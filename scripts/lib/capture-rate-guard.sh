@@ -38,3 +38,32 @@ capture_rate_preflight_message() {
     echo "${cam} capture rate defective (see #656): ${line}"
   fi
 }
+
+# capture_rate_journalctl_cmd INVOCATION_ID -> the REMOTE journalctl command text that reads
+# ONLY the CURRENT camera-box.service process instance's log lines (scoped via
+# _SYSTEMD_INVOCATION_ID), falling back to the OLD unscoped "-u camera-box -n 200" form when
+# INVOCATION_ID is empty (systemctl show failed/unavailable -- never silently skip the whole
+# preflight just because the invocation id couldn't be read).
+#
+# WHY (#693): `journalctl -u <unit>` spans ACROSS service restarts -- it is NOT scoped to the
+# CURRENTLY RUNNING process. Live-diagnosed 2026-07-11: cam1's camera-box.service was bounced by
+# an earlier gate run's routine cleanup() restart; the OLD process instance's #656 DEFECTIVE WARN
+# (logged 2s BEFORE the restart) was still inside the NEW instance's "-n 200" lookback window and
+# false-failed the preflight even though the new process's own captured rate was already healthy
+# (59.8-59.9fps, confirmed live). Same journal-freshness bug class already fixed for DanteSync
+# journal reads (#550/#591/#595/#607, and #686 today) -- a journal-window check with no
+# freshness/process-instance boundary can read a stale line and false-fail a currently-healthy
+# node. `_SYSTEMD_INVOCATION_ID=<uuid>` (the running unit's own InvocationID, from `systemctl show
+# -p InvocationID --value camera-box`) restricts journalctl to ONLY that exact process instance's
+# lines -- a WARN from a killed prior instance can never leak into the lookback window again.
+#
+# Pure string builder (no ssh, no I/O) -- the caller substitutes INVOCATION_ID (already resolved
+# over ssh) locally, so this is directly unit-testable without a live rig.
+capture_rate_journalctl_cmd() {
+  local invocation_id="${1:-}"
+  if [ -n "$invocation_id" ]; then
+    printf 'journalctl _SYSTEMD_INVOCATION_ID=%s --no-pager -n 200 2>/dev/null' "$invocation_id"
+  else
+    printf 'journalctl -u camera-box --no-pager -n 200 2>/dev/null'
+  fi
+}

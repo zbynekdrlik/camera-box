@@ -645,6 +645,17 @@ seconds (and on a link flap). The unit tests prove the trigger logic only — di
 designs a read-only root + 512M overlay, but the deployed boxes don't use it (long-term target;
 operational re-image tracked in **#301**).
 
+**CORRECTION (#679, live-confirmed 2026-07-11) — the fleet is NOT uniformly rw-root any more.**
+Writing directly to `/etc/` on **cam1, cam3, cam5, cam6** now fails `Read-only file system` — some
+prior provisioning pass already converted them to ro-root (setup-device.sh STEP 18's fstab
+rewrite, applied at SOME point after the paragraph above was written). **cam2 and cam4 are still
+genuinely rw-root** (a direct `/etc/...` write succeeds with no remount). The
+dantesync-deployment skill's "cam3 is the ONE exception" framing is now WRONG — treat EVERY box
+individually: attempt the plain write first, and on `Read-only file system` wrap it in
+`mount -o remount,rw /` ... `mount -o remount,ro / 2>/dev/null || true` (the same pattern
+`setup-device.sh`'s own `ensure_root_writable`/`restore_root_mode` already uses). Never assume a
+box's mode from this doc or from another box's result — check live.
+
 **The brick (NOT fs corruption):** `unattended-upgrades` was active → auto-installed a `6.8.0-124`
 kernel; a FULL 100M `/var/cache` tmpfs broke apt with ENOSPC so its **initrd never generated**; a
 later `update-grub` (the #289 isolcpus edit) made that initrd-less kernel the default → can't mount

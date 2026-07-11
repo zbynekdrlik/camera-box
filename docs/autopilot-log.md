@@ -3206,3 +3206,54 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
   and the imag-nb `ts_present`-epoch-window + cheap-repro techniques in `.claude/skills/genlock`.
 - No version bump needed — dev (`1.7.0-dev.339`) was already strictly ahead of main
   (`1.7.0-dev.338`) at session start.
+
+## 2026-07-11 — #679 + #681 + #674 batch (PR #683)
+
+- **#679 (fleet `/var/log` 50MB tmpfs, closes the follow-up from the 2026-07-10 incidental
+  finding above)** — fixed in BOTH layers:
+  - dantesync (separate repo, `zbynekdrlik/dantesync` PR #49, RED `75d298e` / GREEN `8d64c9e`,
+    merged `8794ab0`, released v1.8.19): throttled the per-second `[PTP] Drift:...` log line
+    (`should_log_drift_summary`, `DRIFT_LOG_SUMMARY_INTERVAL_SAMPLES=30`) — was ~65% of the
+    fleet's log volume. Canary-deployed to cam4 first (LOCKED post-restart, HTTP status OK),
+    then rolled to the rest of the fleet (cam1-3/5-6, imag-nb, strih, stream) per this session's
+    completion evidence.
+  - camera-box (RED `af1ae5b5e` / GREEN `3fc313b82`, `Closes #679`): `scripts/lib/log-bound.sh`
+    (new) + `setup-device.sh` STEP 18 + `create-usb-linux.sh` write a 5M `size` cap into
+    `/etc/logrotate.d/rsyslog` and a systemd timer drop-in overriding the stock daily
+    `logrotate.timer` to every 15 minutes. `verify-device.sh` (s) is the new acceptance check.
+    Applied LIVE to cam1-cam6 this session (cam1/cam3/cam5/cam6 needed a `mount -o remount,rw /`
+    — their root is already ro; cam2/cam4 are still rw-root).
+- **#681 (ALL_CAMBOX measurement trust, RED `d9590d063` / GREEN `dcc091ea8`, `Closes #681`)**:
+  - Point 1 (phantom per-segment gaps): root-caused `painted_tick_gaps`'s per-adjacent-pair walk
+    as a BIASED estimator (floors each pair's shortfall at 0 independently, never crediting a
+    finer-than-nominal local delta — which the dual-QR Vernier's normal async sampling beat
+    routinely produces — against a later catch-up jump). Fixed with a whole-window net-span
+    calculation (`expected_count - present_count`), a strict generalization of the old formula.
+    Re-verified against the REAL RUN_ID 1783727115 artifacts (`/tmp/recording-e2e-1783727115/`):
+    gaps collapsed from ~279-329 (33-39% of ~846 frames, every window) to 0-36 (0-4%), now
+    matching known real fleet health (cam2's real judder the clear standout; CAM1's proven-clean
+    window correctly reads 0).
+  - Point 2 (imag "repeats one aggregate" suspicion): DISPROVEN by evidence — every OTHER printed
+    field genuinely differs per window in the real data. The actual gap: the #588/#604 density
+    terms that ALSO gate `is_live_no_copy()` (`optical_stuck_density`/`optical_local_stuck_density`
+    + their `_ok` booleans) were computed correctly per-window but never surfaced in the JSON, so
+    a density-driven failure was unexplainable from the report alone — every one of imag's 12
+    windows in RUN_ID 1783727115 failed with every OTHER field clean. Now surfaced in both the
+    console line and the JSON.
+- **#674 (imag judder instrumentation, non-closing — issue stays OPEN)**: a prior worker's
+  targeted restart-only repro found no reproduction. Shipped the agreed next step:
+  `scripts/imag-jitter-monitor.sh` (periodic genlock-FIFO audit delta reporter via the existing
+  `genlock-jitter-report` binary, resumable byte-offset tracking in
+  `scripts/lib/imag-jitter-state.sh`, journald-visible under `imag-jitter-monitor`, 5-min systemd
+  timer) + `scripts/mark-imag-restart.sh` (restart-correlation marker, run from dev1, referenced
+  from `launch-obs-genlock.sh`'s own printed relaunch plan). Deployed live to imag-nb this
+  session, verified emitting real journald entries. Commit `42f1b6a60` uses the non-closing
+  `#674: ...` form (repo GOTCHA — a bare `fix: #674` would auto-close on merge). Posted a comment
+  on #674 describing the deliverable.
+- Full local suite green: 566/566 default-feature lib tests, 985/985 `--features probe` lib
+  tests, `cargo fmt --check` + `cargo clippy --all-targets -- -D warnings` clean on both feature
+  sets. No camera-box appliance binary redeploy needed — `painted_tick_gaps` is not called from
+  `src/main.rs` (only from the probe-gated `recording-verdict` analysis tool), and #679/#674's
+  changes are provisioning scripts / standalone tools, not the deployed service.
+- No version bump needed on camera-box — dev (`1.7.0-dev.340`) was already strictly ahead of main
+  (`1.7.0-dev.339`) at session start (post-#680-merge bump).

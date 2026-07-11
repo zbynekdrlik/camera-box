@@ -105,6 +105,15 @@ fn systemd_units_exist_with_a_five_minute_cadence() {
         service.contains("imag-jitter-monitor.sh"),
         "imag-jitter-monitor.service must run the #674 monitor script"
     );
+    // Live-confirmed on imag-nb (2026-07-11): without this, journald tags the service's stdout by
+    // the ExecStart command's basename (imag-jitter-monitor.sh), NOT "imag-jitter-monitor" — a
+    // DIFFERENT tag than mark-imag-restart.sh's `logger -t imag-jitter-monitor` marker, defeating
+    // the whole point of a shared `journalctl -t imag-jitter-monitor` view.
+    assert!(
+        service.contains("SyslogIdentifier=imag-jitter-monitor"),
+        "imag-jitter-monitor.service must pin SyslogIdentifier=imag-jitter-monitor so its journal \
+         entries share the SAME tag mark-imag-restart.sh's marker uses (#674)"
+    );
     let timer = read("systemd/imag-jitter-monitor.timer");
     assert!(
         timer.contains("OnUnitActiveSec=5min"),

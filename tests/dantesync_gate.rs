@@ -73,6 +73,14 @@ fn run_gate_env(args: &[&str], extra_env: &[(&str, &str)]) -> (i32, String, Stri
     )
 }
 
+/// #686: a sentinel path that never exists on disk. Pointing a Linux node's
+/// DANTESYNC_GATE_LINUX_HTTP_<NAME> override at this makes read_linux_node_http_status's `cat`
+/// fail (silently, `2>/dev/null || true`) and return "" deterministically -- forcing the
+/// journal-fallback path WITHOUT any live network dependency. Every pre-#686 Linux-journal-only
+/// test below must pass this (or an equivalent override) so it never attempts a REAL curl to the
+/// live rig (cam1/cam2/imag-nb on the LAN) when run locally on a LAN-connected dev box.
+const NO_HTTP: &str = "/nonexistent-686-linux-http-fixture";
+
 /// Write a `journalctl -o short-iso` DanteSync journal fixture and return its path (#608). Mirrors
 /// clock_offset_painter_gate.rs's write_journal/write_journal_stale/write_journal_no_offset —
 /// same "caller pre-fetches the status to a file" pattern, extended to dantesync-gate.sh's Linux
@@ -240,10 +248,13 @@ fn gate_passes_on_a_linux_node_with_ok_fresh_offset_and_ptp_locked() {
     );
     let (code, stdout, stderr) = run_gate_env(
         &["--linux", "cam1=10.77.9.61"],
-        &[(
-            "DANTESYNC_GATE_LINUX_JOURNAL_CAM1",
-            &j.display().to_string(),
-        )],
+        &[
+            (
+                "DANTESYNC_GATE_LINUX_JOURNAL_CAM1",
+                &j.display().to_string(),
+            ),
+            ("DANTESYNC_GATE_LINUX_HTTP_CAM1", NO_HTTP), // #686: force journal fallback, no live curl
+        ],
     );
     assert_eq!(
         code, 0,
@@ -263,10 +274,13 @@ fn gate_fails_on_a_linux_node_with_a_fresh_offset_that_exceeds_the_bound() {
     );
     let (code, stdout, stderr) = run_gate_env(
         &["--linux", "cam1=10.77.9.61"],
-        &[(
-            "DANTESYNC_GATE_LINUX_JOURNAL_CAM1",
-            &j.display().to_string(),
-        )],
+        &[
+            (
+                "DANTESYNC_GATE_LINUX_JOURNAL_CAM1",
+                &j.display().to_string(),
+            ),
+            ("DANTESYNC_GATE_LINUX_HTTP_CAM1", NO_HTTP), // #686: force journal fallback, no live curl
+        ],
     );
     assert_eq!(
         code, 20,
@@ -288,10 +302,13 @@ fn gate_incomplete_on_a_linux_node_with_a_stale_offset_line() {
     );
     let (code, stdout, stderr) = run_gate_env(
         &["--linux", "cam1=10.77.9.61"],
-        &[(
-            "DANTESYNC_GATE_LINUX_JOURNAL_CAM1",
-            &j.display().to_string(),
-        )],
+        &[
+            (
+                "DANTESYNC_GATE_LINUX_JOURNAL_CAM1",
+                &j.display().to_string(),
+            ),
+            ("DANTESYNC_GATE_LINUX_HTTP_CAM1", NO_HTTP), // #686: force journal fallback, no live curl
+        ],
     );
     assert_eq!(
         code, 11,
@@ -314,10 +331,13 @@ fn gate_incomplete_on_a_linux_node_with_no_ntp_offset_line_at_all() {
     );
     let (code, stdout, stderr) = run_gate_env(
         &["--linux", "cam1=10.77.9.61"],
-        &[(
-            "DANTESYNC_GATE_LINUX_JOURNAL_CAM1",
-            &j.display().to_string(),
-        )],
+        &[
+            (
+                "DANTESYNC_GATE_LINUX_JOURNAL_CAM1",
+                &j.display().to_string(),
+            ),
+            ("DANTESYNC_GATE_LINUX_HTTP_CAM1", NO_HTTP), // #686: force journal fallback, no live curl
+        ],
     );
     assert_eq!(
         code, 11,
@@ -354,6 +374,8 @@ fn gate_linux_journal_override_is_keyed_per_node_name_not_a_single_shared_var() 
                 "DANTESYNC_GATE_LINUX_JOURNAL_CAM2",
                 &cam2_drift.display().to_string(),
             ),
+            ("DANTESYNC_GATE_LINUX_HTTP_CAM1", NO_HTTP), // #686: force journal fallback, no live curl
+            ("DANTESYNC_GATE_LINUX_HTTP_CAM2", NO_HTTP),
         ],
     );
     assert_eq!(
@@ -499,6 +521,152 @@ fn help_describes_win_http_and_its_freshness_requirement() {
     );
 }
 
+// ---------------------------------------------------------------------------------------------
+// #686 — regression introduced by #679's dantesync log throttling (v1.8.19 fleet-wide):
+// ptp_locked_from_journal() decides LOCKED vs DEGRADED by comparing the journal POSITION of the
+// last `[PTP] (NANO|LOCK) Drift:` servo line against the last `[NTP] offset:` line -- sound when
+// servo lines tick ~1/s, but after the 1-in-30 throttle they land at nearly the SAME cadence as
+// the NTP offset lines, so whichever happened to log last wins: a genuinely LOCKED node can read
+// DEGRADED with roughly coin-flip odds. The fix: for Linux nodes, try dantesync#47's own network
+// status endpoint (http://<ip>:8898/status, the SAME authoritative signal --win-http already
+// reads for Windows boxes, deployed fleet-wide and verified responding on cam1-cam6, 2026-07-11)
+// FIRST; the journal parser is now a FALLBACK for a node whose HTTP endpoint is unreachable/
+// disabled -- never a second opinion when HTTP answered (a reachable-but-STALE HTTP payload must
+// fail the gate, not silently fall through to a possibly-misleading journal read).
+// ---------------------------------------------------------------------------------------------
+
+/// Write `json` to a temp file and return its path -- the DANTESYNC_GATE_LINUX_HTTP_<NAME>
+/// fixture (mirrors write_win_http_fixture above, #648).
+fn write_linux_http_fixture(name: &str, json: &str) -> PathBuf {
+    let dir =
+        std::env::temp_dir().join(format!("dante-gate-linux-http-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{name}.json"));
+    let mut f = std::fs::File::create(&path).unwrap();
+    f.write_all(json.as_bytes()).unwrap();
+    path
+}
+
+#[test]
+fn gate_passes_a_throttled_linux_node_via_http_status_first() {
+    // The exact #686 regression: a THROTTLED journal whose last [NTP] offset: line is NEWER
+    // (later position) than the last [PTP] NANO Drift: servo line -- ptp_locked_from_journal
+    // alone would read this as DEGRADED even though the node is genuinely locked. A healthy,
+    // fresh, in-bound HTTP payload must make the gate PASS regardless of what the (misleading)
+    // journal says, because HTTP is now tried FIRST.
+    let throttled_journal = write_dante_journal(
+        "cam1_throttled",
+        "2026-07-11T10:00:00+02:00 cam1 dantesync[1]: [PTP] NANO  Drift:   +12ns/s  Adj: +6.10ppm\n\
+2026-07-11T10:00:29+02:00 cam1 dantesync[1]: [NTP] offset:+150us (threshold:520us, adaptive)\n",
+    );
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let http_ok = format!(
+        "{{\"gm_source_ip\":\"10.77.9.184\",\"settled\":true,\"updated_ts\":{now},\
+         \"is_locked\":true,\"ntp_offset_us\":150,\"mode\":\"NANO\",\"ntp_failed\":false}}"
+    );
+    let http_fixture = write_linux_http_fixture("cam1_throttled_http", &http_ok);
+    let (code, stdout, stderr) = run_gate_env(
+        &["--linux", "cam1=10.77.9.61"],
+        &[
+            (
+                "DANTESYNC_GATE_LINUX_JOURNAL_CAM1",
+                &throttled_journal.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_LINUX_HTTP_CAM1",
+                &http_fixture.display().to_string(),
+            ),
+        ],
+    );
+    assert_eq!(
+        code, 0,
+        "#686: a throttled journal that WOULD read DEGRADED must not sink the gate when the \
+         HTTP status is healthy+fresh+locked -- HTTP must be tried FIRST. stdout={stdout} stderr={stderr}"
+    );
+    assert!(stdout.contains("GATE PASS"), "stdout: {stdout}");
+}
+
+#[test]
+fn gate_fails_when_a_linux_node_http_payload_is_stale_even_if_its_journal_looks_fine() {
+    // The HTTP payload is reachable but STALE (old updated_ts) -- must FAIL the gate (never
+    // silently fall back to the journal, even though the journal fixture here is healthy/LOCKED).
+    // Proves: once HTTP answers, it is authoritative -- fallback is ONLY for HTTP being
+    // unreachable, never for HTTP being stale.
+    let healthy_journal = write_dante_journal(
+        "cam1_healthy_but_http_stale",
+        "2026-07-11T10:00:00+02:00 cam1 dantesync[1]: [NTP] offset:+150us (threshold:520us, adaptive)\n\
+2026-07-11T10:00:05+02:00 cam1 dantesync[1]: [PTP] NANO  Drift:   +12ns/s  Adj: +6.10ppm\n",
+    );
+    // A genuinely old capture (well behind "now" no matter when this test runs).
+    let stale_http = "{\"gm_source_ip\":\"10.77.9.184\",\"settled\":true,\"updated_ts\":1783647854,\
+                       \"is_locked\":true,\"ntp_offset_us\":0,\"mode\":\"NANO\",\"ntp_failed\":false}";
+    let http_fixture = write_linux_http_fixture("cam1_http_stale", stale_http);
+    let (code, stdout, stderr) = run_gate_env(
+        &["--linux", "cam1=10.77.9.61"],
+        &[
+            (
+                "DANTESYNC_GATE_LINUX_JOURNAL_CAM1",
+                &healthy_journal.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_LINUX_HTTP_CAM1",
+                &http_fixture.display().to_string(),
+            ),
+        ],
+    );
+    assert_eq!(
+        code, 11,
+        "#686: a STALE Linux HTTP payload must be INCOMPLETE (11), never silently pass by \
+         falling back to a healthy-looking journal. stdout={stdout} stderr={stderr}"
+    );
+    assert!(stderr.contains("INCOMPLETE"), "stderr: {stderr}");
+    assert!(stdout.contains("NTP STALE"), "stdout: {stdout}");
+}
+
+#[test]
+fn gate_falls_back_to_the_journal_when_a_linux_node_http_endpoint_is_unreachable() {
+    // No DANTESYNC_GATE_LINUX_HTTP_CAM1 override and an unroutable IP (TEST-NET-1) -> HTTP
+    // unreachable -> FALL BACK to the journal fixture, which is healthy -> PASS. Proves the
+    // fallback path still works for a node whose HTTP endpoint is genuinely down/disabled.
+    let healthy_journal = write_dante_journal(
+        "cam1_http_unreachable_journal_ok",
+        "2026-07-11T10:00:00+02:00 cam1 dantesync[1]: [NTP] offset:+150us (threshold:520us, adaptive)\n\
+2026-07-11T10:00:05+02:00 cam1 dantesync[1]: [PTP] NANO  Drift:   +12ns/s  Adj: +6.10ppm\n",
+    );
+    let (code, stdout, stderr) = run_gate_env(
+        &["--linux", "cam1=192.0.2.1"],
+        &[
+            (
+                "DANTESYNC_GATE_LINUX_JOURNAL_CAM1",
+                &healthy_journal.display().to_string(),
+            ),
+            ("CLOCK_GUARD_HTTP_TIMEOUT", "1"),
+        ],
+    );
+    assert_eq!(
+        code, 0,
+        "#686: an unreachable Linux HTTP endpoint must FALL BACK to the (healthy) journal, not \
+         fail the gate. stdout={stdout} stderr={stderr}"
+    );
+    assert!(stdout.contains("GATE PASS"), "stdout: {stdout}");
+}
+
+#[test]
+fn help_describes_linux_nodes_trying_http_first() {
+    let (code, stdout, _e) = run_gate(&["--help"]);
+    assert_eq!(code, 0, "--help must exit 0");
+    let low = stdout.to_lowercase();
+    assert!(
+        low.contains("linux") && low.contains("http") && low.contains("first"),
+        "#686: help must specifically describe that LINUX nodes now try the HTTP status \
+         endpoint FIRST (the journal is a fallback) -- not just the pre-existing generic \
+         mentions of 'http'/'fallback' unrelated to this: {stdout}"
+    );
+}
+
 #[test]
 fn gate_linux_journal_override_maps_a_hyphenated_node_name_to_a_valid_env_var() {
     // #608 review follow-up: the NAME -> ENV_VAR mapping uppercases AND maps "-" to "_" (a bare
@@ -512,10 +680,13 @@ fn gate_linux_journal_override_maps_a_hyphenated_node_name_to_a_valid_env_var() 
     );
     let (code, stdout, stderr) = run_gate_env(
         &["--linux", "imag-nb=10.77.9.182"],
-        &[(
-            "DANTESYNC_GATE_LINUX_JOURNAL_IMAG_NB",
-            &j.display().to_string(),
-        )],
+        &[
+            (
+                "DANTESYNC_GATE_LINUX_JOURNAL_IMAG_NB",
+                &j.display().to_string(),
+            ),
+            ("DANTESYNC_GATE_LINUX_HTTP_IMAG_NB", NO_HTTP), // #686: force journal fallback, no live curl
+        ],
     );
     assert_eq!(
         code, 0,

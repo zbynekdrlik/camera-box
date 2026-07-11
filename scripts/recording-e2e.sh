@@ -82,6 +82,11 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # rig's production camera-box.service down and undetected — poll+retry+loud-warn builder.
 # shellcheck source=scripts/lib/camera-box-restart-verify.sh
 . "$HERE/lib/camera-box-restart-verify.sh"
+# #682: imag never had its program scene set by THIS harness -- a prior session's leftover scene
+# silently decided which camera imag's leg measured. imag_scene_for_camera maps the resolved
+# SOURCE camera to imag's own "Cam N" scene name (the SAME 1:1 pattern imag_scenes.py seeds).
+# shellcheck source=scripts/lib/imag-scene-route.sh
+. "$HERE/lib/imag-scene-route.sh"
 camera_resolve "${CAM:-cam1}"
 # #24 item 1: this harness's SOURCE-camera role (the physical box filming cam2's monitor via
 # the optical loopback + carrying the #174 render-time capture burn) is one of
@@ -372,8 +377,14 @@ fi
 # camera's recent journal for that WARN and fail FAST — before burning a doomed 30-minute run —
 # rather than re-deriving the fps math a second time here (single source of truth stays in Rust).
 echo "[0/8] capture-delivery-rate preflight — $CAMERA_NAME must not show a sustained rate defect (#656)"
+# #693: resolve the CURRENT camera-box.service InvocationID first, so the journal read below is
+# scoped to THIS process instance only -- a stale WARN from a prior instance (killed by a routine
+# cleanup() restart) must never leak into the lookback window. Empty on failure (older systemd /
+# transient ssh hiccup) -- capture_rate_journalctl_cmd falls back to the unscoped read then.
+CAPTURE_RATE_INVOCATION_ID="$(sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$CAM1_IP" \
+  "systemctl show -p InvocationID --value camera-box 2>/dev/null" 2>/dev/null || true)"
 CAPTURE_RATE_DEFECT_LINE="$(sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$CAM1_IP" \
-  "journalctl -u camera-box --no-pager -n 200 2>/dev/null | grep -E '$(capture_rate_defect_grep_pattern)' | tail -1" \
+  "$(capture_rate_journalctl_cmd "$CAPTURE_RATE_INVOCATION_ID") | grep -E '$(capture_rate_defect_grep_pattern)' | tail -1" \
   2>/dev/null || true)"
 if [ -n "$CAPTURE_RATE_DEFECT_LINE" ]; then
   echo "ERROR: $(capture_rate_preflight_message "$CAMERA_NAME" "$CAPTURE_RATE_DEFECT_LINE")" >&2
@@ -527,12 +538,22 @@ systemctl start cam2-painter 2>/dev/null || true"
   # The cam devices are now freed regardless of what the OBS restore does. #328: bound every OBS
   # call by `timeout` so a hung obs-websocket op (#328) can't block the trap even if it runs.
   # #649: StopRecord itself already ran, FIRST, at the top of this function (harness-started boxes
-  # only) — no separate record-stop call belongs here any more; #462's "imag never had its program
-  # scene routed by THIS harness" note still holds (rig-mode.sh test owns that), it just no longer
-  # needs its own StopRecord line since the #649 block above covers it.
+  # only) — no separate record-stop call belongs here any more. #682 SUPERSEDES the old "imag
+  # never had its program scene routed by THIS harness" note (rig-mode.sh test used to be the ONLY
+  # thing that ever touched it) — [4a/8] above now routes + saves it, so cleanup() restores it too.
   echo "[cleanup] restore OBS program scenes (each bounded by ${OBS_CLEANUP_TIMEOUT}s — #328)"
   timeout "$OBS_CLEANUP_TIMEOUT" python3 "$HERE/obs_phase2.py" teardown --host "$STREAM"
   timeout "$OBS_CLEANUP_TIMEOUT" python3 "$HERE/obs_phase2.py" teardown --host "$STRIH"
+  # #682: restore imag's program scene to whatever it was BEFORE [4a/8] routed it to the
+  # camera-under-test. A NO-OP if [4a/8] never ran (IMAG_PREV_SCENE stays its "" pre-trap safe
+  # default on an early abort). Best-effort like every other cleanup() restore (warn, never abort
+  # the trap) -- a restore failure here must never block the rest of cleanup()'s teardown.
+  if [ -n "${IMAG_PREV_SCENE:-}" ]; then
+    timeout "$OBS_CLEANUP_TIMEOUT" python3 "$HERE/obs_phase2.py" switch --host "$IMAG_IP" \
+      --program-scene "$IMAG_PREV_SCENE" >/dev/null 2>&1 \
+      && echo "    [cleanup] imag: restored program scene to '$IMAG_PREV_SCENE'" \
+      || echo "    WARNING #682: could not restore imag's program scene to '$IMAG_PREV_SCENE' -- check manually" >&2
+  fi
   # Defense-in-depth (#166 review BUG 1): if the verdict's process group is still
   # running (e.g. the run is aborting for another reason), stop the whole group so a
   # multi-GB decode is never orphaned. The monitor already group-kills on STALL; this
@@ -561,6 +582,37 @@ systemctl start cam2-painter 2>/dev/null || true"
       echo "        scripts/rig-mode.sh event (or obs_burn_filter.py remove) before any live broadcast." >&2
     fi
   done
+  # #684: FINAL, INDEPENDENT camera-box.service verify -- the LAST thing cleanup() does, for
+  # EVERY box this run touched (source cam always; cam2/painter always; cam3-6 when
+  # ALL_CAMBOX=1). Live incident (2026-07-11): cam1 was found INACTIVE after BOTH the PR #680 and
+  # PR #683 "Full-path E2E" gate runs despite the early-cleanup restore above (#675) -- for the
+  # cam1 RUN_ID 1573931971 run (#682) the deploy-launched camera-box-burn-1573931971.service
+  # itself deactivated cleanly ~11 min after launch (journalctl on cam1: "Started ... 08:46:00" /
+  # "Deactivated successfully ... 08:57:10" -- consistent with THIS cleanup() actually having
+  # run), yet camera-box.service was never observed restarting until a human found it down 55 min
+  # later and hand-started it -- something between the early restore and the true end of
+  # cleanup() left the source cam down with no trace of a second attempt. This pass is a cheap,
+  # IDEMPOTENT camera_box_verify_active_cmds call used STANDALONE (no preceding stop/pkill/rm --
+  # nothing here tears anything down): a healthy box costs one quick SSH round trip; a box the
+  # early restore missed gets a genuine INDEPENDENT restart attempt + the same loud #675 WARNING
+  # if that ALSO fails, so it can never again go undetected until a human stumbles on it later.
+  echo "[cleanup] #684 FINAL camera-box.service verify (every box this run touched, independent of the restore above)"
+  timeout "$CLEANUP_SSH_TIMEOUT" sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$CAM1_IP" \
+    "$(camera_box_verify_active_cmds "$CAMERA_NAME (source, $CAM1_IP) FINAL")" || true
+  if [ "${ALL_CAMBOX:-0}" = "1" ]; then
+    for _cfip in "$CAM3_IP" "$CAM4_IP" "$CAM5_IP" "$CAM6_IP"; do
+      case "$_cfip" in
+        "$CAM3_IP") _cfcn="cam3" ;;
+        "$CAM4_IP") _cfcn="cam4" ;;
+        "$CAM5_IP") _cfcn="cam5" ;;
+        "$CAM6_IP") _cfcn="cam6" ;;
+      esac
+      timeout "$CLEANUP_SSH_TIMEOUT" sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$_cfip" \
+        "$(camera_box_verify_active_cmds "$_cfcn ($_cfip) FINAL")" || true
+    done
+  fi
+  timeout "$CLEANUP_SSH_TIMEOUT" sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$PAINTER_IP" \
+    "$(camera_box_verify_active_cmds "cam2/painter, $PAINTER_IP FINAL")" || true
 }
 # #657: a plain foreground `sleep N` defers ALL signal handling — trapped OR default — until
 # that `wait4()` syscall returns on its own, i.e. until the sleep completes naturally. This is
@@ -613,6 +665,14 @@ STREAM_PROG_SOURCE="${STREAM_PROG_SOURCE:-NDI 2ME PGM}" # the prod input the sce
 # PROGRAM onto that scene + toggles this burn ON; this harness defensively ensures/verifies it too
 # (the SAME "single source of truth" BURN_TARGETS array, extended below).
 IMAG_PROG_SOURCE="${IMAG_PROG_SOURCE:-NDI CAM1}"
+# #682: imag's OWN scene showing the camera-under-test -- resolved per-camera (never hardcoded to
+# 'Cam 1' like rig-mode.sh's set_imag_test_program(), which only ever routes cam1). Declared here
+# (BEFORE the cleanup trap installs, same reasoning as the *_PROG_SOURCE vars above) so cleanup()
+# never `set -u`-aborts referencing it on an early abort. IMAG_PREV_SCENE stays "" (its #246-style
+# safe default) until [4a/8] actually captures imag's PRE-route scene -- cleanup()'s restore is a
+# no-op until then.
+IMAG_PROG_SCENE="${IMAG_PROG_SCENE:-$(imag_scene_for_camera "$CAMERA_NAME")}"
+IMAG_PREV_SCENE=""
 # #252: single source of truth for the host=ip=source burn triples. The #195 pre-record burn-ON
 # gate and the #246 cleanup() burn-clear loop iterate the SAME set; keeping it in one array means a
 # third box (or a triple-structure change) can never green-light a set the cleanup does not clear
@@ -910,6 +970,19 @@ STREAM_OUT=$(python3 "$HERE/obs_phase2.py" prod-scene --host "$STREAM" \
   --test-latency-ms "$GENLOCK_TEST_LATENCY_MS")
 echo "    strih program NDI='$STRIH_OUT'  stream program NDI='$STREAM_OUT'"
 sleep 6  # let both OBS chains stabilise before recording
+
+# #682: imag never had its program scene routed by THIS harness -- whatever a PRIOR session left
+# on program silently decided which camera imag's leg measured (live incident, RUN_ID 1573931971:
+# imag stuck on 'Cam 4' from an earlier #674 experiment while this run certified cam1 -- the imag
+# leg FAILed even though cam1->strih->stream was ZERO loss end-to-end). Save imag's CURRENT
+# program scene (restored in cleanup(), mirroring the strih/stream scene restore there) then route
+# it to the camera-under-test's OWN scene via obs_phase2.py's existing `switch` subcommand -- the
+# SAME non-black self-check the #312 all-cambox sweep already uses, so a missing/dead imag scene
+# FAILS LOUD (bare `set -e` propagation) here instead of silently wasting the whole run.
+echo "[4a/8] #682 imag program-scene routing — must show $CAMERA_NAME (the camera under test)"
+IMAG_PREV_SCENE="$(python3 "$HERE/obs_phase2.py" program-scene --host "$IMAG_IP")"
+echo "    imag was on '$IMAG_PREV_SCENE' — routing to '$IMAG_PROG_SCENE' ($CAMERA_NAME)"
+python3 "$HERE/obs_phase2.py" switch --host "$IMAG_IP" --program-scene "$IMAG_PROG_SCENE" >/dev/null
 
 # #195/#257: PRE-RECORD BURN-ON GATE — burns MUST be ON before recording, else the run is wasted.
 # #257 made the burn a per-source `genlock_burn` bool (no OBS_BURN_QR env, no relaunch): the strih

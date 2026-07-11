@@ -90,6 +90,38 @@ read_linux_node_journal() {
     'journalctl -u dantesync --no-pager -n 400 -o short-iso 2>/dev/null' 2>/dev/null || true
 }
 
+# read_linux_node_http_status NAME IP -> that Linux camera's LIVE DanteSync status JSON, fetched
+# from dantesync#47's own network endpoint (http://IP:GATE_WIN_HTTP_PORT/status, #648) -- the SAME
+# authoritative signal read_win_http_status already reads for the Windows boxes, deployed
+# fleet-wide and verified responding on cam1-cam6, 2026-07-11.
+#
+# #686: this is now the gate's PRIMARY signal for a Linux node (tried BEFORE the journal parser).
+# Regression: after #679 throttled DanteSync's periodic journal reports (~1-in-30), the servo
+# "[PTP] (NANO|LOCK) Drift:" lines and the "[NTP] offset:" lines land at nearly the SAME cadence,
+# so ptp_locked_from_journal's "whichever logged last wins" POSITION comparison can flip a
+# genuinely LOCKED node to DEGRADED with roughly coin-flip odds -- observed live, cam2 flip-
+# flopped LOCKED->DEGRADED->LOCKED across three gate runs within 20 minutes while its own
+# :8898/status continuously reported is_locked:true, mode NANO/LOCK. HTTP carries the daemon's
+# own CURRENT is_locked/mode/ntp_offset_us/updated_ts directly -- no log-cadence ambiguity.
+#
+# "" if unreachable / non-200 (curl -fsS fails closed on either) -- the caller then FALLS BACK to
+# read_linux_node_journal. That fallback is ONLY for the HTTP endpoint being unreachable/disabled
+# -- never a second opinion once HTTP has answered (a reachable-but-STALE HTTP payload must fail
+# the gate, not silently fall through to a possibly-misleading journal read).
+#
+# Overridable for tests/offline via DANTESYNC_GATE_LINUX_HTTP_<NAME> (NAME uppercased, "-" -> "_")
+# -- mirrors read_win_http_status's DANTESYNC_GATE_WIN_HTTP_<NAME> and read_linux_node_journal's
+# DANTESYNC_GATE_LINUX_JOURNAL_<NAME> fixture-injection seams above.
+read_linux_node_http_status() {
+  local name="$1" ip="$2" var
+  var="DANTESYNC_GATE_LINUX_HTTP_$(printf '%s' "$name" | tr '[:lower:]-' '[:upper:]_')"
+  if [ -n "${!var:-}" ]; then
+    cat "${!var}" 2>/dev/null || true
+    return 0
+  fi
+  curl -fsS --max-time "$GATE_WIN_HTTP_TIMEOUT" "http://${ip}:${GATE_WIN_HTTP_PORT}/status" 2>/dev/null || true
+}
+
 # read_win_http_status NAME HOST -> that Windows box's LIVE DanteSync status JSON, fetched
 # directly from dantesync#47's own network endpoint (http://HOST:GATE_WIN_HTTP_PORT/status,
 # #648) — no win-* MCP, no human pre-fetch, so an unattended CI run has a real data source.
@@ -128,13 +160,20 @@ Options:
                        pre-fetch; unattended-CI-safe. Repeatable.
   --win-http-port N    port for --win-http nodes (default ${GATE_WIN_HTTP_PORT}).
 
-A Linux node's NTP offset must be FRESH, not just in-bound: the freshest "[NTP] offset:" journal
-line must be no older than DANTESYNC_OFFSET_FRESHNESS_S (default ${GATE_OFFSET_FRESHNESS_S}) seconds
-behind that node's newest journal line, or its offset is STALE -> UNKNOWN (never a silent OK) --
-see dantesync_offset_verdict() in clock-offset-guard.sh (#550/#591/#595). A --win-http node's
-reading must be FRESH the same way: its "updated_ts" field must be no older than
-DANTESYNC_OFFSET_FRESHNESS_S seconds behind the gate's own wall clock, or it is STALE -> UNKNOWN
-(#648) -- a --win-status (file-relay) node is unchanged/AGE-BLIND (tracked separately, #598).
+#686: LINUX nodes now try the SAME network status endpoint (http://IP:PORT/status) FIRST --
+authoritative, immune to journal log-cadence throttling (#679). The journal parser is the
+FALLBACK, used ONLY when a Linux node's HTTP endpoint is unreachable/disabled -- never a second
+opinion once HTTP has answered (a reachable-but-stale HTTP payload fails the gate, it does not
+fall through to the journal).
+
+A Linux node's NTP offset must be FRESH, not just in-bound. Via HTTP (the primary path, #686):
+its "updated_ts" field must be no older than DANTESYNC_OFFSET_FRESHNESS_S seconds behind the
+gate's own wall clock, exactly like a --win-http node (#648). Via the journal (the fallback
+path): the freshest "[NTP] offset:" journal line must be no older than
+DANTESYNC_OFFSET_FRESHNESS_S (default ${GATE_OFFSET_FRESHNESS_S}) seconds behind that node's
+newest journal line -- see dantesync_offset_verdict() in clock-offset-guard.sh (#550/#591/#595).
+Either way a stale reading is STALE -> UNKNOWN, never a silent OK. A --win-status (file-relay)
+node is unchanged/AGE-BLIND (tracked separately, #598).
 
 Exit: 0 = all nodes NTP+PTP OK, 20 = a node DRIFTED or PTP-DEGRADED, 11 = a node UNREACHABLE/
 UNKNOWN, 1 = usage error.
@@ -171,16 +210,18 @@ main() {
     echo "ERROR: sshpass not found — required to query the Linux cam DanteSync over SSH." >&2
     exit 1
   fi
-  if [ "${#win_http[@]}" -gt 0 ] && ! command -v curl >/dev/null 2>&1; then
-    echo "ERROR: curl not found — required to query a --win-http node's DanteSync status (#648)." >&2
-    exit 1
-  fi
 
   local -a linux_pairs=()
   set -f
   # shellcheck disable=SC2206
   linux_pairs=($linux)
   set +f
+  # #686: Linux nodes now try the network status endpoint FIRST too (read_linux_node_http_status),
+  # not just --win-http nodes -- curl is required whenever EITHER array is non-empty.
+  if { [ "${#linux_pairs[@]}" -gt 0 ] || [ "${#win_http[@]}" -gt 0 ]; } && ! command -v curl >/dev/null 2>&1; then
+    echo "ERROR: curl not found — required to query DanteSync status over HTTP (#648/#686)." >&2
+    exit 1
+  fi
   if [ "${#linux_pairs[@]}" -eq 0 ] && [ "${#win_status[@]}" -eq 0 ] && [ "${#win_http[@]}" -eq 0 ]; then
     echo "ERROR: no nodes to gate (--linux, --win-status, and --win-http are all empty)." >&2
     echo "The recording-E2E gate cannot certify the cluster with zero nodes — refusing to pass." >&2
@@ -191,16 +232,45 @@ main() {
   echo "   GM = 10.77.9.184 (PTP grandmaster); NTP master = strih; degraded PTP => meaningless latency"
 
   local bad=0 unknown=0 ok=0 name ip status offset rc_off rc_ptp ptp
+  local now
+  now="$(date +%s)"
 
-  # --- Linux nodes (journald over SSH) -----------------------------------------------------
+  # --- Linux nodes (HTTP status endpoint FIRST -- #686; journald over SSH as FALLBACK) ------
   local pair
   for pair in "${linux_pairs[@]}"; do
     name="${pair%%=*}"; ip="${pair#*=}"
+    # #686: try the network status endpoint FIRST -- authoritative, immune to the #679
+    # journal-throttle false-DEGRADE. read_linux_node_journal (#608) remains the FALLBACK for a
+    # node whose HTTP endpoint is unreachable/disabled -- never consulted once HTTP answers.
+    status="$(read_linux_node_http_status "$name" "$ip")"
+    if [ -n "$status" ]; then
+      rc_off=0
+      case "$(pipe_json_freshness_verdict "$status" "$now" "$GATE_OFFSET_FRESHNESS_S")" in
+        stale)
+          printf '  %-14s NTP STALE    (updated_ts older than %ss -- status incomplete, #686)\n' \
+            "$name" "$GATE_OFFSET_FRESHNESS_S"
+          rc_off=3 ;;
+        absent)
+          printf '  %-14s NTP UNKNOWN  (no updated_ts field -- status incomplete, #686)\n' "$name"
+          rc_off=3 ;;
+        *)
+          offset="$(offset_us_from_pipe_json "$status")"
+          offset_check "$name" "$offset" "$bound" || rc_off=$? ;;
+      esac
+      ptp="$(ptp_locked_from_pipe_json "$status")"
+      rc_ptp=0; ptp_check "$name" "$ptp" || rc_ptp=$?
+      case "$(node_verdict "$rc_off" "$rc_ptp")" in
+        OK) ok=$((ok + 1)) ;; BAD) bad=$((bad + 1)) ;; UNKNOWN) unknown=$((unknown + 1)) ;;
+      esac
+      continue
+    fi
+    # HTTP unreachable/disabled -> FALLBACK to the journal parser (unchanged pre-#686 path).
     # read_linux_node_journal (#608) is the SSH-gather seam: live over SSH, or a fixture file via
     # DANTESYNC_GATE_LINUX_JOURNAL_<NAME> for tests/offline runs.
     status="$(read_linux_node_journal "$name" "$ip")"
     if [ -z "$status" ]; then
-      printf '  %-14s UNREACHABLE  (no DanteSync journal over SSH @ %s)\n' "$name" "$ip"
+      printf '  %-14s UNREACHABLE  (no DanteSync HTTP @ %s:%s/status nor journal over SSH)\n' \
+        "$name" "$ip" "$GATE_WIN_HTTP_PORT"
       unknown=$((unknown + 1)); continue
     fi
     ptp="$(ptp_locked_from_journal "$status")"
@@ -250,9 +320,8 @@ main() {
   # No win-* MCP, no human pre-fetch -- the whole point of #648 is an unattended CI run has
   # neither. The endpoint's JSON carries "updated_ts" (unix epoch seconds), so this path CAN and
   # DOES grade freshness: a box whose dantesync died but whose HTTP server keeps serving a cached
-  # snapshot must be caught, never silently graded on stale numbers.
-  local now
-  now="$(date +%s)"
+  # snapshot must be caught, never silently graded on stale numbers. `$now` was already captured
+  # above (shared with the #686 Linux HTTP freshness check).
   for entry in "${win_http[@]}"; do
     name="${entry%%=*}"; ip="${entry#*=}"
     status="$(read_win_http_status "$name" "$ip")"
