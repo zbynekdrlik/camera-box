@@ -3127,3 +3127,82 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
   that was ALSO blocking the same gate, unrelated to my code change.
 - Artifacts: `/tmp/recording-e2e-{1783735291,275516850}/` on dev1 (verdict JSONs, partials,
   pixel-proofs, latency CSVs, painter CSVs).
+
+## 2026-07-11 — #675 (cleanup restart-verify) + #627 (0-byte StartRecord investigation), PR #678
+
+- **#675** — `recording-e2e.sh` cleanup()'s `systemctl restart camera-box` restore (cam1's
+  SOURCE role, the cam3/4/5/6 ALL_CAMBOX loop, and cam2/painter) used a bare
+  `2>/dev/null; true`/`|| true` that silently swallowed a failed restart — the exact bug
+  escalated in #675's own comments (cam1/cam2/cam4 all hit it across 4 occurrences in one prior
+  session, twice breaking the required Full-path E2E CI gate). Added
+  `scripts/lib/camera-box-restart-verify.sh` (`camera_box_verify_active_cmds`, same
+  "single source, many callers" model as `rig_test_dropin_clear_cmds`): polls
+  `systemctl is-active camera-box` after every restart, retries ONCE in the same ssh session, and
+  prints a loud non-swallowed `WARNING #675` if still not active — never aborts cleanup()'s trap
+  (mirrors the #649 warn-only discipline). RED test SHA `4e8ba1391`, GREEN fix SHA `e3633a692`
+  (`tests/harness_recording_e2e_cleanup_verifies_restart_675.rs`, 6 tests). Functionally verified
+  the actual bash logic (not just syntax) with 3 stubbed `systemctl` scenarios (happy path,
+  recovers-after-retry, fails-after-retry) — all behaved correctly. Full `cargo test` re-run
+  after touching `recording-e2e.sh` (per this repo's own CLAUDE.md GOTCHA) — 115/115 binaries
+  green, no static-anchor collisions with any sibling `harness_recording_e2e_*` test.
+- **#627** — live-reproduction-tested the `genlock_latency_ms_src` correlation hypothesis (the
+  #358 force-set immediately before StartRecord) directly on the real stream box: 9 varied
+  attempts (6 raw `SetInputSettings` transitions mirroring the issue's own 898→1000 pattern at
+  gaps 0-6s, 3 via the actual `prod-scene` production code path at gaps 0-2s) — **0/9
+  reproduced**; every StartRecord came back healthy with growing bytes, every finalized
+  recording ~11MB of real content. Closed as mitigated-unreproducible (PR #633's fail-fast
+  liveness check already covers the practical harm). Unrelated finding from that investigation —
+  `_assert_program_nonblack`'s black-check false-positives on dim-but-real content
+  (`OBS_NONBLACK_MIN_MEAN=20` tuned for the #312 bright test-monitor, not general camera
+  content) — filed separately as **#677**, not fixed here.
+- PR #678 (dev→main): all gates green including the "Full-path E2E (rig zero-loss gate)"
+  hardware check on the real rig; merged `5bffd07c2`. Post-merge version bump
+  `1.7.0-dev.338` → `1.7.0-dev.339` (`1bcb60fa2`).
+
+## 2026-07-11 — #665/#666/#674/#677 rig-health batch, PR #680
+
+- **Re-validated all 4 issues first** (filed same day, still fresh) before touching anything.
+- **#674** (imag judder after strih+stream restart) — ran the suggested cheap targeted repro:
+  watched imag-nb's own `genlock-fifo audit 'NDI CAM4'` `underruns` counter directly (via the
+  embedded `ts_present` epoch-ns, no midnight-boundary hunting) across a control window, then a
+  real `launch-obs-genlock.sh --force` relaunch of BOTH strih and stream. Result: **zero**
+  underrun growth in the ~5.8 min immediately after the restart (cleaner than the control
+  window) — the isolated restart alone does NOT reproduce the elevated-underrun mechanism from
+  the original AFTER-pass (531 underruns over its window vs 12 in BEFORE). Posted full findings
+  to #674; left OPEN (no fix landed, mechanism not confirmed reproducible in isolation); #466
+  stays blocked on it.
+- **#677** — `_assert_program_nonblack`'s shared `min_mean` floor (20, tuned for #312's bright
+  dual-QR monitor) was false-aborting `prod_scene()`'s recording-e2e.sh [4/8] step on legitimately
+  dim (but real, peak=231/mean=18.0) production content. Fix: `prod_scene()` now passes its own
+  looser floor (env `OBS_NONBLACK_MIN_MEAN_PROD`, default 5); `switch()` (#312's own sweep)
+  untouched. RED test SHA `29713c668`, GREEN fix SHA `44d0b25aa`
+  (`tests/python/test_obs_phase2_nonblack_prod_floor_677.py`, 4 tests + `test_obs_phase2_prewarm.py`
+  lambda-signature fix). `Closes #677`.
+- **#666** — cam5/cam6 showed a transient ~20% EMITTED-frame deficit (captured healthy, 0
+  capture-dropped, self-recovers ~5min). Ruled out: CPU-isolation misconfiguration (confirmed
+  matches cam1/3/4's `#289` isolation exactly), systemd timers (none align with the finding's
+  timing), DanteSync clock-step magnitude (~1-1.5ms steps, far too small to explain a sustained
+  20% 5-min deficit). No definitive root cause found live — shipped the "document + monitor" path
+  the ticket sanctioned: a new `#666`-tagged WARN (`EMIT_RATE_TOLERANCE_PCT=5%`) reusing the SAME
+  pure `capture_rate_health` decision `#656` already uses, checked against the configured genlock
+  SEND rate instead of the negotiated CAPTURE rate. SHA `e50be3df0`
+  (`src/capture_rate_health.rs` + `src/main.rs`, 3 new tests). `Closes #666`.
+- **#665** — investigated cam2's capture chain live. Found cam2's `camera-box.service` actually
+  DOWN (SIGTERM'd) from an UNRELATED acute issue — see below — restarted it, then confirmed CPU
+  isolation is correctly configured (painter's `ndir:reconn` threads off the isolated capture
+  core, matching cam1/3/4) and cam2's USB reconnect-churn (25 events) is not an outlier vs cam1
+  (14) / cam3 (61). Live post-restart data matched the classic #656/#663 over-capture
+  quantization pattern, not a distinct defect. Diagnosed as the SAME hardware-defect class, no
+  code fix; closed directly (`gh issue close`) with evidence + a physical cable/port/dongle
+  inspection recommendation for the owner.
+- **Incidental fleet finding (filed separately, NOT part of this PR)** — while investigating
+  #665, found EVERY active cam box's `/var/log` 50MB tmpfs at 96-100% full (cam2 had already
+  crashed from it; rsyslog spamming ENOSPC). Dominant volume driver: `dantesync`'s per-second
+  `[PTP]` debug logging (~65% of a sampled syslog tail). Applied an immediate stopgap on all 6
+  boxes (truncated syslog + restarted rsyslog, verified `camera-box.service` stayed active
+  throughout) and filed **#679** with full root-cause evidence for a dedicated follow-up
+  (dantesync is a separate repo).
+- Playbook: captured the fleet log-disk-full finding + mitigation recipe in `.claude/skills/ops`,
+  and the imag-nb `ts_present`-epoch-window + cheap-repro techniques in `.claude/skills/genlock`.
+- No version bump needed — dev (`1.7.0-dev.339`) was already strictly ahead of main
+  (`1.7.0-dev.338`) at session start.

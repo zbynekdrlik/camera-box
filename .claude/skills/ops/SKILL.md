@@ -1018,3 +1018,34 @@ touched (the SOURCE camera + cam2, and cam1/cam3-6 too if `ALL_CAMBOX=1`) — do
 harness's own cleanup log.** This bit a live PR's REQUIRED CI gate (#676) purely from leftover
 state an earlier, unrelated dispatch left behind. Root cause not yet fixed — tracked on #675
 (suggested fix: an explicit post-restart `systemctl is-active` verification that fails LOUD).
+
+## GOTCHA — every cam box's `/var/log` is a fixed 50MB tmpfs; it fills in ~4-5 days and CAN crash `camera-box.service` (#679, 2026-07-11)
+
+Live incident: cam2's `camera-box.service` was found `inactive (dead)` (SIGTERM'd, no auto-restart)
+because `/var/log` (a RAM-backed `tmpfs`, 50MB, on every cam box by image design) was 100% full —
+`rsyslogd` was spamming `No space left on device`. Checking the WHOLE active fleet found
+**cam1/cam2/cam3/cam4/cam5/cam6 all at 48-50M/50M** simultaneously; cam2 was just the first to
+actually crash. Dominant volume driver (confirmed via a line-count breakdown of a live syslog
+tail): **`dantesync`'s `[PTP] NANO Drift: ...` line, logged ~once per SECOND, forever** (~65% of
+total log volume — roughly 5x camera-box's own routine `Streaming: ...` line at 1/5s). At that
+combined rate the 50MB tmpfs fills in ~4-5 days of uptime with zero external trigger. The
+`ndi_display` "Waiting for display... /dev/fb0" WARN is NOT a contributor — it's already correctly
+throttled to 1 line/30s in `src/ndi_display.rs`.
+
+**Health check (run fleet-wide when investigating ANY cam box weirdness — a full log disk can
+cause silent, hard-to-diagnose service instability):**
+```bash
+# per box (root@10.77.9.6X or the linux-camN MCP Shell):
+df -h /var/log   # 100%/50M used = the box is at risk NOW
+```
+
+**Stopgap mitigation (safe, reversible, does not touch camera-box.service or its config):**
+```bash
+tail -c 500000 /var/log/syslog > /tmp/syslog_tail_backup.txt 2>/dev/null   # keep recent context
+: > /var/log/syslog
+systemctl restart rsyslog
+systemctl is-active camera-box   # confirm it wasn't already down; restart if it was
+```
+This is a STOPGAP ONLY — the tmpfs refills on the same ~4-5 day cadence until dantesync's own
+per-second PTP debug logging is throttled/leveled down (dantesync is a separate repo, tracked on
+`#679` — do not attempt that fix from this repo).

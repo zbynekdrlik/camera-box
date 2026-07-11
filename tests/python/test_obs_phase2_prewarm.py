@@ -98,7 +98,7 @@ def _patch_helpers(monkeypatch):
     monkeypatch.setattr(obs_phase2, "_force_test_preload",
                         lambda ws, host, upstream, tp, state: None)
     monkeypatch.setattr(obs_phase2, "_assert_program_nonblack",
-                        lambda ws, host, scene, label, black_hint: None)
+                        lambda ws, host, scene, label, black_hint, min_mean=None: None)
 
 
 # ---------------------------------------------------------------------------

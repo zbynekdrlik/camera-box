@@ -176,6 +176,21 @@ file is very likely a textual collision, not a real regression — grep the fail
 `.find(...)` argument (or the surrounding slice logic) to see which literal string or adjacency
 moved, then reword your new text (or relocate it) so it no longer matches/breaks that anchor.
 
+**Prevention pattern (#675) — ADD new behavior via a sourced helper, never edit the literal
+anchor line itself.** When the new logic needs to run right after an EXISTING pinned line (e.g.
+"verify camera-box came back active after `systemctl restart camera-box`"), don't touch that
+line's text at all — append a call to a NEW function in a NEW `scripts/lib/*.sh` file via command
+substitution on the line(s) immediately after it (`$(my_new_helper_cmds "label")`). The static
+anchor test suite reads ONLY `scripts/recording-e2e.sh`'s own text, never a sourced lib's — the
+function CALL is invisible there (compile-time text), but its expanded OUTPUT still lands in the
+final remote command at actual runtime. This adds a whole new capability with ZERO risk to any
+existing `.find()`/adjacency assertion, and keeps the new logic in ONE sourced source of truth
+(mirrors `rig_test_dropin_clear_cmds` in `scripts/lib/rig-test-dropin.sh`, #309) instead of
+duplicating it inline at every call site. See `scripts/lib/camera-box-restart-verify.sh` for a
+worked example — 3 call sites (cam1, the ALL_CAMBOX loop, cam2/painter) each gained a poll+retry
+step with the ORIGINAL restart lines byte-for-byte unchanged, verified by the full `cargo test`
+suite staying green (115/115 binaries, no anchor collisions).
+
 ## Local Build Policy
 
 **Tier 0 (default) — CI builds the deployable binary; local checkouts run cheap checks only.**

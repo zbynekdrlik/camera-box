@@ -1033,7 +1033,7 @@ def _program_luma(ws, scene_name):
         return None, None
 
 
-def _assert_program_nonblack(ws, host, scene, label, black_hint):
+def _assert_program_nonblack(ws, host, scene, label, black_hint, min_mean=None):
     """#163/#111 FAIL-FAST non-black self-check, POLLED — the ONE shared implementation used by
     both prod_scene() (step [4/8] routing) and switch() (the #312 all-cambox sweep). A black program
     records all-undecodable and wastes the whole run (#163); but a cold DistroAV receiver (high
@@ -1044,14 +1044,23 @@ def _assert_program_nonblack(ws, host, scene, label, black_hint):
     *label* tags the log lines (e.g. '#163', '#312 switch'); *black_hint* is the context-specific
     guidance appended to the BLACK SystemExit. Returns on OK/UNKNOWN; raises SystemExit on a genuine
     BLACK at the deadline. Consolidating the loop in one place (was duplicated) keeps the #111/#163
-    timeout-race tuning from drifting between the two call sites."""
+    timeout-race tuning from drifting between the two call sites.
+
+    *min_mean*, when given by the caller, OVERRIDES the env-resolved default below — see #677: the
+    two call sites need DIFFERENT floors (switch()'s bright dual-QR monitor vs prod_scene()'s
+    arbitrary, possibly dim, real production content), so each caller now owns its own floor instead
+    of sharing one global default."""
     blackcheck_timeout = float(os.environ.get("OBS_BLACKCHECK_TIMEOUT_S", "20"))
-    # #312: callers here route to a KNOWN-BRIGHT scene (the dual-QR monitor, mean ~105 when settled),
-    # so require a MEAN floor — a mid-renegotiation frame (peak ~117 but mean ~2.7 right after cam1's
-    # [2/8] restart) then keeps the poll WAITING until cam1's NDI settles, instead of falsely passing
-    # on peak and recording a black program. Env-overridable; set 0 to restore pure peak-only (e.g. a
-    # genuinely dark-but-live prod scene). Default 20: well above the 2.7 garbage, below the ~105 frame.
-    min_mean = float(os.environ.get("OBS_NONBLACK_MIN_MEAN", "20"))
+    # #312: switch() (the ONLY caller that omits min_mean) routes to a KNOWN-BRIGHT scene (the
+    # dual-QR monitor, mean ~105 when settled), so it needs a MEAN floor — a mid-renegotiation frame
+    # (peak ~117 but mean ~2.7 right after cam1's [2/8] restart) then keeps the poll WAITING until
+    # cam1's NDI settles, instead of falsely passing on peak and recording a black program.
+    # Env-overridable; set 0 to restore pure peak-only. Default 20: well above the 2.7 garbage, below
+    # the ~105 frame. #677: prod_scene() passes its OWN, looser floor explicitly (see its call site)
+    # because it routes to ARBITRARY certified production content, which can legitimately be dim —
+    # this default must never apply there.
+    if min_mean is None:
+        min_mean = float(os.environ.get("OBS_NONBLACK_MIN_MEAN", "20"))
     poll_interval = 1.0
     t0 = time.monotonic()
     while True:
@@ -1254,6 +1263,11 @@ def prod_scene(a):
         # all-undecodable and wastes the whole run; poll until non-black or the timeout (a cold
         # DistroAV receiver needs longer than a single read to fill its FIFO). Only black AT the
         # deadline aborts BEFORE StartRecord.
+        # #677: unlike switch() (#312's bright dual-QR monitor), prod_scene() routes to whatever the
+        # CERTIFIED production scene shows — arbitrary real camera content that can legitimately be
+        # dim (live repro: peak=231, mean=18.0, genuinely non-black). Pass a LOOSER, dedicated floor
+        # (default 5) instead of the #312-tuned shared default (20): still well above the ~2.7
+        # mid-renegotiation garbage frame, but below any real dim content.
         _assert_program_nonblack(
             ws,
             a.host,
@@ -1262,6 +1276,7 @@ def prod_scene(a):
             f"The source is not delivering frames; aborting BEFORE StartRecord so a black recording "
             f"never wastes a full run. Check the certified prod input feeding '{target}' is "
             f"receiving NDI.",
+            min_mean=float(os.environ.get("OBS_NONBLACK_MIN_MEAN_PROD", "5")),
         )
 
         sys.stderr.write(

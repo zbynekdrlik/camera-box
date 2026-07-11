@@ -1286,3 +1286,44 @@ IDENTICAL video signal. There are NOT separate cameras per box. Consequences:
 - Capture-rate health check first: `journalctl -u camera-box | grep Streaming:` — captured fps
   must be ≈ the configured rate (60). Over-delivery (62-64fps) = defective USB grabber state →
   USB-reset it (#656 prevention adds an automatic WARN + E2E preflight for this).
+
+## Cheap standalone repro of ONE recording-e2e.sh step (#627) — don't run the full 30-min harness
+
+To test a hypothesis about ONE specific step of `recording-e2e.sh` (e.g. "does this OBS setting
+change right before StartRecord destabilize the encoder?"), you do NOT need to run the full
+harness (min `DURATION=300` = 5 min, plus deploy/setup overhead). Call the SAME `obs_phase2.py`
+subcommands the harness itself calls, directly from dev1, against the idle rig:
+
+1. `python3 scripts/obs_phase2.py rig-busy-check --strih-host <strih> --stream-host <stream>
+   --password ""` first — confirm idle (busy=false) before touching prod OBS state.
+2. Exercise the real code path directly, e.g. `prod-scene --host <stream> --program-scene PRO
+   --test-latency-source "NDI 2ME PGM" --test-latency-ms <N>` (omit `--upstream` to skip the
+   unrelated preload-force and isolate just the one setting under test) immediately followed by
+   `record --host <stream> --action start` (the #627 liveness check reports pass/fail in ~4s).
+   `record --action stop` right after to end the test recording; `teardown --host <stream>`
+   restores whatever was snapshotted.
+3. Vary the ONLY variable under test (e.g. the gap via `sleep N` between the two calls) across a
+   handful of attempts — each cycle is ~10-15s, not 5+ minutes.
+4. To prove a LOGIC change actually behaves correctly (not just "the syntax parses"), stub the
+   relevant remote command locally: `systemctl() { ... }; export -f systemctl` inside a `bash -c`
+   that sources the lib and invokes the generated snippet — lets you force every branch (always
+   active / recovers after retry / never recovers) without needing the rig to actually fail.
+5. Clean up any small test recordings you create afterward (`Remove-Item` via the win-* MCP —
+   they're easy to spot by their fresh `LastWriteTime`).
+
+This was how #627's `genlock_latency_ms_src` transition hypothesis was tested live (9 varied
+attempts in a few minutes total, 0 reproductions) — much cheaper than 9 full 30-min E2E runs.
+
+## `_assert_program_nonblack` can false-positive on dim (not black) production content — #677
+
+`obs_phase2.py`'s `_assert_program_nonblack` (the [4/8] black-frame self-check before
+StartRecord) uses `OBS_NONBLACK_MIN_MEAN=20` as its floor — but that floor was tuned for the
+#312 dual-QR TEST monitor scene specifically ("mean ~105 when settled" per its own code comment).
+Calling `prod-scene` against ordinary production camera content that happens to be legitimately
+dim (mean < 20, but with real bright pixels — peak 231 observed) reports FALSE "renders BLACK"
+and aborts the run naming an NDI/genlock problem that doesn't actually exist. Confirmed live
+2026-07-11 while investigating #627: 3/3 `prod-scene` calls against the idle stream box's normal
+'PRO' scene false-failed the black-check, while the recording that followed each false-fail was
+a healthy ~11MB file. Not yet fixed (filed as #677) — if you hit "renders BLACK" during a normal
+(non-dual-QR-monitor) run, don't assume the source is actually dead; check the reported
+`mean=`/`peak=` values first.
