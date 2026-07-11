@@ -196,3 +196,50 @@ fn full_path_e2e_yml_duration_defaults_to_300_for_pr_triggered_runs() {
          empty (a pull_request-triggered run has no workflow_dispatch inputs)"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// #406 — the EPIC's own acceptance bar: "the REQUIRED pull_request job never sets ALL_CAMBOX=1,
+// so the blocking gate exercises NEITHER the multi-camera cross-camera spread (#624/#286) NOR
+// the #641 A/V-offset gate — both exist in code but only in the on-demand sweep." User directive
+// 2026-07-11 evening: flip it NOW (prerequisite #681 measurement-trust work already landed) —
+// every PR must pass the fused 6-camera zero-loss + delivery-latency-spread + A/V-offset gate
+// (fail-closed) to merge. recording-e2e.sh's ALL_CAMBOX=1 path self-wires everything else it
+// needs (switch schedule, cam2's continuous QPSK audio marker via its own AV_SYNC_MARKER_DEVICE/
+// CADENCE defaults, AV_EXPECTED_MS defaulting to 0) — the workflow only needs to set the ONE
+// flag. Scoped to `pull_request` only (via the ternary) so a manual `workflow_dispatch` operator
+// soak keeps its existing single-camera behavior unless a future ticket adds an explicit input.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn full_path_e2e_yml_sets_all_cambox_for_pull_request_triggered_runs() {
+    let s = read_workflow();
+    assert!(
+        s.contains("ALL_CAMBOX: ${{ github.event_name == 'pull_request' && '1' || '0' }}"),
+        "#406: the required pull_request job must set ALL_CAMBOX=1 so the automatic merge gate \
+         runs the FUSED multi-camera sweep (cross-camera spread + #641 A/V-offset gate) — not \
+         just the single-camera path. Must be scoped to pull_request (leaving workflow_dispatch's \
+         manual-soak behavior unchanged)."
+    );
+}
+
+/// The ALL_CAMBOX env line must live in the SAME step (env: block) as DURATION/
+/// NDI_RUNTIME_DIR_V6 — i.e. it actually reaches recording-e2e.sh's invocation, not just sit
+/// somewhere else in the file where it would never be read by the script.
+#[test]
+fn full_path_e2e_yml_all_cambox_is_in_the_recording_steps_env_block() {
+    let s = read_workflow();
+    let step_pos = s
+        .find("name: Recording-based 4-node cam2")
+        .expect("the recording step must exist");
+    let run_pos = s[step_pos..]
+        .find("run: exec bash scripts/recording-e2e.sh")
+        .map(|p| p + step_pos)
+        .expect("the recording step must invoke recording-e2e.sh");
+    let step_block = &s[step_pos..run_pos];
+    assert!(
+        step_block.contains("ALL_CAMBOX:"),
+        "#406: ALL_CAMBOX must be set inside the recording step's own env: block (between its \
+         `name:` and its `run:` line), not elsewhere in the file — recording-e2e.sh only sees \
+         env vars set on ITS OWN step. step_block:\n{step_block}"
+    );
+}
