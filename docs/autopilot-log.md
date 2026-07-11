@@ -3006,3 +3006,81 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
   investigation numbers) — the SAME pre-existing cam1-grabber defect #663 now tracks, unrelated
   to #660 or the restart. Per strict-test-mandate, did NOT force a false PASS: #466 stays OPEN,
   updated with the honest before/after evidence, now blocked on #663 instead of #660.
+
+## #663 — automatic USB-reset self-heal for the capture-rate defect (PR #664)
+
+- **Problem**: #656 shipped DETECT-only (a WARN once captured fps sustains >1% deviation for
+  30s). #663's live finding: the manual USB-reset fix from #656 was only TEMPORARY — cam1's
+  ShadowCast 2 recurred the same defect within hours, three times in one day.
+- **Fix**: new `src/capture_rate_selfheal.rs` — pure decide_selfheal (throttle 600s + recurrence-
+  window escalation, 3 heals within 3600s → CRITICAL "replace the hardware" log line) + the
+  actual sysfs reset I/O (uvcvideo unbind + `authorized` 0→1 toggle, mirroring #656's manually-
+  verified fix). Wired into `src/main.rs`'s existing #656 WARN block. Runs in-process (systemd
+  unit already root + `ReadWritePaths=/sys`); exits (code 77 success / 78 reset-failed) AFTER the
+  capture loop's normal shutdown cleanup (grab-recorder flush, burn-thread join) so systemd's
+  `Restart=always` brings it back up against the re-enumerated device without truncating an
+  in-flight `--record-grab` E2E recording.
+- **Review**: self-review before requesting review found + fixed 2 gaps (unretried reauthorize
+  failure left a device permanently disconnected; unguarded busid-level assumption could toggle
+  the wrong sysfs node). `requesting-code-review` subagent found 3 more Important issues, all
+  fixed: raw `process::exit` skipped shutdown cleanup (now graceful); total reset failure had no
+  CRITICAL visibility (now logs CRITICAL + exits with a distinct code); escalation wording
+  overstated certainty ("self-healed" → "had N USB-reset attempts").
+- **20 Tier-0 unit tests** (throttle, recurrence-window escalation matching #663's own incident,
+  state parse/format round-trip, sysfs path derivation pinned against cam1's live-confirmed
+  layout, is_interface_level_busid guard).
+- Commits: `feat(#663)` the module + wiring → `docs(#663)` ops skill → `harden(#663)` review
+  fixes round 1 → `fix(#663)` graceful shutdown + CRITICAL-on-failure (review round 2). PR #664
+  merged `911c8e1db`; dev bumped to 1.7.0-dev.335 post-merge.
+- **Deployed to the full active fleet** (cam1/cam2/cam3/cam4) and **live-verified extensively**:
+  - **cam3**: caught a full natural cycle live — `#656` WARN sustained 100+ consecutive windows →
+    self-heal fired (attempt #2, correctly rate-limited from attempt #1 right after deploy) →
+    USB-resetting `/dev/video1` → USB reset complete → graceful exit(77) → systemd restarted
+    (new PID) → fps recovered to ~59.5-60.2 captured. Recurred again ~20 min later (attempt #3
+    pending, correctly rate-limited) — confirms the defect's genuine multi-times-per-hour
+    recurrence rate and the self-heal correctly handling it every time.
+  - **cam2**: a DIFFERENT, persistent under-rate pattern (~55-59fps captured, not the ShadowCast
+    over-rate quantization) survived 3 full USB-reset attempts within the hour → self-heal
+    correctly escalated to CRITICAL (`has had 3 USB-reset attempts within 3600s without the
+    defect staying fixed ... Grabber hardware likely failing — replace the USB cable/port/
+    device`) while STILL performing the 3rd reset (never a stop condition, per design). Filed as
+    a distinct follow-up: **#665** (may be a resource-contention or hardware issue unrelated to
+    the #656/#663 ShadowCast class, since resets aren't holding).
+  - **cam1/cam4**: healthy throughout (60.0-60.9 fps captured), no false-positive self-heal
+    triggers on normal startup transients (confirms the 6-consecutive-window/30s confirm gate
+    correctly rejects blips).
+- Closed #663 with this evidence (cam3's full detect→heal→recover cycle IS the live proof the
+  issue asked for).
+
+## 2026-07-10/11 — #466 + #312 rig-runs dispatch (restart-survival + all-cambox evidence)
+
+- **#466 (EPIC Topology v2, imag-inclusive restart-survival proof)**: 3 real dispatch attempts.
+  - Attempt 3 (RUN_ID 1783723036, CAM=cam1): INVALIDATED — an orphaned painter process from this
+    session's own `rig-mode.sh test` flakiness debugging (see #667) held DRM master, forcing the
+    fresh painter onto a tearing-prone fbdev fallback showing STALE content; cam2 optical read
+    collapsed to 0 frames. Discarded.
+  - Attempt 4 (RUN_ID 1783724370, CAM=cam1): clean launch. Root-caused cam1's burn dying mid-run:
+    a REAL `#656` capture-rate defect fired + `#663` self-heal exited the process expecting
+    systemd respawn — but the test's burn-enabled deploy is a plain ad-hoc `nohup`, so nothing
+    respawned it. Filed **#668** (new). imag showed a 165-tick COPY/FREEZE.
+  - Attempt 5 (RUN_ID 1783725853, CAM=cam4, healthiest box tonight): **cam4/strih/stream all
+    achieved ZERO loss** — first fully clean delivery-chain result in this EPIC's history. Only
+    imag failed (its scene is permanently pinned to cam1 regardless of SOURCE camera choice, so
+    it inherits cam1's hardware issue structurally). imag showed a 169-tick COPY/FREEZE — filed
+    **#669** (new, reproduced in 3/3 clean runs tonight, NOT #660 regression — different shape).
+  - Conclusion: the topology itself is provably zero-loss; #466 stays OPEN, blocked on a physical
+    hardware replacement for cam1's ShadowCast 2 grabber (tracked #663/#665/#668) plus root-causing
+    the new recurring imag freeze (#669).
+- **#312 item 4 (clean 6-camera ALL_CAMBOX sweep)**: 1 attempt (RUN_ID 1783727115, DURATION=360,
+  all 6 cameras, 12×30s segments). NOT clean — every per-segment window FAILed. Two distinct
+  findings: (1) a REAL fleet health problem (cam2/cam3 had ACTIVE `#656` defects, cam5/cam6 the
+  `#666` emit-deficit, cam1 the known hardware issue — half the fleet degraded simultaneously);
+  (2) an UNRESOLVED puzzle — cam4's own per-segment window showed high gap counts despite cam4
+  proving fully clean in this session's OWN dedicated measurement minutes earlier; flagged, not
+  root-caused. Item 4 stays OPEN; item 5 (CI gate) remains done (PR #647).
+- New issues filed: **#666** (cam5/cam6 transient emit deficit), **#667** (rig-mode.sh test flaky
+  exit-1 after cam2 painter launch), **#668** (self-heal kills ad-hoc test burn with no respawn),
+  **#669** (recurring imag COPY/FREEZE, 3/3 clean runs).
+- Rig restored to clean EVENT mode after all runs (verified: rig-busy-gate FREE, all 6 camera-box
+  services active, cam2-painter active, burns off both boxes, prod scenes restored).
+- Artifacts on dev1: `/tmp/recording-e2e-{1783723036,1783724370,1783725853,1783727115}/`.

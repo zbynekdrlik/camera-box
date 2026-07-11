@@ -985,6 +985,20 @@ restart with exit code 77 if it just self-healed, or **78** if the reset attempt
 (check the CRITICAL journal line right above it — the device may need manual
 `echo 1 > <authorized path>` recovery).
 
+**GOTCHA — a plain `journalctl -u camera-box -n N` tail can silently MISS the actual heal-action
+lines during live verification.** The capture loop's own intercom (`recv N pkt/s...`) and #299
+chroma lines fire every ~5s alongside the fps report, at a high enough rate that a small `-n`
+window (e.g. `-n 30`) can scroll straight past the one-shot `USB-resetting`/`USB reset complete`/
+`CRITICAL` lines if you fetch it even a few seconds late. Confirmed live (2026-07-10, #663
+verification): a `-n 30` tail showed only `#663 self-heal rate-limited: ...s remaining` lines
+(the routine per-window log) with the actual reset action nowhere visible, even though it had
+JUST happened — the reset lines were already pushed out by ~15+ intervening intercom/chroma
+lines. **Fix:** bracket the known event time with `journalctl -u camera-box --since "HH:MM:SS"
+--until "HH:MM:SS"` (from the "Xs remaining" countdown you were already watching, which pins the
+attempt's timestamp precisely) rather than trusting a small `-n` tail — or grep the FULL
+unbounded journal (`journalctl -u camera-box | grep -E "..."`) when hunting a specific one-shot
+event rather than the routine per-window noise.
+
 **Generic across the fleet:** this lives in the shared capture loop every cam box runs — no per-box
 config. Any cam box (cam1, cam3, or any future box) running a ShadowCast-class or similar USB
 capture dongle that drifts off its negotiated rate self-heals identically once deployed.
