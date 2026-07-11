@@ -31,9 +31,28 @@
 #       --out-dir 'C:\\camera-box\\verdict-out' \
 #       -- <recording-verdict args, paths already Windows-style>
 #
+# #703: --execute switches this script to ACTUALLY RUN the plan over ssh/scp (no MCP, no
+# human paste-step) — #701 proved plain OpenSSH+password ssh/scp works on this rig for strih
+# specifically. Needs --verdict-exe-local <dev1 path to the CI-built recording-verdict.exe>
+# (always uploaded fresh — correctness over speed, the exe is ~3MB) and --local-out-dir <dev1
+# dir to pull the partial + #186 pixel-proof dir into>. Planner mode (no --execute, the
+# default) is UNCHANGED — still the pure text-only plan for a human/MCP operator run.
+#
+# Usage (execute mode):
+#   recording-verdict-on-strih.sh --execute \
+#       --strih-rec 'D:\_REC\...\strih-REC.mkv' \
+#       --verdict-exe-local target/release-windows/recording-verdict.exe \
+#       --out-dir 'C:\camera-box\verdict-out' --local-out-dir /tmp/recording-e2e-12345 \
+#       -- --extract-partial strih --strih 'D:\_REC\...\strih-REC.mkv' ... --out 'C:\camera-box\verdict-out\strih-partial-12345.json'
+#
 # Env:
-#   STRIH_BOX (default 10.77.9.202) — informational; the MCP target is win-strih.
+#   STRIH_BOX (default 10.77.9.202) — ssh/MCP target.
+#   STRIH_USER / STRIH_PW (default newlevel / newlevel, per targets.md) — --execute only.
 set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/win-ssh-exec.sh
+. "$HERE/lib/win-ssh-exec.sh"
 
 # Build the PowerShell command line that runs the verdict ON the strih box. RUST_LOG=info so the
 # per-recording decode progress is visible (the agent's liveness signal). The verdict writes its
@@ -62,9 +81,14 @@ build_onbox_command() {
 # calling build_onbox_command) does NOT trigger arg-parsing against the sourcing shell's $@.
 main() {
   local STRIH_BOX="${STRIH_BOX:-10.77.9.202}"
+  local STRIH_USER="${STRIH_USER:-newlevel}"
+  local STRIH_PW="${STRIH_PW:-newlevel}"
   local VERDICT_EXE='C:\camera-box\recording-verdict.exe'
   local OUT_DIR='C:\camera-box\verdict-out'
   local STRIH_REC=""
+  local EXECUTE=0
+  local VERDICT_EXE_LOCAL=""
+  local LOCAL_OUT_DIR=""
   # Everything after `--` is passed verbatim to recording-verdict on the box.
   local -a PASS_ARGS=()
   while [ "$#" -gt 0 ]; do
@@ -77,10 +101,13 @@ main() {
           return 0
         fi
         shift 2 ;;
-      --strih-rec)   STRIH_REC="$2"; shift 2 ;;
-      --verdict-exe) VERDICT_EXE="$2"; shift 2 ;;
-      --out-dir)     OUT_DIR="$2"; shift 2 ;;
-      --)            shift; PASS_ARGS=("$@"); break ;;
+      --strih-rec)        STRIH_REC="$2"; shift 2 ;;
+      --verdict-exe)      VERDICT_EXE="$2"; shift 2 ;;
+      --out-dir)          OUT_DIR="$2"; shift 2 ;;
+      --execute)          EXECUTE=1; shift 1 ;;
+      --verdict-exe-local) VERDICT_EXE_LOCAL="$2"; shift 2 ;;
+      --local-out-dir)    LOCAL_OUT_DIR="$2"; shift 2 ;;
+      --)                 shift; PASS_ARGS=("$@"); break ;;
       *) echo "unknown arg: $1" >&2; exit 2 ;;
     esac
   done
@@ -101,6 +128,44 @@ main() {
     fi
   done
   if [ -n "$OUT_PARTIAL" ]; then PIXELS_DIR="${OUT_PARTIAL%.json}-pixels"; fi
+
+  if [ "$EXECUTE" = "1" ]; then
+    if [ -z "$OUT_PARTIAL" ]; then
+      echo "ERROR: --execute needs a --out <partial.json> inside the forwarded args" >&2
+      exit 2
+    fi
+    if [ -z "$LOCAL_OUT_DIR" ]; then
+      echo "ERROR: --execute needs --local-out-dir <dev1 dir to pull results into>" >&2
+      exit 2
+    fi
+    command -v sshpass >/dev/null 2>&1 || {
+      echo "ERROR: sshpass not found — needed to ssh/scp into strih (#701/#703)." >&2
+      exit 1
+    }
+    echo "[recording-verdict-on-strih] --execute: ensuring $OUT_DIR exists on strih (${STRIH_BOX})"
+    win_ssh_run "$STRIH_USER" "$STRIH_PW" "$STRIH_BOX" \
+      "New-Item -ItemType Directory -Force -Path \"$OUT_DIR\" | Out-Null"
+    if [ -n "$VERDICT_EXE_LOCAL" ]; then
+      echo "[recording-verdict-on-strih] deploying $VERDICT_EXE_LOCAL -> ${STRIH_BOX}:${VERDICT_EXE} (always fresh — correctness over speed)"
+      win_ssh_upload "$STRIH_USER" "$STRIH_PW" "$STRIH_BOX" "$VERDICT_EXE_LOCAL" "$VERDICT_EXE"
+    fi
+    echo "[recording-verdict-on-strih] running on strih (${STRIH_BOX}): $ONBOX_CMD"
+    win_ssh_run "$STRIH_USER" "$STRIH_PW" "$STRIH_BOX" "$ONBOX_CMD"
+    mkdir -p "$LOCAL_OUT_DIR"
+    local partial_base local_partial
+    partial_base="$(basename "$OUT_PARTIAL")"
+    local_partial="$LOCAL_OUT_DIR/$partial_base"
+    echo "[recording-verdict-on-strih] pulling back $OUT_PARTIAL -> $local_partial"
+    win_ssh_download "$STRIH_USER" "$STRIH_PW" "$STRIH_BOX" "$OUT_PARTIAL" "$local_partial"
+    if win_ssh_path_exists "$STRIH_USER" "$STRIH_PW" "$STRIH_BOX" "$PIXELS_DIR"; then
+      echo "[recording-verdict-on-strih] pulling back #186 pixel proofs $PIXELS_DIR -> $LOCAL_OUT_DIR/"
+      win_ssh_download_dir "$STRIH_USER" "$STRIH_PW" "$STRIH_BOX" "$PIXELS_DIR" "$LOCAL_OUT_DIR/"
+    else
+      echo "[recording-verdict-on-strih] no pixel-proof dir on strih — clean run, nothing flagged"
+    fi
+    echo "[recording-verdict-on-strih] done: partial at $local_partial"
+    return 0
+  fi
 
   cat <<PLAN
 # ===== #208 extract-strih-partial ON the strih box (decode where the video is) =====

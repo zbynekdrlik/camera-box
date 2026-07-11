@@ -87,6 +87,10 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # SOURCE camera to imag's own "Cam N" scene name (the SAME 1:1 pattern imag_scenes.py seeds).
 # shellcheck source=scripts/lib/imag-scene-route.sh
 . "$HERE/lib/imag-scene-route.sh"
+# #703: shared ssh/scp helpers for EXECUTING recording-verdict directly on strih/stream (the
+# [8/8] E2E_EXECUTE_VERDICT=1 path — #701 proved ssh/scp works on this rig for these boxes).
+# shellcheck source=scripts/lib/win-ssh-exec.sh
+. "$HERE/lib/win-ssh-exec.sh"
 camera_resolve "${CAM:-cam1}"
 # #24 item 1: this harness's SOURCE-camera role (the physical box filming cam2's monitor via
 # the optical loopback + carrying the #174 render-time capture burn) is one of
@@ -134,7 +138,20 @@ STREAM=10.77.9.204
 # own 911003 digital corner burn (#463) when present.
 IMAG_IP="${IMAG_IP:-10.77.9.182}"
 CAM_PW=newlevel
+# #703: strih/stream ssh creds for the E2E_EXECUTE_VERDICT=1 path (win-ssh-exec.sh helpers) —
+# same convention as CAM_PW/IMAG_PW, per targets.md's "SSH: newlevel/newlevel" rows.
+STRIH_USER="${STRIH_USER:-newlevel}"
+STRIH_PW="${STRIH_PW:-newlevel}"
+STREAM_USER="${STREAM_USER:-newlevel}"
+STREAM_PW="${STREAM_PW:-newlevel}"
 RUN_ID="${RUN_ID:-$(( (RANDOM << 16) | RANDOM ))}"
+# #703: surface RUN_ID to the CI workflow (when running under GH Actions) so a downstream
+# workflow step (the fail-closed structural guard) can locate THIS run's verdict JSON
+# directly — /tmp/recording-e2e-${RUN_ID}/verdict-${RUN_ID}.json — without a fragile
+# "most-recently-modified /tmp dir" heuristic.
+if [ -n "${GITHUB_ENV:-}" ]; then
+  echo "RECORDING_E2E_RUN_ID=$RUN_ID" >> "$GITHUB_ENV"
+fi
 DURATION="${DURATION:-1800}"
 if [ "$DURATION" -lt 300 ]; then
   echo "ERROR: DURATION=${DURATION} below the 300 s zero-loss floor (default 1800)." >&2
@@ -1832,8 +1849,35 @@ if [ "$VERDICT_ON_STREAM" = "1" ]; then
   # #462: resolved HERE (before the imag deploy step below needs it too) — the SAME Linux binary
   # this dev1 process would otherwise merge with; imag-nb (x86_64 Ubuntu) runs it unmodified.
   VERDICT_BIN="$(cd "$PROBE_BIN_DIR" && pwd)/recording-verdict"
-  STREAM_REC_WIN="${STREAM_REC_WIN:-<the stream recording AS IT LIVES ON THE STREAM BOX>}"
-  STRIH_REC_WIN="${STRIH_REC_WIN:-<the strih recording AS IT LIVES ON THE STRIH BOX>}"
+  # #703: default to the REAL box-local paths OBS's own StopRecord ([7/8] above) already
+  # returned ($STRIH_HOST_PATH/$STREAM_HOST_PATH) rather than an unresolved placeholder — this
+  # is what EXECUTE mode needs to actually ssh/scp against (a literal "<...>" placeholder would
+  # 404 on the box); it also saves the plan-print/MCP operator a manual fill-in step. Still
+  # override-able via STRIH_REC_WIN/STREAM_REC_WIN env for a manual/debug dispatch.
+  STREAM_REC_WIN="${STREAM_REC_WIN:-${STREAM_HOST_PATH:-<the stream recording AS IT LIVES ON THE STREAM BOX>}}"
+  STRIH_REC_WIN="${STRIH_REC_WIN:-${STRIH_HOST_PATH:-<the strih recording AS IT LIVES ON THE STRIH BOX>}}"
+  # #703: E2E_EXECUTE_VERDICT=1 (set ONLY by the CI workflow's REQUIRED pull_request gate) makes
+  # this harness ACTUALLY RUN the strih+stream decode-in-place over ssh (#701: proven to work
+  # with the targets.md creds — retires the old "scp/ssh to Windows is denied" premise for
+  # THESE TWO boxes) instead of merely printing the plan for a human/MCP operator to paste.
+  # workflow_dispatch / manual operator runs stay at the default 0 — unchanged plan-printing.
+  # STRIH_USER/STRIH_PW/STREAM_USER/STREAM_PW are defined near the top of this script (with
+  # CAM_PW), reused here.
+  E2E_EXECUTE_VERDICT="${E2E_EXECUTE_VERDICT:-0}"
+  EXEC_STRIH_ARGS=()
+  EXEC_STREAM_ARGS=()
+  if [ "$E2E_EXECUTE_VERDICT" = "1" ]; then
+    if [ -z "${WIN_VERDICT_EXE_LOCAL:-}" ] || [ ! -f "$WIN_VERDICT_EXE_LOCAL" ]; then
+      echo "ERROR: #703 E2E_EXECUTE_VERDICT=1 but WIN_VERDICT_EXE_LOCAL is unset/missing — the CI" >&2
+      echo "       workflow must download the matching probe-tools-windows-amd64 artifact (built" >&2
+      echo "       by ci.yml's windows-probe job for this SAME commit) and export" >&2
+      echo "       WIN_VERDICT_EXE_LOCAL before invoking recording-e2e.sh." >&2
+      exit 1
+    fi
+    EXEC_STRIH_ARGS=(--execute --verdict-exe-local "$WIN_VERDICT_EXE_LOCAL" --local-out-dir "$OUTDIR")
+    EXEC_STREAM_ARGS=(--execute --verdict-exe-local "$WIN_VERDICT_EXE_LOCAL" --local-out-dir "$OUTDIR")
+    echo "    #703: E2E_EXECUTE_VERDICT=1 — strih+stream will be decoded FOR REAL over ssh (not just planned)."
+  fi
   STRIH_PARTIAL_WIN="$OUT_DIR_WIN\\strih-partial-${RUN_ID}.json"
   STREAM_PARTIAL_WIN="$OUT_DIR_WIN\\stream-partial-${RUN_ID}.json"
   STRIH_PARTIAL="$OUTDIR/strih-partial-${RUN_ID}.json"   # pulled back to dev1
@@ -1850,11 +1894,27 @@ if [ "$VERDICT_ON_STREAM" = "1" ]; then
   echo "    --- [8/8a] extract the STRIH partial ON the strih box (win-strih), in place ---"
   # The strih recording carries cam1 (forwarded) + strih burns; --extract-partial strih decodes
   # it IN PLACE on the strih box and writes the small partial JSON. It is NEVER copied off-box.
-  "$HERE/recording-verdict-on-strih.sh" \
-    --verdict-exe "$VERDICT_EXE_WIN" --out-dir "$OUT_DIR_WIN" --strih-rec "$STRIH_REC_WIN" \
-    -- --extract-partial strih --strih "$STRIH_REC_WIN" --capture-fps "$STRIH_CAPTURE_FPS" \
-       --burn-cam1-run-id "$BURN_CAM1_RUN_ID" --burn-strih-run-id "$BURN_STRIH_RUN_ID" \
-       $CG --out "$STRIH_PARTIAL_WIN"
+  # #703: wrapped in a function so EXECUTE mode can launch it BACKGROUNDED (parallel with the
+  # stream extract below, and with imag's own extract further down) while default plan-print
+  # mode still calls it in the FOREGROUND exactly as before (EXEC_STRIH_ARGS is empty there, so
+  # the invocation text/behavior is unchanged from the pre-#703 call).
+  run_strih_extract() {
+    "$HERE/recording-verdict-on-strih.sh" \
+      --verdict-exe "$VERDICT_EXE_WIN" --out-dir "$OUT_DIR_WIN" --strih-rec "$STRIH_REC_WIN" \
+      "${EXEC_STRIH_ARGS[@]}" \
+      -- --extract-partial strih --strih "$STRIH_REC_WIN" --capture-fps "$STRIH_CAPTURE_FPS" \
+         --burn-cam1-run-id "$BURN_CAM1_RUN_ID" --burn-strih-run-id "$BURN_STRIH_RUN_ID" \
+         $CG --out "$STRIH_PARTIAL_WIN"
+  }
+  STRIH_EXTRACT_PID=""
+  if [ "$E2E_EXECUTE_VERDICT" = "1" ]; then
+    STRIH_EXTRACT_LOG="$OUTDIR/strih-extract-${RUN_ID}.log"
+    run_strih_extract >"$STRIH_EXTRACT_LOG" 2>&1 &
+    STRIH_EXTRACT_PID=$!
+    echo "    #703: strih extract launched in background (pid $STRIH_EXTRACT_PID, log $STRIH_EXTRACT_LOG)"
+  else
+    run_strih_extract
+  fi
   echo "    pull back to dev1: $STRIH_PARTIAL  AND the #186 pixel-proof dir $STRIH_PIXELS"
   echo "      (win-strih FileDownload $STRIH_PARTIAL_WIN -> $STRIH_PARTIAL;"
   echo "       win-strih FileDownload $STRIH_PIXELS_WIN -> $STRIH_PIXELS  [absent on a clean run])"
@@ -1879,15 +1939,29 @@ if [ "$VERDICT_ON_STREAM" = "1" ]; then
   # The stream recording carries all three burns; --extract-partial stream decodes it IN PLACE on
   # the stream box. It is passed ONLY its own --stream recording — NEVER the strih recording (the
   # strih recording is decoded on the strih box above), so no box-to-box copy is ever needed.
-  "$HERE/recording-verdict-on-stream.sh" \
-    --verdict-exe "$VERDICT_EXE_WIN" --out-dir "$OUT_DIR_WIN" --stream-rec "$STREAM_REC_WIN" \
-    -- --extract-partial stream --stream "$STREAM_REC_WIN" --capture-fps "$STREAM_CAPTURE_FPS" \
-       --strih-emit-fps "$STRIH_CAPTURE_FPS" --stream-capture-fps "$STREAM_CAPTURE_FPS" \
-       --cam2-run-id "$RUN_ID" \
-       --burn-cam1-run-id "$BURN_CAM1_RUN_ID" --burn-strih-run-id "$BURN_STRIH_RUN_ID" \
-       --burn-stream-run-id "$BURN_STREAM_RUN_ID" \
-       $_av_marker_args \
-       $CG --out "$STREAM_PARTIAL_WIN"
+  # #703: same function-wrapped backgrounding as run_strih_extract above — launched right after
+  # strih (so BOTH decodes run concurrently in EXECUTE mode), foreground/unchanged otherwise.
+  run_stream_extract() {
+    "$HERE/recording-verdict-on-stream.sh" \
+      --verdict-exe "$VERDICT_EXE_WIN" --out-dir "$OUT_DIR_WIN" --stream-rec "$STREAM_REC_WIN" \
+      "${EXEC_STREAM_ARGS[@]}" \
+      -- --extract-partial stream --stream "$STREAM_REC_WIN" --capture-fps "$STREAM_CAPTURE_FPS" \
+         --strih-emit-fps "$STRIH_CAPTURE_FPS" --stream-capture-fps "$STREAM_CAPTURE_FPS" \
+         --cam2-run-id "$RUN_ID" \
+         --burn-cam1-run-id "$BURN_CAM1_RUN_ID" --burn-strih-run-id "$BURN_STRIH_RUN_ID" \
+         --burn-stream-run-id "$BURN_STREAM_RUN_ID" \
+         $_av_marker_args \
+         $CG --out "$STREAM_PARTIAL_WIN"
+  }
+  STREAM_EXTRACT_PID=""
+  if [ "$E2E_EXECUTE_VERDICT" = "1" ]; then
+    STREAM_EXTRACT_LOG="$OUTDIR/stream-extract-${RUN_ID}.log"
+    run_stream_extract >"$STREAM_EXTRACT_LOG" 2>&1 &
+    STREAM_EXTRACT_PID=$!
+    echo "    #703: stream extract launched in background (pid $STREAM_EXTRACT_PID, log $STREAM_EXTRACT_LOG)"
+  else
+    run_stream_extract
+  fi
   echo "    pull back to dev1: $STREAM_PARTIAL  AND the #186 pixel-proof dir $STREAM_PIXELS"
   echo "      (win-stream-snv FileDownload $STREAM_PARTIAL_WIN -> $STREAM_PARTIAL;"
   echo "       win-stream-snv FileDownload $STREAM_PIXELS_WIN -> $STREAM_PIXELS  [absent on a clean run])"
@@ -1919,6 +1993,36 @@ continuing WITHOUT the imag partial; the merge below will omit --merge-partials 
   else
     echo "WARNING: #462 no imag recording path (StopRecord returned none) — imag partial NOT produced;" >&2
     echo "         the merge below will run WITHOUT --merge-partials imag=... (cam→imag proof skipped)." >&2
+  fi
+
+  # #703: EXECUTE mode — the strih [8/8a] + stream [8/8b] extracts were launched BACKGROUNDED
+  # above (in parallel with each other AND with imag's own synchronous [8/8c] extract just
+  # above), so by this point all three have had the SAME wall-clock window to finish instead of
+  # serializing (the timing budget this fix's PR body documents). Wait for both now, BEFORE the
+  # merge needs their partial JSONs on disk. A failure here is FATAL (unlike imag, which is
+  # optional) — the merge cannot compute a real verdict missing either leg.
+  if [ "$E2E_EXECUTE_VERDICT" = "1" ]; then
+    echo "    #703: waiting for the backgrounded strih+stream decode-in-place to finish..."
+    STRIH_EXTRACT_RC=0
+    if [ -n "$STRIH_EXTRACT_PID" ]; then wait "$STRIH_EXTRACT_PID" || STRIH_EXTRACT_RC=$?; fi
+    STREAM_EXTRACT_RC=0
+    if [ -n "$STREAM_EXTRACT_PID" ]; then wait "$STREAM_EXTRACT_PID" || STREAM_EXTRACT_RC=$?; fi
+    echo "    ----- strih extract log ($STRIH_EXTRACT_LOG) -----"
+    cat "$STRIH_EXTRACT_LOG" 2>/dev/null || true
+    echo "    ----- stream extract log ($STREAM_EXTRACT_LOG) -----"
+    cat "$STREAM_EXTRACT_LOG" 2>/dev/null || true
+    echo "    ------------------------------------"
+    if [ "$STRIH_EXTRACT_RC" != "0" ] || [ "$STREAM_EXTRACT_RC" != "0" ]; then
+      echo "ERROR: #703 strih extract rc=$STRIH_EXTRACT_RC stream extract rc=$STREAM_EXTRACT_RC — cannot" >&2
+      echo "       compute the verdict without both partials. See the logs above for the root cause." >&2
+      exit 1
+    fi
+    if [ ! -f "$STRIH_PARTIAL" ] || [ ! -f "$STREAM_PARTIAL" ]; then
+      echo "ERROR: #703 extract reported success but a partial JSON is missing (strih=$STRIH_PARTIAL" >&2
+      echo "       stream=$STREAM_PARTIAL) — cannot compute the verdict." >&2
+      exit 1
+    fi
+    echo "    #703: both partials present — proceeding to the REAL merge (below)."
   fi
 
   echo "    --- [8/8d] MERGE the small partials ON dev1 (no recording on dev1) ---"
@@ -1960,6 +2064,38 @@ continuing WITHOUT the imag partial; the merge below will omit --merge-partials 
     echo "    #332 all-cambox: --switch-schedule $SWITCH_SCHEDULE_JSON (per-cambox continuity in the merge, ON the stream box)"
   fi
   printf '      %q ' "$VERDICT_BIN" "${MERGE_ARGS[@]}"; echo
+
+  # #703: EXECUTE mode runs the merge above FOR REAL right now (never just prints it) and makes
+  # THIS SCRIPT'S OWN EXIT CODE the merge recording-verdict's exit code — the actual fix for the
+  # bug this issue reports (the required CI gate used to `exit 0` here unconditionally, with NO
+  # verdict ever computed). Print mode (default, unchanged) keeps emitting the plan text for a
+  # human/MCP operator to run manually and reports its own honest "this is NOT the verdict" note.
+  if [ "$E2E_EXECUTE_VERDICT" = "1" ]; then
+    echo "    #703: EXECUTING the merge above for real (not just printing it) — this run's own"
+    echo "    exit code IS the merge recording-verdict's exit code."
+    GATE=0
+    "$VERDICT_BIN" "${MERGE_ARGS[@]}" || GATE=$?
+    echo "[8/8] render the 2-graph report PNG"
+    if [ -f "$REPORT_JSON" ]; then
+      python3 "$HERE/recording-e2e-report.py" --json "$REPORT_JSON" --out "$REPORT_PNG" || \
+        echo "WARNING: report render failed (non-fatal; JSON at $REPORT_JSON)" >&2
+    fi
+    echo "    --- [8/8e] cleanup plan (JSON secured at $REPORT_JSON) ---"
+    if [ "${KEEP_RECORDINGS:-0}" = "1" ]; then
+      echo "    KEEP_RECORDINGS=1 — skipping the recording-cleanup plan (debugging opt-out, #652)."
+    else
+      echo "    #652: free rig disk by deleting ONLY this run's own strih+stream recordings (the"
+      echo "    verdict + partials + pixel-proofs above are the evidence that is KEPT; the source"
+      echo "    recordings are re-derivable by re-running). NEVER a directory sweep — the EXACT"
+      echo "    paths StopRecord returned for THIS run only:"
+      echo "      win-strih Shell:      Remove-Item -Force -LiteralPath '${STRIH_HOST_PATH:-<unknown>}'"
+      echo "      win-stream-snv Shell: Remove-Item -Force -LiteralPath '${STREAM_HOST_PATH:-<unknown>}'"
+      echo "    Set KEEP_RECORDINGS=1 to skip this (debugging)."
+    fi
+    echo "    #703: merge recording-verdict exit code = $GATE (this IS the zero-loss/A/V verdict)."
+    exit "$GATE"
+  fi
+
   echo "    The win-* MCP holder runs 8/8a + 8/8b on strih+stream (imag's 8/8c ALREADY ran above —"
   echo "    #462, plain ssh, no MCP needed), pulls the strih+stream partials (+ their <partial>-pixels"
   echo "    #186 proof dirs) to dev1, then runs the 8/8d merge above on dev1. A recording is NEVER"

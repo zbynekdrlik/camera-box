@@ -76,49 +76,59 @@ fn recording_e2e_sh_disk_budget_check_is_never_fatal() {
     );
 }
 
-/// The per-box (default VERDICT_ON_STREAM=1) plan must print the run-scoped cleanup
-/// instructions AFTER the merge command it already prints, and before that branch's `exit 0`.
+/// The per-box (default VERDICT_ON_STREAM=1) branch prints the run-scoped cleanup instructions
+/// AFTER the merge command it already prints. #703 split this branch in two sub-paths sharing
+/// the SAME merge-command print: E2E_EXECUTE_VERDICT=1 (the CI gate — ACTUALLY runs the merge,
+/// then prints cleanup + `exit "$GATE"`) and the default plan-print sub-path (unchanged — prints
+/// the "NOT the verdict" NOTE, then cleanup, then `exit 0`). Both sub-paths must print their own
+/// #652 cleanup instructions after the merge print; only the PLAN-PRINT sub-path's cleanup needs
+/// to come after its own exit-code NOTE (the EXECUTE sub-path has no such NOTE — it prints the
+/// REAL exit code, not a disclaimer).
 #[test]
 fn recording_e2e_sh_per_box_path_prints_cleanup_after_the_merge_command() {
     let s = read_recording_e2e();
     let merge_print_pos = s
         .find(r#"printf '      %q ' "$VERDICT_BIN" "${MERGE_ARGS[@]}"; echo"#)
         .expect("recording-e2e.sh must still print the merge command");
-    let cleanup_pos = s
+
+    // #703: the EXECUTE sub-path (E2E_EXECUTE_VERDICT=1) — its own #652 cleanup mention must
+    // appear after the merge print AND before its own `exit "$GATE"`.
+    let execute_branch_pos = s[merge_print_pos..]
+        .find(r#"if [ "$E2E_EXECUTE_VERDICT" = "1" ]; then"#)
+        .map(|rel| merge_print_pos + rel)
+        .expect("#703: the execute sub-path must exist after the merge print");
+    let execute_gate_exit_pos = s[execute_branch_pos..]
+        .find(r#"exit "$GATE""#)
+        .map(|rel| execute_branch_pos + rel)
+        .expect("#703: the execute sub-path must exit \"$GATE\" after running the real merge");
+    let execute_cleanup_pos = s[execute_branch_pos..execute_gate_exit_pos]
         .find("#652")
-        .filter(|&p| p > merge_print_pos)
-        .or_else(|| {
-            // fall back to a scan of every #652 occurrence, pick the first one after the merge print
-            let mut idx = 0;
-            loop {
-                match s[idx..].find("#652") {
-                    Some(rel) => {
-                        let abs = idx + rel;
-                        if abs > merge_print_pos {
-                            break Some(abs);
-                        }
-                        idx = abs + 1;
-                    }
-                    None => break None,
-                }
-            }
-        })
-        .expect("#652: a #652-tagged cleanup instruction must appear after the merge print");
+        .map(|rel| execute_branch_pos + rel);
     assert!(
-        cleanup_pos > merge_print_pos,
-        "#652 cleanup instructions must come AFTER the merge command print"
+        execute_cleanup_pos.is_some(),
+        "#703/#652: the EXECUTE sub-path must ALSO print the #652 cleanup instructions, between \
+         the merge print (pos {merge_print_pos}) and its own exit \"$GATE\" (pos {execute_gate_exit_pos})"
     );
 
-    // The per-box branch's own `exit 0` (the "harness only EMITS the plan" exit) must come
-    // AFTER the cleanup print, not before it.
+    // The PLAN-PRINT sub-path (default, unchanged pre-#703 behavior): its cleanup print must
+    // come after its own exit-code NOTE ("this is NOT the verdict") and before its `exit 0`.
     let per_box_exit_marker = "PASS/FAIL is the merge recording-verdict EXIT CODE on dev1";
     let exit_marker_pos = s
         .find(per_box_exit_marker)
-        .expect("the per-box branch's own NOTE about exit 0 must still exist");
+        .expect("the plan-print sub-path's own NOTE about exit 0 must still exist");
+    let plan_print_cleanup_pos = s[exit_marker_pos..]
+        .find("#652")
+        .map(|rel| exit_marker_pos + rel)
+        .expect("#652: a cleanup instruction must appear after the plan-print sub-path's NOTE");
+    let plan_print_exit0_pos = s[plan_print_cleanup_pos..]
+        .find("\n  exit 0\nfi")
+        .map(|rel| plan_print_cleanup_pos + rel)
+        .expect("#652: the plan-print sub-path's own exit 0 must exist after its cleanup print");
     assert!(
-        cleanup_pos > exit_marker_pos,
-        "#652: the cleanup plan must be printed in the per-box (VERDICT_ON_STREAM=1) branch, \
-         after its own exit-code NOTE"
+        exit_marker_pos < plan_print_cleanup_pos && plan_print_cleanup_pos < plan_print_exit0_pos,
+        "#652: the plan-print sub-path's cleanup plan must be printed after its exit-code NOTE \
+         (pos {exit_marker_pos}) and before its own exit 0 (pos {plan_print_exit0_pos}), found \
+         cleanup at {plan_print_cleanup_pos}"
     );
 }
 
