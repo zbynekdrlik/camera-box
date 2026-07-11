@@ -77,6 +77,31 @@ fn sample_mono_to_real_offset_100ns() -> i64 {
     real_100ns - mono_100ns
 }
 
+/// #685 follow-up (live-discovered 2026-07-11, deploying to cam1): the box's OS-level
+/// hostname, via the `gethostname(2)` syscall — the SAME live value the `hostname` shell
+/// command reports. Used to resolve the grabber model (see the call site in
+/// `run_capture_loop`). The deployed fleet's `config.toml` does NOT set the optional
+/// `hostname` field (confirmed live: it silently defaulted to the generic `"camera-box"`
+/// string on cam1, so `capture_rate_health::grabber_model_for_hostname` could never match
+/// a real CAM1-6 name and permanently fell back to the strict 1% tolerance — the exact
+/// false-positive #685 set out to eliminate; cam1 was still self-heal-resetting on its own
+/// normal ~61fps wobble minutes after the #685 binary was deployed, until this follow-up).
+/// The OS-level hostname IS set correctly per-box by `scripts/setup-device.sh` (confirmed
+/// live: cam1 -> `"CAM1"`), so query it directly instead of trusting the unpopulated
+/// app-config field. Returns an empty string on any syscall failure (never panics) — the
+/// caller falls back to `GrabberModel::Unknown` (the safe strict tolerance), same as an
+/// unrecognized hostname.
+fn os_hostname() -> String {
+    // HOST_NAME_MAX is 64 on Linux; 256 leaves generous headroom without any real cost.
+    let mut buf = [0u8; 256];
+    let rc = unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) };
+    if rc != 0 {
+        return String::new();
+    }
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    String::from_utf8_lossy(&buf[..end]).into_owned()
+}
+
 /// Apply real-time optimizations to the current thread for lowest latency
 /// Based on media-bridge's extreme low-latency settings
 fn apply_realtime_optimizations() {
@@ -319,6 +344,7 @@ async fn main() -> Result<()> {
     run_capture_loop(
         &device_path,
         &config.ndi_name,
+        &config.hostname,
         display_config,
         intercom_config,
         args.record_grab.clone(),
@@ -330,6 +356,9 @@ async fn main() -> Result<()> {
 async fn run_capture_loop(
     device_path: &str,
     ndi_name: &str,
+    // #685 — this box's hostname (CAM1-CAM6), used ONLY to resolve its grabber model for a
+    // per-model capture-rate tolerance (see `capture_rate_health::grabber_model_for_hostname`).
+    hostname: &str,
     display_config: Option<NdiDisplayConfig>,
     intercom_config: Option<intercom::IntercomConfig>,
     record_grab: Option<String>,
@@ -404,6 +433,24 @@ async fn run_capture_loop(
     // loop below runs on a `'static` spawn_blocking closure, so the borrowed `device_path: &str`
     // parameter can't be captured directly).
     let device_path_owned = device_path.to_string();
+
+    // #685 — resolve this box's grabber model from its hostname ONCE, up front, so the capture
+    // loop's #656/#663 capture-rate check below can use a per-model tolerance instead of one
+    // strict global default (ShadowCast 2's characteristic USB quantization wobble is far wider
+    // than the other grabber models' — see `capture_rate_health::GrabberModel`). Prefers the
+    // real OS-level hostname (`os_hostname()`) over the config-derived `hostname` parameter —
+    // see that function's doc for why (the deployed fleet's config.toml doesn't set it).
+    // `Copy`, so it moves into the `'static` spawn_blocking closure below for free.
+    let resolved_hostname = {
+        let os = os_hostname();
+        if os.is_empty() {
+            hostname.to_string()
+        } else {
+            os
+        }
+    };
+    let grabber_model =
+        camera_box::capture_rate_health::grabber_model_for_hostname(&resolved_hostname);
 
     // Genlock #11: optionally emit NDI at a target broadcast rate, decimating the
     // faster capture onto DanteSync wall-clock boundaries, so a downstream
@@ -533,6 +580,13 @@ async fn run_capture_loop(
         let mut consecutive_rate_breaches: u32 = 0;
         let configured_capture_fps: f64 =
             frame_rate.numerator as f64 / frame_rate.denominator.max(1) as f64;
+        // #685 — this box's model-specific capture-rate deviation tolerance (percent); see
+        // `capture_rate_health::tolerance_pct_for_model`. Only the CAPTURE-side (#656/#663)
+        // check below uses this — the EMIT-side (#666) health check just below stays on its own
+        // model-agnostic tolerance, since the emit-side invariant (60.00 fps on the DanteSync
+        // tick, zero loss) is unaffected by capture-side wobble and stays strict by design.
+        let capture_rate_tolerance_pct =
+            camera_box::capture_rate_health::tolerance_pct_for_model(grabber_model);
         // #666 — emit-vs-capture health: consecutive-breach counter for the SAME pure
         // `capture_rate_health` decision, but checked against the configured genlock SEND rate
         // (`send_fps`, below) instead of the negotiated capture rate — catches a defect in the
@@ -924,7 +978,7 @@ async fn run_capture_loop(
                         let rate_deviant = camera_box::capture_rate_health::is_rate_deviant(
                             cap_fps,
                             configured_capture_fps,
-                            camera_box::capture_rate_health::CAPTURE_RATE_TOLERANCE_PCT,
+                            capture_rate_tolerance_pct,
                         );
                         consecutive_rate_breaches =
                             camera_box::capture_rate_health::next_consecutive_breaches(
@@ -936,12 +990,13 @@ async fn run_capture_loop(
                             camera_box::capture_rate_health::CAPTURE_RATE_WARN_WINDOWS,
                         ) {
                             tracing::warn!(
-                                "#656 capture-delivery-rate DEFECTIVE: {:.2} fps captured vs {:.2} fps configured/negotiated (>{:.1}% deviation sustained for {} consecutive report windows, ~{}s) — USB-reset the capture device (see #656)",
+                                "#656 capture-delivery-rate DEFECTIVE: {:.2} fps captured vs {:.2} fps configured/negotiated (>{:.1}% deviation sustained for {} consecutive report windows, ~{}s, {} tolerance) — USB-reset the capture device (see #656, #685)",
                                 cap_fps,
                                 configured_capture_fps,
-                                camera_box::capture_rate_health::CAPTURE_RATE_TOLERANCE_PCT,
+                                capture_rate_tolerance_pct,
                                 consecutive_rate_breaches,
-                                consecutive_rate_breaches as u64 * 5
+                                consecutive_rate_breaches as u64 * 5,
+                                grabber_model
                             );
 
                             // #663 — self-heal: the #656 fix (a manual USB reset) is only
@@ -987,7 +1042,8 @@ async fn run_capture_loop(
                                             "{}",
                                             camera_box::capture_rate_selfheal::critical_escalation_message(
                                                 &device_path_owned,
-                                                attempt_number
+                                                attempt_number,
+                                                grabber_model
                                             )
                                         );
                                     }
@@ -1182,6 +1238,20 @@ async fn run_capture_loop(
 mod tests {
     use super::*;
     use clap::CommandFactory;
+
+    /// #685 follow-up: a live regression guard for the exact bug that let cam1 keep
+    /// self-heal-resetting on its own normal wobble even AFTER the #685 binary was
+    /// deployed — `os_hostname()` must actually reach the real `gethostname(2)` value
+    /// (non-empty on any real machine, incl. this test runner), not silently degrade to
+    /// the empty-string failure path every time.
+    #[test]
+    fn os_hostname_returns_a_real_non_empty_value() {
+        let h = os_hostname();
+        assert!(
+            !h.is_empty(),
+            "gethostname(2) must resolve to a real hostname on any machine that can run this test"
+        );
+    }
 
     #[test]
     fn test_args_parse_default() {

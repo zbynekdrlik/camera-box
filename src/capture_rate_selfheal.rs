@@ -9,8 +9,21 @@
 //! within hours, three times in one day. This module is the automatic ACT half: given a confirmed
 //! (`should_warn`-level) deviant capture rate, decide whether to perform an automatic USB reset
 //! RIGHT NOW, rate-limited so a genuinely dying grabber can't reset-loop forever, and escalating to
-//! a CRITICAL "replace the hardware" log line once the same box keeps re-failing despite repeated
-//! resets.
+//! a CRITICAL log line once the same box keeps re-failing despite repeated resets.
+//!
+//! ## #685 — per-model tolerance recalibration (the CRITICAL line no longer means "replace it")
+//!
+//! Fleet-wide forensics (2026-07-11) found the ORIGINAL wording above ("replace the USB
+//! cable/port/device") was wrong for the common case: ALL 3 deployed ShadowCast 2 units (CAM1-3)
+//! show the same characteristic rate wobble that triggered this escalation, while 0/3
+//! other-model grabbers do — a MODEL trait (its USB output clock free-runs even against its own
+//! HDMI input), not a per-unit defect, and there are no spare units to swap in anyway. The fix has
+//! two parts: (1) `capture_rate_health::tolerance_pct_for_model` now gives ShadowCast 2 a wider,
+//! evidence-based deviation floor so its normal wobble never reaches `should_warn` — and therefore
+//! never reaches this module at all — while every other model keeps the original strict 1% floor;
+//! (2) `critical_escalation_message` (below) is reworded so that IF this escalation still fires
+//! (a genuine deviation BEYOND even the widened floor), it reads as "investigate", not "hardware
+//! is dying".
 //!
 //! Split the same way `obs_self_heal.rs` splits from `obs_watchdog.rs` (#411/#391): the DETECT
 //! decision stays in `capture_rate_health` unchanged; this module owns WHEN to act (throttle +
@@ -40,6 +53,8 @@
 //! being tmpfs, a reboot clears it, which is correct (a fresh boot deserves a fresh attempt count).
 
 use std::path::Path;
+
+use crate::capture_rate_health::GrabberModel;
 
 /// Default tolerance/threshold reused: this module is invoked only once `capture_rate_health::
 /// should_warn` is already true (a real, sustained-for-30s defect) — see `src/main.rs`'s capture
@@ -171,18 +186,34 @@ pub fn decide_selfheal(
 }
 
 /// The CRITICAL, human-actionable escalation line (#663 ask: "the honest signal for the physical
-/// fix the owner may ultimately need"). Pure string formatting so it's directly unit-testable.
+/// fix the owner may ultimately need"; #685 reword: no longer a hardware-replacement diagnosis).
+/// Pure string formatting so it's directly unit-testable.
 ///
-/// Deliberately says "reset ATTEMPTS", not "self-healed" (review finding, #663) — `heal_count`
-/// counts every trigger within the recurrence window regardless of whether the individual USB
-/// reset itself later succeeded or failed (rate-limit state is saved before the attempt runs), so
-/// claiming each one was a successful "heal" would overstate what's actually known and could
-/// wrongly blame hardware for what might be a software/permissions failure.
-pub fn critical_escalation_message(video_device_path: &str, heal_count: u32) -> String {
+/// Deliberately says "reset ATTEMPTS", not "self-healed" (review finding, #663, unchanged) —
+/// `heal_count` counts every trigger within the recurrence window regardless of whether the
+/// individual USB reset itself later succeeded or failed (rate-limit state is saved before the
+/// attempt runs), so claiming each one was a successful "heal" would overstate what's actually
+/// known.
+///
+/// #685: does NOT say "replace the hardware" / "FAILING HARDWARE" and does NOT recommend a
+/// cable/port/dongle swap — the fleet-wide forensics withdrew that advice (ShadowCast 2's
+/// characteristic wobble is a MODEL trait, not a per-unit defect, and no spares exist). By the
+/// time this fires at all, the caller has ALREADY compared against `model`'s OWN (possibly
+/// widened) `capture_rate_health::tolerance_pct_for_model` floor — so a genuine trigger here is,
+/// by construction, beyond that model's normal characteristic envelope, and the honest framing is
+/// "investigate", not a hardware diagnosis this module has no way to actually confirm.
+pub fn critical_escalation_message(
+    video_device_path: &str,
+    heal_count: u32,
+    model: GrabberModel,
+) -> String {
     format!(
-        "CRITICAL #663: capture device {video_device_path} has had {heal_count} USB-reset attempts \
-         within {}s without the defect staying fixed — this reads as FAILING HARDWARE, not a \
-         transient re-negotiation. Grabber hardware likely failing — replace the USB cable/port/device.",
+        "CRITICAL #663/#685: capture device {video_device_path} ({model}) has had {heal_count} \
+         USB-reset attempts within {}s without the defect staying fixed — this is persistent \
+         BEYOND the {model}'s normal characteristic envelope; investigate. This is NOT the \
+         model's normal quantization wobble (that is already tolerated and never reaches this \
+         escalation), and this module cannot confirm the root cause is hardware — see #685 \
+         before assuming a physical cause.",
         DEFAULT_RECURRENCE_WINDOW_S
     )
 }
@@ -613,15 +644,50 @@ mod tests {
     }
 
     #[test]
-    fn critical_escalation_message_names_the_device_and_the_hardware_fix() {
-        let msg = critical_escalation_message("/dev/video1", 3);
+    fn critical_escalation_message_names_the_device_model_and_heal_count() {
+        let msg = critical_escalation_message("/dev/video1", 3, GrabberModel::ShadowCast2);
         assert!(msg.contains("CRITICAL"));
         assert!(msg.contains("#663"));
+        assert!(msg.contains("#685"));
         assert!(msg.contains("/dev/video1"));
+        assert!(msg.contains("ShadowCast 2"));
         assert!(msg.contains('3'));
+    }
+
+    #[test]
+    fn critical_escalation_message_685_no_longer_recommends_hardware_replacement() {
+        // #685: the fleet-wide forensics WITHDREW the "replace hardware" advice — ShadowCast 2's
+        // characteristic wobble is a MODEL trait (3/3 units), not a per-unit defect, and there
+        // are no spare units to swap in anyway (user instruction). This must stay reworded.
+        let msg = critical_escalation_message("/dev/video1", 3, GrabberModel::ShadowCast2);
+        let lower = msg.to_lowercase();
         assert!(
-            msg.contains("replace the USB cable/port/device"),
-            "must carry the exact honest physical-fix guidance the operator needs: {msg}"
+            !lower.contains("replace"),
+            "must not recommend replacing hardware/cable/port/device: {msg}"
+        );
+        assert!(
+            !lower.contains("warranty"),
+            "must not mention warranty: {msg}"
+        );
+        assert!(
+            !lower.contains("failing hardware"),
+            "must not diagnose failing hardware — this module cannot confirm that: {msg}"
+        );
+        assert!(
+            lower.contains("investigate"),
+            "must reframe as 'investigate', not a hardware diagnosis: {msg}"
+        );
+    }
+
+    #[test]
+    fn critical_escalation_message_names_the_actual_model_per_box() {
+        let shadowcast = critical_escalation_message("/dev/video1", 3, GrabberModel::ShadowCast2);
+        let nzxt = critical_escalation_message("/dev/video0", 3, GrabberModel::NzxtSignalHd60);
+        assert!(shadowcast.contains("ShadowCast 2"));
+        assert!(nzxt.contains("NZXT Signal HD60"));
+        assert_ne!(
+            shadowcast, nzxt,
+            "the message must actually vary per model, not just per device path"
         );
     }
 

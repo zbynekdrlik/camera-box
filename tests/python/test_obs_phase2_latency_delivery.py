@@ -186,6 +186,46 @@ class TestLatencySnapshotSetRestore:
         assert saved["input"] == "NDI 2ME PGM"
         assert saved["latency_ms"] == 450, "snapshot must save the ORIGINAL prod value (450)"
 
+    def test_691_snapshot_is_saved_even_when_already_at_the_target_value(self, monkeypatch):
+        # #691 REGRESSION GUARD for the live incident: the box's current value ALREADY
+        # equals the (auto-derived) test value -- nothing needs to be forced. The OLD
+        # code took this to mean "nothing to restore" and DISCARDED any existing saved
+        # snapshot; that is exactly how the stream box got stuck at 1000ms forever (a
+        # PRIOR run's own restore never completed, so its leftover snapshot was the only
+        # way back to 925 -- and the old code threw it away instead of using it).
+        rpc_response = {
+            "GetInputSettings": {
+                "inputSettings": {"genlock_latency_ms_src": 925},
+            },
+            "GetSourceFilterList": {"filters": []},
+        }
+        calls = _patch_capture(monkeypatch, rpc_response=rpc_response)
+        # A PRE-EXISTING (stale, from an earlier incomplete run) snapshot for this host.
+        state = {
+            "10.0.0.1": {
+                obs_phase2._TEST_LATENCY_STATE_KEY: {
+                    "input": "NDI 2ME PGM", "latency_ms": 3, "render_delays": [],
+                }
+            }
+        }
+        # requested_test_latency_ms=925 == current value -> the "nothing to force" branch.
+        changed = obs_phase2._snapshot_and_set_test_latency(
+            None, "10.0.0.1", "NDI 2ME PGM", 925, state
+        )
+
+        assert changed is False, "nothing needed to change, so no force-set"
+        # The snapshot must now reflect THIS run's own observation (925), overwriting the
+        # stale leftover (3) -- never left empty/discarded.
+        saved = state["10.0.0.1"][obs_phase2._TEST_LATENCY_STATE_KEY]
+        assert saved["latency_ms"] == 925, (
+            f"a fresh snapshot must ALWAYS be saved, even when nothing is forced -- "
+            f"got {saved!r}"
+        )
+        # No SetInputSettings for the latency key -- genuinely nothing was forced.
+        sets = [p for op, p in calls if op == "SetInputSettings"
+                and "genlock_latency_ms_src" in p.get("inputSettings", {})]
+        assert sets == [], f"already-at-target must not issue a redundant SetInputSettings: {sets}"
+
     def test_restore_puts_back_saved_latency(self, monkeypatch):
         rpc_response = {
             "GetInputSettings": {
@@ -255,6 +295,101 @@ class TestLatencySnapshotSetRestore:
             f"(stderr: {stderr_lines!r})"
         )
 
+    # -----------------------------------------------------------------------
+    # #691 belt-and-braces: calibrated-value cross-check (optional)
+    # -----------------------------------------------------------------------
+
+    def test_691_calibrated_mismatch_warns_loud_even_when_restore_matches_snapshot(
+        self, monkeypatch
+    ):
+        # The restore itself is internally consistent (read-back == snapshot, 1000ms) --
+        # but that snapshot was ALREADY wrong (e.g. a prior run's incomplete restore left
+        # the box at 1000ms, and THIS run's own snapshot just captured that stuck value).
+        # The snapshot-vs-restore check alone cannot see this; the calibrated cross-check
+        # (925ms, the real av-sync-last.json value) must catch it.
+        rpc_response = {
+            "GetInputSettings": {
+                "inputSettings": {"genlock_latency_ms_src": 1000},
+            },
+        }
+        _patch_capture(monkeypatch, rpc_response=rpc_response)
+        state = {
+            "10.0.0.1": {
+                obs_phase2._TEST_LATENCY_STATE_KEY: {
+                    "input": "NDI 2ME PGM", "latency_ms": 1000, "render_delays": [],
+                }
+            }
+        }
+        stderr_lines = []
+        monkeypatch.setattr(sys, "stderr",
+                            type("FakeStderr", (), {"write": lambda s, msg: stderr_lines.append(msg)})())
+
+        obs_phase2._restore_test_latency(
+            None, "10.0.0.1", state, calibrated_latency_ms=925
+        )
+
+        warn_lines = [l for l in stderr_lines if "691" in l and "calibrat" in l.lower()]
+        assert warn_lines, (
+            f"a calibrated-value mismatch must emit a LOUD #691 warning even when the "
+            f"restore matched its own (already-wrong) snapshot (stderr: {stderr_lines!r})"
+        )
+
+    def test_691_calibrated_match_emits_no_extra_warning(self, monkeypatch):
+        rpc_response = {
+            "GetInputSettings": {
+                "inputSettings": {"genlock_latency_ms_src": 925},
+            },
+        }
+        _patch_capture(monkeypatch, rpc_response=rpc_response)
+        state = {
+            "10.0.0.1": {
+                obs_phase2._TEST_LATENCY_STATE_KEY: {
+                    "input": "NDI 2ME PGM", "latency_ms": 925, "render_delays": [],
+                }
+            }
+        }
+        stderr_lines = []
+        monkeypatch.setattr(sys, "stderr",
+                            type("FakeStderr", (), {"write": lambda s, msg: stderr_lines.append(msg)})())
+
+        obs_phase2._restore_test_latency(
+            None, "10.0.0.1", state, calibrated_latency_ms=925
+        )
+
+        warn_lines = [l for l in stderr_lines if "691" in l and "calibrat" in l.lower()]
+        assert warn_lines == [], (
+            f"a matching calibrated value must NOT emit the #691 mismatch warning: "
+            f"{stderr_lines!r}"
+        )
+
+    def test_691_calibrated_check_is_skipped_when_not_supplied(self, monkeypatch):
+        # Default (None) — the common unattended-CI case, no operator-gathered value
+        # available. Must not warn, must not error.
+        rpc_response = {
+            "GetInputSettings": {
+                "inputSettings": {"genlock_latency_ms_src": 1000},  # would mismatch 925
+            },
+        }
+        _patch_capture(monkeypatch, rpc_response=rpc_response)
+        state = {
+            "10.0.0.1": {
+                obs_phase2._TEST_LATENCY_STATE_KEY: {
+                    "input": "NDI 2ME PGM", "latency_ms": 1000, "render_delays": [],
+                }
+            }
+        }
+        stderr_lines = []
+        monkeypatch.setattr(sys, "stderr",
+                            type("FakeStderr", (), {"write": lambda s, msg: stderr_lines.append(msg)})())
+
+        obs_phase2._restore_test_latency(None, "10.0.0.1", state)  # no calibrated_latency_ms
+
+        warn_lines = [l for l in stderr_lines if "691" in l and "calibrat" in l.lower()]
+        assert warn_lines == [], (
+            f"the calibrated cross-check must be silently skipped when not supplied: "
+            f"{stderr_lines!r}"
+        )
+
     def test_restore_re_enables_gpu_delay_filters(self, monkeypatch):
         rpc_response = {
             "GetInputSettings": {
@@ -307,7 +442,11 @@ class TestCLITestLatencyMs:
             f"got {captured!r}"
         )
 
-    def test_prod_scene_test_latency_ms_defaults_to_1000(self, monkeypatch):
+    def test_prod_scene_test_latency_ms_defaults_to_none_not_a_forced_1000(self, monkeypatch):
+        # #691: the CLI default changed from a blind forced 1000 to `None` ("not
+        # explicitly requested") — resolve_test_latency_ms derives the EFFECTIVE value
+        # from the box's own current latency at call time instead (see that function's
+        # own tests below). GENLOCK_TEST_LATENCY_MS still forces a literal value when set.
         captured = {}
         monkeypatch.setattr(obs_phase2, "prod_scene",
                             lambda a: captured.update(latency=getattr(a, "test_latency_ms", "MISSING")))
@@ -316,6 +455,71 @@ class TestCLITestLatencyMs:
             ["obs_phase2.py", "prod-scene", "--host", "h", "--program-scene", "Cam 5"],
         )
         obs_phase2.main()
-        assert captured.get("latency") == 1000, (
-            f"default test-latency-ms must be 1000 (the rescoped #358 value); got {captured!r}"
+        assert captured.get("latency") is None, (
+            f"unset --test-latency-ms must reach prod_scene as a.test_latency_ms=None "
+            f"(#691 — auto-derived later from the box's current value); got {captured!r}"
         )
+
+    def test_prod_scene_test_latency_ms_honors_explicit_env_override(self, monkeypatch):
+        captured = {}
+        monkeypatch.setattr(obs_phase2, "prod_scene",
+                            lambda a: captured.update(latency=getattr(a, "test_latency_ms", "MISSING")))
+        monkeypatch.setenv("GENLOCK_TEST_LATENCY_MS", "1200")
+        monkeypatch.setattr(
+            sys, "argv",
+            ["obs_phase2.py", "prod-scene", "--host", "h", "--program-scene", "Cam 5"],
+        )
+        obs_phase2.main()
+        assert captured.get("latency") == 1200, (
+            f"an explicit GENLOCK_TEST_LATENCY_MS env override must still win verbatim; "
+            f"got {captured!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# #691 — resolve_test_latency_ms: the EFFECTIVE test-latency decision
+# ---------------------------------------------------------------------------
+
+class TestResolveTestLatencyMs:
+    def test_explicit_request_always_wins_verbatim(self):
+        # An operator/supervisor override is never second-guessed, regardless of what
+        # the box's current value happens to be.
+        assert obs_phase2.resolve_test_latency_ms(1200, current_ms=925) == 1200
+        assert obs_phase2.resolve_test_latency_ms(1200, current_ms=3) == 1200
+
+    def test_unset_uses_current_value_when_already_above_floor(self):
+        # The #691 live scenario: the box is calibrated at 925ms, well above the 500ms
+        # floor -- use it AS-IS. Nothing is forced, so there is nothing to stomp.
+        assert obs_phase2.resolve_test_latency_ms(None, current_ms=925) == 925
+
+    def test_unset_uses_current_value_exactly_at_the_floor(self):
+        assert (
+            obs_phase2.resolve_test_latency_ms(
+                None, current_ms=500, floor_ms=500
+            )
+            == 500
+        )
+
+    def test_unset_falls_back_to_1000_when_current_is_below_the_floor(self):
+        # The box is at the prod A/V-align baseline (450ms) -- below the 500ms floor, so
+        # nothing already exercises the #292 >450ms cap regression. Fall back to 1000.
+        assert obs_phase2.resolve_test_latency_ms(None, current_ms=450) == 1000
+        assert obs_phase2.resolve_test_latency_ms(None, current_ms=3) == 1000
+
+    def test_custom_floor_and_fallback_are_honored(self):
+        assert (
+            obs_phase2.resolve_test_latency_ms(
+                None, current_ms=600, floor_ms=700, fallback_ms=2000
+            )
+            == 2000
+        )
+        assert (
+            obs_phase2.resolve_test_latency_ms(
+                None, current_ms=800, floor_ms=700, fallback_ms=2000
+            )
+            == 800
+        )
+
+    def test_defaults_match_the_module_constants(self):
+        assert obs_phase2.DEFAULT_TEST_LATENCY_CURRENT_FLOOR_MS == 500
+        assert obs_phase2.DEFAULT_TEST_LATENCY_FALLBACK_MS == 1000

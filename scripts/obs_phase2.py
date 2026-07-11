@@ -350,14 +350,81 @@ def _parse_latency_ms_from_audit_line(line: str):
     return None
 
 
-def _snapshot_and_set_test_latency(ws, host, source_name, test_latency_ms, state):
-    """#358: snapshot the per-source genlock latency + gpu_delay filter states on
-    `source_name` ('NDI 2ME PGM'), set the test latency, and disable any gpu_delay
-    filters so they don't mask the effective FIFO depth in the audit log.
+# #691: the box's own CURRENT genlock_latency_ms_src, at or above this floor, is already
+# well past the #292 >450ms cap this gate exercises — so there is no need to FORCE any
+# change at all when the caller left --test-latency-ms unset. 500ms comfortably clears the
+# 450ms prod A/V-align baseline while staying below the #358 gate's original 1000ms.
+DEFAULT_TEST_LATENCY_CURRENT_FLOOR_MS = 500
+
+# #691: fallback test latency (ms) used ONLY when the box's current value is BELOW the
+# floor above (so nothing already exercises the #292 regression) and the caller did not
+# explicitly request a specific value. This is the ORIGINAL #358 default.
+DEFAULT_TEST_LATENCY_FALLBACK_MS = 1000
+
+
+def _int_env_or_none(name):
+    """Read an int-valued env var, or None if unset/empty.
+
+    #691: used for both --test-latency-ms (distinguishes an EXPLICIT operator override
+    from "derive a smart default from the box's current value", see
+    resolve_test_latency_ms) and --calibrated-latency-ms (an OPTIONAL cross-check value —
+    absent by default, never a hard requirement)."""
+    v = os.environ.get(name, "")
+    return int(v) if v else None
+
+
+def resolve_test_latency_ms(
+    requested_ms,
+    current_ms,
+    floor_ms=DEFAULT_TEST_LATENCY_CURRENT_FLOOR_MS,
+    fallback_ms=DEFAULT_TEST_LATENCY_FALLBACK_MS,
+):
+    """#691 PURE decision: the EFFECTIVE #358 delivery-verify test latency to apply.
+
+    `requested_ms` is `None` when the caller (recording-e2e.sh) did not explicitly set
+    `GENLOCK_TEST_LATENCY_MS` — an EXPLICIT value always wins verbatim (an operator/
+    supervisor override is never second-guessed).
+
+    Otherwise: if the box's CURRENT (pre-test) `genlock_latency_ms_src` already sits at or
+    above `floor_ms` (500ms — comfortably above the #292 >450ms cap this gate exercises),
+    use that CURRENT value AS-IS. This is the actual #691 fix: a box already calibrated to
+    (e.g.) 925ms needs NO forced change at all to exercise the regression check — which
+    eliminates the #691 stomp risk entirely for that run (there is nothing to restore
+    because nothing was ever changed).
+
+    Only when the current value is BELOW the floor (nothing already exercises the cap)
+    does this fall back to `fallback_ms` (1000ms, the original #358 default) so the gate
+    still meaningfully tests the FIFO's ability to hold a latency deep past the cap.
+
+    Pure function — no I/O. Tier-0 testable on default features."""
+    if requested_ms is not None:
+        return requested_ms
+    if current_ms >= floor_ms:
+        return current_ms
+    return fallback_ms
+
+
+def _snapshot_and_set_test_latency(ws, host, source_name, requested_test_latency_ms, state):
+    """#358/#691: snapshot the per-source genlock latency + gpu_delay filter states on
+    `source_name` ('NDI 2ME PGM'), set the (possibly auto-derived, see
+    `resolve_test_latency_ms`) test latency, and disable any gpu_delay filters so they
+    don't mask the effective FIFO depth in the audit log.
 
     Saves the snapshot to `state[host][_TEST_LATENCY_STATE_KEY]` (persisted to disk)
     BEFORE making changes — crash-safe, mirrors the #183 preload pattern. No-op and no
-    state entry when `source_name` is empty. Returns True iff it changed anything."""
+    state entry when `source_name` is empty. Returns True iff it changed anything.
+
+    #691 FIX: the snapshot is now saved UNCONDITIONALLY, even when nothing needs to
+    change (current value already equals the effective test value). The OLD behavior
+    skipped saving state in that case AND actively discarded any existing saved state —
+    which silently destroyed the one piece of information that could recover a box left
+    stuck by an EARLIER run whose own restore never completed (e.g. a crash before
+    cleanup() ran). Live incident: the stream box's 'NDI 2ME PGM' got stuck at the 1000ms
+    test value; every SUBSEQUENT run's `prod_latency (1000) == test_latency_ms (1000)`
+    short-circuit treated that as "already correct" and silently perpetuated the stomp —
+    the calibrated 925ms A/V-align value was never restored until a human intervened over
+    the WebSocket directly. Always snapshotting THIS run's own observed value means
+    teardown always has something accurate (as of THIS run's start) to restore to."""
     if not source_name:
         return False
 
@@ -365,6 +432,10 @@ def _snapshot_and_set_test_latency(ws, host, source_name, test_latency_ms, state
     inp_settings = _rpc(ws, "GetInputSettings", {"inputName": source_name},
                         ignore_err=True).get("inputSettings", {})
     prod_latency = inp_settings.get(_GENLOCK_SRC_LATENCY_KEY, 3)  # 3ms floor default
+
+    # #691: resolve the EFFECTIVE test latency from the box's OWN current value when the
+    # caller did not explicitly request one.
+    test_latency_ms = resolve_test_latency_ms(requested_test_latency_ms, prod_latency)
 
     # Read current gpu_delay filters.
     filter_list = _rpc(ws, "GetSourceFilterList", {"sourceName": source_name},
@@ -379,16 +450,8 @@ def _snapshot_and_set_test_latency(ws, host, source_name, test_latency_ms, state
         if f.get("filterKind") == _GPU_DELAY_KIND
     ]
 
-    if prod_latency == test_latency_ms:
-        sys.stderr.write(
-            f"[obs] {host}: #358 '{source_name}' already at genlock_latency_ms_src="
-            f"{test_latency_ms}; nothing to force\n"
-        )
-        state.setdefault(host, {}).pop(_TEST_LATENCY_STATE_KEY, None)
-        _save_state(state)
-        return False
-
-    # Save snapshot FIRST (crash-safe), THEN apply changes.
+    # #691: save the snapshot UNCONDITIONALLY (see the function docstring) — BEFORE any
+    # change is applied, crash-safe, mirrors the #183 preload pattern.
     host_state = state.setdefault(host, {})
     host_state[_TEST_LATENCY_STATE_KEY] = {
         "input": source_name,
@@ -396,6 +459,14 @@ def _snapshot_and_set_test_latency(ws, host, source_name, test_latency_ms, state
         "render_delays": render_delays,
     }
     _save_state(state)
+
+    if prod_latency == test_latency_ms:
+        sys.stderr.write(
+            f"[obs] {host}: #358/#691 '{source_name}' already at genlock_latency_ms_src="
+            f"{test_latency_ms}; nothing to force (snapshot saved so teardown still "
+            f"restores it)\n"
+        )
+        return False
 
     # Set test latency.
     _rpc(ws, "SetInputSettings", {
@@ -421,11 +492,23 @@ def _snapshot_and_set_test_latency(ws, host, source_name, test_latency_ms, state
     return True
 
 
-def _restore_test_latency(ws, host, state):
-    """#358: restore the per-source genlock latency + gpu_delay filters saved by
+def _restore_test_latency(ws, host, state, calibrated_latency_ms=None):
+    """#358/#691: restore the per-source genlock latency + gpu_delay filters saved by
     _snapshot_and_set_test_latency. No-op when nothing was snapshotted. Emits a LOUD
     warning (mirroring #246 burn-verify) if the read-back after restore ≠ snapshot —
-    prod A/V-align depends on exact restore. Best-effort; clears state entry always."""
+    prod A/V-align depends on exact restore. Best-effort; clears state entry always.
+
+    `calibrated_latency_ms` (#691 belt-and-braces, OPTIONAL): the known-good prod value
+    from `av-sync-last.json` on the OBS box's own ProgramData, gathered by the operator/
+    agent and passed in — mirrors drift-guard.sh's `av_sync_calibrated_ms` best-effort
+    cross-check for the SAME file, since this function has no ssh/scp path to read the
+    Windows box's filesystem directly (`av_sync_calibrate.py`'s own `remote_push_plan`
+    doc: scp/ssh to Windows is denied on this rig). When supplied, the FINAL restored
+    value is cross-checked against it and a LOUD warn fires on mismatch — this catches
+    the case the snapshot-vs-restore check above CANNOT: the snapshot itself already
+    being wrong (e.g. this run's snapshot captured a value a PRIOR run's incomplete
+    restore left behind, not the true calibrated prod value). Silently skipped (no
+    check) when not supplied — never a hard requirement."""
     host_state = state.get(host, {})
     saved = host_state.get(_TEST_LATENCY_STATE_KEY)
     if not saved:
@@ -434,6 +517,7 @@ def _restore_test_latency(ws, host, state):
     source_name = saved.get("input", "")
     prod_latency = saved.get("latency_ms")
     render_delays = saved.get("render_delays", [])
+    final_value = None
 
     if source_name and prod_latency is not None:
         # Restore the per-source latency.
@@ -447,6 +531,7 @@ def _restore_test_latency(ws, host, state):
         readback = _rpc(ws, "GetInputSettings", {"inputName": source_name},
                         ignore_err=True).get("inputSettings", {})
         actual = readback.get(_GENLOCK_SRC_LATENCY_KEY)
+        final_value = actual
         if actual != prod_latency:
             sys.stderr.write(
                 f"[obs] {host}: #358 WARN mismatch after restore — "
@@ -458,6 +543,17 @@ def _restore_test_latency(ws, host, state):
             sys.stderr.write(
                 f"[obs] {host}: #358 RESTORED '{source_name}' genlock_latency_ms_src "
                 f"-> {prod_latency} (prod A/V-align 450ms restored)\n"
+            )
+
+        # #691 belt-and-braces: cross-check the FINAL value against the CALIBRATED prod
+        # source of truth, when supplied (see docstring above).
+        if calibrated_latency_ms is not None and final_value != calibrated_latency_ms:
+            sys.stderr.write(
+                f"[obs] {host}: #691 WARN calibrated-value mismatch — "
+                f"'{source_name}' genlock_latency_ms_src={final_value!r} after restore, "
+                f"but the calibrated prod value (av-sync-last.json) is "
+                f"{calibrated_latency_ms}ms; prod A/V-align may be OFF even though the "
+                f"restore itself matched its own snapshot. Manual check required.\n"
             )
 
     # Re-enable gpu_delay filters that were enabled before the test.
@@ -1245,17 +1341,20 @@ def prod_scene(a):
         _force_test_preload(ws, a.host, getattr(a, "upstream", ""),
                             getattr(a, "test_preload", 1), state)
 
-        # #358: SNAPSHOT + SET the per-source genlock latency on the stream-box prod input
-        # ('NDI 2ME PGM', passed via --test-latency-source) to the configured test value
-        # (default 1000ms, env GENLOCK_TEST_LATENCY_MS). Disables gpu_delay (Render-Delay)
+        # #358/#691: SNAPSHOT + SET the per-source genlock latency on the stream-box prod
+        # input ('NDI 2ME PGM', passed via --test-latency-source). `test_latency_ms` is
+        # `None` unless the caller explicitly set GENLOCK_TEST_LATENCY_MS — see
+        # `resolve_test_latency_ms`'s doc: an unset value is now auto-derived from the
+        # box's OWN current latency (current value if already >= 500ms, else the original
+        # 1000ms fallback), not a blind forced 1000ms. Disables gpu_delay (Render-Delay)
         # filters for the test window so they don't mask the effective FIFO depth in audit
-        # lines. Saved and restored in teardown (prod A/V-align 450ms restored exactly).
-        # The delivery-verify gate (live FIFO audit log read vs set value) is run by the
-        # supervisor against the live rig; this commit ships the code + pure-function tests.
+        # lines. Saved (unconditionally, #691) and restored in teardown (prod A/V-align
+        # restored exactly). The delivery-verify gate (live FIFO audit log read vs set
+        # value) is run by the supervisor against the live rig.
         _snapshot_and_set_test_latency(
             ws, a.host,
             getattr(a, "test_latency_source", ""),
-            getattr(a, "test_latency_ms", 1000),
+            getattr(a, "test_latency_ms", None),
             state,
         )
 
@@ -1292,11 +1391,16 @@ def teardown(a):
     state = _load_state()  # corruption-safe: a bad state file must not stop the restore
     try:
         ws = _conn(a.host, a.password)
-        # #358: restore the prod stream input's per-source genlock latency (450ms A/V-align)
-        # and re-enable any gpu_delay filters that were disabled for the test. BEFORE preload
-        # restore and scene switches so prod is back on its A/V-align config immediately.
-        # LOUD warn if read-back ≠ snapshot (mirrors #246 burn-verify at recording-e2e.sh:316).
-        _restore_test_latency(ws, a.host, state)
+        # #358/#691: restore the prod stream input's per-source genlock latency (450ms
+        # A/V-align) and re-enable any gpu_delay filters that were disabled for the test.
+        # BEFORE preload restore and scene switches so prod is back on its A/V-align
+        # config immediately. LOUD warn if read-back ≠ snapshot (mirrors #246 burn-verify
+        # at recording-e2e.sh:316). `calibrated_latency_ms` (OPTIONAL, #691 belt-and-
+        # braces) cross-checks the restored value against av-sync-last.json's known-good
+        # prod value when the caller supplied one — see _restore_test_latency's doc.
+        _restore_test_latency(
+            ws, a.host, state, getattr(a, "calibrated_latency_ms", None)
+        )
         # #183: restore the prod input's genlock_preload that prod-scene forced to the test
         # value, BEFORE anything else, so prod audio-sync is back to its production depth even
         # if a later step warns. No-op when nothing was forced.
@@ -1789,13 +1893,30 @@ def main():
                 "--test-latency-source",
                 default=os.environ.get("GENLOCK_TEST_LATENCY_SOURCE", ""),
             )
-            # #358: per-source genlock latency to SET for the delivery-verify test window.
-            # Default 1000ms (the rescoped #358 value, well above the A/V-align 450ms).
-            # env: GENLOCK_TEST_LATENCY_MS (overridable in recording-e2e.sh).
+            # #358/#691: per-source genlock latency to SET for the delivery-verify test
+            # window. Default is `None` (unset) unless GENLOCK_TEST_LATENCY_MS is
+            # EXPLICITLY set — `resolve_test_latency_ms` then auto-derives the effective
+            # value from the box's OWN current latency at call time (current value if
+            # already >= 500ms, else the original 1000ms fallback) instead of a blind
+            # forced 1000ms every run. env: GENLOCK_TEST_LATENCY_MS (set by
+            # recording-e2e.sh only when an explicit override is requested).
             p.add_argument(
                 "--test-latency-ms",
                 type=int,
-                default=int(os.environ.get("GENLOCK_TEST_LATENCY_MS", "1000")),
+                default=_int_env_or_none("GENLOCK_TEST_LATENCY_MS"),
+            )
+        if name == "teardown":
+            # #691 belt-and-braces (OPTIONAL): the known-good calibrated prod value from
+            # av-sync-last.json on the OBS box's own ProgramData, gathered by the
+            # operator/agent (this process has no ssh/scp path to read it directly — same
+            # constraint drift-guard.sh's av_sync_calibrated_ms already documents for the
+            # SAME file). When supplied, _restore_test_latency cross-checks the restored
+            # value against it and warns loudly on mismatch. Absent by default — never a
+            # hard requirement, an unattended CI run simply skips the check.
+            p.add_argument(
+                "--calibrated-latency-ms",
+                type=int,
+                default=_int_env_or_none("AV_SYNC_CALIBRATED_MS"),
             )
         if name == "setup":
             p.add_argument("--upstream", required=True)

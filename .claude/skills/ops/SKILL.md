@@ -977,15 +977,35 @@ granted; cleared on reboot, which is correct — a fresh boot deserves a fresh a
 - **Max one reset attempt per 10 min** (`DEFAULT_MIN_HEAL_INTERVAL_S=600`) — a genuinely dying
   grabber can't reset-loop forever (the WARN keeps firing every window while the defect persists).
 - **3 heals within a 1h recurrence window** (`DEFAULT_CRITICAL_ESCALATION_HEALS=3` /
-  `DEFAULT_RECURRENCE_WINDOW_S=3600` — matches #663's own live incident) → a `CRITICAL #663: ...
-  Grabber hardware likely failing — replace the USB cable/port/device.` log line. The heal STILL
-  runs even when escalating — this is the honest signal for the physical fix the owner may
-  ultimately need, not a stop condition. **When you see this line in the journal, the software
-  self-heal has done what it can — the next step is physically inspecting/replacing the ShadowCast
-  2's USB cable, the box's USB port, or the dongle itself**, not chasing more code.
+  `DEFAULT_RECURRENCE_WINDOW_S=3600` — matches #663's own live incident) → a `CRITICAL #663/#685:
+  ... persistent BEYOND the <model>'s normal characteristic envelope; investigate.` log line. The
+  heal STILL runs even when escalating — this is the honest signal that the software self-heal
+  hasn't been able to hold, not a stop condition.
 - A gap longer than the recurrence window resets the heal count to 1 (a fresh occurrence, not a
   continuation of a failing streak) — so a box that heals once, stays healthy for days, then
   re-drifts months later is NOT treated as "still failing" from the earlier incident.
+
+**#685 — per-model tolerance recalibration (this escalation no longer means "replace hardware").**
+Fleet-wide forensics (2026-07-11) found ALL 3 deployed ShadowCast 2 units (CAM1-3) show the SAME
+characteristic capture-rate wobble that used to trigger this escalation (USB output clock
+free-running against its own HDMI input — internal resampling — live-observed ~55fps-64.02fps
+against a negotiated 60.000fps, up to ~8.3% deviation), while 0/3 other-model grabbers (CAM4 NZXT
+Signal HD60, CAM5-6 Elgato 4K S) do — a MODEL trait, not a per-unit defect, and there are no spare
+units to swap in. Consequences:
+- `capture_rate_health::tolerance_pct_for_model` now gives `GrabberModel::ShadowCast2` a wider
+  10% deviation floor (`SHADOWCAST2_CAPTURE_RATE_TOLERANCE_PCT`) instead of the shared 1%
+  default, so ShadowCast 2's own characteristic wobble never even reaches the #656 WARN, and
+  therefore never reaches this self-heal module at all. CAM4-6 keep the original strict 1% floor
+  unchanged.
+- `critical_escalation_message` (this section's CRITICAL line) is reworded — it no longer says
+  "replace the hardware" / names a cable-port-dongle swap / mentions warranty. **Because a genuine
+  trigger has ALREADY cleared the model's own (possibly widened) tolerance, it is by construction
+  beyond that model's normal envelope — but this module still cannot itself confirm the root
+  cause is hardware**, so the honest instruction is "investigate" (see the technician-session
+  ticket for physical discrimination), not a reflexive part swap.
+- The `#656 capture-delivery-rate DEFECTIVE` WARN line itself now also names the grabber model and
+  the actual tolerance applied (e.g. `..., ShadowCast 2 tolerance) — USB-reset the capture device
+  (see #656, #685)`), so the model context is visible even before any escalation.
 
 **Verifying it worked on a box:** `journalctl -u camera-box | grep -E "#656|#663"` — look for the
 `#656 capture-delivery-rate DEFECTIVE` WARN immediately followed by `#663 self-heal: USB-resetting

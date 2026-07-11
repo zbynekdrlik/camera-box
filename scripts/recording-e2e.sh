@@ -542,7 +542,13 @@ systemctl start cam2-painter 2>/dev/null || true"
   # never had its program scene routed by THIS harness" note (rig-mode.sh test used to be the ONLY
   # thing that ever touched it) — [4a/8] above now routes + saves it, so cleanup() restores it too.
   echo "[cleanup] restore OBS program scenes (each bounded by ${OBS_CLEANUP_TIMEOUT}s — #328)"
-  timeout "$OBS_CLEANUP_TIMEOUT" python3 "$HERE/obs_phase2.py" teardown --host "$STREAM"
+  # #691: pass the calibrated cross-check value through ONLY when the caller supplied one
+  # (empty by default — the common unattended-CI case simply skips the check).
+  _stream_teardown_args=(teardown --host "$STREAM")
+  if [ -n "$AV_SYNC_CALIBRATED_MS" ]; then
+    _stream_teardown_args+=(--calibrated-latency-ms "$AV_SYNC_CALIBRATED_MS")
+  fi
+  timeout "$OBS_CLEANUP_TIMEOUT" python3 "$HERE/obs_phase2.py" "${_stream_teardown_args[@]}"
   timeout "$OBS_CLEANUP_TIMEOUT" python3 "$HERE/obs_phase2.py" teardown --host "$STRIH"
   # #682: restore imag's program scene to whatever it was BEFORE [4a/8] routed it to the
   # camera-under-test. A NO-OP if [4a/8] never ran (IMAG_PREV_SCENE stays its "" pre-trap safe
@@ -659,6 +665,16 @@ STRIH_PROG_SCENE="${STRIH_PROG_SCENE:-$CAMERA_STRIH_SCENE}"   # prod scene showi
 STRIH_PROG_SOURCE="${STRIH_PROG_SOURCE:-$CAMERA_STRIH_SOURCE}" # the prod input behind that scene (#246 burn-off target)
 STREAM_PROG_SCENE="${STREAM_PROG_SCENE:-PRO}"          # #343: record the ALREADY-ACTIVE prod scene (NDI 2ME PGM already warm) — no cold re-activation
 STREAM_PROG_SOURCE="${STREAM_PROG_SOURCE:-NDI 2ME PGM}" # the prod input the scene shows
+# #691 belt-and-braces (OPTIONAL, empty by default): the known-good calibrated prod
+# genlock_latency_ms_src for $STREAM_PROG_SOURCE, from av-sync-last.json on the stream
+# box's own ProgramData — gathered by the operator/agent (this script has no ssh/scp path
+# to read the Windows box's filesystem directly) and passed in for cleanup()'s teardown
+# call to cross-check the restored value against. Declared HERE (BEFORE the cleanup trap
+# installs, same reasoning as the *_PROG_SOURCE vars above) so cleanup() never `set -u`-
+# aborts referencing it on an early abort. Empty (unset) = the check is silently skipped —
+# never a hard requirement, matches drift-guard.sh's av_sync_calibrated_ms convention for
+# the SAME file.
+AV_SYNC_CALIBRATED_MS="${AV_SYNC_CALIBRATED_MS:-}"
 # #462 (EPIC #466): imag-nb's program-feeding NDI input — the #399-style 1:1 mapping from Phase 1
 # (setup-imag.sh) pins 'NDI CAM1'..'NDI CAM6' -> 'CAMx (usb)' 1:1, so cam1 (the SOURCE camera that
 # films cam2's monitor) rides 'NDI CAM1'. rig-mode.sh TEST mode is what actually routes imag's
@@ -927,11 +943,21 @@ sleep 3  # let the painter put the QR on the monitor cam1 films
 #   stream records 'NDI 2ME PGM' whose source-name is strih's program NDI name ($STRIH_OUT).
 STRIH_UPSTREAM_NDI="${STRIH_UPSTREAM_NDI:-$CAMERA_SOURCE}"  # the SOURCE camera's own NDI name (#24)
 TEST_PRELOAD="${TEST_PRELOAD:-1}"                       # #183: force preload=1 for the test
-# #358: delivery-verify gate — set stream box's 'NDI 2ME PGM' to GENLOCK_TEST_LATENCY_MS (1000ms)
-# for the test window, then restore prod A/V-align (450ms) on teardown. The live FIFO audit log
-# read-back (latency_ms= field) confirms the FIFO actually HELD 1000ms (the #292 silent-non-apply
-# gate). Supervisor runs the live rig-validate step; this ships the code + pure-function tests.
-GENLOCK_TEST_LATENCY_MS="${GENLOCK_TEST_LATENCY_MS:-1000}"
+# #358/#691: delivery-verify gate — set stream box's 'NDI 2ME PGM' genlock_latency_ms_src
+# to a value that exercises the #292 >450ms cap regression for the test window, then
+# restore the PRE-TEST value (snapshotted by obs_phase2.py itself) on teardown. The live
+# FIFO audit log read-back (latency_ms= field) confirms the FIFO actually HELD the set
+# value (the #292 silent-non-apply gate).
+#
+# #691: GENLOCK_TEST_LATENCY_MS is left EMPTY (unset) by default now — NOT forced to
+# 1000ms. obs_phase2.py's `resolve_test_latency_ms` derives the EFFECTIVE value at call
+# time from the stream box's OWN current genlock_latency_ms_src: if that's already >=
+# 500ms (comfortably exercises the #292 cap — the normal case once the box is calibrated,
+# e.g. the live 925ms A/V-align value), it's used AS-IS with NO forced change at all —
+# eliminating the #691 stomp risk entirely for a healthy calibrated box. Only when the
+# current value is genuinely below 500ms does it fall back to the original 1000ms. Set
+# GENLOCK_TEST_LATENCY_MS explicitly to force a literal value instead (still always wins).
+GENLOCK_TEST_LATENCY_MS="${GENLOCK_TEST_LATENCY_MS:-}"
 GENLOCK_TEST_LATENCY_SOURCE="${GENLOCK_TEST_LATENCY_SOURCE:-$STREAM_PROG_SOURCE}"
 
 # #406/#312 item5: belt-and-braces re-check, immediately before rerouting strih/stream's
@@ -951,7 +977,11 @@ fi
 echo "[4/8] OBS prod-scene routing — strih program='$STRIH_PROG_SCENE' ($CAMERA_NAME via $STRIH_PROG_SOURCE),"
 echo "      stream program='$STREAM_PROG_SCENE' (strih feed via '$STREAM_PROG_SOURCE')"
 echo "      #183: forcing genlock_preload=$TEST_PRELOAD on both recorded prod inputs for the test"
-echo "      #358: setting $GENLOCK_TEST_LATENCY_SOURCE genlock_latency_ms_src=$GENLOCK_TEST_LATENCY_MS for delivery-verify"
+if [ -n "$GENLOCK_TEST_LATENCY_MS" ]; then
+  echo "      #358: forcing $GENLOCK_TEST_LATENCY_SOURCE genlock_latency_ms_src=$GENLOCK_TEST_LATENCY_MS for delivery-verify (explicit override)"
+else
+  echo "      #358/#691: $GENLOCK_TEST_LATENCY_SOURCE genlock_latency_ms_src for delivery-verify -- auto (current value if already >= 500ms, else 1000ms fallback)"
+fi
 STRIH_OUT=$(python3 "$HERE/obs_phase2.py" prod-scene --host "$STRIH" \
   --program-scene "$STRIH_PROG_SCENE" \
   --upstream "$STRIH_UPSTREAM_NDI" --test-preload "$TEST_PRELOAD")
@@ -963,11 +993,17 @@ STRIH_OUT=$(python3 "$HERE/obs_phase2.py" prod-scene --host "$STRIH" \
 # already on PRO, prod_scene's `curr_prog == target` branch skips the switch entirely → no hang.
 # PRECONDITION: the stream box runs on its prod 'PRO' scene in normal operation; if it has DRIFTED
 # off PRO, prod_scene takes the bounded switch and fails LOUD at the #328 timeout (no silent hang).
-STREAM_OUT=$(python3 "$HERE/obs_phase2.py" prod-scene --host "$STREAM" \
+# #691: --test-latency-ms is passed ONLY when GENLOCK_TEST_LATENCY_MS was explicitly set —
+# an unset flag lets obs_phase2.py's resolve_test_latency_ms auto-derive the effective
+# value from the box's own current latency at call time (see the #358/#691 block above).
+_stream_prod_scene_args=(prod-scene --host "$STREAM" \
   --program-scene "$STREAM_PROG_SCENE" \
   --upstream "$STRIH_OUT" --test-preload "$TEST_PRELOAD" \
-  --test-latency-source "$GENLOCK_TEST_LATENCY_SOURCE" \
-  --test-latency-ms "$GENLOCK_TEST_LATENCY_MS")
+  --test-latency-source "$GENLOCK_TEST_LATENCY_SOURCE")
+if [ -n "$GENLOCK_TEST_LATENCY_MS" ]; then
+  _stream_prod_scene_args+=(--test-latency-ms "$GENLOCK_TEST_LATENCY_MS")
+fi
+STREAM_OUT=$(python3 "$HERE/obs_phase2.py" "${_stream_prod_scene_args[@]}")
 echo "    strih program NDI='$STRIH_OUT'  stream program NDI='$STREAM_OUT'"
 sleep 6  # let both OBS chains stabilise before recording
 
