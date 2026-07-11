@@ -500,6 +500,51 @@ fn fatal_grep_pattern_matches_deploy_fleet_signatures() {
     );
 }
 
+// ---------------------------------------------------------------------------------------------
+// #694 — same stale-journal-across-restart exposure #693 fixed for recording-e2e.sh's preflight:
+// verify_camera_after_swap's post-restart emit-ok + FATAL scan both read `journalctl -u
+// camera-box -n 200/300` unscoped -- a line from the box's PREVIOUS camera-box.service instance
+// (killed by the restart this very swap just performed) can leak into the lookback window.
+// Fix: reuse scripts/lib/capture-rate-guard.sh's capture_rate_journalctl_cmd(), scoped to the
+// CURRENT process's _SYSTEMD_INVOCATION_ID (resolved via `systemctl show -p InvocationID`).
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn sources_shared_capture_rate_guard_lib() {
+    let s = fs::read_to_string(script()).expect("read upgrade-fleet-ndi.sh");
+    assert!(
+        s.contains("lib/capture-rate-guard.sh"),
+        "#694: upgrade-fleet-ndi.sh must source scripts/lib/capture-rate-guard.sh to reuse \
+         capture_rate_journalctl_cmd() instead of duplicating the invocation-id-scoping logic."
+    );
+}
+
+#[test]
+fn verify_camera_after_swap_scopes_journal_reads_to_the_current_invocation() {
+    let s = fs::read_to_string(script()).expect("read upgrade-fleet-ndi.sh");
+    let invocation_pos = s.find("InvocationID").expect(
+        "#694: verify_camera_after_swap must resolve camera-box's CURRENT InvocationID before \
+         reading the post-restart journal (same fix as #693's recording-e2e.sh preflight)",
+    );
+    let cmd_call_pos = s.find("capture_rate_journalctl_cmd").expect(
+        "#694: the emit-ok/FATAL reads must be built via the shared capture_rate_journalctl_cmd",
+    );
+    assert!(
+        invocation_pos < cmd_call_pos,
+        "#694: the invocation id must be resolved BEFORE it is used to scope the journalctl read"
+    );
+    assert!(
+        !s.contains("journalctl -u camera-box --no-pager -n 200 2>/dev/null | grep"),
+        "#694: the OLD unscoped-across-restarts emit-ok literal must be gone (replaced by \
+         capture_rate_journalctl_cmd)."
+    );
+    assert!(
+        !s.contains("journalctl -u camera-box --no-pager -n 300 2>/dev/null | grep"),
+        "#694: the OLD unscoped-across-restarts FATAL-scan literal must be gone (replaced by \
+         capture_rate_journalctl_cmd)."
+    );
+}
+
 /// Static ordering guard: the main flow must upgrade every member of the CANARY SET strictly
 /// before iterating the REMAINING cameras — the whole point of "canary(-set) first, never touch
 /// the rest on failure". #452: the canary is now a SET (one per distinct box-class), not a

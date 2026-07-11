@@ -88,6 +88,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
                                       # drift-guard.sh's --check-imag facet since #596)
 # shellcheck source=scripts/lib/log-bound.sh
 . "$HERE/lib/log-bound.sh"       # log_bound_verdict/log_bound_gather_remote_snippet (#679)
+# shellcheck source=scripts/lib/capture-rate-guard.sh
+. "$HERE/lib/capture-rate-guard.sh"  # invocation-id-scoped journalctl builder (#694, shared
+                                     # with deploy-fleet.sh + upgrade-fleet-ndi.sh)
 # clock-offset-guard.sh is sourced ONLY for its pure functions; its own
 # `[ "${BASH_SOURCE[0]}" != "${0}" ]` guard skips clock-offset-guard.sh's own `main "$@"` flow.
 # shellcheck source=scripts/clock-offset-guard.sh
@@ -575,8 +578,14 @@ else
 fi
 
 # (c) + (i) camera-box journal: NDI emit alive, no FATAL, capture-chroma colour -----------------
+# #694: same stale-journal-across-restart exposure #693 fixed for recording-e2e.sh's preflight --
+# `journalctl -u camera-box` spans ACROSS a service restart, so a line from a PREVIOUS process
+# instance could leak into the lookback window. Resolve the CURRENT InvocationID and scope the
+# read via the shared capture_rate_journalctl_cmd(); empty on failure falls back to the old
+# unscoped read (never silently skip the whole acceptance check).
 rc=0
-CB_JOURNAL="$(ssh_box "journalctl -u camera-box --no-pager -n 300 2>/dev/null")" || rc=$?
+CB_INVOCATION_ID="$(ssh_box "systemctl show -p InvocationID --value camera-box 2>/dev/null" || true)"
+CB_JOURNAL="$(ssh_box "$(capture_rate_journalctl_cmd "$CB_INVOCATION_ID" 300)")" || rc=$?
 if [ "$rc" -ne 0 ] || [ -z "$CB_JOURNAL" ]; then
   fail "camera-box journal unreadable (ssh rc=$rc)"
   fail "capture chroma metric unreadable -- camera-box journal unreadable"

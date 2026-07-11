@@ -345,6 +345,51 @@ fn deploy_fleet_sources_shared_ndi_alive_lib() {
     );
 }
 
+// ---------------------------------------------------------------------------------------------
+// #694 — same stale-journal-across-restart exposure #693 fixed for recording-e2e.sh's preflight:
+// deploy-fleet.sh's post-restart genlock-report + FATAL scan both read `journalctl -u camera-box
+// -n 200/300` unscoped -- a WARN/FATAL line from the box's PREVIOUS camera-box.service instance
+// (killed by the restart this very deploy just performed) can leak into the lookback window.
+// Fix: reuse scripts/lib/capture-rate-guard.sh's capture_rate_journalctl_cmd(), scoped to the
+// CURRENT process's _SYSTEMD_INVOCATION_ID (resolved via `systemctl show -p InvocationID`).
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn deploy_fleet_sources_shared_capture_rate_guard_lib() {
+    let s = read("scripts/deploy-fleet.sh");
+    assert!(
+        s.contains(". \"$HERE/lib/capture-rate-guard.sh\""),
+        "#694: deploy-fleet.sh must source scripts/lib/capture-rate-guard.sh to reuse \
+         capture_rate_journalctl_cmd() instead of duplicating the invocation-id-scoping logic."
+    );
+}
+
+#[test]
+fn deploy_fleet_scopes_post_restart_journal_reads_to_the_current_invocation() {
+    let s = read("scripts/deploy-fleet.sh");
+    let invocation_pos = s.find("InvocationID").expect(
+        "#694: deploy-fleet.sh must resolve camera-box's CURRENT InvocationID before reading \
+         the post-restart journal (same fix as #693's recording-e2e.sh preflight)",
+    );
+    let cmd_call_pos = s.find("capture_rate_journalctl_cmd").expect(
+        "#694: the genlock/FATAL reads must be built via the shared capture_rate_journalctl_cmd",
+    );
+    assert!(
+        invocation_pos < cmd_call_pos,
+        "#694: the invocation id must be resolved BEFORE it is used to scope the journalctl read"
+    );
+    assert!(
+        !s.contains("journalctl -u camera-box --no-pager -n 200 2>/dev/null | grep"),
+        "#694: the OLD unscoped-across-restarts genlock-report literal must be gone (replaced by \
+         capture_rate_journalctl_cmd)."
+    );
+    assert!(
+        !s.contains("journalctl -u camera-box --no-pager -n 300 2>/dev/null | grep"),
+        "#694: the OLD unscoped-across-restarts FATAL-scan literal must be gone (replaced by \
+         capture_rate_journalctl_cmd)."
+    );
+}
+
 /// Happy path: a box on the new version that IS emitting the genlock report and byte-matches
 /// must make the run exit 0 with "FLEET ALIGNED". Without this, a future edit that breaks the
 /// success path (e.g. always-fail) goes uncaught.

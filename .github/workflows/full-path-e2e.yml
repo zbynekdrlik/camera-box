@@ -26,6 +26,17 @@ name: Full-path E2E (recording-based · hardware · self-hosted dev1)
 # as "free") if the rig is unreachable. `workflow_dispatch` remains available for an operator-run
 # manual soak up to 1800 s.
 #
+# #406 (2026-07-11, user directive): the required pull_request job now runs the FUSED
+# multi-camera sweep (ALL_CAMBOX=1, recording step env below) — the EPIC's own final acceptance
+# item. Before this flip the automatic gate only exercised the single-camera path, so a
+# cross-camera delivery-latency SPREAD regression (#624/#286) or an A/V-offset regression (#641)
+# could merge with this required check green (both checks existed in code, but only in the
+# on-demand sweep). ALL_CAMBOX=1 cycles EVERY active cambox through strih PROGRAM for
+# SEGMENT_SECS each (recording-e2e.sh's own default sweep/segment sizing) and cam2 emits its
+# continuous QPSK audio marker for the whole run, so the fused verdict now also gates on the
+# per-camera delivery-latency spread AND the A/V-offset (default AV_EXPECTED_MS=0). Scoped to
+# `pull_request` only — a manual `workflow_dispatch` operator soak is unchanged (single-camera).
+#
 # Deliberately, like loopback-e2e.yml:
 #   * This REROUTES the production strih + stream OBS program to the probe scene AND RECORDS it
 #     for the run duration — gated by rig-busy-gate.sh (above), which refuses to run while the
@@ -145,6 +156,16 @@ jobs:
           # PR-triggered runs use the 300s acceptance-floor profile (no `inputs.duration_secs`
           # on a pull_request event); workflow_dispatch keeps its own default/operator override.
           DURATION: ${{ inputs.duration_secs || '300' }}
+          # #406 — the EPIC's own acceptance bar: the required pull_request job never exercised
+          # the fused multi-camera sweep, so a real cross-camera delivery-latency spread
+          # regression (#624/#286) or an A/V-offset regression (#641) could merge with this gate
+          # green. ALL_CAMBOX=1 arms recording-e2e.sh's fused path, which self-wires everything
+          # else it needs (the per-cambox switch schedule, cam2's continuous QPSK audio marker
+          # via its own AV_SYNC_MARKER_DEVICE/CADENCE defaults, AV_EXPECTED_MS defaulting to 0) —
+          # no other env var is required. Scoped to `pull_request` ONLY: a manual
+          # `workflow_dispatch` operator soak keeps its existing single-camera behavior (never
+          # silently widened by this flip; a future ticket can add an explicit input for it).
+          ALL_CAMBOX: ${{ github.event_name == 'pull_request' && '1' || '0' }}
         # #657: `exec` REPLACES this step's process image with recording-e2e.sh's own bash — a
         # plain `bash scripts/recording-e2e.sh` forks a NESTED child the Actions runner never
         # signals directly (empirically confirmed: it signals only the single top-level step PID
