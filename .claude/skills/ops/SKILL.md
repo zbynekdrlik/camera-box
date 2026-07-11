@@ -1047,6 +1047,19 @@ attempt's timestamp precisely) rather than trusting a small `-n` tail — or gre
 unbounded journal (`journalctl -u camera-box | grep -E "..."`) when hunting a specific one-shot
 event rather than the routine per-window noise.
 
+**For a SCRIPTED windowed read (a gate, not a human doing live verification), prefer
+`--since=@EPOCH --until=@EPOCH`** (systemd's native absolute-time epoch-seconds form) over
+`HH:MM:SS` strings — no timezone ambiguity, no `date +%H:%M:%S` formatting step, and it composes
+directly with a `$(date +%s)` snapshot taken at the moment the window opens/closes. #705's
+mid-recording capture-rate recheck (`capture_rate_window_journalctl_cmd`,
+`scripts/lib/capture-rate-guard.sh`) uses exactly this: snapshot `START_EPOCH`/`END_EPOCH` around
+the operation being bracketed, then `journalctl _SYSTEMD_INVOCATION_ID=<id> --since=@$START_EPOCH
+--until=@$END_EPOCH` — simpler than this repo's other pattern (`freshest_offset_us` in
+`scripts/clock-offset-guard.sh`), which has to parse `-o short-iso` timestamps back OUT of an
+already-fetched window because it grades a value gathered for a different purpose; a NEW gate that
+controls its own fetch should push the window bound into journalctl itself instead of re-deriving
+that parsing.
+
 **Generic across the fleet:** this lives in the shared capture loop every cam box runs — no per-box
 config. Any cam box (cam1, cam3, or any future box) running a ShadowCast-class or similar USB
 capture dongle that drifts off its negotiated rate self-heals identically once deployed.

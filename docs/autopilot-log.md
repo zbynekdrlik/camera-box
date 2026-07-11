@@ -2,6 +2,59 @@
 
 Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads context.
 
+## 2026-07-12 — #705 (mid-recording capture-rate check) + #701 (docs sweep) landed on PR #704; #689 diagnosis deepened; #706 (NEW) filed; PR STILL held (v1.7.0-dev.348)
+
+- **#705** (capture-rate-guard.sh preflight only checks once at start): `de9d65f01` RED (8 new
+  tests in `tests/harness_capture_rate_guard.rs` — `capture_rate_window_journalctl_cmd` /
+  `capture_rate_recurrence_message` / the recording-e2e.sh wiring, all confirmed absent/failing
+  pre-fix), `b063e2358` GREEN. New `[7b/8]` step in `scripts/recording-e2e.sh` re-resolves a FRESH
+  `CAPTURE_RATE_WINDOW_INVOCATION_ID` (NOT the stale `[0/8]` one — `[2/8]` redeploys+restarts
+  camera-box in between) and re-queries the #656 journal signal bounded to the exact
+  StartRecord..StopRecord window via journalctl's native `--since=@N/--until=@N`. Live-proven on
+  the actual required-gate CI run (29171383668): printed `"ok: no capture-rate defect recurrence
+  in cam1's journal during the recording window (1783811307..1783811610)"` — cam1 was healthy that
+  run (current live fps ~63, within the #685 ShadowCast-widened >10% tolerance), so the check
+  correctly did NOT false-positive.
+- **#701** (stale "scp/ssh to Windows is denied" claim): corrected across 30 files (6 skills, 14
+  scripts, 10 test files) found via `grep -rin denied` repo-wide, excluding `docs/autopilot-log.md`
+  (append-only history) and the handful #703's own PR #704 had already retired the premise for.
+  Two correction shapes: genuinely-stale claims corrected + scoped to strih/stream specifically
+  (per #701's own evidence); still-valid design choices (GUI relaunch via win-* MCP, a destructive
+  deletion plan kept human-gated, a named-pipe/registry read with no headless ssh path built yet)
+  re-reasoned accurately instead of blaming "ssh denied". No functional changes — comments/
+  docstrings/printed-plan text only. Full local suite green (122 Rust binaries, 295 Python tests).
+- **#689 diagnosis (mission: do NOT close, comment findings)**: extended the 2026-07-11 diagnosis
+  with the ELD/EDID layer — cam2's HDA codec pcm=3 (the exact `hw:CARD=PCH,DEV=3` device) shows a
+  VALID ELD for a real BenQ GL2480 monitor (web-confirmed: ships with genuine 2W×2 speakers,
+  matching the ELD's `speakers=[0x1] FL/FR` declaration), jack=on, no hotplug events in 5 days of
+  uptime, all 4 `IEC958 Playback Switch` controls on (the only software mute point HDMI audio has,
+  and it's not engaged) — the digital path is provably healthy end-to-end from HDA codec to a
+  correctly-negotiated real-speaker sink. `mbc` OBS input confirmed correctly configured (ASIO
+  "Dante Virtual Soundcard (x64)" routes 0/1, unmuted, 0dB, all tracks enabled). The DanteSync
+  target `mbc@10.77.9.232` was unreachable (no route) this session — flagged as a data point, not
+  a proven cause (naming overlap with the OBS input label may be coincidental). Fresh corroborating
+  evidence from the REAL full-path-e2e gate run: every camera's A/V-offset gate reads
+  `candidates=0 -> UNKNOWN` (not just my earlier cam2-only manual test). Conclusion unchanged from
+  2026-07-11: every remotely-checkable segment is healthy; the break is physical (monitor OSD
+  volume/mute, or the taped mic) or needs Dante Controller GUI access not attempted this session.
+  Posted as two comments (issuecomment-4948980802, issuecomment-4949152203); issue left OPEN per
+  the dispatch's explicit "do NOT close" mission.
+- **#706 (NEW, filed this session)**: re-running the required gate (both BEFORE and AFTER the
+  #705/#701 commits, to rule out either introducing it) shows every cambox leg reporting 0 REAL
+  DROP but ~7250-8530 BURN-UNREADABLE ids each (~47000+ total, near-identical magnitude both
+  runs — confirmed pre-existing, unrelated to this session's diffs). `strih` itself shows only 4
+  REAL DROP out of ~9280 ids. This is a burn-decode-quality problem, not a chain-loss problem —
+  filed with full per-camera evidence from both runs, not investigated further (out of this
+  dispatch's #705/#701/#689 scope). `imag`'s Δ0-duplication finding in the same runs re-triggers
+  the #588 pattern (closed) — worth checking against #588's own closing evidence.
+- **PR #704 STILL HELD, NOT MERGED**: required gate `full-path-e2e` ran to completion twice more
+  this session (CI green both times; the hardware gate genuinely computed a real verdict both
+  times, `overall_pass=false` both times) — RED on #689 (confirmed still silent) + #706 (newly
+  surfaced). Never weakened/bypassed. PR body updated with `Closes #705`/`Closes #701` (alongside
+  the existing `Closes #703`) + a 2026-07-12 status section documenting all three current
+  blockers, so a future re-dispatch has full context without re-deriving it.
+- Version bump: dev `1.7.0-dev.347` → `1.7.0-dev.348`.
+
 ## 2026-07-11 — #703 required-gate execution fix: LANDED + verified working, HELD unmerged (PR #704, v1.7.0-dev.347)
 
 - **#703** (CRITICAL: required merge gate exits GREEN without ever computing the zero-loss/A/V

@@ -212,3 +212,33 @@ audit-logging feature (2026-07-10) entirely; clicking Start against a real, conf
 signal for >4 minutes left Latency/Index/Audio Frequency/Video Index/Audio Index all at `-` the
 whole time. Rebuild+redeploy tracked in #698 — do NOT attempt to verify the dock's live lock again
 until that lands AND the volumedetect pre-flight above is clean.
+
+## #689 (2026-07-12) — segment-by-segment remote diagnosis: cam2's HDA/HDMI-audio path checked via ELD, not just ALSA PCM state
+
+When a recorded marker is silent (`-91dB`, above) and the ALSA PCM `state=RUNNING`/`owner_pid`
+check (the #690 finding above) already proved the SOFTWARE side is healthy, the next remotely-
+checkable segment is whether the physical HDMI sink (the monitor) is genuinely negotiated as a
+real audio-capable device — not assumed. On cam2 (`ssh root@10.77.9.62`):
+
+```bash
+cat /proc/asound/PCH/eld#2.*        # one file per pin×converter combo (usually 32+ entries)
+amixer -c PCH contents              # includes the raw ELD bytes + 'HDMI/DP,pcm=N Jack' on/off
+```
+
+Exactly ONE `eld#` entry should read `monitor_present 1` / `eld_valid 1`, with `monitor_name`,
+`speakers=[0x1] FL/FR`, `sad0_coding_type LPCM`, and real sample-rate/bit-depth lists — cross-check
+`monitor_name` against the vendor's own published spec (web search) to confirm the monitor
+genuinely ships with built-in speakers (some monitors declare HDMI-audio-passthrough capability in
+their EDID without a physical speaker — the ELD alone doesn't prove speaker hardware exists).
+`amixer -c PCH contents`'s `'HDMI/DP,pcm=N Jack'` control should read `on` for the SAME device
+number the marker emitter targets (`hw:CARD=PCH,DEV=N`), and every `IEC958 Playback Switch`
+control should read `on` (the only software mute point HDMI audio has on this card — if this
+doesn't exist or reads `off`, that IS a remotely-fixable cause, unmute it and re-test before
+concluding "physical"). Cross-check `dmesg -T | grep -iE 'hdmi|jack|audio'` + `journalctl -k
+--since "<window>" | grep -i hdmi` for any hotplug/EDID-change event correlated with when the
+silence started — no events across the whole uptime rules out a recent cable/monitor-state change
+as the cause. If ALL of this reads healthy (as it did 2026-07-12), the remaining candidates are
+100% physical (monitor's own OSD volume/mute — its speaker hardware is real per the spec check
+above, but its volume is controlled by physical buttons with no software knob) or need Dante
+Controller GUI access (not remotely reachable via SSH — check whether a win-* MCP target has it
+installed before ruling this segment fully unreachable).
