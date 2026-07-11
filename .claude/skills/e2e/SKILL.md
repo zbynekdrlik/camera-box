@@ -603,6 +603,45 @@ is Phase-2, a DistroAV burn-filter change held off the 2.5h windows-genlock buil
   (e.g. CAM3 down) never reads as a pass. Active set today (#312 items 1+3) = ALL SIX cameras
   (CAM1/2/3/4/5/6) — see the updated Phase-2 paragraph below.
 
+## #681 — a per-adjacent-pair delta walk is a BIASED estimator; use whole-window NET span instead
+
+`window_segment`'s `gaps` count (via `painted_tick_gaps`, #625) went through TWO bugs on the SAME
+data before it was trustworthy — know the difference so a THIRD variant never recurs.
+
+- **#625 (fixed):** walking the RECORDED order let a benign delivery reorder (a one-frame-late
+  60→30 straddle, `#133`/`#196`/`#216`) manufacture phantom gaps. Fix: sort the DISTINCT present
+  values first (a monotone-at-the-source counter's sorted order recovers true delivery-order-
+  independence).
+- **#681 (fixed, live evidence RUN_ID 1783727115) — sorting was NOT enough.** Even sorted, summing
+  each ADJACENT pair's shortfall independently (`delta/step - 1`, floored at 0 PER PAIR) is a
+  BIASED estimator: it never credits a local delta SMALLER than `expected_step` (which the
+  dual-QR Vernier's normal async even/odd sampling beat produces routinely — real numbers: 659
+  pairs at delta=1 against 160 at delta=6, for expected_step=2) against a LATER catch-up jump. The
+  per-pair floor silently drops the "ahead of schedule" credit every single time, so it compounds:
+  a genuinely ~1% net-loss window reported **33-39% gaps** — a camera independently proven clean
+  in a DEDICATED single-camera measurement minutes earlier still failed every window of the sweep.
+  **Fix:** replace the per-pair sum with ONE whole-window net-span calculation:
+  `expected_count = (last-first)/step + 1` minus the actual distinct `present_count`. This is a
+  strict generalization (identical result whenever every delta happens to be `>= step`; only
+  diverges, correctly, when some are smaller) and mirrors the SAME "avg tick step ≈ expected, zero
+  NET loss" acceptance methodology the Dual-QR Vernier proof (top of this file) already uses.
+
+**The generalizable lesson — for ANY future "count genuinely-missing slots from a sampled counter"
+gate in this repo:** never sum a per-adjacent-pair shortfall with per-pair flooring; compute the
+whole-window/whole-run NET (expected total minus actual distinct count). A per-pair floor is
+asymmetric — it can only ever OVER-count, never under, because a locally-fast run's "credit" has
+nowhere to go once its own pair is judged in isolation. This is the SAME class of bug the #588/#604
+imag density terms and the #580v2 `is_live_no_copy` run-length gate were built to avoid on the
+OTHER measurement path (imag's own optical beat) — #681 is the swept-cambox sibling of that same
+lesson, discovered independently on a different code path.
+
+**Diagnostic technique that found it:** don't trust the aggregate number alone — pull the RAW
+distinct-value delta HISTOGRAM for the failing window (`sorted(set(ticks))`, then
+`Counter(b-a for a,b in zip(seq,seq[1:]))`) and compare it against the SPAN-based net
+(`(last-first)//step + 1 - len(set(ticks))`). A wide-but-small-magnitude histogram (many small
+deltas) with a near-zero net is the signature of this bias; a genuinely large net loss shows up as
+a real span-based deficit regardless of the local delta pattern.
+
 **Phase-2 harness (`recording-e2e.sh ALL_CAMBOX=1`) — RUNS ON THE DEFAULT `VERDICT_ON_STREAM=1`
 (#332).** The sweep (`switch_schedule.py` + `obs_phase2.py switch`) writes `switch-schedule.json`
 and appends `--switch-schedule` to BOTH verdict paths: the legacy decode-on-dev1 `VERDICT_ARGS`
