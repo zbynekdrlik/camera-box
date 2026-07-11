@@ -82,6 +82,48 @@ fn verify_device_reuses_ndi_alive_and_clock_offset_guard_instead_of_reinventing(
     );
 }
 
+// -----------------------------------------------------------------------------------------
+// #694 — same stale-journal-across-restart exposure #693 fixed for recording-e2e.sh's
+// preflight: verify-device.sh's (c)+(i) camera-box journal read (`journalctl -u camera-box
+// -n 300`, feeding ndi_emit_ok / ndi_journal_has_fatal / chroma_state_from_journal) is
+// unscoped -- a line from a PREVIOUS camera-box.service instance (e.g. bounced by an earlier
+// gate run) can leak into the lookback window and produce a false verdict. Fix: reuse
+// scripts/lib/capture-rate-guard.sh's capture_rate_journalctl_cmd(), scoped to the CURRENT
+// process's _SYSTEMD_INVOCATION_ID (resolved via `systemctl show -p InvocationID`).
+// -----------------------------------------------------------------------------------------
+
+#[test]
+fn verify_device_sources_capture_rate_guard_lib() {
+    let body = read(VERIFY_SCRIPT);
+    assert!(
+        on_noncomment_line(&body, "lib/capture-rate-guard.sh"),
+        "{VERIFY_SCRIPT} must source scripts/lib/capture-rate-guard.sh to reuse \
+         capture_rate_journalctl_cmd() instead of duplicating the invocation-id-scoping logic \
+         (#694)."
+    );
+}
+
+#[test]
+fn verify_device_scopes_the_journal_read_to_the_current_invocation() {
+    let body = read(VERIFY_SCRIPT);
+    let invocation_pos = body.find("InvocationID").expect(
+        "#694: verify-device.sh must resolve camera-box's CURRENT InvocationID before reading \
+         the journal (same fix as #693's recording-e2e.sh preflight)",
+    );
+    let cmd_call_pos = body.find("capture_rate_journalctl_cmd").expect(
+        "#694: the (c)+(i) journal read must be built via the shared capture_rate_journalctl_cmd",
+    );
+    assert!(
+        invocation_pos < cmd_call_pos,
+        "#694: the invocation id must be resolved BEFORE it is used to scope the journalctl read"
+    );
+    assert!(
+        !body.contains("journalctl -u camera-box --no-pager -n 300 2>/dev/null"),
+        "#694: the OLD unscoped-across-restarts journal literal must be gone (replaced by \
+         capture_rate_journalctl_cmd)."
+    );
+}
+
 #[test]
 fn verify_device_has_a_source_guard_for_pure_functions() {
     let body = read(VERIFY_SCRIPT);

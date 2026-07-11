@@ -214,6 +214,59 @@ fn capture_rate_journalctl_cmd_falls_back_to_the_unscoped_unit_read_when_invocat
     );
 }
 
+// ---------------------------------------------------------------------------------------------
+// #694 — deploy-fleet.sh, verify-device.sh, and upgrade-fleet-ndi.sh have the SAME
+// stale-journal-across-restart exposure #693 fixed for recording-e2e.sh's preflight, but each
+// reads a DIFFERENT lookback window (200 or 300 lines) than the hardcoded "-n 200" this function
+// originally emitted. Extend it with an optional LINES arg (default 200, so the existing
+// recording-e2e.sh call site — which passes only the invocation id — is unaffected) so every
+// caller can reuse ONE scoped-journalctl builder instead of duplicating the scoping logic.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn capture_rate_journalctl_cmd_defaults_to_200_lines_when_lines_arg_omitted() {
+    let out = run_sourced("capture_rate_journalctl_cmd 'abc-123'");
+    let cmd = out.trim();
+    assert!(
+        cmd.contains("-n 200"),
+        "#694: omitting the LINES arg must default to the original -n 200 behavior. Got: {cmd}"
+    );
+}
+
+#[test]
+fn capture_rate_journalctl_cmd_accepts_a_custom_line_count_scoped() {
+    let out = run_sourced("capture_rate_journalctl_cmd 'abc-123' 300");
+    let cmd = out.trim();
+    assert!(
+        cmd.contains("_SYSTEMD_INVOCATION_ID=abc-123"),
+        "#694: a custom line count must not lose the invocation-id scoping. Got: {cmd}"
+    );
+    assert!(
+        cmd.contains("-n 300"),
+        "#694: passing 300 as the LINES arg must produce '-n 300', not the hardcoded default. \
+         Got: {cmd}"
+    );
+    assert!(
+        !cmd.contains("-n 200"),
+        "#694: a custom line count must replace, not append to, the default. Got: {cmd}"
+    );
+}
+
+#[test]
+fn capture_rate_journalctl_cmd_accepts_a_custom_line_count_unscoped_fallback() {
+    let out = run_sourced("capture_rate_journalctl_cmd '' 300");
+    let cmd = out.trim();
+    assert!(
+        cmd.contains("-u camera-box"),
+        "#694: an empty invocation id must still fall back to the unscoped -u camera-box form \
+         even with a custom line count. Got: {cmd}"
+    );
+    assert!(
+        cmd.contains("-n 300"),
+        "#694: the unscoped fallback must also honor a custom line count. Got: {cmd}"
+    );
+}
+
 #[test]
 fn capture_rate_journalctl_cmd_output_is_valid_remote_shell() {
     let out = run_sourced("capture_rate_journalctl_cmd 'abc-123'");
