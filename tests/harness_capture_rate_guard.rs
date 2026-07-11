@@ -172,3 +172,82 @@ fn recording_e2e_preflight_uses_the_shared_message_formatter() {
          capture_rate_preflight_message helper (never a second ad-hoc string built inline)"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// #693 — `journalctl -u camera-box -n 200` spans ACROSS service restarts (not scoped to the
+// CURRENTLY RUNNING process). Live incident 2026-07-11: a routine cleanup() restart bounced
+// cam1's camera-box.service; the OLD process instance's stale #656 DEFECTIVE WARN (logged 2s
+// before the restart) was still inside the NEW instance's 200-line lookback and false-failed the
+// required merge gate's preflight even though the new process's own captured rate was already
+// healthy. Same journal-freshness bug class already fixed for DanteSync reads (#550/#591/#595/
+// #607/#686). Fix: scope the read to the CURRENT process instance via
+// `_SYSTEMD_INVOCATION_ID=<uuid>` (from `systemctl show -p InvocationID --value camera-box`).
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn capture_rate_journalctl_cmd_scopes_to_the_given_invocation_id() {
+    let out = run_sourced("capture_rate_journalctl_cmd 'abc-123-def'");
+    let cmd = out.trim();
+    assert!(
+        cmd.contains("_SYSTEMD_INVOCATION_ID=abc-123-def"),
+        "#693: with a non-empty invocation id, the journalctl command must scope to it \
+         (_SYSTEMD_INVOCATION_ID=<id>) so a stale line from a KILLED prior instance can never \
+         leak into the lookback window. Got: {cmd}"
+    );
+    assert!(
+        !cmd.contains("-u camera-box"),
+        "#693: an invocation-id-scoped read must not ALSO use the unscoped -u camera-box form \
+         (that would defeat the scoping). Got: {cmd}"
+    );
+}
+
+#[test]
+fn capture_rate_journalctl_cmd_falls_back_to_the_unscoped_unit_read_when_invocation_id_is_empty() {
+    // systemctl show can fail/return empty (e.g. an older systemd, a transient SSH hiccup) --
+    // never silently skip the WHOLE preflight just because the invocation id couldn't be read.
+    let out = run_sourced("capture_rate_journalctl_cmd ''");
+    let cmd = out.trim();
+    assert!(
+        cmd.contains("-u camera-box"),
+        "#693: with an empty invocation id, must fall back to the original -u camera-box form \
+         (never silently produce no command at all). Got: {cmd}"
+    );
+}
+
+#[test]
+fn capture_rate_journalctl_cmd_output_is_valid_remote_shell() {
+    let out = run_sourced("capture_rate_journalctl_cmd 'abc-123'");
+    let checker = Command::new("bash")
+        .arg("-n")
+        .arg("-c")
+        .arg(out.trim())
+        .output()
+        .expect("run bash -n");
+    assert!(
+        checker.status.success(),
+        "#693: capture_rate_journalctl_cmd's output must be syntactically valid shell text"
+    );
+}
+
+/// recording-e2e.sh must resolve the CURRENT camera-box.service invocation id BEFORE reading the
+/// journal for the #656 defect line, and use capture_rate_journalctl_cmd instead of the old bare
+/// `journalctl -u camera-box --no-pager -n 200` literal (which read across restarts, #693).
+#[test]
+fn recording_e2e_preflight_scopes_the_journal_read_to_the_current_invocation() {
+    let s = read("scripts/recording-e2e.sh");
+    let invocation_pos = s
+        .find("InvocationID")
+        .expect("#693: the preflight must resolve camera-box's CURRENT InvocationID");
+    let cmd_call_pos = s.find("capture_rate_journalctl_cmd").expect(
+        "#693: the preflight must build its journalctl read via capture_rate_journalctl_cmd",
+    );
+    assert!(
+        invocation_pos < cmd_call_pos,
+        "#693: the invocation id must be resolved BEFORE it is used to scope the journalctl read"
+    );
+    assert!(
+        !s.contains("journalctl -u camera-box --no-pager -n 200 2>/dev/null | grep"),
+        "#693: the OLD unscoped-across-restarts journalctl literal must be gone from the \
+         preflight (replaced by the invocation-id-scoped capture_rate_journalctl_cmd)"
+    );
+}
