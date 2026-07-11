@@ -627,6 +627,64 @@ fn gate_fails_when_a_linux_node_http_payload_is_stale_even_if_its_journal_looks_
 }
 
 #[test]
+fn gate_fails_when_a_linux_node_http_payload_is_fresh_but_ptp_degraded() {
+    // Review follow-up (PR #692): the new Linux-HTTP branch's plain FAIL path — a fresh,
+    // reachable payload whose daemon itself reports is_locked:false (NTP-only sawtooth) must
+    // FAIL the gate with 20 through the NEW branch, exactly like the --win-http equivalent
+    // (gate_fails_fast_when_a_node_is_ptp_degraded above). The underlying parsers are already
+    // unit-tested in clock_offset_guard.rs; this pins the WIRING (rc_ptp -> node_verdict ->
+    // exit code) for the Linux-HTTP path specifically.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let degraded = format!(
+        "{{\"gm_source_ip\":\"10.77.9.184\",\"settled\":false,\"updated_ts\":{now},\
+         \"is_locked\":false,\"ntp_offset_us\":150,\"mode\":\"NTP\",\"ntp_failed\":false}}"
+    );
+    let p = write_linux_http_fixture("cam1_http_degraded", &degraded);
+    let (code, stdout, stderr) = run_gate_env(
+        &["--linux", "cam1=10.77.9.61"],
+        &[("DANTESYNC_GATE_LINUX_HTTP_CAM1", &p.display().to_string())],
+    );
+    assert_eq!(
+        code, 20,
+        "#686: a fresh Linux HTTP payload with is_locked:false must FAIL the gate (20). \
+         stdout={stdout} stderr={stderr}"
+    );
+    assert!(stderr.contains("GATE FAILED"), "stderr: {stderr}");
+    assert!(stdout.contains("PTP DEGRADED"), "stdout: {stdout}");
+}
+
+#[test]
+fn gate_fails_when_a_linux_node_http_payload_is_fresh_but_offset_drifted() {
+    // Review follow-up (PR #692): the other plain FAIL path through the new Linux-HTTP branch —
+    // locked servo but an out-of-bound NTP offset (50 ms >> the 2 ms default bound) must DRIFT
+    // -> FAIL (20), mirroring gate_fails_when_a_node_exceeds_the_offset_bound's --win-status
+    // equivalent.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let drifted = format!(
+        "{{\"gm_source_ip\":\"10.77.9.184\",\"settled\":true,\"updated_ts\":{now},\
+         \"is_locked\":true,\"ntp_offset_us\":50000,\"mode\":\"NANO\",\"ntp_failed\":false}}"
+    );
+    let p = write_linux_http_fixture("cam1_http_drift", &drifted);
+    let (code, stdout, stderr) = run_gate_env(
+        &["--linux", "cam1=10.77.9.61"],
+        &[("DANTESYNC_GATE_LINUX_HTTP_CAM1", &p.display().to_string())],
+    );
+    assert_eq!(
+        code, 20,
+        "#686: a fresh Linux HTTP payload with an out-of-bound offset must FAIL the gate (20). \
+         stdout={stdout} stderr={stderr}"
+    );
+    assert!(stderr.contains("GATE FAILED"), "stderr: {stderr}");
+    assert!(stdout.contains("DRIFT"), "stdout: {stdout}");
+}
+
+#[test]
 fn gate_falls_back_to_the_journal_when_a_linux_node_http_endpoint_is_unreachable() {
     // No DANTESYNC_GATE_LINUX_HTTP_CAM1 override and an unroutable IP (TEST-NET-1) -> HTTP
     // unreachable -> FALL BACK to the journal fixture, which is healthy -> PASS. Proves the

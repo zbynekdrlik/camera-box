@@ -152,13 +152,16 @@ Usage:
 
 Options:
   --bound-us N        max tolerated |NTP offset| in us (default ${GATE_BOUND_US}; see #8 rationale).
-  --linux "n=ip ..."  Linux nodes queried via journald over SSH (default: ${GATE_LINUX}).
+  --linux "n=ip ..."  Linux nodes -- HTTP status endpoint FIRST, journald-over-SSH fallback
+                      (#686; default: ${GATE_LINUX}).
   --win-status N=FILE  a Windows node N whose DanteSync status-pipe JSON the caller wrote to FILE
                        (ssh to Windows is denied; the win-* MCP holder pre-fetches it). Repeatable.
   --win-http N=HOST    a Windows node N queried LIVE over HTTP from dantesync#47's own network
                        status endpoint (http://HOST:PORT/status, #648) -- no win-* MCP, no human
                        pre-fetch; unattended-CI-safe. Repeatable.
-  --win-http-port N    port for --win-http nodes (default ${GATE_WIN_HTTP_PORT}).
+  --win-http-port N    port for the HTTP status endpoint (default ${GATE_WIN_HTTP_PORT}) -- shared
+                       by --win-http nodes AND the --linux nodes' HTTP-first reads (#686); the
+                       whole fleet serves one port, so one knob covers both.
 
 #686: LINUX nodes now try the SAME network status endpoint (http://IP:PORT/status) FIRST --
 authoritative, immune to journal log-cadence throttling (#679). The journal parser is the
