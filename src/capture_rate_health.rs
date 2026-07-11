@@ -44,6 +44,78 @@ pub const CAPTURE_RATE_WARN_WINDOWS: u32 = 6;
 /// tolerance differ.
 pub const EMIT_RATE_TOLERANCE_PCT: f64 = 5.0;
 
+/// #685 — grabber HARDWARE MODEL, used to select a per-model capture-rate deviation tolerance
+/// (`tolerance_pct_for_model`) and to label the #663 self-heal CRITICAL-escalation message
+/// honestly (`capture_rate_selfheal::critical_escalation_message`) instead of reflexively
+/// recommending hardware replacement for behavior that is actually normal for the model.
+///
+/// Fleet mapping is OPERATIONALLY known (not device-probed) — see `grabber_model_for_hostname`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GrabberModel {
+    /// Genki ShadowCast 2 (CAM1-CAM3, live fleet, 2026-07). Its USB output clock free-runs even
+    /// against its own HDMI input (internal resampling), producing a CHARACTERISTIC quantized
+    /// capture-rate wobble on a perfectly healthy unit — live-observed captured rates from ~55fps
+    /// to 64.02fps against a negotiated 60.000fps (up to ~8.3% deviation), sustained for minutes
+    /// at a time (#656, #663, #665, #685 forensics). ALL 3 deployed ShadowCast 2 units show this
+    /// pattern; 0/3 other-model grabbers do — a MODEL characteristic, not a per-unit defect.
+    ShadowCast2,
+    /// NZXT Signal HD60 (CAM4, live fleet). No live evidence of rate instability — keeps the
+    /// strict default tolerance.
+    NzxtSignalHd60,
+    /// Elgato 4K S (CAM5-CAM6, live fleet). No live evidence of rate instability — keeps the
+    /// strict default tolerance.
+    Elgato4kS,
+    /// Hostname didn't match a known cambox (unprovisioned box, renamed host, test harness) —
+    /// falls back to the STRICT default tolerance rather than guessing the wide ShadowCast-
+    /// specific one; an unknown grabber deserves the tighter floor, not the benefit of the doubt.
+    Unknown,
+}
+
+impl std::fmt::Display for GrabberModel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            GrabberModel::ShadowCast2 => "ShadowCast 2",
+            GrabberModel::NzxtSignalHd60 => "NZXT Signal HD60",
+            GrabberModel::Elgato4kS => "Elgato 4K S",
+            GrabberModel::Unknown => "unknown grabber model",
+        })
+    }
+}
+
+/// Map a box's `config.hostname` to its known grabber model, per the live fleet layout (CAM1-3 =
+/// ShadowCast 2, CAM4 = NZXT Signal HD60, CAM5-6 = Elgato 4K S — `scripts/setup-device.sh`'s
+/// documented uppercase `CAM<N>` hostname convention). Case-insensitive + trims whitespace so a
+/// stray-cased hostname still resolves; anything that doesn't match a known cambox is
+/// `GrabberModel::Unknown` (never guessed).
+pub fn grabber_model_for_hostname(hostname: &str) -> GrabberModel {
+    match hostname.trim().to_ascii_uppercase().as_str() {
+        "CAM1" | "CAM2" | "CAM3" => GrabberModel::ShadowCast2,
+        "CAM4" => GrabberModel::NzxtSignalHd60,
+        "CAM5" | "CAM6" => GrabberModel::Elgato4kS,
+        _ => GrabberModel::Unknown,
+    }
+}
+
+/// #685 — ShadowCast 2's per-model capture-rate tolerance (percent). Set to cover the FULL live-
+/// observed characteristic-wobble range with margin (~55fps-64.02fps against a 60.000fps
+/// negotiated rate = up to ~8.3% deviation — #656, #663, #665) while still catching a genuinely
+/// severe deviation well outside that envelope. Deliberately a SEPARATE named constant (not a
+/// widening of the shared `CAPTURE_RATE_TOLERANCE_PCT`) so a future `GrabberModel` variant added
+/// later doesn't silently inherit ShadowCast's allowance.
+pub const SHADOWCAST2_CAPTURE_RATE_TOLERANCE_PCT: f64 = 10.0;
+
+/// The capture-rate deviation tolerance (percent) to use with `is_rate_deviant`, given this box's
+/// grabber model. `CAPTURE_RATE_TOLERANCE_PCT` (1%, unchanged) for every model except
+/// `ShadowCast2`; see `SHADOWCAST2_CAPTURE_RATE_TOLERANCE_PCT`'s doc for why that one is wider.
+pub fn tolerance_pct_for_model(model: GrabberModel) -> f64 {
+    match model {
+        GrabberModel::ShadowCast2 => SHADOWCAST2_CAPTURE_RATE_TOLERANCE_PCT,
+        GrabberModel::NzxtSignalHd60 | GrabberModel::Elgato4kS | GrabberModel::Unknown => {
+            CAPTURE_RATE_TOLERANCE_PCT
+        }
+    }
+}
+
 /// True when `captured_fps` deviates from `configured_fps` by more than `tolerance_pct`
 /// percent. `configured_fps <= 0.0` (or any non-finite input) is treated as "no valid
 /// configured rate to check against" — never deviant; callers only invoke this once a real
@@ -219,6 +291,136 @@ mod tests {
     // `const`, so this is a compile-time assertion (clippy: assertions_on_constants) rather than
     // a runtime `#[test]`.
     const _: () = assert!(EMIT_RATE_TOLERANCE_PCT > CAPTURE_RATE_TOLERANCE_PCT);
+
+    // -----------------------------------------------------------------------------------------
+    // #685 — per-model capture-rate tolerance: ShadowCast 2's characteristic quantization wobble
+    // must NOT be flagged deviant (so it can never fire the #663 self-heal USB reset on its
+    // own); every other known model keeps the original strict 1% floor unchanged.
+    // -----------------------------------------------------------------------------------------
+
+    #[test]
+    fn grabber_model_maps_the_live_fleet_hostnames() {
+        assert_eq!(
+            grabber_model_for_hostname("CAM1"),
+            GrabberModel::ShadowCast2
+        );
+        assert_eq!(
+            grabber_model_for_hostname("CAM2"),
+            GrabberModel::ShadowCast2
+        );
+        assert_eq!(
+            grabber_model_for_hostname("CAM3"),
+            GrabberModel::ShadowCast2
+        );
+        assert_eq!(
+            grabber_model_for_hostname("CAM4"),
+            GrabberModel::NzxtSignalHd60
+        );
+        assert_eq!(grabber_model_for_hostname("CAM5"), GrabberModel::Elgato4kS);
+        assert_eq!(grabber_model_for_hostname("CAM6"), GrabberModel::Elgato4kS);
+    }
+
+    #[test]
+    fn grabber_model_is_case_insensitive_and_trims_whitespace() {
+        assert_eq!(
+            grabber_model_for_hostname("cam1"),
+            GrabberModel::ShadowCast2
+        );
+        assert_eq!(
+            grabber_model_for_hostname("  Cam4  "),
+            GrabberModel::NzxtSignalHd60
+        );
+    }
+
+    #[test]
+    fn grabber_model_unknown_hostname_falls_back_to_unknown_not_a_guess() {
+        assert_eq!(
+            grabber_model_for_hostname("camera-box"),
+            GrabberModel::Unknown
+        );
+        assert_eq!(grabber_model_for_hostname(""), GrabberModel::Unknown);
+        assert_eq!(grabber_model_for_hostname("CAM7"), GrabberModel::Unknown);
+    }
+
+    #[test]
+    fn tolerance_is_strict_1pct_for_every_model_except_shadowcast2() {
+        assert_eq!(
+            tolerance_pct_for_model(GrabberModel::NzxtSignalHd60),
+            CAPTURE_RATE_TOLERANCE_PCT
+        );
+        assert_eq!(
+            tolerance_pct_for_model(GrabberModel::Elgato4kS),
+            CAPTURE_RATE_TOLERANCE_PCT
+        );
+        assert_eq!(
+            tolerance_pct_for_model(GrabberModel::Unknown),
+            CAPTURE_RATE_TOLERANCE_PCT
+        );
+        assert_eq!(
+            tolerance_pct_for_model(GrabberModel::ShadowCast2),
+            SHADOWCAST2_CAPTURE_RATE_TOLERANCE_PCT
+        );
+    }
+
+    // Both sides are `const`, so this is a compile-time assertion (clippy: assertions_on_constants)
+    // rather than a runtime `#[test]` — mirrors the EMIT_RATE_TOLERANCE_PCT one below.
+    const _: () = assert!(SHADOWCAST2_CAPTURE_RATE_TOLERANCE_PCT > CAPTURE_RATE_TOLERANCE_PCT);
+
+    #[test]
+    fn live_shadowcast2_characteristic_readings_are_not_deviant_under_its_model_tolerance() {
+        // #656 (cam1 defect episode), #663 (cam3's steady-state wobble), #665 (cam2's
+        // under-delivery episode, later reclassified as the SAME model class) — the full range
+        // of live-observed "healthy but wobbly" ShadowCast 2 readings.
+        let tol = tolerance_pct_for_model(GrabberModel::ShadowCast2);
+        for captured in [
+            60.1, 60.5, 61.0, 61.77, 62.06, 62.8, 63.2, 64.02, 55.0, 58.2, 59.5,
+        ] {
+            assert!(
+                !is_rate_deviant(captured, 60.0, tol),
+                "captured={captured} vs 60.0 configured must be within ShadowCast 2's {tol}% \
+                 characteristic-wobble tolerance (must never trip #663 self-heal on its own)"
+            );
+        }
+    }
+
+    #[test]
+    fn the_same_live_shadowcast2_readings_would_have_tripped_the_old_strict_default() {
+        // Proves the #685 widening is a real change, not a no-op: every value below DID cross
+        // the original 1% default that every other model still uses.
+        for captured in [61.0, 61.77, 62.06, 62.8, 63.2, 64.02, 55.0, 58.2] {
+            assert!(
+                is_rate_deviant(captured, 60.0, CAPTURE_RATE_TOLERANCE_PCT),
+                "captured={captured} should have been deviant under the OLD strict 1% default"
+            );
+        }
+    }
+
+    #[test]
+    fn a_genuinely_extreme_deviation_still_trips_the_shadowcast2_tolerance() {
+        // A deviation well beyond the observed characteristic envelope (e.g. a near-total rate
+        // collapse) must still be caught even on ShadowCast 2's wider floor — #685's recalibration
+        // widens the floor, it does not disable the check.
+        let tol = tolerance_pct_for_model(GrabberModel::ShadowCast2);
+        assert!(
+            is_rate_deviant(45.0, 60.0, tol),
+            "45fps vs 60fps (25% deviation) must still trip"
+        );
+        assert!(
+            is_rate_deviant(75.0, 60.0, tol),
+            "75fps vs 60fps (25% deviation) must still trip"
+        );
+    }
+
+    #[test]
+    fn nzxt_and_elgato_still_flag_the_same_deviation_shadowcast2_now_tolerates() {
+        // The whole point of a PER-MODEL tolerance: only ShadowCast 2 gets the wider floor. A
+        // NZXT/Elgato box reading the SAME 62fps (now fine for ShadowCast 2) must still be
+        // flagged — #685 must not accidentally loosen the check fleet-wide.
+        let nzxt_tol = tolerance_pct_for_model(GrabberModel::NzxtSignalHd60);
+        let elgato_tol = tolerance_pct_for_model(GrabberModel::Elgato4kS);
+        assert!(is_rate_deviant(62.0, 60.0, nzxt_tol));
+        assert!(is_rate_deviant(62.0, 60.0, elgato_tol));
+    }
 
     #[test]
     fn real_666_scenario_warns_exactly_at_the_configured_window() {

@@ -6,14 +6,18 @@
 # (#656 prevention item 2).
 #
 # The appliance's OWN capture loop (src/capture_rate_health.rs + its src/main.rs call site)
-# already logs a WARN naming #656 once a camera's captured fps has sustained a >1% deviation
-# from its negotiated capture rate for CAPTURE_RATE_WARN_WINDOWS (6) consecutive 5s report
-# windows — the exact #656 root cause (cam1's ShadowCast 2 silently delivering ~64fps instead
-# of its negotiated 60.000fps, producing a persistent ~4Hz content-duplicate judder that was
-# only caught after the fact via tick-pattern archaeology on a full recording). Rather than
-# re-deriving the fps math a SECOND time in bash (a copy that could drift from the Rust
-# decision), `scripts/recording-e2e.sh`'s preflight simply GREPS the source camera's recent
-# journal for that WARN before a doomed 30-minute E2E run gets kicked off.
+# already logs a WARN naming #656 once a camera's captured fps has sustained a deviation from
+# its negotiated capture rate (>1% for most grabber models; #685 widens this to >10% for
+# ShadowCast 2 specifically, since that model's own USB output clock free-runs even against its
+# own HDMI input, producing a characteristic quantized-rate wobble that isn't a real defect) for
+# CAPTURE_RATE_WARN_WINDOWS (6) consecutive 5s report windows — the exact #656 root cause (cam1's
+# ShadowCast 2 silently delivering ~64fps instead of its negotiated 60.000fps, producing a
+# persistent ~4Hz content-duplicate judder that was only caught after the fact via tick-pattern
+# archaeology on a full recording). Rather than re-deriving the fps math a SECOND time in bash (a
+# copy that could drift from the Rust decision, including the per-model tolerance), this preflight
+# simply GREPS the source camera's recent journal for that WARN (the grep pattern below matches on
+# the "#656 capture-delivery-rate DEFECTIVE" substring only — it does not care which tolerance
+# fired it) before a doomed 30-minute E2E run gets kicked off.
 #
 # Source-only: this file defines pure functions and performs no side effects on its own.
 
