@@ -473,15 +473,31 @@ cleanup() {
   # character right after the hyphen there is a LETTER, not a digit). That gap orphaned
   # cam2/cam3/cam4/cam5/cam6's burn processes across multiple runs, crash-looping camera-box
   # ("Device or resource busy") until manually killed — found live while verifying #312 item 2 PR B.
+  # #668: the burn binary now runs under a transient systemd-run unit (Restart=on-failure) so a
+  # mid-test #663 self-heal respawns it — stop that unit FIRST (an explicit `systemctl stop` is
+  # never followed by a restart, even under Restart=on-failure/always) so the pkill below can
+  # never race a respawn back into existence.
   timeout "$CLEANUP_SSH_TIMEOUT" sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$CAM1_IP" \
-    "pkill -9 -f 'camera-box-burn-[a-z0-9]' 2>/dev/null; pkill -x camera-box 2>/dev/null; sleep 1; \
+    "systemctl stop camera-box-burn-${RUN_ID} 2>/dev/null; systemctl reset-failed camera-box-burn-${RUN_ID} 2>/dev/null; \
+     pkill -9 -f 'camera-box-burn-[a-z0-9]' 2>/dev/null; pkill -x camera-box 2>/dev/null; sleep 1; \
      rm -f /tmp/camera-box-burn-* 2>/dev/null; systemctl restart camera-box 2>/dev/null; true"
   # #624/#312: cam3/cam4/cam5/cam6 — same restore as cam1, ONLY when the ALL_CAMBOX deploy above
   # actually ran (gated the same way) so a plain single-camera run never touches these boxes at all.
   if [ "${ALL_CAMBOX:-0}" = "1" ]; then
     for _cip in "$CAM3_IP" "$CAM4_IP" "$CAM5_IP" "$CAM6_IP"; do
+      # #668: recover the cam name from its IP (needed for its systemd-run unit name below) —
+      # keeps the loop header itself unchanged (tests/harness_recording_e2e_cleanup_resilient.rs
+      # locates this loop by its exact `for _cip in "$CAM3_IP"` text).
+      case "$_cip" in
+        "$CAM3_IP") _ccn="cam3" ;;
+        "$CAM4_IP") _ccn="cam4" ;;
+        "$CAM5_IP") _ccn="cam5" ;;
+        "$CAM6_IP") _ccn="cam6" ;;
+      esac
+      # #668: same stop-the-unit-first ordering as cam1 above — never let the pkill race a respawn.
       timeout "$CLEANUP_SSH_TIMEOUT" sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$_cip" \
-        "pkill -9 -f 'camera-box-burn-[a-z0-9]' 2>/dev/null; pkill -x camera-box 2>/dev/null; sleep 1; \
+        "systemctl stop camera-box-burn-${_ccn}-${RUN_ID} 2>/dev/null; systemctl reset-failed camera-box-burn-${_ccn}-${RUN_ID} 2>/dev/null; \
+         pkill -9 -f 'camera-box-burn-[a-z0-9]' 2>/dev/null; pkill -x camera-box 2>/dev/null; sleep 1; \
          rm -f /tmp/camera-box-burn-* 2>/dev/null; systemctl restart camera-box 2>/dev/null; true"
     done
   fi
@@ -489,10 +505,12 @@ cleanup() {
   # (a prior `rig-mode.sh test` would otherwise make this restart bring camera-box back WITHOUT
   # --display — the interkom return monitor stays dark). The clear is single-sourced
   # (rig_test_dropin_clear_cmds) + idempotent (rm -f is a no-op if absent). #312: under
-  # ALL_CAMBOX=1, [2b/8] ALSO deployed a manually nohup'd probe-featured burn binary here (the
-  # SAME #640-widened kill pattern this cleanup uses elsewhere) — harmless (matches nothing) on
-  # the plain single-camera path, where [2b/8] never ran.
+  # ALL_CAMBOX=1, [2b/8] ALSO deployed a probe-featured burn binary here under a transient
+  # systemd-run unit (#668) — stopping that unit is harmless (no-op) on the plain single-camera
+  # path, where [2b/8] never ran.
   timeout "$CLEANUP_SSH_TIMEOUT" sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$PAINTER_IP" "pkill -x frame-probe 2>/dev/null || true
+systemctl stop camera-box-burn-cam2-${RUN_ID} 2>/dev/null || true
+systemctl reset-failed camera-box-burn-cam2-${RUN_ID} 2>/dev/null || true
 pkill -9 -f 'camera-box-burn-[a-z0-9]' 2>/dev/null || true
 rm -f /tmp/camera-box-burn-* 2>/dev/null || true
 $(rig_test_dropin_clear_cmds)
@@ -689,7 +707,20 @@ echo "[2/8] $CAMERA_NAME (${CAM1_IP}) — probe-featured camera-box with the #17
 # colour v4l2 controls (saturation=50/contrast=50) directly here (#338/#312: the old sharp
 # set saturation=0/contrast=75 hurt the decode and tinted the picture; device defaults read
 # clean).
+# #668: deploy under a TRANSIENT systemd-run unit (Restart=on-failure), not a bare `nohup ... &`.
+# A bare nohup'd process has NOTHING watching it — when a real #656/#663 self-heal fires mid-test
+# on this SOURCE camera (it exits(77) BY DESIGN, expecting systemd's Restart=always to bring it
+# back — src/capture_rate_selfheal.rs), the ad-hoc nohup'd burn process just dies for the rest of
+# the recording window, silently losing this camera's digital-burn measurement (live evidence,
+# #668: RUN_ID 1783724370 — cam1's burn ids stopped dead at id 4738 the instant the self-heal's
+# USB reset exited it, ~290s before the recording ended). Wrapping it in a transient unit with
+# Restart=on-failure gives the self-heal's own respawn expectation a REAL systemd unit to hold —
+# no change to capture_rate_selfheal.rs itself, the ad-hoc test deploy now behaves exactly like
+# the production camera-box.service it's standing in for. cleanup() stops this unit explicitly
+# (an explicit `systemctl stop` is never followed by an automatic restart) before the belt-and-
+# suspenders pkill, so a stopped test can never leave a unit trying to respawn.
 CAM1_BURN_BIN="/tmp/camera-box-burn-${RUN_ID}"
+CAM1_BURN_UNIT="camera-box-burn-${RUN_ID}"
 sshpass -p "$CAM_PW" scp -o StrictHostKeyChecking=no \
   "$PROBE_BIN_DIR"/camera-box root@"$CAM1_IP":"$CAM1_BURN_BIN"
 sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$CAM1_IP" \
@@ -697,9 +728,13 @@ sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$CAM1_IP" \
    chmod +x $CAM1_BURN_BIN; \
    i=0; while fuser -s /dev/video0 2>/dev/null && [ \$i -lt 30 ]; do sleep 0.5; i=\$((i+1)); done; \
    v4l2-ctl -d /dev/video0 --set-ctrl=saturation=50,contrast=50 2>/dev/null; \
-   (CAMERA_BOX_GENLOCK_FPS=$GENLOCK_FPS CAMERA_BOX_BURN_RUN_ID=$SRC_BURN_RUN_ID \
-     CAMERA_BOX_CAPTURE_STATS=/tmp/cam1-capture-stats.txt NDI_RUNTIME_DIR_V6=/usr/lib/ndi \
-     nohup $CAM1_BURN_BIN >/tmp/cbox-burn.log 2>&1 &)"
+   rm -f /tmp/cbox-burn.log; \
+   systemd-run --unit=$CAM1_BURN_UNIT --collect \
+     --property=Restart=on-failure --property=RestartSec=3 \
+     --property=StandardOutput=append:/tmp/cbox-burn.log --property=StandardError=append:/tmp/cbox-burn.log \
+     --setenv=CAMERA_BOX_GENLOCK_FPS=$GENLOCK_FPS --setenv=CAMERA_BOX_BURN_RUN_ID=$SRC_BURN_RUN_ID \
+     --setenv=CAMERA_BOX_CAPTURE_STATS=/tmp/cam1-capture-stats.txt --setenv=NDI_RUNTIME_DIR_V6=/usr/lib/ndi \
+     $CAM1_BURN_BIN"
 sleep 4  # let $CAMERA_NAME's NDI sender (with the burn) become discoverable
 
 # #624/#312: the ALL_CAMBOX sweep also cuts cam2/cam3/cam4/cam5/cam6 into strih program —
@@ -729,8 +764,12 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
     _cn="${_cn_ip_burn%%=*}"; _crest="${_cn_ip_burn#*=}"; _cip="${_crest%%=*}"; _cburn="${_crest#*=}"
     echo "[2b/8] $_cn (${_cip}) — probe-featured camera-box with its OWN capture BURN (run_id=$_cburn, #624/#312 ALL_CAMBOX)"
     _cbin="/tmp/camera-box-burn-${_cn}-${RUN_ID}"
-    _cnodisplay=""
-    if [ "$_cn" = "cam2" ]; then _cnodisplay="CAMERA_BOX_NO_DISPLAY=1 "; fi
+    # #668: same transient systemd-run unit (Restart=on-failure) as cam1's [2/8] deploy above —
+    # a mid-test self-heal on any of these boxes now respawns, instead of silently dying for the
+    # rest of the run.
+    _cunit="camera-box-burn-${_cn}-${RUN_ID}"
+    _cnodisplay_setenv=""
+    if [ "$_cn" = "cam2" ]; then _cnodisplay_setenv="--setenv=CAMERA_BOX_NO_DISPLAY=1 "; fi
     sshpass -p "$CAM_PW" scp -o StrictHostKeyChecking=no \
       "$PROBE_BIN_DIR"/camera-box root@"$_cip":"$_cbin"
     sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$_cip" \
@@ -739,9 +778,13 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
        chmod +x $_cbin; \
        i=0; while fuser -s /dev/video0 2>/dev/null && [ \$i -lt 30 ]; do sleep 0.5; i=\$((i+1)); done; \
        v4l2-ctl -d /dev/video0 --set-ctrl=saturation=50,contrast=50 2>/dev/null; \
-       (${_cnodisplay}CAMERA_BOX_GENLOCK_FPS=$GENLOCK_FPS CAMERA_BOX_BURN_RUN_ID=$_cburn \
-         NDI_RUNTIME_DIR_V6=/usr/lib/ndi \
-         nohup $_cbin >/tmp/cbox-burn-${_cn}.log 2>&1 &)"
+       rm -f /tmp/cbox-burn-${_cn}.log; \
+       systemd-run --unit=$_cunit --collect \
+         --property=Restart=on-failure --property=RestartSec=3 \
+         --property=StandardOutput=append:/tmp/cbox-burn-${_cn}.log --property=StandardError=append:/tmp/cbox-burn-${_cn}.log \
+         ${_cnodisplay_setenv}--setenv=CAMERA_BOX_GENLOCK_FPS=$GENLOCK_FPS --setenv=CAMERA_BOX_BURN_RUN_ID=$_cburn \
+         --setenv=NDI_RUNTIME_DIR_V6=/usr/lib/ndi \
+         $_cbin"
   done
   sleep 4  # let cam2/cam3/cam4/cam5/cam6's NDI senders (with their burns) become discoverable
 fi
