@@ -6,6 +6,7 @@ use crate::probe::payload::Payload;
 use image::{GrayImage, Luma};
 use qrcode::{EcLevel, QrCode};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
 
 /// #207 — which decode path a single recording frame took.
 ///
@@ -404,21 +405,68 @@ fn install_rqrr_assert_silencer() {
     });
 }
 
-/// Panic-safe [`rqrr_decode_all`] for the #202 tiled retry: rqrr's grid identifier has an
-/// internal `assert!(scan >= 1)` (rqrr-0.9.3 identify/grid.rs:206) that PANICS on certain
-/// degenerate finder geometries (a near-empty or pathologically small tile). On the FULL
-/// frame this never fires (the big optical QR is always well-formed), but the robust pass
-/// feeds rqrr many sub-tiles, any of which could be degenerate — a panic there would abort
-/// the whole frame's decode (and, via the worker pool, the verdict). Catch it and treat a
-/// panicking tile as "found nothing" (the full-frame pass + the other tiles still cover the
-/// frame). The [`install_rqrr_assert_silencer`] hook keeps that caught assert from spamming
-/// stderr while leaving every other panic loud. Used ONLY for the extra tile passes; the
-/// primary full-frame pass keeps the plain `rqrr_decode_all` so existing behavior is
-/// byte-for-byte unchanged.
+/// Panic-safe wrapper around [`rqrr_decode_all`]: rqrr's grid identifier has an internal
+/// `assert!(scan >= 1)` (rqrr-0.9.3 identify/grid.rs:206), and its `Perspective::map` has a
+/// SEPARATE `assert!(x <= i32::MAX as f64)` (geometry.rs:55) — both PANIC on certain
+/// degenerate finder geometries (a near-empty/pathologically-small tile for the first; a
+/// near-degenerate homography for the second). A panic here would abort the whole frame's
+/// decode (and, via the worker pool, the whole `--extract-partial` run). Catch it and treat a
+/// panicking pass as "found nothing" (the other pass/tile still covers the frame). The
+/// [`install_rqrr_assert_silencer`] hook keeps the already-known `scan >= 1` assert from
+/// spamming stderr while leaving every other panic's default stderr report intact; EITHER way
+/// `catch_unwind` here still catches it (the silencer only affects what gets PRINTED, never
+/// what gets caught). Used by BOTH the #202 tiled retry AND (#673) the primary full-frame pass
+/// in [`decode_qr_luma_all`] — the old assumption that "the full frame never panics" was
+/// live-disproven on a real recording (see that function's doc).
 fn rqrr_decode_all_catch(img: GrayImage) -> Vec<Payload> {
     install_rqrr_assert_silencer();
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rqrr_decode_all(img)))
-        .unwrap_or_default()
+    // #673 opt-in diagnostic: when QR_DECODE_PANIC_DUMP_DIR is set, save the EXACT
+    // panic-triggering frame as a PNG for building a real-pixel regression fixture later — a
+    // caught rqrr internal panic is rare (one confirmed incident in ~11000 real frames) and
+    // was, before this fix, effectively impossible to capture without crashing the whole run.
+    // Zero cost when unset (one cached env lookup, no clone).
+    static DUMP_DIR: OnceLock<Option<String>> = OnceLock::new();
+    static DUMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let dump_dir = DUMP_DIR.get_or_init(|| std::env::var("QR_DECODE_PANIC_DUMP_DIR").ok());
+    let img_for_dump = dump_dir.as_ref().map(|_| img.clone());
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rqrr_decode_all(img))) {
+        Ok(payloads) => payloads,
+        Err(e) => {
+            // Log every caught rqrr internal panic (not just the silenced "scan >= 1" one).
+            // Diagnostic only: the caller already treats "nothing decoded" as a normal outcome
+            // (an already-gated undecodable frame), so this never changes pass/fail — it just
+            // makes a caught crash visible instead of silent (comprehensive-logging.md).
+            let msg = e
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| e.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "<non-string panic payload>".to_string());
+            if let (Some(dir), Some(dump_img)) = (dump_dir, img_for_dump) {
+                let n = DUMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+                let path = format!("{dir}/qr-decode-panic-{n}.png");
+                match dump_img.save(&path) {
+                    Ok(()) => tracing::warn!(
+                        panic_message = %msg,
+                        path,
+                        "rqrr internal panic caught during QR decode — frame dumped for repro (#673)"
+                    ),
+                    Err(io_err) => tracing::warn!(
+                        panic_message = %msg,
+                        path,
+                        error = %io_err,
+                        "rqrr internal panic caught during QR decode — frame dump FAILED (#673)"
+                    ),
+                }
+            } else {
+                tracing::warn!(
+                    panic_message = %msg,
+                    "rqrr internal panic caught during QR decode — treating this frame/tile as \
+                     undecodable (#673)"
+                );
+            }
+            Vec::new()
+        }
+    }
 }
 
 /// Otsu's global threshold (0..=255) maximizing between-class variance of a gray
@@ -500,18 +548,32 @@ fn binarize_otsu(img: &GrayImage) -> GrayImage {
 /// read together. Cost: one extra cheap full-frame Otsu rqrr pass per frame on the OFFLINE
 /// decode (correctness over offline-decode speed); the ~10× tiled passes stay conditional
 /// behind the fast/robust gate.
+///
+/// #673 — BOTH calls go through [`rqrr_decode_all_catch`] (panic-safe), not the bare
+/// `rqrr_decode_all` the doc above historically described. rqrr's `Perspective::map`
+/// (rqrr-0.9.3 geometry.rs:55) has its OWN internal `assert!(x <= i32::MAX as f64)` —
+/// DIFFERENT from the tile-path's already-guarded `assert!(scan >= 1)` (identify/grid.rs) —
+/// that PANICS when a detected grid's homography is near-degenerate. The old assumption
+/// ("on the full frame this never fires, the big optical QR is always well-formed") was
+/// live-disproven 2026-07-11: a real stream recording (RUN_ID 1783735291, restart-survival
+/// dispatch #466) crashed a decode worker thread mid-run via exactly this assert, aborting
+/// the WHOLE `--extract-partial` run with zero partial output. A panicking full-frame pass is
+/// now treated identically to a genuinely-empty decode (already the normal, already-gated
+/// "undecodable frame" outcome) — this changes crash-vs-no-crash, never any pass/fail
+/// semantics of the zero-loss verdict itself.
 pub fn decode_qr_luma_all(img: GrayImage) -> Vec<Payload> {
-    let mut out = rqrr_decode_all(img.clone());
+    let mut out = rqrr_decode_all_catch(img.clone());
     // The hard Otsu cut recovers the soft optical capture the plain adaptive prepare misses,
     // even when the plain pass already decoded the crisp burns (#363).
-    merge_payloads(&mut out, rqrr_decode_all(binarize_otsu(&img)));
+    merge_payloads(&mut out, rqrr_decode_all_catch(binarize_otsu(&img)));
     out
 }
 
-/// Panic-safe twin of [`decode_qr_luma_all`] for the #202 tile passes (plain pass, then an
-/// Otsu-binarized retry if empty), with both rqrr calls wrapped in
-/// [`rqrr_decode_all_catch`] so a degenerate tile that trips rqrr's internal assert yields
-/// "nothing" instead of aborting the whole frame's decode.
+/// Tile-scoped twin of [`decode_qr_luma_all`] for the #202 tile passes (plain pass, then an
+/// Otsu-binarized retry if empty). Both this AND `decode_qr_luma_all` route through the same
+/// panic-safe [`rqrr_decode_all_catch`] (#673) so a degenerate tile — or a degenerate
+/// full-frame homography — that trips an rqrr internal assert yields "nothing" instead of
+/// aborting the whole frame's decode.
 fn decode_qr_luma_all_tile(img: GrayImage) -> Vec<Payload> {
     let first = rqrr_decode_all_catch(img.clone());
     if !first.is_empty() {
