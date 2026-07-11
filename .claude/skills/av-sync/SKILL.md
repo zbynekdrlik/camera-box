@@ -149,10 +149,10 @@ av-sync-dock: UNLOCKED last_offset=<ms>ms source=cluster
 ```
 
 **Correction (2026-07-11, #690): the `idx=<N>` field shown above in older versions of this doc was
-dropped in commit `56079f033`** ("drop misleading idx from audit log... this loop's CbAvOffset
-comes from EVERY CRC-4-accepted marker candidate... idx8 at this point is not reliably 'the frame
-this lock belongs to'"). The three lines above are the CURRENT, authoritative format — verified
-against the live `sync-test-output.cpp` glue, not just the doc.
+dropped in commit `56079f033`** ("drop misleading idx from audit log... the audit-log push() runs
+on EVERY CRC-4-accepted marker candidate... the idx8 printed alongside a LOCKED/UPDATED line was
+not reliably 'the frame this lock belongs to'"). The three lines above are the CURRENT,
+authoritative format — verified against the live `sync-test-output.cpp` glue, not just the doc.
 
 `camerabox::CbLockAuditTracker` (`vendor/av-sync-dock/src/camera-box-audio.hpp`, pure/OBS-free)
 owns the transition classification (Locked/Updated/Unlocked, with an "Updated" only firing when
