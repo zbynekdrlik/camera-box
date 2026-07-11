@@ -77,6 +77,11 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # src/capture_rate_health.rs). Used by the [0/8] preflight step below, before any deploy/record.
 # shellcheck source=scripts/lib/capture-rate-guard.sh
 . "$HERE/lib/capture-rate-guard.sh"
+# #675: cleanup()'s cam1/cam3/cam4/cam5/cam6/cam2 `systemctl restart camera-box` restore used to
+# be a bare `2>/dev/null; true`/`|| true` that silently swallowed a failed restart, leaving the
+# rig's production camera-box.service down and undetected — poll+retry+loud-warn builder.
+# shellcheck source=scripts/lib/camera-box-restart-verify.sh
+. "$HERE/lib/camera-box-restart-verify.sh"
 camera_resolve "${CAM:-cam1}"
 # #24 item 1: this harness's SOURCE-camera role (the physical box filming cam2's monitor via
 # the optical loopback + carrying the #174 render-time capture burn) is one of
@@ -480,7 +485,8 @@ cleanup() {
   timeout "$CLEANUP_SSH_TIMEOUT" sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$CAM1_IP" \
     "systemctl stop camera-box-burn-${RUN_ID} 2>/dev/null; systemctl reset-failed camera-box-burn-${RUN_ID} 2>/dev/null; \
      pkill -9 -f 'camera-box-burn-[a-z0-9]' 2>/dev/null; pkill -x camera-box 2>/dev/null; sleep 1; \
-     rm -f /tmp/camera-box-burn-* 2>/dev/null; systemctl restart camera-box 2>/dev/null; true"
+     rm -f /tmp/camera-box-burn-* 2>/dev/null; systemctl restart camera-box 2>/dev/null; true
+$(camera_box_verify_active_cmds "$CAMERA_NAME (source, $CAM1_IP)")"
   # #624/#312: cam3/cam4/cam5/cam6 — same restore as cam1, ONLY when the ALL_CAMBOX deploy above
   # actually ran (gated the same way) so a plain single-camera run never touches these boxes at all.
   if [ "${ALL_CAMBOX:-0}" = "1" ]; then
@@ -498,7 +504,8 @@ cleanup() {
       timeout "$CLEANUP_SSH_TIMEOUT" sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$_cip" \
         "systemctl stop camera-box-burn-${_ccn}-${RUN_ID} 2>/dev/null; systemctl reset-failed camera-box-burn-${_ccn}-${RUN_ID} 2>/dev/null; \
          pkill -9 -f 'camera-box-burn-[a-z0-9]' 2>/dev/null; pkill -x camera-box 2>/dev/null; sleep 1; \
-         rm -f /tmp/camera-box-burn-* 2>/dev/null; systemctl restart camera-box 2>/dev/null; true"
+         rm -f /tmp/camera-box-burn-* 2>/dev/null; systemctl restart camera-box 2>/dev/null; true
+$(camera_box_verify_active_cmds "$_ccn ($_cip)")"
     done
   fi
   # cam2 (painter): restart it. #309: FIRST clear any leftover #291 rig-mode no-display drop-in
@@ -515,6 +522,7 @@ pkill -9 -f 'camera-box-burn-[a-z0-9]' 2>/dev/null || true
 rm -f /tmp/camera-box-burn-* 2>/dev/null || true
 $(rig_test_dropin_clear_cmds)
 systemctl restart camera-box 2>/dev/null || true
+$(camera_box_verify_active_cmds "cam2/painter, $PAINTER_IP")
 systemctl start cam2-painter 2>/dev/null || true"
   # The cam devices are now freed regardless of what the OBS restore does. #328: bound every OBS
   # call by `timeout` so a hung obs-websocket op (#328) can't block the trap even if it runs.
