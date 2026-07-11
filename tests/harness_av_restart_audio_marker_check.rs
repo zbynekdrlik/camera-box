@@ -379,6 +379,55 @@ fn combined_check_cmds_appends_emission_block_only_when_marker_log_given() {
     );
 }
 
+/// #667 REGRESSION: `painter_launch_remote`'s WHOLE heredoc runs under `set -e` (rig-mode.sh puts
+/// `set -e` at its top, scripts/rig-mode.sh:208) — but `grep -c PATTERN FILE` returns a NON-ZERO
+/// exit status whenever the match count is zero (or the file doesn't exist yet), even though it
+/// correctly prints "0"/nothing to stdout. `c0=$(grep -c ...)` is a plain assignment whose exit
+/// status IS grep's exit status, so under `set -e` this SILENTLY ABORTS THE WHOLE SCRIPT the
+/// instant it samples the marker log before the very first QPSK marker has fired (~3s cadence
+/// after painter launch) — with ZERO output, before this check ever gets to print its own #431
+/// PASS/FAIL diagnostic. Live evidence: rig-mode.sh exited 1 right after the #420 RUNNING PASS
+/// line ~4/5 runs, never reaching toggle_burn/enforce_strih_ndi_mapping/set_imag_test_program.
+/// This test runs the REAL emission-check snippet under `set -e` (matching the production
+/// heredoc) against a marker-log path that does not exist yet — the exact race window — and
+/// asserts the check reaches ITS OWN diagnostic output instead of dying silently on grep's raw
+/// exit code.
+#[test]
+fn emission_check_survives_set_e_when_marker_log_not_yet_created_667() {
+    let dir = emission_scratch("667-sete-no-file");
+    // Deliberately never created before the check runs — reproduces the exact race: the marker
+    // log doesn't exist yet (or has zero rows) at the moment `painter_launch_remote` samples it.
+    let log = dir.join("markers-not-yet-created.csv");
+    let lib = manifest_dir().join(LIB_REL);
+    let script = format!(
+        r#"set -e
+. "{lib}"
+snippet="$(audio_marker_emission_check_cmds "{log}" 'true' "test=667")"
+eval "$snippet"
+"#,
+        lib = lib.display(),
+        log = log.display(),
+    );
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(&script)
+        .env("AUDIO_MARKER_EMIT_POLL_INTERVAL_SECS", "1")
+        .env("AUDIO_MARKER_EMIT_POLL_ATTEMPTS", "1")
+        .output()
+        .expect("#667: failed to run the set -e harness");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stdout.contains("#431") || stderr.contains("#431"),
+        "#667: under `set -e` (the real remote heredoc's own mode), the emission check must reach \
+         its own #431 diagnostic (PASS or FAIL) instead of dying silently on grep -c's own exit \
+         status the moment the marker log doesn't exist yet — the exact race rig-mode.sh hit ~4/5 \
+         runs, exiting right after the #420 RUNNING PASS line with zero further output. \
+         exit={:?} stdout={stdout:?} stderr={stderr:?}",
+        out.status.code()
+    );
+}
+
 /// Both real call sites must pass their known marker-log path as the 4th positional argument, so
 /// the #431 hardening actually applies in production — not merely available-but-unused.
 #[test]
