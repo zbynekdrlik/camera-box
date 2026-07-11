@@ -377,8 +377,14 @@ fi
 # camera's recent journal for that WARN and fail FAST — before burning a doomed 30-minute run —
 # rather than re-deriving the fps math a second time here (single source of truth stays in Rust).
 echo "[0/8] capture-delivery-rate preflight — $CAMERA_NAME must not show a sustained rate defect (#656)"
+# #693: resolve the CURRENT camera-box.service InvocationID first, so the journal read below is
+# scoped to THIS process instance only -- a stale WARN from a prior instance (killed by a routine
+# cleanup() restart) must never leak into the lookback window. Empty on failure (older systemd /
+# transient ssh hiccup) -- capture_rate_journalctl_cmd falls back to the unscoped read then.
+CAPTURE_RATE_INVOCATION_ID="$(sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$CAM1_IP" \
+  "systemctl show -p InvocationID --value camera-box 2>/dev/null" 2>/dev/null || true)"
 CAPTURE_RATE_DEFECT_LINE="$(sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$CAM1_IP" \
-  "journalctl -u camera-box --no-pager -n 200 2>/dev/null | grep -E '$(capture_rate_defect_grep_pattern)' | tail -1" \
+  "$(capture_rate_journalctl_cmd "$CAPTURE_RATE_INVOCATION_ID") | grep -E '$(capture_rate_defect_grep_pattern)' | tail -1" \
   2>/dev/null || true)"
 if [ -n "$CAPTURE_RATE_DEFECT_LINE" ]; then
   echo "ERROR: $(capture_rate_preflight_message "$CAMERA_NAME" "$CAPTURE_RATE_DEFECT_LINE")" >&2
