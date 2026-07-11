@@ -304,3 +304,238 @@ fn recording_e2e_preflight_scopes_the_journal_read_to_the_current_invocation() {
          preflight (replaced by the invocation-id-scoped capture_rate_journalctl_cmd)"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// #705 — the [0/8] preflight above only proves the source camera was clean BEFORE a run starts;
+// the #656/#663 ShadowCast judder is confirmed to RECUR mid-session (PR #704's own real-verdict
+// CI run: cam1's own recurrence_heal_count=30), so a clean preflight does not guarantee the
+// recording stayed clean for its whole duration. These cover the NEW mid-recording (POST
+// StartRecord..StopRecord window) re-check: a window-bounded journalctl builder
+// (capture_rate_window_journalctl_cmd, journalctl's own native --since=@N/--until=@N absolute-
+// time filtering -- no bash-side timestamp parsing needed) and a distinct diagnostic message
+// (capture_rate_recurrence_message) so a recurrence during the recording never gets confused
+// with a fresh chain-loss/zero-loss regression surfaced elsewhere in the verdict.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn capture_rate_window_journalctl_cmd_scopes_to_invocation_id_and_time_window() {
+    let out = run_sourced("capture_rate_window_journalctl_cmd 'abc-123-def' 1000 2000");
+    let cmd = out.trim();
+    assert!(
+        cmd.contains("_SYSTEMD_INVOCATION_ID=abc-123-def"),
+        "#705: with a non-empty invocation id, must scope to it (mirrors #693's scoping) so a \
+         stale line from a KILLED prior instance can never leak into the window. Got: {cmd}"
+    );
+    assert!(
+        cmd.contains("--since=@1000"),
+        "#705: must bound the read to the recording window's START via journalctl's native \
+         absolute-time --since=@epoch form. Got: {cmd}"
+    );
+    assert!(
+        cmd.contains("--until=@2000"),
+        "#705: must bound the read to the recording window's END via journalctl's native \
+         absolute-time --until=@epoch form. Got: {cmd}"
+    );
+    assert!(
+        !cmd.contains("-u camera-box"),
+        "#705: an invocation-id-scoped read must not ALSO use the unscoped -u camera-box form \
+         (defeats the scoping). Got: {cmd}"
+    );
+}
+
+#[test]
+fn capture_rate_window_journalctl_cmd_falls_back_to_unscoped_unit_read_when_invocation_id_empty()
+{
+    let out = run_sourced("capture_rate_window_journalctl_cmd '' 1000 2000");
+    let cmd = out.trim();
+    assert!(
+        cmd.contains("-u camera-box"),
+        "#705: an empty invocation id must fall back to the unscoped -u camera-box form (mirrors \
+         capture_rate_journalctl_cmd's own fallback contract). Got: {cmd}"
+    );
+    assert!(
+        cmd.contains("--since=@1000") && cmd.contains("--until=@2000"),
+        "#705: the unscoped fallback must still honor the time window. Got: {cmd}"
+    );
+}
+
+#[test]
+fn capture_rate_window_journalctl_cmd_output_is_valid_remote_shell() {
+    let out = run_sourced("capture_rate_window_journalctl_cmd 'abc-123' 1000 2000");
+    let checker = Command::new("bash")
+        .arg("-n")
+        .arg("-c")
+        .arg(out.trim())
+        .output()
+        .expect("run bash -n");
+    assert!(
+        checker.status.success(),
+        "#705: capture_rate_window_journalctl_cmd's output must be syntactically valid shell text"
+    );
+}
+
+#[test]
+fn recurrence_message_extracts_captured_and_configured_fps_and_reads_distinctly_from_preflight() {
+    let out = run_sourced(
+        "capture_rate_recurrence_message cam1 'WARN #656 capture-delivery-rate DEFECTIVE: 63.20 fps captured vs 60.00 fps configured/negotiated (>1.0% deviation sustained for 6 consecutive report windows, ~30s) — USB-reset the capture device (see #656)'",
+    );
+    let msg = out.trim();
+    assert!(
+        msg.contains("63.20") && msg.contains("60.00"),
+        "#705: recurrence message must extract the real captured/configured fps. Got: {msg}"
+    );
+    assert!(
+        msg.contains("RECURRED DURING"),
+        "#705: the recurrence message must read distinctly from capture_rate_preflight_message's \
+         'capture rate defective' wording, so a human/CI reader can tell a mid-recording \
+         recurrence apart from the pre-recording preflight failure. Got: {msg}"
+    );
+    assert!(
+        msg.contains("#705"),
+        "#705: the recurrence message should point at this ticket for context. Got: {msg}"
+    );
+    assert_ne!(
+        msg,
+        "cam1 capture rate defective (~63.20fps, expected 60.00fps) — USB-reset the grabber (see #656)",
+        "#705: must NOT be byte-identical to capture_rate_preflight_message's output"
+    );
+}
+
+#[test]
+fn recurrence_message_falls_back_gracefully_on_an_unparseable_line() {
+    let out = run_sourced(
+        "capture_rate_recurrence_message cam3 'a #656 capture-delivery-rate DEFECTIVE line in an unexpected shape'",
+    );
+    let msg = out.trim();
+    assert!(
+        msg.contains("cam3"),
+        "#705: fallback message must still name the camera. Got: {msg}"
+    );
+    assert!(
+        msg.contains("a #656 capture-delivery-rate DEFECTIVE line in an unexpected shape"),
+        "#705: fallback must echo the raw matched line, never silently swallow the signal. Got: {msg}"
+    );
+}
+
+// ---- Wiring the mid-recording check into recording-e2e.sh -------------------------------------
+
+#[test]
+fn recording_e2e_captures_the_recording_window_start_and_end_epoch() {
+    let s = read("scripts/recording-e2e.sh");
+    let start_record_pos = s
+        .find("echo \"[5/8] StartRecord")
+        .expect("[5/8] StartRecord step must exist");
+    let window_start_pos = s.find("CAPTURE_RATE_WINDOW_START_EPOCH=").expect(
+        "#705: recording-e2e.sh must snapshot the recording window's START epoch",
+    );
+    assert!(
+        window_start_pos > start_record_pos,
+        "#705: the window START epoch must be captured AFTER StartRecord actually runs"
+    );
+
+    let stop_record_pos = s
+        .find("echo \"[7/8] StopRecord")
+        .expect("[7/8] StopRecord step must exist");
+    let window_end_pos = s.find("CAPTURE_RATE_WINDOW_END_EPOCH=").expect(
+        "#705: recording-e2e.sh must snapshot the recording window's END epoch",
+    );
+    assert!(
+        window_end_pos > stop_record_pos,
+        "#705: the window END epoch must be captured AFTER the [7/8] StopRecord step begins"
+    );
+    assert!(
+        window_end_pos > window_start_pos,
+        "#705: the window END epoch capture must textually follow the window START capture"
+    );
+}
+
+#[test]
+fn recording_e2e_runs_the_post_recording_capture_rate_check_after_stoprecord() {
+    let s = read("scripts/recording-e2e.sh");
+    let window_end_pos = s
+        .find("CAPTURE_RATE_WINDOW_END_EPOCH=")
+        .expect("#705: window END epoch capture must exist");
+    let check_header_pos = s
+        .find("capture-delivery-rate POST-recording check")
+        .expect("#705: the post-recording capture-rate check step must exist");
+    assert!(
+        check_header_pos > window_end_pos,
+        "#705: the post-recording check must run AFTER the window END epoch is captured"
+    );
+
+    let window_cmd_pos = s
+        .find("capture_rate_window_journalctl_cmd \"")
+        .expect("#705: the post-recording check must call capture_rate_window_journalctl_cmd");
+    assert!(
+        window_cmd_pos > check_header_pos,
+        "#705: the journalctl-window call must be part of the post-recording check block"
+    );
+
+    let msg_call_pos = s
+        .find("capture_rate_recurrence_message \"$CAMERA_NAME\"")
+        .expect(
+            "#705: the post-recording check must format its fail message via the shared \
+             capture_rate_recurrence_message helper (never a second ad-hoc string built inline)",
+        );
+    assert!(
+        msg_call_pos > check_header_pos,
+        "#705: the recurrence-message call must be part of the post-recording check block"
+    );
+
+    // A matched recurrence must abort the run (exit 1) BEFORE the ~5-10 min decode step below
+    // ever launches — scoped tightly to just this check's own block so an unrelated exit 1
+    // elsewhere in the file can never make this assertion vacuously pass.
+    let check_ok_pos = s
+        .find("no capture-rate defect recurrence in $CAMERA_NAME's journal during the recording")
+        .expect("#705: the post-recording check must print a success line when clean");
+    assert!(
+        check_ok_pos > check_header_pos,
+        "#705: the success echo must come after the check step header"
+    );
+    let this_check_block = &s[check_header_pos..check_ok_pos];
+    assert!(
+        this_check_block.contains("exit 1"),
+        "#705: the post-recording capture-rate check must exit 1 on a matched recurrence line"
+    );
+
+    // Must run BEFORE the decode step launches (#193's VERDICT_ON_STREAM branch) — the whole
+    // point is saving the ~5-10 min decode budget, not just diagnosing after the fact.
+    let decode_pos = s
+        .find("#193: by DEFAULT decode ON stream.lan")
+        .expect("the #193 decode-on-stream branch comment must exist");
+    assert!(
+        check_ok_pos < decode_pos,
+        "#705: the post-recording capture-rate check must complete BEFORE the decode step \
+         launches, so a recurrence is caught before the expensive decode budget is spent"
+    );
+}
+
+#[test]
+fn recording_e2e_post_check_reresolves_invocation_id_after_start_record_not_the_stale_preflight_one()
+{
+    let s = read("scripts/recording-e2e.sh");
+    let start_record_pos = s
+        .find("echo \"[5/8] StartRecord")
+        .expect("[5/8] StartRecord step must exist");
+    let window_invocation_pos = s.find("CAPTURE_RATE_WINDOW_INVOCATION_ID=").expect(
+        "#705: the post-recording check must re-resolve a FRESH InvocationID (the [0/8] \
+         preflight's own $CAPTURE_RATE_INVOCATION_ID is stale by this point -- [2/8] deploys \
+         and restarts camera-box in between, killing that process instance)",
+    );
+    assert!(
+        window_invocation_pos > start_record_pos,
+        "#705: the fresh invocation id must be resolved AFTER [5/8] StartRecord (so it reflects \
+         the process instance that was actually running DURING the recording)"
+    );
+
+    let window_cmd_call = s
+        .find("capture_rate_window_journalctl_cmd \"$CAPTURE_RATE_WINDOW_INVOCATION_ID\"")
+        .expect(
+            "#705: the post-recording check must pass the FRESH $CAPTURE_RATE_WINDOW_INVOCATION_ID \
+             into capture_rate_window_journalctl_cmd, never the stale [0/8] $CAPTURE_RATE_INVOCATION_ID",
+        );
+    assert!(
+        window_cmd_call > window_invocation_pos,
+        "#705: the fresh invocation id must be resolved BEFORE it is used"
+    );
+}
