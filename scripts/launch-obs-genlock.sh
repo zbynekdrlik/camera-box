@@ -195,6 +195,9 @@ ${PROGRAM}
 # STEP 3: to toggle the measurement burn (TEST mode), DON'T relaunch — flip the per-source bool over
 #         WebSocket:  scripts/obs_burn_filter.py add|remove --host ${box_ip} --input "<NDI input>"
 #         (or use scripts/rig-mode.sh test|event, which does it for both boxes).
+# STEP 4 (#674): once STEP 2 confirms the relaunch succeeded, mark it on imag-nb's own journald so
+#         a future imag judder report can be time-correlated against this restart:
+#         scripts/mark-imag-restart.sh --box ${box} --reason "<why you relaunched>"
 PLAN
 }
 
