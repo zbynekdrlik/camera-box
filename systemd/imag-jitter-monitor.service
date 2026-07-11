@@ -11,6 +11,12 @@ Type=oneshot
 # %h = newlevel's home on imag-nb. Deployed alongside its scripts/lib/imag-jitter-state.sh sibling.
 ExecStart=%h/imag-jitter-monitor/imag-jitter-monitor.sh
 TimeoutStartSec=30
+# Without this, journald tags the service's own stdout by the ExecStart command's basename
+# (imag-jitter-monitor.sh) — DIFFERENT from the "imag-jitter-monitor" tag
+# scripts/mark-imag-restart.sh's `logger -t imag-jitter-monitor` call uses. Pin it explicitly so
+# BOTH the periodic delta reports AND the restart marker land under the SAME
+# `journalctl -t imag-jitter-monitor` view (the whole point of sharing the tag, #674).
+SyslogIdentifier=imag-jitter-monitor
 
 [Install]
 WantedBy=default.target
