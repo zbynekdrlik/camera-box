@@ -567,3 +567,70 @@ fn setup_device_root_rw_helpers_fail_loud_not_best_effort() {
          -- no silent `|| true` on the remount itself"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// #679 — /var/log tmpfs bounded against runaway growth, on BOTH provisioners
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn setup_device_sources_log_bound_and_writes_both_files_inside_step_18() {
+    let body = read_script();
+    assert!(
+        on_noncomment_line(&body, ". \"$HERE/lib/log-bound.sh\""),
+        "setup-device.sh must source scripts/lib/log-bound.sh (#679) -- the shared size cap + \
+         drop-in content generators"
+    );
+    let write_size_idx = first_noncomment_idx(&body, "log_bound_logrotate_config > ").expect(
+        "setup-device.sh must write /etc/logrotate.d/rsyslog via log_bound_logrotate_config (#679)",
+    );
+    let write_dropin_idx = first_noncomment_idx(&body, "log_bound_timer_dropin > ").expect(
+        "setup-device.sh must write the logrotate.timer drop-in via log_bound_timer_dropin (#679)",
+    );
+    let fstab_write_idx = first_noncomment_idx(&body, "cat > /etc/fstab << FSTABEOF")
+        .expect("the STEP 18 fstab rewrite must be present");
+    let restore_idx = first_noncomment_exact_idx(&body, "restore_root_mode")
+        .expect("restore_root_mode must be called");
+    assert!(
+        write_size_idx > fstab_write_idx && write_size_idx < restore_idx,
+        "the #679 logrotate config write (line {write_size_idx}) must happen AFTER the STEP 18 \
+         fstab rewrite (line {fstab_write_idx}) and BEFORE restore_root_mode (line {restore_idx}) \
+         -- it needs root still writable"
+    );
+    assert!(
+        write_dropin_idx > fstab_write_idx && write_dropin_idx < restore_idx,
+        "the #679 timer drop-in write (line {write_dropin_idx}) must also happen inside the same \
+         writable window (fstab={fstab_write_idx}, restore={restore_idx})"
+    );
+    assert!(
+        on_noncomment_line(&body, "systemctl restart logrotate.timer"),
+        "setup-device.sh must restart logrotate.timer after writing the #679 drop-in so it takes \
+         effect immediately on a re-provisioned already-booted box, not just after next reboot"
+    );
+}
+
+#[test]
+fn create_usb_linux_sources_log_bound_and_writes_both_files_into_the_chroot() {
+    let body = read_usb_script();
+    assert!(
+        on_noncomment_line(&body, ". \"$SCRIPT_DIR/lib/log-bound.sh\""),
+        "create-usb-linux.sh must source scripts/lib/log-bound.sh (#679) -- the SAME content \
+         generators setup-device.sh uses, so the size cap can never drift between the two \
+         provisioners"
+    );
+    assert!(
+        on_noncomment_line(
+            &body,
+            "log_bound_logrotate_config > \"$MOUNT_ROOT$LOG_BOUND_LOGROTATE_PATH\""
+        ),
+        "create-usb-linux.sh must write /etc/logrotate.d/rsyslog into the base-image chroot \
+         (#679) -- closes the window before setup-device.sh later converts /var/log to a tmpfs"
+    );
+    assert!(
+        on_noncomment_line(
+            &body,
+            "log_bound_timer_dropin > \"$MOUNT_ROOT$LOG_BOUND_TIMER_DROPIN_PATH\""
+        ),
+        "create-usb-linux.sh must write the frequent logrotate.timer drop-in into the base-image \
+         chroot too (#679)"
+    );
+}
