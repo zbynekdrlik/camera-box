@@ -1002,3 +1002,19 @@ event rather than the routine per-window noise.
 **Generic across the fleet:** this lives in the shared capture loop every cam box runs — no per-box
 config. Any cam box (cam1, cam3, or any future box) running a ShadowCast-class or similar USB
 capture dongle that drifts off its negotiated rate self-heals identically once deployed.
+
+**GOTCHA — `recording-e2e.sh`'s cleanup can silently leave the SOURCE camera's (and/or cam2's)
+production `camera-box.service` INACTIVE after the run — the harness's own log shows no failure
+signal (#675, 2026-07-11).** Confirmed 4x in one session (cam2 twice, cam4 once, cam1 once, always
+on a box that dispatch actually used, including after a FULLY GREEN `Full-path E2E` CI run) — the
+cleanup's remote restore one-liner (`systemctl restart camera-box`) is wrapped in `2>/dev/null ||
+true`, so any failure (ssh timeout/refused, a hiccup earlier in the same remote one-liner) is
+swallowed with zero visible signal. Manually re-running the SAME one-liner standalone succeeds
+cleanly in ~3s — so it's likely session/connection-contention-specific (suspect sshd
+`MaxStartups`/`MaxSessions` hit during a busy dispatch with many concurrent MCP/ssh sessions to
+the same box), not a broken command. **Practical rule: after ANY `recording-e2e.sh` dispatch,
+before trusting the rig is restored, run `systemctl is-active camera-box` on EVERY box the run
+touched (the SOURCE camera + cam2, and cam1/cam3-6 too if `ALL_CAMBOX=1`) — do not trust the
+harness's own cleanup log.** This bit a live PR's REQUIRED CI gate (#676) purely from leftover
+state an earlier, unrelated dispatch left behind. Root cause not yet fixed — tracked on #675
+(suggested fix: an explicit post-restart `systemctl is-active` verification that fails LOUD).

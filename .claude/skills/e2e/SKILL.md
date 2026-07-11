@@ -1215,6 +1215,34 @@ vendored `distroav.so` filter itself was NOT touched (would need a rebuild + fre
 Studio Mode off, or the vendored filter starts gating the counter to the program pass only, this
 step model needs re-deriving from a fresh live recording, not assumed.
 
+**GOTCHA — rqrr's `Perspective::map` (geometry.rs:55) has ANOTHER internal panic besides the
+already-guarded `scan >= 1`: `assert!(x <= i32::MAX as f64)` on a near-degenerate detected grid —
+and it CAN fire on the PRIMARY full-frame decode pass, not just tiles (#673, 2026-07-11 live
+incident).** `decode_qr_luma_all` (used by every real-frame decode) called the bare, unprotected
+`rqrr_decode_all` — a real stream recording crashed a decode worker thread mid-`--extract-partial`,
+aborting the whole run with zero output. Fixed: both of `decode_qr_luma_all`'s rqrr calls now go
+through the existing `rqrr_decode_all_catch` (previously tile-retry-only), with a WARN log +
+opt-in `QR_DECODE_PANIC_DUMP_DIR` env var that dumps the exact panic-triggering frame as a PNG for
+a future real-pixel regression fixture (an extensive synthetic-repro attempt — ~130,000+ combined
+tries across 6 strategies — could not reproduce the exact assert; see #673 for the full list of
+what was tried, useful if this recurs and you're tempted to re-attempt synthesis).
+
+**`IMAG_PROG_SOURCE`/`IMAG_PROG_SCENE` CAN be overridden to follow a non-cam1 SOURCE camera for a
+restart-survival dispatch — this is a DELIBERATE exception to the "imag always pinned to cam1"
+rule stated earlier in this file, not a contradiction of it (2026-07-11, #466/#674).** When cam1's
+own hardware defect (#656/#663 class) is ACTIVELY blocking every attempt (imag inherits it since
+it's structurally pinned to cam1), and that defect is ALREADY separately tracked + accepted as a
+physical-hardware cost — overriding `IMAG_PROG_SOURCE=NDI CAM4`/`IMAG_PROG_SCENE=Cam 4` (env vars
+to both `recording-e2e.sh` AND whatever routed imag's OBS program scene beforehand — imag's OWN
+OBS state persists across strih/stream restarts since only strih/stream get restarted) isolates
+the restart-survival QUESTION (does OBS restart cause delivery regression?) from cam1's UNRELATED
+hardware reliability question. This produced the cleanest full-chain measurement in the whole
+EPIC's history — but ALSO revealed a NEW, narrower finding: imag can still fail the `#588` judder
+gate even on a proven-healthy source camera, confirmed NOT cam-hardware-related (checked the
+source camera's own capture-rate log for the exact window — clean). Root cause not yet found,
+tracked on #674. Lesson: don't assume "imag failed" always means "cam1's hardware, again" —
+verify the ACTUAL source camera's health for the ACTUAL measurement window before concluding.
+
 ---
 
 ## "Is gate X CI-automatic or rig-manual?" — read `docs/strict-gate-coverage.md` first (EPIC #406)
