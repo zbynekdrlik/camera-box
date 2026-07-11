@@ -1366,3 +1366,28 @@ and aborts the run naming an NDI/genlock problem that doesn't actually exist. Co
 a healthy ~11MB file. Not yet fixed (filed as #677) — if you hit "renders BLACK" during a normal
 (non-dual-QR-monitor) run, don't assume the source is actually dead; check the reported
 `mean=`/`peak=` values first.
+
+## A recurring bug class: `journalctl -u <unit> -n N` reads across a service RESTART, false-failing a preflight/gate on a stale line
+
+`journalctl -u <unit>` is NOT scoped to the currently-running process instance — it spans the
+unit's WHOLE history, so a bare `-n N` lookback can still contain a WARN/error line from a PRIOR
+process instance that was just killed by a routine restart. This exact bug has recurred FIVE+
+times in this codebase, each time as "a currently-healthy node/box false-fails a gate because the
+gate read a stale line": DanteSync journal reads (#550/#591/#595/#607), the #679 log-throttle
+variant that hit the DanteSync PTP-lock POSITION comparison (#686), and — live, 2026-07-11 —
+`recording-e2e.sh`'s `[0/8]` capture-rate preflight (#656/#693): cam1's `camera-box.service` was
+bounced by a routine `cleanup()` restart, and the OLD process instance's `#656 DEFECTIVE` WARN
+(logged 2s before the restart) was still inside the NEW instance's `-n 200` lookback and false-
+failed the **required merge gate**, even though the new process's own captured rate was already
+healthy (confirmed live via a fresh `journalctl` read).
+
+**The fix pattern, once you hit this**: scope the read to the CURRENT process instance —
+`systemctl show -p InvocationID --value <unit>` gives the running instance's UUID;
+`journalctl _SYSTEMD_INVOCATION_ID=<uuid>` returns ONLY that instance's lines, so a stale line
+from a killed prior instance can never leak in again (see `scripts/lib/capture-rate-guard.sh`'s
+`capture_rate_journalctl_cmd`, and `scripts/dantesync-gate.sh`'s HTTP-status-first fix for the
+DanteSync variant, which sidesteps the journal entirely by preferring dantesync#47's own
+`:8898/status` network endpoint). **Three more call sites have the SAME theoretical exposure but
+no live incident yet — filed as #694, not fixed**: `scripts/deploy-fleet.sh` (emit-ok + fatal
+checks), `scripts/verify-device.sh` (device acceptance), `scripts/upgrade-fleet-ndi.sh` (emit-ok
++ fatal checks). If ANY of those ever false-fails on a stale line, this is the fix pattern.

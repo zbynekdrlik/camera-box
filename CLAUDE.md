@@ -121,6 +121,26 @@ wrong PR with no review of it.
   changes untouched). If a sweep still happens (`git show --stat HEAD` shows a file you never
   edited), `git rm --cached <path>` in a follow-up commit restores it to untracked — never `git
   rm`/delete it from disk, it's someone else's live work.
+  - **GOTCHA (confirmed live, 2026-07-11, PR #692 / #684): `git commit -m "..." -- <path>`
+    commits that path's FULL CURRENT working-tree content, not just what you `git add -p`'d for
+    it.** This matters even OUTSIDE the two-worker scenario, any time you need TWO separate
+    commits (e.g. a RED test commit then a GREEN fix commit, `regression-test-first.md`) touching
+    the SAME file with only PART of your edits ready for the first commit. Selectively staging
+    hunks via `git add -p <path>` (answering `y`/`n` per hunk) then running
+    `git commit -m "..." -- <path>` does **NOT** commit only the staged hunks — it commits the
+    path's CURRENT ON-DISK state, staged-or-not, silently pulling in the unstaged hunks too. Live
+    incident: staging only #682's hunks in `scripts/recording-e2e.sh` via `git add -p`, then
+    running `git commit -- scripts/lib/imag-scene-route.sh scripts/recording-e2e.sh` (intending
+    to land ONLY the #682 fix), silently also committed the NOT-YET-STAGED #684 final-verify
+    block still sitting in the working tree — collapsing two intended separate RED→GREEN pairs
+    into one commit. **Never git-history-rewrite to fix this** (`commit-conventions.md`) — the
+    clean recovery is a NEW commit pair: temporarily `Edit` the file to REMOVE the
+    accidentally-early hunk (recreating the true pre-fix state), commit that as the RED test
+    commit, then re-add the removed hunk as its own GREEN commit. To avoid it going forward: when
+    you need ONLY the staged hunks of a partially-staged file, commit with **no pathspec at all**
+    (`git commit -m "..."`, which commits exactly the INDEX) rather than repeating the file's path
+    — the pathspec form is for "commit this path's CURRENT state", not "commit what I staged for
+    this path".
 - **Before every `git commit`, `git log --oneline -3`** to confirm HEAD is still what you expect
   — if it shows commits you didn't write, the other worker advanced the shared branch under you.
 - **A push by EITHER worker pushes the local `dev` ref as it stands**, including the other
