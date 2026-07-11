@@ -1007,6 +1007,21 @@ units to swap in. Consequences:
   the actual tolerance applied (e.g. `..., ShadowCast 2 tolerance) — USB-reset the capture device
   (see #656, #685)`), so the model context is visible even before any escalation.
 
+**GOTCHA — the deployed fleet's `config.toml` does NOT set the optional `hostname` field; resolving
+the grabber model from `config.hostname` alone silently degrades to `Unknown` forever.** Confirmed
+live on cam1 (2026-07-11): `/etc/camera-box/config.toml` has no `hostname = "..."` line at all, so
+`Config`'s `hostname` field falls back to its coded default (`"camera-box"`, a generic string) —
+NOT the box's real identity. `capture_rate_health::grabber_model_for_hostname("camera-box")` can
+never match `CAM1`-`CAM6`, so it silently resolves `GrabberModel::Unknown` (the strict 1% floor) on
+EVERY box in the fleet as deployed, defeating the whole #685 recalibration even after the fixed
+binary is running. The FIX (`os_hostname()` in `src/main.rs`, a small `gethostname(2)` wrapper):
+prefer the box's real OS-level hostname (correctly set per-box by `scripts/setup-device.sh` —
+confirmed live: cam1 → `"CAM1"`) over the config-derived value, falling back to config only if the
+syscall itself fails. **Any future feature that needs "which physical box is this" must use
+`os_hostname()` (or read `/etc/hostname` directly) — never trust `config.hostname` to reflect the
+box's real identity on the live fleet**, unless a future provisioning change starts actually
+populating it (grep `config.toml` on a live box first to check, don't assume).
+
 **Verifying it worked on a box:** `journalctl -u camera-box | grep -E "#656|#663"` — look for the
 `#656 capture-delivery-rate DEFECTIVE` WARN immediately followed by `#663 self-heal: USB-resetting
 capture device ...` / `USB reset complete` / `shutdown cleanup complete — exiting now (code 77)`,

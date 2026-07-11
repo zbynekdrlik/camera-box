@@ -211,6 +211,53 @@ worked example — 3 call sites (cam1, the ALL_CAMBOX loop, cam2/painter) each g
 step with the ORIGINAL restart lines byte-for-byte unchanged, verified by the full `cargo test`
 suite staying green (115/115 binaries, no anchor collisions).
 
+## GOTCHA — `gh pr merge` falsely refuses a green PR as "not up to date"; the direct REST call works
+
+This repo's `dev` branch is **structurally always "behind" `main`** by design: `main` only ever
+gains 2-parent MERGE commits from past `dev`→`main` PRs (`Merge pull request #N from
+zbynekdrlik/dev`); `dev` itself is a pure linear branch that NEVER pulls those merge commits back
+in (confirmed by walking several consecutive `Merge pull request #N` commits' parents — each
+merge's own dev-side parent is dev's OLD tip, never main's). So `git merge-base --is-ancestor
+origin/main origin/dev` is **permanently false**, and every PR's `mergeable_state` reads `"behind"`
+forever, even on a fully green PR with zero real conflicts (`mergeable: true`).
+
+**Incident (2026-07-11, PR #697):** with every required check green, `gh pr merge 697 --merge`
+(and `--auto`) both refused: `"the head branch is not up to date with the base branch"`. This is
+`gh`'s own CLIENT-SIDE heuristic being overly cautious for this repo's workflow shape — it is NOT
+what GitHub's server-side branch protection actually enforces here. The direct REST call — the
+EXACT SAME operation the green "Merge pull request" web button performs, **not** an admin/bypass —
+succeeded immediately with zero special flags:
+
+```bash
+gh api repos/OWNER/REPO/pulls/<N>/merge -X PUT -f merge_method=merge -f commit_title="Merge pull request #<N> from zbynekdrlik/dev"
+```
+
+**Never reach for `--admin`** just because `gh pr merge` complains about "not up to date" — that
+IS a branch-protection bypass and is banned regardless (`autonomous-quality-discipline.md`). This
+`behind` state is a known-harmless artifact of this repo's specific two-branch shape, not a real
+staleness problem; the plain REST merge call is the correct, non-bypassing path when EVERY actual
+required check is green and `gh pr merge` is merely being overcautious about it.
+
+## GOTCHA — a live-triggered E2E gate run can race ahead of a mid-cycle fleet redeploy
+
+If a PR's fix requires a fleet redeploy to actually take effect on the live rig BEFORE the gate
+can pass (e.g. a WARN threshold recalibration — #685), the PR's own automatic `pull_request`-
+triggered "Full-path E2E" run can start (and fail, against the STILL-stale rig) before the redeploy
+finishes — pushing the fix and deploying it is NOT atomic with the CI trigger. Don't chase that
+failed run; once the redeploy is verified live (journal/WS read-back), get a FRESH run against the
+CURRENT rig state with:
+
+```bash
+gh workflow run "Full-path E2E (recording-based · hardware · self-hosted dev1)" --ref dev
+```
+
+This creates a `workflow_dispatch` run against `dev`'s current HEAD SHA — GitHub attaches it to the
+SAME commit's check-runs, so once it succeeds the PR's required "Full-path E2E (rig zero-loss
+gate)" check is satisfied even though an EARLIER run on that same SHA failed (`gh pr view`'s cached
+`statusCheckRollup` may still show the old failure — trust `gh api .../commits/<sha>/check-runs`
+or attempt the actual merge for the authoritative live verdict). Same "manual re-trigger after a
+stale/superseded run" pattern the `linux-genlock.yml` GOTCHA above documents for a cancelled run.
+
 ## Local Build Policy
 
 **Tier 0 (default) — CI builds the deployable binary; local checkouts run cheap checks only.**

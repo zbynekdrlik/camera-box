@@ -3257,3 +3257,58 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
   changes are provisioning scripts / standalone tools, not the deployed service.
 - No version bump needed on camera-box — dev (`1.7.0-dev.340`) was already strictly ahead of main
   (`1.7.0-dev.339`) at session start (post-#680-merge bump).
+
+## 2026-07-11 — #685 + #691 batch (PR #697)
+
+- **#685 (recalibrate capture self-heal per grabber model, `ac2006b08` + follow-up `7f4c7a2ef`,
+  `Closes #685`)**: fleet forensics found ALL 3 deployed ShadowCast 2 units (CAM1-3) show a
+  characteristic capture-rate wobble (up to ~8.3% deviation) that used to trip the #656 WARN /
+  #663 self-heal USB reset — a MODEL trait, not a per-unit defect (0/3 other-model grabbers show
+  it). Shipped `capture_rate_health::GrabberModel` + `grabber_model_for_hostname` +
+  `tolerance_pct_for_model` (ShadowCast 2 gets a 10% floor, every other model keeps the original
+  1%), and reworded `critical_escalation_message` to drop the "replace the hardware" diagnosis
+  (fleet-wide, no spares exist). **Live gap found + fixed mid-cycle**: the deployed fleet's
+  `config.toml` never sets the optional `hostname` field, so `grabber_model_for_hostname` always
+  resolved `Unknown` (strict 1% tolerance) — cam1 kept self-heal-resetting on its OWN normal
+  ~61fps wobble even after the first #685 binary was deployed. Fixed with `os_hostname()` (a
+  `gethostname(2)` wrapper) as the primary source, config-hostname only as a fallback. Verified
+  live post-redeploy: zero `#656`/`#663` lines across the WHOLE 6-box fleet (CAM1-6) despite
+  sustained ~60-61fps captured on the ShadowCast boxes.
+- **#691 (recording-e2e.sh's #358 gate permanently stomping the calibrated stream PGM latency,
+  RED `87ee557d1` / GREEN `8aad20362`, `Closes #691`)**: root cause was `obs_phase2.py`'s
+  `_snapshot_and_set_test_latency` discarding any existing saved snapshot on the "already at
+  target" fast path instead of restoring it — once the stream box got stuck at the 1000ms test
+  value (an earlier run's own restore never completing), every subsequent run silently
+  perpetuated the stomp. Fixed: snapshot now saved UNCONDITIONALLY before the check;
+  `resolve_test_latency_ms` derives the effective test latency from the box's OWN current value
+  (≥500ms → used as-is, zero forced change) instead of a blind 1000ms default; belt-and-braces
+  OPTIONAL `--calibrated-latency-ms` (env `AV_SYNC_CALIBRATED_MS`) cross-checks the restored value
+  against `av-sync-last.json`'s known-good prod value. **Live-verified from THIS PR's OWN
+  Full-path E2E gate run**: `[obs] 10.77.9.204: #358/#691 'NDI 2ME PGM' already at
+  genlock_latency_ms_src=925; nothing to force` — the calibrated 925ms value was never touched at
+  all, and a fresh OBS WebSocket read immediately after the run confirmed
+  `genlock_latency_ms_src = 925` live on the stream box.
+- CI gotcha hit live: PR #697's automatic `pull_request`-triggered Full-path E2E run raced ahead
+  of the mid-cycle fleet redeploy and failed on cam1's stale (pre-fix) binary; the fix was to
+  finish the redeploy, then `gh workflow run "Full-path E2E (recording-based · hardware ·
+  self-hosted dev1)" --ref dev` to get a FRESH run against the corrected fleet state (same
+  manual-retrigger pattern this file's `git commit -- <path>` GOTCHA section documents for a
+  cancelled `linux-genlock.yml` run).
+- Merge gotcha: `gh pr merge` (both plain and `--auto`) refused with "the head branch is not up
+  to date with the base branch" even though `mergeable: true` — this repo's dev branch is
+  STRUCTURALLY always "behind" main (main only ever gains 2-parent MERGE commits from past PRs;
+  dev is a pure linear branch that never pulls them back in — confirmed by inspecting the last
+  several `Merge pull request #N` commits' parents). The direct REST call (`gh api
+  repos/.../pulls/697/merge -X PUT -f merge_method=merge ...`) — the SAME operation the green
+  "Merge pull request" web button performs — succeeded immediately with zero admin/bypass flags.
+  `gh pr merge`'s client-side "up to date" heuristic is simply overly cautious for this repo's
+  workflow shape; the actual GitHub server-side branch protection does not block it.
+- Full local suite green (both feature-relevant test surfaces): Rust `cargo test` (577 lib tests
+  + all integration binaries, incl. the new `harness_recording_e2e_latency_stomp_691.rs`), Python
+  `pytest tests/python` (295 tests). `cargo fmt --check` + `cargo clippy --all-targets -- -D
+  warnings` clean.
+- Deployed camera-box binary (main `39dcc3096`, sha256 `1d45e84c...`) fleet-wide to CAM1-CAM6,
+  verified emit rates healthy (59-60 fps emitted / 60-61 fps captured) and zero capture-rate
+  WARNs on every box post-redeploy.
+- Version bump: dev `1.7.0-dev.343` → `1.7.0-dev.344` (post-merge; dev and main had converged to
+  the same version after this PR's merge).

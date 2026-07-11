@@ -143,10 +143,16 @@ operator/agent should grep for to diagnose a live desync (like the closed #529) 
 instead of re-deriving it from a fresh recording:
 
 ```
-av-sync-dock: LOCKED  offset=<ms> idx=<N> source=cluster matched=<n> mad=<ms>
-av-sync-dock: UPDATED offset=<ms> idx=<N> source=cluster matched=<n> mad=<ms>
-av-sync-dock: UNLOCKED last_offset=<ms> idx=<N>
+av-sync-dock: LOCKED offset=<ms>ms source=cluster matched=<n> mad=<ms>ms
+av-sync-dock: UPDATED offset=<ms>ms source=cluster matched=<n> mad=<ms>ms
+av-sync-dock: UNLOCKED last_offset=<ms>ms source=cluster
 ```
+
+**Correction (2026-07-11, #690): the `idx=<N>` field shown above in older versions of this doc was
+dropped in commit `56079f033`** ("drop misleading idx from audit log... the audit-log push() runs
+on EVERY CRC-4-accepted marker candidate... the idx8 printed alongside a LOCKED/UPDATED line was
+not reliably 'the frame this lock belongs to'"). The three lines above are the CURRENT,
+authoritative format — verified against the live `sync-test-output.cpp` glue, not just the doc.
 
 `camerabox::CbLockAuditTracker` (`vendor/av-sync-dock/src/camera-box-audio.hpp`, pure/OBS-free)
 owns the transition classification (Locked/Updated/Unlocked, with an "Updated" only firing when
@@ -163,3 +169,43 @@ av-sync-dock" job fires on every `dev` push touching this tree and does a REAL M
 whole plugin against the genlocked OBS SDK (see `#188` in that workflow). So a dock-only change
 gets a genuine compile proof on the SAME push-to-dev cycle as everything else — dispatching the
 full 150-min `windows-genlock.yml` afterward is a belt-and-braces extra proof, not the only gate.
+
+## #689/#690 (2026-07-11) — RECORDED AUDIO CAN BE SILENT even when OBS meters show activity; check volume BEFORE trusting a marker recording
+
+A fresh, validly-executed cam2-only measurement attempt (with the #691 harness-stomp fix confirmed
+holding — `NDI 2ME PGM` stayed at the calibrated **925ms** throughout, untouched by any E2E run)
+decoded to `Error: too few clustered A/V pairs to estimate (audio markers 0, video ticks 6900,
+candidates 0, need 4 within ±60 ms)` — **zero** audio candidates, despite the video-side dual-QR
+decode working perfectly (7060/7060 frames, 6900 ticks). Root-caused, not guessed:
+
+- `ffprobe` confirmed the recorded MP4 has exactly ONE audio stream (`aac 48000Hz 2ch`, matching
+  the marker log's `sr=48000` header) — ruled out a wrong `--av-audio-track` index.
+- `mbc`/`fallback repro` are both assigned to OBS audio tracks 1-6 (`GetInputAudioTracks` → all
+  `true`) — ruled out a track-routing misconfiguration.
+- **`ffmpeg -af volumedetect` over the whole recorded audio stream measured `mean_volume: -91.0 dB`,
+  `max_volume: -91.0 dB`** — i.e. the recorded track is essentially digital silence, not just a
+  quiet/masked marker. This is despite the live OBS Audio Mixer showing meter motion on `mbc`
+  during the test — whatever the on-screen meters were showing was NOT what ended up muxed into
+  the recording.
+
+**Mandatory pre-flight for any future av-sync recording (cam2-only OR fused ALL_CAMBOX): before
+committing to the full ~150-300s run, record a short 15-20s clip first and run**
+```
+ffmpeg -i <clip.mp4> -af volumedetect -f null - 2>&1 | grep -E "mean_volume|max_volume"
+```
+**and confirm it reads meaningfully above the noise floor (e.g. > -50dB) before trusting a marker
+will be present.** This costs under a minute and would have caught the #689 failure immediately
+instead of burning a full ~15 min record+decode cycle for a doomed recording. Full raw evidence:
+issue #689 comment 2026-07-11 (`recording-verdict --av-sync` output, `ffprobe`/`GetInputAudioTracks`/
+`volumedetect` results).
+
+**The #398/#690 dock is ALSO blocked by both a stale deployed build AND this same audio-silence
+class of issue** — the dock's `on_start_stop()` binds to `obs_get_video()`/`obs_get_audio()` (the
+box's PROGRAM canvas + the GLOBAL MASTER AUDIO MIX, the same bus Recording/Stream use), so it is
+exposed to the identical "meters show something, the actual bus carries nothing" trap. Confirmed
+live 2026-07-11: BOTH strih's and stream's deployed `obs-audio-video-sync-dock.dll` predate the
+#398 decode-lock fix (`125c0c617`, 2026-07-03 17:32 — after both DLLs were built) and the #634
+audit-logging feature (2026-07-10) entirely; clicking Start against a real, confirmed-live cam2
+signal for >4 minutes left Latency/Index/Audio Frequency/Video Index/Audio Index all at `-` the
+whole time. Rebuild+redeploy tracked in #698 — do NOT attempt to verify the dock's live lock again
+until that lands AND the volumedetect pre-flight above is clean.
