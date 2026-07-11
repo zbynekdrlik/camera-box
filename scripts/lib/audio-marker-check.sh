@@ -93,18 +93,27 @@ CHECK
 # whole window passes with the count flat. A single row-count read is not enough (the emitter may
 # simply not have reached its first cadence tick yet); requiring GROWTH across the window is what
 # proves the feed is not just alive but actually producing markers.
+#
+# #667 FIX: `grep -c PATTERN FILE` returns a NON-ZERO exit status whenever the match count is zero
+# (or FILE doesn't exist yet) — even though it correctly prints "0"/nothing to stdout. The caller
+# (painter_launch_remote in rig-mode.sh) wraps its WHOLE heredoc in `set -e`, so a bare
+# `c0=$(grep -c ...)` assignment SILENTLY ABORTED THE REMOTE SCRIPT the instant it sampled the
+# marker log before the very first QPSK marker had fired (~3s cadence race right after painter
+# launch) — with ZERO output, before this check ever printed its own PASS/FAIL. Both `grep -c`
+# calls below now use the `|| true` guard already established elsewhere in this codebase for the
+# same footgun (scripts/verify-device.sh, scripts/genlock-manifest.sh, scripts/drift-guard.sh).
 audio_marker_emission_check_cmds() {
   local marker_log="$1"
   local on_fail_cmd="${2:-true}"
   local extra="${3:-}"
   cat <<CHECK
-c0=\$(grep -c '^[0-9]' "$marker_log" 2>/dev/null); c0=\${c0:-0}
+c0=\$(grep -c '^[0-9]' "$marker_log" 2>/dev/null || true); c0=\${c0:-0}
 grown=0
 interval="\${AUDIO_MARKER_EMIT_POLL_INTERVAL_SECS:-3}"
 attempts="\${AUDIO_MARKER_EMIT_POLL_ATTEMPTS:-3}"
 i=0; while [ \$i -lt "\$attempts" ]; do
   sleep "\$interval"
-  c1=\$(grep -c '^[0-9]' "$marker_log" 2>/dev/null); c1=\${c1:-0}
+  c1=\$(grep -c '^[0-9]' "$marker_log" 2>/dev/null || true); c1=\${c1:-0}
   if [ "\$c1" -gt "\$c0" ]; then grown=1; break; fi
   c0=\$c1
   i=\$((i+1))
