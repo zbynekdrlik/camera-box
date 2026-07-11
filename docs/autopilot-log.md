@@ -3084,3 +3084,46 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
 - Rig restored to clean EVENT mode after all runs (verified: rig-busy-gate FREE, all 6 camera-box
   services active, cam2-painter active, burns off both boxes, prod scenes restored).
 - Artifacts on dev1: `/tmp/recording-e2e-{1783723036,1783724370,1783725853,1783727115}/`.
+
+## 2026-07-11 — #466 restart-survival: resumed + completed, cleanest measurement yet, still not clean PASS
+
+- Resumed from durable state after a prior worker died mid-protocol. Decoding the inherited
+  BEFORE-pass (RUN_ID 1783735291, CAM=cam4, imag explicitly routed to `NDI CAM4` for the first
+  time) crashed `recording-verdict.exe` on the stream recording — rqrr's `Perspective::map`
+  (geometry.rs:55) internal panic, a DIFFERENT assert than the already-guarded `scan >= 1`, on
+  the primary full-frame decode path (zero panic protection there). Fixed as **#673** (PR #676,
+  merged `5eecda587`, dev bumped to 1.7.0-dev.338): both of `decode_qr_luma_all`'s rqrr calls now
+  route through the existing `rqrr_decode_all_catch`; added a WARN log + opt-in
+  `QR_DECODE_PANIC_DUMP_DIR` frame-dump diagnostic. `[no-test: ...]` bypass used after an
+  extensive (~130,000+ combined attempts, 6 strategies) failed synthetic-repro effort — the fix's
+  safety is instead verified by all 27 existing `probe::qr` tests passing unchanged + a live
+  re-run on the real crashing recording (caught the same panic, completed successfully).
+- Completed the protocol with the fixed binary: BEFORE-pass merge = the cleanest full-chain
+  result in this EPIC's entire history (cam4/strih/stream/imag ALL `zero_loss=true`,
+  `overall_pass=true`). Real OBS restart (force-kill + relaunch, both boxes, genlock re-confirmed).
+  AFTER-pass (RUN_ID 275516850, same config): cam4/strih/stream still all clean, but **imag now
+  fails the `#588` judder gate** (`imag_optical_stuck_density` 0.67% -> 2.17%, ceiling 1.00%).
+  Checked cam4's OWN capture-rate log for the exact AFTER window — perfectly healthy, 0
+  capture-dropped, no `#656`/self-heal — so this is NOT the historical cam1-hardware confound.
+  `zero-loss-restart-gate` -> FAIL (as every prior attempt), but for a genuinely NEW, narrower
+  reason. Filed **#674** with full evidence; commented full evidence + honest conclusion on #466
+  (stays OPEN, blocked on #674).
+- **Found + escalated a separate, severe rig-reliability bug**: `recording-e2e.sh`'s cleanup can
+  silently leave the SOURCE camera's (and/or cam2's) production `camera-box.service` INACTIVE
+  after a run, with zero signal in the harness's own log (the remote restore command is wrapped
+  in `2>/dev/null || true`). Hit this 4 times in one session (cam2 x2, cam4 x1, cam1 x1) —
+  including after the auto-triggered `Full-path E2E` CI check on PR #676 FAILED because cam4 was
+  already dark from an earlier dispatch's leftover state, then AGAIN after that same CI check's
+  own successful rerun. Manually restarted the affected boxes each time (verified healthy after).
+  Filed **#675** with full evidence, including that the exact same restore command succeeds
+  cleanly when run standalone (suspect ssh/session contention during a busy dispatch, not a
+  broken command) — root cause not yet fixed.
+- Rig restored to clean EVENT mode + verified: all 4 active cam boxes (`cam1`/`cam2`/`cam3`/`cam4`)
+  `systemctl is-active camera-box` = active, no stray painter, burns OFF on strih/stream/imag,
+  strih/stream OBS scenes restored, `rig-mode.sh event` re-run for good measure.
+- PR #676 (fix #673) merged after ALSO diagnosing + fixing the #675 symptom live (twice, since it
+  recurred) to unblock the required `Full-path E2E` CI gate, plus riding out one genuine cam1
+  `#656` hardware-flakiness episode (fixed with the documented manual USB `authorized` 0/1 reset)
+  that was ALSO blocking the same gate, unrelated to my code change.
+- Artifacts: `/tmp/recording-e2e-{1783735291,275516850}/` on dev1 (verdict JSONs, partials,
+  pixel-proofs, latency CSVs, painter CSVs).
