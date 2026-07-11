@@ -1566,6 +1566,12 @@ STREAM_RECORDING_STARTED=1  # #649: same — set only once this box's OWN StartR
 python3 "$HERE/obs_phase2.py" record --host "$IMAG_IP" --action start
 IMAG_RECORDING_STARTED=1    # #649: same — set only once this box's OWN StartRecord succeeded
 
+# #705: snapshot the recording window's START epoch (wall clock) — the mid-recording
+# capture-rate check ([7b/8] below) bounds its journal read to EXACTLY this window, so a
+# #656/#663 defect that recurs DURING the recording gets its own distinct diagnostic instead of
+# only surfacing (mis-attributed) via the eventual zero-loss/A-V verdict.
+CAPTURE_RATE_WINDOW_START_EPOCH="$(date +%s)"
+
 # #312 Phase-2 ALL-CAMBOX SWEEP (opt-in via ALL_CAMBOX=1). Instead of one steady-state hold on a
 # single cambox, sequentially cut EACH active cambox into strih PROGRAM for ~SEGMENT_SECS, cycling
 # the sweep until the total reaches DURATION, while the ONE continuous stream recording keeps
@@ -1667,9 +1673,43 @@ STREAM_HOST_PATH=$(python3 "$HERE/obs_phase2.py" record --host "$STREAM" --actio
   || echo "WARNING: stream StopRecord returned non-zero (continuing; recording may already be stopped)" >&2
 IMAG_HOST_PATH=$(python3 "$HERE/obs_phase2.py" record --host "$IMAG_IP" --action stop) \
   || echo "WARNING: imag StopRecord returned non-zero (continuing; recording may already be stopped)" >&2
+# #705: snapshot the recording window's END epoch — pairs with CAPTURE_RATE_WINDOW_START_EPOCH
+# ([5/8] above) to bound the mid-recording capture-rate check immediately below.
+CAPTURE_RATE_WINDOW_END_EPOCH="$(date +%s)"
 echo "    strih host file:  ${STRIH_HOST_PATH:-<unknown>}"
 echo "    stream host file: ${STREAM_HOST_PATH:-<unknown>}"
 echo "    imag host file:   ${IMAG_HOST_PATH:-<unknown>}  (#462 — stays ON imag, decoded in place below)"
+
+# [7b/8] capture-delivery-rate POST-recording check (#705): the [0/8] preflight above only
+# proves $CAMERA_NAME was clean BEFORE the recording started -- the #656/#663 ShadowCast judder
+# is confirmed to RECUR mid-session (PR #704's own real-verdict CI run: cam1's own
+# recurrence_heal_count=30 at the time of that incident), so a clean preflight does not
+# guarantee the recording stayed clean for its whole duration. Re-resolve the CURRENT
+# camera-box.service InvocationID here -- NOT the stale $CAPTURE_RATE_INVOCATION_ID the [0/8]
+# preflight resolved: [2/8] (which already ran by this point) redeploys + restarts camera-box,
+# so that id names a KILLED prior process instance and a query scoped to it would silently see
+# NOTHING that happened during the actual recording. Re-query the SAME #656 journal signal,
+# this time bounded to the EXACT recording window via journalctl's own native absolute-time
+# --since=@epoch/--until=@epoch filtering (capture_rate_window_journalctl_cmd) -- no bash-side
+# timestamp math needed. This FAILS the run HERE, before the ~5-10 min decode step below ever
+# launches (the recording itself already happened and can't be un-spent, but the decode-time
+# portion of the budget is saved), with a diagnostic (capture_rate_recurrence_message) that reads
+# distinctly from the preflight's own failure so a human/CI reader never again has to manually
+# correlate journalctl timestamps against the recording window by hand (exactly what #703's own
+# PR #704 diagnosis required).
+echo "[7b/8] capture-delivery-rate POST-recording check — $CAMERA_NAME must not have recurred a #656/#663 defect during the recording (#705)"
+CAPTURE_RATE_WINDOW_INVOCATION_ID="$(sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$CAM1_IP" \
+  "systemctl show -p InvocationID --value camera-box 2>/dev/null" 2>/dev/null || true)"
+CAPTURE_RATE_RECURRENCE_LINE="$(sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$CAM1_IP" \
+  "$(capture_rate_window_journalctl_cmd "$CAPTURE_RATE_WINDOW_INVOCATION_ID" "$CAPTURE_RATE_WINDOW_START_EPOCH" "$CAPTURE_RATE_WINDOW_END_EPOCH") | grep -E '$(capture_rate_defect_grep_pattern)' | tail -1" \
+  2>/dev/null || true)"
+if [ -n "$CAPTURE_RATE_RECURRENCE_LINE" ]; then
+  echo "ERROR: $(capture_rate_recurrence_message "$CAMERA_NAME" "$CAPTURE_RATE_RECURRENCE_LINE")" >&2
+  echo "       matched journal line: $CAPTURE_RATE_RECURRENCE_LINE" >&2
+  exit 1
+fi
+echo "    ok: no capture-rate defect recurrence in $CAMERA_NAME's journal during the recording window (${CAPTURE_RATE_WINDOW_START_EPOCH}..${CAPTURE_RATE_WINDOW_END_EPOCH})"
+
 # #359: do NOT kill the painter early. frame-probe writes the ground-truth CSV ONLY on its clean
 # --duration-secs self-exit (src/probe/run.rs) — the old unconditional `pkill -x frame-probe` here
 # fired at ~DURATION, BEFORE the painter's DURATION+60 self-exit, so it never wrote a fresh CSV and

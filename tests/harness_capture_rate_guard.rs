@@ -344,8 +344,7 @@ fn capture_rate_window_journalctl_cmd_scopes_to_invocation_id_and_time_window() 
 }
 
 #[test]
-fn capture_rate_window_journalctl_cmd_falls_back_to_unscoped_unit_read_when_invocation_id_empty()
-{
+fn capture_rate_window_journalctl_cmd_falls_back_to_unscoped_unit_read_when_invocation_id_empty() {
     let out = run_sourced("capture_rate_window_journalctl_cmd '' 1000 2000");
     let cmd = out.trim();
     assert!(
@@ -425,9 +424,9 @@ fn recording_e2e_captures_the_recording_window_start_and_end_epoch() {
     let start_record_pos = s
         .find("echo \"[5/8] StartRecord")
         .expect("[5/8] StartRecord step must exist");
-    let window_start_pos = s.find("CAPTURE_RATE_WINDOW_START_EPOCH=").expect(
-        "#705: recording-e2e.sh must snapshot the recording window's START epoch",
-    );
+    let window_start_pos = s
+        .find("CAPTURE_RATE_WINDOW_START_EPOCH=")
+        .expect("#705: recording-e2e.sh must snapshot the recording window's START epoch");
     assert!(
         window_start_pos > start_record_pos,
         "#705: the window START epoch must be captured AFTER StartRecord actually runs"
@@ -436,9 +435,9 @@ fn recording_e2e_captures_the_recording_window_start_and_end_epoch() {
     let stop_record_pos = s
         .find("echo \"[7/8] StopRecord")
         .expect("[7/8] StopRecord step must exist");
-    let window_end_pos = s.find("CAPTURE_RATE_WINDOW_END_EPOCH=").expect(
-        "#705: recording-e2e.sh must snapshot the recording window's END epoch",
-    );
+    let window_end_pos = s
+        .find("CAPTURE_RATE_WINDOW_END_EPOCH=")
+        .expect("#705: recording-e2e.sh must snapshot the recording window's END epoch");
     assert!(
         window_end_pos > stop_record_pos,
         "#705: the window END epoch must be captured AFTER the [7/8] StopRecord step begins"
@@ -511,8 +510,8 @@ fn recording_e2e_runs_the_post_recording_capture_rate_check_after_stoprecord() {
 }
 
 #[test]
-fn recording_e2e_post_check_reresolves_invocation_id_after_start_record_not_the_stale_preflight_one()
-{
+fn recording_e2e_post_check_reresolves_invocation_id_after_start_record_not_the_stale_preflight_one(
+) {
     let s = read("scripts/recording-e2e.sh");
     let start_record_pos = s
         .find("echo \"[5/8] StartRecord")
