@@ -1,0 +1,13 @@
+[Unit]
+# Fires the #674 imag-nb genlock-FIFO audit delta reporter every 5 minutes.
+Description=Run the imag-nb genlock-FIFO audit delta reporter every 5 minutes (#674)
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+Persistent=false
+
+[Install]
+WantedBy=timers.target

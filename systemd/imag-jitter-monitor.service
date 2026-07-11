@@ -1,0 +1,16 @@
+[Unit]
+# #674 — imag-nb periodic genlock-FIFO audit delta reporter (telemetry for the NEXT natural
+# occurrence of the #588 judder, after a targeted restart-only repro found no reproduction).
+# Runs on imag-nb itself, as the desktop `newlevel` user (systemd --user unit — matches
+# ~/.config/systemd/user/ convention; imag-nb's OWN OBS also runs as this user).
+Description=imag-nb genlock-FIFO audit delta reporter (#674)
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Service]
+Type=oneshot
+# %h = newlevel's home on imag-nb. Deployed alongside its scripts/lib/imag-jitter-state.sh sibling.
+ExecStart=%h/imag-jitter-monitor/imag-jitter-monitor.sh
+TimeoutStartSec=30
+
+[Install]
+WantedBy=default.target

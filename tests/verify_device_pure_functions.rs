@@ -1145,3 +1145,135 @@ fn check_dantesync_liveness_is_wired_into_the_d_live_flow() {
          misattributed to 'daemon hung' (#600 review)"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// (s) /var/log tmpfs bounded against runaway growth -- size cap + frequent rotation check (#679)
+//
+// Every cam box's /var/log is a fixed 50MB tmpfs; the stock logrotate config only rotates on a
+// weekly calendar with no `size` cap, so a chatty logger (dantesync's per-second [PTP] Drift line
+// was ~65% of the fleet's volume) filled it in ~4-5 days and crashed cam2's camera-box.service
+// (2026-07-11). log_bound_verdict (scripts/lib/log-bound.sh) requires BOTH a `size` cap on
+// /etc/logrotate.d/rsyslog AND a systemd timer drop-in that checks far more often than the stock
+// daily cadence.
+// ---------------------------------------------------------------------------------------------
+
+fn log_bound_verdict_of(block: &str) -> String {
+    let (code, out, err) = run_sourced(&format!(
+        "BLOCK='{}'\nlog_bound_verdict \"$BLOCK\"",
+        block.replace('\'', "'\\''")
+    ));
+    assert_eq!(code, 0, "harness crashed. stderr: {err}");
+    out.trim().to_string()
+}
+
+#[test]
+fn log_bound_verdict_ok_when_size_cap_and_frequent_dropin_are_both_present() {
+    let block = "\
+LOGROTATE_RSYSLOG_SIZE=5M
+LOGROTATE_FREQUENT_DROPIN=[Timer]|OnCalendar=|OnCalendar=*:0/15|AccuracySec=1min|";
+    assert_eq!(log_bound_verdict_of(block), "ok");
+}
+
+#[test]
+fn log_bound_verdict_fails_when_the_size_cap_is_missing() {
+    let block = "\
+LOGROTATE_RSYSLOG_SIZE=
+LOGROTATE_FREQUENT_DROPIN=[Timer]|OnCalendar=|OnCalendar=*:0/15|AccuracySec=1min|";
+    let v = log_bound_verdict_of(block);
+    assert!(
+        v.starts_with("FAIL:") && v.contains("size"),
+        "missing size cap must FAIL with a size-related reason, got: {v}"
+    );
+}
+
+#[test]
+fn log_bound_verdict_fails_when_the_frequent_dropin_is_missing() {
+    let block = "\
+LOGROTATE_RSYSLOG_SIZE=5M
+LOGROTATE_FREQUENT_DROPIN=";
+    let v = log_bound_verdict_of(block);
+    assert!(
+        v.starts_with("FAIL:") && v.contains("99-camera-box-frequent.conf"),
+        "missing frequent-check drop-in must FAIL naming the drop-in path, got: {v}"
+    );
+}
+
+#[test]
+fn log_bound_verdict_fails_when_the_dropin_exists_but_stays_on_the_stock_daily_cadence() {
+    // A drop-in file present but with the WRONG content (e.g. a no-op override, or a future edit
+    // dropping the short interval) must still FAIL -- presence alone is not proof.
+    let block = "\
+LOGROTATE_RSYSLOG_SIZE=5M
+LOGROTATE_FREQUENT_DROPIN=[Timer]|OnCalendar=daily|";
+    let v = log_bound_verdict_of(block);
+    assert!(
+        v.starts_with("FAIL:") && v.contains("short OnCalendar"),
+        "a drop-in with no short OnCalendar interval must still FAIL, got: {v}"
+    );
+}
+
+#[test]
+fn log_bound_gather_remote_snippet_prints_both_expected_keys() {
+    let (code, out, err) = run_sourced("log_bound_gather_remote_snippet");
+    assert_eq!(code, 0, "harness crashed. stderr: {err}");
+    assert!(
+        out.contains("LOGROTATE_RSYSLOG_SIZE=") && out.contains("LOGROTATE_FREQUENT_DROPIN="),
+        "log_bound_gather_remote_snippet must print BOTH KEY= lines log_bound_verdict parses, \
+         got: {out}"
+    );
+}
+
+#[test]
+fn log_bound_logrotate_config_carries_the_size_cap_and_all_six_log_paths() {
+    let (code, out, err) = run_sourced("log_bound_logrotate_config");
+    assert_eq!(code, 0, "harness crashed. stderr: {err}");
+    for needle in [
+        "/var/log/syslog",
+        "/var/log/auth.log",
+        "/var/log/kern.log",
+        "size 5M",
+        "rotate 1",
+        "/usr/lib/rsyslog/rsyslog-rotate",
+    ] {
+        assert!(
+            out.contains(needle),
+            "log_bound_logrotate_config output must contain '{needle}', got: {out}"
+        );
+    }
+}
+
+#[test]
+fn log_bound_logrotate_config_output_itself_passes_the_verdict_it_gates() {
+    // Round-trip: the SAME content this generator writes to the box must itself parse as "ok"
+    // through the size-cap half of log_bound_verdict's grep — proves the generator and the
+    // verdict's parsing regex agree on the literal `size <N><unit>` shape.
+    let (code, out, err) = run_sourced(
+        r#"
+        cfg="$(log_bound_logrotate_config)"
+        echo "$cfg" | grep -oE 'size[[:space:]]+[0-9]+[kKmMgG]' | head -1 | awk '{print $2}'
+        "#,
+    );
+    assert_eq!(code, 0, "harness crashed. stderr: {err}");
+    assert_eq!(
+        out.trim(),
+        "5M",
+        "the verdict's own size-cap grep must extract '5M' from log_bound_logrotate_config's output"
+    );
+}
+
+#[test]
+fn log_bound_timer_dropin_sets_a_short_oncalendar_interval() {
+    let (code, out, err) = run_sourced("log_bound_timer_dropin");
+    assert_eq!(code, 0, "harness crashed. stderr: {err}");
+    assert!(
+        out.contains("OnCalendar=*:0/"),
+        "log_bound_timer_dropin must set a short OnCalendar interval, got: {out}"
+    );
+    // Round-trip against the verdict's own parsing shape (the gather snippet flattens newlines to
+    // '|' before log_bound_verdict inspects it).
+    let flattened = out.replace('\n', "|");
+    assert!(
+        flattened.contains("OnCalendar=*:0/"),
+        "flattened drop-in content must still contain the short interval, got: {flattened}"
+    );
+}

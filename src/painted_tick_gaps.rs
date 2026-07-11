@@ -29,26 +29,45 @@
 //! `a, a+2, a+4, a+6`) manufactures THREE phantom gaps (a backward jump, then TWO oversized
 //! forward jumps) for ZERO actual loss.
 //!
-//! ## The fix
+//! ## The fix (#625 — sort out reordering)
 //!
 //! [`painted_tick_gaps`] walks the DISTINCT present tick VALUES in SORTED (not recorded) order.
 //! Since the underlying painted tick is a monotonically-increasing counter at the SOURCE
 //! (cam2's painter), sorting recovers the true delivery-order-independent sequence; a benign
 //! reorder collapses to zero extra gaps (sorting a swapped-but-complete run yields the SAME
-//! sorted sequence as the unswapped run). The existing decimation-aware tolerance
-//! (`delta / expected_step - 1`, crediting up to `undecodable` frames) is UNCHANGED — only the
-//! walk order changes — so a genuinely missing tick value is still caught (never masked): sorting
-//! cannot make an absent value appear, it can only stop a present-but-reordered value from being
-//! misread as absent-then-duplicated.
-
-/// Compute the number of genuinely-missing painted-tick slots ("gaps") from the DISTINCT present
-/// tick values observed in one all-cambox schedule window, crediting up to `undecodable` (frames
-/// that reached the recording but whose painted tick did not decode — BURN-UNREADABLE, never a
-/// lost frame) against the count. `present_ticks` may be given in ANY order (recorded order,
-/// reversed, shuffled) — the function sorts internally, so a benign stream-recording reorder
-/// (`#133`/`#196`/`#216`) can never manufacture a phantom gap. `expected_step` is the by-design
-/// decimation step (2 for the 60Hz painter read from a 30fps stream recording); values `<= 0`
-/// floor to `1` (no decimation).
+//! sorted sequence as the unswapped run).
+//!
+//! ## The SECOND bug (#681, live evidence RUN_ID 1783727115, 2026-07-11) — a BIASED per-pair walk
+//!
+//! Sorting fixed reordering, but the #625 fix still summed each ADJACENT pair's shortfall
+//! independently (`delta / expected_step - 1`, floored at 0 per pair) — a systematically BIASED
+//! estimator. The dual-QR Vernier's normal asynchronous even/odd sampling beat routinely produces
+//! SOME local deltas SMALLER than `expected_step` (the camera resolves both halves back-to-back,
+//! e.g. delta=1 at expected_step=2) followed by a compensating catch-up jump. A per-pair floor-
+//! at-zero walk credits NOTHING for the finer-than-nominal pair (its true contribution is
+//! slightly NEGATIVE — "ahead of schedule" — but negative is floored away) while charging the
+//! FULL integer-divided penalty for the later catch-up jump, with no memory that the earlier fine
+//! sampling had already "pre-paid" for it. Over hundreds of such pairs this compounds into
+//! hundreds of phantom gaps: RUN_ID 1783727115's CAM4 window (a camera independently proven
+//! clean elsewhere in the SAME session) showed sorted-distinct deltas of `{1: 659, 6: 160, ...}`
+//! — the per-pair walk summed 333 raw (329 credited), a ~40x overcount, while the honest
+//! whole-window NET account (`expected_count(845) - present_count(837) = 8`, under 1%) proves the
+//! window was essentially loss-free.
+//!
+//! ## The fix (#681)
+//!
+//! Replace the per-pair summation with a single WHOLE-WINDOW net-span calculation:
+//! `expected_count = (last - first) / expected_step + 1` minus the actual `present_count`
+//! (distinct sorted values). This is mathematically unbiased — a local run that is FINER than
+//! nominal (more distinct values across a given span than the nominal grid predicts) naturally
+//! nets AGAINST a later coarser/catch-up run within the SAME window, exactly mirroring the
+//! existing "avg tick step ≈ expected, zero NET loss" acceptance methodology
+//! (`.claude/skills/e2e`'s Dual-QR Vernier proof) instead of re-deriving a second, biased,
+//! per-transition accounting. A genuinely missing chunk (present_count too small relative to the
+//! span even after crediting undecodable frames) is still caught in full — the net-span
+//! calculation is a strict generalization: whenever every observed delta happens to be `>=
+//! expected_step` (the #625 tests' shape), it produces the IDENTICAL result the old per-pair walk
+//! did; it only diverges (correctly) when some deltas are SMALLER than nominal.
 pub fn painted_tick_gaps(present_ticks: &[u32], undecodable: u32, expected_step: i64) -> u32 {
     let expected_step = expected_step.max(1);
 
@@ -56,14 +75,14 @@ pub fn painted_tick_gaps(present_ticks: &[u32], undecodable: u32, expected_step:
     sorted.sort_unstable();
     sorted.dedup();
 
-    let mut raw_gaps: i64 = 0;
-    for w in sorted.windows(2) {
-        let delta = i64::from(w[1]) - i64::from(w[0]);
-        let lost = (delta / expected_step) - 1;
-        if lost > 0 {
-            raw_gaps += lost;
+    let raw_gaps: i64 = match (sorted.first(), sorted.last()) {
+        (Some(&first), Some(&last)) => {
+            let expected_count = (i64::from(last) - i64::from(first)) / expected_step + 1;
+            let present_count = sorted.len() as i64;
+            expected_count - present_count
         }
-    }
+        _ => 0, // empty input: nothing observed, nothing expected
+    };
 
     // Each BURN-UNREADABLE (undecodable) frame reached the recording but its painted tick did not
     // decode — it may have occupied exactly one candidate slot, so credit up to `undecodable`
@@ -162,6 +181,66 @@ mod tests {
         assert_eq!(
             painted_tick_gaps(&present, 0, -5),
             painted_tick_gaps(&present, 0, 1)
+        );
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // #681 — the PER-PAIR walk itself (even sorted) is a BIASED estimator: it floors every
+    // individual pair's shortfall at zero (never crediting a "faster than nominal" local run,
+    // where `delta < expected_step`, against a LATER catch-up jump), so it manufactures large
+    // phantom gaps whenever the dual-QR Vernier's normal asynchronous even/odd sampling beat
+    // produces some finer-than-nominal local deltas. Live evidence: RUN_ID 1783727115's CAM4
+    // window (a camera independently proven clean elsewhere that session) — real sorted-distinct
+    // tick deltas were {1: 659 times, 6: 160 times, ...} at expected_step=2. The whole-window
+    // NET account is span-based and honest: expected_count=(last-first)/step+1=845,
+    // present_count=837, true residual = 8 (< 1%) — but the OLD per-pair walk summed 333 raw
+    // (329 credited after the 4 undecodable), a ~40x overcount purely from flooring each
+    // finer-than-nominal pair's negative contribution to zero instead of letting it net out
+    // against the later catch-up jumps. See `docs/autopilot-log.md` for the full investigation.
+    // ---------------------------------------------------------------------------------------
+
+    #[test]
+    fn sampling_beat_with_zero_net_loss_reports_zero_gaps_681() {
+        // Three "groups" of 5 consecutive tick values (delta=1 within a group — the Vernier
+        // resolving BOTH the even and odd half most of the time), each group separated by a
+        // delta=6 catch-up jump — the EXACT shape observed live on RUN_ID 1783727115's CAM4
+        // window. At the nominal step 2, this sequence's ACHIEVED resolution is FINER than
+        // nominal (15 distinct values across a span the step-2 grid would only expect 13 of) —
+        // provably NOT lossy: `expected_count(13) <= present_count(15)`.
+        let mut present = Vec::new();
+        let mut v: u32 = 1000;
+        for _group in 0..3 {
+            for _ in 0..5 {
+                present.push(v);
+                v += 1;
+            }
+            v += 5; // the delta=6 catch-up jump to the next group's first value
+        }
+        assert_eq!(
+            painted_tick_gaps(&present, 0, 2),
+            0,
+            "a benign sampling-beat pattern (some finer-than-nominal local deltas, netting to \
+             zero loss over the whole window) must never manufacture a phantom gap — the OLD \
+             per-pair-floor walk reported 4 phantom gaps for this exact shape"
+        );
+    }
+
+    #[test]
+    fn sampling_beat_with_a_real_gap_still_reports_the_real_loss_681() {
+        // Same benign beat pattern as above, PLUS one genuinely large real gap (a true ~36-tick
+        // loss) spliced in. The fix must still catch the real loss even amid the benign noise —
+        // netting out the beat pattern must never mask an actual drop.
+        let present: Vec<u32> = vec![
+            1000, 1001, 1002, 1003, 1004, // benign group 1
+            1010, 1011, 1012, 1013,
+            1014, // benign group 2 (delta=6 catch-up, net-zero so far)
+            1050, 1051, 1052, 1053, 1054, // group 3, after a REAL ~36-tick gap (1014 -> 1050)
+        ];
+        // expected_count = (1054-1000)/2 + 1 = 28; present_count = 15; real residual = 13.
+        assert_eq!(
+            painted_tick_gaps(&present, 0, 2),
+            13,
+            "a genuine large gap spliced amid benign beat noise must still be reported honestly"
         );
     }
 }

@@ -18,7 +18,7 @@
 
 | Device | IP Address | Status | Notes |
 |--------|------------|--------|-------|
-| CAM1 | 10.77.9.61 | Active | READ-ONLY reference |
+| CAM1 | 10.77.9.61 | Active | SSH: root/newlevel (ro-root appliance like the whole fleet — deploy normally; the old "READ-ONLY reference" note meant the ro filesystem, NOT "skip deploys") |
 | CAM2 | 10.77.9.62 | Active | SSH: root/newlevel |
 | CAM3 | 10.77.9.63 | Active | SSH: root/newlevel |
 | CAM4 | 10.77.9.64 | Active | SSH: root/newlevel |
