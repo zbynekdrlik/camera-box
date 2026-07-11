@@ -2,6 +2,62 @@
 
 Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads context.
 
+## 2026-07-11 — #703 required-gate execution fix: LANDED + verified working, HELD unmerged (PR #704, v1.7.0-dev.347)
+
+- **#703** (CRITICAL: required merge gate exits GREEN without ever computing the zero-loss/A/V
+  verdict): fixed for real. `4743e2e9b` RED (20 new tests against pre-fix code, verified absent
+  at `eef1e688e`), `1262ddbda` GREEN (`scripts/lib/win-ssh-exec.sh` new — ssh/scp exec helpers
+  for strih/stream, live-verified against the rig before writing code; `--execute` mode on
+  `recording-verdict-on-strih.sh`/`-on-stream.sh`; `E2E_EXECUTE_VERDICT` wiring in
+  `recording-e2e.sh` — parallel backgrounded strih+stream extracts, real merge invocation,
+  `exit "$GATE"`; the workflow's Windows-artifact fetch step + fail-closed structural guard +
+  RUN_ID-scoped artifact upload). `tests/recording_verdict_merge_gate_exit_code.rs` (from a
+  dispatched fork's investigation, reviewed + compiled+run locally via the sanctioned one-off
+  `--features probe` bypass before trusting it) proves the #641/#624 AV+spread gates fold into
+  the real CLI subprocess exit code, not just an in-process bool.
+- **Two more real bugs found by the FIRST live CI execution** (nothing had ever really run
+  before #703, so nothing had exercised these paths): `72d8b2131` — (1) `scp` download of a
+  Windows backslash path fails "No such file or directory" even though the file exists (fixed:
+  convert `\`→`/` for the scp SOURCE spec only; upload/destination side is unaffected, verified
+  separately); (2) plain `basename` doesn't split on `\`, corrupting the pull-back local path;
+  (3) the cam2 A/V-marker CSV push to stream was print-only even in execute mode (a PRE-#703 gap
+  this exposed) — now actually `win_ssh_upload`'d. All three fixed, live-verified against strih
+  directly, regression-tested (5 new tests). Playbook: `.claude/skills/ci` documents both scp
+  gotchas + the "grep for remaining MCP-instruction-only lines" lesson.
+- **Concurrent-editing scare, resolved**: mid-session, `scripts/recording-verdict-on-strih.sh`/
+  `-on-stream.sh`/`scripts/lib/win-ssh-exec.sh` appeared already-modified before I'd written
+  anything — looked exactly like the documented "two autopilot workers on the shared checkout"
+  GOTCHA. Root cause turned out different: a fork I'd dispatched for READ-ONLY AV-gate
+  investigation went beyond its instructed scope and wrote real code (including a version-bump
+  commit it misattributed to itself), racing my own main-thread edits on the same files. No
+  second human/AI session was ever involved. Its OWN test file
+  (`tests/recording_verdict_merge_gate_exit_code.rs`) was high-quality and kept (compiled+ran
+  clean); its script edits were superseded by mine (verified byte-for-byte equivalent design
+  before proceeding). Lesson: a fork sharing full context can still act beyond an explicit
+  "investigation only, no code" instruction — don't assume it stayed in its lane; diff its
+  output before trusting/discarding either side.
+- **Gate genuinely executed, twice, on THIS PR's own commits — and correctly went RED both
+  times on REAL, pre-existing, already-tracked problems, never a fake pass:**
+  - Run 2 (`72d8b2131`, run 29168775610): `overall_pass=false`. `all_cambox_av_sync` — EVERY
+    camera `candidates=0, verdict=unknown` (zero QPSK audio decoded) = **#689** (already
+    documented: near-silent recorded track, software chain confirmed healthy to the HDMI PCM
+    output, break is physically downstream, not fixable remotely). Continuity/latency/imag-
+    optical failures = **#656/#663** (cam1 ShadowCast USB over-delivery, confirmed LIVE via
+    `journalctl` during the exact recording window: `61-62fps captured` vs the 60fps target,
+    `V4L2_BUF_FLAG_ERROR` WARNs, `recurrence_heal_count=30` on cam1's own selfheal state file).
+  - **Decision: PR #704 held OPEN, NOT merged this dispatch** — per `pr-merge-policy.md` (never
+    merge a red required check, regardless of root cause) and the dispatch's own explicit
+    instruction for this exact scenario. The fix itself is proven correct and functional (two
+    consecutive real executions, both producing a genuine computed verdict); the PR's own gate
+    is red on pre-existing rig conditions outside this ticket's scope. Full evidence posted to
+    both #703 and PR #704.
+  - **Filed #705** (new, narrower follow-up): `capture-rate-guard.sh`'s `[0/8]` preflight only
+    checks ONCE at the start of a run — a #656/#663 recurrence MID-recording (confirmed to
+    happen) burns the whole run budget with no early abort and no self-evident diagnostic in the
+    verdict JSON.
+- **Not closed**: #703 stays OPEN (the PR that closes it is unmerged); re-dispatch once #689
+  and/or #656/#663 are resolved or the gate happens to run clean on a healthy rig window.
+
 ## 2026-07-11 — Bundle: #694 stale-journal fix + #406 fused-gate flip + #696 detection (PR #700, v1.7.0-dev.345); #698 rebuild+redeploy; #689 follow-up
 
 - **#694** (stale-journal-across-restart, same class #693 fixed): `bd2f0d933` RED (new anchor

@@ -357,3 +357,56 @@ gh api repos/OWNER/REPO/pulls/N -X PATCH --input payload.json
 live, it wrote the PR body as the literal 20-character string `"@/tmp/pr-body.md"`, not the file's
 contents. Always build a small JSON payload file and use `--input`, never trust `-f key=@file` to
 read from disk here.
+
+## #703 — ssh/scp to strih+stream WORKS (retires the "scp/ssh to Windows is DENIED" premise for
+## THESE TWO boxes) — but scp has TWO live-verified Windows-path gotchas of its own
+
+`#701` first proved plain `sshpass -p "$PW" ssh/scp $USER@10.77.9.202`/`.204` (creds in
+`targets.md`) works cleanly. `#703` wired this into the REQUIRED merge gate for real
+(`scripts/lib/win-ssh-exec.sh`, `recording-verdict-on-strih.sh`/`-on-stream.sh --execute`,
+`recording-e2e.sh`'s `E2E_EXECUTE_VERDICT=1`) and the FIRST real CI execution immediately hit two
+new, previously-unreachable bugs (nothing had ever really run before, so nothing had ever
+exercised these paths) — don't re-derive, they're fixed + regression-tested in `win-ssh-exec.sh`:
+
+1. **`scp user@host:'C:\camera-box\...\x.json' dest` fails `No such file or directory` even
+   though the file genuinely exists on the box** — live-reproduced on strih. The IDENTICAL file
+   via forward slashes (`C:/camera-box/.../x.json`) downloads fine, byte-identical. This is
+   SOURCE-side (download/pull) ONLY — the OPPOSITE direction (`scp local user@host:'C:\...'`,
+   i.e. upload/push to a backslash DESTINATION) is UNAFFECTED, separately live-verified. Fix:
+   `win_ssh_scp_source_path()` converts `\`→`/` before building the scp remote SOURCE spec;
+   `win_ssh_upload`'s destination stays untouched (converting it would be an unrequested,
+   unverified change to a direction that already works).
+2. **Plain bash `basename` doesn't split on `\`** — fed a backslash Windows path it finds no `/`
+   and returns the WHOLE STRING unchanged, corrupting the local pull-back destination into a
+   nonsense nested path (`$LOCAL_OUT_DIR/C:\camera-box\verdict-out\...json`, live-observed in a
+   failed run's log). Fix: `win_ssh_basename()` normalizes to `/` first, then strips.
+
+`recording-verdict.exe` ITSELF (Rust `std::fs`, and its own decode/write paths) has no problem
+with EITHER separator for reading/writing — confirmed live: `--strih`/`--stream` args populated
+from OBS's own StopRecord return already use forward slashes (`D:/_REC/....mkv`) and decoded
+fine; the harness's own hardcoded `C:\camera-box\...` constants wrote fine too. The bug is
+PURELY in the scp CLIENT's own remote-SOURCE-spec parsing, nothing else.
+
+**Also found the same session — a PRE-EXISTING "MCP push instruction, never actually executed"
+gap**: the cam2 A/V-sync marker CSV push to the stream box (`recording-e2e.sh`'s `[8/8b-pre]`)
+was PRINT-ONLY even before #703 (an "MCP operator, please FileUpload this" instruction) — since
+`[8/8]` never really executed ANYTHING pre-#703, this was never actually exercised either. The
+first real `E2E_EXECUTE_VERDICT=1` + `ALL_CAMBOX=1` run exposed it: `recording-verdict.exe`'s
+`--av-marker-log` read failed `os error 2` on a CSV that was never actually uploaded. Fixed by
+`win_ssh_upload`-ing it for real in execute mode. **Lesson for the NEXT "wire real execution"
+ticket in this harness: grep the WHOLE `[8/8]` region for every remaining `echo "... FileUpload
+..."` / `FileDownload` MCP-instruction line before declaring the per-box flow fully executed —
+each one is a potential same-class gap**, invisible until something finally tries to really run
+the step that depends on it.
+
+**Diagnosing a widespread ALL_CAMBOX continuity/AV-sync gate failure — check for a recurring
+known hardware defect BEFORE assuming a new bug.** When the fused verdict fails broadly (every
+camera, not one), cross-reference the SOURCE camera's OWN journal against the recording's exact
+timestamp window (`journalctl -u camera-box --since '<start>' --until '<end>'`) for the #656/#663
+ShadowCast over-delivery signature (`NN fps captured` where NN > 61, `V4L2_BUF_FLAG_ERROR` WARNs)
+and its `/run/camera-box/capture-rate-selfheal.state`'s `recurrence_heal_count` — a nonzero,
+climbing count during the EXACT recording window is a strong signal the whole failure is that
+already-tracked recurring defect, not a new regression. `#705` filed the follow-up gap this
+exposed: the `[0/8]` `capture-rate-guard.sh` preflight only checks ONCE at start, so a mid-
+recording recurrence (confirmed to happen — #656/#663 documented as recurring "same-day") burns
+the full run budget with no early abort and no self-evident diagnostic.
