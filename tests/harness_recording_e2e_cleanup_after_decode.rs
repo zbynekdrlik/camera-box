@@ -17,8 +17,10 @@
 //!    prints the EXACT, run-scoped deletion plan for ONLY this run's own strih+stream recordings
 //!    — via the box-local `$STRIH_HOST_PATH` / `$STREAM_HOST_PATH` StopRecord returned earlier
 //!    (mirrors the #649 exact-path-tracking discipline) — for an agent/operator to execute via
-//!    the win-* MCP (scp/ssh to Windows is denied, the same constraint every other Windows-side
-//!    step in this script already works under). NEVER a directory sweep. `KEEP_RECORDINGS=1`
+//!    the win-* MCP (a deletion plan is deliberately kept human/MCP-driven rather than
+//!    auto-executed over ssh, even though #701 proved plain scp/ssh reaches strih/stream — a
+//!    destructive action stays a printed plan, not a policy consequence of ssh reachability).
+//!    NEVER a directory sweep. `KEEP_RECORDINGS=1`
 //!    opts out (debugging). Printed in BOTH the default per-box (VERDICT_ON_STREAM=1) plan AND
 //!    the legacy fused (VERDICT_ON_STREAM=0) path, which actually runs the verdict synchronously
 //!    and knows GATE before its own final `exit "$GATE"`.

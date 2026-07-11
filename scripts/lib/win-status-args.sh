@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # scripts/lib/win-status-args.sh — shared "--win-status NAME=FILE" parse + missing-file guard
 # (#622, extracted from scripts/w32time-gate.sh + scripts/dantesync-gate.sh). Both gates read a
-# Windows box's pre-fetched status text (ssh to Windows is denied on this rig, so the caller — the
+# Windows box's pre-fetched status text (these gates have no headless ssh-based gather of their
+# own -- #701 proved plain scp/ssh reaches strih/stream, but the console status here is still
+# gathered via the win-* MCP, not migrated -- so the caller — the
 # autopilot worker / operator, who HAS the win-* MCP — pre-fetches each box's status to a local
 # file) via a repeatable `--win-status NAME=FILE` CLI arg. #598's own review flagged this exact
 # block as character-for-character duplicated between the two gates: the same

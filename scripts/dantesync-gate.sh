@@ -24,8 +24,11 @@
 #     clock-offset-painter-gate.sh uses (DEV1_DANTE_JOURNAL/PAINTER_DANTE_JOURNAL, #608), keyed by
 #     node name (like --win-status NAME=FILE below) since this gate can measure MULTIPLE Linux
 #     nodes at once, unlike the painter gate's fixed dev1<->painter pair.
-#   * Windows OBS boxes (strih, stream): ssh/scp is DENIED, so this script cannot read their
-#     `\\.\pipe\dantesync` status itself. The caller (the autopilot worker / operator, who HAS
+#   * Windows OBS boxes (strih, stream): this script itself does not read their
+#     `\\.\pipe\dantesync` status directly — historically because ssh/scp to Windows was believed
+#     denied on this rig; #701 proved plain scp/ssh actually reaches strih/stream with the
+#     targets.md creds, but this gate has not been migrated to a headless ssh-based pipe read. The
+#     caller (the autopilot worker / operator, who HAS
 #     the win-* MCP) writes each box's status-pipe JSON to a local file and passes it via
 #     --win-status NAME=FILE. A Windows node with NO status file is UNKNOWN -> the gate fails
 #     (never a silent pass). recording-e2e.sh populates these files before invoking the gate.
@@ -155,7 +158,9 @@ Options:
   --linux "n=ip ..."  Linux nodes -- HTTP status endpoint FIRST, journald-over-SSH fallback
                       (#686; default: ${GATE_LINUX}).
   --win-status N=FILE  a Windows node N whose DanteSync status-pipe JSON the caller wrote to FILE
-                       (ssh to Windows is denied; the win-* MCP holder pre-fetches it). Repeatable.
+                       (this gate has no headless ssh-based pipe read; the win-* MCP holder
+                       pre-fetches it -- #701 proved plain scp/ssh reaches strih/stream, but the
+                       named-pipe status is read via the win-* MCP here, not migrated). Repeatable.
   --win-http N=HOST    a Windows node N queried LIVE over HTTP from dantesync#47's own network
                        status endpoint (http://HOST:PORT/status, #648) -- no win-* MCP, no human
                        pre-fetch; unattended-CI-safe. Repeatable.

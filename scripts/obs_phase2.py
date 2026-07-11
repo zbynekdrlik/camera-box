@@ -501,9 +501,10 @@ def _restore_test_latency(ws, host, state, calibrated_latency_ms=None):
     `calibrated_latency_ms` (#691 belt-and-braces, OPTIONAL): the known-good prod value
     from `av-sync-last.json` on the OBS box's own ProgramData, gathered by the operator/
     agent and passed in — mirrors drift-guard.sh's `av_sync_calibrated_ms` best-effort
-    cross-check for the SAME file, since this function has no ssh/scp path to read the
-    Windows box's filesystem directly (`av_sync_calibrate.py`'s own `remote_push_plan`
-    doc: scp/ssh to Windows is denied on this rig). When supplied, the FINAL restored
+    cross-check for the SAME file, since this function itself has no ssh/scp path of its own to
+    read the Windows box's filesystem directly (`av_sync_calibrate.py`'s own `remote_push_plan`
+    prints a win-* MCP plan instead -- #701 proved plain scp/ssh reaches strih/stream, but
+    that script still has no MCP/ssh access of its own). When supplied, the FINAL restored
     value is cross-checked against it and a LOUD warn fires on mismatch — this catches
     the case the snapshot-vs-restore check above CANNOT: the snapshot itself already
     being wrong (e.g. this run's snapshot captured a value a PRIOR run's incomplete

@@ -294,7 +294,7 @@ fi
 # AND PTP-locked (µs-grade fine servo, GM 10.77.9.184 up — NOT the ±1 ms NTP sawtooth
 # fallback): cross-node per-hop latency and per-frame timestamp alignment are meaningless
 # otherwise. The gate fails fast (non-zero, per-node diagnostic) and the run does NOT
-# proceed to recording. The Linux cams are read over SSH; the Windows boxes (ssh denied) are
+# proceed to recording. The Linux cams are read over SSH; the Windows boxes are
 # queried LIVE over HTTP from dantesync#47's own network status endpoint
 # (http://<box>:8898/status, #648) via dantesync-gate.sh's --win-http — no win-* MCP, no human
 # pre-fetch, so this gate is fully unattended. (Superseded the pre-#648 flow: this script used
@@ -316,7 +316,7 @@ echo "[0/8] DanteSync NTP+PTP gate — $CAMERA_NAME, cam2, strih, stream must AL
 # drifted / stock-OBS build silently produces a false result — that is #119). So before bringing up
 # the rig, gather each Windows box's observed stack state and run drift-guard --compare against the
 # pinned set (vendor/README.md); REFUSE (non-zero) on DRIFT (20) or UNKNOWN (11). Same Windows-box
-# access pattern as the DanteSync gate above: ssh is denied, so each box's state JSON is fetched over
+# access pattern as the DanteSync gate above: each box's state JSON is fetched over
 # its standing http.server (a helper exposes the read-only /drift-guard observed values as
 # /bundle-state.json), falling back to a caller-pre-fetched file (the win-* MCP holder writes it).
 # Optionally pass VERSION_GATE_MANIFEST=<BUNDLE_MANIFEST.json> to also assert the build SHAs.
@@ -1191,8 +1191,9 @@ fi
 # scope: this PR ships the gate + wiring; the live two-recording rig proof with a REAL
 # OBS restart is supervisor-driven).
 #
-# Because scp/exec to the Windows boxes is DENIED to bash (same #208/#193 constraint as
-# the main verdict below), the recording-verdict --av-sync DECODE step is EMITTED as a
+# This av-restart-sync path predates #701/#703 (which proved plain scp/ssh reaches strih/stream
+# and wired an --execute path into the MAIN verdict below) and has not been migrated to it yet, so
+# the recording-verdict --av-sync DECODE step is still EMITTED as a
 # plan for the win-stream-snv MCP holder to run — exactly like the [8/8a-c] per-box
 # decode-in-place plan. Only the final av-restart-sync-gate decision (on the two small
 # JSONs, once pulled back to dev1) runs directly here.
@@ -1794,7 +1795,9 @@ if [ "$VERDICT_ON_STREAM" = "1" ]; then
   echo "          verdict runs ON stream.lan against the LOCAL recording (dev1 gets only JSON+PNGs)."
 else
   # LEGACY decode-on-dev1: download the OBS recordings from the Windows boxes via the win-* MCP
-  # / http.server. scp to Windows is DENIED on this rig; the harness expects the caller (the
+  # / http.server. This path predates #701 (plain scp/ssh actually reaches strih/stream, and is
+  # the PREFERRED transfer for a multi-GB recording — the win-* MCP FileDownload breaks above a
+  # few MB) and has not been migrated; the harness still expects the caller (the
   # autopilot worker or operator) to pull STRIH_HOST_PATH / STREAM_HOST_PATH via the win-* MCP
   # and place them at $STRIH_REC / $STREAM_REC. If they are already present, proceed.
   "$HERE/recording-fetch-windows.sh" \
@@ -1871,8 +1874,11 @@ VERDICT_ARGS+=(--av-expected-ms "$AV_EXPECTED_MS")
 # small partial JSONs (+ the painter CSV) move. The OLD #193 flow ran a SINGLE fused verdict on
 # the stream box, which forced the ~700 MB strih .mkv to be copied strih→stream first — that copy
 # is GONE. The harness EMITS the per-box plans (upload recording-verdict.exe → extract the partial
-# on each box → pull back ONLY the small JSON); the agent/operator holding the win-* MCP executes
-# them (scp/ssh to Windows is DENIED, so bash cannot run them itself), then runs the dev1 merge.
+# on each box → pull back ONLY the small JSON); by DEFAULT the agent/operator holding the win-* MCP
+# executes them (a human/MCP-pasteable plan). #703's E2E_EXECUTE_VERDICT=1 (below) instead runs
+# these plans for real over ssh/scp — #701 proved plain scp/ssh reaches strih/stream directly, no
+# MCP paste-step needed — but that opt-in is reserved for the REQUIRED CI gate; a manual/
+# workflow_dispatch run still gets the plan-only default here.
 # Set VERDICT_ON_STREAM=0 for the LEGACY single-box decode-on-dev1 fallback (no box-decode .exe).
 if [ "$VERDICT_ON_STREAM" = "1" ]; then
   set -e
@@ -1961,8 +1967,8 @@ if [ "$VERDICT_ON_STREAM" = "1" ]; then
 
   # #312 item 2 (PR A): the cam2 continuous A/V-sync marker log lives on dev1 (pulled from cam2
   # above, a plain Linux scp) but the stream recording — the ONLY recording that co-locates the
-  # marker's audio track with the cam2 dual-QR video — lives on the WINDOWS stream box. scp/ssh TO
-  # Windows is DENIED on this rig (same constraint every other cross-box transfer here hits), so
+  # marker's audio track with the cam2 dual-QR video — lives on the WINDOWS stream box. This
+  # plan-only path predates #701 (plain scp/ssh actually reaches strih/stream), so
   # this PUSHES the small marker CSV via the win-stream-snv MCP (FileUpload), mirroring the exact
   # PLAN convention `av_sync_calibrate.py`'s REMOTE PUSH plan already uses. `--extract-partial
   # stream` then decodes it ON-BOX (alongside the burns) and carries the result through the small
@@ -2153,8 +2159,9 @@ continuing WITHOUT the imag partial; the merge below will omit --merge-partials 
   echo "    copied box-to-box nor to dev1 — only the small partial JSONs (+ the painter CSV + the"
   echo "    handful of flagged-frame PNGs) move (#208/#186/#462)."
   echo "    ============================================================================"
-  echo "    NOTE: this exit code is NOT the zero-loss verdict. In per-box mode the harness only"
-  echo "          EMITS the plan (scp/ssh to Windows is denied, so bash cannot run it itself). The"
+  echo "    NOTE: this exit code is NOT the zero-loss verdict. In per-box PLANNER mode (this path;"
+  echo "          E2E_EXECUTE_VERDICT=1 runs it for real over ssh/scp instead, #701/#703) the"
+  echo "          harness only EMITS the plan for the win-* MCP holder to run. The"
   echo "          PASS/FAIL is the merge recording-verdict EXIT CODE on dev1 + the pulled-back"
   echo "          JSON — read THOSE, not this script's exit 0."
   echo "    ============================================================================"

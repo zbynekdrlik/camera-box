@@ -1328,7 +1328,9 @@ fn compare_build_sha_facet_dormant_without_a_manifest() {
 // deploy, EVERY file the bundle shipped must match the manifest byte-for-byte on the live box, and
 // the deploy FAILS on ANY mismatch (missing, extra-via-unread, or sha-drifted file) — so a partial
 // or corrupted deploy (one file silently stale) can never pass. The live per-file hashes are
-// gathered off the Windows box (Get-FileHash over each deployed bundle file, ssh denied) and fed as
+// gathered off the Windows box (Get-FileHash over each deployed bundle file, via the win-* MCP
+// Shell -- #701 proved plain scp/ssh reaches strih/stream and #703's win-ssh-exec.sh proves a
+// remote PowerShell command CAN run over ssh too, but this facet has not been migrated) and fed as
 // a comma-separated `relpath=sha256` list via the new `bundle_hashes=` observed key; the engine
 // walks the manifest's files[] and compares each. The manifest path uses forward slashes (the
 // genlock-manifest.sh layout), so the observed relpaths must match that convention.

@@ -253,8 +253,10 @@ class TestDefaultLastJsonPath:
 # (i) #465/#529 -- remote push plan: when run OFF the stream box (the normal case -- this
 # script connects to --host over the OBS WebSocket, it does not need to run ON that box),
 # default_last_json_path() falls back to a LOCAL path nothing on the stream box can read.
-# scp/ssh to Windows is denied (recording-fetch-windows.sh, obs-self-heal-install.sh), so the
-# only established channel to place a file there is the win-* MCP FileWrite tool, driven by the
+# scp/ssh to Windows was historically believed denied on this rig; #701 proved plain scp/ssh
+# actually reaches strih/stream with the targets.md creds, but for a short in-memory JSON blob
+# like this one, the established channel this script still uses is the win-* MCP FileWrite tool
+# (recording-fetch-windows.sh, obs-self-heal-install.sh use the same PLAN convention), driven by the
 # operator/agent. remote_push_plan() prints an explicit, copy-pasteable plan -- same convention
 # as obs-self-heal-install.sh's PLAN block -- instead of silently leaving a file nobody reads.
 # ---------------------------------------------------------------------------

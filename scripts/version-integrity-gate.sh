@@ -115,7 +115,9 @@ Options:
   --manifest PATH   the build-under-test BUNDLE_MANIFEST.json — when set, applied to every box that
                     does not already carry a manifest= in its state (activates the BUILD-SHA facet).
   --win-state N=FILE  a box N whose observed drift-guard stack state JSON the caller wrote to FILE
-                    (ssh denied; the win-* MCP holder pre-fetches it). Repeatable. A box with no
+                    (this gate has no headless ssh gather of its own; the win-* MCP holder
+                    pre-fetches it -- #701 proved plain scp/ssh reaches strih/stream, not migrated
+                    here). Repeatable. A box with no
                     file is UNKNOWN -> the gate refuses.
 
 Exit: 0 = every box matches the pinned set (proceed), 20 = a box DRIFTED (REFUSED),

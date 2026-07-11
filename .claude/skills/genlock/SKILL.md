@@ -336,8 +336,11 @@ Two LAYERS guard "the deployed stack is the build we think it is":
   of test mode (the burns) is `scripts/rig-mode.sh test|event`, which drives `obs_burn_filter.py
   add|remove` over WS (the #128 wrapper itself is env-free now). The recording-e2e cleanup trap also
   clears+verifies burns off via `obs_burn_filter.py remove`+`check` on both boxes over obs-websocket
-  (the harness has no SSH to Windows; with no burn env any more, the WS `genlock_burn` toggle +
-  `rig-mode event` is the whole story).
+  (this cleanup step predates #701, which proved plain OpenSSH+password scp/ssh actually WORKS
+  against strih (10.77.9.202) and stream (10.77.9.204) specifically with the `targets.md` creds —
+  the WS-based toggle here is kept because it's already the simplest, no-restart mechanism for a
+  bool state flip, not because ssh is unreachable; with no burn env any more, the WS `genlock_burn`
+  toggle + `rig-mode event` is the whole story).
 - **#237 (DONE)** — `manifest_sha_for_component` bracket-escapes the dll-basename dot
   (`obs[.]dll`) so it is matched literally not as a regex wildcard; an obs.dll-only
   manifest labels a supplied distroav SHA `SKIPPED` (not `OK`) — an unchecked value must

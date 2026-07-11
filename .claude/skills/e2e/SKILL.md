@@ -368,7 +368,8 @@ mode (clean prod broadcast). Replaces the ad-hoc, context-dependent switching th
 burn left ON in the prod **Machine** env painted QR on the LIVE broadcast, and genlock left in a test
 state. The settings below are PINNED in the script; do NOT improvise them.
 
-Run from dev1 (ssh to the cam boxes is ALLOWED; ssh to the Windows boxes is DENIED, so the OBS side
+Run from dev1 (ssh to the cam boxes is ALLOWED; ssh to strih/stream also WORKS as of #701, but
+driving/verifying a live GUI OBS action is exactly what the win-* MCP is for, so the OBS side
 is PRINTED as the exact step to paste into the box's win-* MCP Shell — the WS burn toggle
 `obs_burn_filter.py add|remove` and, only if OBS is wedged, the env-free
 `launch-obs-genlock.sh --box {strih|stream} --force` relaunch):
@@ -1200,12 +1201,18 @@ supervisor re-decode of 572001 is the real proof.** The honest gate uses RUN-LEN
   not catch it (exactly the failure mode that shipped the original #580 sign-flipped fixture).**
 
 **`recording-verdict-on-imag.sh` ACTUALLY EXECUTES — it does NOT just print a plan, unlike its
-strih/stream siblings.** `recording-verdict-on-strih.sh` / `-on-stream.sh` are pure PLANNERS
-because ssh/scp to the Windows boxes is DENIED on this rig (the win-* MCP is the only path). imag-nb
-is a plain Ubuntu box, same access class as cam1/cam2 (`targets.md`'s "Linux OBS Targets" row, SSH
-`newlevel`/`newlevel`) — bash CAN ssh/scp it directly, so the on-imag helper deploys the verdict
-binary (skip if already present+executable), runs `--extract-partial imag` over ssh, and scp's the
-small partial (+ `#186` pixel-proof dir) back to dev1 itself, in the SAME script invocation. Don't
+strih/stream siblings BY DEFAULT.** `recording-verdict-on-strih.sh` / `-on-stream.sh` default to
+pure PLANNER mode (a MCP-pasteable plan) — historically because ssh/scp to the Windows boxes was
+believed DENIED on this rig; #701 proved plain OpenSSH+password ssh/scp actually WORKS against
+strih/stream specifically with the `targets.md` creds, and #703 already wired an opt-in
+`--execute` mode into both scripts that runs the SAME shape of flow imag-nb always used (see
+each script's own header). Planner mode stays the default for a manual/`workflow_dispatch`
+operator run; `--execute` is what the REQUIRED CI merge gate uses (`E2E_EXECUTE_VERDICT=1`).
+imag-nb is a plain Ubuntu box, same access class as cam1/cam2 (`targets.md`'s "Linux OBS Targets"
+row, SSH `newlevel`/`newlevel`) — bash CAN ssh/scp it directly, so the on-imag helper deploys the
+verdict binary (skip if already present+executable), runs `--extract-partial imag` over ssh, and
+scp's the small partial (+ `#186` pixel-proof dir) back to dev1 itself, in the SAME script
+invocation. Don't
 be misled by the on-strih/on-stream "printed plan" pattern when writing a similar helper for a
 Linux/ssh-reachable box — check the access class first.
 

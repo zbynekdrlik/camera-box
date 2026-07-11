@@ -2,8 +2,11 @@
 # recording-fetch-windows.sh — pull an OBS recording off a Windows box (strih/stream)
 # to dev1, for the recording-based 4-node E2E (#105/#7).
 #
-# scp/ssh TO the Windows boxes is DENIED on this rig (CLAUDE.md). The established,
-# CI-safe mechanism (proven this session) is a standing `python -m http.server` on each
+# scp/ssh TO the Windows boxes was historically believed DENIED on this rig; #701 proved plain
+# scp/ssh actually reaches strih/stream with the targets.md creds (and is preferred for a
+# multi-GB recording — the win-* MCP FileDownload breaks above a few MB), but this script has not
+# been migrated off its original http.server mechanism, which remains CI-safe and unattended:
+# a standing `python -m http.server` on each
 # Windows box serving its OBS record DIRECTORY on port 8899; dev1 curls the file by name.
 # OBS StopRecord gives the host's ABSOLUTE path; we take its basename and fetch
 # http://<box>:<HTTP_PORT>/<basename> → the dev1 destination.

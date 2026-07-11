@@ -358,8 +358,10 @@ class TestDefaultLastJsonPath:
 # (i) #636 -- remote push plan: the SAME persist-location gap #465 fixed in
 # av_sync_calibrate.py. This script also connects to --host over the OBS WebSocket and does
 # not need to run ON the stream box, so default_last_json_path() falls back to a LOCAL path
-# nothing on the stream box can read. scp/ssh to Windows is denied, so the only established
-# channel to place a file there is the win-* MCP FileWrite tool, driven by the operator/agent.
+# nothing on the stream box can read. scp/ssh to Windows was historically believed denied; #701
+# proved plain scp/ssh actually reaches strih/stream, but for a short in-memory JSON blob like
+# this one, the established channel this script still uses is the win-* MCP FileWrite tool,
+# driven by the operator/agent.
 # remote_push_plan() prints an explicit, copy-pasteable plan -- same convention as
 # av_sync_calibrate.remote_push_plan() / obs-self-heal-install.sh's PLAN block.
 # ---------------------------------------------------------------------------

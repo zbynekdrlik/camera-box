@@ -8,8 +8,9 @@
 //!
 //! The gate is a WIRING layer over the unit-tested `scripts/drift-guard.sh --compare` engine
 //! (tested in tests/drift_guard.rs) — it does NOT reinvent any comparison. It mirrors
-//! dantesync-gate.sh: the Windows boxes (ssh denied) have their live observed stack state
-//! pre-fetched to a JSON FILE by the win-* MCP holder (or fetched over the standing http.server);
+//! dantesync-gate.sh: the Windows boxes (this gate has no headless ssh gather of its own — #701
+//! proved plain scp/ssh reaches strih/stream, not migrated here) have their live observed stack
+//! state pre-fetched to a JSON FILE by the win-* MCP holder (or fetched over the standing http.server);
 //! this gate parses each box's state into drift-guard `--compare` key=val args, runs the engine
 //! per box, and rolls the verdicts up. A box with no state file is UNKNOWN -> the gate refuses
 //! (never a silent pass). These tests pin the gate's own FLOW: the state->args parse, the verdict

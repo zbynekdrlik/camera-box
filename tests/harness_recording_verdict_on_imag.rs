@@ -49,8 +49,10 @@ fn recording_verdict_on_imag_script_exists() {
     }
 }
 
-/// UNLIKE its Windows siblings, this script must target imag over PLAIN SSH (the ssh/scp-denied
-/// constraint is specific to Windows) — it must reference the imag box IP and NEVER the win-*
+/// UNLIKE its Windows siblings' DEFAULT planner mode, this script must target imag over PLAIN SSH
+/// (imag-nb is a plain Linux box reached directly, same access class as cam1/cam2; the Windows
+/// siblings default to the win-* MCP for a GUI-adjacent workflow, though #701/#703 gave them an
+/// opt-in --execute ssh path too) — it must reference the imag box IP and NEVER the win-*
 /// MCP names (those are strictly for strih/stream).
 #[test]
 fn on_imag_helper_targets_imag_over_plain_ssh_not_mcp() {

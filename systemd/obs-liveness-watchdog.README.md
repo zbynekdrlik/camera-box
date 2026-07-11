@@ -11,12 +11,16 @@ over 2 consecutive passes — fires a Discord alert immediately. It is the Windo
 
 ## Auto-recover design decision — DETECT + ALERT automatically, RECOVERY is agent-driven
 
-ssh to the Windows boxes is **DENIED** and the win-* MCP is **agent-only** (a systemd --user timer
-cannot drive the MCP or ssh). So a dev1 timer can fully **DETECT** a wedge (OBS WebSocket is
-network-reachable, no ssh/MCP needed for `GetStats`) but **cannot itself force-kill or relaunch** a
-wedged `obs64.exe` process — every other Windows recovery action in this repo already goes through
-an agent driving the win-* MCP (`scripts/launch-obs-genlock.sh` is itself a PURE PLANNER that only
-PRINTS the PowerShell program to paste into the box's MCP `Shell` — see that script's own header).
+The win-* MCP is **agent-only** (a systemd --user timer has no agent session to drive it) — and
+even though #701 proved plain scp/ssh actually reaches strih/stream with the `targets.md` creds, a
+headless ssh-based recovery for THIS timer was never built. So a dev1 timer can fully **DETECT** a
+wedge (OBS WebSocket is network-reachable, no ssh/MCP needed for `GetStats`) but **cannot itself
+force-kill or relaunch** a wedged `obs64.exe` process today — every other Windows recovery action
+in this repo already goes through an agent driving the win-* MCP
+(`scripts/launch-obs-genlock.sh` is itself a PURE PLANNER that only
+PRINTS the PowerShell program to paste into the box's MCP `Shell` — see that script's own header;
+driving/verifying a GUI relaunch is exactly what the MCP is for, ssh reachability alone wouldn't
+replace that).
 
 So this watchdog:
 1. **Detects** a confirmed wedge automatically, unattended, from the dev1 timer.

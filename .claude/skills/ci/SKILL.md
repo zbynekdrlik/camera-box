@@ -101,7 +101,12 @@ scripts/recording-verdict-on-stream.sh \
 `VERDICT_ON_STREAM=0` selects the legacy decode-on-dev1 path (kept for boxes without
 uploaded verdict.exe).
 
-scp/ssh to Windows (stream.lan) is **DENIED** on this rig — use the win-stream-snv MCP.
+scp/ssh to Windows (stream.lan) was historically believed **DENIED** on this rig — corrected below
+(the #703 section further down): plain OpenSSH+password scp/ssh actually WORKS against stream.lan
+with the targets.md creds, and is now what `E2E_EXECUTE_VERDICT=1` uses for real. This section's
+`FileDownload`/manual-plan flow (win-stream-snv MCP) is still the fallback for a manual/
+`workflow_dispatch` operator run, or for pulling files above the few-MB point where `FileDownload`
+itself breaks (see #701) — for anything sizeable, prefer scp directly.
 ffmpeg/ffprobe are already installed on stream.lan (winget; ffmpeg 8.0.1 on PATH).
 
 ## Probe is CI-only locally — never compile `--features probe` on dev1 (#185)

@@ -107,10 +107,11 @@ def remote_push_plan(host: str, payload: dict) -> str:
     connects to `--host` over the OBS WebSocket and does NOT need to run ON that box, so
     `default_last_json_path()` normally falls back to a LOCAL path (no PROGRAMDATA env var on a
     Linux control host) that nothing on the stream box can read -- the same gap #465 found and
-    fixed in `av_sync_calibrate.py`. scp/ssh to the Windows boxes is DENIED on this rig
-    (`recording-fetch-windows.sh`, `obs-self-heal-install.sh`) -- the only established channel
-    to place a file there is the win-* MCP `FileWrite` tool, and this script has no MCP access
-    of its own. So instead of silently leaving an unreachable local file, print the exact
+    fixed in `av_sync_calibrate.py`. scp/ssh to the Windows boxes was historically believed
+    DENIED on this rig (`recording-fetch-windows.sh`, `obs-self-heal-install.sh` use the same
+    PLAN convention); #701 proved plain scp/ssh actually reaches strih/stream with the
+    targets.md creds, but this script has no ssh/MCP access of its own -- it just prints the
+    plan. So instead of silently leaving an unreachable local file, print the exact
     destination + content (same PLAN convention as `obs-self-heal-install.sh` /
     `av_sync_calibrate.remote_push_plan`) so the caller can paste it straight into a FileWrite
     call.
@@ -120,7 +121,7 @@ def remote_push_plan(host: str, payload: dict) -> str:
     content = json.dumps(payload, indent=2)
     return (
         "[phase-sync] REMOTE PUSH REQUIRED -- this file was persisted LOCALLY, not on the OBS box.\n"
-        "[phase-sync]   scp/ssh to Windows is denied; push it via the win-* MCP FileWrite tool:\n"
+        "[phase-sync]   this script has no MCP/ssh access -- push it via the win-* MCP FileWrite tool:\n"
         f"[phase-sync]   host={host}  mcp={mcp_line}\n"
         f"[phase-sync]   dest={REMOTE_PROGRAMDATA_JSON_PATH}\n"
         f"[phase-sync]   content:\n{content}"

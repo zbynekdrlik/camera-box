@@ -10,7 +10,9 @@
 # WHAT IT DOES — the CAM side is automated here (ssh to the cam boxes is ALLOWED); the Windows OBS
 # burn is toggled DIRECTLY over OBS WebSocket (scripts/obs_burn_filter.py — the harness has WS access);
 # the env-free genlock relaunch (no --mode) is PRINTED to run via the win-*
-# MCP (ssh/scp to the Windows boxes is DENIED on this rig, same model as recording-verdict-on-stream.sh).
+# MCP (same model as recording-verdict-on-stream.sh's default planner mode — a GUI relaunch is
+# exactly what the win-* MCP is for; #701 proved plain scp/ssh reaches strih/stream, but that
+# doesn't drive/verify a GUI app launch).
 #
 #   TEST  : cam2 — stop the PERMANENT cam2-painter.service if installed (#440: it and this script's
 #                  transient emitter-painter both write /dev/fb0 — left running it made the displayed
@@ -526,13 +528,14 @@ set_imag_test_program() {
   return $rc
 }
 
-# print_genlock_relaunch_note MODE -> the genlock RELAUNCH step (printed, not run — ssh to Windows is
-# DENIED so OBS launch goes via the win-* MCP). #257: env-free; the wrapper just verifies the genlock
+# print_genlock_relaunch_note MODE -> the genlock RELAUNCH step (printed, not run — a GUI OBS
+# launch goes via the win-* MCP; #701 proved plain scp/ssh reaches strih/stream, but that doesn't
+# drive/verify a GUI app). #257: env-free; the wrapper just verifies the genlock
 # render tick is ENABLED (build default). Only needed if OBS is not already running on a box.
 print_genlock_relaunch_note() {
   local mode="$1"
   cat <<EOF
-# ---- Windows OBS genlock relaunch (only if OBS is not already running; ssh denied -> win-* MCP) ----
+# ---- Windows OBS genlock relaunch (only if OBS is not already running; via win-* MCP) ----
 # The measurement burn for ${mode} mode was just toggled over WebSocket above (no relaunch). The
 # genlock build is hard-locked (render tick + ts-align always ON, latency 3 ms — NO env), so a
 # relaunch is only needed to (re)start a stopped/wedged OBS. Per box, paste the printed program into
@@ -562,8 +565,9 @@ Usage:
 
 The CAM side (cam2 = 10.77.9.62) is applied + verified here over ssh. The OBS burn is toggled DIRECTLY
 over OBS WebSocket (scripts/obs_burn_filter.py — no relaunch); the env-free genlock relaunch (no
---mode) is PRINTED to run via the win-* MCP (ssh to Windows is denied). See the script header for
-env overrides.
+--mode) is PRINTED to run via the win-* MCP (a GUI relaunch is what the win-* MCP is for; #701
+proved plain scp/ssh reaches strih/stream too, but that doesn't drive a GUI app). See the script
+header for env overrides.
 
 Exit codes: 0 = mode applied (cam side + burn WS toggle) + relaunch note printed; 2 = usage error.
 EOF

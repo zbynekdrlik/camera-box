@@ -9,8 +9,9 @@
 //! SOURCE OF TRUTH: identical PINNED settings every time, no improvisation.
 //!
 //! The CAM side is automated over ssh (ssh to the cam boxes is ALLOWED); the Windows OBS side is
-//! PRINTED as the exact `launch-obs-genlock.sh --mode {test|event}` step (ssh to Windows is denied —
-//! the agent drives the win-* MCP). Same PURE-PLANNER model as tests/launch_obs_genlock.rs: these
+//! PRINTED as the exact `launch-obs-genlock.sh --mode {test|event}` step (a GUI relaunch is what
+//! the win-* MCP is for — #701 proved plain scp/ssh reaches strih/stream too, but that doesn't
+//! drive/verify a GUI app). Same PURE-PLANNER model as tests/launch_obs_genlock.rs: these
 //! tests source the REAL script (its `BASH_SOURCE != $0` guard skips main), call its pure remote-
 //! command builders, and assert the PINNED painter flags + the safety properties (free /dev/fb0,
 //! fail loud on a missing binary, the PID-file stop that avoids the `pkill -f` self-match footgun,
@@ -621,7 +622,7 @@ fn no_cmdline_matching_pkill_on_executable_lines() {
 
 /// #257: the burn is toggled over OBS WebSocket (no --mode relaunch). `obs_burn_targets` lists the
 /// strih + stream program inputs; `burn_action_for_mode` maps test->add (burn ON), event->remove
-/// (burn OFF). The genlock relaunch note (printed, ssh denied) is env-free — no --mode.
+/// (burn OFF). The genlock relaunch note (printed, via win-* MCP) is env-free — no --mode.
 #[test]
 fn burn_targets_cover_both_boxes() {
     let targets = run_sourced("obs_burn_targets");

@@ -108,7 +108,10 @@ at all, that was a wrong assumption in an earlier session's comment).
 **Fixed**: `main()` now prints an explicit REMOTE PUSH plan (dest path + resolved win-* MCP tool +
 exact JSON content) whenever the write lands off-box. The operator/agent completes the transfer
 via `win-stream-snv FileWrite` to `C:\ProgramData\camera-box\av-sync-last.json` — same PLAN
-convention `obs-self-heal-install.sh` already uses (scp/ssh to Windows is denied on this rig).
+convention `obs-self-heal-install.sh` already uses (historically because scp/ssh to Windows was
+believed denied on this rig; #701 proved plain scp/ssh actually works against strih/stream with
+the targets.md creds — for a short in-memory JSON blob like this one either path works fine, this
+skill just hasn't been migrated off the original MCP-FileWrite plan).
 
 **Correction (was wrongly claimed on #465's thread): the #398 A/V-sync dock does NOT read
 `av-sync-last.json`.** Checked the vendored dock source

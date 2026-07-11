@@ -74,7 +74,9 @@ child-PEB read was needed to prove the var was inherited — all gone with the e
 **Every OBS (re)launch — deploy, crash-recovery, reboot — MUST go through
 `scripts/launch-obs-genlock.sh`. Do NOT hand-roll a `Start-Process` for the broadcast OBS.**
 
-The wrapper is the PURE planner (scp/ssh to Windows is denied — the agent drives the win-* MCP). It
+The wrapper is the PURE planner — the agent drives the win-* MCP (a GUI relaunch + on-screen log
+verification is exactly what the win-* MCP is for; #701 proved plain scp/ssh DOES work against
+strih/stream, but that doesn't help drive/verify a GUI app). It
 PRINTS the exact PowerShell program to paste into the box's `win-strih` / `win-stream-snv` MCP
 `Shell`. The emitted program, in ONE self-contained run: clears `%APPDATA%\obs-studio\.sentinel\*`,
 launches obs64 cwd=`bin\64bit`, then VERIFIES the OBS log shows `genlock: … render tick ENABLED` (the
@@ -186,8 +188,10 @@ fires a Discord alert once a wedge is confirmed over 2 consecutive passes — se
 `systemd/obs-liveness-watchdog.README.md` for the install/live-verify procedure. **Detection is
 fully automatic from dev1 (no ssh/MCP needed for `GetStats`); recovery from THIS dev1 timer is
 agent-driven** — the alert embeds the exact `scripts/launch-obs-genlock.sh --box <box> --force`
-command, because ssh to these boxes is denied and the win-* MCP is agent-only (a dev1 timer cannot
-itself force-kill or relaunch obs64.exe). When you (the agent) see that alert, just run the
+command, because the win-* MCP is agent-only (a dev1 timer has no agent session to drive it) and
+this recovery step was never migrated to a headless ssh path even though #701 proved plain
+scp/ssh DOES reach strih/stream (a bare systemd timer still cannot itself force-kill or relaunch
+obs64.exe today). When you (the agent) see that alert, just run the
 embedded recovery command — do NOT ask before recovering (same "recover it, don't ask" rule as the
 rest of this file).
 

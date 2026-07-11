@@ -10,8 +10,12 @@
 # log shows the genlock render tick ENABLED (the build-default proof) AND DistroAV loaded, failing
 # LOUD otherwise (never a silent stock-OBS / wrong-build / broken-locale launch).
 #
-# HOW THE PIECES FIT (same model as scripts/recording-verdict-on-stream.sh — scp/ssh to Windows is
-# DENIED on this rig, so the agent drives the win-* MCP): this script is the PURE, testable PLANNER.
+# HOW THE PIECES FIT (same model as scripts/recording-verdict-on-stream.sh — historically "scp/ssh
+# to Windows is DENIED on this rig, so the agent drives the win-* MCP"; #701 proved plain
+# OpenSSH+password scp/ssh actually WORKS against strih (10.77.9.202) and stream (10.77.9.204)
+# specifically with the targets.md creds, but this script stays a planner because launching a GUI
+# app and reading its on-screen log state is exactly what the win-* MCP is FOR, not a workaround):
+# this script is the PURE, testable PLANNER.
 # Given the box + obs install dir, it PRINTS the exact PowerShell program to paste into the box's
 # `win-strih` / `win-stream-snv` MCP `Shell`. It runs NO PowerShell itself and needs no Windows
 # access — the Rust unit tests (tests/launch_obs_genlock.rs) source it and assert the emitted program
@@ -182,7 +186,9 @@ main() {
 
   cat <<PLAN
 # ===== #257 genlock OBS (re)launch plan — box=${box} (${mcp}, ${box_ip}) =====
-# scp/ssh to Windows is DENIED on this rig — the agent runs the program below via the ${mcp} MCP Shell.
+# Run the program below via the ${mcp} MCP Shell — a GUI relaunch + on-screen log verification is
+# exactly what the win-* MCP is for (#701: plain scp/ssh DOES work against strih/stream with the
+# targets.md creds, but that doesn't help drive/verify a GUI app).
 #
 # STEP 1: paste the following PowerShell program into:  ${mcp} Shell
 #         (it clears crash sentinels, launches obs64 cwd=bin\\64bit, then log-verifies the genlock
