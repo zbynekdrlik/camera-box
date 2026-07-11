@@ -1118,6 +1118,30 @@ supervisor re-decode of 572001 is the real proof.** The honest gate uses RUN-LEN
   `capture-rate-guard.sh` E2E preflight only catches (a), not (b). If a restart-survival or
   full-path E2E run fails ONLY on imag's `#588` judder gate (never on delivery/burn contiguity),
   re-check cam1's capture rate and USB-reset it before assuming a code regression.
+- **Diagnosing an imag freeze/stall during an ALL_CAMBOX sweep: always check CAM1's own self-heal
+  state, never whichever camera strih's sweep window LABEL happens to show at that moment (#670,
+  2026-07-11).** imag's PROGRAM-feeding input (`NDI CAM1`) is FIXED to cam1's own feed for the
+  WHOLE recording — the ALL_CAMBOX `[6/8]` loop only ever calls `obs_phase2.py switch --host
+  "$STRIH"`, it never touches imag. So a stall on imag that happens to land inside, say, the
+  "CAM2 window" of strih's OWN independent sweep schedule has NOTHING to do with CAM2 — that's
+  purely two unrelated schedules overlapping by chance. A real incident (#670, filed as a
+  "mysterious ~2.8s NDI-receiver stall ~26-29s after a re-route") was mis-investigated by checking
+  `/tmp/cbox-burn-cam2.log` (cam2's own burn log) instead of cam1's, because the freeze fell inside
+  the CAM2-labeled window — cam2's log looked clean, so the freeze was wrongly declared a novel
+  genlock/NDI bug. The actual cause: `cat /run/camera-box/capture-rate-selfheal.state` on cam1
+  itself showed `last_heal_epoch_s` matching the freeze's start epoch to the EXACT SECOND — a
+  routine `#656`/`#663` self-heal event on cam1's known-recurring ShadowCast 2 grabber defect.
+  **Two reusable diagnostics for this class of "imag froze" report:** (1) SSH/MCP into cam1 and
+  read `/run/camera-box/capture-rate-selfheal.state` (tmpfs, survives until the next heal or
+  reboot) — an exact epoch match against the freeze's `gen_ts_ns` settles it in one command, no
+  packet capture or vendor-source spelunking needed; (2) even WITHOUT cam1 access, the imag
+  partial JSON itself is diagnostic: if cam1's OWN corner burn (`run_id=911001`, `BURN_RUN_ID_CAM1`)
+  PERMANENTLY disappears from `frames[].payloads` at/after the freeze (grep for the last
+  frame_index carrying `911001`) while the OPTICAL tick (cam2's dual-QR) keeps advancing normally
+  afterward, that is the exact signature `#668`'s fix commit documents for a self-heal killing the
+  ad-hoc E2E harness's un-supervised burn process — NOT a genlock/NDI-receiver defect. Never accept
+  "which camera does the window label say" as the camera to investigate for an imag stall; imag
+  only ever watches cam1.
 - **Methodology lesson (2026-07-07, both from PR #587's post-CI review round): verify a dispatched
   design-spec's formula against the ACTUAL field semantics / physical model — don't just transcribe
   it.** The #580 design comment's shorthand `present_count >= (frames_count/step) * fraction` was
