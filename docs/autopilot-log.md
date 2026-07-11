@@ -3158,3 +3158,51 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
 - PR #678 (dev→main): all gates green including the "Full-path E2E (rig zero-loss gate)"
   hardware check on the real rig; merged `5bffd07c2`. Post-merge version bump
   `1.7.0-dev.338` → `1.7.0-dev.339` (`1bcb60fa2`).
+
+## 2026-07-11 — #665/#666/#674/#677 rig-health batch, PR #680
+
+- **Re-validated all 4 issues first** (filed same day, still fresh) before touching anything.
+- **#674** (imag judder after strih+stream restart) — ran the suggested cheap targeted repro:
+  watched imag-nb's own `genlock-fifo audit 'NDI CAM4'` `underruns` counter directly (via the
+  embedded `ts_present` epoch-ns, no midnight-boundary hunting) across a control window, then a
+  real `launch-obs-genlock.sh --force` relaunch of BOTH strih and stream. Result: **zero**
+  underrun growth in the ~5.8 min immediately after the restart (cleaner than the control
+  window) — the isolated restart alone does NOT reproduce the elevated-underrun mechanism from
+  the original AFTER-pass (531 underruns over its window vs 12 in BEFORE). Posted full findings
+  to #674; left OPEN (no fix landed, mechanism not confirmed reproducible in isolation); #466
+  stays blocked on it.
+- **#677** — `_assert_program_nonblack`'s shared `min_mean` floor (20, tuned for #312's bright
+  dual-QR monitor) was false-aborting `prod_scene()`'s recording-e2e.sh [4/8] step on legitimately
+  dim (but real, peak=231/mean=18.0) production content. Fix: `prod_scene()` now passes its own
+  looser floor (env `OBS_NONBLACK_MIN_MEAN_PROD`, default 5); `switch()` (#312's own sweep)
+  untouched. RED test SHA `29713c668`, GREEN fix SHA `44d0b25aa`
+  (`tests/python/test_obs_phase2_nonblack_prod_floor_677.py`, 4 tests + `test_obs_phase2_prewarm.py`
+  lambda-signature fix). `Closes #677`.
+- **#666** — cam5/cam6 showed a transient ~20% EMITTED-frame deficit (captured healthy, 0
+  capture-dropped, self-recovers ~5min). Ruled out: CPU-isolation misconfiguration (confirmed
+  matches cam1/3/4's `#289` isolation exactly), systemd timers (none align with the finding's
+  timing), DanteSync clock-step magnitude (~1-1.5ms steps, far too small to explain a sustained
+  20% 5-min deficit). No definitive root cause found live — shipped the "document + monitor" path
+  the ticket sanctioned: a new `#666`-tagged WARN (`EMIT_RATE_TOLERANCE_PCT=5%`) reusing the SAME
+  pure `capture_rate_health` decision `#656` already uses, checked against the configured genlock
+  SEND rate instead of the negotiated CAPTURE rate. SHA `e50be3df0`
+  (`src/capture_rate_health.rs` + `src/main.rs`, 3 new tests). `Closes #666`.
+- **#665** — investigated cam2's capture chain live. Found cam2's `camera-box.service` actually
+  DOWN (SIGTERM'd) from an UNRELATED acute issue — see below — restarted it, then confirmed CPU
+  isolation is correctly configured (painter's `ndir:reconn` threads off the isolated capture
+  core, matching cam1/3/4) and cam2's USB reconnect-churn (25 events) is not an outlier vs cam1
+  (14) / cam3 (61). Live post-restart data matched the classic #656/#663 over-capture
+  quantization pattern, not a distinct defect. Diagnosed as the SAME hardware-defect class, no
+  code fix; closed directly (`gh issue close`) with evidence + a physical cable/port/dongle
+  inspection recommendation for the owner.
+- **Incidental fleet finding (filed separately, NOT part of this PR)** — while investigating
+  #665, found EVERY active cam box's `/var/log` 50MB tmpfs at 96-100% full (cam2 had already
+  crashed from it; rsyslog spamming ENOSPC). Dominant volume driver: `dantesync`'s per-second
+  `[PTP]` debug logging (~65% of a sampled syslog tail). Applied an immediate stopgap on all 6
+  boxes (truncated syslog + restarted rsyslog, verified `camera-box.service` stayed active
+  throughout) and filed **#679** with full root-cause evidence for a dedicated follow-up
+  (dantesync is a separate repo).
+- Playbook: captured the fleet log-disk-full finding + mitigation recipe in `.claude/skills/ops`,
+  and the imag-nb `ts_present`-epoch-window + cheap-repro techniques in `.claude/skills/genlock`.
+- No version bump needed — dev (`1.7.0-dev.339`) was already strictly ahead of main
+  (`1.7.0-dev.338`) at session start.
