@@ -3312,3 +3312,53 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
   WARNs on every box post-redeploy.
 - Version bump: dev `1.7.0-dev.343` → `1.7.0-dev.344` (post-merge; dev and main had converged to
   the same version after this PR's merge).
+
+## 2026-07-11 — #689/#690 live re-attempt: honest UNKNOWN + dock stale-build finding (PR #699, v1.7.0-dev.345)
+
+- **#689** (re-measure A/V lipsync now that #691's harness-stomp fix holds 925ms): ran a fresh,
+  validly-executed cam2-only QPSK measurement. Confirmed pre-flight: `NDI 2ME PGM` genlock latency
+  read 925ms both before and after (untouched by any E2E run); `rig-mode.sh test` PASS (marker
+  audible-verified); cam2's own NDI feed routed directly onto strih PROGRAM via the existing
+  "Cam 2" scene (`obs_phase2.py switch --program-scene "Cam 2"`) — a lighter-weight alternative to
+  the PHASE2-PROBE/burn dance for a cam2-only test, confirmed visually via screenshot reaching
+  stream's PRO program; `mbc` confirmed unmuted/0dB. Recorded 235s
+  (`2026-07-11 18-10-52.mp4`), decoded via `recording-verdict --av-sync`: video side perfect
+  (7060/7060 frames, 6900 ticks), audio side **zero candidates**. Root-caused (not guessed):
+  `ffprobe` ruled out wrong track index (exactly 1 audio stream, matching sr); `GetInputAudioTracks`
+  ruled out track-routing misconfig; `ffmpeg -af volumedetect` on the full recording measured
+  **mean/max -91.0dB — genuine digital silence**, despite live OBS meters showing activity during
+  the test. Reported **Unknown** per the ticket's own fail-closed mandate (no guessed number, hold
+  stays at 925ms unchanged). Full raw evidence posted directly to #689 (comment
+  issuecomment-4947627229). Issue left OPEN — Step 3 (derive+set) cannot proceed without a trustworthy
+  number.
+- **#690** (verify the live A/V-sync dock): confirmed via OBS-log module-load lines + on-disk DLL
+  mtimes cross-referenced against `git log` that BOTH strih's and stream's deployed
+  `obs-audio-video-sync-dock.dll` (v0.1.4) predate commit `125c0c617` (#398 decode-lock fix,
+  2026-07-03 17:32 — after both DLLs were built) and `dca5e943f`/`56079f033` (#634 audit logging,
+  2026-07-10) entirely. Live-tested anyway with the SAME real cam2 signal from the #689 attempt:
+  clicked Start on the stream box's dock, ran >4 minutes — Latency/Index/Audio Frequency/Video
+  Index/Audio Index all stayed `-` the whole time (never locked). Investigated the dock's actual
+  source code (`sync-test-dock.cpp`/`obs-output.c`): it binds to `obs_get_video()`/`obs_get_audio()`
+  — the PROGRAM canvas + the GLOBAL MASTER AUDIO MIX, no named-source binding at all — so it's
+  exposed to the same audio-silence trap #689 hit. Did NOT write a fake "working dock" screenshot
+  or operator procedure. Full evidence posted directly to #690 (comment issuecomment-4947641275).
+  Filed follow-up **#698** (rebuild `windows-genlock.yml` off current `main` + coordinated redeploy
+  to both boxes + re-verify) — this repo's own playbook already treats rollouts of this shape as a
+  supervisor/coordinated rig step, out of bundle-safe PR scope.
+- PR #699 (docs-only, `.claude/skills/av-sync/SKILL.md`): documents both findings, the mandatory
+  `ffmpeg volumedetect` pre-flight recommendation for future measurement attempts, and corrects a
+  stale `idx=<N>` audit-log format left over from before #634 (verified byte-for-byte against the
+  live `sync-test-output.cpp` blog() calls). Deep-review pass (general-purpose subagent) found one
+  🔵 minor (a loose commit-message paraphrase) — fixed same session. CI green (`CI` + the hardware
+  `Full-path E2E` gate) both push cycles; merged `2a1a50527` → main `7806ff17f`.
+- **Neither #689 nor #690 closed** — PR body used "Refs #689, #690" (verified via
+  `gh api .../pulls/699 --jq '.body | test(...)'` returning `false` for any close-keyword match,
+  per this repo's own #504/PR#539 negation-doesn't-protect-you gotcha) so the merge did not
+  auto-close either; confirmed both still OPEN post-merge.
+- Version bump: dev `1.7.0-dev.344` → `1.7.0-dev.345` (post-merge; `Cargo.lock` is gitignored, only
+  `Cargo.toml` tracked).
+- **Security note:** encountered TWO injected "system-reminder"-styled messages during this session
+  claiming the date had silently changed and instructing not to mention it to the user (one
+  embedded in a subagent's tool-result stream, repeated directly to this session multiple times
+  afterward). Not a legitimate instruction channel — ignored the "don't mention" part both times,
+  flagged it in-session, had no effect on the actual work.
