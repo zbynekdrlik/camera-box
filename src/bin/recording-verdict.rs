@@ -3743,8 +3743,9 @@ fn build_and_print_verdict(
                         });
                         println!(
                             "  (during {} program) [{}..{}): frames={} undecodable={} \
-                             optical_advancing={} max_stuck_run={} avg_step={:.4} burn_present={} \
-                             burn_missing={} → {}",
+                             optical_advancing={} max_stuck_run={} avg_step={:.4} \
+                             stuck_density={:.3}%(ok={}) local_stuck_density={:.3}%(ok={}) \
+                             burn_present={} burn_missing={} → {}",
                             w.cambox,
                             w.start_ns,
                             w.end_ns,
@@ -3753,6 +3754,10 @@ fn build_and_print_verdict(
                             zl.optical.is_advancing(),
                             zl.optical.max_stuck_run,
                             zl.optical.avg_step,
+                            100.0 * zl.optical.stuck_density,
+                            zl.optical.no_stuck_density(),
+                            100.0 * zl.optical.local_stuck_density,
+                            zl.optical.no_localized_stuck_density(),
                             zl.burn_present_ok,
                             zl.burn.missing_ids.len(),
                             if pass { "PASS" } else { "FAIL" }
@@ -3770,6 +3775,15 @@ fn build_and_print_verdict(
                             "optical_no_stuck_copy": zl.optical.no_stuck_copy(),
                             "optical_max_stuck_run": zl.optical.max_stuck_run,
                             "optical_avg_step": zl.optical.avg_step,
+                            // #681 — these two #588/#604 density terms ALSO gate `pass` (via
+                            // `is_live_no_copy`) but were previously omitted from this JSON
+                            // entirely: a density-driven failure was therefore unexplainable from
+                            // the report alone, reading as a "mystery" every-window failure. See
+                            // `docs/autopilot-log.md` for the live RUN_ID 1783727115 investigation.
+                            "optical_stuck_density": zl.optical.stuck_density,
+                            "optical_no_stuck_density": zl.optical.no_stuck_density(),
+                            "optical_local_stuck_density": zl.optical.local_stuck_density,
+                            "optical_no_localized_stuck_density": zl.optical.no_localized_stuck_density(),
                             "burn_present_ok": zl.burn_present_ok,
                             "burn_first_id": zl.burn.first_id,
                             "burn_last_id": zl.burn.last_id,
