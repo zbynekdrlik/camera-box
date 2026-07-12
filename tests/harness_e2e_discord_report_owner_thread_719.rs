@@ -255,7 +255,9 @@ fn owner_vars_absent_falls_back_to_notifications_channel_logged() {
     );
     assert!(
         out.stderr.contains("falling back to #notifications")
-            || out.stderr.contains("DISCORD_NOTIFICATION_CHANNEL_ZBYNEK not set"),
+            || out
+                .stderr
+                .contains("DISCORD_NOTIFICATION_CHANNEL_ZBYNEK not set"),
         "the fallback must be LOGGED loudly (per the issue's own requirement), stderr={}",
         out.stderr
     );

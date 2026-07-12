@@ -27,6 +27,20 @@ set -euo pipefail
 #     not already present in the environment, so CI's real secret is never shadowed. The channel
 #     id (#notifications, 1257652233714270219) is not a secret — same default the existing
 #     workflow "Discord alert" steps use — overridable via DISCORD_CHANNEL_ID.
+#
+# #719 — OWNER THREAD + @MENTION (the actual delivery target, per milestone-notifications.md's
+# owner-thread model): #notifications above is a channel the user does NOT watch, and Discord
+# only push-notifies a phone on an @mention (or a DM) — so every #711 report posted there was
+# silently invisible. This sender now PREFERS DISCORD_NOTIFICATION_CHANNEL_ZBYNEK (the owner's
+# own Discord thread) and prefixes the FIRST message chunk with <@$DISCORD_MENTION_ZBYNEK> (the
+# push trigger). Both vars live in the SAME ~/.claude/channels/discord/.env file already sourced
+# for DISCORD_BOT_TOKEN above — but full-path-e2e.yml passes ONLY DISCORD_BOT_TOKEN/
+# DISCORD_CHANNEL_ID as GitHub secrets, never the owner vars, so that .env is sourced whenever
+# EITHER the owner-channel or the mention var is still missing — even when DISCORD_BOT_TOKEN is
+# already set from a real CI secret (this runs on the dev1 self-hosted runner, so the local .env
+# is always right there). A preset DISCORD_BOT_TOKEN is restored afterward so CI's real secret is
+# NEVER overwritten by whatever token value happens to sit in the local .env.
+# #notifications is now a LOGGED FALLBACK, used ONLY when the owner vars are genuinely absent.
 
 # e2e_discord_report_send <verdict-json-path> <run-id> <gate-exit-code> <duration-secs>
 # Public entrypoint — ALWAYS returns 0 (fail-open). See header comment above.
@@ -49,17 +63,40 @@ _e2e_discord_report_send_inner() {
     return 0
   fi
 
-  if [ -z "${DISCORD_BOT_TOKEN:-}" ]; then
+  # #719: source the local .env whenever the bot token OR either owner-thread var is still
+  # missing (CI never passes the owner vars as secrets — see the header comment above). Preserve
+  # an already-set DISCORD_BOT_TOKEN across the source (CI's real secret must win over whatever
+  # value happens to be in the local .env).
+  local _preset_bot_token="${DISCORD_BOT_TOKEN:-}"
+  if [ -z "${DISCORD_BOT_TOKEN:-}" ] || [ -z "${DISCORD_NOTIFICATION_CHANNEL_ZBYNEK:-}" ] || [ -z "${DISCORD_MENTION_ZBYNEK:-}" ]; then
     if [ -f "$HOME/.claude/channels/discord/.env" ]; then
       # shellcheck disable=SC1090,SC1091
       . "$HOME/.claude/channels/discord/.env"
     fi
   fi
-  local channel_id="${DISCORD_CHANNEL_ID:-1257652233714270219}" # #notifications (.claude/skills/ci)
+  if [ -n "$_preset_bot_token" ]; then
+    DISCORD_BOT_TOKEN="$_preset_bot_token"
+  fi
 
   if [ -z "${DISCORD_BOT_TOKEN:-}" ]; then
     echo "WARNING: #711 e2e_discord_report_send: DISCORD_BOT_TOKEN not set (neither in env nor \$HOME/.claude/channels/discord/.env) — skipping Discord report (fail-open)." >&2
     return 0
+  fi
+
+  # #719: prefer the owner's own Discord thread (push-notifies via @mention); #notifications is
+  # a logged fallback only, used when the owner vars are genuinely unavailable.
+  local channel_id mention_prefix=""
+  if [ -n "${DISCORD_NOTIFICATION_CHANNEL_ZBYNEK:-}" ]; then
+    channel_id="$DISCORD_NOTIFICATION_CHANNEL_ZBYNEK"
+    if [ -n "${DISCORD_MENTION_ZBYNEK:-}" ]; then
+      mention_prefix="<@${DISCORD_MENTION_ZBYNEK}> "
+    else
+      echo "WARNING: #719 e2e_discord_report_send: DISCORD_MENTION_ZBYNEK not set — posting to the owner thread (channel $channel_id) WITHOUT an @mention (no phone push)." >&2
+    fi
+    echo "#719: e2e_discord_report_send: routing the E2E report to the owner's Discord thread (channel $channel_id)."
+  else
+    channel_id="${DISCORD_CHANNEL_ID:-1257652233714270219}" # #notifications fallback (.claude/skills/ci)
+    echo "WARNING: #719 e2e_discord_report_send: DISCORD_NOTIFICATION_CHANNEL_ZBYNEK not set (neither in env nor \$HOME/.claude/channels/discord/.env) — falling back to #notifications channel $channel_id with NO @mention (report will NOT push-notify the owner)." >&2
   fi
 
   local event
@@ -92,6 +129,9 @@ _e2e_discord_report_send_inner() {
   i=0
   while [ "$i" -lt "$n" ]; do
     content="$(printf '%s' "$chunks_json" | jq -r ".[$i]")"
+    if [ "$i" -eq 0 ] && [ -n "$mention_prefix" ]; then
+      content="${mention_prefix}${content}" # #719: the push trigger, chunk 1 only
+    fi
     payload="$(jq -n --arg c "$content" '{content:$c}')"
     response="$(curl -sS --max-time 10 -w '\n%{http_code}' -X POST \
       -H "Authorization: Bot ${DISCORD_BOT_TOKEN}" \
