@@ -3813,6 +3813,21 @@ fn build_and_print_verdict(
                     if let Some(note) = &s.note {
                         println!("      ⚠ {note}");
                     }
+                    // #726: presentation-cadence EVENNESS — REPORTED only (not yet gate-enforced;
+                    // see src/presentation_cadence.rs). `None` on any window with no painted tick
+                    // (every non-cam2 window in a sweep).
+                    if let Some(pc) = &s.presentation_cadence {
+                        println!(
+                            "      cadence: evenness={:.3} uniform={}/{} duplicate={} catchup={} paired_events={} other={}",
+                            pc.evenness_score,
+                            pc.uniform_steps,
+                            pc.sample_deltas,
+                            pc.duplicate_steps,
+                            pc.catchup_steps,
+                            pc.paired_events,
+                            pc.other_steps
+                        );
+                    }
                 }
                 if no_anchor > 0 {
                     println!(

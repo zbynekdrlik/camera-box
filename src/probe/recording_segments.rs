@@ -97,7 +97,10 @@ pub struct SegmentFrame {
 }
 
 /// The per-segment continuity verdict for ONE schedule window.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+// #726: `presentation_cadence` carries `f64` fractions, which have no `Eq` impl (NaN) -- this
+// struct drops the `Eq` derive it used to carry (nothing outside this file relied on it; only
+// `PartialEq` + `Debug`, both still derived, are used by the tests' `assert_eq!`s).
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct CamboxSegment {
     /// The cambox attributed to this window.
     pub cambox: String,
@@ -124,10 +127,17 @@ pub struct CamboxSegment {
     /// never mistaken for a continuity break. `None` on any covered window (`frames > 0`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// #726: the presentation-cadence EVENNESS of this window's painted-tick sequence (RECORDED
+    /// order) — `None` when this window carries no painted tick at all (any non-cam2 window in a
+    /// CAMBOX_SWEEP: `tick` is `None` on every frame, so there is nothing to classify). REPORTED
+    /// only — this does NOT feed into `pass` (the threshold is not yet calibrated against a
+    /// known-healthy run; see `crate::presentation_cadence`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub presentation_cadence: Option<crate::presentation_cadence::CadenceEvenness>,
 }
 
 /// The whole-recording segmented-continuity verdict.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SegmentedContinuity {
     /// One verdict per schedule window, in schedule order.
     pub segments: Vec<CamboxSegment>,
@@ -357,6 +367,14 @@ fn window_segment(
     let gaps =
         crate::painted_tick_gaps::painted_tick_gaps(&present_ticks, undecodable, expected_step);
 
+    // #726: presentation-cadence EVENNESS — reuses the SAME `present_ticks` (RECORDED order,
+    // unlike the sorted sequence `painted_tick_gaps` consumes above) + `expected_step` this
+    // window already computed for the net-loss accounting; no extra decode work. `None` on a
+    // window with fewer than 2 decoded ticks (incl. every non-cam2 window, whose `present_ticks`
+    // is always empty).
+    let presentation_cadence =
+        crate::presentation_cadence::measure_cadence_evenness(&present_ticks, expected_step);
+
     let first_tick = frames.iter().find_map(|f| f.tick);
     let last_tick = frames.iter().rev().find_map(|f| f.tick);
 
@@ -382,6 +400,7 @@ fn window_segment(
         last_tick,
         pass,
         note,
+        presentation_cadence,
     }
 }
 
@@ -957,5 +976,89 @@ mod tests {
         assert_eq!(v.guard_ns, 0, "negative guard floored to 0");
         assert_eq!(v.expected_step, 1, "zero step floored to 1");
         assert!(v.segments[0].pass);
+    }
+
+    // ---- #726: presentation_cadence wiring ------------------------------------------------
+
+    #[test]
+    fn cam2_window_with_uniform_step_reports_perfect_evenness() {
+        // A clean cam2 window at the real 60fps->30fps decimation ratio (step 2): every recorded
+        // frame's painted tick advances by exactly 2 -> the "smooth 30" reference shape.
+        let schedule = vec![win("cam2", 0, 10_000)];
+        let frames = clean_frames(0, 100, 20, 2, 1000); // ticks 1000,1002,...,1038
+        let v = segment_continuity(&frames, &schedule, 0, 2);
+        let seg = &v.segments[0];
+        assert!(seg.pass, "clean uniform sequence must still pass: {seg:?}");
+        let pc = seg
+            .presentation_cadence
+            .as_ref()
+            .expect("cam2 window with >=2 decoded ticks must report cadence evenness");
+        assert_eq!(pc.evenness_score, 1.0);
+        assert_eq!(pc.duplicate_steps, 0);
+        assert_eq!(pc.paired_events, 0);
+        assert_eq!(pc.expected_step, 2);
+    }
+
+    #[test]
+    fn cam2_window_with_paired_judder_reports_low_evenness() {
+        // The "15fps-like" signature: every source frame held for two recorded frames then a
+        // compensating double jump. copies>0 already fails `pass` via the existing gate (a
+        // duplicate IS a stale/frozen-frame fault) -- presentation_cadence additionally reports
+        // the PATTERN (paired, not scattered) and a fractional severity score.
+        let schedule = vec![win("cam2", 0, 10_000)];
+        let mut frames = Vec::new();
+        for k in 0..10i64 {
+            let t = 1000 + (k as u32) * 4;
+            frames.push(SegmentFrame {
+                frame_index: (k * 2) as u64,
+                gen_ts_ns: 100 + k * 200,
+                tick: Some(t),
+            });
+            frames.push(SegmentFrame {
+                frame_index: (k * 2 + 1) as u64,
+                gen_ts_ns: 100 + k * 200 + 100,
+                tick: Some(t), // held -- same tick presented twice
+            });
+        }
+        let v = segment_continuity(&frames, &schedule, 0, 2);
+        let seg = &v.segments[0];
+        assert!(
+            seg.copies > 0,
+            "the existing copies gate must already flag the held frames: {seg:?}"
+        );
+        let pc = seg
+            .presentation_cadence
+            .as_ref()
+            .expect("cam2 window with >=2 decoded ticks must report cadence evenness");
+        assert_eq!(
+            pc.uniform_steps, 0,
+            "no delta is ever the on-cadence step 2"
+        );
+        assert!(
+            pc.paired_events > 0,
+            "must detect the paired duplicate+catchup shape: {pc:?}"
+        );
+        assert!(pc.evenness_score < 1.0);
+    }
+
+    #[test]
+    fn non_cam2_window_with_no_painted_tick_reports_no_cadence() {
+        // A swept non-cam2 cambox: frames are present (frame_count > 0) but every tick is None --
+        // presentation_cadence must be None (nothing to classify), never a spurious 0.0.
+        let schedule = vec![win("cam1", 0, 1000)];
+        let frames: Vec<SegmentFrame> = (0..5usize)
+            .map(|i| SegmentFrame {
+                frame_index: i as u64,
+                gen_ts_ns: 100 + (i as i64) * 100,
+                tick: None,
+            })
+            .collect();
+        let v = segment_continuity(&frames, &schedule, 0, 2);
+        let seg = &v.segments[0];
+        assert_eq!(seg.frames, 5);
+        assert!(
+            seg.presentation_cadence.is_none(),
+            "a window with zero decoded ticks must report no cadence verdict: {seg:?}"
+        );
     }
 }

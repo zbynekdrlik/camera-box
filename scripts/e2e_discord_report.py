@@ -350,6 +350,37 @@ def _section_overall(verdict, meta):
     return "\n".join(lines)
 
 
+def _section_presentation_cadence(verdict):
+    """#726 -- presentation-cadence EVENNESS, REPORTED only (not yet gate-enforced; the threshold
+    is not calibrated against a known-healthy run -- see src/presentation_cadence.rs). Sourced
+    from all_cambox_continuity.segments[] (STRIH's OWN per-cambox sweep, not .imag.segments) --
+    populated only for cam2's own window(s), the only place with a continuously-decodable painted
+    tick. This is the "smooth 30 = uniform 2-tick spacing; 15-like = paired spacing" number the
+    2026-07-12 live-event stutter needed and the pre-existing gates were blind to.
+
+    Deliberately NOT numbered (1-5) so it never shifts the existing headline sections' numbering.
+    """
+    lines = ["**Plynulosť obrazu na strih (informatívne, #726)**"]
+    segments = _g(verdict, "all_cambox_continuity", "segments", default=[]) or []
+    cadence_segments = [s for s in segments if isinstance(s, dict) and s.get("presentation_cadence")]
+    if not cadence_segments:
+        lines.append("  N/A — nemerané v tomto behu (chýba okno s namaľovaným tikom, napr. cam2)")
+        return "\n".join(lines)
+    for seg in cadence_segments:
+        pc = seg["presentation_cadence"]
+        score = pc.get("evenness_score")
+        dup = pc.get("duplicate_steps", 0)
+        paired = pc.get("paired_events", 0)
+        total = pc.get("sample_deltas", 0)
+        cam = seg.get("cambox", "?")
+        pct = f"{score * 100:.0f}%" if score is not None else "N/A"
+        lines.append(
+            f"  {cam}: rovnomernosť {pct} ({dup} zdvojených z {total} snímok, {paired} "
+            f"spárovaných udalostí 'drž a dobehni' — signatúra '15fps' pri 30fps plátne)"
+        )
+    return "\n".join(lines)
+
+
 def compose_report(verdict: dict, meta: dict | None = None) -> str:
     """Pure: verdict JSON dict + small meta dict -> Slovak markdown report text.
 
@@ -364,6 +395,7 @@ def compose_report(verdict: dict, meta: dict | None = None) -> str:
         _section_video_sync(verdict),
         _section_av_sync(verdict),
         _section_overall(verdict, meta),
+        _section_presentation_cadence(verdict),
     ]
     return "\n\n".join(sections)
 

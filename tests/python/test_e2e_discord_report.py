@@ -229,6 +229,93 @@ class TestLegacySingleCameraFixture:
 
 
 # ---------------------------------------------------------------------------
+# #726 -- presentation-cadence EVENNESS section (REPORTED only, not gate-enforced)
+# ---------------------------------------------------------------------------
+
+class TestPresentationCadenceSection:
+    def test_na_when_no_all_cambox_continuity_segments_at_all(self):
+        # the legacy single-camera fixture has no all_cambox_* blocks whatsoever.
+        verdict = _load("verdict_legacy_single_camera.json")
+        report = edr.compose_report(verdict, {"run_id": "x", "event": "test"})
+        assert "Plynulosť obrazu na strih (informatívne, #726)" in report
+        assert "chýba okno s namaľovaným tikom" in report
+
+    def test_na_when_segments_present_but_none_carry_presentation_cadence(self):
+        # segments exist (e.g. non-cam2 windows only) but none decoded a painted tick.
+        verdict = {
+            "all_cambox_continuity": {
+                "segments": [
+                    {"cambox": "cam1", "pass": True, "frames": 10},
+                    {"cambox": "cam3", "pass": True, "frames": 12},
+                ]
+            }
+        }
+        report = edr.compose_report(verdict, {"run_id": "x", "event": "test"})
+        assert "chýba okno s namaľovaným tikom" in report
+
+    def test_reports_cam2_evenness_percentage_and_counts(self):
+        verdict = {
+            "all_cambox_continuity": {
+                "segments": [
+                    {"cambox": "cam1", "pass": True, "frames": 10},
+                    {
+                        "cambox": "cam2",
+                        "pass": True,
+                        "frames": 30,
+                        "presentation_cadence": {
+                            "expected_step": 2,
+                            "sample_deltas": 29,
+                            "uniform_steps": 29,
+                            "duplicate_steps": 0,
+                            "catchup_steps": 0,
+                            "other_steps": 0,
+                            "paired_events": 0,
+                            "uniform_fraction": 1.0,
+                            "duplicate_fraction": 0.0,
+                            "paired_fraction": 0.0,
+                            "evenness_score": 1.0,
+                        },
+                    },
+                ]
+            }
+        }
+        report = edr.compose_report(verdict, {"run_id": "x", "event": "test"})
+        assert "cam2: rovnomernosť 100% (0 zdvojených z 29 snímok, 0 spárovaných" in report
+        # cam1 (no presentation_cadence) must not get its own cadence line.
+        section = report.split("Plynulosť obrazu na strih")[1]
+        assert "cam1:" not in section
+
+    def test_reports_judder_recording_with_low_percentage_and_paired_count(self):
+        verdict = {
+            "all_cambox_continuity": {
+                "segments": [
+                    {
+                        "cambox": "cam2",
+                        "pass": False,
+                        "frames": 30,
+                        "presentation_cadence": {
+                            "expected_step": 2,
+                            "sample_deltas": 29,
+                            "uniform_steps": 0,
+                            "duplicate_steps": 15,
+                            "catchup_steps": 14,
+                            "other_steps": 0,
+                            "paired_events": 14,
+                            "uniform_fraction": 0.0,
+                            "duplicate_fraction": 15 / 29,
+                            "paired_fraction": 28 / 29,
+                            "evenness_score": 0.0,
+                        },
+                    },
+                ]
+            }
+        }
+        report = edr.compose_report(verdict, {"run_id": "x", "event": "test"})
+        assert "cam2: rovnomernosť 0% (15 zdvojených z 29 snímok, 14 spárovaných" in report
+        assert "signatúra '15fps' pri 30fps plátne" in report
+
+
+# ---------------------------------------------------------------------------
 # chunk_for_discord -- pure text splitter
 # ---------------------------------------------------------------------------
 
