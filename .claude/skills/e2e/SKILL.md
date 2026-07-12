@@ -514,6 +514,22 @@ aborts the run. The start branch reads `GetRecordStatus`, on an active orphan lo
 `OBS_RECORD_FINALIZE_TIMEOUT_S` (120 s) — FAIL LOUD (`SystemExit`) on timeout, never a doomed
 `StartRecord`. Guard: `tests/python/test_obs_phase2_record.py`.
 
+**NEW (#709, 2026-07-12, still OPEN) — imag-nb's (10.77.9.182) OBS can silently never actually
+start a recording even though the harness logs `"recording STARTED"`.** Live incident: `[5/8]`
+logged `10.77.9.182: recording STARTED`, then the SEPARATE #627 post-start liveness poll caught
+it 4s later — `outputActive=[False, False]`, `outputBytes` STATIC (the box's stale idle value,
+not a growing fresh-recording byte count). imag's own OBS log (`~/.config/obs-studio/logs/...` on
+the box) showed **ZERO lines of any kind** in the whole window — not an error, not even a
+WebSocket-request trace — while strih/stream's equivalent StartRecord calls DID show growing byte
+counts in the same run. Diagnostic: `GetRecordStatus` over the WS directly
+(`python3 -c "...from obs_phase2 import _conn,_rpc; ws=_conn('10.77.9.182',''); print(_rpc(ws,
+'GetRecordStatus',{}))"`) — `outputActive=false` + a STATIC `outputBytes` matching what you'd read
+even when the box is genuinely idle is the tell (not a crash — imag's OBS process stays alive and
+healthy throughout). Root cause NOT yet found (is `obs_phase2.py record`'s own "STARTED" print
+based on a positive `outputActive=true` confirmation, or just a non-erroring RPC response? — worth
+checking first). Not yet reproduced a second time; the rig was confirmed idle/clean afterward so
+no cleanup was needed. See #709 for full evidence before re-diagnosing from scratch.
+
 ## Local test verification gotchas (Tier-0)
 
 - **Python harness tests:** run with `python3 -m pytest tests/python/ -p no:html` — the repo's
@@ -1415,6 +1431,53 @@ When `copies`/`gaps` look elevated or growing across a run, don't guess — run 
    and not a genlock issue. `#665`/`#666` are the standing tracker for this defect class; a fresh
    `all_cambox_continuity` red run that traces to it is that defect's materialization, not a new
    root cause — link back to them instead of re-diagnosing from scratch.
+
+## RESOLVED (#708, 2026-07-12) — strih's OWN `full_chain.loss.strih.real_drops` periodic 4-frame residual was a per-source-counter accounting artifact, NOT loss
+
+`full_chain.loss.strih` (a DIFFERENT metric from `all_cambox_continuity` above — see the "A
+DIFFERENT per-node metric" section elsewhere in this file) periodically flagged exactly 4
+`real_drop` ids per ~300s ALL_CAMBOX run, always landing in a schedule window ~9.5-10.3s after a
+program switch. **Root cause: strih's 911002 render-tick burn is emitted by SIX INDEPENDENT
+free-running DistroAV filter instances — one per raw `NDI camN` input** (`BURN_TARGETS` attaches
+it to every input so whichever gets cut to program already carries it), and the always-open
+Multiview projector (#365's own precondition) keeps ALL SIX rendering continuously — so all 6
+counters free-run the WHOLE recording regardless of which is on-air, and their numeric ranges
+routinely OVERLAP (proven live: one run's cam5 range `66709..=67840` overlapped cam6's very next
+window `66934..=68067`). `burn_contiguity_in_window_with_step`'s backward-jump check (`id < prev`
+⇒ `RealDrop`) was built for ONE genuine monotonic counter — it misread the EXPECTED
+counter-instance discontinuity at every program switch as a reorder fault.
+
+**The decisive discriminator, done OFFLINE with zero new rig time** (per the dispatch's own
+instruction — cheapest first): pull the flagged ids' exact values from the verdict JSON's
+`full_chain.loss.strih.classified[]` (NOT `frame_index` — that field is an internal sort-position,
+NOT the video frame the id was decoded at; use `.id`), then grep BOTH the same run's already-local
+`strih-partial-<run>.json` AND `stream-partial-<run>.json` (`frames[].payloads[]` where
+`run_id==911002`) for that exact `frame_id`. If it's present in BOTH (own recording AND
+downstream), it was never lost anywhere — SPURIOUS. This is the diagnostic-time twin of the
+already-shipped #356 cross-recording reconciliation fix (same "does the downstream recording
+prove delivery" idea, applied by hand during investigation instead of automatically in the
+verdict). **Two locally-cached CI runs' full partials (multi-MB JSON + pixel-proof dirs) survive
+in `/tmp/recording-e2e-<run>/` on dev1 for a long time after the run — check there BEFORE
+spending rig time on a fresh repro; the evidence may already exist.**
+
+**The fix** (`src/probe/burn_contiguity.rs` + `src/bin/recording-verdict.rs`): a NEW `window_of`
+parameter (computed by reusing the EXISTING `frame_gen_ts_anchor`/`place_frame_in_window` #706/#312
+already use, so it can never disagree with them) suppresses the backward-jump/decimation-excess
+classification ONLY when the previous and current present frame are CONFIRMED to sit in two
+DIFFERENT `--switch-schedule` windows. A backward jump WITHIN one window (the SAME counter
+instance, which can never legitimately go backward) still FAILS. An UNKNOWN window on either side
+never suppresses. Scoped strictly to `node=="strih"` (the one node proven to have this
+multi-counter mechanism — `stream`'s 911004 burn is a single continuous counter on one fixed
+input). See `burn_contiguity_in_window_with_step_and_schedule`'s doc comment for the full
+reasoning; 9 new unit tests lock it, RED-then-GREEN in commit order (`c57f204a8`/`d8f2a5b8b`).
+
+**Reusable lesson for the NEXT per-node burn oddity:** before assuming a flagged id is a genuine
+drop, check whether that node's burn is attached to MULTIPLE concurrently-active sources (any
+`BURN_TARGETS`-style fan-out) rather than one single fixed input — a multi-instance free-running
+counter's numeric ranges are NOT globally ordered by wall-clock time, so any contiguity check
+built assuming "one monotonic counter" will misfire at every source-switch boundary. The tell:
+grouping the flagged run's payloads by switch-schedule window and checking each window's own
+`min(id)..=max(id)` range for OVERLAP with a NON-adjacent (by camera identity) window.
 
 ## Cheap standalone repro of ONE recording-e2e.sh step (#627) — don't run the full 30-min harness
 

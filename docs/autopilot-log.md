@@ -3706,3 +3706,47 @@ a follow-up if not done by the time this log entry is read.
   OPEN/unmerged (correctly still blocked on #689 + #707 + #708, all real, none bypassable).
 - No version bump (no code changed). No commits to `dev` this cycle — diagnostic work only,
   landed as GitHub issue/PR comments (#707 comment + retitle, #708 filed, PR #704 comment).
+
+## 2026-07-12 — #708 (fixed + closed), #709 (filed)
+
+- #708 (full-path-e2e gate: strih carries a small but PERIODIC 4-frame `real_drop`): ROOT CAUSE
+  FOUND + FIXED + CLOSED. Decisive offline discriminator (per dispatch instruction, no new rig
+  run): cross-checked all 4 flagged ids from BOTH named CI runs' already-local partials
+  (`/tmp/recording-e2e-{89679772,1375282184}/{strih,stream}-partial-*.json`) — 8/8 ids present
+  byte-for-byte in BOTH strih's own recording AND downstream at stream. VERDICT: SPURIOUS.
+  Root cause: strih's 911002 render-tick burn is emitted by SIX INDEPENDENT free-running DistroAV
+  filter instances (one per raw `NDI camN` input, via `BURN_TARGETS`), kept continuously rendering
+  by the always-open Multiview projector regardless of on-air status — their numeric ranges
+  routinely OVERLAP across program switches (proven: cam5 `66709..=67840` vs cam6
+  `66934..=68067`), and the existing backward-jump contiguity check (built for ONE monotonic
+  counter) misread the expected counter-instance discontinuity as a reorder fault. All 4 flagged
+  ids per run landed exactly at a confirmed program-switch boundary.
+  Fix: `src/probe/burn_contiguity.rs` (new `window_of` param + `burn_contiguity_in_window_with_step_and_schedule`)
+  + `src/bin/recording-verdict.rs` (`attribute_window_indices`, wired for `node=="strih"` only) —
+  suppress the backward-jump/decimation-excess classification ONLY when the previous/current
+  present frame are CONFIRMED (via `--switch-schedule`) to sit in DIFFERENT windows; an in-window
+  backward jump still FAILS; an unknown window never suppresses.
+  RED `c57f204a8` (threading added, suppression not yet applied — 3 new tests genuinely fail) →
+  GREEN `d8f2a5b8b` (suppression applied — 9 new tests pass, incl. an end-to-end
+  `node_verdict_with_optical` reproduction + a byte-identical-to-the-old-wrapper regression
+  guard). CI `Test` job green on `dev` HEAD: run 29179347676 (all jobs success; Mutation Testing
+  correctly skipped, on-demand only). No local compile path exists for this file class
+  (`required-features=["probe"]`) — CI is the sole verification, per CLAUDE.md's own documented
+  policy for `src/probe/*.rs`/`recording-verdict.rs`.
+  Closed #708 with full evidence (root cause + fix + CI-green). PR #704's body updated: #708
+  dropped from the blocker set (now #689 + #707 + the new #709 — see below).
+- #709 (filed, OPEN): attempted the natural live re-verification (a fresh full-path-e2e rig run)
+  — it aborted at `[5/8] StartRecord` because imag-nb's (10.77.9.182) OBS silently never started a
+  recording (own OBS log shows ZERO trace of the request in the whole window; the #627 post-start
+  liveness check correctly caught it 4s later, `outputActive=[False,False]`, static
+  `outputBytes`). Completely unrelated infra mechanism, not #703/#708/#689/#707. Filed with full
+  evidence + a diagnostic recipe (`GetRecordStatus` over WS directly). Confirmed rig idle/clean
+  afterward (`outputActive=false`) — no cleanup needed, no second live run forced (Sunday morning,
+  possible broadcast later today).
+- Playbook: `.claude/skills/e2e/SKILL.md` gained (1) a "RESOLVED #708" section with the root cause
+  + the reusable "check locally-cached CI partials before spending rig time" + "multi-instance
+  free-running counter" diagnostic pattern for the next per-node burn oddity; (2) a #709 note next
+  to the existing `obs_phase2.py record --action start` orphan-guard section, so the next worker
+  recognizes the "STARTED logged but OBS log shows nothing" symptom fast.
+- No version bump needed this cycle (`dev` 1.7.0-dev.348 already strictly ahead of `main`
+  1.7.0-dev.346 from a prior cycle).
