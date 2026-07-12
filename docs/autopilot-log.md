@@ -2,6 +2,59 @@
 
 Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads context.
 
+## 2026-07-12 (night) — #708 (strih periodic real_drop) + #696 (cam3 corruption) deep-dived; NO code fix; PR #704 STILL held (v1.7.0-dev.348)
+
+- **#708** (strih carries a periodic 4-frame `real_drops`, aligned to the ALL_CAMBOX switch
+  cadence): precisely correlated the 4 drops to exact window boundaries using the real verdict
+  JSON + CI log epoch-ns (not estimates) — confirmed the flagged schedule labels are CAM2/CAM5/
+  CAM6 (boxes cam2/cam5/cam6), clean are CAM1/CAM3/CAM4 (boxes cam1/cam3/cam4), each drop landing
+  ~9.5-10.3s into its window. Ruled OUT simple genlock-FIFO starvation on the flagged source (live
+  `genlock-fifo audit 'NDI cam2'` shows zero underrun/hold/overrun/backward_step growth across the
+  window). Found the 3 flagged strih inputs each have ONE genlock setting resolved via DEFAULT
+  rather than explicit persistence (genlock_fifo unset on cam4/cam6 inputs, latency unset on cam2
+  input) vs all-explicit on the 3 clean inputs — suggestive, functionally inconclusive (defaults
+  match the explicit values elsewhere). Leading unconfirmed hypothesis: strih's OWN 911002 render
+  burn is a PER-SOURCE counter (BURN_TARGETS covers all 6 camera inputs) that's inherently
+  irregular (#360) because Studio-Mode's Program-preview widget + the (always-open, #276
+  precondition) Multiview projector can both independently trigger `video_render` on the active
+  source, and the Multiview's #278/#293 anti-starvation forced-render can steal ~1 program-tick's
+  budget — a believable source of a spurious missing burn id that is NOT necessarily a real lost
+  program-output frame. Could not confirm (no historical per-tick renderSkip data survives).
+  **Found + fixed a REAL playbook bug along the way**: `.claude/skills/e2e/SKILL.md`'s #707-era
+  "label CAM1 -> physical cam5" translation table was empirically WRONG (verified via SSH hostname
+  on all 6 boxes + the os_hostname()->NDI-sender code path + live GetSceneItemList on all 6 strih
+  scenes + a real CI run's own `[seg N/10]` log lines — the schedule label IS the box number
+  directly, no translation needed). Corrected in place (commit `8c2bf3e03`). Full findings on
+  #708's own thread. Left OPEN — no fix, no verdict-side allowance shipped (unproven whether the
+  drops are cosmetic-in-measurement; the strict-test mandate forbids guessing here).
+- **#696** (cam3 optical decode 52% corrupted despite clean digital delivery): (a) checked
+  journalctl since the 2026-07-11 `frame_integrity_issue()` deploy — 3967 `CORRUPTED buffer` WARN
+  lines total, EVERY one at v4l2 sequence 0 (the known-benign startup transient, 4/restart); zero
+  mid-stream corruption caught since deploy — a real but inconclusive negative result (no
+  recurrence opportunity, not a disproof). (b) Built a raw-v4l2-capture baseline bypassing
+  camera-box/NDI entirely: cam3 is a locked-down read-only-root appliance with no v4l2-ctl/ffmpeg/
+  opencv, so installed `v4l2py` (pip --target= into tmpfs, correct ioctl marshalling — a
+  hand-rolled ioctl struct attempt was discarded as too risky after finding a real layout mistake)
+  and grabbed 600 raw YUYV frames over a genuine 10.0s/60fps window with `camera-box.service`
+  briefly stopped (~12s) and cleanly restarted after. A per-frame "roughness" (adjacent-byte-delta)
+  statistic stayed tight (6.48-7.15, zero outliers over 598 frames) and a pulled sample frame
+  decoded to a crisp, uncorrupted image — the raw driver path is healthy right now (expected; the
+  original defect is a single rare ~5m20s episode, not reproducible on demand). (c) Confirmed via
+  `VIDIOC_ENUM_FMT` that the ShadowCast 2 supports both YUYV (always used) and MJPEG, but the
+  device negotiates USB 3.2 SuperSpeed (5000 Mbps, ~2.5x headroom over the ~2Gbit/s raw YUYV
+  1080p60 need) — ruling out bandwidth exhaustion as the obvious driver — and switching to MJPEG
+  would need a new JPEG-decode step in the hot capture path (new dependency, new corruption-
+  detection surface), NOT a trivial swap, so did not implement it blind. Conclusion unchanged from
+  the issue's own prior framing: a hardware-class intermittent USB-transport defect, matching
+  #685/#687's forensics; left OPEN referencing #688 (technician session), no purchase
+  recommendation. Full findings on #696's own thread.
+- **No fix landed for either ticket** — investigation-only session. Committed ONE docs-only fix
+  (`8c2bf3e03`, the #708 playbook correction above) to `dev`; pushed; both the fast `CI` workflow
+  (green) and the required `full-path-e2e` gate (failed — `overall_pass=false`, the SAME
+  pre-existing #689/#707/#708 blockers, confirmed via the log, NOT a new regression from the docs
+  commit) ran to completion. PR #704 remains OPEN/unmerged, unchanged in scope (no Closes lines
+  added — neither #708 nor #696 was resolved).
+
 ## 2026-07-12 — #705 (mid-recording capture-rate check) + #701 (docs sweep) landed on PR #704; #689 diagnosis deepened; #706 (NEW) filed; PR STILL held (v1.7.0-dev.348)
 
 - **#705** (capture-rate-guard.sh preflight only checks once at start): `de9d65f01` RED (8 new

@@ -143,3 +143,44 @@ In `open_with_controls`, `apply_controls` runs after `Capture::set_format` and
 `set_params`, just before streaming. Many UVC cards (ShadowCast included) RESET
 picture controls to factory defaults on `VIDIOC_S_FMT`/`S_PARM`, so applying
 earlier lets the format-set clobber them (#156). Keep the apply where it is.
+
+## Diagnostic — raw v4l2 capture bypassing camera-box entirely (#696, no v4l2-ctl/ffmpeg on the boxes)
+
+The cam boxes are locked-down appliances: `/` is mounted `ro`, `/tmp` is a tiny (100MB) `tmpfs`,
+and there is NO `v4l2-ctl`/`ffmpeg`/`opencv`/`python3-v4l2` installed — `apt-get install` fails
+(`Read-only file system` writing `/var/lib/apt/lists`). To grab raw frames straight off
+`/dev/videoN` for a corruption/tearing investigation (bypassing camera-box/NDI/genlock entirely):
+
+```bash
+mkdir -p /tmp/pylibs
+python3 -m pip install --target=/tmp/pylibs --no-warn-script-location v4l2py   # ~4.4MB, pypi reachable
+sudo systemctl stop camera-box                       # frees /dev/video0 for exclusive mmap streaming
+PYTHONPATH=/tmp/pylibs python3 - <<'PY'
+from v4l2py import Device
+dev = Device("/dev/video0"); dev.open()
+for frame in dev:
+    buff = frame.buff                    # real ctypes v4l2_buffer — .flags, .bytesused, .sequence
+    is_err = bool(buff.flags & 0x0040)   # V4L2_BUF_FLAG_ERROR
+    ...                                   # inspect bytes(frame); break after N frames
+dev.close()
+PY
+sudo systemctl start camera-box                      # ALWAYS restore before ending the session
+rm -rf /tmp/pylibs /tmp/<your-grab-dir>               # tmpfs is tiny — clean up your own files
+```
+
+**Do NOT hand-roll the V4L2 `ioctl` struct layout in raw `struct.pack`** — `struct v4l2_buffer`'s
+real x86_64 layout (`v4l2_timecode` is 16 bytes, not the 44 a naive read of the struct might
+suggest; there's non-obvious padding before `timestamp`/the `m` union) is easy to get wrong, and a
+wrong-sized buffer handed to a V4L2 `ioctl` reads/writes past your allocation — `v4l2py`
+(`pip install v4l2py`, pulls `linuxpy`) does the marshalling correctly via `ctypes.Structure` and
+is safe to install into the tmpfs at basically zero risk to the device. Sanity-check `sizeof(struct
+v4l2_buffer)` (88 bytes) by decoding the ioctl request code's embedded size (bits 16-29 of e.g.
+`VIDIOC_QUERYBUF=0xC0585609`) if you ever need to verify a size independently.
+
+**A per-frame "roughness" statistic (mean adjacent-byte delta over a handful of sampled rows) is a
+cheap way to characterize corruption without decoding every frame to PNG** — real video content
+has strongly correlated neighboring bytes (low roughness); a torn/speckled corrupt frame spikes it.
+Only save the handful of frames that look anomalous (or a few evenly-spaced samples) to disk — the
+100MB tmpfs fills after ~24 raw 1920×1080 YUYV frames (4,147,200 bytes each). To actually LOOK at
+a saved `.yuyv` frame, pull it to dev1 (`scp`) and `ffmpeg -f rawvideo -pixel_format yuyv422
+-video_size WxH -i frame.yuyv frame.png` (dev1 has ffmpeg/numpy/PIL; the cam boxes don't).
