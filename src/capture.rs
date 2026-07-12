@@ -1,3 +1,4 @@
+use crate::capture_rate_health::GrabberModel;
 use anyhow::{Context, Result};
 use v4l::buffer::Type;
 use v4l::control::{Control, Value};
@@ -469,27 +470,76 @@ pub fn color_production_controls() -> Vec<CaptureControl> {
 ///   parse it ([`parse_capture_controls`]). Used by ad-hoc rig tweaks; an empty /
 ///   whitespace spec yields no controls (deliberate "touch nothing" escape hatch).
 ///   The certified SHARP set ([`certified_cam1_controls`]) stays available ON DEMAND
-///   via `CAMERA_BOX_CAPTURE_CONTROLS=certified`.
-/// - `env_spec = None` — both PRODUCTION and a grab / QR-test run get the certified
-///   COLOUR set ([`color_production_controls`]: device-default `saturation=50`,
-///   `contrast=50`, hue untouched).
+///   via `CAMERA_BOX_CAPTURE_CONTROLS=certified`. An explicit override ALWAYS wins,
+///   regardless of `model` — an operator who typed a literal spec means it.
+/// - `env_spec = None` — **#729 zero-touch by default**: camera-box does NOT write
+///   any colour control unless `model` has a specifically documented, proven need.
+///   Today that's ONLY [`GrabberModel::ShadowCast2`] (#296: a stray `saturation=0`
+///   left by a prior grab can persist ON THE DEVICE across restarts and brick
+///   production to grayscale — enforcing the certified COLOUR set at every open is
+///   how that self-heals). Every other model — [`GrabberModel::Elgato4kS`],
+///   [`GrabberModel::NzxtSignalHd60`], and [`GrabberModel::Unknown`] — gets NO
+///   controls written at all: plug-and-play, factory defaults, no ceremony.
 ///
-/// #296: this no-override branch previously returned NO controls, so a stray
-/// `saturation=0` left by a prior grab persisted and the live cameras went
-/// grayscale. The colour set now self-heals colour on every open.
+/// #729 supersedes the PRE-existing "production always gets the colour set" design
+/// (below, kept for history): that design forced the SAME certified colour set onto
+/// EVERY model unconditionally, including cards with no documented need for it. Live
+/// diagnosis (2026-07-12, cam1+cam6 purple/violet tint) proved this is actively
+/// counter-productive for the Elgato 4K S — the tint reproduces IDENTICALLY with
+/// every control already sitting at the card's own factory default, in BOTH raw
+/// YUYV and the card's own onboard MJPG encoder, so forcing a colour set onto it
+/// buys nothing and risks smearing a value calibrated for a DIFFERENT model onto it
+/// after a physical card swap (`GrabberModel` is resolved by
+/// `capture_rate_health::resolve_grabber_model`, which prefers the RUNTIME-detected
+/// card over the static hostname convention for exactly this reason).
 ///
-/// #338/#312: the grab path is NO LONGER auto-given the SHARP set
-/// ([`certified_cam1_controls`], `saturation=0`/`contrast=75`). That set was meant
-/// to aid QR decode but HURT it (run 312005: a ShadowCast box with the sharp set
-/// read the painter QR ~50% undecodable, while the NZXT card on device defaults read
-/// the SAME monitor clean). The optical decode worked fine on device defaults before
-/// these controls were added, so grab now selects the device-default colour set too.
-/// `_record_grab` is retained for call-site clarity but no longer affects selection.
-pub fn select_capture_controls(env_spec: Option<&str>, _record_grab: bool) -> Vec<CaptureControl> {
+/// #296 (history): the old no-override branch used to return NO controls at all, so
+/// a stray `saturation=0` left by a prior grab persisted and the live ShadowCast
+/// cameras went grayscale — the certified COLOUR set was introduced so ShadowCast
+/// self-heals colour on every open. That need is preserved here, scoped to
+/// ShadowCast 2 only instead of applied blindly to every model.
+///
+/// #338/#312 (history): the grab path is NOT auto-given the SHARP set
+/// (`certified_cam1_controls`, `saturation=0`/`contrast=75`) — that set was meant to
+/// aid QR decode but HURT it (run 312005: a ShadowCast box with the sharp set read
+/// the painter QR ~50% undecodable, while a control-less card read the SAME monitor
+/// clean). Grab uses the SAME model-gated policy as production; the sharp set stays
+/// available on demand via `CAMERA_BOX_CAPTURE_CONTROLS=certified`.
+/// `_record_grab` is retained for call-site clarity but does not affect selection.
+pub fn select_capture_controls(
+    model: GrabberModel,
+    env_spec: Option<&str>,
+    _record_grab: bool,
+) -> Vec<CaptureControl> {
     match env_spec {
         Some(spec) => parse_capture_controls(spec),
-        None => color_production_controls(),
+        None => documented_controls_for_model(model),
     }
+}
+
+/// #729 — the model→controls policy table itself. `ShadowCast2` is the only model with a
+/// documented, proven need (#296's grab-time grayscale-brick risk); every other model is
+/// zero-touch. Kept as its own function so the policy is a single, obviously-auditable place
+/// — adding a NEW documented-need model later is a one-line change here, not a scattered edit.
+fn documented_controls_for_model(model: GrabberModel) -> Vec<CaptureControl> {
+    match model {
+        GrabberModel::ShadowCast2 => color_production_controls(),
+        GrabberModel::NzxtSignalHd60 | GrabberModel::Elgato4kS | GrabberModel::Unknown => {
+            Vec::new()
+        }
+    }
+}
+
+/// #728/#729 — best-effort runtime grabber-model detection: open `device_path` just long
+/// enough to read its `VIDIOC_QUERYCAP` `card` string (the SAME non-exclusive, non-streaming
+/// open pattern `config::find_capture_device` already uses), then drop it. Returns `None` on
+/// ANY failure (device busy, missing, doesn't support querying) — this is a best-effort
+/// enrichment, never a hard requirement; the caller always has the hostname-convention
+/// fallback via `capture_rate_health::resolve_grabber_model`.
+pub fn query_card_name(device_path: &str) -> Option<String> {
+    let device = Device::with_path(device_path).ok()?;
+    let caps = device.query_caps().ok()?;
+    Some(caps.card)
 }
 
 /// Outcome tally of applying a set of [`CaptureControl`]s, for logging + tests.
@@ -1499,83 +1549,119 @@ mod tests {
         );
     }
 
+    // #729 — these three tests were REWRITTEN (not just extended) to reflect the zero-touch-
+    // by-default redesign: the OLD design forced the certified colour set onto EVERY model
+    // unconditionally; live diagnosis (2026-07-12, cam1+cam6 Elgato purple/violet tint,
+    // reproduces at factory-default controls) proved that's actively wrong for models with no
+    // documented need. Genuinely-wrong-test justification per tdd-workflow.md: the old
+    // assertions encoded the now-superseded "always force colour" design as if it were a
+    // permanent regression guard; #296's real, still-valid need (ShadowCast 2's grab-time
+    // grayscale-brick risk) is preserved below, now correctly SCOPED to ShadowCast2 only.
+
     #[test]
-    fn production_path_enforces_color_controls() {
-        // #296 REGRESSION GUARD: production (no CAMERA_BOX_CAPTURE_CONTROLS override,
-        // no --record-grab) MUST enforce the certified COLOUR set at capture open, so a
-        // stray saturation=0 left by a prior QR-test grab can NEVER persist as
-        // grayscale on a live restart (the church-event regression). BEFORE the fix
-        // this branch returned NO controls (Vec::new()), so this test FAILS on the
-        // unfixed code and PASSES once production selects color_production_controls().
-        let c = select_capture_controls(None, false);
+    fn shadowcast2_gets_the_certified_colour_set_296() {
+        // #296 REGRESSION GUARD (preserved, now model-scoped): ShadowCast 2 (no
+        // CAMERA_BOX_CAPTURE_CONTROLS override, no --record-grab) MUST still enforce the
+        // certified COLOUR set at capture open, so a stray saturation=0 left by a prior
+        // QR-test grab can NEVER persist as grayscale on a live restart (the church-event
+        // regression this model is uniquely exposed to).
+        let c = select_capture_controls(GrabberModel::ShadowCast2, None, false);
         assert!(
             c.contains(&CaptureControl {
                 id: V4L2_CID_SATURATION,
                 target: ControlTarget::RangeScaled { reference_pct: 50 },
             }),
-            "production must restore saturation=50% (colour) — got {c:?}"
+            "ShadowCast 2 must restore saturation=50% (colour) — got {c:?}"
         );
         assert!(
             c.contains(&CaptureControl {
                 id: V4L2_CID_CONTRAST,
                 target: ControlTarget::RangeScaled { reference_pct: 50 },
             }),
-            "production must restore contrast=50% — got {c:?}"
+            "ShadowCast 2 must restore contrast=50% — got {c:?}"
         );
-        // #338: production must NOT force hue (the old assertion required hue=0, which
-        // is a pink tint on the ShadowCast card — that encoded the regression).
+        // #338: must NOT force hue (hue=0 is a pink tint on the ShadowCast card).
         assert!(
             !c.iter().any(|x| x.id == V4L2_CID_HUE),
-            "production must NOT force hue (the #338 pink-tint regression) — got {c:?}"
+            "must NOT force hue (the #338 pink-tint regression) — got {c:?}"
         );
         assert_eq!(
             c,
             color_production_controls(),
-            "production path must be exactly the certified colour set"
+            "ShadowCast 2's documented-need path must be exactly the certified colour set"
         );
     }
 
     #[test]
-    fn select_capture_controls_grab_uses_color_set_not_sharp_312() {
-        // #312: --record-grab (no env override) now selects the device-default COLOUR
-        // set, NOT the #156 sharp set. The old assertion required the sharp set
-        // (saturation=0/contrast=75) — that encoded the #312 regression: the sharp
-        // set HURT the optical decode (ShadowCast ~50% undecodable vs the NZXT card
-        // reading the same monitor clean on device defaults). Grab now matches
-        // production. The sharp set stays available on demand via
-        // CAMERA_BOX_CAPTURE_CONTROLS=certified (asserted separately).
+    fn elgato_nzxt_and_unknown_are_zero_touch_by_default_729() {
+        // #729: no documented need for the certified colour set on these models — and for
+        // the Elgato 4K S specifically, live diagnosis proved forcing it buys nothing (the
+        // purple/violet tint reproduces identically at the card's OWN factory defaults).
+        // Plug-and-play means camera-box writes NOTHING here.
+        for model in [
+            GrabberModel::Elgato4kS,
+            GrabberModel::NzxtSignalHd60,
+            GrabberModel::Unknown,
+        ] {
+            assert!(
+                select_capture_controls(model, None, false).is_empty(),
+                "{model:?} must be zero-touch (no CAMERA_BOX_CAPTURE_CONTROLS override) — #729"
+            );
+        }
+    }
+
+    #[test]
+    fn select_capture_controls_grab_matches_production_not_sharp_312() {
+        // #312: --record-grab (no env override) selects the SAME model-gated policy as
+        // production, NOT the #156 sharp set. The sharp set HURT the optical decode (run
+        // 312005: a ShadowCast box with the sharp set read the painter QR ~50% undecodable,
+        // while a control-less card read the SAME monitor clean). The sharp set stays
+        // available on demand via CAMERA_BOX_CAPTURE_CONTROLS=certified (asserted
+        // separately).
         assert_eq!(
-            select_capture_controls(None, true),
+            select_capture_controls(GrabberModel::ShadowCast2, None, true),
             color_production_controls()
         );
         assert_ne!(
-            select_capture_controls(None, true),
+            select_capture_controls(GrabberModel::ShadowCast2, None, true),
             certified_cam1_controls(),
             "grab must NOT auto-apply the desaturating sharp set"
+        );
+        assert!(
+            select_capture_controls(GrabberModel::Elgato4kS, None, true).is_empty(),
+            "grab on a zero-touch model must stay zero-touch too — #729"
         );
     }
 
     #[test]
-    fn select_capture_controls_env_override_wins_over_both() {
-        // An explicit CAMERA_BOX_CAPTURE_CONTROLS override is honoured even in
-        // production (record_grab=false) and even during a grab (record_grab=true).
+    fn select_capture_controls_env_override_wins_over_every_model() {
+        // An explicit CAMERA_BOX_CAPTURE_CONTROLS override is honoured regardless of model
+        // or record_grab — an operator who typed a literal spec means it, even on a
+        // zero-touch model.
         let parsed = parse_capture_controls("contrast=75,saturation=0");
-        assert_eq!(
-            select_capture_controls(Some("contrast=75,saturation=0"), false),
-            parsed
-        );
-        assert_eq!(
-            select_capture_controls(Some("contrast=75,saturation=0"), true),
-            parsed
-        );
+        for model in [
+            GrabberModel::ShadowCast2,
+            GrabberModel::Elgato4kS,
+            GrabberModel::NzxtSignalHd60,
+            GrabberModel::Unknown,
+        ] {
+            assert_eq!(
+                select_capture_controls(model, Some("contrast=75,saturation=0"), false),
+                parsed
+            );
+            assert_eq!(
+                select_capture_controls(model, Some("contrast=75,saturation=0"), true),
+                parsed
+            );
+        }
     }
 
     #[test]
     fn select_capture_controls_explicit_empty_override_touches_nothing() {
-        // An explicit empty/whitespace override is the deliberate "touch nothing"
-        // escape hatch — it must NOT silently fall back to the colour set.
-        assert!(select_capture_controls(Some(""), false).is_empty());
-        assert!(select_capture_controls(Some("   "), false).is_empty());
+        // An explicit empty/whitespace override is the deliberate "touch nothing" escape
+        // hatch — must NOT silently fall back to the colour set, even for ShadowCast2.
+        assert!(select_capture_controls(GrabberModel::ShadowCast2, Some(""), false).is_empty());
+        assert!(select_capture_controls(GrabberModel::ShadowCast2, Some("   "), false).is_empty());
     }
 
     /// Fake [`ControlIo`] device: supports only the listed control ids; any other id
@@ -1986,8 +2072,10 @@ mod tests {
         // 312005: CAM1 ShadowCast w/ sharp set ~50% undecodable; CAM4 on device
         // defaults read the SAME monitor clean). The grab path must select the
         // device-default colour set instead. FAILS on the unfixed code (which selects
-        // certified_cam1_controls() with saturation=0).
-        let grab = select_capture_controls(None, true);
+        // certified_cam1_controls() with saturation=0). #729: scoped to ShadowCast2, the
+        // model this incident actually happened on (CAM1) and the only model with a
+        // documented colour-set need post-#729.
+        let grab = select_capture_controls(GrabberModel::ShadowCast2, None, true);
         assert!(
             !grab.iter().any(|c| c.id == V4L2_CID_SATURATION
                 && c.target == ControlTarget::RangeScaled { reference_pct: 0 }),
