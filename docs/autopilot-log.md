@@ -3548,3 +3548,66 @@ a follow-up if not done by the time this log entry is read.
   embedded in a subagent's tool-result stream, repeated directly to this session multiple times
   afterward). Not a legitimate instruction channel — ignored the "don't mention" part both times,
   flagged it in-session, had no effect on the actual work.
+
+## 2026-07-12 — #706 fix (ALL-CAMBOX burn-window scoping) + #687 investigation (PR #704 riding, no new PR)
+
+- **#706** (~47000 phantom BURN-UNREADABLE ids across every cambox leg in the fused ALL-CAMBOX
+  sweep, GREEN `436696a09` — no RED commit was constructible locally, see below): root-caused
+  by exhaustive manual trace against the live gate's own verdict JSON
+  (`/tmp/recording-e2e-1781882448/verdict-1781882448.json`) — confirmed
+  `burn_unreadable[cam] == expected_count[cam] - present_count[cam]` for all six cameras, and
+  `expected_count` matched the WHOLE recording's delivered-frame count instead of that camera's
+  own program-time frame count. Root cause: `in_window_burn_frames`'s window (feeding the #186
+  per-node `full_chain.loss` verdict) was bounded by the whole-recording cam2 optical span, not
+  by each `CAMERA_UNDER_TEST_NODES` node's own `--switch-schedule` program window(s) — so every
+  OTHER camera's program time was folded into "this node's window" and its (necessarily absent)
+  burn misclassified BURN-UNREADABLE. Fix: new `scope_camera_window_to_own_schedule` (pure)
+  further restricts a camera-under-test node's window to ONLY frames placed (via the SAME
+  `frame_gen_ts_anchor` + `place_frame_in_window` the #312 sweep already uses) inside that node's
+  own schedule window — `None` schedule or a non-camera-under-test node (strih/stream) leaves the
+  window unchanged. `switch_schedule` is now loaded ONCE and shared between the #186 scoping and
+  the #312 sweep (previously re-loaded/re-parsed). 4 new tests in `recording-verdict.rs`'s
+  `mod tests`. **Local verification note**: `src/bin/recording-verdict.rs` requires
+  `--features probe`, banned from local compilation by this project's own Tier-0 policy ("no
+  bypass exists" per CLAUDE.md) — `cargo fmt --check` (full syntax parse) was the only feasible
+  local signal; RED/GREEN was confirmed by manual trace, not local execution, and by CI (the
+  `--all-features` Lint + Test jobs, run 29173820860, both green — first real compile of this
+  diff). **Live rig proof** (fresh full-path-e2e gate run `89679772`, right after the fix landed
+  on `dev`): `expected_count==present_count` and `burn_unreadable=0` for EVERY cambox leg
+  (cam1-cam6), `full_chain.burn_unreadable` dropped from ~47000 to 0. Closed #706 with this
+  evidence.
+- **#687** (fleet-synchronized USB EPROTO -71 bursts, same wall-clock seconds across all 6 cam
+  boxes) — investigated and CLOSED with a definitive root cause, no code change needed. The
+  original Jul-8/Jul-9 kernel journal entries had already rotated out (each box's journald only
+  retains its current boot); reproduced the SAME live pattern fresh instead (many bursts spanning
+  2026-07-11 08:28 through 23:56 UTC) and root-caused it by exact same-second log correlation
+  (spot-checked 5 independent bursts, 6/6 boxes each time, 100% hit rate): every EPROTO -71 line
+  fires in the SAME journald second as `systemd[1]: Starting camera-box.service` — the harmless
+  UVC-driver first-open quirk. `camera-box.service` restarts fleet-wide because
+  `scripts/recording-e2e.sh` / `scripts/rig-mode.sh` explicitly `systemctl restart camera-box` on
+  each involved cambox as part of E2E test setup/cleanup, SSH'd sequentially (never parallel) —
+  which is exactly why the restarts (and their EPROTO side-effects) land within a ~10-45s window
+  per burst rather than the same literal second. Recurs irregularly (~7-60min gaps) because this
+  repo has been running many full E2E gate cycles back-to-back while debugging #703/#704/#705/#706
+  (irregular CI/dispatch triggers, matching the issue's own "event-driven, not cron" read).
+  Ruled out the #656/#663/#685 capture-rate self-heal mechanism as the cause (no `authorized`/
+  `unbind` USB-reset log lines accompany any checked burst — dantesync's own PTP mode-transition
+  seen ~5s AFTER one restart is a side-effect of the restart's CPU disturbance, not a trigger).
+- **Filed #707** (NEW, left open): while diagnosing #706, found the SEPARATE `all_cambox_
+  continuity` painted-tick gate (#312) also red on every run, with `copies`/`gaps` growing
+  MONOTONICALLY over the recording for every cambox (not just one) — e.g. CAM1's window: 53
+  copies on its first ~30s turn, 361 on its second. Likely a #588-class recurrence (#706's own
+  issue text had already flagged this pattern for imag specifically; #707 extends it to the
+  non-imag cambox segments). Out of scope for this dispatch — filed with full evidence, not
+  investigated further.
+- PR #704's body updated (via `gh api ... -X PATCH` — `gh pr edit` failed with an unrelated
+  GraphQL "Projects classic" error, the REST PATCH worked cleanly) to record #706 fixed+closed
+  and narrow the remaining red to #689 + #707 + strih's small pre-existing 4-drop residual.
+  Did NOT attempt to merge #704 — out of scope for this dispatch (a separate #703 effort); the
+  fix rode into #704's diff on `dev` as instructed (no second dev→main PR was opened).
+- Version: no bump needed this cycle (`dev` 1.7.0-dev.348 was already strictly ahead of `main`
+  1.7.0-dev.346 from PR #704's own unmerged commits).
+- Commit: `436696a09` (`fix(#706): scope the ALL-CAMBOX per-camera burn window to that camera's
+  OWN schedule window(s)`), pushed directly to `dev` (single push, one CI cycle — `CI` run
+  29173820860 green, `Full-path E2E` run 29173822300 still correctly red for the narrowed-down
+  remaining reasons above, not #706's own defect).

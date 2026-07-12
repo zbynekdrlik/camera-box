@@ -604,6 +604,28 @@ is Phase-2, a DistroAV burn-filter change held off the 2.5h windows-genlock buil
   (e.g. CAM3 down) never reads as a pass. Active set today (#312 items 1+3) = ALL SIX cameras
   (CAM1/2/3/4/5/6) — see the updated Phase-2 paragraph below.
 
+## A DIFFERENT per-node metric (`full_chain.loss`, the #186 headline) was NOT schedule-scoped until #706 — the bug class to watch for
+
+The `all_cambox_continuity` gate above (#312) has ALWAYS been correctly schedule-windowed — but a
+SEPARATE, older per-node metric — `full_chain.loss.<cam>` (`expected_count`/`present_count`/
+`burn_unreadable`, the #186 headline verdict `node_verdict_with_optical` builds via
+`in_window_burn_frames`) — was NOT: its window was the WHOLE-RECORDING cam2 optical span, a
+leftover from before the ALL-CAMBOX sweep existed (when a single camera was continuously on
+program for the whole test). In the fused ALL-CAMBOX sweep each `CAMERA_UNDER_TEST_NODES` entry is
+on program for only its OWN ~1/6-to-2/6 share of the recording — so #186's un-scoped window folded
+every OTHER camera's program time into "this node's window" and misclassified it BURN-UNREADABLE:
+~47000 phantom ids fleet-wide (#706), ~7250-8530 PER camera. **The tell**, if you ever see this
+recur on a NEW per-node metric someone adds to the ALL-CAMBOX sweep: `burn_unreadable[cam] ≈
+expected_count[cam] × (fraction of the recording OTHER camboxes were on program)`, i.e.
+`expected_count[cam]` sits near the WHOLE recording's frame count instead of near
+`present_count[cam]`. The fix pattern (`scope_camera_window_to_own_schedule`,
+`src/bin/recording-verdict.rs`): reuse the SAME `frame_gen_ts_anchor` + `place_frame_in_window`
+the #312 sweep already uses to restrict the new metric's window to that camera's own schedule
+window(s) — never invent a second attribution scheme, or the two gates can disagree. Duration-floor
+/ optical-undecodable-rate style metrics (`optical_span_facts`) should usually stay
+WHOLE-recording — those measure "did the session run long enough" / "did the shared optical read
+stay clean", legitimately session-wide properties, not per-camera-program-time ones.
+
 ## #681 — a per-adjacent-pair delta walk is a BIASED estimator; use whole-window NET span instead
 
 `window_segment`'s `gaps` count (via `painted_tick_gaps`, #625) went through TWO bugs on the SAME
@@ -1398,3 +1420,27 @@ DanteSync variant, which sidesteps the journal entirely by preferring dantesync#
 no live incident yet — filed as #694, not fixed**: `scripts/deploy-fleet.sh` (emit-ok + fatal
 checks), `scripts/verify-device.sh` (device acceptance), `scripts/upgrade-fleet-ndi.sh` (emit-ok
 + fatal checks). If ANY of those ever false-fails on a stale line, this is the fix pattern.
+
+## "Fleet-synchronized" kernel/USB anomaly across all 6 cam boxes → check the E2E harness's OWN restart first (#687)
+
+Any kernel/USB message that fires at nearly the SAME wall-clock second across ALL 6 cam boxes
+(observed: `uvcvideo ... Non-zero status (-71) in video completion handler` on every box, #687) is
+NOT automatically evidence of a mysterious external network/avahi/MCP trigger — check whether it
+is simply a SIDE EFFECT of `camera-box.service` being restarted fleet-wide first.
+`scripts/recording-e2e.sh` / `scripts/rig-mode.sh` explicitly `systemctl restart camera-box` on
+each involved cambox as part of E2E test setup/cleanup (`scripts/lib/camera-box-restart-verify.sh`,
+`rig-mode.sh:242`, `recording-e2e.sh:552/828/878/1253`), SSH'd to each box in SEQUENCE (never in
+parallel) — this is why the restarts (and any USB-open-quirk side effect) land within a ~10-45s
+window across the fleet rather than the literal same second, and why the pattern recurs
+irregularly (matching however often E2E gate cycles have been dispatched, not a fixed cadence).
+**Confirm/rule out fast**: `journalctl --since '<T-5s>' --until '<T+5s>'` on the box at the exact
+anomaly timestamp — if `systemd[1]: Starting camera-box.service` appears in the SAME second, the
+anomaly is that restart's side effect, done (#687's EPROTO -71 is the well-known harmless
+first-open UVC-driver quirk: it fires once right as the freshly-opened `/dev/videoN` settles, with
+no re-enumeration or speed downgrade following). **Journalctl retention gotcha (bit this
+investigation once)**: a cam box's journald only retains the CURRENT boot's log
+(`journalctl --list-boots` shows a single boot) — evidence from a multi-day-old incident is
+usually already gone if the box rebooted since; reproduce fresh instead of chasing stale
+timestamps. Don't reach for the #656/#663/#685 capture-rate self-heal mechanism as the explanation
+without checking first — it leaves its OWN distinct signature (`authorized`/`unbind` USB-reset log
+lines), absent from a plain harness-triggered restart.
