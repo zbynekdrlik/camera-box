@@ -2,6 +2,44 @@
 
 Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads context.
 
+## 2026-07-12 (morning) — #710 (fixed+closed) / #712 (fixed+closed) / #690 (partial, held) — bundled, PR #704 still held (v1.7.0-dev.349)
+
+- **#710** (obs_phase2.py #627 liveness check false-abort on a cold OBS restart's first
+  StartRecord): `_record_liveness_verdict` now tolerates a leading `outputActive=False`
+  sample as long as everything from the first `True` onward stays `True`. RED
+  `ec024e7dc`, GREEN `31c3bdb8f`. Tests: `tests/python/test_obs_phase2_record.py`
+  30/30 (4 new). Closed with evidence.
+- **#712** (recording-e2e.sh ALL_CAMBOX cleanup trap cut off mid-loop by a GH Actions
+  cancellation): cam3/4/5/6 restore loop now backgrounds all 4 ssh restores and waits
+  via new `scripts/lib/cambox-parallel-restore.sh`; loop wall-clock bounded by the
+  slowest box, not the sum of 4. RED `dc1fe017d`, GREEN `c5e740767`. Tests: new
+  `tests/harness_cambox_parallel_restore_712.rs` 7/7 (incl. a real-execution timing
+  proof). Full `cargo test` suite green — no anchor collisions in the sibling
+  `harness_recording_e2e_*` files. Closed with evidence.
+- **#690** (verify the live A/V-sync dock + Slovak operator procedure): PARTIAL, stays
+  OPEN. mbc (10.77.9.232) was network-unreachable the whole session (checked
+  repeatedly, 09:40-10:08 CEST — "No route to host"), so the live dock-lock
+  re-verification could not be attempted; rig itself stayed idle/not-streaming
+  throughout (pure mbc-power block, not a broadcast-timing block). Delivered the
+  one-page Slovak operator procedure (`docs/operator-av-sync-dock-sk.md`, `2931450b9`)
+  grounded in the dock's own source + existing findings, incl. the mute/unmute
+  discipline. Honest finding posted on the issue; re-attempt when mbc is reachable.
+- **Version bump** `324d0e162` (1.7.0-dev.348 → .349), first commit of the batch.
+- **PR #704** body updated (REST API PATCH — `gh pr edit` hits the known Projects-
+  classic GraphQL bug, see `.claude/skills/ci/SKILL.md`) with `Closes #710` /
+  `Closes #712`; #690 intentionally has no Closes line (genuinely incomplete).
+- **CI**: regular pipeline (lint/test/build/coverage/security/shellcheck/
+  windows-probe) green on the push — run 29185162641. The self-hosted
+  `full-path-e2e` required rig gate re-triggered on the same push (run
+  29185163557) and is tracked separately as part of PR #704's ongoing multi-session
+  saga — not driven to completion by this dispatch (neither #710 nor #712 touch the
+  zero-loss/A/V measurement path).
+- **Playbook**: `.claude/skills/e2e/SKILL.md` (#710 cold-start note + #712 parallel-
+  restore note next to the cancellation GOTCHA), `CLAUDE.md` (second worked example
+  under the recording-e2e.sh static-anchor GOTCHA — wrapping an anchored line's
+  execution mode is safe when every sibling test uses substring `.find()`),
+  `.claude/skills/av-sync/SKILL.md` (mbc-reachability pre-flight one-liner).
+
 ## 2026-07-12 (night) — #708 (strih periodic real_drop) + #696 (cam3 corruption) deep-dived; NO code fix; PR #704 STILL held (v1.7.0-dev.348)
 
 - **#708** (strih carries a periodic 4-frame `real_drops`, aligned to the ALL_CAMBOX switch
