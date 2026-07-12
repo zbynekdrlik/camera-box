@@ -2523,3 +2523,57 @@ fn setup_imag_driftguard_pubkey_step_owned_by_desktop_user_541() {
          tee -a \"$AUTH_KEYS\"`), not as root"
     );
 }
+
+/// #727 — imag-nb is a PRODUCTION device: a short accidental press of its power button
+/// suspended/shut it down during the 2026-07-12 live event. The fleet's cam boxes already
+/// protect against this (setup-device.sh STEP 12: HandlePowerKey/HandleSuspendKey/
+/// HandleHibernateKey=ignore) — imag-nb's step 5 only ever covered the LID + idle/blank/lock
+/// path, never the physical power button. This must be persisted so a re-provision (or a new
+/// imag-class box) keeps the protection — the live drop-in applied by hand during the event
+/// does not survive a fresh `setup-imag.sh` run.
+#[test]
+fn setup_imag_ignores_power_button_727() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("99-production-no-powerkey.conf"),
+        "{SETUP} must write a `99-production-no-powerkey.conf` logind drop-in (matching the \
+         live-applied file, #727) — a re-provision must not lose the power-button protection \
+         applied by hand during the 2026-07-12 event"
+    );
+    let powerkey_conf = body
+        .find("99-production-no-powerkey.conf")
+        .expect("checked above");
+    // The heredoc body that follows the `cat >` for this file must carry all three key-handling
+    // directives — scope the search to a bounded window right after the filename so this test
+    // can't accidentally match an unrelated HandlePowerKey mention elsewhere in the script.
+    let window = &body[powerkey_conf..(powerkey_conf + 400).min(body.len())];
+    for needle in ["HandlePowerKey=ignore", "HandleSuspendKey=ignore", "HandleHibernateKey=ignore"]
+    {
+        assert!(
+            window.contains(needle),
+            "{SETUP}: the #727 99-production-no-powerkey.conf drop-in must set `{needle}` — a \
+             short physical power-button press must never suspend/shutdown this production box"
+        );
+    }
+}
+
+/// The #727 power-button drop-in must actually take effect: `systemctl restart systemd-logind`
+/// (or an equivalent reload) must run AFTER the file is written, in the SAME step as step 5's
+/// existing lid/sleep drop-in — otherwise the new directives sit on disk unread until some
+/// LATER unrelated restart happens to pick them up.
+#[test]
+fn setup_imag_reloads_logind_after_powerkey_conf_727() {
+    let body = read(SETUP);
+    let powerkey_conf = body
+        .find("99-production-no-powerkey.conf")
+        .expect("{SETUP} must have the #727 power-key drop-in (see setup_imag_ignores_power_button_727)");
+    let restart = body
+        .find("systemctl restart systemd-logind")
+        .expect("{SETUP} must restart systemd-logind to apply the logind.conf.d drop-ins");
+    assert!(
+        restart > powerkey_conf,
+        "{SETUP}: `systemctl restart systemd-logind` must come AFTER the #727 \
+         99-production-no-powerkey.conf is written, or the new directives never take effect \
+         this run"
+    );
+}
