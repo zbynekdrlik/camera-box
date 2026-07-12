@@ -211,6 +211,20 @@ worked example — 3 call sites (cam1, the ALL_CAMBOX loop, cam2/painter) each g
 step with the ORIGINAL restart lines byte-for-byte unchanged, verified by the full `cargo test`
 suite staying green (115/115 binaries, no anchor collisions).
 
+**Variant (#712) — WRAPPING an anchored line's execution mode (not just appending after it) is
+ALSO safe, PROVIDED you check every sibling test uses SUBSTRING `.find()`, never a full-line/exact
+match.** #712 needed the cam3/4/5/6 ALL_CAMBOX restore loop's ssh call to run BACKGROUNDED
+(`( timeout ... ssh ... ) &` instead of a bare foreground call) so 4 boxes restore concurrently
+instead of sequentially — this touches the anchor line itself, not just text after it. Before
+doing this: `grep -rn '\.find(' tests/*.rs` for every string that could live inside the region
+being touched, and confirm each is a `body.contains(...)`/`region.find(...)` SUBSTRING check
+(unaffected by a `(`/`) &` wrapper on the same logical command) rather than something that
+requires the anchor to be the literal FIRST token on its line or hard-codes exact whitespace. The
+new PID-collection + wait logic itself went into a new sourced lib
+(`scripts/lib/cambox-parallel-restore.sh`), same as the #675 pattern — only the wrap-in-parens
+touched the anchored region directly, and it was verified safe (grep first, then the full
+`cargo test` suite green after) rather than assumed safe.
+
 ## GOTCHA — `gh pr merge` falsely refuses a green PR as "not up to date"; the direct REST call works
 
 This repo's `dev` branch is **structurally always "behind" `main`** by design: `main` only ever

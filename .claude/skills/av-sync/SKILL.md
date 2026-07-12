@@ -242,3 +242,23 @@ as the cause. If ALL of this reads healthy (as it did 2026-07-12), the remaining
 above, but its volume is controlled by physical buttons with no software knob) or need Dante
 Controller GUI access (not remotely reachable via SSH — check whether a win-* MCP target has it
 installed before ruling this segment fully unreachable).
+
+## #690 — before attempting the dock's live-lock verification, check `mbc` is reachable FIRST
+
+`mbc` (Master Broadcast Console, 10.77.9.232) is "often OFF outside broadcasts" (`targets.md`) —
+the dock (same as any #689-style measurement) needs its LIVE master-mix audio, so attempting a
+live-lock test while it's off just burns a cycle for a guaranteed no-lock. Cheap one-shot check
+BEFORE any rig-mode.sh test / dock-Start attempt:
+```bash
+timeout 5 bash -c "echo > /dev/tcp/10.77.9.232/22" 2>&1 && echo "MBC UP" || echo "MBC UNREACHABLE"
+```
+"No route to host" = genuinely off (not a firewall/credential issue) — same failure shape #689's
+2026-07-11/12 comments already documented for this exact host. Confirmed live 2026-07-12 (#710/
+#712/#690 dispatch): `mbc` stayed unreachable across the whole session (checked repeatedly,
+09:40-10:03 CEST) — combined with `rig-busy-check` staying idle the whole time, this was purely an
+mbc-power block, not a live-broadcast-timing one. The one-page Slovak operator procedure for the
+dock (`docs/operator-av-sync-dock-sk.md`) was written from source (`vendor/av-sync-dock/src/
+sync-test-dock.cpp`'s `on_start_stop()` + `data/locale/en-US.ini`'s exact UI label text) and
+existing documented findings — but the actual "dock locks on real signal, updates live, survives a
+camera switch" proof (with a screenshot) is STILL not re-confirmed as of 2026-07-12; #690 stays
+OPEN. Re-attempt the live-lock test whenever `mbc` is reachable AND the rig is idle.

@@ -508,6 +508,16 @@ the default program source), and the rig-busy-check, before considering the rig 
 `pkill -9 -f 'camera-box-burn-'` + `rm -f /tmp/camera-box-burn-*` + `systemctl restart camera-box`
 per stray box, `obs_burn_filter.py remove` per stray-burn input.
 
+**#712 (2026-07-12) — the cam3/4/5/6 loop is now PARALLEL, shrinking (not eliminating) this
+window.** `cleanup()`'s cam3/4/5/6 restore now backgrounds all 4 boxes' ssh restores at once and
+waits for them via `scripts/lib/cambox-parallel-restore.sh`'s `cambox_parallel_wait_and_report`, so
+the loop's wall-clock is bounded by the SLOWEST single box instead of the SUM of 4 (a real
+functional timing proof lives in `tests/harness_cambox_parallel_restore_712.rs`). This makes a
+cancellation landing mid-loop far less likely, but a SIGKILL can still land inside the shorter
+window — the manual re-verify steps above (`ps aux`/`systemctl is-active`/`obs_burn_filter.py
+check`/`rig-busy-check` on EVERY box) are still the correct backstop after any cancelled
+ALL_CAMBOX run, never assume the parallelization alone makes cleanup atomic.
+
 ## Painter ground-truth CSV lifecycle + recording orphan guard (#355 / #359)
 
 **frame-probe writes the painter ground-truth `/tmp/painter.csv` ONLY on its clean `--duration-secs`
@@ -1616,6 +1626,17 @@ subcommands the harness itself calls, directly from dev1, against the idle rig:
 
 This was how #627's `genlock_latency_ms_src` transition hypothesis was tested live (9 varied
 attempts in a few minutes total, 0 reproductions) — much cheaper than 9 full 30-min E2E runs.
+
+**#710 — the #627 liveness check now TOLERATES a leading cold-start `False` sample.** A FRESH OBS
+process's NVENC/CUDA cold-init can take slightly longer than one liveness poll (`OBS_RECORD_
+LIVENESS_POLL_S`, default 2s) to flip `outputActive` to `True` — live repro on imag-nb verifying
+#709: `active=[False, True] bytes=[0, 623840]` was a GENUINE recording, but the old "any `False` =
+DEAD" rule false-aborted it. `_record_liveness_verdict` (`scripts/obs_phase2.py`) now walks to the
+FIRST `True` sample before applying the death checks: a LEADING run of `False` is tolerated as long
+as everything from the first `True` onward stays `True`. A `True→False` transition anywhere
+(started then died) or an all-`False` window (never started) still fail hard, unchanged — #627's
+original protection is fully preserved. Only matters on the FIRST `StartRecord` right after a fresh
+OBS process restart; a warm, already-running OBS is unaffected.
 
 ## `_assert_program_nonblack` can false-positive on dim (not black) production content — #677
 
