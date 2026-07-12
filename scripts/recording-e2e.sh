@@ -91,6 +91,12 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # [8/8] E2E_EXECUTE_VERDICT=1 path — #701 proved ssh/scp works on this rig for these boxes).
 # shellcheck source=scripts/lib/win-ssh-exec.sh
 . "$HERE/lib/win-ssh-exec.sh"
+# #709: imag-nb GPU VRAM headroom preflight (pure query-cmd builder + parser + message
+# formatters) — a long-uptime OBS render pipeline on imag-nb can leak GPU VRAM until StartRecord's
+# NVENC encoder init fails with NV_ENC_ERR_OUT_OF_MEMORY; catch it BEFORE StartRecord, not via the
+# opaque #627 liveness-check failure it would otherwise produce.
+# shellcheck source=scripts/lib/imag-gpu-guard.sh
+. "$HERE/lib/imag-gpu-guard.sh"
 camera_resolve "${CAM:-cam1}"
 # #24 item 1: this harness's SOURCE-camera role (the physical box filming cam2's monitor via
 # the optical loopback + carrying the #174 render-time capture burn) is one of
@@ -1164,6 +1170,30 @@ if ! OBS_PASSWORD_STRIH="${OBS_PASSWORD:-}" OBS_PASSWORD_STREAM="${OBS_PASSWORD:
   echo "    Clear burns with scripts/rig-mode.sh event; see EPIC #406." >&2
   exit 1
 fi
+
+echo "[4e/8] #709 imag-nb GPU VRAM headroom preflight — StartRecord's NVENC encoder needs real free VRAM"
+# A long-uptime OBS render pipeline on imag-nb can leak GPU VRAM (live-diagnosed #709: 6872MiB
+# used out of 8151MiB total after 5 days uptime, leaving ~1058MiB free — NVENC's encoder init then
+# fails NV_ENC_ERR_OUT_OF_MEMORY and StartRecord silently never starts a recording, only caught 4s
+# later by the #627 liveness check with no root-cause hint). Read the box's CURRENT free VRAM and
+# FAIL FAST with an actionable message — before StartRecord ([5/8]) ever runs — rather than burn
+# time discovering an opaque liveness failure. IMAG_GPU_MIN_FREE_MIB default (1500) sits with
+# real margin above the observed failure point (~1058MiB) and well below a freshly-restarted
+# box's healthy free VRAM (~7849MiB, confirmed live post-fix).
+IMAG_GPU_MIN_FREE_MIB="${IMAG_GPU_MIN_FREE_MIB:-1500}"
+IMAG_GPU_QUERY_OUT="$(sshpass -p "${IMAG_PW:-newlevel}" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 \
+  "${IMAG_USER:-newlevel}@$IMAG_IP" "$(imag_gpu_query_cmd)" 2>&1 || true)"
+IMAG_GPU_FREE_MIB="$(imag_gpu_free_mib_from_query "$IMAG_GPU_QUERY_OUT" || true)"
+if [ -z "$IMAG_GPU_FREE_MIB" ]; then
+  echo "ERROR: $(imag_gpu_unreadable_message)" >&2
+  echo "       raw nvidia-smi output: $IMAG_GPU_QUERY_OUT" >&2
+  exit 1
+fi
+if [ "$(imag_gpu_headroom_ok "$IMAG_GPU_FREE_MIB" "$IMAG_GPU_MIN_FREE_MIB")" != "true" ]; then
+  echo "ERROR: $(imag_gpu_preflight_message "$IMAG_GPU_FREE_MIB" "$IMAG_GPU_MIN_FREE_MIB")" >&2
+  exit 1
+fi
+echo "    ok: imag-nb GPU has ${IMAG_GPU_FREE_MIB}MiB VRAM free (>= ${IMAG_GPU_MIN_FREE_MIB}MiB required)"
 
 # ============================================================================
 # #137 OPTIONAL MODE — OBS-restart A/V-sync SURVIVAL gate. OFF by default.
