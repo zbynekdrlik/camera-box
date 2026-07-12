@@ -587,6 +587,14 @@ async fn run_capture_loop(
         // tick, zero loss) is unaffected by capture-side wobble and stays strict by design.
         let capture_rate_tolerance_pct =
             camera_box::capture_rate_health::tolerance_pct_for_model(grabber_model);
+        // #717 — SUSTAINED-band capture-rate health: a SEPARATE, narrower consecutive-breach
+        // counter/tolerance, so a genuinely chronic deviation (e.g. cam1's #674 63.9-64.0fps)
+        // still trips self-heal even when it stays comfortably inside the wide jitter-band
+        // tolerance above (#685's correct-for-short-bursts widening, which #717 leaves
+        // unchanged). See `capture_rate_health::sustained_tolerance_pct_for_model`'s doc.
+        let mut consecutive_sustained_breaches: u32 = 0;
+        let sustained_rate_tolerance_pct =
+            camera_box::capture_rate_health::sustained_tolerance_pct_for_model(grabber_model);
         // #666 — emit-vs-capture health: consecutive-breach counter for the SAME pure
         // `capture_rate_health` decision, but checked against the configured genlock SEND rate
         // (`send_fps`, below) instead of the negotiated capture rate — catches a defect in the
@@ -1017,19 +1025,60 @@ async fn run_capture_loop(
                                 consecutive_rate_breaches,
                                 rate_deviant,
                             );
-                        if camera_box::capture_rate_health::should_warn(
+                        let jitter_confirmed = camera_box::capture_rate_health::should_warn(
                             consecutive_rate_breaches,
                             camera_box::capture_rate_health::CAPTURE_RATE_WARN_WINDOWS,
-                        ) {
-                            tracing::warn!(
-                                "#656 capture-delivery-rate DEFECTIVE: {:.2} fps captured vs {:.2} fps configured/negotiated (>{:.1}% deviation sustained for {} consecutive report windows, ~{}s, {} tolerance) — USB-reset the capture device (see #656, #685)",
-                                cap_fps,
-                                configured_capture_fps,
-                                capture_rate_tolerance_pct,
-                                consecutive_rate_breaches,
-                                consecutive_rate_breaches as u64 * 5,
-                                grabber_model
+                        );
+
+                        // #717 — SUSTAINED-band check: a SEPARATE, narrower tolerance
+                        // (`sustained_rate_tolerance_pct`) + a longer required run
+                        // (`SUSTAINED_WARN_WINDOWS`, 60s) so a genuinely chronic deviation (e.g.
+                        // cam1's #674 chronic 63.9-64.0fps) still trips self-heal even while it
+                        // stays comfortably inside the wide jitter floor above — #685's widening
+                        // is still correct for genuinely short-lived quantization jitter (band
+                        // (a)); this catches band (b), the sustained case #685 over-corrected
+                        // away. See `capture_rate_health::sustained_tolerance_pct_for_model`'s doc.
+                        let sustained_deviant = camera_box::capture_rate_health::is_rate_deviant(
+                            cap_fps,
+                            configured_capture_fps,
+                            sustained_rate_tolerance_pct,
+                        );
+                        consecutive_sustained_breaches =
+                            camera_box::capture_rate_health::next_consecutive_breaches(
+                                consecutive_sustained_breaches,
+                                sustained_deviant,
                             );
+                        let sustained_confirmed = camera_box::capture_rate_health::should_warn(
+                            consecutive_sustained_breaches,
+                            camera_box::capture_rate_health::SUSTAINED_WARN_WINDOWS,
+                        );
+
+                        if camera_box::capture_rate_selfheal::should_trigger_selfheal(
+                            jitter_confirmed,
+                            sustained_confirmed,
+                        ) {
+                            if jitter_confirmed {
+                                tracing::warn!(
+                                    "#656 capture-delivery-rate DEFECTIVE: {:.2} fps captured vs {:.2} fps configured/negotiated (>{:.1}% deviation sustained for {} consecutive report windows, ~{}s, {} tolerance) — USB-reset the capture device (see #656, #685)",
+                                    cap_fps,
+                                    configured_capture_fps,
+                                    capture_rate_tolerance_pct,
+                                    consecutive_rate_breaches,
+                                    consecutive_rate_breaches as u64 * 5,
+                                    grabber_model
+                                );
+                            } else {
+                                tracing::warn!(
+                                    "#717 capture-delivery-rate SUSTAINED defect: {:.2} fps captured vs {:.2} fps configured/negotiated (>{:.1}% deviation sustained for {} consecutive report windows, ~{}s) — inside {}'s wide {:.1}% jitter-tolerant envelope but PERSISTENT beyond the #717 60s sustained bar, reset-fixable per #642/#674 evidence — USB-reset the capture device (see #717, #674, #685, #663)",
+                                    cap_fps,
+                                    configured_capture_fps,
+                                    sustained_rate_tolerance_pct,
+                                    consecutive_sustained_breaches,
+                                    consecutive_sustained_breaches as u64 * 5,
+                                    grabber_model,
+                                    capture_rate_tolerance_pct
+                                );
+                            }
 
                             // #663 — self-heal: the #656 fix (a manual USB reset) is only
                             // TEMPORARY — the same defect recurred within hours, three times in
