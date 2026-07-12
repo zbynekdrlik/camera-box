@@ -4069,3 +4069,39 @@ a follow-up if not done by the time this log entry is read.
   commit without a new push, use `gh run rerun <the pull_request run's id>` (preserves the
   `pull_request` event context, not `workflow_dispatch`'s `workflow_dispatch` context).
 - Version: no bump this cycle (`dev` already well ahead of `main`, unchanged from prior cycles).
+
+## 2026-07-12 (evening, continued) — #674 reopened, narrowed further — solo dispatch, no code change
+
+- **#674 investigated per its own reopening comment's sharp check, left OPEN with a narrowed,
+  much more precise state (NOT re-closed).** Found `RUN_ID=1796626745` (gate run `29194843940`)
+  matching the reopening comment's `13:50:32-13:55:47 UTC` window. Pulled cam1's own
+  `/tmp/cbox-burn.log` for the full burn: emit rock-steady 59.1-60.2fps, captured 61.4-63.0fps,
+  **zero** `send_stall.rs`/`boundary_skip_count` WARN lines anywhere — rejects #707's
+  emit-deficit-on-cam1 hypothesis on the actual new instrumentation (deployed this morning,
+  1.7.0-dev.349), extending the earlier captured-side-only rejection.
+- **Caught and fixed a stale-mapping bug in my own first pass, inherited from this issue's own
+  09:33/09:36 comments (and very likely #707's own "cam2/cam5/cam6" attribution too — same
+  09:33-09:37 session):** both used `CAMBOX_SWEEP`'s literal scene:label pairing as a
+  label->physical-box translation table. `.claude/skills/e2e` was already corrected under #708
+  (closed 04:26 UTC that same day, BEFORE those 09:33 comments) — schedule label `CAMN` needs NO
+  translation, it IS physical box `camN` directly (two independent inversions cancel). Re-ran the
+  "two-observer discriminator" check with the CORRECTED mapping: downloaded 3 older CI runs'
+  verdict JSONs as artifacts (`gh run download -n recording-e2e-full-path`) for
+  `29182933011`/`29183864079`/`29185381010` to cross-check reproducibility.
+- **Result: physical cam1's own general-chain optical continuity (`all_cambox_continuity.segments`,
+  decoded via cam2's painted-tick QR on the recorded stream — genuinely independent from imag's own
+  pixel-content check) ALSO rises from cam1's early on-program window to its late one, reproducibly
+  in ALL 4 runs** (copies 3->53, 30->48, 39->51, 30->52) — matching imag's own already-established
+  time-correlated rise for the SAME camera, while cam1's own device telemetry (captured fps) is
+  flat/identical between those exact two windows every time. Two independently-implemented
+  measurement systems both show the same real, reproducible, time-elapsed-correlated defect on
+  physical cam1 specifically — ruling out both an imag-exclusive artifact AND cam1's own
+  send/capture telemetry as explanations. Root cause (network path to cam1 vs a shared
+  receiver-side decode effect) is NOT located — left as the narrowed open state.
+- Posted full evidence to #674 (stays OPEN) + a heads-up to #707 (its own camera attribution may
+  need the same #708 re-mapping check — not re-derived there, out of this dispatch's scope).
+- **Playbook fix (this session, committed):** added a prominent `#708 GOTCHA` comment directly at
+  `CAMBOX_SWEEP`'s definition in `scripts/recording-e2e.sh` (line ~1683) pointing at
+  `.claude/skills/e2e`'s existing correction section — the correction was already documented but
+  invisible at the exact line that tempts a wrong first read (I made the same mistake myself before
+  catching it via the skill file). No other code change, no version bump, no PR/CI cycle.

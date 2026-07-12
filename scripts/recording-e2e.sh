@@ -1680,6 +1680,12 @@ ALL_CAMBOX="${ALL_CAMBOX:-0}"
 # JUST AS MEASURABLE as cam1/cam3/cam4/cam5/cam6's, via the SAME digital capture-burn mechanism
 # (recording-verdict.rs's CAMERA_UNDER_TEST_NODES) — this default now includes it. cam5/cam6
 # (fleet growth 4→6, #451) are added the same way cam3/cam4 were by #624.
+# #708 GOTCHA (2026-07-12, hit twice already — #674/#707 investigators both re-derived this wrong
+# on first read): do NOT read this scene:label pairing as a label->box translation table. It looks
+# like one but ISN'T — the set-ndi-mapping.py NDI-source-binding inversion exactly CANCELS it, so
+# the resulting `all_cambox_continuity.segments[].cambox` label CAMN == physical box camN directly,
+# NO translation needed. See `.claude/skills/e2e` "CORRECTION (2026-07-12, #708)" for the 4-way
+# verification. Before computing a per-physical-camera table from this JSON, re-read that section.
 CAMBOX_SWEEP="${CAMBOX_SWEEP:-Cam 5:CAM1 Cam 1:CAM3 Cam 3:CAM4 Cam 2:CAM2 Cam 4:CAM5 Cam 6:CAM6}"
 SEGMENT_SECS="${SEGMENT_SECS:-30}"
 if [ "$ALL_CAMBOX" = "1" ]; then
