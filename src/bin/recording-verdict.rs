@@ -1097,6 +1097,92 @@ fn partition_frames_by_window(
     (out, no_anchor)
 }
 
+/// #706 — the switch-schedule context [`scope_camera_window_to_own_schedule`] needs to restrict a
+/// `CAMERA_UNDER_TEST_NODES` node's in-window delivered-frame set to ONLY its own program
+/// window(s). `Copy` (both fields are plain slices/an int) so passing it through the #186 loop's
+/// 8 iterations is free; `None` throughout means "no switch schedule" (the single-camera-
+/// continuously-on-program mode) and leaves every existing caller/fixture unchanged.
+#[derive(Debug, Clone, Copy)]
+struct ScheduleScope<'a> {
+    /// The parsed `--switch-schedule` windows (shared with the #312 sweep — see the hoisted
+    /// `switch_schedule` binding in `build_and_print_verdict`).
+    schedule: &'a [SwitchWindow],
+    /// The SAME anchor priority (a node burn's render time, falling back to cam2's optical paint)
+    /// `frame_gen_ts_anchor`/#312's own placement uses — kept identical so the #186 per-camera
+    /// scoping here and the #312 per-segment sweep can never attribute a frame to a different
+    /// cambox window than each other.
+    anchor_run_ids: &'a [u32],
+    /// The transition guard (ns) discarded on each side of every schedule boundary — the SAME
+    /// `--switch-guard-ns` value the #312 sweep uses (`args.switch_guard_ns`).
+    guard_ns: i64,
+}
+
+/// #706 — restrict a `CAMERA_UNDER_TEST_NODES` node's in-window delivered-frame set to ONLY the
+/// frames that fall inside THIS node's own switch-schedule program window(s) (post-transition-
+/// guard), when the ALL-CAMBOX fused sweep supplies a `--switch-schedule`.
+///
+/// ## The bug this closes
+///
+/// In the ALL-CAMBOX sweep (#312) every `CAMERA_UNDER_TEST_NODES` entry is on strih PROGRAM for
+/// only its OWN ~30s window(s) out of the whole ~300s recording — the other ~5/6 (or more, with 6
+/// camboxes) of the time a DIFFERENT cambox is selected and this node's burn CANNOT appear at all
+/// (by design — not loss). [`in_window_burn_frames`]'s own boundary is the WHOLE-RECORDING cam2
+/// optical span, which does not know this: every OTHER camera's program time is included in "this
+/// node's window", so every one of those delivered frames (which genuinely never carry THIS
+/// node's burn) is misclassified BURN-UNREADABLE — confirmed live (#706): a 300s / 6-camera sweep
+/// reported ~7000-8500 phantom BURN-UNREADABLE PER camera (~46000-47000 total) with 0 REAL DROP
+/// and 0 genuine chain loss on any leg. Restricting to this node's OWN schedule window(s) —
+/// mirroring EXACTLY how [`partition_frames_by_window`]/[`segment_continuity`] already attribute a
+/// frame to a cambox for the #312 sweep, via the SAME [`frame_gen_ts_anchor`] +
+/// [`place_frame_in_window`] — makes the two per-camera gates agree on which frames belong to
+/// which camera, and removes the phantom count entirely.
+///
+/// `scope: None` (no `--switch-schedule` — the single-camera-continuously-on-program mode, e.g.
+/// #204/#216's existing fixtures) leaves `window` UNCHANGED — this function only ever NARROWS the
+/// window, never widens it, and only for [`CAMERA_UNDER_TEST_NODES`] (strih/stream are recorded
+/// continuously throughout regardless of which cambox is on program, so they need no scoping and
+/// this is a no-op for them even when a schedule IS supplied).
+fn scope_camera_window_to_own_schedule(
+    window: Vec<RecordedBurnFrame>,
+    node: &str,
+    source: &[RecordingFrame],
+    all_burn_run_ids: &[u32],
+    cam2_run_id: Option<u32>,
+    scope: Option<ScheduleScope<'_>>,
+) -> Vec<RecordedBurnFrame> {
+    let Some(scope) = scope else {
+        return window;
+    };
+    if !CAMERA_UNDER_TEST_NODES.contains(&node) {
+        return window;
+    }
+    // frame_index -> gen_ts_ns anchor, computed ONCE over `source` — the SAME anchor priority
+    // (a node burn's render time, falling back to cam2's optical paint) #312's own placement uses,
+    // so a frame can never be attributed to a different window here than it would be there.
+    let gen_ts_by_index: HashMap<u64, i64> = source
+        .iter()
+        .filter_map(|f| {
+            frame_gen_ts_anchor(f, scope.anchor_run_ids, all_burn_run_ids, cam2_run_id)
+                .map(|ts| (f.frame_index, ts))
+        })
+        .collect();
+    window
+        .into_iter()
+        .filter(|rbf| {
+            let Some(&gen_ts) = gen_ts_by_index.get(&rbf.frame_index) else {
+                // No anchor at all on the original frame ⇒ cannot be placed on the schedule
+                // timeline ⇒ excluded (mirrors `segment_frames_from_recording`'s `no_anchor`
+                // exclusion — never silently counted as this node's own window).
+                return false;
+            };
+            match place_frame_in_window(gen_ts, scope.schedule, scope.guard_ns) {
+                WindowPlacement::In(wi) => scope.schedule[wi].cambox.eq_ignore_ascii_case(node),
+                WindowPlacement::Guard | WindowPlacement::Outside => false,
+            }
+        })
+        .collect()
+}
+
 /// Build the trustworthy verdict for one node from the decoded stream frames: run the
 /// IN-WINDOW per-recorded-frame contiguity check (#198 — rate-aware: cam1's burn is per-EMIT
 /// so a forward integer gap is a REAL drop, strih/stream's is per-RENDER so a forward gap is
@@ -1109,12 +1195,19 @@ fn partition_frames_by_window(
 /// `optical` carries the precomputed [`OpticalSpanFacts`] for `spec.source` (the #363 undecodable
 /// count + the #373 span frames), computed ONCE per source by the caller so two nodes sharing a
 /// recording do not rescan it (#374 nit 1).
+///
+/// `schedule_scope` (#706): `Some` ⇒ this node's in-window delivered-frame set (the DELIVERED
+/// universe `expected_count`/`present_count`/`burn_unreadable` are all computed FROM) is further
+/// restricted to ONLY this node's own switch-schedule program window(s) — see
+/// [`scope_camera_window_to_own_schedule`]. `None` ⇒ today's unscoped whole-recording-optical-span
+/// window, unchanged.
 fn node_verdict_with_optical(
     spec: &NodeSpec,
     all_burn_run_ids: &[u32],
     optical: OpticalSpanFacts,
     out_dir: &Path,
     max_pixel_proof: usize,
+    schedule_scope: Option<ScheduleScope<'_>>,
 ) -> Result<NodeVerdict> {
     let node = spec.node;
     // #133: read this node's burn from its OWN source recording (cam1 = the clean 1080p strih
@@ -1129,6 +1222,17 @@ fn node_verdict_with_optical(
         all_burn_run_ids,
         spec.rate,
         spec.cam2_run_id,
+    );
+    // #706 — in the ALL-CAMBOX fused sweep, further restrict to ONLY this node's own
+    // switch-schedule program window(s) (no-op for strih/stream, and a no-op whenever no
+    // `--switch-schedule` was supplied — see `scope_camera_window_to_own_schedule`'s doc).
+    let window = scope_camera_window_to_own_schedule(
+        window,
+        node,
+        source,
+        all_burn_run_ids,
+        spec.cam2_run_id,
+        schedule_scope,
     );
     let in_window = burn_contiguity_in_window_with_step(node, &window, spec.rate, spec.step);
     let contiguity = in_window.contiguity;
@@ -2429,6 +2533,17 @@ fn build_and_print_verdict(
     // built incrementally and written to --json for the 2-graph report renderer.
     let mut report = serde_json::json!({ "nodes": {}, "hops": {}, "latency": {} });
 
+    // #706 — load the switch schedule ONCE, up front, so it is available BOTH to the #186
+    // per-camera loss loop below (which needs it to scope each CAMERA_UNDER_TEST_NODES node's
+    // window to its OWN program segment(s) — see `scope_camera_window_to_own_schedule`) AND to
+    // the #312 per-segment sweep further down (which previously re-loaded + re-parsed the same
+    // file itself). One parse, one source of truth, both consumers always agree on the windows.
+    let switch_schedule: Option<Vec<SwitchWindow>> = args
+        .switch_schedule
+        .as_ref()
+        .map(|p| load_switch_schedule(p))
+        .transpose()?;
+
     // The recording file backing each node's frames, for pixel proof. `None` ⇒ the frames came
     // from a merged per-box partial (the recording is on its own box, never copied here #208).
     let strih_rec: Option<PathBuf> = strih.as_ref().and_then(|d| d.rec_path.clone());
@@ -2878,6 +2993,21 @@ fn build_and_print_verdict(
             // optical-span scan twice.
             let stream_optical = optical_span_facts(stream_frames, &all_burns, cam2_pin);
             let cam1_optical = optical_span_facts(cam1_source, &all_burns, cam2_pin);
+            // #706 — the switch-schedule scope for the CAMERA_UNDER_TEST_NODES entries in the
+            // loop below (see `scope_camera_window_to_own_schedule`'s doc): restricts each
+            // camera's in-window delivered-frame set to ONLY its own program window(s) in the
+            // ALL-CAMBOX fused sweep. `None` (no `--switch-schedule`) leaves every node's window
+            // unchanged — the pre-#706 single-camera-continuously-on-program behavior.
+            // `schedule_anchor_run_ids` mirrors the SAME priority (strih render time, then
+            // stream) the #312 sweep further down uses to place a frame on the schedule
+            // timeline — `Copy`, so it costs nothing to pass through all 8 loop iterations.
+            let schedule_anchor_run_ids = [args.burn_strih_run_id, args.burn_stream_run_id];
+            let schedule_scope: Option<ScheduleScope<'_>> =
+                switch_schedule.as_deref().map(|schedule| ScheduleScope {
+                    schedule,
+                    anchor_run_ids: &schedule_anchor_run_ids,
+                    guard_ns: args.switch_guard_ns,
+                });
             // #364 — the colour gate samples a recording by path; strih and stream both point at the
             // stream recording, so without memoization that recording is colour-sampled TWICE
             // (identical work — mirrors the #374 nit 1 dedup of the optical scan). Cache the per-path
@@ -3083,6 +3213,7 @@ fn build_and_print_verdict(
                     optical,
                     &args.out_dir,
                     args.max_pixel_proof,
+                    schedule_scope,
                 )?;
                 // #364 — the per-camera COLOUR gate: charge any reference patch wrong on a majority
                 // of sampled frames as a HARD fail (mirrors the optical read). 0 when `--colour-gate`
@@ -3553,10 +3684,12 @@ fn build_and_print_verdict(
     // cambox program windows (by burn gen_ts_ns, minus the transition guard on each boundary) and
     // verify the painted-tick continuity PER cambox. Gates the headline alongside the per-node burn
     // verdict so a single cambox dropping in ITS ~30s window fails the run.
-    if let Some(schedule_path) = &args.switch_schedule {
+    if let Some(schedule) = switch_schedule.as_deref() {
         match &stream_frames_opt {
             Some(stream_frames) => {
-                let schedule = load_switch_schedule(schedule_path)?;
+                // #706: `schedule` is the ONE parse of `--switch-schedule`, hoisted to the top of
+                // this function (shared with the #186 per-camera scoping above) — no longer
+                // re-loaded/re-parsed here.
                 // The painted tick's by-design step in the stream recording = the decimation of the
                 // 60Hz painter at the recording rate (refresh_hz / stream_capture_fps = 2). Derived
                 // from the configured fps when --switch-expected-step is 0, else the explicit value.
@@ -3596,7 +3729,7 @@ fn build_and_print_verdict(
                     cam2_pin,
                 );
                 let seg =
-                    segment_continuity(&seg_frames, &schedule, args.switch_guard_ns, expected_step);
+                    segment_continuity(&seg_frames, schedule, args.switch_guard_ns, expected_step);
                 println!();
                 println!(
                     "=== #312 ALL-CAMBOX per-segment continuity ({} window(s), guard {} ns, painted-tick step {}) ===",
@@ -3701,7 +3834,7 @@ fn build_and_print_verdict(
                         &[BURN_RUN_ID_IMAG],
                         &[BURN_RUN_ID_IMAG],
                         cam2_pin,
-                        &schedule,
+                        schedule,
                         args.switch_guard_ns,
                     );
                     println!();
@@ -3856,7 +3989,7 @@ fn build_and_print_verdict(
                     &anchor_run_ids,
                     &latency_all_burns,
                     cam2_pin,
-                    &schedule,
+                    schedule,
                     args.switch_guard_ns,
                 );
                 println!();
@@ -4867,9 +5000,17 @@ fn report_pulled_back_pixel_proofs(box_paths: &[(String, PathBuf)]) {
 #[cfg(test)]
 mod tests {
     use super::{
-        frame_is_delivered_optical, in_window_burn_frames, node_burn_id_on,
-        node_verdict_with_optical, optical_span_facts, parse_cam1_capture_stats_str, parse_grab_ts,
-        parse_painter_flip_str, parse_painter_ticks_str,
+        frame_is_delivered_optical,
+        in_window_burn_frames,
+        node_burn_id_on,
+        node_verdict_with_optical,
+        optical_span_facts,
+        parse_cam1_capture_stats_str,
+        parse_grab_ts,
+        parse_painter_flip_str,
+        parse_painter_ticks_str,
+        // #706
+        scope_camera_window_to_own_schedule,
     };
 
     /// #312 — locks the key design split: `CAMERA_UNDER_TEST_NODES` (digital contiguity) is
@@ -4999,7 +5140,16 @@ mod tests {
         max_pixel_proof: usize,
     ) -> anyhow::Result<super::NodeVerdict> {
         let optical = optical_span_facts(spec.source, all_burn_run_ids, spec.cam2_run_id);
-        node_verdict_with_optical(spec, all_burn_run_ids, optical, out_dir, max_pixel_proof)
+        // #706: every existing fixture using this helper predates the switch-schedule scoping —
+        // `None` reproduces their exact pre-#706 unscoped behavior (whole-recording optical span).
+        node_verdict_with_optical(
+            spec,
+            all_burn_run_ids,
+            optical,
+            out_dir,
+            max_pixel_proof,
+            None,
+        )
     }
 
     // ---- #198 in-window burn-contiguity wiring (the bug-level regression) ----
@@ -8578,6 +8728,235 @@ mod tests {
             "clean 60->30 decimation on cam1 (ids step by 2) is ZERO loss (#571): {:?}",
             v.contiguity
         );
+    }
+
+    // ---- #706 — ALL-CAMBOX switch-schedule scoping (the fused-sweep BURN-UNREADABLE bug) ----
+
+    /// Like [`frame`], but each payload also carries an explicit `gen_ts_ns` — needed to place a
+    /// frame on a `--switch-schedule` timeline (#706). `frame()` hard-codes `gen_ts_ns: 1` for
+    /// every payload, which every OTHER test in this file is fine with since none of them place
+    /// frames on a schedule timeline.
+    fn frame_at(frame_index: u64, payloads: &[(u32, u32, i64)]) -> RecordingFrame {
+        let payloads: Vec<Payload> = payloads
+            .iter()
+            .map(|&(run_id, frame_id, gen_ts_ns)| Payload {
+                run_id,
+                frame_id,
+                gen_ts_ns,
+            })
+            .collect();
+        let tick = payloads.iter().map(|p| p.frame_id).max();
+        RecordingFrame {
+            frame_index,
+            payloads,
+            tick,
+        }
+    }
+
+    /// #706 regression (the pure scoping function) — a `CAMERA_UNDER_TEST_NODES` node's
+    /// in-window delivered-frame set must be restricted to ONLY its own switch-schedule program
+    /// window(s), never the whole recording. Two schedule windows: `[0,1000)` is cam1's OWN
+    /// program time, `[1000,2000)` is a DIFFERENT cambox's (CAM3). cam1's burn is present on the
+    /// first pair of frames (its own window) and absent on the second pair (CAM3's window — cam1
+    /// physically cannot appear there, by design, not loss). Pre-#706 (no scoping) BOTH pairs
+    /// would count toward cam1's window, manufacturing 2 phantom BURN-UNREADABLE frames.
+    #[test]
+    fn scope_camera_window_excludes_other_cambox_program_time_706() {
+        let schedule = vec![
+            super::SwitchWindow {
+                cambox: "CAM1".to_string(),
+                start_ns: 0,
+                end_ns: 1000,
+            },
+            super::SwitchWindow {
+                cambox: "CAM3".to_string(),
+                start_ns: 1000,
+                end_ns: 2000,
+            },
+        ];
+        let source: Vec<RecordingFrame> = vec![
+            frame_at(0, &[(STRIH, 1, 100)]),
+            frame_at(1, &[(STRIH, 2, 200)]),
+            frame_at(2, &[(STRIH, 3, 1100)]),
+            frame_at(3, &[(STRIH, 4, 1200)]),
+        ];
+        let window = vec![
+            super::RecordedBurnFrame {
+                frame_index: 0,
+                burn_id: Some(5000),
+            },
+            super::RecordedBurnFrame {
+                frame_index: 1,
+                burn_id: Some(5001),
+            },
+            super::RecordedBurnFrame {
+                frame_index: 2,
+                burn_id: None,
+            },
+            super::RecordedBurnFrame {
+                frame_index: 3,
+                burn_id: None,
+            },
+        ];
+        let scope = super::ScheduleScope {
+            schedule: &schedule,
+            anchor_run_ids: &[STRIH],
+            guard_ns: 0,
+        };
+        let scoped = scope_camera_window_to_own_schedule(
+            window,
+            "cam1",
+            &source,
+            &[STRIH],
+            None,
+            Some(scope),
+        );
+        assert_eq!(
+            scoped,
+            vec![
+                super::RecordedBurnFrame {
+                    frame_index: 0,
+                    burn_id: Some(5000),
+                },
+                super::RecordedBurnFrame {
+                    frame_index: 1,
+                    burn_id: Some(5001),
+                },
+            ],
+            "#706: cam1's window must be scoped to ONLY its own schedule window (frames 0/1) — \
+             cam3's program-time frames (2/3, where cam1 CANNOT carry a burn by design) must be \
+             excluded, not counted as cam1's phantom BURN-UNREADABLE"
+        );
+    }
+
+    /// #706 — `None` schedule scope must leave the window UNCHANGED (the pre-#706
+    /// single-camera-continuously-on-program behavior every existing fixture relies on).
+    #[test]
+    fn scope_camera_window_none_scope_is_a_no_op_706() {
+        let window = vec![
+            super::RecordedBurnFrame {
+                frame_index: 0,
+                burn_id: Some(1),
+            },
+            super::RecordedBurnFrame {
+                frame_index: 1,
+                burn_id: None,
+            },
+        ];
+        let source: Vec<RecordingFrame> = Vec::new();
+        let scoped =
+            scope_camera_window_to_own_schedule(window.clone(), "cam1", &source, &[], None, None);
+        assert_eq!(
+            scoped, window,
+            "#706: no --switch-schedule ⇒ window must pass through unchanged"
+        );
+    }
+
+    /// #706 — a non-`CAMERA_UNDER_TEST_NODES` node (strih/stream) must never be schedule-scoped,
+    /// even when a schedule IS supplied — those nodes are recorded continuously regardless of
+    /// which cambox is on program.
+    #[test]
+    fn scope_camera_window_never_scopes_non_camera_under_test_nodes_706() {
+        let schedule = vec![super::SwitchWindow {
+            cambox: "CAM1".to_string(),
+            start_ns: 0,
+            end_ns: 1,
+        }];
+        let window = vec![super::RecordedBurnFrame {
+            frame_index: 0,
+            burn_id: Some(1),
+        }];
+        // gen_ts 500 falls OUTSIDE the only window — if this node were (wrongly) scoped, it
+        // would be filtered out; strih/stream must come back UNCHANGED regardless.
+        let source: Vec<RecordingFrame> = vec![frame_at(0, &[(STRIH, 1, 500)])];
+        let scope = super::ScheduleScope {
+            schedule: &schedule,
+            anchor_run_ids: &[STRIH],
+            guard_ns: 0,
+        };
+        let scoped = scope_camera_window_to_own_schedule(
+            window.clone(),
+            "strih",
+            &source,
+            &[STRIH],
+            None,
+            Some(scope),
+        );
+        assert_eq!(
+            scoped, window,
+            "#706: strih/stream nodes must never be schedule-scoped"
+        );
+    }
+
+    /// #706 END-TO-END — `node_verdict_with_optical` with a switch-schedule scope must report
+    /// `is_zero()==true` for a camera-under-test node that is delivery-clean WITHIN its own
+    /// program window, even though the SAME recording carries a long stretch where a DIFFERENT
+    /// cambox is on program (and this node's burn is legitimately absent there). Pre-#706 this
+    /// synthetic recording would have reported the off-program stretch as BURN-UNREADABLE and
+    /// FAILED a genuinely zero-loss camera — reproducing the LIVE gate finding (#706: ~7000-8500
+    /// phantom BURN-UNREADABLE per camera, 0 REAL DROP, 0 genuine chain loss).
+    #[test]
+    fn node_verdict_with_optical_all_cambox_scope_ignores_other_cambox_program_time_706() {
+        let schedule = vec![
+            super::SwitchWindow {
+                cambox: "CAM1".to_string(),
+                start_ns: 0,
+                end_ns: 1000,
+            },
+            super::SwitchWindow {
+                cambox: "CAM3".to_string(),
+                start_ns: 1000,
+                end_ns: 2000,
+            },
+        ];
+        let mut stream: Vec<RecordingFrame> = Vec::new();
+        // Window 0 (cam1's own): 3 clean delivered frames, cam1 burn present + step-2 decimated.
+        for i in 0..3u32 {
+            stream.push(frame_at(
+                i as u64,
+                &[
+                    (CAM2, 100 + i, 100 + i as i64),
+                    (CAM1B, 2000 + i * 2, 100 + i as i64),
+                ],
+            ));
+        }
+        // Window 1 (a DIFFERENT cambox's own): 3 delivered frames, NO cam1 burn at all — cam1
+        // physically cannot appear while another cambox is on program.
+        for i in 0..3u32 {
+            stream.push(frame_at(3 + i as u64, &[(CAM2, 200 + i, 1100 + i as i64)]));
+        }
+        let optical = optical_span_facts(&stream, &[CAM1B, STRIH, STREAM], None);
+        let scope = super::ScheduleScope {
+            schedule: &schedule,
+            anchor_run_ids: &[STRIH, STREAM],
+            guard_ns: 0,
+        };
+        let v = node_verdict_with_optical(
+            &super::NodeSpec {
+                node: "cam1",
+                burn_run_id: CAM1B,
+                rate: BurnRate::PerEmittedFrame,
+                source: &stream,
+                rec_path: None,
+                cam2_run_id: None,
+                step: super::node_render_step("cam1", 60.0, 30.0, 60.0, 30.0), // = 2
+            },
+            &[CAM1B, STRIH, STREAM],
+            optical,
+            std::path::Path::new("/tmp"),
+            0,
+            Some(scope),
+        )
+        .unwrap();
+        assert!(
+            v.is_zero(),
+            "#706: cam1's OWN schedule window is delivery-clean; a different cambox's program \
+             time (where cam1 legitimately never appears) must NOT be counted as cam1's phantom \
+             BURN-UNREADABLE — got {:?}",
+            v.contiguity
+        );
+        assert_eq!(v.burn_unreadable(), 0, "#706: no phantom BURN-UNREADABLE");
+        assert_eq!(v.real_drops(), 0, "#706: no phantom REAL DROP either");
     }
 
     #[test]
