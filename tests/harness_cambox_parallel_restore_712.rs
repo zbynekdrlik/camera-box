@@ -96,25 +96,45 @@ fn all_cambox_loop_backgrounds_each_restore_call() {
     );
 }
 
-/// The loop must WAIT for every collected PID (via the shared helper) AFTER its own `done` —
-/// never before all 4 boxes have actually been launched, and never skipped entirely (which
-/// would let the trap return before the backgrounded ssh calls finish, defeating the whole
-/// point: they'd get killed alongside the rest of the process on a real SIGKILL).
+/// The loop must be followed by a WAIT for every collected PID (via the shared helper) — never
+/// before all 4 boxes have actually been launched, and never skipped entirely (which would let
+/// the trap return before the backgrounded ssh calls finish, defeating the whole point: they'd
+/// get killed alongside the rest of the process on a real SIGKILL).
+///
+/// #713 UPDATE (stale-assertion fix, justified): this test used to require
+/// `cambox_parallel_wait_and_report` to be called INSIDE `loop_region` itself, right after the
+/// loop's own `done`. #713 intentionally moved that call OUT of the loop — cam1's restore (before
+/// the loop) and cam2/painter's restore (after the loop) now join the SAME shared
+/// CAMBOX_PARALLEL_PIDS/LABELS group, so ONE combined `cambox_parallel_wait_and_report` call
+/// covers all of them (see `tests/harness_cambox_parallel_restore_713.rs`,
+/// `exactly_one_shared_wait_call_covers_the_whole_device_restore_phase`, which locks that shape
+/// precisely). The loop itself is UNCHANGED — it still only APPENDS to the arrays, never waits —
+/// so this test now asserts that narrower, still-true invariant: the loop's `done` is followed,
+/// somewhere later in cleanup(), by a wait call — never interleaved into the per-box iteration,
+/// and never omitted.
 #[test]
-fn all_cambox_loop_waits_for_every_pid_after_the_loop_body() {
+fn all_cambox_loop_is_followed_by_a_wait_after_the_loop_body() {
     let body = cleanup_body(&read("scripts/recording-e2e.sh"));
     let region = loop_region(&body);
-    let done_pos = region
+    assert!(
+        !region.contains("cambox_parallel_wait_and_report"),
+        "#713: the wait call must NOT be interleaved inside the cam3/4/5/6 loop region any more — \
+         it moved to a single shared call after cam2/painter is also armed. Loop region:\n{region}"
+    );
+    let done_pos = body
         .find("\n    done\n")
         .expect("#712: the cam3/4/5/6 loop must still close with `done` (unchanged shape)");
-    let wait_pos = region.find("cambox_parallel_wait_and_report").expect(
-        "#712: the loop must call cambox_parallel_wait_and_report to wait for every \
-         backgrounded restore before cleanup() can return",
-    );
+    let wait_pos = body[done_pos..]
+        .find("cambox_parallel_wait_and_report")
+        .map(|i| done_pos + i)
+        .expect(
+            "#712/#713: cleanup() must call cambox_parallel_wait_and_report to wait for every \
+             backgrounded restore (cam1 + the loop + cam2/painter) before cleanup() can return",
+        );
     assert!(
         wait_pos > done_pos,
-        "#712: cambox_parallel_wait_and_report must be called AFTER the loop's `done` (once ALL \
-         4 PIDs are collected), not interleaved into the per-box iteration. Loop region:\n{region}"
+        "#712/#713: cambox_parallel_wait_and_report must be called AFTER the loop's `done` (once \
+         ALL boxes' PIDs are collected), not interleaved into the per-box iteration."
     );
 }
 

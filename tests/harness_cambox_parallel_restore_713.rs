@@ -56,7 +56,9 @@ fn device_restore_phase(body: &str) -> &str {
     let wait_pos = body[start..]
         .find("cambox_parallel_wait_and_report")
         .map(|i| start + i)
-        .expect("#713: cleanup() must call cambox_parallel_wait_and_report in the device-restore phase");
+        .expect(
+            "#713: cleanup() must call cambox_parallel_wait_and_report in the device-restore phase",
+        );
     let end = body[wait_pos..]
         .find('\n')
         .map(|i| wait_pos + i)
@@ -70,17 +72,28 @@ fn device_restore_phase(body: &str) -> &str {
 #[test]
 fn cambox_parallel_pids_initialized_before_cam1_restore() {
     let body = cleanup_body(&read("scripts/recording-e2e.sh"));
+    // Anchor on the cam3/4/5/6 loop start too, so this test is immune to `root@"$CAM1_IP" \`
+    // ALSO appearing earlier in the script for an unrelated purpose (the [0/8]
+    // capture-rate-guard preflight ssh calls use the identical continuation-line shape against
+    // the SAME $CAM1_IP var, well before cleanup() even starts) — search for cam1's ssh restore
+    // call ONLY within the device-restore region (init..loop_start), not from position 0.
     let init_pos = body
         .find("CAMBOX_PARALLEL_PIDS=()")
         .expect("#713: cleanup() must initialize CAMBOX_PARALLEL_PIDS");
-    let cam1_ssh_pos = body
-        .find("root@\"$CAM1_IP\" \\\n")
-        .expect("#713: cleanup() must still have cam1's own ssh restore call");
+    let loop_start = body
+        .find("for _cip in \"$CAM3_IP\"")
+        .expect("#624/#312: cleanup() must have the cam3/4/5/6 ALL_CAMBOX restore loop");
     assert!(
-        init_pos < cam1_ssh_pos,
-        "#713: CAMBOX_PARALLEL_PIDS must be initialized BEFORE cam1's ssh restore call (cam1 is \
-         now part of the shared parallel group, not a separate sequential call ahead of it). \
-         init_pos={init_pos} cam1_ssh_pos={cam1_ssh_pos}"
+        init_pos < loop_start,
+        "#713: CAMBOX_PARALLEL_PIDS must be initialized before the cam3/4/5/6 loop too (unchanged \
+         from #712). init_pos={init_pos} loop_start={loop_start}"
+    );
+    let cam1_region = &body[init_pos..loop_start];
+    assert!(
+        cam1_region.contains("root@\"$CAM1_IP\" \\\n"),
+        "#713: CAMBOX_PARALLEL_PIDS must be initialized BEFORE (and cam1's own ssh restore call \
+         must appear between it and) the cam3/4/5/6 loop start — cam1 is now part of the shared \
+         parallel group, not a separate sequential call ahead of it. Region:\n{cam1_region}"
     );
 }
 

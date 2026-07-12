@@ -506,6 +506,16 @@ cleanup() {
   # device is the safety-critical action, so it leads; every cam ssh AND every OBS call below is
   # wrapped in `timeout` so nothing in cleanup() can block the trap indefinitely.
   echo "[cleanup] #328 FREE $CAMERA_NAME/cam2 capture devices FIRST (never gated behind OBS teardown)"
+  # #713: cam1 (SOURCE), cam3/4/5/6 (ALL_CAMBOX loop below), and cam2/painter ALL background
+  # their ssh restore into ONE shared CAMBOX_PARALLEL_PIDS/LABELS group with ONE
+  # cambox_parallel_wait_and_report call at the end of this device-restore phase (after
+  # cam2/painter is armed, just before the OBS teardown region begins) -- extends #712's
+  # cam3/4/5/6-only parallelization to the WHOLE phase. Live incident (2026-07-12, #713): a GH
+  # Actions cancellation landing AFTER #712 shipped still stranded cam2 -- it sat OUTSIDE #712's
+  # parallel group, sequential after the loop, so its restore never got a chance to run before
+  # the SIGKILL. Backgrounding cam1 + cam2 too closes that remaining gap.
+  CAMBOX_PARALLEL_PIDS=()
+  CAMBOX_PARALLEL_LABELS=()
   # cam1: FORCE-kill the manual #174 burn binary (pkill -9 -f, its own basename) AND any camera-box,
   # remove the deployed test binary, restore the clean deployed service — reliably frees /dev/video0.
   # #626: the pattern MUST be anchored ('camera-box-burn-[a-z0-9]') — a bare 'camera-box-burn-'
@@ -527,19 +537,25 @@ cleanup() {
   # mid-test #663 self-heal respawns it — stop that unit FIRST (an explicit `systemctl stop` is
   # never followed by a restart, even under Restart=on-failure/always) so the pkill below can
   # never race a respawn back into existence.
-  timeout "$CLEANUP_SSH_TIMEOUT" sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$CAM1_IP" \
-    "systemctl stop camera-box-burn-${RUN_ID} 2>/dev/null; systemctl reset-failed camera-box-burn-${RUN_ID} 2>/dev/null; \
-     pkill -9 -f 'camera-box-burn-[a-z0-9]' 2>/dev/null; pkill -x camera-box 2>/dev/null; sleep 1; \
-     rm -f /tmp/camera-box-burn-* 2>/dev/null; systemctl restart camera-box 2>/dev/null; true
+  # #713: backgrounded ( ... ) & -- collected+waited in the shared group below, alongside
+  # cam3/4/5/6 and cam2/painter.
+  (
+    timeout "$CLEANUP_SSH_TIMEOUT" sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$CAM1_IP" \
+      "systemctl stop camera-box-burn-${RUN_ID} 2>/dev/null; systemctl reset-failed camera-box-burn-${RUN_ID} 2>/dev/null; \
+       pkill -9 -f 'camera-box-burn-[a-z0-9]' 2>/dev/null; pkill -x camera-box 2>/dev/null; sleep 1; \
+       rm -f /tmp/camera-box-burn-* 2>/dev/null; systemctl restart camera-box 2>/dev/null; true
 $(camera_box_verify_active_cmds "$CAMERA_NAME (source, $CAM1_IP)")"
+  ) &
+  CAMBOX_PARALLEL_PIDS+=("$!")
+  CAMBOX_PARALLEL_LABELS+=("$CAMERA_NAME (source, $CAM1_IP)")
   # #624/#312: cam3/cam4/cam5/cam6 — same restore as cam1, ONLY when the ALL_CAMBOX deploy above
   # actually ran (gated the same way) so a plain single-camera run never touches these boxes at all.
   if [ "${ALL_CAMBOX:-0}" = "1" ]; then
     # #712: launch all 4 boxes' restores CONCURRENTLY (never sequentially) so the whole loop
     # fits inside a GH Actions cancellation's short grace window regardless of how many
     # camboxes are active — see scripts/lib/cambox-parallel-restore.sh for the full incident.
-    CAMBOX_PARALLEL_PIDS=()
-    CAMBOX_PARALLEL_LABELS=()
+    # #713: the arrays are now initialized ONCE, above (shared with cam1 + cam2/painter) --
+    # this loop just keeps appending into them.
     for _cip in "$CAM3_IP" "$CAM4_IP" "$CAM5_IP" "$CAM6_IP"; do
       # #668: recover the cam name from its IP (needed for its systemd-run unit name below) —
       # keeps the loop header itself unchanged (tests/harness_recording_e2e_cleanup_resilient.rs
@@ -562,8 +578,8 @@ $(camera_box_verify_active_cmds "$_ccn ($_cip)")"
       CAMBOX_PARALLEL_PIDS+=("$!")
       CAMBOX_PARALLEL_LABELS+=("$_ccn ($_cip)")
     done
-    # #712: wait for every backgrounded restore individually + report each box by name.
-    cambox_parallel_wait_and_report
+    # #713: no per-loop wait here any more -- the SHARED wait below (after cam2/painter is
+    # armed) covers cam1 + this loop + cam2/painter in one pass.
   fi
   # cam2 (painter): restart it. #309: FIRST clear any leftover #291 rig-mode no-display drop-in
   # (a prior `rig-mode.sh test` would otherwise make this restart bring camera-box back WITHOUT
@@ -572,7 +588,9 @@ $(camera_box_verify_active_cmds "$_ccn ($_cip)")"
   # ALL_CAMBOX=1, [2b/8] ALSO deployed a probe-featured burn binary here under a transient
   # systemd-run unit (#668) — stopping that unit is harmless (no-op) on the plain single-camera
   # path, where [2b/8] never ran.
-  timeout "$CLEANUP_SSH_TIMEOUT" sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$PAINTER_IP" "pkill -x frame-probe 2>/dev/null || true
+  # #713: backgrounded ( ... ) & -- collected+waited in the shared group, same as cam1/cam3-6.
+  (
+    timeout "$CLEANUP_SSH_TIMEOUT" sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$PAINTER_IP" "pkill -x frame-probe 2>/dev/null || true
 systemctl stop camera-box-burn-cam2-${RUN_ID} 2>/dev/null || true
 systemctl reset-failed camera-box-burn-cam2-${RUN_ID} 2>/dev/null || true
 pkill -9 -f 'camera-box-burn-[a-z0-9]' 2>/dev/null || true
@@ -581,6 +599,13 @@ $(rig_test_dropin_clear_cmds)
 systemctl restart camera-box 2>/dev/null || true
 $(camera_box_verify_active_cmds "cam2/painter, $PAINTER_IP")
 systemctl start cam2-painter 2>/dev/null || true"
+  ) &
+  CAMBOX_PARALLEL_PIDS+=("$!")
+  CAMBOX_PARALLEL_LABELS+=("cam2/painter, $PAINTER_IP")
+  # #713: ONE shared wait for cam1 + (cam3/4/5/6 if ALL_CAMBOX) + cam2/painter -- the whole
+  # device-restore phase's wall-clock is now bounded by the SLOWEST single box, not the sum of
+  # up to 6 sequential ssh round trips.
+  cambox_parallel_wait_and_report
   # The cam devices are now freed regardless of what the OBS restore does. #328: bound every OBS
   # call by `timeout` so a hung obs-websocket op (#328) can't block the trap even if it runs.
   # #649: StopRecord itself already ran, FIRST, at the top of this function (harness-started boxes
