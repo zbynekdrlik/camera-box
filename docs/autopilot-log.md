@@ -4031,3 +4031,41 @@ a follow-up if not done by the time this log entry is read.
   Filed **#716**: persist cam-box burn-run fps logs to dev1 (currently overwritten before the
   next run, blocking this exact kind of forensics).
 - No code changes, no version bump, no PR/CI cycle — pure GitHub-issue investigation dispatch.
+
+## 2026-07-12 (evening) — #717 (fixed+closed) / #718 (filed) — solo dispatch, PR #704 still held (v1.7.0-dev.349)
+
+- **#717 CLOSED** — split the ShadowCast 2 (CAM1-3) self-heal envelope into two independent bands.
+  #685 widened the capture-rate deviation tolerance to 10% so ShadowCast's characteristic
+  short-lived quantization jitter never trips #656/#663 self-heal — but that same wide floor also
+  swallowed a genuinely SUSTAINED, reset-fixable defect (#674's chronic 63.9-64.0fps for a whole
+  recording, 6.67% dup rate). New: `capture_rate_health::SHADOWCAST2_SUSTAINED_TOLERANCE_PCT` (2%)
+  + `SUSTAINED_WARN_WINDOWS` (12 windows = 60s) — a SEPARATE, narrower tolerance requiring a longer
+  unbroken run than the existing 10%/30s jitter band; `capture_rate_selfheal::
+  should_trigger_selfheal(jitter_confirmed, sustained_confirmed)` — self-heal fires on EITHER band.
+  CAM4-6 (NZXT/Elgato) unaffected (`sustained_tolerance_pct_for_model` degenerately returns their
+  own existing tolerance). 3 RED→GREEN commit pairs (`46dc0c290`→`2cbe0d092` two-band tolerance
+  fns; `bbaf1402e`→`459dd9cd5` the OR combinator; `58259f117` main.rs wiring), 12 new tests incl.
+  the exact #674 live numbers. Local: `cargo check`/`clippy`/`fmt --check` clean, full
+  `cargo test` green. CI green (run 29192714659). Fleet-deployed to all 6 cam boxes (v1.7.0-dev.349;
+  recovered a `#640`-class stray-burn-process "Device or resource busy" on cam2-6 left by the prior
+  gate run first). Live-watched cam1 ~5 min post-deploy: jitter up to 62.5fps repeatedly dipped
+  back under 2% before the 60s threshold — correctly tolerated, zero false self-heal. Cam1 did not
+  enter its #674 chronic locked state this session (intermittent by nature) — no live sustained-band
+  RESET directly observed; the #674 scenario is proven exactly by the unit tests instead. Closed
+  with full evidence (`gh issue comment` + `gh issue close`); PR #704 body updated (REST API
+  `--input` workaround per the ci skill — `gh pr edit`'s GraphQL projectCards bug still applies)
+  with a new STATUS UPDATE section + `Closes #717`.
+- **#718 FILED** (new finding, NOT part of #717): re-triggering the required `full-path-e2e` gate
+  for a post-deploy verdict (`gh run rerun` on the same commit's `pull_request`-context run, after
+  the pre-deploy baseline attempt already computed a real `overall_pass=false` verdict on the
+  known #707/#588/#689 red set) hit `--colour-gate` failing outright on BOTH strih and stream
+  ("could not localize the dual-QR colour scale in ANY of 12 sampled frames") — unrelated to
+  #717's code, blocks verdict computation entirely when it fires. Filed with both attempts' logs
+  as evidence; PR #704 now additionally held on #718 alongside #707/#689.
+- **Gotcha reconfirmed live:** `workflow_dispatch` on `full-path-e2e.yml` runs the LEGACY
+  plan-only soak (`E2E_EXECUTE_VERDICT=0`, `ALL_CAMBOX=0`) — it always "succeeds" trivially and is
+  USELESS for a real red-set delta. The required gate only computes a real verdict on a
+  `pull_request` (PR #704 synchronize) event; to get a fresh real verdict on an already-pushed
+  commit without a new push, use `gh run rerun <the pull_request run's id>` (preserves the
+  `pull_request` event context, not `workflow_dispatch`'s `workflow_dispatch` context).
+- Version: no bump this cycle (`dev` already well ahead of `main`, unchanged from prior cycles).

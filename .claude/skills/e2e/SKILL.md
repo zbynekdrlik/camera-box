@@ -1832,3 +1832,38 @@ usually already gone if the box rebooted since; reproduce fresh instead of chasi
 timestamps. Don't reach for the #656/#663/#685 capture-rate self-heal mechanism as the explanation
 without checking first — it leaves its OWN distinct signature (`authorized`/`unbind` USB-reset log
 lines), absent from a plain harness-triggered restart.
+
+## `gh workflow run` (`workflow_dispatch`) on `full-path-e2e.yml` is the LEGACY plan-only soak — USELESS for a real red-set delta (#717, 2026-07-12)
+
+`full-path-e2e.yml` branches its whole behavior on `github.event_name`: `E2E_EXECUTE_VERDICT` and
+`ALL_CAMBOX` are BOTH `${{ github.event_name == 'pull_request' && '1' || '0' }}` — so a
+`workflow_dispatch` run (manually fired via `gh workflow run "Full-path E2E ..." --ref dev` or the
+GitHub UI "Run workflow" button) ALWAYS runs with `E2E_EXECUTE_VERDICT=0` and single-camera
+`ALL_CAMBOX=0`: it stays in the OLD plan-print-only mode (never decodes strih/stream, never
+computes a real verdict) and therefore "succeeds" trivially almost every time. **This is a trap
+when trying to get a fresh post-fix verdict on a commit that's already pushed** — triggering via
+`workflow_dispatch` burns ~15 min of rig time and reports a meaningless green.
+
+**The required gate only computes a REAL verdict on a `pull_request` (synchronize) event** — i.e.
+the automatic run that fires when you push to the branch a PR tracks (PR #704 → `dev`). To get a
+FRESH real verdict on an ALREADY-PUSHED commit without creating a new push (e.g. after a
+fleet/rig-side change with no code diff, like a manual binary deploy), use:
+
+```bash
+gh run rerun <the-original-pull_request-run-id>
+```
+
+`gh run rerun` preserves the ORIGINAL trigger's event context (`github.event_name` stays
+`pull_request`), so `E2E_EXECUTE_VERDICT`/`ALL_CAMBOX` are correctly `1` again — unlike a fresh
+`gh workflow run`, which always dispatches as `workflow_dispatch`. Find the run id via
+`gh run list --branch dev --workflow "Full-path E2E (recording-based · hardware · self-hosted dev1)" --json databaseId,event,headSha` and pick the one with `"event": "pull_request"` matching your
+commit.
+
+**Two same-commit `pull_request` runs 25 minutes apart can disagree for reasons OUTSIDE your own
+diff** — a live #717 verification saw the first attempt compute a real verdict cleanly
+(`--colour-gate` localized fine on both strih+stream) while a re-run of the SAME commit 25 min
+later hit `--colour-gate: could not localize the dual-QR colour scale in ANY of 12 sampled frames`
+on BOTH boxes (filed as #718 — a new, unrelated blocker). Don't assume a second run's failure is
+caused by your own change just because it's the same commit; diff the TWO runs' logs
+(`gh api repos/OWNER/REPO/actions/jobs/<job-id>/logs`, or `gh api .../attempts/<N>/jobs` to fetch a
+specific earlier attempt after a `gh run rerun`) before concluding anything.
