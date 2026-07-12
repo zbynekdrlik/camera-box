@@ -233,5 +233,13 @@ pub mod painted_tick_gaps;
 // probe-gated `probe::fb::blank_fbdev` (the actual ioctl + write) uses this geometry decision.
 pub mod fb_blank;
 
+// #707 — NDI blocking-send STALL diagnostic (pure decision). Given how long a SINGLE blocking
+// `NDIlib_send_send_video_v2` call took and the sender's configured frame interval, decides
+// whether THIS call stalled — the missing direct evidence the #656/#663/#665/#666/#707
+// emit-rate-deficit family has never had (only the downstream 5s-averaged emitted-fps symptom
+// was ever measured). No probe deps, so it unit-tests Tier-0; `ndi::NdiSender::
+// send_frame_data_with_timecode` times the real call and WARNs via this decision.
+pub mod send_stall;
+
 #[cfg(feature = "probe")]
 pub mod probe;

@@ -1076,8 +1076,31 @@ impl NdiSender {
         };
 
         // SYNCHRONOUS send - blocks until NDI accepts frame (lowest latency)
+        //
+        // #707 — time this exact blocking call. The #656/#663/#665/#666 emit-rate-deficit family
+        // has only ever measured the downstream 5s-averaged symptom (emitted fps < configured
+        // send fps); this pinpoints, per-call, whether the SDK's own blocking send is where the
+        // time actually goes (network/receiver backpressure) — see `crate::send_stall`.
+        let send_started = std::time::Instant::now();
         unsafe {
             (self.lib.send_send_video_v2)(self.sender, &video_frame);
+        }
+        let send_duration_ms = send_started.elapsed().as_secs_f64() * 1000.0;
+        let configured_fps =
+            fps_from_frame_rate(self.frame_rate.numerator, self.frame_rate.denominator) as f64;
+        if configured_fps > 0.0 {
+            let frame_interval_ms = 1000.0 / configured_fps;
+            if crate::send_stall::is_send_stall(send_duration_ms, frame_interval_ms) {
+                tracing::warn!(
+                    "{}",
+                    crate::send_stall::send_stall_warning(
+                        &self.ndi_name.to_string_lossy(),
+                        send_duration_ms,
+                        frame_interval_ms,
+                        configured_fps,
+                    )
+                );
+            }
         }
 
         self.frame_count += 1;
