@@ -4140,3 +4140,52 @@ a follow-up if not done by the time this log entry is read.
   `.claude/skills/e2e`'s existing correction section — the correction was already documented but
   invisible at the exact line that tempts a wrong first read (I made the same mistake myself before
   catching it via the skill file). No other code change, no version bump, no PR/CI cycle.
+
+## 2026-07-12 (night) — #727, #728, #729 bundled — user AT THE RIG live, coordinated around focus checks
+
+- **#727 (persist power-button protection)** — persisted the already hand-applied live
+  `99-production-no-powerkey.conf` logind drop-in into `scripts/setup-imag.sh` step 5 (RED
+  `f6668962d`, GREEN `9c49715a3`, fmt fixup `b443318a0`). Re-verified live: both drop-ins present
+  + sleep/suspend/hibernate/hybrid-sleep targets masked. **STAYS OPEN** — the user's own physical
+  short-press confirmation is still pending, deliberately not claimed as verified.
+- **#728 (cam1<->cam5 card-swap A/B + runtime detection)** — confirmed the true fleet card table
+  live (cam1=Elgato 4K S, cam5=ShadowCast 2, cam2/3/4/6 unchanged). Rate+content-dup discriminator
+  came back INCONCLUSIVE, honestly reported: the WHOLE fleet (incl. never-moved cam2/cam3) is
+  currently clean of the #656/#663/#665/#674/#685/#717 chronic-wobble signature — consistent with
+  its known intermittency, decides nothing card-vs-box. Shipped
+  `capture_rate_health::grabber_model_from_card_name` + `resolve_grabber_model` (`dc67c5d7e`) — the
+  shared runtime-detection seam, 10 new tests. Updated `targets.md`'s live grabber table + flagged
+  stale `cam1 ShadowCast`/`/dev/video0` refs in `.claude/skills/e2e` (`8074cc9a3`). **STAYS OPEN**
+  pending a future recurrence to actually decide.
+- **#729 (Elgato purple tint + zero-touch redesign)** — live diagnosis (pixel-proof screenshots
+  posted) found the tint on cam1+cam6 (both Elgato 4K S) reproduces IDENTICALLY at factory-default
+  controls, in both raw YUYV and the card's own onboard MJPG encoder, at 1080p and 720p — an
+  ISP/hardware characteristic, not a software bug, not a persisted-value smear. Per the user's live
+  redirect (superseding the ticket's original "re-apply certified set" framing), redesigned
+  `select_capture_controls` to be model-gated + zero-touch by default (`c501f1ec4`): only
+  `GrabberModel::ShadowCast2` keeps the certified colour set (#296's real need); every other model
+  is plug-and-play. Wired into `main.rs` (`ff9209d94`). **Found + removed a stale pre-#456 systemd
+  override on cam6** (`camera-box.service.d/capture-controls.conf`, live-only, not in any repo
+  script) that was silently overriding the new zero-touch policy. **STAYS OPEN** — the tint itself
+  needs a product-level decision from the user (live with it / partial-saturation compromise /
+  replace the 2 Elgato units).
+- **Rig coordination:** the user was live at the rig in TEST mode doing focus checks the whole
+  session. No rig-mode changes, no painter/marker interference. Brief `camera-box` stop/restart
+  cycles on cam1/cam5 only, for raw V4L2 diagnostic grabs (skill-documented pattern) — always
+  restored within ~10s, verified `systemctl is-active` after each. Deliberately CANCELLED the
+  auto-triggered `Full-path E2E` gate run on this push (`29208168611`) — it runs `ALL_CAMBOX=1`, a
+  full rig-wide recording sweep that would have collided with the live session; not a quality
+  bypass (PR #704 was already held on unrelated pre-existing blockers regardless). Fleet binary
+  deployed to all 6 cam boxes post-CI-green; post-deploy journal confirms the new resolution +
+  policy behaving exactly as designed on every box (2 MISMATCH WARNs on the swapped boxes, correct
+  zero-touch/documented-need split elsewhere).
+- **Playbook:** `.claude/skills/capture` (`ba750fd29`) — #729's zero-touch redesign summary, a
+  v4l2-ctl/tmpfs-overflow gotcha (filled cam5's 100MB /tmp mid-grab), the ISP-vs-software colour
+  diagnostic method (onboard-MJPG cross-check + Y/U/V correlation), and the stale-systemd-override
+  gotcha.
+- Regular CI (run `29208167151`) all green: Lint/Build/Test/Coverage/Security/Drift
+  Guard/Windows-probe/Shellcheck/Python-harness. `cargo fmt`/`clippy -D warnings` clean throughout.
+  No version bump this cycle (`dev` already well ahead of `main`, unchanged from prior cycles).
+  PR #704 updated with a STATUS UPDATE section (via REST API PATCH — the known
+  Projects-classic `gh pr edit` GraphQL bug), no `Closes` lines added (none of the 3 tickets close
+  this cycle).
