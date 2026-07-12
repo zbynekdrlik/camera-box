@@ -514,21 +514,65 @@ aborts the run. The start branch reads `GetRecordStatus`, on an active orphan lo
 `OBS_RECORD_FINALIZE_TIMEOUT_S` (120 s) — FAIL LOUD (`SystemExit`) on timeout, never a doomed
 `StartRecord`. Guard: `tests/python/test_obs_phase2_record.py`.
 
-**NEW (#709, 2026-07-12, still OPEN) — imag-nb's (10.77.9.182) OBS can silently never actually
-start a recording even though the harness logs `"recording STARTED"`.** Live incident: `[5/8]`
-logged `10.77.9.182: recording STARTED`, then the SEPARATE #627 post-start liveness poll caught
-it 4s later — `outputActive=[False, False]`, `outputBytes` STATIC (the box's stale idle value,
-not a growing fresh-recording byte count). imag's own OBS log (`~/.config/obs-studio/logs/...` on
-the box) showed **ZERO lines of any kind** in the whole window — not an error, not even a
-WebSocket-request trace — while strih/stream's equivalent StartRecord calls DID show growing byte
-counts in the same run. Diagnostic: `GetRecordStatus` over the WS directly
-(`python3 -c "...from obs_phase2 import _conn,_rpc; ws=_conn('10.77.9.182',''); print(_rpc(ws,
-'GetRecordStatus',{}))"`) — `outputActive=false` + a STATIC `outputBytes` matching what you'd read
-even when the box is genuinely idle is the tell (not a crash — imag's OBS process stays alive and
-healthy throughout). Root cause NOT yet found (is `obs_phase2.py record`'s own "STARTED" print
-based on a positive `outputActive=true` confirmation, or just a non-erroring RPC response? — worth
-checking first). Not yet reproduced a second time; the rig was confirmed idle/clean afterward so
-no cleanup was needed. See #709 for full evidence before re-diagnosing from scratch.
+**RESOLVED (#709, 2026-07-12) — imag-nb's OBS can silently never actually start a recording:
+root cause was a GPU VRAM leak exhausting NVENC's encoder-init headroom, NOT a WebSocket/RPC
+bug.** Live incident: `[5/8]` logged `10.77.9.182: recording STARTED` (obs-websocket's
+`StartRecord` only calls the frontend API and never verifies the encoder actually initialized —
+so a genuinely-failed start still returns `result:true`), then the SEPARATE #627 post-start
+liveness poll caught it 4s later — `outputActive=[False, False]`, `outputBytes` STATIC.
+
+**Diagnostic gotcha — imag-nb's OBS log uses LOCAL time (Europe/Prague, CEST, UTC+2), not UTC.**
+The original write-up ("imag's OBS log showed ZERO lines of any kind in the window") was a
+TIMEZONE MISREAD: grepping the log for the UTC failure timestamp (`04:21:33`) found nothing
+because the log's own timestamps are LOCAL (`06:21:33`). Always confirm the box's actual TZ
+(`timedatectl` / compare `date` vs `date -u`) and convert the CI run's UTC timestamps before
+concluding a log is silent.
+
+**Real root cause, found once the log was read at the correct (local) time:**
+```
+[obs-nvenc] init_encoder_h264: nv.nvEncInitializeEncoder(enc->session, &enc->params) failed: 10
+    (NV_ENC_ERR_OUT_OF_MEMORY)
+[obs-nvenc] init_encoder_h264: ... failed: 10 (NV_ENC_ERR_OUT_OF_MEMORY)   (2nd fallback attempt)
+Already in non_texture encoder, can't fall back further!
+```
+imag's OBS had run 5 days without a restart; its render pipeline (6 continuous NDI genlock feeds +
+the built-in Multiview) had leaked GPU VRAM up to 6872MiB of 8151MiB total (`nvidia-smi`), leaving
+only ~1058MiB free — not enough for NVENC's recording-encoder session to initialize. Fix: restart
+OBS on imag-nb (`pkill -9 -x obs`, matching `setup-imag.sh`'s own hot-swap relaunch pattern) —
+confirmed live: VRAM dropped to ~302MiB used, and StartRecord then wrote real, growing bytes.
+Prevention shipped: `scripts/lib/imag-gpu-guard.sh` + a new `[4e/8]` `recording-e2e.sh` preflight
+(before `[5/8] StartRecord`) that reads free VRAM via nvidia-smi and fails fast with an actionable
+message when it drops below `IMAG_GPU_MIN_FREE_MIB` (default 1500MiB) — see
+`tests/harness_imag_gpu_guard.rs`.
+
+**GOTCHA hit fixing #709 — a manual `pkill -9 -x obs` + relaunch on imag-nb that skips the
+`saved_projectors`-strip step opens DUPLICATE projectors and regresses the render-budget gate.**
+`setup-imag.sh`'s openbox autostart script strips `saved_projectors` from the scene-collection
+JSON BEFORE every launch specifically so a restart never restores a stale saved projector pair
+(see the `#522` note earlier in this file) — but that step lives ONLY in the autostart script, not
+in a bare manual `pkill+relaunch` driven by hand over ssh. Skipping it let OBS restore ONE stale
+Program+Multiview projector pair on launch, and then re-running `imag_scenes.py --projector`
+(to reseed scenes) opened a SECOND pair — `wmctrl -l` showed FOUR projector windows (2×Program +
+2×Multiview) instead of the intended two. Consequence: the compositor draws everything TWICE per
+frame, which silently regressed imag's OWN `[4d/8]` render-budget gate (60.00fps/0% skip →
+~57fps/2.5-10% skip, `#405/#406` gate) — a SEPARATE, self-inflicted failure mode from #709 itself,
+that showed up as a NEW red gate on the very next CI rerun. Fix: close the duplicate pair
+(`wmctrl -i -c <id>`, Linux-side — there is no WS request to close a projector, same limitation as
+the Windows boxes) — or better, ALWAYS strip `saved_projectors` BEFORE any manual imag-nb OBS
+relaunch, exactly mirroring the autostart script's own sequence:
+```bash
+pkill -9 -x obs; # wait for death
+for f in ~/.config/obs-studio/basic/scenes/*.json; do
+  python3 -c "import json,sys; p=sys.argv[1]; d=json.load(open(p)); d['saved_projectors']=[]; json.dump(d,open(p,'w'))" "$f"
+done
+DISPLAY=:0 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus XAUTHORITY=~/.Xauthority \
+  taskset -c 2-11 obs &   # then re-seed via imag_scenes.py --host 127.0.0.1 [--projector]
+```
+Verified live: after the properly-sequenced restart, imag held 60.00fps / ~5ms render / 0% skip —
+even better than the pre-incident baseline. This is the imag-nb-specific manifestation of the
+obs-ops skill's existing "a force-kill relaunch restores a STALE saved config" gotcha — same class
+of bug, worth checking `wmctrl -l` (window COUNT, not just presence) after ANY manual imag-nb OBS
+restart, not just after a genlock hot-swap.
 
 ## Local test verification gotchas (Tier-0)
 

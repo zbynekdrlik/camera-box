@@ -3750,3 +3750,47 @@ a follow-up if not done by the time this log entry is read.
   recognizes the "STARTED logged but OBS log shows nothing" symptom fast.
 - No version bump needed this cycle (`dev` 1.7.0-dev.348 already strictly ahead of `main`
   1.7.0-dev.346 from a prior cycle).
+
+- #709 (fixed + closed): root cause was a GPU VRAM leak on imag-nb's OBS (5 days uptime, 6872MiB
+  of 8151MiB used) exhausting the headroom NVENC's recording-encoder session needs — StartRecord's
+  WS RPC returns result:true regardless (obs-websocket never verifies encoder init), but OBS's own
+  log showed `NV_ENC_ERR_OUT_OF_MEMORY`, twice, at BOTH reported repro timestamps once read in the
+  box's correct LOCAL timezone (the original "OBS log shows zero lines" claim was a UTC-vs-CEST
+  misread). Fix: restart OBS on imag-nb (`pkill -9 -x obs` + relaunch, `setup-imag.sh`'s own
+  hot-swap pattern) — VRAM dropped to ~302MiB, confirmed live with two real test recordings
+  writing growing bytes. Prevention: new `scripts/lib/imag-gpu-guard.sh` + `[4e/8]` recording-e2e.sh
+  preflight (nvidia-smi free-VRAM check before `[5/8] StartRecord`, IMAG_GPU_MIN_FREE_MIB=1500
+  default), 16 new tests in `tests/harness_imag_gpu_guard.rs`. Commit `6ca6f97c3` on dev.
+- Self-inflicted side-finding + fix (same session): the FIRST manual restart skipped the
+  `saved_projectors`-strip step the openbox autostart script always does, so OBS restored a stale
+  Program+Multiview projector pair AND the manual re-seed opened a SECOND pair — 4 projector
+  windows instead of 2, doubling the compositor's per-frame draw and regressing imag's OWN
+  `[4d/8]` render-budget gate (60fps/0% skip → ~57fps/2.5-10% skip). Fixed by closing the
+  duplicates, then doing a SECOND, properly-sequenced restart (strip saved_projectors BEFORE
+  launch) — confirmed 60.00fps/~5ms/0% skip afterward, better than the pre-incident baseline.
+- Re-ran the required full-path-e2e gate TWICE post-fix (`gh run rerun 29180680684` on commit
+  `6ca6f97c3`, no new push needed — pull_request:synchronize already picked up the fix commit).
+  First rerun still failed at [4d/8] (the duplicate-projector side effect, not yet fixed at that
+  point); SECOND rerun progressed cleanly through [4e/8] (my new gate) → [5/8] StartRecord (imag:
+  "recording liveness OK") → [6/8] ALL-CAMBOX sweep → [8/8] a genuinely COMPUTED verdict
+  (overall_pass=false, not the #703-class "never computed"). #709 confirmed no longer any part of
+  what blocks PR #704. Remaining red (reported to the supervisor, none of it mine to fix this
+  dispatch): all_cambox_continuity 10/10 windows FAIL (#707's mechanism), imag's own #588/#604-class
+  stuck-tick-density judder 6/10 windows FAIL, and the A/V-sync leg — audio no longer silent
+  (#689's physical mute was cleared upstream) but the measured cam2 offset (-44.5ms) sits outside
+  the ±20ms tolerance and most cameras have too few per-window candidate samples.
+- Filed #710 (follow-up, not fixed this cycle): a SEPARATE, narrower race in obs_phase2.py's own
+  #627 liveness check — the FIRST StartRecord right after a COLD OBS restart can false-abort
+  (samples=[False,True]) even though the recording is genuinely fine a moment later; a WARM
+  second attempt passes cleanly. Needs a live cold-restart repro to validate a fix; not touched
+  blind (no-timeout-band-aids).
+- Playbook: `.claude/skills/e2e/SKILL.md`'s #709 note rewritten from "still OPEN, root cause not
+  found" to RESOLVED with the full root cause, the UTC-vs-local-timezone diagnostic gotcha, and a
+  NEW gotcha for the duplicate-projector class of restart mistake (mirrors the obs-ops skill's
+  existing "force-kill relaunch restores a stale saved config" note, imag-nb-specific manifestation).
+- PR #704 body updated with the new status (via `gh api ... -X PATCH` — `gh pr edit`'s own GraphQL
+  call errored on a deprecated Projects-classic field, unrelated to the edit itself; the API PATCH
+  worked cleanly). #709 closed directly (not waiting for PR #704's eventual merge), matching this
+  PR's own established pattern (#706/#708 closed the same way).
+- No version bump needed this cycle (`dev` 1.7.0-dev.348 already strictly ahead of `main`
+  1.7.0-dev.346 from a prior cycle).
