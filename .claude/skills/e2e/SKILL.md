@@ -518,6 +518,54 @@ window — the manual re-verify steps above (`ps aux`/`systemctl is-active`/`obs
 check`/`rig-busy-check` on EVERY box) are still the correct backstop after any cancelled
 ALL_CAMBOX run, never assume the parallelization alone makes cleanup atomic.
 
+**#713 (2026-07-12) — extended to ALL 6 boxes (cam1 + the cam3/4/5/6 loop + cam2/painter, one
+shared `CAMBOX_PARALLEL_PIDS`/`LABELS` group, ONE `cambox_parallel_wait_and_report` call at the
+end) — but this ALSO concentrates more simultaneous outbound ssh sessions from dev1, and tripped
+the pre-existing `#675` SSH-connection-contention condition on the very first live run after it
+shipped (all 6 boxes hit "restore failed/timed out" within ~2s of the group launching — too fast
+for a genuine 30s timeout, consistent with an immediate connection-level rejection, not 6
+independent hangs).** The rig ended up fully healthy anyway — the SEPARATE, unaffected `#684`
+FINAL-verify pass (sequential, still runs after the parallel group) caught every box not-yet-
+active and its own `#675` one-retry mechanism recovered all 6. **Lesson for the next widening of
+this parallel group (or any similar N-way ssh fan-out from dev1 to the cam fleet): concentrating
+MORE simultaneous outbound connections trades a smaller cancellation-stranding window for a HIGHER
+chance of tripping `#675`'s connection contention on a normal (non-cancelled) exit — both are real
+trade-offs, not free.** Filed as `#715` (root cause + a stagger/sshd-limit fix are NOT yet
+investigated — a fresh gate-run's cleanup log is the way to check: grep for `WARNING #712 ...
+failed/timed out` immediately after `#328 FREE cam1/cam2 capture devices FIRST`; its absence, or a
+much smaller fraction of boxes hitting it, is the signal a fix landed).
+
+## GPU/encode-contention correlation technique (#674, 2026-07-12) — epoch-join a nvidia-smi sampler against the harness's OWN real window boundaries
+
+To test whether imag-nb's GPU/NVENC state correlates with a per-window judder-density metric
+(`all_cambox_continuity.imag.segments[].optical_stuck_density`) WITHOUT touching any rig config:
+
+1. **Sampler**: `scripts/imag-gpu-contention-sampler.sh` (committed) — a bounded-duration loop of
+   `nvidia-smi --query-gpu=utilization.gpu,memory.used,encoder.stats.sessionCount
+   --format=csv,noheader,nounits`, one CSV row per sample with a `date +%s.%3N` epoch timestamp.
+   Arm it (`nohup ... &`, `IMAG_GPU_SAMPLE_DURATION_SECS=900` is a safe default) BEFORE triggering
+   the gate run — you don't know exactly how long preflight/setup will take before `StartRecord`
+   actually fires, so budget generously; a duration too short truncates the TAIL of the recording
+   (confirmed live: a 900s window armed ~620s before `StartRecord` actually fired left the LAST
+   ~29s of a ~306s recording uncovered — always check via the exact math below and disclose any
+   gap honestly rather than silently extrapolating).
+2. **Real epoch window boundaries — read `switch-schedule.json`, not the printed log lines.**
+   `/tmp/recording-e2e-<RUN_ID>/switch-schedule.json` (still on dev1 after a self-hosted-runner
+   gate run — check there BEFORE spending rig time on a fresh repro, mirrors the `#708` lesson)
+   has each window's REAL `start_ns`/`end_ns` on dev1's own epoch clock (`n / 1e9` for seconds).
+   Since dev1 and imag-nb are both DanteSync-synced sub-ms, a straight epoch-second join between
+   the GPU CSV and these window bounds is valid at any sampling cadence coarser than ~10ms — no
+   manual clock-offset correction needed, unlike the painter-vs-dev1 `#326` gate's own correction
+   (that gate compares two DIFFERENT clocks' RAW offsets; this join compares two ALREADY-
+   DanteSync-disciplined epoch clocks directly).
+3. **Join**: for each window, filter GPU-CSV rows to `[start_ns/1e9, end_ns/1e9]`, average. Print
+   samples-covered vs window-duration per row so a gap (see point 1) is visible in the output, not
+   silently averaged over a partial window.
+4. Result this run (2026-07-12): GPU util/VRAM/encoder-sessions were COMPLETELY FLAT throughout —
+   REJECTS "GPU/encode contention builds up during the recording" as `#674`'s judder mechanism (no
+   growth to correlate against a judder density that was ALSO flat, just already-elevated). Full
+   writeup on `#674`'s own thread.
+
 ## Painter ground-truth CSV lifecycle + recording orphan guard (#355 / #359)
 
 **frame-probe writes the painter ground-truth `/tmp/painter.csv` ONLY on its clean `--duration-secs`
@@ -1057,6 +1105,18 @@ it) or before re-deriving this mapping from scratch:
   BOTH in the same JSON (cam2 measured, the other 5 candidates-present-but-unclustered) and a
   single generic "UNKNOWN" would have hidden that cam2's mic path was fine while the others simply
   didn't have a usable window.
+- **#714 (2026-07-12) — SUPERSEDES the old "only cam2 can ever be Measured" framing.** The 5
+  non-cam2 cameras' UNKNOWN was root-caused (not just described) as pure sample-density starvation
+  — live data showed their per-window candidate counts ARE non-zero and roughly proportional to
+  window duration (the dual-QR ticks genuinely decode fine in every camera's own window, per the
+  rig's shared-HDMI-splitter optical-injection topology), they just can't accumulate
+  `MIN_AV_SAMPLES` real matches in a single ~30-60s slot (cam2's own whole-300s pool only clears
+  the floor at ~1 real match per ~10-13s). `av_window::derive_camera_av_sync` now gives every
+  such camera a DERIVED estimate (cam2's own offset re-centered on this camera's own `#286`
+  delivery-latency delta vs the run's mean) — reported as `verdict=="derived"`, NEVER conflated
+  with `"measured"`. The Discord composer renders it as `"ODVODENÉ <value>"`. A camera is a bare
+  `"unknown"` now ONLY when there's no `#286` delivery sample to derive from either (e.g. no
+  `--strih` recording supplied, or that camera never appeared in the sweep at all).
 - **Known-blocker ticket hints** (`KNOWN_BLOCKER_HINTS` in the composer) are annotations ONLY — the
   technical description on each line (e.g. "Kontinuita medzi kamerami (stream): FAIL") is always
   accurate on its own from the JSON; the `#707`/`#588`/`#604`/`#689`/`#641` pointers are a

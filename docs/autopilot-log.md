@@ -3951,3 +3951,58 @@ a follow-up if not done by the time this log entry is read.
   different things with the same string); added a pointer to the two new `#707` diagnostics so a
   future emit-rate investigation checks them before falling back to fps-delta archaeology.
 - No version bump needed this cycle (`dev` well ahead of `main`, unchanged from prior cycles).
+
+## 2026-07-12 (afternoon) — #713 (fixed+closed) / #714 (fixed+closed) / #674 (investigated, GPU-contention hypothesis rejected, stays open) — bundled, PR #704 still held
+
+- **#713** (extend #712's parallel-restore group to cam1 + cam2/painter, up to 6 boxes
+  concurrently, one shared `cambox_parallel_wait_and_report`): RED `f6f32fca2` (6 new tests,
+  `tests/harness_cambox_parallel_restore_713.rs`, all fail against the pre-fix sequential
+  cam1/cam2 blocks), GREEN `11cf91680` (also fixed a genuinely stale #712 test assertion that
+  required the wait call INSIDE the loop region — updated with justification, not weakened),
+  doc-only header update `92a311647`. Full default-feature `cargo test` green (no anchor
+  collisions in sibling `harness_recording_e2e_*` tests). Closed with evidence.
+- **#714** (per-camera A/V coverage — only cam2 ever produced a Measured verdict, the other 5
+  cameras' UNKNOWN made the per-camera A/V gate structurally unpassable every run): implemented
+  option 2 (derived estimate — cam2's own measured offset re-centered on each camera's own #286
+  delivery-latency delta), `av_window::derive_camera_av_sync` (pure, 8 unit tests) + wired into
+  `recording-verdict.rs`'s two-pass `all_cambox_av_sync` block + `e2e_discord_report.py`'s
+  "ODVODENÉ" rendering. Commit `4f3703c13`. Tests: 8 av_window + 2 recording-verdict (probe
+  feature) + 6 Python (new fixture `verdict_derived_av_714.json`). Full probe-feature
+  `recording-verdict` suite green (128/128), full default-feature suite green, full
+  `pytest tests/python` green (339/339). Closed with LIVE evidence: the very next gate run
+  (760308236) showed all 6 cameras reporting a value (cam2 measured -34.0ms; cam1/3/4/5/6 derived
+  -31 to -36ms, tight cluster) instead of 5 silent unknowns — acceptance bar met.
+- **#674** (imag optical judder — GPU/encode-contention-during-recording hypothesis, the
+  addendum's own proposed next step): deployed `scripts/imag-gpu-contention-sampler.sh` (new,
+  committed `2d3fb0b5f`) to imag-nb, armed at 1.5s cadence for THIS push's own re-triggered
+  ALL_CAMBOX gate run, correlated the samples against the run's real per-window
+  `optical_stuck_density` using `switch-schedule.json`'s own real epoch-ns window boundaries
+  (both dev1 and imag-nb DanteSync-synced sub-ms — a direct epoch join, no offset correction
+  needed). Result: GPU util (13.7-14.1%), VRAM (flat 1436 MiB), encoder sessions (constant 1) —
+  ZERO growth across the fully-covered windows 0-8 (~90% of the recording). Judder density was
+  ALSO flat this run (6.73-6.92%, uniformly elevated from window 0 — a DIFFERENT shape than the
+  3 earlier runs' low-early/high-late pattern the addendum was built on). REJECTS the GPU-
+  contention-rising hypothesis (nothing rose, on either side). Honest gap disclosed: the sampler's
+  fixed 900s window ended 29s before this run's actual StopRecord, so window 9's tail (~last 28s)
+  has almost no GPU coverage. New open lead noted (not chased further, scope discipline): the
+  judder SHAPE itself varies run-to-run. Posted full writeup to #674 (stays OPEN, no root cause
+  found yet).
+- **Live finding filed as #715** (NOT a #713 logic bug): the very next gate run after #713
+  shipped hit a real robustness side-effect — 6-way concurrent ssh from dev1 tripped the
+  pre-existing, already-documented `#675` connection-contention condition (all 6 boxes briefly
+  reported "restore failed/timed out" within ~2s — too fast for a genuine 30s timeout). The
+  EXISTING `#675` retry safety net (unaffected by #713) recovered every box; rig independently
+  re-verified fully healthy afterward (all 6 `camera-box.service` active, no stray burns, all
+  strih NDI burns OFF). Filed with full evidence + a suggested fix direction (stagger the 6
+  launches, or investigate sshd `MaxStartups`/`MaxSessions`) for a future dispatch.
+- PR #704 body updated (via `gh api -X PATCH --input <payload.json>` — `gh pr edit --body-file`
+  hits the SAME documented Projects-classic GraphQL error every time on this repo; the REST
+  workaround is already in `.claude/skills/ci`, applied again here) with a new STATUS UPDATE
+  section + `Closes #713` / `Closes #714` lines.
+- Playbook: `.claude/skills/e2e/SKILL.md` gained (1) the #713→#715 SSH-concentration-vs-
+  cancellation-window trade-off note right after the #712 section, (2) a new "GPU/encode-
+  contention correlation technique" section documenting the epoch-join method (read real window
+  bounds from `switch-schedule.json`, never re-derive from printed log timestamps) for any future
+  imag-nb resource-correlation investigation, (3) an update to the A/V UNKNOWN-reasons section
+  superseding the old "only cam2 can ever be Measured" framing now that #714's derivation exists.
+- No version bump needed this cycle (`dev` well ahead of `main`, unchanged from prior cycles).
