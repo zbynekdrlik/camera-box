@@ -241,5 +241,14 @@ pub mod fb_blank;
 // send_frame_data_with_timecode` times the real call and WARNs via this decision.
 pub mod send_stall;
 
+// #726 — presentation-cadence EVENNESS metric (pure decision). Given the per-frame painted-tick
+// sequence in RECORDED order (the same `SegmentFrame.tick` data `probe::recording_segments::
+// window_segment` already extracts), classifies whether a recording's 60fps->30fps downsample is
+// SMOOTH (uniform `expected_step` cadence) or JUDDERY (paired duplicate+catchup spacing — the
+// "15fps-like" live-event symptom the existing loss/continuity gates were blind to). No probe
+// deps, so it unit-tests Tier-0; `probe::recording_segments::window_segment` reports it as a new
+// field on `CamboxSegment` (REPORTED metric first — not yet gate-enforced pending calibration).
+pub mod presentation_cadence;
+
 #[cfg(feature = "probe")]
 pub mod probe;
