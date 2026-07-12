@@ -96,6 +96,57 @@ pub fn grabber_model_for_hostname(hostname: &str) -> GrabberModel {
     }
 }
 
+/// #728/#729 — map a V4L2 `VIDIOC_QUERYCAP` `card` string (e.g. `"Elgato 4K S: Elgato 4K S"`,
+/// `"ShadowCast 2: ShadowCast 2"`, `"NZXT Signal HD60 Video: NZXT Si..."` — all live-observed
+/// verbatim, 2026-07-12) to its [`GrabberModel`]. This is the RUNTIME counterpart of
+/// [`grabber_model_for_hostname`]'s OPERATIONAL (hostname-convention) mapping — a physical
+/// card swap changes what's plugged into a box without changing its hostname, so the static
+/// table alone silently desyncs from reality the moment a card moves (the #728 cam1<->cam5
+/// reshuffle: cam1's hostname still says "ShadowCast 2" per the table, but the box now
+/// physically has an Elgato 4K S). Case-insensitive substring match (driver `card` strings
+/// vary in exact punctuation/repetition across firmware, e.g. the model name appearing twice
+/// separated by `: `) — never an exact-string match, which would be brittle to a firmware
+/// string tweak. Unrecognized/empty input is `GrabberModel::Unknown`, same never-guess
+/// contract as the hostname mapping.
+pub fn grabber_model_from_card_name(card: &str) -> GrabberModel {
+    let lower = card.to_ascii_lowercase();
+    if lower.contains("shadowcast") {
+        GrabberModel::ShadowCast2
+    } else if lower.contains("elgato") {
+        GrabberModel::Elgato4kS
+    } else if lower.contains("nzxt") || lower.contains("signal hd60") {
+        GrabberModel::NzxtSignalHd60
+    } else {
+        GrabberModel::Unknown
+    }
+}
+
+/// #728/#729 — resolve a box's grabber model, preferring LIVE hardware truth over the static
+/// hostname convention whenever it's available and recognized. This is the single shared seam
+/// both tickets asked for: #728's self-heal envelope selection and #729's colour-control
+/// policy both key off whatever this function returns, so a physical card swap can never
+/// desync the two from each other or from reality.
+///
+/// - `detected_card` is `Some` and [`grabber_model_from_card_name`] recognizes it -> that
+///   model wins, EVEN IF it disagrees with `grabber_model_for_hostname(hostname)` (the swap
+///   case — runtime hardware is always more current than the hostname convention).
+/// - `detected_card` is `None` (the query failed/unavailable) OR doesn't match any known
+///   model -> fall back to `grabber_model_for_hostname(hostname)`, same never-guess-past-
+///   Unknown contract as before. An unrecognized card string is NOT trusted enough to
+///   override a known hostname mapping, but also never fabricates a match.
+///
+/// Pure — logging a detected mismatch (so a swap is visible in the journal, per #729's "no
+/// ceremony, just log it plainly") is the caller's job, not this function's.
+pub fn resolve_grabber_model(hostname: &str, detected_card: Option<&str>) -> GrabberModel {
+    if let Some(card) = detected_card {
+        let from_card = grabber_model_from_card_name(card);
+        if from_card != GrabberModel::Unknown {
+            return from_card;
+        }
+    }
+    grabber_model_for_hostname(hostname)
+}
+
 /// #685 — ShadowCast 2's per-model capture-rate tolerance (percent). Set to cover the FULL live-
 /// observed characteristic-wobble range with margin (~55fps-64.02fps against a 60.000fps
 /// negotiated rate = up to ~8.3% deviation — #656, #663, #665) while still catching a genuinely
@@ -390,6 +441,102 @@ mod tests {
         );
         assert_eq!(grabber_model_for_hostname(""), GrabberModel::Unknown);
         assert_eq!(grabber_model_for_hostname("CAM7"), GrabberModel::Unknown);
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // #728/#729 — runtime card-name detection + the shared resolve_grabber_model seam. Live
+    // `card` strings captured 2026-07-12 via `v4l2-ctl --info` on the real fleet.
+    // -----------------------------------------------------------------------------------------
+
+    #[test]
+    fn grabber_model_from_card_name_matches_live_fleet_strings() {
+        assert_eq!(
+            grabber_model_from_card_name("Elgato 4K S: Elgato 4K S"),
+            GrabberModel::Elgato4kS
+        );
+        assert_eq!(
+            grabber_model_from_card_name("ShadowCast 2: ShadowCast 2"),
+            GrabberModel::ShadowCast2
+        );
+        assert_eq!(
+            grabber_model_from_card_name("NZXT Signal HD60 Video: NZXT Si"),
+            GrabberModel::NzxtSignalHd60
+        );
+    }
+
+    #[test]
+    fn grabber_model_from_card_name_is_case_insensitive() {
+        assert_eq!(
+            grabber_model_from_card_name("elgato 4k s"),
+            GrabberModel::Elgato4kS
+        );
+        assert_eq!(
+            grabber_model_from_card_name("SHADOWCAST 2"),
+            GrabberModel::ShadowCast2
+        );
+    }
+
+    #[test]
+    fn grabber_model_from_card_name_unrecognized_is_unknown_never_guessed() {
+        assert_eq!(
+            grabber_model_from_card_name("Some Other Webcam"),
+            GrabberModel::Unknown
+        );
+        assert_eq!(grabber_model_from_card_name(""), GrabberModel::Unknown);
+    }
+
+    /// The #728 decisive scenario: cam1's hostname convention still says ShadowCast 2, but
+    /// the box now physically has an Elgato 4K S (the live card swap). Runtime truth must
+    /// win — this is the whole point of the shared detection seam.
+    #[test]
+    fn resolve_grabber_model_runtime_detection_wins_over_stale_hostname_728() {
+        assert_eq!(
+            resolve_grabber_model("CAM1", Some("Elgato 4K S: Elgato 4K S")),
+            GrabberModel::Elgato4kS,
+            "a physically swapped card must resolve to what's ACTUALLY plugged in, not what \
+             the hostname convention used to say"
+        );
+        // The other half of the same reshuffle: cam5's hostname says Elgato, but the
+        // ShadowCast 2 physically sits there now.
+        assert_eq!(
+            resolve_grabber_model("CAM5", Some("ShadowCast 2: ShadowCast 2")),
+            GrabberModel::ShadowCast2
+        );
+    }
+
+    #[test]
+    fn resolve_grabber_model_falls_back_to_hostname_when_detection_unavailable() {
+        // Detection failed (device query error, or called before the device is open) — the
+        // hostname convention is still the best available answer, never a hard failure.
+        assert_eq!(
+            resolve_grabber_model("CAM4", None),
+            GrabberModel::NzxtSignalHd60
+        );
+    }
+
+    #[test]
+    fn resolve_grabber_model_falls_back_to_hostname_when_card_name_unrecognized() {
+        // A detected-but-unrecognized card string (a brand-new grabber model, or a firmware
+        // string this mapping doesn't know yet) is not trusted enough to override a KNOWN
+        // hostname mapping — but also never invents a match.
+        assert_eq!(
+            resolve_grabber_model("CAM2", Some("Some Brand New Grabber")),
+            GrabberModel::ShadowCast2
+        );
+    }
+
+    #[test]
+    fn resolve_grabber_model_no_stored_state_is_zero_touch_unknown() {
+        // Neither the hostname nor the detected card resolves to anything known — the
+        // "no stored state" fixture: must land on Unknown, never a guessed model.
+        assert_eq!(
+            resolve_grabber_model("dev-laptop", None),
+            GrabberModel::Unknown
+        );
+        assert_eq!(
+            resolve_grabber_model("dev-laptop", Some("Unbranded HDMI Grabber")),
+            GrabberModel::Unknown
+        );
     }
 
     #[test]
