@@ -102,6 +102,12 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # E2E_EXECUTE_VERDICT=1 branch of [8/8] below.
 # shellcheck source=scripts/lib/e2e-discord-report.sh
 . "$HERE/lib/e2e-discord-report.sh"
+# #712: cleanup()'s cam3/4/5/6 ALL_CAMBOX restore loop used to ssh into each box SEQUENTIALLY —
+# a GH Actions cancellation kills the runner process directly, it does not wait for a 4-box
+# sequential loop to finish. cambox_parallel_wait_and_report waits for all 4 backgrounded
+# restores at once, bounding the loop's wall-clock by the slowest single box.
+# shellcheck source=scripts/lib/cambox-parallel-restore.sh
+. "$HERE/lib/cambox-parallel-restore.sh"
 camera_resolve "${CAM:-cam1}"
 # #24 item 1: this harness's SOURCE-camera role (the physical box filming cam2's monitor via
 # the optical loopback + carrying the #174 render-time capture burn) is one of
@@ -529,6 +535,11 @@ $(camera_box_verify_active_cmds "$CAMERA_NAME (source, $CAM1_IP)")"
   # #624/#312: cam3/cam4/cam5/cam6 — same restore as cam1, ONLY when the ALL_CAMBOX deploy above
   # actually ran (gated the same way) so a plain single-camera run never touches these boxes at all.
   if [ "${ALL_CAMBOX:-0}" = "1" ]; then
+    # #712: launch all 4 boxes' restores CONCURRENTLY (never sequentially) so the whole loop
+    # fits inside a GH Actions cancellation's short grace window regardless of how many
+    # camboxes are active — see scripts/lib/cambox-parallel-restore.sh for the full incident.
+    CAMBOX_PARALLEL_PIDS=()
+    CAMBOX_PARALLEL_LABELS=()
     for _cip in "$CAM3_IP" "$CAM4_IP" "$CAM5_IP" "$CAM6_IP"; do
       # #668: recover the cam name from its IP (needed for its systemd-run unit name below) —
       # keeps the loop header itself unchanged (tests/harness_recording_e2e_cleanup_resilient.rs
@@ -540,12 +551,19 @@ $(camera_box_verify_active_cmds "$CAMERA_NAME (source, $CAM1_IP)")"
         "$CAM6_IP") _ccn="cam6" ;;
       esac
       # #668: same stop-the-unit-first ordering as cam1 above — never let the pkill race a respawn.
-      timeout "$CLEANUP_SSH_TIMEOUT" sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$_cip" \
-        "systemctl stop camera-box-burn-${_ccn}-${RUN_ID} 2>/dev/null; systemctl reset-failed camera-box-burn-${_ccn}-${RUN_ID} 2>/dev/null; \
-         pkill -9 -f 'camera-box-burn-[a-z0-9]' 2>/dev/null; pkill -x camera-box 2>/dev/null; sleep 1; \
-         rm -f /tmp/camera-box-burn-* 2>/dev/null; systemctl restart camera-box 2>/dev/null; true
+      # #712: backgrounded ( ... ) & — all 4 boxes restore IN PARALLEL, collected+waited below.
+      (
+        timeout "$CLEANUP_SSH_TIMEOUT" sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$_cip" \
+          "systemctl stop camera-box-burn-${_ccn}-${RUN_ID} 2>/dev/null; systemctl reset-failed camera-box-burn-${_ccn}-${RUN_ID} 2>/dev/null; \
+           pkill -9 -f 'camera-box-burn-[a-z0-9]' 2>/dev/null; pkill -x camera-box 2>/dev/null; sleep 1; \
+           rm -f /tmp/camera-box-burn-* 2>/dev/null; systemctl restart camera-box 2>/dev/null; true
 $(camera_box_verify_active_cmds "$_ccn ($_cip)")"
+      ) &
+      CAMBOX_PARALLEL_PIDS+=("$!")
+      CAMBOX_PARALLEL_LABELS+=("$_ccn ($_cip)")
     done
+    # #712: wait for every backgrounded restore individually + report each box by name.
+    cambox_parallel_wait_and_report
   fi
   # cam2 (painter): restart it. #309: FIRST clear any leftover #291 rig-mode no-display drop-in
   # (a prior `rig-mode.sh test` would otherwise make this restart bring camera-box back WITHOUT
