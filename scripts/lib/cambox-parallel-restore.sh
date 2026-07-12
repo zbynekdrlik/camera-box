@@ -20,14 +20,29 @@
 # them, so the loop fits inside a short cancellation grace window regardless of how many
 # camboxes are active in CAMBOX_SWEEP.
 #
-# Usage (see recording-e2e.sh's cleanup(), the cam3/4/5/6 ALL_CAMBOX restore loop):
+# #713 EXTENSION (2026-07-12): the SAME live-incident class recurred after #712 shipped -- a
+# cancellation landing after the (now-parallel) cam3/4/5/6 loop still stranded cam2, because
+# cam1's restore (BEFORE the loop) and cam2/painter's restore (AFTER the loop) were still two
+# separate, sequential, un-backgrounded calls outside #712's own parallel group. cleanup() now
+# backgrounds ALL of cam1 + the cam3/4/5/6 loop (when ALL_CAMBOX=1) + cam2/painter into this SAME
+# group, with ONE shared cambox_parallel_wait_and_report call at the very end of the whole
+# device-restore phase -- up to 6 boxes concurrently, not just 4.
+#
+# Usage (see recording-e2e.sh's cleanup(), the whole device-restore phase -- cam1, the cam3/4/5/6
+# ALL_CAMBOX loop, and cam2/painter all append into ONE shared pair of arrays):
 #   CAMBOX_PARALLEL_PIDS=()
 #   CAMBOX_PARALLEL_LABELS=()
+#   ( timeout "$CLEANUP_SSH_TIMEOUT" sshpass ... ssh ... root@"$CAM1_IP" "..." ) &
+#   CAMBOX_PARALLEL_PIDS+=("$!")
+#   CAMBOX_PARALLEL_LABELS+=("$CAMERA_NAME (source, $CAM1_IP)")
 #   for _cip in "$CAM3_IP" "$CAM4_IP" "$CAM5_IP" "$CAM6_IP"; do
 #     ( timeout "$CLEANUP_SSH_TIMEOUT" sshpass ... ssh ... root@"$_cip" "..." ) &
 #     CAMBOX_PARALLEL_PIDS+=("$!")
 #     CAMBOX_PARALLEL_LABELS+=("$_ccn ($_cip)")
 #   done
+#   ( timeout "$CLEANUP_SSH_TIMEOUT" sshpass ... ssh ... root@"$PAINTER_IP" "..." ) &
+#   CAMBOX_PARALLEL_PIDS+=("$!")
+#   CAMBOX_PARALLEL_LABELS+=("cam2/painter, $PAINTER_IP")
 #   cambox_parallel_wait_and_report
 #
 # cambox_parallel_wait_and_report waits for EVERY collected PID INDIVIDUALLY (never a bare
