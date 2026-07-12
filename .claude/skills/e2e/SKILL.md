@@ -1355,23 +1355,38 @@ IDENTICAL video signal. There are NOT separate cameras per box. Consequences:
   must be ≈ the configured rate (60). Over-delivery (62-64fps) = defective USB grabber state →
   USB-reset it (#656 prevention adds an automatic WARN + E2E preflight for this).
 
-## GOTCHA — the `all_cambox_continuity` schedule labels `CAM1..CAM6` are NOT 1:1 physical box numbers
+## CORRECTION (2026-07-12, #708) — the `all_cambox_continuity` schedule labels ARE 1:1 physical box numbers; the prior GOTCHA table here was WRONG
 
-`CAMBOX_SWEEP` in `scripts/recording-e2e.sh` is `Cam 5:CAM1 Cam 1:CAM3 Cam 3:CAM4 Cam 2:CAM2
-Cam 4:CAM5 Cam 6:CAM6` (`<strih scene name>:<schedule label>`) — the schedule's `"cambox":"CAM1"`
-etc. in `switch-schedule.json` and the verdict's `all_cambox_continuity.segments[].cambox` field
-are these SWEEP LABELS, not physical box numbers. Translate before drawing any per-box conclusion:
+An earlier version of this section (written during #707) claimed `label CAM1 -> physical cam5`
+etc. and warned to "translate before drawing any per-box conclusion". **That table was
+empirically WRONG — verified live 2026-07-12 during #708 via three independent, cross-checked
+methods:**
 
-```
-label CAM1 -> physical cam5      label CAM4 -> physical cam3
-label CAM2 -> physical cam2      label CAM5 -> physical cam4
-label CAM3 -> physical cam1      label CAM6 -> physical cam6   (only CAM2/CAM6 are 1:1)
-```
+1. **SSH `hostname` on all 6 boxes directly**: `10.77.9.61`=`CAM1`, `.62`=`CAM2`, `.63`=`CAM3`,
+   `.64`=`CAM4`, `.65`=`CAM5`, `.66`=`cam6` — i.e. box IP N has hostname `CAMN` (or `camN`), no
+   reshuffle.
+2. **`os_hostname()` (src/main.rs) feeds the NDI sender name directly** (`src/ndi.rs`: sender =
+   `<hostname> (usb)`) — so box camN broadcasts NDI name `CAMN (usb)`, confirmed by the ORIGINAL
+   (correct, still-standing) "strih NDI Input -> Camera Mapping (INVERTED)" table earlier in the
+   genlock skill: `NDI src "CAM1 (usb)" == real camera CAM1 (10.77.9.61)`.
+3. **Live `GetSceneItemList` on strih for every `Cam N` scene** (2026-07-12) proves each scene
+   name contains the SAME-NUMBERED `NDI camN` input 1:1 (`Cam 5` → `['ASIO zvuk','NDI cam5']`,
+   `Cam 4` → `['NDI cam4']`, etc.) — there is NO scene-level inversion. The ONLY inversion in the
+   whole chain is the INPUT-OBJECT-NAME → SENDER binding (`scripts/set-ndi-mapping.py`
+   `DEFAULT_MAP`, e.g. input `"NDI cam5"` receives sender `"CAM1 (usb)"` = box cam1) — a
+   DIFFERENT layer from the schedule label, and the inversions there exactly CANCEL the
+   `CAMBOX_SWEEP` scene/label pairing (`Cam 5:CAM1`, `Cam 1:CAM3`, `Cam 3:CAM4`, `Cam 2:CAM2`,
+   `Cam 4:CAM5`, `Cam 6:CAM6`) — so **schedule label CAMN, box camN, and the NDI sender name
+   `CAMN (usb)` are always the SAME physical machine.** Cross-checked a 4th way against a real CI
+   run's own `[seg N/10] <LABEL> via '<scene>' switched at <ns>` log lines (run 29174543633):
+   `CAM1 via 'Cam 5'`, `CAM3 via 'Cam 1'`, `CAM4 via 'Cam 3'`, `CAM2 via 'Cam 2'`, `CAM5 via 'Cam 4'`,
+   `CAM6 via 'Cam 6'` — exactly matches `CAMBOX_SWEEP`, confirming `label CAMN == box camN` with
+   no translation needed.
 
-Cost real investigation time on #707 (2026-07-12): a "CAM1 chronically worst" read from the
-verdict JSON alone was actually physical **cam5**, and cross-referencing physical `journalctl`
-required this translation first. Re-check the current `CAMBOX_SWEEP` value before trusting this
-table — it changes if the fleet's scene assignments are ever reshuffled.
+**Do NOT re-apply the deleted "CAM1→cam5" table.** If `CAMBOX_SWEEP`'s scene:label PAIRING itself
+is ever edited to use a non-identity mapping (e.g. `Cam 3:CAM1`), the label would then differ from
+the box — always re-derive from the CURRENT `CAMBOX_SWEEP` value + a live `GetSceneItemList` check
+(method 3 above) rather than trusting any hardcoded table, this one included.
 
 ## Diagnosing `all_cambox_continuity` copies/gaps growth — accounting vs genlock vs REAL box defect (#707, 2026-07-12)
 
