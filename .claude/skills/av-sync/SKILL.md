@@ -262,3 +262,64 @@ sync-test-dock.cpp`'s `on_start_stop()` + `data/locale/en-US.ini`'s exact UI lab
 existing documented findings — but the actual "dock locks on real signal, updates live, survives a
 camera switch" proof (with a screenshot) is STILL not re-confirmed as of 2026-07-12; #690 stays
 OPEN. Re-attempt the live-lock test whenever `mbc` is reachable AND the rig is idle.
+
+## #725/#689 (2026-07-13) — which cam2 HDMI pin is REALLY live: read `codec_cvt_nid`, don't trust
+## a remembered `eld#X.Y` index or `aplay -l`'s cached device name
+
+The #725 finding ("pin shuffled from DEV=3 to DEV=7 after a reboot") recorded a SPECIFIC `eld#2.4`
+index as corresponding to DEV=7 at the time it was written — but ELD pin/converter numbering can
+re-shuffle on a LATER reboot too, so that specific `eld#X.Y` → `DEV=N` mapping is a snapshot, not a
+durable fact. `aplay -l`'s device NAME (e.g. `device 3: HDMI 0 [BenQ GL2480]`) is ALSO not reliable
+evidence of which pin is currently live — that name string looks like it can be a load-time cache
+that doesn't necessarily update on a later EDID renegotiation.
+
+The reliable, direct answer is inside the ELD entry that currently reads `monitor_present 1` /
+`eld_valid 1`:
+```bash
+cat /proc/asound/PCH/eld#2.4        # (or whichever index currently shows monitor_present=1)
+# ...
+# codec_cvt_nid   0x3                <- THIS is the converter/PCM device number, in hex
+```
+`codec_cvt_nid` directly names the PCM converter node — `0x3` means the live sink is
+`hw:CARD=PCH,DEV=3`, regardless of which `eld#` index it currently lives at or what `aplay -l`
+happens to have cached. Cross-check against `aplay -l` for a sanity read, but trust `codec_cvt_nid`
+when they disagree. Live 2026-07-13: found `codec_cvt_nid=0x3` (i.e. DEV=3, the hardcoded default
+every marker path already uses) was CORRECTLY live again, even though #725 had found DEV=7 live the
+evening before — the pin re-shuffled AGAIN sometime between the two checks (plausibly the owner's
+live rig work or a jack replug that same night). #725's underlying bug (no DYNAMIC resolution, only
+a hardcoded default) is still real and unfixed — this is just the fast, reliable way to check
+"is the hardcoded default CURRENTLY correct" before assuming a silent/off-timing recording.
+
+## #689 (2026-07-13) — NEVER derive a `hold_new` recommendation from ONE gate run; the measurement
+## itself has real run-to-run noise comparable to the ±20ms gate tolerance
+
+3 consecutive full-path-e2e gate runs, ~30-35 min apart, same unchanged 925ms hold, same unchanged
+code, produced cam2 `av_offset_ms` of −33.9 / −64.25 / −21.4 ms (`mad_ms` 22.85 / 15.29 / 32.72 —
+only ONE of three cleared this project's own mad≤20ms trust bar). All three breach ±20ms, so "the
+hold is off" is a safe conclusion — but the exact magnitude swings by >40ms across barely an hour of
+otherwise-idle rig time, which is NOT explainable by hold drift (confirmed live via `GetInputSettings`
+unchanged at 925 throughout) or by #725's pin question (confirmed DEV=3 correctly live throughout,
+via the `codec_cvt_nid` check above). Before ever recommending (let alone applying) a `hold_new`
+from a SINGLE run's number, pull at least 2-3 independent full-gate runs spread over the session and
+report the SPREAD, not just the latest value — a single-run recommendation risks overshooting or
+undershooting by the same margin the spread itself shows. Filed #733 to audit whether this is a real
+clustering-algorithm (`src/av_window.rs`) sensitivity issue (candidate multimodality, 33ms video-tick
+quantization interacting with the ±60ms `av_cluster_tol_ms` window) rather than a genuine physical
+drift.
+
+## `gh pr edit` / `gh issue edit --body` can fail on a GraphQL error UNRELATED to your edit — use the REST PATCH instead
+
+On this repo, `gh pr edit 704 --body "..."` (or `-F file`) can return:
+```
+GraphQL: Projects (classic) is being deprecated in favor of the new Projects experience... (repository.pullRequest.projectCards)
+```
+and the edit **silently does NOT apply** (the command exits 1, body unchanged) — this is `gh`'s own
+GraphQL mutation trying to also fetch/refresh a deprecated `projectCards` field unrelated to the body
+edit itself, not a problem with your content. Workaround — call the REST API directly, which has no
+such field:
+```bash
+python3 -c "import json; json.dump({'body': open('body.md').read()}, open('body.json','w'))"
+gh api repos/OWNER/REPO/pulls/<N> -X PATCH --input body.json
+```
+Confirm with `gh pr view <N> --json body -q '.body'` afterward — don't assume the plain `gh pr edit`
+error means your content was rejected; it may just mean this unrelated GraphQL field choked.

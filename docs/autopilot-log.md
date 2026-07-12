@@ -2,6 +2,48 @@
 
 Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads context.
 
+## 2026-07-13 (night) — #707 + #689 (both harvest-only, no commits, PR #704 still held)
+
+- **Dispatch**: unblock PR #704's last two required-gate blockers (#707 continuity, #689 A/V) using
+  a full night of live data — the two #707 diagnostics (`send_stall.rs`, `boundary_skip_count`) had
+  a day of live data to harvest; #689 needed a re-measurement now that audio is no longer silent.
+- **Method**: 3 fresh full-path-e2e gate runs against unchanged `dev` HEAD (`bebb966ca`) — reused 2
+  already on disk (`142901047`, `670137317`) + triggered 1 fresh (`gh run rerun 29211814532` →
+  `802117826`, after hitting-then-immediately-correcting the documented `workflow_dispatch`-is-
+  plan-only-mode gotcha, cancelled before burning rig time).
+- **#707 result**: totals collapsed from the issue's original 100s-1800s/run down to 4, 9, and 40
+  (one 33/33 spike, rest near-zero) across the 3 runs — a dramatic, real improvement, plausibly from
+  tonight's earlier #717/#728/#729 fixes (correlational, not proven). Correlated every non-zero
+  window's exact UTC boundary against `journalctl -u camera-box` on the affected box — ZERO
+  `#707 NDI blocking send STALL` / `#707 genlock emit-gate SKIPPED` WARNs fired in ANY window,
+  including the 33/33 spike (confirmed zero journal entries of any kind in that box's exact window).
+  Both of #707's own leading hypotheses are now empirically ruled out for the current, much smaller
+  residual — genuinely inconclusive for a same-night code fix, not a "guess and ship" situation.
+  Posted full evidence to #707 (comment), left OPEN, gate correctly stays RED.
+- **#689 result**: confirmed live (`codec_cvt_nid=0x3` on cam2's HDA ELD) that the hardcoded
+  `hw:CARD=PCH,DEV=3` marker device is CORRECTLY live right now (the #725 pin-shuffle finding was
+  accurate for its own moment, evidently re-shuffled back since) — audio is genuinely NOT silent,
+  all 3 runs produced real matched-sample measurements. But `av_offset_ms` swung −33.9/−64.25/−21.4ms
+  across the 3 runs (only 1/3 cleared the mad≤20ms trust bar) at an UNCHANGED, live-confirmed 925ms
+  hold — real measurement instability, not a simple hold-recalibration case. Posted full evidence +
+  an explicitly LOW-confidence recommendation range (`hold_new` ≈ 946-989ms) to #689, did NOT touch
+  the hold (operator's own knob), left OPEN.
+- **Filed #733**: av-sync clustering (`src/av_window.rs`) method-stability audit — the run-to-run
+  mad/offset instability above, flagged as a "needs a method-level look" item already on #689 from
+  2026-07-12, now backed by a 3rd independent same-night data point. Genuinely out-of-scope for a
+  blind same-night attempt (algorithmic investigation, not a same-file trivial fix).
+- **PR #704**: body updated with a prepended STATUS UPDATE section (via `gh api ... -X PATCH` — the
+  plain `gh pr edit --body` call failed on an unrelated GraphQL `projectCards`/Projects-classic
+  deprecation error on this repo, documented in the av-sync skill). PR left OPEN, NOT merged —
+  `mergeStateStatus: BLOCKED`, both required-gate blockers still red, correctly.
+- **Rig state**: 3 test recordings run + cleaned up by the harness's own trap; explicitly re-ran
+  `scripts/rig-mode.sh test` at the end to restore the standard end-of-night TEST state (cam2
+  painter + QPSK marker running, burns ON, NDI mapping verified) since the harness's own cleanup had
+  left nothing running. `rig-busy-check` confirmed idle throughout and at the end.
+- **Playbook updates**: `.claude/skills/av-sync/SKILL.md` — 3 new sections (the `codec_cvt_nid`
+  direct-ELD-mapping technique, the "harvest ≥3 runs before trusting a hold recommendation" lesson,
+  the `gh pr edit` GraphQL-failure/REST-PATCH workaround).
+
 ## 2026-07-12 (afternoon) — #674 (confirmed+closed, mechanism nailed at raw V4L2 stage)
 
 - **#674** (imag/strih #588 optical judder investigation, this session's SOLO discriminator
