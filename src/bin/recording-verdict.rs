@@ -40,8 +40,8 @@ use anyhow::{Context, Result};
 use camera_box::av_window::{self, AvSyncVerdict};
 use camera_box::probe::av_sync_recording::{decode_av_marker_inputs, AvMarkerInputs};
 use camera_box::probe::burn_contiguity::{
-    burn_contiguity_in_window_with_step, BurnRate, InWindowMissingKind, NodeContiguity,
-    RecordedBurnFrame,
+    burn_contiguity_in_window_with_step, burn_contiguity_in_window_with_step_and_schedule,
+    BurnRate, InWindowMissingKind, NodeContiguity, RecordedBurnFrame,
 };
 use camera_box::probe::recording::{
     analyze_recording_with_burns, analyze_recording_with_grouped_burns, extract_frames_png,
@@ -1183,6 +1183,44 @@ fn scope_camera_window_to_own_schedule(
         .collect()
 }
 
+/// #708 — for EACH entry of `window`, compute which `--switch-schedule` window index (if any)
+/// it belongs to, via the SAME anchor priority + [`place_frame_in_window`] used everywhere else
+/// a frame is placed on the schedule timeline ([`scope_camera_window_to_own_schedule`] just
+/// above, and the #312 sweep) — so this NEW per-render backward-jump exception can never
+/// disagree with the #706/#312 window attribution about which window a frame belongs to.
+///
+/// `None` at a position ⇒ the frame's own gen_ts anchor is missing, or it fell inside a
+/// transition guard / outside every window — [`burn_contiguity_in_window_with_step_and_schedule`]
+/// treats an unknown window on EITHER side of a comparison as "assume the SAME window" (never
+/// silently suppresses a real anomaly), so returning `None` here is always the conservative,
+/// safe choice.
+fn attribute_window_indices(
+    window: &[RecordedBurnFrame],
+    source: &[RecordingFrame],
+    all_burn_run_ids: &[u32],
+    cam2_run_id: Option<u32>,
+    scope: ScheduleScope<'_>,
+) -> Vec<Option<usize>> {
+    let gen_ts_by_index: HashMap<u64, i64> = source
+        .iter()
+        .filter_map(|f| {
+            frame_gen_ts_anchor(f, scope.anchor_run_ids, all_burn_run_ids, cam2_run_id)
+                .map(|ts| (f.frame_index, ts))
+        })
+        .collect();
+    window
+        .iter()
+        .map(|rbf| {
+            gen_ts_by_index.get(&rbf.frame_index).and_then(|&gen_ts| {
+                match place_frame_in_window(gen_ts, scope.schedule, scope.guard_ns) {
+                    WindowPlacement::In(wi) => Some(wi),
+                    WindowPlacement::Guard | WindowPlacement::Outside => None,
+                }
+            })
+        })
+        .collect()
+}
+
 /// Build the trustworthy verdict for one node from the decoded stream frames: run the
 /// IN-WINDOW per-recorded-frame contiguity check (#198 — rate-aware: cam1's burn is per-EMIT
 /// so a forward integer gap is a REAL drop, strih/stream's is per-RENDER so a forward gap is
@@ -1234,7 +1272,28 @@ fn node_verdict_with_optical(
         spec.cam2_run_id,
         schedule_scope,
     );
-    let in_window = burn_contiguity_in_window_with_step(node, &window, spec.rate, spec.step);
+    // #708 — strih's OWN 911002 burn is emitted by SIX INDEPENDENT free-running per-source
+    // filter instances (one per raw `NDI camN` input — see `attribute_window_indices`'s doc), so
+    // a backward id jump landing EXACTLY at a confirmed program-switch boundary is the EXPECTED
+    // counter-instance change, not a lost frame (live-proven on 2 independent CI runs: every
+    // flagged id was found present both in strih's own recording and downstream at stream).
+    // Scoped to "strih" ONLY — the one node this mechanism is proven for; "stream"'s 911004 burn
+    // is a single continuous counter on one fixed input, so this is a pure no-op for it either
+    // way, but keeping the exception explicitly node-scoped avoids ever touching its behavior.
+    let window_of: Option<Vec<Option<usize>>> = if node == "strih" {
+        schedule_scope.map(|scope| {
+            attribute_window_indices(&window, source, all_burn_run_ids, spec.cam2_run_id, scope)
+        })
+    } else {
+        None
+    };
+    let in_window = burn_contiguity_in_window_with_step_and_schedule(
+        node,
+        &window,
+        spec.rate,
+        spec.step,
+        window_of.as_deref(),
+    );
     let contiguity = in_window.contiguity;
     // #363/#373 — the optical facts (undecodable count + span frames) are computed ONCE per source
     // by the caller and passed in (#374 nit 1: strih + stream share the stream recording, so this
@@ -8957,6 +9016,72 @@ mod tests {
         );
         assert_eq!(v.burn_unreadable(), 0, "#706: no phantom BURN-UNREADABLE");
         assert_eq!(v.real_drops(), 0, "#706: no phantom REAL DROP either");
+    }
+
+    /// #708 END-TO-END — the LIVE incident reproduced through the FULL `node_verdict_with_optical`
+    /// pipeline for the "strih" node specifically (not just the pure kernel tested directly in
+    /// `burn_contiguity.rs`). strih's window stays genuinely UNSCOPED here
+    /// (`scope_camera_window_to_own_schedule` is a documented no-op for strih/stream, #706 — this
+    /// is a SEPARATE, additional mechanism on top of it), but the id sequence still carries a
+    /// backward jump landing EXACTLY at a confirmed `--switch-schedule` window boundary — the
+    /// EXACT shape of the live #708 finding (cam5's own free-running 911002 counter range
+    /// `66709..=67840` overlapped cam6's `66934..=68067`, both proven present in the real
+    /// recording, both downstream at stream — genuinely never lost). Without the fix this
+    /// would report a phantom `real_drop` at frame_index 2; with it, ZERO loss.
+    #[test]
+    fn node_verdict_with_optical_strih_backward_jump_at_confirmed_window_boundary_is_zero_loss_708()
+    {
+        let schedule = vec![
+            super::SwitchWindow {
+                cambox: "CAM4".to_string(),
+                start_ns: 0,
+                end_ns: 1000,
+            },
+            super::SwitchWindow {
+                cambox: "CAM2".to_string(),
+                start_ns: 1000,
+                end_ns: 2000,
+            },
+        ];
+        let stream: Vec<RecordingFrame> = vec![
+            frame_at(0, &[(CAM2, 900, 100), (STRIH, 100, 100)]),
+            frame_at(1, &[(CAM2, 901, 200), (STRIH, 103, 200)]),
+            // Window boundary at t=1000: a DIFFERENT source's OWN independent 911002 filter
+            // instance cuts onto program — its free-running counter value (101) is LOWER than
+            // the previous window's tail (103). Pre-#708 this reads as a backward-jump fault.
+            frame_at(2, &[(CAM2, 902, 1100), (STRIH, 101, 1100)]),
+            frame_at(3, &[(CAM2, 903, 1200), (STRIH, 106, 1200)]),
+        ];
+        let optical = optical_span_facts(&stream, &[STRIH, STREAM], None);
+        let scope = super::ScheduleScope {
+            schedule: &schedule,
+            anchor_run_ids: &[STRIH, STREAM],
+            guard_ns: 0,
+        };
+        let v = node_verdict_with_optical(
+            &super::NodeSpec {
+                node: "strih",
+                burn_run_id: STRIH,
+                rate: BurnRate::PerRenderTick,
+                source: &stream,
+                rec_path: None,
+                cam2_run_id: None,
+                step: super::node_render_step("strih", 60.0, 30.0, 60.0, 30.0),
+            },
+            &[STRIH, STREAM],
+            optical,
+            std::path::Path::new("/tmp"),
+            0,
+            Some(scope),
+        )
+        .unwrap();
+        assert!(
+            v.is_zero(),
+            "#708: a backward jump landing exactly at a CONFIRMED window boundary must not be a \
+             phantom drop — got {:?}",
+            v.contiguity
+        );
+        assert_eq!(v.real_drops(), 0, "#708: no phantom REAL DROP");
     }
 
     #[test]
