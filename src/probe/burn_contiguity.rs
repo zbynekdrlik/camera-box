@@ -446,12 +446,10 @@ pub fn burn_contiguity_in_window_with_step_and_schedule(
                     // raw camera input — see the function doc), not a lost frame. Suppressed ONLY
                     // for this one boundary comparison; a backward jump WITHIN one window (the
                     // SAME counter instance, which can never legitimately go backward) still FAILS.
-                    // #708 RED (test-first): the suppression is NOT wired up yet in this commit
-                    // — only the `window_of`/`crossed_window_boundary` THREADING is added, so the
-                    // new tests below can call the real function signature and observe them FAIL.
-                    // The next commit adds `&& !crossed_window_boundary` here to make them pass.
-                    let _ = crossed_window_boundary;
-                    if id < prev && matches!(rate, BurnRate::PerRenderTick) {
+                    if id < prev
+                        && matches!(rate, BurnRate::PerRenderTick)
+                        && !crossed_window_boundary
+                    {
                         non_present_delivered = non_present_delivered.saturating_add(1);
                         missing_slots.push(MissingSlot {
                             id,
@@ -480,9 +478,14 @@ pub fn burn_contiguity_in_window_with_step_and_schedule(
                     // strictly inside (prev, id) ⇒ below max_present ⇒ never collide with a
                     // synthetic None id (seeded above max_present) or a present id.
                     // (cam1's per-emit forward gap is handled set-wise below — neither acts here.)
-                    // #708 RED (test-first): same as the backward-jump branch above — the
-                    // suppression is added in the next (GREEN) commit.
-                    if matches!(rate, BurnRate::PerRenderTick) && expected_step >= 2 && id > prev {
+                    // #708 — a decimation-excess computation across a CONFIRMED window boundary is
+                    // equally meaningless (the two ids come from two unrelated free-running
+                    // counters, so their numeric distance is not a real gap size); same suppression.
+                    if matches!(rate, BurnRate::PerRenderTick)
+                        && expected_step >= 2
+                        && id > prev
+                        && !crossed_window_boundary
+                    {
                         let gap = id as i64 - prev as i64;
                         let excess = gap / expected_step - 1 - i64::from(nones_since_prev);
                         if excess > 0 {
