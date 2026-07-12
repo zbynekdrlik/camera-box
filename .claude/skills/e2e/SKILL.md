@@ -956,7 +956,27 @@ strih's SOURCE role.** A `CAM=cam4` run's cam4/strih/stream hops can be fully ZE
 STILL fails — because imag structurally always measures cam1's physical feed (Phase-1 provisioning,
 `IMAG_PROG_SCENE` fixed constant). If cam1 has an active hardware defect, imag inherits it in EVERY
 run no matter which camera is under test elsewhere — this is not a bug, don't try to route imag's
-scene to a different camera to "fix" it (that would defeat its diagnostic purpose).
+scene to a different camera to "fix" it (that would defeat its diagnostic purpose). Under
+`ALL_CAMBOX=1` this is HARD-ENFORCED, not just a default: `scripts/recording-e2e.sh` line ~131
+errors out if `CAMERA_NAME != cam1` when `ALL_CAMBOX=1` — every `all_cambox_continuity.imag`-based
+gate run is ALWAYS a cam1-vs-imag measurement underneath.
+
+**Don't misread `all_cambox_continuity.imag.segments[].cambox` as "which camera imag is
+showing" — it's a borrowed TIME-WINDOW label, not imag's actual source (#674, 2026-07-12).**
+imag's OWN OBS scene never moves off `Cam 1` during an `ALL_CAMBOX` sweep (previous paragraph) —
+the per-segment `cambox: "CAM1"/"CAM3"/...` values are the SAME schedule-window boundaries the
+general (strih-side) `all_cambox_continuity.segments` uses, reused here purely so the two arrays
+line up 1:1 for reporting. So an `imag.segments[3].cambox == "CAM2"` entry does NOT mean imag was
+looking at physical cam2 in that window — it was still looking at cam1, during the time slot
+strih happened to have cam2 on program. Confirmed live: imag's `optical_stuck_density` is
+TIME-elapsed-correlated (rises through the recording, same shape on every camera label) while the
+general `all_cambox_continuity.segments` copies/gaps are PER-PHYSICAL-CAMERA-correlated (cam5/
+cam2 bad in both their turns, others clean) — two different signatures, proving they measure two
+different things. A SEPARATE naming collision compounds the risk: imag-nb's own OBS source named
+`NDI CAM1` subscribes to the raw NDI advertisement `"CAM1 (usb)"` — literally physical box
+hostname `cam1` (10.77.9.61) — which is UNRELATED to the schedule label `CAM1` (which maps to
+physical **cam5** via `CAMBOX_SWEEP`, per this skill's own delivery-latency section below). Two
+completely different "CAM1"s in the same investigation; keep them straight.
 
 **`#656`/`#663` self-heal firing on the E2E harness's OWN ad-hoc burn-enabled SOURCE-camera deploy
 kills that camera's digital burn measurement for the REST OF THE RUN, with no respawn (filed
@@ -1552,6 +1572,16 @@ When `copies`/`gaps` look elevated or growing across a run, don't guess — run 
    and not a genlock issue. `#665`/`#666` are the standing tracker for this defect class; a fresh
    `all_cambox_continuity` red run that traces to it is that defect's materialization, not a new
    root cause — link back to them instead of re-diagnosing from scratch.
+4. **Two DIRECT diagnostics now exist (#707, 2026-07-12) — check these FIRST, before falling back
+   to fps-delta archaeology.** `journalctl -u camera-box | grep '#707'` on the affected box for the
+   SAME window: `#707 NDI blocking send STALL on '<sender>'` means the SYNCHRONOUS
+   `NDIlib_send_send_video_v2` call itself blocked (network/receiver backpressure — confirms the
+   #656/#663/#665/#666 family's long-standing "network/genlock-gate hiccup" suspicion for THIS
+   occurrence); `#707 genlock emit-gate SKIPPED N boundary interval(s)` means a clock discontinuity
+   (a DanteSync NTP/PTP step, or a stalled poll) leapt `ndi::genlock_emit_gate`'s boundary past
+   frame(s) that were never emitted. Neither firing during a confirmed emit-rate deficit rules both
+   out and points elsewhere (capture-side queuing, scheduling). See `src/send_stall.rs` /
+   `ndi::boundary_skip_count` for the pure decisions.
 
 ## RESOLVED (#708, 2026-07-12) — strih's OWN `full_chain.loss.strih.real_drops` periodic 4-frame residual was a per-source-counter accounting artifact, NOT loss
 

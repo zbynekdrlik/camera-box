@@ -3867,3 +3867,87 @@ a follow-up if not done by the time this log entry is read.
   `-f body=@file` which does not read the file).
 - No version bump needed this cycle (`dev` 1.7.0-dev.348 already strictly ahead of `main`
   1.7.0-dev.346).
+
+## 2026-07-12 (afternoon) — #674 (hypothesis tested + rejected, redirected) / #707 (2 new diagnostics shipped) / #689 (per-camera A/V table reported) — PR #704 still held, dev commits `8f0be9d75`/`95b789a53`
+
+- **Dispatch instruction (from the supervisor):** test whether #674's imag judder is the
+  downstream view of #707's cam2/cam5/cam6 emit-rate deficit (one root cause, not two) BEFORE
+  anything else; separately root-cause #707's emit side and ship a fix/instrumentation; report
+  #689's fused per-camera A/V numbers with an assessment, NO knob changes.
+- **#674 hypothesis REJECTED with code + data**, not guessed: `scripts/recording-e2e.sh` line
+  ~131 HARD-REQUIRES `CAMERA_NAME=cam1` under `ALL_CAMBOX=1` — imag's own program scene
+  (`imag_scene_for_camera`) is set ONCE at `[4a/8]` and NEVER re-routed for the rest of the
+  recording, so every ALL_CAMBOX gate run's imag measurement is ALWAYS a fixed cam1-vs-imag
+  reading, regardless of what strih's switch schedule is doing. Confirmed live on imag-nb: only
+  `NDI CAM1` (raw NDI name `"CAM1 (usb)"` = physical box `cam1`, 10.77.9.61) is ever an active
+  full-res receiver; `imag.segments[].cambox` labels are borrowed schedule time-windows for
+  report-bucketing only. Data corroborates: imag's `optical_stuck_density` is TIME-elapsed-
+  correlated (rises through the recording on EVERY schedule label, same shape all 3 sampled
+  runs) while #707's OWN general `all_cambox_continuity.segments` defect is PER-PHYSICAL-CAMERA-
+  correlated (cam5/cam2 bad both turns, others clean both turns, no time trend) — two different
+  signatures. Physical cam1 itself is not one of #707's flagged boxes and its own capture/emit
+  health was verified live (steady ~60fps, 0 self-heal events).
+  - Redirected toward: imag-nb's single active NIC (`enx6c1ff773c91f`, a USB-Ethernet adapter —
+    the onboard `enp7s0` is unused/DOWN) shows a non-zero `ethtool -S` `rx_missed: 11361`; `NDI
+    CAM1` is subscribed TWICE (the dedicated program source + the always-on `MV CAM1` Multiview
+    thumbnail, both bound to the identical stream) — no other camera has this doubling.
+  - **Explicitly did NOT overclaim "chronic"**: a genuinely CI-idle control window could not be
+    established (this repo's CI has been running near-continuously overnight); one deliberately-
+    checked quiet-ish window (03:55-04:18 UTC) showed `NDI CAM1` UNREMARKABLE, comparable to/
+    lower than several other sources — the large spikes (3,760-19,565 underruns/~5.5min) are
+    specifically test/harness-adjacent, most plausibly correlated with the harness restarting
+    physical cam1's `camera-box` service as part of its own per-run reconcile/deploy cycle
+    (live-confirmed: cam1's PID changed at 08:31:57 UTC, ~8min after a recording ended). Not
+    executed: disabling the redundant `MV CAM1` tile or bringing up `enp7s0` — both change live
+    rig config on a broadcast-facing surface, flagged for the owner rather than silently done.
+  - Posted full writeup to #674 (`issuecomment-4950707482`).
+- **#707**: root-caused as far as safely possible without guessing at a pacing "fix" for what
+  the evidence says is a hardware/network/clock-discipline question, not a software pacing bug
+  (`ndi::genlock_emit_gate` already deliberately handles both forward and backward clock steps).
+  Shipped two independent, Tier-0-tested, fleet-wide-deployed DIRECT diagnostics instead of
+  guessing:
+  - `src/send_stall.rs` (new, `is_send_stall`/`send_stall_warning`) + a timing wire around the
+    SYNCHRONOUS `NDIlib_send_send_video_v2` call in `NdiSender::send_frame_data_with_timecode`
+    (`src/ndi.rs`) — WARNs when one blocking send call ate ≥1.5x its frame budget (commit
+    `8f0be9d75` — landed by a concurrent worker sharing this dev1 checkout per this repo's own
+    documented GOTCHA; confirmed via `git log`/`git diff HEAD` before committing anything, no
+    conflict, my own independent implementation converged on the same design).
+  - `ndi::boundary_skip_count` (new) + a wire in the capture loop's genlock-decimation call site
+    (`src/main.rs`) — WARNs with exact prev/new boundary values when `genlock_emit_gate`'s
+    forward-resync branch silently absorbed a clock discontinuity, skipping un-emitted
+    boundaries (my own commit `95b789a53`, exact-path-staged on top of the concurrent worker's
+    commit per the GOTCHA's own mitigation).
+  - New (unconfirmed) data point: cam5 fired 194 `#666` WARNs in one ~2h window, clustered into
+    6 episodes ~18-19min apart; cam2/cam6 fired zero in the same window. Tried correlating with
+    DanteSync's periodic PTP "NANO MODE" servo re-acquisition — a cam2 cross-check (22 NANO-mode
+    re-engagements in the same window, far more frequent than cam5's, yet zero #666 WARNs)
+    weakens this as a general causal mechanism, so reported as an open, NOT-confirmed lead
+    rather than a claimed root cause.
+  - No functional pacing fix applied — every candidate mechanism found evidence for is an
+    infra/hardware/clock question; the two new diagnostics are the safe, evidence-generating
+    contribution instead of an unproven code change.
+  - Posted writeup to #707 (`issuecomment-4950709007`).
+- **#689**: pulled `all_cambox_av_sync` from the 3 latest full-path-e2e runs. Only cam2 ever
+  produces a `Measured` verdict (offsets +2.1/-16.2/-22.2ms across 3 runs, mean ≈-12.1ms, inside
+  ±20ms) — cam1/cam3/cam4/cam5/cam6 are UNKNOWN in every run, NOT because their sync is bad but
+  because `src/av_window.rs`'s per-camera windowing structurally starves them (cam2 pools the
+  WHOLE ~300s recording; every other camera only gets its own ~30-60s schedule slot, too short to
+  clear `MIN_AV_SAMPLES=8` given the documented CRC-4 false-decode flood). Reported this
+  measurement-coverage explanation plainly rather than assuming the other 5 cameras are fine.
+  `strih_stream` video latency confirmed stable across all 3 runs (p50 962.0-962.2ms), so the
+  cam2 offset swing is more likely intrinsic audio-clustering noise than real hold drift. NO
+  stream hold or other latency knob touched, per the dispatch's explicit instruction. Posted to
+  #689 (`issuecomment-4950690743`).
+- **Repo GOTCHA encountered live**: a concurrent worker (another process sharing this SAME dev1
+  checkout) committed `8f0be9d75` mid-session — nearly-identical independent `send_stall.rs`
+  work. Followed this repo's own documented mitigation exactly: `git log --oneline -3` before
+  every commit, exact-path `git commit -- <files>` (never `-A`/`-a`), `git fetch` + compare
+  before push, exact-SHA push (`git push origin <sha>:refs/heads/dev`). No conflict, no lost
+  work, clean fast-forward.
+- Playbook: `.claude/skills/e2e/SKILL.md` — clarified that `all_cambox_continuity.imag.segments[
+  ].cambox` is a borrowed time-window label, NOT what imag is actually showing (it's always
+  cam1), and flagged the raw-NDI-name-vs-schedule-label "CAM1" collision (imag's `NDI CAM1` =
+  physical cam1 hostname; the schedule's `CAM1` label = physical cam5 via `CAMBOX_SWEEP` — two
+  different things with the same string); added a pointer to the two new `#707` diagnostics so a
+  future emit-rate investigation checks them before falling back to fps-delta archaeology.
+- No version bump needed this cycle (`dev` well ahead of `main`, unchanged from prior cycles).
