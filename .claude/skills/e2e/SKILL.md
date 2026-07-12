@@ -1611,6 +1611,29 @@ started one. A leftover recording blocks every subsequent CI gate run as RIG_BUS
 manually diagnoses it (rig-busy-gate.sh now prints per-box timecode + stray-vs-broadcast hints,
 #649 item 3).
 
+## GOTCHA — a manual `rig-mode.sh test` right before (or during) a push that triggers the CI E2E gate can leave stale cam2 painter state that breaks the CI's OWN `[3/8]`/#431 marker-growth check (2026-07-13)
+
+`rig-mode.sh test` and the CI harness's own `[3/8]` step both launch a `frame-probe --paint-only`
+process on cam2 (same pidfile `/run/rig-painter.pid`, same fb0). Live incident: ran `rig-mode.sh
+test` manually (successfully — marker verified RUNNING), then pushed a commit ~3 min later. The
+push's own `pull_request`-triggered E2E gate started its `[3/8]` step ~9 min after that (self-hosted
+runner queue + earlier build steps), which reported `PASS: #420 QPSK audio marker RUNNING` (the
+ALSA PCM state check) but then **FAILED #431** ("marker log has NOT GROWN across 3 polls — RUNNING-
+but-silent") — the marker log the harness's OWN run expected to see growing (`/tmp/av-markers.csv`)
+never did, even though SOME marker data did land in the shared `/run/rig-qpsk-markers.csv` path (my
+earlier manual run's own file). Root cause not fully isolated (didn't reproduce/retry to confirm)
+but the shared pidfile/fb0/log-path surface between a manual invocation and the harness's own step
+is the clear suspect — the harness's own StartRecord alignment likely raced a stale process/state
+left by the manual call rather than cleanly taking over. Recovery was simple: confirm no orphaned
+painter process (`ps aux | grep -i painter` on cam2), re-run `rig-mode.sh test` once more (clean
+this time, confirmed by watching `/run/rig-qpsk-markers.csv` actually grow across a few seconds),
+`rig-busy-check` idle. **Rule: avoid a manual `rig-mode.sh test` invocation in the few minutes
+immediately before a push you know will trigger the PR's required E2E gate** (or expect the gate's
+own `[3/8]`/#431 step to possibly need a one-off manual state check + `rig-mode.sh test` re-run
+afterward before trusting the NEXT run) — this is a timing/collision hazard, not a code regression,
+and does not indicate anything wrong with #431 itself (which correctly caught the stalled marker
+rather than silently trusting the RUNNING-but-silent ALSA state).
+
 ## TOPOLOGY FACT — ONE camera + HDMI splitter feeds ALL cam boxes the IDENTICAL signal (owner-corrected 2026-07-10)
 
 The optical leg is: cam2 paints its monitor → **ONE physical camera** films that monitor → the
