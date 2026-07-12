@@ -402,26 +402,81 @@ async fn run_capture_loop(
         None
     };
 
-    // Open capture device at 1920x1080 @ 60fps.
-    //
-    // Select the V4L2 picture controls to ENFORCE at open (see
-    // `select_capture_controls`):
-    // - `CAMERA_BOX_CAPTURE_CONTROLS` set  -> that explicit override,
-    // - else `--record-grab`               -> the certified SHARP set (saturation=0,
-    //                                          contrast=75) so the filmed QR decodes (#156),
-    // - else PRODUCTION                    -> the certified COLOUR set (#296) so a stray
-    //                                          saturation=0 left by a prior grab can NEVER
-    //                                          persist and turn the live cameras grayscale.
-    let env_spec = std::env::var("CAMERA_BOX_CAPTURE_CONTROLS").ok();
-    let capture_controls: Vec<camera_box::capture::CaptureControl> =
-        camera_box::capture::select_capture_controls(env_spec.as_deref(), record_grab.is_some());
-    if capture_controls.is_empty() {
-        tracing::info!("no v4l2 capture controls to enforce at open (explicit empty override)");
+    // #685/#728/#729 — resolve this box's grabber model ONCE, up front, BEFORE deciding which
+    // v4l2 controls to enforce (colour policy, #729) and BEFORE the capture-rate self-heal
+    // envelope (#685/#663) — both consumers now share ONE detection instead of drifting apart.
+    // Prefers the real OS-level hostname (`os_hostname()`) over the config-derived `hostname`
+    // parameter — see that function's doc for why (the deployed fleet's config.toml doesn't set
+    // it). `Copy`, so it moves into the `'static` spawn_blocking closure below for free.
+    let resolved_hostname = {
+        let os = os_hostname();
+        if os.is_empty() {
+            hostname.to_string()
+        } else {
+            os
+        }
+    };
+    // #728 — best-effort RUNTIME detection: read the actual plugged-in card's V4L2 `card`
+    // string. A physical card swap changes what's plugged in without changing the box's
+    // hostname, so the static hostname->model table alone silently desyncs from reality the
+    // moment a card moves (the 2026-07-12 cam1<->cam5 reshuffle). `query_card_name` is
+    // best-effort (never fatal) — `resolve_grabber_model` falls back to the hostname
+    // convention whenever detection is unavailable or unrecognized.
+    let detected_card = camera_box::capture::query_card_name(device_path);
+    let grabber_model = camera_box::capture_rate_health::resolve_grabber_model(
+        &resolved_hostname,
+        detected_card.as_deref(),
+    );
+    let hostname_model =
+        camera_box::capture_rate_health::grabber_model_for_hostname(&resolved_hostname);
+    if grabber_model != hostname_model {
+        tracing::warn!(
+            "grabber model MISMATCH: hostname '{}' convention says {}, but the plugged-in \
+             card ({:?}) resolves to {} — using the RUNTIME-detected model (a physical card \
+             swap changed what's on this box; #728/#729 never trust the stale hostname \
+             mapping over live hardware)",
+            resolved_hostname,
+            hostname_model,
+            detected_card,
+            grabber_model
+        );
     } else {
         tracing::info!(
-            "enforcing {} certified v4l2 capture control(s) at open \
-             (#296 colour self-heal / #156 sharp grab)",
-            capture_controls.len()
+            "grabber model: {} (hostname '{}', detected card: {:?})",
+            grabber_model,
+            resolved_hostname,
+            detected_card
+        );
+    }
+
+    // Open capture device at 1920x1080 @ 60fps.
+    //
+    // Select the V4L2 picture controls to ENFORCE at open (see `select_capture_controls`):
+    // - `CAMERA_BOX_CAPTURE_CONTROLS` set -> that explicit override, regardless of model,
+    // - else                              -> #729 zero-touch by default: NO controls at all
+    //                                         unless `grabber_model` has a documented, proven
+    //                                         need (today: ONLY ShadowCast 2, #296's grab-time
+    //                                         grayscale-brick risk). Plug-and-play for every
+    //                                         other card — factory defaults, no ceremony.
+    let env_spec = std::env::var("CAMERA_BOX_CAPTURE_CONTROLS").ok();
+    let capture_controls: Vec<camera_box::capture::CaptureControl> =
+        camera_box::capture::select_capture_controls(
+            grabber_model,
+            env_spec.as_deref(),
+            record_grab.is_some(),
+        );
+    if capture_controls.is_empty() {
+        tracing::info!(
+            "no v4l2 capture controls to enforce at open (zero-touch: {} has no documented \
+             need, or an explicit empty override) — #729",
+            grabber_model
+        );
+    } else {
+        tracing::info!(
+            "enforcing {} certified v4l2 capture control(s) at open ({} documented need / \
+             explicit override)",
+            capture_controls.len(),
+            grabber_model
         );
     }
     let mut capture = VideoCapture::open_with_controls(device_path, &capture_controls)?;
@@ -433,24 +488,6 @@ async fn run_capture_loop(
     // loop below runs on a `'static` spawn_blocking closure, so the borrowed `device_path: &str`
     // parameter can't be captured directly).
     let device_path_owned = device_path.to_string();
-
-    // #685 — resolve this box's grabber model from its hostname ONCE, up front, so the capture
-    // loop's #656/#663 capture-rate check below can use a per-model tolerance instead of one
-    // strict global default (ShadowCast 2's characteristic USB quantization wobble is far wider
-    // than the other grabber models' — see `capture_rate_health::GrabberModel`). Prefers the
-    // real OS-level hostname (`os_hostname()`) over the config-derived `hostname` parameter —
-    // see that function's doc for why (the deployed fleet's config.toml doesn't set it).
-    // `Copy`, so it moves into the `'static` spawn_blocking closure below for free.
-    let resolved_hostname = {
-        let os = os_hostname();
-        if os.is_empty() {
-            hostname.to_string()
-        } else {
-            os
-        }
-    };
-    let grabber_model =
-        camera_box::capture_rate_health::grabber_model_for_hostname(&resolved_hostname);
 
     // Genlock #11: optionally emit NDI at a target broadcast rate, decimating the
     // faster capture onto DanteSync wall-clock boundaries, so a downstream
