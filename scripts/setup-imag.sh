@@ -279,7 +279,7 @@ bash /etc/rc.local
 grep -q performance /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor || fail "governor not performance"
 
 # =============================================================================
-step 5 "Never sleep: lid ignore + sleep masked + idle/blank/lock off (openbox: xset in the step-16 autostart; the gsettings below apply while GNOME is still installed on THIS run — they become no-ops once step 15 purges it later in the same run, and on any subsequent re-run)"
+step 5 "Never sleep: lid ignore + power/suspend/hibernate key ignore (#727) + sleep masked + idle/blank/lock off (openbox: xset in the step-16 autostart; the gsettings below apply while GNOME is still installed on THIS run — they become no-ops once step 15 purges it later in the same run, and on any subsequent re-run)"
 # =============================================================================
 mkdir -p /etc/systemd/logind.conf.d
 cat > /etc/systemd/logind.conf.d/99-imag-no-sleep.conf <<'EOF'
@@ -288,6 +288,18 @@ HandleLidSwitch=ignore
 HandleLidSwitchExternalPower=ignore
 HandleLidSwitchDocked=ignore
 IdleAction=ignore
+EOF
+# #727: imag-nb is a PRODUCTION device — a short accidental power-button press
+# suspended/shut it down during the 2026-07-12 live event. Mirrors setup-device.sh's
+# STEP 12 fleet convention (HandlePowerKey/HandleSuspendKey/HandleHibernateKey=ignore)
+# in a separate drop-in, matching the file already hand-applied live on the box.
+cat > /etc/systemd/logind.conf.d/99-production-no-powerkey.conf <<'EOF'
+[Login]
+HandlePowerKey=ignore
+HandleSuspendKey=ignore
+HandleHibernateKey=ignore
+HandleLidSwitch=ignore
+HandleLidSwitchExternalPower=ignore
 EOF
 systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target >/dev/null 2>&1 || true
 systemctl restart systemd-logind
