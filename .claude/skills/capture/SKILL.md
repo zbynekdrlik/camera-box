@@ -1,9 +1,32 @@
 ---
 name: capture
-description: V4L2 capture controls (saturation/contrast/hue) — the certified COLOUR vs SHARP sets, device-state persistence, NZXT CAM4 no-controls, and the testable apply path. Load before touching src/capture.rs control logic or diagnosing grayscale/colour-tint cameras.
+description: V4L2 capture controls (saturation/contrast/hue) — the certified COLOUR vs SHARP sets, MODEL-GATED zero-touch-by-default policy (#729), device-state persistence, runtime grabber-model detection, NZXT CAM4 no-controls, and the testable apply path. Load before touching src/capture.rs control logic or diagnosing grayscale/colour-tint cameras.
 ---
 
 # V4L2 capture controls (src/capture.rs)
+
+## #729 (2026-07-12, supersedes the section below) — zero-touch by default, model-gated
+
+**camera-box does NOT write any V4L2 colour control unless the RUNTIME-DETECTED grabber model
+has a specifically documented, proven need.** `select_capture_controls(model, env_spec,
+record_grab)` — no env override -> `documented_controls_for_model(model)`: TODAY only
+`GrabberModel::ShadowCast2` gets the certified COLOUR set (the real #296 need below); every other
+model (`Elgato4kS`, `NzxtSignalHd60`, `Unknown`) is zero-touch, plug-and-play, factory defaults,
+no ceremony. An explicit `CAMERA_BOX_CAPTURE_CONTROLS` override still always wins, for any model.
+
+**`model` comes from `capture_rate_health::resolve_grabber_model(hostname, detected_card)`** —
+runtime V4L2 `card`-string detection (`capture::query_card_name`, a best-effort non-exclusive
+`VIDIOC_QUERYCAP` read) WINS over the static hostname convention whenever available, so a
+physical card swap (#728) can never again silently apply a stale colour policy (or a stale
+self-heal tolerance — same shared detection feeds both). `main.rs` logs a WARN on any detected
+mismatch. See `.claude/skills/ops`'s `#663`/`#685` section for the self-heal-envelope half of the
+same shared detection.
+
+**Before assuming "the code" explains a box's current control state, check for a per-host
+`camera-box.service.d/*.conf` systemd env override** (`systemctl show camera-box -p Environment`
+on the live box) — an explicit override is invisible to `git grep` (nothing in this repo writes
+one) and always wins over whatever the code's own policy would otherwise pick. See the dedicated
+GOTCHA further down this file (cam6, 2026-07-12) for a live example of a stale one.
 
 ## The #1 gotcha — UVC device controls PERSIST on the card across processes
 
@@ -13,20 +36,22 @@ stays on the card after that process exits, and the NEXT camera-box start inheri
 it. This bricked a live event (#296): a grab set `saturation=0`, production
 restarted applying NO controls, and every camera stayed grayscale forever.
 
-**Therefore production must ENFORCE a known control set at EVERY capture open** —
+**Therefore ShadowCast 2 production must ENFORCE a known control set at EVERY capture open** —
 never trust the card's current state. Self-healing, same philosophy as the genlock
-lockdown (#150/#257).
+lockdown (#150/#257). **This need is SPECIFIC to ShadowCast 2 (#729) — every other model is
+zero-touch by default, see the section above.**
 
 ## Two certified control sets — do not confuse them
 
 | Set | fn | Values (reference %, #456) | When |
 |---|---|---|---|
-| COLOUR (default — production AND grab) | `color_production_controls()` (#296/#338) | saturation=50%, contrast=50% (no hue) | ANY no-env open: production OR grab |
+| COLOUR (ShadowCast 2's documented need, #729) | `color_production_controls()` (#296/#338) | saturation=50%, contrast=50% (no hue) | `GrabberModel::ShadowCast2`, no env override |
 | SHARP (on demand only) | `certified_cam1_controls()` (#156) | contrast=75%, saturation=0% | ONLY `CAMERA_BOX_CAPTURE_CONTROLS=certified` |
 
 `saturation=50%` / `contrast=50%` = the ShadowCast factory defaults, normal
 colour, proven on the rig (channel_diff ≈ 35). This is the device-default set;
-both production and grab now use it. **These are PERCENTAGES, not literal V4L2
+both production and grab use it, but ONLY on ShadowCast 2 (#729) — Elgato 4K S and
+NZXT Signal HD60 are zero-touch. **These are PERCENTAGES, not literal V4L2
 values** — see the #456 range-aware resolution section below; on the ShadowCast
 card 50%/75%/0% happen to equal the literal values 50/75/0.
 
@@ -235,3 +260,83 @@ exact_dup = full_hash == prev_full_hash
   This project's own `config.toml` uses `device = "auto"`, so camera-box's own restart is unaffected
   by the renumbering — but YOUR raw-capture script must open whichever node is currently the capture
   one, not a hardcoded `/dev/video0`.
+
+## GOTCHA — `v4l2-ctl --stream-count=N --stream-to=file` can silently fill the 100MB `/tmp`
+## tmpfs mid-grab (#728, 2026-07-12)
+
+A raw dump (not the tiny CSV the content-hash discriminator above writes) is `width*height*2`
+bytes PER FRAME (4,147,200 for 1920x1080 YUYV) — `--stream-count=300` on a 100MB tmpfs silently
+TRUNCATES at ~25 frames the moment the tmpfs fills (v4l2-ctl keeps printing progress but the file
+just stops growing), and once the tmpfs is 100% full, EVERY subsequent write on that box fails
+(`No space left on device`) — including an unrelated `journalctl | grep > /tmp/foo.txt` pipe run
+minutes later for a totally different check. Confirmed live: a `--stream-count=300` grab on cam5
+silently landed at 104,857,600 bytes (~25 frames) and then broke a `journalctl` analysis pipeline
+with no obvious link between "I asked for 300 frames" and "this unrelated command now fails".
+
+**Rule: always pass an EXPLICIT, SMALL `--stream-count`** — `frame_bytes * count` must leave
+comfortable headroom under 100MB (15 frames of 1080p YUYV = 62MB, safe; NEVER request "however
+many frames I probably want" and let the tmpfs decide). After ANY raw grab, `df -h /tmp` before
+doing anything else on that box, and `rm` the raw file (or the whole grab) the MOMENT you're done
+analyzing it — don't leave it for "cleanup at the end of the session". If you hit `No space left
+on device` on ANY command, `df -h /tmp` immediately and clear stale grabs before concluding
+anything else is broken.
+
+## Diagnosing a hardware/ISP colour defect vs a software control bug (#729, 2026-07-12)
+
+When a camera/grabber shows wrong colour and the obvious V4L2 controls (saturation/contrast/hue)
+are already at their card's own factory default, don't assume "must be a control/software bug" —
+test whether the defect survives OUTSIDE camera-box's own code path entirely:
+
+1. **Grab via the card's OWN onboard hardware encoder, not just raw YUYV.** Most UVC capture
+   dongles support `MJPG` too (`v4l2-ctl --list-formats`); JPEG encoding happens in the chip's own
+   ISP, completely bypassing any YUYV byte-order/format assumption in your own code. If the SAME
+   visual defect appears in the onboard-MJPG grab, the defect is upstream of anything your own
+   code touches — it's in the card's own ISP/AWB, not a camera-box bug, no matter how the raw YUYV
+   path is parsed.
+2. **Try a different resolution.** A bandwidth-driven negotiation/fallback defect (common on
+   marginal USB links) usually clears at a lower resolution; a defect that reproduces IDENTICALLY
+   at 1080p and 720p rules out a bandwidth/negotiation cause.
+3. **Check whether chroma tracks luma, not just its magnitude.** camera-box's own `mean_chroma`
+   metric reports MEAN ABSOLUTE deviation (`|U-128|`, `|V-128|`) — enough to say "there's
+   colour when there shouldn't be" but not WHY. Pull a raw frame, compute per-pixel `Y` (mean of
+   the two luma bytes per macropixel) and the raw `U`/`V` byte, and check the Pearson correlation
+   between `Y` and `U`/`V` across a few thousand sampled pixels. A near-linear correlation
+   (`|corr| > 0.9`) on content that SHOULD be near-neutral gray (e.g. a black/white QR test
+   pattern) is the signature of "chroma is actually a scaled/offset copy of luma" — a real ISP/AWB
+   defect, not a hue-rotation-fixable colour cast (a hue rotation preserves an already-nonzero
+   chroma vector's magnitude; it can't null a luma-driven error that should be zero).
+4. **`saturation=0` fully suppressing the defect does NOT mean saturation is the bug** — it just
+   proves the saturation control reaches the real pipeline (post-ISP linear gain). If desaturating
+   ALSO kills genuine colour content (a colour-bar test pattern, real footage) at the same rate,
+   there is no control value that removes only the false colour — confirms an ISP-level defect,
+   not a control mis-set.
+
+If all of the above hold, the defect is a genuine hardware/firmware characteristic of that grabber
+MODEL (confirmed on cam1+cam6, both Elgato 4K S, identical `u_dev≈35 v_dev≈21` and identical
+purple/lime look in both raw YUYV and onboard MJPG, at both 1080p and 720p, with every control at
+factory default) — no camera-box code change can fix it; it's a product decision (accept it / a
+documented partial-saturation compromise / replace the affected units), not an engineering one.
+
+## GOTCHA — a per-host `camera-box.service.d/*.conf` systemd env override can silently smear a
+## LITERAL control value outside any code path OR provisioning script (#729, cam6, 2026-07-12)
+
+`CAMERA_BOX_CAPTURE_CONTROLS` set via `Environment=` in a systemd drop-in ALWAYS wins over
+whatever the code's own model-gated policy (`capture::select_capture_controls`) would otherwise
+select — this is correct, intentional behavior (an operator override should win), but it also
+means a drop-in written by hand YEARS before a later code fix (here: pre-#456's range-aware
+resolution) can sit forever, invisible in `git grep`, silently defeating a later redesign (#729's
+zero-touch policy) that assumes "no override = the code decides". Found live: cam6 had
+`/etc/systemd/system/camera-box.service.d/capture-controls.conf` setting a literal
+`contrast=128,saturation=128` — its own comment said "Proper fix = range-aware colour in
+camera-box", i.e. it was ALREADY known to be a stopgap the day it was written, and nobody ever
+came back to remove it once #456 shipped the real fix.
+
+**When auditing/fixing ANY per-box V4L2/capture-control behavior, check
+`/etc/systemd/system/camera-box.service.d/*.conf` on the LIVE box for a leftover
+`CAMERA_BOX_CAPTURE_CONTROLS` override BEFORE trusting the code's own logic to explain what's
+actually happening** — `systemctl show camera-box -p Environment` shows the fully-merged env,
+which is the ground truth, not `grep`-ing the repo (this override was never written by any
+provisioning script, so `git grep` finds nothing). If a stopgap override predates a later proper
+code fix and now just duplicates what the code already does correctly, remove the drop-in +
+`daemon-reload` + restart — don't leave dead ceremony sitting on one box that a future person will
+trip over.
