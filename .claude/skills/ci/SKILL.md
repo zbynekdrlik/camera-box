@@ -71,6 +71,31 @@ Confirm via the created-message `id` in the response body.
 The Discord bot can't `fetch_messages` on these channels from an in-session Discord plugin
 (not allowlisted) — verify delivery by the bot REST POST returning a message `id`.
 
+**#711/#719 Discord report routing:** `scripts/lib/e2e-discord-report.sh` prefers
+`DISCORD_NOTIFICATION_CHANNEL_ZBYNEK` (the owner's own thread, push-notifies via a
+`<@DISCORD_MENTION_ZBYNEK>` prefix on chunk 1) over the plain `#notifications` channel
+(`DISCORD_CHANNEL_ID`, now a logged fallback only — the user does not watch it and Discord never
+pushes a phone notification without a mention/DM). CI (`full-path-e2e.yml`) passes only
+`DISCORD_BOT_TOKEN`/`DISCORD_CHANNEL_ID` as GitHub secrets — the owner-thread vars are backfilled
+from `~/.claude/channels/discord/.env` on every send (this runs on the dev1 self-hosted runner, so
+that file is always present), preserving an already-set `DISCORD_BOT_TOKEN` so CI's real secret is
+never shadowed by the local file's own value.
+
+**TESTING PATTERN — a fake `curl` on PATH that records multi-line argv safely.** A test that drives
+a bash function calling `curl -d "$payload" ...` and wants to assert on the ACTUAL payload sent
+must capture the fake curl's argv into a log file — but the payload itself (a composed Discord
+report) is MULTI-LINE, so a newline-delimited log is ambiguous (one arg's embedded newlines look
+identical to arg boundaries). Use ASCII Record Separator (`\x1e`) between args and Group Separator
+(`\x1d`) between calls instead — bytes that never occur in real curl argv (headers, JSON, URLs):
+```bash
+# fake curl:
+{ for a in "$@"; do printf '%s\x1e' "$a"; done; printf '\x1d'; } >> "$CURL_LOG"
+printf '{"id":"999"}\n200'   # canned success response, mirrors `curl -w '\n%{http_code}'`
+```
+Parse in the test harness by splitting on `\x1d` then `\x1e`. See
+`tests/harness_e2e_discord_report_owner_thread_719.rs` for the full pattern (PATH-stub convention,
+same family as `tests/harness_deploy_fleet.rs`'s `sshpass`/`gh` stubs).
+
 ## Probe Binary Flow — Run on stream.lan, NOT dev1
 
 OBS records the 0.7–6 GB program file on stream box (10.77.9.204 — strong CPU, fast disks).

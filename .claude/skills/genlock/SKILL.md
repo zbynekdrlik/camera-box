@@ -910,3 +910,55 @@ the ONE variable (the restart) from everything else a full E2E session also does
 found ZERO underrun growth post-restart (cleaner than the control baseline), which meaningfully
 narrowed the investigation (ruled out "restart alone" as sufficient) at a fraction of the cost of
 a full harness run.
+
+## MAP — the TWO distinct frame-duplication/drop mechanisms in vendored OBS (#726, live-event "15fps-like" stutter)
+
+When a 60fps NDI source feeds a 30fps canvas and the OUTPUT judders (visibly halved motion, "feels
+like 15fps" even though the canvas is still mechanically producing 30 frames/sec), there are TWO
+architecturally SEPARATE places in `vendor/obs-studio/libobs` this can originate — do not conflate
+them; they have different symptoms and different fixes:
+
+**A — per-source genlock release cadence** (`obs-source.c`'s `ready_async_frame`, ~L4750-5050,
+the `#401` phase-locked cadence). Runs ONCE PER RENDER TICK PER SOURCE. In STEADY state it presents
+exactly ONE matured frame and advances the locked boundary by exactly ONE SOURCE interval
+(`next_frame->timestamp + interval`). If the source arrives FASTER than the canvas ticks (a 60fps
+source into a 30fps-tick render loop), the per-source queue depth grows until it crosses
+`GENLOCK_QDEPTH_RELOCK`, at which point the BACKLOG STORM branch fires (`release = due`) —
+presenting the newest due frame and DROPPING (counted in `genlock_dropped_due`) the
+matured-but-superseded ones. **Signature: periodic multi-frame content JUMPS (skips), never a
+repeated/duplicate frame.** Diagnostic: `genlock_dropped_due`/`genlock_relocks` counters (the
+periodic `genlock-fifo audit` log line), or (new, #726) `src/presentation_cadence.rs`'s
+`other_steps`/irregular-jump buckets on a REAL (jitter-tolerant, see the recording-decode skill's
+own #726 note) cadence read.
+
+**B — canvas-side render-lag frame duplication** (`obs-video.c`'s `video_sleep`/`output_frame`/
+`output_video_data`, ~L989-1101). Runs ONCE PER RENDER TICK for the WHOLE canvas (not per-source).
+`video_sleep()` computes `count` — how many output-frame slots the CURRENT rendered texture fills
+— from whether the render thread hit its wall-clock deadline (`os_sleepto_ns`): a MISS (render
+took longer than one canvas interval, e.g. under sustained Multiview/compositing contention — see
+`#708`'s "Multiview keeps all 6 raw inputs rendering continuously" finding) makes `count>1`, and
+the SAME rendered texture is handed to the encoder `count` times — a literal re-presentation of
+the previous frame's pixels. **Signature: a genuinely held/repeated frame (the "hold-then-catch-up"
+pattern).** Diagnostic: `video->lagged_frames`/`video->total_frames` — STOCK OBS counters, already
+exposed via `obs_get_lagged_frames()`/`obs_get_total_frames()` and via obs-websocket's `GetStats`
+as `renderSkippedFrames`/`renderTotalFrames` (this is the SAME "render health" signal
+`obs-render-health-metric.md` memory already flags vs the encoder-side `outputSkippedFrames`,
+which stays green even when render chokes). Ad-hoc read (no dedicated CLI subcommand exists —
+`scripts/obs_phase2.py` has no `stats` verb):
+```python
+import sys; sys.path.insert(0, "scripts")
+import obs_phase2 as op
+ws = op._conn("10.77.9.202", "<strih WS password>")  # or "10.77.9.204", "" for stream (no auth)
+print(op._rpc(ws, "GetStats"))
+ws.close()
+```
+
+Both mechanisms plausibly explain "raising the canvas to 60fps mitigated it live" (Mechanism A:
+1:1 tick-rate/source-rate alignment removes ALL backlog-driven relock activity structurally;
+Mechanism B: a finer render-tick granularity MAY reduce the probability of any single tick missing
+its (now shorter) deadline, though this direction is less obviously predicted). #726's own
+real-rig data (see the recording-decode skill) is qualitatively more consistent with Mechanism A's
+"mostly steady, periodic catch-up" shape than with B's simpler duplicate-then-resume shape, but
+this is NOT yet conclusively distinguished — see #726 for the live disambiguation plan (correlate
+a `presentation_cadence` read against a `GetStats renderSkippedFrames` DELTA over the SAME
+recording window).

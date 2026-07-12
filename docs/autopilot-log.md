@@ -4189,3 +4189,64 @@ a follow-up if not done by the time this log entry is read.
   PR #704 updated with a STATUS UPDATE section (via REST API PATCH — the known
   Projects-classic `gh pr edit` GraphQL bug), no `Closes` lines added (none of the 3 tickets close
   this cycle).
+
+## #719 (fixed+closed, live-verified) + #726 (metric shipped+wired, honest partial, stays open) — 2026-07-12/13
+
+- **#719 — Discord E2E reports weren't reaching the user.** `scripts/lib/e2e-discord-report.sh`
+  always posted to the shared `#notifications` channel with no @mention — Discord never
+  push-notifies without one, so every #711 report was silently invisible. Fix: prefer
+  `DISCORD_NOTIFICATION_CHANNEL_ZBYNEK` + prefix chunk 1 with `<@DISCORD_MENTION_ZBYNEK>`;
+  `#notifications` is now a logged fallback only. Backfills the owner vars from
+  `~/.claude/channels/discord/.env` even when `DISCORD_BOT_TOKEN` is already a real CI secret,
+  never clobbering it. RED `f801bf8b7`, GREEN `6abc25779`
+  (`tests/harness_e2e_discord_report_owner_thread_719.rs`, PATH-stub fake `curl` with
+  record/group-separator argv logging — see the ci skill). **Live-verified** on this PR's own
+  `pull_request` E2E rerun (CI 29209662091, RUN_ID 142901047): posted to channel
+  `1519638400171511860` with 3 real message ids. **Closed with evidence.**
+- **#726 — LIVE EVENT: strih/stream "stuttered like 15fps" at 30fps canvas, 60fps canvas
+  mitigated it live.** Shipped deliverable 1 (the presentation-cadence EVENNESS metric): new
+  Tier-0 crate-root module `src/presentation_cadence.rs` (`9716ac3c8`, 9 unit tests) wired into
+  `probe::recording_segments::window_segment` as a new `presentation_cadence` field on
+  `CamboxSegment` (`704f0fbc9`) — reuses the SAME `present_ticks`/`expected_step` the window
+  already extracts, no new decode work; dropped `CamboxSegment`/`SegmentedContinuity`'s `Eq`
+  derive (f64 fractions have no `Eq`; verified nothing outside the file relied on it). Surfaced
+  in the #711 Discord report (`scripts/e2e_discord_report.py`, 4 new Python tests).
+  **Live-verified working end-to-end** on the same E2E rerun — `presentation_cadence` computed
+  for all 10 CAMBOX_SWEEP windows, zero crashes. **Important real-data finding**: pulled the raw
+  per-frame decode and found the metric's exact-match delta bucketing does NOT tolerate the real
+  signal's inherent jitter (measured: 83% of deltas = 1, 16% = 7, essentially none = the
+  "expected" 2, yet the MEAN matches 2.0004 almost exactly) — the metric's current numbers are
+  NOT yet a trustworthy smooth-vs-judder read; needs a jitter-tolerant redesign before its
+  percentages mean anything (mirrors the `painted_tick_gaps` #625/#681 lesson on the SAME
+  signal). Full root-cause investigation (two candidate vendored-OBS mechanisms with file:line
+  evidence — `obs-source.c`'s per-source release cadence vs `obs-video.c`'s canvas-side
+  render-lag duplication, see the genlock skill) + this jitter finding documented across 3
+  comments on #726. Also collected a `GetStats` render-health baseline (strih: 14.4ms avg render
+  vs 33.3ms budget, ~0 renderSkippedFrames — clean at rest). **STAYS OPEN** (honest partial, as
+  the dispatch explicitly sanctioned) — deliverable 2 (the actual vendored-OBS fix) needs the
+  150-min genlock build cycle + a jitter-tolerant metric redesign first.
+- **Infra fix along the way**: strih's `BundleStateServer` (:8899) scheduled task had died again
+  (RECURRENCE of the 2026-07-10 finding, but a DIFFERENT failure signature —
+  `SCHED_S_TASK_TERMINATED`, not the earlier crash — proving the `RestartCount=999` hardening
+  doesn't cover every death mode). Fixed live (`Start-ScheduledTask`), confirmed serving.
+  Filed **#732** for the real fix (an active health-check watchdog, mirroring
+  `obs-liveness-watchdog`). Both the ops skill's BundleStateServer section and this repo's
+  CLAUDE.md were updated (see Playbook below).
+- **Playbook**: `CLAUDE.md` — corrected a STALE, actively DANGEROUS GOTCHA (the old
+  `gh workflow run --ref dev` re-trigger advice would satisfy the PR's required check with a
+  MEANINGLESS green, per #717's own later finding that `workflow_dispatch` never executes the
+  real verdict), plus 2 new GOTCHAs (`gh pr edit` GraphQL Projects-classic failure -> use the
+  REST PATCH; `Eq` derive + a new f64 field on a probe-gated struct). `.claude/skills/ops`
+  (BundleStateServer recurrence + new failure signature), `.claude/skills/genlock` (the two
+  candidate OBS mechanisms map), `.claude/skills/recording-decode` (the painted-tick jitter
+  numbers + consequence for any per-step statistic), `.claude/skills/obs-ops` (ad-hoc `GetStats`
+  read snippet), `.claude/skills/ci` (#719 routing + the fake-curl record-separator test
+  pattern).
+- **Repo rules followed**: sole worker on the shared dev1 checkout, no sub-worker spawning, exact
+  commit prefixes checked for the `Closes #N` auto-close trap (verified `#726` never appears
+  adjacent to a closing verb in any commit/PR-body text), Tier-0 locals green throughout,
+  `gh pr edit`'s GraphQL failure worked around via REST PATCH, CI monitored via a true foreground
+  blocking bash loop after an earlier Monitor-tool death (subagent turn-boundary issue).
+- **PR #704 stays OPEN, unmerged** — the shared E2E gate is still red on the SAME two
+  pre-existing, already-tracked, out-of-scope blockers this PR was held on before this dispatch
+  (#707 continuity, #689 A/V tolerance); #719/#726 are complete on their own merits regardless.

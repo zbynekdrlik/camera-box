@@ -222,6 +222,25 @@ committed setup script, per #650's own history) — if a future re-provision rec
 scratch, re-apply this `Set-ScheduledTask` hardening (or fold it into whatever script eventually
 DOES create the task).
 
+**RECURRED 2026-07-12/13 (#732) — `RestartCount=999` does NOT cover every death mode.** Found
+strih's `BundleStateServer` dead AGAIN, 3 days after the above hardening, with a DIFFERENT
+`LastTaskResult`: `1073807364` = `0x40010004` (`SCHED_S_TASK_TERMINATED`) — an
+`SCHED_S_*`-class (informational/SUCCESS) code, NOT a `SCHED_E_*`/`0xC0*` FAILURE code. Windows
+Task Scheduler's restart-on-failure logic only re-launches after a genuine error exit; a
+"terminated" result (an explicit stop, a session/parent teardown, etc.) is NOT treated as a
+failure, so `RestartCount` never engages for THIS class of death — structurally different from the
+07-10 crash (`0xC000013A`) the hardening targeted. `Get-ScheduledTask` still showed the settings
+intact (`RestartCount=999` etc.) — the hardening didn't regress, it's just insufficient by design
+for a non-failure termination. Same fix (`Start-ScheduledTask -TaskName "BundleStateServer"`,
+confirm via `bundle-state-server.log`'s tail — NOT via `Invoke-WebRequest` over the win-strih MCP
+Shell, which hung/timed out both times despite the server itself logging a prompt `200` response
+to the SAME request within the same second; trust `curl http://<box>:8899/bundle-state.json` run
+FROM dev1 instead, or the server's own log, over an MCP-Shell-side `Invoke-WebRequest`).
+**#732 proposes the real fix**: an ACTIVE health-check watchdog (mirroring `#391`
+`obs-liveness-watchdog`) that periodically probes `:8899` and restarts the task regardless of its
+last exit code — a passive Task-Scheduler restart-on-failure setting can never catch a
+"terminated but scheduler considers that fine" death, no matter how high `RestartCount` is set.
+
 ## Device Deployment
 
 Camera devices (CAM1-4) run x86_64 Ubuntu. Build in CI (never locally); download artifact, deploy over SSH.

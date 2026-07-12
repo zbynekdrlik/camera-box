@@ -252,25 +252,60 @@ IS a branch-protection bypass and is banned regardless (`autonomous-quality-disc
 staleness problem; the plain REST merge call is the correct, non-bypassing path when EVERY actual
 required check is green and `gh pr merge` is merely being overcautious about it.
 
+## GOTCHA — `gh pr edit --body-file` fails with a GraphQL "Projects (classic)" error; use the REST PATCH instead
+
+`gh pr edit 704 --body-file <file>` (or `--body`) fails on this repo with `GraphQL: Projects
+(classic) is being deprecated...(repository.pullRequest.projectCards)` and exit code 1 — `gh`'s
+GraphQL mutation for editing a PR fetches the `projectCards` field in its response even when you
+never touch project cards, and this repo (or org) still has that legacy field wired up. The body
+is **silently NOT updated** when this happens (confirmed: re-reading the PR body afterward showed
+the OLD text). The direct REST PATCH sidesteps the broken GraphQL response entirely and works
+every time:
+
+```bash
+gh api repos/OWNER/REPO/pulls/<N> -X PATCH -F body=@/path/to/new-body.md
+```
+
+Same family as the `gh pr merge` GOTCHA above (a `gh` CLI convenience wrapper misbehaving on this
+specific repo; the equivalent raw REST call is the reliable fallback) — check the PATCH response's
+own `.body` (or re-`gh pr view --json body`) to confirm the write actually landed before trusting
+it, since a `gh pr edit` failure here is easy to miss (it prints an error to stderr but the exit
+code alone doesn't make the silent no-op obvious without a diff-back).
+
 ## GOTCHA — a live-triggered E2E gate run can race ahead of a mid-cycle fleet redeploy
 
 If a PR's fix requires a fleet redeploy to actually take effect on the live rig BEFORE the gate
 can pass (e.g. a WARN threshold recalibration — #685), the PR's own automatic `pull_request`-
 triggered "Full-path E2E" run can start (and fail, against the STILL-stale rig) before the redeploy
 finishes — pushing the fix and deploying it is NOT atomic with the CI trigger. Don't chase that
-failed run; once the redeploy is verified live (journal/WS read-back), get a FRESH run against the
-CURRENT rig state with:
+failed run; once the redeploy is verified live (journal/WS read-back), get a fresh REAL verdict.
+
+**CORRECTED 2026-07-12/13 (#717, #719/#726 dispatch) — this section used to recommend
+`gh workflow run "Full-path E2E ..." --ref dev` here. DO NOT DO THAT — it is DANGEROUSLY WRONG
+for this purpose.** `full-path-e2e.yml` branches `E2E_EXECUTE_VERDICT`/`ALL_CAMBOX` on
+`github.event_name == 'pull_request'` — a `workflow_dispatch` run (what `gh workflow run` always
+creates) ALWAYS gets `E2E_EXECUTE_VERDICT=0`/`ALL_CAMBOX=0` and stays in the OLD plan-print-only
+mode: it never decodes strih/stream, never computes a real verdict, and "succeeds" trivially —
+**yet GitHub still posts a check-run with the SAME required-check NAME on the SAME commit SHA**,
+which SATISFIES the PR's branch-protection requirement. Following this GOTCHA as originally
+written could let a genuinely broken PR merge behind a MEANINGLESS green. The correct way to get
+a fresh REAL verdict on an already-pushed commit (no new push, e.g. after a fleet-side fix or an
+infra repair with no code diff) is:
 
 ```bash
-gh workflow run "Full-path E2E (recording-based · hardware · self-hosted dev1)" --ref dev
+gh run rerun <the-original-pull_request-run-id>
 ```
 
-This creates a `workflow_dispatch` run against `dev`'s current HEAD SHA — GitHub attaches it to the
-SAME commit's check-runs, so once it succeeds the PR's required "Full-path E2E (rig zero-loss
-gate)" check is satisfied even though an EARLIER run on that same SHA failed (`gh pr view`'s cached
-`statusCheckRollup` may still show the old failure — trust `gh api .../commits/<sha>/check-runs`
-or attempt the actual merge for the authoritative live verdict). Same "manual re-trigger after a
-stale/superseded run" pattern the `linux-genlock.yml` GOTCHA above documents for a cancelled run.
+`gh run rerun` preserves the ORIGINAL trigger's event context (`github.event_name` stays
+`pull_request`), so `E2E_EXECUTE_VERDICT`/`ALL_CAMBOX` are correctly `1` again. Find the run id via
+`gh run list --branch dev --workflow "Full-path E2E (recording-based · hardware · self-hosted
+dev1)" --json databaseId,event,headSha` and pick the one with `"event": "pull_request"` matching
+your commit. Full detail + the "two same-commit `pull_request` runs can disagree for reasons
+outside your own diff" corollary: `.claude/skills/e2e`'s own `gh workflow run` section (the
+canonical source now — this CLAUDE.md section is kept only as a pointer + a loud warning against
+the old advice; do not restore the `gh workflow run` snippet here). Same "manual re-trigger after a
+stale/superseded run" IDEA the `linux-genlock.yml` GOTCHA above documents for a cancelled run — but
+`gh workflow run` is the WRONG mechanism for this specific workflow; `gh run rerun` is correct.
 
 ## Local Build Policy
 
@@ -322,6 +357,19 @@ entirely to `recording-verdict.rs`/`src/probe/` has **zero local verification pa
 compile check — until CI runs. Treat every such change with extra manual review rigor (type/
 signature checks, `cargo fmt --all -- --check`, diffing brace/paren balance against `origin/main`)
 before pushing, and expect CI to be the FIRST place a mistake surfaces.
+
+**Gotcha within that extra-review-rigor pass — adding an `f64` field to a probe-gated struct that
+derives `Eq` breaks the build (#726).** `f64`/`f32` have no `Eq` impl (NaN has no total order), so
+`#[derive(..., Eq, ...)]` on a struct that gains a field containing (or wrapping) a float no longer
+compiles. Since this lives under `src/probe/` it is INVISIBLE locally (per above) — the break only
+surfaces on CI. Before adding a float-carrying field to any `src/probe/*.rs` struct: `grep -n
+"derive(" <file>` for that struct and drop `Eq` if present (keep `PartialEq`/`Debug` — `assert_eq!`
+only needs those, never `Eq`), then `grep -rn "StructName" src/ tests/` to confirm nothing outside
+the file relies on the dropped `Eq` bound (a HashSet/BTreeSet key, a generic `T: Eq` constraint) —
+if something does, that's a real blocker to resolve, not just delete the derive. Example:
+`probe::recording_segments::CamboxSegment`/`SegmentedContinuity` dropped `Eq` when
+`presentation_cadence: Option<CadenceEvenness>` (which carries `f64` fractions) was added; verified
+clean via the grep above before pushing.
 
 **Bound the shared dev1 `target/` (backstop).** Even default-feature checks + rust-analyzer
 accumulate over a day (incremental cache, never purged). Keep it under ~4 GB:

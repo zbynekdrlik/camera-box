@@ -951,3 +951,40 @@ per-camera latency — each was independently missed at some point), (5) add the
 `scripts/recording-e2e.sh`. Grep for an EXISTING camera's id (e.g. `911007` for cam4) across
 `src/` and `scripts/` to find every site that needs the new id added alongside it — that is a
 faster and more reliable check than trying to remember the list above.
+
+## The painted (cam2 optical Vernier) `tick` has REAL jitter — never bucket its recorded-order deltas by exact equality (#726)
+
+`RecordingFrame.tick` (this file's doc, ~L128) is "the highest `frame_id` among the decoded
+OPTICAL (cam2 dual-QR) payloads — left QR carries the latest even tick, right the latest odd, the
+freshest sharp region wins". On a REAL rig recording (CI run 29209662091, RUN_ID 142901047, 9436
+frames, painted-tick step logged as 2 — a 60fps painter into a 30fps canvas) the RECORDED-order
+consecutive deltas of this `tick` were measured directly (raw Python over the decoded
+`strih-partial-<id>.json`, independent of any Rust bucketing):
+
+```
+delta=1:  83.1% (7841/9434)
+delta=7:  15.6% (1475/9434)
+delta=0:   0.06% (6 -- true duplicates, agrees with the independently-computed `copies` field)
+mean delta: 2.0004  (matches expected_step=2's long-run average almost exactly)
+```
+
+Essentially NO individual delta equals 2, yet the MEAN matches the expected 2:1 decimation ratio
+almost perfectly — i.e. `gaps`/net-loss accounting (which nets over the whole window, per
+`painted_tick_gaps`'s sorted net-span math, see `painted_tick_gaps.rs`) reads clean, but a
+per-step EXACT-equality classifier would misread this as "never on-cadence". This is NOT
+reordering in the #133/#196/#216 sense (only 2 of 9434 deltas were negative) — it's genuine,
+LARGE, real per-step jitter inherent to the multi-hop chain (painter vblank-paced draw -> cam2's
+own physical camera capturing that monitor -> cam2's NDI emit -> strih's genlock ingest, see the
+genlock skill's `#726` "Mechanism A" note for why a mostly-small-step-plus-periodic-larger-catchup
+shape is exactly what a per-source release-cadence backlog/relock pattern would produce).
+
+**Consequence for any new per-step statistic on this signal** (e.g. `src/presentation_cadence.rs`,
+#726's presentation-cadence-evenness metric): an exact-delta==expected_step classifier is
+USELESS on real data — it will bucket nearly everything as "other" regardless of whether the
+recording is genuinely smooth or judder-y. `delta==0` (true duplicate) stays a RELIABLE,
+jitter-immune signal (an exact repeat essentially never happens by jitter coincidence — cross-check
+against the existing `copies` field, which is computed the same way and agreed exactly in this
+run). Any "on-cadence" classification needs a TOLERANCE band calibrated from real healthy-run data
+like the numbers above (or an entirely different statistic, e.g. mean/stddev over a window) —
+never bare equality. This mirrors the exact lesson `painted_tick_gaps` already learned twice (#625
+sorted-order tolerance, #681 net-span vs a biased per-pair walk) for the SAME underlying signal.
