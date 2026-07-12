@@ -116,6 +116,11 @@ pub fn tolerance_pct_for_model(model: GrabberModel) -> f64 {
     }
 }
 
+// #717 RED marker: `SHADOWCAST2_SUSTAINED_TOLERANCE_PCT` / `SUSTAINED_WARN_WINDOWS` /
+// `sustained_tolerance_pct_for_model` are NOT YET IMPLEMENTED — the test module below already
+// references them (RED commit: proves via compile failure that the two-band split does not
+// exist yet). Implemented in the immediately-following GREEN commit.
+
 /// True when `captured_fps` deviates from `configured_fps` by more than `tolerance_pct`
 /// percent. `configured_fps <= 0.0` (or any non-finite input) is treated as "no valid
 /// configured rate to check against" — never deviant; callers only invoke this once a real
@@ -420,6 +425,109 @@ mod tests {
         let elgato_tol = tolerance_pct_for_model(GrabberModel::Elgato4kS);
         assert!(is_rate_deviant(62.0, 60.0, nzxt_tol));
         assert!(is_rate_deviant(62.0, 60.0, elgato_tol));
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // #717 — two-band ShadowCast 2 envelope: a SEPARATE, narrower SUSTAINED-band tolerance
+    // (2%, `SUSTAINED_WARN_WINDOWS`=60s) catches a genuinely chronic defect that #685's wide
+    // 10%/30s jitter band correctly tolerates as short-lived characteristic wobble.
+    // -----------------------------------------------------------------------------------------
+
+    #[test]
+    fn real_674_chronic_64fps_is_sustained_deviant_under_shadowcast2() {
+        // #674 closure evidence: cam1 held 63.9-64.0fps rock-steady for an entire recording —
+        // 6.5-6.67% deviation from the 60.0 negotiated rate. Must trip the SUSTAINED band even
+        // though it stays comfortably inside ShadowCast 2's wide 10% jitter floor.
+        let sustained_tol = sustained_tolerance_pct_for_model(GrabberModel::ShadowCast2);
+        assert!(is_rate_deviant(63.9, 60.0, sustained_tol));
+        assert!(is_rate_deviant(64.0, 60.0, sustained_tol));
+        // Confirm it is NOT deviant under the wide jitter floor — #717 must not disturb the
+        // jitter band itself (that's #685's own, still-correct behavior), only ADD the
+        // sustained one.
+        let jitter_tol = tolerance_pct_for_model(GrabberModel::ShadowCast2);
+        assert!(!is_rate_deviant(63.9, 60.0, jitter_tol));
+        assert!(!is_rate_deviant(64.0, 60.0, jitter_tol));
+    }
+
+    #[test]
+    fn short_lived_quantization_readings_within_2pct_stay_healthy_under_sustained_band() {
+        let tol = sustained_tolerance_pct_for_model(GrabberModel::ShadowCast2);
+        for captured in [60.0, 60.1, 60.5, 59.5, 61.1, 58.9] {
+            assert!(
+                !is_rate_deviant(captured, 60.0, tol),
+                "captured={captured} should be within ShadowCast 2's {tol}% sustained-band \
+                 tolerance"
+            );
+        }
+    }
+
+    #[test]
+    fn sustained_tolerance_is_narrower_than_jitter_tolerance_for_shadowcast2_only() {
+        assert!(
+            sustained_tolerance_pct_for_model(GrabberModel::ShadowCast2)
+                < tolerance_pct_for_model(GrabberModel::ShadowCast2)
+        );
+    }
+
+    #[test]
+    fn sustained_tolerance_equals_jitter_tolerance_for_every_other_model() {
+        for model in [
+            GrabberModel::NzxtSignalHd60,
+            GrabberModel::Elgato4kS,
+            GrabberModel::Unknown,
+        ] {
+            assert_eq!(
+                sustained_tolerance_pct_for_model(model),
+                tolerance_pct_for_model(model),
+                "{model} must not get a separate sustained floor — its single-band strict \
+                 tolerance already covers both roles, so #717 must not change its behavior"
+            );
+        }
+    }
+
+    #[test]
+    fn sustained_warn_windows_is_60_seconds_double_the_jitter_warn_windows() {
+        assert_eq!(SUSTAINED_WARN_WINDOWS, CAPTURE_RATE_WARN_WINDOWS * 2);
+    }
+
+    #[test]
+    fn real_674_scenario_sustained_warn_fires_exactly_at_60s_never_earlier() {
+        // Mirrors `real_656_scenario_warns_exactly_at_the_configured_window` but for the
+        // sustained band, fed #674's actual live chronic reading (64.0fps).
+        let tol = sustained_tolerance_pct_for_model(GrabberModel::ShadowCast2);
+        let mut consecutive = 0u32;
+        for i in 1..=(SUSTAINED_WARN_WINDOWS + 2) {
+            let deviant = is_rate_deviant(64.0, 60.0, tol);
+            assert!(deviant);
+            consecutive = next_consecutive_breaches(consecutive, deviant);
+            let warn = should_warn(consecutive, SUSTAINED_WARN_WINDOWS);
+            if i < SUSTAINED_WARN_WINDOWS {
+                assert!(!warn, "window {i} should not warn yet");
+            } else {
+                assert!(warn, "window {i} should warn");
+            }
+        }
+    }
+
+    #[test]
+    fn a_burst_shorter_than_60s_never_reaches_the_sustained_threshold() {
+        // Band (a): a deviation burst that self-recovers before SUSTAINED_WARN_WINDOWS (60s) is
+        // tolerated — the whole point of splitting the two bands (#717).
+        let tol = sustained_tolerance_pct_for_model(GrabberModel::ShadowCast2);
+        let mut consecutive = 0u32;
+        // 8 deviant windows (40s) then recovery, well short of the 12-window (60s) threshold.
+        for _ in 0..8 {
+            let deviant = is_rate_deviant(64.0, 60.0, tol);
+            consecutive = next_consecutive_breaches(consecutive, deviant);
+            assert!(!should_warn(consecutive, SUSTAINED_WARN_WINDOWS));
+        }
+        let healthy = is_rate_deviant(60.05, 60.0, tol); // well within 2% -> not deviant
+        assert!(!healthy);
+        consecutive = next_consecutive_breaches(consecutive, healthy);
+        assert_eq!(
+            consecutive, 0,
+            "a healthy window must reset the sustained-band streak"
+        );
     }
 
     #[test]
