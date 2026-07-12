@@ -490,6 +490,24 @@ timeout-bounded + pkill -9), `tests/python/test_obs_phase2_timeout.py` (the pure
 **Any NEW blocking obs-websocket/ssh call in a cleanup/trap MUST be timeout-wrapped and ordered after
 the cam-device free.**
 
+**GOTCHA — `gh run cancel` on an ALL_CAMBOX run can cut the cleanup trap off MID-LOOP, before it
+reaches every cambox (2026-07-12, #709 dispatch).** The bounded-per-step timeout guards above
+protect against a HUNG step, but a GitHub Actions **cancellation** kills the whole runner PROCESS
+directly — it does not wait for a bash trap's SEQUENTIAL per-cambox loop (`pkill -9 -f
+'camera-box-burn-'` → restart, once per active box in `CAMBOX_SWEEP`) to finish all six iterations.
+Live incident: cancelling a redundant (docs-only, no new verification value) ALL_CAMBOX run mid-sweep
+left `camera-box-burn-cam3/4/5/6` still holding their video devices and those four boxes'
+`camera-box.service` crash-looping ("Device or resource busy") — cam1/cam2 were ALREADY restored
+(cleanup had reached them before the cancel landed), the burns were left ON on every strih NDI input
+(visible-QR risk on a live broadcast), and cam2's own `camera-box.service` was ALSO crash-looping on
+`/dev/video1` from a stray `camera-box-burn-cam2-*`. **Whenever you cancel an ALL_CAMBOX (or any
+multi-cambox) run, do NOT trust the cancellation to have finished cleanup — explicitly re-verify
+EVERY cambox** (`ps aux | grep camera-box-burn` + `systemctl is-active camera-box` on all 6 boxes),
+EVERY strih NDI input's burn state (`obs_burn_filter.py check` on `NDI cam1`..`NDI cam6`, not just
+the default program source), and the rig-busy-check, before considering the rig clean. Fix pattern:
+`pkill -9 -f 'camera-box-burn-'` + `rm -f /tmp/camera-box-burn-*` + `systemctl restart camera-box`
+per stray box, `obs_burn_filter.py remove` per stray-burn input.
+
 ## Painter ground-truth CSV lifecycle + recording orphan guard (#355 / #359)
 
 **frame-probe writes the painter ground-truth `/tmp/painter.csv` ONLY on its clean `--duration-secs`
