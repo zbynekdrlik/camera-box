@@ -1480,20 +1480,38 @@ def _record_liveness_verdict(active_flags, byte_counts):
 
     Never silently passes:
       - no samples at all -> DEAD (a caller bug, never treated as "live by default"),
-      - any sample with outputActive=False -> DEAD (the output died during the check window),
+      - outputActive never goes True during the whole window -> DEAD (never started),
+      - outputActive goes False AFTER having been True -> DEAD (the output died during the
+        check window — #627's original "started then died" symptom),
       - the LAST sample's outputBytes <= 0 -> DEAD (the exact #627 symptom: StartRecord
         reported success but the output wrote nothing for the whole run),
       - byte count did not GROW across the window (>=2 samples, last <= first) -> DEAD (the
         output started writing something then stalled/froze immediately — byte>0-only would
         miss this).
 
+    #710 cold-start tolerance: a LEADING run of outputActive=False is tolerated (NOT treated
+    as dead) as long as every sample from the first True onward stays True — a fresh OBS
+    process's NVENC/CUDA cold-init can take slightly longer than one liveness poll to flip
+    outputActive to True, even though the recording genuinely starts fine within the SAME
+    liveness window's next sample (live repro: active=[False, True] bytes=[0, 623840] on a
+    cold imag-nb OBS restart). This does NOT weaken the "started then died" or "never
+    started" checks above — those keep failing hard, unchanged.
+
     Returns (is_live: bool, reason: str) — *reason* is empty when is_live is True, else it
     explains the failure for the caller's abort message.
     """
     if not active_flags:
         return False, "no GetRecordStatus samples were taken"
-    if any(not active for active in active_flags):
-        return False, f"outputActive went False during the liveness window (samples={active_flags})"
+    first_true = next((i for i, active in enumerate(active_flags) if active), None)
+    if first_true is None:
+        return False, (
+            f"outputActive stayed False for the whole liveness window (samples={active_flags}) "
+            f"— recording never started"
+        )
+    if any(not active for active in active_flags[first_true:]):
+        return False, (
+            f"outputActive went False during the liveness window (samples={active_flags})"
+        )
     if not byte_counts or byte_counts[-1] <= 0:
         got = byte_counts[-1] if byte_counts else "unknown"
         return False, (
@@ -1538,8 +1556,14 @@ def _assert_record_is_live(ws, host, samples=None, poll_s=None):
             f"Aborting NOW instead of burning the full run on a dead-on-arrival recording "
             f"(#627). active={active_flags} bytes={byte_counts}"
         )
+    cold_start_note = ""
+    if active_flags and not active_flags[0]:
+        # #710: surface when the cold-start tolerance actually fired, so a run log can be
+        # grepped for how often the FIRST post-restart StartRecord needed the extra sample.
+        cold_start_note = " (cold start — first sample was still warming up, tolerated per #710)"
     sys.stderr.write(
-        f"[obs] {host}: recording liveness OK (active={active_flags} bytes={byte_counts})\n"
+        f"[obs] {host}: recording liveness OK (active={active_flags} bytes={byte_counts})"
+        f"{cold_start_note}\n"
     )
 
 
