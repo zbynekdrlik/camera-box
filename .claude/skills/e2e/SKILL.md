@@ -1355,6 +1355,52 @@ IDENTICAL video signal. There are NOT separate cameras per box. Consequences:
   must be ≈ the configured rate (60). Over-delivery (62-64fps) = defective USB grabber state →
   USB-reset it (#656 prevention adds an automatic WARN + E2E preflight for this).
 
+## GOTCHA — the `all_cambox_continuity` schedule labels `CAM1..CAM6` are NOT 1:1 physical box numbers
+
+`CAMBOX_SWEEP` in `scripts/recording-e2e.sh` is `Cam 5:CAM1 Cam 1:CAM3 Cam 3:CAM4 Cam 2:CAM2
+Cam 4:CAM5 Cam 6:CAM6` (`<strih scene name>:<schedule label>`) — the schedule's `"cambox":"CAM1"`
+etc. in `switch-schedule.json` and the verdict's `all_cambox_continuity.segments[].cambox` field
+are these SWEEP LABELS, not physical box numbers. Translate before drawing any per-box conclusion:
+
+```
+label CAM1 -> physical cam5      label CAM4 -> physical cam3
+label CAM2 -> physical cam2      label CAM5 -> physical cam4
+label CAM3 -> physical cam1      label CAM6 -> physical cam6   (only CAM2/CAM6 are 1:1)
+```
+
+Cost real investigation time on #707 (2026-07-12): a "CAM1 chronically worst" read from the
+verdict JSON alone was actually physical **cam5**, and cross-referencing physical `journalctl`
+required this translation first. Re-check the current `CAMBOX_SWEEP` value before trusting this
+table — it changes if the fleet's scene assignments are ever reshuffled.
+
+## Diagnosing `all_cambox_continuity` copies/gaps growth — accounting vs genlock vs REAL box defect (#707, 2026-07-12)
+
+When `copies`/`gaps` look elevated or growing across a run, don't guess — run this triage in order
+(each step rules out one whole class of cause; all three were needed to reach ground truth once):
+
+1. **Read `src/probe/recording_segments.rs::window_segment` + its unit tests first** — it is
+   decimation-aware (`expected_step`), order-independent for `gaps` (#625), and windows are fully
+   isolated (`prev_recorded` resets per window) — an accounting bug here would show as a FIXED
+   pattern every run, not noisy per-run variance.
+2. **Pull live `genlock-fifo audit` lines from BOTH strih's per-camera ingests AND stream's PGM
+   ingest**, scoped to the exact StartRecord→StopRecord wall-clock window (find it via
+   `gh run view <id> --log | grep -iE 'StartRecord|StopRecord'`):
+   ```powershell
+   Select-String -Path $log -Pattern "genlock-fifo audit" |
+     Where-Object { $_.Line -match "^HH:(MM_RANGE)" }
+   ```
+   Group by source, diff `underruns`/`holds`/`overruns`/`backward_steps`/`depth` first-vs-last in
+   the window. Flat + zero-growth across the whole window on BOTH boxes = genlock/FIFO is clean,
+   the cause is elsewhere.
+3. **Pull live `journalctl -u camera-box --since <window start> --until <window end> | grep -E
+   "Streaming:|DEFECTIVE|WARN"` on the PHYSICAL boxes** (translate schedule labels first, see
+   above) for the exact window. A `captured` fps that stays healthy (~60) while `emitted` sags
+   below it — sometimes with an explicit `#666 emit-delivery-rate DEFECTIVE` WARN in the log — is
+   a REAL box-level emit-pipeline defect (the #656/#663/#665/#666 family), not a measurement bug
+   and not a genlock issue. `#665`/`#666` are the standing tracker for this defect class; a fresh
+   `all_cambox_continuity` red run that traces to it is that defect's materialization, not a new
+   root cause — link back to them instead of re-diagnosing from scratch.
+
 ## Cheap standalone repro of ONE recording-e2e.sh step (#627) — don't run the full 30-min harness
 
 To test a hypothesis about ONE specific step of `recording-e2e.sh` (e.g. "does this OBS setting

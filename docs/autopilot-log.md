@@ -3611,3 +3611,45 @@ a follow-up if not done by the time this log entry is read.
   OWN schedule window(s)`), pushed directly to `dev` (single push, one CI cycle — `CI` run
   29173820860 green, `Full-path E2E` run 29173822300 still correctly red for the narrowed-down
   remaining reasons above, not #706's own defect).
+
+## 2026-07-12 — #707 deep-diagnosed (real signal, NOT accounting/#588/genlock) + #708 filed (tracking duty)
+
+- **Tracking duty**: pulled verdict JSONs for CI runs `29173822300`/`29174543633` and identified
+  the untracked "strih-4-drop" red-set item — `full_chain.loss.strih.real_drops=4`. Found it is a
+  PERIODIC, not random, residual: near-identical `frame_index` across 6 independent runs spanning
+  hours (`[2991-2994, 3898-3900, 4805-4808, 8430-8438]`), aligned to the #312 ALL_CAMBOX
+  switch-schedule cadence (~30.2-30.3s), offset ~100s from recording start. Not previously given
+  its own tracking issue (only mentioned as "pre-existing, negligible" inside #706's closed
+  thread). **Filed #708** with the full periodicity evidence.
+- **#707 re-investigated end-to-end.** The original filing's "grows monotonically across every
+  cambox" framing does NOT hold up against a 6-run sample — that dramatic pattern was specific to
+  ONE outlier run (`1781882448`, the run the ticket was originally filed from); the other 5 runs
+  show a noisy, non-monotonic, per-cambox pattern instead. Ruled out `window_segment` accounting
+  bugs (module + 20 unit tests read in full — correctly windowed, decimation-aware, order-
+  independent gaps per #625, no time-dependent logic). Ruled out genlock/FIFO software drift —
+  pulled live `genlock-fifo audit` lines from strih's 6 per-camera ingests AND stream's `NDI 2ME
+  PGM` ingest for the EXACT recording window of both CI runs: zero underrun/hold/overrun growth,
+  flat FIFO depth throughout, on both boxes, both runs.
+  Found the REAL cause via live `journalctl -u camera-box` on the physical camboxes during the
+  exact recording windows: cam6 logged a live `#666 emit-delivery-rate DEFECTIVE` WARN inside
+  run2's window (55 fps emitted vs 60 fps captured, 0 capture-dropped); cam5 showed the same
+  emit-lag shape recovering in real time; cam2 showed a related over-capture/under-emit variant.
+  Translating the switch-schedule's `CAM1..CAM6` labels to physical boxes (`CAMBOX_SWEEP` in
+  `scripts/recording-e2e.sh`: `Cam 5:CAM1 Cam 1:CAM3 Cam 3:CAM4 Cam 2:CAM2 Cam 4:CAM5 Cam 6:CAM6`)
+  confirmed the elevated-density boxes are physical cam5/cam2/cam6 — exactly the boxes #665
+  (cam2, closed, CRITICAL USB-reset escalation, cable-or-contention root cause never confirmed)
+  and #666 (cam5/cam6, closed, transient emit-rate dip that self-heals) already flagged. #666's
+  own closing text explicitly predicted this: "if a live #312 sweep run shows a real drop
+  attributable to this, that run's evidence will supersede this report" — #707 is that
+  materialization. Live-checked cam2's CPU load (113% on its `--display` process, load avg 1.79)
+  as weak corroboration of #665's resource-contention hypothesis (not proof).
+  **No code change** — the check is correctly detecting a real upstream rig defect, not a
+  measurement bug; weakening `window_segment`'s strict check would violate the strict-test-mandate
+  for a REAL signal. Retitled #707 to the corrected diagnosis, commented full evidence, linked
+  #665/#666/#656/#663 as the causal family. Root-causing the emit-rate defect itself needs a
+  multi-hour correlation study or physical hardware inspection — out of scope for a solo night
+  dispatch.
+- PR #704: posted a status-update comment recording #707's re-diagnosis and #708's filing; left
+  OPEN/unmerged (correctly still blocked on #689 + #707 + #708, all real, none bypassable).
+- No version bump (no code changed). No commits to `dev` this cycle — diagnostic work only,
+  landed as GitHub issue/PR comments (#707 comment + retitle, #708 filed, PR #704 comment).
