@@ -3794,3 +3794,38 @@ a follow-up if not done by the time this log entry is read.
   PR's own established pattern (#706/#708 closed the same way).
 - No version bump needed this cycle (`dev` 1.7.0-dev.348 already strictly ahead of `main`
   1.7.0-dev.346 from a prior cycle).
+
+## 2026-07-12 — #711 (Discord full-report after every full-path E2E run) implemented + closed (dev commit 702ac1cba)
+
+- User directive: post a Slovak, phone-readable Discord report after EVERY full-path E2E run
+  (CI PR gate AND a manual/supervisor-driven run) — per-camera zero-loss (stream + imag), latency
+  stability + honest imag floor, video-sync delivery-latency spread, A/V sync (never a fabricated
+  UNKNOWN — always a reason, "tichá stopa" for a silent track), overall verdict + named blockers.
+- `scripts/e2e_discord_report.py` (pure composer, 33 pytest tests / 4 fixtures incl. a REAL run
+  JSON) + `scripts/lib/e2e-discord-report.sh` (fail-open sender, reuses the existing bot-token
+  #notifications mechanism) + one new call in `scripts/recording-e2e.sh`'s `[8/8]`
+  `E2E_EXECUTE_VERDICT=1` branch (shared by CI + manual, no duplicated logic) +
+  `DISCORD_BOT_TOKEN`/`DISCORD_CHANNEL_ID` added to `full-path-e2e.yml`'s E2E step env.
+- Full Rust suite (581+ tests, 123 binaries) run locally after editing `recording-e2e.sh` per the
+  static-anchor GOTCHA — 0 failures. 328 python tests green (295 pre-existing + 33 new).
+  `shellcheck -S warning` clean.
+- Live-verified the sender BEFORE spending a rig cycle (2 test messages posted+deleted from
+  #notifications using the clean-pass fixture), then triggered the real required gate on this
+  commit (run 29182933011, via PR #704's own `synchronize`) — it produced the FIRST real report
+  from a genuinely-computed verdict, message ids `1525758377928425502`/`1525758379321065644`,
+  content cross-checked correct against the run's own numbers (6/6 stream zero-loss, 5/6 imag
+  path fail, 13.4ms cross-cam latency spread, 8.7ms strih delivery spread, cam2 A/V -22.2ms
+  outside tolerance, 5 cams honestly UNKNOWN with a stated reason). Rig was free (checked via
+  `obs_phase2.py rig-busy-check`) both before implementation and at trigger time.
+- PR #704 body updated (via `gh api -X PATCH ... --input <jq-built-payload>` — `gh pr edit`'s own
+  GraphQL call errors on this repo's deprecated Projects-classic field; see the new `.claude/
+  skills/ci` gotcha). #711 closed directly (matches the #706/#708/#709 pattern already
+  established in this same PR) — PR #704 itself stays OPEN/held for the unrelated real rig
+  blockers (#707 continuity, imag optical judder, A/V tolerance) it already documents.
+- Playbook: `.claude/skills/e2e/SKILL.md` gained the field-mapping section (which verdict-JSON
+  block answers which of the 6 report questions, and the explicit "no camera→imag latency field
+  exists yet" honesty note); `.claude/skills/ci/SKILL.md` gained the `gh` GraphQL
+  "Projects (classic)" read/write-fallback gotcha (REST `gh api -X PATCH --input <file>`, never
+  `-f body=@file` which does not read the file).
+- No version bump needed this cycle (`dev` 1.7.0-dev.348 already strictly ahead of `main`
+  1.7.0-dev.346).

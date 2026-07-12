@@ -415,3 +415,31 @@ already-tracked recurring defect, not a new regression. `#705` filed the follow-
 exposed: the `[0/8]` `capture-rate-guard.sh` preflight only checks ONCE at start, so a mid-
 recording recurrence (confirmed to happen — #656/#663 documented as recurring "same-day") burns
 the full run budget with no early abort and no self-evident diagnostic.
+
+## `gh` CLI GraphQL "Projects (classic)" error — mutations need the REST fallback (#711)
+
+**This repo's `gh issue view --comments`, `gh pr edit --body-file`, and similar `gh` subcommands
+that build a GraphQL query with `projectCards` in their default field set FAIL outright** with
+`GraphQL: Projects (classic) is being deprecated ... (repository.pullRequest.projectCards)` (or
+`repository.issue.projectCards`) — a `gh` CLI bug hitting repos that have (or had) a classic
+Project board, unrelated to anything in the command's own arguments. Confirmed live twice in one
+session (#711): `gh issue view 711 --comments` and `gh pr edit 704 --body-file ...` both failed
+this way with exit 1, silently doing NOTHING (no comment data returned / no body update applied)
+— it is NOT a partial success, treat the exit-1 as a real failure and verify afterward.
+
+**Read fallback:** drop `--comments`/the failing flag and use `--json` instead:
+`gh issue view <N> --json comments -q '.comments[] | ...'` (the plain JSON query path avoids the
+`projectCards` field the buggy default view builds).
+
+**Write fallback (PR/issue body edits) — go around `gh pr edit`/`gh issue edit` entirely via the
+REST API, which never touches the broken GraphQL field:**
+```bash
+jq -Rs '{body: .}' new_body.md > payload.json
+gh api -X PATCH repos/OWNER/REPO/pulls/<N>   --input payload.json --silent   # PR body
+gh api -X PATCH repos/OWNER/REPO/issues/<N>  --input payload.json --silent   # issue body
+```
+**`gh api -f body=@file` does NOT read the file** (unlike `gh issue create -F`) — it sets the
+literal string `@/path/to/file` as the value. Build a proper JSON payload with `jq -Rs` and pass
+it via `--input <file>` (or `--input -` from a pipe) instead. Always `gh pr view <N> --json body`
+afterward to confirm the write actually landed — the GraphQL failure mode looks identical to a
+successful no-op until you check.

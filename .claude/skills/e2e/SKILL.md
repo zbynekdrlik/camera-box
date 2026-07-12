@@ -995,6 +995,55 @@ repeated tick is a `copy`; `undecodable` is the direct `None` count. It mirrors 
 definitions but treats a duplicate as a copy, never burn-unreadable. Regression-locked by
 `non_adjacent_freeze_hiding_a_real_drop_still_fails`.
 
+## Discord full-report after every full-path E2E run (#711) — the field-mapping decisions
+
+`scripts/e2e_discord_report.py` (pure, fixture-tested — `tests/python/test_e2e_discord_report.py`)
+composes the Slovak per-run Discord report from the merged verdict JSON. It reads ONLY existing
+fields — no new measurement was added — so the value is entirely in which JSON block answers which
+of the user's 6 required questions. Read this BEFORE changing the verdict JSON schema (a renamed/
+moved field silently breaks the report with no compile-time signal — only the fixture tests catch
+it) or before re-deriving this mapping from scratch:
+
+- **"Zero-loss cesta do STREAMU" (per camera)** → `full_chain.loss.camN` (the #186 headline
+  burn-id-contiguity gate — `real_drops`/`burn_unreadable`/`present_count`/`expected_count`).
+- **"Zero-loss cesta do IMAG" (per camera)** → `all_cambox_continuity.imag.segments`, aggregated
+  per `cambox` label (a camera cycles through several segments — sum `copies`/`gaps`/`undecodable`,
+  AND every segment's `pass` for that cambox). Falls back to the single combined
+  `full_chain.loss.imag` node (`imag_optical_beat_pass`) on a non-`ALL_CAMBOX` run, where imag has
+  no per-camera breakdown at all.
+- **"Latencia — stabilita + minimálna latencia do imag"** → `all_cambox_latency` (the SOURCE-side
+  `cam2→camera-capture` hop, 5 cams, cam2 excluded — see the section above this one, "measures
+  SOURCE-side `d_X`"). **There is NO measured camera→imag latency field in this codebase today.**
+  `all_cambox_latency`'s minimum is reported as an honest FLOOR (imag receives the SAME camera NDI
+  before strih ever touches it, so imag's real latency is ≥ this number, plus imag's own unmeasured
+  receive/hold time) — never claimed as the actual imag number. If a real camera→imag latency hop
+  is ever added, point this section at it directly instead of the floor.
+- **"Video sync NDI kamier v strih OBS (delivery-latency spread, per-camera holds)"** →
+  `all_cambox_delivery_latency` (the RECEIVER-side `strih_burn − camera_burn` hop, all 6 cams incl.
+  cam2, #286/#624) — the issue's own parenthetical names this block directly, word for word.
+- **A/V UNKNOWN reasons** — never a bare "UNKNOWN": `candidates==0` → `"tichá stopa"` (the literal
+  phrase issue #711 requires for a silent audio track); `candidates>0` but `cluster_samples==0` →
+  `"nedostatok konzistentných vzoriek"`. Distinguishing these two matters — #709's real run had
+  BOTH in the same JSON (cam2 measured, the other 5 candidates-present-but-unclustered) and a
+  single generic "UNKNOWN" would have hidden that cam2's mic path was fine while the others simply
+  didn't have a usable window.
+- **Known-blocker ticket hints** (`KNOWN_BLOCKER_HINTS` in the composer) are annotations ONLY — the
+  technical description on each line (e.g. "Kontinuita medzi kamerami (stream): FAIL") is always
+  accurate on its own from the JSON; the `#707`/`#588`/`#604`/`#689`/`#641` pointers are a
+  convenience that WILL go stale as those tickets close. Update the dict when they do; a stale
+  pointer degrades to "a still-correct FAIL with an outdated ticket number", never a false claim.
+
+**Delivery mechanism** — `scripts/lib/e2e-discord-report.sh`, called from `[8/8]`'s
+`E2E_EXECUTE_VERDICT=1` branch in `recording-e2e.sh` (the ONE code path both the CI PR gate and a
+manual supervisor-driven run share). Reuses the bot-token `#notifications` POST this skill's own
+"Discord CI Notifications" section documents — fail-open by design (runs under `set +e`, restores
+the caller's `errexit` before returning), so a Discord outage can never fail the real gate.
+**Verify delivery the same way as everywhere else in this skill: the created-message `id`, not
+`fetch_messages`** (this channel isn't allowlisted for the in-session Discord plugin) — `curl -H
+"Authorization: Bot $DISCORD_BOT_TOKEN" ".../channels/<id>/messages?limit=N"` reads recent messages
+back directly when you need to eyeball real content (used to verify #711 end-to-end against a live
+CI run before closing the issue).
+
 ## Verdict ACCOUNTING seam — headline COUNT vs pass/FAIL are separate (safe place to fix over-counts)
 
 The recording-verdict has TWO independent layers; know which you are touching:
