@@ -1026,17 +1026,39 @@ hostname `cam1` (10.77.9.61) — which is UNRELATED to the schedule label `CAM1`
 physical **cam5** via `CAMBOX_SWEEP`, per this skill's own delivery-latency section below). Two
 completely different "CAM1"s in the same investigation; keep them straight.
 
-**`#656`/`#663` self-heal firing on the E2E harness's OWN ad-hoc burn-enabled SOURCE-camera deploy
-kills that camera's digital burn measurement for the REST OF THE RUN, with no respawn (filed
-#668).** `recording-e2e.sh`'s `[2/8]` deploy is a plain `nohup camera-box-burn-<RUN_ID> &` — NOT a
-systemd unit. If the SOURCE camera's `#656` capture-rate defect fires mid-recording, `#663`'s
-self-heal exits the process (code 77) EXPECTING systemd's `Restart=always` to bring it back — but
-nothing is watching this ad-hoc process, so it just stays dead. Symptom: that camera's `#186`
-zero-loss verdict shows a burn-id sequence that stops dead partway through with everything after
-classified `BURN-UNREADABLE`. Diagnostic: check `/tmp/cbox-burn.log` on the SOURCE camera for a
-`#656 capture-delivery-rate DEFECTIVE` / `#663 self-heal` block around the point the ids stop.
-Workaround: pick a currently-healthy `CAM=` (check `journalctl -u camera-box | grep -iE
-'Streaming:|WARN'` on each candidate box for a recent/active `#656` WARN before committing to it).
+**`#656`/`#663` self-heal firing on the E2E harness's OWN burn-enabled SOURCE-camera deploy USED TO
+kill that camera's digital burn measurement for the REST OF THE RUN, with no respawn — fixed by
+#668 (STATUS: shipped, not just filed).** `recording-e2e.sh`'s `[2/8]`/`[2b/8]` deploy now runs
+under a real TRANSIENT `systemd-run --unit=camera-box-burn-<RUN_ID>[-<cam>] --collect
+--property=Restart=on-failure` unit for every camera under an ALL_CAMBOX sweep (cam1's own
+dedicated path AND the `_ccn`/`_cunit` loop for cam2-6) — a mid-recording `#656`/`#663` self-heal
+exit (code 77) now respawns instead of dying silently. If you still see a burn-id sequence stop
+dead partway through (`#186` verdict shows everything after classified `BURN-UNREADABLE`), it is
+NOT this now-fixed class — investigate fresh.
+
+**Finding a PAST run's cam-box capture-rate telemetry (`Streaming: X fps emitted / Y fps
+captured`) — `journalctl -u camera-box-burn-<RUN_ID>` is EMPTY of application output; the real
+source is `/tmp/cbox-burn.log`, and it is OVERWRITTEN before every new burn (2026-07-12, #674
+confirmation, #716 filed).** During an actual gate-run recording, the PERSISTENT
+`camera-box.service` is stopped (to free the capture device) and the transient burn unit above
+takes over — but `systemd-run`'s `--property=StandardOutput=append:/tmp/cbox-burn.log
+--property=StandardError=append:/tmp/cbox-burn.log` redirects the binary's own stdout/stderr
+DIRECTLY to that file, never to journald. `journalctl -u camera-box-burn-<RUN_ID>` only ever shows
+systemd lifecycle lines (`Started`/`Deactivated`/`Consumed ... CPU time`) — zero `Streaming:`/WARN
+content, on ANY invocation, past or present; this is NOT the #693 stale-cross-restart class (the
+data was never in journald to begin with — invocation-ID scoping doesn't help). Worse: `[2/8]`
+does `rm -f /tmp/cbox-burn.log` before EVERY new burn, so **only the MOST RECENT run's raw fps log
+survives on the box at any moment** — with `full-path-e2e` firing roughly every 30-45 min on this
+repo, a specific past run's telemetry is often already gone by the time you go looking for it.
+`$OUTDIR/cam1-capture-stats.txt` (a coarse END-OF-RUN total: `v4l2_dropped=N`,
+`frames_captured=N`, scp'd back to dev1 already) survives per-run but has no per-window
+granularity. **#716 (open)** proposes persisting `/tmp/cbox-burn.log` to dev1 per run the same
+way. Until it lands: if you need a SPECIFIC past run's fps history and it's not the latest one,
+it's gone — don't waste time hunting journald or CI logs for it (checked both, neither has it).
+Workaround for "pick a currently-healthy `CAM=` before starting a NEW test" (a live, forward-
+looking check, not a past-run lookup): `journalctl -u camera-box | grep -iE 'Streaming:|WARN'` on
+each candidate box IS valid for this — that reads the PERSISTENT service, which only runs
+between/before tests, not during one.
 
 **Killing a `python.exe` process on a `win-*` MCP box by NAME can kill the MCP's OWN backend and
 drop the tool's transport.** The `win-strih`/`win-stream-snv` MCP server's own remote agent runs AS
@@ -1397,6 +1419,26 @@ supervisor re-decode of 572001 is the real proof.** The honest gate uses RUN-LEN
   `capture-rate-guard.sh` E2E preflight only catches (a), not (b). If a restart-survival or
   full-path E2E run fails ONLY on imag's `#588` judder gate (never on delivery/burn contiguity),
   re-check cam1's capture rate and USB-reset it before assuming a code regression.
+- **#674 CLOSED (2026-07-12) — the "subtler version" above is CONFIRMED, with a precise number:
+  imag's `#588` judder is a faithful pixel-level relay of cam1's OWN chronic ~64fps-captured/
+  60fps-emitted rate, not a downstream/software artifact.** Freshly measured across an ENTIRE
+  5-min recording (`/tmp/cbox-burn.log` for `RECORDING_E2E_RUN_ID=1740128460` — see the
+  cam-box-telemetry-retrieval note above): captured fps rock-steady 63.9-64.0 in EVERY window,
+  zero capture-dropped, zero self-heal/WARN lines anywhere — this is a CHRONIC, always-on
+  condition (also confirmed live outside any recording, twice, at different times), not an
+  intermittent "episode". The math: (64.0-60.0)/60.0=6.67% lines up almost exactly with imag's
+  measured 6.76-7.04% judder density for that same run. Matches #685's already-established
+  mechanism precisely ("internal resampling → duplicate-frame bursts" from the ShadowCast 2's
+  free-running USB clock) — self-heal correctly did NOT fire (6.67% sits inside the post-#685
+  `SHADOWCAST2_CAPTURE_RATE_TOLERANCE_PCT=10.0` envelope; that's intended, not a gap). **Residual
+  open lead, NOT chased further:** a DIFFERENT run in the same investigation (`1790862887`) showed
+  a DECLINING judder shape (6.98%→0.47%→back to 4.3% within one 5-min recording) that a purely
+  chronic/always-on mechanism does not by itself explain — its own raw fps log was already
+  overwritten by the time it was checked (the exact #716 gap), so this specific run's cam1 rate
+  could not be verified. If `#716` lands and a future dispatch has spare E2E budget, checking a
+  fresh decline-shaped run's own `/tmp/cbox-burn.log` (or, better, `capture-rate-selfheal.state`'s
+  `last_heal_epoch_s`, per the diagnostic two entries below) against its own judder shape would
+  close that residual question.
 - **Diagnosing an imag freeze/stall during an ALL_CAMBOX sweep: always check CAM1's own self-heal
   state, never whichever camera strih's sweep window LABEL happens to show at that moment (#670,
   2026-07-11).** imag's PROGRAM-feeding input (`NDI CAM1`) is FIXED to cam1's own feed for the
