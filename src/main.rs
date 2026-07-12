@@ -765,12 +765,35 @@ async fn run_capture_loop(
                 if out_interval_ns > 0 {
                     // Genlock decimation: emit only the capture at/after each
                     // wall-clock boundary (pure logic in ndi::genlock_emit_gate).
+                    let prev_boundary_ns = next_boundary_ns;
                     let (emit, next) = camera_box::ndi::genlock_emit_gate(
                         wall_clock_ns(),
                         next_boundary_ns,
                         out_interval_ns,
                     );
                     next_boundary_ns = next;
+                    // #707 — a clock discontinuity (DanteSync NTP/PTP step, or a stalled poll)
+                    // can leap the gate's boundary past one or more intervals that are then
+                    // NEVER emitted — the missing direct evidence for whether a clock step is
+                    // what's behind a #666/#707-class transient emit-rate deficit. See
+                    // `ndi::boundary_skip_count`'s own doc comment.
+                    let skipped = camera_box::ndi::boundary_skip_count(
+                        prev_boundary_ns,
+                        next_boundary_ns,
+                        out_interval_ns,
+                    );
+                    if skipped > 0 {
+                        tracing::warn!(
+                            "#707 genlock emit-gate SKIPPED {} boundary interval(s) \
+                             (prev_boundary_ns={}, new_boundary_ns={}, interval_ns={}) — a clock \
+                             discontinuity (DanteSync step) or a stalled poll leapt past frame(s) \
+                             that were never emitted (see #707)",
+                            skipped,
+                            prev_boundary_ns,
+                            next_boundary_ns,
+                            out_interval_ns
+                        );
+                    }
                     if !emit {
                         return; // between boundaries — decimate (don't send)
                     }

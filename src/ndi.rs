@@ -534,6 +534,34 @@ pub fn genlock_emit_gate(now_ns: u64, next_boundary_ns: u64, interval_ns: u64) -
     (true, next)
 }
 
+/// #707 — how many WHOLE emit-boundary intervals were SKIPPED (never emitted) between the
+/// `next_boundary_ns` this capture loop held BEFORE calling [`genlock_emit_gate`] and the
+/// boundary it returned. A normal `emit=false` poll (decimated, between boundaries) leaves the
+/// boundary unchanged (0 skipped); a normal `emit=true` poll advances by exactly ONE
+/// `interval_ns` (0 skipped — that's the expected single-frame cadence, not a skip). Anything
+/// LARGER than one interval means [`genlock_emit_gate`]'s own forward-resync branch fired — a
+/// clock discontinuity (a DanteSync NTP/PTP step correction, or a stalled poll) leapt the wall
+/// clock past one or more boundaries that were therefore NEVER emitted, which is the exact
+/// mechanism a #666/#707-class transient emit-rate deficit would show if a clock step is its
+/// cause. This is the missing direct evidence for that specific hypothesis (as
+/// [`crate::send_stall`]'s doc comment covers the sibling "blocking network send" hypothesis) —
+/// two independent, non-overlapping diagnostics for the same still-open emit-rate-deficit
+/// family, so a future recurrence can show WHICH mechanism (or neither) actually fired.
+///
+/// `old_boundary_ns == 0` is the gate's own "uninitialized" sentinel (see
+/// [`genlock_emit_gate`]'s own init branch) — the very first call always advances from 0 to a
+/// real boundary and must NEVER be misread as a multi-interval skip, so it always reports 0.
+/// A backward step (`new_boundary_ns <= old_boundary_ns`, e.g. the gate's own backward-jump
+/// re-latch, or a decimated poll where the boundary is simply unchanged) also reports 0 — this
+/// counts only FORWARD skips, the only direction that actually drops un-emitted boundaries.
+pub fn boundary_skip_count(old_boundary_ns: u64, new_boundary_ns: u64, interval_ns: u64) -> u64 {
+    if interval_ns == 0 || old_boundary_ns == 0 || new_boundary_ns <= old_boundary_ns {
+        return 0;
+    }
+    let advanced = new_boundary_ns - old_boundary_ns;
+    (advanced / interval_ns).saturating_sub(1)
+}
+
 /// #297 — read the host's current usable (up, non-loopback, IPv4) network addresses into a
 /// canonical [`crate::reannounce::NetworkSignature`]. This is the Linux IO half of the
 /// re-announce trigger (the pure decision lives in `crate::reannounce`). A `getifaddrs`
@@ -1868,6 +1896,67 @@ mod tests {
         let (emit2, next2) = genlock_emit_gate(999, 555, 0);
         assert!(!emit2);
         assert_eq!(next2, 555);
+    }
+
+    // #707 — boundary_skip_count: the "was a boundary skipped" diagnostic decision.
+
+    #[test]
+    fn skip_count_zero_on_uninitialized_sentinel() {
+        // old_boundary_ns == 0 is the gate's own "uninitialized" sentinel — the very first
+        // call's huge jump from 0 must never read as a skip.
+        assert_eq!(boundary_skip_count(0, 100 * I30, I30), 0);
+    }
+
+    #[test]
+    fn skip_count_zero_on_unchanged_boundary_decimated_poll() {
+        // A decimated (emit=false) poll leaves the boundary unchanged.
+        let boundary = 5 * I30;
+        assert_eq!(boundary_skip_count(boundary, boundary, I30), 0);
+    }
+
+    #[test]
+    fn skip_count_zero_on_normal_single_interval_advance() {
+        // The expected steady-state emit=true advance: exactly one interval, no skip.
+        let old = 5 * I30;
+        let new = old + I30;
+        assert_eq!(boundary_skip_count(old, new, I30), 0);
+    }
+
+    #[test]
+    fn skip_count_reports_a_multi_interval_forward_jump() {
+        // A clock step (or a stalled poll) that leapt the boundary forward by 6 intervals in
+        // one call means 5 boundaries were never emitted.
+        let old = 10 * I30;
+        let new = old + 6 * I30;
+        assert_eq!(boundary_skip_count(old, new, I30), 5);
+    }
+
+    #[test]
+    fn skip_count_zero_on_backward_step() {
+        // A backward clock step re-latches to a SMALLER boundary — never a forward skip.
+        let old = 100 * I30;
+        let new = 40 * I30;
+        assert_eq!(boundary_skip_count(old, new, I30), 0);
+    }
+
+    #[test]
+    fn skip_count_zero_when_interval_is_zero_genlock_off() {
+        assert_eq!(boundary_skip_count(5 * I30, 200 * I30, 0), 0);
+    }
+
+    #[test]
+    fn skip_count_matches_genlock_emit_gate_forward_resync_live() {
+        // End-to-end: drive genlock_emit_gate itself through a real forward clock step and
+        // confirm boundary_skip_count reads the same skip the gate's own resync branch took.
+        let boundary = 10 * I30;
+        let jumped_now = boundary + 6 * I30 + 500; // 6+ intervals past the pending boundary
+        let (emit, next) = genlock_emit_gate(jumped_now, boundary, I30);
+        assert!(emit, "a capture at/after the boundary always emits");
+        assert_eq!(
+            boundary_skip_count(boundary, next, I30),
+            6,
+            "the gate's forward-resync must be visible as a 6-boundary skip"
+        );
     }
 
     #[test]
