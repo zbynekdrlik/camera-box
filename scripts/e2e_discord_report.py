@@ -39,7 +39,13 @@ Report content — six sections, matching issue #711's spec verbatim:
   5. A/V sync v stream OBS — `all_cambox_av_sync`. Every UNKNOWN is reported WITH ITS REASON:
      zero candidates -> "tichá stopa" (silent audio track, the literal phrase issue #711 requires);
      candidates present but no reliable cluster -> "nedostatok konzistentných vzoriek". NEVER a
-     bare number where the data doesn't support one.
+     bare number where the data doesn't support one. #714: a camera whose OWN per-window pooling
+     was sample-starved (structurally, per-camera windows are too short to accumulate enough real
+     QPSK marker matches — see av_window::derive_camera_av_sync's own doc comment) but whose
+     offset could be soundly ESTIMATED (verdict=="derived", from cam2's own measured offset +
+     this camera's own #286 delivery-latency delta) is reported as "ODVODENÉ <value>", always
+     visually distinct from a real "measured" number — satisfying the #714 acceptance bar (a value
+     or a reasoned bound for EVERY camera, never a silent "cam2 only").
   6. Celkový verdikt (PASS/RED) + ktoré brány blokujú, named technically (never silently "red").
 """
 from __future__ import annotations
@@ -277,6 +283,16 @@ def _section_av_sync(verdict):
             lines.append(
                 f"  {_pass_glyph(node.get('gate_pass'))} {cam}: offset {_fmt_ms(offset)}, "
                 f"MAD {_fmt_ms(mad)}, zhody={matched}"
+            )
+        elif node.get("verdict") == "derived":
+            # #714: a camera whose OWN per-window pooling was sample-starved, but whose offset
+            # could be soundly ESTIMATED from cam2's own measured offset + this camera's own
+            # #286 delivery-latency delta — always labeled distinctly from a real measurement.
+            offset = node.get("derived_offset_ms")
+            spread = node.get("derived_delivery_spread_ms")
+            lines.append(
+                f"  {_pass_glyph(node.get('gate_pass'))} {cam}: ODVODENÉ {_fmt_ms(offset)} "
+                f"(z cam2 + vlastný doručovací rozdiel, rozptyl ±{_fmt_ms(spread)})"
             )
         else:
             reason = _av_reason(node)

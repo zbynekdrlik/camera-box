@@ -168,6 +168,91 @@ pub fn window_ticks(
     out
 }
 
+/// #714 — a per-camera A/V-sync estimate DERIVED (never fabricated) for a camera whose own
+/// per-window pooling is sample-starved ([`AvSyncVerdict::Unknown`]), from cam2's own MEASURED
+/// whole-recording offset plus the delta between this camera's OWN `#286` delivery-latency p50
+/// (`all_cambox_delivery_latency`, `strih_burn − camera_burn`) and the mean p50 across every
+/// camera that produced a delivery sample this run.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DerivedAvSync {
+    pub derived_offset_ms: f64,
+    /// The #286 delivery-latency cross-camera spread this run — the honest DIAGNOSTIC margin on
+    /// the derivation (report-only field; see [`derive_camera_av_sync`]'s doc comment for why the
+    /// gate itself still applies the SAME ±20ms tolerance as a real measurement).
+    pub delivery_spread_ms: f64,
+    pub gate_pass: bool,
+}
+
+/// THE pure derivation (#714).
+///
+/// ## Why this is sound, not fabricated — grounded in the #689 live-data finding
+///
+/// Every cam box receives the IDENTICAL optically-injected picture (cam2's dual-QR) via the
+/// shared HDMI splitter (this project's own documented rig topology — one broadcast camera films
+/// cam2's monitor, its HDMI output is physically split into every cam box's own USB capture
+/// card). Live evidence (#689, 3 gate runs, 2026-07-12): the 5 non-cam2 cameras' per-window
+/// candidate counts ARE non-zero and roughly proportional to their own schedule-window duration
+/// (103-988 candidates vs cam2's 2013-3256 over the whole ~10x-longer recording) — the video
+/// ticks genuinely decode fine inside every camera's own window. The reason none of the 5 ever
+/// clears [`MIN_AV_SAMPLES`] is NOT missing signal — a single ~30-60s schedule window is simply
+/// too short to accumulate enough REAL (non-false-CRC-decode) marker matches, given the QPSK
+/// marker's finite occurrence rate: cam2's own whole-300s pool clears the floor at only 22-31
+/// matched samples (roughly one real match every ~10-13s) — well under 8 in a single short
+/// window, structurally, regardless of raw candidate count.
+///
+/// cam2's own whole-recording offset therefore implicitly BLENDS together whichever camera's
+/// receiver-side delivery latency (`strih_burn − camera_burn`, #286's OWN Verify metric) was
+/// active at each sampled instant across the whole run — cam2 has no camera-under-test delivery
+/// latency of its own, so its number is an average over all 6 cameras' delivery times as they
+/// rotated through program. Re-centering that blended number on THIS camera's own delivery p50,
+/// relative to the mean the blend implicitly averages over, is the direct algebraic correction
+/// for the one variable that genuinely differs per camera (#286's own per-source genlock hold) —
+/// never a guess, and never a re-derivation of the A/V relationship itself (still cam2's own
+/// measured paint-tick-vs-marker offset, only re-centered).
+///
+/// ## Fail-closed — `None` (never a fabricated number) when
+///
+/// - cam2 itself did not reach [`AvSyncVerdict::Measured`] this run (nothing to re-center), or
+/// - this camera produced no #286 delivery-latency sample this run (no p50 to re-center on), or
+/// - fewer than 2 cameras produced a delivery sample this run (no meaningful mean to re-center
+///   against — a single-sample "mean" would just reproduce cam2's own number with zero
+///   correction, silently hiding that nothing was actually derived).
+pub fn derive_camera_av_sync(
+    cam2_offset_ms: Option<f64>,
+    camera_delivery_p50_ms: Option<f64>,
+    all_delivery_p50s_ms: &[f64],
+    expected_ms: f64,
+) -> Option<DerivedAvSync> {
+    let cam2_offset = cam2_offset_ms?;
+    let cam_p50 = camera_delivery_p50_ms?;
+    if all_delivery_p50s_ms.len() < 2 {
+        return None;
+    }
+    let mean_p50 = all_delivery_p50s_ms.iter().sum::<f64>() / all_delivery_p50s_ms.len() as f64;
+    let derived_offset_ms = cam2_offset + (cam_p50 - mean_p50);
+    let max_p50 = all_delivery_p50s_ms
+        .iter()
+        .cloned()
+        .fold(f64::MIN, f64::max);
+    let min_p50 = all_delivery_p50s_ms
+        .iter()
+        .cloned()
+        .fold(f64::MAX, f64::min);
+    let delivery_spread_ms = max_p50 - min_p50;
+    // #714 spec: "the spread folded into the tolerance check (±20ms gate then applies to the
+    // DERIVED value)" — the delivery delta is already folded INTO derived_offset_ms itself (the
+    // re-centering above); the SAME tolerance the measured path uses then applies to that
+    // now-per-camera-specific value. delivery_spread_ms is kept as a separate, honest DIAGNOSTIC
+    // field (never silently widening or narrowing the tolerance) so a report reader can judge the
+    // derivation's own confidence margin independently of the pass/fail call.
+    let gate_pass = (derived_offset_ms - expected_ms).abs() <= AV_OFFSET_GATE_TOLERANCE_MS;
+    Some(DerivedAvSync {
+        derived_offset_ms,
+        delivery_spread_ms,
+        gate_pass,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -373,6 +458,111 @@ mod tests {
         assert!(
             !av_offset_gate_pass(&mismatched, 0.0),
             "an Unknown verdict must never pass the gate, even if av_offset_ms happens to be Some"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // derive_camera_av_sync (#714)
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn derive_none_when_cam2_itself_is_not_measured() {
+        let v = derive_camera_av_sync(None, Some(980.0), &[960.0, 970.0, 980.0], 0.0);
+        assert_eq!(
+            v, None,
+            "no cam2 offset to re-center ⇒ never fabricate a number"
+        );
+    }
+
+    #[test]
+    fn derive_none_when_this_camera_has_no_delivery_sample() {
+        let v = derive_camera_av_sync(Some(-12.0), None, &[960.0, 970.0, 980.0], 0.0);
+        assert_eq!(
+            v, None,
+            "no delivery p50 for THIS camera ⇒ nothing to re-center against"
+        );
+    }
+
+    #[test]
+    fn derive_none_when_fewer_than_two_cameras_have_delivery_samples() {
+        // Only 1 camera's delivery sample exists this run — a "mean" of one value would just
+        // reproduce cam2's own number with zero correction, silently hiding that nothing was
+        // actually derived.
+        let v = derive_camera_av_sync(Some(-12.0), Some(980.0), &[980.0], 0.0);
+        assert_eq!(v, None);
+        let v_empty = derive_camera_av_sync(Some(-12.0), Some(980.0), &[], 0.0);
+        assert_eq!(v_empty, None);
+    }
+
+    #[test]
+    fn derive_recenters_cam2_offset_on_this_cameras_own_delivery_delta() {
+        // mean p50 across the 6 cameras = 970ms; this camera's own p50 = 980ms (10ms ABOVE
+        // the mean, i.e. this camera's frames sat in strih's queue 10ms longer than average) ⇒
+        // derived = cam2_offset + (980 - 970) = cam2_offset + 10.
+        let p50s = [960.0, 965.0, 970.0, 975.0, 980.0, 970.0]; // mean = 970.0
+        let v = derive_camera_av_sync(Some(-12.0), Some(980.0), &p50s, 0.0)
+            .expect("all inputs present ⇒ a derived estimate");
+        assert!(
+            (v.derived_offset_ms - (-2.0)).abs() < 1e-9,
+            "expected -12.0 + (980.0 - 970.0) = -2.0, got {}",
+            v.derived_offset_ms
+        );
+        assert!(
+            (v.delivery_spread_ms - 20.0).abs() < 1e-9,
+            "spread = max(980) - min(960) = 20.0, got {}",
+            v.delivery_spread_ms
+        );
+    }
+
+    #[test]
+    fn derive_gate_pass_boundary_matches_the_measured_paths_own_tolerance() {
+        let p50s = [970.0, 970.0]; // mean = 970.0, zero delta for THIS camera below
+                                   // derived offset lands EXACTLY on the ±20ms boundary ⇒ still PASS (<=, matching
+                                   // av_offset_gate_pass's own inclusive boundary).
+        let at_boundary =
+            derive_camera_av_sync(Some(20.0), Some(970.0), &p50s, 0.0).expect("inputs present");
+        assert!(
+            (at_boundary.derived_offset_ms - 20.0).abs() < 1e-9,
+            "zero delivery delta ⇒ derived == cam2's own offset"
+        );
+        assert!(
+            at_boundary.gate_pass,
+            "exactly at tolerance must still PASS"
+        );
+
+        let just_over =
+            derive_camera_av_sync(Some(20.1), Some(970.0), &p50s, 0.0).expect("inputs present");
+        assert!(!just_over.gate_pass, "just over tolerance must FAIL");
+    }
+
+    #[test]
+    fn derive_gate_fails_when_the_re_centered_offset_exceeds_tolerance() {
+        // cam2's own offset is safely inside tolerance (5ms), but this camera's delivery p50 is
+        // 30ms above the mean ⇒ the re-centered estimate (35ms) exceeds ±20ms — the derivation
+        // must FAIL here even though cam2's own measured number would have passed.
+        let p50s = [940.0, 970.0, 1000.0]; // mean = 970.0
+        let v = derive_camera_av_sync(Some(5.0), Some(1000.0), &p50s, 0.0).expect("inputs present");
+        assert!(
+            (v.derived_offset_ms - 35.0).abs() < 1e-9,
+            "expected 5.0 + (1000.0 - 970.0) = 35.0, got {}",
+            v.derived_offset_ms
+        );
+        assert!(
+            !v.gate_pass,
+            "a re-centered offset outside ±20ms must FAIL, independent of cam2's own PASS"
+        );
+    }
+
+    #[test]
+    fn derive_respects_a_nonzero_expected_ms() {
+        // expected_ms is the operator's dialed value (nominally ~0, but the gate must honor
+        // whatever --av-expected-ms was actually passed).
+        let p50s = [970.0, 970.0];
+        let v =
+            derive_camera_av_sync(Some(500.0), Some(970.0), &p50s, 500.0).expect("inputs present");
+        assert!(
+            v.gate_pass,
+            "derived offset == expected_ms exactly ⇒ PASS regardless of the absolute value"
         );
     }
 }

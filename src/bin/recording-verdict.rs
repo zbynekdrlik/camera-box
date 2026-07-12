@@ -4200,6 +4200,14 @@ fn build_and_print_verdict(
                 // is not yet closed/proven, and this field's purpose right now is to let a
                 // manual re-verification run SEE whether the applied differentiated offsets
                 // collapsed the delivery-time spread, not to add a new standing CI requirement.
+                //
+                // #714: keyed by camera, populated below when a --strih recording is present —
+                // consumed further down by the A/V-sync block's `av_window::derive_camera_av_sync`
+                // (a camera's own #286 delivery p50, re-centering cam2's whole-recording A/V
+                // offset for a camera whose own per-window A/V pooling is sample-starved).
+                let mut camera_delivery_p50: std::collections::HashMap<&str, f64> =
+                    std::collections::HashMap::new();
+                let mut delivery_p50s_ms: Vec<f64> = Vec::new();
                 if let Some((strih_frames, _)) = &strih_data {
                     println!();
                     println!(
@@ -4221,13 +4229,13 @@ fn build_and_print_verdict(
                         &delivery_camera_burn_ids,
                     );
                     let mut delivery_json = serde_json::Map::new();
-                    let mut delivery_p50s_ms: Vec<f64> = Vec::new();
                     for (&camera, samples) in
                         CAMERA_UNDER_TEST_NODES.iter().zip(delivery_samples.iter())
                     {
                         let lat = hop_latency(&format!("{camera}->strih (delivery)"), samples);
                         if let Some(h) = &lat {
                             delivery_p50s_ms.push(h.stats.p50_ms);
+                            camera_delivery_p50.insert(camera, h.stats.p50_ms); // #714
                         }
                         println!(
                             "  {camera}: samples={}, p50={}",
@@ -4324,6 +4332,12 @@ fn build_and_print_verdict(
                     // the ±20ms A/V-offset gate for the run's overall verdict to pass — folded
                     // into `all_pass` below, alongside all_cambox_continuity + all_cambox_latency.
                     let mut av_all_pass = true;
+                    // #714 pass 1: compute every camera's OWN pooled measurement first (UNCHANGED
+                    // logic from before), keyed by camera name — so cam2's own measured offset is
+                    // available before ANY camera's derivation below regardless of loop order
+                    // (CAMERA_UNDER_TEST_NODES lists cam2 second, not first).
+                    let mut cam_syncs: std::collections::HashMap<&str, av_window::CameraAvSync> =
+                        std::collections::HashMap::new();
                     for &camera in CAMERA_UNDER_TEST_NODES.iter() {
                         // cam2 is the emitter/painter itself: it has NO own schedule window where
                         // the optical dual-QR is visible (cam2's OWN camera does not film its own
@@ -4380,8 +4394,39 @@ fn build_and_print_verdict(
                             av_window::MIN_AV_SAMPLES,
                             args.av_cluster_tol_ms,
                         );
-                        let gate_pass =
-                            av_window::av_offset_gate_pass(&cam_sync, args.av_expected_ms);
+                        cam_syncs.insert(camera, cam_sync);
+                    }
+                    // #714: cam2's own measured offset — the anchor every Unknown non-cam2
+                    // camera's derived estimate re-centers against below. `None` when cam2 itself
+                    // is Unknown this run (derive_camera_av_sync then fails closed for every
+                    // camera, never fabricating a number from a missing anchor).
+                    let cam2_offset_ms = cam_syncs.get("cam2").and_then(|s| s.av_offset_ms);
+                    for &camera in CAMERA_UNDER_TEST_NODES.iter() {
+                        let whole_recording = camera == "cam2";
+                        let cam_sync = cam_syncs.get(camera).expect(
+                            "#714: every CAMERA_UNDER_TEST_NODES entry populated in pass 1 above",
+                        );
+                        // #714: for a non-cam2 camera that came back Unknown (per-window sample
+                        // starvation — see av_window::derive_camera_av_sync's own doc comment for
+                        // why this is sound, not fabricated), attempt the derived estimate from
+                        // cam2's own offset + this camera's #286 delivery-latency delta. Never for
+                        // cam2 itself (it has its own real measurement) and never when the real
+                        // per-window measurement already succeeded.
+                        let derived =
+                            if !whole_recording && cam_sync.verdict == AvSyncVerdict::Unknown {
+                                av_window::derive_camera_av_sync(
+                                    cam2_offset_ms,
+                                    camera_delivery_p50.get(camera).copied(),
+                                    &delivery_p50s_ms,
+                                    args.av_expected_ms,
+                                )
+                            } else {
+                                None
+                            };
+                        let gate_pass = match &derived {
+                            Some(d) => d.gate_pass,
+                            None => av_window::av_offset_gate_pass(cam_sync, args.av_expected_ms),
+                        };
                         av_all_pass &= gate_pass;
                         println!(
                             "  {camera}: {} windows={} candidates={} cluster_samples={} → {} \
@@ -4394,33 +4439,59 @@ fn build_and_print_verdict(
                             cam_sync.windows,
                             cam_sync.candidates,
                             cam_sync.cluster_samples,
-                            match cam_sync.verdict {
-                                AvSyncVerdict::Measured => format!(
+                            match (cam_sync.verdict, &derived) {
+                                (AvSyncVerdict::Measured, _) => format!(
                                     "{:.1}ms (mad {:.1}ms)",
                                     cam_sync.av_offset_ms.unwrap_or(0.0),
                                     cam_sync.mad_ms.unwrap_or(0.0)
                                 ),
-                                AvSyncVerdict::Unknown => "UNKNOWN (too few samples)".to_string(),
+                                (AvSyncVerdict::Unknown, Some(d)) => format!(
+                                    "DERIVED {:.1}ms (#714: cam2 {:.1}ms + this camera's #286 \
+                                     delivery delta, cross-camera delivery spread ±{:.1}ms)",
+                                    d.derived_offset_ms,
+                                    cam2_offset_ms.unwrap_or(0.0),
+                                    d.delivery_spread_ms,
+                                ),
+                                (AvSyncVerdict::Unknown, None) => {
+                                    "UNKNOWN (too few samples, no derivation possible)".to_string()
+                                }
                             },
                             if gate_pass { "PASS" } else { "FAIL" }
                         );
-                        av_json.insert(
-                            camera.to_string(),
-                            serde_json::json!({
-                                "node": camera,
-                                "windowing": if whole_recording { "whole_recording" } else { "per_window" },
-                                "windows": cam_sync.windows,
-                                "candidates": cam_sync.candidates,
-                                "cluster_samples": cam_sync.cluster_samples,
-                                "av_offset_ms": cam_sync.av_offset_ms,
-                                "mad_ms": cam_sync.mad_ms,
-                                "verdict": match cam_sync.verdict {
-                                    AvSyncVerdict::Measured => "measured",
-                                    AvSyncVerdict::Unknown => "unknown",
-                                },
-                                "gate_pass": gate_pass,
-                            }),
-                        );
+                        let verdict_label = match (cam_sync.verdict, &derived) {
+                            (AvSyncVerdict::Measured, _) => "measured",
+                            (AvSyncVerdict::Unknown, Some(_)) => "derived",
+                            (AvSyncVerdict::Unknown, None) => "unknown",
+                        };
+                        let mut cam_json = serde_json::json!({
+                            "node": camera,
+                            "windowing": if whole_recording { "whole_recording" } else { "per_window" },
+                            "windows": cam_sync.windows,
+                            "candidates": cam_sync.candidates,
+                            "cluster_samples": cam_sync.cluster_samples,
+                            "av_offset_ms": cam_sync.av_offset_ms,
+                            "mad_ms": cam_sync.mad_ms,
+                            "verdict": verdict_label,
+                            "gate_pass": gate_pass,
+                        });
+                        if let Some(d) = &derived {
+                            // #714: a DERIVED estimate is reported under its OWN fields, never
+                            // written into `av_offset_ms`/`mad_ms` (which stay null — those are
+                            // reserved for a genuine per-camera MEASUREMENT) — so no consumer can
+                            // mistake a derived number for an independently measured one.
+                            cam_json["derived_offset_ms"] = serde_json::json!(d.derived_offset_ms);
+                            cam_json["derived_from_cam2_offset_ms"] =
+                                serde_json::json!(cam2_offset_ms);
+                            cam_json["derived_delivery_spread_ms"] =
+                                serde_json::json!(d.delivery_spread_ms);
+                            cam_json["derived_note"] = serde_json::json!(
+                                "estimated (#714) from cam2's own measured whole-recording A/V \
+                                 offset re-centered on this camera's own #286 delivery-latency \
+                                 delta -- NOT an independent audio/video measurement for this \
+                                 camera"
+                            );
+                        }
+                        av_json.insert(camera.to_string(), cam_json);
                     }
                     println!(
                         "  >>> #624 deliverable 4 A/V-offset gate: expected={:.1}ms tolerance=±{:.1}ms → {}",
@@ -7602,6 +7673,268 @@ mod tests {
             with_av["overall_pass"], without_av["overall_pass"],
             "#624/#312 PR B: a PASSING av_sync gate must be a no-op on the overall verdict -- \
              with={with_av}, without={without_av}"
+        );
+    }
+
+    // ---- #714 — per-camera A/V coverage: a sample-starved (Unknown) camera gets a DERIVED
+    // estimate from cam2's own measured offset + this camera's #286 delivery-latency delta,
+    // whenever a --strih recording (delivery latency) is ALSO supplied this run. ----
+
+    /// Combines `build_all_cambox_av_sync_fixture`'s stream-recording construction (cam2's
+    /// optical dual-QR + each window's camera burn, feeding the A/V candidate pooling) with
+    /// `build_all_cambox_delivery_latency_fixture`'s strih-recording construction (each window's
+    /// camera burn + strih's own render burn, feeding `all_cambox_delivery_latency`) over the
+    /// SAME switch-schedule windows — so both blocks are populated from ONE consistent fixture,
+    /// letting a camera that is Unknown in `all_cambox_av_sync` ALSO have a #286 delivery sample
+    /// for `av_window::derive_camera_av_sync` to re-center against. `cameras` is `(cambox label,
+    /// camera burn run_id, delivery latency ns for strih)`.
+    fn build_all_cambox_av_sync_with_delivery_fixture(
+        tag: &str,
+        cameras: &[(&str, u32, i64)],
+        av: Option<AvMarkerInputs>,
+        av_expected_ms: f64,
+    ) -> serde_json::Value {
+        use super::{build_and_print_verdict, Cam1Source, DecodedRec};
+        use clap::Parser;
+
+        const ONE_S: i64 = 1_000_000_000;
+        let base = 6_000 * ONE_S;
+        let win = 5 * ONE_S;
+        let dir = std::env::temp_dir().join(format!("cb-714-avdel-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sched_path = dir.join("switch-schedule.json");
+        let windows_json: Vec<String> = cameras
+            .iter()
+            .enumerate()
+            .map(|(wi, &(label, _, _))| {
+                let start_ns = base + (wi as i64) * win;
+                let end_ns = start_ns + win;
+                format!(r#"{{"cambox":"{label}","start_ns":{start_ns},"end_ns":{end_ns}}}"#)
+            })
+            .collect();
+        std::fs::write(&sched_path, format!("[{}]", windows_json.join(","))).unwrap();
+
+        let mut stream_frames: Vec<RecordingFrame> = Vec::new();
+        let mut strih_frames: Vec<RecordingFrame> = Vec::new();
+        let mut idx = 0u64;
+        for (wi, &(_, camera_burn, delivery_latency_ns)) in cameras.iter().enumerate() {
+            let wstart = base + (wi as i64) * win;
+            for j in 0..20i64 {
+                let ts = wstart + (j + 1) * (ONE_S / 5);
+                let optical = 1000u32 + idx as u32;
+                stream_frames.push(RecordingFrame {
+                    frame_index: idx,
+                    payloads: vec![
+                        Payload {
+                            run_id: STRIH,
+                            frame_id: 1670 + idx as u32,
+                            gen_ts_ns: ts,
+                        },
+                        Payload {
+                            run_id: CAM2,
+                            frame_id: optical,
+                            gen_ts_ns: ts,
+                        },
+                        Payload {
+                            run_id: camera_burn,
+                            frame_id: 5000 + idx as u32,
+                            gen_ts_ns: ts,
+                        },
+                    ],
+                    tick: Some(optical),
+                });
+                strih_frames.push(RecordingFrame {
+                    frame_index: idx,
+                    payloads: vec![
+                        Payload {
+                            run_id: camera_burn,
+                            frame_id: 8000 + idx as u32,
+                            gen_ts_ns: ts,
+                        },
+                        Payload {
+                            run_id: STRIH,
+                            frame_id: 1670 + idx as u32,
+                            gen_ts_ns: ts + delivery_latency_ns,
+                        },
+                    ],
+                    tick: None,
+                });
+                idx += 1;
+            }
+        }
+
+        let args = super::Args::parse_from([
+            "recording-verdict",
+            "--switch-schedule",
+            sched_path.to_str().unwrap(),
+            "--switch-guard-ns",
+            "0",
+            "--switch-expected-step",
+            "2",
+            "--av-expected-ms",
+            &av_expected_ms.to_string(),
+        ]);
+
+        let (v, _pass) = build_and_print_verdict(
+            &args,
+            Some(DecodedRec {
+                frames: strih_frames,
+                rec_path: None,
+            }),
+            Some(DecodedRec {
+                frames: stream_frames,
+                rec_path: None,
+            }),
+            Cam1Source::Absent,
+            None,
+            None,
+            None, // #461: no imag frames in this fixture
+            av,
+        )
+        .expect("verdict");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        v
+    }
+
+    /// HEADLINE (#714): cam1's window carries 10 real, dense A/V candidates → Measured. cam3's
+    /// window carries ZERO A/V candidates (its ticks fall outside the emit-log range, mirroring
+    /// the sibling #312 fixture) → Unknown on its own — but BOTH cameras (plus cam2) have a
+    /// #286 delivery-latency sample this run, so cam3 gets a DERIVED estimate instead of a bare
+    /// "unknown", satisfying the #714 acceptance bar ("a value or reasoned bound for EVERY
+    /// camera"). cam4/cam5/cam6 never appear in the sweep at all (no delivery sample either) →
+    /// stay genuinely "unknown" (never a fabricated derivation from zero evidence).
+    #[test]
+    fn all_cambox_av_sync_derives_a_per_camera_estimate_for_a_sample_starved_camera_714() {
+        let emit_log: Vec<(u8, u32, i64)> = (0..10u8).map(|k| (k, 1000 + k as u32, 0)).collect();
+        let audio_markers: Vec<(f64, u8)> = (0..10u8).map(|k| (k as f64 / 30.0 - 0.5, k)).collect();
+        let av = AvMarkerInputs {
+            fps: 30.0,
+            video_start_s: 0.0,
+            emit_log,
+            audio_markers,
+        };
+        // cam1: delivery p50 = 800ms. cam3: delivery p50 = 840ms (40ms above cam1's) — mean of
+        // the two = 820ms, so cam3's derived offset = cam2's own offset + (840 - 820) = +20ms.
+        let v = build_all_cambox_av_sync_with_delivery_fixture(
+            "derive",
+            &[("CAM1", CAM1B, 800_000_000), ("CAM3", CAM3B, 840_000_000)],
+            Some(av),
+            0.0,
+        );
+
+        let av_sync = &v["all_cambox_av_sync"];
+        assert_eq!(
+            av_sync["cam1"]["verdict"],
+            serde_json::json!("measured"),
+            "sanity: cam1 must be a real measurement in this fixture: {av_sync}"
+        );
+        let cam2_offset = av_sync["cam2"]["av_offset_ms"]
+            .as_f64()
+            .expect("sanity: cam2 must be measured (whole-recording pool): {av_sync}");
+        assert_eq!(
+            av_sync["cam3"]["verdict"],
+            serde_json::json!("derived"),
+            "#714: cam3 is sample-starved on its own (0 candidates) but a delivery sample \
+             exists ⇒ DERIVED, never a bare unknown: {av_sync}"
+        );
+        assert!(
+            av_sync["cam3"]["av_offset_ms"].is_null(),
+            "#714: a derived estimate must NOT be written into av_offset_ms (reserved for a \
+             genuine independent measurement): {av_sync}"
+        );
+        let derived_offset = av_sync["cam3"]["derived_offset_ms"]
+            .as_f64()
+            .expect("#714: cam3 must carry derived_offset_ms: {av_sync}");
+        assert!(
+            (derived_offset - (cam2_offset + 20.0)).abs() < 1e-6,
+            "#714: expected cam2_offset({cam2_offset}) + (840 - 820) = {}, got {derived_offset}: {av_sync}",
+            cam2_offset + 20.0
+        );
+        assert_eq!(
+            av_sync["cam3"]["derived_from_cam2_offset_ms"],
+            serde_json::json!(cam2_offset),
+            "#714: the derivation's own cam2 anchor must be reported for traceability: {av_sync}"
+        );
+        assert_eq!(
+            av_sync["cam3"]["derived_delivery_spread_ms"],
+            serde_json::json!(40.0),
+            "#714: spread = max(840) - min(800) = 40ms: {av_sync}"
+        );
+        assert!(
+            av_sync["cam3"]["derived_note"]
+                .as_str()
+                .unwrap()
+                .contains("estimated"),
+            "#714: the derivation must be self-labeled, never presented as a real measurement: {av_sync}"
+        );
+        for absent in ["cam4", "cam5", "cam6"] {
+            assert_eq!(
+                av_sync[absent]["verdict"],
+                serde_json::json!("unknown"),
+                "#714: {absent} never appeared in this sweep (no delivery sample either) -> \
+                 genuinely unknown, never a fabricated derivation from zero evidence: {av_sync}"
+            );
+            assert!(
+                av_sync[absent]["derived_offset_ms"].is_null(),
+                "#714: {absent} must not carry a derived field when no derivation was possible: {av_sync}"
+            );
+        }
+    }
+
+    /// #714: the derived estimate's OWN gate can disagree with cam2's — a camera whose delivery
+    /// p50 is far enough above the mean pushes the re-centered offset outside ±20ms even though
+    /// cam2's own measured offset is safely inside it.
+    #[test]
+    fn all_cambox_av_sync_derived_gate_can_fail_even_when_cam2_itself_passes_714() {
+        let emit_log: Vec<(u8, u32, i64)> = (0..10u8).map(|k| (k, 1000 + k as u32, 0)).collect();
+        // Real markers land exactly at video_ts(1000+k) - 0.005s ⇒ cam1's (and cam2's own
+        // whole-recording) measured offset is a clean +5ms — safely inside ±20ms of expected=0.
+        let audio_markers: Vec<(f64, u8)> =
+            (0..10u8).map(|k| (k as f64 / 30.0 - 0.005, k)).collect();
+        let av = AvMarkerInputs {
+            fps: 30.0,
+            video_start_s: 0.0,
+            emit_log,
+            audio_markers,
+        };
+        // cam1: 800ms delivery. cam3: 870ms delivery (70ms above cam1's, mean=835ms) -> cam3's
+        // derived offset = 5 + (870 - 835) = 5 + 35 = 40ms -> OUTSIDE +/-20ms even though cam2's
+        // own measured +5ms offset comfortably passes.
+        let v = build_all_cambox_av_sync_with_delivery_fixture(
+            "derive-fail",
+            &[("CAM1", CAM1B, 800_000_000), ("CAM3", CAM3B, 870_000_000)],
+            Some(av),
+            0.0,
+        );
+
+        let av_sync = &v["all_cambox_av_sync"];
+        assert_eq!(
+            av_sync["cam2"]["gate_pass"],
+            serde_json::json!(true),
+            "sanity: cam2's own +5ms measured offset must pass the gate: {av_sync}"
+        );
+        assert_eq!(
+            av_sync["cam3"]["verdict"],
+            serde_json::json!("derived"),
+            "sanity: cam3 must reach the derived path: {av_sync}"
+        );
+        let derived_offset = av_sync["cam3"]["derived_offset_ms"].as_f64().unwrap();
+        assert!(
+            (derived_offset - 40.0).abs() < 1e-6,
+            "expected 5.0 + (870 - 835) = 40.0, got {derived_offset}: {av_sync}"
+        );
+        assert_eq!(
+            av_sync["cam3"]["gate_pass"],
+            serde_json::json!(false),
+            "#714: a re-centered offset outside +/-20ms must FAIL, independent of cam2's own \
+             PASS: {av_sync}"
+        );
+        assert_eq!(
+            v["overall_pass"],
+            serde_json::json!(false),
+            "#714: a failing DERIVED gate must force overall_pass=false, same severity as a \
+             failing MEASURED gate: {v}"
         );
     }
 
