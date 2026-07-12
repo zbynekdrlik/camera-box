@@ -116,10 +116,55 @@ pub fn tolerance_pct_for_model(model: GrabberModel) -> f64 {
     }
 }
 
-// #717 RED marker: `SHADOWCAST2_SUSTAINED_TOLERANCE_PCT` / `SUSTAINED_WARN_WINDOWS` /
-// `sustained_tolerance_pct_for_model` are NOT YET IMPLEMENTED — the test module below already
-// references them (RED commit: proves via compile failure that the two-band split does not
-// exist yet). Implemented in the immediately-following GREEN commit.
+/// #717 — SUSTAINED-band capture-rate deviation tolerance (percent) for ShadowCast 2. #685's wide
+/// `SHADOWCAST2_CAPTURE_RATE_TOLERANCE_PCT` (10%) correctly tolerates ShadowCast 2's characteristic
+/// SHORT-LIVED quantization jitter (band (a): deviation bursts that self-recover within ~60s) —
+/// but it ALSO swallowed a genuinely SUSTAINED, reset-fixable defect (band (b): the #674 closure
+/// evidence — cam1 held a rock-steady 63.9-64.0fps, a 6.5-6.67% deviation, for an ENTIRE 10-window
+/// gate recording, producing 6.67% duplicate frames / visible program judder that imag's own
+/// density gate correctly failed on). A USB reset PROVABLY fixes this class of defect (#642: a
+/// reset took cam1 from 64.02fps to a stable 60.1-60.5fps) — a fixable defect is not "a model
+/// characteristic to tolerate" (see the project's calibrate-artifact-vs-fix-robustness playbook
+/// note). This SEPARATE, narrower floor is what the SUSTAINED check (`SUSTAINED_WARN_WINDOWS`,
+/// 60s) uses instead of the wide jitter floor, so a deviation this size that actually PERSISTS
+/// still trips self-heal even though it never reaches the wide 10% jitter floor.
+pub const SHADOWCAST2_SUSTAINED_TOLERANCE_PCT: f64 = 2.0;
+
+/// #717 — number of consecutive 5s report windows a SUSTAINED-band deviation must hold before it
+/// counts as a real, reset-worthy defect rather than ShadowCast 2's short-lived quantization
+/// jitter. 12 windows @ 5s = 60s — double `CAPTURE_RATE_WARN_WINDOWS`'s 30s (the jitter-band/#656
+/// WARN cadence, left unchanged) — per #717's explicit "sustained >= 60s" acceptance bar: long
+/// enough that a burst which self-recovers inside 60s (band (a), tolerated) never trips it, short
+/// enough that a genuinely chronic defect (band (b)) is caught well before a 300s+ E2E recording
+/// completes.
+pub const SUSTAINED_WARN_WINDOWS: u32 = 12;
+
+/// The SUSTAINED-band capture-rate deviation tolerance (percent) to use for a self-heal decision,
+/// given this box's grabber model. `GrabberModel::ShadowCast2` gets the narrow
+/// `SHADOWCAST2_SUSTAINED_TOLERANCE_PCT` (2%) — a SEPARATE, TIGHTER floor than its own
+/// (jitter-band) `tolerance_pct_for_model` (10%) — so a sustained-but-under-10%-deviation defect
+/// (#674's chronic 64fps) still trips self-heal even though it never reaches the wide jitter
+/// floor. Every other model returns the SAME value as `tolerance_pct_for_model` — their
+/// single-band strict tolerance already IS the sustained tolerance, so pairing it with
+/// `SUSTAINED_WARN_WINDOWS` (60s) makes the sustained check a strict SUPERSET of their existing
+/// 30s jitter-band trigger: it can never fire before the jitter-band one already did, so their
+/// self-heal cadence is UNCHANGED by #717.
+pub fn sustained_tolerance_pct_for_model(model: GrabberModel) -> f64 {
+    match model {
+        GrabberModel::ShadowCast2 => SHADOWCAST2_SUSTAINED_TOLERANCE_PCT,
+        GrabberModel::NzxtSignalHd60 | GrabberModel::Elgato4kS | GrabberModel::Unknown => {
+            tolerance_pct_for_model(model)
+        }
+    }
+}
+
+// Both sides are `const`-derived; these are compile-time assertions (clippy: assertions_on_constants)
+// pinning the #717 two-band invariant: the sustained floor sits strictly BETWEEN the strict
+// default and ShadowCast 2's own wide jitter floor, and its required window count is strictly
+// longer than the jitter band's.
+const _: () = assert!(SHADOWCAST2_SUSTAINED_TOLERANCE_PCT < SHADOWCAST2_CAPTURE_RATE_TOLERANCE_PCT);
+const _: () = assert!(SHADOWCAST2_SUSTAINED_TOLERANCE_PCT > CAPTURE_RATE_TOLERANCE_PCT);
+const _: () = assert!(SUSTAINED_WARN_WINDOWS > CAPTURE_RATE_WARN_WINDOWS);
 
 /// True when `captured_fps` deviates from `configured_fps` by more than `tolerance_pct`
 /// percent. `configured_fps <= 0.0` (or any non-finite input) is treated as "no valid
