@@ -2547,8 +2547,11 @@ fn setup_imag_ignores_power_button_727() {
     // directives — scope the search to a bounded window right after the filename so this test
     // can't accidentally match an unrelated HandlePowerKey mention elsewhere in the script.
     let window = &body[powerkey_conf..(powerkey_conf + 400).min(body.len())];
-    for needle in ["HandlePowerKey=ignore", "HandleSuspendKey=ignore", "HandleHibernateKey=ignore"]
-    {
+    for needle in [
+        "HandlePowerKey=ignore",
+        "HandleSuspendKey=ignore",
+        "HandleHibernateKey=ignore",
+    ] {
         assert!(
             window.contains(needle),
             "{SETUP}: the #727 99-production-no-powerkey.conf drop-in must set `{needle}` — a \
@@ -2564,9 +2567,9 @@ fn setup_imag_ignores_power_button_727() {
 #[test]
 fn setup_imag_reloads_logind_after_powerkey_conf_727() {
     let body = read(SETUP);
-    let powerkey_conf = body
-        .find("99-production-no-powerkey.conf")
-        .expect("{SETUP} must have the #727 power-key drop-in (see setup_imag_ignores_power_button_727)");
+    let powerkey_conf = body.find("99-production-no-powerkey.conf").expect(
+        "{SETUP} must have the #727 power-key drop-in (see setup_imag_ignores_power_button_727)",
+    );
     let restart = body
         .find("systemctl restart systemd-logind")
         .expect("{SETUP} must restart systemd-logind to apply the logind.conf.d drop-ins");
