@@ -4006,3 +4006,28 @@ a follow-up if not done by the time this log entry is read.
   imag-nb resource-correlation investigation, (3) an update to the A/V UNKNOWN-reasons section
   superseding the old "only cam2 can ever be Measured" framing now that #714's derivation exists.
 - No version bump needed this cycle (`dev` well ahead of `main`, unchanged from prior cycles).
+
+## 2026-07-12 — #674 confirmation mission (closed with evidence) — no code changes, investigation only
+
+- **#674** (imag #588 optical judder root cause): confirmed the supervisor's unifying hypothesis
+  — imag's judder is a faithful pixel-level relay of cam1's own already-documented (#685)
+  ShadowCast-2 free-running-clock characteristic, not a downstream/software artifact. Method:
+  found the ACTUAL capture happens via a per-run transient `camera-box-burn-<RUN_ID>.service`
+  (not the persistent `camera-box.service` — that one is stopped during a recording), whose
+  stdout is redirected DIRECTLY to `/tmp/cbox-burn.log` on cam1 (never journald), truncated
+  before every new burn. Only the LATEST of the 3 target runs (`1740128460`) still had its raw
+  log; the other 2 (`760308236`, `1790862887`) were already overwritten by later CI activity —
+  filed **#716** to fix (persist the log to dev1 per run, mirroring `cam1-capture-stats.txt`).
+  For `1740128460`: per-window correlation showed cam1's captured rate rock-steady 63.9-64.0fps
+  in EVERY window (zero variation, zero capture-dropped, zero self-heal/WARN lines), matching
+  imag's 6.76-7.04% judder density almost exactly ((64-60)/60=6.67%) and matching #685's own
+  established mechanism ("internal resampling → duplicate-frame bursts") precisely. Independently
+  re-confirmed the ~63-64fps/~59-60fps pattern is ALWAYS-ON (checked live outside any recording).
+  The decline-shape run (`1790862887`) stays genuinely UNCONFIRMED — its raw data is gone, noted
+  honestly as a residual open lead, not chased into a new ticket. Closed #674 with full evidence
+  (`gh issue comment` + `gh issue close`); posted corroborating notes on #685 (correcting the
+  dispatch's guess: self-heal correctly did NOT fire, 6.67% is INSIDE the 10% envelope) and #688
+  (informational data point for a future physical-inspection pass, not a reprioritization ask).
+  Filed **#716**: persist cam-box burn-run fps logs to dev1 (currently overwritten before the
+  next run, blocking this exact kind of forensics).
+- No code changes, no version bump, no PR/CI cycle — pure GitHub-issue investigation dispatch.
