@@ -97,6 +97,11 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # opaque #627 liveness-check failure it would otherwise produce.
 # shellcheck source=scripts/lib/imag-gpu-guard.sh
 . "$HERE/lib/imag-gpu-guard.sh"
+# #711: Discord full-report sender (fail-open, reuses the existing bot-token #notifications
+# path — never a second sender) — called once the merge verdict is genuinely computed, in the
+# E2E_EXECUTE_VERDICT=1 branch of [8/8] below.
+# shellcheck source=scripts/lib/e2e-discord-report.sh
+. "$HERE/lib/e2e-discord-report.sh"
 camera_resolve "${CAM:-cam1}"
 # #24 item 1: this harness's SOURCE-camera role (the physical box filming cam2's monitor via
 # the optical loopback + carrying the #174 render-time capture burn) is one of
@@ -2167,6 +2172,8 @@ continuing WITHOUT the imag partial; the merge below will omit --merge-partials 
       python3 "$HERE/recording-e2e-report.py" --json "$REPORT_JSON" --out "$REPORT_PNG" || \
         echo "WARNING: report render failed (non-fatal; JSON at $REPORT_JSON)" >&2
     fi
+    echo "    [8/8f] #711: Discord full-report (fail-open — never affects \$GATE below)"
+    e2e_discord_report_send "$REPORT_JSON" "$RUN_ID" "$GATE" "$DURATION"
     echo "    --- [8/8e] cleanup plan (JSON secured at $REPORT_JSON) ---"
     if [ "${KEEP_RECORDINGS:-0}" = "1" ]; then
       echo "    KEEP_RECORDINGS=1 — skipping the recording-cleanup plan (debugging opt-out, #652)."

@@ -217,6 +217,13 @@ jobs:
           # is set by the fetch step immediately above (pull_request only). workflow_dispatch
           # (manual operator soak) is UNCHANGED — stays in plan-print mode for the MCP holder.
           E2E_EXECUTE_VERDICT: ${{ github.event_name == 'pull_request' && '1' || '0' }}
+          # #711: the SAME bot-token #notifications path ci.yml's/this workflow's own "Discord
+          # alert" steps already use (see .claude/skills/ci) — recording-e2e.sh's own
+          # E2E_EXECUTE_VERDICT=1 branch posts the full Slovak report via
+          # scripts/lib/e2e-discord-report.sh when the merge verdict is genuinely computed.
+          # Fail-open: a missing/failing POST here never fails this step (see that file's header).
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          DISCORD_CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_ID }}
         # #657: `exec` REPLACES this step's process image with recording-e2e.sh's own bash — a
         # plain `bash scripts/recording-e2e.sh` forks a NESTED child the Actions runner never
         # signals directly (empirically confirmed: it signals only the single top-level step PID

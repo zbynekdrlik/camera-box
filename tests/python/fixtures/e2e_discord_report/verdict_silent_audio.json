@@ -1,0 +1,44 @@
+{
+  "overall_pass": false,
+  "min_secs": 300.0,
+  "full_chain": {
+    "zero_loss": true,
+    "real_drops": 0,
+    "loss": {
+      "cam1": {"zero_loss": true, "real_drops": 0, "burn_unreadable": 0, "present_count": 1694, "expected_count": 1694},
+      "cam2": {"zero_loss": true, "real_drops": 0, "burn_unreadable": 0, "present_count": 1691, "expected_count": 1691}
+    }
+  },
+  "all_cambox_continuity": {
+    "overall_pass": true,
+    "segments": [
+      {"cambox": "CAM1", "pass": true, "copies": 0, "gaps": 0, "undecodable": 0, "frames": 847},
+      {"cambox": "CAM2", "pass": true, "copies": 0, "gaps": 0, "undecodable": 0, "frames": 847}
+    ],
+    "imag": {
+      "overall_pass": true,
+      "segments": [
+        {"cambox": "CAM1", "pass": true, "frames": 1695, "undecodable": 0},
+        {"cambox": "CAM2", "pass": true, "frames": 1694, "undecodable": 0}
+      ]
+    }
+  },
+  "all_cambox_latency": {
+    "cam1": {"mean_ms": 68.4, "jitter_ms": 8.2, "min_ms": 59.4, "max_ms": 81.6, "samples": 1687},
+    "cross_camera_spread_ms": 5.0,
+    "spread_gate_pass": true
+  },
+  "all_cambox_delivery_latency": {
+    "cam1": {"mean_ms": 71.2, "jitter_ms": 51.3, "min_ms": 20.5, "max_ms": 133.0, "samples": 2181},
+    "cam2": {"mean_ms": 71.1, "jitter_ms": 51.2, "min_ms": 20.5, "max_ms": 123.0, "samples": 1816},
+    "cross_camera_spread_ms": 0.1,
+    "spread_gate_pass": true
+  },
+  "all_cambox_av_sync": {
+    "cam1": {"node": "cam1", "verdict": "unknown", "av_offset_ms": null, "mad_ms": null, "candidates": 0, "cluster_samples": 0, "gate_pass": false},
+    "cam2": {"node": "cam2", "verdict": "unknown", "av_offset_ms": null, "mad_ms": null, "candidates": 0, "cluster_samples": 0, "gate_pass": false},
+    "expected_ms": 0.0,
+    "gate_tolerance_ms": 20.0,
+    "gate_pass": false
+  }
+}
