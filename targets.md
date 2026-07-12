@@ -22,9 +22,28 @@
 | CAM2 | 10.77.9.62 | Active | SSH: root/newlevel |
 | CAM3 | 10.77.9.63 | Active | SSH: root/newlevel |
 | CAM4 | 10.77.9.64 | Active | SSH: root/newlevel |
-| CAM5 | 10.77.9.65 | Provisioning | SSH: root/newlevel; fleet growing 4->6 (#451) |
-| CAM6 | 10.77.9.66 | Provisioning | SSH: root/newlevel; fleet growing 4->6 (#451) |
+| CAM5 | 10.77.9.65 | Active | SSH: root/newlevel; fleet grew 4->6 (#451), fully provisioned |
+| CAM6 | 10.77.9.66 | Active | SSH: root/newlevel; fleet grew 4->6 (#451), fully provisioned |
 | CAM7 | — | Not built | Never built — user only expressed future interest in a 7th camera (#593). Add a row with a real IP here when a physical cam7 box exists. |
+
+### Grabber cards — LIVE fleet assignment (verified 2026-07-12 via V4L2 `card` string, #728)
+
+**A physical card can move between boxes without the hostname changing — this table can drift.**
+`grabber_model_for_hostname` in `src/capture_rate_health.rs` is the OPERATIONAL/historical
+convention only; the code no longer trusts it blindly — `capture_rate_health::resolve_grabber_model`
+resolves the ACTUAL runtime card via `capture::query_card_name` (VIDIOC_QUERYCAP) at every boot and
+prefers that over this table whenever it's available. Re-verify with
+`v4l2-ctl -d /dev/videoN --info | grep 'Card type'` (or read `/sys/class/video4linux/videoN/name`)
+before trusting this table for anything operational.
+
+| Device | Grabber model | Capture node | Notes |
+|--------|---------------|--------------|-------|
+| CAM1 | Elgato 4K S | /dev/video1 | Swapped in 2026-07-12 (was ShadowCast 2, #728) |
+| CAM2 | ShadowCast 2 | /dev/video0 | Unchanged |
+| CAM3 | ShadowCast 2 | /dev/video0 | Unchanged |
+| CAM4 | NZXT Signal HD60 | /dev/video0 | Unchanged, no V4L2 picture controls exposed |
+| CAM5 | ShadowCast 2 | /dev/video0 | Swapped in 2026-07-12 (was Elgato 4K S, #728) — this is the SAME physical unit that used to sit in CAM1 |
+| CAM6 | Elgato 4K S | /dev/video1 | Unchanged |
 
 ## Linux OBS Targets (camera-box, #458)
 

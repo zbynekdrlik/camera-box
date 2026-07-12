@@ -73,6 +73,15 @@ Trustworthy E2E zero-loss proof from RECORDED OBS OUTPUT.
 broadcast camera (30fps) films monitor → cam1 ShadowCast → camera-box → "CAM1 (usb)" NDI →
 strih OBS PHASE2-PROBE program → stream OBS program. Both record locally.
 
+**#728 GOTCHA (2026-07-12): cam1's grabber card is no longer a ShadowCast.** The user
+physically swapped it with cam5's card — cam1 now has an **Elgato 4K S** on `/dev/video1`
+(cam5 now has the ShadowCast 2, on `/dev/video0`). The description above is historically
+accurate for when this proof was run (2026-06-17); read "cam1 ShadowCast" in older sections
+of this skill as "whatever grabber card cam1 had AT THE TIME" — check the LIVE fleet table
+in `targets.md` for the current assignment before assuming a specific model/device node.
+`grabber_model_for_hostname`'s static table is likewise OPERATIONAL/historical only —
+`capture_rate_health::resolve_grabber_model` resolves the actual RUNTIME card at boot.
+
 **Dual-QR Vernier (the method):** `frame-probe --paint-only --dual-qr` renders TWO QRs at 60Hz:
 LEFT=latest even tick, RIGHT=latest odd tick. ONE half changes per refresh (anti-blur, always ≥1
 cleanly decodable). Decode BOTH per recorded frame; `tick = max(left_even, right_odd)` = exact
@@ -114,9 +123,12 @@ renders its report via `scripts/recording-e2e-report.py` (in repo).
 ## Camera Pre-Run Checklist (#220) — cam1 optical settings the harness CANNOT auto-set
 
 The cam2→cam1 OPTICAL injection leg (cam1 broadcast camera filming the cam2 monitor QR) depends on
-the cam1 camera's MANUAL settings. The harness CANNOT read or set them: camera-box reads
-`/dev/video0` (the ShadowCast capture card), which does NOT expose the BMPCC's shutter/focus/
-exposure. `recording-e2e.sh` PRINTS this checklist at startup; satisfy it BEFORE every proof run:
+the cam1 camera's MANUAL settings. The harness CANNOT read or set them: camera-box reads whatever
+grabber card is CURRENTLY on cam1 (`/dev/video0` when it was the ShadowCast card; `/dev/video1`
+since the 2026-07-12 #728 swap to an Elgato 4K S — check `targets.md`'s live fleet table, never
+assume the device path), which does NOT expose the BMPCC's shutter/focus/exposure regardless of
+which grabber model is plugged in. `recording-e2e.sh` PRINTS this checklist at startup; satisfy it
+BEFORE every proof run:
 
 - **Shutter FAST: ≥ 1/500 s (ideally 1/1000)** — a slow shutter integrates a full 60Hz monitor
   refresh and SMEARS the dual-QR Vernier mid-change (one half changes per refresh), so the optical
