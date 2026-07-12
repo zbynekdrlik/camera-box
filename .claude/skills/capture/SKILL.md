@@ -184,3 +184,54 @@ Only save the handful of frames that look anomalous (or a few evenly-spaced samp
 100MB tmpfs fills after ~24 raw 1920×1080 YUYV frames (4,147,200 bytes each). To actually LOOK at
 a saved `.yuyv` frame, pull it to dev1 (`scp`) and `ffmpeg -f rawvideo -pixel_format yuyv422
 -video_size WxH -i frame.yuyv frame.png` (dev1 has ffmpeg/numpy/PIL; the cam boxes don't).
+
+## Content-hash discriminator — is duplication happening AT the raw capture stage? (#674)
+
+**Question this answers:** downstream (imag/strih) optical checks show duplicate-content judder on
+a camera whose reported capture RATE is clean (60-64fps, no drops, no stall) — is the duplication
+already present in the grabber's own raw V4L2 buffers, or is it introduced somewhere downstream
+(NDI transport, receiver-side decode)? This is the natural next question after the "roughness"
+corruption check above — same raw-capture setup, different per-frame statistic.
+
+**Method (confirmed live on cam1, #674, 2026-07-12):** with the shared monitor genuinely animating
+(painter in TEST mode — `scripts/rig-mode.sh test`, so there IS new content every capture tick;
+without this the test is meaningless, everything looks "duplicate"), open the raw device per the
+recipe above and for each frame compute TWO cheap, C-speed statistics — no numpy needed, none of
+the cam boxes have it:
+
+```python
+import hashlib
+full_hash = hashlib.blake2b(buf, digest_size=8).digest()     # exact-duplicate test (~1-3ms/4MB frame)
+sample = buf[::1024]                                          # ~4050 decimated bytes, mixed Y/U/V
+sad = sum(abs(a - b) for a, b in zip(sample, prev_sample))    # cheap "did content change" signal
+exact_dup = full_hash == prev_full_hash
+```
+
+- `exact_dup` (full-buffer byte-for-byte match vs the previous frame) is the actual duplicate test —
+  a UVC grabber re-delivering a stale buffer when its input/output clock phase drifts produces an
+  **exact** byte match, not a "close" one; don't bother with a fuzzy/tolerance compare for the
+  primary signal.
+- `sad` on the decimated sample is a cheap SANITY check, not the detector: confirms (a) the source
+  is genuinely animating almost every frame (min SAD across real-content pairs, NOT the min across
+  ALL pairs — non-duplicate pairs) should be enormous relative to the near-dup threshold — cam1's
+  #674 run measured min 38,384 vs a 2,000 threshold, a 19x margin, zero pairs fell in between), and
+  (b) `exact_dup` isn't accidentally missing "same content, different noise" cases — in that same
+  run every `exact_dup` also had `sad == 0` and NOTHING scored 0 < sad < threshold, i.e. ShadowCast's
+  duplicate frames are perfect byte copies, not merely similar. Log `(idx, seq, t_monotonic, err,
+  exact_dup, sad)` per frame to a tiny CSV (bytes, not the raw frames) — the 100MB tmpfs never fills.
+- **Exclude the first ~2s as a startup transient before computing a duplication rate** — the #674
+  run showed 91% "duplicate" in the first ~45 frames right after `dev.open()` (buffer/queue still
+  settling), which is a capture-open artifact, not the phenomenon under test. Steady-state rate =
+  duplicates / frames over `t_monotonic > first_t + 2.0`.
+- **Cross-check the rate arithmetically**: `(achieved_fps - target_fps) / achieved_fps` should be
+  close to the measured duplicate-pair rate if the mechanism is "free-running clock repeats a frame
+  whenever input/output phase drifts through a beat" (#685's ShadowCast-2 model characteristic) — a
+  match here (cam1, #674: 4.3% arithmetic vs 4.23% measured) is strong independent confirmation you
+  found the right thing, not a coincidental artifact of your own detector.
+- **`/dev/videoN` numbering can shift** — a UVC device that drops/re-enumerates on USB (visible as
+  repeated `Found UVC 1.00 device` lines in `dmesg`) gets a NEW `/dev/videoN` node; check
+  `/sys/class/video4linux/videoN/name` + `index` (the capture node is `index 0`, a second node for
+  the same card is usually a metadata/still node at `index 1`) rather than assuming `/dev/video0`.
+  This project's own `config.toml` uses `device = "auto"`, so camera-box's own restart is unaffected
+  by the renumbering — but YOUR raw-capture script must open whichever node is currently the capture
+  one, not a hardcoded `/dev/video0`.

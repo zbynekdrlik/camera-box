@@ -2,6 +2,41 @@
 
 Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads context.
 
+## 2026-07-12 (afternoon) — #674 (confirmed+closed, mechanism nailed at raw V4L2 stage)
+
+- **#674** (imag/strih #588 optical judder investigation, this session's SOLO discriminator
+  dispatch): ran the supervisor's own decisive discriminator — the #696 raw-v4l2 capture technique
+  on cam1 (10.77.9.61), content-hashing consecutive raw frames straight off `/dev/video1` (bypassed
+  camera-box/NDI/genlock entirely; the device had re-enumerated off `/dev/video0` from unrelated USB
+  churn, `config.toml device="auto"` kept camera-box's own restart unaffected).
+- Put cam2 in TEST mode (`rig-mode.sh test`) so the shared monitor genuinely animated (dual-QR
+  vernier, 60fps) during the 45s raw capture window (shortened from the planned 60-120s — a live
+  event was approaching this session; still fully decisive).
+- **Result: 4.23% byte-exact duplicate frame pairs (blake2b full-buffer hash) in steady state
+  (excluding a ~2s device-settle transient), at a clean 62.4-62.7fps reported raw capture rate.**
+  Every duplicate pair was a PERFECT byte match (decimated-sample SAD=0); every non-duplicate pair
+  had SAD >= 38,384 (19x the near-dup threshold) — a completely clean bimodal split, no ambiguous
+  middle ground. The excess-rate arithmetic (62.7-60.0)/62.7 = 4.3% matches the measured 4.23%
+  almost exactly — the same arithmetic already seen downstream at imag/strih in this issue's earlier
+  comments, now reproduced quantitatively at the RAW capture stage.
+- **Mechanism NAILED per the supervisor's own discriminator criterion**: ShadowCast delivers
+  byte-identical duplicate frame content directly at the V4L2 capture stage while its reported rate
+  reads clean/in-tolerance (#685/#717's tolerance envelope correctly stays silent — the RATE is
+  fine, the CONTENT repeats). Not a downstream NDI/software artifact. Not reset-fixable in software
+  when the rate already reads in-tolerance. The imag/strih #588 judder gates are confirmed correctly
+  detecting a real physical defect — no gate change recommended.
+- Posted full methodology + numbers to #674, closed with evidence. Cross-posted a routing note to
+  #688 (the physical-discrimination technician session) since the mechanism is now the physical
+  layer, not software.
+- Rig restored to clean EVENT state immediately after capture (a live-event notice arrived
+  mid-task): cam1 `camera-box` active/streaming, cam2 painter stopped + permanent painter service
+  restored, OBS burns OFF on strih/stream/imag, `rig-busy-check` clean, rig-active heartbeat
+  cleared, nothing recording.
+- **Playbook fix (this session, committed):** added the content-hash discriminator technique
+  (exact-hash + decimated-sample SAD sanity check, startup-transient exclusion, rate cross-check,
+  `/dev/videoN` renumbering gotcha) to `.claude/skills/capture` as a reusable addendum to the #696
+  raw-v4l2 recipe. No code change, no version bump, no PR/CI cycle (docs-only).
+
 ## 2026-07-12 (morning) — #710 (fixed+closed) / #712 (fixed+closed) / #690 (partial, held) — bundled, PR #704 still held (v1.7.0-dev.349)
 
 - **#710** (obs_phase2.py #627 liveness check false-abort on a cold OBS restart's first
