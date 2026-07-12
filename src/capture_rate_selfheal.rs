@@ -320,6 +320,22 @@ pub fn is_interface_level_busid(busid: &str) -> bool {
     busid.contains(':')
 }
 
+/// #717 — two-band capture-rate self-heal trigger. Self-heal should fire once EITHER band
+/// confirms a defect: the existing wide JITTER band (`capture_rate_health::
+/// tolerance_pct_for_model` + `capture_rate_health::CAPTURE_RATE_WARN_WINDOWS`, 30s) OR the new
+/// narrow SUSTAINED band (`capture_rate_health::sustained_tolerance_pct_for_model` +
+/// `capture_rate_health::SUSTAINED_WARN_WINDOWS`, 60s). #685 widened ShadowCast 2's jitter floor
+/// to 10% so its characteristic short-lived quantization wobble (band (a)) never even reaches
+/// this decision — but that same wide floor ALSO swallowed a genuinely SUSTAINED, reset-fixable
+/// defect (band (b): #674's chronic 63.9-64.0fps, held for an entire recording). For every model
+/// except ShadowCast 2 the sustained band uses the SAME tolerance as the jitter band
+/// (`sustained_tolerance_pct_for_model` degenerately returns `tolerance_pct_for_model` for them),
+/// so their sustained arm is a strict superset of their own jitter arm's own 30s trigger and can
+/// never fire earlier — #717 changes NOTHING about their self-heal cadence.
+pub fn should_trigger_selfheal(jitter_confirmed: bool, sustained_confirmed: bool) -> bool {
+    jitter_confirmed || sustained_confirmed
+}
+
 /// Perform the actual USB reset on the capture device backing `video_device_path` (e.g.
 /// `/dev/video1`) — mirrors the manually-verified #656 fix sequence: uvcvideo unbind (best-effort;
 /// the `authorized` toggle below is what actually forces re-enumeration, so a failed/missing
