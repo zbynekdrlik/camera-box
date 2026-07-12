@@ -425,6 +425,30 @@ pub fn perform_usb_reset(video_device_path: &str) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
+    // #717 RED marker: `should_trigger_selfheal` is NOT YET IMPLEMENTED — these tests reference
+    // it already (RED commit: proves via compile failure the two-band OR combinator does not
+    // exist yet). Implemented in the immediately-following GREEN commit.
+
+    #[test]
+    fn selfheal_triggers_on_jitter_band_alone() {
+        assert!(should_trigger_selfheal(true, false));
+    }
+
+    #[test]
+    fn selfheal_triggers_on_sustained_band_alone() {
+        assert!(should_trigger_selfheal(false, true));
+    }
+
+    #[test]
+    fn selfheal_triggers_when_both_bands_confirm() {
+        assert!(should_trigger_selfheal(true, true));
+    }
+
+    #[test]
+    fn selfheal_does_not_trigger_when_neither_band_confirms() {
+        assert!(!should_trigger_selfheal(false, false));
+    }
+
     const T0: u64 = 1_000_000;
 
     #[test]
