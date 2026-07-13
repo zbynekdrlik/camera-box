@@ -102,6 +102,12 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # opaque #627 liveness-check failure it would otherwise produce.
 # shellcheck source=scripts/lib/imag-gpu-guard.sh
 . "$HERE/lib/imag-gpu-guard.sh"
+# #748: pre-record measurement-audio presence preflight (pure parser + silent/audible classifier +
+# operator messages + remote command builders) — the mbc measurement chain feeds the whole A/V-sync
+# leg; a silent chain must FAIL the run loudly, never burn a cycle reported as a quiet av_sync
+# "unknown, candidates: 0" (the run 237189640 silence that went unnoticed for a week).
+# shellcheck source=scripts/lib/audio-presence-preflight.sh
+. "$HERE/lib/audio-presence-preflight.sh"
 # #711: Discord full-report sender (fail-open, reuses the existing bot-token #notifications
 # path — never a second sender) — called once the merge verdict is genuinely computed, in the
 # E2E_EXECUTE_VERDICT=1 branch of [8/8] below.
@@ -1187,6 +1193,45 @@ for _hbs in "${BURN_TARGETS[@]}"; do  # #252: shared burn triples (same set clea
   fi
   echo "    [$_bn burn-check] OK — burns ON (genlock_burn=true on '$_bsrc', runtime, no relaunch)"
 done
+
+echo "[4b2/8] #748 audio-presence preflight — the mbc measurement chain MUST be audible before recording"
+# The A/V-sync leg reads the mbc measurement audio (speaker -> church PA mic -> mbc -> Dante ->
+# stream OBS); a silent chain makes every A/V number meaningless. Make a SHORT probe recording on
+# the stream box (the mbc audio rides the stream program recording), run ffmpeg volumedetect on the
+# box via win_ssh_run, and FAIL LOUD if the track is silent — so a dead measurement chain never
+# again burns a full cycle reported only as a quiet av_sync "unknown, candidates: 0" (#748). Every
+# knob is env-overridable like the sibling gates; a short probe guarding the whole run is the
+# sanctioned exception to the one-full-test rule (a preflight, not a partial measurement).
+AUDIO_PREFLIGHT_ENABLE="${AUDIO_PREFLIGHT_ENABLE:-1}"
+AUDIO_PREFLIGHT_THRESHOLD_DB="${AUDIO_PREFLIGHT_THRESHOLD_DB:--60}"
+AUDIO_PREFLIGHT_PROBE_SECS="${AUDIO_PREFLIGHT_PROBE_SECS:-15}"
+AUDIO_PREFLIGHT_SSH_TIMEOUT="${AUDIO_PREFLIGHT_SSH_TIMEOUT:-90}"
+if [ "$AUDIO_PREFLIGHT_ENABLE" = "1" ]; then
+  # Short throwaway probe recording on stream. A leftover from an abort in the ~15s window self-heals:
+  # the next run's --action start stops any orphan (obs_phase2.py record) before it re-records.
+  python3 "$HERE/obs_phase2.py" record --host "$STREAM" --action start >/dev/null
+  sleep "$AUDIO_PREFLIGHT_PROBE_SECS"
+  _ap_path="$(python3 "$HERE/obs_phase2.py" record --host "$STREAM" --action stop || true)"
+  if [ -z "$_ap_path" ]; then
+    echo "ERROR: $(audio_preflight_norec_message)" >&2
+    exit 1
+  fi
+  _ap_out="$(timeout "$AUDIO_PREFLIGHT_SSH_TIMEOUT" win_ssh_run "$STREAM_USER" "$STREAM_PW" "$STREAM" "$(audio_preflight_volumedetect_ps "$_ap_path")" 2>&1 || true)"
+  win_ssh_run "$STREAM_USER" "$STREAM_PW" "$STREAM" "$(audio_preflight_delete_ps "$_ap_path")" >/dev/null 2>&1 || true
+  _ap_db="$(audio_preflight_parse_max_db "$_ap_out" || true)"
+  if [ -z "$_ap_db" ]; then
+    echo "ERROR: $(audio_preflight_unreadable_message)" >&2
+    echo "       raw volumedetect output: $_ap_out" >&2
+    exit 1
+  fi
+  if [ "$(audio_preflight_is_silent "$_ap_db" "$AUDIO_PREFLIGHT_THRESHOLD_DB")" = "true" ]; then
+    echo "ERROR: $(audio_preflight_silent_message "$_ap_db" "$AUDIO_PREFLIGHT_THRESHOLD_DB")" >&2
+    exit 1
+  fi
+  echo "    ok: mbc measurement audio AUDIBLE (max_volume ${_ap_db} dB >= ${AUDIO_PREFLIGHT_THRESHOLD_DB} dB threshold)"
+else
+  echo "    [audio-presence preflight] SKIPPED (AUDIO_PREFLIGHT_ENABLE=0)"
+fi
 
 echo "[4c/8] #365 frozen-camera gate — every strih raw NDI input must be updating (not a frozen feed)"
 # #747: the gate WARMS each camera input itself before sampling — there is NO external

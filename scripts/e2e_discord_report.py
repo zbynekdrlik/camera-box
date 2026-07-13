@@ -300,6 +300,10 @@ def _section_av_sync(verdict):
 
     if all_silent and cams:
         lines.append("  ↳ A/V: UNKNOWN — tichá stopa (žiadna kamera nezachytila zvukovú značku)")
+        # #748: never leave the operator with a bare "unknown" — say WHICH chain link to check.
+        lines.append(
+            "  ⚠️ MERACÍ ZVUK TICHÝ — skontroluj mbc Ableton kanál (mute) + Dante routing do stream OBS (#748)"
+        )
 
     tolerance = block.get("gate_tolerance_ms")
     gate_pass = block.get("gate_pass")
