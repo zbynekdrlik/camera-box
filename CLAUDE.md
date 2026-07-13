@@ -167,28 +167,42 @@ wrong PR with no review of it.
   The supervisor should prefer serial dispatch or per-worker `git worktree` isolation for this
   repo going forward.
 
-## GOTCHA — editing `scripts/recording-e2e.sh` can silently break OTHER test files' static anchors
+## GOTCHA — editing `scripts/recording-e2e.sh` (OR `scripts/rig-mode.sh`) can silently break OTHER test files' static anchors
 
-Many separate `tests/harness_*.rs` files independently `.find()` literal substrings/adjacency in
-`scripts/recording-e2e.sh` (a banner like `"[5/8] StartRecord"`, or structural adjacency like
-`fi\ntrap cleanup EXIT`) to pin ordering/structure — the same static-string-assertion model
-`tests/harness_recording_e2e_cleanup_resilient.rs` (#328) established, now reused across many
-unrelated features (`#137` av-restart-sync, `#286` all-cambox burn targets, `#649` StopRecord
-ordering, etc.). A new comment or code line you add to this file CAN accidentally (1) duplicate a
-literal anchor another test's `.find()` relies on — `.find()` returns the FIRST match in the WHOLE
-file, not the occurrence near your own edit — or (2) break a textual adjacency two unrelated tests
-hard-code (e.g. inserting a line between an `if` block's closing `fi` and the following `trap
-cleanup EXIT HUP INT TERM` line).
+Many separate `tests/harness_*.rs` / `tests/rig_mode.rs` files independently `.find()`/`.split()`
+literal substrings/adjacency in `scripts/recording-e2e.sh` OR `scripts/rig-mode.sh` (a banner like
+`"[5/8] StartRecord"`, a bare function-name anchor like `.split("do_event()")`, or structural
+adjacency like `fi\ntrap cleanup EXIT`) to pin ordering/structure — the same static-string-assertion
+model `tests/harness_recording_e2e_cleanup_resilient.rs` (#328) established, now reused across many
+unrelated features in BOTH files (`#137` av-restart-sync, `#286` all-cambox burn targets, `#649`
+StopRecord ordering, `#524`'s `event_mode_calls_stop_stray_recordings_guard`, etc.). A new comment
+or code line you add to EITHER file CAN accidentally (1) duplicate a literal anchor another test's
+`.find()`/`.split()` relies on — `.find()` returns the FIRST match in the WHOLE file, and
+`.split(X).nth(1)` grabs the segment AFTER the SECOND occurrence of `X`, not the occurrence near
+your own edit — or (2) break a textual adjacency two unrelated tests hard-code (e.g. inserting a
+line between an `if` block's closing `fi` and the following `trap cleanup EXIT HUP INT TERM` line).
 
-**Confirmed live (#649, 2026-07-10):** a new `cleanup()` comment containing the literal text
-`[5/8] StartRecord` broke 3 tests in `tests/harness_av_restart_sync_gate.rs` (the `#137` gate,
-which anchors on that exact string to slice "everything before the main record step"); and adding
-new variable declarations directly before `trap cleanup EXIT HUP INT TERM` broke
+**Confirmed live (#649, 2026-07-10, recording-e2e.sh):** a new `cleanup()` comment containing the
+literal text `[5/8] StartRecord` broke 3 tests in `tests/harness_av_restart_sync_gate.rs` (the
+`#137` gate, which anchors on that exact string to slice "everything before the main record
+step"); and adding new variable declarations directly before `trap cleanup EXIT HUP INT TERM` broke
 `recording_e2e_all_cambox_extends_burn_targets_to_every_strih_input_286` in
 `tests/harness_recording_e2e_paths.rs` (which hard-codes that the `#286` ALL_CAMBOX block's
 closing `fi` is immediately followed by `trap cleanup EXIT`).
 
-**Mitigation:** after ANY edit to `scripts/recording-e2e.sh`, run the FULL `cargo test` suite —
+**Confirmed live (#722, 2026-07-13, rig-mode.sh — the SAME class, a DIFFERENT file):** a new
+comment reading "...sent by `do_event()` AFTER this function returns..." — placed INSIDE
+`event_mode_assert()`, BEFORE the real `do_event() {` definition — broke
+`event_mode_calls_stop_stray_recordings_guard` in `tests/rig_mode.rs`, which extracts the function
+body via `s.split("do_event()").nth(1)`. With TWO occurrences of the literal text `do_event()` (the
+new comment, then the real definition), `.nth(1)` grabbed the segment BETWEEN them (a few lines of
+comment) instead of the real function body — the test's failure message printed the WRONG slice
+(the comment text), which is the tell: if a `.split()`/`.find()`-based test's failure output looks
+like the wrong region of the file, suspect a duplicated anchor, not a logic regression. Fix: reword
+the comment so it never contains the bare function-name-with-parens text (e.g. "the EVENT-mode
+caller" instead of "`do_event()`") when that text sits BEFORE the real definition in the file.
+
+**Mitigation:** after ANY edit to `scripts/recording-e2e.sh` OR `scripts/rig-mode.sh`, run the FULL `cargo test` suite —
 not just your own new/targeted test file — before pushing (`cargo test # airuleset:build-ok`
 locally bypasses the Tier-0 build-block for this one-off check; Tier-0 policy is otherwise
 `cargo test --no-run` only, see below). A failure elsewhere in the suite right after touching this

@@ -2,6 +2,85 @@
 
 Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads context.
 
+## 2026-07-13 — #722+#723+#724+#725 (2026-07-12 on-air QR incident set): all four shipped, TDD throughout, live-verified
+
+Bundled batch, PR #704 already open/held (#707+#689+#737 — no new PR opened, per dispatch
+instruction). Commits: `5f627c000` (version bump 351), then per-ticket RED→GREEN pairs for
+#725, #723, #722 (5 sub-commits: pure decision layer, pixel-proof gather, fleet/artifacts
+builders + wiring, then a self-match bugfix found live), #724, plus `78b34d4f9` (the live
+self-match fix).
+
+- **#725** — `scripts/lib/marker-device-resolve.sh`: resolves the QPSK marker's ALSA device from
+  cam2's live `aplay -l` (a device carries a genuine monitor when its bracketed name differs
+  from its generic `HDMI N` slot label — the owner's corrected premise, no eld#-file
+  numbering). Wired into `rig-mode.sh do_test()` with a post-launch re-check. Fixture built
+  from the ticket's own quoted excerpt (cam2 SSH down for the unrelated #737 reason at
+  authoring time). `tests/harness_marker_device_resolve_725.rs` (8 tests).
+- **#723** — `scripts/lib/rig-test-ledger.sh`: durable PID/unit registration + a 1h safety cap
+  (overridable with a stated reason); `rig-mode.sh event`'s `event_mode_ledger_cleanup()` reads
+  the ledger and terminates every entry BY PID (SIGTERM→bounded SIGKILL→#660 fb0 fallback) —
+  immune to a renamed binary (the #721 incident: a worker's renamed `cam2-painter`, 24h
+  duration, evaded every name-based cleanup). Wired into both rig-mode.sh's painter launch and
+  recording-e2e.sh's (via the safe append-after-anchor pattern, #675 — never touching the
+  existing SSH command block text). `tests/harness_rig_test_ledger_723.rs` (16 tests) proves
+  the fixture requirement with REAL spawned renamed processes (one cooperative, one
+  SIGTERM-ignoring) — required a `Fixture` struct with a background reaper thread since Rust's
+  bare `Child` handle doesn't auto-reap (a `kill -0` on an un-reaped zombie reads "alive"
+  forever otherwise).
+- **#722** — `scripts/event_assert.py`: the pure 8-item decision + aggregation layer (any ONE
+  item failing fails the whole contract; several items fail CLOSED on missing/empty facts).
+  `scripts/qr_screenshot_check.py`: the pixel-proof gather (real OBS WS screenshot +
+  `cv2.QRCodeDetector` decode — no new runtime dep needed, cv2 already present; `qrcode` is
+  test-only for generating fixtures). `obs_phase2.py` gained `stream-status` and
+  `latency-check` (restore-or-fail) actions. `scripts/lib/event-assert.sh` +
+  `event_mode_assert()` (rig-mode.sh) orchestrate all 8 items into one facts JSON; `do_event()`
+  exits with the verdict. **Live-caught + fixed a real bug during verification**: the fleet
+  paint-process check self-matched its own ssh invocation text (`pgrep -f` matching the
+  enclosing `bash -c "$SCRIPT"` process's cmdline) — every cam box falsely reported
+  `PAINT_COUNT=2`. Fixed via base64-encoding the search pattern in the script's source text; a
+  SECOND bug in the same function (`pgrep -c`/`systemctl is-active` print their own value even
+  on non-zero exit, so `$(cmd || echo fallback)` double-printed) fixed the same way. Both
+  documented in `.claude/skills/ops` (new gotcha, extends #626/#640). `tests/
+  harness_event_assert_wired_722.rs` (10 tests, incl. 2 that reproduce the self-match with the
+  REAL system pgrep, no live rig needed) + `tests/python/test_event_assert.py` (30) + `tests/
+  python/test_qr_screenshot_check.py` (6) + `tests/python/test_obs_phase2_event_assert_actions.py` (6).
+- **#724** — `scripts/lib/event-mode-discord-confirm.sh`: after the #722 assert phase, ONE
+  Slovak message to the owner's Discord thread with @mention, on BOTH outcomes — reuses the
+  #719 owner-thread model but, per the ticket's own instruction, NEVER falls back to
+  `#notifications` (genuinely-absent owner vars just skip, fail-open, logged loudly).
+  `event_assert.py` gained `format_discord_message_sk` + `--discord-out`. `tests/
+  harness_event_mode_discord_confirm_724.rs` (6 tests, same fake-curl pattern as the #719
+  test).
+
+**Live verification** (cam2 unreachable all session — confirmed via direct SSH attempt,
+`kex_exchange_identification: read: Connection reset by peer`, matching #737's already-tracked
+failing-storage state; per dispatch instruction, cam2 live-apply was SKIPPED entirely — nothing
+deployed/restarted there): every OTHER reachable component was exercised for real —
+`stream-status`/`record status`/`obs_burn_filter check` against strih+stream+imag (all clean:
+burns off, nothing recording/streaming); `qr_screenshot_check.py` against strih's 4 canonical
+scenes (real screenshot + real decode, 0 QR found); `set-ndi-mapping.py --verify-only` (clean,
+6 inputs correctly bound); `latency-check` against stream's `NDI 2ME PGM` (925ms == 925ms
+calibrated, no restore needed); the fleet check against cam1/cam3/cam4/cam5/cam6 (all clean
+after the self-match fix); the ledger register/read/clear/terminate-by-PID cycle against cam1's
+real filesystem and a real spawned process there. The Discord sender: sent BOTH a pass-shaped
+message and a REAL fail-shaped message (assembled from the actual gathered live facts, honestly
+showing cam2 as FAILING per the fail-closed design) to the owner's thread, confirmed via API
+read-back (message ids `1526139063856533665` / `1526139222464008264`).
+
+Full local suite throughout: 256 Rust test binaries (0 failed), 407/407 python tests,
+`shellcheck -S warning` clean, `cargo fmt`/`clippy -D warnings` clean. CI (push
+`78b34d4f9`) monitored to green.
+
+Note: dev1's local `pytest-html` plugin is broken (`ModuleNotFoundError: jinja2`, an
+externally-managed PEP 668 pip environment issue predating this session) — use
+`PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest tests/python` locally until fixed; CI is
+unaffected (fresh runner, `pip install` in the workflow).
+
+Findings landed on tickets as they happened; playbook updated: `.claude/skills/ops` (new
+self-match/double-print gotcha, #722), `CLAUDE.md`'s existing static-anchor GOTCHA extended to
+confirm it also applies to `rig-mode.sh` (not just `recording-e2e.sh`).
+
+
 ## 2026-07-13 (night) — #707 post-switch bandwidth-ramp hypothesis (3rd supervisor follow-up): REFUTED code+data, investigation loop closed per dispatch
 
 - **3rd follow-up dispatch**: the anatomy's front-loaded-burst shape suggested a NEW mechanism —

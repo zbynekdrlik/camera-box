@@ -908,6 +908,44 @@ systemctl is-active camera-box             # confirm active, then fuser /dev/fb0
 Check ALL of cam2/cam3/cam4/cam5/cam6 (not just the one you noticed) — an interrupted ALL_CAMBOX
 run orphans all of them at once, not just one.
 
+## #722 — the SAME self-match footgun also hits `pgrep -c -f` (read-only, not just `pkill -f`), and two commands double-print their own value on "failure"
+
+The #626/#640 self-match above is about `pkill -f` SELF-KILLING mid-script (silent, catastrophic).
+`pgrep -c -f PATTERN` has the identical root cause but a subtler symptom: it doesn't kill
+anything, it just returns a WRONG COUNT. Live-caught (2026-07-13, the #722 EVENT-mode CONTRACT's
+fleet paint-process sweep): `ssh cam1 "PAINT_COUNT=\$(pgrep -c -f -- --paint-only ...); ..."`
+reported `PAINT_COUNT=2` on every cam box, even with zero real painters running — the ENCLOSING
+`bash -c "$WHOLE_SCRIPT"` process's own `/proc/PID/cmdline` contains the literal search pattern
+(it's part of the script text ssh sends), so `pgrep -f` counts that shell itself as a match.
+
+**When the anchor trick (#626/#640) doesn't apply** — you're searching for a literal FLAG
+(`--paint-only`) that could legitimately appear anywhere in a real target's argv, so there's no
+digit/letter boundary to anchor against — **obfuscate the pattern instead**: base64-encode it in
+the script's SOURCE TEXT, decode into a runtime variable, search on the DECODED value. The literal
+substring then never appears in any process's cmdline except a genuine match's own:
+```bash
+pattern_b64="$(printf '%s' --paint-only | base64 | tr -d '\n')"   # built LOCALLY, dev1-side
+# embedded into the remote script as literal source text — the ONLY occurrence of the base64
+# blob, never the raw pattern:
+cat <<REMOTE
+PAINT_PATTERN=\$(printf '%s' '$pattern_b64' | base64 -d)
+PAINT_COUNT=\$(pgrep -c -f -- "\$PAINT_PATTERN" 2>/dev/null)
+REMOTE
+```
+Before writing ANY `pgrep -f`/`pkill -f`/`grep -f`-style check whose pattern text will appear
+verbatim in the ssh command string itself, ask: can the anchor trick work here (a target-only
+argv boundary), or does the pattern need obfuscating (a literal flag/string with no safe anchor)?
+
+**Second, unrelated bug in the SAME check, same incident:** `pgrep -c` prints its own count
+(even `"0"` on zero matches) but ALSO exits NON-ZERO when the count is 0 — and `systemctl
+is-active` prints its own state word (`inactive`/`failed`/...) while ALSO exiting non-zero for
+anything but `active`. A naive `VAR=$(cmd || echo fallback)` then DOUBLE-PRINTS: `cmd`'s own
+stdout PLUS the fallback, e.g. `PAINT_COUNT="0\n0"` or `SERVICE_ACTIVE="inactive\nunknown"`. Fix:
+trust the command's own printed value; only substitute a fallback when the variable is genuinely
+EMPTY: `VAR=$(cmd 2>/dev/null); VAR="${VAR:-fallback}"` — never `$(cmd || echo fallback)` for any
+command that prints a value on its "failure" exit path (`pgrep -c`, `systemctl is-active`, and
+likely others — check what a command prints on ITS OWN non-zero path before reaching for `||`).
+
 ## #625 — a RECORDED-order tick/id walk misreads a benign stream-recording reorder as a fault
 
 The stream recording is documented (`#133`/`#196`/`#216`) to occasionally deliver a frame
