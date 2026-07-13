@@ -1653,6 +1653,69 @@ def record(a):
         ws.close()
 
 
+def stream_status(a):
+    """#722 EVENT-mode CONTRACT item 4: read-only `GetStreamStatus`, printed the SAME
+    "active=<bool> path=<...>" shape `record --action status` already uses (path is always
+    empty for streaming -- there's no output file -- kept for a stable, easily-`grep`able
+    two-field format across both actions). Never starts/stops anything -- this is a pure check,
+    the streaming-side counterpart of `record --action status`."""
+    ws = _conn(a.host, a.password)
+    try:
+        s = _rpc(ws, "GetStreamStatus")
+        print(f"active={s.get('outputActive', False)} path=")
+    finally:
+        ws.close()
+
+
+def latency_check(a):
+    """#722 EVENT-mode CONTRACT item 6: is *a.source*'s `genlock_latency_ms_src` (on *a.host*)
+    equal to the CALIBRATED value from av-sync-last.json (the #691 stomp-protection prod source
+    of truth)? If not, RESTORE it to the calibrated value (a test window may have left it off --
+    event mode must actively fix this, not just report it) and re-verify. Prints
+    "current=<int|unknown> calibrated=<int> restored=<bool> final=<int|unknown>" and exits 0 iff
+    the FINAL value (after any restore attempt) matches the calibrated value -- exits 1 if it
+    could not be brought back in line (never silently reports success on an unrestored
+    mismatch)."""
+    ws = _conn(a.host, a.password)
+    try:
+        settings = _rpc(ws, "GetInputSettings", {"inputName": a.source}, ignore_err=True).get(
+            "inputSettings", {}
+        )
+        current = settings.get(_GENLOCK_SRC_LATENCY_KEY)
+        restored = False
+        final = current
+        if current != a.calibrated_ms:
+            sys.stderr.write(
+                f"[latency-check] {a.host}: '{a.source}' {_GENLOCK_SRC_LATENCY_KEY}={current!r} "
+                f"!= calibrated={a.calibrated_ms} -- RESTORING to the calibrated value.\n"
+            )
+            _rpc(
+                ws,
+                "SetInputSettings",
+                {
+                    "inputName": a.source,
+                    "inputSettings": {_GENLOCK_SRC_LATENCY_KEY: a.calibrated_ms},
+                    "overlay": True,
+                },
+                ignore_err=True,
+            )
+            readback = _rpc(
+                ws, "GetInputSettings", {"inputName": a.source}, ignore_err=True
+            ).get("inputSettings", {})
+            final = readback.get(_GENLOCK_SRC_LATENCY_KEY)
+            restored = True
+        ok = final == a.calibrated_ms
+        print(f"current={current} calibrated={a.calibrated_ms} restored={restored} final={final}")
+        if not ok:
+            sys.stderr.write(
+                f"FAIL: [latency-check] {a.host}: '{a.source}' could not be brought to the "
+                f"calibrated value {a.calibrated_ms} (final={final!r}) -- manual check required.\n"
+            )
+        sys.exit(0 if ok else 1)
+    finally:
+        ws.close()
+
+
 def switch(a):
     """#312 Phase-2 all-cambox sweep: cut strih PROGRAM to *a.program_scene* and confirm it
     renders NON-BLACK, then print the switch wall-clock epoch-ns (``time.time_ns()``) on stdout.
@@ -1883,7 +1946,10 @@ def program_scene(a):
 def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name in ("setup", "teardown", "record", "prod-scene", "switch", "program-scene"):
+    for name in (
+        "setup", "teardown", "record", "prod-scene", "switch", "program-scene",
+        "stream-status", "latency-check",
+    ):
         p = sub.add_parser(name)
         p.add_argument("--host", required=True)
         p.add_argument("--password", default="")
@@ -1892,6 +1958,14 @@ def main():
                 "--action", required=True,
                 choices=("start", "stop", "status", "guard"),
             )
+        if name == "latency-check":
+            # #722 EVENT-mode CONTRACT item 6: the per-source input to check/restore (typically
+            # the stream box's 'NDI 2ME PGM' program-genlock input) + the calibrated value from
+            # av-sync-last.json (gathered by the caller, this process has no ssh/scp path of its
+            # own to read that file directly -- same constraint drift-guard.sh and
+            # _restore_test_latency already document for the SAME file).
+            p.add_argument("--source", required=True)
+            p.add_argument("--calibrated-ms", type=int, required=True)
         if name == "prod-scene":
             # #163: route program to a CERTIFIED PROD scene and record IT (no colliding
             # probe ndi_source). --program-scene is the existing prod scene to record;
@@ -1967,7 +2041,8 @@ def main():
     a = ap.parse_args()
     {"setup": setup, "teardown": teardown, "record": record,
      "prod-scene": prod_scene, "switch": switch,
-     "program-scene": program_scene, "rig-busy-check": rig_busy_check}[a.cmd](a)
+     "program-scene": program_scene, "rig-busy-check": rig_busy_check,
+     "stream-status": stream_status, "latency-check": latency_check}[a.cmd](a)
 
 
 if __name__ == "__main__":
