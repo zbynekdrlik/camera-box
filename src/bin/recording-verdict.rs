@@ -44,8 +44,8 @@ use camera_box::probe::burn_contiguity::{
     BurnRate, InWindowMissingKind, NodeContiguity, RecordedBurnFrame,
 };
 use camera_box::probe::recording::{
-    analyze_recording_with_burns, analyze_recording_with_grouped_burns_optical,
-    extract_frames_png, select_frames_to_extract, RecordingFrame, DEFAULT_MAX_PIXEL_PROOF,
+    analyze_recording_with_burns, analyze_recording_with_grouped_burns_optical, extract_frames_png,
+    select_frames_to_extract, RecordingFrame, DEFAULT_MAX_PIXEL_PROOF,
 };
 use camera_box::probe::recording_latency::{
     burn_ids_in, burn_ids_with_frame_index_in, cam2_cam1_samples, cam2_cam1_samples_from_burn,

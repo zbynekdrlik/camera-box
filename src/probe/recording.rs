@@ -972,13 +972,8 @@ mod tests {
     #[test]
     fn grouped_burns_optical_requires_both_vernier_halves_through_the_full_wiring() {
         let luma = single_qr_luma(700);
-        let f = decode_recording_frame_with_grouped_burns_optical(
-            3,
-            luma,
-            &[],
-            &[],
-            Some((6519, 2)),
-        );
+        let f =
+            decode_recording_frame_with_grouped_burns_optical(3, luma, &[], &[], Some((6519, 2)));
         assert_eq!(f.frame_index, 3);
         // Only one Vernier half was ever painted onto this frame, so even the #202 robust
         // tiled retry (correctly attempted, per the qr.rs-level tests) cannot recover a second
@@ -986,7 +981,12 @@ mod tests {
         // POINT of this test is that the call compiles/threads through cleanly end-to-end and
         // returns a coherent frame, not a panic or a silently-dropped parameter.
         assert_eq!(f.tick, Some(700));
-        assert_eq!(f.payloads.len(), 1, "only the one painted half: {:?}", f.payloads);
+        assert_eq!(
+            f.payloads.len(),
+            1,
+            "only the one painted half: {:?}",
+            f.payloads
+        );
     }
 
     #[test]
