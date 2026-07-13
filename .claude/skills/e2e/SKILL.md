@@ -1288,6 +1288,23 @@ FROZEN_GATE_BIN=/path/to/frozen-camera-gate  # binary path (auto-discovered via 
 **CI artifact:** `frozen-camera-gate` is built (default features) alongside the probe tools
 and uploaded into the `probe-tools-linux-amd64` artifact.
 
+**GOTCHA (#747, 2026-07-13) — "FROZEN" in the FAIL message does NOT always mean "genuinely stuck
+repeating the same frame".** `_screenshot_hash` returns `None` on BOTH failure shapes: (a) a real
+frozen NDI source (>3 identical hashes in a row — the documented case above), AND (b) a hard
+`GetSourceScreenshot` RPC/decode failure for that source (source not currently rendering, OBS
+connection hiccup, etc.) — the fail-closed `< 2 successful samples = FROZEN` branch fires
+identically for either cause, and the FAIL message reads the same either way
+(`FROZEN: NDI cam4, NDI cam6`). **Check the RAW timeline JSON printed just before the FAIL line**
+to tell them apart: a genuinely-stuck camera shows the SAME real hash repeated across samples; an
+availability/RPC failure shows `null` for EVERY sample (never even one successful hash). Live
+incident: `[2b/8]`'s ALL_CAMBOX redeploy produced `"NDI cam4": [null]*8, "NDI cam6": [null]*8`
+across 3 consecutive full E2E attempts — a capture/RPC-availability failure, not a stuck-frame
+one — while a standalone `GetSourceScreenshot` run against the SAME sources moments after a
+failed attempt succeeded cleanly for all 5. Root cause not yet found (#747, OPEN) — cam6's
+underlying box also independently carries #707's ongoing emit-rate deficit, a plausible
+contributing factor for a receiver-side reconnect race, but not confirmed as the sole cause.
+Don't assume "the camera is stuck" from this FAIL line alone — read the timeline JSON first.
+
 ---
 
 ## Resumable / idempotent per-box decode — `--skip-if-exists` on planner scripts (#281 Part B)

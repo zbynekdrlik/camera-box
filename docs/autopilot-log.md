@@ -4920,3 +4920,71 @@ findings are reproducible, not one-off:
   the next investigation.
 
 PR #704 remains unmerged — 2 independent gate runs, same 3 red findings both times.
+
+## 2026-07-13 (new session) — #744 (v4l2 colour-literal smear) fixed + closed; #746 (gate self-break) found+fixed mid-cycle; #747 (frozen-camera-gate) filed as a NEW earlier-stage blocker
+
+Dispatched to work #744: `scripts/recording-e2e.sh` hardcoded `v4l2-ctl --set-ctrl=saturation=50,
+contrast=50` on a hardcoded `/dev/video0` at 3 sites ([0/8] preflight, [2/8] cam1 deploy, [2b/8]
+ALL_CAMBOX loop). That literal is the ShadowCast 2's own 0-100 factory default but ~39% of the
+Elgato 4K S's own 0-255 default (128) — live evidence: CAM1 (10.77.9.61) + CAM6 (10.77.9.66) sat
+at contrast=50/saturation=50 on their 0-255 range, producing dark multiview tiles.
+
+- Version bump: `chore: bump version to 1.7.0-dev.354` (e1c57c8bb).
+- RED: `test(#744): RED -- v4l2-neutral helper parser + recording-e2e.sh wiring pins`
+  (712a071d5) — 10 tests, sourcing a not-yet-created `scripts/lib/v4l2-neutral.sh` against
+  ShadowCast/Elgato/NZXT/partial-exposure `--list-ctrls` fixtures + static-anchor pins on
+  recording-e2e.sh.
+- GREEN: `fix(#744): GREEN -- range-aware colour reset, dynamic capture-node resolution`
+  (ed8831daa) — new `scripts/lib/v4l2-neutral.sh`: resolves the capture node dynamically (the
+  `/dev/videoN` whose own sysfs `index` is `0` — USB nodes renumber, #728), reads + applies EACH
+  control's own `--list-ctrls` default (never hue, #338; never a foreign literal). Wired into all
+  3 sites; `targets.md` CAM1/CAM6 capture-node column updated to `/dev/video0` (both renumbered).
+
+**Pushed, and the very next gate run (29264394882) died BEFORE any E2E ran** — the gate's own
+"detect docs-only diff" (#646) step called `gh pr diff <N> --name-only` under
+`set -euo pipefail`; this PR's accumulated diff crossed GitHub's API size limit
+(`PullRequest.diff too_large`), `-e` turned the refusal into `exit 1`, killing the WHOLE job. The
+required merge gate could no longer produce a result AT ALL, on any push. Filed + fixed same
+session as #746:
+- RED: `test(#746): RED -- docs-only step must derive changed files locally + fail open`
+  (f517f1b62).
+- GREEN: `fix(#746): GREEN -- docs-only detection derives changed files locally, fails open`
+  (cd3097d08) — derives the changed-file list via a local `git fetch origin main` +
+  `git diff --name-only origin/main HEAD` (no API size limit; deliberately NOT the triple-dot
+  merge-base form, since `actions/checkout@v4`'s default shallow checkout has no shared history
+  for it). Fails OPEN on any detection error (never blocks the real gate). Dropped the now-unused
+  `pull-requests: read` permission. Updated the pre-existing #646 tests whose assertions were
+  tied to the old `gh pr diff` mechanism.
+
+**Pushed, and THAT gate run (29265311504) also failed** — `[2b/8]`'s deploy died with
+"unknown arguments: rm", verdict never computed. Root cause: `$(...)` command substitution strips
+ALL trailing newlines from a function's captured output, so embedding
+`v4l2_neutral_set_default_cmd`'s result mid-string (as [2/8]/[2b/8] do) glued its last
+`v4l2-ctl --get-ctrl` line onto the following `rm -f ...` with no separator. Fixed same session:
+- RED: `test(#744): RED -- command-substitution trims the trailing newline, gluing embedded
+  commands` (0c68e4cc2) — reproduced with a fake `v4l2-ctl` + marker file matching
+  recording-e2e.sh's exact embedding shape.
+- GREEN: `fix(#744): GREEN -- terminate each _cmd function's last statement with an explicit ;`
+  (d6c1ebedf) — both `_cmd` functions now end their last statement with `;`, surviving the
+  newline-strip regardless of what follows at the embedding site.
+
+**Pushed; that gate run (29266952758) STILL failed, but for a genuinely DIFFERENT, NEW reason**:
+`frozen-camera-gate FAIL — FROZEN: NDI cam4, NDI cam6` during `[2b/8]`'s redeploy, BEFORE any
+recording starts — earlier in the pipeline than #707/#740/#741 (which all analyze a COMPUTED
+verdict). Reran twice more (`gh run rerun`, 3 attempts total) — identical failure every time.
+Investigated and evidenced NOT caused by #744/#746: every run's own readback confirms #744's fix
+working correctly (ShadowCast 50/50, Elgato cam6 128/128, NZXT untouched); a standalone OBS WS
+screenshot check succeeded on all 5 sources right after a failed run; cam6's condition is the
+ALREADY-TRACKED #707 emit-rate deficit (confirmed firing in normal steady-state production
+streaming, unrelated to this test); cam4 shows an already-coded corrupted-buffer-at-startup path
+(#696). Filed as **#747** with full evidence — not root-caused further, to keep this dispatch
+bounded.
+
+PR #704 body updated (REST PATCH — `gh pr edit` fails on this repo, see the standing GOTCHA):
+`Closes #744` + `Closes #746` added; #740 commented noting its colour-gate outcome remains
+UNCONFIRMED this session (the recording never started on any of the 3 attempts) — left OPEN, not
+closed.
+
+**PR #704 NOT merged** — `mergeStateStatus: BLOCKED`. Held on #707 (cam6 emit-rate deficit),
+#740 (colour gate, unconfirmed post-#744), #741 (strih real-drop anomaly), and now **#747**
+(frozen-camera-gate, blocking even earlier than the other three).
