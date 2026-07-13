@@ -1695,6 +1695,57 @@ mod tests {
         results
     }
 
+    /// #726 — drive the cadence with a SOURCE arriving at `src_interval_ns` into a CANVAS whose
+    /// render tick fires at `canvas_interval_ns` (the live 60fps-camera-into-30fps-strih-canvas
+    /// case). The render-tick wall time slews ±2ms; frames arrive `skew_ns` after their stamp
+    /// with the same deterministic ±4ms NDI jitter the 1:1 sim uses. Returns
+    /// `(presented_src_frame_indices, dropped_src_frame_indices)` — each stamp mapped back to its
+    /// source-frame INDEX `(ts − BASE) / src_interval_ns`, so a test reads the PRESENTATION
+    /// CADENCE directly (consecutive index deltas): a smooth every-Nth-frame cadence at N =
+    /// canvas/src is Δ==N uniform; the pre-#726 crawl is Δ==1 punctuated by backlog-storm jumps.
+    fn run_cadence_sim_ratio(
+        reserve_ms: u32,
+        src_interval_ns: u64,
+        canvas_interval_ns: u64,
+        skew_ns: u64,
+        n_src_frames: u64,
+    ) -> (Vec<u64>, Vec<u64>) {
+        const BASE: u64 = 1_000_000_000_000;
+        let mut cadence = ReleaseCadence::new();
+        let mut queue: std::collections::VecDeque<u64> = std::collections::VecDeque::new();
+        let mut next_arrival: u64 = 0;
+        let mut presented_idx = Vec::new();
+        let mut dropped_idx = Vec::new();
+        // Enough canvas ticks to drain every source frame (source runs faster than the canvas).
+        let n_ticks = n_src_frames * src_interval_ns / canvas_interval_ns + 40;
+        for k in 0..n_ticks {
+            let slew: i64 = if k % 2 == 0 { 2_000_000 } else { -2_000_000 };
+            let wall = (BASE + k * canvas_interval_ns).saturating_add_signed(slew);
+            // A source frame enters the queue once its arrival instant (stamp + skew + ±4ms
+            // jitter) has passed. next_arrival is processed in order, so the queue stays
+            // monotonic in stamps regardless of the jitter (a later frame never overtakes).
+            while next_arrival < n_src_frames
+                && BASE
+                    + next_arrival * src_interval_ns
+                    + skew_ns
+                    + ((next_arrival * 2_654_435_761) % 8_000_001)
+                    - 4_000_000
+                    <= wall
+            {
+                queue.push_back(BASE + next_arrival * src_interval_ns);
+                next_arrival += 1;
+            }
+            let out = cadence.tick(wall, reserve_ms, canvas_interval_ns, &mut queue);
+            if let Some(ts) = out.presented {
+                presented_idx.push((ts - BASE) / src_interval_ns);
+            }
+            for d in out.dropped {
+                dropped_idx.push((d - BASE) / src_interval_ns);
+            }
+        }
+        (presented_idx, dropped_idx)
+    }
+
     /// #401 REGRESSION LOCK — the measured live failure: at a grid-aligned reserve
     /// (16 ms ≈ one 60 Hz interval) the pre-#401 per-tick wall-compare release churned
     /// hold↔drop and delivered only ~44 of 60 distinct fps on `NDI cam5` (and 43.8 at
@@ -1767,6 +1818,86 @@ mod tests {
         let mut uniq = presented.clone();
         uniq.dedup();
         assert_eq!(uniq.len(), 600);
+    }
+
+    /// #726 REGRESSION LOCK — the live-event "like 15fps" judder at a 30fps canvas. A 60fps
+    /// NDI source feeding a 30fps canvas must present a UNIFORM every-2nd-frame cadence (each
+    /// presented frame is exactly 2 source frames past the previous, so presented content tracks
+    /// real time), NOT the pre-#726 crawl: STEADY presented the OLDEST matured frame and advanced
+    /// the boundary by one CANVAS interval, so content advanced only +1 SOURCE frame per tick
+    /// while real time advanced 2 → content fell progressively behind (playing ~half speed), the
+    /// per-source queue grew ~1 frame/tick until `GENLOCK_QDEPTH_RELOCK` fired the backlog storm,
+    /// which JUMPED ~+7 frames (~5×/s). The crawl+jump nets to the right average (2.0/frame → the
+    /// loss gates stay clean, which is why every earlier gate was blind to it) but visibly halves
+    /// perceived motion. The fix: when the source is at an integer multiple N>=2 of the canvas
+    /// rate (derived from the stamp grid), STEADY presents the NEWEST matured frame and retires
+    /// the older matured one(s), collapsing the delta histogram to a clean Δ==2.
+    #[test]
+    fn cadence_60_into_30_presents_uniform_every_second_frame() {
+        const SRC_I: u64 = 16_666_667; // 60 Hz source (cam2 painter / camera emit)
+        const CANVAS_I: u64 = 33_333_333; // 30 Hz strih canvas render tick
+        // reserve 3ms = the production genlock floor; 20ms stamp→arrival skew = the measured live
+        // pipeline latency (same as the 1:1 sims).
+        let (presented, _dropped) = run_cadence_sim_ratio(3, SRC_I, CANVAS_I, 20_000_000, 400);
+        // Skip the ACQUIRE / cold-start window (matches the live win0 "cold-start noise on top"
+        // vs the clean win1/win2); read the steady-state cadence.
+        let steady: Vec<u64> = presented.iter().skip(15).copied().collect();
+        assert!(
+            steady.len() > 100,
+            "#726: expected a long steady presented window, got {}",
+            steady.len()
+        );
+        let deltas: Vec<i64> = steady.windows(2).map(|w| w[1] as i64 - w[0] as i64).collect();
+        let mut hist = std::collections::BTreeMap::new();
+        for &d in &deltas {
+            *hist.entry(d).or_insert(0usize) += 1;
+        }
+        let uniform = deltas.iter().filter(|&&d| d == 2).count();
+        let frac = uniform as f64 / deltas.len() as f64;
+        assert!(
+            frac > 0.95,
+            "#726: a 60fps source into a 30fps canvas must present a UNIFORM every-2nd-frame \
+             cadence (Δ==2 source frames per presented frame); got {:.1}% uniform of {} deltas, \
+             histogram {:?} — the pre-#726 crawl (mostly Δ==1) then backlog jump (Δ==7) is the \
+             live-event 15fps-like judder",
+            frac * 100.0,
+            deltas.len(),
+            hist
+        );
+        // No net loss: mean delta ≈ 2 (every-other-frame, long-run real-time).
+        let mean: f64 = deltas.iter().map(|&d| d as f64).sum::<f64>() / deltas.len() as f64;
+        assert!(
+            (mean - 2.0).abs() < 0.1,
+            "#726: 60→30 mean presented-frame step must be ≈2 (got {mean:.3})"
+        );
+        // Cadence never runs backward.
+        assert!(
+            deltas.iter().all(|&d| d >= 1),
+            "#726: presentation order must be preserved"
+        );
+    }
+
+    /// #726 — the fix must NOT change the 1:1 (source rate == canvas rate) path: a 30fps source
+    /// into a 30fps canvas still presents EVERY frame exactly once with nothing dropped (the
+    /// present-oldest lossless drain). `source_is_integer_multiple` is derived from the STAMP
+    /// GRID (33.3ms stamps → N==1), so the multi-consume never engages here.
+    #[test]
+    fn cadence_30_into_30_still_lossless_every_frame() {
+        const I: u64 = 33_333_333; // 30 Hz source AND 30 Hz canvas — the 1:1 stream 'NDI 2ME PGM' path
+        let (presented, dropped) = run_cadence_sim_ratio(3, I, I, 20_000_000, 300);
+        let steady: Vec<u64> = presented.iter().skip(15).copied().collect();
+        let deltas: Vec<i64> = steady.windows(2).map(|w| w[1] as i64 - w[0] as i64).collect();
+        assert!(
+            deltas.iter().all(|&d| d == 1),
+            "#726: a 1:1 source must present EVERY frame (Δ==1), never skip — the multi-consume \
+             must stay gated to the integer-multiple case"
+        );
+        assert!(
+            dropped.is_empty(),
+            "#726: a 1:1 source must drop NOTHING (got {} drops) — the present-oldest lossless \
+             drain path is unchanged for N==1",
+            dropped.len()
+        );
     }
 
     /// #401 — a genuine upstream STALL must still catch up (the IMAG latency contract):
