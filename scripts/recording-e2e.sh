@@ -1174,7 +1174,14 @@ for _hbs in "${BURN_TARGETS[@]}"; do  # #252: shared burn triples (same set clea
 done
 
 echo "[4c/8] #365 frozen-camera gate — every strih raw NDI input must be updating (not a frozen feed)"
-# Precondition: the Multiview projector must be OPEN on strih (#276) so all NDI inputs render.
+# #747: the gate WARMS each camera input itself before sampling — there is NO external
+# precondition. The #730/#508 Multiview decoupling removed the last always-on surface for the
+# raw main inputs this gate checks (a not-showing DistroAV source does not render at all, which
+# is indistinguishable from a genuine freeze); frozen-camera-gate.py now puts each input's
+# wrapping 'Cam N' scene on PREVIEW (Studio Mode) and settles (--warm-settle) BEFORE sampling it.
+# The stale "keep the Multiview projector open" precondition is gone — the decoupled Multiview
+# renders low-bandwidth 'MV Cam N' twins (#730), not these raw main inputs, so it never kept
+# them warm either way.
 # Hash each raw NDI camera input via GetSourceScreenshot; feed the per-camera timeline to the
 # Rust binary (frozen-camera-gate) which returns FROZEN names on exit 1 / PASS on exit 0.
 # Threshold, sources, and sample count are env-overridable so operators can tune without a code
@@ -1230,9 +1237,10 @@ frozen_ok=0
 for frozen_attempt in $(seq 1 "$FROZEN_CAM_ATTEMPTS"); do
   if python3 "$HERE/frozen-camera-gate.py" \
       --host "$STRIH" \
-      --threshold "${FROZEN_CAM_THRESHOLD:-3}" \
-      --samples   "${FROZEN_CAM_SAMPLES:-8}" \
-      --sources   "${FROZEN_CAM_SOURCES:-NDI cam1,NDI cam2,NDI cam3,NDI cam4,NDI cam5,NDI cam6}"; then
+      --threshold   "${FROZEN_CAM_THRESHOLD:-3}" \
+      --samples     "${FROZEN_CAM_SAMPLES:-8}" \
+      --sources     "${FROZEN_CAM_SOURCES:-NDI cam1,NDI cam2,NDI cam3,NDI cam4,NDI cam5,NDI cam6}" \
+      --warm-settle "${FROZEN_CAM_WARM_SETTLE_S:-3}"; then
     frozen_ok=1
     break
   fi
@@ -1686,6 +1694,18 @@ if [ "${ZERO_LOSS_RESTART_GATE:-0}" = "1" ]; then
   fi
   exit "$GATE"
 fi
+
+echo "[4f/8] #747 pre-record camera-scene warm-up — cycle every strih 'Cam N' scene onto preview"
+# Companion to [4c/8]'s own per-source warm-up: cycle EVERY strih camera scene onto PREVIEW
+# briefly (right before StartRecord) so [6/8]'s ALL_CAMBOX sweep's very first program cut to
+# each camera is not a cold DistroAV receiver connect. Post-#730/#508 Multiview decoupling, a
+# raw NDI main input not currently SHOWING does not render until something puts it on
+# program/preview — this is the last chance to do that before the recording actually starts.
+# Best-effort: `|| true` so a WS hiccup here never aborts the run (the recording's own
+# per-segment cuts will still connect the receiver, just possibly with a cold first second —
+# exactly the pre-#747 status quo, not a new failure mode).
+python3 "$HERE/warm_cam_scenes.py" --host "$STRIH" --settle "${WARM_CAM_SETTLE_S:-1.5}" 2>&1 \
+  | sed 's/^/    /' || true
 
 echo "[5/8] StartRecord on strih + stream (program = certified prod scene) + imag (#462 — program routed to the camera under test by [4a/8], #682)"
 # #627: `record --action start` now polls GetRecordStatus itself right after StartRecord and
