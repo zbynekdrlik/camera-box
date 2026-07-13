@@ -1836,6 +1836,52 @@ When `copies`/`gaps` look elevated or growing across a run, don't guess — run 
      `send_stall.rs` + `boundary_skip_count` (already deployed fleet-wide) are armed for the next
      natural recurrence; this section + the `--merge-partials`/event-anatomy techniques are the
      starting point for whoever picks this up next.
+   - **HYPOTHESIS 4 (decoder MISREADS) — REFUTED with near-certainty, AND the real root cause found
+     + fixed (2026-07-13, #707).** Raw recordings for both spike runs were already purged (checked
+     live on strih+stream via MCP — only sparse UNDECODABLE-classified pixel PNGs remain, none at
+     the copy/gap frame indices), so pixel re-decode was impossible. Instead: the QR wire format
+     (`src/probe/payload.rs`) carries a CRC32-checked `(run_id, frame_id, gen_ts_ns)`, and the
+     painter's own ground-truth CSV (`painter-<run>.csv`, `tick,gen_ts_ns,flip_ts_ns`) logs every
+     REAL refresh. Per `painter::paint_one_frame`, at refresh `T` with `gen_ts_ns=G_T`, BOTH Vernier
+     halves (`vernier_ids(T)`) are re-stamped with `G_T` — so the full set of (frame_id, gen_ts_ns)
+     pairs a CORRECT decode could ever produce is fully computable from the CSV alone (2 pairs per
+     real tick). Cross-checked all decoded cam2-optical payloads across all 5 available verdicts:
+     **92939/92939 matched a real painted tick exactly — zero hallucinated/misread values.** H4
+     refuted (false-positive odds for a random CRC32 match: ~2^-32/payload, negligible over ~93k
+     checks).
+   - **But every one of the 33+15 burst frames had exactly ONE optical payload (always the "held"
+     half), never two** — root cause: the #207 fast/robust decode gate
+     (`decode_qr_luma_all_fast_then_robust_grouped_pathed`, `src/probe/qr.rs`) only ever checked
+     digital NODE BURNS before skipping the #202 robust tiled retry — never the dual-QR Vernier's
+     own two-half completeness. A frame where the plain pass read the (easy, digital) burns fine
+     but missed the actively-repainting Vernier half took the FAST path anyway, silently skipping
+     the ALREADY-PROVEN robust recovery. **Fixed** (commits `f25031088`→`6e8fff279`, TDD RED→GREEN,
+     8 new tests, CI green incl. `cargo clippy --all-features -D warnings` and
+     `cargo nextest --all-features`): added a third `min_distinct_optical` gate dimension —
+     `decode_qr_luma_all_fast_then_robust_grouped_pathed_optical`/
+     `decode_recording_frame_with_grouped_burns_optical`/
+     `analyze_recording_with_grouped_burns_optical`, wired into BOTH `extract_partial`'s
+     "strih"/"stream" decode-in-place arms AND the legacy fused `main()` path via
+     `args.cam2_pin().map(|run_id| (run_id, 2))`.
+   - **Measured effect on a real rig run (RECORDING_E2E_RUN_ID `1492415599`, 2026-07-13): residual
+     collapsed from up to 1863 copies/1862 gaps (this ticket's worst historical run) to 5 copies /
+     7 gaps total across 10 windows** — no more large single-window spikes (max 1/window). Still
+     not literally zero (`all_cambox_continuity.overall_pass` stays `false` on the strict
+     `copies==0 && gaps==0` bar) — whether to accept a small calibrated tolerance for this residual
+     is a product decision raised to the user on #707's own thread, not decided here.
+   - **Hit the `gh workflow run` (`workflow_dispatch`) plan-only trap myself despite it already
+     being fully documented** (see "`gh workflow run`... is the LEGACY plan-only soak" section
+     below, and `CLAUDE.md`'s own GOTCHA at "a live-triggered E2E gate run can race ahead of a
+     mid-cycle fleet redeploy" — both already correct on disk). **Root cause of MY mistake: I
+     trusted the project CLAUDE.md text embedded in my system-prompt snapshot instead of doing a
+     live `Read` of the actual file before acting** — a PRIOR session had already corrected that
+     CLAUDE.md section (and cross-referenced this skill's own canonical section below) sometime
+     after my snapshot was taken, but I never re-read the live file to pick up the fix. Recovered
+     via `gh run rerun <the pull_request-triggered run>` per the existing playbook, exactly as
+     documented. **Lesson: for a critical live-workflow gotcha on a SHARED dev1 checkout (other
+     sessions can and do correct CLAUDE.md concurrently), live-`Read` the actual file rather than
+     trusting the system-prompt snapshot, especially right before an action (like triggering CI)
+     that a stale gotcha could make expensive to get wrong.**
 
 ## RESOLVED (#708, 2026-07-12) — strih's OWN `full_chain.loss.strih.real_drops` periodic 4-frame residual was a per-source-counter accounting artifact, NOT loss
 

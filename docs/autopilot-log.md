@@ -4510,3 +4510,44 @@ a follow-up if not done by the time this log entry is read.
 - **PR #704 stays OPEN, unmerged** — the shared E2E gate is still red on the SAME two
   pre-existing, already-tracked, out-of-scope blockers this PR was held on before this dispatch
   (#707 continuity, #689 A/V tolerance); #719/#726 are complete on their own merits regardless.
+
+## 2026-07-13 — #707 Hypothesis 4 (decoder misreads) tested + REFUTED; real root cause found + fixed; residual collapsed ~99.7%, NOT fully resolved (user decision pending)
+
+- **Commits**: `f25031088` (test, RED — 6 new tests in `src/probe/qr.rs`, stubbed gate),
+  `3741b017d` (fix, GREEN — real `min_distinct_optical` gate dimension in
+  `fast_path_gate_satisfied`), `d27622734` (fix — wired into `extract_partial`'s strih/stream
+  arms + legacy fused `main()` path, 2 new wiring tests in `src/probe/recording.rs`), `6e8fff279`
+  (style — cargo fmt). All pushed to `dev`, CI green (`Lint`: `cargo clippy --all-features -D
+  warnings`; `Test`: `cargo nextest --all-features`, all 8 new + full existing suite; `Build` +
+  `Windows probe build` release+probe; `Code Coverage`).
+- **H4 (decoder misreads) REFUTED**: cross-checked every decoded cam2-optical payload's
+  `(frame_id, gen_ts_ns)` across all 5 available verdicts (92939 payloads) against the painter's
+  own ground-truth CSV (`painter-<run>.csv`) — 0 mismatches. No pixels needed (raw recordings
+  already purged); used the QR wire format's CRC32 + the painter's per-tick log instead.
+- **Real root cause found + fixed**: the #207 fast/robust decode gate never checked dual-QR
+  Vernier optical completeness before skipping the #202 robust tiled retry — only digital node
+  burns. A frame reading the (easy) burns fine but missing the actively-repainting Vernier half
+  silently took the fast path, never getting the robust recovery already proven to work. Added a
+  third gate dimension (`min_distinct_optical`), threaded through 4 layers of the decode chain.
+- **Measured on a real rig run** (RECORDING_E2E_RUN_ID `1492415599`, after correcting my own
+  `workflow_dispatch`-plan-only mistake via `gh run rerun`): `all_cambox_continuity` residual
+  collapsed from up to 1863 copies/1862 gaps (this ticket's worst historical run) to **5 copies /
+  7 gaps total** across a 314s recording — no more large single-window spikes. Still not literally
+  zero; `all_cambox_continuity.overall_pass` stays `false`.
+- **NOT closed** — whether to accept a small calibrated tolerance for the remaining ~5/7 residual
+  is raised as a genuine product decision to the user on #707's own thread (a PRIOR session on
+  this ticket already flagged this exact class of decision as "not mine to decide unilaterally").
+  PR #704 stays blocked on #707 (tiny residual) + the already-tracked #689 (A/V) + imag's own
+  #588-class continuity — none of which this dispatch was scoped to fix.
+- **Own mistake + playbook fix**: triggered `gh workflow run ... --ref dev` for a rerun, which
+  runs in PLANNER-ONLY mode for this workflow (`E2E_EXECUTE_VERDICT=0` for `workflow_dispatch`) —
+  a false-positive green that computed no real verdict. This exact gotcha was ALREADY correctly
+  documented in both CLAUDE.md and `.claude/skills/e2e` by a prior session; I made the mistake by
+  trusting my system-prompt CLAUDE.md snapshot instead of live-reading the file before acting.
+  Recovered via `gh run rerun <pull_request-run-id>` per the existing playbook. Trimmed a
+  duplicate explanation I'd added to `.claude/skills/e2e/SKILL.md` down to a cross-reference +
+  the "live-Read before acting on a shared checkout" lesson.
+- **#718 (colour-gate localization) hit again** (3rd occurrence) on the first rerun attempt —
+  already tracked, unrelated to #707 (independent decode path, confirmed by code read); commented
+  with this occurrence's evidence, worked around by re-running rather than investigating further
+  (out of #707's scope).
