@@ -1611,28 +1611,46 @@ started one. A leftover recording blocks every subsequent CI gate run as RIG_BUS
 manually diagnoses it (rig-busy-gate.sh now prints per-box timecode + stray-vs-broadcast hints,
 #649 item 3).
 
-## GOTCHA — a manual `rig-mode.sh test` right before (or during) a push that triggers the CI E2E gate can leave stale cam2 painter state that breaks the CI's OWN `[3/8]`/#431 marker-growth check (2026-07-13)
+## RESOLVED (#734, 2026-07-13) — a manual `rig-mode.sh test` right before the CI E2E gate no longer breaks `[3/8]`/#431; the collision is self-healed
 
-`rig-mode.sh test` and the CI harness's own `[3/8]` step both launch a `frame-probe --paint-only`
-process on cam2 (same pidfile `/run/rig-painter.pid`, same fb0). Live incident: ran `rig-mode.sh
-test` manually (successfully — marker verified RUNNING), then pushed a commit ~3 min later. The
-push's own `pull_request`-triggered E2E gate started its `[3/8]` step ~9 min after that (self-hosted
-runner queue + earlier build steps), which reported `PASS: #420 QPSK audio marker RUNNING` (the
-ALSA PCM state check) but then **FAILED #431** ("marker log has NOT GROWN across 3 polls — RUNNING-
-but-silent") — the marker log the harness's OWN run expected to see growing (`/tmp/av-markers.csv`)
-never did, even though SOME marker data did land in the shared `/run/rig-qpsk-markers.csv` path (my
-earlier manual run's own file). Root cause not fully isolated (didn't reproduce/retry to confirm)
-but the shared pidfile/fb0/log-path surface between a manual invocation and the harness's own step
-is the clear suspect — the harness's own StartRecord alignment likely raced a stale process/state
-left by the manual call rather than cleanly taking over. Recovery was simple: confirm no orphaned
-painter process (`ps aux | grep -i painter` on cam2), re-run `rig-mode.sh test` once more (clean
-this time, confirmed by watching `/run/rig-qpsk-markers.csv` actually grow across a few seconds),
-`rig-busy-check` idle. **Rule: avoid a manual `rig-mode.sh test` invocation in the few minutes
-immediately before a push you know will trigger the PR's required E2E gate** (or expect the gate's
-own `[3/8]`/#431 step to possibly need a one-off manual state check + `rig-mode.sh test` re-run
-afterward before trusting the NEXT run) — this is a timing/collision hazard, not a code regression,
-and does not indicate anything wrong with #431 itself (which correctly caught the stalled marker
-rather than silently trusting the RUNNING-but-silent ALSA state).
+**Superseded the GOTCHA that used to live here** ("avoid a manual `rig-mode.sh test` invocation
+before a push" — that workaround is no longer needed; both orders now work).
+
+**Root cause, confirmed** (reproduced 2/2 the same night, then root-caused): `rig-mode.sh test`
+and the CI harness's own `[3/8]` step both launch a `frame-probe --paint-only` process on cam2
+(same pidfile, same fb0) — but `[3/8]` never killed a PRE-EXISTING one before waiting for
+`/dev/fb0` and launching its own. A manual `rig-mode.sh test` process left running holds BOTH
+`/dev/fb0` AND the audio-marker's ALSA device (`hw:CARD=PCH,DEV=3`) EXCLUSIVELY:
+- the `fuser -s /dev/fb0` wait loop merely times out after 15s (busy or not, no failure branch)
+  and launches a SECOND frame-probe anyway;
+- the #420 "RUNNING" self-check reads the DEVICE-scoped `/proc/asound/PCH/pcm3p/sub0/status` —
+  this reports `state: RUNNING` from the OLD still-alive process regardless of whether the run's
+  own NEW process ever managed to open the device;
+- the #431 emission-growth check polls THIS run's own `--marker-log` file
+  (`/tmp/av-markers.csv`), which the new process never writes to if its own `--audio-marker` open
+  failed on the busy device.
+
+Net effect: `PASS: #420 ... RUNNING` immediately followed by `FAIL: #431 ... has NOT GROWN` —
+device-scoped check passes on the OLD process, file-scoped check fails on the silently-broken NEW
+one.
+
+**Fix**: `[3/8]`'s `_cam2_kill_existing` step (`scripts/recording-e2e.sh`) unconditionally
+`pkill -x frame-probe`s BEFORE the fb0-fuser wait loop, then polls `pgrep -x frame-probe` (bounded,
+~10s) until it reports nothing — applied to BOTH the ALL_CAMBOX and plain single-camera
+`_cam2_prep` branches. Deliberately does NOT try to REUSE a foreign running painter instead of
+killing it: it paints a DIFFERENT `--run-id` than the gate's own `$RUN_ID`, and
+`recording-verdict`'s decode only trusts markers/QR burns carrying its OWN run id — reusing a
+stale process's output would silently record the wrong run's content.
+
+**Verified two ways**: Rust harness tests
+(`tests/harness_recording_e2e_cam2_kill_existing_painter_734.rs`, bound to the dedicated
+`_cam2_kill_existing` step — NOT a bare `pkill -x frame-probe` substring search, which ALSO
+matches a pre-existing, unrelated `on_fail_cmd` argument in the same block and would false-GREEN
+even pre-fix); AND live on the rig — restored TEST mode (painter confirmed RUNNING), then ran the
+exact kill+verify-dead commands directly against it: `pkill -x frame-probe` killed it, the
+`pgrep -x frame-probe` poll confirmed it gone after 1 cycle (0.5s), `fuser -s /dev/fb0` then
+correctly reported fb0 free — the exact precondition that broke `[3/8]` twice is now cleanly
+self-healed. **No more need to avoid running `rig-mode.sh test` before a push.**
 
 ## TOPOLOGY FACT — ONE camera + HDMI splitter feeds ALL cam boxes the IDENTICAL signal (owner-corrected 2026-07-10)
 

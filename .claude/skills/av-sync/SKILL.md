@@ -307,6 +307,43 @@ clustering-algorithm (`src/av_window.rs`) sensitivity issue (candidate multimoda
 quantization interacting with the ±60ms `av_cluster_tol_ms` window) rather than a genuine physical
 drift.
 
+## #733 (RESOLVED, 2026-07-13) — the clustering window WAS too wide; a much tighter estimator ships, but the run-to-run swing is PROVEN chain-level, not algorithmic
+
+The #689 finding above was investigated end to end. Method: pull the RAW pre-clustering candidate
+data (not just the final verdict) straight off the stream box — `C:\camera-box\verdict-out\
+stream-partial-<RUN_ID>.json` carries `frames` (every decoded video tick) + `av_sync.emit_log` +
+`av_sync.audio_markers` for that run (the box keeps these even though only the summary JSON/PNG get
+uploaded as a GH artifact). Reimplement `window_ticks`/`av_offset_candidates`/`cluster_offset_ms`
+exactly (any language) and cross-validate against the published `av_offset_ms`/`matched`/`mad_ms`
+before trusting the reproduction.
+
+Two real, shipped findings from that data:
+1. **Same-`frame_id` duplicate detections** (37-84ms apart, present in all 3 runs) were inflating
+   the sample count — fixed via `qpsk_marker::av_offset_candidates_deduped` (Tier-0, TDD).
+2. **The old ±60ms cluster window was wide enough to blend two nearby sub-clusters** — binning one
+   run's raw candidates in 10ms bins showed two separate density bumps ~70ms apart that the 120ms
+   window swallowed into one noisier blend (that run's outlier `mad_ms=32.7`). A **tight-first
+   sweep** (successively widen `cluster_tol_ms` from 15ms up until `MIN_AV_SAMPLES` clears) on the
+   SAME deduped data showed each run individually has a MUCH more precise true cluster (mad_ms
+   7-9ms at ±15ms, vs 15-33ms at the old ±60ms default) — `--av-cluster-tol-ms` tightened to 25ms.
+
+**The real conclusion — and the reusable lesson**: even at that MUCH tighter precision, the 3 runs'
+offsets STILL disagreed by ~50ms (-20.83/-59.67/-6.10ms). A materially more precise estimator did
+NOT converge the runs toward one number — proving the instability is genuinely chain-level (ALSA
+ring-delay compensation, acoustic path variance, the mbc mastering chain's own state, or similar),
+not a clustering artifact. **Do NOT pool raw candidates across separate runs/sessions to
+manufacture one "average" number when you haven't first checked whether the underlying quantity is
+even stable across them** — pooling here would have silently discarded 2/3 of the real (disagreeing)
+signal as if it were noise. When #689 (or a future hold-derivation ticket) is next worked: use the
+tightened defaults (mad_ms 7-13ms is the new "healthy" reference), gather a genuinely long baseline
+(many runs across a wide time span), and look for correlation with anything observable before
+trusting an average — one night's 3 runs is still not enough.
+
+The LIVE dock's own `DOCK_CLUSTER_TOL_MS` (`src/av_sync_dock.rs`) was deliberately left at 60ms —
+it's mirrored byte-for-byte into the vendored C++ dock and needs the ~150min genlock build cycle to
+verify safely. Filed #735 to evaluate it separately with the SAME tight-first-sweep methodology,
+against the live dock's own continuous-rolling candidate stream.
+
 ## `gh pr edit` / `gh issue edit --body` can fail on a GraphQL error UNRELATED to your edit — use the REST PATCH instead
 
 On this repo, `gh pr edit 704 --body "..."` (or `-F file`) can return:

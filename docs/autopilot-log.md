@@ -2,6 +2,76 @@
 
 Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads context.
 
+## 2026-07-13 (night) — #733 (fixed+closed) + #734 (fixed+closed) — both code fixes shipped, live-verified; PR #704 STILL held on #707
+
+- **Dispatch**: work #733 (av-sync clustering method-level audit) + #734 (a manual `rig-mode.sh
+  test` before the CI push breaks `[3/8]`/#431) as a bundled batch, night session.
+- **#733 — method-level audit of `src/av_window.rs`/`qpsk_marker.rs` clustering.** Pulled the RAW
+  pre-clustering candidate data for all 3 of the prior dispatch's runs directly off the stream box
+  (`stream-partial-{142901047,670137317,802117826}.json`, which carries `frames`/`emit_log`/
+  `audio_markers` even though only the summary verdict gets uploaded as a GH artifact).
+  Reimplemented the algorithm in Python, cross-validated byte-exact against the published numbers.
+  Two real findings, both shipped: (1) same-`frame_id` duplicate detections (37-84ms apart, all 3
+  runs) were inflating the sample count — fixed via new Tier-0 `qpsk_marker::
+  av_offset_candidates_with_fid`/`dedupe_same_fid_candidates`/`av_offset_candidates_deduped` (RED
+  `754b52ac7`, GREEN `ed15bb5c1`, 6 new tests); (2) the old ±60ms cluster window was wide enough to
+  blend two nearby real sub-clusters into one noisier band (one run's `mad_ms` hit 32.7) — a
+  tight-first sweep on the deduped data showed each run's TRUE cluster is far more precise
+  (mad_ms 7-9ms at ±15ms vs 15-33ms at ±60ms) — `--av-cluster-tol-ms` default tightened 60->25ms
+  (`ef170a328`). **The real conclusion**: even at that much tighter precision, the 3 runs STILL
+  disagreed by ~50ms (-20.83/-59.67/-6.10ms) — proving the run-to-run swing is genuine CHAIN-LEVEL
+  drift (ALSA ring-delay compensation, acoustic path, mbc mastering chain state, or similar), NOT a
+  clustering-algorithm artifact — satisfying the ticket's own explicit alternative resolution
+  criterion. Deliberately did NOT touch the live dock's `DOCK_CLUSTER_TOL_MS` (still 60ms, mirrored
+  byte-for-byte into vendored C++, needs the ~150min genlock build to verify) — filed **#735** to
+  evaluate it separately with the same methodology. Commented the sharpened findings onto #689
+  (unblocking it stays a longer-baseline problem, now with a genuinely trustworthy per-run
+  estimator). **Closed #733 with full evidence.**
+- **#734 — root-caused the `[3/8]`/#431 collision.** `[3/8]` never killed a PRE-EXISTING
+  `frame-probe` before waiting on `/dev/fb0` and launching its own — a manual `rig-mode.sh test`
+  process left running holds BOTH `/dev/fb0` AND the audio-marker's ALSA device
+  (`hw:CARD=PCH,DEV=3`) exclusively. The #420 RUNNING check is DEVICE-scoped (`/proc/asound/...`,
+  passes on the OLD process regardless of the NEW one) while #431's emission-growth check is
+  scoped to THIS run's own `--marker-log` file, which the new process never writes to if its own
+  `--audio-marker` open failed on the busy device — exactly the live PASS-#420/FAIL-#431 split.
+  Fix: `_cam2_kill_existing` unconditionally `pkill -x frame-probe`s + polls `pgrep -x frame-probe`
+  until dead (bounded ~10s) BEFORE the fb0-wait, in BOTH the ALL_CAMBOX and plain single-camera
+  `_cam2_prep` branches (RED `ba8f4275a`, GREEN `98024491b`). Deliberately does NOT reuse a foreign
+  painter (it carries a DIFFERENT `--run-id`, and the verdict decode only trusts its OWN run id).
+  **Live-verified TWICE**: the push's own `pull_request` E2E gate (`29215952677`) showed `[3/8]`
+  PASSing both #420 and #431 cleanly; separately, restored TEST mode (painter confirmed RUNNING,
+  PID 10195) and ran the exact kill+verify-dead commands directly against it on cam2 — `pkill`
+  killed it, the `pgrep` poll confirmed dead after 1 cycle, `fuser -s /dev/fb0` then correctly
+  reported free — the exact incident precondition now cleanly self-heals. **Closed #734.**
+- **CI**: push run `29215951115` (Lint/Build/Test/Coverage/Security/Drift-Guard/Windows-probe/
+  Shellcheck/Python-harness) all green — this is the FIRST real compile of the probe-gated wiring
+  changes (`src/bin/recording-verdict.rs`, `src/probe/av_sync_recording.rs` — no local Tier-0
+  bypass exists for these per this repo's own CLAUDE.md, reviewed by eye beforehand). E2E gate
+  run `29215952677` correctly FAILED on the pre-existing, already-tracked #707 continuity residual
+  (CAM3 copies=2/gaps=3, CAM4 copies=1) — unrelated to tonight's tickets, not attempted. cam2's
+  live av_sync in that same run: `cluster_samples=23 -> -32.1ms (mad 9.3ms)` — confirms #733's
+  tightened default is working exactly as designed on the real rig (mad well under the old
+  15-33ms range).
+- **Rig coordination**: restored TEST mode (painter running, `rig-mode.sh test`) before ending the
+  session, per this repo's standing rule (the user does focus checks in the morning). Rig confirmed
+  idle (`rig-busy-gate.sh` -> RIG_FREE) both after the E2E run and after the final live #734
+  verification kill/restart cycle.
+- **Filed #735** (live dock's `DOCK_CLUSTER_TOL_MS`, deliberately deferred — needs the vendored
+  C++ build cycle to verify safely).
+- **Playbook**: `.claude/skills/av-sync` (`#733` RESOLVED section — the full audit methodology +
+  the chain-vs-algorithm conclusion, reusable for any future av-sync stability investigation) and
+  `.claude/skills/e2e` (superseded the stale #734 "avoid a manual rig-mode.sh test before a push"
+  workaround GOTCHA with the RESOLVED root-cause + fix + live-verification writeup).
+- **Repo rules followed**: sole worker on the shared dev1 checkout, no sub-worker spawning, no
+  renamed binaries, registered+killed all rig starts (the live #734 verification kill/restart),
+  left the rig in TEST mode, exact-path commits throughout, `git log -3` checked before every
+  commit, Tier-0 locals green (fmt/clippy/check/test --no-run + the FULL local test suite —
+  127/127 binaries, 0 FAILED — after editing `scripts/recording-e2e.sh`, per this repo's own
+  static-anchor GOTCHA), CI waited via a true foreground blocking bash loop throughout, no version
+  bump this cycle (`dev` already well ahead of `main`, unchanged from prior cycles). PR #704
+  picked up all 6 commits automatically (dev->main) — no new PR opened, no merge attempted (still
+  correctly BLOCKED on #707, out of scope tonight).
+
 ## 2026-07-13 (night) — #707 + #689 (both harvest-only, no commits, PR #704 still held)
 
 - **Dispatch**: unblock PR #704's last two required-gate blockers (#707 continuity, #689 A/V) using
