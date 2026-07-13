@@ -223,3 +223,154 @@ fn regression_e2e_script_no_longer_hardcodes_dev_video0_in_the_three_sites_744()
          /dev/video0 (#744, #728 -- USB grabber nodes renumber)"
     );
 }
+
+// --- live-caught regression (gate run 29265311504, the #746 push's E2E): command substitution
+// UNCONDITIONALLY STRIPS trailing newlines from a function's captured output, so embedding
+// `$(v4l2_neutral_set_default_cmd)` mid-string (as [2/8]/[2b/8] do, followed by more literal
+// remote text) glued its LAST line onto whatever text followed, with NO separator at all --
+// `v4l2-ctl ... --get-ctrl=... 2>/dev/null` + `rm -f /tmp/....log` became ONE command line,
+// v4l2-ctl errored "unknown arguments: rm", and the `rm` never ran. Fixed by ending each `_cmd`
+// function's last statement with an explicit `;` that survives the newline-strip. These tests
+// reproduce the EXACT embedding shape recording-e2e.sh uses (a fake `v4l2-ctl` capturing argv +
+// a marker file the trailing `rm -f` must remove) against the REAL library -- a structural
+// "ends with `;`" check alone would not have caught the actual live failure mode.
+
+fn scratch(name: &str) -> PathBuf {
+    let dir =
+        std::env::temp_dir().join(format!("v4l2-neutral-746-{}-{}", std::process::id(), name));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create scratch dir");
+    dir
+}
+
+/// Install a fake `v4l2-ctl` on PATH that appends its argv (space-joined) as one line to
+/// `$ARGV_LOG`, and prints nothing to stdout (so `--list-ctrls` yields an empty capture, the
+/// `if [ -n "$_v4l2_ctrlarg" ]` branch is skipped, and the ONLY real v4l2-ctl invocation that
+/// runs is the final `--get-ctrl=...` line -- the exact one the live bug glued text onto).
+fn install_fake_v4l2_ctl(bin_dir: &std::path::Path) {
+    let script = "#!/usr/bin/env bash\necho \"$@\" >> \"$ARGV_LOG\"\n";
+    fs::write(bin_dir.join("v4l2-ctl"), script).expect("write fake v4l2-ctl");
+    let mut perms = fs::metadata(bin_dir.join("v4l2-ctl"))
+        .unwrap()
+        .permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+    fs::set_permissions(bin_dir.join("v4l2-ctl"), perms).unwrap();
+}
+
+#[test]
+fn set_default_cmd_embedding_never_glues_the_following_command_746() {
+    let dir = scratch("set-default");
+    install_fake_v4l2_ctl(&dir);
+    let marker = dir.join("marker");
+    fs::write(&marker, "").expect("create marker file");
+    let argv_log = dir.join("argvlog");
+    fs::write(&argv_log, "").expect("create argv log");
+
+    // Reproduces recording-e2e.sh's EXACT [2/8]/[2b/8] embedding shape: a resolved
+    // $V4L2_NEUTRAL_NODE, then `$(v4l2_neutral_set_default_cmd)` embedded mid-string, followed
+    // by a `rm -f <marker>;` on the "next line" via a backslash-newline continuation inside an
+    // outer double-quoted string -- exactly what the harness's own sshpass ssh command strings
+    // look like.
+    let harness = format!(
+        r#"set -uo pipefail
+. "$SCRIPT"
+export PATH="{bin}:$PATH"
+export ARGV_LOG="{argv_log}"
+V4L2_NEUTRAL_NODE=/fake/video0
+CMD="echo start; \
+   $(v4l2_neutral_set_default_cmd) \
+   rm -f {marker}; \
+   echo done"
+eval "$CMD"
+"#,
+        bin = dir.display(),
+        argv_log = argv_log.display(),
+        marker = marker.display(),
+    );
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(&harness)
+        .env("SCRIPT", lib_script())
+        .output()
+        .expect("failed to run bash harness");
+    assert!(
+        out.status.success(),
+        "harness exited non-zero.\nstdout={:?}\nstderr={:?}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("start") && stdout.contains("done"),
+        "both echo markers must have run (proves the eval'd script didn't abort): {stdout}"
+    );
+    assert!(
+        !marker.exists(),
+        "the `rm -f <marker>` that follows v4l2_neutral_set_default_cmd's embedding must run as \
+         its OWN command -- if it got glued onto v4l2-ctl's argv instead (the live #746 bug), \
+         the marker file would still exist"
+    );
+    let argv_log_text = fs::read_to_string(&argv_log).expect("read argv log");
+    assert!(
+        !argv_log_text.contains("rm"),
+        "the fake v4l2-ctl must NEVER receive \"rm\" as one of its arguments -- that is the \
+         exact live failure (\"unknown arguments: rm\"): {argv_log_text}"
+    );
+    assert!(
+        argv_log_text.contains("--get-ctrl=saturation,contrast"),
+        "the final get-ctrl readback must still have run cleanly: {argv_log_text}"
+    );
+}
+
+#[test]
+fn resolve_node_cmd_embedding_never_glues_the_following_command_746() {
+    // Same shape, for v4l2_neutral_resolve_node_cmd. Without the trailing `;` fix, its last
+    // statement (a bare `V4L2_NEUTRAL_NODE=...` assignment, no command name) glued directly onto
+    // whatever command follows at the embedding site becomes a bash "VAR=value command" PREFIX
+    // assignment -- which sets the variable ONLY in that one command's temporary environment, not
+    // in the calling shell -- so a LATER reference to $V4L2_NEUTRAL_NODE reads as unset. The
+    // explicit trailing `;` prevents that: it closes the assignment as its own statement before
+    // anything else can attach to it as a prefix.
+    let dir = scratch("resolve-node");
+    let marker = dir.join("marker");
+    fs::write(&marker, "").expect("create marker file");
+    let harness = format!(
+        r#"set -uo pipefail
+. "$SCRIPT"
+CMD="echo start; \
+   $(v4l2_neutral_resolve_node_cmd) \
+   rm -f {marker}; \
+   echo \"node=\$V4L2_NEUTRAL_NODE\"; \
+   echo done"
+eval "$CMD"
+"#,
+        marker = marker.display(),
+    );
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(&harness)
+        .env("SCRIPT", lib_script())
+        .output()
+        .expect("failed to run bash harness");
+    assert!(
+        out.status.success(),
+        "harness exited non-zero.\nstdout={:?}\nstderr={:?}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("start") && stdout.contains("done"),
+        "both echo markers must have run: {stdout}"
+    );
+    assert!(
+        !marker.exists(),
+        "the `rm -f <marker>` following v4l2_neutral_resolve_node_cmd's embedding must run as \
+         its own command: {stdout}"
+    );
+    assert!(
+        stdout.contains("node=/dev/video0") || stdout.contains("node=/dev/video"),
+        "V4L2_NEUTRAL_NODE must have been resolved/assigned before the following commands ran: \
+         {stdout}"
+    );
+}
