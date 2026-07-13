@@ -154,6 +154,59 @@ def unpack_color_multiply(value: int) -> tuple[float, float, float]:
     return (r / 255.0, g / 255.0, b / 255.0)
 
 
+def classify_persisted_correction(
+    filter_present: bool, filter_enabled: bool | None, color_multiply: int | None
+) -> str:
+    """#738 drift-guard FACET -- the pure classification a persistence check reduces to (a
+    scene-collection reset, a manual filter deletion, or a reinstall could silently drop this
+    correction the same way #334's disabled-burn-filter and #522's saved_projectors leak already
+    proved OBS state CAN quietly revert). Returns one of:
+
+    - `"missing"` -- the filter is not attached at all (scene collection reset / never applied).
+    - `"disabled"` -- present but disabled (never renders, #334's exact failure shape).
+    - `"identity"` -- present + enabled, but `color_multiply` is still the neutral default
+      (`IDENTITY_COLOR_MULTIPLY`) -- i.e. never actually calibrated, or reset back to it.
+    - `"applied"` -- present, enabled, and carrying a genuine (non-identity) correction: the
+      healthy state.
+
+    Pure -- the caller (a drift-guard-style periodic check) supplies the THREE live-read facts;
+    this function only classifies them, mirroring `obs_burn_filter.py`'s `compute_burn_on` shape.
+    """
+    if not filter_present:
+        return "missing"
+    if not filter_enabled:
+        return "disabled"
+    if color_multiply is None or color_multiply == IDENTITY_COLOR_MULTIPLY:
+        return "identity"
+    return "applied"
+
+
+def check_correction_persisted(ws, source: str, filter_name: str = DEFAULT_FILTER_NAME) -> dict:
+    """Live read-only check (the WS glue around `classify_persisted_correction`): has `source`'s
+    colour-correction filter survived (present, enabled, non-identity)? Suitable for a periodic
+    drift-guard-style assertion -- reuses the SAME `GetSourceFilterList` shape
+    `obs_burn_filter.py`'s own `_has_filter`/`_filter_enabled` already use."""
+    from obs_phase2 import _rpc
+
+    data = _rpc(ws, "GetSourceFilterList", {"sourceName": source}, ignore_err=True)
+    filters = (data or {}).get("filters", [])
+    match = next((f for f in filters if f.get("filterName") == filter_name), None)
+    present = match is not None
+    enabled = bool(match.get("filterEnabled")) if match else None
+    color_multiply = None
+    if present:
+        got = _rpc(ws, "GetSourceFilter", {"sourceName": source, "filterName": filter_name}, ignore_err=True)
+        color_multiply = (got or {}).get("filterSettings", {}).get("color_multiply")
+    status = classify_persisted_correction(present, enabled, color_multiply)
+    return {
+        "source": source,
+        "status": status,
+        "filter_present": present,
+        "filter_enabled": enabled,
+        "color_multiply": color_multiply,
+    }
+
+
 # ---------------------------------------------------------------------------
 # OBS WebSocket I/O (real rig glue -- not unit-tested against a live OBS; the pure math above is)
 # ---------------------------------------------------------------------------
@@ -337,13 +390,21 @@ def main(argv=None):
         help="run ROUNDS of iterative composed correction instead of a single pass (see "
         "compose_gains's doc for why one pass under-corrects)",
     )
+    ap.add_argument(
+        "--check",
+        action="store_true",
+        help="#738 drift-guard facet: read-only -- report whether each source's correction is "
+        "still present/enabled/non-identity, never measure or apply anything",
+    )
     a = ap.parse_args(argv)
 
     from obs_phase2 import _conn
 
     ws = _conn(a.host, a.password)
     try:
-        if a.iterative > 0:
+        if a.check:
+            results = [check_correction_persisted(ws, src, a.filter_name) for src in a.sources]
+        elif a.iterative > 0:
             results = [
                 calibrate_source_iterative(
                     ws, src, a.filter_name, a.damping, a.samples, a.interval_s, a.iterative
@@ -366,6 +427,8 @@ def main(argv=None):
     finally:
         ws.close()
     print(json.dumps(results, indent=2))
+    if a.check:
+        return 0 if all(r.get("status") == "applied" for r in results) else 1
     return 0
 
 

@@ -169,3 +169,36 @@ class TestColorMultiplyPacking:
     def test_alpha_byte_is_always_zero_matching_the_observed_obs_default(self):
         packed = occ.pack_color_multiply(1.0, 1.0, 1.0)
         assert (packed >> 24) & 0xFF == 0
+
+
+# ---------------------------------------------------------------------------
+# classify_persisted_correction -- the #738 drift-guard facet's pure classifier
+# ---------------------------------------------------------------------------
+
+class TestClassifyPersistedCorrection:
+    def test_missing_when_filter_absent(self):
+        assert occ.classify_persisted_correction(False, None, None) == "missing"
+
+    def test_disabled_when_present_but_disabled(self):
+        # Mirrors #334's exact failure shape (a present-but-disabled filter never renders).
+        assert occ.classify_persisted_correction(True, False, 0x00445566) == "disabled"
+
+    def test_identity_when_enabled_but_never_calibrated(self):
+        assert (
+            occ.classify_persisted_correction(True, True, occ.IDENTITY_COLOR_MULTIPLY)
+            == "identity"
+        )
+
+    def test_identity_when_color_multiply_key_is_absent_entirely(self):
+        # GetSourceFilter returned {} for filterSettings (never explicitly set) -- treat the
+        # same as identity, not a crash or a false "applied".
+        assert occ.classify_persisted_correction(True, True, None) == "identity"
+
+    def test_applied_when_present_enabled_and_non_identity(self):
+        real_value = occ.pack_color_multiply(0.57, 0.94, 0.62)
+        assert occ.classify_persisted_correction(True, True, real_value) == "applied"
+
+    def test_missing_takes_priority_over_disabled_state(self):
+        # An absent filter has no "enabled" state to speak of -- must report missing regardless
+        # of whatever `filter_enabled` value a caller might pass.
+        assert occ.classify_persisted_correction(False, True, 12345) == "missing"
