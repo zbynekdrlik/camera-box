@@ -87,6 +87,11 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # SOURCE camera to imag's own "Cam N" scene name (the SAME 1:1 pattern imag_scenes.py seeds).
 # shellcheck source=scripts/lib/imag-scene-route.sh
 . "$HERE/lib/imag-scene-route.sh"
+# #723: SINGLE SOURCE OF TRUTH for the rig-test LEDGER — this harness's own cam2 painter launch
+# registers into it too, so rig-mode.sh event's cleanup sweep can find + kill it BY PID even if a
+# run is abandoned mid-flight (never just a name-pattern guess). See scripts/lib/rig-test-ledger.sh.
+# shellcheck source=scripts/lib/rig-test-ledger.sh
+. "$HERE/lib/rig-test-ledger.sh"
 # #703: shared ssh/scp helpers for EXECUTING recording-verdict directly on strih/stream (the
 # [8/8] E2E_EXECUTE_VERDICT=1 path — #701 proved ssh/scp works on this rig for these boxes).
 # shellcheck source=scripts/lib/win-ssh-exec.sh
@@ -1010,6 +1015,22 @@ sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$PAINTER_IP" \
    $_cam2_marker_check"
 PAINTER_LAUNCH_EPOCH="$(date +%s)"  # #359: when the painter's --duration-secs lifetime started
 sleep 3  # let the painter put the QR on the monitor cam1 films
+
+# #723: register this run's painter in the rig-test LEDGER — the sanctioned registration path,
+# so rig-mode.sh event's cleanup sweep (or an orphan sweep) can find + kill it BY PID even if
+# this run is abandoned mid-flight and its process later gets renamed/copied elsewhere (the #721
+# incident class). Best-effort (never aborts a measurement run over a ledger hiccup): PID
+# discovery via a fresh pgrep right after launch — frame-probe was just uniquely killed+
+# relaunched above ($_cam2_kill_existing), so exactly one is expected.
+_cam2_painter_pid="$(sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$PAINTER_IP" \
+  "pgrep -x frame-probe 2>/dev/null | head -1" 2>/dev/null || true)"
+if [ -n "$_cam2_painter_pid" ]; then
+  sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$PAINTER_IP" \
+    "$(rig_test_ledger_register_remote_cmds "frame-probe --paint-only (recording-e2e run $RUN_ID)" "$_cam2_painter_pid" cam2 "recording-e2e.sh" "$(rig_test_ledger_effective_max_duration "$((DURATION + 60))" "recording-e2e measurement run")")" \
+    2>&1 | sed 's/^/    [#723 ledger] /' || true
+else
+  echo "WARNING: [#723] could not discover cam2 painter PID for ledger registration (best-effort, run proceeds)." >&2
+fi
 
 # #163: record the CERTIFIED PRODUCTION scene program on each box — NOT a probe
 # ndi_source. The old probe path pointed `phase2-probe-src` at "CAM1 (usb)", the SAME

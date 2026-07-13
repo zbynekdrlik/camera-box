@@ -11,7 +11,9 @@
 
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Child, Command};
+use std::sync::{Arc, Mutex};
+use std::thread;
 use std::thread::sleep;
 use std::time::Duration;
 
@@ -66,7 +68,9 @@ fn effective_max_duration_clamps_without_a_reason() {
 
 #[test]
 fn effective_max_duration_honors_an_explicit_reason() {
-    let r = run_sourced("rig_test_ledger_effective_max_duration 7200 'rig-mode TEST measurement window'");
+    let r = run_sourced(
+        "rig_test_ledger_effective_max_duration 7200 'rig-mode TEST measurement window'",
+    );
     assert_eq!(r.exit_code, 0, "stderr={}", r.stderr);
     assert_eq!(
         r.stdout, "7200",
@@ -172,7 +176,9 @@ fn register_read_clear_round_trip_against_a_real_file() {
 
 #[test]
 fn read_of_a_missing_ledger_is_empty_not_an_error() {
-    let r = run_sourced("eval \"$(rig_test_ledger_read_remote_cmds /nonexistent/path/rig-tests.jsonl)\"");
+    let r = run_sourced(
+        "eval \"$(rig_test_ledger_read_remote_cmds /nonexistent/path/rig-tests.jsonl)\"",
+    );
     assert_eq!(r.exit_code, 0, "stderr={}", r.stderr);
     assert_eq!(r.stdout, "");
 }
@@ -184,48 +190,105 @@ fn read_of_a_missing_ledger_is_empty_not_an_error() {
 // process calls itself.
 // ---------------------------------------------------------------------------
 
-/// Spawn `/bin/sh -c 'exec -a NAME sleep 9999'` (a cooperative long-lived process under an
-/// arbitrary renamed argv[0]) and return its PID.
-fn spawn_renamed_cooperative(name: &str) -> u32 {
-    let child = Command::new("/bin/sh")
+/// A spawned fixture process, kept PROMPTLY reaped by a background thread that polls
+/// `try_wait()` every 20ms for as long as the process lives (bounded to 10s as a safety valve).
+///
+/// WHY this exists: `rig_test_ledger_terminate_entry_cmds`'s own `kill -0 "$target"` polling
+/// loop checks process EXISTENCE, and a zombie (a dead-but-not-yet-reaped child) STILL counts as
+/// "exists" to `kill -0` until its ACTUAL PARENT calls `wait()`/`waitpid()` on it. In a real
+/// deployment the target's parent is a login shell / systemd / init, all of which reap promptly
+/// — so `kill -0` correctly reflects death within milliseconds there. But a bare
+/// `std::process::Command::spawn()` in a test does NOT auto-reap; if the test only calls
+/// `try_wait()` once at the very end, the terminate script's OWN `kill -0` loop spins through
+/// its entire ~5s escalation window seeing a live-looking zombie and WRONGLY reports
+/// `KILL_NEEDED=1` even for a process that died from the very first SIGTERM (confirmed via
+/// `ExitStatus`'s raw wait-status decoding signal 15 = SIGTERM, not 9 = SIGKILL, when this
+/// artifact was root-caused). This background reaper closes that test-only gap so the fixture
+/// behaves like a REAL rig process for the purposes of this test, without changing anything
+/// about how `rig_test_ledger_terminate_entry_cmds` itself works.
+struct Fixture {
+    pid: u32,
+    child: Arc<Mutex<Child>>,
+    alive: Arc<Mutex<bool>>,
+}
+
+impl Fixture {
+    fn spawn(child: Child) -> Self {
+        let pid = child.id();
+        let child = Arc::new(Mutex::new(child));
+        let alive = Arc::new(Mutex::new(true));
+        let child_bg = Arc::clone(&child);
+        let alive_bg = Arc::clone(&alive);
+        thread::spawn(move || {
+            for _ in 0..500 {
+                // 500 * 20ms = 10s safety bound
+                {
+                    let mut c = child_bg.lock().expect("reaper: child mutex poisoned");
+                    if matches!(c.try_wait(), Ok(Some(_))) {
+                        *alive_bg.lock().expect("reaper: alive mutex poisoned") = false;
+                        return;
+                    }
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+        });
+        Self { pid, child, alive }
+    }
+
+    fn is_alive(&self) -> bool {
+        *self.alive.lock().expect("alive mutex poisoned")
+    }
+
+    fn force_kill(&self) {
+        let mut c = self.child.lock().expect("child mutex poisoned");
+        let _ = c.kill();
+        let _ = c.wait();
+    }
+}
+
+/// Spawn `bash -c 'exec -a NAME sleep 9999'` (a cooperative long-lived process under an
+/// arbitrary renamed argv[0]), promptly-reaped (see `Fixture`).
+fn spawn_renamed_cooperative(name: &str) -> Fixture {
+    let child = Command::new("/bin/bash")
         .arg("-c")
         .arg(format!("exec -a '{name}' sleep 9999"))
         .spawn()
         .expect("spawn renamed sleep");
-    child.id()
+    Fixture::spawn(child)
 }
 
 /// Spawn a renamed process that IGNORES SIGTERM (forces the terminate builder to escalate to
-/// SIGKILL) — the harder half of the #721 fixture.
-fn spawn_renamed_sigterm_ignoring(name: &str) -> u32 {
-    let child = Command::new("/bin/sh")
+/// SIGKILL) — the harder half of the #721 fixture. Promptly-reaped (see `Fixture`).
+fn spawn_renamed_sigterm_ignoring(name: &str) -> Fixture {
+    let child = Command::new("/bin/bash")
         .arg("-c")
-        .arg(format!("exec -a '{name}' /bin/bash -c 'trap \"\" TERM; while true; do sleep 1; done'"))
+        .arg(format!(
+            "exec -a '{name}' /bin/bash -c 'trap \"\" TERM; while true; do sleep 1; done'"
+        ))
         .spawn()
         .expect("spawn renamed sigterm-ignoring process");
-    child.id()
-}
-
-fn pid_alive(pid: u32) -> bool {
-    Command::new("kill")
-        .arg("-0")
-        .arg(pid.to_string())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
-fn reap_best_effort(pid: u32) {
-    let _ = Command::new("kill").arg("-9").arg(pid.to_string()).status();
+    Fixture::spawn(child)
 }
 
 #[test]
 fn renamed_cooperative_process_is_killed_by_pid_via_sigterm() {
-    let pid = spawn_renamed_cooperative("cam2-painter-totally-not-frame-probe");
+    let fixture = spawn_renamed_cooperative("cam2-painter-totally-not-frame-probe");
+    let pid = fixture.pid;
     sleep(Duration::from_millis(200));
-    assert!(pid_alive(pid), "fixture process must be alive before the test");
+    assert!(
+        fixture.is_alive(),
+        "fixture process must be alive before the test"
+    );
 
-    let r = run_sourced(&format!("rig_test_ledger_terminate_entry_cmds {pid} pid"));
+    // eval — rig_test_ledger_terminate_entry_cmds is a STRING BUILDER (mirrors every other
+    // `_cmds` function in this file's convention): it PRINTS a remote command; the caller must
+    // eval/execute the printed text to actually run it (production embeds it via `$(...)` into
+    // an `ssh` call). Calling the function directly here would only assert on its own SOURCE
+    // TEXT (which happens to literally contain the string "KILL_NEEDED=0" in its else-branch —
+    // a false-positive trap).
+    let r = run_sourced(&format!(
+        "eval \"$(rig_test_ledger_terminate_entry_cmds {pid} pid)\""
+    ));
     assert_eq!(r.exit_code, 0, "stderr={}", r.stderr);
     assert!(
         r.stdout.contains("KILL_NEEDED=0"),
@@ -233,20 +296,26 @@ fn renamed_cooperative_process_is_killed_by_pid_via_sigterm() {
         r.stdout
     );
     assert!(
-        !pid_alive(pid),
+        !fixture.is_alive(),
         "the RENAMED process (argv[0]='cam2-painter-totally-not-frame-probe') must be DEAD after \
          terminate-by-pid -- kill-by-PID never cares what the process calls itself (the #721 fix)"
     );
-    reap_best_effort(pid);
+    fixture.force_kill();
 }
 
 #[test]
 fn renamed_sigterm_ignoring_process_escalates_to_sigkill_and_dies() {
-    let pid = spawn_renamed_sigterm_ignoring("cam2-painter-stubborn");
+    let fixture = spawn_renamed_sigterm_ignoring("cam2-painter-stubborn");
+    let pid = fixture.pid;
     sleep(Duration::from_millis(300));
-    assert!(pid_alive(pid), "fixture process must be alive before the test");
+    assert!(
+        fixture.is_alive(),
+        "fixture process must be alive before the test"
+    );
 
-    let r = run_sourced(&format!("rig_test_ledger_terminate_entry_cmds {pid} pid"));
+    let r = run_sourced(&format!(
+        "eval \"$(rig_test_ledger_terminate_entry_cmds {pid} pid)\""
+    ));
     assert_eq!(r.exit_code, 0, "stderr={}", r.stderr);
     assert!(
         r.stdout.contains("KILL_NEEDED=1"),
@@ -254,17 +323,18 @@ fn renamed_sigterm_ignoring_process_escalates_to_sigkill_and_dies() {
         r.stdout
     );
     assert!(
-        !pid_alive(pid),
+        !fixture.is_alive(),
         "the RENAMED SIGTERM-ignoring process must still end up DEAD via the SIGKILL escalation"
     );
-    reap_best_effort(pid);
+    fixture.force_kill();
 }
 
 #[test]
 fn terminate_of_an_already_dead_pid_is_a_success_not_a_failure() {
     // A PID that no longer exists (e.g. the process already exited on its own) — cleanup's job
-    // is "make sure it's gone", which is already true; must not error.
-    let r = run_sourced("rig_test_ledger_terminate_entry_cmds 999999 pid");
+    // is "make sure it's gone", which is already true; must not error. (eval — see the comment
+    // on the renamed-process tests above for why this can't call the builder directly.)
+    let r = run_sourced("eval \"$(rig_test_ledger_terminate_entry_cmds 999999 pid)\"");
     assert_eq!(r.exit_code, 0, "stderr={}", r.stderr);
     assert!(r.stdout.contains("KILL_NEEDED=0"));
 }
@@ -305,7 +375,8 @@ fn rig_mode_sources_and_uses_the_ledger() {
          ledger"
     );
     assert!(
-        text.contains("event_mode_ledger_cleanup") || text.contains("rig_test_ledger_terminate_entry_cmds"),
+        text.contains("event_mode_ledger_cleanup")
+            || text.contains("rig_test_ledger_terminate_entry_cmds"),
         "do_event() must clean the ledger (terminate every registered entry) as part of the \
          EVENT-mode switch"
     );

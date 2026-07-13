@@ -105,6 +105,12 @@ RIG_MODE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # device silently plays into a dead pin after any HDMI renegotiation.
 # shellcheck source=scripts/lib/marker-device-resolve.sh
 . "$RIG_MODE_DIR/lib/marker-device-resolve.sh"
+# #723: SINGLE SOURCE OF TRUTH for the rig-test LEDGER — anything a test/worker starts on the
+# rig registers durably here; EVENT mode cleans BY LEDGER (kill-by-PID, immune to a process
+# rename — the #721 incident's root link: a RENAMED painter that every name-based cleanup
+# missed). See scripts/lib/rig-test-ledger.sh for the full #723 story.
+# shellcheck source=scripts/lib/rig-test-ledger.sh
+. "$RIG_MODE_DIR/lib/rig-test-ledger.sh"
 # #464: SINGLE SOURCE OF TRUTH for the presenter-aware painter-liveness check (KMS page-flip vs
 # fbdev) — see scripts/lib/presenter-liveness-check.sh for the full #464 story. Mirrors
 # src/presenter_kind.rs::resolve_presenter_kind's "will this run ever touch /dev/fb0?" answer.
@@ -294,6 +300,12 @@ nohup $bin --paint-only --dual-qr --qr-size $qr --duration-secs $dur --paint-fps
   --marker-log $marker_log $extra >/tmp/rig-painter.log 2>&1 &
 echo \$! > "$pidfile"
 PAINTER_PID=\$(cat "$pidfile")
+# (4b) #723: register this painter in the rig-test LEDGER — the sanctioned registration path, so
+#      EVENT mode (or an orphan sweep) can find and kill it BY PID even if the binary is later
+#      renamed/copied elsewhere (the #721 incident class). $dur is TEST mode's own intentional
+#      measurement-window length (often > the 3600s safety cap) — passed WITH a reason so it is
+#      honored verbatim rather than clamped (rig_test_ledger_effective_max_duration).
+$(rig_test_ledger_register_remote_cmds "frame-probe --paint-only (rig-mode TEST painter)" '\$PAINTER_PID' cam2 "rig-mode.sh test" "$(rig_test_ledger_effective_max_duration "$dur" "rig-mode TEST measurement window")")
 sleep 3
 # (5) verify the painter is UP and ACTUALLY PAINTING — presenter-aware (#464). --presenter auto
 #     (the default here) may land on the KMS page-flip presenter, which by design NEVER opens
@@ -670,6 +682,45 @@ do_test() {
   echo "RESULT: TEST mode — cam side PASS, burns ON."
 }
 
+# event_mode_ledger_cleanup -> #723: read cam2's rig-test LEDGER and terminate EVERY registered
+# entry — SIGTERM, bounded escalation to SIGKILL, and the #660 clean-paint fb0 fallback when a
+# KILL was actually needed — then CLEAR the ledger. This is the exhaustive sweep that catches
+# anything painter_stop_remote's own name-based `pkill -x frame-probe` might miss (a renamed
+# binary — the #721 incident class), and anything ELSE a test/worker registered (a burn, an
+# override) that this switch's own steps don't already know to revert. Runs BEFORE the #722
+# assert phase so the assert's own paint-process/artifact checks see the CLEANED end state.
+# Best-effort per entry (one bad/malformed line must never abort the whole cleanup or do_event
+# itself) — logs everything for the operator, never hard-fails.
+event_mode_ledger_cleanup() {
+  echo "[#723] rig-test ledger cleanup on cam2 (exhaustive sweep, BEFORE the #722 assert phase):"
+  local raw
+  raw="$(cam_ssh "$(rig_test_ledger_read_remote_cmds)" 2>/dev/null || true)"
+  if [ -z "$raw" ]; then
+    echo "[#723] ledger empty/absent on cam2 -- nothing to clean."
+    return 0
+  fi
+  local line what pidunit box out
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    what="$(printf '%s' "$line" | jq -r '.what // empty' 2>/dev/null || true)"
+    pidunit="$(printf '%s' "$line" | jq -r '.pid_or_unit // empty' 2>/dev/null || true)"
+    box="$(printf '%s' "$line" | jq -r '.box // empty' 2>/dev/null || true)"
+    if [ -z "$pidunit" ]; then
+      echo "WARNING: [#723] skipping malformed ledger line: $line" >&2
+      continue
+    fi
+    echo "[#723] cleaning ledger entry: what=${what:-?} pid_or_unit=$pidunit box=${box:-?}"
+    out="$(cam_ssh "$(rig_test_ledger_terminate_entry_cmds "$pidunit" pid)" 2>&1 || true)"
+    echo "$out" | sed 's/^/    [ledger cleanup] /'
+    if printf '%s' "$out" | grep -q 'KILL_NEEDED=1'; then
+      echo "[#723] entry required SIGKILL (never got its own graceful teardown) -- running the #660 clean-paint fb0 fallback."
+      cam_ssh "$(rig_test_ledger_clean_paint_fallback_cmds)" 2>&1 | sed 's/^/    [ledger cleanup] /' || true
+    fi
+  done <<< "$raw"
+  cam_ssh "$(rig_test_ledger_clear_remote_cmds)" 2>/dev/null || true
+  echo "[#723] ledger cleared on cam2."
+}
+
 do_event() {
   require_sshpass
   # #281 Fix#3: clear the rig-active heartbeat — we are returning the rig to a clean prod/EVENT
@@ -686,6 +737,8 @@ do_event() {
   echo
   echo "[cam2 ${PAINTER_IP}] stop painter (via pidfile) -> remove CAMERA_BOX_NO_DISPLAY drop-in -> restart camera-box -> verify HDMI preview restored"
   cam_ssh "$(painter_stop_remote "$PAINTER_PIDFILE")"
+  echo
+  event_mode_ledger_cleanup
   echo
   echo "[obs] #257 toggle per-source genlock_burn OFF over WebSocket (no relaunch — the #246 guard):"
   toggle_burn event
