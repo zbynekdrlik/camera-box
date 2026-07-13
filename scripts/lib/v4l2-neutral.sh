@@ -80,6 +80,17 @@ v4l2_neutral_default_ctrl_arg() {
 # `/dev/video0` if none is found). Sets the variable but produces no other output/side effect —
 # callers needing the fuser-wait/v4l2-ctl calls to target the SAME node just reference
 # `$V4L2_NEUTRAL_NODE` in their own remote text right after embedding this.
+#
+# CRITICAL: the LAST statement below ends with an explicit `;` — never rely on the function's own
+# trailing newline to separate it from whatever text follows at the embedding site. `$(...)`
+# command substitution UNCONDITIONALLY STRIPS trailing newlines from captured output (standard
+# bash behaviour), so a caller embedding this via `"...$(v4l2_neutral_resolve_node_cmd) more text"`
+# would otherwise get the LAST line here glued directly onto "more text" with no separator at all
+# (live #744/#746 incident: gate run 29265311504 — `v4l2-ctl ... --get-ctrl=... 2>/dev/null` from
+# v4l2_neutral_set_default_cmd's OWN last line, below, got glued to a following `rm -f ...`,
+# turning it into `v4l2-ctl ... 2>/dev/null rm -f /tmp/....log` — v4l2-ctl errored "unknown
+# arguments: rm", and the intended `rm` never ran at all). An explicit trailing `;` here survives
+# the stripped newline and correctly terminates the statement regardless of what follows.
 v4l2_neutral_resolve_node_cmd() {
   printf '%s\n' \
     'V4L2_NEUTRAL_NODE=""' \
@@ -91,7 +102,7 @@ v4l2_neutral_resolve_node_cmd() {
     '    break' \
     '  fi' \
     'done' \
-    'V4L2_NEUTRAL_NODE="${V4L2_NEUTRAL_NODE:-/dev/video0}"'
+    'V4L2_NEUTRAL_NODE="${V4L2_NEUTRAL_NODE:-/dev/video0}";'
 }
 
 # v4l2_neutral_set_default_cmd -> the REMOTE bash TEXT that reads `$V4L2_NEUTRAL_NODE`'s OWN
@@ -99,6 +110,10 @@ v4l2_neutral_resolve_node_cmd() {
 # control), and reads the result back for the caller's log. ASSUMES `V4L2_NEUTRAL_NODE` is already
 # set (by v4l2_neutral_resolve_node_cmd, embedded immediately before this in the same remote
 # script/ssh session).
+#
+# CRITICAL (see v4l2_neutral_resolve_node_cmd's comment above — the SAME command-substitution
+# newline-stripping trap): the LAST statement ends with an explicit `;` so it can never be glued
+# to whatever literal text follows it at the embedding site.
 v4l2_neutral_set_default_cmd() {
   printf "_v4l2_ctrlarg=\$(v4l2-ctl -d \"\$V4L2_NEUTRAL_NODE\" --list-ctrls 2>/dev/null | awk '%s')\n" \
     "$V4L2_NEUTRAL_AWK_PROGRAM"
@@ -106,7 +121,7 @@ v4l2_neutral_set_default_cmd() {
     'if [ -n "$_v4l2_ctrlarg" ]; then' \
     '  v4l2-ctl -d "$V4L2_NEUTRAL_NODE" --set-ctrl="$_v4l2_ctrlarg" 2>/dev/null' \
     'fi' \
-    'v4l2-ctl -d "$V4L2_NEUTRAL_NODE" --get-ctrl=saturation,contrast 2>/dev/null'
+    'v4l2-ctl -d "$V4L2_NEUTRAL_NODE" --get-ctrl=saturation,contrast 2>/dev/null;'
 }
 
 # v4l2_neutral_apply_cmds -> the FULL standalone remote command (resolve node -> apply its own
