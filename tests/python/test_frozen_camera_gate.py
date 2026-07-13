@@ -33,6 +33,7 @@ _mod = _load_module()
 _hash_png = _mod._hash_png
 _extract_png = _mod._extract_png
 _build_timeline_json = _mod._build_timeline_json
+_scene_for_input = _mod._scene_for_input
 
 
 # ---------------------------------------------------------------------------
@@ -172,3 +173,132 @@ class TestBuildTimelineJson:
             assert isinstance(entries, list)
             for entry in entries:
                 assert entry is None or isinstance(entry, str)
+
+
+# ---------------------------------------------------------------------------
+# #747 — _scene_for_input: map a raw NDI camera INPUT name to its wrapping strih 'Cam N'
+# SCENE name, so the per-source warm-up can put that scene on PREVIEW before sampling.
+# ---------------------------------------------------------------------------
+
+class TestSceneForInput:
+    def test_maps_canonical_ndi_cam_names(self):
+        assert _scene_for_input("NDI cam1") == "Cam 1"
+        assert _scene_for_input("NDI cam5") == "Cam 5"
+        assert _scene_for_input("NDI cam6") == "Cam 6"
+
+    def test_multi_digit_camera_number(self):
+        assert _scene_for_input("NDI cam12") == "Cam 12"
+
+    def test_non_canonical_names_return_none(self):
+        # Non-standard --sources values (a caller override, a test fixture, a typo) must
+        # degrade to "no warm-up for this one" rather than raise — see _capture_timelines.
+        assert _scene_for_input("Multiview") is None
+        assert _scene_for_input("") is None
+        assert _scene_for_input("NDI cam") is None
+        assert _scene_for_input("cam1") is None
+        assert _scene_for_input("NDI cam5 ") is None
+        assert _scene_for_input("NDI cam5x") is None
+
+
+# ---------------------------------------------------------------------------
+# #747 — _resolve_original_preview: read Studio Mode + the operator's current preview
+# scene ONCE before warming, so main() can restore it after the gate finishes.
+# ---------------------------------------------------------------------------
+
+class TestResolveOriginalPreview:
+    def test_studio_on_returns_current_preview(self, monkeypatch):
+        def fake_rpc(ws, rtype, rdata=None, ignore_err=False):
+            if rtype == "GetStudioModeEnabled":
+                return {"studioModeEnabled": True}
+            if rtype == "GetCurrentPreviewScene":
+                return {"currentPreviewSceneName": "Multiview"}
+            raise AssertionError(f"unexpected RPC {rtype!r}")
+
+        monkeypatch.setattr(_mod, "_rpc", fake_rpc)
+        studio, orig = _mod._resolve_original_preview(object())
+        assert studio is True
+        assert orig == "Multiview"
+
+    def test_studio_off_never_reads_preview_and_returns_none(self, monkeypatch):
+        def fake_rpc(ws, rtype, rdata=None, ignore_err=False):
+            if rtype == "GetStudioModeEnabled":
+                return {"studioModeEnabled": False}
+            raise AssertionError(
+                f"unexpected RPC {rtype!r} — must not read preview when Studio Mode is off"
+            )
+
+        monkeypatch.setattr(_mod, "_rpc", fake_rpc)
+        studio, orig = _mod._resolve_original_preview(object())
+        assert studio is False
+        assert orig is None
+
+
+# ---------------------------------------------------------------------------
+# #747 — _capture_timelines warm-up: before sampling EACH source, its wrapping 'Cam N'
+# scene must be put on PREVIEW and settled, THEN sampled. Post-#730/#508 Multiview
+# decoupling, an input not currently SHOWING renders nothing — sampling cold is
+# indistinguishable from a genuine freeze.
+# ---------------------------------------------------------------------------
+
+class TestCaptureTimelinesWarmUp:
+    def _patch_common(self, monkeypatch, calls, sleeps):
+        def fake_rpc(ws, rtype, rdata=None, ignore_err=False):
+            calls.append((rtype, rdata))
+            return {}
+
+        monkeypatch.setattr(_mod, "_rpc", fake_rpc)
+        monkeypatch.setattr(_mod, "_screenshot_hash", lambda ws, src: f"h-{src}")
+        monkeypatch.setattr(_mod.time, "sleep", lambda s: sleeps.append(s))
+
+    def test_warms_scene_before_sampling(self, monkeypatch):
+        calls, sleeps = [], []
+        self._patch_common(monkeypatch, calls, sleeps)
+
+        timelines = _mod._capture_timelines(
+            ws=object(), sources=["NDI cam5"], n_samples=2, cadence_s=1.0, warm_settle_s=3.0
+        )
+
+        assert timelines == {"NDI cam5": ["h-NDI cam5", "h-NDI cam5"]}
+        assert calls[0] == ("SetCurrentPreviewScene", {"sceneName": "Cam 5"}), (
+            "the scene warm-up must happen BEFORE any screenshot sampling, got calls=%r" % calls
+        )
+        assert sleeps[0] == 3.0, "the settle sleep must be the warm_settle_s value, first"
+        assert sleeps[1:] == [1.0], "one cadence sleep between the 2 samples (n_samples=2)"
+
+    def test_skips_warm_for_unmapped_source(self, monkeypatch):
+        calls, sleeps = [], []
+        self._patch_common(monkeypatch, calls, sleeps)
+
+        _mod._capture_timelines(
+            ws=object(), sources=["Multiview"], n_samples=1, cadence_s=1.0, warm_settle_s=3.0
+        )
+
+        assert calls == [], "a source with no 'Cam N' scene mapping must be sampled cold"
+
+    def test_skips_warm_when_settle_is_zero(self, monkeypatch):
+        calls, sleeps = [], []
+        self._patch_common(monkeypatch, calls, sleeps)
+
+        _mod._capture_timelines(
+            ws=object(), sources=["NDI cam5"], n_samples=1, cadence_s=1.0, warm_settle_s=0.0
+        )
+
+        assert calls == [], "warm_settle_s<=0 (Studio Mode off) must skip warming entirely"
+
+    def test_multi_source_warms_each_in_turn_in_order(self, monkeypatch):
+        calls, sleeps = [], []
+        self._patch_common(monkeypatch, calls, sleeps)
+
+        _mod._capture_timelines(
+            ws=object(),
+            sources=["NDI cam1", "NDI cam3"],
+            n_samples=1,
+            cadence_s=1.0,
+            warm_settle_s=1.0,
+        )
+
+        warm_calls = [c for c in calls if c[0] == "SetCurrentPreviewScene"]
+        assert warm_calls == [
+            ("SetCurrentPreviewScene", {"sceneName": "Cam 1"}),
+            ("SetCurrentPreviewScene", {"sceneName": "Cam 3"}),
+        ], "each source's scene must be warmed in turn, in source-list order"
