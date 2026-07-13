@@ -2158,3 +2158,39 @@ on BOTH boxes (filed as #718 — a new, unrelated blocker). Don't assume a secon
 caused by your own change just because it's the same commit; diff the TWO runs' logs
 (`gh api repos/OWNER/REPO/actions/jobs/<job-id>/logs`, or `gh api .../attempts/<N>/jobs` to fetch a
 specific earlier attempt after a `gh run rerun`) before concluding anything.
+
+## GOTCHA — `timeout CMD` cannot invoke a shell FUNCTION (only an executable)
+
+`timeout SECS win_ssh_run ...` (or any `timeout`-wrapped call to a sourced bash function like
+`win_ssh_run`/`win_ssh_upload` from `scripts/lib/win-ssh-exec.sh`) fails with `timeout: failed to
+run command 'win_ssh_run': No such file or directory` — `timeout` `execvp()`s its argument
+directly; it never goes through the calling shell, so a shell FUNCTION (not a file on `$PATH`) is
+invisible to it. This bites specifically when adding a NEW bounded win_ssh_run call somewhere that
+didn't have one before (confirmed live, #748, run 29281776692) — every EXISTING sibling call in
+`recording-e2e.sh` either has no `timeout` wrapper, or already routes through the fix below.
+
+**Fix:** wrap in `bash -c`, re-sourcing the lib INSIDE that subshell (so bash, not `execvp`,
+resolves the function):
+```bash
+timeout "$T" bash -c '. "$1"; win_ssh_run "$2" "$3" "$4" "$5"' _ \
+  "$HERE/lib/win-ssh-exec.sh" "$USER" "$PW" "$HOST" "$PS_CMD"
+```
+(positional args after the placeholder `_` land as `$1`.. inside the `bash -c` script — avoids
+quoting hazards from interpolating them directly into the script string.)
+
+## GOTCHA — OBS-WS `StopRecord`'s RPC reply can race the mp4 muxer's own finalize (moov atom)
+
+`obs_phase2.py record --host <box> --action stop` returns as soon as the `StopRecord` WebSocket
+RPC replies with the file path — this is NOT proof the mp4 is fully written. Reading the file
+(e.g. `ffmpeg -i <path> -af volumedetect`) less than ~1s later can hit `moov atom not found` /
+`Invalid data found when processing input` — the muxer hadn't finished writing the trailing moov
+atom + closing the handle yet. This is INVISIBLE on the real ~300s recording (plenty of natural
+delay before `[7/8]`'s later download/decode) but bites hard on any SHORT probe recording read
+immediately after its own stop (confirmed live, #748's audio-presence preflight, run 29282790031).
+
+**Fix — a BOUNDED RETRY on the read** (same shape as the `[4c/8]` frozen-camera gate's
+reconnect-race retry), NOT a longer blind sleep before the first read (`no-timeout-band-aids.md`):
+a transient finalize-race clears within 1-2 retries (a 3s settle between attempts is plenty,
+live-verified); a genuine failure (ffmpeg missing, wrong path) fails identically on every attempt
+and still surfaces the same operator message once attempts are exhausted — the retry never masks
+a real problem, only absorbs the transient one.

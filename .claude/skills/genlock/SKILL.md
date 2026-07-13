@@ -976,6 +976,51 @@ this is NOT yet conclusively distinguished — see #726 for the live disambiguat
 a `presentation_cadence` read against a `GetStats renderSkippedFrames` DELTA over the SAME
 recording window).
 
+**UPDATE (2026-07-13) — Candidate A CONFIRMED + fix implemented, one residual gap found.** Live
+data conclusively showed A (uneven hold-then-jump, `duplicate_steps=0` on clean windows — B ruled
+out). Fix in `obs-source.c`'s STEADY branch (mirrored in `src/probe/genlock.rs`
+`ReleaseCadence::tick`): when `genlock_source_is_integer_multiple(source, canvas_interval)` detects
+the source runs at an integer multiple N>=2 of the canvas rate (derived from the front-2-queue
+stamp delta, NOT arrival timing), mature every frame up to `boundary + interval/2` and present the
+NEWEST, retiring older matured ones into `genlock_dropped_due` — a uniform every-Nth-frame cadence
+instead of the old present-oldest-one-per-tick crawl. Deployed via the FAST obs.dll hot-swap
+(libobs-only, no struct change → ABI-safe, no ~150-min full build needed — see the #278/#293
+precedent this repo already has for this class of change).
+
+**Residual (still open, #726 stays open):** `genlock_source_is_integer_multiple` re-derives N from
+scratch EVERY TICK off just the two OLDEST queued frames (`async_frames.array[0]`/`[1]`) — it
+returns `false` (falls back to the OLD single-release path) whenever `async_frames.num < 2` or the
+front pair isn't strictly monotonic at that instant. Live data (2026-07-13) found ONE camera input
+('NDI cam5', feeding CAM1's box) where this flips to `false` for a SUSTAINED period within one
+recording window — `genlock_relocks` (the SEPARATE backlog-storm counter, only incremented when
+`async_frames.num > GENLOCK_QDEPTH_RELOCK`) climbs continuously (~2/s) on that input while it stays
+FLAT on other 60-in-30 inputs ('NDI cam1'/'NDI cam3') in the identical time window — i.e. the same
+build, same mechanism, only ONE input affected, asymmetrically. Two live hypotheses, not yet
+distinguished: (a) that specific camera box genuinely has noisier per-frame stamp timing at that
+moment (a real source-side irregularity), or (b) the per-tick front-2-only re-derivation is simply
+too jitter-sensitive and needs to be STICKY (latch the confirmed N per-source, re-derive only after
+a genuine relock/gap event). **A sticky-N fix needs a NEW persistent `obs_source_t` field — that is
+a STRUCT CHANGE, which forfeits the ABI-safe fast-swap property** (would need the full ~150-min
+`windows-genlock.yml` build, not `windows-genlock-fast.yml`) — flag this to whoever picks up the
+follow-up so they don't attempt a fast-swap and get confused when it needs `obs-internal.h` too.
+
+**TECHNIQUE — correlate a SPECIFIC verdict window/segment against the strih/stream OBS log via the
+verdict.json artifact's own embedded `wall_clock_epoch_s`** (a strih/stream variant of the
+imag-nb `ts_present` technique above — same idea, cheaper source field, no manual epoch-window
+math needed). Every `full-path-e2e` run uploads a `recording-e2e-full-path` artifact containing
+`verdict-<run>.json`; download it (`gh run download <run-id> -n recording-e2e-full-path --dir
+<dir>`) and each `all_cambox_continuity.segments[i].residual_events[]` entry already carries a
+real `wall_clock_epoch_s` (a UTC unix-epoch integer, no manual `date -u -d` conversion needed) —
+use the segment's own `start_ns`/`end_ns` (nanosecond epoch, `/1e9` for seconds) to bound the
+window, then grep the corresponding box's OBS log (`win-strih`/`win-stream-snv` MCP `Shell`, the
+newest `*.txt` under `$env:APPDATA\obs-studio\logs`) for `genlock-fifo audit '<the specific NDI
+input feeding that segment's camera>'` lines whose printed `HH:MM:SS` falls in that UTC window
+(strih/stream logs print LOCAL time — Europe/Bratislava CEST, UTC+2 — unlike imag-nb's log, which
+uses the SAME local-time convention; convert the epoch to CEST, not UTC, before matching against
+the printed timestamp). This is how the #726 residual above was root-caused: identified the ONE
+bad segment from the verdict JSON, converted its epoch range to CEST, and found the asymmetric
+`relocks` behavior directly in the live OBS log for that exact window.
+
 ## #730 — strih's own #501-pattern low-bandwidth multiview twins (`scripts/strih_mv_scenes.py`)
 
 strih never had imag-nb's `#501` "MV Cam N" twin-scene optimization — the built-in Multiview

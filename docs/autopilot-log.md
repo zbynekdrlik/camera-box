@@ -5045,3 +5045,46 @@ precondition, not a defect.
 #741 (strih real-drop, unchanged), #707 (window-0 residual), and #747's own painter-duration
 side-effect. Next dispatch: fix the painter-duration/warm-up-budget interaction (#747) and the
 vendored `obs-source.c` release-cadence fix (#726 candidate A).
+
+## 2026-07-13 night dispatch — #726 obs-source.c fix (partial), #747 CLOSED, #748 built + validated live
+
+- **#726 (60→30 release-cadence judder) — vendored `obs-source.c` fix IMPLEMENTED, deployed via
+  FAST obs.dll hot-swap (SHA `8e2817e5874cd97516fa65314bc34f7fcc772a6683d183319f659e1575c285bd`,
+  from commit 9c9c3a05e), verified via `drift-guard --compare` on strih+stream (NO DRIFT). RED
+  `19c98e64d` / GREEN `7cffbbcb9`: `ReleaseCadence::tick` + `obs-source.c`'s STEADY branch now
+  mature up to `boundary+interval/2` and present newest when `genlock_source_is_integer_multiple`
+  detects N>=2. Fresh fused gate (run 29283876281): 2 windows byte-perfect `{2:845}`, 5 more
+  98-99.5% uniform (dramatic improvement over pre-fix's uniform {1:~705,7:~141} everywhere) — but
+  ONE window (CAM1, win6) still shows the OLD crawl pattern, root-caused to `genlock_relocks`
+  continuously incrementing on 'NDI cam5' (backlog-storm path, separate from the STEADY fix) while
+  CAM3/CAM4's inputs show zero relocks in the same window. Hypothesis: the per-tick, front-2-queue-
+  entry-only N-detection is jitter-sensitive; a STICKY per-source N-latch would need a NEW
+  persistent `obs_source_t` field — a struct change that breaks the ABI-safe fast-swap, needing the
+  full ~150-min build to test. **#726 left OPEN** with full diagnosis on the ticket; not closed.
+- **#747 (painter-duration side-effect) — CLOSED.** `PAINTER_PRE_RECORD_SLACK_SECS=240` (RED
+  `a122f669a` / GREEN `9c9c3a05e`) eliminates the dark-tail windows: window8/9 both `undecodable=0`
+  on the fresh run (was 576/844 before). Acceptance met, closed with evidence.
+- **#748 (audio-presence preflight + alert) — IMPLEMENTED + validated LIVE end-to-end.** New
+  `scripts/lib/audio-presence-preflight.sh` (Tier-0, 8/8 tests) + `recording-e2e.sh [4b2/8]` +
+  `e2e_discord_report.py`'s silent-A/V line. RED `14ff60f93` / GREEN `19bd9a61b` / fmt `3bf2653e0`.
+  TWO live bugs found + fixed during the FIRST real exercise (never caught locally — needs the
+  live rig): (1) `timeout win_ssh_run` — `timeout` execvp()s directly, can't invoke a shell
+  function (fix `cc9d3cf04`: route through `bash -c` re-sourcing the lib); (2) OBS-WS `StopRecord`
+  replies before the mp4 muxer finalizes the moov atom — a bounded retry (`c9617d5d7`, same shape
+  as the `[4c/8]` frozen-camera gate) absorbs the race. Confirmed live: real audio measured
+  (-5.3 dB / -42.3 dB in different runs), correctly classified audible against the -60dB
+  threshold. Coverage-audit checklist (splitter legs, clock health, colour readback, painter
+  content, strih/stream GPU headroom) posted as open line items on #748, not scattered new issues.
+- **A/V-sync leg UNBLOCKED** (mbc chain fix, IP moved to 10.77.7.232) — first REAL A/V measurement
+  in a long time: cam2 offset -70.98ms (27 clustered samples), cam4 -78.20ms (8 samples), both
+  `gate_pass=false` at the ±20ms tolerance. Commented on #689 (its own exact scope — "derive the
+  stream hold, 1000ms unproven") with real numbers to work from.
+- Fresh numbers commented on #707 (window0+window6 CAM1 residual, correlated with #726's open
+  finding), #740 (colour gate unchanged, still red on every node), #741 (strih real_drops 6→4,
+  same non-monotonic shape).
+- **PR #704 NOT merged** — only "Full-path E2E (rig zero-loss gate)" is red; every other check
+  (Lint/Test/Coverage/Build/Windows-probe/Security/Drift-Guard/Shellcheck) is green. Held on
+  #726's residual + #707 + #740 + #741 + the new #689 A/V-tolerance finding.
+- Rig restored: both boxes' obs64 healthy (1 each), strih's AutoHotkey64 restored post-swap,
+  Multiview projector reopened, TEST mode re-armed fresh before the gate run, orphan probe
+  recordings cleaned up.
