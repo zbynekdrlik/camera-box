@@ -771,6 +771,137 @@ mod tests {
         assert!(cand.iter().any(|&c| (c - 6300.0).abs() < 1e-6));
     }
 
+    // -----------------------------------------------------------------
+    // #733 — same-fid duplicate-detection dedup (real-data audit, 2026-07-13)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn av_offset_candidates_with_fid_reproduces_av_offset_candidates_exactly() {
+        // `av_offset_candidates` is now re-expressed in terms of the richer
+        // `av_offset_candidates_with_fid` — same matching, same order, same values. Reuses the
+        // index-wrap fixture above as a cross-check that the refactor changed nothing observable.
+        let emit = vec![(5u8, 105u32, 0i64), (5u8, 405u32, 0i64)];
+        let ticks = vec![(105u32, 2.0f64), (405u32, 8.0f64)];
+        let audio = vec![(1.7f64, 5u8)];
+        let plain = av_offset_candidates(&emit, &audio, &ticks);
+        let with_fid = av_offset_candidates_with_fid(&emit, &audio, &ticks);
+        assert_eq!(with_fid.len(), plain.len());
+        let plain_from_with_fid: Vec<f64> = with_fid.iter().map(|&(off, _, _)| off).collect();
+        assert_eq!(plain_from_with_fid, plain, "same offsets, same order");
+    }
+
+    #[test]
+    fn dedupe_same_fid_candidates_collapses_a_near_simultaneous_duplicate_to_the_earliest() {
+        // Mirrors the REAL live pattern found auditing 2026-07-13's 3 full-path-e2e gate runs
+        // (#733): the winning cluster sometimes contains TWO candidates sharing the identical
+        // `fid` (e.g. live run 142901047's fid=8667: audio_ts 98.155s -> offset -16.8ms, and
+        // audio_ts 98.221s, 66ms later -> offset -82.6ms — the SAME video reference point, so the
+        // two offsets differ by exactly the audio-ts gap). Only the EARLIER (direct-path) sample
+        // should survive; the later one (likely an acoustic echo / reverb tail off the mbc
+        // mastering chain, or the decoder's own onset search re-triggering) is dropped.
+        let cand = vec![
+            (-16.8, 8667u32, 98.155),
+            (-82.6, 8667u32, 98.221), // 66ms after the first — same fid, gets collapsed
+            (10.0, 9929u32, 119.198), // unrelated real candidate, different fid — untouched
+        ];
+        let deduped = dedupe_same_fid_candidates(&cand, 0.2);
+        assert_eq!(
+            deduped.len(),
+            2,
+            "the 66ms-apart same-fid pair collapses to one; the unrelated fid survives"
+        );
+        assert!(
+            deduped.iter().any(|&o| (o - (-16.8)).abs() < 1e-9),
+            "kept the EARLIER (direct-path) sample of the duplicate pair: {deduped:?}"
+        );
+        assert!(
+            !deduped.iter().any(|&o| (o - (-82.6)).abs() < 1e-9),
+            "dropped the LATER (echo-like) sample of the duplicate pair: {deduped:?}"
+        );
+        assert!(
+            deduped.iter().any(|&o| (o - 10.0).abs() < 1e-9),
+            "the unrelated different-fid candidate is untouched: {deduped:?}"
+        );
+    }
+
+    #[test]
+    fn dedupe_same_fid_candidates_does_not_merge_a_same_fid_pair_far_apart_in_time() {
+        // A genuinely SEPARATE re-emission sharing a wrapped index (only possible on a recording
+        // long enough to wrap past 256 markers) must NOT be treated as a duplicate — the window_s
+        // bound (well under the ~3s marker cadence) protects this.
+        let cand = vec![(300.0, 42u32, 5.0), (-150.0, 42u32, 800.0)]; // ~795s apart
+        let deduped = dedupe_same_fid_candidates(&cand, 0.2);
+        assert_eq!(deduped.len(), 2, "far-apart same-fid entries are NOT merged");
+    }
+
+    #[test]
+    fn dedupe_same_fid_candidates_chains_three_close_detections_into_one() {
+        // A chain of 3 detections each within window_s of its PREDECESSOR (not necessarily of the
+        // first) still collapses to a single kept (earliest) sample — the merge must not require
+        // every pair to be mutually within window_s of the very first timestamp.
+        let cand = vec![
+            (0.0, 1u32, 10.0),
+            (-10.0, 1u32, 10.15),
+            (-20.0, 1u32, 10.30),
+        ];
+        let deduped = dedupe_same_fid_candidates(&cand, 0.2);
+        assert_eq!(deduped, vec![0.0], "chained duplicates collapse to the earliest");
+    }
+
+    #[test]
+    fn av_offset_candidates_deduped_matches_the_real_143901047_pattern_end_to_end() {
+        // End-to-end: emit_log/audio/ticks shaped like the real fid=8667 duplicate (#733) alongside
+        // a handful of other real markers plus scattered false decodes — cluster_offset_ms on the
+        // deduped candidates must (a) still recover the real cluster's offset and (b) report FEWER
+        // matched samples than the raw (non-deduped) path, since the inflated duplicate no longer
+        // counts twice.
+        let mut emit = Vec::new();
+        let mut ticks = Vec::new();
+        for i in 0..20u32 {
+            let fid = 1000 + 100 * i;
+            emit.push((i as u8, fid, 0i64));
+            ticks.push((fid, 10.0 * i as f64));
+        }
+        let mut audio: Vec<(f64, u8)> = Vec::new();
+        for i in 0..20u32 {
+            audio.push((10.0 * i as f64 - 0.020, i as u8)); // real: video leads audio by 20ms
+        }
+        // Duplicate the marker at index 8 (mirrors the live fid=8667 pattern): a second decode of
+        // the SAME index 66ms after the first, landing further from the true cluster.
+        audio.push((10.0 * 8.0 - 0.020 + 0.066, 8u8));
+        // A handful of false decodes scattered far from the real cluster (unrelated in-range idx).
+        for k in 0..50u32 {
+            let idx = (k % 20) as u8;
+            audio.push((k as f64 * 3.7, idx));
+        }
+        let raw = av_offset_candidates(&emit, &audio, &ticks);
+        let deduped = av_offset_candidates_deduped(&emit, &audio, &ticks, DEDUPE_SAME_FID_WINDOW_S);
+        assert!(
+            deduped.len() < raw.len(),
+            "dedup must strictly reduce the candidate count when a duplicate is present: raw={} deduped={}",
+            raw.len(),
+            deduped.len()
+        );
+        let raw_cluster = cluster_offset_ms(&raw, 8, 25.0).expect("raw clusters");
+        let deduped_cluster = cluster_offset_ms(&deduped, 8, 25.0).expect("deduped clusters");
+        assert!(
+            (raw_cluster.offset_ms - (-20.0)).abs() < 1.0,
+            "raw still recovers ~-20ms: {}",
+            raw_cluster.offset_ms
+        );
+        assert!(
+            (deduped_cluster.offset_ms - (-20.0)).abs() < 1.0,
+            "deduped still recovers ~-20ms: {}",
+            deduped_cluster.offset_ms
+        );
+        assert!(
+            deduped_cluster.matched < raw_cluster.matched,
+            "deduped cluster has fewer (non-inflated) matched samples: raw={} deduped={}",
+            raw_cluster.matched,
+            deduped_cluster.matched
+        );
+    }
+
     #[test]
     fn required_delay_sign_and_clamp() {
         assert_eq!(required_delay_ms(1000, 120.0), 880); // video lags → reduce
