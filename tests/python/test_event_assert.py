@@ -234,3 +234,51 @@ def test_summary_on_failure_names_the_failing_item():
     summary = ea.format_summary_sk(False, results)
     assert ea.ITEM_LABELS_SK["burns_off"] in summary
     assert "CHYBA" in summary
+
+
+# ---------------------------------------------------------------------------
+# #724 -- the Discord confirmation message (owner-thread + @mention, phone-readable). Sent on
+# BOTH outcomes: pass = "potvrdenie", fail = "varovanie" naming every failing item with a X mark.
+# Reuses format_summary_sk's per-item lines -- one source of truth for what "clean" means,
+# never a second, divergent description of the same 8 items.
+# ---------------------------------------------------------------------------
+
+
+def test_discord_message_on_pass_has_a_confirmation_header_and_every_item_checked():
+    results = _all_pass_item_results()
+    msg = ea.format_discord_message_sk(True, results, timestamp="2026-07-13 21:05:00")
+    assert "POTVRDENY" in msg
+    for name in ea.ITEM_ORDER:
+        assert ea.ITEM_LABELS_SK[name] in msg
+    assert "OK" in msg
+    assert "2026-07-13 21:05:00" in msg
+
+
+def test_discord_message_on_fail_is_a_warning_and_names_every_failing_item():
+    results = _all_pass_item_results()
+    results["pixel_proof"] = False
+    results["burns_off"] = False
+    msg = ea.format_discord_message_sk(False, results, timestamp="2026-07-13 21:05:00")
+    assert "NEPRESIEL" in msg
+    assert ea.ITEM_LABELS_SK["pixel_proof"] in msg
+    assert ea.ITEM_LABELS_SK["burns_off"] in msg
+    assert "CHYBA" in msg
+    assert "2026-07-13 21:05:00" in msg
+
+
+def test_discord_message_includes_details_when_provided():
+    results = _all_pass_item_results()
+    msg = ea.format_discord_message_sk(
+        True, results, details={"latency_calibrated": "aktualna=925ms, kalibrovana=925ms"},
+        timestamp="2026-07-13 21:05:00",
+    )
+    assert "aktualna=925ms, kalibrovana=925ms" in msg
+
+
+def test_discord_message_never_exceeds_a_single_discord_chunk():
+    # Discord's hard per-message cap is 2000 chars; this message is a short fixed checklist, so
+    # it must comfortably fit in ONE message even with details populated for every item.
+    results = _all_pass_item_results()
+    details = {name: "x" * 40 for name in ea.ITEM_ORDER}
+    msg = ea.format_discord_message_sk(True, results, details=details, timestamp="2026-07-13 21:05:00")
+    assert len(msg) < 2000
