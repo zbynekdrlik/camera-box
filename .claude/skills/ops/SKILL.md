@@ -1129,3 +1129,67 @@ systemctl is-active camera-box   # confirm it wasn't already down; restart if it
 This is a STOPGAP ONLY — the tmpfs refills on the same ~4-5 day cadence until dantesync's own
 per-second PTP debug logging is throttled/leveled down (dantesync is a separate repo, tracked on
 `#679` — do not attempt that fix from this repo).
+
+## #731 — Companion Satellite on imag-nb (headless Stream Deck client) — the systemd hwdb/uaccess ACL trap
+
+imag-nb (10.77.9.182) runs Bitfocus Companion Satellite as a headless systemd service so the
+physically-connected Elgato Stream Deck can drive Bitfocus Companion running on the SEPARATE
+`companion.lan` (10.77.9.205) box. Installed via `scripts/setup-imag.sh` step 20 (idempotent,
+safe to re-run) — installs via the OFFICIAL `bitfocus/companion-satellite` installer script
+(`pi-image/install.sh`, creates a dedicated `satellite` system user + a `satellite.service`
+systemd unit), never a hand-rolled reimplementation.
+
+**Config mechanism — `/boot/satellite-config` is a PER-START import, not one-shot.**
+`fixup-pi-config.js` (the service's `ExecStartPre`) re-reads `/boot/satellite-config` on EVERY
+service start, imports `COMPANION_IP`/`REST_PORT` into the persisted
+`/home/satellite/satellite-config.json`, THEN resets the boot file back to a blank commented
+template. So (re-)pointing the satellite at a different Companion host is: write
+`/boot/satellite-config` fresh with the real values, then `systemctl restart satellite` — NOT a
+one-time file that only matters on first install.
+
+**GOTCHA — the officially-installed `50-satellite.rules` udev rule (`GROUP=satellite,
+MODE=660`) can be silently OVERRIDDEN by systemd's own hwdb/uaccess mechanism, leaving the
+headless service user unable to open the device (live-confirmed 2026-07-13).** Any HID device
+systemd's hwdb classifies as an "AV production controller" (`ID_AV_PRODUCTION_CONTROLLER=1` env
+var, set via `SUBSYSTEM=="hidraw", IMPORT{builtin}="hwdb"` — the Elgato Stream Deck matches this)
+gets tagged `uaccess` by `/usr/lib/udev/rules.d/70-uaccess.rules:89`
+(`SUBSYSTEM=="hidraw", ENV{ID_AV_PRODUCTION_CONTROLLER}=="1", TAG+="uaccess"`). systemd-logind
+then grants a PER-SEAT ACL to whichever user owns the active graphical session (the desktop
+autologin user, `newlevel` on imag-nb) — and that ACL grant **explicitly sets `group::---`**,
+which REPLACES the plain group-permission bits entirely once any ACL exists on the file (POSIX
+ACL semantics: an ACL present means the traditional `group` bits are ignored in favor of the
+ACL's own `group::` entry). Symptom: `journalctl -u satellite` shows
+`Open "streamdeck:..." failed: ... cannot open device with path /dev/hidrawN` even though
+`ls -l /dev/hidrawN` correctly shows `crw-rw----+ 1 root satellite` (the `+` is the tell — an ACL
+is present and is silently overriding what the ownership line implies).
+
+**Fix — strip the uaccess tag for these devices, numbered AFTER `70-uaccess.rules` (tag removal
+must run after the tag is added):**
+```
+# /etc/udev/rules.d/99-companion-satellite-no-uaccess.rules
+SUBSYSTEM=="hidraw", ENV{ID_AV_PRODUCTION_CONTROLLER}=="1", TAG-="uaccess"
+```
+`udevadm control --reload-rules && udevadm trigger --subsystem-match=hidraw` applies it going
+forward (a FUTURE hotplug/reboot never gains the ACL). A device that's ALREADY plugged in and
+already carries the stale ACL from before the rule existed needs an explicit
+`setfacl -b /dev/hidrawN` reset — the udev rule alone doesn't retroactively strip an
+already-applied ACL. Both steps are baked into `setup-imag.sh` step 20 (loops every
+`ID_AV_PRODUCTION_CONTROLLER=1` hidraw device and resets its ACL on every run — idempotent-safe).
+
+**Verify:** `journalctl -u satellite -n 30` should show `Connected to Companion:
+CompanionVersion="..."` with no `cannot open device` error, and `curl
+http://127.0.0.1:9999/api/surfaces` (the satellite's own REST server, note the `/api/` prefix —
+plain `/status`/`/surfaces` 404) should list the claimed surface, e.g.
+`[{"pluginId":"elgato-stream-deck",...,"surfaceId":"streamdeck:...","productName":"Elgato Stream
+Deck MK.2"}]`. This proves the TECHNICAL connection + surface claim — it does NOT prove the
+operator's actual Companion button config is wired up correctly on the Companion server side
+(adding/mapping the surface in Companion's own web UI is a separate, human step).
+
+**Reusable lesson for ANY future headless-service-needs-a-HID-device work on a Linux desktop
+box** (imag-nb or any future similar provision): the `70-uaccess.rules`/`logind` ACL mechanism
+exists to let a LOGGED-IN desktop user access convenience devices (webcams, joysticks, "AV
+production controllers", smartcards, etc.) without root — it actively fights a udev rule that
+tries to grant GROUP-based access instead, because ONCE an ACL exists on a file, the ACL wins
+over the group bits entirely. Any headless service (not tied to a login session) that needs to
+open such a device needs its own `TAG-="uaccess"` rule numbered after `70-`, not just a
+`GROUP=`/`MODE=` rule alone.

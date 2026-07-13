@@ -4551,3 +4551,43 @@ a follow-up if not done by the time this log entry is read.
   already tracked, unrelated to #707 (independent decode path, confirmed by code read); commented
   with this occurrence's evidence, worked around by re-running rather than investigating further
   (out of #707's scope).
+
+## 2026-07-13 — #730 (strih multiview twins) + #731 (Companion Satellite on imag-nb)
+
+Bundled batch, committed to `dev` (PR #704 already open/held on #707+#689 — no new PR opened,
+per dispatch instruction). Commits: `5c101725b` (version bump 350), `c1bdfe5a0` (#730),
+`f6dee14f6` (#731).
+
+- **#730** — `scripts/strih_mv_scenes.py` replicates imag-nb's #501 low-bandwidth multiview-twin
+  pattern on strih: reads each real "Cam N" scene's live NDI binding, creates a "MV Cam N" twin
+  (genlock_monitor=true), wires both the built-in OBS Multiview projector (show_in_multiview) and
+  strih's own hand-built "Multiview" scene (item swap, transform-preserving). Live-applied to
+  strih (production, hot WS, no restart) — all 6 twins + rewire verified via WS reads and a
+  screenshot. **Honest finding, not the hoped-for win**: a controlled live A/B (twin vs
+  full-bandwidth, isolating the 6 camera tiles from the 11 other Multiview scenes) showed NO
+  measurable `averageFrameRenderTime` difference — strih's Multiview render cost is dominated by
+  something else entirely (render time was observed climbing 14.75ms -> ~29ms over the session
+  independent of which camera scenes were shown). Posted full numbers to `#726` (the open
+  live-event-stutter/render-contention investigation) as evidence rather than claiming a fix here.
+  Persistence: the script itself is idempotent/re-runnable (mirrors imag_scenes.py's role), plus a
+  one-time on-box scene-collection backup (`C:\obs-backup\20260713-082702-scenes\`). Tests:
+  `tests/python/test_strih_mv_scenes.py` (22 pure-function tests).
+- **#731** — `setup-imag.sh` step 20 installs Bitfocus Companion Satellite headlessly on imag-nb
+  via the official installer, points it at `companion.lan` (resolves fine, no DNS issue live),
+  enables+starts the systemd service. Found + fixed a real GOTCHA live: systemd's hwdb tags the
+  Stream Deck `ID_AV_PRODUCTION_CONTROLLER=1` -> `70-uaccess.rules` grants a per-seat ACL that
+  overrides the installer's own `GROUP=satellite` udev rule, leaving the headless service user
+  unable to open the device ("cannot open device with path /dev/hidraw3") — fixed with a
+  `TAG-="uaccess"` rule (numbered after 70-) + a `setfacl -b` reset for the already-plugged
+  device. Live-verified: satellite connected to Companion 4.3.4 (`tcp://companion.lan:16622`),
+  `GET /api/surfaces` lists the Stream Deck MK.2 as a claimed surface, service enabled (survives
+  reboot). NOT claimed: whether the operator's actual Companion button config lights up/works —
+  that's the user's own pending confirmation per the ticket. Tests: 5 new
+  `tests/setup_imag_guards.rs` guards (TOTAL_STEPS 19->20).
+
+Verification: `cargo fmt --all -- --check` clean, `cargo check`/`cargo clippy --all-targets -- -D
+warnings` clean (default features), full `cargo test --no-run` + every default-feature test binary
+run directly (109 binaries, 0 failed), full `python -m pytest tests/python` (365 passed). No
+`scripts/recording-e2e.sh` touch this session (the anchor-collision gotcha doesn't apply).
+
+Findings landed on tickets as they happened: `#726` comment (the #730 render-cost A/B data).
