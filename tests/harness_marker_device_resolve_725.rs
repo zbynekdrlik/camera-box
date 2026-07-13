@@ -94,14 +94,15 @@ struct Run {
 }
 
 fn run_sourced(aplay_text: &str, body: &str) -> Run {
-    let harness = format!(
-        "set -uo pipefail\n. {:?}\nAPLAY_TEXT={:?}\n{body}",
-        script(),
-        aplay_text,
-    );
+    // The fixture is passed via an ENV VAR (not interpolated into the bash -c script text) —
+    // Rust's `{:?}` Debug-escapes embedded newlines as literal `\n` two-character sequences,
+    // which a plain double-quoted bash string does NOT expand back into real newlines (that
+    // needs $'...' ANSI-C quoting). An env var carries the bytes verbatim, no escaping needed.
+    let harness = format!("set -uo pipefail\n. {:?}\nAPLAY_TEXT=\"$APLAY_TEXT_FIXTURE\"\n{body}", script());
     let out = Command::new("bash")
         .arg("-c")
         .arg(&harness)
+        .env("APLAY_TEXT_FIXTURE", aplay_text)
         .output()
         .expect("failed to run bash harness");
     Run {
@@ -219,10 +220,19 @@ fn rig_mode_do_test_calls_the_live_resolver() {
         .unwrap_or(text.len());
     let do_test_body = &text[do_test_start..do_test_end];
     assert!(
-        do_test_body.contains("marker_device_resolve_from_aplay")
-            || do_test_body.contains("marker_device_carries_monitor"),
-        "do_test() must call the #725 live aplay -l resolver before launching the painter, not \
-         rely solely on the hardcoded AUDIO_MARKER_DEVICE default"
+        do_test_body.contains("resolve_marker_device") && do_test_body.contains("painter_launch_remote"),
+        "do_test() must call the #725 live-resolver wrapper (resolve_marker_device) BEFORE \
+         launching the painter, not rely solely on the hardcoded AUDIO_MARKER_DEVICE default"
+    );
+    assert!(
+        do_test_body.contains("verify_marker_device_monitor"),
+        "do_test() must re-verify the chosen marker device still carries a live monitor AFTER \
+         launch (#725's post-launch re-check)"
+    );
+    assert!(
+        text.contains("marker_device_resolve_from_aplay"),
+        "the #725 pure resolver (marker_device_resolve_from_aplay) must actually be called \
+         somewhere in rig-mode.sh, not just referenced in comments"
     );
     assert!(
         text.contains("lib/marker-device-resolve.sh"),

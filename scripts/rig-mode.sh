@@ -99,6 +99,12 @@ RIG_MODE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # AV_RESTART_GATE painter (#421) so both launches can never drift on what "audible" means.
 # shellcheck source=scripts/lib/audio-marker-check.sh
 . "$RIG_MODE_DIR/lib/audio-marker-check.sh"
+# #725: SINGLE SOURCE OF TRUTH for resolving the QPSK audio-marker's ALSA device DYNAMICALLY
+# from the live `aplay -l` output (which HDMI device carries a genuine connected-monitor EDID
+# name right now) — see scripts/lib/marker-device-resolve.sh for the full #725 story. A hardcoded
+# device silently plays into a dead pin after any HDMI renegotiation.
+# shellcheck source=scripts/lib/marker-device-resolve.sh
+. "$RIG_MODE_DIR/lib/marker-device-resolve.sh"
 # #464: SINGLE SOURCE OF TRUTH for the presenter-aware painter-liveness check (KMS page-flip vs
 # fbdev) — see scripts/lib/presenter-liveness-check.sh for the full #464 story. Mirrors
 # src/presenter_kind.rs::resolve_presenter_kind's "will this run ever touch /dev/fb0?" answer.
@@ -585,6 +591,42 @@ cam_ssh() {
   sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 root@"$PAINTER_IP" "$1"
 }
 
+# resolve_marker_device -> stdout: the ALSA device string to use for the QPSK audio marker
+# (#725). Fetches a live `aplay -l` from cam2 and resolves via marker_device_resolve_from_aplay
+# (scripts/lib/marker-device-resolve.sh); on resolution failure (no device in the live listing
+# carries a genuine monitor name) falls back to the pinned AUDIO_MARKER_DEVICE default, loudly
+# WARNING that live resolution found nothing — last resort only. A truly dead pin can never end
+# in a silent PASS regardless: verify_marker_device_monitor (below) re-checks whichever device
+# was actually used, AFTER launch.
+resolve_marker_device() {
+  local aplay_text resolved
+  aplay_text="$(cam_ssh "$(marker_device_aplay_list_cmds)" 2>/dev/null || true)"
+  if resolved="$(marker_device_resolve_from_aplay "$aplay_text")"; then
+    echo "[#725] resolved marker device from cam2's live aplay -l: $resolved" >&2
+    echo "$resolved"
+  else
+    echo "WARNING: [#725] no HDMI device in cam2's live aplay -l carries a genuine monitor name -- falling back to the pinned default $AUDIO_MARKER_DEVICE (last resort; will still be re-verified after launch)." >&2
+    echo "$AUDIO_MARKER_DEVICE"
+  fi
+}
+
+# verify_marker_device_monitor DEVICE -> exit 0 iff DEVICE still carries a genuine monitor name
+# in a FRESH cam2 aplay -l read (#725's post-launch re-check — catches a monitor unplugged in the
+# gap between resolution and launch, or a fallback device that has no monitor either). On
+# failure: print a FAIL LOUD diagnostic, kill the just-launched painter (a silent dead-pin run
+# must never be reported PASS), and return non-zero.
+verify_marker_device_monitor() {
+  local device="$1" aplay_text
+  aplay_text="$(cam_ssh "$(marker_device_aplay_list_cmds)" 2>/dev/null || true)"
+  if marker_device_carries_monitor "$aplay_text" "$device"; then
+    echo "PASS: [#725] marker device $device confirmed carrying a live monitor (post-launch re-check)"
+    return 0
+  fi
+  echo "FAIL: [#725] marker device $device does NOT carry a live monitor on re-check (dead pin) -- killing the just-launched painter (a silent dead-pin run must never PASS)." >&2
+  cam_ssh "PID=\$(cat '$PAINTER_PIDFILE' 2>/dev/null || true); [ -n \"\$PID\" ] && kill \"\$PID\" 2>/dev/null || true" || true
+  return 1
+}
+
 do_test() {
   require_sshpass
   # #281 Fix#3: mark the rig as deliberately in a TEST state so the rig-restore watchdog does not
@@ -596,8 +638,15 @@ do_test() {
   echo "[obs] #531 pre-event genlock-staleness check on imag-nb (advisory, never blocks the switch):"
   warn_imag_genlock_stale
   echo
+  echo "[cam2 ${PAINTER_IP}] #725 resolve the QPSK audio-marker device from cam2's LIVE aplay -l (never trust the hardcoded default):"
+  local resolved_marker_device
+  resolved_marker_device="$(resolve_marker_device)"
+  echo
   echo "[cam2 ${PAINTER_IP}] switch camera-box to no-display (free /dev/fb0, keep capture+emit) -> launch PINNED painter (qr=${QR_SIZE}px)"
-  cam_ssh "$(painter_launch_remote "$PAINTER_BIN" "$PAINTER_DURATION_SECS" "$QR_SIZE" "$PAINTER_PIDFILE" "$PAINTER_EXTRA_FLAGS" "$PAINTER_FPS" "$RIG_TEST_DROPIN" "$AUDIO_MARKER_DEVICE" "$AUDIO_MARKER_CADENCE_TICKS" "$AUDIO_MARKER_LOG")"
+  cam_ssh "$(painter_launch_remote "$PAINTER_BIN" "$PAINTER_DURATION_SECS" "$QR_SIZE" "$PAINTER_PIDFILE" "$PAINTER_EXTRA_FLAGS" "$PAINTER_FPS" "$RIG_TEST_DROPIN" "$resolved_marker_device" "$AUDIO_MARKER_CADENCE_TICKS" "$AUDIO_MARKER_LOG")"
+  echo
+  echo "[cam2 ${PAINTER_IP}] #725 post-launch re-check: does $resolved_marker_device STILL carry a live monitor?"
+  verify_marker_device_monitor "$resolved_marker_device"
   echo
   echo "[obs] #257 toggle per-source genlock_burn ON over WebSocket (no relaunch):"
   toggle_burn test
@@ -612,7 +661,7 @@ do_test() {
   echo
   echo "ACHIEVED (cam side): cam2 painting dual-QR ${QR_SIZE}px on /dev/fb0 (pidfile ${PAINTER_PIDFILE})."
   echo "                     cam2 camera-box still ACTIVE in no-display mode (#291: NOT stopped — capture+emit keep running)."
-  echo "                     cam2 QPSK audio marker RUNNING+VERIFIED on ${AUDIO_MARKER_DEVICE} (#420: cadence ${AUDIO_MARKER_CADENCE_TICKS} ticks, log ${AUDIO_MARKER_LOG})."
+  echo "                     cam2 QPSK audio marker RUNNING+VERIFIED on ${resolved_marker_device} (#420/#725: live-resolved device, cadence ${AUDIO_MARKER_CADENCE_TICKS} ticks, log ${AUDIO_MARKER_LOG})."
   echo "                     -> verify cam2's NDI actually reaches strih on the rig (this switch does not prove the emit)."
   echo "                     cam1 (${CAM1_IP}) left on its DEPLOYED service (already at the 30 fps test rate)."
   echo "ACHIEVED (obs side): genlock_burn=true on strih + stream + imag program inputs (WebSocket, no relaunch)."
