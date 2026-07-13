@@ -328,7 +328,7 @@ restored heavier state.
   Skipped/Total) at T0, wait N s, snapshot again → DELTAS (renderSkipped delta, outputFps) are immune to
   startup transient and to the huge cumulative counters. `renderSkippedFrames` = GPU compositor missed
   the 60fps deadline; `outputSkippedFrames` = encoder dropped a broadcast frame (the one that matters).
-  No dedicated CLI verb exists for a one-off ad-hoc read — call the RPC directly (#726):
+  No dedicated CLI verb exists for a one-off ad-hoc read on OTHER boxes — call the RPC directly (#726):
   ```python
   import sys; sys.path.insert(0, "scripts")
   import obs_phase2 as op
@@ -336,6 +336,10 @@ restored heavier state.
   print(op._rpc(ws, "GetStats"))
   ws.close()
   ```
+  On strih specifically, `scripts/strih_mv_scenes.py --host 10.77.9.202 --password <pw> --stats
+  <seconds>` (#730) now DOES give a one-shot before/after-friendly delta report (activeFps,
+  avgRenderMs, renderSkipped/renderTotal + %, outputSkipped/outputTotal) without hand-rolling the
+  RPC — reuse it instead of the raw snippet above when measuring strih.
 - **Open the built-in Multiview projector:** `OpenVideoMixProjector {videoMixType:
   OBS_WEBSOCKET_VIDEO_MIX_TYPE_MULTIVIEW, monitorIndex:0}` (fullscreen). There is **no WS request to
   CLOSE a projector** — close it by `PostMessage WM_CLOSE (0x0010)` to the window titled

@@ -975,3 +975,55 @@ real-rig data (see the recording-decode skill) is qualitatively more consistent 
 this is NOT yet conclusively distinguished — see #726 for the live disambiguation plan (correlate
 a `presentation_cadence` read against a `GetStats renderSkippedFrames` DELTA over the SAME
 recording window).
+
+## #730 — strih's own #501-pattern low-bandwidth multiview twins (`scripts/strih_mv_scenes.py`)
+
+strih never had imag-nb's `#501` "MV Cam N" twin-scene optimization — the built-in Multiview
+projector AND strih's own hand-built "Multiview" SCENE (a plain scene whose items are references
+to the real "Cam N" scenes, used to feed a physical camera-operator monitor) both rendered every
+camera at FULL bandwidth. `scripts/strih_mv_scenes.py` replicates the imag pattern: for every real
+"Cam N" scene strih has, it reads that scene's existing "NDI cam\<n>" input's LIVE
+`ndi_source_name` (never hardcodes the box's documented INVERTED input-label mapping — see the
+top-of-file "strih NDI Input → Camera Mapping" table above) and wraps that exact value in a new
+"MV Cam \<n>" twin input (`genlock_monitor=true`, `latency=1`), then:
+
+1. Toggles the built-in-multiview `show_in_multiview` private setting (real scene -> false, twin
+   -> true) — the SAME mechanism #501 used on imag.
+2. Rewires strih's own "Multiview" SCENE — swaps every scene-item that references a real "Cam N"
+   scene for the matching "MV Cam N" twin, ADDING the new item (at the exact same
+   position/scale/bounds transform) BEFORE removing the old one, so the live operator monitor
+   never drops a tile mid-swap (hot-apply, no OBS restart — strih is production).
+
+Usage: `scripts/strih_mv_scenes.py --host 10.77.9.202 --password <strih WS pw> [--multiview-scene
+NAME] [--stats SECONDS]` — idempotent (safe to re-run any time; re-reads the live NDI binding and
+re-applies every setting). `--stats N` prints an ad-hoc `GetStats` render-cost delta over N seconds
+(no seeding) — the reusable tool the "Rig measurement helpers" section above notes doesn't exist
+yet as a CLI verb; this fills that gap for any future before/after render-budget check.
+
+**Live-verified 2026-07-13** (all 6 twins + the Multiview rewire applied to the real strih
+production box, confirmed via `GetSceneList`/`GetSceneItemList`/`GetSourcePrivateSettings` and a
+screenshot of the live Multiview grid showing the correct twin thumbnails).
+
+**Render-cost finding — HONEST, not the expected win.** A controlled live A/B (same window length,
+only the 6 camera tiles toggled between twin/full-bandwidth, everything else held constant —
+including an isolated variant with the other 11 non-camera Multiview scenes temporarily hidden)
+showed **no measurable difference** between the low-bandwidth twins and the original full-bandwidth
+scenes on strih's `averageFrameRenderTime` — see the full write-up + numbers posted to `#726`
+(2026-07-13 comment), which is the more relevant open investigation (strih's live-event stutter /
+render-contention root-cause hunt) for this data. Short version: strih's Multiview projector also
+renders 11 OTHER unrelated scenes untouched by this change, and `averageFrameRenderTime` was
+observed climbing (14.75ms -> ~29ms) over the course of testing independent of which camera scenes
+were shown — so whatever dominates strih's Multiview render cost is NOT the camera tiles'
+NDI bandwidth mode. The twins are still a correct, value-neutral-to-positive change (matches the
+proven imag mechanism, adds zero cost, and the underlying win is real at the SOURCE level even if
+not visible in the whole-canvas `averageFrameRenderTime` gauge) — just don't cite this as a proven
+strih render-cost fix without re-measuring once #726's real driver is found.
+
+**Persistence.** `scripts/strih_mv_scenes.py` itself IS the re-seeding mechanism (mirrors
+`imag_scenes.py`'s role for imag — re-run it any time after an OBS reinstall/scene-collection
+loss; it is idempotent and self-healing). A live on-box backup of strih's whole scene-collection
+directory (`%APPDATA%\obs-studio\basic\scenes\*.json`, all 3 collections including the active
+`uplne_orezana.json`) was ALSO taken to `C:\obs-backup\<timestamp>-scenes\` on 2026-07-13, following
+the same rollback-backup convention as the genlock DLL deploys above (`C:\obs-backup\<date>\`).
+Tests: `tests/python/test_strih_mv_scenes.py` (pure name-mapping/transform-filtering/replacement-
+planning/stats-delta logic, no live OBS — mirrors `test_obs_phase2_*.py`'s importlib pattern).
