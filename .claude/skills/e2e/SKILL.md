@@ -1813,6 +1813,29 @@ When `copies`/`gaps` look elevated or growing across a run, don't guess — run 
      structurally distinct events (a 33-tick and 15-tick contiguous span, `copies` and `gaps`
      genuinely equal), but NOT explained by an immediate dup+catchup optical beat — cause remains
      open. Full evidence on #707's own thread.
+   - **Event-anatomy result (2026-07-13, #707) — no forced mechanism.** Per-event tables (frame
+     index / tick / ±5-frame context / wall-clock spacing) for both spikes vs 3 small-residual
+     windows: the delta-histogram SHAPE is identical everywhere (dominated by Δ=1 + a periodic
+     Δ=6/7/8 catchup cluster that stays roughly CONSTANT ~130-140/window regardless of duplicate
+     count 1-33 — decoupled from the duplicates), and ZERO outlier/backward deltas anywhere. The
+     two spikes are TIGHT TEMPORAL BURSTS (33 duplicates in 5.3s of a 30.2s window, 15 in 6.4s),
+     front-loaded into the first ~1/5-1/6 of their window — NOT a slow drift spread evenly across
+     it. Small-residual duplicates by contrast are isolated, 8-14s apart. No mechanism proposed;
+     tables posted honestly to #707.
+   - **Post-switch receiver bandwidth-ramp hypothesis (2026-07-13, #707) — REFUTED, code AND
+     data.** See the genlock skill's `PROP_BANDWIDTH` note (searchable there) for the code-level
+     half: strih's camera NDI sources are ALWAYS `PROP_BW_HIGHEST`, no bandwidth-mode-switching
+     mechanism exists on strih at all (the one that does, #501's `genlock_monitor` twin-scene
+     low-bandwidth override, is imag-nb-only). Data-level: strih's own `genlock-fifo audit 'NDI
+     camN'` `received` counter increments by EXACTLY 300 every 5s sample (a flat 60.0fps) straight
+     through both switch instants and both entire duplicate bursts, with `depth` never moving off
+     its steady-state value — zero evidence of an arrival-rate dip or ramp anywhere.
+   - **Net result after 3 independent mechanism tests tonight, all refuted**: painter/monitor
+     presentation slip, optical sampling beat, post-switch bandwidth ramp. The two spikes remain
+     real, structurally clean (no real-loss signature at all — see above), genuinely unexplained.
+     `send_stall.rs` + `boundary_skip_count` (already deployed fleet-wide) are armed for the next
+     natural recurrence; this section + the `--merge-partials`/event-anatomy techniques are the
+     starting point for whoever picks this up next.
 
 ## RESOLVED (#708, 2026-07-12) — strih's OWN `full_chain.loss.strih.real_drops` periodic 4-frame residual was a per-source-counter accounting artifact, NOT loss
 

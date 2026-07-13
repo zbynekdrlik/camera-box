@@ -2,6 +2,38 @@
 
 Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads context.
 
+## 2026-07-13 (night) — #707 post-switch bandwidth-ramp hypothesis (3rd supervisor follow-up): REFUTED code+data, investigation loop closed per dispatch
+
+- **3rd follow-up dispatch**: the anatomy's front-loaded-burst shape suggested a NEW mechanism —
+  post-switch receiver ramp-up (DistroAV/NDI running off-program sources in reduced-bandwidth mode,
+  the just-switched-in source needing seconds to reach full 60fps). Verify from strih's genlock
+  FIFO audit arrival/depth stats at the exact burst instants; also check DistroAV's
+  `force_genlock_certified_settings` for a bandwidth pin.
+- **Code-level: REFUTED.** `GENLOCK_FORCED_SETTINGS` in `vendor/distroav/src/ndi-source.cpp` pins
+  `PROP_BANDWIDTH` to `PROP_BW_HIGHEST` for every genlock source by default. The one exception
+  (`PROP_GENLOCK_MONITOR`, #501 — narrows to `PROP_BW_LOWEST`) is a SEPARATE, imag-nb-only
+  twin-scene mechanism (`scripts/imag_scenes.py`) for imag's OWN multiview render-budget problem —
+  it never touches the actual program-feeding "Cam N" source, and strih doesn't even have this
+  twin-scene infrastructure yet (#730, still open, tracks building it). No bandwidth-mode-switching
+  mechanism exists on strih today, at all.
+- **Data-level: REFUTED.** Pulled strih's `genlock-fifo audit 'NDI camN'` lines spanning both
+  exact switch instants + the full duplicate bursts: `received` increments by EXACTLY 300 every 5s
+  sample (a flat, unbroken 60.0fps) straight through both switches and both entire bursts; `depth`
+  never moves off its steady-state value. Zero evidence of an arrival-rate dip anywhere.
+- **Investigation loop closed per the dispatch's own explicit instruction** ("either way, this
+  closes tonight's investigation loop"). THREE independent mechanism hypotheses tested and refuted
+  tonight: painter/monitor presentation slip, optical sampling beat, post-switch bandwidth ramp.
+  The two spikes (CAM1 33/33, CAM6 15/15) remain real, structurally clean (no real-loss signature:
+  zero outlier/backward deltas, zero FIFO starvation, isolated single-frame duplicates never long
+  runs), genuinely unexplained. No fix implemented, no gate weakened. #707 left OPEN for a
+  fresh-eyes session — `send_stall.rs`/`boundary_skip_count` (already deployed fleet-wide) are
+  armed for the next natural recurrence; every technique used tonight (`--merge-partials`
+  reproduction, event anatomy, FIFO arrival-rate cross-check) is documented in `.claude/skills/e2e`
+  + `.claude/skills/genlock` for whoever picks this up next.
+- **PR #704**: still BLOCKED (`all_cambox_continuity`'s own residual, root cause open). NOT merged.
+  Pushing this final round of docs, monitoring the resulting CI/E2E cycle to terminal, then closing
+  out the evidence block per the dispatch.
+
 ## 2026-07-13 (night) — #707 event-level anatomy (2nd supervisor follow-up): no forced mechanism, root cause still open
 
 - **Follow-up dispatch**: extract exact per-event anatomy (frame indices, tick values, ±5-frame

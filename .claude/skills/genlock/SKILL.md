@@ -52,6 +52,19 @@ more** — the old env knobs were removed in #257. The current model:
   (Latency ms), `PROP_BURN` (Measurement burn, default OFF). Every other DistroAV knob is removed
   from the UI and FORCED to a certified value (`force_genlock_certified_settings` ← the
   `GENLOCK_FORCED_SETTINGS` const table, the complement of `GENLOCK_WHITELIST_PROPS`).
+  **`PROP_BANDWIDTH` is forced to `PROP_BW_HIGHEST` for every genlock source by default** — there
+  is NO "reduced-bandwidth for off-program sources" mode anywhere in this pin (checked while
+  ruling out a #707 hypothesis, 2026-07-13). The ONE exception is `PROP_GENLOCK_MONITOR` (#501,
+  `ndi-source.cpp` line ~394): a source explicitly flagged `genlock_monitor=true` gets
+  `PROP_BANDWIDTH` narrowed to `PROP_BW_LOWEST` INSTEAD — but that flag is set on a SEPARATE,
+  DEDICATED "MV Cam N" twin-scene source (imag-nb only, `scripts/imag_scenes.py`), never on the
+  regular "Cam N" program-feeding source itself; the twin exists purely to feed imag-nb's built-in
+  multiview cheaply (its own render-budget fix, unrelated to program switching) — a "Cam N" scene's
+  own NDI source is ALWAYS `PROP_BW_HIGHEST`, whether it's currently in program or not, and this
+  whole twin-scene mechanism is **imag-nb-specific and does not exist on strih at all** (issue
+  #730, still open, tracks building strih's own per-camera multiview — it doesn't have one yet).
+  So there is no bandwidth-mode-switching mechanism to trigger a post-switch "ramp to full rate" on
+  strih's own camera ingests, at the code level, today.
 - **Measurement burn is a per-source `genlock_burn` bool, runtime, NO restart** — toggled over OBS
   WebSocket `SetInputSettings genlock_burn` (`scripts/obs_burn_filter.py add|remove`, driven by
   `scripts/rig-mode.sh test|event`). libobs stores it (`obs_source_set/get_genlock_burn`); the QR
