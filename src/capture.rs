@@ -596,10 +596,8 @@ pub fn select_capture_controls(
 fn documented_controls_for_model(model: GrabberModel) -> Vec<CaptureControl> {
     match model {
         GrabberModel::ShadowCast2 => color_production_controls(),
-        // TODO(#729 RED): wire Elgato4kS -> elgato_4k_s_corrective_controls() in the GREEN commit.
-        GrabberModel::Elgato4kS | GrabberModel::NzxtSignalHd60 | GrabberModel::Unknown => {
-            Vec::new()
-        }
+        GrabberModel::Elgato4kS => elgato_4k_s_corrective_controls(),
+        GrabberModel::NzxtSignalHd60 | GrabberModel::Unknown => Vec::new(),
     }
 }
 
