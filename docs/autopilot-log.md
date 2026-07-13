@@ -4670,3 +4670,61 @@ run directly (109 binaries, 0 failed), full `python -m pytest tests/python` (365
 `scripts/recording-e2e.sh` touch this session (the anchor-collision gotcha doesn't apply).
 
 Findings landed on tickets as they happened: `#726` comment (the #730 render-cost A/B data).
+
+## 2026-07-13 — #729 follow-up: Elgato 4K S corrective saturation set, TDD, deployed + live-verified
+
+The #729 zero-touch redesign itself (model-gated table, runtime detection) had already shipped in
+a prior cycle; this dispatch was the remaining deliverable — neutralize the purple/violet tint on
+cam1+cam6 (Elgato 4K S) via a documented-proven-need corrective control set, the one exception the
+zero-touch policy explicitly allows.
+
+Commits: `b729a21a5` (version bump 352), `967f57af1` (RED — `elgato_4k_s_gets_the_corrective_
+saturation_set_729_followup` + updated `select_capture_controls_grab_matches_production_not_
+sharp_312`, both failing against unfixed zero-touch routing), `aa1f0e4a2` (GREEN — wired
+`GrabberModel::Elgato4kS -> elgato_4k_s_corrective_controls()` in `documented_controls_for_model`).
+
+**Method:** live sweep on cam6 (`v4l2-ctl -d /dev/video1 --set-ctrl=...` against the running
+capture, reading the `capture chroma:` journal line). Hue sweep (full 0-255) proved rotation
+cannot reduce chroma MAGNITUDE (stayed ~45-53 throughout — moves the error between channels, never
+nulls it, matching the theoretical prediction). Saturation sweep showed a clean linear
+relationship (chroma scales proportionally with the saturation setting, all the way to 0); picked
+`saturation=32` (25% of the card's own default 128) as landing closest to the healthy target
+(`u_dev≈7 v_dev≈10.7`) — confirmed on BOTH affected units (cam6 8.2/10.5, cam1 8.3/10.5,
+near-identical). Contrast/brightness sweeps ruled out as alternatives (brightness barely moves
+chroma across its whole range; contrast=0 only "helps" by flattening all image contrast).
+`reference_pct=12` on `ControlTarget::RangeScaled` resolves to the literal 31 on this card's
+queried 0-255 range.
+
+**Deploy + persistence verification:** downloaded the CI `camera-box-linux-amd64` artifact for
+`aa1f0e4a2`, deployed to cam1 AND cam6 (both RO-root — remount rw/ro dance), confirmed via a
+GENUINE `systemctl stop/start` that the corrective saturation value is applied automatically at
+capture open with zero manual intervention (both boxes settled to `u_dev≈8.0-8.3 v_dev≈10.2-10.6`
+post-restart). Pixel-proof screenshots taken via strih OBS WebSocket (`Cam 5` scene = physical
+cam1, `Cam 6` scene = physical cam6, per the NDI-source-label offset) before/during/after tuning —
+the vivid magenta/purple noise on the live (dark, low-light) scene visibly collapsed to a much
+duller, near-neutral dark tone.
+
+**Honest limitation:** cam2 (the test-pattern painter) was unreachable this session (#737 dying
+disk, off-limits per this dispatch) so validation against genuinely bright/colourful content
+wasn't possible — only the current (dark, low-colour) live scene. The measured linear
+saturation/chroma relationship is clean enough to generalize with confidence, but real colour
+fidelity on these 2 units is now reduced to ~25% of normal as an unavoidable consequence (proven:
+the tint and any genuine scene chroma share the exact same saturation gain). This tradeoff is
+documented in the function's own doc comment and in `.claude/skills/capture` — retune is a
+one-line change if the muted colour proves unacceptable once real bright content is checked.
+
+Ticket closed with evidence (not merged — PR #704 remains blocked on the unrelated #737 cam2
+E2E-gate failure; regular CI jobs green on `aa1f0e4a2`, confirmed the E2E failure is the
+pre-existing cam2-unreachable one, not a regression from this change).
+
+Verification: `cargo fmt --all --check` clean, `cargo check` clean, `cargo clippy --all-targets --
+-D warnings` clean (default features), `cargo test --no-run` clean, `cargo test --lib capture::`
+62/62 passed (bypass-verified RED then GREEN). CI run 29237245506: all regular jobs green
+(lint/build/test/coverage/security/drift-guard/shellcheck/windows-probe-build); E2E gate (run
+29237247678) failed on the pre-existing `cam2 UNREACHABLE` precondition, unrelated to this diff.
+
+📔 Playbook: `.claude/skills/capture/SKILL.md` updated — new "Three certified control sets" table
+row (was "Two"), a new "Elgato 4K S corrective-saturation tuning method" section documenting the
+live sweep procedure + measured data + honest limitation, and the earlier "no code change can fix
+it" paragraph corrected with a #729-follow-up pointer (the magnitude WAS reducible; only a
+lossless fix wasn't possible).

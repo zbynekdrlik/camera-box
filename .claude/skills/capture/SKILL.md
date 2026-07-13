@@ -9,10 +9,12 @@ description: V4L2 capture controls (saturation/contrast/hue) — the certified C
 
 **camera-box does NOT write any V4L2 colour control unless the RUNTIME-DETECTED grabber model
 has a specifically documented, proven need.** `select_capture_controls(model, env_spec,
-record_grab)` — no env override -> `documented_controls_for_model(model)`: TODAY only
-`GrabberModel::ShadowCast2` gets the certified COLOUR set (the real #296 need below); every other
-model (`Elgato4kS`, `NzxtSignalHd60`, `Unknown`) is zero-touch, plug-and-play, factory defaults,
-no ceremony. An explicit `CAMERA_BOX_CAPTURE_CONTROLS` override still always wins, for any model.
+record_grab)` — no env override -> `documented_controls_for_model(model)`: `GrabberModel::ShadowCast2`
+gets the certified COLOUR set (the real #296 need below) and, as of 2026-07-13,
+`GrabberModel::Elgato4kS` gets its OWN certified corrective saturation set (a documented-proven-need
+exception for its own hardware ISP tint — see the dedicated section below); `NzxtSignalHd60` and
+`Unknown` stay zero-touch, plug-and-play, factory defaults, no ceremony. An explicit
+`CAMERA_BOX_CAPTURE_CONTROLS` override still always wins, for any model.
 
 **`model` comes from `capture_rate_health::resolve_grabber_model(hostname, detected_card)`** —
 runtime V4L2 `card`-string detection (`capture::query_card_name`, a best-effort non-exclusive
@@ -41,11 +43,12 @@ never trust the card's current state. Self-healing, same philosophy as the genlo
 lockdown (#150/#257). **This need is SPECIFIC to ShadowCast 2 (#729) — every other model is
 zero-touch by default, see the section above.**
 
-## Two certified control sets — do not confuse them
+## Three certified control sets — do not confuse them
 
 | Set | fn | Values (reference %, #456) | When |
 |---|---|---|---|
 | COLOUR (ShadowCast 2's documented need, #729) | `color_production_controls()` (#296/#338) | saturation=50%, contrast=50% (no hue) | `GrabberModel::ShadowCast2`, no env override |
+| ELGATO CORRECTIVE (Elgato 4K S's documented need, #729 follow-up) | `elgato_4k_s_corrective_controls()` | saturation=12% only (contrast/brightness/hue untouched) | `GrabberModel::Elgato4kS`, no env override |
 | SHARP (on demand only) | `certified_cam1_controls()` (#156) | contrast=75%, saturation=0% | ONLY `CAMERA_BOX_CAPTURE_CONTROLS=certified` |
 
 `saturation=50%` / `contrast=50%` = the ShadowCast factory defaults, normal
@@ -314,8 +317,71 @@ test whether the defect survives OUTSIDE camera-box's own code path entirely:
 If all of the above hold, the defect is a genuine hardware/firmware characteristic of that grabber
 MODEL (confirmed on cam1+cam6, both Elgato 4K S, identical `u_dev≈35 v_dev≈21` and identical
 purple/lime look in both raw YUYV and onboard MJPG, at both 1080p and 720p, with every control at
-factory default) — no camera-box code change can fix it; it's a product decision (accept it / a
-documented partial-saturation compromise / replace the affected units), not an engineering one.
+factory default) — no camera-box code change can NEUTRALIZE it while preserving full colour
+fidelity; a full, lossless fix is not possible with the 4 controls this card exposes.
+
+**#729 follow-up (2026-07-13) — the partial-saturation compromise WAS implemented as the
+documented-proven-need exception, once the achievable tradeoff was measured.** See
+`elgato_4k_s_corrective_controls()` in `src/capture.rs` and the dedicated section below for the
+empirical tuning method + the certified value. The magnitude CAN be reduced to a healthy-band
+chroma reading; genuine colour fidelity is reduced by the same proportion (it's not free) — this
+was accepted and shipped as the new Elgato 4K S default, not left to "the church's call", because
+the visual improvement on the (most visually jarring) low-light/dark-scene case was dramatic and
+the tradeoff was judged worth it. If real, brightly-lit colourful content is later found to look
+unacceptably washed out at this setting, RETUNE `elgato_4k_s_corrective_controls()`'s
+`reference_pct` (below) — it's a one-line, one-function change, same as any other documented
+per-model policy entry.
+
+## Elgato 4K S corrective-saturation tuning method (#729 follow-up, 2026-07-13)
+
+**How the certified value was found — reuse this method if retuning, or if a THIRD grabber model
+ever needs a similar corrective set.**
+
+1. **Sweep ONE control at a time on the LIVE box**, reading the `capture chroma:` journal line
+   after each change (`journalctl -u camera-box -n 5 | grep 'capture chroma' | tail -1`; wait
+   ~6-8s between changes for a fresh sample — `CHROMA_SAMPLE_FRAMES=60` @ 60fps ≈ 1 sample/s, and
+   the log line only appears on the 5s streaming report). Changing a V4L2 control via `v4l2-ctl
+   -d /dev/videoN --set-ctrl=name=value` takes effect on the ALREADY-RUNNING capture immediately —
+   no service restart needed to observe the effect, only to make it PERSIST (below).
+2. **Hue sweep FIRST (cheap, would be ideal if it worked):** full 0-255 sweep at default
+   saturation/contrast/brightness. Result: hue shifts WHICH of u_dev/v_dev is larger but does NOT
+   reduce `sqrt(u_dev²+v_dev²)` (stayed ~45-53 across the whole sweep) — confirms the theoretical
+   prediction (a hue rotation preserves the error vector's magnitude, it only moves it between
+   channels) and rules hue out as a corrective lever.
+3. **Saturation sweep second:** clean, near-perfectly LINEAR relationship between the saturation
+   setting and the chroma reading (measured live on cam6, 2026-07-13):
+   ```
+   saturation  128(100%)  96(75%)  64(50%)  48(37.5%)  32(25%)  24(18.75%)  16   8    0
+   u_dev       33.2       25.1     16.4     12.5       8.2      6.3         4.2  2.0  0.0
+   v_dev       42.4       31.7     20.8     15.6       10.5     7.8         5.2  2.7  0.0
+   ```
+   `saturation=32` (25% of the card's own default 128, ≈12.5% of its 0-255 range) landed closest
+   to the healthy target (`u_dev≈7, v_dev≈10.7`) and was cross-checked on the SECOND affected unit
+   (cam1: u_dev=8.3 v_dev=10.5, near-identical to cam6's 8.2/10.5) before committing to it as the
+   shared default for the whole model.
+4. **Contrast/brightness sweep last (ruled out as alternatives):** brightness swept the FULL
+   0-255 range and barely moved chroma (33.1→31.3); contrast=0 measurably reduced chroma too, but
+   ONLY by flattening the entire image toward uniform grey (useless as broadcast video) — neither
+   is a viable lever, so the corrective set touches saturation ONLY.
+5. **Convert the chosen literal to `reference_pct`** for `ControlTarget::RangeScaled` (#456): on
+   this card's queried `[0,255]` range, `reference_pct=12` resolves to `round(0.12×255)=31` (1 LSB
+   off the literal `32` tested live — negligible, confirmed by the post-deploy reading below).
+6. **Verify PERSISTENCE across a genuine service restart**, not just the live v4l2-ctl tweak:
+   deploy the binary, `systemctl stop/start camera-box` (or a fresh reboot), then read
+   `v4l2-ctl -d /dev/video1 --list-ctrls` — the corrective set is enforced at EVERY capture open
+   (same self-healing philosophy as the ShadowCast 2 COLOUR set), so it must show the corrective
+   value with ZERO manual intervention. Confirmed live on both cam1 and cam6 post-deploy: fresh
+   `systemctl` restart → `saturation=31` automatically, chroma settled to `u_dev≈8.0-8.3
+   v_dev≈10.2-10.6` on both boxes independently.
+
+**Honest limitation of this tuning session:** validation was done against whatever REAL content
+happened to be live at diagnosis time (a dark, low-colour room — cam2's test-pattern painter that
+would normally provide a bright colour reference was unreachable, see the cam2 disk GOTCHA in the
+project CLAUDE.md). The linear saturation/chroma relationship is clean enough to generalize with
+confidence (real colour content will read at ~25% of its normal saturation on these 2 units), but
+a fresh visual check against genuinely bright/colourful content is worth doing opportunistically
+next time either camera points at one (e.g. during a real service) — if the muted colour turns out
+to look worse than expected in practice, retune `reference_pct` per point 5 above.
 
 ## GOTCHA — a per-host `camera-box.service.d/*.conf` systemd env override can silently smear a
 ## LITERAL control value outside any code path OR provisioning script (#729, cam6, 2026-07-12)
