@@ -4988,3 +4988,60 @@ closed.
 **PR #704 NOT merged** — `mergeStateStatus: BLOCKED`. Held on #707 (cam6 emit-rate deficit),
 #740 (colour gate, unconfirmed post-#744), #741 (strih real-drop anomaly), and now **#747**
 (frozen-camera-gate, blocking even earlier than the other three).
+
+## 2026-07-13 — #747 fix (per-source scene warm-up) + #726 metric slice (histogram/derived-step)
+
+Dispatched to fix #747 (frozen-camera-gate FAILS FROZEN on cam4/cam6 — root cause + fix design
+already on the ticket from a supervisor comment) + the #726 metric slice (presentation_cadence
+miscalibration — comment-only, do not close).
+
+- RED: `test(#726): RED -- presentation_cadence miscalibration on zero-net-loss data` (fda55e380)
+  — reproduces the live window8 shape (mostly +1 deltas, periodic +7 catch-ups, netting to exactly
+  2/step) and asserts the fix: a delta histogram, a data-derived `expected_step` (mode of positive
+  deltas), and a self-consistency reading. `CadenceEvenness` has none of these fields yet — fails
+  to compile.
+- GREEN: `fix(#726): GREEN -- delta histogram + data-derived expected_step + self-consistency`
+  (71ea88665) — `delta_histogram`, `derived_expected_step`, `derived_uniform_steps/_fraction`
+  added alongside the existing caller-driven fields (unchanged, every pre-existing test still
+  passes). Dropped `Copy` (a `BTreeMap` field isn't `Copy`) — grepped every caller clean (only
+  `.as_ref()`/moves, no implicit-copy reliance). Wired the derived reading into
+  `recording-verdict`'s per-window cadence print line.
+- RED: `test(#747): RED -- per-source camera-scene warm-up before frozen-gate sampling`
+  (5ee78a473) — locks the fix: `_scene_for_input`/`_resolve_original_preview` don't exist yet,
+  `_capture_timelines` doesn't warm; also adds `tests/python/test_warm_cam_scenes.py` for the
+  not-yet-created `[5/8]`-side companion script.
+- GREEN: `fix(#747): GREEN -- warm each camera scene onto preview before frozen-gate sampling`
+  (a7102c73a) — `frozen-camera-gate.py` now warms EACH source's `Cam N` scene onto PREVIEW +
+  settles (`--warm-settle`, default 3s) BEFORE sampling it, restoring the original preview after;
+  new `scripts/warm_cam_scenes.py` cycles every scene once right before `[5/8]` StartRecord (new
+  `[4f/8]` step in `recording-e2e.sh`). Full `cargo test` re-run clean after both
+  `recording-e2e.sh` edits (the static-anchor GOTCHA) — 133 binaries, 2003 tests, 0 failures.
+
+**Pushed (a7102c73a). Both CI (green) and the Full-path E2E gate ran; the supervisor read the
+verdict directly (RUN_ID 237189640, gate run 29272685333) and confirmed both fixes work:**
+
+- **#747 WORKS**: `[4c/8]` PASS with full live hash timelines for every input incl. cam4/cam6 —
+  the first complete verdict since the #730 decoupling. Side-effect found: the added warm-up
+  (~50s) now makes the `[3/8]` painter's fixed 360s duration expire ~47s before StopRecord,
+  poisoning the run's last two ALL_CAMBOX windows (576 + 844 = 1420 undecodable). Comment posted
+  on #747 by the supervisor; NOT closed — the painter-duration fix is the ticket's remaining item
+  (next dispatch).
+- **#726 WORKS**: delivered the A-vs-B disambiguation the ticket was blocked on — clean windows'
+  histogram (e.g. `{1: 705, 7: 141}`, `duplicate_steps=0`) confirms CANDIDATE A (per-source
+  release-cadence), ruling out candidate B (render-lag duplication). Comment posted by the
+  supervisor; NOT closed — the actual vendored `obs-source.c` fix is separate future work.
+
+**This dispatch's own remaining tasks, all completed**: Elgato persistence re-check (#744
+acceptance) — `contrast=128 saturation=128` confirmed live on both 10.77.9.61 and 10.77.9.66,
+v4l2-neutral.sh did not re-smear. Fresh numbers commented on #740 (colour_fail=2 identically on
+every camera node + strih + stream, imag=0 — #744 ruled out as a fix, root cause still upstream of
+every grabber), #707 (residual front-loaded in window 0 — 18/23 copies, 16/21 gaps across windows
+0-8; windows 1/2/4 fully clean), and #741 (strih real_drops=6, same non-monotonic id shape,
+unchanged). A/V sync verdict is all `unknown`/`candidates=0` this run because mbc (10.77.9.232,
+the reference audio node) was powered off/unreachable (confirmed via ping) — an environmental
+precondition, not a defect.
+
+**PR #704 NOT merged** — still `mergeStateStatus: BLOCKED`. Held on #740 (colour, still red),
+#741 (strih real-drop, unchanged), #707 (window-0 residual), and #747's own painter-duration
+side-effect. Next dispatch: fix the painter-duration/warm-up-budget interaction (#747) and the
+vendored `obs-source.c` release-cadence fix (#726 candidate A).

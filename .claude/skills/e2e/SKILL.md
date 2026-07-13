@@ -1251,9 +1251,21 @@ continuously even when the underlying camera NDI is stuck. Hashing a Multiview t
 imageWidth: 320}`. A live-but-dark camera still has sensor noise (hash changes every sample at
 mean luma ~5–7); a frozen NDI repeats identical PNG bytes → STATIC → FAIL.
 
-**Precondition (#276):** the Multiview projector must be OPEN on strih so all raw NDI inputs
-are rendering. A source that is not rendering produces all-black frames (identical hashes) and
-is correctly detected as FROZEN — the right fail-safe to prevent wasting a run on a dead feed.
+**Precondition — GONE since #747 (2026-07-13): the gate now WARMS each input itself.** The old
+"Multiview projector must be open" precondition (#276) was silently INVALIDATED the same day it
+was written by #730/#508's Multiview decoupling (see the GOTCHA below) — a decoupled Multiview
+renders low-bandwidth `MV Cam N` TWIN clones, not these raw main inputs, so keeping it open no
+longer keeps `NDI cam4`/`NDI cam6` etc. rendering at all. The fix: before sampling EACH source,
+`frozen-camera-gate.py` now sets that input's wrapping strih `Cam N` scene (see
+`scripts/strih_mv_scenes.py`'s naming convention — `_scene_for_input('NDI cam5') == 'Cam 5'`) to
+PREVIEW (Studio Mode, always on on strih/stream) and settles `--warm-settle` seconds (default
+3.0, `FROZEN_CAM_WARM_SETTLE_S`) BEFORE taking that source's samples — this genuinely opens/
+refreshes the DistroAV receiver. Frozen = repeated identical hash WHILE ACTIVATED; a null/
+identical-cold read is no longer possible because nothing is ever sampled cold. The original
+preview scene is restored once every source has been sampled. The companion
+`scripts/warm_cam_scenes.py` (new `[4f/8]` step) does the SAME cycle-and-restore once, right
+before `[5/8] StartRecord`, so the `[6/8]` ALL_CAMBOX sweep's first cut to each camera isn't
+ALSO a cold connect.
 
 **Sources checked by default:** `NDI cam1, NDI cam2, NDI cam3, NDI cam5` (the raw strih inputs).
 
@@ -1288,22 +1300,33 @@ FROZEN_GATE_BIN=/path/to/frozen-camera-gate  # binary path (auto-discovered via 
 **CI artifact:** `frozen-camera-gate` is built (default features) alongside the probe tools
 and uploaded into the `probe-tools-linux-amd64` artifact.
 
-**GOTCHA (#747, 2026-07-13) — "FROZEN" in the FAIL message does NOT always mean "genuinely stuck
-repeating the same frame".** `_screenshot_hash` returns `None` on BOTH failure shapes: (a) a real
-frozen NDI source (>3 identical hashes in a row — the documented case above), AND (b) a hard
-`GetSourceScreenshot` RPC/decode failure for that source (source not currently rendering, OBS
-connection hiccup, etc.) — the fail-closed `< 2 successful samples = FROZEN` branch fires
-identically for either cause, and the FAIL message reads the same either way
-(`FROZEN: NDI cam4, NDI cam6`). **Check the RAW timeline JSON printed just before the FAIL line**
-to tell them apart: a genuinely-stuck camera shows the SAME real hash repeated across samples; an
-availability/RPC failure shows `null` for EVERY sample (never even one successful hash). Live
-incident: `[2b/8]`'s ALL_CAMBOX redeploy produced `"NDI cam4": [null]*8, "NDI cam6": [null]*8`
-across 3 consecutive full E2E attempts — a capture/RPC-availability failure, not a stuck-frame
-one — while a standalone `GetSourceScreenshot` run against the SAME sources moments after a
-failed attempt succeeded cleanly for all 5. Root cause not yet found (#747, OPEN) — cam6's
-underlying box also independently carries #707's ongoing emit-rate deficit, a plausible
-contributing factor for a receiver-side reconnect race, but not confirmed as the sole cause.
-Don't assume "the camera is stuck" from this FAIL line alone — read the timeline JSON first.
+**GOTCHA — ROOT-CAUSED + FIXED (#747, 2026-07-13): "FROZEN" in the FAIL message did NOT always
+mean "genuinely stuck repeating the same frame" — read this if you ever see it again post-fix.**
+`_screenshot_hash` returns `None` on BOTH failure shapes: (a) a real frozen NDI source (>3
+identical hashes in a row), AND (b) a hard `GetSourceScreenshot` RPC/decode failure for that
+source — the fail-closed `< 2 successful samples = FROZEN` branch fires identically for either
+cause, and the FAIL message reads the same either way (`FROZEN: NDI cam4, NDI cam6`). **Check the
+RAW timeline JSON printed just before the FAIL line** to tell them apart: a genuinely-stuck camera
+shows the SAME real hash repeated; an availability failure shows `null` for EVERY sample.
+
+**Root cause (confirmed live):** `NDI cam4`/`NDI cam6` were the ONLY main inputs with
+`GetSourceActive.videoShowing=false` at gate time — a decoupled Multiview (#730/#508) no longer
+gives them a rendering surface, so a not-showing DistroAV source genuinely does not render at
+all (not a receiver/network fault). 3 consecutive full E2E attempts (including one on a pure-docs
+commit — proving it was rig state, not the code under test) reproduced `[null]*8` for both;
+putting either camera's scene on PREVIEW made it `videoShowing=true` within 5s with real
+screenshot data. **Fixed** by the per-source warm-up described above — see the "Precondition"
+paragraph. Verified on the first post-fix gate run: `[4c/8]` PASS with full live hash timelines
+for every input including cam4/cam6.
+
+**Side-effect the fix introduced (tracked on #747 itself, next dispatch's item, NOT re-opened
+here):** the warm-up phases add real wall-clock time (5 sources × (settle + samples×cadence) ≈
+50s) between `[3/8]`'s painter launch and `[5/8]` StartRecord. A painter started with a fixed
+`--duration-secs` can now expire BEFORE `StopRecord` if that budget doesn't account for the added
+warm-up time — the tail of the recording reads fully undecodable (`painted tick == none`), not a
+new zero-loss defect. If you see a run's LAST one or two ALL_CAMBOX windows FULLY undecodable
+(100% of frames, not a partial rate), check the painter's `--duration-secs` against the actual
+elapsed wall-clock from painter-launch to StopRecord before treating it as a real regression.
 
 ---
 
@@ -1952,15 +1975,21 @@ per-run frame_index/timing correlation before re-deriving this from scratch.
 `full_chain.loss.strih` (a DIFFERENT metric from `all_cambox_continuity` above — see the "A
 DIFFERENT per-node metric" section elsewhere in this file) periodically flagged exactly 4
 `real_drop` ids per ~300s ALL_CAMBOX run, always landing in a schedule window ~9.5-10.3s after a
-program switch. **Root cause: strih's 911002 render-tick burn is emitted by SIX INDEPENDENT
-free-running DistroAV filter instances — one per raw `NDI camN` input** (`BURN_TARGETS` attaches
-it to every input so whichever gets cut to program already carries it), and the always-open
-Multiview projector (#365's own precondition) keeps ALL SIX rendering continuously — so all 6
-counters free-run the WHOLE recording regardless of which is on-air, and their numeric ranges
-routinely OVERLAP (proven live: one run's cam5 range `66709..=67840` overlapped cam6's very next
-window `66934..=68067`). `burn_contiguity_in_window_with_step`'s backward-jump check (`id < prev`
-⇒ `RealDrop`) was built for ONE genuine monotonic counter — it misread the EXPECTED
-counter-instance discontinuity at every program switch as a reorder fault.
+program switch. **Root cause (dated, pre-#730): strih's 911002 render-tick burn is emitted by SIX
+INDEPENDENT free-running DistroAV filter instances — one per raw `NDI camN` input** (`BURN_TARGETS`
+attaches it to every input so whichever gets cut to program already carries it), and the
+always-open Multiview projector (#365's own precondition, at the time) kept ALL SIX rendering
+continuously — so all 6 counters free-ran the WHOLE recording regardless of which was on-air, and
+their numeric ranges routinely OVERLAP (proven live: one run's cam5 range `66709..=67840`
+overlapped cam6's very next window `66934..=68067`). `burn_contiguity_in_window_with_step`'s
+backward-jump check (`id < prev` ⇒ `RealDrop`) was built for ONE genuine monotonic counter — it
+misread the EXPECTED counter-instance discontinuity at every program switch as a reorder fault.
+
+**STALE as of #730/#508 (2026-07-13) — see the #747 GOTCHA above:** the Multiview projector no
+longer keeps every raw `NDI camN` input rendering (it shows low-bandwidth `MV Cam N` twins
+instead), so this "all 6 free-run continuously" premise may no longer hold going forward — if
+#741's investigation resumes, re-verify the burn-filter's actual per-input render-activity
+assumption against the CURRENT (post-decoupling) Multiview wiring before reusing this analysis.
 
 **The decisive discriminator, done OFFLINE with zero new rig time** (per the dispatch's own
 instruction — cheapest first): pull the flagged ids' exact values from the verdict JSON's
