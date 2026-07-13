@@ -1757,18 +1757,62 @@ When `copies`/`gaps` look elevated or growing across a run, don't guess — run 
      the exact breach window (even though the SAME recording's `all_cambox_continuity` failed hard
      that instant) is a DIRECT refutation of the painter as the common source — not an absence of
      correlation, an absence of the physical event itself.
-   - **Caveat found hand-replicating `window_segment` from a re-extracted `*-partial-<run>.json`
-     for a THIRD check (per-strih-frame copy positions):** getting the window-placement ANCHOR
-     wrong silently produces a plausible-looking but WRONG copy count. `place_frame_in_window` uses
-     the frame's node-BURN `gen_ts_ns` as the anchor (strih burn `911002` first, then stream
-     `911004`, only falling back to the optical tick's OWN `gen_ts_ns` when neither burn decoded —
-     see `frame_gen_ts_anchor` in `src/bin/recording-verdict.rs`), NOT the optical tick's own
-     `gen_ts_ns`. Using the wrong anchor still got `frames`/`undecodable` exactly right (both are
-     forgiving of a ~100-200ms anchor skew) but `copies` came out completely different (0 vs the
-     verdict's own reported 15) — a hand re-derivation of `copies`/`gaps` from a partial JSON is
-     NOT reliable evidence on its own; treat the verdict JSON's own reported segment counts as
-     ground truth and use a re-derivation only for CORRELATING other data against the verdict's
-     window boundaries (as in the two bullets above), never for disputing the verdict's own count.
+   - **SUPERSEDED (2026-07-13) — don't hand-reimplement `window_segment` in Python; RE-RUN the
+     real binary via `--merge-partials` instead, and it EXACTLY reproduces the live verdict,
+     including the #726 `presentation_cadence` per-window breakdown for free.** A hand
+     re-derivation hits two silent traps: (1) `all_cambox_continuity`'s `SegmentFrame`s come from
+     the **STREAM partial's `frames`, never strih's** (`segment_frames_from_recording(stream_frames,
+     ...)` in `src/bin/recording-verdict.rs` — a comment right above the `MERGE_ARGS` construction
+     in `scripts/recording-e2e.sh` says so explicitly: "the all-cambox segmentation reads the
+     SINGLE continuous stream recording's frames, carried in `stream=$STREAM_PARTIAL`"); reading
+     strih's partial instead gets `frames`/`undecodable` right (both tolerant of the anchor) but
+     `copies` silently wrong. (2) `gaps` (`painted_tick_gaps`, #625/#681) is a WHOLE-WINDOW
+     **net-span** calculation (`expected_count(from first/last tick at `expected_step`) −
+     present_count(distinct sorted values)`) — it is NOT an event-by-event pairing and has NO
+     adjacency/order dependence, so it is exquisitely sensitive to using a version of the binary
+     whose `painted_tick_gaps` logic predates a fix (an old cached artifact, e.g. from `/tmp/probe-
+     tools-*` downloaded days earlier, silently produced `gaps=287` instead of the correct `15` for
+     an identical input — no error, just a wrong-but-plausible number). **The reliable recipe:**
+     download the CURRENT CI run's `probe-tools-linux-amd64` artifact (`gh run download <run-id>
+     -n probe-tools-linux-amd64`, `chmod +x recording-verdict`), then feed it the run's own
+     on-disk `strih-partial-<run>.json` + `stream-partial-<run>.json` + `switch-schedule.json`
+     with the SAME flags `scripts/recording-e2e.sh`'s `MERGE_ARGS` uses (all default-valued run
+     ids — `--burn-cam1-run-id 911001` ... `--burn-cam6-run-id 911011 --burn-strih-run-id 911002
+     --burn-stream-run-id 911004 --cam2-run-id <RUN_ID> --capture-fps 30 --strih-emit-fps 30
+     --stream-capture-fps 30 --imag-capture-fps 60 --min-secs 300 --av-expected-ms 0`):
+     ```bash
+     recording-verdict --merge-partials strih=strih-partial-<RUN>.json \
+       --merge-partials stream=stream-partial-<RUN>.json \
+       --min-secs 300 --capture-fps 30 --strih-emit-fps 30 --stream-capture-fps 30 \
+       --imag-capture-fps 60 --cam2-run-id <RUN> \
+       --burn-cam1-run-id 911001 --burn-cam2-run-id 911009 --burn-cam3-run-id 911008 \
+       --burn-cam4-run-id 911007 --burn-cam5-run-id 911010 --burn-cam6-run-id 911011 \
+       --burn-strih-run-id 911002 --burn-stream-run-id 911004 --av-expected-ms 0 \
+       --switch-schedule switch-schedule.json --json out.json
+     ```
+     Verified byte-exact against 5 independent recordings' original `verdict-<run>.json` segments
+     (every `frames`/`undecodable`/`copies`/`gaps`/`first_tick`/`last_tick` matched). This is now
+     the go-to technique for ANY question that needs per-window sub-detail the top-level verdict
+     JSON doesn't carry (e.g. the `presentation_cadence` breakdown below) — never hand-reimplement.
+   - **Discriminator result (2026-07-13, #707) — the "balanced dup-then-catchup-skip" optical
+     sampling-beat hypothesis is CONTRADICTED by the data.** `presentation_cadence`
+     (`src/presentation_cadence.rs`, #726) already computes the EXACT signature a phase-drift beat
+     would produce: `paired_events` = adjacent `(duplicate, catchup)` pairs, i.e. `Δtick=0`
+     IMMEDIATELY followed by `Δtick = 2×expected_step`. Recomputed all 5 available runs (50
+     windows total) via the recipe above: **`paired_events=0` AND `catchup_steps=0` in EVERY
+     SINGLE window**, including the two large spike windows (CAM1 33/33, CAM6 15/15) where
+     `copies` happens to exactly equal `gaps`. Also checked the broader claim "`copies`≈`gaps`
+     always" directly: across the 50 windows, only 15/32 non-clean windows are EXACTLY balanced
+     (47%) — the rest show a genuine ±1-3 imbalance (e.g. `copies=2 gaps=0`, `copies=0 gaps=2`,
+     `copies=1 gaps=3`) that a uniform physical beat should not produce. Note `painted_tick_gaps`
+     is a whole-window NET-SPAN diff (`expected_count − distinct_present_count`), NOT an
+     event-pairing computation — a window where `copies` happens to equal `gaps` is an ARITHMETIC
+     COINCIDENCE of that window's specific tick span/distinct-count, not evidence of temporal
+     pairing on its own; `presentation_cadence`'s `paired_events` is the actual, purpose-built test
+     for temporal pairing, and it is uniformly zero. Conclusion: the two big spikes are real,
+     structurally distinct events (a 33-tick and 15-tick contiguous span, `copies` and `gaps`
+     genuinely equal), but NOT explained by an immediate dup+catchup optical beat — cause remains
+     open. Full evidence on #707's own thread.
 
 ## RESOLVED (#708, 2026-07-12) — strih's OWN `full_chain.loss.strih.real_drops` periodic 4-frame residual was a per-source-counter accounting artifact, NOT loss
 

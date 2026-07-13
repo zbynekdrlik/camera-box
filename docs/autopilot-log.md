@@ -2,6 +2,40 @@
 
 Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads context.
 
+## 2026-07-13 (night) — #707 optical-sampling-beat hypothesis (supervisor mid-task correction): offline validation CONTRADICTS it, no fix implemented
+
+- **Mid-task correction from supervisor**: after the painter-common-source refutation (below),
+  supervisor proposed a DIFFERENT mechanism — the physical splitter camera free-running vs the
+  monitor's 60Hz refresh, producing balanced dup+skip pairs (a "captures twice then skips once"
+  optical sampling beat) — with an explicit instruction to VALIDATE offline against all 5 runs
+  BEFORE implementing a balanced-slip-aware verdict change, and to STOP + report if validation
+  contradicts it (no forced fit).
+- **Tooling fix that unblocked reliable validation**: my earlier hand-reimplementation of
+  `window_segment` in Python was wrong two ways — (1) `all_cambox_continuity` reads the STREAM
+  partial's frames, not strih's (confirmed in `src/bin/recording-verdict.rs` +
+  `scripts/recording-e2e.sh`'s `MERGE_ARGS` comment); (2) an old cached `/tmp/probe-tools-*`
+  binary predates a `painted_tick_gaps` fix. Fixed recipe: download the CURRENT CI run's
+  `probe-tools-linux-amd64` artifact, feed it the on-disk partials via `--merge-partials` with
+  the exact `MERGE_ARGS` flag set. Verified byte-exact against all 5 runs' original verdict
+  segments — now a reliable, documented technique (`.claude/skills/e2e`).
+- **Direct test result: CONTRADICTED.** `presentation_cadence` (#726) already computes the exact
+  predicted signature (`paired_events`: a duplicate immediately followed by a compensating
+  2×expected_step catch-up jump). Recomputed all 5 runs / 50 windows: `paired_events=0` AND
+  `catchup_steps=0` in EVERY window, including both large spikes (CAM1 33/33, CAM6 15/15) where
+  `copies` happens to equal `gaps`. Also checked "copies≈gaps always" directly: only 15/32
+  non-clean windows (47%) are exactly balanced — the rest show a genuine imbalance inconsistent
+  with a uniform beat. `painted_tick_gaps` is a whole-window net-span diff (no event-adjacency
+  dependence) — a window where copies==gaps is an arithmetic coincidence, not proof of pairing.
+- **No code changed** — per the supervisor's own explicit stop condition. Full evidence posted to
+  #707 (https://github.com/zbynekdrlik/camera-box/issues/707#issuecomment-4953913495). #707 left
+  OPEN — root cause of the two large spikes remains genuinely unexplained after two independent,
+  evidence-backed mechanism tests (painter-common-source, optical-sampling-beat), both refuted.
+- **PR #704**: still NOT merged, still blocked (own residual + #689, unchanged from the prior
+  entry). Continuing to monitor the docs-push-triggered CI/E2E re-run to terminal state.
+- **Playbook**: `.claude/skills/e2e` — replaced the earlier (correct-in-spirit but under-explained)
+  "hand re-derivation is unreliable" caveat with the full working `--merge-partials` recipe +
+  this session's `presentation_cadence` discriminator result.
+
 ## 2026-07-13 (night) — #707 painter-common-source discriminator: REFUTED with ground-truth evidence, no fix, PR #704 STILL held (#707 + #689)
 
 - **Dispatch**: execute the supervisor synthesis on #707 — test whether CAM6's 15/15 and CAM1's
