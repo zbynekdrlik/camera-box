@@ -744,10 +744,27 @@ pub fn decode_qr_luma_all_fast_then_robust_grouped(
     mandatory_burn_run_ids: &[u32],
     any_of_burn_run_ids: &[u32],
 ) -> Vec<Payload> {
-    let (out, path) = decode_qr_luma_all_fast_then_robust_grouped_pathed(
+    decode_qr_luma_all_fast_then_robust_grouped_optical(
         img,
         mandatory_burn_run_ids,
         any_of_burn_run_ids,
+        None,
+    )
+}
+
+/// #707 — [`decode_qr_luma_all_fast_then_robust_grouped`] with the third (optical) gate
+/// dimension; see [`decode_qr_luma_all_fast_then_robust_grouped_pathed_optical`].
+pub fn decode_qr_luma_all_fast_then_robust_grouped_optical(
+    img: GrayImage,
+    mandatory_burn_run_ids: &[u32],
+    any_of_burn_run_ids: &[u32],
+    min_distinct_optical: Option<(u32, usize)>,
+) -> Vec<Payload> {
+    let (out, path) = decode_qr_luma_all_fast_then_robust_grouped_pathed_optical(
+        img,
+        mandatory_burn_run_ids,
+        any_of_burn_run_ids,
+        min_distinct_optical,
     );
     match path {
         DecodePath::Fast => FAST_PATH_FRAMES.fetch_add(1, Ordering::Relaxed),
@@ -791,28 +808,87 @@ pub fn decode_qr_luma_all_fast_then_robust_grouped_pathed(
     mandatory_burn_run_ids: &[u32],
     any_of_burn_run_ids: &[u32],
 ) -> (Vec<Payload>, DecodePath) {
+    decode_qr_luma_all_fast_then_robust_grouped_pathed_optical(
+        img,
+        mandatory_burn_run_ids,
+        any_of_burn_run_ids,
+        None,
+    )
+}
+
+/// #707 — the #207 gate's THIRD, independent completeness dimension: the cam2 dual-QR
+/// Vernier optical read. `min_distinct_optical = Some((optical_run_id, min_distinct_ids))`
+/// requires the plain pass to already carry at least `min_distinct_ids` DISTINCT `frame_id`s
+/// for `optical_run_id` before the fast path may skip the tiled recovery — `None` preserves
+/// the exact pre-#707 behavior (burns only), unchanged for every existing caller.
+///
+/// **Why this is needed** (found investigating #707's residual `all_cambox_continuity`
+/// `copies`/`gaps`): the dual-QR Vernier paints TWO regions per refresh (left=latest even
+/// tick, right=latest odd tick, `painter::vernier_ids`) — a healthy frame's plain pass finds
+/// BOTH as two distinct payloads. But the pre-#707 gate here only ever checked the NODE BURNS
+/// (cam1/strih/stream/camN) — a frame where the plain pass reads the (small, digitally
+/// rendered, easy) node burns fine but MISSES one dual-QR half (the actively-repainting region
+/// is naturally harder to read than the held one — moiré/shimmer/focus-breathing during a brief
+/// optical-degradation window) took the FAST path anyway, silently skipping the #202 robust
+/// tiled+upscaled retry that has ALREADY been proven (see
+/// [`fast_then_robust_falls_back_to_robust_on_a_real_burn_unreadable_frame`]) to recover reads
+/// the plain pass alone misses. The frame's resolved Vernier tick then falls back to whichever
+/// single held id DID decode — the SAME value the immediately preceding frame already reported
+/// — registering as a spurious `all_cambox_continuity` "copy" even though nothing was actually
+/// duplicated on screen (#707 offline-validated every such frame's decoded `(frame_id,
+/// gen_ts_ns)` against the painter's own ground-truth CSV: 92939/92939 payloads across 5 full
+/// recordings matched a REAL painted tick exactly — zero hallucinated/misread values — so this
+/// is a decode-COVERAGE gap, never a decoder-correctness bug; see #707's own issue thread).
+pub fn decode_qr_luma_all_fast_then_robust_grouped_pathed_optical(
+    img: GrayImage,
+    mandatory_burn_run_ids: &[u32],
+    any_of_burn_run_ids: &[u32],
+    min_distinct_optical: Option<(u32, usize)>,
+) -> (Vec<Payload>, DecodePath) {
     let mut out = decode_qr_luma_all(img.clone());
 
-    // Fast path: the plain pass already carries every MANDATORY burn, AND (when the any-of
-    // group is non-empty) at least one of its members — the tiled recovery could only re-find
-    // the same ids (robust is a SUPERSET that adds nothing here), so skip its ~10× cost. This
-    // is the ~99 %+ common case on a clean recording.
-    let mandatory_present = mandatory_burn_run_ids
-        .iter()
-        .all(|id| out.iter().any(|p| p.run_id == *id));
-    let any_of_present = any_of_burn_run_ids.is_empty()
-        || any_of_burn_run_ids
-            .iter()
-            .any(|id| out.iter().any(|p| p.run_id == *id));
-    if mandatory_present && any_of_present {
+    if fast_path_gate_satisfied(
+        &out,
+        mandatory_burn_run_ids,
+        any_of_burn_run_ids,
+        min_distinct_optical,
+    ) {
         return (out, DecodePath::Fast);
     }
 
-    // Robust fallback: a mandatory burn is missing, or NONE of the any-of group decoded — give
-    // rqrr the tiled+upscaled look (#202) that recovers the small burns the full-frame pass
-    // intermittently misses.
+    // Robust fallback: a mandatory burn is missing, NONE of the any-of group decoded, or (#707)
+    // the dual-QR optical read is short of its required distinct-id count — give rqrr the
+    // tiled+upscaled look (#202) that recovers reads the full-frame pass intermittently misses.
     robust_tile_passes(&img, &mut out);
     (out, DecodePath::Robust)
+}
+
+/// Pure #207/#707 fast-path gate DECISION — every completeness dimension the plain-pass
+/// `payloads` must already satisfy before the ~10×-cost robust tiled retry can be skipped.
+/// Extracted from [`decode_qr_luma_all_fast_then_robust_grouped_pathed_optical`] so the
+/// decision itself is directly unit-testable against hand-built payload lists, with no image
+/// decode involved (mirrors the project's other pure-decision seams, e.g. `send_stall::
+/// is_send_stall`).
+fn fast_path_gate_satisfied(
+    payloads: &[Payload],
+    mandatory_burn_run_ids: &[u32],
+    any_of_burn_run_ids: &[u32],
+    min_distinct_optical: Option<(u32, usize)>,
+) -> bool {
+    let mandatory_present = mandatory_burn_run_ids
+        .iter()
+        .all(|id| payloads.iter().any(|p| p.run_id == *id));
+    let any_of_present = any_of_burn_run_ids.is_empty()
+        || any_of_burn_run_ids
+            .iter()
+            .any(|id| payloads.iter().any(|p| p.run_id == *id));
+    // #707 RED STUB (temporary, this commit only — see the paired GREEN commit that follows):
+    // the optical-completeness dimension is not implemented yet, so this still reproduces the
+    // exact pre-#707 gate (burns only) regardless of `min_distinct_optical` — proving the new
+    // tests above genuinely fail against today's behavior before the real check is wired in.
+    let _ = min_distinct_optical;
+    let optical_complete = true;
+    mandatory_present && any_of_present && optical_complete
 }
 
 /// Decode a dual-QR frame and reconcile. Both QRs sit in one horizontal band across the
@@ -1818,6 +1894,202 @@ mod tests {
             path,
             DecodePath::Fast,
             "empty expected-burns set ⇒ always FAST"
+        );
+    }
+
+    // ========================================================================
+    // #707 — the gate's THIRD (optical) completeness dimension. Found while investigating
+    // #707's residual `all_cambox_continuity` copies/gaps: a frame where the plain pass reads
+    // every expected node burn fine but MISSES one dual-QR Vernier half took the FAST path
+    // anyway, silently skipping the #202 robust recovery that (proven above) CAN recover a
+    // read the plain pass alone misses. See `fast_path_gate_satisfied`'s doc for the full
+    // reasoning + the #707 ground-truth evidence that this is a coverage gap, not a
+    // decoder-correctness bug.
+    // ========================================================================
+
+    #[test]
+    fn fast_path_gate_optical_check_is_a_no_op_when_none() {
+        // `min_distinct_optical = None` must reproduce the EXACT pre-#707 gate (burns only) —
+        // every existing caller passes `None` via the un-suffixed wrappers and must see no
+        // behavior change at all.
+        let one_optical = [Payload {
+            run_id: 7,
+            frame_id: 100,
+            gen_ts_ns: 1,
+        }];
+        assert!(
+            fast_path_gate_satisfied(&one_optical, &[], &[], None),
+            "no burns required + no optical requirement ⇒ satisfied regardless of optical count"
+        );
+    }
+
+    #[test]
+    fn fast_path_gate_requires_min_distinct_optical_ids_when_specified() {
+        // Only ONE distinct id of the optical run_id present — short of the required 2 (the
+        // dual-QR Vernier's left+right halves) — the gate must NOT be satisfied even though
+        // there are no burns to require at all.
+        let one_optical = [Payload {
+            run_id: 7,
+            frame_id: 100,
+            gen_ts_ns: 1,
+        }];
+        assert!(
+            !fast_path_gate_satisfied(&one_optical, &[], &[], Some((7, 2))),
+            "only 1 distinct optical id present, 2 required ⇒ NOT satisfied (must retry robust)"
+        );
+    }
+
+    #[test]
+    fn fast_path_gate_satisfied_when_optical_ids_meet_the_minimum() {
+        let two_optical = [
+            Payload {
+                run_id: 7,
+                frame_id: 100,
+                gen_ts_ns: 1,
+            },
+            Payload {
+                run_id: 7,
+                frame_id: 101,
+                gen_ts_ns: 1,
+            },
+        ];
+        assert!(
+            fast_path_gate_satisfied(&two_optical, &[], &[], Some((7, 2))),
+            "2 distinct optical ids present, 2 required ⇒ satisfied"
+        );
+    }
+
+    #[test]
+    fn fast_path_gate_optical_check_ignores_a_repeated_id_and_other_run_ids() {
+        // A repeated frame_id (same held id decoded twice, e.g. duplicate rqrr detections) must
+        // NOT count as 2 DISTINCT ids; a burn payload (a different run_id entirely) must not
+        // count toward the optical requirement either.
+        let repeated_plus_burn = [
+            Payload {
+                run_id: 7,
+                frame_id: 100,
+                gen_ts_ns: 1,
+            },
+            Payload {
+                run_id: 7,
+                frame_id: 100,
+                gen_ts_ns: 1,
+            },
+            Payload {
+                run_id: 911_002,
+                frame_id: 5555,
+                gen_ts_ns: 2,
+            },
+        ];
+        assert!(
+            !fast_path_gate_satisfied(&repeated_plus_burn, &[], &[], Some((7, 2))),
+            "1 distinct optical id (repeated) + an unrelated burn ⇒ still short of 2: {repeated_plus_burn:?}"
+        );
+    }
+
+    #[test]
+    fn optical_gate_fast_path_when_both_dual_qr_halves_and_burns_already_read() {
+        // The common case (#707): a clean frame where the plain pass reads BOTH Vernier halves
+        // AND the expected burn — must take FAST, unchanged from before this dimension existed.
+        const STRIH_ID: u32 = 911_002;
+        let left = Payload {
+            run_id: 7,
+            frame_id: 600,
+            gen_ts_ns: 1,
+        };
+        let right = Payload {
+            run_id: 7,
+            frame_id: 601,
+            gen_ts_ns: 2,
+        };
+        let strih_burn = Payload {
+            run_id: STRIH_ID,
+            frame_id: 1670,
+            gen_ts_ns: 3,
+        };
+        let luma = dual_with_bottom_burn(&left, &right, &strih_burn, 360, 0.0);
+
+        // Precondition: the plain pass already reads both optical halves.
+        let plain = decode_qr_luma_all(luma.clone());
+        let distinct_optical: std::collections::HashSet<u32> = plain
+            .iter()
+            .filter(|p| p.run_id == 7)
+            .map(|p| p.frame_id)
+            .collect();
+        assert_eq!(
+            distinct_optical.len(),
+            2,
+            "precondition: plain pass must read both Vernier halves: {plain:?}"
+        );
+
+        let (got, path) = decode_qr_luma_all_fast_then_robust_grouped_pathed_optical(
+            luma,
+            &[STRIH_ID],
+            &[],
+            Some((7, 2)),
+        );
+        assert_eq!(
+            path,
+            DecodePath::Fast,
+            "both optical halves + the mandatory burn already read ⇒ FAST, unchanged by #707"
+        );
+        assert!(got.iter().any(|p| p.run_id == STRIH_ID));
+    }
+
+    #[test]
+    fn optical_gate_falls_back_to_robust_when_only_one_dual_qr_half_decodes() {
+        // #707's actual defect, reproduced deterministically: render only ONE Vernier QR (the
+        // "held" half — the OTHER, freshly-repainting half is entirely absent from this frame,
+        // modeling the real-world moiré/shimmer miss). The plain pass finds every expected node
+        // burn AND one optical id — the PRE-#707 gate (burns only) would wrongly call this FAST.
+        // With the optical dimension wired in, it must fall through to ROBUST instead.
+        const STRIH_ID: u32 = 911_002;
+        let held = Payload {
+            run_id: 7,
+            frame_id: 700,
+            gen_ts_ns: 1,
+        };
+        let strih_burn = Payload {
+            run_id: STRIH_ID,
+            frame_id: 1671,
+            gen_ts_ns: 2,
+        };
+        let (w, h) = (1920u32, 1080u32);
+        let bgra = render_qr_bgra(&held, w, h, 700);
+        let mut luma = bgra_to_luma(&bgra, w, h, w * 4);
+        let qh = render_payload_qr(&strih_burn, 360).height();
+        blit_burn_luma(&mut luma, &strih_burn, 360, 40, h - qh - 40);
+
+        // Precondition: exactly ONE distinct optical id decodes in the plain pass (the other
+        // Vernier half was never painted onto this frame at all).
+        let plain = decode_qr_luma_all(luma.clone());
+        let distinct_optical: std::collections::HashSet<u32> = plain
+            .iter()
+            .filter(|p| p.run_id == 7)
+            .map(|p| p.frame_id)
+            .collect();
+        assert_eq!(
+            distinct_optical.len(),
+            1,
+            "precondition: plain pass must read exactly one Vernier half: {plain:?}"
+        );
+        assert!(
+            plain.iter().any(|p| p.run_id == STRIH_ID),
+            "precondition: the mandatory burn must still decode: {plain:?}"
+        );
+
+        let (_got, path) = decode_qr_luma_all_fast_then_robust_grouped_pathed_optical(
+            luma,
+            &[STRIH_ID],
+            &[],
+            Some((7, 2)),
+        );
+        assert_eq!(
+            path,
+            DecodePath::Robust,
+            "#707: only 1 of 2 expected optical ids read by the plain pass — even with every \
+             burn present, the gate must retry robust instead of silently accepting the short \
+             optical read (the pre-#707 gate wrongly returned Fast here)"
         );
     }
 }
