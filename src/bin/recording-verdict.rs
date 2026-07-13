@@ -63,7 +63,7 @@ use camera_box::probe::recording_segments::{
 use camera_box::probe::recording_verdict::{
     cam_strih_assessment, verdict, FrameTick, RecordingVerdict, VerdictConfig,
 };
-use camera_box::qpsk_marker::av_offset_candidates;
+use camera_box::qpsk_marker::{av_offset_candidates_deduped, DEDUPE_SAME_FID_WINDOW_S};
 use clap::Parser;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -306,8 +306,16 @@ struct Args {
     av_min_matched: usize,
     /// #188 A/V-sync: half-width (ms) of the offset cluster window. Candidate offsets within
     /// ±this of the densest band are the real markers; the rest (false decodes, wrong-lap matches)
-    /// are rejected. Default 60.
-    #[arg(long, default_value_t = 60.0)]
+    /// are rejected. #733 (2026-07-13) tightened the default from 60 to 25: a real-data audit of 3
+    /// full-path-e2e gate runs found the OLD ±60ms window wide enough to occasionally swallow TWO
+    /// nearby sub-clusters into one (one run's mad_ms hit 32.7ms — a genuinely bimodal-looking
+    /// blend, not one tight cluster), while a tight-first sweep on the SAME real data showed each
+    /// run's true cluster is far more precise than that: even at ±15ms every run cleared
+    /// `MIN_AV_SAMPLES`(8) with mad_ms 7-9ms. ±25ms is the conservative middle ground — comfortable
+    /// margin above the 8-sample floor (19-24 matched candidates on all 3 real runs) while staying
+    /// far tighter than the old default (mad_ms 11-13ms vs 15-33ms). See `.claude/skills/av-sync`
+    /// for the full audit.
+    #[arg(long, default_value_t = 25.0)]
     av_cluster_tol_ms: f64,
     /// #624 deliverable 4 / #312 item 2 PR B: the expected/dialed A/V offset (ms) — the
     /// operator's live #398 dock reading (nominally ~0, since the dock is dialed to align video
@@ -4376,8 +4384,15 @@ fn build_and_print_verdict(
                                     av.fps,
                                     av.video_start_s,
                                 );
-                                let cands =
-                                    av_offset_candidates(&av.emit_log, &av.audio_markers, &ticks);
+                                // #733 — deduped: collapse near-simultaneous duplicate decodes of
+                                // the SAME marker (a real-data audit found 37-84ms-apart same-fid
+                                // pairs) before clustering.
+                                let cands = av_offset_candidates_deduped(
+                                    &av.emit_log,
+                                    &av.audio_markers,
+                                    &ticks,
+                                    DEDUPE_SAME_FID_WINDOW_S,
+                                );
                                 (1, vec![cands])
                             } else {
                                 let mut matched = 0usize;
@@ -4395,10 +4410,11 @@ fn build_and_print_verdict(
                                         av.fps,
                                         av.video_start_s,
                                     );
-                                    per_window.push(av_offset_candidates(
+                                    per_window.push(av_offset_candidates_deduped(
                                         &av.emit_log,
                                         &av.audio_markers,
                                         &ticks,
+                                        DEDUPE_SAME_FID_WINDOW_S,
                                     ));
                                 }
                                 (matched, per_window)

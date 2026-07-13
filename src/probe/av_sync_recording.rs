@@ -10,8 +10,8 @@
 
 use crate::probe::recording::analyze_recording;
 use crate::qpsk_marker::{
-    av_offset_candidates, cluster_offset_ms, decode_markers, parse_ffprobe_start_time,
-    parse_qpsk_marker_log, AudioParams, AvOffset,
+    av_offset_candidates_deduped, cluster_offset_ms, decode_markers, parse_ffprobe_start_time,
+    parse_qpsk_marker_log, AudioParams, AvOffset, DEDUPE_SAME_FID_WINDOW_S,
 };
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -156,8 +156,9 @@ fn extract_audio_mono_f32(path: &Path, track: u32, sample_rate: u32) -> Result<V
 ///
 /// Steps: ffprobe fps → decode every recorded frame's dual-QR tick → (tick, video_ts) samples;
 /// extract audio track → QPSK-decode (audio_ts, index); form a candidate `video − audio` offset per
-/// index-match (`av_offset_candidates`); the offset is the median of the DENSEST cluster of those
-/// candidates (`cluster_offset_ms`) — robust to false audio decodes and the index wrap.
+/// index-match, deduping near-simultaneous same-`frame_id` duplicates (`av_offset_candidates_deduped`,
+/// #733); the offset is the median of the DENSEST cluster of those candidates (`cluster_offset_ms`)
+/// — robust to false audio decodes and the index wrap.
 pub fn av_sync_from_recording(
     recording: &Path,
     marker_log_csv: &str,
@@ -205,7 +206,12 @@ pub fn av_sync_from_recording(
     // of that frame, and form a `video − audio` candidate offset. The true offset is the median of
     // the densest cluster of these candidates (false decodes + wrong-lap matches scatter and are
     // rejected). This is robust to the massive false-decode rate CRC-4 lets through on a music mix.
-    let candidates = av_offset_candidates(&emit_log, &audio_markers, &ticks);
+    // #733 — deduped: collapse near-simultaneous duplicate decodes of the SAME marker (a real-data
+    // audit found 37-84ms-apart same-frame_id pairs, most plausibly an acoustic echo/reverb tail
+    // off the mbc mastering chain the marker's audio rides) to one sample before clustering, so a
+    // duplicate never inflates the matched count or skews the median/MAD.
+    let candidates =
+        av_offset_candidates_deduped(&emit_log, &audio_markers, &ticks, DEDUPE_SAME_FID_WINDOW_S);
     let n_cand = candidates.len();
 
     let offset =
