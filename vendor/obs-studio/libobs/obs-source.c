@@ -4775,6 +4775,29 @@ static void genlock_audit_log(obs_source_t *source, uint64_t now_ns)
 }
 /* ---- end genlock FIFO preload + audit ------------------------------------ */
 
+/* camera-box #726: is this genlock source running at an integer multiple N>=2 of the
+ * canvas render-tick rate? Derived from the STAMP GRID — the consecutive capture-stamp
+ * delta of the two oldest queued frames is the true source frame interval regardless of
+ * arrival jitter (a single NDI source delivers in monotonic capture order). A 60fps source
+ * into a 30fps canvas stamps every ~16.6ms, so canvas_interval / src_interval ~= 2 => N==2
+ * => true; a 1:1 source (30fps into 30fps) stamps every canvas interval => N==1 => false
+ * (the present-oldest lossless-drain STEADY path below is then unchanged). Needs >=2 queued
+ * frames to measure the source interval; a non-positive delta (a backward-step seam, where
+ * async_frames is non-monotonic) also reads N==1 (false), so the multi-consume never engages
+ * across a clock step. Mirror of src/probe/genlock.rs ReleaseCadence::source_is_integer_multiple. */
+static inline bool genlock_source_is_integer_multiple(const obs_source_t *source, uint64_t canvas_interval_ns)
+{
+	if (canvas_interval_ns == 0 || source->async_frames.num < 2)
+		return false;
+	const uint64_t t0 = source->async_frames.array[0]->timestamp;
+	const uint64_t t1 = source->async_frames.array[1]->timestamp;
+	if (t1 <= t0)
+		return false;
+	const uint64_t src_interval = t1 - t0;
+	/* round-to-nearest N = canvas / src; a structural integer multiple is N >= 2. */
+	return (canvas_interval_ns + src_interval / 2) / src_interval >= 2;
+}
+
 static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 {
 	struct obs_source_frame *next_frame = source->async_frames.array[0];
@@ -5021,14 +5044,47 @@ static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 				} else if (source->async_frames.array[0]->timestamp <=
 					   source->genlock_locked_next_boundary_ns) {
 					/* STEADY (strict FIFO): the queue head matured by the LOCKED
-					 * boundary — present the OLDEST matured frame, exactly one in
-					 * steady state at any arrival skew. Presenting oldest (v1
-					 * presented the newest matured and dropped the rest) is what
-					 * makes a transient 2-frame maturation LOSSLESS: the extra
-					 * frame drains on the next tick (depth-bounded by the backlog
-					 * guard above). The boundary re-anchors to the presented
-					 * stamp below so small stamp jitter cannot accumulate. */
-					release = 1;
+					 * boundary. */
+					if (genlock_source_is_integer_multiple(source, interval)) {
+						/* camera-box #726: the source runs at an integer multiple
+						 * N>=2 of the canvas render-tick rate (a 60fps NDI source
+						 * into a 30fps canvas). The present-OLDEST path CRAWLS here:
+						 * one canvas interval lands a HAIR under N source intervals
+						 * (30fps 33_333_333 ns vs 2*60fps 33_333_334 ns), so the
+						 * boundary matures only ONE frame per tick while N arrive —
+						 * content plays at ~1/N speed and the queue grows until the
+						 * backlog storm above catches up with a JUMP (the live-event
+						 * "like 15fps" judder, #726). Instead mature every frame up
+						 * to the boundary PLUS a half-interval slack (so the frame
+						 * ~one canvas interval ahead — the hair-past-boundary one —
+						 * is included, the #136 boundary-churn tolerance), release
+						 * the NEWEST and retire the older matured one(s) into
+						 * genlock_dropped_due (the erase loop below). The boundary
+						 * re-anchors to the presented stamp, advancing ONE canvas
+						 * interval (= N source frames) per tick: a uniform
+						 * every-Nth-frame cadence tracking real time, slew-immune
+						 * (keys on the boundary, not the wall). Mirror of
+						 * src/probe/genlock.rs ReleaseCadence::tick N>=2 path. */
+						const uint64_t mature_deadline =
+							source->genlock_locked_next_boundary_ns +
+							interval / 2;
+						size_t matured_n = 0;
+						while (matured_n < source->async_frames.num &&
+						       source->async_frames.array[matured_n]->timestamp <=
+							       mature_deadline)
+							matured_n++;
+						release = matured_n > 0 ? matured_n : 1;
+					} else {
+						/* present the OLDEST matured frame, exactly one in steady
+						 * state at any arrival skew. Presenting oldest (v1 presented
+						 * the newest matured and dropped the rest) is what makes a
+						 * transient 2-frame maturation LOSSLESS: the extra frame
+						 * drains on the next tick (depth-bounded by the backlog
+						 * guard above). The boundary re-anchors to the presented
+						 * stamp below so small stamp jitter cannot accumulate.
+						 * N==1 is byte-identical to pre-#726. */
+						release = 1;
+					}
 				} else if (present_ts >= source->async_frames.array[0]->timestamp) {
 					/* GAP RESYNC: nothing matured, but the oldest queued frame is
 					 * BEYOND the boundary and has aged past the reserve —

@@ -170,3 +170,40 @@ fn backward_step_recovery_survives_the_cadence() {
         );
     }
 }
+
+#[test]
+fn steady_multi_consumes_at_an_integer_source_multiple_of_the_canvas() {
+    // #726 — the live-event "like 15fps" judder. At a STRUCTURAL N>=2 source:canvas ratio (a
+    // 60fps NDI camera into strih's 30fps canvas) the STEADY path presented the OLDEST matured
+    // frame and re-anchored the boundary to it; one canvas interval (33_333_333 ns) lands a HAIR
+    // under 2 source intervals (33_333_334 ns), so the boundary matured only ONE frame per tick
+    // while N arrived — content crawled +1 source frame/tick, the queue grew, and the backlog
+    // storm jumped +7 (~5x/s). The fix: for a structural N>=2 source (detected from the stamp
+    // grid), mature every frame up to the boundary PLUS a half-interval slack, release the NEWEST
+    // and retire the older matured one(s) into genlock_dropped_due — a uniform every-Nth-frame
+    // cadence tracking real time, slew-immune (keys on the boundary, not the wall). N==1 keeps the
+    // present-oldest lossless-drain path byte-identical. Behavioral RED->GREEN proof is
+    // src/probe/genlock.rs `cadence_60_into_30_presents_uniform_every_second_frame`; this
+    // default-features guard pins the C port so a subtree-pull or edit can't silently revert it.
+    let src = squish(&vendor_file(OBS_SOURCE));
+    assert!(
+        src.contains("static inline bool genlock_source_is_integer_multiple("),
+        "{OBS_SOURCE}: #726 — the integer-multiple detector \
+         (genlock_source_is_integer_multiple, derived from the stamp grid) is gone; the 60->30 \
+         STEADY cadence would crawl+jump again. Mirror: src/probe/genlock.rs \
+         ReleaseCadence::source_is_integer_multiple."
+    );
+    assert!(
+        src.contains("if (genlock_source_is_integer_multiple(source, interval)) {"),
+        "{OBS_SOURCE}: #726 — the STEADY release no longer branches on \
+         genlock_source_is_integer_multiple; the 60->30 multi-consume (present newest matured, \
+         retire older) reverted to present-oldest (the crawl). Re-apply."
+    );
+    assert!(
+        src.contains("mature_deadline")
+            && src.contains("source->genlock_locked_next_boundary_ns + interval / 2"),
+        "{OBS_SOURCE}: #726 — the STEADY N>=2 maturation slack (boundary + interval/2, so the \
+         frame ~one canvas interval ahead matures despite canvas_interval being a hair under \
+         N*src_interval) is gone; the multi-consume would mature only 1 frame and still crawl."
+    );
+}

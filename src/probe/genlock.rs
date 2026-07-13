@@ -1527,12 +1527,48 @@ impl ReleaseCadence {
             // branch re-fires once they age.
         }
 
-        // STEADY (strict FIFO): release the OLDEST frame matured by the LOCKED boundary —
-        // exactly one in steady state at any arrival skew. Presenting oldest (v1 presented
-        // newest and dropped the rest) is what makes a transient 2-frame maturation lossless:
-        // the extra frame drains on the next tick (depth-bounded by the relock above).
+        // STEADY (strict FIFO): release the frame(s) matured by the LOCKED boundary.
         let matured = queue.iter().take_while(|&&ts| ts <= boundary).count();
         if matured > 0 {
+            // camera-box #726: when the source runs at an integer multiple N>=2 of the canvas
+            // render-tick rate (a 60fps NDI source into a 30fps canvas), the present-OLDEST-matured
+            // path CRAWLS: the LOCKED boundary re-anchors to the presented stamp, and one canvas
+            // interval lands a HAIR under N source intervals (30fps interval 33_333_333 ns vs
+            // 2×60fps 33_333_334 ns), so the boundary matures only ONE frame per tick while N arrive
+            // — content plays at ~1/N speed and the per-source queue grows ~(N-1) frames/tick until
+            // the backlog storm above catches up with a multi-frame JUMP. That crawl-then-jump is the
+            // live-event "like 15fps" judder (#726). FIX: for a structural N>=2 source, mature the
+            // frames up to the boundary PLUS a half-interval slack (so the frame ~one canvas interval
+            // ahead — the hair-past-boundary one — is included, the #136 boundary-churn tolerance),
+            // present the NEWEST of them and retire the older matured one(s) into `dropped`. The
+            // boundary re-anchors to that presented stamp, so it advances ONE canvas interval (=
+            // N source frames) per tick — a uniform every-Nth-frame cadence that tracks real time.
+            // Keying on the phase-locked BOUNDARY (not the wall clock) keeps it slew-immune — the
+            // whole point of #401. Gated on the source being STRUCTURALLY at N>=2 (from the stamp
+            // grid, not arrival timing) so a TRANSIENT 1:1 double-maturation stays LOSSLESS via the
+            // present-oldest drain below — N==1 is byte-identical.
+            if Self::source_is_integer_multiple(queue, interval_ns) {
+                let mature_deadline = boundary + interval_ns / 2;
+                let matured_n = queue
+                    .iter()
+                    .take_while(|&&ts| ts <= mature_deadline)
+                    .count()
+                    .max(1);
+                let mut dropped = Vec::with_capacity(matured_n - 1);
+                for _ in 0..matured_n - 1 {
+                    dropped.push(queue.pop_front().expect("older matured"));
+                }
+                let presented = queue.pop_front().expect("newest matured");
+                self.locked_next_boundary_ns = Some(presented + interval_ns);
+                return CadenceOutcome {
+                    presented: Some(presented),
+                    dropped,
+                    late_hold: false,
+                    relocked: false,
+                };
+            }
+            // N==1: present the OLDEST matured frame — exactly one in steady state; a transient
+            // 2-frame maturation drains losslessly next tick (byte-identical to pre-#726).
             let presented = queue.pop_front().expect("matured frame");
             self.locked_next_boundary_ns = Some(presented + interval_ns);
             return CadenceOutcome {
@@ -1570,6 +1606,34 @@ impl ReleaseCadence {
     /// is unambiguous backlog while tolerating burst jitter; a stall's burst catches up
     /// within one tick with every jumped frame counted.
     const QDEPTH_RELOCK: usize = 6;
+
+    /// camera-box #726: is the source running at an integer multiple N>=2 of the canvas
+    /// render-tick rate? Derived from the STAMP GRID — the consecutive capture-stamp delta of
+    /// the two oldest queued frames is the true source frame interval regardless of arrival
+    /// jitter (a single NDI source delivers in monotonic capture order). A 60fps source into a
+    /// 30fps canvas stamps every 16.6ms, so `canvas_interval / src_interval ≈ 2` → N==2 → true;
+    /// a 1:1 source (30fps into 30fps) stamps every 33.3ms → N==1 → false (the present-oldest
+    /// lossless-drain path is unchanged). Needs >=2 queued frames to measure the source interval;
+    /// a non-positive delta (a backward-step seam, where `async_frames` is non-monotonic) also
+    /// reads N==1 (false), so the multi-consume never engages across a clock step. Mirror of the
+    /// C helper `genlock_source_is_integer_multiple` in obs-source.c.
+    fn source_is_integer_multiple(
+        queue: &std::collections::VecDeque<u64>,
+        canvas_interval_ns: u64,
+    ) -> bool {
+        if canvas_interval_ns == 0 {
+            return false;
+        }
+        let (Some(&t0), Some(&t1)) = (queue.front(), queue.get(1)) else {
+            return false;
+        };
+        if t1 <= t0 {
+            return false;
+        }
+        let src_interval = t1 - t0;
+        // Round-to-nearest N = canvas / src; a structural integer multiple is N >= 2.
+        (canvas_interval_ns + src_interval / 2) / src_interval >= 2
+    }
 }
 
 #[cfg(test)]
@@ -1836,8 +1900,8 @@ mod tests {
     fn cadence_60_into_30_presents_uniform_every_second_frame() {
         const SRC_I: u64 = 16_666_667; // 60 Hz source (cam2 painter / camera emit)
         const CANVAS_I: u64 = 33_333_333; // 30 Hz strih canvas render tick
-        // reserve 3ms = the production genlock floor; 20ms stamp→arrival skew = the measured live
-        // pipeline latency (same as the 1:1 sims).
+                                          // reserve 3ms = the production genlock floor; 20ms stamp→arrival skew = the measured live
+                                          // pipeline latency (same as the 1:1 sims).
         let (presented, _dropped) = run_cadence_sim_ratio(3, SRC_I, CANVAS_I, 20_000_000, 400);
         // Skip the ACQUIRE / cold-start window (matches the live win0 "cold-start noise on top"
         // vs the clean win1/win2); read the steady-state cadence.
@@ -1847,7 +1911,10 @@ mod tests {
             "#726: expected a long steady presented window, got {}",
             steady.len()
         );
-        let deltas: Vec<i64> = steady.windows(2).map(|w| w[1] as i64 - w[0] as i64).collect();
+        let deltas: Vec<i64> = steady
+            .windows(2)
+            .map(|w| w[1] as i64 - w[0] as i64)
+            .collect();
         let mut hist = std::collections::BTreeMap::new();
         for &d in &deltas {
             *hist.entry(d).or_insert(0usize) += 1;
@@ -1886,7 +1953,10 @@ mod tests {
         const I: u64 = 33_333_333; // 30 Hz source AND 30 Hz canvas — the 1:1 stream 'NDI 2ME PGM' path
         let (presented, dropped) = run_cadence_sim_ratio(3, I, I, 20_000_000, 300);
         let steady: Vec<u64> = presented.iter().skip(15).copied().collect();
-        let deltas: Vec<i64> = steady.windows(2).map(|w| w[1] as i64 - w[0] as i64).collect();
+        let deltas: Vec<i64> = steady
+            .windows(2)
+            .map(|w| w[1] as i64 - w[0] as i64)
+            .collect();
         assert!(
             deltas.iter().all(|&d| d == 1),
             "#726: a 1:1 source must present EVERY frame (Δ==1), never skip — the multi-consume \
