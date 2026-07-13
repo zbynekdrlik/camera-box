@@ -44,8 +44,8 @@ use camera_box::probe::burn_contiguity::{
     BurnRate, InWindowMissingKind, NodeContiguity, RecordedBurnFrame,
 };
 use camera_box::probe::recording::{
-    analyze_recording_with_burns, analyze_recording_with_grouped_burns, extract_frames_png,
-    select_frames_to_extract, RecordingFrame, DEFAULT_MAX_PIXEL_PROOF,
+    analyze_recording_with_burns, analyze_recording_with_grouped_burns_optical,
+    extract_frames_png, select_frames_to_extract, RecordingFrame, DEFAULT_MAX_PIXEL_PROOF,
 };
 use camera_box::probe::recording_latency::{
     burn_ids_in, burn_ids_with_frame_index_in, cam2_cam1_samples, cam2_cam1_samples_from_burn,
@@ -2394,19 +2394,25 @@ fn decode_for(path: Option<&Path>, expected_node_burns: &[u32]) -> Result<Option
 
 /// #632 gap 1 — [`decode_for`] with the #207 fast-path gate split into MANDATORY (always
 /// required) + ANY-OF (whichever ONE of [`CAMERA_UNDER_TEST_NODES`] is actually deployed this
-/// run) groups — see [`analyze_recording_with_grouped_burns`]. Used for the fused strih/stream
+/// run) groups — see [`analyze_recording_with_grouped_burns_optical`]. Used for the fused strih/stream
 /// decode in `main()` so a cam3/cam4/cam5/cam6/cam2-deployed run gets the same #207 fast path a
 /// cam1-deployed run always could.
 fn decode_for_grouped(
     path: Option<&Path>,
     mandatory_burns: &[u32],
     any_of_burns: &[u32],
+    min_distinct_optical: Option<(u32, usize)>,
 ) -> Result<Option<DecodedRec>> {
     let Some(path) = path else {
         return Ok(None);
     };
-    let frames = analyze_recording_with_grouped_burns(path, mandatory_burns, any_of_burns)
-        .with_context(|| format!("analyze recording {}", path.display()))?;
+    let frames = analyze_recording_with_grouped_burns_optical(
+        path,
+        mandatory_burns,
+        any_of_burns,
+        min_distinct_optical,
+    )
+    .with_context(|| format!("analyze recording {}", path.display()))?;
     Ok(Some(DecodedRec {
         frames,
         rec_path: Some(path.to_path_buf()),
@@ -2500,15 +2506,20 @@ fn main() -> Result<()> {
     // cam1 only) for the #207 fast gate. #632 gap 1: the camera-under-test slot is an ANY-OF
     // group (cam1..cam6 are mutually exclusive — only the deployed one's burn ever appears), not
     // a hardcoded cam1-only mandatory check — see `camera_under_test_burn_ids`.
+    // #707: strih/stream also require both cam2 dual-QR Vernier halves before skipping the
+    // robust retry — see `extract_partial`'s identical wiring for the full reasoning.
+    let min_distinct_optical = args.cam2_pin().map(|run_id| (run_id, 2));
     let strih = decode_for_grouped(
         args.strih.as_deref(),
         &[args.burn_strih_run_id],
         &camera_under_test_burn_ids(&args),
+        min_distinct_optical,
     )?;
     let stream = decode_for_grouped(
         args.stream.as_deref(),
         &[args.burn_strih_run_id, args.burn_stream_run_id],
         &camera_under_test_burn_ids(&args),
+        min_distinct_optical,
     )?;
     // #463: imag now carries its OWN digital corner burn (run_id BURN_RUN_ID_IMAG) — decode for
     // it so the #207 fast/robust gate looks for it. Backward compatible: a recording with no
@@ -4871,16 +4882,26 @@ fn extract_partial(args: &Args, box_name: &str) -> Result<()> {
     // deployed this run — mutually exclusive, so "at least one" unlocks the fast path exactly
     // like the historically-hardcoded cam1-only check did for cam1 specifically). imag has no
     // camera-under-test any-of group, so it keeps the plain mandatory-only decode unchanged.
+    //
+    // #707: strih AND stream ALSO carry the cam2 dual-QR Vernier optical read baked into their
+    // recorded pixels (whichever cambox is on program at that instant), so both now ALSO require
+    // both Vernier halves before skipping the #202 robust retry — see
+    // `decode_qr_luma_all_fast_then_robust_grouped_pathed_optical`'s doc for the full reasoning.
+    // `args.cam2_pin()` is `None` only for an unpinned (`--cam2-run-id 0`) debug invocation, in
+    // which case this is byte-for-byte the pre-#707 gate.
+    let min_distinct_optical = args.cam2_pin().map(|run_id| (run_id, 2));
     let frames = match box_name {
-        "strih" => analyze_recording_with_grouped_burns(
+        "strih" => analyze_recording_with_grouped_burns_optical(
             rec_path,
             &[args.burn_strih_run_id],
             &camera_under_test_burn_ids(args),
+            min_distinct_optical,
         ),
-        "stream" => analyze_recording_with_grouped_burns(
+        "stream" => analyze_recording_with_grouped_burns_optical(
             rec_path,
             &[args.burn_strih_run_id, args.burn_stream_run_id],
             &camera_under_test_burn_ids(args),
+            min_distinct_optical,
         ),
         _ => analyze_recording_with_burns(rec_path, &expected_burns),
     }

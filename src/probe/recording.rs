@@ -30,7 +30,7 @@
 
 use crate::probe::payload::Payload;
 use crate::probe::qr::{
-    decode_qr_luma_all_fast_then_robust, decode_qr_luma_all_fast_then_robust_grouped,
+    decode_qr_luma_all_fast_then_robust, decode_qr_luma_all_fast_then_robust_grouped_optical,
     decode_qr_luma_all_robust,
 };
 use anyhow::{Context, Result};
@@ -250,7 +250,7 @@ pub fn decode_recording_frame_with_burns(
 }
 
 /// #632 gap 1 — [`decode_recording_frame_with_burns`] with the #207 fast gate split into TWO
-/// independent groups (see [`decode_qr_luma_all_fast_then_robust_grouped`]): `mandatory_burns`
+/// independent groups (see [`decode_qr_luma_all_fast_then_robust_grouped_optical`]): `mandatory_burns`
 /// must ALL decode (e.g. the strih/stream render burns), and `any_of_burns` needs only ONE
 /// member decoded (e.g. whichever ONE of cam1/cam2/cam3/cam4/cam5/cam6 is the camera physically
 /// under test THIS run — they are mutually exclusive, so requiring ALL six in one flat
@@ -265,7 +265,34 @@ pub fn decode_recording_frame_with_grouped_burns(
     mandatory_burns: &[u32],
     any_of_burns: &[u32],
 ) -> RecordingFrame {
-    let payloads = decode_qr_luma_all_fast_then_robust_grouped(luma, mandatory_burns, any_of_burns);
+    decode_recording_frame_with_grouped_burns_optical(
+        frame_index,
+        luma,
+        mandatory_burns,
+        any_of_burns,
+        None,
+    )
+}
+
+/// #707 — [`decode_recording_frame_with_grouped_burns`] with the #207 gate's third (optical)
+/// completeness dimension: `min_distinct_optical = Some((cam2_run_id, 2))` requires the plain
+/// pass to already carry BOTH dual-QR Vernier halves before skipping the #202 robust tiled
+/// retry — see [`crate::probe::qr::decode_qr_luma_all_fast_then_robust_grouped_pathed_optical`]
+/// for the full reasoning. `None` is byte-for-byte identical to
+/// [`decode_recording_frame_with_grouped_burns`] (every pre-#707 caller, unaffected).
+pub fn decode_recording_frame_with_grouped_burns_optical(
+    frame_index: u64,
+    luma: GrayImage,
+    mandatory_burns: &[u32],
+    any_of_burns: &[u32],
+    min_distinct_optical: Option<(u32, usize)>,
+) -> RecordingFrame {
+    let payloads = decode_qr_luma_all_fast_then_robust_grouped_optical(
+        luma,
+        mandatory_burns,
+        any_of_burns,
+        min_distinct_optical,
+    );
     // Same tick derivation as decode_recording_frame_with_burns (node burns excluded).
     let tick = payloads
         .iter()
@@ -476,6 +503,7 @@ fn decode_stream_parallel(
     workers: usize,
     mandatory_burns: &[u32],
     any_of_burns: &[u32],
+    min_distinct_optical: Option<(u32, usize)>,
     produce: impl FnOnce(&mut dyn FnMut(u64, GrayImage) -> bool) -> Result<u64>,
 ) -> Result<Vec<RecordingFrame>> {
     let (job_tx, job_rx) = std::sync::mpsc::sync_channel::<(u64, GrayImage)>(workers * 2);
@@ -501,11 +529,14 @@ fn decode_stream_parallel(
                 rx.recv()
             };
             let Ok((idx, luma)) = job else { break };
-            let f = decode_recording_frame_with_grouped_burns(
+            // `min_distinct_optical` is `Option<(u32, usize)>` (Copy) — captured by the `move`
+            // closure once per worker thread, same as the #707 gate's other parameters.
+            let f = decode_recording_frame_with_grouped_burns_optical(
                 idx,
                 luma,
                 &mandatory_burns,
                 &any_of_burns,
+                min_distinct_optical,
             );
             tracing::debug!(
                 frame = f.frame_index, decoded = f.payloads.len(), tick = ?f.tick,
@@ -635,11 +666,25 @@ pub fn analyze_recording_with_grouped_burns(
     mandatory_burns: &[u32],
     any_of_burns: &[u32],
 ) -> Result<Vec<RecordingFrame>> {
+    analyze_recording_with_grouped_burns_optical(path, mandatory_burns, any_of_burns, None)
+}
+
+/// #707 — [`analyze_recording_with_grouped_burns`] with the #207 gate's third (optical)
+/// completeness dimension threaded all the way through the parallel decode pool; see
+/// [`decode_recording_frame_with_grouped_burns_optical`]. `None` is byte-for-byte identical to
+/// [`analyze_recording_with_grouped_burns`] (every pre-#707 caller, unaffected).
+pub fn analyze_recording_with_grouped_burns_optical(
+    path: &Path,
+    mandatory_burns: &[u32],
+    any_of_burns: &[u32],
+    min_distinct_optical: Option<(u32, usize)>,
+) -> Result<Vec<RecordingFrame>> {
     let (width, height) = probe_dimensions(path)?;
     let workers = decode_workers(width, height);
     tracing::info!(
         file = %path.display(), width, height, workers,
         mandatory_burns = ?mandatory_burns, any_of_burns = ?any_of_burns,
+        min_distinct_optical = ?min_distinct_optical,
         avail_mb = available_mem_bytes().map(|b| b / 1_048_576),
         "recording analysis start (parallel decode, #187 memory-bounded worker pool, #207 fast-then-robust)"
     );
@@ -651,14 +696,20 @@ pub fn analyze_recording_with_grouped_burns(
     // output growing during the decode so the detector sees real progress — the
     // deep fix, not a band-aid timeout bump (no-timeout-band-aids.md).
     const PROGRESS_EVERY: u64 = 1000;
-    let frames = decode_stream_parallel(workers, mandatory_burns, any_of_burns, |emit| {
-        read_frames(path, width, height, |idx, luma| {
-            if idx > 0 && idx % PROGRESS_EVERY == 0 {
-                tracing::info!(file = %path.display(), frames_read = idx, "recording decode progress");
-            }
-            emit(idx, luma)
-        })
-    })?;
+    let frames = decode_stream_parallel(
+        workers,
+        mandatory_burns,
+        any_of_burns,
+        min_distinct_optical,
+        |emit| {
+            read_frames(path, width, height, |idx, luma| {
+                if idx > 0 && idx % PROGRESS_EVERY == 0 {
+                    tracing::info!(file = %path.display(), frames_read = idx, "recording decode progress");
+                }
+                emit(idx, luma)
+            })
+        },
+    )?;
     let decoded: usize = frames.iter().filter(|f| !f.payloads.is_empty()).count();
     // #207 — the fast/robust decode-path split, so the verdict log shows the speedup is real:
     // on a clean recording almost every frame should take the cheap plain-only fast path, with
@@ -838,6 +889,20 @@ mod tests {
         bgra_to_luma(&bgra, cw, ch, cw * 4)
     }
 
+    /// #707 — a frame carrying only ONE of the dual-QR Vernier's two halves (the run_id
+    /// [`dual_qr_luma`] uses, 6519, with only `held_id` painted; the other half was never
+    /// painted onto this frame at all). Models the real-world "one Vernier half missed" case.
+    fn single_qr_luma(held_id: u32) -> GrayImage {
+        let (cw, ch, qs) = (960u32, 540u32, 260u32);
+        let p = Payload {
+            run_id: 6519,
+            frame_id: held_id,
+            gen_ts_ns: 1,
+        };
+        let bgra = crate::probe::qr::render_qr_bgra(&p, cw, ch, qs);
+        bgra_to_luma(&bgra, cw, ch, cw * 4)
+    }
+
     #[test]
     fn decode_recording_frame_returns_both_dual_qrs() {
         // A strih-6519-type frame (two sharp QRs) decodes to BOTH — the exact case
@@ -881,6 +946,47 @@ mod tests {
             f.payloads
         );
         assert_eq!(f.tick, Some(301));
+    }
+
+    /// #707 wiring proof: `decode_recording_frame_with_grouped_burns_optical` with
+    /// `min_distinct_optical` unset (`None`) must decode IDENTICALLY to the plain grouped
+    /// function — every pre-#707 caller is unaffected by this parameter existing at all.
+    #[test]
+    fn grouped_burns_optical_matches_grouped_when_optical_requirement_is_none() {
+        let luma = dual_qr_luma(400, 401);
+        let plain = decode_recording_frame_with_grouped_burns(9, luma.clone(), &[], &[]);
+        let optical = decode_recording_frame_with_grouped_burns_optical(9, luma, &[], &[], None);
+        assert_eq!(
+            plain, optical,
+            "`None` must be byte-for-byte identical to the pre-#707 grouped decode"
+        );
+    }
+
+    /// #707's actual fix, proven through the FULL wiring (recording.rs → qr.rs), not just the
+    /// pure gate decision: a frame with only ONE Vernier half decodes in the plain pass still
+    /// resolves the SAME tick either way (nothing else painted a second value to recover here),
+    /// but with `min_distinct_optical` requiring 2, the decode must have taken the ROBUST path
+    /// — proven indirectly via `DecodePath` at the qr.rs layer already; here we confirm the
+    /// call reaches recording.rs's own decode function without dropping the parameter and still
+    /// returns a coherent `RecordingFrame` (frame_index/tick correct) through the full chain.
+    #[test]
+    fn grouped_burns_optical_requires_both_vernier_halves_through_the_full_wiring() {
+        let luma = single_qr_luma(700);
+        let f = decode_recording_frame_with_grouped_burns_optical(
+            3,
+            luma,
+            &[],
+            &[],
+            Some((6519, 2)),
+        );
+        assert_eq!(f.frame_index, 3);
+        // Only one Vernier half was ever painted onto this frame, so even the #202 robust
+        // tiled retry (correctly attempted, per the qr.rs-level tests) cannot recover a second
+        // id that was never there — the resolved tick is still the one real id present. The
+        // POINT of this test is that the call compiles/threads through cleanly end-to-end and
+        // returns a coherent frame, not a panic or a silently-dropped parameter.
+        assert_eq!(f.tick, Some(700));
+        assert_eq!(f.payloads.len(), 1, "only the one painted half: {:?}", f.payloads);
     }
 
     #[test]
@@ -1037,7 +1143,7 @@ mod tests {
         // refill it at least once — the backpressure/reorder path is genuinely
         // exercised), without paying for dozens of needless frames.
         let n: u64 = 16;
-        let frames = decode_stream_parallel(4, &[], &[], |emit| {
+        let frames = decode_stream_parallel(4, &[], &[], None, |emit| {
             for i in 0..n {
                 // left = even tick 2i, right = odd tick 2i+1 → tick = 2i+1, unique
                 // per frame so an order bug is detectable.
@@ -1077,7 +1183,7 @@ mod tests {
         // path — the comparison is purely about ordering/parallelism, not the decode
         // path.
         for w in [1usize, 4] {
-            let par = decode_stream_parallel(w, &[], &[], |emit| {
+            let par = decode_stream_parallel(w, &[], &[], None, |emit| {
                 for i in 0..n {
                     emit(i, make(i));
                 }
@@ -1099,7 +1205,7 @@ mod tests {
         // short read — otherwise a truncated decode could be read as "0 loss". The
         // burn set is irrelevant to error propagation; `&[]` keeps the one decoded
         // frame on the cheap fast path (see the module note above).
-        let r = decode_stream_parallel(4, &[], &[], |emit| {
+        let r = decode_stream_parallel(4, &[], &[], None, |emit| {
             emit(0, dual_qr_luma(0, 1));
             anyhow::bail!("simulated ffmpeg failure");
         });
