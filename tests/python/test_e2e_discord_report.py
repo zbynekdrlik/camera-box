@@ -315,6 +315,59 @@ class TestPresentationCadenceSection:
         assert "signatúra '15fps' pri 30fps plátne" in report
 
 
+class TestResidualEventsSection:
+    """#707 EVENT-FORENSICS -- the "Odchýlky s dôvodmi" line, sourced from
+    all_cambox_continuity.residual_events (src/residual_events.rs)."""
+
+    def test_absent_when_no_all_cambox_continuity_at_all(self):
+        # The legacy single-camera fixture has no all_cambox_* blocks whatsoever -- no sweep ran,
+        # so the line must not appear at all (never a spurious "0/0").
+        verdict = _load("verdict_legacy_single_camera.json")
+        report = edr.compose_report(verdict, {"run_id": "x", "event": "test"})
+        assert "Odchýlky s dôvodmi" not in report
+
+    def test_reports_zero_zero_for_a_genuinely_clean_sweep(self):
+        # The block ran (segments present) but found no residual events at all -- a real "swept
+        # clean" signal, distinct from "never swept".
+        verdict = {"all_cambox_continuity": {"segments": [{"cambox": "cam1", "residual_events": []}]}}
+        report = edr.compose_report(verdict, {"run_id": "x", "event": "test"})
+        assert "Odchýlky s dôvodmi: 0 s dôkazmi / 0 otvorených" in report
+
+    def test_reads_the_flat_top_level_list_and_splits_by_reason(self):
+        verdict = {
+            "all_cambox_continuity": {
+                "segments": [{"cambox": "cam1"}],
+                "residual_events": [
+                    {"kind": "copy", "frame_index": 5926, "reason": "known #656 self-heal burst"},
+                    {"kind": "copy", "frame_index": 6100, "reason": None},
+                    {"kind": "gap", "frame_index": 7000},
+                ],
+            }
+        }
+        report = edr.compose_report(verdict, {"run_id": "x", "event": "test"})
+        assert "Odchýlky s dôvodmi: 1 s dôkazmi / 2 otvorených" in report
+
+    def test_falls_back_to_walking_segments_when_no_top_level_list(self):
+        # An older verdict JSON that predates the flattened all_cambox_continuity.residual_events
+        # convenience field -- the composer must still aggregate from segments[].residual_events.
+        verdict = {
+            "all_cambox_continuity": {
+                "segments": [
+                    {
+                        "cambox": "cam1",
+                        "residual_events": [{"kind": "copy", "frame_index": 1, "reason": "x"}],
+                    },
+                    {
+                        "cambox": "cam2",
+                        "residual_events": [{"kind": "gap", "frame_index": 2}],
+                    },
+                ]
+            }
+        }
+        report = edr.compose_report(verdict, {"run_id": "x", "event": "test"})
+        assert "Odchýlky s dôvodmi: 1 s dôkazmi / 1 otvorených" in report
+
+
 # ---------------------------------------------------------------------------
 # chunk_for_discord -- pure text splitter
 # ---------------------------------------------------------------------------

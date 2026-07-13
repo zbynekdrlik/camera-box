@@ -381,6 +381,36 @@ def _section_presentation_cadence(verdict):
     return "\n".join(lines)
 
 
+def _section_residual_events(verdict):
+    """#707 EVENT-FORENSICS -- the per-event residual copy/gap breakdown (src/residual_events.rs),
+    surfaced per the user's binding #707 decision ("every residual deviation must have its own
+    documented reason"). Reads the flat `all_cambox_continuity.residual_events` list (each event
+    optionally carries a `reason` once a human/tool has investigated it -- absent means still
+    OPEN, never silently assumed benign). Falls back to walking `segments[].residual_events` for
+    an older verdict JSON that predates the flattened top-level list. Returns None (no line) when
+    this run carried NO --switch-schedule sweep at all (`all_cambox_continuity` absent, or present
+    with no `segments`/`residual_events` key at all) -- never a spurious "0/0" for a run where the
+    metric plain doesn't apply. A genuinely CLEAN sweep (the block ran, found zero events) DOES
+    report "0 s dôkazmi / 0 otvorených" -- that is a real, useful "swept clean" signal, distinct
+    from "never swept".
+    """
+    events = _g(verdict, "all_cambox_continuity", "residual_events", default=None)
+    if events is None:
+        segments = _g(verdict, "all_cambox_continuity", "segments", default=None)
+        if segments is None:
+            return None  # no ALL_CAMBOX sweep at all in this run
+        events = []
+        for seg in segments:
+            if isinstance(seg, dict):
+                events.extend(seg.get("residual_events") or [])
+    with_reason = sum(1 for e in events if isinstance(e, dict) and e.get("reason"))
+    open_count = len(events) - with_reason
+    return (
+        "**Odchýlky s dôvodmi (#707 forenzný rozbor)**\n"
+        f"  Odchýlky s dôvodmi: {with_reason} s dôkazmi / {open_count} otvorených"
+    )
+
+
 def compose_report(verdict: dict, meta: dict | None = None) -> str:
     """Pure: verdict JSON dict + small meta dict -> Slovak markdown report text.
 
@@ -397,6 +427,9 @@ def compose_report(verdict: dict, meta: dict | None = None) -> str:
         _section_overall(verdict, meta),
         _section_presentation_cadence(verdict),
     ]
+    residual_section = _section_residual_events(verdict)
+    if residual_section is not None:
+        sections.append(residual_section)
     return "\n\n".join(sections)
 
 
