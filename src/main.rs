@@ -455,9 +455,11 @@ async fn run_capture_loop(
     // - `CAMERA_BOX_CAPTURE_CONTROLS` set -> that explicit override, regardless of model,
     // - else                              -> #729 zero-touch by default: NO controls at all
     //                                         unless `grabber_model` has a documented, proven
-    //                                         need (today: ONLY ShadowCast 2, #296's grab-time
-    //                                         grayscale-brick risk). Plug-and-play for every
-    //                                         other card — factory defaults, no ceremony.
+    //                                         need (ShadowCast 2's #296 grab-time grayscale-brick
+    //                                         risk, or Elgato 4K S's #729-follow-up corrective
+    //                                         saturation set for its own ISP tint). Plug-and-play
+    //                                         for every other card — factory defaults, no
+    //                                         ceremony.
     let env_spec = std::env::var("CAMERA_BOX_CAPTURE_CONTROLS").ok();
     let capture_controls: Vec<camera_box::capture::CaptureControl> =
         camera_box::capture::select_capture_controls(
