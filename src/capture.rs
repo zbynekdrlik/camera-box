@@ -465,9 +465,17 @@ pub fn color_production_controls() -> Vec<CaptureControl> {
 }
 
 /// The CERTIFIED Elgato 4K S corrective V4L2 capture control (#729 follow-up,
-/// 2026-07-13): a documented-proven-need exception to the zero-touch policy above,
-/// for the ONE thing on this card that IS correctable — the purple/violet tint's
-/// visible MAGNITUDE — via a partial saturation reduction.
+/// 2026-07-13) — **superseded as the DEFAULT by #738 the same day** (the correction
+/// moved OBS-side, a genuine per-channel `color_multiply` gain, live-verified to
+/// beat this saturation-only compromise — see `documented_controls_for_model`'s
+/// doc). This function is kept fully in code and reachable via an explicit
+/// `CAMERA_BOX_CAPTURE_CONTROLS` override — a switchable manual fallback, not
+/// dead code — in case the OBS-side correction is ever removed, or a future
+/// physical card swap needs this path again. The tuning below (a
+/// documented-proven-need exception to the zero-touch policy for the ONE thing on
+/// this card that IS correctable via V4L2 alone — the purple/violet tint's visible
+/// MAGNITUDE, via a partial saturation reduction) is unchanged history, not
+/// retuned.
 ///
 /// Background: live diagnosis (2026-07-12, cam1+cam6, both Elgato 4K S) proved the
 /// tint is a genuine ISP/AWB characteristic of this card model — it reproduces
@@ -544,12 +552,21 @@ pub fn elgato_4k_s_corrective_controls() -> Vec<CaptureControl> {
 ///   That's [`GrabberModel::ShadowCast2`] (#296: a stray `saturation=0` left by a
 ///   prior grab can persist ON THE DEVICE across restarts and brick production to
 ///   grayscale — enforcing the certified COLOUR set at every open is how that
-///   self-heals) and, as of 2026-07-13, [`GrabberModel::Elgato4kS`] (a proven,
-///   documented hardware/ISP tint on this specific card model — see
-///   [`elgato_4k_s_corrective_controls`] for the empirical tuning that established
-///   the correction and its real colour-fidelity tradeoff). Every other model —
-///   [`GrabberModel::NzxtSignalHd60`] and [`GrabberModel::Unknown`] — gets NO
-///   controls written at all: plug-and-play, factory defaults, no ceremony.
+///   self-heals). [`GrabberModel::Elgato4kS`] briefly had a SECOND documented-need
+///   V4L2 correction (2026-07-13, [`elgato_4k_s_corrective_controls`]) but #738
+///   (same day) SUPERSEDED it: the correction moved OBS-side (a per-input
+///   `color_filter_v2` grey-world `color_multiply` on the receiving OBS boxes),
+///   which is a genuine per-CHANNEL gain (closer to a true white-balance fix) —
+///   strictly more powerful than this card's saturation/contrast/hue-only V4L2
+///   controls, and live-verified (screenshots + chroma numbers, #738) to cut the
+///   cast further while leaving more real colour intact than the V4L2-only
+///   compromise could. So `Elgato4kS` is zero-touch here too now, same as every
+///   other model without a documented V4L2-specific need —
+///   [`GrabberModel::NzxtSignalHd60`] and [`GrabberModel::Unknown`] — NO controls
+///   written at all: plug-and-play, factory defaults, no ceremony.
+///   [`elgato_4k_s_corrective_controls`] stays fully in code, reachable via an
+///   explicit `CAMERA_BOX_CAPTURE_CONTROLS` override, for a switchable manual
+///   revert if the OBS-side correction is ever removed or found wanting.
 ///
 /// #729 supersedes the PRE-existing "production always gets the colour set" design
 /// (below, kept for history): that design forced the SAME certified colour set onto
@@ -588,16 +605,16 @@ pub fn select_capture_controls(
 }
 
 /// #729 — the model→controls policy table itself. `ShadowCast2` has a documented, proven
-/// need (#296's grab-time grayscale-brick risk); `Elgato4kS` has a SECOND, separately
-/// documented, proven need as of 2026-07-13 (the corrective partial-saturation set —
-/// [`elgato_4k_s_corrective_controls`]); every other model is zero-touch. Kept as its own
-/// function so the policy is a single, obviously-auditable place — adding a NEW
-/// documented-need model later is a one-line change here, not a scattered edit.
+/// need (#296's grab-time grayscale-brick risk); every other model — including `Elgato4kS`
+/// since #738 moved its tint correction OBS-side — is zero-touch. Kept as its own function
+/// so the policy is a single, obviously-auditable place — adding a NEW documented-need model
+/// later is a one-line change here, not a scattered edit.
 fn documented_controls_for_model(model: GrabberModel) -> Vec<CaptureControl> {
     match model {
         GrabberModel::ShadowCast2 => color_production_controls(),
-        GrabberModel::Elgato4kS => elgato_4k_s_corrective_controls(),
-        GrabberModel::NzxtSignalHd60 | GrabberModel::Unknown => Vec::new(),
+        GrabberModel::Elgato4kS | GrabberModel::NzxtSignalHd60 | GrabberModel::Unknown => {
+            Vec::new()
+        }
     }
 }
 
@@ -1704,18 +1721,15 @@ mod tests {
     }
 
     #[test]
-    fn elgato_4k_s_gets_the_corrective_saturation_set_729_followup() {
-        // #729 follow-up (2026-07-13): the Elgato 4K S has a SECOND documented, proven
-        // need — a partial-saturation correction for its own hardware/ISP purple/violet
-        // tint (empirically tuned live on cam1+cam6, both reading u_dev≈8.2-8.3/v_dev≈10.5
-        // at this setting, matching the healthy ≈7/10.7 target). FAILS on the unfixed
-        // code (which still routes Elgato4kS to zero-touch / Vec::new()).
-        let c = select_capture_controls(GrabberModel::Elgato4kS, None, false);
-        assert_eq!(
-            c,
-            elgato_4k_s_corrective_controls(),
-            "Elgato 4K S must apply its documented corrective saturation set — got {c:?}"
-        );
+    fn elgato_4k_s_corrective_controls_stay_a_reachable_switchable_fallback_738() {
+        // #729 follow-up (2026-07-13) established this corrective set (empirically tuned
+        // live on cam1+cam6, both reading u_dev≈8.2-8.3/v_dev≈10.5 at this setting, matching
+        // the healthy ≈7/10.7 target); #738 (same day) superseded it as the DEFAULT (the
+        // correction moved OBS-side, live-verified to beat this V4L2-only compromise -- see
+        // `elgato_4k_s_is_zero_touch_by_default_738`). This function itself must stay fully
+        // intact and reachable via an explicit CAMERA_BOX_CAPTURE_CONTROLS override -- a
+        // switchable manual fallback, never dead code.
+        let c = elgato_4k_s_corrective_controls();
         assert!(
             c.contains(&CaptureControl {
                 id: V4L2_CID_SATURATION,
@@ -1761,14 +1775,14 @@ mod tests {
             certified_cam1_controls(),
             "grab must NOT auto-apply the desaturating sharp set"
         );
-        // #729 follow-up: grab on the Elgato 4K S gets the SAME corrective set as
-        // production (the certified partial-saturation correction), not the sharp set,
-        // and not zero-touch either.
+        // #738: grab on the Elgato 4K S matches production's zero-touch policy (the
+        // correction moved OBS-side) — same as production, not the sharp set either.
         assert_eq!(
             select_capture_controls(GrabberModel::Elgato4kS, None, true),
-            elgato_4k_s_corrective_controls(),
-            "grab on the Elgato 4K S must apply the SAME documented corrective set as production — #729"
+            select_capture_controls(GrabberModel::Elgato4kS, None, false),
+            "grab on the Elgato 4K S must apply the SAME zero-touch policy as production — #738"
         );
+        assert!(select_capture_controls(GrabberModel::Elgato4kS, None, true).is_empty());
         assert_ne!(
             select_capture_controls(GrabberModel::Elgato4kS, None, true),
             certified_cam1_controls(),
