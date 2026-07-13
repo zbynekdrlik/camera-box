@@ -373,6 +373,23 @@ gates `is_zero()` alongside contiguity + `optical_undecodable`.
   is the sharp discriminator (exposure/compression robust). The recorded fixture (with a bad-colour
   variant) is what locks the bar end-to-end on the rig.
 
+**#740 (2026-07-13, open) — the RED and BLUE reference patches fail identically on EVERY node
+(cam1-6, strih, stream) even on genuinely healthy hardware — a chroma-threshold calibration gap,
+not a per-camera defect.** First full-path E2E run after the #737 splitter fix (cam2 rebuilt + all
+6 cameras uniform healthy chroma) still showed `colour_fail=2` on every optical-path node (imag
+alone passes — it samples the scale under different conditions). Both failing patches (red
+`(255,0,0)`, blue `(0,0,255)`) measure the CORRECT hue (≤3° error) but a `chroma` of only 27-30,
+just under `classify_patch`'s chromatic threshold of 40 — misclassified `Grayscale` instead of
+`Pass`. Every OTHER chromatic patch (green/cyan/magenta/yellow — 2-of-3-channel colours) reads
+chroma 74-108, comfortably above 40. Hypothesis: red/blue are the two single-dominant-channel
+patches in the 13-patch scale, so at the rig's already-documented extreme dim capture (this run's
+own white patch read ~30-45% of its expected channel value) their absolute chroma is more likely to
+fall under a fixed threshold than a two-channel colour at the same relative dimness. Not yet
+confirmed whether this dimness is worse-than-typical or the threshold was always this marginal for
+red/blue specifically. **Do not loosen the 40 threshold to force a pass** — see #740 for full
+evidence; this currently gates every full-path E2E run shut regardless of the #729 tint saga
+(closed, unrelated — see the capture skill).
+
 ## Rig TEST / EVENT Mode Switch (#247) — `scripts/rig-mode.sh`
 
 THE deterministic, single-source-of-truth switch between TEST mode (QR/E2E measurement) and EVENT
@@ -1899,6 +1916,13 @@ When `copies`/`gaps` look elevated or growing across a run, don't guess — run 
      that a stale gotcha could make expensive to get wrong.**
 
 ## RESOLVED (#708, 2026-07-12) — strih's OWN `full_chain.loss.strih.real_drops` periodic 4-frame residual was a per-source-counter accounting artifact, NOT loss
+
+**#741 (2026-07-13, open) — a residual 5-real-drop case survived #708's fix on a run that DID
+supply `--switch-schedule`, with the exact `first_id > last_id` non-monotonic tell this section
+describes.** Not yet distinguished from a genuine drop vs. an edge case where one of the two
+adjacent frames couldn't be confidently window-placed (the fix's own documented limitation: "an
+UNKNOWN window on either side never suppresses"). See #741 for the full id/frame_index list before
+re-deriving this from scratch.
 
 `full_chain.loss.strih` (a DIFFERENT metric from `all_cambox_continuity` above — see the "A
 DIFFERENT per-node metric" section elsewhere in this file) periodically flagged exactly 4

@@ -5,6 +5,28 @@ description: V4L2 capture controls (saturation/contrast/hue) — the certified C
 
 # V4L2 capture controls (src/capture.rs)
 
+## #729 FINAL ROOT CAUSE (2026-07-13, closed): the whole "purple tint" saga was a degraded HDMI splitter, NOT V4L2/software
+
+**Read this BEFORE re-chasing a V4L2/OBS colour theory for a "camera(s) showing purple/tinted" report.**
+The #729/#738 saga below (Elgato corrective saturation, then OBS-side grey-world correction, then a
+mid-session "hard pivot" reverting both because a genuine hardware defect can't appear overnight)
+was chasing the wrong layer. The REAL cause, found while rebuilding cam2's failed disk (#737): the
+shared **HDMI splitter** (topology: ONE camera films cam2's monitor → splitter → all 6 cam boxes,
+see the e2e skill's TOPOLOGY FACT) had **4 of 6 output ports delivering no signal**. Each grabber
+card renders "no signal" differently — **Elgato → purple/violet noise** (exactly this saga's
+symptom), **ShadowCast → flat grey**. Re-cabling/power-cycling the splitter fixed it instantly;
+live-verified same-day with V4L2 at factory default (zero-touch) and the OBS colour filters
+DISABLED — i.e. neither software "fix" was the actual cure. This also explains why cam6 genuinely
+"ran weeks with perfect colours until Sunday" (the user's own correct instinct that triggered the
+pivot): nothing in the camera changed, the SPLITTER degraded over that period.
+
+**Next time:** if 1+ cameras suddenly show a colour cast (especially purple on an Elgato, grey-flat
+on a ShadowCast), check the HDMI splitter's physical cabling/power FIRST — before touching V4L2
+controls or building an OBS-side correction filter. The Elgato corrective-saturation code
+(`elgato_4k_s_corrective_controls()`) and the OBS grey-world calibration tool
+(`scripts/obs_colour_correction_calibrate.py`, #738) both stay in the codebase as switchable manual
+fallbacks (never dead code) but are NOT the fix for this failure mode.
+
 ## #738 (2026-07-13, supersedes #729's Elgato-corrective-by-default) — the tint correction moved OBS-side
 
 **`GrabberModel::Elgato4kS` is ZERO-TOUCH by default again** — the V4L2 saturation-only corrective

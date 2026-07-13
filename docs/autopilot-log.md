@@ -4841,3 +4841,62 @@ approaching.
 Main CI (run `29242685856`, commit `822ea3249`) fully green — all 9 non-skipped jobs passed. The
 required E2E gate (run `29242688189`) failed on the pre-existing, unrelated cam2-unreachable
 precondition (#737), not a regression from this session's diff.
+
+## 2026-07-13 (autopilot-worker mission) — PR #704 gate re-run: still RED, 3 new findings filed, #729 closed with root cause
+
+Dispatched to run the full fused E2E gate on the "now fully healthy" rig and merge PR #704 if
+green. Validated the dispatch's premise live (never trusted the stale mission text alone, per
+`verify-issue-still-valid.md`): SSH-confirmed cam1/cam6 capture chroma healthy (u_dev 7-8/v_dev
+14-17) matching cam2/cam3/cam5/cam6, cam2 painter+marker running, rig idle — all consistent with
+the claimed "rig healthy" state, even though the most recent git commit on `dev` (the "urgent
+pivot", `b706fc45a`) predated the ACTUAL fix (the #737 HDMI-splitter re-cable, landed via a GitHub
+comment only 2 minutes before this session started, not yet reflected in any commit).
+
+**Triggered `gh run rerun` on the existing `pull_request` Full-path E2E run for current dev HEAD**
+(run `29243655947`, never `gh workflow run` — the documented plan-only trap). Waited FOREGROUND
+via a bounded polling loop (10-min Bash cap, no leading `sleep`). Run completed `failure` after
+~19 min (RUN_ID `1846362504`).
+
+**Verdict: `overall_pass=false`, for 3 independent reasons, NONE of them the #729/#737 tint saga**
+(which IS now resolved — closed #729 with fresh live evidence, see below):
+
+1. **`all_cambox_continuity` residual: 19 copies + 15 gaps / 8529 frames** — roughly 2 orders of
+   magnitude smaller than the historical worst (1863/1862 in a single window) this ticket (#707)
+   documented, strongly supporting the "degrading splitter/monitor caused most of the historical
+   residual" hypothesis. NOT zero though, so per the user's standing NO-TOLERANCE decision #707
+   stays open (posted the full numbers + per-window breakdown as a comment, recommending a second
+   confirming run before considering closure, per this ticket's own two-independent-runs
+   precedent).
+2. **Filed #740** — every optical-path node (cam1-6, strih, stream) fails the #364 colour gate
+   identically on the SAME 2 reference patches (red + blue): correct hue, but chroma (27-30) just
+   under the chromatic-classification threshold (40) — likely a calibration gap tied to the rig's
+   already-documented extreme-dim capture affecting single-channel colours more than two-channel
+   ones. NOT loosening the threshold to force a pass (strict-test mandate) — filed with full
+   per-patch evidence for investigation.
+3. **Filed #741** — `full_chain.loss.strih` shows 5 `real_drop` ids with `first_id > last_id`
+   (1658070 > 306444), the exact non-monotonic tell #708 (closed) already diagnosed as strih's
+   6-independent-free-running-burn-counter accounting quirk — but this run DID supply
+   `--switch-schedule` (so #708's window-aware fix WAS active) and 5 ids still slipped through.
+   Not yet distinguished from a genuine drop vs. a residual edge case of the fix's own documented
+   "unknown window never suppresses" limitation.
+
+**Closed #729** (cam1+cam3+cam6 purple tint saga) with fresh, independent live evidence: the
+splitter fix (#737's own resolution, landed literally minutes before this dispatch, hence not yet
+reflected on `dev`) is confirmed as the real root cause — cam1/cam6 read healthy chroma RIGHT NOW
+while running with V4L2 at factory defaults and the OBS colour-correction filters disabled (i.e.
+neither software "fix" this saga built was the actual cure).
+
+**imag's #467/#583 per-segment stuck-density failures across all 10 windows** are consistent with
+the already-tracked chronic cam1-ShadowCast-rate-mismatch judder (#674/#685/#663) — noted, no new
+issue.
+
+**PR #704 NOT merged** — gate is genuinely red on the 3 items above. Playbook updated:
+`.claude/skills/capture/SKILL.md` gained a new top "#729 FINAL ROOT CAUSE" section (splitter, not
+V4L2/software — check this FIRST next time a camera shows a colour cast); `.claude/skills/e2e`
+gained the #740 chroma-threshold finding (after the #364 section) and a #741 pointer (in the #708
+section).
+
+📔 Playbook: `.claude/skills/capture/SKILL.md` — new top section documenting the #729 saga's real
+root cause (degraded HDMI splitter, not V4L2/OBS software) so the next colour-cast report checks
+the splitter first. `.claude/skills/e2e/SKILL.md` — #740 (uniform red/blue colour-gate chroma
+threshold finding) added after the #364 section; a #741 pointer added to the #708 section.
