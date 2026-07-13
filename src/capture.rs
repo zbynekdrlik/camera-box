@@ -1664,6 +1664,34 @@ mod tests {
     }
 
     #[test]
+    fn elgato_4k_s_is_zero_touch_by_default_738() {
+        // #738 (2026-07-13): the Elgato 4K S tint correction moved OBS-side (a per-input
+        // color_filter_v2 grey-world color_multiply on strih's 'NDI cam5'(physical CAM1) /
+        // 'NDI cam6'(physical CAM6) inputs + imag-nb's 'NDI CAM1' — live-verified,
+        // screenshots + chroma numbers: cast magnitude reduced from ~12.6-12.9 to ~1.6-1.7,
+        // matching cam5's own near-neutral reference cast — demonstrably better than this
+        // V4L2 saturation-only compromise, which could only ever cut the SAME saturation
+        // gain from both the tint and real colour together). #729's corrective V4L2 set is
+        // superseded as the DEFAULT: the card now gets NO V4L2 colour control at all
+        // (matching NzxtSignalHd60/Unknown) — plug-and-play, correction lives downstream
+        // where the tools are adequate (a genuine per-channel gain, not just a saturation
+        // scale). `elgato_4k_s_corrective_controls()` itself is UNCHANGED and still fully
+        // reachable via `CAMERA_BOX_CAPTURE_CONTROLS` for a manual/switchable revert — see
+        // its own doc comment.
+        assert!(
+            select_capture_controls(GrabberModel::Elgato4kS, None, false).is_empty(),
+            "#738: Elgato 4K S must be zero-touch by default now that the correction moved \
+             OBS-side — got {:?}",
+            select_capture_controls(GrabberModel::Elgato4kS, None, false)
+        );
+        // Grab mode must match production — same zero-touch policy, no special-casing.
+        assert!(
+            select_capture_controls(GrabberModel::Elgato4kS, None, true).is_empty(),
+            "#738: grab on the Elgato 4K S must also be zero-touch by default"
+        );
+    }
+
+    #[test]
     fn nzxt_and_unknown_are_zero_touch_by_default_729() {
         // #729: no documented need for the certified colour set on these models.
         // Plug-and-play means camera-box writes NOTHING here.
