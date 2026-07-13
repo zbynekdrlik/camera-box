@@ -435,6 +435,23 @@ pub fn av_offset_candidates(
     audio: &[(f64, u8)],
     ticks: &[(u32, f64)],
 ) -> Vec<f64> {
+    av_offset_candidates_with_fid(emit_log, audio, ticks)
+        .into_iter()
+        .map(|(off, _fid, _ts)| off)
+        .collect()
+}
+
+/// #733 — [`av_offset_candidates`], but each candidate also carries the emit-log `frame_id` and
+/// audio decode timestamp that produced it, so a caller can detect and collapse near-simultaneous
+/// duplicate detections of the SAME marker before clustering (see
+/// [`dedupe_same_fid_candidates`]). `av_offset_candidates` above is re-expressed in terms of this
+/// function — identical matching, identical order, identical values; zero behavior change to its
+/// existing callers/tests.
+pub fn av_offset_candidates_with_fid(
+    emit_log: &[(u8, u32, i64)],
+    audio: &[(f64, u8)],
+    ticks: &[(u32, f64)],
+) -> Vec<(f64, u32, f64)> {
     let mut by_idx: HashMap<u8, Vec<u32>> = HashMap::new();
     for &(idx, fid, _) in emit_log {
         by_idx.entry(idx).or_default().push(fid);
@@ -444,12 +461,85 @@ pub fn av_offset_candidates(
         if let Some(fids) = by_idx.get(&idx) {
             for &fid in fids {
                 if let Some(vts) = interp_video_ts(ticks, fid) {
-                    cand.push((vts - ts) * 1000.0);
+                    cand.push(((vts - ts) * 1000.0, fid, ts));
                 }
             }
         }
     }
     cand
+}
+
+/// #733 — evidence-based default window (seconds) for [`dedupe_same_fid_candidates`] /
+/// [`av_offset_candidates_deduped`]. The real-data audit (2026-07-13, 3 full-path-e2e gate runs)
+/// found duplicate same-fid detection gaps of 37-84ms; 0.2s gives comfortable margin on both
+/// sides while staying well under the ~3s marker cadence (`AUDIO_MARKER_CADENCE_TICKS`), so a
+/// genuinely separate re-emission that happens to share a wrapped index (only possible on a
+/// recording long enough to wrap past 256 markers) is never mistakenly merged.
+pub const DEDUPE_SAME_FID_WINDOW_S: f64 = 0.2;
+
+/// #733 — collapse near-simultaneous duplicate decodes of the SAME emitted marker (identical
+/// `frame_id`) into ONE candidate, keeping only the EARLIEST audio timestamp.
+///
+/// Real-data audit (2026-07-13): the winning cluster of a whole-recording cam2 A/V-sync
+/// measurement sometimes contains TWO candidates sharing the identical `frame_id`, decoded 37-84ms
+/// apart — algebraically, since `offset = (video_ts - audio_ts) * 1000` and `video_ts` is FIXED
+/// for a given `frame_id`, the two candidates differ by EXACTLY the audio-ts gap. These are not two
+/// independent measurements of the true offset: they are the SAME physical marker occurrence
+/// detected twice (plausibly an acoustic echo/reverb tail off the mbc mastering chain the marker's
+/// audio physically rides, or `decode_markers`'s own onset search re-triggering on a nearby but
+/// distinct sample position). Treating both as independent, equally-weighted samples inflates the
+/// apparent matched count and — because the later duplicate is by construction MORE NEGATIVE
+/// (audio arriving later) — systematically pulls the cluster toward a more-negative median/wider
+/// MAD whenever a duplicate happens to fall inside the winning window.
+///
+/// `window_s` bounds how close two same-fid detections' audio timestamps must be to be treated as
+/// one event (see [`DEDUPE_SAME_FID_WINDOW_S`] for the calibrated default). Detections are merged
+/// TRANSITIVELY along a chain (each within `window_s` of its immediate predecessor, not
+/// necessarily of the very first) — a burst of 3+ re-triggers on one marker still collapses to a
+/// single kept sample. Output order is NOT the input order (grouping is unordered internally);
+/// sort the result if a deterministic ordering is needed.
+pub fn dedupe_same_fid_candidates(
+    candidates_with_fid: &[(f64, u32, f64)],
+    window_s: f64,
+) -> Vec<f64> {
+    let mut by_fid: HashMap<u32, Vec<(f64, f64)>> = HashMap::new(); // fid -> [(ts, offset_ms)]
+    for &(off, fid, ts) in candidates_with_fid {
+        by_fid.entry(fid).or_default().push((ts, off));
+    }
+    let mut kept = Vec::new();
+    for (_fid, mut items) in by_fid {
+        items.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut chain_ts: Option<f64> = None;
+        for (ts, off) in items {
+            match chain_ts {
+                Some(prev_ts) if ts - prev_ts <= window_s => {
+                    // Within window_s of the PREVIOUS detection in this fid's chain — same event,
+                    // already kept the earliest; advance the chain anchor so a 3rd+ detection
+                    // chains transitively off its immediate predecessor.
+                    chain_ts = Some(ts);
+                }
+                _ => {
+                    kept.push(off);
+                    chain_ts = Some(ts);
+                }
+            }
+        }
+    }
+    kept
+}
+
+/// #733 — [`av_offset_candidates_with_fid`] + [`dedupe_same_fid_candidates`] in one call: the SAME
+/// `av_offset_candidates`-shaped `Vec<f64>` output, now robust to same-fid duplicate detections.
+pub fn av_offset_candidates_deduped(
+    emit_log: &[(u8, u32, i64)],
+    audio: &[(f64, u8)],
+    ticks: &[(u32, f64)],
+    window_s: f64,
+) -> Vec<f64> {
+    dedupe_same_fid_candidates(
+        &av_offset_candidates_with_fid(emit_log, audio, ticks),
+        window_s,
+    )
 }
 
 /// The robust A/V offset: the median of the DENSEST cluster of candidate offsets (window width
@@ -831,7 +921,11 @@ mod tests {
         // bound (well under the ~3s marker cadence) protects this.
         let cand = vec![(300.0, 42u32, 5.0), (-150.0, 42u32, 800.0)]; // ~795s apart
         let deduped = dedupe_same_fid_candidates(&cand, 0.2);
-        assert_eq!(deduped.len(), 2, "far-apart same-fid entries are NOT merged");
+        assert_eq!(
+            deduped.len(),
+            2,
+            "far-apart same-fid entries are NOT merged"
+        );
     }
 
     #[test]
@@ -845,7 +939,11 @@ mod tests {
             (-20.0, 1u32, 10.30),
         ];
         let deduped = dedupe_same_fid_candidates(&cand, 0.2);
-        assert_eq!(deduped, vec![0.0], "chained duplicates collapse to the earliest");
+        assert_eq!(
+            deduped,
+            vec![0.0],
+            "chained duplicates collapse to the earliest"
+        );
     }
 
     #[test]
@@ -864,15 +962,20 @@ mod tests {
         }
         let mut audio: Vec<(f64, u8)> = Vec::new();
         for i in 0..20u32 {
-            audio.push((10.0 * i as f64 - 0.020, i as u8)); // real: video leads audio by 20ms
+            // video_ts − audio_ts = −20ms ⇒ video LEADS audio by 20ms (this project's own sign
+            // convention: "> 0 = video LAGS audio").
+            audio.push((10.0 * i as f64 + 0.020, i as u8));
         }
         // Duplicate the marker at index 8 (mirrors the live fid=8667 pattern): a second decode of
-        // the SAME index 66ms after the first, landing further from the true cluster.
-        audio.push((10.0 * 8.0 - 0.020 + 0.066, 8u8));
-        // A handful of false decodes scattered far from the real cluster (unrelated in-range idx).
+        // the SAME index 15ms after the first — close enough to still land inside a ±25ms cluster
+        // window (matching the live 37-84ms gaps at this project's OLD ±60ms/120ms-wide default),
+        // but well within the DEDUPE_SAME_FID_WINDOW_S(0.2s) merge window.
+        audio.push((10.0 * 8.0 + 0.020 + 0.015, 8u8));
+        // False decodes parked far outside the real cluster's time range so they can never
+        // accidentally land near the real -20ms cluster (deterministic, no flakiness).
         for k in 0..50u32 {
             let idx = (k % 20) as u8;
-            audio.push((k as f64 * 3.7, idx));
+            audio.push((100_000.0 + k as f64 * 3.7, idx));
         }
         let raw = av_offset_candidates(&emit, &audio, &ticks);
         let deduped = av_offset_candidates_deduped(&emit, &audio, &ticks, DEDUPE_SAME_FID_WINDOW_S);
@@ -886,7 +989,7 @@ mod tests {
         let deduped_cluster = cluster_offset_ms(&deduped, 8, 25.0).expect("deduped clusters");
         assert!(
             (raw_cluster.offset_ms - (-20.0)).abs() < 1.0,
-            "raw still recovers ~-20ms: {}",
+            "raw still recovers ~-20ms (median is robust to one outlier): {}",
             raw_cluster.offset_ms
         );
         assert!(
