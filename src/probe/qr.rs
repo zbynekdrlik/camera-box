@@ -882,12 +882,17 @@ fn fast_path_gate_satisfied(
         || any_of_burn_run_ids
             .iter()
             .any(|id| payloads.iter().any(|p| p.run_id == *id));
-    // #707 RED STUB (temporary, this commit only — see the paired GREEN commit that follows):
-    // the optical-completeness dimension is not implemented yet, so this still reproduces the
-    // exact pre-#707 gate (burns only) regardless of `min_distinct_optical` — proving the new
-    // tests above genuinely fail against today's behavior before the real check is wired in.
-    let _ = min_distinct_optical;
-    let optical_complete = true;
+    let optical_complete = match min_distinct_optical {
+        None => true,
+        Some((run_id, min_distinct_ids)) => {
+            let distinct: std::collections::HashSet<u32> = payloads
+                .iter()
+                .filter(|p| p.run_id == run_id)
+                .map(|p| p.frame_id)
+                .collect();
+            distinct.len() >= min_distinct_ids
+        }
+    };
     mandatory_present && any_of_present && optical_complete
 }
 
