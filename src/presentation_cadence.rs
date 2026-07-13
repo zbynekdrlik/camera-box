@@ -133,6 +133,93 @@ pub fn measure_cadence_evenness(ticks: &[u32], expected_step: i64) -> Option<Cad
 mod tests {
     use super::*;
 
+    // ---- #726 MISCALIBRATION FIX: histogram + data-derived expected_step ----------------
+    //
+    // Live verdict data (2026-07-13, window8): 845/845 deltas classified `other` at the
+    // CALLER-SUPPLIED expected_step=2, even though the SAME window simultaneously reports
+    // copies=0/gaps=0/undecodable=0 (a PERFECTLY clean window under the net-loss accounting)
+    // -- internally inconsistent. Root cause: the real per-frame delta pattern on this
+    // multi-hop chain (camera->NDI->genlock->canvas) is NOT a clean uniform +2 -- it is
+    // mostly SMALL steps (+1) with periodic CATCH-UP jumps (+7 in the live data, ratio
+    // ~5.3:1), netting to the correct average (~2.0) without any individual delta ever
+    // landing on 2. These tests reproduce that shape (five +1 deltas then one +7, repeated
+    // -- net average is exactly 2/step: 5*1+7=12 over 6 steps=2.0) and lock the fix: (a) a
+    // raw delta histogram, (b) `expected_step` derived from the data (mode of positive
+    // deltas), (c) a self-consistency reading (a zero-net-loss window classifies mostly
+    // on-cadence under the DERIVED step, unlike the old exact-match reading).
+
+    fn real_rig_jitter_pattern(reps: u32) -> Vec<u32> {
+        let mut ticks: Vec<u32> = vec![0];
+        for _ in 0..reps {
+            let base = *ticks.last().unwrap();
+            for k in 1..=5u32 {
+                ticks.push(base + k);
+            }
+            ticks.push(base + 5 + 7);
+        }
+        ticks
+    }
+
+    #[test]
+    fn histogram_and_derived_step_reflect_the_real_data_not_the_callers_guess() {
+        let ticks = real_rig_jitter_pattern(20); // 120 deltas: 100 x +1, 20 x +7
+        let v = measure_cadence_evenness(&ticks, 2).expect("plenty of samples");
+
+        assert_eq!(
+            v.delta_histogram.get(&1).copied().unwrap_or(0),
+            100,
+            "100 deltas of +1 (20 reps * 5 each): {v:?}"
+        );
+        assert_eq!(
+            v.delta_histogram.get(&7).copied().unwrap_or(0),
+            20,
+            "20 deltas of +7 (20 reps * 1 each): {v:?}"
+        );
+        assert_eq!(
+            v.derived_expected_step, 1,
+            "the mode of the POSITIVE deltas is +1 (100 occurrences beats +7's 20), not the \
+             caller's guess of 2: {v:?}"
+        );
+    }
+
+    #[test]
+    fn zero_net_loss_window_with_wrong_callers_guess_still_classifies_mostly_uniform_via_derived_step(
+    ) {
+        let ticks = real_rig_jitter_pattern(20);
+        let v = measure_cadence_evenness(&ticks, 2).expect("plenty of samples");
+
+        // Reproduces the live bug: the OLD exact-match reading at the caller's expected_step=2
+        // buckets EVERY delta as `other` -- no delta is ever exactly 2 or 4 in this pattern.
+        assert_eq!(
+            v.uniform_steps, 0,
+            "the OLD expected_step=2 exact-match bucket must reproduce the live miscalibration: \
+             {v:?}"
+        );
+
+        // The fix: this window has NO net loss (the pattern nets to exactly `expected_step`=2
+        // per step by construction), so the auto-calibrated (derived-step) reading must
+        // classify the overwhelming majority of frames as on-cadence -- not near-zero like the
+        // old exact-match reading (#726 self-consistency (c)).
+        assert!(
+            v.derived_uniform_fraction > 0.8,
+            "a zero-net-loss window must self-consistently classify as mostly on-cadence under \
+             the derived step, got {v:?}"
+        );
+    }
+
+    #[test]
+    fn derived_expected_step_falls_back_to_callers_value_when_no_positive_delta_exists() {
+        // Degenerate: every delta is 0 (frozen) -- there is no positive delta to derive a mode
+        // from. Must fall back to the caller's `expected_step`, never panic or a sentinel.
+        let ticks: Vec<u32> = vec![5, 5, 5, 5];
+        let v = measure_cadence_evenness(&ticks, 2).unwrap();
+        assert_eq!(
+            v.derived_expected_step, 2,
+            "falls back to the caller's expected_step when no positive delta exists: {v:?}"
+        );
+        assert_eq!(v.derived_uniform_steps, 0);
+    }
+
     // ---- degenerate inputs -------------------------------------------------------------
 
     #[test]
