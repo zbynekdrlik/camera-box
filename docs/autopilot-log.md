@@ -4728,3 +4728,74 @@ row (was "Two"), a new "Elgato 4K S corrective-saturation tuning method" section
 live sweep procedure + measured data + honest limitation, and the earlier "no code change can fix
 it" paragraph corrected with a #729-follow-up pointer (the magnitude WAS reducible; only a
 lossless fix wasn't possible).
+
+## 2026-07-13 — #707 EVENT-FORENSICS tooling (built + fixture-tested, NOT closed) / #738 (fixed+closed) — bundled, PR #704 still held
+
+**#707 (tooling only, per dispatch — ticket stays OPEN):** per the ticket's binding 2026-07-13
+decision ("every residual deviation must have its own documented reason"), built the per-event
+forensics mode end-to-end at the code level, fixture-tested against the ticket's own real
+event-anatomy data (no new rig time — cam2's disk is still down, #737):
+
+- `src/residual_events.rs` (new Tier-0 pure module) — `residual_events()` locates a `Copy` event
+  on every recorded-order adjacent tick repeat and a `Gap` event on a backward jump or a forward
+  jump beyond `|Δ|>10` (the exact outlier threshold the ticket's own anatomy table already used).
+  12 unit tests built directly from the ticket's posted delta histograms + the verbatim
+  `frame_idx=5926` duplicate context.
+- `CamboxSegment`/`SegmentedContinuity` (`src/probe/recording_segments.rs`) gain a
+  `residual_events` field — per-window and flattened whole-run — serialized automatically into
+  `all_cambox_continuity` in the verdict JSON. 3 new tests.
+- `extract_partial_flagged_frames` (`src/bin/recording-verdict.rs`) now flags each residual
+  event's ±2-frame neighbourhood for #186 pixel proof, when the stream box's extract is given the
+  same `--switch-schedule` the merge already consumes; `recording-e2e.sh` now pushes the schedule
+  to the stream box (mirrors the existing `--av-marker-log` push) so this fires on the next real
+  ALL_CAMBOX run.
+- `scripts/event-forensics-dossier.py` — offline collector: given the verdict JSON + already-pulled
+  strih genlock-FIFO-audit lines + per-camera journal lines, groups matching log lines under each
+  event by wall-clock second. 18 unit tests, no SSH/MCP.
+- `scripts/e2e_discord_report.py` — new "Odchýlky s dôvodmi: N s dôkazmi / M otvorených" line. 4
+  new tests.
+
+Commits: `04db41418` (version bump) → `11d5d5361` (residual_events kernel) → `9bc5936ab` (wiring
+into recording_segments.rs) → `51c47677f` (pixel-proof extension) → `da239f3ed` (harness script
+wiring) → `ebab184ed` (dossier collector) → `7d3341cf1` (Discord report line). Comment posted on
+#707 with the full evidence; ticket left OPEN per the dispatch's explicit instruction (tooling
+only — live harvesting resumes once cam2's disk is fixed).
+
+**#738 (fixed+closed):** OBS-side per-input colour correction beats the #729 V4L2 saturation-only
+compromise. Live-verified on strih (cam1 via `'NDI cam5'` input, cam6 via `'NDI cam6'` — strih's
+label inversion bit again: `'NDI cam1'` is actually physical CAM3, not a tinted camera) and
+imag-nb (`'NDI CAM1'`, clean 1:1 mapping there): a grey-world per-channel `color_multiply` gain on
+a new `color_filter_v2` filter collapsed the chroma-cast magnitude from ~12.6-12.9 to ~1.6-1.7
+(matching cam5's own near-neutral reference, a ~87% reduction) — screenshots show cam6's obvious
+purple cast fully neutralized. Two real gotchas found only by live testing (documented in
+`scripts/obs_colour_correction_calibrate.py`'s own module doc + the capture skill): OBS's
+`color_multiply` is sRGB-gamma-decoded before use as a linear multiplier (a single grey-world pass
+under-corrects; fixed with an iterative compose-don't-replace convergence loop), and its byte range
+can only represent a gain ≤1.0 (can dim, never boost — `grey_world_gains` anchors on the darkest
+channel, not the mean, or a "boost" channel silently no-ops). V4L2 reverted to zero-touch for
+`GrabberModel::Elgato4kS` (RED `65f9e7a86` → GREEN `77a6cc612`, 63 `capture::` tests green
+locally) — `elgato_4k_s_corrective_controls()` itself stays fully in code, reachable via
+`CAMERA_BOX_CAPTURE_CONTROLS`, a switchable manual fallback. A drift-guard facet
+(`classify_persisted_correction`/`check_correction_persisted`, `--check` CLI mode) confirms the
+correction persisted (`status: applied` on all 3 sources, confirmed live post-session).
+
+**Honest caveat (stated in the closing comment):** validation was against dim/dark real content
+(cam2's test-pattern painter unreachable, #737) — the same limitation the original #729 V4L2
+tuning session had. Closed per the dispatch's evidence bar with the caveat stated plainly; the
+user's own eyeball under real lighting is the final word, reopen if it looks wrong in practice.
+
+Commits: `65f9e7a86` (RED) → `77a6cc612` (GREEN) → `9617c4004` (calibration tool) →
+`7e4ea92f4` (drift-guard facet) → `634faa2cb` (capture skill docs).
+
+Neither ticket merged yet — PR #704 remains blocked on the unrelated #737 cam2 E2E-gate
+precondition; this dispatch's commits ride on `dev` behind it, same as every #737-blocked session
+this week.
+
+📔 Playbook: `.claude/skills/e2e/SKILL.md` gained a new bullet in the existing "Diagnosing
+all_cambox_continuity copies/gaps growth" triage section pointing at the #707 EVENT-FORENSICS
+tooling (`residual_events[]` in the verdict JSON, the pixel-proof extension, the dossier
+collector) — the next session investigating a residual should run the dossier collector, not
+hand-grep logs. `.claude/skills/capture/SKILL.md` gained a new "#738" top section + a full
+dedicated "OBS-side grey-world colour correction" section (calibration method, the two gotchas,
+the NDI-input-label re-discovery, the drift-guard facet, the acceptance-note caveat) — read before
+touching V4L2 colour policy OR the strih/imag colour-correction filters again.

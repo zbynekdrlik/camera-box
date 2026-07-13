@@ -1869,6 +1869,21 @@ When `copies`/`gaps` look elevated or growing across a run, don't guess — run 
      not literally zero (`all_cambox_continuity.overall_pass` stays `false` on the strict
      `copies==0 && gaps==0` bar) — whether to accept a small calibrated tolerance for this residual
      is a product decision raised to the user on #707's own thread, not decided here.
+   - **USER DECISION (2026-07-13): NO tolerance — every residual deviation gets its own documented
+     reason instead. #707 EVENT-FORENSICS tooling built + fixture-tested the same day** (live
+     harvesting resumes once cam2's disk is fixed, #737): `src/residual_events.rs` (Tier-0 pure
+     module) locates a `Copy` event on every recorded-order adjacent tick repeat and a `Gap` event
+     on a backward jump or a forward jump beyond `|Δ|>10` (this section's own outlier threshold,
+     reused as the discriminator) — reported as `residual_events[]` on `CamboxSegment` /
+     `SegmentedContinuity` in the verdict JSON, each with frame index, tick values, wall-clock
+     epoch second, and switch-schedule offset. The stream box's `--extract-partial`, when given the
+     same `--switch-schedule` the merge already consumes, now flags each event's ±2-frame
+     neighbourhood for #186 pixel proof (`recording-e2e.sh` pushes the schedule to the stream box
+     for this). `scripts/event-forensics-dossier.py` (offline, given the verdict JSON + already-
+     pulled strih genlock-FIFO-audit lines + per-camera journal lines) groups matching log lines
+     under each event by wall-clock second, ready for whoever picks up the next real residual —
+     don't hand-grep, run this first. The Discord report (#711) now prints "Odchýlky s dôvodmi: N
+     s dôkazmi / M otvorených" every run.
    - **Hit the `gh workflow run` (`workflow_dispatch`) plan-only trap myself despite it already
      being fully documented** (see "`gh workflow run`... is the LEGACY plan-only soak" section
      below, and `CLAUDE.md`'s own GOTCHA at "a live-triggered E2E gate run can race ahead of a
