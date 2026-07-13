@@ -982,8 +982,26 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
 else
   _cam2_prep="systemctl stop cam2-painter 2>/dev/null || true; systemctl stop camera-box; pkill -x camera-box 2>/dev/null; rm -f /tmp/painter.csv;"
 fi
+# #734: unconditionally kill any PRE-EXISTING frame-probe on cam2 and VERIFY it is actually dead
+# (not merely "started a kill") BEFORE waiting for /dev/fb0 / launching this run's own painter. A
+# manual `rig-mode.sh test` invocation (or any stale leftover) left running holds BOTH /dev/fb0 AND
+# the audio-marker's ALSA device (hw:CARD=...,DEV=N) EXCLUSIVELY. Without this, the fb0-fuser wait
+# below merely times out after 15s (busy or not) and launches a SECOND frame-probe anyway — the
+# #420 RUNNING check is DEVICE-scoped (reads /proc/asound/.../status, which reports RUNNING from
+# the OLD still-alive process regardless of whether the NEW one ever opened the device) while the
+# #431 emission-growth check is scoped to THIS run's own --marker-log file, which the new process
+# never gets to write if its own --audio-marker open failed on the busy device — exactly the
+# PASS-#420/FAIL-#431 split from the live incident (#734, 2026-07-13, reproduced 2/2). NEVER reuse
+# a foreign painter process instead of killing it: it paints a DIFFERENT --run-id than $RUN_ID, and
+# this run's recording-verdict decode only trusts markers/QR burns carrying ITS OWN $RUN_ID —
+# reusing a stale process's output would silently record the WRONG run's content. `pkill -x`
+# matches by process COMM name only, so it can never self-match this remote ssh session's own
+# cmdline (the established convention throughout this codebase — never `pkill -f`).
+_cam2_kill_existing="pkill -x frame-probe 2>/dev/null || true; \
+   ki=0; while pgrep -x frame-probe >/dev/null 2>&1 && [ \$ki -lt 20 ]; do sleep 0.5; ki=\$((ki+1)); done;"
 sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$PAINTER_IP" \
   "$_cam2_prep \
+   $_cam2_kill_existing \
    i=0; while fuser -s /dev/fb0 2>/dev/null && [ \$i -lt 30 ]; do sleep 0.5; i=\$((i+1)); done; \
    (nohup /tmp/frame-probe --paint-only --dual-qr --wall-clock --paint-log /tmp/painter.csv \
       --paint-fps $PAINT_FPS --qr-size $QR_SIZE --run-id $RUN_ID --duration-secs $((DURATION+60)) \
