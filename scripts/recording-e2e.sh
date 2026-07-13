@@ -2115,6 +2115,24 @@ if [ "$VERDICT_ON_STREAM" = "1" ]; then
     _av_marker_args="--av-marker-log $AV_MARKER_WIN"
   fi
 
+  # #707 EVENT-FORENSICS: push the SAME switch-schedule JSON the dev1 merge already consumes to
+  # the stream box too, so its own --extract-partial can ALSO locate residual copy/gap events
+  # (via segment_continuity, same as the merge) and flag their ±2-frame neighbourhoods for #186
+  # pixel proof WHILE the recording is still local to this box (the merge, on dev1, never has the
+  # recording — see the #208 module doc). Mirrors the --av-marker-log push immediately above.
+  SWITCH_SCHEDULE_WIN="${SWITCH_SCHEDULE_WIN:-$OUT_DIR_WIN\\switch-schedule-${RUN_ID}.json}"
+  _switch_schedule_args=""
+  if [ "${ALL_CAMBOX:-0}" = "1" ] && [ -f "$SWITCH_SCHEDULE_JSON" ]; then
+    echo "    --- [8/8b-pre] PUSH the #312 switch schedule to the stream box (#707 event-forensics) ---"
+    if [ "$E2E_EXECUTE_VERDICT" = "1" ]; then
+      echo "      win_ssh_upload $SWITCH_SCHEDULE_JSON -> stream:$SWITCH_SCHEDULE_WIN"
+      win_ssh_upload "$STREAM_USER" "$STREAM_PW" "$STREAM" "$SWITCH_SCHEDULE_JSON" "$SWITCH_SCHEDULE_WIN"
+    else
+      echo "      win-stream-snv FileUpload $SWITCH_SCHEDULE_JSON -> $SWITCH_SCHEDULE_WIN"
+    fi
+    _switch_schedule_args="--switch-schedule $SWITCH_SCHEDULE_WIN"
+  fi
+
   echo "    --- [8/8b] extract the STREAM partial ON the stream box (win-stream-snv), in place ---"
   # The stream recording carries all three burns; --extract-partial stream decodes it IN PLACE on
   # the stream box. It is passed ONLY its own --stream recording — NEVER the strih recording (the
@@ -2131,6 +2149,7 @@ if [ "$VERDICT_ON_STREAM" = "1" ]; then
          --burn-cam1-run-id "$BURN_CAM1_RUN_ID" --burn-strih-run-id "$BURN_STRIH_RUN_ID" \
          --burn-stream-run-id "$BURN_STREAM_RUN_ID" \
          $_av_marker_args \
+         $_switch_schedule_args \
          $CG --out "$STREAM_PARTIAL_WIN"
   }
   STREAM_EXTRACT_PID=""
