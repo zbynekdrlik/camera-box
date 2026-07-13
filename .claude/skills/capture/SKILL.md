@@ -5,15 +5,29 @@ description: V4L2 capture controls (saturation/contrast/hue) — the certified C
 
 # V4L2 capture controls (src/capture.rs)
 
-## #729 (2026-07-12, supersedes the section below) — zero-touch by default, model-gated
+## #738 (2026-07-13, supersedes #729's Elgato-corrective-by-default) — the tint correction moved OBS-side
+
+**`GrabberModel::Elgato4kS` is ZERO-TOUCH by default again** — the V4L2 saturation-only corrective
+set (#729 follow-up) is superseded as the DEFAULT the SAME day it shipped: the tint correction now
+lives on the RECEIVING OBS boxes (strih's 'NDI cam5'(physical CAM1)/'NDI cam6'(physical CAM6)
+inputs + imag-nb's 'NDI CAM1') as a genuine per-CHANNEL `color_filter_v2` `color_multiply` gain —
+strictly more powerful than the V4L2 card's saturation/contrast/hue-only controls (no
+per-channel gain exists there at all). Live-verified, screenshots + chroma numbers: cast magnitude
+collapsed from ~12.6-12.9 to ~1.6-1.7 (matching cam5's own near-neutral reference) — a
+demonstrably better result than the V4L2-only compromise, which could only ever cut the SAME
+saturation gain from the tint and real colour together. See the dedicated OBS-side section near
+the end of this file for the calibration method, the two real gotchas it took to get there, and
+the drift-guard facet. `elgato_4k_s_corrective_controls()` stays FULLY in code — reachable via an
+explicit `CAMERA_BOX_CAPTURE_CONTROLS` override — as a switchable manual fallback, never dead code.
+
+## #729 (2026-07-12) — zero-touch by default, model-gated
 
 **camera-box does NOT write any V4L2 colour control unless the RUNTIME-DETECTED grabber model
 has a specifically documented, proven need.** `select_capture_controls(model, env_spec,
 record_grab)` — no env override -> `documented_controls_for_model(model)`: `GrabberModel::ShadowCast2`
-gets the certified COLOUR set (the real #296 need below) and, as of 2026-07-13,
-`GrabberModel::Elgato4kS` gets its OWN certified corrective saturation set (a documented-proven-need
-exception for its own hardware ISP tint — see the dedicated section below); `NzxtSignalHd60` and
-`Unknown` stay zero-touch, plug-and-play, factory defaults, no ceremony. An explicit
+gets the certified COLOUR set (the real #296 need below); `GrabberModel::Elgato4kS`,
+`NzxtSignalHd60`, and `Unknown` all stay zero-touch, plug-and-play, factory defaults, no ceremony
+(#738 moved the Elgato correction OBS-side — see the section above). An explicit
 `CAMERA_BOX_CAPTURE_CONTROLS` override still always wins, for any model.
 
 **`model` comes from `capture_rate_health::resolve_grabber_model(hostname, detected_card)`** —
@@ -48,7 +62,7 @@ zero-touch by default, see the section above.**
 | Set | fn | Values (reference %, #456) | When |
 |---|---|---|---|
 | COLOUR (ShadowCast 2's documented need, #729) | `color_production_controls()` (#296/#338) | saturation=50%, contrast=50% (no hue) | `GrabberModel::ShadowCast2`, no env override |
-| ELGATO CORRECTIVE (Elgato 4K S's documented need, #729 follow-up) | `elgato_4k_s_corrective_controls()` | saturation=12% only (contrast/brightness/hue untouched) | `GrabberModel::Elgato4kS`, no env override |
+| ELGATO CORRECTIVE (#729 follow-up; superseded as default by #738's OBS-side fix — see above) | `elgato_4k_s_corrective_controls()` | saturation=12% only (contrast/brightness/hue untouched) | ONLY `CAMERA_BOX_CAPTURE_CONTROLS` override now — a switchable manual fallback, not the `Elgato4kS` default |
 | SHARP (on demand only) | `certified_cam1_controls()` (#156) | contrast=75%, saturation=0% | ONLY `CAMERA_BOX_CAPTURE_CONTROLS=certified` |
 
 `saturation=50%` / `contrast=50%` = the ShadowCast factory defaults, normal
@@ -382,6 +396,81 @@ confidence (real colour content will read at ~25% of its normal saturation on th
 a fresh visual check against genuinely bright/colourful content is worth doing opportunistically
 next time either camera points at one (e.g. during a real service) — if the muted colour turns out
 to look worse than expected in practice, retune `reference_pct` per point 5 above.
+
+## #738 (2026-07-13) — the tint correction moved OBS-side: `scripts/obs_colour_correction_calibrate.py`
+
+**Why:** the V4L2 saturation cut above shares ONE gain between the tint and real colour (proven —
+there's no partial value that removes proportionally more of the defect than of real colour). OBS's
+`color_filter_v2` filter's `color_multiply` setting is a genuine independent PER-CHANNEL gain
+(`vendor/obs-studio/plugins/obs-filters/color-correction-filter.c`: `filter->color_matrix.{x.x,
+y.y,z.z} = color_multiply_v4.{x,y,z}` set separately) — closer to a true white-balance fix, and able
+to neutralize a directional R/B-vs-G cast without crushing overall chroma the way a blanket
+saturation scale must.
+
+**Method — "grey-world" white balance, NOT a literal cam5-frame match.** The issue asked to
+calibrate "against cam5's rendition of the same splitter content" — that needs `rig-mode.sh test`
+to paint a shared reference pattern through the HDMI splitter, which touches cam2 (OFF-LIMITS,
+#737's dying disk). Live sampling confirmed cam5 and cam1/cam6 are pointed at genuinely DIFFERENT
+real scenes right now anyway (cam5 near-black; cam1/cam6 a dim room) — a literal frame match would
+be comparing apples to oranges. Instead: the standard grey-world assumption (a large mixed scene
+averages near-neutral) computes a per-channel gain that brings the input's mean R/G/B toward
+neutral — cam5's OWN near-neutral cast is used only as a sanity reference for "what does an
+undamaged camera's cast look like", never as the literal target frame.
+
+**Two real gotchas found only by testing live (read `scripts/obs_colour_correction_calibrate.py`'s
+own module doc for the full derivation) — do NOT re-derive from scratch:**
+
+1. **`color_multiply` is sRGB-gamma-decoded before use as a linear multiplier**
+   (`vec4_from_rgba_srgb`) while a `GetSourceScreenshot` PNG is gamma-ENCODED — so a single
+   grey-world pass computed directly in screenshot-space under-corrects (a `damping=1.0` "full"
+   correction only reduced the measured cast by ~27%, not to ~0). Fix:
+   `calibrate_source_iterative` — measure the CURRENT rendered result, compute a correction
+   relative to it, COMPOSE (never replace) onto the cumulative gain, repeat (2-3 rounds converges
+   from ~12.7 mag down to ~1.6-1.7, matching cam5's own reference order of magnitude).
+2. **`color_multiply`'s byte range (0..255) can only represent a gain in [0.0, 1.0] — it can DIM a
+   channel, never BOOST one above its input level.** `grey_world_gains` anchors the target on the
+   DARKEST channel (never the mean) — anchoring on the mean silently needs gain>1.0 on
+   below-average channels, which `pack_color_multiply` clamps to a no-op (byte 255); confirmed
+   live, a "boosted" channel's actual rendered value never moved across 4 rounds despite its
+   nominal gain climbing to ~1.9. The trade-off: the corrected image gets somewhat DARKER (all
+   channels dimmed to match the darkest one), never brighter — inherent to a multiply-only (no
+   `color_add` boost) instrument.
+
+**Live-verified result (strih, 2026-07-13):** cam1 (`'NDI cam5'` input) and cam6 (`'NDI cam6'`
+input) both went from a visibly purple/violet cast (screenshot evidence) to a near-neutral dark
+tone matching cam5's own reference, cast magnitude ~12.6→~1.6 (a ~87% reduction). imag-nb's own
+`'NDI CAM1'` (clean 1:1 mapping, unlike strih's inverted labels — see the genlock skill) confirmed
+the SAME correction independently (`(0.557, 0.942, 0.612)` there vs strih's `(0.572, 0.942,
+0.621)`) — consistent, corroborating evidence this is a real hardware characteristic, not scene
+noise. imag's `'NDI CAM6'` was NOT on program at sampling time (all-zero screenshot, no signal) —
+the filter is present with identity (no-op) settings, ready whenever it IS shown.
+
+**strih NDI-input-label GOTCHA bit this investigation too — always read `ndi_source_name` live,
+never trust the input's OBS LABEL** (the genlock skill's own inversion table is stale/incomplete
+for cam4/cam5/cam6): a first exploratory pass applied a filter to the literally-named `'NDI cam1'`
+input, which actually carries physical **CAM3** (an unrelated, unrelated-content camera reading
+near-black) — not one of the tinted Elgato units at all. `GetInputSettings` on the input and
+reading its `ndi_source_name` field is the only reliable way to know which physical camera is
+really behind an OBS input name; confirmed live mapping (2026-07-13): `NDI cam1`→CAM3(usb),
+`NDI cam2`→CAM2(usb), `NDI cam3`→CAM4(usb), `NDI cam4`→CAM5(usb, the ShadowCast reference!),
+`NDI cam5`→CAM1(usb, tinted), `NDI cam6`→CAM6(usb, tinted, matches its own label for once).
+
+**Persistence / drift-guard facet:** `classify_persisted_correction` / `check_correction_persisted`
+(same module) report `missing`/`disabled`/`identity`/`applied` for a source's filter — mirrors
+`obs_burn_filter.py`'s presence+enabled check shape, plus a THIRD check this filter specifically
+needs (has it drifted back to the neutral identity value?). `--check` CLI mode is read-only, exits
+non-zero unless every given source reports `applied`. Not yet wired into the full `drift-guard.sh`
+manifest/pin system (that 1886-line file's own gather+check+README-pin machinery is a materially
+bigger, separate change) — this standalone check is the facet that exists today; wiring it into the
+periodic drift-guard run is a natural, bounded follow-up if the user wants it on that cadence.
+
+**Acceptance note:** per the #738 decision, the OBS-side correction was shipped based on live
+screenshot + chroma-number evidence against whatever REAL (currently dim/dark) content was
+available — the SAME honest limitation the #729 V4L2 tuning session itself carried (no genuinely
+bright/colourful content was available to validate against either time). The user's own eyeball
+against real broadcast content remains the final acceptance; if it ever looks wrong in practice,
+retune `grey_world_gains`'s `damping` (currently 0.6-0.8 in practice) or revert to the
+`elgato_4k_s_corrective_controls()` V4L2 fallback (still fully in code, one env-var away).
 
 ## GOTCHA — a per-host `camera-box.service.d/*.conf` systemd env override can silently smear a
 ## LITERAL control value outside any code path OR provisioning script (#729, cam6, 2026-07-12)
