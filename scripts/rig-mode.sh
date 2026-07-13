@@ -111,6 +111,12 @@ RIG_MODE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # missed). See scripts/lib/rig-test-ledger.sh for the full #723 story.
 # shellcheck source=scripts/lib/rig-test-ledger.sh
 . "$RIG_MODE_DIR/lib/rig-test-ledger.sh"
+# #722: SINGLE SOURCE OF TRUTH for the two fleet-wide EVENT-mode CONTRACT builders that have no
+# existing tool (per-box paint-process/service/stray-unit status, artifacts-existing check) —
+# see scripts/lib/event-assert.sh for the full #722 story. event_mode_assert() below
+# orchestrates these + the existing OBS-side tools into scripts/event_assert.py's decision.
+# shellcheck source=scripts/lib/event-assert.sh
+. "$RIG_MODE_DIR/lib/event-assert.sh"
 # #464: SINGLE SOURCE OF TRUTH for the presenter-aware painter-liveness check (KMS page-flip vs
 # fbdev) — see scripts/lib/presenter-liveness-check.sh for the full #464 story. Mirrors
 # src/presenter_kind.rs::resolve_presenter_kind's "will this run ever touch /dev/fb0?" answer.
@@ -128,6 +134,13 @@ RIG_MODE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CAM_PW="${CAM_PW:-newlevel}"                 # dev-rig LAN root pw (same as the sibling e2e scripts)
 PAINTER_IP="${PAINTER_IP:-10.77.9.62}"       # cam2 — has /dev/fb0 + the monitor the broadcast cam films
 CAM1_IP="${CAM1_IP:-10.77.9.61}"             # cam1 — the SOURCE camera (NOT reconfigured here; for the print)
+# #722: the FULL fleet (cam1-6, targets.md) — used only by the EVENT-mode CONTRACT's fleet-wide
+# paint-process/service/stray-unit sweep (event_mode_assert). cam2 already has PAINTER_IP; the
+# rest were never previously needed as rig-mode.sh constants (only cam2 is reconfigured here).
+CAM3_IP="${CAM3_IP:-10.77.9.63}"
+CAM4_IP="${CAM4_IP:-10.77.9.64}"
+CAM5_IP="${CAM5_IP:-10.77.9.65}"
+CAM6_IP="${CAM6_IP:-10.77.9.66}"
 PAINTER_BIN="${PAINTER_BIN:-/usr/local/bin/frame-probe}"
 QR_SIZE="${QR_SIZE:-700}"
 PAINTER_FPS="${PAINTER_FPS:-60}"             # painter rate — MUST match the 60fps capture (#290)
@@ -721,6 +734,158 @@ event_mode_ledger_cleanup() {
   echo "[#723] ledger cleared on cam2."
 }
 
+# fleet_ssh HOST CMD -> run CMD on HOST as root, like cam_ssh but for the FULL fleet (cam1-6),
+# not just cam2/PAINTER_IP. Used only by the #722 EVENT-mode CONTRACT's fleet-wide sweep.
+fleet_ssh() {
+  local host="$1" cmd="$2"
+  sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 root@"$host" "$cmd"
+}
+
+# _bool_or_failclosed VALUE -> "true"/"false" JSON literal text. "True"->true, "False"->false,
+# ANYTHING else (unreachable box, RPC error, empty string) -> true — the FAIL-CLOSED default for
+# a "is this thing still ON" check (burn/recording/streaming): an unknown state must never read
+# as "confirmed off". Mirrors event_assert.py's own fail-closed philosophy for facts this
+# function feeds it.
+_bool_or_failclosed() {
+  case "$1" in
+    True) echo true ;;
+    False) echo false ;;
+    *) echo true ;;
+  esac
+}
+
+# event_mode_assert -> #722 EVENT-mode CONTRACT: gather all 8 items' facts (the fleet ssh sweep
+# above + the existing/new OBS-WS tools: obs_burn_filter.py check, obs_phase2.py
+# record/stream-status/latency-check, set-ndi-mapping.py --verify-only,
+# qr_screenshot_check.py), hand them to scripts/event_assert.py for the pure decision +
+# aggregation, and set two globals for the caller: EVENT_ASSERT_PASS (0=pass/1=fail, matching
+# event_assert.py's own exit code) and EVENT_ASSERT_SUMMARY (the printed Slovak summary).
+# EVENT_ASSERT_RESULT_JSON is left pointing at the written machine-readable result (consumed by
+# the #724 Discord confirmation). Best-effort collection throughout — an unreachable box or a
+# failed sub-check is recorded as a FAILING fact (via _bool_or_failclosed / sentinel values),
+# never silently omitted, so the aggregate decision always reflects the REAL rig state.
+event_mode_assert() {
+  local here; here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/.."
+  local facts_json; facts_json="$(mktemp /tmp/event-assert-facts.XXXXXX.json)"
+  EVENT_ASSERT_RESULT_JSON="$(mktemp /tmp/event-assert-result.XXXXXX.json)"
+
+  echo "[#722] EVENT-mode CONTRACT -- gathering the 8-item assert-phase facts:"
+
+  # --- item 1 + part of item 5: fleet paint-process / service / stray-unit sweep -------------
+  local paint_json="{}" active_json="{}" stray_json="{}"
+  local box_ip box ip out pc sa su
+  for box_ip in "cam1=$CAM1_IP" "cam2=$PAINTER_IP" "cam3=$CAM3_IP" "cam4=$CAM4_IP" "cam5=$CAM5_IP" "cam6=$CAM6_IP"; do
+    box="${box_ip%%=*}"; ip="${box_ip#*=}"
+    out="$(fleet_ssh "$ip" "$(event_assert_fleet_check_cmds)" 2>/dev/null || true)"
+    pc="$(printf '%s' "$out" | grep -oP 'PAINT_COUNT=\K[0-9]+' || true)"; [ -n "$pc" ] || pc=-1
+    sa="$(printf '%s' "$out" | grep -oP 'SERVICE_ACTIVE=\K\S+' || true)"; [ -n "$sa" ] || sa=unreachable
+    su="$(printf '%s' "$out" | grep -oP 'STRAY_UNITS=\K\S*' || true)"
+    echo "    [$box $ip] paint=$pc service=$sa stray='${su}'"
+    paint_json="$(jq --argjson j "$paint_json" --arg k "$box" --argjson v "$pc" -n '$j + {($k): $v}')"
+    active_json="$(jq --argjson j "$active_json" --arg k "$box" --argjson v "$([ "$sa" = active ] && echo true || echo false)" -n '$j + {($k): $v}')"
+    if [ -n "$su" ]; then
+      stray_json="$(jq --argjson j "$stray_json" --arg k "$box" --arg v "$su" -n '$j + {($k): ($v | split(","))}')"
+    else
+      stray_json="$(jq --argjson j "$stray_json" --arg k "$box" -n '$j + {($k): []}')"
+    fi
+  done
+
+  # --- item 2: pixel proof (strih's canonical 4 camera scenes, #399) -------------------------
+  local qr_json
+  qr_json="$(python3 "$here/qr_screenshot_check.py" --host "$STRIH_IP" --password "$OBS_WS_PASSWORD" \
+    --scene "Cam 1" --scene "Cam 2" --scene "Cam 3" --scene "Cam 4" 2>/dev/null || true)"
+  [ -n "$qr_json" ] || qr_json="{}"
+  echo "    [pixel-proof] $qr_json"
+
+  # --- item 3: burns off on every measurement-burn target ------------------------------------
+  local burn_json="{}" src label burn_on bv
+  while IFS='|' read -r ip src box; do
+    [ -n "$ip" ] || continue
+    out="$(python3 "$here/obs_burn_filter.py" check --host "$ip" --input "$src" --password "$OBS_WS_PASSWORD" 2>/dev/null || true)"
+    burn_on="$(printf '%s' "$out" | grep -oP 'burn_on=\K(True|False)' || true)"
+    bv="$(_bool_or_failclosed "$burn_on")"
+    label="${box}:${src}"
+    burn_json="$(jq --argjson j "$burn_json" --arg k "$label" --argjson v "$bv" -n '$j + {($k): $v}')"
+  done < <(obs_burn_targets)
+  echo "    [burns] $burn_json"
+
+  # --- item 4: no active recordings/streams on strih+stream -----------------------------------
+  local rec_json="{}" hb active rv
+  for hb in "strih=$STRIH_IP" "stream=$STREAM_IP"; do
+    box="${hb%%=*}"; ip="${hb#*=}"
+    out="$(python3 "$here/obs_phase2.py" record --action status --host "$ip" --password "$OBS_WS_PASSWORD" 2>/dev/null || true)"
+    active="$(printf '%s' "$out" | grep -oP 'active=\K(True|False)' || true)"
+    rv="$(_bool_or_failclosed "$active")"
+    rec_json="$(jq --argjson j "$rec_json" --arg k "${box}:record" --argjson v "$rv" -n '$j + {($k): $v}')"
+
+    out="$(python3 "$here/obs_phase2.py" stream-status --host "$ip" --password "$OBS_WS_PASSWORD" 2>/dev/null || true)"
+    active="$(printf '%s' "$out" | grep -oP 'active=\K(True|False)' || true)"
+    rv="$(_bool_or_failclosed "$active")"
+    rec_json="$(jq --argjson j "$rec_json" --arg k "${box}:stream" --argjson v "$rv" -n '$j + {($k): $v}')"
+  done
+  echo "    [recordings] $rec_json"
+
+  # --- item 6: stream PGM latency == calibrated (av-sync-last.json), restore-or-fail ---------
+  local calibrated_ms="" current_ms="" latency_out latency_detail=""
+  calibrated_ms="$(jq -r '.applied_latency_ms // empty' "$HOME/.camera-box/av-sync-last.json" 2>/dev/null || true)"
+  if [ -n "$calibrated_ms" ]; then
+    latency_out="$(python3 "$here/obs_phase2.py" latency-check --host "$STREAM_IP" --password "$OBS_WS_PASSWORD" \
+      --source "NDI 2ME PGM" --calibrated-ms "$calibrated_ms" 2>/dev/null || true)"
+    current_ms="$(printf '%s' "$latency_out" | grep -oP 'final=\K-?[0-9]+' || true)"
+    latency_detail="aktualna=${current_ms:-neznama}ms, kalibrovana=${calibrated_ms}ms"
+  else
+    latency_detail="kalibrovana hodnota nie je znama (av-sync-last.json chyba/necitatelny)"
+  fi
+  echo "    [latency] $latency_detail"
+
+  # --- item 7: NDI mapping (#399) -------------------------------------------------------------
+  local ndi_ok=0 ndi_mismatches="[]"
+  python3 "$here/set-ndi-mapping.py" --host "$STRIH_IP" --password "$OBS_WS_PASSWORD" --verify-only >/dev/null 2>&1 || ndi_ok=$?
+  [ "$ndi_ok" -eq 0 ] || ndi_mismatches='["drift"]'
+  echo "    [ndi-mapping] verify-only exit=$ndi_ok"
+
+  # --- item 8: test artifacts cleared (cam2 pidfile/marker log + dev1 heartbeat) --------------
+  local artifacts_remote artifacts_local artifacts_json
+  artifacts_remote="$(cam_ssh "$(event_assert_artifacts_check_cmds "$PAINTER_PIDFILE" "$AUDIO_MARKER_LOG")" 2>/dev/null || true)"
+  artifacts_local="$(bash -c "$(event_assert_artifacts_check_cmds "$(rig_heartbeat_path)")" 2>/dev/null || true)"
+  artifacts_json="$(printf '%s\n%s\n' "$artifacts_remote" "$artifacts_local" | jq -R -s 'split("\n") | map(select(length>0))')"
+  echo "    [artifacts] $artifacts_json"
+
+  # --- assemble the facts JSON + decide -------------------------------------------------------
+  jq -n \
+    --argjson fleet_paint_process_counts "$paint_json" \
+    --argjson fleet_service_active "$active_json" \
+    --argjson fleet_stray_units "$stray_json" \
+    --argjson qr_findings "$qr_json" \
+    --argjson burn_states "$burn_json" \
+    --argjson recording_states "$rec_json" \
+    --arg latency_current_ms "$current_ms" \
+    --arg latency_calibrated_ms "$calibrated_ms" \
+    --argjson ndi_mismatches "$ndi_mismatches" \
+    --argjson artifacts_existing "$artifacts_json" \
+    --arg latency_detail "$latency_detail" \
+    '{
+      fleet_paint_process_counts: $fleet_paint_process_counts,
+      fleet_service_active: $fleet_service_active,
+      fleet_stray_units: $fleet_stray_units,
+      qr_findings: $qr_findings,
+      burn_states: $burn_states,
+      recording_states: $recording_states,
+      latency_current_ms: (if ($latency_current_ms | length) > 0 then ($latency_current_ms | tonumber) else null end),
+      latency_calibrated_ms: (if ($latency_calibrated_ms | length) > 0 then ($latency_calibrated_ms | tonumber) else null end),
+      ndi_mismatches: $ndi_mismatches,
+      artifacts_existing: $artifacts_existing,
+      details: {latency_calibrated: $latency_detail}
+    }' > "$facts_json"
+
+  echo
+  echo "[#722] running the aggregate decision (scripts/event_assert.py):"
+  EVENT_ASSERT_PASS=0
+  EVENT_ASSERT_SUMMARY="$(python3 "$here/event_assert.py" --facts "$facts_json" --result-out "$EVENT_ASSERT_RESULT_JSON")" || EVENT_ASSERT_PASS=$?
+  echo "$EVENT_ASSERT_SUMMARY"
+  rm -f "$facts_json" 2>/dev/null || true
+}
+
 do_event() {
   require_sshpass
   # #281 Fix#3: clear the rig-active heartbeat — we are returning the rig to a clean prod/EVENT
@@ -750,8 +915,17 @@ do_event() {
   echo
   echo "ACHIEVED (cam side): cam2 painter stopped, camera-box active + unconditional HDMI preview restored."
   echo "ACHIEVED (obs side): genlock_burn=false on strih + stream + imag program inputs (WebSocket, no relaunch)."
-  echo "NEXT: confirm the prod scene per the obs-ops skill -> rig in clean EVENT mode (no burn on broadcast)."
-  echo "RESULT: EVENT mode — cam side PASS, burns OFF."
+  echo
+  echo "===== [#722] EVENT-mode CONTRACT — the full machine-checkable assert phase ====="
+  event_mode_assert
+  echo "=================================================================================="
+  echo
+  if [ "$EVENT_ASSERT_PASS" -eq 0 ]; then
+    echo "RESULT: EVENT mode — cam side PASS, burns OFF, #722 CONTRACT CONFIRMED clean for broadcast."
+  else
+    echo "RESULT: EVENT mode — #722 CONTRACT FAILED. The rig is NOT confirmed clean for broadcast — see the assert summary above." >&2
+  fi
+  exit "$EVENT_ASSERT_PASS"
 }
 
 main() {

@@ -84,12 +84,19 @@ fn fleet_check_reports_zero_paint_processes_active_service_no_stray_units() {
         "eval \"$(event_assert_fleet_check_cmds)\"",
         &[
             ("pgrep", "exit 1"), // no matches
-            ("systemctl", "case \"$1\" in is-active) echo active; exit 0;; list-units) exit 0;; esac"),
+            (
+                "systemctl",
+                "case \"$1\" in is-active) echo active; exit 0;; list-units) exit 0;; esac",
+            ),
         ],
     );
     assert_eq!(r.exit_code, 0, "stderr={}", r.stderr);
     assert!(r.stdout.contains("PAINT_COUNT=0"), "stdout={}", r.stdout);
-    assert!(r.stdout.contains("SERVICE_ACTIVE=active"), "stdout={}", r.stdout);
+    assert!(
+        r.stdout.contains("SERVICE_ACTIVE=active"),
+        "stdout={}",
+        r.stdout
+    );
     assert!(r.stdout.contains("STRAY_UNITS="), "stdout={}", r.stdout);
 }
 
@@ -99,7 +106,10 @@ fn fleet_check_detects_a_live_paint_process() {
         "eval \"$(event_assert_fleet_check_cmds)\"",
         &[
             ("pgrep", "echo 2\nexit 0"), // 2 matches
-            ("systemctl", "case \"$1\" in is-active) echo active; exit 0;; list-units) exit 0;; esac"),
+            (
+                "systemctl",
+                "case \"$1\" in is-active) echo active; exit 0;; list-units) exit 0;; esac",
+            ),
         ],
     );
     assert_eq!(r.exit_code, 0, "stderr={}", r.stderr);
@@ -142,7 +152,11 @@ fn artifacts_check_reports_nothing_when_all_paths_are_absent() {
         p2.display()
     ));
     assert_eq!(r.exit_code, 0, "stderr={}", r.stderr);
-    assert_eq!(r.stdout, "", "must print nothing when everything's cleared, got: {}", r.stdout);
+    assert_eq!(
+        r.stdout, "",
+        "must print nothing when everything's cleared, got: {}",
+        r.stdout
+    );
 }
 
 #[test]
@@ -157,8 +171,16 @@ fn artifacts_check_reports_a_lingering_pidfile() {
         p2.display()
     ));
     assert_eq!(r.exit_code, 0, "stderr={}", r.stderr);
-    assert!(r.stdout.contains(&p1.display().to_string()), "stdout={}", r.stdout);
-    assert!(!r.stdout.contains(&p2.display().to_string()), "stdout={}", r.stdout);
+    assert!(
+        r.stdout.contains(&p1.display().to_string()),
+        "stdout={}",
+        r.stdout
+    );
+    assert!(
+        !r.stdout.contains(&p2.display().to_string()),
+        "stdout={}",
+        r.stdout
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -185,17 +207,31 @@ fn do_event_calls_the_722_assert_phase_unconditionally() {
         .unwrap_or(text.len());
     let body = &text[start..end];
     assert!(
-        body.contains("event_assert.py"),
-        "do_event() must invoke scripts/event_assert.py -- the #722 aggregate decision, not just \
-         individual checks with no combined verdict"
+        body.contains("event_mode_assert"),
+        "do_event() must call event_mode_assert() -- the #722 orchestration wrapper"
     );
     // Not gated behind an `if` that could skip it entirely on the mainline path -- the call site
     // itself must not be indented as a nested conditional-only branch. We can't fully prove
     // "unconditional" via text alone, but we CAN prove it isn't wrapped in a `[ ... ] &&` guard
     // that would make a false condition silently skip the WHOLE assert with no trace.
     assert!(
-        !body.contains("&& event_assert.py") && !body.contains("&& python3") ,
+        !body.contains("&& event_mode_assert"),
         "the #722 assert phase call must not be silently skippable via a leading `&&` guard"
+    );
+
+    // event_mode_assert() itself must actually invoke scripts/event_assert.py -- the aggregate
+    // decision, not just individual checks with no combined verdict.
+    let ema_start = text
+        .find("event_mode_assert() {")
+        .expect("event_mode_assert() must exist");
+    let ema_end = text[ema_start..]
+        .find("\ndo_event() {")
+        .map(|off| ema_start + off)
+        .unwrap_or(text.len());
+    let ema_body = &text[ema_start..ema_end];
+    assert!(
+        ema_body.contains("event_assert.py"),
+        "event_mode_assert() must invoke scripts/event_assert.py"
     );
 }
 
@@ -208,11 +244,18 @@ fn do_event_exits_nonzero_when_the_assert_phase_fails() {
         .map(|off| start + off)
         .unwrap_or(text.len());
     let body = &text[start..end];
-    // The assert's own exit code must ultimately propagate: either an explicit `exit`/`return`
-    // on failure, or the function's own non-guarded exit status (no blanket `|| true` wrapping
-    // the assert call that would swallow a real FAIL).
+    // The assert's own verdict must ultimately propagate as do_event()'s own exit code -- an
+    // explicit `exit "$EVENT_ASSERT_PASS"` (or equivalent), never swallowed by a blanket
+    // `|| true` on the call itself.
     assert!(
-        !body.contains("event_assert.py") || !body.contains("event_assert.py\") || true"),
-        "the #722 assert phase's failure must never be swallowed by a blanket `|| true`"
+        body.contains("EVENT_ASSERT_PASS") && body.contains("exit"),
+        "do_event() must exit with the #722 assert phase's own verdict (EVENT_ASSERT_PASS), \
+         not unconditionally exit 0 regardless of the outcome"
+    );
+    assert!(
+        !body.contains("event_mode_assert || true")
+            && !body.contains("event_mode_assert 2>&1 || true"),
+        "the #722 assert phase's failure must never be swallowed by a blanket `|| true` on its \
+         own call site"
     );
 }
