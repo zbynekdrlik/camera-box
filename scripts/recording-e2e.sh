@@ -1216,7 +1216,13 @@ if [ "$AUDIO_PREFLIGHT_ENABLE" = "1" ]; then
     echo "ERROR: $(audio_preflight_norec_message)" >&2
     exit 1
   fi
-  _ap_out="$(timeout "$AUDIO_PREFLIGHT_SSH_TIMEOUT" win_ssh_run "$STREAM_USER" "$STREAM_PW" "$STREAM" "$(audio_preflight_volumedetect_ps "$_ap_path")" 2>&1 || true)"
+  # `timeout` execvp()s its command directly -- it cannot invoke a shell FUNCTION like win_ssh_run
+  # (confirmed live: "timeout: failed to run command 'win_ssh_run': No such file or directory",
+  # run 29281776692). Route through `bash -c`, re-sourcing the lib inside that subshell, so bash
+  # (not execvp) resolves win_ssh_run as a function -- same fix as every other sibling win_ssh_run
+  # call that needs an outer timeout bound.
+  _ap_out="$(timeout "$AUDIO_PREFLIGHT_SSH_TIMEOUT" bash -c '. "$1"; win_ssh_run "$2" "$3" "$4" "$5"' _ \
+    "$HERE/lib/win-ssh-exec.sh" "$STREAM_USER" "$STREAM_PW" "$STREAM" "$(audio_preflight_volumedetect_ps "$_ap_path")" 2>&1 || true)"
   win_ssh_run "$STREAM_USER" "$STREAM_PW" "$STREAM" "$(audio_preflight_delete_ps "$_ap_path")" >/dev/null 2>&1 || true
   _ap_db="$(audio_preflight_parse_max_db "$_ap_out" || true)"
   if [ -z "$_ap_db" ]; then
