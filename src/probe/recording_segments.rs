@@ -134,6 +134,13 @@ pub struct CamboxSegment {
     /// known-healthy run; see `crate::presentation_cadence`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub presentation_cadence: Option<crate::presentation_cadence::CadenceEvenness>,
+    /// #707 EVENT-FORENSICS — the locatable per-event breakdown of THIS window's `copies`/`gaps`:
+    /// one entry per detected residual copy/gap, each carrying its own recorded frame index, tick
+    /// values, switch-schedule offset, and cross-reference key — see
+    /// [`crate::residual_events::residual_events`] for the exact detection rule (a different,
+    /// recorded-order/per-transition view than the netted `copies`/`gaps` totals above; the two
+    /// are not expected to sum to the same total). Empty on a clean window.
+    pub residual_events: Vec<crate::residual_events::ResidualEvent>,
 }
 
 /// The whole-recording segmented-continuity verdict.
@@ -152,6 +159,10 @@ pub struct SegmentedContinuity {
     /// Frames whose `gen_ts_ns` fell in NO scheduled window (recorded outside any cambox's
     /// program window — reported for honesty, not attributed to any cambox).
     pub unplaceable_frames: u32,
+    /// #707 EVENT-FORENSICS — every segment's [`CamboxSegment::residual_events`], concatenated in
+    /// schedule order, for a caller that wants the whole run's residual events without walking
+    /// `segments` itself (e.g. the Discord report / the collector script).
+    pub residual_events: Vec<crate::residual_events::ResidualEvent>,
 }
 
 /// Validate a switch schedule: non-empty, each window has a non-empty label and `start_ns <
@@ -282,6 +293,7 @@ pub fn segment_continuity(
 
     let mut overall_pass = !schedule.is_empty();
     let mut segments = Vec::with_capacity(schedule.len());
+    let mut all_residual_events = Vec::new();
     for (wi, w) in schedule.iter().enumerate() {
         let seg = window_segment(
             &w.cambox,
@@ -291,6 +303,7 @@ pub fn segment_continuity(
             expected_step,
         );
         overall_pass &= seg.pass;
+        all_residual_events.extend(seg.residual_events.iter().cloned());
         segments.push(seg);
     }
 
@@ -298,6 +311,7 @@ pub fn segment_continuity(
         segments,
         overall_pass,
         guard_ns,
+        residual_events: all_residual_events,
         expected_step,
         discarded_guard_frames,
         unplaceable_frames,
@@ -375,6 +389,30 @@ fn window_segment(
     let presentation_cadence =
         crate::presentation_cadence::measure_cadence_evenness(&present_ticks, expected_step);
 
+    // #707 EVENT-FORENSICS — the locatable per-event breakdown, computed from the SAME `frames`
+    // (RECORDED order) this function already walked above. `residual_events` needs no `gen_ts_ns`
+    // re-derivation: `SegmentFrame` and `crate::residual_events::TickSample` carry the identical
+    // three fields, so this is a plain field-copy, not a re-decode.
+    let residual_events: Vec<crate::residual_events::ResidualEvent> =
+        crate::residual_events::residual_events(
+            &frames
+                .iter()
+                .map(|f| crate::residual_events::TickSample {
+                    frame_index: f.frame_index,
+                    gen_ts_ns: f.gen_ts_ns,
+                    tick: f.tick,
+                })
+                .collect::<Vec<_>>(),
+            start_ns,
+            expected_step,
+        )
+        .into_iter()
+        .map(|mut e| {
+            e.cambox = cambox.to_string();
+            e
+        })
+        .collect();
+
     let first_tick = frames.iter().find_map(|f| f.tick);
     let last_tick = frames.iter().rev().find_map(|f| f.tick);
 
@@ -401,6 +439,7 @@ fn window_segment(
         pass,
         note,
         presentation_cadence,
+        residual_events,
     }
 }
 
@@ -1060,5 +1099,102 @@ mod tests {
             seg.presentation_cadence.is_none(),
             "a window with zero decoded ticks must report no cadence verdict: {seg:?}"
         );
+    }
+
+    // ---- #707 EVENT-FORENSICS: residual_events wiring ------------------------------------
+
+    #[test]
+    fn copy_event_is_reported_with_the_owning_cambox_tag() {
+        // The SAME duplicate-tick scenario as `copy_stale_frame_in_one_window_fails_that_cambox`
+        // above, now asserting the located event carries the right cambox label + frame data.
+        let schedule = vec![win("cam1", 0, 1000), win("cam2", 1000, 2000)];
+        let mut frames = clean_frames(0, 100, 4, 1, 100);
+        frames.extend([
+            SegmentFrame {
+                frame_index: 100,
+                gen_ts_ns: 1100,
+                tick: Some(500),
+            },
+            SegmentFrame {
+                frame_index: 101,
+                gen_ts_ns: 1200,
+                tick: Some(500),
+            }, // copy
+            SegmentFrame {
+                frame_index: 102,
+                gen_ts_ns: 1300,
+                tick: Some(501),
+            },
+        ]);
+        let v = segment_continuity(&frames, &schedule, 0, 1);
+        assert_eq!(
+            v.segments[0].residual_events.len(),
+            0,
+            "cam1 window is clean"
+        );
+        let cam2_events = &v.segments[1].residual_events;
+        assert_eq!(cam2_events.len(), 1, "events: {cam2_events:?}");
+        assert_eq!(
+            cam2_events[0].kind,
+            crate::residual_events::ResidualEventKind::Copy
+        );
+        assert_eq!(cam2_events[0].cambox, "cam2");
+        assert_eq!(cam2_events[0].frame_index, 101);
+        assert_eq!(cam2_events[0].gen_ts_ns, 1200);
+        assert_eq!(
+            cam2_events[0].window_offset_ns, 200,
+            "1200 - the window's own start_ns (1000)"
+        );
+    }
+
+    #[test]
+    fn segmented_continuity_residual_events_flattens_across_windows_in_schedule_order() {
+        let schedule = vec![win("cam1", 0, 1000), win("cam2", 1000, 2000)];
+        let mut frames = vec![
+            SegmentFrame {
+                frame_index: 0,
+                gen_ts_ns: 100,
+                tick: Some(10),
+            },
+            SegmentFrame {
+                frame_index: 1,
+                gen_ts_ns: 200,
+                tick: Some(10),
+            }, // cam1 copy
+        ];
+        frames.extend([
+            SegmentFrame {
+                frame_index: 100,
+                gen_ts_ns: 1100,
+                tick: Some(500),
+            },
+            SegmentFrame {
+                frame_index: 101,
+                gen_ts_ns: 1200,
+                tick: Some(500),
+            }, // cam2 copy
+        ]);
+        let v = segment_continuity(&frames, &schedule, 0, 1);
+        assert_eq!(
+            v.residual_events.len(),
+            2,
+            "one event per window, flattened: {:?}",
+            v.residual_events
+        );
+        assert_eq!(v.residual_events[0].cambox, "cam1");
+        assert_eq!(v.residual_events[1].cambox, "cam2");
+    }
+
+    #[test]
+    fn clean_window_reports_no_residual_events() {
+        let schedule = vec![win("cam1", 0, 1000)];
+        let frames = clean_frames(0, 100, 8, 1, 100);
+        let v = segment_continuity(&frames, &schedule, 0, 1);
+        assert!(
+            v.segments[0].residual_events.is_empty(),
+            "{:?}",
+            v.segments[0].residual_events
+        );
+        assert!(v.residual_events.is_empty());
     }
 }
