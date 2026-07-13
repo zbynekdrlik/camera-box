@@ -1442,6 +1442,18 @@ pub struct CadenceOutcome {
 pub struct ReleaseCadence {
     /// The boundary (capture-stamp instant) the NEXT tick will mature. `None` ⇒ unlocked.
     locked_next_boundary_ns: Option<u64>,
+    /// camera-box #726 STICKY-N: the last CONFIRMED integer source-rate multiple (0 = none yet).
+    /// The per-tick front-2-pair measurement ([`Self::measure_source_multiple`]) reads
+    /// INCONCLUSIVE whenever the queue momentarily holds <2 frames or the front pair is
+    /// non-monotonic (a DanteSync clock-step seam / out-of-order arrival) — on a jittery
+    /// 60-into-30 input that dropped the release back to the present-oldest CRAWL for sustained
+    /// runs (win5/win6 / CAM1 live, #726, `relocks` climbing ~2/s while sibling inputs stayed
+    /// flat). This latch remembers the last confirmed multiple so an inconclusive tick reuses it
+    /// instead of crawling; a fresh measurement is always the CONFIRMATION authority and updates
+    /// it (a 1:1 rate re-latches to 1 → byte-identical), and it is CLEARED on relock/gap/acquire
+    /// so a stale N can never outlive the rate it described. Mirror of the C field
+    /// `obs_source_t::genlock_last_known_n` (obs-internal.h).
+    last_known_n: u32,
 }
 
 impl ReleaseCadence {
@@ -1633,6 +1645,47 @@ impl ReleaseCadence {
         let src_interval = t1 - t0;
         // Round-to-nearest N = canvas / src; a structural integer multiple is N >= 2.
         (canvas_interval_ns + src_interval / 2) / src_interval >= 2
+    }
+
+    /// camera-box #726 STICKY-N — FRESHLY measure the integer source-rate multiple N from the
+    /// front pair, or `None` when it cannot be measured this tick. `None` = INCONCLUSIVE: fewer
+    /// than 2 queued frames, or a non-monotonic front pair (a backward-step / clock-step seam,
+    /// where `async_frames` is arrival-ordered and momentarily out of stamp order). `Some(N)` is
+    /// a genuine measurement (N>=1); `Some(1)` is a real 1:1 rate, `Some(N>=2)` the #726
+    /// multi-consume trigger. This is the CONFIRMATION authority — the sticky latch only bridges
+    /// the `None` ticks (see [`Self::effective_source_multiple`]). Mirror of the C helper
+    /// `genlock_measure_source_multiple` in obs-source.c.
+    fn measure_source_multiple(
+        queue: &std::collections::VecDeque<u64>,
+        canvas_interval_ns: u64,
+    ) -> Option<u32> {
+        if canvas_interval_ns == 0 {
+            return None;
+        }
+        let (Some(&t0), Some(&t1)) = (queue.front(), queue.get(1)) else {
+            return None; // inconclusive: fewer than 2 queued frames
+        };
+        if t1 <= t0 {
+            return None; // inconclusive: non-monotonic front pair (clock-step seam)
+        }
+        let src_interval = t1 - t0;
+        // Round-to-nearest N = canvas / src; clamp to >=1 (a slower-than-canvas source reads 1).
+        let n = (canvas_interval_ns + src_interval / 2) / src_interval;
+        Some(n.max(1) as u32)
+    }
+
+    /// camera-box #726 STICKY-N — the EFFECTIVE source-rate multiple to release at THIS tick.
+    ///
+    /// RED (this commit): NON-sticky — an inconclusive tick falls back to `1` (the present-oldest
+    /// CRAWL), exactly the pre-fix behavior. The GREEN commit makes it latch the last CONFIRMED
+    /// multiple and bridge inconclusive ticks with it. Mirror of the C helper
+    /// `genlock_effective_source_multiple` in obs-source.c.
+    fn effective_source_multiple(
+        &mut self,
+        queue: &std::collections::VecDeque<u64>,
+        canvas_interval_ns: u64,
+    ) -> u32 {
+        Self::measure_source_multiple(queue, canvas_interval_ns).unwrap_or(1)
     }
 }
 
@@ -1967,6 +2020,87 @@ mod tests {
             "#726: a 1:1 source must drop NOTHING (got {} drops) — the present-oldest lossless \
              drain path is unchanged for N==1",
             dropped.len()
+        );
+    }
+
+    /// #726 RESIDUAL (win5/win6 / CAM1 live, 2026-07-13) RED→GREEN — STICKY-N.
+    ///
+    /// The fast-swap fix (dev.355) made STEADY multi-consume when the front-2 pair measures a
+    /// structural N>=2. But that per-tick re-derivation reads INCONCLUSIVE whenever the queue
+    /// momentarily holds <2 frames OR the front pair is non-monotonic (a DanteSync clock-step
+    /// seam / out-of-order arrival) — and on a jittery input (win6/'NDI cam5'→CAM1) a SUSTAINED
+    /// run of inconclusive detections dropped the release back to the present-oldest CRAWL (Δ==1),
+    /// under-drained the queue, and backlog-stormed (the live {1:459,7:46} histogram, `relocks`
+    /// climbing ~2/s while sibling 60-in-30 inputs stayed flat in the SAME window).
+    ///
+    /// The fix LATCHES the last CONFIRMED multiple and reuses it to bridge an inconclusive tick,
+    /// so the cadence stays at N even across momentary jitter. A fresh measurement is always the
+    /// confirmation authority (a genuine 1:1 rate re-latches to 1 → byte-identical). This test
+    /// drives the N-decision through a clean-then-inconclusive sequence: the pre-sticky code
+    /// returns 1 (crawl) on the inconclusive states; sticky-N returns the latched 2.
+    #[test]
+    fn sticky_n_bridges_inconclusive_ticks_after_confirming_the_multiple() {
+        use std::collections::VecDeque;
+        const CANVAS: u64 = 33_333_333; // 30 Hz canvas
+        let mut cadence = ReleaseCadence::new();
+
+        // A clean 60fps front pair (16.6ms apart) CONFIRMS N==2 and latches it.
+        let clean: VecDeque<u64> = [1_000_000_000, 1_016_666_667, 1_033_333_334].into();
+        assert_eq!(
+            cadence.effective_source_multiple(&clean, CANVAS),
+            2,
+            "#726: a clean 60fps front pair must confirm N==2"
+        );
+
+        // INCONCLUSIVE #1 — only ONE frame queued (num<2). The pre-sticky code reads 1 (crawl);
+        // sticky-N must reuse the latched 2.
+        let one: VecDeque<u64> = [2_000_000_000].into();
+        assert_eq!(
+            cadence.effective_source_multiple(&one, CANVAS),
+            2,
+            "#726 STICKY-N: a momentary num<2 drain must reuse the latched N (2), not crawl to 1"
+        );
+
+        // INCONCLUSIVE #2 — non-monotonic front pair (a clock-step seam, arrival out of stamp
+        // order). Pre-sticky reads 1; sticky-N must still bridge with the latched 2.
+        let seam: VecDeque<u64> = [3_000_000_000, 2_999_000_000, 3_016_000_000].into();
+        assert_eq!(
+            cadence.effective_source_multiple(&seam, CANVAS),
+            2,
+            "#726 STICKY-N: a non-monotonic front pair must reuse the latched N (2), not crawl"
+        );
+
+        // A GENUINE 1:1 measurement (33.3ms front pair) is the confirmation authority — it wins
+        // and RE-LATCHES to 1 (a real rate change), so the fix never fossilises a stale multiple.
+        let onetoone: VecDeque<u64> = [4_000_000_000, 4_033_333_333].into();
+        assert_eq!(
+            cadence.effective_source_multiple(&onetoone, CANVAS),
+            1,
+            "#726: a fresh 1:1 measurement must win and re-latch to 1 (rate change), never keep 2"
+        );
+
+        // Now an inconclusive tick reuses the RE-LATCHED 1 (not the stale 2) — never invents N.
+        let one2: VecDeque<u64> = [5_000_000_000].into();
+        assert_eq!(
+            cadence.effective_source_multiple(&one2, CANVAS),
+            1,
+            "#726 STICKY-N: after a 1:1 re-latch, an inconclusive tick reuses 1, not the old 2"
+        );
+    }
+
+    /// #726 STICKY-N — a FRESH ReleaseCadence with no confirmed multiple yet must NOT invent one:
+    /// an inconclusive first tick (num<2) reads 1 (present-oldest), never a fabricated N>=2. The
+    /// latch only ever holds a value the front pair actually confirmed.
+    #[test]
+    fn sticky_n_never_invents_a_multiple_before_confirmation() {
+        use std::collections::VecDeque;
+        const CANVAS: u64 = 33_333_333;
+        let mut cadence = ReleaseCadence::new();
+        let one: VecDeque<u64> = [1_000_000_000].into();
+        assert_eq!(
+            cadence.effective_source_multiple(&one, CANVAS),
+            1,
+            "#726: an inconclusive tick before any confirmation must read 1, never invent N>=2"
         );
     }
 
