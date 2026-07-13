@@ -40,7 +40,10 @@
 /// painted-tick values in RECORDED (delivery) order — NOT sorted, unlike
 /// `painted_tick_gaps::painted_tick_gaps`'s net-loss accounting, because cadence EVENNESS is
 /// inherently an order-dependent question (a sorted sequence cannot tell smooth from paired).
-#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+// #726: carries a `BTreeMap` (the delta histogram), which isn't `Copy` — this struct dropped the
+// `Copy` derive it used to carry when it fixed the miscalibration; `Clone`/`Debug`/`PartialEq`
+// (all still derived) are what every caller/test actually uses.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct CadenceEvenness {
     /// The nominal painted-tick step per recorded frame this recording was decimated at (e.g. 2
     /// for a 60fps painter into a 30fps canvas). Echoed for the report.
@@ -71,6 +74,33 @@ pub struct CadenceEvenness {
     /// The headline number: `uniform_fraction`, restated for readability. `1.0` = every frame was
     /// perfectly on-cadence (smooth); `0.0` = no frame was ever on-cadence.
     pub evenness_score: f64,
+    /// #726 MISCALIBRATION FIX (a): raw histogram of every consecutive-frame delta value ->
+    /// occurrence count, in RECORDED order (the SAME deltas the classification above uses). A
+    /// perfectly clean 60-in-30 window on the real rig looks like `{1: N, 7: M, ...}`, NOT a
+    /// clean `{2: N}` — multi-hop jitter (camera->NDI->genlock->canvas) means individual deltas
+    /// rarely land exactly on the theoretical decimation ratio, even though the NET average
+    /// tracks it exactly. Exposed so a caller (or a human reading the report) can see the real
+    /// delta distribution directly, instead of only the (possibly wrong-assumption) counts above.
+    pub delta_histogram: std::collections::BTreeMap<i64, usize>,
+    /// #726 MISCALIBRATION FIX (b): `expected_step` AS DERIVED FROM THIS WINDOW'S OWN DATA — the
+    /// mode (most frequent value) of the POSITIVE entries in `delta_histogram`. This is the
+    /// honest "what does on-cadence actually look like here" step, which on real rig data is
+    /// frequently SMALLER than the caller-supplied `expected_step` (the theoretical decimation
+    /// ratio `painted_tick_gaps` uses for its net-loss accounting) — the two are expected to
+    /// DIFFER: `expected_step` stays authoritative for LOSS accounting, `derived_expected_step`
+    /// is authoritative for CADENCE evenness. Falls back to `expected_step` when no positive
+    /// delta exists in this window (nothing to derive a mode from — e.g. every delta is 0 or
+    /// negative).
+    pub derived_expected_step: i64,
+    /// #726 MISCALIBRATION FIX (c) — the SELF-CONSISTENT reading: deltas exactly
+    /// `derived_expected_step` (the real-data on-cadence bucket). A window with `copies == 0 &&
+    /// gaps == 0` (no net loss) is guaranteed to have most of its mass here, unlike
+    /// `uniform_steps` above, which can misreport near-zero when the caller's `expected_step`
+    /// guess doesn't match the real per-frame jitter pattern — exactly the internally-
+    /// inconsistent live bug (window8, 2026-07-13: 845/845 `other` on a copies=0/gaps=0 window)
+    /// this field fixes.
+    pub derived_uniform_steps: usize,
+    pub derived_uniform_fraction: f64,
 }
 
 /// Classify the presentation cadence of `ticks` (painted-tick values in RECORDED order).
@@ -96,9 +126,11 @@ pub fn measure_cadence_evenness(ticks: &[u32], expected_step: i64) -> Option<Cad
     let mut catchup = 0usize;
     let mut other = 0usize;
     let mut paired = 0usize;
+    let mut histogram: std::collections::BTreeMap<i64, usize> = std::collections::BTreeMap::new();
 
     for i in 0..n {
         let d = deltas[i];
+        *histogram.entry(d).or_insert(0) += 1;
         if d == expected_step {
             uniform += 1;
         } else if d == 0 {
@@ -113,6 +145,21 @@ pub fn measure_cadence_evenness(ticks: &[u32], expected_step: i64) -> Option<Cad
         }
     }
 
+    // #726 (b): derive the REAL on-cadence step from this window's own data — the mode of the
+    // POSITIVE deltas (delta==0 is a duplicate/hold, not a step; a negative delta is a
+    // reorder/decode artifact, not a cadence step either). `max_by_key` on a BTreeMap (ascending
+    // key order) breaks ties toward the LARGER delta value, which is an arbitrary-but-deterministic
+    // choice — ties are not expected on real jitter data. Falls back to the caller's
+    // `expected_step` when there is no positive delta to derive from (degenerate: every delta is
+    // 0 or negative), so this never panics or invents a sentinel.
+    let derived_expected_step = histogram
+        .iter()
+        .filter(|(&d, _)| d > 0)
+        .max_by_key(|(_, &count)| count)
+        .map(|(&d, _)| d)
+        .unwrap_or(expected_step);
+    let derived_uniform = histogram.get(&derived_expected_step).copied().unwrap_or(0);
+
     let nf = n as f64;
     Some(CadenceEvenness {
         expected_step,
@@ -126,6 +173,10 @@ pub fn measure_cadence_evenness(ticks: &[u32], expected_step: i64) -> Option<Cad
         duplicate_fraction: duplicate as f64 / nf,
         paired_fraction: (paired * 2) as f64 / nf,
         evenness_score: uniform as f64 / nf,
+        delta_histogram: histogram,
+        derived_expected_step,
+        derived_uniform_steps: derived_uniform,
+        derived_uniform_fraction: derived_uniform as f64 / nf,
     })
 }
 

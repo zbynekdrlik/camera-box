@@ -3846,6 +3846,20 @@ fn build_and_print_verdict(
                             pc.paired_events,
                             pc.other_steps
                         );
+                        // #726 MISCALIBRATION FIX: the auto-calibrated (data-derived) reading +
+                        // raw delta histogram, printed alongside the caller-supplied-step line
+                        // above so a self-consistency mismatch is visible directly in the report
+                        // (a zero-copies/zero-gaps window should show derived_uniform close to
+                        // sample_deltas even when the line above's `uniform` is near 0 — see
+                        // src/presentation_cadence.rs).
+                        println!(
+                            "      cadence(derived): step={} uniform={}/{} ({:.3}) histogram={:?}",
+                            pc.derived_expected_step,
+                            pc.derived_uniform_steps,
+                            pc.sample_deltas,
+                            pc.derived_uniform_fraction,
+                            pc.delta_histogram
+                        );
                     }
                 }
                 if no_anchor > 0 {
