@@ -2,6 +2,42 @@
 
 Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads context.
 
+## 2026-07-13 (night) — #707 event-level anatomy (2nd supervisor follow-up): no forced mechanism, root cause still open
+
+- **Follow-up dispatch**: extract exact per-event anatomy (frame indices, tick values, ±5-frame
+  context, wall-clock spacing) for the two spike windows (CAM1 33/33, CAM6 15/15) + 2-3
+  small-residual windows for contrast, using the corrected `--merge-partials` reproduction.
+- **Delta-histogram shape is IDENTICAL across every window checked, spike or small**: dominated by
+  Δ=1 (~80%) + a periodic Δ=6/7/8 catchup cluster (~130-140/window, roughly CONSTANT regardless of
+  duplicate count 1-33 — decoupled from whatever produces the duplicates) + the duplicates
+  themselves. ZERO outlier deltas (>10 or negative) in any window — no backward jumps, no oversized
+  skips. The 1-then-7 alternation matches the ALREADY-DOCUMENTED normal dual-QR Vernier sampling
+  beat (`painted_tick_gaps`'s #681 docstring); every window's mean delta is exactly 2.0.
+- **The two spikes are TIGHT TEMPORAL BURSTS, not a slow drift across the window**: CAM1's 33
+  duplicates pack into 5.3s of the 30.2s window (~6.2/s while bursting); CAM6's 15 pack into 6.4s
+  (~2.3/s) — both front-loaded into roughly the first 1/5-1/6 of their window, NOT spread evenly
+  (contradicts the "slow drift-through... ~1/s crossing rate" framing from the beat hypothesis).
+- **Small-residual windows: duplicates are ISOLATED, well-separated (8-14s apart)** — a
+  qualitatively different temporal shape from the spikes' tight bursts, though possibly the same
+  underlying event type at a much lower rate (2 data points is not enough to be sure).
+- **No mechanism proposed** — the pattern rules out real loss (no outlier/backward deltas), the
+  immediate dup+catchup pairing (already refuted), and a simple frozen-camera long stuck run
+  (every duplicate is an isolated single Δ0, never a run). Posted the full anatomy tables to #707
+  honestly with no forced fit — root cause of the two large spikes remains genuinely open after
+  THREE independent, evidence-backed investigation rounds tonight (painter-common-source,
+  optical-sampling-beat, event-level anatomy).
+- **imag stuck_density**: the fresh E2E run triggered by the earlier docs push (`29219154256`,
+  HEAD `501cd99ef`) again shows the same decaying-through-recording pattern (9.99% → 0.00% across
+  10 windows) — consistent with #674's already-diagnosed, accepted restart-adjacent pattern, not a
+  new issue. A/V-sync (#689) happened to PASS on this specific run (intermittent — out of scope,
+  #689 stays open for its own dispatch).
+- **PR #704**: still BLOCKED — `all_cambox_continuity`'s own residual persists (unresolved, root
+  cause open), so the gate cannot go green from tonight's work regardless of #689's variability.
+  NOT merged. Pushing this + the prior held commit now as one push, monitoring the resulting
+  (docs-only, code-unchanged) CI/E2E re-run to terminal per policy.
+- **Playbook**: no further playbook changes this round (the `--merge-partials` recipe + anatomy
+  technique were already captured in the previous entry).
+
 ## 2026-07-13 (night) — #707 optical-sampling-beat hypothesis (supervisor mid-task correction): offline validation CONTRADICTS it, no fix implemented
 
 - **Mid-task correction from supervisor**: after the painter-common-source refutation (below),
