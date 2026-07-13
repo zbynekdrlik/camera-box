@@ -73,7 +73,6 @@ on:
 
 permissions:
   contents: read
-  pull-requests: read  # #646: the docs-only detection step reads the PR diff via `gh pr diff`
   actions: read  # #703: the Windows-verdict-artifact fetch step queries ci.yml's runs (gh run list/download)
 
 # Workflow-level: supersede a stale run on a re-push to the SAME PR (or the same ref for a
@@ -105,7 +104,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Detect docs-only diff (#646 — skip busy-gate+E2E on docs-only PRs)
+      - name: Detect docs-only diff (#646 — skip busy-gate+E2E on docs-only PRs; #746 fail-open, local git diff)
         id: docs-only
         # #646: a RUNTIME `if:`-based skip, NEVER `on.pull_request.paths`/`paths-ignore` at the
         # trigger level — a trigger-level path filter means a docs-only PR gets NO check run at
@@ -114,22 +113,45 @@ jobs:
         # runs the job and reports a genuine (skipped) outcome instead. workflow_dispatch has no
         # PR to diff — never treated as docs-only, always runs in full (an operator-run manual
         # soak should never be silently skipped).
+        #
+        # #746: this used to derive the changed-file list via the GitHub PR-diff CLI call, run
+        # under a strict shell mode that exits on the first error. GitHub's PR-diff API REFUSES
+        # once a PR's accumulated diff crosses its size limit ("too large") — a long-lived
+        # dev->main accumulator PR (like #704) eventually crosses that wall, and the strict shell
+        # mode turned that refusal into an immediate non-zero exit, killing the WHOLE job
+        # (busy-gate + recording-e2e never even started) — the REQUIRED merge gate could no
+        # longer produce a result at all, on any future push, no matter how healthy the rig was.
+        # Fixed two ways:
+        #   1. Derive the changed-file list LOCALLY: fetch main, then diff the two commits'
+        #      trees directly (deliberately NOT a merge-base-relative diff — actions/checkout@v4's
+        #      default shallow (depth=1) checkout has no shared history to compute a merge-base
+        #      from, so that form would itself fail on every single run). A local diff has no API
+        #      size limit at all — the checkout is already on disk.
+        #   2. FAIL OPEN: any failure deriving the list (a broken fetch, an unexpected git error)
+        #      is treated as "NOT docs-only" so the full E2E always runs — a broken OPTIMIZATION
+        #      (the docs-only skip) must never block, or silently skip, the REQUIRED gate itself.
+        #      This is why the step no longer runs in strict/exit-on-error mode: the detection is
+        #      wrapped in its own `if`, and the docs_only output is written exactly once,
+        #      unconditionally, after that if/else — both the success and the fail-open path
+        #      always reach it.
         if: github.event_name == 'pull_request'
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          set -euo pipefail
-          CHANGED="$(gh pr diff ${{ github.event.pull_request.number }} --name-only)"
-          echo "changed files:"
-          echo "$CHANGED"
-          DOCS_ONLY=true
-          while IFS= read -r f; do
-            [ -z "$f" ] && continue
-            case "$f" in
-              *.md|docs/*|.claude/*) ;;
-              *) DOCS_ONLY=false ;;
-            esac
-          done <<< "$CHANGED"
+          set -uo pipefail
+          DOCS_ONLY=false
+          if git fetch origin main 2>/dev/null && CHANGED="$(git diff --name-only origin/main HEAD 2>/dev/null)"; then
+            echo "changed files:"
+            echo "$CHANGED"
+            DOCS_ONLY=true
+            while IFS= read -r f; do
+              [ -z "$f" ] && continue
+              case "$f" in
+                *.md|docs/*|.claude/*) ;;
+                *) DOCS_ONLY=false ;;
+              esac
+            done <<< "$CHANGED"
+          else
+            echo "WARNING (#746): could not derive the changed-file list locally -- failing OPEN (treating as NOT docs-only; the full E2E gate will run)" >&2
+          fi
           echo "docs_only=$DOCS_ONLY" >> "$GITHUB_OUTPUT"
           echo "Docs-only PR: $DOCS_ONLY"
 

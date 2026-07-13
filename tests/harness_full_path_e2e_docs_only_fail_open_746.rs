@@ -32,7 +32,9 @@ fn read_workflow() -> String {
 /// Isolate the `id: docs-only` step's own YAML block (from its `- name:` line to the next
 /// step's `- name:` line), same slicing convention as harness_full_path_e2e_docs_only_skip.rs.
 fn docs_only_step_block(s: &str) -> &str {
-    let step_pos = s.find("id: docs-only").expect("id: docs-only step must exist");
+    let step_pos = s
+        .find("id: docs-only")
+        .expect("id: docs-only step must exist");
     let block_start = s[..step_pos].rfind("- name:").unwrap_or(0);
     let next_step_rel = s[step_pos..].find("\n      - name:");
     let block_end = next_step_rel.map(|r| step_pos + r).unwrap_or(s.len());
@@ -105,7 +107,9 @@ fn docs_only_step_always_writes_its_output_exactly_once_746() {
 #[test]
 fn permissions_no_longer_require_pull_requests_read_746() {
     let s = read_workflow();
-    let perm_pos = s.find("permissions:").expect("permissions: block must exist");
+    let perm_pos = s
+        .find("permissions:")
+        .expect("permissions: block must exist");
     let jobs_pos = s.find("\njobs:").unwrap_or(s.len());
     let perm_block = &s[perm_pos..jobs_pos];
     assert!(
