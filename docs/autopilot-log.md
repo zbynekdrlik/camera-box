@@ -4799,3 +4799,45 @@ hand-grep logs. `.claude/skills/capture/SKILL.md` gained a new "#738" top sectio
 dedicated "OBS-side grey-world colour correction" section (calibration method, the two gotchas,
 the NDI-input-label re-discovery, the drift-guard facet, the acceptance-note caveat) — read before
 touching V4L2 colour policy OR the strih/imag colour-correction filters again.
+
+## 2026-07-13 (urgent pivot, mid-session) — #738 OBS-filter retracted as symptom treatment; #729 reopened for a real root-cause hunt
+
+User directive mid-session: cam6's Elgato ran WEEKS with perfect colours until Sunday — a genuine
+hardware/ISP characteristic cannot appear overnight on unchanged hardware, so #738's OBS-side
+grey-world correction is symptom treatment, not the fix. Actions taken immediately:
+
+1. Reverted V4L2 saturation to factory default (128) live on cam1 + cam6 (was 31, the #729
+   corrective mute).
+2. Disabled the OBS colour-correction filters (strih `NDI cam5`/`NDI cam6`, imag-nb `NDI CAM1`) —
+   left in place but inert, per instruction to keep the generic machinery without using it as the
+   fix.
+3. **Version bisect on cam6**: deployed `1.7.0-dev.334` (2026-07-10, commit `9b8d04dad`, BEFORE
+   #728/#729/#717 existed) fresh, factory-default V4L2 controls (that binary never touches them) —
+   tint REPRODUCED IDENTICALLY (u_dev=33.7 v_dev=43.3, matching every other version tested). This
+   refutes a software regression in #728/#729/#717 specifically — it does NOT prove the cast is an
+   immutable hardware constant (a physical/electrical change coincident with Sunday remains
+   untested).
+4. **Colorspace/format audit**: cam6 (Elgato, tinted) and cam5 (ShadowCast 2, clean reference)
+   report IDENTICAL V4L2 format metadata (sRGB / Rec.709 / Limited Range / YUYV) — rules out a
+   colorspace-tag mismatch. `find_capture_device()`'s capability check correctly reads the
+   PER-NODE `device_caps` (confirmed against the vendored `v4l` crate source), so it would
+   correctly skip a non-capture node even under boot-order reshuffling — no drift observed within
+   the current (single-retained) boot.
+5. **New anomaly found**: recurring `uvcvideo: Non-zero status (-71)` USB EPROTO kernel errors on
+   BOTH Elgato units (cam6: 105 over 7 days; cam1: 35 over ~16h) — NOT the documented "fires once
+   at open" quirk, a genuinely chronic condition. Also an `Unknown video format` (P010) warning —
+   the card advertises a format the driver doesn't parse, alongside the YUYV that IS negotiated.
+   Neither proven to CAUSE the cast; both flagged as real, unexplained anomalies.
+6. Redeployed the CURRENT HEAD build (`1.7.0-dev.353`, CI artifact from run `29242685856`) cleanly
+   to BOTH cam1 and cam6 — zero-touch V4L2 (code-enforced, not a manual poke), tint persists
+   identically on both.
+
+#729 reopened with the full bisect + audit evidence; #738 reopened + rescoped (the OBS filter is
+explicitly NOT the fix while root cause is undetermined). Pinged the user for direction — my
+findings contradict the "code regression" hypothesis but do not resolve what changed; continuing
+the hardware/USB angle vs. accepting as unexplained is the user's call, especially with an event
+approaching.
+
+Main CI (run `29242685856`, commit `822ea3249`) fully green — all 9 non-skipped jobs passed. The
+required E2E gate (run `29242688189`) failed on the pre-existing, unrelated cam2-unreachable
+precondition (#737), not a regression from this session's diff.
