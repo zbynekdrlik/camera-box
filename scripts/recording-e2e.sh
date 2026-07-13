@@ -113,6 +113,14 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # restores at once, bounding the loop's wall-clock by the slowest single box.
 # shellcheck source=scripts/lib/cambox-parallel-restore.sh
 . "$HERE/lib/cambox-parallel-restore.sh"
+# #744: reset a capture card's saturation/contrast to ITS OWN --list-ctrls default (never a
+# foreign literal calibrated for a different card, and never a hardcoded /dev/videoN -- USB
+# grabber nodes renumber, #728). Used by the [0/8] preflight and the [2/8]/[2b/8] deploy sites
+# below, which previously hardcoded a literal saturation=50 / contrast=50 pair on `/dev/video0` --
+# harmless on the ShadowCast 2 (its own 0-100 default) but a dark/chroma-muted picture on the
+# 0-255 Elgato 4K S cards (their own default is 128).
+# shellcheck source=scripts/lib/v4l2-neutral.sh
+. "$HERE/lib/v4l2-neutral.sh"
 camera_resolve "${CAM:-cam1}"
 # #24 item 1: this harness's SOURCE-camera role (the physical box filming cam2's monitor via
 # the optical loopback + carrying the #174 render-time capture burn) is one of
@@ -432,17 +440,21 @@ if [ -n "$CAPTURE_RATE_DEFECT_LINE" ]; then
 fi
 echo "    ok: no sustained capture-rate defect in $CAMERA_NAME's recent journal"
 
-# cam1 v4l2 capture controls (#338/#312): apply the device-default colour controls
-# (saturation=50, contrast=50) BEFORE the run. The old "sharp set" (saturation=0,
+# cam1 v4l2 capture controls (#338/#312, range-aware since #744): apply the device's OWN
+# --list-ctrls default for saturation+contrast BEFORE the run. The old "sharp set" (saturation=0,
 # contrast=75) was meant to aid the optical dual-QR decode but HURT it (#312 run 312005:
 # the ShadowCast box with the sharp set read ~50% undecodable while the NZXT card on
 # device defaults read the SAME monitor clean). Device defaults decode fine; saturation=0
-# also tinted/greyed the picture. The [2/8] deploy step re-applies the same colour
-# set at open; this is the belt-and-braces preflight the harness owns regardless.
-echo "[0/8] apply device-default colour controls (saturation=50, contrast=50) (#338/#312)"
+# also tinted/greyed the picture. #744: a hardcoded literal saturation=50 / contrast=50 pair is
+# only correct on the ShadowCast 2's own 0-100 range -- on the 0-255 Elgato 4K S cards the SAME literal
+# is ~39% of THEIR default (128), producing a dark/chroma-muted picture (live 2026-07-13). Each
+# card now gets its OWN reported default via scripts/lib/v4l2-neutral.sh, resolving the capture
+# node dynamically (never a hardcoded /dev/video0 -- USB nodes renumber, #728). The [2/8] deploy
+# step re-applies the same reset at open; this is the belt-and-braces preflight the harness owns
+# regardless.
+echo "[0/8] apply device-own-default colour controls (#338/#312/#744)"
 sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$CAM1_IP" \
-  "v4l2-ctl -d /dev/video0 --set-ctrl=saturation=50,contrast=50 2>/dev/null; \
-   v4l2-ctl -d /dev/video0 --get-ctrl=saturation,contrast 2>/dev/null" \
+  "$(v4l2_neutral_apply_cmds)" \
   || echo "WARNING: could not pre-apply $CAMERA_NAME v4l2 controls (the [2/8] deploy step re-applies them)" >&2
 
 # shellcheck disable=SC2317  # cleanup() runs via the EXIT/HUP/INT/TERM trap
@@ -863,10 +875,13 @@ echo "[2/8] $CAMERA_NAME (${CAM1_IP}) — probe-featured camera-box with the #17
 # run_id (#24: $SRC_BURN_RUN_ID, matching $CAMERA_NAME) + per-emit frame_id + CAPTURE
 # wall-clock ts into the EMITTED frame, which rides through NDI → strih → stream. #179: the
 # grab-record flags are GONE — the burn mark in the stream recording fully replaces the
-# 7.3GB grab, so the SOURCE camera just emits NDI with the burn. Apply the device-default
-# colour v4l2 controls (saturation=50/contrast=50) directly here (#338/#312: the old sharp
-# set saturation=0/contrast=75 hurt the decode and tinted the picture; device defaults read
-# clean).
+# 7.3GB grab, so the SOURCE camera just emits NDI with the burn. Apply the device's OWN
+# --list-ctrls colour default directly here (#338/#312: the old sharp set saturation=0/
+# contrast=75 hurt the decode and tinted the picture; device defaults read clean). #744: this
+# used to be a hardcoded LITERAL saturation=50/contrast=50 -- correct only on the ShadowCast 2's
+# own 0-100 range, but ~39% of the Elgato 4K S's own 0-255 default (128), producing a dark/
+# chroma-muted picture. scripts/lib/v4l2-neutral.sh resolves each card's OWN default instead, on
+# whatever /dev/videoN the kernel currently assigns (never a hardcoded /dev/video0, #728).
 # #668: deploy under a TRANSIENT systemd-run unit (Restart=on-failure), not a bare `nohup ... &`.
 # A bare nohup'd process has NOTHING watching it — when a real #656/#663 self-heal fires mid-test
 # on this SOURCE camera (it exits(77) BY DESIGN, expecting systemd's Restart=always to bring it
@@ -886,8 +901,9 @@ sshpass -p "$CAM_PW" scp -o StrictHostKeyChecking=no \
 sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$CAM1_IP" \
   "systemctl stop camera-box; pkill -x camera-box 2>/dev/null; \
    chmod +x $CAM1_BURN_BIN; \
-   i=0; while fuser -s /dev/video0 2>/dev/null && [ \$i -lt 30 ]; do sleep 0.5; i=\$((i+1)); done; \
-   v4l2-ctl -d /dev/video0 --set-ctrl=saturation=50,contrast=50 2>/dev/null; \
+   $(v4l2_neutral_resolve_node_cmd) \
+   i=0; while fuser -s \$V4L2_NEUTRAL_NODE 2>/dev/null && [ \$i -lt 30 ]; do sleep 0.5; i=\$((i+1)); done; \
+   $(v4l2_neutral_set_default_cmd) \
    rm -f /tmp/cbox-burn.log; \
    systemd-run --unit=$CAM1_BURN_UNIT --collect \
      --property=Restart=on-failure --property=RestartSec=3 \
@@ -936,8 +952,9 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
       "systemctl stop cam2-painter 2>/dev/null || true; \
        systemctl stop camera-box; pkill -x camera-box 2>/dev/null; \
        chmod +x $_cbin; \
-       i=0; while fuser -s /dev/video0 2>/dev/null && [ \$i -lt 30 ]; do sleep 0.5; i=\$((i+1)); done; \
-       v4l2-ctl -d /dev/video0 --set-ctrl=saturation=50,contrast=50 2>/dev/null; \
+       $(v4l2_neutral_resolve_node_cmd) \
+       i=0; while fuser -s \$V4L2_NEUTRAL_NODE 2>/dev/null && [ \$i -lt 30 ]; do sleep 0.5; i=\$((i+1)); done; \
+       $(v4l2_neutral_set_default_cmd) \
        rm -f /tmp/cbox-burn-${_cn}.log; \
        systemd-run --unit=$_cunit --collect \
          --property=Restart=on-failure --property=RestartSec=3 \

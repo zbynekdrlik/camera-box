@@ -38,12 +38,12 @@ before trusting this table for anything operational.
 
 | Device | Grabber model | Capture node | Notes |
 |--------|---------------|--------------|-------|
-| CAM1 | Elgato 4K S | /dev/video1 | Swapped in 2026-07-12 (was ShadowCast 2, #728) |
+| CAM1 | Elgato 4K S | /dev/video0 | Swapped in 2026-07-12 (was ShadowCast 2, #728); capture node RENUMBERED from /dev/video1 -> /dev/video0 by 2026-07-13 (#744) — exactly the "can drift" case above; `scripts/recording-e2e.sh` no longer hardcodes a node, see `scripts/lib/v4l2-neutral.sh` |
 | CAM2 | ShadowCast 2 | /dev/video0 | Unchanged |
 | CAM3 | ShadowCast 2 | /dev/video0 | Unchanged |
 | CAM4 | NZXT Signal HD60 | /dev/video0 | Unchanged, no V4L2 picture controls exposed |
 | CAM5 | ShadowCast 2 | /dev/video0 | Swapped in 2026-07-12 (was Elgato 4K S, #728) — this is the SAME physical unit that used to sit in CAM1 |
-| CAM6 | Elgato 4K S | /dev/video1 | Unchanged |
+| CAM6 | Elgato 4K S | /dev/video0 | Renumbered from /dev/video1 (#744, verified live 2026-07-13, same class of drift as CAM1) |
 
 ## Linux OBS Targets (camera-box, #458)
 

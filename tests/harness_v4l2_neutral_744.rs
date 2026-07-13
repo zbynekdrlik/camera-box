@@ -57,9 +57,8 @@ fn run_sourced(body: &str) -> String {
 /// env var (never interpolated into the bash -c script text — a fixture with embedded quotes or
 /// `$` must never need bash-escaping by the test itself).
 fn ctrl_arg_for(fixture: &str) -> String {
-    let harness = format!(
-        "set -uo pipefail\n. \"$SCRIPT\"\nv4l2_neutral_default_ctrl_arg \"$FIXTURE\"",
-    );
+    let harness =
+        "set -uo pipefail\n. \"$SCRIPT\"\nv4l2_neutral_default_ctrl_arg \"$FIXTURE\"".to_string();
     let out = Command::new("bash")
         .arg("-c")
         .arg(&harness)
