@@ -250,5 +250,16 @@ pub mod send_stall;
 // field on `CamboxSegment` (REPORTED metric first — not yet gate-enforced pending calibration).
 pub mod presentation_cadence;
 
+// #707 EVENT-FORENSICS — per-event residual copy/gap detection (pure decision). Given the same
+// per-frame painted-tick data `presentation_cadence`/`painted_tick_gaps` already consume, locates
+// SPECIFIC recorded frames as Copy/Gap events (frame index, tick values, wall-clock second, switch-
+// schedule offset) so every residual deviation `window_segment` counts gets its own evidence
+// bundle, per the user's binding #707 decision ("every residual deviation must have its own
+// documented reason"). No probe deps, so it unit-tests Tier-0; `probe::recording_segments::
+// window_segment` reports the events as a new field on `CamboxSegment` /
+// `SegmentedContinuity`, and `recording-verdict`'s per-box `--extract-partial` flags their
+// neighbouring frames for #186 pixel proof.
+pub mod residual_events;
+
 #[cfg(feature = "probe")]
 pub mod probe;
