@@ -1206,6 +1206,15 @@ AUDIO_PREFLIGHT_ENABLE="${AUDIO_PREFLIGHT_ENABLE:-1}"
 AUDIO_PREFLIGHT_THRESHOLD_DB="${AUDIO_PREFLIGHT_THRESHOLD_DB:--60}"
 AUDIO_PREFLIGHT_PROBE_SECS="${AUDIO_PREFLIGHT_PROBE_SECS:-15}"
 AUDIO_PREFLIGHT_SSH_TIMEOUT="${AUDIO_PREFLIGHT_SSH_TIMEOUT:-90}"
+# #748 live finding (run 29282790031): OBS-WS StopRecord's RPC reply lands BEFORE the mp4 muxer
+# finalizes the file (moov atom written, handle closed) -- reading the file <1s after StopRecord
+# hit "moov atom not found". This never surfaced on the real ~300s recording (plenty of natural
+# delay before [7/8]'s later download); the short probe hits the race directly. A BOUNDED RETRY
+# (same shape as the [4c/8] frozen-camera gate's reconnect-race retry) absorbs the transient without
+# masking a genuine failure -- a real "ffmpeg missing" / wrong-path error fails identically on every
+# attempt and still surfaces the same operator message after the attempts are exhausted.
+AUDIO_PREFLIGHT_READ_ATTEMPTS="${AUDIO_PREFLIGHT_READ_ATTEMPTS:-4}"
+AUDIO_PREFLIGHT_READ_RETRY_SLEEP="${AUDIO_PREFLIGHT_READ_RETRY_SLEEP:-3}"
 if [ "$AUDIO_PREFLIGHT_ENABLE" = "1" ]; then
   # Short throwaway probe recording on stream. A leftover from an abort in the ~15s window self-heals:
   # the next run's --action start stops any orphan (obs_phase2.py record) before it re-records.
@@ -1216,18 +1225,28 @@ if [ "$AUDIO_PREFLIGHT_ENABLE" = "1" ]; then
     echo "ERROR: $(audio_preflight_norec_message)" >&2
     exit 1
   fi
-  # `timeout` execvp()s its command directly -- it cannot invoke a shell FUNCTION like win_ssh_run
-  # (confirmed live: "timeout: failed to run command 'win_ssh_run': No such file or directory",
-  # run 29281776692). Route through `bash -c`, re-sourcing the lib inside that subshell, so bash
-  # (not execvp) resolves win_ssh_run as a function -- same fix as every other sibling win_ssh_run
-  # call that needs an outer timeout bound.
-  _ap_out="$(timeout "$AUDIO_PREFLIGHT_SSH_TIMEOUT" bash -c '. "$1"; win_ssh_run "$2" "$3" "$4" "$5"' _ \
-    "$HERE/lib/win-ssh-exec.sh" "$STREAM_USER" "$STREAM_PW" "$STREAM" "$(audio_preflight_volumedetect_ps "$_ap_path")" 2>&1 || true)"
+  _ap_db=""
+  for _ap_attempt in $(seq 1 "$AUDIO_PREFLIGHT_READ_ATTEMPTS"); do
+    # `timeout` execvp()s its command directly -- it cannot invoke a shell FUNCTION like win_ssh_run
+    # (confirmed live: "timeout: failed to run command 'win_ssh_run': No such file or directory",
+    # run 29281776692). Route through `bash -c`, re-sourcing the lib inside that subshell, so bash
+    # (not execvp) resolves win_ssh_run as a function -- same fix as every other sibling win_ssh_run
+    # call that needs an outer timeout bound.
+    _ap_out="$(timeout "$AUDIO_PREFLIGHT_SSH_TIMEOUT" bash -c '. "$1"; win_ssh_run "$2" "$3" "$4" "$5"' _ \
+      "$HERE/lib/win-ssh-exec.sh" "$STREAM_USER" "$STREAM_PW" "$STREAM" "$(audio_preflight_volumedetect_ps "$_ap_path")" 2>&1 || true)"
+    _ap_db="$(audio_preflight_parse_max_db "$_ap_out" || true)"
+    if [ -n "$_ap_db" ]; then
+      break
+    fi
+    if [ "$_ap_attempt" -lt "$AUDIO_PREFLIGHT_READ_ATTEMPTS" ]; then
+      echo "    [audio-presence preflight] attempt ${_ap_attempt}/${AUDIO_PREFLIGHT_READ_ATTEMPTS} unreadable (mp4 likely still finalizing) — settling ${AUDIO_PREFLIGHT_READ_RETRY_SLEEP}s, re-reading"
+      sleep "$AUDIO_PREFLIGHT_READ_RETRY_SLEEP"
+    fi
+  done
   win_ssh_run "$STREAM_USER" "$STREAM_PW" "$STREAM" "$(audio_preflight_delete_ps "$_ap_path")" >/dev/null 2>&1 || true
-  _ap_db="$(audio_preflight_parse_max_db "$_ap_out" || true)"
   if [ -z "$_ap_db" ]; then
     echo "ERROR: $(audio_preflight_unreadable_message)" >&2
-    echo "       raw volumedetect output: $_ap_out" >&2
+    echo "       raw volumedetect output (last attempt): $_ap_out" >&2
     exit 1
   fi
   if [ "$(audio_preflight_is_silent "$_ap_db" "$AUDIO_PREFLIGHT_THRESHOLD_DB")" = "true" ]; then
