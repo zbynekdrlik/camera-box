@@ -1553,7 +1553,7 @@ fn setup_imag_leaves_desktop_icon_unpinned_483() {
 /// TOTAL_STEPS must match the actual number of `step()` calls in the script — a drift here means
 /// either a step was added without bumping the counter (progress display under-counts) or the
 /// counter was bumped without adding a step (display over-counts). This is a general invariant,
-/// re-verified here because #541 added the dev1 drift-guard SSH-key step (18 -> 19).
+/// re-verified here because #731 added the Companion Satellite step (19 -> 20).
 #[test]
 fn setup_imag_total_steps_matches_actual_step_calls() {
     let body = read(SETUP);
@@ -1574,8 +1574,8 @@ fn setup_imag_total_steps_matches_actual_step_calls() {
         })
         .count();
     assert_eq!(
-        declared, 19,
-        "TOTAL_STEPS must be 19 after #541 added the dev1 drift-guard SSH-key step to the prior 18"
+        declared, 20,
+        "TOTAL_STEPS must be 20 after #731 added the Companion Satellite step to the prior 19"
     );
     assert_eq!(
         actual, declared,
@@ -2578,5 +2578,145 @@ fn setup_imag_reloads_logind_after_powerkey_conf_727() {
         "{SETUP}: `systemctl restart systemd-logind` must come AFTER the #727 \
          99-production-no-powerkey.conf is written, or the new directives never take effect \
          this run"
+    );
+}
+
+// ============================================================================================
+// #731 — Companion Satellite install for the Stream Deck connected to imag-nb (server
+// companion.lan). Codifies the step that installs bitfocus/companion-satellite as a headless
+// systemd service, points it at the Companion server, and works around the systemd hwdb/uaccess
+// ACL trap that otherwise silently prevents the headless service user from opening the Stream
+// Deck's hidraw device — all live-verified on imag-nb 2026-07-13 (satellite connected to
+// Companion 4.3.4 over tcp://companion.lan:16622, REST /api/surfaces lists the Stream Deck MK.2).
+// ============================================================================================
+
+/// The step must exist, invoke the OFFICIAL bitfocus/companion-satellite installer (never a
+/// hand-rolled reimplementation of apt/node/build steps), and be idempotent-safe to re-run.
+#[test]
+fn setup_imag_installs_companion_satellite_731() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("step 20 \"Companion Satellite for the connected Stream Deck"),
+        "{SETUP}: must have a step 20 that installs Companion Satellite (#731)"
+    );
+    assert!(
+        body.contains(
+            "https://raw.githubusercontent.com/bitfocus/companion-satellite/main/pi-image/install.sh"
+        ),
+        "{SETUP}: must install via the OFFICIAL bitfocus/companion-satellite installer script, \
+         never a hand-rolled reimplementation"
+    );
+}
+
+/// COMPANION_HOST must be an env-overridable constant defaulting to companion.lan (the ticket's
+/// server), with a documented COMPANION_HOST_IP fallback for the .lan DNS caveat the ticket flags.
+#[test]
+fn setup_imag_companion_host_defaults_and_ip_fallback_731() {
+    let body = read(SETUP);
+    assert!(
+        body.contains(r#"COMPANION_HOST="${COMPANION_HOST:-companion.lan}""#),
+        "{SETUP}: COMPANION_HOST must default to companion.lan and be env-overridable"
+    );
+    assert!(
+        body.contains(r#"COMPANION_HOST_IP="${COMPANION_HOST_IP:-}""#),
+        "{SETUP}: COMPANION_HOST_IP must be a declared env-overridable fallback for the .lan DNS \
+         caveat (targets.md) when COMPANION_HOST doesn't resolve"
+    );
+    let getent = body.find("getent hosts \"$COMPANION_HOST\"").expect(
+        "{SETUP}: must check whether COMPANION_HOST actually resolves before configuring it",
+    );
+    let ip_fallback = body[getent..]
+        .find("COMPANION_TARGET=\"$COMPANION_HOST_IP\"")
+        .map(|i| getent + i);
+    assert!(
+        ip_fallback.is_some(),
+        "{SETUP}: on a resolution failure the step must fall back to COMPANION_HOST_IP when given"
+    );
+}
+
+/// /boot/satellite-config must be (re)written EVERY run with COMPANION_IP + REST_PORT — this is
+/// the correct idempotent re-point mechanism (fixup-pi-config.js imports it fresh on every
+/// satellite.service start, then resets the file to a blank template), not a one-shot file.
+#[test]
+fn setup_imag_writes_boot_satellite_config_731() {
+    let body = read(SETUP);
+    let heredoc = body
+        .find("cat > /boot/satellite-config")
+        .expect("{SETUP}: must write /boot/satellite-config (imported by fixup-pi-config.js)");
+    let window = &body[heredoc..(heredoc + 400).min(body.len())];
+    assert!(
+        window.contains("COMPANION_IP=$COMPANION_TARGET"),
+        "{SETUP}: /boot/satellite-config must set COMPANION_IP to the resolved target. Got:\n{window}"
+    );
+    assert!(
+        window.contains("REST_PORT=9999"),
+        "{SETUP}: /boot/satellite-config must enable the REST server on :9999 (used for \
+         verification -- GET /api/status, /api/surfaces). Got:\n{window}"
+    );
+}
+
+/// The systemd hwdb/uaccess ACL workaround must be present: without it, the headless "satellite"
+/// service user cannot open the Stream Deck's hidraw device even though 50-satellite.rules (the
+/// official installer's own udev rule) correctly sets GROUP=satellite -- live-confirmed 2026-07-13
+/// ("cannot open device with path /dev/hidraw3" until this rule was added).
+#[test]
+fn setup_imag_strips_uaccess_tag_for_av_production_controllers_731() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("99-companion-satellite-no-uaccess.rules"),
+        "{SETUP}: must write a udev rule file numbered AFTER 70-uaccess.rules (tag removal must \
+         run after the tag is added) to strip the uaccess ACL override for AV-production-\
+         controller HID surfaces (Stream Deck etc.)"
+    );
+    let rule = body
+        .find("SUBSYSTEM==\"hidraw\", ENV{ID_AV_PRODUCTION_CONTROLLER}==\"1\", TAG-=\"uaccess\"")
+        .expect(
+            "{SETUP}: the udev rule must strip TAG-=\"uaccess\" for \
+             ENV{ID_AV_PRODUCTION_CONTROLLER}==\"1\" hidraw devices",
+        );
+    let reload = body[rule..]
+        .find("udevadm control --reload-rules")
+        .map(|i| rule + i);
+    assert!(
+        reload.is_some(),
+        "{SETUP}: must reload udev rules AFTER writing the no-uaccess rule file, or it never \
+         takes effect this run"
+    );
+    // A device that already gained the restrictive ACL on a PRIOR boot/run needs an explicit
+    // reset now -- a fresh hotplug alone won't gain one going forward, but an already-present
+    // device's existing ACL must be cleared for THIS run to actually work.
+    assert!(
+        body.contains("setfacl -b"),
+        "{SETUP}: must clear any stale ACL already applied to an already-plugged AV-production-\
+         controller device (a future hotplug self-heals via the udev rule alone, but an \
+         already-present device needs an explicit reset)"
+    );
+}
+
+/// The satellite systemd service must be enabled (survives reboot) AND actively started/verified
+/// this run -- not just "enabled" with no confirmation it actually came up.
+#[test]
+fn setup_imag_enables_and_verifies_satellite_service_731() {
+    let body = read(SETUP);
+    let step20 = body
+        .find("step 20 \"Companion Satellite")
+        .expect("{SETUP}: step 20 must exist");
+    let next_step = body[step20..]
+        .find("\necho -e \"${GREEN}========")
+        .map(|i| step20 + i)
+        .unwrap_or(body.len());
+    let region = &body[step20..next_step];
+    assert!(
+        region.contains("systemctl enable satellite"),
+        "{SETUP}: step 20 must `systemctl enable satellite` so it survives reboot. Got:\n{region}"
+    );
+    assert!(
+        region.contains("systemctl restart satellite"),
+        "{SETUP}: step 20 must (re)start the satellite service this run. Got:\n{region}"
+    );
+    assert!(
+        region.contains("systemctl is-active --quiet satellite"),
+        "{SETUP}: step 20 must actively VERIFY the service came up (not just enable+start blindly \
+         and hope). Got:\n{region}"
     );
 }

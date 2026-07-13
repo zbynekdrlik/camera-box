@@ -39,7 +39,13 @@ DEV1_DRIFTGUARD_PUBKEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB/akQWI95uekn0/CRfQ
 # commented instance of the SAME key already being present (e.g. installed by hand with the local
 # ~/.ssh/id_ed25519.pub file's own comment).
 DEV1_DRIFTGUARD_PUBKEY_TYPE_BLOB="${DEV1_DRIFTGUARD_PUBKEY% *}"
-TOTAL_STEPS=19
+TOTAL_STEPS=20
+# #731: Companion Satellite server this box connects the local Stream Deck to. .lan DNS is
+# usually fine on this LAN (companion.lan -> companion-snv.lan, verified live 2026-07-13) but can
+# be flaky like any other .lan name on this network -- COMPANION_HOST_IP is the documented
+# fallback (see targets.md) if COMPANION_HOST ever stops resolving from a box.
+COMPANION_HOST="${COMPANION_HOST:-companion.lan}"
+COMPANION_HOST_IP="${COMPANION_HOST_IP:-}"
 
 step() { echo -e "${GREEN}[$1/${TOTAL_STEPS}] $2${NC}"; }
 fail() { echo -e "${RED}FAIL: $1${NC}" >&2; exit 1; }
@@ -1195,6 +1201,76 @@ else
     echo "$DEV1_DRIFTGUARD_PUBKEY" | sudo -u "$DESKTOP_USER" tee -a "$AUTH_KEYS" >/dev/null
     echo "  dev1 driftguard key appended to $AUTH_KEYS"
 fi
+
+# =============================================================================
+step 20 "Companion Satellite for the connected Stream Deck (#731, server $COMPANION_HOST)"
+# =============================================================================
+# Headless install of Bitfocus Companion Satellite (bitfocus/companion-satellite) via the
+# official installer script -- idempotent (re-running it re-syncs to the pinned stable build; the
+# whole step is safe to re-run on every provisioning pass).
+COMPANION_TARGET="$COMPANION_HOST"
+if ! getent hosts "$COMPANION_HOST" >/dev/null 2>&1; then
+    if [ -n "$COMPANION_HOST_IP" ]; then
+        echo "  WARNING: '$COMPANION_HOST' does not resolve from this box -- using COMPANION_HOST_IP=$COMPANION_HOST_IP instead"
+        COMPANION_TARGET="$COMPANION_HOST_IP"
+    else
+        echo "  WARNING: '$COMPANION_HOST' does not resolve from this box and no COMPANION_HOST_IP \
+override was given -- configuring the satellite with the hostname anyway (it will retry DNS at \
+connect time); set COMPANION_HOST_IP=<ip> and re-run this step if the connection never comes up"
+    fi
+fi
+
+curl -fsSL https://raw.githubusercontent.com/bitfocus/companion-satellite/main/pi-image/install.sh \
+    -o /tmp/companion-satellite-install.sh \
+    || fail "could not download the companion-satellite installer"
+bash /tmp/companion-satellite-install.sh \
+    || fail "companion-satellite install.sh failed (see output above)"
+
+# fixup-pi-config.js (satellite.service's ExecStartPre) re-reads /boot/satellite-config on EVERY
+# service start, imports COMPANION_IP/REST_PORT into the persisted config, then resets this file
+# back to a blank template -- so writing it fresh before every (re)start is the correct idempotent
+# way to (re-)point the satellite, not a one-shot "only matters on first install" file.
+cat > /boot/satellite-config <<CFGEOF
+# Written by setup-imag.sh step 20 (#731) -- re-applied by fixup-pi-config.js on every satellite start
+COMPANION_IP=$COMPANION_TARGET
+REST_PORT=9999
+CFGEOF
+chmod 666 /boot/satellite-config
+
+# #731 GOTCHA: systemd's hwdb classifies the Stream Deck (and similar surfaces) as
+# ID_AV_PRODUCTION_CONTROLLER=1; /usr/lib/udev/rules.d/70-uaccess.rules then TAG+="uaccess"'s the
+# hidraw node, which makes systemd-logind apply a per-SEAT ACL that OVERRIDES the plain
+# GROUP=satellite/MODE=660 the installer's own 50-satellite.rules sets -- the ACL's `group::---`
+# leaves the headless "satellite" service user unable to open the device ("cannot open device with
+# path /dev/hidrawN") even though the group ownership is correct. Strip the uaccess tag for these
+# devices (numbered AFTER 70- on purpose -- tag removal must run after the tag is added) so the
+# plain group-based permission is the one that actually applies. Live-confirmed 2026-07-13: without
+# this, satellite logs an "Open ... failed: cannot open device" error for the Stream Deck; with it,
+# the very next start logs its firmware version and the REST /api/surfaces endpoint lists it.
+cat > /etc/udev/rules.d/99-companion-satellite-no-uaccess.rules <<'UDEVEOF'
+# #731: keep AV-production-controller HID surfaces (Stream Deck etc.) on plain group permissions
+# so the headless "satellite" service user can open them -- see setup-imag.sh step 20 for the why.
+SUBSYSTEM=="hidraw", ENV{ID_AV_PRODUCTION_CONTROLLER}=="1", TAG-="uaccess"
+UDEVEOF
+udevadm control --reload-rules
+udevadm trigger --subsystem-match=hidraw
+# Clear any ACL a PRIOR run/boot already applied before this rule existed (a fresh hotplug/reboot
+# would never gain one going forward, but an already-plugged device needs an explicit reset now).
+for dev in /sys/class/hidraw/hidraw*; do
+    [ -e "$dev" ] || continue
+    if udevadm info "/dev/$(basename "$dev")" 2>/dev/null | grep -q 'ID_AV_PRODUCTION_CONTROLLER=1'; then
+        setfacl -b "/dev/$(basename "$dev")" 2>/dev/null || true
+    fi
+done
+
+systemctl enable satellite >/dev/null 2>&1 || fail "could not enable the satellite systemd service"
+systemctl restart satellite || fail "could not (re)start the satellite systemd service"
+for i in $(seq 1 10); do
+    systemctl is-active --quiet satellite && break
+    [ "$i" -eq 10 ] && fail "satellite service not active after start (journalctl -u satellite for detail)"
+    sleep 1
+done
+echo "  satellite service active + enabled at boot, configured for $COMPANION_TARGET (REST :9999)"
 
 echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}imag-nb base provisioning DONE (genlock build: $(cat "$GENLOCK_MARKER_DIR/GENLOCK_BUILD_SHA.txt" 2>/dev/null || echo unknown))${NC}"
