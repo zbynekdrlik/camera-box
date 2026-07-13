@@ -186,18 +186,34 @@ fn steady_multi_consumes_at_an_integer_source_multiple_of_the_canvas() {
     // src/probe/genlock.rs `cadence_60_into_30_presents_uniform_every_second_frame`; this
     // default-features guard pins the C port so a subtree-pull or edit can't silently revert it.
     let src = squish(&vendor_file(OBS_SOURCE));
+    // #726 STICKY-N (win5/win6 residual): the per-tick front-2 measurement is jitter-sensitive
+    // (reads inconclusive on num<2 / a non-monotonic clock-step seam), so the detector is split
+    // into a MEASURE (0 = inconclusive) and a STICKY effective helper that bridges an inconclusive
+    // tick with the last confirmed multiple. Mirror: src/probe/genlock.rs
+    // ReleaseCadence::measure_source_multiple / effective_source_multiple.
     assert!(
-        src.contains("static inline bool genlock_source_is_integer_multiple("),
-        "{OBS_SOURCE}: #726 — the integer-multiple detector \
-         (genlock_source_is_integer_multiple, derived from the stamp grid) is gone; the 60->30 \
-         STEADY cadence would crawl+jump again. Mirror: src/probe/genlock.rs \
-         ReleaseCadence::source_is_integer_multiple."
+        src.contains("static inline uint32_t genlock_measure_source_multiple("),
+        "{OBS_SOURCE}: #726 — the stamp-grid measurement (genlock_measure_source_multiple, \
+         0 = inconclusive) is gone; the 60->30 STEADY cadence would crawl+jump again. Mirror: \
+         src/probe/genlock.rs ReleaseCadence::measure_source_multiple."
     );
     assert!(
-        src.contains("if (genlock_source_is_integer_multiple(source, interval)) {"),
-        "{OBS_SOURCE}: #726 — the STEADY release no longer branches on \
-         genlock_source_is_integer_multiple; the 60->30 multi-consume (present newest matured, \
-         retire older) reverted to present-oldest (the crawl). Re-apply."
+        src.contains("static inline uint32_t genlock_effective_source_multiple("),
+        "{OBS_SOURCE}: #726 STICKY-N — the sticky effective-multiple helper \
+         (genlock_effective_source_multiple, latch + bridge) is gone; an inconclusive front-2 tick \
+         would fall back to the present-oldest CRAWL (win5/win6 residual). Mirror: \
+         src/probe/genlock.rs ReleaseCadence::effective_source_multiple."
+    );
+    assert!(
+        src.contains("source->genlock_last_known_n = fresh"),
+        "{OBS_SOURCE}: #726 STICKY-N — a fresh measurement no longer LATCHES into \
+         genlock_last_known_n; the sticky bridge can't remember the confirmed multiple. Re-apply."
+    );
+    assert!(
+        src.contains("if (genlock_effective_source_multiple(source, interval) >= 2) {"),
+        "{OBS_SOURCE}: #726 — the STEADY release no longer branches on the STICKY \
+         genlock_effective_source_multiple(...) >= 2; the 60->30 multi-consume reverted to \
+         present-oldest (the crawl) or to the jitter-sensitive per-tick check. Re-apply."
     );
     assert!(
         src.contains("mature_deadline")
@@ -205,5 +221,27 @@ fn steady_multi_consumes_at_an_integer_source_multiple_of_the_canvas() {
         "{OBS_SOURCE}: #726 — the STEADY N>=2 maturation slack (boundary + interval/2, so the \
          frame ~one canvas interval ahead matures despite canvas_interval being a hair under \
          N*src_interval) is gone; the multi-consume would mature only 1 frame and still crawl."
+    );
+    // The latch MUST be cleared on every source-timeline discontinuity (acquire / backlog relock /
+    // gap resync / backward clock-step) so a stale N cannot outlive the rate it described.
+    let clears = src.matches("source->genlock_last_known_n = 0;").count();
+    assert!(
+        clears >= 4,
+        "{OBS_SOURCE}: #726 STICKY-N — the latch is cleared on only {clears} of the 4 required \
+         source-timeline discontinuities (acquire / relock / gap / backward-step); a stale N could \
+         outlive its rate. Re-apply the clears."
+    );
+}
+
+#[test]
+fn sticky_n_latch_field_declared_on_obs_source() {
+    // #726 STICKY-N: the per-source confirmed-multiple latch must live on obs_source
+    // (obs-internal.h), next to the other genlock cadence fields, so bzalloc zeroes it at create.
+    let internal = squish(&vendor_file(OBS_INTERNAL));
+    assert!(
+        internal.contains("uint32_t genlock_last_known_n;"),
+        "{OBS_INTERNAL}: #726 — the sticky-N latch field `uint32_t genlock_last_known_n;` is \
+         missing from obs_source; the per-tick front-2 detector would crawl on inconclusive \
+         ticks again (win5/win6 residual). Mirror: src/probe/genlock.rs ReleaseCadence::last_known_n."
     );
 }

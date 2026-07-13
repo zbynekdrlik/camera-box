@@ -1492,6 +1492,10 @@ impl ReleaseCadence {
         let Some(boundary) = self.locked_next_boundary_ns else {
             // ACQUIRE: first frame due by the wall deadline locks the cadence. Jump to the
             // newest due (startup backlog is stale by definition), counting the older ones.
+            // #726 STICKY-N: a fresh acquire (cold start OR after a source reset that zeroed the
+            // boundary) re-confirms the source multiple from scratch — clear the latch so a stale
+            // N from a previous lock can't outlive it.
+            self.last_known_n = 0;
             let due = queue.iter().take_while(|&&ts| ts <= deadline).count();
             if due == 0 {
                 return hold(false);
@@ -1527,6 +1531,10 @@ impl ReleaseCadence {
                 }
                 let presented = queue.pop_front().expect("due frame");
                 self.locked_next_boundary_ns = Some(presented + interval_ns);
+                // #726 STICKY-N: a genuine backlog re-lock (stall catch-up) is a source-timeline
+                // discontinuity — clear the latch so the post-relock stream re-confirms its
+                // multiple rather than trusting a pre-stall N.
+                self.last_known_n = 0;
                 return CadenceOutcome {
                     presented: Some(presented),
                     dropped,
@@ -1559,7 +1567,13 @@ impl ReleaseCadence {
             // whole point of #401. Gated on the source being STRUCTURALLY at N>=2 (from the stamp
             // grid, not arrival timing) so a TRANSIENT 1:1 double-maturation stays LOSSLESS via the
             // present-oldest drain below — N==1 is byte-identical.
-            if Self::source_is_integer_multiple(queue, interval_ns) {
+            // #726 STICKY-N (win5/win6 residual): the gate is the STICKY effective multiple, not a
+            // per-tick front-2 re-derivation — an inconclusive tick (momentary num<2 / a
+            // non-monotonic clock-step seam) bridges with the last CONFIRMED N instead of crawling
+            // to present-oldest (which under-drained the queue into the backlog storm live). A fresh
+            // measurement still wins (a genuine 1:1 rate re-latches to 1), and the latch is cleared
+            // on acquire/relock/gap so a stale N cannot outlive its rate.
+            if self.effective_source_multiple(queue, interval_ns) >= 2 {
                 let mature_deadline = boundary + interval_ns / 2;
                 let matured_n = queue
                     .iter()
@@ -1599,6 +1613,10 @@ impl ReleaseCadence {
             if deadline >= oldest {
                 let presented = queue.pop_front().expect("oldest");
                 self.locked_next_boundary_ns = Some(presented + interval_ns);
+                // #726 STICKY-N: a GAP RESYNC means upstream skipped stamps (sender restart /
+                // upstream loss) — the source timeline (and possibly its rate) changed. Clear the
+                // latch so the post-gap stream re-confirms its multiple.
+                self.last_known_n = 0;
                 return CadenceOutcome {
                     presented: Some(presented),
                     dropped: Vec::new(),
@@ -1619,42 +1637,19 @@ impl ReleaseCadence {
     /// within one tick with every jumped frame counted.
     const QDEPTH_RELOCK: usize = 6;
 
-    /// camera-box #726: is the source running at an integer multiple N>=2 of the canvas
-    /// render-tick rate? Derived from the STAMP GRID — the consecutive capture-stamp delta of
-    /// the two oldest queued frames is the true source frame interval regardless of arrival
-    /// jitter (a single NDI source delivers in monotonic capture order). A 60fps source into a
-    /// 30fps canvas stamps every 16.6ms, so `canvas_interval / src_interval ≈ 2` → N==2 → true;
-    /// a 1:1 source (30fps into 30fps) stamps every 33.3ms → N==1 → false (the present-oldest
-    /// lossless-drain path is unchanged). Needs >=2 queued frames to measure the source interval;
-    /// a non-positive delta (a backward-step seam, where `async_frames` is non-monotonic) also
-    /// reads N==1 (false), so the multi-consume never engages across a clock step. Mirror of the
-    /// C helper `genlock_source_is_integer_multiple` in obs-source.c.
-    fn source_is_integer_multiple(
-        queue: &std::collections::VecDeque<u64>,
-        canvas_interval_ns: u64,
-    ) -> bool {
-        if canvas_interval_ns == 0 {
-            return false;
-        }
-        let (Some(&t0), Some(&t1)) = (queue.front(), queue.get(1)) else {
-            return false;
-        };
-        if t1 <= t0 {
-            return false;
-        }
-        let src_interval = t1 - t0;
-        // Round-to-nearest N = canvas / src; a structural integer multiple is N >= 2.
-        (canvas_interval_ns + src_interval / 2) / src_interval >= 2
-    }
-
     /// camera-box #726 STICKY-N — FRESHLY measure the integer source-rate multiple N from the
-    /// front pair, or `None` when it cannot be measured this tick. `None` = INCONCLUSIVE: fewer
-    /// than 2 queued frames, or a non-monotonic front pair (a backward-step / clock-step seam,
-    /// where `async_frames` is arrival-ordered and momentarily out of stamp order). `Some(N)` is
-    /// a genuine measurement (N>=1); `Some(1)` is a real 1:1 rate, `Some(N>=2)` the #726
-    /// multi-consume trigger. This is the CONFIRMATION authority — the sticky latch only bridges
-    /// the `None` ticks (see [`Self::effective_source_multiple`]). Mirror of the C helper
-    /// `genlock_measure_source_multiple` in obs-source.c.
+    /// STAMP GRID of the front pair, or `None` when it cannot be measured this tick. The
+    /// consecutive capture-stamp delta of the two oldest queued frames is the true source frame
+    /// interval regardless of arrival jitter (a single NDI source delivers in monotonic capture
+    /// order). A 60fps source into a 30fps canvas stamps every 16.6ms → `canvas / src ≈ 2` →
+    /// `Some(2)`; a 1:1 source (30fps into 30fps) stamps every 33.3ms → `Some(1)`.
+    ///
+    /// `None` = INCONCLUSIVE — fewer than 2 queued frames, or a non-monotonic front pair (a
+    /// backward-step / clock-step seam, where `async_frames` is arrival-ordered and momentarily
+    /// out of stamp order). `Some(N)` (N>=1) is a genuine measurement and the CONFIRMATION
+    /// authority; the sticky latch bridges ONLY the `None` ticks (see
+    /// [`Self::effective_source_multiple`]). Mirror of the C helper `genlock_measure_source_multiple`
+    /// in obs-source.c.
     fn measure_source_multiple(
         queue: &std::collections::VecDeque<u64>,
         canvas_interval_ns: u64,
@@ -1676,16 +1671,26 @@ impl ReleaseCadence {
 
     /// camera-box #726 STICKY-N — the EFFECTIVE source-rate multiple to release at THIS tick.
     ///
-    /// RED (this commit): NON-sticky — an inconclusive tick falls back to `1` (the present-oldest
-    /// CRAWL), exactly the pre-fix behavior. The GREEN commit makes it latch the last CONFIRMED
-    /// multiple and bridge inconclusive ticks with it. Mirror of the C helper
+    /// A fresh measurement ([`Self::measure_source_multiple`]) is the CONFIRMATION authority: when
+    /// the front pair is measurable it WINS and updates the latch (so a genuine 1:1 rate re-latches
+    /// to 1 → the present-oldest lossless path, byte-identical). When the front pair is INCONCLUSIVE
+    /// (momentary num<2 / a non-monotonic clock-step seam) it BRIDGES with the last confirmed
+    /// multiple instead of crawling — the #726 residual fix. It NEVER invents a multiple: an
+    /// unconfirmed latch (0) reads 1. The latch is CLEARED on relock/gap/acquire (see [`Self::tick`])
+    /// so a stale N can never outlive the rate it described. Mirror of the C helper
     /// `genlock_effective_source_multiple` in obs-source.c.
     fn effective_source_multiple(
         &mut self,
         queue: &std::collections::VecDeque<u64>,
         canvas_interval_ns: u64,
     ) -> u32 {
-        Self::measure_source_multiple(queue, canvas_interval_ns).unwrap_or(1)
+        match Self::measure_source_multiple(queue, canvas_interval_ns) {
+            Some(n) => {
+                self.last_known_n = n; // fresh measurement is the confirmation authority
+                n
+            }
+            None => self.last_known_n.max(1), // bridge with the latch; never invent (0 -> 1)
+        }
     }
 }
 
@@ -1999,7 +2004,7 @@ mod tests {
 
     /// #726 — the fix must NOT change the 1:1 (source rate == canvas rate) path: a 30fps source
     /// into a 30fps canvas still presents EVERY frame exactly once with nothing dropped (the
-    /// present-oldest lossless drain). `source_is_integer_multiple` is derived from the STAMP
+    /// present-oldest lossless drain). `measure_source_multiple` is derived from the STAMP
     /// GRID (33.3ms stamps → N==1), so the multi-consume never engages here.
     #[test]
     fn cadence_30_into_30_still_lossless_every_frame() {
