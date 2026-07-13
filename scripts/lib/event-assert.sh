@@ -28,12 +28,32 @@
 #   STRAY_UNITS=<comma-list>   — any camera-box-burn-* systemd unit still present (item 5; empty
 #                                 when clean)
 # Pure string (no dev1-side vars to interpolate) — safe to call identically for every box.
+#
+# SELF-MATCH GOTCHA (confirmed live, 2026-07-13): ssh invokes the WHOLE returned script as
+# `bash -c "$SCRIPT"` on the remote box. If $SCRIPT's own SOURCE TEXT contains the literal
+# pattern "--paint-only" ANYWHERE, the ENCLOSING `bash -c` process's own /proc/PID/cmdline also
+# contains that substring, and `pgrep -f` (which matches any process's FULL cmdline) counts that
+# enclosing shell itself as a false-positive "paint process" — the exact `pkill -f` self-match
+# footgun this codebase warns about everywhere else (painter_stop_remote's "the naive
+# `pkill -f frame-probe` self-kill footgun this whole rig avoids"), now confirmed to apply to
+# `pgrep -c -f` too. Live-caught: every cam box reported PAINT_COUNT=2 with zero real painters
+# running. Fix: the pattern is base64-ENCODED in the script's source text and decoded into a
+# runtime variable — the literal string "--paint-only" then never appears in ANY process's
+# cmdline except a genuine painter's own (never in this checking script's own invocation).
 event_assert_fleet_check_cmds() {
-  cat <<'REMOTE'
-PAINT_COUNT=$(pgrep -c -f -- --paint-only 2>/dev/null || echo 0)
-SERVICE_ACTIVE=$(systemctl is-active camera-box 2>/dev/null || echo unknown)
-STRAY_UNITS=$(systemctl list-units --all --plain --no-legend 'camera-box-burn-*' 2>/dev/null | awk '{print $1}' | paste -sd, -)
-echo "PAINT_COUNT=$PAINT_COUNT SERVICE_ACTIVE=$SERVICE_ACTIVE STRAY_UNITS=$STRAY_UNITS"
+  local pattern_b64; pattern_b64="$(printf '%s' --paint-only | base64 | tr -d '\n')"
+  cat <<REMOTE
+PAINT_PATTERN=\$(printf '%s' '$pattern_b64' | base64 -d)
+# NOTE: \`pgrep -c\` ALWAYS prints a count (even "0" on zero matches) but still exits non-zero
+# when the count is zero -- a naive \`\$(pgrep -c ... || echo 0)\` fallback would then DOUBLE-print
+# "0" (pgrep's own "0" PLUS the fallback's "0"). Trust pgrep's own printed number; only fall back
+# when the variable ends up genuinely EMPTY (e.g. pgrep itself missing).
+PAINT_COUNT=\$(pgrep -c -f -- "\$PAINT_PATTERN" 2>/dev/null); PAINT_COUNT="\${PAINT_COUNT:-0}"
+# Same shape: \`systemctl is-active\` prints ITS OWN state word (inactive/failed/unknown/...) even
+# though it exits non-zero for anything other than "active" -- same double-print trap as above.
+SERVICE_ACTIVE=\$(systemctl is-active camera-box 2>/dev/null); SERVICE_ACTIVE="\${SERVICE_ACTIVE:-unknown}"
+STRAY_UNITS=\$(systemctl list-units --all --plain --no-legend 'camera-box-burn-*' 2>/dev/null | awk '{print \$1}' | paste -sd, -)
+echo "PAINT_COUNT=\$PAINT_COUNT SERVICE_ACTIVE=\$SERVICE_ACTIVE STRAY_UNITS=\$STRAY_UNITS"
 REMOTE
 }
 

@@ -124,10 +124,20 @@ fn fleet_check_does_not_self_match_its_own_invocation_text() {
         .env("SCRIPT_ENV", &cmds)
         .output()
         .expect("run the built fleet-check script via a real bash -c (mirrors ssh's invocation)");
-    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    // Exactly ONE line, exactly "PAINT_COUNT=0 ..." -- not merely "contains" (that would also
+    // pass a broken "PAINT_COUNT=0\n0 SERVICE_ACTIVE=..." shape, the exact secondary bug found
+    // live: `pgrep -c` prints "0" on zero matches but ALSO exits non-zero, so a naive
+    // `$(pgrep -c ... || echo 0)` fallback double-prints "0" on a clean box).
+    assert_eq!(
+        stdout.lines().count(),
+        1,
+        "must be exactly one output line, got: {stdout:?}"
+    );
     assert!(
-        stdout.contains("PAINT_COUNT=0"),
-        "the fleet-check script must NEVER self-match its own invocation text -- got: {stdout}"
+        stdout.starts_with("PAINT_COUNT=0 "),
+        "the fleet-check script must NEVER self-match its own invocation text, and pgrep -c's \
+         own zero-match output must not be duplicated by a fallback -- got: {stdout:?}"
     );
 }
 
