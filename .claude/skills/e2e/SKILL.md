@@ -386,9 +386,11 @@ patches in the 13-patch scale, so at the rig's already-documented extreme dim ca
 own white patch read ~30-45% of its expected channel value) their absolute chroma is more likely to
 fall under a fixed threshold than a two-channel colour at the same relative dimness. Not yet
 confirmed whether this dimness is worse-than-typical or the threshold was always this marginal for
-red/blue specifically. **Do not loosen the 40 threshold to force a pass** — see #740 for full
-evidence; this currently gates every full-path E2E run shut regardless of the #729 tint saga
-(closed, unrelated — see the capture skill).
+red/blue specifically. **CONFIRMED on a second independent run ~20 min later** — near-identical
+chroma (26.0/28.0 vs the first run's 27.0/28.0) on the same 2 patches, every node again. **Do not
+loosen the 40 threshold to force a pass** — see #740 for full evidence; this currently gates every
+full-path E2E run shut regardless of the #729 tint saga (closed, unrelated — see the capture
+skill).
 
 ## Rig TEST / EVENT Mode Switch (#247) — `scripts/rig-mode.sh`
 
@@ -1919,10 +1921,16 @@ When `copies`/`gaps` look elevated or growing across a run, don't guess — run 
 
 **#741 (2026-07-13, open) — a residual 5-real-drop case survived #708's fix on a run that DID
 supply `--switch-schedule`, with the exact `first_id > last_id` non-monotonic tell this section
-describes.** Not yet distinguished from a genuine drop vs. an edge case where one of the two
-adjacent frames couldn't be confidently window-placed (the fix's own documented limitation: "an
-UNKNOWN window on either side never suppresses"). See #741 for the full id/frame_index list before
-re-deriving this from scratch.
+describes — CONFIRMED on a second independent run to be a periodic ~30s-interval phenomenon,
+NOT the #708 window-boundary-placement class.** Two runs ~20 min apart both flagged 5 ids at
+near-identical `frame_index` (within ±35 frames). Cross-referencing each flagged frame's
+`gen_ts_ns` against `switch-schedule.json` shows every occurrence sits ~4.2-4.3s BEFORE the NEXT
+window's start — well outside the 1s transition guard, so #708's window-placement suppression is
+NOT the relevant class here. Elapsed-time gaps between events are consistent near-multiples of the
+~30.2s window length (a fixed-period ~30s timer/health-check/self-heal cycle landing at roughly the
+same phase within whichever window it falls in, firing in only 5 of 10 windows because its own
+period doesn't exactly match the schedule's). Root cause NOT YET FOUND — see #741 for the full
+per-run frame_index/timing correlation before re-deriving this from scratch.
 
 `full_chain.loss.strih` (a DIFFERENT metric from `all_cambox_continuity` above — see the "A
 DIFFERENT per-node metric" section elsewhere in this file) periodically flagged exactly 4

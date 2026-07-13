@@ -4900,3 +4900,23 @@ section).
 root cause (degraded HDMI splitter, not V4L2/OBS software) so the next colour-cast report checks
 the splitter first. `.claude/skills/e2e/SKILL.md` — #740 (uniform red/blue colour-gate chroma
 threshold finding) added after the #364 section; a #741 pointer added to the #708 section.
+
+## 2026-07-13 (same session, cont'd) — second independent gate run CONFIRMS all 3 findings; #741 root-cause narrowed
+
+The docs-only push above (per #720) automatically fired a second Full-path E2E run (RUN_ID
+`2097425179`, ~20 min after the first). Result: `overall_pass=false` again, confirming all 3
+findings are reproducible, not one-off:
+
+- `all_cambox_continuity`: 7 copies + 8 gaps / 8492 frames (comparable to run 1's 19+15/8529) —
+  #707 updated; still not zero, stays open (two SMALL-residual runs isn't the bar — two ZERO runs
+  is).
+- #740 (colour gate red+blue): near-identical chroma (26.0/28.0 vs run 1's 27.0/28.0) on the same
+  2 patches, every node again — confirmed reproducible, not a fluke.
+- #741 (strih real-drop): the SAME 5-drop pattern, at frame indices within ±35 of run 1's. Cross-
+  referenced each flagged frame's timestamp against `switch-schedule.json`: every occurrence sits
+  ~4.2-4.3s BEFORE the next window boundary (well outside the 1s transition guard) — ruling OUT
+  the #708 window-placement class and pointing at a fixed ~30s-period timer/health-check/self-heal
+  cycle instead. Root cause not yet found; posted the full frame/timing correlation to #741 for
+  the next investigation.
+
+PR #704 remains unmerged — 2 independent gate runs, same 3 red findings both times.
