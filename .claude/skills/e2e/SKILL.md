@@ -1737,6 +1737,38 @@ When `copies`/`gaps` look elevated or growing across a run, don't guess — run 
    frame(s) that were never emitted. Neither firing during a confirmed emit-rate deficit rules both
    out and points elsewhere (capture-side queuing, scheduling). See `src/send_stall.rs` /
    `ndi::boundary_skip_count` for the pure decisions.
+5. **Painter-common-source discriminator (#707, 2026-07-13) — two cheap checks, EXISTING data,
+   before hypothesizing a per-box defect.** If a breach window's `copies`/`gaps` COULD be a
+   monitor/painter presentation slip (since every cambox films the SAME shared monitor, see the
+   TOPOLOGY FACT above) rather than a per-box USB/emit defect, both checks below run against data
+   already on disk — no new recording:
+   - **imag's own continuous optical Δ0 rate during the OTHER camera's exact breach window.** imag
+     watches the shared monitor continuously via cam1 regardless of which cambox strih's schedule
+     had in program. Extract `RecordingFrame.tick` per frame from `imag-partial-<run>.json`
+     (`"tick"` field = the JSON serialization of `RecordingFrame::tick`, already excludes node
+     burns — see `src/probe/recording.rs`), walk consecutive present ticks, count Δ0 in a ±15s
+     margin around the breach window (use the SAME `start_ns`/`end_ns` from `switch-schedule.json`,
+     NOT a hand-picked wall-clock guess). A monitor-side event should burst imag's rate ABOVE its
+     own baseline at that instant; no burst = the monitor almost certainly did NOT glitch there.
+   - **The painter's OWN `flip_ts_ns` log is DIRECT ground truth, stronger than imag's inference** —
+     see "Painter ground-truth CSV lifecycle" above for the CSV schema. Compute the flip-to-flip
+     interval for every tick (`flip_ts_ns[i] - flip_ts_ns[i-1]`); a genuinely missed vblank shows as
+     an interval ~2x the ~16.7ms (60Hz) median, a double-flip as ~0. Zero anomalies + <1ms stdev in
+     the exact breach window (even though the SAME recording's `all_cambox_continuity` failed hard
+     that instant) is a DIRECT refutation of the painter as the common source — not an absence of
+     correlation, an absence of the physical event itself.
+   - **Caveat found hand-replicating `window_segment` from a re-extracted `*-partial-<run>.json`
+     for a THIRD check (per-strih-frame copy positions):** getting the window-placement ANCHOR
+     wrong silently produces a plausible-looking but WRONG copy count. `place_frame_in_window` uses
+     the frame's node-BURN `gen_ts_ns` as the anchor (strih burn `911002` first, then stream
+     `911004`, only falling back to the optical tick's OWN `gen_ts_ns` when neither burn decoded —
+     see `frame_gen_ts_anchor` in `src/bin/recording-verdict.rs`), NOT the optical tick's own
+     `gen_ts_ns`. Using the wrong anchor still got `frames`/`undecodable` exactly right (both are
+     forgiving of a ~100-200ms anchor skew) but `copies` came out completely different (0 vs the
+     verdict's own reported 15) — a hand re-derivation of `copies`/`gaps` from a partial JSON is
+     NOT reliable evidence on its own; treat the verdict JSON's own reported segment counts as
+     ground truth and use a re-derivation only for CORRELATING other data against the verdict's
+     window boundaries (as in the two bullets above), never for disputing the verdict's own count.
 
 ## RESOLVED (#708, 2026-07-12) — strih's OWN `full_chain.loss.strih.real_drops` periodic 4-frame residual was a per-source-counter accounting artifact, NOT loss
 

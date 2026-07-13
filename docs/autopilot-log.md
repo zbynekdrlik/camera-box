@@ -2,6 +2,52 @@
 
 Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads context.
 
+## 2026-07-13 (night) — #707 painter-common-source discriminator: REFUTED with ground-truth evidence, no fix, PR #704 STILL held (#707 + #689)
+
+- **Dispatch**: execute the supervisor synthesis on #707 — test whether CAM6's 15/15 and CAM1's
+  33/33 `all_cambox_continuity` breaches (run `1122532813` / `802117826`) are a shared
+  painter/monitor presentation slip (imag, which watches the same monitor continuously via cam1,
+  should show a matching Δ0 burst at the same instant) rather than a per-box #665/#666-family
+  defect; if confirmed, build a painter-flip-log + verdict-consumer principled fix.
+- **Result: REFUTED, with STRONGER evidence than the dispatch asked for.** (1) imag's own Δ0 rate
+  showed no burst above its own baseline in either breach window (0/3600 pairs and 5/3600 pairs,
+  the second actually BELOW that run's whole-recording average). (2) `painter-<run>.csv` already
+  logs the painter's OWN KMS vblank page-flip timestamp (`flip_ts_ns`) per tick — direct ground
+  truth, not inference. Zero missed/doubled flips in either ENTIRE ~360s recording (21600+ ticks
+  each), including the exact breach windows (<1ms stdev from the 16.7ms median). The monitor
+  never glitched. Full evidence posted to #707
+  (https://github.com/zbynekdrlik/camera-box/issues/707#issuecomment-4953812335).
+- **Phase-3 pivot (per dispatch, "no forced conclusion"):** strih's own `genlock-fifo audit 'NDI
+  camN'` lines for both exact windows — CAM6 window: zero new underrun/hold/overrun events. CAM1
+  window: exactly ONE underrun tick coincident with the window, too small to explain a 33/33
+  breach alone. Inconclusive either way; did not pursue further (camera-sensor/exposure beat
+  analysis) — the two large spikes don't fit a uniform-beat signature (a beat's rate should track
+  elapsed frames, not concentrate 33 events in one 30s window while nine others show 0-2).
+- **No code changed.** Per this ticket's own established discipline (strict-test-mandate: never
+  weaken a gate without an evidence-backed cause), did not implement a speculative fix. #707 left
+  OPEN with the refutation + FIFO evidence on the thread for the next session.
+- **PR #704 gate check (no push, so re-checked the LATEST existing `pull_request` CI run,
+  `29217094508`, HEAD `847dc3a389` — same as current `dev`):** still failing on THREE independent
+  gates, not one: `all_cambox_continuity` (#707's own tiny residual, unresolved), `#312 item 2
+  A/V-sync` (#689, a SEPARATE already-open ticket, 4/6 cameras exceed ±20ms — untouched, out of
+  this dispatch's scope), and imag's `#467/#583` per-segment continuity (huge `stuck_density`
+  8-20% on this specific run) — but cross-checked an EARLIER run on the exact SAME recording
+  (`1122532813`, CI run `29215952677`) and found imag's continuity PERFECTLY CLEAN there (0.000%
+  every window), so the latest run's spike looks transient/restart-adjacent (matches #674's
+  already-documented pattern), not a new persistent blocker — not filing a new issue for it.
+- **Did NOT merge** — gate not green, and would not be even if #707 alone were resolved (#689 is
+  independently red). Did NOT trigger a fresh `gh run rerun` (no code/fleet change since the
+  failing run, would reproduce the same result and cost ~20-25 min of rig time for no new signal).
+- **Playbook**: `.claude/skills/e2e` — new step 5 in "Diagnosing `all_cambox_continuity` copies/gaps
+  growth" documenting the painter-flip-ts ground-truth technique + the `place_frame_in_window`
+  anchor-priority gotcha (strih/stream node burn first, NOT the optical tick's own `gen_ts_ns` —
+  cost real time hand-re-deriving a wrong `copies` count before finding this).
+- **Rig state**: read-only investigation (SSH reads of `/tmp` on dev1 + a scp pull of strih's OBS
+  log) — no rig mutation. Found the standing TEST-mode painter had gone inactive (a side effect of
+  the many CI E2E runs since the last explicit `rig-mode.sh test`, each of which manages its OWN
+  transient painter and doesn't restore the standing one) — re-ran `scripts/rig-mode.sh test`,
+  confirmed PASS (painter running, burns ON, NDI mapping verified, imag PROGRAM on cam1).
+
 ## 2026-07-13 (night) — #733 (fixed+closed) + #734 (fixed+closed) — both code fixes shipped, live-verified; PR #704 STILL held on #707
 
 - **Dispatch**: work #733 (av-sync clustering method-level audit) + #734 (a manual `rig-mode.sh
