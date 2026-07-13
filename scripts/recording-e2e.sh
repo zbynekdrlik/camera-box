@@ -187,6 +187,21 @@ if [ "$DURATION" -lt 300 ]; then
   echo "ERROR: DURATION=${DURATION} below the 300 s zero-loss floor (default 1800)." >&2
   exit 1
 fi
+# #747: the cam2 painter (launched below, before the recording) must stay ALIVE from its launch,
+# through the pre-record warm-up/gate budget AND the whole DURATION recording, self-exiting
+# (writing its ground-truth CSV, #359) only AFTER the recording is stopped. The old fixed +60s
+# slack was sized BEFORE the #747 frozen-camera-gate warm-up and scene warm-up phases were inserted
+# between the painter launch and the recording start; with them the painter self-exited ~47s before
+# the recording ended and the last ~1.5 verdict windows went dark (windows 8-9 all-undecodable).
+# Size the slack to cover the WORST-CASE pre-record budget that still records: the frozen-camera
+# gate can burn up to its full attempts-times-retry-sleep (~4x45s) before it passes, plus routing/
+# burn/scene-warm plus record start+stop ~40s. 240s covers that with cushion. Used LOCK-STEP by
+# BOTH the painter --duration-secs AND the PAINTER_EXIT_DEADLINE self-exit wait (a drift makes the
+# wait give up before self-exit, pulling a stale CSV). The painter-CSV freshness gate has NO upper
+# span bound (it fails only on span < DURATION/2), so a larger margin is safe.
+# (Comment deliberately avoids the bracketed phase labels + FROZEN_CAM_* identifiers other
+# tests string-anchor on -- the recording-e2e.sh static-anchor GOTCHA, project CLAUDE.md.)
+PAINTER_PRE_RECORD_SLACK_SECS="${PAINTER_PRE_RECORD_SLACK_SECS:-240}"
 QR_SIZE="${QR_SIZE:-700}"
 # Topology v2 (#459, EPIC #466, SUPERSEDES the #11 60fps-end-to-end framing below): the 60fps
 # low-latency IMAG role moved OFF strih onto the new imag-nb box (10.77.9.182, #458/#463); strih
@@ -1026,7 +1041,7 @@ sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$PAINTER_IP" \
    $_cam2_kill_existing \
    i=0; while fuser -s /dev/fb0 2>/dev/null && [ \$i -lt 30 ]; do sleep 0.5; i=\$((i+1)); done; \
    (nohup /tmp/frame-probe --paint-only --dual-qr --wall-clock --paint-log /tmp/painter.csv \
-      --paint-fps $PAINT_FPS --qr-size $QR_SIZE --run-id $RUN_ID --duration-secs $((DURATION+60)) \
+      --paint-fps $PAINT_FPS --qr-size $QR_SIZE --run-id $RUN_ID --duration-secs $((DURATION + PAINTER_PRE_RECORD_SLACK_SECS)) \
       $_cam2_marker_flags \
       >/tmp/painter.log 2>&1 &); \
    $_cam2_marker_check"
@@ -1873,12 +1888,12 @@ echo "    ok: no capture-rate defect recurrence in $CAMERA_NAME's journal during
 
 # #359: do NOT kill the painter early. frame-probe writes the ground-truth CSV ONLY on its clean
 # --duration-secs self-exit (src/probe/run.rs) — the old unconditional `pkill -x frame-probe` here
-# fired at ~DURATION, BEFORE the painter's DURATION+60 self-exit, so it never wrote a fresh CSV and
+# fired at ~DURATION, BEFORE the painter's DURATION+PAINTER_PRE_RECORD_SLACK_SECS self-exit, so it never wrote a fresh CSV and
 # a STALE leftover got pulled → a fake catastrophic FAIL (run 354002). WAIT for the painter to
 # self-exit: poll until its PROCESS is gone AND a non-empty /tmp/painter.csv freshly written THIS
 # run exists (remote mtime >= run start), bounded by its --duration-secs deadline + grace. A
 # backstop kill only fires if it overran, so the painter can never be left holding /dev/fb0.
-PAINTER_EXIT_DEADLINE=$(( PAINTER_LAUNCH_EPOCH + DURATION + 60 ))
+PAINTER_EXIT_DEADLINE=$(( PAINTER_LAUNCH_EPOCH + DURATION + PAINTER_PRE_RECORD_SLACK_SECS ))
 PAINTER_WAIT_UNTIL=$(( PAINTER_EXIT_DEADLINE + 45 ))   # 45s grace past the painter self-exit
 echo "    #359 waiting for the cam2 painter to self-exit + write a fresh CSV (until $(date -d "@$PAINTER_WAIT_UNTIL" '+%H:%M:%S' 2>/dev/null || echo "$PAINTER_WAIT_UNTIL"))"
 while [ "$(date +%s)" -lt "$PAINTER_WAIT_UNTIL" ]; do
