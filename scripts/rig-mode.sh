@@ -117,6 +117,11 @@ RIG_MODE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # orchestrates these + the existing OBS-side tools into scripts/event_assert.py's decision.
 # shellcheck source=scripts/lib/event-assert.sh
 . "$RIG_MODE_DIR/lib/event-assert.sh"
+# #724: EVENT-mode Discord confirmation sender — after the #722 assert phase, ONE Slovak message
+# lands in the owner's Discord thread (pass=confirmation, fail=warning naming what failed). See
+# scripts/lib/event-mode-discord-confirm.sh for the full #724 story.
+# shellcheck source=scripts/lib/event-mode-discord-confirm.sh
+. "$RIG_MODE_DIR/lib/event-mode-discord-confirm.sh"
 # #464: SINGLE SOURCE OF TRUTH for the presenter-aware painter-liveness check (KMS page-flip vs
 # fbdev) — see scripts/lib/presenter-liveness-check.sh for the full #464 story. Mirrors
 # src/presenter_kind.rs::resolve_presenter_kind's "will this run ever touch /dev/fb0?" answer.
@@ -768,6 +773,10 @@ event_mode_assert() {
   local here; here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/.."
   local facts_json; facts_json="$(mktemp /tmp/event-assert-facts.XXXXXX.json)"
   EVENT_ASSERT_RESULT_JSON="$(mktemp /tmp/event-assert-result.XXXXXX.json)"
+  # #724: the composed Discord confirmation message (Slovak, phone-readable) -- populated by
+  # event_assert.py below, sent by the EVENT-mode caller after this function returns (on BOTH
+  # outcomes).
+  EVENT_ASSERT_DISCORD_MSG_PATH="$(mktemp /tmp/event-assert-discord.XXXXXX.txt)"
 
   echo "[#722] EVENT-mode CONTRACT -- gathering the 8-item assert-phase facts:"
 
@@ -881,7 +890,8 @@ event_mode_assert() {
   echo
   echo "[#722] running the aggregate decision (scripts/event_assert.py):"
   EVENT_ASSERT_PASS=0
-  EVENT_ASSERT_SUMMARY="$(python3 "$here/event_assert.py" --facts "$facts_json" --result-out "$EVENT_ASSERT_RESULT_JSON")" || EVENT_ASSERT_PASS=$?
+  EVENT_ASSERT_SUMMARY="$(python3 "$here/event_assert.py" --facts "$facts_json" \
+    --result-out "$EVENT_ASSERT_RESULT_JSON" --discord-out "$EVENT_ASSERT_DISCORD_MSG_PATH")" || EVENT_ASSERT_PASS=$?
   echo "$EVENT_ASSERT_SUMMARY"
   rm -f "$facts_json" 2>/dev/null || true
 }
@@ -919,6 +929,12 @@ do_event() {
   echo "===== [#722] EVENT-mode CONTRACT — the full machine-checkable assert phase ====="
   event_mode_assert
   echo "=================================================================================="
+  echo
+  # #724: send the Discord confirmation on BOTH outcomes (pass=confirmation, fail=warning naming
+  # what failed) — UNCONDITIONALLY, before the exit below, never gated on EVENT_ASSERT_PASS.
+  echo "[#724] posting the EVENT-mode Discord confirmation to the owner's thread:"
+  event_mode_discord_confirm_send "$(cat "$EVENT_ASSERT_DISCORD_MSG_PATH" 2>/dev/null || echo "$EVENT_ASSERT_SUMMARY")"
+  rm -f "$EVENT_ASSERT_DISCORD_MSG_PATH" "$EVENT_ASSERT_RESULT_JSON" 2>/dev/null || true
   echo
   if [ "$EVENT_ASSERT_PASS" -eq 0 ]; then
     echo "RESULT: EVENT mode — cam side PASS, burns OFF, #722 CONTRACT CONFIRMED clean for broadcast."

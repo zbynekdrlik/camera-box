@@ -5,12 +5,13 @@
 //! #721: the user caught a live QR by EYE; a phone confirmation would have surfaced it, or its
 //! ABSENCE would itself have been the alarm).
 //!
-//! Delivery reuses the #719 owner-thread + @mention model (DISCORD_NOTIFICATION_CHANNEL_ZBYNEK
-//! + DISCORD_MENTION_ZBYNEK, sourced from ~/.claude/channels/discord/.env when not already in
-//! the environment) — but UNLIKE #719's e2e-discord-report.sh, this NEVER falls back to
-//! #notifications: per the ticket's own instruction ("share the sender; do NOT post to
-//! #notifications"), when the owner vars are genuinely absent this sender logs loudly and skips
-//! sending entirely (fail-open — a missing confirmation must never fail rig-mode.sh event).
+//! Delivery reuses the #719 owner-thread + @mention model
+//! (DISCORD_NOTIFICATION_CHANNEL_ZBYNEK and DISCORD_MENTION_ZBYNEK, sourced from
+//! ~/.claude/channels/discord/.env when not already in the environment) — but UNLIKE #719's
+//! e2e-discord-report.sh, this NEVER falls back to #notifications: per the ticket's own
+//! instruction ("share the sender; do NOT post to #notifications"), when the owner vars are
+//! genuinely absent this sender logs loudly and skips sending entirely (fail-open — a missing
+//! confirmation must never fail rig-mode.sh event).
 //!
 //! These tests drive the REAL `event_mode_discord_confirm_send` function (sourced, not
 //! re-implemented) against a fake `curl` on PATH that records every invocation's argv.
@@ -170,7 +171,11 @@ fn owner_vars_absent_skips_sending_never_falls_back_to_notifications() {
         &[],
         &[("DISCORD_BOT_TOKEN", "test-bot-token")],
     );
-    assert_eq!(out.exit_code, 0, "must stay fail-open, stderr={}", out.stderr);
+    assert_eq!(
+        out.exit_code, 0,
+        "must stay fail-open, stderr={}",
+        out.stderr
+    );
     assert_eq!(
         out.curl_calls.len(),
         0,
