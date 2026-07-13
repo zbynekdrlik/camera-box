@@ -4802,6 +4802,70 @@ fn extract_partial_flagged_frames(
         flagged.extend(iw.missing_slots.iter().map(|s| s.frame_index));
     }
 
+    // #707 EVENT-FORENSICS: when the stream box's extract is given the SAME `--switch-schedule`
+    // the merge step uses, ALSO flag the ±2-frame neighbourhood of every located residual
+    // copy/gap event (`crate::residual_events::residual_events`, via the #312 sweep's own
+    // `segment_continuity`) — extending the #186 pixel-proof machinery so a forensics dossier
+    // gets real pixels for the event, not just the JSON. Only the stream box carries the
+    // continuous recording the sweep is windowed over (the strih box's own recording is a
+    // DIFFERENT, per-camera partial view — see `segment_frames_from_recording`'s own doc). A
+    // missing/unparsable schedule degrades gracefully (WARN, no residual-event flagging) — the
+    // existing undecodable + missing-burn flagging above is unaffected either way.
+    if box_name == "stream" {
+        if let Some(schedule_path) = &args.switch_schedule {
+            match load_switch_schedule(schedule_path) {
+                Ok(schedule) => {
+                    let expected_step = if args.switch_expected_step > 0 {
+                        args.switch_expected_step
+                    } else {
+                        camera_box::recording_span_gate::painted_tick_step(
+                            args.refresh_hz,
+                            args.stream_capture_fps,
+                        )
+                    };
+                    let anchor_run_ids = [args.burn_strih_run_id, args.burn_stream_run_id];
+                    let (seg_frames, _no_anchor) = segment_frames_from_recording(
+                        frames,
+                        &anchor_run_ids,
+                        &all_burns,
+                        cam2_pin,
+                    );
+                    let seg = segment_continuity(
+                        &seg_frames,
+                        &schedule,
+                        args.switch_guard_ns,
+                        expected_step,
+                    );
+                    const RESIDUAL_EVENT_NEIGHBOUR_FRAMES: u64 = 2;
+                    for ev in &seg.residual_events {
+                        let lo = ev
+                            .frame_index
+                            .saturating_sub(RESIDUAL_EVENT_NEIGHBOUR_FRAMES);
+                        let hi = ev.frame_index + RESIDUAL_EVENT_NEIGHBOUR_FRAMES;
+                        flagged.extend(lo..=hi);
+                    }
+                    if !seg.residual_events.is_empty() {
+                        println!(
+                            "#707 event-forensics [stream]: {} residual copy/gap event(s) across \
+                             {} switch-schedule window(s) → their ±{RESIDUAL_EVENT_NEIGHBOUR_FRAMES}-frame \
+                             neighbourhoods added to the pixel-proof flag set.",
+                            seg.residual_events.len(),
+                            seg.segments.len(),
+                        );
+                    }
+                }
+                Err(e) => {
+                    eprintln!(
+                        "WARNING: #707 event-forensics: could not load --switch-schedule {} \
+                         ({e:#}) — residual copy/gap events will NOT get pixel proof on this \
+                         extract (the existing undecodable/missing-burn flagging is unaffected).",
+                        schedule_path.display()
+                    );
+                }
+            }
+        }
+    }
+
     flagged.sort_unstable();
     flagged.dedup();
     (flagged, undecodable)
