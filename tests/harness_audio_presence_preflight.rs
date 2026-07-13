@@ -54,8 +54,13 @@ fn parses_digital_silence_level() {
 #[test]
 fn parse_fails_non_zero_when_no_max_volume() {
     let ff = "ffmpeg version 6.0\nSome error: no audio stream found\n";
-    let (ok, db) = run(&format!("audio_preflight_parse_max_db '{ff}' && echo GOTDB"));
-    assert!(!ok, "parse of output with no max_volume must return non-zero");
+    let (ok, db) = run(&format!(
+        "audio_preflight_parse_max_db '{ff}' && echo GOTDB"
+    ));
+    assert!(
+        !ok,
+        "parse of output with no max_volume must return non-zero"
+    );
     assert!(db.is_empty(), "no db should be printed, got {db:?}");
 }
 
@@ -80,19 +85,28 @@ fn audible_track_classified_not_silent() {
 fn silent_message_names_the_mbc_chain_to_check() {
     let (_ok, m) = run("audio_preflight_silent_message -91.0");
     for needle in ["mbc", "Ableton", "Dante", "#748"] {
-        assert!(m.contains(needle), "silent message must mention {needle:?}: {m}");
+        assert!(
+            m.contains(needle),
+            "silent message must mention {needle:?}: {m}"
+        );
     }
 }
 
 #[test]
 fn volumedetect_command_targets_the_probe_file_and_null_sink() {
     let (_ok, c) = run("audio_preflight_volumedetect_ps 'C:\\rec\\probe.mkv'");
-    assert!(c.contains("volumedetect"), "must run the volumedetect filter: {c}");
+    assert!(
+        c.contains("volumedetect"),
+        "must run the volumedetect filter: {c}"
+    );
     assert!(
         c.contains("C:\\rec\\probe.mkv"),
         "must target the probe path: {c}"
     );
-    assert!(c.contains("NUL"), "must write to the Windows null sink: {c}");
+    assert!(
+        c.contains("NUL"),
+        "must write to the Windows null sink: {c}"
+    );
 }
 
 /// The pre-record step must actually be WIRED into recording-e2e.sh: source the lib and, on a
