@@ -101,6 +101,52 @@ fn fleet_check_reports_zero_paint_processes_active_service_no_stray_units() {
 }
 
 #[test]
+fn fleet_check_does_not_self_match_its_own_invocation_text() {
+    // THE REAL pgrep (not a fake) — this is the exact `pkill -f` self-match footgun class this
+    // codebase warns about repeatedly, but for `pgrep -c -f`: ssh invokes the WHOLE built
+    // script as `bash -c "$SCRIPT"`, so if $SCRIPT's own SOURCE TEXT contains the literal
+    // pattern "--paint-only" anywhere, the ENCLOSING bash -c process's /proc/PID/cmdline ALSO
+    // contains that substring and gets counted as a false-positive "paint process" by
+    // `pgrep -f`. Live-caught on the real rig (2026-07-13): every cam box reported
+    // PAINT_COUNT=2 with zero real painters running. Proven here with the REAL system pgrep
+    // (no fake), invoking the built script exactly as ssh would (`bash -c "$SCRIPT"`) — this
+    // would have failed loud before the fix.
+    let cmds = run_sourced("event_assert_fleet_check_cmds").stdout;
+    // Pass the multi-line built script via an ENV VAR, not interpolated into the bash -c source
+    // text (Rust's `{:?}` Debug-escapes newlines as literal two-char `\n`, which a plain
+    // double-quoted bash string does not expand back into real newlines — see the identical
+    // fixture-passing fix in harness_marker_device_resolve_725.rs). The outer `bash -c
+    // "$SCRIPT_ENV"` mirrors exactly how ssh invokes the remote command (a nested bash -c whose
+    // OWN cmdline contains the built script's full text) — this is what must NOT self-match.
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg("bash -c \"$SCRIPT_ENV\"")
+        .env("SCRIPT_ENV", &cmds)
+        .output()
+        .expect("run the built fleet-check script via a real bash -c (mirrors ssh's invocation)");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("PAINT_COUNT=0"),
+        "the fleet-check script must NEVER self-match its own invocation text -- got: {stdout}"
+    );
+}
+
+#[test]
+fn fleet_check_builder_never_embeds_the_paint_pattern_as_literal_source_text() {
+    // A stronger, mechanism-level guard: the BUILT script's source text must never contain the
+    // literal substring "--paint-only" at all -- any occurrence there is a live self-match risk
+    // the moment ssh wraps it in `bash -c "..."`. The pattern must be reconstructed at RUNTIME
+    // (e.g. base64-decoded) so it appears in a process's cmdline only when that process is a
+    // REAL painter, never in the enclosing shell's own invocation text.
+    let cmds = run_sourced("event_assert_fleet_check_cmds").stdout;
+    assert!(
+        !cmds.contains("--paint-only"),
+        "the fleet-check builder must not embed the literal pattern as source text (self-match \
+         risk) -- got:\n{cmds}"
+    );
+}
+
+#[test]
 fn fleet_check_detects_a_live_paint_process() {
     let r = run_with_fake_bins(
         "eval \"$(event_assert_fleet_check_cmds)\"",
