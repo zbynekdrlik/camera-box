@@ -7,7 +7,7 @@
 | stagebox1 | 10.77.9.237 | Active | SSH: newlevel/newlevel |
 | strih | 10.77.9.202 | Active | SSH: newlevel/newlevel |
 | ableton-foh | 10.77.9.230 | Active | SSH: master/master |
-| mbc | 10.77.9.232 | Active | SSH: newlevel/newlevel — Master Broadcast Console: Ableton DAW doing the FINAL stream audio mastering; plugin latency deliberately aligned to EXACTLY 1s (the reason stream PGM's genlock hold ≈ 1000 − camera-path ≈ 925ms); the A/V-sync mic feeds INTO an Ableton channel here (was found muted 2026-07-12 — check this channel first when the measurement audio is silent); box is often OFF outside broadcasts |
+| mbc | 10.77.7.232 | Active | SSH: newlevel/newlevel — Master Broadcast Console: Ableton DAW doing the FINAL stream audio mastering; plugin latency deliberately aligned to EXACTLY 1s (the reason stream PGM's genlock hold ≈ 1000 − camera-path ≈ 925ms); the A/V-sync mic feeds INTO an Ableton channel here (was found muted 2026-07-12 — check this channel first when the measurement audio is silent). IP MOVED 2026-07-13: was 10.77.9.232 (a ping to the OLD IP falsely reads as "box off" — it is normally ON); `mbc.lan` resolves correctly, verify with `getent hosts mbc.lan` before declaring it down |
 | stream | 10.77.9.204 | Active | SSH: newlevel/newlevel |
 | bridge | 10.77.9.201 | Active | SSH: newlevel/newlevel |
 | iem | 10.77.9.231 | Active | SSH: iem/iem |
