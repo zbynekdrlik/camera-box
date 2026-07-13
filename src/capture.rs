@@ -464,6 +464,73 @@ pub fn color_production_controls() -> Vec<CaptureControl> {
     ]
 }
 
+/// The CERTIFIED Elgato 4K S corrective V4L2 capture control (#729 follow-up,
+/// 2026-07-13): a documented-proven-need exception to the zero-touch policy above,
+/// for the ONE thing on this card that IS correctable — the purple/violet tint's
+/// visible MAGNITUDE — via a partial saturation reduction.
+///
+/// Background: live diagnosis (2026-07-12, cam1+cam6, both Elgato 4K S) proved the
+/// tint is a genuine ISP/AWB characteristic of this card model — it reproduces
+/// identically at every control's factory default, in both raw YUYV and the card's
+/// own onboard MJPG encoder, at two resolutions, and its chroma is strongly
+/// luma-correlated (`corr(Y,V) = -0.96`), which NO hue rotation can null (a
+/// rotation preserves the error vector's magnitude; it can only move it between the
+/// U and V channels — confirmed empirically below). So a full, lossless fix is not
+/// achievable with the 4 controls this card exposes (`v4l2-ctl -d /dev/video1
+/// --list-ctrls`: brightness/contrast/saturation/hue, all 0-255, default 128 — no
+/// white-balance/gain/gamma/backlight control exists on this model to correct the
+/// cast selectively).
+///
+/// What IS achievable: `saturation=0` fully suppresses the tint (proven in the
+/// original diagnosis), and a live sweep on cam6 (2026-07-13, real low-light scene
+/// content, hue/contrast/brightness held at their card defaults) showed the chroma
+/// metric scales LINEARLY with the saturation setting:
+///
+/// ```text
+/// saturation  128(100%)  96(75%)  64(50%)  48(37.5%)  32(25%)  24(18.75%)  16   8    0
+/// u_dev       33.2       25.1     16.4     12.5       8.2      6.3         4.2  2.0  0.0
+/// v_dev       42.4       31.7     20.8     15.6       10.5     7.8         5.2  2.7  0.0
+/// ```
+///
+/// `saturation=32` (out of the card's 0-255 range, ≈12.5% of range / 25% of the
+/// card's own default 128) lands closest to the healthy target (`u_dev≈7,
+/// v_dev≈10.7`, cam5's ShadowCast baseline) — confirmed on BOTH affected units
+/// (cam6: u_dev=8.2 v_dev=10.5; cam1: u_dev=8.3 v_dev=10.5, near-identical, matching
+/// the original finding that the two cards behave identically) — and visually
+/// collapses the vivid magenta/purple cast down to a much duller, close-to-neutral
+/// dark tone (pixel-proof screenshots on #729).
+///
+/// Contrast and brightness were also swept (held at default while varying the
+/// other): brightness has almost no effect on chroma (33.1→31.3 across the FULL
+/// 0-255 range); contrast=0 measurably reduces chroma too, but only by flattening
+/// ALL image contrast to near-uniform gray — useless as broadcast video. Neither is
+/// a viable alternative to desaturating.
+///
+/// **The tradeoff is real and is NOT free**: because the tint and any genuine scene
+/// colour share the exact same saturation gain (this is what makes `saturation=0`
+/// able to fully suppress the tint in the first place), this correction ALSO mutes
+/// real colour content on these 2 units to the same ~25% fraction. There is no
+/// partial-saturation value that removes proportionally MORE of the defect than of
+/// real colour — the two are inseparable through this control. Live validation of
+/// this specific tradeoff against genuinely colourful (not just low-light/dark)
+/// content was NOT possible this session (the cam2 test-pattern painter that would
+/// normally provide bright reference colour was unreachable — see the cam2 disk
+/// GOTCHA — and the live scene at diagnosis time was a dark, low-colour room), but
+/// the linear scaling relationship measured above is clean enough (near-perfect
+/// proportionality across the whole sweep) to generalize with confidence: real
+/// colour on these 2 cameras will read at roughly 25% of its normal saturation.
+/// This function stays its own named entry — never folded into
+/// [`color_production_controls`] — precisely so a future decision to drop, retune,
+/// or replace it (e.g. once real bright content can be checked, or if the physical
+/// units are swapped for a different model) is a one-line change, same as any other
+/// documented per-model policy in [`documented_controls_for_model`].
+pub fn elgato_4k_s_corrective_controls() -> Vec<CaptureControl> {
+    vec![CaptureControl {
+        id: V4L2_CID_SATURATION,
+        target: ControlTarget::RangeScaled { reference_pct: 12 },
+    }]
+}
+
 /// Choose the V4L2 capture controls to enforce at device open.
 ///
 /// - `env_spec = Some(spec)` — an explicit `CAMERA_BOX_CAPTURE_CONTROLS` override;
@@ -474,11 +541,14 @@ pub fn color_production_controls() -> Vec<CaptureControl> {
 ///   regardless of `model` — an operator who typed a literal spec means it.
 /// - `env_spec = None` — **#729 zero-touch by default**: camera-box does NOT write
 ///   any colour control unless `model` has a specifically documented, proven need.
-///   Today that's ONLY [`GrabberModel::ShadowCast2`] (#296: a stray `saturation=0`
-///   left by a prior grab can persist ON THE DEVICE across restarts and brick
-///   production to grayscale — enforcing the certified COLOUR set at every open is
-///   how that self-heals). Every other model — [`GrabberModel::Elgato4kS`],
-///   [`GrabberModel::NzxtSignalHd60`], and [`GrabberModel::Unknown`] — gets NO
+///   That's [`GrabberModel::ShadowCast2`] (#296: a stray `saturation=0` left by a
+///   prior grab can persist ON THE DEVICE across restarts and brick production to
+///   grayscale — enforcing the certified COLOUR set at every open is how that
+///   self-heals) and, as of 2026-07-13, [`GrabberModel::Elgato4kS`] (a proven,
+///   documented hardware/ISP tint on this specific card model — see
+///   [`elgato_4k_s_corrective_controls`] for the empirical tuning that established
+///   the correction and its real colour-fidelity tradeoff). Every other model —
+///   [`GrabberModel::NzxtSignalHd60`] and [`GrabberModel::Unknown`] — gets NO
 ///   controls written at all: plug-and-play, factory defaults, no ceremony.
 ///
 /// #729 supersedes the PRE-existing "production always gets the colour set" design
@@ -517,14 +587,17 @@ pub fn select_capture_controls(
     }
 }
 
-/// #729 — the model→controls policy table itself. `ShadowCast2` is the only model with a
-/// documented, proven need (#296's grab-time grayscale-brick risk); every other model is
-/// zero-touch. Kept as its own function so the policy is a single, obviously-auditable place
-/// — adding a NEW documented-need model later is a one-line change here, not a scattered edit.
+/// #729 — the model→controls policy table itself. `ShadowCast2` has a documented, proven
+/// need (#296's grab-time grayscale-brick risk); `Elgato4kS` has a SECOND, separately
+/// documented, proven need as of 2026-07-13 (the corrective partial-saturation set —
+/// [`elgato_4k_s_corrective_controls`]); every other model is zero-touch. Kept as its own
+/// function so the policy is a single, obviously-auditable place — adding a NEW
+/// documented-need model later is a one-line change here, not a scattered edit.
 fn documented_controls_for_model(model: GrabberModel) -> Vec<CaptureControl> {
     match model {
         GrabberModel::ShadowCast2 => color_production_controls(),
-        GrabberModel::NzxtSignalHd60 | GrabberModel::Elgato4kS | GrabberModel::Unknown => {
+        // TODO(#729 RED): wire Elgato4kS -> elgato_4k_s_corrective_controls() in the GREEN commit.
+        GrabberModel::Elgato4kS | GrabberModel::NzxtSignalHd60 | GrabberModel::Unknown => {
             Vec::new()
         }
     }
@@ -1593,21 +1666,56 @@ mod tests {
     }
 
     #[test]
-    fn elgato_nzxt_and_unknown_are_zero_touch_by_default_729() {
-        // #729: no documented need for the certified colour set on these models — and for
-        // the Elgato 4K S specifically, live diagnosis proved forcing it buys nothing (the
-        // purple/violet tint reproduces identically at the card's OWN factory defaults).
+    fn nzxt_and_unknown_are_zero_touch_by_default_729() {
+        // #729: no documented need for the certified colour set on these models.
         // Plug-and-play means camera-box writes NOTHING here.
-        for model in [
-            GrabberModel::Elgato4kS,
-            GrabberModel::NzxtSignalHd60,
-            GrabberModel::Unknown,
-        ] {
+        for model in [GrabberModel::NzxtSignalHd60, GrabberModel::Unknown] {
             assert!(
                 select_capture_controls(model, None, false).is_empty(),
                 "{model:?} must be zero-touch (no CAMERA_BOX_CAPTURE_CONTROLS override) — #729"
             );
         }
+    }
+
+    #[test]
+    fn elgato_4k_s_gets_the_corrective_saturation_set_729_followup() {
+        // #729 follow-up (2026-07-13): the Elgato 4K S has a SECOND documented, proven
+        // need — a partial-saturation correction for its own hardware/ISP purple/violet
+        // tint (empirically tuned live on cam1+cam6, both reading u_dev≈8.2-8.3/v_dev≈10.5
+        // at this setting, matching the healthy ≈7/10.7 target). FAILS on the unfixed
+        // code (which still routes Elgato4kS to zero-touch / Vec::new()).
+        let c = select_capture_controls(GrabberModel::Elgato4kS, None, false);
+        assert_eq!(
+            c,
+            elgato_4k_s_corrective_controls(),
+            "Elgato 4K S must apply its documented corrective saturation set — got {c:?}"
+        );
+        assert!(
+            c.contains(&CaptureControl {
+                id: V4L2_CID_SATURATION,
+                target: ControlTarget::RangeScaled { reference_pct: 12 },
+            }),
+            "Elgato 4K S must reduce saturation to the certified corrective level — got {c:?}"
+        );
+        // Never the FULL desaturation of the sharp set — that would kill all colour, not
+        // just the tint (saturation=0 was already proven to fully suppress the tint, but
+        // this documented set targets the healthy chroma band, not zero).
+        assert!(
+            !c.iter().any(|x| x.id == V4L2_CID_SATURATION
+                && x.target == ControlTarget::RangeScaled { reference_pct: 0 }),
+            "must NOT be the full-desaturation sharp value — got {c:?}"
+        );
+        // Contrast/brightness/hue are left untouched — the sweep proved they don't help
+        // (hue only rotates the error between channels; contrast=0 just flattens the
+        // whole image) and touching them risks a NEW, undocumented drift.
+        assert!(
+            !c.iter().any(|x| x.id == V4L2_CID_HUE),
+            "must NOT touch hue — got {c:?}"
+        );
+        assert!(
+            !c.iter().any(|x| x.id == V4L2_CID_CONTRAST),
+            "must NOT touch contrast — got {c:?}"
+        );
     }
 
     #[test]
@@ -1627,9 +1735,18 @@ mod tests {
             certified_cam1_controls(),
             "grab must NOT auto-apply the desaturating sharp set"
         );
-        assert!(
-            select_capture_controls(GrabberModel::Elgato4kS, None, true).is_empty(),
-            "grab on a zero-touch model must stay zero-touch too — #729"
+        // #729 follow-up: grab on the Elgato 4K S gets the SAME corrective set as
+        // production (the certified partial-saturation correction), not the sharp set,
+        // and not zero-touch either.
+        assert_eq!(
+            select_capture_controls(GrabberModel::Elgato4kS, None, true),
+            elgato_4k_s_corrective_controls(),
+            "grab on the Elgato 4K S must apply the SAME documented corrective set as production — #729"
+        );
+        assert_ne!(
+            select_capture_controls(GrabberModel::Elgato4kS, None, true),
+            certified_cam1_controls(),
+            "grab on the Elgato 4K S must NOT auto-apply the desaturating sharp set either"
         );
     }
 
