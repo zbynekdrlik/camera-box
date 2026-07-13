@@ -185,6 +185,24 @@ def format_summary_sk(overall_pass: bool, item_results: dict, details: dict = No
     return "\n".join(lines)
 
 
+def format_discord_message_sk(overall_pass: bool, item_results: dict, details: dict = None,
+                               timestamp: str = "") -> str:
+    """#724 -- the EVENT-mode Discord confirmation message: sent to the owner's Discord thread
+    after EVERY assert-phase run (pass AND fail), so the user never again has to trust a bare
+    terminal claim about the rig being broadcast-clean. PASS -> "EVENT mod POTVRDENY" (a
+    confirmation); FAIL -> "EVENT mod NEPRESIEL" (a WARNING naming every failing item with a
+    CHYBA mark). Reuses format_summary_sk's per-item lines -- one source of truth for what
+    "clean" means, never a second, divergent description of the same 8 items. Always
+    comfortably under Discord's 2000-char single-message hard cap (a short fixed 8-item
+    checklist, even with details populated for every item)."""
+    header_emoji = "✅" if overall_pass else "⚠️"  # checkmark / warning
+    summary = format_summary_sk(overall_pass, item_results, details)
+    lines = [f"{header_emoji} {summary}"]
+    if timestamp:
+        lines.append(f"cas: {timestamp}")
+    return "\n".join(lines)
+
+
 def compute_item_results(facts: dict) -> dict:
     """Run every item's decision function against an already-gathered facts dict (see the
     module docstring for the facts shape). Returns {item_name: bool}."""
@@ -205,9 +223,15 @@ def compute_item_results(facts: dict) -> dict:
 
 
 def main(argv=None):
+    import datetime
+
     ap = argparse.ArgumentParser(description="#722 EVENT-mode CONTRACT decision + aggregation")
     ap.add_argument("--facts", required=True, help="path to the gathered-facts JSON")
     ap.add_argument("--result-out", default="", help="optional: write the result JSON here")
+    ap.add_argument(
+        "--discord-out", default="",
+        help="optional: write the #724 Discord confirmation message here (plain text)",
+    )
     a = ap.parse_args(argv)
 
     with open(a.facts, encoding="utf-8") as f:
@@ -219,15 +243,22 @@ def main(argv=None):
     summary = format_summary_sk(overall_pass, item_results, details)
     print(summary)
 
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    discord_message = format_discord_message_sk(overall_pass, item_results, details, timestamp)
+
     result = {
         "overall_pass": overall_pass,
         "item_results": item_results,
         "failed_items": failed,
         "summary_sk": summary,
+        "discord_message_sk": discord_message,
     }
     if a.result_out:
         with open(a.result_out, "w", encoding="utf-8") as f:
             json.dump(result, f, indent=2)
+    if a.discord_out:
+        with open(a.discord_out, "w", encoding="utf-8") as f:
+            f.write(discord_message)
 
     sys.exit(0 if overall_pass else 1)
 
