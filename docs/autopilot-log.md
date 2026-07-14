@@ -5188,3 +5188,36 @@ vendored `obs-source.c` release-cadence fix (#726 candidate A).
   with the resolution + a reusable ANSI-strip colour-dump timeseries extraction technique).
   `.claude/skills/provision` gained the new cam3 apt-broken signature + the `apt-get download +
   dpkg -i` single-package bypass.
+
+## 2026-07-14 — #707 B2 crawl fixed+deployed; B1 freeze root-caused (autopilot, dev `26de1c3c2`, PR #704)
+
+- **#707 B2 (CRAWL) — FIXED + deployed + verified.** `vendor/obs-studio/libobs/obs-source.c`:
+  stop clearing `genlock_last_known_n` on the backlog-storm relock; `genlock_measure_source_multiple`
+  scans first `GENLOCK_MEASURE_SCAN_DEPTH`=6 queue entries for the first strictly-increasing pair;
+  add the clear at the flush/inactive reset site. Rust mirror + RED→GREEN `54dd2b5bf`→`a256dee60`
+  (`src/probe/genlock.rs`), vendored guard in `tests/genlock_release_cadence.rs`. FULL windows-genlock
+  bundle (build `26de1c3c2`, run 29315242339) deployed to strih+stream per the #726 runbook (only
+  vendor change since `bfb017d2` is obs-source.c; ProgramData distroav kept + verified = manifest).
+  drift-guard `--compare` = NO DRIFT (exit 0) on both boxes. Post-B2 gate run RUN_ID `34825411`:
+  **CAM6 win1 evenness 0.70→0.98** (delta=1 count 216→12), no crawl-signature window (all
+  `derived_expected_step=2`, delta=2 dominant). B2 acceptance met.
+- **#707 B1 (FREEZE+JUMP) — root-caused, NOT fixed (stays open).** Shipped the instrumentation:
+  prong 1 `src/emit_rate_ring.rs` (per-second emit ring, RED/GREEN `f1e0b5045`) + prong 2
+  `scripts/lib/transport-sampler.sh` + `[5b/8]`/`[7c/8]` in recording-e2e.sh (`26de1c3c2`,
+  `tests/harness_transport_sampler_707.rs`). On the rig: transport sampler armed on all 6 boxes,
+  harvested 6 CSVs. **Discriminator: box genlock EMIT GATE.** CAM1 box→strih TCP Send-Q max=0,
+  retrans=0 (LINK ruled out); capture 60fps/0-dropped (capture ruled out); emit collapsed 60→44fps
+  (~26% captured-but-never-emitted). Box's own `#707 genlock emit-gate SKIPPED` diagnostic (~10/s)
+  names it: emit gate leaps past boundary intervals on a clock discontinuity/stalled poll.
+  CAM1-specific + chronic (survives camera-box restart; prod snapshot cam1=55.8fps/64-skips-per-30s,
+  cam3/4/5/2=60fps/0, cam6 minor). The E2E test-window fleet-wide ~46fps deficit is a SEPARATE
+  burn-CPU confound (3-core boxes, load ~5.9), NOT the prod mechanism. B1 FIX = emit-gate boundary-skip
+  (re-emit/hold vs leap-past; CAM1 clock/poll instability w/ the Elgato 4K S) — remaining #707 work.
+- **#726 — CLOSED** (both deliverables met): 60→30 release-cadence crawl root-caused (STICKY-N +
+  #707 B2 → no crawl-signature window; CAM6 0.70→0.98) + presentation-evenness gate added (in verdict,
+  correctly PASS uniform / FAIL the CAM1 freeze). Before/after on the ticket.
+- **#752 — FILED**: the `#707 emit-gate SKIPPED` diagnostic is unthrottled (~10/s → rsyslogd 37% +
+  journald 15% CPU on 3-core boxes, 25k lines/60s) — a CPU-starvation feedback loop; rate-limit it.
+- **PR #704 NOT merged** — fused gate genuinely red (`overall_pass=false`): the CAM1 #707 emit-gate
+  freeze AND the independent A/V-sync gate (cam2 −42.3ms, operator mbc-dock #689, not a code defect).
+  No bypass. Regular CI all green at `26de1c3c2`. Held for a genuinely-green gate.

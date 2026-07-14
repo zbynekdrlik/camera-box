@@ -616,6 +616,49 @@ To test whether imag-nb's GPU/NVENC state correlates with a per-window judder-de
    growth to correlate against a judder density that was ALSO flat, just already-elevated). Full
    writeup on `#674`'s own thread.
 
+## Emit-rate-deficit / freeze-jump discriminator (#707 B1, 2026-07-14) — 3-layer read: LINK vs BOX-EMIT vs SDK
+
+When `all_cambox_continuity` shows freeze+jump on a cambox (big deltas 7-12 in the window's
+`presentation_cadence.delta_histogram`, i.e. frozen frames then a jump), locate the loss LAYER with
+three signals instead of guessing:
+
+1. **LINK** — the box→strih TCP transport sampler (`scripts/lib/transport-sampler.sh`, armed `[5b/8]`,
+   harvested `[7c/8]` into the run dir as `transport-sampler-<cam>-<RUN_ID>.csv`). Columns:
+   `epoch_ms,iface,send_q_bytes,retrans_total,rx_errors,rx_dropped,tx_errors,tx_dropped`. Over the
+   window: `send_q_bytes max` (0 = TCP never backed up), `retrans_total` DELTA (0 = no wire loss),
+   `tx_err/tx_drop` DELTA. All flat → LINK is CLEAN, loss is upstream of the socket. (`rx_dropped`
+   is INBOUND, not the emit path — benign background multicast; ignore it.)
+2. **BOX EMIT PATH** — the box's own `camera-box` 5s `Streaming:` journal report:
+   `N fps emitted / M fps captured (S sent, C captured, D capture-dropped)`. **`captured`≈60 + `D`=0
+   but `sent` << `captured` = the emit path fell behind capture** (frames captured, never emitted).
+   That is the loss layer. The box's OWN `#707 genlock emit-gate SKIPPED …` diagnostic names the exact
+   mechanism (the genlock emit gate leaps past boundary intervals on a clock discontinuity / stalled
+   poll). `src/emit_rate_ring.rs` (prong 1) pins the exact 1s bucket — but see the deploy gotcha below.
+3. **NDI SDK internal** — only if LINK clean AND emit≈capture (no box deficit) yet strih still froze.
+
+**Confounds that fooled the first read (be honest, don't overstate):**
+- The E2E **burn binary** (`camera-box-burn-<RUN_ID>`) runs alongside `camera-box` and oversubscribes
+  the **3-core** cam boxes (load ~5.9) → ALL boxes drop to ~46fps emit DURING the test. That is a
+  TEST-MEASUREMENT artifact, NOT the production mechanism. Re-check emit rate in PRODUCTION (no burn,
+  post-cleanup): the genuine defect is the box that STAYS degraded (live #707: only CAM1 = 55.8fps +
+  ~64 emit-gate skips/30s; cam3/4/5/2 = 60fps/0 skips, cam6 minor). Chronic if it survives a
+  `systemctl restart camera-box`.
+- The `#707 emit-gate SKIPPED` diagnostic is unthrottled (~10/s → rsyslogd ~37% + journald ~15% CPU on
+  3 cores) — a logging-CPU feedback loop that WORSENS the emit stall (filed #752). Suspect it whenever
+  a box shows rsyslogd/journald high in `ps` during an emit deficit.
+
+## GOTCHA — the E2E harness does NOT deploy the main `camera-box` binary; new `src/main.rs` instrumentation won't be on the boxes after an E2E run
+
+`recording-e2e.sh` `[2/8]`/`[2b/8]` deploys + runs the **burn binary** (`camera-box-burn-<RUN_ID>.service`
+from `USE_PREBUILT_PROBE_DIR`) and `systemctl restart camera-box` — but the restarted service is the
+**INSTALLED `/usr/local/bin/camera-box`** (the production build), NOT a HEAD build. So a change to
+`src/main.rs` / any lib the main binary uses (e.g. the #707 `src/emit_rate_ring.rs` emit-1s report) is
+CI-green but **NOT present on the cam boxes after an E2E gate run** — verify with
+`strings /usr/local/bin/camera-box | grep <your-new-log-string>` (0 = not deployed). To exercise
+main-binary instrumentation on the rig you must fleet-deploy camera-box (`scripts/deploy-fleet.sh` /
+upgrade-fleet), separately from the E2E run. The strih/stream `obs.dll` (genlock) IS what a genlock
+deploy updates; the cam-box main binary is a DIFFERENT artifact on a DIFFERENT deploy path.
+
 ## Painter ground-truth CSV lifecycle + recording orphan guard (#355 / #359)
 
 **frame-probe writes the painter ground-truth `/tmp/painter.csv` ONLY on its clean `--duration-secs`

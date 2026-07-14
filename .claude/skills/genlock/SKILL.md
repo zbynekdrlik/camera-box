@@ -260,6 +260,35 @@ Procedure (per box, ~10 files actually differ but deploy the whole stage for NO-
    `OpenVideoMixProjector {videoMixType:OBS_WEBSOCKET_VIDEO_MIX_TYPE_MULTIVIEW, monitorIndex:1}`
    (strih monitors: `U27P2G6B`(0)=UI, `SyncMaster`(1)=multiview panel).
 
+### Doing the full-bundle deploy over the `win-*` MCP (confirmed live #707, 2026-07-14)
+
+Confirmed nuances when the deploy is driven from a `mcp__win-strih__Shell` / `mcp__win-stream-snv__Shell`
+(NOT the ssh wrapper):
+
+- **Each MCP Shell call is a SEPARATE elevated PowerShell process** — it IS admin (robocopy to
+  `C:\Program Files` works), but `Start-Job` / any background job dies the instant the call returns
+  (the parent shell exits). So do NOT background box-side work with `Start-Job` and poll it in a
+  later call — the job is already gone. Either run the whole robocopy INLINE in one elevated call
+  (raise the Shell `timeout` — 240 s honored) OR use a detached `Start-Process powershell -WindowStyle
+  Hidden -File <script>` that writes a status file, and poll THAT file.
+- **The `data\obs-plugins\win-dshow\obs-virtualcam-module64.dll` lock hangs robocopy FOREVER.** It is
+  held by the Windows Camera Frame Server even with OBS down; robocopy's default `/R:1000000 /W:30`
+  retries it endlessly (the run "stalls" with no error). ALWAYS deploy `data\` with
+  `robocopy … /R:2 /W:2 /XF obs-virtualcam-module64.dll` — the file is content-IDENTICAL build-to-build
+  (verify `Get-FileHash` box-vs-stage), so excluding it is zero drift. (This is the #726 gotcha; the
+  live fix is the `/XF` + short retry cap.)
+- **Serve the bundle from dev1 with `run_in_background: true`** (not `nohup … &` in a plain Bash call —
+  that gets SIGTERM'd on return; exit 144). dev1 rig-subnet IP is `10.77.9.165`; boxes reach it there.
+- **drift-guard `--compare` build facets vs runtime pins.** With ONLY the box SHAs
+  (`obs_dll_sha256`/`distroav_dll_sha256`/`genlock_build_sha`/`genlock_capability` + `manifest=`) the
+  BUILD facets go `OK` but the run exits **11 (INCOMPLETE — NOT drift)** because 4 runtime pins are
+  UNKNOWN. For a clean **exit 0** also supply: `distroav_version=6.2.1`, `ndi_runtime=6.3.2.0`
+  (compare is `>= 6.3.0`, lenient), `distroav_dll_paths=C:\ProgramData\…\distroav.dll`, and
+  `ndi_input_latency="<inp>=0,…"`. Gather the per-source latency via WS — `obs_phase2._conn(host,pw)`
+  then `GetInputList` → for each `inputKind=="ndi_source"` with `genlock_fifo=true`,
+  `GetInputSettings`→`inputSettings.latency` (0=Normal). WS password is in local memory
+  (`rig-obs-ws-credentials`), `NDI_RUNTIME_DIR_V6=/usr/lib/ndi`.
+
 ## Bundle version integrity (EPIC #125)
 
 **On-box build identity in the OBS title (#152):** the window title is composed in
