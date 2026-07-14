@@ -241,6 +241,14 @@ pub mod fb_blank;
 // send_frame_data_with_timecode` times the real call and WARNs via this decision.
 pub mod send_stall;
 
+// #707 — V4L2 capture DEQUEUE stall diagnostic (pure decision). Given how long a SINGLE blocking
+// `process_frame` dequeue (`self.stream.next()`, a VIDIOC_DQBUF under the hood) took and the
+// capture device's own configured frame interval, decides whether THIS dequeue stalled — the
+// capture-side half of the observability pair `send_stall` started on the NDI-send side. No probe
+// deps, so it unit-tests Tier-0; `main.rs`'s own capture loop times the real dequeue (via
+// `capture::FrameInfo::dequeue_duration_ms`) and WARNs via this decision.
+pub mod capture_stall;
+
 // #726 — presentation-cadence EVENNESS metric (pure decision). Given the per-frame painted-tick
 // sequence in RECORDED order (the same `SegmentFrame.tick` data `probe::recording_segments::
 // window_segment` already extracts), classifies whether a recording's 60fps->30fps downsample is

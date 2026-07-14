@@ -809,6 +809,32 @@ async fn run_capture_loop(
                     ));
                 }
 
+                // #707 — did THIS frame's blocking V4L2 dequeue itself stall? Checked on EVERY
+                // captured frame (regardless of emit/decimate decisions below), mirroring the
+                // offset-sample/chroma-sample blocks above. See `capture_stall`'s module doc: this
+                // is the missing capture-side half of the `send_stall` observability pair — a
+                // WARN here on the NEXT natural CAM1-class recurrence, at the same time as an
+                // `all_cambox_delivery_latency` spike, confirms the V4L2/USB/driver layer as the
+                // mechanism; silence here (as already confirmed for `send_stall` on a real 2026-
+                // 07-14 recurrence) would point elsewhere (e.g. strih's own presentation cadence,
+                // per #726).
+                if configured_capture_fps > 0.0 {
+                    let capture_frame_interval_ms = 1000.0 / configured_capture_fps;
+                    if camera_box::capture_stall::is_capture_stall(
+                        info.dequeue_duration_ms,
+                        capture_frame_interval_ms,
+                    ) {
+                        tracing::warn!(
+                            "{}",
+                            camera_box::capture_stall::capture_stall_warning(
+                                info.dequeue_duration_ms,
+                                capture_frame_interval_ms,
+                                configured_capture_fps,
+                            )
+                        );
+                    }
+                }
+
                 if out_interval_ns > 0 {
                     // Genlock decimation: emit only the capture at/after each
                     // wall-clock boundary (pure logic in ndi::genlock_emit_gate).

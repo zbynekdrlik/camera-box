@@ -25,6 +25,15 @@ pub struct FrameInfo {
     /// or test fixtures) — callers that don't feed a real capture timestamp never see this
     /// field used for genlock stamping.
     pub capture_monotonic_100ns: i64,
+    /// #707 — how long THIS frame's blocking V4L2 dequeue (`self.stream.next()`, a
+    /// `VIDIOC_DQBUF` under the hood) actually took, in milliseconds, measured at the call site
+    /// in [`VideoCapture::process_frame`]. `0.0` where no real dequeue happened (e.g.
+    /// [`VideoCapture::frame_info`]'s static getter, or test fixtures) — mirrors
+    /// `capture_monotonic_100ns`'s own "0 = no real measurement" convention. Callers feed this
+    /// into [`crate::capture_stall::is_capture_stall`] to decide whether to WARN — see that
+    /// module's doc for why this closes the SAME observability gap `send_stall` closed for the
+    /// NDI send side, on the capture side instead.
+    pub dequeue_duration_ms: f64,
 }
 
 /// Video frame data with metadata (for compatibility, still used for owned data)
@@ -1082,7 +1091,12 @@ impl VideoCapture {
     where
         F: FnMut(&[u8], FrameInfo),
     {
+        // #707 — time the blocking V4L2 dequeue itself (not the callback below, which does its
+        // own encode+send and is measured separately by `send_stall`). See `capture_stall`'s
+        // module doc for why this is the missing half of the observability pair.
+        let dequeue_started = std::time::Instant::now();
         let (buffer, metadata) = self.stream.next()?;
+        let dequeue_duration_ms = dequeue_started.elapsed().as_secs_f64() * 1000.0;
         let seq = metadata.sequence;
 
         // #696 — drop (never forward to NDI/genlock) a buffer the driver/format itself
@@ -1120,6 +1134,7 @@ impl VideoCapture {
             fourcc: self.fourcc,
             stride: self.stride,
             capture_monotonic_100ns,
+            dequeue_duration_ms,
         };
 
         // Zero-copy: pass buffer slice directly to callback
@@ -1145,6 +1160,7 @@ impl VideoCapture {
             // No real V4L2 metadata at this static getter (no frame was just dequeued) — see
             // the doc on `FrameInfo::capture_monotonic_100ns`.
             capture_monotonic_100ns: 0,
+            dequeue_duration_ms: 0.0,
         }
     }
 
@@ -1249,6 +1265,7 @@ mod tests {
             fourcc: FourCC::new(b"YUYV"),
             stride: 3840,
             capture_monotonic_100ns: 0,
+            dequeue_duration_ms: 0.0,
         };
         // Test Copy trait
         let copied = info;
@@ -1265,6 +1282,7 @@ mod tests {
             fourcc: FourCC::new(b"MJPG"),
             stride: 2560,
             capture_monotonic_100ns: 0,
+            dequeue_duration_ms: 0.0,
         };
         assert_eq!(info.width, 1280);
         assert_eq!(info.height, 720);
