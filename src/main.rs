@@ -603,6 +603,13 @@ async fn run_capture_loop(
         let mut frame_count: u64 = 0; // frames captured this report window
         let mut emit_count: u64 = 0; // frames actually sent to NDI this window
         let mut last_report = std::time::Instant::now();
+        // #707 B1 — per-second emit/capture ring. A MONOTONIC epoch (never the wall clock — this
+        // ticket is about DanteSync wall-clock seams) buckets emit/capture into 1-second slices so a
+        // sub-5s emit pause (the #707 freeze) surfaces instead of averaging into the 5s report.
+        let ring_epoch = std::time::Instant::now();
+        let mut emit_ring = camera_box::emit_rate_ring::EmitRateRing::new(
+            camera_box::emit_rate_ring::DEFAULT_RING_SECONDS,
+        );
 
         // #299 — colour-capture metric: sample chroma once per CHROMA_SAMPLE_FRAMES
         // captured frames (≈1 Hz at 60 fps) and log alongside the 5-second fps report.
@@ -782,6 +789,9 @@ async fn run_capture_loop(
         let mut next_boundary_ns: u64 = 0;
 
         while running_capture.load(Ordering::Relaxed) {
+            // #707 B1 — snapshot the emit counter before the frame closure so the per-second ring
+            // can attribute exactly this frame's emit (0 or 1) after it returns.
+            let emit_before = emit_count;
             // ZERO-COPY: Process frame directly from mmap buffer without copying
             let result = capture.process_frame(|data, info| {
                 // #286 — periodically re-sample the monotonic->realtime clock offset. Counts
@@ -1002,6 +1012,33 @@ async fn run_capture_loop(
                 Ok(()) => {
                     frame_count += 1;
 
+                    // #707 B1 — feed the per-second emit/capture ring (MONOTONIC clock) so a
+                    // sub-5s emit pause surfaces instead of averaging into the 5s report. WARN the
+                    // instant any completed 1-second bucket's emit dips below the send floor: this
+                    // is the box-side prong of #707 B1's freeze discriminator — if it fires during
+                    // a strih freeze the box emit path dipped; if the box stays clean (buckets ~60)
+                    // while strih freezes, the loss is downstream (link / NDI SDK), read off the
+                    // transport sampler instead.
+                    let emitted_this = (emit_count - emit_before) as u32;
+                    let now_mono_ns = ring_epoch.elapsed().as_nanos() as u64;
+                    for bucket in emit_ring.observe(now_mono_ns, emitted_this, 1) {
+                        if camera_box::emit_rate_ring::emit_bucket_below_floor(
+                            bucket.emit,
+                            send_fps as f64,
+                            camera_box::emit_rate_ring::BUCKET_FLOOR_FRACTION,
+                        ) {
+                            tracing::warn!(
+                                "#707 B1 emit-1s DIP: a 1-second window emitted {} frames vs a {} fps configured send rate (floor {:.0}) while capture stayed {} that second — a sub-5s emit pause on THIS box. Discriminator: during a strih freeze this WARN = the box emit path dipped; if the box stays clean while strih freezes, the loss is downstream (link/NDI SDK — read the transport sampler CSV). recent emit-1s: {:?} cap-1s: {:?}",
+                                bucket.emit,
+                                send_fps,
+                                send_fps as f64 * camera_box::emit_rate_ring::BUCKET_FLOOR_FRACTION,
+                                bucket.capture,
+                                emit_ring.emit_buckets(),
+                                emit_ring.capture_buckets(),
+                            );
+                        }
+                    }
+
                     // Report fps every 5 seconds. Under genlock decimation the
                     // emit rate (frames actually sent) differs from the capture
                     // rate — log both so a decimation regression (e.g. emitting
@@ -1073,6 +1110,16 @@ async fn run_capture_loop(
                                 corrupted
                             );
                         }
+                        // #707 B1 — print the per-second emit/capture ring alongside the 5s
+                        // average so a sub-5s emit pause (the #707 freeze) is visible in the log
+                        // even when it averaged out of the fps line above. Buckets are oldest-first,
+                        // one per completed 1-second window.
+                        tracing::info!(
+                            "#707 emit-1s: {:?} cap-1s: {:?} (1-second buckets, oldest first)",
+                            emit_ring.emit_buckets(),
+                            emit_ring.capture_buckets(),
+                        );
+
                         // #656 — capture-delivery-rate health: WARN when the captured fps has
                         // sustained a >1% deviation from the device's negotiated capture rate
                         // for CAPTURE_RATE_WARN_WINDOWS consecutive report windows (a real

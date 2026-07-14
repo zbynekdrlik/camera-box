@@ -269,5 +269,12 @@ pub mod presentation_cadence;
 // neighbouring frames for #186 pixel proof.
 pub mod residual_events;
 
+// #707 B1 — per-second emit/capture rate ring (pure decision). The 5s `Streaming:` report averages
+// fps over the whole window, so a sub-5s EMIT PAUSE (the #707 freeze) can hide in it. This ring
+// keeps the last N completed 1-second (emit, capture) buckets so `main.rs` prints a compact
+// `emit-1s:` line and WARNs the instant any single second's emit dips below the send floor — the
+// box-side prong of #707 B1's freeze discriminator. No probe deps, so it unit-tests Tier-0.
+pub mod emit_rate_ring;
+
 #[cfg(feature = "probe")]
 pub mod probe;
