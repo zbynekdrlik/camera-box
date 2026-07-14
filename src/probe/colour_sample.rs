@@ -689,6 +689,37 @@ mod tests {
         img
     }
 
+    /// Load a REAL fixture PNG from `tests/fixtures/` as packed-RGB8 — mirrors `qr.rs`'s own
+    /// `optical_fixture_luma` (same directory, same panic-on-missing style), just RGB instead of
+    /// luma since [`detect_dual_qr`] takes an `RgbImage`.
+    fn fixture_rgb(name: &str) -> RgbImage {
+        let path: std::path::PathBuf = [env!("CARGO_MANIFEST_DIR"), "tests", "fixtures", name]
+            .iter()
+            .collect();
+        image::open(&path)
+            .unwrap_or_else(|e| panic!("open fixture {}: {e}", path.display()))
+            .to_rgb8()
+    }
+
+    #[test]
+    fn detect_dual_qr_recovers_via_otsu_top_band_crop_on_a_real_soft_frame_718() {
+        // #718 — reuses the EXISTING, already-proven #754 fixture (a real frame from a live rig
+        // recording where the dual-QR is genuinely soft, DataEcc on both halves via a bare
+        // full-frame rqrr pass — confirmed live via a standalone rqrr probe of this exact PNG).
+        // Before #718, `detect_dual_qr` ran ONLY that bare full-frame pass — the SAME pass #754
+        // already proved insufficient for the continuity decoder — so it MISSES this frame
+        // (RED: this assertion fails on the pre-#718 `detect_dual_qr`). The #718 fix adds the
+        // SAME recovery cascade the continuity decoder already had (#363 Otsu retry + #754
+        // top-band-crop retry) directly to this function, which recovers it (GREEN). If a
+        // future rqrr reads this fixture full-frame-plain, re-tune the fixture — never weaken
+        // this assertion to make it pass.
+        let img = fixture_rgb("optical-sweep-decay-late-imag.png");
+        assert!(
+            detect_dual_qr(&img).is_some(),
+            "detect_dual_qr must recover the dual-QR on this real soft frame (#718) — got None"
+        );
+    }
+
     fn to_gray(c: Rgb) -> Rgb {
         let y = (0.299 * c.r as f64 + 0.587 * c.g as f64 + 0.114 * c.b as f64).round() as u8;
         Rgb::new(y, y, y)
