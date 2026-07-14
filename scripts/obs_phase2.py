@@ -1928,6 +1928,39 @@ def rig_busy_check(a):
     print(json.dumps(out))
 
 
+def open_projectors(a):
+    """#758 preflight — imag-nb's Multiview AND Program projectors must be OPEN before ANY run
+    starts (the user's explicit, binding requirement: "MULTIVIEW MUSI BYT ZAPNUTE ako podmienka
+    preflight pred tym nez sa rozbehne akykolvek test" — a run must NEVER begin with Multiview
+    closed).
+
+    obs-websocket 5.x has NO "is a projector currently open" introspection request (no
+    GetProjectorList equivalent exists in the protocol) — so this ALWAYS, idempotently, OPENS
+    both projectors via OpenVideoMixProjector rather than trying to check-then-open. Opening an
+    ALREADY-open projector on the same monitor just re-positions/replaces the same window
+    (harmless) — this is how "auto-open if closed" works without a separate check step the API
+    can't actually provide. `_rpc`'s default `ignore_err=False` means a failed request RAISES
+    (propagates as a non-zero exit) — the caller's preflight step must never silently continue
+    with a projector that failed to open.
+
+    Monitor mapping (imag-nb, #758): monitorIndex 0 = DP-0 -> Multiview; monitorIndex 1 = HDMI-0
+    -> Program."""
+    ws = _conn(a.host, a.password)
+    try:
+        _rpc(ws, "OpenVideoMixProjector", {
+            "videoMixType": "OBS_WEBSOCKET_VIDEO_MIX_TYPE_MULTIVIEW",
+            "monitorIndex": 0,
+        })
+        print("opened/confirmed Multiview projector on monitorIndex 0 (DP-0)")
+        _rpc(ws, "OpenVideoMixProjector", {
+            "videoMixType": "OBS_WEBSOCKET_VIDEO_MIX_TYPE_PROGRAM",
+            "monitorIndex": 1,
+        })
+        print("opened/confirmed Program projector on monitorIndex 1 (HDMI-0)")
+    finally:
+        ws.close()
+
+
 def program_scene(a):
     """#281 Fix#3: print the current program scene name to stdout (one line).
 
@@ -1948,7 +1981,7 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
     for name in (
         "setup", "teardown", "record", "prod-scene", "switch", "program-scene",
-        "stream-status", "latency-check",
+        "stream-status", "latency-check", "open-projectors",
     ):
         p = sub.add_parser(name)
         p.add_argument("--host", required=True)
@@ -2042,7 +2075,8 @@ def main():
     {"setup": setup, "teardown": teardown, "record": record,
      "prod-scene": prod_scene, "switch": switch,
      "program-scene": program_scene, "rig-busy-check": rig_busy_check,
-     "stream-status": stream_status, "latency-check": latency_check}[a.cmd](a)
+     "stream-status": stream_status, "latency-check": latency_check,
+     "open-projectors": open_projectors}[a.cmd](a)
 
 
 if __name__ == "__main__":
