@@ -648,6 +648,27 @@ original cameras** (cam2 was already 1:1, coincidentally): `NDI cam1`→`CAM3 (u
 names ("Cam 1"/"Cam 3"/"Cam 5") followed the input labels — same inversion. Kept here for
 context only; do NOT resurrect this table.
 
+**GOTCHA for the NEXT full mapping change: grep is not enough — check for a HARDCODED-not-derived
+literal too.** Landing the 2026-07-14 pivot required editing far more than the obvious mapping
+owner (`set-ndi-mapping.py`'s `DEFAULT_MAP`): `camera-set.sh`'s `camera_strih_route()`,
+`recording-e2e.sh`'s `CAMBOX_SWEEP` + its `#286` `BURN_TARGETS` extension list + its `#365`
+`FROZEN_CAM_SOURCES` lists, and — the one that would have been EASY to miss — `rig-mode.sh`'s OWN
+`STRIH_PROG_SOURCE="${STRIH_PROG_SOURCE:-NDI cam5}"` default. Every OTHER copy of "which strih
+input shows cam1" in `recording-e2e.sh` is DYNAMICALLY DERIVED via
+`camera_strih_route("$CAMERA_NAME")` (confirmed by a dedicated regression test,
+`recording_e2e_strih_scene_and_source_derive_from_the_resolved_camera`, that the string is NEVER
+hardcoded there) — but `rig-mode.sh`'s copy (used for its OWN burn-toggle target, `#246`) is a
+SEPARATE hardcoded literal with no such test, so it silently kept pointing at the OLD input after
+the pivot until caught by manual inspection, not by any test failure. **Before declaring a mapping
+change complete: grep every script that has EVER read `camera_strih_route`/`CAMERA_STRIH_SCENE`/
+`CAMERA_STRIH_SOURCE` output, and separately grep for the literal `NDI cam<N>`/`Cam <N>` strings
+themselves (`grep -rn '"NDI cam[0-9]"' scripts/`) — a hardcoded literal in a DIFFERENT script that
+happens to serve the same conceptual role will not show up by tracing one script's own call
+graph.** Also worth checking after any future mapping change: `vendor/README.md`'s drift-guard
+per-input latency pin tables (`genlock_source_latency_strih`, `ndi_input_latency`) — those encode
+LIVE state keyed by input name and need a fresh live re-baseline, never a blind text edit (see
+#757).
+
 To enable genlock on a camera's strih ingest: `SetInputSettings genlock_fifo=true`
 on the input whose `ndi_source_name` matches that camera (`overlay=true` so other settings persist).
 
