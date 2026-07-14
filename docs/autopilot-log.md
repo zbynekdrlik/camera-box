@@ -5265,3 +5265,27 @@ vendored `obs-source.c` release-cadence fix (#726 candidate A).
 - **PR #704 NOT merged** — fused gate genuinely red (`overall_pass=false`): the CAM1 #707 emit-gate
   freeze AND the independent A/V-sync gate (cam2 −42.3ms, operator mbc-dock #689, not a code defect).
   No bypass. Regular CI all green at `26de1c3c2`. Held for a genuinely-green gate.
+
+## 2026-07-14 — #754 (optical decode) + #755 (cam7 plumbing) + #756 (version-parity) + #689/#714 (A/V honesty) — bundled batch, PR #704 train
+- **#754 — optical decode decay ELIMINATED, rig-proven twice** (RED `81f2249b1` → GREEN `a93b5e8bf`
+  top-band 0.67 crop recovery; regression `optical_dual_qr_recovered_on_late_sweep_frame_via_top_band_755754`
+  in `src/probe/qr.rs`). Fresh run 581523199 (commit `e38bb0b36`): imag optical 0/18792 undecodable,
+  cam1-7 4/9640, no 100%→0% ramp. Stays OPEN until PR #704 merges.
+- **#755 — cam7 verdict plumbing** (`99f209655`): CAMERA_UNDER_TEST_NODES 6→7, OPTICAL_INJECTION_NODES
+  5→6, `--burn-cam7-run-id`, recording-e2e.sh cam7 wiring; test `all_cambox_av_sync..._312_624` N=100→120.
+  Run 581523199 attributes cam7 (optical span 9640, own continuity window, A/V derived +11.52). OPEN.
+- **#756 — cross-box genlock-build PARITY gate + imag segfault forensics** (`819562e79`): pure
+  `genlock_build_parity_report` (drift-guard.sh) + producer (bundle_state) + opt-in blocking wiring
+  (version-integrity-gate.sh, engages only at ≥2 non-empty SHAs so [0/8] passed dormant this run);
+  5+3+6 TDD. Forensics: both imag crashes stock-OBS; render-health already strict. OPEN.
+- **#689/#714 — A/V per-camera honesty** (`e38bb0b36`, tracked on #689 since #714 CLOSED): pure
+  `av_window::effective_offset_ms(sync, derived)` (measured→av_offset, derived→derived_offset, null
+  only for genuine unknown) wired into recording-verdict cam_json; 3 Tier-0 tests. Run 581523199:
+  every camera now carries a computable `effective_offset_ms` (no silent cam2-only null). BUT the A/V
+  gate stays red — cam2 measured +24.98ms at supervisor's new hold 968 (over-corrected the −43.16
+  baseline, ~5ms outside ±20), derived cam1/3/5 also >20ms; cam4/6/7 pass. Dock #690 NOT demoted.
+- **PR #704 NOT merged (this cycle too)** — fused run 581523199 `overall_pass=false` on UNRELATED
+  pre-existing blockers: `all_cambox_continuity` copies/gaps (#707), `all_cambox_delivery_latency`
+  spread (#624), strih 4 real-drops (#741 recurred, non-monotonic tell), imag judder, A/V spread
+  (#689 calibration). NONE from this batch — #754/#755/#756 legs all clean, #689 code correct. CI
+  Build + Windows-probe-build green at `e38bb0b36`. Honest hold, no bypass.

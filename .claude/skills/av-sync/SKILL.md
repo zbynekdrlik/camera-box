@@ -7,6 +7,21 @@ stream recording and reports the offset. Convention: `av_offset_ms = video − a
 **negative = video LEADS audio** → ADD `latency_adjust_ms` (= −offset) to the video
 source's genlock latency (DistroAV "Latency (ms)" on the program NDI input, hot-apply).
 
+## The `latency_adjust_ms = −offset` (1:1) model did NOT hold on a live recalibration — verify, don't assume one move lands inside ±20ms (2026-07-14, #689)
+
+The convention above says: set the video source's genlock hold by `−offset`, expecting the next
+run's offset to be ~0. A live supervisor recalibration on run 581523199 contradicted a clean 1:1
+response: cam2 measured **−43.16ms at stream hold 925**, the hold was moved **+43ms to 968**
+(exactly `−offset`), yet the NEXT run measured cam2 at **+24.98ms** — a +68ms swing for a +43ms
+move (it OVERSHOT ~0 by ~25ms and flipped sign), still outside the ±20ms bound. Whether that ~25ms
+is a genuinely-non-unity slope or run-to-run measurement variance in the baseline is unresolved on
+one data point — but the operational takeaway is firm: **do NOT assume a single `−offset` hold
+nudge will land the measured leg inside ±20ms.** After any hold change, re-run the fused gate and
+READ cam2's `av_offset_ms` back; expect to iterate (this run needs a further −~15ms nudge toward
+hold ~950), or fall back to the operator dock (#690, which was NOT demoted for exactly this reason).
+Every camera's honest post-move offset is now readable directly from `all_cambox_av_sync.<cam>.effective_offset_ms`
+(#689/#714 — measured for cam2, sound derived for the sample-starved cameras, null only for a genuine unknown).
+
 ## Run recipe
 
 **#420 (2026-07-02): the earlier "−70.2 ms ±10 @ NDI 2ME PGM latency 1000 ms" result is
