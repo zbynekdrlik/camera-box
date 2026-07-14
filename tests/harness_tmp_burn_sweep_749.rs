@@ -140,3 +140,99 @@ fn regression_sweep_runs_before_all_cambox_scp_not_after_749() {
         "the ALL_CAMBOX loop must sweep BEFORE its own scp deploy"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #758 item 1 — tmp_burn_sweep_stale_units_cmds: stops (and reset-fails) any stray
+// camera-box-burn-* systemd UNIT, not just the /tmp file. Executed for real against a fake
+// `systemctl` on PATH that RECORDS its own invocations to a marker file, so the test proves the
+// unit actually gets `stop`+`reset-failed`, not just that the command TEXT mentions them.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn stale_units_cmd_stops_and_reset_fails_every_stray_unit() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let marker = tmp.path().join("systemctl-calls.log");
+    let fake_systemctl = format!(
+        r#"#!/usr/bin/env bash
+echo "$@" >> {marker:?}
+case "$1" in
+  list-units) echo "camera-box-burn-911005.service" ; exit 0 ;;
+  stop|reset-failed) exit 0 ;;
+  *) exit 0 ;;
+esac
+"#
+    );
+    let p = bin_dir.join("systemctl");
+    fs::write(&p, fake_systemctl).unwrap();
+    let mut perm = fs::metadata(&p).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perm, 0o755);
+    fs::set_permissions(&p, perm).unwrap();
+
+    let path_env = format!("{}:{}", bin_dir.display(), std::env::var("PATH").unwrap());
+    let harness = format!(
+        "set -uo pipefail\n. {:?}\neval \"$(tmp_burn_sweep_stale_units_cmds)\"",
+        lib_script()
+    );
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(&harness)
+        .env("PATH", path_env)
+        .output()
+        .expect("run with fake systemctl");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let calls = fs::read_to_string(&marker).unwrap_or_default();
+    assert!(
+        calls.contains("list-units"),
+        "must list stray camera-box-burn-* units first: {calls}"
+    );
+    assert!(
+        calls.contains("stop camera-box-burn-911005.service"),
+        "must stop the stray unit it found: {calls}"
+    );
+    assert!(
+        calls.contains("reset-failed camera-box-burn-911005.service"),
+        "must reset-failed the stray unit after stopping it: {calls}"
+    );
+}
+
+#[test]
+fn stale_units_cmd_is_a_noop_when_no_stray_units_exist() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let fake_systemctl = r#"#!/usr/bin/env bash
+case "$1" in
+  list-units) exit 0 ;; # no matching units -> empty stdout
+  *) exit 0 ;;
+esac
+"#;
+    let p = bin_dir.join("systemctl");
+    fs::write(&p, fake_systemctl).unwrap();
+    let mut perm = fs::metadata(&p).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perm, 0o755);
+    fs::set_permissions(&p, perm).unwrap();
+
+    let path_env = format!("{}:{}", bin_dir.display(), std::env::var("PATH").unwrap());
+    let harness = format!(
+        "set -uo pipefail\n. {:?}\neval \"$(tmp_burn_sweep_stale_units_cmds)\"",
+        lib_script()
+    );
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(&harness)
+        .env("PATH", path_env)
+        .output()
+        .expect("run with fake systemctl");
+    assert!(
+        out.status.success(),
+        "a clean box (no stray units) must never fail the preflight: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

@@ -36,3 +36,25 @@
 tmp_burn_sweep_stale_cmds() {
   echo "find /tmp -maxdepth 1 -name 'camera-box-burn-*' -mmin +60 -delete 2>/dev/null || true;"
 }
+
+# #758 item 1 — tmp_burn_sweep_stale_units_cmds: extends the #749 file sweep above to ALSO stop
+# (and reset-failed) any stray camera-box-burn-* systemd UNIT still present on the box, not just
+# its /tmp binary. A prior run's own systemd-run --unit=camera-box-burn-<RUN_ID> transient unit
+# can outlive a cleanup() that never got to run (an abandoned/killed harness, a flaky ssh
+# round-trip) -- event_assert_fleet_check_cmds (scripts/lib/event-assert.sh) already REPORTS
+# these via its STRAY_UNITS= field (#722 item 5), but never stopped them; the #758 preflight
+# needs a box left with a stray unit STILL RUNNING (potentially still holding the capture device,
+# fighting this run's own [2/8]/[2b/8] deploy) to be self-healed BEFORE the run proceeds, not just
+# reported. Age-independent (a stray unit is, by definition, from a PRIOR run -- unlike the file
+# sweep's -mmin +60 guard, there is no "this run's own not-yet-written unit" to protect against,
+# since a unit only exists once systemd-run has already created it for a SPECIFIC RUN_ID that
+# would be embedded in its own name).
+tmp_burn_sweep_stale_units_cmds() {
+  cat <<'REMOTE'
+systemctl list-units --all --plain --no-legend 'camera-box-burn-*' 2>/dev/null | awk '{print $1}' | while read -r u; do
+  [ -n "$u" ] || continue
+  systemctl stop "$u" 2>/dev/null || true
+  systemctl reset-failed "$u" 2>/dev/null || true
+done
+REMOTE
+}
