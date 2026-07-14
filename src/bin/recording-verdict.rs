@@ -56,6 +56,7 @@ use camera_box::probe::recording_latency::{
     BURN_RUN_ID_CAM5, BURN_RUN_ID_CAM6, BURN_RUN_ID_CAM7, BURN_RUN_ID_IMAG, BURN_RUN_ID_STREAM,
     BURN_RUN_ID_STRIH,
 };
+use camera_box::frozen_leg::{frozen_leg_report, SegmentLeg};
 use camera_box::probe::recording_partial::RecordingPartial;
 use camera_box::probe::recording_segments::{
     load_switch_schedule, place_frame_in_window, segment_continuity, SegmentFrame, SwitchWindow,
@@ -3924,6 +3925,48 @@ fn build_and_print_verdict(
                 }
                 report["all_cambox_continuity"] = seg_json;
                 all_pass &= seg.overall_pass;
+
+                // #758 item 4 — the frozen-leg classifier: distinguishes a SUSTAINED camera
+                // freeze (hard-fail) from isolated stale-replay frames (informational-only,
+                // never gates) using the SAME per-window copies/frames/duration `seg.segments`
+                // already carries. Separate from `seg.overall_pass` above (which ALSO fails on
+                // undecodable/gaps, unrelated to freeze/replay) — this is specifically the
+                // #758-motivated distinction run 1299588287's own forensics conflated (cam2/3/4/6's
+                // 1-3 replayed frames misread as "freezes"; only cam7 was genuinely frozen).
+                let leg_segments: Vec<SegmentLeg> = seg
+                    .segments
+                    .iter()
+                    .map(|s| SegmentLeg {
+                        cambox: &s.cambox,
+                        copies: s.copies,
+                        frames: s.frames,
+                        start_ns: s.start_ns,
+                        end_ns: s.end_ns,
+                    })
+                    .collect();
+                let leg_report = frozen_leg_report(&leg_segments);
+                for f in &leg_report.frozen {
+                    println!("  {}", f.message());
+                }
+                for s in &leg_report.stale_replay {
+                    println!("  {}", s.message());
+                }
+                report["frozen_leg"] = serde_json::json!({
+                    "frozen": leg_report.frozen.iter().map(|f| serde_json::json!({
+                        "cambox": f.cambox,
+                        "since_ns": f.since_ns,
+                        "copies": f.copies,
+                        "approx_stale_secs": f.approx_stale_secs,
+                        "density": f.density,
+                        "message": f.message(),
+                    })).collect::<Vec<_>>(),
+                    "stale_replay": leg_report.stale_replay.iter().map(|s| serde_json::json!({
+                        "cambox": s.cambox,
+                        "copies": s.copies,
+                        "message": s.message(),
+                    })).collect::<Vec<_>>(),
+                });
+                all_pass &= !leg_report.any_frozen();
 
                 // #467/#583 — extend the ALL-CAMBOX sweep to ALSO cover imag-nb's OWN recording:
                 // place its frames onto the SAME schedule timeline (anchored on imag's #463 digital
