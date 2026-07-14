@@ -1699,43 +1699,120 @@ mod tests {
     }
 
     #[test]
-    fn elgato_4k_s_is_zero_touch_by_default_738() {
-        // #738 (2026-07-13): the Elgato 4K S tint correction moved OBS-side (a per-input
-        // color_filter_v2 grey-world color_multiply on strih's 'NDI cam5'(physical CAM1) /
-        // 'NDI cam6'(physical CAM6) inputs + imag-nb's 'NDI CAM1' — live-verified,
-        // screenshots + chroma numbers: cast magnitude reduced from ~12.6-12.9 to ~1.6-1.7,
-        // matching cam5's own near-neutral reference cast — demonstrably better than this
-        // V4L2 saturation-only compromise, which could only ever cut the SAME saturation
-        // gain from both the tint and real colour together). #729's corrective V4L2 set is
-        // superseded as the DEFAULT: the card now gets NO V4L2 colour control at all
-        // (matching NzxtSignalHd60/Unknown) — plug-and-play, correction lives downstream
-        // where the tools are adequate (a genuine per-channel gain, not just a saturation
-        // scale). `elgato_4k_s_corrective_controls()` itself is UNCHANGED and still fully
-        // reachable via `CAMERA_BOX_CAPTURE_CONTROLS` for a manual/switchable revert — see
-        // its own doc comment.
-        assert!(
-            select_capture_controls(GrabberModel::Elgato4kS, None, false).is_empty(),
-            "#738: Elgato 4K S must be zero-touch by default now that the correction moved \
-             OBS-side — got {:?}",
-            select_capture_controls(GrabberModel::Elgato4kS, None, false)
+    fn elgato_4k_s_gets_range_aware_neutral_by_default_745() {
+        // #745 (2026-07-14) RETIRES zero-touch as the Elgato 4K S default: cards get swapped
+        // between boxes at events (binding user requirement — "hociktoru kartu zapojit do
+        // hocikttoreho PC a bude fungovat dobre") and UVC picture controls PERSIST ON THE
+        // CARD across processes/reboots/BOXES (#296) — a card that lived its previous life at
+        // a smeared value never gets reset under zero-touch. Live incident that forced this
+        // (#744, same day): both Elgatos found stuck at contrast=50/saturation=50 (~39% of
+        // their true 0-255/default-128 neutral), and zero-touch would have carried that
+        // forever. Elgato4kS now gets the SAME RangeScaled reference_pct=50 colour set as
+        // ShadowCast2 — resolved against the card's OWN queried default_value (#456), i.e.
+        // genuine manufacturer neutral, never a foreign literal calibrated for another card.
+        // #738's OBS-side tint correction is UNCHANGED and independent of this V4L2 policy —
+        // this is purely "which neutral does the card boot to", not a colour-cast fix.
+        let c = select_capture_controls(GrabberModel::Elgato4kS, None, false);
+        assert_eq!(
+            c,
+            color_production_controls(),
+            "#745: Elgato 4K S must get the SAME range-aware neutral colour set as every \
+             other model now (retiring zero-touch) — got {c:?}"
         );
-        // Grab mode must match production — same zero-touch policy, no special-casing.
-        assert!(
-            select_capture_controls(GrabberModel::Elgato4kS, None, true).is_empty(),
-            "#738: grab on the Elgato 4K S must also be zero-touch by default"
+        // Grab mode must match production — same policy, no special-casing.
+        assert_eq!(
+            select_capture_controls(GrabberModel::Elgato4kS, None, true),
+            color_production_controls(),
+            "#745: grab on the Elgato 4K S must also get the range-aware neutral set"
         );
     }
 
     #[test]
-    fn nzxt_and_unknown_are_zero_touch_by_default_729() {
-        // #729: no documented need for the certified colour set on these models.
-        // Plug-and-play means camera-box writes NOTHING here.
+    fn nzxt_and_unknown_get_range_aware_neutral_by_default_745() {
+        // #745: retiring zero-touch for NzxtSignalHd60/Unknown too — same card-swapping
+        // rationale as Elgato above (any card can land in any box; persisted UVC state must
+        // never survive a swap unrecognized). The NZXT Signal HD60 card exposes NO v4l2
+        // picture controls at all, so applying this set against it is a graceful no-op
+        // (ControlReport all-failed, warn+continue — see
+        // apply_controls_tolerates_device_missing_a_control below for the graceful path
+        // proof).
         for model in [GrabberModel::NzxtSignalHd60, GrabberModel::Unknown] {
-            assert!(
-                select_capture_controls(model, None, false).is_empty(),
-                "{model:?} must be zero-touch (no CAMERA_BOX_CAPTURE_CONTROLS override) — #729"
+            assert_eq!(
+                select_capture_controls(model, None, false),
+                color_production_controls(),
+                "{model:?} must get the range-aware neutral colour set now — #745"
             );
         }
+    }
+
+    #[test]
+    fn elgato_swap_smeared_state_resets_to_manufacturer_neutral_at_open_745() {
+        // #745 LIVE ACCEPTANCE #1 (rig-provable): a card that lived a previous life at a
+        // garbage value (today's live incident, #744: both Elgatos found stuck at
+        // contrast=50/saturation=50 — ~39% of their true 0-255/default-128 neutral, because
+        // zero-touch never touched them) must self-heal to the card's OWN queried
+        // manufacturer default the moment camera-box opens it in ITS NEW box — no manual
+        // v4l2-ctl repair, no reboot, no operator action.
+        let smeared_elgato = FakeDevice::supporting(&[V4L2_CID_SATURATION, V4L2_CID_CONTRAST])
+            .with_range(
+                V4L2_CID_SATURATION,
+                ControlRange {
+                    minimum: 0,
+                    maximum: 255,
+                    default_value: 128,
+                },
+            )
+            .with_range(
+                V4L2_CID_CONTRAST,
+                ControlRange {
+                    minimum: 0,
+                    maximum: 255,
+                    default_value: 128,
+                },
+            )
+            // The "garbage" a previous box/process left on the card (this test's swap-test
+            // analogue of `v4l2-ctl --set-ctrl=contrast=20,saturation=200` on the live rig).
+            .with_initial_value(V4L2_CID_SATURATION, 200)
+            .with_initial_value(V4L2_CID_CONTRAST, 20);
+        let controls = select_capture_controls(GrabberModel::Elgato4kS, None, false);
+        let report = apply_controls_with(&smeared_elgato, &controls);
+        assert_eq!(
+            report.applied, 2,
+            "both controls must apply cleanly on a card that supports them — got {report:?}"
+        );
+        assert_eq!(
+            *smeared_elgato
+                .values
+                .borrow()
+                .get(&V4L2_CID_SATURATION)
+                .unwrap(),
+            128,
+            "saturation must reset to the card's OWN default, not the smeared 200 it carried in"
+        );
+        assert_eq!(
+            *smeared_elgato.values.borrow().get(&V4L2_CID_CONTRAST).unwrap(),
+            128,
+            "contrast must reset to the card's OWN default, not the smeared 20 it carried in"
+        );
+    }
+
+    #[test]
+    fn nzxt_swap_smeared_state_is_graceful_warn_and_continue_745() {
+        // #745 LIVE ACCEPTANCE (NZXT graceful path): the NZXT Signal HD60 card exposes NO
+        // v4l2 picture controls, so applying the SAME range-aware neutral set selected for
+        // it must still warn+continue (ControlReport all-failed), never abort — a
+        // control-less card must keep streaming after a swap, exactly like #296's original
+        // NZXT CAM4 guarantee.
+        let nzxt_shaped = FakeDevice::supporting(&[]); // supports nothing -- the NZXT case
+        let controls = select_capture_controls(GrabberModel::NzxtSignalHd60, None, false);
+        let report = apply_controls_with(&nzxt_shaped, &controls);
+        assert_eq!(
+            report.failed, 2,
+            "both range-aware controls fail gracefully on a control-less card — got {report:?}"
+        );
+        assert_eq!(report.applied, 0);
+        assert_eq!(report.adjusted, 0);
+        // Reaching here at all proves apply_controls_with never aborted (#296 guarantee).
     }
 
     #[test]
@@ -1793,14 +1870,17 @@ mod tests {
             certified_cam1_controls(),
             "grab must NOT auto-apply the desaturating sharp set"
         );
-        // #738: grab on the Elgato 4K S matches production's zero-touch policy (the
-        // correction moved OBS-side) — same as production, not the sharp set either.
+        // #745: grab on the Elgato 4K S matches production's range-aware neutral policy —
+        // same as production, not the sharp set either.
         assert_eq!(
             select_capture_controls(GrabberModel::Elgato4kS, None, true),
             select_capture_controls(GrabberModel::Elgato4kS, None, false),
-            "grab on the Elgato 4K S must apply the SAME zero-touch policy as production — #738"
+            "grab on the Elgato 4K S must apply the SAME range-aware policy as production — #745"
         );
-        assert!(select_capture_controls(GrabberModel::Elgato4kS, None, true).is_empty());
+        assert_eq!(
+            select_capture_controls(GrabberModel::Elgato4kS, None, true),
+            color_production_controls()
+        );
         assert_ne!(
             select_capture_controls(GrabberModel::Elgato4kS, None, true),
             certified_cam1_controls(),
@@ -1859,6 +1939,15 @@ mod tests {
                 values: std::cell::RefCell::new(std::collections::HashMap::new()),
                 ranges: std::cell::RefCell::new(std::collections::HashMap::new()),
             }
+        }
+
+        /// Seed a PRE-EXISTING value for `id`, as if a prior process (or the card's own
+        /// previous life in a DIFFERENT box, #745) had already set it — models the
+        /// "smeared" persisted-UVC-state starting condition a card-swap acceptance test
+        /// needs, distinct from `with_range`'s queried-range metadata.
+        fn with_initial_value(self, id: u32, value: i64) -> Self {
+            self.values.borrow_mut().insert(id, value);
+            self
         }
 
         /// Attach a queried [`ControlRange`] for `id`, as if `VIDIOC_QUERY_EXT_CTRL`
