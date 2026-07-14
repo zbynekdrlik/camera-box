@@ -276,5 +276,10 @@ pub mod residual_events;
 // box-side prong of #707 B1's freeze discriminator. No probe deps, so it unit-tests Tier-0.
 pub mod emit_rate_ring;
 
+// #752 — rate-limit the #707 genlock emit-gate-skip diagnostic. Pure accumulator that coalesces
+// the ~10/s per-skip WARN into ONE aggregated line per 5s report window, killing the rsyslogd/
+// journald CPU-starvation feedback loop on the 3-core boxes. No probe deps, unit-tests Tier-0.
+pub mod emit_skip_log;
+
 #[cfg(feature = "probe")]
 pub mod probe;
