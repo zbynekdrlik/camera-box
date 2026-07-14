@@ -556,44 +556,46 @@ pub fn elgato_4k_s_corrective_controls() -> Vec<CaptureControl> {
 ///   The certified SHARP set ([`certified_cam1_controls`]) stays available ON DEMAND
 ///   via `CAMERA_BOX_CAPTURE_CONTROLS=certified`. An explicit override ALWAYS wins,
 ///   regardless of `model` — an operator who typed a literal spec means it.
-/// - `env_spec = None` — **#729 zero-touch by default**: camera-box does NOT write
-///   any colour control unless `model` has a specifically documented, proven need.
-///   That's [`GrabberModel::ShadowCast2`] (#296: a stray `saturation=0` left by a
-///   prior grab can persist ON THE DEVICE across restarts and brick production to
-///   grayscale — enforcing the certified COLOUR set at every open is how that
-///   self-heals). [`GrabberModel::Elgato4kS`] briefly had a SECOND documented-need
-///   V4L2 correction (2026-07-13, [`elgato_4k_s_corrective_controls`]) but #738
-///   (same day) SUPERSEDED it: the correction moved OBS-side (a per-input
-///   `color_filter_v2` grey-world `color_multiply` on the receiving OBS boxes),
-///   which is a genuine per-CHANNEL gain (closer to a true white-balance fix) —
-///   strictly more powerful than this card's saturation/contrast/hue-only V4L2
-///   controls, and live-verified (screenshots + chroma numbers, #738) to cut the
-///   cast further while leaving more real colour intact than the V4L2-only
-///   compromise could. So `Elgato4kS` is zero-touch here too now, same as every
-///   other model without a documented V4L2-specific need —
-///   [`GrabberModel::NzxtSignalHd60`] and [`GrabberModel::Unknown`] — NO controls
-///   written at all: plug-and-play, factory defaults, no ceremony.
-///   [`elgato_4k_s_corrective_controls`] stays fully in code, reachable via an
-///   explicit `CAMERA_BOX_CAPTURE_CONTROLS` override, for a switchable manual
-///   revert if the OBS-side correction is ever removed or found wanting.
+/// - `env_spec = None` — **#745 range-aware neutral for EVERY model, retiring #729's
+///   zero-touch default.** Cards get swapped between boxes at events (binding user
+///   requirement, 2026-07-13: "mat moznost hociktoru kartu zapojit do hocikttoreho PC a
+///   bude fungovat dobre" — any grabber into any box, correct picture, zero manual
+///   action, no reboots). UVC picture controls PERSIST ON THE CARD across processes,
+///   reboots, AND boxes (#296) — the #729/#738 zero-touch policy therefore inherited
+///   whatever a card's PREVIOUS life left on it, which is NOT plug-and-play under
+///   swapping, it is "trust the card's unknown history". Live incident that forced this
+///   (#744, 2026-07-14): both Elgatos found stuck at contrast=50/saturation=50 (~39% of
+///   their true 0-255/default-128 neutral) with nothing ever resetting them. Every
+///   model — [`GrabberModel::ShadowCast2`], [`GrabberModel::Elgato4kS`],
+///   [`GrabberModel::NzxtSignalHd60`], [`GrabberModel::Unknown`] — now gets the SAME
+///   [`color_production_controls`] set: `RangeScaled { reference_pct: 50 }` for
+///   saturation+contrast, resolved against the card's OWN queried `default_value`
+///   (#456) — i.e. genuine manufacturer neutral, never a foreign literal calibrated for
+///   a different card, and self-healing at every capture open (same philosophy as the
+///   #150/#257 genlock lockdown). Hue is NEVER touched (#338 — `hue=0` is a pink tint
+///   on the ShadowCast card, not neutral). A control-less card (the NZXT CAM4 grab
+///   card) applies gracefully — warn+continue via [`apply_controls_with`]'s
+///   [`ControlReport`], never fatal (#296's original guarantee, preserved).
+///   [`elgato_4k_s_corrective_controls`] (#729/#738's superseded Elgato tint
+///   compromise) stays fully in code, reachable via an explicit
+///   `CAMERA_BOX_CAPTURE_CONTROLS` override, for a switchable manual fallback.
 ///
-/// #729 supersedes the PRE-existing "production always gets the colour set" design
-/// (below, kept for history): that design forced the SAME certified colour set onto
-/// EVERY model unconditionally, including cards with no documented need for it. Live
-/// diagnosis (2026-07-12, cam1+cam6 purple/violet tint) proved this is actively
-/// counter-productive for the Elgato 4K S — the tint reproduces IDENTICALLY with
-/// every control already sitting at the card's own factory default, in BOTH raw
-/// YUYV and the card's own onboard MJPG encoder, so forcing a colour set onto it
-/// buys nothing and risks smearing a value calibrated for a DIFFERENT model onto it
-/// after a physical card swap (`GrabberModel` is resolved by
-/// `capture_rate_health::resolve_grabber_model`, which prefers the RUNTIME-detected
-/// card over the static hostname convention for exactly this reason).
+/// #745 supersedes #729's model-gated design (below, kept for history): #729 itself
+/// superseded an EARLIER "production always gets the colour set" design that forced it
+/// onto every model unconditionally; #729 then narrowed it to ShadowCast2-only after
+/// live diagnosis (2026-07-12, cam1+cam6 purple/violet tint) proved forcing it onto the
+/// Elgato bought nothing for that SPECIFIC defect (a hardware ISP/AWB characteristic no
+/// V4L2 control could fully cure). #745 does NOT reopen that finding — the OBS-side
+/// tint correction (#738) is untouched and independent — it instead recognizes that
+/// "no documented need" was never the same claim as "safe to leave whatever the card
+/// currently holds", and the real-world card-swapping requirement makes the latter
+/// actively dangerous.
 ///
 /// #296 (history): the old no-override branch used to return NO controls at all, so
 /// a stray `saturation=0` left by a prior grab persisted and the live ShadowCast
 /// cameras went grayscale — the certified COLOUR set was introduced so ShadowCast
-/// self-heals colour on every open. That need is preserved here, scoped to
-/// ShadowCast 2 only instead of applied blindly to every model.
+/// self-heals colour on every open. #745 extends that same self-healing guarantee to
+/// every model, not just ShadowCast2.
 ///
 /// #338/#312 (history): the grab path is NOT auto-given the SHARP set
 /// (`certified_cam1_controls`, `saturation=0`/`contrast=75`) — that set was meant to
@@ -613,17 +615,19 @@ pub fn select_capture_controls(
     }
 }
 
-/// #729 — the model→controls policy table itself. `ShadowCast2` has a documented, proven
-/// need (#296's grab-time grayscale-brick risk); every other model — including `Elgato4kS`
-/// since #738 moved its tint correction OBS-side — is zero-touch. Kept as its own function
-/// so the policy is a single, obviously-auditable place — adding a NEW documented-need model
-/// later is a one-line change here, not a scattered edit.
+/// #745 — the model→controls policy table: EVERY model now gets the certified COLOUR
+/// set (range-aware neutral, resolved against each card's own queried default — #456),
+/// retiring #729's model-gated zero-touch default. Kept as its own function, with an
+/// exhaustive match, so the policy stays a single, obviously-auditable place — a future
+/// model that genuinely needs a DIFFERENT set (not just "no set") is still a one-line
+/// change here, and the compiler forces a decision the moment a new [`GrabberModel`]
+/// variant is added.
 fn documented_controls_for_model(model: GrabberModel) -> Vec<CaptureControl> {
     match model {
-        GrabberModel::ShadowCast2 => color_production_controls(),
-        GrabberModel::Elgato4kS | GrabberModel::NzxtSignalHd60 | GrabberModel::Unknown => {
-            Vec::new()
-        }
+        GrabberModel::ShadowCast2
+        | GrabberModel::Elgato4kS
+        | GrabberModel::NzxtSignalHd60
+        | GrabberModel::Unknown => color_production_controls(),
     }
 }
 
@@ -1790,7 +1794,11 @@ mod tests {
             "saturation must reset to the card's OWN default, not the smeared 200 it carried in"
         );
         assert_eq!(
-            *smeared_elgato.values.borrow().get(&V4L2_CID_CONTRAST).unwrap(),
+            *smeared_elgato
+                .values
+                .borrow()
+                .get(&V4L2_CID_CONTRAST)
+                .unwrap(),
             128,
             "contrast must reset to the card's OWN default, not the smeared 20 it carried in"
         );
