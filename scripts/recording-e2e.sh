@@ -132,6 +132,12 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # tmpfs that CAN fill outright (CAM1 + CAM6 both hit 100% live) and fail the deploy hard.
 # shellcheck source=scripts/lib/tmp-burn-sweep.sh
 . "$HERE/lib/tmp-burn-sweep.sh"
+# #707 B1 (freeze+jump discriminator, second prong): the per-cambox TCP-transport + NIC sampler.
+# Pure REMOTE-COMMAND-STRING builders (no ssh at source time) — launched in [5b/8], harvested in
+# [7c/8]. See the lib header for WHY (record Send-Q/retrans/NIC counters during the window so the
+# next ~2.7s FREEZE's discriminator — link vs box-emit vs NDI SDK — can be READ, not guessed).
+# shellcheck source=scripts/lib/transport-sampler.sh
+. "$HERE/lib/transport-sampler.sh"
 camera_resolve "${CAM:-cam1}"
 # #24 item 1: this harness's SOURCE-camera role (the physical box filming cam2's monitor via
 # the optical loopback + carrying the #174 render-time capture burn) is one of
@@ -1825,6 +1831,39 @@ IMAG_RECORDING_STARTED=1    # #649: same — set only once this box's OWN StartR
 # only surfacing (mis-attributed) via the eventual zero-loss/A-V verdict.
 CAPTURE_RATE_WINDOW_START_EPOCH="$(date +%s)"
 
+# [5b/8] #707 B1 (freeze+jump discriminator, SECOND prong) — arm a lightweight per-cambox TCP-to-
+# strih + NIC-counter sampler for the WHOLE [5/8]->[7/8] recording window (stopped + harvested in
+# [7c/8] below). Prong 1 (the box-side emit_rate_ring 1s WARN, src/emit_rate_ring.rs) answers "did
+# the box's OWN emit path dip during the freeze?"; THIS answers "did the box->strih LINK stall at
+# the same instant?" — a ballooning Send-Q / retransmit spike / NIC error+drop increment. On the
+# next ~2.7s FREEZE the two prongs' CSVs discriminate the unnamed final layer: transport spike ->
+# LINK (#688 cable/port + NIC power-mgmt), 1s emit dip -> box emit path (#707), both clean while
+# strih freezes -> NDI SDK internal drop. Best-effort: every ssh is guarded so an unreachable box
+# never aborts the recording (pure diagnostics — its absence is just a missing CSV). TRANSPORT_SAMPLER=0
+# disables it. The remote loop self-terminates after TS_MAX_SECS even if [7c/8]'s stop is skipped,
+# so it can never orphan on a box.
+TRANSPORT_SAMPLER="${TRANSPORT_SAMPLER:-1}"
+if [ "$TRANSPORT_SAMPLER" = "1" ]; then
+  TS_MAX_SECS="${TS_MAX_SECS:-$(( DURATION + 120 ))}"   # orphan-safety ceiling >> the window; [7c/8] stops it promptly
+  TS_REMOTE_CSV="/tmp/transport-sampler-${RUN_ID}.csv"
+  TS_REMOTE_PID="/tmp/transport-sampler-${RUN_ID}.pid"
+  # Sample the SOURCE cambox always; under the ALL_CAMBOX sweep also sample cam2(painter)+cam3..cam6,
+  # each of which is cut into strih program during the sweep. Plain space-list (no command-sub in a
+  # for-list, so `set -e` at the top of this script can never trip on the expansion).
+  TRANSPORT_SAMPLER_BOXES="$CAM1_IP"
+  if [ "${ALL_CAMBOX:-0}" = "1" ]; then
+    TRANSPORT_SAMPLER_BOXES="$TRANSPORT_SAMPLER_BOXES $PAINTER_IP $CAM3_IP $CAM4_IP $CAM5_IP $CAM6_IP"
+  fi
+  echo "[5b/8] transport sampler: arming ss/ip per-box counter sampler (~250ms, ${TS_MAX_SECS}s ceiling) on: $TRANSPORT_SAMPLER_BOXES"
+  for _ts_ip in $TRANSPORT_SAMPLER_BOXES; do
+    _ts_label="$(transport_sampler_box_label "$_ts_ip")"
+    timeout 15 sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 "root@${_ts_ip}" \
+      "$(transport_sampler_remote_start_cmd "$STRIH" 250 "$TS_REMOTE_CSV" "$TS_MAX_SECS" "$TS_REMOTE_PID")" \
+      2>/dev/null | sed "s/^/    ${_ts_label}(${_ts_ip}): /" \
+      || echo "    ${_ts_label}(${_ts_ip}): WARNING — transport sampler arm failed (continuing; diagnostics only)"
+  done
+fi
+
 # #312 Phase-2 ALL-CAMBOX SWEEP (opt-in via ALL_CAMBOX=1). Instead of one steady-state hold on a
 # single cambox, sequentially cut EACH active cambox into strih PROGRAM for ~SEGMENT_SECS, cycling
 # the sweep until the total reaches DURATION, while the ONE continuous stream recording keeps
@@ -1938,6 +1977,31 @@ CAPTURE_RATE_WINDOW_END_EPOCH="$(date +%s)"
 echo "    strih host file:  ${STRIH_HOST_PATH:-<unknown>}"
 echo "    stream host file: ${STREAM_HOST_PATH:-<unknown>}"
 echo "    imag host file:   ${IMAG_HOST_PATH:-<unknown>}  (#462 — stays ON imag, decoded in place below)"
+
+# [7c/8] #707 B1 transport sampler (second prong) — stop the per-box samplers armed in [5b/8] and
+# harvest each per-run CSV into the run dir (scp), so the TCP Send-Q / retransmit / NIC-counter
+# timeline lands BESIDE the recordings + verdict for the freeze discriminator. Already inside the
+# [7/8] `set +e` region (above), and every ssh/scp is `||`-guarded, so a failed harvest here is a
+# warning — never an abort of the run. Reuses the same $TRANSPORT_SAMPLER_BOXES / $TS_REMOTE_*
+# vars the [5b/8] arm set (same shell). The remote loop also self-terminates after TS_MAX_SECS, so
+# even a fully-skipped stop cannot orphan a sampler on a box.
+if [ "${TRANSPORT_SAMPLER:-1}" = "1" ] && [ -n "${TRANSPORT_SAMPLER_BOXES:-}" ]; then
+  echo "[7c/8] transport sampler: stopping + harvesting per-box CSVs into $OUTDIR"
+  mkdir -p "$OUTDIR"
+  for _ts_ip in $TRANSPORT_SAMPLER_BOXES; do
+    _ts_label="$(transport_sampler_box_label "$_ts_ip")"
+    timeout 15 sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 "root@${_ts_ip}" \
+      "$(transport_sampler_remote_stop_cmd "$TS_REMOTE_PID")" >/dev/null 2>&1 \
+      || echo "    ${_ts_label}(${_ts_ip}): WARNING — transport sampler stop returned non-zero (continuing)"
+    _ts_local="$OUTDIR/transport-sampler-${_ts_label}-${RUN_ID}.csv"
+    if timeout 20 sshpass -p "$CAM_PW" scp -o StrictHostKeyChecking=no -o ConnectTimeout=8 \
+        "root@${_ts_ip}:$TS_REMOTE_CSV" "$_ts_local" >/dev/null 2>&1; then
+      echo "    ${_ts_label}(${_ts_ip}): transport CSV -> $_ts_local ($(wc -l < "$_ts_local" 2>/dev/null || echo 0) rows)"
+    else
+      echo "    ${_ts_label}(${_ts_ip}): WARNING — no transport CSV harvested (sampler may not have armed on this box)"
+    fi
+  done
+fi
 
 # [7b/8] capture-delivery-rate POST-recording check (#705): the [0/8] preflight above only
 # proves $CAMERA_NAME was clean BEFORE the recording started -- the #656/#663 ShadowCast judder
