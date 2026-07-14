@@ -44,6 +44,7 @@ before trusting this table for anything operational.
 | CAM4 | NZXT Signal HD60 | /dev/video0 | Unchanged, no V4L2 picture controls exposed |
 | CAM5 | ShadowCast 2 | /dev/video0 | Swapped in 2026-07-12 (was Elgato 4K S, #728) — this is the SAME physical unit that used to sit in CAM1 |
 | CAM6 | Elgato 4K S | /dev/video0 | Renumbered from /dev/video1 (#744, verified live 2026-07-13, same class of drift as CAM1) |
+| CAM7 | Elgato 4K S | /dev/video0 | New box built 2026-07-14 |
 
 ## Linux OBS Targets (camera-box, #458)
 
