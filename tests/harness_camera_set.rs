@@ -154,8 +154,8 @@ fn loopback_e2e_routes_through_camera_set() {
 }
 
 // --- #451: fleet growing 4 -> 6 (cam5/cam6) + per-camera CAMERA_GENLOCK_FPS -------------------
-// --- #593: cam7 removed -- it was NEVER built (the user only expressed future interest); it
-// must not resolve as an active camera anywhere in the fleet map. ------------------------------
+// --- #593 (superseded by #753, see below): cam7 was excluded because it had NEVER been built.
+// -------------------------------------------------------------------------------------------
 
 #[test]
 fn camera_set_resolves_cam5_and_cam6() {
@@ -192,8 +192,14 @@ fn camera_set_resolves_cam7() {
     // verify-device.sh ALL CLEAR 21/21) -- camera_resolve must resolve it exactly like every
     // other real camera, mirroring camera_set_resolves_cam5_and_cam6 above.
     let (ok, ip, source) = resolve("cam7");
-    assert!(ok, "#753: camera_resolve cam7 should succeed -- the box is real now");
-    assert_eq!(ip, "10.77.9.67", "camera_resolve cam7 resolved the wrong IP");
+    assert!(
+        ok,
+        "#753: camera_resolve cam7 should succeed -- the box is real now"
+    );
+    assert_eq!(
+        ip, "10.77.9.67",
+        "camera_resolve cam7 resolved the wrong IP"
+    );
     assert_eq!(
         source, "CAM7 (usb)",
         "camera_resolve cam7 resolved the wrong NDI source"
@@ -339,7 +345,10 @@ fn camera_strih_route_resolves_cam7() {
     // inversion. Wired live over OBS WebSocket as part of this ticket's strih integration.
     let (ok, scene, source) = resolve_strih_route("cam7");
     assert!(ok, "camera_strih_route cam7 should succeed (#753)");
-    assert_eq!(scene, "Cam 7", "camera_strih_route cam7 resolved the wrong strih scene");
+    assert_eq!(
+        scene, "Cam 7",
+        "camera_strih_route cam7 resolved the wrong strih scene"
+    );
     assert_eq!(
         source, "NDI cam7",
         "camera_strih_route cam7 resolved the wrong strih NDI-input source"

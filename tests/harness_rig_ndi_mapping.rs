@@ -1,8 +1,9 @@
-//! #399/#312 — the strih NDI-input→camera mapping must be ENFORCED (set + verified 6-distinct) on
-//! every rig activation, not hand-set. Locks: (a) set-ndi-mapping.py exists with the fixed
-//! 6-distinct pins, (b) rig-mode.sh calls the enforcer in BOTH test and event modes, (c) the pure
-//! mapping logic (pins distinct, duplicate detection) is correct. The live OBS WS set itself is
-//! exercised on the rig, not here (these are pure-file / pure-python locks — no OBS, no ssh).
+//! #399/#312/#753 — the strih NDI-input→camera mapping must be ENFORCED (set + verified
+//! 7-distinct) on every rig activation, not hand-set. Locks: (a) set-ndi-mapping.py exists with
+//! the fixed 7-distinct pins, (b) rig-mode.sh calls the enforcer in BOTH test and event modes,
+//! (c) the pure mapping logic (pins distinct, duplicate detection) is correct. The live OBS WS
+//! set itself is exercised on the rig, not here (these are pure-file / pure-python locks — no
+//! OBS, no ssh).
 
 use std::fs;
 use std::path::PathBuf;
@@ -16,7 +17,7 @@ fn read(p: &str) -> String {
 }
 
 #[test]
-fn set_ndi_mapping_py_exists_with_the_six_distinct_pins() {
+fn set_ndi_mapping_py_exists_with_the_seven_distinct_pins() {
     let s = read("scripts/set-ndi-mapping.py");
     // The fixed Claude-owned mapping (offset per the rig-ndi-source label convention).
     for (inp, snd) in [
@@ -26,10 +27,11 @@ fn set_ndi_mapping_py_exists_with_the_six_distinct_pins() {
         ("NDI cam2", "CAM2 (usb)"),
         ("NDI cam4", "CAM5 (usb)"),
         ("NDI cam6", "CAM6 (usb)"),
+        ("NDI cam7", "CAM7 (usb)"), // #753: new, direct (non-inverted) pin
     ] {
         assert!(
             s.contains(inp) && s.contains(snd),
-            "#399/#312: set-ndi-mapping.py DEFAULT_MAP must pin {inp:?} -> {snd:?}"
+            "#399/#312/#753: set-ndi-mapping.py DEFAULT_MAP must pin {inp:?} -> {snd:?}"
         );
     }
 }
@@ -71,17 +73,18 @@ fn rig_mode_enforces_the_mapping_in_both_test_and_event() {
 }
 
 #[test]
-fn pins_are_six_distinct_cameras_and_duplicates_are_detected() {
-    // Drive the script's pure helpers directly: DEFAULT_MAP must be 6 distinct senders, and
-    // duplicates() must flag a repeated sender (the recurring "two inputs both on CAM4" bug —
-    // #312's own repointing of "NDI cam4" away from CAM4 (usb) fixed exactly this case live).
+fn pins_are_seven_distinct_cameras_and_duplicates_are_detected() {
+    // Drive the script's pure helpers directly: DEFAULT_MAP must be 7 distinct senders (#753:
+    // widened 6->7 with cam7), and duplicates() must flag a repeated sender (the recurring "two
+    // inputs both on CAM4" bug — #312's own repointing of "NDI cam4" away from CAM4 (usb) fixed
+    // exactly this case live).
     let script = format!(
         r#"import importlib.util as u, sys
 spec = u.spec_from_file_location("m", "{p}/scripts/set-ndi-mapping.py")
 m = u.module_from_spec(spec); spec.loader.exec_module(m)
 senders = [s for _, s in m.DEFAULT_MAP]
-assert len(m.DEFAULT_MAP) == 6, "must be 6 inputs"
-assert len(set(senders)) == 6, f"pins must be 6 DISTINCT cameras, got {{senders}}"
+assert len(m.DEFAULT_MAP) == 7, "must be 7 inputs"
+assert len(set(senders)) == 7, f"pins must be 7 DISTINCT cameras, got {{senders}}"
 assert not m.duplicates(dict(m.DEFAULT_MAP)), "the pins must have no duplicate"
 assert m.duplicates({{"NDI cam1": "CAM4 (usb)", "NDI cam2": "CAM4 (usb)"}}), "must flag a dup"
 assert m.parse_map_args(None) == list(m.DEFAULT_MAP), "no --map -> the pins"

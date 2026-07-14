@@ -6,9 +6,11 @@ imag-nb already has ("MV Cam N" — dedicated low-cost thumbnail scenes feeding 
 instead of the full program-grade sources rendering in the multiview grid, #501). This script
 replicates that pattern on strih over OBS WebSocket.
 
-strih already has 6 full-bandwidth camera scenes "Cam 1".."Cam 6", each wrapping ONE NDI input
+strih already has 7 full-bandwidth camera scenes "Cam 1".."Cam 7" (#753, 2026-07-14: cam7 is a
+NEW, direct/non-inverted pin — its scene/input share the same "7"), each wrapping ONE NDI input
 "NDI cam<n>" bound to a real fleet NDI source (the genlock skill's documented INVERTED-label
-mapping — e.g. live-verified 2026-07-13: "NDI cam1" carries "CAM3 (usb)", not CAM1). This script
+mapping for cam1..cam6 — e.g. live-verified 2026-07-13: "NDI cam1" carries "CAM3 (usb)", not
+CAM1). This script
 NEVER hardcodes that mapping: it reads each existing input's LIVE `ndi_source_name` over WS and
 wraps that EXACT same value in a new "MV Cam <n>" twin input, `genlock_monitor=true` (the #501
 pattern — the vendored DistroAV genlock lockdown forces LOW-bandwidth NDI receive, ~9x cheaper,
@@ -43,7 +45,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import obs_phase2 as op  # reuse the repo's ONE obs-websocket client (_conn/_rpc) — never a 4th one
 
-CAMS = range(1, 7)
+CAMS = range(1, 8)  # #753 (2026-07-14): fleet growth 6->7, cam7 is real + provisioned now
 _CAM_SCENE_RE = re.compile(r"^Cam (\d+)$")
 
 # obs-websocket v5 SceneItemTransform: only these fields are SETTABLE via SetSceneItemTransform.

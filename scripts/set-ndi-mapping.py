@@ -4,20 +4,21 @@
 The strih NDI-input→camera-box bindings drift from the pins (the recurring bug: two inputs both on
 CAM4, so a camera shows twice and another is missing). A pure hot WS rebind does NOT survive a
 force-kill OBS relaunch (a distroav.dll swap reverts to the stale saved scene). So rig activation
-(scripts/rig-mode.sh) must ENFORCE the correct 6-distinct mapping every time — set it + verify every
+(scripts/rig-mode.sh) must ENFORCE the correct 7-distinct mapping every time — set it + verify every
 input is bound to a DISTINCT camera — instead of the operator/agent re-doing it by hand.
 
 The mapping is Claude-owned + fixed (never a user question). The pins (offset per the rig-ndi-source
 label convention): NDI cam5→CAM1, NDI cam1→CAM3, NDI cam3→CAM4, NDI cam2→CAM2, NDI cam4→CAM5,
-NDI cam6→CAM6. CAM3 is the down box — its input binds correctly for when it returns; the other 5
-are distinct live feeds. #312 (fleet growth 4→6, #451) added the last two pins: "NDI cam4" USED TO
+NDI cam6→CAM6, NDI cam7→CAM7. CAM3 is the down box — its input binds correctly for when it returns;
+the other 6 are distinct live feeds. #312 (fleet growth 4→6, #451) added two pins: "NDI cam4" USED TO
 duplicate CAM4's own feed (the exact drift bug this module exists to catch) — repointed to the
 previously-unwired CAM5 physical box instead; "NDI cam6" was already correctly bound live on
 strih to CAM6 but had no canonical pin, so it could silently drift on the next OBS relaunch —
-now it is enforced like every other input.
+now it is enforced like every other input. #753 (fleet growth 6→7, 2026-07-14) added "NDI cam7"→
+CAM7, a NEW direct (non-inverted) pin for the newly-provisioned cam7 box.
 
 Exit codes:
-  0  PASS  — every input set to its pin AND all 6 senders distinct
+  0  PASS  — every input set to its pin AND all senders distinct
   1  FAIL  — could not set an input, or a duplicate binding remains
   2  ERROR — OBS WS connection / request failure
 
@@ -35,7 +36,10 @@ import time
 
 PORT = 4455
 
-# #399/#312 — the fixed 6-distinct strih NDI mapping (Claude-owned; never a user question).
+# #399/#312/#753 — the fixed 7-distinct strih NDI mapping (Claude-owned; never a user question).
+# #753 (2026-07-14): 'NDI cam7'->CAM7 is a NEW, DIRECT (non-inverted) pin -- cam7 never had a
+# legacy scene name to inherit, so its input/scene share the same "7", unlike the historical
+# six's inversion.
 DEFAULT_MAP = [
     ("NDI cam5", "CAM1 (usb)"),
     ("NDI cam1", "CAM3 (usb)"),
@@ -43,6 +47,7 @@ DEFAULT_MAP = [
     ("NDI cam2", "CAM2 (usb)"),
     ("NDI cam4", "CAM5 (usb)"),
     ("NDI cam6", "CAM6 (usb)"),
+    ("NDI cam7", "CAM7 (usb)"),
 ]
 
 # websocket-client is imported LAZILY (inside the WS helpers), not at module top: the pure helpers

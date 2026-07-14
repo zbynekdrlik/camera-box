@@ -538,11 +538,11 @@ toggle_burn() {
 # cam2→CAM2 (the pins in set-ndi-mapping.py). It drifts (recurring bug: two inputs both on CAM4 → a
 # camera shows twice, another missing), and a hot WS rebind does not survive a force-kill relaunch —
 # so rig activation ENFORCES it every time here instead of the operator/agent re-doing it by hand.
-# Fail-loud (non-zero) if it cannot make all 4 distinct.
+# Fail-loud (non-zero) if it cannot make all 7 distinct (#753: fleet growth 6->7, cam7 added).
 enforce_strih_ndi_mapping() {
   local here rc=0
   here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || here=""
-  echo "[obs strih ${STRIH_IP}] #399 enforce NDI-input→camera mapping (4 distinct) over WebSocket:"
+  echo "[obs strih ${STRIH_IP}] #399 enforce NDI-input→camera mapping (7 distinct) over WebSocket:"
   python3 "$here/set-ndi-mapping.py" --host "$STRIH_IP" --password "$OBS_WS_PASSWORD" \
     2>&1 | sed 's/^/    [strih ndi-map] /' || rc=$?
   return $rc

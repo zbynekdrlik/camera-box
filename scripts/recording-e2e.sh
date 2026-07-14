@@ -839,14 +839,16 @@ IMAG_RECORDING_STARTED=0
 # only the STRIH_PROG_SOURCE camera measured, the other 5 all "NO SAMPLES"). Extend the SAME
 # single-source-of-truth array the #195 ON-gate and the #246 cleanup() OFF-clear loop already
 # iterate — so this fix automatically covers BOTH ends, never a burn left on that cleanup
-# forgets to clear. The six canonical strih NDI inputs mirror set-ndi-mapping.py's DEFAULT_MAP
+# forgets to clear. The seven canonical strih NDI inputs mirror set-ndi-mapping.py's DEFAULT_MAP
 # (the same fixed list this file's own FROZEN_CAM_SOURCES default already uses) — hardcoded
 # because BURN_TARGETS is defined here, well before CAMBOX_SWEEP is parsed later in the script;
 # a camera genuinely down that run simply never shows a window, so its burn being on-but-unused
 # is harmless (never fabricates a measurement, matching the "never fabricate" convention
-# n_camera_strih_samples/spread_verdict already follow).
+# n_camera_strih_samples/spread_verdict already follow). #753 (2026-07-14): extended 6->7 with
+# "NDI cam7" (cam7's new, fully-provisioned box) — same reasoning, so the fused gate's
+# all_cambox_delivery_latency doesn't silently report "NO SAMPLES" for cam7's windows too.
 if [ "${ALL_CAMBOX:-0}" = "1" ]; then
-  for _acs in "NDI cam5" "NDI cam1" "NDI cam3" "NDI cam2" "NDI cam4" "NDI cam6"; do
+  for _acs in "NDI cam5" "NDI cam1" "NDI cam3" "NDI cam2" "NDI cam4" "NDI cam6" "NDI cam7"; do
     if [ "$_acs" != "$STRIH_PROG_SOURCE" ]; then
       BURN_TARGETS+=("strih-${_acs// /_}=$STRIH=$_acs")
     fi
@@ -1311,7 +1313,9 @@ FROZEN_CAM_RETRY_SLEEP="${FROZEN_CAM_RETRY_SLEEP:-30}"
 # FROZEN_CAM_SOURCES env still overrides everything (operator escape hatch, unchanged). #312:
 # widened the checked input set to all six canonical NDI-input slots (fleet growth 4→6, #451,
 # and cam2 itself is no longer skipped a priori — it is excluded here ONLY if its sender name
-# actually matches FROZEN_CAM_EXCLUDE_SENDER at gate time, same as every other input).
+# actually matches FROZEN_CAM_EXCLUDE_SENDER at gate time, same as every other input). #753
+# (2026-07-14): widened again to seven — cam7's new 'NDI cam7' input joins the checked set the
+# same way cam5/cam6 did.
 FROZEN_CAM_EXCLUDE_SENDER="${FROZEN_CAM_EXCLUDE_SENDER:-CAM2 (usb)}"
 if [ -z "${FROZEN_CAM_SOURCES:-}" ]; then
   FROZEN_CAM_SOURCES="$(python3 - "$STRIH" "$FROZEN_CAM_EXCLUDE_SENDER" "$HERE/obs_phase2.py" <<'PYEOF'
@@ -1321,7 +1325,7 @@ m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 host, exclude = sys.argv[1], sys.argv[2]
 ws = m._conn(host, os.environ.get("OBS_PASSWORD", ""))
 keep = []
-for inp in ["NDI cam1", "NDI cam2", "NDI cam3", "NDI cam4", "NDI cam5", "NDI cam6"]:
+for inp in ["NDI cam1", "NDI cam2", "NDI cam3", "NDI cam4", "NDI cam5", "NDI cam6", "NDI cam7"]:
     try:
         s = m._rpc(ws, "GetInputSettings", {"inputName": inp}).get("inputSettings", {})
         sender = s.get("ndi_source_name", "")
@@ -1343,7 +1347,7 @@ for frozen_attempt in $(seq 1 "$FROZEN_CAM_ATTEMPTS"); do
       --host "$STRIH" \
       --threshold   "${FROZEN_CAM_THRESHOLD:-3}" \
       --samples     "${FROZEN_CAM_SAMPLES:-8}" \
-      --sources     "${FROZEN_CAM_SOURCES:-NDI cam1,NDI cam2,NDI cam3,NDI cam4,NDI cam5,NDI cam6}" \
+      --sources     "${FROZEN_CAM_SOURCES:-NDI cam1,NDI cam2,NDI cam3,NDI cam4,NDI cam5,NDI cam6,NDI cam7}" \
       --warm-settle "${FROZEN_CAM_WARM_SETTLE_S:-3}"; then
     frozen_ok=1
     break
@@ -1877,12 +1881,16 @@ ALL_CAMBOX="${ALL_CAMBOX:-0}"
 # scene:label pairs, per the CANONICAL #399 strih NDI-input->camera mapping (set-ndi-mapping.py
 # DEFAULT_MAP; scene names follow the input labels 1:1, .claude/skills/genlock/SKILL.md):
 #   'Cam 5'->CAM1(.61)  'Cam 1'->CAM3(.63)  'Cam 3'->CAM4(.64)  'Cam 2'->CAM2(.62)
-#   'Cam 4'->CAM5(.65)  'Cam 6'->CAM6(.66)
+#   'Cam 4'->CAM5(.65)  'Cam 6'->CAM6(.66)  'Cam 7'->CAM7(.67)
 # #24/#399: CAM3 is back in the default — its original exclusion (#301, cam3 SSH down) closed
 # 2026-06-30, and #399 later re-pinned 'Cam 1' from CAM4 to CAM3 (a prior default here still said
 # 'Cam 1'->CAM4, silently mis-attributing CAM3's frames to the "CAM4" label — see
 # tests/python/test_cambox_sweep_mapping.py, which cross-checks this default against DEFAULT_MAP
 # so a future re-map can't desync it again).
+#
+# #753 (2026-07-14): 'Cam 7'->CAM7 is a NEW, DIRECT (non-inverted) pin -- cam7 never had a
+# legacy scene name to inherit, so its input/scene share the same "7", unlike the historical
+# six's inversion. Added the same way cam5/cam6 were by #624/#451.
 #
 # #312 CORRECTS the #333 painter exclusion: this default used to sweep ONLY cam1/cam3/cam4,
 # excluding CAM2 on the theory that "while painting the monitor it does NOT capture/emit its OWN
@@ -1899,7 +1907,7 @@ ALL_CAMBOX="${ALL_CAMBOX:-0}"
 # the resulting `all_cambox_continuity.segments[].cambox` label CAMN == physical box camN directly,
 # NO translation needed. See `.claude/skills/e2e` "CORRECTION (2026-07-12, #708)" for the 4-way
 # verification. Before computing a per-physical-camera table from this JSON, re-read that section.
-CAMBOX_SWEEP="${CAMBOX_SWEEP:-Cam 5:CAM1 Cam 1:CAM3 Cam 3:CAM4 Cam 2:CAM2 Cam 4:CAM5 Cam 6:CAM6}"
+CAMBOX_SWEEP="${CAMBOX_SWEEP:-Cam 5:CAM1 Cam 1:CAM3 Cam 3:CAM4 Cam 2:CAM2 Cam 4:CAM5 Cam 6:CAM6 Cam 7:CAM7}"
 SEGMENT_SECS="${SEGMENT_SECS:-30}"
 if [ "$ALL_CAMBOX" = "1" ]; then
   # #332: the all-cambox sweep now runs on the DEFAULT decode-on-stream path (VERDICT_ON_STREAM=1,

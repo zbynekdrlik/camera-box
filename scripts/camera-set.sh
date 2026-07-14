@@ -11,11 +11,8 @@
 #   cam4 -> 10.77.9.64 / "CAM4 (usb)"
 #   cam5 -> 10.77.9.65 / "CAM5 (usb)"   (#451 — fleet growing 4->6)
 #   cam6 -> 10.77.9.66 / "CAM6 (usb)"
-#
-#   cam7 does NOT exist yet (#593) -- the user only expressed FUTURE interest in a 7th camera,
-#   no box was ever built/connected. Do NOT add a cam7 case arm / CAMERA_SET entry until a real
-#   cam7 box exists; adding it back is a one-line change when it does (uncomment + fill in its
-#   real IP below, mirroring the pattern of the six real entries above).
+#   cam7 -> 10.77.9.67 / "CAM7 (usb)"   (#753 — real box built + provisioned 2026-07-14,
+#                                        fleet growing 6->7, Elgato 4K S grabber)
 #
 # This file is meant to be SOURCED, not executed — it defines functions and a default, and
 # performs no side effects on its own. Direct execution prints the resolved default set.
@@ -26,9 +23,9 @@
 # falls through to the `*)` reject arm and returns nonzero.
 
 # CAMERA_SET = the ordered list a "drive the whole set" loop iterates over. Override to run a
-# subset, e.g. `CAMERA_SET="cam1 cam3 cam4"`. Defaults to all six real cameras (#451; #593 —
-# cam7 was never built and must NOT appear in the default set).
-CAMERA_SET="${CAMERA_SET:-cam1 cam2 cam3 cam4 cam5 cam6}"
+# subset, e.g. `CAMERA_SET="cam1 cam3 cam4"`. Defaults to all seven real cameras (#451/#753 —
+# cam7 is a real, fully-provisioned box as of 2026-07-14, 10.77.9.67, Elgato 4K S).
+CAMERA_SET="${CAMERA_SET:-cam1 cam2 cam3 cam4 cam5 cam6 cam7}"
 
 # GENLOCK_FPS = the genlock/broadcast emit rate the harness starts the manual camera-box
 # sender at, so it wall-paces EXACTLY like the deployed camera-box service (#66). The deployed
@@ -126,6 +123,10 @@ camera_resolve() {
 #   NDI cam6 -> CAM6 (usb)   =>  cam6 shows on scene "Cam 6" / source "NDI cam6" (#312: already
 #                                correctly bound live on strih; now canonically pinned so it
 #                                survives an OBS relaunch like the other four)
+#   NDI cam7 -> CAM7 (usb)   =>  cam7 shows on scene "Cam 7" / source "NDI cam7" (#753: a NEW,
+#                                DIRECT (non-inverted) pin -- cam7 never had a legacy scene name
+#                                to inherit, so its input/scene share the same "7", unlike the
+#                                historical six's inversion above)
 # Literal `case` match (#39 injection-safe, same threat model as camera_resolve above) --
 # an unknown/hostile name runs no command, it just falls through to the reject arm.
 camera_strih_route() {
@@ -136,8 +137,9 @@ camera_strih_route() {
     cam4) CAMERA_STRIH_SCENE="Cam 3"; CAMERA_STRIH_SOURCE="NDI cam3" ;;
     cam5) CAMERA_STRIH_SCENE="Cam 4"; CAMERA_STRIH_SOURCE="NDI cam4" ;;
     cam6) CAMERA_STRIH_SCENE="Cam 6"; CAMERA_STRIH_SOURCE="NDI cam6" ;;
+    cam7) CAMERA_STRIH_SCENE="Cam 7"; CAMERA_STRIH_SOURCE="NDI cam7" ;;
     *)
-      echo "camera-set: '${name}' is not a strih-routed SOURCE camera (expected one of: cam1 cam3 cam4 cam5 cam6)" >&2
+      echo "camera-set: '${name}' is not a strih-routed SOURCE camera (expected one of: cam1 cam3 cam4 cam5 cam6 cam7)" >&2
       return 1
       ;;
   esac

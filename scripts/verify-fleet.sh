@@ -13,11 +13,11 @@
 # An OFFLINE box (unreachable over SSH — a box mid-reboot/deploy) is reported SKIPPED, never a
 # hard FAIL: verify-device.sh's own per-CHECK "unreachable = FAIL" posture is right for a box that
 # SHOULD be up; at the FLEET level, a box that's plain not there yet is a different signal from a
-# box that IS there and failing its acceptance checks. (An unresolvable camera NAME, e.g. cam7 —
-# never built, #593 — is a distinct "invalid" verdict, not SKIPPED-as-offline: see camera_resolve.)
+# box that IS there and failing its acceptance checks. (An unresolvable camera NAME, e.g. a typo
+# like cam9, is a distinct "invalid" verdict, not SKIPPED-as-offline: see camera_resolve.)
 #
 # Usage:
-#   scripts/verify-fleet.sh                       # verify cam1-6 (or camera-set.sh's CAMERA_SET)
+#   scripts/verify-fleet.sh                       # verify cam1-7 (or camera-set.sh's CAMERA_SET)
 #   CAMERA_SET="cam1 cam3" scripts/verify-fleet.sh   # verify a subset
 #   scripts/verify-fleet.sh --help
 #
@@ -41,7 +41,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SSH_USER="${SSH_USER:-root}"
 CAM_PW="${CAM_PW:-newlevel}"
 SSH_TIMEOUT="${SSH_TIMEOUT:-10}"
-SET="${CAMERA_SET:-cam1 cam2 cam3 cam4 cam5 cam6}"
+SET="${CAMERA_SET:-cam1 cam2 cam3 cam4 cam5 cam6 cam7}"
 VERIFY_CMD="${VERIFY_CMD:-$HERE/verify-device.sh}"
 # VERIFY_CMD is invoked as a plain child process (line ~140 below), not over ssh -- export the
 # three vars explicitly so verify-device.sh (or a test stub) reliably sees the SAME

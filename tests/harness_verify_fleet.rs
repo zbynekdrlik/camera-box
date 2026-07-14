@@ -383,21 +383,25 @@ fn verify_fleet_offline_box_does_not_mask_a_real_failure_elsewhere() {
 }
 
 #[test]
-fn verify_fleet_rejects_cam7_as_invalid_not_offline() {
-    // #593: cam7 was NEVER built -- it must not even resolve as a camera name (unlike a real,
-    // offline fleet member such as cam6 above). camera_resolve rejects it, so verify-fleet.sh's
+fn verify_fleet_rejects_cam9_as_invalid_not_offline() {
+    // #593 originally used cam7 as the "never built, unresolvable name" example; #753
+    // (2026-07-14) built + provisioned cam7 for real, so it now resolves like any other fleet
+    // member -- this test's PREMISE (not its correctness) went stale, per the
+    // genuinely-wrong-test rewrite rule (tdd-workflow.md). cam9 replaces it as a name that is
+    // made-up and will never resolve (same convention harness_camera_set.rs's
+    // camera_set_rejects_unknown_camera uses). camera_resolve rejects it, so verify-fleet.sh's
     // own "invalid" branch fires, distinct from the reachability-probe-based SKIPPED path.
-    let r = run_fleet("cam1 cam7", &[], &[]);
+    let r = run_fleet("cam1 cam9", &[], &[]);
     assert!(
         !r.success,
-        "verify-fleet.sh must exit nonzero when CAMERA_SET names an unresolvable camera (cam7). \
+        "verify-fleet.sh must exit nonzero when CAMERA_SET names an unresolvable camera (cam9). \
          output:\n{}",
         r.output
     );
     assert_eq!(
         summary_line(&r.output, "FAIL:"),
-        "cam7(invalid)",
-        "cam7 must be reported as an invalid camera name, not silently skipped or passed; \
+        "cam9(invalid)",
+        "cam9 must be reported as an invalid camera name, not silently skipped or passed; \
          output:\n{}",
         r.output
     );
