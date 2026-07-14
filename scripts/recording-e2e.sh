@@ -1128,27 +1128,47 @@ fi
 # #758 item 2 — sender-bounce liveness re-verify: after a box's [2/8]/[2b/8] service->burn-unit
 # swap, re-verify its "MV NDI cam<N>" clone still delivers CHANGING frames. A swap can leave the
 # box emitting NDI again while strih's receiver never re-locks on its own; ONE auto re-attach
-# (strih_mv_scenes.py --reattach, re-applying the twin's OWN current ndi_source_name) is tried
+# (strih_mv_scenes.py --reattach, re-applying the twin's OWN current ndi_source_name) is tried,
+# THEN the harness gives the reconnect real SETTLE time across a bounded number of re-checks
 # before failing loud — never StartRecord, never a cleanup that ends with a leg still dead.
+#
+# Retry/settle budget calibrated from a LIVE measurement (2026-07-14), not guessed: this
+# mechanism's first two real CI exercises both failed cam1 with the ORIGINAL tight budget (a
+# single ~3.5s check, one re-attach, a 2s settle, one more ~3.5s check -- ~13s total after the
+# caller's own upfront `sleep 4`). A direct timed `systemctl restart camera-box` + repeated
+# frozen-camera-gate polling against the SAME "MV NDI cam1" clone measured genuine recovery at
+# t+11.4s -- inside the OLD budget's margin, but only barely, matching the two real failures.
+# The mid-run [3/8]-area frozen-camera-gate retry loop below (FROZEN_CAM_ATTEMPTS=4 x
+# FROZEN_CAM_RETRY_SLEEP=30s) already establishes this repo's OWN precedent for how long a
+# genuine post-deploy NDI reconnect can take -- this preflight check reuses the SAME "attempts x
+# settle" shape, just with a smaller per-camera budget (it fires up to 7x in an ALL_CAMBOX sweep,
+# vs. the mid-run gate's one-shot use), sized comfortably above the measured 11.4s.
 preflight_mv_reverify() {
   local box="$1" cam_n="$2"
   [ "${ALL_CAMBOX:-0}" = "1" ] || return 0
   case " $PREFLIGHT_EXCLUDED_CAMS " in *" $box "*) return 0 ;; esac
-  if python3 "$HERE/frozen-camera-gate.py" --host "$STRIH" --password "" \
-      --sources "MV NDI cam${cam_n}" --samples 2 --cadence 3.5 --threshold 1 --warm-settle 0 \
-      --verdict-bin "$PROBE_BIN_DIR/frozen-camera-gate" >/dev/null 2>&1; then
-    return 0
-  fi
-  echo "    [sender-bounce] ${box} (MV NDI cam${cam_n}) shows no pixel change right after its deploy — attempting ONE re-attach (#758 item 2)" >&2
-  python3 "$HERE/strih_mv_scenes.py" --host "$STRIH" --password "" --reattach "$cam_n" >&2 || true
-  sleep 2
-  if python3 "$HERE/frozen-camera-gate.py" --host "$STRIH" --password "" \
-      --sources "MV NDI cam${cam_n}" --samples 2 --cadence 3.5 --threshold 1 --warm-settle 0 \
-      --verdict-bin "$PROBE_BIN_DIR/frozen-camera-gate" >/dev/null 2>&1; then
-    echo "    [sender-bounce] ${box} recovered after re-attach" >&2
-    return 0
-  fi
-  echo "ERROR: [preflight] FAIL: ${box} (MV NDI cam${cam_n}) still shows no pixel change after ONE re-attach attempt — the camera leg is dead right after its own deploy. Investigate the box directly (this run must not proceed with a known-dead leg)." >&2
+  local attempts="${PREFLIGHT_MV_REVERIFY_ATTEMPTS:-3}"
+  local settle_s="${PREFLIGHT_MV_REVERIFY_SETTLE_S:-6}"
+  local a
+  for a in $(seq 1 "$attempts"); do
+    if python3 "$HERE/frozen-camera-gate.py" --host "$STRIH" --password "" \
+        --sources "MV NDI cam${cam_n}" --samples 2 --cadence 3.5 --threshold 1 --warm-settle 0 \
+        --verdict-bin "$PROBE_BIN_DIR/frozen-camera-gate" >/dev/null 2>&1; then
+      if [ "$a" -gt 1 ]; then
+        echo "    [sender-bounce] ${box} recovered on attempt ${a}/${attempts}" >&2
+      fi
+      return 0
+    fi
+    if [ "$a" -eq 1 ]; then
+      echo "    [sender-bounce] ${box} (MV NDI cam${cam_n}) shows no pixel change right after its deploy — attempting re-attach (#758 item 2)" >&2
+      python3 "$HERE/strih_mv_scenes.py" --host "$STRIH" --password "" --reattach "$cam_n" >&2 || true
+    fi
+    if [ "$a" -lt "$attempts" ]; then
+      echo "    [sender-bounce] ${box} attempt ${a}/${attempts} still no pixel change — settling ${settle_s}s for the NDI reconnect, then re-sampling" >&2
+      sleep "$settle_s"
+    fi
+  done
+  echo "ERROR: [preflight] FAIL: ${box} (MV NDI cam${cam_n}) still shows no pixel change after ${attempts} attempts (incl. one re-attach, ~$((attempts * 4 + (attempts - 1) * settle_s))s total) — the camera leg is dead right after its own deploy. Investigate the box directly (this run must not proceed with a known-dead leg)." >&2
   return 1
 }
 
