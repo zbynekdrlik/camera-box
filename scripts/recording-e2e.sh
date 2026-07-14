@@ -1049,7 +1049,7 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
   done
   if [ -n "$PREFLIGHT_MV_SOURCES" ]; then
     python3 "$HERE/frozen-camera-gate.py" --host "$STRIH" --password "" \
-      --sources "$PREFLIGHT_MV_SOURCES" --samples 2 --cadence 3.5 --threshold 0 --warm-settle 0 \
+      --sources "$PREFLIGHT_MV_SOURCES" --samples 2 --cadence 3.5 --threshold 1 --warm-settle 0 \
       --verdict-bin "$PROBE_BIN_DIR/frozen-camera-gate" \
       || {
         echo "ERROR: [preflight] FAIL: one or more MV NDI clones show NO pixel change across ~3.5s — a camera leg looks frozen/dead before this run even started. Investigate the named camera's NDI sender (see the frozen list above)." >&2
@@ -1068,7 +1068,7 @@ preflight_mv_reverify() {
   [ "${ALL_CAMBOX:-0}" = "1" ] || return 0
   case " $PREFLIGHT_EXCLUDED_CAMS " in *" $box "*) return 0 ;; esac
   if python3 "$HERE/frozen-camera-gate.py" --host "$STRIH" --password "" \
-      --sources "MV NDI cam${cam_n}" --samples 2 --cadence 3.5 --threshold 0 --warm-settle 0 \
+      --sources "MV NDI cam${cam_n}" --samples 2 --cadence 3.5 --threshold 1 --warm-settle 0 \
       --verdict-bin "$PROBE_BIN_DIR/frozen-camera-gate" >/dev/null 2>&1; then
     return 0
   fi
@@ -1076,7 +1076,7 @@ preflight_mv_reverify() {
   python3 "$HERE/strih_mv_scenes.py" --host "$STRIH" --password "" --reattach "$cam_n" >&2 || true
   sleep 2
   if python3 "$HERE/frozen-camera-gate.py" --host "$STRIH" --password "" \
-      --sources "MV NDI cam${cam_n}" --samples 2 --cadence 3.5 --threshold 0 --warm-settle 0 \
+      --sources "MV NDI cam${cam_n}" --samples 2 --cadence 3.5 --threshold 1 --warm-settle 0 \
       --verdict-bin "$PROBE_BIN_DIR/frozen-camera-gate" >/dev/null 2>&1; then
     echo "    [sender-bounce] ${box} recovered after re-attach" >&2
     return 0
