@@ -46,6 +46,11 @@ pub mod reannounce;
 // probe deps, so it unit-tests Tier-0; the probe-gated framebuffer blit lives in `probe::qr`.
 pub mod colour_scale;
 
+// #751 — constant-velocity motion sweep (the UFO-test element) for the cam2 painter. Pure
+// geometry + position math (no probe deps, unit-tests Tier-0); the probe-gated framebuffer blit
+// lives in `probe::qr` and the painter only CALLS it.
+pub mod motion_sweep;
+
 // #188/#145 — QR-based (QPSK) audio marker, byte-compatible with the norihiro
 // obs-audio-video-sync-dock protocol. Pure Tier-0 (encode + decode + estimator); the continuous-feed
 // ALSA emitter (`probe::qpsk_emit`) and recording-verdict decode call into this. Supersedes the chirp.
