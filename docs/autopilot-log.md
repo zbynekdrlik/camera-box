@@ -5088,3 +5088,37 @@ vendored `obs-source.c` release-cadence fix (#726 candidate A).
 - Rig restored: both boxes' obs64 healthy (1 each), strih's AutoHotkey64 restored post-swap,
   Multiview projector reopened, TEST mode re-armed fresh before the gate run, orphan probe
   recordings cleaned up.
+
+## 2026-07-14 — #726 STICKY-N full-bundle deploy + fused gate re-run (residual persists → stays open)
+
+- **STICKY-N implemented** (predecessor commits, dev): bump `aeaf60b28`, RED `f5f79d611`, GREEN
+  `bfb017d2a` — persistent `obs_source_t::genlock_last_known_n` + `ReleaseCadence::last_known_n`
+  latch the last CONFIRMED integer multiple N; bridge an inconclusive front-2 tick (`num<2` /
+  non-monotonic pair) with the latch instead of crawling (present-oldest). Fresh measurement wins +
+  re-latches (1:1 re-latches to 1 → byte-identical); latch cleared on acquire/relock/gap/
+  backward-step. C mirror in `vendor/obs-studio/libobs/obs-source.c`, guard in
+  `tests/genlock_release_cadence.rs`.
+- **FULL windows-genlock build** `bfb017d2` (obs.dll `e741dbe6…`, obs64 `a5febe76…`, opengl
+  `a70a72fa…`, distroav `7c382e18…`) — a struct addition makes the obs.dll-only fast-swap
+  spec-invalid, so the full ~150-min build was required.
+- **DEPLOYED full bundle to BOTH strih + stream** (backups `C:\obs-backup\2026-07-14\`).
+  drift-guard `--compare` = **NO DRIFT** both boxes (all per-component SHAs + capability +
+  genlock_build + ndi_input_latency=0 OK). See the genlock skill's new "FULL-BUNDLE in-place deploy
+  runbook" for the AHK-watchdog gotcha (must `Stop-Process AutoHotkey64` before robocopy or it
+  respawns obs64 mid-copy → rc=8 on data/plugins; restart it after) + the obs.dll crash-modal race
+  (unconditional kill→clear-sentinel→launch). strih recovered from a crash-modal hang on first
+  relaunch (the AHK-respawn-skipped-sentinel-clear bug, now documented).
+- **Fresh fused gate (run 29289603414, `verdict-636515751.json`) on the deployed sticky-N build —
+  overall_pass=false, PR #704 NOT merged (BLOCKED, E2E required check red).** Findings:
+  - **#726: wrong-N crawl ELIMINATED** — `derived_expected_step=2` on ALL 10 strih windows; 8/10
+    uniform >=0.96. CAM6 0.800→0.961 (now PASS), CAM1 win#1 0.947→0.988, CAM1 win#2 (old win6)
+    **0.154→0.481** (3× better) but still FAIL. The CAM1(=`NDI cam5`) residual correlates with
+    cam5 delivery **p99=2203ms / max 2903ms** — a real arrival-jitter burst the FIFO storm-drains
+    (a SOURCE-side #707 emit-deficit + delivery tail, not a genlock cadence gap). **#726 stays
+    OPEN** per acceptance ("every window >=0.95 incl CAM1" unmet); genlock-side work is done.
+  - Commented fresh numbers: **#707** (CAM1/cam5 the dominant continuity residual), **#741** (strih
+    real_drops=4, ids incl low 1085/1087 mid-stream = non-monotonic), **#740** (colour_fail=2 on
+    every node, imag=0 → systemic), **#689** (AV cam1 -66.5 / cam2 -70.7 / cam4 -89.9 ms, all fail
+    ±20ms — stream hold 925ms + tolerance left unchanged).
+- Rig verified CLEAN post-gate: strih program 'Cam 2' / stream 'PRO', burns OFF both boxes (gate
+  cleanup restored). dev1 LAN http server stopped.

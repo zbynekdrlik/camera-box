@@ -207,6 +207,59 @@ Camera→strih hops: genlock tick active but camera ingests are NOT genlock_fifo
 Rollback = stop OBS, robocopy backups back over `C:\Program Files\obs-studio` + the
 ProgramData distroav, clear `%APPDATA%\obs-studio\.sentinel\*`, relaunch.
 
+## FULL-BUNDLE in-place deploy runbook (#726 session, 2026-07-14) — the AHK-watchdog gotcha
+
+When to full-bundle vs obs.dll-only: a **struct change** to `obs_source` (e.g. #726's
+`genlock_last_known_n`) is technically ABI-safe as an **obs.dll-only** swap (distroav + the frontend
+hold `obs_source_t*` opaque handles, never `obs-internal.h`; proven live — the new obs.dll loads the
+OLD distroav.dll fine, genlock FIFO works), so a hot-swap RUNS. **But** a full windows-genlock build
+from dev HEAD also rebuilds `obs64.exe` + `libobs-opengl.dll` (git-describe/`__DATE__` embedded),
+which the boxes' last full-bundle deploy predates — so obs.dll-only leaves those STALE and
+`drift-guard --compare` (manifest per-component check) reports the mismatch. If the ticket/spec says
+"full bundle, NO DRIFT", deploy the whole bundle, not just obs.dll.
+
+Procedure (per box, ~10 files actually differ but deploy the whole stage for NO-DRIFT):
+
+1. `airuleset.py`-serve or `python3 -m http.server --bind <dev1 LAN>` the bundle as ONE zip
+   (`zip -rX bundle.zip . -x '*.pdb'` — PDBs are never deployed; ~172 MB). Backup the differing
+   components to `C:\obs-backup\<date>\*.pre-<tag>` FIRST.
+2. Download + `Expand-Archive` on the box while OBS keeps running (no impact).
+3. **STOP THE AHK WATCHDOG BEFORE KILLING OBS** — `NL_STARTUP.ahk` (a "Safe loop" `AutoHotkey64`
+   process, `D:\_APPS\NL_STARTUP.ahk`, on **strih** — stream has NONE) auto-respawns obs64. If you
+   robocopy while it's alive, it relaunches obs64 mid-copy, which re-locks `data/` + `obs-plugins/`
+   files → `robocopy` exit code **11/10** (bit 8 = FAILURE, some files not copied), silently leaving
+   DRIFT. `Get-Process AutoHotkey64 | Stop-Process -Force` first; **restart it at the END** with the
+   same cmdline (`Start-Process 'C:\Users\newlevel\AppData\Local\Programs\AutoHotkey\v2\AutoHotkey64.exe' -ArgumentList 'D:\_APPS\NL_STARTUP.ahk'`).
+   Its `app1_run` keeps obs64 (`OBS Studio.lnk`) alive; `app3` Resolume, `app6` tally — killing it
+   briefly doesn't stop those (already running), only removes the watchdog until you restart it.
+4. Kill obs64 (+ `obs-browser-page`), clear `%APPDATA%\obs-studio\.sentinel\*`.
+5. Surgical overwrite-keep-extras (preserves 3rd-party plugins — NEVER `/MIR`/`/PURGE`):
+   `robocopy <stage>\bin\64bit  "<root>\bin\64bit"  /E /XF *.pdb /MT:16`,
+   `robocopy <stage>\data       "<root>\data"       /E /MT:16`,
+   `robocopy <stage>\obs-plugins\64bit "<root>\obs-plugins\64bit" /E /XF distroav.dll /MT:16`
+   (distroav lives in **ProgramData**, not Program Files — `/XF` it to avoid a shadow copy that
+   drift-guard's `distroav_dll_paths` check flags). Copy `BUNDLE_MANIFEST.json` +
+   `GENLOCK_BUILD_SHA.txt` to `<root>\` (so `drift-guard genlock_build_sha` reads the new build).
+6. Verify NO drift: `robocopy … /L` and grep for lines NOT matching `*EXTRA` — every genuine
+   copy-candidate must be gone. **`data\obs-plugins\win-dshow\obs-virtualcam-module64.dll` may still
+   show as `Newer` and fail (bit 8) — it's held by the Windows Camera Frame Server / any
+   camera-enumerating app even with OBS down.** Check `Get-FileHash` box-vs-stage: it is
+   content-IDENTICAL build-to-build, so a bit-8 on it alone is BENIGN (newer timestamp only, not real
+   drift) — do not chase it.
+7. Relaunch = **unconditionally** kill → clear sentinel → `Start-Process` (never gate the
+   sentinel-clear on "if not running" — on strih the AHK respawn races you and the guard skips the
+   clear, so obs64 hangs on the "Crash Detected" modal at ~93 MB working-set with no genlock line;
+   the tell is a fresh log whose last line is `Crash or unclean shutdown detected` and NO
+   `genlock: … render tick ENABLED`). Poll for `render tick ENABLED` in the newest log.
+8. `drift-guard --compare host=<box> … manifest=<bundle>\BUNDLE_MANIFEST.json obs_dll_sha256=<full>
+   distroav_dll_sha256=<full> genlock_build_sha=<sha> genlock_capability="genlock: wall-clock-slaved
+   render tick ENABLED" ndi_input_latency="<inp>=0,…"`. **Supply `ndi_input_latency`** (read the
+   DistroAV `latency` field via `obs_phase2._rpc(ws,"GetInputSettings",…)['inputSettings']['latency']`,
+   0=Normal) or the run exits **11 (UNKNOWN/incomplete), not 0** — that is NOT drift, just a value you
+   didn't gather. Reopen the strih Multiview after relaunch via WS
+   `OpenVideoMixProjector {videoMixType:OBS_WEBSOCKET_VIDEO_MIX_TYPE_MULTIVIEW, monitorIndex:1}`
+   (strih monitors: `U27P2G6B`(0)=UI, `SyncMaster`(1)=multiview panel).
+
 ## Bundle version integrity (EPIC #125)
 
 **On-box build identity in the OBS title (#152):** the window title is composed in
