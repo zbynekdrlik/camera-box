@@ -117,6 +117,12 @@ pub mod burn_reconcile;
 // `scripts/frozen-camera-gate.py`; the thin CLI binary lives in `src/bin/frozen-camera-gate.rs`.
 pub mod frozen_camera;
 
+// #758 item 4 — the frozen-leg classifier: distinguishes a SUSTAINED camera freeze (hard-fail)
+// from isolated stale-replay frames (informational-only) from a segment's own copies/frames/
+// duration (the SAME data probe::recording_segments::CamboxSegment already computes). Pure
+// Rust, no probe deps, no image/rqrr — unit-tests Tier-0.
+pub mod frozen_leg;
+
 // #89 — pure DXGI device-lost (GPU TDR / driver-internal-error) log-signature matcher, extracted
 // from `probe::obs_log_audit` (#81) to a crate-root pure module so the default-feature
 // watchdog/self-heal pipeline can share the exact same match — never a second drifting copy.
