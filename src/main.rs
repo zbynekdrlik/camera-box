@@ -610,6 +610,11 @@ async fn run_capture_loop(
         let mut emit_ring = camera_box::emit_rate_ring::EmitRateRing::new(
             camera_box::emit_rate_ring::DEFAULT_RING_SECONDS,
         );
+        // #752 — coalesce the per-gate-call emit-gate-skip WARN (previously ~10/s on a skipping
+        // box → rsyslogd 37% + journald 15% CPU on the 3-core boxes, a starvation feedback loop)
+        // into ONE aggregated WARN per 5s Streaming report. The per-skip detail is accumulated
+        // here and drained on the report tick below.
+        let mut emit_skip_log = camera_box::emit_skip_log::EmitGateSkipLog::new();
 
         // #299 — colour-capture metric: sample chroma once per CHROMA_SAMPLE_FRAMES
         // captured frames (≈1 Hz at 60 fps) and log alongside the 5-second fps report.
@@ -866,16 +871,9 @@ async fn run_capture_loop(
                         out_interval_ns,
                     );
                     if skipped > 0 {
-                        tracing::warn!(
-                            "#707 genlock emit-gate SKIPPED {} boundary interval(s) \
-                             (prev_boundary_ns={}, new_boundary_ns={}, interval_ns={}) — a clock \
-                             discontinuity (DanteSync step) or a stalled poll leapt past frame(s) \
-                             that were never emitted (see #707)",
-                            skipped,
-                            prev_boundary_ns,
-                            next_boundary_ns,
-                            out_interval_ns
-                        );
+                        // #752 — do NOT log per skip (that was the ~10/s storm). Accumulate; the
+                        // 5s Streaming report below drains ONE aggregated WARN with the count.
+                        emit_skip_log.record(skipped);
                     }
                     if !emit {
                         return; // between boundaries — decimate (don't send)
@@ -1119,6 +1117,21 @@ async fn run_capture_loop(
                             emit_ring.emit_buckets(),
                             emit_ring.capture_buckets(),
                         );
+
+                        // #752 — ONE aggregated emit-gate-skip WARN per report window (drains +
+                        // resets the accumulator). A clean window logs nothing; a skipping window
+                        // logs a single line with the event count + total boundaries skipped,
+                        // instead of the ~10/s per-skip storm that starved the emit thread.
+                        if let Some((skip_events, skip_total)) = emit_skip_log.take() {
+                            tracing::warn!(
+                                "{}",
+                                camera_box::emit_skip_log::skip_summary_warning(
+                                    skip_events,
+                                    skip_total,
+                                    5
+                                )
+                            );
+                        }
 
                         // #656 — capture-delivery-rate health: WARN when the captured fps has
                         // sustained a >1% deviation from the device's negotiated capture rate

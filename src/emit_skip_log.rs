@@ -34,8 +34,12 @@ impl EmitGateSkipLog {
     /// Record ONE gate call that skipped `skipped` boundary intervals. A `skipped` of 0 is ignored
     /// (a normal single-interval advance / a decimated poll is NOT a skip), so a caller that calls
     /// `record` on every poll can never inflate the event count with non-skips.
-    pub fn record(&mut self, _skipped: u64) {
-        // RED stub — no accumulation yet (GREEN implements this).
+    pub fn record(&mut self, skipped: u64) {
+        if skipped == 0 {
+            return;
+        }
+        self.events = self.events.saturating_add(1);
+        self.total_skipped = self.total_skipped.saturating_add(skipped);
     }
 
     /// True while nothing has been recorded since the last flush (lets the report skip the WARN).
@@ -47,8 +51,13 @@ impl EmitGateSkipLog {
     /// recorded this window — so the 5s report emits at most ONE aggregated WARN, and none at all
     /// on a clean window (the whole point of the #752 throttle).
     pub fn take(&mut self) -> Option<(u64, u64)> {
-        // RED stub — always None (GREEN implements the drain+reset).
-        None
+        if self.events == 0 {
+            return None;
+        }
+        let out = (self.events, self.total_skipped);
+        self.events = 0;
+        self.total_skipped = 0;
+        Some(out)
     }
 }
 
@@ -56,9 +65,14 @@ impl EmitGateSkipLog {
 /// calls skipped `total_skipped` boundary intervals over the last ~`window_secs`s. Keeps the
 /// `#707 genlock emit-gate SKIPPED` phrase (existing log greps still match) but as ONE line per
 /// window instead of ~10/s.
-pub fn skip_summary_warning(_events: u64, _total_skipped: u64, _window_secs: u64) -> String {
-    // RED stub — empty (GREEN builds the real aggregate line).
-    String::new()
+pub fn skip_summary_warning(events: u64, total_skipped: u64, window_secs: u64) -> String {
+    format!(
+        "#707 genlock emit-gate SKIPPED boundaries in {events} gate call(s) totalling \
+         {total_skipped} boundary interval(s) over the last ~{window_secs}s (rate-limited #752 \
+         aggregate — a clock discontinuity or a stalled/starved emit poll leapt past frame(s) that \
+         were never emitted; per-skip detail is throttled to stop the rsyslogd/journald CPU \
+         feedback loop, see #752)"
+    )
 }
 
 #[cfg(test)]
