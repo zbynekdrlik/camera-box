@@ -560,6 +560,16 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
         ;;
     esac
   done
+
+  # imag-nb's Multiview AND Program projectors must be OPEN before ANY run starts — the user's
+  # explicit, binding requirement ("MULTIVIEW MUSI BYT ZAPNUTE ako podmienka preflight pred tym
+  # nez sa rozbehne akykolvek test"). obs-websocket has no "is it open" query, so this ALWAYS
+  # (idempotently) opens both — a failed open is a loud preflight FAIL, never a silent skip.
+  echo "[0/8] imag-nb Multiview + Program projectors must be OPEN (#758)"
+  if ! python3 "$HERE/obs_phase2.py" open-projectors --host "$IMAG_IP" 2>&1 | sed 's/^/    [imag projectors] /'; then
+    echo "ERROR: [preflight] FAIL: imag-nb (${IMAG_IP}): could not open the Multiview/Program projectors — check imag-nb's OBS WebSocket is reachable and DP-0/HDMI-0 are actually connected monitors." >&2
+    exit 1
+  fi
 fi
 
 # Capture-delivery-rate preflight (#656 prevention item 2): the appliance's OWN capture loop
@@ -1043,6 +1053,33 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
   fi
 fi
 
+# #758 item 2 — sender-bounce liveness re-verify: after a box's [2/8]/[2b/8] service->burn-unit
+# swap, re-verify its "MV NDI cam<N>" clone still delivers CHANGING frames. A swap can leave the
+# box emitting NDI again while strih's receiver never re-locks on its own; ONE auto re-attach
+# (strih_mv_scenes.py --reattach, re-applying the twin's OWN current ndi_source_name) is tried
+# before failing loud — never StartRecord, never a cleanup that ends with a leg still dead.
+preflight_mv_reverify() {
+  local box="$1" cam_n="$2"
+  [ "${ALL_CAMBOX:-0}" = "1" ] || return 0
+  case " $PREFLIGHT_EXCLUDED_CAMS " in *" $box "*) return 0 ;; esac
+  if python3 "$HERE/frozen-camera-gate.py" --host "$STRIH" --password "" \
+      --sources "MV NDI cam${cam_n}" --samples 2 --cadence 3.5 --threshold 0 --warm-settle 0 \
+      --verdict-bin "$PROBE_BIN_DIR/frozen-camera-gate" >/dev/null 2>&1; then
+    return 0
+  fi
+  echo "    [sender-bounce] ${box} (MV NDI cam${cam_n}) shows no pixel change right after its deploy — attempting ONE re-attach (#758 item 2)" >&2
+  python3 "$HERE/strih_mv_scenes.py" --host "$STRIH" --password "" --reattach "$cam_n" >&2 || true
+  sleep 2
+  if python3 "$HERE/frozen-camera-gate.py" --host "$STRIH" --password "" \
+      --sources "MV NDI cam${cam_n}" --samples 2 --cadence 3.5 --threshold 0 --warm-settle 0 \
+      --verdict-bin "$PROBE_BIN_DIR/frozen-camera-gate" >/dev/null 2>&1; then
+    echo "    [sender-bounce] ${box} recovered after re-attach" >&2
+    return 0
+  fi
+  echo "ERROR: [preflight] FAIL: ${box} (MV NDI cam${cam_n}) still shows no pixel change after ONE re-attach attempt — the camera leg is dead right after its own deploy. Investigate the box directly (this run must not proceed with a known-dead leg)." >&2
+  return 1
+}
+
 echo "[2/8] $CAMERA_NAME (${CAM1_IP}) — probe-featured camera-box with the #174 capture BURN (emits NDI w/ $CAMERA_NAME mark, NO grab #179)"
 # #174 + #179: deploy the freshly-built PROBE-featured camera-box (carries the #174 capture
 # burn) to a $CAMERA_NAME-LOCAL /tmp path and launch THAT — NOT the prod
@@ -1092,6 +1129,7 @@ sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$CAM1_IP" \
      --setenv=CAMERA_BOX_CAPTURE_STATS=/tmp/cam1-capture-stats.txt --setenv=NDI_RUNTIME_DIR_V6=/usr/lib/ndi \
      $CAM1_BURN_BIN"
 sleep 4  # let $CAMERA_NAME's NDI sender (with the burn) become discoverable
+preflight_mv_reverify "$CAMERA_NAME" "${CAMERA_NAME#cam}" || exit 1
 
 # #624/#312: the ALL_CAMBOX sweep also cuts cam2/cam3/cam4/cam5/cam6 into strih program —
 # without their OWN capture-burn deployed the SAME way as cam1 above, recording-verdict's
@@ -1149,6 +1187,13 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
          $_cbin"
   done
   sleep 4  # let cam2/cam3/cam4/cam5/cam6's NDI senders (with their burns) become discoverable
+  # #758 item 2 — sender-bounce re-verify each box's own MV clone, right after the shared settle
+  # sleep above (a SEPARATE pass over the same box list, so the settle timing above is unchanged).
+  for _cn_ip_burn in \
+    "cam2=$PAINTER_IP" "cam3=$CAM3_IP" "cam4=$CAM4_IP" "cam5=$CAM5_IP" "cam6=$CAM6_IP" "cam7=$CAM7_IP"; do
+    _cn="${_cn_ip_burn%%=*}"
+    preflight_mv_reverify "$_cn" "${_cn#cam}" || exit 1
+  done
 fi
 
 echo "[3/8] cam2 (${PAINTER_IP}) — free /dev/fb0, paint dual-QR with --paint-log ground truth"
