@@ -341,18 +341,22 @@ gates `is_zero()` alongside contiguity + `optical_undecodable`.
   `dual_qr_gap()` helper, so painter and gate compute IDENTICAL rects. At default 1920×1080 / qr 700
   / tm 24 the column is x∈[840,1080), y∈[24,724). The gate iterates the SAME table:
   - `src/colour_verify.rs` (Tier-0, default features — the JUDGEMENT, mutation-tested): sampler +
-    `classify_patch` (chromatic: Grayscale if chroma<40 / HueShift if hue err>30° / else Pass —
-    neutral: NeutralTint if chroma>48 / else Pass) + `summarize_node_colour` (strict-majority vote
-    over sampled frames). A burn-covered patch is `Unsamplable` → SKIPPED, not charged (a real colour
-    defect is global → still fails on the visible patches); fail-closed only when NOTHING is checkable.
+    `classify_patch` (chromatic: Grayscale if chroma<`GRAYSCALE_CHROMA_MIN` / HueShift if hue
+    err>30° / else Pass — neutral: NeutralTint if chroma>`NEUTRAL_CHROMA_MAX` / else Pass) +
+    `summarize_node_colour` (strict-majority vote over sampled frames). A burn-covered patch is
+    `Unsamplable` → SKIPPED, not charged (a real colour defect is global → still fails on the
+    visible patches); fail-closed only when NOTHING is checkable. **Read the two constants'
+    values from the CODE, never hardcode them here** — both have been recalibrated more than once
+    against real rig data (`NEUTRAL_CHROMA_MAX` 48→72 on the 2026-06-30 recording;
+    `GRAYSCALE_CHROMA_MIN` 40→24 on the #740 splitter/disk-incident recalibration, below) and will
+    likely move again if the rig's physical setup changes.
   - **#364 calibration — gate on HUE + CHROMA, NOT brightness.** The level/sRGB-distance check was
     REMOVED: the rig's optical capture is ~7× DIM by physics (60 Hz monitor + 1/1000 s shutter samples
-    ~1 ms mid-redraw), so a distance/level check only false-fails a correct camera. REAL per-patch
-    measurement of a genuine cam1 chain frame: every patch correct hue (≤19.6°) + chroma (≥50
-    chromatic, ≤38 neutral cast), 9/13 failed ONLY on level. Dropping it is NOT weakening — every real
-    fault (grayscale collapse, dead channel, hue shift, WB cast) still fails on hue/chroma. Locked by
-    `real_rig_dim_capture_passes_while_grayscale_and_dead_channel_fail` with genuine sampled values
-    (real→PASS 13/13, grayscale→FAIL, dead-red→FAIL). `NEUTRAL_CHROMA_MAX`=48 (real cast maxes 38).
+    ~1 ms mid-redraw), so a distance/level check only false-fails a correct camera. Dropping it is NOT
+    weakening — every real fault (grayscale collapse, dead channel, hue shift, WB cast) still fails on
+    hue/chroma. Locked by `real_rig_dim_capture_passes_while_grayscale_and_dead_channel_fail`
+    (2026-06-30 fixture) and `splitter_and_disk_incident_dim_capture_passes_post_recalibration_740`
+    (2026-07-14 fixture, current rig baseline) with genuine sampled values.
   - `src/probe/colour_sample.rs` (probe, CI-only — the I/O glue): `node_burn_exclusions` +
     `extract_recording_colour_summary` (ffmpeg input-seek, N evenly-spaced RGB frames).
 - **#364 rig finding — why the column moved to the central gap:** the original BOTTOM-band scale
@@ -373,24 +377,39 @@ gates `is_zero()` alongside contiguity + `optical_undecodable`.
   is the sharp discriminator (exposure/compression robust). The recorded fixture (with a bad-colour
   variant) is what locks the bar end-to-end on the rig.
 
-**#740 (2026-07-13, open) — the RED and BLUE reference patches fail identically on EVERY node
-(cam1-6, strih, stream) even on genuinely healthy hardware — a chroma-threshold calibration gap,
-not a per-camera defect.** First full-path E2E run after the #737 splitter fix (cam2 rebuilt + all
-6 cameras uniform healthy chroma) still showed `colour_fail=2` on every optical-path node (imag
-alone passes — it samples the scale under different conditions). Both failing patches (red
-`(255,0,0)`, blue `(0,0,255)`) measure the CORRECT hue (≤3° error) but a `chroma` of only 27-30,
-just under `classify_patch`'s chromatic threshold of 40 — misclassified `Grayscale` instead of
-`Pass`. Every OTHER chromatic patch (green/cyan/magenta/yellow — 2-of-3-channel colours) reads
-chroma 74-108, comfortably above 40. Hypothesis: red/blue are the two single-dominant-channel
-patches in the 13-patch scale, so at the rig's already-documented extreme dim capture (this run's
-own white patch read ~30-45% of its expected channel value) their absolute chroma is more likely to
-fall under a fixed threshold than a two-channel colour at the same relative dimness. Not yet
-confirmed whether this dimness is worse-than-typical or the threshold was always this marginal for
-red/blue specifically. **CONFIRMED on a second independent run ~20 min later** — near-identical
-chroma (26.0/28.0 vs the first run's 27.0/28.0) on the same 2 patches, every node again. **Do not
-loosen the 40 threshold to force a pass** — see #740 for full evidence; this currently gates every
-full-path E2E run shut regardless of the #729 tint saga (closed, unrelated — see the capture
-skill).
+**#740 (RESOLVED 2026-07-14) — the RED and BLUE reference patches failed identically on EVERY node
+(cam1-6, strih, stream) after a NAMED physical incident, not a code regression.** Two overlapping
+rig incidents (#737 — cam2's dying disk corrupting its own HDMI display output that drives the
+colour scale, fixed 2026-07-13 13:41; #729 — the downstream HDMI splitter's 4/6 dead ports,
+re-cabled ~14:11 same day) settled the rig's achievable red/blue chroma onto a new, genuinely
+dimmer, but STABLE baseline (red 33-36 / blue 37-38, vs the pre-incident 117-128). Every other
+chromatic patch (green/cyan/magenta/yellow) stayed comfortably >90 throughout — red/blue were
+always the rig's two weakest chromatic patches even pre-incident, just with more headroom over the
+OLD 40 floor. `imag` (a physically separate apparatus) never faltered, confirming it wasn't a code
+bug. Fixed by recalibrating `GRAYSCALE_CHROMA_MIN` 40→24 (same ~26% headroom ratio the old
+threshold held over ITS baseline), with the full dated evidence trail in the constant's own doc
+comment (`src/colour_verify.rs`). **Never loosen this threshold without equivalent dated,
+named-mechanism evidence** — see the #740 GitHub thread + the doc comment for the full playbook.
+
+**Diagnostic technique — building a chroma timeseries from historical local runs (reusable for
+any "is this a physical rig change or a code regression" question).** Every `--colour-gate` run's
+per-patch means are logged (ANSI-coloured) as `colour-dump (localized per-patch mean) patch=N
+expected=... mean=... chroma=... hue=... frames=12` lines inside
+`/tmp/recording-e2e-<RUN_ID>/{strih,stream}-extract-<RUN_ID>.log` — one line per patch (0-12, order
+white/black/R/G/B/C/M/Y/g0/g64/g128/g192/g255, `PATCH_COLOURS`). To extract a timeseries across
+many past runs (strip the ANSI codes FIRST or `grep "patch=N "` silently matches nothing):
+```bash
+for f in $(grep -rl "colour-dump" /tmp/recording-e2e-*/strih-extract-*.log 2>/dev/null); do
+  mtime=$(stat -c '%y' "$f" | cut -d. -f1)
+  clean=$(sed -r 's/\x1b\[[0-9;]*m//g' "$f")
+  red=$(echo "$clean" | grep "patch=2 " | grep -oE "chroma=[0-9.]+" | head -1)   # patch=4 for blue
+  echo "$mtime  RED:$red  $(basename "$f")"
+done | sort
+```
+This is how #740's before/mid/post-incident phases (117-128 → 87-89 → 26-38, settling stable) were
+proven from local `/tmp` history alone, with zero rig access needed — the `verdict-<RUN_ID>.json`
+itself only carries the pass/fail COUNT (`colour_fail`), never the raw per-patch chroma, so the
+`*-extract-*.log` files are the only source for the actual numbers.
 
 ## Rig TEST / EVENT Mode Switch (#247) — `scripts/rig-mode.sh`
 

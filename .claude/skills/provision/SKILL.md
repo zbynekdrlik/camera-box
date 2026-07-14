@@ -192,6 +192,22 @@ something `verify-device.sh` should be loosened to tolerate.
   4. `apt-mark hold linux-image-<pinned>-generic linux-headers-<pinned>-generic` — re-pin the
      CURRENT (surviving) kernel so a future `apt-get upgrade` can't silently pull in a new one
      again. Never leave the box unheld after cleanup.
+- **A DIFFERENT apt-BROKEN signature on cam3 (#743/#750, 2026-07-14) — `linux-image-generic`
+  depends on a kernel version that was never installed, blocking ANY `apt-get install` fleet-wide,
+  not just kernel ops:**
+  ```
+  E: Unmet dependencies. Try 'apt --fix-broken install' with no packages (or specify a solution).
+   linux-image-generic : Depends: linux-image-6.8.0-124-generic but it is not going to be installed
+  ```
+  Distinct from the held-metapackage-on-purge gotcha above (that one is triggered by REMOVING an
+  old kernel; this one blocks EVERY normal install, unprovoked). **Do NOT run
+  `apt --fix-broken install` blind** on a #295/#547-hardened appliance — it may try to install/
+  remove a kernel under the brick-hardening guards. For installing ONE unrelated package (the
+  live case: `psmisc`) while the real fix is pending, bypass the full dependency-graph resolver
+  entirely: `cd /tmp && apt-get download <pkg> && dpkg -i <pkg>*.deb` — downloads + installs just
+  that .deb without touching the broken kernel chain. Root cause not yet diagnosed (tracked #750)
+  — investigate `dpkg -l | grep linux-image`, `apt-mark showhold`, `uname -r` before attempting a
+  real fix.
 - **`setup-device.sh` re-run against an already-booted ro appliance now self-remounts (#599)** —
   STEP 15-18 (fwupd purge, package install, timesync/linuxptp purge, fstab rewrite) all need a
   writable root; `ensure_root_writable()`/`restore_root_mode()` detect a ro root, remount rw for

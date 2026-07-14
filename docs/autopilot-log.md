@@ -5156,3 +5156,35 @@ vendored `obs-source.c` release-cadence fix (#726 candidate A).
   copies=844/846, delivery-latency max=215s) — flagged on the ticket as an artifact, not a real
   recurrence. A narrowly `grep -F`-filtered tail was safe and is what caught the real send_stall
   fire on the final run.
+
+## 2026-07-14 — #740 (fixed+closed) / #749 (fixed+closed) / #743 (fixed+closed) — bundled batch, PR #704
+
+- **#740** — investigated the "colour gate red identically on every node" hypothesis: confirmed a
+  NAMED physical mechanism (cam2 disk failure #737 + degraded HDMI splitter #729, both fixed
+  2026-07-13) shifted the rig's achievable red/blue chroma onto a new, stable, dimmer baseline
+  (117-128 pre-incident -> 33-38 post-fix, both patches' pre-existing thin headroom pushed under
+  the old 40 floor). Recalibrated `GRAYSCALE_CHROMA_MIN` 40->24 (`src/colour_verify.rs`), same
+  ~26% headroom ratio the old threshold held. RED `e0f072f70` / GREEN `7c2603d09`. Confirmed
+  colour_fail=0 on all 9 nodes on PR #704's own gate run (29307419365, RUN_ID `1202659230`).
+- **#749** — `recording-e2e.sh`'s per-run `/tmp/camera-box-burn-<RUN_ID>` deploy binaries were
+  never reliably cleaned; CAM1+CAM6 hit their 100MB tmpfs 100% full. New
+  `scripts/lib/tmp-burn-sweep.sh` (age-gated `-mmin +60` sweep run BEFORE each scp, both cam1's
+  `[2/8]` and the ALL_CAMBOX `[2b/8]` loop). RED `e712b412c` / GREEN `96a277323`. Live-verified:
+  fleet /tmp usage dropped 19-24% -> 5-10% across this PR's own gate run.
+- **#743** — a fresh provision could lack `psmisc` (`fuser`), false-FAILing rig-mode.sh's #464
+  KMS-held check and silently no-op'ing recording-e2e.sh's capture-release wait. Baked into
+  create-usb-linux.sh + setup-device.sh (#362 dual-bake pattern) + new verify-device.sh check (t).
+  RED `1561a71ed`+`af871df48` / GREEN `47d5917d5`. Operational: installed live on cam3/cam5/cam6
+  (cam1/cam2/cam4 already had it). cam3 hit an unrelated pre-existing broken apt dependency chain
+  (`linux-image-generic` wanting an uninstalled kernel version) — bypassed via `apt-get download +
+  dpkg -i` for psmisc specifically, filed the underlying broken-apt-state as #750.
+- Fresh gate numbers posted on #707/#689/#726/#741 (all still open, unrelated to this batch —
+  cam2/cam5/cam6 emit-rate deficit, A/V sync tolerance, imag presentation cadence, strih
+  non-monotonic real-drop). PR #704's `overall_pass` is still false on those alone; regular CI all
+  green, colour facet now green. PR #704 correctly stays UNMERGED (required gate still red on
+  unrelated pre-existing items).
+- Playbook: `.claude/skills/e2e` #364 section updated (stale `GRAYSCALE_CHROMA_MIN`=40/
+  `NEUTRAL_CHROMA_MAX`=48 references fixed to point at the live constants; #740 section replaced
+  with the resolution + a reusable ANSI-strip colour-dump timeseries extraction technique).
+  `.claude/skills/provision` gained the new cam3 apt-broken signature + the `apt-get download +
+  dpkg -i` single-package bypass.
