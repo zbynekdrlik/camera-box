@@ -55,6 +55,6 @@ systemctl list-units --all --plain --no-legend 'camera-box-burn-*' 2>/dev/null |
   [ -n "$u" ] || continue
   systemctl stop "$u" 2>/dev/null || true
   systemctl reset-failed "$u" 2>/dev/null || true
-done
+done;
 REMOTE
 }

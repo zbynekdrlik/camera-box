@@ -236,3 +236,96 @@ esac
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+#[test]
+fn stale_units_cmds_embedding_never_glues_the_following_command_758() {
+    // #758 — reproduces recording-e2e.sh's EXACT [0/8] preflight embedding shape:
+    // "$(tmp_burn_sweep_stale_units_cmds) $(tmp_burn_sweep_stale_cmds)" as ONE ssh remote command
+    // string. Command substitution strips ALL trailing newlines from tmp_burn_sweep_stale_units_
+    // cmds's own captured output (a multi-line heredoc ending in `done`), so without an explicit
+    // `;` after `done`, the space-joined text becomes "...done find /tmp ..." on ONE logical line
+    // -- `done` immediately followed by another command's TEXT with no separator is a syntax
+    // error (live-reproduced against the real cam3 rig box during this ticket's own development:
+    // the FIRST version of this function broke with "syntax error near unexpected token 'find'").
+    // IMPORTANT: tmp_burn_sweep_stale_cmds() is a `_cmds`-style function -- it PRINTS the TEXT of
+    // a find command (via `echo`), it does NOT execute find itself. The bug is specifically about
+    // that PRINTED TEXT getting glued onto the first half's own trailing `done` with no separator
+    // -- an earlier version of this test wrongly used `$(find ... -delete)` (which EXECUTES find
+    // immediately, producing empty stdout since -delete prints nothing) and therefore glued
+    // nothing, silently NOT reproducing the bug. Uses the REAL tmp_burn_sweep_stale_cmds(), which
+    // hardcodes /tmp (matching every production call site) -- a unique random-suffixed stale file
+    // name avoids any collision with real files on a shared dev box.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let marker_log = tmp.path().join("systemctl-calls.log");
+    let fake_systemctl = format!(
+        "#!/usr/bin/env bash\necho \"$@\" >> {}\ncase \"$1\" in\n  \
+         list-units) echo \"camera-box-burn-911002.service\" ; exit 0 ;;\n  \
+         stop|reset-failed) exit 0 ;;\n  *) exit 0 ;;\nesac\n",
+        marker_log.display()
+    );
+    let p = bin_dir.join("systemctl");
+    fs::write(&p, fake_systemctl).unwrap();
+    let mut perm = fs::metadata(&p).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perm, 0o755);
+    fs::set_permissions(&p, perm).unwrap();
+
+    // A stale file in the REAL /tmp (tmp_burn_sweep_stale_cmds() hardcodes it, like every
+    // production call site) -- unique random suffix so this test can never collide with a real
+    // file on a shared dev box. Aged past -mmin +60 via `touch -d`.
+    let unique = std::process::id();
+    let stale_file = PathBuf::from(format!("/tmp/camera-box-burn-test758-{unique}-1234567890"));
+    fs::write(&stale_file, "stale").unwrap();
+    let touch_status = Command::new("touch")
+        .args(["-d", "2020-01-01"])
+        .arg(&stale_file)
+        .status()
+        .expect("age the stale file");
+    assert!(touch_status.success(), "touch -d must succeed");
+
+    let path_env = format!("{}:{}", bin_dir.display(), std::env::var("PATH").unwrap());
+    // The EXACT production embedding: two $() outputs joined by a literal space, run DIRECTLY as
+    // a command. CRITICAL: must be wrapped in a QUOTED string handed to a NESTED `bash -c`, not
+    // used bare as an unquoted command in the outer script -- an UNQUOTED `$(A) $(B)` undergoes
+    // word-splitting and is interpreted as command+args (no `|`/`while`/`done` re-parsing), which
+    // does NOT reproduce the bug at all (confirmed: an earlier version of this test used the bare
+    // unquoted form and silently passed even against the broken pre-fix lib, because the whole
+    // glued text just became literal arguments to `systemctl`, its first word). The REAL
+    // production shape is `ssh host "$(A) $(B)"` -- ssh hands that QUOTED STRING to the remote
+    // `bash -c "<string>"`, which RE-PARSES it as actual shell syntax (only THERE does `done find`
+    // become a genuine syntax error). `bash -c "$(A) $(B)"` (nested) reproduces that exactly.
+    let harness = format!(
+        "set -uo pipefail\n. {}\nbash -c \"$(tmp_burn_sweep_stale_units_cmds) $(tmp_burn_sweep_stale_cmds)\"",
+        lib_script().display(),
+    );
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(&harness)
+        .env("PATH", path_env)
+        .output()
+        .expect("run the combined embedding");
+    let cleanup = || {
+        let _ = fs::remove_file(&stale_file);
+    };
+    if !out.status.success() {
+        cleanup();
+    }
+    assert!(
+        out.status.success(),
+        "the combined embedding must not be a syntax error -- stdout={:?} stderr={:?}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let calls = fs::read_to_string(&marker_log).unwrap_or_default();
+    let stale_still_exists = stale_file.exists();
+    cleanup();
+    assert!(
+        calls.contains("stop camera-box-burn-911002.service"),
+        "the units half must have actually run (not swallowed by the glue): {calls}"
+    );
+    assert!(
+        !stale_still_exists,
+        "the find-delete half must have actually run (not swallowed by the glue)"
+    );
+}
