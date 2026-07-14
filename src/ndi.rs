@@ -1960,6 +1960,49 @@ mod tests {
     }
 
     #[test]
+    fn emit_gate_catches_up_a_buffered_drain_without_dropping_707_b1() {
+        // #707 B1 — the CAM1 FREEZE mechanism. At a matched capture==genlock rate the box
+        // captures a steady 60fps (0 capture-dropped), but a CPU-starvation stall (the #752 log
+        // storm) delays the emit-thread poll for a few intervals; V4L2 then holds the captured
+        // frames (queue depth 4, `capture.rs` `Stream::with_buffers(.., 4)`) and the loop drains
+        // them back-to-back at ~the SAME late wall clock.
+        //
+        // OLD gate: the first drained frame emits, then the forward-resync LEAPS the boundary grid
+        // past the rest, so every following buffered frame lands BETWEEN boundaries and is
+        // DECIMATED (emit=false) — captured-but-never-emitted. A 4-frame drain => 1 emit + 3
+        // dropped => the measured 60->44fps emit collapse and the strih underrun-then-jump freeze.
+        //
+        // FIXED gate (bounded catch-up): a lag within GENLOCK_MAX_CATCHUP_INTERVALS advances ONE
+        // interval per emit, so each buffered (fresh, merely-late) frame fills the next un-emitted
+        // boundary — all 4 emit, no drop. Drives the exact drain and asserts every buffered frame
+        // emits.
+        let i = I30;
+        let b0 = 10 * i; // an aligned pending boundary (grid-aligned so the arithmetic is exact)
+        let stall_intervals = 4u64; // the emit poll was starved ~4 intervals ...
+        let depth = 4u64; // ... and V4L2 held its 4-deep queue meanwhile (capture.rs)
+        // Resume: the loop drains `depth` buffered frames in a tight loop, all at ~the same wall
+        // clock `resume` (a few ns apart — well within one interval).
+        let resume = b0 + stall_intervals * i;
+        let mut next_boundary = b0;
+        let mut emitted = 0u64;
+        for k in 0..depth {
+            let now = resume + k; // k ns apart — all inside the same interval
+            let (emit, nb) = genlock_emit_gate(now, next_boundary, i);
+            next_boundary = nb;
+            if emit {
+                emitted += 1;
+            }
+        }
+        assert_eq!(
+            emitted, depth,
+            "every buffered capture in a bounded starvation drain must EMIT (fill its own \
+             boundary), not be leaped-past and decimated — a {depth}-frame drain that emits only 1 \
+             is the #707 B1 freeze (1 emit + {} captured-but-never-emitted)",
+            depth - 1
+        );
+    }
+
+    #[test]
     fn genlock_gate_advance_is_boundary_plus_interval_not_resync() {
         // Misaligned boundary, now exactly at it (and < boundary+interval, so the
         // resync branch must NOT fire): next must be boundary + interval exactly.
