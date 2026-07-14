@@ -1141,6 +1141,109 @@ mod tests {
         );
     }
 
+    /// #740 — the SPLITTER/DISK-FAILURE INCIDENT fixture. Between 2026-07-12 and 2026-07-13 two
+    /// PHYSICAL faults hit the rig's optical chain: cam2's system disk was dying (#737 — its HDMI
+    /// display output, which feeds the colour scale + QR content cam1 films, degraded into
+    /// corrupted-memory noise before the box was rebuilt on a fresh disk 2026-07-13 13:41) AND the
+    /// HDMI splitter downstream of it had 4/6 dead output ports (#729 — re-cabled ~14:11). BOTH
+    /// were fixed by 2026-07-13 14:11 (both issues closed with live evidence), yet the rig's
+    /// achievable brightness settled at a NEW, genuinely dimmer, but STABLE baseline afterward —
+    /// not a code regression: green/cyan/magenta/yellow stayed comfortably >90 chroma throughout,
+    /// and `imag` (which samples a SEPARATE physical apparatus, per this module's own topology)
+    /// never faltered at all. Only RED and BLUE — this rig's two weakest chromatic patches even in
+    /// the healthy 2026-07-12 baseline (chroma ~117-128 there, well below cyan/magenta's ~125-160)
+    /// — dropped enough to land under the OLD `GRAYSCALE_CHROMA_MIN` (40): 12 consecutive
+    /// `--colour-gate` runs over 10+ hours (2026-07-13 20:20 through 2026-07-14 06:22, strih node)
+    /// held a rock-stable RED 33-36 / BLUE 37-38 (std-dev ~1), a clear new steady state, not an
+    /// active ongoing degradation. This fixture locks the LATEST of those runs (2026-07-14 06:22,
+    /// `verdict-921651134.json`'s `strih-extract` colour-dump) — every patch's real localized mean,
+    /// hue, and chroma exactly as sampled, live, post-incident, both incidents already fixed.
+    ///
+    /// RED-before-GREEN (#740): this test asserts the CURRENT real rig capture must PASS the
+    /// colour gate. Under the pre-#740 `GRAYSCALE_CHROMA_MIN = 40.0` it does NOT (red chroma 35 <
+    /// 40, blue chroma 38 < 40) — the failing colour gate on every optical-path node PR #704
+    /// actually observed. The recalibrated `GRAYSCALE_CHROMA_MIN = 24.0` clears both with the same
+    /// ~26% headroom ratio the original 40 held over its own worst calibration baseline (54, the
+    /// 2026-06-30 fixture's red patch: (54-40)/54 ≈ 25.9%; here (33-24)/33 ≈ 27.3% against the
+    /// new regime's stable floor, 33) while staying enormously far from a genuine grayscale
+    /// collapse (chroma 0) — `chroma_just_under_old_40_threshold_still_fails_as_grayscale_740`
+    /// below locks that a REAL fault is still caught with huge margin under the new value.
+    #[test]
+    fn splitter_and_disk_incident_dim_capture_passes_post_recalibration_740() {
+        // PATCH_COLOURS order: white, black, R, G, B, C, M, Y, g0, g64, g128, g192, g255.
+        let post_incident: [Rgb; 13] = [
+            Rgb::new(105, 137, 146), // white  — cyan cast, chroma 41
+            Rgb::new(0, 2, 1),       // black  — chroma 2
+            Rgb::new(36, 1, 2),      // red    — hue 358.3° (err 1.7°), chroma 35 (was 121 pre-incident)
+            Rgb::new(37, 155, 15),   // green  — hue 110.6° (err 9.4°), chroma 140
+            Rgb::new(0, 1, 38),      // blue   — hue 238.4° (err 1.6°), chroma 38 (was 128 pre-incident)
+            Rgb::new(24, 155, 152),  // cyan   — hue 178.6° (err 1.4°), chroma 131
+            Rgb::new(76, 1, 104),    // magenta— hue 283.7° (err 16.3°), chroma 103
+            Rgb::new(132, 161, 21),  // yellow — hue 72.4° (err 12.4°), chroma 140
+            Rgb::new(1, 3, 0),       // g0     — chroma 3
+            Rgb::new(1, 5, 2),       // g64    — chroma 4
+            Rgb::new(28, 46, 50),    // g128   — cast chroma 22
+            Rgb::new(73, 105, 116),  // g192   — cast chroma 43
+            Rgb::new(116, 151, 162), // g255   — cast chroma 46
+        ];
+        assert_eq!(
+            post_incident.len(),
+            PATCH_COLOURS.len(),
+            "one sample per reference patch"
+        );
+
+        let samples: Vec<Option<Rgb>> = post_incident.iter().map(|&c| Some(c)).collect();
+        let v = verify_samples(&samples);
+        assert!(
+            v.is_pass(),
+            "the post-incident real rig camera must PASS at the recalibrated threshold \
+             (wrong patches: {:?})",
+            v.failures().collect::<Vec<_>>()
+        );
+        assert_eq!(v.wrong_count(), 0, "no patch wrong on the post-incident dim camera");
+
+        // Lock the exact recalibrated value this fixture depends on — a future silent raise back
+        // toward 40 (which would re-fail this real capture) breaks here explicitly.
+        assert!(
+            GRAYSCALE_CHROMA_MIN <= 30.0,
+            "GRAYSCALE_CHROMA_MIN must stay well below the new stable floor (33) to pass real \
+             post-incident rig data: {GRAYSCALE_CHROMA_MIN}"
+        );
+    }
+
+    /// #740 companion — proves the recalibration did NOT gut the gate's ability to catch a real
+    /// fault. A grayscale collapse ON TOP OF the SAME post-incident dim capture must still FAIL by
+    /// a wide margin (chroma collapses to 0, far below even the recalibrated 24).
+    #[test]
+    fn chroma_just_under_old_40_threshold_still_fails_as_grayscale_740() {
+        let post_incident: [Rgb; 13] = [
+            Rgb::new(105, 137, 146),
+            Rgb::new(0, 2, 1),
+            Rgb::new(36, 1, 2),
+            Rgb::new(37, 155, 15),
+            Rgb::new(0, 1, 38),
+            Rgb::new(24, 155, 152),
+            Rgb::new(76, 1, 104),
+            Rgb::new(132, 161, 21),
+            Rgb::new(1, 3, 0),
+            Rgb::new(1, 5, 2),
+            Rgb::new(28, 46, 50),
+            Rgb::new(73, 105, 116),
+            Rgb::new(116, 151, 162),
+        ];
+        let gray: Vec<Option<Rgb>> = post_incident.iter().map(|&c| Some(to_gray(c))).collect();
+        let v_gray = verify_samples(&gray);
+        assert!(
+            !v_gray.is_pass(),
+            "a grayscale fault on top of the post-incident dim capture must still FAIL"
+        );
+        assert!(
+            v_gray.wrong_count() >= 6,
+            "all 6 chromatic patches collapse even at the recalibrated threshold: {}",
+            v_gray.wrong_count()
+        );
+    }
+
     #[test]
     fn realistic_compression_noise_still_passes() {
         // A correct camera through H.264/NDI: small per-channel jitter + a slight overall lift.
