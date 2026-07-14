@@ -5122,3 +5122,37 @@ vendored `obs-source.c` release-cadence fix (#726 candidate A).
     ±20ms — stream hold 925ms + tolerance left unchanged).
 - Rig verified CLEAN post-gate: strih program 'Cam 2' / stream 'PRO', burns OFF both boxes (gate
   cleanup restored). dev1 LAN http server stopped.
+
+## 2026-07-14 — #707 (capture-stall diagnostic landed, root cause NOT closed) / #749 (filed) / #718 (3 more recurrences)
+
+- Dispatched to pin down CAM1's (10.77.9.61, Elgato 4K S) multi-second delivery-latency burst.
+  Extensive live-rig investigation across 6 full `full-path-e2e` runs (commits `9cba91100`
+  version bump, `856b0265c` feat, `99177ec62` docs).
+- **Ruled out this session, with fresh evidence:** true V4L2 capture loss (`v4l2_dropped=0` every
+  run); NDI blocking-send stall as the DOMINANT mechanism (`send_stall.rs` fired only once, 26.6ms
+  — real but far too small to explain a 42-event residual window); the existing genlock emit-gate
+  SKIPPED diagnostic (never exceeded a 2-interval/33ms skip across ~4800 firings in a live 20-min
+  capture). Built + deployed a NEW, symmetric `src/capture_stall.rs` diagnostic (mirrors
+  `send_stall.rs`'s exact pattern, times `process_frame`'s blocking V4L2 dequeue) — stayed silent
+  on every recurrence observed, closing the last piece of camera-box's own internal observability.
+- CAM1 residual persists on every single run tonight (range: 1 copy/0 gaps up to 18 copies/24
+  gaps per window) but severity varies enormously; only the ORIGINAL reference verdict showed the
+  dispatch's cited 2903ms/2203ms multi-second tail — none of this session's re-runs reproduced
+  anything near that magnitude. Acceptance bar (uniform >=0.95, no multi-second tail) NOT met.
+  Leading remaining hypothesis: mechanism lives in strih's own genlock C++ presentation-cadence
+  tick-selection (already correlated with this exact residual by prior #726 sessions), outside
+  this repo's own Rust code and this dispatch's realistic scope.
+- **#707 left OPEN** (not closed — root cause not conclusively found/fixed). **#726 untouched**
+  (no new evidence justifying a state change either way). **PR #704 NOT merged** (still BLOCKED —
+  #707 unresolved + #718 recurring colour-gate flake, hit 3x tonight, commented separately).
+- **Filed #749**: `recording-e2e.sh` never cleans up its per-run `camera-box-burn-<RUN_ID>`
+  binaries; fleet `/tmp` (100MB tmpfs) accumulates until scp deploys fail outright — CAM1 and
+  CAM6 were both already 100% full mid-session, live-blocking a gate run. Cleaned up fleet-wide
+  to unblock; harness fix filed separately, not done here.
+- Own methodology mistake, logged in `.claude/skills/ops` (new gotcha section): an unfiltered
+  `journalctl -f` live-tail on CAM1/CAM6 (trying to catch a natural recurrence's real-time logs,
+  since the appliance's journal retention is only ~2-20 min) pushed `rsyslogd` into a disk-full
+  write-failure spiral, contaminating ONE gate run (RECORDING_E2E_RUN_ID `157890280`, CAM1
+  copies=844/846, delivery-latency max=215s) — flagged on the ticket as an artifact, not a real
+  recurrence. A narrowly `grep -F`-filtered tail was safe and is what caught the real send_stall
+  fire on the final run.
