@@ -138,6 +138,13 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # next ~2.7s FREEZE's discriminator — link vs box-emit vs NDI SDK — can be READ, not guessed).
 # shellcheck source=scripts/lib/transport-sampler.sh
 . "$HERE/lib/transport-sampler.sh"
+# #758 item 1 — the fleet-wide minute-0 preflight: a named, loud, self-expiring exclusion for a
+# box that's known-offline for a reason outside this harness's control (cambox-offline-ack.sh),
+# plus the per-box service-active/emitter-count/stray-unit check (preflight-fleet-check.sh).
+# shellcheck source=scripts/lib/cambox-offline-ack.sh
+. "$HERE/lib/cambox-offline-ack.sh"
+# shellcheck source=scripts/lib/preflight-fleet-check.sh
+. "$HERE/lib/preflight-fleet-check.sh"
 camera_resolve "${CAM:-cam1}"
 # #24 item 1: this harness's SOURCE-camera role (the physical box filming cam2's monitor via
 # the optical loopback + carrying the #174 render-time capture burn) is one of
@@ -457,6 +464,102 @@ IMAG_GENLOCK_SHA="$(sshpass -p "${IMAG_PW:-newlevel}" ssh -o StrictHostKeyChecki
 if [ "${ALL_CAMBOX:-0}" = "1" ]; then
   echo "[0/8] dev1<->painter clock-offset gate — all-cambox window attribution must be trustworthy (#326)"
   "$HERE/clock-offset-painter-gate.sh" --painter "cam2=$PAINTER_IP"
+fi
+
+# #758 item 1 — fleet-wide minute-0 preflight: a dirty/degraded rig must fail LOUDLY here, before
+# the 4-minute build/arm phase, never after a 40-minute recording ("Nechapem dokedy bude trvat ze
+# si ci test urobi najprv preflight checky..." — the user's binding demand, 2026-07-14). ALL_CAMBOX
+# sweep ONLY — the plain single-camera path only ever touches its own SOURCE camera, already
+# pinged above.
+if [ "${ALL_CAMBOX:-0}" = "1" ]; then
+  echo "[0/8] fleet preflight — cam1..cam7 must each be reachable-or-acked and genuinely ready (#758)"
+  PREFLIGHT_EXCLUDED_CAMS=""
+  PREFLIGHT_DANTESYNC_LINUX=""
+  for _pf in "cam1=$CAM1_IP" "cam2=$PAINTER_IP" "cam3=$CAM3_IP" "cam4=$CAM4_IP" "cam5=$CAM5_IP" "cam6=$CAM6_IP" "cam7=$CAM7_IP"; do
+    _pfbox="${_pf%%=*}"
+    _pfip="${_pf#*=}"
+    _pfacked=0
+    if cambox_offline_ack_is_acked "$_pfbox"; then _pfacked=1; fi
+    if ping -c1 -W2 "$_pfip" >/dev/null 2>&1; then
+      # Reachable — an ack naming a REACHABLE box is stale and must never silently outlive the
+      # outage it was written for.
+      if [ "$_pfacked" = "1" ]; then
+        cambox_offline_ack_stale_message "$_pfbox" >&2
+        exit 1
+      fi
+      # Self-heal routine leftover junk from a prior run BEFORE checking (stop stray
+      # camera-box-burn-* units + sweep stale /tmp binaries, #749/#758) — then assert the box is
+      # genuinely ready: the sweep fixes what a mere leftover explains, this check fails loud on
+      # what a leftover does NOT explain (an inactive service, a wrong emitter count, a unit that
+      # SURVIVED the sweep).
+      sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$_pfip" \
+        "$(tmp_burn_sweep_stale_units_cmds) $(tmp_burn_sweep_stale_cmds)" 2>/dev/null || true
+      _pfline="$(sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$_pfip" \
+        "$(preflight_fleet_check_cmds)" 2>/dev/null || true)"
+      _pfverdict="$(preflight_fleet_check_verdict "$_pfline")"
+      if [ -n "$_pfverdict" ]; then
+        echo "ERROR: [preflight] FAIL: ${_pfbox} (${_pfip}): ${_pfverdict} — ssh in and investigate (systemctl status camera-box; systemctl restart camera-box if needed)." >&2
+        exit 1
+      fi
+      echo "    ok: ${_pfbox} (${_pfip}) — ${_pfline}"
+      PREFLIGHT_DANTESYNC_LINUX="${PREFLIGHT_DANTESYNC_LINUX:+$PREFLIGHT_DANTESYNC_LINUX }${_pfbox}=${_pfip}"
+    else
+      # Unreachable — acked (a NAMED, operator-acknowledged outage) → NOTE + exclude; unacked →
+      # loud FAIL (never a silent drop, per strict-test-mandate-no-gate-weakening).
+      if [ "$_pfacked" = "1" ]; then
+        cambox_offline_ack_note "$_pfbox"
+        PREFLIGHT_EXCLUDED_CAMS="${PREFLIGHT_EXCLUDED_CAMS:+$PREFLIGHT_EXCLUDED_CAMS }${_pfbox}"
+      else
+        echo "ERROR: [preflight] FAIL: ${_pfbox} (${_pfip}): unreachable from dev1 — fix connectivity/power, or if this is a KNOWN operator-acknowledged outage set CAMBOX_OFFLINE_ACK=\"${_pfbox}:<reason>\" to proceed without it (#758)." >&2
+        exit 1
+      fi
+    fi
+  done
+  echo "    excluded (acked-offline): ${PREFLIGHT_EXCLUDED_CAMS:-none}"
+
+  # dantesync freshest-offset sanity for cam3..cam7 (cam1/cam2 already covered by the DanteSync
+  # gate above) — reuses the SAME dantesync-gate.sh this harness already trusts, just widened to
+  # the rest of the fleet, excluding any box acked-offline above.
+  if [ -n "$PREFLIGHT_DANTESYNC_LINUX" ]; then
+    echo "[0/8] dantesync freshest-offset sanity — cam3..cam7 (#758)"
+    "$HERE/dantesync-gate.sh" \
+      --bound-us "${CLOCK_GUARD_BOUND_US:-2000}" \
+      --win-http-port "${WIN_DANTE_PORT:-8898}" \
+      --linux "$(printf '%s' "$PREFLIGHT_DANTESYNC_LINUX" | grep -oE 'cam[3-7]=[^ ]*' | paste -sd' ' -)"
+  fi
+
+  # strih genlock_burn must be OFF on every NDI input before we start (a force-killed OBS can
+  # resurrect a saved burn=true on scene-collection restore, the #246 leak class) + strih/stream/
+  # imag must not already be recording or streaming (a stray session from an aborted prior run).
+  echo "[0/8] OBS pre-run state — genlock_burn OFF on every strih NDI input, no stray recording/streaming (#758)"
+  for _n in 1 2 3 4 5 6 7; do
+    case " $PREFLIGHT_EXCLUDED_CAMS " in *" cam${_n} "*) continue ;; esac
+    _pfburn="$(python3 "$HERE/obs_burn_filter.py" check --host "$STRIH" --input "NDI cam${_n}" 2>/dev/null || true)"
+    case "$_pfburn" in
+      *burn_on=True*)
+        echo "ERROR: [preflight] FAIL: strih NDI cam${_n}: genlock_burn is still ON from a prior run — clear it (obs_burn_filter.py remove --host $STRIH --input 'NDI cam${_n}') before starting." >&2
+        exit 1
+        ;;
+    esac
+  done
+  for _pfhs in "strih=$STRIH" "stream=$STREAM"; do
+    _pfhbox="${_pfhs%%=*}"
+    _pfhip="${_pfhs#*=}"
+    _pfrec="$(python3 "$HERE/obs_phase2.py" record --action status --host "$_pfhip" 2>/dev/null || true)"
+    case "$_pfrec" in
+      *active=True*)
+        echo "ERROR: [preflight] FAIL: ${_pfhbox}: OBS is ALREADY recording (a stray session from an aborted prior run) — stop it before starting: ${_pfrec}" >&2
+        exit 1
+        ;;
+    esac
+    _pfstream="$(python3 "$HERE/obs_phase2.py" stream-status --host "$_pfhip" 2>/dev/null || true)"
+    case "$_pfstream" in
+      *active=True*)
+        echo "ERROR: [preflight] FAIL: ${_pfhbox}: OBS is ALREADY streaming (a stray session from an aborted prior run) — stop it before starting: ${_pfstream}" >&2
+        exit 1
+        ;;
+    esac
+  done
 fi
 
 # Capture-delivery-rate preflight (#656 prevention item 2): the appliance's OWN capture loop
@@ -913,6 +1016,31 @@ else
   cargo build --release --features probe --bin frame-probe --bin recording-verdict --bin camera-box  # airuleset:build-ok
   # #365/#405/#137/#109: build the default-feature gate binaries (no probe deps, no disk balloon).
   cargo build --release --bin frozen-camera-gate --bin render-budget-gate --bin av-restart-sync-gate --bin zero-loss-restart-gate  # airuleset:build-ok
+fi
+
+# #758 item 1 (continued) — per-camera NDI liveness via the MV low-bandwidth clones. Needs
+# frozen-camera-gate (just built/fetched above), so it cannot run at true [0/8] — this is still
+# comfortably BEFORE any deploy/OBS-touching step (StartRecord is 4 more steps away). The MV
+# clones ("MV NDI camN" on strih) are ALWAYS active (their scene is always shown in the built-in
+# Multiview, #730) — no lazy-activation false positive, unlike the MAIN "NDI camN" inputs (a
+# receiver thread there only starts once ITS scene is shown — the exact misread that produced
+# today's "4 frozen inputs" panic). ALL_CAMBOX sweep only.
+if [ "${ALL_CAMBOX:-0}" = "1" ]; then
+  echo "[1/8] per-camera NDI liveness via MV low-bandwidth clones (#758)"
+  PREFLIGHT_MV_SOURCES=""
+  for _n in 1 2 3 4 5 6 7; do
+    case " $PREFLIGHT_EXCLUDED_CAMS " in *" cam${_n} "*) continue ;; esac
+    PREFLIGHT_MV_SOURCES="${PREFLIGHT_MV_SOURCES:+$PREFLIGHT_MV_SOURCES,}MV NDI cam${_n}"
+  done
+  if [ -n "$PREFLIGHT_MV_SOURCES" ]; then
+    python3 "$HERE/frozen-camera-gate.py" --host "$STRIH" --password "" \
+      --sources "$PREFLIGHT_MV_SOURCES" --samples 2 --cadence 3.5 --threshold 0 --warm-settle 0 \
+      --verdict-bin "$PROBE_BIN_DIR/frozen-camera-gate" \
+      || {
+        echo "ERROR: [preflight] FAIL: one or more MV NDI clones show NO pixel change across ~3.5s — a camera leg looks frozen/dead before this run even started. Investigate the named camera's NDI sender (see the frozen list above)." >&2
+        exit 1
+      }
+  fi
 fi
 
 echo "[2/8] $CAMERA_NAME (${CAM1_IP}) — probe-featured camera-box with the #174 capture BURN (emits NDI w/ $CAMERA_NAME mark, NO grab #179)"
