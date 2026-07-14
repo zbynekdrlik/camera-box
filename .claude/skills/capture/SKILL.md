@@ -1,9 +1,47 @@
 ---
 name: capture
-description: V4L2 capture controls (saturation/contrast/hue) — the certified COLOUR vs SHARP sets, MODEL-GATED zero-touch-by-default policy (#729), device-state persistence, runtime grabber-model detection, NZXT CAM4 no-controls, and the testable apply path. Load before touching src/capture.rs control logic or diagnosing grayscale/colour-tint cameras.
+description: V4L2 capture controls (saturation/contrast/hue) — the certified COLOUR set applied at every capture open for ALL grabber models (#745, retiring the #729 model-gated zero-touch policy), device-state persistence, runtime grabber-model detection, NZXT CAM4 no-controls, and the testable apply path. Load before touching src/capture.rs control logic or diagnosing grayscale/colour-tint cameras.
 ---
 
 # V4L2 capture controls (src/capture.rs)
+
+## #745 (2026-07-14, CURRENT policy) — zero-touch RETIRED: range-aware neutral enforced at every open, for EVERY model
+
+**camera-box now enforces the certified COLOUR set (`color_production_controls()` — `RangeScaled
+{ reference_pct: 50 }` for saturation+contrast, NEVER hue) at every capture open, for EVERY
+grabber model** — `ShadowCast2`, `Elgato4kS`, `NzxtSignalHd60`, AND `Unknown` all resolve through
+the SAME `documented_controls_for_model(model)` arm now (`src/capture.rs`). The #729 model-gated
+"zero-touch unless documented need" default below is SUPERSEDED, kept only as history.
+
+**Why:** the user's binding 2026-07-13 requirement — cards WILL get swapped between boxes at
+events ("mat moznost hociktoru kartu zapojit do hocikttoreho PC a bude fungovat dobre") — exposed
+zero-touch's real flaw. UVC saturation/contrast/hue PERSIST **on the card itself**, across
+processes, reboots, AND boxes (the #1 gotcha below, #296). Zero-touch for Elgato/NZXT/Unknown
+meant "trust whatever the card's PREVIOUS life left on it" — not plug-and-play under swapping.
+Live incident that forced the retirement (#744, same day): both Elgato units found stuck at
+`contrast=50/saturation=50` (~39% of their true 0-255/default-128 neutral) with nothing in the
+system ever resetting them. Range-aware resolution (#456) means `reference_pct=50` still lands on
+each card's OWN queried manufacturer default (`VIDIOC_QUERY_EXT_CTRL`'s `default_value`) — never a
+foreign literal calibrated for a different card — so this is genuinely "reset to THIS card's own
+neutral", not a blind literal smear.
+
+**What did NOT change:** hue is still never touched (#338 — see below); a control-less card (NZXT
+CAM4) still applies gracefully via the existing warn+continue `ControlReport` path (#296's original
+guarantee); `CAMERA_BOX_CAPTURE_CONTROLS` env override still always wins, any model; the #738
+OBS-side Elgato tint correction (`color_filter_v2` grey-world `color_multiply` on the receiving OBS
+boxes) is untouched and independent — this is purely about which NEUTRAL a card boots to, not a
+colour-cast fix. `elgato_4k_s_corrective_controls()` (#729/#738's superseded Elgato-specific
+compromise) stays fully in code, reachable via an explicit env override, as a switchable manual
+fallback (never dead code).
+
+**Live swap-test acceptance (rig-provable):** set garbage via `v4l2-ctl --set-ctrl=
+contrast=20,saturation=200` on a card, `systemctl restart camera-box`, then `v4l2-ctl --get-ctrl`
+must show the card's own defaults with ZERO manual repair — same self-healing philosophy as the
+#150/#257 genlock lockdown. Unit-level acceptance: `src/capture.rs`'s
+`elgato_swap_smeared_state_resets_to_manufacturer_neutral_at_open_745` (a pre-smeared FakeDevice
+ends at its queried default after `apply_controls_with`) and
+`nzxt_swap_smeared_state_is_graceful_warn_and_continue_745` (same set against a control-less
+FakeDevice fails gracefully, never aborts).
 
 ## #729 FINAL ROOT CAUSE (2026-07-13, closed): the whole "purple tint" saga was a degraded HDMI splitter, NOT V4L2/software
 
@@ -42,15 +80,17 @@ the end of this file for the calibration method, the two real gotchas it took to
 the drift-guard facet. `elgato_4k_s_corrective_controls()` stays FULLY in code — reachable via an
 explicit `CAMERA_BOX_CAPTURE_CONTROLS` override — as a switchable manual fallback, never dead code.
 
-## #729 (2026-07-12) — zero-touch by default, model-gated
+## #729 (2026-07-12, SUPERSEDED 2026-07-14 by #745 above) — zero-touch by default, model-gated — history only
 
-**camera-box does NOT write any V4L2 colour control unless the RUNTIME-DETECTED grabber model
-has a specifically documented, proven need.** `select_capture_controls(model, env_spec,
-record_grab)` — no env override -> `documented_controls_for_model(model)`: `GrabberModel::ShadowCast2`
-gets the certified COLOUR set (the real #296 need below); `GrabberModel::Elgato4kS`,
-`NzxtSignalHd60`, and `Unknown` all stay zero-touch, plug-and-play, factory defaults, no ceremony
-(#738 moved the Elgato correction OBS-side — see the section above). An explicit
-`CAMERA_BOX_CAPTURE_CONTROLS` override still always wins, for any model.
+**This policy is RETIRED — see the #745 section at the top of this file for the CURRENT policy.**
+Kept here as lineage: `select_capture_controls(model, env_spec, record_grab)` — no env override ->
+`documented_controls_for_model(model)` USED TO gate on model: `GrabberModel::ShadowCast2` got the
+certified COLOUR set (the real #296 need below) while `GrabberModel::Elgato4kS`, `NzxtSignalHd60`,
+and `Unknown` stayed zero-touch, plug-and-play, factory defaults, no ceremony (#738 moved the
+Elgato tint correction OBS-side — see the section above, still current). #745 (2026-07-14)
+replaced this model-gating: every model now gets the SAME certified COLOUR set, because zero-touch
+turned out to mean "trust the card's unknown swap history", not "plug-and-play". An explicit
+`CAMERA_BOX_CAPTURE_CONTROLS` override still always wins, for any model — unchanged by #745.
 
 **`model` comes from `capture_rate_health::resolve_grabber_model(hostname, detected_card)`** —
 runtime V4L2 `card`-string detection (`capture::query_card_name`, a best-effort non-exclusive
