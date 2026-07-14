@@ -1056,6 +1056,61 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
         exit 1
       }
   fi
+
+  # #758 preflight item — imag RENDER-HEALTH: with the Multiview projector verified OPEN
+  # (the [0/8] step above), the PROGRAM compositor must still hold its OWN 60fps frame budget
+  # BEFORE any deploy/recording starts — the user's binding demand ("ako to ze to nezachytili
+  # preflight testy!!!!" — because this check did not exist yet). Reuses the EXISTING #405
+  # render-budget-gate.py + render-budget-gate Rust binary (render_budget::classify) — the
+  # SAME strict verdict the later [4d/8] burns-on gate already applies, just run here earlier
+  # (MV open, no burns yet) and SUSTAINED across several independent windows (never one
+  # averaged window, so a transient mid-window dip cannot be averaged away). classify()'s own
+  # 60fps thresholds (2fps tolerance, 1000/60≈16.67ms budget) already ARE the "activeFps >= 58 /
+  # averageFrameRenderTime < 16.7ms" bar from the #758 spec — no new threshold invented here,
+  # single source of truth stays the Rust binary.
+  echo "[1/8] imag render-health preflight — PROGRAM must hold its 60fps budget with MV open, sustained (#758)"
+  RENDER_HEALTH_WINDOWS="${RENDER_HEALTH_WINDOWS:-5}"
+  RENDER_HEALTH_WINDOW_S="${RENDER_HEALTH_WINDOW_S:-6}"
+  for _rhw in $(seq 1 "$RENDER_HEALTH_WINDOWS"); do
+    if ! OBS_PASSWORD_IMAG="${OBS_PASSWORD_IMAG:-${OBS_PASSWORD:-}}" \
+        python3 "$HERE/render-budget-gate.py" \
+        --box "imag=${IMAG_IP}:${RENDER_TARGET_FPS_IMAG:-60}" \
+        --window-s "$RENDER_HEALTH_WINDOW_S" --verdict-bin "$PROBE_BIN_DIR/render-budget-gate" \
+        2>&1 | sed "s/^/    [imag render-health w${_rhw}\/${RENDER_HEALTH_WINDOWS}] /"; then
+      echo "ERROR: [preflight] FAIL: imag render pod budgetom s MV otvoreným (window ${_rhw}/${RENDER_HEALTH_WINDOWS}) — skontroluj divisor/projektory/zataz." >&2
+      exit 1
+    fi
+  done
+
+  # #758 preflight item — MV render-DIVISOR CAPABILITY check (a #756 follow-up item, WARN-only
+  # for now). Distinct from BOTH the #756 build-SHA version-parity check above (same build
+  # everywhere) and the render-health OUTCOME gate just above (program stays inside its frame
+  # budget): this asks whether the deployed imag frontend binary was actually BUILT WITH the
+  # #276/#278/#293 multiview render-divisor decouple (the exported obs_display_set_render_divisor
+  # symbol). obs-websocket's GetStats has no field reporting per-display divisor/throttle state,
+  # so the only real evidence available is the SAME nm -D -u symbol check scripts/setup-imag.sh
+  # already runs at provisioning time (#499) — a read-only query of the deployed binary over SSH,
+  # no config mutation. Known gap (2026-07-14): even the unified genlock-parity build does not
+  # carry this symbol on imag's Linux frontend yet — porting the divisor decouple to the Linux
+  # frontend is a SEPARATE #756 follow-up, NOT this batch — so this WARNs, never FAILs, until
+  # that symbol ships. The render-health check above is the hard gate on the OUTCOME; this is
+  # only a capability marker. Flipping WARN->FAIL once the symbol lands is exactly this ONE line:
+  IMAG_DIVISOR_CAPABILITY_FAIL="${IMAG_DIVISOR_CAPABILITY_FAIL:-0}"
+  echo "[1/8] imag MV render-divisor capability check (#756 follow-up — WARN-only for now)"
+  _divisor_nm_count="$(sshpass -p "${IMAG_PW:-newlevel}" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 \
+    "${IMAG_USER:-newlevel}@$IMAG_IP" \
+    'nm -D -u /usr/bin/obs 2>/dev/null | grep -c obs_display_set_render_divisor || true' \
+    2>/dev/null || true)"
+  if [ "${_divisor_nm_count:-0}" -gt 0 ] 2>/dev/null; then
+    echo "    ok: imag /usr/bin/obs references obs_display_set_render_divisor — MV render-divisor capability present"
+  else
+    _divisor_msg="MV divisor not engaged on imag (known gap, #756) — /usr/bin/obs does not reference obs_display_set_render_divisor; the multiview render-budget decouple is not compiled into imag's Linux frontend yet"
+    if [ "$IMAG_DIVISOR_CAPABILITY_FAIL" = "1" ]; then
+      echo "ERROR: [preflight] FAIL: ${_divisor_msg}" >&2
+      exit 1
+    fi
+    echo "[preflight] WARN: ${_divisor_msg}"
+  fi
 fi
 
 # #758 item 2 — sender-bounce liveness re-verify: after a box's [2/8]/[2b/8] service->burn-unit

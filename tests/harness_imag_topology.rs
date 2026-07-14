@@ -67,11 +67,17 @@ fn recording_e2e_defines_imag_capture_fps_default_60() {
 #[test]
 fn render_budget_gate_call_site_includes_imag_at_60fps() {
     let s = read("scripts/recording-e2e.sh");
+    // Anchor on `--box "strih=` (NOT the bare "render-budget-gate.py" script name) -- #758 added
+    // an EARLIER, imag-only render-budget-gate.py preflight call (an [1/8] render-health check,
+    // before ANY box is deployed), so `.find("render-budget-gate.py")` would now latch onto that
+    // one-box call instead of this THREE-box [4d/8] call site. `--box "strih=` is unique to this
+    // call (the [1/8] preflight never measures strih) and is therefore anchor-stable regardless
+    // of how many OTHER render-budget-gate.py invocations get added elsewhere in the future.
     let call = s
-        .find("render-budget-gate.py")
-        .expect("recording-e2e.sh must invoke render-budget-gate.py");
-    // Scope to the actual invocation block (a handful of lines after the binary name).
-    let window = &s[call..(call + 500).min(s.len())];
+        .find("--box \"strih=")
+        .expect("recording-e2e.sh must invoke render-budget-gate.py with a strih box");
+    // Scope to the actual invocation block (a handful of lines around the strih box arg).
+    let window = &s[call.saturating_sub(200)..(call + 500).min(s.len())];
     assert!(
         window.contains("--box \"strih=${STRIH}:${RENDER_TARGET_FPS_STRIH:-30}\""),
         "render-budget-gate call must keep the strih=…:30 box. Got:\n{window}"
