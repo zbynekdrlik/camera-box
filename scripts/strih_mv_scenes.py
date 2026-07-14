@@ -227,6 +227,28 @@ def measure_stats(obs, seconds: float) -> dict:
     return stats_delta(before, after)
 
 
+def reattach(obs, cam_n: int) -> "str | None":
+    """#758 item 2 — sender-bounce re-attach: re-read the 'MV NDI cam<n>' twin input's OWN
+    current ndi_source_name and re-apply the EXACT same value via SetInputSettings, forcing OBS
+    to tear down and re-establish its DistroAV NDI receive for that source. This is the SAME
+    "SetInputSettings ndi_source_name" re-bind the #758 spec calls for: after a [2/8]/[2b/8]
+    service->burn-unit swap (or during a cleanup restore), a camera's NDI sender can come back up
+    with a receiver that never re-locks on its own — re-applying its OWN bound source name (never
+    inventing a new one) nudges OBS's NDI input to reconnect. Returns the ndi_source_name that was
+    re-applied, or None if the twin input doesn't exist / has no ndi_source_name set (caller then
+    treats this as "cannot re-attach, still dead -> fail loud", never silently invents a fallback
+    source name)."""
+    mv_input = f"MV NDI cam{cam_n}"
+    settings = op._rpc(obs, "GetInputSettings", {"inputName": mv_input}, ignore_err=True)
+    ndi_name = (settings or {}).get("inputSettings", {}).get("ndi_source_name")
+    if not ndi_name:
+        return None
+    op._rpc(obs, "SetInputSettings",
+            {"inputName": mv_input, "inputSettings": {"ndi_source_name": ndi_name}},
+            ignore_err=True)
+    return ndi_name
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                   formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -236,10 +258,23 @@ def main() -> None:
                      help="name of strih's custom multiview-grid scene to rewire (default: Multiview)")
     ap.add_argument("--stats", type=float, default=None, metavar="SECONDS",
                      help="print a GetStats render-cost delta over SECONDS and exit — no seeding")
+    ap.add_argument("--reattach", type=int, default=None, metavar="CAM_N",
+                     help="#758 item 2: re-apply 'MV NDI cam<CAM_N>'s OWN current ndi_source_name "
+                          "(forces an NDI receive reconnect) and exit — no seeding")
     args = ap.parse_args()
 
     obs = op._conn(args.host, args.password)
     try:
+        if args.reattach is not None:
+            ndi_name = reattach(obs, args.reattach)
+            if ndi_name:
+                print(f"reattached MV NDI cam{args.reattach} -> ndi_source_name={ndi_name!r}")
+            else:
+                print(f"REATTACH FAILED: MV NDI cam{args.reattach} has no ndi_source_name to "
+                      f"re-apply (input missing or never seeded)")
+                sys.exit(1)
+            return
+
         if args.stats is not None:
             d = measure_stats(obs, args.stats)
             print(f"render-cost over {args.stats:.0f}s: activeFps={d['activeFps']} "

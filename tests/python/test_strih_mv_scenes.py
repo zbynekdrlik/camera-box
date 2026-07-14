@@ -144,6 +144,55 @@ def test_main_stats_and_seed_functions_exist():
     assert callable(strih_mv_scenes.seed)
     assert callable(strih_mv_scenes.rewire_multiview_scene)
     assert callable(strih_mv_scenes.measure_stats)
+    assert callable(strih_mv_scenes.reattach)
+
+
+# --- #758 item 2 — reattach(): re-applies the MV twin's OWN current ndi_source_name -------------
+
+
+class _FakeObsRpc:
+    """Minimal fake standing in for the live obs-websocket connection: records every _rpc call
+    and returns a scripted response per request type — mirrors this file's own "no live OBS
+    connection" convention (the pure-logic functions are unit-tested; the thin live-WS wrapper
+    around them is proven here with a fake instead of a real socket, same spirit as
+    tests/python/test_obs_phase2_*.py's own fakes)."""
+
+    def __init__(self, get_settings_response):
+        self.calls = []
+        self._get_settings_response = get_settings_response
+
+    def rpc(self, _obs, rtype, rdata=None, ignore_err=False):
+        self.calls.append((rtype, rdata))
+        if rtype == "GetInputSettings":
+            return self._get_settings_response
+        if rtype == "SetInputSettings":
+            return {}
+        raise AssertionError(f"unexpected rpc call: {rtype}")
+
+
+def test_reattach_reapplies_the_twins_own_current_ndi_source_name(monkeypatch):
+    fake = _FakeObsRpc({"inputSettings": {"ndi_source_name": "CAM3 (usb)"}})
+    monkeypatch.setattr(strih_mv_scenes.op, "_rpc", fake.rpc)
+
+    result = strih_mv_scenes.reattach(object(), 5)
+
+    assert result == "CAM3 (usb)"
+    assert fake.calls[0] == ("GetInputSettings", {"inputName": "MV NDI cam5"})
+    assert fake.calls[1] == (
+        "SetInputSettings",
+        {"inputName": "MV NDI cam5", "inputSettings": {"ndi_source_name": "CAM3 (usb)"}},
+    )
+
+
+def test_reattach_returns_none_when_the_twin_has_no_ndi_source_name(monkeypatch):
+    fake = _FakeObsRpc({"inputSettings": {}})
+    monkeypatch.setattr(strih_mv_scenes.op, "_rpc", fake.rpc)
+
+    result = strih_mv_scenes.reattach(object(), 3)
+
+    assert result is None
+    # Never re-applies a fabricated/fallback source name -- must call GetInputSettings only.
+    assert fake.calls == [("GetInputSettings", {"inputName": "MV NDI cam3"})]
 
 
 # --- #753 (2026-07-14): cam7 physical box exists -- seed() must pick up its 'Cam 7' scene too --
