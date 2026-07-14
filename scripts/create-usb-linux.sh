@@ -256,12 +256,17 @@ apt-get install -y \
 # /usr/lib/ndi was not on the dynamic-linker path, and no avahi-daemon ran for the mDNS NDI-source
 # discovery libndi performs. avahi-daemon is mDNS only — no conflict with DanteSync's clock ownership
 # (cam4 runs both). These are public Ubuntu packages (main/universe), installable in the chroot.
+# #743: psmisc (provides `fuser`) joins the SAME dual-bake here + setup-device.sh -- a fresh
+# cam2 clone (2026-07-13) had no `fuser` at all, false-FAILing rig-mode.sh's #464 KMS-held check
+# AND silently no-op'ing recording-e2e.sh's capture-release busy-wait (`fuser` exits 127 ->
+# the `while` loop's condition reads false immediately, same as "already released").
 apt-get install -y \
     libasound2t64 \
     libavahi-client3 \
     libavahi-common3 \
     avahi-daemon \
-    avahi-utils
+    avahi-utils \
+    psmisc
 
 # Put /usr/lib/ndi on the dynamic-linker path so dlopen("libndi.so") resolves once the (licensing-
 # restricted) NDI lib is copied in — without it a fresh box fails on "libndi.so: cannot open shared

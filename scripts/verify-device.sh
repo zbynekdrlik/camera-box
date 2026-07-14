@@ -69,6 +69,10 @@
 #       cap AND a systemd timer drop-in checks far more often than the stock daily cadence (#679;
 #       a chatty logger filled the fixed 50MB tmpfs in ~4-5 days and crashed cam2's
 #       camera-box.service)
+#   (t) `fuser` (psmisc) is installed -- a fresh cam2 clone had none at all, which false-FAILed
+#       rig-mode.sh's #464 KMS-held check AND silently no-op'd recording-e2e.sh's capture-release
+#       busy-wait (fuser exits 127 -> the wait's `while fuser ...` condition reads false
+#       immediately, same as "already released") -- (#743)
 #
 # Exit: 0 iff every check passes. Non-zero if ANY check FAILs or is UNREADABLE (test-strictness --
 # an unreachable/unreadable check is a FAIL, never a silent pass).
@@ -712,6 +716,21 @@ else
   else
     fail "log bound: ${LOG_BOUND_VERDICT#FAIL: }"
   fi
+fi
+
+# (t) fuser (psmisc) installed (#743) -------------------------------------------------------------
+# A fresh cam2 clone had NO fuser at all: rig-mode.sh's #464 KMS-held check false-FAILed (fuser
+# exits 127, which the check's own `if fuser -s ...` reads the SAME as "not held" even though the
+# painter was genuinely alive), and recording-e2e.sh's capture-release busy-wait
+# (`while fuser -s $NODE ...`) silently became a no-op the same way. `command -v` alone proves the
+# binary is present and on PATH -- exactly what both harness call sites need.
+rc=0
+FUSER_PATH="$(ssh_box "command -v fuser 2>/dev/null")" || rc=$?
+if [ "$rc" -eq 0 ] && [ -n "$FUSER_PATH" ]; then
+  ok "fuser present ($FUSER_PATH) -- psmisc installed (#743)"
+else
+  fail "fuser not found on PATH (ssh rc=$rc) -- psmisc missing; rig-mode.sh's #464 KMS-held check \
+and recording-e2e.sh's capture-release wait both silently degrade without it (#743)"
 fi
 
 # (e) genlock.conf drop-in --------------------------------------------------------------------

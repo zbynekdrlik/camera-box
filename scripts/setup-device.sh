@@ -836,9 +836,12 @@ apt-get update -qq
 # #362: include the FULL NDI/audio runtime dep set so a fresh box can RUN camera-box (the CAM3
 # clone crash-looped on missing libndi deps): libasound2t64 (ALSA, intercom), libavahi-common3
 # (libndi links it alongside libavahi-client3), and avahi-utils (avahi-browse for diagnosis).
-apt-get install -y -qq avahi-daemon libavahi-client3 libavahi-common3 avahi-utils libasound2t64 v4l-utils alsa-utils ethtool curl ca-certificates 2>/dev/null || true
+# #743: psmisc (provides `fuser`) joins the same dual-bake as create-usb-linux.sh -- a fresh
+# cam2 clone (2026-07-13) had no `fuser`, false-FAILing rig-mode.sh's #464 KMS-held check AND
+# silently no-op'ing recording-e2e.sh's capture-release busy-wait.
+apt-get install -y -qq avahi-daemon libavahi-client3 libavahi-common3 avahi-utils libasound2t64 v4l-utils alsa-utils ethtool curl ca-certificates psmisc 2>/dev/null || true
 systemctl enable avahi-daemon
-echo "  Installed: avahi-daemon, libavahi-client3, libavahi-common3, avahi-utils, libasound2t64, v4l-utils, alsa-utils, ethtool, curl, ca-certificates"
+echo "  Installed: avahi-daemon, libavahi-client3, libavahi-common3, avahi-utils, libasound2t64, v4l-utils, alsa-utils, ethtool, curl, ca-certificates, psmisc"
 
 # Create rc.local for power management settings (USB autosuspend, etc.)
 cat > /etc/rc.local << 'RCEOF'
