@@ -38,6 +38,7 @@
 
 use anyhow::{Context, Result};
 use camera_box::av_window::{self, AvSyncVerdict};
+use camera_box::frozen_leg::{frozen_leg_report, SegmentLeg};
 use camera_box::probe::av_sync_recording::{decode_av_marker_inputs, AvMarkerInputs};
 use camera_box::probe::burn_contiguity::{
     burn_contiguity_in_window_with_step, burn_contiguity_in_window_with_step_and_schedule,
@@ -56,7 +57,6 @@ use camera_box::probe::recording_latency::{
     BURN_RUN_ID_CAM5, BURN_RUN_ID_CAM6, BURN_RUN_ID_CAM7, BURN_RUN_ID_IMAG, BURN_RUN_ID_STREAM,
     BURN_RUN_ID_STRIH,
 };
-use camera_box::frozen_leg::{frozen_leg_report, SegmentLeg};
 use camera_box::probe::recording_partial::RecordingPartial;
 use camera_box::probe::recording_segments::{
     load_switch_schedule, place_frame_in_window, segment_continuity, SegmentFrame, SwitchWindow,
