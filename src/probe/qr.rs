@@ -1170,6 +1170,98 @@ mod tests {
         }
     }
 
+    #[test]
+    fn optical_dual_qr_recovered_on_late_sweep_frame_via_top_band_755754() {
+        // #754 — a REAL late-range (#751 motion-sweep) frame from the surviving imag recording of
+        // run 303636614 (t≈290s, frame-12081): the crisp bottom node burns (cam1 911001, imag
+        // 911003) decode on the plain full-frame pass, but the SOFT optical dual-QR (run_id
+        // 303636614, top band) does NOT — the exact decoder-side decay this ticket is about. cv2
+        // reads both optical halves off this same frame; rqrr's full-frame pass locates the
+        // optical grid but the perspective/threshold decode fails. The #754 top-band recovery
+        // crop restores it. Fixture committed alongside; sharpness/contrast are constant across
+        // the decay (see the ticket) — this is a coverage gap, not a pixel defect.
+        const OPTICAL_RUN_ID: u32 = 303_636_614;
+        const IMAG_BURN: u32 = 911_003; // present on this frame (fast-path burn gate is satisfied)
+        let luma = optical_fixture_luma("optical-sweep-decay-late-imag.png");
+
+        // RED-condition lock (permanent, mechanism): the FULL-FRAME plain∪Otsu pass
+        // (`decode_qr_luma_all`, the current production full-frame decode) MISSES the optical on
+        // this late frame — 0 payloads for run_id 303636614 — even though it reads the burns.
+        // This is what makes every fast-path decode of this frame drop the optical. If a future
+        // rqrr reads it full-frame, re-tune this fixture, never delete the guard.
+        let full = decode_qr_luma_all(luma.clone());
+        assert!(
+            !full.iter().any(|p| p.run_id == OPTICAL_RUN_ID),
+            "the full-frame plain∪Otsu pass is expected to MISS the soft optical on this late \
+             sweep frame (run_id {OPTICAL_RUN_ID}); got {:?}",
+            full.iter()
+                .map(|p| (p.run_id, p.frame_id))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            full.iter().any(|p| p.run_id == IMAG_BURN),
+            "sanity: the crisp imag burn {IMAG_BURN} MUST decode full-frame on this same frame \
+             (proves the decode itself works — only the soft optical is missed); got {:?}",
+            full.iter()
+                .map(|p| (p.run_id, p.frame_id))
+                .collect::<Vec<_>>()
+        );
+
+        // GREEN (PINNED, the fused verdict + imag/stream path, #707 `--cam2-run-id`): the
+        // per-frame recording decode, gated with min_distinct_optical=Some, recovers BOTH optical
+        // halves via the #754 top-band crop. Without the fix this returns only burns → 0 optical
+        // → fails.
+        let pinned = decode_qr_luma_all_fast_then_robust_grouped_optical(
+            luma.clone(),
+            &[IMAG_BURN],
+            &[],
+            Some((OPTICAL_RUN_ID, 2)),
+        );
+        let optical_pinned = distinct_optical_ids(&pinned, OPTICAL_RUN_ID);
+        assert!(
+            optical_pinned.len() >= 2,
+            "PINNED: the recording decode must recover BOTH optical dual-QR halves via the #754 \
+             top-band crop (≥2 distinct frame_ids, run_id {OPTICAL_RUN_ID}); got {optical_pinned:?} \
+             from {:?}",
+            pinned.iter().map(|p| (p.run_id, p.frame_id)).collect::<Vec<_>>()
+        );
+
+        // GREEN (UNPINNED, the strih-extract path — min_distinct_optical=None, the exact case the
+        // #707 gate could NOT save, see #754): the burns satisfy the gate (fast path), yet the
+        // structural optical-short trigger still fires the top-band recovery and the optical is
+        // surfaced. This is what makes the fix pin-INDEPENDENT.
+        let unpinned = decode_qr_luma_all_fast_then_robust_grouped_optical(
+            luma.clone(),
+            &[IMAG_BURN],
+            &[],
+            None,
+        );
+        let optical_unpinned = distinct_optical_ids(&unpinned, OPTICAL_RUN_ID);
+        assert!(
+            optical_unpinned.len() >= 2,
+            "UNPINNED: the top-band recovery must still surface BOTH optical halves without a \
+             --cam2-run-id pin (≥2 distinct frame_ids, run_id {OPTICAL_RUN_ID}); got \
+             {optical_unpinned:?} from {:?}",
+            unpinned
+                .iter()
+                .map(|p| (p.run_id, p.frame_id))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// The DISTINCT `frame_id`s decoded for `run_id`, sorted+deduped — the count of optical
+    /// Vernier halves recovered for the #754 fixture assertions.
+    fn distinct_optical_ids(payloads: &[Payload], run_id: u32) -> Vec<u32> {
+        let mut ids: Vec<u32> = payloads
+            .iter()
+            .filter(|p| p.run_id == run_id)
+            .map(|p| p.frame_id)
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    }
+
     // ============================================================================
     // #202 — robust offline decode recovers the small node burns rqrr's single
     // full-frame `detect_grids` pass intermittently misses (the residual
