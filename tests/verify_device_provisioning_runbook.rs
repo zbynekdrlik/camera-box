@@ -160,6 +160,20 @@ fn verify_device_covers_every_acceptance_check() {
     }
 }
 
+/// #743 — a fresh cam2 clone had no `fuser` (psmisc) at all: rig-mode.sh's #464 KMS-held check
+/// false-FAILed, and recording-e2e.sh's capture-release busy-wait silently no-op'd. verify-device.sh
+/// must certify `fuser` is actually on PATH so this regresses loudly at acceptance time, not
+/// silently at the next live gate run.
+#[test]
+fn verify_device_covers_fuser_psmisc_check_743() {
+    let body = read(VERIFY_SCRIPT);
+    assert!(
+        on_noncomment_line(&body, "command -v fuser"),
+        "{VERIFY_SCRIPT} must check `fuser` is on PATH via a real `command -v fuser` call (not \
+         just a comment) -- a fresh provision can silently lack psmisc (#743)"
+    );
+}
+
 #[test]
 fn verify_device_exits_nonzero_on_any_failed_check() {
     let body = read(VERIFY_SCRIPT);
