@@ -15,6 +15,14 @@ the physical camera during the live rebind (CAM4=20ms, CAM5=8ms, CAM6=13ms, ever
 — unchanged VALUES, just re-attached to the NEW input that now carries that camera), verified live
 on strih 2026-07-14.
 
+**#757 RE-BASELINE (2026-07-15) — current per-camera `genlock_latency_ms_src` pins:** cam1=3,
+cam2=14, cam3=18, cam4=50, cam5=8, cam6=43, cam7=36 — equalized to a uniform ~71 ms delivery p50
+from run 1984131963's measured per-camera delivery table (eff-A/V spread correlated 1:1 with the
+p50 spread; see #757 for the math). Applied live + read back on all 28 inputs: strih
+`NDI cam1..7` + `MV NDI cam1..7`, imag `NDI CAM1..7` + `MV CAM1..7` (MV clones carry the identical
+latency — parity rule). A deliberate future latency rollout re-derives these from a fresh fused
+run's delivery table, never by hand-tuning a single camera in isolation.
+
 Pre-2026-07-14 HISTORY (superseded, kept for context only — do NOT use): the mapping used to be
 OFFSET by one slot for the six original cameras (NDI cam5→CAM1, NDI cam1→CAM3, NDI cam3→CAM4,
 NDI cam4→CAM5, NDI cam6→CAM6, NDI cam2→CAM2 — cam2 was ALREADY 1:1 even then, coincidentally).
