@@ -222,14 +222,74 @@ fn steady_multi_consumes_at_an_integer_source_multiple_of_the_canvas() {
          frame ~one canvas interval ahead matures despite canvas_interval being a hair under \
          N*src_interval) is gone; the multi-consume would mature only 1 frame and still crawl."
     );
-    // The latch MUST be cleared on every source-timeline discontinuity (acquire / backlog relock /
-    // gap resync / backward clock-step) so a stale N cannot outlive the rate it described.
+    // The latch MUST be cleared on every GENUINE source-timeline discontinuity so a stale N cannot
+    // outlive the rate it described. #741/#707 B2 changed the SET: the four sites are now
+    // acquire / gap resync / backward clock-step / flush-inactive reset — the BACKLOG-STORM relock
+    // is DELIBERATELY excluded (a queue-depth event is not a rate change; see
+    // sticky_n_latch_lifecycle_and_robust_measure_741 below).
     let clears = src.matches("source->genlock_last_known_n = 0;").count();
     assert!(
         clears >= 4,
-        "{OBS_SOURCE}: #726 STICKY-N — the latch is cleared on only {clears} of the 4 required \
-         source-timeline discontinuities (acquire / relock / gap / backward-step); a stale N could \
-         outlive its rate. Re-apply the clears."
+        "{OBS_SOURCE}: #726/#741 STICKY-N — the latch is cleared on only {clears} of the 4 required \
+         source-timeline discontinuities (acquire / gap resync / backward clock-step / \
+         flush-inactive reset); a stale N could outlive its rate. Re-apply the clears."
+    );
+}
+
+#[test]
+fn sticky_n_latch_lifecycle_and_robust_measure_741() {
+    // #741 (#707 B2) — the CRAWL half of #707: a jittery 60-into-30 input crawled at +1 (window
+    // uniform=0.481, histogram {1:295,2:407,3:102,7:39}) because the sticky-N detector kept
+    // reading INCONCLUSIVE. Three code changes fix it; each is pinned here so a subtree-pull or
+    // edit can't silently revert one. Behavioral RED→GREEN proof:
+    // src/probe/genlock.rs `measure_scans_past_a_degenerate_front_pair_741` +
+    // `backlog_relock_preserves_the_confirmed_multiple_741` (probe-gated); this default-features
+    // guard pins the C port.
+    let raw = vendor_file(OBS_SOURCE);
+
+    // (a) The BACKLOG-STORM relock branch must NOT clear the latch — a queue-depth relock is NOT
+    // evidence the source rate changed. Clearing it forced the next inconclusive tick to crawl
+    // (N=1), re-growing the queue and re-triggering the relock: a self-sustaining crawl loop.
+    let relock_pos = raw
+        .find("source->genlock_relocks++;")
+        .expect("#741: the backlog-storm relock branch (genlock_relocks++) must be present");
+    let window_end = (relock_pos + 800).min(raw.len());
+    let after_relock = &raw[relock_pos..window_end];
+    let release_off = after_relock
+        .find("release = due;")
+        .expect("#741: the relock branch must release the due frame (release = due;)");
+    let relock_branch = &after_relock[..release_off];
+    assert!(
+        !relock_branch.contains("genlock_last_known_n = 0"),
+        "{OBS_SOURCE}: #741/#707 B2 — the BACKLOG-STORM relock branch still clears \
+         genlock_last_known_n; a queue-depth relock is NOT a rate change, and clearing there \
+         re-crawls the next inconclusive tick and re-triggers the relock (self-sustaining crawl). \
+         Mirror: src/probe/genlock.rs ReleaseCadence::tick backlog branch (no latch clear)."
+    );
+
+    // (b) genlock_measure_source_multiple must SCAN the first K queue entries for a
+    // strictly-increasing pair (skipping a duplicate/degenerate front pair) — not read only
+    // array[0..1]. The named scan-depth constant carries the rationale with the value.
+    assert!(
+        raw.contains("GENLOCK_MEASURE_SCAN_DEPTH"),
+        "{OBS_SOURCE}: #741/#707 B2 — genlock_measure_source_multiple no longer scans the first K \
+         queue entries (GENLOCK_MEASURE_SCAN_DEPTH) for a strictly-increasing pair; a duplicate \
+         front stamp reads INCONCLUSIVE and the release crawls. Mirror: src/probe/genlock.rs \
+         ReleaseCadence::measure_source_multiple."
+    );
+
+    // (c) The flush/inactive reset (frame==NULL: the source went inactive, delay line gone) must
+    // CLEAR the latch — that is the genuinely-stale reset site. Pinned by co-location with the
+    // sibling flush clears (genlock_filled / genlock_empty_run).
+    let flush_pos = raw
+        .find("source->async_active = false;")
+        .expect("#741: the flush/inactive reset (async_active = false) must be present");
+    let flush_block = &raw[flush_pos..(flush_pos + 900).min(raw.len())];
+    assert!(
+        flush_block.contains("genlock_last_known_n = 0"),
+        "{OBS_SOURCE}: #741/#707 B2 — the flush/inactive reset (frame==NULL) no longer clears \
+         genlock_last_known_n; the source's whole delay line is gone there, so a resumed source \
+         would trust a stale N. Add the clear next to genlock_filled / genlock_empty_run."
     );
 }
 

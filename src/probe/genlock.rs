@@ -2109,6 +2109,110 @@ mod tests {
         );
     }
 
+    /// #741 (#707 B2) RED→GREEN — `measure_source_multiple` must SCAN past a degenerate front pair.
+    ///
+    /// The pre-#741 measure read ONLY `array[0]`/`array[1]`, so a DUPLICATE capture stamp at the
+    /// front returned INCONCLUSIVE (`None`). Sustained on a jittery 60-into-30 input that dropped
+    /// the release to the present-oldest CRAWL — the B2 half of #707 (a window with `uniform=0.481`,
+    /// histogram `{1:295,2:407,3:102,7:39}`: +1 steps at half rate, i.e. consecutive ids WERE
+    /// present, not an arrival problem). Scanning the first K queued entries for the FIRST
+    /// strictly-increasing CONSECUTIVE pair recovers one real source interval past a leading
+    /// duplicate, so a fresh measurement re-confirms N instead of falling to the crawl.
+    #[test]
+    fn measure_scans_past_a_degenerate_front_pair_741() {
+        use std::collections::VecDeque;
+        const CANVAS: u64 = 33_333_333; // 30 Hz canvas
+        const SRC: u64 = 16_666_667; // 60 Hz source (N == 2)
+        let base = 1_000_000_000u64;
+
+        // Regression: a clean 60fps front pair still measures N==2 (the fix only WIDENS the search).
+        let clean: VecDeque<u64> = [base, base + SRC, base + 2 * SRC].into();
+        assert_eq!(
+            ReleaseCadence::measure_source_multiple(&clean, CANVAS),
+            Some(2),
+            "#741: a clean front pair must still measure N==2"
+        );
+
+        // DUPLICATE front stamp: pre-#741 array[0..1]-only measure reads t1<=t0 => None (crawl).
+        // Post-fix: skip the equal pair, the next consecutive pair (base, base+SRC) = one real
+        // source interval => N==2.
+        let dup_front: VecDeque<u64> = [base, base, base + SRC, base + 2 * SRC].into();
+        assert_eq!(
+            ReleaseCadence::measure_source_multiple(&dup_front, CANVAS),
+            Some(2),
+            "#741 B2: a duplicate front stamp must not read INCONCLUSIVE — scan to the next \
+             strictly-increasing consecutive pair for one real source interval (N==2)"
+        );
+
+        // A 1:1 (30-into-30) duplicate-led queue must still re-latch to N==1 (never fabricate 2).
+        let dup_one_to_one: VecDeque<u64> = [base, base, base + CANVAS, base + 2 * CANVAS].into();
+        assert_eq!(
+            ReleaseCadence::measure_source_multiple(&dup_one_to_one, CANVAS),
+            Some(1),
+            "#741: a duplicate-led 1:1 queue must measure N==1, not a fabricated multiple"
+        );
+
+        // Genuinely inconclusive — NO strictly-increasing pair anywhere in the scan window: still
+        // None. The fix widens the search; it never fabricates a measurement.
+        let all_flat: VecDeque<u64> = [base, base, base, base].into();
+        assert_eq!(
+            ReleaseCadence::measure_source_multiple(&all_flat, CANVAS),
+            None,
+            "#741: a queue with no strictly-increasing pair in the first K entries stays \
+             inconclusive (None) — never fabricate a measurement"
+        );
+
+        // Fewer than 2 queued frames stays inconclusive (nothing to compare).
+        let one: VecDeque<u64> = [base].into();
+        assert_eq!(
+            ReleaseCadence::measure_source_multiple(&one, CANVAS),
+            None,
+            "#741: fewer than 2 queued frames stays inconclusive"
+        );
+    }
+
+    /// #741 (#707 B2) RED→GREEN — a BACKLOG-STORM relock must NOT clear the sticky-N latch.
+    ///
+    /// A queue-depth relock (a burst catch-up) is NOT evidence the source RATE changed. Clearing
+    /// `last_known_n` there forced the very next INCONCLUSIVE tick to crawl at N==1, which under a
+    /// steady 60-into-30 backlog re-grew the queue and re-triggered the relock: a self-sustaining
+    /// crawl→relock loop (the #707 B2 crawl window). The latch must SURVIVE a relock; it is cleared
+    /// only on a genuine source-timeline discontinuity (acquire / gap resync / backward clock-step).
+    #[test]
+    fn backlog_relock_preserves_the_confirmed_multiple_741() {
+        use std::collections::VecDeque;
+        const SRC: u64 = 16_666_667; // 60 Hz source
+        const CANVAS: u64 = 33_333_333; // 30 Hz canvas
+        let mut cadence = ReleaseCadence::new();
+
+        // Confirm N==2 from a clean 60fps front pair → latches last_known_n = 2.
+        let clean: VecDeque<u64> =
+            [1_000_000_000, 1_000_000_000 + SRC, 1_000_000_000 + 2 * SRC].into();
+        assert_eq!(cadence.effective_source_multiple(&clean, CANVAS), 2);
+        assert_eq!(cadence.last_known_n, 2, "setup: N==2 must be latched");
+
+        // Lock the cadence, then feed a genuine BACKLOG STORM (> QDEPTH_RELOCK frames, all aged
+        // past the reserve so `due > 0`) — the relock branch.
+        cadence.locked_next_boundary_ns = Some(2_000_000_000);
+        let base = 3_000_000_000u64;
+        let mut queue: VecDeque<u64> = (0..(ReleaseCadence::QDEPTH_RELOCK as u64 + 3))
+            .map(|i| base + i * SRC)
+            .collect();
+        let wall_now = base + 100 * SRC; // every queued frame is due
+        let out = cadence.tick(wall_now, 3, CANVAS, &mut queue);
+
+        assert!(
+            out.relocked,
+            "#741 setup: the backlog storm must hit the relock branch (got {out:?})"
+        );
+        assert_eq!(
+            cadence.last_known_n, 2,
+            "#741 B2: a backlog-storm relock is a queue-depth event, NOT a rate change — it must \
+             PRESERVE the confirmed N (2); clearing it re-crawls on the next inconclusive tick and \
+             re-triggers the relock (the self-sustaining crawl the fix removes)"
+        );
+    }
+
     /// #401 — a genuine upstream STALL must still catch up (the IMAG latency contract):
     /// after a 30-frame arrival gap the cadence re-locks near the live edge and counts the
     /// jumped frames HONESTLY in `dropped` (never silently).
