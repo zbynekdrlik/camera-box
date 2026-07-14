@@ -47,10 +47,20 @@ pub const SPEED_PX_PER_FRAME: u32 = 24;
 /// wave). Constant |velocity| everywhere except the two turnaround points. Returns a value in
 /// `[0, track_px]`; degenerate inputs (`track_px == 0` or `speed == 0`) return 0.
 pub fn sweep_x(frame_idx: u64, track_px: u32, speed_px_per_frame: u32) -> u32 {
-    let _ = frame_idx; // RED stub — no motion yet (GREEN implements the triangle wave).
-    let _ = track_px;
-    let _ = speed_px_per_frame;
-    0
+    if track_px == 0 || speed_px_per_frame == 0 {
+        return 0;
+    }
+    // Triangle wave with period `2*track` (there and back). `phase = (frame_idx * speed) mod
+    // period`. Reduce the multiply modulo `period` FIRST — `(a*b) mod m == ((a mod m)*(b mod m))
+    // mod m` — so the product can never overflow u64 regardless of how long the painter runs.
+    let period = 2 * track_px as u64;
+    let phase = ((frame_idx % period) * (speed_px_per_frame as u64 % period)) % period;
+    let x = if phase <= track_px as u64 {
+        phase // outbound leg: 0 → track
+    } else {
+        period - phase // return leg: track → 0
+    };
+    x as u32
 }
 
 /// The full bottom motion band as a pixel rectangle: `[0, canvas_w) × [canvas_h − BAND_HEIGHT_PX,
@@ -69,21 +79,23 @@ pub fn sweep_band(canvas_w: u32, canvas_h: u32) -> Rect {
 /// horizontally sweeping via [`sweep_x`], vertically centred inside the bottom [`BAND_HEIGHT_PX`]
 /// band. Fully bounds-clamped so it never leaves the canvas or the band.
 pub fn ball_rect(frame_idx: u64, canvas_w: u32, canvas_h: u32) -> Rect {
-    let _ = frame_idx; // RED stub — a zero-size rect (GREEN computes the sweeping ball).
-    let _ = canvas_w;
-    let _ = canvas_h;
-    Rect {
-        x: 0,
-        y: 0,
-        w: 0,
-        h: 0,
-    }
+    let w = BALL_WIDTH_PX.min(canvas_w);
+    let band_h = BAND_HEIGHT_PX.min(canvas_h);
+    let h = BALL_HEIGHT_PX.min(band_h);
+    let track = canvas_w.saturating_sub(w); // max left-edge x so x+w stays on-canvas
+    let x = sweep_x(frame_idx, track, SPEED_PX_PER_FRAME);
+    // Vertically centre the ball inside the bottom band.
+    let band_top = canvas_h - band_h;
+    let y = band_top + (band_h - h) / 2;
+    Rect { x, y, w, h }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::colour_scale::{colour_scale_patches, dual_qr_rects, DEFAULT_QR_SIZE, TOP_MARGIN_PX};
+    use crate::colour_scale::{
+        colour_scale_patches, dual_qr_rects, DEFAULT_QR_SIZE, TOP_MARGIN_PX,
+    };
 
     const W: u32 = 1920;
     const H: u32 = 1080;
@@ -125,7 +137,10 @@ mod tests {
         let mut max_x = 0u32;
         for f in 0..(2 * track / speed) as u64 + 2 {
             let x = sweep_x(f, track, speed);
-            assert!(x <= track, "x={x} left the track (track={track}) at frame {f}");
+            assert!(
+                x <= track,
+                "x={x} left the track (track={track}) at frame {f}"
+            );
             min_x = min_x.min(x);
             max_x = max_x.max(x);
         }
@@ -138,8 +153,16 @@ mod tests {
 
     #[test]
     fn sweep_x_is_deterministic_and_guards_degenerate_inputs() {
-        assert_eq!(sweep_x(12345, 1830, 24), sweep_x(12345, 1830, 24), "pure fn");
-        assert_eq!(sweep_x(7, 0, 24), 0, "zero track → 0, no panic/divide-by-zero");
+        assert_eq!(
+            sweep_x(12345, 1830, 24),
+            sweep_x(12345, 1830, 24),
+            "pure fn"
+        );
+        assert_eq!(
+            sweep_x(7, 0, 24),
+            0,
+            "zero track → 0, no panic/divide-by-zero"
+        );
         assert_eq!(sweep_x(7, 1830, 0), 0, "zero speed → 0");
     }
 
@@ -150,10 +173,26 @@ mod tests {
         assert_eq!(band.h, BAND_HEIGHT_PX);
         for f in 0..500u64 {
             let b = ball_rect(f, W, H);
-            assert!(b.w > 0 && b.h > 0, "the ball must be a real rectangle at frame {f}");
-            assert!(b.y >= band.y, "ball top {} above the band {} at frame {f}", b.y, band.y);
-            assert!(b.y + b.h <= H, "ball bottom {} past the canvas at frame {f}", b.y + b.h);
-            assert!(b.x + b.w <= W, "ball right {} past the canvas at frame {f}", b.x + b.w);
+            assert!(
+                b.w > 0 && b.h > 0,
+                "the ball must be a real rectangle at frame {f}"
+            );
+            assert!(
+                b.y >= band.y,
+                "ball top {} above the band {} at frame {f}",
+                b.y,
+                band.y
+            );
+            assert!(
+                b.y + b.h <= H,
+                "ball bottom {} past the canvas at frame {f}",
+                b.y + b.h
+            );
+            assert!(
+                b.x + b.w <= W,
+                "ball right {} past the canvas at frame {f}",
+                b.x + b.w
+            );
         }
     }
 
@@ -168,14 +207,23 @@ mod tests {
             .into_iter()
             .map(|(rect, _rgb)| rect)
             .collect();
-        assert!(!patches.is_empty(), "the rig colour scale must have patches to guard against");
+        assert!(
+            !patches.is_empty(),
+            "the rig colour scale must have patches to guard against"
+        );
         for f in 0..2000u64 {
             let b = ball_rect(f, W, H);
             for qr in &qrs {
-                assert!(!b.intersects(qr), "ball intersected a dual-QR half at frame {f}: {b:?} vs {qr:?}");
+                assert!(
+                    !b.intersects(qr),
+                    "ball intersected a dual-QR half at frame {f}: {b:?} vs {qr:?}"
+                );
             }
             for p in &patches {
-                assert!(!b.intersects(p), "ball intersected a colour patch at frame {f}: {b:?} vs {p:?}");
+                assert!(
+                    !b.intersects(p),
+                    "ball intersected a colour patch at frame {f}: {b:?} vs {p:?}"
+                );
             }
         }
     }

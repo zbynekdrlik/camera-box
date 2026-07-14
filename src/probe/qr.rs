@@ -287,6 +287,46 @@ pub fn blit_colour_scale_bgra(
     }
 }
 
+/// Fill a pixel `rect` of a BGRA `canvas` (`canvas_w` wide) with an opaque `(b, g, r)` colour.
+/// Every write is bounds-checked so a short/odd buffer is never indexed out of range.
+fn fill_rect_bgra(
+    canvas: &mut [u8],
+    canvas_w: u32,
+    rect: &crate::colour_scale::Rect,
+    b: u8,
+    g: u8,
+    r: u8,
+) {
+    let x_end = rect.x + rect.w;
+    let y_end = rect.y + rect.h;
+    for y in rect.y..y_end {
+        for x in rect.x..x_end {
+            let ci = (((y * canvas_w) + x) * 4) as usize;
+            if ci + 3 < canvas.len() {
+                canvas[ci] = b;
+                canvas[ci + 1] = g;
+                canvas[ci + 2] = r;
+                canvas[ci + 3] = 255;
+            }
+        }
+    }
+}
+
+/// #751 — blit the constant-velocity motion sweep (the UFO-test judder indicator) into a BGRA
+/// `canvas` for painter frame `frame_idx`: fill the bottom [`crate::motion_sweep::BAND_HEIGHT_PX`]
+/// band with a dark track, then draw the bright sweeping ball on it. The band lives fully OUTSIDE
+/// the top dual-QR decode zones AND the central colour-reference column (machine-proven in
+/// `crate::motion_sweep`), so this never affects any QR / colour-patch read. The painter calls this
+/// AFTER rendering the QR(s) + colour scale (when `--motion-sweep` is on, default in --paint-only).
+pub fn blit_motion_sweep_bgra(canvas: &mut [u8], canvas_w: u32, canvas_h: u32, frame_idx: u64) {
+    let band = crate::motion_sweep::sweep_band(canvas_w, canvas_h);
+    let ball = crate::motion_sweep::ball_rect(frame_idx, canvas_w, canvas_h);
+    // Dark track background first, then the bright ball on top (BGRA(0,255,255) = bright yellow —
+    // max contrast on the dark track, and not a QR-like pattern).
+    fill_rect_bgra(canvas, canvas_w, &band, 32, 32, 32);
+    fill_rect_bgra(canvas, canvas_w, &ball, 0, 255, 255);
+}
+
 /// Decode the first QR found in a grayscale image into a Payload, or None.
 pub fn decode_qr_luma(img: GrayImage) -> Option<Payload> {
     let mut prepared = rqrr::PreparedImage::prepare(img);

@@ -49,6 +49,9 @@ pub struct RunConfig {
     /// dual-QR (for eye + recording colour verification, the #364 gate). Forwarded into
     /// the painter's `PaintParams`.
     pub colour_scale: bool,
+    /// #751: paint the constant-velocity motion sweep (UFO-test judder indicator) in the bottom
+    /// band. Forwarded into the painter's `PaintParams`.
+    pub motion_sweep: bool,
     /// Optional path for `run_paint_only` to write the painter's emitted-tick
     /// CSV (`tick,gen_ts_ns`) — the cam→strih ground truth consumed by
     /// `recording-verdict --painter` (#105). `None` ⇒ no log written.
@@ -142,6 +145,7 @@ pub fn run(cfg: RunConfig) -> Result<AnalysisReport> {
             wall_clock: false,
             dual_qr: cfg.dual_qr,
             colour_scale: cfg.colour_scale,
+            motion_sweep: cfg.motion_sweep,
         };
         std::thread::spawn(move || run_painter(params, start, stop, emitted, None, None))
     };
@@ -255,6 +259,7 @@ pub fn run_paint_only(cfg: &RunConfig) -> Result<u64> {
             wall_clock: cfg.wall_clock,
             dual_qr: cfg.dual_qr,
             colour_scale: cfg.colour_scale,
+            motion_sweep: cfg.motion_sweep,
         };
         std::thread::spawn(move || {
             run_painter(params, start, stop, emitted, current_id_p, refresh_out_p)

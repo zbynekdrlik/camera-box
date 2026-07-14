@@ -85,6 +85,11 @@ pub struct PaintParams {
     /// monitor's colours be checked by eye AND sampled per-patch from the recording
     /// (the #364 colour gate). When `false` the canvas carries only the QR(s).
     pub colour_scale: bool,
+    /// #751: also paint the constant-velocity motion sweep (a bright ball sweeping the bottom
+    /// band) so judder is visible BY EYE on the monitor / multiview / recording, not only via QR
+    /// decode. Fully outside the dual-QR + colour-scale zones. Default: ON in --paint-only mode
+    /// (the permanent cam2 painter shows it), OFF otherwise.
+    pub motion_sweep: bool,
 }
 
 /// Vernier dual-QR ids for refresh counter `tick`. LEFT carries the latest EVEN
@@ -176,6 +181,18 @@ fn paint_one_frame(
             params.canvas_h,
             params.qr_size,
             crate::probe::qr::TOP_MARGIN_PX,
+        );
+    }
+
+    // #751 — paint the motion sweep LAST (over the blank bottom band, clear of every decode zone),
+    // keyed on `refresh_tick` (the per-frame counter that advances in BOTH single- and dual-QR
+    // modes), so its position is a pure function of the painter frame index.
+    if params.motion_sweep {
+        crate::probe::qr::blit_motion_sweep_bgra(
+            &mut bgra,
+            params.canvas_w,
+            params.canvas_h,
+            refresh_tick,
         );
     }
 
@@ -339,6 +356,7 @@ mod tests {
             wall_clock: false,
             dual_qr: false,
             colour_scale: false,
+            motion_sweep: false,
         }
     }
 
