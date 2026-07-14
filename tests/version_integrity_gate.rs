@@ -153,6 +153,106 @@ fn gate_passes_when_both_boxes_match_the_pinned_set() {
         "both boxes pinned must PASS. stdout={stdout} stderr={stderr}"
     );
     assert!(stdout.contains("GATE PASS"), "stdout: {stdout}");
+    // #756 opt-in rollout: with NO box reporting a genlock_build_sha yet, the cross-box parity
+    // facet stays DORMANT (never a spurious refuse before the fleet's bundle-state-servers emit it).
+    assert!(
+        stdout.contains("fewer than 2 boxes report a genlock_build_sha"),
+        "parity facet must be dormant when no SHA is reported: {stdout}"
+    );
+    let _ = std::fs::remove_file(&s);
+    let _ = std::fs::remove_file(&t);
+}
+
+/// Inject a #756 `genlock_build_sha` into a pinned state fixture (insert before the closing brace).
+fn with_sha(base: &str, sha: &str) -> String {
+    format!(
+        "{},\"genlock_build_sha\":\"{sha}\"}}",
+        &base[..base.len() - 1]
+    )
+}
+
+#[test]
+fn gate_passes_when_fleet_genlock_builds_are_in_parity_756() {
+    // strih + stream states carry a matching genlock_build_sha AND imag's SHA (supplied via
+    // --genlock-sha) matches -> the whole fleet is on ONE build -> cross-box parity OK, GATE PASS.
+    const SHA: &str = "26de1c3c23980488a110dbf02e5e472f15cb001d";
+    let s = write_state("strih_parity_ok", &with_sha(STRIH_PINNED, SHA));
+    let t = write_state("stream_parity_ok", &with_sha(STREAM_PINNED, SHA));
+    let (code, stdout, stderr) = run_gate(&[
+        "--win-state",
+        &format!("strih={}", s.display()),
+        "--win-state",
+        &format!("stream={}", t.display()),
+        "--genlock-sha",
+        &format!("imag={SHA}"),
+    ]);
+    assert_eq!(
+        code, 0,
+        "unified fleet must PASS. stdout={stdout} stderr={stderr}"
+    );
+    assert!(stdout.contains("GATE PASS"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("genlock_parity") && stdout.contains("ONE genlock build"),
+        "the parity facet must have engaged + reported OK: {stdout}"
+    );
+    let _ = std::fs::remove_file(&s);
+    let _ = std::fs::remove_file(&t);
+}
+
+#[test]
+fn gate_refuses_when_imag_genlock_build_skews_from_the_windows_boxes_756() {
+    // The #756 scenario: strih/stream on the current build, imag on a STALE lineage. Each box's own
+    // drift-guard --compare passes (versions/settings identical across builds — the exact false OK
+    // the ref-compare gives), but the CROSS-BOX parity assert catches the skew -> GATE REFUSED (20).
+    const CUR: &str = "26de1c3c23980488a110dbf02e5e472f15cb001d";
+    const STALE: &str = "8e2817e5aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let s = write_state("strih_parity_skew", &with_sha(STRIH_PINNED, CUR));
+    let t = write_state("stream_parity_skew", &with_sha(STREAM_PINNED, CUR));
+    let (code, stdout, stderr) = run_gate(&[
+        "--win-state",
+        &format!("strih={}", s.display()),
+        "--win-state",
+        &format!("stream={}", t.display()),
+        "--genlock-sha",
+        &format!("imag={STALE}"),
+    ]);
+    assert_eq!(
+        code, 20,
+        "a stale imag vs current strih/stream must REFUSE (20). stdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        stdout.contains("genlock_parity") && stdout.contains("SKEW"),
+        "must report the cross-box genlock SKEW: {stdout}"
+    );
+    assert!(stderr.contains("GATE FAILED"), "stderr: {stderr}");
+    let _ = std::fs::remove_file(&s);
+    let _ = std::fs::remove_file(&t);
+}
+
+#[test]
+fn gate_refuses_when_only_windows_boxes_report_a_build_and_imag_is_unread_756() {
+    // strih/stream report a SHA (2 read peers -> the facet ENGAGES) but imag's SHA is empty (ssh
+    // hiccup): the parity picture is INCOMPLETE for the box we most need to check -> UNKNOWN (11),
+    // never a false OK. Proves the facet is fail-closed once populated, not just on an outright skew.
+    const SHA: &str = "26de1c3c23980488a110dbf02e5e472f15cb001d";
+    let s = write_state("strih_parity_unread", &with_sha(STRIH_PINNED, SHA));
+    let t = write_state("stream_parity_unread", &with_sha(STREAM_PINNED, SHA));
+    let (code, stdout, stderr) = run_gate(&[
+        "--win-state",
+        &format!("strih={}", s.display()),
+        "--win-state",
+        &format!("stream={}", t.display()),
+        "--genlock-sha",
+        "imag=",
+    ]);
+    assert_eq!(
+        code, 11,
+        "an unread imag among a populated set must be INCOMPLETE (11). stdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        stdout.contains("genlock_parity") && stdout.contains("INCOMPLETE"),
+        "must report the incomplete parity naming imag: {stdout}"
+    );
     let _ = std::fs::remove_file(&s);
     let _ = std::fs::remove_file(&t);
 }

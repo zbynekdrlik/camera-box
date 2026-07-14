@@ -68,6 +68,10 @@ DEFAULT_NDI_RUNTIME_DLL = r"C:\Program Files\NDI\NDI 6 Tools\Runtime\Processing.
 # The two static OBS module scan paths (the third, %APPDATA%\obs-studio\plugins, is resolved from
 # the environment below — mirrors bundle_state_gather.DISTROAV_SCAN_ROOTS + drift-guard.md 1c).
 APPDATA_DISTROAV_ROOT = "obs-studio/plugins"
+# #756 — the deployed genlock bundle's build-SHA marker on a Windows box (the SAME
+# GENLOCK_BUILD_SHA.txt imag serves from /opt/obs-genlock/). Read-only; "" if absent (a stock/
+# non-genlock install, or a build predating the marker) -> UNKNOWN, never a guessed SHA.
+DEFAULT_GENLOCK_BUILD_SHA_FILE = r"C:\Program Files\obs-studio\GENLOCK_BUILD_SHA.txt"
 
 
 def log(msg):
@@ -143,7 +147,10 @@ def gather_record_directory(host, password):
         ws.close()
 
 
-def gather_bundle_state(obs_host, password, obs_log_dir, ndi_runtime_dll, distroav_scan_roots):
+def gather_bundle_state(
+    obs_host, password, obs_log_dir, ndi_runtime_dll, distroav_scan_roots,
+    genlock_build_sha_file=DEFAULT_GENLOCK_BUILD_SHA_FILE,
+):
     """Build the fresh bundle-state dict for THIS request — every gather is attempted
     independently so one failing facet (e.g. OBS-WS momentarily unreachable) does not blank out
     the log-derived facets that still read fine; each key that could not be read is simply
@@ -164,6 +171,8 @@ def gather_bundle_state(obs_host, password, obs_log_dir, ndi_runtime_dll, distro
         ndi_input_latency=bsg.ndi_input_latency_csv(ndi_inputs),
         distroav_dll_paths=bsg.distroav_dll_paths(distroav_scan_roots),
         genlock_capability=bsg.genlock_capability_from_log(log_text),
+        # #756 — the deployed genlock build SHA for the cross-box parity gate.
+        genlock_build_sha=bsg.genlock_build_sha_from_file(genlock_build_sha_file),
     )
 
 
@@ -199,6 +208,7 @@ def make_handler(args, state):
                 payload = gather_bundle_state(
                     args.obs_host, args.password, args.obs_log_dir,
                     args.ndi_runtime_dll, self._distroav_scan_roots(),
+                    args.genlock_build_sha_file,
                 )
             except Exception as e:  # noqa: BLE001 - never let a gather bug hang the gate forever
                 log(f"ERROR: bundle-state gather failed: {e}")
@@ -302,6 +312,9 @@ def main(argv=None):
         default=os.path.join(os.environ.get("APPDATA", ""), "obs-studio", "logs"),
     )
     ap.add_argument("--ndi-runtime-dll", default=DEFAULT_NDI_RUNTIME_DLL)
+    # #756 — the deployed genlock build-SHA marker file for the cross-box parity gate. Default is
+    # the Windows bundle path; imag's service passes /opt/obs-genlock/GENLOCK_BUILD_SHA.txt.
+    ap.add_argument("--genlock-build-sha-file", default=DEFAULT_GENLOCK_BUILD_SHA_FILE)
     args = ap.parse_args(argv)
 
     state = _State()

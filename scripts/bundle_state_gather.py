@@ -180,6 +180,34 @@ def record_dir_stats(record_dir):
     return {"total_bytes": total_bytes, "file_count": file_count, "oldest_mtime": oldest_mtime}
 
 
+def genlock_build_sha_from_file(path):
+    """#756 — the box's DEPLOYED genlock build commit SHA, read from its `GENLOCK_BUILD_SHA.txt`
+    (imag: `/opt/obs-genlock/GENLOCK_BUILD_SHA.txt`; the Windows boxes: the SAME file in the
+    deployed genlock bundle). This is the value the #756 CROSS-BOX parity gate compares across the
+    fleet — a peer-parity assert (every box on ONE build) that catches the stale-imag skew the
+    origin/main ref-compare misses during a long-lived dev train (#530/#756).
+
+    Returns the stripped first non-empty line, or "" when the file is missing / unreadable / empty
+    (UNKNOWN downstream — never a guessed or fabricated SHA; the parity engine treats an unread box
+    as INCOMPLETE and refuses, per drift-guard's never-a-false-clean contract). Only the leading
+    token of the first non-blank line is kept, so a stray trailing comment/newline in the marker
+    file can never leak into the compared SHA."""
+    if not path:
+        return ""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if line:
+                    return line.split()[0]
+    except OSError as e:
+        print(
+            f"WARNING: genlock_build_sha_from_file: could not read {path!r}: {e}",
+            file=sys.stderr,
+        )
+    return ""
+
+
 def build_bundle_state(
     *,
     obs_version="",
@@ -190,13 +218,18 @@ def build_bundle_state(
     ndi_input_latency="",
     distroav_dll_paths="",
     genlock_capability="",
+    genlock_build_sha="",
 ):
     """Assemble the flat bundle-state dict `version-integrity-gate.sh --win-state`'s
     `compare_args_from_state()` parses. Every value is a STRING (its regex requires a quoted JSON
     string — a bare number/bool would silently fail to match and read as UNKNOWN, the opposite of
     what a present-but-unread value should mean). A key whose gather came back empty is OMITTED
     entirely (cleaner payload; compare_args_from_state treats an absent key and an empty-string
-    value identically — both UNKNOWN — so this is a presentation choice, not a behavior one)."""
+    value identically — both UNKNOWN — so this is a presentation choice, not a behavior one).
+
+    #756: `genlock_build_sha` is the box's deployed genlock build SHA — the version-integrity gate
+    reads it out of every box's state and runs the CROSS-BOX parity assert (fleet must be on ONE
+    build). Same omit-when-empty rule as every other facet."""
     values = {
         "obs_version": obs_version,
         "distroav_version": distroav_version,
@@ -206,5 +239,6 @@ def build_bundle_state(
         "ndi_input_latency": ndi_input_latency,
         "distroav_dll_paths": distroav_dll_paths,
         "genlock_capability": genlock_capability,
+        "genlock_build_sha": genlock_build_sha,
     }
     return {k: v for k, v in values.items() if v}

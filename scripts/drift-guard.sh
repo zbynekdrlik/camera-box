@@ -500,6 +500,72 @@ imag_build_drift_report() {
     "deploy the latest build via setup-imag.sh step-12 at a safe off-event time" "$@"
 }
 
+# genlock_build_parity_report LABEL=SHA... -> #756 CROSS-BOX genlock-build PARITY: do the LIVE
+# deployed genlock build SHAs of the fleet boxes (imag + strih + stream) all MATCH EACH OTHER?
+#
+# WHY THIS EXISTS — the false OK `genlock_build_drift_report`/`imag_build_drift_report` cannot
+# escape: those compare a box against ORIGIN/MAIN's vendored-genlock HEAD. But the live fleet runs
+# DEV-TRAIN builds (the long-lived unmerged PR #704 train) that are AHEAD of origin/main — so every
+# box reads "OK: current with origin/main" even while imag is GENERATIONS behind the build actually
+# deployed on strih/stream. #530/#756: imag ran a stale lineage, its hot-swapped libobs segfaulted
+# and wedged the GPU at ~11fps, and the ref-compare never flagged the skew because a ref compare is
+# a false OK BY CONSTRUCTION during any long-lived train (the user's #756 upgrade: "musí kontrolovať
+# či sú všade najnovšie verzie"). The ONLY trustworthy assertion is PEER parity: every box's
+# DEPLOYED build SHA must be IDENTICAL. Any skew = FAIL, no git ref involved.
+#
+# Each arg is `LABEL=SHA` — the box's live `GENLOCK_BUILD_SHA.txt` (imag: /opt/obs-genlock/…, read
+# over ssh; the Windows boxes: the SAME file in the deployed genlock bundle, served by the standing
+# :8899 bundle-state service and threaded in by `version-integrity-gate.sh`). A box whose SHA came
+# back empty is UNREAD, never silently dropped. PURE — the caller gathers the SHAs; this decides.
+#
+# Verdict ordering is fail-closed, never a silent clean (the engine's exit-code contract, matching
+# every other facet): a DEFINITE skew among the boxes we COULD read WINS (report it even if a third
+# box is unread — a proven skew is a proven skew); else any unread box OR fewer than two read peers
+# is UNKNOWN (parity can't be certified — never a false OK for an incomplete picture); else every
+# box read and all identical is OK. Returns 0 OK / 20 DRIFT / 11 UNKNOWN.
+genlock_build_parity_report() {
+  local -a read_labels=() read_shas=() unread=()
+  local arg label sha pairs=""
+  for arg in "$@"; do
+    label="${arg%%=*}"
+    sha="${arg#*=}"
+    if [ -z "$sha" ]; then
+      unread+=("$label")
+    else
+      read_labels+=("$label")
+      read_shas+=("$sha")
+      pairs="${pairs:+$pairs, }${label}=${sha}"
+    fi
+  done
+
+  # 1. A DEFINITE skew among the boxes we COULD read wins — even if another box is unread. A proven
+  #    fleet split must FAIL LOUD regardless of a third box's readability.
+  if [ "${#read_shas[@]}" -ge 2 ]; then
+    local first="${read_shas[0]}" i skew=0
+    for i in "${!read_shas[@]}"; do
+      [ "${read_shas[$i]}" != "$first" ] && skew=1
+    done
+    if [ "$skew" -eq 1 ]; then
+      printf '  %-22s DRIFT    (genlock build SKEW across the fleet — boxes are NOT on one lineage: %s; hot-swap the current linux-genlock build onto the lagging box(es) [#460 runbook] so the whole fleet runs ONE build)\n' \
+        "genlock_parity" "$pairs"
+      return 20
+    fi
+  fi
+
+  # 2. Incomplete — a box we could not read, or fewer than two peers to compare. Never a false clean.
+  if [ "${#unread[@]}" -gt 0 ] || [ "${#read_shas[@]}" -lt 2 ]; then
+    printf '  %-22s UNKNOWN  (cross-box genlock parity INCOMPLETE — read [%s]%s; need every fleet box read + >=2 peers to certify one lineage)\n' \
+      "genlock_parity" "${pairs:-none}" \
+      "$([ "${#unread[@]}" -gt 0 ] && printf '; UNREAD: %s' "${unread[*]}")"
+    return 11
+  fi
+
+  # 3. Every box read, all identical -> the whole fleet is on ONE genlock build.
+  printf '  %-22s OK       (all %s fleet boxes on ONE genlock build: %s)\n' \
+    "genlock_parity" "${#read_shas[@]}" "${read_shas[0]}"
+  return 0
+}
+
 # check_imag_report EXP_DISTROAV_SHA OBS_DISTROAV_SHA EXP_FPS OBS_FPS
 #   EXP_LATENCY_MS OBS_LATENCY_MS OBS_LOG_TEXT EXP_PLUGIN_PATH PLUGIN_PATH_PRESENT
 #   EXP_DANTESYNC_LOCKED OBS_DANTESYNC_LOG_TEXT OBS_TIMESYNC_STATES

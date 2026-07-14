@@ -88,10 +88,37 @@ compare_args_from_state() {
     done
 }
 
+# genlock_build_sha_from_state FILE -> the #756 `genlock_build_sha` value from the flat JSON state
+# object FILE, or "" if absent/unreadable. This key is NOT a drift-guard --compare key (it is not
+# emitted by compare_args_from_state above and never fed to drift-guard --compare) — it is read
+# separately here and handed to the CROSS-BOX parity engine (genlock_build_parity_report). Same
+# tolerant flat-JSON parse as compare_args_from_state: match `"genlock_build_sha": "<value>"`,
+# unescape \\ and \", take the first match. "" when the box's state has no such key yet (a box
+# whose bundle-state-server predates #756) — the parity FLOW treats <2 read SHAs as "facet not yet
+# populated" and skips it (opt-in rollout), so an un-upgraded box never spuriously refuses a run.
+genlock_build_sha_from_state() {
+  local file="$1"
+  [ -f "$file" ] || return 0
+  local pair val
+  pair="$(grep -oE "\"genlock_build_sha\"[[:space:]]*:[[:space:]]*\"(\\\\.|[^\"\\\\])*\"" "$file" 2>/dev/null | head -1)"
+  [ -z "$pair" ] && return 0
+  val="$(printf '%s' "$pair" | sed -E 's/^"[^"]*"[[:space:]]*:[[:space:]]*"(.*)"$/\1/')"
+  val="${val//\\\\/\\}"
+  val="${val//\\\"/\"}"
+  printf '%s' "$val"
+}
+
 # --- source-guard: when sourced (the unit tests), stop here --------------------------------
 if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
   return 0
 fi
+
+# The cross-box genlock-parity engine (#756) lives in drift-guard.sh; source it so the FLOW below
+# can call genlock_build_parity_report directly (drift-guard's own source-guard returns before its
+# main, so this pulls in its pure functions only). Sourced AFTER our source-guard, so the gate's own
+# unit tests (which source THIS file for its pure parsers) never pull the engine in.
+# shellcheck source=/dev/null
+. "$DRIFT_GUARD"
 
 # --- flow (executed only when run directly) ------------------------------------------------
 
@@ -128,11 +155,17 @@ EOF
 main() {
   local readme="$DEFAULT_README" manifest=""
   local -a win_state=()
+  # #756 — extra box genlock-build SHAs supplied directly (LABEL=SHA), for boxes not gated via
+  # --win-state (imag-nb is SSH-reachable, so recording-e2e.sh reads its GENLOCK_BUILD_SHA.txt and
+  # passes it here). Repeatable. Combined with the SHAs read out of each --win-state file for the
+  # CROSS-BOX parity assert.
+  local -a genlock_sha=()
   while [ $# -gt 0 ]; do
     case "$1" in
-      --readme)     shift; readme="${1:-}" ;;
-      --manifest)   shift; manifest="${1:-}" ;;
-      --win-state)  shift; win_state+=("${1:-}") ;;
+      --readme)      shift; readme="${1:-}" ;;
+      --manifest)    shift; manifest="${1:-}" ;;
+      --win-state)   shift; win_state+=("${1:-}") ;;
+      --genlock-sha) shift; genlock_sha+=("${1:-}") ;;
       -h|--help)    usage; exit 0 ;;
       --*)          echo "unknown option: $1" >&2; usage >&2; exit 1 ;;
       *)            echo "unexpected argument: $1" >&2; usage >&2; exit 1 ;;
@@ -191,6 +224,44 @@ main() {
       *)  echo "    !! drift-guard exited ${rc} for ${name} (engine/usage error)" >&2; bad=$((bad + 1)) ;;
     esac
   done
+
+  # #756 — CROSS-BOX genlock-build PARITY: every fleet box must run ONE deployed genlock build. This
+  # catches the stale-imag skew the per-box origin/main ref-compare (drift-guard --check-imag) misses
+  # during a long-lived dev train (#530/#756: imag ran a stale lineage, segfaulted, wedged the GPU).
+  # Gather each box's live GENLOCK_BUILD_SHA.txt: from every --win-state box's state JSON (served by
+  # its bundle-state-server) + every --genlock-sha LABEL=SHA supplied directly (imag, read over ssh
+  # by recording-e2e.sh). OPT-IN ROLLOUT: the parity engine is fail-closed (an unread box among a
+  # populated set REFUSES), but we only ENGAGE it once at least two boxes actually report a SHA — a
+  # box whose bundle-state-server predates #756 emits no genlock_build_sha, and until the fleet's
+  # servers are upgraded the facet stays dormant rather than spuriously refusing every run.
+  local -a parity_args=()
+  local ge gname gsha nonempty=0
+  for entry in "${win_state[@]}"; do
+    gname="${entry%%=*}"; file="${entry#*=}"
+    gsha=""
+    [ -n "$file" ] && [ -s "$file" ] && gsha="$(genlock_build_sha_from_state "$file")"
+    parity_args+=("${gname}=${gsha}")
+    [ -n "$gsha" ] && nonempty=$((nonempty + 1))
+  done
+  for ge in "${genlock_sha[@]}"; do
+    parity_args+=("$ge")
+    [ -n "${ge#*=}" ] && nonempty=$((nonempty + 1))
+  done
+  if [ "$nonempty" -ge 2 ]; then
+    echo "  -- cross-box genlock parity (#756) --"
+    local prc=0 parity_out=""
+    parity_out="$(genlock_build_parity_report "${parity_args[@]}")" || prc=$?
+    printf '%s\n' "$parity_out" | sed 's/^/    /'
+    case "$prc" in
+      0)  ok=$((ok + 1)) ;;
+      20) bad=$((bad + 1)) ;;
+      11) unknown=$((unknown + 1)); unknown_boxes+=("genlock_parity") ;;
+      *)  echo "    !! genlock_build_parity_report exited ${prc} (engine error)" >&2; bad=$((bad + 1)) ;;
+    esac
+  else
+    echo "  -- cross-box genlock parity (#756): fewer than 2 boxes report a genlock_build_sha yet"
+    echo "     (opt-in rollout — upgrade each box's bundle-state-server, then this facet engages) --"
+  fi
 
   echo
   if [ "$bad" -gt 0 ]; then

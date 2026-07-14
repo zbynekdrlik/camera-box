@@ -184,6 +184,47 @@ def test_build_bundle_state_all_empty_yields_empty_dict():
     assert bsg.build_bundle_state() == {}
 
 
+# ── #756: genlock_build_sha — the cross-box parity gate's per-box deployed build SHA ─────────────
+
+def test_build_bundle_state_includes_genlock_build_sha_when_present():
+    state = bsg.build_bundle_state(
+        obs_version="32.1.2",
+        genlock_build_sha="26de1c3c23980488a110dbf02e5e472f15cb001d",
+    )
+    assert state["genlock_build_sha"] == "26de1c3c23980488a110dbf02e5e472f15cb001d"
+
+
+def test_build_bundle_state_omits_empty_genlock_build_sha():
+    # An unread SHA (a build predating the marker, or an unreadable file) is OMITTED — the parity
+    # gate then sees the box as unread (UNKNOWN), never a fabricated SHA.
+    assert "genlock_build_sha" not in bsg.build_bundle_state(obs_version="32.1.2")
+
+
+def test_genlock_build_sha_from_file_reads_first_token(tmp_path):
+    f = tmp_path / "GENLOCK_BUILD_SHA.txt"
+    f.write_text("26de1c3c23980488a110dbf02e5e472f15cb001d\n")
+    assert (
+        bsg.genlock_build_sha_from_file(str(f))
+        == "26de1c3c23980488a110dbf02e5e472f15cb001d"
+    )
+
+
+def test_genlock_build_sha_from_file_strips_trailing_content(tmp_path):
+    # Only the leading token of the first non-blank line — a stray trailing comment/whitespace can
+    # never leak into the compared SHA.
+    f = tmp_path / "GENLOCK_BUILD_SHA.txt"
+    f.write_text("\n  26de1c3c2  built 2026-07-14\nextra\n")
+    assert bsg.genlock_build_sha_from_file(str(f)) == "26de1c3c2"
+
+
+def test_genlock_build_sha_from_file_missing_or_empty_is_blank(tmp_path):
+    assert bsg.genlock_build_sha_from_file("") == ""
+    assert bsg.genlock_build_sha_from_file(str(tmp_path / "nope.txt")) == ""
+    empty = tmp_path / "empty.txt"
+    empty.write_text("\n  \n")
+    assert bsg.genlock_build_sha_from_file(str(empty)) == ""
+
+
 # ── #652: record_dir_stats — PURE filesystem stats behind /record-dir-stats.json ────────────────
 # (the disk-budget preflight WARN in recording-e2e.sh; the harness's own E2E test recordings
 # accumulated to ~500 GB on strih / 139 GB on stream, invisible until the disk nearly filled).
