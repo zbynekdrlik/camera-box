@@ -1961,6 +1961,35 @@ def open_projectors(a):
         ws.close()
 
 
+def ensure_studio_mode_off(a):
+    """#758 preflight — imag-nb's Studio Mode is a SEPARATE render-budget consumer from the
+    Multiview projector (`.claude/skills/genlock/SKILL.md` #278: "Studio Mode preview is a 2nd
+    render-budget consumer at 60fps (studio-ON ~14% renderSkip, studio-OFF clean) — prod runs
+    studio off"). Live-caught (2026-07-14): imag's Studio Mode had been left ON from an earlier
+    session, degrading render health right to the edge of the #758 render-health preflight's
+    failure floor (activeFps down to ~56.8-58.1, averageFrameRenderTime up to ~17ms, renderSkip
+    climbing to ~4% — vs a clean ~60fps/8-9ms/0% with it OFF, confirmed by direct A/B measurement
+    against the live rig). ALWAYS (idempotently) turns it OFF, never silently leaves a stale ON
+    state to intermittently fail this preflight or degrade a real recording.
+
+    imag-ONLY: strih/stream's Studio Mode stays ALWAYS ON per the separate, unrelated, hard user
+    directive for those two boxes (a different purpose on a different topology role) — this
+    function must never be pointed at strih/stream."""
+    ws = _conn(a.host, a.password)
+    try:
+        before = bool(_rpc(ws, "GetStudioModeEnabled", ignore_err=True).get("studioModeEnabled"))
+        if before:
+            _rpc(ws, "SetStudioModeEnabled", {"studioModeEnabled": False})
+            print(
+                "imag Studio Mode was ON — turned OFF (a documented #278 render-budget "
+                "consumer; prod runs studio off)"
+            )
+        else:
+            print("imag Studio Mode already OFF — ok")
+    finally:
+        ws.close()
+
+
 def program_scene(a):
     """#281 Fix#3: print the current program scene name to stdout (one line).
 
@@ -1981,7 +2010,7 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
     for name in (
         "setup", "teardown", "record", "prod-scene", "switch", "program-scene",
-        "stream-status", "latency-check", "open-projectors",
+        "stream-status", "latency-check", "open-projectors", "ensure-studio-mode-off",
     ):
         p = sub.add_parser(name)
         p.add_argument("--host", required=True)
@@ -2076,7 +2105,8 @@ def main():
      "prod-scene": prod_scene, "switch": switch,
      "program-scene": program_scene, "rig-busy-check": rig_busy_check,
      "stream-status": stream_status, "latency-check": latency_check,
-     "open-projectors": open_projectors}[a.cmd](a)
+     "open-projectors": open_projectors,
+     "ensure-studio-mode-off": ensure_studio_mode_off}[a.cmd](a)
 
 
 if __name__ == "__main__":

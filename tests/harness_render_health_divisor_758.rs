@@ -17,6 +17,14 @@
 //!    Linux frontend yet) — the render-health item above is the hard gate on the OUTCOME. The
 //!    flip to FAIL (once the Linux divisor symbol ships, a separate #756 PR) must be exactly one
 //!    line to change: `IMAG_DIVISOR_CAPABILITY_FAIL` defaults to `"0"`.
+//! 3. imag STUDIO MODE must be OFF (a live finding discovered WHILE proving item 1 against the
+//!    real rig): Studio Mode is a SEPARATE render-budget consumer from the Multiview
+//!    (`.claude/skills/genlock/SKILL.md` #278) — a stale Studio-Mode-ON left over from an
+//!    earlier session intermittently failed the render-health preflight (activeFps down to ~57,
+//!    averageFrameRenderTime up to ~17ms) even with nothing else wrong. `obs_phase2.py
+//!    ensure-studio-mode-off` ALWAYS (idempotently) turns it OFF on imag before render-health is
+//!    measured — imag-ONLY, never strih/stream (those stay Studio-Mode-ON per a separate, hard,
+//!    unrelated user directive).
 //!
 //! Structural, source-text assertions (same discipline as the rest of this repo's harness suite
 //! — see tests/harness_e2e_execute_verdict_703.rs) since both items are read-only preflight
@@ -164,5 +172,58 @@ fn both_new_preflight_items_are_all_cambox_only_and_ordered_between_mv_liveness_
         divisor_idx < step2_idx,
         "#758: both new preflight items must complete BEFORE [2/8]'s deploy step starts — \
          these are preflight, not mid-run, checks"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// imag Studio Mode must be forced OFF before render-health is measured (a live finding while
+// proving item 1 against the real rig — see the module doc comment, item 3).
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn imag_studio_mode_is_forced_off_before_render_health_is_measured() {
+    let s = recording_e2e();
+    assert!(
+        s.contains("obs_phase2.py\" ensure-studio-mode-off --host \"$IMAG_IP\""),
+        "#758: recording-e2e.sh must call obs_phase2.py ensure-studio-mode-off against imag \
+         (a documented #278 render-budget consumer) before measuring render health"
+    );
+    let studio_idx = s
+        .find("ensure-studio-mode-off")
+        .expect("the studio-mode-off preflight call must exist");
+    let render_health_idx = s
+        .find("imag render-health preflight")
+        .expect("render-health preflight must exist");
+    let projectors_idx = s
+        .find("imag-nb Multiview + Program projectors must be OPEN")
+        .expect("the MV/Program projector-open preflight must exist");
+    assert!(
+        projectors_idx < studio_idx,
+        "#758: Studio Mode must be forced off AFTER the MV/Program projectors are opened \
+         (same [0/8] preflight block, projectors first per the user's original binding demand)"
+    );
+    assert!(
+        studio_idx < render_health_idx,
+        "#758: Studio Mode must be forced off BEFORE render-health is measured, so the \
+         measurement reflects the corrected steady state, not a stale Studio-Mode-ON reading"
+    );
+}
+
+#[test]
+fn obs_phase2_defines_and_wires_ensure_studio_mode_off() {
+    let s = fs::read_to_string(manifest_dir().join("scripts/obs_phase2.py"))
+        .expect("read scripts/obs_phase2.py");
+    assert!(
+        s.contains("def ensure_studio_mode_off(a):"),
+        "#758: obs_phase2.py must define ensure_studio_mode_off"
+    );
+    assert!(
+        s.contains("\"ensure-studio-mode-off\": ensure_studio_mode_off"),
+        "#758: ensure_studio_mode_off must be wired into the subcommand dispatch table"
+    );
+    assert!(
+        s.contains("GetStudioModeEnabled") && s.contains("SetStudioModeEnabled"),
+        "#758: ensure_studio_mode_off must read THEN conditionally set Studio Mode (idempotent, \
+         never an unconditional write)"
     );
 }
