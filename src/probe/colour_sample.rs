@@ -281,16 +281,15 @@ fn select_single_dual_qr(items: &[(f64, f64, f64)], frame_h: f64) -> Option<usiz
         .max_by(|&a, &b| items[a].0.total_cmp(&items[b].0))
 }
 
-/// Detect the dual-QR fiducials in an RGB frame. The candidates are the top-half QR grids that
-/// DECODE (the four node burns are bottom-anchored — excluded by position): the two LARGEST give
-/// [`QrAnchor::Pair`] (payloads left/right + 8 corners, left then right, each TL,TR,BR,BL);
-/// when only ONE decodes — the Vernier's normal captured-frame state through the optical hop
-/// (#400) — the largest gives [`QrAnchor::Single`]. `None` when NEITHER half decodes (the frame
-/// cannot be localized → skipped).
-fn detect_dual_qr(img: &RgbImage) -> Option<QrAnchor> {
-    let luma = rgb_to_luma(img);
+/// Detect the dual-QR fiducials in ONE already-converted grayscale/binarized image (a single
+/// rqrr pass — no retry). The candidates are the top-half QR grids that DECODE (the four node
+/// burns are bottom-anchored — excluded by position): the two LARGEST give [`QrAnchor::Pair`]
+/// (payloads left/right + 8 corners, left then right, each TL,TR,BR,BL); when only ONE decodes —
+/// the Vernier's normal captured-frame state through the optical hop (#400) — the largest gives
+/// [`QrAnchor::Single`]. `None` when NEITHER half decodes on THIS pass.
+fn detect_dual_qr_pass(luma: &GrayImage) -> Option<QrAnchor> {
     let frame_h = luma.height() as f64;
-    let mut prepared = rqrr::PreparedImage::prepare(luma);
+    let mut prepared = rqrr::PreparedImage::prepare(luma.clone());
     let mut corners: Vec<[(f64, f64); 4]> = Vec::new();
     let mut payloads: Vec<Payload> = Vec::new();
     let mut items: Vec<(f64, f64, f64)> = Vec::new();
@@ -320,9 +319,53 @@ fn detect_dual_qr(img: &RgbImage) -> Option<QrAnchor> {
         return Some(QrAnchor::Pair(payloads[li], payloads[ri], pts));
     }
     // #400 fallback: ONE decoded top-half grid still anchors the fit (parity → half → 4-corner
-    // least squares). No decoded grid at all ⇒ None ⇒ the caller skips the frame (fail-closed).
+    // least squares). No decoded grid at all ⇒ None ⇒ the caller tries the next pass / skips.
     let si = select_single_dual_qr(&items, frame_h)?;
     Some(QrAnchor::Single(payloads[si], order_corners(corners[si])))
+}
+
+/// Detect the dual-QR fiducials in an RGB frame (#364/#400), with the SAME recovery cascade the
+/// continuity decoder already has (`qr::decode_qr_luma_all` + `qr::robust_optical_top_band`) —
+/// which this colour-gate localizer never got until #718.
+///
+/// **#718 root cause:** this function used to run ONE bare full-frame rqrr pass — the plain
+/// adaptive-threshold `detect_grids`, no Otsu retry, no top-band crop. Both of those are
+/// established, ALREADY-SHIPPED recovery techniques for a "soft" dual-QR (a QR filmed off a
+/// monitor: low-contrast + moiré + colour-cast) that the continuity decoder has carried since
+/// #363 (`decode_qr_luma_all` = plain ∪ Otsu-binarized) and #754 (`robust_optical_top_band` =
+/// the SAME plain ∪ Otsu retried on just the top [`crate::probe::qr::OPTICAL_TOP_BAND_FRAC`] of
+/// the frame, which excludes the bottom burns and gives rqrr's threshold a cleaner histogram).
+/// Proven live (#718, run 1923775861): 6 of the colour gate's 12 sampled frames landed in the
+/// CLEAN window (where the continuity decoder read the optical fine) and still failed to
+/// localize — because this function had neither recovery pass. Confirmed on the EXISTING #754
+/// fixture `tests/fixtures/optical-sweep-decay-late-imag.png` (a real, previously-proven "full
+/// frame fails, top-band-crop recovers" frame): full-frame plain, AND full-frame Otsu, BOTH still
+/// fail (`DataEcc`) on both dual-QR halves — only the plain-Otsu union on the top-band CROP
+/// recovers both. So the cascade tries, in order: (1) full-frame plain (unchanged baseline —
+/// never regresses an already-working frame), (2) full-frame Otsu-binarized, (3) top-band-crop
+/// plain, (4) top-band-crop Otsu-binarized. The crop is `(0, 0, w, band_h)` — top-left anchored —
+/// so a grid detected inside it keeps VALID full-frame pixel coordinates; no transform needed on
+/// a crop hit. Each pass is a full, independent `detect_dual_qr_pass`, so a crop hit returns
+/// corners already in full-frame space, exactly like a full-frame hit. `None` only when ALL FOUR
+/// passes miss (the frame truly cannot be localized → the caller skips it, fail-closed).
+fn detect_dual_qr(img: &RgbImage) -> Option<QrAnchor> {
+    let luma = rgb_to_luma(img);
+    if let Some(anchor) = detect_dual_qr_pass(&luma) {
+        return Some(anchor);
+    }
+    if let Some(anchor) = detect_dual_qr_pass(&qr::binarize_otsu(&luma)) {
+        return Some(anchor);
+    }
+    let (w, h) = (luma.width(), luma.height());
+    if w < 2 || h < 2 {
+        return None;
+    }
+    let band_h = crate::colour_scale::top_band_crop_height(h, qr::OPTICAL_TOP_BAND_FRAC);
+    let band = image::imageops::crop_imm(&luma, 0, 0, w, band_h).to_image();
+    if let Some(anchor) = detect_dual_qr_pass(&band) {
+        return Some(anchor);
+    }
+    detect_dual_qr_pass(&qr::binarize_otsu(&band))
 }
 
 /// Sample + classify ONE recorded frame's colour scale, LOCALIZED to where the camera actually

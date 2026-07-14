@@ -557,7 +557,10 @@ pub fn otsu_threshold(hist: &[u64; 256]) -> u8 {
 
 /// Binarize a luma image at its Otsu threshold (>= threshold → 255, else 0). The hard
 /// black/white image is what rqrr's finder pattern locking needs from a soft capture.
-fn binarize_otsu(img: &GrayImage) -> GrayImage {
+/// `pub(crate)` (#718): the colour-gate localizer (`colour_sample::detect_dual_qr`) reuses this
+/// SAME hard-Otsu retry — it never had it at all, unlike the continuity decoder's
+/// [`decode_qr_luma_all`] below, which has applied it since #363.
+pub(crate) fn binarize_otsu(img: &GrayImage) -> GrayImage {
     let mut hist = [0u64; 256];
     for p in img.pixels() {
         hist[p.0[0] as usize] += 1;
@@ -675,7 +678,11 @@ const TILE_UPSCALE_MIN: u32 = 1280;
 /// is NOT robust at 6–10/30). Mirror of why [`robust_tile_passes`] crops the BOTTOM band to
 /// recover the small burns — the optical never had the equivalent TOP-band recovery, because the
 /// old "the large optical ALWAYS decodes full-frame" assumption held until #751 broke it.
-const OPTICAL_TOP_BAND_FRAC: f32 = 0.67;
+///
+/// `pub(crate)` (#718): `colour_sample::detect_dual_qr` reuses this SAME fraction for its own
+/// top-band retry crop — the colour-gate localizer never had ANY top-band recovery at all,
+/// unlike this continuity-decode path.
+pub(crate) const OPTICAL_TOP_BAND_FRAC: f32 = 0.67;
 
 /// Merge `add` into `into`, keeping each DISTINCT `(run_id, frame_id)` payload once. The
 /// 60→30 beat + multiple tiles surface the SAME burn many times; this de-dups by the full
@@ -785,7 +792,9 @@ fn robust_optical_top_band(img: &GrayImage, out: &mut Vec<Payload>) {
     if w < 2 || h < 2 {
         return;
     }
-    let band_h = (((h as f32) * OPTICAL_TOP_BAND_FRAC) as u32).clamp(1, h);
+    // #718: crop-height arithmetic now lives in the pure crate-root helper (shared with
+    // `colour_sample::detect_dual_qr`'s own retry) — same formula, one source of truth.
+    let band_h = crate::colour_scale::top_band_crop_height(h, OPTICAL_TOP_BAND_FRAC);
     // Same size as the source when the frac rounds to the full height — still a valid, cheap
     // second look (Otsu over the whole frame), never a panic.
     let band = image::imageops::crop_imm(img, 0, 0, w, band_h).to_image();
