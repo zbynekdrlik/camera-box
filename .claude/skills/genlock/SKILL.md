@@ -619,19 +619,34 @@ full-path-e2e run always saw both boxes UNKNOWN (exit 11) and refused. Fixed by 
   discarding correctly-observed "still busy" state from every earlier check. Needs a short
   retry-before-declaring-unreachable inside a single check cycle.
 
-## strih NDI Input → Camera Mapping (INVERTED)
+## strih NDI Input → Camera Mapping (1:1, since #753 2026-07-14)
 
-strih OBS NDI input labels are INVERTED vs the real cameras. Always resolve by the
-input's `ndi_source_name`, NEVER by the OBS input label.
+**#753 PIVOT (2026-07-14, binding user directive) — strih's mapping is now 1:1.** The user:
+"chcem aby uz bolo ze cam 1 je cam1 ndi source, nie pomenene" (cam N IS the camN NDI source, not
+relabeled). `NDI cam<N>` carries `CAM<N> (usb)` for every N=1..7; scene "Cam N" follows the input
+1:1 too. Still resolve by the input's `ndi_source_name` when in doubt (never assume from memory)
+— but as of this pivot the label and the real camera SHOULD always agree.
 
 | OBS input label | actual NDI src | real camera |
 |---|---|---|
-| `NDI cam1` | `CAM3 (usb)` | CAM3 (10.77.9.63) |
-| `NDI cam3` | `CAM4 (usb)` | CAM4 (10.77.9.64) |
-| `NDI cam5` | `CAM1 (usb)` | CAM1 (10.77.9.61) |
-| `NDI cam2` | (empty) | CAM2 unbound |
+| `NDI cam1` | `CAM1 (usb)` | CAM1 (10.77.9.61) |
+| `NDI cam2` | `CAM2 (usb)` | CAM2 (10.77.9.62) |
+| `NDI cam3` | `CAM3 (usb)` | CAM3 (10.77.9.63) |
+| `NDI cam4` | `CAM4 (usb)` | CAM4 (10.77.9.64) |
+| `NDI cam5` | `CAM5 (usb)` | CAM5 (10.77.9.65) |
+| `NDI cam6` | `CAM6 (usb)` | CAM6 (10.77.9.66) |
+| `NDI cam7` | `CAM7 (usb)` | CAM7 (10.77.9.67) |
 
-Scene names ("Cam 1"/"Cam 3"/"Cam 5") follow the input labels — same inversion.
+Each camera's individually-tuned `genlock_latency_ms_src` MOVED WITH the physical camera during
+the live rebind (unchanged VALUES: CAM4=20ms, CAM5=8ms, CAM6=13ms, every other camera=3ms — just
+re-attached to the input that now actually carries that camera), verified live on strih
+2026-07-14.
+
+**HISTORY (pre-2026-07-14, superseded) — strih's mapping used to be INVERTED for the six
+original cameras** (cam2 was already 1:1, coincidentally): `NDI cam1`→`CAM3 (usb)`, `NDI cam3`→
+`CAM4 (usb)`, `NDI cam5`→`CAM1 (usb)`, `NDI cam4`→`CAM5 (usb)`, `NDI cam6`→`CAM6 (usb)`. Scene
+names ("Cam 1"/"Cam 3"/"Cam 5") followed the input labels — same inversion. Kept here for
+context only; do NOT resurrect this table.
 
 To enable genlock on a camera's strih ingest: `SetInputSettings genlock_fifo=true`
 on the input whose `ndi_source_name` matches that camera (`overlay=true` so other settings persist).

@@ -422,7 +422,10 @@ REMOTE
 # Overridable; defaults mirror the recording-e2e BURN_TARGETS (the prod program inputs).
 STRIH_IP="${STRIH_IP:-10.77.9.202}"
 STREAM_IP="${STREAM_IP:-10.77.9.204}"
-STRIH_PROG_SOURCE="${STRIH_PROG_SOURCE:-NDI cam5}"      # strih program input (#246 burn target)
+STRIH_PROG_SOURCE="${STRIH_PROG_SOURCE:-NDI cam1}"      # strih program input, cam1 (#246 burn
+                                                          # target; #753 2026-07-14: strih's NDI
+                                                          # mapping pivoted to 1:1, cam1 now rides
+                                                          # 'NDI cam1' not the old 'NDI cam5')
 STREAM_PROG_SOURCE="${STREAM_PROG_SOURCE:-NDI 2ME PGM}" # stream program input (#246 burn target)
 # #462 (EPIC #466 Topology v2): imag-nb — the new 60fps low-latency IMAG cutter. Its scene->camera
 # mapping is the Phase 1 1:1 pin (setup-imag.sh, #458): 'NDI CAM1'..'NDI CAM6' -> 'CAMx (usb)'

@@ -7,15 +7,24 @@ force-kill OBS relaunch (a distroav.dll swap reverts to the stale saved scene). 
 (scripts/rig-mode.sh) must ENFORCE the correct 7-distinct mapping every time — set it + verify every
 input is bound to a DISTINCT camera — instead of the operator/agent re-doing it by hand.
 
-The mapping is Claude-owned + fixed (never a user question). The pins (offset per the rig-ndi-source
-label convention): NDI cam5→CAM1, NDI cam1→CAM3, NDI cam3→CAM4, NDI cam2→CAM2, NDI cam4→CAM5,
-NDI cam6→CAM6, NDI cam7→CAM7. CAM3 is the down box — its input binds correctly for when it returns;
-the other 6 are distinct live feeds. #312 (fleet growth 4→6, #451) added two pins: "NDI cam4" USED TO
-duplicate CAM4's own feed (the exact drift bug this module exists to catch) — repointed to the
-previously-unwired CAM5 physical box instead; "NDI cam6" was already correctly bound live on
-strih to CAM6 but had no canonical pin, so it could silently drift on the next OBS relaunch —
-now it is enforced like every other input. #753 (fleet growth 6→7, 2026-07-14) added "NDI cam7"→
-CAM7, a NEW direct (non-inverted) pin for the newly-provisioned cam7 box.
+**#753 PIVOT (2026-07-14, binding user directive) — the mapping is now 1:1, the pre-2026-07-14
+INVERTED table below is HISTORY.** The user: "chcem aby uz bolo ze cam 1 je cam1 ndi source, nie
+pomenene" (cam 1 IS the cam1 NDI source, not relabeled). `NDI cam<N>` now carries `CAM<N> (usb)`
+for every N — no more offset. Each camera's individually-tuned `genlock_latency_ms_src` MOVED WITH
+the physical camera during the live rebind (CAM4=20ms, CAM5=8ms, CAM6=13ms, every other camera=3ms
+— unchanged VALUES, just re-attached to the NEW input that now carries that camera), verified live
+on strih 2026-07-14.
+
+Pre-2026-07-14 HISTORY (superseded, kept for context only — do NOT use): the mapping used to be
+OFFSET by one slot for the six original cameras (NDI cam5→CAM1, NDI cam1→CAM3, NDI cam3→CAM4,
+NDI cam4→CAM5, NDI cam6→CAM6, NDI cam2→CAM2 — cam2 was ALREADY 1:1 even then, coincidentally).
+#312 (fleet growth 4→6, #451) added two of those offset pins: "NDI cam4" USED TO duplicate CAM4's
+own feed (the exact drift bug this module exists to catch) — repointed to the then-unwired CAM5
+physical box instead; "NDI cam6" was already correctly bound live on strih to CAM6 but had no
+canonical pin, so it could silently drift on the next OBS relaunch — now it is enforced like every
+other input. #753 (fleet growth 6→7, 2026-07-14) initially added "NDI cam7"→CAM7 as a NEW direct
+pin (cam7 never had a legacy offset slot to inherit) — and the SAME session then retired the offset
+for cam1/cam3/cam4/cam5/cam6 too, per the binding directive above.
 
 Exit codes:
   0  PASS  — every input set to its pin AND all senders distinct
@@ -25,7 +34,7 @@ Exit codes:
 Usage:
   python3 scripts/set-ndi-mapping.py --host 10.77.9.202 [--password PW]
   python3 scripts/set-ndi-mapping.py --host 10.77.9.202 --verify-only   # check, do not set
-  python3 scripts/set-ndi-mapping.py --map "NDI cam5=CAM1 (usb)" ...     # override the pins
+  python3 scripts/set-ndi-mapping.py --map "NDI cam1=CAM1 (usb)" ...     # override the pins
 """
 import argparse
 import base64
@@ -37,15 +46,15 @@ import time
 PORT = 4455
 
 # #399/#312/#753 — the fixed 7-distinct strih NDI mapping (Claude-owned; never a user question).
-# #753 (2026-07-14): 'NDI cam7'->CAM7 is a NEW, DIRECT (non-inverted) pin -- cam7 never had a
-# legacy scene name to inherit, so its input/scene share the same "7", unlike the historical
-# six's inversion.
+# #753 PIVOT (2026-07-14, binding user directive): 1:1 -- NDI cam<N> -> CAM<N> (usb), for every N.
+# The pre-2026-07-14 offset/inverted table is HISTORY (see the module docstring above); do not
+# reintroduce it.
 DEFAULT_MAP = [
-    ("NDI cam5", "CAM1 (usb)"),
-    ("NDI cam1", "CAM3 (usb)"),
-    ("NDI cam3", "CAM4 (usb)"),
+    ("NDI cam1", "CAM1 (usb)"),
     ("NDI cam2", "CAM2 (usb)"),
-    ("NDI cam4", "CAM5 (usb)"),
+    ("NDI cam3", "CAM3 (usb)"),
+    ("NDI cam4", "CAM4 (usb)"),
+    ("NDI cam5", "CAM5 (usb)"),
     ("NDI cam6", "CAM6 (usb)"),
     ("NDI cam7", "CAM7 (usb)"),
 ]

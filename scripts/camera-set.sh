@@ -112,30 +112,32 @@ camera_resolve() {
 # path above can never accidentally select cam2.
 #
 # The scene/source pins mirror scripts/set-ndi-mapping.py's fixed, Claude-owned genlock mapping
-# EXACTLY (never re-derive it separately -- that mapping is the single place it is decided):
-#   NDI cam5 -> CAM1 (usb)   =>  cam1 shows on scene "Cam 5" / source "NDI cam5"
-#   NDI cam1 -> CAM3 (usb)   =>  cam3 shows on scene "Cam 1" / source "NDI cam1"
-#   NDI cam3 -> CAM4 (usb)   =>  cam4 shows on scene "Cam 3" / source "NDI cam3"
-#   NDI cam4 -> CAM5 (usb)   =>  cam5 shows on scene "Cam 4" / source "NDI cam4" (#312: this slot
-#                                previously DUPLICATED CAM4 (usb), the exact drift bug
-#                                set-ndi-mapping.py's own docstring warns about -- repointed to
-#                                the previously-unwired CAM5 physical box instead)
-#   NDI cam6 -> CAM6 (usb)   =>  cam6 shows on scene "Cam 6" / source "NDI cam6" (#312: already
-#                                correctly bound live on strih; now canonically pinned so it
-#                                survives an OBS relaunch like the other four)
-#   NDI cam7 -> CAM7 (usb)   =>  cam7 shows on scene "Cam 7" / source "NDI cam7" (#753: a NEW,
-#                                DIRECT (non-inverted) pin -- cam7 never had a legacy scene name
-#                                to inherit, so its input/scene share the same "7", unlike the
-#                                historical six's inversion above)
+# EXACTLY (never re-derive it separately -- that mapping is the single place it is decided).
+#
+# #753 PIVOT (2026-07-14, binding user directive): the mapping is now 1:1 -- "chcem aby uz bolo
+# ze cam 1 je cam1 ndi source, nie pomenene" (cam N IS the camN NDI source, not relabeled). The
+# pre-2026-07-14 offset table (cam1->"Cam 5"/"NDI cam5", cam3->"Cam 1"/"NDI cam1", etc) is HISTORY
+# -- see set-ndi-mapping.py's module docstring for the full pre/post record. Each camera's
+# individually-tuned genlock latency MOVED WITH the physical camera during the live rebind
+# (unchanged VALUES: CAM4=20ms, CAM5=8ms, CAM6=13ms, every other camera=3ms -- just re-attached to
+# the input that now actually carries that camera).
+#   NDI cam1 -> CAM1 (usb)   =>  cam1 shows on scene "Cam 1" / source "NDI cam1"
+#   NDI cam3 -> CAM3 (usb)   =>  cam3 shows on scene "Cam 3" / source "NDI cam3"
+#   NDI cam4 -> CAM4 (usb)   =>  cam4 shows on scene "Cam 4" / source "NDI cam4"
+#   NDI cam5 -> CAM5 (usb)   =>  cam5 shows on scene "Cam 5" / source "NDI cam5"
+#   NDI cam6 -> CAM6 (usb)   =>  cam6 shows on scene "Cam 6" / source "NDI cam6"
+#   NDI cam7 -> CAM7 (usb)   =>  cam7 shows on scene "Cam 7" / source "NDI cam7" (#753: added the
+#                                same day the pivot landed, so it was NEVER on the old offset
+#                                table -- always 1:1)
 # Literal `case` match (#39 injection-safe, same threat model as camera_resolve above) --
 # an unknown/hostile name runs no command, it just falls through to the reject arm.
 camera_strih_route() {
   local name="${1:-}"
   case "$name" in
-    cam1) CAMERA_STRIH_SCENE="Cam 5"; CAMERA_STRIH_SOURCE="NDI cam5" ;;
-    cam3) CAMERA_STRIH_SCENE="Cam 1"; CAMERA_STRIH_SOURCE="NDI cam1" ;;
-    cam4) CAMERA_STRIH_SCENE="Cam 3"; CAMERA_STRIH_SOURCE="NDI cam3" ;;
-    cam5) CAMERA_STRIH_SCENE="Cam 4"; CAMERA_STRIH_SOURCE="NDI cam4" ;;
+    cam1) CAMERA_STRIH_SCENE="Cam 1"; CAMERA_STRIH_SOURCE="NDI cam1" ;;
+    cam3) CAMERA_STRIH_SCENE="Cam 3"; CAMERA_STRIH_SOURCE="NDI cam3" ;;
+    cam4) CAMERA_STRIH_SCENE="Cam 4"; CAMERA_STRIH_SOURCE="NDI cam4" ;;
+    cam5) CAMERA_STRIH_SCENE="Cam 5"; CAMERA_STRIH_SOURCE="NDI cam5" ;;
     cam6) CAMERA_STRIH_SCENE="Cam 6"; CAMERA_STRIH_SOURCE="NDI cam6" ;;
     cam7) CAMERA_STRIH_SCENE="Cam 7"; CAMERA_STRIH_SOURCE="NDI cam7" ;;
     *)

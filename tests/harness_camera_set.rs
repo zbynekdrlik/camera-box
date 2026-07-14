@@ -312,17 +312,19 @@ fi
 }
 
 #[test]
-fn camera_strih_route_resolves_the_five_source_eligible_cameras() {
-    // #24/#312: the exact pins scripts/set-ndi-mapping.py programs onto strih (NDI cam5->CAM1,
-    // NDI cam1->CAM3, NDI cam3->CAM4, NDI cam4->CAM5, NDI cam6->CAM6). A wrong scene/source
-    // would route strih's PROGRAM to the WRONG box's NDI feed and silently certify nothing (or
-    // the wrong camera).
+fn camera_strih_route_resolves_the_six_source_eligible_cameras() {
+    // #753 PIVOT (2026-07-14, binding user directive): the mapping scripts/set-ndi-mapping.py
+    // programs onto strih is now 1:1 (NDI cam<N> -> CAM<N> (usb) for every N) -- the pre-pivot
+    // offset table (NDI cam5->CAM1, NDI cam1->CAM3, NDI cam3->CAM4, NDI cam4->CAM5) is HISTORY.
+    // A wrong scene/source would route strih's PROGRAM to the WRONG box's NDI feed and silently
+    // certify nothing (or the wrong camera).
     let expected = [
-        ("cam1", "Cam 5", "NDI cam5"),
-        ("cam3", "Cam 1", "NDI cam1"),
-        ("cam4", "Cam 3", "NDI cam3"),
-        ("cam5", "Cam 4", "NDI cam4"),
+        ("cam1", "Cam 1", "NDI cam1"),
+        ("cam3", "Cam 3", "NDI cam3"),
+        ("cam4", "Cam 4", "NDI cam4"),
+        ("cam5", "Cam 5", "NDI cam5"),
         ("cam6", "Cam 6", "NDI cam6"),
+        ("cam7", "Cam 7", "NDI cam7"), // #753: added the same day the pivot landed -- always 1:1
     ];
     for (name, scene, source) in expected {
         let (ok, got_scene, got_source) = resolve_strih_route(name);
@@ -336,23 +338,6 @@ fn camera_strih_route_resolves_the_five_source_eligible_cameras() {
             "camera_strih_route {name} resolved the wrong strih NDI-input source"
         );
     }
-}
-
-#[test]
-fn camera_strih_route_resolves_cam7() {
-    // #753: cam7's strih route is a NEW, DIRECT (non-inverted) pin -- scene 'Cam 7' shows
-    // input 'NDI cam7' 1:1, unlike the historical six's set-ndi-mapping.py DEFAULT_MAP
-    // inversion. Wired live over OBS WebSocket as part of this ticket's strih integration.
-    let (ok, scene, source) = resolve_strih_route("cam7");
-    assert!(ok, "camera_strih_route cam7 should succeed (#753)");
-    assert_eq!(
-        scene, "Cam 7",
-        "camera_strih_route cam7 resolved the wrong strih scene"
-    );
-    assert_eq!(
-        source, "NDI cam7",
-        "camera_strih_route cam7 resolved the wrong strih NDI-input source"
-    );
 }
 
 #[test]

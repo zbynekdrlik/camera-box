@@ -848,7 +848,7 @@ IMAG_RECORDING_STARTED=0
 # "NDI cam7" (cam7's new, fully-provisioned box) — same reasoning, so the fused gate's
 # all_cambox_delivery_latency doesn't silently report "NO SAMPLES" for cam7's windows too.
 if [ "${ALL_CAMBOX:-0}" = "1" ]; then
-  for _acs in "NDI cam5" "NDI cam1" "NDI cam3" "NDI cam2" "NDI cam4" "NDI cam6" "NDI cam7"; do
+  for _acs in "NDI cam1" "NDI cam2" "NDI cam3" "NDI cam4" "NDI cam5" "NDI cam6" "NDI cam7"; do
     if [ "$_acs" != "$STRIH_PROG_SOURCE" ]; then
       BURN_TARGETS+=("strih-${_acs// /_}=$STRIH=$_acs")
     fi
@@ -1879,35 +1879,36 @@ fi
 # [4b/8] burn-ON gate is unaffected. The DEFAULT path (no ALL_CAMBOX) is the unchanged single hold.
 ALL_CAMBOX="${ALL_CAMBOX:-0}"
 # scene:label pairs, per the CANONICAL #399 strih NDI-input->camera mapping (set-ndi-mapping.py
-# DEFAULT_MAP; scene names follow the input labels 1:1, .claude/skills/genlock/SKILL.md):
-#   'Cam 5'->CAM1(.61)  'Cam 1'->CAM3(.63)  'Cam 3'->CAM4(.64)  'Cam 2'->CAM2(.62)
-#   'Cam 4'->CAM5(.65)  'Cam 6'->CAM6(.66)  'Cam 7'->CAM7(.67)
-# #24/#399: CAM3 is back in the default — its original exclusion (#301, cam3 SSH down) closed
-# 2026-06-30, and #399 later re-pinned 'Cam 1' from CAM4 to CAM3 (a prior default here still said
-# 'Cam 1'->CAM4, silently mis-attributing CAM3's frames to the "CAM4" label — see
-# tests/python/test_cambox_sweep_mapping.py, which cross-checks this default against DEFAULT_MAP
-# so a future re-map can't desync it again).
+# DEFAULT_MAP; scene names follow the input labels 1:1, .claude/skills/genlock/SKILL.md).
 #
-# #753 (2026-07-14): 'Cam 7'->CAM7 is a NEW, DIRECT (non-inverted) pin -- cam7 never had a
-# legacy scene name to inherit, so its input/scene share the same "7", unlike the historical
-# six's inversion. Added the same way cam5/cam6 were by #624/#451.
+# #753 PIVOT (2026-07-14, binding user directive): the mapping is now 1:1 -- "chcem aby uz bolo
+# ze cam 1 je cam1 ndi source, nie pomenene" (cam N IS the camN NDI source, not relabeled). Every
+# scene:label pair below is now the literal identity — 'Cam N'->CAMN — for N=1..7:
+#   'Cam 1'->CAM1(.61)  'Cam 2'->CAM2(.62)  'Cam 3'->CAM3(.63)  'Cam 4'->CAM4(.64)
+#   'Cam 5'->CAM5(.65)  'Cam 6'->CAM6(.66)  'Cam 7'->CAM7(.67)
+# The pre-2026-07-14 OFFSET table this default used to encode (Cam 5->CAM1, Cam 1->CAM3, Cam
+# 3->CAM4, Cam 4->CAM5, unchanged for Cam 2/Cam 6) is HISTORY — see set-ndi-mapping.py's module
+# docstring for the full pre/post record; do NOT reintroduce it.
 #
-# #312 CORRECTS the #333 painter exclusion: this default used to sweep ONLY cam1/cam3/cam4,
-# excluding CAM2 on the theory that "while painting the monitor it does NOT capture/emit its OWN
-# camera NDI" (#179). That reasoning went STALE the moment #291 (closed 2026-06-28) landed:
-# cam2's camera-box daemon keeps CAPTURING + EMITTING its own NDI feed throughout a TEST run
-# (only its framebuffer is freed for the separate frame-probe painter process, via
-# CAMERA_BOX_NO_DISPLAY=1 — see the `[2b/8]` deploy loop below). cam2's OWN chain is therefore
-# JUST AS MEASURABLE as cam1/cam3/cam4/cam5/cam6's, via the SAME digital capture-burn mechanism
-# (recording-verdict.rs's CAMERA_UNDER_TEST_NODES) — this default now includes it. cam5/cam6
-# (fleet growth 4→6, #451) are added the same way cam3/cam4 were by #624.
-# #708 GOTCHA (2026-07-12, hit twice already — #674/#707 investigators both re-derived this wrong
-# on first read): do NOT read this scene:label pairing as a label->box translation table. It looks
-# like one but ISN'T — the set-ndi-mapping.py NDI-source-binding inversion exactly CANCELS it, so
-# the resulting `all_cambox_continuity.segments[].cambox` label CAMN == physical box camN directly,
-# NO translation needed. See `.claude/skills/e2e` "CORRECTION (2026-07-12, #708)" for the 4-way
-# verification. Before computing a per-physical-camera table from this JSON, re-read that section.
-CAMBOX_SWEEP="${CAMBOX_SWEEP:-Cam 5:CAM1 Cam 1:CAM3 Cam 3:CAM4 Cam 2:CAM2 Cam 4:CAM5 Cam 6:CAM6 Cam 7:CAM7}"
+# #24/#399 (history): CAM3 was re-added to the default after its #301 SSH-down exclusion closed
+# 2026-06-30; #312 corrected the #333 painter exclusion (cam2's camera-box daemon keeps
+# CAPTURING+EMITTING its own NDI feed throughout a TEST run — only its framebuffer is freed for
+# the separate frame-probe painter process via CAMERA_BOX_NO_DISPLAY=1, see the `[2b/8]` deploy
+# loop below — so cam2's own chain is JUST AS MEASURABLE as every other camera's, via the SAME
+# digital capture-burn mechanism, recording-verdict.rs's CAMERA_UNDER_TEST_NODES). cam5/cam6
+# (fleet growth 4→6, #451) were added the same way cam3/cam4 were by #624; cam7 (fleet growth
+# 6→7, #753) the same way again — tests/python/test_cambox_sweep_mapping.py cross-checks this
+# default against DEFAULT_MAP so a future re-map can't desync it again.
+#
+# #708 GOTCHA (2026-07-12, HISTORICAL — mooted by the #753 pivot above, kept for context): before
+# 2026-07-14 this scene:label pairing looked like a label->box translation table but wasn't — the
+# set-ndi-mapping.py NDI-source-binding INVERSION exactly cancelled it, so
+# `all_cambox_continuity.segments[].cambox` label CAMN == physical box camN directly even though
+# the scene:label pair itself was offset. Since the pivot the pairing IS a literal identity too —
+# same conclusion (CAMN == camN, no translation needed), now for the simpler reason that there is
+# no inversion left to cancel. See `.claude/skills/e2e` "CORRECTION (2026-07-12, #708)" for the
+# pre-pivot 4-way verification, marked historical there too.
+CAMBOX_SWEEP="${CAMBOX_SWEEP:-Cam 1:CAM1 Cam 2:CAM2 Cam 3:CAM3 Cam 4:CAM4 Cam 5:CAM5 Cam 6:CAM6 Cam 7:CAM7}"
 SEGMENT_SECS="${SEGMENT_SECS:-30}"
 if [ "$ALL_CAMBOX" = "1" ]; then
   # #332: the all-cambox sweep now runs on the DEFAULT decode-on-stream path (VERDICT_ON_STREAM=1,

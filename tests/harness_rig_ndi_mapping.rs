@@ -19,15 +19,16 @@ fn read(p: &str) -> String {
 #[test]
 fn set_ndi_mapping_py_exists_with_the_seven_distinct_pins() {
     let s = read("scripts/set-ndi-mapping.py");
-    // The fixed Claude-owned mapping (offset per the rig-ndi-source label convention).
+    // #753 PIVOT (2026-07-14, binding user directive): the fixed Claude-owned mapping is now 1:1
+    // (the pre-pivot offset table is HISTORY, see set-ndi-mapping.py's own module docstring).
     for (inp, snd) in [
-        ("NDI cam5", "CAM1 (usb)"),
-        ("NDI cam1", "CAM3 (usb)"),
-        ("NDI cam3", "CAM4 (usb)"),
+        ("NDI cam1", "CAM1 (usb)"),
         ("NDI cam2", "CAM2 (usb)"),
-        ("NDI cam4", "CAM5 (usb)"),
+        ("NDI cam3", "CAM3 (usb)"),
+        ("NDI cam4", "CAM4 (usb)"),
+        ("NDI cam5", "CAM5 (usb)"),
         ("NDI cam6", "CAM6 (usb)"),
-        ("NDI cam7", "CAM7 (usb)"), // #753: new, direct (non-inverted) pin
+        ("NDI cam7", "CAM7 (usb)"),
     ] {
         assert!(
             s.contains(inp) && s.contains(snd),

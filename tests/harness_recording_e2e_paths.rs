@@ -449,13 +449,14 @@ fn painter_clock_offset_gate_runs_before_the_all_cambox_sweep() {
 //
 // Root cause (live-confirmed strih 2026-06-22): the harness routed program to the
 // PHASE2-PROBE scene whose `phase2-probe-src` ndi_source was pointed at "CAM1 (usb)" —
-// the SAME source-name the ALWAYS-ON prod input `NDI cam5` already holds. DistroAV
-// allows ONE receiver per (source-name) on a host, so the probe input received NO NDI
-// and the probe scene recorded pure BLACK (luma min=max=0; every frame undecodable),
-// blocking the strict cam1→strih + strih→stream measurement.
+// the SAME source-name the ALWAYS-ON prod input (`NDI cam1`, #753 1:1 pivot -- was `NDI
+// cam5` pre-2026-07-14) already holds. DistroAV allows ONE receiver per (source-name) on
+// a host, so the probe input received NO NDI and the probe scene recorded pure BLACK
+// (luma min=max=0; every frame undecodable), blocking the strict cam1→strih + strih→stream
+// measurement.
 //
 // Fix: record the EXISTING certified prod scene program directly — strih's prod scene
-// already shows cam1 via `NDI cam5` (genlock-certified), and stream's full-screen scene
+// already shows cam1 via `NDI cam1` (genlock-certified), and stream's full-screen scene
 // already shows strih via `NDI 2ME PGM`. No second receiver, no source-name collision.
 // recording-e2e.sh must therefore route program via the `prod-scene` action (not the
 // colliding probe `setup`).
@@ -485,17 +486,17 @@ fn recording_e2e_records_prod_scene_not_colliding_probe() {
 }
 
 /// The harness must name the certified PROD scenes it records: strih's prod scene that
-/// already shows cam1 via the certified genlock input (`Cam 5`), and stream's
-/// full-screen scene that shows strih's feed (`NDI 2ME PGM`). These are the scenes
-/// proven (live + the prior 3-node run) to record NON-black; the probe scene records
-/// black.
+/// already shows cam1 via the certified genlock input (`Cam 1`, #753 1:1 pivot — was `Cam 5`
+/// pre-2026-07-14), and stream's full-screen scene that shows strih's feed (`NDI 2ME PGM`).
+/// These are the scenes proven (live + the prior 3-node run) to record NON-black; the probe
+/// scene records black.
 #[test]
 fn recording_e2e_names_the_certified_prod_scenes() {
     let s = read("scripts/recording-e2e.sh");
     assert!(
-        s.contains("STRIH_PROG_SCENE") && s.contains("Cam 5"),
-        "#163: the strih program scene must be the certified prod scene 'Cam 5' (already \
-         shows cam1 via the genlock-certified `NDI cam5` input — no probe receiver)."
+        s.contains("STRIH_PROG_SCENE") && s.contains("Cam 1"),
+        "#163: the strih program scene must be the certified prod scene 'Cam 1' (#753: cam1 \
+         now shows via the genlock-certified `NDI cam1` input, 1:1 -- no probe receiver)."
     );
     assert!(
         s.contains("STREAM_PROG_SCENE"),
@@ -689,7 +690,7 @@ fn recording_e2e_burn_targets_is_one_shared_array() {
     );
 }
 
-/// #286 — under ALL_CAMBOX=1, BURN_TARGETS must gain strih's OWN burn on the other 5 strih NDI
+/// #286 — under ALL_CAMBOX=1, BURN_TARGETS must gain strih's OWN burn on the other 6 strih NDI
 /// inputs (not just the single default STRIH_PROG_SOURCE), else recording-verdict's
 /// all_cambox_delivery_latency measures only whichever ONE camera owns STRIH_PROG_SOURCE and
 /// reports zero samples for every other camera (confirmed live, 2026-07-09 #286
@@ -698,12 +699,16 @@ fn recording_e2e_burn_targets_is_one_shared_array() {
 /// snippet added to recording-e2e.sh (the file itself can't be sourced directly — no
 /// BASH_SOURCE guard, see the e2e skill's "Testing the E2E harness scripts" gotcha). A
 /// companion content-assertion (below) anchors this hand-copied snippet to the REAL file so a
-/// future edit to the six-source list or the exclusion logic can't silently drift out of sync
+/// future edit to the seven-source list or the exclusion logic can't silently drift out of sync
 /// with what this test actually exercises (code-review finding on PR #644).
+///
+/// #753 PIVOT (2026-07-14, binding user directive): strih's NDI-input->camera mapping is now
+/// 1:1 (NDI cam<N> -> CAM<N>) — cam1's default STRIH_PROG_SOURCE is therefore "NDI cam1" now,
+/// not the pre-pivot offset "NDI cam5". Fleet also grew 6->7 (cam7).
 #[test]
 fn recording_e2e_all_cambox_extends_burn_targets_to_every_strih_input_286() {
     // Drift guard: the real script must contain this EXACT ALL_CAMBOX extension block (the
-    // six-source list + the exclusion `if`), so the behavioral snippet above can never quietly
+    // seven-source list + the exclusion `if`), so the behavioral snippet above can never quietly
     // diverge from what recording-e2e.sh actually runs.
     let real = read("scripts/recording-e2e.sh");
     let real_block_start = real
@@ -717,9 +722,9 @@ fn recording_e2e_all_cambox_extends_burn_targets_to_every_strih_input_286() {
     let real_block = &real[real_block_start..real_block_end];
     assert!(
         real_block.contains(
-            r#"for _acs in "NDI cam5" "NDI cam1" "NDI cam3" "NDI cam2" "NDI cam4" "NDI cam6""#
+            r#"for _acs in "NDI cam1" "NDI cam2" "NDI cam3" "NDI cam4" "NDI cam5" "NDI cam6" "NDI cam7""#
         ),
-        "#286: recording-e2e.sh must extend BURN_TARGETS over exactly the six canonical strih \
+        "#286: recording-e2e.sh must extend BURN_TARGETS over exactly the seven canonical strih \
          NDI inputs: {real_block}"
     );
     assert!(
@@ -739,7 +744,7 @@ STREAM_PROG_SOURCE="NDI 2ME PGM"
 IMAG_PROG_SOURCE="NDI CAM1"
 BURN_TARGETS=("strih=$STRIH=$STRIH_PROG_SOURCE" "stream=$STREAM=$STREAM_PROG_SOURCE" "imag=$IMAG_IP=$IMAG_PROG_SOURCE")
 if [ "${ALL_CAMBOX:-0}" = "1" ]; then
-  for _acs in "NDI cam5" "NDI cam1" "NDI cam3" "NDI cam2" "NDI cam4" "NDI cam6"; do
+  for _acs in "NDI cam1" "NDI cam2" "NDI cam3" "NDI cam4" "NDI cam5" "NDI cam6" "NDI cam7"; do
     if [ "$_acs" != "$STRIH_PROG_SOURCE" ]; then
       BURN_TARGETS+=("strih-${_acs// /_}=$STRIH=$_acs")
     fi
@@ -752,7 +757,7 @@ printf '%s\n' "${BURN_TARGETS[@]}"
         .arg("-c")
         .arg(snippet)
         .arg("bash")
-        .arg("NDI cam5")
+        .arg("NDI cam1")
         .output()
         .expect("run snippet");
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -762,38 +767,9 @@ printf '%s\n' "${BURN_TARGETS[@]}"
         "#286: ALL_CAMBOX unset must leave BURN_TARGETS at exactly 3 (unchanged default path): {stdout:?}"
     );
 
-    // ALL_CAMBOX=1, default STRIH_PROG_SOURCE ("NDI cam5", cam1) — gains the OTHER 5 strih
-    // inputs (8 total: the original 3 + 5 more), and does NOT duplicate "NDI cam5" itself.
-    let out = Command::new("bash")
-        .arg("-c")
-        .arg(snippet)
-        .arg("bash")
-        .arg("NDI cam5")
-        .env("ALL_CAMBOX", "1")
-        .output()
-        .expect("run snippet");
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let lines: Vec<&str> = stdout.lines().collect();
-    assert_eq!(
-        lines.len(),
-        8,
-        "#286: ALL_CAMBOX=1 must extend BURN_TARGETS to 8 (3 original + 5 additional strih \
-         inputs, excluding the one STRIH_PROG_SOURCE already covers): {stdout:?}"
-    );
-    for expect in ["NDI cam1", "NDI cam3", "NDI cam2", "NDI cam4", "NDI cam6"] {
-        assert!(
-            stdout.contains(expect),
-            "#286: BURN_TARGETS must cover strih input {expect:?}: {stdout:?}"
-        );
-    }
-    assert_eq!(
-        stdout.matches("NDI cam5").count(),
-        1,
-        "#286: the default STRIH_PROG_SOURCE (NDI cam5) must NOT be duplicated: {stdout:?}"
-    );
-
-    // A NON-default STRIH_PROG_SOURCE (e.g. CAM=cam3 selects 'NDI cam1') is correctly excluded
-    // from the additional set instead of the wrong (still-default) one.
+    // ALL_CAMBOX=1, default STRIH_PROG_SOURCE ("NDI cam1", cam1, #753 1:1 pivot) — gains the
+    // OTHER 6 strih inputs (9 total: the original 3 + 6 more), and does NOT duplicate "NDI cam1"
+    // itself.
     let out = Command::new("bash")
         .arg("-c")
         .arg(snippet)
@@ -803,21 +779,53 @@ printf '%s\n' "${BURN_TARGETS[@]}"
         .output()
         .expect("run snippet");
     let stdout = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
     assert_eq!(
-        stdout.lines().count(),
-        8,
-        "#286: a non-default STRIH_PROG_SOURCE must still yield exactly 8 targets: {stdout:?}"
+        lines.len(),
+        9,
+        "#286: ALL_CAMBOX=1 must extend BURN_TARGETS to 9 (3 original + 6 additional strih \
+         inputs, excluding the one STRIH_PROG_SOURCE already covers): {stdout:?}"
     );
+    for expect in [
+        "NDI cam2", "NDI cam3", "NDI cam4", "NDI cam5", "NDI cam6", "NDI cam7",
+    ] {
+        assert!(
+            stdout.contains(expect),
+            "#286: BURN_TARGETS must cover strih input {expect:?}: {stdout:?}"
+        );
+    }
     assert_eq!(
         stdout.matches("NDI cam1").count(),
+        1,
+        "#286: the default STRIH_PROG_SOURCE (NDI cam1) must NOT be duplicated: {stdout:?}"
+    );
+
+    // A NON-default STRIH_PROG_SOURCE (e.g. CAM=cam3 selects 'NDI cam3') is correctly excluded
+    // from the additional set instead of the wrong (still-default) one.
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(snippet)
+        .arg("bash")
+        .arg("NDI cam3")
+        .env("ALL_CAMBOX", "1")
+        .output()
+        .expect("run snippet");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout.lines().count(),
+        9,
+        "#286: a non-default STRIH_PROG_SOURCE must still yield exactly 9 targets: {stdout:?}"
+    );
+    assert_eq!(
+        stdout.matches("NDI cam3").count(),
         1,
         "#286: whichever source IS the current STRIH_PROG_SOURCE must not be duplicated \
          either: {stdout:?}"
     );
     assert!(
-        stdout.contains("NDI cam5"),
-        "#286: when STRIH_PROG_SOURCE is 'NDI cam1', 'NDI cam5' must be ADDED as one of the \
-         other 5: {stdout:?}"
+        stdout.contains("NDI cam1"),
+        "#286: when STRIH_PROG_SOURCE is 'NDI cam3', 'NDI cam1' must be ADDED as one of the \
+         other 6: {stdout:?}"
     );
 }
 
@@ -1474,10 +1482,13 @@ fn recording_e2e_all_cambox_sweep_runs_on_stream_box() {
 /// reserved digital capture-burn id (mirroring cam1/cam3/cam4/cam5/cam6 exactly) and
 /// CAMERA_BOX_NO_DISPLAY=1 so the frame-probe painter can still own /dev/fb0.
 ///
-/// Under the #399 canonical NDI mapping (NDI cam5→CAM1, cam1→CAM3, cam3→CAM4, cam2→CAM2,
-/// cam4→CAM5, cam6→CAM6; scene names follow the input labels), cam2 is scene "Cam 2"; #312 also
-/// wires in cam5 (scene "Cam 4") and cam6 (scene "Cam 6") — fleet growth 4→6, #451. So the
-/// default sweeps ALL SIX cameras, still overridable via $CAMBOX_SWEEP.
+/// #753 PIVOT (2026-07-14, binding user directive): the strih NDI-input->camera mapping is now
+/// 1:1 (NDI cam<N> -> CAM<N>, scene "Cam N" for every N) — the pre-pivot #399 offset table (NDI
+/// cam5→CAM1, cam1→CAM3, cam3→CAM4, cam4→CAM5; cam2/cam6 were ALREADY 1:1) is HISTORY. cam2 is
+/// scene "Cam 2" (unchanged either way); #312 wired in cam5 (now scene "Cam 5", was "Cam 4"
+/// pre-pivot) and cam6 (scene "Cam 6", unchanged) — fleet growth 4→6, #451. #753 (fleet growth
+/// 6→7, 2026-07-14) added cam7 (scene "Cam 7"). So the default sweeps ALL SEVEN cameras, still
+/// overridable via $CAMBOX_SWEEP.
 ///
 /// The ORIGINAL #328/#440 concern this exclusion partly guarded against — the PERMANENT
 /// `cam2-painter.service` and the transient TEST-mode painter BOTH fighting over `/dev/fb0` — is
@@ -1485,7 +1496,7 @@ fn recording_e2e_all_cambox_sweep_runs_on_stream_box() {
 /// `recording_e2e_cam2_deploy_stops_the_permanent_painter_service_before_launching_the_transient_probe`
 /// below.
 #[test]
-fn recording_e2e_default_sweep_covers_all_six_cameras_including_cam2() {
+fn recording_e2e_default_sweep_covers_all_seven_cameras_including_cam2() {
     let s = read("scripts/recording-e2e.sh");
     let line = s
         .lines()
@@ -1497,15 +1508,16 @@ fn recording_e2e_default_sweep_covers_all_six_cameras_including_cam2() {
          MEASURABLE camera during a TEST run, so excluding it is now stale: {line}"
     );
     for (scene, label) in [
-        ("Cam 5:CAM1", "CAM1"),
-        ("Cam 1:CAM3", "CAM3"),
-        ("Cam 3:CAM4", "CAM4"),
-        ("Cam 4:CAM5", "CAM5"),
+        ("Cam 1:CAM1", "CAM1"),
+        ("Cam 3:CAM3", "CAM3"),
+        ("Cam 4:CAM4", "CAM4"),
+        ("Cam 5:CAM5", "CAM5"),
         ("Cam 6:CAM6", "CAM6"),
+        ("Cam 7:CAM7", "CAM7"),
     ] {
         assert!(
             line.contains(scene),
-            "#312: the default sweep must still cover {label} via '{scene}': {line}"
+            "#312/#753: the default sweep must still cover {label} via '{scene}': {line}"
         );
     }
     assert!(

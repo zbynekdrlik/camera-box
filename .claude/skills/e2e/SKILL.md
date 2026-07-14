@@ -902,9 +902,10 @@ AND the DEFAULT per-box `MERGE_ARGS` (the `--merge-partials` step). The per-camb
 calls), so the merge path produces it IDENTICALLY to the fused/legacy path — the all-cambox verdict
 now runs ON the stream box (#193, decode where the video lives), NOT forced onto dev1. The old guard
 that forced `VERDICT_ON_STREAM=0` is GONE (#332). Just run `ALL_CAMBOX=1 bash scripts/recording-e2e.sh`
-(default `VERDICT_ON_STREAM=1`). Sweep config: `CAMBOX_SWEEP` (default, since #312 items 1+3:
-**`Cam 5:CAM1 Cam 1:CAM3 Cam 3:CAM4 Cam 2:CAM2 Cam 4:CAM5 Cam 6:CAM6`** — ALL SIX cameras, incl.
-cam2), `SEGMENT_SECS` (default 30).
+(default `VERDICT_ON_STREAM=1`). Sweep config: `CAMBOX_SWEEP` (default, since #312 items 1+3, #753
+fleet growth 6→7 + the 1:1 mapping pivot 2026-07-14:
+**`Cam 1:CAM1 Cam 2:CAM2 Cam 3:CAM3 Cam 4:CAM4 Cam 5:CAM5 Cam 6:CAM6 Cam 7:CAM7`** — ALL SEVEN
+cameras, incl. cam2), `SEGMENT_SECS` (default 30).
 
 **cam2's #333 exclusion was CORRECTED by #312 — do NOT reintroduce it.** #333 originally excluded
 CAM2/.62 (the dual-QR painter) reasoning "while painting it emits no camera NDI so its window is
@@ -1329,7 +1330,8 @@ preview scene is restored once every source has been sampled. The companion
 before `[5/8] StartRecord`, so the `[6/8]` ALL_CAMBOX sweep's first cut to each camera isn't
 ALSO a cold connect.
 
-**Sources checked by default:** `NDI cam1, NDI cam2, NDI cam3, NDI cam5` (the raw strih inputs).
+**Sources checked by default:** `NDI cam1, NDI cam2, NDI cam3, NDI cam4, NDI cam5, NDI cam6,
+NDI cam7` (the raw strih inputs; #753 fleet growth 6→7 extended this).
 
 **Threshold:** > 3 consecutive identical hashes = FROZEN. A run of ≤ 3 identical is allowed
 (e.g. sensor temporarily settling). Fail-closed: < 2 successful samples also = FROZEN.
@@ -1350,7 +1352,7 @@ ALSO a cold connect.
 ```bash
 FROZEN_CAM_THRESHOLD=3      # consecutive-static threshold (default 3)
 FROZEN_CAM_SAMPLES=8        # samples to collect (default 8 → ~8 s window)
-FROZEN_CAM_SOURCES="NDI cam1,NDI cam2,NDI cam3,NDI cam5"  # sources to check
+FROZEN_CAM_SOURCES="NDI cam1,NDI cam2,NDI cam3,NDI cam4,NDI cam5,NDI cam6,NDI cam7"  # sources to check
 FROZEN_GATE_BIN=/path/to/frozen-camera-gate  # binary path (auto-discovered via PROBE_BIN_DIR)
 ```
 
@@ -1641,13 +1643,16 @@ list is exempt from `set -e`, so a failure degrades gracefully (the optional art
 `$IMAG_PARTIAL` — simply stays absent, and a downstream `if [ -f "$IMAG_PARTIAL" ]` guard omits it
 from the merge). Apply this to ANY new fallible call added inside that branch, not just imag's.
 
-**imag's camera mapping is a CLEAN 1:1, unlike strih's drift-corrected `#399` mapping.** strih's
-program input showing cam1 is `NDI cam5` (a historical drift-correction — see `#399` in this file's
-sibling sections / `.claude/skills/genlock`). imag's Phase-1 provisioning (`setup-imag.sh`, #458)
-pins `NDI CAM1`..`NDI CAM6` → `CAMx (usb)` 1:1 fresh, so imag's input showing cam1 (the SOURCE
-camera that films cam2's monitor) is simply `NDI CAM1` / scene `Cam 1`
-(`IMAG_PROG_SOURCE`/`IMAG_PROG_SCENE` in both `recording-e2e.sh` and `rig-mode.sh`). Don't assume
-the two boxes' camera→input naming matches — they're maintained independently.
+**imag's camera mapping is a CLEAN 1:1 — and since #753 (2026-07-14) strih's is too.** Before the
+pivot, strih's program input showing cam1 used to be `NDI cam5` (a historical drift-corrected
+offset mapping — see `#399` in this file's sibling sections / `.claude/skills/genlock`, marked
+HISTORY there now). imag's Phase-1 provisioning (`setup-imag.sh`, #458) pins `NDI CAM1`..`NDI
+CAM7` → `CAMx (usb)` 1:1 fresh; strih's binding user directive rebind (2026-07-14) brought strih
+to the SAME 1:1 shape. So both boxes' input showing cam1 (the SOURCE camera that films cam2's
+monitor) are now simply `NDI CAM1`/scene `Cam 1` on imag and `NDI cam1`/scene `Cam 1` on strih
+(`IMAG_PROG_SOURCE`/`IMAG_PROG_SCENE`, `STRIH_PROG_SOURCE`/`STRIH_PROG_SCENE` — all four now agree
+in SHAPE, though imag keeps its own uppercase `CAMx (usb)`/`NDI CAMx` naming convention, still
+maintained independently of strih's lowercase `NDI camx`).
 
 **`rig-mode.sh` extends `obs_burn_targets()`/`toggle_burn` to imag for free** — the array's own
 `#252` design comment explicitly anticipated "a third box", so TEST mode turning imag's 911003 burn
@@ -1789,6 +1794,17 @@ IDENTICAL video signal. There are NOT separate cameras per box. Consequences:
   USB-reset it (#656 prevention adds an automatic WARN + E2E preflight for this).
 
 ## CORRECTION (2026-07-12, #708) — the `all_cambox_continuity` schedule labels ARE 1:1 physical box numbers; the prior GOTCHA table here was WRONG
+
+**PRE-2026-07-14 HISTORY — the mechanism below (inversion-cancellation) is now MOOT.** #753's
+binding user directive (2026-07-14) pivoted strih's NDI-input→camera mapping itself to a literal
+1:1 (no more inversion at ANY layer — see the genlock skill's "strih NDI Input → Camera Mapping"
+section and `set-ndi-mapping.py`'s module docstring). The CONCLUSION this section proves —
+**schedule label CAMN == physical box camN, no translation needed** — is still true today, now
+for the simpler reason that there is no inversion left anywhere in the chain to cancel. The
+INVESTIGATION below (three cross-checked methods proving the OLD inverted mapping's
+cancellation) is kept as historical record of how that was established; do not re-derive it, and
+do not expect the CAMBOX_SWEEP pairing it references (`Cam 5:CAM1` etc) to still exist — see
+`recording-e2e.sh`'s CAMBOX_SWEEP default for the current 1:1 pairs.
 
 An earlier version of this section (written during #707) claimed `label CAM1 -> physical cam5`
 etc. and warned to "translate before drawing any per-box conclusion". **That table was
