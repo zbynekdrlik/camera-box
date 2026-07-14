@@ -241,6 +241,23 @@ FROM dev1 instead, or the server's own log, over an MCP-Shell-side `Invoke-WebRe
 last exit code — a passive Task-Scheduler restart-on-failure setting can never catch a
 "terminated but scheduler considers that fine" death, no matter how high `RestartCount` is set.
 
+**A THIRD failure mode (found 2026-07-14, #756): the task can be UP and healthy, but running a
+STALE deployed copy of `bundle-state-server.py`/`bundle_state_gather.py` that predates a recent
+schema change to the payload — the running code is simply NOT what's currently committed in the
+repo.** `curl http://<box>:8899/bundle-state.json` on both strih and stream came back with the
+whole `genlock_build_sha` key MISSING even though `bundle_state_gather.py`'s committed source
+(unmodified in the working tree) already had `genlock_build_sha_from_file(...)` wired in — the
+`.py` files under `C:\ProgramData\camera-box\` were dated days before that change landed. This is
+NOT a scheduled-task-health problem (the task was `Running`, `LastTaskResult=0`) — it's a plain
+**deploy drift**: nothing automatically pushes a new commit's `scripts/bundle-state-server.py` /
+`scripts/bundle_state_gather.py` to the boxes; a code change to these files needs an EXPLICIT
+redeploy (`FileWrite` the current committed content to `C:\ProgramData\camera-box\`) + a restart
+of the running `python.exe` (killing the stale PID is enough — the `run-bundle-state-server.ps1`
+supervisor loop relaunches it within ~5s, picking up the new file) before its payload reflects the
+new schema. **Whenever you add/change a field these two files gather, always confirm live** (`curl
+.../bundle-state.json` on BOTH strih and stream, not just one) that the NEW field is actually
+present in the served payload — don't assume "the repo has it" means "the boxes serve it".
+
 ## Device Deployment
 
 Camera devices (CAM1-4) run x86_64 Ubuntu. Build in CI (never locally); download artifact, deploy over SSH.

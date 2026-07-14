@@ -5289,3 +5289,36 @@ vendored `obs-source.c` release-cadence fix (#726 candidate A).
   spread (#624), strih 4 real-drops (#741 recurred, non-monotonic tell), imag judder, A/V spread
   (#689 calibration). NONE from this batch — #754/#755/#756 legs all clean, #689 code correct. CI
   Build + Windows-probe-build green at `e38bb0b36`. Honest hold, no bypass.
+
+## 2026-07-14 (cont'd) — #718 + #758 batch (render-health, divisor capability, sender-bounce timing fix)
+
+- **#718 — colour-gate localizer #754-style fragility** (`68a7ae51d`): `detect_dual_qr_pass` gained
+  an explicit `top_half_frame_h` param, always populated with the ORIGINAL uncropped frame height
+  by every crop-cascade caller (was using the CROPPED buffer's own height, wrongly discarding
+  legitimate top-half content). RED (CI failure on `detect_dual_qr_recovers_via_otsu_top_band_crop_
+  on_a_real_soft_frame_718`) → GREEN, RED→GREEN proven via scratch harness against the #754 fixture.
+  This was the CI-blocking bug on this PR's earlier push (commit `f72f57fc2`). #718 stays OPEN —
+  the ACTUAL recording named in its own forensics has a persistent, non-crop-recoverable defect
+  (Defect B), a durable comment posted on the ticket.
+- **#758 items 1-5, all shipped** (`117dd6974`, `70f2c519d`, `345f068fb`, `057fd51b0`): #756 parity
+  check flipped opt-in→ENFORCED (live-verified strih/stream's bundle-state-server was STALE,
+  redeployed + restarted, then all 3 boxes confirmed matching `genlock_build_sha`); two new
+  preflight items (imag render-health reusing the existing #405 render-budget-gate.py/Rust
+  classify(), MV divisor capability via read-only `nm -D -u` matching setup-imag.sh's provisioning
+  check); imag Studio Mode forced OFF before render-health is measured (LIVE FINDING: a stale
+  Studio-Mode-ON from an earlier session was degrading render health right to the failure floor —
+  A/B measured ~57fps/15-17ms ON vs clean ~60fps/8-9ms OFF); `preflight_mv_reverify`'s retry budget
+  widened from one-shot (~13s) to a 3-attempt×6s-settle loop (LIVE MEASURED: cam1's real post-
+  restart NDI reconnect took 11.4s, matching TWO real CI failures on the old budget; a repro of the
+  new code recovered correctly on attempt 3, ~23s).
+  Acceptance run 29369805058 (commit `057fd51b0`): got through the WHOLE new preflight chain +
+  actual 300s recording + decode + merge to a REAL computed verdict (`overall_pass=false`) — every
+  new #758 mechanism proven working end-to-end on real hardware. Verdict failure is entirely in
+  the already-tracked #707/#689/#741/#588-class continuity/A/V domain, none of it from this batch.
+  Full `cargo test` green throughout (2125 tests final), `pytest` green (490 tests), fmt/clippy clean.
+- **PR body correction**: found + fixed a STALE `Closes #756` line from an earlier historical batch
+  section in PR #704's body that would have auto-closed #756 (still OPEN, Linux divisor decouple
+  pending) on this PR's eventual merge — reworded so the keyword and issue number are no longer
+  adjacent anywhere in the body. Comment posted on #756.
+- **PR #704 NOT merged (still)** — same pre-existing #707/#689/#741/#588-class blockers as prior
+  cycles, none from this batch. Honest hold, no bypass, no admin-merge.

@@ -831,6 +831,53 @@ budget on EVERY tick → skipped forever → the strih Multiview FROZE solid for
   `windows-genlock-fast.yml` (fires on `vendor/obs-studio/**` push). Live 4-cam unfreeze = supervisor
   rig step at the coordinated OBS rollout.
 
+## #758 — Studio Mode is a SEPARATE render-budget consumer from Multiview; imag must run it OFF
+A stale **Studio-Mode-ON** left over from an earlier debugging/testing session on imag degraded its
+render loop right to the edge of (and past) a healthy budget — confirmed live 2026-07-14 by direct
+A/B `GetStats` measurement on the SAME box, same Multiview-open state: **Studio ON ≈ 56.8-58.1fps /
+15.5-17.1ms render / renderSkip climbing to ~4%; Studio OFF ≈ 60.00fps / 7.9-10.3ms / 0% renderSkip,
+stable across 5+ repeated windows.** This is a DIFFERENT consumer from the Multiview projector
+itself (#276/#278/#293 above) — it stacks on top of it, and unlike the Multiview it has no
+documented reason to be on for imag's operator workflow (imag has no operator staging a NEXT scene
+via a Preview pane the way a vision-mixer operator would; MV+Program projectors are the actual
+consumed outputs). **Fix, now automated:** `scripts/obs_phase2.py ensure-studio-mode-off` (idempotent
+— reads `GetStudioModeEnabled`, only calls `SetStudioModeEnabled: false` when it's actually ON) is
+wired into `recording-e2e.sh`'s `[0/8]` preflight, right after the MV/Program projector-open step and
+BEFORE render-health is measured. **imag-ONLY** — do NOT point this at strih/stream; their Studio
+Mode stays ALWAYS ON per a separate, unrelated, hard user directive for those two boxes (see the
+`Studio Mode always ON both boxes` memory note — that note is scoped to strih+stream, it does NOT
+mean imag too). If you ever manually toggle Studio Mode on imag while debugging something else,
+remember to run this (or just re-run the `[0/8]` preflight) before trusting a render-health reading.
+
+## #758 — MV render-divisor CAPABILITY check has NO OBS-WS signal; reuses the setup-imag.sh nm check
+`render_divisor`/the EWMA budget-skip state (#276/#278/#293) has **no obs-websocket `GetStats` field**
+— there is no RPC that reports "is this display's monitoring-throttle path compiled in / actively
+engaging". The only real, checkable evidence is STATIC: the exported `obs_display_set_render_divisor`
+symbol in the deployed frontend binary (`nm -D -u /usr/bin/obs | grep obs_display_set_render_divisor`)
+— the SAME check `scripts/setup-imag.sh` already runs at provisioning time (#499). `recording-e2e.sh`'s
+`[0/8]` preflight now ALSO runs this (read-only, over SSH) on every ALL_CAMBOX run, not just at
+provision time — WARN-only for now (`IMAG_DIVISOR_CAPABILITY_FAIL` defaults to `0`; flipping to FAIL
+is a one-line change once the Linux frontend genuinely carries the symbol on a build that also
+proves it ENGAGES — that engagement proof is separate future #756 work, this check only proves the
+symbol is LINKED). Live-checked 2026-07-14: the symbol WAS present on that day's build — if you see
+this WARN fire, it means a regression (a frontend swap that dropped the symbol), not the pre-existing
+"known gap" some earlier dispatch text assumed was still true; always re-check live, don't trust a
+stale "known gap" framing (`verify-issue-still-valid.md`'s general lesson, applied here specifically).
+
+## #758 — cam1's post-deploy NDI reconnect genuinely takes ~11-20s; don't under-budget a reverify
+`preflight_mv_reverify` (the sender-bounce liveness re-check after a camera's `[2/8]`/`[2b/8]`
+service→burn-unit swap) originally budgeted ~13s total (one ~3.5s check, one re-attach, a fixed 2s
+settle, one more ~3.5s check) before declaring the leg dead. TWO real CI acceptance runs failed cam1
+on this exact mechanism. A direct timed `systemctl restart camera-box` on cam1 + repeated
+`frozen-camera-gate.py` polling against `MV NDI cam1` measured genuine recovery at **t+11.4s** — a
+real, physical NDI reconnect latency (v4l2 device re-open + USB renegotiation + NDI announce +
+strih's receiver re-discovery), not a dead camera. Widened to a 3-attempt × 6s-settle retry loop
+(mirrors this file's OWN `FROZEN_CAM_ATTEMPTS`/`FROZEN_CAM_RETRY_SLEEP` precedent for the mid-run
+frozen-camera-gate, just sized smaller since this fires per-camera up to 7x per sweep). **If you add
+a NEW post-deploy liveness/reverify check anywhere in this harness, measure the real reconnect
+latency live FIRST** (a plain restart + poll loop, no code needed) rather than guessing a budget —
+a guessed-tight budget reads as "the camera is dead" when it's actually just still reconnecting.
+
 ## #275 — cheaper measurement burn (bulk-fill render); wire format is LOCKED by the #186 fixtures
 The per-frame QR burn (strih/stream `genlock_burn` filter `vendor/distroav/src/burn-qr.hpp` render())
 was a per-pixel `put_bgra` loop with per-pixel bounds checks → 18.9ms on a 60fps strih render (>16.6ms
