@@ -2,6 +2,50 @@
 
 Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads context.
 
+## 2026-07-14 — #745 (fixed+closed, deployed cam6) / #753 (wiring landed, stays open) / strih 1:1 mapping pivot -- bundled batch, PR #704 train
+
+- **#745** -- retired the #729 model-gated zero-touch policy: `documented_controls_for_model` now
+  returns `color_production_controls()` (RangeScaled reference_pct=50, saturation+contrast, never
+  hue) for EVERY grabber model (ShadowCast2/Elgato4kS/NzxtSignalHd60/Unknown), not just
+  ShadowCast2. Driven by the binding card-swap requirement (2026-07-13) + the live #744 incident
+  (both Elgatos found stuck at contrast=50/saturation=50 under zero-touch). RED `dbc5b299c` (5
+  rewritten/new tests) / GREEN `8462ebda2`. New FakeDevice.with_initial_value() builder models a
+  "smeared" pre-existing control value. LIVE swap test on cam6 (10.77.9.66): set garbage
+  contrast=20/saturation=200 via v4l2-ctl, deployed the new binary (CI artifact from run
+  29334579137), `systemctl restart camera-box` -- get-ctrl read back **contrast=128
+  saturation=128** with ZERO manual action, journal confirmed `capture control id=0x00980902 set
+  to 128 (verified)` / `id=0x00980901 set to 128 (verified)`, chroma line sane (`u_dev=6.4-6.7
+  v_dev=14.1-14.2 -> colour`). Closed with this evidence.
+- **#753** -- cam7 wired into strih (input/scene/MV clone, live-verified via `set-ndi-mapping.py`
+  PASS 7/7), `camera-set.sh`/`recording-e2e.sh` extended to 7 cameras. RED `be69cb14e` / GREEN
+  `3ee5a479b`. Final acceptance (a fused run measuring cam7) stays blocked on #739 (splitter) /
+  #754 (decoder bug) -- left OPEN per dispatch instruction, no gate run attempted.
+- **Mid-flight pivot (`aa9beb705`)**: the user issued a NEW binding directive during this
+  dispatch -- strih's NDI-input->camera mapping is now literal 1:1 (`NDI cam<N>` -> `CAM<N>
+  (usb)`), retiring the historical offset table. Supervisor rebound all 7 inputs live (latency
+  values MOVED WITH each physical camera, unchanged: CAM4=20ms/CAM5=8ms/CAM6=13ms/rest=3ms); this
+  dispatch made the repo match -- `set-ndi-mapping.py` DEFAULT_MAP, `camera_strih_route()`,
+  `CAMBOX_SWEEP`, plus a genuinely-easy-to-miss hardcoded literal in `rig-mode.sh`'s own
+  `STRIH_PROG_SOURCE` default (found via a targeted grep sweep, NOT dynamically derived like
+  recording-e2e.sh's own copy). Every static-anchor test pinning the old mapping rewritten
+  (`harness_camera_set.rs`, `harness_rig_ndi_mapping.rs`, `harness_recording_e2e_paths.rs` --
+  including one, `recording_e2e_names_the_certified_prod_scenes`, that would have stayed GREEN for
+  the WRONG reason post-pivot if not caught). `.claude/skills/genlock` + `.claude/skills/e2e`
+  mapping tables marked HISTORY. Full local suite verified green after every edit (4+ full
+  `cargo test` passes during the sweep, 136/136 binaries; `pytest tests/python/` 474/474).
+- **Filed #755**: `recording-verdict.rs`'s `CAMERA_UNDER_TEST_NODES` + per-camera burn-id CLI
+  plumbing is still 6-camera -- cam7 has no reserved digital capture-burn id yet. Cross-cutting
+  through a 9000+ line binary, genuinely out of scope this dispatch.
+- **Filed #757**: `vendor/README.md`'s drift-guard latency pin tables need a live re-baseline
+  against the post-pivot rig state -- deliberately NOT blind-edited (too risky without a fresh
+  live read).
+- Posted a tracking comment on #689 (A/V-sync) noting its own "per-camera holds" reference now
+  keys to the new 1:1 input names.
+- Playbook: `.claude/skills/capture` gained the #745 CURRENT-policy section (#729 marked
+  superseded, kept as lineage). `.claude/skills/genlock` gained a GOTCHA for the next full mapping
+  change (grep the call graph AND grep for the literal strings -- a hardcoded-not-derived copy in
+  a different script won't show up tracing one script's own call graph).
+
 ## 2026-07-13 — #722+#723+#724+#725 (2026-07-12 on-air QR incident set): all four shipped, TDD throughout, live-verified
 
 Bundled batch, PR #704 already open/held (#707+#689+#737 — no new PR opened, per dispatch
