@@ -287,8 +287,20 @@ fn select_single_dual_qr(items: &[(f64, f64, f64)], frame_h: f64) -> Option<usiz
 /// (payloads left/right + 8 corners, left then right, each TL,TR,BR,BL); when only ONE decodes —
 /// the Vernier's normal captured-frame state through the optical hop (#400) — the largest gives
 /// [`QrAnchor::Single`]. `None` when NEITHER half decodes on THIS pass.
-fn detect_dual_qr_pass(luma: &GrayImage) -> Option<QrAnchor> {
-    let frame_h = luma.height() as f64;
+///
+/// `top_half_frame_h` is the height to test candidates' centroid-y against for the
+/// [`select_two_dual_qr`]/[`select_single_dual_qr`] "top half" filter — **the ORIGINAL, UNCROPPED
+/// frame height**, NOT necessarily `luma.height()`. #718 bug this parameter fixes: when `luma` is
+/// a TOP-BAND CROP (`detect_dual_qr`'s retry), the dual-QR's ABSOLUTE y-position is unchanged
+/// (the crop is `(0, 0)`-anchored), but naively using the CROPPED image's OWN height as the "half"
+/// divisor shrinks the threshold — a dual-QR sitting at y≈370 of an original 1080px frame (well
+/// inside the true top half, 370 < 540) sits at y≈370 of a 723px-tall 0.67 crop too, but
+/// 370 is NOT < 723/2=361.5, so the OLD self-referential `luma.height()` filter wrongly excluded
+/// it as if it were a bottom-anchored burn — confirmed live on CI (#718's own RED→GREEN test
+/// failed exactly this way: the crop+Otsu pass DID recover both halves' payloads, but
+/// `select_two_dual_qr`/`select_single_dual_qr` filtered them out before ever building the
+/// `QrAnchor`). Passing the ORIGINAL frame height explicitly, unaffected by any crop, fixes this.
+fn detect_dual_qr_pass(luma: &GrayImage, top_half_frame_h: f64) -> Option<QrAnchor> {
     let mut prepared = rqrr::PreparedImage::prepare(luma.clone());
     let mut corners: Vec<[(f64, f64); 4]> = Vec::new();
     let mut payloads: Vec<Payload> = Vec::new();
@@ -312,7 +324,7 @@ fn detect_dual_qr_pass(luma: &GrayImage) -> Option<QrAnchor> {
             }
         }
     }
-    if let Some([li, ri]) = select_two_dual_qr(&items, frame_h) {
+    if let Some([li, ri]) = select_two_dual_qr(&items, top_half_frame_h) {
         let mut pts = Vec::with_capacity(8);
         pts.extend_from_slice(&order_corners(corners[li]));
         pts.extend_from_slice(&order_corners(corners[ri]));
@@ -320,7 +332,7 @@ fn detect_dual_qr_pass(luma: &GrayImage) -> Option<QrAnchor> {
     }
     // #400 fallback: ONE decoded top-half grid still anchors the fit (parity → half → 4-corner
     // least squares). No decoded grid at all ⇒ None ⇒ the caller tries the next pass / skips.
-    let si = select_single_dual_qr(&items, frame_h)?;
+    let si = select_single_dual_qr(&items, top_half_frame_h)?;
     Some(QrAnchor::Single(payloads[si], order_corners(corners[si])))
 }
 
@@ -350,22 +362,26 @@ fn detect_dual_qr_pass(luma: &GrayImage) -> Option<QrAnchor> {
 /// passes miss (the frame truly cannot be localized → the caller skips it, fail-closed).
 fn detect_dual_qr(img: &RgbImage) -> Option<QrAnchor> {
     let luma = rgb_to_luma(img);
-    if let Some(anchor) = detect_dual_qr_pass(&luma) {
-        return Some(anchor);
-    }
-    if let Some(anchor) = detect_dual_qr_pass(&qr::binarize_otsu(&luma)) {
-        return Some(anchor);
-    }
     let (w, h) = (luma.width(), luma.height());
+    // The ORIGINAL, uncropped frame height — passed to EVERY detect_dual_qr_pass call below
+    // (including the cropped ones) so the "top half" filter's divisor never shrinks along with
+    // a crop (see detect_dual_qr_pass's own doc for the #718 bug this fixes).
+    let full_frame_h = h as f64;
+    if let Some(anchor) = detect_dual_qr_pass(&luma, full_frame_h) {
+        return Some(anchor);
+    }
+    if let Some(anchor) = detect_dual_qr_pass(&qr::binarize_otsu(&luma), full_frame_h) {
+        return Some(anchor);
+    }
     if w < 2 || h < 2 {
         return None;
     }
     let band_h = crate::colour_scale::top_band_crop_height(h, qr::OPTICAL_TOP_BAND_FRAC);
     let band = image::imageops::crop_imm(&luma, 0, 0, w, band_h).to_image();
-    if let Some(anchor) = detect_dual_qr_pass(&band) {
+    if let Some(anchor) = detect_dual_qr_pass(&band, full_frame_h) {
         return Some(anchor);
     }
-    detect_dual_qr_pass(&qr::binarize_otsu(&band))
+    detect_dual_qr_pass(&qr::binarize_otsu(&band), full_frame_h)
 }
 
 /// Sample + classify ONE recorded frame's colour scale, LOCALIZED to where the camera actually
