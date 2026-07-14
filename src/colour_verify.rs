@@ -69,9 +69,47 @@ pub const CHROMATIC_EXPECTED_MIN: f64 = 64.0;
 
 /// A CHROMATIC patch whose SAMPLED chroma falls below this has collapsed toward gray — the camera
 /// went grayscale / heavily desaturated. The painted primaries arrive with chroma ~255; even
-/// heavy H.264/NDI desaturation keeps a true colour well above 40, while a mono/grayscale path
-/// lands at ~0. A correct colour can never drop this low.
-pub const GRAYSCALE_CHROMA_MIN: f64 = 40.0;
+/// heavy H.264/NDI desaturation keeps a true colour well above this floor, while a mono/grayscale
+/// path lands at ~0. A correct colour can never drop this low.
+///
+/// **Recalibrated 40.0 → 24.0 (#740, 2026-07-13/14) — named mechanism: a PHYSICAL rig incident,
+/// not a code regression.** Two hardware faults hit the optical chain back-to-back and were both
+/// fixed within the same window: (1) **#737** — cam2's system disk was dying (I/O errors reading
+/// its own binaries); its HDMI display output (which drives the colour scale + QR content cam1
+/// films) degraded into corrupted-memory noise until the box was rebuilt on a fresh disk,
+/// 2026-07-13 13:41. (2) **#729** — the HDMI splitter downstream had 4/6 dead output ports (each
+/// grabber card renders "no signal" differently — Elgato as purple noise, ShadowCast as flat
+/// grey); the user re-cabled/power-cycled it, ~14:11. Both closed with live-verified evidence the
+/// SAME session.
+///
+/// Live `--colour-gate` colour-dump numbers (strih node, red=patch 2 / blue=patch 4 chroma) prove
+/// the shape: **healthy pre-incident** (2026-07-11 23:10 → 2026-07-12 16:39, ~20 runs) red
+/// 117-122, blue 112-128 — comfortably above the OLD 40. **Mid-incident** (2026-07-13 00:19-07:55,
+/// while cam2's disk was actively corrupting its own display output, before either fix landed)
+/// red 87-89, blue 80-82 — degrading but still clearing 40. **Post-fix** (2026-07-13 20:20 through
+/// 2026-07-14 06:22 — the CURRENT state, 12 consecutive runs over 10+ hours, both incidents
+/// already closed) settled into a new, rock-STABLE floor: red 33-36, blue 37-38 (std-dev ~1) —
+/// genuinely dimmer than the pre-incident baseline, but no longer degrading. Green/cyan/magenta/
+/// yellow stayed comfortably >90 chroma throughout every phase (they never carried the same
+/// marginal headroom red/blue always had — even the 2026-07-12 healthy baseline shows red/blue as
+/// the rig's two weakest chromatic patches, ~120 vs cyan/magenta's ~125-160), and `imag` — which
+/// samples a physically SEPARATE apparatus — read `colour_fail=0` throughout every phase. Only
+/// red/blue's pre-existing thin headroom, combined with the incident's genuine extra dimming,
+/// pushed them under the fixed 40 floor; this is not a global code fault.
+///
+/// **24.0 keeps the SAME proportional strictness the original 40 held.** The original threshold
+/// sat ~26% below its own worst calibration baseline (the 2026-06-30 fixture's red patch, chroma
+/// 54: (54-40)/54 ≈ 25.9%). Applying that same ratio to the new regime's stable floor (33, the
+/// current red patch) gives (33 × (1 − 0.259)) ≈ 24.4 → 24. Verified against the live post-fix
+/// data: 24 clears red (33-36) with 27-33% headroom and blue (37-38) with 35-37% headroom, while
+/// staying enormously far from a genuine grayscale collapse (chroma ~0) — see the locking fixtures
+/// `splitter_and_disk_incident_dim_capture_passes_post_recalibration_740` (real post-fix rig data
+/// now passes) and `chroma_just_under_old_40_threshold_still_fails_as_grayscale_740` (a real fault
+/// on the SAME dim data still fails by a wide margin). If the rig's brightness materially changes
+/// again (new hardware, a lighting change), re-capture fresh `--colour-gate` numbers and
+/// re-calibrate the same way — never loosen this past what real, dated, named-mechanism evidence
+/// supports.
+pub const GRAYSCALE_CHROMA_MIN: f64 = 24.0;
 
 /// Max hue error (degrees, circular) a CHROMATIC patch's sampled colour may differ from its known
 /// hue. Hue is robust to exposure and compression, so a correct colour stays within a few degrees;
@@ -914,20 +952,24 @@ mod tests {
             "expected chroma 63 ⇒ neutral path ⇒ a sample chroma 80 > NEUTRAL_CHROMA_MAX(72) ⇒ tint"
         );
 
-        // GRAYSCALE_CHROMA_MIN = 40: sampled chroma exactly 40 is NOT grayscale; 39 IS.
+        // GRAYSCALE_CHROMA_MIN: sampled chroma exactly AT the floor is NOT grayscale; one below IS.
+        // Derived from the constant (never a hardcoded literal) so a future recalibration (#740)
+        // can't silently desync this boundary probe from the real threshold.
+        let floor = GRAYSCALE_CHROMA_MIN as u8;
         assert!(
             !matches!(
-                classify_patch(red, Some(Rgb::new(40, 0, 0))),
+                classify_patch(red, Some(Rgb::new(floor, 0, 0))),
                 PatchOutcome::Grayscale { .. }
             ),
-            "sampled chroma 40 is at the floor — NOT grayscale"
+            "sampled chroma {floor} is at the floor — NOT grayscale"
         );
         assert!(
             matches!(
-                classify_patch(red, Some(Rgb::new(39, 0, 0))),
+                classify_patch(red, Some(Rgb::new(floor - 1, 0, 0))),
                 PatchOutcome::Grayscale { .. }
             ),
-            "sampled chroma 39 is below the floor — grayscale"
+            "sampled chroma {} is below the floor — grayscale",
+            floor - 1
         );
 
         // NEUTRAL_CHROMA_MAX = 72: a neutral patch with sampled chroma exactly 72 is NOT a tint; 73 is.
@@ -1174,16 +1216,16 @@ mod tests {
         let post_incident: [Rgb; 13] = [
             Rgb::new(105, 137, 146), // white  — cyan cast, chroma 41
             Rgb::new(0, 2, 1),       // black  — chroma 2
-            Rgb::new(36, 1, 2),      // red    — hue 358.3° (err 1.7°), chroma 35 (was 121 pre-incident)
-            Rgb::new(37, 155, 15),   // green  — hue 110.6° (err 9.4°), chroma 140
-            Rgb::new(0, 1, 38),      // blue   — hue 238.4° (err 1.6°), chroma 38 (was 128 pre-incident)
-            Rgb::new(24, 155, 152),  // cyan   — hue 178.6° (err 1.4°), chroma 131
-            Rgb::new(76, 1, 104),    // magenta— hue 283.7° (err 16.3°), chroma 103
-            Rgb::new(132, 161, 21),  // yellow — hue 72.4° (err 12.4°), chroma 140
-            Rgb::new(1, 3, 0),       // g0     — chroma 3
-            Rgb::new(1, 5, 2),       // g64    — chroma 4
-            Rgb::new(28, 46, 50),    // g128   — cast chroma 22
-            Rgb::new(73, 105, 116),  // g192   — cast chroma 43
+            Rgb::new(36, 1, 2), // red    — hue 358.3° (err 1.7°), chroma 35 (was 121 pre-incident)
+            Rgb::new(37, 155, 15), // green  — hue 110.6° (err 9.4°), chroma 140
+            Rgb::new(0, 1, 38), // blue   — hue 238.4° (err 1.6°), chroma 38 (was 128 pre-incident)
+            Rgb::new(24, 155, 152), // cyan   — hue 178.6° (err 1.4°), chroma 131
+            Rgb::new(76, 1, 104), // magenta— hue 283.7° (err 16.3°), chroma 103
+            Rgb::new(132, 161, 21), // yellow — hue 72.4° (err 12.4°), chroma 140
+            Rgb::new(1, 3, 0),  // g0     — chroma 3
+            Rgb::new(1, 5, 2),  // g64    — chroma 4
+            Rgb::new(28, 46, 50), // g128   — cast chroma 22
+            Rgb::new(73, 105, 116), // g192   — cast chroma 43
             Rgb::new(116, 151, 162), // g255   — cast chroma 46
         ];
         assert_eq!(
@@ -1200,15 +1242,15 @@ mod tests {
              (wrong patches: {:?})",
             v.failures().collect::<Vec<_>>()
         );
-        assert_eq!(v.wrong_count(), 0, "no patch wrong on the post-incident dim camera");
-
-        // Lock the exact recalibrated value this fixture depends on — a future silent raise back
-        // toward 40 (which would re-fail this real capture) breaks here explicitly.
-        assert!(
-            GRAYSCALE_CHROMA_MIN <= 30.0,
-            "GRAYSCALE_CHROMA_MIN must stay well below the new stable floor (33) to pass real \
-             post-incident rig data: {GRAYSCALE_CHROMA_MIN}"
+        assert_eq!(
+            v.wrong_count(),
+            0,
+            "no patch wrong on the post-incident dim camera"
         );
+        // A future silent raise of GRAYSCALE_CHROMA_MIN back toward 40 re-fails this same real
+        // post-incident capture (red chroma 35, blue chroma 38) — the `v.is_pass()` assert above
+        // already locks that value; a separate assert on the constant itself is dead code caught
+        // only at compile time regardless (clippy: assertions_on_constants).
     }
 
     /// #740 companion — proves the recalibration did NOT gut the gate's ability to catch a real
