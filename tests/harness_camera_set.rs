@@ -180,43 +180,46 @@ fn camera_set_resolves_cam5_and_cam6() {
     }
 }
 
+// --- #753 (2026-07-14): cam7 physical box EXISTS and is fully provisioned --------------------
+// The #593 "cam7 was never built" premise the three tests above used to pin is now STALE --
+// verify-device.sh CAM7 reported ALL CLEAR (21/21), static IP 10.77.9.67, grabber Elgato 4K S.
+// Genuinely-wrong-test rewrite per tdd-workflow.md: the world these tests encoded has changed,
+// not the code's correctness.
+
 #[test]
-fn camera_set_rejects_cam7_not_yet_built() {
-    // #593: cam7 was NEVER built -- the user only expressed FUTURE interest in a 7th camera, no
-    // box was ever connected. It must be rejected as an unknown camera, exactly like any other
-    // made-up name, never silently resolved to a phantom IP/source.
-    let (ok, _ip, _src) = resolve("cam7");
-    assert!(
-        !ok,
-        "#593: camera_resolve cam7 must FAIL -- cam7 was never built and must not be part of \
-         the active fleet"
+fn camera_set_resolves_cam7() {
+    // #753: cam7 is a REAL, fully-provisioned box now (10.77.9.67, Elgato 4K S,
+    // verify-device.sh ALL CLEAR 21/21) -- camera_resolve must resolve it exactly like every
+    // other real camera, mirroring camera_set_resolves_cam5_and_cam6 above.
+    let (ok, ip, source) = resolve("cam7");
+    assert!(ok, "#753: camera_resolve cam7 should succeed -- the box is real now");
+    assert_eq!(ip, "10.77.9.67", "camera_resolve cam7 resolved the wrong IP");
+    assert_eq!(
+        source, "CAM7 (usb)",
+        "camera_resolve cam7 resolved the wrong NDI source"
     );
 }
 
 #[test]
-fn camera_set_reject_message_lists_six_cameras_not_seven() {
-    // The reject message must stay in sync with the real accepted set, or a typo report
-    // misleads whoever reads it about which names are actually valid. #593: cam7 is not real.
+fn camera_set_reject_message_lists_seven_cameras() {
+    // #753: cam7 is real now -- the reject message must list all seven, or a typo report
+    // misleads whoever reads it about which names are actually valid.
     let s = read("scripts/camera-set.sh");
     assert!(
-        s.contains("expected one of: cam1 cam2 cam3 cam4 cam5 cam6"),
-        "#593: the unknown-camera reject message must list the six real cameras (cam1..cam6)."
-    );
-    assert!(
-        !s.contains("expected one of: cam1 cam2 cam3 cam4 cam5 cam6 cam7"),
-        "#593: the unknown-camera reject message must NOT list cam7 -- it was never built."
+        s.contains("expected one of: cam1 cam2 cam3 cam4 cam5 cam6 cam7"),
+        "#753: the unknown-camera reject message must list all seven real cameras (cam1..cam7)."
     );
 }
 
 #[test]
-fn camera_set_default_includes_six_cameras_not_cam7() {
+fn camera_set_default_includes_all_seven_cameras() {
     // CAMERA_SET is the "drive the whole set" default the fleet-wide orchestrators
-    // (deploy-fleet.sh, upgrade-fleet-ndi.sh) fall back to when the operator doesn't override
-    // it. #593: cam7 was never built, so it must not appear in the default active set.
+    // (deploy-fleet.sh, verify-fleet.sh) fall back to when the operator doesn't override it.
+    // #753: cam7 is a real, fully-provisioned box now -- the default must include it.
     let s = read("scripts/camera-set.sh");
     assert!(
-        s.contains("CAMERA_SET=\"${CAMERA_SET:-cam1 cam2 cam3 cam4 cam5 cam6}\""),
-        "#593: CAMERA_SET default must list exactly the six real cameras (cam1..cam6), no cam7."
+        s.contains("CAMERA_SET=\"${CAMERA_SET:-cam1 cam2 cam3 cam4 cam5 cam6 cam7}\""),
+        "#753: CAMERA_SET default must list all seven real cameras (cam1..cam7)."
     );
 }
 
@@ -327,6 +330,20 @@ fn camera_strih_route_resolves_the_five_source_eligible_cameras() {
             "camera_strih_route {name} resolved the wrong strih NDI-input source"
         );
     }
+}
+
+#[test]
+fn camera_strih_route_resolves_cam7() {
+    // #753: cam7's strih route is a NEW, DIRECT (non-inverted) pin -- scene 'Cam 7' shows
+    // input 'NDI cam7' 1:1, unlike the historical six's set-ndi-mapping.py DEFAULT_MAP
+    // inversion. Wired live over OBS WebSocket as part of this ticket's strih integration.
+    let (ok, scene, source) = resolve_strih_route("cam7");
+    assert!(ok, "camera_strih_route cam7 should succeed (#753)");
+    assert_eq!(scene, "Cam 7", "camera_strih_route cam7 resolved the wrong strih scene");
+    assert_eq!(
+        source, "NDI cam7",
+        "camera_strih_route cam7 resolved the wrong strih NDI-input source"
+    );
 }
 
 #[test]

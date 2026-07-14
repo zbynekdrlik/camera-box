@@ -144,3 +144,14 @@ def test_main_stats_and_seed_functions_exist():
     assert callable(strih_mv_scenes.seed)
     assert callable(strih_mv_scenes.rewire_multiview_scene)
     assert callable(strih_mv_scenes.measure_stats)
+
+
+# --- #753 (2026-07-14): cam7 physical box exists -- seed() must pick up its 'Cam 7' scene too --
+
+def test_cams_covers_all_seven_cameras():
+    # #753: cam7 is a real, fully-provisioned box (10.77.9.67, Elgato 4K S) now getting a strih
+    # 'Cam 7' scene wired up -- seed()'s CAMS range must widen to include it, or the MV twin
+    # ("MV Cam 7") this script exists to auto-provision would silently never get created.
+    assert list(strih_mv_scenes.CAMS) == list(range(1, 8)), (
+        f"#753: CAMS must cover cam1..cam7, got {list(strih_mv_scenes.CAMS)}"
+    )
