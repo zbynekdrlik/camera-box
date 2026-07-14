@@ -139,9 +139,42 @@ fn compare_args_from_state_emits_drift_guard_key_vals() {
 #[test]
 fn gate_passes_when_both_boxes_match_the_pinned_set() {
     // The whole point: the live stack == pinned set on BOTH boxes -> GATE PASS (0). The rig test
-    // may proceed and trust its result.
-    let s = write_state("strih_pin", STRIH_PINNED);
-    let t = write_state("stream_pin", STREAM_PINNED);
+    // may proceed and trust its result. #758: the cross-box genlock parity facet is now ENFORCED
+    // (no longer opt-in) -- a genuinely clean/healthy fixture must ALSO carry a matching
+    // genlock_build_sha on every box (strih/stream via the state fixture, imag via --genlock-sha),
+    // exactly like the real fleet does as of 2026-07-14 (~21:40, all three unified).
+    const SHA: &str = "26de1c3c23980488a110dbf02e5e472f15cb001d";
+    let s = write_state("strih_pin", &with_sha(STRIH_PINNED, SHA));
+    let t = write_state("stream_pin", &with_sha(STREAM_PINNED, SHA));
+    let (code, stdout, stderr) = run_gate(&[
+        "--win-state",
+        &format!("strih={}", s.display()),
+        "--win-state",
+        &format!("stream={}", t.display()),
+        "--genlock-sha",
+        &format!("imag={SHA}"),
+    ]);
+    assert_eq!(
+        code, 0,
+        "both boxes pinned + fleet genlock parity must PASS. stdout={stdout} stderr={stderr}"
+    );
+    assert!(stdout.contains("GATE PASS"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("genlock_parity") && stdout.contains("ONE genlock build"),
+        "the ENFORCED parity facet must have engaged + reported OK: {stdout}"
+    );
+    let _ = std::fs::remove_file(&s);
+    let _ = std::fs::remove_file(&t);
+}
+
+#[test]
+fn gate_is_incomplete_when_no_box_reports_a_genlock_build_sha_758() {
+    // #758 — the OTHER half of "ENFORCED": a fixture that does NOT carry any genlock_build_sha at
+    // all (the #756 opt-in-rollout scenario this test used to represent as a dormant-facet PASS)
+    // must now INCOMPLETE (11), not silently pass -- an un-upgraded/unread bundle-state-server is
+    // itself a real gap once the facet is enforced, never a reason to skip the whole check.
+    let s = write_state("strih_pin_no_sha_758", STRIH_PINNED);
+    let t = write_state("stream_pin_no_sha_758", STREAM_PINNED);
     let (code, stdout, stderr) = run_gate(&[
         "--win-state",
         &format!("strih={}", s.display()),
@@ -149,15 +182,13 @@ fn gate_passes_when_both_boxes_match_the_pinned_set() {
         &format!("stream={}", t.display()),
     ]);
     assert_eq!(
-        code, 0,
-        "both boxes pinned must PASS. stdout={stdout} stderr={stderr}"
+        code, 11,
+        "zero boxes reporting a genlock_build_sha must now be INCOMPLETE, not a silent PASS. \
+         stdout={stdout} stderr={stderr}"
     );
-    assert!(stdout.contains("GATE PASS"), "stdout: {stdout}");
-    // #756 opt-in rollout: with NO box reporting a genlock_build_sha yet, the cross-box parity
-    // facet stays DORMANT (never a spurious refuse before the fleet's bundle-state-servers emit it).
     assert!(
-        stdout.contains("fewer than 2 boxes report a genlock_build_sha"),
-        "parity facet must be dormant when no SHA is reported: {stdout}"
+        stdout.contains("genlock_parity") && stdout.contains("INCOMPLETE"),
+        "must report the ENFORCED parity facet as incomplete: {stdout}"
     );
     let _ = std::fs::remove_file(&s);
     let _ = std::fs::remove_file(&t);

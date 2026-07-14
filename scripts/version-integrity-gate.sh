@@ -93,9 +93,10 @@ compare_args_from_state() {
 # emitted by compare_args_from_state above and never fed to drift-guard --compare) — it is read
 # separately here and handed to the CROSS-BOX parity engine (genlock_build_parity_report). Same
 # tolerant flat-JSON parse as compare_args_from_state: match `"genlock_build_sha": "<value>"`,
-# unescape \\ and \", take the first match. "" when the box's state has no such key yet (a box
-# whose bundle-state-server predates #756) — the parity FLOW treats <2 read SHAs as "facet not yet
-# populated" and skips it (opt-in rollout), so an un-upgraded box never spuriously refuses a run.
+# unescape \\ and \", take the first match. "" when the box's state has no such key yet -- ENFORCED
+# (#758): the parity engine's OWN "<2 read SHAs" branch now returns UNKNOWN (a real gate-blocking
+# condition), so an un-upgraded/unread box's bundle-state-server is itself flagged, never silently
+# skipped.
 genlock_build_sha_from_state() {
   local file="$1"
   [ -f "$file" ] || return 0
@@ -230,38 +231,38 @@ main() {
   # during a long-lived dev train (#530/#756: imag ran a stale lineage, segfaulted, wedged the GPU).
   # Gather each box's live GENLOCK_BUILD_SHA.txt: from every --win-state box's state JSON (served by
   # its bundle-state-server) + every --genlock-sha LABEL=SHA supplied directly (imag, read over ssh
-  # by recording-e2e.sh). OPT-IN ROLLOUT: the parity engine is fail-closed (an unread box among a
-  # populated set REFUSES), but we only ENGAGE it once at least two boxes actually report a SHA — a
-  # box whose bundle-state-server predates #756 emits no genlock_build_sha, and until the fleet's
-  # servers are upgraded the facet stays dormant rather than spuriously refusing every run.
+  # by recording-e2e.sh). ENFORCED (#758): the parity engine is fail-closed (an unread box, OR fewer
+  # than 2 read peers, is UNKNOWN — a REAL gate-blocking condition, never a silent skip).
   local -a parity_args=()
-  local ge gname gsha nonempty=0
+  local ge gname gsha
   for entry in "${win_state[@]}"; do
     gname="${entry%%=*}"; file="${entry#*=}"
     gsha=""
     [ -n "$file" ] && [ -s "$file" ] && gsha="$(genlock_build_sha_from_state "$file")"
     parity_args+=("${gname}=${gsha}")
-    [ -n "$gsha" ] && nonempty=$((nonempty + 1))
   done
   for ge in "${genlock_sha[@]}"; do
     parity_args+=("$ge")
-    [ -n "${ge#*=}" ] && nonempty=$((nonempty + 1))
   done
-  if [ "$nonempty" -ge 2 ]; then
-    echo "  -- cross-box genlock parity (#756) --"
-    local prc=0 parity_out=""
-    parity_out="$(genlock_build_parity_report "${parity_args[@]}")" || prc=$?
-    printf '%s\n' "$parity_out" | sed 's/^/    /'
-    case "$prc" in
-      0)  ok=$((ok + 1)) ;;
-      20) bad=$((bad + 1)) ;;
-      11) unknown=$((unknown + 1)); unknown_boxes+=("genlock_parity") ;;
-      *)  echo "    !! genlock_build_parity_report exited ${prc} (engine error)" >&2; bad=$((bad + 1)) ;;
-    esac
-  else
-    echo "  -- cross-box genlock parity (#756): fewer than 2 boxes report a genlock_build_sha yet"
-    echo "     (opt-in rollout — upgrade each box's bundle-state-server, then this facet engages) --"
-  fi
+  # #756/#758 — ENFORCED (no longer opt-in/dormant, per the user's explicit escalation after
+  # today's imag stale-build incident): the parity engine ALWAYS runs now, unconditionally — its
+  # OWN "fewer than 2 read peers" branch already returns UNKNOWN (11), which this case statement
+  # already treats as a gate-blocking condition exactly like every other facet's UNKNOWN. The old
+  # `nonempty -ge 2` gate existed ONLY to skip calling the engine at all while the fleet's
+  # bundle-state-servers were still being upgraded (#756 rollout) -- that rollout is complete
+  # (strih+stream+imag all report genlock_build_sha as of 2026-07-14 ~21:40), so a box that fails
+  # to report one now is itself a REAL, actionable gap (a stale/unread bundle-state-server), never
+  # a reason to silently skip the whole facet.
+  echo "  -- cross-box genlock parity (#756, ENFORCED) --"
+  local prc=0 parity_out=""
+  parity_out="$(genlock_build_parity_report "${parity_args[@]}")" || prc=$?
+  printf '%s\n' "$parity_out" | sed 's/^/    /'
+  case "$prc" in
+    0)  ok=$((ok + 1)) ;;
+    20) bad=$((bad + 1)) ;;
+    11) unknown=$((unknown + 1)); unknown_boxes+=("genlock_parity") ;;
+    *)  echo "    !! genlock_build_parity_report exited ${prc} (engine error)" >&2; bad=$((bad + 1)) ;;
+  esac
 
   echo
   if [ "$bad" -gt 0 ]; then
