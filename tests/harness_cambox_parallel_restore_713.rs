@@ -195,7 +195,7 @@ fn device_restore_phase_preserves_existing_restore_command_content() {
         "pkill -9 -f 'camera-box-burn-[a-z0-9]'",
         "systemctl restart camera-box 2>/dev/null; true",
         "camera_box_verify_active_cmds",
-        "for _cip in \"$CAM3_IP\" \"$CAM4_IP\" \"$CAM5_IP\" \"$CAM6_IP\"; do",
+        "for _cip in \"$CAM3_IP\" \"$CAM4_IP\" \"$CAM5_IP\" \"$CAM6_IP\" \"$CAM7_IP\"; do",
         "root@\"$PAINTER_IP\" \"pkill -x frame-probe",
         "rig_test_dropin_clear_cmds",
         "systemctl start cam2-painter",
@@ -211,10 +211,10 @@ fn device_restore_phase_preserves_existing_restore_command_content() {
 /// THE HEADLINE REAL PROOF: extract the ACTUAL whole device-restore phase from
 /// recording-e2e.sh (no rig, no ssh — `timeout`/`sshpass` faked as a fast function that just
 /// records it was called and sleeps a short, fixed delay to simulate one ssh round-trip) and
-/// measure wall-clock with ALL_CAMBOX=1 (so cam1 + cam3/4/5/6 + cam2/painter = 6 boxes total are
-/// all active). 6 boxes at a simulated ~300ms round-trip each: SEQUENTIAL would take >=1800ms;
+/// measure wall-clock with ALL_CAMBOX=1 (so cam1 + cam3/4/5/6/7 + cam2/painter = 7 boxes total are
+/// all active). 7 boxes at a simulated ~300ms round-trip each: SEQUENTIAL would take >=2100ms;
 /// PARALLEL must take well under that (bounded here at 900ms, generous margin for CI scheduling
-/// jitter) — and all 6 boxes must still have genuinely been contacted (never skipped for speed).
+/// jitter) — and all 7 boxes must still have genuinely been contacted (never skipped for speed).
 #[test]
 fn whole_device_restore_phase_runs_in_parallel_not_sequentially() {
     let body = cleanup_body(&read("scripts/recording-e2e.sh"));
@@ -243,7 +243,7 @@ fn whole_device_restore_phase_runs_in_parallel_not_sequentially() {
          source {parallel_lib:?}\n\
          source {restart_verify_lib:?}\n\
          source {dropin_lib:?}\n\
-         CAM1_IP=10.9.9.1\nCAM3_IP=10.9.9.3\nCAM4_IP=10.9.9.4\nCAM5_IP=10.9.9.5\nCAM6_IP=10.9.9.6\n\
+         CAM1_IP=10.9.9.1\nCAM3_IP=10.9.9.3\nCAM4_IP=10.9.9.4\nCAM5_IP=10.9.9.5\nCAM6_IP=10.9.9.6\nCAM7_IP=10.9.9.7\n\
          PAINTER_IP=10.9.9.2\nCAMERA_NAME=cam1\n\
          CAM_PW=fake\nRUN_ID=713001\nCLEANUP_SSH_TIMEOUT=5\nALL_CAMBOX=1\n\
          LOG={log:?}\n\
@@ -273,20 +273,20 @@ fn whole_device_restore_phase_runs_in_parallel_not_sequentially() {
 
     let log = fs::read_to_string(&log_path).unwrap_or_default();
     for ip in [
-        "10.9.9.1", "10.9.9.3", "10.9.9.4", "10.9.9.5", "10.9.9.6", "10.9.9.2",
+        "10.9.9.1", "10.9.9.3", "10.9.9.4", "10.9.9.5", "10.9.9.6", "10.9.9.7", "10.9.9.2",
     ] {
         assert!(
             log.contains(ip),
-            "#713: every one of the 6 boxes (cam1 + cam3/4/5/6 + cam2/painter) must actually be \
-             contacted (found in the fake timeout()'s call log) — parallelizing must never skip \
+            "#713/#755: every one of the 7 boxes (cam1 + cam3/4/5/6/7 + cam2/painter) must actually \
+             be contacted (found in the fake timeout()'s call log) — parallelizing must never skip \
              a box for speed. Log:\n{log}"
         );
     }
 
     assert!(
         elapsed.as_millis() < 900,
-        "#713: 6 boxes at a simulated ~300ms round-trip each MUST run in PARALLEL (bounded well \
-         under the ~1800ms+ a SEQUENTIAL phase would take), not one after another. Elapsed: {:?}",
+        "#713: 7 boxes at a simulated ~300ms round-trip each MUST run in PARALLEL (bounded well \
+         under the ~2100ms+ a SEQUENTIAL phase would take), not one after another. Elapsed: {:?}",
         elapsed
     );
 }

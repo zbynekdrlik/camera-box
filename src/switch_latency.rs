@@ -43,7 +43,7 @@
 /// gate is specifically about the cam2→camera OPTICAL-INJECTION latency (see the module doc
 /// above) — cam2 is the painter, not an optical-injection camera, so it correctly has no place
 /// in this set, unlike the digital-contiguity `CAMERA_UNDER_TEST_NODES` which DOES include it.
-pub const OPTICAL_INJECTION_NODES: [&str; 5] = ["cam1", "cam3", "cam4", "cam5", "cam6"];
+pub const OPTICAL_INJECTION_NODES: [&str; 6] = ["cam1", "cam3", "cam4", "cam5", "cam6", "cam7"];
 
 /// The #624 issue's fixed cross-camera spread threshold, in milliseconds: half a 30fps
 /// program frame (`1000.0 / 30.0 / 2.0 ≈ 16.667`, rounded down to the issue's literal `16ms`).

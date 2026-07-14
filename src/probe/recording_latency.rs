@@ -127,6 +127,11 @@ pub const BURN_RUN_ID_CAM5: u32 = 911010;
 /// camera (fleet growth 4→6, #451). See [`BURN_RUN_ID_CAM4`]'s doc — same role, same mutual
 /// exclusivity, fresh id outside every id already in use.
 pub const BURN_RUN_ID_CAM6: u32 = 911011;
+/// #755 — cam7's capture-burn run_id, extending the #24/#624 mechanism to the 7th physical
+/// camera (fleet growth 6→7, #753 — the new Elgato 4K S box at 10.77.9.67). See
+/// [`BURN_RUN_ID_CAM4`]'s doc — same role, same mutual exclusivity, fresh id outside every id
+/// already in use (911001..911004/911007..911011).
+pub const BURN_RUN_ID_CAM7: u32 = 911012;
 
 /// Per-hop latency over the analyzed window, with the #108 stability dimensions
 /// (jitter + drift) on top of the reused [`LatencyStats`] percentiles.

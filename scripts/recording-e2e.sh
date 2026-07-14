@@ -177,6 +177,7 @@ CAM3_IP="${CAM3_IP:-10.77.9.63}"
 CAM4_IP="${CAM4_IP:-10.77.9.64}"
 CAM5_IP="${CAM5_IP:-10.77.9.65}"
 CAM6_IP="${CAM6_IP:-10.77.9.66}"
+CAM7_IP="${CAM7_IP:-10.77.9.67}"
 STRIH=10.77.9.202
 STREAM=10.77.9.204
 # #462 (EPIC #466 Topology v2): imag-nb — the NEW 60fps low-latency IMAG cutter of all 6 NDI
@@ -272,6 +273,9 @@ BURN_CAM2_RUN_ID="${BURN_CAM2_RUN_ID:-911009}"
 # defaults exactly.
 BURN_CAM5_RUN_ID="${BURN_CAM5_RUN_ID:-911010}"
 BURN_CAM6_RUN_ID="${BURN_CAM6_RUN_ID:-911011}"
+# #755: cam7 capture-burn run_id (fleet growth 6→7, #753), deployed ONLY under ALL_CAMBOX=1.
+# Match recording-verdict's BURN_RUN_ID_CAM7 (911012) default exactly.
+BURN_CAM7_RUN_ID="${BURN_CAM7_RUN_ID:-911012}"
 # #24 item 1: which of the reserved ids above belongs to the box actually filling the
 # SOURCE-camera role THIS run ($CAMERA_NAME, resolved via CAM= at the top; NEVER cam2 — see
 # camera_strih_route()'s own doc). The ids are already mutually distinct and already read
@@ -288,6 +292,7 @@ case "$CAMERA_NAME" in
   cam4) SRC_BURN_RUN_ID="$BURN_CAM4_RUN_ID" ;;
   cam5) SRC_BURN_RUN_ID="$BURN_CAM5_RUN_ID" ;;
   cam6) SRC_BURN_RUN_ID="$BURN_CAM6_RUN_ID" ;;
+  cam7) SRC_BURN_RUN_ID="$BURN_CAM7_RUN_ID" ;;
 esac
 OUTDIR="${OUTDIR:-/tmp/recording-e2e-${RUN_ID}}"
 mkdir -p "$OUTDIR"
@@ -425,12 +430,19 @@ check_recordings_budget() {
 }
 check_recordings_budget strih  "$STRIH"
 check_recordings_budget stream "$STREAM"
+# #756 — imag is SSH-reachable, so read its deployed genlock build SHA directly (the Windows boxes'
+# SHAs flow in via their --win-state bundle-state JSON) and hand it to the gate's CROSS-BOX parity
+# assert. Best-effort: an unreachable imag yields "" -> the parity facet stays dormant until >=2
+# boxes report a SHA (opt-in rollout), never a spurious refuse. Mirrors the [4d/8] imag ssh (l.1412).
+IMAG_GENLOCK_SHA="$(sshpass -p "${IMAG_PW:-newlevel}" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 \
+  "${IMAG_USER:-newlevel}@$IMAG_IP" 'cat /opt/obs-genlock/GENLOCK_BUILD_SHA.txt 2>/dev/null | head -1' 2>/dev/null | tr -d '[:space:]' || true)"
 # ALWAYS pass --win-state for strih AND stream (NOT conditional on the file existing): an absent file
 # is UNKNOWN -> the gate REFUSES, never a silent pass with a box's build unverified.
 "$HERE/version-integrity-gate.sh" \
   ${VERSION_GATE_MANIFEST:+--manifest "$VERSION_GATE_MANIFEST"} \
   --win-state "strih=$VERSION_STRIH_STATE" \
-  --win-state "stream=$VERSION_STREAM_STATE"
+  --win-state "stream=$VERSION_STREAM_STATE" \
+  --genlock-sha "imag=$IMAG_GENLOCK_SHA"
 
 # dev1<->painter clock-offset gate — ALL_CAMBOX sweep ONLY (#326, #312 Phase-2 robustness). The
 # all-cambox sweep ([6/8] below) stamps each program-switch WINDOW boundary on dev1's
@@ -605,7 +617,7 @@ $(camera_box_verify_active_cmds "$CAMERA_NAME (source, $CAM1_IP)")"
     # camboxes are active — see scripts/lib/cambox-parallel-restore.sh for the full incident.
     # #713: the arrays are now initialized ONCE, above (shared with cam1 + cam2/painter) --
     # this loop just keeps appending into them.
-    for _cip in "$CAM3_IP" "$CAM4_IP" "$CAM5_IP" "$CAM6_IP"; do
+    for _cip in "$CAM3_IP" "$CAM4_IP" "$CAM5_IP" "$CAM6_IP" "$CAM7_IP"; do
       # #668: recover the cam name from its IP (needed for its systemd-run unit name below) —
       # keeps the loop header itself unchanged (tests/harness_recording_e2e_cleanup_resilient.rs
       # locates this loop by its exact `for _cip in "$CAM3_IP"` text).
@@ -614,6 +626,7 @@ $(camera_box_verify_active_cmds "$CAMERA_NAME (source, $CAM1_IP)")"
         "$CAM4_IP") _ccn="cam4" ;;
         "$CAM5_IP") _ccn="cam5" ;;
         "$CAM6_IP") _ccn="cam6" ;;
+        "$CAM7_IP") _ccn="cam7" ;;
       esac
       # #668: same stop-the-unit-first ordering as cam1 above — never let the pkill race a respawn.
       # #712: backgrounded ( ... ) & — all 4 boxes restore IN PARALLEL, collected+waited below.
@@ -726,12 +739,13 @@ systemctl start cam2-painter 2>/dev/null || true"
   timeout "$CLEANUP_SSH_TIMEOUT" sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$CAM1_IP" \
     "$(camera_box_verify_active_cmds "$CAMERA_NAME (source, $CAM1_IP) FINAL")" || true
   if [ "${ALL_CAMBOX:-0}" = "1" ]; then
-    for _cfip in "$CAM3_IP" "$CAM4_IP" "$CAM5_IP" "$CAM6_IP"; do
+    for _cfip in "$CAM3_IP" "$CAM4_IP" "$CAM5_IP" "$CAM6_IP" "$CAM7_IP"; do
       case "$_cfip" in
         "$CAM3_IP") _cfcn="cam3" ;;
         "$CAM4_IP") _cfcn="cam4" ;;
         "$CAM5_IP") _cfcn="cam5" ;;
         "$CAM6_IP") _cfcn="cam6" ;;
+        "$CAM7_IP") _cfcn="cam7" ;;
       esac
       timeout "$CLEANUP_SSH_TIMEOUT" sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$_cfip" \
         "$(camera_box_verify_active_cmds "$_cfcn ($_cfip) FINAL")" || true
@@ -974,7 +988,8 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
     "cam3=$CAM3_IP=$BURN_CAM3_RUN_ID" \
     "cam4=$CAM4_IP=$BURN_CAM4_RUN_ID" \
     "cam5=$CAM5_IP=$BURN_CAM5_RUN_ID" \
-    "cam6=$CAM6_IP=$BURN_CAM6_RUN_ID"; do
+    "cam6=$CAM6_IP=$BURN_CAM6_RUN_ID" \
+    "cam7=$CAM7_IP=$BURN_CAM7_RUN_ID"; do
     _cn="${_cn_ip_burn%%=*}"; _crest="${_cn_ip_burn#*=}"; _cip="${_crest%%=*}"; _cburn="${_crest#*=}"
     echo "[2b/8] $_cn (${_cip}) — probe-featured camera-box with its OWN capture BURN (run_id=$_cburn, #624/#312 ALL_CAMBOX)"
     _cbin="/tmp/camera-box-burn-${_cn}-${RUN_ID}"
@@ -2443,6 +2458,7 @@ continuing WITHOUT the imag partial; the merge below will omit --merge-partials 
     --burn-cam1-run-id "$BURN_CAM1_RUN_ID" --burn-cam2-run-id "$BURN_CAM2_RUN_ID" \
     --burn-cam3-run-id "$BURN_CAM3_RUN_ID" --burn-cam4-run-id "$BURN_CAM4_RUN_ID" \
     --burn-cam5-run-id "$BURN_CAM5_RUN_ID" --burn-cam6-run-id "$BURN_CAM6_RUN_ID" \
+    --burn-cam7-run-id "$BURN_CAM7_RUN_ID" \
     --burn-strih-run-id "$BURN_STRIH_RUN_ID" --burn-stream-run-id "$BURN_STREAM_RUN_ID" \
     --av-expected-ms "$AV_EXPECTED_MS" \
     --out-dir "$OUTDIR/pixel-proof" --json "$REPORT_JSON")

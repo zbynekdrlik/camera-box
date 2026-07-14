@@ -47,7 +47,7 @@ pub fn analyzed_span_long_enough(analyzed_span_secs: f64, min_secs: f64) -> bool
 /// original "camera under test"; #24 extends the SAME role to cam3/cam4, and #312 further to
 /// cam2/cam5/cam6 (all six emit 60fps NDI — mirrors `recording-verdict.rs`'s
 /// `CAMERA_UNDER_TEST_NODES`, which this is kept in sync with).
-const CAMERA_UNDER_TEST_NODES: [&str; 6] = ["cam1", "cam2", "cam3", "cam4", "cam5", "cam6"];
+const CAMERA_UNDER_TEST_NODES: [&str; 7] = ["cam1", "cam2", "cam3", "cam4", "cam5", "cam6", "cam7"];
 
 /// #461 — the imag-nb node label (EPIC #466 Topology v2). imag records ON ITS OWN recording at
 /// its own rate (60fps, low-latency IMAG) — neither the camera-under-test's `capture_fps` (read

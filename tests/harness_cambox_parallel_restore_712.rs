@@ -147,8 +147,9 @@ fn all_cambox_loop_preserves_existing_restore_command_content() {
     let body = cleanup_body(&read("scripts/recording-e2e.sh"));
     let region = loop_region(&body);
     for needle in [
-        "for _cip in \"$CAM3_IP\" \"$CAM4_IP\" \"$CAM5_IP\" \"$CAM6_IP\"; do",
+        "for _cip in \"$CAM3_IP\" \"$CAM4_IP\" \"$CAM5_IP\" \"$CAM6_IP\" \"$CAM7_IP\"; do",
         "\"$CAM3_IP\") _ccn=\"cam3\" ;;",
+        "\"$CAM7_IP\") _ccn=\"cam7\" ;;",
         "systemctl stop camera-box-burn-",
         "pkill -9 -f 'camera-box-burn-[a-z0-9]'",
         "systemctl restart camera-box 2>/dev/null; true",
@@ -244,8 +245,8 @@ fn cambox_parallel_wait_and_report_attributes_pass_and_fail_correctly() {
 /// as a standalone, sourceable snippet.
 fn loop_snippet(s: &str) -> String {
     let start = s
-        .find("for _cip in \"$CAM3_IP\" \"$CAM4_IP\" \"$CAM5_IP\" \"$CAM6_IP\"; do")
-        .expect("#712: recording-e2e.sh must have the cam3/4/5/6 restore loop");
+        .find("for _cip in \"$CAM3_IP\" \"$CAM4_IP\" \"$CAM5_IP\" \"$CAM6_IP\" \"$CAM7_IP\"; do")
+        .expect("#712/#755: recording-e2e.sh must have the cam3-7 restore loop");
     let rel_end = s[start..]
         .find("\n    done\n")
         .expect("#712: the loop must close with `done`");
@@ -279,7 +280,7 @@ fn all_cambox_restore_loop_runs_in_parallel_not_sequentially() {
          set -uo pipefail\n\
          source {parallel_lib:?}\n\
          source {restart_verify_lib:?}\n\
-         CAM3_IP=10.9.9.3\nCAM4_IP=10.9.9.4\nCAM5_IP=10.9.9.5\nCAM6_IP=10.9.9.6\n\
+         CAM3_IP=10.9.9.3\nCAM4_IP=10.9.9.4\nCAM5_IP=10.9.9.5\nCAM6_IP=10.9.9.6\nCAM7_IP=10.9.9.7\n\
          CAM_PW=fake\nRUN_ID=712001\nCLEANUP_SSH_TIMEOUT=5\n\
          LOG={log:?}\n\
          timeout() {{ shift; echo \"CALLED $*\" >> \"$LOG\"; sleep 0.3; return 0; }}\n\
@@ -310,18 +311,19 @@ fn all_cambox_restore_loop_runs_in_parallel_not_sequentially() {
     );
 
     let log = fs::read_to_string(&log_path).unwrap_or_default();
-    for ip in ["10.9.9.3", "10.9.9.4", "10.9.9.5", "10.9.9.6"] {
+    for ip in ["10.9.9.3", "10.9.9.4", "10.9.9.5", "10.9.9.6", "10.9.9.7"] {
         assert!(
             log.contains(ip),
-            "#712: every one of the 4 camboxes must actually be contacted (found in the fake \
-             timeout()'s call log) — parallelizing must never skip a box for speed. Log:\n{log}"
+            "#712/#755: every one of the 5 camboxes (cam3-7) must actually be contacted (found in \
+             the fake timeout()'s call log) — parallelizing must never skip a box for speed. \
+             Log:\n{log}"
         );
     }
 
     assert!(
         elapsed.as_millis() < 900,
-        "#712: 4 boxes at a simulated ~300ms round-trip each MUST run in PARALLEL (bounded well \
-         under the ~1200ms+ a SEQUENTIAL loop would take), not one after another. Elapsed: {:?}",
+        "#712/#755: the cam3-7 boxes at a simulated ~300ms round-trip each MUST run in PARALLEL \
+         (bounded well under the sequential SUM), not one after another. Elapsed: {:?}",
         elapsed
     );
 }

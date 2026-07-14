@@ -53,7 +53,8 @@ use camera_box::probe::recording_latency::{
     n_camera_strih_samples, painter_internal_gen_to_flip, per_frame_latency_csv_rows,
     strih_stream_samples, strih_stream_samples_from_stream, write_latency_csv, HopLatency,
     LatencySample, RunIds, BURN_RUN_ID_CAM1, BURN_RUN_ID_CAM2, BURN_RUN_ID_CAM3, BURN_RUN_ID_CAM4,
-    BURN_RUN_ID_CAM5, BURN_RUN_ID_CAM6, BURN_RUN_ID_IMAG, BURN_RUN_ID_STREAM, BURN_RUN_ID_STRIH,
+    BURN_RUN_ID_CAM5, BURN_RUN_ID_CAM6, BURN_RUN_ID_CAM7, BURN_RUN_ID_IMAG, BURN_RUN_ID_STREAM,
+    BURN_RUN_ID_STRIH,
 };
 use camera_box::probe::recording_partial::RecordingPartial;
 use camera_box::probe::recording_segments::{
@@ -198,6 +199,9 @@ struct Args {
     /// #312: cam6's capture-burn run_id (fleet growth 4→6, #451). See `--burn-cam3-run-id`.
     #[arg(long, default_value_t = BURN_RUN_ID_CAM6)]
     burn_cam6_run_id: u32,
+    /// #755: cam7's capture-burn run_id (fleet growth 6→7, #753). See `--burn-cam3-run-id`.
+    #[arg(long, default_value_t = BURN_RUN_ID_CAM7)]
+    burn_cam7_run_id: u32,
     /// #108: cam2's painter run_id (the `--run-id` the cam2 painter used). When set,
     /// cam2's QR is matched EXACTLY by this run_id, so the strih burn forwarded into
     /// the stream recording can NEVER be mistaken for cam2. Strongly recommended for
@@ -472,7 +476,7 @@ const OPTICAL_UNDECODABLE_RATE_MAX: f64 = 0.005;
 /// NOTE: this is the CONTIGUITY/loss set. It is deliberately BROADER than
 /// [`OPTICAL_INJECTION_NODES`] (below), which drives the cam2→camera OPTICAL-INJECTION latency
 /// loop and excludes cam2 itself (cam2 cannot optically film its own monitor).
-const CAMERA_UNDER_TEST_NODES: [&str; 6] = ["cam1", "cam2", "cam3", "cam4", "cam5", "cam6"];
+const CAMERA_UNDER_TEST_NODES: [&str; 7] = ["cam1", "cam2", "cam3", "cam4", "cam5", "cam6", "cam7"];
 
 /// #312 — the SUBSET of [`CAMERA_UNDER_TEST_NODES`] that physically films cam2's painted
 /// monitor via the HDMI-splitter optical loopback (a real lens + capture card pointed at cam2's
@@ -483,7 +487,7 @@ const CAMERA_UNDER_TEST_NODES: [&str; 6] = ["cam1", "cam2", "cam3", "cam4", "cam
 /// framebuffer paint, not a real optical-injection latency). cam2 still gets its own DIGITAL
 /// contiguity/loss proof via [`CAMERA_UNDER_TEST_NODES`] above — only this narrower optical
 /// latency measurement excludes it.
-const OPTICAL_INJECTION_NODES: [&str; 5] = ["cam1", "cam3", "cam4", "cam5", "cam6"];
+const OPTICAL_INJECTION_NODES: [&str; 6] = ["cam1", "cam3", "cam4", "cam5", "cam6", "cam7"];
 
 /// The full trustworthy verdict for one node: the contiguity result plus, when not
 /// contiguous, every missing id classified from the pixels.
@@ -2958,6 +2962,7 @@ fn build_and_print_verdict(
         let cam4_ids = burn_ids_in(cam1_source, args.burn_cam4_run_id);
         let cam5_ids = burn_ids_in(cam1_source, args.burn_cam5_run_id);
         let cam6_ids = burn_ids_in(cam1_source, args.burn_cam6_run_id);
+        let cam7_ids = burn_ids_in(cam1_source, args.burn_cam7_run_id);
         // #632 gap 2: resolve which CAMERA_UNDER_TEST_NODES entry actually produced ids in this
         // run, for the cam2→SOURCE V4L2 capture-drop label further down (independent of this
         // `if let` block's scope).
@@ -2968,6 +2973,7 @@ fn build_and_print_verdict(
             !cam4_ids.is_empty(),
             !cam5_ids.is_empty(),
             !cam6_ids.is_empty(),
+            !cam7_ids.is_empty(),
         );
         let strih_ids_seq = burn_ids_in(stream_frames, args.burn_strih_run_id);
         let stream_ids_seq = burn_ids_in(stream_frames, args.burn_stream_run_id);
@@ -2977,6 +2983,7 @@ fn build_and_print_verdict(
             || !cam4_ids.is_empty()
             || !cam5_ids.is_empty()
             || !cam6_ids.is_empty()
+            || !cam7_ids.is_empty()
             || !strih_ids_seq.is_empty()
             || !stream_ids_seq.is_empty();
         if any_burn {
@@ -2985,19 +2992,21 @@ fn build_and_print_verdict(
                 "=== #174 FULL-CHAIN per-hop verdict (camera-under-test from the {cam1_source_label}; strih/stream from the stream recording) ==="
             );
             println!(
-                "  burn ids: cam1={} cam2={} cam3={} cam4={} cam5={} cam6={} (from {cam1_source_label}) strih={} stream={} (stream recording)",
+                "  burn ids: cam1={} cam2={} cam3={} cam4={} cam5={} cam6={} cam7={} (from {cam1_source_label}) strih={} stream={} (stream recording)",
                 cam1_ids.len(),
                 cam2_ids.len(),
                 cam3_ids.len(),
                 cam4_ids.len(),
                 cam5_ids.len(),
                 cam6_ids.len(),
+                cam7_ids.len(),
                 strih_ids_seq.len(),
                 stream_ids_seq.len()
             );
             report["full_chain"]["burn_ids_present"] = serde_json::json!({
                 "cam1": cam1_ids.len(), "cam2": cam2_ids.len(), "cam3": cam3_ids.len(),
                 "cam4": cam4_ids.len(), "cam5": cam5_ids.len(), "cam6": cam6_ids.len(),
+                "cam7": cam7_ids.len(),
                 "strih": strih_ids_seq.len(), "stream": stream_ids_seq.len(),
             });
             report["full_chain"]["cam1_source"] = serde_json::json!(cam1_source_label);
@@ -3015,19 +3024,21 @@ fn build_and_print_verdict(
                 || !cam3_ids.is_empty()
                 || !cam4_ids.is_empty()
                 || !cam5_ids.is_empty()
-                || !cam6_ids.is_empty();
+                || !cam6_ids.is_empty()
+                || !cam7_ids.is_empty();
             if strih_data.is_some() && !camera_under_test_measured {
                 eprintln!(
                     "WARNING: --strih supplied but NO camera-under-test burn found in the strih \
-                     recording (checked cam1={}, cam2={}, cam3={}, cam4={}, cam5={}, cam6={}) — \
-                     the camera→strih hop is UNMEASURED this run (burn OFF or not reaching \
-                     strih). A ZERO-loss headline below covers strih/stream ONLY.",
+                     recording (checked cam1={}, cam2={}, cam3={}, cam4={}, cam5={}, cam6={}, \
+                     cam7={}) — the camera→strih hop is UNMEASURED this run (burn OFF or not \
+                     reaching strih). A ZERO-loss headline below covers strih/stream ONLY.",
                     args.burn_cam1_run_id,
                     args.burn_cam2_run_id,
                     args.burn_cam3_run_id,
                     args.burn_cam4_run_id,
                     args.burn_cam5_run_id,
-                    args.burn_cam6_run_id
+                    args.burn_cam6_run_id,
+                    args.burn_cam7_run_id
                 );
                 report["full_chain"]["cam1_unmeasured"] = serde_json::json!(true);
             }
@@ -3049,6 +3060,7 @@ fn build_and_print_verdict(
                 args.burn_cam4_run_id,
                 args.burn_cam5_run_id,
                 args.burn_cam6_run_id,
+                args.burn_cam7_run_id,
                 args.burn_strih_run_id,
                 args.burn_stream_run_id,
             ];
@@ -3234,6 +3246,27 @@ fn build_and_print_verdict(
                         ),
                     },
                     !cam6_ids.is_empty(),
+                    cam1_optical,
+                    cam1_carried_colour,
+                ),
+                (
+                    // #755 — cam7 (fleet growth 6→7, #753), see the cam3 comment above.
+                    NodeSpec {
+                        node: "cam7",
+                        burn_run_id: args.burn_cam7_run_id,
+                        rate: BurnRate::PerEmittedFrame,
+                        source: cam1_source,
+                        rec_path: cam1_rec_path,
+                        cam2_run_id: cam2_pin,
+                        step: node_render_step(
+                            "cam7",
+                            args.strih_emit_fps,
+                            args.stream_capture_fps,
+                            args.refresh_hz,
+                            args.capture_fps,
+                        ),
+                    },
+                    !cam7_ids.is_empty(),
                     cam1_optical,
                     cam1_carried_colour,
                 ),
@@ -3797,6 +3830,7 @@ fn build_and_print_verdict(
                     args.burn_cam4_run_id,
                     args.burn_cam5_run_id,
                     args.burn_cam6_run_id,
+                    args.burn_cam7_run_id,
                     args.burn_strih_run_id,
                     args.burn_stream_run_id,
                 ];
@@ -4088,6 +4122,7 @@ fn build_and_print_verdict(
                     args.burn_cam4_run_id,
                     args.burn_cam5_run_id,
                     args.burn_cam6_run_id,
+                    args.burn_cam7_run_id,
                     args.burn_strih_run_id,
                     args.burn_stream_run_id,
                 ];
@@ -4117,8 +4152,9 @@ fn build_and_print_verdict(
                         "cam4" => args.burn_cam4_run_id,
                         "cam5" => args.burn_cam5_run_id,
                         "cam6" => args.burn_cam6_run_id,
+                        "cam7" => args.burn_cam7_run_id,
                         _ => unreachable!(
-                            "OPTICAL_INJECTION_NODES is exactly cam1/cam3/cam4/cam5/cam6"
+                            "OPTICAL_INJECTION_NODES is exactly cam1/cam3/cam4/cam5/cam6/cam7"
                         ),
                     };
                     let other_burns: Vec<u32> = latency_all_burns
@@ -4270,6 +4306,7 @@ fn build_and_print_verdict(
                         args.burn_cam4_run_id,
                         args.burn_cam5_run_id,
                         args.burn_cam6_run_id,
+                        args.burn_cam7_run_id,
                     ];
                     let delivery_samples = n_camera_strih_samples(
                         strih_frames,
@@ -4642,6 +4679,7 @@ fn resolve_camera_under_test_label(
     cam4_present: bool,
     cam5_present: bool,
     cam6_present: bool,
+    cam7_present: bool,
 ) -> &'static str {
     if !cam1_present {
         for (node, present) in [
@@ -4650,6 +4688,7 @@ fn resolve_camera_under_test_label(
             ("cam4", cam4_present),
             ("cam5", cam5_present),
             ("cam6", cam6_present),
+            ("cam7", cam7_present),
         ] {
             if present {
                 return node;
@@ -4671,6 +4710,7 @@ fn burn_run_id_for_camera(node: &str, args: &Args) -> u32 {
         "cam4" => args.burn_cam4_run_id,
         "cam5" => args.burn_cam5_run_id,
         "cam6" => args.burn_cam6_run_id,
+        "cam7" => args.burn_cam7_run_id,
         _ => unreachable!(
             "burn_run_id_for_camera called with {node:?} — expected a CAMERA_UNDER_TEST_NODES entry"
         ),
@@ -5288,7 +5328,7 @@ mod tests {
             "#312: cam2 must NOT be an optical-injection node — it is the painter itself, with \
              no second camera-vs-monitor optical hop to measure"
         );
-        for cam in ["cam1", "cam3", "cam4", "cam5", "cam6"] {
+        for cam in ["cam1", "cam3", "cam4", "cam5", "cam6", "cam7"] {
             assert!(
                 super::CAMERA_UNDER_TEST_NODES.contains(&cam)
                     && super::OPTICAL_INJECTION_NODES.contains(&cam),
@@ -5327,6 +5367,7 @@ mod tests {
             super::BURN_RUN_ID_STREAM,
             super::BURN_RUN_ID_IMAG,
             super::BURN_RUN_ID_CAM4,
+            super::BURN_RUN_ID_CAM7,
         ];
         assert!(
             !other_reserved.contains(&args.burn_cam3_run_id),
@@ -5337,23 +5378,24 @@ mod tests {
         );
     }
 
-    /// #312 — cam2/cam5/cam6's default capture-burn run_ids must ALSO be unique among every
-    /// other reserved id (mirrors the #24 cam3 regression test above — the same class of latent
-    /// collision bug is exactly what reserving a FRESH id per new camera-under-test guards
-    /// against). All NINE reserved ids must be pairwise distinct.
+    /// #312/#755 — cam2/cam5/cam6/cam7's default capture-burn run_ids must ALSO be unique among
+    /// every other reserved id (mirrors the #24 cam3 regression test above — the same class of
+    /// latent collision bug is exactly what reserving a FRESH id per new camera-under-test guards
+    /// against). All TEN reserved ids must be pairwise distinct.
     #[test]
-    fn all_nine_reserved_burn_run_ids_are_pairwise_distinct_312() {
+    fn all_ten_reserved_burn_run_ids_are_pairwise_distinct_755() {
         use clap::Parser;
         use std::collections::HashSet;
 
         let args = super::Args::parse_from(["recording-verdict"]);
-        let ids: [(&str, u32); 9] = [
+        let ids: [(&str, u32); 10] = [
             ("cam1", super::BURN_RUN_ID_CAM1),
             ("cam2", args.burn_cam2_run_id),
             ("cam3", super::BURN_RUN_ID_CAM3),
             ("cam4", super::BURN_RUN_ID_CAM4),
             ("cam5", args.burn_cam5_run_id),
             ("cam6", args.burn_cam6_run_id),
+            ("cam7", args.burn_cam7_run_id),
             ("strih", super::BURN_RUN_ID_STRIH),
             ("stream", super::BURN_RUN_ID_STREAM),
             ("imag", super::BURN_RUN_ID_IMAG),
@@ -5663,6 +5705,7 @@ mod tests {
 
     const CAM5B: u32 = super::BURN_RUN_ID_CAM5; // #312 cam5's OWN per-EMIT capture burn run_id (911010)
     const CAM6B: u32 = super::BURN_RUN_ID_CAM6; // #312 cam6's OWN per-EMIT capture burn run_id (911011)
+    const CAM7B: u32 = super::BURN_RUN_ID_CAM7; // #755 cam7's OWN per-EMIT capture burn run_id (911012)
 
     /// Build a window of N delivered frames carrying BOTH cam5's and cam6's digital burns in
     /// every frame (a synthetic-only shortcut — in any REAL run only one of cam1/cam2/cam3/cam4/
@@ -5740,6 +5783,74 @@ mod tests {
             v["full_chain"]["burn_ids_present"]["cam6"],
             serde_json::json!(60),
             "#312: all 60 cam6 burn ids decoded: {}",
+            v["full_chain"]["burn_ids_present"]
+        );
+    }
+
+    /// #755 — a window of N delivered frames carrying cam7's OWN digital capture-burn in every
+    /// frame (mirrors [`window_cam5_and_cam6`] for the 7th camera, #753).
+    fn window_cam7(n: u32, with_stream: bool) -> Vec<RecordingFrame> {
+        (0..n)
+            .map(|i| {
+                let mut ps: Vec<(u32, u32)> = vec![(CAM2, 100 + i), (CAM7B, 9500 + i)];
+                ps.push((STRIH, 1670 + 3 * i));
+                if with_stream {
+                    ps.push((STREAM, 12000 + 3 * i));
+                }
+                frame(i as u64, &ps)
+            })
+            .collect()
+    }
+
+    /// #755 — extends the #186 per-node digital-burn contiguity check to CAM7 (fleet growth 6→7,
+    /// #753). A contiguous cam7 burn end-to-end ⇒ the fused verdict reports node "cam7" ZERO loss,
+    /// exactly like cam5/cam6 — locks that the new `NodeSpec` tuple, the `--burn-cam7-run-id`
+    /// plumbing, and the `CAMERA_UNDER_TEST_NODES` membership all wired correctly (a missing site
+    /// would leave cam7 unmeasured / absent from the report, the "NO SAMPLES" mode #286 fixed).
+    #[test]
+    fn cam7_digital_burn_extends_the_186_contiguity_check_755() {
+        use super::{build_and_print_verdict, Cam1Source, DecodedRec};
+        use clap::Parser;
+
+        let args = super::Args::parse_from(["recording-verdict", "--min-secs", "1"]);
+        let strih_frames = window_cam7(60, false);
+        let stream_frames = window_cam7(60, true);
+
+        let (v, pass) = build_and_print_verdict(
+            &args,
+            Some(DecodedRec {
+                frames: strih_frames,
+                rec_path: None,
+            }),
+            Some(DecodedRec {
+                frames: stream_frames,
+                rec_path: None,
+            }),
+            Cam1Source::Absent,
+            None,
+            None,
+            None, // #461: no imag frames in this test
+            None, // #312 item 2 (PR A): no carried A/V-sync inputs in this test
+        )
+        .expect("verdict");
+
+        assert!(pass, "#755: contiguous cam7 burn ⇒ overall PASS: {v}");
+        let loss = &v["full_chain"]["loss"];
+        assert_eq!(
+            loss["cam7"]["zero_loss"],
+            serde_json::json!(true),
+            "#755: cam7 must be verdicted ZERO loss when its OWN burn is contiguous: {loss}"
+        );
+        for absent in ["cam1", "cam3", "cam4", "cam5", "cam6"] {
+            assert!(
+                loss.get(absent).is_none(),
+                "#755: {absent} never emitted this run ⇒ must NOT appear in the loss report: {loss}"
+            );
+        }
+        assert_eq!(
+            v["full_chain"]["burn_ids_present"]["cam7"],
+            serde_json::json!(60),
+            "#755: all 60 cam7 burn ids decoded: {}",
             v["full_chain"]["burn_ids_present"]
         );
     }
@@ -7750,11 +7861,11 @@ mod tests {
     /// so their loss/latency contribution is identical either way).
     #[test]
     fn all_cambox_av_sync_gate_pass_does_not_change_the_overall_verdict_312_624() {
-        // 5 windows (cam1/cam3/cam4/cam5/cam6), 20 frames each = 100 frames, optical ticks
-        // 1000..=1099 contiguous across ALL windows. emit_log covers the FULL 1000..=1099 range
-        // so EVERY window (and cam2's whole-recording pool over all 100 frames) decodes a dense,
-        // clean 500ms offset -- no Unknown camera anywhere.
-        const N: usize = 100;
+        // 6 windows (cam1/cam3/cam4/cam5/cam6/cam7 — #755), 20 frames each = 120 frames, optical
+        // ticks 1000..=1119 contiguous across ALL windows. emit_log covers the FULL 1000..=1119
+        // range so EVERY window (and cam2's whole-recording pool over all 120 frames) decodes a
+        // dense, clean 500ms offset -- no Unknown camera anywhere.
+        const N: usize = 120;
         let emit_log: Vec<(u8, u32, i64)> = (0..N).map(|k| (k as u8, 1000 + k as u32, 0)).collect();
         let audio_markers: Vec<(f64, u8)> = (0..N)
             .map(|k| (k as f64 / 30.0 - 0.5, k as u8)) // video_ts(1000+k) - 0.5s = k/30.0 - 0.5
@@ -7771,6 +7882,7 @@ mod tests {
             ("CAM4", super::BURN_RUN_ID_CAM4, 790_000_000),
             ("CAM5", CAM5B, 805_000_000),
             ("CAM6", CAM6B, 815_000_000),
+            ("CAM7", CAM7B, 810_000_000),
         ];
 
         // expected_ms=500.0 matches the constructed clean offset exactly -> every camera passes.
@@ -7782,7 +7894,7 @@ mod tests {
             !with_av["all_cambox_av_sync"].is_null(),
             "sanity: the WITH-av_sync run must actually have reported the block: {with_av}"
         );
-        for cam in ["cam1", "cam2", "cam3", "cam4", "cam5", "cam6"] {
+        for cam in ["cam1", "cam2", "cam3", "cam4", "cam5", "cam6", "cam7"] {
             assert_eq!(
                 with_av["all_cambox_av_sync"][cam]["verdict"],
                 serde_json::json!("measured"),
@@ -8546,6 +8658,7 @@ mod tests {
                 super::BURN_RUN_ID_CAM4,
                 CAM5B,
                 CAM6B,
+                CAM7B,
                 STRIH
             ]),
             "strih partial carries every CAMERA_UNDER_TEST_NODES id (#632) + strih"
@@ -8559,6 +8672,7 @@ mod tests {
                 super::BURN_RUN_ID_CAM4,
                 CAM5B,
                 CAM6B,
+                CAM7B,
                 STRIH,
                 STREAM
             ]),
@@ -8577,12 +8691,12 @@ mod tests {
     fn resolve_camera_under_test_label_defaults_to_cam1() {
         use super::resolve_camera_under_test_label;
         assert_eq!(
-            resolve_camera_under_test_label(true, false, false, false, false, false),
+            resolve_camera_under_test_label(true, false, false, false, false, false, false),
             "cam1",
             "cam1 present ⇒ cam1 (even if, hypothetically, another id were also present)"
         );
         assert_eq!(
-            resolve_camera_under_test_label(false, false, false, false, false, false),
+            resolve_camera_under_test_label(false, false, false, false, false, false, false),
             "cam1",
             "nothing present ⇒ the pre-#632 default, unchanged"
         );
@@ -8595,29 +8709,34 @@ mod tests {
     fn resolve_camera_under_test_label_resolves_to_the_deployed_camera() {
         use super::resolve_camera_under_test_label;
         assert_eq!(
-            resolve_camera_under_test_label(false, false, true, false, false, false),
+            resolve_camera_under_test_label(false, false, true, false, false, false, false),
             "cam3",
             "#632: cam1 absent, cam3 present ⇒ label must be cam3, not the stale cam1"
         );
         assert_eq!(
-            resolve_camera_under_test_label(false, false, false, true, false, false),
+            resolve_camera_under_test_label(false, false, false, true, false, false, false),
             "cam4",
             "#632: cam4 deployed ⇒ cam4"
         );
         assert_eq!(
-            resolve_camera_under_test_label(false, true, false, false, false, false),
+            resolve_camera_under_test_label(false, true, false, false, false, false, false),
             "cam2",
             "#632: cam2 (the fixed painter, ALSO camera-under-test role per #312) ⇒ cam2"
         );
         assert_eq!(
-            resolve_camera_under_test_label(false, false, false, false, true, false),
+            resolve_camera_under_test_label(false, false, false, false, true, false, false),
             "cam5",
             "#632: cam5 deployed ⇒ cam5"
         );
         assert_eq!(
-            resolve_camera_under_test_label(false, false, false, false, false, true),
+            resolve_camera_under_test_label(false, false, false, false, false, true, false),
             "cam6",
             "#632: cam6 deployed ⇒ cam6"
+        );
+        assert_eq!(
+            resolve_camera_under_test_label(false, false, false, false, false, false, true),
+            "cam7",
+            "#755: cam7 deployed ⇒ cam7"
         );
     }
 

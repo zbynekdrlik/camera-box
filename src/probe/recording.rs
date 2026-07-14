@@ -169,13 +169,14 @@ pub struct RecordingFrame {
 /// `forensic-dump`/`recording-probe`/the A/V-sync tool with ZERO accuracy benefit, since
 /// those tools never decode imag's own recording through this generic path) — caught in
 /// review, not by a test (the existing suite has no timing assertion for this gate).
-pub const NODE_BURN_RUN_IDS: [u32; 9] = [
+pub const NODE_BURN_RUN_IDS: [u32; 10] = [
     crate::probe::recording_latency::BURN_RUN_ID_CAM1,
     crate::probe::recording_latency::BURN_RUN_ID_CAM2,
     crate::probe::recording_latency::BURN_RUN_ID_CAM3,
     crate::probe::recording_latency::BURN_RUN_ID_CAM4,
     crate::probe::recording_latency::BURN_RUN_ID_CAM5,
     crate::probe::recording_latency::BURN_RUN_ID_CAM6,
+    crate::probe::recording_latency::BURN_RUN_ID_CAM7,
     crate::probe::recording_latency::BURN_RUN_ID_STRIH,
     crate::probe::recording_latency::BURN_RUN_ID_STREAM,
     crate::probe::recording_latency::BURN_RUN_ID_IMAG,
@@ -1079,7 +1080,7 @@ mod tests {
     fn node_burn_run_ids_includes_every_camera_under_test_312() {
         use crate::probe::recording_latency::{
             BURN_RUN_ID_CAM2, BURN_RUN_ID_CAM3, BURN_RUN_ID_CAM4, BURN_RUN_ID_CAM5,
-            BURN_RUN_ID_CAM6,
+            BURN_RUN_ID_CAM6, BURN_RUN_ID_CAM7,
         };
         for (label, id) in [
             ("cam2", BURN_RUN_ID_CAM2),
@@ -1087,6 +1088,7 @@ mod tests {
             ("cam4", BURN_RUN_ID_CAM4),
             ("cam5", BURN_RUN_ID_CAM5),
             ("cam6", BURN_RUN_ID_CAM6),
+            ("cam7", BURN_RUN_ID_CAM7),
         ] {
             assert!(
                 NODE_BURN_RUN_IDS.contains(&id),
