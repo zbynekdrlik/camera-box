@@ -107,10 +107,10 @@ struct Args {
     #[arg(long, num_args = 0..=1, default_missing_value = "true")]
     colour_scale: Option<bool>,
     /// Paint the #751 constant-velocity motion sweep (a bright ball sweeping the bottom band) so
-    /// judder is visible BY EYE on the monitor / multiview / recording. Fully outside the dual-QR
-    /// + colour-scale zones (a fused run still decodes clean). Default: ON in --paint-only mode
-    /// (the permanent cam2 painter shows it), OFF otherwise. Force/disable with
-    /// --motion-sweep[=true|false].
+    /// judder is visible BY EYE on the monitor, multiview, and recording. It stays fully outside
+    /// the dual-QR and colour-scale zones (a fused run still decodes clean). Defaults ON in
+    /// `--paint-only` mode (the permanent cam2 painter shows it) and OFF otherwise; override with
+    /// `--motion-sweep` or `--motion-sweep=false`.
     #[arg(long, num_args = 0..=1, default_missing_value = "true")]
     motion_sweep: Option<bool>,
     /// Paint QR frames DIRECTLY into an NDI sender with this name (no
