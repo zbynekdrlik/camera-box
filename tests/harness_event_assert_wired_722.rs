@@ -315,3 +315,63 @@ fn do_event_exits_nonzero_when_the_assert_phase_fails() {
          own call site"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #758 item 5 — event_mode_assert()'s OWN `here` computation must resolve to the directory the
+// python helpers (event_assert.py, obs_phase2.py, obs_burn_filter.py, set-ndi-mapping.py,
+// qr_screenshot_check.py) actually live in (scripts/), not one level too high (scripts/..). A
+// real, hermetic execution of the EXACT extracted line — not just a text/pattern check — so a
+// future variant of the same off-by-one-directory mistake is still caught.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn event_mode_assert_here_resolves_to_the_real_scripts_dir_758() {
+    let text = fs::read_to_string(manifest_dir().join("scripts/rig-mode.sh")).unwrap();
+    let start = text
+        .find("event_mode_assert() {")
+        .expect("event_mode_assert() must exist");
+    let end = text[start..]
+        .find("\ndo_event() {")
+        .map(|off| start + off)
+        .expect("do_event() must follow event_mode_assert()");
+    let body = &text[start..end];
+    let here_line = body
+        .lines()
+        .find(|l| l.trim_start().starts_with("local here; here="))
+        .expect("event_mode_assert() must set a local `here`");
+
+    // Hermetic fixture tree shaped like the real repo: <tmp>/scripts/event_assert.py (the file
+    // `here` must resolve next to) + <tmp>/scripts/rig-mode.sh (a stand-in carrying ONLY the
+    // extracted `here=` line, at the SAME relative position as the real file, so
+    // `${BASH_SOURCE[0]}`'s own dirname computation is faithful without touching the real repo
+    // tree or requiring the whole real script to be sourced).
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let scripts_dir = tmp.path().join("scripts");
+    fs::create_dir_all(&scripts_dir).expect("mkdir scripts");
+    fs::write(
+        scripts_dir.join("event_assert.py"),
+        "#!/usr/bin/env python3\n",
+    )
+    .expect("write stand-in event_assert.py");
+    let probe = scripts_dir.join("rig-mode.sh");
+    fs::write(
+        &probe,
+        format!("#!/usr/bin/env bash\n{here_line}\necho \"$here\"\n"),
+    )
+    .expect("write probe script");
+
+    let out = Command::new("bash")
+        .arg(&probe)
+        .output()
+        .expect("run probe script");
+    let here = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let resolved = PathBuf::from(&here).join("event_assert.py");
+    assert!(
+        resolved.is_file(),
+        "event_mode_assert()'s own `here` computation resolves to {here:?} — {resolved:?} does \
+         not exist. Every python3 call inside event_mode_assert() (event_assert.py, \
+         obs_phase2.py, obs_burn_filter.py, set-ndi-mapping.py, qr_screenshot_check.py) joins \
+         against this SAME `here`, so a wrong directory here breaks the WHOLE #722 assert phase, \
+         not just event_assert.py (line: {here_line:?})"
+    );
+}
