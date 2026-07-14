@@ -284,7 +284,11 @@ fn sticky_n_latch_lifecycle_and_robust_measure_741() {
     let flush_pos = raw
         .find("source->async_active = false;")
         .expect("#741: the flush/inactive reset (async_active = false) must be present");
-    let flush_block = &raw[flush_pos..(flush_pos + 900).min(raw.len())];
+    let flush_tail = &raw[flush_pos..];
+    let flush_end = flush_tail
+        .find("free_async_cache(source);")
+        .expect("#741: the flush/inactive block must end by freeing the async cache");
+    let flush_block = &flush_tail[..flush_end];
     assert!(
         flush_block.contains("genlock_last_known_n = 0"),
         "{OBS_SOURCE}: #741/#707 B2 — the flush/inactive reset (frame==NULL) no longer clears \

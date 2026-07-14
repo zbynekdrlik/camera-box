@@ -3649,6 +3649,12 @@ static void obs_source_output_video_internal(obs_source_t *source, const struct 
 		/* camera-box #126: an explicit flush re-arms the latch here; clear the
 		 * consecutive-empty run too so it can't carry a stale count into the rebuild. */
 		source->genlock_empty_run = 0;
+		/* camera-box #741/#707 B2: the source went inactive (flushed) — the whole delay
+		 * line is gone, so the last CONFIRMED source-rate multiple is genuinely stale.
+		 * Clear it HERE (the reset site the #726 clears missed) so a resumed source
+		 * re-confirms N from scratch instead of trusting a pre-flush latch. Mirror: a
+		 * fresh src/probe/genlock.rs ReleaseCadence starts with last_known_n = 0. */
+		source->genlock_last_known_n = 0;
 		free_async_cache(source);
 		pthread_mutex_unlock(&source->async_mutex);
 		return;
@@ -4258,6 +4264,12 @@ static uint32_t genlock_clamp_preload_u32(uint32_t v)
  * dropped_due 2918 of 4202 received, relocks 1076. Depth is immune to any constant
  * skew. Mirror of src/probe/genlock.rs ReleaseCadence::QDEPTH_RELOCK. */
 #define GENLOCK_QDEPTH_RELOCK 6
+/* camera-box #741/#707 B2: how many of the front queued frames genlock_measure_source_multiple
+ * scans for a strictly-increasing consecutive pair. Reading only array[0..1] read INCONCLUSIVE on
+ * a DUPLICATE front stamp / arrival-non-monotonic seam, so a jittery 60-into-30 input crawled;
+ * scanning the first few entries recovers one real source interval past a leading degenerate pair.
+ * Mirror: src/probe/genlock.rs ReleaseCadence::MEASURE_SCAN_DEPTH. */
+#define GENLOCK_MEASURE_SCAN_DEPTH 6
 /* genlock_latency_ms() is declared further down (after the #184 ms-knob block); forward
  * declare it so genlock_preload_default() can branch on whether the ms knob is set. */
 static uint32_t genlock_latency_ms(void);
@@ -4776,25 +4788,45 @@ static void genlock_audit_log(obs_source_t *source, uint64_t now_ns)
 /* ---- end genlock FIFO preload + audit ------------------------------------ */
 
 /* camera-box #726 STICKY-N: FRESHLY measure this genlock source's integer rate multiple N from
- * the STAMP GRID of the front pair, or 0 when it cannot be measured this tick. The consecutive
- * capture-stamp delta of the two oldest queued frames is the true source frame interval regardless
- * of arrival jitter (a single NDI source delivers in monotonic capture order). A 60fps source into
+ * the STAMP GRID of the front queued frames, or 0 when it cannot be measured this tick. The delta
+ * of a strictly-increasing consecutive stamp pair is the true source frame interval regardless of
+ * arrival jitter (a single NDI source delivers in monotonic capture order). A 60fps source into
  * a 30fps canvas stamps every ~16.6ms, so canvas_interval / src_interval ~= 2 => N==2; a 1:1 source
  * (30fps into 30fps) stamps every canvas interval => N==1 (the present-oldest lossless-drain STEADY
- * path is then unchanged). Returns 0 = INCONCLUSIVE: fewer than 2 queued frames, or a non-positive
- * delta (a backward-step seam, where async_frames is arrival-ordered and momentarily non-monotonic).
- * A non-zero return (N>=1) is a genuine measurement — the CONFIRMATION authority; the sticky latch
+ * path is then unchanged). #741/#707 B2: SCAN the first GENLOCK_MEASURE_SCAN_DEPTH entries for that
+ * pair rather than reading only array[0..1] — a DUPLICATE front stamp / arrival-non-monotonic seam
+ * at array[0..1] used to read INCONCLUSIVE and (sustained) crawl. Returns 0 = INCONCLUSIVE: fewer
+ * than 2 queued frames, or NO strictly-increasing pair in the scan window. A non-zero return
+ * (N>=1) is a genuine measurement — the CONFIRMATION authority; the sticky latch
  * (genlock_effective_source_multiple) bridges ONLY the 0 ticks. Mirror of src/probe/genlock.rs
  * ReleaseCadence::measure_source_multiple. */
 static inline uint32_t genlock_measure_source_multiple(const obs_source_t *source, uint64_t canvas_interval_ns)
 {
 	if (canvas_interval_ns == 0 || source->async_frames.num < 2)
 		return 0; /* inconclusive: fewer than 2 queued frames */
-	const uint64_t t0 = source->async_frames.array[0]->timestamp;
-	const uint64_t t1 = source->async_frames.array[1]->timestamp;
-	if (t1 <= t0)
-		return 0; /* inconclusive: non-monotonic front pair (clock-step seam) */
-	const uint64_t src_interval = t1 - t0;
+	/* #741/#707 B2 ROBUST: the very front pair (array[0],array[1]) can be momentarily
+	 * degenerate — a DUPLICATE capture stamp (t1==t0) or an arrival-order non-monotonic
+	 * seam (t1<t0). Reading ONLY array[0..1] then returned INCONCLUSIVE, and a SUSTAINED
+	 * inconclusive run on a jittery 60-into-30 input dropped the release to the present-oldest
+	 * CRAWL (#707 B2: a window uniform=0.481, histogram {1:295,2:407,3:102,7:39}). Scan the
+	 * first K queued entries for the FIRST strictly-increasing CONSECUTIVE pair — that delta is
+	 * one real source frame interval regardless of a leading duplicate. Still 0 (inconclusive)
+	 * when NO increasing pair exists in the window: the fix WIDENS the search, it never
+	 * fabricates a measurement (the sticky latch bridges the 0). */
+	const size_t scan = source->async_frames.num < (size_t)GENLOCK_MEASURE_SCAN_DEPTH
+				    ? source->async_frames.num
+				    : (size_t)GENLOCK_MEASURE_SCAN_DEPTH;
+	uint64_t src_interval = 0;
+	for (size_t i = 0; i + 1 < scan; i++) {
+		const uint64_t a = source->async_frames.array[i]->timestamp;
+		const uint64_t b = source->async_frames.array[i + 1]->timestamp;
+		if (b > a) {
+			src_interval = b - a;
+			break;
+		}
+	}
+	if (src_interval == 0)
+		return 0; /* inconclusive: no strictly-increasing pair in the first K entries */
 	/* round-to-nearest N = canvas / src; clamp to >=1 (a slower-than-canvas source reads 1). */
 	const uint64_t n = (canvas_interval_ns + src_interval / 2) / src_interval;
 	return (uint32_t)(n < 1 ? 1 : n);
@@ -5072,10 +5104,17 @@ static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 					 * past the reserve yet) deliberately falls through: the
 					 * STEADY path drains it, or this branch fires once it ages. */
 					source->genlock_relocks++;
-					/* #726 STICKY-N: a genuine backlog re-lock (stall catch-up) is a
-					 * source-timeline discontinuity -- clear the latch so the
-					 * post-relock stream re-confirms its multiple. */
-					source->genlock_last_known_n = 0;
+					/* #741/#707 B2: do NOT clear genlock_last_known_n here. A
+					 * backlog re-lock is a QUEUE-DEPTH event, NOT evidence the
+					 * source RATE changed — the #726 clear made the very next
+					 * INCONCLUSIVE tick crawl at N=1, which under a steady 60-into-30
+					 * backlog re-grew the queue and re-triggered THIS relock: a
+					 * self-sustaining crawl->relock loop (the #707 B2 crawl window,
+					 * uniform=0.481). The latch bridges the post-relock inconclusive
+					 * ticks with the still-correct multiple; a genuine rate change is
+					 * re-confirmed by the next measurable front pair, and a real
+					 * source-timeline discontinuity still clears it at
+					 * acquire / gap resync / backward clock-step / flush. */
 					release = due;
 				} else if (source->async_frames.array[0]->timestamp <=
 					   source->genlock_locked_next_boundary_ns) {

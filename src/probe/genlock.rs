@@ -1531,10 +1531,13 @@ impl ReleaseCadence {
                 }
                 let presented = queue.pop_front().expect("due frame");
                 self.locked_next_boundary_ns = Some(presented + interval_ns);
-                // #726 STICKY-N: a genuine backlog re-lock (stall catch-up) is a source-timeline
-                // discontinuity — clear the latch so the post-relock stream re-confirms its
-                // multiple rather than trusting a pre-stall N.
-                self.last_known_n = 0;
+                // #741/#707 B2: do NOT clear last_known_n here. A backlog re-lock is a QUEUE-DEPTH
+                // event, NOT evidence the source RATE changed — the #726 clear made the next
+                // INCONCLUSIVE tick crawl (N=1), re-growing the queue and re-triggering this relock
+                // (a self-sustaining crawl loop, the #707 B2 crawl window uniform=0.481). The latch
+                // bridges the post-relock inconclusive ticks; a genuine rate change re-confirms via
+                // the next measurable front pair; a real source-timeline discontinuity still clears
+                // it at acquire / gap resync / backward clock-step (and, in the C, flush/inactive).
                 return CadenceOutcome {
                     presented: Some(presented),
                     dropped,
@@ -1637,17 +1640,26 @@ impl ReleaseCadence {
     /// within one tick with every jumped frame counted.
     const QDEPTH_RELOCK: usize = 6;
 
+    /// #741/#707 B2 — how many front queued frames [`Self::measure_source_multiple`] scans for a
+    /// strictly-increasing consecutive pair. Reading only the front pair read INCONCLUSIVE on a
+    /// duplicate/degenerate front stamp, so a jittery 60-into-30 input crawled; scanning the first
+    /// few entries recovers one real source interval past a leading duplicate. Mirror of the C
+    /// `#define GENLOCK_MEASURE_SCAN_DEPTH`.
+    const MEASURE_SCAN_DEPTH: usize = 6;
+
     /// camera-box #726 STICKY-N — FRESHLY measure the integer source-rate multiple N from the
-    /// STAMP GRID of the front pair, or `None` when it cannot be measured this tick. The
-    /// consecutive capture-stamp delta of the two oldest queued frames is the true source frame
-    /// interval regardless of arrival jitter (a single NDI source delivers in monotonic capture
-    /// order). A 60fps source into a 30fps canvas stamps every 16.6ms → `canvas / src ≈ 2` →
-    /// `Some(2)`; a 1:1 source (30fps into 30fps) stamps every 33.3ms → `Some(1)`.
+    /// STAMP GRID of the front queued frames, or `None` when it cannot be measured this tick. The
+    /// delta of a strictly-increasing consecutive stamp pair is the true source frame interval
+    /// regardless of arrival jitter (a single NDI source delivers in monotonic capture order). A
+    /// 60fps source into a 30fps canvas stamps every 16.6ms → `canvas / src ≈ 2` → `Some(2)`; a
+    /// 1:1 source (30fps into 30fps) stamps every 33.3ms → `Some(1)`.
     ///
-    /// `None` = INCONCLUSIVE — fewer than 2 queued frames, or a non-monotonic front pair (a
-    /// backward-step / clock-step seam, where `async_frames` is arrival-ordered and momentarily
-    /// out of stamp order). `Some(N)` (N>=1) is a genuine measurement and the CONFIRMATION
-    /// authority; the sticky latch bridges ONLY the `None` ticks (see
+    /// #741/#707 B2: SCAN the first [`Self::MEASURE_SCAN_DEPTH`] entries for that pair rather than
+    /// reading only `front()`/`get(1)` — a DUPLICATE front stamp or an arrival-non-monotonic seam
+    /// at the very front used to read INCONCLUSIVE and (sustained) crawl. `None` = INCONCLUSIVE —
+    /// fewer than 2 queued frames, or NO strictly-increasing pair in the scan window. `Some(N)`
+    /// (N>=1) is a genuine measurement and the CONFIRMATION authority; the sticky latch bridges
+    /// ONLY the `None` ticks (see
     /// [`Self::effective_source_multiple`]). Mirror of the C helper `genlock_measure_source_multiple`
     /// in obs-source.c.
     fn measure_source_multiple(
@@ -1657,13 +1669,25 @@ impl ReleaseCadence {
         if canvas_interval_ns == 0 {
             return None;
         }
-        let (Some(&t0), Some(&t1)) = (queue.front(), queue.get(1)) else {
-            return None; // inconclusive: fewer than 2 queued frames
-        };
-        if t1 <= t0 {
-            return None; // inconclusive: non-monotonic front pair (clock-step seam)
+        // #741/#707 B2 ROBUST: scan the first K entries for the FIRST strictly-increasing
+        // consecutive pair (skip a degenerate front pair — a DUPLICATE stamp or an arrival
+        // non-monotonic seam). That delta is one real source interval past a leading duplicate;
+        // reading only the front pair used to read INCONCLUSIVE there and (sustained) crawl. Still
+        // None when NO increasing pair exists in the window — the fix widens the search, never
+        // fabricates a measurement (the sticky latch bridges the None).
+        let scan = queue.len().min(Self::MEASURE_SCAN_DEPTH);
+        let mut src_interval = 0u64;
+        for i in 0..scan.saturating_sub(1) {
+            let a = queue[i];
+            let b = queue[i + 1];
+            if b > a {
+                src_interval = b - a;
+                break;
+            }
         }
-        let src_interval = t1 - t0;
+        if src_interval == 0 {
+            return None; // inconclusive: no strictly-increasing pair in the first K entries
+        }
         // Round-to-nearest N = canvas / src; clamp to >=1 (a slower-than-canvas source reads 1).
         let n = (canvas_interval_ns + src_interval / 2) / src_interval;
         Some(n.max(1) as u32)
