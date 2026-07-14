@@ -24,7 +24,7 @@
 | CAM4 | 10.77.9.64 | Active | SSH: root/newlevel |
 | CAM5 | 10.77.9.65 | Active | SSH: root/newlevel; fleet grew 4->6 (#451), fully provisioned |
 | CAM6 | 10.77.9.66 | Active | SSH: root/newlevel; fleet grew 4->6 (#451), fully provisioned |
-| CAM7 | — | Not built | Never built — user only expressed future interest in a 7th camera (#593). Add a row with a real IP here when a physical cam7 box exists. |
+| CAM7 | 10.77.9.67 | Active | SSH: root/newlevel; BUILT 2026-07-14 (M.2 internal disk, setup-device.sh CAM7, verify-device ALL CLEAR 21/21); NOT yet wired into strih OBS (no 'NDI cam7' input/scene) nor CAMERA_SET/sweep — integration is the follow-up |
 
 ### Grabber cards — LIVE fleet assignment (verified 2026-07-12 via V4L2 `card` string, #728)
 
