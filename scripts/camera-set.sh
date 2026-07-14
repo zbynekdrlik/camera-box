@@ -77,10 +77,12 @@ camera_resolve() {
     cam4) CAMERA_IP=10.77.9.64; CAMERA_SOURCE="CAM4 (usb)"; CAMERA_GENLOCK_FPS=60 ;;
     cam5) CAMERA_IP=10.77.9.65; CAMERA_SOURCE="CAM5 (usb)"; CAMERA_GENLOCK_FPS=60 ;;
     cam6) CAMERA_IP=10.77.9.66; CAMERA_SOURCE="CAM6 (usb)"; CAMERA_GENLOCK_FPS=60 ;;
-    # cam7 not yet built (#593) -- uncomment + fill in its real IP/source when a 7th box exists:
-    # cam7) CAMERA_IP=10.77.9.67; CAMERA_SOURCE="CAM7 (usb)"; CAMERA_GENLOCK_FPS=60 ;;
+    # cam7: real box built 2026-07-14 (M.2 install, provisioned via setup-device.sh CAM7).
+    # NOT yet in CAMERA_SET / camera_strih_route -- strih OBS has no 'NDI cam7' input/scene yet;
+    # wire those (and only then extend the sweep/fleet loops) as the follow-up step.
+    cam7) CAMERA_IP=10.77.9.67; CAMERA_SOURCE="CAM7 (usb)"; CAMERA_GENLOCK_FPS=60 ;;
     *)
-      echo "camera-set: unknown camera '${name}' (expected one of: cam1 cam2 cam3 cam4 cam5 cam6)" >&2
+      echo "camera-set: unknown camera '${name}' (expected one of: cam1 cam2 cam3 cam4 cam5 cam6 cam7)" >&2
       return 1
       ;;
   esac
