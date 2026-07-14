@@ -84,7 +84,10 @@ mod tests {
         let mut log = EmitGateSkipLog::new();
         assert!(log.is_empty());
         log.record(0); // a non-skip poll must not count
-        assert!(log.is_empty(), "a 0-boundary 'skip' must not register an event");
+        assert!(
+            log.is_empty(),
+            "a 0-boundary 'skip' must not register an event"
+        );
         log.record(2);
         log.record(1);
         assert!(!log.is_empty());
@@ -103,7 +106,9 @@ mod tests {
             log.record(skipped);
             expected_total += skipped;
         }
-        let (events, total) = log.take().expect("a window with skips yields exactly one summary");
+        let (events, total) = log
+            .take()
+            .expect("a window with skips yields exactly one summary");
         assert_eq!(events, 10, "all 10 skip events coalesced into ONE summary");
         assert_eq!(total, expected_total);
         // Drained + reset → the NEXT (clean) window emits nothing.
@@ -129,7 +134,10 @@ mod tests {
     fn summary_names_events_total_window_and_keeps_the_707_grep_tag() {
         let s = skip_summary_warning(10, 24, 5);
         assert!(s.contains("#707"), "keep the #707 log-grep tag");
-        assert!(s.contains("genlock emit-gate SKIPPED"), "keep the existing phrase for greps");
+        assert!(
+            s.contains("genlock emit-gate SKIPPED"),
+            "keep the existing phrase for greps"
+        );
         assert!(s.contains("10"), "name the event count");
         assert!(s.contains("24"), "name the total boundaries skipped");
         assert!(s.contains('5'), "name the window seconds");

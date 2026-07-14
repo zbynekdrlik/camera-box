@@ -2013,8 +2013,8 @@ mod tests {
         let b0 = 10 * i; // an aligned pending boundary (grid-aligned so the arithmetic is exact)
         let stall_intervals = 4u64; // the emit poll was starved ~4 intervals ...
         let depth = 4u64; // ... and V4L2 held its 4-deep queue meanwhile (capture.rs)
-        // Resume: the loop drains `depth` buffered frames in a tight loop, all at ~the same wall
-        // clock `resume` (a few ns apart — well within one interval).
+                          // Resume: the loop drains `depth` buffered frames in a tight loop, all at ~the same wall
+                          // clock `resume` (a few ns apart — well within one interval).
         let resume = b0 + stall_intervals * i;
         let mut next_boundary = b0;
         let mut emitted = 0u64;
@@ -2027,7 +2027,8 @@ mod tests {
             }
         }
         assert_eq!(
-            emitted, depth,
+            emitted,
+            depth,
             "every buffered capture in a bounded starvation drain must EMIT (fill its own \
              boundary), not be leaped-past and decimated — a {depth}-frame drain that emits only 1 \
              is the #707 B1 freeze (1 emit + {} captured-but-never-emitted)",
