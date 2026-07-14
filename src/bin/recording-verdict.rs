@@ -4566,6 +4566,14 @@ fn build_and_print_verdict(
                             "mad_ms": cam_sync.mad_ms,
                             "verdict": verdict_label,
                             "gate_pass": gate_pass,
+                            // #714/#689 — the ONE computable per-camera A/V offset the gate/report
+                            // read (measured value for cam2, sound derived value for a starved
+                            // camera, null only for a genuine unknown) — so the raw verdict is
+                            // never a bare `av_offset_ms=null` for a camera we DO have a number for
+                            // (the "silent cam2-only" the #714 one-full-test mandate forbids). The
+                            // `verdict` label above still says which kind of value this is.
+                            "effective_offset_ms":
+                                av_window::effective_offset_ms(cam_sync, derived.as_ref()),
                         });
                         if let Some(d) = &derived {
                             // #714: a DERIVED estimate is reported under its OWN fields, never

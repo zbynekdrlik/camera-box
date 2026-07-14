@@ -139,6 +139,30 @@ pub fn av_offset_gate_pass(sync: &CameraAvSync, expected_ms: f64) -> bool {
     }
 }
 
+/// #714/#689 — the ONE per-camera A/V offset a consumer (the #711 report, the merge path, a human
+/// reading the raw verdict) should read, so EVERY camera under test carries a computable number,
+/// not a `null` that has to be cross-read against a second field. It is:
+///
+/// * the genuine MEASURED `av_offset_ms` when the camera reached [`AvSyncVerdict::Measured`]
+///   (cam2, whose whole-recording pool always clears the cluster floor), else
+/// * the DERIVED `derived_offset_ms` when the camera was sample-starved but cam2's anchor + this
+///   camera's #286 delivery delta produced a sound estimate ([`derive_camera_av_sync`]), else
+/// * `None` — genuinely nothing to report (cam2 itself Unknown, or no delivery sample to
+///   re-center on): a true unknown, never fabricated.
+///
+/// The camera's `verdict` label (`measured` / `derived` / `unknown`) still distinguishes WHICH of
+/// these produced the value, so surfacing them through one field is a computability convenience,
+/// never a conflation — a derived number is still plainly marked derived. This is deliberately
+/// the SAME priority the #711 report already applies (measured field first, then the derived
+/// field), lifted into the pure layer so the raw verdict JSON is honest by construction and the
+/// gate/report never disagree on "what is this camera's A/V offset".
+pub fn effective_offset_ms(sync: &CameraAvSync, derived: Option<&DerivedAvSync>) -> Option<f64> {
+    match sync.verdict {
+        AvSyncVerdict::Measured => sync.av_offset_ms,
+        AvSyncVerdict::Unknown => derived.map(|d| d.derived_offset_ms),
+    }
+}
+
 /// Build `(tick, video_ts_s)` samples for `qpsk_marker::av_offset_candidates`'s third argument,
 /// from a decoded window's `(frame_index, tick)` pairs — pure (no `RecordingFrame` dependency,
 /// so it stays Tier-0 testable) mirroring the identical construction
@@ -564,5 +588,49 @@ mod tests {
             v.gate_pass,
             "derived offset == expected_ms exactly ⇒ PASS regardless of the absolute value"
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // effective_offset_ms (#714/#689 — one computable per-camera number)
+    // ---------------------------------------------------------------------
+    // (reuses the `measured(av_offset_ms)` helper defined above for the
+    // av_offset_gate_pass tests — a Measured CameraAvSync with that offset.)
+
+    fn unknown() -> CameraAvSync {
+        CameraAvSync {
+            windows: 1,
+            candidates: 500,
+            cluster_samples: 0,
+            av_offset_ms: None,
+            mad_ms: None,
+            verdict: AvSyncVerdict::Unknown,
+        }
+    }
+
+    #[test]
+    fn effective_offset_is_the_measured_value_for_a_measured_camera() {
+        // cam2's own measurement — the effective value IS the measured offset (derived ignored,
+        // and in practice absent for a measured camera).
+        assert_eq!(effective_offset_ms(&measured(-4.2), None), Some(-4.2));
+    }
+
+    #[test]
+    fn effective_offset_is_the_derived_value_for_a_starved_but_derived_camera() {
+        // The #714/#689 fix: a per-window sample-starved camera (av_offset_ms=None) that HAS a
+        // sound derived estimate surfaces the DERIVED number here, so the raw verdict is never a
+        // bare `null` for a camera we actually have a computable A/V offset for.
+        let d = DerivedAvSync {
+            derived_offset_ms: -6.1,
+            delivery_spread_ms: 17.0,
+            gate_pass: true,
+        };
+        assert_eq!(effective_offset_ms(&unknown(), Some(&d)), Some(-6.1));
+    }
+
+    #[test]
+    fn effective_offset_is_none_only_for_a_genuine_unknown() {
+        // No measurement AND no derivation (cam2 itself Unknown, or no delivery sample) ⇒ a true
+        // null — never fabricated. This is the ONLY case a consumer sees no number.
+        assert_eq!(effective_offset_ms(&unknown(), None), None);
     }
 }
