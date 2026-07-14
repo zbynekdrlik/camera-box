@@ -127,6 +127,11 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # 0-255 Elgato 4K S cards (their own default is 128).
 # shellcheck source=scripts/lib/v4l2-neutral.sh
 . "$HERE/lib/v4l2-neutral.sh"
+# #749: sweep stale /tmp/camera-box-burn-* binaries a prior run's own cleanup() failed to remove
+# (a flaky ssh round-trip, #737) BEFORE this run's own scp deploy -- each box's /tmp is a 100MB
+# tmpfs that CAN fill outright (CAM1 + CAM6 both hit 100% live) and fail the deploy hard.
+# shellcheck source=scripts/lib/tmp-burn-sweep.sh
+. "$HERE/lib/tmp-burn-sweep.sh"
 camera_resolve "${CAM:-cam1}"
 # #24 item 1: this harness's SOURCE-camera role (the physical box filming cam2's monitor via
 # the optical loopback + carrying the #174 render-time capture burn) is one of
@@ -917,6 +922,10 @@ echo "[2/8] $CAMERA_NAME (${CAM1_IP}) — probe-featured camera-box with the #17
 # suspenders pkill, so a stopped test can never leave a unit trying to respawn.
 CAM1_BURN_BIN="/tmp/camera-box-burn-${RUN_ID}"
 CAM1_BURN_UNIT="camera-box-burn-${RUN_ID}"
+# #749: sweep stale binaries BEFORE the scp below -- a full /tmp (a prior run's own cleanup()
+# never landing) must never block THIS run's own deploy. Best-effort (never fail the harness).
+sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$CAM1_IP" \
+  "$(tmp_burn_sweep_stale_cmds)" 2>/dev/null || true
 sshpass -p "$CAM_PW" scp -o StrictHostKeyChecking=no \
   "$PROBE_BIN_DIR"/camera-box root@"$CAM1_IP":"$CAM1_BURN_BIN"
 sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$CAM1_IP" \
@@ -967,6 +976,10 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
     _cunit="camera-box-burn-${_cn}-${RUN_ID}"
     _cnodisplay_setenv=""
     if [ "$_cn" = "cam2" ]; then _cnodisplay_setenv="--setenv=CAMERA_BOX_NO_DISPLAY=1 "; fi
+    # #749: same pre-scp stale-binary sweep as cam1's [2/8] site above -- each ALL_CAMBOX box has
+    # its own independent 100MB /tmp tmpfs that can fill the same way.
+    sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$_cip" \
+      "$(tmp_burn_sweep_stale_cmds)" 2>/dev/null || true
     sshpass -p "$CAM_PW" scp -o StrictHostKeyChecking=no \
       "$PROBE_BIN_DIR"/camera-box root@"$_cip":"$_cbin"
     sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$_cip" \
