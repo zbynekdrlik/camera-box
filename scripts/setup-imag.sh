@@ -833,6 +833,22 @@ EOF
         # state on top of the boot hook re-opening them fresh).
         printf '\n[BasicWindow]\nSaveProjectors=false\n' >> "$f"
     fi
+    if ! grep -q '^CloseExistingProjectors=' "$f"; then
+        # #756: true — OBSBasic::OpenProjector() (vendor/obs-studio/frontend/widgets/
+        # OBSBasic_Projectors.cpp) only closes an EXISTING projector on the SAME monitor before
+        # opening a new one when this key is true; it has NO compiled-in default (a missing key
+        # reads as false), so a fresh profile leaves every OpenVideoMixProjector call (the #758
+        # [0/8] preflight calls it via obs_phase2.py open-projectors on EVERY recording-e2e.sh
+        # run, unconditionally) STACKING a brand-new Multiview/Program window on top of the
+        # previous one instead of replacing it. Live-caught (2026-07-15): 7 stray Multiview + 7
+        # stray Program projector windows had accumulated on imag (`DISPLAY=:0 wmctrl -l`) over
+        # one afternoon of repeated preflight runs — seven independently-throttled Multiview
+        # renders, each still costing real graphics-thread time, fully explains the render-health
+        # preflight's intermittent sub-58fps failures even on a build whose #276/#278/#293
+        # divisor mechanism is confirmed correctly compiled in (nm -D -u). Setting this makes
+        # every future OpenVideoMixProjector call self-correct to exactly one window per monitor.
+        printf '\n[BasicWindow]\nCloseExistingProjectors=true\n' >> "$f"
+    fi
     if ! grep -q '^LastVersion=' "$f"; then
         printf '\n[General]\nLastVersion=536936450\n' >> "$f"   # 32.1.2 — suppress first-run wizard
     fi

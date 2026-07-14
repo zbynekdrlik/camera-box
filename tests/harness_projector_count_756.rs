@@ -101,7 +101,9 @@ fn projector_count_preflight_checks_exactly_one_of_each_via_wmctrl() {
         "{RECORDING_E2E} must name the #756 projector-count preflight step"
     );
     assert!(
-        s.contains("wmctrl -l") && s.contains("Projector - Multiview") && s.contains("Projector - Program"),
+        s.contains("wmctrl -l")
+            && s.contains("Projector - Multiview")
+            && s.contains("Projector - Program"),
         "{RECORDING_E2E}: the #756 projector-count check must read imag's actual window list \
          over SSH (wmctrl -l, DISPLAY=:0) and count the Multiview/Program projector windows by \
          their exact wmctrl titles -- obs-websocket itself has no projector-list introspection"

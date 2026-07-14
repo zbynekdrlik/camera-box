@@ -12,11 +12,15 @@
 //! 2. MV render-DIVISOR CAPABILITY (a #756 follow-up item): whether the deployed imag frontend
 //!    binary was actually built with the #276/#278 multiview render-divisor decouple symbol
 //!    (`obs_display_set_render_divisor`) — the same read-only `nm -D -u` check
-//!    `scripts/setup-imag.sh` already runs at provisioning time (#499). WARN-only for now (a
-//!    known gap: even the unified genlock-parity build does not carry this symbol on imag's
-//!    Linux frontend yet) — the render-health item above is the hard gate on the OUTCOME. The
-//!    flip to FAIL (once the Linux divisor symbol ships, a separate #756 PR) must be exactly one
-//!    line to change: `IMAG_DIVISOR_CAPABILITY_FAIL` defaults to `"0"`.
+//!    `scripts/setup-imag.sh` already runs at provisioning time (#499). Originally WARN-only (a
+//!    believed "known gap": the log-marker grep this ticket's original investigation used found
+//!    zero #276/#278/divisor/multiview lines — but no such log line has EVER existed anywhere in
+//!    the vendored source, so that was never real evidence). **#756 (2026-07-15) flipped this to
+//!    FAIL-by-default**: a direct `nm -D -u` against the live imag frontend proves the symbol
+//!    genuinely IS referenced — see `tests/harness_projector_count_756.rs` for the full
+//!    investigation (the real render-health defect was 7 stray accumulated Multiview/Program
+//!    projector windows, unrelated to the divisor mechanism itself, also fixed there).
+//!    `IMAG_DIVISOR_CAPABILITY_FAIL` now defaults to `"1"`.
 //! 3. imag STUDIO MODE must be OFF (a live finding discovered WHILE proving item 1 against the
 //!    real rig): Studio Mode is a SEPARATE render-budget consumer from the Multiview
 //!    (`.claude/skills/genlock/SKILL.md` #278) — a stale Studio-Mode-ON left over from an
@@ -114,31 +118,42 @@ fn divisor_capability_check_reads_the_same_symbol_setup_imag_checks_at_provision
     );
 }
 
+// #756 (2026-07-15) SUPERSEDES this test's original assertion: the #758 WARN-only default was
+// a hedge against a "known gap" belief (the Linux divisor symbol missing) that was reached by
+// grepping the OBS frontend log for text markers that never existed anywhere in the vendored
+// source — never real evidence either way. A direct nm -D -u check against the live imag
+// frontend (GENLOCK_BUILD_SHA.txt=26de1c3c2) proves the symbol genuinely IS referenced
+// (count=1) — see tests/harness_projector_count_756.rs for the full investigation. The check
+// therefore now FAILS by default; the WARN *branch* itself is kept (still reachable by
+// explicitly overriding the env var to 0) so an operator can temporarily downgrade it without a
+// code change, but that is no longer the shipped default.
 #[test]
-fn divisor_capability_check_warns_by_default_never_fails_until_flipped() {
+fn divisor_capability_check_fails_by_default_now_756() {
     let s = recording_e2e();
     assert!(
-        s.contains(r#"IMAG_DIVISOR_CAPABILITY_FAIL="${IMAG_DIVISOR_CAPABILITY_FAIL:-0}""#),
-        "#758: the divisor capability check must default to WARN (0), never FAIL, until the \
-         Linux divisor symbol actually ships (a separate #756 follow-up)"
+        s.contains(r#"IMAG_DIVISOR_CAPABILITY_FAIL="${IMAG_DIVISOR_CAPABILITY_FAIL:-1}""#),
+        "#756: the divisor capability check must now default to FAIL (1) — nm -D -u on the live \
+         imag frontend confirms obs_display_set_render_divisor genuinely ships; this is no \
+         longer a 'known gap' the #758 WARN-only stance was hedging against"
     );
     assert!(
         s.contains("[preflight] WARN: ${_divisor_msg}"),
-        "#758: an absent symbol must print a loud WARN line, never silently pass"
+        "#756: the WARN branch must still exist (reachable by explicitly overriding \
+         IMAG_DIVISOR_CAPABILITY_FAIL=0), even though it is no longer the default"
     );
-    // The flip to FAIL must be a single conditional on the ONE env var above — never a second,
-    // independently-hardcoded FAIL path that the "one-line change" flip would miss. Count LINES
-    // referencing the var (not raw substring matches — the default-assignment line itself
-    // legitimately mentions the name twice: `VAR="${VAR:-0}"`).
+    // The flip is a single conditional on the ONE env var above — never a second,
+    // independently-hardcoded FAIL path. Count LINES referencing the var (not raw substring
+    // matches — the default-assignment line itself legitimately mentions the name twice:
+    // `VAR="${VAR:-1}"`).
     let fail_lines = s
         .lines()
         .filter(|l| l.contains("IMAG_DIVISOR_CAPABILITY_FAIL"))
         .count();
     assert_eq!(
         fail_lines, 2,
-        "#758: IMAG_DIVISOR_CAPABILITY_FAIL must be referenced on exactly two LINES (the \
-         default-assignment line + the one `if` check that flips WARN->FAIL) — got {fail_lines}, \
-         which means the flip is no longer a one-line change"
+        "#756: IMAG_DIVISOR_CAPABILITY_FAIL must be referenced on exactly two LINES (the \
+         default-assignment line + the one `if` check) — got {fail_lines}, which means the flip \
+         is no longer a one-line change"
     );
 }
 

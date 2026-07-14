@@ -576,6 +576,38 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
     exit 1
   fi
 
+  # camera-box #756: OpenVideoMixProjector (called unconditionally by the block above, on EVERY
+  # single recording-e2e.sh run) only REPLACES the same-monitor projector instead of stacking a
+  # new one on top when the OBS user-config key BasicWindow.CloseExistingProjectors is true
+  # (vendor/obs-studio/frontend/widgets/OBSBasic_Projectors.cpp OpenProjector()) — that key has
+  # NO compiled-in default (a missing key reads as false), and imag's global.ini never carried
+  # it until setup-imag.sh's #756 seed. Live-caught (2026-07-15): with the key unset, imag had
+  # accumulated 7 stray Multiview + 7 stray Program projector windows (confirmed via
+  # `wmctrl -l` over SSH) — seven independently-throttled Multiview renders, each STILL costing
+  # real graphics-thread time regardless of the #276/#278/#293 per-display divisor mechanism
+  # (which IS confirmed correctly compiled in — see the nm -D -u capability check below), fully
+  # explains the render-health preflight's intermittent sub-58fps failures. setup-imag.sh now
+  # seeds CloseExistingProjectors=true so every open-projectors call above self-corrects to
+  # exactly one window per monitor — but PROVE it every run, never just hope the config landed
+  # (a reprovision that forgets the seed, or an OBS upgrade changing the default, must be caught
+  # immediately, not silently degrade render health run after run): hard-fail loud, never a
+  # silent self-heal, if imag ever again shows more than one Multiview or Program projector.
+  echo "[0/8] imag-nb projector count must be EXACTLY 1 Multiview + 1 Program — no stray accumulation (#756)"
+  _mv_count="$(sshpass -p "${IMAG_PW:-newlevel}" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 \
+    "${IMAG_USER:-newlevel}@$IMAG_IP" \
+    "DISPLAY=:0 wmctrl -l 2>/dev/null | grep -c 'Projector - Multiview' || true" \
+    2>/dev/null || true)"
+  _pgm_count="$(sshpass -p "${IMAG_PW:-newlevel}" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 \
+    "${IMAG_USER:-newlevel}@$IMAG_IP" \
+    "DISPLAY=:0 wmctrl -l 2>/dev/null | grep -c 'Projector - Program' || true" \
+    2>/dev/null || true)"
+  if [ "${_mv_count:-0}" -eq 1 ] 2>/dev/null && [ "${_pgm_count:-0}" -eq 1 ] 2>/dev/null; then
+    echo "    ok: imag-nb shows exactly 1 Multiview + 1 Program projector"
+  else
+    echo "ERROR: [preflight] FAIL: imag-nb projector count is Multiview=${_mv_count:-0} Program=${_pgm_count:-0}, expected exactly 1+1 — stray projector windows are accumulating (check BasicWindow.CloseExistingProjectors=true in ~/.config/obs-studio/{global,user}.ini on imag-nb, or close the extras: DISPLAY=:0 wmctrl -l | grep Projector)." >&2
+    exit 1
+  fi
+
   # imag Studio Mode is a SEPARATE render-budget consumer from the Multiview (SKILL.md #278:
   # "Studio Mode preview is a 2nd render-budget consumer at 60fps ... prod runs studio off").
   # Live-caught (2026-07-14): a stale Studio-Mode-ON left over from an earlier session
@@ -1094,21 +1126,30 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
     fi
   done
 
-  # #758 preflight item — MV render-DIVISOR CAPABILITY check (a #756 follow-up item, WARN-only
-  # for now). Distinct from BOTH the #756 build-SHA version-parity check above (same build
-  # everywhere) and the render-health OUTCOME gate just above (program stays inside its frame
-  # budget): this asks whether the deployed imag frontend binary was actually BUILT WITH the
-  # #276/#278/#293 multiview render-divisor decouple (the exported obs_display_set_render_divisor
-  # symbol). obs-websocket's GetStats has no field reporting per-display divisor/throttle state,
-  # so the only real evidence available is the SAME nm -D -u symbol check scripts/setup-imag.sh
-  # already runs at provisioning time (#499) — a read-only query of the deployed binary over SSH,
-  # no config mutation. Known gap (2026-07-14): even the unified genlock-parity build does not
-  # carry this symbol on imag's Linux frontend yet — porting the divisor decouple to the Linux
-  # frontend is a SEPARATE #756 follow-up, NOT this batch — so this WARNs, never FAILs, until
-  # that symbol ships. The render-health check above is the hard gate on the OUTCOME; this is
-  # only a capability marker. Flipping WARN->FAIL once the symbol lands is exactly this ONE line:
-  IMAG_DIVISOR_CAPABILITY_FAIL="${IMAG_DIVISOR_CAPABILITY_FAIL:-0}"
-  echo "[1/8] imag MV render-divisor capability check (#756 follow-up — WARN-only for now)"
+  # #758 preflight item — MV render-DIVISOR CAPABILITY check (a #756 follow-up item). Distinct
+  # from BOTH the #756 build-SHA version-parity check above (same build everywhere) and the
+  # render-health OUTCOME gate just above (program stays inside its frame budget): this asks
+  # whether the deployed imag frontend binary was actually BUILT WITH the #276/#278/#293
+  # multiview render-divisor decouple (the exported obs_display_set_render_divisor symbol).
+  # obs-websocket's GetStats has no field reporting per-display divisor/throttle state, so the
+  # only real evidence available is the SAME nm -D -u symbol check scripts/setup-imag.sh already
+  # runs at provisioning time (#499) — a read-only query of the deployed binary over SSH, no
+  # config mutation.
+  #
+  # #756 (2026-07-15): FLIPPED from WARN-only to FAIL-by-default. The earlier "known gap" belief
+  # (that the divisor symbol was missing on imag's Linux frontend) was reached by grepping the
+  # OBS frontend LOG for #276/#278/divisor/multiview text markers — but no such log line has
+  # EVER existed anywhere in the vendored source (obs-display.c / OBSProjector.cpp never blog()
+  # the divisor), so "zero markers" was never real evidence. This EXACT nm -D -u check, run live
+  # against the currently-deployed imag frontend (GENLOCK_BUILD_SHA.txt=26de1c3c2), shows
+  # count=1 — the symbol genuinely IS referenced (the #276/#278/#293 patch, commit a50fa5a18, is
+  # an ancestor of every build since). The render-health failures that motivated the original
+  # WARN-only stance were a SEPARATE bug (7 stray accumulated Multiview/Program projector
+  # windows — see the #756 projector-count preflight above), now fixed independently. A missing
+  # symbol on any FUTURE imag build is therefore a real regression, not an expected gap — hard
+  # fail. Flipping back to WARN, if ever needed, is exactly this ONE line:
+  IMAG_DIVISOR_CAPABILITY_FAIL="${IMAG_DIVISOR_CAPABILITY_FAIL:-1}"
+  echo "[1/8] imag MV render-divisor capability check (#756)"
   _divisor_nm_count="$(sshpass -p "${IMAG_PW:-newlevel}" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 \
     "${IMAG_USER:-newlevel}@$IMAG_IP" \
     'nm -D -u /usr/bin/obs 2>/dev/null | grep -c obs_display_set_render_divisor || true' \
@@ -1116,7 +1157,7 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
   if [ "${_divisor_nm_count:-0}" -gt 0 ] 2>/dev/null; then
     echo "    ok: imag /usr/bin/obs references obs_display_set_render_divisor — MV render-divisor capability present"
   else
-    _divisor_msg="MV divisor not engaged on imag (known gap, #756) — /usr/bin/obs does not reference obs_display_set_render_divisor; the multiview render-budget decouple is not compiled into imag's Linux frontend yet"
+    _divisor_msg="MV divisor capability MISSING on imag (#756 regression) — /usr/bin/obs does not reference obs_display_set_render_divisor; the multiview render-budget decouple is not compiled into imag's Linux frontend"
     if [ "$IMAG_DIVISOR_CAPABILITY_FAIL" = "1" ]; then
       echo "ERROR: [preflight] FAIL: ${_divisor_msg}" >&2
       exit 1
