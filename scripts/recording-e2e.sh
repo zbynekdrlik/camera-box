@@ -145,6 +145,11 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/cambox-offline-ack.sh"
 # shellcheck source=scripts/lib/preflight-fleet-check.sh
 . "$HERE/lib/preflight-fleet-check.sh"
+# #758 item 3 — the in-run freeze watch: polls the SAME MV-clone mechanism DURING the recording
+# window (StartRecord through StopRecord) so a mid-run freeze fails the run within ~30s of onset,
+# not at decode time.
+# shellcheck source=scripts/lib/live-freeze-watch.sh
+. "$HERE/lib/live-freeze-watch.sh"
 camera_resolve "${CAM:-cam1}"
 # #24 item 1: this harness's SOURCE-camera role (the physical box filming cam2's monitor via
 # the optical loopback + carrying the #174 render-time capture burn) is one of
@@ -2003,6 +2008,24 @@ echo "[4f/8] #747 pre-record camera-scene warm-up — cycle every strih 'Cam N' 
 python3 "$HERE/warm_cam_scenes.py" --host "$STRIH" --settle "${WARM_CAM_SETTLE_S:-1.5}" 2>&1 \
   | sed 's/^/    /' || true
 
+# #758 item 3 — arm the in-run freeze watch for the WHOLE recording window (StartRecord through
+# StopRecord), right before StartRecord. ALL_CAMBOX only (mirrors the [0/8]/[1/8] preflight + [2/8]/[2b/8] reverify's
+# own gating) — excludes any acked-offline camera.
+FREEZE_WATCH_PID_FILE="$OUTDIR/freeze-watch.pid"
+FREEZE_WATCH_POISON_FILE="$OUTDIR/freeze-watch-poison.txt"
+if [ "${ALL_CAMBOX:-0}" = "1" ]; then
+  FREEZE_WATCH_SOURCES=""
+  for _n in 1 2 3 4 5 6 7; do
+    case " ${PREFLIGHT_EXCLUDED_CAMS:-} " in *" cam${_n} "*) continue ;; esac
+    FREEZE_WATCH_SOURCES="${FREEZE_WATCH_SOURCES:+$FREEZE_WATCH_SOURCES,}MV NDI cam${_n}"
+  done
+  if [ -n "$FREEZE_WATCH_SOURCES" ]; then
+    echo "[5/8 pre] arming in-run freeze watch (#758): $FREEZE_WATCH_SOURCES"
+    live_freeze_watch_start "$FREEZE_WATCH_PID_FILE" "$FREEZE_WATCH_POISON_FILE" \
+      "$STRIH" "$FREEZE_WATCH_SOURCES" "$PROBE_BIN_DIR"
+  fi
+fi
+
 echo "[5/8] StartRecord on strih + stream (program = certified prod scene) + imag (#462 — program routed to the camera under test by [4a/8], #682)"
 # #627: `record --action start` now polls GetRecordStatus itself right after StartRecord and
 # raises (nonzero exit) if the output isn't genuinely active + writing growing bytes — a
@@ -2152,6 +2175,9 @@ else
 fi
 
 echo "[7/8] StopRecord + download strih + stream recordings to dev1 (NO grab #179)"
+# #758 item 3 — disarm the in-run freeze watch now that the recording window has ended (its own
+# verdict is read further below, at recording-verdict time, from the poison file this leaves behind).
+live_freeze_watch_stop "$FREEZE_WATCH_PID_FILE"
 # #178: the StopRecord→verdict region is RESILIENT. run 172046073 completed the recording
 # + StopRecord, then a set -e abort (a non-zero $(StopRecord) capture / a transient ssh /
 # an absent optional recording hitting a `[ -f ] && ...` guard) jumped straight to the
@@ -2690,6 +2716,15 @@ continuing WITHOUT the imag partial; the merge below will omit --merge-partials 
       echo "      win-stream-snv Shell: Remove-Item -Force -LiteralPath '${STREAM_HOST_PATH:-<unknown>}'"
       echo "    Set KEEP_RECORDINGS=1 to skip this (debugging)."
     fi
+    # #758 item 3 — the in-run freeze watch's own verdict: a mid-run freeze the decode-based
+    # verdict above may not have caught (or caught only as a generic loss, with no NAMED "this
+    # camera froze at this timestamp" diagnosis) HARD-fails this run's own exit code too.
+    FREEZE_WATCH_REPORT="$(live_freeze_watch_verdict "$FREEZE_WATCH_POISON_FILE")"
+    if [ -n "$FREEZE_WATCH_REPORT" ]; then
+      echo "ERROR: [freeze-watch] one or more cameras froze during the recording (#758):" >&2
+      echo "$FREEZE_WATCH_REPORT" >&2
+      GATE=1
+    fi
     echo "    #703: merge recording-verdict exit code = $GATE (this IS the zero-loss/A/V verdict)."
     exit "$GATE"
   fi
@@ -2800,6 +2835,15 @@ if [ -s "$REPORT_JSON" ]; then
     echo "  win-strih Shell:      Remove-Item -Force -LiteralPath '${STRIH_HOST_PATH:-<unknown>}'"
     echo "  win-stream-snv Shell: Remove-Item -Force -LiteralPath '${STREAM_HOST_PATH:-<unknown>}'"
   fi
+fi
+
+# #758 item 3 — the in-run freeze watch's own verdict (same check as the E2E_EXECUTE_VERDICT=1
+# branch's own early exit above; this is the LEGACY/plan-print path's equivalent tail).
+FREEZE_WATCH_REPORT="$(live_freeze_watch_verdict "$FREEZE_WATCH_POISON_FILE")"
+if [ -n "$FREEZE_WATCH_REPORT" ]; then
+  echo "ERROR: [freeze-watch] one or more cameras froze during the recording (#758):" >&2
+  echo "$FREEZE_WATCH_REPORT" >&2
+  GATE=1
 fi
 
 exit "$GATE"
