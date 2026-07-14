@@ -773,7 +773,12 @@ _bool_or_failclosed() {
 # failed sub-check is recorded as a FAILING fact (via _bool_or_failclosed / sentinel values),
 # never silently omitted, so the aggregate decision always reflects the REAL rig state.
 event_mode_assert() {
-  local here; here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/.."
+  # #758 item 5: this used to carry a trailing "/.." -- the ONLY one of this file's `here=`
+  # computations that did, resolving one directory too high (the repo root) instead of scripts/,
+  # where event_assert.py / obs_phase2.py / obs_burn_filter.py / set-ndi-mapping.py /
+  # qr_screenshot_check.py actually live. Matches every OTHER `here=` line in this file (e.g.
+  # painter_liveness/OBS-scene helpers above) -- scripts/ itself, no trailing "/..".
+  local here; here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   local facts_json; facts_json="$(mktemp /tmp/event-assert-facts.XXXXXX.json)"
   EVENT_ASSERT_RESULT_JSON="$(mktemp /tmp/event-assert-result.XXXXXX.json)"
   # #724: the composed Discord confirmation message (Slovak, phone-readable) -- populated by
