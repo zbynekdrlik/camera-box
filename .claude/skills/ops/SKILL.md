@@ -1168,6 +1168,43 @@ This is a STOPGAP ONLY — the tmpfs refills on the same ~4-5 day cadence until 
 per-second PTP debug logging is throttled/leveled down (dantesync is a separate repo, tracked on
 `#679` — do not attempt that fix from this repo).
 
+## GOTCHA — live `journalctl -f` tailing on a cam box for diagnostics is DANGEROUS; retention is already only 2-20 minutes (#707, 2026-07-14)
+
+**Never leave an unfiltered `journalctl -f` (or `dmesg -w`) running on a cam box while investigating
+something** — confirmed live while root-causing #707's CAM1 residual: an unfiltered tail (piped to a
+file for later inspection) generated enough volume that, combined with the box already sitting close
+to its `/var/log` 50MB tmfps ceiling (the #679 gotcha above), it tipped `rsyslogd` into a
+`No space left on device` write-failure retry SPIRAL — hundreds of thousands of duplicate lines in
+under 10 minutes, which then ALSO filled `/tmp` (a separate 100MB tmpfs) via the runaway capture file
+itself. This didn't just risk disk — it produced ONE fully CONTAMINATED gate run (`all_cambox_continuity`
+copies=844/846, delivery-latency p50=27.8s/max=215s on CAM1) that looked like a catastrophic new
+finding but was entirely an artifact of the monitoring itself, not a real recurrence. **Two separate
+lessons:**
+
+1. **Even under NORMAL conditions, the live journal retains only ~2-20 minutes** on these boxes
+   (tmpfs-backed, aggressively vacuumed under any real log volume) — a post-hoc `journalctl --since/
+   --until` query for a burst that happened even 10-15 minutes ago will very likely come back empty.
+   There is NO reliable way to retroactively inspect a cam box's journal for an event more than a few
+   minutes old. If you need evidence from a specific mechanism, you MUST be tailing (safely, see below)
+   BEFORE the event happens, not querying after.
+2. **If you must live-tail for a specific diagnostic, filter to an EXACT, narrow, low-frequency
+   pattern with `grep -F`/`grep -E --line-buffered` PIPED on the remote host** (so only matching lines
+   ever hit disk) — e.g. `journalctl -f -o short-iso --no-pager | grep --line-buffered -F 'blocking
+   send STALL' > /tmp/x.log &`. NEVER use a broad pattern like `error` or `stall` alone — `rsyslogd`'s
+   OWN cascading disk-full messages contain generic words like "error" and will match, turning your
+   "safe" filtered tail into the same runaway spiral. Check `df -h /tmp` periodically while it runs,
+   and ALWAYS kill the tail process (by PID, never `pkill -f '<pattern>'` — the pattern can self-match
+   your own `ssh ... "pkill -f '<pattern>' ..."` command line and kill the SSH session instead, see
+   `capture` skill's V4L2/rig-mode `pgrep -x` footgun for the same self-match class) and delete the
+   capture file the moment you're done, before triggering another rig run.
+
+**Separate, unrelated tmpfs accumulation bug found the same session: #749** — `recording-e2e.sh`
+never cleans up its per-run `camera-box-burn-<RUN_ID>` binaries in `/tmp` (a DIFFERENT, also-100MB
+tmpfs from `/var/log`), so repeated gate runs alone (no live-tailing needed) eventually fill it and
+break the next run's `scp` deploy outright. `df -h /tmp` (not just `/var/log`) belongs in the health
+check above when investigating ANY cam box weirdness, especially right before/after a `full-path-e2e`
+run.
+
 ## #731 — Companion Satellite on imag-nb (headless Stream Deck client) — the systemd hwdb/uaccess ACL trap
 
 imag-nb (10.77.9.182) runs Bitfocus Companion Satellite as a headless systemd service so the
