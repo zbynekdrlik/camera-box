@@ -170,21 +170,24 @@ class _FakeObsRpc:
         raise AssertionError(f"unexpected rpc call: {rtype}")
 
 
-def test_reattach_reapplies_the_twins_own_current_ndi_source_name(monkeypatch):
+def test_reattach_reapplies_the_inputs_own_current_ndi_source_name(monkeypatch):
+    # #761: reattach() now targets the MAIN "NDI camN" input (strih's "MV Cam N" scenes were
+    # switched to same-source, the old "MV NDI camN" clone items are disabled and no longer
+    # what the sender-bounce probe checks).
     fake = _FakeObsRpc({"inputSettings": {"ndi_source_name": "CAM3 (usb)"}})
     monkeypatch.setattr(strih_mv_scenes.op, "_rpc", fake.rpc)
 
     result = strih_mv_scenes.reattach(object(), 5)
 
     assert result == "CAM3 (usb)"
-    assert fake.calls[0] == ("GetInputSettings", {"inputName": "MV NDI cam5"})
+    assert fake.calls[0] == ("GetInputSettings", {"inputName": "NDI cam5"})
     assert fake.calls[1] == (
         "SetInputSettings",
-        {"inputName": "MV NDI cam5", "inputSettings": {"ndi_source_name": "CAM3 (usb)"}},
+        {"inputName": "NDI cam5", "inputSettings": {"ndi_source_name": "CAM3 (usb)"}},
     )
 
 
-def test_reattach_returns_none_when_the_twin_has_no_ndi_source_name(monkeypatch):
+def test_reattach_returns_none_when_the_input_has_no_ndi_source_name(monkeypatch):
     fake = _FakeObsRpc({"inputSettings": {}})
     monkeypatch.setattr(strih_mv_scenes.op, "_rpc", fake.rpc)
 
@@ -192,7 +195,7 @@ def test_reattach_returns_none_when_the_twin_has_no_ndi_source_name(monkeypatch)
 
     assert result is None
     # Never re-applies a fabricated/fallback source name -- must call GetInputSettings only.
-    assert fake.calls == [("GetInputSettings", {"inputName": "MV NDI cam3"})]
+    assert fake.calls == [("GetInputSettings", {"inputName": "NDI cam3"})]
 
 
 # --- #753 (2026-07-14): cam7 physical box exists -- seed() must pick up its 'Cam 7' scene too --

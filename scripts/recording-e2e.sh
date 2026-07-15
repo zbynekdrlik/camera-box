@@ -1077,26 +1077,39 @@ else
   cargo build --release --bin frozen-camera-gate --bin render-budget-gate --bin av-restart-sync-gate --bin zero-loss-restart-gate  # airuleset:build-ok
 fi
 
-# #758 item 1 (continued) — per-camera NDI liveness via the MV low-bandwidth clones. Needs
-# frozen-camera-gate (just built/fetched above), so it cannot run at true [0/8] — this is still
-# comfortably BEFORE any deploy/OBS-touching step (StartRecord is 4 more steps away). The MV
-# clones ("MV NDI camN" on strih) are ALWAYS active (their scene is always shown in the built-in
-# Multiview, #730) — no lazy-activation false positive, unlike the MAIN "NDI camN" inputs (a
-# receiver thread there only starts once ITS scene is shown — the exact misread that produced
-# today's "4 frozen inputs" panic). ALL_CAMBOX sweep only.
+# #758 item 1 (continued) — per-camera NDI liveness. Needs frozen-camera-gate (just
+# built/fetched above), so it cannot run at true [0/8] — this is still comfortably BEFORE any
+# deploy/OBS-touching step (StartRecord is 4 more steps away).
+#
+# #761/#763 (2026-07-15) — the probe target is now PER-BOX, not a single shared convention:
+# STRIH switched its "MV Cam N" scenes to SAME-SOURCE (user-directed, #761 KEPT): they now
+# render the MAIN "NDI camN" input (scene-item scaled) and the old "MV NDI camN" low-bandwidth
+# CLONE items are DISABLED in those scenes — probing the disabled clones always reads FROZEN
+# (a disabled scene item never renders, no projector/warm-up trick can activate it) even on a
+# perfectly healthy camera. So on strih this preflight now probes the MAIN "NDI camN" inputs
+# instead. This is SAFE without frozen-camera-gate.py's own #747 PREVIEW warm-up (still passed
+# --warm-settle 0, i.e. disabled, unchanged): the built-in OBS Multiview grid projector renders
+# EVERY scene's thumbnail continuously while open (not gated on program/preview state), so as
+# long as that projector stays open (the rig's normal state) every "Cam N" scene — and hence
+# its "NDI camN" input — is ALWAYS actively rendering, structurally, with no lazy-activation
+# false positive (the exact risk the old "4 frozen inputs" panic this comment used to warn
+# about). IMAG was REVERTED to the low-bandwidth "MV CAMN" clone approach (full 1080p x7 does
+# not fit its render budget, #763 tracks unifying the two boxes onto one model later) — imag has
+# no equivalent frozen-camera-gate call site today, but if one is ever added it must target the
+# CLONES, not the mains, mirroring this same per-box split.
 if [ "${ALL_CAMBOX:-0}" = "1" ]; then
-  echo "[1/8] per-camera NDI liveness via MV low-bandwidth clones (#758)"
+  echo "[1/8] per-camera NDI liveness via strih's main NDI inputs (#758/#761)"
   PREFLIGHT_MV_SOURCES=""
   for _n in 1 2 3 4 5 6 7; do
     case " $PREFLIGHT_EXCLUDED_CAMS " in *" cam${_n} "*) continue ;; esac
-    PREFLIGHT_MV_SOURCES="${PREFLIGHT_MV_SOURCES:+$PREFLIGHT_MV_SOURCES,}MV NDI cam${_n}"
+    PREFLIGHT_MV_SOURCES="${PREFLIGHT_MV_SOURCES:+$PREFLIGHT_MV_SOURCES,}NDI cam${_n}"
   done
   if [ -n "$PREFLIGHT_MV_SOURCES" ]; then
     python3 "$HERE/frozen-camera-gate.py" --host "$STRIH" --password "" \
       --sources "$PREFLIGHT_MV_SOURCES" --samples 2 --cadence 3.5 --threshold 1 --warm-settle 0 \
       --verdict-bin "$PROBE_BIN_DIR/frozen-camera-gate" \
       || {
-        echo "ERROR: [preflight] FAIL: one or more MV NDI clones show NO pixel change across ~3.5s — a camera leg looks frozen/dead before this run even started. Investigate the named camera's NDI sender (see the frozen list above)." >&2
+        echo "ERROR: [preflight] FAIL: one or more camera NDI inputs show NO pixel change across ~3.5s — a camera leg looks frozen/dead before this run even started. Investigate the named camera's NDI sender (see the frozen list above)." >&2
         exit 1
       }
   fi
@@ -1167,23 +1180,36 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
 fi
 
 # #758 item 2 — sender-bounce liveness re-verify: after a box's [2/8]/[2b/8] service->burn-unit
-# swap, re-verify its "MV NDI cam<N>" clone still delivers CHANGING frames. A swap can leave the
-# box emitting NDI again while strih's receiver never re-locks on its own; ONE auto re-attach
-# (strih_mv_scenes.py --reattach, re-applying the twin's OWN current ndi_source_name) is tried,
-# THEN the harness gives the reconnect real SETTLE time across a bounded number of re-checks
-# before failing loud — never StartRecord, never a cleanup that ends with a leg still dead.
+# swap, re-verify its "NDI cam<N>" main input still delivers CHANGING frames. A swap can leave
+# the box emitting NDI again while strih's receiver never re-locks on its own; ONE auto
+# re-attach (strih_mv_scenes.py --reattach, re-applying the input's OWN current
+# ndi_source_name) is tried, THEN the harness gives the reconnect real SETTLE time across a
+# bounded number of re-checks before failing loud — never StartRecord, never a cleanup that
+# ends with a leg still dead.
+#
+# #761 (2026-07-15, user-directed, KEPT): strih's "MV Cam N" scenes were switched to
+# SAME-SOURCE — the old "MV NDI cam<N>" low-bandwidth clone items are now DISABLED in those
+# scenes, so probing them always reads frozen regardless of camera health. This re-verify (and
+# strih_mv_scenes.py's reattach()) now targets the MAIN "NDI cam<N>" input instead — the SAME
+# per-box split as the [1/8] preflight above. It works without frozen-camera-gate.py's own
+# #747 PREVIEW warm-up (still --warm-settle 0, unchanged) because the built-in OBS Multiview
+# grid projector renders every "Cam N" scene's thumbnail continuously while open, keeping every
+# "NDI cam<N>" main input always-active regardless of program/preview state. IMAG stays on the
+# low-bandwidth clone model (#763 tracks unifying the two boxes later) — this function is
+# strih-only (called with a camera name/number, always resolves against $STRIH).
 #
 # Retry/settle budget calibrated from a LIVE measurement (2026-07-14), not guessed: this
 # mechanism's first two real CI exercises both failed cam1 with the ORIGINAL tight budget (a
 # single ~3.5s check, one re-attach, a 2s settle, one more ~3.5s check -- ~13s total after the
 # caller's own upfront `sleep 4`). A direct timed `systemctl restart camera-box` + repeated
-# frozen-camera-gate polling against the SAME "MV NDI cam1" clone measured genuine recovery at
-# t+11.4s -- inside the OLD budget's margin, but only barely, matching the two real failures.
-# The mid-run [3/8]-area frozen-camera-gate retry loop below (FROZEN_CAM_ATTEMPTS=4 x
-# FROZEN_CAM_RETRY_SLEEP=30s) already establishes this repo's OWN precedent for how long a
-# genuine post-deploy NDI reconnect can take -- this preflight check reuses the SAME "attempts x
-# settle" shape, just with a smaller per-camera budget (it fires up to 7x in an ALL_CAMBOX sweep,
-# vs. the mid-run gate's one-shot use), sized comfortably above the measured 11.4s.
+# frozen-camera-gate polling against the SAME "MV NDI cam1" clone (the pre-#761 target)
+# measured genuine recovery at t+11.4s -- inside the OLD budget's margin, but only barely,
+# matching the two real failures. The mid-run [3/8]-area frozen-camera-gate retry loop below
+# (FROZEN_CAM_ATTEMPTS=4 x FROZEN_CAM_RETRY_SLEEP=30s) already establishes this repo's OWN
+# precedent for how long a genuine post-deploy NDI reconnect can take -- this preflight check
+# reuses the SAME "attempts x settle" shape, just with a smaller per-camera budget (it fires up
+# to 7x in an ALL_CAMBOX sweep, vs. the mid-run gate's one-shot use), sized comfortably above
+# the measured 11.4s.
 preflight_mv_reverify() {
   local box="$1" cam_n="$2"
   [ "${ALL_CAMBOX:-0}" = "1" ] || return 0
@@ -1193,7 +1219,7 @@ preflight_mv_reverify() {
   local a
   for a in $(seq 1 "$attempts"); do
     if python3 "$HERE/frozen-camera-gate.py" --host "$STRIH" --password "" \
-        --sources "MV NDI cam${cam_n}" --samples 2 --cadence 3.5 --threshold 1 --warm-settle 0 \
+        --sources "NDI cam${cam_n}" --samples 2 --cadence 3.5 --threshold 1 --warm-settle 0 \
         --verdict-bin "$PROBE_BIN_DIR/frozen-camera-gate" >/dev/null 2>&1; then
       if [ "$a" -gt 1 ]; then
         echo "    [sender-bounce] ${box} recovered on attempt ${a}/${attempts}" >&2
@@ -1201,7 +1227,7 @@ preflight_mv_reverify() {
       return 0
     fi
     if [ "$a" -eq 1 ]; then
-      echo "    [sender-bounce] ${box} (MV NDI cam${cam_n}) shows no pixel change right after its deploy — attempting re-attach (#758 item 2)" >&2
+      echo "    [sender-bounce] ${box} (NDI cam${cam_n}) shows no pixel change right after its deploy — attempting re-attach (#758 item 2)" >&2
       python3 "$HERE/strih_mv_scenes.py" --host "$STRIH" --password "" --reattach "$cam_n" >&2 || true
     fi
     if [ "$a" -lt "$attempts" ]; then
@@ -1209,7 +1235,7 @@ preflight_mv_reverify() {
       sleep "$settle_s"
     fi
   done
-  echo "ERROR: [preflight] FAIL: ${box} (MV NDI cam${cam_n}) still shows no pixel change after ${attempts} attempts (incl. one re-attach, ~$((attempts * 4 + (attempts - 1) * settle_s))s total) — the camera leg is dead right after its own deploy. Investigate the box directly (this run must not proceed with a known-dead leg)." >&2
+  echo "ERROR: [preflight] FAIL: ${box} (NDI cam${cam_n}) still shows no pixel change after ${attempts} attempts (incl. one re-attach, ~$((attempts * 4 + (attempts - 1) * settle_s))s total) — the camera leg is dead right after its own deploy. Investigate the box directly (this run must not proceed with a known-dead leg)." >&2
   return 1
 }
 
@@ -2139,13 +2165,19 @@ python3 "$HERE/warm_cam_scenes.py" --host "$STRIH" --settle "${WARM_CAM_SETTLE_S
 # #758 item 3 — arm the in-run freeze watch for the WHOLE recording window (StartRecord through
 # StopRecord), right before StartRecord. ALL_CAMBOX only (mirrors the [0/8]/[1/8] preflight + [2/8]/[2b/8] reverify's
 # own gating) — excludes any acked-offline camera.
+#
+# #761 (2026-07-15): same per-box probe-target split as the [1/8] preflight and the [2/8]/[2b/8]
+# sender-bounce reverify above — strih's "MV NDI cam<N>" clone items are now DISABLED (scenes
+# switched to same-source), so this watch probes the MAIN "NDI cam<N>" inputs instead, kept
+# always-active by the built-in OBS Multiview grid projector. See #763 for imag's separate
+# clone-based model.
 FREEZE_WATCH_PID_FILE="$OUTDIR/freeze-watch.pid"
 FREEZE_WATCH_POISON_FILE="$OUTDIR/freeze-watch-poison.txt"
 if [ "${ALL_CAMBOX:-0}" = "1" ]; then
   FREEZE_WATCH_SOURCES=""
   for _n in 1 2 3 4 5 6 7; do
     case " ${PREFLIGHT_EXCLUDED_CAMS:-} " in *" cam${_n} "*) continue ;; esac
-    FREEZE_WATCH_SOURCES="${FREEZE_WATCH_SOURCES:+$FREEZE_WATCH_SOURCES,}MV NDI cam${_n}"
+    FREEZE_WATCH_SOURCES="${FREEZE_WATCH_SOURCES:+$FREEZE_WATCH_SOURCES,}NDI cam${_n}"
   done
   if [ -n "$FREEZE_WATCH_SOURCES" ]; then
     echo "[5/8 pre] arming in-run freeze watch (#758): $FREEZE_WATCH_SOURCES"

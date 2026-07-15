@@ -228,23 +228,34 @@ def measure_stats(obs, seconds: float) -> dict:
 
 
 def reattach(obs, cam_n: int) -> "str | None":
-    """#758 item 2 — sender-bounce re-attach: re-read the 'MV NDI cam<n>' twin input's OWN
-    current ndi_source_name and re-apply the EXACT same value via SetInputSettings, forcing OBS
-    to tear down and re-establish its DistroAV NDI receive for that source. This is the SAME
-    "SetInputSettings ndi_source_name" re-bind the #758 spec calls for: after a [2/8]/[2b/8]
-    service->burn-unit swap (or during a cleanup restore), a camera's NDI sender can come back up
-    with a receiver that never re-locks on its own — re-applying its OWN bound source name (never
-    inventing a new one) nudges OBS's NDI input to reconnect. Returns the ndi_source_name that was
-    re-applied, or None if the twin input doesn't exist / has no ndi_source_name set (caller then
+    """#758 item 2 — sender-bounce re-attach: re-read an input's OWN current ndi_source_name and
+    re-apply the EXACT same value via SetInputSettings, forcing OBS to tear down and
+    re-establish its DistroAV NDI receive for that source. This is the SAME "SetInputSettings
+    ndi_source_name" re-bind the #758 spec calls for: after a [2/8]/[2b/8] service->burn-unit
+    swap (or during a cleanup restore), a camera's NDI sender can come back up with a receiver
+    that never re-locks on its own — re-applying its OWN bound source name (never inventing a
+    new one) nudges OBS's NDI input to reconnect. Returns the ndi_source_name that was
+    re-applied, or None if the input doesn't exist / has no ndi_source_name set (caller then
     treats this as "cannot re-attach, still dead -> fail loud", never silently invents a fallback
-    source name)."""
-    mv_input = f"MV NDI cam{cam_n}"
-    settings = op._rpc(obs, "GetInputSettings", {"inputName": mv_input}, ignore_err=True)
+    source name).
+
+    #761 (2026-07-15, user-directed, KEPT): strih's "MV Cam N" scenes were switched to
+    SAME-SOURCE — they now render the MAIN "NDI camN" input, and the old "MV NDI camN"
+    low-bandwidth clone items are DISABLED in those scenes. The sender-bounce liveness probe
+    this function backs (recording-e2e.sh's preflight_mv_reverify) was switched to match — it
+    now checks the MAIN "NDI camN" input's liveness, so this reattach must target the SAME
+    input the probe actually checks (re-attaching the now-unused, disabled clone would fix
+    nothing the probe cares about). Targets `f"NDI cam{cam_n}"` — the main, always-rendered
+    input (per #761's own reasoning: it's continuously shown via the built-in OBS Multiview
+    grid projector, so a stuck receiver here is a genuine sender-bounce symptom, same as it
+    always was for the clone)."""
+    input_name = f"NDI cam{cam_n}"
+    settings = op._rpc(obs, "GetInputSettings", {"inputName": input_name}, ignore_err=True)
     ndi_name = (settings or {}).get("inputSettings", {}).get("ndi_source_name")
     if not ndi_name:
         return None
     op._rpc(obs, "SetInputSettings",
-            {"inputName": mv_input, "inputSettings": {"ndi_source_name": ndi_name}},
+            {"inputName": input_name, "inputSettings": {"ndi_source_name": ndi_name}},
             ignore_err=True)
     return ndi_name
 
