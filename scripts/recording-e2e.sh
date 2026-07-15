@@ -2334,12 +2334,14 @@ if [ "$TRANSPORT_SAMPLER" = "1" ]; then
   TS_MAX_SECS="${TS_MAX_SECS:-$(( DURATION + 120 ))}"   # orphan-safety ceiling >> the window; [7c/8] stops it promptly
   TS_REMOTE_CSV="/tmp/transport-sampler-${RUN_ID}.csv"
   TS_REMOTE_PID="/tmp/transport-sampler-${RUN_ID}.pid"
-  # Sample the SOURCE cambox always; under the ALL_CAMBOX sweep also sample cam2(painter)+cam3..cam6,
+  # Sample the SOURCE cambox always; under the ALL_CAMBOX sweep also sample cam2(painter)+cam3..cam7,
   # each of which is cut into strih program during the sweep. Plain space-list (no command-sub in a
-  # for-list, so `set -e` at the top of this script can never trip on the expansion).
+  # for-list, so `set -e` at the top of this script can never trip on the expansion). #707
+  # (2026-07-15): cam7 was missing here (fleet grew 6->7, #755, after this list was written) --
+  # LINK could not be auto-ruled-out for its residual events without this coverage.
   TRANSPORT_SAMPLER_BOXES="$CAM1_IP"
   if [ "${ALL_CAMBOX:-0}" = "1" ]; then
-    TRANSPORT_SAMPLER_BOXES="$TRANSPORT_SAMPLER_BOXES $PAINTER_IP $CAM3_IP $CAM4_IP $CAM5_IP $CAM6_IP"
+    TRANSPORT_SAMPLER_BOXES="$TRANSPORT_SAMPLER_BOXES $PAINTER_IP $CAM3_IP $CAM4_IP $CAM5_IP $CAM6_IP $CAM7_IP"
   fi
   echo "[5b/8] transport sampler: arming ss/ip per-box counter sampler (~250ms, ${TS_MAX_SECS}s ceiling) on: $TRANSPORT_SAMPLER_BOXES"
   for _ts_ip in $TRANSPORT_SAMPLER_BOXES; do

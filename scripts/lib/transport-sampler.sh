@@ -90,6 +90,7 @@ transport_sampler_box_label() {
 	64) echo cam4 ;;
 	65) echo cam5 ;;
 	66) echo cam6 ;;
+	67) echo cam7 ;;
 	*) echo "box-${1##*.}" ;;
 	esac
 }
