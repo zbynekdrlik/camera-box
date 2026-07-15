@@ -193,6 +193,15 @@ pub struct AuditSummary {
     pub max_abs_head_skew_ms: i64,
     /// Mean `|ts_head_skew_ms|` across the window — the typical arrival jitter.
     pub mean_abs_head_skew_ms: f64,
+    /// #757 — SIGNED mean `ts_head_skew_ms` across the window (never `.abs()`'d, unlike
+    /// `mean_abs_head_skew_ms` above). This is the correction signal a pre-record phase
+    /// calibrator needs: a genlocked source's TRUE cam→strih transit time is approximately
+    /// `latency_ms + mean_head_skew_ms` (positive skew = frame arrived AFTER its scheduled
+    /// release, i.e. the applied pin under-estimates true transit; negative = the pin has
+    /// slack to spare). The `.abs()`'d field above answers "how much jitter", this one
+    /// answers "which direction, on average" — needed to reconstruct an absolute latency the
+    /// #286 `compute_phase_sync_offsets` kernel can re-pin from, without a full recording.
+    pub mean_head_skew_ms: f64,
     /// The deepest FIFO depth/peak observed across the window.
     pub peak_depth: u64,
 }
@@ -206,6 +215,8 @@ pub fn summarize(samples: &[AuditSample]) -> Option<AuditSummary> {
     let abs_skews: Vec<i64> = samples.iter().map(|s| s.ts_head_skew_ms.abs()).collect();
     let max_abs_head_skew_ms = abs_skews.iter().copied().max().unwrap_or(0);
     let mean_abs_head_skew_ms = abs_skews.iter().sum::<i64>() as f64 / samples.len() as f64;
+    // #757 RED: stub — always 0.0, not yet the real signed mean (see the GREEN commit).
+    let mean_head_skew_ms = 0.0_f64;
     let peak_depth = samples
         .iter()
         .map(|s| s.peak as u64)
@@ -226,6 +237,7 @@ pub fn summarize(samples: &[AuditSample]) -> Option<AuditSummary> {
         delta_late_holds: last.late_holds.saturating_sub(first.late_holds),
         max_abs_head_skew_ms,
         mean_abs_head_skew_ms,
+        mean_head_skew_ms,
         peak_depth,
     })
 }
@@ -362,6 +374,41 @@ mod tests {
     #[test]
     fn summarize_returns_none_for_an_empty_window() {
         assert!(summarize(&[]).is_none());
+    }
+
+    #[test]
+    fn summarize_computes_the_signed_mean_head_skew_not_absolute_757() {
+        // #757: a pre-record phase calibrator needs the SIGNED mean skew (direction, not just
+        // magnitude) to reconstruct an absolute cam->strih transit time from the applied pin.
+        // mean(-3, 6) must be +1.5, never |{-3,6}| mean = 4.5 (that's mean_abs_head_skew_ms).
+        let mut first = parse_audit_line(SAMPLE_LINE_CAM1).unwrap();
+        let mut last = first.clone();
+        first.ts_head_skew_ms = -3;
+        last.ts_head_skew_ms = 6;
+
+        let summary = summarize(&[first, last]).expect("2 samples must summarize");
+        assert!(
+            (summary.mean_head_skew_ms - 1.5).abs() < 1e-9,
+            "signed mean(-3, 6) == 1.5, got {}",
+            summary.mean_head_skew_ms
+        );
+        // Sanity: a symmetric window must average toward zero on the SIGNED mean even though
+        // the ABS mean stays clearly positive -- proves the two fields really are distinct.
+        let mut neg = parse_audit_line(SAMPLE_LINE_CAM1).unwrap();
+        let mut pos = neg.clone();
+        neg.ts_head_skew_ms = -10;
+        pos.ts_head_skew_ms = 10;
+        let symmetric = summarize(&[neg, pos]).unwrap();
+        assert!(
+            (symmetric.mean_head_skew_ms - 0.0).abs() < 1e-9,
+            "signed mean(-10, 10) == 0.0, got {}",
+            symmetric.mean_head_skew_ms
+        );
+        assert!(
+            (symmetric.mean_abs_head_skew_ms - 10.0).abs() < 1e-9,
+            "abs mean(|-10|, |10|) == 10.0 (unchanged, distinct field), got {}",
+            symmetric.mean_abs_head_skew_ms
+        );
     }
 
     #[test]
