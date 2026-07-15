@@ -130,6 +130,29 @@ fn program_verifies_render_tick_and_distroav_log_lines() {
     );
 }
 
+/// #786 — the emitted program carries the AUDIO-BUFFERING LAUNCH-GATE: a bad ASIO launch draw
+/// (libobs ratcheting its one-way global audio buffering to the 960 ms max within the first
+/// seconds, sticky until restart → whole-session A/V off by ~0.9 s) must be detected from the
+/// fresh log and answered with a bounded kill+relaunch redraw, failing LOUD (exit 7) when every
+/// attempt draws bad. A wrapper without this gate relaunches OBS blind into the 2026-07-15
+/// incident.
+#[test]
+fn program_gates_on_audio_buffering_and_redraws_786() {
+    let p = program_default();
+    assert!(
+        p.contains("total audio buffering is now (\\d+) milliseconds"),
+        "#786: the program must read the fresh log's audio-buffering peak. Program:\n{p}"
+    );
+    assert!(
+        p.contains("Max audio buffering reached"),
+        "#786: the program must detect the maxed-out ratchet marker. Program:\n{p}"
+    );
+    assert!(
+        p.contains("exit 7"),
+        "#786: exhausting the relaunch attempts must fail LOUD with the distinct exit 7. Program:\n{p}"
+    );
+}
+
 /// The FINAL verdict gates exit 0 on the render tick being ENABLED (the genlock build proof) and
 /// fails LOUD (non-zero exit) otherwise — never a silent stock/wrong-build launch.
 #[test]
