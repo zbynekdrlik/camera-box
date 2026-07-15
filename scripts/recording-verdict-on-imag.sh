@@ -51,7 +51,13 @@ set -euo pipefail
 # only, %q-quoted — no dev1 path, no unescaped argument) WITHOUT touching the network.
 build_onimag_command() {
   local exe="$1"; shift
-  printf 'RUST_LOG=info %q' "$exe"
+  # #767: the decode is a BATCH job on a box running PRODUCTION OBS — with the keep-alive build
+  # all 16 NDI receivers decode continuously (~4 cores), and an unthrottled decode (313% CPU +
+  # ffmpeg child) drove load to 27 → starved NDI threads → user-visible stutter on the
+  # projection while the compositor still reported 60fps (live, 2026-07-15). nice 19 + pinned
+  # to cores 12-15, fully OFF the cores OBS is pinned to (taskset -c 2-11 at launch). The
+  # ffmpeg child inherits both. Decode takes longer on 4 E-cores — irrelevant for a batch job.
+  printf 'nice -n 19 taskset -c 12-15 env RUST_LOG=info %q' "$exe"
   local a
   for a in "$@"; do
     printf ' %q' "$a"
