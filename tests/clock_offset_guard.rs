@@ -369,6 +369,45 @@ fn dantesync_offset_verdict_absent_when_no_offset_line() {
     assert_eq!(offset_verdict(DS_ABSENT), "absent");
 }
 
+// #767-era measurement noise (live, 2026-07-15, E2E runs 29413733037/29419195600): under E2E
+// network load the per-sample [NTP] offset MEASUREMENT spikes to ~2-3ms for a SINGLE sample
+// (cam5 -2787us, cam7 -2316us) while PTP stays NANO-locked and the surrounding samples read
+// tens of us -- the clock is fine, the one measurement is noisy. Grading the single freshest
+// sample makes the gate flake exactly during E2E load; the verdict therefore grades the MEDIAN
+// of the fresh samples among the last 5 offset lines. The bound (2000us) is UNCHANGED and a
+// SUSTAINED out-of-bound offset (the real cam5/6 5.28s class) still hard-fails.
+const DS_FRESH_SPIKE_AMID_OK: &str = "\
+2026-07-07T18:36:20+02:00 CAM5 dantesync[900]: [NTP] offset:-20us (threshold:535us, adaptive)
+2026-07-07T18:36:28+02:00 CAM5 dantesync[900]: [NTP] offset:+34us (threshold:535us, adaptive)
+2026-07-07T18:36:36+02:00 CAM5 dantesync[900]: [NTP] offset:-15us (threshold:535us, adaptive)
+2026-07-07T18:36:44+02:00 CAM5 dantesync[900]: [PTP] NANO  Drift:   -486ns/s  Adj: +6.82ppm
+2026-07-07T18:36:45+02:00 CAM5 dantesync[900]: [NTP] offset:-2787us
+2026-07-07T18:36:46+02:00 CAM5 dantesync[900]: [PTP] NANO  Drift:   +253ns/s  Adj: +6.81ppm
+";
+
+const DS_FRESH_SUSTAINED_DRIFT: &str = "\
+2026-07-07T18:36:20+02:00 CAM5 dantesync[900]: [NTP] offset:+2624us
+2026-07-07T18:36:28+02:00 CAM5 dantesync[900]: [NTP] offset:+2508us
+2026-07-07T18:36:36+02:00 CAM5 dantesync[900]: [NTP] offset:+2865us
+2026-07-07T18:36:44+02:00 CAM5 dantesync[900]: [PTP] NANO  Drift:   -486ns/s  Adj: +6.82ppm
+2026-07-07T18:36:46+02:00 CAM5 dantesync[900]: [PTP] NANO  Drift:   +253ns/s  Adj: +6.81ppm
+";
+
+#[test]
+fn dantesync_offset_verdict_tolerates_a_single_fresh_measurement_spike() {
+    // One fresh ~2.8ms sample amid fresh tens-of-us samples = measurement noise, PTP still
+    // locked -> the median is in-bound -> "ok". (Pre-#767-fix this graded the single freshest
+    // sample and returned "drift" -- the exact E2E-load flake.)
+    assert_eq!(offset_verdict(DS_FRESH_SPIKE_AMID_OK), "ok");
+}
+
+#[test]
+fn dantesync_offset_verdict_still_drifts_on_sustained_out_of_bound_offset() {
+    // EVERY fresh sample out of bound -> the median is out of bound -> "drift". The median is
+    // noise-rejection, never a weakening of the 2000us bound.
+    assert_eq!(offset_verdict(DS_FRESH_SUSTAINED_DRIFT), "drift");
+}
+
 #[test]
 fn dantesync_offset_verdict_fails_closed_on_a_malformed_freshness_window() {
     // Same fail-closed property as freshest_offset_us, proven through the actual verdict every
