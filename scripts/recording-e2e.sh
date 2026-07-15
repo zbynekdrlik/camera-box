@@ -2185,19 +2185,34 @@ python3 "$HERE/warm_cam_scenes.py" --host "$STRIH" --settle "${WARM_CAM_SETTLE_S
 # the real recording starts (step 5), and re-pins before anything is scored.
 #
 # Mechanism (no full recording/decode needed — see scripts/prerecord_phase_calibrate.py's own
-# module doc for the derivation): a short mini-sweep cuts strih PROGRAM through every camera in
-# $CAMBOX_SWEEP for CALIB_DWELL_SECS each (reusing the SAME switch_schedule.py plan + the SAME
-# obs_phase2.py switch strih already uses in the ALL-CAMBOX sweep below — one full cycle, ONE
-# `plan` call with duration = CALIB_DWELL_SECS * 7 always clears the whole sweep regardless of
-# its actual pair count, per switch_schedule.n_segments' ceil()). strih's OWN live
-# `genlock-fifo audit` log (emitted ~every 5s per genlocked source) already carries, per
-# camera, the EFFECTIVE pin active during the window (`latency_ms`) and the SIGNED mean
-# deviation of the actual arrival from that pin's own release schedule (`mean_head_skew_ms`,
-# #757 — new field). Their sum reconstructs each camera's TRUE absolute cam→strih transit
-# latency WITHOUT decoding a single frame; feeding that into the EXISTING #286
-# `compute_phase_sync_offsets` kernel (via the phase-sync calibrator script, completely
-# unchanged) produces the same slowest-anchored relative pin set a full recording-based
-# measurement would.
+# module doc for the derivation): cycle every strih camera scene onto PREVIEW for
+# CALIB_DWELL_SECS each (reusing warm_cam_scenes.py's EXACT, already-proven, unchanged
+# preview-cycling mechanism — the #747 warm-up just above already calls it with a short
+# settle; this is the SAME function, called again with a longer settle for calibration
+# purposes). strih's OWN live `genlock-fifo audit` log (emitted ~every 5s per genlocked
+# source) already carries, per camera, the EFFECTIVE pin active during the window
+# (`latency_ms`) and the SIGNED mean deviation of the actual arrival from that pin's own
+# release schedule (`mean_head_skew_ms`, #757 — new field). Their sum reconstructs each
+# camera's TRUE absolute cam→strih transit latency WITHOUT decoding a single frame; feeding
+# that into the EXISTING #286 `compute_phase_sync_offsets` kernel (via the phase-sync
+# calibrator script, completely unchanged) produces the same slowest-anchored relative pin
+# set a full recording-based measurement would.
+#
+# #757 CORRECTION (2026-07-15, live regression on the very first acceptance run, 1779172763):
+# the ORIGINAL design here cut strih PROGRAM (not preview) through every camera. That
+# disrupted the LIVE stream/audio/imag chains for roughly the next two minutes: the
+# following run's first ~4 recording windows showed massively elevated imag optical
+# stuck-density (0.2-1.0 vs a normal <0.01, one window FULLY stuck) AND cam1's segment
+# alone carried 39 copies/37 gaps, AND all_cambox_av_sync's QPSK clustering collapsed to
+# ZERO cluster_samples on EVERY camera including cam2 itself (which normally self-measures
+# cleanly) — all self-recovering by window 5. #747's own warm-up (right above) proves
+# genlock-fifo audit lines fire for a PREVIEW-only-active source too (its own docstring:
+# "so DistroAV's raw NDI receivers... are already connected" — the OBS source video-tick
+# pipeline that emits genlock-fifo audit lines runs for ANY active view, program OR
+# preview, per vendor/obs-studio/libobs/obs-source.c's genlock_audit_log call sites, which
+# are gated on the source's own tick/showing state, never specifically on "is this the
+# program source"). So this step now NEVER touches strih PROGRAM at all — the live
+# broadcast/recording chain is completely undisturbed by calibration.
 #
 # Best-effort throughout (`set +e` for this whole block): a calibration hiccup (an unreachable
 # log, zero usable audit lines, an apply failure) must NEVER abort the scored recording below —
@@ -2208,66 +2223,48 @@ if [ "$PRERECORD_PHASE_CALIBRATE" = "1" ] && [ "${ALL_CAMBOX:-0}" = "1" ]; then
   echo "[4g/8] #757 pre-record phase auto-pin — measure THIS run's actual per-camera phase, re-pin before the real recording starts"
   CALIB_DWELL_SECS="${CALIB_DWELL_SECS:-10}"
   mkdir -p "$OUTDIR"
-  # Same default literal as CAMBOX_SWEEP's own formal assignment near the ALL-CAMBOX sweep
-  # below (keep both in sync if that default ever changes) — read here via the SAME
-  # inline-default form; no formal CAMBOX_SWEEP assignment has run yet at this point.
-  _CALIB_SWEEP="${CAMBOX_SWEEP:-Cam 1:CAM1 Cam 2:CAM2 Cam 3:CAM3 Cam 4:CAM4 Cam 5:CAM5 Cam 6:CAM6 Cam 7:CAM7}"
-  mapfile -t _CALIB_PLAN < <(python3 "$HERE/switch_schedule.py" plan \
-    --sweep "$_CALIB_SWEEP" --segment-secs "$CALIB_DWELL_SECS" --duration "$((CALIB_DWELL_SECS * 7))")
-  if [ "${#_CALIB_PLAN[@]}" -eq 0 ]; then
-    echo "WARNING: #757 empty calibration sweep plan from CAMBOX_SWEEP='$_CALIB_SWEEP' — skipping pre-record auto-pin this run" >&2
-  else
-    for _cseg in "${_CALIB_PLAN[@]}"; do
-      _cscene="${_cseg%%$'\t'*}"; _clabel="${_cseg##*$'\t'}"
-      python3 "$HERE/obs_phase2.py" switch --host "$STRIH" --program-scene "$_cscene" >/dev/null 2>&1 \
-        && echo "    [calib] $_clabel via '$_cscene'" \
-        || echo "    WARNING: #757 calib switch to '$_cscene' ($_clabel) failed — its measurement will be missing" >&2
-      interruptible_sleep "$CALIB_DWELL_SECS"
-    done
-    # Restore strih program to the SOURCE camera's own scene ([4/8] above already set this up) —
-    # the mini-sweep must never leave the wrong scene on program going into the real recording.
-    python3 "$HERE/obs_phase2.py" switch --host "$STRIH" --program-scene "$STRIH_PROG_SCENE" >/dev/null 2>&1 \
-      || echo "WARNING: #757 could not restore strih program to '$STRIH_PROG_SCENE' after calibration" >&2
+  echo "    [calib] cycling every strih camera onto PREVIEW for ${CALIB_DWELL_SECS}s each (program output untouched)"
+  python3 "$HERE/warm_cam_scenes.py" --host "$STRIH" --settle "$CALIB_DWELL_SECS" 2>&1 \
+    | sed 's/^/    [calib] /'
 
-    CALIB_LOG="$OUTDIR/prerecord-calib-strih-${RUN_ID}.log"
-    if win_ssh_run "$STRIH_USER" "$STRIH_PW" "$STRIH" \
-        'Get-Content (Get-ChildItem "$env:APPDATA\obs-studio\logs\*.txt" | Sort-Object LastWriteTime -Descending | Select-Object -First 1) -Tail 2000' \
-        > "$CALIB_LOG" 2>/dev/null && [ -s "$CALIB_LOG" ]; then
-      CALIB_JITTER_JSON="$OUTDIR/prerecord-calib-jitter-${RUN_ID}.json"
-      if "$PROBE_BIN_DIR/genlock-jitter-report" --file "$CALIB_LOG" --json > "$CALIB_JITTER_JSON" 2>"$OUTDIR/prerecord-calib-jitter-err-${RUN_ID}.log"; then
-        CALIB_STRIH_MEASURED="$OUTDIR/prerecord-calib-strih-measured-${RUN_ID}.json"
-        CALIB_IMAG_MAIN_MEASURED="$OUTDIR/prerecord-calib-imag-main-measured-${RUN_ID}.json"
-        CALIB_IMAG_MV_MEASURED="$OUTDIR/prerecord-calib-imag-mv-measured-${RUN_ID}.json"
-        if python3 "$HERE/prerecord_phase_calibrate.py" --jitter-json "$CALIB_JITTER_JSON" \
-             --out "$CALIB_STRIH_MEASURED" \
-             --imag-main-out "$CALIB_IMAG_MAIN_MEASURED" --imag-mv-out "$CALIB_IMAG_MV_MEASURED"; then
-          echo "    [calib] applying corrected pins to strih (mains)…"
-          python3 "$HERE/phase_sync_calibrate.py" --host "$STRIH" --password "$STRIH_PW" \
-            --measured-json "$CALIB_STRIH_MEASURED" --apply \
-            --gate-bin "$PROBE_BIN_DIR/phase-sync-gate" \
-            --json-path "$OUTDIR/prerecord-calib-strih-pins-${RUN_ID}.json" \
-            || echo "WARNING: #757 strih pin apply failed — continuing with whatever pins were already set" >&2
-          echo "    [calib] applying corrected pins to imag (mains)…"
-          python3 "$HERE/phase_sync_calibrate.py" --host "$IMAG_IP" --password "${IMAG_PW:-newlevel}" \
-            --measured-json "$CALIB_IMAG_MAIN_MEASURED" --apply \
-            --gate-bin "$PROBE_BIN_DIR/phase-sync-gate" \
-            --json-path "$OUTDIR/prerecord-calib-imag-main-pins-${RUN_ID}.json" \
-            || echo "WARNING: #757 imag-main pin apply failed — continuing" >&2
-          echo "    [calib] applying corrected pins to imag (MV clones)…"
-          python3 "$HERE/phase_sync_calibrate.py" --host "$IMAG_IP" --password "${IMAG_PW:-newlevel}" \
-            --measured-json "$CALIB_IMAG_MV_MEASURED" --apply \
-            --gate-bin "$PROBE_BIN_DIR/phase-sync-gate" \
-            --json-path "$OUTDIR/prerecord-calib-imag-mv-pins-${RUN_ID}.json" \
-            || echo "WARNING: #757 imag-MV pin apply failed — continuing" >&2
-        else
-          echo "WARNING: #757 no usable per-camera measurement in this run's calibration sweep — skipping pin apply, using whatever was already set" >&2
-        fi
+  CALIB_LOG="$OUTDIR/prerecord-calib-strih-${RUN_ID}.log"
+  if win_ssh_run "$STRIH_USER" "$STRIH_PW" "$STRIH" \
+      'Get-Content (Get-ChildItem "$env:APPDATA\obs-studio\logs\*.txt" | Sort-Object LastWriteTime -Descending | Select-Object -First 1) -Tail 2000' \
+      > "$CALIB_LOG" 2>/dev/null && [ -s "$CALIB_LOG" ]; then
+    CALIB_JITTER_JSON="$OUTDIR/prerecord-calib-jitter-${RUN_ID}.json"
+    if "$PROBE_BIN_DIR/genlock-jitter-report" --file "$CALIB_LOG" --json > "$CALIB_JITTER_JSON" 2>"$OUTDIR/prerecord-calib-jitter-err-${RUN_ID}.log"; then
+      CALIB_STRIH_MEASURED="$OUTDIR/prerecord-calib-strih-measured-${RUN_ID}.json"
+      CALIB_IMAG_MAIN_MEASURED="$OUTDIR/prerecord-calib-imag-main-measured-${RUN_ID}.json"
+      CALIB_IMAG_MV_MEASURED="$OUTDIR/prerecord-calib-imag-mv-measured-${RUN_ID}.json"
+      if python3 "$HERE/prerecord_phase_calibrate.py" --jitter-json "$CALIB_JITTER_JSON" \
+           --out "$CALIB_STRIH_MEASURED" \
+           --imag-main-out "$CALIB_IMAG_MAIN_MEASURED" --imag-mv-out "$CALIB_IMAG_MV_MEASURED"; then
+        echo "    [calib] applying corrected pins to strih (mains)…"
+        python3 "$HERE/phase_sync_calibrate.py" --host "$STRIH" --password "$STRIH_PW" \
+          --measured-json "$CALIB_STRIH_MEASURED" --apply \
+          --gate-bin "$PROBE_BIN_DIR/phase-sync-gate" \
+          --json-path "$OUTDIR/prerecord-calib-strih-pins-${RUN_ID}.json" \
+          || echo "WARNING: #757 strih pin apply failed — continuing with whatever pins were already set" >&2
+        echo "    [calib] applying corrected pins to imag (mains)…"
+        python3 "$HERE/phase_sync_calibrate.py" --host "$IMAG_IP" --password "${IMAG_PW:-newlevel}" \
+          --measured-json "$CALIB_IMAG_MAIN_MEASURED" --apply \
+          --gate-bin "$PROBE_BIN_DIR/phase-sync-gate" \
+          --json-path "$OUTDIR/prerecord-calib-imag-main-pins-${RUN_ID}.json" \
+          || echo "WARNING: #757 imag-main pin apply failed — continuing" >&2
+        echo "    [calib] applying corrected pins to imag (MV clones)…"
+        python3 "$HERE/phase_sync_calibrate.py" --host "$IMAG_IP" --password "${IMAG_PW:-newlevel}" \
+          --measured-json "$CALIB_IMAG_MV_MEASURED" --apply \
+          --gate-bin "$PROBE_BIN_DIR/phase-sync-gate" \
+          --json-path "$OUTDIR/prerecord-calib-imag-mv-pins-${RUN_ID}.json" \
+          || echo "WARNING: #757 imag-MV pin apply failed — continuing" >&2
       else
-        echo "WARNING: #757 genlock-jitter-report found no usable audit lines in the calibration window (see $OUTDIR/prerecord-calib-jitter-err-${RUN_ID}.log) — skipping pin apply" >&2
+        echo "WARNING: #757 no usable per-camera measurement in this run's calibration sweep — skipping pin apply, using whatever was already set" >&2
       fi
     else
-      echo "WARNING: #757 could not fetch strih's OBS log for calibration — skipping pin apply" >&2
+      echo "WARNING: #757 genlock-jitter-report found no usable audit lines in the calibration window (see $OUTDIR/prerecord-calib-jitter-err-${RUN_ID}.log) — skipping pin apply" >&2
     fi
+  else
+    echo "WARNING: #757 could not fetch strih's OBS log for calibration — skipping pin apply" >&2
   fi
   set -e
 else
