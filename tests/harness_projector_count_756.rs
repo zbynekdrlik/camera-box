@@ -58,6 +58,7 @@
 
 use std::fs;
 use std::path::PathBuf;
+use std::process::Command;
 
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -86,6 +87,132 @@ fn setup_imag_seeds_close_existing_projectors_756() {
          `obs_phase2.py open-projectors` call the #758 preflight makes on every single \
          recording-e2e.sh run stacks ANOTHER Multiview+Program pair on top of the last -- \
          live-caught as 7 stray pairs accumulated on imag"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// 1b. FUNCTIONAL guard: seed_ini() must land the key INSIDE the file's EXISTING [BasicWindow]
+//     section, never as a second, duplicate `[BasicWindow]` header appended later in the file.
+//
+//     Live-caught (2026-07-15): a first attempt at this fix appended a brand-new
+//     `[BasicWindow]\nCloseExistingProjectors=true\n` block to the END of imag's ALREADY-
+//     populated user.ini (which already had its own `[BasicWindow]` section from an earlier
+//     provisioning run). libobs's util/config-file.c is a CUSTOM ini parser (NOT Qt's
+//     QSettings — an earlier comment in this file assuming section-merging was wrong) that
+//     stores sections in a uthash table keyed by name; a second `[BasicWindow]` header does
+//     NOT merge into the first section — every config_get_bool()/config_find_item() lookup
+//     only ever resolves the FIRST-inserted section, so a key seeded into a later duplicate
+//     section is silently unreachable, and gets DROPPED ENTIRELY the next time OBS itself
+//     cleanly saves the file (confirmed live: after one OBS restart, the appended block had
+//     vanished from disk). Proven on the live rig: 4 open-projectors calls in a row still
+//     stacked 4 stray Multiview + 4 stray Program windows with the buggy seed applied.
+//
+//     A purely textual check (`body.contains("CloseExistingProjectors=true")`, test 1 above)
+//     cannot catch this — the string legitimately IS in the script either way. This test
+//     extracts the REAL seed_ini() function body from the script (sed range-match, no
+//     hand-duplicated copy that could drift) and actually RUNS it against synthetic fixtures.
+// ---------------------------------------------------------------------------------------------
+
+/// Extract the real `seed_ini() { ... }` function body verbatim from setup-imag.sh (the
+/// function is defined WELL AFTER the file's `BASH_SOURCE[0] != $0` early-return guard, so it
+/// cannot be reached via a plain `source` the way the top-of-file pure functions are in
+/// tests/setup_imag_pure_functions.rs — extract it as text instead).
+fn extract_seed_ini() -> String {
+    let body = read(SETUP);
+    let start = body
+        .find("seed_ini() {")
+        .expect("scripts/setup-imag.sh must define seed_ini()");
+    let after_start = &body[start..];
+    let end = after_start
+        .find("\n}\n")
+        .expect("seed_ini()'s closing brace (a bare `}` on its own line) must exist");
+    after_start[..end + 2].to_string()
+}
+
+/// Run the extracted seed_ini() function against a fixture file's INITIAL content, return the
+/// file's content afterward.
+fn run_seed_ini_on(initial_content: &str) -> String {
+    let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+    fs::write(tmp.path(), initial_content).expect("write fixture");
+    let harness = format!(
+        "set -euo pipefail\n{}\nseed_ini \"$F\"\n",
+        extract_seed_ini()
+    );
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(&harness)
+        .env("F", tmp.path())
+        .output()
+        .expect("failed to run bash harness");
+    assert!(
+        out.status.success(),
+        "seed_ini() harness failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    fs::read_to_string(tmp.path()).expect("read fixture back")
+}
+
+#[test]
+fn seed_ini_inserts_close_existing_projectors_into_the_existing_basicwindow_section_756() {
+    // Simulates the REAL live state that broke: a file that already has a populated
+    // [BasicWindow] section (from an earlier provisioning run) AND a [General] section after
+    // it — exactly imag's actual user.ini shape before this fix.
+    let fixture = "[OBSWebSocket]\nServerEnabled=true\n\n\
+                   [BasicWindow]\nSaveProjectors=true\nPreviewEnabled=true\n\n\
+                   [General]\nLastVersion=536936450\n";
+    let result = run_seed_ini_on(fixture);
+
+    assert!(
+        result.contains("CloseExistingProjectors=true"),
+        "seed_ini() must add the key somewhere: {result}"
+    );
+
+    // The critical assertion: the key must land BEFORE the [General] section header that was
+    // already in the file — i.e. INSIDE the existing [BasicWindow] section — never appended
+    // as a NEW section further down (which would be silently unreachable, see the module doc
+    // comment above).
+    let key_idx = result
+        .find("CloseExistingProjectors=true")
+        .expect("key must be present");
+    let general_idx = result
+        .find("[General]")
+        .expect("the fixture's original [General] section must survive");
+    assert!(
+        key_idx < general_idx,
+        "seed_ini() must insert CloseExistingProjectors=true INSIDE the file's EXISTING \
+         [BasicWindow] section (before the next section header), never append a duplicate \
+         [BasicWindow] block later in the file -- a duplicate section is silently unreachable \
+         via config_get_bool()/config_find_item() (libobs util/config-file.c resolves only the \
+         FIRST-inserted section for a given name) and gets dropped entirely the next time OBS \
+         itself saves the file. Got:\n{result}"
+    );
+
+    // Must never create a SECOND `[BasicWindow]` header — that is the exact bug shape.
+    let basicwindow_count = result.matches("[BasicWindow]").count();
+    assert_eq!(
+        basicwindow_count, 1,
+        "seed_ini() must never produce a second [BasicWindow] section header -- got \
+         {basicwindow_count} occurrences in:\n{result}"
+    );
+}
+
+#[test]
+fn seed_ini_appends_a_fresh_basicwindow_section_when_none_exists_756() {
+    // The genuinely-fresh-file case (first-ever provision, no [BasicWindow] section at all
+    // yet) must still work via the fallback append path.
+    let fixture = "[OBSWebSocket]\nServerEnabled=true\n";
+    let result = run_seed_ini_on(fixture);
+    assert!(
+        result.contains("[BasicWindow]") && result.contains("CloseExistingProjectors=true"),
+        "seed_ini() must append a fresh [BasicWindow] section carrying the key when the file \
+         has none yet: {result}"
+    );
+    let basicwindow_count = result.matches("[BasicWindow]").count();
+    assert_eq!(
+        basicwindow_count, 1,
+        "must produce exactly one [BasicWindow] section on a fresh file -- got \
+         {basicwindow_count} in:\n{result}"
     );
 }
 

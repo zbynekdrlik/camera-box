@@ -847,7 +847,25 @@ EOF
         # preflight's intermittent sub-58fps failures even on a build whose #276/#278/#293
         # divisor mechanism is confirmed correctly compiled in (nm -D -u). Setting this makes
         # every future OpenVideoMixProjector call self-correct to exactly one window per monitor.
-        printf '\n[BasicWindow]\nCloseExistingProjectors=true\n' >> "$f"
+        #
+        # INSERT into the EXISTING [BasicWindow] section (this SAME seed_ini() call already
+        # created one two lines above, via the SaveProjectors seed) — NEVER append a duplicate
+        # `[BasicWindow]` header. libobs's own util/config-file.c is a CUSTOM ini parser (NOT
+        # Qt's QSettings) that keys sections in a uthash table by name; a SECOND `[BasicWindow]`
+        # header does not merge into the first section, it adds a separate instance under the
+        # same hash key, and every config_get_bool()/config_find_item() lookup only ever
+        # resolves the FIRST-inserted section — a key seeded into a later duplicate section is
+        # silently unreachable, and gets DROPPED ENTIRELY the next time OBS itself cleanly saves
+        # the file (its own save only ever writes back what it had loaded). Live-caught
+        # (2026-07-15): appending a duplicate section this way was applied to the already-running
+        # imag box, then vanished completely after the next OBS restart's config save — 4
+        # repeated open-projectors calls afterward still stacked 4 stray Multiview + 4 stray
+        # Program windows, proving the naive append never took effect.
+        if grep -q '^\[BasicWindow\]$' "$f"; then
+            sed -i '0,/^\[BasicWindow\]$/s//[BasicWindow]\nCloseExistingProjectors=true/' "$f"
+        else
+            printf '\n[BasicWindow]\nCloseExistingProjectors=true\n' >> "$f"
+        fi
     fi
     if ! grep -q '^LastVersion=' "$f"; then
         printf '\n[General]\nLastVersion=536936450\n' >> "$f"   # 32.1.2 — suppress first-run wizard
