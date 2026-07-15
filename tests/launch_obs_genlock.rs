@@ -151,6 +151,26 @@ fn program_gates_on_audio_buffering_and_redraws_786() {
         p.contains("exit 7"),
         "#786: exhausting the relaunch attempts must fail LOUD with the distinct exit 7. Program:\n{p}"
     );
+    // Pin the gate's LOGIC constants, not just its strings — a refactor that keeps the literals
+    // but loosens the threshold / attempt count / clean-condition must go RED here.
+    assert!(
+        p.contains("$bufPeak -le 200"),
+        "#786: the clean-draw threshold must stay 200 ms (peak above it = bad draw). Program:\n{p}"
+    );
+    assert!(
+        p.contains("$maxLaunchAttempts = 3"),
+        "#786: the redraw budget must stay bounded at 3 attempts. Program:\n{p}"
+    );
+    assert!(
+        p.contains("(-not $bufMaxed) -and"),
+        "#786: the clean condition must require BOTH not-maxed AND peak under threshold. Program:\n{p}"
+    );
+    // The AHK stop-first/restart-last bracket (strih: NL_STARTUP.ahk would respawn a BARE obs64
+    // mid-redraw, dropping the shortcut params — the interkom "Permissions denied" failure).
+    assert!(
+        p.contains("Stop-Process -Name AutoHotkey64") && p.contains("$ahkStopped"),
+        "#786: the redraw must stop AHK first and restart it after the loop. Program:\n{p}"
+    );
 }
 
 /// The FINAL verdict gates exit 0 on the render tick being ENABLED (the genlock build proof) and

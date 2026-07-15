@@ -122,11 +122,14 @@ Start-Sleep -Seconds 3
 #     shrinks until OBS restarts -> the whole session's A/V sync is off by ~0.9 s (live incident
 #     2026-07-15: operator's 900 ms genlock latency needed ~2000 ms to compensate). A bad draw is
 #     fully decided in the first seconds and is visible in the fresh log, so gate + redraw here.
-\$audioLogDir = "\$env:APPDATA\\obs-studio\\logs"
+#     NB fail-open asymmetry: an empty/absent log reads as peak 0 = "AUDIO OK" here, but step (4)
+#     below fails CLOSED (exit 1) on the same missing log, so a silent overall pass is impossible.
+\$logDir = "\$env:APPDATA\\obs-studio\\logs"
 \$maxLaunchAttempts = 3
+\$ahkStopped = \$false
 for (\$attempt = 1; \$attempt -le \$maxLaunchAttempts; \$attempt++) {
   Start-Sleep -Seconds 10   # ASIO starts right after module load; a bad burst completes within ~5 s
-  \$audioLog  = Get-ChildItem \$audioLogDir -Filter *.txt | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+  \$audioLog  = Get-ChildItem \$logDir -Filter *.txt | Sort-Object LastWriteTime -Descending | Select-Object -First 1
   \$audioText = if (\$audioLog) { Get-Content \$audioLog.FullName -Raw } else { "" }
   \$bufPeak = 0
   foreach (\$m in [regex]::Matches(\$audioText, 'total audio buffering is now (\\d+) milliseconds')) {
@@ -142,6 +145,14 @@ for (\$attempt = 1; \$attempt -le \$maxLaunchAttempts; \$attempt++) {
     exit 7
   }
   Write-Warning "#786: bad ASIO launch draw (buffering peak \${bufPeak} ms, maxed=\$bufMaxed) -- killing + relaunching OBS (attempt \$(\$attempt + 1)/\$maxLaunchAttempts)."
+  # Stop AHK BEFORE killing obs64 (strih only; no-op elsewhere): NL_STARTUP.ahk respawns obs64 via
+  # the BARE exe within seconds of the window vanishing, which would drop the shortcut params
+  # (--enable-media-stream --verbose -> interkom "Permissions denied") AND race a double-launch.
+  # Same stop-first/restart-last structure as the #411 self-heal. Restarted after the loop.
+  if (Get-Process AutoHotkey64 -ErrorAction SilentlyContinue) {
+    Stop-Process -Name AutoHotkey64 -Force -ErrorAction SilentlyContinue
+    \$ahkStopped = \$true
+  }
   Stop-Process -Name obs64 -Force -ErrorAction SilentlyContinue
   Start-Sleep -Seconds 4
   Remove-Item "\$env:APPDATA\\obs-studio\\.sentinel\\*" -Force -ErrorAction SilentlyContinue
@@ -159,12 +170,16 @@ for (\$attempt = 1; \$attempt -le \$maxLaunchAttempts; \$attempt++) {
   if (-not \$proc) { Write-Error "obs64 did not start on #786 relaunch"; exit 6 }
   Start-Sleep -Seconds 3
 }
+if (\$ahkStopped) {
+  \$ahkLnk = Get-ChildItem "\$env:APPDATA\\Microsoft\\Windows\\Start Menu\\Programs\\Startup" -Filter "*NL_STARTUP*" -ErrorAction SilentlyContinue | Select-Object -First 1
+  if (\$ahkLnk) { Start-Process -FilePath \$ahkLnk.FullName; Write-Host "#786: AHK watchdog restarted (\$(\$ahkLnk.Name))." }
+  else { Write-Warning "#786: AHK was stopped for the redraw but no NL_STARTUP startup shortcut found -- restart it manually." }
+}
 
 # (4) VERIFY the fresh OBS log shows the genlock render tick ENABLED (the #257 build-default proof --
 #     same line drift-guard.sh genlock_capability_from_log + the rig validation key on) AND DistroAV
 #     loaded. The log is the AUTHORITATIVE runtime signal; a stock OBS / wrong build emits no genlock
 #     line. Anything short of BOTH -> non-zero exit (fail loud, never a silent half-genlocked box).
-\$logDir = "\$env:APPDATA\\obs-studio\\logs"
 \$log = Get-ChildItem \$logDir -Filter *.txt | Sort-Object LastWriteTime -Descending | Select-Object -First 1
 \$logText = if (\$log) { Get-Content \$log.FullName -Raw } else { "" }
 \$tickOk     = \$logText -match 'genlock:.*render tick ENABLED'
@@ -247,7 +262,9 @@ main() {
 # exactly what the win-* MCP is for (#701: plain scp/ssh DOES work against strih/stream with the
 # targets.md creds, but that doesn't help drive/verify a GUI app).
 #
-# STEP 1: paste the following PowerShell program into:  ${mcp} Shell
+# STEP 1: paste the following PowerShell program into:  ${mcp} Shell  -- set the Shell call's
+#         timeout to >= 240 s: the #786 audio gate's worst case is 3 draws + 2 relaunches
+#         (~100 s beyond a clean launch), and a truncated run never prints its verdict
 #         (it clears crash sentinels, launches obs64 cwd=bin\\64bit, then log-verifies the genlock
 #          render tick ENABLED + DistroAV loaded, failing LOUD otherwise — NO env carried)
 # ----------------------------------------------------------------------------------------------------
