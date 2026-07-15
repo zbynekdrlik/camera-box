@@ -1453,3 +1453,56 @@ fn log_diet_journald_dropin_sets_the_pinned_runtime_max_use() {
         "flattened drop-in content must still contain the cap value, got: {flattened}"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// #762 fix -- log_diet_rsyslog_purged: lets (s) supersede its #679 logrotate check once rsyslog
+// is genuinely purged (its own conffile /etc/logrotate.d/rsyslog is removed WITH the package, so
+// the OLD #679 check becomes structurally unsatisfiable on an otherwise-correctly-hardened box).
+// ---------------------------------------------------------------------------------------------
+
+fn rsyslog_purged(block: &str) -> bool {
+    let (code, out, err) = run_sourced(&format!(
+        "BLOCK='{}'\nif log_diet_rsyslog_purged \"$BLOCK\"; then echo YES; else echo NO; fi",
+        block.replace('\'', "'\\''")
+    ));
+    assert_eq!(code, 0, "harness crashed. stderr: {err}");
+    match out.trim() {
+        "YES" => true,
+        "NO" => false,
+        other => panic!("unexpected harness output: {other}"),
+    }
+}
+
+#[test]
+fn log_diet_rsyslog_purged_true_when_dpkg_reports_purged_states() {
+    for dpkg_state in ["", "purge ok not-installed", "purge ok config-files"] {
+        let block = format!("RSYSLOG_DPKG={dpkg_state}\nRSYSLOG_ACTIVE=inactive\nRSYSLOG_ENABLED=");
+        assert!(
+            rsyslog_purged(&block),
+            "dpkg state '{dpkg_state}' should read as purged"
+        );
+    }
+}
+
+#[test]
+fn log_diet_rsyslog_purged_false_when_still_installed_even_if_inactive_and_masked() {
+    // Masking alone does NOT count as purged -- mirrors the (u) check's own "masking is not
+    // enough" contract.
+    let block =
+        "RSYSLOG_DPKG=install ok installed\nRSYSLOG_ACTIVE=inactive\nRSYSLOG_ENABLED=masked";
+    assert!(!rsyslog_purged(block));
+}
+
+#[test]
+fn log_diet_rsyslog_purged_from_dpkg_matches_the_block_level_wrapper() {
+    let (code, out, err) = run_sourced(
+        "log_diet_rsyslog_purged_from_dpkg 'install ok installed' && echo YES || echo NO",
+    );
+    assert_eq!(code, 0, "harness crashed. stderr: {err}");
+    assert_eq!(out.trim(), "NO");
+
+    let (code, out, err) =
+        run_sourced("log_diet_rsyslog_purged_from_dpkg '' && echo YES || echo NO");
+    assert_eq!(code, 0, "harness crashed. stderr: {err}");
+    assert_eq!(out.trim(), "YES");
+}

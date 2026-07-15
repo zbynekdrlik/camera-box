@@ -61,6 +61,33 @@ echo "JOURNALD_DROPIN=$(cat /etc/systemd/journald.conf.d/99-camera-box-diet.conf
 REMOTE
 }
 
+# log_diet_rsyslog_purged_from_dpkg DPKG_STATUS -> 0 (true, genuinely purged) or 1 (false, still
+# installed in some form). Same "files genuinely gone" states as timesync-authority.sh's
+# dpkg_status_installed: EMPTY (dpkg has never heard of it / fully purged), "not-installed", or
+# "config-files" (removed, only leftover conffiles). Every other state means rsyslog's files are
+# present in some form. Extracted so verify-device.sh's (s) check (#679, the OLD rsyslog-owned
+# logrotate size-cap check) can ask "is rsyslog even here any more?" with the EXACT same
+# definition log_diet_provision_verdict itself uses, instead of a second, driftable copy -- once
+# rsyslog is genuinely purged, /etc/logrotate.d/rsyslog is REMOVED WITH IT (it is one of
+# rsyslog's own conffiles), so #679's size-cap check becomes structurally impossible to satisfy
+# and must be treated as "superseded by #762", not "FAIL".
+log_diet_rsyslog_purged_from_dpkg() {
+  case "$1" in
+    '' | *' not-installed' | *' config-files') return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# log_diet_rsyslog_purged STATE_BLOCK -> 0 (true) or 1 (false). Block-level convenience wrapper
+# around log_diet_rsyslog_purged_from_dpkg for a caller that already has the FULL
+# log_diet_gather_remote_snippet block (verify-device.sh's (s)/(u) checks share ONE ssh round
+# trip -- see the (s)/(u) call sites).
+log_diet_rsyslog_purged() {
+  local dpkg
+  dpkg="$(printf '%s\n' "$1" | sed -n 's/^RSYSLOG_DPKG=//p')"
+  log_diet_rsyslog_purged_from_dpkg "$dpkg"
+}
+
 # log_diet_provision_verdict STATE_BLOCK -> "ok" or the newline-joined "FAIL: ..." reasons.
 # STATE_BLOCK is the KEY=VALUE-per-line text produced by log_diet_gather_remote_snippet (or an
 # equivalent hand-built fixture in tests). Fail-closed on anything unreadable/missing -- an
@@ -74,15 +101,9 @@ log_diet_provision_verdict() {
   enabled="$(printf '%s\n' "$block" | sed -n 's/^RSYSLOG_ENABLED=//p')"
   dropin="$(printf '%s\n' "$block" | sed -n 's/^JOURNALD_DROPIN=//p')"
 
-  # Same "files genuinely gone" states as timesync-authority.sh's dpkg_status_installed: EMPTY
-  # (dpkg has never heard of it / fully purged), "not-installed", or "config-files" (removed,
-  # only leftover conffiles). Every other state means rsyslog's files are present in some form.
-  case "$dpkg" in
-    '' | *' not-installed' | *' config-files') ;;
-    *)
-      fails="${fails:+$fails$nl}FAIL: rsyslog is INSTALLED (dpkg status: ${dpkg:-<empty>}) -- purge it, journald already captures everything on this read-only appliance (#762)"
-      ;;
-  esac
+  if ! log_diet_rsyslog_purged_from_dpkg "$dpkg"; then
+    fails="${fails:+$fails$nl}FAIL: rsyslog is INSTALLED (dpkg status: ${dpkg:-<empty>}) -- purge it, journald already captures everything on this read-only appliance (#762)"
+  fi
 
   if [ "$(printf '%s' "$active" | tr -d '[:space:]')" = "active" ]; then
     fails="${fails:+$fails$nl}FAIL: rsyslog is ACTIVE -- it must be purged, not merely stopped (#762: a masked-but-installed daemon can still be re-enabled)"

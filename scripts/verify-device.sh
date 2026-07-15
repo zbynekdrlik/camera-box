@@ -68,7 +68,10 @@
 #   (s) /var/log tmpfs is bounded against runaway growth -- /etc/logrotate.d/rsyslog has a `size`
 #       cap AND a systemd timer drop-in checks far more often than the stock daily cadence (#679;
 #       a chatty logger filled the fixed 50MB tmpfs in ~4-5 days and crashed cam2's
-#       camera-box.service)
+#       camera-box.service). SUPERSEDED by #762 once rsyslog is genuinely purged (the (u) check
+#       below) -- /etc/logrotate.d/rsyslog is one of rsyslog's OWN conffiles and is removed with
+#       it, so this check passes as "N/A, superseded" on a #762-hardened box instead of FAILing
+#       on a file that can no longer exist
 #   (t) `fuser` (psmisc) is installed -- a fresh cam2 clone had none at all, which false-FAILed
 #       rig-mode.sh's #464 KMS-held check AND silently no-op'd recording-e2e.sh's capture-release
 #       busy-wait (fuser exits 127 -> the wait's `while fuser ...` condition reads false
@@ -708,22 +711,39 @@ else
   fi
 fi
 
-# (s) /var/log tmpfs bounded against runaway growth (#679) ---------------------------------------
+# (s) /var/log tmpfs bounded against runaway growth (#679, SUPERSEDED by #762 once rsyslog is
+# purged) -------------------------------------------------------------------------------------
 # Every box's /var/log is a fixed 50MB tmpfs; the stock logrotate config rotates ONLY on a weekly
 # calendar with no `size` cap, so a chatty logger (dantesync's per-second [PTP] Drift line was the
 # fleet's dominant volume driver) filled it in ~4-5 days and crashed cam2's camera-box.service
 # (2026-07-11). log_bound_verdict (scripts/lib/log-bound.sh) requires a `size` cap on
 # /etc/logrotate.d/rsyslog AND a systemd timer drop-in that checks far more often than daily.
+#
+# #762: once rsyslog is genuinely PURGED (the (u) check below), /etc/logrotate.d/rsyslog is
+# REMOVED WITH IT (a package conffile) -- the #679 size-cap check then becomes structurally
+# impossible to satisfy on a box that is otherwise CORRECTLY hardened, which would be a false
+# FAIL. Gather the #762 rsyslog/journald state FIRST (shared with the (u) check below -- one ssh
+# round trip covers both) and skip the #679 logrotate check entirely when rsyslog is confirmed
+# purged; only fall back to the full log_bound_verdict when rsyslog is still present (a box not
+# yet re-provisioned onto the #762 fix).
 rc=0
-LOG_BOUND_STATE="$(ssh_box "$(log_bound_gather_remote_snippet)")" || rc=$?
-if [ "$rc" -ne 0 ] || [ -z "$LOG_BOUND_STATE" ]; then
-  fail "could not read logrotate/timer state over SSH (rc=$rc) -- cannot certify /var/log is bounded against runaway growth (#679)"
+LOG_DIET_STATE="$(ssh_box "$(log_diet_gather_remote_snippet)")" || rc=$?
+if [ "$rc" -ne 0 ] || [ -z "$LOG_DIET_STATE" ]; then
+  fail "could not read rsyslog/journald state over SSH (rc=$rc) -- cannot certify /var/log is bounded (#679/#762)"
+elif log_diet_rsyslog_purged "$LOG_DIET_STATE"; then
+  ok "/var/log tmpfs bound: rsyslog is purged -- #679's logrotate size-cap is superseded by the #762 journald RuntimeMaxUse cap (checked at (u) below)"
 else
-  LOG_BOUND_VERDICT="$(log_bound_verdict "$LOG_BOUND_STATE")"
-  if [ "$LOG_BOUND_VERDICT" = "ok" ]; then
-    ok "/var/log tmpfs is bounded -- logrotate size cap + frequent (#679) rotation check both present"
+  rc=0
+  LOG_BOUND_STATE="$(ssh_box "$(log_bound_gather_remote_snippet)")" || rc=$?
+  if [ "$rc" -ne 0 ] || [ -z "$LOG_BOUND_STATE" ]; then
+    fail "could not read logrotate/timer state over SSH (rc=$rc) -- cannot certify /var/log is bounded against runaway growth (#679)"
   else
-    fail "log bound: ${LOG_BOUND_VERDICT#FAIL: }"
+    LOG_BOUND_VERDICT="$(log_bound_verdict "$LOG_BOUND_STATE")"
+    if [ "$LOG_BOUND_VERDICT" = "ok" ]; then
+      ok "/var/log tmpfs is bounded -- logrotate size cap + frequent (#679) rotation check both present"
+    else
+      fail "log bound: ${LOG_BOUND_VERDICT#FAIL: }"
+    fi
   fi
 fi
 
@@ -749,11 +769,10 @@ fi
 # loop (~400 lines/s, 42.8% CPU), starving the camera-box send path badly enough to measurably
 # drift NDI delivery timing. log_diet_provision_verdict (scripts/lib/log-diet.sh) fails LOUD if
 # rsyslog is still installed/active/enabled (masking alone is not enough) OR the journald
-# RuntimeMaxUse=20M drop-in is missing/wrong.
-rc=0
-LOG_DIET_STATE="$(ssh_box "$(log_diet_gather_remote_snippet)")" || rc=$?
-if [ "$rc" -ne 0 ] || [ -z "$LOG_DIET_STATE" ]; then
-  fail "could not read rsyslog/journald state over SSH (rc=$rc) -- cannot certify the #762 logging diet is applied"
+# RuntimeMaxUse=20M drop-in is missing/wrong. Reuses $LOG_DIET_STATE already gathered at (s)
+# above -- ONE ssh round trip covers both checks.
+if [ -z "${LOG_DIET_STATE:-}" ]; then
+  fail "could not read rsyslog/journald state over SSH -- cannot certify the #762 logging diet is applied"
 else
   LOG_DIET_VERDICT="$(log_diet_provision_verdict "$LOG_DIET_STATE")"
   if [ "$LOG_DIET_VERDICT" = "ok" ]; then
