@@ -401,6 +401,34 @@ fn dantesync_offset_verdict_tolerates_a_single_fresh_measurement_spike() {
     assert_eq!(offset_verdict(DS_FRESH_SPIKE_AMID_OK), "ok");
 }
 
+// A SAME-SIGN NOISE BURST: the 3 freshest samples spike high in one direction (live cam5
+// 12:26-12:30: +2624, +2508, +2865 consecutive; run 29420477560 graded cam7 "drift" on median
+// 2113us) while the 8 samples just before read tens of us. A 5-sample window is
+// majority-covered by such a burst; ping RTT on the loaded rig LAN jitters to ~3.5ms on EVERY
+// box, so a short burst is measurement physics, not a clock step (PTP stays NANO). An
+// 11-sample window (~5min at the ~30s cadence; the journal gather is -n 400, so depth exists)
+// keeps the median on the in-bound bulk while a genuine step shifts ALL samples and still
+// drifts.
+const DS_FRESH_BURST_AMID_OK: &str = "\
+2026-07-07T18:33:20+02:00 CAM7 dantesync[900]: [NTP] offset:-20us (threshold:535us, adaptive)
+2026-07-07T18:33:50+02:00 CAM7 dantesync[900]: [NTP] offset:+34us (threshold:535us, adaptive)
+2026-07-07T18:34:20+02:00 CAM7 dantesync[900]: [NTP] offset:-15us (threshold:535us, adaptive)
+2026-07-07T18:34:50+02:00 CAM7 dantesync[900]: [NTP] offset:+109us (threshold:535us, adaptive)
+2026-07-07T18:35:20+02:00 CAM7 dantesync[900]: [NTP] offset:-103us (threshold:535us, adaptive)
+2026-07-07T18:35:50+02:00 CAM7 dantesync[900]: [NTP] offset:+55us (threshold:535us, adaptive)
+2026-07-07T18:36:05+02:00 CAM7 dantesync[900]: [NTP] offset:-130us (threshold:535us, adaptive)
+2026-07-07T18:36:15+02:00 CAM7 dantesync[900]: [NTP] offset:+88us (threshold:535us, adaptive)
+2026-07-07T18:36:25+02:00 CAM7 dantesync[900]: [NTP] offset:+2113us
+2026-07-07T18:36:35+02:00 CAM7 dantesync[900]: [NTP] offset:+2316us
+2026-07-07T18:36:45+02:00 CAM7 dantesync[900]: [NTP] offset:+2787us
+2026-07-07T18:36:46+02:00 CAM7 dantesync[900]: [PTP] NANO  Drift:   +253ns/s  Adj: +6.81ppm
+";
+
+#[test]
+fn dantesync_offset_verdict_tolerates_a_fresh_noise_burst_at_the_window_edge() {
+    assert_eq!(offset_verdict(DS_FRESH_BURST_AMID_OK), "ok");
+}
+
 #[test]
 fn dantesync_offset_verdict_still_drifts_on_sustained_out_of_bound_offset() {
     // EVERY fresh sample out of bound -> the median is out of bound -> "drift". The median is
