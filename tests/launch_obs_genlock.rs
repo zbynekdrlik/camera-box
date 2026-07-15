@@ -154,8 +154,8 @@ fn program_gates_on_audio_buffering_and_redraws_786() {
     // Pin the gate's LOGIC constants, not just its strings — a refactor that keeps the literals
     // but loosens the threshold / attempt count / clean-condition must go RED here.
     assert!(
-        p.contains("$bufPeak -le 200"),
-        "#786: the clean-draw threshold must stay 200 ms (peak above it = bad draw). Program:\n{p}"
+        p.contains("$bufPeak -le 100"),
+        "#786: the clean-draw threshold must stay 100 ms (box standard 64/85 ms + headroom) (peak above it = bad draw). Program:\n{p}"
     );
     assert!(
         p.contains("$maxLaunchAttempts = 3"),

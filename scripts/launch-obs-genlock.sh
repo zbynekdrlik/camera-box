@@ -122,6 +122,10 @@ Start-Sleep -Seconds 3
 #     shrinks until OBS restarts -> the whole session's A/V sync is off by ~0.9 s (live incident
 #     2026-07-15: operator's 900 ms genlock latency needed ~2000 ms to compensate). A bad draw is
 #     fully decided in the first seconds and is visible in the fresh log, so gate + redraw here.
+#     THRESHOLD = 100 ms: the box's own measured STANDARD is 64 ms (every clean retained launch
+#     2026-07-11..15; a few days show 85 ms), so 100 = norm + small headroom. The user's rule:
+#     OBS must never come up with more than the standard draw -- a "small" 200 ms pass would
+#     already be a visible lip-sync shift vs the operator's calibrated latency baseline.
 #     NB fail-open asymmetry: an empty/absent log reads as peak 0 = "AUDIO OK" here, but step (4)
 #     below fails CLOSED (exit 1) on the same missing log, so a silent overall pass is impossible.
 \$logDir = "\$env:APPDATA\\obs-studio\\logs"
@@ -136,7 +140,7 @@ for (\$attempt = 1; \$attempt -le \$maxLaunchAttempts; \$attempt++) {
     \$v = [int]\$m.Groups[1].Value; if (\$v -gt \$bufPeak) { \$bufPeak = \$v }
   }
   \$bufMaxed = \$audioText -match 'Max audio buffering reached'
-  if ((-not \$bufMaxed) -and \$bufPeak -le 200) {
+  if ((-not \$bufMaxed) -and \$bufPeak -le 100) {
     Write-Host "AUDIO OK: buffering peak \${bufPeak} ms -- clean ASIO launch draw (#786 gate)."
     break
   }
