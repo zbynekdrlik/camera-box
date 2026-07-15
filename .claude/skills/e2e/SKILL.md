@@ -2314,13 +2314,14 @@ a real problem, only absorbs the transient one.
 
 ## imag MV cells are SAME-SOURCE since 2026-07-15 — the #501 low-bw twins are GONE (do not resurrect)
 
-The "MV Cam N" cells on imag now nest the SAME full-bw `NDI CAMx` main inputs the program uses —
-the `#501` `MV CAMx` genlock_monitor twin receivers were REMOVED live and from the seed
-(`scripts/imag_scenes.py`, commits a641724a7/41423c9c2). Reason: their raison d'être (7× fullHD
-decode would collapse the notebook) died with the `#767` keep-alive build (mains decode
-continuously anyway) — measured after the pivot: 60fps / 2.3ms / 0 skips / CPU 3-12%, BETTER than
-with twins; and post-reboot the twins had degraded into a relock storm (~every 4s = the laggy MV
-the user hit). Consequences for gate/tooling: imag has NO `MV CAMx` inputs any more —
+The "MV Cam N" cells on imag nest the SAME full-bw `NDI CAMx` main inputs the program uses —
+the `#501` `MV CAMx` genlock_monitor twin receivers are GONE (scenes + seed; final state after a
+same-night detour, see #783/#784). THE REAL story of why twins ever seemed necessary: EVERY
+"7×fullHD collapses imag" measurement (incl. the 53-59fps FAILs) was taken while the box secretly
+ran ALL OBS threads on ONE core (latent isolcpus, #784). With a clean cmdline + full scheduler,
+same-source measures: all 7 fullHD arrivals exactly 60fps, render 60fps / 4.8ms / 0 skip, CPU
+18%, load 2.8 — twins are pure waste there. Consequences for gate/tooling: imag has NO `MV CAMx`
+inputs any more —
 `imag_latency_enforce.py` finds 9 NDI inputs (7 mains + 2 resolume), not 16; any check/metric
 enumerating imag `MV CAM*` inputs (#761-era) must be re-pointed or it silently no-ops.
 
