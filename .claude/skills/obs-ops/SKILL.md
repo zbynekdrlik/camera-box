@@ -300,6 +300,17 @@ AutoHotkey64` FIRST → kill obs64 → backup + copy the new obs.dll (verify `Ge
 restart AHK sees the OBS window already up → takes the `else Startup()` branch (no "zapnúť všetko?"
 MsgBox) and won't double-launch. (Proven on the 2026-06-27 #147 obs.dll deploy.)
 
+**GOTCHA (#767 deploy, 2026-07-15) — EVERY Windows hot-swap MUST also update
+`C:\Program Files\obs-studio\GENLOCK_BUILD_SHA.txt` to the deployed build's commit SHA** (same
+role as imag's `/opt/obs-genlock/GENLOCK_BUILD_SHA.txt`; the bundle-state-server serves it as
+`genlock_build_sha` and the #756 CROSS-BOX parity facet in the fused E2E's `[0/8]`
+version-integrity gate compares it across strih+stream+imag). Swapping the DLLs without the
+marker leaves the box reporting the OLD SHA → `genlock_parity DRIFT` → the E2E gate REFUSES the
+rig at minute 0 (live incident: the first post-#767-deploy gate run failed exactly this way —
+imag=dede91825, strih=stream=2789f46c). Write it BOM-free:
+`[IO.File]::WriteAllText('C:\Program Files\obs-studio\GENLOCK_BUILD_SHA.txt', "<sha>`n",
+(New-Object System.Text.UTF8Encoding $false))`.
+
 strih has OTHER OBS installs in `D:\_APPS` (1ME/2ME/vestibul/input/light) — do NOT touch;
 broadcast = the Program Files 2ME one only.
 
