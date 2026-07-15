@@ -65,6 +65,13 @@ RECORD_FINALIZE_POLL_S = float(os.environ.get("OBS_RECORD_FINALIZE_POLL_S", "2")
 # proceeding into a multi-minute sleep that ends in a 0-byte file. Env-overridable.
 RECORD_LIVENESS_SAMPLES = int(os.environ.get("OBS_RECORD_LIVENESS_SAMPLES", "2"))
 RECORD_LIVENESS_POLL_S = float(os.environ.get("OBS_RECORD_LIVENESS_POLL_S", "2"))
+# #767 follow-up (live incident, run 29417639968): imag's NVENC cold-init takes ~3s from
+# StartRecord to the muxer actually writing, and outputBytes lags a further beat -- the fixed
+# 2x2s window alone saw active=[False, True] bytes=[0, 0] and aborted a HEALTHY recording (the
+# file grew to 296MB until cleanup stopped it). When the last fixed-window sample is ACTIVE with
+# bytes still 0, keep polling at 1s inside this bounded grace budget and pass as soon as bytes
+# appear; an output still at 0 bytes after the whole budget is genuinely dead (#627) and aborts.
+RECORD_LIVENESS_BYTES_GRACE_S = float(os.environ.get("OBS_RECORD_LIVENESS_BYTES_GRACE_S", "8"))
 
 # #63/#149: the probe ndi_source MUST be configured EXACTLY like the live, certified, proven-
 # working genlock camera inputs (NDI cam1/3/5 on strih) so the harness measures the SAME config
@@ -1550,6 +1557,22 @@ def _assert_record_is_live(ws, host, samples=None, poll_s=None):
         active_flags.append(status.get("outputActive", False))
         byte_counts.append(status.get("outputBytes", -1))
     is_live, reason = _record_liveness_verdict(active_flags, byte_counts)
+    # #767 byte-counter grace: the output IS active but bytes are still exactly 0 -- a slow
+    # NVENC cold-init (imag) rather than a dead output. Keep polling at 1s inside the bounded
+    # grace budget; pass as soon as bytes appear, abort per #627 if the whole budget stays 0.
+    grace_used = 0.0
+    while (
+        not is_live
+        and active_flags[-1]
+        and byte_counts[-1] == 0
+        and grace_used < RECORD_LIVENESS_BYTES_GRACE_S
+    ):
+        time.sleep(1)
+        grace_used += 1.0
+        status = _rpc(ws, "GetRecordStatus")
+        active_flags.append(status.get("outputActive", False))
+        byte_counts.append(status.get("outputBytes", -1))
+        is_live, reason = _record_liveness_verdict(active_flags, byte_counts)
     if not is_live:
         raise SystemExit(
             f"[obs] {host}: recording FAILED the post-start liveness check — {reason}. "
@@ -1557,10 +1580,15 @@ def _assert_record_is_live(ws, host, samples=None, poll_s=None):
             f"(#627). active={active_flags} bytes={byte_counts}"
         )
     cold_start_note = ""
+    if grace_used > 0:
+        cold_start_note = (
+            f" (bytes appeared only after {grace_used:.0f}s grace -- slow NVENC cold-init)"
+        )
     if active_flags and not active_flags[0]:
         # #710: surface when the cold-start tolerance actually fired, so a run log can be
         # grepped for how often the FIRST post-restart StartRecord needed the extra sample.
-        cold_start_note = " (cold start — first sample was still warming up, tolerated per #710)"
+        # (+= so the #767 grace note above survives when BOTH fired -- the typical imag case.)
+        cold_start_note += " (cold start — first sample was still warming up, tolerated per #710)"
     sys.stderr.write(
         f"[obs] {host}: recording liveness OK (active={active_flags} bytes={byte_counts})"
         f"{cold_start_note}\n"
