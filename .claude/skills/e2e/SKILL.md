@@ -2333,3 +2333,19 @@ boot/relaunch path — a hard reboot's autostart seed wiping the operator's tran
 **imag touchpad (`#779`):** libinput `Scrolling Pixel Distance` hard-caps at **50** (BadValue
 above it) — 50 is the gentlest scroll possible; persisted in
 `/etc/X11/xorg.conf.d/30-touchpad-tap.conf` together with Tapping/TappingDrag/NaturalScrolling.
+
+## GOTCHA — latentná GRUB zmena sa aktivuje až REBOOTOM; isolcpus = single-core OBS (#784, 2026-07-15)
+
+`/etc/default/grub.d/98-imag-isolation.cfg` (isolcpus=2-11, z #484 experimentu 4.7.) spal 11 dní a
+prvý tvrdý reboot ho aktivoval: **isolcpus jadrá plánovač nebalancuje**, takže OBS s
+`taskset -c 2-11` skončil s ~200 vláknami na JEDNOM jadre (cpu2) — full-bw NDI decode padol na
+~24 fps/kameru, SDK fronta narástla na ~2 s lag; low-bw klony (lacný decode) pritom išli 60 fps.
+Sieť/hodiny/GL/render metriky boli ČISTÉ — jediné priame tely: (1) `ps -L -o tid,comm,psr` →
+všetky vlákna psr=rovnaké číslo; (2) susedné jadrá na 800 MHz pri "vyťaženom" procese;
+(3) full-bw arrival « low-bw arrival na tom istom boxe. Diagnostika arrival rate: delta
+`received=` z genlock-fifo audit riadkov za N sekúnd. Fix: cfg zmazaný + update-grub (definitívne
+po ďalšom reboote); interim `taskset -a -pc <neizolované jadrá>` na bežiaci obs okamžite uvoľní.
+**Pravidlo: isolcpus NIKDY pre viacvláknový proces s range maskou** — len s explicitným
+per-vlákno pinovaním. Po KAŽDOM reboote rig boxu over `/proc/cmdline` proti očakávaniu
+(drift-guard fazeta = #780 balík). A pri "reboot všetko rozbil": `ls -la /etc/default/grub.d/` —
+mtime súborov prezradí míny čakajúce od posledného bootu.
