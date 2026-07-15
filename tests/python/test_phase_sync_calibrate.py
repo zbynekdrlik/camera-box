@@ -178,6 +178,41 @@ class TestLoadMeasuredJson:
             phase_sync_calibrate.load_measured_json(str(p))
 
 
+class TestApplyMargin:
+    """#757 (2026-07-15 live regression): zero-headroom pins produced a uniform copies≈gaps
+    pattern on EVERY camera (ordinary jitter flipping frames across the ts-align deadline).
+    apply_margin() raises the floor by a uniform constant without disturbing the relative
+    "slowest lowest pin, fastest highest" ordering the offset kernel already establishes."""
+
+    def test_shifts_every_offset_by_the_same_constant(self):
+        offsets = {"NDI cam1": 3, "NDI cam4": 47, "NDI cam5": 8}
+        out = phase_sync_calibrate.apply_margin(offsets, 10)
+        assert out == {"NDI cam1": 13, "NDI cam4": 57, "NDI cam5": 18}
+
+    def test_preserves_relative_ordering_and_differences(self):
+        offsets = {"NDI cam1": 3, "NDI cam4": 47}
+        out = phase_sync_calibrate.apply_margin(offsets, 15)
+        assert out["NDI cam4"] - out["NDI cam1"] == offsets["NDI cam4"] - offsets["NDI cam1"]
+
+    def test_rounds_to_the_nearest_whole_ms(self):
+        offsets = {"NDI cam1": 3.0}
+        out = phase_sync_calibrate.apply_margin(offsets, 10.6)
+        assert out == {"NDI cam1": 14}  # round(13.6) == 14
+
+    def test_zero_or_negative_margin_is_a_noop(self):
+        offsets = {"NDI cam1": 3, "NDI cam4": 47}
+        assert phase_sync_calibrate.apply_margin(offsets, 0) == offsets
+        assert phase_sync_calibrate.apply_margin(offsets, -5) == offsets
+
+    def test_never_mutates_the_input_dict(self):
+        offsets = {"NDI cam1": 3}
+        phase_sync_calibrate.apply_margin(offsets, 10)
+        assert offsets == {"NDI cam1": 3}, "apply_margin must not mutate its input"
+
+    def test_empty_offsets_returns_empty(self):
+        assert phase_sync_calibrate.apply_margin({}, 10) == {}
+
+
 # ---------------------------------------------------------------------------
 # fake OBS-websocket RPC layer (mirrors tests/python/test_av_sync_calibrate.py's FakeObs,
 # extended to track PER-SOURCE state since #286 applies N sources, not one)

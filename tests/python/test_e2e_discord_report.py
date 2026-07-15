@@ -479,14 +479,40 @@ class TestLatencyPinsSection:
         report = edr.compose_report(verdict, {"run_id": "x", "pins": pins})
         assert "PARITA main≠MV" not in report
 
-    def test_imag_pins_shown_alongside_strih_when_present(self):
-        verdict = self._verdict_with_delivery({"cam1": 71.0})
+    def test_imag_shown_as_one_fixed_summary_line_when_all_compliant(self):
+        # #757 (2026-07-15, binding directive): imag is fixed-3ms-always, never a per-camera
+        # cell -- ONE summary line, not a repeated "imag=3ms" per camera row.
+        verdict = self._verdict_with_delivery({"cam1": 71.0, "cam2": 68.0})
         pins = {
-            "strih": {"cam1": {"main_ms": 3, "mv_ms": 3}},
-            "imag": {"cam1": {"main_ms": 3, "mv_ms": 3}},
+            "strih": {
+                "cam1": {"main_ms": 3, "mv_ms": 3},
+                "cam2": {"main_ms": 14, "mv_ms": 14},
+            },
+            "imag": {
+                "cam1": {"main_ms": 3, "mv_ms": 3},
+                "cam2": {"main_ms": 3, "mv_ms": 3},
+            },
         }
         report = edr.compose_report(verdict, {"run_id": "x", "pins": pins})
-        assert "imag=3ms" in report
+        assert "imag: všetky 3 (fixné, IMAG=min latencia)" in report
+        assert "imag=" not in report, "must NOT render a per-camera imag cell anymore"
+
+    def test_imag_drift_from_fixed_3ms_is_flagged_loudly(self):
+        verdict = self._verdict_with_delivery({"cam1": 71.0, "cam2": 68.0})
+        pins = {
+            "strih": {
+                "cam1": {"main_ms": 3, "mv_ms": 3},
+                "cam2": {"main_ms": 14, "mv_ms": 14},
+            },
+            "imag": {
+                "cam1": {"main_ms": 3, "mv_ms": 3},
+                "cam2": {"main_ms": 67, "mv_ms": 67},  # drifted -- imag_latency_enforce missed it
+            },
+        }
+        report = edr.compose_report(verdict, {"run_id": "x", "pins": pins})
+        assert "NEODCHÝLENÉ" in report
+        assert "cam2" in report
+        assert "všetky 3 (fixné" not in report
 
     def test_missing_camera_in_pins_reports_na_not_silently_omitted(self):
         verdict = self._verdict_with_delivery({"cam1": 71.0, "cam2": 68.0})

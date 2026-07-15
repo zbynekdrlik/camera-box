@@ -56,6 +56,11 @@ import re
 import sys
 
 CAMERA_ORDER = ["cam1", "cam2", "cam3", "cam4", "cam5", "cam6", "cam7"]
+
+# #757 (2026-07-15, binding user directive): imag's fixed floor -- mirrors
+# imag_latency_enforce.IMAG_FIXED_LATENCY_MS (kept as its own literal, not a cross-module
+# import, so this stays a dependency-free PURE formatter).
+IMAG_FIXED_LATENCY_MS = 3
 _CAM_KEY_RE = re.compile(r"^cam[1-7]$")
 
 # Optional, best-effort annotations only — the technical description above each line is always
@@ -414,6 +419,14 @@ def _section_latency_pins(verdict, meta):
         }
     A camera/box missing from `pins` is reported N/A for that cell, never silently omitted from
     the table -- the user asked to flag mismatches loudly, not hide gaps.
+
+    **#757 (2026-07-15, binding user directive): imag is FIXED-3ms-ALWAYS, never per-camera
+    equalized** -- per-camera pin equalization is a STRIH-only concept (see
+    scripts/imag_latency_enforce.py). So imag no longer gets a per-camera cell in the loop below;
+    instead it gets ONE summary line after the per-camera table: "všetky 3 (fixné, IMAG=min
+    latencia)" when every imag pin this run actually reads back as 3ms, or a LOUD per-camera
+    drift warning otherwise (imag_latency_enforce.py should have already self-healed this before
+    the report ran -- seeing drift HERE means that step itself failed or didn't run).
     """
     pins = meta.get("pins")
     if not pins:
@@ -429,34 +442,47 @@ def _section_latency_pins(verdict, meta):
     any_mismatch = False
     for cam in cams:
         s = strih_pins.get(cam) or {}
-        i = imag_pins.get(cam) or {}
         s_main, s_mv = s.get("main_ms"), s.get("mv_ms")
-        i_main, i_mv = i.get("main_ms"), i.get("mv_ms")
         p50 = _g(delivery, cam, "p50_ms")
         rec = recommended.get(cam)
 
         mismatch = False
         if s_main is not None and s_mv is not None and s_main != s_mv:
             mismatch = True
-        if i_main is not None and i_mv is not None and i_main != i_mv:
-            mismatch = True
         any_mismatch = any_mismatch or mismatch
 
         strih_str = f"strih={_pin_or_na(s_main)}" if s_main is not None else "strih=N/A"
         if s_mv is not None and s_mv != s_main:
             strih_str += f"(MV={_pin_or_na(s_mv)}!)"
-        imag_str = ""
-        if imag_pins:
-            imag_str = f", imag={_pin_or_na(i_main)}"
-            if i_mv is not None and i_mv != i_main:
-                imag_str += f"(MV={_pin_or_na(i_mv)}!)"
 
         flag = " ⚠️ PARITA main≠MV" if mismatch else ""
         rec_str = f", odporúčané={_pin_or_na(rec)}" if rec is not None else ""
         lines.append(
-            f"  {'⚠️' if mismatch else '•'} {cam}: {strih_str}{imag_str}, "
+            f"  {'⚠️' if mismatch else '•'} {cam}: {strih_str}, "
             f"p50 tento beh={_pin_or_na(p50)}{rec_str}{flag}"
         )
+
+    if imag_pins:
+        drifted = [
+            cam
+            for cam in cams
+            if (imag_pins.get(cam) or {}).get("main_ms") not in (None, IMAG_FIXED_LATENCY_MS)
+            or (imag_pins.get(cam) or {}).get("mv_ms") not in (None, IMAG_FIXED_LATENCY_MS)
+        ]
+        if drifted:
+            lines.append(
+                f"  ⚠️ imag NEODCHÝLENÉ od pevných {IMAG_FIXED_LATENCY_MS}ms na: "
+                + ", ".join(
+                    f"{cam}=main:{_pin_or_na((imag_pins.get(cam) or {}).get('main_ms'))}"
+                    f"/mv:{_pin_or_na((imag_pins.get(cam) or {}).get('mv_ms'))}"
+                    for cam in drifted
+                )
+                + " (imag_latency_enforce.py malo toto opraviť pred behom)"
+            )
+        else:
+            lines.append(
+                f"  imag: všetky {IMAG_FIXED_LATENCY_MS} (fixné, IMAG=min latencia)"
+            )
 
     stream_active = pins.get("stream_hold_active_ms")
     av_last = pins.get("av_sync_last") or {}

@@ -304,6 +304,31 @@ def write_last_json(json_path: Path, cameras: list) -> dict:
     return payload
 
 
+def apply_margin(offsets: dict, margin_ms: float) -> dict:
+    """#757 -- PURE: shift every computed offset by a UNIFORM +margin_ms, rounded to the
+    nearest whole ms (genlock_latency_ms_src is an integer OBS setting).
+
+    Why a uniform shift preserves the kernel's own convention: `compute_phase_sync_offsets`
+    pins the SLOWEST source at the floor and holds every other source back by exactly how much
+    earlier it would otherwise present -- i.e. `offset[cam] = floor + (slowest - own)`. Adding
+    the SAME constant to every value leaves `(slowest - own)` (the RELATIVE spread the
+    "slowest lowest pin, fastest highest" convention depends on) completely unchanged; it only
+    raises the FLOOR itself from `floor` to `floor + margin_ms`. This is the fix for #757's
+    2026-07-15 live regression: a camera pinned with ZERO headroom above its own measured
+    transit sits exactly at the ts-align release deadline, so ordinary jitter flips individual
+    frames across the slot boundary (a duplicate on one side, a gap on the other -- the
+    observed uniform copies≈gaps pattern on every camera). A margin held above every
+    camera's own measured transit, not just the slowest one, gives ordinary jitter somewhere
+    to land without crossing the deadline.
+
+    `margin_ms <= 0` is a no-op (returns `offsets` unchanged, same dict values) -- callers that
+    don't have a margin estimate yet keep today's exact behavior. Never mutates the input dict.
+    """
+    if margin_ms <= 0:
+        return dict(offsets)
+    return {source: round(value + margin_ms) for source, value in offsets.items()}
+
+
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -325,10 +350,24 @@ def main():
         help="path to the phase-sync-gate Rust binary (#438) "
              "(default: probed from PHASE_SYNC_GATE_BIN or PROBE_BIN_DIR)",
     )
+    ap.add_argument(
+        "--margin-ms", type=float, default=0.0,
+        help="#757: uniformly raise every computed offset by this many ms above the floor "
+             "(jitter headroom -- see apply_margin's own doc). Default 0 (no change, today's "
+             "exact behavior).",
+    )
     args = ap.parse_args()
 
     measured = load_measured_json(args.measured_json)
     offsets = compute_phase_sync_offsets(measured, gate_bin=args.gate_bin)
+    if args.margin_ms > 0:
+        before = dict(offsets)
+        offsets = apply_margin(offsets, args.margin_ms)
+        print(
+            f"[phase-sync] #757 margin={args.margin_ms:.1f}ms applied to every offset "
+            f"(before -> after): "
+            + ", ".join(f"{s}: {before[s]}->{offsets[s]}" for s in sorted(offsets))
+        )
 
     ws = _conn(args.host, args.password)
     plan = []

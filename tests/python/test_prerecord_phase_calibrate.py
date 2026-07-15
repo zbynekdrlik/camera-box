@@ -1,13 +1,16 @@
 """#757 -- unit tests for scripts/prerecord_phase_calibrate.py, the pre-record phase auto-pin
 reconstructor: turns a `genlock-jitter-report --json` snapshot into per-camera measured cam->
-strih latencies, re-keyed under each target host's own source-name template.
+strih latencies (STRIH ONLY -- imag is fixed-3ms-always, see test_imag_latency_enforce.py) plus
+a computed jitter-headroom margin estimate.
 
 Covers, with NO live OBS/rig:
   a. measured_by_camera() -- reconstructs latency_ms + mean_head_skew_ms per "NDI cam<N>"
      source; skips non-strih-shaped names, missing/non-numeric fields, and non-dict values.
   b. source_names_by_template() -- pure re-keying under a host's naming convention.
-  c. main() CLI wiring -- writes the strih file always; writes imag-main/imag-mv files only
-     when requested; exits 1 (writes nothing) when the jitter JSON has no usable cameras.
+  c. compute_margin_ms() -- worst-case max_abs_head_skew_ms across strih cam sources, floored
+     at a safe minimum.
+  d. main() CLI wiring -- writes the strih file always; writes the margin file only when
+     requested; exits 1 (writes nothing) when the jitter JSON has no usable cameras.
 """
 import json
 import pathlib
@@ -88,13 +91,53 @@ class TestSourceNamesByTemplate:
             "NDI cam3": 16.0,
         }
 
-    def test_imag_main_and_mv_templates_differ_by_key_only(self):
-        by_cam = {2: 20.0}
-        assert ppc.source_names_by_template(by_cam, "NDI CAM{n}") == {"NDI CAM2": 20.0}
-        assert ppc.source_names_by_template(by_cam, "MV CAM{n}") == {"MV CAM2": 20.0}
-
     def test_empty_input_produces_empty_output(self):
         assert ppc.source_names_by_template({}, "NDI cam{n}") == {}
+
+
+# ---------------------------------------------------------------------------
+# compute_margin_ms -- pure
+# ---------------------------------------------------------------------------
+
+class TestComputeMarginMs:
+    def test_uses_the_worst_max_abs_head_skew_across_cam_sources(self):
+        jitter = {
+            "NDI cam1": {"max_abs_head_skew_ms": 15},
+            "NDI cam2": {"max_abs_head_skew_ms": 42},
+            "NDI cam3": {"max_abs_head_skew_ms": 8},
+        }
+        assert ppc.compute_margin_ms(jitter) == 42.0
+
+    def test_floors_at_the_given_minimum_when_jitter_is_small(self):
+        jitter = {"NDI cam1": {"max_abs_head_skew_ms": 2}}
+        assert ppc.compute_margin_ms(jitter, floor_ms=10.0) == 10.0
+
+    def test_custom_floor_is_respected(self):
+        jitter = {"NDI cam1": {"max_abs_head_skew_ms": 2}}
+        assert ppc.compute_margin_ms(jitter, floor_ms=25.0) == 25.0
+
+    def test_ignores_non_cam_sources(self):
+        jitter = {
+            "NDI 2ME PGM": {"max_abs_head_skew_ms": 900},  # not a strih cam source
+            "NDI cam1": {"max_abs_head_skew_ms": 12},
+        }
+        assert ppc.compute_margin_ms(jitter, floor_ms=10.0) == 12.0
+
+    def test_no_cam_sources_returns_the_floor(self):
+        jitter = {"NDI 2ME PGM": {"max_abs_head_skew_ms": 900}}
+        assert ppc.compute_margin_ms(jitter, floor_ms=10.0) == 10.0
+
+    def test_missing_or_non_numeric_field_is_skipped(self):
+        jitter = {
+            "NDI cam1": {},  # no max_abs_head_skew_ms
+            "NDI cam2": {"max_abs_head_skew_ms": None},
+            "NDI cam3": {"max_abs_head_skew_ms": 30},
+        }
+        assert ppc.compute_margin_ms(jitter, floor_ms=10.0) == 30.0
+
+    def test_empty_or_malformed_input_returns_the_floor_never_raises(self):
+        assert ppc.compute_margin_ms({}, floor_ms=10.0) == 10.0
+        assert ppc.compute_margin_ms(None, floor_ms=10.0) == 10.0
 
 
 # ---------------------------------------------------------------------------
@@ -114,30 +157,42 @@ class TestMainCli:
         written = json.loads(out_path.read_text())
         assert written == {"NDI cam1": 4.0, "NDI cam4": 44.0}
 
-    def test_writes_imag_main_and_mv_only_when_requested(self, tmp_path):
+    def test_writes_the_margin_file_only_when_requested(self, tmp_path):
         jitter_path = tmp_path / "jitter.json"
         jitter_path.write_text(json.dumps({
-            "NDI cam2": {"latency_ms": 14, "mean_head_skew_ms": 0.0},
+            "NDI cam2": {"latency_ms": 14, "mean_head_skew_ms": 0.0, "max_abs_head_skew_ms": 22},
         }))
         out_path = tmp_path / "strih.json"
-        imag_main = tmp_path / "imag-main.json"
-        imag_mv = tmp_path / "imag-mv.json"
+        margin_path = tmp_path / "margin.txt"
         rc = ppc.main([
             "--jitter-json", str(jitter_path), "--out", str(out_path),
-            "--imag-main-out", str(imag_main), "--imag-mv-out", str(imag_mv),
+            "--margin-out", str(margin_path),
         ])
         assert rc == 0
-        assert json.loads(imag_main.read_text()) == {"NDI CAM2": 14.0}
-        assert json.loads(imag_mv.read_text()) == {"MV CAM2": 14.0}
+        assert margin_path.read_text().strip() == "22.0"
 
-    def test_imag_outputs_are_not_written_when_not_requested(self, tmp_path):
+    def test_margin_file_is_not_written_when_not_requested(self, tmp_path):
         jitter_path = tmp_path / "jitter.json"
         jitter_path.write_text(json.dumps({"NDI cam1": {"latency_ms": 3, "mean_head_skew_ms": 0.0}}))
         out_path = tmp_path / "strih.json"
-        imag_main = tmp_path / "imag-main.json"
+        margin_path = tmp_path / "margin.txt"
         rc = ppc.main(["--jitter-json", str(jitter_path), "--out", str(out_path)])
         assert rc == 0
-        assert not imag_main.exists()
+        assert not margin_path.exists()
+
+    def test_margin_floor_ms_flag_is_wired_through(self, tmp_path):
+        jitter_path = tmp_path / "jitter.json"
+        jitter_path.write_text(json.dumps({
+            "NDI cam1": {"latency_ms": 3, "mean_head_skew_ms": 0.0, "max_abs_head_skew_ms": 2},
+        }))
+        out_path = tmp_path / "strih.json"
+        margin_path = tmp_path / "margin.txt"
+        rc = ppc.main([
+            "--jitter-json", str(jitter_path), "--out", str(out_path),
+            "--margin-out", str(margin_path), "--margin-floor-ms", "25",
+        ])
+        assert rc == 0
+        assert margin_path.read_text().strip() == "25.0"
 
     def test_no_usable_cameras_returns_1_and_writes_nothing(self, tmp_path, capsys):
         jitter_path = tmp_path / "jitter.json"
