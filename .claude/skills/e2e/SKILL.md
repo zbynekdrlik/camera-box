@@ -2311,3 +2311,25 @@ a transient finalize-race clears within 1-2 retries (a 3s settle between attempt
 live-verified); a genuine failure (ffmpeg missing, wrong path) fails identically on every attempt
 and still surfaces the same operator message once attempts are exhausted — the retry never masks
 a real problem, only absorbs the transient one.
+
+## imag MV cells are SAME-SOURCE since 2026-07-15 — the #501 low-bw twins are GONE (do not resurrect)
+
+The "MV Cam N" cells on imag now nest the SAME full-bw `NDI CAMx` main inputs the program uses —
+the `#501` `MV CAMx` genlock_monitor twin receivers were REMOVED live and from the seed
+(`scripts/imag_scenes.py`, commits a641724a7/41423c9c2). Reason: their raison d'être (7× fullHD
+decode would collapse the notebook) died with the `#767` keep-alive build (mains decode
+continuously anyway) — measured after the pivot: 60fps / 2.3ms / 0 skips / CPU 3-12%, BETTER than
+with twins; and post-reboot the twins had degraded into a relock storm (~every 4s = the laggy MV
+the user hit). Consequences for gate/tooling: imag has NO `MV CAMx` inputs any more —
+`imag_latency_enforce.py` finds 9 NDI inputs (7 mains + 2 resolume), not 16; any check/metric
+enumerating imag `MV CAM*` inputs (#761-era) must be re-pointed or it silently no-ops.
+
+**Seed transform-preserve (#783):** `imag_scenes.py seed()` sets a scene item's transform ONLY
+when the item was just created — an EXISTING item's transform is the OPERATOR'S (hand-tuned
+LED-wall crop) and is never touched. Never re-add an unconditional `SetSceneItemTransform` to a
+boot/relaunch path — a hard reboot's autostart seed wiping the operator's transforms is the exact
+2026-07-15 incident this guards.
+
+**imag touchpad (`#779`):** libinput `Scrolling Pixel Distance` hard-caps at **50** (BadValue
+above it) — 50 is the gentlest scroll possible; persisted in
+`/etc/X11/xorg.conf.d/30-touchpad-tap.conf` together with Tapping/TappingDrag/NaturalScrolling.
