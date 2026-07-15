@@ -106,14 +106,40 @@ int main(void)
         return 2;
     }
 
-    /* (2) The program output (render_divisor <= 1) must NEVER be throttled by the cadence
-     *     floor OR the budget gate, even over budget, across every frame_counter value. */
+    /* (2) The program output (render_divisor 0 -- render_display() never even routes
+     *     program/preview displays here, this is the defensive contract) must NEVER be
+     *     throttled by the cadence floor OR the budget gate, even over budget. */
     int prog_renders = 0;
-    int prog_max = run_loop(1, 22000000ULL, 9000000ULL, budget, ticks, &prog_renders);
+    int prog_max = run_loop(0, 22000000ULL, 9000000ULL, budget, ticks, &prog_renders);
     if (prog_renders != ticks || prog_max != 0) {
         fprintf(stderr, "FAIL: program render throttled (renders=%d/%d, longest skip run=%d)\n",
                 prog_renders, ticks, prog_max);
         return 3;
+    }
+
+    /* (2b) #776: an EFFECTIVE divisor of 1 (a 30fps canvas deriving cadence-uncapped
+     *     multiview cells) is cadence-free BUT STILL budget-gated: over budget it skips
+     *     (program priority) while the #293 floor keeps it from starving; under budget it
+     *     renders every tick (the whole point of #776 -- 30fps cells on a 30fps canvas). */
+    int mv1_renders = 0;
+    int mv1_max = run_loop(1, 22000000ULL, 9000000ULL, budget, ticks, &mv1_renders);
+    if (mv1_renders == ticks) {
+        fprintf(stderr, "FAIL: over-budget effective-divisor-1 multiview was NOT budget-gated "
+                "(rendered every tick -- the pre-#776 <=1 early-return is back)\n");
+        return 7;
+    }
+    if (mv1_max > K) {
+        fprintf(stderr, "FAIL: over-budget effective-divisor-1 multiview starved %d consecutive "
+                "ticks (> K=%d)\n", mv1_max, K);
+        return 8;
+    }
+    int mv1_light_renders = 0;
+    run_loop(1, 5000000ULL, 9000000ULL, budget, ticks, &mv1_light_renders);
+    if (mv1_light_renders != ticks) {
+        fprintf(stderr, "FAIL: under-budget effective-divisor-1 multiview must render EVERY "
+                "tick (30fps cells on a 30fps canvas, #776) -- rendered %d/%d\n",
+                mv1_light_renders, ticks);
+        return 9;
     }
 
     /* (3) A not-yet-warmed-up display (ewma==0) must render to measure (never pre-starved),

@@ -91,7 +91,7 @@ static inline bool obs_display_should_skip(uint32_t render_divisor, uint32_t fra
 					   uint64_t ewma_ns, uint64_t elapsed_ns,
 					   uint64_t budget_ns, uint32_t consecutive_skips)
 {
-	if (render_divisor <= 1) /* program output + preview: never throttled */
+	if (render_divisor < 1) /* program output + preview (divisor 0): never throttled */
 		return false;
 	if (ewma_ns == 0) /* not warmed up: render once to measure its cost */
 		return false;
@@ -100,8 +100,16 @@ static inline bool obs_display_should_skip(uint32_t render_divisor, uint32_t fra
 	 * tick whose frame_counter is not a multiple of render_divisor -- regardless of
 	 * measured cost or remaining budget. Without this, a display cheap enough to always
 	 * fit under budget (the imag Multiview's live behavior) is never actually throttled by
-	 * the soft budget gate below, defeating the render_divisor marker entirely. */
-	if ((frame_counter % render_divisor) != 0)
+	 * the soft budget gate below, defeating the render_divisor marker entirely.
+	 *
+	 * #776: an EFFECTIVE divisor of 1 (a 30fps canvas deriving cadence-uncapped multiview
+	 * cells -- see render_display()'s canvas-rate derivation) means NO cadence skipping,
+	 * but the display is STILL a monitoring display: the budget gate + #293 floor below
+	 * keep applying, so the program always has priority on a tight tick. The old
+	 * `<= 1 -> never throttled` early-return wrongly disabled the budget brake for that
+	 * case; only divisor 0 (program/preview, never routed here by render_display()'s own
+	 * `render_divisor > 1` guard anyway) is exempt. */
+	if (render_divisor > 1 && (frame_counter % render_divisor) != 0)
 		return true;
 
 	if (elapsed_ns + ewma_ns <= budget_ns) /* fits the remaining budget this tick: render */
