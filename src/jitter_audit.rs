@@ -216,8 +216,8 @@ pub fn summarize(samples: &[AuditSample]) -> Option<AuditSummary> {
     let max_abs_head_skew_ms = abs_skews.iter().copied().max().unwrap_or(0);
     let mean_abs_head_skew_ms = abs_skews.iter().sum::<i64>() as f64 / samples.len() as f64;
     // #757: SIGNED mean, no `.abs()` — see the field doc for why the sign matters.
-    let mean_head_skew_ms = samples.iter().map(|s| s.ts_head_skew_ms).sum::<i64>() as f64
-        / samples.len() as f64;
+    let mean_head_skew_ms =
+        samples.iter().map(|s| s.ts_head_skew_ms).sum::<i64>() as f64 / samples.len() as f64;
     let peak_depth = samples
         .iter()
         .map(|s| s.peak as u64)
@@ -241,6 +241,29 @@ pub fn summarize(samples: &[AuditSample]) -> Option<AuditSummary> {
         mean_head_skew_ms,
         peak_depth,
     })
+}
+
+/// #757 — JSON-serialize a slice of [`AuditSummary`] as one JSON object keyed by `source`
+/// name, each value carrying the fields a pre-record phase calibrator needs
+/// (`latency_ms` + `mean_head_skew_ms` reconstructs the absolute cam→strih transit time —
+/// see `mean_head_skew_ms`'s own doc). Used by `genlock-jitter-report --json`. Every summary
+/// is included unfiltered/unrenamed — a caller needing only e.g. `"NDI cam<N>"` strih sources
+/// filters the result afterward, this function never guesses which subset matters.
+pub fn summaries_to_json(summaries: &[AuditSummary]) -> serde_json::Value {
+    let mut out = serde_json::Map::new();
+    for s in summaries {
+        out.insert(
+            s.source.clone(),
+            serde_json::json!({
+                "samples": s.samples,
+                "latency_ms": s.latency_ms,
+                "mean_head_skew_ms": s.mean_head_skew_ms,
+                "mean_abs_head_skew_ms": s.mean_abs_head_skew_ms,
+                "max_abs_head_skew_ms": s.max_abs_head_skew_ms,
+            }),
+        );
+    }
+    serde_json::Value::Object(out)
 }
 
 /// Convenience: group `samples` by source, then [`summarize`] each group. One
@@ -433,6 +456,34 @@ mod tests {
         assert_eq!(summaries[0].samples, 2);
         assert_eq!(summaries[1].source, "NDI cam2");
         assert_eq!(summaries[1].samples, 1);
+    }
+
+    #[test]
+    fn summaries_to_json_carries_source_latency_and_signed_skew_757() {
+        let cam2 = SAMPLE_LINE_CAM1
+            .replace("NDI cam1", "NDI cam2")
+            .replace("ts_head_skew_ms=-2", "ts_head_skew_ms=6");
+        let text = format!("{SAMPLE_LINE_CAM1}\n{cam2}");
+        let samples = parse_audit_lines(&text);
+        let summaries = summarize_all(&samples);
+        let json = summaries_to_json(&summaries);
+        let obj = json.as_object().expect("must be a JSON object");
+        assert_eq!(obj.len(), 2, "one entry per source");
+
+        let cam1 = &obj["NDI cam1"];
+        assert_eq!(cam1["latency_ms"], 3);
+        assert_eq!(cam1["mean_head_skew_ms"], -2.0);
+        assert_eq!(cam1["samples"], 1);
+
+        let cam2 = &obj["NDI cam2"];
+        assert_eq!(cam2["latency_ms"], 3);
+        assert_eq!(cam2["mean_head_skew_ms"], 6.0);
+    }
+
+    #[test]
+    fn summaries_to_json_of_empty_input_is_an_empty_object() {
+        let json = summaries_to_json(&[]);
+        assert_eq!(json, serde_json::json!({}));
     }
 
     #[test]
