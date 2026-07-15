@@ -2335,12 +2335,12 @@ fi
 # LIVE_FREEZE_WATCH=0 lets a bisect run disable ONLY this mechanism (nothing else) to test that
 # hypothesis directly.
 #
-# #757 TEMPORARY (2026-07-15): default flipped to 0 for EXACTLY the coordinator's requested
-# kill-shot acceptance run -- this is a ONE-RUN diagnostic default, not a permanent disable of
-# the #758 safety feature. MUST be flipped back to 1 (or the whole knob deleted, keeping the
-# watch unconditionally on) in the VERY NEXT commit once this run's evidence is read, whichever
-# way the bisect result points.
-LIVE_FREEZE_WATCH="${LIVE_FREEZE_WATCH:-0}"
+# #757 KILL-SHOT RESULT (2026-07-15, run 1874027737): pairs PERSIST with freeze-watch fully
+# disabled (9-14/segment) -- the mechanism is EXONERATED, it is not the periodic-disturbance
+# cause. Default restored to 1 (the #758 safety feature stays ON in normal operation); the
+# LIVE_FREEZE_WATCH knob itself is left in place (harmless, still useful for any future
+# re-test) but is no longer expected to matter for this bisect.
+LIVE_FREEZE_WATCH="${LIVE_FREEZE_WATCH:-1}"
 FREEZE_WATCH_PID_FILE="$OUTDIR/freeze-watch.pid"
 FREEZE_WATCH_POISON_FILE="$OUTDIR/freeze-watch-poison.txt"
 if [ "$LIVE_FREEZE_WATCH" = "1" ] && [ "${ALL_CAMBOX:-0}" = "1" ]; then
