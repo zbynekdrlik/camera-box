@@ -59,8 +59,8 @@ use camera_box::probe::recording_latency::{
 };
 use camera_box::probe::recording_partial::RecordingPartial;
 use camera_box::probe::recording_segments::{
-    load_switch_schedule, place_frame_in_window, segment_continuity, SegmentFrame, SwitchWindow,
-    WindowPlacement, DEFAULT_TRANSITION_GUARD_NS,
+    load_switch_schedule, place_frame_in_window, raw_window_index, segment_continuity,
+    SegmentFrame, SwitchWindow, WindowPlacement, DEFAULT_TRANSITION_GUARD_NS,
 };
 use camera_box::probe::recording_verdict::{
     cam_strih_assessment, verdict, FrameTick, RecordingVerdict, VerdictConfig,
@@ -1196,17 +1196,37 @@ fn scope_camera_window_to_own_schedule(
         .collect()
 }
 
-/// #708 — for EACH entry of `window`, compute which `--switch-schedule` window index (if any)
-/// it belongs to, via the SAME anchor priority + [`place_frame_in_window`] used everywhere else
-/// a frame is placed on the schedule timeline ([`scope_camera_window_to_own_schedule`] just
-/// above, and the #312 sweep) — so this NEW per-render backward-jump exception can never
-/// disagree with the #706/#312 window attribution about which window a frame belongs to.
+/// #708/#741 — for EACH entry of `window`, compute which `--switch-schedule` window index (if
+/// any) it belongs to, for the SOLE purpose of feeding
+/// [`burn_contiguity_in_window_with_step_and_schedule`]'s `crossed_window_boundary` check (this
+/// function's only caller/consumer — see that function's `window_of` parameter).
 ///
-/// `None` at a position ⇒ the frame's own gen_ts anchor is missing, or it fell inside a
-/// transition guard / outside every window — [`burn_contiguity_in_window_with_step_and_schedule`]
-/// treats an unknown window on EITHER side of a comparison as "assume the SAME window" (never
-/// silently suppresses a real anomaly), so returning `None` here is always the conservative,
-/// safe choice.
+/// #741 fix (live-investigated, 2026-07-15): this used to reuse [`place_frame_in_window`] — the
+/// GUARD-filtered placement content-attribution uses everywhere else — but that made the #708
+/// exception structurally unable to fire for the exact case it exists to except. A genuine
+/// program switch changes the active render source within roughly one render tick (~30ms) of
+/// the schedule boundary; the settle-time guard band (`scope.guard_ns`, ~1s) is far wider than
+/// that, so the LAST frame before a real cut and the FIRST frame after it are — by construction
+/// — both inside the guard band on their own side, both reading back `Guard` (mapped to `None`
+/// below the old way). `crossed_window_boundary` only ever fires on `(Some(pw), Some(cw))`, so it
+/// silently stayed `false` on every real boundary crossing, misclassifying the expected
+/// per-source free-running-counter discontinuity as a `RealDrop` (confirmed live: both fresh
+/// investigation runs' every single flagged "real_drop" landed within 1–32ms of an actual
+/// `--switch-schedule` boundary — well inside the guard band, never a genuine mid-window gap).
+///
+/// This now uses [`raw_window_index`] — the SAME schedule-interval lookup `place_frame_in_window`
+/// performs internally, just WITHOUT its settle-time guard layered on top. Content attribution
+/// elsewhere ([`scope_camera_window_to_own_schedule`], the #312 sweep) is completely unaffected —
+/// they still call `place_frame_in_window` directly and keep the guard, which is correct for
+/// THEIR purpose (deciding which cambox's tally a frame counts toward). Only the boundary-
+/// crossing QUESTION ("did the schedule's active window change between these two frames") needs
+/// the guard-free answer, because the guard's settle-time margin is exactly what was hiding the
+/// boundary from it.
+///
+/// `None` at a position ⇒ the frame's own gen_ts anchor is missing, or it fell genuinely outside
+/// every scheduled window — [`burn_contiguity_in_window_with_step_and_schedule`] treats an
+/// unknown window on EITHER side of a comparison as "assume the SAME window" (never silently
+/// suppresses a real anomaly), so returning `None` here is always the conservative, safe choice.
 fn attribute_window_indices(
     window: &[RecordedBurnFrame],
     source: &[RecordingFrame],
@@ -1224,12 +1244,9 @@ fn attribute_window_indices(
     window
         .iter()
         .map(|rbf| {
-            gen_ts_by_index.get(&rbf.frame_index).and_then(|&gen_ts| {
-                match place_frame_in_window(gen_ts, scope.schedule, scope.guard_ns) {
-                    WindowPlacement::In(wi) => Some(wi),
-                    WindowPlacement::Guard | WindowPlacement::Outside => None,
-                }
-            })
+            gen_ts_by_index
+                .get(&rbf.frame_index)
+                .and_then(|&gen_ts| raw_window_index(gen_ts, scope.schedule))
         })
         .collect()
 }
@@ -9715,6 +9732,91 @@ mod tests {
             v.contiguity
         );
         assert_eq!(v.real_drops(), 0, "#708: no phantom REAL DROP");
+    }
+
+    #[test]
+    fn node_verdict_with_optical_strih_backward_jump_within_the_real_transition_guard_is_zero_loss_741(
+    ) {
+        // #741: the #708 test above uses `guard_ns: 0`, which never exercises the ACTUAL bug --
+        // #708's exception is derived from `attribute_window_indices`'s window_of, which used to
+        // route through the GUARD-filtered `place_frame_in_window`. In PRODUCTION `guard_ns` is
+        // `DEFAULT_TRANSITION_GUARD_NS` (1s), and a genuine program switch changes the active
+        // render source within roughly one render tick (~30ms) of the boundary -- so the frames
+        // straddling a REAL cut are, by construction, ALWAYS inside that much-wider 1s guard band
+        // on their own side. Live-investigated (2026-07-15, #741): both fresh CI runs' every
+        // single flagged "real_drop" landed within 1-32ms of an actual switch-schedule boundary
+        // -- reproduced here with a jump 30ms before the boundary and 13ms after it, matching the
+        // measured magnitudes exactly.
+        let guard_ns = super::DEFAULT_TRANSITION_GUARD_NS;
+        let boundary_ns: i64 = 1_000_000_000; // 1s
+        let schedule = vec![
+            super::SwitchWindow {
+                cambox: "CAM4".to_string(),
+                start_ns: 0,
+                end_ns: boundary_ns,
+            },
+            super::SwitchWindow {
+                cambox: "CAM2".to_string(),
+                start_ns: boundary_ns,
+                end_ns: boundary_ns + 1_000_000_000,
+            },
+        ];
+        let before_ns = boundary_ns - 30_000_000; // 30ms before the cut
+        let after_ns = boundary_ns + 13_000_000; // 13ms after the cut
+        let stream: Vec<RecordingFrame> = vec![
+            frame_at(
+                0,
+                &[
+                    (CAM2, 900, before_ns - 100_000_000),
+                    (STRIH, 100, before_ns - 100_000_000),
+                ],
+            ),
+            // Last frame of window0, well inside the 1s guard on the "before" side.
+            frame_at(1, &[(CAM2, 901, before_ns), (STRIH, 103, before_ns)]),
+            // First frame of window1, well inside the 1s guard on the "after" side. A DIFFERENT
+            // source's own independent 911002 filter instance cuts onto program -- its
+            // free-running counter value (101) is LOWER than the previous window's tail (103).
+            frame_at(2, &[(CAM2, 902, after_ns), (STRIH, 101, after_ns)]),
+            frame_at(
+                3,
+                &[
+                    (CAM2, 903, after_ns + 100_000_000),
+                    (STRIH, 106, after_ns + 100_000_000),
+                ],
+            ),
+        ];
+        let optical = optical_span_facts(&stream, &[STRIH, STREAM], None);
+        let scope = super::ScheduleScope {
+            schedule: &schedule,
+            anchor_run_ids: &[STRIH, STREAM],
+            guard_ns,
+        };
+        let v = node_verdict_with_optical(
+            &super::NodeSpec {
+                node: "strih",
+                burn_run_id: STRIH,
+                rate: BurnRate::PerRenderTick,
+                source: &stream,
+                rec_path: None,
+                cam2_run_id: None,
+                step: super::node_render_step("strih", 60.0, 30.0, 60.0, 30.0),
+            },
+            &[STRIH, STREAM],
+            optical,
+            std::path::Path::new("/tmp"),
+            0,
+            Some(scope),
+        )
+        .unwrap();
+        assert!(
+            v.is_zero(),
+            "#741: a backward jump landing within the REAL (1s) transition guard of a CONFIRMED \
+             window boundary must not be a phantom drop -- the guard-filtered window_of used to \
+             blind attribute_window_indices to exactly this case (both sides always land inside \
+             the guard on a genuine cut) -- got {:?}",
+            v.contiguity
+        );
+        assert_eq!(v.real_drops(), 0, "#741: no phantom REAL DROP");
     }
 
     #[test]

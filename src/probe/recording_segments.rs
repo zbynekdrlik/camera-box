@@ -233,6 +233,24 @@ pub enum WindowPlacement {
     Outside,
 }
 
+/// Which schedule window's `[start_ns, end_ns)` interval `gen_ts_ns` falls into, with NO guard
+/// applied — `None` only when genuinely outside every scheduled window. Windows are ordered +
+/// non-overlapping, so a gen_ts can fall in at most one. Shared by [`place_frame_in_window`]
+/// (which layers the settle-time guard on top, for CONTENT attribution) and #741's
+/// `attribute_window_indices` (`src/bin/recording-verdict.rs`), which needs the UNGUARDED
+/// placement instead: a genuine program switch changes the active render source within roughly
+/// one render tick (~30ms) of the boundary, so the frames immediately before/after a REAL cut
+/// are — by construction — almost always inside the (much larger, ~1s) settle-time guard band on
+/// their respective sides. Deriving "did a schedule boundary occur between these two frames"
+/// from the GUARD-filtered placement therefore can never see the boundary it exists to detect
+/// (both sides read back `None`/`Guard`); the raw, guard-free placement here answers that
+/// question correctly.
+pub fn raw_window_index(gen_ts_ns: i64, schedule: &[SwitchWindow]) -> Option<usize> {
+    schedule
+        .iter()
+        .position(|w| gen_ts_ns >= w.start_ns && gen_ts_ns < w.end_ns)
+}
+
 /// Which schedule window (post-transition-guard) a frame at `gen_ts_ns` belongs to. Windows are
 /// ordered + non-overlapping, so a gen_ts can fall in at most one; a frame within `guard_ns` of
 /// either boundary of its window is [`WindowPlacement::Guard`] (the switch takes a few frames to
@@ -243,10 +261,7 @@ pub fn place_frame_in_window(
     guard_ns: i64,
 ) -> WindowPlacement {
     let guard_ns = guard_ns.max(0);
-    match schedule
-        .iter()
-        .position(|w| gen_ts_ns >= w.start_ns && gen_ts_ns < w.end_ns)
-    {
+    match raw_window_index(gen_ts_ns, schedule) {
         Some(wi) => {
             let w = &schedule[wi];
             let after_lead = gen_ts_ns >= w.start_ns.saturating_add(guard_ns);
