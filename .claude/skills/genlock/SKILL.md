@@ -1237,3 +1237,63 @@ directory (`%APPDATA%\obs-studio\basic\scenes\*.json`, all 3 collections includi
 the same rollback-backup convention as the genlock DLL deploys above (`C:\obs-backup\<date>\`).
 Tests: `tests/python/test_strih_mv_scenes.py` (pure name-mapping/transform-filtering/replacement-
 planning/stats-delta logic, no live OBS — mirrors `test_obs_phase2_*.py`'s importlib pattern).
+
+## GOTCHA — editing `~/.config/obs-studio/{global,user}.ini` on a RUNNING OBS box: kill-after-edit races the dying process's own shutdown save (#756, 2026-07-15)
+
+**Never edit `global.ini`/`user.ini` while OBS is still running, then kill it.** The dying
+process's OWN shutdown handler writes back the file with its IN-MEMORY config state — which
+never saw your edit — silently CLOBBERING it. Live-caught: appended `CloseExistingProjectors=true`
+to imag's `user.ini` while OBS (PID X) was running, then `kill -TERM`'d it → the relaunched
+process (fresh PID) came up with the key MISSING entirely, because the OLD process's shutdown
+save overwrote the file with its stale content the instant it received the signal. **Correct
+order: STOP OBS first (confirm `pgrep -x obs` empty), THEN edit the config file, THEN start OBS.**
+On imag specifically, also `systemctl stop imag-obs-watchdog.service` first — the watchdog
+auto-relaunches OBS on death (tier-a), which would otherwise race your edit exactly the same way.
+
+**Second, independent gotcha in the SAME investigation — libobs's ini parser is NOT Qt's
+QSettings, and a DUPLICATE `[section]` header is silently unreachable.** `util/config-file.c`
+(a custom parser, `util/uthash.h` just redefines a couple of upstream `uthash`'s macros — NOT a
+1000+-line hash-table implementation itself, that lives at the SYSTEM `uthash-dev` package)
+stores sections in a uthash table keyed by name; adding a SECOND `[BasicWindow]` header (e.g. by
+naively `printf '\n[BasicWindow]\nKey=value\n' >> file` when the file ALREADY has a
+`[BasicWindow]` section) does NOT merge into the first section — `config_get_bool`/
+`config_find_item` only ever resolve the FIRST-inserted section, so a key seeded into the later
+duplicate is silently unreachable, and gets DROPPED ENTIRELY the next time OBS itself saves the
+file (its save only ever writes back what it loaded). **Always INSERT a new key into an EXISTING
+section instead of appending a new one:**
+```bash
+if grep -q '^\[BasicWindow\]$' "$f"; then
+    sed -i '0,/^\[BasicWindow\]$/s//[BasicWindow]\nNewKey=value/' "$f"   # GNU sed first-match-only idiom
+else
+    printf '\n[BasicWindow]\nNewKey=value\n' >> "$f"                     # only when truly absent
+fi
+```
+See `scripts/setup-imag.sh`'s `seed_ini()` for the shipped version of this pattern (the
+`CloseExistingProjectors` seed) and `tests/harness_projector_count_756.rs` for a functional
+(execution) test that actually RUNS the extracted `seed_ini()` body against synthetic fixtures —
+a purely textual `body.contains(...)` check cannot catch this class of bug (the literal string is
+present in the script either way; only running it against an ALREADY-populated fixture file
+reveals the duplicate-section defect).
+
+## GOTCHA — a live gdb breakpoint on a HOT render/shutdown-path function can itself trigger a real wedge-reboot (#756, 2026-07-15)
+
+Live-caught TWICE this session: setting a gdb breakpoint on `config_get_bool` (called from many
+places, including per-UI-update paths) on imag's running OBS process, with `commands`/`continue`
+auto-resuming on every hit, stalled the render thread badly enough that the watchdog's tier-b
+wedge detector fired a REAL reboot (`fps=43.5` observed, matching genuine wedge thresholds) — the
+debugger itself became the load, not just an observer. `obs_enter_graphics`-family functions are
+called even MORE often than `config_get_bool`, so breakpointing anywhere in that call graph live
+is HIGHER risk still. **Before attaching gdb to a running OBS process on ANY rig box, consider:
+(1) is the target function on a per-frame or per-UI-tick hot path — if so, expect real
+performance impact, not just "a debugger is attached"; (2) can the same question be answered via
+a STANDALONE, OFF-BOX reproduction instead** (compile just the relevant `.c`/`.rs` files with
+minimal stubs and feed them synthetic input — see the `config_probe` throwaway harness this
+investigation built: `gcc -std=gnu11 -I vendor/obs-studio/libobs -c
+vendor/obs-studio/libobs/util/config-file.c` + stub `os_*`/`bmem`/`dstr` functions + a tiny
+`config_open_string()`-driven `main()` — this is 100% safe, zero rig risk, and answered the
+question this gdb session was chasing definitively once written); **(3) if gdb on the live box is
+truly unavoidable, prefer a FILTERED conditional breakpoint that skips fast for 99% of hits AND
+budget for the possibility of a wedge-reboot** (the watchdog's alarm-only mode, if armed, at least
+won't auto-reboot out from under you — but the render-thread stall itself still happened and still
+degraded whatever you were trying to measure). Never assume "just attaching + reading a few
+frames" is free on a box with an active wedge-reboot watchdog.

@@ -2037,10 +2037,49 @@ When `copies`/`gaps` look elevated or growing across a run, don't guess — run 
 
 ## RESOLVED (#708, 2026-07-12) — strih's OWN `full_chain.loss.strih.real_drops` periodic 4-frame residual was a per-source-counter accounting artifact, NOT loss
 
-**#741 (2026-07-13, open) — a residual 5-real-drop case survived #708's fix on a run that DID
+**#741 RESOLVED (2026-07-15, commit `4346f4993`) — the residual case WAS the #708 window-boundary
+class after all; the 2026-07-13 note below (kept for the methodology-failure lesson) reached the
+WRONG conclusion off a data-source bug.** Re-running the ACTUAL `recording-verdict` binary against
+fresh partial-JSON data found every flagged id landing within **1-32ms** of a real
+`--switch-schedule` boundary — the OPPOSITE of the stale "~4.2s before, well outside the 1s guard"
+claim below. The 2026-07-13 investigation's timestamp lookup used **strih-partial's own local
+`gen_ts_ns`** for the 911002 burn; the CORRECT source is the **stream-partial's forwarded 911002
+payloads** (strih's burn is read downstream, from the stream recording — same as
+`full_chain.loss.strih` itself computes it). Using the wrong file introduced a systematic offset
+that made real ~30ms-from-boundary events look like ~4.2s-before-boundary events, sending the whole
+"periodic ~30s timer" theory down a dead end.
+
+**The REAL root cause:** `attribute_window_indices()` computed each frame's window placement via
+the GUARD-filtered `place_frame_in_window` (the guard exists for CONTENT attribution — see
+`RESOLVED #708` below). A genuine program switch changes the active render source within ~30ms of
+the boundary; the settle-time guard band is ~1s — so the last frame before a real cut and the
+first frame after it are, by construction, ALWAYS inside the guard band on their own side, both
+reading back `None`. `crossed_window_boundary` only fires on `(Some, Some)` with differing window
+indices, so it could never fire for the exact case it exists to except.
+
+**Fix:** a new `raw_window_index()` (`src/probe/recording_segments.rs`) — the same schedule-
+interval lookup `place_frame_in_window` does internally, minus the guard — replaces
+`place_frame_in_window` as `attribute_window_indices`'s placement source. `window_of` has exactly
+ONE consumer (`crossed_window_boundary`), so content attribution elsewhere is unaffected. New test
+`node_verdict_with_optical_strih_backward_jump_within_the_real_transition_guard_is_zero_loss_741`
+uses a REALISTIC `guard_ns` (the existing #708 test uses `guard_ns: 0`, which structurally can
+never produce the `Guard`/`None` case — why the original fix looked complete while leaving this
+gap).
+
+**Reusable lesson (why the 2026-07-13 note below got it backwards):** when correlating a flagged
+node's frame against `switch-schedule.json`, always use the SAME data source the metric itself
+reads from — for `full_chain.loss.strih` that is the **stream-partial's forwarded 911002
+payloads**, never a different node's own local partial, even one that also happens to carry a
+911002-tagged burn. Two different files carrying "the same run_id" are not interchangeable
+timestamp sources unless you've confirmed they're the SAME decode pass.
+
+---
+
+**STALE, WRONG CONCLUSION (2026-07-13) — kept only for the methodology-failure lesson above, do
+NOT reuse this analysis:** a residual 5-real-drop case survived #708's fix on a run that DID
 supply `--switch-schedule`, with the exact `first_id > last_id` non-monotonic tell this section
 describes — CONFIRMED on a second independent run to be a periodic ~30s-interval phenomenon,
-NOT the #708 window-boundary-placement class.** Two runs ~20 min apart both flagged 5 ids at
+NOT the #708 window-boundary-placement class. Two runs ~20 min apart both flagged 5 ids at
 near-identical `frame_index` (within ±35 frames). Cross-referencing each flagged frame's
 `gen_ts_ns` against `switch-schedule.json` shows every occurrence sits ~4.2-4.3s BEFORE the NEXT
 window's start — well outside the 1s transition guard, so #708's window-placement suppression is
