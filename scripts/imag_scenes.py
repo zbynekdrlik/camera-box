@@ -154,21 +154,31 @@ def seed(obs: Obs) -> None:
                 },
             }, ignore_err=True)
 
-    # #501→SAME-SOURCE pivot (2026-07-15, user-driven): the "MV Cam N" cells now nest the SAME
-    # full-bw "NDI CAMx" main inputs the program uses — identical frames, identical genlock
-    # timing (3ms), zero proxy lag. The old low-bandwidth "MV CAMx" twin receivers are GONE:
-    # their reason to exist (7x fullHD decode would collapse the notebook render) died with the
-    # #767 keep-alive build (all main receivers decode continuously anyway); live-measured after
-    # the switch: 60fps / 2.3ms render / 0 skips / CPU 3-12% — better than with the twins.
+    # #501: low-bandwidth "MV Cam N" monitor-only twins. Same fleet NDI names as the real
+    # "Cam N" scenes above, but genlock_monitor=true tells the vendor/distroav genlock lockdown
+    # to force LOW-bandwidth NDI receive for these sources (~9x cheaper) instead of the
+    # certified HIGHEST used by every full-bw source. Feeds the built-in multiview ONLY —
+    # never bound to program.
     for n in CAMS:
-        scene, inp = f"MV Cam {n}", f"NDI CAM{n}"
-        obs.req("CreateScene", {"sceneName": scene}, ignore_err=True)
+        scene, inp, ndi_name = f"MV Cam {n}", f"MV CAM{n}", f"CAM{n} (usb)"
         pre = obs.req("GetSceneItemId", {"sceneName": scene, "sourceName": inp},
                       ignore_err=True)
         item_existed = pre.get("sceneItemId") is not None
-        if not item_existed:
-            obs.req("CreateSceneItem", {"sceneName": scene, "sourceName": inp},
-                    ignore_err=True)
+        obs.req("CreateScene", {"sceneName": scene}, ignore_err=True)
+        obs.req("CreateInput", {
+            "sceneName": scene, "inputName": inp, "inputKind": "ndi_source",
+            "inputSettings": {
+                "ndi_source_name": ndi_name, "latency": 1, "genlock_monitor": True,
+            },
+        }, ignore_err=True)
+        # re-apply source binding + low-bandwidth monitor flag every run (self-healing)
+        obs.req("SetInputSettings", {
+            "inputName": inp,
+            "inputSettings": {
+                "ndi_source_name": ndi_name, "latency": 1, "genlock_monitor": True,
+            },
+        }, ignore_err=True)
+        obs.req("SetInputMute", {"inputName": inp, "inputMuted": True}, ignore_err=True)
         item = obs.req("GetSceneItemId", {"sceneName": scene, "sourceName": inp},
                        ignore_err=True)
         if not item_existed and item.get("sceneItemId") is not None:
