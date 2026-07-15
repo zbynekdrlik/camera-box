@@ -244,7 +244,7 @@ def relaunch_obs():
         except Exception:
             time.sleep(3)
     if up:
-        for args in ([SEED_SCRIPT, "--host", "127.0.0.1"],
+        for args in ([SEED_SCRIPT, "--host", "127.0.0.1", "--bootstrap"],
                      [SEED_SCRIPT, "--host", "127.0.0.1", "--projector"]):
             subprocess.run(["systemd-run", "--uid=newlevel", "--gid=newlevel",
                             "--setenv=DISPLAY=:0", "--setenv=HOME=/home/newlevel",
