@@ -39,6 +39,10 @@ import hashlib
 import json
 import sys
 
+# #785: --bootstrap = boot/recovery invocation (autostart + watchdog) — ONLY that path may
+# enforce program scene / studio / input bindings; a bare run only creates what is missing.
+BOOTSTRAP = "--bootstrap" in sys.argv
+
 from websocket import create_connection
 
 # #526: VERIFIED physical camera <-> NDI-name mapping (live-checked 2026-07-05, all 6 boxes up).
@@ -135,12 +139,15 @@ def seed(obs: Obs) -> None:
             "sceneName": scene, "inputName": inp, "inputKind": "ndi_source",
             "inputSettings": {"ndi_source_name": ndi_name, "latency": 1},  # 1 = Low latency
         }, ignore_err=True)
-        # re-apply source binding + low latency every run (self-healing)
-        obs.req("SetInputSettings", {
-            "inputName": inp,
-            "inputSettings": {"ndi_source_name": ndi_name, "latency": 1},
-        }, ignore_err=True)
-        obs.req("SetInputMute", {"inputName": inp, "inputMuted": True}, ignore_err=True)
+        # #785: source-binding/mute "self-healing" runs ONLY on --bootstrap (boot/recovery
+        # path) or on a just-created input — a plain reseed must NEVER overwrite whatever
+        # the OPERATOR set on an existing input (the "skripty mi kazia nastavenia" class).
+        if BOOTSTRAP or not item_existed:
+            obs.req("SetInputSettings", {
+                "inputName": inp,
+                "inputSettings": {"ndi_source_name": ndi_name, "latency": 1},
+            }, ignore_err=True)
+            obs.req("SetInputMute", {"inputName": inp, "inputMuted": True}, ignore_err=True)
         item = obs.req("GetSceneItemId", {"sceneName": scene, "sourceName": inp},
                        ignore_err=True)
         if not item_existed and item.get("sceneItemId") is not None:
@@ -182,8 +189,11 @@ def seed(obs: Obs) -> None:
                 },
             }, ignore_err=True)
 
-    obs.req("SetStudioModeEnabled", {"studioModeEnabled": True}, ignore_err=True)
-    obs.req("SetCurrentProgramScene", {"sceneName": "Cam 1"}, ignore_err=True)
+    # #785: forcing program/Studio is a BOOTSTRAP action (fresh OBS after boot/recovery).
+    # A reseed on a RUNNING production OBS must never yank the operator's program scene.
+    if BOOTSTRAP:
+        obs.req("SetStudioModeEnabled", {"studioModeEnabled": True}, ignore_err=True)
+        obs.req("SetCurrentProgramScene", {"sceneName": "Cam 1"}, ignore_err=True)
 
     v = obs.req("GetVideoSettings")
     ok = (v["fpsNumerator"], v["baseWidth"], v["baseHeight"]) == (FPS, CANVAS_W, CANVAS_H)
