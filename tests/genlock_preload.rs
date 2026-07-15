@@ -2286,6 +2286,9 @@ mod distroav_source {
         // table — the COMPLEMENT of the whitelist — so a value can't drift and an upstream property
         // add/remove can't reintroduce a live knob. The table must pin every forced key (incl. PTZ),
         // and ndi_source_update must still CALL the forcer when genlock is on.
+        // #767: PROP_BEHAVIOR is forced to KEEP_ACTIVE (was STOP_RESUME_LAST_FRAME) — a genlocked
+        // source's NDI receiver must never tear down on hide (cold reconnect = slow wake + dropped
+        // frames on a cut). The anti-assertion below keeps the sleep-on-hide value from returning.
         let src = squish(&vendor_file(NDI_SOURCE));
         assert!(
             src.contains("GENLOCK_FORCED_SETTINGS"),
@@ -2293,7 +2296,7 @@ mod distroav_source {
         );
         for entry in [
             "{PROP_SYNC, false, PROP_SYNC_NDI_SOURCE_TIMECODE, false}",
-            "{PROP_BEHAVIOR, false, PROP_BEHAVIOR_STOP_RESUME_LAST_FRAME, false}",
+            "{PROP_BEHAVIOR, false, PROP_BEHAVIOR_KEEP_ACTIVE, false}",
             "{PROP_BANDWIDTH, false, PROP_BW_HIGHEST, false}",
             "{PROP_LATENCY, false, PROP_LATENCY_NORMAL, false}",
             "{PROP_HW_ACCEL, true, 0, true}",
@@ -2308,6 +2311,12 @@ mod distroav_source {
                  could be left misconfigured on the genlock path. Re-apply the full forcer table."
             );
         }
+        assert!(
+            !src.contains("{PROP_BEHAVIOR, false, PROP_BEHAVIOR_STOP_RESUME_LAST_FRAME"),
+            "{NDI_SOURCE}: #767 — the forced table pins PROP_BEHAVIOR back to \
+             STOP_RESUME_LAST_FRAME; that re-enables receiver teardown on hide (cold reconnect \
+             + dropped frames on every cut to a hidden camera). It must stay KEEP_ACTIVE."
+        );
         assert!(
             src.contains("force_genlock_certified_settings(settings)"),
             "{NDI_SOURCE}: #257 — ndi_source_update no longer CALLS force_genlock_certified_settings."
