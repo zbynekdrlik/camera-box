@@ -295,7 +295,11 @@ dantesync_offset_verdict() {
   fi
   # #767: grade the MEDIAN of the recent fresh samples, not the single freshest one -- see
   # _fresh_offset_median_us above for the measurement-noise rationale. Contract unchanged.
-  off_us="$(_fresh_offset_median_us "$journal" "$fresh" 5)"
+  # Window K=11 (~5min at the ~30s sample cadence): a same-sign 2-3-sample burst under E2E
+  # LAN load majority-covers a 5-window (live cam5 +2624/+2508/+2865 consecutive; cam7 median
+  # 2113 in run 29420477560) but stays a minority of 11; a genuine clock step shifts ALL
+  # samples and still drifts. Callers gather journalctl -n 400, so the depth exists.
+  off_us="$(_fresh_offset_median_us "$journal" "$fresh" 11)"
   if [ -z "$off_us" ]; then
     printf 'stale\n'
     return 0
