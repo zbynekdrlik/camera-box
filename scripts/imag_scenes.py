@@ -123,6 +123,13 @@ def seed(obs: Obs) -> None:
 
     for n in CAMS:
         scene, inp, ndi_name = f"Cam {n}", f"NDI CAM{n}", f"CAM{n} (usb)"
+        # #783: detect pre-existence BEFORE create — an EXISTING item's transform belongs to
+        # the OPERATOR (hand-tuned LED-wall crop/scale) and must NEVER be overwritten by a
+        # boot/relaunch seed (live incident 2026-07-15: a hard reboot's autostart seed reset
+        # the user's transforms to fullscreen). Only a freshly-created item gets the default.
+        pre = obs.req("GetSceneItemId", {"sceneName": scene, "sourceName": inp},
+                      ignore_err=True)
+        item_existed = pre.get("sceneItemId") is not None
         obs.req("CreateScene", {"sceneName": scene}, ignore_err=True)
         obs.req("CreateInput", {
             "sceneName": scene, "inputName": inp, "inputKind": "ndi_source",
@@ -136,7 +143,7 @@ def seed(obs: Obs) -> None:
         obs.req("SetInputMute", {"inputName": inp, "inputMuted": True}, ignore_err=True)
         item = obs.req("GetSceneItemId", {"sceneName": scene, "sourceName": inp},
                        ignore_err=True)
-        if item.get("sceneItemId") is not None:
+        if not item_existed and item.get("sceneItemId") is not None:
             obs.req("SetSceneItemTransform", {
                 "sceneName": scene, "sceneItemId": item["sceneItemId"],
                 "sceneItemTransform": {
@@ -154,6 +161,9 @@ def seed(obs: Obs) -> None:
     # never bound to program.
     for n in CAMS:
         scene, inp, ndi_name = f"MV Cam {n}", f"MV CAM{n}", f"CAM{n} (usb)"
+        pre = obs.req("GetSceneItemId", {"sceneName": scene, "sourceName": inp},
+                      ignore_err=True)
+        item_existed = pre.get("sceneItemId") is not None
         obs.req("CreateScene", {"sceneName": scene}, ignore_err=True)
         obs.req("CreateInput", {
             "sceneName": scene, "inputName": inp, "inputKind": "ndi_source",
@@ -171,7 +181,7 @@ def seed(obs: Obs) -> None:
         obs.req("SetInputMute", {"inputName": inp, "inputMuted": True}, ignore_err=True)
         item = obs.req("GetSceneItemId", {"sceneName": scene, "sourceName": inp},
                        ignore_err=True)
-        if item.get("sceneItemId") is not None:
+        if not item_existed and item.get("sceneItemId") is not None:
             obs.req("SetSceneItemTransform", {
                 "sceneName": scene, "sceneItemId": item["sceneItemId"],
                 "sceneItemTransform": {
