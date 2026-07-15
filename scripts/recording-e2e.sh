@@ -590,8 +590,22 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
   # seeds CloseExistingProjectors=true so every open-projectors call above self-corrects to
   # exactly one window per monitor — but PROVE it every run, never just hope the config landed
   # (a reprovision that forgets the seed, or an OBS upgrade changing the default, must be caught
-  # immediately, not silently degrade render health run after run): hard-fail loud, never a
-  # silent self-heal, if imag ever again shows more than one Multiview or Program projector.
+  # immediately, not silently degrade render health run after run): hard-fail loud if imag
+  # shows more than one Multiview or Program projector AFTER the narrow #769 heal below.
+
+  # #769: windowed-stray heal FIRST — OBS's launch-restore can recreate a projector WINDOWED
+  # (internal monitor=-1); the CloseExistingProjectors replace loop matches GetMonitor()==target
+  # only, so that stray is invisible to it and every ensure-open above stacks one more window
+  # (live ping-pong: 3 gate refusals in one afternoon, 2026-07-15). Keep the NEWEST window per
+  # kind (the one ensure-open just opened on the proper monitor), close older strays; the count
+  # check below stays the LOUD backstop when this does not converge (a genuinely regressed
+  # config must still refuse the rig, #756).
+  # shellcheck source=lib/imag-projector-heal.sh
+  . "$HERE/lib/imag-projector-heal.sh"
+  sshpass -p "${IMAG_PW:-newlevel}" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 \
+    "${IMAG_USER:-newlevel}@$IMAG_IP" "$(imag_projector_heal_cmds)" 2>/dev/null \
+    | sed 's/^/    [imag projector-heal] /' || true
+
   echo "[0/8] imag-nb projector count must be EXACTLY 1 Multiview + 1 Program — no stray accumulation (#756)"
   _mv_count="$(sshpass -p "${IMAG_PW:-newlevel}" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 \
     "${IMAG_USER:-newlevel}@$IMAG_IP" \
