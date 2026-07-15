@@ -233,6 +233,45 @@ freshest_offset_us() {
   printf '%s' "$off_us"
 }
 
+# _fresh_offset_median_us JOURNAL FRESHNESS_S [K] -> the lower MEDIAN of the individually-FRESH
+# samples among the K (default 5) most recent "[NTP] offset:" lines; "" when none is fresh and
+# parseable. #767-era measurement-noise rejection (live, 2026-07-15): under E2E network load a
+# SINGLE [NTP] offset sample spikes to ~2-3ms (cam5 -2787us, cam7 -2316us) while PTP stays
+# NANO-locked and the surrounding samples read tens of us -- the CLOCK is fine, the one
+# measurement is noisy, and a verdict graded on the single freshest sample flakes exactly when
+# an E2E run loads the LAN. The median across the recent fresh samples rejects a lone spike
+# while a SUSTAINED out-of-bound offset (the real cam5/6 5.28s class) still lands every sample
+# out of bound -> median out of bound -> drift. Freshness is checked PER SAMPLE against the
+# newest journal line, same knob + same fail-closed non-numeric handling as freshest_offset_us.
+# (freshest_offset_us itself is left single-sample: its #326 painter-gate caller compares two
+# boxes' raw values relatively and owns its own tolerance.)
+_fresh_offset_median_us() {
+  local journal="$1" fresh="$2" k="${3:-5}"
+  local iso_re='[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[+-][0-9]{2}:[0-9]{2}'
+  local now_iso now_e lines line off_iso off_e off_us
+  local -a vals=()
+  if ! printf '%s' "$fresh" | grep -qE '^[0-9]+$'; then
+    printf ''
+    return 0
+  fi
+  now_iso="$(printf '%s\n' "$journal" | grep -oE "^$iso_re" | tail -1 || true)"
+  now_e="$(_short_iso_epoch "$now_iso")"
+  [ -n "$now_e" ] || { printf ''; return 0; }
+  lines="$(printf '%s\n' "$journal" | grep -E '\[NTP\] offset:' | tail -n "$k" || true)"
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    off_iso="$(printf '%s' "$line" | grep -oE "^$iso_re" | head -1 || true)"
+    off_e="$(_short_iso_epoch "$off_iso")"
+    [ -n "$off_e" ] || continue
+    [ "$((now_e - off_e))" -le "$fresh" ] || continue
+    off_us="$(printf '%s' "$line" | sed -n 's/.*\[NTP\] offset:+\{0,1\}\(-\{0,1\}[0-9][0-9]*\)us.*/\1/p' | head -1 || true)"
+    printf '%s' "$off_us" | grep -qE '^-?[0-9]+$' || continue
+    vals+=("$off_us")
+  done <<< "$lines"
+  [ "${#vals[@]}" -gt 0 ] || { printf ''; return 0; }
+  printf '%s\n' "${vals[@]}" | sort -n | awk -v n="${#vals[@]}" 'NR == int((n+1)/2) { print; exit }'
+}
+
 # dantesync_offset_verdict JOURNAL FRESHNESS_S BOUND_US -> "ok" | "drift" | "stale" | "absent".
 # Supersedes the age-blind dantesync_offset_ok (which read the LAST "[NTP] offset:" line via tail -1
 # regardless of age -- on cam5/6 that graded on a STALE boot-STEP line, the #550 bug). It finds the
@@ -254,7 +293,9 @@ dantesync_offset_verdict() {
     printf 'absent\n'
     return 0
   fi
-  off_us="$(freshest_offset_us "$journal" "$fresh")"
+  # #767: grade the MEDIAN of the recent fresh samples, not the single freshest one -- see
+  # _fresh_offset_median_us above for the measurement-noise rationale. Contract unchanged.
+  off_us="$(_fresh_offset_median_us "$journal" "$fresh" 5)"
   if [ -z "$off_us" ]; then
     printf 'stale\n'
     return 0
