@@ -258,6 +258,48 @@ fn projector_count_preflight_fails_loud_on_any_mismatch_never_silently_self_heal
 }
 
 #[test]
+fn windowed_stray_heal_runs_between_open_projectors_and_count_769() {
+    // #769 (live ping-pong, 3 gate refusals 2026-07-15): OBS's launch-restore can recreate a
+    // projector as a WINDOWED window (internal monitor = -1); OpenVideoMixProjector's
+    // CloseExistingProjectors replace loop matches GetMonitor()==target only, so the windowed
+    // stray is INVISIBLE to it and every ensure-open stacks one more window. The gate must
+    // self-heal the mechanical stray (keep the NEWEST window per kind -- the one ensure-open
+    // just opened on the proper monitor -- close older ones) BETWEEN ensure-open and the count
+    // check; the count check still hard-fails if the heal does not converge (a genuinely
+    // regressed config stays loud, #756).
+    let s = read(RECORDING_E2E);
+    assert!(
+        s.contains("lib/imag-projector-heal.sh") && s.contains("imag_projector_heal_cmds"),
+        "#769: recording-e2e.sh must source lib/imag-projector-heal.sh and run          imag_projector_heal_cmds on imag between open-projectors and the count check"
+    );
+    let open_idx = s
+        .find("imag-nb Multiview + Program projectors must be OPEN")
+        .expect("open-projectors preflight must exist");
+    let heal_idx = s
+        .find("imag_projector_heal_cmds")
+        .expect("the #769 heal call must exist");
+    let count_idx = s
+        .find("projector count must be EXACTLY 1 Multiview + 1 Program")
+        .expect("the #756 count preflight must exist");
+    assert!(
+        open_idx < heal_idx && heal_idx < count_idx,
+        "#769: heal must run AFTER ensure-open (so the newest window is the proper one to keep)          and BEFORE the count check (which stays the loud non-convergence backstop)"
+    );
+
+    let lib = read("scripts/lib/imag-projector-heal.sh");
+    assert!(
+        lib.contains("imag_projector_heal_cmds()"),
+        "#769: the lib must define imag_projector_heal_cmds()"
+    );
+    for needle in ["Projector - $kind", "tail -1", "wmctrl -i -c"] {
+        assert!(
+            lib.contains(needle),
+            "#769: heal snippet must enumerate projector windows per kind, keep the NEWEST              (highest id via sort | tail -1) and close the others (wmctrl -i -c) -- missing {needle:?}"
+        );
+    }
+}
+
+#[test]
 fn projector_count_preflight_runs_after_open_projectors_and_before_studio_mode() {
     let s = read(RECORDING_E2E);
     let open_idx = s
