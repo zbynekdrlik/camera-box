@@ -381,3 +381,19 @@ lets a stale copy silently shadow the intended genlock build (the mixed-version 
   (`distroav_dll_paths`) and FAILS if there is more than one, or the lone one is off canonical.
   Pinned in `vendor/README.md` as `canonical_plugin_path`. Do NOT remove the canonical copy —
   only ever clean a duplicate in a SHADOW path (and only after confirming which is canonical).
+
+## #786 — stream OBS A/V sync mimo o ~0.9s po štarte: ASIO launch race → audio buffering 960ms (sticky)
+
+libobs GLOBAL audio buffering is a one-way ratchet (grows on late audio, NEVER shrinks until OBS
+restart). On SOME stream-OBS launches the 'ASIO Input Capture' source on **VB-Matrix VASIO-8**
+floods stale audio in the ~1s window before **Dante Virtual Soundcard** finishes initializing →
+43× "adding 21 ms" in 0.9s → `Max audio buffering reached!` → 960ms, stuck for the whole session.
+Healthy launch = exactly ONE `adding 64 milliseconds` line, peak 64ms. Effect: audio +896ms vs
+normal → the operator's ~900ms genlock latency reads as ~2000ms-worth wrong; OBS restart with a
+clean launch restores it. **Launch-window only** — a 7h bad session showed ZERO further growth, so
+it cannot flip spontaneously mid-event; only a relaunch re-rolls the dice.
+
+**Diagnóza (10s):** v čerstvom logu `Select-String "Max audio buffering|total audio buffering"` —
+`960` = zlý štart (reštartuj OBS kým nie je 64ms); `64` = čistý. **Núdzová kompenzácia naživo bez
+reštartu:** genlock latency +~900ms (overené operátorom). Trvalý fix = launch-gate v
+`launch-obs-genlock.sh` (#786).
