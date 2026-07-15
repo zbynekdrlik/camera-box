@@ -586,6 +586,15 @@ GENLOCK_BACKUP_ROOT="/opt/obs-backup"
 LIBOBS_REAL="/usr/lib/x86_64-linux-gnu/libobs.so.30"
 DISTROAV_REAL="/usr/lib/x86_64-linux-gnu/obs-plugins/distroav.so"
 OBS_FRONTEND_REAL="/usr/bin/obs"
+# #756 (live wedge, 2026-07-15): libobs-opengl is a SEPARATE shared library
+# (vendor/obs-studio/libobs-opengl/CMakeLists.txt: add_library(libobs-opengl SHARED)) from
+# libobs.so.30 -- Fix B (the X11/EGL client-size cache, gl-x11-egl.c) lives entirely in it. It
+# was NEVER named in this hot-swap before, so every prior "successful" swap silently left the
+# PPA-stock (or an even older ad-hoc-deployed) libobs-opengl.so.30 in place while the
+# GENLOCK_BUILD_SHA.txt marker claimed the current dev HEAD was fully deployed -- live-confirmed
+# on imag-nb: the loaded file was dated 11 days stale, predating Fix B entirely, while a fresh
+# wedge was captured blocking in the EXACT call chain Fix B was supposed to have eliminated.
+LIBOBS_OPENGL_REAL="/usr/lib/x86_64-linux-gnu/libobs-opengl.so.30"
 
 command -v jq >/dev/null 2>&1 || apt-get install -y jq >/dev/null 2>&1 || fail "jq install failed (needed for #460 manifest verify)"
 
@@ -647,17 +656,20 @@ NEW_SHA="$(gh run view "$RUN_ID" --repo "$GENLOCK_REPO" --json headSha -q .headS
 [ -n "$NEW_SHA" ] || fail "could not read headSha for run $RUN_ID"
 
 NOOP_VALID=0
-if [ "$DEPLOYED_SHA" = "$NEW_SHA" ] && [ -f "$LIBOBS_REAL" ] && [ -f "$DISTROAV_REAL" ] && [ -f "$OBS_FRONTEND_REAL" ]; then
+if [ "$DEPLOYED_SHA" = "$NEW_SHA" ] && [ -f "$LIBOBS_REAL" ] && [ -f "$DISTROAV_REAL" ] && [ -f "$OBS_FRONTEND_REAL" ] && [ -f "$LIBOBS_OPENGL_REAL" ]; then
     NOOP_VALID=1
     # #472 defense-in-depth (PR #471 review, deliberately deferred): the SHA-marker + file
     # *existence* check above trusts the on-disk marker without re-verifying the installed
-    # BYTES. If the deployed libobs.so.30/distroav.so/bin-obs were ever silently reverted (e.g. an
-    # unattended `apt upgrade` slipping past the apt-mark hold, or manual tampering), a no-op
-    # re-run would wrongly report "already deployed" and skip re-swapping — the verify step's runtime
-    # log-verify would still catch it eventually, but only after a confusing failure. Re-verify
-    # the CURRENTLY INSTALLED files against the manifest cached locally on the LAST successful
-    # swap (pure local sha256 compare, zero network cost, only paid on the already-rare re-run
-    # path) and fall through to a fresh re-install on any mismatch.
+    # BYTES. If the deployed libobs.so.30/distroav.so/bin-obs/libobs-opengl.so.30 were ever
+    # silently reverted (e.g. an unattended `apt upgrade` slipping past the apt-mark hold, manual
+    # tampering, OR -- the #756 live incident this libobs-opengl.so.30 re-verify closes -- a
+    # PRIOR version of this very script that never named libobs-opengl.so.30 at all, so its bytes
+    # never changed while the marker kept claiming full deployment), a no-op re-run would wrongly
+    # report "already deployed" and skip re-swapping — the verify step's runtime log-verify would
+    # still catch it eventually, but only after a confusing failure. Re-verify the CURRENTLY
+    # INSTALLED files against the manifest cached locally on the LAST successful swap (pure local
+    # sha256 compare, zero network cost, only paid on the already-rare re-run path) and fall
+    # through to a fresh re-install on any mismatch.
     CACHED_MANIFEST="$GENLOCK_MARKER_DIR/BUNDLE_MANIFEST.json"
     if [ -f "$CACHED_MANIFEST" ]; then
         WANT_LIBOBS_SHA_CACHED="$(manifest_sha_for_path "$CACHED_MANIFEST" 'lib/x86_64-linux-gnu/libobs.so.30')"
@@ -666,8 +678,10 @@ if [ "$DEPLOYED_SHA" = "$NEW_SHA" ] && [ -f "$LIBOBS_REAL" ] && [ -f "$DISTROAV_
         GOT_DISTROAV_SHA_CACHED="$(sha256sum "$DISTROAV_REAL" | awk '{print $1}')"
         WANT_OBS_SHA_CACHED="$(manifest_sha_for_path "$CACHED_MANIFEST" 'bin/obs')"
         GOT_OBS_SHA_CACHED="$(sha256sum "$OBS_FRONTEND_REAL" | awk '{print $1}')"
+        WANT_LIBOBS_OPENGL_SHA_CACHED="$(manifest_sha_for_path "$CACHED_MANIFEST" 'lib/x86_64-linux-gnu/libobs-opengl.so.30')"
+        GOT_LIBOBS_OPENGL_SHA_CACHED="$(sha256sum "$LIBOBS_OPENGL_REAL" | awk '{print $1}')"
         if [ "$GOT_LIBOBS_SHA_CACHED" != "$WANT_LIBOBS_SHA_CACHED" ] || [ "$GOT_DISTROAV_SHA_CACHED" != "$WANT_DISTROAV_SHA_CACHED" ] \
-            || [ "$GOT_OBS_SHA_CACHED" != "$WANT_OBS_SHA_CACHED" ]; then
+            || [ "$GOT_OBS_SHA_CACHED" != "$WANT_OBS_SHA_CACHED" ] || [ "$GOT_LIBOBS_OPENGL_SHA_CACHED" != "$WANT_LIBOBS_OPENGL_SHA_CACHED" ]; then
             echo "  WARNING: installed genlock bytes do not match the cached manifest — forcing re-install"
             NOOP_VALID=0
         fi
@@ -699,8 +713,10 @@ else
     BUNDLE_LIBOBS="$GENLOCK_TMP/bundle/lib/x86_64-linux-gnu/libobs.so.30"
     FAST_DISTROAV="$GENLOCK_TMP/fast/distroav.so"
     BUNDLE_OBS="$GENLOCK_TMP/bundle/bin/obs"
+    BUNDLE_LIBOBS_OPENGL="$GENLOCK_TMP/bundle/lib/x86_64-linux-gnu/libobs-opengl.so.30"
     [ -f "$FAST_DISTROAV" ] || fail "distroav-linux-fast-so missing distroav.so"
     [ -f "$BUNDLE_OBS" ] || fail "bundle missing bin/obs (#499: the frontend executable)"
+    [ -f "$BUNDLE_LIBOBS_OPENGL" ] || fail "bundle missing lib/x86_64-linux-gnu/libobs-opengl.so.30 (#756: the X11/EGL client-size cache Fix B lives in this SEPARATE library)"
     [ -f "$GENLOCK_TMP/bundle/BUNDLE_MANIFEST.json" ] || fail "bundle missing BUNDLE_MANIFEST.json (#120)"
     MANIFEST="$GENLOCK_TMP/bundle/BUNDLE_MANIFEST.json"
 
@@ -713,6 +729,13 @@ else
     # empty — live-verified with a minimal repro during review of this exact PR.
     WANT_LIBOBS_SHA="$(manifest_sha_for_path "$MANIFEST" 'lib/x86_64-linux-gnu/libobs.so.30')"
     verify_file_sha "$BUNDLE_LIBOBS" "$WANT_LIBOBS_SHA" "bundle libobs.so.30"
+    # #756: libobs-opengl.so.30 is a SEPARATE library from libobs.so.30 (its own CMake SHARED
+    # target) that carries the Fix B X11/EGL client-size cache — it has its OWN manifest entry
+    # (confirmed live: BUNDLE_MANIFEST.json already lists lib/x86_64-linux-gnu/libobs-opengl.so.30
+    # even before this fix, because the bundle stage already copies the full OBS rundir — only the
+    # DEPLOY side ever missed it), verify it the same way.
+    WANT_LIBOBS_OPENGL_SHA="$(manifest_sha_for_path "$MANIFEST" 'lib/x86_64-linux-gnu/libobs-opengl.so.30')"
+    verify_file_sha "$BUNDLE_LIBOBS_OPENGL" "$WANT_LIBOBS_OPENGL_SHA" "bundle libobs-opengl.so.30"
     # distroav.so has NO manifest of its own in the distroav-linux-fast-so artifact (it ships only
     # DISTROAV_BUILD_SHA.txt — a commit id, not a content hash) — cross-check it against the
     # BUNDLE's manifest entry for the SAME file instead (both jobs build distroav.so from the
@@ -741,6 +764,7 @@ else
         mkdir -p "$STOCK_BACKUP"
         [ -f "$LIBOBS_REAL" ] && cp -a "$LIBOBS_REAL" "$STOCK_BACKUP/libobs.so.30"
         [ -f "$DISTROAV_REAL" ] && cp -a "$DISTROAV_REAL" "$STOCK_BACKUP/distroav.so"
+        [ -f "$LIBOBS_OPENGL_REAL" ] && cp -a "$LIBOBS_OPENGL_REAL" "$STOCK_BACKUP/libobs-opengl.so.30"
     fi
     if [ ! -f "$OBS_FRONTEND_STOCK_BACKUP" ]; then
         [ -f "$OBS_FRONTEND_REAL" ] && cp -a "$OBS_FRONTEND_REAL" "$OBS_FRONTEND_STOCK_BACKUP"
@@ -750,17 +774,22 @@ else
     [ -f "$LIBOBS_REAL" ] && cp -a "$LIBOBS_REAL" "$PREV_BACKUP/libobs.so.30"
     [ -f "$DISTROAV_REAL" ] && cp -a "$DISTROAV_REAL" "$PREV_BACKUP/distroav.so"
     [ -f "$OBS_FRONTEND_REAL" ] && cp -a "$OBS_FRONTEND_REAL" "$PREV_BACKUP/obs"
+    [ -f "$LIBOBS_OPENGL_REAL" ] && cp -a "$LIBOBS_OPENGL_REAL" "$PREV_BACKUP/libobs-opengl.so.30"
     [ -n "$DEPLOYED_SHA" ] && echo "$DEPLOYED_SHA" > "$PREV_BACKUP/GENLOCK_BUILD_SHA.txt"
 
     install -m 0644 -o root -g root "$BUNDLE_LIBOBS" "$LIBOBS_REAL" || fail "libobs.so.30 hot-swap install failed"
     install -m 0644 -o root -g root "$FAST_DISTROAV" "$DISTROAV_REAL" || fail "distroav.so hot-swap install failed"
     install -m 0755 -o root -g root "$BUNDLE_OBS" "$OBS_FRONTEND_REAL" || fail "frontend obs hot-swap install failed (#499)"
+    install -m 0644 -o root -g root "$BUNDLE_LIBOBS_OPENGL" "$LIBOBS_OPENGL_REAL" || fail "libobs-opengl.so.30 hot-swap install failed (#756)"
     ldconfig
 
     # SONAME sanity check (no `-q` on a piped external command under pipefail — same early-close
     # SIGPIPE footgun documented for the step-4 ldconfig check; read the full small output instead).
     readelf -d "$LIBOBS_REAL" 2>/dev/null | grep 'SONAME.*\[libobs\.so\.30\]' >/dev/null \
         || fail "post-swap libobs.so.30 SONAME check failed — refuse a mismatched ABI"
+    # #756: same SONAME sanity check for the newly-swapped libobs-opengl.so.30.
+    readelf -d "$LIBOBS_OPENGL_REAL" 2>/dev/null | grep 'SONAME.*\[libobs-opengl\.so\.30\]' >/dev/null \
+        || fail "post-swap libobs-opengl.so.30 SONAME check failed — refuse a mismatched ABI (#756)"
 
     # #499 post-swap build-proof: the stock PPA frontend never references
     # obs_display_set_render_divisor (the #276/#278/#293 multiview render-budget decouple symbol)

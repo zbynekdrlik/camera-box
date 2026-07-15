@@ -485,11 +485,11 @@ fn setup_imag_manifest_lookup_never_inlined_in_multi_arg_call() {
         );
     }
     assert_eq!(
-        call_lines, 6,
-        "{SETUP}: expected exactly 6 manifest_sha_for_path call sites — the install-time verify \
-         (libobs.so.30 + distroav.so + #499 bin/obs) PLUS the #472 no-op re-verify (same three \
-         files, looked up again from the CACHED manifest) — found {call_lines}; update this test \
-         if the call count genuinely changed"
+        call_lines, 8,
+        "{SETUP}: expected exactly 8 manifest_sha_for_path call sites — the install-time verify \
+         (libobs.so.30 + distroav.so + #499 bin/obs + #756 libobs-opengl.so.30) PLUS the #472 \
+         no-op re-verify (same four files, looked up again from the CACHED manifest) — found \
+         {call_lines}; update this test if the call count genuinely changed"
     );
 }
 
@@ -2730,7 +2730,7 @@ fn setup_imag_enables_and_verifies_satellite_service_731() {
 // hot-swap up to and including today's GENLOCK_BUILD_SHA.txt marker silently left the ORIGINAL
 // (July 4, pre-Fix-B) libobs-opengl.so.30 in place on imag-nb -- the SHA marker claimed the
 // current dev HEAD was deployed while the actual loaded library was 11 days stale. A fresh wedge
-// was captured live (06:12, 2026-07-15) blocking in the EXACT xcb_wait_for_reply <- 
+// was captured live (06:12, 2026-07-15) blocking in the EXACT xcb_wait_for_reply <-
 // get_window_geometry call chain Fix B was supposed to have eliminated -- direct proof the
 // deployed bytes never changed. Mirrors the #499 frontend-binary fix exactly (same shape: a
 // SEPARATE artifact silently excluded from the swap loop).
@@ -2749,7 +2749,9 @@ fn setup_imag_hotswaps_libobs_opengl_756() {
          the hot-swap 'succeeds' and updates its SHA marker."
     );
     assert!(
-        body.contains(r#"BUNDLE_LIBOBS_OPENGL="$GENLOCK_TMP/bundle/lib/x86_64-linux-gnu/libobs-opengl.so.30""#),
+        body.contains(
+            r#"BUNDLE_LIBOBS_OPENGL="$GENLOCK_TMP/bundle/lib/x86_64-linux-gnu/libobs-opengl.so.30""#
+        ),
         "{SETUP} must resolve the bundle's libobs-opengl.so.30 path -- the genlock bundle \
          (obs-genlock-linux-x86_64) already carries it (confirmed live in \
          /opt/obs-genlock/BUNDLE_MANIFEST.json: lib/x86_64-linux-gnu/libobs-opengl.so.30)"
@@ -2826,7 +2828,9 @@ fn setup_imag_previous_backup_covers_libobs_opengl_756() {
 fn setup_imag_installs_libobs_opengl_with_library_perms_756() {
     let body = read(SETUP);
     assert!(
-        body.contains(r#"install -m 0644 -o root -g root "$BUNDLE_LIBOBS_OPENGL" "$LIBOBS_OPENGL_REAL""#),
+        body.contains(
+            r#"install -m 0644 -o root -g root "$BUNDLE_LIBOBS_OPENGL" "$LIBOBS_OPENGL_REAL""#
+        ),
         "{SETUP} must `install -m 0644` libobs-opengl.so.30 -- a shared library (like \
          libobs.so.30/distroav.so), not an executable"
     );
