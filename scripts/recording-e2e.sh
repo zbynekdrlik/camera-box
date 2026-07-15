@@ -2333,9 +2333,14 @@ fi
 # the uniform ~10-17-pairs-per-30s-segment pattern (#757's own auto-pin/margin mechanism has
 # been ruled OUT — the pattern persists with it fully disabled and static pins restored).
 # LIVE_FREEZE_WATCH=0 lets a bisect run disable ONLY this mechanism (nothing else) to test that
-# hypothesis directly. Default stays 1 (the safety feature stays ON) -- this is an opt-out for
-# ONE diagnostic run, never a permanent disable.
-LIVE_FREEZE_WATCH="${LIVE_FREEZE_WATCH:-1}"
+# hypothesis directly.
+#
+# #757 TEMPORARY (2026-07-15): default flipped to 0 for EXACTLY the coordinator's requested
+# kill-shot acceptance run -- this is a ONE-RUN diagnostic default, not a permanent disable of
+# the #758 safety feature. MUST be flipped back to 1 (or the whole knob deleted, keeping the
+# watch unconditionally on) in the VERY NEXT commit once this run's evidence is read, whichever
+# way the bisect result points.
+LIVE_FREEZE_WATCH="${LIVE_FREEZE_WATCH:-0}"
 FREEZE_WATCH_PID_FILE="$OUTDIR/freeze-watch.pid"
 FREEZE_WATCH_POISON_FILE="$OUTDIR/freeze-watch-poison.txt"
 if [ "$LIVE_FREEZE_WATCH" = "1" ] && [ "${ALL_CAMBOX:-0}" = "1" ]; then
