@@ -5322,3 +5322,66 @@ vendored `obs-source.c` release-cadence fix (#726 candidate A).
   adjacent anywhere in the body. Comment posted on #756.
 - **PR #704 NOT merged (still)** — same pre-existing #707/#689/#741/#588-class blockers as prior
   cycles, none from this batch. Honest hold, no bypass, no admin-merge.
+
+## 2026-07-15 — #756 (cadence floor + libobs-opengl deploy fix, closed) + #762 (logging diet, closed)
+
+- **#756 Member 1** — hard cadence floor for the #278/#293 adaptive multiview budget gate.
+  `test(#756): RED 2018dfca4` / `fix(#756): GREEN 22fa09548`. `obs_display_should_skip()` gains
+  a `frame_counter` param; unconditionally skips a throttleable display when
+  `frame_counter % render_divisor != 0`, regardless of measured cost — closes the gap where a
+  MV render cheap enough to always fit under budget (post earlier Fix B) never actually halved,
+  because the old adaptive-only gate almost never fired. Lock-step (#269 rule) updated in
+  tests/genlock_preload.rs + both windows-genlock*.yml. `tests/obs_display_budget.rs` C-harness
+  RED→GREEN: light display renders exactly ticks/divisor (was every tick), over-budget display
+  still never starves, program never throttled.
+- **#756 Member 2** — genlock hot-swap gap found live: `libobs-opengl.so.30` (a SEPARATE shared
+  library carrying the earlier session's Fix B, gl-x11-egl.c X11-round-trip cache) was NEVER
+  named in `scripts/setup-imag.sh`'s hot-swap — every prior "successful" swap silently left it
+  up to 11 days stale (live-confirmed: deployed file dated Jul 4, predating Fix B entirely, a
+  fresh wedge captured 06:12 in the EXACT call chain Fix B was meant to eliminate).
+  `test(#756): RED 4b9c24106` / `fix(#756): GREEN 2789f46c8` — mirrors the #499 frontend-binary
+  precedent (name the real path, verify via manifest, backup, install, SONAME-check). Deployed +
+  byte-verified to imag/strih/stream, parity confirmed on `2789f46c8`.
+  Also fixed live (found while deploying): `imag-obs-watchdog.py`'s `relaunch_obs()` never
+  cleared OBS's own crash-recovery `.sentinel` markers before relaunching a dead OBS -> every
+  tier-a auto-relaunch hung at "Crash or unclean shutdown detected". Script had NO git-tracked
+  source anywhere; now tracked + fixed in `docs(#756): bb14751ec`. Filed #764 for wiring it into
+  setup-imag.sh provisioning (separate scope, not done here).
+  Chasing a coordinator-reported fresh wedge mid-batch also surfaced a THIRD, unrelated
+  regression: a parallel user-directed change (#761, kept) switched strih's "MV Cam N" scenes to
+  same-source, disabling the old "MV NDI camN" low-bandwidth clones the #758 frozen-camera
+  preflight/sender-bounce-reverify/freeze-watch were still probing — always read FROZEN
+  regardless of camera health. `fix(#756): d687fad4c` switches strih's probe target to the main
+  "NDI camN" inputs (safe: the built-in OBS Multiview grid projector keeps them always-rendering
+  regardless of program/preview state); imag keeps the clone model (#763 tracks unifying later).
+  `strih_mv_scenes.py`'s `reattach()` retargeted to match.
+  Live verification: imag sustained 60.0fps / 0 new render-skips / ~2.1-2.5ms render time (was
+  ~10ms pre-fix) over a 30s+ window; strih (coordinator-verified post their own restart)
+  30.00fps/17.82ms/0.03% skips with the real built-in Multiview projector open. Full-path E2E
+  acceptance run (verdict `2012611359`): imag optical duplicates 0.000-0.002 density
+  (`imag_optical_beat_pass=true`), `real_drops=0` across every node, imag continuity
+  `overall_pass=true`. **#756 closed** with this evidence — the remaining verdict reds
+  (cross-camera delivery spread / cam7 A/V offset, strih CAM2/CAM6 residual undecodable) are a
+  different, pre-existing calibration/pin-tuning domain the coordinator owns separately.
+- **#762** — cam appliance log storm (50MB /var/log tmpfs fills in ~2.5 days -> rsyslog
+  write-error feedback loop burns 40%+ CPU -> camera-box send path starves -> NDI delivery
+  timing drifts, ~14%-class imag optical duplicates). Permanent fix: purge (not mask) rsyslog +
+  cap journald `RuntimeMaxUse=20M` in both provisioners (new `scripts/lib/log-diet.sh`,
+  `feat(#762): a58ecf674`), a `verify-device.sh` (u) check (with a same-commit fix for the (u)
+  regressing the pre-existing (s) logrotate check once rsyslog is genuinely purged — `#679` is
+  now correctly read as "superseded" rather than falsely failing, `fix(#762): 3c95fbf13`), and a
+  new `[0/8]` fleet preflight item in `scripts/lib/preflight-fleet-check.sh` (disk >=80% or
+  rsyslogd/journald CPU >=20% = loud named FAIL, catchable before the tmpfs even fills).
+  Applied live to all 7 cam boxes (rsyslog purged + journald capped, verified via
+  `verify-device.sh` on every box). **#762 closed** against its own stated acceptance bar, same
+  E2E verdict `2012611359`: cam1 delivery p50 = 58.7ms (target ~71ms, well inside),
+  imag optical duplicates = 0.027% (target <=3%).
+- Full `cargo test` green throughout (145 binaries, default features), `pytest tests/python/`
+  green (512 tests), fmt/clippy clean at every commit.
+- **PR #704 NOT merged** — acceptance run `2012611359` still `overall_pass=false` on
+  cross-camera delivery-spread/cam7-A/V-offset + strih CAM2/CAM6 residual undecodable, both
+  OUTSIDE #756/#762's scope. Coordinator is finishing those directly on the rig (pin
+  re-equalization, a strih scene reorder + OBS restart, an imag same-source retest) and will
+  re-trigger the gate. PR body updated with a status section; #756/#762 closed directly (with
+  evidence) rather than via this PR's merge, since their own scoped deliverables are
+  independently complete and live-verified.

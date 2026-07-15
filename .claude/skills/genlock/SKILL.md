@@ -1297,3 +1297,99 @@ budget for the possibility of a wedge-reboot** (the watchdog's alarm-only mode, 
 won't auto-reboot out from under you — but the render-thread stall itself still happened and still
 degraded whatever you were trying to measure). Never assume "just attaching + reading a few
 frames" is free on a box with an active wedge-reboot watchdog.
+
+## GOTCHA — `libobs-opengl.so.30` is a SEPARATE deploy artifact from `libobs.so.30` on imag's Linux hot-swap; it was silently excluded for 11+ days (#756, 2026-07-15)
+
+`vendor/obs-studio/libobs-opengl/CMakeLists.txt` builds `libobs-opengl` as its OWN
+`add_library(... SHARED)` target — a genuinely separate `.so` from `libobs.so.30`, even though
+both live under the same `vendor/obs-studio/` tree and both get produced by the SAME
+`linux-genlock.yml` build (the bundle stage copies the FULL `cmake --install` rundir, so
+`libobs-opengl.so.30` is ALWAYS correctly present in `BUNDLE_MANIFEST.json` — this was a pure
+DEPLOY-script gap, never a build gap). `scripts/setup-imag.sh`'s genlock hot-swap (step 12,
+since #460/#499) only ever named `LIBOBS_REAL`/`DISTROAV_REAL`/`OBS_FRONTEND_REAL` — so a change
+confined to `vendor/obs-studio/libobs-opengl/*.c` (e.g. #756 Fix B, the X11/EGL client-size
+cache in `gl-x11-egl.c`) could ship, build clean, get "deployed" (the SHA marker updates,
+`NOOP_VALID` reports success), and STILL never actually reach imag — live-confirmed: the loaded
+file was dated 11 days stale while `GENLOCK_BUILD_SHA.txt` claimed the current dev HEAD. Fixed
+in #756 (`2789f46c8`): `LIBOBS_OPENGL_REAL="/usr/lib/x86_64-linux-gnu/libobs-opengl.so.30"` is
+now a 4th swapped component with the SAME manifest-verify/backup/install/SONAME-check treatment
+as the other three, and the #472 no-op re-verify re-hashes it too. **The lesson for any FUTURE
+Linux-side vendored-OBS change:** before assuming a change is covered by the existing hot-swap,
+check WHICH `.so`/binary the touched file compiles into (`grep -rn "add_library\|add_executable"
+vendor/obs-studio/**/CMakeLists.txt`) and confirm that exact output path is named in
+`scripts/setup-imag.sh`'s step 12 — do not assume "it's under vendor/obs-studio, the hot-swap
+must cover it".
+
+## GOTCHA — OBS's own crash-recovery `.sentinel` clearing is needed for the LINUX watchdog's auto-relaunch too, not just the Windows launch wrapper (#756, 2026-07-15)
+
+The Windows `launch-obs-genlock.sh` wrapper has always cleared `%APPDATA%\obs-studio\.sentinel\*`
+before relaunching (documented earlier in this file). `imag-obs-watchdog.py`'s tier-a
+`relaunch_obs()` (the auto-relaunch-a-dead-OBS recovery path) never had the Linux equivalent —
+it always launches a fresh `/usr/bin/obs --disable-shutdown-check` WITHOUT first clearing
+`~/.config/obs-studio/.sentinel/*`. A tier-a relaunch follows a DEAD obs process — by
+construction never a clean exit — so the crashed run's sentinel is ALWAYS still present, and
+OBS's own crash-recovery check hangs the freshly-launched process at `"Crash or unclean shutdown
+detected"` in its log (near-idle CPU, no further progress) instead of actually starting. Live-hit
+during #756's own hot-swap (which SIGKILLs the old process before installing new bytes): the
+watchdog's own auto-relaunch attempt hung exactly this way, `ws_up: false` in its own alarm
+record. Fixed by adding a `clear_obs_sentinels()` step to `relaunch_obs()` (glob + best-effort
+remove, never blocking the relaunch attempt on a removal failure). `scripts/imag-obs-watchdog.py`
+is now tracked in git for the first time — read it there, not on the box, when investigating this
+class of issue. **If you ever manually SIGKILL/kill OBS on imag (or any box) as part of a
+hot-swap/investigation, always clear the sentinel before the NEXT launch — whether you relaunch
+by hand or let the watchdog do it.**
+
+## GOTCHA — a Windows OBS "Projector" window is a THREAD of the SAME obs64.exe process, not a separate PID; killing it by title-matched PID kills OBS itself (2026-07-15)
+
+`Get-Process | Where-Object {$_.MainWindowTitle -like "*Projector*"}` on a Windows OBS box can
+return a PID whose `MainWindowTitle` happens to be `"Projector - Program"`/`"Projector -
+Multiview"` at that instant — but that PID is `obs64.exe`'s OWN process id (its main window
+handle just currently reports the LAST-focused/foreground window's title, which can be a
+projector). `Stop-Process -Id <that PID> -Force` therefore SIGKILLs the whole OBS process, not
+just the projector window — live-confirmed on strih (2026-07-15): killing what looked like a
+stray "Projector - Program" window actually crashed OBS entirely, which AHK then auto-respawned
+(racing a separate manual relaunch attempt into a genuine two-obs64-instances collision).
+**Never target a Windows OBS projector for closure by PID from a title match.** To close ONLY a
+projector window (never the OBS process), drive it through OBS WebSocket / the UI (there is no
+`CloseProjector` RPC in obs-websocket v5 as of this writing — closing a specific projector
+window is a UI-only action, e.g. Alt+F4 while it has focus, or just leave it open) rather than a
+blind `Stop-Process` on any PID discovered via a window-title search.
+
+## GOTCHA — OBS's BUILT-IN Multiview grid PROJECTOR and a user-created SCENE literally named "Multiview" are two UNRELATED things — do not conflate them (2026-07-15)
+
+`OpenVideoMixProjector {videoMixType: OBS_WEBSOCKET_VIDEO_MIX_TYPE_MULTIVIEW}` opens OBS's
+BUILT-IN system feature — a grid of THUMBNAILS of every scene, rendered continuously while the
+projector window is open, independent of program/preview state (this is what the render-divisor
+cadence floor #278/#293/#756 all throttle). strih ALSO happens to have a hand-built SCENE named
+literally `"Multiview"` (#730 — a plain scene whose items reference other scenes, used to feed a
+physical camera-operator monitor) — a COMPLETELY SEPARATE object that only renders when IT is
+shown (via `OpenSourceProjector {sourceName: "Multiview"}`, or being on program/preview itself).
+Opening a projector of the SCENE named "Multiview" does NOT engage the built-in Multiview
+system feature, and vice versa — confirmed live: reopening the built-in Multiview grid after an
+OBS restart does NOT require (and is unrelated to) the "Multiview" scene's own projector. If you
+need "every camera input to stay actively rendering regardless of program/preview" (the
+liveness-probe precondition several #758 mechanisms rely on), that's the BUILT-IN Multiview grid
+projector (`OBS_WEBSOCKET_VIDEO_MIX_TYPE_MULTIVIEW`) — the operator's physical monitor feed (the
+"Multiview" SCENE) is a separate, unrelated concern. The projector's real window title for the
+built-in feature is exactly `"Projector - Multiview"`.
+
+## strih per-camera liveness probe target is PER-BOX and has changed convention twice (#758→#761→#763) — check the CURRENT wiring before reusing this pattern elsewhere
+
+`recording-e2e.sh`'s three #758 camera-liveness mechanisms ([1/8] preflight,
+`preflight_mv_reverify` sender-bounce reverify, the in-run freeze watch) all probe strih over
+`frozen-camera-gate.py --sources`. **As of #756/#761 (2026-07-15) this probes the MAIN
+`"NDI camN"` inputs on strih** (`strih_mv_scenes.py --reattach` matches: it re-applies the MAIN
+input's own `ndi_source_name`). This works with NO `--warm-settle` (still passed `0`, i.e.
+warm-up disabled) because the built-in OBS Multiview grid projector — see the GOTCHA above —
+keeps every "Cam N" scene, and hence its "NDI camN" input, continuously rendering regardless of
+program/preview state, as long as that projector stays open (the rig's normal/expected state).
+This SUPERSEDES the original #758 design (probing the low-bandwidth `"MV NDI camN"` clone
+twins, #730) — those clone scene-items were disabled then REMOVED from strih's "MV Cam N"
+scenes entirely (a user-directed same-source switch, #761, KEPT — do not re-enable them).
+**imag is DIFFERENT and still uses the clone model** (full 1080p×7 doesn't fit its render
+budget) — #763 tracks unifying the two boxes onto one model later; there is no existing
+imag-hosted frozen-camera-gate call site as of this writing, but if one is ever added it must
+target the clones, not the mains, mirroring strih's own split. Before reusing/extending ANY of
+these three mechanisms, re-verify which convention is currently wired on the target box —
+`GetSceneItemList {sceneName: "MV Cam N"}` / a live `GetInputSettings` on the "MV NDI camN"
+input's `ndi_source_name` will tell you which mode is currently live.
