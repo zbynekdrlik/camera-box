@@ -109,6 +109,21 @@ fn build_onimag_command_produces_a_safely_quoted_command() {
         cmd.contains("--imag") && cmd.contains("--out"),
         "#462: the on-imag command must forward the --imag/--out args. Got: {cmd:?}"
     );
+    // #767 follow-up (live stutter, 2026-07-15 ~18:10): the on-imag decode ran UNTHROTTLED at
+    // 313% CPU (+ its ffmpeg child) alongside production OBS (~400% -- with keep-alive ALL 16
+    // NDI receivers decode continuously), driving load to 27 on a 16-thread box; the starved
+    // NDI decode threads made every source stutter on the projection while the compositor still
+    // reported 60fps. The decode is a BATCH job: it must run nice -n 19 and pinned to cores
+    // 12-15 -- fully OFF the cores OBS is pinned to (taskset -c 2-11 in the watchdog/systemd-run
+    // launch), so it can never compete with the production render/decode again.
+    assert!(
+        cmd.contains("nice -n 19"),
+        "#767: the on-imag decode must run at nice 19 (batch priority). Got: {cmd:?}"
+    );
+    assert!(
+        cmd.contains("taskset -c 12-15"),
+        "#767: the on-imag decode must be pinned OFF the OBS cores (2-11) onto 12-15. Got: {cmd:?}"
+    );
     // The space-containing path must be safely quoted (bash %q either backslash-escapes the
     // space or single-quotes the whole token) — re-running the printed command line through bash
     // must reproduce the exact original argument, proving the quoting round-trips.
