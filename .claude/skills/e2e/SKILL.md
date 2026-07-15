@@ -2336,8 +2336,12 @@ above it) — 50 is the gentlest scroll possible; persisted in
 
 ## GOTCHA — latentná GRUB zmena sa aktivuje až REBOOTOM; isolcpus = single-core OBS (#784, 2026-07-15)
 
-`/etc/default/grub.d/98-imag-isolation.cfg` (isolcpus=2-11, z #484 experimentu 4.7.) spal 11 dní a
-prvý tvrdý reboot ho aktivoval: **isolcpus jadrá plánovač nebalancuje**, takže OBS s
+`/etc/default/grub.d/98-imag-isolation.cfg` (isolcpus=2-11, z #484 experimentu 4.7.). KOREKCIA
+PO OVERENÍ BOOT HISTÓRIE: izolácia bola AKTÍVNA minimálne od 14.7. 21:31 (boot -5..-2 všetky s
+isolcpus v cmdline) — box na nej "fungoval" celé dni, lebo ľahká architektúra (klonové MV bunky +
+spiace mains) sa zmestila na JEDNO 4,5 GHz jadro a všetky metriky vyzerali zdravo. Kolaps
+neprišiel aktiváciou míny rebootom, ale KOMBINÁCIOU: studený štart všetkých prijímačov na jednom
+jadre (relock búrka) + následný same-source pokus (7×fullHD decode na to isté jadro). **isolcpus jadrá plánovač nebalancuje**, takže OBS s
 `taskset -c 2-11` skončil s ~200 vláknami na JEDNOM jadre (cpu2) — full-bw NDI decode padol na
 ~24 fps/kameru, SDK fronta narástla na ~2 s lag; low-bw klony (lacný decode) pritom išli 60 fps.
 Sieť/hodiny/GL/render metriky boli ČISTÉ — jediné priame tely: (1) `ps -L -o tid,comm,psr` →
