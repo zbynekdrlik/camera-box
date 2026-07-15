@@ -124,22 +124,52 @@ Start-Sleep -Seconds 3
 #     fully decided in the first seconds and is visible in the fresh log, so gate + redraw here.
 #     THRESHOLD = 100 ms: the box's own measured STANDARD is 64 ms (every clean retained launch
 #     2026-07-11..15; a few days show 85 ms), so 100 = norm + small headroom. The user's rule:
-#     OBS must never come up with more than the standard draw -- a "small" 200 ms pass would
-#     already be a visible lip-sync shift vs the operator's calibrated latency baseline.
+#     OBS must never come up with more than the standard draw.
 #     NB fail-open asymmetry: an empty/absent log reads as peak 0 = "AUDIO OK" here, but step (4)
 #     below fails CLOSED (exit 1) on the same missing log, so a silent overall pass is impossible.
 \$logDir = "\$env:APPDATA\\obs-studio\\logs"
+function Get-BufDraw {
+  \$l = Get-ChildItem \$logDir -Filter *.txt | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+  \$t = if (\$l) { Get-Content \$l.FullName -Raw } else { "" }
+  \$pk = 0
+  foreach (\$m in [regex]::Matches([string]\$t, 'total audio buffering is now (\\d+) milliseconds')) {
+    \$v = [int]\$m.Groups[1].Value; if (\$v -gt \$pk) { \$pk = \$v }
+  }
+  [pscustomobject]@{ Peak = \$pk; Maxed = ([string]\$t -match 'Max audio buffering reached') }
+}
+# If the box's shortcut is the #786 GUARDED launcher (obs-guarded-launch.ps1 -- the retargeted
+# "OBS Studio.lnk"), the ON-BOX script owns the kill+redraw. Running a SECOND redraw loop here
+# would race it (double kill -> possible double obs64). So: guarded shortcut -> VERIFY-ONLY wait
+# (up to 180 s for the on-box redraws to settle clean), else -> this wrapper's own redraw loop.
+\$guardedLnk = \$false
+if (Test-Path \$lnk) {
+  \$lnkArgs = (New-Object -ComObject WScript.Shell).CreateShortcut(\$lnk).Arguments
+  if ([string]\$lnkArgs -match 'obs-guarded-launch\\.ps1') { \$guardedLnk = \$true }
+}
+if (\$guardedLnk) {
+  Write-Host "#786: guarded shortcut detected -- the on-box launcher owns the redraw; verify-only here."
+  \$bufOk = \$false
+  \$deadline = (Get-Date).AddSeconds(180)
+  while ((Get-Date) -lt \$deadline) {
+    Start-Sleep -Seconds 10
+    \$d = Get-BufDraw
+    if (\$d.Peak -le 100 -and -not \$d.Maxed) { \$bufOk = \$true; break }
+  }
+  \$d = Get-BufDraw
+  if (\$bufOk -and \$d.Peak -le 100 -and -not \$d.Maxed) {
+    Write-Host "AUDIO OK: buffering peak \$(\$d.Peak) ms -- clean draw via the on-box guard (#786)."
+  } else {
+    Write-Error "#786 FAIL: audio buffering still \$(\$d.Peak) ms (maxed=\$(\$d.Maxed)) after the on-box guard's redraws -- A/V sync would be off. Investigate the ASIO devices (VB-Matrix VASIO-8 / Dante VSC) before trusting this box."
+    exit 7
+  }
+} else {
 \$maxLaunchAttempts = 3
 \$ahkStopped = \$false
 for (\$attempt = 1; \$attempt -le \$maxLaunchAttempts; \$attempt++) {
   Start-Sleep -Seconds 10   # ASIO starts right after module load; a bad burst completes within ~5 s
-  \$audioLog  = Get-ChildItem \$logDir -Filter *.txt | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-  \$audioText = if (\$audioLog) { Get-Content \$audioLog.FullName -Raw } else { "" }
-  \$bufPeak = 0
-  foreach (\$m in [regex]::Matches(\$audioText, 'total audio buffering is now (\\d+) milliseconds')) {
-    \$v = [int]\$m.Groups[1].Value; if (\$v -gt \$bufPeak) { \$bufPeak = \$v }
-  }
-  \$bufMaxed = \$audioText -match 'Max audio buffering reached'
+  \$d = Get-BufDraw
+  \$bufPeak = \$d.Peak
+  \$bufMaxed = \$d.Maxed
   if ((-not \$bufMaxed) -and \$bufPeak -le 100) {
     Write-Host "AUDIO OK: buffering peak \${bufPeak} ms -- clean ASIO launch draw (#786 gate)."
     break
@@ -178,6 +208,7 @@ if (\$ahkStopped) {
   \$ahkLnk = Get-ChildItem "\$env:APPDATA\\Microsoft\\Windows\\Start Menu\\Programs\\Startup" -Filter "*NL_STARTUP*" -ErrorAction SilentlyContinue | Select-Object -First 1
   if (\$ahkLnk) { Start-Process -FilePath \$ahkLnk.FullName; Write-Host "#786: AHK watchdog restarted (\$(\$ahkLnk.Name))." }
   else { Write-Warning "#786: AHK was stopped for the redraw but no NL_STARTUP startup shortcut found -- restart it manually." }
+}
 }
 
 # (4) VERIFY the fresh OBS log shows the genlock render tick ENABLED (the #257 build-default proof --

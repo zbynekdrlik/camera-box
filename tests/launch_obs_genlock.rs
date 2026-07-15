@@ -171,6 +171,13 @@ fn program_gates_on_audio_buffering_and_redraws_786() {
         p.contains("Stop-Process -Name AutoHotkey64") && p.contains("$ahkStopped"),
         "#786: the redraw must stop AHK first and restart it after the loop. Program:\n{p}"
     );
+    // On a box whose shortcut IS the on-box guarded launcher (obs-guarded-launch.ps1), the wrapper
+    // must DELEGATE — verify-only, never a second concurrent redraw loop (double kill would race
+    // the on-box guard into two obs64 instances).
+    assert!(
+        p.contains("obs-guarded-launch") && p.contains("$guardedLnk"),
+        "#786: a guarded shortcut must switch the wrapper to verify-only delegation. Program:\n{p}"
+    );
 }
 
 /// The FINAL verdict gates exit 0 on the render tick being ENABLED (the genlock build proof) and
