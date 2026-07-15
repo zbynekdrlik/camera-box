@@ -2324,9 +2324,21 @@ fi
 # switched to same-source), so this watch probes the MAIN "NDI cam<N>" inputs instead, kept
 # always-active by the built-in OBS Multiview grid projector. See #763 for imag's separate
 # clone-based model.
+#
+# #757 DIAGNOSTIC KNOB (2026-07-15, temporary, bisecting the uniform copies≈gaps regression):
+# this watch's per-poll-cycle work is 7 sources x 3 samples x GetSourceScreenshot on strih's
+# FULL-RES main inputs (frozen-camera-gate.py's _capture_timelines) -- GetSourceScreenshot is a
+# KNOWN synchronous graphics-thread stall on the requested source. Roughly one screenshot every
+# ~2s throughout the ENTIRE recording window is a plausible periodic-disturbance mechanism for
+# the uniform ~10-17-pairs-per-30s-segment pattern (#757's own auto-pin/margin mechanism has
+# been ruled OUT — the pattern persists with it fully disabled and static pins restored).
+# LIVE_FREEZE_WATCH=0 lets a bisect run disable ONLY this mechanism (nothing else) to test that
+# hypothesis directly. Default stays 1 (the safety feature stays ON) -- this is an opt-out for
+# ONE diagnostic run, never a permanent disable.
+LIVE_FREEZE_WATCH="${LIVE_FREEZE_WATCH:-1}"
 FREEZE_WATCH_PID_FILE="$OUTDIR/freeze-watch.pid"
 FREEZE_WATCH_POISON_FILE="$OUTDIR/freeze-watch-poison.txt"
-if [ "${ALL_CAMBOX:-0}" = "1" ]; then
+if [ "$LIVE_FREEZE_WATCH" = "1" ] && [ "${ALL_CAMBOX:-0}" = "1" ]; then
   FREEZE_WATCH_SOURCES=""
   for _n in 1 2 3 4 5 6 7; do
     case " ${PREFLIGHT_EXCLUDED_CAMS:-} " in *" cam${_n} "*) continue ;; esac
@@ -2337,6 +2349,8 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
     live_freeze_watch_start "$FREEZE_WATCH_PID_FILE" "$FREEZE_WATCH_POISON_FILE" \
       "$STRIH" "$FREEZE_WATCH_SOURCES" "$PROBE_BIN_DIR"
   fi
+else
+  echo "[5/8 pre] in-run freeze watch — SKIPPED (LIVE_FREEZE_WATCH=$LIVE_FREEZE_WATCH, ALL_CAMBOX=${ALL_CAMBOX:-0})"
 fi
 
 echo "[5/8] StartRecord on strih + stream (program = certified prod scene) + imag (#462 — program routed to the camera under test by [4a/8], #682)"
