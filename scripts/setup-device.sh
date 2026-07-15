@@ -37,6 +37,11 @@ fail() {
                             # sourced (unmodified) by verify-device.sh's (s) check and
                             # create-usb-linux.sh, single source of truth for the size cap + paths
 
+# shellcheck source=scripts/lib/log-diet.sh
+. "$HERE/lib/log-diet.sh"  # log_diet_journald_dropin (#762) -- also sourced (unmodified) by
+                           # verify-device.sh's (u) check and create-usb-linux.sh, single source
+                           # of truth for the journald RuntimeMaxUse cap path/value
+
 # GitHub repo + CI dev-build channel for installing the fleet-matching binary (#457 -- the fleet
 # runs CI dev-builds, e.g. 1.7.0-dev.157, never a GitHub release; see STEP 3 below).
 GITHUB_REPO="zbynekdrlik/camera-box"
@@ -906,6 +911,26 @@ for _u in ptp4l phc2sys; do
     systemctl mask "$_u" 2>/dev/null || true
 done
 echo "  #591/#597: purged + masked competing timesync daemons (dantesync is the sole clock authority)"
+
+# #762: rsyslog is REDUNDANT on this appliance -- journald already captures everything (the
+# ACTUAL log store any operator/harness reads, e.g. `journalctl -u camera-box`), and nothing
+# reads /var/log/syslog on a read-only appliance with no operator logging in. A live incident
+# (cam1, 2026-07-15) showed rsyslogd enter a write-error feedback loop once the 50MB /var/log
+# tmpfs filled -- write fails, logs the failure, journald forwards it, write fails again -- at
+# ~400 lines/s, burning 42.8% CPU and starving the camera-box send path badly enough to
+# measurably drift NDI delivery timing. Same disable -> purge -> mask discipline as the
+# #591/#597 stanzas above -- purge, not just mask (a masked-but-installed daemon can still be
+# re-enabled). Cap journald's own RuntimeMaxUse so the journal itself can never grow to fill the
+# SAME tmpfs rsyslog used to (log_diet_journald_dropin, scripts/lib/log-diet.sh -- single source
+# of truth shared with verify-device.sh's (u) check and create-usb-linux.sh).
+systemctl disable --now rsyslog 2>/dev/null || true
+apt-get purge -y rsyslog 2>/dev/null \
+    || dpkg --purge --force-depends rsyslog 2>/dev/null || true
+systemctl mask rsyslog 2>/dev/null || true
+mkdir -p "$(dirname "$LOG_DIET_JOURNALD_DROPIN_PATH")"
+log_diet_journald_dropin > "$LOG_DIET_JOURNALD_DROPIN_PATH"
+systemctl restart systemd-journald 2>/dev/null || true
+echo "  #762: purged rsyslog + capped journald RuntimeMaxUse=${LOG_DIET_JOURNALD_RUNTIME_MAX} (log-storm CPU/disk fix)"
 
 DANTESYNC_INSTALLED=false
 

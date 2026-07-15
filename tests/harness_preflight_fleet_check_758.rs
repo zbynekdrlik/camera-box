@@ -191,3 +191,160 @@ fn verdict_fails_on_a_surviving_stray_unit() {
         r.stdout
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// #762 item 2 — disk-fill / log-storm-signature preflight, added to the SAME one-round-trip line.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn check_reports_disk_and_cpu_fields_alongside_the_758_fields() {
+    let r = run_with_fake_bins(
+        "eval \"$(preflight_fleet_check_cmds)\"",
+        &[
+            (
+                "systemctl",
+                "case \"$1\" in is-active) echo active; exit 0;; list-units) exit 0;; esac",
+            ),
+            ("pgrep", "echo 1; exit 0"),
+            (
+                "df",
+                "case \"$*\" in *'/var/log'*) printf 'Use%%\\n12%%\\n';; *'/tmp'*) printf 'Use%%\\n7%%\\n';; esac",
+            ),
+            (
+                "ps",
+                "printf 'rsyslogd 0.0\\nsystemd-journal 1.5\\nbash 0.1\\n'",
+            ),
+        ],
+    );
+    assert_eq!(r.exit_code, 0, "stderr={}", r.stderr);
+    assert!(r.stdout.contains("DISK_LOG_PCT=12"), "stdout={}", r.stdout);
+    assert!(r.stdout.contains("DISK_TMP_PCT=7"), "stdout={}", r.stdout);
+    assert!(r.stdout.contains("RSYSLOGD_CPU=0"), "stdout={}", r.stdout);
+    assert!(r.stdout.contains("JOURNALD_CPU=1"), "stdout={}", r.stdout);
+}
+
+#[test]
+fn check_sums_cpu_across_multiple_matching_processes() {
+    // A storm can spawn/thread such that more than one matching row appears -- sum them, don't
+    // just take the first.
+    let r = run_with_fake_bins(
+        "eval \"$(preflight_fleet_check_cmds)\"",
+        &[
+            (
+                "systemctl",
+                "case \"$1\" in is-active) echo active; exit 0;; list-units) exit 0;; esac",
+            ),
+            ("pgrep", "echo 1; exit 0"),
+            ("df", "printf 'Use%%\\n1%%\\n'"),
+            ("ps", "printf 'rsyslogd 20.5\\nrsyslogd 22.3\\n'"),
+        ],
+    );
+    assert_eq!(r.exit_code, 0, "stderr={}", r.stderr);
+    assert!(r.stdout.contains("RSYSLOGD_CPU=42"), "stdout={}", r.stdout);
+}
+
+// ---------------------------------------------------------------------------------------------
+// preflight_fleet_check_verdict — #762 disk/CPU thresholds (pure decision, no I/O).
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn verdict_is_still_empty_pass_when_disk_and_cpu_fields_are_healthy() {
+    let r = run_sourced(
+        "preflight_fleet_check_verdict 'SERVICE_ACTIVE=active EMITTER_COUNT=1 STRAY_UNITS= \
+         DISK_LOG_PCT=12 DISK_TMP_PCT=7 RSYSLOGD_CPU=0 JOURNALD_CPU=1'",
+    );
+    assert_eq!(r.exit_code, 0);
+    assert_eq!(r.stdout, "", "a healthy box must PASS (empty verdict)");
+}
+
+#[test]
+fn verdict_fails_on_var_log_over_80_percent() {
+    let r = run_sourced(
+        "preflight_fleet_check_verdict 'SERVICE_ACTIVE=active EMITTER_COUNT=1 STRAY_UNITS= \
+         DISK_LOG_PCT=92 DISK_TMP_PCT=5 RSYSLOGD_CPU=0 JOURNALD_CPU=0'",
+    );
+    assert_eq!(r.exit_code, 0);
+    assert!(
+        r.stdout.contains("/var/log at 92%") && r.stdout.contains("#762"),
+        "stdout={}",
+        r.stdout
+    );
+}
+
+#[test]
+fn verdict_fails_on_var_log_at_exactly_the_threshold() {
+    // >= threshold, not strictly >, matches cam_disk_alert_needed's own boundary convention.
+    let r = run_sourced(
+        "preflight_fleet_check_verdict 'SERVICE_ACTIVE=active EMITTER_COUNT=1 STRAY_UNITS= \
+         DISK_LOG_PCT=80 DISK_TMP_PCT=5 RSYSLOGD_CPU=0 JOURNALD_CPU=0'",
+    );
+    assert_eq!(r.exit_code, 0);
+    assert!(r.stdout.contains("/var/log at 80%"), "stdout={}", r.stdout);
+}
+
+#[test]
+fn verdict_fails_on_tmp_over_80_percent() {
+    let r = run_sourced(
+        "preflight_fleet_check_verdict 'SERVICE_ACTIVE=active EMITTER_COUNT=1 STRAY_UNITS= \
+         DISK_LOG_PCT=5 DISK_TMP_PCT=85 RSYSLOGD_CPU=0 JOURNALD_CPU=0'",
+    );
+    assert_eq!(r.exit_code, 0);
+    assert!(r.stdout.contains("/tmp at 85%"), "stdout={}", r.stdout);
+}
+
+#[test]
+fn verdict_fails_on_rsyslogd_cpu_over_20_percent_the_storm_signature() {
+    // The exact live cam1 signal (42.8% CPU) -- catches the storm BEFORE the tmpfs is full.
+    let r = run_sourced(
+        "preflight_fleet_check_verdict 'SERVICE_ACTIVE=active EMITTER_COUNT=1 STRAY_UNITS= \
+         DISK_LOG_PCT=30 DISK_TMP_PCT=5 RSYSLOGD_CPU=43 JOURNALD_CPU=0'",
+    );
+    assert_eq!(r.exit_code, 0);
+    assert!(
+        r.stdout.contains("rsyslogd CPU at 43%") && r.stdout.contains("storm signature"),
+        "stdout={}",
+        r.stdout
+    );
+}
+
+#[test]
+fn verdict_fails_on_journald_cpu_over_20_percent() {
+    let r = run_sourced(
+        "preflight_fleet_check_verdict 'SERVICE_ACTIVE=active EMITTER_COUNT=1 STRAY_UNITS= \
+         DISK_LOG_PCT=5 DISK_TMP_PCT=5 RSYSLOGD_CPU=0 JOURNALD_CPU=25'",
+    );
+    assert_eq!(r.exit_code, 0);
+    assert!(
+        r.stdout.contains("systemd-journald CPU at 25%"),
+        "stdout={}",
+        r.stdout
+    );
+}
+
+#[test]
+fn verdict_checks_service_health_before_disk_and_cpu() {
+    // Ordering: an inactive service is a more urgent/actionable failure than a disk warning on
+    // the SAME box -- the existing (#758) checks must still win when both are present.
+    let r = run_sourced(
+        "preflight_fleet_check_verdict 'SERVICE_ACTIVE=inactive EMITTER_COUNT=0 STRAY_UNITS= \
+         DISK_LOG_PCT=99 DISK_TMP_PCT=99 RSYSLOGD_CPU=99 JOURNALD_CPU=99'",
+    );
+    assert_eq!(r.exit_code, 0);
+    assert!(r.stdout.contains("not active"), "stdout={}", r.stdout);
+}
+
+#[test]
+fn verdict_defaults_missing_disk_and_cpu_fields_to_zero_never_a_false_fail() {
+    // A hand-built fixture line predating #762 (e.g. an older test, or a caller that hasn't
+    // upgraded its remote gather yet) must not spuriously FAIL just because the new fields are
+    // absent -- absence defaults to 0 (healthy), matching the existing STRAY_UNITS convention.
+    let r = run_sourced(
+        "preflight_fleet_check_verdict 'SERVICE_ACTIVE=active EMITTER_COUNT=1 STRAY_UNITS='",
+    );
+    assert_eq!(r.exit_code, 0);
+    assert_eq!(
+        r.stdout, "",
+        "missing #762 fields must default to healthy, not FAIL, got: {}",
+        r.stdout
+    );
+}

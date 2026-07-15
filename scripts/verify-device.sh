@@ -73,6 +73,10 @@
 #       rig-mode.sh's #464 KMS-held check AND silently no-op'd recording-e2e.sh's capture-release
 #       busy-wait (fuser exits 127 -> the wait's `while fuser ...` condition reads false
 #       immediately, same as "already released") -- (#743)
+#   (u) rsyslog is PURGED (not merely masked) AND journald has a RuntimeMaxUse=20M drop-in
+#       (#762 -- rsyslog is redundant on this appliance, journald already captures everything;
+#       a live cam1 incident showed a full /var/log tmpfs put rsyslogd into a write-error
+#       feedback loop burning 42.8% CPU and starving the camera-box send path)
 #
 # Exit: 0 iff every check passes. Non-zero if ANY check FAILs or is UNREADABLE (test-strictness --
 # an unreachable/unreadable check is a FAIL, never a silent pass).
@@ -92,6 +96,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
                                       # drift-guard.sh's --check-imag facet since #596)
 # shellcheck source=scripts/lib/log-bound.sh
 . "$HERE/lib/log-bound.sh"       # log_bound_verdict/log_bound_gather_remote_snippet (#679)
+# shellcheck source=scripts/lib/log-diet.sh
+. "$HERE/lib/log-diet.sh"        # log_diet_provision_verdict/log_diet_gather_remote_snippet (#762)
 # shellcheck source=scripts/lib/capture-rate-guard.sh
 . "$HERE/lib/capture-rate-guard.sh"  # invocation-id-scoped journalctl builder (#694, shared
                                      # with deploy-fleet.sh + upgrade-fleet-ndi.sh)
@@ -515,6 +521,9 @@ Checks:
   (o) NDI runtime pinned to the fleet version (NDI_VERSION_PIN, default 6.3.2)
   (q) WARNING only: stale .bak cruft under the NDI dir or the systemd drop-in dir (#453)
   (r) dantesync is the SOLE timesync authority -- no competing daemon installed/active/enabled (#591)
+  (s) /var/log tmpfs bounded against runaway growth -- logrotate size cap + frequent rotation (#679)
+  (t) fuser (psmisc) is installed (#743)
+  (u) rsyslog PURGED (not just masked) + journald RuntimeMaxUse capped (#762)
 
 Env: KERNEL_PIN (optional exact running-kernel pin), NDI_VERSION_PIN (default 6.3.2),
      DANTESYNC_OFFSET_FRESHNESS_S (max age of a fresh [NTP] offset line, default 300),
@@ -731,6 +740,29 @@ if [ "$rc" -eq 0 ] && [ -n "$FUSER_PATH" ]; then
 else
   fail "fuser not found on PATH (ssh rc=$rc) -- psmisc missing; rig-mode.sh's #464 KMS-held check \
 and recording-e2e.sh's capture-release wait both silently degrade without it (#743)"
+fi
+
+# (u) rsyslog PURGED + journald RuntimeMaxUse capped (#762) ---------------------------------------
+# rsyslog is redundant on this appliance -- journald already captures everything, and nothing
+# reads /var/log/syslog on a read-only appliance with no operator logging in. A live cam1
+# incident (2026-07-15) showed a full /var/log tmpfs put rsyslogd into a write-error feedback
+# loop (~400 lines/s, 42.8% CPU), starving the camera-box send path badly enough to measurably
+# drift NDI delivery timing. log_diet_provision_verdict (scripts/lib/log-diet.sh) fails LOUD if
+# rsyslog is still installed/active/enabled (masking alone is not enough) OR the journald
+# RuntimeMaxUse=20M drop-in is missing/wrong.
+rc=0
+LOG_DIET_STATE="$(ssh_box "$(log_diet_gather_remote_snippet)")" || rc=$?
+if [ "$rc" -ne 0 ] || [ -z "$LOG_DIET_STATE" ]; then
+  fail "could not read rsyslog/journald state over SSH (rc=$rc) -- cannot certify the #762 logging diet is applied"
+else
+  LOG_DIET_VERDICT="$(log_diet_provision_verdict "$LOG_DIET_STATE")"
+  if [ "$LOG_DIET_VERDICT" = "ok" ]; then
+    ok "rsyslog purged + journald RuntimeMaxUse=${LOG_DIET_JOURNALD_RUNTIME_MAX} drop-in present (#762)"
+  else
+    while IFS= read -r _reason; do
+      [ -n "$_reason" ] && fail "log diet: ${_reason#FAIL: }"
+    done <<< "$LOG_DIET_VERDICT"
+  fi
 fi
 
 # (e) genlock.conf drop-in --------------------------------------------------------------------
