@@ -57,7 +57,7 @@ build_launch_program() {
   local kill_block=""
   if [ "$force" = "1" ]; then
     kill_block=$(cat <<'PSKILL'
-# --force: documented obs-ops recovery — force-kill a wedged obs64 before relaunch (DEV rig).
+# --force: documented obs-ops recovery -- force-kill a wedged obs64 before relaunch (DEV rig).
 Get-Process obs64 -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.Id -Force }
 Start-Sleep -Seconds 2
 PSKILL
@@ -66,7 +66,7 @@ PSKILL
     kill_block=$(cat <<'PSNOKILL'
 # No --force: refuse to double-launch a running obs64 (relaunch deliberately; use --force for a wedged one).
 if (Get-Process obs64 -ErrorAction SilentlyContinue) {
-  Write-Error "obs64 already running — relaunch deliberately (--force to recover a wedged one)."; exit 3
+  Write-Error "obs64 already running -- relaunch deliberately (--force to recover a wedged one)."; exit 3
 }
 PSNOKILL
 )
@@ -76,7 +76,7 @@ PSNOKILL
 # ===== #257 deterministic genlock OBS (re)launch + verify (paste into the box's win-* MCP Shell) =====
 # The genlock build is HARD-LOCKED: render tick + ts-align ALWAYS ON, latency = 3 ms build const, NO
 # OBS_GENLOCK_*/OBS_BURN_* env. The measurement burn is a per-source genlock_burn bool over WebSocket
-# (scripts/obs_burn_filter.py), toggled WITHOUT a relaunch — this wrapper never touches it.
+# (scripts/obs_burn_filter.py), toggled WITHOUT a relaunch -- this wrapper never touches it.
 \$ErrorActionPreference = 'Stop'
 
 ${kill_block}
@@ -84,13 +84,13 @@ ${kill_block}
 # (1) Clear stale crash sentinels so OBS does not pop the "Crash Detected" modal and hang headless.
 Remove-Item "\$env:APPDATA\\obs-studio\\.sentinel\\*" -Force -ErrorAction SilentlyContinue
 
-# (2) Launch OBS via the box's OWN Start-Menu SHORTCUT ("OBS Studio.lnk") — the STANDARD launch
+# (2) Launch OBS via the box's OWN Start-Menu SHORTCUT ("OBS Studio.lnk") -- the STANDARD launch
 #     path, so the box's own shortcut parameters are always honored (user directive 2026-07-15:
-#     "obs sa ma spustat standartne cez zastupcu", the params are PER-BOX — e.g. strih's shortcut
+#     "obs sa ma spustat standartne cez zastupcu", the params are PER-BOX -- e.g. strih's shortcut
 #     carries --enable-media-stream --verbose, which the interkom VDO.ninja Browser source needs
 #     for camera/mic access; a bare exe launch dropped them and rendered a "Permissions denied"
 #     box on program output, user-caught live). Fallback to the bare exe ONLY if the shortcut is
-#     genuinely absent (fail-open recovery beats no OBS at all — the verify below still gates).
+#     genuinely absent (fail-open recovery beats no OBS at all -- the verify below still gates).
 #     NB on strih: D:\\_APPS\\NL_STARTUP.ahk auto-respawns obs64 from this same dir, but it won't
 #     double-launch once one is running, so this Start-Process wins; the log verify below fails loud
 #     on a non-genlock build regardless. See obs-ops skill.
@@ -101,7 +101,7 @@ if (-not (Test-Path \$exe)) { Write-Error "obs64 not found at \$exe"; exit 5 }
 if (Test-Path \$lnk) {
   Start-Process -FilePath \$lnk
 } else {
-  Write-Warning "OBS Studio.lnk shortcut not found — falling back to a bare exe launch (box-specific shortcut params will be MISSING; fix the shortcut)."
+  Write-Warning "OBS Studio.lnk shortcut not found -- falling back to a bare exe launch (box-specific shortcut params will be MISSING; fix the shortcut)."
   Start-Process -FilePath \$exe -WorkingDirectory '${bin64_ps}'
 }
 
@@ -115,7 +115,52 @@ for (\$i = 0; \$i -lt 30; \$i++) {
 if (-not \$proc) { Write-Error "obs64 did not start"; exit 6 }
 Start-Sleep -Seconds 3
 
-# (4) VERIFY the fresh OBS log shows the genlock render tick ENABLED (the #257 build-default proof —
+# (3b) #786 AUDIO-BUFFERING LAUNCH-GATE (hotfix; the OBS-level fix is #786's real deliverable).
+#     Some launches hit an ASIO init race ('ASIO Input Capture' on VB-Matrix VASIO-8 floods stale
+#     audio in the ~1s window before Dante Virtual Soundcard finishes init) -> libobs ratchets its
+#     GLOBAL audio buffering to the 960 ms MAX within the first seconds, and that buffer NEVER
+#     shrinks until OBS restarts -> the whole session's A/V sync is off by ~0.9 s (live incident
+#     2026-07-15: operator's 900 ms genlock latency needed ~2000 ms to compensate). A bad draw is
+#     fully decided in the first seconds and is visible in the fresh log, so gate + redraw here.
+\$audioLogDir = "\$env:APPDATA\\obs-studio\\logs"
+\$maxLaunchAttempts = 3
+for (\$attempt = 1; \$attempt -le \$maxLaunchAttempts; \$attempt++) {
+  Start-Sleep -Seconds 10   # ASIO starts right after module load; a bad burst completes within ~5 s
+  \$audioLog  = Get-ChildItem \$audioLogDir -Filter *.txt | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+  \$audioText = if (\$audioLog) { Get-Content \$audioLog.FullName -Raw } else { "" }
+  \$bufPeak = 0
+  foreach (\$m in [regex]::Matches(\$audioText, 'total audio buffering is now (\\d+) milliseconds')) {
+    \$v = [int]\$m.Groups[1].Value; if (\$v -gt \$bufPeak) { \$bufPeak = \$v }
+  }
+  \$bufMaxed = \$audioText -match 'Max audio buffering reached'
+  if ((-not \$bufMaxed) -and \$bufPeak -le 200) {
+    Write-Host "AUDIO OK: buffering peak \${bufPeak} ms -- clean ASIO launch draw (#786 gate)."
+    break
+  }
+  if (\$attempt -eq \$maxLaunchAttempts) {
+    Write-Error "#786 FAIL: audio buffering peak \${bufPeak} ms (maxed=\$bufMaxed) after \$maxLaunchAttempts launches -- A/V sync would be off by ~\${bufPeak} ms. Investigate the ASIO devices (VB-Matrix VASIO-8 / Dante VSC) before trusting this box."
+    exit 7
+  }
+  Write-Warning "#786: bad ASIO launch draw (buffering peak \${bufPeak} ms, maxed=\$bufMaxed) -- killing + relaunching OBS (attempt \$(\$attempt + 1)/\$maxLaunchAttempts)."
+  Stop-Process -Name obs64 -Force -ErrorAction SilentlyContinue
+  Start-Sleep -Seconds 4
+  Remove-Item "\$env:APPDATA\\obs-studio\\.sentinel\\*" -Force -ErrorAction SilentlyContinue
+  if (Test-Path \$lnk) {
+    Start-Process -FilePath \$lnk
+  } else {
+    Start-Process -FilePath \$exe -WorkingDirectory '${bin64_ps}'
+  }
+  \$proc = \$null
+  for (\$i = 0; \$i -lt 30; \$i++) {
+    Start-Sleep -Seconds 1
+    \$proc = Get-Process obs64 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (\$proc -and \$proc.WorkingSet64 -gt 100MB) { break }
+  }
+  if (-not \$proc) { Write-Error "obs64 did not start on #786 relaunch"; exit 6 }
+  Start-Sleep -Seconds 3
+}
+
+# (4) VERIFY the fresh OBS log shows the genlock render tick ENABLED (the #257 build-default proof --
 #     same line drift-guard.sh genlock_capability_from_log + the rig validation key on) AND DistroAV
 #     loaded. The log is the AUTHORITATIVE runtime signal; a stock OBS / wrong build emits no genlock
 #     line. Anything short of BOTH -> non-zero exit (fail loud, never a silent half-genlocked box).
@@ -124,16 +169,16 @@ Start-Sleep -Seconds 3
 \$logText = if (\$log) { Get-Content \$log.FullName -Raw } else { "" }
 \$tickOk     = \$logText -match 'genlock:.*render tick ENABLED'
 \$distroavOk = \$logText -match '(?i)distroav'
-if (\$tickOk)     { Write-Host "LOG OK: genlock render tick ENABLED (build default, #257)" } else { Write-Error "#257 LOG: 'render tick ENABLED' NOT found in \$(\$log.Name) — NOT the genlock build (stock/wrong OBS?)." }
+if (\$tickOk)     { Write-Host "LOG OK: genlock render tick ENABLED (build default, #257)" } else { Write-Error "#257 LOG: 'render tick ENABLED' NOT found in \$(\$log.Name) -- NOT the genlock build (stock/wrong OBS?)." }
 if (\$distroavOk) { Write-Host "LOG OK: DistroAV loaded" }                                  else { Write-Warning "#257 LOG: no DistroAV line yet (may log lazily on first NDI activation)." }
 
-# (5) FINAL VERDICT — fail loud unless the render tick is ENABLED (the genlock build proof). DistroAV
+# (5) FINAL VERDICT -- fail loud unless the render tick is ENABLED (the genlock build proof). DistroAV
 #     is a warning only (it logs lazily on first NDI source activation).
 if (\$tickOk) {
   Write-Host "#257 OK: obs64 PID \$(\$proc.Id) launched, genlock render tick ENABLED (no env needed)."
   exit 0
 } else {
-  Write-Error "#257 FAIL: genlock render tick NOT enabled — do NOT trust this box (wrong OBS build?)."
+  Write-Error "#257 FAIL: genlock render tick NOT enabled -- do NOT trust this box (wrong OBS build?)."
   exit 1
 }
 PS
