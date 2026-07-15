@@ -215,8 +215,9 @@ pub fn summarize(samples: &[AuditSample]) -> Option<AuditSummary> {
     let abs_skews: Vec<i64> = samples.iter().map(|s| s.ts_head_skew_ms.abs()).collect();
     let max_abs_head_skew_ms = abs_skews.iter().copied().max().unwrap_or(0);
     let mean_abs_head_skew_ms = abs_skews.iter().sum::<i64>() as f64 / samples.len() as f64;
-    // #757 RED: stub — always 0.0, not yet the real signed mean (see the GREEN commit).
-    let mean_head_skew_ms = 0.0_f64;
+    // #757: SIGNED mean, no `.abs()` — see the field doc for why the sign matters.
+    let mean_head_skew_ms = samples.iter().map(|s| s.ts_head_skew_ms).sum::<i64>() as f64
+        / samples.len() as f64;
     let peak_depth = samples
         .iter()
         .map(|s| s.peak as u64)
