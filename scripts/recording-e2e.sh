@@ -2231,12 +2231,27 @@ python3 "$HERE/warm_cam_scenes.py" --host "$STRIH" --settle "${WARM_CAM_SETTLE_S
 # marker before the preview cycle starts and fetching only what was appended since (`Select-
 # Object -Skip`), never a blind tail.
 #
+# #757 CORRECTION 3 (2026-07-15, live regression on acceptance run 1698791093 — Correction 2's
+# OWN fix made things WORSE, not better): spread jumped to 128.1ms (cam3 177, cam5 176.7, cam2
+# 155.8ms p50) and all_cambox_av_sync offsets shifted to +73..+201ms (cam2 measured +143.65 —
+# the margin shifted the WHOLE video path ~130ms late vs the previously-working calibrated
+# hold), while the uniform copies≈gaps pattern Correction 2 targeted PERSISTED UNCHANGED
+# (9-19 per segment, still uniform). Two consecutive auto-pin iterations degraded results —
+# per architecture-first.md's "no circular development", STOP iterating blind on the live
+# rig and demote the whole mechanism to OFF-BY-DEFAULT (advisory measurement/report only,
+# never applied) until the underlying PREVIEW-based skew measurement itself is understood:
+# a margin computed from it shifting the ENTIRE video path by ~130ms is strong evidence that
+# `mean_head_skew_ms`/`max_abs_head_skew_ms` measured against a PREVIEW-only-active source
+# does NOT reliably proxy the PROGRAM-relevant quantity this mechanism needs — Correction 1's
+# reasoning (genlock_audit_log fires for any active view) may be necessary but is evidently
+# not SUFFICIENT for the measured skew to mean the same thing as it would for an active
+# program source. Re-enable only after that question has a real answer, via
+# PRERECORD_PHASE_CALIBRATE=1 (opt-in) — never by flipping this default back blind.
+#
 # Best-effort throughout (`set +e` for this whole block): a calibration hiccup (an unreachable
 # log, zero usable audit lines, an apply failure) must NEVER abort the scored recording below —
-# it just means this run keeps whatever pins were already applied (the pre-#757 behavior). The
-# imag enforcement sub-step is INDEPENDENT of the strih measurement's own success/failure — it
-# always runs and always self-heals imag's fixed floor.
-PRERECORD_PHASE_CALIBRATE="${PRERECORD_PHASE_CALIBRATE:-1}"
+# it just means this run keeps whatever pins were already applied (the pre-#757 behavior).
+PRERECORD_PHASE_CALIBRATE="${PRERECORD_PHASE_CALIBRATE:-0}"
 if [ "$PRERECORD_PHASE_CALIBRATE" = "1" ] && [ "${ALL_CAMBOX:-0}" = "1" ]; then
   set +e
   echo "[4g/8] #757 pre-record phase auto-pin (strih only) — measure THIS run's actual per-camera phase, re-pin before the real recording starts"
@@ -2283,15 +2298,21 @@ if [ "$PRERECORD_PHASE_CALIBRATE" = "1" ] && [ "${ALL_CAMBOX:-0}" = "1" ]; then
   else
     echo "WARNING: #757 could not fetch strih's OBS log for calibration — skipping pin apply" >&2
   fi
-
-  # #757 binding user directive (2026-07-15): imag runs EVERY NDI input at the fixed 3ms
-  # floor, ALWAYS — independent of the strih measurement above (never gated on its success).
-  echo "    [calib] enforcing imag's fixed 3ms floor on every NDI input (self-healing, imag never gets per-camera equalization)…"
-  python3 "$HERE/imag_latency_enforce.py" --host "$IMAG_IP" --password "${IMAG_PW:-newlevel}" 2>&1 \
-    | sed 's/^/    [calib] /'
   set -e
 else
   echo "[4g/8] #757 pre-record phase auto-pin — SKIPPED (PRERECORD_PHASE_CALIBRATE=$PRERECORD_PHASE_CALIBRATE, ALL_CAMBOX=${ALL_CAMBOX:-0})"
+fi
+
+# #757 binding user directive (2026-07-15): imag runs EVERY NDI input at the fixed 3ms floor,
+# ALWAYS — INDEPENDENT of PRERECORD_PHASE_CALIBRATE (the strih-only auto-pin mechanism above,
+# currently off by default per Correction 3). Never gated on that mechanism's own on/off state
+# or its success/failure — imag's fixed floor is a standing invariant, not a calibration output.
+if [ "${ALL_CAMBOX:-0}" = "1" ]; then
+  set +e
+  echo "[4g/8b] #757 enforcing imag's fixed 3ms floor on every NDI input (self-healing, imag never gets per-camera equalization)"
+  python3 "$HERE/imag_latency_enforce.py" --host "$IMAG_IP" --password "${IMAG_PW:-newlevel}" 2>&1 \
+    | sed 's/^/    [imag-latency] /'
+  set -e
 fi
 
 # #758 item 3 — arm the in-run freeze watch for the WHOLE recording window (StartRecord through
