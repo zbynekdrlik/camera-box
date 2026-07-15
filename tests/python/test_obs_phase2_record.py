@@ -609,3 +609,66 @@ def test_record_start_passes_liveness_check_on_a_cold_restart_first_start(monkey
 
     err = capsys.readouterr().err
     assert "liveness OK" in err, f"a tolerated cold start must still log liveness OK: {err!r}"
+
+
+def test_record_start_grace_tolerates_slow_nvenc_byte_counter(monkeypatch, capsys):
+    # REGRESSION (#767 deploy, 2026-07-15, run 29417639968): imag's NVENC cold-init takes
+    # ~3s from StartRecord to the muxer actually writing, and outputBytes lags a further
+    # beat -- the fixed 2x2s liveness window sampled active=[False, True] bytes=[0, 0] and
+    # ABORTED a recording that was in fact healthy (the file grew to 296MB until cleanup
+    # stopped it). When the LAST sample is active with bytes still 0, record() must keep
+    # polling within a bounded grace window and pass once bytes appear -- never abort a
+    # genuinely-live recording on a slow byte counter.
+    started = {"yes": False}
+    # post-start sequence: warming up (False,0) -> active but 0 bytes (True,0) -> grace
+    # polls see bytes appear and grow.
+    seq = iter([
+        {"outputActive": False, "outputBytes": 0},
+        {"outputActive": True, "outputBytes": 0},
+        {"outputActive": True, "outputBytes": 0},
+        {"outputActive": True, "outputBytes": 512000},
+    ])
+
+    def fake_rpc(ws, rtype, rdata=None, ignore_err=False, timeout_s=None):
+        if rtype == "StartRecord":
+            started["yes"] = True
+        if rtype == "GetRecordStatus":
+            if not started["yes"]:
+                return {"outputActive": False, "outputTimecode": "00:00:00"}
+            return next(seq, {"outputActive": True, "outputBytes": 1024000})
+        return {}
+
+    monkeypatch.setattr(obs_phase2, "_conn", lambda host, password="": _FakeWS())
+    monkeypatch.setattr(obs_phase2, "_rpc", fake_rpc)
+    monkeypatch.setattr(obs_phase2.time, "sleep", lambda *_a, **_k: None)
+
+    obs_phase2.record(_start_args("10.77.9.182"))  # must NOT raise
+
+    err = capsys.readouterr().err
+    assert "liveness OK" in err
+    assert "grace" in err, (
+        f"the log must surface that the byte-grace fired (greppable per run): {err!r}"
+    )
+
+
+def test_record_start_grace_still_aborts_when_bytes_never_appear(monkeypatch):
+    # The #627 protection must SURVIVE the grace: an output that stays active with 0 bytes
+    # past the whole grace budget is still dead-on-arrival -> SystemExit.
+    started = {"yes": False}
+
+    def fake_rpc(ws, rtype, rdata=None, ignore_err=False, timeout_s=None):
+        if rtype == "StartRecord":
+            started["yes"] = True
+        if rtype == "GetRecordStatus":
+            if not started["yes"]:
+                return {"outputActive": False, "outputTimecode": "00:00:00"}
+            return {"outputActive": True, "outputBytes": 0}
+        return {}
+
+    monkeypatch.setattr(obs_phase2, "_conn", lambda host, password="": _FakeWS())
+    monkeypatch.setattr(obs_phase2, "_rpc", fake_rpc)
+    monkeypatch.setattr(obs_phase2.time, "sleep", lambda *_a, **_k: None)
+
+    with pytest.raises(SystemExit) as exc_info:
+        obs_phase2.record(_start_args("10.77.9.182"))
+    assert "#627" in str(exc_info.value)
