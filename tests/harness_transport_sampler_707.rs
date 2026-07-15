@@ -85,10 +85,35 @@ fn box_label_maps_each_last_octet_to_its_cam_name() {
         run_sourced("transport_sampler_box_label 10.77.9.66").trim(),
         "cam6"
     );
+    // #757/#707: cam7 (fleet grew 6->7, #755) must resolve to "cam7" like every other cambox —
+    // NOT the "box-67" unknown-octet fallback the diagnostic gap left it at.
+    assert_eq!(
+        run_sourced("transport_sampler_box_label 10.77.9.67").trim(),
+        "cam7"
+    );
     // Unknown last octet must degrade to a stable, non-colliding label, never crash.
     assert_eq!(
         run_sourced("transport_sampler_box_label 10.77.9.99").trim(),
         "box-99"
+    );
+}
+
+/// #757/#707: recording-e2e.sh's TRANSPORT_SAMPLER_BOXES list (the ALL_CAMBOX branch) must
+/// include cam7's IP, matching every other ALL_CAMBOX camera — the #707 investigation
+/// (2026-07-15) found LINK could not be auto-ruled-out for cam7 because this list stopped at
+/// cam6 (a diagnostic gap, not a functional bug: cam7 simply had no transport-sampler coverage).
+#[test]
+fn transport_sampler_boxes_list_includes_cam7() {
+    let s = read("scripts/recording-e2e.sh");
+    let idx = s
+        .find("TRANSPORT_SAMPLER_BOXES=\"$TRANSPORT_SAMPLER_BOXES")
+        .expect("the ALL_CAMBOX TRANSPORT_SAMPLER_BOXES extension line must exist");
+    let line_end = s[idx..].find('\n').map(|o| idx + o).unwrap_or(s.len());
+    let line = &s[idx..line_end];
+    assert!(
+        line.contains("$CAM7_IP"),
+        "TRANSPORT_SAMPLER_BOXES must also sample cam7 (LINK layer coverage for every \
+         ALL_CAMBOX camera, #707): {line}"
     );
 }
 
