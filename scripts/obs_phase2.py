@@ -1961,31 +1961,28 @@ def open_projectors(a):
         ws.close()
 
 
-def ensure_studio_mode_off(a):
-    """#758 preflight — imag-nb's Studio Mode is a SEPARATE render-budget consumer from the
-    Multiview projector (`.claude/skills/genlock/SKILL.md` #278: "Studio Mode preview is a 2nd
-    render-budget consumer at 60fps (studio-ON ~14% renderSkip, studio-OFF clean) — prod runs
-    studio off"). Live-caught (2026-07-14): imag's Studio Mode had been left ON from an earlier
-    session, degrading render health right to the edge of the #758 render-health preflight's
-    failure floor (activeFps down to ~56.8-58.1, averageFrameRenderTime up to ~17ms, renderSkip
-    climbing to ~4% — vs a clean ~60fps/8-9ms/0% with it OFF, confirmed by direct A/B measurement
-    against the live rig). ALWAYS (idempotently) turns it OFF, never silently leaves a stale ON
-    state to intermittently fail this preflight or degrade a real recording.
-
-    imag-ONLY: strih/stream's Studio Mode stays ALWAYS ON per the separate, unrelated, hard user
-    directive for those two boxes (a different purpose on a different topology role) — this
-    function must never be pointed at strih/stream."""
+def ensure_studio_mode_on(a):
+    """#767 preflight — Studio Mode must be ON on EVERY broadcast box, imag included (user hard
+    rule, 2026-07-15: without Studio Mode the multiview's Preview cell is DEAD — "studio mode je
+    'MUST BE', NEMOZES HO PODLA NALADY VYPINAT"). This INVERTS the former #758
+    ensure-studio-mode-off step, which was written when Studio ON measurably collapsed imag's
+    render (38-42fps/~23ms on the pre-#767 distroav.so — receiver teardown churn on the preview
+    scene's hide/show). With the #767 keep-alive DistroAV build the churn is gone and imag holds
+    60.0fps / ~1.8ms render WITH Studio ON + Multiview + 7 cams + overlays (measured 2026-07-15,
+    5x5s GetStats samples). The gate therefore now measures render health in the PRODUCTION
+    state: Studio ON. ALWAYS (idempotently) turns it ON, never silently leaves a stale OFF state
+    to hide a Studio-ON render regression from the render-health preflight."""
     ws = _conn(a.host, a.password)
     try:
         before = bool(_rpc(ws, "GetStudioModeEnabled", ignore_err=True).get("studioModeEnabled"))
         if before:
-            _rpc(ws, "SetStudioModeEnabled", {"studioModeEnabled": False})
-            print(
-                "imag Studio Mode was ON — turned OFF (a documented #278 render-budget "
-                "consumer; prod runs studio off)"
-            )
+            print("imag Studio Mode already ON — ok (production state)")
         else:
-            print("imag Studio Mode already OFF — ok")
+            _rpc(ws, "SetStudioModeEnabled", {"studioModeEnabled": True})
+            print(
+                "imag Studio Mode was OFF — turned ON (production parity; the Preview cell in "
+                "the multiview needs it — user hard rule 2026-07-15, #767)"
+            )
     finally:
         ws.close()
 
@@ -2010,7 +2007,7 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
     for name in (
         "setup", "teardown", "record", "prod-scene", "switch", "program-scene",
-        "stream-status", "latency-check", "open-projectors", "ensure-studio-mode-off",
+        "stream-status", "latency-check", "open-projectors", "ensure-studio-mode-on",
     ):
         p = sub.add_parser(name)
         p.add_argument("--host", required=True)
@@ -2106,7 +2103,7 @@ def main():
      "program-scene": program_scene, "rig-busy-check": rig_busy_check,
      "stream-status": stream_status, "latency-check": latency_check,
      "open-projectors": open_projectors,
-     "ensure-studio-mode-off": ensure_studio_mode_off}[a.cmd](a)
+     "ensure-studio-mode-on": ensure_studio_mode_on}[a.cmd](a)
 
 
 if __name__ == "__main__":

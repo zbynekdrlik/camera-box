@@ -267,8 +267,8 @@ fn projector_count_preflight_runs_after_open_projectors_and_before_studio_mode()
         .find("projector count must be EXACTLY 1 Multiview + 1 Program")
         .expect("the #756 projector-count preflight must exist");
     let studio_idx = s
-        .find("imag Studio Mode must be OFF")
-        .expect("the #758 studio-mode-off preflight must exist");
+        .find("imag Studio Mode must be ON")
+        .expect("the #767 studio-mode-on preflight must exist (inverted from the #758 force-OFF)");
     assert!(
         open_idx < count_idx,
         "#756: the projector-count check must run AFTER open-projectors opens/confirms the pair \

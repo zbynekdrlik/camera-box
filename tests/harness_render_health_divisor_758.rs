@@ -22,13 +22,12 @@
 //!    projector windows, unrelated to the divisor mechanism itself, also fixed there).
 //!    `IMAG_DIVISOR_CAPABILITY_FAIL` now defaults to `"1"`.
 //! 3. imag STUDIO MODE must be OFF (a live finding discovered WHILE proving item 1 against the
-//!    real rig): Studio Mode is a SEPARATE render-budget consumer from the Multiview
-//!    (`.claude/skills/genlock/SKILL.md` #278) — a stale Studio-Mode-ON left over from an
-//!    earlier session intermittently failed the render-health preflight (activeFps down to ~57,
-//!    averageFrameRenderTime up to ~17ms) even with nothing else wrong. `obs_phase2.py
-//!    ensure-studio-mode-off` ALWAYS (idempotently) turns it OFF on imag before render-health is
-//!    measured — imag-ONLY, never strih/stream (those stay Studio-Mode-ON per a separate, hard,
-//!    unrelated user directive).
+//!    real rig): Studio Mode must be ON on EVERY broadcast box, imag included (user hard rule
+//!    2026-07-15 — without Studio the multiview Preview cell is dead). `obs_phase2.py
+//!    ensure-studio-mode-on` ALWAYS (idempotently) turns it ON on imag before render-health is
+//!    measured, so the measurement reflects the PRODUCTION state (this INVERTS the former #758
+//!    force-OFF step: the old Studio-ON render collapse was the pre-#767 distroav.so receiver
+//!    churn, fixed by the keep-alive build — imag measures 60fps/1.8ms with Studio ON now).
 //!
 //! Structural, source-text assertions (same discipline as the rest of this repo's harness suite
 //! — see tests/harness_e2e_execute_verdict_703.rs) since both items are read-only preflight
@@ -196,16 +195,23 @@ fn both_new_preflight_items_are_all_cambox_only_and_ordered_between_mv_liveness_
 // ---------------------------------------------------------------------------------------------
 
 #[test]
-fn imag_studio_mode_is_forced_off_before_render_health_is_measured() {
+fn imag_studio_mode_is_forced_on_before_render_health_is_measured() {
     let s = recording_e2e();
     assert!(
-        s.contains("obs_phase2.py\" ensure-studio-mode-off --host \"$IMAG_IP\""),
-        "#758: recording-e2e.sh must call obs_phase2.py ensure-studio-mode-off against imag \
-         (a documented #278 render-budget consumer) before measuring render health"
+        s.contains("obs_phase2.py\" ensure-studio-mode-on --host \"$IMAG_IP\""),
+        "#767: recording-e2e.sh must call obs_phase2.py ensure-studio-mode-on against imag \
+         (Studio is MUST-BE-ON on every broadcast box — the Preview cell needs it) before \
+         measuring render health"
+    );
+    assert!(
+        !s.contains("ensure-studio-mode-off"),
+        "#767: the former #758 force-OFF step must be GONE — turning Studio off on imag is \
+         banned (user hard rule 2026-07-15); render health is measured in the production \
+         Studio-ON state"
     );
     let studio_idx = s
-        .find("ensure-studio-mode-off")
-        .expect("the studio-mode-off preflight call must exist");
+        .find("ensure-studio-mode-on")
+        .expect("the studio-mode-on preflight call must exist");
     let render_health_idx = s
         .find("imag render-health preflight")
         .expect("render-health preflight must exist");
@@ -214,31 +220,32 @@ fn imag_studio_mode_is_forced_off_before_render_health_is_measured() {
         .expect("the MV/Program projector-open preflight must exist");
     assert!(
         projectors_idx < studio_idx,
-        "#758: Studio Mode must be forced off AFTER the MV/Program projectors are opened \
+        "#758: Studio Mode must be forced on AFTER the MV/Program projectors are opened \
          (same [0/8] preflight block, projectors first per the user's original binding demand)"
     );
     assert!(
         studio_idx < render_health_idx,
-        "#758: Studio Mode must be forced off BEFORE render-health is measured, so the \
-         measurement reflects the corrected steady state, not a stale Studio-Mode-ON reading"
+        "#767: Studio Mode must be forced on BEFORE render-health is measured, so the \
+         measurement reflects the real production state, not a stale Studio-OFF reading that \
+         would hide a Studio-ON render regression"
     );
 }
 
 #[test]
-fn obs_phase2_defines_and_wires_ensure_studio_mode_off() {
+fn obs_phase2_defines_and_wires_ensure_studio_mode_on() {
     let s = fs::read_to_string(manifest_dir().join("scripts/obs_phase2.py"))
         .expect("read scripts/obs_phase2.py");
     assert!(
-        s.contains("def ensure_studio_mode_off(a):"),
-        "#758: obs_phase2.py must define ensure_studio_mode_off"
+        s.contains("def ensure_studio_mode_on(a):"),
+        "#767: obs_phase2.py must define ensure_studio_mode_on"
     );
     assert!(
-        s.contains("\"ensure-studio-mode-off\": ensure_studio_mode_off"),
-        "#758: ensure_studio_mode_off must be wired into the subcommand dispatch table"
+        s.contains("\"ensure-studio-mode-on\": ensure_studio_mode_on"),
+        "#767: ensure_studio_mode_on must be wired into the subcommand dispatch table"
     );
     assert!(
         s.contains("GetStudioModeEnabled") && s.contains("SetStudioModeEnabled"),
-        "#758: ensure_studio_mode_off must read THEN conditionally set Studio Mode (idempotent, \
+        "#767: ensure_studio_mode_on must read THEN conditionally set Studio Mode (idempotent, \
          never an unconditional write)"
     );
 }

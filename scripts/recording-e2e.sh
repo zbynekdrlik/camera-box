@@ -608,17 +608,17 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
     exit 1
   fi
 
-  # imag Studio Mode is a SEPARATE render-budget consumer from the Multiview (SKILL.md #278:
-  # "Studio Mode preview is a 2nd render-budget consumer at 60fps ... prod runs studio off").
-  # Live-caught (2026-07-14): a stale Studio-Mode-ON left over from an earlier session
-  # intermittently failed the render-health preflight below (activeFps down to ~57, render time
-  # up to ~17ms) even with NOTHING else wrong — confirmed by direct A/B rig measurement (studio
-  # ON: ~57fps/15-17ms/up to ~4% renderSkip; studio OFF: clean ~60fps/8-9ms/0%). ALWAYS
-  # (idempotently) turn it OFF on imag before measuring render health — never let a stale toggle
-  # intermittently fail this preflight or degrade a real recording. imag-ONLY: strih/stream's
-  # Studio Mode stays ALWAYS ON per the separate, unrelated, hard user directive for those boxes.
-  echo "[0/8] imag Studio Mode must be OFF (a documented render-budget consumer, #758)"
-  python3 "$HERE/obs_phase2.py" ensure-studio-mode-off --host "$IMAG_IP" 2>&1 | sed 's/^/    [imag studio-mode] /'
+  # imag Studio Mode must be ON — INVERTED from the former #758 force-OFF step (user hard rule,
+  # 2026-07-15: without Studio Mode the multiview's Preview cell is DEAD, so Studio is "MUST BE"
+  # on EVERY broadcast box, imag included — never a render knob to toggle by mood). The old
+  # force-OFF was written when Studio ON collapsed imag's render (38-42fps/~23ms) — root cause
+  # was the pre-#767 distroav.so receiver teardown churn, NOT the preview pass: with the #767
+  # keep-alive build imag measures 60.0fps/~1.8ms WITH Studio ON + MV + 7 cams + overlays
+  # (2026-07-15). Forcing ON here also makes the render-health preflight below measure the REAL
+  # production state — a Studio-ON render regression must fail the gate, not hide behind a
+  # temporarily-toggled-off preview.
+  echo "[0/8] imag Studio Mode must be ON (production parity — Preview cell needs it, #767)"
+  python3 "$HERE/obs_phase2.py" ensure-studio-mode-on --host "$IMAG_IP" 2>&1 | sed 's/^/    [imag studio-mode] /'
 fi
 
 # Capture-delivery-rate preflight (#656 prevention item 2): the appliance's OWN capture loop
