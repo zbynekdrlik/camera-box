@@ -2830,8 +2830,25 @@ continuing WITHOUT the imag partial; the merge below will omit --merge-partials 
       python3 "$HERE/recording-e2e-report.py" --json "$REPORT_JSON" --out "$REPORT_PNG" || \
         echo "WARNING: report render failed (non-fatal; JSON at $REPORT_JSON)" >&2
     fi
+    # #756 Member 3 — live per-source genlock latency pins + recommended pins, gathered AFTER
+    # the verdict JSON exists (it needs this run's OWN delivery-latency table) and BEFORE the
+    # Discord report composes (so the pins land in the SAME report, not a follow-up message).
+    # Best-effort, fail-open like the report send itself below: a pins-snapshot failure (a box
+    # unreachable, phase-sync-gate missing) must never affect $GATE or block the report — the
+    # report composer simply omits the pins section when the file is missing/empty (see
+    # e2e_discord_report.py's _section_latency_pins: "never fabricated — this run didn't gather
+    # a pins snapshot").
+    PINS_JSON="/tmp/latency-pins-${RUN_ID}.json"
+    echo "    [8/8f-pre] #756: live latency-pins snapshot (strih+imag WS reads + recommended pins from this run's delivery table)"
+    if ! python3 "$HERE/latency_pins_snapshot.py" \
+        --strih-host "$STRIH" --imag-host "$IMAG_IP" --stream-host "$STREAM" \
+        --password "${OBS_PASSWORD:-}" \
+        --verdict-json "$REPORT_JSON" --out "$PINS_JSON" 2>&1 | sed 's/^/    [pins-snapshot] /'; then
+      echo "WARNING: #756 latency_pins_snapshot.py failed — Discord report will omit the pins section (fail-open, gate unaffected)." >&2
+      PINS_JSON=""
+    fi
     echo "    [8/8f] #711: Discord full-report (fail-open — never affects \$GATE below)"
-    e2e_discord_report_send "$REPORT_JSON" "$RUN_ID" "$GATE" "$DURATION"
+    e2e_discord_report_send "$REPORT_JSON" "$RUN_ID" "$GATE" "$DURATION" "$PINS_JSON"
     echo "    --- [8/8e] cleanup plan (JSON secured at $REPORT_JSON) ---"
     if [ "${KEEP_RECORDINGS:-0}" = "1" ]; then
       echo "    KEEP_RECORDINGS=1 — skipping the recording-cleanup plan (debugging opt-out, #652)."

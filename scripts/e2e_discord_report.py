@@ -55,8 +55,8 @@ import json
 import re
 import sys
 
-CAMERA_ORDER = ["cam1", "cam2", "cam3", "cam4", "cam5", "cam6"]
-_CAM_KEY_RE = re.compile(r"^cam[1-6]$")
+CAMERA_ORDER = ["cam1", "cam2", "cam3", "cam4", "cam5", "cam6", "cam7"]
+_CAM_KEY_RE = re.compile(r"^cam[1-7]$")
 
 # Optional, best-effort annotations only — the technical description above each line is always
 # accurate on its own; a stale/closed ticket number here never changes what is reported, it just
@@ -85,6 +85,10 @@ def _fmt_ms(x, nd=1):
         return f"{float(x):.{nd}f}ms"
     except (TypeError, ValueError):
         return "N/A"
+
+
+def _pin_or_na(v):
+    return f"{v:.0f}ms" if isinstance(v, (int, float)) else "N/A"
 
 
 def _pass_glyph(ok):
@@ -385,6 +389,99 @@ def _section_presentation_cadence(verdict):
     return "\n".join(lines)
 
 
+def _section_latency_pins(verdict, meta):
+    """#756 Member 3 -- the user's REPEATED, previously-unmet request: per-camera CONFIGURED
+    genlock latency pins (live-read over WS at run time, never hardcoded) next to this run's
+    OWN measured delivery p50, plus the computed RECOMMENDED pin set for the next iteration.
+    The fused E2E's own program scene-switching already measures every source's delivery -- this
+    turns that into the per-source latency calibrator the user has asked for repeatedly
+    ("vysledok syncu a nastavenych latencii pre jednotlive cam sourcy... sucastou velkeho e2e
+    testu").
+
+    `meta["pins"]` (optional -- this whole section is skipped, never fabricated, when absent) is
+    a dict gathered by scripts/latency_pins_snapshot.py (a separate, impure, WS-driven script --
+    this function stays a PURE formatter, no network/subprocess I/O, matching compose_report's
+    own contract):
+        {
+          "strih": {"cam1": {"main_ms": 3, "mv_ms": 3}, ...},   # live GetInputSettings reads
+          "imag":  {"cam1": {"main_ms": 3, "mv_ms": 3}, ...},   # (both optional per-box)
+          "stream_hold_active_ms": 952,                          # live 'NDI 2ME PGM' pin
+          "av_sync_last": {"applied_latency_ms": 952, "offset_ms": -7.24, "source": "NDI 2ME PGM",
+                            "calibrated_at": "..."},              # ~/.camera-box/av-sync-last.json
+          "recommended_pins_ms": {"cam1": 3, "cam2": 13, ...}     # phase-sync-gate output,
+                                                                    # computed from THIS run's
+                                                                    # own delivery p50 table
+        }
+    A camera/box missing from `pins` is reported N/A for that cell, never silently omitted from
+    the table -- the user asked to flag mismatches loudly, not hide gaps.
+    """
+    pins = meta.get("pins")
+    if not pins:
+        return None  # never fabricated -- this run didn't gather a pins snapshot
+
+    cams = _cameras_present(verdict) or list(CAMERA_ORDER)
+    delivery = _g(verdict, "all_cambox_delivery_latency", default={})
+    strih_pins = pins.get("strih") or {}
+    imag_pins = pins.get("imag") or {}
+    recommended = pins.get("recommended_pins_ms") or {}
+
+    lines = ["**Nastavené latencie per kamera (živé z WS, nie napevno) + odporúčanie**"]
+    any_mismatch = False
+    for cam in cams:
+        s = strih_pins.get(cam) or {}
+        i = imag_pins.get(cam) or {}
+        s_main, s_mv = s.get("main_ms"), s.get("mv_ms")
+        i_main, i_mv = i.get("main_ms"), i.get("mv_ms")
+        p50 = _g(delivery, cam, "p50_ms")
+        rec = recommended.get(cam)
+
+        mismatch = False
+        if s_main is not None and s_mv is not None and s_main != s_mv:
+            mismatch = True
+        if i_main is not None and i_mv is not None and i_main != i_mv:
+            mismatch = True
+        any_mismatch = any_mismatch or mismatch
+
+        strih_str = f"strih={_pin_or_na(s_main)}" if s_main is not None else "strih=N/A"
+        if s_mv is not None and s_mv != s_main:
+            strih_str += f"(MV={_pin_or_na(s_mv)}!)"
+        imag_str = ""
+        if imag_pins:
+            imag_str = f", imag={_pin_or_na(i_main)}"
+            if i_mv is not None and i_mv != i_main:
+                imag_str += f"(MV={_pin_or_na(i_mv)}!)"
+
+        flag = " ⚠️ PARITA main≠MV" if mismatch else ""
+        rec_str = f", odporúčané={_pin_or_na(rec)}" if rec is not None else ""
+        lines.append(
+            f"  {'⚠️' if mismatch else '•'} {cam}: {strih_str}{imag_str}, "
+            f"p50 tento beh={_pin_or_na(p50)}{rec_str}{flag}"
+        )
+
+    stream_active = pins.get("stream_hold_active_ms")
+    av_last = pins.get("av_sync_last") or {}
+    applied = av_last.get("applied_latency_ms")
+    lines.append(
+        f"  Stream 'NDI 2ME PGM' hold: živé z WS={_pin_or_na(stream_active)}, "
+        f"posledný zdroj pravdy (av-sync-last.json)={_pin_or_na(applied)}"
+        + (
+            " ⚠️ NEZHODA — box beží s iným holdom, než je zapísaný ako naposledy kalibrovaný"
+            if (
+                stream_active is not None
+                and applied is not None
+                and stream_active != applied
+            )
+            else ""
+        )
+    )
+    if any_mismatch:
+        lines.append(
+            "  ⚠️ main≠MV klon nesie inú latenciu ako hlavný zdroj tej istej kamery — "
+            "monitorovací obraz (multiview) potom sedí inak ako program (parity violation)"
+        )
+    return "\n".join(lines)
+
+
 def _section_residual_events(verdict):
     """#707 EVENT-FORENSICS -- the per-event residual copy/gap breakdown (src/residual_events.rs),
     surfaced per the user's binding #707 decision ("every residual deviation must have its own
@@ -419,7 +516,9 @@ def compose_report(verdict: dict, meta: dict | None = None) -> str:
     """Pure: verdict JSON dict + small meta dict -> Slovak markdown report text.
 
     `meta` keys (all optional): run_id, event ("CI PR gate" | "manuálny beh (recording-e2e.sh)" |
-    any free label), duration_secs, gate_exit (the merge recording-verdict process exit code).
+    any free label), duration_secs, gate_exit (the merge recording-verdict process exit code),
+    pins (the #756 Member 3 live-pins snapshot dict -- see _section_latency_pins's own docstring
+    for its shape; entirely optional, the section is skipped when absent).
     """
     meta = meta or {}
     sections = [
@@ -431,6 +530,9 @@ def compose_report(verdict: dict, meta: dict | None = None) -> str:
         _section_overall(verdict, meta),
         _section_presentation_cadence(verdict),
     ]
+    pins_section = _section_latency_pins(verdict, meta)
+    if pins_section is not None:
+        sections.append(pins_section)
     residual_section = _section_residual_events(verdict)
     if residual_section is not None:
         sections.append(residual_section)
@@ -466,6 +568,13 @@ def main(argv=None):
     ap.add_argument("--duration", type=int, default=None, dest="duration_secs")
     ap.add_argument("--gate-exit", type=int, default=None, dest="gate_exit")
     ap.add_argument(
+        "--pins-json",
+        default=None,
+        help="#756 Member 3: path to the JSON scripts/latency_pins_snapshot.py wrote (live "
+        "genlock latency pins + recommended pins) -- optional; the pins report section is "
+        "skipped entirely when not supplied",
+    )
+    ap.add_argument(
         "--json-chunks",
         action="store_true",
         help="print a JSON array of Discord-sized message chunks instead of the raw text",
@@ -475,11 +584,17 @@ def main(argv=None):
     with open(args.json, encoding="utf-8") as f:
         verdict = json.load(f)
 
+    pins = None
+    if args.pins_json:
+        with open(args.pins_json, encoding="utf-8") as f:
+            pins = json.load(f)
+
     meta = {
         "run_id": args.run_id,
         "event": args.event,
         "duration_secs": args.duration_secs,
         "gate_exit": args.gate_exit,
+        "pins": pins,
     }
     text = compose_report(verdict, meta)
     if args.json_chunks:

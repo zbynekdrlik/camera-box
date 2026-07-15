@@ -42,8 +42,11 @@ set -euo pipefail
 # NEVER overwritten by whatever token value happens to sit in the local .env.
 # #notifications is now a LOGGED FALLBACK, used ONLY when the owner vars are genuinely absent.
 
-# e2e_discord_report_send <verdict-json-path> <run-id> <gate-exit-code> <duration-secs>
+# e2e_discord_report_send <verdict-json-path> <run-id> <gate-exit-code> <duration-secs> [pins-json-path]
 # Public entrypoint — ALWAYS returns 0 (fail-open). See header comment above.
+# #756 Member 3: the optional 5th arg is the path scripts/latency_pins_snapshot.py wrote (live
+# genlock latency pins + this run's own recommended pins) — omit it (or pass "") to compose the
+# report WITHOUT the pins section, unchanged from before #756.
 e2e_discord_report_send() {
   local _e2e_prev_errexit=0
   case "$-" in *e*) _e2e_prev_errexit=1 ;; esac
@@ -54,7 +57,7 @@ e2e_discord_report_send() {
 }
 
 _e2e_discord_report_send_inner() {
-  local verdict_json="$1" run_id="$2" gate_exit="$3" duration_secs="$4"
+  local verdict_json="$1" run_id="$2" gate_exit="$3" duration_secs="$4" pins_json="${5:-}"
   local here
   here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -106,10 +109,15 @@ _e2e_discord_report_send_inner() {
     event="manuálny beh (recording-e2e.sh)"
   fi
 
+  local pins_arg=()
+  if [ -n "$pins_json" ] && [ -s "$pins_json" ]; then
+    pins_arg=(--pins-json "$pins_json")
+  fi
+
   local chunks_json
   chunks_json="$(python3 "$here/../e2e_discord_report.py" \
     --json "$verdict_json" --run-id "$run_id" --event "$event" \
-    --duration "$duration_secs" --gate-exit "$gate_exit" --json-chunks 2>&1)"
+    --duration "$duration_secs" --gate-exit "$gate_exit" "${pins_arg[@]}" --json-chunks 2>&1)"
   if [ $? -ne 0 ]; then
     echo "WARNING: #711 e2e_discord_report_send: report composer failed — skipping Discord report (fail-open). Output:" >&2
     echo "$chunks_json" >&2

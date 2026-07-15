@@ -524,7 +524,10 @@ fn recording_e2e_execute_mode_runs_the_merge_and_propagates_its_exit_code() {
     // creep); the window itself is an arbitrary "comfortably larger than the text between them"
     // implementation constant, never a correctness bound, so it grows with genuinely new code
     // between the two anchors rather than the anchors moving.
-    let window = &s[exec_merge_block..(exec_merge_block + 2500).min(s.len())];
+    // #756: widened from 2500 to 3800 bytes -- the Member 3 live-latency-pins snapshot step
+    // (scripts/latency_pins_snapshot.py invocation + its fail-open comment block) legitimately
+    // added ~800 bytes between the merge call and the exit, same justified-growth pattern as #758.
+    let window = &s[exec_merge_block..(exec_merge_block + 3800).min(s.len())];
     assert!(
         window.contains(r#"exit "$GATE""#),
         "#703: after running the real merge, the branch must `exit \"$GATE\"` (the merge's own \
