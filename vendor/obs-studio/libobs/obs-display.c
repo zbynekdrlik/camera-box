@@ -268,8 +268,19 @@ void render_display(struct obs_display *display)
 	 * skipped at most OBS_DISPLAY_MAX_CONSECUTIVE_SKIPS ticks in a row; the (K+1)-th over-budget
 	 * tick is FORCED to render (and the per-display skip counter resets after the draw, below).
 	 * So the Multiview throttles to a reduced-but-NONZERO cadence (~15fps at K=3) instead of
-	 * freezing — decouple, not disable (the multiview-must-not-affect-program rule). */
+	 * freezing — decouple, not disable (the multiview-must-not-affect-program rule).
+	 *
+	 * #756 (imag-nb live finding): the budget gate above is SOFT — a monitoring display cheap
+	 * enough to always fit under the remaining budget (imag's Multiview: ~6.7-10.45ms EWMA
+	 * under a ~15ms budget) is NEVER actually throttled by it, even though render_divisor
+	 * marks it for 1/divisor cadence. render_frame_counter is a hard per-instance tick
+	 * counter, incremented every tick this display is throttleable (regardless of
+	 * skip/render outcome); obs_display_should_skip() uses it to ALWAYS skip a
+	 * cadence-ineligible tick regardless of cost/budget, closing that gap while the
+	 * existing budget-based over-budget throttle (and its #293 floor) still applies on top,
+	 * on the cadence-eligible ticks. */
 	if (display->render_divisor > 1) {
+		display->render_frame_counter++;
 		const uint64_t interval = obs->video.video_frame_interval_ns;
 		const uint64_t tick_start = obs->video.graphics_frame_start_ns;
 		const uint64_t ewma = display->render_ewma_ns;
@@ -277,8 +288,8 @@ void render_display(struct obs_display *display)
 			const uint64_t now = os_gettime_ns();
 			const uint64_t elapsed = (now > tick_start) ? (now - tick_start) : 0;
 			const uint64_t budget = interval - interval / 10; /* 90% safety margin */
-			if (obs_display_should_skip(display->render_divisor, ewma, elapsed, budget,
-						    display->render_consecutive_skips)) {
+			if (obs_display_should_skip(display->render_divisor, display->render_frame_counter,
+						    ewma, elapsed, budget, display->render_consecutive_skips)) {
 				display->render_consecutive_skips++;
 				return;
 			}

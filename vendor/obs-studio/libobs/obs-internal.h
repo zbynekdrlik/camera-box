@@ -317,10 +317,18 @@ struct obs_display {
 	 * render_consecutive_skips (#293) is the anti-starvation counter: how many ticks in a row
 	 * an over-budget monitoring display has been skipped — capped at
 	 * OBS_DISPLAY_MAX_CONSECUTIVE_SKIPS (obs-display-budget.h) so the Multiview can never
-	 * freeze; reset to 0 after every real render. Per-instance, graphics-thread-only. */
+	 * freeze; reset to 0 after every real render. render_frame_counter (#756) is a hard
+	 * cadence counter, incremented every tick this display is considered (regardless of
+	 * skip/render outcome) — obs_display_should_skip() uses
+	 * `frame_counter % render_divisor != 0` to ALWAYS skip a throttleable display on an
+	 * ineligible tick, closing the gap where a display cheap enough to always fit under
+	 * budget was never actually throttled by the #278/#293 budget gate alone (imag-nb live
+	 * finding: the Multiview rendered every tick despite render_divisor=2). All three
+	 * fields are per-instance, graphics-thread-only. */
 	uint64_t render_ewma_ns;
 	uint32_t render_divisor;
 	uint32_t render_consecutive_skips;
+	uint32_t render_frame_counter;
 
 	struct obs_display *next;
 	struct obs_display **prev_next;

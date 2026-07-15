@@ -2059,11 +2059,18 @@ mod vendored_source {
         );
         assert!(
             src.contains(
-                "if (obs_display_should_skip(display->render_divisor, ewma, elapsed, budget,"
+                "if (obs_display_should_skip(display->render_divisor, display->render_frame_counter, ewma, elapsed, budget,"
             ),
-            "{OBS_DISPLAY}: #278/#293 — render_display() no longer calls obs_display_should_skip(); \
-             the adaptive budget-skip gate is gone and the multiview would steal the 60fps \
-             program budget again."
+            "{OBS_DISPLAY}: #278/#293/#756 — render_display() no longer calls \
+             obs_display_should_skip() with the frame_counter-carrying signature; the adaptive \
+             budget-skip gate (or the #756 hard cadence floor) is gone and the multiview would \
+             steal the 60fps program budget, or never actually throttle, again."
+        );
+        assert!(
+            src.contains("display->render_frame_counter++;"),
+            "{OBS_DISPLAY}: #756 — render_display() no longer bumps render_frame_counter every \
+             tick; the hard cadence floor has nothing to count and a cheap monitoring display \
+             would render every tick again (the imag-nb live regression)."
         );
         assert!(
             src.contains("display->render_consecutive_skips++;"),
@@ -2105,6 +2112,12 @@ mod vendored_source {
             "{OBS_DISPLAY_BUDGET}: #293 — the anti-starvation floor (skip an over-budget display \
              only while consecutive_skips < K) is gone; the #278 freeze returns."
         );
+        assert!(
+            bud.contains("if ((frame_counter % render_divisor) != 0)"),
+            "{OBS_DISPLAY_BUDGET}: #756 — the hard cadence-floor term is gone; a monitoring \
+             display cheap enough to always fit under budget would render every tick again \
+             instead of throttling to 1/render_divisor (the imag-nb live regression)."
+        );
     }
 
     #[test]
@@ -2131,6 +2144,12 @@ mod vendored_source {
             hdr.contains("uint64_t graphics_frame_start_ns;"),
             "{OBS_INTERNAL}: #278 — obs_core_video.graphics_frame_start_ns field missing; the \
              adaptive skip cannot measure how much budget the program already used."
+        );
+        assert!(
+            hdr.contains("uint32_t render_frame_counter;"),
+            "{OBS_INTERNAL}: #756 — obs_display.render_frame_counter field missing; the hard \
+             cadence floor has nowhere to count ticks and a cheap monitoring display would \
+             render every tick again (the imag-nb live regression)."
         );
     }
 
@@ -2572,14 +2591,21 @@ mod distroav_source {
         // that lets the multiview steal the 60fps program budget again.
         let wf = squish(&vendor_file(WINDOWS_GENLOCK_WF));
         assert!(
-            wf.contains("if (obs_display_should_skip(display->render_divisor, ewma, elapsed, budget,"),
-            "{WINDOWS_GENLOCK_WF}: #278/#293 — the production build no longer asserts the adaptive \
-             budget-skip gate (obs_display_should_skip call); re-add the pwsh gate."
+            wf.contains("if (obs_display_should_skip(display->render_divisor, display->render_frame_counter, ewma, elapsed, budget,"),
+            "{WINDOWS_GENLOCK_WF}: #278/#293/#756 — the production build no longer asserts the \
+             adaptive budget-skip gate with the frame_counter-carrying signature \
+             (obs_display_should_skip call); re-add the pwsh gate."
         );
         assert!(
             wf.contains("return consecutive_skips < OBS_DISPLAY_MAX_CONSECUTIVE_SKIPS;"),
             "{WINDOWS_GENLOCK_WF}: #293 — the production build no longer asserts the anti-starvation \
              floor in obs-display-budget.h; re-add the pwsh gate (the multiview could freeze)."
+        );
+        assert!(
+            wf.contains("if ((frame_counter % render_divisor) != 0)"),
+            "{WINDOWS_GENLOCK_WF}: #756 — the production build no longer asserts the hard \
+             cadence-floor term in obs-display-budget.h; re-add the pwsh gate (a cheap \
+             monitoring display would never actually throttle)."
         );
         assert!(
             wf.contains("display->render_ewma_ns = prev ? (prev * 3 + dur) / 4 : dur;"),
@@ -2602,16 +2628,22 @@ mod distroav_source {
         let wf = squish(&vendor_file(WINDOWS_GENLOCK_FAST_WF));
         assert!(
             wf.contains(
-                "if (obs_display_should_skip(display->render_divisor, ewma, elapsed, budget,"
+                "if (obs_display_should_skip(display->render_divisor, display->render_frame_counter, ewma, elapsed, budget,"
             ),
-            "{WINDOWS_GENLOCK_FAST_WF}: #278/#293 — the FAST build does not assert the adaptive \
-             budget-skip gate (obs_display_should_skip call); add the pwsh gate, mirroring \
-             windows-genlock.yml."
+            "{WINDOWS_GENLOCK_FAST_WF}: #278/#293/#756 — the FAST build does not assert the \
+             adaptive budget-skip gate with the frame_counter-carrying signature \
+             (obs_display_should_skip call); add the pwsh gate, mirroring windows-genlock.yml."
         );
         assert!(
             wf.contains("return consecutive_skips < OBS_DISPLAY_MAX_CONSECUTIVE_SKIPS;"),
             "{WINDOWS_GENLOCK_FAST_WF}: #293 — the FAST build does not assert the anti-starvation \
              floor in obs-display-budget.h; add the pwsh gate (the multiview could freeze)."
+        );
+        assert!(
+            wf.contains("if ((frame_counter % render_divisor) != 0)"),
+            "{WINDOWS_GENLOCK_FAST_WF}: #756 — the FAST build does not assert the hard \
+             cadence-floor term in obs-display-budget.h; add the pwsh gate (a cheap monitoring \
+             display would never actually throttle)."
         );
         assert!(
             wf.contains("display->render_ewma_ns = prev ? (prev * 3 + dur) / 4 : dur;"),

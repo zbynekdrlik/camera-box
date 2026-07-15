@@ -307,25 +307,28 @@ jobs:
         shell: pwsh
         run: |
           $disp = (Get-Content "vendor/obs-studio/libobs/obs-display.c" -Raw) -replace '\s+', ' '
-          if ($disp -notmatch [regex]::Escape('if (obs_display_should_skip(display->render_divisor, ewma, elapsed, budget,')) { Write-Error "obs-display.c: #278/#293 adaptive budget-skip gate gone — the multiview would steal the 60fps program budget"; exit 1 }
+          if ($disp -notmatch [regex]::Escape('if (obs_display_should_skip(display->render_divisor, display->render_frame_counter, ewma, elapsed, budget,')) { Write-Error "obs-display.c: #278/#293 adaptive budget-skip gate gone — the multiview would steal the 60fps program budget"; exit 1 }
+          if ($disp -notmatch [regex]::Escape('display->render_frame_counter++;')) { Write-Error "obs-display.c: #756 hard cadence-floor counter not bumped — a cheap multiview would never actually throttle"; exit 1 }
           if ($disp -notmatch [regex]::Escape('display->render_consecutive_skips++;')) { Write-Error "obs-display.c: #293 anti-starvation skip counter not bumped — the multiview could freeze again"; exit 1 }
           if ($disp -notmatch [regex]::Escape('const uint64_t budget = interval - interval / 10;')) { Write-Error "obs-display.c: #278 90% frame-budget gone"; exit 1 }
           if ($disp -notmatch [regex]::Escape('display->render_ewma_ns = prev ? (prev * 3 + dur) / 4 : dur;')) { Write-Error "obs-display.c: #278 render-cost EWMA update gone — the budget gate cannot learn a display is heavy"; exit 1 }
           if ($disp -notmatch [regex]::Escape('void obs_display_set_render_divisor(obs_display_t *display, uint32_t divisor)')) { Write-Error "obs-display.c: #278 obs_display_set_render_divisor impl gone"; exit 1 }
           $bud = (Get-Content "vendor/obs-studio/libobs/obs-display-budget.h" -Raw) -replace '\s+', ' '
           if ($bud -notmatch [regex]::Escape('return consecutive_skips < OBS_DISPLAY_MAX_CONSECUTIVE_SKIPS;')) { Write-Error "obs-display-budget.h: #293 anti-starvation floor gone — an over-budget multiview would freeze forever"; exit 1 }
+          if ($bud -notmatch [regex]::Escape('if ((frame_counter % render_divisor) != 0)')) { Write-Error "obs-display-budget.h: #756 hard cadence-floor term gone — a cheap multiview would never actually throttle to 1/divisor"; exit 1 }
           $vid = (Get-Content "vendor/obs-studio/libobs/obs-video.c" -Raw) -replace '\s+', ' '
           if ($vid -notmatch [regex]::Escape('obs->video.graphics_frame_start_ns = frame_start;')) { Write-Error "obs-video.c: #278 per-tick start no longer published — the adaptive skip loses its elapsed reference"; exit 1 }
           $hdr = (Get-Content "vendor/obs-studio/libobs/obs-internal.h" -Raw) -replace '\s+', ' '
           if ($hdr -notmatch [regex]::Escape('uint64_t render_ewma_ns;')) { Write-Error "obs-internal.h: #278 obs_display.render_ewma_ns field gone"; exit 1 }
           if ($hdr -notmatch [regex]::Escape('uint64_t graphics_frame_start_ns;')) { Write-Error "obs-internal.h: #278 obs_core_video.graphics_frame_start_ns field gone"; exit 1 }
+          if ($hdr -notmatch [regex]::Escape('uint32_t render_frame_counter;')) { Write-Error "obs-internal.h: #756 obs_display.render_frame_counter field gone — the hard cadence floor has nowhere to count ticks"; exit 1 }
           $api = (Get-Content "vendor/obs-studio/libobs/obs.h" -Raw) -replace '\s+', ' '
           if ($api -notmatch [regex]::Escape('EXPORT void obs_display_set_render_divisor(obs_display_t *display, uint32_t divisor)')) { Write-Error "obs.h: #278 obs_display_set_render_divisor not EXPORTed — frontend cannot link it"; exit 1 }
           $proj = (Get-Content "vendor/obs-studio/frontend/widgets/OBSProjector.cpp" -Raw) -replace '\s+', ' '
           if ($proj -notmatch [regex]::Escape('if (isMultiview) obs_display_set_render_divisor(GetDisplay(), 2)')) { Write-Error "OBSProjector.cpp: #278 multiview no longer marks render_divisor=2 — it would not be throttled"; exit 1 }
           $bqr = (Get-Content "vendor/distroav/src/burn-qr.hpp" -Raw) -replace '\s+', ' '
           if ($bqr -notmatch [regex]::Escape('std::memset(row, 0xFF,')) { Write-Error "burn-qr.hpp: #275 bulk-fill (per-row white memset) gone — burn render reverted to the slow per-pixel path that overran the 60fps budget"; exit 1 }
-          Write-Output "#278 multiview adaptive budget-skip decouple + #275 bulk-fill burn render present — OK"
+          Write-Output "#278 multiview adaptive budget-skip decouple + #756 cadence floor + #275 bulk-fill burn render present — OK"
 
       # #85: assert the #78 "B′" real-wall-clock emit-timecode patch is present in the
       # vendored DistroAV OUTPUT source BEFORE the 150-min build, so a future `git
