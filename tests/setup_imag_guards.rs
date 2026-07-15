@@ -2720,3 +2720,150 @@ fn setup_imag_enables_and_verifies_satellite_service_731() {
          and hope). Got:\n{region}"
     );
 }
+
+// ============================================================================================
+// #756 (live wedge, 2026-07-15) — the genlock hot-swap must ALSO swap libobs-opengl.so.30, a
+// SEPARATE shared library (add_library(libobs-opengl SHARED), vendor/obs-studio/libobs-opengl/
+// CMakeLists.txt) from libobs.so.30. Fix B (commits 0632cb548/ceadfda58) lives ENTIRELY in
+// vendor/obs-studio/libobs-opengl/gl-x11-egl.c -- but the #460/#499 hot-swap only ever named
+// LIBOBS_REAL/DISTROAV_REAL/OBS_FRONTEND_REAL, never libobs-opengl.so.30, so EVERY genlock
+// hot-swap up to and including today's GENLOCK_BUILD_SHA.txt marker silently left the ORIGINAL
+// (July 4, pre-Fix-B) libobs-opengl.so.30 in place on imag-nb -- the SHA marker claimed the
+// current dev HEAD was deployed while the actual loaded library was 11 days stale. A fresh wedge
+// was captured live (06:12, 2026-07-15) blocking in the EXACT xcb_wait_for_reply <- 
+// get_window_geometry call chain Fix B was supposed to have eliminated -- direct proof the
+// deployed bytes never changed. Mirrors the #499 frontend-binary fix exactly (same shape: a
+// SEPARATE artifact silently excluded from the swap loop).
+// ============================================================================================
+
+/// The hot-swap must overwrite the REAL libobs-opengl.so.30 path, not just libobs.so.30.
+#[test]
+fn setup_imag_hotswaps_libobs_opengl_756() {
+    let body = read(SETUP);
+    assert!(
+        body.contains(r#"LIBOBS_OPENGL_REAL="/usr/lib/x86_64-linux-gnu/libobs-opengl.so.30""#),
+        "{SETUP} must define LIBOBS_OPENGL_REAL -- the genlock hot-swap must ALSO swap \
+         libobs-opengl.so.30, a SEPARATE shared library from libobs.so.30 that carries the \
+         #756 Fix B X11/EGL client-size cache (gl-x11-egl.c). Without this the deployed box \
+         silently keeps running a stale libobs-opengl.so.30 forever, no matter how many times \
+         the hot-swap 'succeeds' and updates its SHA marker."
+    );
+    assert!(
+        body.contains(r#"BUNDLE_LIBOBS_OPENGL="$GENLOCK_TMP/bundle/lib/x86_64-linux-gnu/libobs-opengl.so.30""#),
+        "{SETUP} must resolve the bundle's libobs-opengl.so.30 path -- the genlock bundle \
+         (obs-genlock-linux-x86_64) already carries it (confirmed live in \
+         /opt/obs-genlock/BUNDLE_MANIFEST.json: lib/x86_64-linux-gnu/libobs-opengl.so.30)"
+    );
+}
+
+/// libobs-opengl.so.30's sha must be looked up via manifest_sha_for_path and actually
+/// verify_file_sha'd -- the same integrity discipline already applied to libobs.so.30/
+/// distroav.so/bin/obs (#120/#499).
+#[test]
+fn setup_imag_verifies_libobs_opengl_via_bundle_manifest_756() {
+    let body = read(SETUP);
+    let want = body
+        .find("WANT_LIBOBS_OPENGL_SHA=\"$(manifest_sha_for_path")
+        .expect("libobs-opengl.so.30 expected sha must be looked up via manifest_sha_for_path");
+    let verify = body
+        .find("verify_file_sha \"$BUNDLE_LIBOBS_OPENGL\" \"$WANT_LIBOBS_OPENGL_SHA\"")
+        .expect("bundle libobs-opengl.so.30 must actually be verify_file_sha'd against its looked-up sha");
+    assert!(
+        want < verify,
+        "{SETUP}: WANT_LIBOBS_OPENGL_SHA must be resolved BEFORE the verify_file_sha call"
+    );
+    assert!(
+        body.contains("'lib/x86_64-linux-gnu/libobs-opengl.so.30'"),
+        "{SETUP}: the manifest lookup for libobs-opengl.so.30 must use the literal manifest \
+         relpath 'lib/x86_64-linux-gnu/libobs-opengl.so.30' (matches the #120 \
+         BUNDLE_MANIFEST.json entry, live-confirmed on imag-nb)"
+    );
+}
+
+/// The stock PPA libobs-opengl.so.30 must be backed up ONCE (mirrors the existing
+/// STOCK_BACKUP guard for libobs.so.30/distroav.so -- same #185 bounded-backup discipline).
+#[test]
+fn setup_imag_backs_up_stock_libobs_opengl_once_756() {
+    let body = read(SETUP);
+    let stock_block_start = body
+        .find(r#"if [ ! -d "$STOCK_BACKUP" ]; then"#)
+        .expect("the stock backup guard block must exist");
+    let install = body
+        .find(r#"install -m 0644 -o root -g root "$BUNDLE_LIBOBS_OPENGL" "$LIBOBS_OPENGL_REAL""#)
+        .expect("the libobs-opengl.so.30 install call must exist");
+    assert!(
+        stock_block_start < install,
+        "{SETUP}: the stock backup block must run BEFORE libobs-opengl.so.30 is overwritten"
+    );
+    let stock_block_end = body[stock_block_start..]
+        .find("\n\tif [ ! -f \"$OBS_FRONTEND_STOCK_BACKUP\" ]")
+        .map(|i| stock_block_start + i)
+        .unwrap_or(install);
+    let stock_block = &body[stock_block_start..stock_block_end];
+    assert!(
+        stock_block.contains(r#"cp -a "$LIBOBS_OPENGL_REAL" "$STOCK_BACKUP/libobs-opengl.so.30""#),
+        "{SETUP}: the ONE-TIME stock backup block must ALSO copy libobs-opengl.so.30, mirroring \
+         the libobs.so.30/distroav.so stock backups already there. Got block:\n{stock_block}"
+    );
+}
+
+/// The PREVIOUS-build rollback backup (overwritten on every swap) must ALSO cover
+/// libobs-opengl.so.30 -- otherwise a rollback to "the previous deployed build" would silently
+/// leave libobs-opengl.so.30 on whatever it happened to be, defeating the rollback.
+#[test]
+fn setup_imag_previous_backup_covers_libobs_opengl_756() {
+    let body = read(SETUP);
+    assert!(
+        body.contains(r#"cp -a "$LIBOBS_OPENGL_REAL" "$PREV_BACKUP/libobs-opengl.so.30""#),
+        "{SETUP}: the PREV_BACKUP rollback dir must ALSO capture libobs-opengl.so.30 before the \
+         swap, mirroring the existing libobs.so.30/distroav.so/obs PREV_BACKUP copies"
+    );
+}
+
+/// libobs-opengl.so.30 install must preserve library permissions (0644), matching
+/// libobs.so.30/distroav.so (0755 is reserved for the executable frontend binary, #499).
+#[test]
+fn setup_imag_installs_libobs_opengl_with_library_perms_756() {
+    let body = read(SETUP);
+    assert!(
+        body.contains(r#"install -m 0644 -o root -g root "$BUNDLE_LIBOBS_OPENGL" "$LIBOBS_OPENGL_REAL""#),
+        "{SETUP} must `install -m 0644` libobs-opengl.so.30 -- a shared library (like \
+         libobs.so.30/distroav.so), not an executable"
+    );
+}
+
+/// A post-swap SONAME sanity check for libobs-opengl.so.30, mirroring the existing libobs.so.30
+/// SONAME check -- refuse a mismatched/wrong-ABI file.
+#[test]
+fn setup_imag_verifies_libobs_opengl_soname_postswap_756() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("SONAME.*\\[libobs-opengl\\.so\\.30\\]"),
+        "{SETUP} must readelf -d the swapped libobs-opengl.so.30 and grep its SONAME, mirroring \
+         the existing libobs.so.30 SONAME sanity check -- refuse a mismatched/wrong-ABI file"
+    );
+}
+
+/// The #472 no-op re-verify (cached-manifest byte re-check on an unchanged-SHA re-run) must ALSO
+/// cover libobs-opengl.so.30 -- otherwise a re-run could report "already deployed" while
+/// libobs-opengl.so.30 was tampered/reverted underneath the marker, exactly the class of bug
+/// this whole fix exists to close (a marker that lies about what bytes are actually on disk).
+#[test]
+fn setup_imag_noop_reverify_covers_libobs_opengl_756() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("WANT_LIBOBS_OPENGL_SHA_CACHED")
+            && body.contains("GOT_LIBOBS_OPENGL_SHA_CACHED")
+            && body.contains(r#"sha256sum "$LIBOBS_OPENGL_REAL""#),
+        "{SETUP}: the #472 cached-manifest re-verify (which decides whether a same-SHA re-run is \
+         a genuine no-op) must ALSO re-hash the currently-installed libobs-opengl.so.30 against \
+         the cached manifest -- otherwise a silently-reverted/tampered libobs-opengl.so.30 would \
+         never be caught on a no-op re-run, the exact 'marker lies about the bytes' bug class \
+         this fix exists to close"
+    );
+    assert!(
+        body.contains(r#"[ -f "$LIBOBS_OPENGL_REAL" ]"#),
+        "{SETUP}: the NOOP_VALID existence check must ALSO require libobs-opengl.so.30 to exist \
+         on disk, not just libobs.so.30/distroav.so/bin/obs"
+    );
+}
