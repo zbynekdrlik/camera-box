@@ -20,10 +20,11 @@
 //!
 //! Certified genlock values (read live from the working prod input `NDI cam5`,
 //! 2026-06-22): `ndi_sync` = 2 (SOURCE_TIMECODE / source timing), `genlock_fifo` =
-//! true, `ndi_behavior` = 2 (STOP_RESUME_LAST_FRAME), `ndi_recv_hw_accel` = true,
-//! `ndi_bw_mode` = 0 (highest), `latency` = 0 (NORMAL), `ndi_audio` = false,
-//! `ndi_framesync` = false, `ndi_fix_alpha_blending` = false. The two user knobs
-//! (`ndi_source_name`, `genlock_preload`) are NEVER forced.
+//! true, `ndi_behavior` = 2 (STOP_RESUME_LAST_FRAME) -- RE-CERTIFIED #764 (2026-07-15) to
+//! `ndi_behavior` = 0 (KEEP_ACTIVE), see tests/distroav_ndi_keepalive_764.rs --
+//! `ndi_recv_hw_accel` = true, `ndi_bw_mode` = 0 (highest), `latency` = 0 (NORMAL),
+//! `ndi_audio` = false, `ndi_framesync` = false, `ndi_fix_alpha_blending` = false. The two
+//! user knobs (`ndi_source_name`, `genlock_preload`) are NEVER forced.
 //!
 //! This is a SOURCE-presence guard (same convention as
 //! tests/distroav_source_config_lock.rs, tests/genlock_preload.rs,
@@ -92,7 +93,11 @@ fn genlock_certified_forcer_exists_and_sets_every_certified_key() {
     // dropped/weakened force fails AND an upstream property add can't reintroduce a live knob.
     let must_force: &[&str] = &[
         "{PROP_SYNC, false, PROP_SYNC_NDI_SOURCE_TIMECODE, false}",
-        "{PROP_BEHAVIOR, false, PROP_BEHAVIOR_STOP_RESUME_LAST_FRAME, false}",
+        // #764 (event-critical, 2026-07-15): re-certified from STOP_RESUME_LAST_FRAME to
+        // KEEP_ACTIVE -- STOP_RESUME_LAST_FRAME tore the receiver thread down on every hide,
+        // paying a full NDI reconnect on every program cut back to that camera. See
+        // tests/distroav_ndi_keepalive_764.rs for the full #764 patch guard.
+        "{PROP_BEHAVIOR, false, PROP_BEHAVIOR_KEEP_ACTIVE, false}",
         "{PROP_BANDWIDTH, false, PROP_BW_HIGHEST, false}",
         "{PROP_LATENCY, false, PROP_LATENCY_NORMAL, false}",
         "{PROP_TIMEOUT, false, PROP_TIMEOUT_KEEP_CONTENT, false}",
