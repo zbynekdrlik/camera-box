@@ -2331,6 +2331,18 @@ LED-wall crop) and is never touched. Never re-add an unconditional `SetSceneItem
 boot/relaunch path — a hard reboot's autostart seed wiping the operator's transforms is the exact
 2026-07-15 incident this guards.
 
+**Seed is OPERATOR-WINS by default; enforcement ONLY behind `--bootstrap` (#785):** the same
+principle generalized to ALL seed writes. A bare `imag_scenes.py` run only CREATES missing
+objects — it never re-binds an existing input's settings/latency, never re-mutes, never switches
+program scene, never toggles Studio Mode (live-proven: an operator's unmuted NDI CAM7 survives a
+bare reseed byte-identical). The enforcement set (bindings+latency self-heal, mutes, program=
+"Cam 1", Studio ON) runs ONLY with `--bootstrap`, passed by exactly TWO callers: the openbox
+autostart (boot) and the watchdog tier-a recovery (fresh OBS after relaunch — repo copy
+`scripts/imag-obs-watchdog.py` in parity). When adding ANY new seed write, decide its class
+explicitly: create-missing (always OK) vs enforce (must go behind `BOOTSTRAP or not item_existed`)
+— an unconditional write on a running production OBS is the "skripty mi kazia nastavenia" bug
+class, never "self-healing".
+
 **imag touchpad (`#779`):** libinput `Scrolling Pixel Distance` hard-caps at **50** (BadValue
 above it) — 50 is the gentlest scroll possible; persisted in
 `/etc/X11/xorg.conf.d/30-touchpad-tap.conf` together with Tapping/TappingDrag/NaturalScrolling.
