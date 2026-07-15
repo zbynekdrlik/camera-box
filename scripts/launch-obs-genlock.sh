@@ -84,14 +84,26 @@ ${kill_block}
 # (1) Clear stale crash sentinels so OBS does not pop the "Crash Detected" modal and hang headless.
 Remove-Item "\$env:APPDATA\\obs-studio\\.sentinel\\*" -Force -ErrorAction SilentlyContinue
 
-# (2) Launch obs64 with cwd = bin\\64bit (wrong cwd => "Failed to find locale/en-US.ini" broken OBS).
+# (2) Launch OBS via the box's OWN Start-Menu SHORTCUT ("OBS Studio.lnk") — the STANDARD launch
+#     path, so the box's own shortcut parameters are always honored (user directive 2026-07-15:
+#     "obs sa ma spustat standartne cez zastupcu", the params are PER-BOX — e.g. strih's shortcut
+#     carries --enable-media-stream --verbose, which the interkom VDO.ninja Browser source needs
+#     for camera/mic access; a bare exe launch dropped them and rendered a "Permissions denied"
+#     box on program output, user-caught live). Fallback to the bare exe ONLY if the shortcut is
+#     genuinely absent (fail-open recovery beats no OBS at all — the verify below still gates).
 #     NB on strih: D:\\_APPS\\NL_STARTUP.ahk auto-respawns obs64 from this same dir, but it won't
 #     double-launch once one is running, so this Start-Process wins; the log verify below fails loud
 #     on a non-genlock build regardless. See obs-ops skill.
 \$obsDir = '${obs_dir_ps}'
 \$exe    = '${exe_ps}'
+\$lnk    = "\$env:ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\OBS Studio.lnk"
 if (-not (Test-Path \$exe)) { Write-Error "obs64 not found at \$exe"; exit 5 }
-Start-Process -FilePath \$exe -WorkingDirectory '${bin64_ps}'
+if (Test-Path \$lnk) {
+  Start-Process -FilePath \$lnk
+} else {
+  Write-Warning "OBS Studio.lnk shortcut not found — falling back to a bare exe launch (box-specific shortcut params will be MISSING; fix the shortcut)."
+  Start-Process -FilePath \$exe -WorkingDirectory '${bin64_ps}'
+}
 
 # (3) Wait for obs64 to come up and write its log (genlock lines are emitted at launch).
 \$proc = \$null
