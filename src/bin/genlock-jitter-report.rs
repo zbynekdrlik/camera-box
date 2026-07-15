@@ -95,17 +95,27 @@ fn main() {
 }
 
 /// Read the input text: `--file <path>` if given, else stdin.
+///
+/// #757: LOSSY UTF-8 decode (`String::from_utf8_lossy`), never `read_to_string`'s strict
+/// decode. A real strih OBS log pulled via PowerShell `Get-Content` over ssh can carry a
+/// handful of invalid UTF-8 bytes from a console-encoding hop (the multi-byte "≈" glyph in
+/// `latency_ms=N (≈F frames @ ...)` is the observed offender) — a STRICT read fails on the
+/// very first bad byte anywhere in a 600KB+ log, discarding every otherwise-parseable audit
+/// line in the whole file. A lossy read changes nothing for a genuinely clean line: the
+/// corrupted bytes only ever land inside decorative text `parse_audit_line` already treats
+/// as skippable (no `key=value` token can contain a raw non-ASCII byte in the first place).
 fn read_input() -> std::io::Result<String> {
     let args: Vec<String> = std::env::args().collect();
     let mut it = args.iter().skip(1);
     while let Some(arg) = it.next() {
         if arg == "--file" {
             if let Some(path) = it.next() {
-                return std::fs::read_to_string(path);
+                let bytes = std::fs::read(path)?;
+                return Ok(String::from_utf8_lossy(&bytes).into_owned());
             }
         }
     }
-    let mut buf = String::new();
-    std::io::stdin().read_to_string(&mut buf)?;
-    Ok(buf)
+    let mut buf = Vec::new();
+    std::io::stdin().read_to_end(&mut buf)?;
+    Ok(String::from_utf8_lossy(&buf).into_owned())
 }
