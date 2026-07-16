@@ -130,20 +130,16 @@ pub fn parse_mode(v: Option<&str>) -> (bool, Option<String>) {
 }
 
 impl Config {
-    /// Read the process env (`CAMERA_BOX_PUBLISH_30P`, `_BLEND`, `_MODE`), logging any
-    /// parse warning. Unset ⇒ disabled.
-    pub fn from_process_env() -> Self {
-        let enabled = parse_enabled(std::env::var("CAMERA_BOX_PUBLISH_30P").ok().as_deref());
-        let (blend, warn) = parse_blend(
-            std::env::var("CAMERA_BOX_PUBLISH_30P_BLEND")
-                .ok()
-                .as_deref(),
-        );
+    /// Pure core (review finding: the env-NAME→field glue must be testable): resolve the
+    /// config through an injected lookup — `CAMERA_BOX_PUBLISH_30P`, `_BLEND`, `_MODE`.
+    /// Unset ⇒ disabled. Parse warnings are logged here (once, at startup).
+    pub fn from_env_lookup(get: impl Fn(&str) -> Option<String>) -> Self {
+        let enabled = parse_enabled(get("CAMERA_BOX_PUBLISH_30P").as_deref());
+        let (blend, warn) = parse_blend(get("CAMERA_BOX_PUBLISH_30P_BLEND").as_deref());
         if let Some(w) = warn {
             tracing::warn!("#792 {}", w);
         }
-        let (adaptive, warn) =
-            parse_mode(std::env::var("CAMERA_BOX_PUBLISH_30P_MODE").ok().as_deref());
+        let (adaptive, warn) = parse_mode(get("CAMERA_BOX_PUBLISH_30P_MODE").as_deref());
         if let Some(w) = warn {
             tracing::warn!("#792 {}", w);
         }
@@ -152,6 +148,11 @@ impl Config {
             blend,
             adaptive,
         }
+    }
+
+    /// Read the real process env. Thin delegate — all logic lives in [`Self::from_env_lookup`].
+    pub fn from_process_env() -> Self {
+        Self::from_env_lookup(|k| std::env::var(k).ok())
     }
 }
 
@@ -496,6 +497,15 @@ pub fn spawn(mut sender: crate::ndi::NdiSender, config: Config) -> std::io::Resu
                 ) {
                     tracing::error!("#792 publish-30p send failed: {}", e);
                 }
+                // #297 parity for the SECOND sender (review finding): the primary re-registers on
+                // a network change via the capture loop's maybe_reannounce() poll — without the
+                // same poll here, a boot race / link flap would leave "CAMn (30p)" undiscoverable
+                // while "CAMn (usb)" recovers. Internally throttled to REANNOUNCE_POLL_INTERVAL,
+                // so a per-output call (~30/s) is ~free; frames keep flowing from local capture
+                // even while the network is down, so the poll fires exactly when it matters.
+                if let Err(e) = sender.maybe_reannounce() {
+                    tracing::warn!("#792 publish-30p re-announce check failed: {}", e);
+                }
             });
         })?;
     Ok(Tee::new(tx, pool_rx, drops))
@@ -562,6 +572,36 @@ mod tests {
     fn secondary_name_derivation() {
         assert_eq!(derive_30p_name("usb"), "30p", "fleet default → CAMn (30p)");
         assert_eq!(derive_30p_name("custom"), "custom 30p");
+    }
+
+    #[test]
+    fn env_lookup_maps_each_var_name_to_its_field() {
+        let lookup = |vars: &'static [(&'static str, &'static str)]| {
+            move |k: &str| {
+                vars.iter()
+                    .find(|(name, _)| *name == k)
+                    .map(|(_, v)| v.to_string())
+            }
+        };
+        // All unset ⇒ disabled, default blend, adaptive.
+        let c = Config::from_env_lookup(lookup(&[]));
+        assert_eq!(
+            c,
+            Config {
+                enabled: false,
+                blend: BLEND_DEFAULT,
+                adaptive: true
+            }
+        );
+        // Each real env NAME lands in its field (pins the glue, not just the parsers).
+        let c = Config::from_env_lookup(lookup(&[("CAMERA_BOX_PUBLISH_30P", "1")]));
+        assert!(c.enabled && c.adaptive && c.blend == BLEND_DEFAULT);
+        let c = Config::from_env_lookup(lookup(&[("CAMERA_BOX_PUBLISH_30P_BLEND", "0.25")]));
+        assert_eq!(c.blend, 0.25);
+        assert!(!c.enabled);
+        let c = Config::from_env_lookup(lookup(&[("CAMERA_BOX_PUBLISH_30P_MODE", "fixed")]));
+        assert!(!c.adaptive);
+        assert!(!c.enabled);
     }
 
     #[test]
@@ -878,6 +918,62 @@ mod tests {
             vec![10u8; 8],
             "MJPG pair emits the FIRST frame untouched"
         );
+    }
+
+    #[test]
+    fn worker_adaptive_mode_dispatches_the_motion_adaptive_blend() {
+        // Same data as the adaptive_blend unit test: group 1 static (chroma noise only),
+        // group 2 a moving edge. adaptive=true must keep the moving group's FIRST-frame
+        // bytes; a regression flipping the dispatch to the fixed blend would average them.
+        let (tx, rx) = sync_channel::<Frame>(16);
+        let (pool_tx, _pool_rx) = sync_channel::<Vec<u8>>(POOL_CAP);
+        let drops = Arc::new(AtomicU64::new(0));
+        let mut f0 = frame(0, 0);
+        f0.buf = vec![100, 120, 100, 130, 50, 90, 50, 200];
+        let mut f1 = frame(1, 0);
+        f1.buf = vec![100, 124, 100, 134, 150, 10, 150, 100];
+        tx.send(f0).unwrap();
+        tx.send(f1).unwrap();
+        drop(tx);
+        let mut sent: Vec<Vec<u8>> = Vec::new();
+        run_worker_loop(rx, pool_tx, 128, true, drops, |f| sent.push(f.buf.clone()));
+        assert_eq!(sent.len(), 1);
+        assert_eq!(
+            sent[0],
+            vec![100, 122, 100, 132, 50, 90, 50, 200],
+            "adaptive dispatch: static group averaged, moving group keeps the first frame \
+             (the fixed blend would have averaged both groups)"
+        );
+    }
+
+    #[test]
+    fn worker_flushes_double_drop_as_two_solo_outputs_in_order() {
+        // seqs 1 and 2 dropped at the tee: slot (0,1) lost its odd, slot (2,3) lost its
+        // even — SoloBoth must emit BOTH survivors, earlier first, unblended, each with
+        // its own timecode.
+        let (tx, rx) = sync_channel::<Frame>(16);
+        let (pool_tx, pool_rx) = sync_channel::<Vec<u8>>(POOL_CAP);
+        let drops = Arc::new(AtomicU64::new(0));
+        tx.send(frame(0, 10)).unwrap();
+        tx.send(frame(3, 40)).unwrap();
+        drop(tx);
+        let mut sent: Vec<(u64, i64, Vec<u8>)> = Vec::new();
+        run_worker_loop(rx, pool_tx, 128, false, drops, |f| {
+            sent.push((f.seq, f.timecode_100ns, f.buf.clone()));
+        });
+        assert_eq!(sent.len(), 2, "both broken slots' survivors are emitted");
+        assert_eq!(
+            sent[0],
+            (0, 1000, vec![10u8; 8]),
+            "earlier survivor first, unblended, its own timecode"
+        );
+        assert_eq!(
+            sent[1],
+            (3, 1003, vec![40u8; 8]),
+            "later survivor second, unblended, its own timecode"
+        );
+        // Both buffers recycled back to the pool.
+        assert!(pool_rx.try_recv().is_ok() && pool_rx.try_recv().is_ok());
     }
 
     #[test]
