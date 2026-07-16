@@ -26,17 +26,14 @@
 //! - `CAMERA_BOX_PUBLISH_30P_BLEND=0.0..0.5` — MAX weight of the pair's SECOND frame.
 //!   0.5 = full 50/50 average (default), 0.0 = pure decimation (keep first frame),
 //!   between = weighted average (less ghosting, less smoothness).
-//! - `CAMERA_BOX_PUBLISH_30P_MODE=fixed|adaptive` — default `fixed` (the FRC-correct
-//!   choice, user-corrected + source-verified 2026-07-16): frame blending in frame-rate
-//!   conversion exists TO SMOOTH MOTION (anti-judder), and broadcast FRC (Teranex "FRC
-//!   Aperture") dials blending UP as motion increases — blending is an identity op on
-//!   static pixels, so it only ever acts on motion. `adaptive` (opt-in) is the
-//!   deinterlacer/TNR-style luma-diff gate: full average on static areas (~sqrt(2) noise
-//!   reduction), weight ramped to ZERO on moving edges. That AVOIDS double-image ghosting
-//!   with short shutters but renders all visible motion like plain decimation (judder
-//!   kept) — it is a ghost-averse/NR rendition, NOT a motion smoother; keep it only as a
-//!   retreat if a short-shutter box ghosts objectionably (the softer first retreat is
-//!   lowering BLEND, the Teranex-aperture analog).
+//!
+//! Blending acts ON MOTION by construction (averaging identical static pixels is an
+//! identity op) — it is the FRC anti-judder smoother, dialed UP with motion in broadcast
+//! practice (Teranex "FRC Aperture"; user-corrected + source-verified 2026-07-16). A
+//! previously-shipped "motion-adaptive" luma-diff gate (blend static only) was a
+//! deinterlacer/TNR mechanism misapplied to FRC — it cancelled the blend exactly where it
+//! matters — and was DELETED, not kept as an option (mvp-philosophy: no dead approaches).
+//! The ghost retreat on a short-shutter box is the BLEND knob (partial aperture).
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
@@ -62,24 +59,12 @@ pub const BLEND_MAX: f32 = 0.5;
 /// Worker stats log cadence, in OUTPUT frames (~10 s at 30fps).
 pub const STATS_LOG_EVERY_OUTPUTS: u64 = 300;
 
-/// Opt-in `adaptive` mode ramp: luma differences at or below this are treated as sensor
-/// noise / static content → full configured blend. 8-bit LSB.
-pub const ADAPT_LUMA_T_LO: u8 = 8;
-
-/// Opt-in `adaptive` mode ramp: luma differences at or above this are a moving edge →
-/// blend weight ZERO (keep the first frame sharp, no ghost — and no smoothing: motion
-/// renders like decimation). Linear ramp between the two.
-pub const ADAPT_LUMA_T_HI: u8 = 32;
-
 /// Parsed `CAMERA_BOX_PUBLISH_30P*` configuration.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Config {
     pub enabled: bool,
-    /// MAX weight of the pair's SECOND frame, clamped to `[0.0, BLEND_MAX]`.
+    /// Weight of the pair's SECOND frame, clamped to `[0.0, BLEND_MAX]`.
     pub blend: f32,
-    /// Opt-in luma-diff-gated blending (ghost-averse/NR rendition). `false` (DEFAULT) =
-    /// fixed whole-frame weight — the FRC motion smoother.
-    pub adaptive: bool,
 }
 
 /// Pure parse of the enable flag ("1"/"true"/"yes", case-insensitive, trimmed).
@@ -119,24 +104,9 @@ pub fn parse_blend(v: Option<&str>) -> (f32, Option<String>) {
     }
 }
 
-/// Pure parse of the mode knob: `fixed` (default, incl. unset — the FRC motion smoother)
-/// or the opt-in `adaptive` gate. Anything else falls back to fixed with a warning.
-pub fn parse_mode(v: Option<&str>) -> (bool, Option<String>) {
-    match v.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
-        None | Some("") | Some("fixed") => (false, None),
-        Some("adaptive") => (true, None),
-        Some(other) => (
-            false,
-            Some(format!(
-                "CAMERA_BOX_PUBLISH_30P_MODE={other} unknown (fixed|adaptive) — using fixed"
-            )),
-        ),
-    }
-}
-
 impl Config {
     /// Pure core (review finding: the env-NAME→field glue must be testable): resolve the
-    /// config through an injected lookup — `CAMERA_BOX_PUBLISH_30P`, `_BLEND`, `_MODE`.
+    /// config through an injected lookup — `CAMERA_BOX_PUBLISH_30P`, `_BLEND`.
     /// Unset ⇒ disabled. Parse warnings are logged here (once, at startup).
     pub fn from_env_lookup(get: impl Fn(&str) -> Option<String>) -> Self {
         let enabled = parse_enabled(get("CAMERA_BOX_PUBLISH_30P").as_deref());
@@ -144,15 +114,7 @@ impl Config {
         if let Some(w) = warn {
             tracing::warn!("#792 {}", w);
         }
-        let (adaptive, warn) = parse_mode(get("CAMERA_BOX_PUBLISH_30P_MODE").as_deref());
-        if let Some(w) = warn {
-            tracing::warn!("#792 {}", w);
-        }
-        Config {
-            enabled,
-            blend,
-            adaptive,
-        }
+        Config { enabled, blend }
     }
 
     /// Read the real process env. Thin delegate — all logic lives in [`Self::from_env_lookup`].
@@ -195,68 +157,6 @@ pub fn blend_into(first: &mut [u8], second: &[u8], wb_q8: u16) {
     let wa = 256 - wb;
     for (a, &b) in first.iter_mut().zip(second.iter()) {
         *a = ((u32::from(*a) * wa + u32::from(b) * wb + 128) >> 8) as u8;
-    }
-}
-
-/// Byte offset of the FIRST luma sample within a 4-byte macropixel group for the
-/// byte-blendable interleaved formats: YUYV = `Y0 U Y1 V` → 0, UYVY = `U Y0 V Y1` → 1.
-/// `None` = format is not blendable at the byte level.
-pub fn luma_offset_for(fourcc: &str) -> Option<usize> {
-    match fourcc {
-        "YUYV" => Some(0),
-        "UYVY" => Some(1),
-        _ => None,
-    }
-}
-
-/// Motion-adaptive weight ramp: luma difference `d` at/below `t_lo` → full `wmax_q8`
-/// (static content), at/above `t_hi` → 0 (moving edge), linear in between.
-pub fn adaptive_weight_q8(d: u8, wmax_q8: u16, t_lo: u8, t_hi: u8) -> u16 {
-    if d <= t_lo {
-        return wmax_q8;
-    }
-    if d >= t_hi || t_hi <= t_lo {
-        return 0;
-    }
-    let span = u32::from(t_hi - t_lo);
-    let above = u32::from(d - t_lo);
-    (u32::from(wmax_q8) * (span - above) / span) as u16
-}
-
-/// MOTION-ADAPTIVE temporal blend, in place into `first`. Per 4-byte macropixel
-/// (2 pixels sharing chroma): the group's motion measure is the LARGER of its two luma
-/// differences; the blend weight ramps from `wmax_q8` (static → full average, temporal
-/// noise reduction) to 0 (moving edge → keep the first frame sharp, NO double-image
-/// ghost). Chroma follows its group's luma decision so no colour fringing can appear on
-/// moving edges. A trailing partial group (never occurs on real even-width frames) is
-/// left as the first frame.
-pub fn blend_adaptive_into(
-    first: &mut [u8],
-    second: &[u8],
-    luma_offset: usize,
-    wmax_q8: u16,
-    t_lo: u8,
-    t_hi: u8,
-) {
-    if wmax_q8 == 0 {
-        return;
-    }
-    debug_assert!(luma_offset < 2);
-    let n = first.len().min(second.len()) / 4 * 4;
-    for (ga, gb) in first[..n]
-        .chunks_exact_mut(4)
-        .zip(second[..n].chunks_exact(4))
-    {
-        let d0 = ga[luma_offset].abs_diff(gb[luma_offset]);
-        let d1 = ga[luma_offset + 2].abs_diff(gb[luma_offset + 2]);
-        let wb = u32::from(adaptive_weight_q8(d0.max(d1), wmax_q8, t_lo, t_hi));
-        if wb == 0 {
-            continue;
-        }
-        let wa = 256 - wb;
-        for (a, &b) in ga.iter_mut().zip(gb.iter()) {
-            *a = ((u32::from(*a) * wa + u32::from(b) * wb + 128) >> 8) as u8;
-        }
     }
 }
 
@@ -394,7 +294,6 @@ pub fn run_worker_loop(
     rx: Receiver<Frame>,
     pool_tx: SyncSender<Vec<u8>>,
     wb_q8: u16,
-    adaptive: bool,
     drops: Arc<AtomicU64>,
     mut send: impl FnMut(&Frame),
 ) {
@@ -412,19 +311,8 @@ pub fn run_worker_loop(
             PairAction::Hold => {}
             PairAction::Blend { mut first, second } => {
                 let fourcc = first.info.fourcc.str().unwrap_or("");
-                if let Some(luma_offset) = luma_offset_for(fourcc) {
-                    if adaptive {
-                        blend_adaptive_into(
-                            &mut first.buf,
-                            &second.buf,
-                            luma_offset,
-                            wb_q8,
-                            ADAPT_LUMA_T_LO,
-                            ADAPT_LUMA_T_HI,
-                        );
-                    } else {
-                        blend_into(&mut first.buf, &second.buf, wb_q8);
-                    }
+                if matches!(fourcc, "YUYV" | "UYVY") {
+                    blend_into(&mut first.buf, &second.buf, wb_q8);
                     blended += 1;
                 } else {
                     // Non-interleaved-8bit format (MJPG etc): byte blending is invalid —
@@ -485,13 +373,12 @@ pub fn spawn(mut sender: crate::ndi::NdiSender, config: Config) -> std::io::Resu
     let drops = Arc::new(AtomicU64::new(0));
     let drops_worker = Arc::clone(&drops);
     let wb_q8 = blend_weight_q8(config.blend);
-    let adaptive = config.adaptive;
     std::thread::Builder::new()
         .name("publish-30p".into())
         .spawn(move || {
             // OFF the isolated capture core, onto the general cores (painter/intercom side).
             crate::affinity::pin_off_capture_core("publish-30p");
-            run_worker_loop(rx, pool_tx, wb_q8, adaptive, drops_worker, |f: &Frame| {
+            run_worker_loop(rx, pool_tx, wb_q8, drops_worker, |f: &Frame| {
                 if let Err(e) = sender.send_frame_data_with_timecode(
                     &f.buf,
                     f.info.width,
@@ -588,117 +475,21 @@ mod tests {
                     .map(|(_, v)| v.to_string())
             }
         };
-        // All unset ⇒ disabled, default blend, adaptive.
+        // All unset ⇒ disabled, default blend.
         let c = Config::from_env_lookup(lookup(&[]));
         assert_eq!(
             c,
             Config {
                 enabled: false,
-                blend: BLEND_DEFAULT,
-                adaptive: false
+                blend: BLEND_DEFAULT
             }
         );
         // Each real env NAME lands in its field (pins the glue, not just the parsers).
         let c = Config::from_env_lookup(lookup(&[("CAMERA_BOX_PUBLISH_30P", "1")]));
-        assert!(c.enabled && !c.adaptive && c.blend == BLEND_DEFAULT);
+        assert!(c.enabled && c.blend == BLEND_DEFAULT);
         let c = Config::from_env_lookup(lookup(&[("CAMERA_BOX_PUBLISH_30P_BLEND", "0.25")]));
         assert_eq!(c.blend, 0.25);
         assert!(!c.enabled);
-        let c = Config::from_env_lookup(lookup(&[("CAMERA_BOX_PUBLISH_30P_MODE", "adaptive")]));
-        assert!(c.adaptive);
-        assert!(!c.enabled);
-    }
-
-    #[test]
-    fn mode_defaults_to_fixed_blend_the_frc_motion_smoother() {
-        // User-corrected + source-verified (2026-07-16): FRC blending exists to smooth
-        // MOTION; blending is an identity on static pixels, so the adaptive gate (which
-        // zeroes the blend exactly on motion) must never be the default.
-        assert_eq!(parse_mode(None), (false, None));
-        assert_eq!(parse_mode(Some("fixed")), (false, None));
-        assert_eq!(parse_mode(Some(" ADAPTIVE ")), (true, None));
-        let (adaptive, warn) = parse_mode(Some("garbage"));
-        assert!(!adaptive, "unknown mode falls back to FIXED (the default)");
-        assert!(warn.is_some());
-    }
-
-    // -- motion-adaptive blend ---------------------------------------------------------
-
-    #[test]
-    fn adaptive_weight_ramp() {
-        // Static (d <= t_lo): full weight. Moving edge (d >= t_hi): zero. Linear between.
-        assert_eq!(adaptive_weight_q8(0, 128, 8, 32), 128);
-        assert_eq!(adaptive_weight_q8(8, 128, 8, 32), 128);
-        assert_eq!(adaptive_weight_q8(32, 128, 8, 32), 0);
-        assert_eq!(adaptive_weight_q8(255, 128, 8, 32), 0);
-        assert_eq!(
-            adaptive_weight_q8(20, 128, 8, 32),
-            64,
-            "midpoint = half weight"
-        );
-        let w14 = adaptive_weight_q8(14, 128, 8, 32);
-        let w26 = adaptive_weight_q8(26, 128, 8, 32);
-        assert!(w14 > 64 && w26 < 64, "ramp is monotonic");
-        assert_eq!(
-            adaptive_weight_q8(9, 128, 8, 8),
-            0,
-            "degenerate ramp never divides by zero"
-        );
-    }
-
-    #[test]
-    fn adaptive_blend_full_averages_static_and_keeps_moving_edges_sharp() {
-        // YUYV groups: [Y0 U Y1 V]. Group 1 static (luma diff 0, chroma noise only) →
-        // full average incl chroma (temporal NR). Group 2 moving edge (luma diff 100)
-        // → ALL 4 bytes keep the FIRST frame (no ghost, no colour fringe).
-        let mut a = vec![100, 120, 100, 130, 50, 90, 50, 200];
-        let b = vec![100, 124, 100, 134, 150, 10, 150, 100];
-        blend_adaptive_into(&mut a, &b, 0, 128, ADAPT_LUMA_T_LO, ADAPT_LUMA_T_HI);
-        assert_eq!(
-            a,
-            vec![100, 122, 100, 132, 50, 90, 50, 200],
-            "static group averaged, moving group untouched"
-        );
-    }
-
-    #[test]
-    fn adaptive_blend_honours_uyvy_luma_offset() {
-        // UYVY groups: [U Y0 V Y1] — luma at offsets 1 and 3. Moving lumas must shield
-        // the group even when chroma bytes happen to match.
-        let mut a = vec![120, 50, 130, 50];
-        let b = vec![120, 150, 130, 150];
-        blend_adaptive_into(&mut a, &b, 1, 128, ADAPT_LUMA_T_LO, ADAPT_LUMA_T_HI);
-        assert_eq!(
-            a,
-            vec![120, 50, 130, 50],
-            "moving UYVY group keeps the first frame"
-        );
-        let mut a = vec![120, 50, 130, 50];
-        let b = vec![124, 52, 134, 52];
-        blend_adaptive_into(&mut a, &b, 1, 128, ADAPT_LUMA_T_LO, ADAPT_LUMA_T_HI);
-        assert_eq!(
-            a,
-            vec![122, 51, 132, 51],
-            "static UYVY group fully averaged"
-        );
-    }
-
-    #[test]
-    fn adaptive_blend_zero_weight_is_noop_and_partial_tail_is_left() {
-        let mut a = vec![10u8, 10, 10, 10, 99, 99];
-        let b = vec![12u8, 12, 12, 12, 1, 1];
-        blend_adaptive_into(&mut a, &b, 0, 0, ADAPT_LUMA_T_LO, ADAPT_LUMA_T_HI);
-        assert_eq!(
-            a,
-            vec![10, 10, 10, 10, 99, 99],
-            "wmax 0 = pure decimation no-op"
-        );
-        blend_adaptive_into(&mut a, &b, 0, 128, ADAPT_LUMA_T_LO, ADAPT_LUMA_T_HI);
-        assert_eq!(
-            a,
-            vec![11, 11, 11, 11, 99, 99],
-            "complete group blended; trailing partial group left as the first frame"
-        );
     }
 
     // -- blend math ------------------------------------------------------------------
@@ -883,7 +674,7 @@ mod tests {
         tx.send(frame(5, 60)).unwrap();
         drop(tx);
         let mut sent: Vec<(u64, i64, Vec<u8>)> = Vec::new();
-        run_worker_loop(rx, pool_tx, 128, false, drops, |f| {
+        run_worker_loop(rx, pool_tx, 128, drops, |f| {
             sent.push((f.seq, f.timecode_100ns, f.buf.clone()));
         });
         assert_eq!(sent.len(), 3, "5 inputs with one gap → 3 outputs");
@@ -919,38 +710,12 @@ mod tests {
         tx.send(f1).unwrap();
         drop(tx);
         let mut sent: Vec<Vec<u8>> = Vec::new();
-        run_worker_loop(rx, pool_tx, 128, false, drops, |f| sent.push(f.buf.clone()));
+        run_worker_loop(rx, pool_tx, 128, drops, |f| sent.push(f.buf.clone()));
         assert_eq!(sent.len(), 1);
         assert_eq!(
             sent[0],
             vec![10u8; 8],
             "MJPG pair emits the FIRST frame untouched"
-        );
-    }
-
-    #[test]
-    fn worker_adaptive_mode_dispatches_the_motion_adaptive_blend() {
-        // Same data as the adaptive_blend unit test: group 1 static (chroma noise only),
-        // group 2 a moving edge. adaptive=true must keep the moving group's FIRST-frame
-        // bytes; a regression flipping the dispatch to the fixed blend would average them.
-        let (tx, rx) = sync_channel::<Frame>(16);
-        let (pool_tx, _pool_rx) = sync_channel::<Vec<u8>>(POOL_CAP);
-        let drops = Arc::new(AtomicU64::new(0));
-        let mut f0 = frame(0, 0);
-        f0.buf = vec![100, 120, 100, 130, 50, 90, 50, 200];
-        let mut f1 = frame(1, 0);
-        f1.buf = vec![100, 124, 100, 134, 150, 10, 150, 100];
-        tx.send(f0).unwrap();
-        tx.send(f1).unwrap();
-        drop(tx);
-        let mut sent: Vec<Vec<u8>> = Vec::new();
-        run_worker_loop(rx, pool_tx, 128, true, drops, |f| sent.push(f.buf.clone()));
-        assert_eq!(sent.len(), 1);
-        assert_eq!(
-            sent[0],
-            vec![100, 122, 100, 132, 50, 90, 50, 200],
-            "adaptive dispatch: static group averaged, moving group keeps the first frame \
-             (the fixed blend would have averaged both groups)"
         );
     }
 
@@ -966,7 +731,7 @@ mod tests {
         tx.send(frame(3, 40)).unwrap();
         drop(tx);
         let mut sent: Vec<(u64, i64, Vec<u8>)> = Vec::new();
-        run_worker_loop(rx, pool_tx, 128, false, drops, |f| {
+        run_worker_loop(rx, pool_tx, 128, drops, |f| {
             sent.push((f.seq, f.timecode_100ns, f.buf.clone()));
         });
         assert_eq!(sent.len(), 2, "both broken slots' survivors are emitted");
@@ -993,7 +758,7 @@ mod tests {
         tx.send(frame(1, 20)).unwrap();
         drop(tx);
         let mut sent: Vec<Vec<u8>> = Vec::new();
-        run_worker_loop(rx, pool_tx, 0, false, drops, |f| sent.push(f.buf.clone()));
+        run_worker_loop(rx, pool_tx, 0, drops, |f| sent.push(f.buf.clone()));
         assert_eq!(sent.len(), 1);
         assert_eq!(
             sent[0],

@@ -590,13 +590,8 @@ async fn run_capture_loop(
                 match camera_box::publish_30p::spawn(s, publish_30p_cfg) {
                     Ok(tee) => {
                         tracing::info!(
-                            "#792 publish-30p ACTIVE: streaming as '{}' (mode={}, max blend={}, channel depth {})",
+                            "#792 publish-30p ACTIVE: streaming as '{}' (blend={}, channel depth {})",
                             name_30p,
-                            if publish_30p_cfg.adaptive {
-                                "motion-adaptive"
-                            } else {
-                                "fixed"
-                            },
                             publish_30p_cfg.blend,
                             camera_box::publish_30p::CHANNEL_DEPTH
                         );
