@@ -265,6 +265,9 @@ def main() -> None:
     ap.add_argument("--host", required=True)
     ap.add_argument("--port", type=int, default=4455)
     ap.add_argument("--password", default=None)
+    ap.add_argument("--bootstrap", action="store_true",
+                    help="#785: boot/recovery invocation — enforce bindings/mutes/program/Studio "
+                         "(a bare run only creates what is missing; operator state always wins)")
     ap.add_argument("--projector", action="store_true",
                     help="open the PROGRAM projector on the HDMI monitor AND the built-in "
                          "MULTIVIEW projector on the panel")
