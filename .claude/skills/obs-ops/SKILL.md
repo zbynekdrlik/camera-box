@@ -288,6 +288,15 @@ To restart strih's OBS mid-session: kill obs64 + relaunch via `scripts/launch-ob
 strih --force` (genlock comes up automatically — it is a build default, #257, no env needed). AHK then
 sees OBS running and won't re-add another one.
 
+**AHK is STRIH-ONLY — `build_launch_program` takes a third arg `HAS_AHK` (#792 guard repair,
+2026-07-16).** The #786 audio-gate redraw loop brackets AHK (stop-first/restart-last), but ONLY a
+box that actually runs the watcher may get those commands: `build_launch_program OBS_DIR FORCE 1`
+(default = strih behavior) emits the bracket; `... 0` (stream — the `--box stream` case and
+obs-self-heal-install.sh both pass 0) emits documented no-ops instead. Pinned by
+`tests/launch_obs_genlock.rs::program_without_ahk_watcher_carries_no_ahk_commands_786` and the
+`#411` self-heal stream guard — a new caller of `build_launch_program` must pass the box-correct
+third arg, never rely on the default for stream.
+
 **GOTCHA — a libobs HOT-SWAP (deploying a new `obs.dll`) needs AHK STOPPED for the swap window, not
 just kill+relaunch.** AHK's `SafeLoop` (`Run obs64` after a ~5 s delay when its window is gone, polled
 every 1 s) is fine for a fast restart, but a DLL swap is multi-step (kill obs64 → `Copy-Item` the new
