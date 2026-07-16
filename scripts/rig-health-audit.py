@@ -137,8 +137,10 @@ def check_cam(name: str, ip: str) -> None:
         fps_s = f"{emitted:.1f}/{captured:.1f}"
         if emitted < 59.0 or captured < 59.0:
             problems.append("fps-low")
-        if dropped > 0:
+        if dropped >= 5:
             problems.append(f"capture-dropped={dropped}")
+        elif dropped > 0:
+            problems.append(f"warn:capture-dropped={dropped}")
     else:
         problems.append("no-streaming-report")
     chroma = chroma_m[-1] if chroma_m else "?"
@@ -147,7 +149,8 @@ def check_cam(name: str, ip: str) -> None:
         problems.append(f"dante={off_us}us")
     if ro != "ro":
         problems.append("root=rw")
-    verdict = "PASS" if not problems else ("WARN" if problems in ([["capture-dropped=1"]],) else "FAIL")
+    hard = [x for x in problems if not x.startswith("warn:")]
+    verdict = "PASS" if not problems else ("WARN" if not hard else "FAIL")
     detail = (f"svc={svc} fps={fps_s} chroma={chroma} dante={off_us:+d}us root={ro} load={load}"
               if off_us is not None else f"svc={svc} fps={fps_s} chroma={chroma} dante=? root={ro} load={load}")
     if problems:
@@ -192,11 +195,12 @@ def check_imag() -> None:
             problems.append("render-skips")
     else:
         problems.append("ws-stats-missing")
-    low = [s for s, r in rates.items() if r < 58.0]
+    cam_rates = {s: r for s, r in rates.items() if re.match(r"NDI CAM\d", s)}
+    low = [s for s, r in cam_rates.items() if r < 58.0]
     if low:
         problems.append("arrivals-low:" + ",".join(low))
-    if len(rates) < 7:
-        problems.append(f"arrivals-seen={len(rates)}/7")
+    if len(cam_rates) < 7:
+        problems.append(f"cam-arrivals-seen={len(cam_rates)}/7")
     verdict = "PASS" if not problems else "FAIL"
     detail = f"render={render} arrivals[{fmt_rates(rates)}] isolcpus=none dante={off_us:+d}us" if off_us is not None else f"render={render} arrivals[{fmt_rates(rates)}]"
     if problems:

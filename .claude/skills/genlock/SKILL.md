@@ -190,7 +190,13 @@ Both production broadcast OBS boxes upgraded in-place to the camera-box genlock 
 | Genlock active | YES | YES |
 | Genlock env | none — build default (#257) | none — build default (#257) |
 
-(The version/SHA row above is the 2026-06-13 baseline; the current deployed bytes are the #257 build —
+(LIVE 2026-07-16: **strih obs.dll = the #776 MV-divisor build `95709867c` (EE9BA019…)** — multiview
+renders every tick (30fps MV; render 30fps/21.5ms/0% skip, fits the 33ms budget with headroom; the
+2026-07-15 "doesn't fit" conclusion was CONFOUNDED by the bare-exe launch problem, not the build);
+**stream obs.dll = the #767 keep-alive build `dede91825` (E6887854…)**. Verify live via
+`GENLOCK_BUILD_SHA.txt` + `Get-FileHash` — NEVER from a stale SHA stamp alone; Copy-Item preserves
+source mtime, so a rollback is invisible in timestamps. The version/SHA row above is the 2026-06-13
+baseline; the current deployed bytes are the #257-lineage builds —
 see `docs/autopilot-log.md` for the live obs.dll / distroav.dll SHAs and the drift-guard `--compare`
 manifest check. Genlock is no longer gated by any env: it is a build default since #257.)
 
