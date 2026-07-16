@@ -556,6 +556,66 @@ async fn run_capture_loop(
     tracing::info!("NDI sender ready, streaming as '{}'", ndi_name);
     tracing::info!("ZERO-COPY mode: AVX2 SIMD + sync send for lowest latency");
 
+    // #792 — optional SECONDARY 30fps NDI stream: 2-frame temporal blend of the emitted 60fps
+    // pairs, published as "<machine> (30p)" alongside the primary. OFF unless
+    // CAMERA_BOX_PUBLISH_30P=1 (unset ⇒ bit-identical legacy behavior). The tee into this path
+    // is bounded + drop-on-full, so the 60p hot path can NEVER block on it; a sender-create
+    // failure disables the feature loudly and leaves the 60p stream untouched.
+    let publish_30p_cfg = camera_box::publish_30p::Config::from_process_env();
+    let mut publish_30p_tee: Option<camera_box::publish_30p::Tee> = if publish_30p_cfg.enabled {
+        let effective_fps = send_rate.numerator as f64 / send_rate.denominator.max(1) as f64;
+        if effective_fps < 60.0 {
+            tracing::warn!(
+                "#792 publish-30p expects a 60fps emit path; effective send rate is {:.1} fps — pair blending would combine NON-adjacent frames",
+                effective_fps
+            );
+        }
+        let name_30p = camera_box::publish_30p::derive_30p_name(ndi_name);
+        match NdiSender::new(
+            &name_30p,
+            camera_box::capture::FrameRate {
+                numerator: 30,
+                denominator: 1,
+            },
+        ) {
+            Ok(mut s) => {
+                // The worker consumes emitted pairs (external cadence) and stamps each output
+                // with its pair's FIRST frame's genlock timecode — no internal pacing sleep.
+                s.set_external_pacing(true);
+                match camera_box::publish_30p::spawn(s, publish_30p_cfg) {
+                    Ok(tee) => {
+                        tracing::info!(
+                            "#792 publish-30p ACTIVE: streaming as '{}' (mode={}, max blend={}, channel depth {})",
+                            name_30p,
+                            if publish_30p_cfg.adaptive {
+                                "motion-adaptive"
+                            } else {
+                                "fixed"
+                            },
+                            publish_30p_cfg.blend,
+                            camera_box::publish_30p::CHANNEL_DEPTH
+                        );
+                        Some(tee)
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            "#792 publish-30p worker spawn FAILED ({e}) — secondary stream disabled, 60p unaffected"
+                        );
+                        None
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!(
+                    "#792 publish-30p sender create FAILED ({e}) — secondary stream disabled, 60p unaffected"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // #105 node 2 — cam1 grab recorder (TEST mode). Connect BEFORE the loop so the
     // dev1 ffmpeg listener is bound and the sidecar header is written; a connect
     // failure is fatal (the operator asked to record — don't silently NDI-only).
@@ -1004,6 +1064,12 @@ async fn run_capture_loop(
                 }
                 emit_count += 1; // reached only when the frame passed the gate
                 tee_grab(data);
+                // #792 — tee the emitted frame to the optional 30p publisher LAST (one bounded
+                // memcpy + try_send, drop-on-full: never blocks this 60p hot path). Production
+                // path only — the probe burn path above returns before reaching here.
+                if let Some(t) = publish_30p_tee.as_mut() {
+                    t.tee(data, info, capture_timecode_100ns);
+                }
             });
 
             match result {
