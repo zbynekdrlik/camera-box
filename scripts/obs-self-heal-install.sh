@@ -92,9 +92,11 @@ build_recovery_script() {
 
   # REUSE launch-obs-genlock.sh's own planner for the kill+relaunch+log-verify step — force=1
   # (self-heal only ever acts on a CONFIRMED wedge, so it always force-kills). This is the ONE
-  # launch path; nothing here re-derives it.
-  local kill_relaunch_program
-  kill_relaunch_program="$(build_launch_program "$obs_dir" "1")"
+  # launch path; nothing here re-derives it. has_ahk mirrors the block below: only strih runs the
+  # AHK watcher, so only strih's embedded program may carry a real AutoHotkey64 command (#786).
+  local kill_relaunch_program launch_has_ahk
+  if [ "$box" = "strih" ]; then launch_has_ahk=1; else launch_has_ahk=0; fi
+  kill_relaunch_program="$(build_launch_program "$obs_dir" "1" "$launch_has_ahk")"
 
   # AHK auto-respawn only exists on strih (.claude/skills/obs-ops "AHK on strih") — stream has no
   # second watcher to race, so its Stop/RestartAhk steps are documented no-ops, never a guess at a

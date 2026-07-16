@@ -243,30 +243,32 @@ fn imag_scenes_projector_selects_by_hdmi_not_edp_522() {
 }
 
 // ============================================================================================
-// #501 -- MV monitor-only twin scenes feed the built-in multiview from LOW-bandwidth NDI
-// receivers (genlock_monitor=true -> vendor/distroav's genlock lockdown MONITOR-SOURCE
-// exception, ~9x cheaper than the full-bw "Cam N" receivers) so the #276/#278/#293
-// render-budget decouple keeps the program at 60fps with the multiview open. Root cause
-// (runtime-proven with an eglSwapBuffers-counting shim, #501 comment 2026-07-04): a single
-// multiview render costs ~80ms CPU because its 6 cells render ALL 6 cameras' FULL-1080p NDI
-// sources, whose async texture uploads happen ONLY during the multiview's own render.
+// #501→#783 -- MV twin scenes for the built-in multiview. HISTORY: #501 fed them from
+// LOW-bandwidth NDI receivers (genlock_monitor=true, the vendor/distroav MONITOR-SOURCE
+// exception) because 7x full-1080p decode collapsed the render budget. #783 (2026-07-15,
+// user-driven) RETIRED the low-bw twins: the #767 keep-alive build removed the twins' reason
+// to exist, and post-reboot the twin receivers degraded badly (relock every ~4s = the laggy
+// multiview the user hit live). The "MV Cam N" cells now nest the SAME full-bw "NDI CAMn"
+// inputs the program uses -- identical frames + genlock timing, zero proxy lag. Live-measured
+// after the switch: 60fps / 2.3ms / 0 skips / CPU 3-12%, better than with the twins.
 // ============================================================================================
 
-/// The seeder must create a SEPARATE low-bandwidth "MV Cam N" twin scene per camera, bound to
-/// the SAME fleet NDI name but flagged genlock_monitor=true so the vendor/distroav lockdown
-/// forces low-bandwidth receive instead of the certified highest-bandwidth default.
+/// #783: the seeder must create the 6 "MV Cam N" twin scenes, each nesting the SAME full-bw
+/// "NDI CAMn" input the program scenes use (same-source pivot) -- and the retired #501
+/// low-bandwidth path (genlock_monitor=true twin receivers) must NOT come back: it degraded
+/// after every reboot (relock ~4s) and was removed deliberately.
 #[test]
-fn imag_scenes_seeds_six_low_bandwidth_mv_monitor_scenes() {
+fn imag_scenes_seeds_six_mv_twins_nesting_the_same_source_mains() {
     let body = read(SCENES);
     assert!(
-        body.contains("f\"MV Cam {n}\""),
-        "{SCENES} must seed 6 \"MV Cam N\" monitor-only twin scenes (camera-box #501)"
+        body.contains("f\"MV Cam {n}\", f\"NDI CAM{n}\""),
+        "{SCENES} must seed 6 \"MV Cam N\" twin scenes each nesting the SAME \"NDI CAMn\" input \
+         the program uses (the #783 same-source pivot)"
     );
     assert!(
-        body.contains("\"genlock_monitor\": True"),
-        "{SCENES} must set genlock_monitor=true on the MV twin's NDI input settings -- this is \
-         the flag vendor/distroav's genlock lockdown reads to force LOW-bandwidth NDI receive \
-         instead of the certified HIGHEST (camera-box #501)"
+        !body.contains("\"genlock_monitor\": True"),
+        "{SCENES}: the #501 low-bandwidth twin-receiver path (genlock_monitor=true) was RETIRED \
+         by #783 (post-reboot relock degradation) -- it must not be reintroduced silently"
     );
     let mv_block_start = body
         .find("f\"MV Cam {n}\"")

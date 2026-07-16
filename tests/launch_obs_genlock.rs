@@ -180,6 +180,31 @@ fn program_gates_on_audio_buffering_and_redraws_786() {
     );
 }
 
+/// #786/#411 — a box with NO AutoHotkey64 watcher (stream; only strih runs NL_STARTUP.ahk) must get
+/// a program WITHOUT any real AutoHotkey64 command: build_launch_program's third arg (has_ahk=0)
+/// swaps the AHK stop/restart bracket for documented no-ops. Without this, the #411 self-heal
+/// script (which embeds this program verbatim) carried a real `Stop-Process -Name AutoHotkey64`
+/// onto stream — the exact thing its stream guard test forbids.
+#[test]
+fn program_without_ahk_watcher_carries_no_ahk_commands_786() {
+    let p = run_sourced("build_launch_program 'C:\\Program Files\\obs-studio' 0 0");
+    assert!(
+        !p.contains("Stop-Process -Name AutoHotkey64"),
+        "has_ahk=0 must not emit a real AutoHotkey64 stop command. Program:\n{p}"
+    );
+    assert!(
+        p.contains("no-op") && p.contains("AutoHotkey64"),
+        "has_ahk=0 must DOCUMENT the AHK bracket as a no-op, not silently vanish. Program:\n{p}"
+    );
+    // The redraw gate itself is unchanged — only the AHK bracket is swapped.
+    assert!(
+        p.contains("$bufPeak -le 100") && p.contains("exit 7"),
+        "the #786 audio gate must survive has_ahk=0 untouched. Program:\n{p}"
+    );
+    // Default (2-arg) stays the strih behavior — the AHK bracket present (pinned above in
+    // program_gates_on_audio_buffering_and_redraws_786).
+}
+
 /// The FINAL verdict gates exit 0 on the render tick being ENABLED (the genlock build proof) and
 /// fails LOUD (non-zero exit) otherwise — never a silent stock/wrong-build launch.
 #[test]

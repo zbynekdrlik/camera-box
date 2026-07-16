@@ -35,15 +35,48 @@ set -euo pipefail
 
 # --- PURE functions (no network, no MCP, no Windows — unit-tested by sourcing this script) --------
 
-# build_launch_program OBS_DIR FORCE -> the full PowerShell program that (re)launches OBS env-free and
-# then log-verifies + fails-loud. OBS_DIR is the OBS install root (its bin\64bit is the mandatory cwd).
-# FORCE="1" inserts a documented force-kill of a wedged obs64 first (obs-ops recovery — this is a DEV
-# rig, "kludne ho killni"); FORCE="0" aborts if obs64 is already running (relaunch deliberately, never
-# double-launch). Pure string builder so a unit test can assert the program is well-formed without a
-# Windows host. Heredoc body is a literal PowerShell here-string — bash-level interpolation is ONLY
-# $OBS_DIR / the FORCE branch; everything else (PowerShell $vars) is literal.
+# build_launch_program OBS_DIR FORCE [HAS_AHK] -> the full PowerShell program that (re)launches OBS
+# env-free and then log-verifies + fails-loud. OBS_DIR is the OBS install root (its bin\64bit is the
+# mandatory cwd). FORCE="1" inserts a documented force-kill of a wedged obs64 first (obs-ops recovery
+# — this is a DEV rig, "kludne ho killni"); FORCE="0" aborts if obs64 is already running (relaunch
+# deliberately, never double-launch). HAS_AHK (default "1") emits the #786 AHK stop-first/restart-last
+# bracket around the redraw loop — pass "0" for a box with NO AutoHotkey64 auto-respawn watcher
+# (stream; only strih runs NL_STARTUP.ahk, per .claude/skills/obs-ops "AHK on strih") so its program
+# never carries a real AutoHotkey64 command (the #411 self-heal stream guard pins this). Pure string
+# builder so a unit test can assert the program is well-formed without a Windows host. Heredoc body is
+# a literal PowerShell here-string — bash-level interpolation is ONLY $OBS_DIR / the FORCE branch /
+# the AHK bracket; everything else (PowerShell $vars) is literal.
 build_launch_program() {
-  local obs_dir="$1" force="$2"
+  local obs_dir="$1" force="$2" has_ahk="${3:-1}"
+
+  # #786/#411 — the AHK bracket is emitted ONLY for a box that actually runs the AHK watcher.
+  local ahk_decl ahk_stop_ps ahk_restart_ps
+  if [ "$has_ahk" = "1" ]; then
+    ahk_decl='$ahkStopped = $false'
+    ahk_stop_ps=$(cat <<'PSAHK'
+  # Stop AHK BEFORE killing obs64 (strih only; no-op elsewhere): NL_STARTUP.ahk respawns obs64 via
+  # the BARE exe within seconds of the window vanishing, which would drop the shortcut params
+  # (--enable-media-stream --verbose -> interkom "Permissions denied") AND race a double-launch.
+  # Same stop-first/restart-last structure as the #411 self-heal. Restarted after the loop.
+  if (Get-Process AutoHotkey64 -ErrorAction SilentlyContinue) {
+    Stop-Process -Name AutoHotkey64 -Force -ErrorAction SilentlyContinue
+    $ahkStopped = $true
+  }
+PSAHK
+)
+    ahk_restart_ps=$(cat <<'PSAHK'
+if ($ahkStopped) {
+  $ahkLnk = Get-ChildItem "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup" -Filter "*NL_STARTUP*" -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($ahkLnk) { Start-Process -FilePath $ahkLnk.FullName; Write-Host "#786: AHK watchdog restarted ($($ahkLnk.Name))." }
+  else { Write-Warning "#786: AHK was stopped for the redraw but no NL_STARTUP startup shortcut found -- restart it manually." }
+}
+PSAHK
+)
+  else
+    ahk_decl='# (no AutoHotkey64 watcher on this box -- the #786 AHK stop/restart bracket is a no-op)'
+    ahk_stop_ps='  # AutoHotkey64: no-op (this box has no AHK auto-respawn watcher -- nothing to stop)'
+    ahk_restart_ps='# AutoHotkey64 restart: no-op (no AHK watcher on this box)'
+  fi
   local bin64="${obs_dir}\\bin\\64bit"
   local exe="${bin64}\\obs64.exe"
   # Escape for the PowerShell SINGLE-quoted strings below: a literal ' is doubled to '' (the
@@ -164,7 +197,7 @@ if (\$guardedLnk) {
   }
 } else {
 \$maxLaunchAttempts = 3
-\$ahkStopped = \$false
+${ahk_decl}
 for (\$attempt = 1; \$attempt -le \$maxLaunchAttempts; \$attempt++) {
   Start-Sleep -Seconds 10   # ASIO starts right after module load; a bad burst completes within ~5 s
   \$d = Get-BufDraw
@@ -179,14 +212,7 @@ for (\$attempt = 1; \$attempt -le \$maxLaunchAttempts; \$attempt++) {
     exit 7
   }
   Write-Warning "#786: bad ASIO launch draw (buffering peak \${bufPeak} ms, maxed=\$bufMaxed) -- killing + relaunching OBS (attempt \$(\$attempt + 1)/\$maxLaunchAttempts)."
-  # Stop AHK BEFORE killing obs64 (strih only; no-op elsewhere): NL_STARTUP.ahk respawns obs64 via
-  # the BARE exe within seconds of the window vanishing, which would drop the shortcut params
-  # (--enable-media-stream --verbose -> interkom "Permissions denied") AND race a double-launch.
-  # Same stop-first/restart-last structure as the #411 self-heal. Restarted after the loop.
-  if (Get-Process AutoHotkey64 -ErrorAction SilentlyContinue) {
-    Stop-Process -Name AutoHotkey64 -Force -ErrorAction SilentlyContinue
-    \$ahkStopped = \$true
-  }
+${ahk_stop_ps}
   Stop-Process -Name obs64 -Force -ErrorAction SilentlyContinue
   Start-Sleep -Seconds 4
   Remove-Item "\$env:APPDATA\\obs-studio\\.sentinel\\*" -Force -ErrorAction SilentlyContinue
@@ -204,11 +230,7 @@ for (\$attempt = 1; \$attempt -le \$maxLaunchAttempts; \$attempt++) {
   if (-not \$proc) { Write-Error "obs64 did not start on #786 relaunch"; exit 6 }
   Start-Sleep -Seconds 3
 }
-if (\$ahkStopped) {
-  \$ahkLnk = Get-ChildItem "\$env:APPDATA\\Microsoft\\Windows\\Start Menu\\Programs\\Startup" -Filter "*NL_STARTUP*" -ErrorAction SilentlyContinue | Select-Object -First 1
-  if (\$ahkLnk) { Start-Process -FilePath \$ahkLnk.FullName; Write-Host "#786: AHK watchdog restarted (\$(\$ahkLnk.Name))." }
-  else { Write-Warning "#786: AHK was stopped for the redraw but no NL_STARTUP startup shortcut found -- restart it manually." }
-}
+${ahk_restart_ps}
 }
 
 # (4) VERIFY the fresh OBS log shows the genlock render tick ENABLED (the #257 build-default proof --
@@ -281,15 +303,17 @@ main() {
     esac
   done
 
-  local mcp box_ip
+  # has_ahk: only strih runs the NL_STARTUP.ahk auto-respawn watcher (obs-ops "AHK on strih") —
+  # stream's program must not carry a real AutoHotkey64 command (#411 self-heal guard pins this).
+  local mcp box_ip has_ahk
   case "$box" in
-    strih)  mcp="win-strih";       box_ip="10.77.9.202" ;;
-    stream) mcp="win-stream-snv";  box_ip="10.77.9.204" ;;
+    strih)  mcp="win-strih";       box_ip="10.77.9.202"; has_ahk=1 ;;
+    stream) mcp="win-stream-snv";  box_ip="10.77.9.204"; has_ahk=0 ;;
     *) echo "ERROR: --box must be 'strih' or 'stream' (got '${box}')" >&2; usage >&2; exit 2 ;;
   esac
 
   local PROGRAM
-  PROGRAM="$(build_launch_program "$obs_dir" "$force")"
+  PROGRAM="$(build_launch_program "$obs_dir" "$force" "$has_ahk")"
 
   cat <<PLAN
 # ===== #257 genlock OBS (re)launch plan — box=${box} (${mcp}, ${box_ip}) =====
