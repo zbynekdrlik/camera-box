@@ -26,14 +26,17 @@
 //! - `CAMERA_BOX_PUBLISH_30P_BLEND=0.0..0.5` — MAX weight of the pair's SECOND frame.
 //!   0.5 = full 50/50 average (default), 0.0 = pure decimation (keep first frame),
 //!   between = weighted average (less ghosting, less smoothness).
-//! - `CAMERA_BOX_PUBLISH_30P_MODE=adaptive|fixed` — default `adaptive`: MOTION-ADAPTIVE
-//!   blending. Per-macropixel luma difference ramps the blend weight from the configured
-//!   max (static areas: full average = smooth + ~sqrt(2) noise reduction) down to ZERO on
-//!   moving edges (no double-image ghosting even with a short outdoor-sunlight shutter).
-//!   This makes the stream self-tuning — the operator never has to touch the knob; the
-//!   knob + `fixed` mode remain as an explicit override/fallback. Same tier as broadcast
-//!   "motion adaptive" standards conversion (vs the naive fixed blend below it and the
-//!   GPU-class motion-compensated tier above it).
+//! - `CAMERA_BOX_PUBLISH_30P_MODE=fixed|adaptive` — default `fixed` (the FRC-correct
+//!   choice, user-corrected + source-verified 2026-07-16): frame blending in frame-rate
+//!   conversion exists TO SMOOTH MOTION (anti-judder), and broadcast FRC (Teranex "FRC
+//!   Aperture") dials blending UP as motion increases — blending is an identity op on
+//!   static pixels, so it only ever acts on motion. `adaptive` (opt-in) is the
+//!   deinterlacer/TNR-style luma-diff gate: full average on static areas (~sqrt(2) noise
+//!   reduction), weight ramped to ZERO on moving edges. That AVOIDS double-image ghosting
+//!   with short shutters but renders all visible motion like plain decimation (judder
+//!   kept) — it is a ghost-averse/NR rendition, NOT a motion smoother; keep it only as a
+//!   retreat if a short-shutter box ghosts objectionably (the softer first retreat is
+//!   lowering BLEND, the Teranex-aperture analog).
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
@@ -59,12 +62,13 @@ pub const BLEND_MAX: f32 = 0.5;
 /// Worker stats log cadence, in OUTPUT frames (~10 s at 30fps).
 pub const STATS_LOG_EVERY_OUTPUTS: u64 = 300;
 
-/// Motion-adaptive ramp: luma differences at or below this are treated as sensor noise /
-/// static content → full configured blend. 8-bit LSB.
+/// Opt-in `adaptive` mode ramp: luma differences at or below this are treated as sensor
+/// noise / static content → full configured blend. 8-bit LSB.
 pub const ADAPT_LUMA_T_LO: u8 = 8;
 
-/// Motion-adaptive ramp: luma differences at or above this are a moving edge → blend
-/// weight ZERO (keep the first frame sharp, no ghost). Linear ramp between the two.
+/// Opt-in `adaptive` mode ramp: luma differences at or above this are a moving edge →
+/// blend weight ZERO (keep the first frame sharp, no ghost — and no smoothing: motion
+/// renders like decimation). Linear ramp between the two.
 pub const ADAPT_LUMA_T_HI: u8 = 32;
 
 /// Parsed `CAMERA_BOX_PUBLISH_30P*` configuration.
@@ -73,7 +77,8 @@ pub struct Config {
     pub enabled: bool,
     /// MAX weight of the pair's SECOND frame, clamped to `[0.0, BLEND_MAX]`.
     pub blend: f32,
-    /// Motion-adaptive blending (default). `false` = fixed whole-frame weight.
+    /// Opt-in luma-diff-gated blending (ghost-averse/NR rendition). `false` (DEFAULT) =
+    /// fixed whole-frame weight — the FRC motion smoother.
     pub adaptive: bool,
 }
 
@@ -114,16 +119,16 @@ pub fn parse_blend(v: Option<&str>) -> (f32, Option<String>) {
     }
 }
 
-/// Pure parse of the mode knob: `adaptive` (default, incl. unset) or `fixed`. Anything
-/// else falls back to adaptive with a warning.
+/// Pure parse of the mode knob: `fixed` (default, incl. unset — the FRC motion smoother)
+/// or the opt-in `adaptive` gate. Anything else falls back to fixed with a warning.
 pub fn parse_mode(v: Option<&str>) -> (bool, Option<String>) {
     match v.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
-        None | Some("") | Some("adaptive") => (true, None),
-        Some("fixed") => (false, None),
+        None | Some("") | Some("fixed") => (false, None),
+        Some("adaptive") => (true, None),
         Some(other) => (
-            true,
+            false,
             Some(format!(
-                "CAMERA_BOX_PUBLISH_30P_MODE={other} unknown (adaptive|fixed) — using adaptive"
+                "CAMERA_BOX_PUBLISH_30P_MODE={other} unknown (fixed|adaptive) — using fixed"
             )),
         ),
     }
@@ -590,27 +595,30 @@ mod tests {
             Config {
                 enabled: false,
                 blend: BLEND_DEFAULT,
-                adaptive: true
+                adaptive: false
             }
         );
         // Each real env NAME lands in its field (pins the glue, not just the parsers).
         let c = Config::from_env_lookup(lookup(&[("CAMERA_BOX_PUBLISH_30P", "1")]));
-        assert!(c.enabled && c.adaptive && c.blend == BLEND_DEFAULT);
+        assert!(c.enabled && !c.adaptive && c.blend == BLEND_DEFAULT);
         let c = Config::from_env_lookup(lookup(&[("CAMERA_BOX_PUBLISH_30P_BLEND", "0.25")]));
         assert_eq!(c.blend, 0.25);
         assert!(!c.enabled);
-        let c = Config::from_env_lookup(lookup(&[("CAMERA_BOX_PUBLISH_30P_MODE", "fixed")]));
-        assert!(!c.adaptive);
+        let c = Config::from_env_lookup(lookup(&[("CAMERA_BOX_PUBLISH_30P_MODE", "adaptive")]));
+        assert!(c.adaptive);
         assert!(!c.enabled);
     }
 
     #[test]
-    fn mode_defaults_to_adaptive() {
-        assert_eq!(parse_mode(None), (true, None));
-        assert_eq!(parse_mode(Some("adaptive")), (true, None));
-        assert_eq!(parse_mode(Some(" FIXED ")), (false, None));
+    fn mode_defaults_to_fixed_blend_the_frc_motion_smoother() {
+        // User-corrected + source-verified (2026-07-16): FRC blending exists to smooth
+        // MOTION; blending is an identity on static pixels, so the adaptive gate (which
+        // zeroes the blend exactly on motion) must never be the default.
+        assert_eq!(parse_mode(None), (false, None));
+        assert_eq!(parse_mode(Some("fixed")), (false, None));
+        assert_eq!(parse_mode(Some(" ADAPTIVE ")), (true, None));
         let (adaptive, warn) = parse_mode(Some("garbage"));
-        assert!(adaptive, "unknown mode falls back to adaptive");
+        assert!(!adaptive, "unknown mode falls back to FIXED (the default)");
         assert!(warn.is_some());
     }
 
