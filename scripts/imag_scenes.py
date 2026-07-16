@@ -201,17 +201,28 @@ def seed(obs: Obs) -> None:
     missing = [f"Cam {n}" for n in CAMS if f"Cam {n}" not in scenes]
     mv_missing = [f"MV Cam {n}" for n in CAMS if f"MV Cam {n}" not in scenes]
 
-    # #501: built-in-multiview membership — show ONLY the low-bw "MV Cam N" twins; hide the
-    # real full-bw "Cam N" scenes (and everything else) so the Stream Deck still cuts the real
-    # scenes to program while the built-in multiview only ever renders the cheap twins. Mirrors
-    # OBSBasic_Scenes.cpp's "ShowInMultiview" context-menu action (same `show_in_multiview` key
-    # on obs_source_get_private_settings(sceneSource)), applied here over obs-websocket's
-    # SetSourcePrivateSettings (which overlays onto the same per-source private-settings store).
-    for name in scenes:
-        obs.req("SetSourcePrivateSettings", {
-            "sourceName": name,
-            "sourceSettings": {"show_in_multiview": name.startswith("MV Cam ")},
-        }, ignore_err=True)
+    # #501: built-in-multiview membership — the SEED-OWNED scenes only: "MV Cam N" shown,
+    # "Cam N" mains hidden (Stream Deck cuts the real scenes to program while the multiview
+    # renders the MV set). Mirrors OBSBasic_Scenes.cpp's "ShowInMultiview" context-menu action
+    # (same `show_in_multiview` key on obs_source_get_private_settings), applied over
+    # SetSourcePrivateSettings.
+    #
+    # #785 OPERATOR-WINS — HARD RULE: a scene the seed does NOT own (anything outside
+    # "Cam N"/"MV Cam N" — e.g. the operator's "MW resolume imag") is NEVER touched. The old
+    # blanket `for name in scenes: show_in_multiview = name.startswith("MV Cam ")` actively
+    # UN-TICKED the operator's own multiview choices on EVERY seed run (live incident chain,
+    # 2026-07-16: the user re-ticked "MW resolume imag" and each seed wiped it again — this,
+    # not lost unsaved UI state, was the recurring cause). Enforcement of even the OWNED
+    # scenes' membership runs only on --bootstrap (fresh OBS); a bare seed touches nothing.
+    if BOOTSTRAP:
+        for name in scenes:
+            owned = name.startswith("MV Cam ") or (name.startswith("Cam ") and name[4:].isdigit())
+            if not owned:
+                continue
+            obs.req("SetSourcePrivateSettings", {
+                "sourceName": name,
+                "sourceSettings": {"show_in_multiview": name.startswith("MV Cam ")},
+            }, ignore_err=True)
 
     print(f"video: {v['baseWidth']}x{v['baseHeight']}@{v['fpsNumerator']}"
           f"/{v['fpsDenominator']} {'OK' if ok else 'MISMATCH (output active? retry idle)'}")
