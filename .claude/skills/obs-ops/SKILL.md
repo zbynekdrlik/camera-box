@@ -108,6 +108,17 @@ PEB, read via `NtQueryInformationProcess` + `ReadProcessMemory` (PEB+0x20 → Pr
 With genlock now a build default this verification is no longer needed — genlock state is read from
 the OBS log (`render tick ENABLED`).
 
+## GOTCHA — NDI source dropdown is an EDITABLE combo: never type into it when the finder list is empty (#795)
+
+Live incident (2026-07-17 event): the strih→stream feed collapsed (network), the operator opened
+the DistroAV source properties to re-pick — the NDI list was EMPTY (discovery lost on the sick
+network) and the dropdown is an editable combobox, so keystrokes MANGLED the stored source name
+character by character ('NDI 2ME-PGM' → 'N2ME-PGM' → '2ME-PGM'), each update pointing at a
+nonexistent source → black, unrecoverable from the UI. Recovery = restart OBS (the saved scene
+JSON still holds the last-SAVED correct name). Operator guidance until #795 lands (list-only
+selector): when a feed dies, do NOT open/edit the source picker — restart OBS via the launcher.
+The mangled names are visible in the log as successive `[distroav] NDI Source Updated:` lines.
+
 ## Recovery — Do It Autonomously (Never Ask)
 
 The user has repeated this 2-3× and gets angry when re-asked which recovery method to use.
