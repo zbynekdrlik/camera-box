@@ -23,7 +23,7 @@
 //!
 //! Config (systemd drop-in / env, mirrors `CAMERA_BOX_GENLOCK_FPS`'s pattern):
 //! - `CAMERA_BOX_PUBLISH_30P=1` — enable (unset/0 ⇒ bit-identical legacy behavior).
-//! - `CAMERA_BOX_PUBLISH_30P_BLEND=0.0..0.5` — MAX weight of the pair's SECOND frame.
+//! - `CAMERA_BOX_PUBLISH_30P_BLEND=0.0..0.5` — the weight of the pair's SECOND frame.
 //!   0.5 = full 50/50 average (default), 0.0 = pure decimation (keep first frame),
 //!   between = weighted average (less ghosting, less smoothness).
 //!
@@ -441,6 +441,15 @@ mod tests {
     }
 
     #[test]
+    fn default_is_the_full_50_50_average_pinned_to_the_value() {
+        // Delta-review finding: every other assertion compares against BLEND_DEFAULT itself
+        // (tautological). Anchor the shipped default to the CONCRETE value so a regression
+        // away from the full 50/50 average (the user-caught #792 inversion) goes RED.
+        assert_eq!(BLEND_DEFAULT, 0.5);
+        assert_eq!(blend_weight_q8(BLEND_DEFAULT), 128);
+    }
+
+    #[test]
     fn blend_defaults_clamps_and_warns() {
         assert_eq!(parse_blend(None), (BLEND_DEFAULT, None));
         assert_eq!(parse_blend(Some("0.5")), (0.5, None));
@@ -693,6 +702,31 @@ mod tests {
         assert!(
             pool_rx.try_recv().is_ok(),
             "worker returns buffers to the pool"
+        );
+    }
+
+    #[test]
+    fn worker_blends_uyvy_pairs_too() {
+        // Pins the SECOND arm of the blendable gate (matches!(fourcc, "YUYV" | "UYVY")):
+        // a refactor narrowing it to YUYV-only would silently route UYVY to decimation.
+        // Defensive branch — capture negotiates YUYV — but the pin is one cheap test.
+        let (tx, rx) = sync_channel::<Frame>(16);
+        let (pool_tx, _pool_rx) = sync_channel::<Vec<u8>>(POOL_CAP);
+        let drops = Arc::new(AtomicU64::new(0));
+        let mut f0 = frame(0, 10);
+        f0.info = info(b"UYVY");
+        let mut f1 = frame(1, 20);
+        f1.info = info(b"UYVY");
+        tx.send(f0).unwrap();
+        tx.send(f1).unwrap();
+        drop(tx);
+        let mut sent: Vec<Vec<u8>> = Vec::new();
+        run_worker_loop(rx, pool_tx, 128, drops, |f| sent.push(f.buf.clone()));
+        assert_eq!(sent.len(), 1);
+        assert_eq!(
+            sent[0],
+            vec![15u8; 8],
+            "UYVY pair is blended, never decimated"
         );
     }
 
