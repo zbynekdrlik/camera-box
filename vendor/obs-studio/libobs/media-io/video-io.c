@@ -615,11 +615,21 @@ double video_output_get_frame_rate(const video_t *video)
 
 uint32_t video_output_get_skipped_frames(const video_t *video)
 {
+	/* camera-box #793: obs-websocket GetStats can land on a pooled thread while
+	 * obs_get_video() is still NULL during startup — same guard the neighbouring
+	 * getters (format/width/height/frame_rate) already carry. */
+	if (!video)
+		return 0;
+
 	return (uint32_t)os_atomic_load_long(&get_const_root(video)->skipped_frames);
 }
 
 uint32_t video_output_get_total_frames(const video_t *video)
 {
+	/* camera-box #793: see video_output_get_skipped_frames. */
+	if (!video)
+		return 0;
+
 	return (uint32_t)os_atomic_load_long(&get_const_root(video)->total_frames);
 }
 
