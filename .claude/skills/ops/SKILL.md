@@ -614,7 +614,7 @@ clear-signal-only. Full procedure: `systemd/rig-restore-watchdog.README.md`. Ena
 cp systemd/rig-restore-watchdog.{service,timer} ~/.config/systemd/user/
 # strih OBS-WS secret is NOT committed — supply it via a LOCAL drop-in (mode 0600, not git):
 mkdir -p ~/.config/systemd/user/rig-restore-watchdog.service.d
-printf '[Service]\nEnvironment=OBS_WS_PASSWORD=<strih WS pw — local memory, NOT committed>\nEnvironment=CAM_PW=newlevel\n' \
+printf '[Service]\nEnvironment=OBS_WS_PASSWORD=<strih WS pw — local memory, NOT committed>\nEnvironment=CAM_PW=<fleet deploy pw — memory cam-fleet-deploy-credential, NOT committed>\n' \
   > ~/.config/systemd/user/rig-restore-watchdog.service.d/override.conf
 systemctl --user daemon-reload
 systemctl --user enable --now rig-restore-watchdog.timer
