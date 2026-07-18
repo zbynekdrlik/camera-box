@@ -186,6 +186,19 @@ need to model the log's decorative `(≈N frames @ Ffps)` / `(=N ms)` / `(re-arm
 skipped. Reuse this parser for any future "read the audit log and compute a delta" need instead
 of re-deriving a sed/regex one-off.
 
+**GOTCHA — the #797 "phantom 50.1 fps" (2026-07-18): NEVER divide an audit-counter delta by a
+wall-clock sleep.** The audit line appends every **~5.017 s** (not 5.000). A hand-rolled one-off
+(`/tmp/imag-diag.py`) snapshotted the LATEST line's `received=`, slept 6 s, snapshotted again and
+divided by 6 — a 6 s wall window almost always spans EXACTLY ONE new audit tick (+301 frames at a
+true 60 fps), so the meter printed **301/6 = 50.17 ≈ "50.1" at every true-60 source, always**
+(cross-check that unmasked it: a ~43 fps Resolume feed showed "35.8" = 215/6). Two days were spent
+hunting a phantom "OBS receive caps at 50 while ndi-recv-probe gets 60" — the probe-vs-OBS
+differential compared a correct meter against this broken one. Rule: rate from a fixed-cadence log
+counter = delta ÷ **the matched lines' OWN log timestamps** (or count whole ticks × 5.017), i.e.
+use `jitter_audit`/`genlock-jitter-report` per the paragraph above — or, for receive rate, the
+`recv-timing #797` line (measured inside the DistroAV loop with steady_clock; lands ONLY in OBS's
+own log file, NOT in `/tmp/imag-obs-start.log`). Full post-mortem: #797 (retraction comment).
+
 **Still open (empirical, not this ticket):** going BELOW 3ms needs a floor-varied OBS *build*
 (the const can't vary at runtime post-#257) + a live recording + `genlock-jitter-report` on the
 captured log — a build-matrix change, supervisor/user-driven runbook in the doc's §7.
