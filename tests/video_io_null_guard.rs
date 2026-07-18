@@ -67,7 +67,10 @@ fn neighbour_getters_keep_their_upstream_null_guards() {
     // The fix follows the existing idiom — if upstream ever restructures these, the #793
     // guard style must be re-checked rather than blindly merged.
     let src = fs::read_to_string(VIDEO_IO).expect("read vendored video-io.c");
-    let body = fn_body(&src, "double video_output_get_frame_rate(const video_t *video)");
+    let body = fn_body(
+        &src,
+        "double video_output_get_frame_rate(const video_t *video)",
+    );
     assert!(
         body.contains("if (!video)"),
         "upstream frame_rate NULL guard disappeared — re-audit all video_output_* getters (#793)"
