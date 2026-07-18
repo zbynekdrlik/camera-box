@@ -18,7 +18,12 @@ fn main() -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("usage: ndi-recv-probe \"<NDI source name>\" [secs]"))?;
     let secs: u64 = args.next().and_then(|s| s.parse().ok()).unwrap_or(30);
 
+    let hwaccel = std::env::args().any(|a| a == "--hwaccel");
     let mut rx = camera_box::ndi::NdiReceiver::connect(&source, 15)?;
+    if hwaccel {
+        rx.send_metadata("<ndi_video_codec type=\"hardware\"/>")?;
+        println!("hw-accel metadata SENT (DistroAV-identical)");
+    }
     println!("connected to '{source}' — measuring {secs}s...");
 
     let t0 = std::time::Instant::now();

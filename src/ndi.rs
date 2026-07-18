@@ -242,6 +242,14 @@ type NDIlib_recv_capture_v3_fn = unsafe extern "C" fn(
     u32,
 ) -> c_int;
 #[allow(non_camel_case_types)]
+#[repr(C)]
+struct NDIlib_metadata_frame_t {
+    length: c_int,
+    timecode: i64,
+    p_data: *const c_char,
+}
+type NDIlib_recv_send_metadata_fn =
+    unsafe extern "C" fn(*mut c_void, *const NDIlib_metadata_frame_t) -> bool;
 type NDIlib_recv_free_video_v2_fn =
     unsafe extern "C" fn(*mut c_void, *const NDIlib_video_frame_v2_recv_t);
 
@@ -264,6 +272,7 @@ struct NdiLib {
     recv_destroy: NDIlib_recv_destroy_fn,
     recv_capture_v3: NDIlib_recv_capture_v3_fn,
     recv_free_video_v2: NDIlib_recv_free_video_v2_fn,
+    recv_send_metadata: NDIlib_recv_send_metadata_fn,
 }
 
 impl NdiLib {
@@ -373,6 +382,9 @@ impl NdiLib {
             let recv_free_video_v2: NDIlib_recv_free_video_v2_fn = *library
                 .get::<NDIlib_recv_free_video_v2_fn>(b"NDIlib_recv_free_video_v2")
                 .context("NDIlib_recv_free_video_v2 not found")?;
+            let recv_send_metadata: NDIlib_recv_send_metadata_fn = *library
+                .get::<NDIlib_recv_send_metadata_fn>(b"NDIlib_recv_send_metadata")
+                .context("NDIlib_recv_send_metadata not found")?;
 
             // Initialize NDI
             if !initialize() {
@@ -396,6 +408,7 @@ impl NdiLib {
                 recv_destroy,
                 recv_capture_v3,
                 recv_free_video_v2,
+                recv_send_metadata,
             })
         }
     }
@@ -1349,6 +1362,19 @@ impl NdiReceiver {
 
     /// Capture next video frame (blocking with timeout)
     /// Returns None if no frame available within timeout
+    /// #797 — send receiver metadata (e.g. the DistroAV hw-accel request
+    /// `<ndi_video_codec type="hardware"/>`), verbatim what the vendored ndi-source does.
+    pub fn send_metadata(&mut self, xml: &str) -> Result<()> {
+        let c = CString::new(xml)?;
+        let frame = NDIlib_metadata_frame_t {
+            length: xml.len() as c_int,
+            timecode: 0,
+            p_data: c.as_ptr(),
+        };
+        unsafe { (self.lib.recv_send_metadata)(self.receiver, &frame) };
+        Ok(())
+    }
+
     pub fn capture_frame(&mut self, timeout_ms: u32) -> Result<Option<ReceivedFrame>> {
         let mut video_frame: NDIlib_video_frame_v2_recv_t = unsafe { std::mem::zeroed() };
 
