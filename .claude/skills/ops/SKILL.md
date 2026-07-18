@@ -8,6 +8,19 @@ description: >
 
 # Camera-box Ops
 
+## Diagnostika: "multiview nejde plynulo" pri ČISTOM renderi = počítaj dantesync Stepped (2026-07-18)
+
+Operator feel "MV nie je 30fps" while strih GetStats shows a PERFECT render (30.0fps, 0% skips)
+and inputs show 60fps arrivals with zero holds in a short window: the hitches are sporadic
+per-cell TS-ALIGN holds caused by sender CLOCK STEPS — count them per cam box:
+`journalctl -u dantesync --since "-30 min" | grep -c Stepped`. Live event 2026-07-18: 1-33
+steps/30min per cam (~100 fleet-wide = a visible hitch somewhere in the grid every ~18s) from
+NTP jitter on the loaded venue LAN; at home offsets are sub-100µs with zero steps. Each ~1-2ms
+step jumps that camera's genlock timecodes -> its cell holds a frame -> a single-cell hic. An
+OBS restart does NOT help (nothing accumulates receiver-side); robustness/alarming is
+dantesync#50. Second (structural) component of the feel: MV cells are sharp 60->30 decimation
+judder — the #792 "CAMn (30p)" blend streams are the designed cure once strih consumes them.
+
 ## Venue/event network — MikroTik topology + the microburst egress-drop gotcha (#797, 2026-07-18)
 
 The traveling rig LAN is all-MikroTik, ssh user `admin` (password = the fleet deploy pw — memory
