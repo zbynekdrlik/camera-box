@@ -37,6 +37,7 @@ import argparse
 import base64
 import hashlib
 import json
+import os
 import sys
 
 # #785: --bootstrap = boot/recovery invocation (autostart + watchdog) — ONLY that path may
@@ -193,7 +194,21 @@ def seed(obs: Obs) -> None:
     # A reseed on a RUNNING production OBS must never yank the operator's program scene.
     if BOOTSTRAP:
         obs.req("SetStudioModeEnabled", {"studioModeEnabled": True}, ignore_err=True)
-        obs.req("SetCurrentProgramScene", {"sceneName": "Cam 1"}, ignore_err=True)
+        # #785: restore the program scene that was LIVE at the last graceful stop
+        # (imag-obs-stop.sh writes ~/.config/imag-last-program before SIGTERM) instead of
+        # always parking on "Cam 1" — the operator's cut must survive an OBS restart.
+        # Unknown/stale scene name -> ignore_err leaves the collection default; missing
+        # state file -> the old "Cam 1" fallback.
+        program = "Cam 1"
+        state_path = os.path.expanduser("~/.config/imag-last-program")
+        try:
+            with open(state_path) as fh:
+                saved = fh.read().strip()
+            if saved:
+                program = saved
+        except OSError as exc:
+            print(f"seed: no last-program state ({state_path}: {exc}) — fallback '{program}'")
+        obs.req("SetCurrentProgramScene", {"sceneName": program}, ignore_err=True)
 
     v = obs.req("GetVideoSettings")
     ok = (v["fpsNumerator"], v["baseWidth"], v["baseHeight"]) == (FPS, CANVAS_W, CANVAS_H)
