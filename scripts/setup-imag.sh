@@ -986,7 +986,7 @@ step 15 "Kiosk environment (#504): openbox+lightdm autologin, DM→lightdm, disa
 #     package is a no-op). lightdm's default-Recommends greeter (lightdm-gtk-greeter) comes along;
 #     the owner's list names no specific greeter, so none is pinned here.
 apt-get update -qq
-DEBIAN_FRONTEND=noninteractive apt-get install -y openbox lightdm \
+DEBIAN_FRONTEND=noninteractive apt-get install -y openbox lightdm feh \
     || fail "#504: openbox+lightdm install failed — cannot convert imag-nb to the kiosk WM"
 
 # (b) lightdm autologin → openbox. Idempotent full-file write of a fixed drop-in (always the same
@@ -1138,6 +1138,10 @@ if [ -n "$PROJ" ]; then
     || xrandr --output "$PROJ" --mode 1920x1080 --rate 60 2>/dev/null || true
 fi
 xset s off -dpms s noblank 2>/dev/null || true
+# wall-fallback: resolume-imag still ako pozadie -- restart OBS nikdy neukaze ciernu stenu.
+# Obrazok je OPERATORSKY ASSET (nie git) -- refresh: OBS-WS GetSourceScreenshot sceny
+# 'resolume imag' do ~/Pictures/wall-fallback.png (viz #791 reprovision parity note).
+[ -f "$HOME/Pictures/wall-fallback.png" ] && command -v feh >/dev/null && feh --no-fehbg --bg-fill "$HOME/Pictures/wall-fallback.png" 2>/dev/null || true
 # Clear stale OBS crash sentinels BEFORE launch -- a hard/unclean reboot is EXACTLY the case OBS's
 # own "Crash or unclean shutdown detected" modal fires on, which would hang the boot headless and
 # :4455 would never come up (same fix as this script's own provisioning-time relaunch, step 17;
