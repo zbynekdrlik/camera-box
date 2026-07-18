@@ -3662,10 +3662,20 @@ static void obs_source_output_video_internal(obs_source_t *source, const struct 
 
 	source_profiler_async_frame_received(source);
 
+	/* camera-box #797 instrumentation: time the two candidate stall stages of the
+	 * receive-thread submit path — cache_video (async_mutex #1 wait + possible alloc +
+	 * 4MB copy_frame_data) and the async_mutex #2 wait below. Rate-limited slow-call
+	 * log (>5ms total, max ~1 line/s) with a cumulative slow counter, so a systematic
+	 * ~3-4ms/frame stall (the 50-of-60fps pull-loop quantizer) is unmissable in the
+	 * imag OBS log within seconds. Pure diagnosis — remove after #797 closes. */
+	uint64_t iv797_t0 = os_gettime_ns();
+
 	struct obs_source_frame *output = cache_video(source, frame);
 
+	uint64_t iv797_t1 = os_gettime_ns();
 	/* ------------------------------------------- */
 	pthread_mutex_lock(&source->async_mutex);
+	uint64_t iv797_t2 = os_gettime_ns();
 	if (output) {
 		if (os_atomic_dec_long(&output->refs) == 0) {
 			obs_source_frame_destroy(output);
@@ -3695,6 +3705,24 @@ static void obs_source_output_video_internal(obs_source_t *source, const struct 
 		}
 	}
 	pthread_mutex_unlock(&source->async_mutex);
+
+	{
+		/* #797: see the comment above iv797_t0. */
+		uint64_t iv797_t3 = os_gettime_ns();
+		if (iv797_t3 - iv797_t0 > 5000000ULL) {
+			static volatile long iv797_slow_count = 0;
+			static uint64_t iv797_last_log_ns = 0;
+			os_atomic_inc_long((long *)&iv797_slow_count);
+			if (iv797_t3 - iv797_last_log_ns > 1000000000ULL) {
+				iv797_last_log_ns = iv797_t3;
+				blog(LOG_INFO,
+				     "genlock #797 slow output_video '%s': total=%.2fms cache_video=%.2fms lock2_wait=%.2fms (slow_total=%ld)",
+				     obs_source_get_name(source), (double)(iv797_t3 - iv797_t0) / 1e6,
+				     (double)(iv797_t1 - iv797_t0) / 1e6, (double)(iv797_t2 - iv797_t1) / 1e6,
+				     iv797_slow_count);
+			}
+		}
+	}
 }
 
 void obs_source_output_video(obs_source_t *source, const struct obs_source_frame *frame)

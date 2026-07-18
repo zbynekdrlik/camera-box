@@ -16,6 +16,7 @@
 ******************************************************************************/
 
 #include "plugin-main.h"
+#include <chrono>
 #include "ndi-finder.h"
 
 #include <util/platform.h>
@@ -605,6 +606,14 @@ void *ndi_source_thread(void *data)
 	int64_t timestamp_audio = 0;
 	int64_t timestamp_video = 0;
 
+	/* camera-box #797 recv-timing instrumentation: locate the ~50-of-60fps pull-loop
+	 * throttle. Times recv_capture_v3 (wait for SDK) vs process_video2+free (our cost,
+	 * dominated by obs_source_output_video) per VIDEO frame; logs a 5s summary per
+	 * source. Pure diagnosis — remove after #797 closes. */
+	uint64_t t797_n = 0;
+	double t797_cap_sum = 0, t797_cap_max = 0, t797_out_sum = 0, t797_out_max = 0;
+	auto t797_last_log = std::chrono::steady_clock::now();
+
 	//
 	// Main NDI receiver loop: BEGIN
 	//
@@ -938,8 +947,10 @@ void *ndi_source_thread(void *data)
 			//
 			// !ndi_frame_sync
 			//
+			auto t797_c0 = std::chrono::steady_clock::now();
 			frame_received =
 				ndiLib->recv_capture_v3(ndi_receiver, &video_frame, &audio_frame, nullptr, 100);
+			auto t797_c1 = std::chrono::steady_clock::now();
 
 			if (frame_received == NDIlib_frame_type_audio) {
 				//
@@ -961,6 +972,28 @@ void *ndi_source_thread(void *data)
 				ndi_source_thread_process_video2(s, &video_frame, s->obs_source, &obs_video_frame);
 
 				ndiLib->recv_free_video_v2(ndi_receiver, &video_frame);
+				{
+					auto t797_c2 = std::chrono::steady_clock::now();
+					double cap_ms = std::chrono::duration<double, std::milli>(t797_c1 - t797_c0).count();
+					double out_ms = std::chrono::duration<double, std::milli>(t797_c2 - t797_c1).count();
+					t797_n++;
+					t797_cap_sum += cap_ms;
+					t797_out_sum += out_ms;
+					if (cap_ms > t797_cap_max)
+						t797_cap_max = cap_ms;
+					if (out_ms > t797_out_max)
+						t797_out_max = out_ms;
+					if (std::chrono::duration<double>(t797_c2 - t797_last_log).count() >= 5.0 && t797_n > 0) {
+						obs_log(LOG_INFO,
+							"recv-timing #797 '%s': n=%llu cap_avg=%.2fms cap_max=%.2fms out_avg=%.2fms out_max=%.2fms",
+							obs_source_name, (unsigned long long)t797_n,
+							t797_cap_sum / (double)t797_n, t797_cap_max,
+							t797_out_sum / (double)t797_n, t797_out_max);
+						t797_n = 0;
+						t797_cap_sum = t797_cap_max = t797_out_sum = t797_out_max = 0;
+						t797_last_log = t797_c2;
+					}
+				}
 				continue;
 			}
 
