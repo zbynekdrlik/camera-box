@@ -8,6 +8,25 @@ description: >
 
 # Camera-box Ops
 
+## Venue/event network — MikroTik topology + the microburst egress-drop gotcha (#797, 2026-07-18)
+
+The traveling rig LAN is all-MikroTik, ssh user `admin` (password = the fleet deploy pw — memory
+`cam-fleet-deploy-credential`, NOT committed): router_snv RB4011 = 10.77.8.1; CRS310-8G+2S+
+switches: foh1_audio 10.77.9.2, stage_av 10.77.9.3, foh1_video 10.77.9.4, foh2_video 10.77.9.5.
+10G SFP+ trunks between them; port naming `etherN::dante|::basic|::trunk`. Map a device to its
+physical port: `/interface bridge host print where mac-address=XX:...` per switch (a MAC learned
+on a `::trunk` port means "behind that trunk, next switch").
+
+**GOTCHA — a 2.5G edge port fed from a 10G trunk TAIL-DROPS microbursts with the default buffer
+split** (CRS310 default `shared-buffers=40%`): live incident = imag on foh2 ether3 dropped ~8
+pkt/s (`/interface ethernet print stats` → `tx-drop-queue1-packet`), strih on the 10G SFP+ port
+clean. Fix (applied 2026-07-18, KEEP): `/interface ethernet switch qos settings set
+shared-buffers=80%` → drops 0. Check drops first on any "receiver gets less than sender sends"
+report: `:local a [/interface ethernet get [find name~"etherX"] tx-drop-packet]; :delay 6s; ...`.
+NOTE: eliminating these drops did NOT lift the imag 50fps cap (#797 — NDI sender-side pacing vs
+the Linux receiver; post-event lab plan on the ticket). Also: cam boxes sit on `::dante`-named
+ports in places — verify no future Dante QoS policy throttles video there.
+
 ## DanteSync Cluster Clock
 
 DanteSync (`~/devel/dantetimesync`) is the cluster wall-clock basis for genlock (#8/#42).
