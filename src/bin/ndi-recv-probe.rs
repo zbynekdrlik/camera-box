@@ -41,7 +41,10 @@ fn main() -> anyhow::Result<()> {
         }
         let w = window_start.elapsed().as_secs_f64();
         if w >= 5.0 {
-            println!("rate: {:.1} fps ({window_frames} frames / {w:.2}s)", window_frames as f64 / w);
+            println!(
+                "rate: {:.1} fps ({window_frames} frames / {w:.2}s)",
+                window_frames as f64 / w
+            );
             window_frames = 0;
             window_start = std::time::Instant::now();
         }
