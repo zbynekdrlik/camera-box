@@ -10,6 +10,17 @@ description: >
 
 ## #257 — PRODUCTION-SAFE HARD-LOCK (the CURRENT state; supersedes the env model below)
 
+**GOTCHA (2026-07-18, live-event #797 debugging): the vendored libndi runtime IGNORES
+`ndi-config.v1.json` — transport cannot be forced via config on this build.** Writing
+`{"ndi":{"rudp":{"recv":false,"send":false},"unicast":{...false},"multicast":{...false}}}` to
+`~/.ndi/` (receiver side, imag) AND `/root/.ndi/` (sender side, cam box service runs as root) had
+ZERO effect — wire stayed pure UDP after full process restarts on both ends. Do not burn event
+time retrying config-based transport switches; the post-event paths are on camera-box#797
+(NDI_CONFIG_DIR env? version-specific keys? SDK update in vendor/). Context: NDI RUDP sender-side
+per-connection degradation to exactly ~50/60fps against the LINUX receiver only (Windows strih
+receiver clean, sender-wire capture proved 14-15ms burst pacing originates in the sender's lib).
+
+
 **The genlock build is hard-locked and ENV-FREE. There is NO `OBS_GENLOCK_*` / `OBS_BURN_*` env any
 more** — the old env knobs were removed in #257. The current model:
 
