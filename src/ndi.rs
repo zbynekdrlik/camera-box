@@ -248,8 +248,10 @@ struct NDIlib_metadata_frame_t {
     timecode: i64,
     p_data: *const c_char,
 }
+#[allow(non_camel_case_types)]
 type NDIlib_recv_send_metadata_fn =
     unsafe extern "C" fn(*mut c_void, *const NDIlib_metadata_frame_t) -> bool;
+#[allow(non_camel_case_types)]
 type NDIlib_recv_free_video_v2_fn =
     unsafe extern "C" fn(*mut c_void, *const NDIlib_video_frame_v2_recv_t);
 
