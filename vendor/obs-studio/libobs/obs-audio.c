@@ -665,6 +665,47 @@ bool audio_callback(void *param, uint64_t start_ts_in, uint64_t end_ts_in, uint6
 	const char *buffering_name = calc_min_ts(data, sample_rate, &min_ts);
 	pthread_mutex_unlock(&data->audio_sources_mutex);
 
+	/* camera-box #800: audio-side telemetry — the audio twin of the genlock-fifo audit.
+	 * The recurring live A/V-desync hunt died on a LOG BLIND SPOT: the video chain is
+	 * instrumented per hop (sender timecodes + FIFO audits) while the audio path logged
+	 * NOTHING between "adding audio buffering" events, so an in-OBS audio-timeline shift
+	 * could never be told apart from an external (console/mastering) chain change. Every
+	 * 60 s dump, per audio source: how far its audio timeline sits behind the OS clock
+	 * (ts_lag_ms — a smooth ppm-scale GROWTH here = the source's sample clock drifting vs
+	 * the wall/render clock, e.g. a Dante Virtual Soundcard slaved to a different clock
+	 * domain), buffered depth, and timing_adjust. Runs on the audio thread; audio_ts and
+	 * timing_adjust are audio-thread-owned, the input-buf size read is approximate
+	 * (unlocked, telemetry-only). */
+	{
+		static uint64_t t800_last_log_ns = 0;
+		const uint64_t t800_now = os_gettime_ns();
+		if (t800_now - t800_last_log_ns >= 60000000000ULL) {
+			t800_last_log_ns = t800_now;
+			blog(LOG_INFO,
+			     "audio-telemetry #800: total_buffering=%d ms (ticks=%d/%d) buffering_source=%s",
+			     (int)(audio->total_buffering_ticks * AUDIO_OUTPUT_FRAMES * 1000 / sample_rate),
+			     (int)audio->total_buffering_ticks, (int)audio->max_buffering_ticks,
+			     buffering_name ? buffering_name : "-");
+			pthread_mutex_lock(&data->audio_sources_mutex);
+			struct obs_source *tsrc = data->first_audio_source;
+			while (tsrc) {
+				if (tsrc->audio_ts || tsrc->audio_input_buf[0].size) {
+					const int64_t lag_ms =
+						tsrc->audio_ts ? (int64_t)(t800_now - tsrc->audio_ts) / 1000000 : -1;
+					const int buf_ms = (int)(tsrc->audio_input_buf[0].size / sizeof(float) * 1000 /
+								 sample_rate);
+					blog(LOG_INFO,
+					     "audio-telemetry #800 '%s': ts_lag_ms=%" PRId64
+					     " buffered_ms=%d pending=%d timing_adjust_ms=%" PRId64,
+					     obs_source_get_name(tsrc), lag_ms, buf_ms, (int)tsrc->audio_pending,
+					     (int64_t)tsrc->timing_adjust / 1000000);
+				}
+				tsrc = (struct obs_source *)tsrc->next_audio_source;
+			}
+			pthread_mutex_unlock(&data->audio_sources_mutex);
+		}
+	}
+
 	/* ------------------------------------------------ */
 	/* if a source has gone backward in time, buffer    */
 	if (audio->fixed_buffer) {

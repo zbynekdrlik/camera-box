@@ -861,7 +861,16 @@ budget on EVERY tick → skipped forever → the strih Multiview FROZE solid for
   `windows-genlock-fast.yml` (fires on `vendor/obs-studio/**` push). Live 4-cam unfreeze = supervisor
   rig step at the coordinated OBS rollout.
 
-## #758 — Studio Mode is a SEPARATE render-budget consumer from Multiview; imag must run it OFF
+## #758 — Studio Mode render cost (HISTORY — the "imag must run it OFF" mandate is SUPERSEDED)
+
+**⚠️ SUPERSEDED (user, 2026-07-18): "vypínať studio mód je dávno prekonaný stav"** — the OFF mandate
+below dates from the era when imag still had other render-budget problems (e.g. everything pinned to
+one core). Current state: imag_scenes.py --bootstrap deliberately sets **Studio Mode ON** (the
+operator cut workflow needs it) and the render budget holds fine (live 2026-07-18: 60.0 fps /
+6.3 ms / 0.03 % skips WITH Studio ON). Do NOT turn Studio Mode off on imag as an "optimization" —
+the A/B numbers below are kept only as historical context of what Studio Mode cost back then.
+
+### (HISTORY) original #758 finding — Studio Mode as a render-budget consumer
 A stale **Studio-Mode-ON** left over from an earlier debugging/testing session on imag degraded its
 render loop right to the edge of (and past) a healthy budget — confirmed live 2026-07-14 by direct
 A/B `GetStats` measurement on the SAME box, same Multiview-open state: **Studio ON ≈ 56.8-58.1fps /
