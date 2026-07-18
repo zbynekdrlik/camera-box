@@ -90,6 +90,10 @@ criterion = { version = "0.5", features = ["html_reports"] }
 probe = ["dep:crc", "dep:qrcode", "dep:rqrr", "dep:image", "dep:drm", "dep:lz4_flex"]
 
 [[bin]]
+name = "ndi-recv-probe"
+path = "src/bin/ndi-recv-probe.rs"
+
+[[bin]]
 name = "frozen-camera-gate"
 path = "src/bin/frozen-camera-gate.rs"
 
