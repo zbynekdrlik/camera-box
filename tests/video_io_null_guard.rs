@@ -76,3 +76,28 @@ fn neighbour_getters_keep_their_upstream_null_guards() {
         "upstream frame_rate NULL guard disappeared — re-audit all video_output_* getters (#793)"
     );
 }
+
+#[test]
+fn canvas_mix_detaches_before_free_and_obs_get_video_is_null_safe_793() {
+    // Second #793 flavor (garbage pointer, "segfault at 7e1"): obs_canvas_clear_mix used to
+    // free the mix BEFORE nulling canvas->mix, so obs_get_video() on the obs-websocket pooled
+    // thread could read freed memory. Pin the detach-before-free order + the NULL-safe getter.
+    let canvas =
+        fs::read_to_string("vendor/obs-studio/libobs/obs-canvas.c").expect("read obs-canvas.c");
+    let body = fn_body(&canvas, "void obs_canvas_clear_mix(obs_canvas_t *canvas)");
+    let detach = body
+        .find("canvas->mix = NULL")
+        .expect("detach assignment present");
+    let free = body.find("obs_free_video_mix").expect("free call present");
+    assert!(
+        detach < free,
+        "#793 regression: obs_canvas_clear_mix must DETACH canvas->mix BEFORE obs_free_video_mix"
+    );
+
+    let obs_c = fs::read_to_string("vendor/obs-studio/libobs/obs.c").expect("read obs.c");
+    let getter = fn_body(&obs_c, "video_t *obs_get_video(void)");
+    assert!(
+        getter.contains("mix ? mix->video : NULL"),
+        "#793 regression: obs_get_video lost its NULL-safe canvas/mix chain"
+    );
+}

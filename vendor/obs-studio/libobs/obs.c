@@ -1821,7 +1821,15 @@ audio_t *obs_get_audio(void)
 
 video_t *obs_get_video(void)
 {
-	return obs->data.main_canvas->mix->video;
+	/* camera-box #793: NULL-safe — main_canvas->mix is NULL during the boot
+	 * window and across canvas video resets, and obs-websocket's GetStats calls
+	 * this from a pooled thread the moment a client (Companion) connects. The
+	 * unguarded chain returned NULL->video (boot crash flavor) or read a freed
+	 * mix (see obs_canvas_clear_mix). Downstream video_output_* getters are
+	 * NULL-safe, so returning NULL here is fully handled. */
+	obs_canvas_t *canvas = obs->data.main_canvas;
+	struct obs_core_video_mix *mix = canvas ? canvas->mix : NULL;
+	return mix ? mix->video : NULL;
 }
 
 obs_source_t *obs_get_output_source(uint32_t channel)
