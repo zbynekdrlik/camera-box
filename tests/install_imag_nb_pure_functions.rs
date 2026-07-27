@@ -225,3 +225,31 @@ fn nm_keyfile_pins_the_static_address() {
         "keyfile must be a valid NM connection profile: {out}"
     );
 }
+
+/// #819 (live, 10.77.9.187, 2026-07-27): the chroot installed the **GA** kernel (`linux-generic`,
+/// 6.8) while the imag role runs the **HWE** line (the incumbent box is on 6.17
+/// `linux-generic-hwe-24.04`). `setup-imag.sh` step 6 holds the HWE package names and step 7
+/// installs `linux-lowlatency-hwe-24.04`, whose deps ARE those HWE packages — so a GA baseline
+/// aborts provisioning outright:
+///   `linux-lowlatency-hwe-24.04 : Depends: linux-image-generic-hwe-24.04 … not going to be installed`
+/// and it also drops the 13th-gen CPU/iGPU/USB-NIC support #482 deliberately kept.
+#[test]
+fn the_chroot_kernel_is_the_hwe_line_the_imag_role_runs() {
+    let (code, chroot_fn, err) = run_sourced("declare -f configure_in_chroot");
+    assert_eq!(code, 0, "configure_in_chroot must exist. stderr: {err}");
+    assert!(
+        chroot_fn.contains("linux-generic-hwe-24.04"),
+        "the chroot must install the HWE kernel chain setup-imag.sh assumes: {chroot_fn}"
+    );
+    assert!(
+        !regex_lite_has_bare_ga_install(&chroot_fn),
+        "a bare `apt-get install … linux-generic` (the GA line) must be gone: {chroot_fn}"
+    );
+}
+
+/// `apt-get install -y linux-generic` with no `-hwe-24.04` suffix anywhere on the line.
+fn regex_lite_has_bare_ga_install(body: &str) -> bool {
+    body.lines().any(|l| {
+        l.contains("apt-get install") && l.contains("linux-generic") && !l.contains("linux-generic-hwe-24.04")
+    })
+}

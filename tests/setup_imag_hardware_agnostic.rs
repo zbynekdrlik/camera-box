@@ -330,6 +330,37 @@ fn the_peer_call_site_uses_the_function_and_fails_loud() {
     );
 }
 
+/// #820 (live, 10.77.9.187, 2026-07-27): step 6 `apt-mark hold`s the HWE kernel package NAMES
+/// unconditionally — including ones this box has not installed. Step 7 then installs
+/// `linux-lowlatency-hwe-24.04`, whose dependencies are exactly those held names, and apt refuses:
+///   `E: Held packages were changed and -y was used without --allow-change-held-packages.`
+/// Provisioning held itself out of its own next step. Two independent guards:
+#[test]
+fn the_kernel_hold_never_blocks_the_lowlatency_install() {
+    let b = body();
+    let hold = b
+        .find("KERNEL_HOLD_PKGS")
+        .expect("step 6 kernel hold must exist");
+    let step7 = b
+        .find("linux-lowlatency-hwe-24.04 >/dev/null")
+        .expect("step 7 lowlatency install must exist");
+    assert!(hold < step7, "step 6 runs before step 7 — precondition of this test");
+
+    // (a) the hold itself must only cover packages that are actually INSTALLED on this box
+    let hold_region = &b[hold.saturating_sub(400)..hold + 400];
+    assert!(
+        hold_region.contains("dpkg -s"),
+        "step 6 must hold only INSTALLED kernel packages (dpkg -s gate): {hold_region}"
+    );
+    // (b) and the lowlatency install must survive a pre-existing hold on its own dependencies
+    let step7_line_end = b[step7..].find('\n').map(|e| step7 + e).unwrap_or(b.len());
+    let step7_region = &b[step7.saturating_sub(300)..step7_line_end];
+    assert!(
+        step7_region.contains("--allow-change-held-packages"),
+        "step 7's kernel install must not be blocked by step 6's own holds: {step7_region}"
+    );
+}
+
 fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
