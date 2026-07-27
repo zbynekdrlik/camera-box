@@ -2366,3 +2366,31 @@ po ďalšom reboote); interim `taskset -a -pc <neizolované jadrá>` na bežiaci
 per-vlákno pinovaním. Po KAŽDOM reboote rig boxu over `/proc/cmdline` proti očakávaniu
 (drift-guard fazeta = #780 balík). A pri "reboot všetko rozbil": `ls -la /etc/default/grub.d/` —
 mtime súborov prezradí míny čakajúce od posledného bootu.
+
+## Fleet-preflight ack (#758) had NO way in from CI, and conflated "reachable" with "healthy" (#827)
+
+`recording-e2e.sh`'s `[0/8]` ALL_CAMBOX fleet preflight (#758) already had the
+`CAMBOX_OFFLINE_ACK` exclusion mechanism (`scripts/lib/cambox-offline-ack.sh`) — but
+`.github/workflows/full-path-e2e.yml` never SET it, so the required `pull_request` gate hard-failed
+the instant the physical fleet was smaller than 7 boxes (2026-07-27, cam4's grabber card removed,
+cam5/6/7 powered off). Two fixes, both in `scripts/lib/cambox-offline-ack.sh`:
+
+- **CI wiring:** `cambox_offline_ack_effective(explicit, file)` — an explicit env value (a manual
+  `workflow_dispatch`'s new `offline_ack` input) wins outright; empty falls back to a checked-in
+  repo-level default file, **`rig-fleet.txt`** (repo root, `box:reason` per line, `#`
+  comments/blanks ignored). The automatic `pull_request` gate carries NO inputs, so it ALWAYS uses
+  `rig-fleet.txt` — keep that file in sync with the physical rig state, or a genuinely-down box
+  will hard-fail the gate again.
+- **The subtler bug:** the OLD stale-ack check decided "stale" purely from `ping` success — so a
+  box that is REACHABLE (OS/network up) but UNHEALTHY (`camera-box.service` stuck `activating`
+  forever because its grabber card is physically absent — exactly cam4's case) could never be
+  acked at all; acking it hit the STALE hard-fail immediately. Fixed by
+  `cambox_offline_ack_decide(status, acked)` — a single healthy/unhealthy/unreachable ×
+  acked/unacked decision matrix (`ok`/`stale`/`exclude`/`fail`); the health check
+  (`preflight_fleet_check_verdict`) now runs on every REACHABLE box regardless of ack status, and
+  staleness is decided from that health verdict, not from `ping` alone. **Lesson for any future
+  ack/exclusion mechanism: never let a cheap liveness probe (ping, process-exists) stand in for the
+  actual health check when deciding whether an acknowledgment is "stale".**
+- `cambox_offline_ack_excluded_json(boxes)` builds the `[{"box":..,"reason":..}]` array
+  jq-merged into the run's verdict JSON as `.excluded_cams` right after the merge writes it — so a
+  partial-fleet run can never be misread as full-fleet-clean from the JSON alone.
