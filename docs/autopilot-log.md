@@ -5425,3 +5425,40 @@ vendored `obs-source.c` release-cadence fix (#726 candidate A).
   #756->#758 two-step repeated. The live half of #826 (editing NL_STARTUP.ahk to drop the dead
   `app1_binarypath`/`app2_*` block; deleting the `_RETIRED_*` folders once this facet has run
   green) is the supervisor's win-* MCP work, out of scope for this code-only dispatch.
+
+## #832 — repoint the rig's imag role from the incumbent .182 to the replacement .187
+
+- Validated live 2026-07-27 (issue text): `.182` HDMI-0 disconnected (DP-0 only, its own panel);
+  `.187` HDMI-1 connected 1920x1080 (the wall) + eDP-1 panel, fully provisioned (OBS 32.1.2 genlock
+  build, scenes 6/6 + Multiview 6/6, obs-websocket :4455, dantesync PTP LOCKED, zero failed units).
+  `imag_scenes.py --projector` against `.182` FAILs "no HDMI projector monitor detected"; against
+  `.187` correctly routes PROGRAM->HDMI-1 / MULTIVIEW->eDP-1.
+- Design comment posted BEFORE code: issuecomment-5096556400 (predates commit `5a82fd4ae`).
+- Version bump `chore: 1.7.0-dev.373` (`e81188e70`).
+- RED: `test(#832): [red] ...` (`5a82fd4ae`) — new tests/harness_imag_host.rs (9 tests: default
+  active = replacement/.187, IMAG_HOST_ACTIVE=incumbent swaps in .182, unknown selector rejected,
+  direct IMAG_IP override wins, both consumer scripts source the lib, the [0/8] projector-count
+  FAIL names the host, recording-verdict-on-imag.sh + drift-guard --check-imag receive the
+  resolved host) + 3 existing assertions in tests/harness_imag_topology.rs / tests/rig_mode.rs
+  updated from the old per-file `IMAG_IP="${IMAG_IP:-10.77.9.182}"` literal to the new sourced
+  design.
+- GREEN: `fix(#832): [green] ...` (`2b3ee2a13`) — new scripts/imag-host.sh (mirrors
+  scripts/camera-set.sh's CAMERA_ACTIVE_SET design: `imag_host_resolve` FACT lookup for both
+  known boxes + `IMAG_HOST_ACTIVE` selector, default "replacement"). recording-e2e.sh +
+  rig-mode.sh source it in place of their own independent IMAG_IP declarations.
+  recording-e2e.sh's [8/8c] `recording-verdict-on-imag.sh` call now passes `IMAG_BOX="$IMAG_IP"`
+  (that script had its OWN independent default, never told the resolved host); rig-mode.sh's
+  `warn_imag_genlock_stale()` now passes `host=$IMAG_IP` to `drift-guard.sh --check-imag` (which
+  already supported the override, just was never given one) — both were silent holes that would
+  have kept targeting the dead incumbent even after the "obvious" two-file fix. The [0/8]
+  projector-count FAIL message now names the checked host. imag_scenes.py's docstring example +
+  a full-path-e2e.yml pointer comment updated (cosmetic — neither had a real default to converge).
+- Full `cargo test` green (152/152 binaries, 0 failures) — no static-anchor collision from
+  touching recording-e2e.sh/rig-mode.sh. `cargo fmt --all --check` / `cargo clippy --all-targets
+  -- -D warnings` / `shellcheck -S warning` all clean.
+- Requirements 1-4 from the issue are all CODE + TEST covered (env-override reversibility proof,
+  incumbent kept as a fact, every named consumer converged, FAIL text names the host). NOT
+  test-covered (needs the live rig, explicitly out of scope for this code-only dispatch per the
+  supervisor's constraints): running the actual hardware "Full-path E2E" gate against `.187` to
+  confirm the `[0/8]` imag preflight now passes live, and imag-nb's Multiview/Program projectors
+  actually opening on the real HDMI-1/eDP-1 outputs. Rides open PR #704 (dev->main).
