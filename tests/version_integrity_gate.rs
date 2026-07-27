@@ -416,3 +416,397 @@ fn help_describes_the_version_integrity_requirement() {
         "help must describe the pinned-set / drift requirement: {stdout}"
     );
 }
+
+// ── #826: strih OBS-identity machine-check facet ────────────────────────────────────────────
+//
+// The 2026-07-27 incident: a hand-launched stale `1ME` OBS 31.1.2 install squatted TCP :4455
+// while the version-integrity gate's own parity marker still described the pinned genlock
+// 32.1.2 build -- the harness silently drove/measured the WRONG renderer for a whole gate cycle.
+// These tests pin the four new pure verdict functions (sourced directly, mirroring how
+// `compare_args_from_state` is tested above) plus the end-to-end opt-in rollout behavior: a box
+// that reports NONE of the new keys must gate EXACTLY as before (the live fleet + every existing
+// fixture here predates the redeployed bundle-state-server.py that will report them).
+
+const PINNED_OBS_EXE: &str = r"C:\Program Files\obs-studio\bin\64bit\obs64.exe";
+const PINNED_OBS_WORKDIR: &str = r"C:\Program Files\obs-studio\bin\64bit";
+const PINNED_SHORTCUT: &str = r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs\OBS Studio.lnk";
+
+#[test]
+fn state_json_value_is_the_generic_single_key_parser() {
+    let p = write_state("generic_kv", "{\"foo\":\"bar baz\",\"genlock_build_sha\":\"abc123\"}");
+    let out = run_sourced(
+        "state_json_value \"$F\" foo",
+        &[("F", p.to_str().unwrap())],
+    );
+    assert_eq!(out.trim_end_matches('\n'), "bar baz");
+    let _ = std::fs::remove_file(&p);
+}
+
+#[test]
+fn genlock_build_sha_from_state_still_works_after_the_generic_refactor() {
+    // Behavior-preserving refactor check: genlock_build_sha_from_state must keep returning
+    // exactly what it did before, now implemented via state_json_value.
+    let p = write_state("sha_refactor", "{\"genlock_build_sha\":\"deadbeef\"}");
+    let out = run_sourced(
+        "genlock_build_sha_from_state \"$F\"",
+        &[("F", p.to_str().unwrap())],
+    );
+    assert_eq!(out, "deadbeef");
+    let _ = std::fs::remove_file(&p);
+}
+
+#[test]
+fn obs_installs_verdict_ok_when_only_the_pinned_install_exists() {
+    let out = run_sourced(
+        &format!("obs_installs_verdict '{PINNED_OBS_EXE}' '{PINNED_OBS_EXE}'; echo RC=$?"),
+        &[],
+    );
+    assert!(out.contains("OK"), "expected OK: {out}");
+    assert!(out.contains("RC=0"), "{out}");
+}
+
+#[test]
+fn obs_installs_verdict_drifts_on_a_retired_folder_still_present() {
+    // Renaming a folder aside (_RETIRED_*) is NOT the same as removing the install -- its exe is
+    // still launchable, and must still be reported as a DRIFT-worthy extra.
+    let extra = r"D:\_APPS\_RETIRED_1ME-obs_2026-07-27\bin\64bit\obs64.exe";
+    let csv = format!("{PINNED_OBS_EXE},{extra}");
+    let out = run_sourced(
+        &format!("obs_installs_verdict '{PINNED_OBS_EXE}' '{csv}'; echo RC=$?"),
+        &[],
+    );
+    assert!(out.contains("DRIFT"), "expected DRIFT: {out}");
+    assert!(out.contains("_RETIRED_1ME-obs_2026-07-27"), "must name the extra install: {out}");
+    assert!(out.contains("RC=20"), "{out}");
+}
+
+#[test]
+fn obs_installs_verdict_unknown_when_scan_unread() {
+    let out = run_sourced(
+        &format!("obs_installs_verdict '{PINNED_OBS_EXE}' ''; echo RC=$?"),
+        &[],
+    );
+    assert!(out.contains("UNKNOWN"), "expected UNKNOWN: {out}");
+    assert!(out.contains("RC=11"), "{out}");
+}
+
+#[test]
+fn port_identity_verdict_ok_when_owner_matches_pinned() {
+    let out = run_sourced(
+        &format!(
+            "port_identity_verdict '{PINNED_OBS_EXE}' '32.1.2' '{PINNED_OBS_EXE}' '32.1.2'; echo RC=$?"
+        ),
+        &[],
+    );
+    assert!(out.contains("OK"), "{out}");
+    assert!(out.contains("RC=0"), "{out}");
+}
+
+#[test]
+fn port_identity_verdict_drifts_when_the_owner_is_a_different_install() {
+    // The exact 2026-07-27 incident: :4455 owned by the stale 1ME install, by PATH, not name.
+    let stale = r"D:\_APPS\_RETIRED_1ME-obs_2026-07-27\bin\64bit\obs64.exe";
+    let out = run_sourced(
+        &format!(
+            "port_identity_verdict '{PINNED_OBS_EXE}' '32.1.2' '{stale}' '31.1.2'; echo RC=$?"
+        ),
+        &[],
+    );
+    assert!(out.contains("DRIFT"), "{out}");
+    assert!(out.contains(stale), "must name the wrong owner path: {out}");
+    assert!(out.contains("RC=20"), "{out}");
+}
+
+#[test]
+fn port_identity_verdict_drifts_on_version_mismatch_at_the_right_path() {
+    let out = run_sourced(
+        &format!(
+            "port_identity_verdict '{PINNED_OBS_EXE}' '32.1.2' '{PINNED_OBS_EXE}' '31.1.2'; echo RC=$?"
+        ),
+        &[],
+    );
+    assert!(out.contains("DRIFT"), "{out}");
+    assert!(out.contains("RC=20"), "{out}");
+}
+
+#[test]
+fn port_identity_verdict_unknown_when_owner_unread() {
+    let out = run_sourced(
+        &format!("port_identity_verdict '{PINNED_OBS_EXE}' '32.1.2' '' ''; echo RC=$?"),
+        &[],
+    );
+    assert!(out.contains("UNKNOWN"), "{out}");
+    assert!(out.contains("RC=11"), "{out}");
+}
+
+#[test]
+fn obs_process_count_verdict_ok_for_exactly_one() {
+    let out = run_sourced("obs_process_count_verdict '1'; echo RC=$?", &[]);
+    assert!(out.contains("OK"), "{out}");
+    assert!(out.contains("RC=0"), "{out}");
+}
+
+#[test]
+fn obs_process_count_verdict_drifts_on_a_second_process() {
+    let out = run_sourced("obs_process_count_verdict '2'; echo RC=$?", &[]);
+    assert!(out.contains("DRIFT"), "{out}");
+    assert!(out.contains("RC=20"), "{out}");
+}
+
+#[test]
+fn obs_process_count_verdict_drifts_on_zero_running() {
+    let out = run_sourced("obs_process_count_verdict '0'; echo RC=$?", &[]);
+    assert!(out.contains("DRIFT"), "{out}");
+    assert!(out.contains("RC=20"), "{out}");
+}
+
+#[test]
+fn obs_process_count_verdict_unknown_when_unread() {
+    let out = run_sourced("obs_process_count_verdict ''; echo RC=$?", &[]);
+    assert!(out.contains("UNKNOWN"), "{out}");
+    assert!(out.contains("RC=11"), "{out}");
+}
+
+#[test]
+fn startup_chain_verdict_ok_when_everything_resolves_to_the_pinned_install() {
+    let out = run_sourced(
+        &format!(
+            "startup_chain_verdict '{PINNED_OBS_EXE}' '{PINNED_OBS_WORKDIR}' '{PINNED_SHORTCUT}' \
+             '{PINNED_SHORTCUT}' '1' '0' '{PINNED_OBS_EXE}' '{PINNED_OBS_WORKDIR}'; echo RC=$?"
+        ),
+        &[],
+    );
+    assert!(out.contains("OK"), "{out}");
+    assert!(out.contains("RC=0"), "{out}");
+}
+
+#[test]
+fn startup_chain_verdict_drifts_when_dead_leftover_config_present() {
+    // #826's "config states one truth" requirement: NL_STARTUP.ahk still carrying the dead
+    // app1_binarypath / enabled app2_* leftover is itself a DRIFT, even when app1 resolves fine.
+    let out = run_sourced(
+        &format!(
+            "startup_chain_verdict '{PINNED_OBS_EXE}' '{PINNED_OBS_WORKDIR}' '{PINNED_SHORTCUT}' \
+             '{PINNED_SHORTCUT}' '1' '1' '{PINNED_OBS_EXE}' '{PINNED_OBS_WORKDIR}'; echo RC=$?"
+        ),
+        &[],
+    );
+    assert!(out.contains("DRIFT"), "{out}");
+    assert!(out.contains("app1_binarypath") || out.contains("app2"), "{out}");
+    assert!(out.contains("RC=20"), "{out}");
+}
+
+#[test]
+fn startup_chain_verdict_drifts_when_shortcut_resolves_elsewhere() {
+    // The exact incident shape: app1_path still names the Start Menu shortcut, but that shortcut
+    // (or a hand launch) resolves to the stale install instead of the pinned genlock build.
+    let stale = r"D:\_APPS\_RETIRED_1ME-obs_2026-07-27\bin\64bit\obs64.exe";
+    let out = run_sourced(
+        &format!(
+            "startup_chain_verdict '{PINNED_OBS_EXE}' '{PINNED_OBS_WORKDIR}' '{PINNED_SHORTCUT}' \
+             '{PINNED_SHORTCUT}' '1' '0' '{stale}' '{PINNED_OBS_WORKDIR}'; echo RC=$?"
+        ),
+        &[],
+    );
+    assert!(out.contains("DRIFT"), "{out}");
+    assert!(out.contains("RC=20"), "{out}");
+}
+
+#[test]
+fn startup_chain_verdict_unknown_when_unread() {
+    let out = run_sourced(
+        &format!(
+            "startup_chain_verdict '{PINNED_OBS_EXE}' '{PINNED_OBS_WORKDIR}' '{PINNED_SHORTCUT}' \
+             '' '' '' '' ''; echo RC=$?"
+        ),
+        &[],
+    );
+    assert!(out.contains("UNKNOWN"), "{out}");
+    assert!(out.contains("RC=11"), "{out}");
+}
+
+/// Inject arbitrary extra `"key":"value"` pairs into a pinned state fixture (before the closing
+/// brace) — mirrors `with_sha` above, generalized to any #826 obs-identity key set.
+fn with_obs_identity(base: &str, extra_pairs: &[(&str, &str)]) -> String {
+    let mut out = base[..base.len() - 1].to_string();
+    for (k, v) in extra_pairs {
+        out.push_str(&format!(",\"{k}\":\"{}\"", v.replace('\\', "\\\\")));
+    }
+    out.push('}');
+    out
+}
+
+#[test]
+fn gate_still_passes_when_a_box_reports_none_of_the_826_obs_identity_keys() {
+    // Rollout is opt-in (mirrors #756's original landing): a box whose bundle-state-server has
+    // not yet been redeployed with the #826 facet must gate EXACTLY as before -- this is the
+    // backward-compatibility proof for the entire existing fleet/fixture set.
+    const SHA: &str = "26de1c3c23980488a110dbf02e5e472f15cb001d";
+    let s = write_state("strih_no826", &with_sha(STRIH_PINNED, SHA));
+    let t = write_state("stream_no826", &with_sha(STREAM_PINNED, SHA));
+    let (code, stdout, stderr) = run_gate(&[
+        "--win-state",
+        &format!("strih={}", s.display()),
+        "--win-state",
+        &format!("stream={}", t.display()),
+        "--genlock-sha",
+        &format!("imag={SHA}"),
+    ]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(!stdout.contains("obs_installs"), "must not engage when unreported: {stdout}");
+    assert!(!stdout.contains("port4455_identity"), "must not engage when unreported: {stdout}");
+    assert!(!stdout.contains("obs_process_count"), "must not engage when unreported: {stdout}");
+    assert!(!stdout.contains("startup_chain"), "must not engage when unreported: {stdout}");
+    let _ = std::fs::remove_file(&s);
+    let _ = std::fs::remove_file(&t);
+}
+
+#[test]
+fn gate_refuses_when_a_reporting_box_has_an_extra_obs_install_826() {
+    const SHA: &str = "26de1c3c23980488a110dbf02e5e472f15cb001d";
+    let extra = r"D:\_APPS\_RETIRED_1ME-obs_2026-07-27\bin\64bit\obs64.exe";
+    let s = write_state(
+        "strih_extra_install_826",
+        &with_obs_identity(
+            &with_sha(STRIH_PINNED, SHA),
+            &[("obs_installs", &format!("{PINNED_OBS_EXE},{extra}"))],
+        ),
+    );
+    let t = write_state("stream_extra_install_826", &with_sha(STREAM_PINNED, SHA));
+    let (code, stdout, stderr) = run_gate(&[
+        "--win-state",
+        &format!("strih={}", s.display()),
+        "--win-state",
+        &format!("stream={}", t.display()),
+        "--genlock-sha",
+        &format!("imag={SHA}"),
+    ]);
+    assert_eq!(code, 20, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("obs_installs") && stdout.contains("DRIFT"), "{stdout}");
+    let _ = std::fs::remove_file(&s);
+    let _ = std::fs::remove_file(&t);
+}
+
+#[test]
+fn gate_refuses_when_port_4455_is_owned_by_the_wrong_install_826() {
+    // The exact 2026-07-27 incident, reproduced end-to-end through the gate.
+    const SHA: &str = "26de1c3c23980488a110dbf02e5e472f15cb001d";
+    let stale = r"D:\_APPS\_RETIRED_1ME-obs_2026-07-27\bin\64bit\obs64.exe";
+    let s = write_state(
+        "strih_port_squat_826",
+        &with_obs_identity(
+            &with_sha(STRIH_PINNED, SHA),
+            &[
+                ("port4455_owner_path", stale),
+                ("port4455_owner_version", "31.1.2"),
+            ],
+        ),
+    );
+    let t = write_state("stream_port_squat_826", &with_sha(STREAM_PINNED, SHA));
+    let (code, stdout, stderr) = run_gate(&[
+        "--win-state",
+        &format!("strih={}", s.display()),
+        "--win-state",
+        &format!("stream={}", t.display()),
+        "--genlock-sha",
+        &format!("imag={SHA}"),
+    ]);
+    assert_eq!(code, 20, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stdout.contains("port4455_identity") && stdout.contains("DRIFT"),
+        "{stdout}"
+    );
+    let _ = std::fs::remove_file(&s);
+    let _ = std::fs::remove_file(&t);
+}
+
+#[test]
+fn gate_refuses_when_a_second_obs_class_process_is_running_826() {
+    const SHA: &str = "26de1c3c23980488a110dbf02e5e472f15cb001d";
+    let s = write_state(
+        "strih_second_proc_826",
+        &with_obs_identity(&with_sha(STRIH_PINNED, SHA), &[("obs_process_count", "2")]),
+    );
+    let t = write_state("stream_second_proc_826", &with_sha(STREAM_PINNED, SHA));
+    let (code, stdout, stderr) = run_gate(&[
+        "--win-state",
+        &format!("strih={}", s.display()),
+        "--win-state",
+        &format!("stream={}", t.display()),
+        "--genlock-sha",
+        &format!("imag={SHA}"),
+    ]);
+    assert_eq!(code, 20, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stdout.contains("obs_process_count") && stdout.contains("DRIFT"),
+        "{stdout}"
+    );
+    let _ = std::fs::remove_file(&s);
+    let _ = std::fs::remove_file(&t);
+}
+
+#[test]
+fn gate_refuses_when_strih_startup_chain_still_carries_the_dead_leftover_826() {
+    const SHA: &str = "26de1c3c23980488a110dbf02e5e472f15cb001d";
+    let s = write_state(
+        "strih_startup_dead_826",
+        &with_obs_identity(
+            &with_sha(STRIH_PINNED, SHA),
+            &[
+                ("ahk_app1_shortcut_path", PINNED_SHORTCUT),
+                ("ahk_app1_run", "1"),
+                ("ahk_dead_config_present", "1"),
+                ("shortcut_target_path", PINNED_OBS_EXE),
+                ("shortcut_workdir", PINNED_OBS_WORKDIR),
+            ],
+        ),
+    );
+    let t = write_state("stream_startup_dead_826", &with_sha(STREAM_PINNED, SHA));
+    let (code, stdout, stderr) = run_gate(&[
+        "--win-state",
+        &format!("strih={}", s.display()),
+        "--win-state",
+        &format!("stream={}", t.display()),
+        "--genlock-sha",
+        &format!("imag={SHA}"),
+    ]);
+    assert_eq!(code, 20, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stdout.contains("startup_chain") && stdout.contains("DRIFT"),
+        "{stdout}"
+    );
+    let _ = std::fs::remove_file(&s);
+    let _ = std::fs::remove_file(&t);
+}
+
+#[test]
+fn gate_never_engages_startup_chain_for_a_box_with_no_ahk_826() {
+    // stream has NO NL_STARTUP.ahk at all -- reporting obs_installs/port4455/process_count
+    // (the generic per-box facets) must NOT also require the ahk-specific startup_chain facet.
+    const SHA: &str = "26de1c3c23980488a110dbf02e5e472f15cb001d";
+    let s = write_state("strih_ok_826", &with_sha(STRIH_PINNED, SHA));
+    let t = write_state(
+        "stream_no_ahk_826",
+        &with_obs_identity(
+            &with_sha(STREAM_PINNED, SHA),
+            &[
+                ("obs_installs", PINNED_OBS_EXE),
+                ("port4455_owner_path", PINNED_OBS_EXE),
+                ("port4455_owner_version", "32.1.2"),
+                ("obs_process_count", "1"),
+            ],
+        ),
+    );
+    let (code, stdout, stderr) = run_gate(&[
+        "--win-state",
+        &format!("strih={}", s.display()),
+        "--win-state",
+        &format!("stream={}", t.display()),
+        "--genlock-sha",
+        &format!("imag={SHA}"),
+    ]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(!stdout.contains("startup_chain"), "{stdout}");
+    let _ = std::fs::remove_file(&s);
+    let _ = std::fs::remove_file(&t);
+}
