@@ -5385,3 +5385,43 @@ vendored `obs-source.c` release-cadence fix (#726 candidate A).
   re-trigger the gate. PR body updated with a status section; #756/#762 closed directly (with
   evidence) rather than via this PR's merge, since their own scoped deliverables are
   independently complete and live-verified.
+
+## #826 — strih OBS-identity machine-check facet (2026-07-27)
+
+- Issue rewritten mid-flight (see #826 comments): the 2026-07-27 incident (a hand-launched stale
+  `1ME` OBS 31.1.2 install squatted TCP :4455 while the version-integrity gate's own parity marker
+  still described the pinned genlock 32.1.2 build) turned out NOT to be a dead startup chain —
+  `NL_STARTUP.ahk`'s `app1` already pointed at the genlock build correctly; the squat was caused by
+  an agent hand-launching the dead `app1_binarypath`-referenced `1ME.lnk` during the #818 lineage
+  swap. The 8 pre-genlock leftover OBS folders on strih were renamed aside (`_RETIRED_*`) live by
+  the prior session, NOT part of this dispatch.
+- Design comment posted BEFORE code: issuecomment-5095928186 (predates commit `a95185f19`).
+- Version bump `chore: 1.7.0-dev.372` (`a95185f19`).
+- RED: `test(#826): [red] ...` (`f0a4bc1ec`) — 18 python (tests/python/test_bundle_state_gather.py)
+  + 20 rust (tests/version_integrity_gate.rs) failing assertions for obs_installs_under /
+  obs_process_count_from_listing / ahk_app1_shortcut_path / ahk_app1_run /
+  ahk_dead_config_present (Python) and obs_installs_verdict / port_identity_verdict /
+  obs_process_count_verdict / startup_chain_verdict / state_json_value (bash).
+- Test-infra fix (own commit, `5924fe509`): `run_sourced`'s `set +e` — the gate's own
+  `set -euo pipefail` was leaking into the test harness's shell on source, aborting before the
+  harness's own `echo RC=$?`; a pre-existing bug the new DRIFT/UNKNOWN-asserting tests exposed.
+- GREEN: `fix(#826): [green] ...` (`c768c6e97`) — gather in
+  scripts/bundle_state_gather.py + scripts/bundle-state-server.py (port4455_owner via
+  Get-NetTCPConnection->Get-Process->Get-Item VersionInfo, obs_process_list, NL_STARTUP.ahk text
+  read, WScript.Shell shortcut resolution), verdict in scripts/version-integrity-gate.sh
+  (state_json_value generalized out of genlock_build_sha_from_state; four new fail-closed verdict
+  functions; wired into main()'s per-box loop as OPT-IN per box/key, mirroring genlock_build_sha's
+  original #756 landing, so the existing fleet + fixtures keep gating unchanged until
+  bundle-state-server.py is redeployed).
+- Full `cargo test` green (151 binaries, 0 failures) + `pytest tests/python` green (581 passed),
+  confirming no static-anchor collision from touching version-integrity-gate.sh/
+  bundle_state_gather.py. fmt/clippy/shellcheck clean.
+- Pushed to `dev`, rides open PR #704 (dev->main, blocked on the hardware E2E gate — not touched
+  by this dispatch). Non-hardware CI green on first push modulo one transient
+  `ndi_peer_resolution_survives_pipefail_when_the_first_candidate_is_up` SIGPIPE flake (unrelated
+  file, passed locally beforehand, passed on `gh run rerun --failed`).
+- Filed #829: flip the facet from opt-in to ENFORCED once the supervisor confirms
+  bundle-state-server.py is redeployed live on strih (+ stream) reporting the new keys — the
+  #756->#758 two-step repeated. The live half of #826 (editing NL_STARTUP.ahk to drop the dead
+  `app1_binarypath`/`app2_*` block; deleting the `_RETIRED_*` folders once this facet has run
+  green) is the supervisor's win-* MCP work, out of scope for this code-only dispatch.
