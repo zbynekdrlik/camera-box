@@ -424,6 +424,68 @@ fn binutils_is_installed_and_the_tool_guard_runs_before_the_swap_checks() {
     );
 }
 
+/// #823 (live, 10.77.9.187, 2026-07-27): the post-purge display-manager assertion compared a
+/// CANONICALISED path against a LITERAL `/lib/...` one. On usrmerge Ubuntu `/lib` is a symlink to
+/// `/usr/lib`, so `readlink -f` always answers `/usr/lib/...` and the check could never pass — a
+/// perfectly correct kiosk DM aborted provisioning on its last assertion.
+#[test]
+fn the_display_manager_check_is_usrmerge_proof() {
+    let root = std::env::temp_dir().join(format!("imag-dm-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let units = root.join("usr/lib/systemd/system");
+    fs::create_dir_all(&units).expect("mkdir units");
+    fs::write(units.join("lightdm.service"), "[Unit]\n").expect("write lightdm unit");
+    fs::write(units.join("gdm.service"), "[Unit]\n").expect("write gdm unit");
+    // the usrmerge shape: /lib -> usr/lib
+    #[cfg(unix)]
+    std::os::unix::fs::symlink("usr/lib", root.join("lib")).expect("symlink lib -> usr/lib");
+    let etc = root.join("etc/systemd/system");
+    fs::create_dir_all(&etc).expect("mkdir etc");
+    // …and the link written through the /lib path, exactly as the script writes it
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(
+        root.join("lib/systemd/system/lightdm.service"),
+        etc.join("display-manager.service"),
+    )
+    .expect("symlink display-manager");
+
+    let dm = etc.join("display-manager.service");
+    let lightdm = root.join("lib/systemd/system/lightdm.service");
+    let (code, _o, err) = run_sourced(&format!(
+        "imag_same_unit {} {}",
+        shell_quote(dm.to_str().expect("utf8")),
+        shell_quote(lightdm.to_str().expect("utf8"))
+    ));
+    assert_eq!(
+        code, 0,
+        "a correct kiosk DM linked via /lib must PASS on a usrmerge box. stderr: {err}"
+    );
+
+    // …and a DM that genuinely is not lightdm must still FAIL
+    let gdm = root.join("lib/systemd/system/gdm.service");
+    let (code, _o, _e) = run_sourced(&format!(
+        "imag_same_unit {} {}",
+        shell_quote(gdm.to_str().expect("utf8")),
+        shell_quote(lightdm.to_str().expect("utf8"))
+    ));
+    assert_ne!(code, 0, "a gdm display manager must still fail the check");
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// …and the call sites must use it instead of the literal string compare.
+#[test]
+fn the_display_manager_call_sites_compare_canonical_paths() {
+    let b = body();
+    assert!(
+        !b.contains("= \"/lib/systemd/system/lightdm.service\" ]"),
+        "the literal-vs-canonical compare must be gone (#823)"
+    );
+    assert!(
+        b.contains("imag_same_unit"),
+        "the DM assertions must compare canonicalised units"
+    );
+}
+
 fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
