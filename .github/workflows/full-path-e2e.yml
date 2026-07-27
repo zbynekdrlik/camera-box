@@ -260,6 +260,10 @@ jobs:
           # through to the checked-in rig-fleet.txt default. A manual workflow_dispatch's
           # offline_ack input, when non-empty, overrides that default outright.
           CAMBOX_OFFLINE_ACK: ${{ github.event_name == 'workflow_dispatch' && inputs.offline_ack || '' }}
+        # #832: this workflow never hardcodes an imag-nb address itself — recording-e2e.sh
+        # resolves the ACTIVE imag host from scripts/imag-host.sh (the ONE declared source of
+        # truth, reversible between the incumbent 10.77.9.182 and the replacement 10.77.9.187).
+        # A future imag swap is a one-line change in that file, never a workflow edit.
         # #657: `exec` REPLACES this step's process image with recording-e2e.sh's own bash — a
         # plain `bash scripts/recording-e2e.sh` forks a NESTED child the Actions runner never
         # signals directly (empirically confirmed: it signals only the single top-level step PID

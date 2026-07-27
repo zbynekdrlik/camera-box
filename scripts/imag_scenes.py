@@ -30,7 +30,12 @@ Seeds (spec docs/superpowers/specs/2026-07-03-imag-nb-topology-design.md, Phase 
     on the panel (#522/#488 — self-healed every boot by the openbox autostart hook)
 
 Usage:
-  imag_scenes.py --host 10.77.9.182 [--password PW] [--projector]
+  imag_scenes.py --host 10.77.9.187 [--password PW] [--projector]
+
+--host has no default (always required) -- it is just an example above. The rig's own harness
+scripts resolve the CURRENT active imag host from scripts/imag-host.sh (#832; single source of
+truth, reversible between the incumbent 10.77.9.182 and the replacement 10.77.9.187) rather than
+hardcoding either address, so a future swap never means hunting a literal here too.
 """
 
 import argparse

@@ -227,7 +227,13 @@ STREAM=10.77.9.204
 # cameras (Linux, own recorded program). A THIRD recorded+decoded node alongside strih+stream —
 # its zero-loss proof is the cam2 OPTICAL tick's own contiguity (60fps, no beat) ANDed with its
 # own 911003 digital corner burn (#463) when present.
-IMAG_IP="${IMAG_IP:-10.77.9.182}"
+#
+# #832: IMAG_IP is now DERIVED from scripts/imag-host.sh — the ONE declared imag host (mirrors
+# camera-set.sh's CAMERA_ACTIVE_SET design, #827) — instead of an independent literal here.
+# Swapping the rig's imag role (incumbent .182 <-> replacement .187) is a one-line change in that
+# ONE file (or IMAG_HOST_ACTIVE=incumbent for a one-off run), never a hunt through this script.
+# shellcheck source=scripts/imag-host.sh
+. "$HERE/imag-host.sh"
 CAM_PW=newlevel
 # #703: strih/stream ssh creds for the E2E_EXECUTE_VERDICT=1 path (win-ssh-exec.sh helpers) —
 # same convention as CAM_PW/IMAG_PW, per targets.md's "SSH: newlevel/newlevel" rows.
@@ -698,7 +704,7 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
   if [ "${_mv_count:-0}" -eq 1 ] 2>/dev/null && [ "${_pgm_count:-0}" -eq 1 ] 2>/dev/null; then
     echo "    ok: imag-nb shows exactly 1 Multiview + 1 Program projector"
   else
-    echo "ERROR: [preflight] FAIL: imag-nb projector count is Multiview=${_mv_count:-0} Program=${_pgm_count:-0}, expected exactly 1+1 — stray projector windows are accumulating (check BasicWindow.CloseExistingProjectors=true in ~/.config/obs-studio/{global,user}.ini on imag-nb, or close the extras: DISPLAY=:0 wmctrl -l | grep Projector)." >&2
+    echo "ERROR: [preflight] FAIL: imag-nb (${IMAG_IP}) projector count is Multiview=${_mv_count:-0} Program=${_pgm_count:-0}, expected exactly 1+1 — stray projector windows are accumulating (check BasicWindow.CloseExistingProjectors=true in ~/.config/obs-studio/{global,user}.ini on imag-nb, or close the extras: DISPLAY=:0 wmctrl -l | grep Projector)." >&2
     exit 1
   fi
 
@@ -3032,7 +3038,11 @@ if [ "$VERDICT_ON_STREAM" = "1" ]; then
   # WARNING; }` degrades gracefully instead: the imag leg is skipped, $IMAG_PARTIAL stays absent,
   # and the merge command below (guarded by `if [ -f "$IMAG_PARTIAL" ]`) simply omits it.
   if [ -n "${IMAG_HOST_PATH:-}" ]; then
-    "$HERE/recording-verdict-on-imag.sh" \
+    # #832: recording-verdict-on-imag.sh has its OWN independent IMAG_BOX default (it is a
+    # standalone tool, also runnable by hand) -- pass the SAME resolved host recording-e2e.sh
+    # itself is targeting (scripts/imag-host.sh), so this [8/8c] decode step never silently
+    # ssh's to a DIFFERENT imag box than the one the rest of the run just deployed/recorded to.
+    IMAG_BOX="$IMAG_IP" "$HERE/recording-verdict-on-imag.sh" \
       --verdict-bin "$VERDICT_BIN" --out-dir "$IMAG_REMOTE_OUT_DIR" --local-out-dir "$OUTDIR" \
       --imag-rec "$IMAG_HOST_PATH" \
       -- --extract-partial imag --imag "$IMAG_HOST_PATH" --imag-capture-fps "$IMAG_CAPTURE_FPS" \

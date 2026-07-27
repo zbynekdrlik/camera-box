@@ -454,7 +454,13 @@ STREAM_PROG_SOURCE="${STREAM_PROG_SOURCE:-NDI 2ME PGM}" # stream program input (
 # #462 (EPIC #466 Topology v2): imag-nb — the new 60fps low-latency IMAG cutter. Its scene->camera
 # mapping is the Phase 1 1:1 pin (setup-imag.sh, #458): 'NDI CAM1'..'NDI CAM6' -> 'CAMx (usb)'
 # 1:1, so cam1 (the SOURCE camera that films cam2's monitor) rides 'NDI CAM1' / scene 'Cam 1'.
-IMAG_IP="${IMAG_IP:-10.77.9.182}"
+#
+# #832: IMAG_IP is now DERIVED from scripts/imag-host.sh — the ONE declared imag host (mirrors
+# camera-set.sh's CAMERA_ACTIVE_SET design, #827) — instead of an independent literal here.
+# Swapping the rig's imag role (incumbent .182 <-> replacement .187) is a one-line change in that
+# ONE file (or IMAG_HOST_ACTIVE=incumbent for a one-off run), never a hunt through this script.
+# shellcheck source=scripts/imag-host.sh
+. "$RIG_MODE_DIR/imag-host.sh"
 IMAG_PROG_SOURCE="${IMAG_PROG_SOURCE:-NDI CAM1}"        # imag input showing cam1 (#462 burn target)
 IMAG_PROG_SCENE="${IMAG_PROG_SCENE:-Cam 1}"             # imag scene showing cam1 — routed to PROGRAM in TEST mode
 OBS_WS_PASSWORD="${OBS_WS_PASSWORD:-}"
@@ -512,7 +518,11 @@ warn_imag_genlock_stale() {
   # still returns 0) instead of crashing here.
   here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || here=""
   echo "[#531] pre-event drift check: is imag-nb's DEPLOYED genlock build current with origin/main?"
-  out="$( cd "$here/.." && bash scripts/drift-guard.sh --check-imag 2>&1 )" || rc=$?
+  # #832: pass the ACTIVE resolved imag host (scripts/imag-host.sh) — drift-guard.sh already
+  # supports a host= override, it just was never given the rig's own resolved value, so this
+  # check silently always targeted drift-guard's own hardcoded default regardless of which
+  # physical box rig-mode.sh itself was driving.
+  out="$( cd "$here/.." && bash scripts/drift-guard.sh --check-imag "host=$IMAG_IP" 2>&1 )" || rc=$?
   printf '%s\n' "$out" | sed 's/^/    [imag drift] /'
   # #531 review: log the actual exit code (comprehensive-logging: values, not just a bare pass/fail)
   # instead of capturing it into `rc` and never reading it — 0=OK, 20=DRIFT, 11=UNKNOWN, anything

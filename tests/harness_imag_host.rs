@@ -156,18 +156,19 @@ fn recording_e2e_passes_the_resolved_imag_host_to_recording_verdict_on_imag() {
     // the [8/8c] decode-on-imag step would keep ssh-ing to the OLD incumbent even after
     // recording-e2e.sh itself correctly resolved the replacement.
     let s = read("scripts/recording-e2e.sh");
+    // Anchor on the ACTUAL invocation (quoted "$HERE/..." call), not a bare substring match --
+    // a nearby explanatory comment mentioning the same script NAME would otherwise be the first
+    // (wrong) match for a naive `.find("recording-verdict-on-imag.sh")`.
     let call = s
-        .find("recording-verdict-on-imag.sh")
+        .find("\"$HERE/recording-verdict-on-imag.sh\"")
         .expect("#832: recording-e2e.sh must call recording-verdict-on-imag.sh");
-    // Scope to a small window around the call site (the env-var prefix must sit immediately
-    // before the invocation, not merely appear somewhere else in the file).
-    let window_start = call.saturating_sub(200);
-    let window = &s[window_start..call];
+    let line_start = s[..call].rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let line = &s[line_start..call];
     assert!(
-        window.contains("IMAG_BOX=\"$IMAG_IP\""),
+        line.contains("IMAG_BOX=\"$IMAG_IP\""),
         "#832: recording-e2e.sh must pass IMAG_BOX=\"$IMAG_IP\" to recording-verdict-on-imag.sh \
          so the [8/8c] decode step targets the SAME resolved imag host as the rest of the run. \
-         window:\n{window}"
+         line:\n{line}"
     );
 }
 
@@ -177,8 +178,11 @@ fn rig_mode_passes_the_resolved_imag_host_to_drift_guard_check_imag() {
     // staleness warning must actually pass it, or the check always targets drift-guard's own
     // hardcoded default regardless of which imag box the rig is actually driving.
     let s = read("scripts/rig-mode.sh");
+    // Anchor on the ACTUAL invocation (`bash scripts/drift-guard.sh ...`), not a bare substring
+    // match -- an explanatory comment a few lines above mentions the same script+flag inside
+    // backticks with no `bash ` prefix, which would otherwise be the first (wrong) match.
     let call = s
-        .find("drift-guard.sh --check-imag")
+        .find("bash scripts/drift-guard.sh --check-imag")
         .expect("#832: rig-mode.sh must call drift-guard.sh --check-imag");
     let line_start = s[..call].rfind('\n').map(|i| i + 1).unwrap_or(0);
     let line_end = s[call..].find('\n').map(|i| call + i).unwrap_or(s.len());
