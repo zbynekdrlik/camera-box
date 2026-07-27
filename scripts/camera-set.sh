@@ -178,6 +178,41 @@ camera_active_ndi_sources_csv() {
   printf '%s' "$out"
 }
 
+# camera_active_excluding <excluded> -> prints (space-separated, stdout) every camera in
+# CAMERA_ACTIVE_SET that is NOT a word in EXCLUDED (space-separated cam names, e.g. the
+# recording-e2e.sh `[0/8]` fleet preflight's own $PREFLIGHT_EXCLUDED_CAMS -- boxes TEMPORARILY
+# acked-offline via CAMBOX_OFFLINE_ACK, distinct from PERMANENT retirement via CAMERA_ACTIVE_SET
+# membership). Word-exact match, same discipline as camera_is_active above.
+#
+# #827 follow-up (2026-07-28): live hardware gate run 30310110884 proved a retired camera (never
+# a member of CAMERA_ACTIVE_SET at all) can still leak into a sampled/checked list when a
+# consumer enumerates the fleet via a literal range instead of deriving from CAMERA_ACTIVE_SET --
+# this is the ONE place that "active minus acked-offline" derivation happens, so a retired camera
+# can never reappear just because a NEW call site forgot to intersect with CAMERA_ACTIVE_SET.
+camera_active_excluding() {
+  local excluded="${1:-}" cam out=""
+  for cam in $CAMERA_ACTIVE_SET; do
+    case " ${excluded} " in
+      *" ${cam} "*) continue ;;
+    esac
+    out="${out:+$out }$cam"
+  done
+  printf '%s' "$out"
+}
+
+# camera_active_ndi_sources_excluding_csv <excluded> -> prints (stdout) "NDI cam1,NDI cam2,..."
+# for every camera in camera_active_excluding's result -- the CSV-shaped sibling of the function
+# above, used by consumers that pass a comma-joined strih-NDI-input list to a Python harness
+# (frozen-camera-gate.py's --sources, live-freeze-watch's source arg) rather than iterating cam
+# names one at a time.
+camera_active_ndi_sources_excluding_csv() {
+  local excluded="${1:-}" cam out=""
+  for cam in $(camera_active_excluding "$excluded"); do
+    out="${out:+$out,}NDI $cam"
+  done
+  printf '%s' "$out"
+}
+
 # camera_strih_route <name>
 # On success: sets CAMERA_STRIH_SCENE / CAMERA_STRIH_SOURCE -- the strih OBS scene, and its
 # underlying NDI-input name, that shows this physical camera's feed on the certified prod

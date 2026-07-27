@@ -623,8 +623,11 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
   # resurrect a saved burn=true on scene-collection restore, the #246 leak class) + strih/stream/
   # imag must not already be recording or streaming (a stray session from an aborted prior run).
   echo "[0/8] OBS pre-run state — genlock_burn OFF on every strih NDI input, no stray recording/streaming (#758)"
-  for _n in 1 2 3 4 5 6 7; do
-    case " $PREFLIGHT_EXCLUDED_CAMS " in *" cam${_n} "*) continue ;; esac
+  # #827 follow-up: derive the checked camera list from CAMERA_ACTIVE_SET (camera-set.sh) minus
+  # any acked-offline box -- never a literal 1..7 range (a retired camera must never be checked
+  # here, regardless of what its strih OBS input still looks like).
+  for _cam in $(camera_active_excluding "$PREFLIGHT_EXCLUDED_CAMS"); do
+    _n="${_cam#cam}"
     _pfburn="$(python3 "$HERE/obs_burn_filter.py" check --host "$STRIH" --input "NDI cam${_n}" 2>/dev/null || true)"
     case "$_pfburn" in
       *burn_on=True*)
@@ -1194,11 +1197,11 @@ fi
 # CLONES, not the mains, mirroring this same per-box split.
 if [ "${ALL_CAMBOX:-0}" = "1" ]; then
   echo "[1/8] per-camera NDI liveness via strih's main NDI inputs (#758/#761)"
-  PREFLIGHT_MV_SOURCES=""
-  for _n in 1 2 3 4 5 6 7; do
-    case " $PREFLIGHT_EXCLUDED_CAMS " in *" cam${_n} "*) continue ;; esac
-    PREFLIGHT_MV_SOURCES="${PREFLIGHT_MV_SOURCES:+$PREFLIGHT_MV_SOURCES,}NDI cam${_n}"
-  done
+  # #827 follow-up (2026-07-28): derive the sampled source list from CAMERA_ACTIVE_SET
+  # (camera-set.sh) minus any acked-offline box -- never a literal 1..7 range. This is the exact
+  # call site that sampled retired "NDI cam5"/"NDI cam6"/"NDI cam7" and failed FROZEN on live run
+  # 30310110884 (their strih OBS inputs still exist, but they are retired and never emit).
+  PREFLIGHT_MV_SOURCES="$(camera_active_ndi_sources_excluding_csv "$PREFLIGHT_EXCLUDED_CAMS")"
   if [ -n "$PREFLIGHT_MV_SOURCES" ]; then
     python3 "$HERE/frozen-camera-gate.py" --host "$STRIH" --password "" \
       --sources "$PREFLIGHT_MV_SOURCES" --samples 2 --cadence 3.5 --threshold 1 --warm-settle 0 \
@@ -2438,11 +2441,10 @@ LIVE_FREEZE_WATCH="${LIVE_FREEZE_WATCH:-1}"
 FREEZE_WATCH_PID_FILE="$OUTDIR/freeze-watch.pid"
 FREEZE_WATCH_POISON_FILE="$OUTDIR/freeze-watch-poison.txt"
 if [ "$LIVE_FREEZE_WATCH" = "1" ] && [ "${ALL_CAMBOX:-0}" = "1" ]; then
-  FREEZE_WATCH_SOURCES=""
-  for _n in 1 2 3 4 5 6 7; do
-    case " ${PREFLIGHT_EXCLUDED_CAMS:-} " in *" cam${_n} "*) continue ;; esac
-    FREEZE_WATCH_SOURCES="${FREEZE_WATCH_SOURCES:+$FREEZE_WATCH_SOURCES,}NDI cam${_n}"
-  done
+  # #827 follow-up: derive the watched source list from CAMERA_ACTIVE_SET (camera-set.sh) minus
+  # any acked-offline box -- never a literal 1..7 range (same fix as the [0/8]/[1/8] preflight
+  # loops above).
+  FREEZE_WATCH_SOURCES="$(camera_active_ndi_sources_excluding_csv "${PREFLIGHT_EXCLUDED_CAMS:-}")"
   if [ -n "$FREEZE_WATCH_SOURCES" ]; then
     echo "[5/8 pre] arming in-run freeze watch (#758): $FREEZE_WATCH_SOURCES"
     live_freeze_watch_start "$FREEZE_WATCH_PID_FILE" "$FREEZE_WATCH_POISON_FILE" \
