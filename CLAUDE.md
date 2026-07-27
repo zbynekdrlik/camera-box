@@ -22,6 +22,7 @@ Rust app for embedded NDI cameras (CAM1-4): multi-camera NDI streaming with soft
 - imag-nb swap (install-imag-nb.sh → setup-imag.sh, derived CPU/GPU/IP) → `.claude/rules/imag-nb-provisioning.md` (auto-loads on its `paths:`)
 - E2E gate preconditions (DanteSync servo, bundle-state-server) → `.claude/rules/rig-standing-services.md` (auto-loads on its `paths:`)
 - CI/workflow concurrency-cancel risk, sourced-bash-test-harness `set -e` leak → `.claude/rules/ci-testing-gotchas.md` (auto-loads on its `paths:`)
+- `CAMERA_ACTIVE_SET` fleet-enumeration discipline (never a literal cam-number range) → `.claude/rules/camera-active-set.md` (auto-loads on its `paths:`)
 
 ## DO NOT DELETE These Files
 
