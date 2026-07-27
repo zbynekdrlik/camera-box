@@ -205,6 +205,24 @@ like the wrong region of the file, suspect a duplicated anchor, not a logic regr
 the comment so it never contains the bare function-name-with-parens text (e.g. "the EVENT-mode
 caller" instead of "`do_event()`") when that text sits BEFORE the real definition in the file.
 
+**Confirmed live (#832, 2026-07-27) — the anchor you break can be a test YOU are writing IN THE
+SAME PR, not just a pre-existing one.** Adding an explanatory comment right before a call site
+(`# #832: recording-verdict-on-imag.sh has its OWN independent IMAG_BOX default...` right before
+`"$HERE/recording-verdict-on-imag.sh"`) created a SECOND occurrence of the literal script name —
+a NEW test's own `s.find("recording-verdict-on-imag.sh")` then latched onto the comment (the FIRST
+occurrence) instead of the real invocation a few lines later, so its assertion window never
+reached the actual call. Same failure shape hit a second, unrelated anchor in the same PR:
+`rig-mode.sh`'s pre-existing explanatory comment already said `` `scripts/drift-guard.sh
+--check-imag` `` (backticked, no `bash ` prefix) several lines above the REAL
+`bash scripts/drift-guard.sh --check-imag ...` call — a naive `.find("drift-guard.sh
+--check-imag")` grabbed the comment, not the call. Fix in both cases: anchor on a substring that
+can ONLY appear at the real call site (the quoted `"$HERE/...").sh"` invocation form, or a
+`bash ` / other prefix the comment never uses) — never a bare script/flag name that a nearby
+comment could also contain. **The general rule: when you write a NEW static-anchor test against
+one of these two files in the SAME commit/PR that adds explanatory prose near the call site,
+verify your OWN anchor is unique too — you can self-collide, not just collide with someone else's
+existing test.**
+
 **Mitigation:** after ANY edit to `scripts/recording-e2e.sh` OR `scripts/rig-mode.sh`, run the FULL `cargo test` suite —
 not just your own new/targeted test file — before pushing (`cargo test # airuleset:build-ok`
 locally bypasses the Tier-0 build-block for this one-off check; Tier-0 policy is otherwise
