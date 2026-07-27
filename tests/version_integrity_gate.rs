@@ -32,8 +32,16 @@ fn script() -> PathBuf {
 }
 
 /// Source the gate (its BASH_SOURCE!=$0 guard skips main) and run `body`, returning stdout.
+///
+/// #826: the gate's own top-of-file `set -euo pipefail` LEAKS into the current shell when the
+/// file is merely SOURCED (a sourced script's `set` options are not scoped away on return) — so
+/// any `body` that calls a verdict function returning non-zero (a DRIFT/UNKNOWN scenario, exactly
+/// what most #826 verdict tests need to assert) would abort THIS harness before its own trailing
+/// `echo RC=$?` ever ran, well before `body`'s own logic had a say. `set +e` immediately after the
+/// source neutralizes the leaked `-e` for every caller — behavior-preserving for existing callers
+/// (which only ever exercised return-0 scenarios and so never tripped over this).
 fn run_sourced(body: &str, extra_env: &[(&str, &str)]) -> String {
-    let harness = format!("set -uo pipefail\n. \"$SCRIPT\"\n{body}");
+    let harness = format!("set -uo pipefail\n. \"$SCRIPT\"\nset +e\n{body}");
     let mut cmd = Command::new("bash");
     cmd.arg("-c").arg(&harness).env("SCRIPT", script());
     for (k, v) in extra_env {
@@ -429,15 +437,16 @@ fn help_describes_the_version_integrity_requirement() {
 
 const PINNED_OBS_EXE: &str = r"C:\Program Files\obs-studio\bin\64bit\obs64.exe";
 const PINNED_OBS_WORKDIR: &str = r"C:\Program Files\obs-studio\bin\64bit";
-const PINNED_SHORTCUT: &str = r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs\OBS Studio.lnk";
+const PINNED_SHORTCUT: &str =
+    r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs\OBS Studio.lnk";
 
 #[test]
 fn state_json_value_is_the_generic_single_key_parser() {
-    let p = write_state("generic_kv", "{\"foo\":\"bar baz\",\"genlock_build_sha\":\"abc123\"}");
-    let out = run_sourced(
-        "state_json_value \"$F\" foo",
-        &[("F", p.to_str().unwrap())],
+    let p = write_state(
+        "generic_kv",
+        "{\"foo\":\"bar baz\",\"genlock_build_sha\":\"abc123\"}",
     );
+    let out = run_sourced("state_json_value \"$F\" foo", &[("F", p.to_str().unwrap())]);
     assert_eq!(out.trim_end_matches('\n'), "bar baz");
     let _ = std::fs::remove_file(&p);
 }
@@ -476,7 +485,10 @@ fn obs_installs_verdict_drifts_on_a_retired_folder_still_present() {
         &[],
     );
     assert!(out.contains("DRIFT"), "expected DRIFT: {out}");
-    assert!(out.contains("_RETIRED_1ME-obs_2026-07-27"), "must name the extra install: {out}");
+    assert!(
+        out.contains("_RETIRED_1ME-obs_2026-07-27"),
+        "must name the extra install: {out}"
+    );
     assert!(out.contains("RC=20"), "{out}");
 }
 
@@ -592,7 +604,10 @@ fn startup_chain_verdict_drifts_when_dead_leftover_config_present() {
         &[],
     );
     assert!(out.contains("DRIFT"), "{out}");
-    assert!(out.contains("app1_binarypath") || out.contains("app2"), "{out}");
+    assert!(
+        out.contains("app1_binarypath") || out.contains("app2"),
+        "{out}"
+    );
     assert!(out.contains("RC=20"), "{out}");
 }
 
@@ -653,10 +668,22 @@ fn gate_still_passes_when_a_box_reports_none_of_the_826_obs_identity_keys() {
         &format!("imag={SHA}"),
     ]);
     assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
-    assert!(!stdout.contains("obs_installs"), "must not engage when unreported: {stdout}");
-    assert!(!stdout.contains("port4455_identity"), "must not engage when unreported: {stdout}");
-    assert!(!stdout.contains("obs_process_count"), "must not engage when unreported: {stdout}");
-    assert!(!stdout.contains("startup_chain"), "must not engage when unreported: {stdout}");
+    assert!(
+        !stdout.contains("obs_installs"),
+        "must not engage when unreported: {stdout}"
+    );
+    assert!(
+        !stdout.contains("port4455_identity"),
+        "must not engage when unreported: {stdout}"
+    );
+    assert!(
+        !stdout.contains("obs_process_count"),
+        "must not engage when unreported: {stdout}"
+    );
+    assert!(
+        !stdout.contains("startup_chain"),
+        "must not engage when unreported: {stdout}"
+    );
     let _ = std::fs::remove_file(&s);
     let _ = std::fs::remove_file(&t);
 }
@@ -682,7 +709,10 @@ fn gate_refuses_when_a_reporting_box_has_an_extra_obs_install_826() {
         &format!("imag={SHA}"),
     ]);
     assert_eq!(code, 20, "stdout={stdout} stderr={stderr}");
-    assert!(stdout.contains("obs_installs") && stdout.contains("DRIFT"), "{stdout}");
+    assert!(
+        stdout.contains("obs_installs") && stdout.contains("DRIFT"),
+        "{stdout}"
+    );
     let _ = std::fs::remove_file(&s);
     let _ = std::fs::remove_file(&t);
 }
