@@ -225,6 +225,69 @@ fn full_path_e2e_yml_sets_all_cambox_for_pull_request_triggered_runs() {
 /// The ALL_CAMBOX env line must live in the SAME step (env: block) as DURATION/
 /// NDI_RUNTIME_DIR_V6 — i.e. it actually reaches recording-e2e.sh's invocation, not just sit
 /// somewhere else in the file where it would never be read by the script.
+// ---------------------------------------------------------------------------------------------
+// #830 — the shared cross-repo rig lease: camera-box's full-path-e2e.yml and restreamer's Rust
+// CI both drive the SAME physical rig from the SAME self-hosted dev1 runner with no mutual
+// exclusion (live collision 2026-07-27). The busy-gate step must identify THIS run to the lease
+// (repo/run_id/run_url/job), and a SEPARATE `always()` step must release it — never only on
+// rig-busy-gate.sh's own success path (that would leave the lease dangling on cancellation or a
+// later step's failure).
+// ---------------------------------------------------------------------------------------------
+
+/// The busy-gate step must pass its OWN run identity to the shared lease — otherwise
+/// scripts/rig-busy-gate.sh falls back to a local-only identity that a foreign gate can't use to
+/// find the run (no run_url to report, no way to check "is this run still going").
+#[test]
+fn full_path_e2e_yml_busy_gate_step_sets_rig_lease_identity_env() {
+    let s = read_workflow();
+    let step_pos = s
+        .find("name: Rig-busy gate")
+        .expect("the rig-busy-gate step must exist");
+    let run_pos = s[step_pos..]
+        .find("run: bash scripts/rig-busy-gate.sh")
+        .map(|p| p + step_pos)
+        .expect("the rig-busy-gate step must invoke scripts/rig-busy-gate.sh");
+    let step_block = &s[step_pos..run_pos];
+    for expected in [
+        "RIG_LEASE_REPO:",
+        "RIG_LEASE_RUN_ID:",
+        "RIG_LEASE_RUN_URL:",
+        "RIG_LEASE_JOB:",
+    ] {
+        assert!(
+            step_block.contains(expected),
+            "#830: the rig-busy-gate step's env: block must set {expected} so the shared rig \
+             lease can identify THIS run: {step_block}"
+        );
+    }
+}
+
+/// A dedicated release step must exist, run `if: always()` (success, failure, AND cancellation),
+/// and invoke the release wrapper — never rely solely on rig-busy-gate.sh's own success path,
+/// which deliberately leaves the lease HELD for the recording step that follows it.
+#[test]
+fn full_path_e2e_yml_has_always_release_lease_step() {
+    let s = read_workflow();
+    let step_pos = s
+        .find("name: Release the shared rig lease")
+        .expect("#830: a dedicated 'Release the shared rig lease' step must exist");
+    let after = &s[step_pos..];
+    let step_end = after
+        .find("\n      - name:")
+        .map(|p| p + step_pos)
+        .unwrap_or(s.len());
+    let step_block = &s[step_pos..step_end];
+    assert!(
+        step_block.contains("if: always()"),
+        "#830: the lease-release step must run `if: always()` (success, earlier-step failure, \
+         AND cancellation) — never gated on the earlier steps' own outcome: {step_block}"
+    );
+    assert!(
+        step_block.contains("run: bash scripts/rig-lease-release.sh"),
+        "the release step must invoke scripts/rig-lease-release.sh: {step_block}"
+    );
+}
+
 #[test]
 fn full_path_e2e_yml_all_cambox_is_in_the_recording_steps_env_block() {
     let s = read_workflow();
