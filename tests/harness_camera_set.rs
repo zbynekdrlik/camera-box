@@ -422,6 +422,136 @@ fn camera_strih_route_resolves_the_six_source_eligible_cameras() {
     }
 }
 
+// --- #827 follow-up (2026-07-28): the `[0/8]`/`[1/8]`/`[5/8 pre]` recording-e2e.sh preflight
+// loops still enumerated the fleet via a LITERAL `for _n in 1 2 3 4 5 6 7` range and only
+// subtracted `PREFLIGHT_EXCLUDED_CAMS` (the TEMPORARY acked-offline list) -- never intersecting
+// with `CAMERA_ACTIVE_SET` (the PERMANENT retired-fleet list). A live hardware gate run
+// (30310110884) proved this: the frozen-camera-gate preflight still sampled "NDI cam5"/"NDI cam6"/
+// "NDI cam7" and failed FROZEN on all three, even though they are retired and correctly excluded
+// everywhere else. These two new helpers are the single derivation point all three call sites now
+// use -- fixture-driven, no rig needed. -------------------------------------------------------
+
+/// Source `camera-set.sh` with an optional `CAMERA_ACTIVE_SET` override, run
+/// `camera_active_excluding <excluded>`, and return its stdout (space-separated cam names).
+fn active_excluding(active_set_override: Option<&str>, excluded: &str) -> String {
+    let script = manifest_dir().join("scripts/camera-set.sh");
+    let harness = r#"
+set -uo pipefail
+. "$SCRIPT"
+camera_active_excluding "$EXCLUDED"
+"#;
+    let mut cmd = Command::new("bash");
+    cmd.arg("-c")
+        .arg(harness)
+        .env("SCRIPT", &script)
+        .env("EXCLUDED", excluded);
+    if let Some(v) = active_set_override {
+        cmd.env("CAMERA_ACTIVE_SET", v);
+    }
+    let out = cmd.output().expect("failed to run bash harness");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+#[test]
+fn camera_active_excluding_never_includes_a_retired_camera_even_with_empty_exclusion() {
+    // #827 follow-up: cam5/cam6/cam7 are NOT in the default CAMERA_ACTIVE_SET at all -- they must
+    // never appear in the derived list, regardless of what (if anything) is passed as excluded.
+    assert_eq!(
+        active_excluding(None, ""),
+        "cam1 cam2 cam3 cam4",
+        "camera_active_excluding with no exclusion must return exactly the active set"
+    );
+}
+
+#[test]
+fn camera_active_excluding_subtracts_the_acked_offline_list_within_the_active_set() {
+    // cam4 acked-offline (e.g. grabber card removed) must drop out, but only cam4 -- the other
+    // active cameras stay, and no retired camera ever appears.
+    assert_eq!(
+        active_excluding(None, "cam4"),
+        "cam1 cam2 cam3",
+        "camera_active_excluding must drop an acked-offline camera from the active set"
+    );
+}
+
+#[test]
+fn camera_active_excluding_reactivation_flows_through_env_override() {
+    // THE reversibility proof for this call path specifically (mirrors
+    // camera_active_set_env_override_reactivates_a_retired_camera above): re-adding cam5 to
+    // CAMERA_ACTIVE_SET must make it appear here too, with zero code changes.
+    assert_eq!(
+        active_excluding(Some("cam1 cam2 cam3 cam4 cam5"), ""),
+        "cam1 cam2 cam3 cam4 cam5",
+        "#827: a reactivated camera must flow through camera_active_excluding"
+    );
+}
+
+/// Source `camera-set.sh` with an optional `CAMERA_ACTIVE_SET` override, run
+/// `camera_active_ndi_sources_excluding_csv <excluded>`, and return its stdout.
+fn active_ndi_sources_excluding_csv(active_set_override: Option<&str>, excluded: &str) -> String {
+    let script = manifest_dir().join("scripts/camera-set.sh");
+    let harness = r#"
+set -uo pipefail
+. "$SCRIPT"
+camera_active_ndi_sources_excluding_csv "$EXCLUDED"
+"#;
+    let mut cmd = Command::new("bash");
+    cmd.arg("-c")
+        .arg(harness)
+        .env("SCRIPT", &script)
+        .env("EXCLUDED", excluded);
+    if let Some(v) = active_set_override {
+        cmd.env("CAMERA_ACTIVE_SET", v);
+    }
+    let out = cmd.output().expect("failed to run bash harness");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+#[test]
+fn camera_active_ndi_sources_excluding_csv_never_includes_a_retired_camera() {
+    // This is the EXACT property that failed live on run 30310110884: a retired camera whose
+    // strih OBS input is STILL PRESENT (NDI cam5/cam6/cam7 scene-collection entries were never
+    // deleted, #827) must not appear in the sampled/checked source list -- with NO exclusion
+    // passed at all, since retirement (not acking) is what keeps them out.
+    let csv = active_ndi_sources_excluding_csv(None, "");
+    assert_eq!(
+        csv, "NDI cam1,NDI cam2,NDI cam3,NDI cam4",
+        "a retired camera (cam5/cam6/cam7) must never appear in the derived NDI source CSV, \
+         regardless of whether its strih OBS input still exists"
+    );
+    for retired in ["NDI cam5", "NDI cam6", "NDI cam7"] {
+        assert!(
+            !csv.contains(retired),
+            "{retired} must not appear in the derived source list -- it is retired from \
+             CAMERA_ACTIVE_SET (#827)"
+        );
+    }
+}
+
+#[test]
+fn camera_active_ndi_sources_excluding_csv_also_drops_acked_offline_within_active_set() {
+    // cam4 acked-offline (e.g. grabber card removed) subtracts from the CSV too -- the SAME
+    // PREFLIGHT_EXCLUDED_CAMS mechanism the three recording-e2e.sh call sites already pass
+    // through unchanged.
+    assert_eq!(
+        active_ndi_sources_excluding_csv(None, "cam4"),
+        "NDI cam1,NDI cam2,NDI cam3",
+        "an acked-offline camera within the active set must be excluded from the CSV"
+    );
+}
+
+#[test]
+fn camera_active_ndi_sources_excluding_csv_reactivation_flows_through() {
+    // Re-enabling a retired camera via CAMERA_ACTIVE_SET must make it appear back in the derived
+    // NDI-source CSV too -- the whole point of deriving from the active set instead of a literal
+    // range.
+    assert_eq!(
+        active_ndi_sources_excluding_csv(Some("cam1 cam2 cam3 cam4 cam5"), ""),
+        "NDI cam1,NDI cam2,NDI cam3,NDI cam4,NDI cam5",
+        "#827: a reactivated camera must flow through camera_active_ndi_sources_excluding_csv"
+    );
+}
+
 #[test]
 fn camera_strih_route_rejects_cam2_and_unknown_cameras() {
     // cam2 is the FIXED painter -- NEVER the SOURCE camera-under-test here, deliberately, even
