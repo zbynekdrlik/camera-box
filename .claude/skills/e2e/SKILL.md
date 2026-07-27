@@ -164,6 +164,38 @@ and every `card0-HDMI-A-*` connector reports `disconnected` — cam3's SSH is re
 (contrary to an earlier 2026-07-05 note that it was down); worth re-checking whenever this
 hardware gap is revisited.
 
+## Fleet size is `CAMERA_ACTIVE_SET` (#827, 2026-07-27) — reversible retirement, ONE declared list
+
+**cam5/cam6/cam7 are RETIRED from the active fleet as of 2026-07-27** — their USB grabber cards
+were returned to their owner and the boxes are powered off. cam4 stays active (its card is
+scheduled to be fitted, #828). This is a **binding, REVERSIBLE** retirement per the owner's own
+directive: *"dufam ze to odobratie cam5 az cam7 urobis tak aby ked zasa budu k dispozicii si to
+vedel znova lahko povolit"* — re-enabling a returned box must be a one-line change, never
+archaeology through a deleted diff.
+
+**The mechanism:** `scripts/camera-set.sh` declares `CAMERA_ACTIVE_SET` (default `"cam1 cam2 cam3
+cam4"`) as the **ONE** list of cameras physically installed today. `camera_resolve()` /
+`camera_strih_route()` still resolve **every** camera the fleet has ever wired (cam1-cam7 — IP,
+NDI source, genlock fps, strih scene/route are FACTS, never deleted); only `CAMERA_ACTIVE_SET`
+membership decides who is actually swept/preflighted/mapped today. Every fleet-wide consumer
+derives from it: `recording-e2e.sh`'s `[0/8]` preflight, the `[2b/8]` ALL_CAMBOX deploy loop, the
+cleanup restore loops, `TRANSPORT_SAMPLER_BOXES`, the BURN_TARGETS strih-input extension, and the
+`CAMBOX_SWEEP` default all iterate `camera_active_secondary_set()` / `camera_active_sweep_pairs()`
+/ `CAMERA_ACTIVE_SET` directly — none of them independently enumerate a camera list any more.
+`scripts/set-ndi-mapping.py` mirrors this with its own `--active` flag (defaulting to the
+`CAMERA_ACTIVE_SET` env var — `scripts/rig-mode.sh` passes it straight through), filtering its
+full 7-camera `FULL_MAP` fact table down to the active pins via `active_map()`.
+
+**RE-ENABLE PROCEDURE (memorize this, it's the whole point):** cam5 (or cam6/cam7) comes back?
+Add its name to `CAMERA_ACTIVE_SET` in `scripts/camera-set.sh` (one line), then rerun the gate.
+Nothing else needs to change — every derived consumer picks it up automatically. Proven by
+`tests/harness_camera_set.rs`'s `camera_active_set_env_override_reactivates_a_retired_camera`,
+`tests/harness_cambox_parallel_restore_712.rs`'s
+`all_cambox_restore_loop_contacts_a_reactivated_retired_camera`, and the sibling reversibility
+tests in `harness_cambox_parallel_restore_713.rs` / `harness_recording_e2e_paths.rs` /
+`harness_rig_ndi_mapping.rs` / `tests/python/test_cambox_sweep_mapping.py` — each drives the env
+override directly and asserts the retired camera actually flows back through, end to end.
+
 ## `recording-e2e.sh` now drives cam1, cam3, cam4, cam5, OR cam6 as the SOURCE camera (#24 item 1, PR #631; #312 item 1 added cam5/cam6)
 
 `CAM=cam1|cam3|cam4|cam5|cam6` (env var, defaults to `cam1` for back-compat) selects which
