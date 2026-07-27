@@ -161,7 +161,12 @@ imag_pick_ndi_peer() {
 # pipe, so a still-running writer loop dies on SIGPIPE and `set -euo pipefail` fails the WHOLE
 # substitution: the live .187 provisioning run aborted with a bare `exit 1` and zero output while
 # cam1 was up and answering. Same trap this script already documents at its `ldconfig | grep -q`
-# site — buffer first, pipe once.
+# site — buffer first, pipe once. The optional CANDIDATE args exist so a caller (or a future
+# test) can override the fleet default without touching NDI_PEER_CANDIDATES; no site does today,
+# which is exactly what trips shellcheck's "references arguments, but none are ever passed"
+# check (SC2120) -- it cannot see that the zero-arg call path is the intended, exercised
+# behaviour (see tests/setup_imag_hardware_agnostic.rs), not an unused parameter.
+# shellcheck disable=SC2120
 imag_resolve_ndi_peer() {
     local candidates=("$@") probe="" h
     [ "${#candidates[@]}" -gt 0 ] || read -r -a candidates <<<"$NDI_PEER_CANDIDATES"
