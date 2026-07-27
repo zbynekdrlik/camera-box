@@ -315,11 +315,12 @@ fn summary_line<'a>(output: &'a str, label: &str) -> &'a str {
 
 #[test]
 fn verify_fleet_treats_an_offline_box_as_skipped_and_still_exits_zero() {
-    // cam6 (10.77.9.66) offline -- must be SKIPPED, and since no OTHER box fails, the fleet
+    // cam4 (10.77.9.64) offline -- must be SKIPPED, and since no OTHER box fails, the fleet
     // exit status must still be 0 (an offline box alone is not a fleet failure, #552).
-    // #593: this used to use cam7 as the "offline" example -- cam7 was never built and is no
-    // longer a resolvable camera name at all, so a real fleet member (cam6) stands in instead.
-    let r = run_fleet("cam1 cam6", &["10.77.9.66"], &[]);
+    // #593: this used to use cam7 as the "offline" example (cam7 was never built); #827
+    // (2026-07-27) retired cam5/cam6/cam7 outright (grabber cards returned, boxes powered off),
+    // so a real fleet member from the remaining 4-box set (cam4) stands in instead.
+    let r = run_fleet("cam1 cam4", &["10.77.9.64"], &[]);
     assert!(
         r.success,
         "exited nonzero solely because one box was offline -- an offline box must be SKIPPED, \
@@ -327,7 +328,7 @@ fn verify_fleet_treats_an_offline_box_as_skipped_and_still_exits_zero() {
         r.output
     );
     // Precise checks on the actual per-label summary lines (not a loose substring match that a
-    // vacuous "SKIPPED: none" could also satisfy) -- cam1 genuinely PASSED, cam6 genuinely
+    // vacuous "SKIPPED: none" could also satisfy) -- cam1 genuinely PASSED, cam4 genuinely
     // SKIPPED, nothing FAILED.
     assert_eq!(
         summary_line(&r.output, "PASS:"),
@@ -337,25 +338,25 @@ fn verify_fleet_treats_an_offline_box_as_skipped_and_still_exits_zero() {
     );
     assert_eq!(
         summary_line(&r.output, "SKIPPED:"),
-        "cam6",
-        "cam6 (offline) must be reported SKIPPED, by name, not just the label present with an \
+        "cam4",
+        "cam4 (offline) must be reported SKIPPED, by name, not just the label present with an \
          empty list; output:\n{}",
         r.output
     );
     assert_eq!(
         summary_line(&r.output, "FAIL:"),
         "none",
-        "cam6 (offline) must NOT appear in the FAIL summary; output:\n{}",
+        "cam4 (offline) must NOT appear in the FAIL summary; output:\n{}",
         r.output
     );
 }
 
 #[test]
 fn verify_fleet_offline_box_does_not_mask_a_real_failure_elsewhere() {
-    // Mixed fleet: cam6 offline (SKIPPED) AND cam2 reachable-but-failing (FAIL) -- the offline
+    // Mixed fleet: cam4 offline (SKIPPED) AND cam2 reachable-but-failing (FAIL) -- the offline
     // box must not swallow the real failure; overall exit must still be nonzero.
-    // #593: cam6 stands in for the old cam7 example -- cam7 was never built.
-    let r = run_fleet("cam1 cam2 cam6", &["10.77.9.66"], &["cam2"]);
+    // #827 (2026-07-27): cam4 stands in for the retired cam6 example -- cam5/cam6/cam7 are gone.
+    let r = run_fleet("cam1 cam2 cam4", &["10.77.9.64"], &["cam2"]);
     assert!(
         !r.success,
         "an offline box masked a real failure elsewhere -- must still exit nonzero. output:\n{}",
@@ -375,7 +376,7 @@ fn verify_fleet_offline_box_does_not_mask_a_real_failure_elsewhere() {
     );
     assert_eq!(
         summary_line(&r.output, "SKIPPED:"),
-        "cam6",
+        "cam4",
         "output:\n{}",
         r.output
     );
@@ -439,7 +440,7 @@ fn verify_fleet_rejects_an_unknown_positional_argument() {
 #[test]
 fn verify_fleet_camera_set_is_case_insensitive() {
     // setup-device.sh / verify-device.sh both advertise (and accept) case-insensitive NAMEs
-    // (CAM5 / cam5 both work) -- CAMERA_SET must honor the same convention, not silently reject
+    // (CAM3 / cam3 both work) -- CAMERA_SET must honor the same convention, not silently reject
     // uppercase entries as "invalid".
     let r = run_fleet("CAM1 Cam2", &[], &[]);
     assert!(

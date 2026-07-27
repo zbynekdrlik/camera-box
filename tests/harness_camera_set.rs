@@ -153,24 +153,33 @@ fn loopback_e2e_routes_through_camera_set() {
     );
 }
 
-// --- #451: fleet growing 4 -> 6 (cam5/cam6) + per-camera CAMERA_GENLOCK_FPS -------------------
-// --- #593 (superseded by #753, see below): cam7 was excluded because it had NEVER been built.
-// -------------------------------------------------------------------------------------------
+// --- #827 (2026-07-27): cam5/cam6/cam7 RETIRED from the ACTIVE fleet -- but REVERSIBLY --------
+// Binding owner directive (posted on #827): retiring cam5/cam6/cam7 must be a ONE-LINE reversal
+// when the boxes come back (grabber cards returned to their owner today). So camera_resolve() /
+// camera_strih_route() KEEP resolving all seven cameras fully (facts never deleted); retirement
+// is expressed ONLY via `CAMERA_ACTIVE_SET` -- the ONE declared list every fleet-wide consumer
+// derives its working set from. These tests pin BOTH directions: the default is exactly cam1-4,
+// AND overriding CAMERA_ACTIVE_SET to include a retired camera flows through to the derived
+// consumer (camera_active_secondary_set) -- the proof the reversal actually works, not just a
+// comment claiming it does.
 
 #[test]
-fn camera_set_resolves_cam5_and_cam6() {
-    // The fleet grew 4->6 (#451). A wrong/missing IP would deploy the probe to (and certify)
-    // the WRONG box, exactly like the original cam1-4 guard above.
+fn camera_set_still_resolves_cam5_cam6_cam7_facts() {
+    // #827: retiring a camera from the ACTIVE fleet must NEVER delete its resolvable facts (IP,
+    // NDI source, genlock fps) -- camera_resolve is a FACT lookup, not a policy decision. This is
+    // what makes reactivation a one-line CAMERA_ACTIVE_SET edit instead of archaeology through a
+    // deleted diff.
     let expected = [
         ("cam5", "10.77.9.65", "CAM5 (usb)"),
         ("cam6", "10.77.9.66", "CAM6 (usb)"),
+        ("cam7", "10.77.9.67", "CAM7 (usb)"),
     ];
-
     for (name, ip, source) in expected {
         let (ok, got_ip, got_src) = resolve(name);
         assert!(
             ok,
-            "camera_resolve {name} should succeed (#451 fleet growth 4->6)"
+            "#827: camera_resolve {name} must still succeed -- retirement is an ACTIVE-SET \
+             membership question, never a deleted fact"
         );
         assert_eq!(got_ip, ip, "camera_resolve {name} resolved the wrong IP");
         assert_eq!(
@@ -180,52 +189,123 @@ fn camera_set_resolves_cam5_and_cam6() {
     }
 }
 
-// --- #753 (2026-07-14): cam7 physical box EXISTS and is fully provisioned --------------------
-// The #593 "cam7 was never built" premise the three tests above used to pin is now STALE --
-// verify-device.sh CAM7 reported ALL CLEAR (21/21), static IP 10.77.9.67, grabber Elgato 4K S.
-// Genuinely-wrong-test rewrite per tdd-workflow.md: the world these tests encoded has changed,
-// not the code's correctness.
-
 #[test]
-fn camera_set_resolves_cam7() {
-    // #753: cam7 is a REAL, fully-provisioned box now (10.77.9.67, Elgato 4K S,
-    // verify-device.sh ALL CLEAR 21/21) -- camera_resolve must resolve it exactly like every
-    // other real camera, mirroring camera_set_resolves_cam5_and_cam6 above.
-    let (ok, ip, source) = resolve("cam7");
-    assert!(
-        ok,
-        "#753: camera_resolve cam7 should succeed -- the box is real now"
-    );
-    assert_eq!(
-        ip, "10.77.9.67",
-        "camera_resolve cam7 resolved the wrong IP"
-    );
-    assert_eq!(
-        source, "CAM7 (usb)",
-        "camera_resolve cam7 resolved the wrong NDI source"
-    );
-}
-
-#[test]
-fn camera_set_reject_message_lists_seven_cameras() {
-    // #753: cam7 is real now -- the reject message must list all seven, or a typo report
-    // misleads whoever reads it about which names are actually valid.
+fn camera_set_reject_message_still_lists_all_seven_cameras() {
+    // The reject message reflects what camera_resolve can RESOLVE (a fact lookup), not what is
+    // currently ACTIVE -- #827 kept all seven names resolvable, so the message must too.
     let s = read("scripts/camera-set.sh");
     assert!(
         s.contains("expected one of: cam1 cam2 cam3 cam4 cam5 cam6 cam7"),
-        "#753: the unknown-camera reject message must list all seven real cameras (cam1..cam7)."
+        "#827: the unknown-camera reject message must still list all seven resolvable cameras."
     );
 }
 
 #[test]
-fn camera_set_default_includes_all_seven_cameras() {
-    // CAMERA_SET is the "drive the whole set" default the fleet-wide orchestrators
-    // (deploy-fleet.sh, verify-fleet.sh) fall back to when the operator doesn't override it.
-    // #753: cam7 is a real, fully-provisioned box now -- the default must include it.
+fn camera_active_set_default_is_exactly_cam1_through_cam4() {
+    // CAMERA_ACTIVE_SET is the ONE declared list of cameras physically installed TODAY (#827).
     let s = read("scripts/camera-set.sh");
     assert!(
-        s.contains("CAMERA_SET=\"${CAMERA_SET:-cam1 cam2 cam3 cam4 cam5 cam6 cam7}\""),
-        "#753: CAMERA_SET default must list all seven real cameras (cam1..cam7)."
+        s.contains("CAMERA_ACTIVE_SET=\"${CAMERA_ACTIVE_SET:-cam1 cam2 cam3 cam4}\""),
+        "#827: CAMERA_ACTIVE_SET default must be exactly the four active cameras (cam1..cam4)."
+    );
+}
+
+#[test]
+fn camera_set_default_derives_from_camera_active_set_not_a_second_list() {
+    // #827: CAMERA_SET (the deploy-fleet.sh/verify-fleet.sh/upgrade-fleet-ndi.sh fallback) must
+    // DERIVE from CAMERA_ACTIVE_SET -- never independently enumerate the fleet a second time.
+    let s = read("scripts/camera-set.sh");
+    assert!(
+        s.contains("CAMERA_SET=\"${CAMERA_SET:-$CAMERA_ACTIVE_SET}\""),
+        "#827: CAMERA_SET must default to $CAMERA_ACTIVE_SET, not a second hardcoded cam list."
+    );
+}
+
+/// Source `camera-set.sh` with an optional `CAMERA_ACTIVE_SET` override and run
+/// `camera_active_secondary_set`, returning its stdout (space-separated cam names).
+fn active_secondary_set(active_set_override: Option<&str>) -> String {
+    let script = manifest_dir().join("scripts/camera-set.sh");
+    let harness = r#"
+set -uo pipefail
+. "$SCRIPT"
+camera_active_secondary_set
+"#;
+    let mut cmd = Command::new("bash");
+    cmd.arg("-c").arg(harness).env("SCRIPT", &script);
+    if let Some(v) = active_set_override {
+        cmd.env("CAMERA_ACTIVE_SET", v);
+    }
+    let out = cmd.output().expect("failed to run bash harness");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+#[test]
+fn camera_active_secondary_set_excludes_cam1_and_cam2_by_default() {
+    // The default active set is cam1-4; the "secondary" (non-source, non-painter) cameras the
+    // ALL_CAMBOX sweep cuts in are cam3/cam4 only.
+    assert_eq!(
+        active_secondary_set(None),
+        "cam3 cam4",
+        "#827: the default secondary set must be exactly cam3 cam4 (cam1=source, cam2=painter)"
+    );
+}
+
+#[test]
+fn camera_active_set_env_override_reactivates_a_retired_camera() {
+    // THE PROOF the reversal actually works (owner directive on #827: a comment saying "just add
+    // it back" is not proof) -- overriding CAMERA_ACTIVE_SET to include a RETIRED camera (cam5)
+    // must flow through to the derived secondary set, with ZERO code changes beyond the env var.
+    assert_eq!(
+        active_secondary_set(Some("cam1 cam2 cam3 cam4 cam5")),
+        "cam3 cam4 cam5",
+        "#827: adding a retired camera back to CAMERA_ACTIVE_SET must make it appear in the \
+         derived secondary set -- this is the whole point of the active-set design"
+    );
+    // And removing one back out un-reactivates it, just as easily.
+    assert_eq!(
+        active_secondary_set(Some("cam1 cam2 cam3")),
+        "cam3",
+        "#827: shrinking CAMERA_ACTIVE_SET must shrink the derived secondary set the same way"
+    );
+}
+
+/// Source `camera-set.sh` with an optional `CAMERA_ACTIVE_SET` override and run
+/// `camera_is_active <name>`, returning true/false.
+fn is_active(name: &str, active_set_override: Option<&str>) -> bool {
+    let script = manifest_dir().join("scripts/camera-set.sh");
+    let harness = r#"
+set -uo pipefail
+. "$SCRIPT"
+camera_is_active "$NAME" && echo YES || echo NO
+"#;
+    let mut cmd = Command::new("bash");
+    cmd.arg("-c")
+        .arg(harness)
+        .env("SCRIPT", &script)
+        .env("NAME", name);
+    if let Some(v) = active_set_override {
+        cmd.env("CAMERA_ACTIVE_SET", v);
+    }
+    let out = cmd.output().expect("failed to run bash harness");
+    String::from_utf8_lossy(&out.stdout).trim() == "YES"
+}
+
+#[test]
+fn camera_is_active_matches_whole_words_only() {
+    // #827: a substring match would wrongly treat "cam1" as active just because "cam10" (a
+    // hypothetical future name) appears in the set -- must be an exact word match.
+    assert!(is_active("cam1", None), "cam1 must be active by default");
+    assert!(
+        !is_active("cam5", None),
+        "cam5 must NOT be active by default (retired)"
+    );
+    assert!(
+        is_active("cam5", Some("cam1 cam2 cam3 cam4 cam5")),
+        "cam5 must become active once added to CAMERA_ACTIVE_SET"
+    );
+    assert!(
+        !is_active("cam1", Some("cam10 cam2")),
+        "camera_is_active must not substring-match 'cam1' inside 'cam10'"
     );
 }
 
@@ -261,7 +341,7 @@ fn camera_resolve_emits_per_camera_genlock_fps() {
     // (today uniformly 60 for the whole program-feeding fleet) — this is the table #450's
     // provisioning drop-in generation is meant to read, distinct from the existing GLOBAL
     // GENLOCK_FPS the harness uses for its own manually-launched cam1 sender.
-    for cam in ["cam1", "cam2", "cam3", "cam4", "cam5", "cam6"] {
+    for cam in ["cam1", "cam2", "cam3", "cam4", "cam5", "cam6", "cam7"] {
         let fps = resolve_genlock_fps(cam);
         assert_eq!(
             fps, "60",
@@ -270,12 +350,11 @@ fn camera_resolve_emits_per_camera_genlock_fps() {
     }
 }
 
-// --- #24 item 1 / #312 item 1: camera_strih_route() -- which strih OBS scene shows a given
-// physical camera, so scripts/recording-e2e.sh can drive cam1, cam3, cam4, cam5, OR cam6 as the
-// dedicated SOURCE camera (the box filming cam2's monitor + carrying the #174 capture burn)
-// instead of being hard-coded to cam1. The scene/source pins mirror
-// scripts/set-ndi-mapping.py's fixed, Claude-owned genlock mapping exactly: NDI cam5->CAM1,
-// NDI cam1->CAM3, NDI cam3->CAM4, NDI cam4->CAM5, NDI cam6->CAM6. -------
+// --- #24 item 1 / #312: camera_strih_route() -- which strih OBS scene shows a given
+// physical camera, so scripts/recording-e2e.sh can drive cam1, cam3, cam4, cam5, cam6, OR cam7
+// as the dedicated SOURCE camera (the box filming cam2's monitor + carrying the #174 capture
+// burn) instead of being hard-coded to cam1. #827 (2026-07-27): cam5/cam6/cam7 are RETIRED from
+// CAMERA_ACTIVE_SET but their strih routes stay fully resolvable here (facts, not policy). -------
 
 /// Source `camera-set.sh`, run `camera_strih_route <name>`, and return its
 /// `SCENE\t<scene>\nSOURCE\t<source>` resolution (or REJECT on an unsupported name).
@@ -316,15 +395,18 @@ fn camera_strih_route_resolves_the_six_source_eligible_cameras() {
     // #753 PIVOT (2026-07-14, binding user directive): the mapping scripts/set-ndi-mapping.py
     // programs onto strih is now 1:1 (NDI cam<N> -> CAM<N> (usb) for every N) -- the pre-pivot
     // offset table (NDI cam5->CAM1, NDI cam1->CAM3, NDI cam3->CAM4, NDI cam4->CAM5) is HISTORY.
-    // A wrong scene/source would route strih's PROGRAM to the WRONG box's NDI feed and silently
-    // certify nothing (or the wrong camera).
+    // #827 (2026-07-27): cam5/cam6/cam7 are RETIRED from CAMERA_ACTIVE_SET, but camera_strih_route
+    // stays a pure FACT lookup -- it must still resolve them exactly, since recording-e2e.sh's
+    // single-node CAM= selection is orthogonal to the active-set gate (a one-off manual
+    // reactivation test needs the route to still exist). A wrong scene/source would route strih's
+    // PROGRAM to the WRONG box's NDI feed and silently certify nothing (or the wrong camera).
     let expected = [
         ("cam1", "Cam 1", "NDI cam1"),
         ("cam3", "Cam 3", "NDI cam3"),
         ("cam4", "Cam 4", "NDI cam4"),
         ("cam5", "Cam 5", "NDI cam5"),
         ("cam6", "Cam 6", "NDI cam6"),
-        ("cam7", "Cam 7", "NDI cam7"), // #753: added the same day the pivot landed -- always 1:1
+        ("cam7", "Cam 7", "NDI cam7"),
     ];
     for (name, scene, source) in expected {
         let (ok, got_scene, got_source) = resolve_strih_route(name);

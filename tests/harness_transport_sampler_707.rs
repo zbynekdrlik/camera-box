@@ -99,22 +99,39 @@ fn box_label_maps_each_last_octet_to_its_cam_name() {
 }
 
 /// #757/#707: recording-e2e.sh's TRANSPORT_SAMPLER_BOXES list (the ALL_CAMBOX branch) must
-/// include cam7's IP, matching every other ALL_CAMBOX camera — the #707 investigation
-/// (2026-07-15) found LINK could not be auto-ruled-out for cam7 because this list stopped at
-/// cam6 (a diagnostic gap, not a functional bug: cam7 simply had no transport-sampler coverage).
+/// include every camera still in the ACTIVE fleet. #827 (2026-07-27, binding owner directive):
+/// the list DERIVES from camera_active_secondary_set() (scripts/camera-set.sh) -- never a second
+/// hardcoded box list -- so cam5/cam6/cam7 (retired, grabber cards returned, boxes powered off)
+/// are excluded today but flow back in automatically the moment CAMERA_ACTIVE_SET is widened.
 #[test]
-fn transport_sampler_boxes_list_includes_cam7() {
+fn transport_sampler_boxes_extension_derives_from_camera_active_secondary_set() {
     let s = read("scripts/recording-e2e.sh");
     let idx = s
-        .find("TRANSPORT_SAMPLER_BOXES=\"$TRANSPORT_SAMPLER_BOXES")
-        .expect("the ALL_CAMBOX TRANSPORT_SAMPLER_BOXES extension line must exist");
-    let line_end = s[idx..].find('\n').map(|o| idx + o).unwrap_or(s.len());
-    let line = &s[idx..line_end];
+        .find("TRANSPORT_SAMPLER_BOXES=\"$CAM1_IP\"")
+        .expect("the TRANSPORT_SAMPLER_BOXES initialization must exist");
+    let region_end = s[idx..]
+        .find("\n  echo \"[5b/8]")
+        .map(|o| idx + o)
+        .expect("the TRANSPORT_SAMPLER_BOXES build region must end before the [5b/8] echo");
+    let region = &s[idx..region_end];
     assert!(
-        line.contains("$CAM7_IP"),
-        "TRANSPORT_SAMPLER_BOXES must also sample cam7 (LINK layer coverage for every \
-         ALL_CAMBOX camera, #707): {line}"
+        region.contains("camera_active_secondary_set") && region.contains("camera_secondary_ip"),
+        "#707/#827: TRANSPORT_SAMPLER_BOXES must derive its ALL_CAMBOX secondary boxes from \
+         camera_active_secondary_set()/camera_secondary_ip(), never a second hardcoded list: {region}"
     );
+    for hardcoded in [
+        "\"$CAM3_IP\"",
+        "\"$CAM4_IP\"",
+        "\"$CAM5_IP\"",
+        "\"$CAM6_IP\"",
+        "\"$CAM7_IP\"",
+    ] {
+        assert!(
+            !region.contains(hardcoded),
+            "#827: TRANSPORT_SAMPLER_BOXES must not independently enumerate a fixed camera IP \
+             list any more -- found {hardcoded} in: {region}"
+        );
+    }
 }
 
 /// The loop body carries every signal the discriminator needs, self-terminates (ceiling + sentinel),

@@ -690,7 +690,7 @@ fn recording_e2e_burn_targets_is_one_shared_array() {
     );
 }
 
-/// #286 — under ALL_CAMBOX=1, BURN_TARGETS must gain strih's OWN burn on the other 6 strih NDI
+/// #286 — under ALL_CAMBOX=1, BURN_TARGETS must gain strih's OWN burn on the other strih NDI
 /// inputs (not just the single default STRIH_PROG_SOURCE), else recording-verdict's
 /// all_cambox_delivery_latency measures only whichever ONE camera owns STRIH_PROG_SOURCE and
 /// reports zero samples for every other camera (confirmed live, 2026-07-09 #286
@@ -699,20 +699,23 @@ fn recording_e2e_burn_targets_is_one_shared_array() {
 /// snippet added to recording-e2e.sh (the file itself can't be sourced directly — no
 /// BASH_SOURCE guard, see the e2e skill's "Testing the E2E harness scripts" gotcha). A
 /// companion content-assertion (below) anchors this hand-copied snippet to the REAL file so a
-/// future edit to the seven-source list or the exclusion logic can't silently drift out of sync
+/// future edit to the source list or the exclusion logic can't silently drift out of sync
 /// with what this test actually exercises (code-review finding on PR #644).
 ///
 /// #753 PIVOT (2026-07-14, binding user directive): strih's NDI-input->camera mapping is now
 /// 1:1 (NDI cam<N> -> CAM<N>) — cam1's default STRIH_PROG_SOURCE is therefore "NDI cam1" now,
-/// not the pre-pivot offset "NDI cam5". Fleet also grew 6->7 (cam7).
+/// not the pre-pivot offset "NDI cam5". Fleet grew 6->7 (cam7), then #827 (2026-07-27, binding
+/// owner directive) retired cam5/cam6/cam7 from the ACTIVE fleet (grabber cards returned to
+/// their owner, boxes powered off) — REVERSIBLY: the loop below now derives its source list from
+/// CAMERA_ACTIVE_SET (scripts/camera-set.sh) rather than a hardcoded literal.
 #[test]
 fn recording_e2e_all_cambox_extends_burn_targets_to_every_strih_input_286() {
     // Drift guard: the real script must contain this EXACT ALL_CAMBOX extension block (the
-    // seven-source list + the exclusion `if`), so the behavioral snippet above can never quietly
-    // diverge from what recording-e2e.sh actually runs.
+    // CAMERA_ACTIVE_SET-driven loop + the exclusion `if`), so the behavioral snippet below can
+    // never quietly diverge from what recording-e2e.sh actually runs.
     let real = read("scripts/recording-e2e.sh");
     let real_block_start = real
-        .find("if [ \"${ALL_CAMBOX:-0}\" = \"1\" ]; then\n  for _acs in")
+        .find("if [ \"${ALL_CAMBOX:-0}\" = \"1\" ]; then\n  for _acn in")
         .expect("#286: recording-e2e.sh must define the ALL_CAMBOX BURN_TARGETS extension block");
     let real_block_end = real_block_start
         + real[real_block_start..]
@@ -721,19 +724,21 @@ fn recording_e2e_all_cambox_extends_burn_targets_to_every_strih_input_286() {
         + 1;
     let real_block = &real[real_block_start..real_block_end];
     assert!(
-        real_block.contains(
-            r#"for _acs in "NDI cam1" "NDI cam2" "NDI cam3" "NDI cam4" "NDI cam5" "NDI cam6" "NDI cam7""#
-        ),
-        "#286: recording-e2e.sh must extend BURN_TARGETS over exactly the seven canonical strih \
-         NDI inputs: {real_block}"
+        real_block.contains("for _acn in $CAMERA_ACTIVE_SET"),
+        "#286/#827: recording-e2e.sh must extend BURN_TARGETS by iterating CAMERA_ACTIVE_SET \
+         (never a second hardcoded source list): {real_block}"
     );
     assert!(
-        real_block.contains(r#"if [ "$_acs" != "$STRIH_PROG_SOURCE" ]; then"#)
+        real_block.contains(r#"_acs="NDI $_acn""#)
+            && real_block.contains(r#"if [ "$_acs" != "$STRIH_PROG_SOURCE" ]; then"#)
             && real_block.contains(r#"BURN_TARGETS+=("strih-${_acs// /_}=$STRIH=$_acs")"#),
-        "#286: recording-e2e.sh must exclude the current STRIH_PROG_SOURCE and append the \
-         REMAINING sources as strih-<name>=$STRIH=<source> triples: {real_block}"
+        "#286: recording-e2e.sh must build 'NDI <cam>' from each active camera and exclude the \
+         current STRIH_PROG_SOURCE, appending the REMAINING sources as \
+         strih-<name>=$STRIH=<source> triples: {real_block}"
     );
 
+    // The behavioral snippet mirrors the REAL loop exactly (source list = CAMERA_ACTIVE_SET, an
+    // env var the harness itself reads via camera-set.sh) — driven here directly, no rig needed.
     let snippet = r#"
 set -euo pipefail
 STRIH="10.77.9.202"
@@ -744,7 +749,8 @@ STREAM_PROG_SOURCE="NDI 2ME PGM"
 IMAG_PROG_SOURCE="NDI CAM1"
 BURN_TARGETS=("strih=$STRIH=$STRIH_PROG_SOURCE" "stream=$STREAM=$STREAM_PROG_SOURCE" "imag=$IMAG_IP=$IMAG_PROG_SOURCE")
 if [ "${ALL_CAMBOX:-0}" = "1" ]; then
-  for _acs in "NDI cam1" "NDI cam2" "NDI cam3" "NDI cam4" "NDI cam5" "NDI cam6" "NDI cam7"; do
+  for _acn in $CAMERA_ACTIVE_SET; do
+    _acs="NDI $_acn"
     if [ "$_acs" != "$STRIH_PROG_SOURCE" ]; then
       BURN_TARGETS+=("strih-${_acs// /_}=$STRIH=$_acs")
     fi
@@ -752,12 +758,14 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
 fi
 printf '%s\n' "${BURN_TARGETS[@]}"
 "#;
-    // Default path (ALL_CAMBOX unset) — unchanged, exactly 3 targets (strih/stream/imag).
+    // Default path (ALL_CAMBOX unset) — unchanged, exactly 3 targets (strih/stream/imag),
+    // regardless of CAMERA_ACTIVE_SET.
     let out = Command::new("bash")
         .arg("-c")
         .arg(snippet)
         .arg("bash")
         .arg("NDI cam1")
+        .env("CAMERA_ACTIVE_SET", "cam1 cam2 cam3 cam4")
         .output()
         .expect("run snippet");
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -767,28 +775,27 @@ printf '%s\n' "${BURN_TARGETS[@]}"
         "#286: ALL_CAMBOX unset must leave BURN_TARGETS at exactly 3 (unchanged default path): {stdout:?}"
     );
 
-    // ALL_CAMBOX=1, default STRIH_PROG_SOURCE ("NDI cam1", cam1, #753 1:1 pivot) — gains the
-    // OTHER 6 strih inputs (9 total: the original 3 + 6 more), and does NOT duplicate "NDI cam1"
-    // itself.
+    // ALL_CAMBOX=1, default STRIH_PROG_SOURCE ("NDI cam1", cam1, #753 1:1 pivot), default
+    // CAMERA_ACTIVE_SET (cam1-4, #827) — gains the OTHER 3 strih inputs (6 total: the original 3
+    // + 3 more), and does NOT duplicate "NDI cam1" itself.
     let out = Command::new("bash")
         .arg("-c")
         .arg(snippet)
         .arg("bash")
         .arg("NDI cam1")
         .env("ALL_CAMBOX", "1")
+        .env("CAMERA_ACTIVE_SET", "cam1 cam2 cam3 cam4")
         .output()
         .expect("run snippet");
     let stdout = String::from_utf8_lossy(&out.stdout);
     let lines: Vec<&str> = stdout.lines().collect();
     assert_eq!(
         lines.len(),
-        9,
-        "#286: ALL_CAMBOX=1 must extend BURN_TARGETS to 9 (3 original + 6 additional strih \
+        6,
+        "#286/#827: ALL_CAMBOX=1 must extend BURN_TARGETS to 6 (3 original + 3 additional strih \
          inputs, excluding the one STRIH_PROG_SOURCE already covers): {stdout:?}"
     );
-    for expect in [
-        "NDI cam2", "NDI cam3", "NDI cam4", "NDI cam5", "NDI cam6", "NDI cam7",
-    ] {
+    for expect in ["NDI cam2", "NDI cam3", "NDI cam4"] {
         assert!(
             stdout.contains(expect),
             "#286: BURN_TARGETS must cover strih input {expect:?}: {stdout:?}"
@@ -808,13 +815,14 @@ printf '%s\n' "${BURN_TARGETS[@]}"
         .arg("bash")
         .arg("NDI cam3")
         .env("ALL_CAMBOX", "1")
+        .env("CAMERA_ACTIVE_SET", "cam1 cam2 cam3 cam4")
         .output()
         .expect("run snippet");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert_eq!(
         stdout.lines().count(),
-        9,
-        "#286: a non-default STRIH_PROG_SOURCE must still yield exactly 9 targets: {stdout:?}"
+        6,
+        "#286/#827: a non-default STRIH_PROG_SOURCE must still yield exactly 6 targets: {stdout:?}"
     );
     assert_eq!(
         stdout.matches("NDI cam3").count(),
@@ -825,7 +833,25 @@ printf '%s\n' "${BURN_TARGETS[@]}"
     assert!(
         stdout.contains("NDI cam1"),
         "#286: when STRIH_PROG_SOURCE is 'NDI cam3', 'NDI cam1' must be ADDED as one of the \
-         other 6: {stdout:?}"
+         other 3: {stdout:?}"
+    );
+
+    // #827 REVERSIBILITY PROOF: widening CAMERA_ACTIVE_SET to include a retired camera (cam5)
+    // makes BURN_TARGETS cover it too -- zero code changes beyond the env var.
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(snippet)
+        .arg("bash")
+        .arg("NDI cam1")
+        .env("ALL_CAMBOX", "1")
+        .env("CAMERA_ACTIVE_SET", "cam1 cam2 cam3 cam4 cam5")
+        .output()
+        .expect("run snippet");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("NDI cam5"),
+        "#827: reactivating cam5 via CAMERA_ACTIVE_SET must make BURN_TARGETS cover 'NDI cam5' \
+         too -- proving the reversal actually works: {stdout:?}"
     );
 }
 
@@ -1479,50 +1505,103 @@ fn recording_e2e_all_cambox_sweep_runs_on_stream_box() {
 /// capture + NDI emit do not, so cam2 stays a MEASURABLE camera during the test"). CAMBOX_SWEEP
 /// and CAMERA_UNDER_TEST_NODES (src/bin/recording-verdict.rs) were never updated after #291
 /// landed — #312 fixes both: cam2 is now included, deployed via the `[2b/8]` loop with its OWN
-/// reserved digital capture-burn id (mirroring cam1/cam3/cam4/cam5/cam6 exactly) and
+/// reserved digital capture-burn id (mirroring cam1/cam3/cam4 exactly) and
 /// CAMERA_BOX_NO_DISPLAY=1 so the frame-probe painter can still own /dev/fb0.
 ///
 /// #753 PIVOT (2026-07-14, binding user directive): the strih NDI-input->camera mapping is now
 /// 1:1 (NDI cam<N> -> CAM<N>, scene "Cam N" for every N) — the pre-pivot #399 offset table (NDI
 /// cam5→CAM1, cam1→CAM3, cam3→CAM4, cam4→CAM5; cam2/cam6 were ALREADY 1:1) is HISTORY. cam2 is
-/// scene "Cam 2" (unchanged either way); #312 wired in cam5 (now scene "Cam 5", was "Cam 4"
-/// pre-pivot) and cam6 (scene "Cam 6", unchanged) — fleet growth 4→6, #451. #753 (fleet growth
-/// 6→7, 2026-07-14) added cam7 (scene "Cam 7"). So the default sweeps ALL SEVEN cameras, still
-/// overridable via $CAMBOX_SWEEP.
+/// scene "Cam 2" (unchanged either way). #312 briefly wired in cam5/cam6 (fleet growth 4→6,
+/// #451) and #753 added cam7 (fleet growth 6→7) — but #827 (2026-07-27, binding owner directive)
+/// retired all three from the ACTIVE fleet REVERSIBLY: the default now DERIVES from
+/// CAMERA_ACTIVE_SET (scripts/camera-set.sh's camera_active_sweep_pairs) rather than a hardcoded
+/// literal, so it sweeps the FOUR real cameras (cam1/cam2/cam3/cam4) today and picks up a
+/// reactivated camera automatically. Still overridable via $CAMBOX_SWEEP.
 ///
 /// The ORIGINAL #328/#440 concern this exclusion partly guarded against — the PERMANENT
 /// `cam2-painter.service` and the transient TEST-mode painter BOTH fighting over `/dev/fb0` — is
 /// UNRELATED to the sweep-inclusion question and still needs its own guard: see
 /// `recording_e2e_cam2_deploy_stops_the_permanent_painter_service_before_launching_the_transient_probe`
 /// below.
-#[test]
-fn recording_e2e_default_sweep_covers_all_seven_cameras_including_cam2() {
+///
+/// #827: CAMBOX_SWEEP's default is no longer a static literal (`${CAMBOX_SWEEP:-Cam 1:CAM1 ...}`)
+/// but a command-substitution expression (`${CAMBOX_SWEEP:-$(camera_active_sweep_pairs)}`) — so
+/// this test RESOLVES it for real by sourcing camera-set.sh and letting bash evaluate the exact
+/// default expression, exactly as recording-e2e.sh does at runtime, instead of regex-scraping
+/// static text.
+fn resolve_cambox_sweep_default(active_set_override: Option<&str>) -> String {
     let s = read("scripts/recording-e2e.sh");
     let line = s
         .lines()
         .find(|l| l.contains("CAMBOX_SWEEP=\"${CAMBOX_SWEEP:-"))
-        .expect("#333: recording-e2e.sh must define a default CAMBOX_SWEEP");
+        .expect("#333: recording-e2e.sh must define a default CAMBOX_SWEEP")
+        .trim();
+    let camera_set_sh = format!("{}/scripts/camera-set.sh", env!("CARGO_MANIFEST_DIR"));
+    let harness =
+        format!("set -euo pipefail\n. {camera_set_sh:?}\n{line}\nprintf '%s' \"$CAMBOX_SWEEP\"\n");
+    let mut cmd = Command::new("bash");
+    cmd.arg("-c").arg(&harness);
+    if let Some(v) = active_set_override {
+        cmd.env("CAMERA_ACTIVE_SET", v);
+    }
+    let out = cmd
+        .output()
+        .expect("failed to resolve CAMBOX_SWEEP default");
     assert!(
-        line.contains("Cam 2:CAM2"),
+        out.status.success(),
+        "resolving CAMBOX_SWEEP default failed. stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).to_string()
+}
+
+#[test]
+fn recording_e2e_default_sweep_covers_all_four_cameras_including_cam2() {
+    let s = read("scripts/recording-e2e.sh");
+    assert!(
+        s.contains("CAMBOX_SWEEP=\"${CAMBOX_SWEEP:-$(camera_active_sweep_pairs)}\""),
+        "#827: CAMBOX_SWEEP must derive its default from camera_active_sweep_pairs() \
+         (camera-set.sh, CAMERA_ACTIVE_SET-driven) — never a second hardcoded scene:label list."
+    );
+
+    let resolved = resolve_cambox_sweep_default(None);
+    assert!(
+        resolved.contains("Cam 2:CAM2"),
         "#312: the default CAMBOX_SWEEP must include cam2 (scene 'Cam 2') — #291 made it a \
-         MEASURABLE camera during a TEST run, so excluding it is now stale: {line}"
+         MEASURABLE camera during a TEST run, so excluding it is now stale: {resolved}"
     );
     for (scene, label) in [
         ("Cam 1:CAM1", "CAM1"),
         ("Cam 3:CAM3", "CAM3"),
         ("Cam 4:CAM4", "CAM4"),
-        ("Cam 5:CAM5", "CAM5"),
-        ("Cam 6:CAM6", "CAM6"),
-        ("Cam 7:CAM7", "CAM7"),
     ] {
         assert!(
-            line.contains(scene),
-            "#312/#753: the default sweep must still cover {label} via '{scene}': {line}"
+            resolved.contains(scene),
+            "#312/#753/#827: the default sweep must still cover {label} via '{scene}': {resolved}"
         );
     }
+    for retired in ["Cam 5:CAM5", "Cam 6:CAM6", "Cam 7:CAM7"] {
+        assert!(
+            !resolved.contains(retired),
+            "#827: the default sweep must NOT reference the retired {retired} — the box no \
+             longer exists: {resolved}"
+        );
+    }
+}
+
+/// #827 REVERSIBILITY PROOF: overriding CAMERA_ACTIVE_SET to bring a retired camera (cam5) back
+/// makes CAMBOX_SWEEP's resolved default cover it too — zero code changes beyond the env var.
+#[test]
+fn recording_e2e_cambox_sweep_default_reactivates_a_retired_camera_via_active_set() {
+    let resolved = resolve_cambox_sweep_default(Some("cam1 cam2 cam3 cam4 cam5"));
     assert!(
-        line.contains("${CAMBOX_SWEEP:-"),
-        "#333: CAMBOX_SWEEP must remain env-overridable: {line}"
+        resolved.contains("Cam 5:CAM5"),
+        "#827: reactivating cam5 via CAMERA_ACTIVE_SET must make CAMBOX_SWEEP's default cover \
+         'Cam 5:CAM5' too -- proving the reversal actually works: {resolved}"
+    );
+    assert!(
+        !resolved.contains("Cam 6:CAM6") && !resolved.contains("Cam 7:CAM7"),
+        "#827: cam6/cam7 must stay untouched -- only cam5 was added back: {resolved}"
     );
 }
 

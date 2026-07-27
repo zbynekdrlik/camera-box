@@ -1,11 +1,14 @@
 //! #713 — cleanup()'s cam1 (SOURCE) and cam2/painter device restores still ran SEQUENTIALLY,
-//! outside #712's own cam3/4/5/6 parallel group — extend the pattern to the WHOLE device-restore
-//! phase (up to 6 boxes, one shared wait).
+//! outside #712's own secondary-camera parallel group (#827: cam5/cam6/cam7 retired, grabber
+//! cards returned, boxes powered off, but REVERSIBLY via camera_active_secondary_set() —
+//! scripts/camera-set.sh) — extend the pattern to the WHOLE device-restore phase (cam1 + every
+//! active secondary camera + cam2/painter, one shared wait).
 //!
 //! ## The bug (live evidence, 2026-07-12, posted on #713)
 //!
-//! #712 parallelized ONLY the cam3/4/5/6 ALL_CAMBOX loop (the part the original #712 incident
-//! actually described). cam1's SOURCE-camera restore and cam2/painter's restore are SEPARATE
+//! #712 parallelized ONLY the secondary-camera ALL_CAMBOX loop (the part the original #712
+//! incident actually described, back when the fleet still had 7 boxes). cam1's SOURCE-camera
+//! restore and cam2/painter's restore are SEPARATE
 //! sequential blocks in cleanup() — one BEFORE the loop, one AFTER it — both still vulnerable to
 //! a GitHub Actions run cancellation (which kills the runner PROCESS directly, not waiting for a
 //! bash trap to finish). Live incident: cancelling a run right after #712 shipped still stranded
@@ -14,8 +17,8 @@
 //!
 //! ## The fix these tests lock
 //!
-//! cam1's restore, the (already-parallel) cam3/4/5/6 loop, and cam2/painter's restore now ALL
-//! background their ssh call into the SAME `CAMBOX_PARALLEL_PIDS`/`CAMBOX_PARALLEL_LABELS`
+//! cam1's restore, the (already-parallel) secondary-camera loop, and cam2/painter's restore now
+//! ALL background their ssh call into the SAME `CAMBOX_PARALLEL_PIDS`/`CAMBOX_PARALLEL_LABELS`
 //! arrays (initialized ONCE, before cam1), with a SINGLE `cambox_parallel_wait_and_report` call
 //! at the end of the whole device-restore phase (after cam2/painter is armed) — never the
 //! per-loop wait #712 shipped. Every existing restore command's literal content (#626/#640/#668
@@ -44,6 +47,20 @@ fn cleanup_body(s: &str) -> String {
     s[start..end].to_string()
 }
 
+/// Extract `NAME() { ... }` — from the literal `"NAME() {"` header to the next top-level `"\n}\n"`
+/// — a standalone, sourceable snippet. Every helper this file needs is a simple flat function
+/// (no nested braces), so this simple scan is exact.
+fn function_body(s: &str, name: &str) -> String {
+    let header = format!("{name}() {{");
+    let start = s
+        .find(&header)
+        .unwrap_or_else(|| panic!("expected recording-e2e.sh to define {name}()"));
+    let rel_end = s[start..]
+        .find("\n}\n")
+        .unwrap_or_else(|| panic!("expected {name}() to close with a top-level }}"));
+    s[start..start + rel_end + "\n}".len()].to_string()
+}
+
 /// The WHOLE device-restore phase: from the (now-shared) array init through the single
 /// `cambox_parallel_wait_and_report` call that ends it. Anchored on the FIRST
 /// `CAMBOX_PARALLEL_PIDS=()` in the cleanup body (must now be BEFORE cam1's own restore, not
@@ -67,44 +84,44 @@ fn device_restore_phase(body: &str) -> &str {
 }
 
 /// HEADLINE: the array init (`CAMBOX_PARALLEL_PIDS=()`) must come BEFORE cam1's own ssh restore
-/// call — i.e. cam1 is now part of the SAME shared group the cam3/4/5/6 loop already used, not a
-/// separate un-backgrounded call ahead of it.
+/// call — i.e. cam1 is now part of the SAME shared group the secondary-camera loop already used,
+/// not a separate un-backgrounded call ahead of it.
 #[test]
 fn cambox_parallel_pids_initialized_before_cam1_restore() {
     let body = cleanup_body(&read("scripts/recording-e2e.sh"));
-    // Anchor on the cam3/4/5/6 loop start too, so this test is immune to `root@"$CAM1_IP" \`
-    // ALSO appearing earlier in the script for an unrelated purpose (the [0/8]
-    // capture-rate-guard preflight ssh calls use the identical continuation-line shape against
-    // the SAME $CAM1_IP var, well before cleanup() even starts) — search for cam1's ssh restore
-    // call ONLY within the device-restore region (init..loop_start), not from position 0.
+    // Anchor on the secondary-camera loop start too, so this test is immune to
+    // `root@"$CAM1_IP" \` ALSO appearing earlier in the script for an unrelated purpose (the
+    // [0/8] capture-rate-guard preflight ssh calls use the identical continuation-line shape
+    // against the SAME $CAM1_IP var, well before cleanup() even starts) — search for cam1's ssh
+    // restore call ONLY within the device-restore region (init..loop_start), not from position 0.
     let init_pos = body
         .find("CAMBOX_PARALLEL_PIDS=()")
         .expect("#713: cleanup() must initialize CAMBOX_PARALLEL_PIDS");
     let loop_start = body
-        .find("for _cip in \"$CAM3_IP\"")
-        .expect("#624/#312: cleanup() must have the cam3/4/5/6 ALL_CAMBOX restore loop");
+        .find("for _ccn in $(camera_active_secondary_set)")
+        .expect("#624/#312/#827: cleanup() must have the ALL_CAMBOX secondary restore loop");
     assert!(
         init_pos < loop_start,
-        "#713: CAMBOX_PARALLEL_PIDS must be initialized before the cam3/4/5/6 loop too (unchanged \
-         from #712). init_pos={init_pos} loop_start={loop_start}"
+        "#713: CAMBOX_PARALLEL_PIDS must be initialized before the secondary-camera loop too \
+         (unchanged from #712). init_pos={init_pos} loop_start={loop_start}"
     );
     let cam1_region = &body[init_pos..loop_start];
     assert!(
         cam1_region.contains("root@\"$CAM1_IP\" \\\n"),
         "#713: CAMBOX_PARALLEL_PIDS must be initialized BEFORE (and cam1's own ssh restore call \
-         must appear between it and) the cam3/4/5/6 loop start — cam1 is now part of the shared \
-         parallel group, not a separate sequential call ahead of it. Region:\n{cam1_region}"
+         must appear between it and) the secondary-camera loop start — cam1 is now part of the \
+         shared parallel group, not a separate sequential call ahead of it. Region:\n{cam1_region}"
     );
 }
 
 /// cam1's own restore call must be backgrounded ( ... ) & and its PID/label appended to the
-/// shared arrays — exactly like the cam3/4/5/6 loop's #712 fix, applied to cam1 too.
+/// shared arrays — exactly like the secondary-camera loop's #712 fix, applied to cam1 too.
 #[test]
 fn cam1_restore_call_is_backgrounded() {
     let body = cleanup_body(&read("scripts/recording-e2e.sh"));
     let loop_start = body
-        .find("for _cip in \"$CAM3_IP\"")
-        .expect("#624/#312: cleanup() must have the cam3/4/5/6 ALL_CAMBOX restore loop");
+        .find("for _ccn in $(camera_active_secondary_set)")
+        .expect("#624/#312/#827: cleanup() must have the ALL_CAMBOX secondary restore loop");
     let cam1_block = &body[..loop_start];
     assert!(
         cam1_block.contains(") &"),
@@ -157,7 +174,7 @@ fn cam2_painter_restore_call_is_backgrounded() {
 
 /// The WHOLE device-restore phase must call `cambox_parallel_wait_and_report` EXACTLY ONCE — no
 /// separate per-loop wait (the #712 shape) any more; ONE shared wait covers cam1 + the
-/// cam3/4/5/6 loop + cam2/painter.
+/// secondary-camera loop + cam2/painter.
 #[test]
 fn exactly_one_shared_wait_call_covers_the_whole_device_restore_phase() {
     let body = cleanup_body(&read("scripts/recording-e2e.sh"));
@@ -166,8 +183,8 @@ fn exactly_one_shared_wait_call_covers_the_whole_device_restore_phase() {
     assert_eq!(
         count, 1,
         "#713: the device-restore phase must call cambox_parallel_wait_and_report EXACTLY ONCE \
-         (a single shared wait for cam1 + cam3/4/5/6 + cam2/painter), not once per sub-group. \
-         Phase:\n{phase}"
+         (a single shared wait for cam1 + the secondary-camera loop + cam2/painter), not once per \
+         sub-group. Phase:\n{phase}"
     );
     // And that one call must come AFTER cam2/painter's own PID append — i.e. cam2/painter is
     // armed BEFORE the wait, never after it (which would defeat the point).
@@ -195,7 +212,8 @@ fn device_restore_phase_preserves_existing_restore_command_content() {
         "pkill -9 -f 'camera-box-burn-[a-z0-9]'",
         "systemctl restart camera-box 2>/dev/null; true",
         "camera_box_verify_active_cmds",
-        "for _cip in \"$CAM3_IP\" \"$CAM4_IP\" \"$CAM5_IP\" \"$CAM6_IP\" \"$CAM7_IP\"; do",
+        "for _ccn in $(camera_active_secondary_set); do",
+        "_cip=\"$(camera_secondary_ip \"$_ccn\")\"",
         "root@\"$PAINTER_IP\" \"pkill -x frame-probe",
         "rig_test_dropin_clear_cmds",
         "systemctl start cam2-painter",
@@ -208,22 +226,22 @@ fn device_restore_phase_preserves_existing_restore_command_content() {
     }
 }
 
-/// THE HEADLINE REAL PROOF: extract the ACTUAL whole device-restore phase from
-/// recording-e2e.sh (no rig, no ssh — `timeout`/`sshpass` faked as a fast function that just
-/// records it was called and sleeps a short, fixed delay to simulate one ssh round-trip) and
-/// measure wall-clock with ALL_CAMBOX=1 (so cam1 + cam3/4/5/6/7 + cam2/painter = 7 boxes total are
-/// all active). 7 boxes at a simulated ~300ms round-trip each: SEQUENTIAL would take >=2100ms;
-/// PARALLEL must take well under that (bounded here at 900ms, generous margin for CI scheduling
-/// jitter) — and all 7 boxes must still have genuinely been contacted (never skipped for speed).
-#[test]
-fn whole_device_restore_phase_runs_in_parallel_not_sequentially() {
-    let body = cleanup_body(&read("scripts/recording-e2e.sh"));
+/// Build a runnable driver: source camera-set.sh (real camera_active_secondary_set fact) + the
+/// real extracted camera_secondary_ip function + the real extracted device-restore phase, with
+/// `timeout`/`sshpass` faked as a fast function that just records it was called and sleeps a
+/// short, fixed delay to simulate one ssh round-trip. `active_set_override` lets a test drive a
+/// DIFFERENT CAMERA_ACTIVE_SET (e.g. reactivating a retired camera) with zero code changes.
+fn write_driver(
+    driver_path: &std::path::Path,
+    log_path: &std::path::Path,
+    active_set_override: Option<&str>,
+) {
+    let recording_e2e_src = read("scripts/recording-e2e.sh");
+    let body = cleanup_body(&recording_e2e_src);
     let phase = device_restore_phase(&body).to_string();
+    let secondary_ip_fn = function_body(&recording_e2e_src, "camera_secondary_ip");
 
-    let dir = tempfile::tempdir().expect("tempdir");
-    let log_path = dir.path().join("calls.log");
-    let driver_path = dir.path().join("driver.sh");
-
+    let camera_set_sh = format!("{}/scripts/camera-set.sh", env!("CARGO_MANIFEST_DIR"));
     let parallel_lib = format!(
         "{}/scripts/lib/cambox-parallel-restore.sh",
         env!("CARGO_MANIFEST_DIR")
@@ -237,9 +255,16 @@ fn whole_device_restore_phase_runs_in_parallel_not_sequentially() {
         env!("CARGO_MANIFEST_DIR")
     );
 
+    let active_set_export = match active_set_override {
+        Some(v) => format!("export CAMERA_ACTIVE_SET={v:?}\n"),
+        None => String::new(),
+    };
+
     let driver = format!(
         "#!/usr/bin/env bash\n\
          set -uo pipefail\n\
+         {active_set_export}\
+         source {camera_set_sh:?}\n\
          source {parallel_lib:?}\n\
          source {restart_verify_lib:?}\n\
          source {dropin_lib:?}\n\
@@ -251,10 +276,25 @@ fn whole_device_restore_phase_runs_in_parallel_not_sequentially() {
          export -f timeout\n\
          sshpass() {{ :; }}\n\
          export -f sshpass\n\
+         {secondary_ip_fn}\n\
          {phase}\n",
         log = log_path.to_string_lossy(),
     );
-    fs::write(&driver_path, driver).expect("write driver");
+    fs::write(driver_path, driver).expect("write driver");
+}
+
+/// THE HEADLINE REAL PROOF: extract the ACTUAL whole device-restore phase from
+/// recording-e2e.sh (no rig, no ssh) and measure wall-clock with ALL_CAMBOX=1 + the DEFAULT
+/// active set (so cam1 + cam3/4 + cam2/painter = 4 boxes total are active — #827: cam5/cam6/cam7
+/// retired). 4 boxes at a simulated ~300ms round-trip each: SEQUENTIAL would take >=1200ms;
+/// PARALLEL must take well under that (bounded here at 700ms) — and all 4 boxes must still have
+/// genuinely been contacted (never skipped for speed).
+#[test]
+fn whole_device_restore_phase_runs_in_parallel_not_sequentially() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let log_path = dir.path().join("calls.log");
+    let driver_path = dir.path().join("driver.sh");
+    write_driver(&driver_path, &log_path, None);
 
     let start = Instant::now();
     let out = Command::new("bash")
@@ -272,21 +312,56 @@ fn whole_device_restore_phase_runs_in_parallel_not_sequentially() {
     );
 
     let log = fs::read_to_string(&log_path).unwrap_or_default();
-    for ip in [
-        "10.9.9.1", "10.9.9.3", "10.9.9.4", "10.9.9.5", "10.9.9.6", "10.9.9.7", "10.9.9.2",
-    ] {
+    for ip in ["10.9.9.1", "10.9.9.3", "10.9.9.4", "10.9.9.2"] {
         assert!(
             log.contains(ip),
-            "#713/#755: every one of the 7 boxes (cam1 + cam3/4/5/6/7 + cam2/painter) must actually \
-             be contacted (found in the fake timeout()'s call log) — parallelizing must never skip \
-             a box for speed. Log:\n{log}"
+            "#713/#827: every one of the 4 default-active boxes (cam1 + cam3/4 + cam2/painter) \
+             must actually be contacted (found in the fake timeout()'s call log) — parallelizing \
+             must never skip a box for speed. Log:\n{log}"
         );
     }
 
     assert!(
-        elapsed.as_millis() < 900,
-        "#713: 7 boxes at a simulated ~300ms round-trip each MUST run in PARALLEL (bounded well \
-         under the ~2100ms+ a SEQUENTIAL phase would take), not one after another. Elapsed: {:?}",
+        elapsed.as_millis() < 700,
+        "#713: 4 boxes at a simulated ~300ms round-trip each MUST run in PARALLEL (bounded well \
+         under the ~1200ms a SEQUENTIAL phase would take), not one after another. Elapsed: {:?}",
         elapsed
+    );
+}
+
+/// #827 REVERSIBILITY PROOF: overriding CAMERA_ACTIVE_SET to bring a RETIRED camera (cam5) back
+/// makes the WHOLE device-restore phase actually contact it too — with zero code changes beyond
+/// the env var.
+#[test]
+fn whole_device_restore_phase_contacts_a_reactivated_retired_camera() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let log_path = dir.path().join("calls.log");
+    let driver_path = dir.path().join("driver.sh");
+    write_driver(&driver_path, &log_path, Some("cam1 cam2 cam3 cam4 cam5"));
+
+    let out = Command::new("bash")
+        .arg(&driver_path)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run driver");
+    assert!(
+        out.status.success(),
+        "driver must exit 0. stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let log = fs::read_to_string(&log_path).unwrap_or_default();
+    for ip in ["10.9.9.1", "10.9.9.2", "10.9.9.3", "10.9.9.4", "10.9.9.5"] {
+        assert!(
+            log.contains(ip),
+            "#827: reactivating cam5 via CAMERA_ACTIVE_SET must make the whole device-restore \
+             phase contact it too (10.9.9.5) alongside cam1/cam2/cam3/cam4 -- proving the \
+             reversal actually works end-to-end. Log:\n{log}"
+        );
+    }
+    assert!(
+        !log.contains("10.9.9.6") && !log.contains("10.9.9.7"),
+        "#827: cam6/cam7 must stay untouched -- only cam5 was added back. Log:\n{log}"
     );
 }

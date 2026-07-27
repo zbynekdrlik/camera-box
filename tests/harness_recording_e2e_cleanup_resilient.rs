@@ -126,7 +126,7 @@ fn cleanup_kills_the_cam_name_infixed_all_cambox_burn_binaries() {
     let body = cleanup_body(&read("scripts/recording-e2e.sh"));
 
     let loop_region_start = body
-        .find("for _cip in \"$CAM3_IP\"")
+        .find("for _ccn in $(camera_active_secondary_set)")
         .expect("#624/#312: cleanup() must have the cam3/4/5/6 ALL_CAMBOX restore loop");
     // Code-review finding: bound loop_region's RIGHT edge at the cam2/painter block's own start —
     // an unbounded `&body[loop_region_start..]` would run to the end of cleanup() and swallow the
