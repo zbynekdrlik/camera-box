@@ -40,6 +40,43 @@ Two scripts, in this order. Neither is manual work; a notebook swap is repo tool
   `\EFI\BOOT\BOOTX64.EFI` fallback, `systemd-networkd-wait-online` masked, `ssh.service` (not
   `ssh.socket`, which is what noble enables by default), UUID-based fstab, blank machine-id.
 
+## The five things a FRESH box exposes that the incumbent never did (live, .187, 2026-07-27)
+
+The incumbent box (.182) hides these because it accumulated state over months. Every one of them
+aborted provisioning on the replacement notebook, and every one is now fixed + regression-tested.
+When a NEXT swap fails, check this list before theorising:
+
+- **The kernel line (#819).** `install-imag-nb.sh` must install `linux-generic-hwe-24.04`, not
+  `linux-generic` — the imag role runs HWE, step 6 holds the HWE names and step 7's
+  `linux-lowlatency-hwe-24.04` depends on exactly them. A GA baseline aborts step 7 outright.
+- **Holding a NOT-installed package is not a no-op (#820).** `apt-mark hold <name>` on a package
+  this box has never installed makes apt refuse any later install that would pull it in
+  (`E: Held packages were changed and -y was used without --allow-change-held-packages`) — step 6
+  held step 7 out. Hold only what `dpkg -s` confirms, and let the kernel install pass
+  `--allow-change-held-packages`.
+- **A missing TOOL is not a failed check (#822).** `readelf`/`nm` come from `binutils`, absent on a
+  fresh Ubuntu. Their empty output made step 12 report `SONAME check failed — refuse a mismatched
+  ABI` while the hot-swap had actually succeeded. Install binutils and preflight with
+  `imag_require_tools`, which names the missing tool.
+- **usrmerge breaks literal path compares (#823).** `/lib` IS a symlink to `/usr/lib`, so
+  `readlink -f` of the DM link always answers `/usr/lib/...` and a compare against the literal
+  `/lib/systemd/system/lightdm.service` can never match. Canonicalise BOTH sides
+  (`imag_same_unit`).
+- **The OBS base version must MATCH the genlock build (#824).** The PPA moved to 32.2.0 while the
+  genlock build is 32.1.2; libobs then refuses every stock plugin (`compiled with newer libobs
+  32.2` × 41) and OBS comes up with ONLY `distroav.so` — no obs-websocket (so `imag_scenes.py`
+  gets `ConnectionRefused` on :4455) and no encoders. `IMAG_OBS_BASE_VERSION` pins it; a superseded
+  PPA binary is gone from the pool but still served by
+  `launchpad.net/~obsproject/+archive/ubuntu/obs-studio/+files/` (live: pool 404, +files 200).
+  `apt-mark hold obs-studio` keeps it there. The durable answer is bumping the vendored genlock
+  build to the current OBS release (#825).
+
+A healthy fresh box, post-reboot: `uname -r` on the HWE line, `/proc/cmdline` carrying the DERIVED
+`isolcpus=`/`nohz_full=`/`irqaffinity=` + `preempt=full`, DM = lightdm with the autologin drop-in,
+openbox + obs running as the desktop user, gdm3 purged, zero failed units, `libndi.so.6 ->
+libndi.so.6.3.2`, dantesync PTP LOCKED, OBS log showing `genlock: wall-clock-slaved render tick
+ENABLED` + ~24 loaded modules including `obs-websocket.so`, and :4455 listening.
+
 ## setup-imag.sh is hardware-agnostic — do not re-introduce a literal (#816)
 
 The replacement notebook is a different machine (i5-13420H, 12 threads, **no dGPU**) than the box
