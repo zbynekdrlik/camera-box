@@ -167,8 +167,11 @@ fn setup_imag_autostart_strips_saved_projectors_522() {
         .find("saved_projectors")
         .expect("saved_projectors strip must be present");
     // must run BEFORE OBS launches so OBS loads the stripped collection (restore happens at load).
+    // #816: the pin is no longer the literal 2-11 — the autostart is written with an
+    // __ISOLCPUS__ placeholder that step 8's DERIVED isolated-CPU set is sed'd into, so the same
+    // script provisions notebooks with different core counts. Ordering contract unchanged.
     let launch = body
-        .find("taskset -c 2-11 obs &")
+        .find("taskset -c __ISOLCPUS__ obs &")
         .expect("the autostart OBS launch must be present");
     assert!(
         strip < launch,
@@ -809,7 +812,7 @@ fn setup_imag_clears_obs_crash_sentinel_before_launch() {
         .find("rm -rf \"${OBS_CFG}/.sentinel\"")
         .expect("sentinel-clear line must exist");
     let obs_launch = body
-        .find("nohup taskset -c 2-11 obs >/tmp/obs-launch.log")
+        .find(r#"nohup taskset -c "$IMAG_ISOLATED_CPUS" obs >/tmp/obs-launch.log"#)
         .expect("{SETUP} must launch obs via nohup (pinned to the #483 P-core block)");
     assert!(
         sentinel_clear < obs_launch,
@@ -1413,11 +1416,13 @@ fn setup_imag_writes_isolation_grub_dropin_with_exact_cmdline_483() {
     );
     assert!(
         body.contains(
-            r#"GRUB_CMDLINE_LINUX_DEFAULT="$GRUB_CMDLINE_LINUX_DEFAULT isolcpus=2,3,4,5,6,7,8,9,10,11 nohz_full=10,11 irqaffinity=0,1,12,13,14,15""#
+            r#"GRUB_CMDLINE_LINUX_DEFAULT="\$GRUB_CMDLINE_LINUX_DEFAULT isolcpus=${IMAG_ISOLATED_CPUS} nohz_full=${IMAG_NOHZ_CPUS} irqaffinity=${IMAG_HOUSEKEEP_CPUS}""#
         ),
-        "{SETUP} 98-imag-isolation.cfg must carry the EXACT live-verified cmdline: \
-         isolcpus=2-11 (whole P-core block for OBS), nohz_full=10,11 ONLY (the future genlock \
-         render-tick core pair, not the whole block — #303), irqaffinity=0,1,12,13,14,15 (#483)"
+        "{SETUP} 98-imag-isolation.cfg must carry the three DERIVED lists (#816): the isolated \
+         P-core block for OBS, nohz_full on ONLY the last isolated pair (the genlock render-tick \
+         pair, not the whole block — #303), irqaffinity on the housekeeping CPUs (#483). The \
+         decision is unchanged — it is derived from thread_siblings_list instead of hardcoded, so \
+         a replacement notebook with a different core count is provisioned correctly"
     );
     assert!(
         !body.contains("rcu_nocbs=10,11") && !body.contains("rcu_nocbs=2,3,4,5,6,7,8,9,10,11"),
@@ -1486,14 +1491,15 @@ fn setup_imag_isolation_step_calls_safe_grub_regen_not_raw_update_grub_483() {
 fn setup_imag_pins_obs_to_pcore_block_on_both_launch_paths_483() {
     let body = read(SETUP);
     assert!(
-        body.contains("taskset -c 2-11 obs &"),
-        "{SETUP}: the openbox autostart script (#522) must launch OBS via `taskset -c 2-11 obs` \
-         — without it, isolcpus would starve the boot-launched OBS onto cpu0,1,12-15"
+        body.contains("taskset -c __ISOLCPUS__ obs &"),
+        "{SETUP}: the openbox autostart script (#522) must launch OBS pinned to the DERIVED \
+         isolated set (the __ISOLCPUS__ placeholder step 8 sed's in, #816) — without the pin, \
+         isolcpus would starve the boot-launched OBS onto the housekeeping CPUs"
     );
     assert!(
-        body.contains("nohup taskset -c 2-11 obs >/tmp/obs-launch.log"),
-        "{SETUP} must launch OBS via `taskset -c 2-11 obs` in the provisioning-time launcher \
-         (#483), matching the boot-time openbox autostart script"
+        body.contains(r#"nohup taskset -c "$IMAG_ISOLATED_CPUS" obs >/tmp/obs-launch.log"#),
+        "{SETUP} must launch OBS pinned to the same DERIVED isolated set in the provisioning-time \
+         launcher (#483/#816), matching the boot-time openbox autostart script"
     );
 }
 
@@ -1852,7 +1858,7 @@ fn setup_imag_nvidia_step_lands_between_cpu_isolation_and_ndi_runtime_500() {
         .find("NVIDIA dGPU driver (#500)")
         .expect("the #500 NVIDIA driver step must exist");
     let ndi_step = body
-        .find("NDI runtime 6.3.2 from cam1")
+        .find("NDI runtime 6.3.2 from ${NDI_PEER}")
         .expect("the NDI runtime step must exist");
     assert!(
         cpu_isolation < nvidia_step && nvidia_step < ndi_step,
@@ -1947,9 +1953,10 @@ fn setup_imag_autostart_primaries_panel_not_hdmi_522() {
 fn setup_imag_autostart_launches_obs_pinned_522() {
     let body = read(SETUP);
     assert!(
-        body.contains("taskset -c 2-11 obs &"),
-        "{SETUP}: the openbox autostart script must launch OBS via `taskset -c 2-11 obs` (#483) \
-         — without it, isolcpus would starve the boot-launched OBS onto cpu0,1,12-15"
+        body.contains("taskset -c __ISOLCPUS__ obs &"),
+        "{SETUP}: the openbox autostart script must launch OBS pinned to the DERIVED isolated set \
+         (#483/#816) — without it, isolcpus would starve the boot-launched OBS onto the \
+         housekeeping CPUs"
     );
 }
 
@@ -1962,7 +1969,7 @@ fn setup_imag_autostart_waits_for_websocket_before_seeding_522() {
         .find("/dev/tcp/127.0.0.1/4455")
         .expect("{SETUP}: the autostart script must wait on 127.0.0.1:4455 before seeding");
     let obs_launch = body
-        .find("taskset -c 2-11 obs &")
+        .find("taskset -c __ISOLCPUS__ obs &")
         .expect("obs launch must exist in the autostart script");
     assert!(
         obs_launch < wait_loop,
@@ -2020,7 +2027,7 @@ fn setup_imag_installs_imag_scenes_py_and_websocket_dep_522() {
          curl) — not just reference the path"
     );
     let sed_sub = body
-        .find(r#"sed -i "s#__PYBIN__#${PYBIN}#; s#__SCN__#${SCN}#""#)
+        .find(r#"sed -i "s#__PYBIN__#${PYBIN}#; s#__SCN__#${SCN}#; s#__ISOLCPUS__#${IMAG_ISOLATED_CPUS}#""#)
         .expect(
             "{SETUP} must sed-substitute the __PYBIN__/__SCN__ placeholders with the actual \
              resolved paths right after writing the heredoc — a literal __PYBIN__ left in the \
@@ -2420,8 +2427,8 @@ fn setup_imag_grants_rtprio_for_genlock_rt_pin_484() {
     // It must be reserved together with the #483 CPU-isolation those cores exist for: the drop-in
     // is written after the #483 grub-isolation step (they are one concern — reserve + grant).
     let iso_idx = body
-        .find("isolcpus=2,3,4,5,6,7,8,9,10,11 nohz_full=10,11")
-        .expect("the #483 CPU-isolation cmdline must still be present");
+        .find("isolcpus=${IMAG_ISOLATED_CPUS} nohz_full=${IMAG_NOHZ_CPUS}")
+        .expect("the #483/#816 CPU-isolation cmdline must still be present");
     let rtprio_idx = body
         .find("/etc/security/limits.d/95-imag-genlock-rtprio.conf")
         .expect("the #484 rtprio drop-in must be present");

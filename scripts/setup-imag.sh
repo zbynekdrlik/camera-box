@@ -21,9 +21,18 @@ set -euo pipefail
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 
-STATIC_IP="10.77.9.182"
+# #816: the box under provisioning is a PARAMETER, not a constant. The default stays the
+# incumbent imag notebook so every existing invocation is unchanged; a REPLACEMENT box is
+# provisioned with `IMAG_IP=10.77.9.187 sudo -E ./setup-imag.sh` while the old one is still live
+# on .182 (two boxes cannot hold one address).
+STATIC_IP="${IMAG_IP:-10.77.9.182}"
 PREFIX="23"
-NDI_PEER="10.77.9.61"            # cam1 — fleet NDI runtime source (6.3.2)
+# #816: the NDI runtime (6.3.2) is copied from a fleet cam box. Pinning cam1 alone made
+# provisioning FAIL whenever that ONE box was down (it was, on 2026-07-27 — its grabber card had
+# been lent out). Every cam box carries the same fleet-identical runtime, so any REACHABLE one
+# will do; the list is probed in order and the first live box wins.
+NDI_PEER_CANDIDATES="${NDI_PEER_CANDIDATES:-10.77.9.61 10.77.9.62 10.77.9.63 10.77.9.64 10.77.9.65 10.77.9.66 10.77.9.67}"
+NDI_PEER="${NDI_PEER:-}"         # resolved at first use from NDI_PEER_CANDIDATES (or pinned by env)
 NDI_DIR="/usr/lib/ndi"
 DESKTOP_USER="newlevel"
 USER_HOME="/home/${DESKTOP_USER}"
@@ -70,6 +79,77 @@ manifest_sha_for_path() {
     printf '%s\n' "$sha"
 }
 
+# imag_cpu_isolation_plan  (stdin: one "CPU SIBLINGS_LIST" line per logical CPU, numerically
+# ordered — i.e. cpuN + the contents of its topology/thread_siblings_list) -> THREE lines:
+#   1. the CPUs to ISOLATE for the OBS thread pool   (isolcpus=)
+#   2. the CPUs to run tickless                      (nohz_full=)
+#   3. the CPUs left for housekeeping                (irqaffinity=)
+#
+# #483 tuned these by hand on the original 16-thread notebook (6 SMT P-cores + 4 E-cores) and
+# BAKED THE RESULT IN AS LITERALS. #816 derives the same decision from the topology instead, so a
+# replacement notebook with a different core count is provisioned correctly rather than being
+# handed CPU numbers it does not have. The decision itself is UNCHANGED and reproduces the old
+# box's values byte-for-byte:
+#   - an SMT-PAIRED CPU is a P-core thread, an UNPAIRED one is an E-core (verified live on both
+#     boxes via thread_siblings_list, never lscpu's flat count);
+#   - P-core0 stays for openbox/Xorg + sshd/MCP, together with EVERY E-core -> housekeeping/IRQs;
+#   - every other P-core thread is isolated for OBS (~106 threads, ~3 cores of real work);
+#   - nohz_full covers ONLY the LAST isolated P-core pair — the one that hosts the SCHED_FIFO
+#     genlock render tick (#484). Spreading it over the whole block would remove load-balancing
+#     signal (#303).
+imag_cpu_isolation_plan() {
+    local cpu sibs i found
+    local -a pair_key=() pair_cpus=() ecores=()
+    while read -r cpu sibs; do
+        [ -n "$cpu" ] || continue
+        case "$sibs" in
+            *,*|*-*)                      # SMT-paired -> a P-core thread
+                found=-1
+                for i in "${!pair_key[@]}"; do
+                    if [ "${pair_key[$i]}" = "$sibs" ]; then found="$i"; break; fi
+                done
+                if [ "$found" -lt 0 ]; then
+                    pair_key+=("$sibs"); pair_cpus+=("$cpu")
+                else
+                    pair_cpus[$found]="${pair_cpus[$found]},$cpu"
+                fi
+                ;;
+            *) ecores+=("$cpu") ;;        # unpaired -> an E-core
+        esac
+    done
+    local n="${#pair_key[@]}"
+    [ "$n" -ge 3 ] || fail "imag_cpu_isolation_plan: found only $n SMT-paired P-core(s) — an imag box needs one for housekeeping plus at least two to isolate for the OBS thread pool"
+    local isolated=""
+    for ((i = 1; i < n; i++)); do
+        isolated="${isolated:+$isolated,}${pair_cpus[$i]}"
+    done
+    local house="${pair_cpus[0]}"
+    for i in "${ecores[@]+"${ecores[@]}"}"; do house="${house},${i}"; done
+    printf '%s\n%s\n%s\n' "$isolated" "${pair_cpus[$((n - 1))]}" "$house"
+}
+
+# imag_has_discrete_nvidia  (stdin: `lspci -nn` output) -> exit 0 when a DISCRETE NVIDIA display
+# adapter is present, non-zero otherwise. #816: the NVIDIA driver step (#500) was mandatory and
+# fail-hard, which aborts provisioning on a perfectly good box that simply has no dGPU (the
+# replacement notebook is Intel-UHD-only). Match only real display-class devices so an NVIDIA
+# audio/USB function on the same card can never masquerade as a GPU.
+imag_has_discrete_nvidia() {
+    grep -Eiq '(vga compatible controller|3d controller|display controller).*nvidia'
+}
+
+# imag_pick_ndi_peer  (stdin: one "HOST STATUS" line per candidate, in preference order) -> the
+# first host whose STATUS is "up". Fails loud when none is reachable — provisioning cannot fetch
+# the fleet NDI runtime from nowhere, and a silent empty peer would surface much later as a
+# confusing scp error (#816).
+imag_pick_ndi_peer() {
+    local host status
+    while read -r host status; do
+        [ -n "$host" ] || continue
+        if [ "$status" = "up" ]; then printf '%s\n' "$host"; return 0; fi
+    done
+    fail "no reachable cam box among the NDI runtime candidates — cannot fetch the fleet NDI runtime"
+}
+
 # verify_file_sha FILE EXPECTED_SHA LABEL -> fail loud on any mismatch (corrupted/tampered file).
 verify_file_sha() {
     local f="$1" want="$2" label="$3" got
@@ -93,6 +173,19 @@ ASSUME_YES=0
 if [ "$ASSUME_YES" -ne 1 ]; then
     read -p "Provision this box as imag-nb (${STATIC_IP})? (y/N) " -n 1 -r; echo
     [[ $REPLY =~ ^[Yy]$ ]] || { echo "Aborted."; exit 1; }
+fi
+
+# #816: resolve the NDI runtime peer ONCE, up front, from whichever cam box is actually alive —
+# a fleet box being down (grabber card lent out, being re-flashed) must not abort provisioning of
+# an unrelated notebook. `ping -c1 -W1` per candidate: fast, and reachability is exactly what the
+# later scp needs. NDI_PEER pinned by env skips the probe entirely.
+if [ -z "$NDI_PEER" ]; then
+    NDI_PEER="$(
+        for h in $NDI_PEER_CANDIDATES; do
+            if ping -c1 -W1 "$h" >/dev/null 2>&1; then printf '%s up\n' "$h"; else printf '%s down\n' "$h"; fi
+        done | imag_pick_ndi_peer
+    )" || exit 1
+    echo "  #816: NDI runtime peer = ${NDI_PEER} (first reachable of: ${NDI_PEER_CANDIDATES})"
 fi
 
 # Pre-flight: curl + CA certs BEFORE first use (the cam5/#450 lesson — a base image without
@@ -443,19 +536,35 @@ step 8 "CPU isolation (#483): P-core block for OBS + safe-grub regen"
 # NDI IRQ is managed-MSI and rejects runtime affinity changes (#303). HT pairs verified LIVE via
 # thread_siblings_list (not lscpu's flat count): cpu0=0-1, cpu2=2-3, cpu4=4-5, cpu6=6-7, cpu8=8-9,
 # cpu10=10-11 (all P-core HT pairs), cpu12-15 = E-cores (no HT pairing).
-cat > /etc/default/grub.d/98-imag-isolation.cfg <<'EOF'
-# camera-box #483: reserve the P-core block cpu2-11 for the OBS thread pool (keep P-core0=cpu0,1
-# + the E-cores cpu12-15 for openbox/sshd/MCP/housekeeping); nohz_full only on cpu10,11 (the future
-# genlock render-tick core, #484). rcu_nocbs=all is already set by 99-lowlatency.cfg (covers 10,11,
-# which nohz_full requires). irqaffinity keeps IRQs off the isolated block.
-GRUB_CMDLINE_LINUX_DEFAULT="$GRUB_CMDLINE_LINUX_DEFAULT isolcpus=2,3,4,5,6,7,8,9,10,11 nohz_full=10,11 irqaffinity=0,1,12,13,14,15"
+# #816: DERIVE the three CPU lists from this box's own topology instead of the 16-thread literals
+# #483 hand-verified — the decision is identical (see imag_cpu_isolation_plan), it just no longer
+# assumes a specific core count. Read numerically-ordered so the plan's "first P-core pair" is
+# genuinely cpu0's.
+IMAG_ISOLATION_PLAN="$(
+    for f in /sys/devices/system/cpu/cpu[0-9]*/topology/thread_siblings_list; do
+        [ -r "$f" ] || continue
+        c="${f#/sys/devices/system/cpu/cpu}"; c="${c%%/*}"
+        printf '%s %s\n' "$c" "$(cat "$f")"
+    done | sort -n -k1,1 | imag_cpu_isolation_plan
+)" || exit 1
+IMAG_ISOLATED_CPUS="$(printf '%s\n' "$IMAG_ISOLATION_PLAN" | sed -n 1p)"
+IMAG_NOHZ_CPUS="$(printf '%s\n'    "$IMAG_ISOLATION_PLAN" | sed -n 2p)"
+IMAG_HOUSEKEEP_CPUS="$(printf '%s\n' "$IMAG_ISOLATION_PLAN" | sed -n 3p)"
+[ -n "$IMAG_ISOLATED_CPUS" ] && [ -n "$IMAG_NOHZ_CPUS" ] && [ -n "$IMAG_HOUSEKEEP_CPUS" ] \
+    || fail "#816: could not derive the CPU isolation plan from this box's topology"
+cat > /etc/default/grub.d/98-imag-isolation.cfg <<EOF
+# camera-box #483/#816: reserve the P-core block (minus P-core0) for the OBS thread pool; keep
+# P-core0 + every E-core for openbox/sshd/MCP/housekeeping, and park default IRQs there too.
+# nohz_full covers only the last isolated P-core pair (the genlock render-tick core, #484).
+# rcu_nocbs=all is already set by 99-lowlatency.cfg. DERIVED from this box's thread_siblings_list.
+GRUB_CMDLINE_LINUX_DEFAULT="\$GRUB_CMDLINE_LINUX_DEFAULT isolcpus=${IMAG_ISOLATED_CPUS} nohz_full=${IMAG_NOHZ_CPUS} irqaffinity=${IMAG_HOUSEKEEP_CPUS}"
 EOF
 # #295/#487: never a raw ad-hoc grub edit -- guarantee every kernel has an initrd, regenerate
 # grub.cfg, then refuse to trust it if the default entry lacks a kernel image or an initrd. ONE
 # call covers BOTH this drop-in and #482's 99-lowlatency.cfg above (they are only ever picked up
 # by grub-mkconfig, which runs once here).
 safe_grub_regen
-echo "  #483: isolcpus=2-11 nohz_full=10,11 irqaffinity=0,1,12,13,14,15 written + grub regenerated"
+echo "  #483/#816: isolcpus=${IMAG_ISOLATED_CPUS} nohz_full=${IMAG_NOHZ_CPUS} irqaffinity=${IMAG_HOUSEKEEP_CPUS} written + grub regenerated"
 echo "  NOTE: CPU isolation takes effect on the NEXT boot — this script does not reboot the box"
 
 # camera-box #484: grant the desktop user rtprio so OBS's genlock render-tick pin can go SCHED_FIFO.
@@ -500,7 +609,13 @@ step 9 "NVIDIA dGPU driver (#500): nvidia-driver-595-open + PRIME nvidia-primary
 # box with no actual driver files. Check the Status field content instead (no `-q` on the piped
 # grep — dpkg -s output is tiny, but this matches the same safe-read convention used elsewhere in
 # this script rather than mixing conventions).
-if ! dpkg -s nvidia-driver-595-open 2>/dev/null | grep '^Status: install ok installed' >/dev/null; then
+# #816: the whole step is GATED on a discrete NVIDIA GPU actually being present. It was
+# mandatory + fail-hard, which aborts provisioning on a replacement notebook that simply has no
+# dGPU (live: the i5-13420H box is Intel-UHD-only). On such a box the HDMI program output is
+# driven by the iGPU directly — there is no PRIME to select and no driver to install.
+if ! lspci -nn | imag_has_discrete_nvidia; then
+    echo "  #816: no discrete NVIDIA GPU on this box — skipping the driver + PRIME step (iGPU drives HDMI directly)"
+elif ! dpkg -s nvidia-driver-595-open 2>/dev/null | grep '^Status: install ok installed' >/dev/null; then
     apt-get update -qq
     DEBIAN_FRONTEND=noninteractive apt-get install -y nvidia-driver-595-open >/dev/null \
         || fail "nvidia-driver-595-open install failed"
@@ -508,8 +623,10 @@ fi
 # PRIME nvidia-primary: on-demand PRIME mode left the HDMI dGPU output dead (live-verified) --
 # nvidia must be the PRIMARY renderer so BOTH the HDMI output and the laptop's own eDP panel run
 # on the RTX 5050.
-command -v prime-select >/dev/null 2>&1 || fail "prime-select missing after nvidia-driver-595-open install"
-prime-select nvidia || fail "prime-select nvidia failed"
+if lspci -nn | imag_has_discrete_nvidia; then
+    command -v prime-select >/dev/null 2>&1 || fail "prime-select missing after nvidia-driver-595-open install"
+    prime-select nvidia || fail "prime-select nvidia failed"
+fi
 # #295/#487: a DKMS driver install regenerates initramfs for the running kernel -- never trust
 # that blindly. Reuse the SAME safe_grub_regen helper the #482/#483 grub.d drops call above
 # (defined earlier in step 6): guarantee every kernel has an initrd, regenerate grub.cfg, and
@@ -520,11 +637,13 @@ if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
 else
     echo "  #500: nvidia-smi not yet enumerating the GPU (expected pre-reboot on a fresh driver install)"
 fi
-echo "  #500: nvidia-driver-595-open installed, prime-select nvidia set, grub/initrd re-verified"
-echo "  NOTE: the PRIME GPU mode + the new DKMS module take full effect on the NEXT boot — this script does not reboot the box"
+if lspci -nn | imag_has_discrete_nvidia; then
+    echo "  #500: nvidia-driver-595-open installed, prime-select nvidia set, grub/initrd re-verified"
+    echo "  NOTE: the PRIME GPU mode + the new DKMS module take full effect on the NEXT boot — this script does not reboot the box"
+fi
 
 # =============================================================================
-step 10 "NDI runtime 6.3.2 from cam1 -> ${NDI_DIR} (fleet-identical)"
+step 10 "NDI runtime 6.3.2 from ${NDI_PEER} -> ${NDI_DIR} (fleet-identical)"
 # =============================================================================
 if [ ! -e "${NDI_DIR}/libndi.so.6" ]; then
     [ -n "${CAM_PW:-}" ] || fail "CAM_PW env required to fetch NDI runtime from cam1"
@@ -1156,7 +1275,7 @@ rm -rf "$HOME/.config/obs-studio/.sentinel"/* 2>/dev/null || true
 for f in "$HOME"/.config/obs-studio/basic/scenes/*.json; do
   [ -f "$f" ] && python3 -c "import json,sys; p=sys.argv[1]; d=json.load(open(p)); d['saved_projectors']=[]; json.dump(d,open(p,'w'))" "$f" 2>/dev/null || true
 done
-taskset -c 2-11 obs &
+taskset -c __ISOLCPUS__ obs &
 # wait for OBS WebSocket :4455, then seed scenes/#507 membership + open both projectors (self-heal every boot)
 for i in $(seq 1 30); do (exec 3<>/dev/tcp/127.0.0.1/4455) 2>/dev/null && { exec 3>&-; break; }; sleep 1; done
 sleep 2
@@ -1164,7 +1283,7 @@ PYBIN="__PYBIN__"; SCN="__SCN__"
 "$PYBIN" "$SCN" --host 127.0.0.1 >/tmp/imag-seed.log 2>&1 || true
 "$PYBIN" "$SCN" --host 127.0.0.1 --projector >>/tmp/imag-seed.log 2>&1 || true
 AUTOSTART_EOF
-sed -i "s#__PYBIN__#${PYBIN}#; s#__SCN__#${SCN}#" "$USER_HOME/.config/openbox/autostart"
+sed -i "s#__PYBIN__#${PYBIN}#; s#__SCN__#${SCN}#; s#__ISOLCPUS__#${IMAG_ISOLATED_CPUS}#" "$USER_HOME/.config/openbox/autostart"
 chmod +x "$USER_HOME/.config/openbox/autostart"
 chown "$DESKTOP_USER:$DESKTOP_USER" "$USER_HOME/.config/openbox/autostart"
 
@@ -1200,7 +1319,7 @@ if [ -S /tmp/.X11-unix/X0 ]; then
         # written by root (this script runs as root); sudo -u drops privilege only for the `obs`
         # process itself, not for the redirect -- that is intentional here, not a bug.
         sudo -u "$DESKTOP_USER" DISPLAY=:0 DBUS_SESSION_BUS_ADDRESS="$UBUS" \
-            nohup taskset -c 2-11 obs >/tmp/obs-launch.log 2>&1 &
+            nohup taskset -c "$IMAG_ISOLATED_CPUS" obs >/tmp/obs-launch.log 2>&1 &
         sleep 8
     fi
     pgrep -x obs >/dev/null || fail "OBS did not start (see /tmp/obs-launch.log)"
