@@ -32,6 +32,11 @@ PREFIX="23"
 # been lent out). Every cam box carries the same fleet-identical runtime, so any REACHABLE one
 # will do; the list is probed in order and the first live box wins.
 NDI_PEER_CANDIDATES="${NDI_PEER_CANDIDATES:-10.77.9.61 10.77.9.62 10.77.9.63 10.77.9.64 10.77.9.65 10.77.9.66 10.77.9.67}"
+# #824: the OBS base package version MUST match the genlock build's OBS version — libobs refuses
+# any stock plugin built against a NEWER libobs ("compiled with newer libobs 32.2"), which on the
+# .187 bring-up left OBS with only distroav.so loaded: no obs-websocket, no encoders. Overridable;
+# bump it together with the vendored genlock build (#825).
+IMAG_OBS_BASE_VERSION="${IMAG_OBS_BASE_VERSION:-32.1.2-0obsproject1~noble}"
 NDI_PEER="${NDI_PEER:-}"         # resolved at first use from NDI_PEER_CANDIDATES (or pinned by env)
 NDI_DIR="/usr/lib/ndi"
 DESKTOP_USER="newlevel"
@@ -193,6 +198,23 @@ imag_same_unit() {
     a="$(readlink -f "$1" 2>/dev/null)" || return 1
     b="$(readlink -f "$2" 2>/dev/null)" || return 1
     [ -n "$a" ] && [ "$a" = "$b" ]
+}
+
+# imag_obs_base_plan CANDIDATE WANTED -> "apt" when the PPA still offers the wanted version,
+# "deb" when it has moved on (the superseded binary is still downloadable from Launchpad). Never
+# "just take the candidate" — a base whose libobs is NEWER than the genlock build disables every
+# stock plugin (#824).
+imag_obs_base_plan() {
+    local candidate="$1" wanted="$2"
+    [ -n "$wanted" ] || fail "#824: no OBS base version pinned"
+    if [ "$candidate" = "$wanted" ]; then printf 'apt\n'; else printf 'deb\n'; fi
+}
+
+# imag_obs_base_deb_url VERSION -> the Launchpad +files URL for that (possibly superseded) PPA
+# binary. The PPA pool only keeps the CURRENT version; +files keeps superseded ones (live-verified
+# 200 for 32.1.2 while the pool 404s).
+imag_obs_base_deb_url() {
+    printf 'https://launchpad.net/~obsproject/+archive/ubuntu/obs-studio/+files/obs-studio_%s_amd64.deb\n' "$1"
 }
 
 # verify_file_sha FILE EXPECTED_SHA LABEL -> fail loud on any mismatch (corrupted/tampered file).
@@ -727,11 +749,33 @@ systemctl enable --now avahi-daemon >/dev/null 2>&1
 # =============================================================================
 step 11 "OBS Studio (official PPA, 32.x) — base install; libobs.so.30 gets genlock hot-swapped next"
 # =============================================================================
-if ! command -v obs >/dev/null 2>&1; then
+INSTALLED_OBS_VERSION="$(dpkg-query -W -f='${Version}' obs-studio 2>/dev/null || true)"
+if [ "$INSTALLED_OBS_VERSION" != "$IMAG_OBS_BASE_VERSION" ]; then
     add-apt-repository -y ppa:obsproject/obs-studio >/dev/null
     apt-get update -qq
-    DEBIAN_FRONTEND=noninteractive apt-get install -y obs-studio >/dev/null
+    OBS_CANDIDATE="$(apt-cache policy obs-studio 2>/dev/null | awk '/Candidate:/{print $2}')"
+    OBS_BASE_PLAN="$(imag_obs_base_plan "$OBS_CANDIDATE" "$IMAG_OBS_BASE_VERSION")" || exit 1
+    echo "  #824: OBS base pin ${IMAG_OBS_BASE_VERSION} (PPA candidate ${OBS_CANDIDATE:-none}) -> ${OBS_BASE_PLAN}"
+    if [ "$OBS_BASE_PLAN" = "apt" ]; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --allow-downgrades "obs-studio=${IMAG_OBS_BASE_VERSION}" >/dev/null \
+            || fail "#824: obs-studio=${IMAG_OBS_BASE_VERSION} install failed"
+    else
+        # the PPA moved on — fetch the pinned (superseded) binary from Launchpad's +files endpoint
+        OBS_DEB_URL="$(imag_obs_base_deb_url "$IMAG_OBS_BASE_VERSION")"
+        curl -fsSL -o /tmp/obs-base.deb "$OBS_DEB_URL" \
+            || fail "#824: could not download the pinned OBS base ${IMAG_OBS_BASE_VERSION} from ${OBS_DEB_URL}"
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --allow-downgrades /tmp/obs-base.deb >/dev/null \
+            || fail "#824: pinned OBS base ${IMAG_OBS_BASE_VERSION} install failed"
+        rm -f /tmp/obs-base.deb
+    fi
 fi
+# #824: hold it — an unattended upgrade to a newer libobs disables every stock plugin against the
+# genlock build (no obs-websocket, no encoders).
+apt-mark hold obs-studio >/dev/null 2>&1 \
+    || echo "  WARNING: apt-mark hold obs-studio failed — an apt upgrade could break the genlock plugin ABI"
+GOT_OBS_VERSION="$(dpkg-query -W -f='${Version}' obs-studio 2>/dev/null || true)"
+[ "$GOT_OBS_VERSION" = "$IMAG_OBS_BASE_VERSION" ] \
+    || fail "#824: OBS base is ${GOT_OBS_VERSION:-none}, expected ${IMAG_OBS_BASE_VERSION} — a mismatched base disables every stock plugin against the genlock build"
 obs --version 2>/dev/null || true
 
 # =============================================================================
