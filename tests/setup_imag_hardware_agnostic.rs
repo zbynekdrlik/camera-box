@@ -254,6 +254,82 @@ fn ndi_peer_falls_back_to_any_reachable_cam() {
     );
 }
 
+/// LIVE REGRESSION (2026-07-27, the new box `.187`): the #816 peer resolution was written as a
+/// `for … | imag_pick_ndi_peer` pipeline. `imag_pick_ndi_peer` returns as soon as the FIRST
+/// reachable candidate is found, which closes the pipe — every LATER `printf` in the still-running
+/// loop then dies on SIGPIPE (141). Under the script's own `set -euo pipefail` that makes the whole
+/// command substitution fail, so provisioning aborted with a BARE `exit 1` and ZERO output on a box
+/// where cam1 was up and answering. (setup-imag.sh already documents this exact trap at its
+/// `ldconfig | grep -q` site — the new code walked straight into it.)
+///
+/// The resolution must therefore be a FUNCTION that probes every candidate into a buffer BEFORE
+/// feeding the picker, and it must survive `set -e` + `pipefail` with the FIRST candidate up.
+#[test]
+fn ndi_peer_resolution_survives_pipefail_when_the_first_candidate_is_up() {
+    let dir = std::env::temp_dir().join(format!("imag-ndi-peer-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("mkdir stub dir");
+    let ping = dir.join("ping");
+    // Only 10.77.9.61 (the FIRST candidate) answers — the worst case for the SIGPIPE bug, because
+    // the picker returns on line 1 while five more candidates are still being probed.
+    fs::write(
+        &ping,
+        "#!/bin/bash\nfor a in \"$@\"; do [ \"$a\" = 10.77.9.61 ] && exit 0; done\nexit 1\n",
+    )
+    .expect("write stub ping");
+    let mut perms = fs::metadata(&ping).expect("stat stub").permissions();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        perms.set_mode(0o755);
+    }
+    fs::set_permissions(&ping, perms).expect("chmod stub");
+
+    // `set -e` too — the real script runs `set -euo pipefail`, and the bug only bites with -e.
+    let harness = format!(
+        "set -euo pipefail\nexport PATH={}:$PATH\n. \"$SCRIPT\"\nimag_resolve_ndi_peer\n",
+        shell_quote(dir.to_str().expect("utf8 dir"))
+    );
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(&harness)
+        .env("SCRIPT", script())
+        .output()
+        .expect("failed to run bash harness");
+    let _ = fs::remove_dir_all(&dir);
+
+    let code = out.status.code().unwrap_or(-1);
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert_eq!(
+        code, 0,
+        "resolving the peer must not die on SIGPIPE under `set -euo pipefail`. stderr: {stderr}"
+    );
+    assert_eq!(
+        stdout.trim(),
+        "10.77.9.61",
+        "the first reachable candidate must be returned"
+    );
+}
+
+/// The call site must use that function — not an inline pipeline that can re-introduce the bug —
+/// and a peer that cannot be resolved must say WHY (the live failure printed nothing at all).
+#[test]
+fn the_peer_call_site_uses_the_function_and_fails_loud() {
+    let b = body();
+    assert!(
+        b.contains("imag_resolve_ndi_peer"),
+        "the provisioning flow must resolve the peer through the tested function"
+    );
+    assert!(
+        !b.contains("done | imag_pick_ndi_peer"),
+        "the SIGPIPE-prone inline `for … | imag_pick_ndi_peer` pipeline must be gone"
+    );
+    assert!(
+        !b.contains("\" || exit 1\n    echo \"  #816: NDI runtime peer"),
+        "a bare `exit 1` with no message must not gate provisioning"
+    );
+}
+
 fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
