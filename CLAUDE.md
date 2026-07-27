@@ -21,6 +21,7 @@ Rust app for embedded NDI cameras (CAM1-4): multi-camera NDI streaming with soft
 - A/V-sync offset measurement (cam2 QPSK marker, `--av-sync`, ring-bias + cluster-pairing gotchas) → load `.claude/skills/av-sync`
 - imag-nb swap (install-imag-nb.sh → setup-imag.sh, derived CPU/GPU/IP) → `.claude/rules/imag-nb-provisioning.md` (auto-loads on its `paths:`)
 - E2E gate preconditions (DanteSync servo, bundle-state-server) → `.claude/rules/rig-standing-services.md` (auto-loads on its `paths:`)
+- CI/workflow concurrency-cancel risk, sourced-bash-test-harness `set -e` leak → `.claude/rules/ci-testing-gotchas.md` (auto-loads on its `paths:`)
 
 ## DO NOT DELETE These Files
 
