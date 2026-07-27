@@ -643,9 +643,12 @@ fn burn_targets_cover_both_boxes() {
 #[test]
 fn burn_targets_cover_imag_too() {
     let targets = run_sourced("obs_burn_targets");
+    // #832: IMAG_IP now defaults to the ACTIVE imag host resolved by scripts/imag-host.sh — the
+    // replacement notebook (.187) since 2026-07-27, not the incumbent (.182, #831 HDMI now
+    // disconnected). See tests/harness_imag_host.rs for the reversibility proof.
     assert!(
-        targets.contains("10.77.9.182") && targets.contains("imag"),
-        "#462: obs_burn_targets must include imag-nb. got=\n{targets}"
+        targets.contains("10.77.9.187") && targets.contains("imag"),
+        "#462/#832: obs_burn_targets must include imag-nb at its ACTIVE resolved host. got=\n{targets}"
     );
 }
 
@@ -655,9 +658,11 @@ fn burn_targets_cover_imag_too() {
 #[test]
 fn imag_prog_source_constant_defaults_to_ndi_cam1() {
     let s = fs::read_to_string(script()).expect("read rig-mode.sh");
+    // #832: IMAG_IP's default is no longer an independently hardcoded literal here -- it is
+    // derived by sourcing scripts/imag-host.sh (see tests/harness_imag_host.rs).
     assert!(
-        s.contains("IMAG_IP=\"${IMAG_IP:-10.77.9.182}\""),
-        "#462: rig-mode.sh must define IMAG_IP (default 10.77.9.182)."
+        s.contains(". \"$RIG_MODE_DIR/imag-host.sh\""),
+        "#832: rig-mode.sh must source scripts/imag-host.sh to derive IMAG_IP."
     );
     assert!(
         s.contains("IMAG_PROG_SOURCE=\"${IMAG_PROG_SOURCE:-NDI CAM1}\""),

@@ -20,14 +20,17 @@ fn read(p: &str) -> String {
 // [0/8] reachability preflight + host lists (recording-e2e.sh:144, per the issue text).
 // ---------------------------------------------------------------------------
 
-/// imag-nb must be a named topology constant (10.77.9.182) and must appear in the [0/8]
-/// reachability preflight's host list alongside cam1/cam2/strih/stream.
+/// imag-nb must be a named topology constant (resolved via scripts/imag-host.sh, #832) and must
+/// appear in the [0/8] reachability preflight's host list alongside cam1/cam2/strih/stream.
 #[test]
 fn recording_e2e_defines_imag_ip_and_checks_it_reachable() {
     let s = read("scripts/recording-e2e.sh");
+    // #832: IMAG_IP's default is no longer an independently hardcoded literal here -- it is
+    // derived by sourcing scripts/imag-host.sh (the ONE declared imag host, reversible between
+    // the incumbent .182 and the replacement .187 — see tests/harness_imag_host.rs).
     assert!(
-        s.contains("IMAG_IP=\"${IMAG_IP:-10.77.9.182}\""),
-        "#462: recording-e2e.sh must define IMAG_IP (default 10.77.9.182, the Linux OBS target)."
+        s.contains(". \"$HERE/imag-host.sh\""),
+        "#832: recording-e2e.sh must source scripts/imag-host.sh to derive IMAG_IP."
     );
     let preflight = s
         .find("reachability preflight")
