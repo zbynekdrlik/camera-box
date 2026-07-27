@@ -5462,3 +5462,26 @@ vendored `obs-source.c` release-cadence fix (#726 candidate A).
   supervisor's constraints): running the actual hardware "Full-path E2E" gate against `.187` to
   confirm the `[0/8]` imag preflight now passes live, and imag-nb's Multiview/Program projectors
   actually opening on the real HDMI-1/eDP-1 outputs. Rides open PR #704 (dev->main).
+
+## #830 — shared cross-repo rig lease (camera-box half)
+
+- Design settled on the issue by the owner (comment issuecomment-5096994495): a lockdir lease on
+  dev1 (`/var/tmp/rig-lease/` + `holder.json` + `heartbeat`), no service, no network dependency.
+- RED: `test(#830): [red] ...` (`1027658a9`) — `tests/harness_rig_lease.rs` (pure lib, 8 tests)
+  + `tests/harness_rig_busy_gate_lease_830.rs` (full-gate integration, 6 tests) + new assertions
+  in `tests/harness_full_path_e2e_workflow.rs` (lease identity env + always() release step) + the
+  two existing rig-busy-gate harnesses updated to isolate `RIG_LEASE_DIR` per test.
+- GREEN: `fix(#830): [green] ...` (`d9b0ed40b`) — new `scripts/lib/rig-lease.sh` (acquire/
+  release/heartbeat/staleness pure functions), `scripts/rig-busy-gate.sh` acquires the lease
+  BEFORE its OBS busy-check loop (wait-then-acquire or fail-fast-exit-44 against a live foreign
+  holder, reusing the gate's own iteration/sleep budget; releases on its own failure paths via
+  trap, leaves it HELD across a RIG_FREE exit), new `scripts/rig-lease-release.sh` + a dedicated
+  `if: always()` step in `full-path-e2e.yml` releases it on success/failure/cancellation.
+- Full `cargo test` green (154/154 binaries), `cargo fmt --all --check` / `cargo clippy
+  --all-targets -- -D warnings` / `shellcheck -S warning` all clean.
+- NOT test-covered (needs restreamer's own half, zbynekdrlik/restreamer#349, and the real rig —
+  explicitly out of scope for this code-only dispatch per the supervisor's constraints): the
+  actual cross-repo race resolved live between camera-box's and restreamer's CI. Playbook updated:
+  `.claude/rules/ci-testing-gotchas.md` (a repo-wide "no while-true/while-:" content-assert test
+  can trip on a genuinely-bounded NEW loop added anywhere in the file; isolate any shared-host-path
+  lockdir/heartbeat to a per-test tempdir). Rides open PR #704 (dev->main).

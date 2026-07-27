@@ -55,3 +55,36 @@ file only ever exercised return-0 scenarios, so the bug was silent until #826's 
 tests (which deliberately assert DRIFT/UNKNOWN) hit it. Any future sourced-harness test in this
 repo that asserts a specific non-zero exit code from a sourced function should sanity-check this
 the same way (a bare `func; echo RC=$?` that never prints `RC=` is the tell).
+
+## A "bounded loop" content-assert scans the WHOLE script text — a genuinely-bounded NEW loop can still trip it (#830)
+
+`tests/harness_rig_busy_gate.rs`'s `rig_busy_gate_is_bounded_never_infinite` asserts the ENTIRE
+`scripts/rig-busy-gate.sh` text never contains the literal substrings `"while true"` or
+`"while :"` — a crude but repo-wide guard against an unbounded poll loop, not scoped to any one
+function. Adding a SECOND loop anywhere later in the same file (#830: a lease-acquire wait/retry
+loop, added before the pre-existing OBS busy-check loop) trips this test even when the new loop
+IS genuinely bounded by some other mechanism (a `SECONDS`-based deadline, in the first attempt at
+this) — the assertion doesn't parse semantics, only greps text. Fix: bound the new loop with an
+explicit iteration-count `for ((i = 0; i <= max_attempts; i++))` (matching this repo's own
+established idiom for the pre-existing loop) instead of `while true`/`while :` + an internal
+break/deadline check — genuinely bounded AND passes the text scan. Before adding ANY loop to a
+file covered by this kind of content-assert test, `grep -n "while true\|while :"` the target
+test file first to know whether the literal keywords are banned outright.
+
+## Isolate ANY shared-host-path (lockdir/heartbeat/lease file) to a per-test tempdir — never the real path (#830)
+
+A script that reads/writes a well-known SHARED filesystem path outside the test's own tempdir
+(a lockdir like `/var/tmp/rig-lease/`, a heartbeat file, anything with a fixed default location)
+MUST accept an env override for that path (`RIG_LEASE_DIR` for `scripts/lib/rig-lease.sh` /
+`scripts/rig-busy-gate.sh`, mirroring the existing `CAMERA_BOX_RIG_HEARTBEAT` override on
+`scripts/lib/rig-heartbeat.sh`) — and EVERY test that exercises the script MUST set that override
+to its own `tempfile::tempdir()`. Without it, parallel `cargo test` threads (or two different test
+FILES, run in the same or different binaries) race on the SAME real path, causing flaky
+false-refusals ("held by a foreign holder") that have nothing to do with the scenario under test —
+and on this repo's shared dev1 checkout (see the top-level CLAUDE.md GOTCHA on two workers sharing
+one clone), a test run could even collide with a REAL in-progress CI job's lease. When adding a
+test that invokes an EXISTING script via `Command::new("bash")`, check whether that script touches
+any shared host path and add the override to the test's own command-builder helper (deriving the
+tempdir from a fixture path already unique per test, e.g. `fake_py`'s own parent dir, keeps the
+helper's signature stable — see `run_gate` in `tests/harness_rig_busy_gate.rs` /
+`tests/harness_rig_busy_gate_self_heal.rs`).
