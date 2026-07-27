@@ -2320,8 +2320,11 @@ fn setup_imag_504_reasserts_dm_symlink_after_purge() {
         .find("ln -sf /lib/systemd/system/lightdm.service /etc/systemd/system/display-manager.service")
         .expect("DM symlink switch present");
     let purge_idx = body.find("apt-get purge").expect("GNOME purge present");
+    // #823: the compare is now canonical-vs-canonical (imag_same_unit) — the old literal
+    // `/lib/...` string could never match on a usrmerge box. Same assertion, same fail-loud, same
+    // position after the purge.
     let reassert_idx = body
-        .find(r#"[ "$(readlink -f /etc/systemd/system/display-manager.service)" = "/lib/systemd/system/lightdm.service" ]"#)
+        .find("imag_same_unit /etc/systemd/system/display-manager.service /lib/systemd/system/lightdm.service")
         .expect(
             "{SETUP} (#504) must re-verify the display-manager symlink AFTER the GNOME purge — a \
              package postrm (gdm3) running after the initial switch could silently re-point it back",

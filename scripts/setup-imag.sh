@@ -183,6 +183,18 @@ imag_require_tools() {
     [ -z "$missing" ] || fail "#822: required verification tool(s) not installed: ${missing} (apt-get install binutils) — refusing to run a check that cannot execute"
 }
 
+# imag_same_unit LINK UNIT -> exit 0 when LINK resolves to the SAME systemd unit file as UNIT.
+# #823: the old check compared `readlink -f <link>` against the LITERAL "/lib/systemd/system/
+# lightdm.service". On usrmerge Ubuntu /lib IS a symlink to /usr/lib, so readlink -f always answers
+# /usr/lib/... and the compare could never pass — a perfectly correct kiosk DM aborted provisioning
+# on its last assertion (.187, 2026-07-27). Canonicalise BOTH sides.
+imag_same_unit() {
+    local a b
+    a="$(readlink -f "$1" 2>/dev/null)" || return 1
+    b="$(readlink -f "$2" 2>/dev/null)" || return 1
+    [ -n "$a" ] && [ "$a" = "$b" ]
+}
+
 # verify_file_sha FILE EXPECTED_SHA LABEL -> fail loud on any mismatch (corrupted/tampered file).
 verify_file_sha() {
     local f="$1" want="$2" label="$3" got
@@ -1236,7 +1248,7 @@ fi
 # earlier switch blindly. A postrm that silently re-pointed display-manager.service back is exactly
 # the black-wall failure mode this whole step exists to prevent; refuse to leave the box in an
 # uncertain DM state rather than discover it only on the next reboot.
-[ "$(readlink -f /etc/systemd/system/display-manager.service)" = "/lib/systemd/system/lightdm.service" ] \
+imag_same_unit /etc/systemd/system/display-manager.service /lib/systemd/system/lightdm.service \
     || fail "#504: display-manager.service no longer points at lightdm after the GNOME purge — refuse to leave the box with an uncertain display manager"
 
 echo "  NOTE: the kiosk (lightdm+openbox) takes over the SESSION on the NEXT boot — this script does not reboot the box"
