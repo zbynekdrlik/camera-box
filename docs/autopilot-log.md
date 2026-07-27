@@ -5485,3 +5485,29 @@ vendored `obs-source.c` release-cadence fix (#726 candidate A).
   `.claude/rules/ci-testing-gotchas.md` (a repo-wide "no while-true/while-:" content-assert test
   can trip on a genuinely-bounded NEW loop added anywhere in the file; isolate any shared-host-path
   lockdir/heartbeat to a per-test tempdir). Rides open PR #704 (dev->main).
+
+## #827 follow-up (2026-07-28) — frozen-camera-gate + siblings still sampled retired cams
+
+- Root cause: `scripts/recording-e2e.sh` had THREE loops (`[0/8]` genlock_burn-OFF check, `[1/8]`
+  frozen-camera-gate MV-liveness preflight -- the exact call site that FAILED live on hardware run
+  30310110884, `[5/8 pre]` live-freeze-watch arming) enumerating the fleet via a literal `for _n in
+  1 2 3 4 5 6 7` range and only subtracting `PREFLIGHT_EXCLUDED_CAMS` (the TEMPORARY acked-offline
+  list) -- never intersecting with `CAMERA_ACTIVE_SET` (the PERMANENT retired-fleet list). Design
+  posted `gh issue comment 827` (issuecomment-5097601058, corrected in issuecomment-5097618394)
+  BEFORE the first commit.
+- RED: `test(#827): [red] ...` (`54494c20b`) -- new tests in `tests/harness_camera_set.rs`
+  (`camera_active_excluding`/`camera_active_ndi_sources_excluding_csv` fixture tests, 6 new) +
+  `tests/harness_frozen_camera_gate_active_set_827.rs` (5 content-assert tests pinning all three
+  call sites). All 11 fail against pre-fix code.
+- GREEN: `fix(#827): [green] ...` (`287d6621b`) -- two new pure helpers in `scripts/camera-set.sh`
+  (`camera_active_excluding`, `camera_active_ndi_sources_excluding_csv`); the three
+  `recording-e2e.sh` call sites now derive from `CAMERA_ACTIVE_SET` via these instead of the
+  literal range.
+- Full `cargo test` green (155/155 binaries), `tests/python` green (581/581), `cargo fmt --all
+  --check` / `cargo clippy --all-targets -- -D warnings` / `shellcheck -S warning` all clean.
+- Playbook: new `.claude/rules/camera-active-set.md` (the bug shape + the two reuse helpers) +
+  router line in `CLAUDE.md`.
+- Rides open PR #704 (dev->main). Non-hardware "CI" run 30312571238 green (all jobs incl. Build/
+  Lint/Shellcheck/Coverage/Windows probe build/Security Audit/Drift Guard/Python harness/Test).
+  The hardware "Full-path E2E" gate auto-triggered on push (30312574335) -- NOT touched/re-run
+  per this dispatch's constraints; the supervisor owns that gate + the merge.
