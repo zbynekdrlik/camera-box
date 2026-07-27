@@ -344,7 +344,10 @@ fn the_kernel_hold_never_blocks_the_lowlatency_install() {
     let step7 = b
         .find("linux-lowlatency-hwe-24.04 >/dev/null")
         .expect("step 7 lowlatency install must exist");
-    assert!(hold < step7, "step 6 runs before step 7 — precondition of this test");
+    assert!(
+        hold < step7,
+        "step 6 runs before step 7 — precondition of this test"
+    );
 
     // (a) the hold itself must only cover packages that are actually INSTALLED on this box
     let hold_region = &b[hold.saturating_sub(400)..hold + 400];

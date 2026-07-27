@@ -250,6 +250,8 @@ fn the_chroot_kernel_is_the_hwe_line_the_imag_role_runs() {
 /// `apt-get install -y linux-generic` with no `-hwe-24.04` suffix anywhere on the line.
 fn regex_lite_has_bare_ga_install(body: &str) -> bool {
     body.lines().any(|l| {
-        l.contains("apt-get install") && l.contains("linux-generic") && !l.contains("linux-generic-hwe-24.04")
+        l.contains("apt-get install")
+            && l.contains("linux-generic")
+            && !l.contains("linux-generic-hwe-24.04")
     })
 }

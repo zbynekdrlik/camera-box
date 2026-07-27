@@ -1345,9 +1345,7 @@ fn setup_imag_safe_grub_regen_helper_defined_with_full_295_contract() {
 fn setup_imag_installs_lowlatency_config_not_a_kernel_downgrade_482() {
     let body = read(SETUP);
     assert!(
-        body.contains(
-            "apt-get install -y --allow-change-held-packages linux-lowlatency-hwe-24.04"
-        ),
+        body.contains("apt-get install -y --allow-change-held-packages linux-lowlatency-hwe-24.04"),
         "{SETUP} must install linux-lowlatency-hwe-24.04 (#482) — the meta/config package that \
          pulls in `lowlatency-kernel` without swapping the kernel image"
     );
