@@ -170,6 +170,19 @@ imag_resolve_ndi_peer() {
     printf '%s' "$probe" | imag_pick_ndi_peer
 }
 
+# imag_require_tools TOOL... -> fail loud, NAMING the missing tool(s). #822: step 12 verifies the
+# hot-swapped binaries with `readelf`/`nm` (binutils). On a freshly installed box binutils is
+# ABSENT, so those commands emit nothing, the greps find nothing, and the step aborted with
+# "SONAME check failed — refuse a mismatched ABI" — blaming the artifact for a missing TOOL, while
+# the swap had actually succeeded. A verification that cannot run is not a failed verification.
+imag_require_tools() {
+    local t missing=""
+    for t in "$@"; do
+        command -v "$t" >/dev/null 2>&1 || missing="${missing:+$missing }$t"
+    done
+    [ -z "$missing" ] || fail "#822: required verification tool(s) not installed: ${missing} (apt-get install binutils) — refusing to run a check that cannot execute"
+}
+
 # verify_file_sha FILE EXPECTED_SHA LABEL -> fail loud on any mismatch (corrupted/tampered file).
 verify_file_sha() {
     local f="$1" want="$2" label="$3" got
@@ -750,6 +763,13 @@ OBS_FRONTEND_REAL="/usr/bin/obs"
 LIBOBS_OPENGL_REAL="/usr/lib/x86_64-linux-gnu/libobs-opengl.so.30"
 
 command -v jq >/dev/null 2>&1 || apt-get install -y jq >/dev/null 2>&1 || fail "jq install failed (needed for #460 manifest verify)"
+# #822: readelf/nm (binutils) verify the hot-swapped binaries further down this step. A fresh
+# Ubuntu install has NO binutils — install it, then preflight, so a missing TOOL can never be
+# reported as a failed ABI check.
+command -v readelf >/dev/null 2>&1 && command -v nm >/dev/null 2>&1 \
+    || apt-get install -y binutils >/dev/null 2>&1 \
+    || fail "#822: binutils install failed (readelf/nm needed to verify the genlock hot-swap)"
+imag_require_tools readelf nm
 
 # manifest_sha_for_path() and verify_file_sha() are defined at the TOP of this file (pure
 # functions, no root/network needed) — see the source-guard block near the top for why: they are
