@@ -364,6 +364,66 @@ fn the_kernel_hold_never_blocks_the_lowlatency_install() {
     );
 }
 
+/// #822 (live, 10.77.9.187, 2026-07-27): step 12 verifies the hot-swapped binaries with `readelf`
+/// and `nm` — both from `binutils`, which the script never installs. On a fresh box they are
+/// ABSENT, so the checks produce nothing and the step aborts blaming the ARTIFACT:
+///   `FAIL: post-swap libobs.so.30 SONAME check failed — refuse a mismatched ABI`
+/// while the swap had in fact succeeded (`obs --version` = 32.1.2, the genlock build). A missing
+/// verification TOOL must never be reported as a failed verification.
+#[test]
+fn a_missing_verification_tool_is_named_not_reported_as_an_abi_mismatch() {
+    let dir = std::env::temp_dir().join(format!("imag-tools-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("mkdir stub dir");
+    // A PATH with NOTHING on it: readelf/nm cannot be found.
+    let harness = format!(
+        "set -uo pipefail\nPATH={}\n. \"$SCRIPT\"\nimag_require_tools readelf nm\n",
+        shell_quote(dir.to_str().expect("utf8 dir"))
+    );
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(&harness)
+        .env("SCRIPT", script())
+        .output()
+        .expect("failed to run bash harness");
+    let _ = fs::remove_dir_all(&dir);
+
+    assert_ne!(
+        out.status.code().unwrap_or(-1),
+        0,
+        "a missing tool must fail the guard"
+    );
+    let err = String::from_utf8_lossy(&out.stderr).to_lowercase();
+    assert!(
+        err.contains("readelf"),
+        "the failure must NAME the missing tool: {err}"
+    );
+    assert!(
+        !err.contains("abi") && !err.contains("mismatch"),
+        "a missing tool must not be reported as an ABI mismatch: {err}"
+    );
+}
+
+/// …and the provisioning flow must both INSTALL binutils and run that guard before step 12's
+/// readelf/nm checks, so the situation cannot arise on a fresh box at all.
+#[test]
+fn binutils_is_installed_and_the_tool_guard_runs_before_the_swap_checks() {
+    let b = body();
+    assert!(
+        b.contains("binutils"),
+        "provisioning must install binutils — readelf/nm are not on a fresh Ubuntu install"
+    );
+    let guard = b
+        .find("imag_require_tools readelf nm")
+        .expect("step 12 must preflight its verification tools");
+    let check = b
+        .find("post-swap libobs.so.30 SONAME check failed")
+        .expect("the SONAME check must exist");
+    assert!(
+        guard < check,
+        "the tool guard must run BEFORE the readelf/nm checks it protects"
+    );
+}
+
 fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
