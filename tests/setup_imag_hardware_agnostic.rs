@@ -486,6 +486,75 @@ fn the_display_manager_call_sites_compare_canonical_paths() {
     );
 }
 
+/// #824 (live, 10.77.9.187, 2026-07-27): step 11 installed whatever the obsproject PPA currently
+/// offers (32.2.0) while the genlock build is 32.1.2. libobs 32.1.2 then refuses every stock
+/// plugin — `Module '…/obs-websocket.so' compiled with newer libobs 32.2` × 41 — so OBS came up
+/// with ONLY distroav.so loaded, no WebSocket (`imag_scenes.py` → ConnectionRefused on :4455) and
+/// no encoders. The base MUST match the genlock bundle's OBS version, and a superseded PPA version
+/// is still fetchable from Launchpad's +files endpoint.
+#[test]
+fn the_obs_base_version_is_matched_to_the_genlock_build() {
+    // the wanted version is available in the PPA -> plain apt install of THAT version
+    let (code, out, err) =
+        run_sourced("imag_obs_base_plan '32.1.2-0obsproject1~noble' '32.1.2-0obsproject1~noble'");
+    assert_eq!(
+        code, 0,
+        "a matching candidate must plan an apt install. stderr: {err}"
+    );
+    assert_eq!(
+        out.trim(),
+        "apt",
+        "install the pinned version straight from the PPA"
+    );
+
+    // the PPA has moved on -> fall back to the superseded .deb, never silently take the candidate
+    let (code, out, err) =
+        run_sourced("imag_obs_base_plan '32.2.0-0obsproject1~noble' '32.1.2-0obsproject1~noble'");
+    assert_eq!(
+        code, 0,
+        "a superseded wanted version must still be installable. stderr: {err}"
+    );
+    assert_eq!(
+        out.trim(),
+        "deb",
+        "a PPA candidate that does not match the genlock build must NOT be installed as-is"
+    );
+
+    let (code, url, err) = run_sourced("imag_obs_base_deb_url '32.1.2-0obsproject1~noble'");
+    assert_eq!(code, 0, "the deb URL must resolve. stderr: {err}");
+    assert!(
+        url.contains("launchpad.net/~obsproject/+archive/ubuntu/obs-studio/+files/")
+            && url.contains("obs-studio_32.1.2-0obsproject1~noble_amd64.deb"),
+        "the superseded PPA binary comes from Launchpad's +files endpoint: {url}"
+    );
+}
+
+/// …and the call site must use the plan + hold the package, so an unattended upgrade cannot
+/// re-break the plugin ABI.
+#[test]
+fn the_obs_base_install_is_pinned_and_held() {
+    let b = body();
+    assert!(
+        b.contains("IMAG_OBS_BASE_VERSION"),
+        "the OBS base version must be an explicit, overridable pin (#824)"
+    );
+    assert!(
+        b.contains("imag_obs_base_plan"),
+        "step 11 must decide the install path from the PPA candidate vs the pinned version"
+    );
+    assert!(
+        !b.contains("apt-get install -y obs-studio >/dev/null"),
+        "the unpinned `apt-get install -y obs-studio` must be gone (#824)"
+    );
+    let install = b
+        .find("imag_obs_base_plan")
+        .expect("step 11 plan call must exist");
+    let hold = b[install..]
+        .find("apt-mark hold obs-studio")
+        .expect("the base install must be held against later upgrades");
+    assert!(hold > 0, "hold must follow the install");
+}
+
 fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
