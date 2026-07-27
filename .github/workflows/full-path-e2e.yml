@@ -64,6 +64,15 @@ on:
         # disk preflight fails early otherwise). Ideal soak (1800 s) is an operator opt-in.
         description: "Steady-state run seconds (>=300; cam1 grab ~20 MB/s on dev1)"
         default: "300"
+      offline_ack:
+        # #827: overrides the checked-in rig-fleet.txt default outright (an operator dispatching
+        # manually with a DIFFERENT physical rig state than the checked-in file — e.g. a box came
+        # back, or a NEW box just went down) — comma-separated "box:reason" pairs, same format
+        # scripts/lib/cambox-offline-ack.sh already parses (e.g. "cam5:powered-off-2026-07-27").
+        # Leave empty (default) to use the checked-in rig-fleet.txt as-is. The automatic
+        # pull_request gate below (which carries NO inputs) always falls through to rig-fleet.txt.
+        description: "CAMBOX_OFFLINE_ACK override (comma 'box:reason' pairs; empty = use rig-fleet.txt)"
+        default: ""
   # #406/#312 item5: the automatic BLOCKING merge gate. Fires on every dev->main PR
   # open/update — the busy-gate step protects the live rig, so this can safely run
   # unattended (never on every push to dev — only when a PR targeting main exists/changes).
@@ -246,6 +255,11 @@ jobs:
           # Fail-open: a missing/failing POST here never fails this step (see that file's header).
           DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
           DISCORD_CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_ID }}
+          # #827: the automatic pull_request gate carries NO workflow_dispatch inputs, so this is
+          # always empty for it — recording-e2e.sh's own cambox_offline_ack_effective then falls
+          # through to the checked-in rig-fleet.txt default. A manual workflow_dispatch's
+          # offline_ack input, when non-empty, overrides that default outright.
+          CAMBOX_OFFLINE_ACK: ${{ github.event_name == 'workflow_dispatch' && inputs.offline_ack || '' }}
         # #657: `exec` REPLACES this step's process image with recording-e2e.sh's own bash — a
         # plain `bash scripts/recording-e2e.sh` forks a NESTED child the Actions runner never
         # signals directly (empirically confirmed: it signals only the single top-level step PID

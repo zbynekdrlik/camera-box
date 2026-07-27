@@ -145,6 +145,13 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/cambox-offline-ack.sh"
 # shellcheck source=scripts/lib/preflight-fleet-check.sh
 . "$HERE/lib/preflight-fleet-check.sh"
+# #827: the CI workflow has no way to feed CAMBOX_OFFLINE_ACK for the automatic pull_request gate
+# (it carries no workflow_dispatch inputs) -- so an explicit env value (a manual dispatch's
+# offline_ack input, or an operator's hand-set env var) still wins outright, but an EMPTY one now
+# falls back to the checked-in repo-level default file below. Computed once, here, before the
+# [0/8] fleet preflight reads CAMBOX_OFFLINE_ACK.
+RIG_FLEET_ACK_FILE="${RIG_FLEET_ACK_FILE:-$HERE/../rig-fleet.txt}"
+CAMBOX_OFFLINE_ACK="$(cambox_offline_ack_effective "${CAMBOX_OFFLINE_ACK:-}" "$RIG_FLEET_ACK_FILE")"
 # #758 item 3 — the in-run freeze watch: polls the SAME MV-clone mechanism DURING the recording
 # window (StartRecord through StopRecord) so a mid-run freeze fails the run within ~30s of onset,
 # not at decode time.
@@ -486,12 +493,11 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
     _pfacked=0
     if cambox_offline_ack_is_acked "$_pfbox"; then _pfacked=1; fi
     if ping -c1 -W2 "$_pfip" >/dev/null 2>&1; then
-      # Reachable — an ack naming a REACHABLE box is stale and must never silently outlive the
-      # outage it was written for.
-      if [ "$_pfacked" = "1" ]; then
-        cambox_offline_ack_stale_message "$_pfbox" >&2
-        exit 1
-      fi
+      # Reachable — but reachable is NOT the same as healthy (#827): a box whose OS/network is up
+      # but whose camera-box.service never leaves e.g. "activating" (a physically-removed grabber
+      # card, 2026-07-27) must still be excludable via an ack — so the health check now always
+      # runs here, and cambox_offline_ack_decide (not a raw ping result) makes the call.
+      #
       # Self-heal routine leftover junk from a prior run BEFORE checking (stop stray
       # camera-box-burn-* units + sweep stale /tmp binaries, #749/#758) — then assert the box is
       # genuinely ready: the sweep fixes what a mere leftover explains, this check fails loud on
@@ -502,22 +508,41 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
       _pfline="$(sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$_pfip" \
         "$(preflight_fleet_check_cmds)" 2>/dev/null || true)"
       _pfverdict="$(preflight_fleet_check_verdict "$_pfline")"
-      if [ -n "$_pfverdict" ]; then
+      if [ -n "$_pfverdict" ]; then _pfstatus="unhealthy"; else _pfstatus="healthy"; fi
+      case "$(cambox_offline_ack_decide "$_pfstatus" "$_pfacked")" in
+      stale)
+        cambox_offline_ack_stale_message "$_pfbox" >&2
+        exit 1
+        ;;
+      exclude)
+        # Reachable but genuinely unhealthy, and acked — proceed WITHOUT it, named + loud (never
+        # a silent drop, per strict-test-mandate-no-gate-weakening).
+        cambox_offline_ack_note "$_pfbox"
+        echo "    excluded: ${_pfbox} (${_pfip}) reachable but unhealthy — ${_pfverdict}"
+        PREFLIGHT_EXCLUDED_CAMS="${PREFLIGHT_EXCLUDED_CAMS:+$PREFLIGHT_EXCLUDED_CAMS }${_pfbox}"
+        ;;
+      fail)
         echo "ERROR: [preflight] FAIL: ${_pfbox} (${_pfip}): ${_pfverdict} — ssh in and investigate (systemctl status camera-box; systemctl restart camera-box if needed)." >&2
         exit 1
-      fi
-      echo "    ok: ${_pfbox} (${_pfip}) — ${_pfline}"
-      PREFLIGHT_DANTESYNC_LINUX="${PREFLIGHT_DANTESYNC_LINUX:+$PREFLIGHT_DANTESYNC_LINUX }${_pfbox}=${_pfip}"
+        ;;
+      *)
+        echo "    ok: ${_pfbox} (${_pfip}) — ${_pfline}"
+        PREFLIGHT_DANTESYNC_LINUX="${PREFLIGHT_DANTESYNC_LINUX:+$PREFLIGHT_DANTESYNC_LINUX }${_pfbox}=${_pfip}"
+        ;;
+      esac
     else
       # Unreachable — acked (a NAMED, operator-acknowledged outage) → NOTE + exclude; unacked →
       # loud FAIL (never a silent drop, per strict-test-mandate-no-gate-weakening).
-      if [ "$_pfacked" = "1" ]; then
+      case "$(cambox_offline_ack_decide unreachable "$_pfacked")" in
+      exclude)
         cambox_offline_ack_note "$_pfbox"
         PREFLIGHT_EXCLUDED_CAMS="${PREFLIGHT_EXCLUDED_CAMS:+$PREFLIGHT_EXCLUDED_CAMS }${_pfbox}"
-      else
+        ;;
+      *)
         echo "ERROR: [preflight] FAIL: ${_pfbox} (${_pfip}): unreachable from dev1 — fix connectivity/power, or if this is a KNOWN operator-acknowledged outage set CAMBOX_OFFLINE_ACK=\"${_pfbox}:<reason>\" to proceed without it (#758)." >&2
         exit 1
-      fi
+        ;;
+      esac
     fi
   done
   echo "    excluded (acked-offline): ${PREFLIGHT_EXCLUDED_CAMS:-none}"
@@ -3045,6 +3070,22 @@ continuing WITHOUT the imag partial; the merge below will omit --merge-partials 
     echo "    exit code IS the merge recording-verdict's exit code."
     GATE=0
     "$VERDICT_BIN" "${MERGE_ARGS[@]}" || GATE=$?
+    # #827: merge the fleet-preflight exclusion list into the verdict JSON so a run that excluded
+    # boxes (ALL_CAMBOX only — PREFLIGHT_EXCLUDED_CAMS is otherwise unset/empty, and the merge
+    # below is then a harmless no-op `excluded_cams: []`) can NEVER be read back as "full-fleet
+    # clean" from the JSON alone. Best-effort: a jq failure here never affects $GATE — the
+    # exclusion is already loudly printed in the [0/8] preflight log above.
+    if [ -f "$REPORT_JSON" ]; then
+      _pf_excluded_json="$(cambox_offline_ack_excluded_json "${PREFLIGHT_EXCLUDED_CAMS:-}")"
+      _pf_tmp_json="${REPORT_JSON}.tmp"
+      if jq --argjson excluded "$_pf_excluded_json" '.excluded_cams = $excluded' \
+          "$REPORT_JSON" >"$_pf_tmp_json" 2>/dev/null; then
+        mv "$_pf_tmp_json" "$REPORT_JSON"
+      else
+        echo "WARNING: #827 could not merge excluded_cams into $REPORT_JSON (jq failed) — the exclusion is still visible in the [0/8] preflight log above." >&2
+        rm -f "$_pf_tmp_json"
+      fi
+    fi
     echo "[8/8] render the 2-graph report PNG"
     if [ -f "$REPORT_JSON" ]; then
       python3 "$HERE/recording-e2e-report.py" --json "$REPORT_JSON" --out "$REPORT_PNG" || \

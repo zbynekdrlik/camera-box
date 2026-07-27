@@ -1,0 +1,18 @@
+# rig-fleet.txt -- #827 repo-level DEFAULT for CAMBOX_OFFLINE_ACK.
+#
+# Read by scripts/recording-e2e.sh (via scripts/lib/cambox-offline-ack.sh's
+# cambox_offline_ack_effective) whenever CI's own CAMBOX_OFFLINE_ACK is empty -- this is the
+# fallback the automatic pull_request E2E gate uses (it carries no workflow_dispatch inputs). A
+# manual `workflow_dispatch` run's `offline_ack` input, when non-empty, OVERRIDES this file
+# outright.
+#
+# Format: one "box:reason" per line. Blank lines and lines starting with '#' are ignored. Keep
+# this in sync with the PHYSICAL rig state -- a box named here that is actually reachable AND
+# healthy fails the run LOUDLY as a stale ack (#758/#827); remove the line the moment the box is
+# back in the fleet.
+#
+# Current physical state (2026-07-27, #827):
+cam4:grabber-card-removed-2026-07-27
+cam5:powered-off-2026-07-27
+cam6:powered-off-2026-07-27
+cam7:powered-off-2026-07-27

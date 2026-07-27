@@ -527,7 +527,10 @@ fn recording_e2e_execute_mode_runs_the_merge_and_propagates_its_exit_code() {
     // #756: widened from 2500 to 3800 bytes -- the Member 3 live-latency-pins snapshot step
     // (scripts/latency_pins_snapshot.py invocation + its fail-open comment block) legitimately
     // added ~800 bytes between the merge call and the exit, same justified-growth pattern as #758.
-    let window = &s[exec_merge_block..(exec_merge_block + 3800).min(s.len())];
+    // #827: widened from 3800 to 4800 bytes -- the fleet-preflight excluded_cams jq-merge step
+    // (cambox_offline_ack_excluded_json + its fail-open comment block) legitimately added ~540
+    // bytes between the merge call and the exit, same justified-growth pattern as #758/#756.
+    let window = &s[exec_merge_block..(exec_merge_block + 4800).min(s.len())];
     assert!(
         window.contains(r#"exit "$GATE""#),
         "#703: after running the real merge, the branch must `exit \"$GATE\"` (the merge's own \

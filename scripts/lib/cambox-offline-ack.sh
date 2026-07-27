@@ -74,3 +74,80 @@ cambox_offline_ack_stale_message() {
   reason="$(cambox_offline_ack_reason "$box")"
   echo "ERROR: [preflight] STALE ACK: ${box} is named in CAMBOX_OFFLINE_ACK (reason: ${reason}) but is REACHABLE — remove it from CAMBOX_OFFLINE_ACK now that the box is back (re-enable checklist: #753)."
 }
+
+# #827: the E2E workflow had NO way to feed CAMBOX_OFFLINE_ACK from CI at all, and the ack
+# mechanism above conflated "reachable" with "healthy" -- a box whose OS/network answers ping but
+# whose camera-box.service is stuck (e.g. "activating" forever, cam4's grabber card physically
+# removed, 2026-07-27) could never be acked without hitting the STALE hard-fail above, because
+# staleness was decided purely on ping success. The three functions below fix both: a repo-level
+# default-ack file the harness reads when CI sets no explicit override, and a single decision
+# function that distinguishes "healthy" from "unhealthy" (not just "reachable"/"unreachable").
+
+# cambox_offline_ack_effective EXPLICIT FILE -> the effective CAMBOX_OFFLINE_ACK value.
+#   EXPLICIT non-empty -> wins outright (an operator's explicit override is never silently
+#     replaced by the checked-in default -- a workflow_dispatch input, or a hand-set env var).
+#   EXPLICIT empty -> read FILE (one "box:reason", "# comment", or blank line per line;
+#     comments/blanks ignored, non-blank lines comma-joined into the same format
+#     cambox_offline_ack_reason/_is_acked already parse). A missing/absent FILE is simply "no
+#     default" (empty result, never an error) -- a repo without the file behaves exactly like
+#     today (every box must be reachable-or-explicit-acked).
+cambox_offline_ack_effective() {
+  local explicit="${1:-}" file="${2:-}"
+  if [ -n "$explicit" ]; then
+    printf '%s' "$explicit"
+    return 0
+  fi
+  if [ -z "$file" ] || [ ! -f "$file" ]; then
+    return 0
+  fi
+  local line stripped entries=""
+  while IFS= read -r line || [ -n "$line" ]; do
+    stripped="${line%%#*}"
+    # trim leading/trailing whitespace without a subshell/sed round trip
+    stripped="${stripped#"${stripped%%[![:space:]]*}"}"
+    stripped="${stripped%"${stripped##*[![:space:]]}"}"
+    [ -n "$stripped" ] || continue
+    entries="${entries:+$entries,}$stripped"
+  done <"$file"
+  printf '%s' "$entries"
+}
+
+# cambox_offline_ack_decide STATUS ACKED -> "ok" | "stale" | "exclude" | "fail" — the single
+# source of truth for the preflight decision matrix (STATUS = healthy|unhealthy|unreachable,
+# ACKED = 1|0). Replaces scattered inline if/else in recording-e2e.sh's [0/8] loop:
+#   healthy    + unacked -> ok       (proceed normally, exactly like today)
+#   healthy    + acked   -> stale    (the fleet came back and nobody updated the ack — loud)
+#   unhealthy  + acked   -> exclude  (#827 fix: reachable-but-broken, e.g. cam4 — proceed, named)
+#   unhealthy  + unacked -> fail     (exactly like today)
+#   unreachable+ acked   -> exclude  (exactly like today)
+#   unreachable+ unacked -> fail     (exactly like today)
+#   anything else (unknown STATUS)  -> fail (never silently OK on an unrecognized status)
+cambox_offline_ack_decide() {
+  local status="${1:-}" acked="${2:-0}"
+  case "$status" in
+  healthy)
+    if [ "$acked" = "1" ]; then echo "stale"; else echo "ok"; fi
+    ;;
+  unhealthy | unreachable)
+    if [ "$acked" = "1" ]; then echo "exclude"; else echo "fail"; fi
+    ;;
+  *)
+    echo "fail"
+    ;;
+  esac
+}
+
+# cambox_offline_ack_excluded_json BOXES -> a JSON array `[{"box":"cam4","reason":"..."}, ...]`
+# for embedding into the run's verdict JSON (recording-e2e.sh jq-merges this into $REPORT_JSON as
+# .excluded_cams after the merge writes it) -- so a partial-fleet run can NEVER be read back as
+# "full-fleet clean" from the JSON alone (#827 acceptance). BOXES is a space-separated box-name
+# list (as PREFLIGHT_EXCLUDED_CAMS accumulates it); reasons come from CAMBOX_OFFLINE_ACK via
+# cambox_offline_ack_reason. Requires jq (already a repo dependency, see e2e-discord-report.sh).
+cambox_offline_ack_excluded_json() {
+  local boxes="${1:-}" box reason out="[]"
+  for box in $boxes; do
+    reason="$(cambox_offline_ack_reason "$box")"
+    out="$(printf '%s' "$out" | jq --arg b "$box" --arg r "$reason" '. + [{"box":$b,"reason":$r}]')"
+  done
+  printf '%s' "$out"
+}
