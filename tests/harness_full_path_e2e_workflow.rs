@@ -222,9 +222,6 @@ fn full_path_e2e_yml_sets_all_cambox_for_pull_request_triggered_runs() {
     );
 }
 
-/// The ALL_CAMBOX env line must live in the SAME step (env: block) as DURATION/
-/// NDI_RUNTIME_DIR_V6 — i.e. it actually reaches recording-e2e.sh's invocation, not just sit
-/// somewhere else in the file where it would never be read by the script.
 // ---------------------------------------------------------------------------------------------
 // #830 — the shared cross-repo rig lease: camera-box's full-path-e2e.yml and restreamer's Rust
 // CI both drive the SAME physical rig from the SAME self-hosted dev1 runner with no mutual
@@ -288,6 +285,9 @@ fn full_path_e2e_yml_has_always_release_lease_step() {
     );
 }
 
+/// The ALL_CAMBOX env line must live in the SAME step (env: block) as DURATION/
+/// NDI_RUNTIME_DIR_V6 — i.e. it actually reaches recording-e2e.sh's invocation, not just sit
+/// somewhere else in the file where it would never be read by the script.
 #[test]
 fn full_path_e2e_yml_all_cambox_is_in_the_recording_steps_env_block() {
     let s = read_workflow();

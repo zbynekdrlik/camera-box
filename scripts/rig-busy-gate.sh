@@ -53,6 +53,115 @@ report_outcome() {
   fi
 }
 
+# --------------------------------------------------------------------------------------------
+# #830: shared cross-repo rig lease -- acquire BEFORE this gate does anything else (even before
+# polling OBS state below), so a foreign CI run (restreamer, once it participates via
+# zbynekdrlik/restreamer#349) can never have its E2E corrupted by us rerouting program scenes
+# underneath it, and this gate can report WHO holds the rig instead of an ambiguous RIG_BUSY. The
+# OBS-state busy-check loop below is UNCHANGED and stays wired in as the FALLBACK for a busy rig
+# with no lease participant on the other side yet. See scripts/lib/rig-lease.sh for the full
+# design + rationale (owner-settled lockdir-on-dev1 design, gh issue #830).
+# --------------------------------------------------------------------------------------------
+# shellcheck source=lib/rig-lease.sh
+. "$HERE/lib/rig-lease.sh"
+
+RIG_LEASE_REPO="${RIG_LEASE_REPO:-${GITHUB_REPOSITORY:-camera-box-local}}"
+RIG_LEASE_RUN_ID="${RIG_LEASE_RUN_ID:-${GITHUB_RUN_ID:-local-$$}}"
+RIG_LEASE_RUN_URL="${RIG_LEASE_RUN_URL:-}"
+RIG_LEASE_JOB="${RIG_LEASE_JOB:-${GITHUB_JOB:-full-path}}"
+# How long we expect to HOLD the rig once acquired (this gate's own busy-wait budget PLUS the
+# recording step that follows it in the same CI job) -- written into holder.json so a foreign
+# gate can decide whether to wait us out or fail fast.
+RIG_LEASE_HOLD_SECS="${RIG_LEASE_HOLD_SECS:-2700}"
+# Stale threshold comfortably ABOVE this job's own `timeout-minutes: 75` cap (full-path-e2e.yml)
+# so a genuinely-still-running holder is NEVER reclaimed on heartbeat age alone -- a dead/crashed
+# holder is still bounded-reclaimable, just not instantly (mirrors the #657 self-heal principle).
+RIG_LEASE_STALE_SECS="${RIG_LEASE_STALE_SECS:-5400}"
+# How long WE are willing to wait for a live foreign holder to release before giving up. Defaults
+# to this gate's own OBS-busy budget (MAX_ITERATIONS * SLEEP_SECS below) so both loops share one
+# mental model of "how long is this gate allowed to wait".
+RIG_LEASE_MAX_WAIT_SECS="${RIG_LEASE_MAX_WAIT_SECS:-$((MAX_ITERATIONS * SLEEP_SECS))}"
+
+# Release the lease on ANY exit path EXCEPT the "rig is free, proceeding" success path (which
+# leaves it held for the recording step that runs later in the SAME job -- that step, and
+# cancellation, are covered by the workflow's own separate `always()` release step, see
+# scripts/rig-lease-release.sh). Safe to call unconditionally: rig_lease_release() itself is a
+# no-op unless we are still the lease's current holder.
+RIG_LEASE_PROCEEDING=0
+rig_lease_cleanup_on_exit() {
+  if [ "$RIG_LEASE_PROCEEDING" -ne 1 ]; then
+    rig_lease_release "$RIG_LEASE_RUN_ID"
+  fi
+}
+trap rig_lease_cleanup_on_exit EXIT
+
+# rig_lease_epoch_of ISO8601 -> echo its epoch seconds, or "" if unparseable.
+rig_lease_epoch_of() {
+  date -u -d "$1" +%s 2>/dev/null || echo ""
+}
+
+# rig_lease_acquire_or_wait -- try to acquire the shared lease. If it is held by a genuinely LIVE
+# foreign holder, either WAIT for it (retrying on the same iteration/sleep cadence as the OBS
+# busy-check loop below) or FAIL FAST when the holder's own expected_release_at is further away
+# than our whole wait budget -- no point grinding a budget against a soak that will obviously
+# outlast it (the exact #830 complaint: 30 minutes burnt against a 45-minute restreamer soak).
+rig_lease_acquire_or_wait() {
+  local expected_release_at
+  expected_release_at="$(date -u -d "+${RIG_LEASE_HOLD_SECS} seconds" +%Y-%m-%dT%H:%M:%SZ)"
+  # Bounded by an explicit iteration count (never an unbounded while-true) -- one attempt per
+  # sleep tick over the whole wait budget, plus one extra attempt for headroom. A zero SLEEP_SECS
+  # (fast tests) would otherwise divide-by-zero; treat it as 1 tick's worth of spacing only for
+  # sizing this bound, the actual `sleep "$SLEEP_SECS"` below still sleeps 0.
+  local wait_tick=$(( SLEEP_SECS > 0 ? SLEEP_SECS : 1 ))
+  local max_wait_attempts=$(( RIG_LEASE_MAX_WAIT_SECS / wait_tick + 2 ))
+
+  for ((_lease_attempt = 0; _lease_attempt <= max_wait_attempts; _lease_attempt++)); do
+    local acquire_out acquire_rc
+    set +e
+    acquire_out=$(rig_lease_acquire "$RIG_LEASE_REPO" "$RIG_LEASE_RUN_ID" "$RIG_LEASE_RUN_URL" \
+      "$RIG_LEASE_JOB" "$expected_release_at" "$RIG_LEASE_STALE_SECS")
+    acquire_rc=$?
+    set -e
+    echo "[rig-busy-gate] $acquire_out"
+    if [ "$acquire_rc" -eq 0 ]; then
+      return 0
+    fi
+
+    local held_by exp_at now_epoch exp_epoch remaining
+    held_by=$(printf '%s' "$acquire_out" | sed -n 's/^RIG_LEASE_HELD_BY=\([^ ]*\).*/\1/p')
+    exp_at=$(printf '%s' "$acquire_out" | sed -n 's/.*expected_release_at=\([^ ]*\)$/\1/p')
+    now_epoch=$(date -u +%s)
+    exp_epoch="$(rig_lease_epoch_of "$exp_at")"
+    if [ -n "$exp_epoch" ]; then
+      remaining=$(( exp_epoch - now_epoch ))
+    else
+      remaining=0
+    fi
+
+    if [ "$remaining" -gt "$RIG_LEASE_MAX_WAIT_SECS" ]; then
+      echo "::error title=RIG LEASE HELD (#830)::rig lease held by ${held_by}, expected free in ${remaining}s (~$(( remaining / 60 )) min) -- exceeds our max-wait budget (${RIG_LEASE_MAX_WAIT_SECS}s). Failing FAST rather than grinding a budget against a soak that will obviously outlast it."
+      report_outcome "OUTCOME=RIG_LEASE_HELD RIG_HELD_BY=${held_by} expected_release_at=${exp_at}"
+      exit 44
+    fi
+
+    if [ "$_lease_attempt" -ge "$max_wait_attempts" ]; then
+      echo "::error title=RIG LEASE HELD (#830)::rig lease still held by ${held_by} after waiting ${RIG_LEASE_MAX_WAIT_SECS}s."
+      report_outcome "OUTCOME=RIG_LEASE_HELD RIG_HELD_BY=${held_by} expected_release_at=${exp_at}"
+      exit 44
+    fi
+    echo "[rig-busy-gate] rig lease held by ${held_by} (expected free ~${exp_at}) -- waiting..."
+    sleep "$SLEEP_SECS"
+  done
+
+  # Unreachable in practice (the loop body always either returns or exits) -- defensive fail
+  # closed rather than falling through silently if that invariant is ever broken.
+  echo "::error title=RIG LEASE HELD (#830)::rig lease wait loop exhausted unexpectedly."
+  report_outcome "OUTCOME=RIG_LEASE_HELD"
+  exit 44
+}
+
+rig_lease_acquire_or_wait
+
 # #657: per-host CONSECUTIVE stray-poll counters, reset to 0 the instant a poll does NOT show
 # that host in stray_hosts (a real broadcast starting mid-wait, or the rig going genuinely free,
 # must never inherit a stale streak from an earlier, unrelated stray episode).
@@ -105,9 +214,19 @@ for ((i = 1; i <= MAX_ITERATIONS; i++)); do
   BUSY=$(printf '%s' "$OUTPUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["busy"])')
   if [ "$BUSY" = "False" ]; then
     echo "[rig-busy-gate] rig is free — proceeding."
+    # #830: this gate keeps the lease HELD across the exit — the recording step that follows in
+    # the same CI job needs it. The workflow's own separate `always()` step (see
+    # scripts/rig-lease-release.sh) releases it later, on success, on a later step's failure, AND
+    # on cancellation.
+    RIG_LEASE_PROCEEDING=1
     report_outcome "OUTCOME=RIG_FREE"
     exit 0
   fi
+
+  # #830: keep our own lease heartbeat fresh across a long busy-wait (comfortably unnecessary at
+  # the default budgets -- MAX_ITERATIONS*SLEEP_SECS <= RIG_LEASE_STALE_SECS -- but cheap and
+  # correct regardless of overrides).
+  rig_lease_heartbeat_touch
 
   # #649 item 3: surface obs_phase2.py's plain-English diagnostic hint (per-box streaming vs
   # recording state -> stray-test-recording-vs-real-broadcast) as its OWN log line, not just

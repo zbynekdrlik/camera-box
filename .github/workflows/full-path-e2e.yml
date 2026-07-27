@@ -167,10 +167,19 @@ jobs:
       - name: Rig-busy gate — refuse to reroute prod OBS while a REAL broadcast is live (#406/#312)
         # Polls OBS WebSocket on strih+stream (GetStreamStatus/GetRecordStatus) for up to 30 min.
         # Distinct exit codes: 0 = free (proceed), 42 = still busy after the budget, 43 = rig
-        # unreachable (fails CLOSED, never assumes "free"). See scripts/rig-busy-gate.sh.
+        # unreachable (fails CLOSED, never assumes "free"), 44 = the #830 shared cross-repo rig
+        # lease is held by a LIVE foreign holder (e.g. restreamer's own CI) -- named explicitly
+        # instead of an ambiguous RIG_BUSY. See scripts/rig-busy-gate.sh + scripts/lib/rig-lease.sh.
         # #646: SKIPPED (reported skipped, not silently absent) on a confirmed docs-only PR;
         # always runs for workflow_dispatch (manual soak) regardless.
         if: github.event_name == 'workflow_dispatch' || steps.docs-only.outputs.docs_only != 'true'
+        env:
+          # #830: identify THIS run to the shared rig lease so a foreign gate (restreamer,
+          # zbynekdrlik/restreamer#349) can name us instead of guessing from OBS state alone.
+          RIG_LEASE_REPO: ${{ github.repository }}
+          RIG_LEASE_RUN_ID: ${{ github.run_id }}
+          RIG_LEASE_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RIG_LEASE_JOB: ${{ github.job }}
         run: bash scripts/rig-busy-gate.sh
 
       - name: Fetch the matching Windows recording-verdict.exe for THIS commit (#703)
@@ -323,6 +332,16 @@ jobs:
             /tmp/recording-e2e-${{ env.RECORDING_E2E_RUN_ID }}/report-*.png
             /tmp/recording-e2e-${{ env.RECORDING_E2E_RUN_ID }}/pixel-proof/**
           if-no-files-found: warn
+
+      - name: Release the shared rig lease (#830 — cleanup, always, incl. cancellation)
+        # #830: released here (never only on scripts/rig-busy-gate.sh's own success path) so a
+        # cancelled run, or a later step failing, still frees the rig for restreamer's CI
+        # (zbynekdrlik/restreamer#349) instead of leaving a dangling lease. Safe no-op if this run
+        # never acquired the lease at all (docs-only skip, or a fast-failed busy-gate).
+        if: always()
+        env:
+          RIG_LEASE_RUN_ID: ${{ github.run_id }}
+        run: bash scripts/rig-lease-release.sh
 
       - name: Discord alert on frame-loss regression (bot API → #notifications)
         if: failure()
