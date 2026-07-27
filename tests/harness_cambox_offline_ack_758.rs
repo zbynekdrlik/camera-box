@@ -147,3 +147,160 @@ fn stale_ack_message_is_a_loud_error_naming_the_box() {
     assert!(r.stdout.contains("STALE ACK"), "stdout={}", r.stdout);
     assert!(r.stdout.contains("cam7"), "stdout={}", r.stdout);
 }
+
+// #827 items 1+2 — the E2E workflow never set CAMBOX_OFFLINE_ACK at all (no way in from CI), and
+// the existing stale-ack check conflated "reachable" with "healthy" (a box whose OS/network is up
+// but whose service is stuck e.g. `activating` forever -- cam4's grabber card physically removed,
+// 2026-07-27 -- could never be acked without hitting the STALE hard-fail). These three new pure
+// functions fix both: `cambox_offline_ack_effective` wires in a repo-level default-ack file when
+// CI sets no explicit override; `cambox_offline_ack_decide` is the single source of truth for the
+// healthy/unhealthy/unreachable x acked/unacked decision matrix (unhealthy+acked -> exclude, never
+// stale); `cambox_offline_ack_excluded_json` builds the JSON the harness merges into the verdict
+// so an excluded-box run can never read back as full-fleet-clean.
+
+fn write_temp_file(contents: &str) -> tempfile::NamedTempFile {
+    use std::io::Write;
+    let mut f = tempfile::NamedTempFile::new().expect("create temp file");
+    f.write_all(contents.as_bytes()).expect("write temp file");
+    f
+}
+
+#[test]
+fn effective_prefers_the_explicit_ack_over_the_default_file() {
+    let file = write_temp_file("cam4:grabber-card-removed\n");
+    let r = run_sourced(
+        None,
+        &format!(
+            "cambox_offline_ack_effective 'cam7:explicit-reason' {:?}",
+            file.path()
+        ),
+    );
+    assert_eq!(r.exit_code, 0);
+    assert_eq!(
+        r.stdout, "cam7:explicit-reason",
+        "an explicit ack must win outright over the checked-in default file"
+    );
+}
+
+#[test]
+fn effective_falls_back_to_the_default_file_when_explicit_is_empty() {
+    let file = write_temp_file("cam4:grabber-card-removed\ncam5:powered-off\n");
+    let r = run_sourced(
+        None,
+        &format!("cambox_offline_ack_effective '' {:?}", file.path()),
+    );
+    assert_eq!(r.exit_code, 0);
+    assert_eq!(r.stdout, "cam4:grabber-card-removed,cam5:powered-off");
+}
+
+#[test]
+fn effective_ignores_blank_lines_and_comments_in_the_default_file() {
+    let file = write_temp_file(
+        "# rig-fleet.txt -- default ack list\n\ncam4:grabber-card-removed\n  \n# another comment\ncam5:powered-off\n",
+    );
+    let r = run_sourced(
+        None,
+        &format!("cambox_offline_ack_effective '' {:?}", file.path()),
+    );
+    assert_eq!(r.exit_code, 0);
+    assert_eq!(r.stdout, "cam4:grabber-card-removed,cam5:powered-off");
+}
+
+#[test]
+fn effective_is_empty_when_no_explicit_and_no_default_file_exists() {
+    let r = run_sourced(
+        None,
+        "cambox_offline_ack_effective '' /nonexistent/rig-fleet.txt",
+    );
+    assert_eq!(r.exit_code, 0);
+    assert_eq!(r.stdout, "");
+}
+
+#[test]
+fn decide_healthy_and_unacked_is_ok() {
+    let r = run_sourced(None, "cambox_offline_ack_decide healthy 0");
+    assert_eq!(r.stdout, "ok");
+}
+
+#[test]
+fn decide_healthy_and_acked_is_stale() {
+    // The fleet came back healthy but the ack was never removed -- loud stale warning.
+    let r = run_sourced(None, "cambox_offline_ack_decide healthy 1");
+    assert_eq!(r.stdout, "stale");
+}
+
+#[test]
+fn decide_unhealthy_and_acked_is_exclude() {
+    // The #827 fix: cam4 is REACHABLE (its OS/network answers ping) but UNHEALTHY (service
+    // stuck activating -- grabber card removed). Acked -> must EXCLUDE, never STALE.
+    let r = run_sourced(None, "cambox_offline_ack_decide unhealthy 1");
+    assert_eq!(r.stdout, "exclude");
+}
+
+#[test]
+fn decide_unhealthy_and_unacked_is_fail() {
+    let r = run_sourced(None, "cambox_offline_ack_decide unhealthy 0");
+    assert_eq!(r.stdout, "fail");
+}
+
+#[test]
+fn decide_unreachable_and_acked_is_exclude() {
+    let r = run_sourced(None, "cambox_offline_ack_decide unreachable 1");
+    assert_eq!(r.stdout, "exclude");
+}
+
+#[test]
+fn decide_unreachable_and_unacked_is_fail() {
+    let r = run_sourced(None, "cambox_offline_ack_decide unreachable 0");
+    assert_eq!(r.stdout, "fail");
+}
+
+#[test]
+fn excluded_json_is_empty_array_for_no_excluded_boxes() {
+    let r = run_sourced(
+        Some("cam4:grabber-card-removed"),
+        "cambox_offline_ack_excluded_json ''",
+    );
+    assert_eq!(r.exit_code, 0);
+    let v: serde_json::Value = serde_json::from_str(&r.stdout).expect("valid JSON");
+    assert_eq!(v, serde_json::json!([]));
+}
+
+#[test]
+fn excluded_json_names_each_excluded_box_with_its_reason() {
+    let r = run_sourced(
+        Some("cam4:grabber-card-removed,cam5:powered-off"),
+        "cambox_offline_ack_excluded_json 'cam4 cam5'",
+    );
+    assert_eq!(r.exit_code, 0);
+    let v: serde_json::Value = serde_json::from_str(&r.stdout).expect("valid JSON");
+    assert_eq!(
+        v,
+        serde_json::json!([
+            {"box": "cam4", "reason": "grabber-card-removed"},
+            {"box": "cam5", "reason": "powered-off"}
+        ])
+    );
+}
+
+#[test]
+fn excluded_json_reaches_the_verdict_output_via_jq_merge() {
+    // (c) the exclusion list reaches the verdict output -- the exact merge recording-e2e.sh
+    // performs on $REPORT_JSON after the verdict binary writes it.
+    let verdict = write_temp_file(r#"{"overall_pass": true, "hops": {}}"#);
+    let r = run_sourced(
+        Some("cam4:grabber-card-removed"),
+        &format!(
+            "excluded=\"$(cambox_offline_ack_excluded_json 'cam4')\"; \
+             jq --argjson excluded \"$excluded\" '.excluded_cams = $excluded' {:?}",
+            verdict.path()
+        ),
+    );
+    assert_eq!(r.exit_code, 0, "stdout={}", r.stdout);
+    let v: serde_json::Value = serde_json::from_str(&r.stdout).expect("valid JSON");
+    assert_eq!(v["overall_pass"], serde_json::json!(true));
+    assert_eq!(
+        v["excluded_cams"],
+        serde_json::json!([{"box": "cam4", "reason": "grabber-card-removed"}])
+    );
+}
