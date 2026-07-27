@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""#399 — enforce the strih OBS NDI-input→camera mapping (OBS-WS harness).
+"""#399 — enforce the strih OBS NDI-input->camera mapping (OBS-WS harness).
 
 The strih NDI-input→camera-box bindings drift from the pins (the recurring bug: two inputs both on
 CAM4, so a camera shows twice and another is missing). A pure hot WS rebind does NOT survive a
 force-kill OBS relaunch (a distroav.dll swap reverts to the stale saved scene). So rig activation
-(scripts/rig-mode.sh) must ENFORCE the correct 7-distinct mapping every time — set it + verify every
+(scripts/rig-mode.sh) must ENFORCE the correct distinct mapping every time — set it + verify every
 input is bound to a DISTINCT camera — instead of the operator/agent re-doing it by hand.
 
 **#753 PIVOT (2026-07-14, binding user directive) — the mapping is now 1:1, the pre-2026-07-14
@@ -22,6 +22,18 @@ p50 spread; see #757 for the math). Applied live + read back on all 28 inputs: s
 `NDI cam1..7` + `MV NDI cam1..7`, imag `NDI CAM1..7` + `MV CAM1..7` (MV clones carry the identical
 latency — parity rule). A deliberate future latency rollout re-derives these from a fresh fused
 run's delivery table, never by hand-tuning a single camera in isolation.
+
+**#827 RETIREMENT (2026-07-27, binding owner directive) — cam5/cam6/cam7 removed from the
+ACTIVE mapping, but REVERSIBLY.** The test rig shrank: cam5/cam6/cam7's USB grabber cards were
+returned to their owner and those boxes are powered off. The owner's binding requirement: this
+retirement MUST be a one-line reversal when the boxes come back — so `FULL_MAP` below keeps
+EVERY camera's pin as a FACT (never deleted), and `--active` (defaulting to the `CAMERA_ACTIVE_SET`
+env var camera-set.sh exports, or "cam1 cam2 cam3 cam4" if that's unset too) filters it down to
+the pins actually ENFORCED this run. Re-enable procedure: cam5 back? add "cam5" to
+CAMERA_ACTIVE_SET in scripts/camera-set.sh (scripts/rig-mode.sh passes it through automatically
+via `--active "$CAMERA_ACTIVE_SET"`), rerun the gate — nothing here needs to change. Whatever OBS
+scenes for a retired input remain configured on strih are simply no longer enforced while
+inactive — they carry no live camera feed anyway.
 
 Pre-2026-07-14 HISTORY (superseded, kept for context only — do NOT use): the mapping used to be
 OFFSET by one slot for the six original cameras (NDI cam5→CAM1, NDI cam1→CAM3, NDI cam3→CAM4,
@@ -43,21 +55,24 @@ Usage:
   python3 scripts/set-ndi-mapping.py --host 10.77.9.202 [--password PW]
   python3 scripts/set-ndi-mapping.py --host 10.77.9.202 --verify-only   # check, do not set
   python3 scripts/set-ndi-mapping.py --map "NDI cam1=CAM1 (usb)" ...     # override the pins
+  python3 scripts/set-ndi-mapping.py --active "cam1 cam2 cam3 cam4 cam5" ...  # reactivate cam5
 """
 import argparse
 import base64
 import hashlib
 import json
+import os
 import sys
 import time
 
 PORT = 4455
 
-# #399/#312/#753 — the fixed 7-distinct strih NDI mapping (Claude-owned; never a user question).
-# #753 PIVOT (2026-07-14, binding user directive): 1:1 -- NDI cam<N> -> CAM<N> (usb), for every N.
-# The pre-2026-07-14 offset/inverted table is HISTORY (see the module docstring above); do not
-# reintroduce it.
-DEFAULT_MAP = [
+# #399/#312/#753 — the FULL strih NDI mapping FACT table (Claude-owned; never a user question) --
+# every camera the fleet has ever wired, REGARDLESS of which are currently active (#827: a fact
+# lookup, never deleted on retirement). #753 PIVOT (2026-07-14, binding user directive): 1:1 --
+# NDI cam<N> -> CAM<N> (usb), for every N. The pre-2026-07-14 offset/inverted table is HISTORY
+# (see the module docstring above); do not reintroduce it.
+FULL_MAP = [
     ("NDI cam1", "CAM1 (usb)"),
     ("NDI cam2", "CAM2 (usb)"),
     ("NDI cam3", "CAM3 (usb)"),
@@ -67,8 +82,41 @@ DEFAULT_MAP = [
     ("NDI cam7", "CAM7 (usb)"),
 ]
 
+# DEFAULT_MAP kept as an alias to FULL_MAP for anything that still imports it directly (e.g. a
+# caller that wants every known pin regardless of activity) -- active_map() below is the ONE
+# place "which pins are ENFORCED today" is decided.
+DEFAULT_MAP = FULL_MAP
+
+# #827: the ACTIVE camera set default -- mirrors scripts/camera-set.sh's CAMERA_ACTIVE_SET
+# exactly (this module is invoked as a standalone subprocess, so it reads the SAME env var rather
+# than re-declaring its own separate default; when unset, falls back to the identical literal
+# camera-set.sh itself defaults to, so the two can never silently disagree).
+DEFAULT_ACTIVE_SET = os.environ.get("CAMERA_ACTIVE_SET", "cam1 cam2 cam3 cam4")
+
+
+def _camera_name_of(ndi_input):
+    """'NDI cam3' -> 'cam3' -- the camera name a strih NDI-input label carries (#753: literal
+    1:1, input 'NDI cam<N>' always names camera 'cam<N>')."""
+    prefix = "NDI "
+    return ndi_input[len(prefix):] if ndi_input.startswith(prefix) else ndi_input
+
+
+def active_map(active_set=None):
+    """FULL_MAP filtered down to only the cameras named in `active_set` (space/comma-separated
+    string, or an iterable of names). Defaults to DEFAULT_ACTIVE_SET. This is THE single place
+    "which pins are enforced today" is decided -- #827's whole point: change what's active by
+    changing the SET passed in, never by editing FULL_MAP."""
+    if active_set is None:
+        active_set = DEFAULT_ACTIVE_SET
+    if isinstance(active_set, str):
+        names = set(active_set.replace(",", " ").split())
+    else:
+        names = set(active_set)
+    return [(inp, snd) for inp, snd in FULL_MAP if _camera_name_of(inp) in names]
+
+
 # websocket-client is imported LAZILY (inside the WS helpers), not at module top: the pure helpers
-# (parse_map_args / duplicates / DEFAULT_MAP) must be importable + unit-testable WITHOUT the WS
+# (parse_map_args / duplicates / active_map) must be importable + unit-testable WITHOUT the WS
 # dependency (a top-level import here made harness_rig_ndi_mapping.rs fail on a CI runner that has no
 # websocket-client). Only the actual OBS-WS connect needs it.
 def _ws():
@@ -81,10 +129,13 @@ def _ws():
 
 # ─── pure helpers (unit-testable without OBS) ────────────────────────────────
 
-def parse_map_args(items):
-    """Parse repeated `--map "INPUT=SENDER"` into [(input, sender), ...]; default pins if none."""
+def parse_map_args(items, active_set=None):
+    """Parse repeated `--map "INPUT=SENDER"` into [(input, sender), ...]; an explicit --map
+    ALWAYS wins outright (an operator override is never filtered by activity). With no --map,
+    fall back to active_map(active_set) -- #827: only the currently-ACTIVE cameras' pins, never
+    the full historical fact table unfiltered."""
     if not items:
-        return list(DEFAULT_MAP)
+        return active_map(active_set)
     out = []
     for it in items:
         if "=" not in it:
@@ -151,12 +202,18 @@ def main():
     ap = argparse.ArgumentParser(description="#399 enforce strih NDI mapping")
     ap.add_argument("--host", required=True)
     ap.add_argument("--password", default="")
-    ap.add_argument("--map", action="append", help='"INPUT=SENDER" (repeatable; default = the pins)')
+    ap.add_argument("--map", action="append", help='"INPUT=SENDER" (repeatable; default = the active pins)')
+    ap.add_argument(
+        "--active",
+        default=None,
+        help="#827: space/comma-separated camera names to enforce (default: $CAMERA_ACTIVE_SET "
+        "env, or 'cam1 cam2 cam3 cam4'). Ignored when --map is given explicitly.",
+    )
     ap.add_argument("--verify-only", action="store_true", help="check + report, do not set")
     args = ap.parse_args()
 
     try:
-        want = parse_map_args(args.map)
+        want = parse_map_args(args.map, args.active)
     except ValueError as e:
         sys.exit(f"ERROR: {e}")
 

@@ -77,7 +77,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # src/capture_rate_health.rs). Used by the [0/8] preflight step below, before any deploy/record.
 # shellcheck source=scripts/lib/capture-rate-guard.sh
 . "$HERE/lib/capture-rate-guard.sh"
-# #675: cleanup()'s cam1/cam3/cam4/cam5/cam6/cam2 `systemctl restart camera-box` restore used to
+# #675: cleanup()'s cam1/cam3/cam4/cam2 `systemctl restart camera-box` restore used to
 # be a bare `2>/dev/null; true`/`|| true` that silently swallowed a failed restart, leaving the
 # rig's production camera-box.service down and undetected — poll+retry+loud-warn builder.
 # shellcheck source=scripts/lib/camera-box-restart-verify.sh
@@ -113,7 +113,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # E2E_EXECUTE_VERDICT=1 branch of [8/8] below.
 # shellcheck source=scripts/lib/e2e-discord-report.sh
 . "$HERE/lib/e2e-discord-report.sh"
-# #712: cleanup()'s cam3/4/5/6 ALL_CAMBOX restore loop used to ssh into each box SEQUENTIALLY —
+# #712: cleanup()'s cam3/4 ALL_CAMBOX restore loop used to ssh into each box SEQUENTIALLY —
 # a GH Actions cancellation kills the runner process directly, it does not wait for a 4-box
 # sequential loop to finish. cambox_parallel_wait_and_report waits for all 4 backgrounded
 # restores at once, bounding the loop's wall-clock by the slowest single box.
@@ -160,43 +160,67 @@ CAMBOX_OFFLINE_ACK="$(cambox_offline_ack_effective "${CAMBOX_OFFLINE_ACK:-}" "$R
 camera_resolve "${CAM:-cam1}"
 # #24 item 1: this harness's SOURCE-camera role (the physical box filming cam2's monitor via
 # the optical loopback + carrying the #174 render-time capture burn) is one of
-# cam1/cam3/cam4/cam5/cam6 ONLY (#312 fleet growth 4→6, #451) — cam2 is deliberately EXCLUDED
-# from this role: it is the fixed painter (its own monitor + /dev/fb0), and camera_strih_route()
-# rejects it by design so it can never be selected as SOURCE (see that function's own doc for
-# why — the device conflict with $PAINTER_IP). cam2 IS separately wired as a "camera under
-# test" for the ALL-CAMBOX sweep's digital-burn contiguity check (recording-verdict.rs's
-# CAMERA_UNDER_TEST_NODES) via its own dedicated scene "Cam 2"/"NDI cam2" and burn id, keyed
-# off $PAINTER_IP directly in the [2b/8] deploy loop below — NEVER through this SOURCE-camera
-# resolution. camera_strih_route() (camera-set.sh) fails loudly (via `set -e`, mirroring
-# camera_resolve's own bare-call style above) on any unsupported CAM rather than silently
-# certifying the wrong box; on success it sets CAMERA_STRIH_SCENE/CAMERA_STRIH_SOURCE, consumed
-# below.
+# cam1/cam3/cam4/cam5/cam6/cam7 (camera_strih_route() resolves any of them — a pure FACT lookup,
+# #827: retiring a camera from CAMERA_ACTIVE_SET does not remove its SOURCE route) — cam2 is
+# deliberately EXCLUDED from this role: it is the fixed painter (its own monitor + /dev/fb0), and
+# camera_strih_route() rejects it by design so it can never be selected as SOURCE (see that
+# function's own doc for why — the device conflict with $PAINTER_IP). cam2 IS separately wired as
+# a "camera under test" for the ALL-CAMBOX sweep's digital-burn contiguity check
+# (recording-verdict.rs's CAMERA_UNDER_TEST_NODES) via its own dedicated scene "Cam 2"/"NDI cam2"
+# and burn id, keyed off $PAINTER_IP directly in the [2b/8] deploy loop below — NEVER through
+# this SOURCE-camera resolution. camera_strih_route() (camera-set.sh) fails loudly (via `set -e`,
+# mirroring camera_resolve's own bare-call style above) on any unsupported CAM rather than
+# silently certifying the wrong box; on success it sets
+# CAMERA_STRIH_SCENE/CAMERA_STRIH_SOURCE, consumed below.
 camera_strih_route "$CAMERA_NAME"
-# ALL_CAMBOX=1's OWN secondary-camera deploy loop ([2b/8] below) unconditionally deploys
-# cam2/cam3/cam4/cam5/cam6 at their FIXED physical IPs. If CAM=cam3/cam4/cam5/cam6 is ALSO
-# picked as the primary SOURCE camera, [2/8] would deploy that SAME physical box a second time
-# under a different burn binary — a real device/process conflict (two camera-box instances
-# fighting over /dev/video0), not just a labeling nit. Reject the combination loudly instead.
+# ALL_CAMBOX=1's OWN secondary-camera deploy loop ([2b/8] below) unconditionally deploys cam2 +
+# every camera in camera_active_secondary_set() (camera-set.sh, #827) at their FIXED physical
+# IPs. Picking a non-default SOURCE camera at the same time is not supported at all — it would
+# risk double-deploying a physical box under two different burn binaries (a real device/process
+# conflict). Reject the combination loudly instead.
 if [ "${ALL_CAMBOX:-0}" = "1" ] && [ "$CAMERA_NAME" != "cam1" ]; then
   echo "ERROR: CAM='$CAMERA_NAME' + ALL_CAMBOX=1 is not supported — ALL_CAMBOX's own [2b/8]" >&2
-  echo "       loop already deploys cam2/cam3/cam4/cam5/cam6 at their fixed IPs alongside the" >&2
-  echo "       primary; picking one of them as the primary SOURCE camera too would" >&2
-  echo "       double-deploy the same physical box. Run CAM=cam3/cam4/cam5/cam6 WITHOUT" >&2
+  echo "       loop already deploys cam2 + every active secondary camera at their fixed IPs" >&2
+  echo "       alongside the primary; picking a non-default SOURCE camera too risks" >&2
+  echo "       double-deploying the same physical box. Run CAM=<name> WITHOUT" >&2
   echo "       ALL_CAMBOX for a dedicated single-node source-camera certification (#24)." >&2
   exit 1
 fi
 
-CAM1_IP="${CAM1_IP:-$CAMERA_IP}"      # the SOURCE camera (films cam2's monitor, emits NDI w/ #174 burn); resolved via CAM=/camera_resolve above (#24) — despite the name, this is whichever of cam1/cam3/cam4/cam5/cam6 was selected
+CAM1_IP="${CAM1_IP:-$CAMERA_IP}"      # the SOURCE camera (films cam2's monitor, emits NDI w/ #174 burn); resolved via CAM=/camera_resolve above (#24) — despite the name, this is whichever camera was selected
 PAINTER_IP="${PAINTER_IP:-10.77.9.62}" # cam2 — the box with the physical monitor cam1 films; #312: ALSO deployed as its OWN camera-under-test node ([2b/8] below), keyed off this same IP
 # #624/#312: the OTHER camera-under-test boxes the ALL_CAMBOX sweep cuts into strih program
-# (cam2's own chain + cam3/cam4/cam5/cam6). Only used (deployed to / restored) when
-# ALL_CAMBOX=1 — the default single-camera path never touches them. Same physical IPs
-# camera-set.sh / cam-disk-guard.sh / rig-restore-watchdog.sh use.
+# (cam2's own chain + every camera in camera_active_secondary_set(), #827). Only used (deployed
+# to / restored) when ALL_CAMBOX=1 — the default single-camera path never touches them. Same
+# physical IPs camera-set.sh / cam-disk-guard.sh / rig-restore-watchdog.sh use.
+#
+# #827 (2026-07-27, binding owner directive) — REVERSIBILITY: cam5/cam6/cam7's IPs stay declared
+# here as FACTS even though they are retired from CAMERA_ACTIVE_SET today (grabber cards returned
+# to their owner, boxes powered off). Which of CAM3_IP..CAM7_IP actually get DEPLOYED/preflighted
+# under ALL_CAMBOX=1 is decided ENTIRELY by camera_active_secondary_set() (scripts/camera-set.sh)
+# — re-enabling a retired camera is adding its name back to CAMERA_ACTIVE_SET there, never
+# touching this file. Re-enable procedure: cam5 back? add "cam5" to CAMERA_ACTIVE_SET in
+# scripts/camera-set.sh (or export CAMERA_ACTIVE_SET="cam1 cam2 cam3 cam4 cam5" for a one-off
+# run), then rerun the gate — nothing here needs to change.
 CAM3_IP="${CAM3_IP:-10.77.9.63}"
 CAM4_IP="${CAM4_IP:-10.77.9.64}"
 CAM5_IP="${CAM5_IP:-10.77.9.65}"
 CAM6_IP="${CAM6_IP:-10.77.9.66}"
 CAM7_IP="${CAM7_IP:-10.77.9.67}"
+# camera_secondary_ip NAME -> the fixed IP var for a non-source, non-painter camera name (facts
+# mirror camera-set.sh's camera_resolve() exactly). The ONLY place a name from
+# camera_active_secondary_set() is turned into an IP -- every loop below goes through this, never
+# a second hand-maintained name->IP table.
+camera_secondary_ip() {
+  case "$1" in
+    cam3) printf '%s' "$CAM3_IP" ;;
+    cam4) printf '%s' "$CAM4_IP" ;;
+    cam5) printf '%s' "$CAM5_IP" ;;
+    cam6) printf '%s' "$CAM6_IP" ;;
+    cam7) printf '%s' "$CAM7_IP" ;;
+    *) echo "camera_secondary_ip: unknown secondary camera '$1'" >&2; return 1 ;;
+  esac
+}
 STRIH=10.77.9.202
 STREAM=10.77.9.204
 # #462 (EPIC #466 Topology v2): imag-nb — the NEW 60fps low-latency IMAG cutter of all 6 NDI
@@ -295,6 +319,23 @@ BURN_CAM6_RUN_ID="${BURN_CAM6_RUN_ID:-911011}"
 # #755: cam7 capture-burn run_id (fleet growth 6→7, #753), deployed ONLY under ALL_CAMBOX=1.
 # Match recording-verdict's BURN_RUN_ID_CAM7 (911012) default exactly.
 BURN_CAM7_RUN_ID="${BURN_CAM7_RUN_ID:-911012}"
+# #827 (2026-07-27, binding owner directive) — REVERSIBILITY: BURN_CAM{5,6,7}_RUN_ID stay
+# declared as FACTS even though cam5/cam6/cam7 are retired from CAMERA_ACTIVE_SET today. Whether
+# they are actually DEPLOYED under ALL_CAMBOX=1 is decided entirely by
+# camera_active_secondary_set() (scripts/camera-set.sh) — see that function + CAM3_IP..CAM7_IP's
+# own comment above for the re-enable procedure.
+# camera_secondary_burn_run_id NAME -> the reserved BURN_CAM<N>_RUN_ID for a secondary camera
+# name -- mirrors camera_secondary_ip's shape, single lookup site.
+camera_secondary_burn_run_id() {
+  case "$1" in
+    cam3) printf '%s' "$BURN_CAM3_RUN_ID" ;;
+    cam4) printf '%s' "$BURN_CAM4_RUN_ID" ;;
+    cam5) printf '%s' "$BURN_CAM5_RUN_ID" ;;
+    cam6) printf '%s' "$BURN_CAM6_RUN_ID" ;;
+    cam7) printf '%s' "$BURN_CAM7_RUN_ID" ;;
+    *) echo "camera_secondary_burn_run_id: unknown secondary camera '$1'" >&2; return 1 ;;
+  esac
+}
 # #24 item 1: which of the reserved ids above belongs to the box actually filling the
 # SOURCE-camera role THIS run ($CAMERA_NAME, resolved via CAM= at the top; NEVER cam2 — see
 # camera_strih_route()'s own doc). The ids are already mutually distinct and already read
@@ -484,10 +525,20 @@ fi
 # sweep ONLY — the plain single-camera path only ever touches its own SOURCE camera, already
 # pinged above.
 if [ "${ALL_CAMBOX:-0}" = "1" ]; then
-  echo "[0/8] fleet preflight — cam1..cam7 must each be reachable-or-acked and genuinely ready (#758)"
+  # #827: the preflight target list is cam1 (source) + cam2 (painter) + every camera in
+  # camera_active_secondary_set() (camera-set.sh) — the ONE place fleet membership is declared.
+  # Re-enabling a retired camera (e.g. cam5) is adding it to CAMERA_ACTIVE_SET there; this loop
+  # picks it up automatically, no change needed here.
+  PREFLIGHT_TARGETS=("cam1=$CAM1_IP" "cam2=$PAINTER_IP")
+  PREFLIGHT_TARGET_NAMES="cam1 cam2"
+  for _pf_cn in $(camera_active_secondary_set); do
+    PREFLIGHT_TARGETS+=("${_pf_cn}=$(camera_secondary_ip "$_pf_cn")")
+    PREFLIGHT_TARGET_NAMES="$PREFLIGHT_TARGET_NAMES $_pf_cn"
+  done
+  echo "[0/8] fleet preflight — ${PREFLIGHT_TARGET_NAMES} must each be reachable-or-acked and genuinely ready (#758/#827)"
   PREFLIGHT_EXCLUDED_CAMS=""
   PREFLIGHT_DANTESYNC_LINUX=""
-  for _pf in "cam1=$CAM1_IP" "cam2=$PAINTER_IP" "cam3=$CAM3_IP" "cam4=$CAM4_IP" "cam5=$CAM5_IP" "cam6=$CAM6_IP" "cam7=$CAM7_IP"; do
+  for _pf in "${PREFLIGHT_TARGETS[@]}"; do
     _pfbox="${_pf%%=*}"
     _pfip="${_pf#*=}"
     _pfacked=0
@@ -547,11 +598,15 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
   done
   echo "    excluded (acked-offline): ${PREFLIGHT_EXCLUDED_CAMS:-none}"
 
-  # dantesync freshest-offset sanity for cam3..cam7 (cam1/cam2 already covered by the DanteSync
-  # gate above) — reuses the SAME dantesync-gate.sh this harness already trusts, just widened to
-  # the rest of the fleet, excluding any box acked-offline above.
+  # dantesync freshest-offset sanity for the active secondary cameras (cam1/cam2 already covered
+  # by the DanteSync gate above) — reuses the SAME dantesync-gate.sh this harness already trusts,
+  # just widened to the rest of the ACTIVE fleet (camera_active_secondary_set(), #827), excluding
+  # any box acked-offline above. The cam[3-7] pattern is a harmless SUPERSET match -- only names
+  # that were actually iterated above (i.e. currently active) ever appear in
+  # PREFLIGHT_DANTESYNC_LINUX in the first place, so this never needs editing when
+  # CAMERA_ACTIVE_SET changes.
   if [ -n "$PREFLIGHT_DANTESYNC_LINUX" ]; then
-    echo "[0/8] dantesync freshest-offset sanity — cam3..cam7 (#758)"
+    echo "[0/8] dantesync freshest-offset sanity — ${PREFLIGHT_TARGET_NAMES#cam1 cam2 } (#758/#827)"
     "$HERE/dantesync-gate.sh" \
       --bound-us "${CLOCK_GUARD_BOUND_US:-2000}" \
       --win-http-port "${WIN_DANTE_PORT:-8898}" \
@@ -768,11 +823,11 @@ cleanup() {
   # device is the safety-critical action, so it leads; every cam ssh AND every OBS call below is
   # wrapped in `timeout` so nothing in cleanup() can block the trap indefinitely.
   echo "[cleanup] #328 FREE $CAMERA_NAME/cam2 capture devices FIRST (never gated behind OBS teardown)"
-  # #713: cam1 (SOURCE), cam3/4/5/6 (ALL_CAMBOX loop below), and cam2/painter ALL background
+  # #713: cam1 (SOURCE), cam3/4 (ALL_CAMBOX loop below), and cam2/painter ALL background
   # their ssh restore into ONE shared CAMBOX_PARALLEL_PIDS/LABELS group with ONE
   # cambox_parallel_wait_and_report call at the end of this device-restore phase (after
   # cam2/painter is armed, just before the OBS teardown region begins) -- extends #712's
-  # cam3/4/5/6-only parallelization to the WHOLE phase. Live incident (2026-07-12, #713): a GH
+  # cam3/4-only parallelization to the WHOLE phase. Live incident (2026-07-12, #713): a GH
   # Actions cancellation landing AFTER #712 shipped still stranded cam2 -- it sat OUTSIDE #712's
   # parallel group, sequential after the loop, so its restore never got a chance to run before
   # the SIGKILL. Backgrounding cam1 + cam2 too closes that remaining gap.
@@ -786,21 +841,21 @@ cleanup() {
   # kills that shell before it ever reaches `systemctl restart` — a live 3h40m undetected outage
   # on cam1/cam3/cam4 traced to this exact bug (#626). The real target's argv0 always has EITHER a
   # run-id digit immediately after the hyphen (cam1's own /tmp/camera-box-burn-1783530925) OR a
-  # camname letter (cam2/cam3/cam4/cam5/cam6's own #624/#312 ALL_CAMBOX deploy,
+  # camname letter (cam2/cam3/cam4's own #624/#312 ALL_CAMBOX deploy,
   # /tmp/camera-box-burn-cam3-1783530925 — `_cbin="/tmp/camera-box-burn-${_cn}-${RUN_ID}"`); the
   # invoking shell's own cmdline has a `[` bracket character there instead (the regex's own
   # class-open), so the anchored `[a-z0-9]` pattern matches ONLY a real target, never itself.
   # #640 CORRECTION: an earlier version of this comment claimed the DIGIT-only pattern
   # ('camera-box-burn-[0-9]') already matched the camname-infixed form too — it does NOT (the
   # character right after the hyphen there is a LETTER, not a digit). That gap orphaned
-  # cam2/cam3/cam4/cam5/cam6's burn processes across multiple runs, crash-looping camera-box
+  # cam2/cam3/cam4's burn processes across multiple runs, crash-looping camera-box
   # ("Device or resource busy") until manually killed — found live while verifying #312 item 2 PR B.
   # #668: the burn binary now runs under a transient systemd-run unit (Restart=on-failure) so a
   # mid-test #663 self-heal respawns it — stop that unit FIRST (an explicit `systemctl stop` is
   # never followed by a restart, even under Restart=on-failure/always) so the pkill below can
   # never race a respawn back into existence.
   # #713: backgrounded ( ... ) & -- collected+waited in the shared group below, alongside
-  # cam3/4/5/6 and cam2/painter.
+  # cam3/4 and cam2/painter.
   (
     timeout "$CLEANUP_SSH_TIMEOUT" sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$CAM1_IP" \
       "systemctl stop camera-box-burn-${RUN_ID} 2>/dev/null; systemctl reset-failed camera-box-burn-${RUN_ID} 2>/dev/null; \
@@ -810,27 +865,21 @@ $(camera_box_verify_active_cmds "$CAMERA_NAME (source, $CAM1_IP)")"
   ) &
   CAMBOX_PARALLEL_PIDS+=("$!")
   CAMBOX_PARALLEL_LABELS+=("$CAMERA_NAME (source, $CAM1_IP)")
-  # #624/#312: cam3/cam4/cam5/cam6 — same restore as cam1, ONLY when the ALL_CAMBOX deploy above
-  # actually ran (gated the same way) so a plain single-camera run never touches these boxes at all.
+  # #624/#312: every ACTIVE secondary camera (camera_active_secondary_set(), #827) — same restore
+  # as cam1, ONLY when the ALL_CAMBOX deploy above actually ran (gated the same way) so a plain
+  # single-camera run never touches these boxes at all. #827 (binding owner directive): iterating
+  # by NAME (not a fixed IP list) is what makes re-enabling a retired camera a one-line
+  # CAMERA_ACTIVE_SET edit — this loop needs no change when the active set grows or shrinks.
   if [ "${ALL_CAMBOX:-0}" = "1" ]; then
-    # #712: launch all 4 boxes' restores CONCURRENTLY (never sequentially) so the whole loop
+    # #712: launch every box's restore CONCURRENTLY (never sequentially) so the whole loop
     # fits inside a GH Actions cancellation's short grace window regardless of how many
     # camboxes are active — see scripts/lib/cambox-parallel-restore.sh for the full incident.
     # #713: the arrays are now initialized ONCE, above (shared with cam1 + cam2/painter) --
     # this loop just keeps appending into them.
-    for _cip in "$CAM3_IP" "$CAM4_IP" "$CAM5_IP" "$CAM6_IP" "$CAM7_IP"; do
-      # #668: recover the cam name from its IP (needed for its systemd-run unit name below) —
-      # keeps the loop header itself unchanged (tests/harness_recording_e2e_cleanup_resilient.rs
-      # locates this loop by its exact `for _cip in "$CAM3_IP"` text).
-      case "$_cip" in
-        "$CAM3_IP") _ccn="cam3" ;;
-        "$CAM4_IP") _ccn="cam4" ;;
-        "$CAM5_IP") _ccn="cam5" ;;
-        "$CAM6_IP") _ccn="cam6" ;;
-        "$CAM7_IP") _ccn="cam7" ;;
-      esac
+    for _ccn in $(camera_active_secondary_set); do
+      _cip="$(camera_secondary_ip "$_ccn")"
       # #668: same stop-the-unit-first ordering as cam1 above — never let the pkill race a respawn.
-      # #712: backgrounded ( ... ) & — all 4 boxes restore IN PARALLEL, collected+waited below.
+      # #712: backgrounded ( ... ) & — every active secondary box restores IN PARALLEL, collected+waited below.
       (
         timeout "$CLEANUP_SSH_TIMEOUT" sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$_cip" \
           "systemctl stop camera-box-burn-${_ccn}-${RUN_ID} 2>/dev/null; systemctl reset-failed camera-box-burn-${_ccn}-${RUN_ID} 2>/dev/null; \
@@ -851,7 +900,7 @@ $(camera_box_verify_active_cmds "$_ccn ($_cip)")"
   # ALL_CAMBOX=1, [2b/8] ALSO deployed a probe-featured burn binary here under a transient
   # systemd-run unit (#668) — stopping that unit is harmless (no-op) on the plain single-camera
   # path, where [2b/8] never ran.
-  # #713: backgrounded ( ... ) & -- collected+waited in the shared group, same as cam1/cam3-6.
+  # #713: backgrounded ( ... ) & -- collected+waited in the shared group, same as cam1/cam3-4.
   (
     timeout "$CLEANUP_SSH_TIMEOUT" sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$PAINTER_IP" "pkill -x frame-probe 2>/dev/null || true
 systemctl stop camera-box-burn-cam2-${RUN_ID} 2>/dev/null || true
@@ -865,7 +914,7 @@ systemctl start cam2-painter 2>/dev/null || true"
   ) &
   CAMBOX_PARALLEL_PIDS+=("$!")
   CAMBOX_PARALLEL_LABELS+=("cam2/painter, $PAINTER_IP")
-  # #713: ONE shared wait for cam1 + (cam3/4/5/6 if ALL_CAMBOX) + cam2/painter -- the whole
+  # #713: ONE shared wait for cam1 + (cam3/4 if ALL_CAMBOX) + cam2/painter -- the whole
   # device-restore phase's wall-clock is now bounded by the SLOWEST single box, not the sum of
   # up to 6 sequential ssh round trips.
   cambox_parallel_wait_and_report
@@ -923,7 +972,7 @@ systemctl start cam2-painter 2>/dev/null || true"
     fi
   done
   # #684: FINAL, INDEPENDENT camera-box.service verify -- the LAST thing cleanup() does, for
-  # EVERY box this run touched (source cam always; cam2/painter always; cam3-6 when
+  # EVERY box this run touched (source cam always; cam2/painter always; cam3-4 when
   # ALL_CAMBOX=1). Live incident (2026-07-11): cam1 was found INACTIVE after BOTH the PR #680 and
   # PR #683 "Full-path E2E" gate runs despite the early-cleanup restore above (#675) -- for the
   # cam1 RUN_ID 1573931971 run (#682) the deploy-launched camera-box-burn-1573931971.service
@@ -940,14 +989,8 @@ systemctl start cam2-painter 2>/dev/null || true"
   timeout "$CLEANUP_SSH_TIMEOUT" sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$CAM1_IP" \
     "$(camera_box_verify_active_cmds "$CAMERA_NAME (source, $CAM1_IP) FINAL")" || true
   if [ "${ALL_CAMBOX:-0}" = "1" ]; then
-    for _cfip in "$CAM3_IP" "$CAM4_IP" "$CAM5_IP" "$CAM6_IP" "$CAM7_IP"; do
-      case "$_cfip" in
-        "$CAM3_IP") _cfcn="cam3" ;;
-        "$CAM4_IP") _cfcn="cam4" ;;
-        "$CAM5_IP") _cfcn="cam5" ;;
-        "$CAM6_IP") _cfcn="cam6" ;;
-        "$CAM7_IP") _cfcn="cam7" ;;
-      esac
+    for _cfcn in $(camera_active_secondary_set); do
+      _cfip="$(camera_secondary_ip "$_cfcn")"
       timeout "$CLEANUP_SSH_TIMEOUT" sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$_cfip" \
         "$(camera_box_verify_active_cmds "$_cfcn ($_cfip) FINAL")" || true
     done
@@ -1054,16 +1097,15 @@ IMAG_RECORDING_STARTED=0
 # only the STRIH_PROG_SOURCE camera measured, the other 5 all "NO SAMPLES"). Extend the SAME
 # single-source-of-truth array the #195 ON-gate and the #246 cleanup() OFF-clear loop already
 # iterate — so this fix automatically covers BOTH ends, never a burn left on that cleanup
-# forgets to clear. The seven canonical strih NDI inputs mirror set-ndi-mapping.py's DEFAULT_MAP
-# (the same fixed list this file's own FROZEN_CAM_SOURCES default already uses) — hardcoded
-# because BURN_TARGETS is defined here, well before CAMBOX_SWEEP is parsed later in the script;
-# a camera genuinely down that run simply never shows a window, so its burn being on-but-unused
-# is harmless (never fabricates a measurement, matching the "never fabricate" convention
-# n_camera_strih_samples/spread_verdict already follow). #753 (2026-07-14): extended 6->7 with
-# "NDI cam7" (cam7's new, fully-provisioned box) — same reasoning, so the fused gate's
-# all_cambox_delivery_latency doesn't silently report "NO SAMPLES" for cam7's windows too.
+# forgets to clear. #827 (2026-07-27, binding owner directive): the strih NDI inputs iterated
+# here DERIVE from CAMERA_ACTIVE_SET (camera-set.sh) — never a second hardcoded list — so
+# re-enabling a retired camera (e.g. cam5) is a one-line CAMERA_ACTIVE_SET edit, picked up here
+# automatically. A camera genuinely down that run simply never shows a window, so its burn being
+# on-but-unused is harmless (never fabricates a measurement, matching the "never fabricate"
+# convention n_camera_strih_samples/spread_verdict already follow).
 if [ "${ALL_CAMBOX:-0}" = "1" ]; then
-  for _acs in "NDI cam1" "NDI cam2" "NDI cam3" "NDI cam4" "NDI cam5" "NDI cam6" "NDI cam7"; do
+  for _acn in $CAMERA_ACTIVE_SET; do
+    _acs="NDI $_acn"
     if [ "$_acs" != "$STRIH_PROG_SOURCE" ]; then
       BURN_TARGETS+=("strih-${_acs// /_}=$STRIH=$_acs")
     fi
@@ -1337,7 +1379,7 @@ sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$CAM1_IP" \
 sleep 4  # let $CAMERA_NAME's NDI sender (with the burn) become discoverable
 preflight_mv_reverify "$CAMERA_NAME" "${CAMERA_NAME#cam}" || exit 1
 
-# #624/#312: the ALL_CAMBOX sweep also cuts cam2/cam3/cam4/cam5/cam6 into strih program —
+# #624/#312: the ALL_CAMBOX sweep also cuts cam2/cam3/cam4 into strih program —
 # without their OWN capture-burn deployed the SAME way as cam1 above, recording-verdict's
 # per-camera all_cambox_latency/contiguity blocks would honestly report null for them (no burn
 # to pair against), which is NOT the real per-camera proof this sweep exists to produce. Mirror
@@ -1351,17 +1393,21 @@ preflight_mv_reverify "$CAMERA_NAME" "${CAMERA_NAME#cam}" || exit 1
 # frame-probe painter (launched next, [3/8]) own /dev/fb0 without stopping cam2's OWN measured
 # capture+NDI-emit chain. Stopping the PERMANENT painter unit (see the guarded stop command
 # below, #440) is unconditionally attempted for every box in the loop — a harmless no-op on
-# cam3/cam4/cam5/cam6 (unit doesn't exist there, `2>/dev/null || true` swallows it) — but is
-# REQUIRED on cam2 to avoid the #328/#440 two-painters-fighting-over-fb0 bug (the permanent
-# service and this loop's transient probe-featured binary must never both hold fb0/run at once).
+# every other active secondary camera (unit doesn't exist there, `2>/dev/null || true` swallows
+# it) — but is REQUIRED on cam2 to avoid the #328/#440 two-painters-fighting-over-fb0 bug (the
+# permanent service and this loop's transient probe-featured binary must never both hold
+# fb0/run at once).
+#
+# #827 (2026-07-27, binding owner directive): the deploy list is cam2 + every camera in
+# camera_active_secondary_set() (camera-set.sh) — the ONE place fleet membership is declared.
+# Re-enabling a retired camera (e.g. cam5) is adding it to CAMERA_ACTIVE_SET there; this loop
+# picks it up automatically, no change needed here.
+CAMBOX_SECONDARY_DEPLOY=("cam2=$PAINTER_IP=$BURN_CAM2_RUN_ID")
+for _scn in $(camera_active_secondary_set); do
+  CAMBOX_SECONDARY_DEPLOY+=("${_scn}=$(camera_secondary_ip "$_scn")=$(camera_secondary_burn_run_id "$_scn")")
+done
 if [ "${ALL_CAMBOX:-0}" = "1" ]; then
-  for _cn_ip_burn in \
-    "cam2=$PAINTER_IP=$BURN_CAM2_RUN_ID" \
-    "cam3=$CAM3_IP=$BURN_CAM3_RUN_ID" \
-    "cam4=$CAM4_IP=$BURN_CAM4_RUN_ID" \
-    "cam5=$CAM5_IP=$BURN_CAM5_RUN_ID" \
-    "cam6=$CAM6_IP=$BURN_CAM6_RUN_ID" \
-    "cam7=$CAM7_IP=$BURN_CAM7_RUN_ID"; do
+  for _cn_ip_burn in "${CAMBOX_SECONDARY_DEPLOY[@]}"; do
     _cn="${_cn_ip_burn%%=*}"; _crest="${_cn_ip_burn#*=}"; _cip="${_crest%%=*}"; _cburn="${_crest#*=}"
     echo "[2b/8] $_cn (${_cip}) — probe-featured camera-box with its OWN capture BURN (run_id=$_cburn, #624/#312 ALL_CAMBOX)"
     _cbin="/tmp/camera-box-burn-${_cn}-${RUN_ID}"
@@ -1392,11 +1438,10 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
          --setenv=NDI_RUNTIME_DIR_V6=/usr/lib/ndi \
          $_cbin"
   done
-  sleep 4  # let cam2/cam3/cam4/cam5/cam6's NDI senders (with their burns) become discoverable
+  sleep 4  # let cam2 + every active secondary camera's NDI senders (with their burns) become discoverable
   # #758 item 2 — sender-bounce re-verify each box's own MV clone, right after the shared settle
   # sleep above (a SEPARATE pass over the same box list, so the settle timing above is unchanged).
-  for _cn_ip_burn in \
-    "cam2=$PAINTER_IP" "cam3=$CAM3_IP" "cam4=$CAM4_IP" "cam5=$CAM5_IP" "cam6=$CAM6_IP" "cam7=$CAM7_IP"; do
+  for _cn_ip_burn in "${CAMBOX_SECONDARY_DEPLOY[@]}"; do
     _cn="${_cn_ip_burn%%=*}"
     preflight_mv_reverify "$_cn" "${_cn#cam}" || exit 1
   done
@@ -1709,17 +1754,21 @@ FROZEN_CAM_RETRY_SLEEP="${FROZEN_CAM_RETRY_SLEEP:-30}"
 # and cam2 itself is no longer skipped a priori — it is excluded here ONLY if its sender name
 # actually matches FROZEN_CAM_EXCLUDE_SENDER at gate time, same as every other input). #753
 # (2026-07-14): widened again to seven — cam7's new 'NDI cam7' input joins the checked set the
-# same way cam5/cam6 did.
+# same way cam5/cam6 did. #827 (2026-07-27, binding owner directive): the checked input set now
+# DERIVES from CAMERA_ACTIVE_SET (camera-set.sh, passed to the python heredoc as an extra arg) —
+# never a second hardcoded list. Re-enabling a retired camera is a one-line CAMERA_ACTIVE_SET
+# edit, picked up here automatically.
 FROZEN_CAM_EXCLUDE_SENDER="${FROZEN_CAM_EXCLUDE_SENDER:-CAM2 (usb)}"
 if [ -z "${FROZEN_CAM_SOURCES:-}" ]; then
-  FROZEN_CAM_SOURCES="$(python3 - "$STRIH" "$FROZEN_CAM_EXCLUDE_SENDER" "$HERE/obs_phase2.py" <<'PYEOF'
+  FROZEN_CAM_SOURCES="$(python3 - "$STRIH" "$FROZEN_CAM_EXCLUDE_SENDER" "$HERE/obs_phase2.py" "$CAMERA_ACTIVE_SET" <<'PYEOF'
 import importlib.util, os, sys
 spec = importlib.util.spec_from_file_location("o", sys.argv[3])
 m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 host, exclude = sys.argv[1], sys.argv[2]
+active_cams = sys.argv[4].split()
 ws = m._conn(host, os.environ.get("OBS_PASSWORD", ""))
 keep = []
-for inp in ["NDI cam1", "NDI cam2", "NDI cam3", "NDI cam4", "NDI cam5", "NDI cam6", "NDI cam7"]:
+for inp in [f"NDI {cam}" for cam in active_cams]:
     try:
         s = m._rpc(ws, "GetInputSettings", {"inputName": inp}).get("inputSettings", {})
         sender = s.get("ndi_source_name", "")
@@ -1741,7 +1790,7 @@ for frozen_attempt in $(seq 1 "$FROZEN_CAM_ATTEMPTS"); do
       --host "$STRIH" \
       --threshold   "${FROZEN_CAM_THRESHOLD:-3}" \
       --samples     "${FROZEN_CAM_SAMPLES:-8}" \
-      --sources     "${FROZEN_CAM_SOURCES:-NDI cam1,NDI cam2,NDI cam3,NDI cam4,NDI cam5,NDI cam6,NDI cam7}" \
+      --sources     "${FROZEN_CAM_SOURCES:-$(camera_active_ndi_sources_csv)}" \
       --warm-settle "${FROZEN_CAM_WARM_SETTLE_S:-3}"; then
     frozen_ok=1
     break
@@ -2433,14 +2482,17 @@ if [ "$TRANSPORT_SAMPLER" = "1" ]; then
   TS_MAX_SECS="${TS_MAX_SECS:-$(( DURATION + 120 ))}"   # orphan-safety ceiling >> the window; [7c/8] stops it promptly
   TS_REMOTE_CSV="/tmp/transport-sampler-${RUN_ID}.csv"
   TS_REMOTE_PID="/tmp/transport-sampler-${RUN_ID}.pid"
-  # Sample the SOURCE cambox always; under the ALL_CAMBOX sweep also sample cam2(painter)+cam3..cam7,
-  # each of which is cut into strih program during the sweep. Plain space-list (no command-sub in a
-  # for-list, so `set -e` at the top of this script can never trip on the expansion). #707
-  # (2026-07-15): cam7 was missing here (fleet grew 6->7, #755, after this list was written) --
-  # LINK could not be auto-ruled-out for its residual events without this coverage.
+  # Sample the SOURCE cambox always; under the ALL_CAMBOX sweep also sample cam2(painter) + every
+  # ACTIVE secondary camera (camera_active_secondary_set(), #827 — the ONE place fleet membership
+  # is declared), each of which is cut into strih program during the sweep. #707 (2026-07-15):
+  # cam7 was missing here (fleet grew 6->7, #755, after this list was written) -- LINK could not
+  # be auto-ruled-out for its residual events without this coverage.
   TRANSPORT_SAMPLER_BOXES="$CAM1_IP"
   if [ "${ALL_CAMBOX:-0}" = "1" ]; then
-    TRANSPORT_SAMPLER_BOXES="$TRANSPORT_SAMPLER_BOXES $PAINTER_IP $CAM3_IP $CAM4_IP $CAM5_IP $CAM6_IP $CAM7_IP"
+    TRANSPORT_SAMPLER_BOXES="$TRANSPORT_SAMPLER_BOXES $PAINTER_IP"
+    for _ts_cn in $(camera_active_secondary_set); do
+      TRANSPORT_SAMPLER_BOXES="$TRANSPORT_SAMPLER_BOXES $(camera_secondary_ip "$_ts_cn")"
+    done
   fi
   echo "[5b/8] transport sampler: arming ss/ip per-box counter sampler (~250ms, ${TS_MAX_SECS}s ceiling) on: $TRANSPORT_SAMPLER_BOXES"
   for _ts_ip in $TRANSPORT_SAMPLER_BOXES; do
@@ -2467,9 +2519,8 @@ ALL_CAMBOX="${ALL_CAMBOX:-0}"
 #
 # #753 PIVOT (2026-07-14, binding user directive): the mapping is now 1:1 -- "chcem aby uz bolo
 # ze cam 1 je cam1 ndi source, nie pomenene" (cam N IS the camN NDI source, not relabeled). Every
-# scene:label pair below is now the literal identity — 'Cam N'->CAMN — for N=1..7:
+# scene:label pair below is now the literal identity — 'Cam N'->CAMN:
 #   'Cam 1'->CAM1(.61)  'Cam 2'->CAM2(.62)  'Cam 3'->CAM3(.63)  'Cam 4'->CAM4(.64)
-#   'Cam 5'->CAM5(.65)  'Cam 6'->CAM6(.66)  'Cam 7'->CAM7(.67)
 # The pre-2026-07-14 OFFSET table this default used to encode (Cam 5->CAM1, Cam 1->CAM3, Cam
 # 3->CAM4, Cam 4->CAM5, unchanged for Cam 2/Cam 6) is HISTORY — see set-ndi-mapping.py's module
 # docstring for the full pre/post record; do NOT reintroduce it.
@@ -2481,8 +2532,10 @@ ALL_CAMBOX="${ALL_CAMBOX:-0}"
 # loop below — so cam2's own chain is JUST AS MEASURABLE as every other camera's, via the SAME
 # digital capture-burn mechanism, recording-verdict.rs's CAMERA_UNDER_TEST_NODES). cam5/cam6
 # (fleet growth 4→6, #451) were added the same way cam3/cam4 were by #624; cam7 (fleet growth
-# 6→7, #753) the same way again — tests/python/test_cambox_sweep_mapping.py cross-checks this
-# default against DEFAULT_MAP so a future re-map can't desync it again.
+# 6→7, #753) the same way again — and #827 (2026-07-27) retired all three (grabber cards
+# returned to their owner, boxes powered off), shrinking the default back to cam1-4.
+# tests/python/test_cambox_sweep_mapping.py cross-checks this default against DEFAULT_MAP so a
+# future re-map can't desync it again.
 #
 # #708 GOTCHA (2026-07-12, HISTORICAL — mooted by the #753 pivot above, kept for context): before
 # 2026-07-14 this scene:label pairing looked like a label->box translation table but wasn't — the
@@ -2492,7 +2545,10 @@ ALL_CAMBOX="${ALL_CAMBOX:-0}"
 # same conclusion (CAMN == camN, no translation needed), now for the simpler reason that there is
 # no inversion left to cancel. See `.claude/skills/e2e` "CORRECTION (2026-07-12, #708)" for the
 # pre-pivot 4-way verification, marked historical there too.
-CAMBOX_SWEEP="${CAMBOX_SWEEP:-Cam 1:CAM1 Cam 2:CAM2 Cam 3:CAM3 Cam 4:CAM4 Cam 5:CAM5 Cam 6:CAM6 Cam 7:CAM7}"
+# #827: derived from CAMERA_ACTIVE_SET (camera-set.sh's camera_active_sweep_pairs) — never a
+# second hardcoded scene:label list. Re-enabling a retired camera (e.g. cam5) is adding it to
+# CAMERA_ACTIVE_SET; this default picks it up automatically.
+CAMBOX_SWEEP="${CAMBOX_SWEEP:-$(camera_active_sweep_pairs)}"
 SEGMENT_SECS="${SEGMENT_SECS:-30}"
 if [ "$ALL_CAMBOX" = "1" ]; then
   # #332: the all-cambox sweep now runs on the DEFAULT decode-on-stream path (VERDICT_ON_STREAM=1,

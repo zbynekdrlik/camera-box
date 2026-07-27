@@ -92,6 +92,12 @@ set -euo pipefail
 # three scripts. Sourced here (before the source-guard) so both the executed flow and the unit tests
 # that source this script get the constant + builder.
 RIG_MODE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# #827 (binding owner directive): camera-set.sh's CAMERA_ACTIVE_SET is the ONE declared list of
+# cameras physically installed today — enforce_strih_ndi_mapping() below passes it straight
+# through to set-ndi-mapping.py's own --active flag, and event_mode_assert()'s fleet sweep
+# derives its box list from it too, so re-enabling a retired camera never needs a change here.
+# shellcheck source=scripts/camera-set.sh
+. "$RIG_MODE_DIR/camera-set.sh"
 # shellcheck source=scripts/lib/rig-test-dropin.sh
 . "$RIG_MODE_DIR/lib/rig-test-dropin.sh"
 # #420/#421: SINGLE SOURCE OF TRUTH for the QPSK audio-marker AUDIBLE self-check (ALSA CARD/DEV
@@ -139,13 +145,31 @@ RIG_MODE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CAM_PW="${CAM_PW:-newlevel}"                 # dev-rig LAN root pw (same as the sibling e2e scripts)
 PAINTER_IP="${PAINTER_IP:-10.77.9.62}"       # cam2 — has /dev/fb0 + the monitor the broadcast cam films
 CAM1_IP="${CAM1_IP:-10.77.9.61}"             # cam1 — the SOURCE camera (NOT reconfigured here; for the print)
-# #722: the FULL fleet (cam1-6, targets.md) — used only by the EVENT-mode CONTRACT's fleet-wide
+# #722: the FULL fleet (targets.md) — used only by the EVENT-mode CONTRACT's fleet-wide
 # paint-process/service/stray-unit sweep (event_mode_assert). cam2 already has PAINTER_IP; the
 # rest were never previously needed as rig-mode.sh constants (only cam2 is reconfigured here).
+# #827 (2026-07-27, binding owner directive): cam5/cam6/cam7's IPs stay declared as FACTS even
+# though they are retired from CAMERA_ACTIVE_SET today (grabber cards returned to their owner,
+# boxes powered off) — event_mode_assert()'s sweep derives WHICH of these actually get swept
+# entirely from camera_active_secondary_set() (camera-set.sh, sourced above), never from a
+# second hardcoded list here.
 CAM3_IP="${CAM3_IP:-10.77.9.63}"
 CAM4_IP="${CAM4_IP:-10.77.9.64}"
 CAM5_IP="${CAM5_IP:-10.77.9.65}"
 CAM6_IP="${CAM6_IP:-10.77.9.66}"
+CAM7_IP="${CAM7_IP:-10.77.9.67}"
+# rig_mode_secondary_ip NAME -> the fixed IP for a non-source, non-painter camera name. Mirrors
+# recording-e2e.sh's camera_secondary_ip() shape (single lookup site, same facts).
+rig_mode_secondary_ip() {
+  case "$1" in
+    cam3) printf '%s' "$CAM3_IP" ;;
+    cam4) printf '%s' "$CAM4_IP" ;;
+    cam5) printf '%s' "$CAM5_IP" ;;
+    cam6) printf '%s' "$CAM6_IP" ;;
+    cam7) printf '%s' "$CAM7_IP" ;;
+    *) echo "rig_mode_secondary_ip: unknown secondary camera '$1'" >&2; return 1 ;;
+  esac
+}
 PAINTER_BIN="${PAINTER_BIN:-/usr/local/bin/frame-probe}"
 QR_SIZE="${QR_SIZE:-700}"
 PAINTER_FPS="${PAINTER_FPS:-60}"             # painter rate — MUST match the 60fps capture (#290)
@@ -537,16 +561,21 @@ toggle_burn() {
 }
 
 # enforce_strih_ndi_mapping -> set + VERIFY the strih NDI-input→camera mapping (#399) over OBS WS.
-# The mapping is fixed + Claude-owned (never a user question): NDI cam5→CAM1, cam1→CAM3, cam3→CAM4,
-# cam2→CAM2 (the pins in set-ndi-mapping.py). It drifts (recurring bug: two inputs both on CAM4 → a
-# camera shows twice, another missing), and a hot WS rebind does not survive a force-kill relaunch —
-# so rig activation ENFORCES it every time here instead of the operator/agent re-doing it by hand.
-# Fail-loud (non-zero) if it cannot make all 7 distinct (#753: fleet growth 6->7, cam7 added).
+# The mapping is fixed + Claude-owned (never a user question): NDI cam1→CAM1, cam2→CAM2, cam3→CAM3,
+# cam4→CAM4 (the pins in set-ndi-mapping.py; #753 1:1 pivot). It drifts (recurring bug: two inputs
+# both on CAM4 → a camera shows twice, another missing), and a hot WS rebind does not survive a
+# force-kill relaunch — so rig activation ENFORCES it every time here instead of the
+# operator/agent re-doing it by hand. Fail-loud (non-zero) if it cannot make all pins distinct.
+# #827 (2026-07-27, binding owner directive): passes CAMERA_ACTIVE_SET (camera-set.sh, sourced
+# above) straight through as set-ndi-mapping.py's own --active filter -- ONE declared list, never
+# a second hardcoded enumeration here. Re-enable procedure: cam5 back? add "cam5" to
+# CAMERA_ACTIVE_SET in scripts/camera-set.sh, rerun the gate.
 enforce_strih_ndi_mapping() {
   local here rc=0
   here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || here=""
-  echo "[obs strih ${STRIH_IP}] #399 enforce NDI-input→camera mapping (7 distinct) over WebSocket:"
+  echo "[obs strih ${STRIH_IP}] #399 enforce NDI-input→camera mapping (distinct) over WebSocket (active: ${CAMERA_ACTIVE_SET}):"
   python3 "$here/set-ndi-mapping.py" --host "$STRIH_IP" --password "$OBS_WS_PASSWORD" \
+    --active "$CAMERA_ACTIVE_SET" \
     2>&1 | sed 's/^/    [strih ndi-map] /' || rc=$?
   return $rc
 }
@@ -789,9 +818,15 @@ event_mode_assert() {
   echo "[#722] EVENT-mode CONTRACT -- gathering the 8-item assert-phase facts:"
 
   # --- item 1 + part of item 5: fleet paint-process / service / stray-unit sweep -------------
+  # #827: the sweep target list is cam1 + cam2(painter) + every camera in
+  # camera_active_secondary_set() (camera-set.sh) -- the ONE place fleet membership is declared.
   local paint_json="{}" active_json="{}" stray_json="{}"
   local box_ip box ip out pc sa su
-  for box_ip in "cam1=$CAM1_IP" "cam2=$PAINTER_IP" "cam3=$CAM3_IP" "cam4=$CAM4_IP" "cam5=$CAM5_IP" "cam6=$CAM6_IP"; do
+  local -a EVENT_ASSERT_TARGETS=("cam1=$CAM1_IP" "cam2=$PAINTER_IP")
+  for box in $(camera_active_secondary_set); do
+    EVENT_ASSERT_TARGETS+=("${box}=$(rig_mode_secondary_ip "$box")")
+  done
+  for box_ip in "${EVENT_ASSERT_TARGETS[@]}"; do
     box="${box_ip%%=*}"; ip="${box_ip#*=}"
     out="$(fleet_ssh "$ip" "$(event_assert_fleet_check_cmds)" 2>/dev/null || true)"
     pc="$(printf '%s' "$out" | grep -oP 'PAINT_COUNT=\K[0-9]+' || true)"; [ -n "$pc" ] || pc=-1

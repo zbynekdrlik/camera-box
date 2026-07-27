@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Single source of truth for the cam1-6 set (#24; extended to cam5-6 by #451).
+# Single source of truth for the camera-box FLEET (#24; grew to cam1-7 by #451/#753).
 #
 # The frame-loss orchestrators (scripts/loopback-e2e.sh, scripts/recording-e2e.sh) source
-# this and resolve a camera NAME (cam1..cam6) to its device IP and NDI source name, instead
-# of baking cam2 in. The map is authoritative per CLAUDE.md / targets.md:
+# this and resolve a camera NAME to its device IP and NDI source name, instead of baking
+# cam2 in. The map is authoritative per CLAUDE.md / targets.md:
 #
 #   cam1 -> 10.77.9.61 / "CAM1 (usb)"
 #   cam2 -> 10.77.9.62 / "CAM2 (usb)"   (the off-air development rig; the default everywhere)
@@ -14,6 +14,31 @@
 #   cam7 -> 10.77.9.67 / "CAM7 (usb)"   (#753 — real box built + provisioned 2026-07-14,
 #                                        fleet growing 6->7, Elgato 4K S grabber)
 #
+# #827 (2026-07-27) — cam5/cam6/cam7 RETIRED from the ACTIVE fleet: their USB grabber cards
+# were returned to their owner and those boxes are powered off. Per BINDING owner directive
+# (2026-07-27, posted on #827): the retirement MUST be trivially REVERSIBLE — "dufam ze to
+# odobratie cam5 az cam7 urobis tak aby ked zasa budu k dispozicii si to vedel znova lahko
+# povolit" (when those boxes come back, re-enabling them must be a one-line change, never
+# archaeology through a deleted diff). So EVERY per-camera fact for cam5/cam6/cam7 (IP, NDI
+# source name, genlock fps, strih scene/NDI-input route) stays intact below, fully resolvable —
+# retirement is expressed ONLY as membership in `CAMERA_ACTIVE_SET`, never as a deleted case arm.
+#
+# **CAMERA_ACTIVE_SET is the ONE declared list of cameras physically installed and active TODAY.**
+# Every fleet-wide consumer (recording-e2e.sh's preflight/sweep/burn-target loops,
+# set-ndi-mapping.py's enforced pins via its own --active flag, deploy-fleet.sh/verify-fleet.sh/
+# upgrade-fleet-ndi.sh's CAMERA_SET fallback, .github/workflows/full-path-e2e.yml indirectly via
+# recording-e2e.sh) DERIVES its working set from this ONE line — never a second hardcoded
+# enumeration of "which cams exist right now".
+#
+# **RE-ENABLE PROCEDURE (the whole point of this design):** a retired camera (e.g. cam5) coming
+# back online is re-activated by adding its name back to CAMERA_ACTIVE_SET below (or overriding
+# the env var for a one-off run: `CAMERA_ACTIVE_SET="cam1 cam2 cam3 cam4 cam5" ...`). Nothing
+# else needs to change — camera_resolve/camera_strih_route already know it fully, and every
+# consumer that derives from CAMERA_ACTIVE_SET (or camera_active_secondary_set below) picks it up
+# automatically on its next run. See tests/harness_camera_set.rs's
+# `camera_active_set_env_override_reactivates_a_retired_camera` for the proof this actually works.
+CAMERA_ACTIVE_SET="${CAMERA_ACTIVE_SET:-cam1 cam2 cam3 cam4}"
+
 # This file is meant to be SOURCED, not executed — it defines functions and a default, and
 # performs no side effects on its own. Direct execution prints the resolved default set.
 #
@@ -22,10 +47,12 @@
 # `case` match on a literal set never executes the value — an unknown/hostile name simply
 # falls through to the `*)` reject arm and returns nonzero.
 
-# CAMERA_SET = the ordered list a "drive the whole set" loop iterates over. Override to run a
-# subset, e.g. `CAMERA_SET="cam1 cam3 cam4"`. Defaults to all seven real cameras (#451/#753 —
-# cam7 is a real, fully-provisioned box as of 2026-07-14, 10.77.9.67, Elgato 4K S).
-CAMERA_SET="${CAMERA_SET:-cam1 cam2 cam3 cam4 cam5 cam6 cam7}"
+# CAMERA_SET = the ordered list a "drive the whole set" loop iterates over (deploy-fleet.sh,
+# verify-fleet.sh, upgrade-fleet-ndi.sh). Override to run a subset, e.g. `CAMERA_SET="cam1 cam3"`,
+# or to include a retired-but-still-defined camera for a one-off manual op, e.g.
+# `CAMERA_SET="$CAMERA_ACTIVE_SET cam5"`. Defaults to the ACTIVE set (#827) — never a second,
+# independently-maintained camera list.
+CAMERA_SET="${CAMERA_SET:-$CAMERA_ACTIVE_SET}"
 
 # GENLOCK_FPS = the genlock/broadcast emit rate the harness starts the manual camera-box
 # sender at, so it wall-paces EXACTLY like the deployed camera-box service (#66). The deployed
@@ -50,6 +77,13 @@ GENLOCK_FPS="${GENLOCK_FPS:-60}"
 # On an unknown/empty name: prints an error to stderr and returns 1 (fail loudly — never silently
 # fall back to cam2 and certify the wrong box).
 #
+# This resolves EVERY camera the fleet has ever wired (cam1-cam7), REGARDLESS of
+# CAMERA_ACTIVE_SET — resolution is a FACT lookup, not a policy decision. Whether a resolved
+# camera is currently part of the active fleet is `camera_is_active`'s job (below), consumed by
+# callers that care (recording-e2e.sh's SOURCE-camera selection, the ALL_CAMBOX secondary sweep).
+# This split is deliberate (#827, binding owner directive): retiring cam5/cam6/cam7 from the
+# active fleet must never require deleting their facts here.
+#
 # CAMERA_GENLOCK_FPS (#451) is the AUTHORITATIVE per-camera genlock emit rate table — distinct
 # from the global harness-only GENLOCK_FPS above. Every camera in the program-feeding fleet
 # emits at 60fps today; this per-name table is the single place a future per-camera divergence
@@ -72,11 +106,12 @@ camera_resolve() {
     cam2) CAMERA_IP=10.77.9.62; CAMERA_SOURCE="CAM2 (usb)"; CAMERA_GENLOCK_FPS=60 ;;
     cam3) CAMERA_IP=10.77.9.63; CAMERA_SOURCE="CAM3 (usb)"; CAMERA_GENLOCK_FPS=60 ;;
     cam4) CAMERA_IP=10.77.9.64; CAMERA_SOURCE="CAM4 (usb)"; CAMERA_GENLOCK_FPS=60 ;;
+    # #827 (2026-07-27): cam5/cam6/cam7 are RETIRED from CAMERA_ACTIVE_SET (grabber cards
+    # returned, boxes powered off) but their FACTS stay fully resolvable here — see this file's
+    # header note. Re-enabling one of them is adding its name back to CAMERA_ACTIVE_SET, never
+    # restoring a deleted case arm.
     cam5) CAMERA_IP=10.77.9.65; CAMERA_SOURCE="CAM5 (usb)"; CAMERA_GENLOCK_FPS=60 ;;
     cam6) CAMERA_IP=10.77.9.66; CAMERA_SOURCE="CAM6 (usb)"; CAMERA_GENLOCK_FPS=60 ;;
-    # cam7: real box built 2026-07-14 (M.2 install, provisioned via setup-device.sh CAM7).
-    # NOT yet in CAMERA_SET / camera_strih_route -- strih OBS has no 'NDI cam7' input/scene yet;
-    # wire those (and only then extend the sweep/fleet loops) as the follow-up step.
     cam7) CAMERA_IP=10.77.9.67; CAMERA_SOURCE="CAM7 (usb)"; CAMERA_GENLOCK_FPS=60 ;;
     *)
       echo "camera-set: unknown camera '${name}' (expected one of: cam1 cam2 cam3 cam4 cam5 cam6 cam7)" >&2
@@ -87,16 +122,76 @@ camera_resolve() {
   return 0
 }
 
+# camera_is_active <name> -> returns 0 iff NAME is a word in CAMERA_ACTIVE_SET, 1 otherwise.
+# This is the ONLY place "is this camera currently part of the live fleet?" is decided — callers
+# NEVER re-derive it by checking CAMERA_ACTIVE_SET's text themselves (a substring check would
+# wrongly match e.g. "cam1" inside a hypothetical "cam10"). Word-exact match via a `case` over a
+# space-padded haystack — same injection-safety posture as camera_resolve (#39): NAME is never
+# eval'd or word-split as a command.
+camera_is_active() {
+  local name="${1:-}"
+  case " ${CAMERA_ACTIVE_SET} " in
+    *" ${name} "*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# camera_active_secondary_set -> prints (space-separated, stdout) CAMERA_ACTIVE_SET with cam1 and
+# cam2 removed — the "other camera-under-test boxes" the ALL_CAMBOX sweep cuts into strih program
+# alongside the resolved SOURCE camera (cam1 role) and the fixed painter (cam2). This is the ONE
+# place recording-e2e.sh's preflight/deploy/restore/transport-sampler loops derive their
+# secondary-camera membership from — adding/removing a camera from CAMERA_ACTIVE_SET flows
+# through here automatically, never a second independently-maintained list.
+camera_active_secondary_set() {
+  local cam out=""
+  for cam in $CAMERA_ACTIVE_SET; do
+    case "$cam" in
+      cam1|cam2) continue ;;
+      *) out="${out:+$out }$cam" ;;
+    esac
+  done
+  printf '%s' "$out"
+}
+
+# camera_active_sweep_pairs -> prints (space-separated, stdout) "Cam N:CAMN" pairs for EVERY
+# camera in CAMERA_ACTIVE_SET, in its own order — the canonical scene:label format
+# scripts/recording-e2e.sh's CAMBOX_SWEEP default derives from (#827). Mirrors the #753 1:1
+# mapping (scene "Cam N" shows camera camN) exactly — never re-derive that mapping separately.
+camera_active_sweep_pairs() {
+  local cam n out=""
+  for cam in $CAMERA_ACTIVE_SET; do
+    n="${cam#cam}"
+    out="${out:+$out }Cam ${n}:CAM${n}"
+  done
+  printf '%s' "$out"
+}
+
+# camera_active_ndi_sources_csv -> prints (stdout) "NDI cam1,NDI cam2,..." -- a comma-joined
+# strih NDI-input list, one per camera in CAMERA_ACTIVE_SET. Used as the frozen-camera-gate's
+# bash-level fallback default (scripts/recording-e2e.sh) when its own python-derived list comes
+# back empty -- so that fallback also derives from CAMERA_ACTIVE_SET, never a second literal.
+camera_active_ndi_sources_csv() {
+  local cam out=""
+  for cam in $CAMERA_ACTIVE_SET; do
+    out="${out:+$out,}NDI $cam"
+  done
+  printf '%s' "$out"
+}
+
 # camera_strih_route <name>
 # On success: sets CAMERA_STRIH_SCENE / CAMERA_STRIH_SOURCE -- the strih OBS scene, and its
 # underlying NDI-input name, that shows this physical camera's feed on the certified prod
 # program -- and returns 0. On any camera NOT wired as a strih-routed SOURCE camera (an unknown
 # name, or cam2 -- see below) prints an error to stderr and returns 1.
 #
+# Like camera_resolve above, this is a FACT lookup (cam1/cam3/cam4/cam5/cam6/cam7 all resolve,
+# REGARDLESS of CAMERA_ACTIVE_SET) — never a policy decision. #827: retiring cam5/cam6/cam7 from
+# the active fleet does not remove their strih routes here.
+#
 # #24 item 1: extracted so scripts/recording-e2e.sh's single-node full-path launch can drive
-# cam1, cam3, OR cam4 as the dedicated SOURCE camera (the box filming cam2's monitor, carrying
-# the #174 render-time capture burn) instead of being hard-coded to cam1. #312 (fleet growth
-# 4->6, #451) extends this to cam5/cam6 too.
+# cam1, cam3, cam4, cam5, cam6, OR cam7 as the dedicated SOURCE camera (the box filming cam2's
+# monitor, carrying the #174 render-time capture burn) instead of being hard-coded to cam1. #312
+# (fleet growth 4->6, #451) extends this to cam5/cam6; #753 to cam7.
 #
 # cam2 is DELIBERATELY NOT a case here, and never should be: recording-e2e.sh's `$CAMERA_NAME`
 # default IS "cam2" (back-compat, see below) while `$PAINTER_IP` is ALSO hardcoded to cam2's
@@ -117,18 +212,13 @@ camera_resolve() {
 # #753 PIVOT (2026-07-14, binding user directive): the mapping is now 1:1 -- "chcem aby uz bolo
 # ze cam 1 je cam1 ndi source, nie pomenene" (cam N IS the camN NDI source, not relabeled). The
 # pre-2026-07-14 offset table (cam1->"Cam 5"/"NDI cam5", cam3->"Cam 1"/"NDI cam1", etc) is HISTORY
-# -- see set-ndi-mapping.py's module docstring for the full pre/post record. Each camera's
-# individually-tuned genlock latency MOVED WITH the physical camera during the live rebind
-# (unchanged VALUES: CAM4=20ms, CAM5=8ms, CAM6=13ms, every other camera=3ms -- just re-attached to
-# the input that now actually carries that camera).
+# -- see set-ndi-mapping.py's module docstring for the full pre/post record.
 #   NDI cam1 -> CAM1 (usb)   =>  cam1 shows on scene "Cam 1" / source "NDI cam1"
 #   NDI cam3 -> CAM3 (usb)   =>  cam3 shows on scene "Cam 3" / source "NDI cam3"
 #   NDI cam4 -> CAM4 (usb)   =>  cam4 shows on scene "Cam 4" / source "NDI cam4"
 #   NDI cam5 -> CAM5 (usb)   =>  cam5 shows on scene "Cam 5" / source "NDI cam5"
 #   NDI cam6 -> CAM6 (usb)   =>  cam6 shows on scene "Cam 6" / source "NDI cam6"
-#   NDI cam7 -> CAM7 (usb)   =>  cam7 shows on scene "Cam 7" / source "NDI cam7" (#753: added the
-#                                same day the pivot landed, so it was NEVER on the old offset
-#                                table -- always 1:1)
+#   NDI cam7 -> CAM7 (usb)   =>  cam7 shows on scene "Cam 7" / source "NDI cam7"
 # Literal `case` match (#39 injection-safe, same threat model as camera_resolve above) --
 # an unknown/hostile name runs no command, it just falls through to the reject arm.
 camera_strih_route() {
@@ -163,4 +253,6 @@ if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
   if camera_strih_route "$CAMERA" 2>/dev/null; then
     printf 'STRIH_SCENE=%q STRIH_SOURCE=%q\n' "$CAMERA_STRIH_SCENE" "$CAMERA_STRIH_SOURCE"
   fi
+  printf 'CAMERA_ACTIVE_SET=%q\n' "$CAMERA_ACTIVE_SET"
+  printf 'CAMERA_ACTIVE_SECONDARY_SET=%q\n' "$(camera_active_secondary_set)"
 fi
