@@ -444,10 +444,23 @@ step 6 "Boot safety net (#487): kernel apt-hold + initrd-guarantee hook + unatte
 # failed -- track the real outcome so the summary line reflects reality instead of asserting
 # success next to (or instead of) the WARNING.
 KERNEL_HOLD_OK=1
-apt-mark hold linux-image-generic-hwe-24.04 linux-headers-generic-hwe-24.04 \
-    linux-generic-hwe-24.04 "linux-headers-$(uname -r)" "linux-image-$(uname -r)" \
-    >/dev/null 2>&1 \
-    || { KERNEL_HOLD_OK=0; echo "  WARNING: apt-mark hold of the generic kernel packages failed"; }
+# #820: hold ONLY packages this box actually has installed. Holding a NOT-installed name is not a
+# no-op — apt then refuses any later install that would pull it in, and step 7's
+# linux-lowlatency-hwe-24.04 depends on exactly these HWE packages ("E: Held packages were changed
+# and -y was used without --allow-change-held-packages"). Provisioning held itself out of its own
+# next step on the replacement notebook (.187, 2026-07-27).
+KERNEL_HOLD_PKGS=()
+for p in linux-image-generic-hwe-24.04 linux-headers-generic-hwe-24.04 linux-generic-hwe-24.04 \
+    "linux-headers-$(uname -r)" "linux-image-$(uname -r)"; do
+    dpkg -s "$p" >/dev/null 2>&1 && KERNEL_HOLD_PKGS+=("$p")
+done
+if [ "${#KERNEL_HOLD_PKGS[@]}" -eq 0 ]; then
+    KERNEL_HOLD_OK=0
+    echo "  WARNING: no installed generic-kernel package found to hold — kernel NOT pinned"
+else
+    apt-mark hold "${KERNEL_HOLD_PKGS[@]}" >/dev/null 2>&1 \
+        || { KERNEL_HOLD_OK=0; echo "  WARNING: apt-mark hold of the generic kernel packages failed"; }
+fi
 cat > /etc/apt/apt.conf.d/51imag-kernel-lockdown <<'EOF'
 // #487: the kernel is pinned (apt-mark hold) -- never let unattended-upgrades touch it, and never
 // let it reboot the box unattended. Automatic-Reboot is already Ubuntu's default (false); pinning
@@ -526,7 +539,11 @@ step 7 "Low-latency kernel (#482): preempt=full via lowlatency-kernel config —
 # `apt-get install` on an already-installed package is already a no-op.
 if ! dpkg -s lowlatency-kernel >/dev/null 2>&1; then
     apt-get update -qq
-    DEBIAN_FRONTEND=noninteractive apt-get install -y linux-lowlatency-hwe-24.04 >/dev/null \
+    # #820: --allow-change-held-packages so step 6's own kernel hold can never block this install
+    # (the lowlatency meta depends on the very HWE packages step 6 pins). Step 6 re-holds nothing
+    # here; the hold is restored on the next provisioning pass, and the lowlatency packages get
+    # their own hold right below.
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --allow-change-held-packages linux-lowlatency-hwe-24.04 >/dev/null \
         || fail "linux-lowlatency-hwe-24.04 install failed"
 fi
 [ -f /etc/default/grub.d/99-lowlatency.cfg ] \

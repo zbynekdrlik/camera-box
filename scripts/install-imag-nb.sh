@@ -317,11 +317,14 @@ echo "root:${DESKTOP_PW}" | chpasswd
 apt-get update -qq
 apt-get install -y --no-install-recommends openssh-server network-manager grub-efi-amd64 grub-efi-amd64-signed shim-signed >/dev/null
 
-# The ISO's install layers ship NO kernel (see copy_rootfs) — pull one from apt. \`linux-generic\`
-# brings image + modules + headers (headers matter for any later DKMS driver). setup-imag.sh may
-# swap in the lowlatency HWE kernel afterwards; this is the bootable baseline.
+# The ISO's install layers ship NO kernel (see copy_rootfs) — pull one from apt. It MUST be the
+# **HWE** chain (\`linux-generic-hwe-24.04\`, image + modules + headers), not the GA one (#819):
+# the imag role runs the HWE line (the incumbent box is on 6.17), setup-imag.sh step 6 holds the
+# HWE package names and step 7 installs linux-lowlatency-hwe-24.04 whose deps ARE those packages —
+# a GA baseline aborts provisioning ("Depends: linux-image-generic-hwe-24.04 … not going to be
+# installed") and drops the 13th-gen CPU/iGPU/USB-NIC support #482 deliberately kept.
 if ! ls /boot/vmlinuz-* >/dev/null 2>&1; then
-    apt-get install -y linux-generic >/dev/null || exit 1
+    apt-get install -y linux-generic-hwe-24.04 >/dev/null || exit 1
 fi
 ls /boot/vmlinuz-* >/dev/null 2>&1 || { echo "no kernel installed in the chroot" >&2; exit 1; }
 

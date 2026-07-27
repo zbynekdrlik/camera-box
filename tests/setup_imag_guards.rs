@@ -1193,13 +1193,28 @@ fn setup_imag_boot_safety_net_precedes_lowlatency_and_isolation_steps() {
 #[test]
 fn setup_imag_holds_generic_kernel_packages_487() {
     let body = read(SETUP);
-    const HOLD_CMD: &str =
-        "apt-mark hold linux-image-generic-hwe-24.04 linux-headers-generic-hwe-24.04";
+    // #820: the hold is now built from the packages that are actually INSTALLED — holding a
+    // not-installed HWE name blocked step 7's own lowlatency install. Same pin, gated by dpkg.
+    for pkg in [
+        "linux-image-generic-hwe-24.04",
+        "linux-headers-generic-hwe-24.04",
+        "linux-generic-hwe-24.04",
+    ] {
+        assert!(
+            body.contains(pkg),
+            "{SETUP} must still pin `{pkg}` (imag runs the HWE kernel line, not the plain \
+             -generic names the cam fleet's setup-device.sh uses) so a surprise kernel can never \
+             be installed (#487, extends #295)"
+        );
+    }
     assert!(
-        body.contains(HOLD_CMD),
-        "{SETUP} must run `{HOLD_CMD}` (imag runs the HWE kernel line, not the plain -generic \
-         names the cam fleet's setup-device.sh uses) so a surprise kernel can never be installed \
-         (#487, extends #295)"
+        body.contains("apt-mark hold \"${KERNEL_HOLD_PKGS[@]}\""),
+        "{SETUP} must apt-mark hold the collected kernel package list (#487/#820)"
+    );
+    assert!(
+        body.contains("dpkg -s \"$p\" >/dev/null 2>&1 && KERNEL_HOLD_PKGS+=(\"$p\")"),
+        "{SETUP} must hold ONLY installed kernel packages — a hold on a not-installed name makes \
+         apt refuse step 7's linux-lowlatency-hwe-24.04 install (#820, live on .187)"
     );
 }
 
@@ -1330,7 +1345,9 @@ fn setup_imag_safe_grub_regen_helper_defined_with_full_295_contract() {
 fn setup_imag_installs_lowlatency_config_not_a_kernel_downgrade_482() {
     let body = read(SETUP);
     assert!(
-        body.contains("apt-get install -y linux-lowlatency-hwe-24.04"),
+        body.contains(
+            "apt-get install -y --allow-change-held-packages linux-lowlatency-hwe-24.04"
+        ),
         "{SETUP} must install linux-lowlatency-hwe-24.04 (#482) — the meta/config package that \
          pulls in `lowlatency-kernel` without swapping the kernel image"
     );
