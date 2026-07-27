@@ -150,6 +150,26 @@ imag_pick_ndi_peer() {
     fail "no reachable cam box among the NDI runtime candidates — cannot fetch the fleet NDI runtime"
 }
 
+# imag_resolve_ndi_peer  (args: candidate hosts, default $NDI_PEER_CANDIDATES) -> the first
+# REACHABLE one on stdout. Probes every candidate into a BUFFER first, then feeds the picker —
+# never `for … | imag_pick_ndi_peer`. The picker returns on the first "up" line, which closes the
+# pipe, so a still-running writer loop dies on SIGPIPE and `set -euo pipefail` fails the WHOLE
+# substitution: the live .187 provisioning run aborted with a bare `exit 1` and zero output while
+# cam1 was up and answering. Same trap this script already documents at its `ldconfig | grep -q`
+# site — buffer first, pipe once.
+imag_resolve_ndi_peer() {
+    local candidates=("$@") probe="" h
+    [ "${#candidates[@]}" -gt 0 ] || read -r -a candidates <<<"$NDI_PEER_CANDIDATES"
+    for h in "${candidates[@]}"; do
+        if ping -c1 -W1 "$h" >/dev/null 2>&1; then
+            probe="${probe}${h} up"$'\n'
+        else
+            probe="${probe}${h} down"$'\n'
+        fi
+    done
+    printf '%s' "$probe" | imag_pick_ndi_peer
+}
+
 # verify_file_sha FILE EXPECTED_SHA LABEL -> fail loud on any mismatch (corrupted/tampered file).
 verify_file_sha() {
     local f="$1" want="$2" label="$3" got
@@ -180,11 +200,8 @@ fi
 # an unrelated notebook. `ping -c1 -W1` per candidate: fast, and reachability is exactly what the
 # later scp needs. NDI_PEER pinned by env skips the probe entirely.
 if [ -z "$NDI_PEER" ]; then
-    NDI_PEER="$(
-        for h in $NDI_PEER_CANDIDATES; do
-            if ping -c1 -W1 "$h" >/dev/null 2>&1; then printf '%s up\n' "$h"; else printf '%s down\n' "$h"; fi
-        done | imag_pick_ndi_peer
-    )" || exit 1
+    NDI_PEER="$(imag_resolve_ndi_peer)" \
+        || fail "#816: could not resolve an NDI runtime peer from: ${NDI_PEER_CANDIDATES} — pin one with NDI_PEER=<ip> if the fleet is down"
     echo "  #816: NDI runtime peer = ${NDI_PEER} (first reachable of: ${NDI_PEER_CANDIDATES})"
 fi
 
