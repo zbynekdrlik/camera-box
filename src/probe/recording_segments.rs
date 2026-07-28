@@ -1212,4 +1212,81 @@ mod tests {
         );
         assert!(v.residual_events.is_empty());
     }
+
+    #[test]
+    fn residual_gap_events_can_be_nonzero_while_authoritative_gaps_stays_zero_852() {
+        // #852 — reproduces run 1867252327's exact puzzle: `all_cambox_continuity` reported
+        // EVERY segment's authoritative `gaps` field as 0, yet `residual_events` reported 388
+        // Gap-kind events fleet-wide. Investigation (issue comment) found this is NOT a
+        // contradiction: every one of the 388 real events had a recorded-order delta in [11,53]
+        // (`missing_slots` 4-25) -- moderate jumps fully explained by that run's own ~64%
+        // fleet-wide `undecodable` rate. `gaps` (order-independent, credits `undecodable` as
+        // plausible slot-fillers -- #625/#681) correctly finds no PROVEN loss; `residual_events`
+        // (deliberately UNCREDITED recorded-order forensics -- see its own module doc) correctly
+        // flags each moderate jump as a locatable candidate anyway, because its outlier
+        // threshold (`GAP_OUTLIER_ABS_DELTA=10`) was calibrated on the #707 anatomy investigation's
+        // CLEAN sample recordings, where routine catch-up deltas never exceeded 8. Neither
+        // metric is wrong; they intentionally diverge under high `undecodable`. This test locks
+        // that divergence so a future change never wires `residual_events` into `pass`, and
+        // never "corrects" `gaps` to match it (which would silently break the already-proven
+        // #625/#681 credit logic).
+        let schedule = vec![win("cam1", 0, 100_000)];
+        let mut frames: Vec<SegmentFrame> = Vec::new();
+        let mut idx: u64 = 0;
+        let mut ts: i64 = 0;
+        // 9 present ticks: two delta=14 transitions (beyond the |Δ|>10 outlier ceiling), the
+        // rest routine step-2 advances -- mirrors the real run's own delta shape (median 15).
+        for t in [1000u32, 1002, 1004, 1018, 1020, 1022, 1036, 1038, 1040] {
+            ts += 100;
+            frames.push(SegmentFrame {
+                frame_index: idx,
+                gen_ts_ns: ts,
+                tick: Some(t),
+            });
+            idx += 1;
+        }
+        // 15 undecodable frames -- ample credit for the whole-window net-span deficit
+        // ((1040-1000)/2 + 1 = 21 expected - 9 present = 12), so `gaps` nets to 0.
+        for _ in 0..15 {
+            ts += 100;
+            frames.push(SegmentFrame {
+                frame_index: idx,
+                gen_ts_ns: ts,
+                tick: None,
+            });
+            idx += 1;
+        }
+        let v = segment_continuity(&frames, &schedule, 0, 2);
+        let seg = &v.segments[0];
+        assert_eq!(seg.undecodable, 15);
+        assert_eq!(
+            seg.gaps, 0,
+            "whole-window net span (12) is fully credited by 15 undecodable slots: {seg:?}"
+        );
+        let gap_events: Vec<_> = seg
+            .residual_events
+            .iter()
+            .filter(|e| e.kind == crate::residual_events::ResidualEventKind::Gap)
+            .collect();
+        assert_eq!(
+            gap_events.len(),
+            2,
+            "both delta=14 transitions exceed GAP_OUTLIER_ABS_DELTA(10) as UNCREDITED \
+             recorded-order forensics, even though the credited `gaps` field is 0: {gap_events:?}"
+        );
+        for e in &gap_events {
+            assert_eq!(
+                e.missing_slots,
+                Some(6),
+                "delta 14 at expected_step 2 -> (14/2)-1 = 6 missing slots: {e:?}"
+            );
+        }
+        // The segment still correctly FAILS: `undecodable>0` is an independent, deliberate
+        // `pass` criterion (real confidence in zero-loss, not just "no PROVEN hole") -- `gaps==0`
+        // alone is necessary but not sufficient. This is NOT a false negative.
+        assert!(
+            !seg.pass,
+            "undecodable>0 still fails pass, honestly reflecting low decode confidence: {seg:?}"
+        );
+    }
 }
