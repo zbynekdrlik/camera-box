@@ -1480,46 +1480,53 @@ fn setup_imag_holds_lowlatency_config_packages_after_install_482() {
     );
 }
 
-/// #483: the CPU-isolation grub.d drop-in must carry the EXACT live-verified cmdline — the P-core
-/// block cpu2-11 isolated for OBS, nohz_full scoped ONLY to the future genlock render-tick pair
-/// (10,11 — not the whole block, per #303's load-balancing-signal caveat), and IRQs parked off
-/// the isolated block.
+/// #842 (recurrence of #784): `setup-imag.sh` must NEVER write a kernel-cmdline isolation
+/// (`isolcpus=`/`nohz_full=`/`irqaffinity=`) drop-in again — measured live to disable scheduler
+/// load balancing for the listed CPUs, piling 114 of OBS's 119 threads onto ONE core (60fps ->
+/// ~53fps NDI receive, 7-10 underruns/s). #784 hand-fixed the OLD box (.182) by deleting this
+/// exact drop-in on 2026-07-15, but the SOURCE was never changed, so #816's topology-derived
+/// rewrite reproduced the identical defect on the replacement notebook. The AFFINITY-only pin
+/// (taskset via /etc/imag-isolated-cpus.conf, fed by the SAME imag_cpu_isolation_plan derivation)
+/// is UNCHANGED and must still be written — only the kernel-level isolation is gone.
 #[test]
-fn setup_imag_writes_isolation_grub_dropin_with_exact_cmdline_483() {
+fn setup_imag_never_writes_kernel_isolcpus_dropin_842() {
     let body = read(SETUP);
     assert!(
-        body.contains("/etc/default/grub.d/98-imag-isolation.cfg"),
-        "{SETUP} must write /etc/default/grub.d/98-imag-isolation.cfg (#483)"
+        !body.contains("isolcpus=${IMAG_ISOLATED_CPUS}") && !body.contains("nohz_full=${IMAG_NOHZ_CPUS}"),
+        "{SETUP}: must NEVER write isolcpus=/nohz_full= to a GRUB_CMDLINE_LINUX_DEFAULT drop-in \
+         (#784/#842 regression -- disables scheduler load balancing for a many-threaded OBS \
+         process, piling threads onto a single core)"
     );
     assert!(
-        body.contains(
-            r#"GRUB_CMDLINE_LINUX_DEFAULT="\$GRUB_CMDLINE_LINUX_DEFAULT isolcpus=${IMAG_ISOLATED_CPUS} nohz_full=${IMAG_NOHZ_CPUS} irqaffinity=${IMAG_HOUSEKEEP_CPUS}""#
-        ),
-        "{SETUP} 98-imag-isolation.cfg must carry the three DERIVED lists (#816): the isolated \
-         P-core block for OBS, nohz_full on ONLY the last isolated pair (the genlock render-tick \
-         pair, not the whole block — #303), irqaffinity on the housekeeping CPUs (#483). The \
-         decision is unchanged — it is derived from thread_siblings_list instead of hardcoded, so \
-         a replacement notebook with a different core count is provisioned correctly"
-    );
-    assert!(
-        !body.contains("rcu_nocbs=10,11") && !body.contains("rcu_nocbs=2,3,4,5,6,7,8,9,10,11"),
-        "{SETUP}: 98-imag-isolation.cfg must NOT duplicate rcu_nocbs — #482's 99-lowlatency.cfg \
-         already sets rcu_nocbs=all (which covers 10,11), reconciled per the #482 LIVE-DONE \
-         comment"
+        body.contains("printf '%s\\n' \"$IMAG_ISOLATED_CPUS\" > /etc/imag-isolated-cpus.conf"),
+        "{SETUP}: the AFFINITY-only persisted config (/etc/imag-isolated-cpus.conf, feeding \
+         imag-obs-start.sh's taskset pin) must still be written -- restricting OBS to a core mask \
+         is fine, only kernel-level *isolation* of those cores was the #842 regression"
     );
 }
 
-/// #483: the isolation drop-in write must be followed by a CALL to safe_grub_regen (not merely
-/// its definition) so grub.cfg is actually regenerated with the initrd-guarantee + validation —
-/// never a raw `update-grub` bypassing the #295 safety net.
+/// #842: `setup-imag.sh` must SELF-HEAL a leftover `/etc/default/grub.d/98-imag-isolation.cfg`
+/// from a previous provisioning run (or a hand-applied #483/#816-era config) — remove it and
+/// regenerate grub via the existing `safe_grub_regen` helper (never a raw `update-grub`, #295).
 #[test]
-fn setup_imag_isolation_step_calls_safe_grub_regen_not_raw_update_grub_483() {
+fn setup_imag_self_heals_leftover_isolation_dropin_and_regens_grub_842() {
     let body = read(SETUP);
-    let isolation_write = body
-        .find("/etc/default/grub.d/98-imag-isolation.cfg")
-        .expect("the isolation grub.d write must exist");
+    let removal_check = body
+        .find("if [ -f /etc/default/grub.d/98-imag-isolation.cfg ]")
+        .expect(
+            "{SETUP} must check for a leftover /etc/default/grub.d/98-imag-isolation.cfg (#842 \
+             self-heal, the same discipline every other drift-prone config in this script uses)",
+        );
+    let rm_call = body
+        .find("rm -f /etc/default/grub.d/98-imag-isolation.cfg")
+        .expect("{SETUP} must `rm -f` the leftover isolation drop-in when found (#842)");
+    assert!(
+        removal_check < rm_call,
+        "{SETUP}: the existence check must come BEFORE the rm -f (#842 self-heal ordering)"
+    );
     // The LAST occurrence of "safe_grub_regen" in the file must be a bare CALL (not the `() {`
-    // definition) — i.e. step 8 actually invokes the helper after writing its own drop-in.
+    // definition), and it must come AFTER the self-heal removal — grub.cfg is only correctly
+    // regenerated once the stale drop-in is actually gone.
     let last_mention = body
         .rfind("safe_grub_regen")
         .expect("safe_grub_regen must be mentioned (defined + called)");
@@ -1527,21 +1534,16 @@ fn setup_imag_isolation_step_calls_safe_grub_regen_not_raw_update_grub_483() {
     assert!(
         trailing.starts_with("safe_grub_regen\n"),
         "{SETUP}: the LAST occurrence of `safe_grub_regen` must be a bare call on its own line \
-         (step 8 invoking the helper), not the `() {{` definition — a defined-but-never-called \
-         helper would leave 98-imag-isolation.cfg (and 99-lowlatency.cfg) never picked up by \
-         grub-mkconfig"
+         (the #842 self-heal invoking the helper), not the `() {{` definition"
     );
     assert!(
-        isolation_write < last_mention,
-        "{SETUP}: safe_grub_regen must be CALLED after the 98-imag-isolation.cfg drop-in is \
-         written (#483)"
+        rm_call < last_mention,
+        "{SETUP}: safe_grub_regen must be CALLED after the leftover drop-in is removed (#842)"
     );
     // Never a raw ad-hoc `update-grub` call OUTSIDE the safe_grub_regen helper itself — the whole
     // point of #487/#295 is that grub is NEVER regenerated without the initrd-guarantee first.
-    // Found in review: an exact `t == "update-grub"` match has a latent gap -- it would miss a
-    // future rogue call written as `update-grub 2>&1`, `update-grub --foo`, or with a trailing
-    // redirect/comment (the first-word-of-the-line IS the invoked command regardless of what
-    // follows it). Match on the first whitespace-separated token instead of the whole line.
+    // Match on the first whitespace-separated token so a trailing redirect/comment can't hide a
+    // rogue call.
     let raw_update_grub_calls = body
         .lines()
         .filter(|l| {
@@ -2589,17 +2591,20 @@ fn setup_imag_grants_rtprio_for_genlock_rt_pin_484() {
          ~10 the #484 render-tick thread requests) — the ulimit that lets a non-root user request \
          SCHED_FIFO"
     );
-    // It must be reserved together with the #483 CPU-isolation those cores exist for: the drop-in
-    // is written after the #483 grub-isolation step (they are one concern — reserve + grant).
+    // It must be reserved together with the #483/#842 CPU-affinity reservation those cores exist
+    // for: the drop-in is written after step 8's IMAG_ISOLATED_CPUS derivation (they are one
+    // concern — reserve + grant). #842 removed the kernel-cmdline isolcpus/nohz_full literal this
+    // anchored on before; anchor on the persisted affinity config write instead, which #842 keeps
+    // unchanged.
     let iso_idx = body
-        .find("isolcpus=${IMAG_ISOLATED_CPUS} nohz_full=${IMAG_NOHZ_CPUS}")
-        .expect("the #483/#816 CPU-isolation cmdline must still be present");
+        .find("printf '%s\\n' \"$IMAG_ISOLATED_CPUS\" > /etc/imag-isolated-cpus.conf")
+        .expect("the #483/#816/#842 CPU-affinity persistence must still be present");
     let rtprio_idx = body
         .find("/etc/security/limits.d/95-imag-genlock-rtprio.conf")
         .expect("the #484 rtprio drop-in must be present");
     assert!(
         iso_idx < rtprio_idx,
-        "{SETUP}: the #484 rtprio grant must be written alongside/after the #483 CPU-isolation \
+        "{SETUP}: the #484 rtprio grant must be written alongside/after the #483/#842 CPU-affinity \
          reservation (the reserved cores + the rtprio grant are one appliance-hardening concern)"
     );
 }

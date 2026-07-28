@@ -194,7 +194,7 @@ fn imag_hwe_kernel_installed_reuses_dpkg_status_installed() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// (d) kernel cmdline: preempt=full + DERIVED isolation (#289/#303/#816)
+// (d) kernel cmdline: preempt=full + NO kernel isolcpus/nohz_full isolation (#289/#482/#784/#842)
 // ---------------------------------------------------------------------------------------------
 
 #[test]
@@ -210,39 +210,87 @@ fn imag_cmdline_has_preempt_full_whole_token() {
     assert_eq!(lines, vec!["YES", "NO"], "{out:?}");
 }
 
+/// #842 (recurrence of #784): `isolcpus=`/`nohz_full=` on the kernel cmdline disables scheduler
+/// load balancing for the CPUs listed -- measured live to pile 114 of OBS's 119 threads onto ONE
+/// core while sibling cores in the SAME affinity mask sat at 0% busy (60fps -> ~53fps NDI
+/// receive). `scripts/setup-imag.sh` must stop writing them; this is the acceptance-gate guard
+/// that fails LOUD if a box (old or newly provisioned) still carries either token -- #784's own
+/// outstanding item, deferred between #780/#791 since 2026-07-15 and the direct cause of the
+/// #842 recurrence on the replacement notebook.
 #[test]
-fn imag_cmdline_has_derived_isolation_matches_the_derived_plan_never_a_literal() {
-    // Real derived plan for a 12-thread (6 P-core-pair + ... ) box, byte-for-byte what
-    // imag_cpu_isolation_plan would compute -- this test proves the CHECK correctly matches a
-    // DERIVED plan, not a fixed cam-fleet-style literal like isolcpus=3.
-    let cmdline = "BOOT_IMAGE=/vmlinuz quiet isolcpus=2,4,6,8,10 nohz_full=10 irqaffinity=0,12,13,14,15 preempt=full";
-    let (code, out, err) = run_sourced(&format!(
-        r#"if imag_cmdline_has_derived_isolation "{cmdline}" "2,4,6,8,10" "10" "0,12,13,14,15"; then echo YES; else echo NO; fi"#
-    ));
-    assert_eq!(code, 0, "stderr: {err}");
-    assert_eq!(
-        out.trim(),
-        "YES",
-        "must match the exact derived plan: {out:?}"
-    );
+fn imag_cmdline_free_of_kernel_isolation_fails_on_isolcpus_or_nohz_full() {
+    let cases = [
+        ("BOOT_IMAGE=/vmlinuz quiet preempt=full rcu_nocbs=all", "YES"), // .182's real clean cmdline
+        (
+            "BOOT_IMAGE=/vmlinuz quiet isolcpus=2,3,4,5,6,7 nohz_full=6,7 irqaffinity=0,1,8,9,10,11 preempt=full",
+            "NO",
+        ), // .187's real #842 defect cmdline
+        ("BOOT_IMAGE=/vmlinuz quiet isolcpus=2-7 preempt=full", "NO"), // isolcpus alone must still fail
+        ("BOOT_IMAGE=/vmlinuz quiet nohz_full=6,7 preempt=full", "NO"), // nohz_full alone must still fail
+    ];
+    for (cmdline, want) in cases {
+        let (code, out, err) = run_sourced(&format!(
+            r#"if imag_cmdline_free_of_kernel_isolation "{cmdline}"; then echo YES; else echo NO; fi"#
+        ));
+        assert_eq!(code, 0, "stderr: {err}");
+        assert_eq!(
+            out.trim(),
+            want,
+            "imag_cmdline_free_of_kernel_isolation({cmdline:?}) expected {want}"
+        );
+    }
+}
 
-    // A DIFFERENT (e.g. stale/cam-fleet) plan must NOT match.
-    let (code, out, err) = run_sourced(&format!(
-        r#"if imag_cmdline_has_derived_isolation "{cmdline}" "3" "10,11" "0-2"; then echo YES; else echo NO; fi"#
-    ));
-    assert_eq!(code, 0, "stderr: {err}");
-    assert_eq!(out.trim(), "NO", "a mismatched plan must fail: {out:?}");
+// ---------------------------------------------------------------------------------------------
+// OBS thread distribution: the #842 DIRECT SYMPTOM check -- no single CPU core may hold a
+// majority of OBS's live threads (a future variant of the isolcpus-class bug must not pass
+// silently just because it doesn't happen to write a kernel-cmdline token).
+// ---------------------------------------------------------------------------------------------
 
-    // An empty derived value (topology gather failed) must never silently pass.
+/// `imag_obs_thread_concentration_ok` takes the raw per-thread processor numbers (`ps -L -o psr=
+/// -C obs` output, one CPU number per OBS thread, one per line) and fails when a single core
+/// holds more than ~60% of the live thread count -- the #842 signature was 114/119 (96%) on one
+/// core. Live-verified reference numbers used directly: 114 on cpu5, 19/16/24/26/12/17 spread
+/// after the fix (comment 5105280323 on #842).
+#[test]
+fn imag_obs_thread_concentration_ok_flags_a_single_core_pileup() {
+    // The FIXED distribution (post-#842, real numbers): 19+16+24+26+12+17 = 114 threads spread
+    // across 6 cores, max 26 -> 26/114 = 22.8%, well under the 60% bound.
+    let spread: String = std::iter::repeat("2\n")
+        .take(19)
+        .chain(std::iter::repeat("3\n").take(16))
+        .chain(std::iter::repeat("4\n").take(24))
+        .chain(std::iter::repeat("5\n").take(26))
+        .chain(std::iter::repeat("6\n").take(12))
+        .chain(std::iter::repeat("7\n").take(17))
+        .collect();
     let (code, out, err) = run_sourced(&format!(
-        r#"if imag_cmdline_has_derived_isolation "{cmdline}" "" "10" "0,12,13,14,15"; then echo YES; else echo NO; fi"#
+        r#"LIST="{spread}"
+if imag_obs_thread_concentration_ok "$LIST"; then echo YES; else echo NO; fi"#
     ));
     assert_eq!(code, 0, "stderr: {err}");
-    assert_eq!(
-        out.trim(),
-        "NO",
-        "empty derived isolated-cpu set must fail: {out:?}"
+    assert_eq!(out.trim(), "YES", "spread distribution must pass: {out:?}");
+
+    // The #842 DEFECT distribution (real numbers): 114 threads on cpu5, 5 threads elsewhere (119
+    // total) -- 114/119 = 95.8%, far past the 60% bound.
+    let pileup: String = std::iter::repeat("5\n")
+        .take(114)
+        .chain(std::iter::repeat("7\n").take(5))
+        .collect();
+    let (code, out, err) = run_sourced(&format!(
+        r#"LIST="{pileup}"
+if imag_obs_thread_concentration_ok "$LIST"; then echo YES; else echo NO; fi"#
+    ));
+    assert_eq!(code, 0, "stderr: {err}");
+    assert_eq!(out.trim(), "NO", "single-core pileup must fail: {out:?}");
+
+    // An empty/unreadable thread list (OBS not running, or `ps` failed) must never silently pass.
+    let (code, out, err) = run_sourced(
+        r#"LIST=""
+if imag_obs_thread_concentration_ok "$LIST"; then echo YES; else echo NO; fi"#,
     );
+    assert_eq!(code, 0, "stderr: {err}");
+    assert_eq!(out.trim(), "NO", "empty thread list must fail: {out:?}");
 }
 
 // ---------------------------------------------------------------------------------------------
