@@ -5771,3 +5771,33 @@ onto `origin/dev` via the shared dev1 checkout (another worker's push carried th
 file's own shared-checkout GOTCHA) -- CI run 30355387898 + Full-path E2E run 30355390764 were
 still IN PROGRESS when this session ended; the supervisor/next session should confirm terminal
 state before considering PR #704 mergeable on this front.
+
+## #841 (2026-07-28) — imag-nb Program projector stutter: Intel iGPU freq-floor pin + wrapper CPU pin derived (no more hardcoded literal)
+
+Two confirmed live gaps on 10.77.9.187, both in the imag launch/provisioning path. Design posted
+`gh issue comment 841` (issuecomment-5103780589) BEFORE the RED commit.
+
+RED: `ad9b99749` (`tests/harness_imag_intel_display_841.rs` new + `harness_imag_obs_start_stop_840.rs`
+updated -- its #840 test enshrined the now-proven-wrong "2-11 is a sane fallback" contract,
+replaced with the #841 contract, justification inline). GREEN: `e5a684a67` (Intel TearFree
+xorg.conf.d + `imag-igpu-maxperf.service` freq-floor pin + `/etc/imag-isolated-cpus.conf` one
+source of truth for the wrapper's fallback). CORRECTION: `bfad45dea` -- live-tested the TearFree
+snippet on the real box BEFORE finalizing and found it a DEAD option on the `modesetting` driver
+actually bound here (Xorg logged `Option "TearFree" is not used`; `strings modesetting_drv.so` has
+no "TearFree" text — it's an `xf86-video-intel` legacy-DDX feature). Removed it rather than ship a
+cargo-culted no-op; documented the finding + the real tear-free mechanism (Present+PageFlip,
+already default with no compositor) in both the script comment and the test file. Full playbook
+entry in `.claude/rules/imag-nb-provisioning.md`.
+
+Live-verified before/after on 10.77.9.187 (posted `gh issue comment 841`,
+issuecomment-5104019355): `gt_min_freq_mhz` 100→1400 (pinned to the box's own `gt_RP0_freq_mhz`,
+survived a full lightdm/X restart), live `obs` `Cpus_allowed_list` 2-11→2-7 (reproduced the exact
+manual "Spustit OBS" bug scenario with `IMAG_ISOLATED_CPUS` unset, confirmed it now reads the
+persisted `/etc/imag-isolated-cpus.conf`), OBS `cpuUsage` roughly halved (17.6%→9.6%) post-fix.
+Box left fully operator-ready: both projectors open on the correct outputs, systemd unit
+enabled+active.
+
+Full local `cargo test` suite green throughout (785 tests across all binaries, 0 failed, re-run
+after every edit including the TearFree correction) -- no static-anchor collisions from editing
+`setup-imag.sh`/`imag-obs-start.sh`. `cargo fmt --all --check`/`cargo check`/
+`cargo clippy --all-targets -- -D warnings`/`shellcheck` all clean.

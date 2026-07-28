@@ -13,6 +13,7 @@ paths:
   - "tests/setup_imag_pure_functions.rs"
   - "tests/verify_imag_pure_functions.rs"
   - "tests/harness_imag_obs_start_stop_840.rs"
+  - "tests/harness_imag_intel_display_841.rs"
 ---
 
 # Replacing the imag notebook — install the OS, provision it, then VERIFY it (#791 / #815 / #816 / #821)
@@ -250,3 +251,44 @@ only existed on the live box because a prior session hand-placed them (confirmed
 check (p) on a hand-patched box can hide a genuine provisioning gap that only bites on the NEXT
 from-scratch reprovision — when a check verifies a file's presence, also grep the provisioner for
 whether it actually WRITES/FETCHES that file, not just that some check expects it.
+
+## A "port the NVIDIA setting to Intel" idea MUST be live-tested, never shipped from the analogy alone (#841)
+
+`setup-imag.sh` had ZERO NVIDIA display-tuning code at all before #841 (the incumbent .182's
+`nvidia-settings --assign ... ForceFullCompositionPipeline=On` + `GPUPowerMizerMode=1` block in
+`~/.config/openbox/autostart` was hand-placed, same "provisioning gap hidden by a hand patch"
+shape as the #840 entry above — never provisioned by any script, on EITHER box). The obvious-looking
+port to Intel — `Option "TearFree" "true"` under `Driver "modesetting"` in a fresh
+`/etc/X11/xorg.conf.d/` snippet — was written, deployed, and Xorg (`systemctl restart lightdm`)
+logged back `(WW) modeset(0): Option "TearFree" is not used`. `strings
+/usr/lib/xorg/modules/drivers/modesetting_drv.so` confirmed no "TearFree" text exists in the
+binary at all: **TearFree is a feature of the LEGACY `xf86-video-intel` DDX, not of the built-in
+`modesetting` driver** — and Xorg autoconfigures `modesetting` for this PCI id
+(`(==) Matched modesetting as autoconfigured driver 0`), never matching the installed-but-unused
+`xf86-video-intel` package. Shipping the dead option anyway (it "looks right", references a real
+xorg.conf.d syntax, and produces no ERROR, only a WARNING easy to miss in a long boot log) would
+have been exactly the cargo-culted-NVIDIA-semantics mistake this class of ticket exists to catch.
+
+**The check that actually proves an xorg driver option took effect: grep `Xorg.0.log` for
+`(WW) ... Option "X" is not used` AFTER restarting the X session that loads the new
+xorg.conf.d file — a silent absence of an error is NOT proof the option did anything.**
+`strings <driver>.so | grep -i <option-name>` is the fast pre-check (if the literal option name
+isn't even a string in the binary, it cannot possibly be implemented) before ever touching the
+live box. The same live-test-before-shipping discipline surfaced that `Option "VariableRefresh"`
+(VRR/adaptive-sync) IS real on this build (`strings`-confirmed, and visible as an X property
+`VariableRefresh: disabled` in the log even with it off) — but the specific HDMI-1 projector
+output reports `vrr_capable: 0` in `xrandr --verbose` (only the eDP-1 laptop panel supports it),
+so it wasn't applicable to the actually-affected output either. What this driver stack DOES
+provide tear-free by default, confirmed in the same log: `Present`+`DRI3` extensions initialize
+cleanly and `PageFlip`/`Atomic` are compiled into the driver — a full-screen client with no
+compositor running (this box's whole design) gets direct page-flipped scanout automatically, with
+no xorg.conf.d knob needed or available for it.
+
+**The genuinely-applicable Intel/i915 counterpart to `GPUPowerMizerMode=1` turned out to be real
+and IS the fix that shipped:** the iGPU actively DVFS-scales its clock (`gt_cur_freq_mhz`/
+`gt_act_freq_mhz` sampled cycling well below the box's own `gt_RP0_freq_mhz` ceiling under live
+render load) — the same ramp-hitch class of stutter `GPUPowerMizerMode=1` avoids on NVIDIA. i915
+has no PowerMizer, but pinning the frequency FLOOR (`gt_min_freq_mhz`) up to the hardware's own
+reported ceiling (`gt_RP0_freq_mhz`, NEVER a hardcoded MHz literal — a future Intel notebook's
+ceiling will differ) gets the same "always at max clock" outcome, applied via a dedicated systemd
+oneshot unit (sysfs resets every boot) mirroring the existing `cpu-performance.service` pattern.
