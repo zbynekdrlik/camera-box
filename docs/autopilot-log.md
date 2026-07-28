@@ -5731,3 +5731,43 @@ SAME test file (the pathspec-commit-stages-full-content GOTCHA this CLAUDE.md al
 -- corrected via a targeted `git hash-object`/`update-index --cacheinfo` commit that touched only
 the one leaked hunk, never their other in-progress files. CI green: run 30354727208. PR #704
 body updated with the added scope (REST PATCH, per the `gh pr edit` GraphQL GOTCHA).
+
+**#840 (imag-nb loses both OBS projectors on every restart) — commits `415ae8c3c` (test, RED),
+`3064d6d35` (fix, GREEN):** root cause (live-verified against 10.77.9.187): the openbox autostart
+booted OBS directly with its own fragile inline 30s WebSocket wait (no obs-process-liveness
+check, failure swallowed by `|| true`) instead of going through `imag-obs-start.sh` (the operator
+menu's more robust 90s/liveness-checked path) -- a captured `/tmp/imag-seed.log` showed
+`imag_scenes.py` failing with `ConnectionRefusedError` at boot. `imag-obs-stop.sh` used
+`pkill -TERM` only, which never runs OBS's own clean-shutdown save (`saved_projectors` measured
+`[]` after a SIGTERM stop with both projectors open). `obs_phase2.py::open_projectors` hardcoded
+`monitorIndex 0/1` instead of deriving Program(HDMI)/Multiview(panel) by connector type (mirrors
+`imag_scenes.py::projector()`'s already-correct rule). `verify-imag.sh` check (o) called the
+projector-OPEN action itself before counting -- self-establishing what it asserted.
+
+Fix: autostart now launches OBS THROUGH `imag-obs-start.sh` (env-exported `IMAG_ISOLATED_CPUS`,
+`__ISOLCPUS__` placeholder mechanism unchanged); `setup-imag.sh` now also installs both
+`imag-obs-start.sh`/`imag-obs-stop.sh` onto the box (gh-api fetch, neither was ever provisioned
+before); `imag-obs-stop.sh` attempts a graceful `wmctrl -c "OBS Studio"` window close before the
+existing SIGTERM/SIGKILL ladder; `obs_phase2.py::open_projectors` derives monitor indices from a
+live `GetMonitorList` call, fails loud on either missing connector; `verify-imag.sh` check (o)
+reads the current count with no side effect, then restarts OBS via `imag-obs-stop.sh` +
+`imag-obs-start.sh` and re-counts to prove persistence.
+
+Live-verified on 10.77.9.187 (not just unit tests): killed OBS, ran the box's own regenerated
+autostart script -- Program projector landed on HDMI-1 (x=0), Multiview on eDP-1 (x=1920,
+matching `xrandr --listmonitors`); ran `imag-obs-stop.sh` -- `saved_projectors` went from `[]` to
+2 populated entries (proving the graceful close actually persists state); ran
+`scripts/verify-imag.sh` end-to-end -- both new (o) sub-checks (before-restart count,
+after-restart persistence) passed. 4 UNRELATED pre-existing failures observed on the same run
+(systemd-timesyncd installed, watchdog not-yet-deployed, no DockState, and a NEWLY-DISCOVERED
+check-(n) regex bug -- `imag_scenes_output_ok` never matches imag_scenes.py's real
+"(multiview, low-bw)" MV-scenes line) -- all out of #840's scope; the check-(n) regex bug filed
+as #843 (unrelated to check (o), and `scripts/verify-imag.sh` is concurrently being edited by the
+#791 worker, so fixing it here risked a second shared-checkout collision).
+
+Full local suite green throughout (159/159 `cargo test` binaries, `pytest tests/python` 594/594,
+`cargo fmt --all --check`/`clippy --all-targets -D warnings`/`shellcheck` all clean). Commits rode
+onto `origin/dev` via the shared dev1 checkout (another worker's push carried them along, per this
+file's own shared-checkout GOTCHA) -- CI run 30355387898 + Full-path E2E run 30355390764 were
+still IN PROGRESS when this session ended; the supervisor/next session should confirm terminal
+state before considering PR #704 mergeable on this front.
