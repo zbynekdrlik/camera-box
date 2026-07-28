@@ -11,8 +11,11 @@
 # healthy fails the run LOUDLY as a stale ack (#758/#827); remove the line the moment the box is
 # back in the fleet.
 #
-# Current physical state (2026-07-27, #827):
-cam4:grabber-card-removed-2026-07-27
+# Current physical state (2026-07-28, #827):
+# cam4 is BACK in the fleet (2026-07-28): its grabber card (NZXT Signal HD60) was reseated -- the
+# USB-C connector had not been pushed fully home, so the card never enumerated at all (empty USB3
+# bus, no /dev/video*, camera-box crash-looping on "No video capture device found"). After the
+# reseat it enumerates, /dev/video0+1 exist and camera-box streams 60/60 fps with 0 dropped.
 cam5:powered-off-2026-07-27
 cam6:powered-off-2026-07-27
 cam7:powered-off-2026-07-27
