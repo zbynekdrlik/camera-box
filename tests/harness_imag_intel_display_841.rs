@@ -6,9 +6,26 @@
 //!     ForceFullCompositionPipeline=On` + `GPUPowerMizerMode=1`) is NVIDIA-only and was never
 //!     provisioned onto the replacement notebook (Intel UHD / Raptor Lake-P, i915,
 //!     `modesetting`+glamor, no discrete GPU) -- nothing equivalent exists there.
-//!     `setup-imag.sh` must provision the Intel-appropriate counterpart, gated on the ABSENCE of
-//!     a discrete NVIDIA GPU via the existing `imag_has_discrete_nvidia` helper, and must leave
-//!     the existing NVIDIA-gated driver/PRIME branch byte-for-byte unchanged.
+//!     `setup-imag.sh` must provision the GENUINELY-APPLICABLE Intel counterpart, gated on the
+//!     ABSENCE of a discrete NVIDIA GPU via the existing `imag_has_discrete_nvidia` helper, and
+//!     must leave the existing NVIDIA-gated driver/PRIME branch byte-for-byte unchanged.
+//!
+//!     IMPORTANT correction made DURING this ticket's own live verification (not a later fix):
+//!     the naive "port ForceFullCompositionPipeline as TearFree" idea was tested LIVE on
+//!     10.77.9.187 and found to be a DEAD option -- `Option "TearFree" "true"` under `Driver
+//!     "modesetting"` produced `(WW) modeset(0): Option "TearFree" is not used` in Xorg.0.log, and
+//!     `strings modesetting_drv.so` contains no "TearFree" text at all. TearFree is a feature of
+//!     the LEGACY `xf86-video-intel` DDX, not of the built-in `modesetting` driver Xorg actually
+//!     autoconfigures for this PCI id here. Shipping it anyway would have been exactly the
+//!     cargo-culted-NVIDIA-semantics mistake this ticket explicitly warns against, so it is NOT
+//!     written. What this stack verifiably already provides tear-free by default (same log:
+//!     `Present`+`DRI3` init cleanly, `PageFlip`/`Atomic` compiled into the driver per `strings`)
+//!     is direct page-flipped full-screen scanout with no compositor running -- the real
+//!     mechanism, not an xorg.conf.d knob. VRR (`Option "VariableRefresh"`, also real on this
+//!     build) was considered too, but the HDMI-1 projector output itself reports `vrr_capable: 0`
+//!     -- not applicable to the affected output. The genuinely-applicable Intel/i915 counterpart
+//!     to `GPUPowerMizerMode=1` is the GPU frequency-floor pin below, which IS real and
+//!     live-verified (gt_min_freq_mhz 100 -> 1400, confirmed to survive an X/OBS restart).
 //!
 //! (2) `imag-obs-start.sh`'s `taskset` CPU pin fell back to a bare hardcoded `2-11` -- the
 //!     INCUMBENT's 16-thread range -- whenever the wrapper is invoked without `IMAG_ISOLATED_CPUS`
@@ -38,27 +55,26 @@ const START: &str = "scripts/imag-obs-start.sh";
 // Gap 1 -- Intel display tuning (setup-imag.sh)
 // ================================================================================================
 
-/// The Intel TearFree xorg.conf.d snippet must be written INSIDE the existing "no discrete
-/// NVIDIA GPU" branch (#816's `imag_has_discrete_nvidia` gate) -- never unconditionally, and
-/// never in the NVIDIA-present branch.
+/// TearFree must NOT be shipped -- it was live-tested and proven to be a DEAD option on the
+/// `modesetting` driver actually bound on this box (`(WW) ... Option "TearFree" is not used`,
+/// confirmed live 2026-07-28). Pin the ABSENCE so a future edit doesn't cargo-cult it back in
+/// without re-verifying, and require the finding to be documented inline (never silently dropped
+/// with no trace of why).
 #[test]
-fn setup_imag_provisions_intel_tearfree_gated_on_no_discrete_nvidia_841() {
+fn setup_imag_does_not_ship_the_dead_tearfree_option_841() {
     let body = read(SETUP);
-    let gate = body
-        .find("no discrete NVIDIA GPU on this box")
-        .expect("the #816 no-dGPU branch must still exist");
-    let tearfree = body
-        .find(r#"Option "TearFree" "true""#)
-        .expect("setup-imag.sh must provision an xorg.conf.d TearFree snippet for the Intel path");
     assert!(
-        gate < tearfree,
-        "{SETUP}: the TearFree snippet must be written inside the existing no-discrete-NVIDIA \
-         branch, right where the #816 gate already decides there's no dGPU"
+        !body.contains("cat > /etc/X11/xorg.conf.d/"),
+        "{SETUP}: must NOT write any xorg.conf.d file for the Intel path -- a live-tested \
+         `Option \"TearFree\"` snippet was proven a DEAD option on the `modesetting` driver bound \
+         here (#841) and must not ship; the explanatory comment mentioning the option's literal \
+         name for documentation purposes is fine, only an actual xorg.conf.d WRITE is banned"
     );
     assert!(
-        body.contains("/etc/X11/xorg.conf.d/"),
-        "{SETUP}: the TearFree snippet must land under /etc/X11/xorg.conf.d/ (same convention as \
-         the existing 30-touchpad-tap.conf)"
+        body.contains("is not used") && body.contains("modesetting_drv.so"),
+        "{SETUP}: the comment explaining WHY TearFree was tried and rejected (the live \
+         `(WW) ... is not used` finding + the strings/modesetting_drv.so check) must stay \
+         documented inline, not silently dropped"
     );
 }
 

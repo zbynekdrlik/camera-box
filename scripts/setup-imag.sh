@@ -707,35 +707,35 @@ step 9 "NVIDIA dGPU driver (#500): nvidia-driver-595-open + PRIME nvidia-primary
 if ! lspci -nn | imag_has_discrete_nvidia; then
     echo "  #816: no discrete NVIDIA GPU on this box — skipping the driver + PRIME step (iGPU drives HDMI directly)"
     # #841: the incumbent box's anti-stutter display tuning (nvidia-settings
-    # ForceFullCompositionPipeline=On + GPUPowerMizerMode=1) is NVIDIA-only and has no counterpart
-    # here — provision the genuinely-applicable Intel/i915 equivalents instead of leaving the
-    # display path untuned (confirmed live on 10.77.9.187: Xorg runs modesetting+glamor+iris, no
-    # legacy `intel` DDX, so TearFree is the correct knob; the iGPU actively DVFS-scales
-    # gt_cur_freq_mhz well below its own gt_RP0_freq_mhz ceiling under load, the same ramp-hitch
-    # class of stutter GPUPowerMizerMode=1 avoids on NVIDIA):
-    #   (a) TearFree -- the modesetting-driver option that eliminates the mid-frame tear/stutter
-    #       line without a compositor (a compositor over the fullscreen OBS projector would
-    #       double-composite and stutter -- same reasoning as the NVIDIA box's picom mask, #777).
-    #   (b) pin the iGPU's frequency FLOOR to its own reported ceiling (gt_RP0_freq_mhz, never a
-    #       hardcoded MHz literal -- a future Intel notebook's ceiling will differ) so it stops
-    #       idling down and ramping back up under load. i915 has no PowerMizer; raising the floor
-    #       to the hardware max gets the same "always at max clock" outcome. Sysfs values reset on
-    #       reboot, so this is reapplied every boot via a dedicated systemd oneshot unit, mirroring
-    #       the existing cpu-performance.service convention (step 4) rather than a
-    #       provisioning-time-only write.
-    mkdir -p /etc/X11/xorg.conf.d
-    cat > /etc/X11/xorg.conf.d/20-intel-tearfree.conf <<'XORG_EOF'
-# camera-box #841: tear-free HDMI program projector on Intel iGPU (modesetting + glamor).
-# TearFree is the modesetting-driver counterpart to NVIDIA's ForceFullCompositionPipeline=On --
-# it eliminates the mid-frame tear/stutter line on fast motion without a compositor (a compositor
-# over the fullscreen OBS projector would double-composite and stutter, same reasoning as the
-# NVIDIA box's picom mask, #777).
-Section "Device"
-    Identifier "imag intel gpu"
-    Driver "modesetting"
-    Option "TearFree" "true"
-EndSection
-XORG_EOF
+    # ForceFullCompositionPipeline=On + GPUPowerMizerMode=1) is NVIDIA-only and has no direct
+    # counterpart here -- but "TearFree" (the naive intel-DDX-style analog) does NOT apply on
+    # THIS driver stack, confirmed LIVE on 10.77.9.187 rather than assumed: `Option "TearFree"
+    # "true"` under `Driver "modesetting"` produced the Xorg.0.log line
+    # `(WW) modeset(0): Option "TearFree" is not used`, and `strings modesetting_drv.so` contains
+    # no "TearFree"/"Tear" text at all -- TearFree is a feature of the LEGACY xf86-video-intel DDX
+    # (installed here but never
+    # matched -- Xorg autoconfigures the built-in `modesetting` driver for this PCI id, confirmed
+    # `(==) Matched modesetting as autoconfigured driver 0`), not of `modesetting`+glamor. Shipping
+    # a dead option would be exactly the cargo-culted-NVIDIA-semantics-onto-Intel mistake this
+    # ticket warns against, so it is NOT written. What this stack actually already provides
+    # tear-free, verified live in the SAME log: `Present`+`DRI3` init cleanly and
+    # `modeset(0): glamor X acceleration enabled`, with `PageFlip`/`Atomic` compiled into the
+    # driver (`strings` confirms) -- a full-screen client (the OBS Program projector, no
+    # compositor running) gets direct page-flipped scanout via Present by default, which is the
+    # real tear-free mechanism on this stack, not an xorg.conf.d option. VRR (`Option
+    # "VariableRefresh"`, also `strings`-confirmed real and X-property-visible as `VariableRefresh:
+    # disabled` in the log) was considered too, but the HDMI-1 projector output itself reports
+    # `vrr_capable: 0` (only the eDP-1 laptop panel does) -- not applicable to the affected output.
+    #
+    # The genuinely-applicable Intel/i915 equivalent to GPUPowerMizerMode=1 IS real: the iGPU
+    # actively DVFS-scales (gt_cur_freq_mhz observed cycling well below its own gt_RP0_freq_mhz
+    # ceiling under live 6-camera render load) -- the same ramp-hitch class of stutter
+    # GPUPowerMizerMode=1 avoids on NVIDIA. i915 has no PowerMizer; pin the frequency FLOOR to the
+    # hardware's own reported ceiling (gt_RP0_freq_mhz, never a hardcoded MHz literal -- a future
+    # Intel notebook's ceiling will differ) instead, so it stops idling down and ramping back up
+    # under load. Sysfs values reset on reboot, so this is reapplied every boot via a dedicated
+    # systemd oneshot unit, mirroring the existing cpu-performance.service convention (step 4)
+    # rather than a provisioning-time-only write.
     cat > /usr/local/bin/imag-igpu-maxperf.sh <<'IGPU_EOF'
 #!/usr/bin/env bash
 # camera-box #841: pin the Intel iGPU's frequency floor to its own reported max (gt_RP0_freq_mhz)
@@ -775,7 +775,7 @@ SVC_EOF
     systemctl daemon-reload
     systemctl enable --now imag-igpu-maxperf.service >/dev/null 2>&1 \
         || echo "  WARNING: could not enable imag-igpu-maxperf.service"
-    echo "  #841: Intel TearFree xorg.conf.d snippet + iGPU max-frequency-pin service provisioned"
+    echo "  #841: iGPU max-frequency-pin service provisioned (no xorg.conf.d change -- TearFree does not exist on this driver, live-verified; Present+PageFlip already gives tear-free full-screen scanout without a compositor)"
 elif ! dpkg -s nvidia-driver-595-open 2>/dev/null | grep '^Status: install ok installed' >/dev/null; then
     apt-get update -qq
     DEBIAN_FRONTEND=noninteractive apt-get install -y nvidia-driver-595-open >/dev/null \
