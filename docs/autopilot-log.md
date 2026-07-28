@@ -6078,3 +6078,19 @@ rig capture to validate (nothing offline can prove it), and cascades through the
 burn/geometry parity system + the wire-format fixture lock -- outside "software first" as
 directed. No code changed, nothing merged; PR #704 stays blocked on #854. Direction (painter
 module-size change vs. physical camera adjustment) left to the supervisor.
+
+#854 follow-up (2026-07-28T18:17Z): decisive offline TEARING discriminator. Used
+painter-1867252327.csv (exact tick->gen_ts_ns ground truth) + a deterministic re-encode via the
+same qrcode 0.14.1/EcLevel::H the painter uses to reconstruct exact expected module grids per
+candidate painter tick, diffed data-modules-only (function-module mask derived empirically) vs
+the captured raw bit sampled via rqrr's own RefGridImage::bit(). Result: 28/30 failing frames
+show a PERFECT (zero residual bit error) row-split between two ADJACENT painter ticks
+(delta tick=1, ~16.6ms, one 60Hz refresh) -- e.g. frame_index 101: rows 0-11 (245 data modules)
+match tick 3373 with 0 errors, rows 12-32 (585 data modules) match tick 3374 (the very next
+refresh) with 0 errors. Seam row stable at ~12/33 across most of the run (consistent with the
+rig's genlock holding a fixed camera/painter phase). Confirms genuine display/capture TEARING,
+not moire/signal noise -- no image-processing fix can ever work (matches the prior 0/48 sweep).
+Posted full numbers to #854 (issuecomment-5108016878) + `.claude/skills/recording-decode/
+SKILL.md` (commit f7f7bf52c). No code changed; PR #704 stays blocked on #854. Fix direction
+(painter hold-for-2-refreshes vs camera/capture shutter-timing sync) left open for decision --
+reproduction crate kept outside this repo: ~/devel/tearing-probe-854.
