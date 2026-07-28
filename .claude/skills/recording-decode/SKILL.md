@@ -1098,3 +1098,69 @@ not-yet-painted larger QR decodes better), it falls under `pattern-change-needs-
 and it cascades through the #463 four-place burn/geometry parity system + the wire-format fixture
 lock. That escalation (vs. physical camera adjustment) is a direction decision, not a continuation
 of this software sweep.
+
+## #854 follow-up — TEARING CONFIRMED: the decisive discriminator method (don't re-derive it)
+
+The `DataEcc` root cause above is real but doesn't distinguish "moiré/signal-level noise" from
+"the recorded frame contains rows from TWO different painter instants" (display/rolling-shutter
+tearing). This was settled DECISIVELY offline, using ground truth already on disk — no rig time.
+
+**The trick: `painter-<run>.csv` is exact ground truth, and the Payload encoder is deterministic.**
+`painter-<run>.csv` (`tick,gen_ts_ns,flip_ts_ns`) is the painter's own log of exactly what it
+rendered, every tick. `vernier_ids(tick)` (`src/probe/painter.rs`) is a pure function, and the
+Payload wire format (`P{run_id}.{frame_id}.{gen_ts_ns}.{crc32}`, `src/probe/payload.rs`) is
+encoded via `qrcode::QrCode::with_error_correction_level(_, EcLevel::H)` — deterministic given
+the same crate version (Cargo.lock pins `qrcode 0.14.1`, `rqrr 0.9.3`). So for ANY candidate
+painter tick you can reconstruct the EXACT module bit grid that was actually rendered, byte-for-
+byte, and diff it against the CAPTURED module bits sampled off a failing frame.
+
+**Empirical fact used to build candidate payloads:** a cleanly-decoded frame's LEFT and RIGHT
+payloads both carry `gen_ts_ns == painter.csv[tick].gen_ts_ns` for the SAME `tick` (confirmed by
+cross-referencing `stream-partial-<run>.json`'s decoded `payloads[]` against `painter.csv`) —
+`paint_one_frame` stamps ONE fresh `gen_ts_ns` per tick and uses it for BOTH halves regardless of
+which one visually changes. So candidate tick `T`'s left/right payload strings are fully
+determined by `painter.csv[T]` alone.
+
+**Sample the CAPTURED bits via rqrr's OWN per-module sampler — don't reimplement one.**
+`rqrr::Grid<G>`'s `grid` field is public; `RefGridImage::bit(y, x)` (reached via the `BitGrid`
+trait on `grid.grid`) is a single masked-bit sample per module — literally the same raw bit
+rqrr's own decoder reads before Reed-Solomon. No custom homography/resampler needed for this
+diagnostic (that machinery is for trying to IMPROVE the read, a different goal, see above).
+
+**Function modules dilute a naive full-row diff — filter them out empirically.** Finder/timing/
+format-info modules match ANY candidate trivially (they don't depend on payload data), which
+makes a row look "close" even for a WRONG candidate. Don't hand-derive the ISO structural-layout
+table: encode ~15 wildly different synthetic payloads (varying run_id/frame_id/gen_ts_ns widely,
+enough to also vary the auto-selected mask pattern) and mark as "function" every module position
+that's IDENTICAL across all of them. Diff DATA MODULES ONLY, per row.
+
+**Node burns can land on the SAME grid size as the dual-QR** (both use the same Payload format;
+similar string lengths land on the same QR version) — `rqrr::PreparedImage::detect_grids()`
+returns all of them (5 total: 2 dual-QR + 3 burns on this recording). Size alone doesn't separate
+them; the dual-QR pair sits at a distinctly smaller `mean_y` (higher up the frame) than the
+node-burn trio — select the 2 grids with the smallest `mean_y` among same-size candidates.
+
+**The result (camera-box#854, run 1867252327):** in 28 of 30 tested failing frames, one specific
+candidate tick `T` zeroes out EVERY data-module bit in the TOP ~12 of 33 rows, and the VERY NEXT
+painter tick `T+1` (Δtick=1, ~16.6 ms later — one 60 Hz refresh) SIMULTANEOUSLY zeroes out every
+data-module bit in the remaining rows — together covering all 33 rows with ZERO residual errors,
+confirmed independently on the LEFT and RIGHT Vernier halves, splitting at the IDENTICAL row
+within each frame. Any wrong candidate scores ~250–450 mismatches out of 830 data modules (the
+~50% "uncorrelated masked bits" baseline) — the transition from 0 to ~50% is a sharp step at
+exactly Δtick=0 vs ±1, not a gradual "similar string" gradient (confirmed adversarially: two
+candidates sharing the SAME `frame_id` but differing only in which tick's `gen_ts_ns` they carry
+score 336 vs 292 total mismatches with the top-row-clean-count jumping 3→12 — a real structural
+step, not noise). The seam row is essentially CONSTANT (12/33 or 13/33) across most of the tested
+span — consistent with the rig's disciplined genlock holding a stable phase between camera
+exposure and painter refresh, and itself a second line of evidence against "moiré" (which would
+depend only on fixed geometry, not on a threshold split against specific temporal ticks). Full
+writeup + numbers: `gh issue view 854 --comments` (2026-07-28 comment). Reproduction crate (kept
+OUTSIDE this repo, per convention): `~/devel/tearing-probe-854`.
+
+**Consequence:** this is a genuine optical-chain TEMPORAL artifact (two different painter instants
+in one recorded frame), not decoder-side and not general signal noise — no image-processing
+technique can ever fix it (matches the exhaustive 0/48 sweep above exactly). The two real fix
+directions are a painter-side hold-for-2-refreshes mitigation (software-only, no rig time, trades
+away half the Vernier's temporal resolution) or camera/capture-side shutter/frame-timing
+synchronization to the display's refresh (needs an operator at the rig) — a genuine direction
+decision, left on the ticket, not implemented here.
