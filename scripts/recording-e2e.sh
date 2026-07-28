@@ -246,6 +246,12 @@ STREAM=10.77.9.204
 # ONE file (or IMAG_HOST_ACTIVE=incumbent for a one-off run), never a hunt through this script.
 # shellcheck source=scripts/imag-host.sh
 . "$HERE/imag-host.sh"
+# #845: imag_has_discrete_nvidia (the SAME hardware-detector setup-imag.sh/verify-imag.sh already
+# use, #816) -- picks which [4e/8] headroom preflight variant applies to whichever imag box is
+# active. Sourcing (not re-deriving) it here is the established reuse pattern
+# (verify-imag.sh sources this same file for imag_cpu_isolation_plan/imag_has_discrete_nvidia).
+# shellcheck source=scripts/setup-imag.sh
+. "$HERE/setup-imag.sh"
 CAM_PW=newlevel
 # #703: strih/stream ssh creds for the E2E_EXECUTE_VERDICT=1 path (win-ssh-exec.sh helpers) —
 # same convention as CAM_PW/IMAG_PW, per targets.md's "SSH: newlevel/newlevel" rows.
@@ -1879,29 +1885,78 @@ if ! OBS_PASSWORD_STRIH="${OBS_PASSWORD:-}" OBS_PASSWORD_STREAM="${OBS_PASSWORD:
   exit 1
 fi
 
-echo "[4e/8] #709 imag-nb GPU VRAM headroom preflight — StartRecord's NVENC encoder needs real free VRAM"
-# A long-uptime OBS render pipeline on imag-nb can leak GPU VRAM (live-diagnosed #709: 6872MiB
-# used out of 8151MiB total after 5 days uptime, leaving ~1058MiB free — NVENC's encoder init then
-# fails NV_ENC_ERR_OUT_OF_MEMORY and StartRecord silently never starts a recording, only caught 4s
-# later by the #627 liveness check with no root-cause hint). Read the box's CURRENT free VRAM and
-# FAIL FAST with an actionable message — before StartRecord ([5/8]) ever runs — rather than burn
-# time discovering an opaque liveness failure. IMAG_GPU_MIN_FREE_MIB default (1500) sits with
-# real margin above the observed failure point (~1058MiB) and well below a freshly-restarted
-# box's healthy free VRAM (~7849MiB, confirmed live post-fix).
-IMAG_GPU_MIN_FREE_MIB="${IMAG_GPU_MIN_FREE_MIB:-1500}"
-IMAG_GPU_QUERY_OUT="$(sshpass -p "${IMAG_PW:-newlevel}" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 \
-  "${IMAG_USER:-newlevel}@$IMAG_IP" "$(imag_gpu_query_cmd)" 2>&1 || true)"
-IMAG_GPU_FREE_MIB="$(imag_gpu_free_mib_from_query "$IMAG_GPU_QUERY_OUT" || true)"
-if [ -z "$IMAG_GPU_FREE_MIB" ]; then
-  echo "ERROR: $(imag_gpu_unreadable_message)" >&2
-  echo "       raw nvidia-smi output: $IMAG_GPU_QUERY_OUT" >&2
+echo "[4e/8] #709/#845 imag-nb headroom preflight — StartRecord's encoder needs real free memory (dGPU VRAM if this box has one, else system RAM on an iGPU-only box)"
+# #845: the replacement imag notebook (10.77.9.187, #816) has NO discrete GPU (Intel iGPU / i915
+# only) -- the nvidia-smi-based check below is structurally unsatisfiable there and used to abort
+# every gate run with "returned an unreadable value" (run 30358343543), wrongly pointing at a
+# driver that was never installed by design. Detect dGPU presence the SAME way setup-imag.sh /
+# verify-imag.sh already do (imag_has_discrete_nvidia, an lspci display-class match, #816) and run
+# the box-appropriate variant. Per #833: a MISSING `lspci` must never be silently misread as "no
+# dGPU" (that would be exactly the measured-zero bug class) -- preflight it by name first.
+_imag_lspci_probe="$(sshpass -p "${IMAG_PW:-newlevel}" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 \
+  "${IMAG_USER:-newlevel}@$IMAG_IP" "$(imag_require_remote_tool_cmd lspci)" 2>/dev/null || true)"
+_imag_lspci_missing="$(imag_remote_tool_probe_missing "$_imag_lspci_probe")"
+if [ -n "$_imag_lspci_missing" ]; then
+  echo "ERROR: [preflight] FAIL: imag-nb (${IMAG_IP}): required tool(s) not installed: ${_imag_lspci_missing} (apt-get install -y pciutils) — refusing to guess whether a discrete GPU is present (#833/#845 class)." >&2
   exit 1
 fi
-if [ "$(imag_gpu_headroom_ok "$IMAG_GPU_FREE_MIB" "$IMAG_GPU_MIN_FREE_MIB")" != "true" ]; then
-  echo "ERROR: $(imag_gpu_preflight_message "$IMAG_GPU_FREE_MIB" "$IMAG_GPU_MIN_FREE_MIB")" >&2
+IMAG_LSPCI_OUT="$(sshpass -p "${IMAG_PW:-newlevel}" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 \
+  "${IMAG_USER:-newlevel}@$IMAG_IP" "lspci -nn 2>/dev/null" 2>&1 || true)"
+if [ -z "$IMAG_LSPCI_OUT" ]; then
+  echo "ERROR: imag-nb lspci query returned nothing (tool confirmed present above) — cannot determine whether a discrete NVIDIA GPU is present. Check SSH connectivity to imag-nb directly." >&2
   exit 1
 fi
-echo "    ok: imag-nb GPU has ${IMAG_GPU_FREE_MIB}MiB VRAM free (>= ${IMAG_GPU_MIN_FREE_MIB}MiB required)"
+IMAG_HAS_DGPU=no
+if printf '%s\n' "$IMAG_LSPCI_OUT" | imag_has_discrete_nvidia; then IMAG_HAS_DGPU=yes; fi
+
+if [ "$IMAG_HAS_DGPU" = "yes" ]; then
+  # --- discrete NVIDIA present: the ORIGINAL #709 nvidia-smi free-VRAM check, unchanged --------
+  # A long-uptime OBS render pipeline on imag-nb can leak GPU VRAM (live-diagnosed #709: 6872MiB
+  # used out of 8151MiB total after 5 days uptime, leaving ~1058MiB free — NVENC's encoder init then
+  # fails NV_ENC_ERR_OUT_OF_MEMORY and StartRecord silently never starts a recording, only caught 4s
+  # later by the #627 liveness check with no root-cause hint). Read the box's CURRENT free VRAM and
+  # FAIL FAST with an actionable message — before StartRecord ([5/8]) ever runs — rather than burn
+  # time discovering an opaque liveness failure. IMAG_GPU_MIN_FREE_MIB default (1500) sits with
+  # real margin above the observed failure point (~1058MiB) and well below a freshly-restarted
+  # box's healthy free VRAM (~7849MiB, confirmed live post-fix).
+  IMAG_GPU_MIN_FREE_MIB="${IMAG_GPU_MIN_FREE_MIB:-1500}"
+  IMAG_GPU_QUERY_OUT="$(sshpass -p "${IMAG_PW:-newlevel}" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 \
+    "${IMAG_USER:-newlevel}@$IMAG_IP" "$(imag_gpu_query_cmd)" 2>&1 || true)"
+  IMAG_GPU_FREE_MIB="$(imag_gpu_free_mib_from_query "$IMAG_GPU_QUERY_OUT" || true)"
+  if [ -z "$IMAG_GPU_FREE_MIB" ]; then
+    echo "ERROR: $(imag_gpu_unreadable_message)" >&2
+    echo "       raw nvidia-smi output: $IMAG_GPU_QUERY_OUT" >&2
+    exit 1
+  fi
+  if [ "$(imag_gpu_headroom_ok "$IMAG_GPU_FREE_MIB" "$IMAG_GPU_MIN_FREE_MIB")" != "true" ]; then
+    echo "ERROR: $(imag_gpu_preflight_message "$IMAG_GPU_FREE_MIB" "$IMAG_GPU_MIN_FREE_MIB")" >&2
+    exit 1
+  fi
+  echo "    ok: imag-nb GPU has ${IMAG_GPU_FREE_MIB}MiB VRAM free (>= ${IMAG_GPU_MIN_FREE_MIB}MiB required)"
+else
+  # --- no discrete GPU (Intel iGPU / i915, this box's CURRENT hardware): system-RAM equivalent -
+  # #845: an integrated GPU has no separate VRAM pool -- it draws render/encode buffers from
+  # system memory (UMA). /proc/meminfo's MemAvailable is the genuinely meaningful headroom
+  # figure on this hardware (live-confirmed on 10.77.9.187, 2026-07-28: no per-GPU memory
+  # accounting exists under /sys/class/drm/card*/ -- only clock-scaling gt_*_freq_mhz files).
+  # IMAG_MEM_MIN_AVAILABLE_MIB reuses the SAME 1500MiB floor as the dGPU check as a conservative
+  # starting point (no #709-equivalent failure has yet been observed on this hardware to
+  # calibrate a tighter number against) -- overridable like every sibling *_MIN_* knob here.
+  IMAG_MEM_MIN_AVAILABLE_MIB="${IMAG_MEM_MIN_AVAILABLE_MIB:-1500}"
+  IMAG_MEM_QUERY_OUT="$(sshpass -p "${IMAG_PW:-newlevel}" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 \
+    "${IMAG_USER:-newlevel}@$IMAG_IP" "$(imag_mem_query_cmd)" 2>&1 || true)"
+  IMAG_MEM_AVAILABLE_MIB="$(imag_mem_available_mib_from_query "$IMAG_MEM_QUERY_OUT" || true)"
+  if [ -z "$IMAG_MEM_AVAILABLE_MIB" ]; then
+    echo "ERROR: $(imag_mem_unreadable_message)" >&2
+    echo "       raw /proc/meminfo output: $IMAG_MEM_QUERY_OUT" >&2
+    exit 1
+  fi
+  if [ "$(imag_mem_headroom_ok "$IMAG_MEM_AVAILABLE_MIB" "$IMAG_MEM_MIN_AVAILABLE_MIB")" != "true" ]; then
+    echo "ERROR: $(imag_mem_preflight_message "$IMAG_MEM_AVAILABLE_MIB" "$IMAG_MEM_MIN_AVAILABLE_MIB")" >&2
+    exit 1
+  fi
+  echo "    ok: imag-nb has no discrete GPU (Intel iGPU / i915, unified memory) -- ${IMAG_MEM_AVAILABLE_MIB}MiB system RAM available (>= ${IMAG_MEM_MIN_AVAILABLE_MIB}MiB required)"
+fi
 
 # ============================================================================
 # #137 OPTIONAL MODE — OBS-restart A/V-sync SURVIVAL gate. OFF by default.

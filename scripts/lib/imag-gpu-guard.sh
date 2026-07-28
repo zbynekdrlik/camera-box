@@ -75,3 +75,70 @@ imag_gpu_preflight_message() {
 imag_gpu_unreadable_message() {
   echo "imag-nb GPU free-VRAM query (nvidia-smi) returned an unreadable value — cannot confirm headroom before StartRecord. Check nvidia-smi / the NVIDIA driver on imag-nb directly."
 }
+
+# ---------------------------------------------------------------------------------------------
+# #845 — the SAME [4e/8] headroom preflight, for an imag-nb box with NO discrete GPU.
+#
+# The replacement imag notebook (10.77.9.187, #816) is Intel UHD (Raptor Lake-P / i915) only —
+# `nvidia-smi` does not exist and never will on it, so the block above is structurally
+# unsatisfiable there (run 30358343543 aborted with "returned an unreadable value", blaming a
+# driver that was never installed by design). Live-inspected on .187 (2026-07-28) before writing
+# this: `lspci` shows exactly one display adapter (Intel UHD Graphics, no NVIDIA line);
+# `/sys/class/drm/card1/` exposes only `gt_*_freq_mhz` clock-scaling files — NO separate VRAM/BAR
+# accounting exists for an integrated GPU (confirmed: no mem/vram-shaped file anywhere under it,
+# and `/sys/kernel/debug/dri/*/i915_gem_objects` needs root, unavailable to the SSH user). An
+# integrated GPU is UMA (unified memory architecture) — it draws its render/encode buffers
+# straight out of SYSTEM RAM, so `/proc/meminfo`'s `MemAvailable` (the kernel's own "could be
+# freed for a new allocation right now" figure, live-read: 5670708 kB of 7778796 kB total) is the
+# genuinely meaningful equivalent of "free VRAM" on this hardware — not a value invented by
+# analogy to the NVIDIA check (the #841 TearFree lesson: a ported-by-analogy setting that doesn't
+# exist on this driver stack). This does NOT replace the dGPU check above on a box that HAS one —
+# it is the box-appropriate ALTERNATIVE, selected by `imag_has_discrete_nvidia` at the call site.
+
+# imag_mem_query_cmd -> the REMOTE command text that prints ONLY MemAvailable in MiB (no header,
+# no units) from /proc/meminfo — the system-memory analogue of imag_gpu_query_cmd for a box with
+# no discrete GPU. MemAvailable (not MemFree) is used deliberately: it already accounts for
+# reclaimable page/buffer cache, matching what the kernel would actually hand a new allocation.
+imag_mem_query_cmd() {
+  echo "awk '/^MemAvailable:/{printf \"%d\\n\", \$2/1024}' /proc/meminfo 2>&1"
+}
+
+# imag_mem_available_mib_from_query OUTPUT -> the parsed available-RAM MiB integer from
+# imag_mem_query_cmd's raw output, or empty when unparseable (meminfo unreadable/empty output) —
+# mirrors imag_gpu_free_mib_from_query's "never silently guess" contract exactly.
+imag_mem_available_mib_from_query() {
+  local out="$1" first_line
+  first_line="$(printf '%s\n' "$out" | head -1 | tr -d '[:space:]')"
+  case "$first_line" in
+    '' | *[!0-9]*) return 1 ;;
+    *) echo "$first_line" ;;
+  esac
+}
+
+# imag_mem_headroom_ok AVAILABLE_MIB MIN_MIB -> "true"/"false", the system-memory counterpart of
+# imag_gpu_headroom_ok. Kept as its own named function (rather than reusing the GPU one under a
+# misleading name) since the two headroom checks measure genuinely different resources on
+# genuinely different hardware — only the pure integer-compare shape is shared.
+imag_mem_headroom_ok() {
+  local available_mib="$1" min_mib="$2"
+  if [ "$available_mib" -ge "$min_mib" ]; then
+    echo "true"
+  else
+    echo "false"
+  fi
+}
+
+# imag_mem_preflight_message AVAILABLE_MIB MIN_MIB -> the operator-facing fail message for a
+# no-dGPU box — names the ACTUAL condition (no discrete GPU, unified memory) rather than blaming
+# a driver, per #845 (the failure this preflight variant exists to prevent).
+imag_mem_preflight_message() {
+  local available_mib="$1" min_mib="$2"
+  echo "imag-nb has no discrete GPU (Intel iGPU / i915, unified memory architecture -- no separate VRAM pool) and only ${available_mib}MiB system RAM available (need >= ${min_mib}MiB) -- StartRecord's encoder draws from this same pool, so low system memory here is the #709-class leak risk on this hardware. Check for a long-uptime OBS render pipeline or other memory growth on imag-nb before retrying (#845)."
+}
+
+# imag_mem_unreadable_message -> the fail message for when /proc/meminfo's output could not be
+# parsed at all — names the actual condition (no dGPU, checking system RAM instead), never
+# "check the NVIDIA driver" (there isn't one on this box).
+imag_mem_unreadable_message() {
+  echo "imag-nb system-memory headroom query (/proc/meminfo MemAvailable) returned an unreadable value -- cannot confirm headroom before StartRecord on this box (no discrete GPU: Intel iGPU / i915). Check /proc/meminfo readability on imag-nb directly."
+}

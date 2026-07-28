@@ -110,7 +110,12 @@ fn imag_mem_available_mib_from_query_strips_whitespace_and_trailing_newline() {
 
 #[test]
 fn imag_mem_available_mib_from_query_fails_loud_on_unparseable_output() {
-    for bad in ["", "N/A", "awk: cannot open /proc/meminfo", "command not found"] {
+    for bad in [
+        "",
+        "N/A",
+        "awk: cannot open /proc/meminfo",
+        "command not found",
+    ] {
         let out = run_sourced(&format!("imag_mem_available_mib_from_query '{bad}'"));
         assert!(
             !out.status.success(),
@@ -161,8 +166,14 @@ fn imag_mem_preflight_message_names_no_dgpu_and_the_figures_never_a_driver() {
     let out = run_sourced("imag_mem_preflight_message 1200 1500");
     assert!(out.status.success());
     let msg = String::from_utf8_lossy(&out.stdout);
-    assert!(msg.contains("1200"), "must include the observed available MiB: {msg}");
-    assert!(msg.contains("1500"), "must include the required floor: {msg}");
+    assert!(
+        msg.contains("1200"),
+        "must include the observed available MiB: {msg}"
+    );
+    assert!(
+        msg.contains("1500"),
+        "must include the required floor: {msg}"
+    );
     assert!(
         msg.to_lowercase().contains("no discrete gpu") || msg.to_lowercase().contains("igpu"),
         "#845: must name the ACTUAL condition (no discrete GPU / iGPU), not blame a driver: {msg}"
@@ -219,13 +230,16 @@ fn recording_e2e_branches_on_imag_has_discrete_nvidia() {
 #[test]
 fn recording_e2e_preflights_lspci_before_trusting_its_absence_as_no_dgpu() {
     let s = read(RECORDING_E2E);
-    let tool_check_idx = s
-        .find("imag_require_remote_tool_cmd lspci")
-        .expect("#833/#845: lspci must be preflighted via imag_require_remote_tool_cmd -- a \
-                 missing lspci must never be silently read as 'no discrete GPU'");
+    let tool_check_idx = s.find("imag_require_remote_tool_cmd lspci").expect(
+        "#833/#845: lspci must be preflighted via imag_require_remote_tool_cmd -- a \
+                 missing lspci must never be silently read as 'no discrete GPU'",
+    );
+    // The actual branch DECISION (`| imag_has_discrete_nvidia; then`) is what must be gated by
+    // the tool check -- not just any mention of the function name (the sourcing comment earlier
+    // in the file also names it, harmlessly, well before the lspci preflight even runs).
     let dgpu_branch_idx = s
-        .find("imag_has_discrete_nvidia")
-        .expect("the dGPU branch decision must exist");
+        .find("| imag_has_discrete_nvidia; then")
+        .expect("the dGPU branch decision (`| imag_has_discrete_nvidia; then`) must exist");
     assert!(
         tool_check_idx < dgpu_branch_idx,
         "#833: the lspci tool-presence check must run BEFORE the code that trusts lspci's \
@@ -272,7 +286,9 @@ fn recording_e2e_mem_preflight_exits_nonzero_on_low_headroom() {
     let s = read(RECORDING_E2E);
     let idx = s
         .find("imag_mem_headroom_ok \"$IMAG_MEM_AVAILABLE_MIB\"")
-        .expect("#845: recording-e2e.sh must check headroom against the parsed available-MiB value");
+        .expect(
+            "#845: recording-e2e.sh must check headroom against the parsed available-MiB value",
+        );
     let window = &s[idx..(idx + 400).min(s.len())];
     assert!(
         window.contains("exit 1"),
