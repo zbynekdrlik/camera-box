@@ -30,9 +30,28 @@ use std::collections::HashMap;
 /// Case-sensitive EXACT box-name match downstream (this function just builds the map — the
 /// caller does a plain `HashMap::get`, never a substring match), matching
 /// `cambox_offline_ack_reason`'s own documented contract ("cam7" must never match "cam70").
-pub fn parse(_ack: &str) -> HashMap<String, String> {
-    // #855 RED: not implemented yet -- every test below must fail (panic), not silently pass.
-    todo!("#855: offline_ack::parse not implemented yet")
+pub fn parse(ack: &str) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    for entry in ack.split(',') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        let (name, reason) = match entry.split_once(':') {
+            Some((n, r)) => (n.trim(), r.trim()),
+            None => (entry, ""),
+        };
+        if name.is_empty() {
+            continue;
+        }
+        let reason = if reason.is_empty() {
+            "unspecified"
+        } else {
+            reason
+        };
+        out.insert(name.to_string(), reason.to_string());
+    }
+    out
 }
 
 #[cfg(test)]
@@ -56,10 +75,15 @@ mod tests {
 
     #[test]
     fn multiple_box_reason_pairs_855() {
-        let m = parse("cam5:powered-off-2026-07-27,cam6:powered-off-2026-07-27,cam7:powered-off-2026-07-27");
+        let m = parse(
+            "cam5:powered-off-2026-07-27,cam6:powered-off-2026-07-27,cam7:powered-off-2026-07-27",
+        );
         assert_eq!(m.len(), 3);
         for cam in ["cam5", "cam6", "cam7"] {
-            assert_eq!(m.get(cam).map(String::as_str), Some("powered-off-2026-07-27"));
+            assert_eq!(
+                m.get(cam).map(String::as_str),
+                Some("powered-off-2026-07-27")
+            );
         }
     }
 
