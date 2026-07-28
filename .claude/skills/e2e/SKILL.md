@@ -277,10 +277,16 @@ Use the FRESH CI probe-tools (linux for cam1/cam2 deploy, windows verdict.exe) a
    before trusting a run** (must be `1920x1080`) — a regression here silently softens the burns.
    (Profile-param changes don't hot-apply to a running output — they take effect at OBS launch.)
 
-**DanteSync gate prerequisite (the harness can't HTTP-fetch :8898):** read `\\.\pipe\dantesync`
-on strih+stream via the win-* MCP (PipeDirection.In; strip the 4-byte header to the leading `{`),
-write `{ntp_offset_us,is_locked,mode,...}` to `/tmp/recording-e2e-<RUN_ID>/dante-{strih,stream}.json`
-BEFORE launching the harness. Then the gate passes all 4 nodes.
+**DanteSync gate prerequisite — NO manual pre-fetch needed (#648, since 2026-07-10).** The harness
+fetches each Windows box's DanteSync status itself, LIVE over HTTP from dantesync#47's own network
+endpoint (`http://<host>:8898/status`) — `recording-e2e.sh` passes `--win-http strih=… --win-http
+stream=…` straight into `scripts/dantesync-gate.sh`. No win-* MCP, no operator pre-fetch, no
+`/tmp/recording-e2e-<RUN_ID>/dante-{strih,stream}.json` file — that pre-#648 flow was removed in
+`e2cfeb3d7` and nothing in this harness writes those files any more. Just launch the harness; the
+gate queries all 4 nodes (cam1/cam2 over SSH+HTTP, strih/stream over HTTP) on its own and fails
+fast if any is unreachable/stale/drifted/PTP-degraded. (If you see a `dante-*.json` file already
+sitting in a run's `$OUTDIR`, it's a stray leftover from someone following this stale advice in the
+past, not something the harness produced — the harness now warns loudly about it, #835.)
 
 **dev1↔painter clock-offset gate — ALL_CAMBOX sweep ONLY (#326):** the all-cambox sweep stamps
 each program-switch WINDOW boundary on dev1's CLOCK_REALTIME, while `recording-verdict
@@ -295,7 +301,9 @@ offsets on the shared strih basis), and FAILS FAST (exit 20) if it exceeds the g
 The pure comparator (`painter_offset_check`) lives in `clock-offset-guard.sh` and is unit-tested
 in `tests/clock_offset_guard.rs`; the gate flow is unit-tested no-rig in
 `tests/clock_offset_painter_gate.rs` by feeding `DEV1_DANTE_JOURNAL` / `PAINTER_DANTE_JOURNAL`
-fixture files (same "pre-fetch status to a file" trick the DanteSync gate uses for Windows nodes).
+fixture files (a TEST-ONLY env-var injection seam, not a live-run pre-fetch — this gate has no
+Windows-node leg at all, dev1↔painter only; do not confuse it with the DanteSync gate above, which
+queries strih/stream LIVE over HTTP and needs no pre-fetched file either, #648).
 
 **Decode on stream.lan (#193), NOT dev1:** the strih recording lives on the strih box; copy it
 DIRECTLY strih→stream box (`New-PSDrive \\10.77.9.204\C$` + Copy-Item, ~751MB in ~7s, NEVER via
