@@ -6113,3 +6113,25 @@ itself is required-features=["probe"] (no local compile/test possible per CLAUDE
 Build Policy) -- verified in CI only, extra manual review rigor applied. PR: TBD (added to the
 already-open #704 bundle via a PATCH to its body, not a new dev->main PR -- see CLAUDE.md's
 "only ONE open PR per (head,base)" gotcha).
+
+#856 (2026-07-28): the fused E2E gate now APPLIES the A/V correction it measures, not just
+reports it. Root cause: av_sync_calibrate.py (the #427/#188 auto-set controller) already had
+the full apply + read-back + rollback safety, but recording-e2e.sh never called it -- and
+cleanup()'s own delivery-verify snapshot/restore (obs_phase2.py teardown --host "$STREAM",
+which ALWAYS runs on exit) would silently overwrite an apply if it ran at [8/8g] itself. Fix:
+a new pure Python combiner scripts/av_sync_combine_offsets.py (RED bc3223c59 -> GREEN
+5d4c852f6, own pytest suite tests/python/test_av_sync_combine_offsets.py, 12 tests) takes THIS
+run's all_cambox_av_sync object and derives the median of every camera whose verdict=="measured"
+(never "derived"/"unknown"/"excluded"), refusing when fewer than 2 cameras qualify or the
+qualifying offsets spread more than 100ms. recording-e2e.sh (RED 6548e337e -> GREEN 7406031f4,
+tests/harness_recording_e2e_av_sync_apply_856.rs, 7 tests) declares AV_SYNC_APPLY_OFFSET_MS
+before the cleanup trap, computes it at [8/8g] right after the merge verdict (E2E_EXECUTE_
+VERDICT=1 only, best-effort/never touches GATE), and applies it via av_sync_calibrate.py
+--host --source --offset-ms --apply strictly INSIDE cleanup(), placed immediately AFTER the
+delivery-verify restore call so the correction composes with (survives) that restore instead of
+being fought by it. Widened the byte-window in harness_e2e_execute_verdict_703.rs's own exit-
+code-propagation test (4800 -> 6200) for the new step, following that test's own established
+growth-tracking convention. Strih inter-camera equalization (PRERECORD_PHASE_CALIBRATE) stays
+OFF by deliberate design, untouched -- out of scope for this ticket. Full local suite (163
+binaries + 635 python tests) green. Added to the already-open #704 bundle via a PATCH to its
+body (same "one open PR per head/base" constraint #855 hit).
