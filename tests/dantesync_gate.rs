@@ -434,9 +434,9 @@ fn gate_fails_when_a_win_http_node_is_stale() {
     // whenever this test actually runs) is always graded STALE against the real wall clock --
     // simulates the box's HTTP server serving a cached snapshot after dantesync itself died.
     let p = write_win_http_fixture("strih_http_stale", HTTP_STRIH_OK);
-    // #836: --samples 1 --window-s 0 keeps this test fast (no real sampling delay) -- the
-    // staleness check runs on the LAST gathered payload regardless of sample count, so a single
-    // read is sufficient to exercise it.
+    // #836: --samples 1 --min-distinct 1 --window-s 0 keeps this test fast (no real sampling
+    // delay, and --min-distinct must never exceed --samples) -- the staleness check runs on the
+    // LAST gathered payload regardless of sample count, so a single read is sufficient.
     let (code, stdout, stderr) = run_gate_env(
         &[
             "--linux",
@@ -444,6 +444,8 @@ fn gate_fails_when_a_win_http_node_is_stale() {
             "--win-http",
             "strih=10.77.9.202",
             "--samples",
+            "1",
+            "--min-distinct",
             "1",
             "--window-s",
             "0",
@@ -482,8 +484,9 @@ fn gate_fails_when_a_win_http_node_updated_ts_field_is_absent() {
     // never silently graded on offset/PTP alone with no freshness proof at all.
     let no_ts = "{\"ntp_offset_us\":0,\"is_locked\":true,\"mode\":\"NANO\"}";
     let p = write_win_http_fixture("strih_http_no_ts", no_ts);
-    // #836: --samples 1 --window-s 0 keeps this test fast; the absent-updated_ts check runs on
-    // the LAST gathered payload regardless of sample count.
+    // #836: --samples 1 --min-distinct 1 --window-s 0 keeps this test fast (--min-distinct must
+    // never exceed --samples); the absent-updated_ts check runs on the LAST gathered payload
+    // regardless of sample count.
     let (code, stdout, stderr) = run_gate_env(
         &[
             "--linux",
@@ -491,6 +494,8 @@ fn gate_fails_when_a_win_http_node_updated_ts_field_is_absent() {
             "--win-http",
             "strih=10.77.9.202",
             "--samples",
+            "1",
+            "--min-distinct",
             "1",
             "--window-s",
             "0",
@@ -621,13 +626,16 @@ fn gate_fails_when_a_linux_node_http_payload_is_stale_even_if_its_journal_looks_
     let stale_http = "{\"gm_source_ip\":\"10.77.9.184\",\"settled\":true,\"updated_ts\":1783647854,\
                        \"is_locked\":true,\"ntp_offset_us\":0,\"mode\":\"NANO\",\"ntp_failed\":false}";
     let http_fixture = write_linux_http_fixture("cam1_http_stale", stale_http);
-    // #836: --samples 1 --window-s 0 keeps this test fast; staleness is graded on the LAST
-    // gathered payload regardless of sample count.
+    // #836: --samples 1 --min-distinct 1 --window-s 0 keeps this test fast (--min-distinct must
+    // never exceed --samples); staleness is graded on the LAST gathered payload regardless of
+    // sample count.
     let (code, stdout, stderr) = run_gate_env(
         &[
             "--linux",
             "cam1=10.77.9.61",
             "--samples",
+            "1",
+            "--min-distinct",
             "1",
             "--window-s",
             "0",
@@ -669,13 +677,16 @@ fn gate_fails_when_a_linux_node_http_payload_is_fresh_but_ptp_degraded() {
          \"is_locked\":false,\"ntp_offset_us\":150,\"mode\":\"NTP\",\"ntp_failed\":false}}"
     );
     let p = write_linux_http_fixture("cam1_http_degraded", &degraded);
-    // #836: --samples 1 --window-s 0 -- PTP-lock grading is independent of offset sampling and
-    // still reads from the LAST gathered payload, so a single read is sufficient here.
+    // #836: --samples 1 --min-distinct 1 --window-s 0 (--min-distinct must never exceed
+    // --samples) -- PTP-lock grading is independent of offset sampling and still reads from the
+    // LAST gathered payload, so a single read is sufficient here.
     let (code, stdout, stderr) = run_gate_env(
         &[
             "--linux",
             "cam1=10.77.9.61",
             "--samples",
+            "1",
+            "--min-distinct",
             "1",
             "--window-s",
             "0",
@@ -1047,5 +1058,160 @@ fn gate_status_line_reports_median_and_spread_regardless_of_outcome() {
     assert!(
         low.contains("median") && low.contains("spread"),
         "a DRIFT status line must still report both median and spread: {stdout}"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// #836 review follow-up -- sampling a node now takes real wall-clock time (up to --window-s
+// seconds), so grading multiple independent nodes ONE AFTER ANOTHER would multiply that window
+// by the node count. The gate instead samples every node CONCURRENTLY (grade_http_node run in a
+// background subshell per node, joined via `wait`). These tests prove that refactor is correct
+// (multiple nodes' reports and verdicts are neither dropped nor mixed up) and that it genuinely
+// runs in parallel (real wall-clock time stays close to ONE window, not node_count x window).
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn gate_reports_and_tallies_multiple_concurrent_nodes_independently() {
+    // Two --win-http nodes: "strih" is tight+in-bound (OK), "stream" scatters beyond stability
+    // (UNSTABLE). The combined gate must FAIL (one BAD node dominates), and the report must show
+    // EACH node's own correct verdict -- neither dropped, swapped, nor bled into the other's line.
+    let base = now_epoch();
+    let ok_responses = vec![
+        http_status(base, 100),
+        http_status(base + 1, 120),
+        http_status(base + 2, 110),
+    ];
+    let unstable_responses = vec![
+        http_status(base, -19800),
+        http_status(base + 1, 200),
+        http_status(base + 2, 20100),
+    ];
+    let p_strih = write_multi_read_fixture("concurrent_strih_ok", &ok_responses);
+    let p_stream = write_multi_read_fixture("concurrent_stream_unstable", &unstable_responses);
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--win-http",
+            "stream=10.77.9.204",
+            "--samples",
+            "3",
+            "--min-distinct",
+            "3",
+            "--window-s",
+            "0",
+        ],
+        &[
+            (
+                "DANTESYNC_GATE_WIN_HTTP_STRIH",
+                &p_strih.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_WIN_HTTP_STREAM",
+                &p_stream.display().to_string(),
+            ),
+        ],
+    );
+    assert_eq!(
+        code, 20,
+        "one BAD node among several must fail the whole gate. stdout={stdout} stderr={stderr}"
+    );
+    assert!(stderr.contains("GATE FAILED"), "stderr: {stderr}");
+    // Each node's OWN line must carry its OWN correct verdict -- not the other's. Match on the
+    // node NAME as the line's leading token (per-node report lines are `  <name>   VERDICT ...`)
+    // rather than a bare substring, since the gate's own banner line ("NTP master = strih; ...")
+    // also contains the literal text "strih".
+    let strih_line = stdout
+        .lines()
+        .find(|l| l.trim_start().starts_with("strih"))
+        .unwrap_or_else(|| panic!("no strih report line in stdout: {stdout}"));
+    let stream_line = stdout
+        .lines()
+        .find(|l| l.trim_start().starts_with("stream"))
+        .unwrap_or_else(|| panic!("no stream report line in stdout: {stdout}"));
+    assert!(
+        strih_line.contains("OK"),
+        "strih (tight, in-bound) must report OK: {strih_line:?}"
+    );
+    assert!(
+        stream_line.contains("UNSTABLE"),
+        "stream (scattered) must report UNSTABLE, not strih's OK: {stream_line:?}"
+    );
+}
+
+#[test]
+fn gate_samples_multiple_nodes_concurrently_not_sequentially() {
+    // Real proof of the performance fix: 2 nodes, each needing 2 samples spread across a REAL
+    // 4-second window (spacing = window/(n-1) = 4s -- gather_http_samples' own real `sleep`, not
+    // skippable via --window-s 0 here since we need to actually MEASURE elapsed time). If the
+    // gate graded nodes one after another, total wall time would be ~2 x 4s = 8s; if concurrent,
+    // it stays close to ONE node's ~4s. The assertion threshold (6.5s) sits safely between the
+    // two, comfortably above scheduling/process-spawn overhead and comfortably below the
+    // sequential total.
+    let base = now_epoch();
+    let responses_a = vec![http_status(base, 100), http_status(base + 4, 110)];
+    let responses_b = vec![http_status(base, 200), http_status(base + 4, 210)];
+    let p_a = write_multi_read_fixture("concurrent_timing_strih", &responses_a);
+    let p_b = write_multi_read_fixture("concurrent_timing_stream", &responses_b);
+
+    let start = std::time::Instant::now();
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--win-http",
+            "stream=10.77.9.204",
+            "--samples",
+            "2",
+            "--min-distinct",
+            "2",
+            "--window-s",
+            "4",
+        ],
+        &[
+            ("DANTESYNC_GATE_WIN_HTTP_STRIH", &p_a.display().to_string()),
+            ("DANTESYNC_GATE_WIN_HTTP_STREAM", &p_b.display().to_string()),
+        ],
+    );
+    let elapsed = start.elapsed();
+    assert_eq!(
+        code, 0,
+        "both nodes are healthy -> PASS. stdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        elapsed.as_secs_f64() < 6.5,
+        "#836 review follow-up: 2 nodes each needing a real 4s sampling window took {:.1}s -- \
+         sequential grading would take ~8s, so this proves the nodes were NOT sampled one after \
+         another. stdout={stdout}",
+        elapsed.as_secs_f64()
+    );
+}
+
+#[test]
+fn gate_refuses_when_min_distinct_exceeds_samples() {
+    // A min-distinct higher than the sample count could NEVER be satisfied by any node --
+    // refuse at argument-parse time (usage error, 1) rather than let every node silently grade
+    // "insufficient" no matter how healthy it is.
+    let (code, _stdout, stderr) = run_gate(&[
+        "--linux",
+        "",
+        "--win-http",
+        "strih=10.77.9.202",
+        "--samples",
+        "2",
+        "--min-distinct",
+        "3",
+    ]);
+    assert_eq!(
+        code, 1,
+        "--min-distinct > --samples must be a usage error. stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("--min-distinct") && stderr.contains("--samples"),
+        "stderr must name both flags: {stderr}"
     );
 }

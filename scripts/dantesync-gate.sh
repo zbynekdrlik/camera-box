@@ -209,6 +209,92 @@ gather_http_samples() {
   printf '%s' "$out"
 }
 
+# grade_http_node READ_FN NAME ARG KIND BOUND STABILITY MIN_DISTINCT SAMPLES WINDOW FRESHNESS_S
+#   VERDICTFILE
+# -> samples + grades ONE node (the shared body for both the Linux-HTTP-first loop and the
+# Windows --win-http loop -- extracted so the two loops don't carry two independently-editable
+# copies of the same freshness -> sampled_offset_check -> ptp_check -> node_verdict sequence).
+# Prints the node's human-readable status line(s) to STDOUT (unchanged wording/order from before
+# this function existed) and writes its final OK/BAD/UNKNOWN verdict word to VERDICTFILE -- a
+# SEPARATE channel from stdout, specifically so this function can be run inside a backgrounded
+# subshell (`grade_http_node ... > "$outfile" &`, see the main loop below) with the verdict still
+# recoverable after `wait` without parsing it back out of the captured report text. KIND is
+# "linux" (tries the HTTP status endpoint first, falls back to read_linux_node_journal (#608) on
+# total HTTP unreachability, #686) or "win" (HTTP only, #648, no journal to fall back to).
+#
+# #836 review follow-up: sampling a node now takes real wall-clock time (up to WINDOW seconds),
+# and nodes are independent -- grading them one after another the way the pre-extraction code did
+# multiplies that window by the node count (4 nodes x 30s window = 2 minutes). Backgrounding one
+# call per node (below) instead runs every node's sampling window CONCURRENTLY, so the total gate
+# time stays close to ONE window regardless of node count. This function's own body is completely
+# unchanged sampling/grading LOGIC -- only where it is invoked from changed.
+grade_http_node() {
+  local read_fn="$1" name="$2" arg="$3" kind="$4" bound="$5" stability="$6" min_distinct="$7"
+  local samples="$8" window="$9" freshness="${10}" verdictfile="${11}"
+  local status samples_raw now rc_off rc_ptp ptp
+
+  samples_raw="$(gather_http_samples "$read_fn" "$name" "$arg" "$samples" "$window")"
+  if [ -z "$samples_raw" ]; then
+    if [ "$kind" = "linux" ]; then
+      # HTTP unreachable/disabled -> FALLBACK to the journal parser (unchanged pre-#686 path).
+      status="$(read_linux_node_journal "$name" "$arg")"
+      if [ -z "$status" ]; then
+        printf '  %-14s UNREACHABLE  (no DanteSync HTTP @ %s:%s/status nor journal over SSH)\n' \
+          "$name" "$arg" "$GATE_WIN_HTTP_PORT"
+        printf 'UNKNOWN' > "$verdictfile"
+        return 0
+      fi
+      ptp="$(ptp_locked_from_journal "$status")"
+      rc_off=0
+      case "$(dantesync_offset_verdict "$status" "$freshness" "$bound")" in
+        ok)
+          printf '  %-14s NTP OK       (fresh offset within %s us bound)\n' "$name" "$bound" ;;
+        drift)
+          printf '  %-14s NTP DRIFT    (fresh offset exceeds %s us bound)\n' "$name" "$bound"
+          rc_off=2 ;;
+        stale)
+          printf '  %-14s NTP STALE    (no FRESH [NTP] offset within %ss -- status incomplete, #550/#595)\n' \
+            "$name" "$freshness"
+          rc_off=3 ;;
+        *)
+          printf '  %-14s NTP UNKNOWN  (no [NTP] offset line at all -- status incomplete)\n' "$name"
+          rc_off=3 ;;
+      esac
+      rc_ptp=0; ptp_check "$name" "$ptp" || rc_ptp=$?
+      printf '%s' "$(node_verdict "$rc_off" "$rc_ptp")" > "$verdictfile"
+      return 0
+    fi
+    printf '  %-14s UNREACHABLE  (no DanteSync HTTP status @ %s:%s/status -- #648)\n' \
+      "$name" "$arg" "$GATE_WIN_HTTP_PORT"
+    printf 'UNKNOWN' > "$verdictfile"
+    return 0
+  fi
+
+  status="$(printf '%s\n' "$samples_raw" | tail -1)"   # most recent payload -> freshness/PTP
+  now="$(date +%s)"   # #836: recompute per node -- sampling itself takes real wall-clock time
+  local issue_ref="648"
+  if [ "$kind" = "linux" ]; then
+    issue_ref="686"
+  fi
+  rc_off=0
+  case "$(pipe_json_freshness_verdict "$status" "$now" "$freshness")" in
+    stale)
+      printf '  %-14s NTP STALE    (updated_ts older than %ss -- status incomplete, #%s)\n' \
+        "$name" "$freshness" "$issue_ref"
+      rc_off=3 ;;
+    absent)
+      printf '  %-14s NTP UNKNOWN  (no updated_ts field -- status incomplete, #%s)\n' \
+        "$name" "$issue_ref"
+      rc_off=3 ;;
+    *)
+      sampled_offset_check "$name" "$samples_raw" "$bound" "$stability" "$min_distinct" \
+        || rc_off=$? ;;
+  esac
+  ptp="$(ptp_locked_from_pipe_json "$status")"
+  rc_ptp=0; ptp_check "$name" "$ptp" || rc_ptp=$?
+  printf '%s' "$(node_verdict "$rc_off" "$rc_ptp")" > "$verdictfile"
+}
+
 usage() {
   cat <<EOF
 dantesync-gate.sh — recording-E2E NTP+PTP precondition gate (#7).
@@ -325,6 +411,11 @@ main() {
     echo "ERROR: --stability-us must be a non-negative integer (got '${stability}')." >&2
     exit 1
   fi
+  if [ "$min_distinct" -gt "$samples" ]; then
+    echo "ERROR: --min-distinct (${min_distinct}) cannot exceed --samples (${samples}) --" \
+      "no node could ever gather that many distinct reads (#836)." >&2
+    exit 1
+  fi
   if ! command -v sshpass >/dev/null 2>&1; then
     echo "ERROR: sshpass not found — required to query the Linux cam DanteSync over SSH." >&2
     exit 1
@@ -350,109 +441,63 @@ main() {
   echo "== dantesync-gate (#7): recording-E2E precondition — NTP within ${bound} us AND PTP LOCKED =="
   echo "   GM = 10.77.9.184 (PTP grandmaster); NTP master = strih; degraded PTP => meaningless latency"
 
-  local bad=0 unknown=0 ok=0 name ip status rc_off rc_ptp ptp
-  local now samples_raw
+  local bad=0 unknown=0 ok=0 name ip
+
+  # #836 review follow-up: sampling a node now takes up to WINDOW seconds (was instant with the
+  # old single read). Nodes are independent, so gather+grade every node CONCURRENTLY instead of
+  # one after another -- each node's grade_http_node call runs in its OWN backgrounded subshell,
+  # writing its human-readable report to a tmp file and its OK/BAD/UNKNOWN verdict to a sibling
+  # tmp file; the parent waits for every job, then replays each report IN THE SAME ORDER as
+  # before (Linux nodes first, then Windows nodes, each in their given order -- deterministic
+  # output byte-for-byte) and tallies the verdicts. Total wall time is now close to ONE sampling
+  # window regardless of node count, instead of window x node_count.
+  local tmpdir
+  tmpdir="$(mktemp -d)"
+  trap 'rm -rf "$tmpdir"' EXIT
+
+  local -a job_outfiles=() job_verdictfiles=()
+  local idx=0 outfile vfile
 
   # --- Linux nodes (HTTP status endpoint FIRST -- #686; journald over SSH as FALLBACK) ------
   local pair
   for pair in "${linux_pairs[@]}"; do
     name="${pair%%=*}"; ip="${pair#*=}"
-    # #686: try the network status endpoint FIRST -- authoritative, immune to the #679
-    # journal-throttle false-DEGRADE. read_linux_node_journal (#608) remains the FALLBACK for a
-    # node whose HTTP endpoint is unreachable/disabled -- never consulted once HTTP answers.
-    # #836: gather_http_samples samples the node MULTIPLE times (short-circuiting to empty on an
-    # unreachable first read, same as the pre-#836 single read) instead of reading it once.
-    samples_raw="$(gather_http_samples read_linux_node_http_status "$name" "$ip" "$samples" "$window")"
-    if [ -n "$samples_raw" ]; then
-      status="$(printf '%s\n' "$samples_raw" | tail -1)"   # most recent payload -> freshness/PTP
-      now="$(date +%s)"   # #836: recompute per node -- sampling itself takes real wall-clock time
-      rc_off=0
-      case "$(pipe_json_freshness_verdict "$status" "$now" "$GATE_OFFSET_FRESHNESS_S")" in
-        stale)
-          printf '  %-14s NTP STALE    (updated_ts older than %ss -- status incomplete, #686)\n' \
-            "$name" "$GATE_OFFSET_FRESHNESS_S"
-          rc_off=3 ;;
-        absent)
-          printf '  %-14s NTP UNKNOWN  (no updated_ts field -- status incomplete, #686)\n' "$name"
-          rc_off=3 ;;
-        *)
-          sampled_offset_check "$name" "$samples_raw" "$bound" "$stability" "$min_distinct" \
-            || rc_off=$? ;;
-      esac
-      ptp="$(ptp_locked_from_pipe_json "$status")"
-      rc_ptp=0; ptp_check "$name" "$ptp" || rc_ptp=$?
-      case "$(node_verdict "$rc_off" "$rc_ptp")" in
-        OK) ok=$((ok + 1)) ;; BAD) bad=$((bad + 1)) ;; UNKNOWN) unknown=$((unknown + 1)) ;;
-      esac
-      continue
-    fi
-    # HTTP unreachable/disabled -> FALLBACK to the journal parser (unchanged pre-#686 path).
-    # read_linux_node_journal (#608) is the SSH-gather seam: live over SSH, or a fixture file via
-    # DANTESYNC_GATE_LINUX_JOURNAL_<NAME> for tests/offline runs.
-    status="$(read_linux_node_journal "$name" "$ip")"
-    if [ -z "$status" ]; then
-      printf '  %-14s UNREACHABLE  (no DanteSync HTTP @ %s:%s/status nor journal over SSH)\n' \
-        "$name" "$ip" "$GATE_WIN_HTTP_PORT"
-      unknown=$((unknown + 1)); continue
-    fi
-    ptp="$(ptp_locked_from_journal "$status")"
-    rc_off=0
-    case "$(dantesync_offset_verdict "$status" "$GATE_OFFSET_FRESHNESS_S" "$bound")" in
-      ok)
-        printf '  %-14s NTP OK       (fresh offset within %s us bound)\n' "$name" "$bound" ;;
-      drift)
-        printf '  %-14s NTP DRIFT    (fresh offset exceeds %s us bound)\n' "$name" "$bound"
-        rc_off=2 ;;
-      stale)
-        printf '  %-14s NTP STALE    (no FRESH [NTP] offset within %ss -- status incomplete, #550/#595)\n' \
-          "$name" "$GATE_OFFSET_FRESHNESS_S"
-        rc_off=3 ;;
-      *)
-        printf '  %-14s NTP UNKNOWN  (no [NTP] offset line at all -- status incomplete)\n' "$name"
-        rc_off=3 ;;
-    esac
-    rc_ptp=0; ptp_check "$name" "$ptp" || rc_ptp=$?
-    case "$(node_verdict "$rc_off" "$rc_ptp")" in
-      OK) ok=$((ok + 1)) ;; BAD) bad=$((bad + 1)) ;; UNKNOWN) unknown=$((unknown + 1)) ;;
-    esac
+    outfile="$tmpdir/$idx.out"; vfile="$tmpdir/$idx.verdict"
+    grade_http_node read_linux_node_http_status "$name" "$ip" linux \
+      "$bound" "$stability" "$min_distinct" "$samples" "$window" "$GATE_OFFSET_FRESHNESS_S" \
+      "$vfile" > "$outfile" &
+    job_outfiles+=("$outfile"); job_verdictfiles+=("$vfile")
+    idx=$((idx + 1))
   done
 
   # --- Windows nodes fetched LIVE over HTTP (dantesync#47's network status endpoint, #648) ----
   # No win-* MCP, no human pre-fetch -- the whole point of #648 is an unattended CI run has
-  # neither. The endpoint's JSON carries "updated_ts" (unix epoch seconds), so this path CAN and
-  # DOES grade freshness: a box whose dantesync died but whose HTTP server keeps serving a cached
-  # snapshot must be caught, never silently graded on stale numbers. (#835: this is now the ONLY
-  # Windows-node input path -- the old --win-status file-relay path, which was age-blind, was
-  # removed.) #836: gather_http_samples samples the node MULTIPLE times instead of reading it
-  # once -- see the Linux loop above for the same treatment.
+  # neither. (#835: this is now the ONLY Windows-node input path -- the old --win-status
+  # file-relay path, which was age-blind, was removed.)
   local entry
   for entry in "${win_http[@]}"; do
     name="${entry%%=*}"; ip="${entry#*=}"
-    samples_raw="$(gather_http_samples read_win_http_status "$name" "$ip" "$samples" "$window")"
-    if [ -z "$samples_raw" ]; then
-      printf '  %-14s UNREACHABLE  (no DanteSync HTTP status @ %s:%s/status -- #648)\n' \
-        "$name" "$ip" "$GATE_WIN_HTTP_PORT"
-      unknown=$((unknown + 1)); continue
-    fi
-    status="$(printf '%s\n' "$samples_raw" | tail -1)"   # most recent payload -> freshness/PTP
-    now="$(date +%s)"   # #836: recompute per node -- sampling itself takes real wall-clock time
-    rc_off=0
-    case "$(pipe_json_freshness_verdict "$status" "$now" "$GATE_OFFSET_FRESHNESS_S")" in
-      stale)
-        printf '  %-14s NTP STALE    (updated_ts older than %ss -- status incomplete, #648)\n' \
-          "$name" "$GATE_OFFSET_FRESHNESS_S"
-        rc_off=3 ;;
-      absent)
-        printf '  %-14s NTP UNKNOWN  (no updated_ts field -- status incomplete, #648)\n' "$name"
-        rc_off=3 ;;
-      *)
-        sampled_offset_check "$name" "$samples_raw" "$bound" "$stability" "$min_distinct" \
-          || rc_off=$? ;;
-    esac
-    ptp="$(ptp_locked_from_pipe_json "$status")"
-    rc_ptp=0; ptp_check "$name" "$ptp" || rc_ptp=$?
-    case "$(node_verdict "$rc_off" "$rc_ptp")" in
-      OK) ok=$((ok + 1)) ;; BAD) bad=$((bad + 1)) ;; UNKNOWN) unknown=$((unknown + 1)) ;;
+    outfile="$tmpdir/$idx.out"; vfile="$tmpdir/$idx.verdict"
+    grade_http_node read_win_http_status "$name" "$ip" win \
+      "$bound" "$stability" "$min_distinct" "$samples" "$window" "$GATE_OFFSET_FRESHNESS_S" \
+      "$vfile" > "$outfile" &
+    job_outfiles+=("$outfile"); job_verdictfiles+=("$vfile")
+    idx=$((idx + 1))
+  done
+
+  # `wait`'s own exit status is the LAST job's exit status -- irrelevant here (each node's
+  # verdict is read back from its own file below, not from the job's return code) and must never
+  # abort this script under `set -e` if some job happens to exit non-zero.
+  wait || true
+
+  local i verdict
+  for ((i = 0; i < idx; i++)); do
+    cat "${job_outfiles[$i]}"
+    verdict="$(cat "${job_verdictfiles[$i]}" 2>/dev/null || printf 'UNKNOWN')"
+    case "$verdict" in
+      OK) ok=$((ok + 1)) ;;
+      BAD) bad=$((bad + 1)) ;;
+      *) unknown=$((unknown + 1)) ;;
     esac
   done
 

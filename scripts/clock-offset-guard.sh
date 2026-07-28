@@ -498,6 +498,13 @@ offset_check() {
 
 # distinct_offset_samples_us PAYLOADS_NEWLINE -> newline list of the DISTINCT ntp_offset_us
 # values in PAYLOADS_NEWLINE (one raw status-JSON blob per line, in the order they were read).
+# ASSUMES each individual read's payload is itself a SINGLE line -- true of every real capture in
+# this file (dantesync#47's HTTP endpoint always serves compact, non-pretty-printed JSON; see the
+# fixtures throughout this file and tests/clock_offset_guard.rs) and of gather_http_samples in
+# dantesync-gate.sh (which newline-joins the reads it gathers). If a future endpoint ever emitted
+# multi-line JSON, a read would fail safe here (its "updated_ts"/"ntp_offset_us" wouldn't be found
+# on any single line -> skipped, never miscounted or misread), never a false pass.
+#
 # A read is counted as a NEW independent sample only when its "updated_ts" differs from the last
 # ACCEPTED sample's "updated_ts" -- a read whose updated_ts repeats the last accepted one is the
 # daemon re-serving its own cached value between refreshes and is skipped, never double-counted
@@ -646,8 +653,8 @@ sampled_offset_check() {
         "$label" "$median" "$bound" "$spread" "$stability" "$n"
       return 2 ;;
     *)
-      printf '  %-14s UNKNOWN  (only %s distinct sample(s), need >= %s -- refresh-interval duplicates, #836)\n' \
-        "$label" "$n" "$min_distinct"
+      printf '  %-14s UNKNOWN  (only %s distinct sample(s) [median %sus, spread %sus], need >= %s -- refresh-interval duplicates, #836)\n' \
+        "$label" "$n" "$median" "$spread" "$min_distinct"
       return 3 ;;
   esac
 }
