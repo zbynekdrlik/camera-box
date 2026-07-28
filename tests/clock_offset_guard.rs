@@ -795,6 +795,102 @@ fn ptp_check_maps_state_to_exit_code() {
     }
 }
 
+// --- gm_source_ip_from_pipe_json / gm_matches_expected / gm_check (#834) --------------------
+//
+// #834 (2026-07-28): the stream box reported is_locked=true/settled=true while PTP-locked to a
+// FOREIGN grandmaster (10.77.7.109 instead of the rig's 10.77.9.184) and sat 14.7ms out. The
+// fixtures below (HTTP_STATUS_STRIH_FIXTURE / HTTP_STATUS_STREAM_FIXTURE, declared further down
+// in this file for the #648 freshness tests) are the REAL captured payloads from that exact
+// incident — strih on the rig's own grandmaster, stream locked to the foreign one.
+
+#[test]
+fn gm_source_ip_from_pipe_json_reads_the_real_field() {
+    let out = run_sourced(
+        "gm_source_ip_from_pipe_json \"$JSON\"",
+        &[("JSON", HTTP_STATUS_STRIH_FIXTURE)],
+    );
+    assert_eq!(
+        out.trim(),
+        "10.77.9.184",
+        "must read strih's gm_source_ip: {out:?}"
+    );
+
+    let out = run_sourced(
+        "gm_source_ip_from_pipe_json \"$JSON\"",
+        &[("JSON", HTTP_STATUS_STREAM_FIXTURE)],
+    );
+    assert_eq!(
+        out.trim(),
+        "10.77.7.109",
+        "must read stream's FOREIGN gm_source_ip (#834): {out:?}"
+    );
+}
+
+#[test]
+fn gm_source_ip_from_pipe_json_empty_when_field_absent() {
+    let out = run_sourced(
+        "gm_source_ip_from_pipe_json \"$JSON\"",
+        &[("JSON", "{\"is_locked\":true,\"mode\":\"NANO\"}")],
+    );
+    assert_eq!(
+        out.trim(),
+        "",
+        "no gm_source_ip field -> UNKNOWN (empty), never a guessed match: {out:?}"
+    );
+}
+
+#[test]
+fn gm_matches_expected_true_only_on_exact_nonempty_match() {
+    let out = run_sourced(
+        r#"
+        for a in "10.77.9.184:10.77.9.184:YES" "10.77.7.109:10.77.9.184:NO" ":10.77.9.184:NO" "10.77.9.184::NO"; do
+          actual="${a%%:*}"; rest="${a#*:}"; expected="${rest%%:*}"; want="${rest#*:}"
+          if gm_matches_expected "$actual" "$expected"; then got=YES; else got=NO; fi
+          [ "$got" = "$want" ] && echo "OK $a" || echo "MISMATCH $a got=$got"
+        done
+        "#,
+        &[],
+    );
+    assert!(
+        !out.contains("MISMATCH"),
+        "gm_matches_expected produced a mismatch: {out}"
+    );
+}
+
+#[test]
+fn gm_check_ok_foreign_and_unknown() {
+    // strih locked to the rig's own GM -> OK (rc 0).
+    let out = run_sourced(
+        "set +e; gm_check strih \"$ACTUAL\" 10.77.9.184; echo \"rc=$?\"",
+        &[("ACTUAL", "10.77.9.184")],
+    );
+    assert!(
+        out.contains("GM OK") && out.contains("rc=0"),
+        "matching grandmaster must be OK: {out:?}"
+    );
+
+    // stream locked to a FOREIGN grandmaster -> FOREIGN (rc 2), the #834 shape — this must fail
+    // even though the node's own offset/is_locked might read healthy in isolation.
+    let out = run_sourced(
+        "set +e; gm_check stream \"$ACTUAL\" 10.77.9.184; echo \"rc=$?\"",
+        &[("ACTUAL", "10.77.7.109")],
+    );
+    assert!(
+        out.contains("GM FOREIGN") && out.contains("rc=2"),
+        "a foreign grandmaster must FAIL (#834), never look OK: {out:?}"
+    );
+
+    // gm_source_ip unread -> UNKNOWN (rc 3), never a silent pass.
+    let out = run_sourced(
+        "set +e; gm_check node \"$ACTUAL\" 10.77.9.184; echo \"rc=$?\"",
+        &[("ACTUAL", "")],
+    );
+    assert!(
+        out.contains("GM UNKNOWN") && out.contains("rc=3"),
+        "an unread grandmaster must be UNKNOWN, never OK: {out:?}"
+    );
+}
+
 // --- updated_ts_from_pipe_json / pipe_json_freshness_verdict (#648) -------------------------
 //
 // dantesync#47 gave every managed box a network status endpoint (http://<box>:8898/status)
