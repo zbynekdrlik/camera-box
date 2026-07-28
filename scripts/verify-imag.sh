@@ -77,11 +77,19 @@ set -euo pipefail
 #   (l) dantesync PTP LOCKED + a FRESH clock offset within bound + the SAME grandmaster as the
 #       rest of the rig (#834 -- gates grandmaster IDENTITY, not just the offset)
 #   (m) dantesync is the SOLE timesync authority (no systemd-timesyncd/chrony/ntp/linuxptp)
-#   (n) scenes present (Cam 1-6) and Multiview populated (MV Cam 1-6)
+#   (n) scenes present (Cam 1-N, N = imag_scenes.py's own IMAG_SCENE_CAM_COUNT, default 7) and
+#       Multiview populated (MV Cam 1-N)
 #   (o) both projectors open -- exactly 1 Program (HDMI) + 1 Multiview (panel), no stray windows
 #   (p) operator scaffolding present (#791): /usr/local/bin/imag-obs-start.sh, wmctrl, the
 #       right-click menu (~/.config/openbox/menu.xml), the wall-fallback image, the watchdog
 #       installed-but-disabled (#756)
+#   (q) OPERATOR parity (#791): the full canonical 17-scene ORDER (Scene, Cam N..Cam 1, resolume
+#       imag, MV Cam 1..N, MW resolume imag) and all 10 canonical NDI-source bindings (7 fleet
+#       cams + the 3 Resolume/overlay inputs no automated seeder creates) -- via
+#       `imag_scenes.py --verify-parity`, read-only
+#   (r) OBS stats dock persistence: global.ini carries a non-empty DockState (#791 -- OBS never
+#       writes this on its own on a box that has run 24/7 without a clean exit; setup-imag.sh
+#       seeds a known-good captured default the first time a box provisions)
 #
 # Every remote helper this gate shells out to (wmctrl, python3) is preflighted BY NAME before use
 # (#822 pattern) -- a missing tool is reported as a missing tool, never folded into a failed
@@ -338,15 +346,52 @@ imag_nvidia_verdict() {
 
 # --- (n) scenes present + Multiview populated (imag_scenes.py, bare) -------------------------
 
-# imag_scenes_output_ok STDOUT -> 0 iff STDOUT (imag_scenes.py's own printed report) shows BOTH
-# the 6 "Cam N" scenes and the 6 "MV Cam N" scenes fully present. Text-based (not just the exit
-# code) so a caller can distinguish which set is short from the SAME captured output the operator
-# would read.
+# imag_scenes_output_ok STDOUT EXPECTED_COUNT -> 0 iff STDOUT (imag_scenes.py's own printed
+# report) shows BOTH the "Cam N" scenes and the "MV Cam N" scenes fully present, EXPECTED_COUNT/
+# EXPECTED_COUNT each. Text-based (not just the exit code) so a caller can distinguish which set
+# is short from the SAME captured output the operator would read. EXPECTED_COUNT is NOT a literal
+# here -- #791: this used to hardcode "6/6", which silently kept passing even after cam7 (#753)
+# was wired into the fleet and imag_scenes.py's own CAMS range still excluded it (the exact bug
+# this whole ticket exists to catch). The caller passes the CURRENT expected count (derived from
+# imag_scenes.py's own IMAG_SCENE_CAM_COUNT default/override), never a re-hardcoded number here.
 imag_scenes_output_ok() {
-  # Line-anchored (^) -- "MV scenes: 6/6 OK" contains "scenes: 6/6 OK" as a plain SUBSTRING, so an
+  local out="$1" count="$2"
+  [ -n "$count" ] || return 1
+  # Line-anchored (^) -- "MV scenes: N/N OK" contains "scenes: N/N OK" as a plain SUBSTRING, so an
   # unanchored -F match would wrongly pass the main-scenes check off the MV line alone even when
-  # the main "scenes: N/6" line reports a shortfall. Anchor each to its own line's start.
-  printf '%s\n' "$1" | grep -qE '^scenes: 6/6 OK' && printf '%s\n' "$1" | grep -qE '^MV scenes: 6/6 OK'
+  # the main "scenes: N/N" line reports a shortfall. Anchor each to its own line's start.
+  printf '%s\n' "$out" | grep -qE "^scenes: ${count}/${count} OK" \
+    && printf '%s\n' "$out" | grep -qE "^MV scenes: ${count}/${count} OK"
+}
+
+# --- (q) canonical scene ORDER + NDI-source bindings (imag_scenes.py --verify-parity, #791) ---
+
+# imag_parity_output_ok STDOUT -> 0 iff STDOUT (imag_scenes.py --verify-parity's own printed
+# report) shows BOTH "scene order: OK" and "ndi sources: OK" as whole lines. This is the check
+# that actually catches a box whose reprovision silently reproduced only PART of the operator's
+# real layout (missing Cam 7/MV Cam 7, missing the Resolume/overlay NDI sources, or a scrambled
+# scene ORDER) -- (n) above only ever proved the "Cam N"/"MV Cam N" COUNT, never the full 17-scene
+# set (incl. "resolume imag"/"MW resolume imag", which NO automated seeder creates) nor the order.
+imag_parity_output_ok() {
+  printf '%s\n' "$1" | grep -qxF "scene order: OK" \
+    && printf '%s\n' "$1" | grep -qxF "ndi sources: OK"
+}
+
+# --- (r) OBS stats dock persisted (DockState in global.ini, #791) -----------------------------
+
+# imag_dockstate_present GLOBAL_INI_TEXT -> 0 iff GLOBAL_INI_TEXT (the box's own
+# ~/.config/obs-studio/global.ini contents) carries a non-empty `DockState=` line under
+# [BasicWindow]. OBS only ever WRITES this key on a clean exit (imag-nb runs 24/7 and has
+# therefore never shed one on its own) -- setup-imag.sh seeds a known-good captured default (see
+# its own step-13 comment) the FIRST time a box provisions, so this check simply proves that seed
+# (or a real captured layout from an actual operator clean-exit) is present on disk; it cannot
+# prove the CURRENTLY RUNNING session has the dock docked live (that would need a UI-level read
+# this repo has no mechanism for), only that the box will come back with it after its next
+# restart -- which is exactly the persistence gap #791 reported.
+imag_dockstate_present() {
+  local text="$1" line
+  line="$(printf '%s\n' "$text" | grep '^DockState=' | head -1)"
+  [ -n "${line#DockState=}" ]
 }
 
 # --- (o) projector count -- exactly 1 Program + 1 Multiview (#756/#758) ----------------------
@@ -747,12 +792,24 @@ else
 fi
 
 # (n) scenes present + Multiview populated (imag_scenes.py, bare) --------------------------------
+# #791: the expected count is IMAG_SCENE_CAM_COUNT's own default (7) -- overridable the same way
+# imag_scenes.py itself is, never re-hardcoded independently here.
+IMAG_SCENE_CAM_COUNT="${IMAG_SCENE_CAM_COUNT:-7}"
 rc=0
-SCENES_OUT="$(python3 "$HERE/imag_scenes.py" --host "$IMAG_IP" 2>&1)" || rc=$?
-if imag_scenes_output_ok "$SCENES_OUT"; then
-  ok "scenes: Cam 1-6 + MV Cam 1-6 all present"
+SCENES_OUT="$(IMAG_SCENE_CAM_COUNT="$IMAG_SCENE_CAM_COUNT" python3 "$HERE/imag_scenes.py" --host "$IMAG_IP" 2>&1)" || rc=$?
+if imag_scenes_output_ok "$SCENES_OUT" "$IMAG_SCENE_CAM_COUNT"; then
+  ok "scenes: Cam 1-${IMAG_SCENE_CAM_COUNT} + MV Cam 1-${IMAG_SCENE_CAM_COUNT} all present"
 else
   fail "scenes/Multiview membership incomplete (rc=$rc): $(printf '%s' "$SCENES_OUT" | tr '\n' ' ')"
+fi
+
+# (q) OPERATOR parity: full canonical scene ORDER + NDI-source bindings (#791) -------------------
+rc=0
+PARITY_OUT="$(IMAG_SCENE_CAM_COUNT="$IMAG_SCENE_CAM_COUNT" python3 "$HERE/imag_scenes.py" --host "$IMAG_IP" --verify-parity 2>&1)" || rc=$?
+if imag_parity_output_ok "$PARITY_OUT"; then
+  ok "operator parity: canonical scene order + NDI-source bindings all match (#791)"
+else
+  fail "operator parity mismatch (rc=$rc): $(printf '%s' "$PARITY_OUT" | tr '\n' ' ')"
 fi
 
 # (o) both projectors open -- exactly 1 Program + 1 Multiview (#756/#758) -----------------------
@@ -813,6 +870,17 @@ if imag_watchdog_installed_but_disabled "${WATCHDOG_MODE:-}" "${WATCHDOG_UNIT_LI
   ok "imag-obs-watchdog installed but disabled (agreed model: boot autostart + menu, no auto-respawn, #756)"
 else
   fail "imag-obs-watchdog not in the agreed installed-but-disabled state (script mode='${WATCHDOG_MODE:-<none>}', unit='${WATCHDOG_UNIT_LIST:-<none>}', enabled='${WATCHDOG_ENABLED:-<none>}') (#791)"
+fi
+
+# (r) OBS stats dock persistence: global.ini carries a non-empty DockState (#791) --------------
+rc=0
+GLOBAL_INI="$(ssh_box "cat /home/${IMAG_USER}/.config/obs-studio/global.ini 2>/dev/null")" || rc=$?
+if [ "$rc" -ne 0 ] || [ -z "$GLOBAL_INI" ]; then
+  fail "global.ini unreadable (ssh rc=$rc) -- cannot check stats-dock persistence"
+elif imag_dockstate_present "$GLOBAL_INI"; then
+  ok "OBS dock layout (incl. the Stats dock) persisted in global.ini -- survives a restart (#791)"
+else
+  fail "global.ini has no DockState -- the Stats dock (and any other dock arrangement) will NOT survive an OBS restart (#791)"
 fi
 
 echo ""

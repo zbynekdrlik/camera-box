@@ -6,10 +6,11 @@ re-applied on every run (self-healing, same philosophy as the genlock lockdown).
 
 Seeds (spec docs/superpowers/specs/2026-07-03-imag-nb-topology-design.md, Phase 1):
   - video: 1920x1080 canvas+output @ 60fps
-  - scenes "Cam 1".."Cam 6", each with one NDI input "NDI CAM<n>" -> "CAM<n> (usb)"
+  - scenes "Cam 1".."Cam <IMAG_SCENE_CAM_COUNT>" (env-overridable, default 7 -- #791), each with
+    one NDI input "NDI CAM<n>" -> "CAM<n> (usb)"
     (low-latency mode, muted audio, bounds-scaled to fill the canvas) — FULL-bandwidth,
     what the Stream Deck cuts to program.
-  - scenes "MV Cam 1".."MV Cam 6" (#501), each with one NDI input "MV CAM<n>" bound to the
+  - scenes "MV Cam 1".."MV Cam <IMAG_SCENE_CAM_COUNT>" (#501), each with one NDI input "MV CAM<n>" bound to the
     SAME fleet NDI name but flagged genlock_monitor=true, so the vendor/distroav genlock
     lockdown forces LOW-bandwidth NDI receive (~9x cheaper) for these monitor-only twins.
     Root cause (issue #501, runtime-proven with an eglSwapBuffers-counting shim): the
@@ -51,16 +52,54 @@ BOOTSTRAP = "--bootstrap" in sys.argv
 
 from websocket import create_connection
 
-# #526: VERIFIED physical camera <-> NDI-name mapping (live-checked 2026-07-05, all 6 boxes up).
-# The fleet advertises a clean 1:1 by box number: box 10.77.9.61 -> "CAM1 (usb)", .62 -> "CAM2",
-# .63 -> "CAM3", .64 -> "CAM4", .65 -> "CAM5", .66 -> "CAM6". So the naive 1:1 below ("MV Cam n" /
-# "Cam n" bound to "CAMn (usb)") IS the intended physical order, and the built-in multiview tile
-# order (= scene list order MV Cam 1..6) matches the physical camera numbering the cutter expects.
-# This differs from strih's OBS-source LABEL offset (that offset is in strih's source naming, not
-# in the NDI sender names, which are 1:1 to box number on every box). Pinned by a guard test in
+# #526: VERIFIED physical camera <-> NDI-name mapping (live-checked 2026-07-05, all 6 boxes up;
+# cam7 added #753/#791, box 10.77.9.67 -> "CAM7 (usb)"). The fleet advertises a clean 1:1 by box
+# number: box 10.77.9.61 -> "CAM1 (usb)", .62 -> "CAM2", .63 -> "CAM3", .64 -> "CAM4",
+# .65 -> "CAM5", .66 -> "CAM6", .67 -> "CAM7". So the naive 1:1 below ("MV Cam n" / "Cam n" bound
+# to "CAMn (usb)") IS the intended physical order, and the built-in multiview tile order (= scene
+# list order MV Cam 1..N) matches the physical camera numbering the cutter expects. This differs
+# from strih's OBS-source LABEL offset (that offset is in strih's source naming, not in the NDI
+# sender names, which are 1:1 to box number on every box). Pinned by a guard test in
 # tests/harness_imag_topology.rs so a silent reorder can't drift it.
-CAMS = range(1, 7)
+#
+# #791: this used to be a bare hardcoded `range(1, 7)` (1..6) -- when a 7th camera (cam7,
+# 10.77.9.67, #753) was wired into the fleet, imag's OWN scene seeder never grew to include it
+# (the literal range excluded it silently, and the boot-time --bootstrap self-heal therefore never
+# created/repaired "Cam 7"/"MV Cam 7" or enforced their Multiview membership). Never hardcode this
+# count again -- IMAG_SCENE_CAM_COUNT is the ONE declared, env-overridable value, so a future
+# fleet growth to cam8 needs no code edit here (mirrors the single-source-of-truth philosophy of
+# CAMERA_ACTIVE_SET in scripts/camera-set.sh / .claude/rules/camera-active-set.md -- though this is
+# imag's OWN scene-camera count, independent of that E2E active-fleet list: imag has always seeded
+# Cam5/Cam6 scenes even while CAMERA_ACTIVE_SET retired those boxes from the E2E zero-loss sweep,
+# since imag's Multiview/cut preview is a different concern from the recording-verdict test fleet).
+IMAG_SCENE_CAM_COUNT = int(os.environ.get("IMAG_SCENE_CAM_COUNT", "7"))
+CAMS = range(1, IMAG_SCENE_CAM_COUNT + 1)
 CANVAS_W, CANVAS_H, FPS = 1920, 1080, 60
+
+# #791: the CANONICAL 17-scene operator layout (captured live off the incumbent .182 / replacement
+# .187 -- byte-identical scene_order on both, 2026-07-27/28) -- the scenes seed() above OWNS
+# ("Cam N"/"MV Cam N") plus the hand-built ones NO automated seeder creates ("resolume imag" /
+# "MW resolume imag" / the base "Scene"). Never hardcode the Cam-N span here either -- derive it
+# from CAMS so IMAG_SCENE_CAM_COUNT growth keeps this list correct with no second edit.
+CANONICAL_SCENE_ORDER = (
+    ["Scene"]
+    + [f"Cam {n}" for n in reversed(list(CAMS))]
+    + ["resolume imag"]
+    + [f"MV Cam {n}" for n in CAMS]
+    + ["MW resolume imag"]
+)
+
+# #791: the CANONICAL NDI-source bindings -- the 7 (or IMAG_SCENE_CAM_COUNT) fleet camera inputs
+# seed() itself creates, PLUS the 3 Resolume/overlay inputs that live ONLY in the canonical scene
+# collection JSON (scripts/imag-obs-scenes-canonical.json, installed by setup-imag.sh) -- no
+# automated seeder creates those three, so verify_parity() below is what actually proves they
+# exist and are bound to the right NDI sender name after a fresh provision.
+CANONICAL_NDI_SOURCES = {
+    **{f"NDI CAM{n}": f"CAM{n} (usb)" for n in CAMS},
+    "MW imag resolume": "RESOLUME-SNV (Arena - To imag obs)",
+    "NDI resolume imag": "RESOLUME-SNV (Arena - To imag obs)",
+    "imag overlay": "RESOLUME-SNV (Arena - imag overlay)",
+}
 
 
 class Obs:
@@ -246,9 +285,10 @@ def seed(obs: Obs) -> None:
 
     print(f"video: {v['baseWidth']}x{v['baseHeight']}@{v['fpsNumerator']}"
           f"/{v['fpsDenominator']} {'OK' if ok else 'MISMATCH (output active? retry idle)'}")
-    print(f"scenes: {len([s for s in scenes if s.startswith('Cam ')])}/6"
+    cam_count = len(list(CAMS))
+    print(f"scenes: {len([s for s in scenes if s.startswith('Cam ')])}/{cam_count}"
           + (f" MISSING {missing}" if missing else " OK"))
-    print(f"MV scenes: {len([s for s in scenes if s.startswith('MV Cam ')])}/6 (multiview, low-bw)"
+    print(f"MV scenes: {len([s for s in scenes if s.startswith('MV Cam ')])}/{cam_count} (multiview, low-bw)"
           + (f" MISSING {mv_missing}" if mv_missing else " OK"))
     if not ok or missing or mv_missing:
         sys.exit(1)
@@ -291,6 +331,76 @@ def projector(obs: Obs) -> None:
               f"(monitors: {[m.get('monitorName') for m in mons]})")
 
 
+# #791: PURE comparison helpers (no OBS/network) -- unit-tested directly (tests/python), mirrors
+# this repo's own "extract the pure decision, keep the WS glue thin" convention (src/reannounce.rs,
+# src/colour_scale.rs). Kept separate from verify_parity() below so a fresh notebook's parity can
+# be proven offline against a captured GetSceneList/GetInputSettings fixture, no rig required.
+
+def scene_order_mismatch(actual_order: list, expected_order: list = None) -> str:
+    """Returns "" iff actual_order == expected_order (CANONICAL_SCENE_ORDER by default) -- else a
+    short human-readable description of what's wrong (missing/unexpected scenes, or a pure
+    ordering drift when the SET matches but the sequence doesn't)."""
+    expected = CANONICAL_SCENE_ORDER if expected_order is None else expected_order
+    if actual_order == expected:
+        return ""
+    missing = [s for s in expected if s not in actual_order]
+    extra = [s for s in actual_order if s not in expected]
+    if missing or extra:
+        parts = []
+        if missing:
+            parts.append(f"missing {missing}")
+        if extra:
+            parts.append(f"unexpected {extra}")
+        return "; ".join(parts)
+    return f"wrong ORDER -- got {actual_order}, want {expected}"
+
+
+def ndi_source_mismatches(actual: dict, expected: dict = None) -> list:
+    """actual/expected are {inputName: ndi_source_name}. Returns a list of human-readable problem
+    strings (empty list = every expected binding present and correct). expected defaults to
+    CANONICAL_NDI_SOURCES."""
+    exp = CANONICAL_NDI_SOURCES if expected is None else expected
+    problems = []
+    for name, want in exp.items():
+        if name not in actual:
+            problems.append(f"MISSING {name!r}")
+        elif actual[name] != want:
+            problems.append(f"MISMATCH {name!r} -> got {actual[name]!r} want {want!r}")
+    return problems
+
+
+def verify_parity(obs: Obs) -> None:
+    """#791: prove OPERATOR parity, not just system parity -- the FULL canonical 17-scene ORDER
+    (not just "Cam N"/"MV Cam N" presence, which seed()'s own report already covers) and the 10
+    canonical NDI-source bindings (7 fleet cams + the 3 Resolume/overlay inputs no automated
+    seeder creates -- those live only in the canonical scene collection JSON installed by
+    setup-imag.sh). Read-only: never seeds, creates, or touches anything.
+
+    GetSceneList's own array order is the REVERSE of the scene collection JSON's scene_order
+    field (live-verified 2026-07-28 against .187: WS index 0 = "MW resolume imag", last index =
+    "Scene", while the on-disk JSON's scene_order lists "Scene" first) -- reverse it back before
+    comparing against CANONICAL_SCENE_ORDER, which reads top-to-bottom the same way the JSON (and
+    the ticket's own human-readable table) does.
+    """
+    ws_scenes = [s["sceneName"] for s in obs.req("GetSceneList")["scenes"]]
+    actual_order = list(reversed(ws_scenes))
+    order_problem = scene_order_mismatch(actual_order)
+    print("scene order: " + (f"MISMATCH -- {order_problem}" if order_problem else "OK"))
+
+    actual_ndi = {}
+    for inp in obs.req("GetInputList").get("inputs", []):
+        if inp.get("inputKind") != "ndi_source":
+            continue
+        name = inp["inputName"]
+        settings = obs.req("GetInputSettings", {"inputName": name}, ignore_err=True)
+        actual_ndi[name] = settings.get("inputSettings", {}).get("ndi_source_name")
+    ndi_problems = ndi_source_mismatches(actual_ndi)
+    print("ndi sources: " + ("; ".join(ndi_problems) if ndi_problems else "OK"))
+
+    if order_problem or ndi_problems:
+        sys.exit(1)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--host", required=True)
@@ -302,10 +412,15 @@ def main() -> None:
     ap.add_argument("--projector", action="store_true",
                     help="open the PROGRAM projector on the HDMI monitor AND the built-in "
                          "MULTIVIEW projector on the panel")
+    ap.add_argument("--verify-parity", action="store_true",
+                    help="#791: read-only check that the full canonical scene ORDER + NDI-source "
+                         "bindings match (never seeds/creates anything)")
     args = ap.parse_args()
     obs = Obs(args.host, args.port, args.password)
     if args.projector:
         projector(obs)
+    elif args.verify_parity:
+        verify_parity(obs)
     else:
         seed_profile(obs)  # #502: Advanced NVENC native-1080p mkv profile BEFORE the video/scene seed
         seed(obs)

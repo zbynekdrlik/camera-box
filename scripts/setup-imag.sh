@@ -1133,10 +1133,70 @@ EOF
     if ! grep -q '^LastVersion=' "$f"; then
         printf '\n[General]\nLastVersion=536936450\n' >> "$f"   # 32.1.2 — suppress first-run wizard
     fi
+    if ! grep -q '^DockState=' "$f"; then
+        # #791: OBS only persists [BasicWindow] geometry/DockState on a CLEAN exit -- imag-nb has
+        # run 24/7 since first bring-up and has therefore never shed one (confirmed live on BOTH
+        # .182 and .187: neither global.ini has ever carried these keys), so the operator's
+        # requested Stats dock (visible + DOCKED) reverts to OBS's bare default layout on every
+        # restart instead of surviving it.
+        #
+        # These two values are a REAL Qt QMainWindow::saveState()/saveGeometry() blob -- NOT
+        # hand-authored (it is an internal, versioned Qt binary stream; hand-constructing one is
+        # not safe). Generated ONCE, off-rig, on dev1 with a disposable stock OBS 30.0.2 kiosk
+        # (Xvfb + openbox, a throwaway blank profile, zero scenes): Docks -> Stats, dragged into a
+        # docked column after Controls, then a clean File > Exit so OBS ITSELF wrote these into its
+        # own global.ini. Qt's dock-widget object names (scenesDock/sourcesDock/mixerDock/
+        # transitionsDock/controlsDock/statsDock) have been stable across OBS's Qt frontend for
+        # years, so this applies cleanly to the box's actual OBS 32.1.2 genlock build too --
+        # Qt's restoreState() is best-effort per-widget-by-objectName, so even a future OBS build
+        # that adds/removes an unrelated dock degrades to "some docks not repositioned", never a
+        # crash or a corrupted layout.
+        #
+        # Seeded ONLY when DockState is missing (this same idempotent-seed convention every other
+        # key in this function already uses) -- an operator who performs one real clean exit gets
+        # THEIR OWN captured layout persisted from then on, and this seed never overwrites it.
+        DOCKSTATE_GEOMETRY='AdnQywADAAAAAAF6AAAAogAAB38AAAOVAAABewAAALgAAAd+AAADkAAAAAAAAAAAB4AAAAF7AAAAuAAAB34AAAOQ'
+        DOCKSTATE_BLOB='AAAA/wAAAAD9AAAAAQAAAAMAAAYEAAABAfwBAAAABvsAAAAUAHMAYwBlAG4AZQBzAEQAbwBjAGsBAAAAAAAAAKAAAACgAP////sAAAAWAHMAbwB1AHIAYwBlAHMARABvAGMAawEAAACkAAAAoAAAAKAA////+wAAABIAbQBpAHgAZQByAEQAbwBjAGsBAAABSAAAAN4AAADeAP////sAAAAeAHQAcgBhAG4AcwBpAHQAaQBvAG4AcwBEAG8AYwBrAQAAAioAAACgAAAAoAD////7AAAAGABjAG8AbgB0AHIAbwBsAHMARABvAGMAawEAAALOAAAAngAAAJ4A////+wAAABIAcwB0AGEAdABzAEQAbwBjAGsBAAADcAAAApQAAAKUAP///wAABgQAAAGbAAAABAAAAAQAAAAIAAAACPwAAAAA'
+        if grep -q '^\[BasicWindow\]$' "$f"; then
+            # Insert right after the FIRST [BasicWindow] header (never append a duplicate one --
+            # see the CloseExistingProjectors comment above for why a second header is silently
+            # unreachable). awk, not sed: the base64 blobs contain literal `/` characters, which
+            # would collide with sed's own `s/.../.../ ` delimiter.
+            awk -v geo="$DOCKSTATE_GEOMETRY" -v dock="$DOCKSTATE_BLOB" '
+                { print }
+                /^\[BasicWindow\]$/ && !done { print "geometry=" geo; print "DockState=" dock; done=1 }
+            ' "$f" > "${f}.tmp791" && mv "${f}.tmp791" "$f"
+        else
+            printf '\n[BasicWindow]\ngeometry=%s\nDockState=%s\n' "$DOCKSTATE_GEOMETRY" "$DOCKSTATE_BLOB" >> "$f"
+        fi
+    fi
 }
 seed_ini "$OBS_CFG/global.ini"
 seed_ini "$OBS_CFG/user.ini"
 chown -R "$DESKTOP_USER:$DESKTOP_USER" "$OBS_CFG"
+
+# #791: install the CANONICAL 17-scene operator collection -- ONLY when this box genuinely has NO
+# scene collection yet (a fresh profile). imag_scenes.py's own WS-based seed deliberately never
+# creates "resolume imag" / "MW resolume imag" (its #785 OPERATOR-WINS carve-out -- those are
+# hand-built scenes, not owned by the automated seeder), so a from-scratch box was silently
+# missing them, Cam 7/MV Cam 7, and the whole correct scene ORDER until an operator built them by
+# hand (the exact repeated-manual-work complaint this ticket exists to kill). The canonical file
+# was captured live off the incumbent .182 (byte-identical to the already-live-restored .187,
+# 2026-07-27/28) and is fetched the same way imag_scenes.py itself is (gh api against this repo's
+# dev branch -- this script has no sibling repo checkout at runtime). Never overwrites an existing
+# collection (operator-wins, same discipline as every seed_ini() key above).
+SCENES_DIR="${USER_HOME}/.config/obs-studio/basic/scenes"
+mkdir -p "$SCENES_DIR"
+if ! ls "$SCENES_DIR"/*.json >/dev/null 2>&1; then
+    gh api -H "Accept: application/vnd.github.raw" \
+        "repos/${GENLOCK_REPO}/contents/scripts/imag-obs-scenes-canonical.json?ref=dev" \
+        > "$SCENES_DIR/Untitled.json" \
+        || fail "#791: could not fetch the canonical scene collection from ${GENLOCK_REPO} (dev)"
+    chown "$DESKTOP_USER:$DESKTOP_USER" "$SCENES_DIR/Untitled.json"
+    echo "  #791: canonical 17-scene collection installed (fresh box had none)"
+else
+    echo "  #791: existing scene collection found on disk -- leaving it untouched (operator wins)"
+fi
 
 # =============================================================================
 step 14 "Desktop de-jitter (#485): mask background jitter sources + OBS ProcessPriority=High"
