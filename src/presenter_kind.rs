@@ -102,6 +102,56 @@ pub fn resolve_presenter_kind(requested: PresenterKind, kms_open_ok: bool) -> Re
 mod tests {
     use super::*;
 
+    /// #854 RED: `/dev/dri` card numbering is not a stable ABI — cam2 enumerated its i915 KMS
+    /// device as `card1` on 2026-07-04 (the #464 doc comment above quotes a live log line
+    /// proving it) and as `card0` by 2026-07-28, with NO `card1` node at all after a reboot +
+    /// kernel update. `order_drm_card_candidates` does not exist yet — this is the pure decision
+    /// `open_presenter`'s Auto fallback will use to try every OTHER `/dev/dri/cardN` before
+    /// giving up on KMS, so a future renumbering can never again silently and permanently
+    /// degrade a tear-free double-buffered KMS run to the imperfect single-buffered fbdev path.
+    #[test]
+    fn order_drm_card_candidates_filters_and_sorts_ascending() {
+        let entries = vec![
+            "/dev/dri/renderD128".to_string(),
+            "/dev/dri/card1".to_string(),
+            "/dev/dri/by-path".to_string(),
+            "/dev/dri/card0".to_string(),
+        ];
+        assert_eq!(
+            order_drm_card_candidates(&entries),
+            vec!["/dev/dri/card0".to_string(), "/dev/dri/card1".to_string()],
+            "#854: render nodes / by-path entries must be filtered out, and cardN entries \
+             ordered ascending by number (deterministic — never raw read_dir order)"
+        );
+    }
+
+    #[test]
+    fn order_drm_card_candidates_empty_when_no_card_nodes() {
+        let entries = vec!["/dev/dri/renderD128".to_string()];
+        assert!(order_drm_card_candidates(&entries).is_empty());
+    }
+
+    #[test]
+    fn order_drm_card_candidates_handles_bare_basenames() {
+        // `open_presenter`'s discovery reads directory ENTRY NAMES (basenames), not full
+        // paths, in one call site — the fn must work on either shape.
+        let entries = vec!["card2".to_string(), "card0".to_string(), "renderD129".to_string()];
+        assert_eq!(
+            order_drm_card_candidates(&entries),
+            vec!["card0".to_string(), "card2".to_string()]
+        );
+    }
+
+    #[test]
+    fn drm_card_index_parses_card_n_only() {
+        assert_eq!(drm_card_index("/dev/dri/card1"), Some(1));
+        assert_eq!(drm_card_index("card0"), Some(0));
+        assert_eq!(drm_card_index("/dev/dri/renderD128"), None);
+        assert_eq!(drm_card_index("/dev/dri/by-path"), None);
+        assert_eq!(drm_card_index("card"), None, "no digits after 'card' -> None");
+        assert_eq!(drm_card_index("cardX"), None, "non-numeric suffix -> None");
+    }
+
     #[test]
     fn parse_known_kinds() {
         assert_eq!(PresenterKind::parse("auto").unwrap(), PresenterKind::Auto);
