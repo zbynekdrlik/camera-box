@@ -14,13 +14,19 @@
 # back is always a one-line change here, never archaeology through a deleted diff or hunting a
 # literal across half a dozen scripts.
 #
-# Two known imag-nb boxes:
-#   incumbent   -> 10.77.9.182 (the original box; #831 — its HDMI is now disconnected, DP-0 only,
-#                                so it drives nothing even though it is still powered+reachable)
-#   replacement -> 10.77.9.187 (physically wired to the wall's HDMI since 2026-07-27; fully
-#                                provisioned: OBS 32.1.2 genlock build, scenes 6/6 + Multiview
-#                                6/6, obs-websocket :4455, dantesync PTP LOCKED, zero failed
-#                                units — #816/#819-#825)
+# Two known imag-nb boxes. NOTE the 2026-07-29 IP SWAP (user directive): the imag ROLE keeps its
+# historical address .182 permanently, so a box swap never again drifts the address every consumer
+# and every operator has memorised. The replacement notebook was moved ONTO .182 and the retired
+# incumbent was moved OFF it, rather than repointing the whole rig at a new number:
+#   replacement -> 10.77.9.182 (ACTIVE: the box physically wired to the wall's HDMI since
+#                                2026-07-27; fully provisioned — OBS 32.1.2 genlock build,
+#                                scenes 6/6 + Multiview 6/6, obs-websocket :4455, dantesync PTP
+#                                LOCKED, zero failed units — #816/#819-#825. Held .187 from
+#                                2026-07-27 until the 2026-07-29 swap.)
+#   incumbent   -> 10.77.9.189 (RETIRED reference box, hostname imag-pc; its HDMI is disconnected
+#                                (#831) so it drives nothing. Moved off .182 on 2026-07-29 and its
+#                                OBS autostart disabled, so it can never again be mistaken for the
+#                                live imag. Kept reachable only as a verification reference.)
 #
 # IMAG_HOST_ACTIVE selects which fact is the one every consumer (scripts/recording-e2e.sh,
 # scripts/rig-mode.sh) derives IMAG_IP from. Swapping the rig's imag role back to the incumbent
@@ -46,8 +52,8 @@ IMAG_HOST_ACTIVE="${IMAG_HOST_ACTIVE:-replacement}"
 imag_host_resolve() {
   local name="${1:-}"
   case "$name" in
-    incumbent)   IMAG_HOST_IP=10.77.9.182 ;;
-    replacement) IMAG_HOST_IP=10.77.9.187 ;;
+    incumbent)   IMAG_HOST_IP=10.77.9.189 ;;
+    replacement) IMAG_HOST_IP=10.77.9.182 ;;
     *)
       echo "imag-host: unknown imag host '${name}' (expected one of: incumbent replacement)" >&2
       return 1

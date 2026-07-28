@@ -1,6 +1,8 @@
 //! Regression guard for #832 — the rig's imag-nb role must be repointed from the incumbent
-//! notebook (`10.77.9.182`, HDMI now disconnected per #831) to the replacement (`10.77.9.187`,
-//! wired to the wall's HDMI since 2026-07-27) via ONE declared source of truth, never a literal
+//! notebook (HDMI disconnected per #831, now retired at `10.77.9.189`) to the replacement
+//! (wired to the wall's HDMI since 2026-07-27, and holding the role's permanent historical
+//! address `10.77.9.182` since the 2026-07-29 IP swap) via ONE declared source of truth,
+//! never a literal
 //! scattered across `scripts/recording-e2e.sh`, `scripts/rig-mode.sh`,
 //! `scripts/recording-verdict-on-imag.sh`, and `scripts/drift-guard.sh`'s `--check-imag` call.
 //!
@@ -51,17 +53,23 @@ fn resolve(env: &[(&str, &str)]) -> (bool, String) {
 }
 
 #[test]
-fn imag_host_defaults_to_the_replacement_187() {
+fn imag_host_defaults_to_the_replacement_182() {
     // #832: the default ACTIVE imag host is the replacement notebook -- the incumbent's HDMI is
-    // disconnected (#831), so a rig run with NO override must target .187.
+    // disconnected (#831), so a rig run with NO override must target the replacement.
+    //
+    // 2026-07-29 IP SWAP (user directive): the imag ROLE keeps the historical address .182
+    // permanently, so the replacement was moved ONTO .182 (it held .187 from 2026-07-27 until
+    // the swap) and the retired incumbent was moved OFF it to .189. The ACTIVE selector is
+    // unchanged -- still `replacement`; only the address FACT behind it moved.
     let (ok, out) = resolve(&[]);
     assert!(
         ok,
         "scripts/imag-host.sh must exit 0 by default. got: {out}"
     );
     assert!(
-        out.contains("IMAG_HOST_ACTIVE=replacement") && out.contains("IMAG_IP=10.77.9.187"),
-        "#832: the default active imag host must resolve to the replacement (10.77.9.187). got: {out}"
+        out.contains("IMAG_HOST_ACTIVE=replacement") && out.contains("IMAG_IP=10.77.9.182"),
+        "#832: the default active imag host must resolve to the replacement (10.77.9.182 since \
+         the 2026-07-29 IP swap). got: {out}"
     );
 }
 
@@ -76,8 +84,9 @@ fn imag_host_active_env_override_swaps_the_incumbent_back_in() {
         "scripts/imag-host.sh must accept IMAG_HOST_ACTIVE=incumbent. got: {out}"
     );
     assert!(
-        out.contains("IMAG_HOST_ACTIVE=incumbent") && out.contains("IMAG_IP=10.77.9.182"),
-        "#832: IMAG_HOST_ACTIVE=incumbent must resolve IMAG_IP to the incumbent (10.77.9.182). got: {out}"
+        out.contains("IMAG_HOST_ACTIVE=incumbent") && out.contains("IMAG_IP=10.77.9.189"),
+        "#832: IMAG_HOST_ACTIVE=incumbent must resolve IMAG_IP to the incumbent (10.77.9.189 \
+         since the 2026-07-29 IP swap moved the retired box off .182). got: {out}"
     );
 }
 

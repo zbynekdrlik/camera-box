@@ -21,6 +21,15 @@ paths:
 
 # Replacing the imag notebook — install the OS, provision it, then VERIFY it (#791 / #815 / #816 / #821)
 
+> **Addresses — read this before chasing any IP in this file.** Since the **2026-07-29 IP swap**
+> (user directive) the imag ROLE permanently owns **`10.77.9.182`**: the replacement notebook was
+> moved ONTO that address and the retired original was moved OFF it to `10.77.9.189` (OBS stopped,
+> autostart disabled). The point is that a box swap must never again drift the address every
+> script, MCP and operator has memorised. **Every `10.77.9.187` in this file is HISTORICAL** — that
+> was the replacement's temporary address between 2026-07-27 and the swap; the live findings
+> recorded against it still stand, only the number moved. Never hardcode either address: resolve
+> the active box through `scripts/imag-host.sh` (`IMAG_HOST_ACTIVE`, facts for BOTH boxes).
+
 Three scripts, in this order. None of it is manual work; a notebook swap is repo tooling.
 
 ```

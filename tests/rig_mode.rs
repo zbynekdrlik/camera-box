@@ -644,10 +644,12 @@ fn burn_targets_cover_both_boxes() {
 fn burn_targets_cover_imag_too() {
     let targets = run_sourced("obs_burn_targets");
     // #832: IMAG_IP now defaults to the ACTIVE imag host resolved by scripts/imag-host.sh — the
-    // replacement notebook (.187) since 2026-07-27, not the incumbent (.182, #831 HDMI now
-    // disconnected). See tests/harness_imag_host.rs for the reversibility proof.
+    // replacement notebook, not the retired incumbent (#831 HDMI disconnected). Since the
+    // 2026-07-29 IP swap the imag ROLE permanently holds .182 and the retired box sits at .189,
+    // so this asserts .182 = the LIVE imag box. See tests/harness_imag_host.rs for the
+    // reversibility proof.
     assert!(
-        targets.contains("10.77.9.187") && targets.contains("imag"),
+        targets.contains("10.77.9.182") && targets.contains("imag"),
         "#462/#832: obs_burn_targets must include imag-nb at its ACTIVE resolved host. got=\n{targets}"
     );
 }
