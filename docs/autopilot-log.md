@@ -5894,3 +5894,69 @@ GOTCHA documents for `recording-e2e.sh`/`rig-mode.sh`). `cargo fmt --all --check
 `cargo clippy --all-targets -- -D warnings` all clean.
 
 Shared PR: #704 (dev→main train; body updated with a `## #847 —` scope section + `Closes #847`).
+
+## #847 test-fix — obsolete NVENC-only harness test rewritten for the hardware-aware contract (2026-07-28)
+
+The #847 fix (encoder hardware-selection, commit 77144bd94) shipped correctly but never touched
+`tests/harness_imag_topology.rs`'s `imag_scenes_seeds_advanced_nvenc_recording_profile_502`, which
+still pinned the OLD hardcoded `("AdvOut", "RecEncoder", "obs_nvenc_h264_tex")` literal and the
+single-arg `seed_profile(obs)` call shape — CI was red on `dev` as a result. Rewritten as
+`imag_scenes_seeds_advanced_hardware_aware_recording_profile_847`, pinning the dynamic
+`("AdvOut", "RecEncoder", rec_encoder)` tuple, `select_rec_encoder`'s NVENC/x264 decision,
+`seed_profile(obs, has_discrete_nvidia)`'s two-arg signature, and an explicit "no quoted qsv
+literal" guard. Commit b78a0be34. Full `cargo test` re-run after the fix (161/161 binaries green)
+per the CLAUDE.md one-failure-hides-another-RED gotcha.
+
+## #842 (2026-07-28, recurrence of #784) — isolcpus kernel-cmdline isolation removed from setup-imag.sh; affinity-only OBS pin
+
+Root cause + full investigation trail on the #842 issue (comments 5104301959/5104901760/
+5105021142/5105280323). `scripts/setup-imag.sh` wrote `isolcpus=`/`nohz_full=`/`irqaffinity=` to
+`/etc/default/grub.d/98-imag-isolation.cfg` — isolcpus disables scheduler load balancing for a
+many-threaded process, measured to pile 114/119 of OBS's threads onto ONE core (60fps -> ~53fps
+NDI receive, 7-10 underruns/s) on the replacement notebook (10.77.9.187). Identical signature to
+#784's 2026-07-15 finding on the incumbent .182 box, hand-fixed there but never ported to source —
+#816's topology-derived rewrite reproduced the defect verbatim on the new hardware.
+
+Design comment (root cause, chosen approach, rejected alternative of keeping nohz_full alone)
+posted to #842 BEFORE any code commit: https://github.com/zbynekdrlik/camera-box/issues/842#issuecomment-5105379543
+
+RED (2e5a55350): rewrote the two obsolete #483 tests in `tests/setup_imag_guards.rs` that pinned
+the now-wrong "must write isolcpus=..." contract into `setup_imag_never_writes_kernel_isolcpus_
+dropin_842` + `setup_imag_self_heals_leftover_isolation_dropin_and_regens_grub_842`; re-anchored
+`setup_imag_grants_rtprio_for_genlock_rt_pin_484`'s ordering assertion off the removed cmdline
+literal onto the still-present affinity-persist line. New pure-function tests in
+`tests/verify_imag_pure_functions.rs`: `imag_cmdline_free_of_kernel_isolation_fails_on_isolcpus_
+or_nohz_full` (real .182/.187 cmdline fixtures) and `imag_obs_thread_concentration_ok_flags_a_
+single_core_pileup` (real 114/119-vs-19/16/24/26/12/17 measured numbers).
+
+GREEN (ef3201aca): `scripts/setup-imag.sh` step 8 no longer writes the grub cmdline isolation at
+all — isolcpus/nohz_full/irqaffinity all dropped (a deliberate decision, not just isolcpus; see
+the design comment / the new imag-nb-provisioning.md GOTCHA for why nohz_full/irqaffinity were
+NOT kept as a partial config). The taskset AFFINITY pin (`/etc/imag-isolated-cpus.conf`, fed by the
+UNCHANGED `imag_cpu_isolation_plan`) stays exactly as-is. Self-heals a leftover
+`98-imag-isolation.cfg` (rm + `safe_grub_regen`). `scripts/verify-imag.sh` check (d) now hard-FAILs
+on `isolcpus=`/`nohz_full=` presence (#784's own outstanding acceptance-gate item, deferred between
+#780/#791 since 2026-07-15) and also verifies the persisted affinity file still matches the
+derived plan; new check (s) hard-FAILs if OBS's live threads concentrate onto a single core
+(>60%, the DIRECT SYMPTOM, independent of the cmdline check).
+
+`drift-guard --check-imag` (#780) deliberately NOT touched — no `/proc/cmdline` gather exists
+there and `check_imag_report()`'s stable positional-arg contract would need cross-cutting changes
+to duplicate a check the mandatory VERIFY gate already performs; reasoning on #842, noted on #784.
+#784 stays OPEN (per its own comment 5105021405) until this fix is confirmed at a real future
+provisioning run; #842 closes via this PR's `Closes #842`.
+
+Full `cargo test` suite green (161/161) both after the RED commit (confirming which binaries
+failed) and after GREEN (confirming zero regressions elsewhere, including the two anchor-collision
+near-misses this diff itself introduced and fixed: a stray `/etc/imag-isolated-cpus.conf` mention
+in a NEW explanatory comment before the real derive/write line, caught by
+`setup_imag_persists_the_derived_isolated_cpus_for_the_wrapper_841`). `cargo fmt --all --check` /
+`cargo clippy --all-targets -- -D warnings` clean.
+
+New project-playbook GOTCHA added to `.claude/rules/imag-nb-provisioning.md` documenting the full
+incident (why it recurred: a live hand-fix on one box was never ported to source, and the
+acceptance-gate action item sat deferred for two weeks) — this is the lesson the whole fix exists
+to encode so a THIRD recurrence on a future box is structurally impossible.
+
+Shared PR: #704 (dev→main train; body updated with a `## Item A` + `## #842 —` scope section and
+`Closes #842`).

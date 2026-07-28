@@ -95,26 +95,32 @@ When a NEXT swap fails, check this list before theorising:
   `apt-mark hold obs-studio` keeps it there. The durable answer is bumping the vendored genlock
   build to the current OBS release (#825).
 
-A healthy fresh box, post-reboot: `uname -r` on the HWE line, `/proc/cmdline` carrying the DERIVED
-`isolcpus=`/`nohz_full=`/`irqaffinity=` + `preempt=full`, DM = lightdm with the autologin drop-in,
-openbox + obs running as the desktop user, gdm3 purged, zero failed units, `libndi.so.6 ->
-libndi.so.6.3.2`, dantesync PTP LOCKED, OBS log showing `genlock: wall-clock-slaved render tick
-ENABLED` + ~24 loaded modules including `obs-websocket.so`, and :4455 listening.
+A healthy fresh box, post-reboot: `uname -r` on the HWE line, `/proc/cmdline` carrying
+`preempt=full` and **NO** `isolcpus=`/`nohz_full=` token (#842 — see the CPU-affinity section
+below; kernel-level isolation was REMOVED, only the taskset affinity pin remains), DM = lightdm
+with the autologin drop-in, openbox + obs running as the desktop user, gdm3 purged, zero failed
+units, `libndi.so.6 -> libndi.so.6.3.2`, dantesync PTP LOCKED, OBS log showing `genlock:
+wall-clock-slaved render tick ENABLED` + ~24 loaded modules including `obs-websocket.so`, and
+:4455 listening.
 
 ## setup-imag.sh is hardware-agnostic — do not re-introduce a literal (#816)
 
 The replacement notebook is a different machine (i5-13420H, 12 threads, **no dGPU**) than the box
-the script was written against (16 threads, RTX 5050). Three things are therefore DERIVED, and a
+the script was written against (16 threads, RTX 5050). Things below are therefore DERIVED, and a
 future edit must keep them derived:
 
-- **CPU isolation** — `imag_cpu_isolation_plan` reads `thread_siblings_list`: SMT-paired CPUs are
-  P-core threads, unpaired ones E-cores; P-core0 + every E-core stay for housekeeping/IRQs, the rest
-  of the P-core block is isolated for OBS, `nohz_full` covers only the last isolated pair (the #484
-  render-tick pair). The #483 DECISION is unchanged — the old box's hand-tuned
-  `isolcpus=2..11 nohz_full=10,11 irqaffinity=0,1,12-15` is reproduced byte-for-byte, and a test
-  pins exactly that. Both OBS launch paths pin to the derived set (the openbox autostart via an
-  `__ISOLCPUS__` placeholder sed'd in at provisioning time — the heredoc is quoted, so a `$VAR`
-  there would NOT expand).
+- **CPU affinity (#483/#816, AFFINITY-ONLY since #842 — see the dedicated GOTCHA section below
+  for the full incident)** — `imag_cpu_isolation_plan` reads `thread_siblings_list`: SMT-paired
+  CPUs are P-core threads, unpaired ones E-cores; P-core0 + every E-core stay for
+  housekeeping/IRQs, the rest of the P-core block is the set OBS's taskset pin restricts itself
+  to. **The function's derivation logic is unchanged, but its OUTPUT IS NO LONGER WRITTEN TO THE
+  KERNEL CMDLINE** — `isolcpus=`/`nohz_full=`/`irqaffinity=` disabled scheduler load balancing for
+  a many-threaded OBS process (#842, a recurrence of #784), so `setup-imag.sh` now writes ONLY the
+  taskset-affinity persisted config (`/etc/imag-isolated-cpus.conf`), never the grub.d cmdline
+  drop-in. Both OBS launch paths still pin to the derived set via `taskset` (the openbox autostart
+  via an `__ISOLCPUS__` placeholder sed'd in at provisioning time — the heredoc is quoted, so a
+  `$VAR` there would NOT expand) — restricting OBS to a core MASK is fine; kernel-level *isolation*
+  of those cores is what broke it.
 - **NVIDIA driver + `prime-select`** — gated on `imag_has_discrete_nvidia` (an `lspci` display-class
   match). It used to be mandatory + fail-hard, which aborts provisioning on a box that simply has no
   dGPU. On such a box the iGPU drives the HDMI program output directly.
@@ -371,3 +377,57 @@ also re-runs `imag_scenes.py --bootstrap`, harmlessly re-applying the same value
 encoder id (or any other Advanced-output setting) live, without an intervening restart, will
 silently prove NOTHING either way — a false negative if the new value would actually have worked,
 and (as happened here) a confusing false trail if you don't realize the restart is missing.
+
+## `isolcpus=`/`nohz_full=` on the kernel cmdline is a scheduler footgun for a MULTI-threaded process — affinity masks alone are safe (#784, recurred as #842)
+
+**This is a REPEAT regression — read it before touching CPU isolation/affinity on this box again.**
+#483/#816 derive a CPU set and, until #842, wrote it into `GRUB_CMDLINE_LINUX_DEFAULT` as
+`isolcpus=<set> nohz_full=<pair> irqaffinity=<rest>`. `isolcpus=` removes the listed CPUs from the
+kernel scheduler's *load-balancing domains* — it is designed for explicit PER-THREAD pinning
+(one realtime thread, one dedicated core), never for handing a whole range mask to a many-threaded
+process. OBS on imag is ~106-119 threads; once isolated, the scheduler stopped rebalancing THOSE
+CPUs among themselves and piled the vast majority of OBS's threads onto a single one (measured
+twice now: #784 on the incumbent .182 box 2026-07-15, #842 on the replacement notebook .187
+2026-07-28 — same 114-ish-threads-on-one-core signature both times). Direct-measured consequence:
+NDI receive drops from 60fps to ~53fps with 7-10 underruns/s, because the starved cores can't keep
+up with 4-6x 1080p60 decode.
+
+**Why it recurred:** #784 found the defect and hand-deleted `/etc/default/grub.d/98-imag-isolation.cfg`
+directly on the LIVE box (.182) — a hotfix, never ported back to `scripts/setup-imag.sh` (the
+SOURCE that generates that same file). #816 then generalized the CPU-set DERIVATION (topology-based
+instead of a hardcoded literal) without touching the underlying isolcpus DECISION, so provisioning
+the replacement notebook on 2026-07-27 regenerated the identical defect on new hardware. **The
+guard that would have caught this at provisioning time — "fail loud if `/proc/cmdline` carries
+isolcpus/nohz_full" — was written down as an action item on #784 on 2026-07-15 and then deferred
+between #780 and #791 for two weeks without ever being implemented.** Lesson: a live hand-fix on
+one box is not a fix — the SOURCE script must change, AND the acceptance gate must assert the new
+contract, in the SAME sitting, or the exact same defect reprovisions itself on the next box.
+
+**The fix that shipped (#842):** stop writing `isolcpus=`/`nohz_full=`/`irqaffinity=` to the
+kernel cmdline entirely — not just `isolcpus`, all three, since `nohz_full`/`irqaffinity` only had
+meaning paired with an isolated block and neither serves any purpose alone. **The taskset AFFINITY
+pin is NOT the same mechanism and is NOT the problem** — `imag-obs-start.sh`'s
+`taskset -c "$IMAG_ISOLATED_CPUS"` (fed by the unchanged `imag_cpu_isolation_plan` derivation,
+persisted to `/etc/imag-isolated-cpus.conf`) restricts WHICH cores OBS may run on without removing
+those cores from the scheduler's load-balancing domain — threads still migrate freely WITHIN the
+mask. Live-verified: OBS restricted to 6 cores via taskset alone (no isolcpus) spreads its threads
+19/16/24/26/12/17 and gets the SAME 60.2fps/0-underrun numbers as an unrestricted box. **Restricting
+is safe; isolating is not** — don't conflate the two when reasoning about this class of fix.
+
+**Two independent acceptance-gate checks now guard this (`scripts/verify-imag.sh`, run at the
+MANDATORY step-4 VERIFY phase of every provisioning — see the runbook at the top of this file):**
+(d) hard-FAILs if `/proc/cmdline` carries either `isolcpus=` or `nohz_full=` (`imag_cmdline_free_
+of_kernel_isolation`), and separately (s) hard-FAILs if OBS's live threads concentrate onto a
+single CPU core (`imag_obs_thread_concentration_ok`, >60% on one core) — the DIRECT SYMPTOM check,
+independent of (d), so a *different* future mechanism that produces the same thread pileup without
+writing a cmdline token still cannot pass silently. `scripts/setup-imag.sh` also self-heals: if a
+leftover `98-imag-isolation.cfg` is found on a box being (re)provisioned, it is removed and grub
+regenerated, rather than merely not-writing a new one.
+
+**If a future SCHED_FIFO-class realtime thread genuinely needs kernel-level tick support** (the
+`nohz_full`/`irqaffinity` tokens existed to prepare for a genlock render-tick thread that, per
+#483/#484, does not exist yet — it uses `sched_setscheduler(SCHED_FIFO)` + an rtprio ulimit grant,
+neither of which needs a cmdline flag) — that is a NEW, explicit, tested, per-thread pinning
+design of its own, never a blanket range-mask isolation reintroduced "because it was there before".
+#784 said it plainly: isolation may return "LEN s explicitným per-thread pinningom" (only with
+explicit per-thread pinning) — this is still the bar.
