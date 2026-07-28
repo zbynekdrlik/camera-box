@@ -5836,3 +5836,61 @@ context per the CLAUDE.md `full-path-e2e.yml` gotcha -- never `gh workflow run` 
 Full local `cargo test` suite green throughout (161/161 binaries, 0 failed -- no anchor collisions
 in `recording-e2e.sh` from the new branch/sourcing edits). `cargo fmt --all --check`/`cargo check`/
 `cargo clippy --all-targets -- -D warnings`/`shellcheck -S warning` all clean.
+
+## #847 (2026-07-28) — imag-nb recording never starts: RecEncoder hardware selection (NVENC/x264, never QSV)
+
+With #845 fixed, the `[4e/8]` preflight passes and the gate advances to `[5/8] StartRecord` --
+but imag-nb's OWN recording never actually starts. Root cause: `scripts/imag_scenes.py`'s
+`seed_profile()` (#502) hardcodes `RecEncoder=obs_nvenc_h264_tex` against the incumbent NVIDIA
+box; the replacement notebook (10.77.9.187, #816) has no discrete GPU, so NVENC never
+initializes ("Encoder ID 'obs_nvenc_h264_tex' not found" in the OBS log) and every StartRecord
+silently produces 0 bytes. Design + investigation posted `gh issue comment 847`
+(issuecomment-5105006447) BEFORE any code, per the mandatory design-first step.
+
+RED: `43488616f` (`tests/python/test_imag_scenes_rec_encoder_847.py`, 13 tests, all fail against
+the untouched script). GREEN: `77144bd94` -- `select_rec_encoder(has_discrete_nvidia)` pure
+decision (NVENC when a dGPU is present, x264 otherwise), `has_discrete_nvidia_from_lspci` mirrors
+`imag_has_discrete_nvidia`'s exact regex (parity-tested against the SAME fixtures
+`tests/setup_imag_hardware_agnostic.rs` uses, since Python can't import the bash function),
+`detect_has_discrete_nvidia` runs `lspci` locally for the `--bootstrap` self-heal path (`--host
+127.0.0.1`) or over SSH (sshpass, `IMAG_USER`/`IMAG_PW`) for the dev1-invoked path -- a missing
+`lspci` fails loud by name in both (#833 class).
+
+**QSV live investigation (3 rounds, all on 10.77.9.187) -- the #841 TearFree lesson applied
+again: never ship a ported-by-analogy fallback unverified.** `obs_qsv11_v2` looked obvious
+(loaded module, matching hardware class) but every live `StartRecord` attempt with it failed:
+(1) bare QSV -> `MFX_ERR_NOT_FOUND` -- `newlevel` wasn't in the `render` group (`renderD128` is
+`root:render`), fixed live; (2) same error after the group fix -- the oneVPL GPU runtime package
+(`libmfx-gen1.2`, the actual hardware backend; only the dispatcher `libvpl2` was installed) was
+missing, installed live; (3) with BOTH fixed, STILL fails -- one layer deeper, inside
+`obs-qsv11.so`'s own `MFXVideoENCODE::Init()`: `Unsupported configurations, parameters, or
+features (MFX_ERR_UNSUPPORTED)` at a Texture/VAAPI-surface IOPattern, a genuine libmfx-interop
+incompatibility with this Linux/OpenGL OBS build. `obs_x264` (software), tested the same way,
+WORKS: `StartRecord` -> `outputActive=True`, bytes growing (1.0-1.1MB@3s), a real playable `.mkv`
+from `StopRecord`; `mpstat` on the isolated cores (2-7) during the live recording showed ample
+headroom (cores 3/4/5/7 100% idle, core 6 ~10%, core 2's ~93% is the pre-existing #484 SCHED_FIFO
+render-tick thread). x264 shipped; QSV finding filed as #848 for anyone who wants to revisit it.
+
+Live-APPLIED to the already-provisioned box (not just code): deployed the fixed
+`imag_scenes.py` to `/usr/local/bin/` on 10.77.9.187, restarted OBS through the normal operator
+path (`imag-obs-stop.sh` + `imag-obs-start.sh`), confirmed `basic.ini` now persists
+`RecEncoder=obs_x264` and the boot log prints `profile: imag-60fps (Mode=Advanced,
+rec=obs_x264 native-1080p mkv)`, then live-tested `StartRecord`/`StopRecord` through the NORMAL
+boot path's WebSocket end-to-end (outputActive=True, bytes growing, clean stop). Box left in its
+normal running state: scenes 7/7, both projectors open, program on Cam 1.
+
+Repo-wide sweep for other NVIDIA-only assumptions on the imag path (per the #845 precedent):
+`scripts/imag-gpu-contention-sampler.sh`'s unconditional `nvidia-smi` requirement is the ALREADY-
+tracked #846 (no new issue needed); `scripts/setup-imag.sh`'s own `nvidia-smi`/`prime-select`
+uses are already gated on `imag_has_discrete_nvidia`. Found ONE new gap:
+`scripts/imag-obs-watchdog.py`'s wedge-forensic `snapshot()` unconditionally shells `nvidia-smi`
+(x3) and hardcodes PCI address `01:00.0` -- filed as #849 (a different subsystem, not CI-gate-
+blocking, needs its own hardware-equivalent-forensics design, so NOT fixed in this PR per the
+bundling gate).
+
+Full `tests/python` suite green (607/607). Full `cargo test --no-run` compiles clean (no anchor
+collisions -- this fix is Python-only, outside the bash static-anchor-test class the CLAUDE.md
+GOTCHA documents for `recording-e2e.sh`/`rig-mode.sh`). `cargo fmt --all --check`/`cargo check`/
+`cargo clippy --all-targets -- -D warnings` all clean.
+
+Shared PR: #704 (dev→main train; body updated with a `## #847 —` scope section + `Closes #847`).

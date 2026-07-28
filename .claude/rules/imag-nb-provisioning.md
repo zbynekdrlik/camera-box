@@ -338,4 +338,36 @@ scripts/ scripts/lib/`) before closing out — #845's sweep found one more sibli
 `command -v nvidia-smi || FATAL` shape. It was NOT wired into any automated gate (a standalone
 manual diagnostic, zero callers anywhere else in the repo), so it was out of #845's own scope —
 filed as its own follow-up issue (#846) rather than fixed in the same PR, per the bundling gate
-(a genuinely separate script, not "the same preflight").
+(a genuinely separate script, not "the same preflight"). **#847's own sweep found ONE more**:
+`scripts/imag-obs-watchdog.py`'s wedge-forensic `snapshot()` unconditionally shells `nvidia-smi`
+(x3) and hardcodes PCI address `01:00.0` — filed as #849 (different subsystem, needs its own
+hardware-equivalent-forensics design, not fixed in the same PR).
+
+## A config value written over the websocket does NOT take effect on an already-running OBS — it needs a RESTART (#847)
+
+`SetProfileParameter` (obs-websocket) just does `config_set_string(profile_config, ...);
+config_save(profile_config);` — confirmed by reading
+`vendor/obs-studio/plugins/obs-websocket/src/requesthandler/RequestHandler_Config.cpp`'s handler.
+It does **not** call anything equivalent to `OBSBasic::ResetOutputs()`, which is what actually
+(re)creates OBS's Advanced-output encoder objects from the CURRENT config. Those output objects
+are built ONCE, when OBS's own frontend starts up (reading whatever `RecEncoder`/etc. was
+persisted in `basic.ini` at THAT moment) — changing the ini value later via the websocket writes
+the file correctly, but the ALREADY-RUNNING OBS process keeps using its stale, already-built
+output object until it is restarted.
+
+**Live-observed trap (#847):** setting `RecEncoder=obs_qsv11_v2` via `SetProfileParameter` while
+OBS was running, then calling `StartRecord`, silently did nothing (`outputActive` stayed `False`,
+0 bytes) — not because the new encoder was wrong, but because OBS's already-running recording
+output object was still the one built at ITS OWN startup (with the OLD, broken NVENC config). The
+tell: `GetProfileParameter` correctly echoed the NEW value back, yet the behavior stayed exactly
+like the OLD one — a config write that "worked" per its own read-back but had ZERO runtime effect
+is this exact bug, not a flaky encoder.
+
+**The fix pattern for testing/applying any `AdvOut`/output-shaped `SetProfileParameter` change on
+a LIVE box:** write the new value FIRST (or via `seed_profile()`'s own boot-time re-application),
+THEN restart OBS through the normal operator path (`imag-obs-stop.sh` + `imag-obs-start.sh` — the
+graceful `wmctrl -c` close + relaunch, which re-reads `basic.ini` fresh at OBS's own startup and
+also re-runs `imag_scenes.py --bootstrap`, harmlessly re-applying the same value). Testing a NEW
+encoder id (or any other Advanced-output setting) live, without an intervening restart, will
+silently prove NOTHING either way — a false negative if the new value would actually have worked,
+and (as happened here) a confusing false trail if you don't realize the restart is missing.
