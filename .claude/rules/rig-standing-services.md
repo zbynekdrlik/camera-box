@@ -5,6 +5,10 @@ paths:
   - "scripts/clock-offset-painter-gate.sh"
   - "scripts/bundle-state-server.py"
   - "scripts/run-bundle-state-server.ps1"
+  - "scripts/w32time-gate.sh"
+  - "scripts/lib/win-status-args.sh"
+  - "scripts/lib/stale-artifact-guard.sh"
+  - ".claude/skills/e2e/SKILL.md"
 ---
 
 # The E2E gate's preconditions are STANDING SERVICES — they go quiet, and the gate blames itself
@@ -56,6 +60,34 @@ curl -fsS --max-time 8 -o /dev/null -w '%{http_code}\n' http://10.77.9.204:8899/
 Tracked as a real fault (the task must survive a reboot, and the harness must say
 `bundle-state-server DOWN on <box>` instead of describing the manual workaround) — see the open
 issue filed 2026-07-27.
+
+## 3. When a gate's INPUT MECHANISM migrates (e.g. file-relay → live HTTP), the runbook prose and the old relay path both rot silently — grep before trusting either (#835)
+
+`#648` moved `dantesync-gate.sh`'s Windows-node input from a human/agent pre-fetching
+`\\.\pipe\dantesync` to a file (`--win-status NAME=FILE`) to a live `--win-http` fetch
+(`http://<host>:8898/status`) — but nobody updated `.claude/skills/e2e/SKILL.md`'s runbook prose,
+which kept telling an operator to hand-write `dante-{strih,stream}.json` before every run. Someone
+following that stale advice dropped a 21-day-old cached snapshot into a live run's `$OUTDIR` — a
+real false-GREEN hazard, since the surviving `--win-status` code path was **deliberately
+age-blind** (a plain `cat`, no `updated_ts`/mtime check).
+
+**The lesson, twice over:**
+
+- **A migration that changes HOW a gate gets its data must also update every DOC that tells a
+  human what to do before running it** — the runbook prose is a caller too, and it does not fail
+  loudly when it goes stale; it just quietly walks someone into reproducing the old, worse
+  mechanism next to the new one.
+- **Before deciding to GUARD vs REMOVE a surviving-but-superseded relay path, grep the WHOLE repo
+  for its actual callers** (`grep -rn '\-\-win-status\b'`, or whatever the flag/function is),
+  not just the one script you're looking at. `dantesync-gate.sh --win-status` had zero live
+  callers left (only its own tests) once `recording-e2e.sh` switched to `--win-http` — the
+  superior mechanism already covered the same nodes, so #835 removed it outright rather than
+  bolting a freshness check onto dead code. **But check for SIBLING scripts sharing the same
+  helper before deleting the helper itself** — `scripts/lib/win-status-args.sh`'s
+  `win_status_parse_entry` is shared by `dantesync-gate.sh` (now-removed use) AND
+  `scripts/w32time-gate.sh` (still actively uses `--win-status` for the W32Time service-state
+  invariant, which has no HTTP equivalent to migrate to) — the shared helper stayed, only
+  `dantesync-gate.sh`'s own flag/loop was deleted.
 
 ## The general shape
 
