@@ -55,6 +55,17 @@ def test_canonical_constants_match_the_live_captured_layout():
     assert mod.CANONICAL_NDI_SOURCES == CANONICAL_NDI
 
 
+def test_imag_scene_cam_count_env_override_widens_cams_with_no_code_edit(monkeypatch):
+    """#791: IMAG_SCENE_CAM_COUNT must be a real override, not just a default -- a future cam8
+    must need ZERO code edit here, only the env var. Re-imports the module under a fresh spec
+    (module-level constants are computed at import time) so the override actually takes effect."""
+    monkeypatch.setenv("IMAG_SCENE_CAM_COUNT", "8")
+    mod = _load(REPO / "scripts" / "imag_scenes.py", "imag_scenes_env_override_under_test")
+    assert list(mod.CAMS) == [1, 2, 3, 4, 5, 6, 7, 8]
+    assert mod.CANONICAL_SCENE_ORDER[:2] == ["Scene", "Cam 8"]
+    assert "NDI CAM8" in mod.CANONICAL_NDI_SOURCES
+
+
 def test_scene_order_mismatch_ok_on_exact_canonical_order():
     mod = _scenes_module()
     assert mod.scene_order_mismatch(list(CANONICAL_ORDER)) == ""

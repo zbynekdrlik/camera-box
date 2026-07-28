@@ -167,15 +167,17 @@ fn setup_imag_autostart_strips_saved_projectors_522() {
         .find("saved_projectors")
         .expect("saved_projectors strip must be present");
     // must run BEFORE OBS launches so OBS loads the stripped collection (restore happens at load).
-    // #816: the pin is no longer the literal 2-11 — the autostart is written with an
-    // __ISOLCPUS__ placeholder that step 8's DERIVED isolated-CPU set is sed'd into, so the same
-    // script provisions notebooks with different core counts. Ordering contract unchanged.
+    // #840: the autostart no longer runs a bare `taskset -c __ISOLCPUS__ obs &` itself -- it now
+    // launches OBS THROUGH imag-obs-start.sh (the same path the operator's menu uses), passed the
+    // DERIVED isolated-CPU set via an exported env var. The __ISOLCPUS__ placeholder mechanism
+    // (step 8's derived set, sed'd in after the heredoc) is unchanged; only WHERE it lands moved
+    // from a direct taskset argument to an env-var export. Ordering contract unchanged.
     let launch = body
-        .find("taskset -c __ISOLCPUS__ obs &")
-        .expect("the autostart OBS launch must be present");
+        .find(r#"export IMAG_ISOLATED_CPUS="__ISOLCPUS__""#)
+        .expect("the autostart's IMAG_ISOLATED_CPUS export (feeding imag-obs-start.sh) must be present");
     assert!(
         strip < launch,
-        "the saved_projectors strip must run BEFORE the autostart launches OBS (#522)"
+        "the saved_projectors strip must run BEFORE the autostart launches OBS (#522/#840)"
     );
 }
 
@@ -220,54 +222,15 @@ fn imag_scenes_seeds_seven_cams_at_1080p60_no_hardcoded_range() {
         "{SCENES} must bind inputs to the fleet `CAM<n> (usb)` NDI source names"
     );
 
-    // Behavioral proof (not just static text): importing the module with NO env override must
-    // resolve CAMS to exactly 1..=7, and an override must widen it further (e.g. a future cam8) —
-    // proving the mechanism actually works, not just that the right words appear in the file.
-    let repo = manifest_dir();
-    let out = std::process::Command::new("python3")
-        .arg("-c")
-        .arg(
-            "import importlib.util, sys; \
-             spec = importlib.util.spec_from_file_location('m', 'scripts/imag_scenes.py'); \
-             m = importlib.util.module_from_spec(spec); sys.modules['m'] = m; \
-             spec.loader.exec_module(m); print(list(m.CAMS))",
-        )
-        .current_dir(&repo)
-        .output()
-        .expect("run python3 to import imag_scenes.py");
-    assert!(
-        out.status.success(),
-        "importing {SCENES} failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        stdout.contains("[1, 2, 3, 4, 5, 6, 7]"),
-        "#791: CAMS must default to [1..7] (cam7 included) with no env override. Got: {stdout}"
-    );
-
-    let out2 = std::process::Command::new("python3")
-        .arg("-c")
-        .arg(
-            "import importlib.util, sys; \
-             spec = importlib.util.spec_from_file_location('m', 'scripts/imag_scenes.py'); \
-             m = importlib.util.module_from_spec(spec); sys.modules['m'] = m; \
-             spec.loader.exec_module(m); print(list(m.CAMS))",
-        )
-        .current_dir(&repo)
-        .env("IMAG_SCENE_CAM_COUNT", "8")
-        .output()
-        .expect("run python3 with IMAG_SCENE_CAM_COUNT=8");
-    assert!(
-        out2.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&out2.stderr)
-    );
-    let stdout2 = String::from_utf8_lossy(&out2.stdout);
-    assert!(
-        stdout2.contains("[1, 2, 3, 4, 5, 6, 7, 8]"),
-        "#791: IMAG_SCENE_CAM_COUNT=8 must widen CAMS to [1..8] with NO code edit. Got: {stdout2}"
-    );
+    // The BEHAVIORAL proof (importing the module with/without IMAG_SCENE_CAM_COUNT actually
+    // resolves CAMS correctly) lives in tests/python/test_imag_scenes_verify_parity.py, NOT here
+    // -- imag_scenes.py imports the `websocket` pip package at module level (line ~53), which is
+    // only installed in the dedicated "Python harness tests" CI job (pytest tests/python), never
+    // in the plain cargo-test/coverage jobs a Rust test runs under. A bare
+    // `Command::new("python3")` import from THIS file broke CI (websocket ModuleNotFoundError)
+    // the first time this test was written with an inline behavioral check -- static text
+    // assertions only here; the real import-and-run proof belongs in the python suite that
+    // actually has the dependency.
 }
 
 /// #791: the canonical 17-scene ORDER and the 10 canonical NDI-source bindings must be derived
