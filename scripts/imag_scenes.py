@@ -44,6 +44,9 @@ import base64
 import hashlib
 import json
 import os
+import re
+import shutil
+import subprocess
 import sys
 
 # #785: --bootstrap = boot/recovery invocation (autostart + watchdog) — ONLY that path may
@@ -135,21 +138,130 @@ class Obs:
                 return msg["d"].get("responseData", {})
 
 
-def seed_profile(obs: Obs) -> None:
-    """#502: put imag on a named ADVANCED profile with a native-1080p60 NVENC h264 mkv recording
-    encoder, instead of the naive default Simple profile (x264 @ 6 Mbps 'Stream' quality, which
-    softens the E2E QR/burns). imag records its OWN OBS-program output for the topology-v2 zero-loss
-    verdict (recording-verdict-on-imag.sh extracts per-box partials from imag-REC.mkv), so a clean
+# #847: RecEncoder hardware selection -- imag-nb recording never starts on a box with no
+# discrete NVIDIA GPU.
+#
+# #502 hardcoded ("AdvOut", "RecEncoder", "obs_nvenc_h264_tex") against the INCUMBENT box's RTX
+# 5050. The replacement notebook (10.77.9.187, #816) is Intel iGPU only -- NVENC never
+# initializes ("Encoder ID 'obs_nvenc_h264_tex' not found" in the OBS log), so the recording
+# output object is never created and every StartRecord silently produces 0 bytes (the exact [5/8]
+# liveness-check failure this ticket fixes; same class as #709/#845).
+#
+# The obvious-looking fallback (QSV, obs_qsv11_v2 -- listed as loaded in the OBS log) was
+# LIVE-TESTED on 10.77.9.187, not assumed (the #841 TearFree lesson: never ship a ported-by-
+# analogy setting unverified). Three rounds, in order:
+#   1. bare QSV -> "Failed to initialize MFX ... (MFX_ERR_NOT_FOUND)" -- `newlevel` was not in
+#      the `render` group (/dev/dri/renderD128 is root:render).
+#   2. render group fixed -> SAME error -- the oneVPL GPU runtime package (libmfx-gen1.2, the
+#      actual hardware backend; only the dispatcher libvpl2 was installed) was missing too.
+#   3. both gaps fixed -> StartRecord STILL never actually starts: "[qsv encoder: 'msdk_impl']
+#      Unsupported configurations, parameters, or features (MFX_ERR_UNSUPPORTED)" at
+#      MFXVideoENCODE::Init() (surf: Texture IOPattern) -- a genuine libmfx Texture/VAAPI-interop
+#      incompatibility in OBS's Linux QSV plugin on this build, not a missing dependency.
+# `obs_x264` (software), tested the SAME way, WORKS: StartRecord -> outputActive=True, bytes
+# growing (1.0MB@3s/3.0MB@7s), a real playable 5.2MB .mkv from StopRecord. mpstat on the box's
+# isolated cores (2-7, /etc/imag-isolated-cpus.conf) during that live recording showed ample
+# headroom (cores 3/4/5/7 100% idle, core 6 ~10%; core 2's ~93% is the PRE-EXISTING #484
+# SCHED_FIFO render-tick thread, unrelated to the encode). Full trail: the #847 issue's design
+# comment. So: dGPU present -> NVENC (byte-for-byte unchanged), no dGPU -> x264 -- NEVER qsv,
+# which is confirmed unreliable here (a follow-up issue tracks the QSV MFX_ERR_UNSUPPORTED
+# finding for whoever wants to revisit it later; this ticket does not block on it, per its own
+# "x264 is the safe fallback if QSV proves unreliable" guidance).
+
+
+def select_rec_encoder(has_discrete_nvidia: bool) -> str:
+    """Pure decision -- the OBS RecEncoder id to use for THIS box's hardware. See the comment
+    block above for the live investigation that ruled out QSV as the no-dGPU fallback."""
+    return "obs_nvenc_h264_tex" if has_discrete_nvidia else "obs_x264"
+
+
+# Mirrors scripts/setup-imag.sh's `imag_has_discrete_nvidia` bash function EXACTLY (the SAME
+# regex, same case-insensitivity, matched per-line like `grep`) -- that function cannot be
+# imported from Python, so the regex is mirrored here rather than a second, differently-behaved
+# detector invented (the #845 lesson). tests/python/test_imag_scenes_rec_encoder_847.py's
+# test_has_discrete_nvidia_from_lspci_agrees_with_the_bash_detector runs BOTH against the same
+# fixture text so a future drift in either regex is caught.
+_NVIDIA_DISCRETE_RE = re.compile(
+    r"(vga compatible controller|3d controller|display controller).*nvidia", re.IGNORECASE
+)
+
+
+def has_discrete_nvidia_from_lspci(lspci_output: str) -> bool:
+    """Pure parser -- True iff LSPCI_OUTPUT (the text of `lspci -nn`) names a discrete NVIDIA
+    display-class device on any line."""
+    return any(_NVIDIA_DISCRETE_RE.search(line) for line in lspci_output.splitlines())
+
+
+def _is_local_host(host: str) -> bool:
+    """True when HOST resolves to this same machine -- the --bootstrap self-heal path
+    (imag-obs-start.sh / imag-obs-watchdog.py) always passes literally 127.0.0.1."""
+    return host in ("127.0.0.1", "localhost", "::1")
+
+
+def _lspci_query_local() -> str:
+    """Run `lspci -nn` as a LOCAL subprocess -- valid only when this process runs ON the box
+    being configured (the loopback --host case). A missing lspci fails LOUD by name (#833 class)
+    -- never silently read as "no discrete GPU"."""
+    if shutil.which("lspci") is None:
+        sys.exit(
+            "FAIL: lspci not found on PATH -- cannot determine whether a discrete NVIDIA GPU is "
+            "present (apt-get install -y pciutils)"
+        )
+    result = subprocess.run(["lspci", "-nn"], capture_output=True, text=True, timeout=10, check=False)
+    return result.stdout
+
+
+def _lspci_query_remote(host: str) -> str:
+    """SSH to HOST and run `lspci -nn` remotely -- for the dev1-invoked case where imag_scenes.py
+    runs on a DIFFERENT machine than the box being configured (verify-imag.sh, the manual
+    post-provision step). Mirrors every other script's IMAG_USER/IMAG_PW sshpass convention
+    (default newlevel/newlevel). A missing lspci (or sshpass/ssh) on the REMOTE box fails LOUD by
+    name, never silently "no dGPU" (#833 class)."""
+    user = os.environ.get("IMAG_USER", "newlevel")
+    pw = os.environ.get("IMAG_PW", "newlevel")
+    ssh_base = [
+        "sshpass", "-p", pw, "ssh",
+        "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=8",
+        f"{user}@{host}",
+    ]
+    probe = subprocess.run(
+        ssh_base + ["command -v lspci >/dev/null 2>&1 && echo LSPCI_OK || echo LSPCI_MISSING"],
+        capture_output=True, text=True, timeout=15, check=False,
+    )
+    if "LSPCI_OK" not in probe.stdout:
+        sys.exit(
+            f"FAIL: lspci not found on {host} (or unreachable) -- cannot determine whether a "
+            "discrete NVIDIA GPU is present (apt-get install -y pciutils)"
+        )
+    result = subprocess.run(ssh_base + ["lspci -nn"], capture_output=True, text=True, timeout=15, check=False)
+    return result.stdout
+
+
+def detect_has_discrete_nvidia(host: str) -> bool:
+    """Detect whether HOST (the box being configured) has a discrete NVIDIA GPU -- local lspci
+    when HOST is this same machine, remote SSH otherwise. Never guessed."""
+    out = _lspci_query_local() if _is_local_host(host) else _lspci_query_remote(host)
+    return has_discrete_nvidia_from_lspci(out)
+
+
+def seed_profile(obs: Obs, has_discrete_nvidia: bool) -> None:
+    """#502: put imag on a named ADVANCED profile with a native-1080p60 recording encoder, instead
+    of the naive default Simple profile (x264 @ 6 Mbps 'Stream' quality, which softens the E2E
+    QR/burns). imag records its OWN OBS-program output for the topology-v2 zero-loss verdict
+    (recording-verdict-on-imag.sh extracts per-box partials from imag-REC.mkv), so a clean
     native-resolution recording matters (the #225 lesson: never let the recording rescale/soften).
     Applied over WebSocket (CreateProfile/SetCurrentProfile/SetProfileParameter) — verified to
-    persist on the box and produce a 1920x1080@60 h264-NVENC .mkv (2026-07-05). NVENC h264 is
-    available on imag's RTX 5050 (obs_nvenc_h264_tex); RecRescale=false keeps it native 1080p."""
+    persist on the box. RecEncoder is now HARDWARE-SELECTED (#847, see select_rec_encoder above):
+    NVENC h264 on a box with a discrete NVIDIA GPU (obs_nvenc_h264_tex, unchanged from #502),
+    x264 (software, live-proven to work) on an Intel-iGPU-only box. RecRescale=false keeps it
+    native 1080p either way."""
+    rec_encoder = select_rec_encoder(has_discrete_nvidia)
     obs.req("CreateProfile", {"profileName": "imag-60fps"}, ignore_err=True)
     obs.req("SetCurrentProfile", {"profileName": "imag-60fps"}, ignore_err=True)
     for cat, name, val in (
         ("Output", "Mode", "Advanced"),
         ("AdvOut", "RecType", "Standard"),
-        ("AdvOut", "RecEncoder", "obs_nvenc_h264_tex"),
+        ("AdvOut", "RecEncoder", rec_encoder),
         ("AdvOut", "RecRescale", "false"),
         ("AdvOut", "RecFormat2", "mkv"),
         ("AdvOut", "RecFilePath", "/home/newlevel"),
@@ -160,7 +272,7 @@ def seed_profile(obs: Obs) -> None:
     prof = obs.req("GetProfileList").get("currentProfileName")
     mode = obs.req("GetProfileParameter", {
         "parameterCategory": "Output", "parameterName": "Mode"}).get("parameterValue")
-    print(f"profile: {prof} (Mode={mode}, rec=NVENC h264 native-1080p mkv)")
+    print(f"profile: {prof} (Mode={mode}, rec={rec_encoder} native-1080p mkv)")
 
 
 def seed(obs: Obs) -> None:
@@ -422,7 +534,9 @@ def main() -> None:
     elif args.verify_parity:
         verify_parity(obs)
     else:
-        seed_profile(obs)  # #502: Advanced NVENC native-1080p mkv profile BEFORE the video/scene seed
+        # #847: detect once per run -- never guessed, see detect_has_discrete_nvidia above.
+        has_dgpu = detect_has_discrete_nvidia(args.host)
+        seed_profile(obs, has_dgpu)  # #502/#847: Advanced profile BEFORE the video/scene seed
         seed(obs)
 
 
