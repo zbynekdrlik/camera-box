@@ -305,5 +305,11 @@ pub mod emit_skip_log;
 // frame purely from the always-crisp node burns).
 pub mod optical_payload_check;
 
+// #855 — parse the shell-side CAMBOX_OFFLINE_ACK / rig-fleet.txt ack format on the Rust side, so
+// recording-verdict's all_cambox_av_sync gate can report an acked-offline box EXCLUDED instead of
+// judging it UNKNOWN/FAIL on samples it was never going to produce. No probe deps, so it unit
+// tests Tier-0.
+pub mod offline_ack;
+
 #[cfg(feature = "probe")]
 pub mod probe;
