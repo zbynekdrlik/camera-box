@@ -303,6 +303,11 @@ def _section_av_sync(verdict):
                 f"  {_pass_glyph(node.get('gate_pass'))} {cam}: ODVODENÉ {_fmt_ms(offset)} "
                 f"(z cam2 + vlastný doručovací rozdiel, rozptyl ±{_fmt_ms(spread)})"
             )
+        elif node.get("verdict") == "excluded":
+            # #855: an operator-acknowledged offline box (CAMBOX_OFFLINE_ACK / rig-fleet.txt) —
+            # reported EXCLUDED, never as a judged UNKNOWN, so it never reads as "this box failed".
+            reason = node.get("exclude_reason") or "operátorom potvrdené offline"
+            lines.append(f"  ⏸️ {cam}: VYNECHANÉ (potvrdené offline — {reason})")
         else:
             reason = _av_reason(node)
             lines.append(f"  ⚪ {cam}: UNKNOWN — {reason}")

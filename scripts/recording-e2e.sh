@@ -2940,6 +2940,12 @@ fi
 # printed command, not silently implicit.
 AV_EXPECTED_MS="${AV_EXPECTED_MS:-0}"
 VERDICT_ARGS+=(--av-expected-ms "$AV_EXPECTED_MS")
+# #855: thread the SAME operator ack (CAMBOX_OFFLINE_ACK, already resolved above from either an
+# explicit override or the repo-level rig-fleet.txt default) straight through to recording-verdict
+# unchanged -- no shell-side re-parsing. Consumed ONLY by the all_cambox_av_sync gate: an acked
+# box is reported EXCLUDED there instead of judged UNKNOWN/FAIL on samples it was never going to
+# produce. Harmless no-op (`--offline-ack-cams ""`) when nothing is acked this run.
+VERDICT_ARGS+=(--offline-ack-cams "${CAMBOX_OFFLINE_ACK:-}")
 
 # #208 PER-BOX DECODE-IN-PLACE (refines #193): by default decode EACH recording ON ITS OWN BOX —
 # the strih recording ON the strih box, the stream recording ON the stream box — and merge the
@@ -3192,6 +3198,7 @@ continuing WITHOUT the imag partial; the merge below will omit --merge-partials 
     --burn-cam7-run-id "$BURN_CAM7_RUN_ID" \
     --burn-strih-run-id "$BURN_STRIH_RUN_ID" --burn-stream-run-id "$BURN_STREAM_RUN_ID" \
     --av-expected-ms "$AV_EXPECTED_MS" \
+    --offline-ack-cams "${CAMBOX_OFFLINE_ACK:-}" \
     --out-dir "$OUTDIR/pixel-proof" --json "$REPORT_JSON")
   # #462: fold in the imag partial WHEN [8/8c] actually produced one (it runs directly above, not
   # merely printed) — `if`-form so a missing/failed imag extract never `set -e`-aborts the merge of

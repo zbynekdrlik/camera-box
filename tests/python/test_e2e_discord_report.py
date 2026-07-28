@@ -17,6 +17,10 @@ Fixtures live in tests/python/fixtures/e2e_discord_report/:
     delivery-latency delta) — must compose "ODVODENÉ <value>", never a bare "UNKNOWN", for every
     derived camera; one camera's derived offset is deliberately outside tolerance to prove the
     gate still fails closed on a bad DERIVED estimate too.
+  - verdict_offline_ack_excluded_855.json synthetic, cam1-4 measured/PASS, cam5/cam6/cam7
+    operator-acked offline (CAMBOX_OFFLINE_ACK / rig-fleet.txt, #855) -- must compose "VYNECHANÉ"
+    with the ack reason, never a bare "UNKNOWN", and the excluded boxes must never drag the
+    overall verdict down (gate_pass stays true).
 """
 import json
 import pathlib
@@ -200,6 +204,36 @@ class TestDerivedAvFixture:
         av_section = self.report.split("4️⃣")[1].split("5️⃣")[0]
         for cam in ["cam1", "cam2", "cam3", "cam4", "cam5", "cam6"]:
             assert f"{cam}: " in av_section, f"{cam} must have its own line: {av_section}"
+
+
+# ---------------------------------------------------------------------------
+# #855 -- an operator-acknowledged offline box is EXCLUDED from A/V-sync, never a judged UNKNOWN
+# ---------------------------------------------------------------------------
+
+class TestOfflineAckExcludedFixture:
+    def setup_method(self):
+        self.verdict = _load("verdict_offline_ack_excluded_855.json")
+        self.report = edr.compose_report(self.verdict, {"run_id": "855", "event": "CI PR gate"})
+
+    def test_excluded_cameras_are_never_shown_as_unknown(self):
+        av_section = self.report.split("4️⃣")[1].split("5️⃣")[0]
+        for cam in ["cam5", "cam6", "cam7"]:
+            cam_line = next(line for line in av_section.splitlines() if cam in line)
+            assert "UNKNOWN" not in cam_line, f"an acked-offline box must never read as UNKNOWN: {cam_line}"
+            assert "VYNECHANÉ" in cam_line
+
+    def test_excluded_reason_is_shown(self):
+        av_section = self.report.split("4️⃣")[1].split("5️⃣")[0]
+        assert "powered-off-2026-07-27" in av_section
+
+    def test_measured_cameras_still_report_normally(self):
+        av_section = self.report.split("4️⃣")[1].split("5️⃣")[0]
+        assert "cam1: offset -3.2ms" in av_section
+
+    def test_overall_verdict_is_pass_not_dragged_down_by_the_excluded_boxes(self):
+        # #855 acceptance: an acked-offline box must never count as a FAIL for the gate.
+        assert "✅ PASS" in self.report
+        assert "A/V synchronizácia: FAIL" not in self.report
 
 
 # ---------------------------------------------------------------------------

@@ -4576,9 +4576,35 @@ fn build_and_print_verdict(
                         let cam_sync = cam_syncs.get(camera).expect(
                             "#714: every CAMERA_UNDER_TEST_NODES entry populated in pass 1 above",
                         );
-                        // #855 GREEN TODO: an operator-acknowledged offline box (offline_ack_map)
-                        // must be excluded here instead of judged -- not implemented yet (RED).
-                        let _ = &offline_ack_map;
+                        // #855: an operator-acknowledged offline box is reported EXCLUDED here,
+                        // never judged — it never gets a chance to fail the gate on zero samples
+                        // that were never going to exist. Skips derivation/gate-pass entirely and
+                        // is NEVER folded into `av_all_pass` (below), so it can neither pass nor
+                        // fail the gate, only be visibly skipped. A box NOT in offline_ack_map
+                        // falls through to the unchanged fail-closed path below.
+                        if let Some(reason) = offline_ack_map.get(camera) {
+                            println!(
+                                "  {camera}: EXCLUDED — operator-acknowledged offline ({reason}) \
+                                 [gate SKIPPED, #855]"
+                            );
+                            av_json.insert(
+                                camera.to_string(),
+                                serde_json::json!({
+                                    "node": camera,
+                                    "excluded": true,
+                                    "exclude_reason": reason,
+                                    "verdict": "excluded",
+                                    "gate_pass": serde_json::Value::Null,
+                                    "windows": cam_sync.windows,
+                                    "candidates": cam_sync.candidates,
+                                    "cluster_samples": cam_sync.cluster_samples,
+                                    "av_offset_ms": serde_json::Value::Null,
+                                    "mad_ms": serde_json::Value::Null,
+                                    "effective_offset_ms": serde_json::Value::Null,
+                                }),
+                            );
+                            continue;
+                        }
                         // #714: for a non-cam2 camera that came back Unknown (per-window sample
                         // starvation — see av_window::derive_camera_av_sync's own doc comment for
                         // why this is sound, not fabricated), attempt the derived estimate from
