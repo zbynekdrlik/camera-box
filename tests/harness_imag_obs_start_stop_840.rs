@@ -26,25 +26,41 @@ const STOP: &str = "scripts/imag-obs-stop.sh";
 // imag-obs-start.sh — the CPU pin must be DERIVED (env-overridable), never a bare hardcoded
 // literal, so the boot path (which knows the box's own DERIVED isolated-CPU set, #816) and a bare
 // manual invocation (no env set) both work correctly.
+//
+// #841 SUPERSEDES this test's ORIGINAL assertion: #840 shipped `taskset -c
+// "${IMAG_ISOLATED_CPUS:-2-11}"`, treating "2-11" as a "sane default" for a bare manual
+// invocation. That default is itself the INCUMBENT (16-thread) box's hand-tuned range and is
+// WRONG on the 12-thread replacement notebook (10.77.9.187) — a manual "Spustit OBS" invocation
+// there (no env set) pinned the live `obs` process to `Cpus_allowed_list: 2-11`, overlapping the
+// kernel's own `irqaffinity=...,8,9,10,11` IRQ cores and defeating the isolation (live-confirmed).
+// A hardcoded literal from ONE box is never a "sane default" for a DIFFERENT box's topology — the
+// #816 hardware-agnostic-derivation rule applies to the wrapper's fallback too, not just the
+// kernel cmdline. The fallback is now a PERSISTED file (`/etc/imag-isolated-cpus.conf`) that
+// setup-imag.sh writes from the SAME `imag_cpu_isolation_plan` derivation already used for grub —
+// see `tests/harness_imag_intel_display_841.rs` for the full #841 contract.
 // ================================================================================================
 
-/// The launch line must read `IMAG_ISOLATED_CPUS` with a fallback default — never a bare
-/// `taskset -c 2-11` — so the openbox autostart (which DOES know the box's derived isolation
-/// plan, #816) can pass it through, while a manual "Spustit OBS" menu invocation (no env set)
-/// still gets a sane default.
+/// The launch line must read `IMAG_ISOLATED_CPUS`, falling back to the PERSISTED derived config
+/// file (never a bare hardcoded literal) — so the boot autostart (which passes
+/// `IMAG_ISOLATED_CPUS` directly, #840) and a bare manual invocation (no env set, reads
+/// `/etc/imag-isolated-cpus.conf`, #841) both use the SAME box-derived isolated-CPU set.
 #[test]
-fn imag_obs_start_taskset_pin_is_env_overridable_with_a_fallback_840() {
+fn imag_obs_start_taskset_pin_is_env_overridable_no_hardcoded_fallback_841() {
     let body = read(START);
     assert!(
-        body.contains(r#"taskset -c "${IMAG_ISOLATED_CPUS:-2-11}""#),
-        "{START} must launch OBS via `taskset -c \"${{IMAG_ISOLATED_CPUS:-2-11}}\"` -- a bare \
-         hardcoded `taskset -c 2-11` cannot be pinned to a DIFFERENT box's derived isolated-CPU \
-         set (#816) when invoked from the boot autostart (#840)"
+        body.contains("IMAG_ISOLATED_CPUS"),
+        "{START} must still read IMAG_ISOLATED_CPUS from the environment when the boot autostart \
+         sets it (#840)"
     );
     assert!(
-        !body.contains("taskset -c 2-11 obs"),
-        "{START}: the OLD bare-literal taskset invocation must be gone -- it is now only the \
-         FALLBACK default inside the env-overridable form above"
+        !body.contains("2-11"),
+        "{START}: the OLD box's hardcoded \"2-11\" literal must be completely gone — including as \
+         a \"fallback default\", which #841 proved is wrong on a different box's topology"
+    );
+    assert!(
+        body.contains("/etc/imag-isolated-cpus.conf"),
+        "{START}: a manual invocation with no env set must fall back to the PERSISTED derived \
+         config file (#841), not a second hardcoded literal"
     );
 }
 
