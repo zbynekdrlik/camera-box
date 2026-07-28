@@ -95,16 +95,6 @@ fn write_dante_journal(name: &str, lines: &str) -> PathBuf {
     path
 }
 
-/// Write `json` to a temp file and return its path (kept alive by the returned tempdir-like).
-fn write_status(name: &str, json: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("dante-gate-test-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join(format!("{name}.json"));
-    let mut f = std::fs::File::create(&path).unwrap();
-    f.write_all(json.as_bytes()).unwrap();
-    path
-}
-
 #[test]
 fn node_verdict_passes_only_when_both_ntp_and_ptp_pass() {
     // OK iff offset rc 0 AND ptp rc 0. A DRIFT/DEGRADED (rc 2) on EITHER => BAD (hard failure
@@ -132,71 +122,45 @@ fn node_verdict_passes_only_when_both_ntp_and_ptp_pass() {
     }
 }
 
-#[test]
-fn gate_passes_when_a_windows_node_is_ntp_and_ptp_locked() {
-    // A real locked strih status file (NTP 154us within bound + is_locked NANO) -> GATE PASS (0).
-    let locked = "{\"gm_source_ip\":\"10.77.9.184\",\"is_locked\":true,\"ntp_offset_us\":154,\
-                  \"mode\":\"NANO\",\"ntp_failed\":false}";
-    let p = write_status("strih_ok", locked);
-    let (code, stdout, _e) = run_gate(&[
-        "--linux",
-        "",
-        "--win-status",
-        &format!("strih={}", p.display()),
-    ]);
-    assert_eq!(code, 0, "locked+synced node must PASS: {stdout}");
-    assert!(stdout.contains("GATE PASS"), "stdout: {stdout}");
-}
+// ---------------------------------------------------------------------------------------------
+// #835 — the `--win-status NAME=FILE` file-relay path (the Windows-node status-pipe JSON a
+// human/agent pre-fetched via the win-* MCP) is REMOVED outright, not guarded. It had ZERO live
+// callers left in this repo (recording-e2e.sh has passed only --win-http since #648) and was
+// deliberately AGE-BLIND (no updated_ts/mtime check — the exact "load a stale clock reading"
+// hazard a stale runbook could walk an operator into, #598/#835). The --win-http path already
+// covers the identical two Windows nodes with a strictly better mechanism (no MCP, no pre-fetch,
+// DOES grade freshness) — the four tests this block replaces
+// (gate_passes_when_a_windows_node_is_ntp_and_ptp_locked / gate_fails_fast_when_a_node_is_ptp_
+// degraded / gate_fails_when_a_node_exceeds_the_offset_bound /
+// gate_incomplete_when_a_windows_status_file_is_missing) had their coverage duplicated 1:1 by
+// gate_passes_a_win_http_node_that_is_fresh_locked_and_in_bound /
+// gate_fails_when_a_win_http_node_is_stale / gate_fails_when_a_win_http_node_updated_ts_field_is_
+// absent / gate_fails_when_a_win_http_node_is_unreachable below, so nothing goes untested.
+// ---------------------------------------------------------------------------------------------
 
 #[test]
-fn gate_fails_fast_when_a_node_is_ptp_degraded() {
-    // is_locked=false (NTP-only sawtooth) must FAIL the gate with code 20, even though NTP is OK.
-    let degraded = "{\"is_locked\":false,\"mode\":\"NTP\",\"ntp_offset_us\":154}";
-    let p = write_status("stream_degraded", degraded);
-    let (code, _o, stderr) = run_gate(&[
-        "--linux",
-        "",
-        "--win-status",
-        &format!("stream={}", p.display()),
-    ]);
-    assert_eq!(
-        code, 20,
-        "PTP-degraded node must FAIL (20). stderr: {stderr}"
-    );
-    assert!(stderr.contains("GATE FAILED"), "stderr: {stderr}");
-}
-
-#[test]
-fn gate_fails_when_a_node_exceeds_the_offset_bound() {
-    // is_locked NANO but NTP offset 50 ms >> 2 ms bound -> DRIFT -> FAIL (20).
-    let drifted = "{\"is_locked\":true,\"mode\":\"NANO\",\"ntp_offset_us\":50000}";
-    let p = write_status("strih_drift", drifted);
-    let (code, _o, stderr) = run_gate(&[
-        "--linux",
-        "",
-        "--win-status",
-        &format!("strih={}", p.display()),
-    ]);
-    assert_eq!(
-        code, 20,
-        "NTP-drifted node must FAIL (20). stderr: {stderr}"
+fn help_no_longer_documents_win_status_835() {
+    let (code, stdout, _e) = run_gate(&["--help"]);
+    assert_eq!(code, 0, "--help must exit 0");
+    assert!(
+        !stdout.contains("--win-status"),
+        "the removed file-relay flag must no longer appear in --help: {stdout}"
     );
 }
 
 #[test]
-fn gate_incomplete_when_a_windows_status_file_is_missing() {
-    // No status file for a Windows node -> UNKNOWN -> exit 11 (incomplete, NOT a silent pass).
-    let (code, _o, stderr) = run_gate(&[
-        "--linux",
-        "",
-        "--win-status",
-        "stream=/tmp/definitely-not-a-real-dante-status.json",
-    ]);
+fn win_status_flag_is_rejected_as_an_unknown_option_835() {
+    // Passing the removed flag must fail the SAME way any other unrecognized flag does (usage
+    // error, exit 1) -- never silently accepted, never treated as a node with no data.
+    let (code, _o, stderr) = run_gate(&["--linux", "", "--win-status", "stream=/tmp/x.json"]);
     assert_eq!(
-        code, 11,
-        "missing status -> INCOMPLETE (11). stderr: {stderr}"
+        code, 1,
+        "--win-status must be an unrecognized option now. stderr: {stderr}"
     );
-    assert!(stderr.contains("INCOMPLETE"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("unknown option"),
+        "stderr should name it an unknown option: {stderr}"
+    );
 }
 
 #[test]
