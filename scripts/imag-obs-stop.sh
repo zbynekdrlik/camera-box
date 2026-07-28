@@ -7,6 +7,14 @@
 # saves the CURRENT program scene to ~/.config/imag-last-program BEFORE terminating OBS;
 # imag_scenes.py --bootstrap restores it on the next start.
 #
+# #840: SIGTERM never runs OBS's own clean-shutdown save path (live-verified: with both
+# projectors open, a SIGTERM-only stop followed by re-reading the scene collection JSON showed
+# `saved_projectors: []` every time) — OBS only persists `saved_projectors` and
+# `DockState`/`geometry` (in global.ini) on a real Qt application exit. This script now attempts
+# a GRACEFUL window close first (`wmctrl -c`, the same EWMH `_NET_CLOSE_WINDOW` request a window
+# manager's own close button sends, which OBS handles as `Controls -> Exit`), and only falls back
+# to the pre-existing SIGTERM/SIGKILL ladder if OBS does not exit on its own within budget.
+#
 # Use this for EVERY deliberate OBS stop (deploys, recovery, operator menu) — never bare pkill.
 set -euo pipefail
 
@@ -33,9 +41,26 @@ PY
     else
         echo "WARN: could not read program scene (WS down?) — keeping previous state file"
     fi
+    # #840: try a GRACEFUL window close FIRST -- this is what makes OBS actually run its own
+    # clean-shutdown save path (saved_projectors, DockState/geometry). "OBS Studio" is a stable
+    # prefix of the MAIN window's title only (live-verified `wmctrl -l`:
+    # "OBS Studio 32.1.2 - newlevel.media build ... - Profile: imag-60fps - Scenes: Untitled");
+    # the two Projector windows are titled "Projector - Program"/"Projector - Multiview" and never
+    # match this substring, so this can never accidentally close a projector instead.
+    if command -v wmctrl >/dev/null 2>&1; then
+        DISPLAY="${DISPLAY:-:0}" wmctrl -c "OBS Studio" 2>/dev/null || true
+        for _ in $(seq 1 15); do
+            pgrep -x obs >/dev/null || { echo "obs closed cleanly (wmctrl -c)"; exit 0; }
+            sleep 1
+        done
+        echo "WARN: obs did not exit within 15s of the graceful window close -- escalating"
+    else
+        echo "WARN: wmctrl not installed -- cannot request a graceful window close, escalating straight to SIGTERM"
+    fi
+
     pkill -TERM -x obs || true
     for _ in $(seq 1 20); do
-        pgrep -x obs >/dev/null || { echo "obs stopped"; exit 0; }
+        pgrep -x obs >/dev/null || { echo "obs stopped (SIGTERM)"; exit 0; }
         sleep 1
     done
     echo "WARN: obs ignored SIGTERM for 20s — force-killing"

@@ -35,9 +35,10 @@ set -euo pipefail
 #   - scripts/imag-host.sh     imag_host_resolve() -- the #832 single source of truth for IMAG_IP
 #   - scripts/imag_scenes.py (bare)         scene + Multiview membership (idempotent self-heal,
 #                              the SAME mechanism the openbox autostart runs every boot)
-#   - scripts/obs_phase2.py open-projectors + wmctrl window count -- the EXACT mechanism
-#                              recording-e2e.sh's own "[0/8] imag-nb Multiview + Program
-#                              projectors" preflight already proves live (#758/#756)
+#   - imag-obs-stop.sh + imag-obs-start.sh + wmctrl window count -- restarts OBS through the
+#                              box's OWN operator scripts and re-counts, proving PERSISTENCE
+#                              across a real restart (#840) rather than opening the projectors
+#                              itself (the #840 self-establishing bug this replaced)
 #
 # Usage:
 #   scripts/verify-imag.sh
@@ -79,7 +80,9 @@ set -euo pipefail
 #   (m) dantesync is the SOLE timesync authority (no systemd-timesyncd/chrony/ntp/linuxptp)
 #   (n) scenes present (Cam 1-N, N = imag_scenes.py's own IMAG_SCENE_CAM_COUNT, default 7) and
 #       Multiview populated (MV Cam 1-N)
-#   (o) both projectors open -- exactly 1 Program (HDMI) + 1 Multiview (panel), no stray windows
+#   (o) both projectors PRESENT (never opened by this gate) AND PERSIST across a real OBS
+#       restart via imag-obs-stop.sh + imag-obs-start.sh -- exactly 1 Program (HDMI) + 1
+#       Multiview (panel), no stray windows, both before AND after the restart (#840)
 #   (p) operator scaffolding present (#791): /usr/local/bin/imag-obs-start.sh, wmctrl, the
 #       right-click menu (~/.config/openbox/menu.xml), the wall-fallback image, the watchdog
 #       installed-but-disabled (#756)
@@ -812,15 +815,16 @@ else
   fail "operator parity mismatch (rc=$rc): $(printf '%s' "$PARITY_OUT" | tr '\n' ' ')"
 fi
 
-# (o) both projectors open -- exactly 1 Program + 1 Multiview (#756/#758) -----------------------
-rc=0
-PROJ_OUT="$(python3 "$HERE/obs_phase2.py" open-projectors --host "$IMAG_IP" 2>&1)" || rc=$?
-if [ "$rc" -ne 0 ]; then
-  fail "could not open the Program/Multiview projectors (rc=$rc): $(printf '%s' "$PROJ_OUT" | tr '\n' ' ')"
-else
-  ok "projectors opened/confirmed: $(printf '%s' "$PROJ_OUT" | tr '\n' ' ')"
-fi
-
+# (o) both projectors PRESENT (never self-established) + PERSIST across a real restart (#756/#840)
+# ---------------------------------------------------------------------------------------------
+# #840: this check used to call obs_phase2.py's projector-OPEN action itself, then count via wmctrl --
+# establishing the very condition it then asserted, so it would pass even on a box that comes up
+# with ZERO projectors every single boot (the exact live symptom this ticket fixes). It now (1)
+# reads the CURRENT state with no side effect and FAILS if it isn't already exactly 1+1, and (2)
+# restarts OBS through the box's OWN operator scripts (imag-obs-stop.sh + imag-obs-start.sh -- the
+# SAME path a real reboot / the operator's manual "Spustit OBS" menu uses) and re-counts, to
+# actually prove the projectors PERSIST across a real restart rather than merely CAN be opened
+# once from dev1.
 rc=0
 WMCTRL_PATH="$(ssh_box "command -v wmctrl 2>/dev/null")" || rc=$?
 if [ "$rc" -ne 0 ] || [ -z "$WMCTRL_PATH" ]; then
@@ -829,9 +833,23 @@ else
   MV_COUNT="$(ssh_box "DISPLAY=:0 wmctrl -l 2>/dev/null | grep -c 'Projector - Multiview' || true")"
   PGM_COUNT="$(ssh_box "DISPLAY=:0 wmctrl -l 2>/dev/null | grep -c 'Projector - Program' || true")"
   if imag_projector_counts_ok "${MV_COUNT:-0}" "${PGM_COUNT:-0}"; then
-    ok "exactly 1 Multiview + 1 Program projector window (no stray accumulation, #756)"
+    ok "exactly 1 Multiview + 1 Program projector window BEFORE restart (measured from the box's OWN current state, never opened by this gate, #840)"
   else
-    fail "projector count is Multiview=${MV_COUNT:-0} Program=${PGM_COUNT:-0}, expected exactly 1+1 (#756)"
+    fail "projector count is Multiview=${MV_COUNT:-0} Program=${PGM_COUNT:-0}, expected exactly 1+1 -- the box's OWN startup path did not establish them (#756/#840)"
+  fi
+
+  rc=0
+  RESTART_OUT="$(ssh_box "/usr/local/bin/imag-obs-stop.sh && /usr/local/bin/imag-obs-start.sh" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    fail "OBS restart via imag-obs-stop.sh + imag-obs-start.sh failed (rc=$rc): $(printf '%s' "$RESTART_OUT" | tr '\n' ' ')"
+  else
+    MV_COUNT2="$(ssh_box "DISPLAY=:0 wmctrl -l 2>/dev/null | grep -c 'Projector - Multiview' || true")"
+    PGM_COUNT2="$(ssh_box "DISPLAY=:0 wmctrl -l 2>/dev/null | grep -c 'Projector - Program' || true")"
+    if imag_projector_counts_ok "${MV_COUNT2:-0}" "${PGM_COUNT2:-0}"; then
+      ok "projectors PERSIST across a real OBS restart: exactly 1 Multiview + 1 Program after imag-obs-stop.sh + imag-obs-start.sh (#840)"
+    else
+      fail "projectors did NOT persist across a real OBS restart -- Multiview=${MV_COUNT2:-0} Program=${PGM_COUNT2:-0} after restart (#840)"
+    fi
   fi
 fi
 

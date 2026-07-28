@@ -3,8 +3,14 @@
 #
 # WHY: the imag-obs-watchdog used to be the only thing that (re)started OBS after a manual quit,
 # and it fought the operator (auto-relaunch loops + false "crashed" alarms, 2026-07-16) so it is
-# stopped. This script is the OPERATOR path: openbox root menu "Spustit OBS" runs it; boot uses
-# the openbox autostart (which launches obs + seed --bootstrap itself, independent of this file).
+# stopped. This script is the OPERATOR path: openbox root menu "Spustit OBS" runs it.
+#
+# #840: boot now runs THROUGH this SAME script too (IMAG_ISOLATED_CPUS exported by the openbox
+# autostart, see setup-imag.sh step 16) -- it used to launch obs + seed independently inline,
+# with its own fragile 30s WebSocket wait (no obs-process-liveness check, failures silently
+# swallowed by `|| true`), which is exactly what let the boot path silently drop the projector
+# self-heal while this script's more robust 90s/liveness-checked wait kept working fine manually.
+# One launch mechanism now, not two.
 #
 # Idempotent: OBS already running -> prints a note and exits 0 (never a second instance).
 # Full start = the watchdog tier-a recovery semantics: clear crash sentinels -> launch obs ->
@@ -26,7 +32,12 @@ if pgrep -x obs >/dev/null; then
 fi
 
 rm -rf "$HOME/.config/obs-studio/.sentinel"/* 2>/dev/null || true
-taskset -c 2-11 obs --disable-shutdown-check &
+# #840: the CPU pin is env-overridable (falls back to the box's old known-good "2-11" default for
+# a bare manual invocation with no env set) so the boot-time openbox autostart -- which DOES know
+# this box's own DERIVED isolated-CPU set (#816) -- can pass it through via IMAG_ISOLATED_CPUS,
+# while the operator's manual "Spustit OBS" menu invocation (no env set) still gets a sane
+# default. This is what lets the boot path and the manual path share ONE launch script.
+taskset -c "${IMAG_ISOLATED_CPUS:-2-11}" obs --disable-shutdown-check &
 echo "obs launched (pid $!)"
 
 deadline=$((SECONDS + 90))

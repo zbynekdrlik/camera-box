@@ -1393,13 +1393,33 @@ rmdir "$USER_HOME/.config/autostart" 2>/dev/null || true
 apt-get update -qq
 DEBIAN_FRONTEND=noninteractive apt-get install -y python3-websocket >/dev/null \
     || fail "python3-websocket install failed — imag_scenes.py needs it for the boot-time self-heal (#522)"
-PYBIN="/usr/bin/python3"
 SCN="/usr/local/bin/imag_scenes.py"
 gh api -H "Accept: application/vnd.github.raw" \
     "repos/${GENLOCK_REPO}/contents/scripts/imag_scenes.py?ref=dev" \
     > "$SCN" \
     || fail "could not fetch scripts/imag_scenes.py from ${GENLOCK_REPO} (dev) via gh api"
 chmod 755 "$SCN"
+
+# #840: install the operator start/stop scripts onto the box too -- the openbox autostart below
+# now launches OBS THROUGH imag-obs-start.sh (the SAME path the operator's right-click "Spustit
+# OBS" menu entry uses) instead of a separate inline launch+seed, so a boot-durable box HARD
+# DEPENDS on this file actually existing. Neither script was ever installed by this provisioner
+# before #840 (both existed on THIS box only because a prior session hand-placed them) -- fetched
+# here with the SAME gh-api pattern as imag_scenes.py above so a from-scratch reprovision (a
+# future 3rd notebook) is never missing them.
+OBS_START_SH="/usr/local/bin/imag-obs-start.sh"
+gh api -H "Accept: application/vnd.github.raw" \
+    "repos/${GENLOCK_REPO}/contents/scripts/imag-obs-start.sh?ref=dev" \
+    > "$OBS_START_SH" \
+    || fail "could not fetch scripts/imag-obs-start.sh from ${GENLOCK_REPO} (dev) via gh api"
+chmod 755 "$OBS_START_SH"
+
+OBS_STOP_SH="/usr/local/bin/imag-obs-stop.sh"
+gh api -H "Accept: application/vnd.github.raw" \
+    "repos/${GENLOCK_REPO}/contents/scripts/imag-obs-stop.sh?ref=dev" \
+    > "$OBS_STOP_SH" \
+    || fail "could not fetch scripts/imag-obs-stop.sh from ${GENLOCK_REPO} (dev) via gh api"
+chmod 755 "$OBS_STOP_SH"
 
 APP_DESKTOP=$(ls /usr/share/applications/com.obsproject.Studio.desktop 2>/dev/null || true)
 mkdir -p "$USER_HOME/Desktop"
@@ -1417,10 +1437,11 @@ chown -R "$DESKTOP_USER:$DESKTOP_USER" "$USER_HOME/Desktop"
 # The openbox autostart script IS the boot-durable authority (lightdm+openbox reads this file on
 # every session start, unlike XDG .config/autostart/). Written with a QUOTED heredoc so every
 # $VAR inside stays LITERAL text in the generated file -- $PANEL/$PROJ/$i are meant to be
-# evaluated by openbox AT BOOT TIME, never expanded here at provisioning time. The __PYBIN__ /
-# __SCN__ placeholders are substituted with the actual resolved paths right after, via sed --
-# a quoted heredoc cannot both keep $PANEL/$PROJ literal AND interpolate $PYBIN/$SCN in the same
-# pass.
+# evaluated by openbox AT BOOT TIME, never expanded here at provisioning time. The __ISOLCPUS__
+# placeholder (#840: now just an exported env var for imag-obs-start.sh, no longer a direct
+# taskset argument) is substituted with the DERIVED isolated-CPU set right after, via sed -- a
+# quoted heredoc cannot both keep $PANEL/$PROJ literal AND interpolate $IMAG_ISOLATED_CPUS in the
+# same pass.
 mkdir -p "$USER_HOME/.config/openbox"
 cat > "$USER_HOME/.config/openbox/autostart" <<'AUTOSTART_EOF'
 #!/bin/bash
@@ -1453,15 +1474,18 @@ rm -rf "$HOME/.config/obs-studio/.sentinel"/* 2>/dev/null || true
 for f in "$HOME"/.config/obs-studio/basic/scenes/*.json; do
   [ -f "$f" ] && python3 -c "import json,sys; p=sys.argv[1]; d=json.load(open(p)); d['saved_projectors']=[]; json.dump(d,open(p,'w'))" "$f" 2>/dev/null || true
 done
-taskset -c __ISOLCPUS__ obs &
-# wait for OBS WebSocket :4455, then seed scenes/#507 membership + open both projectors (self-heal every boot)
-for i in $(seq 1 30); do (exec 3<>/dev/tcp/127.0.0.1/4455) 2>/dev/null && { exec 3>&-; break; }; sleep 1; done
-sleep 2
-PYBIN="__PYBIN__"; SCN="__SCN__"
-"$PYBIN" "$SCN" --host 127.0.0.1 >/tmp/imag-seed.log 2>&1 || true
-"$PYBIN" "$SCN" --host 127.0.0.1 --projector >>/tmp/imag-seed.log 2>&1 || true
+# #840: boot now runs OBS through the SAME operator path as the "Spustit OBS" right-click menu
+# entry (imag-obs-start.sh) instead of a separate inline launch+wait+seed -- a second launch
+# mechanism (a bare 30s WebSocket wait with NO obs-process-liveness check, its failure swallowed
+# by `|| true`) is what let the boot path silently drop the projector self-heal while the manual
+# path kept working: a real capture on 10.77.9.187 showed imag_scenes.py failing with
+# ConnectionRefusedError at boot because the OLD inline wait loop timed out before OBS's
+# WebSocket came up. imag-obs-start.sh's own 90s wait DOES check obs process liveness while
+# polling, and is the SAME path exercised by the operator menu -- one launch mechanism, not two.
+export IMAG_ISOLATED_CPUS="__ISOLCPUS__"
+/usr/local/bin/imag-obs-start.sh >>/tmp/imag-seed.log 2>&1 || true
 AUTOSTART_EOF
-sed -i "s#__PYBIN__#${PYBIN}#; s#__SCN__#${SCN}#; s#__ISOLCPUS__#${IMAG_ISOLATED_CPUS}#" "$USER_HOME/.config/openbox/autostart"
+sed -i "s#__ISOLCPUS__#${IMAG_ISOLATED_CPUS}#" "$USER_HOME/.config/openbox/autostart"
 chmod +x "$USER_HOME/.config/openbox/autostart"
 chown "$DESKTOP_USER:$DESKTOP_USER" "$USER_HOME/.config/openbox/autostart"
 

@@ -1971,20 +1971,49 @@ def open_projectors(a):
     (propagates as a non-zero exit) — the caller's preflight step must never silently continue
     with a projector that failed to open.
 
-    Monitor mapping (imag-nb, #758): monitorIndex 0 = DP-0 -> Multiview; monitorIndex 1 = HDMI-0
-    -> Program."""
+    #840: monitor indices are DERIVED from a live GetMonitorList call, keyed on each monitor's
+    connector TYPE (HDMI = the external Program projector; anything else = the internal panel
+    driving Multiview) — NEVER hardcoded. The old `monitorIndex 0 = DP-0 -> Multiview /
+    monitorIndex 1 = HDMI-0 -> Program` mapping only worked "by luck" because the index ORDER
+    happened to match the incumbent box's topology; the replacement notebook enumerates
+    eDP-1/HDMI-1 instead of DP-0/HDMI-0, and a box that ever enumerates HDMI as index 0 would have
+    silently sent Program to the panel and Multiview to the projector. Mirrors
+    imag_scenes.py::projector()'s existing, already-correct selection rule (#522/#488) — the two
+    scripts have no shared module today (a separate #791-class scaffolding gap, out of THIS
+    ticket's scope), so the small selection logic is duplicated here rather than imported. Unlike
+    imag_scenes.py::projector() (an operator-convenience script that only WARNs on a missing
+    panel), this function is a preflight/verify GATE (recording-e2e.sh's `[0/8]`,
+    verify-imag.sh) — it FAILS LOUD (raises) when EITHER expected connector is absent, never
+    silently continues."""
     ws = _conn(a.host, a.password)
     try:
+        mons = _rpc(ws, "GetMonitorList").get("monitors", [])
+        panel = [m for m in mons if "HDMI" not in m.get("monitorName", "")]
+        hdmi = [m for m in mons if "HDMI" in m.get("monitorName", "")]
+
+        if not panel:
+            raise RuntimeError(
+                "no panel (non-HDMI) monitor detected for the Multiview projector -- "
+                f"(monitors: {[m.get('monitorName') for m in mons]})"
+            )
         _rpc(ws, "OpenVideoMixProjector", {
             "videoMixType": "OBS_WEBSOCKET_VIDEO_MIX_TYPE_MULTIVIEW",
-            "monitorIndex": 0,
+            "monitorIndex": panel[0]["monitorIndex"],
         })
-        print("opened/confirmed Multiview projector on monitorIndex 0 (DP-0)")
+        print(f"opened/confirmed Multiview projector on monitorIndex {panel[0]['monitorIndex']} "
+              f"({panel[0].get('monitorName')}) [panel]")
+
+        if not hdmi:
+            raise RuntimeError(
+                "no HDMI projector monitor detected -- connect the HDMI monitor first "
+                f"(monitors: {[m.get('monitorName') for m in mons]})"
+            )
         _rpc(ws, "OpenVideoMixProjector", {
             "videoMixType": "OBS_WEBSOCKET_VIDEO_MIX_TYPE_PROGRAM",
-            "monitorIndex": 1,
+            "monitorIndex": hdmi[0]["monitorIndex"],
         })
-        print("opened/confirmed Program projector on monitorIndex 1 (HDMI-0)")
+        print(f"opened/confirmed Program projector on monitorIndex {hdmi[0]['monitorIndex']} "
+              f"({hdmi[0].get('monitorName')}) [HDMI]")
     finally:
         ws.close()
 
