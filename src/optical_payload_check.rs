@@ -15,12 +15,7 @@
 /// node burns. `run_ids` may be empty or contain duplicates; both are handled correctly (empty ⇒
 /// `false`, since there is nothing non-burn to find).
 pub fn has_non_burn_payload(run_ids: impl IntoIterator<Item = u32>, burn_run_ids: &[u32]) -> bool {
-    // #853 RED (temporary, pre-fix): reproduces the ACTUAL pre-fix `extract_frames_png` bug —
-    // "did ANYTHING decode" — true on every frame carrying only node burns (always the case on a
-    // healthy recording) and therefore proves nothing about a genuine non-burn/optical read. The
-    // next commit replaces this with the real burn-set-aware filter.
-    let _ = burn_run_ids;
-    run_ids.into_iter().next().is_some()
+    run_ids.into_iter().any(|id| !burn_run_ids.contains(&id))
 }
 
 #[cfg(test)]
@@ -50,7 +45,10 @@ mod tests {
     fn a_genuine_optical_run_id_is_a_non_burn_payload() {
         // The cam2 Vernier's run_id is the harness's per-run RUN_ID (e.g. 1867252327 on the real
         // run this bug was found on) — never one of the fixed node-burn ids.
-        assert!(has_non_burn_payload([911_002, 911_004, 1_867_252_327], &BURNS));
+        assert!(has_non_burn_payload(
+            [911_002, 911_004, 1_867_252_327],
+            &BURNS
+        ));
     }
 
     #[test]

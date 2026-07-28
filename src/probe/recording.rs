@@ -767,8 +767,17 @@ pub fn select_frames_to_extract(flagged: &[u64], max_extract: usize) -> (Vec<u64
 /// memory at scale) and, for each selected `frame_index`, writes its
 /// native-resolution luma as a PNG into `out_dir` (`frame-<index>.png`). For
 /// frames in `undecodable` it also re-decodes the extracted pixels: a CRC-valid
-/// QR there means a SHARP code was wrongly counted undecodable — a decoder
-/// regression, flagged on the returned [`ExtractedFrame`].
+/// NON-BURN (optical) QR there means a SHARP optical read was wrongly counted
+/// undecodable — a decoder regression, flagged on the returned [`ExtractedFrame`].
+///
+/// #853: this self-check used to accept ANY CRC-valid QR (node burns included) as "sharp" —
+/// guaranteed true on every fleet-wide undecodable frame purely from the always-crisp,
+/// always-present node burns (proven on run 1867252327: all 5879 `tick == None` stream frames
+/// carried exactly the node burns and ZERO optical payload), so it never actually proved anything
+/// about the cam2 optical Vernier `undecodable` measures ([`RecordingFrame::tick`] excludes node
+/// burns by design — see that field's own doc). [`crate::optical_payload_check::
+/// has_non_burn_payload`] mirrors `tick`'s exact same burn-exclusion filter, so the self-check and
+/// the real count can never again disagree about what "found something" means.
 ///
 /// #166: the cap stops the extraction from writing thousands of PNGs (a big slice
 /// of the runtime); the number of flagged frames *dropped* by the cap is logged so
@@ -824,11 +833,17 @@ pub fn extract_frames_png(
         if want.contains(&idx) {
             let png_path = out_dir.join(format!("frame-{idx}.png"));
             // Re-decode BEFORE moving the luma into the PNG save, only for frames the
-            // verdict called undecodable: a CRC-valid payload here = sharp-but-flagged
-            // = decoder bug. Use the SAME robust decode the verdict used (#202) so the
-            // self-check matches the decoder actually in effect — not the weaker plain pass.
+            // verdict called undecodable: a CRC-valid NON-BURN payload here = sharp-but-
+            // flagged = decoder bug. Use the SAME robust decode the verdict used (#202) so
+            // the self-check matches the decoder actually in effect — not the weaker plain
+            // pass. #853: filtered to non-burn ids — see this function's own doc for why
+            // "any QR decoded" (node burns included) is not evidence of anything.
             let sharp_qr_but_flagged_undecodable = if undecodable.contains(&idx) {
-                !decode_qr_luma_all_robust(luma.clone()).is_empty()
+                let recheck = decode_qr_luma_all_robust(luma.clone());
+                crate::optical_payload_check::has_non_burn_payload(
+                    recheck.iter().map(|p| p.run_id),
+                    &NODE_BURN_RUN_IDS,
+                )
             } else {
                 false
             };
@@ -1048,6 +1063,51 @@ mod tests {
             Some(201),
             "tick must be the optical Vernier tick (201), NOT the burn id 9999: {:?}",
             f.payloads
+        );
+    }
+
+    #[test]
+    fn extract_self_check_is_not_fooled_by_burn_only_payloads_853() {
+        // #853 regression: `extract_frames_png`'s `sharp_qr_but_flagged_undecodable` self-check
+        // re-decodes an "undecodable" frame's pixels with `decode_qr_luma_all_robust` and used to
+        // ask "did ANYTHING decode" — which a frame carrying ONLY node burns (no optical Vernier
+        // at all, the exact real-world shape proven on run 1867252327: all 5879 tick==None stream
+        // frames had exactly this shape) always answers yes, regardless of whether the cam2
+        // optical read ever succeeded. Build exactly that frame — a lone cam1 node burn painted,
+        // NO optical dual-QR anywhere — and confirm the FIXED self-check (has_non_burn_payload)
+        // correctly says NO, while the raw robust decode is (as expected) non-empty.
+        use super::NODE_BURN_RUN_IDS as N;
+        use crate::probe::qr::{decode_qr_luma_all_robust, render_qr_bgra};
+        let (cw, ch) = (960u32, 540u32);
+        let burn = Payload {
+            run_id: N[0], // a cam1 node burn — always crisp, always decodable
+            frame_id: 42,
+            gen_ts_ns: 3,
+        };
+        let mut luma = GrayImage::new(cw, ch); // all-black canvas: NO optical Vernier painted
+        let burn_bgra = render_qr_bgra(&burn, 200, 200, 160);
+        let burn_luma = bgra_to_luma(&burn_bgra, 200, 200, 200 * 4);
+        let (ox, oy) = (20u32, ch - 200 - 20);
+        for y in 0..200 {
+            for x in 0..200 {
+                luma.put_pixel(ox + x, oy + y, *burn_luma.get_pixel(x, y));
+            }
+        }
+
+        let recheck = decode_qr_luma_all_robust(luma);
+        // Sanity: the burn genuinely decoded (this is NOT a case where nothing was found at all —
+        // the pre-#853-fix bug and the real fleet-wide bug both depend on the burn decoding fine).
+        assert!(
+            recheck.iter().any(|p| p.run_id == N[0]),
+            "the node burn must decode: {recheck:?}"
+        );
+        // The FIXED self-check: a burn-only decode must NOT be reported as a genuine optical read.
+        assert!(
+            !crate::optical_payload_check::has_non_burn_payload(
+                recheck.iter().map(|p| p.run_id),
+                &N
+            ),
+            "burn-only payloads must not count as sharp_qr_but_flagged_undecodable: {recheck:?}"
         );
     }
 
