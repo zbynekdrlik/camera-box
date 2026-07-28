@@ -397,8 +397,27 @@ fn gate_passes_a_win_http_node_that_is_fresh_locked_and_in_bound() {
          \"is_locked\":true,\"ntp_offset_us\":0,\"mode\":\"NANO\",\"ntp_failed\":false}}"
     );
     let p = write_win_http_fixture("strih_http_ok", &fresh);
+    // #836: the gate now samples each node multiple times and requires a MINIMUM number of
+    // DISTINCT (by updated_ts) samples before it will grade at all. A STATIC single-value fixture
+    // never varies its updated_ts across repeated reads, so it can never satisfy the production
+    // default (min-distinct=3) -- that is deliberate (see
+    // gate_fails_a_win_http_node_with_too_few_distinct_samples_by_default below). This test is
+    // specifically about the ORIGINAL single-good-read concern (fresh+locked+in-bound), so it
+    // overrides --samples 1 --min-distinct 1 (one read is enough to grade) and --window-s 0
+    // (no real sampling delay needed for a single read).
     let (code, stdout, stderr) = run_gate_env(
-        &["--linux", "", "--win-http", "strih=10.77.9.202"],
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--samples",
+            "1",
+            "--min-distinct",
+            "1",
+            "--window-s",
+            "0",
+        ],
         &[("DANTESYNC_GATE_WIN_HTTP_STRIH", &p.display().to_string())],
     );
     assert_eq!(
@@ -415,8 +434,20 @@ fn gate_fails_when_a_win_http_node_is_stale() {
     // whenever this test actually runs) is always graded STALE against the real wall clock --
     // simulates the box's HTTP server serving a cached snapshot after dantesync itself died.
     let p = write_win_http_fixture("strih_http_stale", HTTP_STRIH_OK);
+    // #836: --samples 1 --window-s 0 keeps this test fast (no real sampling delay) -- the
+    // staleness check runs on the LAST gathered payload regardless of sample count, so a single
+    // read is sufficient to exercise it.
     let (code, stdout, stderr) = run_gate_env(
-        &["--linux", "", "--win-http", "strih=10.77.9.202"],
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--samples",
+            "1",
+            "--window-s",
+            "0",
+        ],
         &[("DANTESYNC_GATE_WIN_HTTP_STRIH", &p.display().to_string())],
     );
     assert_eq!(
@@ -451,8 +482,19 @@ fn gate_fails_when_a_win_http_node_updated_ts_field_is_absent() {
     // never silently graded on offset/PTP alone with no freshness proof at all.
     let no_ts = "{\"ntp_offset_us\":0,\"is_locked\":true,\"mode\":\"NANO\"}";
     let p = write_win_http_fixture("strih_http_no_ts", no_ts);
+    // #836: --samples 1 --window-s 0 keeps this test fast; the absent-updated_ts check runs on
+    // the LAST gathered payload regardless of sample count.
     let (code, stdout, stderr) = run_gate_env(
-        &["--linux", "", "--win-http", "strih=10.77.9.202"],
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--samples",
+            "1",
+            "--window-s",
+            "0",
+        ],
         &[("DANTESYNC_GATE_WIN_HTTP_STRIH", &p.display().to_string())],
     );
     assert_eq!(
@@ -532,8 +574,19 @@ fn gate_passes_a_throttled_linux_node_via_http_status_first() {
          \"is_locked\":true,\"ntp_offset_us\":150,\"mode\":\"NANO\",\"ntp_failed\":false}}"
     );
     let http_fixture = write_linux_http_fixture("cam1_throttled_http", &http_ok);
+    // #836: --samples 1 --min-distinct 1 --window-s 0 -- this test is about the HTTP-vs-journal
+    // precedence (#686), not multi-sampling; a single good read is sufficient to grade PASS.
     let (code, stdout, stderr) = run_gate_env(
-        &["--linux", "cam1=10.77.9.61"],
+        &[
+            "--linux",
+            "cam1=10.77.9.61",
+            "--samples",
+            "1",
+            "--min-distinct",
+            "1",
+            "--window-s",
+            "0",
+        ],
         &[
             (
                 "DANTESYNC_GATE_LINUX_JOURNAL_CAM1",
@@ -568,8 +621,17 @@ fn gate_fails_when_a_linux_node_http_payload_is_stale_even_if_its_journal_looks_
     let stale_http = "{\"gm_source_ip\":\"10.77.9.184\",\"settled\":true,\"updated_ts\":1783647854,\
                        \"is_locked\":true,\"ntp_offset_us\":0,\"mode\":\"NANO\",\"ntp_failed\":false}";
     let http_fixture = write_linux_http_fixture("cam1_http_stale", stale_http);
+    // #836: --samples 1 --window-s 0 keeps this test fast; staleness is graded on the LAST
+    // gathered payload regardless of sample count.
     let (code, stdout, stderr) = run_gate_env(
-        &["--linux", "cam1=10.77.9.61"],
+        &[
+            "--linux",
+            "cam1=10.77.9.61",
+            "--samples",
+            "1",
+            "--window-s",
+            "0",
+        ],
         &[
             (
                 "DANTESYNC_GATE_LINUX_JOURNAL_CAM1",
@@ -607,8 +669,17 @@ fn gate_fails_when_a_linux_node_http_payload_is_fresh_but_ptp_degraded() {
          \"is_locked\":false,\"ntp_offset_us\":150,\"mode\":\"NTP\",\"ntp_failed\":false}}"
     );
     let p = write_linux_http_fixture("cam1_http_degraded", &degraded);
+    // #836: --samples 1 --window-s 0 -- PTP-lock grading is independent of offset sampling and
+    // still reads from the LAST gathered payload, so a single read is sufficient here.
     let (code, stdout, stderr) = run_gate_env(
-        &["--linux", "cam1=10.77.9.61"],
+        &[
+            "--linux",
+            "cam1=10.77.9.61",
+            "--samples",
+            "1",
+            "--window-s",
+            "0",
+        ],
         &[("DANTESYNC_GATE_LINUX_HTTP_CAM1", &p.display().to_string())],
     );
     assert_eq!(
@@ -635,8 +706,21 @@ fn gate_fails_when_a_linux_node_http_payload_is_fresh_but_offset_drifted() {
          \"is_locked\":true,\"ntp_offset_us\":50000,\"mode\":\"NANO\",\"ntp_failed\":false}}"
     );
     let p = write_linux_http_fixture("cam1_http_drift", &drifted);
+    // #836: --samples 1 --min-distinct 1 --window-s 0 -- a single grossly out-of-bound read is
+    // sufficient to reach a drift verdict; without the override, a STATIC single-value fixture
+    // could never satisfy the production default min-distinct (3) and would grade INSUFFICIENT
+    // instead of DRIFT -- this test is specifically about the drift-detection wiring.
     let (code, stdout, stderr) = run_gate_env(
-        &["--linux", "cam1=10.77.9.61"],
+        &[
+            "--linux",
+            "cam1=10.77.9.61",
+            "--samples",
+            "1",
+            "--min-distinct",
+            "1",
+            "--window-s",
+            "0",
+        ],
         &[("DANTESYNC_GATE_LINUX_HTTP_CAM1", &p.display().to_string())],
     );
     assert_eq!(
@@ -716,4 +800,247 @@ fn gate_linux_journal_override_maps_a_hyphenated_node_name_to_a_valid_env_var() 
          stdout={stdout} stderr={stderr}"
     );
     assert!(stdout.contains("GATE PASS"), "stdout: {stdout}");
+}
+
+// ---------------------------------------------------------------------------------------------
+// #836 — a SINGLE pipe-json read is close to a coin flip on a noisy node (live data: 2/22 stream
+// box reads land inside the 2000us bound). The gate now samples each --win-http / Linux-HTTP-
+// first node MULTIPLE times over a short window and grades the MEDIAN (against the existing,
+// UNCHANGED bound) AND the SPREAD (a NEW stability check, #836 point 3) of the DISTINCT samples.
+// ---------------------------------------------------------------------------------------------
+
+/// Write an EXECUTABLE fixture script that returns a DIFFERENT response on each successive
+/// invocation -- unlike write_win_http_fixture/write_linux_http_fixture's static `cat` of one
+/// fixed file, this exercises gather_http_samples' ability to observe genuinely varying reads
+/// across N samples, entirely offline (no network, no real sleep needed since --window-s 0
+/// skips spacing). `responses` is the ordered list of raw JSON payloads to return, one per call;
+/// calls beyond the list length keep returning the LAST response, so a caller need not know the
+/// exact number of times it will be invoked.
+fn write_multi_read_fixture(name: &str, responses: &[String]) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "dante-gate-multi-http-test-{}-{}",
+        std::process::id(),
+        name
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let responses_path = dir.join("responses.txt");
+    let mut body = responses.join("\n");
+    body.push('\n');
+    std::fs::write(&responses_path, body).unwrap();
+    let counter_path = dir.join("counter.txt");
+    std::fs::write(&counter_path, "0").unwrap();
+    let script_path = dir.join("fixture.sh");
+    let script = format!(
+        "#!/usr/bin/env bash\n\
+         set -euo pipefail\n\
+         counter_file=\"{counter}\"\n\
+         responses_file=\"{responses}\"\n\
+         n=$(wc -l < \"$responses_file\")\n\
+         i=$(cat \"$counter_file\" 2>/dev/null || echo 0)\n\
+         i=$((i + 1))\n\
+         echo \"$i\" > \"$counter_file\"\n\
+         [ \"$i\" -gt \"$n\" ] && i=\"$n\"\n\
+         sed -n \"${{i}}p\" \"$responses_file\"\n",
+        counter = counter_path.display(),
+        responses = responses_path.display(),
+    );
+    std::fs::write(&script_path, &script).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = std::fs::metadata(&script_path).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&script_path, perms).unwrap();
+    script_path
+}
+
+/// A DanteSync HTTP status-pipe JSON payload with the given (updated_ts, ntp_offset_us),
+/// otherwise healthy/locked -- the shape gather_http_samples/sampled_offset_check consume.
+fn http_status(ts: u64, offset_us: i64) -> String {
+    format!(
+        "{{\"gm_source_ip\":\"10.77.9.184\",\"settled\":true,\"updated_ts\":{ts},\
+         \"is_locked\":true,\"ntp_offset_us\":{offset_us},\"mode\":\"NANO\",\"ntp_failed\":false}}"
+    )
+}
+
+fn now_epoch() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+#[test]
+fn help_describes_the_new_multi_sample_flags_836() {
+    let (code, stdout, _e) = run_gate(&["--help"]);
+    assert_eq!(code, 0, "--help must exit 0");
+    for flag in ["--samples", "--window-s", "--min-distinct", "--stability-us"] {
+        assert!(
+            stdout.contains(flag),
+            "#836: help must document the new sampling flag {flag}: {stdout}"
+        );
+    }
+    let low = stdout.to_lowercase();
+    assert!(
+        low.contains("median") && low.contains("spread"),
+        "#836: help must describe that the gate now grades both the median AND the spread of \
+         multiple samples: {stdout}"
+    );
+}
+
+#[test]
+fn gate_fails_a_win_http_node_with_too_few_distinct_samples_by_default() {
+    // NO --samples / --min-distinct override -- this proves the PRODUCTION DEFAULTS themselves
+    // are strictly stricter than the old single-read gate: a fixture that never varies its
+    // updated_ts (the exact shape of a node whose refresh interval is longer than the sampling
+    // window, or a stuck/cached HTTP server) can never reach the default min-distinct and must
+    // NEVER silently pass, even though the one value it does return is comfortably in-bound
+    // (#836 point 5, second half). --window-s 0 only removes the real sampling DELAY -- min-
+    // distinct and sample-count stay at their real production defaults.
+    let now = now_epoch();
+    let fresh = format!(
+        "{{\"gm_source_ip\":\"10.77.9.184\",\"settled\":true,\"updated_ts\":{now},\
+         \"is_locked\":true,\"ntp_offset_us\":50,\"mode\":\"NANO\",\"ntp_failed\":false}}"
+    );
+    let p = write_win_http_fixture("strih_http_static_default_sampling", &fresh);
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--window-s",
+            "0",
+        ],
+        &[("DANTESYNC_GATE_WIN_HTTP_STRIH", &p.display().to_string())],
+    );
+    assert_eq!(
+        code, 11,
+        "#836: a node whose reads never vary (updated_ts never advances) must be INCOMPLETE (11) \
+         under the real default min-distinct, never a silent PASS on one lucky in-bound value. \
+         stdout={stdout} stderr={stderr}"
+    );
+    assert!(stderr.contains("INCOMPLETE"), "stderr: {stderr}");
+    assert!(
+        stdout.contains("UNKNOWN"),
+        "stdout must show the insufficient-distinct-samples verdict: {stdout}"
+    );
+}
+
+#[test]
+fn gate_fails_a_win_http_node_whose_median_is_fine_but_samples_scatter_beyond_stability() {
+    // THE new failure mode (#836 point 3): a node whose MEDIAN offset is comfortably in-bound
+    // (200us, well under the 2000us default) but whose individual readings scatter across
+    // +-20ms -- exactly the shape the issue describes ("a node scattering +-20ms around a median
+    // of 200us must also fail"). A single-read gate could never see this; it only ever grades
+    // whichever ONE value it happened to draw, and several of these values ARE individually
+    // in-bound.
+    let base = now_epoch();
+    let responses = vec![
+        http_status(base, -19800),
+        http_status(base + 1, 20100),
+        http_status(base + 2, 200),
+        http_status(base + 3, -19500),
+        http_status(base + 4, 19900),
+    ];
+    let p = write_multi_read_fixture("strih_unstable", &responses);
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--samples",
+            "5",
+            "--min-distinct",
+            "3",
+            "--window-s",
+            "0",
+        ],
+        &[("DANTESYNC_GATE_WIN_HTTP_STRIH", &p.display().to_string())],
+    );
+    assert_eq!(
+        code, 20,
+        "#836: a scattered-but-in-bound-median node must FAIL the gate (20) on the NEW stability \
+         check -- never any easier to pass than a plain DRIFT. stdout={stdout} stderr={stderr}"
+    );
+    assert!(stderr.contains("GATE FAILED"), "stderr: {stderr}");
+    assert!(
+        stdout.contains("UNSTABLE"),
+        "stdout must name the failure as instability, not drift, so a red says which kind of \
+         bad it is (#836 point 4): {stdout}"
+    );
+}
+
+#[test]
+fn gate_passes_a_win_http_node_with_enough_stable_distinct_samples() {
+    // The full multi-sample GREEN path end-to-end: several DISTINCT (differing updated_ts),
+    // tight, in-bound readings must PASS, proving gather_http_samples + sampled_offset_check
+    // wire together correctly, not just the pure functions in isolation (already covered in
+    // tests/clock_offset_guard.rs).
+    let base = now_epoch();
+    let responses = vec![
+        http_status(base, 120),
+        http_status(base + 1, 150),
+        http_status(base + 2, 130),
+        http_status(base + 3, 140),
+        http_status(base + 4, 125),
+    ];
+    let p = write_multi_read_fixture("strih_stable", &responses);
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--samples",
+            "5",
+            "--min-distinct",
+            "3",
+            "--window-s",
+            "0",
+        ],
+        &[("DANTESYNC_GATE_WIN_HTTP_STRIH", &p.display().to_string())],
+    );
+    assert_eq!(
+        code, 0,
+        "#836: several distinct, tight, in-bound samples must PASS. stdout={stdout} stderr={stderr}"
+    );
+    assert!(stdout.contains("GATE PASS"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("OK") && stdout.contains("distinct samples"),
+        "the status line must report the distinct-sample count: {stdout}"
+    );
+}
+
+#[test]
+fn gate_status_line_reports_median_and_spread_regardless_of_outcome() {
+    // #836 point 4: "a red says which kind of bad it is" -- the status line must carry BOTH
+    // numbers even on a FAILING verdict, not just on a pass.
+    let base = now_epoch();
+    let responses = vec![
+        http_status(base, 25000),
+        http_status(base + 1, 24800),
+        http_status(base + 2, 25200),
+    ];
+    let p = write_multi_read_fixture("strih_drift_reported", &responses);
+    let (code, stdout, _stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--samples",
+            "3",
+            "--min-distinct",
+            "3",
+            "--window-s",
+            "0",
+        ],
+        &[("DANTESYNC_GATE_WIN_HTTP_STRIH", &p.display().to_string())],
+    );
+    assert_eq!(code, 20, "stdout={stdout}");
+    let low = stdout.to_lowercase();
+    assert!(
+        low.contains("median") && low.contains("spread"),
+        "a DRIFT status line must still report both median and spread: {stdout}"
+    );
 }
