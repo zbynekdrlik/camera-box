@@ -161,8 +161,8 @@ fn paint_one_frame(
                                    // as vernier_ids(0) == (0, 0)). Only a fresh side's stored gen_ts_ns advances this tick;
                                    // a settled side keeps whatever it was last stamped with, so its payload — and therefore
                                    // its rendered QR pixels — is byte-identical to the previous tick.
-        let left_fresh = refresh_tick % 2 == 0;
-        let right_fresh = refresh_tick == 0 || refresh_tick % 2 == 1;
+        let left_fresh = refresh_tick.is_multiple_of(2);
+        let right_fresh = refresh_tick == 0 || !refresh_tick.is_multiple_of(2);
         if left_fresh {
             vernier_gen.left = gen_ts_ns;
         }
