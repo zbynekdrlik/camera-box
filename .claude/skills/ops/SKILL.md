@@ -166,10 +166,11 @@ PowerShell-native `sc.exe` invocation returned EMPTY output over the win-* MCP S
 2026-07-08 probe of both boxes) + a PLAIN (no `cmd /c` wrapper needed)
 `reg query HKLM\SYSTEM\CurrentControlSet\Services\W32Time\Parameters /v Type | Out-String -Width 300`
 + `w32tm /query /status`. Write each box's combined output to a file and pass `--win-status
-NAME=FILE` (mirrors `scripts/dantesync-gate.sh`'s own convention exactly — this gate predates
-#701's finding that plain scp/ssh actually reaches strih/stream, and reads Windows `sc`/`reg`/
-`w32tm` service-control state that the win-* MCP is the natural fit for anyway, so it stays
-offline-fixture-file-only with no live-SSH branch). A box with no
+NAME=FILE` (the shared `scripts/lib/win-status-args.sh` NAME=FILE parser — `scripts/
+dantesync-gate.sh` used the identical convention for its own Windows nodes until #835 removed it
+there in favor of a live `--win-http` fetch; this gate's inputs are `sc`/`reg`/`w32tm`
+service-control TEXT the win-* MCP is the natural fit for anyway, with no HTTP equivalent to
+migrate to, so it stays offline-fixture-file-only with no live-SSH branch). A box with no
 status file is UNKNOWN, never a silent pass. Live 2026-07-08 readings (both already fixed, both
 PASS): strih `STATE=STOPPED START_TYPE=DISABLED Type=NoSync`, stream `STATE=STOPPED
 START_TYPE=DISABLED Type=NTP` (a harmless leftover config value — DISABLED means it can never run
