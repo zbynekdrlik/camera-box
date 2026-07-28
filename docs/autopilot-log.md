@@ -5720,3 +5720,14 @@ replacement 10.77.9.187 -- scene collections confirmed byte-identical). Version 
   `tests/python/test_imag_scenes_verify_parity.py` (10 tests, FakeObs pattern). Full local suite
   verified green (`cargo test` all binaries incl. the two touched, `pytest tests/python` 591/591)
   after both the RED and the GREEN commit.
+
+**CI-fix addendum (`9c520f85f`/`d0447020b`)**: `imag_scenes.py` imports the `websocket` pip
+package at module level -- a Rust test that shelled to bare `python3` to import it broke the
+plain "Test"/"Code Coverage" CI jobs (only the dedicated "Python harness tests" job has that
+dependency installed); moved the behavioral proof into `tests/python/test_imag_scenes_verify_parity.py`.
+Separately, a `git commit -- <path>` on the shared dev1 checkout picked up one hunk of a
+CONCURRENT worker's in-progress #840 (imag-nb reboot-durable projectors) uncommitted edit to the
+SAME test file (the pathspec-commit-stages-full-content GOTCHA this CLAUDE.md already documents)
+-- corrected via a targeted `git hash-object`/`update-index --cacheinfo` commit that touched only
+the one leaked hunk, never their other in-progress files. CI green: run 30354727208. PR #704
+body updated with the added scope (REST PATCH, per the `gh pr edit` GraphQL GOTCHA).
