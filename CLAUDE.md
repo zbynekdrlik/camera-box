@@ -272,7 +272,19 @@ day before). Both had sat unnoticed because the event-mode hotfix sessions never
 suite. Rules: (1) after fixing a failure, ALWAYS re-run the FULL suite — never conclude "now
 green" from the first fix; (2) a hotfix session that skips the full suite leaves landmines for
 the next session — run it before ending the session even when CI is deliberately not triggered
-(count `test result: ok` lines and expect the full binary count, currently ~146).
+(count `test result: ok` lines and expect the full binary count, currently ~156).
+
+## GOTCHA — a NEW `.sh` file's long header comment must not push `set -euo pipefail` past line 15
+
+`pre-write-script-check.sh` (script-failure-policy.md) blocks a brand-new `.sh` file's `Write` if
+`set -euo pipefail` isn't found within the file's first ~15 lines — but this repo's convention for
+a new acceptance-gate/guard script (`verify-device.sh`, `clock-offset-guard.sh`, `setup-imag.sh`,
+...) is a LONG header comment (checks list, env vars, rationale) BEFORE `set -euo pipefail`, often
+80+ lines. Those existing files predate the hook (or were edited incrementally past it); a fresh
+`Write` of a NEW file in that style gets hard-blocked (#821, `scripts/verify-imag.sh`'s first
+draft). Fix: shebang, a ONE-LINE summary comment pointing at "the extended header below", then
+`set -euo pipefail` on/before line ~7, then continue the FULL detailed header comment underneath
+it (bash comments work anywhere) — satisfies the hook without shrinking the documentation.
 
 ## GOTCHA — a `scripts/lib/*.sh` "_cmd" helper embedded via `$(...)` mid-string gets its trailing newline STRIPPED, gluing it to whatever follows
 

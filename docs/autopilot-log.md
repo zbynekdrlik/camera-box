@@ -5511,3 +5511,36 @@ vendored `obs-source.c` release-cadence fix (#726 candidate A).
   Lint/Shellcheck/Coverage/Windows probe build/Security Audit/Drift Guard/Python harness/Test).
   The hardware "Full-path E2E" gate auto-triggered on push (30312574335) -- NOT touched/re-run
   per this dispatch's constraints; the supervisor owns that gate + the merge.
+
+## #821 — scripts/verify-imag.sh: POST-PROVISION acceptance gate for the imag notebook
+
+- Root cause + approach posted `gh issue comment 821` (issuecomment-5098391986) BEFORE the first
+  commit: no acceptance gate existed for imag (only cam1-6 have `verify-device.sh`, #454), which
+  let the replacement notebook (.187) be reported "verified" while still on gdm3/no autologin/no
+  OBS. Approach: mirror `verify-device.sh`'s pure-function/live-SSH-flow structure, COMPOSE
+  already-tested signals (`setup-imag.sh`'s `imag_cpu_isolation_plan`/`imag_has_discrete_nvidia`,
+  `verify-device.sh`'s NDI-symlink parsers, `timesync-authority.sh`, `clock-offset-guard.sh`,
+  `imag-host.sh`, `imag_scenes.py`/`obs_phase2.py`/`wmctrl`) instead of a from-scratch monolith.
+- RED: `test(#821): [red] ...` (`5076f8b61`) -- `tests/verify_imag_pure_functions.rs` (27 tests,
+  new file) + 4 new `gm_*` tests appended to `tests/clock_offset_guard.rs`. Verified failing
+  against pre-fix code (verify-imag.sh removed + clock-offset-guard.sh's GM functions stashed
+  back to HEAD) before committing.
+- GREEN: `fix(#821): [green] ...` (`0be488e13`) -- new `scripts/verify-imag.sh` (all checks a-p:
+  hostname/IP, ssh.service, HWE kernel, derived cmdline isolation, lightdm+autologin+gdm3-absent,
+  zero failed units, openbox/obs running + autostart placeholder check, OBS log genlock-tick +
+  #824 version-mismatch + DistroAV/NDI-loaded, `:4455` listening, OBS base version+hold, NDI
+  runtime pin, NVIDIA dGPU conditional (#816), dantesync PTP+offset+grandmaster (#834), sole
+  timesync authority, scenes/Multiview, projector count, #791 operator scaffolding with
+  by-name tool preflights). New `gm_source_ip_from_pipe_json`/`gm_matches_expected`/`gm_check`
+  in `scripts/clock-offset-guard.sh` (#834 grandmaster-identity gate, reusable by
+  `verify-device.sh`'s own dantesync check later -- tracked on #834 itself, not duplicated here).
+- `.claude/rules/imag-nb-provisioning.md` gains its 4th mandatory runbook step (VERIFY) +
+  `scripts/verify-imag.sh`/`tests/verify_imag_pure_functions.rs` added to its `paths:` frontmatter;
+  `CLAUDE.md` router line updated.
+- Full `cargo test` green (156/156 binaries), `cargo fmt --all --check` / `cargo check` /
+  `cargo clippy --all-targets -- -D warnings` / `shellcheck -S warning` all clean.
+- Never touched the rig (no ssh/MCP to any box); every check in `verify-imag.sh` is UNVERIFIED
+  against the live `.187` box -- the supervisor runs it as the acceptance proof per the dispatch
+  constraints.
+- Rides open PR #704 (dev->main); did not open a new PR, did not merge, did not touch the
+  hardware "Full-path E2E" gate.
