@@ -5544,3 +5544,35 @@ vendored `obs-source.c` release-cadence fix (#726 candidate A).
   constraints.
 - Rides open PR #704 (dev->main); did not open a new PR, did not merge, did not touch the
   hardware "Full-path E2E" gate.
+
+## 2026-07-28 — #833 (imag-nb missing-tool preflight, #822 class over SSH) -- PR #704 train
+
+- Root cause + approach posted `gh issue comment 833` (issuecomment-5098764608) BEFORE the first
+  commit: the `[0/8]` wmctrl-based projector-count preflight AND a sibling `[1/8]` nm-based MV
+  divisor-capability check both shell a remote helper on imag-nb over SSH and read its `grep -c`
+  output as a measurement, with nothing checking the helper is installed -- absent, the count
+  reads 0 and produces a false diagnosis ("stray projector windows accumulating" / "#756
+  regression") instead of "the tool is missing". Same class `imag_require_tools` already fixed
+  LOCALLY in `setup-imag.sh` (#822); this is its SSH-remote counterpart. Rejected reusing
+  `imag_require_tools` directly (it checks LOCAL presence, wrong execution context; sourcing the
+  whole 1400+ line provisioning script for one function risks name/global-state collisions).
+- RED: `test(#833): [red] ...` (`d510af51d`) -- new `scripts/lib/imag-require-remote-tool.sh`
+  (`imag_require_remote_tool_cmd` + pure parser `imag_remote_tool_probe_missing`) landed WITH its
+  unit tests (fixture PATH, no ssh/rig); `tests/harness_imag_require_remote_tool_833.rs`'s
+  structural/wiring assertions on `recording-e2e.sh`/`setup-imag.sh` verified RED (not wired yet).
+- GREEN: `fix(#833): [green] ...` (`821fb7900`) -- wired the new lib into `recording-e2e.sh` at
+  both call sites (before the #769 heal/#756 count check needing wmctrl; before the divisor
+  check needing nm/binutils) via the #675 pattern (new lines only, no anchored-line edits).
+  `setup-imag.sh`'s kiosk package line (`openbox lightdm feh`) now also installs `wmctrl`. Also
+  tightened one RED-commit test assertion whose fixed 1200-char lookahead window bled into the
+  following (legitimately different) divisor-check text -- bounded to the tool check's own code.
+- Sweep for the same shape elsewhere (recording-e2e.sh, rig-mode.sh, python scripts): only the nm
+  divisor check shared it (fixed alongside); nothing else in the repo shells a remote helper and
+  treats its raw output count as a hard pass/fail with no tooling preflight.
+- All 13 new tests green + full `cargo test` (157/157 binaries) green -- no anchor collisions in
+  either edited script. `cargo fmt --all --check` / `cargo check` / `cargo clippy --all-targets
+  -- -D warnings` / `shellcheck -S warning scripts/*.sh scripts/lib/*.sh` all clean.
+- Never touched the rig (no ssh/MCP to any box) and never ran/re-ran the hardware "Full-path E2E"
+  gate, per the dispatch constraints (the supervisor was mid-investigation on an unrelated clock
+  fault).
+- Rides open PR #704 (dev->main); did not open a new PR, did not merge.

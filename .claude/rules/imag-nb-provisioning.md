@@ -70,7 +70,9 @@ When a NEXT swap fails, check this list before theorising:
 - **A missing TOOL is not a failed check (#822).** `readelf`/`nm` come from `binutils`, absent on a
   fresh Ubuntu. Their empty output made step 12 report `SONAME check failed — refuse a mismatched
   ABI` while the hot-swap had actually succeeded. Install binutils and preflight with
-  `imag_require_tools`, which names the missing tool.
+  `imag_require_tools`, which names the missing tool. The SAME class recurs for checks that run
+  REMOTELY over SSH from `recording-e2e.sh` (gate-time, long after provisioning) rather than
+  locally during provisioning — see `.claude/rules/imag-ssh-remote-tool-preflight.md` (#833).
 - **usrmerge breaks literal path compares (#823).** `/lib` IS a symlink to `/usr/lib`, so
   `readlink -f` of the DM link always answers `/usr/lib/...` and a compare against the literal
   `/lib/systemd/system/lightdm.service` can never match. Canonicalise BOTH sides

@@ -23,6 +23,7 @@ Rust app for embedded NDI cameras (CAM1-4): multi-camera NDI streaming with soft
 - E2E gate preconditions (DanteSync servo, bundle-state-server) → `.claude/rules/rig-standing-services.md` (auto-loads on its `paths:`)
 - CI/workflow concurrency-cancel risk, sourced-bash-test-harness `set -e` leak → `.claude/rules/ci-testing-gotchas.md` (auto-loads on its `paths:`)
 - `CAMERA_ACTIVE_SET` fleet-enumeration discipline (never a literal cam-number range) → `.claude/rules/camera-active-set.md` (auto-loads on its `paths:`)
+- imag-nb SSH-remote tool preflight (a missing wmctrl/nm must fail loud by name, never read as a measured zero, #833) → `.claude/rules/imag-ssh-remote-tool-preflight.md` (auto-loads on its `paths:`)
 
 ## DO NOT DELETE These Files
 
