@@ -88,3 +88,27 @@ any shared host path and add the override to the test's own command-builder help
 tempdir from a fixture path already unique per test, e.g. `fake_py`'s own parent dir, keeps the
 helper's signature stable — see `run_gate` in `tests/harness_rig_busy_gate.rs` /
 `tests/harness_rig_busy_gate_self_heal.rs`).
+
+## Testing a "read N times" polling loop offline: make the fixture-injection env var accept an EXECUTABLE, not just a static file (#836)
+
+Several gate scripts read a live status once via an env-overridable `cat "$FIXTURE_PATH"` seam
+(`DANTESYNC_GATE_WIN_HTTP_<NAME>` etc.) — fine for a single read, but a gate that now SAMPLES a
+node multiple times (`dantesync-gate.sh`'s `gather_http_samples`, #836) needs a fixture that
+returns DIFFERENT content on each successive call, and a static file can't do that. The fix,
+reusable for any future "poll N times" gate: extend the read function so the override may point
+at either a plain file (`cat`'d every call, unchanged pre-#836 behavior) OR an EXECUTABLE script
+(`[ -x "$path" ] && "$path" || cat "$path"`) — a test then writes a tiny generated bash script
+that reads/increments a counter file and prints the Nth line of a pre-written responses file
+(clamped to the last line once the caller's real call count exceeds it). This proves the whole
+sampling loop end-to-end (not just the pure grading functions) with **zero real network and zero
+real sleep** — pair it with a `--window-s 0` (or equivalent no-delay) override so the test doesn't
+also pay the gate's real inter-sample spacing. See `write_multi_read_fixture` in
+`tests/dantesync_gate.rs` for the worked pattern.
+
+**A "gather N samples" loop should still short-circuit to the old single-read failure mode when
+the VERY FIRST read is empty** (endpoint simply not there) — don't blindly attempt all N reads
+regardless. This keeps a genuinely-down node's "unreachable" verdict exactly as fast as before
+multi-sampling was added, and means most pre-existing single-read "unreachable"/"fallback" tests
+need NO `--samples`/`--window-s` override at all — only tests whose fixture IS reachable (so the
+loop proceeds to try further reads) need the override to stay fast and to satisfy the new
+min-distinct-samples requirement.

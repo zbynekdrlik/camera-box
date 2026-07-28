@@ -5611,3 +5611,50 @@ vendored `obs-source.c` release-cadence fix (#726 candidate A).
 - Never touched the rig (no ssh/MCP to any box) and never ran/re-ran the hardware "Full-path E2E"
   gate (currently red on the unrelated #834 clock investigation), per dispatch constraints.
 - Rides open PR #704 (dev->main); did not open a new PR, did not merge.
+
+## 2026-07-28 — #836 (multi-sample the DanteSync gate's median+spread) -- PR #704 train
+
+- Root cause: `dantesync-gate.sh`'s `--win-http` and Linux-HTTP-first paths judged each node on a
+  SINGLE `ntp_offset_us` read per gate run -- live data (#834's trail, 22 reads 25s apart on the
+  stream box) showed only 2/22 individual reads land inside the existing 2000us bound, so the
+  same unchanged node passed or failed close to a coin flip. No check existed at all for how much
+  readings SCATTER between samples. Design comment posted BEFORE any code:
+  https://github.com/zbynekdrlik/camera-box/issues/836#issuecomment-5099363953
+- RED 1: `test(#836): [red] ...` (`52487d48c`) -- 13 new pure-function tests in
+  `tests/clock_offset_guard.rs` for `distinct_offset_samples_us` / `median_of_ints` /
+  `spread_of_ints` / `sampled_offset_verdict` / `sampled_offset_report` / `sampled_offset_check`
+  (none exist yet). Includes a regression test built from the EXACT #834/#836 live 22-sample
+  trail, asserting `drift_unstable`.
+- GREEN 1: `fix(#836): [green] ...` (`469ccf17a`) -- added those 6 pure functions to
+  `scripts/clock-offset-guard.sh`. `distinct_offset_samples_us` dedupes reads whose `updated_ts`
+  repeats the last accepted sample (refresh-interval duplicates are not independent samples,
+  point 5). `sampled_offset_verdict` grades the median against the EXISTING unchanged bound AND
+  the spread (max-min) against a NEW stability threshold; both a location and a stability
+  failure are hard failures (rc=2), and too few distinct samples is its own hard "insufficient"
+  failure (rc=3), never a silent pass. 56/56 tests green.
+- RED 2: `test(#836): [red] ...` (`e554d34d8`) -- wired new
+  `--samples`/`--window-s`/`--min-distinct`/`--stability-us` flags + 6 new end-to-end gate tests
+  in `tests/dantesync_gate.rs` (unstable-but-in-bound-median, insufficient-distinct-by-default,
+  full stable-samples PASS, median+spread always reported); updated the 7 pre-existing win-http/
+  linux-http tests to pin the original single-good-read behavior via explicit `--samples 1
+  [--min-distinct 1] --window-s 0` overrides (the real defaults now correctly refuse to grade a
+  static/never-varying fixture). 12/28 failing as expected (flags didn't exist).
+- GREEN 2: `fix(#836): [green] ...` (`291d3fa27`) -- added `gather_http_samples` (N reads spread
+  across a configurable window; short-circuits to empty on the very first empty read, exactly
+  like the pre-#836 single-read "unreachable" behavior, so a genuinely down node still fails
+  fast) to `dantesync-gate.sh`; both the Windows and Linux-HTTP-first loops now call it and grade
+  via `sampled_offset_check` instead of the old single-read `offset_check`. `read_win_http_status`
+  / `read_linux_node_http_status`'s fixture-injection env vars now also accept an EXECUTABLE
+  script (not just a static file), letting tests simulate varying reads with zero real network/
+  sleep. Defaults: 6 reads over a 30s window, >=3 distinct required, 2000us stability bound
+  (same order as the unchanged location bound). 28/28 gate tests green.
+- Full `cargo test` (158/158 binaries, 2392/2392 tests) green -- no anchor collisions in
+  `scripts/recording-e2e.sh`/`scripts/rig-mode.sh` from touching `dantesync-gate.sh`.
+  `cargo fmt --all --check` / `cargo check` / `cargo clippy --all-targets -- -D warnings` /
+  `shellcheck -S warning scripts/*.sh scripts/lib/*.sh` all clean.
+- Filed #837 (follow-up): the Linux SSH-journal fallback path's existing #767 median has no
+  spread/stability check either -- out of scope for #836 because that logic is shared across
+  `clock-offset-guard.sh`'s own CLI flow, `verify-device.sh`, AND `verify-imag.sh` (cross-cutting).
+- Never touched the rig (no ssh/MCP to any box) and never ran/re-ran the hardware "Full-path E2E"
+  gate (currently red on the unrelated #834 clock investigation), per dispatch constraints.
+- Rides open PR #704 (dev->main); did not open a new PR, did not merge.
