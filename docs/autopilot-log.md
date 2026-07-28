@@ -6041,3 +6041,40 @@ last option never on the table per `#836`/`#360`/`#363`). Issue #853 closed with
 PR #704 NOT merged (genuinely blocked on #854, a real unresolved problem, not this ticket's
 scope). Playbook: added a `#853` GOTCHA section to `.claude/skills/recording-decode` documenting
 the self-check pattern + the #376 magnitude-comparison lesson.
+
+## 2026-07-28 — #854 (software decode-robustness R&D — genuinely exhausted, no code change)
+
+Assigned direction: pursue decode-side software robustness FIRST (free, offline, reversible)
+before physical camera adjustment (supervisor's call, not mine). Built two throwaway offline
+Rust experiment crates (rqrr 0.9.3 + image 0.25, matching this repo's pinned versions; NOT part
+of the camera-box repo) against 48 real captured frames independently confirmed `tick == null`:
+the original 30 pixel-proof PNGs (frame_index 20-311, decile 0 of the recording — the EASIEST
+~18.7%-undecodable region) PLUS 18 more frames pulled fresh via `ffmpeg -vf select=eq(n\,N)`
+directly from the stream box's recording, spread across decile 5 (~71.6% undecodable, the
+HARDEST region) — deliberately avoiding drawing conclusions from only the easy cap.
+
+Root cause pinned down PRECISELY via rqrr's own typed `DeQRError`: every failure is `DataEcc`
+(Reed-Solomon over budget), NEVER `FormatEcc`/`InvalidVersion` — finder location, format info,
+and version/size (33x33 modules = QR v4, ~16.2-16.5px module pitch measured from rqrr's own
+`Grid::bounds`) all read correctly; the corruption is specifically excess per-module bit errors,
+narrower and more precise than "moire".
+
+Tried: today's shipped `decode_qr_luma_all` (0/48); Gaussian blur sigma 0.5-3.0 + Otsu, box blur
+r1-3 + Otsu, downscale/upscale 2x-4x anti-alias + Otsu, local adaptive threshold r15/25/35 (each
+1/48 best, ALL hitting the exact SAME single frame `frame-70.png` from the easy sample, never
+replicated on the hard sample -- noise, not a fix); a from-scratch homography-based per-module
+resampler (reused rqrr's OWN located grid geometry + Reed-Solomon decode, replaced only the
+single-pixel module sample with a neighborhood-median + population-level Otsu at 6 window sizes
+0.3x-1.3x module pitch) -- 0/48, the strongest attempt, zero improvement. Also confirmed
+candidate "temporal fusion across held frames" does NOT apply to this painter: the optical tick
+advances every single captured frame (checked directly in the merged JSON, e.g. frame_index
+4756->4759->4760->4762->4763 carries ids 11678->11684->11686->11689->11692) -- no held frame
+exists to average across.
+
+Conclusion posted to #854 (issuecomment-5107663203): software decode robustness for the CURRENT
+painted QR is genuinely exhausted. Candidate "larger QR modules on the painter side" evaluated
+but NOT attempted -- it is a painter/wire-geometry change (not decode-side), needs a FRESH live
+rig capture to validate (nothing offline can prove it), and cascades through the #463 four-place
+burn/geometry parity system + the wire-format fixture lock -- outside "software first" as
+directed. No code changed, nothing merged; PR #704 stays blocked on #854. Direction (painter
+module-size change vs. physical camera adjustment) left to the supervisor.
