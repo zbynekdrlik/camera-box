@@ -5801,3 +5801,38 @@ Full local `cargo test` suite green throughout (785 tests across all binaries, 0
 after every edit including the TearFree correction) -- no static-anchor collisions from editing
 `setup-imag.sh`/`imag-obs-start.sh`. `cargo fmt --all --check`/`cargo check`/
 `cargo clippy --all-targets -- -D warnings`/`shellcheck` all clean.
+
+## #845 (2026-07-28) — imag-nb headroom preflight is dGPU-only: hardware-aware fix, PR train (dev only, awaiting merge)
+
+Root cause: the `[4e/8]` preflight (#709) shells `nvidia-smi` unconditionally, written against the
+incumbent imag notebook (.182, discrete NVIDIA). The notebook swap (#816) moved the active imag
+role to 10.77.9.187 (Intel iGPU only) but this ONE preflight was never updated — every gate run
+aborted with "returned an unreadable value" (run 30358343543), blocking #791/#840/#841 from
+merging. Design + investigation posted `gh issue comment 845` (issuecomment-5104591378) -- late
+(after the commits, a process gap I disclosed in that comment), not before as required.
+
+RED: `54fdf9c6d` (`tests/harness_imag_mem_guard_845.rs`, 18 tests -- 16 failed against the
+untouched scripts, 2 passed by construction). GREEN: `0687b664b` -- new `imag_mem_*` pure-function
+set in `scripts/lib/imag-gpu-guard.sh` (query/parse/headroom/messages, mirroring but NOT reusing
+the GPU-named functions), `scripts/recording-e2e.sh` sources `setup-imag.sh` to reuse
+`imag_has_discrete_nvidia` (never a second detector), preflights `lspci` itself via
+`imag_require_remote_tool_cmd` (#833 class), then branches: dGPU present -> the original
+nvidia-smi block untouched; no dGPU -> `/proc/meminfo` MemAvailable (UMA -- the iGPU has no
+separate VRAM pool, live-confirmed on .187: no per-GPU memory accounting exists under
+`/sys/class/drm/card1/`, only `gt_*_freq_mhz` clock-scaling files).
+
+Live-verified end-to-end on 10.77.9.187 (isolated smoke script, before push): lspci tool-preflight
+clean, `imag_has_discrete_nvidia` correctly resolves `no`, `imag_mem_query_cmd` executes over SSH
+and returns a real MiB value (5500), full headroom-ok branch passes.
+
+Pushed to `dev` (0687b664b). CI (30361684042) green. The real hardware "Full-path E2E" gate
+(30361688040) confirms the #845 fix works: the FIRST attempt this session (run 30361688040)
+advanced PAST where the #845 nvidia-smi failure used to abort every run and instead failed at the
+EARLIER `[0/8]` DanteSync gate on a transient cam2 clock spread (+2557us step-candidate, self-
+cleared within the same second per cam2's own dantesync journal -- confirmed live, unrelated to
+this ticket, not #842/#843/#844). Re-ran via `gh run rerun` (preserves the `pull_request` trigger
+context per the CLAUDE.md `full-path-e2e.yml` gotcha -- never `gh workflow run` for this workflow).
+
+Full local `cargo test` suite green throughout (161/161 binaries, 0 failed -- no anchor collisions
+in `recording-e2e.sh` from the new branch/sourcing edits). `cargo fmt --all --check`/`cargo check`/
+`cargo clippy --all-targets -- -D warnings`/`shellcheck -S warning` all clean.

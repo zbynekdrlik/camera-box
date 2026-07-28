@@ -14,6 +14,9 @@ paths:
   - "tests/verify_imag_pure_functions.rs"
   - "tests/harness_imag_obs_start_stop_840.rs"
   - "tests/harness_imag_intel_display_841.rs"
+  - "scripts/lib/imag-gpu-guard.sh"
+  - "tests/harness_imag_gpu_guard.rs"
+  - "tests/harness_imag_mem_guard_845.rs"
 ---
 
 # Replacing the imag notebook — install the OS, provision it, then VERIFY it (#791 / #815 / #816 / #821)
@@ -292,3 +295,47 @@ has no PowerMizer, but pinning the frequency FLOOR (`gt_min_freq_mhz`) up to the
 reported ceiling (`gt_RP0_freq_mhz`, NEVER a hardcoded MHz literal — a future Intel notebook's
 ceiling will differ) gets the same "always at max clock" outcome, applied via a dedicated systemd
 oneshot unit (sysfs resets every boot) mirroring the existing `cpu-performance.service` pattern.
+
+## The #841 lesson generalizes past SETTINGS to CHECKS/GATES too — search `nvidia`/`nvidia-smi` repo-wide after any dGPU-swap-adjacent ticket (#845)
+
+#841 (above) is about a config SETTING baked against the incumbent NVIDIA box. #845 is the same
+root failure shape applied to a GATE: `scripts/recording-e2e.sh`'s `[4e/8]` headroom preflight
+(#709) unconditionally shelled `nvidia-smi`, written before the notebook swap (#816) — it aborted
+EVERY E2E gate run on the replacement box (10.77.9.187, Intel iGPU only, no discrete GPU) with
+"returned an unreadable value", blocking #791/#840/#841 from ever merging behind it, because
+nobody had grepped for OTHER incumbent-only assumptions when the swap landed.
+
+**The fix pattern, reusable for any future NVIDIA-only check found this way:**
+1. Detect dGPU presence via the ONE existing detector, `imag_has_discrete_nvidia`
+   (`setup-imag.sh`, an `lspci` display-class match, #816) — reuse it by SOURCING `setup-imag.sh`
+   from the calling script (verify-imag.sh already did this; recording-e2e.sh now does too) rather
+   than writing a second detector with different semantics.
+2. Preflight the TOOL you're about to trust for the detection itself (`lspci`) via
+   `imag_require_remote_tool_cmd`/`imag_remote_tool_probe_missing` (#833) — a missing `lspci` must
+   fail loud by name, never be silently misread as "no discrete GPU" (that would be exactly the
+   measured-zero bug class #833 exists to prevent, one level up from the check it's guarding).
+3. Branch: dGPU present → the ORIGINAL NVIDIA-specific check, byte-for-byte unchanged (a box that
+   still has a dGPU must never regress). No dGPU → investigate LIVE on the actual box (never
+   invent the substitute metric by analogy — the #841 TearFree lesson) what the genuinely
+   equivalent, assertable signal is on THIS hardware, and name the real condition in every error
+   message ("no discrete GPU", never "check the NVIDIA driver" on a box that never had one).
+4. NEVER skip/degrade the check on the no-dGPU box just because the exact NVIDIA mechanism doesn't
+   exist there — the requirement the check exists to prove (headroom before StartRecord, encoder
+   capability, whatever) survived the GPU swap even though the mechanism didn't.
+
+**#845's own live investigation, as a worked example of step 3:** an integrated GPU is UMA
+(unified memory architecture) — no separate VRAM pool exists (confirmed on .187: no per-GPU memory
+accounting anywhere under `/sys/class/drm/card1/`, only `gt_*_freq_mhz` clock-scaling files;
+`/sys/kernel/debug/dri/*/i915_gem_objects` needs root, unavailable over the provisioning SSH user).
+So `/proc/meminfo`'s `MemAvailable` is the correct headroom analogue — implemented as its own
+`imag_mem_*` function set in `scripts/lib/imag-gpu-guard.sh` (query/parse/headroom/messages),
+deliberately NOT a renamed reuse of the `imag_gpu_*` functions (they measure genuinely different
+resources; only the pure-compare SHAPE is shared).
+
+**After landing a fix like this, grep the WHOLE repo for the same literal** (`grep -rn "nvidia"
+scripts/ scripts/lib/`) before closing out — #845's sweep found one more sibling,
+`scripts/imag-gpu-contention-sampler.sh` (#674), with the identical unconditional
+`command -v nvidia-smi || FATAL` shape. It was NOT wired into any automated gate (a standalone
+manual diagnostic, zero callers anywhere else in the repo), so it was out of #845's own scope —
+filed as its own follow-up issue (#846) rather than fixed in the same PR, per the bundling gate
+(a genuinely separate script, not "the same preflight").
