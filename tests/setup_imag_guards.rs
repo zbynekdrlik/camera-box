@@ -167,17 +167,15 @@ fn setup_imag_autostart_strips_saved_projectors_522() {
         .find("saved_projectors")
         .expect("saved_projectors strip must be present");
     // must run BEFORE OBS launches so OBS loads the stripped collection (restore happens at load).
-    // #840: the autostart no longer runs a bare `taskset -c __ISOLCPUS__ obs &` itself -- it now
-    // launches OBS THROUGH imag-obs-start.sh (the same path the operator's menu uses), passed the
-    // DERIVED isolated-CPU set via an exported env var. The __ISOLCPUS__ placeholder mechanism
-    // (step 8's derived set, sed'd in after the heredoc) is unchanged; only WHERE it lands moved
-    // from a direct taskset argument to an env-var export. Ordering contract unchanged.
+    // #816: the pin is no longer the literal 2-11 — the autostart is written with an
+    // __ISOLCPUS__ placeholder that step 8's DERIVED isolated-CPU set is sed'd into, so the same
+    // script provisions notebooks with different core counts. Ordering contract unchanged.
     let launch = body
-        .find(r#"export IMAG_ISOLATED_CPUS="__ISOLCPUS__""#)
-        .expect("the autostart's IMAG_ISOLATED_CPUS export (feeding imag-obs-start.sh) must be present");
+        .find("taskset -c __ISOLCPUS__ obs &")
+        .expect("the autostart OBS launch must be present");
     assert!(
         strip < launch,
-        "the saved_projectors strip must run BEFORE the autostart launches OBS (#522/#840)"
+        "the saved_projectors strip must run BEFORE the autostart launches OBS (#522)"
     );
 }
 
