@@ -2,23 +2,36 @@
 paths:
   - "scripts/install-imag-nb.sh"
   - "scripts/setup-imag.sh"
+  - "scripts/verify-imag.sh"
   - "tests/install_imag_nb_pure_functions.rs"
   - "tests/setup_imag_hardware_agnostic.rs"
   - "tests/setup_imag_guards.rs"
   - "tests/setup_imag_pure_functions.rs"
+  - "tests/verify_imag_pure_functions.rs"
 ---
 
-# Replacing the imag notebook — install the OS, then provision it (#791 / #815 / #816)
+# Replacing the imag notebook — install the OS, provision it, then VERIFY it (#791 / #815 / #816 / #821)
 
-Two scripts, in this order. Neither is manual work; a notebook swap is repo tooling.
+Three scripts, in this order. None of it is manual work; a notebook swap is repo tooling.
 
 ```
 1. INSTALL OS   scripts/install-imag-nb.sh --target-disk /dev/nvme0n1 --ip <addr> --yes
                 (run FROM the box's own Ubuntu desktop live-USB, as root)
 2. REBOOT       into the installed system (NVRAM entry is written + set first)
 3. PROVISION    IMAG_IP=<addr> sudo -E ./setup-imag.sh --yes        (on the box)
-4. SCENES       scripts/imag_scenes.py --host <addr>                (from dev1)
+4. VERIFY       scripts/verify-imag.sh                              (from dev1, #821)
 ```
+
+**Step 4 is MANDATORY — no imag box is ever reported "ready" without its output.** #821: the
+replacement notebook (.187) was once reported "verified booted from disk" on the strength of the
+installer's OWN claim of success, when it was in fact still on gdm3 with a login prompt — no
+autologin, no openbox kiosk, no OBS. `verify-imag.sh` re-derives every fact fresh over SSH/network
+AFTER steps 1-3 (kernel/cmdline, lightdm+autologin, OBS log + `:4455`, the OBS base-version pin,
+NDI runtime pin, dantesync PTP lock + FRESH offset + the SAME grandmaster as the rest of the rig
+(#834), the #791 operator scaffolding, and — as part of its own checks — seeds scenes/Multiview
+and opens both projectors via `scripts/imag_scenes.py` / `scripts/obs_phase2.py` (no separate
+manual "SCENES" step is needed any more; `verify-imag.sh` runs them itself and fails loud if either
+comes back short). See `scripts/verify-imag.sh`'s own header comment for the full checks list.
 
 ## The install-layer facts (live-verified 2026-07-27 on a 24.04.2 desktop ISO)
 

@@ -403,6 +403,53 @@ ptp_check() {
   esac
 }
 
+# --- GRANDMASTER identity (#834) -------------------------------------------------------------
+#
+# #834 (stream box, 2026-07-28): a node reported `is_locked:true`/`settled:true` while sitting
+# 14.7 ms off the rig -- it had PTP-locked to a FOREIGN grandmaster (`gm_source_ip:10.77.7.109`)
+# instead of the rig's own `10.77.9.184`. `is_locked` alone only proves the servo is disciplined
+# to SOME clock; it says nothing about WHICH one. A node faithfully locked to the wrong
+# grandmaster reads every local health indicator green while being genuinely 15 ms out -- the same
+# false-green shape as the #591 competing-timesync-daemon incident, but the mechanism here is
+# grandmaster ELECTION, not a second daemon. Every node in the rig must agree on the SAME
+# `gm_source_ip`; this is a gated FACT distinct from (and in addition to) the offset bound.
+
+# gm_source_ip_from_pipe_json TEXT -> the `"gm_source_ip"` string field value in TEXT (a DanteSync
+# status-pipe/HTTP JSON blob -- the SAME blob offset_us_from_pipe_json/ptp_locked_from_pipe_json
+# read), "" if the field is absent/unparseable. `|| true` survives a no-match under set -e/
+# pipefail (same convention as every other *_from_pipe_json parser in this file).
+gm_source_ip_from_pipe_json() {
+  printf '%s' "$1" | grep -oE '"gm_source_ip"[[:space:]]*:[[:space:]]*"[^"]*"' \
+    | sed -n 's/.*"gm_source_ip"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | tail -1 || true
+}
+
+# gm_matches_expected ACTUAL EXPECTED -> 0 iff both are non-empty and IDENTICAL. An empty ACTUAL
+# (the field was unreadable) is never treated as a match -- test-strictness: a grandmaster we
+# could not read must never look correct, exactly the "unreachable = FAIL" contract every other
+# check in this file follows.
+gm_matches_expected() {
+  [ -n "$1" ] && [ -n "$2" ] && [ "$1" = "$2" ]
+}
+
+# gm_check LABEL ACTUAL EXPECTED -> prints a status line; returns 0 OK / 2 FOREIGN-GM / 3 UNKNOWN.
+# A foreign or unreadable grandmaster is ALWAYS a hard fail regardless of how small the node's own
+# offset looks at that instant (#834: "is_locked:true" was true while 15 ms out) -- callers must
+# gate on this in addition to, never instead of, the offset/PTP-lock checks above.
+gm_check() {
+  local label="$1" actual="$2" expected="$3"
+  if [ -z "$actual" ]; then
+    printf '  %-14s GM UNKNOWN   (gm_source_ip unread; expected %s)\n' "$label" "$expected"
+    return 3
+  fi
+  if gm_matches_expected "$actual" "$expected"; then
+    printf '  %-14s GM OK        (locked to the rig grandmaster %s)\n' "$label" "$actual"
+    return 0
+  fi
+  printf '  %-14s GM FOREIGN   (locked to %s, rig grandmaster is %s -- #834: is_locked can be true while badly out)\n' \
+    "$label" "$actual" "$expected"
+  return 2
+}
+
 # offset_check LABEL OFFSET_US BOUND_US -> prints a status line; returns 0 OK / 2 DRIFT /
 # 3 UNKNOWN. OK iff |OFFSET_US| <= BOUND_US (NUMERIC compare). An empty OFFSET_US is UNKNOWN,
 # never OK — an offset we could not read must never look in-bound (test-strictness: no silent
