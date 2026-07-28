@@ -5658,3 +5658,18 @@ vendored `obs-source.c` release-cadence fix (#726 candidate A).
 - Never touched the rig (no ssh/MCP to any box) and never ran/re-ran the hardware "Full-path E2E"
   gate (currently red on the unrelated #834 clock investigation), per dispatch constraints.
 - Rides open PR #704 (dev->main); did not open a new PR, did not merge.
+- Review follow-up (`03537447c`, `02ee9c6b6`) -- two review passes
+  (`superpowers:requesting-code-review` + a `/review`-standards pass) found 1 Warning
+  (sequential per-node sampling multiplies wall-time by node count) + 4 Suggestions (loop
+  duplication, missing `--min-distinct <= --samples` validation, undocumented single-line-JSON
+  assumption, the fixture-injection env var now executing a script). All fixed: extracted shared
+  `grade_http_node()`, parallelized per-node sampling via backgrounded subshells + per-job tmp
+  files joined by `wait || true` (fixed a genuine `set -e` hazard the naive bare `wait` would
+  have introduced -- documented in the playbook), added the `--min-distinct`/`--samples`
+  validation, documented the JSON-line assumption + the executable-fixture trust boundary. 3 new
+  tests including a REAL-timed proof of concurrency (`gate_samples_multiple_nodes_concurrently_
+  not_sequentially`, asserts <6.5s for 2 nodes each needing a genuine 4s sampling window).
+  Playbook: new `## Parallelizing a set -euo pipefail script's loop body with &/wait` section in
+  `.claude/rules/ci-testing-gotchas.md` (the `wait || true` hazard + the `[ cond ] && assignment`
+  non-hazard, verified empirically). Final state: 158/158 binaries, 2395/2395 tests green; CI run
+  30327251047 green.

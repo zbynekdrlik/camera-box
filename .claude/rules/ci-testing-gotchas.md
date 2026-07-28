@@ -4,6 +4,8 @@ paths:
   - "tests/*.rs"
   - "scripts/version-integrity-gate.sh"
   - "scripts/drift-guard.sh"
+  - "scripts/dantesync-gate.sh"
+  - "scripts/clock-offset-guard.sh"
 ---
 
 # CI + bash-test-harness gotchas (#826)
@@ -112,3 +114,36 @@ multi-sampling was added, and means most pre-existing single-read "unreachable"/
 need NO `--samples`/`--window-s` override at all — only tests whose fixture IS reachable (so the
 loop proceeds to try further reads) need the override to stay fast and to satisfy the new
 min-distinct-samples requirement.
+
+## Parallelizing a `set -euo pipefail` script's loop body with `&`/`wait` (#836)
+
+`dantesync-gate.sh` moved from grading N independent nodes ONE AFTER ANOTHER to grading them
+CONCURRENTLY (`grade_http_node ... > "$outfile" &` per node, then `wait`) once sampling a single
+node started taking real wall-clock time. Two `set -e` traps to know about before doing this in
+ANY script here that starts with `set -euo pipefail`:
+
+1. **A bare `wait` (no args) returns the exit status of the LAST job it waited for — and under
+   `set -e` a non-zero return from a bare `wait` statement WILL abort the script**, even though
+   the job's own failure already happened safely in the background and you don't actually care
+   about its raw exit code (you read the real per-job outcome back from a file). Always write
+   `wait || true` when you don't need to react to which job failed via its process exit status.
+2. **`[ cond ] && assignment` / `[ cond ] && do_something` as a STANDALONE statement does NOT
+   trip `set -e` when `cond` is false** — this is a real, easy-to-misjudge bash exemption (any
+   command that is part of an AND-OR list OTHER THAN the list's last command is exempt from `-e`,
+   and a short-circuited `&&` never reaches its second half, so the first half is treated as "not
+   the last command run"). Verified empirically: `bash -c 'set -e; [ 0 -gt 0 ] && x=1; echo ok'`
+   prints `ok` and exits 0. Don't "fix" this pattern defensively (e.g. rewriting it to an
+   `if`/`fi`) out of a mistaken belief it's an `-e` hazard — it isn't. The genuine hazard is #1
+   above (`wait`), not this one.
+
+**When backgrounding a loop body:** each job needs its own OUTPUT channel (a per-job tmp file for
+stdout, redirected at the `&` call site) and its own VERDICT channel if the caller needs to know
+pass/fail per job (a per-job tmp file the job function `printf`s its result into directly — never
+try to smuggle a verdict back through the backgrounded function's own exit CODE, since `wait`'s
+exit-status reporting for multiple backgrounded jobs is awkward and, per #1, actively dangerous
+under `set -e`). Replay the per-job output files in the SAME deterministic order they were
+launched (not the order jobs happen to finish) so the report stays byte-for-byte stable regardless
+of which node's HTTP endpoint answers fastest. Prove the concurrency is REAL, not just structured
+to look parallel, with a timed test: give N≥2 jobs a real multi-second delay each and assert total
+wall-clock stays close to ONE job's delay, not N× it (see
+`gate_samples_multiple_nodes_concurrently_not_sequentially` in `tests/dantesync_gate.rs`).
