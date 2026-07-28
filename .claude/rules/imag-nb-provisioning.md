@@ -3,11 +3,16 @@ paths:
   - "scripts/install-imag-nb.sh"
   - "scripts/setup-imag.sh"
   - "scripts/verify-imag.sh"
+  - "scripts/imag-obs-start.sh"
+  - "scripts/imag-obs-stop.sh"
+  - "scripts/obs_phase2.py"
+  - "scripts/imag_scenes.py"
   - "tests/install_imag_nb_pure_functions.rs"
   - "tests/setup_imag_hardware_agnostic.rs"
   - "tests/setup_imag_guards.rs"
   - "tests/setup_imag_pure_functions.rs"
   - "tests/verify_imag_pure_functions.rs"
+  - "tests/harness_imag_obs_start_stop_840.rs"
 ---
 
 # Replacing the imag notebook — install the OS, provision it, then VERIFY it (#791 / #815 / #816 / #821)
@@ -197,3 +202,51 @@ containing plausible-looking strings trips the repo's secret-scanning `git add`/
 dodge the pattern; append `# airuleset:secret-ok <reason>` to the `git add`/`git commit` command
 (same convention as the other `airuleset:*-ok` bypasses) and state plainly what the flagged content
 actually is.
+
+## `verify-imag.sh`/similar checks can OPEN what they OWN — audit checks used from TWO callers separately (#840)
+
+`scripts/obs_phase2.py open-projectors` is called from TWO places: `recording-e2e.sh`'s `[0/8]`
+preflight (which WANTS to open the projectors as a self-heal before a run) and, before #840,
+`verify-imag.sh` check (o) (which used the SAME call to establish the very condition it then
+asserted with `wmctrl -l`). A check whose job is to PROVE a state exists must never call the
+action that CREATES that state first — always read the boot-produced signal directly (here:
+`wmctrl -l` with zero side effects), and separately prove PERSISTENCE by exercising the box's own
+real restart path (`imag-obs-stop.sh` + `imag-obs-start.sh`, or an actual reboot) rather than
+trusting a one-shot open-from-dev1 to mean anything about what survives a restart. When adding a
+new acceptance check, ask: "does this check CALL the same action it then MEASURES?" — if yes, it's
+the #840 bug shape.
+
+## Verify a captured-output PARSER against the REAL current output text, never an assumed format (#843)
+
+`imag_scenes_output_ok()` in `verify-imag.sh` required the literal regex
+`^MV scenes: ${count}/${count} OK`, but `imag_scenes.py`'s real print line is
+`MV scenes: N/N (multiview, low-bw) OK` — the regex never accounted for the
+`(multiview, low-bw)` clause sitting in between, so the check silently FAILED on every healthy
+box since the line was first written (confirmed via `git log -p`, not a #840 regression). Any
+check function that parses another script's printed text: paste the REAL current output (run the
+producer script live, or read its exact `print(...)` f-string) against the checker function
+directly (`. verify-imag.sh; imag_foo_output_ok "<pasted real text>" ...`) before trusting it —
+never assume an old regex still matches after the producer's print format changed.
+
+## `wmctrl -c` substring-closes the MAIN OBS window safely — Projector titles never collide (#840)
+
+`wmctrl -c "OBS Studio"` (default: case-insensitive SUBSTRING match against the full title,
+first match wins — confirmed via `man wmctrl`) is safe to use for a graceful OBS close because the
+MAIN window's title always starts with `OBS Studio <ver> - ...` while the two Projector windows
+are titled exactly `Projector - Program` / `Projector - Multiview` (live-verified `wmctrl -l -G`
+on 10.77.9.187) — neither ever contains "OBS Studio", so there is no risk of the close request
+hitting a projector instead. This is the ONLY mechanism that reaches OBS's own Qt
+`Controls -> Exit` code path (which is what actually persists `saved_projectors` and
+`DockState`/`geometry` into the scene collection/`global.ini`) — a bare `pkill -TERM` never runs
+it, live-proven by re-reading `saved_projectors` before/after each (`[]` after SIGTERM-only,
+2 populated entries after `wmctrl -c` + a clean exit).
+
+## `imag-obs-start.sh`/`imag-obs-stop.sh` were NEVER provisioned by setup-imag.sh (#840)
+
+Despite `verify-imag.sh` check (p) checking for `/usr/local/bin/imag-obs-start.sh`'s presence
+since #791/#788, `setup-imag.sh` never actually fetched/installed either operator script — they
+only existed on the live box because a prior session hand-placed them (confirmed: `grep -rn
+"imag-obs-start\|imag-obs-stop" scripts/setup-imag.sh` returned nothing before #840). A passing
+check (p) on a hand-patched box can hide a genuine provisioning gap that only bites on the NEXT
+from-scratch reprovision — when a check verifies a file's presence, also grep the provisioner for
+whether it actually WRITES/FETCHES that file, not just that some check expects it.
