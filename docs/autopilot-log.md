@@ -6094,3 +6094,22 @@ Posted full numbers to #854 (issuecomment-5108016878) + `.claude/skills/recordin
 SKILL.md` (commit f7f7bf52c). No code changed; PR #704 stays blocked on #854. Fix direction
 (painter hold-for-2-refreshes vs camera/capture shutter-timing sync) left open for decision --
 reproduction crate kept outside this repo: ~/devel/tearing-probe-854.
+
+#855 (2026-07-28): A/V-offset gate now excludes acked-offline camboxes instead of failing them.
+Root cause: recording-verdict's all_cambox_av_sync loop iterates a fixed 7-camera Rust constant
+with zero knowledge of the shell-side CAMBOX_OFFLINE_ACK / rig-fleet.txt ack -- an acked-offline
+box (e.g. cam5/cam6/cam7, powered-off-2026-07-27) reported windows=0/candidates=0 as a judged
+"unknown, gate FAIL" instead of being visibly excluded. Fix: new pure crate-root module
+src/offline_ack.rs (Tier-0 testable, RED dbe0f9949 -> GREEN bbb88a202) parses the same
+"box:reason,box:reason" format the shell side canonicalizes; a new --offline-ack-cams CLI arg on
+recording-verdict (RED e2f071bb0 -> GREEN c49e7b081) threads it in, and the av_sync loop reports
+an acked camera verdict:"excluded"/gate_pass:null, never folded into av_all_pass. An unacked
+absent camera keeps failing closed unchanged (the standing gate-strictness rule untouched --
+this only fixes WHO gets judged). scripts/recording-e2e.sh threads $CAMBOX_OFFLINE_ACK straight
+through to both invocation sites (VERDICT_ARGS + MERGE_ARGS); scripts/e2e_discord_report.py gets
+a matching "excluded" branch ("VYNECHANÉ") with a new synthetic fixture + 4 pytest cases. Full
+local Tier-0 suite (161 binaries) + full python suite (611 tests) green. recording-verdict.rs
+itself is required-features=["probe"] (no local compile/test possible per CLAUDE.md's Local
+Build Policy) -- verified in CI only, extra manual review rigor applied. PR: TBD (added to the
+already-open #704 bundle via a PATCH to its body, not a new dev->main PR -- see CLAUDE.md's
+"only ONE open PR per (head,base)" gotcha).

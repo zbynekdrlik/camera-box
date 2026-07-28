@@ -98,6 +98,27 @@ heredoc form for the WHOLE message, not just the backtick-containing line. **Nev
 commit that shipped with a mangled message** (`commit-conventions.md` — no history rewrites); the
 next commit's message is where you note the correction if it matters.
 
+## GOTCHA — mentioning ANY OTHER `#N` in a commit message (even just as prose context) can BLOCK the commit on that ticket's own design gate
+
+The autopilot design-before-code hook (`block-commit-without-design.sh`) scans the WHOLE `git
+commit` command text for issue references — its regex is `(?:^|[\s(/])#([0-9]+)\b`, i.e. ANY
+`#N` preceded by whitespace, `(`, `/`, or the string start, not just the commit's OWN `fix(#N):`
+prefix. **Every distinct `#N` it finds must already have a design comment posted, or the commit
+is BLOCKED** — including a number you only mentioned in passing to explain WHY a rule exists
+(e.g. writing "the standing #836 rule: never widen the tolerance" while fixing `#855`). Live
+incident (2026-07-28, `#855`): a GREEN commit's body referenced `(#836: never widen the
+tolerance...)` — a completely different, already-resolved ticket, cited only for context — and
+the hook blocked the commit demanding a design comment on `#836` too.
+
+**Fix: never write a bare `#N` for an issue OTHER than the one(s) this commit's own design
+comment already covers.** Reference the RULE, not the ticket number, in commit-message prose
+("the standing gate-strictness rule: never widen the tolerance" instead of "the `#836` rule") —
+or, if the number must appear, keep it out of the `(?:^|[\s(/])#\d+` shape (e.g. spelled as
+`issue 836` with no `#`, which the regex does not match). This does NOT apply to the commit's OWN
+ticket number(s) in the conventional `fix(#N):` / `test(#N):` prefix — those already have (or are
+about to get) their design comment via the normal flow; it is specifically OTHER tickets casually
+named in the body that trip the gate.
+
 ## GOTCHA — two autopilot workers sharing this dev1 checkout WILL interleave on `dev`
 
 `~/devel/camera-box` is a single shared clone with **no git worktree isolation** — every worker's
