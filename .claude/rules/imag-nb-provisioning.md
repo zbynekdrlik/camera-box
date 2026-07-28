@@ -125,3 +125,75 @@ regression. Same trap as `scripts/recording-e2e.sh` (see the project CLAUDE.md G
 The pure functions are unit-tested by SOURCING the real script — its `BASH_SOURCE[0] != $0` guard
 skips the destructive flow. Keep every new decision function pure (stdin/args in, text out, `fail`
 on the impossible case) so it stays testable without a box.
+
+## Operator PARITY is a SEPARATE concern from system parity (#791)
+
+`verify-imag.sh`'s pre-#791 checks (kernel, lightdm, OBS log markers, NDI runtime pin, dantesync
+lock, and the (n) `Cam N`/`MV Cam N` **count**) all proved the box is a healthy OBS installation --
+none of them proved the box reproduces what the OPERATOR actually sees/uses. A box can pass every
+one of those and still be missing whole scenes (`Cam 7`/`MV Cam 7`), whole NDI-source bindings
+(the Resolume/overlay chain), and have a scrambled scene ORDER -- exactly what shipped on the
+replacement notebook (.187) before this fix. The general lesson: an acceptance gate for an
+appliance with a human-curated UI state (scenes, dock layout, menu, wallpaper) needs a check for
+the FULL curated state, not just "the automated parts came up" -- a count (`6/6 OK`) is not the
+same claim as a full set+order match.
+
+## Getting a canonical scene collection JSON: pull it from the LIVE box, never hand-author it
+
+A committed "canonical" artifact for anything OBS persists as JSON (a scene collection) should be
+captured from a REAL running box (`cat ~/.config/obs-studio/basic/scenes/*.json` over SSH), never
+hand-typed. It is plain JSON (UUIDs, scene items, per-scene `private_settings`) -- safe to
+`python3 -m json.tool` for a diffable, pretty-printed commit; OBS loads a pretty-printed file
+identically to its own compact one (verified live). **OBS auto-discovers and loads a pre-placed
+scene collection with ZERO explicit config wiring** — dropping a file named to match the
+collection name (`Untitled.json`, matching `[Basic] SceneCollectionFile=Untitled` if that's what
+the box already uses, or simply the ONLY `.json` under `basic/scenes/` on an otherwise-fresh
+profile) BEFORE OBS's first launch is enough; no `[Basic]` section needs to be hand-written into
+`global.ini` for this to work (verified with a disposable stock OBS 30.0.2 + Xvfb on dev1: a truly
+empty profile picked the pre-placed file straight up, including its `current_scene`).
+
+**`GetSceneList`'s own array order is the REVERSE of the scene collection JSON's `scene_order`
+field** (live-verified against `.187`, 2026-07-28: WS index 0 = the LAST scene in the JSON's
+`scene_order`, and vice versa). Any code comparing a live WS scene order against a JSON-derived
+canonical list must `reversed()` one side first.
+
+## Generating a Qt `DockState`/`geometry` blob OFF-RIG: Xvfb + openbox + a disposable stock OBS
+
+OBS only persists `[BasicWindow]` `geometry=`/`DockState=` (a base64 `QMainWindow::saveState()`/
+`saveGeometry()` blob) on a CLEAN exit -- a box that has run 24/7 since bring-up has never shed
+one, and hand-authoring the value is not viable (an internal, versioned Qt binary stream). The
+safe way to get a REAL blob without ever touching the live rig:
+
+```bash
+sudo apt-get install -y xdotool openbox   # scrot/import from imagemagick already covers screenshots
+Xvfb :77 -screen 0 1920x1080x24 &
+DISPLAY=:77 openbox &                      # a WM is REQUIRED -- without one, top-level dock
+                                            # windows (e.g. the undocked Stats dialog) render
+                                            # completely unmapped/invisible to `import -window root`
+HOME=/tmp/throwaway-home DISPLAY=:77 obs --disable-shutdown-check &
+# xdotool mousemove <x> <y> click 1  to dismiss first-run dialogs (Auto-Config Wizard, DistroAV
+# plugin-version popup, etc — read their positions via `import -window root` screenshots first)
+# Docks menu -> Stats -> its little dock/undock icon in the floating window's title bar docks it
+# into the main window immediately (click at the icon's coordinates)
+# Then Controls -> Exit (a CLEAN exit) so OBS itself writes geometry=/DockState= into
+# $HOME/.config/obs-studio/global.ini -- grep those two keys out and seed them elsewhere.
+```
+
+A DIFFERENT, older OBS version (30.0.2 stock vs the rig's 32.1.2 genlock build) is fine for this --
+Qt's dock-widget object names (`scenesDock`/`sourcesDock`/`mixerDock`/`transitionsDock`/
+`controlsDock`/`statsDock`) have been stable for years, and `restoreState()` degrades gracefully
+(best-effort per-widget-by-name) if a future build adds/removes an unrelated dock.
+
+**Base64 blobs can contain literal `/` — never insert them with `sed`'s `s/.../.../ ` (delimiter
+collision).** Use `awk` (string concatenation, no regex substitution) to insert generated content
+containing an uncontrolled/opaque payload into an existing ini section instead.
+
+## `block-sensitive-staging.sh` false-positives on long base64/JSON payloads — bypass, don't strip
+
+Committing a legitimate long base64-ish blob (the DockState/geometry values above) or a JSON file
+containing plausible-looking strings trips the repo's secret-scanning `git add`/`git commit` hook
+(Gate 2: "32+ char base64-ish blobs"). This is a FALSE POSITIVE for a genuine non-secret payload
+(a Qt UI-layout blob, an OBS scene collection) — don't strip or reformat the legitimate content to
+dodge the pattern; append `# airuleset:secret-ok <reason>` to the `git add`/`git commit` command
+(same convention as the other `airuleset:*-ok` bypasses) and state plainly what the flagged content
+actually is.

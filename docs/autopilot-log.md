@@ -5673,3 +5673,50 @@ vendored `obs-source.c` release-cadence fix (#726 candidate A).
   `.claude/rules/ci-testing-gotchas.md` (the `wait || true` hazard + the `[ cond ] && assignment`
   non-hazard, verified empirically). Final state: 158/158 binaries, 2395/2395 tests green; CI run
   30327251047 green.
+
+## 2026-07-28 -- #791 imag reprovision parity (cam7 scenes, canonical operator collection, dock persistence, verify-parity gate)
+
+Root cause traced live against BOTH known imag boxes (.182 incumbent 10.77.9.182, .187
+replacement 10.77.9.187 -- scene collections confirmed byte-identical). Version bump
+`138a3a694` (1.7.0-dev.380). RED `c434466ce` / GREEN `ad17a0008`.
+
+- **`scripts/imag_scenes.py`**: `CAMS = range(1, 7)` silently excluded cam7 (#753) from every
+  scene the boot `--bootstrap` self-heal creates/repairs -- replaced with `IMAG_SCENE_CAM_COUNT`
+  (env-overridable, default 7). Added `CANONICAL_SCENE_ORDER`/`CANONICAL_NDI_SOURCES` (both
+  derived from `CAMS`, never a second hand-maintained list), pure `scene_order_mismatch()` /
+  `ndi_source_mismatches()`, and a new read-only `--verify-parity` mode. Live-verified read-only
+  against .187: `scene order: OK` / `ndi sources: OK`.
+- **`scripts/imag-obs-scenes-canonical.json`** (new): the box's REAL 17-scene collection
+  (Scene, Cam 7..Cam 1, resolume imag, MV Cam 1..7, MW resolume imag), captured live off .182 --
+  installs the operator-owned scenes ("resolume imag"/"MW resolume imag") that
+  `imag_scenes.py`'s own #785 OPERATOR-WINS carve-out deliberately never creates. Verified with a
+  disposable stock OBS 30.0.2 kiosk (Xvfb+openbox on dev1, zero rig contact): a genuinely fresh
+  profile auto-loads it with zero manual steps.
+- **`scripts/setup-imag.sh`**: (a) installs the canonical scene collection as
+  `~/.config/obs-studio/basic/scenes/Untitled.json`, ONLY when the box has none yet (never
+  overwrites a live box); (b) seeds `[BasicWindow]` `geometry=`/`DockState=` in
+  `global.ini`/`user.ini` (inside `seed_ini()`, awk not sed -- the captured base64 blob contains
+  literal `/`), ONLY when `DockState` is absent. The DockState/geometry blob is a REAL captured
+  Qt `QMainWindow::saveState()`/`saveGeometry()` value (not hand-authored): generated once,
+  off-rig, by opening Docks -> Stats in a throwaway OBS 30.0.2 kiosk, dragging it into a docked
+  column, then a clean `File > Exit`. Root cause: OBS only persists this on a CLEAN exit; imag-nb
+  runs 24/7 and has therefore never shed one on its own (confirmed empty on BOTH boxes' actual
+  `global.ini`). Verified end-to-end: the seeded ini alone reproduces the exact geometry + docked
+  Stats panel with zero manual clicks.
+- **`scripts/verify-imag.sh`**: two new mandatory checks -- (q) full canonical scene-order + all
+  10 NDI-source bindings via `imag_scenes.py --verify-parity` (the pre-existing (n) check only
+  ever proved the Cam-N/MV-Cam-N COUNT, never the full 17-scene set/order nor the Resolume/
+  overlay bindings -- exactly why the #791 live incident passed silently); (r) `DockState`
+  presence in `global.ini`.
+- **Stream Deck**: investigated, NOT touched. Prior art already exists -- #731 (closed):
+  Bitfocus Companion Satellite (a headless HID-to-network bridge), not direct Stream Deck
+  software, installed by `setup-imag.sh` step 20, pointed at `companion.lan`. Confirmed live:
+  `satellite.service` enabled+active on BOTH .182 and .187. No physical Elgato Stream Deck is
+  currently plugged into either box (`lsusb` clean on both) -- a hardware/operator-config matter,
+  not a code gap.
+- Tests: `tests/setup_imag_guards.rs` (+6 new, incl. the RED->GREEN cam7-hardcode fix and the
+  canonical-JSON/DockState guards), `tests/verify_imag_pure_functions.rs` (+2 new pure functions,
+  `imag_scenes_output_ok` gained an EXPECTED_COUNT param), new
+  `tests/python/test_imag_scenes_verify_parity.py` (10 tests, FakeObs pattern). Full local suite
+  verified green (`cargo test` all binaries incl. the two touched, `pytest tests/python` 591/591)
+  after both the RED and the GREEN commit.
