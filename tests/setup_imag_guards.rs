@@ -167,15 +167,19 @@ fn setup_imag_autostart_strips_saved_projectors_522() {
         .find("saved_projectors")
         .expect("saved_projectors strip must be present");
     // must run BEFORE OBS launches so OBS loads the stripped collection (restore happens at load).
-    // #816: the pin is no longer the literal 2-11 — the autostart is written with an
-    // __ISOLCPUS__ placeholder that step 8's DERIVED isolated-CPU set is sed'd into, so the same
-    // script provisions notebooks with different core counts. Ordering contract unchanged.
+    // #840: the autostart no longer runs a bare `taskset -c __ISOLCPUS__ obs &` itself -- it now
+    // launches OBS THROUGH imag-obs-start.sh (the same path the operator's menu uses), passed the
+    // DERIVED isolated-CPU set via an exported env var. The __ISOLCPUS__ placeholder mechanism
+    // (step 8's derived set, sed'd in after the heredoc) is unchanged; only WHERE it lands moved
+    // from a direct taskset argument to an env-var export. Ordering contract unchanged.
     let launch = body
-        .find("taskset -c __ISOLCPUS__ obs &")
-        .expect("the autostart OBS launch must be present");
+        .find(r#"export IMAG_ISOLATED_CPUS="__ISOLCPUS__""#)
+        .expect(
+            "the autostart's IMAG_ISOLATED_CPUS export (feeding imag-obs-start.sh) must be present",
+        );
     assert!(
         strip < launch,
-        "the saved_projectors strip must run BEFORE the autostart launches OBS (#522)"
+        "the saved_projectors strip must run BEFORE the autostart launches OBS (#522/#840)"
     );
 }
 
@@ -1553,21 +1557,31 @@ fn setup_imag_isolation_step_calls_safe_grub_regen_not_raw_update_grub_483() {
     );
 }
 
-/// #483/#522: OBS must be pinned to the isolated P-core block cpu2-11 on BOTH launch paths — the
-/// boot-time openbox autostart script AND the script's own provisioning-time launcher. Without
-/// this, isolcpus (once active after the next boot) would STARVE OBS onto cpu0,1,12-15 — the
-/// tiny remainder reserved for GNOME/housekeeping/E-cores (live-verified finding, #483 comment).
-/// #522 replaced the old GNOME `.config/autostart/obs.desktop` sed-patch mechanism (dead code on
-/// this lightdm+openbox box, which never read XDG autostart) with a real openbox autostart
-/// script — the taskset pin now lives THERE instead of a sed-patched .desktop `Exec=` line.
+/// #483/#522/#840: OBS must be pinned to the isolated P-core block cpu2-11 on BOTH launch paths —
+/// the boot-time openbox autostart script (via imag-obs-start.sh, #840) AND the script's own
+/// provisioning-time launcher. Without this, isolcpus (once active after the next boot) would
+/// STARVE OBS onto cpu0,1,12-15 — the tiny remainder reserved for GNOME/housekeeping/E-cores
+/// (live-verified finding, #483 comment). #522 replaced the old GNOME
+/// `.config/autostart/obs.desktop` sed-patch mechanism (dead code on this lightdm+openbox box,
+/// which never read XDG autostart) with a real openbox autostart script; #840 then unified that
+/// script's OWN OBS launch with the operator's manual "Spustit OBS" path (imag-obs-start.sh) —
+/// the DERIVED isolated set now reaches imag-obs-start.sh via an exported env var rather than a
+/// direct taskset argument inline in the autostart heredoc.
 #[test]
 fn setup_imag_pins_obs_to_pcore_block_on_both_launch_paths_483() {
     let body = read(SETUP);
     assert!(
-        body.contains("taskset -c __ISOLCPUS__ obs &"),
-        "{SETUP}: the openbox autostart script (#522) must launch OBS pinned to the DERIVED \
-         isolated set (the __ISOLCPUS__ placeholder step 8 sed's in, #816) — without the pin, \
-         isolcpus would starve the boot-launched OBS onto the housekeeping CPUs"
+        body.contains(r#"export IMAG_ISOLATED_CPUS="__ISOLCPUS__""#),
+        "{SETUP}: the openbox autostart script must export IMAG_ISOLATED_CPUS=<the DERIVED \
+         isolated set> (the __ISOLCPUS__ placeholder step 8 sed's in, #816) before calling \
+         imag-obs-start.sh (#840) — without the pin, isolcpus would starve the boot-launched OBS \
+         onto the housekeeping CPUs"
+    );
+    assert!(
+        body.contains("/usr/local/bin/imag-obs-start.sh"),
+        "{SETUP}: the openbox autostart script must launch OBS THROUGH imag-obs-start.sh (#840) \
+         — a second, separate launch mechanism is what let the boot path silently diverge from \
+         the operator's manual path and drop the projector self-heal"
     );
     assert!(
         body.contains(r#"nohup taskset -c "$IMAG_ISOLATED_CPUS" obs >/tmp/obs-launch.log"#),
@@ -2020,67 +2034,90 @@ fn setup_imag_autostart_primaries_panel_not_hdmi_522() {
     );
 }
 
-/// The autostart script must launch OBS taskset-pinned to the isolated P-core block, exactly as
-/// the provisioning-time launcher does (#483) — a reboot must not silently starve OBS.
+/// #840: the autostart script must launch OBS THROUGH imag-obs-start.sh, taskset-pinned to the
+/// isolated P-core block via an exported env var — exactly as the provisioning-time launcher
+/// pins directly (#483) — a reboot must not silently starve OBS.
 #[test]
 fn setup_imag_autostart_launches_obs_pinned_522() {
     let body = read(SETUP);
     assert!(
-        body.contains("taskset -c __ISOLCPUS__ obs &"),
-        "{SETUP}: the openbox autostart script must launch OBS pinned to the DERIVED isolated set \
-         (#483/#816) — without it, isolcpus would starve the boot-launched OBS onto the \
-         housekeeping CPUs"
+        body.contains(r#"export IMAG_ISOLATED_CPUS="__ISOLCPUS__""#)
+            && body.contains("/usr/local/bin/imag-obs-start.sh"),
+        "{SETUP}: the openbox autostart script must export IMAG_ISOLATED_CPUS=<the DERIVED \
+         isolated set> and launch OBS through imag-obs-start.sh (#483/#816/#840) — without the \
+         pin, isolcpus would starve the boot-launched OBS onto the housekeeping CPUs"
     );
 }
 
-/// The autostart script must wait for the OBS WebSocket (:4455) to come up BEFORE seeding — a
-/// race here would run imag_scenes.py against a not-yet-listening OBS and silently no-op.
+/// #840: the autostart script must DELEGATE the WebSocket wait + seed + projector-open sequence
+/// to imag-obs-start.sh, rather than duplicating a bare inline wait loop — the OLD inline 30s
+/// `/dev/tcp` wait (no obs-process-liveness check, its failure swallowed by `|| true`) is exactly
+/// what let a slow boot silently drop the projector self-heal (live capture on 10.77.9.187:
+/// imag_scenes.py's ConnectionRefusedError in /tmp/imag-seed.log, timestamped at boot). The
+/// export must happen BEFORE the delegated call, and the saved_projectors strip (which must run
+/// before OBS ever loads the scene collection) must happen BEFORE the export.
 #[test]
 fn setup_imag_autostart_waits_for_websocket_before_seeding_522() {
     let body = read(SETUP);
-    let wait_loop = body
-        .find("/dev/tcp/127.0.0.1/4455")
-        .expect("{SETUP}: the autostart script must wait on 127.0.0.1:4455 before seeding");
-    let obs_launch = body
-        .find("taskset -c __ISOLCPUS__ obs &")
-        .expect("obs launch must exist in the autostart script");
+    let strip = body
+        .find("saved_projectors")
+        .expect("{SETUP}: the saved_projectors strip must be present");
+    let export = body
+        .find(r#"export IMAG_ISOLATED_CPUS="__ISOLCPUS__""#)
+        .expect("{SETUP}: the autostart script must export IMAG_ISOLATED_CPUS before launching");
+    // Anchor on the FULL delegated invocation line, not the bare path -- the bare path ALSO
+    // appears earlier, in the step-16 install block that fetches imag-obs-start.sh onto the box
+    // (see setup_imag_installs_obs_start_stop_scripts_840) -- `.find()` would otherwise latch
+    // onto that earlier occurrence instead of the actual autostart call (the exact self-collision
+    // class documented in this repo's CLAUDE.md GOTCHA on anchor collisions).
+    let delegated_call = body
+        .find("/usr/local/bin/imag-obs-start.sh >>/tmp/imag-seed.log")
+        .expect("{SETUP}: the autostart script must call imag-obs-start.sh");
     assert!(
-        obs_launch < wait_loop,
-        "{SETUP}: OBS must be launched BEFORE the autostart script waits for its WebSocket to \
-         come up"
+        strip < export && export < delegated_call,
+        "{SETUP}: ordering must be saved_projectors-strip < IMAG_ISOLATED_CPUS export < the \
+         imag-obs-start.sh call (#840) — imag-obs-start.sh itself owns the WebSocket wait, the \
+         seed, and the projector-open, which used to be duplicated inline here"
     );
 }
 
-/// The autostart script must self-heal BOTH the scene/#507-multiview-membership seed AND the
-/// projector layout on EVERY boot — a reboot must never require a human to re-run
-/// imag_scenes.py by hand.
+/// #840: the autostart script must NOT duplicate the inline WebSocket-wait/seed/projector-open
+/// sequence any more — that duplication (a second launch mechanism, fragile and silently
+/// swallowing its own failure) is the root cause this ticket fixes. The whole sequence now lives
+/// in imag-obs-start.sh (covered by tests/harness_imag_obs_start_stop_840.rs) and is invoked as
+/// ONE call from the autostart script.
 #[test]
-fn setup_imag_autostart_seeds_and_opens_projectors_522() {
+fn setup_imag_autostart_no_longer_duplicates_the_launch_sequence_840() {
     let body = read(SETUP);
     assert!(
-        body.contains(r#"--host 127.0.0.1"#),
-        "{SETUP}: the autostart script must invoke imag_scenes.py against the LOCAL OBS \
-         (127.0.0.1) — it runs ON the box, not remotely from dev1"
+        !body.contains("taskset -c __ISOLCPUS__ obs &"),
+        "{SETUP}: the autostart script must NOT run a bare `taskset -c __ISOLCPUS__ obs &` \
+         itself any more — OBS is launched BY imag-obs-start.sh (#840), which the autostart \
+         script now delegates to"
     );
-    let seed_call = body
-        .find(r#""$PYBIN" "$SCN" --host 127.0.0.1 >"#)
-        .expect("{SETUP}: the autostart script must run the seed (no --projector) invocation");
-    let projector_call = body
-        .find(r#""$PYBIN" "$SCN" --host 127.0.0.1 --projector"#)
-        .expect("{SETUP}: the autostart script must ALSO run the --projector invocation");
+    let autostart_start = body
+        .find(r#"cat > "$USER_HOME/.config/openbox/autostart" <<'AUTOSTART_EOF'"#)
+        .expect("the openbox autostart heredoc write must exist");
+    let autostart_end = body
+        .find("AUTOSTART_EOF")
+        .expect("the AUTOSTART_EOF heredoc terminator must exist");
+    let autostart_body = &body[autostart_start..autostart_end];
     assert!(
-        seed_call < projector_call,
-        "{SETUP}: the seed invocation (scenes/#507 multiview membership) must run BEFORE \
-         --projector, so the projectors open against a fully-seeded scene collection"
+        !autostart_body.contains(r#""$PYBIN" "$SCN""#),
+        "{SETUP}: the autostart heredoc body must no longer invoke imag_scenes.py directly \
+         (neither the bare seed nor --projector) -- imag-obs-start.sh (which the autostart now \
+         calls) owns that sequence via its OWN --bootstrap invocation (#840), which ALSO \
+         correctly restores the operator's last program scene on boot (#785) -- something the \
+         old bare (non-bootstrap) autostart seed call never did"
     );
 }
 
 /// setup-imag.sh must actually INSTALL imag_scenes.py + a websocket-client dependency onto the
-/// box at a fixed path, and the __PYBIN__/__SCN__ placeholders left in the quoted heredoc must
-/// actually get substituted — a literal "__PYBIN__" left in the generated file would make the
-/// boot-time self-heal a permanent no-op. The boot hook cannot depend on a hand-made venv or a
-/// checked-out copy of the repo (setup-imag.sh runs standalone on the box, per its own step-12
-/// comment: "no sibling scripts/... checked out there").
+/// box at a fixed path (#522). The boot hook cannot depend on a hand-made venv or a checked-out
+/// copy of the repo (setup-imag.sh runs standalone on the box, per its own step-12 comment: "no
+/// sibling scripts/... checked out there"). #840: the autostart heredoc no longer invokes
+/// imag_scenes.py directly at all (imag-obs-start.sh owns that now), so the __PYBIN__/__SCN__
+/// placeholders it used to interpolate are gone too — only __ISOLCPUS__ still needs substituting.
 #[test]
 fn setup_imag_installs_imag_scenes_py_and_websocket_dep_522() {
     let body = read(SETUP);
@@ -2099,12 +2136,15 @@ fn setup_imag_installs_imag_scenes_py_and_websocket_dep_522() {
         "{SETUP} must actually fetch/install scripts/imag_scenes.py onto the box (via gh api or \
          curl) — not just reference the path"
     );
+    // #840: the autostart heredoc no longer interpolates __PYBIN__/__SCN__ (it no longer invokes
+    // imag_scenes.py directly at all -- see setup_imag_autostart_no_longer_duplicates_the_
+    // launch_sequence_840) -- only __ISOLCPUS__ is still substituted post-heredoc.
     let sed_sub = body
-        .find(r#"sed -i "s#__PYBIN__#${PYBIN}#; s#__SCN__#${SCN}#; s#__ISOLCPUS__#${IMAG_ISOLATED_CPUS}#""#)
+        .find(r#"sed -i "s#__ISOLCPUS__#${IMAG_ISOLATED_CPUS}#""#)
         .expect(
-            "{SETUP} must sed-substitute the __PYBIN__/__SCN__ placeholders with the actual \
-             resolved paths right after writing the heredoc — a literal __PYBIN__ left in the \
-             generated file would make the boot-time self-heal a permanent no-op",
+            "{SETUP} must sed-substitute the __ISOLCPUS__ placeholder with the DERIVED isolated \
+             set right after writing the heredoc — a literal __ISOLCPUS__ left in the generated \
+             file would make the boot-time CPU pin a permanent no-op (#840)",
         );
     let heredoc_write = body
         .find(r#"cat > "$USER_HOME/.config/openbox/autostart" <<'AUTOSTART_EOF'"#)
@@ -2112,6 +2152,55 @@ fn setup_imag_installs_imag_scenes_py_and_websocket_dep_522() {
     assert!(
         heredoc_write < sed_sub,
         "{SETUP}: the placeholder substitution must happen AFTER the heredoc is written"
+    );
+}
+
+/// #840: setup-imag.sh must actually INSTALL /usr/local/bin/imag-obs-start.sh AND
+/// /usr/local/bin/imag-obs-stop.sh onto the box, fetched from the SAME genlock repo dev branch
+/// imag_scenes.py already uses. Before this ticket NEITHER file was ever provisioned by this
+/// script (confirmed: zero references to either filename anywhere in setup-imag.sh) — they only
+/// existed on the live box because a prior session hand-placed them. Since the rewritten
+/// autostart now HARD-DEPENDS on imag-obs-start.sh existing (see
+/// setup_imag_autostart_launches_obs_pinned_522), a from-scratch reprovision without this step
+/// would boot into an autostart calling a script that was never installed.
+#[test]
+fn setup_imag_installs_obs_start_stop_scripts_840() {
+    let body = read(SETUP);
+    assert!(
+        body.contains(r#"OBS_START_SH="/usr/local/bin/imag-obs-start.sh""#),
+        "{SETUP} must resolve a fixed on-box install path for imag-obs-start.sh (#840)"
+    );
+    assert!(
+        body.contains("scripts/imag-obs-start.sh?ref=dev") && body.contains("gh api"),
+        "{SETUP} must actually fetch scripts/imag-obs-start.sh from the genlock repo via gh api \
+         (#840) — not just reference the path"
+    );
+    assert!(
+        body.contains(r#"OBS_STOP_SH="/usr/local/bin/imag-obs-stop.sh""#),
+        "{SETUP} must resolve a fixed on-box install path for imag-obs-stop.sh (#840)"
+    );
+    assert!(
+        body.contains("scripts/imag-obs-stop.sh?ref=dev") && body.contains("gh api"),
+        "{SETUP} must actually fetch scripts/imag-obs-stop.sh from the genlock repo via gh api \
+         (#840) — not just reference the path"
+    );
+    // Both installs must be executable and must happen BEFORE the autostart heredoc is written
+    // (the heredoc references /usr/local/bin/imag-obs-start.sh, so it must already exist by then
+    // for the ordering to make operational sense, even though the heredoc itself is inert text
+    // until the NEXT boot).
+    let start_chmod = body
+        .find(r#"chmod 755 "$OBS_START_SH""#)
+        .expect("{SETUP} must chmod 755 the installed imag-obs-start.sh (#840)");
+    let stop_chmod = body
+        .find(r#"chmod 755 "$OBS_STOP_SH""#)
+        .expect("{SETUP} must chmod 755 the installed imag-obs-stop.sh (#840)");
+    let heredoc_write = body
+        .find(r#"cat > "$USER_HOME/.config/openbox/autostart" <<'AUTOSTART_EOF'"#)
+        .expect("the openbox autostart heredoc write must exist");
+    assert!(
+        start_chmod < heredoc_write && stop_chmod < heredoc_write,
+        "{SETUP}: both imag-obs-start.sh and imag-obs-stop.sh must be installed BEFORE the \
+         autostart heredoc is written (#840) -- the autostart references imag-obs-start.sh"
     );
 }
 

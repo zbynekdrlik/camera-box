@@ -669,6 +669,67 @@ fn imag_projector_counts_ok_requires_exactly_one_each() {
     }
 }
 
+// #840: check (o) used to call `obs_phase2.py open-projectors` ITSELF before counting via
+// wmctrl -- self-establishing the very condition it then asserted, so it would pass even on a
+// box that comes up blank every single boot (the #840 root cause). The gate must instead (1)
+// read the CURRENT projector counts with no side effect and FAIL if they're not already 1+1, and
+// (2) restart OBS through the box's OWN operator scripts (imag-obs-stop.sh + imag-obs-start.sh --
+// the SAME path a real reboot/manual restart uses) and re-count, to actually prove PERSISTENCE.
+
+#[test]
+fn verify_imag_no_longer_self_establishes_projectors_before_counting_840() {
+    let body = std::fs::read_to_string(script()).unwrap();
+    assert!(
+        !body.contains("open-projectors"),
+        "verify-imag.sh must NOT call `obs_phase2.py open-projectors` any more (#840) -- that \
+         call OPENS the projectors itself, so check (o) would self-establish the very condition \
+         it then asserts, passing even on a box that comes up with zero projectors every boot"
+    );
+}
+
+#[test]
+fn verify_imag_restarts_obs_via_its_own_scripts_to_prove_persistence_840() {
+    let body = std::fs::read_to_string(script()).unwrap();
+    assert!(
+        body.contains("/usr/local/bin/imag-obs-stop.sh")
+            && body.contains("/usr/local/bin/imag-obs-start.sh"),
+        "verify-imag.sh check (o) must restart OBS via imag-obs-stop.sh + imag-obs-start.sh (the \
+         box's OWN operator scripts, the same path a real reboot/manual restart uses) to prove \
+         the projectors PERSIST across a real restart (#840), not just that they can be opened \
+         once from dev1"
+    );
+}
+
+#[test]
+fn verify_imag_counts_projectors_before_and_after_the_restart_840() {
+    let body = std::fs::read_to_string(script()).unwrap();
+    let restart = body
+        .find("/usr/local/bin/imag-obs-stop.sh")
+        .expect("the restart invocation must be present");
+    // The wmctrl projector-count read (grep -c 'Projector - Multiview') must appear on BOTH
+    // sides of the restart call -- once to prove the box's OWN startup path already established
+    // them (no self-establish), and again afterward to prove they came back.
+    let counts_before: Vec<_> = body
+        .match_indices("grep -c 'Projector - Multiview'")
+        .map(|(i, _)| i)
+        .collect();
+    assert!(
+        counts_before.len() >= 2,
+        "verify-imag.sh must count the Multiview projector window BOTH before and after the \
+         restart (#840) -- found {} occurrence(s)",
+        counts_before.len()
+    );
+    assert!(
+        counts_before[0] < restart,
+        "the FIRST projector count must happen BEFORE the restart (proving the box's own \
+         startup path already had them, never self-established by this gate)"
+    );
+    assert!(
+        counts_before.iter().any(|&i| i > restart),
+        "a projector count must ALSO happen AFTER the restart (proving persistence, #840)"
+    );
+}
+
 // ---------------------------------------------------------------------------------------------
 // (p) operator scaffolding present (#791)
 // ---------------------------------------------------------------------------------------------
