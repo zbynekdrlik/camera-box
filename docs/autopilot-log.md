@@ -5576,3 +5576,38 @@ vendored `obs-source.c` release-cadence fix (#726 candidate A).
   gate, per the dispatch constraints (the supervisor was mid-investigation on an unrelated clock
   fault).
 - Rides open PR #704 (dev->main); did not open a new PR, did not merge.
+
+## 2026-07-28 — #835 (stale e2e dante pre-fetch doc + age-blind --win-status relay) -- PR #704 train
+
+- Root cause + approach posted `gh issue comment 835` (issuecomment-5099070997) BEFORE the first
+  commit: `.claude/skills/e2e/SKILL.md` still told an operator to hand-pre-fetch each Windows
+  box's DanteSync status into `dante-{strih,stream}.json` before every run -- false since #648
+  (`e2cfeb3d7`), which switched `dantesync-gate.sh` to a live `--win-http` fetch and deleted the
+  file-writing code. Following the stale doc dropped a 21-day-old snapshot into a live run dir
+  (harmless only because nothing reads it). Decided (grep-confirmed zero live callers of
+  `dantesync-gate.sh --win-status` anywhere but its own tests) to REMOVE the file-relay path
+  outright rather than bolt a freshness guard onto dead code -- `--win-http` already covers the
+  same two nodes strictly better. Kept `scripts/lib/win-status-args.sh` (the shared NAME=FILE
+  parser) since `w32time-gate.sh` still legitimately uses it for a non-time-critical invariant.
+- docs commit `6d6a3d9c2` -- corrected the SKILL.md prerequisite block + a second stale claim in
+  the dev1<->painter clock-offset gate section that analogized itself to the now-gone pre-fetch.
+- RED: `test(#835): [red] ...` (`484d5f037`) -- `tests/dantesync_gate.rs`: removed the 4 tests
+  exercising `--win-status` node behavior (coverage already duplicated 1:1 by the existing
+  `--win-http` tests), added `help_no_longer_documents_win_status_835` +
+  `win_status_flag_is_rejected_as_an_unknown_option_835`. New
+  `tests/harness_stale_dante_artifact_835.rs` pins `scripts/lib/stale-artifact-guard.sh`'s
+  `stale_dante_artifact_warn()` (doesn't exist yet) + its wiring into `recording-e2e.sh` right
+  after `mkdir -p "$OUTDIR"`. Confirmed RED: 8/8 new/changed tests failed.
+- GREEN: `fix(#835): [green] ...` (`db2333d38`) -- removed `--win-status` from
+  `dantesync-gate.sh` (header, `usage()`, option parsing, the whole Windows-node status-pipe
+  loop); new `scripts/lib/stale-artifact-guard.sh` sourced + called via the #675 pattern (new
+  lines only). All 29 dantesync_gate/stale-artifact tests green.
+- docs commit `944ccfa11` -- fixed a downstream stale claim in `.claude/skills/ops/SKILL.md`
+  ("mirrors `dantesync-gate.sh`'s own convention exactly") discovered while removing the
+  convention it referenced.
+- Full `cargo test` (158/158 binaries) green -- no anchor collisions in `recording-e2e.sh`.
+  `cargo fmt --all --check` / `cargo check` / `cargo clippy --all-targets -- -D warnings` /
+  `shellcheck -S warning` on all touched/new files all clean.
+- Never touched the rig (no ssh/MCP to any box) and never ran/re-ran the hardware "Full-path E2E"
+  gate (currently red on the unrelated #834 clock investigation), per dispatch constraints.
+- Rides open PR #704 (dev->main); did not open a new PR, did not merge.
