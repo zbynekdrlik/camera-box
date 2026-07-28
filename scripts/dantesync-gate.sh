@@ -22,21 +22,25 @@
 #     DANTESYNC_GATE_LINUX_JOURNAL_<NAME> (NAME uppercased, e.g. DANTESYNC_GATE_LINUX_JOURNAL_CAM1)
 #     -- the SAME "caller pre-fetches the status to a file" pattern
 #     clock-offset-painter-gate.sh uses (DEV1_DANTE_JOURNAL/PAINTER_DANTE_JOURNAL, #608), keyed by
-#     node name (like --win-status NAME=FILE below) since this gate can measure MULTIPLE Linux
-#     nodes at once, unlike the painter gate's fixed dev1<->painter pair.
-#   * Windows OBS boxes (strih, stream): this script itself does not read their
-#     `\\.\pipe\dantesync` status directly — historically because ssh/scp to Windows was believed
-#     denied on this rig; #701 proved plain scp/ssh actually reaches strih/stream with the
-#     targets.md creds, but this gate has not been migrated to a headless ssh-based pipe read. The
-#     caller (the autopilot worker / operator, who HAS
-#     the win-* MCP) writes each box's status-pipe JSON to a local file and passes it via
-#     --win-status NAME=FILE. A Windows node with NO status file is UNKNOWN -> the gate fails
-#     (never a silent pass). recording-e2e.sh populates these files before invoking the gate.
+#     node name, since this gate can measure MULTIPLE Linux nodes at once, unlike the painter
+#     gate's fixed dev1<->painter pair.
+#   * Windows OBS boxes (strih, stream): queried LIVE over HTTP from dantesync#47's own network
+#     status endpoint (http://HOST:PORT/status, #648) via --win-http, below — no win-* MCP, no
+#     human/agent pre-fetch, unattended-CI-safe, and it grades freshness from the payload's own
+#     "updated_ts" field. (#835: the PRIOR flow — a human/agent with the win-* MCP writing each
+#     box's `\\.\pipe\dantesync` status-pipe JSON to a local file, passed via --win-status
+#     NAME=FILE — was REMOVED outright, not merely deprecated: it had zero live callers left
+#     in this repo once recording-e2e.sh switched to --win-http, and it was deliberately
+#     AGE-BLIND with no way to detect a stale/leftover file — exactly the false-GREEN hazard a
+#     stale runbook could walk an operator into. --win-http covers the same two nodes strictly
+#     better. See `scripts/lib/win-status-args.sh` if you need the shared NAME=FILE parser for a
+#     DIFFERENT gate — `scripts/w32time-gate.sh` still legitimately uses it for the W32Time
+#     service-state invariant, which has no HTTP equivalent to migrate to.)
 #
 # Usage:
 #   dantesync-gate.sh [--bound-us N] \
 #       [--linux "cam1=10.77.9.61 cam2=10.77.9.62"] \
-#       [--win-status strih=/tmp/dante-strih.json] [--win-status stream=/tmp/dante-stream.json]
+#       [--win-http strih=10.77.9.202] [--win-http stream=10.77.9.204]
 #   dantesync-gate.sh --help
 #
 # Exit codes: 0 = ALL measured nodes NTP-within-bound AND PTP-locked (run may proceed),
@@ -49,11 +53,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Source the shared, unit-tested DanteSync parsers (its BASH_SOURCE!=$0 guard skips its own flow).
 # shellcheck source=scripts/clock-offset-guard.sh
 . "$HERE/clock-offset-guard.sh"
-# shellcheck source=scripts/lib/win-status-args.sh
-. "$HERE/lib/win-status-args.sh"
 
 GATE_BOUND_US="${CLOCK_GUARD_BOUND_US:-2000}"
-# The four measured nodes by default: the two Linux cams over SSH; strih/stream need --win-status.
+# The four measured nodes by default: the two Linux cams over SSH; strih/stream need --win-http.
 GATE_LINUX="${GATE_LINUX:-cam1=10.77.9.61 cam2=10.77.9.62}"
 GATE_SSH_TIMEOUT="${CLOCK_GUARD_SSH_TIMEOUT:-8}"
 # #550/#591/#595: a Linux node's freshest "[NTP] offset:" journal line must be no older than this
@@ -150,17 +152,13 @@ FAILS FAST unless EVERY measured node is BOTH NTP-synced (|offset| <= bound) AND
 recording run must NOT proceed otherwise — cross-node latency/timestamps would be meaningless.
 
 Usage:
-  dantesync-gate.sh [--bound-us N] [--linux "name=ip ..."] [--win-status NAME=FILE ...] \
+  dantesync-gate.sh [--bound-us N] [--linux "name=ip ..."] \
                      [--win-http NAME=HOST ...] [--win-http-port N]
 
 Options:
   --bound-us N        max tolerated |NTP offset| in us (default ${GATE_BOUND_US}; see #8 rationale).
   --linux "n=ip ..."  Linux nodes -- HTTP status endpoint FIRST, journald-over-SSH fallback
                       (#686; default: ${GATE_LINUX}).
-  --win-status N=FILE  a Windows node N whose DanteSync status-pipe JSON the caller wrote to FILE
-                       (this gate has no headless ssh-based pipe read; the win-* MCP holder
-                       pre-fetches it -- #701 proved plain scp/ssh reaches strih/stream, but the
-                       named-pipe status is read via the win-* MCP here, not migrated). Repeatable.
   --win-http N=HOST    a Windows node N queried LIVE over HTTP from dantesync#47's own network
                        status endpoint (http://HOST:PORT/status, #648) -- no win-* MCP, no human
                        pre-fetch; unattended-CI-safe. Repeatable.
@@ -180,8 +178,9 @@ gate's own wall clock, exactly like a --win-http node (#648). Via the journal (t
 path): the freshest "[NTP] offset:" journal line must be no older than
 DANTESYNC_OFFSET_FRESHNESS_S (default ${GATE_OFFSET_FRESHNESS_S}) seconds behind that node's
 newest journal line -- see dantesync_offset_verdict() in clock-offset-guard.sh (#550/#591/#595).
-Either way a stale reading is STALE -> UNKNOWN, never a silent OK. A --win-status (file-relay)
-node is unchanged/AGE-BLIND (tracked separately, #598).
+Either way a stale reading is STALE -> UNKNOWN, never a silent OK. (#835: the old Windows-node
+FILE-RELAY path, which WAS age-blind, was removed outright -- --win-http covers the same nodes
+and always grades freshness.)
 
 Exit: 0 = all nodes NTP+PTP OK, 20 = a node DRIFTED or PTP-DEGRADED, 11 = a node UNREACHABLE/
 UNKNOWN, 1 = usage error.
@@ -190,12 +189,11 @@ EOF
 
 main() {
   local bound="$GATE_BOUND_US" linux="$GATE_LINUX" win_http_port="$GATE_WIN_HTTP_PORT"
-  local -a win_status=() win_http=()
+  local -a win_http=()
   while [ $# -gt 0 ]; do
     case "$1" in
       --bound-us)      shift; bound="${1:-}" ;;
       --linux)         shift; linux="${1:-}" ;;
-      --win-status)    shift; win_status+=("${1:-}") ;;
       --win-http)      shift; win_http+=("${1:-}") ;;
       --win-http-port) shift; win_http_port="${1:-}" ;;
       -h|--help)       usage; exit 0 ;;
@@ -230,8 +228,8 @@ main() {
     echo "ERROR: curl not found — required to query DanteSync status over HTTP (#648/#686)." >&2
     exit 1
   fi
-  if [ "${#linux_pairs[@]}" -eq 0 ] && [ "${#win_status[@]}" -eq 0 ] && [ "${#win_http[@]}" -eq 0 ]; then
-    echo "ERROR: no nodes to gate (--linux, --win-status, and --win-http are all empty)." >&2
+  if [ "${#linux_pairs[@]}" -eq 0 ] && [ "${#win_http[@]}" -eq 0 ]; then
+    echo "ERROR: no nodes to gate (--linux and --win-http are both empty)." >&2
     echo "The recording-E2E gate cannot certify the cluster with zero nodes — refusing to pass." >&2
     exit 1
   fi
@@ -303,33 +301,14 @@ main() {
     esac
   done
 
-  # --- Windows nodes (status-pipe JSON the caller PRE-FETCHED to a file via MCP) -------------
-  # NOTE (#595 scope): a file the caller wrote carries no proof of ITS OWN age beyond the file's
-  # mtime (which this gate does not read), so this relay path stays AGE-BLIND
-  # (offset_us_from_pipe_json) here. Tracked as part of #598 (Windows W32Time verify-gate for
-  # strih+stream). The --win-http path below (#648) queries the box LIVE instead, so it CAN and
-  # DOES grade freshness from the payload's own "updated_ts".
-  local entry
-  for entry in "${win_status[@]}"; do
-    if ! win_status_parse_entry "$entry"; then
-      unknown=$((unknown + 1)); continue
-    fi
-    name="$WIN_STATUS_NAME"; status="$WIN_STATUS_TEXT"
-    offset="$(offset_us_from_pipe_json "$status")"
-    ptp="$(ptp_locked_from_pipe_json "$status")"
-    rc_off=0; offset_check "$name" "$offset" "$bound" || rc_off=$?
-    rc_ptp=0; ptp_check    "$name" "$ptp"             || rc_ptp=$?
-    case "$(node_verdict "$rc_off" "$rc_ptp")" in
-      OK) ok=$((ok + 1)) ;; BAD) bad=$((bad + 1)) ;; UNKNOWN) unknown=$((unknown + 1)) ;;
-    esac
-  done
-
   # --- Windows nodes fetched LIVE over HTTP (dantesync#47's network status endpoint, #648) ----
   # No win-* MCP, no human pre-fetch -- the whole point of #648 is an unattended CI run has
   # neither. The endpoint's JSON carries "updated_ts" (unix epoch seconds), so this path CAN and
   # DOES grade freshness: a box whose dantesync died but whose HTTP server keeps serving a cached
   # snapshot must be caught, never silently graded on stale numbers. `$now` was already captured
-  # above (shared with the #686 Linux HTTP freshness check).
+  # above (shared with the #686 Linux HTTP freshness check). (#835: this is now the ONLY Windows-
+  # node input path -- the old --win-status file-relay path, which was age-blind, was removed.)
+  local entry
   for entry in "${win_http[@]}"; do
     name="${entry%%=*}"; ip="${entry#*=}"
     status="$(read_win_http_status "$name" "$ip")"

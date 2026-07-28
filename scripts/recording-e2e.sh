@@ -163,6 +163,12 @@ CAMBOX_OFFLINE_ACK="$(cambox_offline_ack_effective "${CAMBOX_OFFLINE_ACK:-}" "$R
 # / "capability missing (#756 regression)" instead of "the tool is not installed" (#822 class).
 # shellcheck source=scripts/lib/imag-require-remote-tool.sh
 . "$HERE/lib/imag-require-remote-tool.sh"
+# #835: a dante-*.json file already sitting in $OUTDIR that this harness did not write is the
+# artifact of a stale manual pre-fetch runbook (removed by #648, but nothing warned when someone
+# still followed it) or a reused RUN_ID whose dir was never cleaned -- must announce itself, not
+# lurk silently next to a gate that already fetches DanteSync status live over HTTP.
+# shellcheck source=scripts/lib/stale-artifact-guard.sh
+. "$HERE/lib/stale-artifact-guard.sh"
 camera_resolve "${CAM:-cam1}"
 # #24 item 1: this harness's SOURCE-camera role (the physical box filming cam2's monitor via
 # the optical loopback + carrying the #174 render-time capture burn) is one of
@@ -368,6 +374,7 @@ case "$CAMERA_NAME" in
 esac
 OUTDIR="${OUTDIR:-/tmp/recording-e2e-${RUN_ID}}"
 mkdir -p "$OUTDIR"
+stale_dante_artifact_warn "$OUTDIR"
 # #359: wall-clock run start. The painter ground-truth CSV (gen_ts_ns = CLOCK_REALTIME epoch
 # ns under --wall-clock) is freshness-gated against this — a stale CSV whose first gen_ts is
 # hours off (run 354002 was 14.9h off) is REJECTED before it can corrupt the verdict.
