@@ -153,9 +153,9 @@ fn cleanup_applies_the_av_sync_correction_after_the_stream_teardown_restore() {
     let teardown_idx = body
         .find("timeout \"$OBS_CLEANUP_TIMEOUT\" python3 \"$HERE/obs_phase2.py\" \"${_stream_teardown_args[@]}\"")
         .expect("cleanup() must call obs_phase2.py teardown with _stream_teardown_args");
-    let apply_idx = body
-        .find("av_sync_calibrate.py")
-        .expect("cleanup() must call scripts/av_sync_calibrate.py to apply this run's own #856 correction");
+    let apply_idx = body.find("av_sync_calibrate.py").expect(
+        "cleanup() must call scripts/av_sync_calibrate.py to apply this run's own #856 correction",
+    );
     assert!(
         teardown_idx < apply_idx,
         "#856: the av_sync_calibrate.py --apply call must come AFTER the stream teardown \

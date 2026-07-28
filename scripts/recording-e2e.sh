@@ -972,6 +972,22 @@ systemctl start cam2-painter 2>/dev/null || true"
     _stream_teardown_args+=(--calibrated-latency-ms "$AV_SYNC_CALIBRATED_MS")
   fi
   timeout "$OBS_CLEANUP_TIMEOUT" python3 "$HERE/obs_phase2.py" "${_stream_teardown_args[@]}"
+  # #856: apply THIS run's own computed rig-wide A/V correction LAST -- strictly AFTER the
+  # delivery-verify snapshot/restore call immediately above (which unconditionally restores
+  # 'NDI 2ME PGM' genlock_latency_ms_src to whatever it was BEFORE this run started -- see that
+  # call's own comment). Applying any earlier (e.g. at [8/8g] itself) would be silently
+  # overwritten by that restore a few lines later in this SAME cleanup() -- composing with the
+  # restore instead of fighting it, per the #856 issue text. Empty (unset) by default: an early
+  # abort, or a run where [8/8g]'s combiner refused (too few measured cameras / spread too
+  # wide), never touches the stream box's genlock latency here at all.
+  if [ -n "$AV_SYNC_APPLY_OFFSET_MS" ]; then
+    echo "[cleanup] #856: applying this run's own computed rig-wide A/V correction (${AV_SYNC_APPLY_OFFSET_MS}ms) to '$STREAM_PROG_SOURCE' on stream (av_sync_calibrate.py --apply, read-back verified)"
+    timeout "$OBS_CLEANUP_TIMEOUT" python3 "$HERE/av_sync_calibrate.py" --host "$STREAM" \
+      --password "${OBS_PASSWORD:-}" --source "$STREAM_PROG_SOURCE" \
+      --offset-ms "$AV_SYNC_APPLY_OFFSET_MS" --apply \
+      --json-path "$OUTDIR/av-sync-last-${RUN_ID}.json" \
+      || echo "WARNING: #856 av_sync_calibrate.py --apply failed -- stream genlock latency left at the just-restored prod value; the NEXT run recomputes from its own fresh measurement" >&2
+  fi
   timeout "$OBS_CLEANUP_TIMEOUT" python3 "$HERE/obs_phase2.py" teardown --host "$STRIH"
   # #682: restore imag's program scene to whatever it was BEFORE [4a/8] routed it to the
   # camera-under-test. A NO-OP if [4a/8] never ran (IMAG_PREV_SCENE stays its "" pre-trap safe
@@ -1093,6 +1109,15 @@ STREAM_PROG_SOURCE="${STREAM_PROG_SOURCE:-NDI 2ME PGM}" # the prod input the sce
 # never a hard requirement, matches drift-guard.sh's av_sync_calibrated_ms convention for
 # the SAME file.
 AV_SYNC_CALIBRATED_MS="${AV_SYNC_CALIBRATED_MS:-}"
+# #856: THIS run's own computed rig-wide A/V correction (offset in ms), set at [8/8g] once the
+# merge verdict's own all_cambox_av_sync measurements are available (E2E_EXECUTE_VERDICT=1
+# only). Declared HERE (empty default, BEFORE the cleanup trap installs, same reasoning as
+# AV_SYNC_CALIBRATED_MS/IMAG_PREV_SCENE above) so cleanup() never `set -u`-aborts referencing
+# it on an early abort -- an early abort naturally never sets it, so cleanup()'s own #856 step
+# does nothing extra. See that step (right after the stream teardown restore call) for why the
+# apply must happen THERE (last), not at [8/8g] itself: the delivery-verify snapshot/restore
+# that ALWAYS runs on exit would otherwise silently overwrite whatever [8/8g] computed.
+AV_SYNC_APPLY_OFFSET_MS="${AV_SYNC_APPLY_OFFSET_MS:-}"
 # #462 (EPIC #466): imag-nb's program-feeding NDI input — the #399-style 1:1 mapping from Phase 1
 # (setup-imag.sh) pins 'NDI CAM1'..'NDI CAM6' -> 'CAMx (usb)' 1:1, so cam1 (the SOURCE camera that
 # films cam2's monitor) rides 'NDI CAM1'. rig-mode.sh TEST mode is what actually routes imag's
@@ -3256,6 +3281,22 @@ continuing WITHOUT the imag partial; the merge below will omit --merge-partials 
     if [ -f "$REPORT_JSON" ]; then
       python3 "$HERE/recording-e2e-report.py" --json "$REPORT_JSON" --out "$REPORT_PNG" || \
         echo "WARNING: report render failed (non-fatal; JSON at $REPORT_JSON)" >&2
+    fi
+    # ============================================================================
+    # #856 [8/8g] -- combine THIS run's own measured per-camera A/V offsets
+    # (all_cambox_av_sync) into ONE rig-wide correction. Best-effort: computing the number
+    # here never touches $GATE (a FAILED run's own offsets are still real measurements worth
+    # correcting FROM for the next run). The actual OBS apply happens LAST, inside cleanup()
+    # (see its own #856 step there) -- composing with the delivery-verify snapshot/restore
+    # instead of being silently overwritten by it (that restore always runs on exit and would
+    # stomp anything applied here).
+    # ============================================================================
+    AV_SYNC_COMBINE_LOG="$OUTDIR/av-sync-combine-${RUN_ID}.log"
+    if AV_SYNC_APPLY_OFFSET_MS="$(python3 "$HERE/av_sync_combine_offsets.py" --verdict-json "$REPORT_JSON" 2>"$AV_SYNC_COMBINE_LOG")"; then
+      echo "    [8/8g] #856: rig-wide A/V correction = ${AV_SYNC_APPLY_OFFSET_MS}ms (median of this run's own verdict==\"measured\" cameras) -- applied LAST in cleanup(), after the delivery-verify restore"
+    else
+      echo "    [8/8g] #856: refusing to compute a rig-wide A/V correction this run (see $AV_SYNC_COMBINE_LOG) -- stream genlock latency left untouched"
+      AV_SYNC_APPLY_OFFSET_MS=""
     fi
     # #756 Member 3 — live per-source genlock latency pins + recommended pins, gathered AFTER
     # the verdict JSON exists (it needs this run's OWN delivery-latency table) and BEFORE the
