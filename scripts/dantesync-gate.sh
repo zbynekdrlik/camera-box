@@ -135,6 +135,11 @@ read_linux_node_journal() {
 # pre-#836 behavior, useful for a fixture that legitimately never varies) OR an EXECUTABLE script
 # (run every call, so a test fixture can return DIFFERENT content on successive invocations
 # without any real network or sleep -- see tests/dantesync_gate.rs's write_multi_read_fixture).
+# TRUST BOUNDARY: this is a TEST/OFFLINE-ONLY seam -- the env var is never set in a real gate run
+# (production reads always fall through to the plain `curl` below), so widening it from "cat a
+# file" to "run a file" adds no attacker-reachable surface; only a caller who already controls
+# this process's environment (the same caller who could already point CLOCK_GUARD_SSH_PASS,
+# CLOCK_GUARD_JOURNAL_OVERRIDE, etc. anywhere they like) can use it.
 read_linux_node_http_status() {
   local name="$1" ip="$2" var
   var="DANTESYNC_GATE_LINUX_HTTP_$(printf '%s' "$name" | tr '[:lower:]-' '[:upper:]_')"
@@ -158,7 +163,8 @@ read_linux_node_http_status() {
 # #836: this function is now called MULTIPLE times per gate run (gather_http_samples, below) to
 # sample the node instead of reading it once -- so the override may point at either a STATIC file
 # (cat'd every call) OR an EXECUTABLE script (run every call, so a test fixture can return
-# DIFFERENT content on successive invocations without any real network or sleep).
+# DIFFERENT content on successive invocations without any real network or sleep). TRUST BOUNDARY:
+# same as read_linux_node_http_status above -- test/offline-only, never set in a real gate run.
 read_win_http_status() {
   local name="$1" host="$2" var
   var="DANTESYNC_GATE_WIN_HTTP_$(printf '%s' "$name" | tr '[:lower:]-' '[:upper:]_')"
