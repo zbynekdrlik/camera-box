@@ -1240,7 +1240,7 @@ fn setup_imag_boot_safety_net_precedes_lowlatency_and_isolation_steps() {
         .find("Low-latency kernel (#482)")
         .expect("the #482 lowlatency-kernel step must exist");
     let isolation_step = body
-        .find("CPU isolation (#483)")
+        .find("CPU affinity (#483/#842)")
         .expect("the #483 CPU-isolation step must exist");
     assert!(
         safety_step < lowlatency_step && lowlatency_step < isolation_step,
@@ -1492,7 +1492,8 @@ fn setup_imag_holds_lowlatency_config_packages_after_install_482() {
 fn setup_imag_never_writes_kernel_isolcpus_dropin_842() {
     let body = read(SETUP);
     assert!(
-        !body.contains("isolcpus=${IMAG_ISOLATED_CPUS}") && !body.contains("nohz_full=${IMAG_NOHZ_CPUS}"),
+        !body.contains("isolcpus=${IMAG_ISOLATED_CPUS}")
+            && !body.contains("nohz_full=${IMAG_NOHZ_CPUS}"),
         "{SETUP}: must NEVER write isolcpus=/nohz_full= to a GRUB_CMDLINE_LINUX_DEFAULT drop-in \
          (#784/#842 regression -- disables scheduler load balancing for a many-threaded OBS \
          process, piling threads onto a single core)"
@@ -1941,7 +1942,7 @@ fn setup_imag_nvidia_step_reuses_safe_grub_regen_500() {
 fn setup_imag_nvidia_step_lands_between_cpu_isolation_and_ndi_runtime_500() {
     let body = read(SETUP);
     let cpu_isolation = body
-        .find("CPU isolation (#483)")
+        .find("CPU affinity (#483/#842)")
         .expect("the #483 CPU isolation step must exist");
     let nvidia_step = body
         .find("NVIDIA dGPU driver (#500)")

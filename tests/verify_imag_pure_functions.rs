@@ -256,13 +256,12 @@ fn imag_cmdline_free_of_kernel_isolation_fails_on_isolcpus_or_nohz_full() {
 fn imag_obs_thread_concentration_ok_flags_a_single_core_pileup() {
     // The FIXED distribution (post-#842, real numbers): 19+16+24+26+12+17 = 114 threads spread
     // across 6 cores, max 26 -> 26/114 = 22.8%, well under the 60% bound.
-    let spread: String = std::iter::repeat("2\n")
-        .take(19)
-        .chain(std::iter::repeat("3\n").take(16))
-        .chain(std::iter::repeat("4\n").take(24))
-        .chain(std::iter::repeat("5\n").take(26))
-        .chain(std::iter::repeat("6\n").take(12))
-        .chain(std::iter::repeat("7\n").take(17))
+    let spread: String = std::iter::repeat_n("2\n", 19)
+        .chain(std::iter::repeat_n("3\n", 16))
+        .chain(std::iter::repeat_n("4\n", 24))
+        .chain(std::iter::repeat_n("5\n", 26))
+        .chain(std::iter::repeat_n("6\n", 12))
+        .chain(std::iter::repeat_n("7\n", 17))
         .collect();
     let (code, out, err) = run_sourced(&format!(
         r#"LIST="{spread}"
@@ -273,9 +272,8 @@ if imag_obs_thread_concentration_ok "$LIST"; then echo YES; else echo NO; fi"#
 
     // The #842 DEFECT distribution (real numbers): 114 threads on cpu5, 5 threads elsewhere (119
     // total) -- 114/119 = 95.8%, far past the 60% bound.
-    let pileup: String = std::iter::repeat("5\n")
-        .take(114)
-        .chain(std::iter::repeat("7\n").take(5))
+    let pileup: String = std::iter::repeat_n("5\n", 114)
+        .chain(std::iter::repeat_n("7\n", 5))
         .collect();
     let (code, out, err) = run_sourced(&format!(
         r#"LIST="{pileup}"

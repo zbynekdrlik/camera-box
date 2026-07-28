@@ -61,8 +61,10 @@ set -euo pipefail
 #   (a) hostname + static IP as provisioned
 #   (b) ssh.service enabled (NOT ssh.socket, noble's default)
 #   (c) kernel on the HWE line (linux-image-generic-hwe-24.04 installed, #819)
-#   (d) /proc/cmdline carries preempt=full + the DERIVED isolcpus=/nohz_full=/irqaffinity= (from
-#       THIS box's own CPU topology via imag_cpu_isolation_plan -- never a hardcoded literal, #816)
+#   (d) /proc/cmdline carries preempt=full AND is FREE of kernel isolcpus=/nohz_full= isolation
+#       (#784/#842 -- isolcpus disables scheduler load balancing, piled 114/119 OBS threads onto
+#       ONE core); the taskset AFFINITY-only pin (/etc/imag-isolated-cpus.conf) is unaffected and
+#       is verified to match THIS box's own topology-derived plan via imag_cpu_isolation_plan (#816)
 #   (e) display-manager.service -> lightdm.service; 50-imag-autologin.conf present; gdm3 absent
 #   (f) zero failed systemd units
 #   (g) openbox autostart present+executable+no unsubstituted __PLACEHOLDER__; openbox + obs
@@ -93,6 +95,9 @@ set -euo pipefail
 #   (r) OBS stats dock persistence: global.ini carries a non-empty DockState (#791 -- OBS never
 #       writes this on its own on a box that has run 24/7 without a clean exit; setup-imag.sh
 #       seeds a known-good captured default the first time a box provisions)
+#   (s) OBS threads are NOT concentrated onto a single CPU core (#842 -- the DIRECT SYMPTOM check,
+#       independent of the (d) cmdline check, so a future variant of the same defect class can't
+#       pass silently just because it doesn't happen to write a kernel-cmdline token)
 #
 # Every remote helper this gate shells out to (wmctrl, python3) is preflighted BY NAME before use
 # (#822 pattern) -- a missing tool is reported as a missing tool, never folded into a failed
@@ -203,7 +208,7 @@ imag_hwe_kernel_installed() {
   dpkg_status_installed "$1"
 }
 
-# --- (d) kernel cmdline: preempt=full + DERIVED isolation (#289/#303/#816) -------------------
+# --- (d) kernel cmdline: preempt=full + NO kernel isolcpus/nohz_full isolation (#289/#482/#784/#842)
 
 # imag_cmdline_has_preempt_full CMDLINE -> 0 iff CMDLINE carries the whole-token `preempt=full`
 # flag (the #482 low-latency-kernel config).
@@ -211,18 +216,16 @@ imag_cmdline_has_preempt_full() {
   printf '%s' " $1 " | grep -qE '[[:space:]]preempt=full[[:space:]]'
 }
 
-# imag_cmdline_has_derived_isolation CMDLINE ISOLATED NOHZ HOUSEKEEP -> 0 iff CMDLINE carries
-# isolcpus=ISOLATED + nohz_full=NOHZ + irqaffinity=HOUSEKEEP as whole space-delimited tokens.
-# ISOLATED/NOHZ/HOUSEKEEP are the plan THIS box's own topology derives via
-# imag_cpu_isolation_plan() (#816) -- never a hardcoded literal (a different core count, or the
-# other known imag box, would derive a genuinely different plan; asserting a fixed cam-fleet-style
-# literal here would be the exact #816 regression this script must not reintroduce).
-imag_cmdline_has_derived_isolation() {
-  local cmdline="$1" isolated="$2" nohz="$3" housekeep="$4"
-  [ -n "$isolated" ] && [ -n "$nohz" ] && [ -n "$housekeep" ] || return 1
-  printf '%s' " $cmdline " | grep -qE "[[:space:]]isolcpus=${isolated}[[:space:]]" \
-    && printf '%s' " $cmdline " | grep -qE "[[:space:]]nohz_full=${nohz}[[:space:]]" \
-    && printf '%s' " $cmdline " | grep -qE "[[:space:]]irqaffinity=${housekeep}[[:space:]]"
+# imag_cmdline_free_of_kernel_isolation CMDLINE -> 0 iff CMDLINE carries NEITHER an `isolcpus=`
+# NOR a `nohz_full=` token. #784/#842: isolcpus= removes the listed CPUs from the kernel
+# scheduler's load-balancing domains -- measured live to pile 114 of OBS's 119 threads onto ONE
+# core while sibling cores in the SAME affinity mask sat idle (60fps -> ~53fps NDI receive,
+# 7-10 underruns/s). setup-imag.sh must never write either token again (the taskset AFFINITY pin,
+# /etc/imag-isolated-cpus.conf, is unaffected and stays) -- this is #784's own outstanding
+# acceptance-gate item, deferred between #780/#791 since 2026-07-15 and the direct cause of the
+# #842 recurrence on the replacement notebook. A hard FAIL, never a warning.
+imag_cmdline_free_of_kernel_isolation() {
+  ! printf '%s' " $1 " | grep -qE '[[:space:]](isolcpus|nohz_full)='
 }
 
 # --- (e) display-manager -> lightdm + autologin; gdm3 absent ---------------------------------
@@ -397,6 +400,27 @@ imag_dockstate_present() {
   [ -n "${line#DockState=}" ]
 }
 
+# --- (s) OBS thread distribution: no single CPU core concentrates OBS's threads (#842) --------
+
+# imag_obs_thread_concentration_ok PSR_LIST -> 0 iff PSR_LIST (raw `ps -L -o psr= -C obs` output --
+# one CPU-core number per OBS thread, one per line) shows NO single core holding more than ~60% of
+# the live thread count. This is the #842 DIRECT-SYMPTOM check: whatever mechanism causes OBS's
+# threads to pile onto one core (isolcpus was the measured cause, but a future variant might not
+# write a kernel-cmdline token at all) must not pass this gate silently. An empty/unreadable list
+# (OBS not running, or the remote `ps` failed) never silently passes -- #833 class, a measured
+# zero is not the same as "check skipped". Measured #842 signature: 114 of 119 threads (96%) on
+# ONE core; the fixed distribution spreads 19/16/24/26/12/17 across 6 cores (max 23%).
+imag_obs_thread_concentration_ok() {
+  local list="$1" total max
+  total="$(printf '%s\n' "$list" | grep -cE '^[0-9]+$')"
+  [ "$total" -gt 0 ] || return 1
+  max="$(printf '%s\n' "$list" | grep -E '^[0-9]+$' | sort -n | uniq -c \
+    | awk '{print $1}' | sort -rn | head -1)"
+  [ -n "$max" ] || return 1
+  # fail when max/total > 60% -- integer form: max*100 > total*60
+  [ "$((max * 100))" -le "$((total * 60))" ]
+}
+
 # --- (o) projector count -- exactly 1 Program + 1 Multiview (#756/#758) ----------------------
 
 # imag_projector_counts_ok MV_COUNT PGM_COUNT -> 0 iff BOTH are the exact string "1" (numeric
@@ -520,7 +544,7 @@ else
   fail "linux-image-generic-hwe-24.04 not installed (status='${HWE_STATUS:-<none>}') -- #819 GA-baseline regression"
 fi
 
-# (d) kernel cmdline: preempt=full + DERIVED isolation (#289/#303/#816) --------------------------
+# (d) kernel cmdline: preempt=full + NO kernel isolcpus/nohz_full isolation (#289/#482/#784/#842)
 rc=0
 CMDLINE="$(ssh_box "cat /proc/cmdline 2>/dev/null")" || rc=$?
 if [ "$rc" -ne 0 ] || [ -z "$CMDLINE" ]; then
@@ -531,27 +555,50 @@ else
   else
     fail "kernel cmdline missing preempt=full (#482): '$CMDLINE'"
   fi
-  # Derive the EXPECTED plan from this box's own live topology -- the identical computation
-  # setup-imag.sh step 8 runs, never a hardcoded literal (#816: a different core count, or the
-  # other known imag box, derives a genuinely different plan).
+  # #784/#842: hard FAIL if the box still carries kernel-level isolcpus=/nohz_full= -- this is
+  # #784's own outstanding acceptance-gate item (deferred between #780/#791 since 2026-07-15) and
+  # the guard that would have caught the #842 recurrence on the replacement notebook at
+  # provisioning time instead of live on the rig.
+  if imag_cmdline_free_of_kernel_isolation "$CMDLINE"; then
+    ok "kernel cmdline carries NO isolcpus/nohz_full kernel isolation (#784/#842 -- affinity-only OBS core reservation)"
+  else
+    fail "kernel cmdline STILL carries isolcpus=/nohz_full= (#784/#842 regression -- disables scheduler load balancing, piles OBS's threads onto ONE core): '$CMDLINE'"
+  fi
+  # The taskset AFFINITY pin (unaffected by #842 -- only kernel-level isolation was removed) must
+  # still be correctly persisted. Derive the EXPECTED isolated-CPU set from this box's own live
+  # topology -- the identical computation setup-imag.sh step 8 runs, never a hardcoded literal
+  # (#816: a different core count, or the other known imag box, derives a genuinely different set).
   rc=0
   TOPO="$(ssh_box "for f in /sys/devices/system/cpu/cpu[0-9]*/topology/thread_siblings_list; do [ -r \"\$f\" ] || continue; c=\"\${f#/sys/devices/system/cpu/cpu}\"; c=\"\${c%%/*}\"; printf '%s %s\n' \"\$c\" \"\$(cat \"\$f\")\"; done | sort -n -k1,1")" || rc=$?
   if [ "$rc" -ne 0 ] || [ -z "$TOPO" ]; then
-    fail "CPU topology unreadable over SSH (rc=$rc) -- cannot derive the expected isolation plan"
+    fail "CPU topology unreadable over SSH (rc=$rc) -- cannot derive the expected affinity plan"
   else
     PLAN=""
     PLAN="$(printf '%s\n' "$TOPO" | imag_cpu_isolation_plan)" || true
     ISOLATED="$(printf '%s\n' "$PLAN" | sed -n 1p)"
-    NOHZ="$(printf '%s\n' "$PLAN" | sed -n 2p)"
-    HOUSEKEEP="$(printf '%s\n' "$PLAN" | sed -n 3p)"
-    if [ -z "$ISOLATED" ] || [ -z "$NOHZ" ] || [ -z "$HOUSEKEEP" ]; then
-      fail "could not derive the CPU isolation plan from this box's own topology (#816)"
-    elif imag_cmdline_has_derived_isolation "$CMDLINE" "$ISOLATED" "$NOHZ" "$HOUSEKEEP"; then
-      ok "kernel cmdline carries the DERIVED isolcpus=${ISOLATED} nohz_full=${NOHZ} irqaffinity=${HOUSEKEEP} (#816)"
+    if [ -z "$ISOLATED" ]; then
+      fail "could not derive the CPU affinity plan from this box's own topology (#816)"
     else
-      fail "kernel cmdline missing the derived isolcpus=${ISOLATED} nohz_full=${NOHZ} irqaffinity=${HOUSEKEEP}: '$CMDLINE'"
+      rc=0
+      PERSISTED="$(ssh_box "cat /etc/imag-isolated-cpus.conf 2>/dev/null" | tr -d '[:space:]')" || rc=$?
+      if [ "$rc" -ne 0 ] || [ "$PERSISTED" != "$(printf '%s' "$ISOLATED" | tr -d '[:space:]')" ]; then
+        fail "/etc/imag-isolated-cpus.conf ('${PERSISTED:-<unreadable>}') does not match the derived affinity set (${ISOLATED}) (#816/#842)"
+      else
+        ok "OBS core affinity persisted correctly: ${ISOLATED} (taskset-only, no kernel isolation, #842)"
+      fi
     fi
   fi
+fi
+
+# (s) OBS threads not concentrated onto a single CPU core -- the #842 DIRECT SYMPTOM ------------
+rc=0
+OBS_PSR_LIST="$(ssh_box "ps -L -o psr= -C obs 2>/dev/null")" || rc=$?
+if [ "$rc" -ne 0 ] || [ -z "$OBS_PSR_LIST" ]; then
+  fail "OBS thread/CPU list unreadable (ssh rc=$rc) -- cannot verify thread distribution (#842)"
+elif imag_obs_thread_concentration_ok "$OBS_PSR_LIST"; then
+  ok "OBS threads spread across multiple CPU cores -- no single-core pileup (#842)"
+else
+  fail "OBS threads are concentrated onto a single CPU core -- the #842/#784 isolcpus signature (a future variant of this bug must not pass silently): '$OBS_PSR_LIST'"
 fi
 
 # (e) display-manager -> lightdm + autologin; gdm3 absent ----------------------------------------

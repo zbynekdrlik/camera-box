@@ -610,22 +610,42 @@ echo "  #482: lowlatency-kernel config installed (preempt=full on the 6.17 gener
 echo "  NOTE: preempt=full takes effect on the NEXT boot — this script does not reboot the box"
 
 # =============================================================================
-step 8 "CPU isolation (#483): P-core block for OBS + safe-grub regen"
+step 8 "CPU affinity (#483/#842): P-core block reserved for OBS -- AFFINITY-ONLY, no kernel isolcpus"
 # =============================================================================
-# imag's OBS is a ~106-thread ~3-core consumer (6x NDI decode + render + genlock + audio), NOT the
-# cam-box's single lean thread -- isolate the whole P-core BLOCK cpu2-11 (10 threads) for OBS, keep
-# P-core0 (cpu0,1) for openbox/Xorg + sshd/MCP housekeeping, and park default IRQs there too.
-# nohz_full is scoped to ONLY the one core pair (10,11) that will host the future SCHED_FIFO
-# genlock render-tick thread (#484) -- spreading it across the whole block would remove
-# load-balancing signal (#303). rcu_nocbs=all already comes from 99-lowlatency.cfg above (covers
-# 10,11). irqaffinity= is a BOOT-TIME default (not a runtime /proc/irq write) -- the USB-ethernet
-# NDI IRQ is managed-MSI and rejects runtime affinity changes (#303). HT pairs verified LIVE via
-# thread_siblings_list (not lscpu's flat count): cpu0=0-1, cpu2=2-3, cpu4=4-5, cpu6=6-7, cpu8=8-9,
-# cpu10=10-11 (all P-core HT pairs), cpu12-15 = E-cores (no HT pairing).
-# #816: DERIVE the three CPU lists from this box's own topology instead of the 16-thread literals
-# #483 hand-verified — the decision is identical (see imag_cpu_isolation_plan), it just no longer
-# assumes a specific core count. Read numerically-ordered so the plan's "first P-core pair" is
-# genuinely cpu0's.
+# #842 (recurrence of #784, live-diagnosed 2026-07-28): isolcpus= REMOVES the listed CPUs from the
+# kernel scheduler's load-balancing DOMAINS -- it exists for explicit PER-THREAD pinning, never
+# for handing a whole range mask to a many-threaded process. imag's OBS is a ~106-119-thread
+# consumer (6x NDI decode + render + genlock + audio); under the OLD isolcpus=<block> cmdline the
+# scheduler placed 114 of those 119 threads on ONE core while the other isolated cores sat at 0%
+# busy -- NDI receive dropped from 60fps to ~53fps with 7-10 underruns/s (measured on 10.77.9.187;
+# identical signature to #784's original 2026-07-15 finding on the incumbent .182 box, hand-fixed
+# there by deleting this exact grub.d drop-in -- a fix that was never ported to THIS script, so
+# #816's topology-derived rewrite reproduced the defect verbatim on the replacement notebook).
+#
+# FIX: stop writing isolcpus=/nohz_full=/irqaffinity= to the kernel cmdline AT ALL. The taskset
+# AFFINITY pin below (the persisted-config file consumed by imag-obs-start.sh's
+# `taskset -c "$IMAG_ISOLATED_CPUS"`) is UNCHANGED and stays -- a plain CPU affinity mask
+# restricts WHICH cores a process may run on but does NOT remove those cores from the scheduler's
+# load-balancing domain, so threads still migrate freely WITHIN the mask. Live-verified after a
+# real reboot with a clean cmdline: threads spread 19/16/24/26/12/17 across cpu2-7, receive back
+# to 60.15-60.20fps / 0-2 underruns -- identical to .182. Restricting OBS to 6 cores is harmless;
+# *isolating* them is what broke it.
+#
+# nohz_full/irqaffinity are DROPPED TOO, not kept as a partial config -- deliberate decision (see
+# the #842 design comment on the issue for the full reasoning): both existed ONLY in service of
+# the isolation scheme. nohz_full was scoped to the one core pair meant to host a FUTURE SCHED_FIFO
+# genlock render-tick thread (#483/#484); irqaffinity pushed default IRQ affinity off the isolated
+# block. That render-tick thread does not exist today (its pin, when it ships, requests SCHED_FIFO
+# via sched_setscheduler() + an rtprio ulimit grant below -- neither needs a kernel-cmdline flag).
+# Keeping either as a stray, unpaired cmdline token once isolcpus is gone would be exactly the
+# "half-finished polotovar" #784 already called out ("izolácia... LEN s explicitným per-thread
+# pinningom") -- if/when the SCHED_FIFO pin needs kernel-level tick support, that is its OWN new,
+# explicit, tested design, not a leftover flag surviving this fix.
+#
+# `imag_cpu_isolation_plan` is UNCHANGED -- its ISOLATED output is still the affinity mask; its
+# nohz_full/housekeeping outputs go unused now (no cmdline write consumes them). HT pairs verified
+# LIVE via thread_siblings_list (not lscpu's flat count): cpu0=0-1, cpu2=2-3, cpu4=4-5, cpu6=6-7,
+# cpu8=8-9, cpu10=10-11 (all P-core HT pairs), cpu12-15 = E-cores (no HT pairing).
 IMAG_ISOLATION_PLAN="$(
     for f in /sys/devices/system/cpu/cpu[0-9]*/topology/thread_siblings_list; do
         [ -r "$f" ] || continue
@@ -634,29 +654,26 @@ IMAG_ISOLATION_PLAN="$(
     done | sort -n -k1,1 | imag_cpu_isolation_plan
 )" || exit 1
 IMAG_ISOLATED_CPUS="$(printf '%s\n' "$IMAG_ISOLATION_PLAN" | sed -n 1p)"
-IMAG_NOHZ_CPUS="$(printf '%s\n'    "$IMAG_ISOLATION_PLAN" | sed -n 2p)"
-IMAG_HOUSEKEEP_CPUS="$(printf '%s\n' "$IMAG_ISOLATION_PLAN" | sed -n 3p)"
-[ -n "$IMAG_ISOLATED_CPUS" ] && [ -n "$IMAG_NOHZ_CPUS" ] && [ -n "$IMAG_HOUSEKEEP_CPUS" ] \
-    || fail "#816: could not derive the CPU isolation plan from this box's topology"
+[ -n "$IMAG_ISOLATED_CPUS" ] \
+    || fail "#816: could not derive the CPU affinity plan from this box's topology"
 # #841: persist the SAME derived value imag-obs-start.sh falls back to for a manual "Spustit OBS"
-# invocation (no IMAG_ISOLATED_CPUS env set) -- ONE source of truth for the kernel cmdline, the
-# boot autostart's env export (step 16), and the wrapper's own fallback. Never a second hardcoded
-# literal in the wrapper.
+# invocation (no IMAG_ISOLATED_CPUS env set) -- ONE source of truth for the taskset affinity pin,
+# the boot autostart's env export (step 16), and the wrapper's own fallback. Never a second
+# hardcoded literal in the wrapper.
 printf '%s\n' "$IMAG_ISOLATED_CPUS" > /etc/imag-isolated-cpus.conf
-cat > /etc/default/grub.d/98-imag-isolation.cfg <<EOF
-# camera-box #483/#816: reserve the P-core block (minus P-core0) for the OBS thread pool; keep
-# P-core0 + every E-core for openbox/sshd/MCP/housekeeping, and park default IRQs there too.
-# nohz_full covers only the last isolated P-core pair (the genlock render-tick core, #484).
-# rcu_nocbs=all is already set by 99-lowlatency.cfg. DERIVED from this box's thread_siblings_list.
-GRUB_CMDLINE_LINUX_DEFAULT="\$GRUB_CMDLINE_LINUX_DEFAULT isolcpus=${IMAG_ISOLATED_CPUS} nohz_full=${IMAG_NOHZ_CPUS} irqaffinity=${IMAG_HOUSEKEEP_CPUS}"
-EOF
-# #295/#487: never a raw ad-hoc grub edit -- guarantee every kernel has an initrd, regenerate
-# grub.cfg, then refuse to trust it if the default entry lacks a kernel image or an initrd. ONE
-# call covers BOTH this drop-in and #482's 99-lowlatency.cfg above (they are only ever picked up
-# by grub-mkconfig, which runs once here).
-safe_grub_regen
-echo "  #483/#816: isolcpus=${IMAG_ISOLATED_CPUS} nohz_full=${IMAG_NOHZ_CPUS} irqaffinity=${IMAG_HOUSEKEEP_CPUS} written + grub regenerated"
-echo "  NOTE: CPU isolation takes effect on the NEXT boot — this script does not reboot the box"
+# #842 self-heal: a leftover kernel-isolation grub.d drop-in from a previous provisioning run (or
+# a hand-applied #483/#816-era config) must be removed and grub regenerated -- the same self-heal
+# discipline every other drift-prone config in this script already applies. This also covers the
+# case where a box is being RE-provisioned after previously carrying the #842 defect.
+if [ -f /etc/default/grub.d/98-imag-isolation.cfg ]; then
+    echo -e "  ${YELLOW}#842: removing leftover /etc/default/grub.d/98-imag-isolation.cfg -- kernel isolcpus/nohz_full is the #784/#842 regression, affinity-only pin stays${NC}"
+    rm -f /etc/default/grub.d/98-imag-isolation.cfg
+    # #295/#487: never a raw ad-hoc grub edit -- guarantee every kernel has an initrd, regenerate
+    # grub.cfg, then refuse to trust it if the default entry lacks a kernel image or an initrd.
+    safe_grub_regen
+    echo "  #842: leftover kernel-isolation drop-in removed + grub regenerated"
+fi
+echo "  #483/#842: OBS core reservation is AFFINITY-ONLY (taskset ${IMAG_ISOLATED_CPUS} via /etc/imag-isolated-cpus.conf) -- no kernel isolcpus/nohz_full/irqaffinity written"
 
 # camera-box #484: grant the desktop user rtprio so OBS's genlock render-tick pin can go SCHED_FIFO.
 # The #484 pin (vendor/obs-studio/libobs/obs-video.c) calls sched_setscheduler(SCHED_FIFO) on the ONE
