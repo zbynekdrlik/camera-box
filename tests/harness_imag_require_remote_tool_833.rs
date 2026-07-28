@@ -279,7 +279,13 @@ fn nm_tool_check_fails_loud_naming_the_tool_never_a_false_regression_claim() {
     let idx = s
         .find("imag_require_remote_tool_cmd nm")
         .expect("#833: the nm tool preflight must exist");
-    let block = &s[idx..(idx + 1200).min(s.len())];
+    // Bound the block to the tool check's OWN code, not the (legitimate, unrelated) divisor
+    // check that follows it -- that one DOES say "#756 regression" for a genuine measurement.
+    let end = s[idx..]
+        .find("echo \"[1/8] imag MV render-divisor capability check")
+        .map(|o| idx + o)
+        .unwrap_or_else(|| (idx + 1200).min(s.len()));
+    let block = &s[idx..end];
     assert!(
         block.contains("exit 1"),
         "#833: a missing nm must hard-fail the preflight (exit 1): {block}"

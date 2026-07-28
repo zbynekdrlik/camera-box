@@ -1219,8 +1219,11 @@ step 15 "Kiosk environment (#504): openbox+lightdm autologin, DM→lightdm, disa
 # (a) Install the light WM + display manager. Idempotent (apt-get install on an already-installed
 #     package is a no-op). lightdm's default-Recommends greeter (lightdm-gtk-greeter) comes along;
 #     the owner's list names no specific greeter, so none is pinned here.
+#     #833: wmctrl rides along here too — recording-e2e.sh's [0/8] projector-count preflight (and
+#     the #769 windowed-stray heal) shell out to it over SSH; a freshly provisioned box without it
+#     made that preflight misread "tool absent" as "0 projectors" (three wasted gate re-runs).
 apt-get update -qq
-DEBIAN_FRONTEND=noninteractive apt-get install -y openbox lightdm feh \
+DEBIAN_FRONTEND=noninteractive apt-get install -y openbox lightdm feh wmctrl \
     || fail "#504: openbox+lightdm install failed — cannot convert imag-nb to the kiosk WM"
 
 # (b) lightdm autologin → openbox. Idempotent full-file write of a fixed drop-in (always the same

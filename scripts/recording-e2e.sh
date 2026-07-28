@@ -157,6 +157,12 @@ CAMBOX_OFFLINE_ACK="$(cambox_offline_ack_effective "${CAMBOX_OFFLINE_ACK:-}" "$R
 # not at decode time.
 # shellcheck source=scripts/lib/live-freeze-watch.sh
 . "$HERE/lib/live-freeze-watch.sh"
+# #833: a MISSING tool on imag-nb (wmctrl, nm) must never be read as a MEASURED zero/empty
+# result -- the #756 projector-count preflight and the [1/8] nm divisor-capability check both
+# shell a remote helper on imag-nb; an absent helper used to be silently misread as "0 projectors"
+# / "capability missing (#756 regression)" instead of "the tool is not installed" (#822 class).
+# shellcheck source=scripts/lib/imag-require-remote-tool.sh
+. "$HERE/lib/imag-require-remote-tool.sh"
 camera_resolve "${CAM:-cam1}"
 # #24 item 1: this harness's SOURCE-camera role (the physical box filming cam2's monitor via
 # the optical loopback + carrying the #174 render-time capture burn) is one of
@@ -662,6 +668,18 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
   echo "[0/8] imag-nb Multiview + Program projectors must be OPEN (#758)"
   if ! python3 "$HERE/obs_phase2.py" open-projectors --host "$IMAG_IP" 2>&1 | sed 's/^/    [imag projectors] /'; then
     echo "ERROR: [preflight] FAIL: imag-nb (${IMAG_IP}): could not open the Multiview/Program projectors — check imag-nb's OBS WebSocket is reachable and DP-0/HDMI-0 are actually connected monitors." >&2
+    exit 1
+  fi
+
+  # #833: preflight imag-nb's OWN tooling BEFORE either the #769 heal or the #756 count check
+  # below shells out to `wmctrl` — a MISSING tool must fail loud BY NAME here, never be silently
+  # misread downstream as "0 projectors" (a freshly (re)provisioned box without wmctrl installed,
+  # #791, cost three wasted hardware-gate re-runs chasing a false "stray windows" diagnosis).
+  _imag_wmctrl_probe="$(sshpass -p "${IMAG_PW:-newlevel}" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 \
+    "${IMAG_USER:-newlevel}@$IMAG_IP" "$(imag_require_remote_tool_cmd wmctrl)" 2>/dev/null || true)"
+  _imag_wmctrl_missing="$(imag_remote_tool_probe_missing "$_imag_wmctrl_probe")"
+  if [ -n "$_imag_wmctrl_missing" ]; then
+    echo "ERROR: [preflight] FAIL: imag-nb (${IMAG_IP}): required tool(s) not installed: ${_imag_wmctrl_missing} (apt-get install -y wmctrl) — refusing to run the #756 projector-count check that cannot execute without it (#822/#833 class)." >&2
     exit 1
   fi
 
@@ -1260,6 +1278,17 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
   # symbol on any FUTURE imag build is therefore a real regression, not an expected gap — hard
   # fail. Flipping back to WARN, if ever needed, is exactly this ONE line:
   IMAG_DIVISOR_CAPABILITY_FAIL="${IMAG_DIVISOR_CAPABILITY_FAIL:-1}"
+  # #833: preflight the `nm` tool itself BEFORE shelling it below — nm ships in binutils, and a
+  # missing binutils (the #822 provisioning gap) must fail loud BY NAME here, never be silently
+  # misread downstream as "MV divisor capability MISSING (#756 regression)" when the real cause
+  # is that the check could not even run.
+  _imag_nm_probe="$(sshpass -p "${IMAG_PW:-newlevel}" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 \
+    "${IMAG_USER:-newlevel}@$IMAG_IP" "$(imag_require_remote_tool_cmd nm)" 2>/dev/null || true)"
+  _imag_nm_missing="$(imag_remote_tool_probe_missing "$_imag_nm_probe")"
+  if [ -n "$_imag_nm_missing" ]; then
+    echo "ERROR: [preflight] FAIL: imag-nb (${IMAG_IP}): required tool(s) not installed: ${_imag_nm_missing} (apt-get install -y binutils) — refusing to run the divisor-capability check that cannot execute without it (#822/#833 class)." >&2
+    exit 1
+  fi
   echo "[1/8] imag MV render-divisor capability check (#756)"
   _divisor_nm_count="$(sshpass -p "${IMAG_PW:-newlevel}" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 \
     "${IMAG_USER:-newlevel}@$IMAG_IP" \
