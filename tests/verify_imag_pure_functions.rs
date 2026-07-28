@@ -547,25 +547,100 @@ fn gm_check_composes_correctly_when_reused_from_clock_offset_guard_sh() {
 
 #[test]
 fn imag_scenes_output_ok_requires_both_sets_complete() {
+    // #791: imag_scenes_output_ok now takes an EXPECTED_COUNT parameter (cam7 widened the fleet
+    // from 6 to 7; the count must never be re-hardcoded as a literal "6" here again).
     let (code, out, err) = run_sourced(
         r#"
         OUT="video: 1920x1080@60/1 OK
-scenes: 6/6 OK
-MV scenes: 6/6 OK"
-        if imag_scenes_output_ok "$OUT"; then echo YES; else echo NO; fi
+scenes: 7/7 OK
+MV scenes: 7/7 OK"
+        if imag_scenes_output_ok "$OUT" 7; then echo YES; else echo NO; fi
 
         SHORT="video: 1920x1080@60/1 OK
-scenes: 5/6 MISSING ['Cam 6']
-MV scenes: 6/6 OK"
-        if imag_scenes_output_ok "$SHORT"; then echo YES; else echo NO; fi
+scenes: 6/7 MISSING ['Cam 7']
+MV scenes: 7/7 OK"
+        if imag_scenes_output_ok "$SHORT" 7; then echo YES; else echo NO; fi
+
+        # A stale caller that forgot to pass the count at all must fail closed, not silently
+        # match on an empty pattern.
+        if imag_scenes_output_ok "$OUT" ""; then echo YES; else echo NO; fi
         "#,
     );
     assert_eq!(code, 0, "stderr: {err}");
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(
         lines,
-        vec!["YES", "NO"],
-        "a short scene set must fail the gate: {out:?}"
+        vec!["YES", "NO", "NO"],
+        "a short scene set must fail the gate, and a missing count must fail closed: {out:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// (q) canonical scene ORDER + NDI-source bindings (imag_scenes.py --verify-parity, #791)
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn imag_parity_output_ok_requires_both_lines_ok() {
+    let (code, out, err) = run_sourced(
+        r#"
+        OK_OUT="scene order: OK
+ndi sources: OK"
+        if imag_parity_output_ok "$OK_OUT"; then echo YES; else echo NO; fi
+
+        BAD_ORDER="scene order: MISMATCH -- missing ['Cam 7', 'MV Cam 7']
+ndi sources: OK"
+        if imag_parity_output_ok "$BAD_ORDER"; then echo YES; else echo NO; fi
+
+        BAD_NDI="scene order: OK
+ndi sources: MISSING 'NDI resolume imag'"
+        if imag_parity_output_ok "$BAD_NDI"; then echo YES; else echo NO; fi
+        "#,
+    );
+    assert_eq!(code, 0, "stderr: {err}");
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec!["YES", "NO", "NO"],
+        "a scene-order OR ndi-source mismatch must fail the gate: {out:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// (r) OBS stats dock persistence: DockState in global.ini (#791)
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn imag_dockstate_present_requires_a_non_empty_dockstate_line() {
+    let (code, out, err) = run_sourced(
+        r#"
+        WITH_DOCK="[OBSWebSocket]
+
+[BasicWindow]
+CloseExistingProjectors=true
+geometry=AdnQywADAAAA
+DockState=AAAA/wAAAAD9AAAA
+SaveProjectors=false"
+        if imag_dockstate_present "$WITH_DOCK"; then echo YES; else echo NO; fi
+
+        NO_DOCK="[OBSWebSocket]
+
+[BasicWindow]
+CloseExistingProjectors=true
+SaveProjectors=false"
+        if imag_dockstate_present "$NO_DOCK"; then echo YES; else echo NO; fi
+
+        EMPTY_DOCK="[BasicWindow]
+DockState="
+        if imag_dockstate_present "$EMPTY_DOCK"; then echo YES; else echo NO; fi
+        "#,
+    );
+    assert_eq!(code, 0, "stderr: {err}");
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec!["YES", "NO", "NO"],
+        "DockState must be present AND non-empty (matches the exact confirmed-live shape of \
+         BOTH known imag boxes' global.ini, which lack the key entirely -- #791): {out:?}"
     );
 }
 

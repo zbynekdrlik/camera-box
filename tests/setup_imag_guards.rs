@@ -179,14 +179,35 @@ fn setup_imag_autostart_strips_saved_projectors_522() {
     );
 }
 
-/// The scene seeder must create all six cameras, bind them 1:1 to the fleet NDI names, and
+/// The scene seeder must create all seven cameras, bind them 1:1 to the fleet NDI names, and
 /// run the canvas at 1080p60 — the whole point of the box.
+///
+/// #791: this test used to pin the LITERAL `range(1, 7)` (1..=6) as the required contract — which
+/// is the exact bug this ticket fixes: cam7 (10.77.9.67, wired into the fleet by #753) was
+/// silently EXCLUDED from imag's own scene set because the range's upper bound was never widened,
+/// and the boot-time `--bootstrap` self-heal therefore never created/repaired "Cam 7"/"MV Cam 7"
+/// or enforced their Multiview membership. The fix makes the count a named, ENV-OVERRIDABLE
+/// constant (never a bare hardcoded literal again — mirrors the CAMERA_ACTIVE_SET
+/// single-source-of-truth philosophy, `.claude/rules/camera-active-set.md`) that currently
+/// resolves to 7 -- so this test now pins the ABSENCE of the old literal, the presence of the
+/// override mechanism, and the actual resolved cam7 behavior.
 #[test]
-fn imag_scenes_seeds_six_cams_at_1080p60() {
+fn imag_scenes_seeds_seven_cams_at_1080p60_no_hardcoded_range() {
     let body = read(SCENES);
     assert!(
-        body.contains("range(1, 7)"),
-        "{SCENES} must iterate cameras 1..=6 (all six NDI cams)"
+        !body.contains("CAMS = range(1, 7)"),
+        "{SCENES} must NOT hardcode `CAMS = range(1, 7)` (1..=6) again — this silently excluded \
+         cam7 (#753/#791) from imag's own scene set."
+    );
+    assert!(
+        body.contains("IMAG_SCENE_CAM_COUNT")
+            && body.contains(r#"os.environ.get("IMAG_SCENE_CAM_COUNT", "7")"#),
+        "{SCENES} must derive the scene-camera count from an env-overridable \
+         IMAG_SCENE_CAM_COUNT (default 7), never a bare literal (#791)."
+    );
+    assert!(
+        body.contains("CAMS = range(1, IMAG_SCENE_CAM_COUNT + 1)"),
+        "{SCENES} must build CAMS from IMAG_SCENE_CAM_COUNT, not a second hardcoded value."
     );
     for needle in ["CANVAS_W, CANVAS_H, FPS = 1920, 1080, 60", "\"ndi_source\""] {
         assert!(
@@ -197,6 +218,82 @@ fn imag_scenes_seeds_six_cams_at_1080p60() {
     assert!(
         body.contains("(usb)"),
         "{SCENES} must bind inputs to the fleet `CAM<n> (usb)` NDI source names"
+    );
+
+    // Behavioral proof (not just static text): importing the module with NO env override must
+    // resolve CAMS to exactly 1..=7, and an override must widen it further (e.g. a future cam8) —
+    // proving the mechanism actually works, not just that the right words appear in the file.
+    let repo = manifest_dir();
+    let out = std::process::Command::new("python3")
+        .arg("-c")
+        .arg(
+            "import importlib.util, sys; \
+             spec = importlib.util.spec_from_file_location('m', 'scripts/imag_scenes.py'); \
+             m = importlib.util.module_from_spec(spec); sys.modules['m'] = m; \
+             spec.loader.exec_module(m); print(list(m.CAMS))",
+        )
+        .current_dir(&repo)
+        .output()
+        .expect("run python3 to import imag_scenes.py");
+    assert!(
+        out.status.success(),
+        "importing {SCENES} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("[1, 2, 3, 4, 5, 6, 7]"),
+        "#791: CAMS must default to [1..7] (cam7 included) with no env override. Got: {stdout}"
+    );
+
+    let out2 = std::process::Command::new("python3")
+        .arg("-c")
+        .arg(
+            "import importlib.util, sys; \
+             spec = importlib.util.spec_from_file_location('m', 'scripts/imag_scenes.py'); \
+             m = importlib.util.module_from_spec(spec); sys.modules['m'] = m; \
+             spec.loader.exec_module(m); print(list(m.CAMS))",
+        )
+        .current_dir(&repo)
+        .env("IMAG_SCENE_CAM_COUNT", "8")
+        .output()
+        .expect("run python3 with IMAG_SCENE_CAM_COUNT=8");
+    assert!(
+        out2.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out2.stderr)
+    );
+    let stdout2 = String::from_utf8_lossy(&out2.stdout);
+    assert!(
+        stdout2.contains("[1, 2, 3, 4, 5, 6, 7, 8]"),
+        "#791: IMAG_SCENE_CAM_COUNT=8 must widen CAMS to [1..8] with NO code edit. Got: {stdout2}"
+    );
+}
+
+/// #791: the canonical 17-scene ORDER and the 10 canonical NDI-source bindings must be derived
+/// (from CAMS), never a second hand-maintained list that could silently drift from the seeder's
+/// own CAMS-derived scene set.
+#[test]
+fn imag_scenes_defines_canonical_order_and_ndi_sources_derived_from_cams() {
+    let body = read(SCENES);
+    for needle in [
+        "CANONICAL_SCENE_ORDER",
+        "CANONICAL_NDI_SOURCES",
+        "def scene_order_mismatch(",
+        "def ndi_source_mismatches(",
+        "def verify_parity(",
+        "--verify-parity",
+    ] {
+        assert!(
+            body.contains(needle),
+            "{SCENES} must define `{needle}` (#791 operator-parity verification)."
+        );
+    }
+    assert!(
+        body.contains("[f\"Cam {n}\" for n in reversed(list(CAMS))]")
+            && body.contains("[f\"MV Cam {n}\" for n in CAMS]"),
+        "{SCENES}: CANONICAL_SCENE_ORDER must be DERIVED from CAMS, not a second hardcoded list \
+         of scene names that could drift from the actual seeded set."
     );
 }
 
@@ -2896,5 +2993,193 @@ fn setup_imag_noop_reverify_covers_libobs_opengl_756() {
         body.contains(r#"[ -f "$LIBOBS_OPENGL_REAL" ]"#),
         "{SETUP}: the NOOP_VALID existence check must ALSO require libobs-opengl.so.30 to exist \
          on disk, not just libobs.so.30/distroav.so/bin/obs"
+    );
+}
+
+// ============================================================================================
+// #791 — imag reprovision parity: canonical operator scene collection + OBS dock persistence.
+// ============================================================================================
+
+/// Root cause 2 (#791): imag_scenes.py's WS-based seed deliberately never creates the hand-built
+/// operator scenes ("resolume imag" / "MW resolume imag" / the base "Scene") -- a from-scratch box
+/// silently lacked them (and Cam 7/MV Cam 7, and the whole correct scene ORDER) until an operator
+/// rebuilt them by hand. The fix commits the CANONICAL 17-scene collection captured live off the
+/// incumbent box and installs it via setup-imag.sh, ONLY on a genuinely fresh box (never
+/// overwriting an existing collection).
+#[test]
+fn setup_imag_installs_canonical_scene_collection_when_none_exists() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("imag-obs-scenes-canonical.json"),
+        "{SETUP} must fetch scripts/imag-obs-scenes-canonical.json (the canonical 17-scene \
+         collection, #791)."
+    );
+    assert!(
+        body.contains(r#"if ! ls "$SCENES_DIR"/*.json >/dev/null 2>&1; then"#),
+        "{SETUP}: the canonical scene collection must be installed ONLY when the box has NO \
+         existing scene collection file (operator-wins -- never overwrite a live box's own \
+         collection, #791)."
+    );
+    let install = body
+        .find("imag-obs-scenes-canonical.json")
+        .expect("canonical scene collection fetch must be present");
+    let window = &body[install.saturating_sub(400)..(install + 400).min(body.len())];
+    assert!(
+        window.contains("gh api") && window.contains(r#""repos/${GENLOCK_REPO}/contents/"#),
+        "{SETUP}: the canonical scene collection must be fetched via `gh api` against \
+         ${{GENLOCK_REPO}} (dev) -- the same convention imag_scenes.py itself is fetched with, \
+         since this script has no sibling repo checkout at runtime on the box. Got:\n{window}"
+    );
+    assert!(
+        window.contains("Untitled.json"),
+        "{SETUP}: the canonical collection must be installed as Untitled.json (matching the \
+         SceneCollectionFile name OBS already uses on both known imag boxes). Got:\n{window}"
+    );
+}
+
+/// The canonical-scene-collection install must run inside/after step 13 (OBS pre-seed) and
+/// strictly BEFORE step 17 (OBS is actually launched) -- installing it after OBS's first launch
+/// would be a no-op (OBS would already have created its own blank default collection by then).
+#[test]
+fn setup_imag_canonical_scenes_install_runs_before_obs_launch() {
+    let body = read(SETUP);
+    let install = body
+        .find("imag-obs-scenes-canonical.json")
+        .expect("canonical scene collection fetch must be present");
+    let launch = body
+        .find("step 17 \"Launch OBS on the desktop session")
+        .expect("step 17 (Launch OBS) must be present");
+    assert!(
+        install < launch,
+        "{SETUP}: the canonical scene collection MUST be installed BEFORE step 17 launches OBS \
+         for the first time -- installing it after launch is a no-op (#791)."
+    );
+}
+
+/// The canonical scene collection JSON itself must be valid JSON, carry the exact 17-scene
+/// `scene_order` this ticket documents (Scene, Cam 7..Cam 1, resolume imag, MV Cam 1..7, MW
+/// resolume imag), and bind the 3 Resolume/overlay NDI sources no automated seeder creates.
+#[test]
+fn canonical_scene_collection_json_has_the_exact_17_scene_order() {
+    let path = manifest_dir().join("scripts/imag-obs-scenes-canonical.json");
+    let body =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let out = std::process::Command::new("python3")
+        .arg("-c")
+        .arg(
+            "import json, sys; \
+             d = json.load(open(sys.argv[1])); \
+             print([s['name'] for s in d['scene_order']]); \
+             ndi = {s['name']: s.get('settings', {}).get('ndi_source_name') \
+                    for s in d['sources'] if s.get('id') == 'ndi_source'}; \
+             print(ndi)",
+        )
+        .arg(&path)
+        .output()
+        .expect("run python3 to parse the canonical scene collection JSON");
+    assert!(
+        out.status.success(),
+        "canonical scene collection JSON must parse as valid JSON: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(
+            "['Scene', 'Cam 7', 'Cam 6', 'Cam 5', 'Cam 4', 'Cam 3', 'Cam 2', 'Cam 1', \
+             'resolume imag', 'MV Cam 1', 'MV Cam 2', 'MV Cam 3', 'MV Cam 4', 'MV Cam 5', \
+             'MV Cam 6', 'MV Cam 7', 'MW resolume imag']"
+        ),
+        "canonical scene collection must carry the exact 17-scene order documented on #791. \
+         Got:\n{stdout}"
+    );
+    for needle in [
+        "'MW imag resolume': 'RESOLUME-SNV (Arena - To imag obs)'",
+        "'NDI resolume imag': 'RESOLUME-SNV (Arena - To imag obs)'",
+        "'imag overlay': 'RESOLUME-SNV (Arena - imag overlay)'",
+    ] {
+        assert!(
+            stdout.contains(needle),
+            "canonical scene collection must bind `{needle}` -- one of the 3 Resolume/overlay \
+             NDI sources no automated seeder creates (#791). Got:\n{stdout}"
+        );
+    }
+    // Never allow the checked-in artifact to silently rot into "not what's captured".
+    assert!(!body.is_empty());
+}
+
+/// Root cause 4 (#791): OBS only persists `[BasicWindow]` `geometry`/`DockState` on a clean exit
+/// -- imag-nb runs 24/7 and has therefore never shed one on its own (confirmed live: neither
+/// known imag box's global.ini has ever carried these keys). setup-imag.sh must seed a known-good
+/// captured default the FIRST time a box provisions, and must never overwrite a real one an
+/// operator's own clean exit already produced.
+#[test]
+fn setup_imag_seeds_dockstate_when_missing_never_overwrites() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("if ! grep -q '^DockState=' \"$f\"; then"),
+        "{SETUP} must seed [BasicWindow] DockState ONLY when missing (operator-wins -- never \
+         overwrite a real captured layout from an actual clean exit, #791)."
+    );
+    assert!(
+        body.contains("DOCKSTATE_GEOMETRY=") && body.contains("DOCKSTATE_BLOB="),
+        "{SETUP} must define the captured geometry/DockState base64 blobs (#791)."
+    );
+    // The base64 blobs contain literal `/` characters (confirmed: DockState starts "AAAA/w...")
+    // -- sed's own `s/.../.../ ` delimiter would collide with that. Must use awk (or an
+    // equivalent non-colliding mechanism), never a plain sed substitution here.
+    let seed_start = body
+        .find("if ! grep -q '^DockState=' \"$f\"; then")
+        .expect("DockState seed block must be present");
+    // Scope to "up to step 14" (well past the block's own close) rather than hunting the exact
+    // closing `fi` indentation -- the block contains a NESTED if/fi (the [BasicWindow]-exists
+    // branch) whose own 8-space-indented `fi` would otherwise wrongly satisfy a naive
+    // `"\n    fi\n"` search (a 4-space `fi\n` is a substring of an 8-space-indented `        fi\n`
+    // line too).
+    let step14 = body
+        .find("step 14 \"Desktop de-jitter")
+        .expect("step 14 must be present");
+    let region = &body[seed_start..step14];
+    assert!(
+        region.contains("awk -v geo=") && region.contains("DOCKSTATE_BLOB"),
+        "{SETUP}: the DockState insertion must use awk (never sed, whose `/` delimiter would \
+         collide with the base64 blob's own literal `/` characters). Got:\n{region}"
+    );
+    assert!(
+        !region.contains("sed -i"),
+        "{SETUP}: the DockState insertion must NOT use sed -- the captured base64 blob contains \
+         literal `/` characters that collide with sed's `s/.../.../ ` delimiter. Got:\n{region}"
+    );
+}
+
+/// The DockState seed must run inside seed_ini() so it applies to BOTH global.ini and user.ini
+/// (the same two files every other pre-seed key in this function already targets), and therefore
+/// BEFORE step 17 launches OBS for the first time.
+#[test]
+fn setup_imag_dockstate_seed_applies_to_both_ini_files_before_obs_launch() {
+    let body = read(SETUP);
+    let seed_fn_start = body
+        .find("seed_ini() {")
+        .expect("seed_ini() must be defined");
+    let dockstate = body
+        .find("if ! grep -q '^DockState=' \"$f\"; then")
+        .expect("DockState seed block must be present");
+    let global_call = body
+        .find(r#"seed_ini "$OBS_CFG/global.ini""#)
+        .expect("seed_ini must be called for global.ini");
+    let user_call = body
+        .find(r#"seed_ini "$OBS_CFG/user.ini""#)
+        .expect("seed_ini must be called for user.ini");
+    assert!(
+        seed_fn_start < dockstate && dockstate < global_call && global_call < user_call,
+        "{SETUP}: the DockState seed must live INSIDE seed_ini() (so it applies to both \
+         global.ini and user.ini), before both call sites."
+    );
+    let launch = body
+        .find("step 17 \"Launch OBS on the desktop session")
+        .expect("step 17 (Launch OBS) must be present");
+    assert!(
+        user_call < launch,
+        "{SETUP}: the DockState seed must complete BEFORE step 17 launches OBS for the first \
+         time (#791)."
     );
 }
