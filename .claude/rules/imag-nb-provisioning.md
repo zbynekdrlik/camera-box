@@ -141,6 +141,19 @@ The pure functions are unit-tested by SOURCING the real script — its `BASH_SOU
 skips the destructive flow. Keep every new decision function pure (stdin/args in, text out, `fail`
 on the impossible case) so it stays testable without a box.
 
+**Confirmed again (#842, 2026-07-28) — a NEW EXPLANATORY COMMENT can be the collision, not just
+code.** Rewriting step 8's header comment, one sentence mentioned the literal path
+`/etc/imag-isolated-cpus.conf` in passing (explaining what the affinity pin consumes) BEFORE the
+real derive-then-write code a few lines later. `tests/harness_imag_intel_display_841.rs`'s
+`setup_imag_persists_the_derived_isolated_cpus_for_the_wrapper_841` does
+`body.find("/etc/imag-isolated-cpus.conf")` (first occurrence) to assert ordering against the
+derivation line — it silently grabbed the COMMENT instead of the real write, and the ordering
+assertion failed even though the actual code was correct. Caught immediately by running the full
+suite (it always is, if you run it) — fixed by rewording the comment to describe the file without
+spelling out its literal path. The lesson generalizes past "code you add" to "prose you add near a
+pinned literal": before writing an explanatory comment, check whether the exact string you're
+about to use for color also happens to be a `.find()`/`.split()` anchor elsewhere in the file.
+
 ## Operator PARITY is a SEPARATE concern from system parity (#791)
 
 `verify-imag.sh`'s pre-#791 checks (kernel, lightdm, OBS log markers, NDI runtime pin, dantesync
