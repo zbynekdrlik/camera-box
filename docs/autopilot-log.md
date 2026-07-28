@@ -5960,3 +5960,31 @@ to encode so a THIRD recurrence on a future box is structurally impossible.
 
 Shared PR: #704 (dev→main train; body updated with a `## Item A` + `## #842 —` scope section and
 `Closes #842`).
+
+## #852 (2026-07-28) — all_cambox_continuity residual reconciliation: NOT a bug, undecodable is
+
+First real `pull_request` E2E run to reach the verdict-computation stage (run 1867252327, CI
+30371662124) reported `all_cambox_continuity.overall_pass=false` with 421 `residual_events`
+(388 gap-kind + 33 copy-kind) fleet-wide despite every segment's authoritative `gaps` field
+reading 0. Root-cause comment posted BEFORE any code (issuecomment-5106499751): pulled every
+Gap-kind event's `tick_before`/`tick_after` delta directly from the real verdict JSON — all 388
+sit in [11,53] (median 15), fully explained by this run's own ~64% fleet-wide `undecodable` rate
+(`residual_events.rs`'s uncredited outlier heuristic, calibrated on much cleaner #707 sample
+recordings, correctly flags moderate jumps that `gaps`'s credited whole-window net-span calc
+(#625/#681) correctly nets to zero). Neither metric is wrong; grepped the whole codebase —
+`residual_events` never feeds `pass`/`overall_pass` anywhere. The genuine reason
+`overall_pass=false` is `undecodable` itself (a chronic, physical optical-decode-quality issue —
+camera shutter/focus/exposure on the broadcast camera filming cam2's monitor, matching `#312`'s
+own repeated history of the same failure mode; no remote control surface exists for it) — split
+out and filed separately as `#853`.
+
+Commits: `e4efb9874` (version bump 1.7.0-dev.385) → `7d270d68f` (test: pin the reconciliation —
+`residual_gap_events_can_be_nonzero_while_authoritative_gaps_stays_zero_852` in
+`src/probe/recording_segments.rs`, a synthetic reproduction of the real run's exact delta shape).
+No RED→GREEN pair — this is a characterization/regression-lock test on already-correct,
+already-tested code, not a bug fix. Verified PASS on the `probe`-feature CI job (run 30376615714,
+job "Test") since the file is behind `#[cfg(feature = "probe")]` and cannot compile-check
+locally (Tier-0 limitation, confirmed by hand-tracing `segment_continuity`/`painted_tick_gaps`/
+`residual_events` against the test's synthetic input before pushing). Regular `CI` workflow fully
+green. Issue #852 closed with full evidence; PR #704 NOT merged (its Full-path E2E gate is
+expected to stay red until #853 is addressed — hands-on rig work, out of this ticket's scope).

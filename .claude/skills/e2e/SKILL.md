@@ -2061,6 +2061,31 @@ When `copies`/`gaps` look elevated or growing across a run, don't guess — run 
      under each event by wall-clock second, ready for whoever picks up the next real residual —
      don't hand-grep, run this first. The Discord report (#711) now prints "Odchýlky s dôvodmi: N
      s dôkazmi / M otvorených" every run.
+   - **#852 (2026-07-28) — a large `residual_events` Gap-kind count is EXPECTED (not a bug) when
+     that segment's `undecodable` is high, and does NOT mean the chain dropped that many frames.**
+     The first real `all_cambox_continuity` verdict off the whole fleet (run 1867252327) showed
+     every segment's authoritative `gaps` field at 0 while `residual_events` reported 388 Gap-kind
+     entries fleet-wide — read at a glance this LOOKS like the `gaps`/`residual_events` accounting
+     disagreeing. Pulling every event's `tick_before`/`tick_after` delta straight from the verdict
+     JSON showed all 388 sit in `[11,53]` (median 15) — moderate jumps, not the `#707` anatomy's
+     "no outliers anywhere" signature. Root cause: that run's `undecodable` rate was ~64%
+     fleet-wide (vs the `#707` anatomy's clean calibration samples), so two successfully-decoded
+     frames are routinely several ticks apart in recorded order — `residual_events` (deliberately
+     UNCREDITED, per its own module doc) correctly flags each such jump past
+     `GAP_OUTLIER_ABS_DELTA` as a candidate, while `gaps` (credits up to `undecodable` slots,
+     `#625`/`#681`) correctly finds no PROVEN hole. **Diagnostic recipe for the next time this
+     pattern recurs:** before suspecting a verdict-logic bug, (1) check that segment's own
+     `undecodable` field — if it's in the hundreds, a moderate residual `Gap` delta is expected
+     noise, not a defect; (2) pull the actual deltas
+     (`tick_after - tick_before` per Gap-kind `residual_events` entry) straight from the verdict
+     JSON and confirm they cluster in a plausible "several undecoded ticks" range rather than
+     being genuinely huge/random. A locked regression test
+     (`residual_gap_events_can_be_nonzero_while_authoritative_gaps_stays_zero_852` in
+     `src/probe/recording_segments.rs`) reproduces this exact shape synthetically so a future
+     change never wires `residual_events` into `pass`, nor "fixes" `gaps` to match it. The
+     ACTUAL reason `overall_pass=false` on that run was the high `undecodable` itself — a
+     chronic, physical camera shutter/focus/exposure decode-quality issue (see `#312`'s own
+     repeated history above), tracked separately as `#853`, not a code defect.
    - **Hit the `gh workflow run` (`workflow_dispatch`) plan-only trap myself despite it already
      being fully documented** (see "`gh workflow run`... is the LEGACY plan-only soak" section
      below, and `CLAUDE.md`'s own GOTCHA at "a live-triggered E2E gate run can race ahead of a
