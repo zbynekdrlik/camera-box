@@ -224,28 +224,50 @@ fn imag_scenes_pins_verified_1to1_camera_mapping_526() {
     );
 }
 
-/// #502: imag must run on a named ADVANCED profile with a native-1080p60 NVENC h264 mkv recording,
-/// not the naive default Simple profile (x264 @ 6 Mbps 'Stream' quality, which softens the E2E
+/// #502/#847: imag must run on a named ADVANCED profile with a native-1080p60 mkv recording, not
+/// the naive default Simple profile (x264 @ 6 Mbps 'Stream' quality, which softens the E2E
 /// QR/burns). imag records its own program for the topology-v2 verdict, so the recording must be
 /// native-resolution + high quality. Verified live 2026-07-05: produces a 1920x1080@60 h264-NVENC
-/// .mkv. Guard the seed_profile() settings so a regression can't silently drop it.
+/// .mkv on the INCUMBENT (RTX 5050) box.
+///
+/// #847 SUPERSEDES this test's original premise: the recording encoder is no longer a hardcoded
+/// `obs_nvenc_h264_tex` literal -- the replacement notebook (10.77.9.187, Intel iGPU only) never
+/// initializes NVENC, so a hardcoded-NVENC seed silently produced 0-byte recordings there (live-
+/// diagnosed, see the #847 issue). `seed_profile()` now takes `has_discrete_nvidia` and derives
+/// the encoder via `select_rec_encoder()`: NVENC when a discrete NVIDIA GPU is present (byte-for-
+/// byte unchanged for the incumbent box), `obs_x264` (live-proven to work) otherwise -- NEVER qsv
+/// (live-tested and confirmed unreliable on this hardware/build, see the #847 design comment).
+/// Pin the NEW hardware-aware contract instead of the old hardcoded one.
 #[test]
-fn imag_scenes_seeds_advanced_nvenc_recording_profile_502() {
+fn imag_scenes_seeds_advanced_hardware_aware_recording_profile_847() {
     let s = read("scripts/imag_scenes.py");
     for needle in [
         r#""profileName": "imag-60fps""#,
         r#"("Output", "Mode", "Advanced")"#,
-        r#"("AdvOut", "RecEncoder", "obs_nvenc_h264_tex")"#,
+        r#"("AdvOut", "RecEncoder", rec_encoder)"#,
         r#"("AdvOut", "RecRescale", "false")"#,
         r#"("AdvOut", "RecFormat2", "mkv")"#,
-        "seed_profile(obs)",
+        "def seed_profile(obs: Obs, has_discrete_nvidia: bool) -> None:",
+        "rec_encoder = select_rec_encoder(has_discrete_nvidia)",
+        "def select_rec_encoder(has_discrete_nvidia: bool) -> str:",
+        r#"return "obs_nvenc_h264_tex" if has_discrete_nvidia else "obs_x264""#,
     ] {
         assert!(
             s.contains(needle),
-            "#502: imag_scenes.py must contain `{needle}` (Advanced NVENC native-1080p mkv \
-             recording profile, applied before the scene seed)"
+            "#847: imag_scenes.py must contain `{needle}` (Advanced, hardware-aware-encoder, \
+             native-1080p mkv recording profile, applied before the scene seed)"
         );
     }
+    // Never qsv as an actual RecEncoder VALUE (a quoted string literal) -- live-tested and
+    // confirmed unreliable on this hardware/build (MFX_ERR_UNSUPPORTED at Init()); shipping it
+    // would silently reproduce the exact zero-bytes failure #847 exists to fix. The design-
+    // rationale comment above mentions the bare (unquoted) name "obs_qsv11_v2" for context, which
+    // is fine -- only a QUOTED literal (something the code could actually return/assign) is banned.
+    assert!(
+        !s.contains("\"obs_qsv11"),
+        "#847: imag_scenes.py must never select a qsv encoder id as a string literal -- \
+         live-proven unreliable on 10.77.9.187"
+    );
 }
 
 // ---------------------------------------------------------------------------
