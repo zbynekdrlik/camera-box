@@ -102,6 +102,23 @@ pub fn vernier_ids(tick: u64) -> (u32, u32) {
     (left as u32, right as u32)
 }
 
+/// #854: per-side "last stamped" `gen_ts_ns` for the dual-QR Vernier, persisted across painter
+/// ticks by the caller so the SETTLED side's rendered payload stays byte-identical to the
+/// previous tick — only the FRESH side (the one whose `frame_id` just changed, per
+/// [`vernier_ids`]) gets a new `gen_ts_ns` baked into its payload this tick. Before this existed,
+/// `paint_one_frame` stamped a fresh `gen_ts_ns` into BOTH halves every tick regardless of which
+/// side changed, so the settled half's QR pixels silently differed tick-to-tick too — defeating
+/// the anti-blur/tear-tolerance guarantee ([`vernier_ids`]'s own doc comment: "the other is
+/// settled (sharp)"). The tick's own returned/logged `gen_ts_ns` (the ground truth
+/// `recording-verdict` joins on by tick/frame_id) is UNCHANGED by this — it is still the fresh
+/// clock read every tick; only the SETTLED side's BAKED payload now correctly reflects when that
+/// content was actually last generated instead of claiming "now".
+#[derive(Debug, Clone, Copy, Default)]
+struct VernierGenTs {
+    left: i64,
+    right: i64,
+}
+
 /// Render + present ONE frame and return `(logical_id, gen_ts_ns, flip_ts_ns)`.
 ///
 /// The ORDER is the #194 contract, and is the whole point of this helper being testable:
@@ -128,6 +145,7 @@ fn paint_one_frame(
     start: Instant,
     frame_id: u32,
     refresh_tick: u64,
+    vernier_gen: &mut VernierGenTs,
 ) -> Result<(u32, i64, i64)> {
     let gen_ts_ns = clock_ns(start, params.wall_clock);
 
@@ -138,15 +156,28 @@ fn paint_one_frame(
         // tick. Exactly one half changes per refresh — the other is settled (sharp).
         let (l, r) = vernier_ids(refresh_tick);
         let logical_id = l.max(r); // the freshly-painted half's id
+                                   // #854: left is fresh exactly on EVEN ticks (vernier_ids' `l == tick` there); right is
+                                   // fresh on ODD ticks, PLUS tick 0 (the bootstrap — both sides start fresh together, same
+                                   // as vernier_ids(0) == (0, 0)). Only a fresh side's stored gen_ts_ns advances this tick;
+                                   // a settled side keeps whatever it was last stamped with, so its payload — and therefore
+                                   // its rendered QR pixels — is byte-identical to the previous tick.
+        let left_fresh = refresh_tick % 2 == 0;
+        let right_fresh = refresh_tick == 0 || refresh_tick % 2 == 1;
+        if left_fresh {
+            vernier_gen.left = gen_ts_ns;
+        }
+        if right_fresh {
+            vernier_gen.right = gen_ts_ns;
+        }
         let left_payload = Payload {
             run_id: params.run_id,
             frame_id: l,
-            gen_ts_ns,
+            gen_ts_ns: vernier_gen.left,
         };
         let right_payload = Payload {
             run_id: params.run_id,
             frame_id: r,
-            gen_ts_ns,
+            gen_ts_ns: vernier_gen.right,
         };
         (
             logical_id,
@@ -271,10 +302,18 @@ pub fn run_painter(
 
     // Dual-QR Vernier: counts refreshes so vernier_ids can assign stable left/right ids.
     let mut refresh_tick: u64 = 0;
+    // #854: per-side last-stamped gen_ts_ns, persisted across ticks — see VernierGenTs.
+    let mut vernier_gen = VernierGenTs::default();
 
     while !stop.load(Ordering::Relaxed) {
-        let (logical_id, gen_ts_ns, flip_ts_ns) =
-            paint_one_frame(presenter.as_mut(), &params, start, frame_id, refresh_tick)?;
+        let (logical_id, gen_ts_ns, flip_ts_ns) = paint_one_frame(
+            presenter.as_mut(),
+            &params,
+            start,
+            frame_id,
+            refresh_tick,
+            &mut vernier_gen,
+        )?;
         emitted
             .lock()
             .unwrap()
@@ -317,7 +356,7 @@ pub fn run_painter(
 
 #[cfg(test)]
 mod tests {
-    use super::{paint_one_frame, vernier_ids, PaintParams};
+    use super::{paint_one_frame, vernier_ids, PaintParams, VernierGenTs};
     use crate::probe::presenter::{Presenter, PresenterKind};
     use anyhow::Result;
     use std::time::{Duration, Instant};
@@ -372,7 +411,8 @@ mod tests {
         };
         let params = test_params();
         let start = Instant::now();
-        let (id, gen_ts, flip_ts) = paint_one_frame(&mut p, &params, start, 0, 0).unwrap();
+        let (id, gen_ts, flip_ts) =
+            paint_one_frame(&mut p, &params, start, 0, 0, &mut VernierGenTs::default()).unwrap();
         assert_eq!(id, 0, "single-QR logical id is the frame_id");
         assert!(flip_ts >= gen_ts, "flip_ts >= gen_ts always");
         let gap_ms = (flip_ts - gen_ts) as f64 / 1_000_000.0;
@@ -394,7 +434,8 @@ mod tests {
         let mut params = test_params();
         params.dual_qr = true;
         let start = Instant::now();
-        let (id, gen_ts, flip_ts) = paint_one_frame(&mut p, &params, start, 0, 4).unwrap();
+        let (id, gen_ts, flip_ts) =
+            paint_one_frame(&mut p, &params, start, 0, 4, &mut VernierGenTs::default()).unwrap();
         // refresh_tick 4 ⇒ vernier_ids(4) = (4, 3) ⇒ logical_id = max = 4.
         assert_eq!(
             id, 4,
@@ -464,11 +505,12 @@ mod tests {
         params.canvas_h = h;
         params.qr_size = qr;
         let start = Instant::now();
+        let mut vernier = VernierGenTs::default();
 
-        let (_, gen2, _) = paint_one_frame(&mut p, &params, start, 0, 2).unwrap();
+        let (_, gen2, _) = paint_one_frame(&mut p, &params, start, 0, 2, &mut vernier).unwrap();
         let bgra2 = p.last.clone().unwrap();
         std::thread::sleep(Duration::from_micros(1));
-        let (_, gen3, _) = paint_one_frame(&mut p, &params, start, 0, 3).unwrap();
+        let (_, gen3, _) = paint_one_frame(&mut p, &params, start, 0, 3, &mut vernier).unwrap();
         let bgra3 = p.last.clone().unwrap();
 
         let left2 = decode_payload(&bgra2, w, h, 2);
