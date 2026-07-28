@@ -172,12 +172,10 @@ fn setup_imag_persists_the_derived_isolated_cpus_for_the_wrapper_841() {
     let derive = body
         .find("IMAG_ISOLATED_CPUS=\"$(printf")
         .expect("the #816 IMAG_ISOLATED_CPUS derivation must still exist");
-    let persist = body
-        .find("/etc/imag-isolated-cpus.conf")
-        .expect(
-            "setup-imag.sh must persist the derived IMAG_ISOLATED_CPUS value to \
+    let persist = body.find("/etc/imag-isolated-cpus.conf").expect(
+        "setup-imag.sh must persist the derived IMAG_ISOLATED_CPUS value to \
              /etc/imag-isolated-cpus.conf for the wrapper to read as its fallback",
-        );
+    );
     assert!(
         derive < persist,
         "{SETUP}: the persisted config file must be written AFTER deriving IMAG_ISOLATED_CPUS, \

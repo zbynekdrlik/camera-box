@@ -32,13 +32,25 @@ if pgrep -x obs >/dev/null; then
 fi
 
 rm -rf "$HOME/.config/obs-studio/.sentinel"/* 2>/dev/null || true
-# #840: the CPU pin is env-overridable (falls back to the box's old known-good "2-11" default for
-# a bare manual invocation with no env set) so the boot-time openbox autostart -- which DOES know
-# this box's own DERIVED isolated-CPU set (#816) -- can pass it through via IMAG_ISOLATED_CPUS,
-# while the operator's manual "Spustit OBS" menu invocation (no env set) still gets a sane
-# default. This is what lets the boot path and the manual path share ONE launch script.
-taskset -c "${IMAG_ISOLATED_CPUS:-2-11}" obs --disable-shutdown-check &
-echo "obs launched (pid $!)"
+# #840/#841: the CPU pin is env-overridable so the boot-time openbox autostart -- which DOES know
+# this box's own DERIVED isolated-CPU set (#816) -- can pass it through via IMAG_ISOLATED_CPUS.
+# A bare manual invocation (no env set, e.g. the operator's "Spustit OBS" menu entry) falls back
+# to the SAME derived value setup-imag.sh persisted to /etc/imag-isolated-cpus.conf when it
+# computed the isolation plan for the kernel cmdline -- ONE source of truth. #841 REMOVED the
+# previous hardcoded fallback range (the INCUMBENT 16-thread box's hand-tuned pin): it was
+# silently wrong on the 12-thread replacement notebook (10.77.9.187), where it overlapped the
+# kernel's own irqaffinity IRQ cores and defeated the isolation. Never guess a pin -- fail loud
+# when neither source has a value.
+ISOLATED_CPUS="${IMAG_ISOLATED_CPUS:-}"
+if [ -z "$ISOLATED_CPUS" ] && [ -r /etc/imag-isolated-cpus.conf ]; then
+    ISOLATED_CPUS="$(cat /etc/imag-isolated-cpus.conf)"
+fi
+if [ -z "$ISOLATED_CPUS" ]; then
+    echo "FAIL: no derived isolated-CPU set available (IMAG_ISOLATED_CPUS unset and /etc/imag-isolated-cpus.conf missing/empty) -- refuse to guess a taskset pin"
+    exit 1
+fi
+taskset -c "$ISOLATED_CPUS" obs --disable-shutdown-check &
+echo "obs launched (pid $!, taskset -c $ISOLATED_CPUS)"
 
 deadline=$((SECONDS + 90))
 until (exec 3<>/dev/tcp/127.0.0.1/4455) 2>/dev/null; do

@@ -638,6 +638,11 @@ IMAG_NOHZ_CPUS="$(printf '%s\n'    "$IMAG_ISOLATION_PLAN" | sed -n 2p)"
 IMAG_HOUSEKEEP_CPUS="$(printf '%s\n' "$IMAG_ISOLATION_PLAN" | sed -n 3p)"
 [ -n "$IMAG_ISOLATED_CPUS" ] && [ -n "$IMAG_NOHZ_CPUS" ] && [ -n "$IMAG_HOUSEKEEP_CPUS" ] \
     || fail "#816: could not derive the CPU isolation plan from this box's topology"
+# #841: persist the SAME derived value imag-obs-start.sh falls back to for a manual "Spustit OBS"
+# invocation (no IMAG_ISOLATED_CPUS env set) -- ONE source of truth for the kernel cmdline, the
+# boot autostart's env export (step 16), and the wrapper's own fallback. Never a second hardcoded
+# literal in the wrapper.
+printf '%s\n' "$IMAG_ISOLATED_CPUS" > /etc/imag-isolated-cpus.conf
 cat > /etc/default/grub.d/98-imag-isolation.cfg <<EOF
 # camera-box #483/#816: reserve the P-core block (minus P-core0) for the OBS thread pool; keep
 # P-core0 + every E-core for openbox/sshd/MCP/housekeeping, and park default IRQs there too.
@@ -701,6 +706,76 @@ step 9 "NVIDIA dGPU driver (#500): nvidia-driver-595-open + PRIME nvidia-primary
 # driven by the iGPU directly — there is no PRIME to select and no driver to install.
 if ! lspci -nn | imag_has_discrete_nvidia; then
     echo "  #816: no discrete NVIDIA GPU on this box — skipping the driver + PRIME step (iGPU drives HDMI directly)"
+    # #841: the incumbent box's anti-stutter display tuning (nvidia-settings
+    # ForceFullCompositionPipeline=On + GPUPowerMizerMode=1) is NVIDIA-only and has no counterpart
+    # here — provision the genuinely-applicable Intel/i915 equivalents instead of leaving the
+    # display path untuned (confirmed live on 10.77.9.187: Xorg runs modesetting+glamor+iris, no
+    # legacy `intel` DDX, so TearFree is the correct knob; the iGPU actively DVFS-scales
+    # gt_cur_freq_mhz well below its own gt_RP0_freq_mhz ceiling under load, the same ramp-hitch
+    # class of stutter GPUPowerMizerMode=1 avoids on NVIDIA):
+    #   (a) TearFree -- the modesetting-driver option that eliminates the mid-frame tear/stutter
+    #       line without a compositor (a compositor over the fullscreen OBS projector would
+    #       double-composite and stutter -- same reasoning as the NVIDIA box's picom mask, #777).
+    #   (b) pin the iGPU's frequency FLOOR to its own reported ceiling (gt_RP0_freq_mhz, never a
+    #       hardcoded MHz literal -- a future Intel notebook's ceiling will differ) so it stops
+    #       idling down and ramping back up under load. i915 has no PowerMizer; raising the floor
+    #       to the hardware max gets the same "always at max clock" outcome. Sysfs values reset on
+    #       reboot, so this is reapplied every boot via a dedicated systemd oneshot unit, mirroring
+    #       the existing cpu-performance.service convention (step 4) rather than a
+    #       provisioning-time-only write.
+    mkdir -p /etc/X11/xorg.conf.d
+    cat > /etc/X11/xorg.conf.d/20-intel-tearfree.conf <<'XORG_EOF'
+# camera-box #841: tear-free HDMI program projector on Intel iGPU (modesetting + glamor).
+# TearFree is the modesetting-driver counterpart to NVIDIA's ForceFullCompositionPipeline=On --
+# it eliminates the mid-frame tear/stutter line on fast motion without a compositor (a compositor
+# over the fullscreen OBS projector would double-composite and stutter, same reasoning as the
+# NVIDIA box's picom mask, #777).
+Section "Device"
+    Identifier "imag intel gpu"
+    Driver "modesetting"
+    Option "TearFree" "true"
+EndSection
+XORG_EOF
+    cat > /usr/local/bin/imag-igpu-maxperf.sh <<'IGPU_EOF'
+#!/usr/bin/env bash
+# camera-box #841: pin the Intel iGPU's frequency floor to its own reported max (gt_RP0_freq_mhz)
+# so it never idles down and ramps back up under load -- the DVFS ramp-up is what caused the
+# intermittent stutter on fast motion in the fullscreen OBS Program projector (the same problem
+# GPUPowerMizerMode=1 solves on the NVIDIA box; i915 has no PowerMizer, but raising gt_min_freq to
+# the hardware's own real max gets the same "always at max clock" outcome). Runs at every boot
+# (systemd, root) because sysfs values reset on reboot -- never a hardcoded MHz literal, a future
+# Intel notebook's ceiling will differ.
+set -euo pipefail
+for card in /sys/class/drm/card[0-9]; do
+    [ -w "$card/gt_min_freq_mhz" ] || continue
+    max="$(cat "$card/gt_RP0_freq_mhz" 2>/dev/null)"
+    [ -n "$max" ] || continue
+    echo "$max" > "$card/gt_min_freq_mhz"
+    echo "$max" > "$card/gt_boost_freq_mhz" 2>/dev/null || true
+    echo "imag-igpu-maxperf: pinned $card gt_min_freq_mhz -> ${max}MHz (was DVFS-scaled down at idle)"
+    exit 0
+done
+echo "imag-igpu-maxperf: no writable i915 gt_min_freq_mhz sysfs node found -- nothing to pin" >&2
+exit 0
+IGPU_EOF
+    chmod 755 /usr/local/bin/imag-igpu-maxperf.sh
+    cat > /etc/systemd/system/imag-igpu-maxperf.service <<'SVC_EOF'
+[Unit]
+Description=camera-box #841: pin Intel iGPU to max frequency (avoid DVFS ramp stutter, imag HDMI program projector)
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/imag-igpu-maxperf.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+SVC_EOF
+    systemctl daemon-reload
+    systemctl enable --now imag-igpu-maxperf.service >/dev/null 2>&1 \
+        || echo "  WARNING: could not enable imag-igpu-maxperf.service"
+    echo "  #841: Intel TearFree xorg.conf.d snippet + iGPU max-frequency-pin service provisioned"
 elif ! dpkg -s nvidia-driver-595-open 2>/dev/null | grep '^Status: install ok installed' >/dev/null; then
     apt-get update -qq
     DEBIAN_FRONTEND=noninteractive apt-get install -y nvidia-driver-595-open >/dev/null \
