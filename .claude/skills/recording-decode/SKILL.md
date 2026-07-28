@@ -988,3 +988,36 @@ run). Any "on-cadence" classification needs a TOLERANCE band calibrated from rea
 like the numbers above (or an entirely different statistic, e.g. mean/stddev over a window) —
 never bare equality. This mirrors the exact lesson `painted_tick_gaps` already learned twice (#625
 sorted-order tolerance, #681 net-span vs a biased per-pair walk) for the SAME underlying signal.
+
+## #853 GOTCHA — a self-check re-decoding "did ANY QR decode" is USELESS on this recording; it must scope to non-burn payloads
+
+`extract_frames_png`'s `sharp_qr_but_flagged_undecodable` self-check re-decodes an "undecodable"
+frame's pixels via `decode_qr_luma_all_robust` and used to ask "is the result non-empty". On this
+recording that question is **guaranteed true on every single undecodable frame**, regardless of
+whether the cam2 optical Vernier ever decodes — because `payloads` here always ALSO includes the
+node burns (strih/stream/camN), which are digitally composited (not photographed) and therefore
+always crisp and always decodable. Proven directly on run 1867252327's `stream-partial.json`: all
+5879 `tick == None` frames had non-empty `payloads`, every one of them containing exactly the 3
+node burns and ZERO optical payload.
+
+**The general lesson: ANY diagnostic self-check on this file that asks "did the robust decode find
+something" must filter to the SPECIFIC signal in question** (here: non-burn/optical, via
+`crate::optical_payload_check::has_non_burn_payload(payloads.iter().map(|p| p.run_id),
+&NODE_BURN_RUN_IDS)` — the SAME `NODE_BURN_RUN_IDS` exclusion `RecordingFrame::tick` already
+applies). "Something decoded" is not evidence about anything specific when burns are
+near-universally present; only "the RIGHT thing decoded" is. Independently confirmed the pixels
+themselves (not just our decoder) genuinely lack the optical payload: OpenCV's `QRCodeDetector`
+and `zbarimg` (zero shared code with our rqrr pipeline) both fail to extract the optical Vernier
+payload on all 30 sampled real frames, even on tight isolated crops with denoise/upscale variants.
+
+**Important scale correction vs #376 above:** #376 calibrated a RATE CEILING (0.5%) for the
+`optical_undecodable` metric on `NodeVerdict` in `recording-verdict.rs` — a genuinely small
+residual moiré floor, USER-APPROVED as acceptable. `all_cambox_continuity`'s per-segment
+`undecodable` (added later by #312, a DIFFERENT metric with its own hard `== 0` requirement, no
+calibrated floor at all) showed **~62-64%** on the same class of artifact — two and a half orders
+of magnitude above the #376 floor. That gap is too large to be "the same calibrated moiré, just
+recalibrate the number" — it means something about this metric's decode path, camera framing, or
+recording generation is materially different/worse than what #376 measured, and needs real
+investigation (filed as #854), not a threshold bump. Never conflate "a calibrated floor exists for
+metric A" with "therefore a huge rate on metric B is also just calibration" — check the actual
+prior floor's MAGNITUDE before assuming the same class of fix applies.

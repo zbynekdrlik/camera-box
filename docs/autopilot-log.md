@@ -5988,3 +5988,56 @@ locally (Tier-0 limitation, confirmed by hand-tracing `segment_continuity`/`pain
 `residual_events` against the test's synthetic input before pushing). Regular `CI` workflow fully
 green. Issue #852 closed with full evidence; PR #704 NOT merged (its Full-path E2E gate is
 expected to stay red until #853 is addressed — hands-on rig work, out of this ticket's scope).
+
+## #853 (2026-07-28) — extract self-check bug: "sharp but flagged undecodable" checked the WRONG thing
+
+The ticket's original diagnosis (broadcast-camera shutter/focus/exposure) was contradicted by its
+own correcting comment (issuecomment-5106897827): `recording-verdict`'s extraction log showed
+`sharp_qr_but_flagged_undecodable=true` on 30/30 sampled frames, and eyeball inspection of two
+pixel-proof PNGs showed both dual-QR Vernier halves fully formed. Re-derived the mechanism from
+`stream-partial-1867252327.json` directly: `all_cambox_continuity`'s `undecodable` counts frames
+where `RecordingFrame::tick.is_none()` (the cam2 OPTICAL Vernier specifically, node burns excluded
+by design), but `extract_frames_png`'s self-check (`sharp_qr_but_flagged_undecodable`) asked
+"did ANY QR decode" via `decode_qr_luma_all_robust` — and ALL 5879 of run 1867252327's stream
+`tick==None` frames had non-empty `payloads`, every single one containing exactly the 3
+always-crisp digital node burns and ZERO optical payload. The self-check was a 100% false
+positive, not evidence of a decoder bug.
+
+Independently confirmed (OUTSIDE our own rqrr pipeline) that the optical payload genuinely fails
+to decode on the real pixels: extracted all 30 saved PNGs and ran them through OpenCV's
+`QRCodeDetector` and `zbarimg` (ZBar) — both locate the finder patterns but decode 0/30 payloads,
+even on tight isolated crops with median/Gaussian/bilateral denoise and area-average anti-alias
+upscale variants. A 3x pixel zoom shows genuine block-level corruption in the QR interior,
+consistent with LCD/camera-sensor moiré (the same diagonal texture is visible across the flat
+gray monitor background in every sample) — a different failure SHAPE than the
+"blurred/defocused" the correcting comment ruled out (aliasing, not motion blur), but still an
+optical-capture-chain artifact, not a code bug.
+
+Approach posted to the issue BEFORE code (issuecomment-5107051913): fix the self-check to filter
+by the node-burn set (mirroring `RecordingFrame::tick`'s own `NODE_BURN_RUN_IDS` exclusion)
+instead of "any QR decoded". Extracted the pure predicate to a new crate-root module
+(`src/optical_payload_check.rs`, the `presenter_kind`/`colour_scale`/`reannounce` Tier-0 pattern)
+so the core logic is locally testable without `--features probe`.
+
+Commits: `56de1724f` (RED — `optical_payload_check::has_non_burn_payload` planted with the exact
+pre-fix "did anything decode" semantics; 2/5 tests fail, confirmed LOCALLY via
+`cargo test --lib optical_payload_check`) → `5c5fcd0f7` (GREEN — fixed the predicate to the
+burn-set filter, wired into `extract_frames_png`, added the probe-gated regression test
+`extract_self_check_is_not_fooled_by_burn_only_payloads_853` in `src/probe/recording.rs`; cannot
+compile locally, verified via CI run 30380307316 — all jobs including `Test`
+(`cargo nextest run --all-features`) green). `cargo fmt`/`check`/`clippy --all-targets -- -D
+warnings`/`cargo test --no-run` all clean locally.
+
+This fix does NOT change `all_cambox_continuity.undecodable`/`overall_pass` — the self-check bug
+never touched `RecordingFrame::tick`'s computation (separate code path). PR #704's Full-path E2E
+gate remains genuinely blocked: the real fleet-wide undecodable rate (~62-64%) is confirmed real,
+not a phantom. Filed `#854` with the full independent-decoder evidence, plus a follow-up
+correction noting `#376`'s existing calibrated moiré-rate-ceiling precedent (0.24% floor, 0.5%
+cap) is two-and-a-half orders of magnitude smaller than this — too large a gap to be "the same
+calibration, just raise the number"; something about `all_cambox_continuity`'s decode path or the
+current camera framing needs real investigation before picking a direction (decode-robustness
+R&D vs physical camera adjustment vs, only if both are infeasible, reconsidering the bar — the
+last option never on the table per `#836`/`#360`/`#363`). Issue #853 closed with full evidence;
+PR #704 NOT merged (genuinely blocked on #854, a real unresolved problem, not this ticket's
+scope). Playbook: added a `#853` GOTCHA section to `.claude/skills/recording-decode` documenting
+the self-check pattern + the #376 magnitude-comparison lesson.
