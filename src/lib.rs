@@ -298,5 +298,12 @@ pub mod emit_rate_ring;
 // journald CPU-starvation feedback loop on the 3-core boxes. No probe deps, unit-tests Tier-0.
 pub mod emit_skip_log;
 
+// #853 — is a decoded QR payload list evidence of a genuine OPTICAL (non-burn) read, or only the
+// easy, always-present digital node burns? No probe deps, so it unit-tests Tier-0;
+// `probe::recording::extract_frames_png`'s `sharp_qr_but_flagged_undecodable` self-check calls it
+// instead of asking "did ANY QR decode" (guaranteed true on every #853 fleet-wide undecodable
+// frame purely from the always-crisp node burns).
+pub mod optical_payload_check;
+
 #[cfg(feature = "probe")]
 pub mod probe;
