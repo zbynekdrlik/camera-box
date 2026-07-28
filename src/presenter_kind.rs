@@ -98,6 +98,37 @@ pub fn resolve_presenter_kind(requested: PresenterKind, kms_open_ok: bool) -> Re
     }
 }
 
+/// Extract the numeric suffix from a `/dev/dri/cardN` path or bare basename, for ordering DRM
+/// device candidates deterministically. Returns `None` for anything that is not a bare `cardN`
+/// node (render nodes like `renderD128`, the `by-path` symlink directory, or any other entry) so
+/// callers can filter those out before trying to open them as a KMS display device.
+pub fn drm_card_index(entry: &str) -> Option<u32> {
+    entry.rsplit('/').next()?.strip_prefix("card")?.parse().ok()
+}
+
+/// Order a list of `/dev/dri` directory entries (bare basenames or full paths) into the sequence
+/// of DRM card device candidates `open_presenter`'s Auto fallback should try, ascending by card
+/// number, after the configured/default device already failed to open.
+///
+/// #854: `/dev/dri/cardN` numbering is NOT a stable ABI — it depends on module load order, which
+/// a kernel/driver update or a reboot can change even on a single-GPU box with no other change at
+/// all. cam2 enumerated its i915 KMS device as `card1` on 2026-07-04 (see the #464 doc comment
+/// above — its quoted live log line proves KMS was genuinely working then) and as `card0` by
+/// 2026-07-28, with NO `card1` node at all. Because `PresenterKind::Auto` treats a failed KMS
+/// open as an ordinary, silent fallback to the imperfect single-buffered fbdev presenter, this
+/// kind of renumbering degrades the tear-free double-buffered KMS guarantee permanently and
+/// invisibly — no error, no crash, just a quietly worse presenter from that reboot onward.
+/// Ascending order is deterministic (never raw `read_dir` order, which is unspecified) and tries
+/// the lowest-numbered — conventionally primary — card first.
+pub fn order_drm_card_candidates(entries: &[String]) -> Vec<String> {
+    let mut candidates: Vec<(u32, String)> = entries
+        .iter()
+        .filter_map(|e| drm_card_index(e).map(|n| (n, e.clone())))
+        .collect();
+    candidates.sort_by_key(|(n, _)| *n);
+    candidates.into_iter().map(|(_, path)| path).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -135,7 +166,11 @@ mod tests {
     fn order_drm_card_candidates_handles_bare_basenames() {
         // `open_presenter`'s discovery reads directory ENTRY NAMES (basenames), not full
         // paths, in one call site — the fn must work on either shape.
-        let entries = vec!["card2".to_string(), "card0".to_string(), "renderD129".to_string()];
+        let entries = vec![
+            "card2".to_string(),
+            "card0".to_string(),
+            "renderD129".to_string(),
+        ];
         assert_eq!(
             order_drm_card_candidates(&entries),
             vec!["card0".to_string(), "card2".to_string()]
@@ -148,7 +183,11 @@ mod tests {
         assert_eq!(drm_card_index("card0"), Some(0));
         assert_eq!(drm_card_index("/dev/dri/renderD128"), None);
         assert_eq!(drm_card_index("/dev/dri/by-path"), None);
-        assert_eq!(drm_card_index("card"), None, "no digits after 'card' -> None");
+        assert_eq!(
+            drm_card_index("card"),
+            None,
+            "no digits after 'card' -> None"
+        );
         assert_eq!(drm_card_index("cardX"), None, "non-numeric suffix -> None");
     }
 
