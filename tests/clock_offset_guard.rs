@@ -1227,7 +1227,12 @@ fn sampled_offset_verdict_insufficient_when_too_few_distinct_samples() {
     // required minimum of 3 -> "insufficient", NEVER a silent pass even though that one value is
     // comfortably in-bound (#836 point 5, second half: "too few distinct samples must itself be
     // a failure, never a silent pass on one").
-    let payloads = format!("{}\n{}\n{}\n", pipe_json(1000, 50), pipe_json(1000, 50), pipe_json(1000, 50));
+    let payloads = format!(
+        "{}\n{}\n{}\n",
+        pipe_json(1000, 50),
+        pipe_json(1000, 50),
+        pipe_json(1000, 50)
+    );
     let out = run_sourced(
         "sampled_offset_verdict \"$P\" 2000 2000 3",
         &[("P", payloads.as_str())],
@@ -1247,7 +1252,11 @@ fn sampled_offset_verdict_fails_closed_on_malformed_thresholds() {
         pipe_json(1025, 110),
         pipe_json(1050, 90),
     );
-    for (bound, stability, min_distinct) in [("abc", "2000", "3"), ("2000", "abc", "3"), ("2000", "2000", "abc")] {
+    for (bound, stability, min_distinct) in [
+        ("abc", "2000", "3"),
+        ("2000", "abc", "3"),
+        ("2000", "2000", "abc"),
+    ] {
         let out = run_sourced(
             &format!("sampled_offset_verdict \"$P\" '{bound}' '{stability}' '{min_distinct}'"),
             &[("P", payloads.as_str())],
@@ -1269,10 +1278,7 @@ fn sampled_offset_report_prints_distinct_count_median_and_spread() {
         pipe_json(1025, 300),
         pipe_json(1050, 200),
     );
-    let out = run_sourced(
-        "sampled_offset_report \"$P\"",
-        &[("P", payloads.as_str())],
-    );
+    let out = run_sourced("sampled_offset_report \"$P\"", &[("P", payloads.as_str())]);
     assert_eq!(
         out.trim(),
         "3 200 200",
@@ -1309,7 +1315,10 @@ fn sampled_offset_check_reports_median_and_spread_on_every_outcome_and_returns_t
         &[("P", ok_payloads.as_str())],
     );
     assert!(
-        out.contains("OK") && out.contains("median") && out.contains("spread") && out.contains("rc=0"),
+        out.contains("OK")
+            && out.contains("median")
+            && out.contains("spread")
+            && out.contains("rc=0"),
         "an OK verdict must still print median+spread: {out:?}"
     );
 

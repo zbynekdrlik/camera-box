@@ -69,6 +69,19 @@ GATE_OFFSET_FRESHNESS_S="${DANTESYNC_OFFSET_FRESHNESS_S:-300}"
 # same default/env-var name recording-e2e.sh already used for its own (now-removed) pre-fetch.
 GATE_WIN_HTTP_PORT="${WIN_DANTE_PORT:-8898}"
 GATE_WIN_HTTP_TIMEOUT="${CLOCK_GUARD_HTTP_TIMEOUT:-10}"
+# #836: a single pipe-json read is close to a coin flip on a noisy node (live data: 22 reads 25s
+# apart on the stream box, only 2/22 individually in-bound). Every --win-http / Linux-HTTP-first
+# node is now sampled GATE_SAMPLE_COUNT times across roughly GATE_SAMPLE_WINDOW_S seconds, and
+# graded on the MEDIAN (existing GATE_BOUND_US, unchanged) AND the SPREAD (new
+# GATE_STABILITY_US) of the samples that are DISTINCT by updated_ts -- see
+# clock-offset-guard.sh's sampled_offset_verdict/sampled_offset_check for the pure grading logic.
+# Fewer than GATE_SAMPLE_MIN_DISTINCT distinct samples is itself a hard failure (never a silent
+# pass on one lucky read). Defaults: 6 reads spread across a 30s window, needing at least 3
+# distinct samples, with a stability bound the same order of magnitude as the location bound.
+GATE_SAMPLE_COUNT="${DANTESYNC_SAMPLE_COUNT:-6}"
+GATE_SAMPLE_WINDOW_S="${DANTESYNC_SAMPLE_WINDOW_S:-30}"
+GATE_SAMPLE_MIN_DISTINCT="${DANTESYNC_SAMPLE_MIN_DISTINCT:-3}"
+GATE_STABILITY_US="${DANTESYNC_STABILITY_US:-2000}"
 
 # read_linux_node_journal NAME IP -> that Linux node's latest DanteSync journald lines over SSH,
 # or "" if unreachable. Overridable for tests/offline via DANTESYNC_GATE_LINUX_JOURNAL_<NAME>
@@ -116,12 +129,21 @@ read_linux_node_journal() {
 #
 # Overridable for tests/offline via DANTESYNC_GATE_LINUX_HTTP_<NAME> (NAME uppercased, "-" -> "_")
 # -- mirrors read_win_http_status's DANTESYNC_GATE_WIN_HTTP_<NAME> and read_linux_node_journal's
-# DANTESYNC_GATE_LINUX_JOURNAL_<NAME> fixture-injection seams above.
+# DANTESYNC_GATE_LINUX_JOURNAL_<NAME> fixture-injection seams above. #836: this function is now
+# called MULTIPLE times per gate run (gather_http_samples, below) to sample the node instead of
+# reading it once -- so the override may point at either a STATIC file (cat'd every call, the
+# pre-#836 behavior, useful for a fixture that legitimately never varies) OR an EXECUTABLE script
+# (run every call, so a test fixture can return DIFFERENT content on successive invocations
+# without any real network or sleep -- see tests/dantesync_gate.rs's write_multi_read_fixture).
 read_linux_node_http_status() {
   local name="$1" ip="$2" var
   var="DANTESYNC_GATE_LINUX_HTTP_$(printf '%s' "$name" | tr '[:lower:]-' '[:upper:]_')"
   if [ -n "${!var:-}" ]; then
-    cat "${!var}" 2>/dev/null || true
+    if [ -x "${!var}" ]; then
+      "${!var}" 2>/dev/null || true
+    else
+      cat "${!var}" 2>/dev/null || true
+    fi
     return 0
   fi
   curl -fsS --max-time "$GATE_WIN_HTTP_TIMEOUT" "http://${ip}:${GATE_WIN_HTTP_PORT}/status" 2>/dev/null || true
@@ -133,14 +155,58 @@ read_linux_node_http_status() {
 # "" if unreachable / non-200 (curl -fsS fails closed on either). Overridable for tests/offline
 # via DANTESYNC_GATE_WIN_HTTP_<NAME> (NAME uppercased, "-" -> "_") -- mirrors
 # read_linux_node_journal's DANTESYNC_GATE_LINUX_JOURNAL_<NAME> fixture-injection seam above.
+# #836: this function is now called MULTIPLE times per gate run (gather_http_samples, below) to
+# sample the node instead of reading it once -- so the override may point at either a STATIC file
+# (cat'd every call) OR an EXECUTABLE script (run every call, so a test fixture can return
+# DIFFERENT content on successive invocations without any real network or sleep).
 read_win_http_status() {
   local name="$1" host="$2" var
   var="DANTESYNC_GATE_WIN_HTTP_$(printf '%s' "$name" | tr '[:lower:]-' '[:upper:]_')"
   if [ -n "${!var:-}" ]; then
-    cat "${!var}" 2>/dev/null || true
+    if [ -x "${!var}" ]; then
+      "${!var}" 2>/dev/null || true
+    else
+      cat "${!var}" 2>/dev/null || true
+    fi
     return 0
   fi
   curl -fsS --max-time "$GATE_WIN_HTTP_TIMEOUT" "http://${host}:${GATE_WIN_HTTP_PORT}/status" 2>/dev/null || true
+}
+
+# gather_http_samples READ_FN NAME ARG N WINDOW_S -> newline-joined raw status-JSON payloads from
+# up to N sequential calls to READ_FN NAME ARG (#836: a single read of a noisy node is close to a
+# coin flip -- see clock-offset-guard.sh's own header for the live data). Reads are spaced evenly
+# across roughly WINDOW_S seconds (spacing = WINDOW_S/(N-1) seconds, floor; WINDOW_S=0 skips all
+# spacing -- the offline/test seam, since a fixture doesn't need real elapsed time to vary its own
+# output). If the VERY FIRST read is empty (the node's HTTP endpoint is simply not there), returns
+# immediately with NO further attempts -- exactly the pre-#836 single-read "unreachable" behavior,
+# so a genuinely-down endpoint fails just as fast as before instead of waiting out N timeouts for
+# a node we already know isn't responding. A LATER empty read (transient) is silently dropped from
+# the sequence; the caller's own MIN_DISTINCT gate (sampled_offset_verdict) decides whether what's
+# left is enough to grade.
+gather_http_samples() {
+  local read_fn="$1" name="$2" arg="$3" n="$4" window="$5"
+  local i space out="" one
+  one="$("$read_fn" "$name" "$arg")"
+  if [ -z "$one" ]; then
+    printf ''
+    return 0
+  fi
+  out="${one}"$'\n'
+  space=0
+  if [ "$n" -gt 1 ]; then
+    space=$(( window / (n - 1) ))
+  fi
+  for ((i = 2; i <= n; i++)); do
+    if [ "$space" -gt 0 ]; then
+      sleep "$space"
+    fi
+    one="$("$read_fn" "$name" "$arg")"
+    if [ -n "$one" ]; then
+      out+="${one}"$'\n'
+    fi
+  done
+  printf '%s' "$out"
 }
 
 usage() {
@@ -153,7 +219,8 @@ recording run must NOT proceed otherwise — cross-node latency/timestamps would
 
 Usage:
   dantesync-gate.sh [--bound-us N] [--linux "name=ip ..."] \
-                     [--win-http NAME=HOST ...] [--win-http-port N]
+                     [--win-http NAME=HOST ...] [--win-http-port N] \
+                     [--samples N] [--window-s S] [--min-distinct N] [--stability-us N]
 
 Options:
   --bound-us N        max tolerated |NTP offset| in us (default ${GATE_BOUND_US}; see #8 rationale).
@@ -165,6 +232,30 @@ Options:
   --win-http-port N    port for the HTTP status endpoint (default ${GATE_WIN_HTTP_PORT}) -- shared
                        by --win-http nodes AND the --linux nodes' HTTP-first reads (#686); the
                        whole fleet serves one port, so one knob covers both.
+  --samples N          #836: how many times to sample each --win-http / Linux-HTTP-first node's
+                       ntp_offset_us instead of reading it once (default ${GATE_SAMPLE_COUNT}) --
+                       a single read is close to a coin flip on a noisy node (live data: 2/22
+                       reads in-bound on one real box). The gate grades the MEDIAN of the samples
+                       against --bound-us (unchanged bound, better estimator) AND the SPREAD of
+                       the same samples against --stability-us (a NEW check a single read can
+                       never make: a node whose median looks fine but whose readings scatter
+                       wildly now FAILS too).
+  --window-s S         roughly how many seconds to spread the --samples reads across (default
+                       ${GATE_SAMPLE_WINDOW_S}; 0 = no spacing at all, for tests/offline).
+  --min-distinct N     minimum DISTINCT (by the payload's own updated_ts) samples required before
+                       the gate will grade a node at all (default ${GATE_SAMPLE_MIN_DISTINCT}) --
+                       consecutive reads whose updated_ts repeats are the daemon re-serving a
+                       cached value between refreshes, not independent measurements, and are
+                       never counted; too few distinct samples is itself a hard failure, never a
+                       silent pass on one lucky read.
+  --stability-us N     max tolerated SPREAD (max-min) of the distinct samples, in us (default
+                       ${GATE_STABILITY_US}) -- see --samples above.
+
+#836: net effect vs the old single-read gate is strictly MORE ways to fail, never fewer -- the
+location bound (--bound-us) itself never moves; sampling only ADDS the spread/stability check and
+the insufficient-distinct-samples check. Every --win-http / Linux-HTTP-first status line now
+reports the median, the spread, and the distinct sample count, so a red line says which kind of
+bad it is: an out-of-bound median, an unstable spread, or too few distinct reads.
 
 #686: LINUX nodes now try the SAME network status endpoint (http://IP:PORT/status) FIRST --
 authoritative, immune to journal log-cadence throttling (#679). The journal parser is the
@@ -189,6 +280,8 @@ EOF
 
 main() {
   local bound="$GATE_BOUND_US" linux="$GATE_LINUX" win_http_port="$GATE_WIN_HTTP_PORT"
+  local samples="$GATE_SAMPLE_COUNT" window="$GATE_SAMPLE_WINDOW_S"
+  local min_distinct="$GATE_SAMPLE_MIN_DISTINCT" stability="$GATE_STABILITY_US"
   local -a win_http=()
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -196,6 +289,10 @@ main() {
       --linux)         shift; linux="${1:-}" ;;
       --win-http)      shift; win_http+=("${1:-}") ;;
       --win-http-port) shift; win_http_port="${1:-}" ;;
+      --samples)       shift; samples="${1:-}" ;;
+      --window-s)      shift; window="${1:-}" ;;
+      --min-distinct)  shift; min_distinct="${1:-}" ;;
+      --stability-us)  shift; stability="${1:-}" ;;
       -h|--help)       usage; exit 0 ;;
       --*)             echo "unknown option: $1" >&2; usage >&2; exit 1 ;;
       *)               echo "unexpected argument: $1" >&2; usage >&2; exit 1 ;;
@@ -212,6 +309,22 @@ main() {
     exit 1
   fi
   GATE_WIN_HTTP_PORT="$win_http_port"
+  if ! printf '%s' "$samples" | grep -qE '^[0-9]+$' || [ "$samples" -lt 1 ]; then
+    echo "ERROR: --samples must be a positive integer (got '${samples}')." >&2
+    exit 1
+  fi
+  if ! printf '%s' "$window" | grep -qE '^[0-9]+$'; then
+    echo "ERROR: --window-s must be a non-negative integer (got '${window}')." >&2
+    exit 1
+  fi
+  if ! printf '%s' "$min_distinct" | grep -qE '^[0-9]+$' || [ "$min_distinct" -lt 1 ]; then
+    echo "ERROR: --min-distinct must be a positive integer (got '${min_distinct}')." >&2
+    exit 1
+  fi
+  if ! printf '%s' "$stability" | grep -qE '^[0-9]+$'; then
+    echo "ERROR: --stability-us must be a non-negative integer (got '${stability}')." >&2
+    exit 1
+  fi
   if ! command -v sshpass >/dev/null 2>&1; then
     echo "ERROR: sshpass not found — required to query the Linux cam DanteSync over SSH." >&2
     exit 1
@@ -237,9 +350,8 @@ main() {
   echo "== dantesync-gate (#7): recording-E2E precondition — NTP within ${bound} us AND PTP LOCKED =="
   echo "   GM = 10.77.9.184 (PTP grandmaster); NTP master = strih; degraded PTP => meaningless latency"
 
-  local bad=0 unknown=0 ok=0 name ip status offset rc_off rc_ptp ptp
-  local now
-  now="$(date +%s)"
+  local bad=0 unknown=0 ok=0 name ip status rc_off rc_ptp ptp
+  local now samples_raw
 
   # --- Linux nodes (HTTP status endpoint FIRST -- #686; journald over SSH as FALLBACK) ------
   local pair
@@ -248,8 +360,12 @@ main() {
     # #686: try the network status endpoint FIRST -- authoritative, immune to the #679
     # journal-throttle false-DEGRADE. read_linux_node_journal (#608) remains the FALLBACK for a
     # node whose HTTP endpoint is unreachable/disabled -- never consulted once HTTP answers.
-    status="$(read_linux_node_http_status "$name" "$ip")"
-    if [ -n "$status" ]; then
+    # #836: gather_http_samples samples the node MULTIPLE times (short-circuiting to empty on an
+    # unreachable first read, same as the pre-#836 single read) instead of reading it once.
+    samples_raw="$(gather_http_samples read_linux_node_http_status "$name" "$ip" "$samples" "$window")"
+    if [ -n "$samples_raw" ]; then
+      status="$(printf '%s\n' "$samples_raw" | tail -1)"   # most recent payload -> freshness/PTP
+      now="$(date +%s)"   # #836: recompute per node -- sampling itself takes real wall-clock time
       rc_off=0
       case "$(pipe_json_freshness_verdict "$status" "$now" "$GATE_OFFSET_FRESHNESS_S")" in
         stale)
@@ -260,8 +376,8 @@ main() {
           printf '  %-14s NTP UNKNOWN  (no updated_ts field -- status incomplete, #686)\n' "$name"
           rc_off=3 ;;
         *)
-          offset="$(offset_us_from_pipe_json "$status")"
-          offset_check "$name" "$offset" "$bound" || rc_off=$? ;;
+          sampled_offset_check "$name" "$samples_raw" "$bound" "$stability" "$min_distinct" \
+            || rc_off=$? ;;
       esac
       ptp="$(ptp_locked_from_pipe_json "$status")"
       rc_ptp=0; ptp_check "$name" "$ptp" || rc_ptp=$?
@@ -305,18 +421,21 @@ main() {
   # No win-* MCP, no human pre-fetch -- the whole point of #648 is an unattended CI run has
   # neither. The endpoint's JSON carries "updated_ts" (unix epoch seconds), so this path CAN and
   # DOES grade freshness: a box whose dantesync died but whose HTTP server keeps serving a cached
-  # snapshot must be caught, never silently graded on stale numbers. `$now` was already captured
-  # above (shared with the #686 Linux HTTP freshness check). (#835: this is now the ONLY Windows-
-  # node input path -- the old --win-status file-relay path, which was age-blind, was removed.)
+  # snapshot must be caught, never silently graded on stale numbers. (#835: this is now the ONLY
+  # Windows-node input path -- the old --win-status file-relay path, which was age-blind, was
+  # removed.) #836: gather_http_samples samples the node MULTIPLE times instead of reading it
+  # once -- see the Linux loop above for the same treatment.
   local entry
   for entry in "${win_http[@]}"; do
     name="${entry%%=*}"; ip="${entry#*=}"
-    status="$(read_win_http_status "$name" "$ip")"
-    if [ -z "$status" ]; then
+    samples_raw="$(gather_http_samples read_win_http_status "$name" "$ip" "$samples" "$window")"
+    if [ -z "$samples_raw" ]; then
       printf '  %-14s UNREACHABLE  (no DanteSync HTTP status @ %s:%s/status -- #648)\n' \
         "$name" "$ip" "$GATE_WIN_HTTP_PORT"
       unknown=$((unknown + 1)); continue
     fi
+    status="$(printf '%s\n' "$samples_raw" | tail -1)"   # most recent payload -> freshness/PTP
+    now="$(date +%s)"   # #836: recompute per node -- sampling itself takes real wall-clock time
     rc_off=0
     case "$(pipe_json_freshness_verdict "$status" "$now" "$GATE_OFFSET_FRESHNESS_S")" in
       stale)
@@ -327,8 +446,8 @@ main() {
         printf '  %-14s NTP UNKNOWN  (no updated_ts field -- status incomplete, #648)\n' "$name"
         rc_off=3 ;;
       *)
-        offset="$(offset_us_from_pipe_json "$status")"
-        offset_check "$name" "$offset" "$bound" || rc_off=$? ;;
+        sampled_offset_check "$name" "$samples_raw" "$bound" "$stability" "$min_distinct" \
+          || rc_off=$? ;;
     esac
     ptp="$(ptp_locked_from_pipe_json "$status")"
     rc_ptp=0; ptp_check "$name" "$ptp" || rc_ptp=$?

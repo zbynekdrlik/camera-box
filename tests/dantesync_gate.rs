@@ -872,7 +872,12 @@ fn now_epoch() -> u64 {
 fn help_describes_the_new_multi_sample_flags_836() {
     let (code, stdout, _e) = run_gate(&["--help"]);
     assert_eq!(code, 0, "--help must exit 0");
-    for flag in ["--samples", "--window-s", "--min-distinct", "--stability-us"] {
+    for flag in [
+        "--samples",
+        "--window-s",
+        "--min-distinct",
+        "--stability-us",
+    ] {
         assert!(
             stdout.contains(flag),
             "#836: help must document the new sampling flag {flag}: {stdout}"
