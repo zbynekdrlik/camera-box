@@ -39,6 +39,7 @@
 use anyhow::{Context, Result};
 use camera_box::av_window::{self, AvSyncVerdict};
 use camera_box::frozen_leg::{frozen_leg_report, SegmentLeg};
+use camera_box::offline_ack;
 use camera_box::probe::av_sync_recording::{decode_av_marker_inputs, AvMarkerInputs};
 use camera_box::probe::burn_contiguity::{
     burn_contiguity_in_window_with_step, burn_contiguity_in_window_with_step_and_schedule,
@@ -329,6 +330,17 @@ struct Args {
     /// gates correctly. Default 0.0 (the "operator dials to ~0 in practice" default case).
     #[arg(long, default_value_t = 0.0)]
     av_expected_ms: f64,
+    /// #855: operator-acknowledged offline boxes, threaded from the shell-side
+    /// `CAMBOX_OFFLINE_ACK` / `rig-fleet.txt` ack (`scripts/lib/cambox-offline-ack.sh`) across
+    /// the shell -> Rust boundary. Same "box:reason,box:reason" format the shell side already
+    /// canonicalizes (a bare box name gets reason "unspecified") -- see `offline_ack::parse`.
+    /// Currently consumed ONLY by the ALL-CAMBOX per-camera A/V-sync gate (#624/#312's
+    /// `all_cambox_av_sync`): a box named here is reported EXCLUDED there instead of judged
+    /// UNKNOWN/FAIL on zero samples it was never going to produce. A box NOT named here keeps
+    /// the existing fail-closed default unchanged (#836: never widen the tolerance, never
+    /// downgrade the gate -- this only fixes WHO gets judged).
+    #[arg(long, default_value = "")]
+    offline_ack_cams: String,
 }
 
 impl Args {
@@ -4472,6 +4484,11 @@ fn build_and_print_verdict(
                         av.emit_log.len(),
                         av.audio_markers.len()
                     );
+                    // #855: operator-acknowledged offline boxes (CAMBOX_OFFLINE_ACK / rig-fleet.txt,
+                    // carried here via --offline-ack-cams) are EXCLUDED from this gate below,
+                    // never judged UNKNOWN/FAIL on samples they were never going to produce. A box
+                    // NOT in this map keeps the existing fail-closed default (#836).
+                    let offline_ack_map = offline_ack::parse(&args.offline_ack_cams);
                     let mut av_json = serde_json::Map::new();
                     // #624 deliverable 4 / #312 item 2 PR B: every camera under test must PASS
                     // the ±20ms A/V-offset gate for the run's overall verdict to pass — folded
@@ -4559,6 +4576,9 @@ fn build_and_print_verdict(
                         let cam_sync = cam_syncs.get(camera).expect(
                             "#714: every CAMERA_UNDER_TEST_NODES entry populated in pass 1 above",
                         );
+                        // #855 GREEN TODO: an operator-acknowledged offline box (offline_ack_map)
+                        // must be excluded here instead of judged -- not implemented yet (RED).
+                        let _ = &offline_ack_map;
                         // #714: for a non-cam2 camera that came back Unknown (per-window sample
                         // starvation — see av_window::derive_camera_av_sync's own doc comment for
                         // why this is sound, not fabricated), attempt the derived estimate from
@@ -7667,6 +7687,19 @@ mod tests {
         av: Option<AvMarkerInputs>,
         av_expected_ms: f64,
     ) -> serde_json::Value {
+        build_all_cambox_av_sync_fixture_with_ack(tag, cameras, av, av_expected_ms, "")
+    }
+
+    /// #855 — same as [`build_all_cambox_av_sync_fixture`], plus a `--offline-ack-cams` value
+    /// (the raw `CAMBOX_OFFLINE_ACK`-format string) threaded through to the CLI args, so a test
+    /// can prove an acked-offline camera is reported EXCLUDED rather than judged.
+    fn build_all_cambox_av_sync_fixture_with_ack(
+        tag: &str,
+        cameras: &[(&str, u32, i64)],
+        av: Option<AvMarkerInputs>,
+        av_expected_ms: f64,
+        offline_ack_cams: &str,
+    ) -> serde_json::Value {
         use super::{build_and_print_verdict, Cam1Source, DecodedRec};
         use clap::Parser;
 
@@ -7729,6 +7762,8 @@ mod tests {
             "2",
             "--av-expected-ms",
             &av_expected_ms.to_string(),
+            "--offline-ack-cams",
+            offline_ack_cams,
         ]);
 
         let (v, _pass) = build_and_print_verdict(
@@ -7983,6 +8018,125 @@ mod tests {
             with_av["overall_pass"], without_av["overall_pass"],
             "#624/#312 PR B: a PASSING av_sync gate must be a no-op on the overall verdict -- \
              with={with_av}, without={without_av}"
+        );
+    }
+
+    /// #855 — an operator-acknowledged offline box (CAMBOX_OFFLINE_ACK / rig-fleet.txt, threaded
+    /// via `--offline-ack-cams`) must be reported EXCLUDED, never judged: cam5/cam6/cam7 never
+    /// appear in this fixture's switch schedule at all (same "absent from the sweep" shape the
+    /// #312/#624 test above already covers), but are ACKED here -- so instead of the previous
+    /// fail-closed "unknown, gate_pass=false", each must come back `verdict:"excluded"`,
+    /// `excluded:true`, its `exclude_reason` carried verbatim, and `gate_pass` NULL (never judged
+    /// pass or fail). cam4 is deliberately left OUT of the ack -- it is ALSO absent from the
+    /// schedule, and must keep the UNCHANGED fail-closed behaviour (#836: this fix changes WHO
+    /// gets judged, never HOW harshly).
+    #[test]
+    fn all_cambox_av_sync_offline_acked_camera_is_excluded_not_judged_855() {
+        let emit_log: Vec<(u8, u32, i64)> = (0..10u8).map(|k| (k, 1000 + k as u32, 0)).collect();
+        let audio_markers: Vec<(f64, u8)> = (0..10u8)
+            .map(|k| (k as f64 / 30.0 - 0.5, k)) // video_ts(1000+k) - 0.5s = k/30.0 - 0.5
+            .collect();
+        let av = AvMarkerInputs {
+            fps: 30.0,
+            video_start_s: 0.0,
+            emit_log,
+            audio_markers,
+        };
+        let cameras: &[(&str, u32, i64)] =
+            &[("CAM1", CAM1B, 800_000_000), ("CAM3", CAM3B, 820_000_000)];
+        let v = build_all_cambox_av_sync_fixture_with_ack(
+            "offline-ack-855",
+            cameras,
+            Some(av),
+            0.0,
+            "cam5:powered-off-2026-07-27,cam6:powered-off-2026-07-27,cam7:powered-off-2026-07-27",
+        );
+        let av_sync = &v["all_cambox_av_sync"];
+        for cam in ["cam5", "cam6", "cam7"] {
+            assert_eq!(
+                av_sync[cam]["verdict"],
+                serde_json::json!("excluded"),
+                "#855: {cam} is acked offline -> excluded, never judged: {av_sync}"
+            );
+            assert_eq!(
+                av_sync[cam]["excluded"],
+                serde_json::json!(true),
+                "#855: {cam}'s excluded flag must be set: {av_sync}"
+            );
+            assert_eq!(
+                av_sync[cam]["exclude_reason"],
+                serde_json::json!("powered-off-2026-07-27"),
+                "#855: {cam}'s ack reason must be carried verbatim into the JSON: {av_sync}"
+            );
+            assert!(
+                av_sync[cam]["gate_pass"].is_null(),
+                "#855: an excluded camera's gate_pass must be null (never judged pass or fail), \
+                 not fabricated true/false: {av_sync}"
+            );
+        }
+        assert_eq!(
+            av_sync["cam4"]["verdict"],
+            serde_json::json!("unknown"),
+            "#855: cam4 is NOT acked -- absent-from-sweep must keep failing closed unchanged: {av_sync}"
+        );
+        assert_eq!(
+            av_sync["cam4"]["gate_pass"],
+            serde_json::json!(false),
+            "#855/#836: an unacked absent camera must still fail the gate -- excluding requires \
+             an EXPLICIT ack, never a bare lack of data: {av_sync}"
+        );
+    }
+
+    /// #855 acceptance — every currently-unscheduled camera acked offline must NEVER drag the
+    /// OVERALL `all_cambox_av_sync.gate_pass` down, even though NONE of them appear in the
+    /// switch schedule at all (only CAM1 is scheduled here; cam3/cam4/cam5/cam6/cam7 are all
+    /// acked). Contrasted against the identical fixture with NO acks, which fails closed exactly
+    /// like the pre-#855 behaviour -- proving this is a real behavioural change, not just a
+    /// per-camera cosmetic label.
+    #[test]
+    fn all_cambox_av_sync_gate_pass_true_when_every_unscheduled_camera_is_acked_855() {
+        let emit_log: Vec<(u8, u32, i64)> = (0..10u8).map(|k| (k, 1000 + k as u32, 0)).collect();
+        let audio_markers: Vec<(f64, u8)> = (0..10u8)
+            .map(|k| (k as f64 / 30.0 - 0.5, k)) // video_ts(1000+k) - 0.5s = k/30.0 - 0.5
+            .collect();
+        let av = AvMarkerInputs {
+            fps: 30.0,
+            video_start_s: 0.0,
+            emit_log,
+            audio_markers,
+        };
+        let cameras: &[(&str, u32, i64)] = &[("CAM1", CAM1B, 800_000_000)];
+        // 500ms is the constructed clean offset (video_ts(1000+k) - audio_ts = 0.5s, #312's
+        // established convention) -- av_expected_ms=500.0 makes cam1's (and cam2's) real
+        // measurement PASS, isolating this test to the exclusion behaviour of the other 5.
+        let acked = build_all_cambox_av_sync_fixture_with_ack(
+            "unscheduled-acked-855",
+            cameras,
+            Some(av.clone()),
+            500.0,
+            "cam3:reason,cam4:reason,cam5:reason,cam6:reason,cam7:reason",
+        );
+        let unacked = build_all_cambox_av_sync_fixture_with_ack(
+            "unscheduled-unacked-855",
+            cameras,
+            Some(av),
+            500.0,
+            "",
+        );
+
+        assert_eq!(
+            acked["all_cambox_av_sync"]["gate_pass"],
+            serde_json::json!(true),
+            "#855: every unscheduled camera was acked -> only cam1+cam2 are judged, both pass \
+             (measured 500ms == expected_ms 500) -> the overall gate must be true: \
+             {acked}"
+        );
+        assert_eq!(
+            unacked["all_cambox_av_sync"]["gate_pass"],
+            serde_json::json!(false),
+            "sanity: the IDENTICAL fixture with NO acks reproduces the pre-#855 fail-closed bug \
+             (cam3..cam7 absent+unacked -> unknown -> gate FAILS) -- proving the ack is what \
+             changed the outcome, not an unrelated fixture difference: {unacked}"
         );
     }
 
