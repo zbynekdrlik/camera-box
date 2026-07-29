@@ -116,16 +116,15 @@ pub const DRAIN_MIN_TICK_INTERVAL: u64 = 30;
 /// other tick). Degenerate `fps_num`/`fps_den` (0) route through [`steady_depth_frames`], which
 /// returns 0 rather than dividing by zero — never panics.
 pub fn should_drain_one(
-    _depth: u64,
-    _latency_ms: u32,
-    _fps_num: u32,
-    _fps_den: u32,
-    _ticks_since_last_drain: u64,
+    depth: u64,
+    latency_ms: u32,
+    fps_num: u32,
+    fps_den: u32,
+    ticks_since_last_drain: u64,
 ) -> bool {
-    // #859 RED: not yet implemented — the GREEN commit fills this in. Always false so a
-    // queue that genuinely needs draining is (wrongly) never drained, which is what the
-    // tests below must catch.
-    false
+    let target = steady_depth_frames(latency_ms, fps_num, fps_den);
+    depth > target.saturating_add(DRAIN_HYSTERESIS_FRAMES)
+        && ticks_since_last_drain >= DRAIN_MIN_TICK_INTERVAL
 }
 
 #[cfg(test)]
@@ -310,17 +309,21 @@ mod tests {
     }
 
     /// #859 follow-up — the RATE BOUND + CONVERGENCE property that makes this safe to ship: a
-    /// queue overshooting its target by 3 frames (the #859 rerun's measured shape) converges to
-    /// EXACTLY the target within the simulated window, and the number of drains that fired is
-    /// bounded by construction to at most one per DRAIN_MIN_TICK_INTERVAL ticks — it can never
-    /// reproduce the every-tick backlog-relock burst the disabled branch used to cause.
+    /// queue overshooting its target by 5 frames converges into the tolerated
+    /// `target..=target+DRAIN_HYSTERESIS_FRAMES` band within the simulated window (never fully
+    /// to the bare target — the hysteresis is what stops it oscillating on ordinary jitter once
+    /// there), and the number of drains that fired is bounded by construction to at most one per
+    /// DRAIN_MIN_TICK_INTERVAL ticks — it can never reproduce the every-tick backlog-relock
+    /// burst the disabled branch used to cause.
     #[test]
     fn slew_limited_drain_converges_and_never_bursts_859() {
         let latency_ms = 957;
         let (fps_num, fps_den) = (30, 1);
         let target = steady_depth_frames(latency_ms, fps_num, fps_den);
-        let mut depth = target + 3; // the measured post-setpoint-step overshoot shape
-        let mut ticks_since_last_drain: u64 = DRAIN_MIN_TICK_INTERVAL; // eligible from tick 0
+        // 5 frames above target: 3 of those are genuinely excess (beyond the hysteresis band),
+        // so exactly 3 drains are needed to settle at target + DRAIN_HYSTERESIS_FRAMES.
+        let mut depth = target + 5;
+        let mut ticks_since_last_drain: u64 = 0; // fresh lock — nothing drained yet
         let mut drains = 0u64;
         const TICKS: u64 = 200;
         for _ in 0..TICKS {
@@ -341,20 +344,26 @@ mod tests {
              ticks over {TICKS} ticks) — the drain is no longer bounded by construction"
         );
         assert_eq!(
-            depth, target,
-            "a 3-frame overshoot must converge to EXACTLY the target within {TICKS} ticks"
+            drains, 3,
+            "exactly 3 frames were genuinely excess above the hysteresis band"
+        );
+        assert_eq!(
+            depth,
+            target + DRAIN_HYSTERESIS_FRAMES,
+            "a 5-frame overshoot must converge into the tolerated band (target + hysteresis) \
+             within {TICKS} ticks, and stop there — never all the way to the bare target"
         );
     }
 
-    /// #859 follow-up — degenerate fps inputs must never panic (mirrors the guard the sibling
-    /// backlog-threshold functions already have).
+    /// #859 follow-up — degenerate fps inputs must never panic. A degenerate rate implies
+    /// target=0 (mirrors [`steady_depth_frames`]'s own degenerate guard), so it does NOT mean
+    /// "never drain" — a depth above the bare hysteresis band still (correctly) drains once
+    /// enough ticks have elapsed; only the depth==0 / ticks==0 case stays quiet.
     #[test]
     fn should_drain_one_degenerate_fps_never_panics_859() {
-        assert!(!should_drain_one(1000, 957, 0, 1, DRAIN_MIN_TICK_INTERVAL));
-        assert!(!should_drain_one(1000, 957, 30, 0, DRAIN_MIN_TICK_INTERVAL));
+        assert!(should_drain_one(1000, 957, 0, 1, DRAIN_MIN_TICK_INTERVAL));
+        assert!(should_drain_one(1000, 957, 30, 0, DRAIN_MIN_TICK_INTERVAL));
         assert!(!should_drain_one(0, 0, 0, 0, 0));
-        // A degenerate rate implies target=0, so any depth above the hysteresis with enough
-        // elapsed ticks still (correctly) drains — degenerate does not mean "never drain".
         assert!(should_drain_one(
             DRAIN_HYSTERESIS_FRAMES + 1,
             957,
