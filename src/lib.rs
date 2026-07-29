@@ -242,6 +242,14 @@ pub mod capture_rate_selfheal;
 // instead of its own inline recorded-order walk.
 pub mod painted_tick_gaps;
 
+// #859 — the genlock FIFO's BACKLOG-STORM threshold, made latency-relative. `obs-source.c`'s bare
+// `GENLOCK_QDEPTH_RELOCK 6` was calibrated on "steady depth is ~1-2 at any skew" (its own comment),
+// which is false for a source configured DEEP: the stream box's `NDI 2ME PGM` sits at depth 29 on
+// the 923 ms latency #856's A/V controller must set, so the backlog branch fires every tick and
+// sheds a frame on every jitter excursion. No probe deps, so it unit-tests Tier-0; the probe-gated
+// `probe::genlock::ReleaseCadence` and the C `GENLOCK_QDEPTH_RELOCK` both derive from here.
+pub mod genlock_backlog;
+
 // #660 — the fbdev "visible page" byte range to BLANK on `probe::kms::KmsPresenter` teardown, so
 // releasing DRM master reveals a deterministic black frame instead of whatever ARBITRARILY OLD
 // content another writer (the fbdev-fallback presenter, or camera-box's own `--display` module)
