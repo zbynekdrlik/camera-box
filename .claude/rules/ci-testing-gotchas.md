@@ -2,13 +2,55 @@
 paths:
   - ".github/workflows/*.yml"
   - "tests/*.rs"
+  - "tests/python/*.py"
   - "scripts/version-integrity-gate.sh"
   - "scripts/drift-guard.sh"
   - "scripts/dantesync-gate.sh"
   - "scripts/clock-offset-guard.sh"
+  - "scripts/*_calibrate.py"
 ---
 
 # CI + bash-test-harness gotchas (#826)
+
+## Raising a shared formula constant (a `PHASE_SYNC_FLOOR_MS`-style floor/cap) breaks EVERY hardcoded literal test expectation that assumed the old value -- across BOTH languages (#707)
+
+Several "pure kernel" constants in this repo are deliberately duplicated across THREE places:
+the Rust kernel (`src/phase_sync.rs`, `src/qpsk_marker.rs`, ...), a CLI-boundary parity-check test
+file that pins the SAME numeric vectors the kernel's own unit tests use
+(`tests/harness_phase_sync_gate.rs` etc.), and a Python mirror + its own pytest suite
+(`scripts/phase_sync_calibrate.py` / `tests/python/test_phase_sync_calibrate.py`). Changing the
+constant's VALUE (not just its doc comment) means every one of those three layers has hardcoded
+LITERAL expected offsets computed from the OLD value, and all of them go RED the moment the
+constant changes -- not because the fix is wrong, but because the fixture data is now stale.
+
+**Before bumping a shared constant like this, grep for the constant name across the WHOLE repo**
+(`grep -rn CONST_NAME --include=*.rs --include=*.py`), not just the two files that define it --
+`#707` needed literal updates in `src/phase_sync.rs`'s OWN test module, `src/bin/phase-sync-gate.rs`'s
+doc-comment JSON examples, `tests/harness_phase_sync_gate.rs` (5 tests), AND
+`tests/python/test_phase_sync_calibrate.py` (the `ApplyLatencyHappyPath`/`ApplyLatencyRollback`
+direct-call tests AND the `TestCLI` tests that mock the compiled gate binary's return value with
+old-floor literals like `{"NDI cam5": 3, "NDI cam1": 13}`). Missing any ONE of these means `cargo
+test`/`pytest` goes red on a file you never touched, which reads like a regression when it's
+actually just a stale fixture.
+
+**When only the ABSOLUTE value moved and the underlying FORMULA/invariant is unchanged** (e.g. a
+"slowest camera pinned to floor, others get floor+deficit" additive formula), add ONE
+floor-agnostic invariant test (asserts a DIFFERENCE or RATIO, never an absolute literal) alongside
+the value-specific ones -- it never needs updating again on the next floor bump, and it is exactly
+the test that catches a REAL regression (the formula itself breaking) as opposed to a cosmetic
+one (the floor's absolute value changing on purpose).
+
+## Getting a genuine pre-fix RED commit when you already edited a file straight to GREEN
+
+`regression-test-first.md`'s RED-before-GREEN commit order still applies even when you (or a
+tool like `cargo fmt`) already produced the fully-fixed file in one pass. Two-step recovery, no
+history rewrite needed: (1) temporarily `Edit` the file back to the OLD value/behavior while
+KEEPING the new test(s) you just added, run the test suite to confirm the new test(s) actually
+fail against the old code (a genuine RED, not just "the test wasn't run yet"), commit that state;
+(2) `Edit` the file forward to the real fix again, re-run, confirm GREEN, commit. This is the
+same "recreate the pre-fix state, commit RED, re-add the fix, commit GREEN" pattern the top-level
+CLAUDE.md GOTCHA documents for a different failure mode (accidentally staging a later hunk early)
+-- reusable any time the fix was written before the RED commit was made.
 
 ## A pushed commit can silently CANCEL the in-flight hardware E2E gate — check the concurrency group before your second push
 
