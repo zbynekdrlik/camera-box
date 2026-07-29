@@ -99,26 +99,45 @@ mod tests {
         assert_eq!(t, 34, "923ms @30fps => 28 implied frames + margin 6");
     }
 
-    /// The no-regression property that makes this safe to ship to the whole rig: every SHALLOW
-    /// source keeps today's behaviour EXACTLY. The imag contract is 3 ms, and the strih box runs
-    /// 3/16/21/26/55 ms — all of these must land on the bare constant they use today.
+    /// The no-regression property that makes this safe to ship to the whole rig.
+    ///
+    /// NOTE the earlier revision of this test asserted something arithmetically FALSE — that
+    /// 16 ms at 60 fps "implies <0.5 frames" and must therefore stay at the bare 6. It does not:
+    /// `16 * 60 / 1000 = 0.96` frames, which rounds to 1 and gives 7. The claim was wrong, not the
+    /// implementation, so it is corrected here rather than the code being bent to satisfy it.
+    ///
+    /// The property that is actually true, and actually load-bearing, is narrower: a source whose
+    /// configured latency implies LESS THAN HALF a frame keeps today's threshold exactly. That
+    /// covers the two values the rig genuinely depends on — the 3 ms global default and the 3 ms
+    /// imag latency contract — at both canvas rates.
     #[test]
-    fn shallow_latency_threshold_is_byte_identical_to_the_bare_constant_859() {
-        for latency_ms in [3u32, 8, 16] {
+    fn sub_half_frame_latency_threshold_is_byte_identical_to_the_bare_constant_859() {
+        // The 3 ms global default / imag contract — the load-bearing case, unchanged at any rate.
+        assert_eq!(backlog_relock_threshold(3, 30, 1), QDEPTH_RELOCK_MARGIN);
+        assert_eq!(backlog_relock_threshold(3, 60, 1), QDEPTH_RELOCK_MARGIN);
+
+        // Anything implying <0.5 frames rounds to 0 implied depth => the bare constant.
+        for (latency_ms, num) in [(3u32, 30u32), (8, 30), (16, 30), (3, 60), (8, 60)] {
             assert_eq!(
-                backlog_relock_threshold(latency_ms, 30, 1),
+                backlog_relock_threshold(latency_ms, num, 1),
                 QDEPTH_RELOCK_MARGIN,
-                "{latency_ms}ms @30fps implies <0.5 frames — threshold must stay the bare 6"
-            );
-            assert_eq!(
-                backlog_relock_threshold(latency_ms, 60, 1),
-                QDEPTH_RELOCK_MARGIN,
-                "{latency_ms}ms @60fps implies <0.5 frames — threshold must stay the bare 6"
+                "{latency_ms}ms @{num}fps implies <0.5 frames — threshold must stay the bare 6"
             );
         }
-        // The 3 ms imag/global default is the load-bearing one: unchanged at both rates.
-        assert_eq!(backlog_relock_threshold(3, 30, 1), 6);
-        assert_eq!(backlog_relock_threshold(3, 60, 1), 6);
+    }
+
+    /// The flip side, stated honestly rather than hidden: a source configured deep ENOUGH to imply
+    /// a whole frame or more DOES get a slightly higher threshold, and that is the intended
+    /// behaviour — the threshold tracks the depth the source itself was configured to hold.
+    ///
+    /// These are the strih box's real per-source latencies on its 30 fps canvas. All of them
+    /// report `holds=0` today, so nothing regresses; they simply stop counting their own
+    /// configured buffer as a backlog.
+    #[test]
+    fn deeper_shallow_sources_move_with_their_own_configured_depth_859() {
+        assert_eq!(backlog_relock_threshold(21, 30, 1), 7, "21ms -> 1 frame + 6");
+        assert_eq!(backlog_relock_threshold(26, 30, 1), 7, "26ms -> 1 frame + 6");
+        assert_eq!(backlog_relock_threshold(55, 30, 1), 8, "55ms -> 2 frames + 6");
     }
 
     #[test]
