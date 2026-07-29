@@ -6135,3 +6135,67 @@ growth-tracking convention. Strih inter-camera equalization (PRERECORD_PHASE_CAL
 OFF by deliberate design, untouched -- out of scope for this ticket. Full local suite (163
 binaries + 635 python tests) green. Added to the already-open #704 bundle via a PATCH to its
 body (same "one open PR per head/base" constraint #855 hit).
+
+## #863 (2026-07-29) — install + accept + verify the permanent cam2 devel-mode QR painter
+
+Root cause: `cam2-painter.service` was referenced everywhere (rig-mode.sh's #440 guarded
+stop/start, recording-e2e.sh cleanup()'s `systemctl start cam2-painter`) but never actually
+installed by setup-device.sh -- every one of those calls was a silent no-op, so cam2's monitor
+stayed black outside an active E2E run. Also surfaced a second, previously-undiscussed conflict:
+camera-box's own unconditional HDMI preview (#528) would contest /dev/fb0/DRM with the painter,
+so cam2 needed a PERMANENT camera-box no-display drop-in (same env var rig-mode.sh's transient
+one already uses, made permanent because cam2's painter role is architecturally fixed).
+
+Design comment: https://github.com/zbynekdrlik/camera-box/issues/863#issuecomment-5119760959
+(posted 15:12:22Z, before the code commit at 15:43:37Z UTC).
+
+Commit f3c5975e2 (feat, no RED/GREEN split -- this is new provisioning + acceptance-check
+infrastructure, not a logic bug; tests added alongside per tdd-workflow.md's "implement-then-
+test acceptable for greenfield features"):
+- scripts/setup-device.sh: `cam2_is_painter_box` / `cam2_painter_no_display_dropin_content` /
+  `cam2_painter_service_unit_content` pure functions + cam2-only STEP 3b (fetch frame-probe from
+  the CI probe-tools-linux-amd64 artifact, install unit + dropin, enable-only -- takes effect on
+  next reboot, matching STEP 7's own convention).
+- systemd/cam2-painter.service: reference unit (dual-QR, qr-size 700, 60fps, Restart=always --
+  frame-probe has no run-forever mode).
+- scripts/verify-device.sh: cam2-only acceptance check (v) -- unit installed+active, presenter-
+  aware journal read (KMS-or-fbdev per #464) confirms genuine painting, camera-box permanently
+  no-display. Placed BEFORE the (q) check so (q) stays the documented last check (a real anchor
+  collision hit + fixed during this ticket -- see tests/verify_device_pure_functions.rs's own
+  "(q) runs to end-of-file" assumption).
+- scripts/lib/cam2-painter-restore-verify.sh (new): WARN-only (never `exit`) verification
+  spliced right after recording-e2e.sh cleanup()'s existing fire-and-forget restart call --
+  presenter-aware (mirrors scripts/lib/presenter-liveness-check.sh's KMS/fbdev distinction) but
+  reads the SERVICE's journal (not a log file) and never aborts the EXIT trap.
+- tests/harness_cam2_painter_provisioning_863.rs: 13 tests (gating, unit/dropin content, static
+  wiring order incl. the (q)-ordering regression, functional fake-systemctl/journalctl/fuser
+  behavior proving the new lib never exits).
+
+Gotcha hit + fixed: adding a comment containing both "systemctl" and "cam2-painter" on one line
+in recording-e2e.sh's source-block tripped `cam2_painter_stop_and_start_are_best_effort_guarded`
+(tests/harness_cam2_painter_coordination.rs, #367) -- reworded to keep the two substrings off
+the same line, per the project's CLAUDE.md GOTCHA on this exact file's static-anchor tests.
+
+Live-verified on cam2 (10.77.9.62): fetched frame-probe from CI run 30454374299, deployed the
+exact unit/dropin content the new setup-device.sh functions generate (remounted rw, wrote files,
+remounted ro -- deploy-from-clean-tree/no-destructive-remote-actions compliant), removed the
+stale leftover transient no-display dropin from an old aborted run, confirmed camera-box active
++ cam2-painter.service active with `presenter: using DRM/KMS page-flip` + `vblank-locked` in its
+journal, `fuser /dev/dri/card0` held by frame-probe, camera-box NOT contesting it. Ran
+`scripts/verify-device.sh CAM2` -- ALL CLEAR including every new (v) sub-check. Manually replayed
+the exact `cam2_painter_restore_verify_cmds` remote text after a `systemctl stop`+`start
+cam2-painter` cycle (simulating cleanup()'s real sequence) -- confirmed
+"[cleanup] cam2-painter.service active + genuinely painting (#863)".
+
+Full local suite: 156 Rust test binaries green (`cargo test # airuleset:build-ok`, run twice --
+once mid-work to catch the anchor collision, once final), `cargo fmt --all --check`,
+`cargo clippy --all-targets -- -D warnings`, `shellcheck -S warning scripts/*.sh
+scripts/lib/*.sh` all clean. Pushed once; CI (lint/test/coverage/build/security/shellcheck/
+drift-guard) green on run 30467729375. Full-path E2E stayed red (pre-existing #707, explicitly
+out of scope per dispatch) -- PR #704 not merged, per instructions.
+
+Follow-up filed (discovered live, unrelated to this ticket): #864 -- `verify-device.sh` check
+(d)'s dantesync PTP-lock read is flaky (compares last-NTP-line vs last-servo-line position;
+false DEGRADED on a genuinely healthy, steadily-locked servo when an NTP line happens to be the
+window's very last line). Confirmed transient by re-running verify-device.sh 3x in a row on an
+unchanged box (CLEAR/FAIL/CLEAR).
