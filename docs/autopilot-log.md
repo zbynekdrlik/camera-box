@@ -6199,3 +6199,27 @@ Follow-up filed (discovered live, unrelated to this ticket): #864 -- `verify-dev
 false DEGRADED on a genuinely healthy, steadily-locked servo when an NTP line happens to be the
 window's very last line). Confirmed transient by re-running verify-device.sh 3x in a row on an
 unchanged box (CLEAR/FAIL/CLEAR).
+
+## #707 -- raise the genlock jitter-reserve floor + enforce it at write time (code half only)
+
+RED: f8ceb2131 -- `phase_sync::tests::floor_is_raised_above_the_measured_relock_cliff` (floor=3
+< 55), `TestApplyLatencyEnforcesJitterFloor` (test_phase_sync_calibrate.py, apply_latency doesn't
+clamp), `TestGenlockJitterFloor` (test_av_sync_calibrate.py, GENLOCK_JITTER_FLOOR_MS didn't
+exist).
+GREEN: 28b8a81df -- `PHASE_SYNC_FLOOR_MS` 3ms -> 55ms (src/phase_sync.rs +
+scripts/phase_sync_calibrate.py, kept in lock-step); new `GENLOCK_JITTER_FLOOR_MS=55`
+(scripts/av_sync_calibrate.py, own copy per this codebase's no-cross-controller-import
+convention); `enforce_jitter_floor_ms()` added to BOTH controllers, called inside apply_latency
+(the funnel every write passes through) + the pre-apply preview print. Updated every existing
+test whose literal expected offset assumed floor=3 (src/phase_sync.rs, harness_phase_sync_gate.rs,
+test_phase_sync_calibrate.py). New floor-agnostic pairwise-spacing regression guard
+(raising_the_floor_preserves_pairwise_spacing_between_cameras) proves relative camera alignment
+is untouched by the floor raise.
+Root cause + rejected alternative: gh issue comment 707 (design, posted before RED commit) --
+https://github.com/zbynekdrlik/camera-box/issues/707#issuecomment-5120573392
+Decision: per explicit dispatch instructions, did NOT open a new PR (commits ride the already-
+open dev->main PR #704) and did NOT merge or chase the hardware Full-path E2E gate -- the
+operator is re-calibrating + verifying the live rig separately. Verified only: cargo
+fmt/check/clippy clean, full `cargo test` 163/163 binaries green, `python -m pytest tests/python`
+628/628 green, and the ordinary push-triggered "CI" workflow run (30471351958) all-jobs-green on
+dev @ 28b8a81df.
