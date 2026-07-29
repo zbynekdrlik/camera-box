@@ -201,8 +201,58 @@ fn program_without_ahk_watcher_carries_no_ahk_commands_786() {
         p.contains("$bufPeak -le 100") && p.contains("exit 7"),
         "the #786 audio gate must survive has_ahk=0 untouched. Program:\n{p}"
     );
+    // #867: a box with no AHK watcher must not embed the resolve+relaunch machinery at all.
+    assert!(
+        !p.contains("$ahkScriptPath"),
+        "has_ahk=0 must not embed the #867 ahk_resolve_and_relaunch_ps machinery. Program:\n{p}"
+    );
     // Default (2-arg) stays the strih behavior — the AHK bracket present (pinned above in
     // program_gates_on_audio_buffering_and_redraws_786).
+}
+
+/// #867: the strih AHK restart must NEVER rely on a bare `-FilePath 'AutoHotkey64.exe'` launch —
+/// AutoHotkey v2 is installed user-scoped under `%LOCALAPPDATA%\Programs\AutoHotkey\v2\` and is
+/// NOT on PATH (confirmed live on strih), so a bare exe-name launch can never resolve. The comment
+/// on #867 root-caused a real outage to exactly this shape in a sibling script.
+#[test]
+fn program_never_launches_ahk_by_bare_exe_name_867() {
+    let p = program_default();
+    assert!(
+        !p.contains("-FilePath 'AutoHotkey64.exe'")
+            && !p.contains("-FilePath \"AutoHotkey64.exe\""),
+        "#867: must never launch AutoHotkey64 by a bare exe name relying on PATH. Program:\n{p}"
+    );
+    // The robust resolve probes the user-scoped install locations, in order, before falling back
+    // to the Startup shortcut / PATH.
+    assert!(
+        p.contains("LOCALAPPDATA") && p.contains("AutoHotkey\\v2\\AutoHotkey64.exe"),
+        "#867: must probe the user-scoped %LOCALAPPDATA%\\Programs\\AutoHotkey\\v2\\ install \
+         location. Program:\n{p}"
+    );
+}
+
+/// #867: the restart must be VERIFIED (poll `Get-Process AutoHotkey64`), and a failed relaunch
+/// must fail LOUD (Write-Error + non-zero exit) — never a blind unconditional success claim, which
+/// is exactly what let strih run for hours with no live respawn watcher.
+#[test]
+fn program_ahk_restart_is_verified_and_fails_loud_867() {
+    let p = program_default();
+    assert!(
+        p.contains("Get-Process AutoHotkey64") && p.contains("$ahkRelaunchVerified"),
+        "#867: the AHK restart must poll Get-Process AutoHotkey64 and record whether it verified. \
+         Program:\n{p}"
+    );
+    let verified_pos = p
+        .find("$ahkRelaunchVerified = $false")
+        .expect("the verify flag must be initialized before the poll loop");
+    let fail_branch = p[verified_pos..]
+        .find("Write-Error")
+        .map(|off| off + verified_pos)
+        .expect("a Write-Error failure branch must exist after the verify flag");
+    let exit_after_fail = p[fail_branch..]
+        .find("exit 9")
+        .expect("the failure branch must exit non-zero (9), not just warn");
+    let _ = exit_after_fail;
 }
 
 /// The FINAL verdict gates exit 0 on the render tick being ENABLED (the genlock build proof) and
