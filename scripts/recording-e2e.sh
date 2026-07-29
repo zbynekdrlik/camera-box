@@ -101,6 +101,13 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # that used to be a silent no-op (the permanent painter unit was never installed, see #863).
 # shellcheck source=scripts/lib/cam2-painter-restore-verify.sh
 . "$HERE/lib/cam2-painter-restore-verify.sh"
+# #872: ON-BOX dead-man restart for that same permanent painter. The restore above lives in
+# cleanup(), the bash EXIT trap -- structurally unreachable on SIGKILL, which this workflow's
+# `cancel-in-progress: true` concurrency group makes routine (any push to `dev` kills an
+# in-flight hardware run). Arming a transient timer on the camera box before each stop means a
+# killed run self-heals there, with no dev1 involvement.
+# shellcheck source=scripts/lib/cam2-painter-deadman.sh
+. "$HERE/lib/cam2-painter-deadman.sh"
 # #709: imag-nb GPU VRAM headroom preflight (pure query-cmd builder + parser + message
 # formatters) — a long-uptime OBS render pipeline on imag-nb can leak GPU VRAM until StartRecord's
 # NVENC encoder init fails with NV_ENC_ERR_OUT_OF_MEMORY; catch it BEFORE StartRecord, not via the
@@ -956,7 +963,8 @@ $(rig_test_dropin_clear_cmds)
 systemctl restart camera-box 2>/dev/null || true
 $(camera_box_verify_active_cmds "cam2/painter, $PAINTER_IP")
 systemctl start cam2-painter 2>/dev/null || true
-$(cam2_painter_restore_verify_cmds)"
+$(cam2_painter_restore_verify_cmds)
+$(cam2_painter_deadman_disarm_cmds)"
   ) &
   CAMBOX_PARALLEL_PIDS+=("$!")
   CAMBOX_PARALLEL_LABELS+=("cam2/painter, $PAINTER_IP")
@@ -1566,7 +1574,10 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
   # Guarded (`2>/dev/null || true`) so a box without the unit is unaffected. Note this does NOT
   # extend to camera-box itself: #291 keeps it RUNNING on cam2 here (a measured node whose
   # capture+emit must stay alive) — only the painter is the process being replaced.
-  _cam2_prep="systemctl stop cam2-painter 2>/dev/null || true; rm -f /tmp/painter.csv /tmp/av-markers.csv;"
+  # #872: arm the on-box dead-man FIRST, so a kill anywhere after this point still restores the
+  # painter without dev1. cleanup() disarms it on every normal exit.
+  _cam2_prep="$(cam2_painter_deadman_arm_cmds)
+systemctl stop cam2-painter 2>/dev/null || true; rm -f /tmp/painter.csv /tmp/av-markers.csv;"
   _cam2_marker_flags="--audio-marker --audio-marker-device $AV_SYNC_MARKER_DEVICE \
       --audio-marker-cadence-ticks $AV_SYNC_MARKER_CADENCE --marker-log /tmp/av-markers.csv"
   # #420/#431 fail-loud self-check (same mechanism AV_RESTART_GATE uses, scripts/lib/audio-marker-check.sh):
@@ -1576,7 +1587,9 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
     'pkill -x frame-probe 2>/dev/null || true' \
     'all-cambox continuous marker, #312 item 2' '/tmp/av-markers.csv')"
 else
-  _cam2_prep="systemctl stop cam2-painter 2>/dev/null || true; systemctl stop camera-box; pkill -x camera-box 2>/dev/null; rm -f /tmp/painter.csv;"
+  # #872: same dead-man arm on the non-sweep arm -- it stops the permanent painter too.
+  _cam2_prep="$(cam2_painter_deadman_arm_cmds)
+systemctl stop cam2-painter 2>/dev/null || true; systemctl stop camera-box; pkill -x camera-box 2>/dev/null; rm -f /tmp/painter.csv;"
 fi
 # #734: unconditionally kill any PRE-EXISTING frame-probe on cam2 and VERIFY it is actually dead
 # (not merely "started a kill") BEFORE waiting for /dev/fb0 / launching this run's own painter. A
@@ -2084,7 +2097,8 @@ if [ "${AV_RESTART_GATE:-0}" = "1" ]; then
     # camera-box stop / the fuser wait would race the framebuffer and silently corrupt the
     # QR + marker paint, degrading the very measurement this gate depends on.
     sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$PAINTER_IP" \
-      "systemctl stop cam2-painter 2>/dev/null || true; \
+      "$(cam2_painter_deadman_arm_cmds)
+       systemctl stop cam2-painter 2>/dev/null || true; \
        systemctl stop camera-box; pkill -x camera-box 2>/dev/null; pkill -x frame-probe 2>/dev/null || true; \
        rm -f /tmp/av-restart-markers.csv; \
        i=0; while fuser -s /dev/fb0 2>/dev/null && [ \$i -lt 30 ]; do sleep 0.5; i=\$((i+1)); done; \
