@@ -80,6 +80,54 @@ pub fn backlog_relock_threshold(latency_ms: u32, fps_num: u32, fps_den: u32) -> 
     steady_depth_frames(latency_ms, fps_num, fps_den).saturating_add(QDEPTH_RELOCK_MARGIN)
 }
 
+/// #859 follow-up — the SLEW-LIMITED SETTLE-BACK DRAIN.
+///
+/// The `backlog_relock_threshold` fix above stopped the backlog-relock branch firing on
+/// EVERY tick in steady state (`relocks` went from +1/frame to 1 in 125304 frames, live). But
+/// that branch was ALSO the FIFO's only mechanism for shedding excess queue depth after a
+/// genlock latency SETPOINT INCREASE — with it gated off in steady state, the plain N==1
+/// release path (`release = 1` every tick) holds depth CONSTANT forever: consuming exactly one
+/// frame per tick against an inflow of exactly one never falls behind, but never catches up
+/// either. Measured live: a +34 ms setpoint step produced +134 ms of ACTUAL delay that held
+/// stable across 6 consecutive samples 20+ minutes apart — a parked overshoot, not a decaying
+/// transient.
+///
+/// This is a bounded, ADDITIONAL path alongside the unchanged backlog-relock branch: at most
+/// once every [`DRAIN_MIN_TICK_INTERVAL`] ticks, while the queue sits more than
+/// [`DRAIN_HYSTERESIS_FRAMES`] above [`steady_depth_frames`], shed exactly ONE extra frame.
+/// The rate is bounded by construction, so it can never reproduce the every-tick paired
+/// duplicate/skip storm the old (removed) per-tick trim caused.
+///
+/// Mirrors: `vendor/obs-studio/libobs/obs-source.c` `genlock_should_drain_one()` /
+/// `genlock_ticks_since_drain` and `src/probe/genlock.rs`
+/// `ReleaseCadence::should_drain_one` / `ticks_since_last_drain` — keep all three in
+/// lock-step.
+pub const DRAIN_HYSTERESIS_FRAMES: u64 = 2;
+
+/// #859 — minimum render ticks between two drain events. Bounds the drain rate to at most one
+/// frame per this many ticks, which is what makes it structurally incapable of producing the
+/// per-tick burst the disabled backlog-relock branch used to cause as a side effect.
+pub const DRAIN_MIN_TICK_INTERVAL: u64 = 30;
+
+/// Should this tick shed exactly ONE EXTRA frame to slew the queue back toward the depth its
+/// own configured latency implies? `depth` is the queue depth observed THIS tick (before any
+/// release); `ticks_since_last_drain` is how many ticks have passed since the last time this
+/// returned `true` (the caller resets it to 0 exactly when it drains, and increments it every
+/// other tick). Degenerate `fps_num`/`fps_den` (0) route through [`steady_depth_frames`], which
+/// returns 0 rather than dividing by zero — never panics.
+pub fn should_drain_one(
+    _depth: u64,
+    _latency_ms: u32,
+    _fps_num: u32,
+    _fps_den: u32,
+    _ticks_since_last_drain: u64,
+) -> bool {
+    // #859 RED: not yet implemented — the GREEN commit fills this in. Always false so a
+    // queue that genuinely needs draining is (wrongly) never drained, which is what the
+    // tests below must catch.
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -211,5 +259,108 @@ mod tests {
             burst_depth as u64 > t,
             "a stall's burst (depth {burst_depth}) must still exceed the threshold ({t})"
         );
+    }
+
+    /// #859 follow-up — at exactly the steady target depth, never drain: this is the queue's
+    /// own configured buffer, not an overshoot.
+    #[test]
+    fn no_drain_at_exactly_the_steady_target_depth_859() {
+        let target = steady_depth_frames(957, 30, 1); // the stream box's post-step setpoint
+        assert!(
+            !should_drain_one(target, 957, 30, 1, DRAIN_MIN_TICK_INTERVAL),
+            "depth == target must never drain, even with plenty of ticks since the last one"
+        );
+    }
+
+    /// #859 follow-up — the hysteresis BOUNDARY: depth == target + DRAIN_HYSTERESIS_FRAMES must
+    /// still NOT drain (strictly-greater comparison), or ordinary arrival jitter around the
+    /// target would trigger a drain that then has nothing genuinely excess to shed.
+    #[test]
+    fn no_drain_at_target_plus_hysteresis_exactly_859() {
+        let target = steady_depth_frames(957, 30, 1);
+        let boundary = target + DRAIN_HYSTERESIS_FRAMES;
+        assert!(
+            !should_drain_one(boundary, 957, 30, 1, DRAIN_MIN_TICK_INTERVAL),
+            "depth == target + hysteresis exactly must NOT drain (strictly greater only)"
+        );
+        assert!(
+            should_drain_one(boundary + 1, 957, 30, 1, DRAIN_MIN_TICK_INTERVAL),
+            "one frame past the hysteresis boundary, with enough elapsed ticks, MUST drain"
+        );
+    }
+
+    /// #859 follow-up — the RATE LIMIT: even with the queue persistently above threshold, a
+    /// drain fires at most once per DRAIN_MIN_TICK_INTERVAL ticks.
+    #[test]
+    fn drain_is_rate_limited_to_once_per_min_tick_interval_859() {
+        let target = steady_depth_frames(957, 30, 1);
+        let deep = target + DRAIN_HYSTERESIS_FRAMES + 3; // well above threshold, persistently
+        assert!(
+            !should_drain_one(deep, 957, 30, 1, 0),
+            "just after a drain (ticks_since_last_drain=0) must NOT drain again immediately"
+        );
+        assert!(
+            !should_drain_one(deep, 957, 30, 1, DRAIN_MIN_TICK_INTERVAL - 1),
+            "one tick short of the interval must still NOT drain"
+        );
+        assert!(
+            should_drain_one(deep, 957, 30, 1, DRAIN_MIN_TICK_INTERVAL),
+            "at exactly DRAIN_MIN_TICK_INTERVAL ticks, an over-threshold queue MUST drain"
+        );
+    }
+
+    /// #859 follow-up — the RATE BOUND + CONVERGENCE property that makes this safe to ship: a
+    /// queue overshooting its target by 3 frames (the #859 rerun's measured shape) converges to
+    /// EXACTLY the target within the simulated window, and the number of drains that fired is
+    /// bounded by construction to at most one per DRAIN_MIN_TICK_INTERVAL ticks — it can never
+    /// reproduce the every-tick backlog-relock burst the disabled branch used to cause.
+    #[test]
+    fn slew_limited_drain_converges_and_never_bursts_859() {
+        let latency_ms = 957;
+        let (fps_num, fps_den) = (30, 1);
+        let target = steady_depth_frames(latency_ms, fps_num, fps_den);
+        let mut depth = target + 3; // the measured post-setpoint-step overshoot shape
+        let mut ticks_since_last_drain: u64 = DRAIN_MIN_TICK_INTERVAL; // eligible from tick 0
+        let mut drains = 0u64;
+        const TICKS: u64 = 200;
+        for _ in 0..TICKS {
+            if should_drain_one(depth, latency_ms, fps_num, fps_den, ticks_since_last_drain) {
+                depth -= 1; // exactly ONE extra frame shed — never more per tick
+                drains += 1;
+                ticks_since_last_drain = 0;
+            } else {
+                ticks_since_last_drain += 1;
+            }
+            // steady inflow: one frame arrives and one is normally consumed each tick, so
+            // depth is otherwise unchanged — only a drain event moves it (matches the ticket's
+            // finding that the plain release=1/tick path holds depth CONSTANT on its own).
+        }
+        assert!(
+            drains <= TICKS / DRAIN_MIN_TICK_INTERVAL + 1,
+            "drains ({drains}) exceeded the rate bound (at most one per {DRAIN_MIN_TICK_INTERVAL} \
+             ticks over {TICKS} ticks) — the drain is no longer bounded by construction"
+        );
+        assert_eq!(
+            depth, target,
+            "a 3-frame overshoot must converge to EXACTLY the target within {TICKS} ticks"
+        );
+    }
+
+    /// #859 follow-up — degenerate fps inputs must never panic (mirrors the guard the sibling
+    /// backlog-threshold functions already have).
+    #[test]
+    fn should_drain_one_degenerate_fps_never_panics_859() {
+        assert!(!should_drain_one(1000, 957, 0, 1, DRAIN_MIN_TICK_INTERVAL));
+        assert!(!should_drain_one(1000, 957, 30, 0, DRAIN_MIN_TICK_INTERVAL));
+        assert!(!should_drain_one(0, 0, 0, 0, 0));
+        // A degenerate rate implies target=0, so any depth above the hysteresis with enough
+        // elapsed ticks still (correctly) drains — degenerate does not mean "never drain".
+        assert!(should_drain_one(
+            DRAIN_HYSTERESIS_FRAMES + 1,
+            957,
+            0,
+            1,
+            DRAIN_MIN_TICK_INTERVAL
+        ));
     }
 }
