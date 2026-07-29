@@ -1,10 +1,19 @@
 //! #703 — proves the REAL `recording-verdict --merge-partials` CLI PROCESS actually EXITS
-//! non-zero when the A/V-offset gate (#641/#624) or the cross-camera delivery-latency-spread
-//! gate (#624) fails — not just that the in-process `build_and_print_verdict()` function
-//! RETURNS `all_pass=false` (already covered, in-process, by
-//! `all_cambox_av_sync_gate_failure_forces_the_overall_verdict_to_fail_312_624` and
+//! non-zero when the cross-camera delivery-latency-spread gate (#624, the `all_cambox_latency`
+//! block — NOT the #286 `all_cambox_delivery_latency` one, which is report-only) fails — not
+//! just that the in-process `build_and_print_verdict()` function RETURNS `all_pass=false`
+//! (already covered, in-process, by
 //! `all_cambox_latency_measures_per_camera_windowed_latency_and_fails_a_wide_spread_624` in
 //! `src/bin/recording-verdict.rs`'s own `#[cfg(test)] mod tests`).
+//!
+//! **#861 (2026-07-29, user decision on #856): the A/V-offset gate (#641/#624 deliverable 4) is
+//! now report-only** — a failing/Unknown A/V-sync verdict no longer makes this process exit
+//! non-zero by itself (mirrors the in-process
+//! `all_cambox_av_sync_gate_failure_no_longer_forces_the_overall_verdict_to_fail_861` /
+//! `all_cambox_av_sync_measures_a_real_camera_and_fails_closed_on_the_rest_312` in
+//! `src/bin/recording-verdict.rs`). The two AV-specific tests below were REWRITTEN from proving
+//! "AV failure ⇒ nonzero exit" to proving the opposite invariant through the SAME real subprocess
+//! path — this is the pair #861 (re-arm after ASRC, #803) will need to invert back.
 //!
 //! WHY A SEPARATE SUBPROCESS TEST: `run_merge()` (`src/bin/recording-verdict.rs`) calls
 //! `std::process::exit(1)` directly on a failing verdict — an IN-PROCESS `#[test]` that fed it
@@ -160,20 +169,22 @@ fn run_merge_subprocess(
     (code, text, json)
 }
 
-/// #641/#624 deliverable 4 — a REAL, cleanly-measured av-offset (500ms) far outside the default
-/// `--av-expected-ms 0` +/-20ms tolerance MUST make the `--merge-partials` PROCESS exit
-/// non-zero, and the written verdict JSON must show the AV gate ITSELF (not just "something") as
-/// the failing reason — mirrors the in-process fixture
-/// `all_cambox_av_sync_measures_a_real_camera_and_fails_closed_on_the_rest_312`'s data shape (10
-/// candidates, all at exactly 500ms) so the SAME real measurement that fixture already trusts is
-/// what is exercised end-to-end here, through the real CLI.
+/// #861 (2026-07-29 user decision on #856) — a REAL, cleanly-measured av-offset (500ms) far
+/// outside the default `--av-expected-ms 0` +/-20ms tolerance must NOT change the
+/// `--merge-partials` PROCESS exit code: the AV-offset gate (#641/#624 deliverable 4) is now
+/// report-only, so a failing measurement here is a no-op on the merge's overall verdict — proven
+/// through the REAL subprocess by comparing the exit code + `overall_pass` of a WITH-av run
+/// against an otherwise-identical WITHOUT-av run. **This SUPERSEDES the old
+/// `merge_subprocess_exits_nonzero_when_av_offset_gate_fails_703`**, which asserted the opposite
+/// when the gate was still wired into `all_pass`; mirrors the in-process fixture
+/// `all_cambox_av_sync_gate_failure_no_longer_forces_the_overall_verdict_to_fail_861` (10
+/// candidates, all at exactly 500ms — same data shape) through the real CLI end-to-end. The JSON
+/// still shows the AV gate ITSELF failing (`gate_pass: false`) and unambiguously report-only
+/// (`gates_overall_pass: false`) — it just no longer decides the exit code.
 #[test]
-fn merge_subprocess_exits_nonzero_when_av_offset_gate_fails_703() {
-    let dir = tempdir("av-fail");
+fn merge_subprocess_exit_code_unaffected_by_av_offset_gate_failure_861() {
     let base = 5_000 * ONE_S_NS;
     let win = 5 * ONE_S_NS;
-    let frames = window_frames(0, base, Some((BURN_RUN_ID_CAM1, 0)));
-    let sched = write_switch_schedule(&dir, &["CAM1"], base, win);
 
     // 10 candidates: video_ts(1000+k) - audio_ts(k/30 - 0.5) = 0.5s = 500ms constant offset,
     // matching the emit-log frame_ids (1000..1010) the CAM1 window's optical ticks carry.
@@ -186,62 +197,78 @@ fn merge_subprocess_exits_nonzero_when_av_offset_gate_fails_703() {
         audio_markers,
     };
 
-    let stream_partial = write_stream_partial(&dir, frames, Some(av));
-    let json_path = dir.join("verdict.json");
-    let pixel_proof_dir = dir.join("pixel-proof");
-    let (code, text, json) = run_merge_subprocess(
-        &stream_partial,
-        &json_path,
-        &[
-            "--switch-schedule",
-            sched.to_str().unwrap(),
-            "--switch-guard-ns",
-            "0",
-            "--switch-expected-step",
-            "2",
-            "--av-expected-ms",
-            "0",
-            "--out-dir",
-            pixel_proof_dir.to_str().unwrap(),
-        ],
-    );
+    let run = |tag: &str, av: Option<AvMarkerInputs>| {
+        let dir = tempdir(tag);
+        let frames = window_frames(0, base, Some((BURN_RUN_ID_CAM1, 0)));
+        let sched = write_switch_schedule(&dir, &["CAM1"], base, win);
+        let stream_partial = write_stream_partial(&dir, frames, av);
+        let json_path = dir.join("verdict.json");
+        let pixel_proof_dir = dir.join("pixel-proof");
+        run_merge_subprocess(
+            &stream_partial,
+            &json_path,
+            &[
+                "--switch-schedule",
+                sched.to_str().unwrap(),
+                "--switch-guard-ns",
+                "0",
+                "--switch-expected-step",
+                "2",
+                "--av-expected-ms",
+                "0",
+                "--out-dir",
+                pixel_proof_dir.to_str().unwrap(),
+            ],
+        )
+    };
 
-    assert_ne!(
-        code, 0,
-        "#703: a 500ms av-offset (far outside the default +/-20ms gate) MUST make the merge \
-         PROCESS exit non-zero, not just report false in-process: exit={code} output={text}"
-    );
-    let v = json.unwrap_or_else(|| panic!("verdict JSON not written at {json_path:?}: {text}"));
+    let (with_code, with_text, with_json) = run("av-fail-with-861", Some(av));
+    let (without_code, without_text, without_json) = run("av-fail-without-861", None);
+
+    let with_v =
+        with_json.unwrap_or_else(|| panic!("with-av verdict JSON not written: {with_text}"));
+    let without_v = without_json
+        .unwrap_or_else(|| panic!("without-av verdict JSON not written: {without_text}"));
+
     assert_eq!(
-        v["all_cambox_av_sync"]["cam1"]["gate_pass"],
+        with_v["all_cambox_av_sync"]["cam1"]["gate_pass"],
         serde_json::json!(false),
-        "#624: cam1's measured 500ms offset must fail the +/-20ms gate: {v}"
-    );
-    assert_eq!(
-        v["all_cambox_av_sync"]["gate_pass"],
-        serde_json::json!(false),
-        "#624: the overall av_sync gate must be false: {v}"
+        "sanity: cam1's measured 500ms offset must still fail the +/-20ms gate: {with_v}"
     );
     assert_eq!(
-        v["overall_pass"],
+        with_v["all_cambox_av_sync"]["gate_pass"],
         serde_json::json!(false),
-        "#703: overall_pass must be false when the av_sync gate fails: {v}"
+        "sanity: the overall av_sync gate must still measure false: {with_v}"
+    );
+    assert_eq!(
+        with_v["all_cambox_av_sync"]["gates_overall_pass"],
+        serde_json::json!(false),
+        "#861: the JSON must say plainly this failing term does not decide overall_pass: {with_v}"
+    );
+    assert_eq!(
+        with_code, without_code,
+        "#861: a failing A/V-offset gate must NOT change the merge PROCESS exit code (report-only, \
+         pending ASRC #803) -- with={with_code} ({with_text}), without={without_code} ({without_text})"
+    );
+    assert_eq!(
+        with_v["overall_pass"], without_v["overall_pass"],
+        "#861: a failing A/V-offset gate must be a no-op on overall_pass through the real CLI too \
+         -- with={with_v}, without={without_v}"
     );
 }
 
-/// #641/#624 — "Unknown from silent audio": the cam2 emit log still exists (the marker was
-/// EMITTED), but the QPSK decode found ZERO audio markers to pair against it — the exact #689/
-/// #690 real-rig failure mode (marker tone bytes are written to the HDMI audio device, but the
-/// recorded track is silent downstream). Too-thin/zero candidates MUST verdict `Unknown`, and
-/// Unknown NEVER passes the gate (never a fabricated pass on thin data) — so the merge
-/// subprocess still exits non-zero.
+/// #861 — "Unknown from silent audio": the cam2 emit log still exists (the marker was EMITTED),
+/// but the QPSK decode found ZERO audio markers to pair against it — the exact #689/#690 real-rig
+/// failure mode (marker tone bytes are written to the HDMI audio device, but the recorded track
+/// is silent downstream). Too-thin/zero candidates still verdict `Unknown` and Unknown still
+/// fails the gate CLOSED (never a fabricated pass on thin data) — but since #861 that failure is
+/// report-only too, so it must NOT change the merge subprocess's exit code either.
+/// **This SUPERSEDES the old `merge_subprocess_exits_nonzero_when_av_sync_is_unknown_from_silent_
+/// audio_703`**, which asserted the opposite when the gate was still wired into `all_pass`.
 #[test]
-fn merge_subprocess_exits_nonzero_when_av_sync_is_unknown_from_silent_audio_703() {
-    let dir = tempdir("av-unknown");
+fn merge_subprocess_exit_code_unaffected_by_av_sync_unknown_from_silent_audio_861() {
     let base = 5_000 * ONE_S_NS;
     let win = 5 * ONE_S_NS;
-    let frames = window_frames(0, base, Some((BURN_RUN_ID_CAM1, 0)));
-    let sched = write_switch_schedule(&dir, &["CAM1"], base, win);
 
     let av = AvMarkerInputs {
         fps: 30.0,
@@ -250,46 +277,58 @@ fn merge_subprocess_exits_nonzero_when_av_sync_is_unknown_from_silent_audio_703(
         audio_markers: vec![], // silent audio track — zero decoded candidates
     };
 
-    let stream_partial = write_stream_partial(&dir, frames, Some(av));
-    let json_path = dir.join("verdict.json");
-    let pixel_proof_dir = dir.join("pixel-proof");
-    let (code, text, json) = run_merge_subprocess(
-        &stream_partial,
-        &json_path,
-        &[
-            "--switch-schedule",
-            sched.to_str().unwrap(),
-            "--switch-guard-ns",
-            "0",
-            "--switch-expected-step",
-            "2",
-            "--av-expected-ms",
-            "0",
-            "--out-dir",
-            pixel_proof_dir.to_str().unwrap(),
-        ],
-    );
+    let run = |tag: &str, av: Option<AvMarkerInputs>| {
+        let dir = tempdir(tag);
+        let frames = window_frames(0, base, Some((BURN_RUN_ID_CAM1, 0)));
+        let sched = write_switch_schedule(&dir, &["CAM1"], base, win);
+        let stream_partial = write_stream_partial(&dir, frames, av);
+        let json_path = dir.join("verdict.json");
+        let pixel_proof_dir = dir.join("pixel-proof");
+        run_merge_subprocess(
+            &stream_partial,
+            &json_path,
+            &[
+                "--switch-schedule",
+                sched.to_str().unwrap(),
+                "--switch-guard-ns",
+                "0",
+                "--switch-expected-step",
+                "2",
+                "--av-expected-ms",
+                "0",
+                "--out-dir",
+                pixel_proof_dir.to_str().unwrap(),
+            ],
+        )
+    };
 
-    assert_ne!(
-        code, 0,
-        "#703: an Unknown av_sync verdict (silent audio, zero candidates) MUST still make the \
-         merge PROCESS exit non-zero — Unknown never passes the gate: exit={code} output={text}"
-    );
-    let v = json.unwrap_or_else(|| panic!("verdict JSON not written at {json_path:?}: {text}"));
+    let (with_code, with_text, with_json) = run("av-unknown-with-861", Some(av));
+    let (without_code, without_text, without_json) = run("av-unknown-without-861", None);
+
+    let with_v =
+        with_json.unwrap_or_else(|| panic!("with-av verdict JSON not written: {with_text}"));
+    let without_v = without_json
+        .unwrap_or_else(|| panic!("without-av verdict JSON not written: {without_text}"));
+
     assert_eq!(
-        v["all_cambox_av_sync"]["cam1"]["verdict"],
+        with_v["all_cambox_av_sync"]["cam1"]["verdict"],
         serde_json::json!("unknown"),
-        "#624: zero audio candidates must verdict unknown, never a fabricated offset: {v}"
+        "sanity: zero audio candidates must still verdict unknown, never a fabricated offset: {with_v}"
     );
     assert_eq!(
-        v["all_cambox_av_sync"]["cam1"]["gate_pass"],
+        with_v["all_cambox_av_sync"]["cam1"]["gate_pass"],
         serde_json::json!(false),
-        "#624: Unknown must fail the gate closed: {v}"
+        "sanity: Unknown must still fail the gate closed: {with_v}"
     );
     assert_eq!(
-        v["overall_pass"],
-        serde_json::json!(false),
-        "#703: overall_pass must be false when av_sync is Unknown: {v}"
+        with_code, without_code,
+        "#861: an Unknown av_sync verdict must NOT change the merge PROCESS exit code (report-only) \
+         -- with={with_code} ({with_text}), without={without_code} ({without_text})"
+    );
+    assert_eq!(
+        with_v["overall_pass"], without_v["overall_pass"],
+        "#861: an Unknown av_sync verdict must be a no-op on overall_pass through the real CLI too \
+         -- with={with_v}, without={without_v}"
     );
 }
 

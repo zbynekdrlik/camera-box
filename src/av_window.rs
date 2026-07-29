@@ -17,8 +17,16 @@
 //!
 //! **PR B wires the ±20ms cross-window bound on top of [`CameraAvSync`]** (#312 item 2 / #624
 //! deliverable 4) — see [`av_offset_gate_pass`]. PR A only reported `all_cambox_av_sync` (offsets,
-//! sample counts, any UNKNOWN cameras); this module now also decides the per-camera PASS/FAIL that
-//! the caller (`bin/recording-verdict.rs`) folds into the run's overall verdict.
+//! sample counts, any UNKNOWN cameras); this module also decides the per-camera PASS/FAIL that the
+//! caller (`bin/recording-verdict.rs`) folds into the run's overall verdict — reports it.
+//!
+//! **#861 (2026-07-29, user decision on #856): the ±20ms bound is temporarily REPORT-ONLY.**
+//! Epic #800 measured program audio drifting ~160ms/hour against video (foreign Waves/Dante clock
+//! domain, sample-count timestamping) — a constant video-delay offset cannot hold that inside
+//! ±20ms until per-source ASRC lands (#803). [`av_offset_gate_pass`] is UNCHANGED (still computed,
+//! still the pure fail-closed decision) — only the CALLER stopped folding its result into
+//! `overall_pass`, mirroring the #286 cross-camera spread term's report-only shape exactly. #861
+//! tracks re-arming it once ASRC is deployed and proven stable.
 
 use crate::qpsk_marker::cluster_offset_ms;
 
