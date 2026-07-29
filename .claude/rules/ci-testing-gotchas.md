@@ -189,3 +189,26 @@ of which node's HTTP endpoint answers fastest. Prove the concurrency is REAL, no
 to look parallel, with a timed test: give N≥2 jobs a real multi-second delay each and assert total
 wall-clock stays close to ONE job's delay, not N× it (see
 `gate_samples_multiple_nodes_concurrently_not_sequentially` in `tests/dantesync_gate.rs`).
+
+## Extracting a shared PS/bash snippet into a `scripts/lib/*.sh` helper can make it appear TWICE in one generated output — a bare-text `.find()` anchor becomes ambiguous (#867)
+
+When a generator script REUSES another generator's full output wholesale (e.g.
+`obs-self-heal-install.sh`'s `build_recovery_script` embeds `launch-obs-genlock.sh`'s
+`build_launch_program` output verbatim for its kill+relaunch step — a deliberate "one launch
+path" reuse, not a bug), and BOTH the outer and the reused inner program independently embed the
+SAME shared helper (e.g. a new `scripts/lib/*.sh` snippet both now source), the shared snippet's
+own text appears MULTIPLE times in the outer script's final generated output. A test that did
+`.find("<some literal from the shared snippet>")` to anchor an ORDERING assertion (e.g. "the
+restart must happen after the verify step") silently grabs the FIRST occurrence — which may be
+the wrong one (the reused inner program's copy, not the outer script's own step). This bit
+`tests/obs_self_heal_install.rs` in #867 when a bare-exe-name literal (previously unique because
+only ONE of the two restart mechanisms used that exact string) was replaced by a shared
+`ahk_resolve_and_relaunch_ps` helper both mechanisms now call — the literal that used to be
+unique now appears twice.
+
+**Fix: anchor on a comment/log-line that is UNIQUE to the specific call site you mean** (e.g. the
+outer script's own `# --- Step 4/4: RestartAhk ---` marker comment, never present inside the
+reused inner program), not on any part of the shared helper's own body. Before trusting a
+`.find()`-based ordering test after extracting shared logic into a lib, grep the FULL generated
+output for your anchor string and confirm it is genuinely unique — `grep -c` on the harness's
+captured stdout, not just eyeballing the source.

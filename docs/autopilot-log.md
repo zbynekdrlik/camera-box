@@ -6223,3 +6223,34 @@ operator is re-calibrating + verifying the live rig separately. Verified only: c
 fmt/check/clippy clean, full `cargo test` 163/163 binaries green, `python -m pytest tests/python`
 628/628 green, and the ordinary push-triggered "CI" workflow run (30471351958) all-jobs-green on
 dev @ 28b8a81df.
+
+## #867 -- strih AHK auto-respawn restart was a bare-exe-name blind-success claim
+RED: 05d1f064e -- new tests/harness_ahk_watchdog_867.rs (lib doesn't exist yet);
+tests/launch_obs_genlock.rs::program_never_launches_ahk_by_bare_exe_name_867 +
+program_ahk_restart_is_verified_and_fails_loud_867; tests/obs_self_heal_install.rs::
+strih_ahk_restart_never_uses_bare_exe_name_867 + strih_ahk_restart_is_verified_and_logs_fatal_on_failure_867.
+4 pre-existing ordering tests re-anchored off "Step 4/4: RestartAhk" (anchor-stability only, still
+passed pre-fix).
+GREEN: 6395b4f58 -- new scripts/lib/ahk-watchdog.sh (ahk_resolve_and_relaunch_ps): probes the real
+user-scoped AutoHotkey v2 install paths in order (%LOCALAPPDATA%\Programs\AutoHotkey\v2\,
+%ProgramFiles%\AutoHotkey\v2\, %ProgramFiles%\AutoHotkey\), falls back to the NL_STARTUP Startup
+shortcut, then Get-Command (PATH) -- never a bare `-FilePath 'AutoHotkey64.exe'`. Polls
+`Get-Process AutoHotkey64` up to ~10s, sets $ahkRelaunchVerified/$ahkRelaunchTarget. Both
+scripts/obs-self-heal-install.sh and scripts/launch-obs-genlock.sh now source it instead of
+duplicating the launch logic; obs-self-heal-install.sh's scheduled recovery pass logs FATAL on a
+failed verify (log-only, it retries ~every 2 min anyway), launch-obs-genlock.sh's one-shot relaunch
+Write-Errors + exits 9 (matches its existing post-launch fail-loud pattern).
+Root cause + rejected alternative: gh issue comment 867 (design, posted before RED commit) --
+https://github.com/zbynekdrlik/camera-box/issues/867#issuecomment-5122320555
+Gotcha: the shared PS block ends up embedded TWICE in the strih self-heal recovery script (once
+via the reused launch-obs-genlock.sh program's own AHK bracket, once in self-heal's own Step 4/4)
+-- a bare text anchor like the removed literal is ambiguous between the two; anchored the 4
+existing ordering tests on the unique "Step 4/4: RestartAhk" comment instead.
+Decision: per explicit dispatch instructions, did NOT open a new PR (commits ride the already-open
+dev->main PR #704) and did NOT merge. Verified: cargo fmt/check/clippy clean, full `cargo test`
+164/164 binaries green. Pushed 6395b4f58 -- ordinary push-triggered "CI" workflow green
+(30483181128). The hardware "Full-path E2E" gate (30483190401, and the two runs immediately before
+mine) failed on rig-state issues unrelated to this diff (strih's bundle-state-server/OBS WebSocket
+unreachable at :8899/:4455) -- consistent with #867's own root cause (strih's OBS currently has no
+live respawn watcher installed yet; this PR only fixes the SCRIPTS, it does not itself deploy/
+enable them on the live rig). Left for the operator/supervisor, same as the #707 entry above.

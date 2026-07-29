@@ -384,6 +384,28 @@ imag=dede91825, strih=stream=2789f46c). Write it BOM-free:
 strih has OTHER OBS installs in `D:\_APPS` (1ME/2ME/vestibul/input/light) — do NOT touch;
 broadcast = the Program Files 2ME one only.
 
+**GOTCHA (#867, 2026-07-29) — `AutoHotkey64.exe` is NOT on PATH; a bare `-FilePath
+'AutoHotkey64.exe'` (as the hot-swap recipe above literally shows) can never resolve.** AHK v2 is
+installed on strih USER-SCOPED under
+`C:\Users\newlevel\AppData\Local\Programs\AutoHotkey\v2\AutoHotkey64.exe` (also
+`...\AutoHotkey\UX\AutoHotkeyUX.exe`) — confirmed live, `where AutoHotkey64.exe` returns nothing.
+The `.ahk` file association DOES work (it lives in HKCU, not HKCR/HKLM, so a non-interactive
+`assoc .ahk` misleadingly reports "not found" — that's expected, not evidence AHK is missing).
+Root cause of a real strih outage: a prior obs.dll hot-swap run's `Stop-Process -Name
+AutoHotkey64 -Force` (correctly, before touching obs64) followed by exactly the bare
+`Start-Process -FilePath "D:\_APPS\NL_STARTUP.ahk"` this doc used to show — the restart step
+was never verified, silently failed, and strih ran with no live respawn watcher for hours before
+the user noticed. `scripts/obs-self-heal-install.sh` and `scripts/launch-obs-genlock.sh` had the
+identical shape (`ahk_start_block` / `ahk_restart_ps`) and got the real fix: both now source
+**`scripts/lib/ahk-watchdog.sh`'s `ahk_resolve_and_relaunch_ps`**, which probes, in order,
+`%LOCALAPPDATA%\Programs\AutoHotkey\v2\`, `%ProgramFiles%\AutoHotkey\v2\`,
+`%ProgramFiles%\AutoHotkey\`, then the NL_STARTUP Startup shortcut, then `Get-Command
+AutoHotkey64.exe` (PATH) — and then POLLS `Get-Process AutoHotkey64` for up to ~10s
+(`$ahkRelaunchVerified`/`$ahkRelaunchTarget`) instead of unconditionally logging success. **Any
+future manual/ad-hoc AHK restart (including a one-off hot-swap paste like the recipe two
+sections above) should reuse that shared function rather than a bare `-FilePath` relaunch, and
+should always verify with `Get-Process AutoHotkey64` before trusting it came back.**
+
 ## A force-kill relaunch restores a STALE saved config — clean the baseline before measuring (#276 deploy)
 
 OBS persists its scene-collection / global state on GRACEFUL exit. A **force-kill** (the deploy/recovery
