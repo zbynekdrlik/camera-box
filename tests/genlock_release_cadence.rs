@@ -19,11 +19,17 @@
 //! v2 (live canary of v1, 2026-07-02, strih `NDI cam5`): v1's wall-based drift guard
 //! (`present_ts > boundary + 2*interval + interval/4`) EMBEDS the constant stamp→arrival
 //! skew (59 ms live at the 3 ms reserve) and relock-stormed — dropped_due 2918 of 4202
-//! received (69 %), relocks 1076. v2 replaces it with a QUEUE-DEPTH backlog guard
-//! (`GENLOCK_QDEPTH_RELOCK`): steady depth is ~1–2 at ANY skew (the boundary paces
-//! arrivals), so depth is skew-immune where wall−boundary drift is not; the steady path
+//! received (69 %), relocks 1076. v2 replaces it with a QUEUE-DEPTH backlog guard, which is
+//! skew-immune where wall−boundary drift is not; the steady path
 //! presents the OLDEST matured frame (strict FIFO, transient 2-frame maturation drains
 //! losslessly) and a GAP RESYNC re-anchors past upstream-skipped stamps.
+//!
+//! #859: that queue-depth threshold is no longer a bare constant. Its original value encoded
+//! "steady depth is ~1–2 at ANY skew", which holds only for a SHALLOW source; a source pinned
+//! deep for A/V alignment (923 ms on the stream box's `NDI 2ME PGM`) sits at ~28 and exceeded it
+//! permanently, relocking every tick and shedding paired duplicate/skip frames. The threshold is
+//! now the depth each source's OWN configured latency implies plus the unchanged margin — see
+//! `src/genlock_backlog.rs` for the Tier-0-tested decision.
 //!
 //! This is a SOURCE-presence guard (same convention as tests/distroav_genlock_lockdown.rs,
 //! tests/obs_updater_disabled.rs): it runs on DEFAULT features (per-PR Linux CI + local
@@ -95,15 +101,38 @@ fn release_is_phase_locked_not_per_tick_wall_compare() {
          ReleaseCadence::tick (v2)."
     );
     // v2: the QUEUE-DEPTH backlog guard must be present — a named constant so the
-    // rationale travels with the threshold. Steady depth is ~1–2 at any arrival skew
-    // (the locked boundary paces arrivals), so depth > GENLOCK_QDEPTH_RELOCK is
-    // unambiguous backlog; the re-lock jumps to the newest due frame counting every
-    // jumped frame (visible catch-up, IMAG latency contract kept).
+    // rationale travels with the threshold. The re-lock jumps to the newest due frame
+    // counting every jumped frame (visible catch-up, IMAG latency contract kept).
     assert!(
         src.contains("GENLOCK_QDEPTH_RELOCK"),
         "{OBS_SOURCE}: #401 v2 — the queue-depth backlog guard (GENLOCK_QDEPTH_RELOCK) is \
          missing; without it a genuine stall's backlog never re-locks to the live edge. \
-         Mirror src/probe/genlock.rs ReleaseCadence::QDEPTH_RELOCK."
+         Mirror src/probe/genlock.rs ReleaseCadence::QDEPTH_RELOCK_MARGIN."
+    );
+    // #859: the threshold must be RELATIVE to the depth each source's own configured latency
+    // implies, not a bare constant. The pre-#859 code compared against the bare 6, whose comment
+    // assumed "steady depth is ~1-2 at any skew" — true only for a SHALLOW source. A source
+    // pinned deep (923 ms on the stream box's 'NDI 2ME PGM', to A/V-align against the mbc's 1 s
+    // mastering) has a steady depth of ~28, so the branch fired EVERY tick and shed a frame on
+    // every arrival-jitter excursion: measured as +59 duplicate / +57 skipped frames injected
+    // into the strih->stream hop. A `git subtree pull` reverting to the bare comparison would
+    // silently reintroduce that, so assert the helper is actually WIRED IN, not merely defined.
+    assert!(
+        src.contains("genlock_backlog_relock_qdepth(source, reserve_ms, interval)"),
+        "{OBS_SOURCE}: #859 — the backlog branch no longer calls \
+         genlock_backlog_relock_qdepth(source, reserve_ms, interval); it is back to comparing \
+         against a bare constant, which a deep-latency source exceeds permanently (steady depth \
+         ~28 at 923 ms) and which therefore relocks every tick and sheds paired duplicate/skip \
+         frames. Mirror: src/genlock_backlog.rs backlog_relock_threshold (Tier-0 unit-tested) \
+         and src/probe/genlock.rs ReleaseCadence::backlog_relock_qdepth."
+    );
+    // The margin must stay the ORIGINAL 6 — #859 changed what the threshold is RELATIVE TO, it
+    // did not widen the tolerance. A bumped margin would be exactly the "widen the threshold to
+    // make it pass" move the standing rule forbids.
+    assert!(
+        src.contains("#define GENLOCK_QDEPTH_RELOCK_MARGIN 6"),
+        "{OBS_SOURCE}: #859 — the backlog MARGIN is no longer the original 6. #859 made the \
+         threshold latency-RELATIVE; it must never become latency-relative AND widened."
     );
     // The mirror pointer must survive so the next maintainer finds the PROVEN Rust
     // reference (and its three cadence tests) before touching the C.
