@@ -75,6 +75,20 @@ is NOT evidence of persistence — it is evidence of a launch that is about to b
 - **On strih, expect AHK to add a SECOND obs64** a few seconds later (it keys on the obs64 WINDOW —
   see "AHK on strih"). After a manual relaunch, count instances and kill the small (~70 MB) one that
   owns neither :4455 nor the newest log; keep the warm one.
+- **After ANY force-kill relaunch, re-check `genlock_burn` before trusting the box for a gate run.**
+  The measurement burn is a per-source runtime bool that lives in the scene collection, so a
+  force-kill loses the E2E's burn-OFF cleanup and OBS restores the last SAVED state — which, if the
+  kill landed after a gate run had turned burns on, is burns ON. Live 2026-07-29: the swap's
+  force-kill left `genlock_burn=True` on all four strih cam inputs AND on stream's `NDI 2ME PGM`,
+  and the next gate run aborted at `[0/8]` with `FAIL: strih NDI cam1: genlock_burn is still ON from
+  a prior…` before computing any verdict. Same class as #844 (a cancelled run leaking the burn), but
+  reached through a force-kill rather than a cancel. Check + clear, no restart needed:
+  ```bash
+  python3 scripts/obs_burn_filter.py check  --host 10.77.9.202 --input "NDI cam1"
+  python3 scripts/obs_burn_filter.py remove --host 10.77.9.202 --input "NDI cam1"   # per input
+  ```
+  This composes with the existing "force-kill relaunch restores a STALE saved config" section below
+  — the burn is one more piece of state that silently reverts.
 
 ## Healthy OBS Proof
 
