@@ -55,10 +55,15 @@ LATENCY_MAX = 2000
 # #707: a SEPARATE, higher floor than LATENCY_MIN above -- mirrors
 # `camera_box::phase_sync::PHASE_SYNC_FLOOR_MS` / `phase_sync_calibrate.PHASE_SYNC_FLOOR_MS`.
 # This controller writes the SAME genlock_latency_ms_src OBS property phase_sync_calibrate.py
-# computes per-camera strih-source offsets for (this script currently applies its rig-wide A/V
-# correction to stream's 'NDI 2ME PGM', per-run, AFTER phase-sync has already run) -- without
-# enforcing the SAME floor here, this controller's own write could silently undercut the value
-# phase-sync already respects. A live FIFO relock audit on strih found the floor needs to be at
+# computes per-camera strih-source offsets for -- but NOT on the same sources: this script writes
+# ONLY stream's 'NDI 2ME PGM' (DEFAULT_SOURCE; no call site overrides it), a different box and a
+# different source from the per-camera strih inputs, so it can never undercut those pins. It is
+# floored here because that source has its own genlock FIFO needing its own jitter reserve, NOT
+# because the two controllers can collide. (An earlier #707 note claimed the collision reason --
+# that was wrong; measured: this source sits at ~973ms, three orders above where the pins live.)
+# The value it computes is an A/V ALIGNMENT hold, a different quantity that merely shares this
+# OBS property -- see enforce_jitter_floor_ms on why clamping it must never be silent.
+# A live FIFO relock audit on strih found the floor needs to be at
 # least 55ms (16ms measured 242 relocks / 8-of-9 failing continuity windows; 55ms measured 12
 # relocks / 0-of-6 failing -- see phase_sync.rs's own doc for the full table). Kept as its OWN
 # copy (not imported), same "never let one controller's behavior silently leak into the other"
