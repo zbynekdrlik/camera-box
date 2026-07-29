@@ -1722,7 +1722,18 @@ mod vendored_source {
         let anchor = raw
             .find("genlock_present_ts_reserve(wall_now, reserve_ms)")
             .expect("#148/#269 [3]: the ts-align reserve deadline (from hoisted wall_now) is gone — re-locate");
-        let window_end = (anchor + 10000).min(raw.len());
+        // #859: the window used to be a fixed `anchor + 10000` byte count, which is a PROXY for
+        // "the same ts-align block" and had already been widened twice (#269, #401) purely
+        // because the block grew. The slew-limited drain pushed holds++ to distance 10032 — 32
+        // bytes past the cap — and the test failed for a reason that has nothing to do with what
+        // it is asserting. Widening the number a third time would just re-arm the same trap, so
+        // scope the window to the ENCLOSING FUNCTION instead: everything up to the next
+        // top-level `static` definition. That is the real boundary the assertion means, and it
+        // cannot rot as the function grows.
+        let window_end = raw[anchor..]
+            .find("\nstatic ")
+            .map(|rel| anchor + rel)
+            .unwrap_or(raw.len());
         assert!(
             raw[anchor..window_end].contains("source->genlock_holds++"),
             "{OBS_SOURCE}: #148 — genlock_holds++ is not in the ts-align decision block \
