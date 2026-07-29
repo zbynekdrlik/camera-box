@@ -268,7 +268,10 @@ class TestReadCurrentLatency:
         def rpc(ws, method, params=None, ignore_err=False, timeout_s=None):
             return {"inputSettings": {}}
         monkeypatch.setattr(phase_sync_calibrate, "_rpc", rpc)
-        assert phase_sync_calibrate.read_current_latency(None, "NDI cam5") == 3
+        assert (
+            phase_sync_calibrate.read_current_latency(None, "NDI cam5")
+            == phase_sync_calibrate.PHASE_SYNC_FLOOR_MS
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -279,8 +282,11 @@ class TestApplyLatencyHappyPath:
     def test_sets_and_verifies(self, monkeypatch):
         fake = FakeObs(latencies={"NDI cam5": 450})
         monkeypatch.setattr(phase_sync_calibrate, "_rpc", fake.rpc)
-        actual = phase_sync_calibrate.apply_latency(None, "NDI cam5", 450, 33)
-        assert actual == 33
+        # 65ms is already above PHASE_SYNC_FLOOR_MS (#707) -- unaffected by the floor clamp, so
+        # this stays a pure "does apply_latency set+verify" test (see
+        # TestApplyLatencyEnforcesJitterFloor below for the clamp behavior itself).
+        actual = phase_sync_calibrate.apply_latency(None, "NDI cam5", 450, 65)
+        assert actual == 65
 
         sets = fake.set_calls()
         latency_sets = [
@@ -291,7 +297,7 @@ class TestApplyLatencyHappyPath:
         assert len(latency_sets) == 1, f"expected exactly one apply (no rollback), got {sets}"
         assert latency_sets[0]["inputSettings"][
             phase_sync_calibrate.GENLOCK_SRC_LATENCY_KEY
-        ] == 33
+        ] == 65
         assert latency_sets[0].get("overlay") is True
 
 
@@ -309,7 +315,10 @@ class TestApplyLatencyRollback:
         monkeypatch.setattr(phase_sync_calibrate, "_rpc", fake.rpc)
 
         with pytest.raises(SystemExit):
-            phase_sync_calibrate.apply_latency(None, "NDI cam5", 450, 33)
+            # 65ms is already above PHASE_SYNC_FLOOR_MS (#707) -- the mismatch here comes from
+            # readback_override_value=3 always disagreeing with whatever was set, not from the
+            # floor clamp itself.
+            phase_sync_calibrate.apply_latency(None, "NDI cam5", 450, 65)
 
         sets = fake.set_calls()
         latency_sets = [
@@ -320,7 +329,7 @@ class TestApplyLatencyRollback:
         assert len(latency_sets) == 2, f"expected apply + rollback, got {sets}"
         assert latency_sets[0]["inputSettings"][
             phase_sync_calibrate.GENLOCK_SRC_LATENCY_KEY
-        ] == 33
+        ] == 65
         assert latency_sets[1]["inputSettings"][
             phase_sync_calibrate.GENLOCK_SRC_LATENCY_KEY
         ] == 450, (
@@ -337,7 +346,7 @@ class TestApplyLatencyRollback:
         monkeypatch.setattr(phase_sync_calibrate, "_rpc", fake.rpc)
 
         with pytest.raises(SystemExit):
-            phase_sync_calibrate.apply_latency(None, "NDI cam5", 450, 33)
+            phase_sync_calibrate.apply_latency(None, "NDI cam5", 450, 65)
 
         captured = capsys.readouterr()
         combined = (captured.out + captured.err).lower()
@@ -505,11 +514,12 @@ class TestCLI:
         fake = FakeObs(latencies={"NDI cam5": 450, "NDI cam1": 450, "NDI cam3": 450})
         monkeypatch.setattr(phase_sync_calibrate, "_rpc", fake.rpc)
         monkeypatch.setattr(phase_sync_calibrate, "_conn", lambda host, password="": None)
-        # slowest = cam5 (100ms) -> floor(3). cam1 (90ms) -> 3+10=13. cam3 (80ms) -> 3+20=23
-        # (same vectors as src/phase_sync.rs's faster_camera_gets_floor_plus_the_deficit).
+        # slowest = cam5 (100ms) -> floor(55, #707). cam1 (90ms) -> 55+10=65. cam3 (80ms) ->
+        # 55+20=75 (same vectors as src/phase_sync.rs's faster_camera_gets_floor_plus_the_deficit,
+        # updated for the #707 floor raise).
         monkeypatch.setattr(
             phase_sync_calibrate, "_run_gate_bin",
-            lambda measured, gate_bin=None: {"NDI cam5": 3, "NDI cam1": 13, "NDI cam3": 23},
+            lambda measured, gate_bin=None: {"NDI cam5": 55, "NDI cam1": 65, "NDI cam3": 75},
         )
         measured_path = tmp_path / "measured.json"
         measured_path.write_text(json.dumps(
@@ -524,16 +534,16 @@ class TestCLI:
         )
         phase_sync_calibrate.main()
 
-        assert fake.latencies["NDI cam5"] == 3
-        assert fake.latencies["NDI cam1"] == 13
-        assert fake.latencies["NDI cam3"] == 23
+        assert fake.latencies["NDI cam5"] == 55
+        assert fake.latencies["NDI cam1"] == 65
+        assert fake.latencies["NDI cam3"] == 75
 
         assert json_path.exists()
         data = json.loads(json_path.read_text())
         by_source = {c["source"]: c for c in data["cameras"]}
-        assert by_source["NDI cam5"]["applied_latency_ms"] == 3
-        assert by_source["NDI cam1"]["applied_latency_ms"] == 13
-        assert by_source["NDI cam3"]["applied_latency_ms"] == 23
+        assert by_source["NDI cam5"]["applied_latency_ms"] == 55
+        assert by_source["NDI cam1"]["applied_latency_ms"] == 65
+        assert by_source["NDI cam3"]["applied_latency_ms"] == 75
         assert by_source["NDI cam5"]["latency_ms"] == 100.0
 
     def test_explicit_json_path_suppresses_remote_push_plan(self, monkeypatch, tmp_path, capsys):

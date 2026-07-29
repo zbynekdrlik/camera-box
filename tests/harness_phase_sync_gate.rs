@@ -84,7 +84,7 @@ fn matches_kernel_slowest_camera_maps_to_the_floor() {
     assert_eq!(code, 0, "expected exit 0, got {code} (stderr={err:?})");
     assert_eq!(
         parse_offsets(&out),
-        vec![("cam1".to_string(), 33), ("cam2".to_string(), 3)]
+        vec![("cam1".to_string(), 85), ("cam2".to_string(), 55)]
     );
 }
 
@@ -96,9 +96,9 @@ fn matches_kernel_faster_camera_gets_floor_plus_the_deficit() {
     assert_eq!(
         parse_offsets(&out),
         vec![
-            ("cam10".to_string(), 3),
-            ("cam20".to_string(), 13),
-            ("cam30".to_string(), 23),
+            ("cam10".to_string(), 55),
+            ("cam20".to_string(), 65),
+            ("cam30".to_string(), 75),
         ]
     );
 }
@@ -111,9 +111,9 @@ fn matches_kernel_tie_at_the_max_maps_every_tied_camera_to_the_floor() {
     assert_eq!(
         parse_offsets(&out),
         vec![
-            ("cam1".to_string(), 3),
-            ("cam2".to_string(), 3),
-            ("cam3".to_string(), 33),
+            ("cam1".to_string(), 55),
+            ("cam2".to_string(), 55),
+            ("cam3".to_string(), 85),
         ]
     );
 }
@@ -126,7 +126,7 @@ fn matches_kernel_clamp_rails_hold() {
     assert_eq!(code, 0);
     assert_eq!(
         parse_offsets(&out),
-        vec![("cam1".to_string(), 2000), ("cam2".to_string(), 3)]
+        vec![("cam1".to_string(), 2000), ("cam2".to_string(), 55)]
     );
 }
 
@@ -135,7 +135,7 @@ fn matches_kernel_clamp_rails_hold() {
 fn matches_kernel_single_camera_gets_the_floor() {
     let (code, out, _) = run(r#"{"only": 123.4}"#);
     assert_eq!(code, 0);
-    assert_eq!(parse_offsets(&out), vec![("only".to_string(), 3)]);
+    assert_eq!(parse_offsets(&out), vec![("only".to_string(), 55)]);
 }
 
 /// Mirrors the kernel's `all_equal_latencies_all_map_to_the_floor`.
@@ -146,9 +146,9 @@ fn matches_kernel_all_equal_latencies_all_map_to_the_floor() {
     assert_eq!(
         parse_offsets(&out),
         vec![
-            ("a".to_string(), 3),
-            ("b".to_string(), 3),
-            ("c".to_string(), 3),
+            ("a".to_string(), 55),
+            ("b".to_string(), 55),
+            ("c".to_string(), 55),
         ]
     );
 }

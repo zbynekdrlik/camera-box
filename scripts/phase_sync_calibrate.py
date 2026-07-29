@@ -65,15 +65,38 @@ from obs_phase2 import _conn, _rpc  # noqa: E402
 # av_sync_calibrate.py drives; #286 just sets it on FOUR sources instead of one.
 GENLOCK_SRC_LATENCY_KEY = "genlock_latency_ms_src"
 
-# Mirrors `camera_box::phase_sync::PHASE_SYNC_FLOOR_MS` / `PHASE_SYNC_CAP_MS`
-# (src/phase_sync.rs), which themselves mirror the DistroAV clamp
-# PROP_GENLOCK_LATENCY_MS_MIN=3 / PROP_GENLOCK_SOURCE_LATENCY_MS_MAX=2000 (same range
-# av_sync_calibrate.py's LATENCY_MIN/LATENCY_MAX use). Keep all three in lock-step. (Only used
-# here as `read_current_latency`'s sane display default when a source has no genlock setting
-# yet -- the FORMULA itself, #438, now lives in exactly one place: the compiled
+# Mirrors `camera_box::phase_sync::PHASE_SYNC_FLOOR_MS` / `PHASE_SYNC_CAP_MS` (src/phase_sync.rs).
+#
+# #707: PHASE_SYNC_FLOOR_MS is NOT the DistroAV hardware clamp anymore -- it used to just mirror
+# PROP_GENLOCK_LATENCY_MS_MIN=3 (the smallest value the OBS property will even accept), but a
+# live FIFO relock audit on strih proved that value leaves the genlock FIFO with no jitter
+# reserve (the slowest camera gets pinned exactly there; 16ms measured 242 relocks / 8-of-9
+# failing continuity windows, vs 55ms's 12 relocks / 0-of-6 failing -- see src/phase_sync.rs's
+# own doc for the full table). This is now a SEPARATE, higher floor: the lowest per-source
+# genlock latency the FIFO can absorb ordinary jitter at, which merely has to stay >= the
+# hardware clamp, not equal it. PHASE_SYNC_CAP_MS is still the DistroAV per-source ceiling
+# (PROP_GENLOCK_SOURCE_LATENCY_MS_MAX=2000, same range av_sync_calibrate.py's LATENCY_MAX uses).
+# Keep this, the Rust const, and av_sync_calibrate.py's own GENLOCK_JITTER_FLOOR_MS (which
+# enforces the SAME final value on the separate controller that writes the same OBS property),
+# in lock-step. Do not "tidy" this back down to 3 -- that reintroduces the relock cliff above.
+# (Also used as `read_current_latency`'s sane display default when a source has no genlock
+# setting yet -- the offset FORMULA itself, #438, lives in exactly one place: the compiled
 # `phase-sync-gate` binary this script shells out to below.)
-PHASE_SYNC_FLOOR_MS = 3
+PHASE_SYNC_FLOOR_MS = 55
 PHASE_SYNC_CAP_MS = 2000
+
+
+def enforce_jitter_floor_ms(new_ms) -> int:
+    """#707: clamp `new_ms` (the FINAL genlock_latency_ms_src value about to be written) up to
+    at least PHASE_SYNC_FLOOR_MS. This is a SEPARATE guard from the offset kernel's own clamp --
+    `compute_phase_sync_offsets`/the compiled `phase-sync-gate` binary already respects the
+    floor as part of the offset formula -- so this exists purely so the value actually WRITTEN
+    to OBS can never go under the floor regardless of how it got here (a future caller bypassing
+    the kernel, a manual override, or -- concretely -- av_sync_calibrate.py writing the SAME
+    genlock_latency_ms_src property afterwards and undercutting it). See PHASE_SYNC_FLOOR_MS's
+    own doc for the measured relock evidence this floor is set from.
+    """
+    return max(int(new_ms), PHASE_SYNC_FLOOR_MS)
 
 # #636 -- the SAME persist-location gap #465 fixed in av_sync_calibrate.py. Canonical
 # Windows-side destination this script's payload MUST end up at for the #390 drift-guard pin
@@ -249,7 +272,12 @@ def apply_latency(ws, source: str, current_ms: int, new_ms: int) -> int:
     `current_ms` and FAILS LOUD -- the source is never left half-set. If even the rollback
     read-back mismatches, prints a LOUD warning (manual check required) before still failing
     loud.
+
+    #707: `new_ms` is clamped to >= PHASE_SYNC_FLOOR_MS HERE too (not just inside the offset
+    kernel/main()'s preview) -- this is the point every write to genlock_latency_ms_src funnels
+    through, so it is where the floor is enforced no matter how `new_ms` was computed.
     """
+    new_ms = enforce_jitter_floor_ms(new_ms)
     print(f"[phase-sync] SET '{source}' {GENLOCK_SRC_LATENCY_KEY}: {current_ms} -> {new_ms}")
     _rpc(ws, "SetInputSettings", {
         "inputName": source,
@@ -372,7 +400,7 @@ def main():
     ws = _conn(args.host, args.password)
     plan = []
     for source, latency_ms in measured.items():
-        new_ms = offsets[source]
+        new_ms = enforce_jitter_floor_ms(offsets[source])
         current = read_current_latency(ws, source)
         print(
             f"[phase-sync] source='{source}' measured_latency={latency_ms:.1f}ms "

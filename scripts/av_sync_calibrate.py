@@ -47,10 +47,34 @@ from obs_phase2 import _conn, _rpc  # noqa: E402
 GENLOCK_SRC_LATENCY_KEY = "genlock_latency_ms_src"
 
 # DistroAV clamp range: PROP_GENLOCK_LATENCY_MS_MIN=3, PROP_GENLOCK_SOURCE_LATENCY_MS_MAX=2000.
+# This is the HARDWARE clamp (the smallest/largest value the OBS property will even accept) --
+# unrelated to, and unchanged by, the jitter-reserve floor below. Do not conflate the two.
 LATENCY_MIN = 3
 LATENCY_MAX = 2000
 
+# #707: a SEPARATE, higher floor than LATENCY_MIN above -- mirrors
+# `camera_box::phase_sync::PHASE_SYNC_FLOOR_MS` / `phase_sync_calibrate.PHASE_SYNC_FLOOR_MS`.
+# This controller writes the SAME genlock_latency_ms_src OBS property phase_sync_calibrate.py
+# computes per-camera strih-source offsets for (this script currently applies its rig-wide A/V
+# correction to stream's 'NDI 2ME PGM', per-run, AFTER phase-sync has already run) -- without
+# enforcing the SAME floor here, this controller's own write could silently undercut the value
+# phase-sync already respects. A live FIFO relock audit on strih found the floor needs to be at
+# least 55ms (16ms measured 242 relocks / 8-of-9 failing continuity windows; 55ms measured 12
+# relocks / 0-of-6 failing -- see phase_sync.rs's own doc for the full table). Kept as its OWN
+# copy (not imported), same "never let one controller's behavior silently leak into the other"
+# convention as every other constant/function this script already duplicates from
+# phase_sync_calibrate.py -- keep both in lock-step; do not diverge.
+GENLOCK_JITTER_FLOOR_MS = 55
+
 DEFAULT_SOURCE = "NDI 2ME PGM"
+
+
+def enforce_jitter_floor_ms(new_ms) -> int:
+    """#707: clamp `new_ms` (the FINAL genlock_latency_ms_src value about to be written) up to
+    at least GENLOCK_JITTER_FLOOR_MS -- the SAME floor phase_sync_calibrate.py's offset kernel
+    already respects for the per-camera strih sources. See GENLOCK_JITTER_FLOOR_MS's own doc.
+    """
+    return max(int(new_ms), GENLOCK_JITTER_FLOOR_MS)
 
 # Canonical Windows-side destination this script's payload MUST end up at for the #390
 # drift-guard `av_sync_calibrated_ms` best-effort cross-check to read it (see
@@ -163,7 +187,14 @@ def apply_latency(ws, source: str, current_ms: int, new_ms: int) -> int:
     takes), ROLLS BACK to `current_ms` and FAILS LOUD — the source is never left half-set. If even
     the rollback read-back mismatches, prints a LOUD warning (manual check required) before still
     failing loud, mirroring the #358 `_restore_test_latency` pattern.
+
+    #707: `new_ms` is clamped to >= GENLOCK_JITTER_FLOOR_MS HERE, at the point of application --
+    this controller writes the SAME genlock_latency_ms_src property phase_sync_calibrate.py
+    computes for the per-camera strih sources; without this clamp this controller's own A/V
+    correction could silently write a value below the jitter-reserve floor phase-sync's own
+    computation already respects.
     """
+    new_ms = enforce_jitter_floor_ms(new_ms)
     print(f"[av-sync] SET '{source}' {GENLOCK_SRC_LATENCY_KEY}: {current_ms} -> {new_ms}")
     _rpc(ws, "SetInputSettings", {
         "inputName": source,
@@ -250,7 +281,7 @@ def main():
 
     ws = _conn(args.host, args.password)
     current = read_current_latency(ws, args.source)
-    new_ms = required_delay_ms(current, offset)
+    new_ms = enforce_jitter_floor_ms(required_delay_ms(current, offset))
     print(
         f"[av-sync] source='{args.source}' current={current}ms offset={offset:.1f}ms "
         f"-> new={new_ms}ms"
