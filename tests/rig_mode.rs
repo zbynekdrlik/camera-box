@@ -877,3 +877,56 @@ fn script_is_source_safe() {
         "#247: the script must be source-safe (BASH_SOURCE != $0 guard) — sourcing ran main"
     );
 }
+
+/// #868 — on the PAINTER box, EVENT mode must NOT demand that `CAMERA_BOX_NO_DISPLAY=1` has
+/// disappeared, and must NOT demand that camera-box owns `/dev/fb0`.
+///
+/// #863 made `/etc/systemd/system/camera-box.service.d/cam2-no-display.conf` PERMANENT on cam2,
+/// because `cam2-painter.service` is the sole owner of that box's monitor. EVENT mode's step (5)
+/// still encoded the pre-#863 contract, so on cam2 it could only ever FAIL:
+///
+/// ```text
+/// FAIL: camera-box Environment still carries CAMERA_BOX_NO_DISPLAY=1 — interkom monitor not restored
+/// ```
+///
+/// That is not cosmetic: the non-zero exit stranded EVENT mode's own burn-clear sweep, leaving
+/// `genlock_burn=true` on strih's `NDI cam1`, which then made the next Full-path E2E gate run refuse
+/// in its `#758` preflight. The verify must branch on whether this box HAS a dedicated painter unit
+/// (the same condition `cam2_painter_service_start_cmds` already guards on), asserting the state that
+/// is actually correct there: transient drop-in gone, `camera-box` active, `cam2-painter` active, and
+/// `/dev/fb0` held (by the painter).
+#[test]
+fn event_mode_painter_box_expects_the_permanent_no_display_dropin_868() {
+    let p = painter_stop();
+    // The NO_DISPLAY assert must be REACHED ONLY on a box with no painter unit — i.e. it sits inside
+    // a branch labelled for this ticket, not at the top level of step (5). Anchoring on the `#868`
+    // label rather than on `systemctl list-unit-files cam2-painter.service` is deliberate: that
+    // string ALREADY appears earlier (the #440 stop/start guards), so a position check against it
+    // would pass vacuously without any branch existing.
+    let branch_pos = p
+        .find("#868")
+        .expect("#868: expected the painter-box verify branch, labelled #868");
+    let nodisplay_assert = p
+        .find("interkom monitor not restored")
+        .expect("#868: the non-painter-box NO_DISPLAY assert must still exist (#528)");
+    assert!(
+        branch_pos < nodisplay_assert,
+        "#868: on the painter box the permanent #863 drop-in MUST remain, so the NO_DISPLAY assert \
+         has to sit behind the painter-box branch — not run unconditionally. Got:\n{p}"
+    );
+}
+
+#[test]
+fn event_mode_painter_box_verifies_the_painter_service_owns_the_monitor_868() {
+    let p = painter_stop();
+    assert!(
+        p.contains("is-active cam2-painter"),
+        "#868: on the painter box EVENT mode must verify cam2-painter is ACTIVE (it, not camera-box, \
+         owns the monitor after #863). Got:\n{p}"
+    );
+    assert!(
+        p.contains("#868"),
+        "#868: the painter-box branch must be labelled so a future reader sees why the asserts \
+         differ per box. Got:\n{p}"
+    );
+}
