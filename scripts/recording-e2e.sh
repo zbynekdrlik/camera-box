@@ -1555,7 +1555,18 @@ AV_SYNC_MARKER_CADENCE="${AV_SYNC_MARKER_CADENCE:-180}"
 _cam2_marker_flags=""
 _cam2_marker_check=""
 if [ "${ALL_CAMBOX:-0}" = "1" ]; then
-  _cam2_prep="rm -f /tmp/painter.csv /tmp/av-markers.csv;"
+  # #869: ALSO stop the PERMANENT cam2-painter.service (the #863 always-on devel painter) — the
+  # non-sweep arm below has always done this, and the sweep needs it just as much. #734's
+  # `pkill -x frame-probe` + death-wait below cannot cover it on its own: that unit is
+  # Restart=always / RestartSec=2, so systemd restores its painter INSIDE the ~10s wait window, the
+  # wait times out, and this run launches a SECOND painter onto the same /dev/fb0 under a DIFFERENT
+  # run-id — verbatim the #440 artifact (the displayed QR alternates between the two painters'
+  # run_ids), which makes all_cambox_continuity report held images as copies/gaps on EVERY cambox.
+  # Ordered BEFORE the #734 kill so that kill is not racing a restart the stop has not disabled yet.
+  # Guarded (`2>/dev/null || true`) so a box without the unit is unaffected. Note this does NOT
+  # extend to camera-box itself: #291 keeps it RUNNING on cam2 here (a measured node whose
+  # capture+emit must stay alive) — only the painter is the process being replaced.
+  _cam2_prep="systemctl stop cam2-painter 2>/dev/null || true; rm -f /tmp/painter.csv /tmp/av-markers.csv;"
   _cam2_marker_flags="--audio-marker --audio-marker-device $AV_SYNC_MARKER_DEVICE \
       --audio-marker-cadence-ticks $AV_SYNC_MARKER_CADENCE --marker-log /tmp/av-markers.csv"
   # #420/#431 fail-loud self-check (same mechanism AV_RESTART_GATE uses, scripts/lib/audio-marker-check.sh):

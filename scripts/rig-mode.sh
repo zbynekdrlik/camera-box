@@ -419,20 +419,45 @@ if [ "\$(systemctl is-active camera-box 2>/dev/null)" != "active" ]; then
   systemctl status camera-box --no-pager >&2 2>/dev/null || true
   exit 1
 fi
-# (5) verify the preview is restored: the EFFECTIVE Environment no longer carries
-#     CAMERA_BOX_NO_DISPLAY=1 (same resolved-check shape TEST mode uses — 'systemctl show', NOT
-#     'systemctl cat', so a silently-failed drop-in removal can't false-pass on the base unit)
-#     AND camera-box re-grabbed /dev/fb0.
-if systemctl show -p Environment --value camera-box 2>/dev/null | grep -q -- 'CAMERA_BOX_NO_DISPLAY=1'; then
-  echo "FAIL: camera-box Environment still carries CAMERA_BOX_NO_DISPLAY=1 — interkom monitor not restored" >&2
-  exit 1
+# (5) verify the monitor is restored. WHICH state is correct depends on the box (#868): a box with a
+#     dedicated cam2-painter.service carries a PERMANENT no-display drop-in
+#     (/etc/systemd/system/camera-box.service.d/cam2-no-display.conf, #863) precisely so camera-box's
+#     display thread NEVER grabs /dev/fb0 or DRM master there — the painter service is the sole owner
+#     of that monitor. Asserting the pre-#863 contract on such a box could only ever FAIL, and the
+#     non-zero exit stranded EVENT mode's own burn-clear sweep (a burn left ON then made the next
+#     Full-path E2E gate run refuse in its #758 preflight). So branch on the unit's presence — the
+#     same condition the #440 stop/start guards use, one notion of "painter box" in this script.
+if systemctl list-unit-files cam2-painter.service >/dev/null 2>&1; then
+  # #868 painter box: NO_DISPLAY is EXPECTED to remain (the permanent #863 drop-in). What must hold
+  # is that the TRANSIENT drop-in is gone (removed above), camera-box is active (checked in (4)),
+  # cam2-painter is active, and /dev/fb0 IS held — by the painter, not by camera-box.
+  i=0; while [ "\$(systemctl is-active cam2-painter 2>/dev/null)" != "active" ] && [ \$i -lt 20 ]; do sleep 0.5; i=\$((i+1)); done
+  if [ "\$(systemctl is-active cam2-painter 2>/dev/null)" != "active" ]; then
+    echo "FAIL: #868 painter box but cam2-painter is not active — nothing is painting this monitor" >&2
+    systemctl status cam2-painter --no-pager >&2 2>/dev/null || true
+    exit 1
+  fi
+  i=0; while ! fuser -s /dev/fb0 2>/dev/null && [ \$i -lt 20 ]; do sleep 0.5; i=\$((i+1)); done
+  if ! fuser -s /dev/fb0 2>/dev/null; then
+    echo "FAIL: #868 cam2-painter active but /dev/fb0 not held — the permanent dual-QR painter is not painting" >&2
+    exit 1
+  fi
+  echo "PASS: transient painter stopped, camera-box active, permanent cam2-painter restored (holding /dev/fb0)"
+else
+  #     The EFFECTIVE Environment no longer carries CAMERA_BOX_NO_DISPLAY=1 (same resolved-check
+  #     shape TEST mode uses — 'systemctl show', NOT 'systemctl cat', so a silently-failed drop-in
+  #     removal can't false-pass on the base unit) AND camera-box re-grabbed /dev/fb0.
+  if systemctl show -p Environment --value camera-box 2>/dev/null | grep -q -- 'CAMERA_BOX_NO_DISPLAY=1'; then
+    echo "FAIL: camera-box Environment still carries CAMERA_BOX_NO_DISPLAY=1 — interkom monitor not restored" >&2
+    exit 1
+  fi
+  i=0; while ! fuser -s /dev/fb0 2>/dev/null && [ \$i -lt 20 ]; do sleep 0.5; i=\$((i+1)); done
+  if ! fuser -s /dev/fb0 2>/dev/null; then
+    echo "FAIL: camera-box active but /dev/fb0 not held — the unconditional preview is not painting the interkom return" >&2
+    exit 1
+  fi
+  echo "PASS: painter stopped, camera-box active + unconditional preview restored (holding /dev/fb0)"
 fi
-i=0; while ! fuser -s /dev/fb0 2>/dev/null && [ \$i -lt 20 ]; do sleep 0.5; i=\$((i+1)); done
-if ! fuser -s /dev/fb0 2>/dev/null; then
-  echo "FAIL: camera-box active but /dev/fb0 not held — the unconditional preview is not painting the interkom return" >&2
-  exit 1
-fi
-echo "PASS: painter stopped, camera-box active + unconditional preview restored (holding /dev/fb0)"
 REMOTE
 }
 
@@ -964,7 +989,18 @@ do_event() {
   stop_stray_recordings
   echo
   echo "[cam2 ${PAINTER_IP}] stop painter (via pidfile) -> remove CAMERA_BOX_NO_DISPLAY drop-in -> restart camera-box -> verify HDMI preview restored"
-  cam_ssh "$(painter_stop_remote "$PAINTER_PIDFILE")"
+  # #868: the cam-side restore must NOT be able to strand a measurement burn ON. Under `set -e` a
+  # non-zero cam_ssh here aborted do_event outright, so the burn-clear step below never ran and the
+  # rig was left with genlock_burn=true on a program input — which then made the NEXT Full-path E2E
+  # gate run refuse in its #758 preflight ("genlock_burn is still ON from a prior run"). One stale
+  # cam-side assert cost a whole gate cycle. So record the failure, keep going through the OBS
+  # burn-clear, and fail loud at the END (folded into the exit status below) — fail-loud is
+  # preserved, statelessness of the rig is no longer sacrificed to it.
+  _cam_restore_rc=0
+  cam_ssh "$(painter_stop_remote "$PAINTER_PIDFILE")" || _cam_restore_rc=$?
+  if [ "$_cam_restore_rc" -ne 0 ]; then
+    echo "WARNING #868: cam-side restore FAILED (rc=$_cam_restore_rc) — continuing to the OBS burn-clear so no burn is stranded ON; EVENT mode will still exit non-zero." >&2
+  fi
   echo
   event_mode_ledger_cleanup
   echo
@@ -989,12 +1025,18 @@ do_event() {
   event_mode_discord_confirm_send "$(cat "$EVENT_ASSERT_DISCORD_MSG_PATH" 2>/dev/null || echo "$EVENT_ASSERT_SUMMARY")"
   rm -f "$EVENT_ASSERT_DISCORD_MSG_PATH" "$EVENT_ASSERT_RESULT_JSON" 2>/dev/null || true
   echo
-  if [ "$EVENT_ASSERT_PASS" -eq 0 ]; then
+  # #868: fold the recorded cam-side restore failure into the final verdict — deferring it past the
+  # burn-clear must never SWALLOW it.
+  if [ "$EVENT_ASSERT_PASS" -eq 0 ] && [ "${_cam_restore_rc:-0}" -eq 0 ]; then
     echo "RESULT: EVENT mode — cam side PASS, burns OFF, #722 CONTRACT CONFIRMED clean for broadcast."
+    exit 0
+  fi
+  if [ "${_cam_restore_rc:-0}" -ne 0 ]; then
+    echo "RESULT: EVENT mode — cam-side restore FAILED (#868, rc=${_cam_restore_rc}). Burns were still cleared, but the rig is NOT confirmed clean — see the cam-side failure above." >&2
   else
     echo "RESULT: EVENT mode — #722 CONTRACT FAILED. The rig is NOT confirmed clean for broadcast — see the assert summary above." >&2
   fi
-  exit "$EVENT_ASSERT_PASS"
+  exit 1
 }
 
 main() {

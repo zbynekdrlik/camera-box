@@ -930,3 +930,55 @@ fn event_mode_painter_box_verifies_the_painter_service_owns_the_monitor_868() {
          differ per box. Got:\n{p}"
     );
 }
+
+/// #868 — a FAILED cam-side restore must never strand a measurement burn ON.
+///
+/// `do_event` runs the cam-side restore BEFORE `toggle_burn event`, under `set -euo pipefail`. So a
+/// non-zero cam_ssh aborted the whole function and the burn-clear never ran — live cost: `NDI cam1`
+/// on strih kept `genlock_burn=true`, and the next Full-path E2E gate run refused in its `#758`
+/// preflight ("genlock_burn is still ON from a prior run"). The failure is now RECORDED, the
+/// burn-clear still runs, and the recorded failure is folded into the final exit status — so
+/// deferring it cannot SWALLOW it either.
+#[test]
+fn event_mode_cam_restore_failure_does_not_strand_the_burn_clear_868() {
+    let whole = fs::read_to_string(script()).expect("read rig-mode.sh");
+    // Bound to do_event's BODY. Anchoring on the whole file is what this repo's own gotcha warns
+    // about: prose ABOVE a call site can contain the same literal as the call, so `.find()` grabs
+    // the comment instead of the code (it did, on the first attempt at this test).
+    let body_start = whole
+        .find("\ndo_event() {")
+        .expect("#868: expected do_event to exist");
+    let body_end = whole[body_start..]
+        .find("\nmain() {")
+        .map(|i| body_start + i)
+        .expect("#868: expected main() to bound do_event's body");
+    let s = &whole[body_start..body_end];
+    let cam_call = s
+        .find("cam_ssh \"$(painter_stop_remote")
+        .expect("#868: expected do_event's cam-side restore call");
+    // The real call site, never the explanatory comment above it: the invocation is indented and
+    // starts the line.
+    let burn_clear = s
+        .find("\n  toggle_burn event")
+        .expect("#868: expected do_event's burn-clear invocation");
+    assert!(
+        cam_call < burn_clear,
+        "#868: this test assumes the documented order (cam restore, then burn clear) — if that \
+         changed, revisit the fix's premise"
+    );
+    // The cam-side failure must be CAPTURED, not allowed to abort before the burn-clear.
+    let capture = s
+        .find("|| _cam_restore_rc=$?")
+        .expect("#868: the cam-side restore's failure must be captured, not left to `set -e`");
+    assert!(
+        capture < burn_clear,
+        "#868: the capture must happen BEFORE the burn-clear, or `set -e` still aborts first"
+    );
+    // ...and must still make EVENT mode fail: the recorded rc has to reach the final exit decision.
+    let tail = &s[burn_clear..];
+    assert!(
+        tail.contains("_cam_restore_rc:-0") && tail.contains("exit 1"),
+        "#868: the recorded cam-side failure must be folded into the final exit status — deferring \
+         it past the burn-clear must not swallow it. Got tail:\n{tail}"
+    );
+}
