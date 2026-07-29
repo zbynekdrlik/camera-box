@@ -237,4 +237,48 @@ mod tests {
             vec![9, 1, 5]
         );
     }
+
+    /// #707 — the RED reproduction: before the fix `PHASE_SYNC_FLOOR_MS` was `3`, the DistroAV
+    /// hardware minimum, which a live FIFO audit on strih proved gives the genlock FIFO no
+    /// jitter reserve (242 relocks/9-window-failures at 16ms vs 12 relocks/0 failures at
+    /// 55ms — see the constant's own doc for the full table). This asserts the floor is raised
+    /// to the ONLY value the live evidence showed zero failing continuity windows at — never
+    /// merely nudged toward the 16->21ms cliff.
+    #[test]
+    fn floor_is_raised_above_the_measured_relock_cliff() {
+        assert!(
+            PHASE_SYNC_FLOOR_MS >= 55,
+            "PHASE_SYNC_FLOOR_MS={PHASE_SYNC_FLOOR_MS} is below the 55ms floor #707's live FIFO \
+             relock audit proved necessary (26ms still failed 1/6 windows, 21ms failed 3/9) — \
+             do not lower this back toward the DistroAV hardware minimum (3ms)"
+        );
+    }
+
+    /// #707 item 3 — raising the floor must shift the whole set by a constant and leave the
+    /// MUTUAL spacing between cameras untouched: `offset(a) - offset(b)` must equal
+    /// `latency(b) - latency(a)` exactly, for every pair, regardless of what
+    /// `PHASE_SYNC_FLOOR_MS` is compiled to. A regression here would silently un-align the
+    /// cameras — worse than the underrun bug this ticket fixes.
+    #[test]
+    fn raising_the_floor_preserves_pairwise_spacing_between_cameras() {
+        let measured: &[(u32, f64)] = &[(1, 50.0), (2, 80.0), (3, 65.0), (4, 72.0)];
+        let out = compute_phase_sync_offsets(measured);
+        let offset = |id: u32| -> i64 {
+            out.iter().find(|o| o.camera_id == id).unwrap().offset_ms as i64
+        };
+        let latency = |id: u32| -> f64 { measured.iter().find(|(i, _)| *i == id).unwrap().1 };
+        for &(a, _) in measured {
+            for &(b, _) in measured {
+                if a == b {
+                    continue;
+                }
+                let expected_diff = (latency(b) - latency(a)).round() as i64;
+                assert_eq!(
+                    offset(a) - offset(b),
+                    expected_diff,
+                    "cam {a} vs cam {b}: raising the floor must not disturb relative spacing"
+                );
+            }
+        }
+    }
 }

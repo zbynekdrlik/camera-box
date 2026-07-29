@@ -348,6 +348,38 @@ class TestApplyLatencyRollback:
 
 
 # ---------------------------------------------------------------------------
+# #707 -- the FINAL applied genlock_latency_ms_src must never go below PHASE_SYNC_FLOOR_MS,
+# enforced at the point of application (apply_latency), not just inside the offset kernel --
+# so a future caller (or av_sync_calibrate.py writing the SAME property afterwards, see that
+# script's own mirrored test) can never silently undercut it.
+# ---------------------------------------------------------------------------
+
+class TestApplyLatencyEnforcesJitterFloor:
+    def test_below_floor_target_is_clamped_up_before_writing(self, monkeypatch):
+        fake = FakeObs(latencies={"NDI cam5": 450})
+        monkeypatch.setattr(phase_sync_calibrate, "_rpc", fake.rpc)
+        actual = phase_sync_calibrate.apply_latency(None, "NDI cam5", 450, 1)
+        assert actual == phase_sync_calibrate.PHASE_SYNC_FLOOR_MS
+
+        sets = fake.set_calls()
+        latency_sets = [
+            p for _, p in sets
+            if p.get("inputName") == "NDI cam5"
+            and phase_sync_calibrate.GENLOCK_SRC_LATENCY_KEY in p.get("inputSettings", {})
+        ]
+        assert len(latency_sets) == 1, f"expected exactly one apply (no rollback), got {sets}"
+        assert latency_sets[0]["inputSettings"][
+            phase_sync_calibrate.GENLOCK_SRC_LATENCY_KEY
+        ] == phase_sync_calibrate.PHASE_SYNC_FLOOR_MS
+
+    def test_a_value_already_above_the_floor_is_unaffected(self, monkeypatch):
+        fake = FakeObs(latencies={"NDI cam5": 450})
+        monkeypatch.setattr(phase_sync_calibrate, "_rpc", fake.rpc)
+        actual = phase_sync_calibrate.apply_latency(None, "NDI cam5", 450, 200)
+        assert actual == 200
+
+
+# ---------------------------------------------------------------------------
 # (f) write_last_json shape
 # ---------------------------------------------------------------------------
 
