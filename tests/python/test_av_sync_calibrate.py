@@ -208,68 +208,6 @@ class TestApplyLatencyRollback:
 
 
 # ---------------------------------------------------------------------------
-# #707 -- the FINAL applied genlock_latency_ms_src must never go below the strih genlock FIFO's
-# measured jitter-reserve floor, even though this controller's own clamp (LATENCY_MIN, the
-# DistroAV hardware minimum) is much lower and unrelated. This controller writes the SAME OBS
-# property phase_sync_calibrate.py computes per-camera offsets for -- without this floor, an
-# A/V correction applied afterwards could silently undercut what phase-sync already respects.
-# ---------------------------------------------------------------------------
-
-class TestGenlockJitterFloor:
-    def test_floor_matches_phase_sync_calibrate_in_lock_step(self):
-        import phase_sync_calibrate
-        assert (
-            av_sync_calibrate.GENLOCK_JITTER_FLOOR_MS
-            == phase_sync_calibrate.PHASE_SYNC_FLOOR_MS
-        ), "av_sync_calibrate's jitter floor must stay in lock-step with phase_sync_calibrate's"
-
-    def test_clamping_below_floor_warns_loudly_never_silently(self, capsys):
-        """#707 follow-up: the clamp raises an A/V ALIGNMENT hold, which is a different quantity
-        from the per-camera FIFO jitter reserve sharing the same OBS property. If it ever bites,
-        the applied hold is NOT the computed alignment -- audio can be out of sync by up to the
-        floor. That must be visible in the run output, never silent."""
-        out = av_sync_calibrate.enforce_jitter_floor_ms(10)
-        assert out == av_sync_calibrate.GENLOCK_JITTER_FLOOR_MS
-        err = capsys.readouterr().err
-        assert "BELOW the genlock jitter floor" in err, (
-            f"clamping an A/V hold up must warn loudly on stderr, got: {err!r}"
-        )
-        assert "out of sync by up to" in err, (
-            f"the warning must state the alignment error it introduces, got: {err!r}"
-        )
-
-    def test_no_warning_when_the_clamp_does_not_bite(self, capsys):
-        """The normal operating point (~973ms measured hold) must stay silent -- a warning that
-        fires every run is noise nobody reads."""
-        out = av_sync_calibrate.enforce_jitter_floor_ms(973)
-        assert out == 973
-        assert capsys.readouterr().err == ""
-
-    def test_below_floor_target_is_clamped_up_before_writing(self, monkeypatch):
-        fake = FakeObs(latency_ms=450)
-        monkeypatch.setattr(av_sync_calibrate, "_rpc", fake.rpc)
-        actual = av_sync_calibrate.apply_latency(None, "NDI 2ME PGM", 450, 1)
-        assert actual == av_sync_calibrate.GENLOCK_JITTER_FLOOR_MS
-
-        sets = fake.set_calls()
-        latency_sets = [
-            p for _, p in sets
-            if p.get("inputName") == "NDI 2ME PGM"
-            and av_sync_calibrate.GENLOCK_SRC_LATENCY_KEY in p.get("inputSettings", {})
-        ]
-        assert len(latency_sets) == 1, f"expected exactly one apply (no rollback), got {sets}"
-        assert latency_sets[0]["inputSettings"][
-            av_sync_calibrate.GENLOCK_SRC_LATENCY_KEY
-        ] == av_sync_calibrate.GENLOCK_JITTER_FLOOR_MS
-
-    def test_a_value_already_above_the_floor_is_unaffected(self, monkeypatch):
-        fake = FakeObs(latency_ms=450)
-        monkeypatch.setattr(av_sync_calibrate, "_rpc", fake.rpc)
-        actual = av_sync_calibrate.apply_latency(None, "NDI 2ME PGM", 450, 880)
-        assert actual == 880
-
-
-# ---------------------------------------------------------------------------
 # (f) write_last_json shape
 # ---------------------------------------------------------------------------
 

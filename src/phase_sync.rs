@@ -26,26 +26,19 @@
 //! applied per-camera against a shared reference (the slowest camera) instead of a single
 //! video/audio pair.
 
-/// Floor for the per-source genlock latency (ms).
+/// Floor for the per-source genlock latency (ms) — mirrors
+/// `probe::genlock::GENLOCK_LATENCY_MS_MIN` (the DistroAV `PROP_GENLOCK_LATENCY_MS_MIN` clamp).
+/// Duplicated as a bare Tier-0 constant (not imported) so this module stays probe-dep-free —
+/// the same choice `qpsk_marker::required_delay_ms` makes by hardcoding `.clamp(3, 2000)`. Keep
+/// both, and the Python mirror's `PHASE_SYNC_FLOOR_MS`, in lock-step.
 ///
-/// **This is NOT the DistroAV hardware clamp anymore (#707).** It used to just mirror
-/// `probe::genlock::GENLOCK_LATENCY_MS_MIN` (`PROP_GENLOCK_LATENCY_MS_MIN=3`, the smallest value
-/// the OBS property will even accept) — but a value that low leaves the strih genlock FIFO with
-/// no jitter reserve: a live FIFO audit on strih (#707, 2026-07-29) caught FOUR strih NDI inputs
-/// at once, at 16/21/26/55ms, with `relocks` (the FIFO actually losing lock — the destructive
-/// event that shows up as a painted-tick `copy`/`gap`) of 242/18/16/12 respectively — a cliff
-/// between 16 and 21ms, and ZERO of nine 30s continuity windows failing only at 55ms (26ms still
-/// failed 1/6, 21ms failed 3/9). `underruns` alone do NOT correlate (the 21ms source had the
-/// MOST underruns of the four) — `relocks` is the signal. So this floor is now a DIFFERENT
-/// concept: the lowest per-source genlock latency the FIFO can absorb ordinary jitter at,
-/// which must merely stay `>=` the DistroAV hardware clamp, not equal it. Duplicated as a bare
-/// Tier-0 constant (not imported) so this module stays probe-dep-free — the same choice
-/// `qpsk_marker::required_delay_ms` makes by hardcoding `.clamp(3, 2000)`. Keep this, and the
-/// Python mirrors (`phase_sync_calibrate.PHASE_SYNC_FLOOR_MS`,
-/// `av_sync_calibrate.GENLOCK_JITTER_FLOOR_MS`, which enforces the SAME final value on the
-/// separate controller that writes the same OBS property), in lock-step. Do not "tidy" this
-/// back down to `3` — that reintroduces the exact relock cliff above.
-pub const PHASE_SYNC_FLOOR_MS: u32 = 55;
+/// Raising this to 55 was tried on 2026-07-29 (issue 707) to fix `all_cambox_continuity`
+/// copies/gaps, on the strength of a live FIFO relock audit that seemed to show a cliff between
+/// 16ms and 21ms. A controlled before/after on the real rig REFUTED that hypothesis: continuity
+/// events went 12 -> 11 (unchanged — noise), and the failures tracked the CAMERA (cam2 worst,
+/// cam4 clean) at both the old and the new pin values, not the reserve. Do not raise this again
+/// without a fresh controlled before/after measurement.
+pub const PHASE_SYNC_FLOOR_MS: u32 = 3;
 
 /// Cap for the per-source genlock latency (ms) — mirrors
 /// `probe::genlock::GENLOCK_SOURCE_LATENCY_MS_MAX` (the DistroAV per-source override ceiling,
@@ -123,14 +116,14 @@ mod tests {
             out[0],
             CameraOffset {
                 camera_id: 1,
-                offset_ms: 85
+                offset_ms: 33
             }
         );
         assert_eq!(
             out[1],
             CameraOffset {
                 camera_id: 2,
-                offset_ms: 55
+                offset_ms: 3
             }
         );
     }
@@ -144,7 +137,7 @@ mod tests {
             out[0],
             CameraOffset {
                 camera_id: 10,
-                offset_ms: 55
+                offset_ms: 3
             }
         );
         // camera 20 is 10ms faster -> floor + 10.
@@ -152,7 +145,7 @@ mod tests {
             out[1],
             CameraOffset {
                 camera_id: 20,
-                offset_ms: 65
+                offset_ms: 13
             }
         );
         // camera 30 is 20ms faster -> floor + 20.
@@ -160,7 +153,7 @@ mod tests {
             out[2],
             CameraOffset {
                 camera_id: 30,
-                offset_ms: 75
+                offset_ms: 23
             }
         );
     }
@@ -172,21 +165,21 @@ mod tests {
             out[0],
             CameraOffset {
                 camera_id: 1,
-                offset_ms: 55
+                offset_ms: 3
             }
         );
         assert_eq!(
             out[1],
             CameraOffset {
                 camera_id: 2,
-                offset_ms: 55
+                offset_ms: 3
             }
         );
         assert_eq!(
             out[2],
             CameraOffset {
                 camera_id: 3,
-                offset_ms: 85
+                offset_ms: 33
             }
         );
     }
@@ -240,7 +233,7 @@ mod tests {
             out.iter().find(|o| o.camera_id == 3).unwrap().offset_ms,
             PHASE_SYNC_FLOOR_MS
         );
-        assert_eq!(out.iter().find(|o| o.camera_id == 1).unwrap().offset_ms, 85);
+        assert_eq!(out.iter().find(|o| o.camera_id == 1).unwrap().offset_ms, 33);
     }
 
     #[test]
@@ -249,27 +242,6 @@ mod tests {
         assert_eq!(
             out.iter().map(|o| o.camera_id).collect::<Vec<_>>(),
             vec![9, 1, 5]
-        );
-    }
-
-    /// #707 — the RED reproduction: before the fix `PHASE_SYNC_FLOOR_MS` was `3`, the DistroAV
-    /// hardware minimum, which a live FIFO audit on strih proved gives the genlock FIFO no
-    /// jitter reserve (242 relocks/9-window-failures at 16ms vs 12 relocks/0 failures at
-    /// 55ms — see the constant's own doc for the full table). This asserts the floor is raised
-    /// to the ONLY value the live evidence showed zero failing continuity windows at — never
-    /// merely nudged toward the 16->21ms cliff.
-    // The comparison is against a `const`, so clippy correctly notes it can be evaluated at
-    // compile time -- that IS the point: this is a standing regression guard against someone
-    // "tidying" PHASE_SYNC_FLOOR_MS back down toward the DistroAV hardware minimum, not a
-    // runtime check. It still runs as a normal `cargo test` case so CI reports it plainly.
-    #[allow(clippy::assertions_on_constants)]
-    #[test]
-    fn floor_is_raised_above_the_measured_relock_cliff() {
-        assert!(
-            PHASE_SYNC_FLOOR_MS >= 55,
-            "PHASE_SYNC_FLOOR_MS={PHASE_SYNC_FLOOR_MS} is below the 55ms floor #707's live FIFO \
-             relock audit proved necessary (26ms still failed 1/6 windows, 21ms failed 3/9) — \
-             do not lower this back toward the DistroAV hardware minimum (3ms)"
         );
     }
 

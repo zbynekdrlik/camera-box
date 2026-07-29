@@ -19,7 +19,7 @@
 //! offset (ms, already clamped to `[PHASE_SYNC_FLOOR_MS, PHASE_SYNC_CAP_MS]`) to stdout:
 //!
 //! ```json
-//! {"NDI cam5": 55, "NDI cam1": 65, "NDI cam3": 75}
+//! {"NDI cam5": 3, "NDI cam1": 13, "NDI cam3": 23}
 //! ```
 //!
 //! **Exit codes:**
