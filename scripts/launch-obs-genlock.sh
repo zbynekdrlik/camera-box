@@ -33,6 +33,11 @@
 # 0 healthy genlock / non-zero fail-loud — is reported by the MCP Shell when the agent runs it.)
 set -euo pipefail
 
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/ahk-watchdog.sh
+# Sourcing (not executing) ahk-watchdog.sh: it defines ONE pure function, no top-level statements.
+. "$HERE/lib/ahk-watchdog.sh"
+
 # --- PURE functions (no network, no MCP, no Windows — unit-tested by sourcing this script) --------
 
 # build_launch_program OBS_DIR FORCE [HAS_AHK] -> the full PowerShell program that (re)launches OBS
@@ -64,11 +69,22 @@ build_launch_program() {
   }
 PSAHK
 )
-    ahk_restart_ps=$(cat <<'PSAHK'
-if ($ahkStopped) {
-  $ahkLnk = Get-ChildItem "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup" -Filter "*NL_STARTUP*" -ErrorAction SilentlyContinue | Select-Object -First 1
-  if ($ahkLnk) { Start-Process -FilePath $ahkLnk.FullName; Write-Host "#786: AHK watchdog restarted ($($ahkLnk.Name))." }
-  else { Write-Warning "#786: AHK was stopped for the redraw but no NL_STARTUP startup shortcut found -- restart it manually." }
+    local ahk_relaunch_ps
+    ahk_relaunch_ps="$(ahk_resolve_and_relaunch_ps)"
+    # #867: the restart must be VERIFIED (Get-Process AutoHotkey64), never just "shortcut file
+    # exists -> assume success" — a resolved-but-failed relaunch here means the redraw loop leaves
+    # strih with NO respawn watcher, so this is fail-loud (Write-Error + a distinct exit), matching
+    # how this script already fails loud on its other post-launch checks (obs64 didn't start, the
+    # #786 audio buffering gate).
+    ahk_restart_ps=$(cat <<PSAHK
+if (\$ahkStopped) {
+${ahk_relaunch_ps}
+  if (\$ahkRelaunchVerified) {
+    Write-Host "#786: AHK watchdog restarted via \$ahkRelaunchTarget."
+  } else {
+    Write-Error "#867 FAIL: AutoHotkey64 did not come back after relaunch (target=\$ahkRelaunchTarget) -- strih has NO respawn watcher; investigate before trusting this box."
+    exit 9
+  }
 }
 PSAHK
 )

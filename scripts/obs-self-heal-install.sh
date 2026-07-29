@@ -58,6 +58,10 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Sourcing (not executing) launch-obs-genlock.sh: its own source-guard stops right after defining
 # build_launch_program, so this ONLY pulls in that pure function — nothing runs.
 . "$HERE/launch-obs-genlock.sh"
+# shellcheck source=scripts/lib/ahk-watchdog.sh
+# Explicit even though launch-obs-genlock.sh above already sources this transitively — never rely
+# on a transitive path staying wired.
+. "$HERE/lib/ahk-watchdog.sh"
 
 # --- PURE functions (no network, no MCP, no Windows — unit-tested by sourcing this script) --------
 
@@ -108,9 +112,18 @@ Stop-Process -Name AutoHotkey64 -Force -ErrorAction SilentlyContinue
 Write-SelfHealLog "StopAhk: AutoHotkey64 stopped (or was not running) — obs64 is now safe to touch"
 PS1
 )
-    ahk_start_block=$(cat <<'PS1'
-Start-Process -FilePath 'AutoHotkey64.exe' -ArgumentList '"D:\_APPS\NL_STARTUP.ahk"'
-Write-SelfHealLog "RestartAhk: AutoHotkey64 relaunched (crash/reboot auto-respawn restored)"
+    local ahk_relaunch_ps
+    ahk_relaunch_ps="$(ahk_resolve_and_relaunch_ps)"
+    # #867: log an explicit FATAL line when the relaunch is not verified, never a blind success
+    # claim — this recovery pass otherwise keeps running (a scheduled task retries ~every 2 min
+    # regardless), so this is log-only, not a hard exit.
+    ahk_start_block=$(cat <<PS1
+${ahk_relaunch_ps}
+if (\$ahkRelaunchVerified) {
+  Write-SelfHealLog "RestartAhk: AutoHotkey64 relaunched via \$ahkRelaunchTarget (crash/reboot auto-respawn restored)"
+} else {
+  Write-SelfHealLog "FATAL: RestartAhk failed -- AutoHotkey64 did not come back after relaunch (target=\$ahkRelaunchTarget) -- strih has NO respawn watcher until this is fixed"
+}
 PS1
 )
   else
