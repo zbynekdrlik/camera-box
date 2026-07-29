@@ -436,7 +436,14 @@ jobs:
           # trio (sync/bw/latency) + ptz (now forced too).
           foreach ($needle in @(
             '{PROP_SYNC, false, PROP_SYNC_NDI_SOURCE_TIMECODE, false}',
-            '{PROP_BEHAVIOR, false, PROP_BEHAVIOR_STOP_RESUME_LAST_FRAME, false}',
+            # #764 deliberately re-pinned this from STOP_RESUME_LAST_FRAME to KEEP_ACTIVE
+            # (see the `/* #764: was STOP_RESUME_LAST_FRAME */` comment on the table entry in
+            # ndi-source.cpp). This assert was never updated with it, so the Windows genlock
+            # build has failed on a STALE expectation since 2026-07-15 — invisible because the
+            # workflow is workflow_dispatch-only and was not run again until 2026-07-29. Assert
+            # the value the forcer is SUPPOSED to pin today; the guard's job is that the key is
+            # pinned at all, and that its certified value cannot drift unnoticed.
+            '{PROP_BEHAVIOR, false, PROP_BEHAVIOR_KEEP_ACTIVE, false}',
             '{PROP_BANDWIDTH, false, PROP_BW_HIGHEST, false}',
             '{PROP_LATENCY, false, PROP_LATENCY_NORMAL, false}',
             '{PROP_HW_ACCEL, true, 0, true}',
