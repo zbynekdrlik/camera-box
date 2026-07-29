@@ -107,6 +107,65 @@ cleanup_bak_cruft() {
     done
 }
 
+# cam2_is_painter_box DEVICE_NAME -> 0 iff DEVICE_NAME (already uppercased by resolve_device_name)
+# is "CAM2", the ONE fixed painter box. #863: cam2 is permanently excluded from
+# camera_strih_route() (scripts/camera-set.sh / recording-e2e.sh) -- its monitor is a diagnostic
+# screen, never a camera-operator return preview. This is a FIXED-ROLE gate (like cam1 being the
+# default source camera), NOT a re-introduction of the per-box preview-routing table #528
+# rejected -- it decides nothing about WHICH camera's feed shows anywhere, only whether THIS one
+# architecturally-fixed box gets the permanent devel-mode painter installed.
+cam2_is_painter_box() {
+    [ "${1:-}" = "CAM2" ]
+}
+
+# cam2_painter_no_display_dropin_content -> the systemd drop-in text that makes camera-box on
+# cam2 PERMANENTLY skip its own --display thread (#863). cam2-painter.service (below) is the SOLE
+# owner of cam2's /dev/fb0 / DRM master -- if camera-box's own unconditional HDMI preview (#528)
+# also grabbed it, the two would race the same physical output with undefined visual result, the
+# same conflict rig-mode.sh's TRANSIENT #291 no-display drop-in avoids during a measurement
+# window. Here it's PERMANENT because cam2's painter role is architecturally fixed, not a
+# per-run state.
+cam2_painter_no_display_dropin_content() {
+    cat <<'EOF'
+[Service]
+# #863: cam2 is the fixed painter box -- camera-box's own display thread must never grab
+# /dev/fb0 (or DRM master) here; cam2-painter.service is always the sole owner of this
+# box's monitor.
+Environment=CAMERA_BOX_NO_DISPLAY=1
+EOF
+}
+
+# cam2_painter_service_unit_content -> the systemd unit text for the PERMANENT devel-mode dual-QR
+# painter (#863 -- "V devel režime má na cam2 monitore trvale bežať QR"). Mirrors the exact
+# pinned flags rig-mode.sh's TEST-mode painter uses (qr-size 700, paint-fps 60, --dual-qr) MINUS
+# the QPSK audio marker (this is a passive visual health display, not a measurement run) --
+# colour-scale/motion-sweep already default ON under --paint-only (src/bin/frame-probe.rs), so
+# nothing else needs to be passed. duration-secs is a large-but-finite bound (~1 year) because
+# frame-probe has no "run forever" mode; Restart=always self-heals both that eventual natural
+# exit and any crash, so the monitor practically never goes dark on its own.
+cam2_painter_service_unit_content() {
+    cat <<'EOF'
+[Unit]
+Description=cam2 permanent dual-QR devel-mode painter (#863)
+Documentation=https://github.com/zbynekdrlik/camera-box
+After=camera-box.service
+Wants=camera-box.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/frame-probe --paint-only --dual-qr --qr-size 700 --paint-fps 60 --duration-secs 31536000
+Restart=always
+RestartSec=2
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cam2-painter
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
 # root_mount_is_readonly OPTS -> 0 iff the FIRST comma-token of a mount-options string is exactly
 # "ro" (the kernel always emits ro/rw first). Substring-safe: a rw mount carrying
 # "errors=remount-ro" is correctly NOT read as read-only. Mirrors verify-device.sh's function of
@@ -342,6 +401,60 @@ elif command -v gh >/dev/null 2>&1 && [ -n "${GH_TOKEN:-}" ]; then
     rm -rf "$DIST_DIR"
 else
     fail "gh CLI unavailable or GH_TOKEN unset -- cannot auto-fetch the fleet dev-build. Install manually, or re-run with --binary <url|path> / CAMERA_BOX_BINARY_URL"
+fi
+
+# =============================================================================
+# STEP 3b: cam2 ONLY -- install the permanent devel-mode dual-QR painter (#863)
+# =============================================================================
+# #863: "V devel režime má na cam2 monitore trvale bežať QR" -- cam2_painter_service_stop_cmds/
+# start_cmds in scripts/rig-mode.sh (#440) and recording-e2e.sh's cleanup() `systemctl start
+# cam2-painter` have ALWAYS assumed this unit exists; it was simply never installed anywhere --
+# this STEP is the missing provisioning path (#863's root cause). Enable-only, like camera-box's
+# own STEP 7 below: this script never starts services live, everything here takes effect on the
+# next reboot.
+if cam2_is_painter_box "$DEVICE_NAME"; then
+    echo ""
+    echo -e "${GREEN}[3b] Installing cam2 permanent dual-QR devel-mode painter (#863)...${NC}"
+    # Same resolution shape as STEP 3's camera-box binary fetch (local path / URL override /
+    # default CI artifact download), scoped to the probe-tools-linux-amd64 artifact's frame-probe
+    # binary.
+    FRAME_PROBE_SRC="${FRAME_PROBE_BINARY_URL:-}"
+    if [ -n "$FRAME_PROBE_SRC" ] && [ -f "$FRAME_PROBE_SRC" ]; then
+        echo "  Using local frame-probe: $FRAME_PROBE_SRC"
+        install -m 0755 "$FRAME_PROBE_SRC" /usr/local/bin/frame-probe
+    elif [ -n "$FRAME_PROBE_SRC" ]; then
+        echo "  Downloading frame-probe from: $FRAME_PROBE_SRC"
+        curl -fsSL "$FRAME_PROBE_SRC" -o /usr/local/bin/frame-probe \
+            || fail "could not download frame-probe from $FRAME_PROBE_SRC"
+        chmod +x /usr/local/bin/frame-probe
+    elif command -v gh >/dev/null 2>&1 && [ -n "${GH_TOKEN:-}" ]; then
+        echo "  Fetching probe-tools-linux-amd64 CI artifact (branch: $CI_BRANCH)..."
+        PROBE_RUN_ID="$(gh run list --repo "$GITHUB_REPO" --branch "$CI_BRANCH" --workflow ci.yml \
+            --status success --limit 1 --json databaseId -q '.[0].databaseId // empty' 2>/dev/null || true)"
+        [ -n "$PROBE_RUN_ID" ] || fail "no successful CI run found on branch '$CI_BRANCH' -- cannot fetch frame-probe (#863). Install manually to /usr/local/bin/frame-probe, or re-run with FRAME_PROBE_BINARY_URL=<url|path>."
+        PROBE_DIST_DIR="$(mktemp -d)"
+        if gh run download "$PROBE_RUN_ID" --repo "$GITHUB_REPO" -n probe-tools-linux-amd64 --dir "$PROBE_DIST_DIR" 2>/dev/null \
+            && [ -f "$PROBE_DIST_DIR/frame-probe" ]; then
+            install -m 0755 "$PROBE_DIST_DIR/frame-probe" /usr/local/bin/frame-probe
+            echo "  frame-probe installed from CI run $PROBE_RUN_ID"
+        else
+            rm -rf "$PROBE_DIST_DIR"
+            fail "gh run download failed for run $PROBE_RUN_ID -- could not fetch frame-probe (probe-tools-linux-amd64 artifact, #863)"
+        fi
+        rm -rf "$PROBE_DIST_DIR"
+    else
+        fail "gh CLI unavailable or GH_TOKEN unset -- cannot auto-fetch frame-probe (probe-tools-linux-amd64 CI artifact, #863). Install manually, or re-run with FRAME_PROBE_BINARY_URL=<url|path>."
+    fi
+
+    # #863: cam2's OWN camera-box must never contest /dev/fb0 -- see the cam2_painter_no_display_
+    # dropin_content() header comment above for the full story.
+    mkdir -p /etc/systemd/system/camera-box.service.d
+    cam2_painter_no_display_dropin_content > /etc/systemd/system/camera-box.service.d/cam2-no-display.conf
+    cam2_painter_service_unit_content > /etc/systemd/system/cam2-painter.service
+    systemctl daemon-reload
+    systemctl enable cam2-painter.service
+    echo "  cam2-painter.service installed + enabled (permanent dual-QR, qr-size 700, 60fps -- takes effect after reboot, #863)"
+    echo "  camera-box.service.d/cam2-no-display.conf installed -- camera-box will never grab /dev/fb0 on cam2 (after reboot)"
 fi
 
 # =============================================================================

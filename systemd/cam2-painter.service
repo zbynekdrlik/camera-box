@@ -1,0 +1,19 @@
+[Unit]
+Description=cam2 permanent dual-QR devel-mode painter (#863)
+Documentation=https://github.com/zbynekdrlik/camera-box
+After=camera-box.service
+Wants=camera-box.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/frame-probe --paint-only --dual-qr --qr-size 700 --paint-fps 60 --duration-secs 31536000
+Restart=always
+RestartSec=2
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cam2-painter
+
+[Install]
+WantedBy=multi-user.target

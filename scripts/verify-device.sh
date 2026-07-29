@@ -80,6 +80,10 @@
 #       (#762 -- rsyslog is redundant on this appliance, journald already captures everything;
 #       a live cam1 incident showed a full /var/log tmpfs put rsyslogd into a write-error
 #       feedback loop burning 42.8% CPU and starving the camera-box send path)
+#   (v) cam2 ONLY: the PERMANENT devel-mode dual-QR painter (cam2-painter.service) is installed,
+#       active, and genuinely painting (presenter-aware journal read, KMS-or-fbdev per #464) --
+#       AND camera-box's own display thread is permanently disabled on this box so it can never
+#       contest /dev/fb0 with the painter (#863)
 #
 # Exit: 0 iff every check passes. Non-zero if ANY check FAILs or is UNREADABLE (test-strictness --
 # an unreachable/unreadable check is a FAIL, never a silent pass).
@@ -527,6 +531,8 @@ Checks:
   (s) /var/log tmpfs bounded against runaway growth -- logrotate size cap + frequent rotation (#679)
   (t) fuser (psmisc) is installed (#743)
   (u) rsyslog PURGED (not just masked) + journald RuntimeMaxUse capped (#762)
+  (v) cam2 ONLY: permanent devel-mode dual-QR painter installed+active+painting, camera-box
+      permanently no-display so it never contests /dev/fb0 (#863)
 
 Env: KERNEL_PIN (optional exact running-kernel pin), NDI_VERSION_PIN (default 6.3.2),
      DANTESYNC_OFFSET_FRESHNESS_S (max age of a fresh [NTP] offset line, default 300),
@@ -895,6 +901,52 @@ fi
 # no longer applies: the HDMI cameraman preview is UNCONDITIONAL and fleet-wide, baked into the
 # binary's own DEFAULT_DISPLAY_SOURCE default -- there is no per-box config left to drift from or
 # lose. See src/main.rs::resolve_display_config (unit tested) for the current contract.
+
+# (v) cam2-only: the PERMANENT devel-mode dual-QR painter is installed, active, and genuinely
+# painting -- and camera-box on cam2 must never contest /dev/fb0 (#863) --------------------------
+# #863: cam2-painter.service was referenced everywhere (rig-mode.sh's #440 stop/start guards,
+# recording-e2e.sh's cleanup()) but was never actually installed by setup-device.sh -- this check
+# is the acceptance gate that catches that gap ever recurring on a re-provisioned/replaced box.
+if [ "$NAME_UPPER" = "CAM2" ]; then
+  rc=0
+  PAINTER_UNIT_FILES="$(ssh_box "systemctl list-unit-files cam2-painter.service 2>/dev/null")" || rc=$?
+  if [ "$rc" -ne 0 ] || [ -z "$PAINTER_UNIT_FILES" ]; then
+    fail "cam2-painter.service not installed on cam2 (#863 -- the permanent devel-mode QR painter; ssh rc=$rc)"
+  else
+    rc=0
+    PAINTER_ACTIVE="$(ssh_box "systemctl is-active cam2-painter.service 2>/dev/null")" || rc=$?
+    if ! active_state_is_active "$PAINTER_ACTIVE"; then
+      fail "cam2-painter.service not active (state='${PAINTER_ACTIVE:-<none>}', ssh rc=$rc)"
+    else
+      ok "cam2-painter.service active (#863 permanent devel-mode QR painter)"
+      rc=0
+      PAINTER_JOURNAL="$(ssh_box "journalctl -u cam2-painter.service -n 200 --no-pager 2>/dev/null")" || rc=$?
+      if [ "$rc" -ne 0 ]; then
+        fail "could not read cam2-painter.service journal to confirm it is genuinely painting (ssh rc=$rc)"
+      elif printf '%s' "$PAINTER_JOURNAL" | grep -q 'presenter: using DRM/KMS page-flip'; then
+        if printf '%s' "$PAINTER_JOURNAL" | grep -q 'vblank-locked'; then
+          ok "cam2-painter.service genuinely painting (KMS page-flip, vblank-locked)"
+        else
+          fail "cam2-painter.service selected KMS but never confirmed vblank-locked (see journalctl -u cam2-painter.service)"
+        fi
+      elif printf '%s' "$PAINTER_JOURNAL" | grep -qi 'falling back to fbdev'; then
+        ok "cam2-painter.service genuinely painting (fbdev fallback presenter)"
+      else
+        fail "cam2-painter.service active but no presenter-selection log line found -- cannot confirm it is genuinely painting (see journalctl -u cam2-painter.service)"
+      fi
+    fi
+  fi
+  # camera-box must NEVER contest /dev/fb0 on cam2 -- the permanent no-display drop-in must be
+  # baked in so a reboot can't silently regress this (see cam2_painter_no_display_dropin_content
+  # in setup-device.sh).
+  rc=0
+  NODISPLAY_ENV="$(ssh_box "systemctl show -p Environment --value camera-box 2>/dev/null")" || rc=$?
+  if [ "$rc" -eq 0 ] && printf '%s' "$NODISPLAY_ENV" | grep -q 'CAMERA_BOX_NO_DISPLAY=1'; then
+    ok "camera-box permanently no-display on cam2 (#863 -- cam2-painter.service owns /dev/fb0)"
+  else
+    fail "camera-box on cam2 is NOT permanently no-display (Environment='${NODISPLAY_ENV:-<none>}', ssh rc=$rc) -- it will contest /dev/fb0 with cam2-painter.service"
+  fi
+fi
 
 # (q) .bak cruft drift -- WARNING only, never a FAIL (#453) -------------------------------------
 # Reuses NDI_LS gathered in (g)/(o); a second ssh call lists the systemd drop-in dir. Inert

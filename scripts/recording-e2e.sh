@@ -96,6 +96,11 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # [8/8] E2E_EXECUTE_VERDICT=1 path — #701 proved ssh/scp works on this rig for these boxes).
 # shellcheck source=scripts/lib/win-ssh-exec.sh
 . "$HERE/lib/win-ssh-exec.sh"
+# #863: WARN-only (never `exit`) verification that the PERMANENT cam2-painter.service genuinely
+# came back active + painting after cleanup() restarts it below -- a fire-and-forget restart call
+# that used to be a silent no-op (the permanent painter unit was never installed, see #863).
+# shellcheck source=scripts/lib/cam2-painter-restore-verify.sh
+. "$HERE/lib/cam2-painter-restore-verify.sh"
 # #709: imag-nb GPU VRAM headroom preflight (pure query-cmd builder + parser + message
 # formatters) — a long-uptime OBS render pipeline on imag-nb can leak GPU VRAM until StartRecord's
 # NVENC encoder init fails with NV_ENC_ERR_OUT_OF_MEMORY; catch it BEFORE StartRecord, not via the
@@ -950,7 +955,8 @@ rm -f /tmp/camera-box-burn-* 2>/dev/null || true
 $(rig_test_dropin_clear_cmds)
 systemctl restart camera-box 2>/dev/null || true
 $(camera_box_verify_active_cmds "cam2/painter, $PAINTER_IP")
-systemctl start cam2-painter 2>/dev/null || true"
+systemctl start cam2-painter 2>/dev/null || true
+$(cam2_painter_restore_verify_cmds)"
   ) &
   CAMBOX_PARALLEL_PIDS+=("$!")
   CAMBOX_PARALLEL_LABELS+=("cam2/painter, $PAINTER_IP")
