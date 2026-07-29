@@ -36,7 +36,7 @@
 //!
 //! This does NOT relax any gate: a genuine backlog storm on a deep source is still caught, just at
 //! the depth that is genuinely anomalous FOR THAT SOURCE. And it is a no-op for every shallow
-//! source on the rig — see `shallow_latency_threshold_is_byte_identical_to_the_bare_constant`.
+//! source on the rig — see `sub_half_frame_latency_threshold_is_byte_identical_to_the_bare_constant_859`.
 //!
 //! Pure + crate-root (not under `src/probe/`) so it is Tier-0 verifiable locally — the
 //! `src/reannounce.rs` / `src/colour_scale.rs` pattern. `src/probe/genlock.rs`'s
@@ -51,6 +51,14 @@ pub const QDEPTH_RELOCK_MARGIN: u64 = 6;
 
 /// The steady-state FIFO depth implied by a source's configured genlock latency, in frames,
 /// rounded to nearest.
+///
+/// `fps_num`/`fps_den` MUST be the **source** frame rate, not the canvas rate. The quantity being
+/// bounded is `async_frames.num`, which counts frames as the SOURCE delivered them — a 60 fps
+/// source feeding a 30 fps canvas queues two entries per canvas interval. The two rates coincide
+/// for the 30-into-30 hop this ticket is about (`NDI 2ME PGM`), but diverge for every 60-into-30
+/// cambox input on strih, where using the canvas rate would under-estimate the implied depth by
+/// exactly the source multiple. The C caller has this available as
+/// `canvas_rate * genlock_effective_source_multiple(source, interval)`.
 ///
 /// Mirrors the rounding `genlock_source_drop_cap()` already uses for the drop cap
 /// (`(latency_ms * fps + 500) / 1000`), so the two latency-derived quantities in the FIFO agree.
@@ -69,10 +77,7 @@ pub fn steady_depth_frames(latency_ms: u32, fps_num: u32, fps_den: u32) -> u64 {
 /// The backlog-relock threshold for a source: a queue depth STRICTLY GREATER than this is a
 /// backlog storm. Callers keep the `depth > threshold` comparison shape they already had.
 pub fn backlog_relock_threshold(latency_ms: u32, fps_num: u32, fps_den: u32) -> u64 {
-    // RED: today's shipped behaviour — the bare constant, ignoring the source's own configured
-    // latency entirely. This is what `obs-source.c` does now and is the defect under test.
-    let _ = (latency_ms, fps_num, fps_den);
-    QDEPTH_RELOCK_MARGIN
+    steady_depth_frames(latency_ms, fps_num, fps_den).saturating_add(QDEPTH_RELOCK_MARGIN)
 }
 
 #[cfg(test)]
@@ -135,9 +140,21 @@ mod tests {
     /// configured buffer as a backlog.
     #[test]
     fn deeper_shallow_sources_move_with_their_own_configured_depth_859() {
-        assert_eq!(backlog_relock_threshold(21, 30, 1), 7, "21ms -> 1 frame + 6");
-        assert_eq!(backlog_relock_threshold(26, 30, 1), 7, "26ms -> 1 frame + 6");
-        assert_eq!(backlog_relock_threshold(55, 30, 1), 8, "55ms -> 2 frames + 6");
+        assert_eq!(
+            backlog_relock_threshold(21, 30, 1),
+            7,
+            "21ms -> 1 frame + 6"
+        );
+        assert_eq!(
+            backlog_relock_threshold(26, 30, 1),
+            7,
+            "26ms -> 1 frame + 6"
+        );
+        assert_eq!(
+            backlog_relock_threshold(55, 30, 1),
+            8,
+            "55ms -> 2 frames + 6"
+        );
     }
 
     #[test]
@@ -147,6 +164,33 @@ mod tests {
         assert_eq!(steady_depth_frames(55, 30, 1), 2); // 1.65 -> 2
         assert_eq!(steady_depth_frames(16, 30, 1), 0); // 0.48 -> 0
         assert_eq!(steady_depth_frames(17, 30, 1), 1); // 0.51 -> 1
+    }
+
+    /// The depth being bounded counts SOURCE frames, so a 60 fps cambox input into strih's 30 fps
+    /// canvas implies twice the depth the canvas rate would suggest. Passing the canvas rate here
+    /// would under-estimate by exactly the source multiple and leave those inputs closer to the
+    /// backlog branch than intended.
+    #[test]
+    fn implied_depth_follows_the_source_rate_not_the_canvas_rate_859() {
+        // strih 'NDI cam3': 26 ms configured, 60 fps source, 30 fps canvas.
+        assert_eq!(
+            steady_depth_frames(26, 60, 1),
+            2,
+            "26ms of a 60fps source = 1.56 -> 2 frames"
+        );
+        assert_eq!(
+            steady_depth_frames(26, 30, 1),
+            1,
+            "the canvas rate would say 1 — too low"
+        );
+        assert_eq!(backlog_relock_threshold(26, 60, 1), 8);
+
+        // The hop this ticket is about is 30-into-30, so the two rates coincide there.
+        assert_eq!(
+            steady_depth_frames(923, 30, 1),
+            steady_depth_frames(923, 30, 1),
+            "NDI 2ME PGM is a 30fps source on a 30fps canvas — no multiple to apply"
+        );
     }
 
     #[test]

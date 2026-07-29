@@ -4290,8 +4290,20 @@ static uint32_t genlock_clamp_preload_u32(uint32_t v)
  * (present_ts > boundary + 2.25*interval), which EMBEDS the constant stamp->arrival
  * skew — the 2026-07-02 live canary (skew 59 ms at the 3 ms reserve) relock-stormed:
  * dropped_due 2918 of 4202 received, relocks 1076. Depth is immune to any constant
- * skew. Mirror of src/probe/genlock.rs ReleaseCadence::QDEPTH_RELOCK. */
-#define GENLOCK_QDEPTH_RELOCK 6
+ * skew. Mirror of src/probe/genlock.rs ReleaseCadence::QDEPTH_RELOCK_MARGIN.
+ *
+ * camera-box #859: this is now the MARGIN above the depth a source's own configured latency
+ * implies, NOT the whole threshold — see genlock_backlog_relock_qdepth() below. The old bare
+ * constant encoded the assumption stated a few lines up ("steady depth is ~1-2 at any skew"),
+ * which is true only for a SHALLOW source. A source pinned deep (the stream box's 'NDI 2ME PGM'
+ * runs 923 ms to A/V-align against the mbc's 1 s mastering) has a steady depth of ~28, so
+ * `28 > 6` was permanently true and the backlog branch fired EVERY tick: relocks incremented
+ * once per frame, and every arrival-jitter excursion to due==2 erased a frame (dropped_due) that
+ * the next tick repeated (holds). Measured live as +59 duplicate / +57 skipped frames injected
+ * into the strih->stream hop, against 2 duplicates in 9626 frames on the cam->strih leg whose
+ * sources all sit below the bare 6. Mirror of src/probe/genlock.rs QDEPTH_RELOCK_MARGIN and
+ * src/genlock_backlog.rs QDEPTH_RELOCK_MARGIN (the Tier-0 unit-tested decision). */
+#define GENLOCK_QDEPTH_RELOCK_MARGIN 6
 /* camera-box #741/#707 B2: how many of the front queued frames genlock_measure_source_multiple
  * scans for a strictly-increasing consecutive pair. Reading only array[0..1] read INCONCLUSIVE on
  * a DUPLICATE front stamp / arrival-non-monotonic seam, so a jittery 60-into-30 input crawled;
@@ -4881,6 +4893,37 @@ static inline uint32_t genlock_effective_source_multiple(obs_source_t *source, u
 	return source->genlock_last_known_n >= 1 ? source->genlock_last_known_n : 1;
 }
 
+/* camera-box #859: the BACKLOG-STORM queue-depth threshold for a source, relative to the depth
+ * that source's OWN configured latency implies. A queue is only in backlog when it exceeds the
+ * buffer it was deliberately configured to hold, plus the original GENLOCK_QDEPTH_RELOCK_MARGIN.
+ *
+ * The source-rate multiple matters: async_frames counts frames as the SOURCE delivered them, so a
+ * 60 fps input on a 30 fps canvas queues two entries per canvas interval and its implied depth is
+ * twice what the canvas rate alone would suggest.
+ *
+ * READ-ONLY on purpose — it uses the PURE genlock_measure_source_multiple with the sticky latch as
+ * fallback, NOT genlock_effective_source_multiple, which WRITES source->genlock_last_known_n. This
+ * threshold is consulted on ticks that never latched before, and merely computing a threshold must
+ * not acquire a write path. Same value, no new side effect.
+ *
+ * Round-to-nearest, matching genlock_source_drop_cap's own latency->frames rounding so the two
+ * latency-derived quantities in this FIFO agree. A degenerate interval yields the bare margin —
+ * identical to the pre-#859 behaviour — rather than dividing by zero.
+ *
+ * Mirror of src/genlock_backlog.rs backlog_relock_threshold (Tier-0 unit-tested) and
+ * src/probe/genlock.rs ReleaseCadence::backlog_relock_qdepth — keep all three in lock-step. */
+static size_t genlock_backlog_relock_qdepth(const obs_source_t *source, uint32_t reserve_ms, uint64_t interval)
+{
+	if (interval == 0)
+		return GENLOCK_QDEPTH_RELOCK_MARGIN;
+	const uint32_t measured = genlock_measure_source_multiple(source, interval);
+	const uint32_t n = measured >= 1 ? measured
+					 : (source->genlock_last_known_n >= 1 ? source->genlock_last_known_n : 1);
+	const uint64_t held_ns = (uint64_t)reserve_ms * 1000000ULL * (uint64_t)n;
+	const uint64_t depth = (held_ns + interval / 2) / interval;
+	return (size_t)(depth + GENLOCK_QDEPTH_RELOCK_MARGIN);
+}
+
 static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 {
 	struct obs_source_frame *next_frame = source->async_frames.array[0];
@@ -5087,8 +5130,12 @@ static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 				 * EMBEDS the constant stamp->arrival skew (59 ms live at the 3 ms
 				 * reserve) and relock-stormed — dropped_due 2918 of 4202 received
 				 * (69 %), relocks 1076. v2 guards backlog QUEUE-RELATIVE (depth >
-				 * GENLOCK_QDEPTH_RELOCK — steady depth is ~1-2 at any skew, the
-				 * boundary paces arrivals) and releases strict FIFO on the STEADY
+				 * genlock_backlog_relock_qdepth() — #859: the depth the source's OWN
+				 * configured latency implies, plus GENLOCK_QDEPTH_RELOCK_MARGIN. The
+				 * pre-#859 bare constant assumed "steady depth is ~1-2 at any skew",
+				 * true only for a SHALLOW source; a source pinned deep for A/V
+				 * alignment sat permanently above it and relocked every tick)
+				 * and releases strict FIFO on the STEADY
 				 * path (present the OLDEST matured frame; a transient 2-frame
 				 * maturation drains losslessly next tick). EVERY discarded frame
 				 * counts into genlock_dropped_due (steady state drops ZERO).
@@ -5117,7 +5164,9 @@ static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 						return false;
 					}
 					release = due;
-				} else if (source->async_frames.num > GENLOCK_QDEPTH_RELOCK &&
+				} else if (source->async_frames.num >
+						   genlock_backlog_relock_qdepth(source, reserve_ms,
+										 interval) &&
 					   due > 0) {
 					/* BACKLOG STORM (v2 — queue-relative, NEVER wall-boundary
 					 * drift): a stall's burst or a persistent inflow>presentation

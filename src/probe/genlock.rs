@@ -1519,10 +1519,10 @@ impl ReleaseCadence {
         // immune to the constant stamp→arrival skew. v1 guarded on `deadline − boundary`,
         // which EMBEDS that skew — the live canary (skew 59 ms, reserve 3 ms) relock-stormed:
         // dropped_due 2918/4202, relocks 1076. Steady depth is ~1–2 at ANY skew (the boundary
-        // paces arrivals), so depth > QDEPTH_RELOCK is unambiguous backlog; re-lock to the
+        // paces arrivals), so depth > backlog_relock_qdepth() is unambiguous backlog (#859: latency-relative); re-lock to the
         // newest due frame, counting every jumped frame (the catch-up keeps the IMAG latency
         // contract and the drop is VISIBLE).
-        if queue.len() > Self::QDEPTH_RELOCK {
+        if queue.len() > self.backlog_relock_qdepth(queue, reserve_ms, interval_ns) {
             let due = queue.iter().take_while(|&&ts| ts <= deadline).count();
             if due > 0 {
                 let mut dropped = Vec::with_capacity(due - 1);
@@ -1634,11 +1634,56 @@ impl ReleaseCadence {
         hold(deadline >= boundary)
     }
 
-    /// Queue depth above which the cadence re-locks to the live edge (backlog storm).
-    /// Steady-state depth is ~1–2 at any arrival skew (the boundary paces arrivals), so 6
-    /// is unambiguous backlog while tolerating burst jitter; a stall's burst catches up
-    /// within one tick with every jumped frame counted.
-    const QDEPTH_RELOCK: usize = 6;
+    /// #859 — the MARGIN above the depth a source's own configured latency implies, before its
+    /// queue counts as a backlog storm. This was the WHOLE threshold until #859, which encoded
+    /// the assumption "steady depth is ~1–2 at any arrival skew (the boundary paces arrivals)" —
+    /// true only for a SHALLOW source. A source pinned deep (923 ms on the stream box's
+    /// `NDI 2ME PGM`, to A/V-align against the mbc's 1 s mastering) has a steady depth of ~28, so
+    /// the bare 6 was permanently exceeded and the cadence relocked EVERY tick, shedding a frame
+    /// on every arrival-jitter excursion to `due == 2` and repeating one on the next.
+    ///
+    /// Mirror of the C `GENLOCK_QDEPTH_RELOCK_MARGIN` and of
+    /// [`crate::genlock_backlog::QDEPTH_RELOCK_MARGIN`], which carries the Tier-0 unit tests.
+    const QDEPTH_RELOCK_MARGIN: usize = 6;
+
+    /// The backlog-storm queue-depth threshold for THIS source's configured latency: a depth
+    /// strictly greater than this is a backlog. Delegates the arithmetic to the Tier-0-tested
+    /// [`crate::genlock_backlog::backlog_relock_threshold`].
+    ///
+    /// The source-rate multiple matters: `queue` holds frames as the SOURCE delivered them, so a
+    /// 60-into-30 input queues two entries per canvas interval and implies twice the depth the
+    /// canvas rate alone would give. Mirror of the C `genlock_backlog_relock_qdepth`.
+    fn backlog_relock_qdepth(
+        &self,
+        queue: &std::collections::VecDeque<u64>,
+        reserve_ms: u32,
+        interval_ns: u64,
+    ) -> usize {
+        if interval_ns == 0 {
+            return Self::QDEPTH_RELOCK_MARGIN;
+        }
+        // READ-ONLY on purpose: use the PURE measurement with the sticky latch as fallback rather
+        // than `effective_source_multiple`, which takes `&mut self` and would latch `last_known_n`
+        // as a side effect of merely computing a threshold — on ticks that never touched it
+        // before. Same value, no new write path in a getter.
+        //
+        // The source rate as an EXACT rational, never a truncated integer fps: a 29.97 canvas
+        // would floor to 29 and under-state the implied depth. source_fps = 1e9 * n / interval_ns.
+        let n = Self::measure_source_multiple(queue, interval_ns)
+            .unwrap_or(self.last_known_n)
+            .max(1);
+        let (Ok(src_num), Ok(src_den)) = (
+            u32::try_from(1_000_000_000u64.saturating_mul(n as u64)),
+            u32::try_from(interval_ns),
+        ) else {
+            // Rates this extreme are not representable in the shared helper's u32 form; fall back
+            // to the pre-#859 bare margin rather than inventing a threshold.
+            return Self::QDEPTH_RELOCK_MARGIN;
+        };
+        let threshold =
+            crate::genlock_backlog::backlog_relock_threshold(reserve_ms, src_num, src_den);
+        usize::try_from(threshold).unwrap_or(usize::MAX)
+    }
 
     /// #741/#707 B2 — how many front queued frames [`Self::measure_source_multiple`] scans for a
     /// strictly-increasing consecutive pair. Reading only the front pair read INCONCLUSIVE on a
@@ -1972,7 +2017,7 @@ mod tests {
     /// real time), NOT the pre-#726 crawl: STEADY presented the OLDEST matured frame and advanced
     /// the boundary by one CANVAS interval, so content advanced only +1 SOURCE frame per tick
     /// while real time advanced 2 → content fell progressively behind (playing ~half speed), the
-    /// per-source queue grew ~1 frame/tick until `GENLOCK_QDEPTH_RELOCK` fired the backlog storm,
+    /// per-source queue grew ~1 frame/tick until `genlock_backlog_relock_qdepth()` fired the backlog storm,
     /// which JUMPED ~+7 frames (~5×/s). The crawl+jump nets to the right average (2.0/frame → the
     /// loss gates stay clean, which is why every earlier gate was blind to it) but visibly halves
     /// perceived motion. The fix: when the source is at an integer multiple N>=2 of the canvas
@@ -2215,11 +2260,11 @@ mod tests {
         assert_eq!(cadence.effective_source_multiple(&clean, CANVAS), 2);
         assert_eq!(cadence.last_known_n, 2, "setup: N==2 must be latched");
 
-        // Lock the cadence, then feed a genuine BACKLOG STORM (> QDEPTH_RELOCK frames, all aged
+        // Lock the cadence, then feed a genuine BACKLOG STORM (> the backlog threshold in frames, all aged
         // past the reserve so `due > 0`) — the relock branch.
         cadence.locked_next_boundary_ns = Some(2_000_000_000);
         let base = 3_000_000_000u64;
-        let mut queue: VecDeque<u64> = (0..(ReleaseCadence::QDEPTH_RELOCK as u64 + 3))
+        let mut queue: VecDeque<u64> = (0..(ReleaseCadence::QDEPTH_RELOCK_MARGIN as u64 + 3))
             .map(|i| base + i * SRC)
             .collect();
         let wall_now = base + 100 * SRC; // every queued frame is due
