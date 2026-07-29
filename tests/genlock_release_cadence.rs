@@ -408,7 +408,8 @@ fn slew_limited_settle_back_drain_present_and_wired_in_859() {
 /// drain's own `if` block, the FIRST `da_erase(source->async_frames, N)` call must erase index
 /// `0`, not `1` — confirms the drop-older/present-newest fix regardless of exact formatting.
 fn raw_drain_erases_index_zero(raw: &str) -> bool {
-    let Some(drain_pos) = raw.find("genlock_should_drain_one(source, reserve_ms, interval) &&") else {
+    let Some(drain_pos) = raw.find("genlock_should_drain_one(source, reserve_ms, interval) &&")
+    else {
         return false;
     };
     let window_end = (drain_pos + 600).min(raw.len());
