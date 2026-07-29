@@ -203,6 +203,36 @@ own log file, NOT in `/tmp/imag-obs-start.log`). Full post-mortem: #797 (retract
 (the const can't vary at runtime post-#257) + a live recording + `genlock-jitter-report` on the
 captured log — a build-matrix change, supervisor/user-driven runbook in the doc's §7.
 
+## #859 — a DEEP per-source latency changes which FIFO branch runs (backlog threshold is latency-relative)
+
+The backlog-storm branch in `obs-source.c` (`async_frames.num > threshold && due > 0` → re-lock to
+the newest due frame, erasing every jumped frame into `dropped_due`) used a bare
+`GENLOCK_QDEPTH_RELOCK 6`, calibrated on the assumption stated in its own comment: *"steady depth is
+~1-2 at any skew, the boundary paces arrivals"*.
+
+**That assumption only holds for a SHALLOW source.** The held latency is `wall_now - reserve_ms`, so
+a source pinned deep — the stream box's `NDI 2ME PGM` runs **923 ms** so the A/V controller can
+align against the mbc's 1 s mastering — has a steady depth of ~28 and exceeded the bare 6
+permanently. Symptoms, all on the deep source only:
+
+- `relocks` increments **once per frame** (this is what #796 reported as "useless as a health
+  signal" — it was actually the branch genuinely firing every tick)
+- `holds` and `dropped_due` advance **in lockstep** on every arrival-jitter excursion to `due == 2`:
+  one frame erased, the next tick repeats the last — a paired duplicate/skip
+- measured as **+59 duplicates / +57 skips** injected into the strih→stream hop, against **2
+  duplicates in 9626 frames** on cam→strih, whose sources all sit below 6 and report `holds=0`
+
+Since #859 the threshold is `genlock_backlog_relock_qdepth()` = the depth that source's own
+configured latency implies (using the SOURCE rate — a 60-into-30 input queues two entries per canvas
+interval) **plus the unchanged margin 6**. Sub-half-frame sources (the 3 ms global default, the 3 ms
+imag contract) are byte-identical to before. The decision is Tier-0 unit-tested in
+`src/genlock_backlog.rs`; the C and `src/probe/genlock.rs` both derive from it and
+`tests/genlock_release_cadence.rs` asserts the C actually CALLS it and that the margin stays 6.
+
+**Reading the audit for this class of bug:** compare `depth` against the latency's implied frames
+(`latency_ms / 33.3` at 30 fps), not against a fixed number — and treat `relocks` climbing at frame
+rate on a *healthy* source as a threshold bug, not a transport problem.
+
 ## Deployed State (strih + stream, since 2026-06-13)
 
 Both production broadcast OBS boxes upgraded in-place to the camera-box genlock build.

@@ -40,6 +40,42 @@ Clear `%APPDATA%\obs-studio\.sentinel\*` before relaunch — stale sentinel file
 `DisableSafeModePrompt=true` but clearing sentinels is the reliable fix. Avoids safe-mode
 which disables DistroAV + genlock.
 
+### GOTCHA — an OBS launched over plain SSH DIES when the ssh session closes (#859, cost a live outage)
+
+**Launching OBS from an ssh-spawned PowerShell "works" and then silently takes the box down
+minutes later.** Windows OpenSSH runs each session's processes in a job object and tears the whole
+tree down at disconnect, so `Start-Process obs64` over ssh gives a fully healthy OBS — it renders,
+NDI delivers, the genlock FIFOs lock, the launch wrapper's own log verification PASSES — and then
+obs64 is killed the moment the ssh command returns. **Live incident 2026-07-29:** the DLL hot-swap
+for #859 was driven over ssh (the `#701 plain scp/ssh DOES work` note above is about FILE COPY, not
+about launching a GUI app); both strih AND stream were left with **no OBS at all**, discovered only
+when a follow-up check showed `obs64=0` on both. The wrapper's `#257 OK: obs64 PID … launched` line
+is NOT evidence of persistence — it is evidence of a launch that is about to be reaped.
+
+- **Preferred: the win-* MCP `Shell`.** It holds a persistent session, so the launch survives. This
+  is what "run the program via the win-* MCP Shell" in the wrapper's own header means — it is not a
+  stylistic preference.
+- **When the box has NO MCP** (e.g. `win-strih` configured in `.mcp.json` but not connected this
+  session): create the process so it BREAKS AWAY from the ssh job object —
+  ```powershell
+  Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
+    CommandLine      = "C:\Program Files\obs-studio\bin\64bit\obs64.exe"
+    CurrentDirectory = "C:\Program Files\obs-studio\bin\64bit"
+  }
+  ```
+  Verified to survive the disconnect (`rc=0`, and the pid is still there from a FRESH ssh session).
+  Note it takes `CurrentDirectory`, so the cwd requirement above is still satisfied.
+- **Dead ends, do not retry:** `schtasks /run` on an `/IT` task returns `ERROR: Element not found`,
+  and the same task with a near-future time trigger never fires (`Last Result: 267011` = never ran)
+  — `/IT` will not start from a non-interactive context even though `Get-Process explorer` shows a
+  live desktop session. `Start-Process explorer.exe <lnk>` did not launch OBS at all.
+- **ALWAYS verify from a SECOND, fresh ssh connection** after any launch — a check inside the same
+  session that launched it cannot see the teardown. Health bar is the existing one: exactly ONE
+  obs64, >100 MB (900 MB–1.4 GB when warm), port 4455 listening, a log whose mtime is advancing.
+- **On strih, expect AHK to add a SECOND obs64** a few seconds later (it keys on the obs64 WINDOW —
+  see "AHK on strih"). After a manual relaunch, count instances and kill the small (~70 MB) one that
+  owns neither :4455 nor the newest log; keep the warm one.
+
 ## Healthy OBS Proof
 
 - Exactly ONE obs64 process
