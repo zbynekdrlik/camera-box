@@ -338,3 +338,80 @@ fn sticky_n_latch_field_declared_on_obs_source() {
          ticks again (win5/win6 residual). Mirror: src/probe/genlock.rs ReleaseCadence::last_known_n."
     );
 }
+
+#[test]
+fn slew_limited_settle_back_drain_present_and_wired_in_859() {
+    // #859 follow-up: the latency-relative backlog threshold correctly stopped the
+    // backlog-relock branch firing every tick in steady state, but that branch was ALSO the
+    // FIFO's only mechanism for shedding excess queue depth after a genlock latency SETPOINT
+    // INCREASE — with it gated off, the plain N==1 steady release (release=1/tick) held depth
+    // CONSTANT forever (measured live: a +34 ms setpoint step produced +134 ms of actual delay,
+    // stable across 6 samples). This bounded, additional drain is what converges it back down.
+    // A `git subtree pull` or edit reverting any of these pieces would silently reintroduce the
+    // parked-overshoot regression, so pin the whole three-file mirror here.
+    let internal = squish(&vendor_file(OBS_INTERNAL));
+    assert!(
+        internal.contains("uint64_t genlock_ticks_since_drain;"),
+        "{OBS_INTERNAL}: #859 follow-up — the drain rate-limit counter \
+         `uint64_t genlock_ticks_since_drain;` is missing from obs_source; the slew-limited \
+         drain has no way to bound its own rate. Mirror: src/probe/genlock.rs \
+         ReleaseCadence::ticks_since_last_drain."
+    );
+
+    let src = squish(&vendor_file(OBS_SOURCE));
+    assert!(
+        src.contains("#define GENLOCK_DRAIN_HYSTERESIS_FRAMES 2"),
+        "{OBS_SOURCE}: #859 follow-up — the drain hysteresis constant \
+         (GENLOCK_DRAIN_HYSTERESIS_FRAMES, must stay 2) is missing or changed; without it \
+         ordinary arrival jitter around the target would trigger spurious drains. Mirror: \
+         src/genlock_backlog.rs DRAIN_HYSTERESIS_FRAMES (Tier-0 unit-tested)."
+    );
+    assert!(
+        src.contains("#define GENLOCK_DRAIN_MIN_TICK_INTERVAL 30"),
+        "{OBS_SOURCE}: #859 follow-up — the drain rate-limit constant \
+         (GENLOCK_DRAIN_MIN_TICK_INTERVAL, must stay 30) is missing or changed; without it the \
+         drain could reproduce the every-tick backlog-relock burst it exists to avoid. Mirror: \
+         src/genlock_backlog.rs DRAIN_MIN_TICK_INTERVAL."
+    );
+    assert!(
+        src.contains("static bool genlock_should_drain_one("),
+        "{OBS_SOURCE}: #859 follow-up — the slew-limited drain decision helper \
+         (genlock_should_drain_one) is gone; the FIFO would park at a setpoint-change overshoot \
+         indefinitely again. Mirror: src/genlock_backlog.rs should_drain_one (Tier-0 tested) / \
+         src/probe/genlock.rs ReleaseCadence::should_drain_one."
+    );
+    // Wired IN, not merely defined — the same "assert the call site, not just the helper"
+    // discipline the #859 backlog-threshold test above already applies.
+    assert!(
+        src.contains("genlock_should_drain_one(source, reserve_ms, interval)"),
+        "{OBS_SOURCE}: #859 follow-up — genlock_should_drain_one is defined but no longer \
+         CALLED from the STEADY N==1 release path; the drain would be dead code and the queue \
+         would park at a setpoint-change overshoot indefinitely again."
+    );
+    // The drain must drop the CURRENT oldest (array[0]) and let the array shift — NOT drop
+    // array[1] while leaving array[0] untouched. The latter desyncs the re-anchored boundary
+    // from the real evenly-spaced frame timeline (confirmed by simulation: the very next tick
+    // reads as a HOLD and a GAP RESYNC regains exactly what the drain shed — a self-cancelling
+    // no-op). A subtree-pull or a "simplify this" edit reverting to array[1] would silently
+    // regress the fix back to a no-op while still LOOKING like it works (still compiles, still
+    // counts genlock_dropped_due). Checked on the RAW (non-squished) source — squish() would
+    // erase the tab/newline structure this needs.
+    assert!(
+        raw_drain_erases_index_zero(&vendor_file(OBS_SOURCE)),
+        "{OBS_SOURCE}: #859 follow-up — the drain no longer erases array[0] (the current \
+         oldest) before re-reading next_frame = array[0]; dropping array[1] instead is a \
+         self-cancelling no-op (see the comment above genlock_should_drain_one's call site)."
+    );
+}
+
+/// Structural check (not a literal-whitespace match) for the previous assertion: within the
+/// drain's own `if` block, the FIRST `da_erase(source->async_frames, N)` call must erase index
+/// `0`, not `1` — confirms the drop-older/present-newest fix regardless of exact formatting.
+fn raw_drain_erases_index_zero(raw: &str) -> bool {
+    let Some(drain_pos) = raw.find("genlock_should_drain_one(source, reserve_ms, interval) &&") else {
+        return false;
+    };
+    let window_end = (drain_pos + 600).min(raw.len());
+    let window = &raw[drain_pos..window_end];
+    window.contains("da_erase(source->async_frames, 0);") && !window.contains("array[1]")
+}

@@ -1454,6 +1454,11 @@ pub struct ReleaseCadence {
     /// so a stale N can never outlive the rate it described. Mirror of the C field
     /// `obs_source_t::genlock_last_known_n` (obs-internal.h).
     last_known_n: u32,
+    /// #859 follow-up: render ticks since the last SLEW-LIMITED SETTLE-BACK DRAIN fired (see
+    /// [`Self::should_drain_one`]). Reset to 0 exactly when a drain fires; incremented every
+    /// other plain-N==1-steady tick. Mirror of the C field
+    /// `obs_source_t::genlock_ticks_since_drain` (obs-internal.h).
+    ticks_since_last_drain: u64,
 }
 
 impl ReleaseCadence {
@@ -1496,6 +1501,9 @@ impl ReleaseCadence {
             // boundary) re-confirms the source multiple from scratch — clear the latch so a stale
             // N from a previous lock can't outlive it.
             self.last_known_n = 0;
+            // #859 follow-up: a fresh lock starts the settle clock over — nothing has
+            // overshot yet immediately after acquiring.
+            self.ticks_since_last_drain = 0;
             let due = queue.iter().take_while(|&&ts| ts <= deadline).count();
             if due == 0 {
                 return hold(false);
@@ -1598,11 +1606,38 @@ impl ReleaseCadence {
             }
             // N==1: present the OLDEST matured frame — exactly one in steady state; a transient
             // 2-frame maturation drains losslessly next tick (byte-identical to pre-#726).
+            //
+            // #859 follow-up: this is the ONE path the ticket's evidence found holds queue
+            // depth CONSTANT forever after a setpoint-change overshoot (release=1/tick against
+            // an inflow of exactly one). Check the slew-limited drain BEFORE popping anything,
+            // so the depth it observes matches what the C's genlock_should_drain_one reads
+            // (queue depth before this tick's release) — mirrors genlock_backlog_relock_qdepth's
+            // own READ-ONLY convention.
+            //
+            // On a drain tick, drop the CURRENT oldest (what would otherwise be presented) and
+            // present the NEXT one instead, re-anchoring the boundary to IT — the same
+            // drop-older/present-newest idiom the ACQUIRE/relock/N>=2 paths already use. Simply
+            // keeping the same presented frame and dropping the one behind it does NOT converge:
+            // it desyncs the re-anchored boundary from the real (evenly-spaced) frame timeline,
+            // so the VERY NEXT tick reads as a HOLD (nothing yet matured) and the queue regains
+            // via a GAP RESYNC exactly what the drain just shed — a self-cancelling no-op,
+            // confirmed by simulation before this was caught.
+            let drain = self.should_drain_one(queue, reserve_ms, interval_ns);
+            let mut dropped = Vec::new();
+            if drain && queue.len() > 1 {
+                let stale = queue
+                    .pop_front()
+                    .expect("drain: queue.len() > 1 checked above");
+                dropped.push(stale);
+                self.ticks_since_last_drain = 0;
+            } else {
+                self.ticks_since_last_drain = self.ticks_since_last_drain.saturating_add(1);
+            }
             let presented = queue.pop_front().expect("matured frame");
             self.locked_next_boundary_ns = Some(presented + interval_ns);
             return CadenceOutcome {
                 presented: Some(presented),
-                dropped: Vec::new(),
+                dropped,
                 late_hold: false,
                 relocked: false,
             };
@@ -1683,6 +1718,48 @@ impl ReleaseCadence {
         let threshold =
             crate::genlock_backlog::backlog_relock_threshold(reserve_ms, src_num, src_den);
         usize::try_from(threshold).unwrap_or(usize::MAX)
+    }
+
+    /// #859 follow-up — SLEW-LIMITED SETTLE-BACK DRAIN decision: should THIS tick shed exactly
+    /// ONE EXTRA frame to settle the queue back toward the depth its own configured latency
+    /// implies, after a setpoint change? Delegates the Tier-0-tested decision to
+    /// [`crate::genlock_backlog::should_drain_one`]; only the source-rate-adjusted fps
+    /// conversion (identical to [`Self::backlog_relock_qdepth`]'s own conversion) lives here.
+    ///
+    /// READ-ONLY like `backlog_relock_qdepth` (same rationale — a decision getter must not
+    /// acquire a write path): uses the pure measurement with the sticky latch as fallback, never
+    /// `effective_source_multiple`. `queue.len()` is read BEFORE the caller pops the presented
+    /// frame, matching the C `genlock_should_drain_one`, which reads `async_frames.num` before
+    /// the caller's own removal of the presented frame.
+    ///
+    /// Mirror of the C `genlock_should_drain_one`.
+    fn should_drain_one(
+        &self,
+        queue: &std::collections::VecDeque<u64>,
+        reserve_ms: u32,
+        interval_ns: u64,
+    ) -> bool {
+        if interval_ns == 0 {
+            return false;
+        }
+        let n = Self::measure_source_multiple(queue, interval_ns)
+            .unwrap_or(self.last_known_n)
+            .max(1);
+        let (Ok(src_num), Ok(src_den)) = (
+            u32::try_from(1_000_000_000u64.saturating_mul(n as u64)),
+            u32::try_from(interval_ns),
+        ) else {
+            // Rates this extreme are not representable in the shared helper's u32 form; never
+            // drain on an unrepresentable rate rather than inventing a decision.
+            return false;
+        };
+        crate::genlock_backlog::should_drain_one(
+            queue.len() as u64,
+            reserve_ms,
+            src_num,
+            src_den,
+            self.ticks_since_last_drain,
+        )
     }
 
     /// #741/#707 B2 — how many front queued frames [`Self::measure_source_multiple`] scans for a
