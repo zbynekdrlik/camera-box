@@ -73,8 +73,28 @@ def enforce_jitter_floor_ms(new_ms) -> int:
     """#707: clamp `new_ms` (the FINAL genlock_latency_ms_src value about to be written) up to
     at least GENLOCK_JITTER_FLOOR_MS -- the SAME floor phase_sync_calibrate.py's offset kernel
     already respects for the per-camera strih sources. See GENLOCK_JITTER_FLOOR_MS's own doc.
+
+    #707 follow-up -- this clamp MUST NEVER be silent. The value this controller computes is an
+    A/V ALIGNMENT hold (how far video is delayed onto the later mastered audio), which is a
+    DIFFERENT quantity from the per-camera FIFO jitter reserve that merely happens to share the
+    same OBS property. At the rig's normal operating point the two never collide (the measured
+    hold on stream's 'NDI 2ME PGM' is ~973ms, far above this floor, relocks=0), so this clamp is
+    inert in practice. But if the alignment ever legitimately computed BELOW the floor (audio
+    early rather than late), clamping it up would push audio out of sync by up to the floor --
+    exactly the kind of silent distortion this rig's gates exist to prevent. So when the clamp
+    actually bites, say so LOUDLY on stderr: an operator reading the run output must be able to
+    see that the applied hold is NOT the alignment that was computed.
     """
-    return max(int(new_ms), GENLOCK_JITTER_FLOOR_MS)
+    computed = int(new_ms)
+    if computed < GENLOCK_JITTER_FLOOR_MS:
+        print(
+            f"WARNING: av-sync: computed A/V hold {computed}ms is BELOW the genlock jitter floor "
+            f"{GENLOCK_JITTER_FLOOR_MS}ms and was clamped UP to it (#707). The applied hold is no "
+            f"longer the computed alignment -- audio may be out of sync by up to "
+            f"{GENLOCK_JITTER_FLOOR_MS - computed}ms. Investigate before trusting this run's A/V.",
+            file=sys.stderr,
+        )
+    return max(computed, GENLOCK_JITTER_FLOOR_MS)
 
 # Canonical Windows-side destination this script's payload MUST end up at for the #390
 # drift-guard `av_sync_calibrated_ms` best-effort cross-check to read it (see
