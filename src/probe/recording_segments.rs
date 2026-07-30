@@ -1503,4 +1503,41 @@ mod tests {
              reflecting low decode confidence: {seg:?}"
         );
     }
+
+    #[test]
+    fn diffuse_gap_with_no_outlier_delta_is_still_located_end_to_end_883() {
+        // #883 -- CAM1 window 9 of run 1412981627: gaps=2 with zero located events from the base
+        // walk (delta histogram {1:11, 2:840, 3:9, 8:1}, max delta 8, under the outlier ceiling
+        // -- residual_events reported [] fleet-wide for this run). This mirrors that shape
+        // end-to-end through `segment_continuity` (a lone delta=6 catch-up amid clean step=2
+        // sampling, undecodable=0, copies=0) -- a counted gap must never be left unlocatable.
+        let schedule = vec![win("cam1", 0, 1_000_000)];
+        let present = [1000u32, 1002, 1004, 1010, 1012, 1014];
+        let frames: Vec<SegmentFrame> = present
+            .iter()
+            .enumerate()
+            .map(|(i, &t)| SegmentFrame {
+                frame_index: i as u64,
+                gen_ts_ns: 100_000 + (i as i64) * 100_000,
+                tick: Some(t),
+            })
+            .collect();
+        let v = segment_continuity(&frames, &schedule, 0, 2);
+        let seg = &v.segments[0];
+        assert_eq!(seg.copies, 0, "{seg:?}");
+        assert_eq!(seg.gaps, 2, "{seg:?}");
+        assert_eq!(
+            seg.residual_events.len(),
+            1,
+            "issue 883: a counted gap must never be left with zero located events: {seg:?}"
+        );
+        assert_eq!(
+            seg.residual_events[0].kind,
+            crate::residual_events::ResidualEventKind::Gap
+        );
+        assert_eq!(seg.residual_events[0].cambox, "cam1");
+        assert_eq!(seg.residual_events[0].missing_slots, Some(2));
+        // The run-level flattened list must carry it too (#707 wiring, unaffected by #883).
+        assert_eq!(v.residual_events.len(), 1, "{:?}", v.residual_events);
+    }
 }

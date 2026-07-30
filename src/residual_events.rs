@@ -141,6 +141,35 @@ fn recorded_delta_before(present: &[&TickSample], i: usize, prev_tick: u32) -> O
     Some(i64::from(prev_tick) - i64::from(before_prev))
 }
 
+/// #883 — when the whole-window net-span `gaps` (computed separately by
+/// [`crate::painted_tick_gaps::painted_tick_gaps`], order-independent) is non-zero but the
+/// per-transition walk in [`residual_events`] found NOTHING to blame it on — every individual
+/// recorded-order delta sat at or under [`GAP_OUTLIER_ABS_DELTA`] and no backward jump occurred —
+/// the counted gap is otherwise completely UNLOCATABLE. Live evidence: CAM1 window 9, run
+/// 1412981627 (issue 883, 2026-07-30): `gaps=2, residual_events=0`, delta histogram `{1:11,
+/// 2:840, 3:9, 8:1}` — the largest individual delta (8) sits comfortably under the outlier
+/// ceiling (10), so nothing in [`residual_events`] flags it, yet the whole-window net-span
+/// accounting is honestly short by 2 slots (a diffuse residual from many near-nominal
+/// transitions, not one big anomaly).
+///
+/// STUB (RED, #883): always returns `events` unchanged. See the GREEN commit for the real
+/// implementation.
+///
+/// Never touches a window that already has a located Gap event (a genuine outlier or backward
+/// jump stays the primary, more concrete lead) and never fires when `gaps == 0` — so it can NEVER
+/// touch the #852 scenario (`gaps == 0`, events non-empty), which stays intentionally locked as a
+/// separate, valid divergence (see
+/// `residual_gap_events_can_be_nonzero_while_authoritative_gaps_stays_zero_852` in
+/// `probe::recording_segments`).
+pub fn locate_best_candidate_for_unattributed_gap(
+    _frames: &[TickSample],
+    _window_start_ns: i64,
+    _gaps: u32,
+    events: Vec<ResidualEvent>,
+) -> Vec<ResidualEvent> {
+    events
+}
+
 /// Detect residual copy/gap events in `frames` (RECORDED order — do NOT sort first, unlike
 /// `painted_tick_gaps`'s net-loss accounting; event LOCATION is inherently order-dependent).
 /// `window_start_ns` is the enclosing schedule window's own start (for `window_offset_ns`); pass
@@ -474,5 +503,107 @@ mod tests {
             events[0].reason, None,
             "every event starts OPEN, undocumented"
         );
+    }
+
+    // ---- #883 -- locate a best candidate when the aggregate says something's missing but the
+    // per-transition walk found nothing (a diffuse residual, not one big outlier) --------------
+
+    #[test]
+    fn zero_gaps_never_adds_a_fallback_event() {
+        let frames = vec![s(0, 100, Some(1000)), s(1, 200, Some(1002))];
+        let events = residual_events(&frames, 0, 2);
+        assert!(events.is_empty());
+        let augmented = locate_best_candidate_for_unattributed_gap(&frames, 0, 0, events);
+        assert!(
+            augmented.is_empty(),
+            "gaps==0 must never add a fallback event"
+        );
+    }
+
+    #[test]
+    fn an_existing_gap_event_is_never_duplicated_by_the_fallback() {
+        // A genuine large outlier is already located by the walk above; the fallback must defer
+        // to it, never adding a second, vaguer event on top.
+        let frames = vec![
+            s(0, 100, Some(1000)),
+            s(1, 200, Some(1001)),
+            s(2, 300, Some(1051)), // delta = 50, already flagged by residual_events()
+            s(3, 400, Some(1052)),
+        ];
+        let events = residual_events(&frames, 0, 2);
+        assert_eq!(events.len(), 1, "events: {events:?}");
+        let augmented = locate_best_candidate_for_unattributed_gap(&frames, 0, 2, events.clone());
+        assert_eq!(
+            augmented, events,
+            "an already-located gap must not be duplicated by the fallback"
+        );
+    }
+
+    #[test]
+    fn diffuse_small_gap_with_no_outlier_delta_is_still_located_883() {
+        // Mirrors CAM1 window 9 of run 1412981627 (issue 883): a lone delta=6 catch-up (well
+        // under GAP_OUTLIER_ABS_DELTA=10) amid otherwise-clean step=2 sampling. painted_tick_gaps
+        // nets this to exactly 2 -- the SAME shape (a moderate, sub-threshold jump with no
+        // compensating fine sampling) as the real window's histogram {1:11, 2:840, 3:9, 8:1}
+        // (max delta 8, also under the ceiling), which likewise nets to gaps=2.
+        let present = [1000, 1002, 1004, 1010, 1012, 1014];
+        let gaps = crate::painted_tick_gaps::painted_tick_gaps(&present, 0, 2);
+        assert_eq!(
+            gaps, 2,
+            "sanity: this shape nets the same 2-slot deficit issue 883 reported"
+        );
+
+        let frames: Vec<TickSample> = present
+            .iter()
+            .enumerate()
+            .map(|(i, &t)| s(i as u64, 1000 + (i as i64) * 1000, Some(t)))
+            .collect();
+        let base_events = residual_events(&frames, 0, 2);
+        assert!(
+            base_events.is_empty(),
+            "issue 883's exact defect: gaps={gaps} > 0 but zero located events from the base \
+             walk: {base_events:?}"
+        );
+
+        let events = locate_best_candidate_for_unattributed_gap(&frames, 0, gaps, base_events);
+        assert_eq!(events.len(), 1, "events: {events:?}");
+        assert_eq!(events[0].kind, ResidualEventKind::Gap);
+        assert_eq!(
+            events[0].missing_slots,
+            Some(2),
+            "the located event carries the FULL credited gaps value, not a re-derived local \
+             estimate: {:?}",
+            events[0]
+        );
+        // The delta=6 jump is 1004 -> 1010, at present[3] (frame_index 3).
+        assert_eq!(events[0].frame_index, 3);
+        assert_eq!(events[0].tick_before, Some(1004));
+        assert_eq!(events[0].tick_after, Some(1010));
+    }
+
+    #[test]
+    fn fallback_picks_the_single_largest_forward_delta() {
+        // Two candidate deltas below the outlier ceiling (4 and 6); the fallback must anchor on
+        // the LARGER one (6), not the first one encountered.
+        let present = [1000, 1004, 1006, 1012, 1014];
+        // deltas: 4, 2, 6, 2 (monotonic, already sorted) --
+        // expected_count=(1014-1000)/2+1=8, present_count=5, gaps=3.
+        let gaps = crate::painted_tick_gaps::painted_tick_gaps(&present, 0, 2);
+        let frames: Vec<TickSample> = present
+            .iter()
+            .enumerate()
+            .map(|(i, &t)| s(i as u64, 100 + (i as i64) * 100, Some(t)))
+            .collect();
+        let base = residual_events(&frames, 0, 2);
+        assert!(base.is_empty(), "{base:?}");
+        let events = locate_best_candidate_for_unattributed_gap(&frames, 0, gaps, base);
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(
+            events[0].tick_before,
+            Some(1006),
+            "the delta=6 transition, not delta=4: {:?}",
+            events[0]
+        );
+        assert_eq!(events[0].tick_after, Some(1012));
     }
 }
