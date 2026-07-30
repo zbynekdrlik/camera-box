@@ -34,10 +34,13 @@
 # Transient unit name shared by the arm/disarm pair. `systemd-run --unit=NAME --on-active=...`
 # creates NAME.timer plus NAME.service; both are cleaned up by the disarm below.
 CAM2_PAINTER_DEADMAN_UNIT="${CAM2_PAINTER_DEADMAN_UNIT:-cam2-painter-deadman}"
-# How long the box waits before self-healing. Must comfortably exceed a full run (a 300s
-# recording plus preflight and decode) so a HEALTHY run never trips it -- cleanup() disarms it
-# long before this fires. 40 minutes is ~2x the longest observed run.
-CAM2_PAINTER_DEADMAN_MINUTES="${CAM2_PAINTER_DEADMAN_MINUTES:-40}"
+# How long the box waits before self-healing. This must comfortably exceed the LONGEST possible
+# run, because a live run holds the painter stopped for its whole duration: [2b/8] stops it, then
+# a 300s+ recording, then the per-box decode, then cleanup(). Measured runs sit at 25-35 min from
+# stop to restore, so 40 was too tight -- a slow decode would let the timer fire MID-RUN and start
+# the permanent painter alongside the harness's own frame-probe, which is verbatim the #440
+# two-painter artifact this stop exists to prevent. 90 minutes leaves the healthy path far clear.
+CAM2_PAINTER_DEADMAN_MINUTES="${CAM2_PAINTER_DEADMAN_MINUTES:-90}"
 
 # cam2_painter_deadman_arm_cmds -> REMOTE bash (embed via `$(cam2_painter_deadman_arm_cmds)`
 # IMMEDIATELY BEFORE a `systemctl stop cam2-painter` in the same remote ssh command string).
@@ -55,7 +58,7 @@ if systemctl list-unit-files cam2-painter.service >/dev/null 2>&1; then
   systemctl stop ${CAM2_PAINTER_DEADMAN_UNIT}.timer 2>/dev/null || true
   systemctl reset-failed ${CAM2_PAINTER_DEADMAN_UNIT}.service 2>/dev/null || true
   systemd-run --quiet --on-active=${CAM2_PAINTER_DEADMAN_MINUTES}min --unit=${CAM2_PAINTER_DEADMAN_UNIT} \\
-    systemctl start cam2-painter 2>/dev/null \\
+    /bin/bash -c 'pgrep -x frame-probe >/dev/null && exit 0; systemctl start cam2-painter' 2>/dev/null \\
     && echo "[#872] cam2-painter dead-man armed (${CAM2_PAINTER_DEADMAN_MINUTES}min) -- a killed run self-heals on this box" \\
     || echo "WARNING #872: could not arm the cam2-painter dead-man -- a killed run WILL leave the monitor dark" >&2
 fi;

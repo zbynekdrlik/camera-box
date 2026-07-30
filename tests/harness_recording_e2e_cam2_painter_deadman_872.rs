@@ -107,6 +107,53 @@ fn cleanup_disarms_the_painter_deadman_after_restarting_the_painter_872() {
     );
 }
 
+/// The dead-man must never fire while a run is genuinely still in progress. Two guards:
+/// the delay comfortably exceeds the longest run, AND the action refuses to start the permanent
+/// painter while the harness's own `frame-probe` still owns the framebuffer. Without the second,
+/// a run that outlives the delay gets TWO painters on one /dev/fb0 under different run-ids —
+/// verbatim the #440 artifact the stop exists to prevent.
+#[test]
+fn deadman_refuses_to_start_the_painter_while_a_frame_probe_is_running_872() {
+    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/lib/cam2-painter-deadman.sh");
+    let s = fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()));
+    assert!(
+        s.contains("pgrep -x frame-probe"),
+        "#872: the dead-man action must check for a live frame-probe before starting the \
+         permanent painter, or a run outliving the delay gets two painters on one framebuffer"
+    );
+    let guard = s
+        .find("pgrep -x frame-probe")
+        .expect("#872: expected the frame-probe guard");
+    let start = s
+        .find("systemctl start cam2-painter'")
+        .expect("#872: expected the guarded start inside the dead-man action");
+    assert!(
+        guard < start,
+        "#872: the frame-probe check must precede the start (guard {guard}, start {start})"
+    );
+}
+
+#[test]
+fn deadman_delay_comfortably_exceeds_the_longest_run_872() {
+    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/lib/cam2-painter-deadman.sh");
+    let s = fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()));
+    let line = s
+        .lines()
+        .find(|l| l.starts_with("CAM2_PAINTER_DEADMAN_MINUTES="))
+        .expect("#872: expected the delay default");
+    let mins: u32 = line
+        .split(":-")
+        .nth(1)
+        .and_then(|t| t.trim_end_matches("}\"").trim_end_matches('}').parse().ok())
+        .unwrap_or_else(|| panic!("#872: could not parse the delay from {line:?}"));
+    assert!(
+        mins >= 60,
+        "#872: a live run holds the painter stopped for 25-35 min (stop -> recording -> per-box \
+         decode -> cleanup); a delay of {mins} min risks firing MID-RUN and starting a second \
+         painter. Keep it well clear of the longest run."
+    );
+}
+
 #[test]
 fn deadman_lib_is_sourced_by_the_harness_872() {
     let s = read_harness();
