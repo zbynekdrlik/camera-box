@@ -60,10 +60,12 @@ impl WindowGateDecision {
 /// frame contents, it only combines counts that are already known).
 pub fn decide(frame_count: u32, undecodable: u32, copies: u32, gaps: u32) -> WindowGateDecision {
     let undecodable_ok = crate::optical_floor::window_within_floor(undecodable, frame_count);
-    // #889 RED-stub: no relaxation yet — `relaxed_pass` still requires `copies == 0 && gaps == 0`,
-    // identical to `strict_pass`. The GREEN commit drops that requirement from `relaxed_pass`.
-    let relaxed_pass = frame_count > 0 && undecodable_ok && copies == 0 && gaps == 0;
-    let strict_pass = frame_count > 0 && undecodable_ok && copies == 0 && gaps == 0;
+    // #889: `relaxed_pass` does NOT look at `copies`/`gaps` at all -- only `frame_count > 0` and
+    // the #881 optical floor, both untouched by this relaxation.
+    let relaxed_pass = frame_count > 0 && undecodable_ok;
+    // `strict_pass` keeps the pre-#889 meaning byte-for-byte: relaxed_pass PLUS the two terms
+    // #889 makes report-only.
+    let strict_pass = relaxed_pass && copies == 0 && gaps == 0;
     WindowGateDecision {
         strict_pass,
         relaxed_pass,
