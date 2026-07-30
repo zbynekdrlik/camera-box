@@ -10,11 +10,10 @@
 //! dev1 itself (the control box that RUNS this gate) — dev1 must not be exempted just because it
 //! is the harness's own host (#862 point 2: "dev1 sa nesmie vynechať").
 //!
-//! These tests pin the gate's own PURE functions (version extraction from a raw dantesync
-//! log/journal text, the per-node verdict, and the fleet-wide roll-up + table print) and its
-//! end-to-end exit-code contract over fixture files (the path that needs no live rig).
+//! These tests pin the gate's own PURE functions (version extraction from `dantesync --version`
+//! stdout, the per-node verdict, and the fleet-wide roll-up + table print) and its end-to-end
+//! exit-code contract over fixture files (the path that needs no live rig).
 
-use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -66,14 +65,6 @@ fn run_gate_env(args: &[&str], extra_env: &[(&str, &str)]) -> (i32, String, Stri
     )
 }
 
-fn write_state_file(dir: &std::path::Path, name: &str, json: &str) -> PathBuf {
-    std::fs::create_dir_all(dir).unwrap();
-    let path = dir.join(name);
-    let mut f = std::fs::File::create(&path).unwrap();
-    f.write_all(json.as_bytes()).unwrap();
-    path
-}
-
 fn tmp_dir(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "dantesync-version-gate-test-{tag}-{}",
@@ -84,51 +75,46 @@ fn tmp_dir(tag: &str) -> PathBuf {
 }
 
 // ---------------------------------------------------------------------------
-// dantesync_version_from_log — PURE version extraction.
+// dantesync_version_from_version_output — PURE version extraction from `dantesync --version`
+// stdout (#862 follow-up: the journal/service-log reader this replaced returned "" on EVERY box
+// in the real fleet -- the version line it looked for is never actually logged. `dantesync
+// --version` prints "dantesync X.Y.Z" and answers on every platform this gate runs against.)
 // ---------------------------------------------------------------------------
 
 #[test]
-fn version_from_log_extracts_linux_console_startup_line() {
+fn version_from_version_output_extracts_plain_output() {
     let out = run_sourced(
-        r#"dantesync_version_from_log "$(printf 'DanteSync v1.8.21\n[NTP] offset: 100us\n')""#,
+        r#"dantesync_version_from_version_output "$(printf 'dantesync 1.8.21\n')""#,
         &[],
     );
     assert_eq!(out.trim(), "1.8.21");
 }
 
 #[test]
-fn version_from_log_extracts_windows_service_startup_line() {
+fn version_from_version_output_last_match_wins_amid_noise() {
+    // Defensive robustness, not a real scenario: if SSH banner/MOTD noise ever precedes the real
+    // line, the LAST match must win, never the first -- mirrors the "freshest wins" discipline
+    // used everywhere else in this repo for a similar reason (never grade a stale/unrelated match
+    // as authoritative).
     let out = run_sourced(
-        r#"dantesync_version_from_log "$(printf '2026-07-29 10:00:00.000 Service Started: v1.8.20\n')""#,
+        r#"dantesync_version_from_version_output "$(printf 'Warning: unknown host key\ndantesync 1.8.25\n')""#,
         &[],
     );
-    assert_eq!(out.trim(), "1.8.20");
+    assert_eq!(out.trim(), "1.8.25");
 }
 
 #[test]
-fn version_from_log_freshest_line_wins_not_first() {
-    // A box upgraded + restarted TWICE: the OLDEST startup line must never outrank the freshest —
-    // exactly the #851 hazard (a stale prior binary's version line still sitting earlier in the
-    // journal/log must not be graded as "the current version").
+fn version_from_version_output_no_match_is_empty() {
     let out = run_sourced(
-        r#"dantesync_version_from_log "$(printf 'DanteSync v1.8.17\n[NTP] offset: 1us\nDanteSync v1.8.21\n[NTP] offset: 2us\n')""#,
-        &[],
-    );
-    assert_eq!(out.trim(), "1.8.21");
-}
-
-#[test]
-fn version_from_log_no_match_is_empty() {
-    let out = run_sourced(
-        r#"dantesync_version_from_log "$(printf 'some unrelated log text\n')""#,
+        r#"dantesync_version_from_version_output "$(printf 'ssh: connect to host: Connection refused\n')""#,
         &[],
     );
     assert_eq!(out.trim(), "");
 }
 
 #[test]
-fn version_from_log_empty_input_is_empty() {
-    let out = run_sourced(r#"dantesync_version_from_log """#, &[]);
+fn version_from_version_output_empty_input_is_empty() {
+    let out = run_sourced(r#"dantesync_version_from_version_output """#, &[]);
     assert_eq!(out.trim(), "");
 }
 
@@ -307,57 +293,53 @@ fn fleet_report_prints_a_box_to_version_table_on_failure() {
 }
 
 // ---------------------------------------------------------------------------
-// End-to-end CLI: --win-state (reusing version-integrity-gate.sh's state_json_value), --local,
-// and --linux, all via fixture injection (no live rig).
+// End-to-end CLI: --win, --local, and --linux, all reading `dantesync --version` output via
+// fixture injection (no live rig, no bundle-state coupling -- #862 follow-up dropped --win-state
+// entirely: strih/stream are read the SAME way as every other node now, over SSH).
 // ---------------------------------------------------------------------------
 
 #[test]
-fn cli_win_state_reads_dantesync_version_key_from_bundle_state_json() {
-    let dir = tmp_dir("winstate");
-    let strih = write_state_file(&dir, "strih.json", r#"{"dantesync_version":"1.8.21"}"#);
+fn cli_win_node_reads_dantesync_version_via_fixture_override() {
+    let dir = tmp_dir("win");
+    let path = dir.join("strih.out");
+    std::fs::write(&path, "dantesync 1.8.21\n").unwrap();
     let (code, out, err) = run_gate_env(
-        &[
-            "--pin",
-            "1.8.21",
-            "--win-state",
-            &format!("strih={}", strih.display()),
-        ],
-        &[],
+        &["--pin", "1.8.21", "--win", "strih=newlevel@10.77.9.202"],
+        &[(
+            "DANTESYNC_VERSION_GATE_VERSION_STRIH",
+            path.to_str().unwrap(),
+        )],
     );
     assert_eq!(code, 0, "stdout={out}\nstderr={err}");
     assert!(out.contains("strih") && out.contains("1.8.21"));
 }
 
 #[test]
-fn cli_win_state_missing_key_is_unknown_never_a_silent_pass() {
-    let dir = tmp_dir("winstate-missing");
-    // Bundle-state JSON that carries OTHER keys but not (yet) dantesync_version — the exact
-    // pre-upgrade shape #862 point 1 exists to close.
-    let strih = write_state_file(&dir, "strih.json", r#"{"obs_version":"32.1.2"}"#);
+fn cli_win_node_unreachable_is_unknown_never_a_silent_pass() {
+    // No fixture override at all -- the real ssh call will fail against an unroutable/loopback
+    // address in the test sandbox (no live rig here), which must read as UNKNOWN, never a pass.
     let (code, out, _err) = run_gate_env(
-        &[
-            "--pin",
-            "1.8.21",
-            "--win-state",
-            &format!("strih={}", strih.display()),
-        ],
-        &[],
+        &["--pin", "1.8.21", "--win", "strih=nobody@127.0.0.1"],
+        &[(
+            "DANTESYNC_VERSION_GATE_SSH_TIMEOUT",
+            "1", // keep the test fast -- fail closed quickly rather than waiting out a real timeout
+        )],
     );
     assert_eq!(
         code, 11,
-        "a bundle-state missing dantesync_version must be UNKNOWN: {out}"
+        "an unreachable --win node must be UNKNOWN, never a silent pass: {out}"
     );
 }
 
 #[test]
 fn cli_local_node_reads_dantesync_version_via_fixture_override() {
     let dir = tmp_dir("local");
-    let path = dir.join("dev1.log");
-    std::fs::write(&path, "DanteSync v1.8.17\n[NTP] offset: 3us\n").unwrap();
+    let path = dir.join("dev1.out");
+    std::fs::write(&path, "dantesync 1.8.17\n").unwrap();
     let (code, out, err) = run_gate_env(
         &["--pin", "1.8.21", "--local", "dev1"],
         &[(
-            "DANTESYNC_VERSION_GATE_JOURNAL_DEV1",
+            "DANTESYNC_VERSION_GATE_VERSION_DEV1",
             path.to_str().unwrap(),
         )],
     );
@@ -368,12 +350,12 @@ fn cli_local_node_reads_dantesync_version_via_fixture_override() {
 #[test]
 fn cli_linux_node_reads_dantesync_version_via_fixture_override() {
     let dir = tmp_dir("linux");
-    let path = dir.join("cam1.log");
-    std::fs::write(&path, "DanteSync v1.8.21\n").unwrap();
+    let path = dir.join("cam1.out");
+    std::fs::write(&path, "dantesync 1.8.21\n").unwrap();
     let (code, out, err) = run_gate_env(
         &["--pin", "1.8.21", "--linux", "cam1=root@10.77.9.61"],
         &[(
-            "DANTESYNC_VERSION_GATE_JOURNAL_CAM1",
+            "DANTESYNC_VERSION_GATE_VERSION_CAM1",
             path.to_str().unwrap(),
         )],
     );

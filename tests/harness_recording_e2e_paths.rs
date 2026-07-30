@@ -1802,25 +1802,27 @@ fn recording_e2e_rejects_all_cambox_combined_with_a_non_cam1_source_camera() {
 // matching the fleet pin. These guards lock the wiring so a refactor cannot silently drop it.
 // ---------------------------------------------------------------------------
 
-/// recording-e2e.sh must invoke the dantesync version-parity gate, reusing the SAME
-/// VERSION_STRIH_STATE/VERSION_STREAM_STATE bundle-state files the version-integrity gate above
-/// already fetched (dantesync_version is one more key in that SAME payload, #862 point 1) --
-/// never a second, independently-fetched state file for the same two boxes.
+/// recording-e2e.sh must invoke the dantesync version-parity gate, reading strih/stream over SSH
+/// via --win exactly like every other node (#862 follow-up, 2026-07-30) -- NOT the bundle-state
+/// coupling this gate used originally (proven half-wired: always UNKNOWN in practice). Scoped to
+/// a window AFTER this gate's own invocation -- version-integrity-gate.sh (a DIFFERENT, #123,
+/// gate) legitimately still uses --win-state for strih/stream and must not be confused with it.
 #[test]
 fn recording_e2e_runs_the_dantesync_version_gate() {
     let s = read("scripts/recording-e2e.sh");
+    let gate_idx = s
+        .find("dantesync-version-gate.sh")
+        .expect("#862: recording-e2e.sh must invoke dantesync-version-gate.sh");
+    let window = &s[gate_idx..(gate_idx + 400).min(s.len())];
     assert!(
-        s.contains("dantesync-version-gate.sh"),
-        "#862: recording-e2e.sh must invoke dantesync-version-gate.sh"
+        window.contains("--win \"strih=") && window.contains("stream="),
+        "#862 follow-up: the dantesync version gate must read strih/stream via --win (ssh), \
+         never the removed --win-state (bundle-state) path. window={window:?}"
     );
     assert!(
-        s.contains("--win-state \"strih=$VERSION_STRIH_STATE\""),
-        "#862: the dantesync version gate must reuse the SAME strih bundle-state file as #123 \
-         (missing -> UNKNOWN -> refuse), never a second independent fetch"
-    );
-    assert!(
-        s.contains("--win-state \"stream=$VERSION_STREAM_STATE\""),
-        "#862: the dantesync version gate must reuse the SAME stream bundle-state file as #123"
+        !window.contains("--win-state"),
+        "#862 follow-up: --win-state was removed for THIS gate's invocation -- the bundle-state \
+         coupling was half-wired and always read UNKNOWN in practice. window={window:?}"
     );
 }
 

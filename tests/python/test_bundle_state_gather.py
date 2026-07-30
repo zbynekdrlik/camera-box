@@ -456,47 +456,14 @@ def test_build_bundle_state_omits_826_keys_when_empty():
         assert key not in state
 
 
-# ── #862: dantesync_version — the fleet-wide dantesync VERSION-PARITY gate's Windows-box facet ──
+# ── #862 follow-up: dantesync_version was REVERTED from bundle-state ──
 #
-# strih/stream's bundle-state (:8899) never carried dantesync_version at all before #862 — the
-# fleet-parity gate (scripts/dantesync-version-gate.sh) could not verify the Windows boxes even
-# though the comparison logic existed, because the value simply was not in the payload (the exact
-# "silent don't-know passes as clean" shape #862 forbids). dantesync has NO embedded Windows
-# VersionInfo resource (its build.rs sets none), so — unlike ndi_runtime_version's Get-Item
-# VersionInfo trick — the version is read from the service's OWN startup log line, the SAME
-# "DanteSync v<ver>" / "Service Started: v<ver>" text the daemon logs on every (re)start.
-
-DANTESYNC_SERVICE_LOG_SAMPLE = """\
-2026-07-27 09:14:02.001 Service Started: v1.8.20
-2026-07-27 09:14:02.500 [NTP] offset: -120us
-2026-07-27 09:14:03.001 [PTP] LOCK Drift: 4us
-"""
-
-
-def test_dantesync_version_from_log_found():
-    assert bsg.dantesync_version_from_log(DANTESYNC_SERVICE_LOG_SAMPLE) == "1.8.20"
-
-
-def test_dantesync_version_from_log_freshest_line_wins():
-    # A box upgraded + restarted twice: the log still carries the OLDER startup line further back
-    # -- the LAST match must win, never the first (the exact #851 stale-version hazard).
-    text = (
-        "2026-07-20 08:00:00.000 Service Started: v1.8.17\n"
-        "2026-07-27 09:14:02.001 Service Started: v1.8.21\n"
-    )
-    assert bsg.dantesync_version_from_log(text) == "1.8.21"
-
-
-def test_dantesync_version_from_log_absent():
-    assert bsg.dantesync_version_from_log("nothing relevant here") == ""
-    assert bsg.dantesync_version_from_log("") == ""
-    assert bsg.dantesync_version_from_log(None) == ""
-
-
-def test_build_bundle_state_includes_dantesync_version_when_present():
-    state = bsg.build_bundle_state(obs_version="32.1.2", dantesync_version="1.8.21")
-    assert state["dantesync_version"] == "1.8.21"
-
-
-def test_build_bundle_state_omits_empty_dantesync_version():
-    assert "dantesync_version" not in bsg.build_bundle_state(obs_version="32.1.2")
+# The #862 gate originally read strih/stream's dantesync version through this bundle-state facet
+# (dantesync_version_from_log + a dantesync_version kwarg on build_bundle_state). Live verification
+# (2026-07-30) found it half-wired end to end: the servers actually deployed on strih/stream never
+# picked up the new key, and even the log line the parser looked for is not something dantesync
+# ever logs on this fleet -- so the facet could only ever read UNKNOWN. The gate now reads EVERY
+# node (including strih/stream) via a uniform `dantesync --version` over SSH instead
+# (scripts/dantesync-version-gate.sh's dantesync_version_from_version_output) -- no bundle-state
+# involvement at all. This module intentionally carries no dantesync_version code any more; do not
+# re-add it without a live, working consumer.
