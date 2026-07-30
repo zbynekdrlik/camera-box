@@ -8,6 +8,7 @@ paths:
   - "scripts/w32time-gate.sh"
   - "scripts/lib/win-status-args.sh"
   - "scripts/lib/stale-artifact-guard.sh"
+  - "scripts/dantesync-version-gate.sh"
   - ".claude/skills/e2e/SKILL.md"
 ---
 
@@ -89,8 +90,28 @@ age-blind** (a plain `cat`, no `updated_ts`/mtime check).
   invariant, which has no HTTP equivalent to migrate to) — the shared helper stayed, only
   `dantesync-gate.sh`'s own flag/loop was deleted.
 
+## 4. A NEW gate's read-path can be built on an UNVERIFIED assumption, not just a stopped service (#862)
+
+The three incidents above all had a REAL service that merely stopped running. `dantesync-version-gate.sh`
+(#862) is a different shape: the gate hard-blocked EVERY run from its very first deploy, because
+its design comment ASSERTED "dantesync has no readable version on Windows, only a startup log
+line" without ever running `dantesync --version` against a live box first. Both assumed sources
+(`journalctl -u dantesync` on Linux, the Windows service log via bundle-state) were empty on the
+REAL fleet — the log line the parser looked for is simply never logged there. `dantesync --version`
+answers directly on every platform (Linux bare command on PATH; Windows the quoted full exe path
+over SSH — OpenSSH-for-Windows runs it via `cmd.exe` directly, no PowerShell wrapper needed, unlike
+several OTHER Windows facets this repo reads via `powershell -NoProfile -Command "..."`).
+
+**The lesson generalizes beyond dantesync:** when a NEW gate's read path depends on a claim like
+"X can only be read this way" / "Y has no direct way to answer Z", verify that claim against the
+REAL target with one live command BEFORE designing the whole gate around it — especially for a
+fail-closed gate that will hard-block real work the moment the assumption is wrong. A design
+comment stating the premise as settled fact is not the same as having checked it live.
+
 ## The general shape
 
-A hard gate that refuses in its first seconds is almost always reporting a **rig-side standing
-service that is not running**, not a defect in the thing under test. Check liveness of the gate's
-own dependencies first; never weaken the gate to get past it.
+A hard gate that refuses in its first seconds is almost always reporting either (a) a **rig-side
+standing service that is not running** (incidents 1-3 above — check liveness of the gate's own
+dependencies first), or (b) a **read-path built on an unverified assumption about how to reach the
+signal at all** (incident 4 — re-derive the value with one live command against the real target
+before trusting the design comment's claim). Never weaken the gate to get past either.
