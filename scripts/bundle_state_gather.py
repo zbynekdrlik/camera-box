@@ -263,6 +263,25 @@ def record_dir_stats(record_dir):
     return {"total_bytes": total_bytes, "file_count": file_count, "oldest_mtime": oldest_mtime}
 
 
+def dantesync_version_from_log(text):
+    """#862 — the FRESHEST dantesync version logged in *text* (the Windows dantesync SERVICE
+    log, `C:\\ProgramData\\DanteSync\\dantesync.log`, or an equivalent Linux console/journal
+    excerpt): matches either "Service Started: v<ver>" (Windows --service mode) or
+    "DanteSync v<ver>" (console/journal mode, the format the Linux daemon under systemd emits).
+    dantesync has NO embedded Windows VersionInfo resource (its build.rs sets none), so —
+    unlike ndi_runtime_version's Get-Item trick — the version cannot be read off the binary's
+    file metadata; this startup log line is the only place it is ever reported.
+
+    The LAST match wins, never the first: a box upgraded + restarted more than once still
+    carries its OLDER startup line further back in the log (dantesync's own 1MB rotation only
+    swaps `.old` in on the NEXT restart, so a long-lived log can span several versions), and
+    grading that stale line as "the current version" is exactly the #851 fleet-drift hazard the
+    #862 version-parity gate exists to catch. "" when *text* has no match (UNKNOWN downstream —
+    unread/absent/service never started, never guessed)."""
+    matches = re.findall(r"(?:DanteSync|Service Started:) v(\d+\.\d+\.\d+)", text or "")
+    return matches[-1] if matches else ""
+
+
 def genlock_build_sha_from_file(path):
     """#756 — the box's DEPLOYED genlock build commit SHA, read from its `GENLOCK_BUILD_SHA.txt`
     (imag: `/opt/obs-genlock/GENLOCK_BUILD_SHA.txt`; the Windows boxes: the SAME file in the
@@ -311,6 +330,7 @@ def build_bundle_state(
     ahk_dead_config_present="",
     shortcut_target_path="",
     shortcut_workdir="",
+    dantesync_version="",
 ):
     """Assemble the flat bundle-state dict `version-integrity-gate.sh --win-state`'s
     `compare_args_from_state()` parses. Every value is a STRING (its regex requires a quoted JSON
@@ -330,7 +350,14 @@ def build_bundle_state(
     NL_STARTUP.ahk (`ahk_app1_shortcut_path`/`ahk_app1_run`/`ahk_dead_config_present`) + the
     Start-Menu shortcut's own resolution (`shortcut_target_path`/`shortcut_workdir`). Same
     omit-when-empty rule; `version-integrity-gate.sh` treats the whole group as opt-in per box
-    (skipped entirely until a box's bundle-state-server reports at least one of them)."""
+    (skipped entirely until a box's bundle-state-server reports at least one of them).
+
+    #862: `dantesync_version` — the box's dantesync daemon version (read via
+    `dantesync_version_from_log` off its service log). This is what makes the fleet-wide
+    dantesync version-parity gate (`scripts/dantesync-version-gate.sh`) able to see strih/stream
+    at all — before this key existed, a Windows box's dantesync version was UNREADABLE from this
+    payload no matter how the comparison logic was written (the gate would have silently read
+    "don't know" — the exact fake-green shape #862 forbids). Same omit-when-empty rule."""
     values = {
         "obs_version": obs_version,
         "distroav_version": distroav_version,
@@ -350,5 +377,6 @@ def build_bundle_state(
         "shortcut_target_path": shortcut_target_path,
         "shortcut_workdir": shortcut_workdir,
         "genlock_build_sha": genlock_build_sha,
+        "dantesync_version": dantesync_version,
     }
     return {k: v for k, v in values.items() if v}

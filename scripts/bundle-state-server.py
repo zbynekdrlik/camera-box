@@ -87,6 +87,12 @@ DEFAULT_STARTUP_SHORTCUT = r"C:\ProgramData\Microsoft\Windows\Start Menu\Program
 # does not apply here" rather than a failure (see version-integrity-gate.sh's startup_chain scope).
 DEFAULT_AHK_PATH = r"D:\_APPS\NL_STARTUP.ahk"
 
+# #862 — the dantesync WINDOWS service's own log file. dantesync logs "Service Started: v<ver>"
+# once per (re)start here (see main.rs's run_service_logic path in the dantesync repo) — the ONLY
+# place its version is ever reported on Windows, since the binary carries no embedded VersionInfo
+# resource (unlike the NDI runtime DLL read via ndi_runtime_version's Get-Item trick).
+DEFAULT_DANTESYNC_LOG_FILE = r"C:\ProgramData\DanteSync\dantesync.log"
+
 
 def log(msg):
     print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}", flush=True)
@@ -175,6 +181,19 @@ def obs_process_list():
         return ""
 
 
+def read_dantesync_log(log_path):
+    """#862 — the raw text of the local dantesync Windows-service log (a plain local file — this
+    process runs ON strih/stream, same as read_ahk_text below). "" if the file is absent
+    (service never installed/started, or a permission issue) or unreadable — UNKNOWN downstream,
+    never guessed."""
+    try:
+        with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+            return f.read()
+    except OSError as e:
+        log(f"WARNING: could not read dantesync log {log_path!r}: {e}")
+        return ""
+
+
 def read_ahk_text(ahk_path):
     """#826 — the raw text of NL_STARTUP.ahk, a plain local file (no PowerShell needed — this
     process already runs ON the box). "" if the file is absent (stream, which runs no
@@ -248,6 +267,7 @@ def gather_bundle_state(
     obs_install_scan_roots=DEFAULT_OBS_INSTALL_SCAN_ROOTS,
     startup_shortcut=DEFAULT_STARTUP_SHORTCUT,
     ahk_path=DEFAULT_AHK_PATH,
+    dantesync_log_path=DEFAULT_DANTESYNC_LOG_FILE,
 ):
     """Build the fresh bundle-state dict for THIS request — every gather is attempted
     independently so one failing facet (e.g. OBS-WS momentarily unreachable) does not blank out
@@ -287,6 +307,8 @@ def gather_bundle_state(
         ahk_dead_config_present=bsg.ahk_dead_config_present(ahk_text),
         shortcut_target_path=shortcut_target,
         shortcut_workdir=shortcut_workdir,
+        # #862 — fleet-wide dantesync version-parity gate's Windows-box facet.
+        dantesync_version=bsg.dantesync_version_from_log(read_dantesync_log(dantesync_log_path)),
     )
 
 
@@ -326,6 +348,7 @@ def make_handler(args, state):
                     obs_install_scan_roots=args.obs_install_scan_root,
                     startup_shortcut=args.startup_shortcut,
                     ahk_path=args.ahk_path,
+                    dantesync_log_path=args.dantesync_log,
                 )
             except Exception as e:  # noqa: BLE001 - never let a gather bug hang the gate forever
                 log(f"ERROR: bundle-state gather failed: {e}")
@@ -442,6 +465,8 @@ def main(argv=None):
     )
     ap.add_argument("--startup-shortcut", default=DEFAULT_STARTUP_SHORTCUT)
     ap.add_argument("--ahk-path", default=DEFAULT_AHK_PATH)
+    # #862 — fleet-wide dantesync version-parity gate: this box's own dantesync service log.
+    ap.add_argument("--dantesync-log", default=DEFAULT_DANTESYNC_LOG_FILE)
     args = ap.parse_args(argv)
     if args.obs_install_scan_root is None:
         args.obs_install_scan_root = list(DEFAULT_OBS_INSTALL_SCAN_ROOTS)
