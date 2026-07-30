@@ -196,6 +196,16 @@ wrong PR with no review of it.
   auto-closed an issue that wasn't yours, explain it via `gh issue comment <N>` for traceability.
   The supervisor should prefer serial dispatch or per-worker `git worktree` isolation for this
   repo going forward.
+- **A red "CI" run on the OTHER worker's push can be YOUR OWN not-yet-fixed RED commit riding
+  along, not a real regression in their code.** Confirmed live (2026-07-30, #854/#881 vs #878):
+  worker A committed a TDD RED commit (failing-on-purpose, per `regression-test-first.md`) while
+  worker B's own commit landed on top of it in the shared local history; when B pushed next, the
+  push carried A's still-broken RED commit too (a push always carries full ancestry — see the
+  bullet above), and B's CI run failed on TESTS A HAD NOT YET FIXED. Before treating a scary CI
+  failure on a push you didn't make as evidence the other worker's code is broken, check the
+  failing test names against YOUR OWN recent RED commit (`git log --oneline` around the failing
+  SHA) — if they're yours, it's a superseded interleaving artifact, not a real bug; your own next
+  push (carrying the GREEN fix) supersedes it and should be judged on its OWN CI run instead.
 
 ## GOTCHA — editing `scripts/recording-e2e.sh` (OR `scripts/rig-mode.sh`) can silently break OTHER test files' static anchors
 
