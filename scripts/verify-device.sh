@@ -84,6 +84,12 @@
 #       active, and genuinely painting (presenter-aware journal read, KMS-or-fbdev per #464) --
 #       AND camera-box's own display thread is permanently disabled on this box so it can never
 #       contest /dev/fb0 with the painter (#863)
+#   (w) the installed /etc/udev/rules.d/99-camera-box.rules wires the video4linux "add" event to
+#       the guarded helper script (never the fleet's old UNCONDITIONAL restart, #894) AND the LIVE
+#       capture grabber's USB power/control currently reads "on" -- a box that silently drifted
+#       back to `auto` (the #894 amplifying re-enumeration feedback loop) FAILS this check instead
+#       of degrading invisibly. N/A (not a FAIL) when the box has no capture grabber fitted at all
+#       (cam4, #828).
 #
 # Exit: 0 iff every check passes. Non-zero if ANY check FAILs or is UNREADABLE (test-strictness --
 # an unreachable/unreadable check is a FAIL, never a silent pass).
@@ -108,6 +114,13 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/capture-rate-guard.sh
 . "$HERE/lib/capture-rate-guard.sh"  # invocation-id-scoped journalctl builder (#694, shared
                                      # with deploy-fleet.sh + upgrade-fleet-ndi.sh)
+# shellcheck source=scripts/lib/v4l2-neutral.sh
+. "$HERE/lib/v4l2-neutral.sh"    # v4l2_neutral_resolve_node_cmd -- resolves the LIVE capture
+                                 # node for the (w) power/control drift read (#894)
+# shellcheck source=scripts/lib/udev-camera-box.sh
+. "$HERE/lib/udev-camera-box.sh" # udev_camera_box_rule_is_burn_gated/
+                                 # udev_camera_box_grabber_power_control_read_cmd/_from_output/
+                                 # _power_control_is_on -- the (w) check (#894)
 # clock-offset-guard.sh is sourced ONLY for its pure functions; its own
 # `[ "${BASH_SOURCE[0]}" != "${0}" ]` guard skips clock-offset-guard.sh's own `main "$@"` flow.
 # shellcheck source=scripts/clock-offset-guard.sh
@@ -533,6 +546,8 @@ Checks:
   (u) rsyslog PURGED (not just masked) + journald RuntimeMaxUse capped (#762)
   (v) cam2 ONLY: permanent devel-mode dual-QR painter installed+active+painting, camera-box
       permanently no-display so it never contests /dev/fb0 (#863)
+  (w) udev rule is burn-gated (never the old unconditional restart) AND the live grabber's USB
+      power/control currently reads "on" (drift check; N/A when no grabber is fitted, #894)
 
 Env: KERNEL_PIN (optional exact running-kernel pin), NDI_VERSION_PIN (default 6.3.2),
      DANTESYNC_OFFSET_FRESHNESS_S (max age of a fresh [NTP] offset line, default 300),
@@ -945,6 +960,42 @@ if [ "$NAME_UPPER" = "CAM2" ]; then
     ok "camera-box permanently no-display on cam2 (#863 -- cam2-painter.service owns /dev/fb0)"
   else
     fail "camera-box on cam2 is NOT permanently no-display (Environment='${NODISPLAY_ENV:-<none>}', ssh rc=$rc) -- it will contest /dev/fb0 with cam2-painter.service"
+  fi
+fi
+
+# (w) udev hotplug rule is burn-gated + live USB autosuspend has not drifted back to auto (#894) -
+# The fleet's OLD rule unconditionally restarted production camera-box.service on every
+# video4linux "add" event, stealing the device back from an in-flight E2E camera-box-burn-*.service
+# (77/NOPERM, misreported as frozen_leg on the camera). The fix (scripts/lib/udev-camera-box.sh) is
+# a guarded rule + helper script installed by setup-device.sh/create-usb-linux.sh; this check
+# proves the box actually has it, and that the LIVE grabber's USB power/control has not silently
+# drifted back to `auto` (the same #894 comment's measured amplifying re-enumeration feedback loop).
+wrc=0
+UDEV_RULE_TEXT="$(ssh_box "cat /etc/udev/rules.d/99-camera-box.rules 2>/dev/null")" || wrc=$?
+if [ "$wrc" -ne 0 ]; then
+  fail "could not read /etc/udev/rules.d/99-camera-box.rules (ssh rc=$wrc)"
+elif [ -z "$UDEV_RULE_TEXT" ]; then
+  fail "/etc/udev/rules.d/99-camera-box.rules is missing -- production is NOT protected from an E2E burn-unit device-steal (#894)"
+elif ! udev_camera_box_rule_is_burn_gated "$UDEV_RULE_TEXT"; then
+  fail "/etc/udev/rules.d/99-camera-box.rules is NOT burn-gated (still the fleet's old unconditional restart, or something else entirely, #894): $UDEV_RULE_TEXT"
+else
+  ok "udev hotplug rule wired to the burn-gated helper (#894)"
+fi
+
+pcrc=0
+POWER_CONTROL_OUT="$(ssh_box "$(v4l2_neutral_resolve_node_cmd)
+if [ -e \"\$V4L2_NEUTRAL_NODE\" ]; then echo CAMERA_BOX_VIDEO_NODE_EXISTS=1; else echo CAMERA_BOX_VIDEO_NODE_EXISTS=0; fi
+$(udev_camera_box_grabber_power_control_read_cmd)")" || pcrc=$?
+if [ "$pcrc" -ne 0 ]; then
+  fail "could not read the live capture grabber's USB power/control (ssh rc=$pcrc)"
+elif ! printf '%s' "$POWER_CONTROL_OUT" | grep -q 'CAMERA_BOX_VIDEO_NODE_EXISTS=1'; then
+  ok "no capture grabber fitted -- USB power/control drift check N/A (#828)"
+else
+  GRABBER_POWER_CONTROL="$(udev_camera_box_grabber_power_control_from_output "$POWER_CONTROL_OUT")"
+  if udev_camera_box_power_control_is_on "$GRABBER_POWER_CONTROL"; then
+    ok "capture grabber USB power/control=on (autosuspend off, #894)"
+  else
+    fail "capture grabber USB power/control='${GRABBER_POWER_CONTROL:-<unreadable>}' -- drifted away from 'on' (#894's amplifying re-enumeration feedback loop; the udev rule should have re-applied this on the last hotplug)"
   fi
 fi
 

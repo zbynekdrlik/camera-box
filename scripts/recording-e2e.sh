@@ -204,6 +204,12 @@ CAMBOX_OFFLINE_ACK="$(cambox_offline_ack_effective "${CAMBOX_OFFLINE_ACK:-}" "$R
 # lurk silently next to a gate that already fetches DanteSync status live over HTTP.
 # shellcheck source=scripts/lib/stale-artifact-guard.sh
 . "$HERE/lib/stale-artifact-guard.sh"
+# #894: udev_camera_box_burn_unit_state_cmd/_from_output/_is_healthy/_integrity_message -- the
+# post-StopRecord run-integrity assertion below (a burn unit that died mid-run must be surfaced as
+# ITS OWN loud, distinctly-labeled failure, never silently indistinguishable from a genuinely
+# frozen camera in recording-verdict.rs's frozen_leg).
+# shellcheck source=scripts/lib/udev-camera-box.sh
+. "$HERE/lib/udev-camera-box.sh"
 camera_resolve "${CAM:-cam1}"
 # #24 item 1: this harness's SOURCE-camera role (the physical box filming cam2's monitor via
 # the optical loopback + carrying the #174 render-time capture burn) is one of
@@ -1583,6 +1589,12 @@ echo "[2/8] $CAMERA_NAME (${CAM1_IP}) — probe-featured camera-box with the #17
 # the production camera-box.service it's standing in for. cleanup() stops this unit explicitly
 # (an explicit `systemctl stop` is never followed by an automatic restart) before the belt-and-
 # suspenders pkill, so a stopped test can never leave a unit trying to respawn.
+# #894: StartLimitIntervalSec=0 disables systemd's default 5-in-10s restart-burst limit. Without
+# it, a device-steal race (the udev hotplug rule restarting production and taking /dev/videoN
+# back mid-run, #894's own root cause) exhausts the burst limit within ~15s and the unit gives up
+# PERMANENTLY at 1/FAILURE -- even after the device becomes free again. Unlimited retry means the
+# burn unit's next scheduled attempt (every RestartSec=3) reclaims the device instead of dying
+# forever, once the #894 udev fix stops production from re-stealing it.
 CAM1_BURN_BIN="/tmp/camera-box-burn-${RUN_ID}"
 CAM1_BURN_UNIT="camera-box-burn-${RUN_ID}"
 # #749: sweep stale binaries BEFORE the scp below -- a full /tmp (a prior run's own cleanup()
@@ -1600,7 +1612,7 @@ sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$CAM1_IP" \
    $(cpu_affinity_burn_resolve_cmd) \
    rm -f /tmp/cbox-burn.log; \
    systemd-run --unit=$CAM1_BURN_UNIT --collect \
-     --property=Restart=on-failure --property=RestartSec=3 \
+     --property=Restart=on-failure --property=RestartSec=3 --property=StartLimitIntervalSec=0 \
      --property=StandardOutput=append:/tmp/cbox-burn.log --property=StandardError=append:/tmp/cbox-burn.log \
      \$CPU_AFFINITY_BURN_PROPERTY \
      --setenv=CAMERA_BOX_GENLOCK_FPS=$GENLOCK_FPS --setenv=CAMERA_BOX_BURN_RUN_ID=$SRC_BURN_RUN_ID \
@@ -1663,7 +1675,7 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
        $(cpu_affinity_burn_resolve_cmd) \
        rm -f /tmp/cbox-burn-${_cn}.log; \
        systemd-run --unit=$_cunit --collect \
-         --property=Restart=on-failure --property=RestartSec=3 \
+         --property=Restart=on-failure --property=RestartSec=3 --property=StartLimitIntervalSec=0 \
          --property=StandardOutput=append:/tmp/cbox-burn-${_cn}.log --property=StandardError=append:/tmp/cbox-burn-${_cn}.log \
          \$CPU_AFFINITY_BURN_PROPERTY \
          ${_cnodisplay_setenv}--setenv=CAMERA_BOX_GENLOCK_FPS=$GENLOCK_FPS --setenv=CAMERA_BOX_BURN_RUN_ID=$_cburn \
@@ -2948,6 +2960,34 @@ echo "    strih host file:  ${STRIH_HOST_PATH:-<unknown>}"
 echo "    stream host file: ${STREAM_HOST_PATH:-<unknown>}"
 echo "    imag host file:   ${IMAG_HOST_PATH:-<unknown>}  (#462 — stays ON imag, decoded in place below)"
 
+# [7b/8] #894: burn-unit run-integrity check. Runs BEFORE the merge/verdict below, so a burn unit
+# that died mid-run (e.g. the exact #894 device-steal race: a hotplug's udev rule restarting
+# production, stealing /dev/videoN back with 77/NOPERM) gets its OWN loud, distinctly-labeled
+# failure printed here -- never silently indistinguishable from recording-verdict.rs's (unrelated)
+# frozen_leg verdict. BURN_UNIT_INTEGRITY_MSG is read by the merge/verdict GATE combinator below.
+echo "[7b/8] burn-unit run-integrity check (#894) — did every camera-box-burn-*.service stay ACTIVE through the recording window?"
+BURN_UNIT_INTEGRITY_MSG=""
+_burn_unit_integrity_check() {  # camname ip unit
+  local _bcn="$1" _bip="$2" _bunit="$3" _brc=0 _bout _bstate _bmsg
+  _bout="$(sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$_bip" \
+    "$(udev_camera_box_burn_unit_state_cmd "$_bunit")" 2>/dev/null)" || _brc=$?
+  _bstate="$(udev_camera_box_burn_unit_state_from_output "$_bout")"
+  if [ "$_brc" -ne 0 ] || ! udev_camera_box_burn_unit_is_healthy "$_bstate"; then
+    _bmsg="$(udev_camera_box_burn_unit_integrity_message "$_bcn" "$_bunit" "${_bstate:-<unreachable, ssh rc=$_brc>}")"
+    echo "    $_bmsg" >&2
+    BURN_UNIT_INTEGRITY_MSG="${BURN_UNIT_INTEGRITY_MSG}${BURN_UNIT_INTEGRITY_MSG:+; }${_bmsg}"
+  else
+    echo "    $_bcn burn unit ($_bunit) active — OK"
+  fi
+}
+_burn_unit_integrity_check "$CAMERA_NAME" "$CAM1_IP" "$CAM1_BURN_UNIT"
+if [ "${ALL_CAMBOX:-0}" = "1" ]; then
+  for _cn_ip_burn in "${CAMBOX_SECONDARY_DEPLOY[@]}"; do
+    _cn="${_cn_ip_burn%%=*}"; _crest="${_cn_ip_burn#*=}"; _cip="${_crest%%=*}"
+    _burn_unit_integrity_check "$_cn" "$_cip" "camera-box-burn-${_cn}-${RUN_ID}"
+  done
+fi
+
 # [7c/8] #707 B1 transport sampler (second prong) — stop the per-box samplers armed in [5b/8] and
 # harvest each per-run CSV into the run dir (scp), so the TCP Send-Q / retransmit / NIC-counter
 # timeline lands BESIDE the recordings + verdict for the freeze discriminator. Already inside the
@@ -3455,6 +3495,15 @@ continuing WITHOUT the imag partial; the merge below will omit --merge-partials 
     echo "    exit code IS the merge recording-verdict's exit code."
     GATE=0
     "$VERDICT_BIN" "${MERGE_ARGS[@]}" || GATE=$?
+    # #894: a burn unit that died mid-run (device-steal, see [7b/8] above) is its OWN run-integrity
+    # failure, independent of whatever recording-verdict.rs computed for frozen_leg -- force the
+    # gate to fail with this EXPLICIT reason so it is never silently indistinguishable from a
+    # genuine frozen camera. Only ever TIGHTENS an already-passing $GATE; never downgrades a
+    # verdict-computed failure into a softer one.
+    if [ -n "$BURN_UNIT_INTEGRITY_MSG" ]; then
+      echo "RUN-INTEGRITY: $BURN_UNIT_INTEGRITY_MSG" >&2
+      [ "$GATE" -eq 0 ] && GATE=1
+    fi
     # #827: merge the fleet-preflight exclusion list into the verdict JSON so a run that excluded
     # boxes (ALL_CAMBOX only — PREFLIGHT_EXCLUDED_CAMS is otherwise unset/empty, and the merge
     # below is then a harmless no-op `excluded_cams: []`) can NEVER be read back as "full-fleet

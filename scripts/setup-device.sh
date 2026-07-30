@@ -42,6 +42,12 @@ fail() {
                            # verify-device.sh's (u) check and create-usb-linux.sh, single source
                            # of truth for the journald RuntimeMaxUse cap path/value
 
+# shellcheck source=scripts/lib/udev-camera-box.sh
+. "$HERE/lib/udev-camera-box.sh"  # udev_camera_box_rules_content/udev_camera_box_helper_script_content
+                                   # (#894) -- also sourced (unmodified) by verify-device.sh's (w)
+                                   # check and create-usb-linux.sh, single source of truth for the
+                                   # conditional restart-on-hotplug + autosuspend-on-readd udev rule
+
 # GitHub repo + CI dev-build channel for installing the fleet-matching binary (#457 -- the fleet
 # runs CI dev-builds, e.g. 1.7.0-dev.157, never a GitHub release; see STEP 3 below).
 GITHUB_REPO="zbynekdrlik/camera-box"
@@ -985,6 +991,27 @@ exit 0
 RCEOF
 chmod +x /etc/rc.local
 echo "  Created: /etc/rc.local (USB autosuspend off, CPU performance)"
+
+# #894: rc.local (above) only applies USB-autosuspend-off ONCE at boot -- a grabber that
+# re-enumerates LATER comes back at the kernel default `auto` (measured fleet-wide: the box that
+# stayed at `on` had zero re-enumerations that day; the two that drifted to `auto` had 5 and 1, an
+# amplifying feedback loop). Install a udev rule that re-applies it on EVERY video4linux "add",
+# scoped to the grabber that actually fired (never a blanket SUBSYSTEM=="usb" match) via the
+# helper script below. The SAME rule also replaces the fleet's old UNCONDITIONAL
+# "restart camera-box.service on hotplug" rule (traced to the retired scripts/setup.sh, #563 --
+# it never migrated into this script) with a CONDITIONAL one: skip the restart while an E2E
+# camera-box-burn-*.service owns the device, so a benign USB re-enumeration during a measurement
+# run can no longer steal the capture node back from the burn unit (77/NOPERM, mislabeled as a
+# frozen camera in the verdict).
+mkdir -p /etc/udev/rules.d
+udev_camera_box_rules_content > /etc/udev/rules.d/99-camera-box.rules
+udev_camera_box_helper_script_content > /usr/local/bin/camera-box-udev-video-add.sh
+chmod +x /usr/local/bin/camera-box-udev-video-add.sh
+# Reload the rule DB now so a re-provisioning pass against an already-booted box picks it up
+# immediately -- this is NOT starting/restarting camera-box.service itself (that stays deferred to
+# the next reboot, per this script's own convention), just refreshing udev's own rule cache.
+udevadm control --reload-rules 2>/dev/null || true
+echo "  Installed: /etc/udev/rules.d/99-camera-box.rules + /usr/local/bin/camera-box-udev-video-add.sh (#894 -- conditional hotplug restart + autosuspend re-apply)"
 
 # =============================================================================
 # STEP 17: Install dantesync (PTP time synchronization) -- the SOLE clock authority

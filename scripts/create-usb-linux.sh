@@ -47,6 +47,11 @@ SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 . "$SCRIPT_DIR/lib/log-diet.sh"  # log_diet_journald_dropin (#762) -- SAME source of truth as
                                  # setup-device.sh/verify-device.sh
 
+# shellcheck source=scripts/lib/udev-camera-box.sh
+. "$SCRIPT_DIR/lib/udev-camera-box.sh"  # udev_camera_box_rules_content/
+                                        # udev_camera_box_helper_script_content (#894) -- SAME
+                                        # source of truth as setup-device.sh/verify-device.sh
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -237,6 +242,16 @@ EOF
     # just needs to land before that chroot script runs). See scripts/lib/log-diet.sh.
     mkdir -p "$MOUNT_ROOT$(dirname "$LOG_DIET_JOURNALD_DROPIN_PATH")"
     log_diet_journald_dropin > "$MOUNT_ROOT$LOG_DIET_JOURNALD_DROPIN_PATH"
+
+    # #894: bake the SAME conditional hotplug-restart + autosuspend-reapply udev rule setup-device.sh
+    # installs (see scripts/lib/udev-camera-box.sh) into the base image too -- a fresh USB build must
+    # never regress to the old fleet's UNCONDITIONAL "restart camera-box.service on hotplug" rule
+    # (traced to the retired scripts/setup.sh, #563) for even one boot before a re-provisioning pass.
+    # Plain file writes, no chroot needed (nothing here calls apt/systemctl).
+    mkdir -p "$MOUNT_ROOT/etc/udev/rules.d" "$MOUNT_ROOT/usr/local/bin"
+    udev_camera_box_rules_content > "$MOUNT_ROOT/etc/udev/rules.d/99-camera-box.rules"
+    udev_camera_box_helper_script_content > "$MOUNT_ROOT/usr/local/bin/camera-box-udev-video-add.sh"
+    chmod +x "$MOUNT_ROOT/usr/local/bin/camera-box-udev-video-add.sh"
 
     # Create setup script to run inside chroot
     cat > "$MOUNT_ROOT/tmp/setup.sh" << 'SETUP_EOF'

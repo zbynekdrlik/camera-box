@@ -533,7 +533,10 @@ fn recording_e2e_execute_mode_runs_the_merge_and_propagates_its_exit_code() {
     // #856: widened from 4800 to 6200 bytes -- the [8/8g] rig-wide A/V-correction combine step
     // (av_sync_combine_offsets.py invocation + its fail-open comment block) legitimately added
     // ~1300 bytes between the merge call and the exit, same justified-growth pattern as above.
-    let window = &s[exec_merge_block..(exec_merge_block + 6200).min(s.len())];
+    // #894: widened from 6200 to 6600 bytes -- the burn-unit run-integrity GATE combinator
+    // (reads BURN_UNIT_INTEGRITY_MSG from the new [7b/8] check and tightens $GATE) legitimately
+    // added ~400 bytes between the merge call and the exit, same justified-growth pattern as above.
+    let window = &s[exec_merge_block..(exec_merge_block + 6600).min(s.len())];
     assert!(
         window.contains(r#"exit "$GATE""#),
         "#703: after running the real merge, the branch must `exit \"$GATE\"` (the merge's own \
