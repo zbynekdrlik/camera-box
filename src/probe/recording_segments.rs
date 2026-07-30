@@ -428,18 +428,27 @@ fn window_segment(
     // (RECORDED order) this function already walked above. `residual_events` needs no `gen_ts_ns`
     // re-derivation: `SegmentFrame` and `crate::residual_events::TickSample` carry the identical
     // three fields, so this is a plain field-copy, not a re-decode.
+    let tick_samples: Vec<crate::residual_events::TickSample> = frames
+        .iter()
+        .map(|f| crate::residual_events::TickSample {
+            frame_index: f.frame_index,
+            gen_ts_ns: f.gen_ts_ns,
+            tick: f.tick,
+        })
+        .collect();
+    let residual_events =
+        crate::residual_events::residual_events(&tick_samples, start_ns, expected_step);
+    // #883 — when the whole-window net-span `gaps` is non-zero but the walk above found NOTHING
+    // to blame it on (every delta sat at/under the outlier ceiling, no backward jump), fall back
+    // to locating the single largest recorded-order delta so a counted gap is never left
+    // completely unlocatable. See `crate::residual_events::
+    // locate_best_candidate_for_unattributed_gap` for the full rationale.
     let residual_events: Vec<crate::residual_events::ResidualEvent> =
-        crate::residual_events::residual_events(
-            &frames
-                .iter()
-                .map(|f| crate::residual_events::TickSample {
-                    frame_index: f.frame_index,
-                    gen_ts_ns: f.gen_ts_ns,
-                    tick: f.tick,
-                })
-                .collect::<Vec<_>>(),
+        crate::residual_events::locate_best_candidate_for_unattributed_gap(
+            &tick_samples,
             start_ns,
-            expected_step,
+            gaps,
+            residual_events,
         )
         .into_iter()
         .map(|mut e| {

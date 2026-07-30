@@ -152,21 +152,70 @@ fn recorded_delta_before(present: &[&TickSample], i: usize, prev_tick: u32) -> O
 /// accounting is honestly short by 2 slots (a diffuse residual from many near-nominal
 /// transitions, not one big anomaly).
 ///
-/// STUB (RED, #883): always returns `events` unchanged. See the GREEN commit for the real
-/// implementation.
+/// This re-walks `frames` (RECORDED order, the same input [`residual_events`] already consumed)
+/// and appends ONE Gap event anchored on the SINGLE LARGEST forward delta in the window — the
+/// best available candidate location to start pixel-proofing from. `missing_slots` is set to the
+/// full CREDITED `gaps` value (the authoritative figure), not the local delta's own
+/// `delta/expected_step - 1` estimate, precisely so a reader never sees two conflicting numbers
+/// for the same window: this event's whole point is "here is where to start looking for the
+/// counted deficit", not an independent re-measurement that could disagree with it.
 ///
 /// Never touches a window that already has a located Gap event (a genuine outlier or backward
-/// jump stays the primary, more concrete lead) and never fires when `gaps == 0` — so it can NEVER
-/// touch the #852 scenario (`gaps == 0`, events non-empty), which stays intentionally locked as a
-/// separate, valid divergence (see
+/// jump stays the primary, more concrete lead — this fallback never doubles up on it) and never
+/// fires when `gaps == 0` — so it can NEVER touch the #852 scenario (`gaps == 0`, events
+/// non-empty), which stays intentionally locked as a separate, valid divergence (see
 /// `residual_gap_events_can_be_nonzero_while_authoritative_gaps_stays_zero_852` in
 /// `probe::recording_segments`).
 pub fn locate_best_candidate_for_unattributed_gap(
-    _frames: &[TickSample],
-    _window_start_ns: i64,
-    _gaps: u32,
-    events: Vec<ResidualEvent>,
+    frames: &[TickSample],
+    window_start_ns: i64,
+    gaps: u32,
+    mut events: Vec<ResidualEvent>,
 ) -> Vec<ResidualEvent> {
+    if gaps == 0 || events.iter().any(|e| e.kind == ResidualEventKind::Gap) {
+        return events;
+    }
+    let present: Vec<&TickSample> = frames.iter().filter(|f| f.tick.is_some()).collect();
+    let mut best_i: Option<usize> = None;
+    let mut best_delta: i64 = 0;
+    for i in 1..present.len() {
+        let prev = present[i - 1].tick.expect("filtered to Some above");
+        let cur = present[i].tick.expect("filtered to Some above");
+        let delta = i64::from(cur) - i64::from(prev);
+        if delta > best_delta {
+            best_delta = delta;
+            best_i = Some(i);
+        }
+    }
+    // Defensive only: `gaps > 0` mathematically requires >= 2 present ticks spanning a positive
+    // range (see `crate::painted_tick_gaps`), so a forward-progressing pair always exists here —
+    // and any backward jump would already have been caught above (unconditional, no threshold),
+    // which would have made the `events.iter().any(...)` guard above return early.
+    let Some(i) = best_i else {
+        return events;
+    };
+    let prev_tick = present[i - 1].tick.expect("filtered to Some above");
+    let cur_tick = present[i].tick.expect("filtered to Some above");
+    let f = present[i];
+    events.push(ResidualEvent {
+        kind: ResidualEventKind::Gap,
+        cambox: String::new(), // caller fills in, same convention as residual_events()
+        frame_index: f.frame_index,
+        gen_ts_ns: f.gen_ts_ns,
+        window_offset_ns: f.gen_ts_ns - window_start_ns,
+        wall_clock_epoch_s: f.gen_ts_ns.div_euclid(1_000_000_000),
+        tick_before: Some(prev_tick),
+        tick_after: Some(cur_tick),
+        missing_slots: Some(gaps),
+        paired_with_catchup: false,
+        reason: Some(format!(
+            "issue 883 fallback: whole-window net-span accounting is short {gaps} slot(s) with \
+             no delta above the outlier ceiling ({GAP_OUTLIER_ABS_DELTA}) -- this is the single \
+             largest recorded-order delta ({best_delta}) in the window, the best available \
+             candidate; the residual may be diffuse across smaller deviations rather than fully \
+             attributable to this one transition"
+        )),
+    });
     events
 }
 
