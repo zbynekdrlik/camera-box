@@ -29,22 +29,26 @@ set -euo pipefail
 # scripts/lib/cambox-offline-ack.sh already provides for an offline cambox (#758/#827) — reused
 # here verbatim, never a second exclusion mechanism invented for this gate.
 #
-# VERSION SOURCE: dantesync has NO embedded Windows VersionInfo resource (its build.rs sets none),
-# so — unlike bundle-state-server.py's ndi_runtime_version Get-Item trick — the version cannot be
-# read off the binary's file metadata. It IS logged once per (re)start, on every platform: Linux
-# prints "DanteSync v<ver>" to stdout (captured by journald under systemd), Windows's --service
-# mode prints "Service Started: v<ver>" to its own log file. This gate's Linux/local read scans
-# `journalctl -u dantesync`; strih/stream expose the SAME value as a NEW `dantesync_version` key
-# in their standing bundle-state (:8899) payload (bundle_state_gather.py/bundle-state-server.py,
-# #862 point 1) — read here via version-integrity-gate.sh's own state_json_value (sourced below,
-# never re-derived) over the SAME --win-state JSON file recording-e2e.sh already fetches for the
-# version-integrity gate.
+# VERSION SOURCE (#862 follow-up, 2026-07-30): the ORIGINAL version of this gate assumed dantesync
+# has no readable version on Windows and read a startup log/journal line instead
+# (`journalctl -u dantesync` on Linux, the Windows service log via bundle-state). BOTH sources
+# turned out empty on the real fleet — `journalctl -u dantesync` never actually carries a version
+# line on Linux, and the strih/stream bundle-state servers deployed at the time never picked up
+# the new `dantesync_version` key — so the gate hard-blocked every E2E run at [0/8] with 7 of 8
+# boxes UNKNOWN (see the #862 supervisor-verification comment). Live re-check found the actual
+# answer simpler: `dantesync --version` prints `dantesync X.Y.Z` and answers on EVERY platform —
+# Linux, Windows, and dev1 itself — over the SAME SSH transport this repo already uses elsewhere
+# (drift-guard.sh's `gather_and_check_imag`, dantesync-gate.sh's Linux journal reads). One uniform
+# reader (`read_dantesync_version_output`, below) now covers every node kind; the bundle-state
+# coupling and the journal/log parser are gone (see .claude/rules/dantesync-version-reading.md for
+# the corrected read-path notes, and scripts/bundle_state_gather.py /
+# scripts/bundle-state-server.py for the reverted #862 additions).
 #
 # Usage:
 #   dantesync-version-gate.sh [--pin VERSION] [--fleet-file PATH] \
 #       --linux "cam1=root@10.77.9.61 cam2=root@10.77.9.62 imag-nb=newlevel@10.77.9.182" \
 #       --local dev1 \
-#       --win-state strih=/tmp/version-strih.json --win-state stream=/tmp/version-stream.json
+#       --win "strih=newlevel@10.77.9.202 stream=newlevel@10.77.9.204"
 #   dantesync-version-gate.sh --help
 #
 # Exit codes: 0 = every node matches the pin (or is knowingly excluded) — rig test may proceed,
@@ -55,31 +59,27 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/cambox-offline-ack.sh
 . "$HERE/lib/cambox-offline-ack.sh"
-# shellcheck source=scripts/version-integrity-gate.sh
-# Sourcing this pulls in ONLY the pure functions declared ABOVE its own BASH_SOURCE!=$0
-# source-guard (state_json_value, compare_args_from_state, ...) — its guard returns before
-# sourcing drift-guard.sh or running its own main(), exactly like this file's own guard below.
-. "$HERE/version-integrity-gate.sh"
 
 DEFAULT_FLEET_FILE="$HERE/../rig-fleet.txt"
-# The fleet-wide pin (#862 point 3). Default = the version already uniform across cam1-4 at the
-# time this gate was written (2026-07-29) — a deliberate, bump-on-purpose value in the SAME spirit
-# as verify-device.sh's NDI_VERSION_PIN: whoever executes a dantesync fleet upgrade (#851) bumps
-# this alongside the deploy, so the gate never silently drifts to "whatever happens to be out".
-DANTESYNC_VERSION_PIN="${DANTESYNC_VERSION_PIN:-1.8.21}"
+# The fleet-wide pin (#862 point 3). Bumped 2026-07-30 (follow-up fix) to the supervisor's
+# fleet-convergence target — a deliberate, bump-on-purpose value in the SAME spirit as
+# verify-device.sh's NDI_VERSION_PIN: whoever executes a dantesync fleet upgrade (#851) bumps this
+# alongside the deploy, so the gate never silently drifts to "whatever happens to be out".
+DANTESYNC_VERSION_PIN="${DANTESYNC_VERSION_PIN:-1.8.25}"
 
 # --- PURE functions (no network, no SSH — unit-tested by sourcing this file) ------------------
 
-# dantesync_version_from_log TEXT -> the FRESHEST ("DanteSync v<ver>" console/journal line, OR
-# "Service Started: v<ver>" Windows-service-log line) dantesync version found in TEXT. The LAST
-# match wins, never the first: a box upgraded + restarted more than once still carries its OLDER
-# startup line further back in the journal/log, and grading that stale line as "the current
-# version" is exactly the #851 hazard this gate exists to catch. "" when TEXT has no match
-# (UNKNOWN downstream — unread/absent, never guessed).
-dantesync_version_from_log() {
+# dantesync_version_from_version_output TEXT -> the dantesync version found in TEXT, which is the
+# raw stdout of a `dantesync --version` invocation ("dantesync X.Y.Z" — confirmed live 2026-07-30
+# on every managed platform: Linux console, Windows service exe, and dev1 itself). The LAST match
+# wins, never the first — purely defensive robustness against SSH banner/MOTD noise ever landing
+# ahead of the real line, mirroring the "freshest wins" discipline this gate's now-removed
+# journal-based reader used for the same reason. "" when TEXT has no match (UNKNOWN downstream —
+# unreachable/unread, never guessed).
+dantesync_version_from_version_output() {
   local text="$1"
   printf '%s\n' "$text" \
-    | grep -oE '(DanteSync|Service Started:) v[0-9]+\.[0-9]+\.[0-9]+' \
+    | grep -oE 'dantesync [0-9]+\.[0-9]+\.[0-9]+' \
     | tail -1 \
     | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || true
 }
@@ -130,15 +130,18 @@ dantesync_fleet_report() {
     esac
   done
   echo
+  # #862 follow-up: name BOTH the DRIFT and UNKNOWN counts in the SAME top banner line, never
+  # UNKNOWN-as-an-aside — a fleet that is mostly UNREADABLE (7 of 8 boxes, the live incident this
+  # fixes) must never read as "1 box(es) run a dantesync version other than the pinned", which
+  # undersells an almost-total read failure as a single minor drift.
   if [ "$bad" -gt 0 ]; then
-    echo "!! GATE FAILED: ${bad} box(es) run a dantesync version other than the pinned ${pin} — rig test REFUSED." >&2
+    echo "!! GATE FAILED: ${bad} box(es) DRIFTED from the pinned ${pin}, ${unknown} box(es) UNKNOWN (version not read) — rig test REFUSED." >&2
     echo "!! A drifted clock daemon can measure the offset worse (#851) and hide behind an otherwise-healthy run." >&2
-    echo "!! Upgrade the box(es) named DRIFT above to ${pin}, re-verify, then re-run." >&2
-    [ "$unknown" -gt 0 ] && echo "!! (${unknown} further box(es) also UNKNOWN — status also incomplete.)" >&2
+    echo "!! Upgrade the box(es) named DRIFT above to ${pin}; fix SSH/dantesync reachability for the box(es) named UNKNOWN; then re-run." >&2
     return 20
   fi
   if [ "$unknown" -gt 0 ]; then
-    echo "!! GATE INCOMPLETE: ${unknown} box(es) UNKNOWN (dantesync version not read) — NOT clean." >&2
+    echo "!! GATE INCOMPLETE: ${unknown} box(es) UNKNOWN (dantesync version not read), 0 box(es) DRIFTED — NOT clean." >&2
     echo "!! Every managed node must report its dantesync version before this gate is trusted. (${ok} OK.)" >&2
     return 11
   fi
@@ -163,57 +166,74 @@ unread-and-unexcluded node, printing a box->version table.
 
 Usage:
   dantesync-version-gate.sh [--pin VERSION] [--fleet-file PATH] \\
-      --linux "name=user@ip ..." [--local name ...] [--win-state name=file ...]
+      --linux "name=user@ip ..." [--local name ...] [--win "name=user@ip ..."]
 
 Options:
   --pin VERSION     the fleet-pinned expected dantesync version (default \$DANTESYNC_VERSION_PIN).
   --fleet-file PATH default CAMBOX_OFFLINE_ACK source when the env var is unset (default:
                     ${DEFAULT_FLEET_FILE}) — same file recording-e2e.sh's fleet preflight reads.
   --linux "N=U@IP ..."  one or more SSH-reachable Linux nodes (space-separated "name=user@ip"
-                    pairs in ONE argument, mirrors dantesync-gate.sh's --linux). Repeatable.
+                    pairs in ONE argument, mirrors dantesync-gate.sh's --linux). Repeatable. Read
+                    via \`dantesync --version\` over SSH.
   --local NAME      a node read LOCALLY (no ssh) — dev1, the box running this gate. Repeatable.
-  --win-state N=FILE  a Windows box (strih/stream) whose bundle-state JSON (dantesync_version key)
-                    was already fetched to FILE. Repeatable. A box with no file is UNKNOWN.
+                    Read via \`dantesync --version\` directly.
+  --win "N=U@IP ..."  one or more SSH-reachable Windows nodes (strih/stream), same
+                    space-separated "name=user@ip" shape as --linux. Repeatable. Read via the
+                    dantesync SERVICE exe's full path over SSH (not on Windows PATH).
 
 Exit: 0 = every node on the pin (or excluded) — proceed. 20 = a node DRIFTED (REFUSED).
   11 = a node UNKNOWN/unread (INCOMPLETE, not clean). 1 = usage error.
 EOF
 }
 
-# read_dantesync_journal NAME [TARGET] -> raw `journalctl -u dantesync` text for NAME. TARGET
-# empty -> LOCAL read (dev1, the box running this gate — no ssh, mirrors
-# clock-offset-painter-gate.sh's dev1-is-local convention). TARGET set ("user@ip") -> SSH read.
-# "" if unreachable/absent (UNKNOWN downstream, never guessed). Overridable for tests/offline via
-# DANTESYNC_VERSION_GATE_JOURNAL_<NAME> (NAME uppercased, "-" -> "_") — mirrors
+# The dantesync SERVICE exe's install path on a Windows node — NOT on PATH there (unlike Linux,
+# where `dantesync` is on PATH at /usr/local/bin on every managed node incl. dev1, confirmed live
+# 2026-07-30). Overridable for a differently-installed box.
+DANTESYNC_VERSION_GATE_WIN_EXE="${DANTESYNC_VERSION_GATE_WIN_EXE:-C:\\Program Files\\DanteSync\\dantesync.exe}"
+
+# read_dantesync_version_output NAME TARGET WIN -> raw `dantesync --version` stdout for NAME.
+# TARGET empty -> LOCAL read (dev1, the box running this gate — no ssh, mirrors
+# clock-offset-painter-gate.sh's dev1-is-local convention). TARGET set ("user@ip") -> SSH read;
+# WIN=1 runs the Windows service exe's full quoted path (confirmed live: OpenSSH-for-Windows
+# executes it via cmd.exe directly, no PowerShell wrapper needed); WIN unset/0 runs the bare
+# `dantesync --version` (on PATH on every Linux node incl. dev1). "" if unreachable/absent
+# (UNKNOWN downstream, never guessed). Overridable per-node for tests/offline via
+# DANTESYNC_VERSION_GATE_VERSION_<NAME> (NAME uppercased, "-" -> "_") — mirrors
 # dantesync-gate.sh's DANTESYNC_GATE_LINUX_JOURNAL_<NAME> fixture-injection seam.
-read_dantesync_journal() {
-  local name="$1" target="${2:-}" var
-  var="DANTESYNC_VERSION_GATE_JOURNAL_$(printf '%s' "$name" | tr '[:lower:]-' '[:upper:]_')"
+read_dantesync_version_output() {
+  local name="$1" target="${2:-}" win="${3:-0}" var cmd
+  var="DANTESYNC_VERSION_GATE_VERSION_$(printf '%s' "$name" | tr '[:lower:]-' '[:upper:]_')"
   if [ -n "${!var:-}" ]; then
     cat "${!var}" 2>/dev/null || true
     return 0
   fi
   if [ -z "$target" ]; then
-    journalctl -u dantesync --no-pager -o cat 2>/dev/null || true
+    # --local nodes are always the Linux box running this gate itself (dev1) -- WIN never applies.
+    dantesync --version 2>/dev/null || true
     return 0
+  fi
+  if [ "$win" = "1" ]; then
+    cmd="\"${DANTESYNC_VERSION_GATE_WIN_EXE}\" --version"
+  else
+    cmd="dantesync --version"
   fi
   sshpass -p "${DANTESYNC_VERSION_GATE_SSH_PASS:-newlevel}" ssh \
     -o StrictHostKeyChecking=no -o BatchMode=no \
     -o "ConnectTimeout=${DANTESYNC_VERSION_GATE_SSH_TIMEOUT:-8}" \
     "$target" \
-    'journalctl -u dantesync --no-pager -o cat 2>/dev/null' 2>/dev/null || true
+    "$cmd" 2>/dev/null || true
 }
 
 main() {
   local pin="$DANTESYNC_VERSION_PIN" fleet_file="$DEFAULT_FLEET_FILE"
-  local -a linux_raw=() local_names=() win_state=()
+  local -a linux_raw=() local_names=() win_raw=()
   while [ $# -gt 0 ]; do
     case "$1" in
       --pin) shift; pin="${1:-}" ;;
       --fleet-file) shift; fleet_file="${1:-}" ;;
       --linux) shift; linux_raw+=("${1:-}") ;;
       --local) shift; local_names+=("${1:-}") ;;
-      --win-state) shift; win_state+=("${1:-}") ;;
+      --win) shift; win_raw+=("${1:-}") ;;
       -h | --help)
         usage
         exit 0
@@ -232,17 +252,21 @@ main() {
     shift || true
   done
 
-  local -a linux_pairs=()
+  local -a linux_pairs=() win_pairs=()
   local raw
   set -f
   for raw in "${linux_raw[@]}"; do
     # shellcheck disable=SC2206
     linux_pairs+=($raw)
   done
+  for raw in "${win_raw[@]}"; do
+    # shellcheck disable=SC2206
+    win_pairs+=($raw)
+  done
   set +f
 
-  if [ "${#linux_pairs[@]}" -eq 0 ] && [ "${#local_names[@]}" -eq 0 ] && [ "${#win_state[@]}" -eq 0 ]; then
-    echo "ERROR: no node to gate (--linux, --local and --win-state are all empty)." >&2
+  if [ "${#linux_pairs[@]}" -eq 0 ] && [ "${#local_names[@]}" -eq 0 ] && [ "${#win_pairs[@]}" -eq 0 ]; then
+    echo "ERROR: no node to gate (--linux, --local and --win are all empty)." >&2
     echo "The dantesync version-parity gate cannot certify the fleet with zero nodes — refusing to pass." >&2
     exit 1
   fi
@@ -251,28 +275,25 @@ main() {
   export CAMBOX_OFFLINE_ACK
 
   local -a entries=()
-  local pair name target version file
+  local pair name target version
 
   for pair in "${linux_pairs[@]}"; do
     name="${pair%%=*}"
     target="${pair#*=}"
-    version="$(dantesync_version_from_log "$(read_dantesync_journal "$name" "$target")")"
+    version="$(dantesync_version_from_version_output "$(read_dantesync_version_output "$name" "$target" 0)")"
     entries+=("${name}=${version}")
   done
 
   for name in "${local_names[@]}"; do
     [ -z "$name" ] && continue
-    version="$(dantesync_version_from_log "$(read_dantesync_journal "$name" "")")"
+    version="$(dantesync_version_from_version_output "$(read_dantesync_version_output "$name" "" 0)")"
     entries+=("${name}=${version}")
   done
 
-  for pair in "${win_state[@]}"; do
+  for pair in "${win_pairs[@]}"; do
     name="${pair%%=*}"
-    file="${pair#*=}"
-    version=""
-    if [ -n "$file" ] && [ -s "$file" ]; then
-      version="$(state_json_value "$file" dantesync_version)"
-    fi
+    target="${pair#*=}"
+    version="$(dantesync_version_from_version_output "$(read_dantesync_version_output "$name" "$target" 1)")"
     entries+=("${name}=${version}")
   done
 

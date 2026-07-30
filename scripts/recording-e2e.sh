@@ -549,11 +549,13 @@ IMAG_GENLOCK_SHA="$(sshpass -p "${IMAG_PW:-newlevel}" ssh -o StrictHostKeyChecki
 # dev1 drift, discovered only by post-mortem — exactly what this gate exists to prevent). Every
 # node dantesync runs on is checked: the active cam fleet (camera_active_excluding — never a
 # literal range, see .claude/rules/camera-active-set.md), imag-nb, dev1 ITSELF (the box running
-# this very gate — #862 point 2: the harness's own host is never exempt), and strih/stream via the
-# SAME bundle-state JSON the version-integrity gate above already fetched (dantesync_version is
-# now one more key in that payload, #862 point 1). An unreachable node never silently passes — it
-# is either read, or explicitly excluded via the SAME CAMBOX_OFFLINE_ACK/rig-fleet.txt mechanism
-# the fleet preflight already uses (#758/#827), never a silent skip.
+# this very gate — #862 point 2: the harness's own host is never exempt), and strih/stream over
+# SSH exactly like every other node (#862 follow-up, 2026-07-30: the ORIGINAL bundle-state-backed
+# read for strih/stream was half-wired and always UNKNOWN in practice — every node, incl.
+# Windows, is now read the SAME uniform way via `dantesync --version`, no bundle-state
+# involvement). An unreachable node never silently passes — it is either read, or explicitly
+# excluded via the SAME CAMBOX_OFFLINE_ACK/rig-fleet.txt mechanism the fleet preflight already
+# uses (#758/#827), never a silent skip.
 echo "[0/8] dantesync version-parity gate — every managed node must run the pinned dantesync (#862)"
 DANTESYNC_VERSION_LINUX="$CAMERA_NAME=root@$CAM1_IP cam2=root@$PAINTER_IP"
 for _dv_cn in $(camera_active_excluding "$CAMERA_NAME cam2"); do
@@ -563,8 +565,7 @@ DANTESYNC_VERSION_LINUX="$DANTESYNC_VERSION_LINUX imag-nb=${IMAG_USER:-newlevel}
 "$HERE/dantesync-version-gate.sh" \
   --linux "$DANTESYNC_VERSION_LINUX" \
   --local dev1 \
-  --win-state "strih=$VERSION_STRIH_STATE" \
-  --win-state "stream=$VERSION_STREAM_STATE"
+  --win "strih=${WIN_SSH_USER:-newlevel}@$STRIH stream=${WIN_SSH_USER:-newlevel}@$STREAM"
 
 # dev1<->painter clock-offset gate — ALL_CAMBOX sweep ONLY (#326, #312 Phase-2 robustness). The
 # all-cambox sweep ([6/8] below) stamps each program-switch WINDOW boundary on dev1's
