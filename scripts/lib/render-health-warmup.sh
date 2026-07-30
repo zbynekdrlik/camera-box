@@ -36,6 +36,8 @@ render_health_window_outcome() {
 
   if [ "$rc" -eq 0 ]; then
     printf 'outcome=PASS\n'
+  elif [ "$idx" -eq 1 ]; then
+    printf 'outcome=WARMUP\n'
   else
     printf 'outcome=FAIL\n'
   fi
