@@ -108,6 +108,14 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # killed run self-heals there, with no dev1 involvement.
 # shellcheck source=scripts/lib/cam2-painter-deadman.sh
 . "$HERE/lib/cam2-painter-deadman.sh"
+# #878 (same family as #844/#869/#872): the PURE decision for the STARTUP self-heal below -- a
+# dead harness only ever restores rig state inside cleanup() (the bash EXIT trap), which SIGKILL
+# never reaches, so the leftover camera-box.service/painter/burn state strands until a human
+# clears it by hand. The repair-vs-skip decision this file provides is derived from the SAME
+# durable rig_e2e_marker_present() evidence rig-restore-watchdog.sh already trusts (#353) -- never a proxy
+# for "is the box currently healthy", which stays entirely the [0/8] fleet preflight's own call.
+# shellcheck source=scripts/lib/startup-self-heal.sh
+. "$HERE/lib/startup-self-heal.sh"
 # #709: imag-nb GPU VRAM headroom preflight (pure query-cmd builder + parser + message
 # formatters) — a long-uptime OBS render pipeline on imag-nb can leak GPU VRAM until StartRecord's
 # NVENC encoder init fails with NV_ENC_ERR_OUT_OF_MEMORY; catch it BEFORE StartRecord, not via the
@@ -586,6 +594,62 @@ DANTESYNC_VERSION_LINUX="$DANTESYNC_VERSION_LINUX imag-nb=${IMAG_USER:-newlevel}
 if [ "${ALL_CAMBOX:-0}" = "1" ]; then
   echo "[0/8] dev1<->painter clock-offset gate — all-cambox window attribution must be trustworthy (#326)"
   "$HERE/clock-offset-painter-gate.sh" --painter "cam2=$PAINTER_IP"
+fi
+
+# #878 (same family as #844/#869/#872): STARTUP self-heal, BEFORE the fleet preflight below
+# asserts anything about the fleet. A dead harness (SIGKILLed / GH Actions cancelled under
+# full-path-e2e.yml's `cancel-in-progress: true` concurrency group -- a ROUTINE event, any push to
+# `dev` kills an in-flight hardware run) only ever restores rig state inside cleanup(), the bash
+# EXIT trap -- structurally unreachable on SIGKILL. The NEXT run then fails at [0/8] preflight on a
+# leftover precondition (camera-box.service inactive, painter dark, a leaked genlock_burn #844)
+# instead of a measurement: four consecutive runs died this way live, 2026-07-30, ten seconds
+# apart on cam2/cam3/cam4 -- the ALL_CAMBOX sweep walking the fleet, not independent failures.
+#
+# Gated STRICTLY on rig_e2e_marker_present() (#353, scripts/lib/rig-heartbeat.sh) -- the SAME
+# durable "a harness entered a test state and did not clean up" evidence rig-restore-watchdog.sh
+# already trusts as its PRIMARY stranded signal. scripts/lib/startup-self-heal.sh turns that
+# evidence into repair-vs-skip, never on a guess (unrecognized input skips + logs the ambiguity,
+# see that file's own functions). This step is deliberately narrow: it repairs
+# ONLY what THIS harness can prove it owns, and it does NOT change the [0/8] fleet preflight's own
+# pass/fail policy below -- an inactive box with no marker evidence still hard-fails exactly as
+# before. Whether the preflight itself should ALSO self-heal an unproven case is the OPEN #878
+# question left for the user; this change does not resolve it either way. ALL_CAMBOX only, same
+# scope as the fleet preflight it precedes -- the bug is specific to the sweep touching cam3/cam4.
+if [ "${ALL_CAMBOX:-0}" = "1" ]; then
+  _shr_marker=0
+  rig_e2e_marker_present && _shr_marker=1
+  _shr_action="$(startup_self_heal_decision "$_shr_marker")"
+  _shr_reason="$(startup_self_heal_reason "$_shr_marker")"
+  echo "[0/8] startup self-heal (#878): ${_shr_action} -- ${_shr_reason}"
+  if [ "$_shr_action" = "repair" ]; then
+    # camera-box.service on every box THIS harness's own EXIT-trap teardown restarts -- cam1
+    # (source), cam2 (painter), and every camera_active_secondary_set() member (#827, never a
+    # literal cam-number range). Reuses the SAME restart+verify primitive that teardown's own
+    # FINAL verify pass uses (via the startup_self_heal_cambox_verify_cmds/_painter_verify_cmds
+    # wrappers, scripts/lib/startup-self-heal.sh -- see that file for why the indirection exists)
+    # STANDALONE: idempotent and cheap on an already-healthy box, a genuine restart+retry attempt
+    # on one the previous run left down.
+    echo "    restoring camera-box.service on every fleet box (idempotent restart+verify, #675/#684)"
+    timeout "$CLEANUP_SSH_TIMEOUT" sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$CAM1_IP" \
+      "$(startup_self_heal_cambox_verify_cmds "$CAMERA_NAME (source, $CAM1_IP) STARTUP-#878")" || true
+    for _shr_cn in $(camera_active_secondary_set); do
+      _shr_cip="$(camera_secondary_ip "$_shr_cn")"
+      timeout "$CLEANUP_SSH_TIMEOUT" sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$_shr_cip" \
+        "$(startup_self_heal_cambox_verify_cmds "$_shr_cn ($_shr_cip) STARTUP-#878")" || true
+    done
+    timeout "$CLEANUP_SSH_TIMEOUT" sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$PAINTER_IP" \
+      "$(startup_self_heal_cambox_verify_cmds "cam2/painter, $PAINTER_IP STARTUP-#878")
+$(startup_self_heal_painter_verify_cmds)" || true
+    # #844: clear any genlock_burn leaked ON by a run that never reached cleanup(). obs_burn_filter.py
+    # remove is idempotent (a no-op if already off -- the same mechanism cleanup()'s own #246/#257
+    # clear-loop uses); scope derives from camera_active_excluding (#827, never a literal range).
+    echo "    clearing any leaked genlock_burn on strih's active-fleet NDI inputs (idempotent, #246/#257/#844)"
+    for _shr_bn in $(camera_active_excluding ""); do
+      _shr_bnum="${_shr_bn#cam}"
+      python3 "$HERE/obs_burn_filter.py" remove --host "$STRIH" --input "NDI cam${_shr_bnum}" 2>&1 \
+        | sed "s/^/    [startup-self-heal burn-clear ${_shr_bn}] /" || true
+    done
+  fi
 fi
 
 # #758 item 1 — fleet-wide minute-0 preflight: a dirty/degraded rig must fail LOUDLY here, before

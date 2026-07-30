@@ -206,25 +206,102 @@ fn startup_self_heal_block(s: &str) -> &str {
     &s[start..end]
 }
 
+/// The block must call the `startup_self_heal_cambox_verify_cmds` WRAPPER, not the raw
+/// `camera_box_verify_active_cmds` helper name directly. This is deliberate, not incidental:
+/// several EXISTING static-anchor tests (tests/harness_recording_e2e_cleanup_verifies_restart_675.rs,
+/// tests/harness_recording_e2e_cleanup_final_verify_684.rs) locate cleanup()'s OWN calls to that
+/// helper via a plain `.find()`, and a bare second occurrence earlier in the file (this startup
+/// step runs before cleanup() is even defined) shadows the real one and breaks them -- reproduced
+/// live while building this fix. `startup_self_heal_genuinely_reuses_the_cambox_verify_helper`
+/// below proves the wrapper still delegates to the real helper, so this indirection is not a
+/// parallel reimplementation.
 #[test]
-fn startup_self_heal_block_repairs_camera_box_service_via_the_existing_restart_verify_helper() {
+fn startup_self_heal_block_repairs_camera_box_service_via_the_verify_wrapper() {
     let s = read_harness();
     let block = startup_self_heal_block(&s);
     assert!(
-        block.contains("camera_box_verify_active_cmds"),
-        "#878: must reuse camera_box_verify_active_cmds (#675/#684) -- never a parallel restart \
-         mechanism. Block:\n{block}"
+        block.contains("startup_self_heal_cambox_verify_cmds"),
+        "#878: must call the startup_self_heal_cambox_verify_cmds wrapper (never the bare \
+         camera_box_verify_active_cmds name, which would shadow cleanup()'s own #675/#684 calls \
+         for the sibling static-anchor tests). Block:\n{block}"
+    );
+    assert!(
+        !block.contains("camera_box_verify_active_cmds"),
+        "#878: the block must NOT call camera_box_verify_active_cmds directly by its bare name -- \
+         route through the startup_self_heal_cambox_verify_cmds wrapper instead. Block:\n{block}"
+    );
+}
+
+/// Same reasoning as above, for the painter restore -- must go through
+/// `startup_self_heal_painter_verify_cmds`, never the bare `cam2_painter_restore_verify_cmds`
+/// name (tests/harness_cam2_painter_provisioning_863.rs locates the real call via an UNBOUNDED
+/// `.find()` over the whole file).
+#[test]
+fn startup_self_heal_block_restores_cam2_painter_via_the_verify_wrapper() {
+    let s = read_harness();
+    let block = startup_self_heal_block(&s);
+    assert!(
+        block.contains("startup_self_heal_painter_verify_cmds"),
+        "#878: must call the startup_self_heal_painter_verify_cmds wrapper (never the bare \
+         cam2_painter_restore_verify_cmds name, which would shadow the real #863 call for \
+         tests/harness_cam2_painter_provisioning_863.rs's unbounded .find()). Block:\n{block}"
+    );
+    assert!(
+        !block.contains("cam2_painter_restore_verify_cmds"),
+        "#878: the block must NOT call cam2_painter_restore_verify_cmds directly by its bare \
+         name -- route through the startup_self_heal_painter_verify_cmds wrapper instead. \
+         Block:\n{block}"
+    );
+}
+
+/// Prove a wrapper genuinely DELEGATES to a real, existing helper rather than reimplementing it --
+/// sources both libs together and diffs the wrapper's output against the real helper's own output
+/// in a per-test tempdir (never a shared /tmp path, per `.claude/rules/ci-testing-gotchas.md`).
+fn assert_wrapper_delegates(real_lib_rel: &str, real_call: &str, wrapper_call: &str) {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let real_out = tmp.path().join("real.out");
+    let wrap_out = tmp.path().join("wrap.out");
+    let real_lib = manifest_dir().join(real_lib_rel);
+    let harness = format!(
+        "set -uo pipefail\n. {real_lib:?}\n. {:?}\n{real_call} > {:?}\n{wrapper_call} > {:?}",
+        lib_script(),
+        &real_out,
+        &wrap_out,
+    );
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(&harness)
+        .output()
+        .expect("failed to run bash harness");
+    assert!(
+        out.status.success(),
+        "harness itself must not crash. stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let real_content = fs::read_to_string(&real_out).expect("read real output");
+    let wrap_content = fs::read_to_string(&wrap_out).expect("read wrapper output");
+    assert_eq!(
+        real_content, wrap_content,
+        "the wrapper must produce BYTE-IDENTICAL output to the real helper -- it must delegate, \
+         not reimplement"
     );
 }
 
 #[test]
-fn startup_self_heal_block_restores_cam2_painter_via_the_existing_helper() {
-    let s = read_harness();
-    let block = startup_self_heal_block(&s);
-    assert!(
-        block.contains("cam2_painter_restore_verify_cmds"),
-        "#878: must reuse cam2_painter_restore_verify_cmds (#863) for the painter -- never a \
-         parallel mechanism. Block:\n{block}"
+fn startup_self_heal_genuinely_reuses_the_cambox_verify_helper() {
+    assert_wrapper_delegates(
+        "scripts/lib/camera-box-restart-verify.sh",
+        "camera_box_verify_active_cmds 'X'",
+        "startup_self_heal_cambox_verify_cmds 'X'",
+    );
+}
+
+#[test]
+fn startup_self_heal_genuinely_reuses_the_painter_verify_helper() {
+    assert_wrapper_delegates(
+        "scripts/lib/cam2-painter-restore-verify.sh",
+        "cam2_painter_restore_verify_cmds",
+        "startup_self_heal_painter_verify_cmds",
     );
 }
 
@@ -244,8 +321,7 @@ fn startup_self_heal_block_derives_fleet_scope_from_camera_active_set_helpers() 
     let s = read_harness();
     let block = startup_self_heal_block(&s);
     assert!(
-        block.contains("camera_active_secondary_set")
-            && block.contains("camera_active_excluding"),
+        block.contains("camera_active_secondary_set") && block.contains("camera_active_excluding"),
         "#878: fleet scope must derive from CAMERA_ACTIVE_SET via the existing \
          camera_active_secondary_set()/camera_active_excluding() helpers -- never a literal \
          cam-number range (.claude/rules/camera-active-set.md). Block:\n{block}"
