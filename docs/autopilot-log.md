@@ -6254,3 +6254,47 @@ mine) failed on rig-state issues unrelated to this diff (strih's bundle-state-se
 unreachable at :8899/:4455) -- consistent with #867's own root cause (strih's OBS currently has no
 live respawn watcher installed yet; this PR only fixes the SCRIPTS, it does not itself deploy/
 enable them on the live rig). Left for the operator/supervisor, same as the #707 entry above.
+
+## #862 -- fleet-wide dantesync version-parity gate (fail-closed against a pinned version)
+RED: 67d398755 -- new tests/dantesync_version_gate.rs (scripts/dantesync-version-gate.sh doesn't
+exist yet, 19 tests/19 failures); tests/python/test_bundle_state_gather.py new
+test_dantesync_version_from_log_* + test_build_bundle_state_*_dantesync_version tests (4
+failures, bsg.dantesync_version_from_log missing + build_bundle_state rejects the new kwarg);
+tests/harness_recording_e2e_paths.rs new recording_e2e_runs_the_dantesync_version_gate +
+dantesync_version_gate_checks_dev1_itself + dantesync_version_gate_runs_before_any_recording (3
+failures, recording-e2e.sh never invoked the new gate).
+GREEN: e4c9e5be7 -- new scripts/dantesync-version-gate.sh: pure dantesync_version_from_log
+(freshest "DanteSync v.../Service Started: v..." startup-log line wins, never the first --
+guards against a stale prior-binary's version line outranking a real upgrade),
+dantesync_version_verdict (OK/DRIFT/UNKNOWN per node against ONE pinned DANTESYNC_VERSION_PIN,
+default 1.8.21 -- NOT a peer-agreement compare, a uniformly-stale fleet still fails), and
+dantesync_fleet_report (box->version table, CAMBOX_OFFLINE_ACK/rig-fleet.txt exclusion reused
+verbatim from the existing offline-cambox mechanism, never a new one). Sources
+version-integrity-gate.sh for its state_json_value (its own source-guard returns before pulling
+in drift-guard.sh or main). scripts/bundle_state_gather.py gained dantesync_version_from_log
+(pure) + a dantesync_version= kwarg on build_bundle_state; scripts/bundle-state-server.py gained
+read_dantesync_log (local file read off C:\ProgramData\DanteSync\dantesync.log) wired into the
+gather -- closes the hole where strih/stream had NO readable dantesync version at all.
+scripts/recording-e2e.sh wires the new gate in as a [0/8] precondition, checking the active cam
+fleet (camera_active_excluding, never a literal range), imag-nb, dev1 itself (local read, no
+ssh -- the harness's own host is never exempt), and strih/stream via the SAME
+VERSION_STRIH_STATE/VERSION_STREAM_STATE bundle-state files the version-integrity gate already
+fetches.
+Root cause + rejected alternative: gh issue comment 862 (design, posted before RED commit) --
+https://github.com/zbynekdrlik/camera-box/issues/862#issuecomment-5125623480
+Scope decision: the ticket's follow-up comment widened scope to "camera-box binary itself also
+drifts across the fleet, not just dantesync" -- split into its own follow-up issue (#875,
+different signal source + different comparison model: relative cross-box parity, not a fixed
+pin, since camera-box ships continuous dev builds) rather than inflating this PR across two
+unrelated components. Linked back on #862.
+Verified: cargo fmt/check/clippy clean (default features), shellcheck --severity=warning clean
+on both touched/new scripts, full `cargo test` 167/167 binaries green (one transient SIGPIPE-race
+flake in tests/setup_imag_hardware_agnostic.rs on the first full run, unrelated to this diff,
+reproduced clean on the second full run and in isolation), full `pytest tests/python` 630/630
+green. Pushed e4c9e5be7 -- ordinary push-triggered "CI" workflow green (30509276367, all
+non-conditional jobs: Lint/Coverage/Test/Shellcheck/Security-Audit/Python-tests/Build/Drift-Guard
+all green; Mutation Testing correctly skipped, PR-diff-scoped only). Did NOT open a new PR or
+merge -- rides the already-open dev->main PR #704 (BLOCKED on the pre-existing #707, per dispatch
+instructions). The hardware "Full-path E2E" gate triggered by this push was still in progress at
+report time and is expected red for the pre-existing, unrelated #707 root cause -- left for the
+supervisor, same disposition as the #867 entry above.
