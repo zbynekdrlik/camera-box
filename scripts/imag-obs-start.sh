@@ -25,6 +25,10 @@ LOG=/tmp/imag-obs-start.log
 
 exec >>"$LOG" 2>&1
 echo "=== $(date '+%F %T') imag-obs-start ==="
+# #882: log the deployed genlock build sha at every start -- so a future incident never again
+# needs cross-referencing git history + a separately-read file just to know what's actually
+# running (exactly the archaeology this ticket's own investigation had to do by hand).
+echo "genlock build sha: $(cat /opt/obs-genlock/GENLOCK_BUILD_SHA.txt 2>/dev/null || echo unknown)"
 
 if pgrep -x obs >/dev/null; then
     echo "OBS uz bezi -- nic nerobim."
@@ -50,7 +54,8 @@ if [ -z "$ISOLATED_CPUS" ]; then
     exit 1
 fi
 taskset -c "$ISOLATED_CPUS" obs --disable-shutdown-check &
-echo "obs launched (pid $!, taskset -c $ISOLATED_CPUS)"
+OBS_PID=$!
+echo "obs launched (pid $OBS_PID, taskset -c $ISOLATED_CPUS)"
 
 deadline=$((SECONDS + 90))
 until (exec 3<>/dev/tcp/127.0.0.1/4455) 2>/dev/null; do
@@ -70,3 +75,15 @@ sleep 2   # WS port is up; give the ident handshake layer a moment before the se
 python3 "$SCN" --host 127.0.0.1 --bootstrap
 python3 "$SCN" --host 127.0.0.1 --projector
 echo "OK: OBS bezi, scenes seednute (--bootstrap), projektory otvorene."
+
+# #882: BLOCK here until obs itself exits, then propagate ITS OWN exit status. This makes obs --
+# not this wrapper script -- the process a systemd Type=simple unit tracks as its "main process"
+# (imag-obs.service, ExecStart=this script): a segfault (killed by a signal) reports non-zero and
+# Restart=on-failure relaunches within seconds; a clean exit(0) (the operator quitting OBS's own
+# UI) reports 0 and is correctly left alone, never fought. Never reached on the idempotent
+# "already running" early exit above -- that path never backgrounds anything of its own to wait on.
+echo "supervising obs (pid $OBS_PID) -- exit propagated to systemd for Restart=on-failure (#882)"
+wait "$OBS_PID"
+OBS_EXIT=$?
+echo "=== $(date '+%F %T') obs exited (code $OBS_EXIT) ==="
+exit "$OBS_EXIT"
