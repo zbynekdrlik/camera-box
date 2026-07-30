@@ -169,3 +169,121 @@ fn imag_obs_stop_handles_missing_wmctrl_without_aborting_840() {
          aborting the whole script under `set -euo pipefail`"
     );
 }
+
+// ================================================================================================
+// #882 -- imag-obs-start.sh: build-sha-at-startup logging + wait-based supervision (so a NEW
+// systemd unit tracking THIS script's own pid can Restart=on-failure on a genuine segfault,
+// without reintroducing the stood-down watchdog's "fights the operator on a manual quit" bug --
+// see the design comment on #882 for the full history/reasoning).
+// ================================================================================================
+
+/// The script must log the deployed genlock build sha at every start -- so a future incident
+/// never again needs cross-referencing git history + a separately-read file to know what's
+/// running (the #882 archaeology this ticket's own investigation had to do by hand).
+#[test]
+fn imag_obs_start_logs_the_genlock_build_sha_at_startup_882() {
+    let body = read(START);
+    assert!(
+        body.contains("/opt/obs-genlock/GENLOCK_BUILD_SHA.txt"),
+        "{START} must read /opt/obs-genlock/GENLOCK_BUILD_SHA.txt and log it at startup (#882)"
+    );
+}
+
+/// The script must capture obs's own PID right after backgrounding it, `wait` on it at the very
+/// end (AFTER the seed/projector steps), and exit with obs's OWN exit status -- this makes obs
+/// itself the tracked "main process" for a `Type=simple` systemd unit, so `Restart=on-failure`
+/// fires exactly on an abnormal (segfault/signal) death and never on a clean `exit(0)`.
+#[test]
+fn imag_obs_start_waits_on_the_backgrounded_obs_pid_and_propagates_its_exit_882() {
+    let body = read(START);
+    let launch = body
+        .find("obs --disable-shutdown-check &")
+        .expect("the pinned launch line must still be present (#840)");
+    let wait_pos = body
+        .find("wait \"$OBS_PID\"")
+        .expect("{START} must `wait \"$OBS_PID\"` on the backgrounded obs process (#882)");
+    assert!(
+        launch < wait_pos,
+        "{START}: the wait must come AFTER the launch line, never before"
+    );
+    let seed = body
+        .find("OK: OBS bezi")
+        .expect("the existing seed-complete echo must still be present");
+    assert!(
+        seed < wait_pos,
+        "{START}: the wait must come AFTER the seed/projector steps finish, not race them"
+    );
+    assert!(
+        body.contains("exit \"$OBS_EXIT\""),
+        "{START} must exit with obs's OWN propagated exit status (#882) -- a clean exit(0) must \
+         never look like a failure to systemd's Restart=on-failure"
+    );
+}
+
+/// The idempotent "already running" early-exit path must be UNCHANGED (still exits 0 immediately,
+/// never waits on a process that isn't this invocation's own child).
+#[test]
+fn imag_obs_start_idempotent_already_running_path_is_unchanged_882() {
+    let body = read(START);
+    assert!(
+        body.contains("OBS uz bezi -- nic nerobim."),
+        "{START} must still print the existing idempotent no-op message"
+    );
+    let idempotent = body.find("OBS uz bezi").expect("idempotent message present");
+    let launch = body
+        .find("obs --disable-shutdown-check &")
+        .expect("launch line present");
+    assert!(
+        idempotent < launch,
+        "{START}: the idempotent already-running check must still run BEFORE the launch line"
+    );
+}
+
+// ================================================================================================
+// #882 -- imag-obs-stop.sh: route a MANUAL stop through `systemctl --user stop imag-obs.service`
+// FIRST when that unit is active, so systemd treats the stop as AUTHORIZED and never fights it
+// with Restart=on-failure (the exact historical bug: the stood-down imag-obs-watchdog.py
+// relaunched OBS after every deliberate manual quit -- issue 788). `--exec-stop` is the mode the
+// unit's own ExecStop= passes, which must SKIP the delegation (systemd is already the one
+// stopping it -- delegating again would recurse) and run the existing ladder directly, UNCHANGED.
+// ================================================================================================
+
+/// A plain (no `--exec-stop`) invocation must check whether imag-obs.service is active and, if
+/// so, delegate to `systemctl --user stop` -- BEFORE the pre-existing program-scene-save /
+/// graceful-close / SIGTERM / SIGKILL ladder even runs.
+#[test]
+fn imag_obs_stop_delegates_to_systemctl_when_the_unit_is_active_882() {
+    let body = read(STOP);
+    assert!(
+        body.contains("systemctl --user is-active --quiet imag-obs.service"),
+        "{STOP} must check whether imag-obs.service is active (#882)"
+    );
+    assert!(
+        body.contains("systemctl --user stop imag-obs.service"),
+        "{STOP} must delegate to `systemctl --user stop` when the unit is active (#882) -- this \
+         is what makes systemd treat the stop as AUTHORIZED and suppress Restart=on-failure"
+    );
+    let delegate = body
+        .find("systemctl --user stop imag-obs.service")
+        .expect("delegation call present");
+    let save = body
+        .find("GetCurrentProgramScene")
+        .expect("the pre-existing #785 program-scene save must still be present");
+    assert!(
+        delegate < save,
+        "{STOP}: the systemctl delegation check must run BEFORE the existing ladder (#882)"
+    );
+}
+
+/// `--exec-stop` mode (the unit's own ExecStop=) must SKIP the systemctl delegation -- otherwise
+/// systemd stopping the unit would call this script, which would call `systemctl stop` again,
+/// which is already in progress (recursion / a no-op at best, a hang at worst).
+#[test]
+fn imag_obs_stop_exec_stop_mode_skips_the_systemctl_delegation_882() {
+    let body = read(STOP);
+    assert!(
+        body.contains("--exec-stop"),
+        "{STOP} must recognize an --exec-stop flag (#882) -- the mode the unit's own ExecStop= \
+         passes so it never re-delegates to systemctl (which is already stopping it)"
+    );
+}
