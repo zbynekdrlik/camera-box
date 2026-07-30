@@ -6298,3 +6298,39 @@ merge -- rides the already-open dev->main PR #704 (BLOCKED on the pre-existing #
 instructions). The hardware "Full-path E2E" gate triggered by this push was still in progress at
 report time and is expected red for the pre-existing, unrelated #707 root cause -- left for the
 supervisor, same disposition as the #867 entry above.
+
+## #862 follow-up fix (2026-07-30) -- the shipped gate's reader read nothing, not the verdict logic
+
+RED: 48fe9a86b -- tests/dantesync_version_gate.rs / tests/harness_recording_e2e_paths.rs /
+tests/python/test_bundle_state_gather.py updated to expect a uniform `dantesync --version`
+reader (new dantesync_version_from_version_output, a new --win SSH flag) instead of the shipped
+journal/bundle-state reads -- all failing against the then-current implementation (one live SSH
+call to cam1 during the RED run, since the old code's env-override var name didn't match the new
+test's fixture var and fell through to the real network).
+GREEN: b8e9197d4 -- scripts/dantesync-version-gate.sh: new pure dantesync_version_from_version_output
+(parses "dantesync X.Y.Z"), new read_dantesync_version_output (uniform reader: bare command
+locally/Linux, quoted full exe path over ssh on Windows -- confirmed OpenSSH-for-Windows runs it
+via cmd.exe directly, no PowerShell wrapper needed), new --win CLI flag replacing --win-state
+(version-integrity-gate.sh sourcing dropped entirely -- state_json_value was the only reason it
+was pulled in). DANTESYNC_VERSION_PIN default 1.8.21 -> 1.8.25 (fleet-convergence target). GATE
+FAILED banner now names DRIFT + UNKNOWN counts in the SAME line. Reverted the half-wired #862
+bundle-state additions in scripts/bundle_state_gather.py (dantesync_version_from_log,
+build_bundle_state's dantesync_version kwarg) and scripts/bundle-state-server.py
+(read_dantesync_log, DEFAULT_DANTESYNC_LOG_FILE, --dantesync-log) -- confirmed via repo-wide grep
+that nothing else consumed the key. Corrected .claude/rules/dantesync-version-reading.md's false
+premise (dantesync DOES answer --version on Windows) and rescoped its `paths:` frontmatter.
+Root cause + approach: gh issue comment 862 (posted before RED commit) --
+https://github.com/zbynekdrlik/camera-box/issues/862#issuecomment-5125975230
+Verified: cargo fmt/check/clippy clean, full `cargo test` 167/167 binaries green, full
+`pytest tests/python` 625/625 green. Live-verified directly over SSH against the real 8-box
+fleet: GATE PASS (all 8 on 1.8.25), a forced --pin 9.9.9 correctly DRIFTs with the new banner
+shape, an unreachable node correctly reads UNKNOWN. Pushed b8e9197d4 -- "CI" workflow green
+(30511427194, all jobs pass). The automatic pull_request-triggered "Full-path E2E" run
+(30511429467) failed overall (pre-existing, unrelated #707: verdict JSON never computed) but its
+own `[0/8] dantesync version-parity gate` step printed the SAME "GATE PASS -- 8 box(es) on the
+pinned dantesync 1.8.25" and the harness proceeded through dozens more preflight steps and into
+the actual recording -- proving the fix works on the real hardware CI path, not just locally. Did
+NOT open a new PR or merge, per dispatch instructions -- rides the already-open dev->main PR #704
+(still BLOCKED on #707). Added a `## #862` status section + `Closes #862` to PR #704's body
+(matches this PR's own established per-ticket section convention, e.g. #758/#863); #862 itself
+left OPEN (auto-closes at PR #704's eventual merge, same disposition as #758/#863 on this PR).
