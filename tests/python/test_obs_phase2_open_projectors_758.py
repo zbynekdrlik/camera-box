@@ -119,6 +119,22 @@ def test_a_failed_open_request_propagates_never_silently_continues(monkeypatch):
         obs_phase2.open_projectors(_args(host="10.77.9.187", password=""))
 
 
+def test_connection_failure_is_labelled_handshake_auth_never_a_bare_traceback(monkeypatch):
+    """#882: the imag-nb outage this issue investigates showed a hardcoded, WRONG fallback message
+    ("check DP-0/HDMI-0 are connected monitors") on ANY failure, including a connection-level one
+    that has nothing to do with monitors at all. A failure to even establish the WebSocket session
+    (process down, port not listening, wrong password) must be raised with a message that clearly
+    names it as a CONNECTION/handshake failure -- never conflated with the later "no matching
+    monitor" RuntimeErrors (which already correctly name the real connector types)."""
+
+    def boom_conn(host, password=""):
+        raise ConnectionRefusedError("[Errno 111] Connection refused")
+
+    monkeypatch.setattr(obs_phase2, "_conn", boom_conn)
+    with pytest.raises(RuntimeError, match="(?i)handshake|auth"):
+        obs_phase2.open_projectors(_args(host="10.77.9.182", password=""))
+
+
 def test_program_projector_never_attempted_after_multiview_raised(monkeypatch):
     # A failure on the Multiview open must abort immediately -- Program must never be attempted
     # in a way that hides the Multiview failure (no swallow-and-continue).
