@@ -1277,3 +1277,232 @@ fn log_bound_timer_dropin_sets_a_short_oncalendar_interval() {
         "flattened drop-in content must still contain the short interval, got: {flattened}"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// (u) rsyslog PURGED + journald RuntimeMaxUse capped (#762)
+//
+// A live cam1 incident (2026-07-15) showed a full 50MB /var/log tmpfs put rsyslogd into a
+// write-error feedback loop (~400 lines/s, 42.8% CPU), starving the camera-box send path badly
+// enough to measurably drift NDI delivery timing. rsyslog is redundant on a read-only appliance
+// (journald already captures everything) -- log_diet_provision_verdict (scripts/lib/log-diet.sh)
+// requires rsyslog to be genuinely PURGED (not merely masked -- an installed-but-masked daemon
+// can still be re-enabled) AND a journald RuntimeMaxUse=20M drop-in to be present.
+// ---------------------------------------------------------------------------------------------
+
+fn log_diet_verdict_of(block: &str) -> String {
+    let (code, out, err) = run_sourced(&format!(
+        "BLOCK='{}'\nlog_diet_provision_verdict \"$BLOCK\"",
+        block.replace('\'', "'\\''")
+    ));
+    assert_eq!(code, 0, "harness crashed. stderr: {err}");
+    out.trim().to_string()
+}
+
+#[test]
+fn log_diet_verdict_ok_when_rsyslog_purged_and_journald_capped() {
+    let block = "\
+RSYSLOG_DPKG=
+RSYSLOG_ACTIVE=inactive
+RSYSLOG_ENABLED=
+JOURNALD_DROPIN=[Journal]|RuntimeMaxUse=20M|";
+    assert_eq!(log_diet_verdict_of(block), "ok");
+}
+
+#[test]
+fn log_diet_verdict_ok_when_rsyslog_dpkg_reports_not_installed_or_config_files() {
+    // Same "files genuinely gone" states timesync_daemon_verdict already accepts for a purged
+    // competing daemon -- config-files (removed, only leftover conffiles) is still "purged".
+    for dpkg_state in ["", "purge ok not-installed", "purge ok config-files"] {
+        let block = format!(
+            "\
+RSYSLOG_DPKG={dpkg_state}
+RSYSLOG_ACTIVE=inactive
+RSYSLOG_ENABLED=
+JOURNALD_DROPIN=[Journal]|RuntimeMaxUse=20M|"
+        );
+        assert_eq!(
+            log_diet_verdict_of(&block),
+            "ok",
+            "dpkg state '{dpkg_state}' should read as purged"
+        );
+    }
+}
+
+#[test]
+fn log_diet_verdict_fails_when_rsyslog_is_still_installed() {
+    let block = "\
+RSYSLOG_DPKG=install ok installed
+RSYSLOG_ACTIVE=inactive
+RSYSLOG_ENABLED=disabled
+JOURNALD_DROPIN=[Journal]|RuntimeMaxUse=20M|";
+    let v = log_diet_verdict_of(block);
+    assert!(
+        v.starts_with("FAIL:") && v.contains("INSTALLED"),
+        "an installed (even inactive/disabled) rsyslog must FAIL -- purge, not just mask, got: {v}"
+    );
+}
+
+#[test]
+fn log_diet_verdict_fails_when_rsyslog_is_masked_but_installed() {
+    // Masking alone is explicitly NOT enough (mirrors timesync_daemon_verdict's own "masking is
+    // not enough" contract) -- a masked-but-installed daemon can still be re-enabled.
+    let block = "\
+RSYSLOG_DPKG=install ok installed
+RSYSLOG_ACTIVE=inactive
+RSYSLOG_ENABLED=masked
+JOURNALD_DROPIN=[Journal]|RuntimeMaxUse=20M|";
+    let v = log_diet_verdict_of(block);
+    assert!(
+        v.starts_with("FAIL:") && v.contains("INSTALLED"),
+        "masked-but-installed rsyslog must still FAIL, got: {v}"
+    );
+}
+
+#[test]
+fn log_diet_verdict_fails_when_rsyslog_is_active() {
+    let block = "\
+RSYSLOG_DPKG=
+RSYSLOG_ACTIVE=active
+RSYSLOG_ENABLED=
+JOURNALD_DROPIN=[Journal]|RuntimeMaxUse=20M|";
+    let v = log_diet_verdict_of(block);
+    assert!(
+        v.starts_with("FAIL:") && v.contains("ACTIVE"),
+        "an active rsyslog must FAIL even if dpkg somehow reads empty, got: {v}"
+    );
+}
+
+#[test]
+fn log_diet_verdict_fails_when_journald_dropin_is_missing() {
+    let block = "\
+RSYSLOG_DPKG=
+RSYSLOG_ACTIVE=inactive
+RSYSLOG_ENABLED=
+JOURNALD_DROPIN=";
+    let v = log_diet_verdict_of(block);
+    assert!(
+        v.starts_with("FAIL:") && v.contains("99-camera-box-diet.conf"),
+        "a missing journald drop-in must FAIL naming the drop-in path, got: {v}"
+    );
+}
+
+#[test]
+fn log_diet_verdict_fails_when_journald_dropin_has_the_wrong_value() {
+    // Present but WRONG content (e.g. a hand-edit widening the cap) must still FAIL --
+    // presence alone is not proof, mirroring log_bound_verdict's own "wrong content" case.
+    let block = "\
+RSYSLOG_DPKG=
+RSYSLOG_ACTIVE=inactive
+RSYSLOG_ENABLED=
+JOURNALD_DROPIN=[Journal]|RuntimeMaxUse=500M|";
+    let v = log_diet_verdict_of(block);
+    assert!(
+        v.starts_with("FAIL:") && v.contains("RuntimeMaxUse=20M"),
+        "a wrong-value journald drop-in must FAIL naming the expected value, got: {v}"
+    );
+}
+
+#[test]
+fn log_diet_verdict_reports_every_failure_not_just_the_first() {
+    // A box that is BOTH still-installed-and-active AND missing the journald cap must surface
+    // BOTH problems in one verdict -- the operator should not have to re-run verify-device.sh
+    // twice to discover the second issue (mirrors timesync_authority_verdict's multi-fail shape).
+    let block = "\
+RSYSLOG_DPKG=install ok installed
+RSYSLOG_ACTIVE=active
+RSYSLOG_ENABLED=enabled
+JOURNALD_DROPIN=";
+    let v = log_diet_verdict_of(block);
+    assert!(v.contains("INSTALLED"), "got: {v}");
+    assert!(v.contains("ACTIVE"), "got: {v}");
+    assert!(v.contains("enabled"), "got: {v}");
+    assert!(v.contains("99-camera-box-diet.conf"), "got: {v}");
+}
+
+#[test]
+fn log_diet_gather_remote_snippet_prints_all_four_expected_keys() {
+    let (code, out, err) = run_sourced("log_diet_gather_remote_snippet");
+    assert_eq!(code, 0, "harness crashed. stderr: {err}");
+    for key in [
+        "RSYSLOG_DPKG=",
+        "RSYSLOG_ACTIVE=",
+        "RSYSLOG_ENABLED=",
+        "JOURNALD_DROPIN=",
+    ] {
+        assert!(
+            out.contains(key),
+            "log_diet_gather_remote_snippet must print '{key}', got: {out}"
+        );
+    }
+}
+
+#[test]
+fn log_diet_journald_dropin_sets_the_pinned_runtime_max_use() {
+    let (code, out, err) = run_sourced("log_diet_journald_dropin");
+    assert_eq!(code, 0, "harness crashed. stderr: {err}");
+    assert!(
+        out.contains("[Journal]") && out.contains("RuntimeMaxUse=20M"),
+        "log_diet_journald_dropin must set [Journal] RuntimeMaxUse=20M, got: {out}"
+    );
+    // Round-trip against the verdict's own parsing shape (the gather snippet flattens newlines to
+    // '|' before log_diet_provision_verdict inspects it) -- proves the generator and the verdict
+    // agree on the literal content shape, mirroring log_bound_timer_dropin's own round-trip test.
+    let flattened = out.replace('\n', "|");
+    assert!(
+        flattened.contains("RuntimeMaxUse=20M"),
+        "flattened drop-in content must still contain the cap value, got: {flattened}"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// #762 fix -- log_diet_rsyslog_purged: lets (s) supersede its #679 logrotate check once rsyslog
+// is genuinely purged (its own conffile /etc/logrotate.d/rsyslog is removed WITH the package, so
+// the OLD #679 check becomes structurally unsatisfiable on an otherwise-correctly-hardened box).
+// ---------------------------------------------------------------------------------------------
+
+fn rsyslog_purged(block: &str) -> bool {
+    let (code, out, err) = run_sourced(&format!(
+        "BLOCK='{}'\nif log_diet_rsyslog_purged \"$BLOCK\"; then echo YES; else echo NO; fi",
+        block.replace('\'', "'\\''")
+    ));
+    assert_eq!(code, 0, "harness crashed. stderr: {err}");
+    match out.trim() {
+        "YES" => true,
+        "NO" => false,
+        other => panic!("unexpected harness output: {other}"),
+    }
+}
+
+#[test]
+fn log_diet_rsyslog_purged_true_when_dpkg_reports_purged_states() {
+    for dpkg_state in ["", "purge ok not-installed", "purge ok config-files"] {
+        let block = format!("RSYSLOG_DPKG={dpkg_state}\nRSYSLOG_ACTIVE=inactive\nRSYSLOG_ENABLED=");
+        assert!(
+            rsyslog_purged(&block),
+            "dpkg state '{dpkg_state}' should read as purged"
+        );
+    }
+}
+
+#[test]
+fn log_diet_rsyslog_purged_false_when_still_installed_even_if_inactive_and_masked() {
+    // Masking alone does NOT count as purged -- mirrors the (u) check's own "masking is not
+    // enough" contract.
+    let block =
+        "RSYSLOG_DPKG=install ok installed\nRSYSLOG_ACTIVE=inactive\nRSYSLOG_ENABLED=masked";
+    assert!(!rsyslog_purged(block));
+}
+
+#[test]
+fn log_diet_rsyslog_purged_from_dpkg_matches_the_block_level_wrapper() {
+    let (code, out, err) = run_sourced(
+        "log_diet_rsyslog_purged_from_dpkg 'install ok installed' && echo YES || echo NO",
+    );
+    assert_eq!(code, 0, "harness crashed. stderr: {err}");
+    assert_eq!(out.trim(), "NO");
+
+    let (code, out, err) =
+        run_sourced("log_diet_rsyslog_purged_from_dpkg '' && echo YES || echo NO");
+    assert_eq!(code, 0, "harness crashed. stderr: {err}");
+    assert_eq!(out.trim(), "YES");
+}

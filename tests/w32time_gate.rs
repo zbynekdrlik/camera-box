@@ -9,8 +9,9 @@
 //! Mirrors `tests/dantesync_gate.rs`'s shape: `run_sourced` exercises the pure verdict/extraction
 //! functions directly; `run_gate` drives the actual gate SCRIPT end-to-end over
 //! `--win-status NAME=FILE` fixture files — the same offline fixture-injection seam #608 added
-//! for dantesync-gate.sh's Linux path, applied here to the ENTIRE Windows-only gate (ssh to
-//! Windows is denied, so this gate is offline-fixture-only, with no env-var/live-SSH branch at
+//! for dantesync-gate.sh's Linux path, applied here to the ENTIRE Windows-only gate (this gate
+//! has no headless ssh gather of its own -- #701 proved plain scp/ssh reaches strih/stream, not
+//! migrated here -- so it is offline-fixture-only, with no env-var/live-SSH branch at
 //! all — unlike dantesync-gate.sh's Linux path, there is no `run_gate_env` here).
 //!
 //! Fixture text for the OK cases is the REAL output live-probed on strih and stream via the

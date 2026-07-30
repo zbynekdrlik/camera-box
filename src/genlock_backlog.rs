@@ -1,0 +1,375 @@
+//! #859 — the genlock FIFO's BACKLOG-STORM threshold, made latency-relative.
+//!
+//! `obs-source.c`'s backlog-relock branch fires when
+//! `async_frames.num > GENLOCK_QDEPTH_RELOCK && due > 0`, re-locking to the newest due frame and
+//! erasing every jumped frame into `genlock_dropped_due`. `GENLOCK_QDEPTH_RELOCK` is the bare
+//! constant `6`, and the comment above it states the assumption it was calibrated on verbatim:
+//!
+//! > depth > GENLOCK_QDEPTH_RELOCK — steady depth is ~1-2 at any skew, the boundary paces arrivals
+//!
+//! That assumption holds for a source configured at a SHALLOW latency (the whole strih box runs
+//! 3–55 ms, and the imag contract is 3 ms). It is FALSE for a source configured DEEP: the held
+//! latency is `wall_now - reserve_ms`, so a source pinned at `latency_ms = 923` (the value #856's
+//! A/V controller must set on the stream box's `NDI 2ME PGM` to align against the mbc's 1 s
+//! mastering) has a STEADY depth of ~28 frames. `28 > 6` is permanently true, so the FIFO believes
+//! it is in backlog on EVERY tick.
+//!
+//! Live evidence (stream box, `genlock-fifo audit 'NDI 2ME PGM'`, 2026-07-29):
+//!
+//! ```text
+//! depth=29 peak=31 cap=59 latency_ms=923
+//! relocks=2793427   (+1 per frame — this is #796's "useless as a health signal")
+//! holds=4385 -> 4386, dropped_due=13938 -> 13939   (+1 each over the same 120 s)
+//! ```
+//!
+//! Most ticks the relock is harmless (`due == 1` ⇒ `release = 1` ⇒ nothing erased), but whenever
+//! arrival jitter makes `due == 2` the branch erases one frame (`dropped_due`) and the next tick
+//! repeats the last frame (`holds`) — the paired duplicate/skip the #859 gate run measured in the
+//! recording: +59 duplicates and +57 skips injected by the strih→stream hop, 58 of 61 duplicates
+//! within 1–3 frames of their partner skip. The cam→strih leg, whose sources all sit below the
+//! bare `6`, carried 2 duplicates in 9626 frames and `holds=0` on every source.
+//!
+//! The FIX is to make the threshold latency-relative, exactly as
+//! `genlock_source_drop_cap()` in the same file already is (it reports `cap=59` for this source =
+//! `latency_frames + 4`). A queue is only in BACKLOG when it exceeds the depth its OWN configured
+//! latency implies, plus the same margin the constant always encoded.
+//!
+//! This does NOT relax any gate: a genuine backlog storm on a deep source is still caught, just at
+//! the depth that is genuinely anomalous FOR THAT SOURCE. And it is a no-op for every shallow
+//! source on the rig — see `sub_half_frame_latency_threshold_is_byte_identical_to_the_bare_constant_859`.
+//!
+//! Pure + crate-root (not under `src/probe/`) so it is Tier-0 verifiable locally — the
+//! `src/reannounce.rs` / `src/colour_scale.rs` pattern. `src/probe/genlock.rs`'s
+//! `ReleaseCadence::QDEPTH_RELOCK` and `obs-source.c`'s `GENLOCK_QDEPTH_RELOCK` both derive from
+//! here and must stay in lock-step.
+
+/// The margin above a source's implied steady depth before its queue counts as a backlog storm.
+///
+/// This is the ORIGINAL `GENLOCK_QDEPTH_RELOCK` value, unchanged — under the old code it was the
+/// whole threshold because the implied steady depth was assumed to be ~1-2 and simply ignored.
+pub const QDEPTH_RELOCK_MARGIN: u64 = 6;
+
+/// The steady-state FIFO depth implied by a source's configured genlock latency, in frames,
+/// rounded to nearest.
+///
+/// `fps_num`/`fps_den` MUST be the **source** frame rate, not the canvas rate. The quantity being
+/// bounded is `async_frames.num`, which counts frames as the SOURCE delivered them — a 60 fps
+/// source feeding a 30 fps canvas queues two entries per canvas interval. The two rates coincide
+/// for the 30-into-30 hop this ticket is about (`NDI 2ME PGM`), but diverge for every 60-into-30
+/// cambox input on strih, where using the canvas rate would under-estimate the implied depth by
+/// exactly the source multiple. The C caller has this available as
+/// `canvas_rate * genlock_effective_source_multiple(source, interval)`.
+///
+/// Mirrors the rounding `genlock_source_drop_cap()` already uses for the drop cap
+/// (`(latency_ms * fps + 500) / 1000`), so the two latency-derived quantities in the FIFO agree.
+/// A zero/degenerate frame rate yields 0 (no implied depth) rather than dividing by zero.
+pub fn steady_depth_frames(latency_ms: u32, fps_num: u32, fps_den: u32) -> u64 {
+    if fps_num == 0 || fps_den == 0 {
+        return 0;
+    }
+    let den = 1000u64.saturating_mul(fps_den as u64);
+    let num = (latency_ms as u64)
+        .saturating_mul(fps_num as u64)
+        .saturating_add(500u64.saturating_mul(fps_den as u64));
+    num / den
+}
+
+/// The backlog-relock threshold for a source: a queue depth STRICTLY GREATER than this is a
+/// backlog storm. Callers keep the `depth > threshold` comparison shape they already had.
+pub fn backlog_relock_threshold(latency_ms: u32, fps_num: u32, fps_den: u32) -> u64 {
+    steady_depth_frames(latency_ms, fps_num, fps_den).saturating_add(QDEPTH_RELOCK_MARGIN)
+}
+
+/// #859 follow-up — the SLEW-LIMITED SETTLE-BACK DRAIN.
+///
+/// The `backlog_relock_threshold` fix above stopped the backlog-relock branch firing on
+/// EVERY tick in steady state (`relocks` went from +1/frame to 1 in 125304 frames, live). But
+/// that branch was ALSO the FIFO's only mechanism for shedding excess queue depth after a
+/// genlock latency SETPOINT INCREASE — with it gated off in steady state, the plain N==1
+/// release path (`release = 1` every tick) holds depth CONSTANT forever: consuming exactly one
+/// frame per tick against an inflow of exactly one never falls behind, but never catches up
+/// either. Measured live: a +34 ms setpoint step produced +134 ms of ACTUAL delay that held
+/// stable across 6 consecutive samples 20+ minutes apart — a parked overshoot, not a decaying
+/// transient.
+///
+/// This is a bounded, ADDITIONAL path alongside the unchanged backlog-relock branch: at most
+/// once every [`DRAIN_MIN_TICK_INTERVAL`] ticks, while the queue sits more than
+/// [`DRAIN_HYSTERESIS_FRAMES`] above [`steady_depth_frames`], shed exactly ONE extra frame.
+/// The rate is bounded by construction, so it can never reproduce the every-tick paired
+/// duplicate/skip storm the old (removed) per-tick trim caused.
+///
+/// Mirrors: `vendor/obs-studio/libobs/obs-source.c` `genlock_should_drain_one()` /
+/// `genlock_ticks_since_drain` and `src/probe/genlock.rs`
+/// `ReleaseCadence::should_drain_one` / `ticks_since_last_drain` — keep all three in
+/// lock-step.
+pub const DRAIN_HYSTERESIS_FRAMES: u64 = 2;
+
+/// #859 — minimum render ticks between two drain events. Bounds the drain rate to at most one
+/// frame per this many ticks, which is what makes it structurally incapable of producing the
+/// per-tick burst the disabled backlog-relock branch used to cause as a side effect.
+pub const DRAIN_MIN_TICK_INTERVAL: u64 = 30;
+
+/// Should this tick shed exactly ONE EXTRA frame to slew the queue back toward the depth its
+/// own configured latency implies? `depth` is the queue depth observed THIS tick (before any
+/// release); `ticks_since_last_drain` is how many ticks have passed since the last time this
+/// returned `true` (the caller resets it to 0 exactly when it drains, and increments it every
+/// other tick). Degenerate `fps_num`/`fps_den` (0) route through [`steady_depth_frames`], which
+/// returns 0 rather than dividing by zero — never panics.
+pub fn should_drain_one(
+    depth: u64,
+    latency_ms: u32,
+    fps_num: u32,
+    fps_den: u32,
+    ticks_since_last_drain: u64,
+) -> bool {
+    let target = steady_depth_frames(latency_ms, fps_num, fps_den);
+    depth > target.saturating_add(DRAIN_HYSTERESIS_FRAMES)
+        && ticks_since_last_drain >= DRAIN_MIN_TICK_INTERVAL
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The regression this ticket is about: the stream box's `NDI 2ME PGM` at the latency #856's
+    /// A/V controller sets. Its OBSERVED steady depth is 29 with peak 31 — both must sit BELOW
+    /// the threshold, or the FIFO relocks every tick and sheds a frame on every jitter excursion.
+    #[test]
+    fn deep_latency_source_does_not_read_as_backlog_at_its_own_steady_depth_859() {
+        // Live values from the stream box audit: latency_ms=923 on a 30.000 fps canvas.
+        let t = backlog_relock_threshold(923, 30, 1);
+        assert!(
+            t >= 29,
+            "#859: observed steady depth 29 must not exceed the backlog threshold ({t})"
+        );
+        assert!(
+            t >= 31,
+            "#859: observed PEAK depth 31 must not exceed the backlog threshold either, or a \
+             routine jitter excursion still triggers the storm branch ({t})"
+        );
+        // 923 ms @ 30 fps -> 28 implied frames, + the original margin 6 = 34.
+        assert_eq!(t, 34, "923ms @30fps => 28 implied frames + margin 6");
+    }
+
+    /// The no-regression property that makes this safe to ship to the whole rig.
+    ///
+    /// NOTE the earlier revision of this test asserted something arithmetically FALSE — that
+    /// 16 ms at 60 fps "implies <0.5 frames" and must therefore stay at the bare 6. It does not:
+    /// `16 * 60 / 1000 = 0.96` frames, which rounds to 1 and gives 7. The claim was wrong, not the
+    /// implementation, so it is corrected here rather than the code being bent to satisfy it.
+    ///
+    /// The property that is actually true, and actually load-bearing, is narrower: a source whose
+    /// configured latency implies LESS THAN HALF a frame keeps today's threshold exactly. That
+    /// covers the two values the rig genuinely depends on — the 3 ms global default and the 3 ms
+    /// imag latency contract — at both canvas rates.
+    #[test]
+    fn sub_half_frame_latency_threshold_is_byte_identical_to_the_bare_constant_859() {
+        // The 3 ms global default / imag contract — the load-bearing case, unchanged at any rate.
+        assert_eq!(backlog_relock_threshold(3, 30, 1), QDEPTH_RELOCK_MARGIN);
+        assert_eq!(backlog_relock_threshold(3, 60, 1), QDEPTH_RELOCK_MARGIN);
+
+        // Anything implying <0.5 frames rounds to 0 implied depth => the bare constant.
+        for (latency_ms, num) in [(3u32, 30u32), (8, 30), (16, 30), (3, 60), (8, 60)] {
+            assert_eq!(
+                backlog_relock_threshold(latency_ms, num, 1),
+                QDEPTH_RELOCK_MARGIN,
+                "{latency_ms}ms @{num}fps implies <0.5 frames — threshold must stay the bare 6"
+            );
+        }
+    }
+
+    /// The flip side, stated honestly rather than hidden: a source configured deep ENOUGH to imply
+    /// a whole frame or more DOES get a slightly higher threshold, and that is the intended
+    /// behaviour — the threshold tracks the depth the source itself was configured to hold.
+    ///
+    /// These are the strih box's real per-source latencies on its 30 fps canvas. All of them
+    /// report `holds=0` today, so nothing regresses; they simply stop counting their own
+    /// configured buffer as a backlog.
+    #[test]
+    fn deeper_shallow_sources_move_with_their_own_configured_depth_859() {
+        assert_eq!(
+            backlog_relock_threshold(21, 30, 1),
+            7,
+            "21ms -> 1 frame + 6"
+        );
+        assert_eq!(
+            backlog_relock_threshold(26, 30, 1),
+            7,
+            "26ms -> 1 frame + 6"
+        );
+        assert_eq!(
+            backlog_relock_threshold(55, 30, 1),
+            8,
+            "55ms -> 2 frames + 6"
+        );
+    }
+
+    #[test]
+    fn steady_depth_rounds_to_nearest_like_the_drop_cap() {
+        assert_eq!(steady_depth_frames(923, 30, 1), 28); // 27.69 -> 28
+        assert_eq!(steady_depth_frames(923, 60, 1), 55); // 55.38 -> 55, matches cap=59 (55+4)
+        assert_eq!(steady_depth_frames(55, 30, 1), 2); // 1.65 -> 2
+        assert_eq!(steady_depth_frames(16, 30, 1), 0); // 0.48 -> 0
+        assert_eq!(steady_depth_frames(17, 30, 1), 1); // 0.51 -> 1
+    }
+
+    /// The depth being bounded counts SOURCE frames, so a 60 fps cambox input into strih's 30 fps
+    /// canvas implies twice the depth the canvas rate would suggest. Passing the canvas rate here
+    /// would under-estimate by exactly the source multiple and leave those inputs closer to the
+    /// backlog branch than intended.
+    #[test]
+    fn implied_depth_follows_the_source_rate_not_the_canvas_rate_859() {
+        // strih 'NDI cam3': 26 ms configured, 60 fps source, 30 fps canvas.
+        assert_eq!(
+            steady_depth_frames(26, 60, 1),
+            2,
+            "26ms of a 60fps source = 1.56 -> 2 frames"
+        );
+        assert_eq!(
+            steady_depth_frames(26, 30, 1),
+            1,
+            "the canvas rate would say 1 — too low"
+        );
+        assert_eq!(backlog_relock_threshold(26, 60, 1), 8);
+
+        // The hop this ticket is about is 30-into-30, so the two rates coincide there.
+        assert_eq!(
+            steady_depth_frames(923, 30, 1),
+            steady_depth_frames(923, 30, 1),
+            "NDI 2ME PGM is a 30fps source on a 30fps canvas — no multiple to apply"
+        );
+    }
+
+    #[test]
+    fn degenerate_frame_rate_implies_no_depth_rather_than_dividing_by_zero() {
+        assert_eq!(steady_depth_frames(923, 0, 1), 0);
+        assert_eq!(steady_depth_frames(923, 30, 0), 0);
+        assert_eq!(backlog_relock_threshold(923, 0, 0), QDEPTH_RELOCK_MARGIN);
+    }
+
+    /// A genuine storm on a deep source is STILL caught — the bar does not move, it moves WITH the
+    /// source. #401's own scenario (a stall's burst landing at once) is far above the threshold.
+    #[test]
+    fn a_real_backlog_storm_on_a_deep_source_is_still_caught_859() {
+        let t = backlog_relock_threshold(923, 30, 1);
+        // A one-second stall on a 30 fps source lands ~30 frames ON TOP of the steady 28.
+        let burst_depth = 28 + 30;
+        assert!(
+            burst_depth as u64 > t,
+            "a stall's burst (depth {burst_depth}) must still exceed the threshold ({t})"
+        );
+    }
+
+    /// #859 follow-up — at exactly the steady target depth, never drain: this is the queue's
+    /// own configured buffer, not an overshoot.
+    #[test]
+    fn no_drain_at_exactly_the_steady_target_depth_859() {
+        let target = steady_depth_frames(957, 30, 1); // the stream box's post-step setpoint
+        assert!(
+            !should_drain_one(target, 957, 30, 1, DRAIN_MIN_TICK_INTERVAL),
+            "depth == target must never drain, even with plenty of ticks since the last one"
+        );
+    }
+
+    /// #859 follow-up — the hysteresis BOUNDARY: depth == target + DRAIN_HYSTERESIS_FRAMES must
+    /// still NOT drain (strictly-greater comparison), or ordinary arrival jitter around the
+    /// target would trigger a drain that then has nothing genuinely excess to shed.
+    #[test]
+    fn no_drain_at_target_plus_hysteresis_exactly_859() {
+        let target = steady_depth_frames(957, 30, 1);
+        let boundary = target + DRAIN_HYSTERESIS_FRAMES;
+        assert!(
+            !should_drain_one(boundary, 957, 30, 1, DRAIN_MIN_TICK_INTERVAL),
+            "depth == target + hysteresis exactly must NOT drain (strictly greater only)"
+        );
+        assert!(
+            should_drain_one(boundary + 1, 957, 30, 1, DRAIN_MIN_TICK_INTERVAL),
+            "one frame past the hysteresis boundary, with enough elapsed ticks, MUST drain"
+        );
+    }
+
+    /// #859 follow-up — the RATE LIMIT: even with the queue persistently above threshold, a
+    /// drain fires at most once per DRAIN_MIN_TICK_INTERVAL ticks.
+    #[test]
+    fn drain_is_rate_limited_to_once_per_min_tick_interval_859() {
+        let target = steady_depth_frames(957, 30, 1);
+        let deep = target + DRAIN_HYSTERESIS_FRAMES + 3; // well above threshold, persistently
+        assert!(
+            !should_drain_one(deep, 957, 30, 1, 0),
+            "just after a drain (ticks_since_last_drain=0) must NOT drain again immediately"
+        );
+        assert!(
+            !should_drain_one(deep, 957, 30, 1, DRAIN_MIN_TICK_INTERVAL - 1),
+            "one tick short of the interval must still NOT drain"
+        );
+        assert!(
+            should_drain_one(deep, 957, 30, 1, DRAIN_MIN_TICK_INTERVAL),
+            "at exactly DRAIN_MIN_TICK_INTERVAL ticks, an over-threshold queue MUST drain"
+        );
+    }
+
+    /// #859 follow-up — the RATE BOUND + CONVERGENCE property that makes this safe to ship: a
+    /// queue overshooting its target by 5 frames converges into the tolerated
+    /// `target..=target+DRAIN_HYSTERESIS_FRAMES` band within the simulated window (never fully
+    /// to the bare target — the hysteresis is what stops it oscillating on ordinary jitter once
+    /// there), and the number of drains that fired is bounded by construction to at most one per
+    /// DRAIN_MIN_TICK_INTERVAL ticks — it can never reproduce the every-tick backlog-relock
+    /// burst the disabled branch used to cause.
+    #[test]
+    fn slew_limited_drain_converges_and_never_bursts_859() {
+        let latency_ms = 957;
+        let (fps_num, fps_den) = (30, 1);
+        let target = steady_depth_frames(latency_ms, fps_num, fps_den);
+        // 5 frames above target: 3 of those are genuinely excess (beyond the hysteresis band),
+        // so exactly 3 drains are needed to settle at target + DRAIN_HYSTERESIS_FRAMES.
+        let mut depth = target + 5;
+        let mut ticks_since_last_drain: u64 = 0; // fresh lock — nothing drained yet
+        let mut drains = 0u64;
+        const TICKS: u64 = 200;
+        for _ in 0..TICKS {
+            if should_drain_one(depth, latency_ms, fps_num, fps_den, ticks_since_last_drain) {
+                depth -= 1; // exactly ONE extra frame shed — never more per tick
+                drains += 1;
+                ticks_since_last_drain = 0;
+            } else {
+                ticks_since_last_drain += 1;
+            }
+            // steady inflow: one frame arrives and one is normally consumed each tick, so
+            // depth is otherwise unchanged — only a drain event moves it (matches the ticket's
+            // finding that the plain release=1/tick path holds depth CONSTANT on its own).
+        }
+        assert!(
+            drains <= TICKS / DRAIN_MIN_TICK_INTERVAL + 1,
+            "drains ({drains}) exceeded the rate bound (at most one per {DRAIN_MIN_TICK_INTERVAL} \
+             ticks over {TICKS} ticks) — the drain is no longer bounded by construction"
+        );
+        assert_eq!(
+            drains, 3,
+            "exactly 3 frames were genuinely excess above the hysteresis band"
+        );
+        assert_eq!(
+            depth,
+            target + DRAIN_HYSTERESIS_FRAMES,
+            "a 5-frame overshoot must converge into the tolerated band (target + hysteresis) \
+             within {TICKS} ticks, and stop there — never all the way to the bare target"
+        );
+    }
+
+    /// #859 follow-up — degenerate fps inputs must never panic. A degenerate rate implies
+    /// target=0 (mirrors [`steady_depth_frames`]'s own degenerate guard), so it does NOT mean
+    /// "never drain" — a depth above the bare hysteresis band still (correctly) drains once
+    /// enough ticks have elapsed; only the depth==0 / ticks==0 case stays quiet.
+    #[test]
+    fn should_drain_one_degenerate_fps_never_panics_859() {
+        assert!(should_drain_one(1000, 957, 0, 1, DRAIN_MIN_TICK_INTERVAL));
+        assert!(should_drain_one(1000, 957, 30, 0, DRAIN_MIN_TICK_INTERVAL));
+        assert!(!should_drain_one(0, 0, 0, 0, 0));
+        assert!(should_drain_one(
+            DRAIN_HYSTERESIS_FRAMES + 1,
+            957,
+            0,
+            1,
+            DRAIN_MIN_TICK_INTERVAL
+        ));
+    }
+}

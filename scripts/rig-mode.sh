@@ -10,7 +10,9 @@
 # WHAT IT DOES — the CAM side is automated here (ssh to the cam boxes is ALLOWED); the Windows OBS
 # burn is toggled DIRECTLY over OBS WebSocket (scripts/obs_burn_filter.py — the harness has WS access);
 # the env-free genlock relaunch (no --mode) is PRINTED to run via the win-*
-# MCP (ssh/scp to the Windows boxes is DENIED on this rig, same model as recording-verdict-on-stream.sh).
+# MCP (same model as recording-verdict-on-stream.sh's default planner mode — a GUI relaunch is
+# exactly what the win-* MCP is for; #701 proved plain scp/ssh reaches strih/stream, but that
+# doesn't drive/verify a GUI app launch).
 #
 #   TEST  : cam2 — stop the PERMANENT cam2-painter.service if installed (#440: it and this script's
 #                  transient emitter-painter both write /dev/fb0 — left running it made the displayed
@@ -90,6 +92,12 @@ set -euo pipefail
 # three scripts. Sourced here (before the source-guard) so both the executed flow and the unit tests
 # that source this script get the constant + builder.
 RIG_MODE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# #827 (binding owner directive): camera-set.sh's CAMERA_ACTIVE_SET is the ONE declared list of
+# cameras physically installed today — enforce_strih_ndi_mapping() below passes it straight
+# through to set-ndi-mapping.py's own --active flag, and event_mode_assert()'s fleet sweep
+# derives its box list from it too, so re-enabling a retired camera never needs a change here.
+# shellcheck source=scripts/camera-set.sh
+. "$RIG_MODE_DIR/camera-set.sh"
 # shellcheck source=scripts/lib/rig-test-dropin.sh
 . "$RIG_MODE_DIR/lib/rig-test-dropin.sh"
 # #420/#421: SINGLE SOURCE OF TRUTH for the QPSK audio-marker AUDIBLE self-check (ALSA CARD/DEV
@@ -97,6 +105,29 @@ RIG_MODE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # AV_RESTART_GATE painter (#421) so both launches can never drift on what "audible" means.
 # shellcheck source=scripts/lib/audio-marker-check.sh
 . "$RIG_MODE_DIR/lib/audio-marker-check.sh"
+# #725: SINGLE SOURCE OF TRUTH for resolving the QPSK audio-marker's ALSA device DYNAMICALLY
+# from the live `aplay -l` output (which HDMI device carries a genuine connected-monitor EDID
+# name right now) — see scripts/lib/marker-device-resolve.sh for the full #725 story. A hardcoded
+# device silently plays into a dead pin after any HDMI renegotiation.
+# shellcheck source=scripts/lib/marker-device-resolve.sh
+. "$RIG_MODE_DIR/lib/marker-device-resolve.sh"
+# #723: SINGLE SOURCE OF TRUTH for the rig-test LEDGER — anything a test/worker starts on the
+# rig registers durably here; EVENT mode cleans BY LEDGER (kill-by-PID, immune to a process
+# rename — the #721 incident's root link: a RENAMED painter that every name-based cleanup
+# missed). See scripts/lib/rig-test-ledger.sh for the full #723 story.
+# shellcheck source=scripts/lib/rig-test-ledger.sh
+. "$RIG_MODE_DIR/lib/rig-test-ledger.sh"
+# #722: SINGLE SOURCE OF TRUTH for the two fleet-wide EVENT-mode CONTRACT builders that have no
+# existing tool (per-box paint-process/service/stray-unit status, artifacts-existing check) —
+# see scripts/lib/event-assert.sh for the full #722 story. event_mode_assert() below
+# orchestrates these + the existing OBS-side tools into scripts/event_assert.py's decision.
+# shellcheck source=scripts/lib/event-assert.sh
+. "$RIG_MODE_DIR/lib/event-assert.sh"
+# #724: EVENT-mode Discord confirmation sender — after the #722 assert phase, ONE Slovak message
+# lands in the owner's Discord thread (pass=confirmation, fail=warning naming what failed). See
+# scripts/lib/event-mode-discord-confirm.sh for the full #724 story.
+# shellcheck source=scripts/lib/event-mode-discord-confirm.sh
+. "$RIG_MODE_DIR/lib/event-mode-discord-confirm.sh"
 # #464: SINGLE SOURCE OF TRUTH for the presenter-aware painter-liveness check (KMS page-flip vs
 # fbdev) — see scripts/lib/presenter-liveness-check.sh for the full #464 story. Mirrors
 # src/presenter_kind.rs::resolve_presenter_kind's "will this run ever touch /dev/fb0?" answer.
@@ -114,6 +145,31 @@ RIG_MODE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CAM_PW="${CAM_PW:-newlevel}"                 # dev-rig LAN root pw (same as the sibling e2e scripts)
 PAINTER_IP="${PAINTER_IP:-10.77.9.62}"       # cam2 — has /dev/fb0 + the monitor the broadcast cam films
 CAM1_IP="${CAM1_IP:-10.77.9.61}"             # cam1 — the SOURCE camera (NOT reconfigured here; for the print)
+# #722: the FULL fleet (targets.md) — used only by the EVENT-mode CONTRACT's fleet-wide
+# paint-process/service/stray-unit sweep (event_mode_assert). cam2 already has PAINTER_IP; the
+# rest were never previously needed as rig-mode.sh constants (only cam2 is reconfigured here).
+# #827 (2026-07-27, binding owner directive): cam5/cam6/cam7's IPs stay declared as FACTS even
+# though they are retired from CAMERA_ACTIVE_SET today (grabber cards returned to their owner,
+# boxes powered off) — event_mode_assert()'s sweep derives WHICH of these actually get swept
+# entirely from camera_active_secondary_set() (camera-set.sh, sourced above), never from a
+# second hardcoded list here.
+CAM3_IP="${CAM3_IP:-10.77.9.63}"
+CAM4_IP="${CAM4_IP:-10.77.9.64}"
+CAM5_IP="${CAM5_IP:-10.77.9.65}"
+CAM6_IP="${CAM6_IP:-10.77.9.66}"
+CAM7_IP="${CAM7_IP:-10.77.9.67}"
+# rig_mode_secondary_ip NAME -> the fixed IP for a non-source, non-painter camera name. Mirrors
+# recording-e2e.sh's camera_secondary_ip() shape (single lookup site, same facts).
+rig_mode_secondary_ip() {
+  case "$1" in
+    cam3) printf '%s' "$CAM3_IP" ;;
+    cam4) printf '%s' "$CAM4_IP" ;;
+    cam5) printf '%s' "$CAM5_IP" ;;
+    cam6) printf '%s' "$CAM6_IP" ;;
+    cam7) printf '%s' "$CAM7_IP" ;;
+    *) echo "rig_mode_secondary_ip: unknown secondary camera '$1'" >&2; return 1 ;;
+  esac
+}
 PAINTER_BIN="${PAINTER_BIN:-/usr/local/bin/frame-probe}"
 QR_SIZE="${QR_SIZE:-700}"
 PAINTER_FPS="${PAINTER_FPS:-60}"             # painter rate — MUST match the 60fps capture (#290)
@@ -286,6 +342,12 @@ nohup $bin --paint-only --dual-qr --qr-size $qr --duration-secs $dur --paint-fps
   --marker-log $marker_log $extra >/tmp/rig-painter.log 2>&1 &
 echo \$! > "$pidfile"
 PAINTER_PID=\$(cat "$pidfile")
+# (4b) #723: register this painter in the rig-test LEDGER — the sanctioned registration path, so
+#      EVENT mode (or an orphan sweep) can find and kill it BY PID even if the binary is later
+#      renamed/copied elsewhere (the #721 incident class). $dur is TEST mode's own intentional
+#      measurement-window length (often > the 3600s safety cap) — passed WITH a reason so it is
+#      honored verbatim rather than clamped (rig_test_ledger_effective_max_duration).
+$(rig_test_ledger_register_remote_cmds "frame-probe --paint-only (rig-mode TEST painter)" '\$PAINTER_PID' cam2 "rig-mode.sh test" "$(rig_test_ledger_effective_max_duration "$dur" "rig-mode TEST measurement window")")
 sleep 3
 # (5) verify the painter is UP and ACTUALLY PAINTING — presenter-aware (#464). --presenter auto
 #     (the default here) may land on the KMS page-flip presenter, which by design NEVER opens
@@ -357,20 +419,45 @@ if [ "\$(systemctl is-active camera-box 2>/dev/null)" != "active" ]; then
   systemctl status camera-box --no-pager >&2 2>/dev/null || true
   exit 1
 fi
-# (5) verify the preview is restored: the EFFECTIVE Environment no longer carries
-#     CAMERA_BOX_NO_DISPLAY=1 (same resolved-check shape TEST mode uses — 'systemctl show', NOT
-#     'systemctl cat', so a silently-failed drop-in removal can't false-pass on the base unit)
-#     AND camera-box re-grabbed /dev/fb0.
-if systemctl show -p Environment --value camera-box 2>/dev/null | grep -q -- 'CAMERA_BOX_NO_DISPLAY=1'; then
-  echo "FAIL: camera-box Environment still carries CAMERA_BOX_NO_DISPLAY=1 — interkom monitor not restored" >&2
-  exit 1
+# (5) verify the monitor is restored. WHICH state is correct depends on the box (#868): a box with a
+#     dedicated cam2-painter.service carries a PERMANENT no-display drop-in
+#     (/etc/systemd/system/camera-box.service.d/cam2-no-display.conf, #863) precisely so camera-box's
+#     display thread NEVER grabs /dev/fb0 or DRM master there — the painter service is the sole owner
+#     of that monitor. Asserting the pre-#863 contract on such a box could only ever FAIL, and the
+#     non-zero exit stranded EVENT mode's own burn-clear sweep (a burn left ON then made the next
+#     Full-path E2E gate run refuse in its #758 preflight). So branch on the unit's presence — the
+#     same condition the #440 stop/start guards use, one notion of "painter box" in this script.
+if systemctl list-unit-files cam2-painter.service >/dev/null 2>&1; then
+  # #868 painter box: NO_DISPLAY is EXPECTED to remain (the permanent #863 drop-in). What must hold
+  # is that the TRANSIENT drop-in is gone (removed above), camera-box is active (checked in (4)),
+  # cam2-painter is active, and /dev/fb0 IS held — by the painter, not by camera-box.
+  i=0; while [ "\$(systemctl is-active cam2-painter 2>/dev/null)" != "active" ] && [ \$i -lt 20 ]; do sleep 0.5; i=\$((i+1)); done
+  if [ "\$(systemctl is-active cam2-painter 2>/dev/null)" != "active" ]; then
+    echo "FAIL: #868 painter box but cam2-painter is not active — nothing is painting this monitor" >&2
+    systemctl status cam2-painter --no-pager >&2 2>/dev/null || true
+    exit 1
+  fi
+  i=0; while ! fuser -s /dev/fb0 2>/dev/null && [ \$i -lt 20 ]; do sleep 0.5; i=\$((i+1)); done
+  if ! fuser -s /dev/fb0 2>/dev/null; then
+    echo "FAIL: #868 cam2-painter active but /dev/fb0 not held — the permanent dual-QR painter is not painting" >&2
+    exit 1
+  fi
+  echo "PASS: transient painter stopped, camera-box active, permanent cam2-painter restored (holding /dev/fb0)"
+else
+  #     The EFFECTIVE Environment no longer carries CAMERA_BOX_NO_DISPLAY=1 (same resolved-check
+  #     shape TEST mode uses — 'systemctl show', NOT 'systemctl cat', so a silently-failed drop-in
+  #     removal can't false-pass on the base unit) AND camera-box re-grabbed /dev/fb0.
+  if systemctl show -p Environment --value camera-box 2>/dev/null | grep -q -- 'CAMERA_BOX_NO_DISPLAY=1'; then
+    echo "FAIL: camera-box Environment still carries CAMERA_BOX_NO_DISPLAY=1 — interkom monitor not restored" >&2
+    exit 1
+  fi
+  i=0; while ! fuser -s /dev/fb0 2>/dev/null && [ \$i -lt 20 ]; do sleep 0.5; i=\$((i+1)); done
+  if ! fuser -s /dev/fb0 2>/dev/null; then
+    echo "FAIL: camera-box active but /dev/fb0 not held — the unconditional preview is not painting the interkom return" >&2
+    exit 1
+  fi
+  echo "PASS: painter stopped, camera-box active + unconditional preview restored (holding /dev/fb0)"
 fi
-i=0; while ! fuser -s /dev/fb0 2>/dev/null && [ \$i -lt 20 ]; do sleep 0.5; i=\$((i+1)); done
-if ! fuser -s /dev/fb0 2>/dev/null; then
-  echo "FAIL: camera-box active but /dev/fb0 not held — the unconditional preview is not painting the interkom return" >&2
-  exit 1
-fi
-echo "PASS: painter stopped, camera-box active + unconditional preview restored (holding /dev/fb0)"
 REMOTE
 }
 
@@ -384,12 +471,21 @@ REMOTE
 # Overridable; defaults mirror the recording-e2e BURN_TARGETS (the prod program inputs).
 STRIH_IP="${STRIH_IP:-10.77.9.202}"
 STREAM_IP="${STREAM_IP:-10.77.9.204}"
-STRIH_PROG_SOURCE="${STRIH_PROG_SOURCE:-NDI cam5}"      # strih program input (#246 burn target)
+STRIH_PROG_SOURCE="${STRIH_PROG_SOURCE:-NDI cam1}"      # strih program input, cam1 (#246 burn
+                                                          # target; #753 2026-07-14: strih's NDI
+                                                          # mapping pivoted to 1:1, cam1 now rides
+                                                          # 'NDI cam1' not the old 'NDI cam5')
 STREAM_PROG_SOURCE="${STREAM_PROG_SOURCE:-NDI 2ME PGM}" # stream program input (#246 burn target)
 # #462 (EPIC #466 Topology v2): imag-nb — the new 60fps low-latency IMAG cutter. Its scene->camera
 # mapping is the Phase 1 1:1 pin (setup-imag.sh, #458): 'NDI CAM1'..'NDI CAM6' -> 'CAMx (usb)'
 # 1:1, so cam1 (the SOURCE camera that films cam2's monitor) rides 'NDI CAM1' / scene 'Cam 1'.
-IMAG_IP="${IMAG_IP:-10.77.9.182}"
+#
+# #832: IMAG_IP is now DERIVED from scripts/imag-host.sh — the ONE declared imag host (mirrors
+# camera-set.sh's CAMERA_ACTIVE_SET design, #827) — instead of an independent literal here.
+# Swapping the rig's imag role (incumbent .182 <-> replacement .187) is a one-line change in that
+# ONE file (or IMAG_HOST_ACTIVE=incumbent for a one-off run), never a hunt through this script.
+# shellcheck source=scripts/imag-host.sh
+. "$RIG_MODE_DIR/imag-host.sh"
 IMAG_PROG_SOURCE="${IMAG_PROG_SOURCE:-NDI CAM1}"        # imag input showing cam1 (#462 burn target)
 IMAG_PROG_SCENE="${IMAG_PROG_SCENE:-Cam 1}"             # imag scene showing cam1 — routed to PROGRAM in TEST mode
 OBS_WS_PASSWORD="${OBS_WS_PASSWORD:-}"
@@ -447,7 +543,11 @@ warn_imag_genlock_stale() {
   # still returns 0) instead of crashing here.
   here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || here=""
   echo "[#531] pre-event drift check: is imag-nb's DEPLOYED genlock build current with origin/main?"
-  out="$( cd "$here/.." && bash scripts/drift-guard.sh --check-imag 2>&1 )" || rc=$?
+  # #832: pass the ACTIVE resolved imag host (scripts/imag-host.sh) — drift-guard.sh already
+  # supports a host= override, it just was never given the rig's own resolved value, so this
+  # check silently always targeted drift-guard's own hardcoded default regardless of which
+  # physical box rig-mode.sh itself was driving.
+  out="$( cd "$here/.." && bash scripts/drift-guard.sh --check-imag "host=$IMAG_IP" 2>&1 )" || rc=$?
   printf '%s\n' "$out" | sed 's/^/    [imag drift] /'
   # #531 review: log the actual exit code (comprehensive-logging: values, not just a bare pass/fail)
   # instead of capturing it into `rc` and never reading it — 0=OK, 20=DRIFT, 11=UNKNOWN, anything
@@ -496,16 +596,21 @@ toggle_burn() {
 }
 
 # enforce_strih_ndi_mapping -> set + VERIFY the strih NDI-input→camera mapping (#399) over OBS WS.
-# The mapping is fixed + Claude-owned (never a user question): NDI cam5→CAM1, cam1→CAM3, cam3→CAM4,
-# cam2→CAM2 (the pins in set-ndi-mapping.py). It drifts (recurring bug: two inputs both on CAM4 → a
-# camera shows twice, another missing), and a hot WS rebind does not survive a force-kill relaunch —
-# so rig activation ENFORCES it every time here instead of the operator/agent re-doing it by hand.
-# Fail-loud (non-zero) if it cannot make all 4 distinct.
+# The mapping is fixed + Claude-owned (never a user question): NDI cam1→CAM1, cam2→CAM2, cam3→CAM3,
+# cam4→CAM4 (the pins in set-ndi-mapping.py; #753 1:1 pivot). It drifts (recurring bug: two inputs
+# both on CAM4 → a camera shows twice, another missing), and a hot WS rebind does not survive a
+# force-kill relaunch — so rig activation ENFORCES it every time here instead of the
+# operator/agent re-doing it by hand. Fail-loud (non-zero) if it cannot make all pins distinct.
+# #827 (2026-07-27, binding owner directive): passes CAMERA_ACTIVE_SET (camera-set.sh, sourced
+# above) straight through as set-ndi-mapping.py's own --active filter -- ONE declared list, never
+# a second hardcoded enumeration here. Re-enable procedure: cam5 back? add "cam5" to
+# CAMERA_ACTIVE_SET in scripts/camera-set.sh, rerun the gate.
 enforce_strih_ndi_mapping() {
   local here rc=0
   here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || here=""
-  echo "[obs strih ${STRIH_IP}] #399 enforce NDI-input→camera mapping (4 distinct) over WebSocket:"
+  echo "[obs strih ${STRIH_IP}] #399 enforce NDI-input→camera mapping (distinct) over WebSocket (active: ${CAMERA_ACTIVE_SET}):"
   python3 "$here/set-ndi-mapping.py" --host "$STRIH_IP" --password "$OBS_WS_PASSWORD" \
+    --active "$CAMERA_ACTIVE_SET" \
     2>&1 | sed 's/^/    [strih ndi-map] /' || rc=$?
   return $rc
 }
@@ -526,13 +631,14 @@ set_imag_test_program() {
   return $rc
 }
 
-# print_genlock_relaunch_note MODE -> the genlock RELAUNCH step (printed, not run — ssh to Windows is
-# DENIED so OBS launch goes via the win-* MCP). #257: env-free; the wrapper just verifies the genlock
+# print_genlock_relaunch_note MODE -> the genlock RELAUNCH step (printed, not run — a GUI OBS
+# launch goes via the win-* MCP; #701 proved plain scp/ssh reaches strih/stream, but that doesn't
+# drive/verify a GUI app). #257: env-free; the wrapper just verifies the genlock
 # render tick is ENABLED (build default). Only needed if OBS is not already running on a box.
 print_genlock_relaunch_note() {
   local mode="$1"
   cat <<EOF
-# ---- Windows OBS genlock relaunch (only if OBS is not already running; ssh denied -> win-* MCP) ----
+# ---- Windows OBS genlock relaunch (only if OBS is not already running; via win-* MCP) ----
 # The measurement burn for ${mode} mode was just toggled over WebSocket above (no relaunch). The
 # genlock build is hard-locked (render tick + ts-align always ON, latency 3 ms — NO env), so a
 # relaunch is only needed to (re)start a stopped/wedged OBS. Per box, paste the printed program into
@@ -562,8 +668,9 @@ Usage:
 
 The CAM side (cam2 = 10.77.9.62) is applied + verified here over ssh. The OBS burn is toggled DIRECTLY
 over OBS WebSocket (scripts/obs_burn_filter.py — no relaunch); the env-free genlock relaunch (no
---mode) is PRINTED to run via the win-* MCP (ssh to Windows is denied). See the script header for
-env overrides.
+--mode) is PRINTED to run via the win-* MCP (a GUI relaunch is what the win-* MCP is for; #701
+proved plain scp/ssh reaches strih/stream too, but that doesn't drive a GUI app). See the script
+header for env overrides.
 
 Exit codes: 0 = mode applied (cam side + burn WS toggle) + relaunch note printed; 2 = usage error.
 EOF
@@ -581,6 +688,42 @@ cam_ssh() {
   sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 root@"$PAINTER_IP" "$1"
 }
 
+# resolve_marker_device -> stdout: the ALSA device string to use for the QPSK audio marker
+# (#725). Fetches a live `aplay -l` from cam2 and resolves via marker_device_resolve_from_aplay
+# (scripts/lib/marker-device-resolve.sh); on resolution failure (no device in the live listing
+# carries a genuine monitor name) falls back to the pinned AUDIO_MARKER_DEVICE default, loudly
+# WARNING that live resolution found nothing — last resort only. A truly dead pin can never end
+# in a silent PASS regardless: verify_marker_device_monitor (below) re-checks whichever device
+# was actually used, AFTER launch.
+resolve_marker_device() {
+  local aplay_text resolved
+  aplay_text="$(cam_ssh "$(marker_device_aplay_list_cmds)" 2>/dev/null || true)"
+  if resolved="$(marker_device_resolve_from_aplay "$aplay_text")"; then
+    echo "[#725] resolved marker device from cam2's live aplay -l: $resolved" >&2
+    echo "$resolved"
+  else
+    echo "WARNING: [#725] no HDMI device in cam2's live aplay -l carries a genuine monitor name -- falling back to the pinned default $AUDIO_MARKER_DEVICE (last resort; will still be re-verified after launch)." >&2
+    echo "$AUDIO_MARKER_DEVICE"
+  fi
+}
+
+# verify_marker_device_monitor DEVICE -> exit 0 iff DEVICE still carries a genuine monitor name
+# in a FRESH cam2 aplay -l read (#725's post-launch re-check — catches a monitor unplugged in the
+# gap between resolution and launch, or a fallback device that has no monitor either). On
+# failure: print a FAIL LOUD diagnostic, kill the just-launched painter (a silent dead-pin run
+# must never be reported PASS), and return non-zero.
+verify_marker_device_monitor() {
+  local device="$1" aplay_text
+  aplay_text="$(cam_ssh "$(marker_device_aplay_list_cmds)" 2>/dev/null || true)"
+  if marker_device_carries_monitor "$aplay_text" "$device"; then
+    echo "PASS: [#725] marker device $device confirmed carrying a live monitor (post-launch re-check)"
+    return 0
+  fi
+  echo "FAIL: [#725] marker device $device does NOT carry a live monitor on re-check (dead pin) -- killing the just-launched painter (a silent dead-pin run must never PASS)." >&2
+  cam_ssh "PID=\$(cat '$PAINTER_PIDFILE' 2>/dev/null || true); [ -n \"\$PID\" ] && kill \"\$PID\" 2>/dev/null || true" || true
+  return 1
+}
+
 do_test() {
   require_sshpass
   # #281 Fix#3: mark the rig as deliberately in a TEST state so the rig-restore watchdog does not
@@ -592,8 +735,15 @@ do_test() {
   echo "[obs] #531 pre-event genlock-staleness check on imag-nb (advisory, never blocks the switch):"
   warn_imag_genlock_stale
   echo
+  echo "[cam2 ${PAINTER_IP}] #725 resolve the QPSK audio-marker device from cam2's LIVE aplay -l (never trust the hardcoded default):"
+  local resolved_marker_device
+  resolved_marker_device="$(resolve_marker_device)"
+  echo
   echo "[cam2 ${PAINTER_IP}] switch camera-box to no-display (free /dev/fb0, keep capture+emit) -> launch PINNED painter (qr=${QR_SIZE}px)"
-  cam_ssh "$(painter_launch_remote "$PAINTER_BIN" "$PAINTER_DURATION_SECS" "$QR_SIZE" "$PAINTER_PIDFILE" "$PAINTER_EXTRA_FLAGS" "$PAINTER_FPS" "$RIG_TEST_DROPIN" "$AUDIO_MARKER_DEVICE" "$AUDIO_MARKER_CADENCE_TICKS" "$AUDIO_MARKER_LOG")"
+  cam_ssh "$(painter_launch_remote "$PAINTER_BIN" "$PAINTER_DURATION_SECS" "$QR_SIZE" "$PAINTER_PIDFILE" "$PAINTER_EXTRA_FLAGS" "$PAINTER_FPS" "$RIG_TEST_DROPIN" "$resolved_marker_device" "$AUDIO_MARKER_CADENCE_TICKS" "$AUDIO_MARKER_LOG")"
+  echo
+  echo "[cam2 ${PAINTER_IP}] #725 post-launch re-check: does $resolved_marker_device STILL carry a live monitor?"
+  verify_marker_device_monitor "$resolved_marker_device"
   echo
   echo "[obs] #257 toggle per-source genlock_burn ON over WebSocket (no relaunch):"
   toggle_burn test
@@ -608,13 +758,220 @@ do_test() {
   echo
   echo "ACHIEVED (cam side): cam2 painting dual-QR ${QR_SIZE}px on /dev/fb0 (pidfile ${PAINTER_PIDFILE})."
   echo "                     cam2 camera-box still ACTIVE in no-display mode (#291: NOT stopped — capture+emit keep running)."
-  echo "                     cam2 QPSK audio marker RUNNING+VERIFIED on ${AUDIO_MARKER_DEVICE} (#420: cadence ${AUDIO_MARKER_CADENCE_TICKS} ticks, log ${AUDIO_MARKER_LOG})."
+  echo "                     cam2 QPSK audio marker RUNNING+VERIFIED on ${resolved_marker_device} (#420/#725: live-resolved device, cadence ${AUDIO_MARKER_CADENCE_TICKS} ticks, log ${AUDIO_MARKER_LOG})."
   echo "                     -> verify cam2's NDI actually reaches strih on the rig (this switch does not prove the emit)."
   echo "                     cam1 (${CAM1_IP}) left on its DEPLOYED service (already at the 30 fps test rate)."
   echo "ACHIEVED (obs side): genlock_burn=true on strih + stream + imag program inputs (WebSocket, no relaunch)."
   echo "                     imag-nb (${IMAG_IP}) PROGRAM routed to '${IMAG_PROG_SCENE}' (cam1, #462)."
   echo "NEXT: confirm the PHASE2-PROBE scene + native-1080p recording per the e2e/obs-ops skill -> TEST mode."
   echo "RESULT: TEST mode — cam side PASS, burns ON."
+}
+
+# event_mode_ledger_cleanup -> #723: read cam2's rig-test LEDGER and terminate EVERY registered
+# entry — SIGTERM, bounded escalation to SIGKILL, and the #660 clean-paint fb0 fallback when a
+# KILL was actually needed — then CLEAR the ledger. This is the exhaustive sweep that catches
+# anything painter_stop_remote's own name-based `pkill -x frame-probe` might miss (a renamed
+# binary — the #721 incident class), and anything ELSE a test/worker registered (a burn, an
+# override) that this switch's own steps don't already know to revert. Runs BEFORE the #722
+# assert phase so the assert's own paint-process/artifact checks see the CLEANED end state.
+# Best-effort per entry (one bad/malformed line must never abort the whole cleanup or do_event
+# itself) — logs everything for the operator, never hard-fails.
+event_mode_ledger_cleanup() {
+  echo "[#723] rig-test ledger cleanup on cam2 (exhaustive sweep, BEFORE the #722 assert phase):"
+  local raw
+  raw="$(cam_ssh "$(rig_test_ledger_read_remote_cmds)" 2>/dev/null || true)"
+  if [ -z "$raw" ]; then
+    echo "[#723] ledger empty/absent on cam2 -- nothing to clean."
+    return 0
+  fi
+  local line what pidunit box out
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    what="$(printf '%s' "$line" | jq -r '.what // empty' 2>/dev/null || true)"
+    pidunit="$(printf '%s' "$line" | jq -r '.pid_or_unit // empty' 2>/dev/null || true)"
+    box="$(printf '%s' "$line" | jq -r '.box // empty' 2>/dev/null || true)"
+    if [ -z "$pidunit" ]; then
+      echo "WARNING: [#723] skipping malformed ledger line: $line" >&2
+      continue
+    fi
+    echo "[#723] cleaning ledger entry: what=${what:-?} pid_or_unit=$pidunit box=${box:-?}"
+    out="$(cam_ssh "$(rig_test_ledger_terminate_entry_cmds "$pidunit" pid)" 2>&1 || true)"
+    echo "$out" | sed 's/^/    [ledger cleanup] /'
+    if printf '%s' "$out" | grep -q 'KILL_NEEDED=1'; then
+      echo "[#723] entry required SIGKILL (never got its own graceful teardown) -- running the #660 clean-paint fb0 fallback."
+      cam_ssh "$(rig_test_ledger_clean_paint_fallback_cmds)" 2>&1 | sed 's/^/    [ledger cleanup] /' || true
+    fi
+  done <<< "$raw"
+  cam_ssh "$(rig_test_ledger_clear_remote_cmds)" 2>/dev/null || true
+  echo "[#723] ledger cleared on cam2."
+}
+
+# fleet_ssh HOST CMD -> run CMD on HOST as root, like cam_ssh but for the FULL fleet (cam1-6),
+# not just cam2/PAINTER_IP. Used only by the #722 EVENT-mode CONTRACT's fleet-wide sweep.
+fleet_ssh() {
+  local host="$1" cmd="$2"
+  sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 root@"$host" "$cmd"
+}
+
+# _bool_or_failclosed VALUE -> "true"/"false" JSON literal text. "True"->true, "False"->false,
+# ANYTHING else (unreachable box, RPC error, empty string) -> true — the FAIL-CLOSED default for
+# a "is this thing still ON" check (burn/recording/streaming): an unknown state must never read
+# as "confirmed off". Mirrors event_assert.py's own fail-closed philosophy for facts this
+# function feeds it.
+_bool_or_failclosed() {
+  case "$1" in
+    True) echo true ;;
+    False) echo false ;;
+    *) echo true ;;
+  esac
+}
+
+# event_mode_assert -> #722 EVENT-mode CONTRACT: gather all 8 items' facts (the fleet ssh sweep
+# above + the existing/new OBS-WS tools: obs_burn_filter.py check, obs_phase2.py
+# record/stream-status/latency-check, set-ndi-mapping.py --verify-only,
+# qr_screenshot_check.py), hand them to scripts/event_assert.py for the pure decision +
+# aggregation, and set two globals for the caller: EVENT_ASSERT_PASS (0=pass/1=fail, matching
+# event_assert.py's own exit code) and EVENT_ASSERT_SUMMARY (the printed Slovak summary).
+# EVENT_ASSERT_RESULT_JSON is left pointing at the written machine-readable result (consumed by
+# the #724 Discord confirmation). Best-effort collection throughout — an unreachable box or a
+# failed sub-check is recorded as a FAILING fact (via _bool_or_failclosed / sentinel values),
+# never silently omitted, so the aggregate decision always reflects the REAL rig state.
+event_mode_assert() {
+  # #758 item 5: this used to carry a trailing "/.." -- the ONLY one of this file's `here=`
+  # computations that did, resolving one directory too high (the repo root) instead of scripts/,
+  # where event_assert.py / obs_phase2.py / obs_burn_filter.py / set-ndi-mapping.py /
+  # qr_screenshot_check.py actually live. Matches every OTHER `here=` line in this file (e.g.
+  # painter_liveness/OBS-scene helpers above) -- scripts/ itself, no trailing "/..".
+  local here; here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  local facts_json; facts_json="$(mktemp /tmp/event-assert-facts.XXXXXX.json)"
+  EVENT_ASSERT_RESULT_JSON="$(mktemp /tmp/event-assert-result.XXXXXX.json)"
+  # #724: the composed Discord confirmation message (Slovak, phone-readable) -- populated by
+  # event_assert.py below, sent by the EVENT-mode caller after this function returns (on BOTH
+  # outcomes).
+  EVENT_ASSERT_DISCORD_MSG_PATH="$(mktemp /tmp/event-assert-discord.XXXXXX.txt)"
+
+  echo "[#722] EVENT-mode CONTRACT -- gathering the 8-item assert-phase facts:"
+
+  # --- item 1 + part of item 5: fleet paint-process / service / stray-unit sweep -------------
+  # #827: the sweep target list is cam1 + cam2(painter) + every camera in
+  # camera_active_secondary_set() (camera-set.sh) -- the ONE place fleet membership is declared.
+  local paint_json="{}" active_json="{}" stray_json="{}"
+  local box_ip box ip out pc sa su
+  local -a EVENT_ASSERT_TARGETS=("cam1=$CAM1_IP" "cam2=$PAINTER_IP")
+  for box in $(camera_active_secondary_set); do
+    EVENT_ASSERT_TARGETS+=("${box}=$(rig_mode_secondary_ip "$box")")
+  done
+  for box_ip in "${EVENT_ASSERT_TARGETS[@]}"; do
+    box="${box_ip%%=*}"; ip="${box_ip#*=}"
+    out="$(fleet_ssh "$ip" "$(event_assert_fleet_check_cmds)" 2>/dev/null || true)"
+    pc="$(printf '%s' "$out" | grep -oP 'PAINT_COUNT=\K[0-9]+' || true)"; [ -n "$pc" ] || pc=-1
+    sa="$(printf '%s' "$out" | grep -oP 'SERVICE_ACTIVE=\K\S+' || true)"; [ -n "$sa" ] || sa=unreachable
+    su="$(printf '%s' "$out" | grep -oP 'STRAY_UNITS=\K\S*' || true)"
+    echo "    [$box $ip] paint=$pc service=$sa stray='${su}'"
+    paint_json="$(jq --argjson j "$paint_json" --arg k "$box" --argjson v "$pc" -n '$j + {($k): $v}')"
+    active_json="$(jq --argjson j "$active_json" --arg k "$box" --argjson v "$([ "$sa" = active ] && echo true || echo false)" -n '$j + {($k): $v}')"
+    if [ -n "$su" ]; then
+      stray_json="$(jq --argjson j "$stray_json" --arg k "$box" --arg v "$su" -n '$j + {($k): ($v | split(","))}')"
+    else
+      stray_json="$(jq --argjson j "$stray_json" --arg k "$box" -n '$j + {($k): []}')"
+    fi
+  done
+
+  # --- item 2: pixel proof (strih's canonical 4 camera scenes, #399) -------------------------
+  local qr_json
+  qr_json="$(python3 "$here/qr_screenshot_check.py" --host "$STRIH_IP" --password "$OBS_WS_PASSWORD" \
+    --scene "Cam 1" --scene "Cam 2" --scene "Cam 3" --scene "Cam 4" 2>/dev/null || true)"
+  [ -n "$qr_json" ] || qr_json="{}"
+  echo "    [pixel-proof] $qr_json"
+
+  # --- item 3: burns off on every measurement-burn target ------------------------------------
+  local burn_json="{}" src label burn_on bv
+  while IFS='|' read -r ip src box; do
+    [ -n "$ip" ] || continue
+    out="$(python3 "$here/obs_burn_filter.py" check --host "$ip" --input "$src" --password "$OBS_WS_PASSWORD" 2>/dev/null || true)"
+    burn_on="$(printf '%s' "$out" | grep -oP 'burn_on=\K(True|False)' || true)"
+    bv="$(_bool_or_failclosed "$burn_on")"
+    label="${box}:${src}"
+    burn_json="$(jq --argjson j "$burn_json" --arg k "$label" --argjson v "$bv" -n '$j + {($k): $v}')"
+  done < <(obs_burn_targets)
+  echo "    [burns] $burn_json"
+
+  # --- item 4: no active recordings/streams on strih+stream -----------------------------------
+  local rec_json="{}" hb active rv
+  for hb in "strih=$STRIH_IP" "stream=$STREAM_IP"; do
+    box="${hb%%=*}"; ip="${hb#*=}"
+    out="$(python3 "$here/obs_phase2.py" record --action status --host "$ip" --password "$OBS_WS_PASSWORD" 2>/dev/null || true)"
+    active="$(printf '%s' "$out" | grep -oP 'active=\K(True|False)' || true)"
+    rv="$(_bool_or_failclosed "$active")"
+    rec_json="$(jq --argjson j "$rec_json" --arg k "${box}:record" --argjson v "$rv" -n '$j + {($k): $v}')"
+
+    out="$(python3 "$here/obs_phase2.py" stream-status --host "$ip" --password "$OBS_WS_PASSWORD" 2>/dev/null || true)"
+    active="$(printf '%s' "$out" | grep -oP 'active=\K(True|False)' || true)"
+    rv="$(_bool_or_failclosed "$active")"
+    rec_json="$(jq --argjson j "$rec_json" --arg k "${box}:stream" --argjson v "$rv" -n '$j + {($k): $v}')"
+  done
+  echo "    [recordings] $rec_json"
+
+  # --- item 6: stream PGM latency == calibrated (av-sync-last.json), restore-or-fail ---------
+  local calibrated_ms="" current_ms="" latency_out latency_detail=""
+  calibrated_ms="$(jq -r '.applied_latency_ms // empty' "$HOME/.camera-box/av-sync-last.json" 2>/dev/null || true)"
+  if [ -n "$calibrated_ms" ]; then
+    latency_out="$(python3 "$here/obs_phase2.py" latency-check --host "$STREAM_IP" --password "$OBS_WS_PASSWORD" \
+      --source "NDI 2ME PGM" --calibrated-ms "$calibrated_ms" 2>/dev/null || true)"
+    current_ms="$(printf '%s' "$latency_out" | grep -oP 'final=\K-?[0-9]+' || true)"
+    latency_detail="aktualna=${current_ms:-neznama}ms, kalibrovana=${calibrated_ms}ms"
+  else
+    latency_detail="kalibrovana hodnota nie je znama (av-sync-last.json chyba/necitatelny)"
+  fi
+  echo "    [latency] $latency_detail"
+
+  # --- item 7: NDI mapping (#399) -------------------------------------------------------------
+  local ndi_ok=0 ndi_mismatches="[]"
+  python3 "$here/set-ndi-mapping.py" --host "$STRIH_IP" --password "$OBS_WS_PASSWORD" --verify-only >/dev/null 2>&1 || ndi_ok=$?
+  [ "$ndi_ok" -eq 0 ] || ndi_mismatches='["drift"]'
+  echo "    [ndi-mapping] verify-only exit=$ndi_ok"
+
+  # --- item 8: test artifacts cleared (cam2 pidfile/marker log + dev1 heartbeat) --------------
+  local artifacts_remote artifacts_local artifacts_json
+  artifacts_remote="$(cam_ssh "$(event_assert_artifacts_check_cmds "$PAINTER_PIDFILE" "$AUDIO_MARKER_LOG")" 2>/dev/null || true)"
+  artifacts_local="$(bash -c "$(event_assert_artifacts_check_cmds "$(rig_heartbeat_path)")" 2>/dev/null || true)"
+  artifacts_json="$(printf '%s\n%s\n' "$artifacts_remote" "$artifacts_local" | jq -R -s 'split("\n") | map(select(length>0))')"
+  echo "    [artifacts] $artifacts_json"
+
+  # --- assemble the facts JSON + decide -------------------------------------------------------
+  jq -n \
+    --argjson fleet_paint_process_counts "$paint_json" \
+    --argjson fleet_service_active "$active_json" \
+    --argjson fleet_stray_units "$stray_json" \
+    --argjson qr_findings "$qr_json" \
+    --argjson burn_states "$burn_json" \
+    --argjson recording_states "$rec_json" \
+    --arg latency_current_ms "$current_ms" \
+    --arg latency_calibrated_ms "$calibrated_ms" \
+    --argjson ndi_mismatches "$ndi_mismatches" \
+    --argjson artifacts_existing "$artifacts_json" \
+    --arg latency_detail "$latency_detail" \
+    '{
+      fleet_paint_process_counts: $fleet_paint_process_counts,
+      fleet_service_active: $fleet_service_active,
+      fleet_stray_units: $fleet_stray_units,
+      qr_findings: $qr_findings,
+      burn_states: $burn_states,
+      recording_states: $recording_states,
+      latency_current_ms: (if ($latency_current_ms | length) > 0 then ($latency_current_ms | tonumber) else null end),
+      latency_calibrated_ms: (if ($latency_calibrated_ms | length) > 0 then ($latency_calibrated_ms | tonumber) else null end),
+      ndi_mismatches: $ndi_mismatches,
+      artifacts_existing: $artifacts_existing,
+      details: {latency_calibrated: $latency_detail}
+    }' > "$facts_json"
+
+  echo
+  echo "[#722] running the aggregate decision (scripts/event_assert.py):"
+  EVENT_ASSERT_PASS=0
+  EVENT_ASSERT_SUMMARY="$(python3 "$here/event_assert.py" --facts "$facts_json" \
+    --result-out "$EVENT_ASSERT_RESULT_JSON" --discord-out "$EVENT_ASSERT_DISCORD_MSG_PATH")" || EVENT_ASSERT_PASS=$?
+  echo "$EVENT_ASSERT_SUMMARY"
+  rm -f "$facts_json" 2>/dev/null || true
 }
 
 do_event() {
@@ -632,7 +989,20 @@ do_event() {
   stop_stray_recordings
   echo
   echo "[cam2 ${PAINTER_IP}] stop painter (via pidfile) -> remove CAMERA_BOX_NO_DISPLAY drop-in -> restart camera-box -> verify HDMI preview restored"
-  cam_ssh "$(painter_stop_remote "$PAINTER_PIDFILE")"
+  # #868: the cam-side restore must NOT be able to strand a measurement burn ON. Under `set -e` a
+  # non-zero cam_ssh here aborted do_event outright, so the burn-clear step below never ran and the
+  # rig was left with genlock_burn=true on a program input — which then made the NEXT Full-path E2E
+  # gate run refuse in its #758 preflight ("genlock_burn is still ON from a prior run"). One stale
+  # cam-side assert cost a whole gate cycle. So record the failure, keep going through the OBS
+  # burn-clear, and fail loud at the END (folded into the exit status below) — fail-loud is
+  # preserved, statelessness of the rig is no longer sacrificed to it.
+  _cam_restore_rc=0
+  cam_ssh "$(painter_stop_remote "$PAINTER_PIDFILE")" || _cam_restore_rc=$?
+  if [ "$_cam_restore_rc" -ne 0 ]; then
+    echo "WARNING #868: cam-side restore FAILED (rc=$_cam_restore_rc) — continuing to the OBS burn-clear so no burn is stranded ON; EVENT mode will still exit non-zero." >&2
+  fi
+  echo
+  event_mode_ledger_cleanup
   echo
   echo "[obs] #257 toggle per-source genlock_burn OFF over WebSocket (no relaunch — the #246 guard):"
   toggle_burn event
@@ -644,8 +1014,29 @@ do_event() {
   echo
   echo "ACHIEVED (cam side): cam2 painter stopped, camera-box active + unconditional HDMI preview restored."
   echo "ACHIEVED (obs side): genlock_burn=false on strih + stream + imag program inputs (WebSocket, no relaunch)."
-  echo "NEXT: confirm the prod scene per the obs-ops skill -> rig in clean EVENT mode (no burn on broadcast)."
-  echo "RESULT: EVENT mode — cam side PASS, burns OFF."
+  echo
+  echo "===== [#722] EVENT-mode CONTRACT — the full machine-checkable assert phase ====="
+  event_mode_assert
+  echo "=================================================================================="
+  echo
+  # #724: send the Discord confirmation on BOTH outcomes (pass=confirmation, fail=warning naming
+  # what failed) — UNCONDITIONALLY, before the exit below, never gated on EVENT_ASSERT_PASS.
+  echo "[#724] posting the EVENT-mode Discord confirmation to the owner's thread:"
+  event_mode_discord_confirm_send "$(cat "$EVENT_ASSERT_DISCORD_MSG_PATH" 2>/dev/null || echo "$EVENT_ASSERT_SUMMARY")"
+  rm -f "$EVENT_ASSERT_DISCORD_MSG_PATH" "$EVENT_ASSERT_RESULT_JSON" 2>/dev/null || true
+  echo
+  # #868: fold the recorded cam-side restore failure into the final verdict — deferring it past the
+  # burn-clear must never SWALLOW it.
+  if [ "$EVENT_ASSERT_PASS" -eq 0 ] && [ "${_cam_restore_rc:-0}" -eq 0 ]; then
+    echo "RESULT: EVENT mode — cam side PASS, burns OFF, #722 CONTRACT CONFIRMED clean for broadcast."
+    exit 0
+  fi
+  if [ "${_cam_restore_rc:-0}" -ne 0 ]; then
+    echo "RESULT: EVENT mode — cam-side restore FAILED (#868, rc=${_cam_restore_rc}). Burns were still cleared, but the rig is NOT confirmed clean — see the cam-side failure above." >&2
+  else
+    echo "RESULT: EVENT mode — #722 CONTRACT FAILED. The rig is NOT confirmed clean for broadcast — see the assert summary above." >&2
+  fi
+  exit 1
 }
 
 main() {

@@ -7,7 +7,7 @@
 | stagebox1 | 10.77.9.237 | Active | SSH: newlevel/newlevel |
 | strih | 10.77.9.202 | Active | SSH: newlevel/newlevel |
 | ableton-foh | 10.77.9.230 | Active | SSH: master/master |
-| mbc | 10.77.9.232 | Active | SSH: newlevel/newlevel |
+| mbc | 10.77.7.232 | Active | SSH: newlevel/newlevel — Master Broadcast Console: Ableton DAW doing the FINAL stream audio mastering; plugin latency deliberately aligned to EXACTLY 1s (the reason stream PGM's genlock hold ≈ 1000 − camera-path ≈ 925ms); the A/V-sync mic feeds INTO an Ableton channel here (was found muted 2026-07-12 — check this channel first when the measurement audio is silent). IP MOVED 2026-07-13: was 10.77.9.232 (a ping to the OLD IP falsely reads as "box off" — it is normally ON); `mbc.lan` resolves correctly, verify with `getent hosts mbc.lan` before declaring it down |
 | stream | 10.77.9.204 | Active | SSH: newlevel/newlevel |
 | bridge | 10.77.9.201 | Active | SSH: newlevel/newlevel |
 | iem | 10.77.9.231 | Active | SSH: iem/iem |
@@ -22,9 +22,29 @@
 | CAM2 | 10.77.9.62 | Active | SSH: root/newlevel |
 | CAM3 | 10.77.9.63 | Active | SSH: root/newlevel |
 | CAM4 | 10.77.9.64 | Active | SSH: root/newlevel |
-| CAM5 | 10.77.9.65 | Provisioning | SSH: root/newlevel; fleet growing 4->6 (#451) |
-| CAM6 | 10.77.9.66 | Provisioning | SSH: root/newlevel; fleet growing 4->6 (#451) |
-| CAM7 | — | Not built | Never built — user only expressed future interest in a 7th camera (#593). Add a row with a real IP here when a physical cam7 box exists. |
+| CAM5 | 10.77.9.65 | Active | SSH: root/newlevel; fleet grew 4->6 (#451), fully provisioned |
+| CAM6 | 10.77.9.66 | Active | SSH: root/newlevel; fleet grew 4->6 (#451), fully provisioned |
+| CAM7 | 10.77.9.67 | Active | SSH: root/newlevel; BUILT 2026-07-14 (M.2 internal disk, setup-device.sh CAM7, verify-device ALL CLEAR 21/21); NOT yet wired into strih OBS (no 'NDI cam7' input/scene) nor CAMERA_SET/sweep — integration is the follow-up |
+
+### Grabber cards — LIVE fleet assignment (verified 2026-07-12 via V4L2 `card` string, #728)
+
+**A physical card can move between boxes without the hostname changing — this table can drift.**
+`grabber_model_for_hostname` in `src/capture_rate_health.rs` is the OPERATIONAL/historical
+convention only; the code no longer trusts it blindly — `capture_rate_health::resolve_grabber_model`
+resolves the ACTUAL runtime card via `capture::query_card_name` (VIDIOC_QUERYCAP) at every boot and
+prefers that over this table whenever it's available. Re-verify with
+`v4l2-ctl -d /dev/videoN --info | grep 'Card type'` (or read `/sys/class/video4linux/videoN/name`)
+before trusting this table for anything operational.
+
+| Device | Grabber model | Capture node | Notes |
+|--------|---------------|--------------|-------|
+| CAM1 | Elgato 4K S | /dev/video0 | Swapped in 2026-07-12 (was ShadowCast 2, #728); capture node RENUMBERED from /dev/video1 -> /dev/video0 by 2026-07-13 (#744) — exactly the "can drift" case above; `scripts/recording-e2e.sh` no longer hardcodes a node, see `scripts/lib/v4l2-neutral.sh` |
+| CAM2 | ShadowCast 2 | /dev/video0 | Unchanged |
+| CAM3 | ShadowCast 2 | /dev/video0 | Unchanged |
+| CAM4 | NZXT Signal HD60 | /dev/video0 | Unchanged, no V4L2 picture controls exposed |
+| CAM5 | ShadowCast 2 | /dev/video0 | Swapped in 2026-07-12 (was Elgato 4K S, #728) — this is the SAME physical unit that used to sit in CAM1 |
+| CAM6 | Elgato 4K S | /dev/video0 | Renumbered from /dev/video1 (#744, verified live 2026-07-13, same class of drift as CAM1) |
+| CAM7 | Elgato 4K S | /dev/video0 | New box built 2026-07-14 |
 
 ## Linux OBS Targets (camera-box, #458)
 

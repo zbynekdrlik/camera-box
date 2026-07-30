@@ -19,11 +19,17 @@
 //! v2 (live canary of v1, 2026-07-02, strih `NDI cam5`): v1's wall-based drift guard
 //! (`present_ts > boundary + 2*interval + interval/4`) EMBEDS the constant stamp→arrival
 //! skew (59 ms live at the 3 ms reserve) and relock-stormed — dropped_due 2918 of 4202
-//! received (69 %), relocks 1076. v2 replaces it with a QUEUE-DEPTH backlog guard
-//! (`GENLOCK_QDEPTH_RELOCK`): steady depth is ~1–2 at ANY skew (the boundary paces
-//! arrivals), so depth is skew-immune where wall−boundary drift is not; the steady path
+//! received (69 %), relocks 1076. v2 replaces it with a QUEUE-DEPTH backlog guard, which is
+//! skew-immune where wall−boundary drift is not; the steady path
 //! presents the OLDEST matured frame (strict FIFO, transient 2-frame maturation drains
 //! losslessly) and a GAP RESYNC re-anchors past upstream-skipped stamps.
+//!
+//! #859: that queue-depth threshold is no longer a bare constant. Its original value encoded
+//! "steady depth is ~1–2 at ANY skew", which holds only for a SHALLOW source; a source pinned
+//! deep for A/V alignment (923 ms on the stream box's `NDI 2ME PGM`) sits at ~28 and exceeded it
+//! permanently, relocking every tick and shedding paired duplicate/skip frames. The threshold is
+//! now the depth each source's OWN configured latency implies plus the unchanged margin — see
+//! `src/genlock_backlog.rs` for the Tier-0-tested decision.
 //!
 //! This is a SOURCE-presence guard (same convention as tests/distroav_genlock_lockdown.rs,
 //! tests/obs_updater_disabled.rs): it runs on DEFAULT features (per-PR Linux CI + local
@@ -95,15 +101,38 @@ fn release_is_phase_locked_not_per_tick_wall_compare() {
          ReleaseCadence::tick (v2)."
     );
     // v2: the QUEUE-DEPTH backlog guard must be present — a named constant so the
-    // rationale travels with the threshold. Steady depth is ~1–2 at any arrival skew
-    // (the locked boundary paces arrivals), so depth > GENLOCK_QDEPTH_RELOCK is
-    // unambiguous backlog; the re-lock jumps to the newest due frame counting every
-    // jumped frame (visible catch-up, IMAG latency contract kept).
+    // rationale travels with the threshold. The re-lock jumps to the newest due frame
+    // counting every jumped frame (visible catch-up, IMAG latency contract kept).
     assert!(
         src.contains("GENLOCK_QDEPTH_RELOCK"),
         "{OBS_SOURCE}: #401 v2 — the queue-depth backlog guard (GENLOCK_QDEPTH_RELOCK) is \
          missing; without it a genuine stall's backlog never re-locks to the live edge. \
-         Mirror src/probe/genlock.rs ReleaseCadence::QDEPTH_RELOCK."
+         Mirror src/probe/genlock.rs ReleaseCadence::QDEPTH_RELOCK_MARGIN."
+    );
+    // #859: the threshold must be RELATIVE to the depth each source's own configured latency
+    // implies, not a bare constant. The pre-#859 code compared against the bare 6, whose comment
+    // assumed "steady depth is ~1-2 at any skew" — true only for a SHALLOW source. A source
+    // pinned deep (923 ms on the stream box's 'NDI 2ME PGM', to A/V-align against the mbc's 1 s
+    // mastering) has a steady depth of ~28, so the branch fired EVERY tick and shed a frame on
+    // every arrival-jitter excursion: measured as +59 duplicate / +57 skipped frames injected
+    // into the strih->stream hop. A `git subtree pull` reverting to the bare comparison would
+    // silently reintroduce that, so assert the helper is actually WIRED IN, not merely defined.
+    assert!(
+        src.contains("genlock_backlog_relock_qdepth(source, reserve_ms, interval)"),
+        "{OBS_SOURCE}: #859 — the backlog branch no longer calls \
+         genlock_backlog_relock_qdepth(source, reserve_ms, interval); it is back to comparing \
+         against a bare constant, which a deep-latency source exceeds permanently (steady depth \
+         ~28 at 923 ms) and which therefore relocks every tick and sheds paired duplicate/skip \
+         frames. Mirror: src/genlock_backlog.rs backlog_relock_threshold (Tier-0 unit-tested) \
+         and src/probe/genlock.rs ReleaseCadence::backlog_relock_qdepth."
+    );
+    // The margin must stay the ORIGINAL 6 — #859 changed what the threshold is RELATIVE TO, it
+    // did not widen the tolerance. A bumped margin would be exactly the "widen the threshold to
+    // make it pass" move the standing rule forbids.
+    assert!(
+        src.contains("#define GENLOCK_QDEPTH_RELOCK_MARGIN 6"),
+        "{OBS_SOURCE}: #859 — the backlog MARGIN is no longer the original 6. #859 made the \
+         threshold latency-RELATIVE; it must never become latency-relative AND widened."
     );
     // The mirror pointer must survive so the next maintainer finds the PROVEN Rust
     // reference (and its three cadence tests) before touching the C.
@@ -169,4 +198,221 @@ fn backward_step_recovery_survives_the_cadence() {
              gone; the cadence port regressed the #147/#269 re-anchor. Re-apply."
         );
     }
+}
+
+#[test]
+fn steady_multi_consumes_at_an_integer_source_multiple_of_the_canvas() {
+    // #726 — the live-event "like 15fps" judder. At a STRUCTURAL N>=2 source:canvas ratio (a
+    // 60fps NDI camera into strih's 30fps canvas) the STEADY path presented the OLDEST matured
+    // frame and re-anchored the boundary to it; one canvas interval (33_333_333 ns) lands a HAIR
+    // under 2 source intervals (33_333_334 ns), so the boundary matured only ONE frame per tick
+    // while N arrived — content crawled +1 source frame/tick, the queue grew, and the backlog
+    // storm jumped +7 (~5x/s). The fix: for a structural N>=2 source (detected from the stamp
+    // grid), mature every frame up to the boundary PLUS a half-interval slack, release the NEWEST
+    // and retire the older matured one(s) into genlock_dropped_due — a uniform every-Nth-frame
+    // cadence tracking real time, slew-immune (keys on the boundary, not the wall). N==1 keeps the
+    // present-oldest lossless-drain path byte-identical. Behavioral RED->GREEN proof is
+    // src/probe/genlock.rs `cadence_60_into_30_presents_uniform_every_second_frame`; this
+    // default-features guard pins the C port so a subtree-pull or edit can't silently revert it.
+    let src = squish(&vendor_file(OBS_SOURCE));
+    // #726 STICKY-N (win5/win6 residual): the per-tick front-2 measurement is jitter-sensitive
+    // (reads inconclusive on num<2 / a non-monotonic clock-step seam), so the detector is split
+    // into a MEASURE (0 = inconclusive) and a STICKY effective helper that bridges an inconclusive
+    // tick with the last confirmed multiple. Mirror: src/probe/genlock.rs
+    // ReleaseCadence::measure_source_multiple / effective_source_multiple.
+    assert!(
+        src.contains("static inline uint32_t genlock_measure_source_multiple("),
+        "{OBS_SOURCE}: #726 — the stamp-grid measurement (genlock_measure_source_multiple, \
+         0 = inconclusive) is gone; the 60->30 STEADY cadence would crawl+jump again. Mirror: \
+         src/probe/genlock.rs ReleaseCadence::measure_source_multiple."
+    );
+    assert!(
+        src.contains("static inline uint32_t genlock_effective_source_multiple("),
+        "{OBS_SOURCE}: #726 STICKY-N — the sticky effective-multiple helper \
+         (genlock_effective_source_multiple, latch + bridge) is gone; an inconclusive front-2 tick \
+         would fall back to the present-oldest CRAWL (win5/win6 residual). Mirror: \
+         src/probe/genlock.rs ReleaseCadence::effective_source_multiple."
+    );
+    assert!(
+        src.contains("source->genlock_last_known_n = fresh"),
+        "{OBS_SOURCE}: #726 STICKY-N — a fresh measurement no longer LATCHES into \
+         genlock_last_known_n; the sticky bridge can't remember the confirmed multiple. Re-apply."
+    );
+    assert!(
+        src.contains("if (genlock_effective_source_multiple(source, interval) >= 2) {"),
+        "{OBS_SOURCE}: #726 — the STEADY release no longer branches on the STICKY \
+         genlock_effective_source_multiple(...) >= 2; the 60->30 multi-consume reverted to \
+         present-oldest (the crawl) or to the jitter-sensitive per-tick check. Re-apply."
+    );
+    assert!(
+        src.contains("mature_deadline")
+            && src.contains("source->genlock_locked_next_boundary_ns + interval / 2"),
+        "{OBS_SOURCE}: #726 — the STEADY N>=2 maturation slack (boundary + interval/2, so the \
+         frame ~one canvas interval ahead matures despite canvas_interval being a hair under \
+         N*src_interval) is gone; the multi-consume would mature only 1 frame and still crawl."
+    );
+    // The latch MUST be cleared on every GENUINE source-timeline discontinuity so a stale N cannot
+    // outlive the rate it described. #741/#707 B2 changed the SET: the four sites are now
+    // acquire / gap resync / backward clock-step / flush-inactive reset — the BACKLOG-STORM relock
+    // is DELIBERATELY excluded (a queue-depth event is not a rate change; see
+    // sticky_n_latch_lifecycle_and_robust_measure_741 below).
+    let clears = src.matches("source->genlock_last_known_n = 0;").count();
+    assert!(
+        clears >= 4,
+        "{OBS_SOURCE}: #726/#741 STICKY-N — the latch is cleared on only {clears} of the 4 required \
+         source-timeline discontinuities (acquire / gap resync / backward clock-step / \
+         flush-inactive reset); a stale N could outlive its rate. Re-apply the clears."
+    );
+}
+
+#[test]
+fn sticky_n_latch_lifecycle_and_robust_measure_741() {
+    // #741 (#707 B2) — the CRAWL half of #707: a jittery 60-into-30 input crawled at +1 (window
+    // uniform=0.481, histogram {1:295,2:407,3:102,7:39}) because the sticky-N detector kept
+    // reading INCONCLUSIVE. Three code changes fix it; each is pinned here so a subtree-pull or
+    // edit can't silently revert one. Behavioral RED→GREEN proof:
+    // src/probe/genlock.rs `measure_scans_past_a_degenerate_front_pair_741` +
+    // `backlog_relock_preserves_the_confirmed_multiple_741` (probe-gated); this default-features
+    // guard pins the C port.
+    let raw = vendor_file(OBS_SOURCE);
+
+    // (a) The BACKLOG-STORM relock branch must NOT clear the latch — a queue-depth relock is NOT
+    // evidence the source rate changed. Clearing it forced the next inconclusive tick to crawl
+    // (N=1), re-growing the queue and re-triggering the relock: a self-sustaining crawl loop.
+    let relock_pos = raw
+        .find("source->genlock_relocks++;")
+        .expect("#741: the backlog-storm relock branch (genlock_relocks++) must be present");
+    let window_end = (relock_pos + 800).min(raw.len());
+    let after_relock = &raw[relock_pos..window_end];
+    let release_off = after_relock
+        .find("release = due;")
+        .expect("#741: the relock branch must release the due frame (release = due;)");
+    let relock_branch = &after_relock[..release_off];
+    assert!(
+        !relock_branch.contains("genlock_last_known_n = 0"),
+        "{OBS_SOURCE}: #741/#707 B2 — the BACKLOG-STORM relock branch still clears \
+         genlock_last_known_n; a queue-depth relock is NOT a rate change, and clearing there \
+         re-crawls the next inconclusive tick and re-triggers the relock (self-sustaining crawl). \
+         Mirror: src/probe/genlock.rs ReleaseCadence::tick backlog branch (no latch clear)."
+    );
+
+    // (b) genlock_measure_source_multiple must SCAN the first K queue entries for a
+    // strictly-increasing pair (skipping a duplicate/degenerate front pair) — not read only
+    // array[0..1]. The named scan-depth constant carries the rationale with the value.
+    assert!(
+        raw.contains("GENLOCK_MEASURE_SCAN_DEPTH"),
+        "{OBS_SOURCE}: #741/#707 B2 — genlock_measure_source_multiple no longer scans the first K \
+         queue entries (GENLOCK_MEASURE_SCAN_DEPTH) for a strictly-increasing pair; a duplicate \
+         front stamp reads INCONCLUSIVE and the release crawls. Mirror: src/probe/genlock.rs \
+         ReleaseCadence::measure_source_multiple."
+    );
+
+    // (c) The flush/inactive reset (frame==NULL: the source went inactive, delay line gone) must
+    // CLEAR the latch — that is the genuinely-stale reset site. Pinned by co-location with the
+    // sibling flush clears (genlock_filled / genlock_empty_run).
+    let flush_pos = raw
+        .find("source->async_active = false;")
+        .expect("#741: the flush/inactive reset (async_active = false) must be present");
+    let flush_tail = &raw[flush_pos..];
+    let flush_end = flush_tail
+        .find("free_async_cache(source);")
+        .expect("#741: the flush/inactive block must end by freeing the async cache");
+    let flush_block = &flush_tail[..flush_end];
+    assert!(
+        flush_block.contains("genlock_last_known_n = 0"),
+        "{OBS_SOURCE}: #741/#707 B2 — the flush/inactive reset (frame==NULL) no longer clears \
+         genlock_last_known_n; the source's whole delay line is gone there, so a resumed source \
+         would trust a stale N. Add the clear next to genlock_filled / genlock_empty_run."
+    );
+}
+
+#[test]
+fn sticky_n_latch_field_declared_on_obs_source() {
+    // #726 STICKY-N: the per-source confirmed-multiple latch must live on obs_source
+    // (obs-internal.h), next to the other genlock cadence fields, so bzalloc zeroes it at create.
+    let internal = squish(&vendor_file(OBS_INTERNAL));
+    assert!(
+        internal.contains("uint32_t genlock_last_known_n;"),
+        "{OBS_INTERNAL}: #726 — the sticky-N latch field `uint32_t genlock_last_known_n;` is \
+         missing from obs_source; the per-tick front-2 detector would crawl on inconclusive \
+         ticks again (win5/win6 residual). Mirror: src/probe/genlock.rs ReleaseCadence::last_known_n."
+    );
+}
+
+#[test]
+fn slew_limited_settle_back_drain_present_and_wired_in_859() {
+    // #859 follow-up: the latency-relative backlog threshold correctly stopped the
+    // backlog-relock branch firing every tick in steady state, but that branch was ALSO the
+    // FIFO's only mechanism for shedding excess queue depth after a genlock latency SETPOINT
+    // INCREASE — with it gated off, the plain N==1 steady release (release=1/tick) held depth
+    // CONSTANT forever (measured live: a +34 ms setpoint step produced +134 ms of actual delay,
+    // stable across 6 samples). This bounded, additional drain is what converges it back down.
+    // A `git subtree pull` or edit reverting any of these pieces would silently reintroduce the
+    // parked-overshoot regression, so pin the whole three-file mirror here.
+    let internal = squish(&vendor_file(OBS_INTERNAL));
+    assert!(
+        internal.contains("uint64_t genlock_ticks_since_drain;"),
+        "{OBS_INTERNAL}: #859 follow-up — the drain rate-limit counter \
+         `uint64_t genlock_ticks_since_drain;` is missing from obs_source; the slew-limited \
+         drain has no way to bound its own rate. Mirror: src/probe/genlock.rs \
+         ReleaseCadence::ticks_since_last_drain."
+    );
+
+    let src = squish(&vendor_file(OBS_SOURCE));
+    assert!(
+        src.contains("#define GENLOCK_DRAIN_HYSTERESIS_FRAMES 2"),
+        "{OBS_SOURCE}: #859 follow-up — the drain hysteresis constant \
+         (GENLOCK_DRAIN_HYSTERESIS_FRAMES, must stay 2) is missing or changed; without it \
+         ordinary arrival jitter around the target would trigger spurious drains. Mirror: \
+         src/genlock_backlog.rs DRAIN_HYSTERESIS_FRAMES (Tier-0 unit-tested)."
+    );
+    assert!(
+        src.contains("#define GENLOCK_DRAIN_MIN_TICK_INTERVAL 30"),
+        "{OBS_SOURCE}: #859 follow-up — the drain rate-limit constant \
+         (GENLOCK_DRAIN_MIN_TICK_INTERVAL, must stay 30) is missing or changed; without it the \
+         drain could reproduce the every-tick backlog-relock burst it exists to avoid. Mirror: \
+         src/genlock_backlog.rs DRAIN_MIN_TICK_INTERVAL."
+    );
+    assert!(
+        src.contains("static bool genlock_should_drain_one("),
+        "{OBS_SOURCE}: #859 follow-up — the slew-limited drain decision helper \
+         (genlock_should_drain_one) is gone; the FIFO would park at a setpoint-change overshoot \
+         indefinitely again. Mirror: src/genlock_backlog.rs should_drain_one (Tier-0 tested) / \
+         src/probe/genlock.rs ReleaseCadence::should_drain_one."
+    );
+    // Wired IN, not merely defined — the same "assert the call site, not just the helper"
+    // discipline the #859 backlog-threshold test above already applies.
+    assert!(
+        src.contains("genlock_should_drain_one(source, reserve_ms, interval)"),
+        "{OBS_SOURCE}: #859 follow-up — genlock_should_drain_one is defined but no longer \
+         CALLED from the STEADY N==1 release path; the drain would be dead code and the queue \
+         would park at a setpoint-change overshoot indefinitely again."
+    );
+    // The drain must drop the CURRENT oldest (array[0]) and let the array shift — NOT drop
+    // array[1] while leaving array[0] untouched. The latter desyncs the re-anchored boundary
+    // from the real evenly-spaced frame timeline (confirmed by simulation: the very next tick
+    // reads as a HOLD and a GAP RESYNC regains exactly what the drain shed — a self-cancelling
+    // no-op). A subtree-pull or a "simplify this" edit reverting to array[1] would silently
+    // regress the fix back to a no-op while still LOOKING like it works (still compiles, still
+    // counts genlock_dropped_due). Checked on the RAW (non-squished) source — squish() would
+    // erase the tab/newline structure this needs.
+    assert!(
+        raw_drain_erases_index_zero(&vendor_file(OBS_SOURCE)),
+        "{OBS_SOURCE}: #859 follow-up — the drain no longer erases array[0] (the current \
+         oldest) before re-reading next_frame = array[0]; dropping array[1] instead is a \
+         self-cancelling no-op (see the comment above genlock_should_drain_one's call site)."
+    );
+}
+
+/// Structural check (not a literal-whitespace match) for the previous assertion: within the
+/// drain's own `if` block, the FIRST `da_erase(source->async_frames, N)` call must erase index
+/// `0`, not `1` — confirms the drop-older/present-newest fix regardless of exact formatting.
+fn raw_drain_erases_index_zero(raw: &str) -> bool {
+    let Some(drain_pos) = raw.find("genlock_should_drain_one(source, reserve_ms, interval) &&")
+    else {
+        return false;
+    };
+    let window_end = (drain_pos + 600).min(raw.len());
+    let window = &raw[drain_pos..window_end];
+    window.contains("da_erase(source->async_frames, 0);") && !window.contains("array[1]")
 }

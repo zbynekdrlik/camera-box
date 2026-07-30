@@ -1,0 +1,68 @@
+{
+  "overall_pass": true,
+  "min_secs": 300.0,
+  "full_chain": {
+    "zero_loss": true,
+    "real_drops": 0,
+    "loss": {
+      "cam1": {"zero_loss": true, "real_drops": 0, "burn_unreadable": 0, "present_count": 1694, "expected_count": 1694},
+      "cam2": {"zero_loss": true, "real_drops": 0, "burn_unreadable": 0, "present_count": 1691, "expected_count": 1691},
+      "cam3": {"zero_loss": true, "real_drops": 0, "burn_unreadable": 0, "present_count": 1692, "expected_count": 1692},
+      "cam4": {"zero_loss": true, "real_drops": 0, "burn_unreadable": 0, "present_count": 1694, "expected_count": 1694},
+      "cam5": {"zero_loss": true, "real_drops": 0, "burn_unreadable": 0, "present_count": 846, "expected_count": 846},
+      "cam6": {"zero_loss": true, "real_drops": 0, "burn_unreadable": 0, "present_count": 847, "expected_count": 847}
+    }
+  },
+  "all_cambox_continuity": {
+    "overall_pass": true,
+    "segments": [
+      {"cambox": "CAM1", "pass": true, "copies": 0, "gaps": 0, "undecodable": 0, "frames": 847},
+      {"cambox": "CAM2", "pass": true, "copies": 0, "gaps": 0, "undecodable": 0, "frames": 847},
+      {"cambox": "CAM3", "pass": true, "copies": 0, "gaps": 0, "undecodable": 0, "frames": 846},
+      {"cambox": "CAM4", "pass": true, "copies": 0, "gaps": 0, "undecodable": 0, "frames": 847},
+      {"cambox": "CAM5", "pass": true, "copies": 0, "gaps": 0, "undecodable": 0, "frames": 846},
+      {"cambox": "CAM6", "pass": true, "copies": 0, "gaps": 0, "undecodable": 0, "frames": 847}
+    ],
+    "imag": {
+      "overall_pass": true,
+      "segments": [
+        {"cambox": "CAM1", "pass": true, "frames": 1695, "undecodable": 0},
+        {"cambox": "CAM2", "pass": true, "frames": 1694, "undecodable": 0},
+        {"cambox": "CAM3", "pass": true, "frames": 1692, "undecodable": 0},
+        {"cambox": "CAM4", "pass": true, "frames": 1694, "undecodable": 0},
+        {"cambox": "CAM5", "pass": true, "frames": 1692, "undecodable": 0},
+        {"cambox": "CAM6", "pass": true, "frames": 1694, "undecodable": 0}
+      ]
+    }
+  },
+  "all_cambox_latency": {
+    "cam1": {"mean_ms": 68.4, "jitter_ms": 8.2, "min_ms": 59.4, "max_ms": 81.6, "samples": 1687},
+    "cam3": {"mean_ms": 69.7, "jitter_ms": 2.7, "min_ms": 67.0, "max_ms": 72.5, "samples": 1686},
+    "cam4": {"mean_ms": 55.0, "jitter_ms": 1.1, "min_ms": 54.1, "max_ms": 72.4, "samples": 1690},
+    "cam5": {"mean_ms": 54.7, "jitter_ms": 3.7, "min_ms": 54.0, "max_ms": 71.2, "samples": 844},
+    "cam6": {"mean_ms": 55.0, "jitter_ms": 3.6, "min_ms": 54.3, "max_ms": 71.7, "samples": 847},
+    "cross_camera_spread_ms": 15.3,
+    "spread_gate_pass": true
+  },
+  "all_cambox_delivery_latency": {
+    "cam1": {"mean_ms": 71.2, "jitter_ms": 51.3, "min_ms": 20.5, "max_ms": 133.0, "samples": 2181},
+    "cam2": {"mean_ms": 71.1, "jitter_ms": 51.2, "min_ms": 20.5, "max_ms": 123.0, "samples": 1816},
+    "cam3": {"mean_ms": 70.4, "jitter_ms": 43.3, "min_ms": 25.6, "max_ms": 114.7, "samples": 1812},
+    "cam4": {"mean_ms": 69.1, "jitter_ms": 51.2, "min_ms": 24.8, "max_ms": 117.2, "samples": 1814},
+    "cam5": {"mean_ms": 68.8, "jitter_ms": 51.1, "min_ms": 22.8, "max_ms": 116.0, "samples": 906},
+    "cam6": {"mean_ms": 69.1, "jitter_ms": 38.0, "min_ms": 23.5, "max_ms": 111.3, "samples": 907},
+    "cross_camera_spread_ms": 11.0,
+    "spread_gate_pass": true
+  },
+  "all_cambox_av_sync": {
+    "cam1": {"node": "cam1", "verdict": "measured", "av_offset_ms": -3.2, "mad_ms": 2.1, "candidates": 900, "cluster_samples": 120, "gate_pass": true},
+    "cam2": {"node": "cam2", "verdict": "measured", "av_offset_ms": 1.5, "mad_ms": 1.8, "candidates": 3126, "cluster_samples": 300, "gate_pass": true},
+    "cam3": {"node": "cam3", "verdict": "measured", "av_offset_ms": -0.9, "mad_ms": 2.4, "candidates": 850, "cluster_samples": 110, "gate_pass": true},
+    "cam4": {"node": "cam4", "verdict": "measured", "av_offset_ms": 2.2, "mad_ms": 1.9, "candidates": 870, "cluster_samples": 118, "gate_pass": true},
+    "cam5": {"node": "cam5", "verdict": "measured", "av_offset_ms": -1.1, "mad_ms": 2.0, "candidates": 640, "cluster_samples": 90, "gate_pass": true},
+    "cam6": {"node": "cam6", "verdict": "measured", "av_offset_ms": 0.6, "mad_ms": 1.7, "candidates": 660, "cluster_samples": 95, "gate_pass": true},
+    "expected_ms": 0.0,
+    "gate_tolerance_ms": 20.0,
+    "gate_pass": true
+  }
+}

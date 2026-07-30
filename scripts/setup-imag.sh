@@ -21,9 +21,23 @@ set -euo pipefail
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 
-STATIC_IP="10.77.9.182"
+# #816: the box under provisioning is a PARAMETER, not a constant. The default stays the
+# incumbent imag notebook so every existing invocation is unchanged; a REPLACEMENT box is
+# provisioned with `IMAG_IP=10.77.9.187 sudo -E ./setup-imag.sh` while the old one is still live
+# on .182 (two boxes cannot hold one address).
+STATIC_IP="${IMAG_IP:-10.77.9.182}"
 PREFIX="23"
-NDI_PEER="10.77.9.61"            # cam1 — fleet NDI runtime source (6.3.2)
+# #816: the NDI runtime (6.3.2) is copied from a fleet cam box. Pinning cam1 alone made
+# provisioning FAIL whenever that ONE box was down (it was, on 2026-07-27 — its grabber card had
+# been lent out). Every cam box carries the same fleet-identical runtime, so any REACHABLE one
+# will do; the list is probed in order and the first live box wins.
+NDI_PEER_CANDIDATES="${NDI_PEER_CANDIDATES:-10.77.9.61 10.77.9.62 10.77.9.63 10.77.9.64 10.77.9.65 10.77.9.66 10.77.9.67}"
+# #824: the OBS base package version MUST match the genlock build's OBS version — libobs refuses
+# any stock plugin built against a NEWER libobs ("compiled with newer libobs 32.2"), which on the
+# .187 bring-up left OBS with only distroav.so loaded: no obs-websocket, no encoders. Overridable;
+# bump it together with the vendored genlock build (#825).
+IMAG_OBS_BASE_VERSION="${IMAG_OBS_BASE_VERSION:-32.1.2-0obsproject1~noble}"
+NDI_PEER="${NDI_PEER:-}"         # resolved at first use from NDI_PEER_CANDIDATES (or pinned by env)
 NDI_DIR="/usr/lib/ndi"
 DESKTOP_USER="newlevel"
 USER_HOME="/home/${DESKTOP_USER}"
@@ -39,7 +53,13 @@ DEV1_DRIFTGUARD_PUBKEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB/akQWI95uekn0/CRfQ
 # commented instance of the SAME key already being present (e.g. installed by hand with the local
 # ~/.ssh/id_ed25519.pub file's own comment).
 DEV1_DRIFTGUARD_PUBKEY_TYPE_BLOB="${DEV1_DRIFTGUARD_PUBKEY% *}"
-TOTAL_STEPS=19
+TOTAL_STEPS=21
+# #731: Companion Satellite server this box connects the local Stream Deck to. .lan DNS is
+# usually fine on this LAN (companion.lan -> companion-snv.lan, verified live 2026-07-13) but can
+# be flaky like any other .lan name on this network -- COMPANION_HOST_IP is the documented
+# fallback (see targets.md) if COMPANION_HOST ever stops resolving from a box.
+COMPANION_HOST="${COMPANION_HOST:-companion.lan}"
+COMPANION_HOST_IP="${COMPANION_HOST_IP:-}"
 
 step() { echo -e "${GREEN}[$1/${TOTAL_STEPS}] $2${NC}"; }
 fail() { echo -e "${RED}FAIL: $1${NC}" >&2; exit 1; }
@@ -62,6 +82,144 @@ manifest_sha_for_path() {
         || fail "cannot parse $manifest"
     [ -n "$sha" ] || fail "#460 manifest lists no entry for $relpath — refuse to trust an unverifiable file"
     printf '%s\n' "$sha"
+}
+
+# imag_cpu_isolation_plan  (stdin: one "CPU SIBLINGS_LIST" line per logical CPU, numerically
+# ordered — i.e. cpuN + the contents of its topology/thread_siblings_list) -> THREE lines:
+#   1. the CPUs to ISOLATE for the OBS thread pool   (isolcpus=)
+#   2. the CPUs to run tickless                      (nohz_full=)
+#   3. the CPUs left for housekeeping                (irqaffinity=)
+#
+# #483 tuned these by hand on the original 16-thread notebook (6 SMT P-cores + 4 E-cores) and
+# BAKED THE RESULT IN AS LITERALS. #816 derives the same decision from the topology instead, so a
+# replacement notebook with a different core count is provisioned correctly rather than being
+# handed CPU numbers it does not have. The decision itself is UNCHANGED and reproduces the old
+# box's values byte-for-byte:
+#   - an SMT-PAIRED CPU is a P-core thread, an UNPAIRED one is an E-core (verified live on both
+#     boxes via thread_siblings_list, never lscpu's flat count);
+#   - P-core0 stays for openbox/Xorg + sshd/MCP, together with EVERY E-core -> housekeeping/IRQs;
+#   - every other P-core thread is isolated for OBS (~106 threads, ~3 cores of real work);
+#   - nohz_full covers ONLY the LAST isolated P-core pair — the one that hosts the SCHED_FIFO
+#     genlock render tick (#484). Spreading it over the whole block would remove load-balancing
+#     signal (#303).
+imag_cpu_isolation_plan() {
+    local cpu sibs i found
+    local -a pair_key=() pair_cpus=() ecores=()
+    while read -r cpu sibs; do
+        [ -n "$cpu" ] || continue
+        case "$sibs" in
+            *,*|*-*)                      # SMT-paired -> a P-core thread
+                found=-1
+                for i in "${!pair_key[@]}"; do
+                    if [ "${pair_key[$i]}" = "$sibs" ]; then found="$i"; break; fi
+                done
+                if [ "$found" -lt 0 ]; then
+                    pair_key+=("$sibs"); pair_cpus+=("$cpu")
+                else
+                    pair_cpus[$found]="${pair_cpus[$found]},$cpu"
+                fi
+                ;;
+            *) ecores+=("$cpu") ;;        # unpaired -> an E-core
+        esac
+    done
+    local n="${#pair_key[@]}"
+    [ "$n" -ge 3 ] || fail "imag_cpu_isolation_plan: found only $n SMT-paired P-core(s) — an imag box needs one for housekeeping plus at least two to isolate for the OBS thread pool"
+    local isolated=""
+    for ((i = 1; i < n; i++)); do
+        isolated="${isolated:+$isolated,}${pair_cpus[$i]}"
+    done
+    local house="${pair_cpus[0]}"
+    for i in "${ecores[@]+"${ecores[@]}"}"; do house="${house},${i}"; done
+    printf '%s\n%s\n%s\n' "$isolated" "${pair_cpus[$((n - 1))]}" "$house"
+}
+
+# imag_has_discrete_nvidia  (stdin: `lspci -nn` output) -> exit 0 when a DISCRETE NVIDIA display
+# adapter is present, non-zero otherwise. #816: the NVIDIA driver step (#500) was mandatory and
+# fail-hard, which aborts provisioning on a perfectly good box that simply has no dGPU (the
+# replacement notebook is Intel-UHD-only). Match only real display-class devices so an NVIDIA
+# audio/USB function on the same card can never masquerade as a GPU.
+imag_has_discrete_nvidia() {
+    grep -Eiq '(vga compatible controller|3d controller|display controller).*nvidia'
+}
+
+# imag_pick_ndi_peer  (stdin: one "HOST STATUS" line per candidate, in preference order) -> the
+# first host whose STATUS is "up". Fails loud when none is reachable — provisioning cannot fetch
+# the fleet NDI runtime from nowhere, and a silent empty peer would surface much later as a
+# confusing scp error (#816).
+imag_pick_ndi_peer() {
+    local host status
+    while read -r host status; do
+        [ -n "$host" ] || continue
+        if [ "$status" = "up" ]; then printf '%s\n' "$host"; return 0; fi
+    done
+    fail "no reachable cam box among the NDI runtime candidates — cannot fetch the fleet NDI runtime"
+}
+
+# imag_resolve_ndi_peer  (args: candidate hosts, default $NDI_PEER_CANDIDATES) -> the first
+# REACHABLE one on stdout. Probes every candidate into a BUFFER first, then feeds the picker —
+# never `for … | imag_pick_ndi_peer`. The picker returns on the first "up" line, which closes the
+# pipe, so a still-running writer loop dies on SIGPIPE and `set -euo pipefail` fails the WHOLE
+# substitution: the live .187 provisioning run aborted with a bare `exit 1` and zero output while
+# cam1 was up and answering. Same trap this script already documents at its `ldconfig | grep -q`
+# site — buffer first, pipe once. The optional CANDIDATE args exist so a caller (or a future
+# test) can override the fleet default without touching NDI_PEER_CANDIDATES; no site does today,
+# which is exactly what trips shellcheck's "references arguments, but none are ever passed"
+# check (SC2120) -- it cannot see that the zero-arg call path is the intended, exercised
+# behaviour (see tests/setup_imag_hardware_agnostic.rs), not an unused parameter.
+# shellcheck disable=SC2120
+imag_resolve_ndi_peer() {
+    local candidates=("$@") probe="" h
+    [ "${#candidates[@]}" -gt 0 ] || read -r -a candidates <<<"$NDI_PEER_CANDIDATES"
+    for h in "${candidates[@]}"; do
+        if ping -c1 -W1 "$h" >/dev/null 2>&1; then
+            probe="${probe}${h} up"$'\n'
+        else
+            probe="${probe}${h} down"$'\n'
+        fi
+    done
+    printf '%s' "$probe" | imag_pick_ndi_peer
+}
+
+# imag_require_tools TOOL... -> fail loud, NAMING the missing tool(s). #822: step 12 verifies the
+# hot-swapped binaries with `readelf`/`nm` (binutils). On a freshly installed box binutils is
+# ABSENT, so those commands emit nothing, the greps find nothing, and the step aborted with
+# "SONAME check failed — refuse a mismatched ABI" — blaming the artifact for a missing TOOL, while
+# the swap had actually succeeded. A verification that cannot run is not a failed verification.
+imag_require_tools() {
+    local t missing=""
+    for t in "$@"; do
+        command -v "$t" >/dev/null 2>&1 || missing="${missing:+$missing }$t"
+    done
+    [ -z "$missing" ] || fail "#822: required verification tool(s) not installed: ${missing} (apt-get install binutils) — refusing to run a check that cannot execute"
+}
+
+# imag_same_unit LINK UNIT -> exit 0 when LINK resolves to the SAME systemd unit file as UNIT.
+# #823: the old check compared `readlink -f <link>` against the LITERAL "/lib/systemd/system/
+# lightdm.service". On usrmerge Ubuntu /lib IS a symlink to /usr/lib, so readlink -f always answers
+# /usr/lib/... and the compare could never pass — a perfectly correct kiosk DM aborted provisioning
+# on its last assertion (.187, 2026-07-27). Canonicalise BOTH sides.
+imag_same_unit() {
+    local a b
+    a="$(readlink -f "$1" 2>/dev/null)" || return 1
+    b="$(readlink -f "$2" 2>/dev/null)" || return 1
+    [ -n "$a" ] && [ "$a" = "$b" ]
+}
+
+# imag_obs_base_plan CANDIDATE WANTED -> "apt" when the PPA still offers the wanted version,
+# "deb" when it has moved on (the superseded binary is still downloadable from Launchpad). Never
+# "just take the candidate" — a base whose libobs is NEWER than the genlock build disables every
+# stock plugin (#824).
+imag_obs_base_plan() {
+    local candidate="$1" wanted="$2"
+    [ -n "$wanted" ] || fail "#824: no OBS base version pinned"
+    if [ "$candidate" = "$wanted" ]; then printf 'apt\n'; else printf 'deb\n'; fi
+}
+
+# imag_obs_base_deb_url VERSION -> the Launchpad +files URL for that (possibly superseded) PPA
+# binary. The PPA pool only keeps the CURRENT version; +files keeps superseded ones (live-verified
+# 200 for 32.1.2 while the pool 404s).
+imag_obs_base_deb_url() {
+    printf 'https://launchpad.net/~obsproject/+archive/ubuntu/obs-studio/+files/obs-studio_%s_amd64.deb\n' "$1"
 }
 
 # verify_file_sha FILE EXPECTED_SHA LABEL -> fail loud on any mismatch (corrupted/tampered file).
@@ -87,6 +245,16 @@ ASSUME_YES=0
 if [ "$ASSUME_YES" -ne 1 ]; then
     read -p "Provision this box as imag-nb (${STATIC_IP})? (y/N) " -n 1 -r; echo
     [[ $REPLY =~ ^[Yy]$ ]] || { echo "Aborted."; exit 1; }
+fi
+
+# #816: resolve the NDI runtime peer ONCE, up front, from whichever cam box is actually alive —
+# a fleet box being down (grabber card lent out, being re-flashed) must not abort provisioning of
+# an unrelated notebook. `ping -c1 -W1` per candidate: fast, and reachability is exactly what the
+# later scp needs. NDI_PEER pinned by env skips the probe entirely.
+if [ -z "$NDI_PEER" ]; then
+    NDI_PEER="$(imag_resolve_ndi_peer)" \
+        || fail "#816: could not resolve an NDI runtime peer from: ${NDI_PEER_CANDIDATES} — pin one with NDI_PEER=<ip> if the fleet is down"
+    echo "  #816: NDI runtime peer = ${NDI_PEER} (first reachable of: ${NDI_PEER_CANDIDATES})"
 fi
 
 # Pre-flight: curl + CA certs BEFORE first use (the cam5/#450 lesson — a base image without
@@ -279,7 +447,7 @@ bash /etc/rc.local
 grep -q performance /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor || fail "governor not performance"
 
 # =============================================================================
-step 5 "Never sleep: lid ignore + sleep masked + idle/blank/lock off (openbox: xset in the step-16 autostart; the gsettings below apply while GNOME is still installed on THIS run — they become no-ops once step 15 purges it later in the same run, and on any subsequent re-run)"
+step 5 "Never sleep: lid ignore + power/suspend/hibernate key ignore (#727) + sleep masked + idle/blank/lock off (openbox: xset in the step-16 autostart; the gsettings below apply while GNOME is still installed on THIS run — they become no-ops once step 15 purges it later in the same run, and on any subsequent re-run)"
 # =============================================================================
 mkdir -p /etc/systemd/logind.conf.d
 cat > /etc/systemd/logind.conf.d/99-imag-no-sleep.conf <<'EOF'
@@ -288,6 +456,18 @@ HandleLidSwitch=ignore
 HandleLidSwitchExternalPower=ignore
 HandleLidSwitchDocked=ignore
 IdleAction=ignore
+EOF
+# #727: imag-nb is a PRODUCTION device — a short accidental power-button press
+# suspended/shut it down during the 2026-07-12 live event. Mirrors setup-device.sh's
+# STEP 12 fleet convention (HandlePowerKey/HandleSuspendKey/HandleHibernateKey=ignore)
+# in a separate drop-in, matching the file already hand-applied live on the box.
+cat > /etc/systemd/logind.conf.d/99-production-no-powerkey.conf <<'EOF'
+[Login]
+HandlePowerKey=ignore
+HandleSuspendKey=ignore
+HandleHibernateKey=ignore
+HandleLidSwitch=ignore
+HandleLidSwitchExternalPower=ignore
 EOF
 systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target >/dev/null 2>&1 || true
 systemctl restart systemd-logind
@@ -316,10 +496,23 @@ step 6 "Boot safety net (#487): kernel apt-hold + initrd-guarantee hook + unatte
 # failed -- track the real outcome so the summary line reflects reality instead of asserting
 # success next to (or instead of) the WARNING.
 KERNEL_HOLD_OK=1
-apt-mark hold linux-image-generic-hwe-24.04 linux-headers-generic-hwe-24.04 \
-    linux-generic-hwe-24.04 "linux-headers-$(uname -r)" "linux-image-$(uname -r)" \
-    >/dev/null 2>&1 \
-    || { KERNEL_HOLD_OK=0; echo "  WARNING: apt-mark hold of the generic kernel packages failed"; }
+# #820: hold ONLY packages this box actually has installed. Holding a NOT-installed name is not a
+# no-op — apt then refuses any later install that would pull it in, and step 7's
+# linux-lowlatency-hwe-24.04 depends on exactly these HWE packages ("E: Held packages were changed
+# and -y was used without --allow-change-held-packages"). Provisioning held itself out of its own
+# next step on the replacement notebook (.187, 2026-07-27).
+KERNEL_HOLD_PKGS=()
+for p in linux-image-generic-hwe-24.04 linux-headers-generic-hwe-24.04 linux-generic-hwe-24.04 \
+    "linux-headers-$(uname -r)" "linux-image-$(uname -r)"; do
+    dpkg -s "$p" >/dev/null 2>&1 && KERNEL_HOLD_PKGS+=("$p")
+done
+if [ "${#KERNEL_HOLD_PKGS[@]}" -eq 0 ]; then
+    KERNEL_HOLD_OK=0
+    echo "  WARNING: no installed generic-kernel package found to hold — kernel NOT pinned"
+else
+    apt-mark hold "${KERNEL_HOLD_PKGS[@]}" >/dev/null 2>&1 \
+        || { KERNEL_HOLD_OK=0; echo "  WARNING: apt-mark hold of the generic kernel packages failed"; }
+fi
 cat > /etc/apt/apt.conf.d/51imag-kernel-lockdown <<'EOF'
 // #487: the kernel is pinned (apt-mark hold) -- never let unattended-upgrades touch it, and never
 // let it reboot the box unattended. Automatic-Reboot is already Ubuntu's default (false); pinning
@@ -398,7 +591,11 @@ step 7 "Low-latency kernel (#482): preempt=full via lowlatency-kernel config —
 # `apt-get install` on an already-installed package is already a no-op.
 if ! dpkg -s lowlatency-kernel >/dev/null 2>&1; then
     apt-get update -qq
-    DEBIAN_FRONTEND=noninteractive apt-get install -y linux-lowlatency-hwe-24.04 >/dev/null \
+    # #820: --allow-change-held-packages so step 6's own kernel hold can never block this install
+    # (the lowlatency meta depends on the very HWE packages step 6 pins). Step 6 re-holds nothing
+    # here; the hold is restored on the next provisioning pass, and the lowlatency packages get
+    # their own hold right below.
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --allow-change-held-packages linux-lowlatency-hwe-24.04 >/dev/null \
         || fail "linux-lowlatency-hwe-24.04 install failed"
 fi
 [ -f /etc/default/grub.d/99-lowlatency.cfg ] \
@@ -413,32 +610,70 @@ echo "  #482: lowlatency-kernel config installed (preempt=full on the 6.17 gener
 echo "  NOTE: preempt=full takes effect on the NEXT boot — this script does not reboot the box"
 
 # =============================================================================
-step 8 "CPU isolation (#483): P-core block for OBS + safe-grub regen"
+step 8 "CPU affinity (#483/#842): P-core block reserved for OBS -- AFFINITY-ONLY, no kernel isolcpus"
 # =============================================================================
-# imag's OBS is a ~106-thread ~3-core consumer (6x NDI decode + render + genlock + audio), NOT the
-# cam-box's single lean thread -- isolate the whole P-core BLOCK cpu2-11 (10 threads) for OBS, keep
-# P-core0 (cpu0,1) for openbox/Xorg + sshd/MCP housekeeping, and park default IRQs there too.
-# nohz_full is scoped to ONLY the one core pair (10,11) that will host the future SCHED_FIFO
-# genlock render-tick thread (#484) -- spreading it across the whole block would remove
-# load-balancing signal (#303). rcu_nocbs=all already comes from 99-lowlatency.cfg above (covers
-# 10,11). irqaffinity= is a BOOT-TIME default (not a runtime /proc/irq write) -- the USB-ethernet
-# NDI IRQ is managed-MSI and rejects runtime affinity changes (#303). HT pairs verified LIVE via
-# thread_siblings_list (not lscpu's flat count): cpu0=0-1, cpu2=2-3, cpu4=4-5, cpu6=6-7, cpu8=8-9,
-# cpu10=10-11 (all P-core HT pairs), cpu12-15 = E-cores (no HT pairing).
-cat > /etc/default/grub.d/98-imag-isolation.cfg <<'EOF'
-# camera-box #483: reserve the P-core block cpu2-11 for the OBS thread pool (keep P-core0=cpu0,1
-# + the E-cores cpu12-15 for openbox/sshd/MCP/housekeeping); nohz_full only on cpu10,11 (the future
-# genlock render-tick core, #484). rcu_nocbs=all is already set by 99-lowlatency.cfg (covers 10,11,
-# which nohz_full requires). irqaffinity keeps IRQs off the isolated block.
-GRUB_CMDLINE_LINUX_DEFAULT="$GRUB_CMDLINE_LINUX_DEFAULT isolcpus=2,3,4,5,6,7,8,9,10,11 nohz_full=10,11 irqaffinity=0,1,12,13,14,15"
-EOF
-# #295/#487: never a raw ad-hoc grub edit -- guarantee every kernel has an initrd, regenerate
-# grub.cfg, then refuse to trust it if the default entry lacks a kernel image or an initrd. ONE
-# call covers BOTH this drop-in and #482's 99-lowlatency.cfg above (they are only ever picked up
-# by grub-mkconfig, which runs once here).
-safe_grub_regen
-echo "  #483: isolcpus=2-11 nohz_full=10,11 irqaffinity=0,1,12,13,14,15 written + grub regenerated"
-echo "  NOTE: CPU isolation takes effect on the NEXT boot — this script does not reboot the box"
+# #842 (recurrence of #784, live-diagnosed 2026-07-28): isolcpus= REMOVES the listed CPUs from the
+# kernel scheduler's load-balancing DOMAINS -- it exists for explicit PER-THREAD pinning, never
+# for handing a whole range mask to a many-threaded process. imag's OBS is a ~106-119-thread
+# consumer (6x NDI decode + render + genlock + audio); under the OLD isolcpus=<block> cmdline the
+# scheduler placed 114 of those 119 threads on ONE core while the other isolated cores sat at 0%
+# busy -- NDI receive dropped from 60fps to ~53fps with 7-10 underruns/s (measured on 10.77.9.187;
+# identical signature to #784's original 2026-07-15 finding on the incumbent .182 box, hand-fixed
+# there by deleting this exact grub.d drop-in -- a fix that was never ported to THIS script, so
+# #816's topology-derived rewrite reproduced the defect verbatim on the replacement notebook).
+#
+# FIX: stop writing isolcpus=/nohz_full=/irqaffinity= to the kernel cmdline AT ALL. The taskset
+# AFFINITY pin below (the persisted-config file consumed by imag-obs-start.sh's
+# `taskset -c "$IMAG_ISOLATED_CPUS"`) is UNCHANGED and stays -- a plain CPU affinity mask
+# restricts WHICH cores a process may run on but does NOT remove those cores from the scheduler's
+# load-balancing domain, so threads still migrate freely WITHIN the mask. Live-verified after a
+# real reboot with a clean cmdline: threads spread 19/16/24/26/12/17 across cpu2-7, receive back
+# to 60.15-60.20fps / 0-2 underruns -- identical to .182. Restricting OBS to 6 cores is harmless;
+# *isolating* them is what broke it.
+#
+# nohz_full/irqaffinity are DROPPED TOO, not kept as a partial config -- deliberate decision (see
+# the #842 design comment on the issue for the full reasoning): both existed ONLY in service of
+# the isolation scheme. nohz_full was scoped to the one core pair meant to host a FUTURE SCHED_FIFO
+# genlock render-tick thread (#483/#484); irqaffinity pushed default IRQ affinity off the isolated
+# block. That render-tick thread does not exist today (its pin, when it ships, requests SCHED_FIFO
+# via sched_setscheduler() + an rtprio ulimit grant below -- neither needs a kernel-cmdline flag).
+# Keeping either as a stray, unpaired cmdline token once isolcpus is gone would be exactly the
+# "half-finished polotovar" #784 already called out ("izolácia... LEN s explicitným per-thread
+# pinningom") -- if/when the SCHED_FIFO pin needs kernel-level tick support, that is its OWN new,
+# explicit, tested design, not a leftover flag surviving this fix.
+#
+# `imag_cpu_isolation_plan` is UNCHANGED -- its ISOLATED output is still the affinity mask; its
+# nohz_full/housekeeping outputs go unused now (no cmdline write consumes them). HT pairs verified
+# LIVE via thread_siblings_list (not lscpu's flat count): cpu0=0-1, cpu2=2-3, cpu4=4-5, cpu6=6-7,
+# cpu8=8-9, cpu10=10-11 (all P-core HT pairs), cpu12-15 = E-cores (no HT pairing).
+IMAG_ISOLATION_PLAN="$(
+    for f in /sys/devices/system/cpu/cpu[0-9]*/topology/thread_siblings_list; do
+        [ -r "$f" ] || continue
+        c="${f#/sys/devices/system/cpu/cpu}"; c="${c%%/*}"
+        printf '%s %s\n' "$c" "$(cat "$f")"
+    done | sort -n -k1,1 | imag_cpu_isolation_plan
+)" || exit 1
+IMAG_ISOLATED_CPUS="$(printf '%s\n' "$IMAG_ISOLATION_PLAN" | sed -n 1p)"
+[ -n "$IMAG_ISOLATED_CPUS" ] \
+    || fail "#816: could not derive the CPU affinity plan from this box's topology"
+# #841: persist the SAME derived value imag-obs-start.sh falls back to for a manual "Spustit OBS"
+# invocation (no IMAG_ISOLATED_CPUS env set) -- ONE source of truth for the taskset affinity pin,
+# the boot autostart's env export (step 16), and the wrapper's own fallback. Never a second
+# hardcoded literal in the wrapper.
+printf '%s\n' "$IMAG_ISOLATED_CPUS" > /etc/imag-isolated-cpus.conf
+# #842 self-heal: a leftover kernel-isolation grub.d drop-in from a previous provisioning run (or
+# a hand-applied #483/#816-era config) must be removed and grub regenerated -- the same self-heal
+# discipline every other drift-prone config in this script already applies. This also covers the
+# case where a box is being RE-provisioned after previously carrying the #842 defect.
+if [ -f /etc/default/grub.d/98-imag-isolation.cfg ]; then
+    echo -e "  ${YELLOW}#842: removing leftover /etc/default/grub.d/98-imag-isolation.cfg -- kernel isolcpus/nohz_full is the #784/#842 regression, affinity-only pin stays${NC}"
+    rm -f /etc/default/grub.d/98-imag-isolation.cfg
+    # #295/#487: never a raw ad-hoc grub edit -- guarantee every kernel has an initrd, regenerate
+    # grub.cfg, then refuse to trust it if the default entry lacks a kernel image or an initrd.
+    safe_grub_regen
+    echo "  #842: leftover kernel-isolation drop-in removed + grub regenerated"
+fi
+echo "  #483/#842: OBS core reservation is AFFINITY-ONLY (taskset ${IMAG_ISOLATED_CPUS} via /etc/imag-isolated-cpus.conf) -- no kernel isolcpus/nohz_full/irqaffinity written"
 
 # camera-box #484: grant the desktop user rtprio so OBS's genlock render-tick pin can go SCHED_FIFO.
 # The #484 pin (vendor/obs-studio/libobs/obs-video.c) calls sched_setscheduler(SCHED_FIFO) on the ONE
@@ -482,7 +717,83 @@ step 9 "NVIDIA dGPU driver (#500): nvidia-driver-595-open + PRIME nvidia-primary
 # box with no actual driver files. Check the Status field content instead (no `-q` on the piped
 # grep — dpkg -s output is tiny, but this matches the same safe-read convention used elsewhere in
 # this script rather than mixing conventions).
-if ! dpkg -s nvidia-driver-595-open 2>/dev/null | grep '^Status: install ok installed' >/dev/null; then
+# #816: the whole step is GATED on a discrete NVIDIA GPU actually being present. It was
+# mandatory + fail-hard, which aborts provisioning on a replacement notebook that simply has no
+# dGPU (live: the i5-13420H box is Intel-UHD-only). On such a box the HDMI program output is
+# driven by the iGPU directly — there is no PRIME to select and no driver to install.
+if ! lspci -nn | imag_has_discrete_nvidia; then
+    echo "  #816: no discrete NVIDIA GPU on this box — skipping the driver + PRIME step (iGPU drives HDMI directly)"
+    # #841: the incumbent box's anti-stutter display tuning (nvidia-settings
+    # ForceFullCompositionPipeline=On + GPUPowerMizerMode=1) is NVIDIA-only and has no direct
+    # counterpart here -- but "TearFree" (the naive intel-DDX-style analog) does NOT apply on
+    # THIS driver stack, confirmed LIVE on 10.77.9.187 rather than assumed: `Option "TearFree"
+    # "true"` under `Driver "modesetting"` produced the Xorg.0.log line
+    # `(WW) modeset(0): Option "TearFree" is not used`, and `strings modesetting_drv.so` contains
+    # no "TearFree"/"Tear" text at all -- TearFree is a feature of the LEGACY xf86-video-intel DDX
+    # (installed here but never
+    # matched -- Xorg autoconfigures the built-in `modesetting` driver for this PCI id, confirmed
+    # `(==) Matched modesetting as autoconfigured driver 0`), not of `modesetting`+glamor. Shipping
+    # a dead option would be exactly the cargo-culted-NVIDIA-semantics-onto-Intel mistake this
+    # ticket warns against, so it is NOT written. What this stack actually already provides
+    # tear-free, verified live in the SAME log: `Present`+`DRI3` init cleanly and
+    # `modeset(0): glamor X acceleration enabled`, with `PageFlip`/`Atomic` compiled into the
+    # driver (`strings` confirms) -- a full-screen client (the OBS Program projector, no
+    # compositor running) gets direct page-flipped scanout via Present by default, which is the
+    # real tear-free mechanism on this stack, not an xorg.conf.d option. VRR (`Option
+    # "VariableRefresh"`, also `strings`-confirmed real and X-property-visible as `VariableRefresh:
+    # disabled` in the log) was considered too, but the HDMI-1 projector output itself reports
+    # `vrr_capable: 0` (only the eDP-1 laptop panel does) -- not applicable to the affected output.
+    #
+    # The genuinely-applicable Intel/i915 equivalent to GPUPowerMizerMode=1 IS real: the iGPU
+    # actively DVFS-scales (gt_cur_freq_mhz observed cycling well below its own gt_RP0_freq_mhz
+    # ceiling under live 6-camera render load) -- the same ramp-hitch class of stutter
+    # GPUPowerMizerMode=1 avoids on NVIDIA. i915 has no PowerMizer; pin the frequency FLOOR to the
+    # hardware's own reported ceiling (gt_RP0_freq_mhz, never a hardcoded MHz literal -- a future
+    # Intel notebook's ceiling will differ) instead, so it stops idling down and ramping back up
+    # under load. Sysfs values reset on reboot, so this is reapplied every boot via a dedicated
+    # systemd oneshot unit, mirroring the existing cpu-performance.service convention (step 4)
+    # rather than a provisioning-time-only write.
+    cat > /usr/local/bin/imag-igpu-maxperf.sh <<'IGPU_EOF'
+#!/usr/bin/env bash
+# camera-box #841: pin the Intel iGPU's frequency floor to its own reported max (gt_RP0_freq_mhz)
+# so it never idles down and ramps back up under load -- the DVFS ramp-up is what caused the
+# intermittent stutter on fast motion in the fullscreen OBS Program projector (the same problem
+# GPUPowerMizerMode=1 solves on the NVIDIA box; i915 has no PowerMizer, but raising gt_min_freq to
+# the hardware's own real max gets the same "always at max clock" outcome). Runs at every boot
+# (systemd, root) because sysfs values reset on reboot -- never a hardcoded MHz literal, a future
+# Intel notebook's ceiling will differ.
+set -euo pipefail
+for card in /sys/class/drm/card[0-9]; do
+    [ -w "$card/gt_min_freq_mhz" ] || continue
+    max="$(cat "$card/gt_RP0_freq_mhz" 2>/dev/null)"
+    [ -n "$max" ] || continue
+    echo "$max" > "$card/gt_min_freq_mhz"
+    echo "$max" > "$card/gt_boost_freq_mhz" 2>/dev/null || true
+    echo "imag-igpu-maxperf: pinned $card gt_min_freq_mhz -> ${max}MHz (was DVFS-scaled down at idle)"
+    exit 0
+done
+echo "imag-igpu-maxperf: no writable i915 gt_min_freq_mhz sysfs node found -- nothing to pin" >&2
+exit 0
+IGPU_EOF
+    chmod 755 /usr/local/bin/imag-igpu-maxperf.sh
+    cat > /etc/systemd/system/imag-igpu-maxperf.service <<'SVC_EOF'
+[Unit]
+Description=camera-box #841: pin Intel iGPU to max frequency (avoid DVFS ramp stutter, imag HDMI program projector)
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/imag-igpu-maxperf.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+SVC_EOF
+    systemctl daemon-reload
+    systemctl enable --now imag-igpu-maxperf.service >/dev/null 2>&1 \
+        || echo "  WARNING: could not enable imag-igpu-maxperf.service"
+    echo "  #841: iGPU max-frequency-pin service provisioned (no xorg.conf.d change -- TearFree does not exist on this driver, live-verified; Present+PageFlip already gives tear-free full-screen scanout without a compositor)"
+elif ! dpkg -s nvidia-driver-595-open 2>/dev/null | grep '^Status: install ok installed' >/dev/null; then
     apt-get update -qq
     DEBIAN_FRONTEND=noninteractive apt-get install -y nvidia-driver-595-open >/dev/null \
         || fail "nvidia-driver-595-open install failed"
@@ -490,8 +801,10 @@ fi
 # PRIME nvidia-primary: on-demand PRIME mode left the HDMI dGPU output dead (live-verified) --
 # nvidia must be the PRIMARY renderer so BOTH the HDMI output and the laptop's own eDP panel run
 # on the RTX 5050.
-command -v prime-select >/dev/null 2>&1 || fail "prime-select missing after nvidia-driver-595-open install"
-prime-select nvidia || fail "prime-select nvidia failed"
+if lspci -nn | imag_has_discrete_nvidia; then
+    command -v prime-select >/dev/null 2>&1 || fail "prime-select missing after nvidia-driver-595-open install"
+    prime-select nvidia || fail "prime-select nvidia failed"
+fi
 # #295/#487: a DKMS driver install regenerates initramfs for the running kernel -- never trust
 # that blindly. Reuse the SAME safe_grub_regen helper the #482/#483 grub.d drops call above
 # (defined earlier in step 6): guarantee every kernel has an initrd, regenerate grub.cfg, and
@@ -502,11 +815,13 @@ if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
 else
     echo "  #500: nvidia-smi not yet enumerating the GPU (expected pre-reboot on a fresh driver install)"
 fi
-echo "  #500: nvidia-driver-595-open installed, prime-select nvidia set, grub/initrd re-verified"
-echo "  NOTE: the PRIME GPU mode + the new DKMS module take full effect on the NEXT boot — this script does not reboot the box"
+if lspci -nn | imag_has_discrete_nvidia; then
+    echo "  #500: nvidia-driver-595-open installed, prime-select nvidia set, grub/initrd re-verified"
+    echo "  NOTE: the PRIME GPU mode + the new DKMS module take full effect on the NEXT boot — this script does not reboot the box"
+fi
 
 # =============================================================================
-step 10 "NDI runtime 6.3.2 from cam1 -> ${NDI_DIR} (fleet-identical)"
+step 10 "NDI runtime 6.3.2 from ${NDI_PEER} -> ${NDI_DIR} (fleet-identical)"
 # =============================================================================
 if [ ! -e "${NDI_DIR}/libndi.so.6" ]; then
     [ -n "${CAM_PW:-}" ] || fail "CAM_PW env required to fetch NDI runtime from cam1"
@@ -531,11 +846,33 @@ systemctl enable --now avahi-daemon >/dev/null 2>&1
 # =============================================================================
 step 11 "OBS Studio (official PPA, 32.x) — base install; libobs.so.30 gets genlock hot-swapped next"
 # =============================================================================
-if ! command -v obs >/dev/null 2>&1; then
+INSTALLED_OBS_VERSION="$(dpkg-query -W -f='${Version}' obs-studio 2>/dev/null || true)"
+if [ "$INSTALLED_OBS_VERSION" != "$IMAG_OBS_BASE_VERSION" ]; then
     add-apt-repository -y ppa:obsproject/obs-studio >/dev/null
     apt-get update -qq
-    DEBIAN_FRONTEND=noninteractive apt-get install -y obs-studio >/dev/null
+    OBS_CANDIDATE="$(apt-cache policy obs-studio 2>/dev/null | awk '/Candidate:/{print $2}')"
+    OBS_BASE_PLAN="$(imag_obs_base_plan "$OBS_CANDIDATE" "$IMAG_OBS_BASE_VERSION")" || exit 1
+    echo "  #824: OBS base pin ${IMAG_OBS_BASE_VERSION} (PPA candidate ${OBS_CANDIDATE:-none}) -> ${OBS_BASE_PLAN}"
+    if [ "$OBS_BASE_PLAN" = "apt" ]; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --allow-downgrades "obs-studio=${IMAG_OBS_BASE_VERSION}" >/dev/null \
+            || fail "#824: obs-studio=${IMAG_OBS_BASE_VERSION} install failed"
+    else
+        # the PPA moved on — fetch the pinned (superseded) binary from Launchpad's +files endpoint
+        OBS_DEB_URL="$(imag_obs_base_deb_url "$IMAG_OBS_BASE_VERSION")"
+        curl -fsSL -o /tmp/obs-base.deb "$OBS_DEB_URL" \
+            || fail "#824: could not download the pinned OBS base ${IMAG_OBS_BASE_VERSION} from ${OBS_DEB_URL}"
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --allow-downgrades /tmp/obs-base.deb >/dev/null \
+            || fail "#824: pinned OBS base ${IMAG_OBS_BASE_VERSION} install failed"
+        rm -f /tmp/obs-base.deb
+    fi
 fi
+# #824: hold it — an unattended upgrade to a newer libobs disables every stock plugin against the
+# genlock build (no obs-websocket, no encoders).
+apt-mark hold obs-studio >/dev/null 2>&1 \
+    || echo "  WARNING: apt-mark hold obs-studio failed — an apt upgrade could break the genlock plugin ABI"
+GOT_OBS_VERSION="$(dpkg-query -W -f='${Version}' obs-studio 2>/dev/null || true)"
+[ "$GOT_OBS_VERSION" = "$IMAG_OBS_BASE_VERSION" ] \
+    || fail "#824: OBS base is ${GOT_OBS_VERSION:-none}, expected ${IMAG_OBS_BASE_VERSION} — a mismatched base disables every stock plugin against the genlock build"
 obs --version 2>/dev/null || true
 
 # =============================================================================
@@ -568,8 +905,24 @@ GENLOCK_BACKUP_ROOT="/opt/obs-backup"
 LIBOBS_REAL="/usr/lib/x86_64-linux-gnu/libobs.so.30"
 DISTROAV_REAL="/usr/lib/x86_64-linux-gnu/obs-plugins/distroav.so"
 OBS_FRONTEND_REAL="/usr/bin/obs"
+# #756 (live wedge, 2026-07-15): libobs-opengl is a SEPARATE shared library
+# (vendor/obs-studio/libobs-opengl/CMakeLists.txt: add_library(libobs-opengl SHARED)) from
+# libobs.so.30 -- Fix B (the X11/EGL client-size cache, gl-x11-egl.c) lives entirely in it. It
+# was NEVER named in this hot-swap before, so every prior "successful" swap silently left the
+# PPA-stock (or an even older ad-hoc-deployed) libobs-opengl.so.30 in place while the
+# GENLOCK_BUILD_SHA.txt marker claimed the current dev HEAD was fully deployed -- live-confirmed
+# on imag-nb: the loaded file was dated 11 days stale, predating Fix B entirely, while a fresh
+# wedge was captured blocking in the EXACT call chain Fix B was supposed to have eliminated.
+LIBOBS_OPENGL_REAL="/usr/lib/x86_64-linux-gnu/libobs-opengl.so.30"
 
 command -v jq >/dev/null 2>&1 || apt-get install -y jq >/dev/null 2>&1 || fail "jq install failed (needed for #460 manifest verify)"
+# #822: readelf/nm (binutils) verify the hot-swapped binaries further down this step. A fresh
+# Ubuntu install has NO binutils — install it, then preflight, so a missing TOOL can never be
+# reported as a failed ABI check.
+command -v readelf >/dev/null 2>&1 && command -v nm >/dev/null 2>&1 \
+    || apt-get install -y binutils >/dev/null 2>&1 \
+    || fail "#822: binutils install failed (readelf/nm needed to verify the genlock hot-swap)"
+imag_require_tools readelf nm
 
 # manifest_sha_for_path() and verify_file_sha() are defined at the TOP of this file (pure
 # functions, no root/network needed) — see the source-guard block near the top for why: they are
@@ -629,17 +982,20 @@ NEW_SHA="$(gh run view "$RUN_ID" --repo "$GENLOCK_REPO" --json headSha -q .headS
 [ -n "$NEW_SHA" ] || fail "could not read headSha for run $RUN_ID"
 
 NOOP_VALID=0
-if [ "$DEPLOYED_SHA" = "$NEW_SHA" ] && [ -f "$LIBOBS_REAL" ] && [ -f "$DISTROAV_REAL" ] && [ -f "$OBS_FRONTEND_REAL" ]; then
+if [ "$DEPLOYED_SHA" = "$NEW_SHA" ] && [ -f "$LIBOBS_REAL" ] && [ -f "$DISTROAV_REAL" ] && [ -f "$OBS_FRONTEND_REAL" ] && [ -f "$LIBOBS_OPENGL_REAL" ]; then
     NOOP_VALID=1
     # #472 defense-in-depth (PR #471 review, deliberately deferred): the SHA-marker + file
     # *existence* check above trusts the on-disk marker without re-verifying the installed
-    # BYTES. If the deployed libobs.so.30/distroav.so/bin-obs were ever silently reverted (e.g. an
-    # unattended `apt upgrade` slipping past the apt-mark hold, or manual tampering), a no-op
-    # re-run would wrongly report "already deployed" and skip re-swapping — the verify step's runtime
-    # log-verify would still catch it eventually, but only after a confusing failure. Re-verify
-    # the CURRENTLY INSTALLED files against the manifest cached locally on the LAST successful
-    # swap (pure local sha256 compare, zero network cost, only paid on the already-rare re-run
-    # path) and fall through to a fresh re-install on any mismatch.
+    # BYTES. If the deployed libobs.so.30/distroav.so/bin-obs/libobs-opengl.so.30 were ever
+    # silently reverted (e.g. an unattended `apt upgrade` slipping past the apt-mark hold, manual
+    # tampering, OR -- the #756 live incident this libobs-opengl.so.30 re-verify closes -- a
+    # PRIOR version of this very script that never named libobs-opengl.so.30 at all, so its bytes
+    # never changed while the marker kept claiming full deployment), a no-op re-run would wrongly
+    # report "already deployed" and skip re-swapping — the verify step's runtime log-verify would
+    # still catch it eventually, but only after a confusing failure. Re-verify the CURRENTLY
+    # INSTALLED files against the manifest cached locally on the LAST successful swap (pure local
+    # sha256 compare, zero network cost, only paid on the already-rare re-run path) and fall
+    # through to a fresh re-install on any mismatch.
     CACHED_MANIFEST="$GENLOCK_MARKER_DIR/BUNDLE_MANIFEST.json"
     if [ -f "$CACHED_MANIFEST" ]; then
         WANT_LIBOBS_SHA_CACHED="$(manifest_sha_for_path "$CACHED_MANIFEST" 'lib/x86_64-linux-gnu/libobs.so.30')"
@@ -648,8 +1004,10 @@ if [ "$DEPLOYED_SHA" = "$NEW_SHA" ] && [ -f "$LIBOBS_REAL" ] && [ -f "$DISTROAV_
         GOT_DISTROAV_SHA_CACHED="$(sha256sum "$DISTROAV_REAL" | awk '{print $1}')"
         WANT_OBS_SHA_CACHED="$(manifest_sha_for_path "$CACHED_MANIFEST" 'bin/obs')"
         GOT_OBS_SHA_CACHED="$(sha256sum "$OBS_FRONTEND_REAL" | awk '{print $1}')"
+        WANT_LIBOBS_OPENGL_SHA_CACHED="$(manifest_sha_for_path "$CACHED_MANIFEST" 'lib/x86_64-linux-gnu/libobs-opengl.so.30')"
+        GOT_LIBOBS_OPENGL_SHA_CACHED="$(sha256sum "$LIBOBS_OPENGL_REAL" | awk '{print $1}')"
         if [ "$GOT_LIBOBS_SHA_CACHED" != "$WANT_LIBOBS_SHA_CACHED" ] || [ "$GOT_DISTROAV_SHA_CACHED" != "$WANT_DISTROAV_SHA_CACHED" ] \
-            || [ "$GOT_OBS_SHA_CACHED" != "$WANT_OBS_SHA_CACHED" ]; then
+            || [ "$GOT_OBS_SHA_CACHED" != "$WANT_OBS_SHA_CACHED" ] || [ "$GOT_LIBOBS_OPENGL_SHA_CACHED" != "$WANT_LIBOBS_OPENGL_SHA_CACHED" ]; then
             echo "  WARNING: installed genlock bytes do not match the cached manifest — forcing re-install"
             NOOP_VALID=0
         fi
@@ -681,8 +1039,10 @@ else
     BUNDLE_LIBOBS="$GENLOCK_TMP/bundle/lib/x86_64-linux-gnu/libobs.so.30"
     FAST_DISTROAV="$GENLOCK_TMP/fast/distroav.so"
     BUNDLE_OBS="$GENLOCK_TMP/bundle/bin/obs"
+    BUNDLE_LIBOBS_OPENGL="$GENLOCK_TMP/bundle/lib/x86_64-linux-gnu/libobs-opengl.so.30"
     [ -f "$FAST_DISTROAV" ] || fail "distroav-linux-fast-so missing distroav.so"
     [ -f "$BUNDLE_OBS" ] || fail "bundle missing bin/obs (#499: the frontend executable)"
+    [ -f "$BUNDLE_LIBOBS_OPENGL" ] || fail "bundle missing lib/x86_64-linux-gnu/libobs-opengl.so.30 (#756: the X11/EGL client-size cache Fix B lives in this SEPARATE library)"
     [ -f "$GENLOCK_TMP/bundle/BUNDLE_MANIFEST.json" ] || fail "bundle missing BUNDLE_MANIFEST.json (#120)"
     MANIFEST="$GENLOCK_TMP/bundle/BUNDLE_MANIFEST.json"
 
@@ -695,6 +1055,13 @@ else
     # empty — live-verified with a minimal repro during review of this exact PR.
     WANT_LIBOBS_SHA="$(manifest_sha_for_path "$MANIFEST" 'lib/x86_64-linux-gnu/libobs.so.30')"
     verify_file_sha "$BUNDLE_LIBOBS" "$WANT_LIBOBS_SHA" "bundle libobs.so.30"
+    # #756: libobs-opengl.so.30 is a SEPARATE library from libobs.so.30 (its own CMake SHARED
+    # target) that carries the Fix B X11/EGL client-size cache — it has its OWN manifest entry
+    # (confirmed live: BUNDLE_MANIFEST.json already lists lib/x86_64-linux-gnu/libobs-opengl.so.30
+    # even before this fix, because the bundle stage already copies the full OBS rundir — only the
+    # DEPLOY side ever missed it), verify it the same way.
+    WANT_LIBOBS_OPENGL_SHA="$(manifest_sha_for_path "$MANIFEST" 'lib/x86_64-linux-gnu/libobs-opengl.so.30')"
+    verify_file_sha "$BUNDLE_LIBOBS_OPENGL" "$WANT_LIBOBS_OPENGL_SHA" "bundle libobs-opengl.so.30"
     # distroav.so has NO manifest of its own in the distroav-linux-fast-so artifact (it ships only
     # DISTROAV_BUILD_SHA.txt — a commit id, not a content hash) — cross-check it against the
     # BUNDLE's manifest entry for the SAME file instead (both jobs build distroav.so from the
@@ -723,6 +1090,7 @@ else
         mkdir -p "$STOCK_BACKUP"
         [ -f "$LIBOBS_REAL" ] && cp -a "$LIBOBS_REAL" "$STOCK_BACKUP/libobs.so.30"
         [ -f "$DISTROAV_REAL" ] && cp -a "$DISTROAV_REAL" "$STOCK_BACKUP/distroav.so"
+        [ -f "$LIBOBS_OPENGL_REAL" ] && cp -a "$LIBOBS_OPENGL_REAL" "$STOCK_BACKUP/libobs-opengl.so.30"
     fi
     if [ ! -f "$OBS_FRONTEND_STOCK_BACKUP" ]; then
         [ -f "$OBS_FRONTEND_REAL" ] && cp -a "$OBS_FRONTEND_REAL" "$OBS_FRONTEND_STOCK_BACKUP"
@@ -732,17 +1100,22 @@ else
     [ -f "$LIBOBS_REAL" ] && cp -a "$LIBOBS_REAL" "$PREV_BACKUP/libobs.so.30"
     [ -f "$DISTROAV_REAL" ] && cp -a "$DISTROAV_REAL" "$PREV_BACKUP/distroav.so"
     [ -f "$OBS_FRONTEND_REAL" ] && cp -a "$OBS_FRONTEND_REAL" "$PREV_BACKUP/obs"
+    [ -f "$LIBOBS_OPENGL_REAL" ] && cp -a "$LIBOBS_OPENGL_REAL" "$PREV_BACKUP/libobs-opengl.so.30"
     [ -n "$DEPLOYED_SHA" ] && echo "$DEPLOYED_SHA" > "$PREV_BACKUP/GENLOCK_BUILD_SHA.txt"
 
     install -m 0644 -o root -g root "$BUNDLE_LIBOBS" "$LIBOBS_REAL" || fail "libobs.so.30 hot-swap install failed"
     install -m 0644 -o root -g root "$FAST_DISTROAV" "$DISTROAV_REAL" || fail "distroav.so hot-swap install failed"
     install -m 0755 -o root -g root "$BUNDLE_OBS" "$OBS_FRONTEND_REAL" || fail "frontend obs hot-swap install failed (#499)"
+    install -m 0644 -o root -g root "$BUNDLE_LIBOBS_OPENGL" "$LIBOBS_OPENGL_REAL" || fail "libobs-opengl.so.30 hot-swap install failed (#756)"
     ldconfig
 
     # SONAME sanity check (no `-q` on a piped external command under pipefail — same early-close
     # SIGPIPE footgun documented for the step-4 ldconfig check; read the full small output instead).
     readelf -d "$LIBOBS_REAL" 2>/dev/null | grep 'SONAME.*\[libobs\.so\.30\]' >/dev/null \
         || fail "post-swap libobs.so.30 SONAME check failed — refuse a mismatched ABI"
+    # #756: same SONAME sanity check for the newly-swapped libobs-opengl.so.30.
+    readelf -d "$LIBOBS_OPENGL_REAL" 2>/dev/null | grep 'SONAME.*\[libobs-opengl\.so\.30\]' >/dev/null \
+        || fail "post-swap libobs-opengl.so.30 SONAME check failed — refuse a mismatched ABI (#756)"
 
     # #499 post-swap build-proof: the stock PPA frontend never references
     # obs_display_set_render_divisor (the #276/#278/#293 multiview render-budget decouple symbol)
@@ -815,13 +1188,107 @@ EOF
         # state on top of the boot hook re-opening them fresh).
         printf '\n[BasicWindow]\nSaveProjectors=false\n' >> "$f"
     fi
+    if ! grep -q '^CloseExistingProjectors=' "$f"; then
+        # #756: true — OBSBasic::OpenProjector() (vendor/obs-studio/frontend/widgets/
+        # OBSBasic_Projectors.cpp) only closes an EXISTING projector on the SAME monitor before
+        # opening a new one when this key is true; it has NO compiled-in default (a missing key
+        # reads as false), so a fresh profile leaves every OpenVideoMixProjector call (the #758
+        # [0/8] preflight calls it via obs_phase2.py open-projectors on EVERY recording-e2e.sh
+        # run, unconditionally) STACKING a brand-new Multiview/Program window on top of the
+        # previous one instead of replacing it. Live-caught (2026-07-15): 7 stray Multiview + 7
+        # stray Program projector windows had accumulated on imag (`DISPLAY=:0 wmctrl -l`) over
+        # one afternoon of repeated preflight runs — seven independently-throttled Multiview
+        # renders, each still costing real graphics-thread time, fully explains the render-health
+        # preflight's intermittent sub-58fps failures even on a build whose #276/#278/#293
+        # divisor mechanism is confirmed correctly compiled in (nm -D -u). Setting this makes
+        # every future OpenVideoMixProjector call self-correct to exactly one window per monitor.
+        #
+        # INSERT into the EXISTING [BasicWindow] section (this SAME seed_ini() call already
+        # created one two lines above, via the SaveProjectors seed) — NEVER append a duplicate
+        # `[BasicWindow]` header. libobs's own util/config-file.c is a CUSTOM ini parser (NOT
+        # Qt's QSettings) that keys sections in a uthash table by name; a SECOND `[BasicWindow]`
+        # header does not merge into the first section, it adds a separate instance under the
+        # same hash key, and every config_get_bool()/config_find_item() lookup only ever
+        # resolves the FIRST-inserted section — a key seeded into a later duplicate section is
+        # silently unreachable, and gets DROPPED ENTIRELY the next time OBS itself cleanly saves
+        # the file (its own save only ever writes back what it had loaded). Live-caught
+        # (2026-07-15): appending a duplicate section this way was applied to the already-running
+        # imag box, then vanished completely after the next OBS restart's config save — 4
+        # repeated open-projectors calls afterward still stacked 4 stray Multiview + 4 stray
+        # Program windows, proving the naive append never took effect.
+        if grep -q '^\[BasicWindow\]$' "$f"; then
+            sed -i '0,/^\[BasicWindow\]$/s//[BasicWindow]\nCloseExistingProjectors=true/' "$f"
+        else
+            printf '\n[BasicWindow]\nCloseExistingProjectors=true\n' >> "$f"
+        fi
+    fi
     if ! grep -q '^LastVersion=' "$f"; then
         printf '\n[General]\nLastVersion=536936450\n' >> "$f"   # 32.1.2 — suppress first-run wizard
+    fi
+    if ! grep -q '^DockState=' "$f"; then
+        # #791: OBS only persists [BasicWindow] geometry/DockState on a CLEAN exit -- imag-nb has
+        # run 24/7 since first bring-up and has therefore never shed one (confirmed live on BOTH
+        # .182 and .187: neither global.ini has ever carried these keys), so the operator's
+        # requested Stats dock (visible + DOCKED) reverts to OBS's bare default layout on every
+        # restart instead of surviving it.
+        #
+        # These two values are a REAL Qt QMainWindow::saveState()/saveGeometry() blob -- NOT
+        # hand-authored (it is an internal, versioned Qt binary stream; hand-constructing one is
+        # not safe). Generated ONCE, off-rig, on dev1 with a disposable stock OBS 30.0.2 kiosk
+        # (Xvfb + openbox, a throwaway blank profile, zero scenes): Docks -> Stats, dragged into a
+        # docked column after Controls, then a clean File > Exit so OBS ITSELF wrote these into its
+        # own global.ini. Qt's dock-widget object names (scenesDock/sourcesDock/mixerDock/
+        # transitionsDock/controlsDock/statsDock) have been stable across OBS's Qt frontend for
+        # years, so this applies cleanly to the box's actual OBS 32.1.2 genlock build too --
+        # Qt's restoreState() is best-effort per-widget-by-objectName, so even a future OBS build
+        # that adds/removes an unrelated dock degrades to "some docks not repositioned", never a
+        # crash or a corrupted layout.
+        #
+        # Seeded ONLY when DockState is missing (this same idempotent-seed convention every other
+        # key in this function already uses) -- an operator who performs one real clean exit gets
+        # THEIR OWN captured layout persisted from then on, and this seed never overwrites it.
+        DOCKSTATE_GEOMETRY='AdnQywADAAAAAAF6AAAAogAAB38AAAOVAAABewAAALgAAAd+AAADkAAAAAAAAAAAB4AAAAF7AAAAuAAAB34AAAOQ'
+        DOCKSTATE_BLOB='AAAA/wAAAAD9AAAAAQAAAAMAAAYEAAABAfwBAAAABvsAAAAUAHMAYwBlAG4AZQBzAEQAbwBjAGsBAAAAAAAAAKAAAACgAP////sAAAAWAHMAbwB1AHIAYwBlAHMARABvAGMAawEAAACkAAAAoAAAAKAA////+wAAABIAbQBpAHgAZQByAEQAbwBjAGsBAAABSAAAAN4AAADeAP////sAAAAeAHQAcgBhAG4AcwBpAHQAaQBvAG4AcwBEAG8AYwBrAQAAAioAAACgAAAAoAD////7AAAAGABjAG8AbgB0AHIAbwBsAHMARABvAGMAawEAAALOAAAAngAAAJ4A////+wAAABIAcwB0AGEAdABzAEQAbwBjAGsBAAADcAAAApQAAAKUAP///wAABgQAAAGbAAAABAAAAAQAAAAIAAAACPwAAAAA'
+        if grep -q '^\[BasicWindow\]$' "$f"; then
+            # Insert right after the FIRST [BasicWindow] header (never append a duplicate one --
+            # see the CloseExistingProjectors comment above for why a second header is silently
+            # unreachable). awk, not sed: the base64 blobs contain literal `/` characters, which
+            # would collide with sed's own `s/.../.../ ` delimiter.
+            awk -v geo="$DOCKSTATE_GEOMETRY" -v dock="$DOCKSTATE_BLOB" '
+                { print }
+                /^\[BasicWindow\]$/ && !done { print "geometry=" geo; print "DockState=" dock; done=1 }
+            ' "$f" > "${f}.tmp791" && mv "${f}.tmp791" "$f"
+        else
+            printf '\n[BasicWindow]\ngeometry=%s\nDockState=%s\n' "$DOCKSTATE_GEOMETRY" "$DOCKSTATE_BLOB" >> "$f"
+        fi
     fi
 }
 seed_ini "$OBS_CFG/global.ini"
 seed_ini "$OBS_CFG/user.ini"
 chown -R "$DESKTOP_USER:$DESKTOP_USER" "$OBS_CFG"
+
+# #791: install the CANONICAL 17-scene operator collection -- ONLY when this box genuinely has NO
+# scene collection yet (a fresh profile). imag_scenes.py's own WS-based seed deliberately never
+# creates "resolume imag" / "MW resolume imag" (its #785 OPERATOR-WINS carve-out -- those are
+# hand-built scenes, not owned by the automated seeder), so a from-scratch box was silently
+# missing them, Cam 7/MV Cam 7, and the whole correct scene ORDER until an operator built them by
+# hand (the exact repeated-manual-work complaint this ticket exists to kill). The canonical file
+# was captured live off the incumbent .182 (byte-identical to the already-live-restored .187,
+# 2026-07-27/28) and is fetched the same way imag_scenes.py itself is (gh api against this repo's
+# dev branch -- this script has no sibling repo checkout at runtime). Never overwrites an existing
+# collection (operator-wins, same discipline as every seed_ini() key above).
+SCENES_DIR="${USER_HOME}/.config/obs-studio/basic/scenes"
+mkdir -p "$SCENES_DIR"
+if ! ls "$SCENES_DIR"/*.json >/dev/null 2>&1; then
+    gh api -H "Accept: application/vnd.github.raw" \
+        "repos/${GENLOCK_REPO}/contents/scripts/imag-obs-scenes-canonical.json?ref=dev" \
+        > "$SCENES_DIR/Untitled.json" \
+        || fail "#791: could not fetch the canonical scene collection from ${GENLOCK_REPO} (dev)"
+    chown "$DESKTOP_USER:$DESKTOP_USER" "$SCENES_DIR/Untitled.json"
+    echo "  #791: canonical 17-scene collection installed (fresh box had none)"
+else
+    echo "  #791: existing scene collection found on disk -- leaving it untouched (operator wins)"
+fi
 
 # =============================================================================
 step 14 "Desktop de-jitter (#485): mask background jitter sources + OBS ProcessPriority=High"
@@ -904,8 +1371,11 @@ step 15 "Kiosk environment (#504): openbox+lightdm autologin, DM→lightdm, disa
 # (a) Install the light WM + display manager. Idempotent (apt-get install on an already-installed
 #     package is a no-op). lightdm's default-Recommends greeter (lightdm-gtk-greeter) comes along;
 #     the owner's list names no specific greeter, so none is pinned here.
+#     #833: wmctrl rides along here too — recording-e2e.sh's [0/8] projector-count preflight (and
+#     the #769 windowed-stray heal) shell out to it over SSH; a freshly provisioned box without it
+#     made that preflight misread "tool absent" as "0 projectors" (three wasted gate re-runs).
 apt-get update -qq
-DEBIAN_FRONTEND=noninteractive apt-get install -y openbox lightdm \
+DEBIAN_FRONTEND=noninteractive apt-get install -y openbox lightdm feh wmctrl \
     || fail "#504: openbox+lightdm install failed — cannot convert imag-nb to the kiosk WM"
 
 # (b) lightdm autologin → openbox. Idempotent full-file write of a fixed drop-in (always the same
@@ -982,7 +1452,7 @@ fi
 # earlier switch blindly. A postrm that silently re-pointed display-manager.service back is exactly
 # the black-wall failure mode this whole step exists to prevent; refuse to leave the box in an
 # uncertain DM state rather than discover it only on the next reboot.
-[ "$(readlink -f /etc/systemd/system/display-manager.service)" = "/lib/systemd/system/lightdm.service" ] \
+imag_same_unit /etc/systemd/system/display-manager.service /lib/systemd/system/lightdm.service \
     || fail "#504: display-manager.service no longer points at lightdm after the GNOME purge — refuse to leave the box with an uncertain display manager"
 
 echo "  NOTE: the kiosk (lightdm+openbox) takes over the SESSION on the NEXT boot — this script does not reboot the box"
@@ -1015,13 +1485,33 @@ rmdir "$USER_HOME/.config/autostart" 2>/dev/null || true
 apt-get update -qq
 DEBIAN_FRONTEND=noninteractive apt-get install -y python3-websocket >/dev/null \
     || fail "python3-websocket install failed — imag_scenes.py needs it for the boot-time self-heal (#522)"
-PYBIN="/usr/bin/python3"
 SCN="/usr/local/bin/imag_scenes.py"
 gh api -H "Accept: application/vnd.github.raw" \
     "repos/${GENLOCK_REPO}/contents/scripts/imag_scenes.py?ref=dev" \
     > "$SCN" \
     || fail "could not fetch scripts/imag_scenes.py from ${GENLOCK_REPO} (dev) via gh api"
 chmod 755 "$SCN"
+
+# #840: install the operator start/stop scripts onto the box too -- the openbox autostart below
+# now launches OBS THROUGH imag-obs-start.sh (the SAME path the operator's right-click "Spustit
+# OBS" menu entry uses) instead of a separate inline launch+seed, so a boot-durable box HARD
+# DEPENDS on this file actually existing. Neither script was ever installed by this provisioner
+# before #840 (both existed on THIS box only because a prior session hand-placed them) -- fetched
+# here with the SAME gh-api pattern as imag_scenes.py above so a from-scratch reprovision (a
+# future 3rd notebook) is never missing them.
+OBS_START_SH="/usr/local/bin/imag-obs-start.sh"
+gh api -H "Accept: application/vnd.github.raw" \
+    "repos/${GENLOCK_REPO}/contents/scripts/imag-obs-start.sh?ref=dev" \
+    > "$OBS_START_SH" \
+    || fail "could not fetch scripts/imag-obs-start.sh from ${GENLOCK_REPO} (dev) via gh api"
+chmod 755 "$OBS_START_SH"
+
+OBS_STOP_SH="/usr/local/bin/imag-obs-stop.sh"
+gh api -H "Accept: application/vnd.github.raw" \
+    "repos/${GENLOCK_REPO}/contents/scripts/imag-obs-stop.sh?ref=dev" \
+    > "$OBS_STOP_SH" \
+    || fail "could not fetch scripts/imag-obs-stop.sh from ${GENLOCK_REPO} (dev) via gh api"
+chmod 755 "$OBS_STOP_SH"
 
 APP_DESKTOP=$(ls /usr/share/applications/com.obsproject.Studio.desktop 2>/dev/null || true)
 mkdir -p "$USER_HOME/Desktop"
@@ -1039,10 +1529,11 @@ chown -R "$DESKTOP_USER:$DESKTOP_USER" "$USER_HOME/Desktop"
 # The openbox autostart script IS the boot-durable authority (lightdm+openbox reads this file on
 # every session start, unlike XDG .config/autostart/). Written with a QUOTED heredoc so every
 # $VAR inside stays LITERAL text in the generated file -- $PANEL/$PROJ/$i are meant to be
-# evaluated by openbox AT BOOT TIME, never expanded here at provisioning time. The __PYBIN__ /
-# __SCN__ placeholders are substituted with the actual resolved paths right after, via sed --
-# a quoted heredoc cannot both keep $PANEL/$PROJ literal AND interpolate $PYBIN/$SCN in the same
-# pass.
+# evaluated by openbox AT BOOT TIME, never expanded here at provisioning time. The __ISOLCPUS__
+# placeholder (#840: now just an exported env var for imag-obs-start.sh, no longer a direct
+# taskset argument) is substituted with the DERIVED isolated-CPU set right after, via sed -- a
+# quoted heredoc cannot both keep $PANEL/$PROJ literal AND interpolate $IMAG_ISOLATED_CPUS in the
+# same pass.
 mkdir -p "$USER_HOME/.config/openbox"
 cat > "$USER_HOME/.config/openbox/autostart" <<'AUTOSTART_EOF'
 #!/bin/bash
@@ -1057,6 +1548,10 @@ if [ -n "$PROJ" ]; then
     || xrandr --output "$PROJ" --mode 1920x1080 --rate 60 2>/dev/null || true
 fi
 xset s off -dpms s noblank 2>/dev/null || true
+# wall-fallback: resolume-imag still ako pozadie -- restart OBS nikdy neukaze ciernu stenu.
+# Obrazok je OPERATORSKY ASSET (nie git) -- refresh: OBS-WS GetSourceScreenshot sceny
+# 'resolume imag' do ~/Pictures/wall-fallback.png (viz #791 reprovision parity note).
+[ -f "$HOME/Pictures/wall-fallback.png" ] && command -v feh >/dev/null && feh --no-fehbg --bg-fill "$HOME/Pictures/wall-fallback.png" 2>/dev/null || true
 # Clear stale OBS crash sentinels BEFORE launch -- a hard/unclean reboot is EXACTLY the case OBS's
 # own "Crash or unclean shutdown detected" modal fires on, which would hang the boot headless and
 # :4455 would never come up (same fix as this script's own provisioning-time relaunch, step 17;
@@ -1071,15 +1566,24 @@ rm -rf "$HOME/.config/obs-studio/.sentinel"/* 2>/dev/null || true
 for f in "$HOME"/.config/obs-studio/basic/scenes/*.json; do
   [ -f "$f" ] && python3 -c "import json,sys; p=sys.argv[1]; d=json.load(open(p)); d['saved_projectors']=[]; json.dump(d,open(p,'w'))" "$f" 2>/dev/null || true
 done
-taskset -c 2-11 obs &
-# wait for OBS WebSocket :4455, then seed scenes/#507 membership + open both projectors (self-heal every boot)
-for i in $(seq 1 30); do (exec 3<>/dev/tcp/127.0.0.1/4455) 2>/dev/null && { exec 3>&-; break; }; sleep 1; done
-sleep 2
-PYBIN="__PYBIN__"; SCN="__SCN__"
-"$PYBIN" "$SCN" --host 127.0.0.1 >/tmp/imag-seed.log 2>&1 || true
-"$PYBIN" "$SCN" --host 127.0.0.1 --projector >>/tmp/imag-seed.log 2>&1 || true
+# #840: boot runs OBS through the SAME operator path as the "Spustit OBS" right-click menu entry
+# instead of a separate inline launch+wait+seed -- a second launch mechanism (a bare 30s WebSocket
+# wait with NO obs-process-liveness check, its failure swallowed by `|| true`) is what let the boot
+# path silently drop the projector self-heal while the manual path kept working: a real capture on
+# 10.77.9.187 showed imag_scenes.py failing with ConnectionRefusedError at boot because the OLD
+# inline wait loop timed out before OBS's WebSocket came up. That operator script's own 90s wait
+# DOES check obs process liveness while polling.
+# #884 (follow-up to issue 882): the call below now goes THROUGH the systemd unit rather than
+# invoking the operator script directly -- the unit's own ExecStart still runs that identical
+# script, so every WebSocket-wait/seed/projector guarantee above is unchanged, but the launch is
+# now systemd-SUPERVISED (Restart=on-failure): a future segfault auto-restarts instead of leaving
+# OBS dead until the next reboot, which is exactly what happened for ~70 minutes before issue 882
+# added the unit. Enabling the unit without ALSO switching this call site would race two launchers
+# at boot -- this line and the `enable --now` below (step 21) are a single, paired change.
+export IMAG_ISOLATED_CPUS="__ISOLCPUS__"
+systemctl --user start imag-obs.service || true
 AUTOSTART_EOF
-sed -i "s#__PYBIN__#${PYBIN}#; s#__SCN__#${SCN}#" "$USER_HOME/.config/openbox/autostart"
+sed -i "s#__ISOLCPUS__#${IMAG_ISOLATED_CPUS}#" "$USER_HOME/.config/openbox/autostart"
 chmod +x "$USER_HOME/.config/openbox/autostart"
 chown "$DESKTOP_USER:$DESKTOP_USER" "$USER_HOME/.config/openbox/autostart"
 
@@ -1115,7 +1619,7 @@ if [ -S /tmp/.X11-unix/X0 ]; then
         # written by root (this script runs as root); sudo -u drops privilege only for the `obs`
         # process itself, not for the redirect -- that is intentional here, not a bug.
         sudo -u "$DESKTOP_USER" DISPLAY=:0 DBUS_SESSION_BUS_ADDRESS="$UBUS" \
-            nohup taskset -c 2-11 obs >/tmp/obs-launch.log 2>&1 &
+            nohup taskset -c "$IMAG_ISOLATED_CPUS" obs >/tmp/obs-launch.log 2>&1 &
         sleep 8
     fi
     pgrep -x obs >/dev/null || fail "OBS did not start (see /tmp/obs-launch.log)"
@@ -1183,6 +1687,128 @@ else
     echo "$DEV1_DRIFTGUARD_PUBKEY" | sudo -u "$DESKTOP_USER" tee -a "$AUTH_KEYS" >/dev/null
     echo "  dev1 driftguard key appended to $AUTH_KEYS"
 fi
+
+# =============================================================================
+step 20 "Companion Satellite for the connected Stream Deck (#731, server $COMPANION_HOST)"
+# =============================================================================
+# Headless install of Bitfocus Companion Satellite (bitfocus/companion-satellite) via the
+# official installer script -- idempotent (re-running it re-syncs to the pinned stable build; the
+# whole step is safe to re-run on every provisioning pass).
+COMPANION_TARGET="$COMPANION_HOST"
+if ! getent hosts "$COMPANION_HOST" >/dev/null 2>&1; then
+    if [ -n "$COMPANION_HOST_IP" ]; then
+        echo "  WARNING: '$COMPANION_HOST' does not resolve from this box -- using COMPANION_HOST_IP=$COMPANION_HOST_IP instead"
+        COMPANION_TARGET="$COMPANION_HOST_IP"
+    else
+        echo "  WARNING: '$COMPANION_HOST' does not resolve from this box and no COMPANION_HOST_IP \
+override was given -- configuring the satellite with the hostname anyway (it will retry DNS at \
+connect time); set COMPANION_HOST_IP=<ip> and re-run this step if the connection never comes up"
+    fi
+fi
+
+curl -fsSL https://raw.githubusercontent.com/bitfocus/companion-satellite/main/pi-image/install.sh \
+    -o /tmp/companion-satellite-install.sh \
+    || fail "could not download the companion-satellite installer"
+bash /tmp/companion-satellite-install.sh \
+    || fail "companion-satellite install.sh failed (see output above)"
+
+# fixup-pi-config.js (satellite.service's ExecStartPre) re-reads /boot/satellite-config on EVERY
+# service start, imports COMPANION_IP/REST_PORT into the persisted config, then resets this file
+# back to a blank template -- so writing it fresh before every (re)start is the correct idempotent
+# way to (re-)point the satellite, not a one-shot "only matters on first install" file.
+cat > /boot/satellite-config <<CFGEOF
+# Written by setup-imag.sh step 20 (#731) -- re-applied by fixup-pi-config.js on every satellite start
+COMPANION_IP=$COMPANION_TARGET
+REST_PORT=9999
+CFGEOF
+chmod 666 /boot/satellite-config
+
+# #731 GOTCHA: systemd's hwdb classifies the Stream Deck (and similar surfaces) as
+# ID_AV_PRODUCTION_CONTROLLER=1; /usr/lib/udev/rules.d/70-uaccess.rules then TAG+="uaccess"'s the
+# hidraw node, which makes systemd-logind apply a per-SEAT ACL that OVERRIDES the plain
+# GROUP=satellite/MODE=660 the installer's own 50-satellite.rules sets -- the ACL's `group::---`
+# leaves the headless "satellite" service user unable to open the device ("cannot open device with
+# path /dev/hidrawN") even though the group ownership is correct. Strip the uaccess tag for these
+# devices (numbered AFTER 70- on purpose -- tag removal must run after the tag is added) so the
+# plain group-based permission is the one that actually applies. Live-confirmed 2026-07-13: without
+# this, satellite logs an "Open ... failed: cannot open device" error for the Stream Deck; with it,
+# the very next start logs its firmware version and the REST /api/surfaces endpoint lists it.
+cat > /etc/udev/rules.d/99-companion-satellite-no-uaccess.rules <<'UDEVEOF'
+# #731: keep AV-production-controller HID surfaces (Stream Deck etc.) on plain group permissions
+# so the headless "satellite" service user can open them -- see setup-imag.sh step 20 for the why.
+SUBSYSTEM=="hidraw", ENV{ID_AV_PRODUCTION_CONTROLLER}=="1", TAG-="uaccess"
+UDEVEOF
+udevadm control --reload-rules
+udevadm trigger --subsystem-match=hidraw
+# Clear any ACL a PRIOR run/boot already applied before this rule existed (a fresh hotplug/reboot
+# would never gain one going forward, but an already-plugged device needs an explicit reset now).
+for dev in /sys/class/hidraw/hidraw*; do
+    [ -e "$dev" ] || continue
+    if udevadm info "/dev/$(basename "$dev")" 2>/dev/null | grep -q 'ID_AV_PRODUCTION_CONTROLLER=1'; then
+        setfacl -b "/dev/$(basename "$dev")" 2>/dev/null || true
+    fi
+done
+
+systemctl enable satellite >/dev/null 2>&1 || fail "could not enable the satellite systemd service"
+systemctl restart satellite || fail "could not (re)start the satellite systemd service"
+for i in $(seq 1 10); do
+    systemctl is-active --quiet satellite && break
+    [ "$i" -eq 10 ] && fail "satellite service not active after start (journalctl -u satellite for detail)"
+    sleep 1
+done
+echo "  satellite service active + enabled at boot, configured for $COMPANION_TARGET (REST :9999)"
+
+# =============================================================================
+step 21 "OBS supervision unit + wallpaper-refresh provisioning + core dumps (#882)"
+# =============================================================================
+# #882: imag-obs-start.sh/imag-obs-stop.sh were already fetched in step 16 above -- this step adds
+# (a) systemd-coredump, so LimitCORE=infinity's captured cores actually land somewhere inspectable
+# (ulimit -c was 0 and kernel.core_pattern was a bare non-piped "core" before this, leaving the
+# 2026-07-30 segfault with nothing debuggable); (b) imag-wallpaper-refresh.sh + its timer, which
+# was hand-installed on the live box only before this ticket -- the exact same "never actually
+# provisioned" gap #840 already found for imag-obs-start.sh/stop.sh (the SCREENSHOT-refresh
+# behavior is unchanged from before #882 -- the obs-down ALERT is fired from a separate, DEV1-side
+# watchdog, scripts/imag-obs-alert-watchdog.sh, since imag-nb has no ~/devel/airuleset checkout or
+# Discord credentials to fire it itself -- confirmed live); (c) the imag-obs.service unit file
+# itself, installed AND enabled+started (issue 884, follow-up to this ticket): the boot-time
+# openbox autostart heredoc above now launches OBS THROUGH this unit rather than calling the
+# operator script directly, so enabling it here no longer races two launchers -- it is the ONLY
+# launcher now. Restart=on-failure gives OBS supervised auto-restart on a real segfault that a
+# bare script call never had (the 2026-07-30 outage this whole feature exists to prevent
+# recurring).
+
+DEBIAN_FRONTEND=noninteractive apt-get install -y systemd-coredump >/dev/null \
+    || fail "systemd-coredump install failed -- needed so LimitCORE=infinity's captured cores land somewhere inspectable (#882)"
+
+WALLPAPER_SH="/usr/local/bin/imag-wallpaper-refresh.sh"
+gh api -H "Accept: application/vnd.github.raw" \
+    "repos/${GENLOCK_REPO}/contents/scripts/imag-wallpaper-refresh.sh?ref=dev" \
+    > "$WALLPAPER_SH" \
+    || fail "could not fetch scripts/imag-wallpaper-refresh.sh from ${GENLOCK_REPO} (dev) via gh api"
+chmod 755 "$WALLPAPER_SH"
+
+sudo -u "$DESKTOP_USER" mkdir -p "$USER_HOME/.config/systemd/user"
+for unit in imag-obs.service imag-wallpaper-refresh.service imag-wallpaper-refresh.timer; do
+    gh api -H "Accept: application/vnd.github.raw" \
+        "repos/${GENLOCK_REPO}/contents/systemd/${unit}?ref=dev" \
+        > "$USER_HOME/.config/systemd/user/${unit}" \
+        || fail "could not fetch systemd/${unit} from ${GENLOCK_REPO} (dev) via gh api"
+done
+chown -R "$DESKTOP_USER:$DESKTOP_USER" "$USER_HOME/.config/systemd"
+
+UID_DESKTOP="$(id -u "$DESKTOP_USER")"
+sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="/run/user/${UID_DESKTOP}" DBUS_SESSION_BUS_ADDRESS="$UBUS" \
+    systemctl --user daemon-reload || fail "systemctl --user daemon-reload failed"
+sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="/run/user/${UID_DESKTOP}" DBUS_SESSION_BUS_ADDRESS="$UBUS" \
+    systemctl --user enable --now imag-wallpaper-refresh.timer \
+    || echo "  WARNING: could not enable imag-wallpaper-refresh.timer -- the wall-fallback screenshot will go stale"
+echo "  imag-wallpaper-refresh.timer enabled (wall-fallback screenshot refresh every 5 min; the obs-down Discord alert is a SEPARATE dev1-side watchdog, scripts/imag-obs-alert-watchdog.sh)"
+# issue 884: the autostart heredoc above now calls through this unit instead of the operator
+# script directly, so enable+start is safe here -- see the step header comment for why.
+sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="/run/user/${UID_DESKTOP}" DBUS_SESSION_BUS_ADDRESS="$UBUS" \
+    systemctl --user enable --now imag-obs.service \
+    || fail "systemctl --user enable --now imag-obs.service failed"
+echo "  imag-obs.service enabled + started (OBS boot launch is now systemd-supervised, Restart=on-failure; issue 884)"
 
 echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}imag-nb base provisioning DONE (genlock build: $(cat "$GENLOCK_MARKER_DIR/GENLOCK_BUILD_SHA.txt" 2>/dev/null || echo unknown))${NC}"

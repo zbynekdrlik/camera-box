@@ -252,8 +252,10 @@ w32time_verdict_class() {
 
 # --- text extraction from a gathered status blob (#598's offline fixture seam) ----------------
 #
-# The caller (the win-* MCP holder — ssh to Windows is denied, so this file cannot gather live
-# itself) pre-fetches `w32time_gather_remote_snippet()`'s output into ONE combined text file per
+# The caller (the win-* MCP holder — this file has no headless ssh-based gather of its own; #701
+# proved plain scp/ssh reaches strih/stream, but the `sc`/`reg`/`w32tm` console output here is
+# still gathered via the win-* MCP Shell, not migrated) pre-fetches
+# `w32time_gather_remote_snippet()`'s output into ONE combined text file per
 # box and passes it to the gate via --win-status NAME=FILE (mirrors dantesync-gate.sh's own
 # --win-status convention exactly). These parsers pull each field back out of that combined text,
 # so the SAME fixture-file path both drives production (live win-* MCP output) and the unit tests

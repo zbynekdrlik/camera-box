@@ -1,7 +1,7 @@
 //! #684 — recording-e2e.sh cleanup() must end with an INDEPENDENT, unconditional
 //! camera-box.service verify pass for every box the run touched (source cam always;
-//! cam2/painter always; cam3-6 under ALL_CAMBOX=1) -- not just the early-cleanup restore sites
-//! #675 already covers.
+//! cam2/painter always; cam3-4 under ALL_CAMBOX=1 -- #827: cam5/cam6/cam7 retired) -- not just
+//! the early-cleanup restore sites #675 already covers.
 //!
 //! ## The bug (live incident, 2026-07-11)
 //!
@@ -73,8 +73,9 @@ fn cleanup_has_a_final_independent_verify_after_the_burn_clear_loop() {
     );
 }
 
-/// The final verify must ALSO cover cam2/painter and, under ALL_CAMBOX=1, cam3-6 -- every box
-/// this run's deploy could have stopped camera-box.service on.
+/// The final verify must ALSO cover cam2/painter and, under ALL_CAMBOX=1, every camera in
+/// camera_active_secondary_set() (#827: cam5/cam6/cam7 retired, but reversibly -- see
+/// scripts/camera-set.sh) -- every box this run's deploy could have stopped camera-box.service on.
 #[test]
 fn cleanup_final_verify_covers_painter_and_all_cambox_secondaries() {
     let body = cleanup_body(&read("scripts/recording-e2e.sh"));
@@ -89,9 +90,10 @@ fn cleanup_final_verify_covers_painter_and_all_cambox_secondaries() {
     );
     assert!(
         final_region.contains("ALL_CAMBOX")
-            && final_region.contains("$CAM3_IP")
-            && final_region.contains("$CAM6_IP"),
-        "#684: the final verify must cover cam3-6 under ALL_CAMBOX=1. Region:\n{final_region}"
+            && final_region.contains("camera_active_secondary_set")
+            && final_region.contains("camera_secondary_ip"),
+        "#684/#827: the final verify must cover every ACTIVE secondary camera under ALL_CAMBOX=1, \
+         derived from camera_active_secondary_set(). Region:\n{final_region}"
     );
 }
 

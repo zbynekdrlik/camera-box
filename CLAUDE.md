@@ -15,10 +15,21 @@ Rust app for embedded NDI cameras (CAM1-4): multi-camera NDI streaming with soft
 - OBS launch/recovery on strih/stream → load `.claude/skills/obs-ops`
 - `--display` HDMI path (connector/phantom-fb detect, upscale cap, capture-dropped counter) → load `.claude/skills/display`
 - CI artifacts, Discord notify, probe binary flow → load `.claude/skills/ci`
-- E2E zero-loss testing (acceptance criteria, QR harness, reporting scope) → load `.claude/skills/e2e`
+- E2E zero-loss testing (acceptance criteria, QR harness, reporting scope, active fleet size / `CAMERA_ACTIVE_SET` reactivation) → load `.claude/skills/e2e`
 - Rig TEST/EVENT mode switch (#247 `scripts/rig-mode.sh`: pinned QR/burns/genlock per mode, the #246 burn-leak guard) → load `.claude/skills/e2e`
 - Recording-verdict QR decode path (fast/robust gate, per-recording burn sets, #186 fixtures) → load `.claude/skills/recording-decode`
 - A/V-sync offset measurement (cam2 QPSK marker, `--av-sync`, ring-bias + cluster-pairing gotchas) → load `.claude/skills/av-sync`
+- imag-nb swap (install-imag-nb.sh → setup-imag.sh → verify-imag.sh acceptance gate, #821; derived CPU/GPU/IP) → `.claude/rules/imag-nb-provisioning.md` (auto-loads on its `paths:`)
+- E2E gate preconditions (DanteSync servo, bundle-state-server) → `.claude/rules/rig-standing-services.md` (auto-loads on its `paths:`)
+- CI/workflow concurrency-cancel risk, sourced-bash-test-harness `set -e` leak → `.claude/rules/ci-testing-gotchas.md` (auto-loads on its `paths:`)
+- `CAMERA_ACTIVE_SET` fleet-enumeration discipline (never a literal cam-number range) → `.claude/rules/camera-active-set.md` (auto-loads on its `paths:`)
+- imag-nb SSH-remote tool preflight (a missing wmctrl/nm must fail loud by name, never read as a measured zero, #833) → `.claude/rules/imag-ssh-remote-tool-preflight.md` (auto-loads on its `paths:`)
+- Presenter DRM device selection + dual-QR Vernier payload stability (`/dev/dri/cardN` renumbering, #854) → `.claude/rules/presenter-drm-selection.md` (auto-loads on its `paths:`)
+- `recording-e2e.sh` cleanup()'s always-runs stream-latency restore composing with a late OBS write (#856) + the 703 byte-window test → `.claude/rules/recording-e2e-cleanup-composition.md` (auto-loads on its `paths:`)
+- `setup-device.sh`/`verify-device.sh` companion conventions (enable-only never live-start, the `(q)`-must-stay-last check ordering, cam2-painter display-ownership, #863) → `.claude/rules/provisioning-scripts.md` (auto-loads on its `paths:`)
+- Reading dantesync's own VERSION (`dantesync --version` answers on every platform, no journal/bundle-state coupling, pin-vs-relative-parity comparison model, #862) → `.claude/rules/dantesync-version-reading.md` (auto-loads on its `paths:`)
+- imag-nb OBS runtime supervision + alerting (dev1-side-only alerting topology, systemd Restart=on-failure vs the issue-788 operator-fighting bug, wait-on-child-pid pattern, #882) → `.claude/rules/imag-obs-supervision.md` (auto-loads on its `paths:`)
+- `gaps` vs `residual_events` divergence (two independently-correct metrics, both directions locked by tests, #852/#883) + pulling real per-segment data from a historical CI run's own log → `.claude/rules/gap-metric-reconciliation.md` (auto-loads on its `paths:`)
 
 ## DO NOT DELETE These Files
 
@@ -91,6 +102,27 @@ message contains none of those three characters; once you write a single backtic
 heredoc form for the WHOLE message, not just the backtick-containing line. **Never amend/rewrite a
 commit that shipped with a mangled message** (`commit-conventions.md` — no history rewrites); the
 next commit's message is where you note the correction if it matters.
+
+## GOTCHA — mentioning ANY OTHER `#N` in a commit message (even just as prose context) can BLOCK the commit on that ticket's own design gate
+
+The autopilot design-before-code hook (`block-commit-without-design.sh`) scans the WHOLE `git
+commit` command text for issue references — its regex is `(?:^|[\s(/])#([0-9]+)\b`, i.e. ANY
+`#N` preceded by whitespace, `(`, `/`, or the string start, not just the commit's OWN `fix(#N):`
+prefix. **Every distinct `#N` it finds must already have a design comment posted, or the commit
+is BLOCKED** — including a number you only mentioned in passing to explain WHY a rule exists
+(e.g. writing "the standing #836 rule: never widen the tolerance" while fixing `#855`). Live
+incident (2026-07-28, `#855`): a GREEN commit's body referenced `(#836: never widen the
+tolerance...)` — a completely different, already-resolved ticket, cited only for context — and
+the hook blocked the commit demanding a design comment on `#836` too.
+
+**Fix: never write a bare `#N` for an issue OTHER than the one(s) this commit's own design
+comment already covers.** Reference the RULE, not the ticket number, in commit-message prose
+("the standing gate-strictness rule: never widen the tolerance" instead of "the `#836` rule") —
+or, if the number must appear, keep it out of the `(?:^|[\s(/])#\d+` shape (e.g. spelled as
+`issue 836` with no `#`, which the regex does not match). This does NOT apply to the commit's OWN
+ticket number(s) in the conventional `fix(#N):` / `test(#N):` prefix — those already have (or are
+about to get) their design comment via the normal flow; it is specifically OTHER tickets casually
+named in the body that trip the gate.
 
 ## GOTCHA — two autopilot workers sharing this dev1 checkout WILL interleave on `dev`
 
@@ -166,29 +198,71 @@ wrong PR with no review of it.
   auto-closed an issue that wasn't yours, explain it via `gh issue comment <N>` for traceability.
   The supervisor should prefer serial dispatch or per-worker `git worktree` isolation for this
   repo going forward.
+- **A red "CI" run on the OTHER worker's push can be YOUR OWN not-yet-fixed RED commit riding
+  along, not a real regression in their code.** Confirmed live (2026-07-30, #854/#881 vs #878):
+  worker A committed a TDD RED commit (failing-on-purpose, per `regression-test-first.md`) while
+  worker B's own commit landed on top of it in the shared local history; when B pushed next, the
+  push carried A's still-broken RED commit too (a push always carries full ancestry — see the
+  bullet above), and B's CI run failed on TESTS A HAD NOT YET FIXED. Before treating a scary CI
+  failure on a push you didn't make as evidence the other worker's code is broken, check the
+  failing test names against YOUR OWN recent RED commit (`git log --oneline` around the failing
+  SHA) — if they're yours, it's a superseded interleaving artifact, not a real bug; your own next
+  push (carrying the GREEN fix) supersedes it and should be judged on its OWN CI run instead.
 
-## GOTCHA — editing `scripts/recording-e2e.sh` can silently break OTHER test files' static anchors
+## GOTCHA — editing `scripts/recording-e2e.sh` (OR `scripts/rig-mode.sh`) can silently break OTHER test files' static anchors
 
-Many separate `tests/harness_*.rs` files independently `.find()` literal substrings/adjacency in
-`scripts/recording-e2e.sh` (a banner like `"[5/8] StartRecord"`, or structural adjacency like
-`fi\ntrap cleanup EXIT`) to pin ordering/structure — the same static-string-assertion model
-`tests/harness_recording_e2e_cleanup_resilient.rs` (#328) established, now reused across many
-unrelated features (`#137` av-restart-sync, `#286` all-cambox burn targets, `#649` StopRecord
-ordering, etc.). A new comment or code line you add to this file CAN accidentally (1) duplicate a
-literal anchor another test's `.find()` relies on — `.find()` returns the FIRST match in the WHOLE
-file, not the occurrence near your own edit — or (2) break a textual adjacency two unrelated tests
-hard-code (e.g. inserting a line between an `if` block's closing `fi` and the following `trap
-cleanup EXIT HUP INT TERM` line).
+Many separate `tests/harness_*.rs` / `tests/rig_mode.rs` files independently `.find()`/`.split()`
+literal substrings/adjacency in `scripts/recording-e2e.sh` OR `scripts/rig-mode.sh` (a banner like
+`"[5/8] StartRecord"`, a bare function-name anchor like `.split("do_event()")`, or structural
+adjacency like `fi\ntrap cleanup EXIT`) to pin ordering/structure — the same static-string-assertion
+model `tests/harness_recording_e2e_cleanup_resilient.rs` (#328) established, now reused across many
+unrelated features in BOTH files (`#137` av-restart-sync, `#286` all-cambox burn targets, `#649`
+StopRecord ordering, `#524`'s `event_mode_calls_stop_stray_recordings_guard`, etc.). A new comment
+or code line you add to EITHER file CAN accidentally (1) duplicate a literal anchor another test's
+`.find()`/`.split()` relies on — `.find()` returns the FIRST match in the WHOLE file, and
+`.split(X).nth(1)` grabs the segment AFTER the SECOND occurrence of `X`, not the occurrence near
+your own edit — or (2) break a textual adjacency two unrelated tests hard-code (e.g. inserting a
+line between an `if` block's closing `fi` and the following `trap cleanup EXIT HUP INT TERM` line).
 
-**Confirmed live (#649, 2026-07-10):** a new `cleanup()` comment containing the literal text
-`[5/8] StartRecord` broke 3 tests in `tests/harness_av_restart_sync_gate.rs` (the `#137` gate,
-which anchors on that exact string to slice "everything before the main record step"); and adding
-new variable declarations directly before `trap cleanup EXIT HUP INT TERM` broke
+**Confirmed live (#649, 2026-07-10, recording-e2e.sh):** a new `cleanup()` comment containing the
+literal text `[5/8] StartRecord` broke 3 tests in `tests/harness_av_restart_sync_gate.rs` (the
+`#137` gate, which anchors on that exact string to slice "everything before the main record
+step"); and adding new variable declarations directly before `trap cleanup EXIT HUP INT TERM` broke
 `recording_e2e_all_cambox_extends_burn_targets_to_every_strih_input_286` in
 `tests/harness_recording_e2e_paths.rs` (which hard-codes that the `#286` ALL_CAMBOX block's
 closing `fi` is immediately followed by `trap cleanup EXIT`).
 
-**Mitigation:** after ANY edit to `scripts/recording-e2e.sh`, run the FULL `cargo test` suite —
+**Confirmed live (#722, 2026-07-13, rig-mode.sh — the SAME class, a DIFFERENT file):** a new
+comment reading "...sent by `do_event()` AFTER this function returns..." — placed INSIDE
+`event_mode_assert()`, BEFORE the real `do_event() {` definition — broke
+`event_mode_calls_stop_stray_recordings_guard` in `tests/rig_mode.rs`, which extracts the function
+body via `s.split("do_event()").nth(1)`. With TWO occurrences of the literal text `do_event()` (the
+new comment, then the real definition), `.nth(1)` grabbed the segment BETWEEN them (a few lines of
+comment) instead of the real function body — the test's failure message printed the WRONG slice
+(the comment text), which is the tell: if a `.split()`/`.find()`-based test's failure output looks
+like the wrong region of the file, suspect a duplicated anchor, not a logic regression. Fix: reword
+the comment so it never contains the bare function-name-with-parens text (e.g. "the EVENT-mode
+caller" instead of "`do_event()`") when that text sits BEFORE the real definition in the file.
+
+**Confirmed live (#832, 2026-07-27) — the anchor you break can be a test YOU are writing IN THE
+SAME PR, not just a pre-existing one.** Adding an explanatory comment right before a call site
+(`# #832: recording-verdict-on-imag.sh has its OWN independent IMAG_BOX default...` right before
+`"$HERE/recording-verdict-on-imag.sh"`) created a SECOND occurrence of the literal script name —
+a NEW test's own `s.find("recording-verdict-on-imag.sh")` then latched onto the comment (the FIRST
+occurrence) instead of the real invocation a few lines later, so its assertion window never
+reached the actual call. Same failure shape hit a second, unrelated anchor in the same PR:
+`rig-mode.sh`'s pre-existing explanatory comment already said `` `scripts/drift-guard.sh
+--check-imag` `` (backticked, no `bash ` prefix) several lines above the REAL
+`bash scripts/drift-guard.sh --check-imag ...` call — a naive `.find("drift-guard.sh
+--check-imag")` grabbed the comment, not the call. Fix in both cases: anchor on a substring that
+can ONLY appear at the real call site (the quoted `"$HERE/...").sh"` invocation form, or a
+`bash ` / other prefix the comment never uses) — never a bare script/flag name that a nearby
+comment could also contain. **The general rule: when you write a NEW static-anchor test against
+one of these two files in the SAME commit/PR that adds explanatory prose near the call site,
+verify your OWN anchor is unique too — you can self-collide, not just collide with someone else's
+existing test.**
+
+**Mitigation:** after ANY edit to `scripts/recording-e2e.sh` OR `scripts/rig-mode.sh`, run the FULL `cargo test` suite —
 not just your own new/targeted test file — before pushing (`cargo test # airuleset:build-ok`
 locally bypasses the Tier-0 build-block for this one-off check; Tier-0 policy is otherwise
 `cargo test --no-run` only, see below). A failure elsewhere in the suite right after touching this
@@ -210,6 +284,91 @@ duplicating it inline at every call site. See `scripts/lib/camera-box-restart-ve
 worked example — 3 call sites (cam1, the ALL_CAMBOX loop, cam2/painter) each gained a poll+retry
 step with the ORIGINAL restart lines byte-for-byte unchanged, verified by the full `cargo test`
 suite staying green (115/115 binaries, no anchor collisions).
+
+**Variant (#712) — WRAPPING an anchored line's execution mode (not just appending after it) is
+ALSO safe, PROVIDED you check every sibling test uses SUBSTRING `.find()`, never a full-line/exact
+match.** #712 needed the cam3/4/5/6 ALL_CAMBOX restore loop's ssh call to run BACKGROUNDED
+(`( timeout ... ssh ... ) &` instead of a bare foreground call) so 4 boxes restore concurrently
+instead of sequentially — this touches the anchor line itself, not just text after it. Before
+doing this: `grep -rn '\.find(' tests/*.rs` for every string that could live inside the region
+being touched, and confirm each is a `body.contains(...)`/`region.find(...)` SUBSTRING check
+(unaffected by a `(`/`) &` wrapper on the same logical command) rather than something that
+requires the anchor to be the literal FIRST token on its line or hard-codes exact whitespace. The
+new PID-collection + wait logic itself went into a new sourced lib
+(`scripts/lib/cambox-parallel-restore.sh`), same as the #675 pattern — only the wrap-in-parens
+touched the anchored region directly, and it was verified safe (grep first, then the full
+`cargo test` suite green after) rather than assumed safe.
+
+## GOTCHA — one failing test binary makes `cargo test` SKIP the remaining binaries (a second RED hides)
+
+`cargo test` stops scheduling not-yet-started test binaries after a binary fails ("waiting for
+other jobs to finish") — so a run that shows ONE failure is NOT a complete accounting: another
+already-RED test file later in the schedule silently never ran. Live incident (2026-07-16, #792
+session): the full suite showed only `obs_self_heal_install` failing; after fixing it, a SECOND
+pre-existing failure surfaced (`setup_imag_guards`, stale since the #783 same-source pivot the
+day before). Both had sat unnoticed because the event-mode hotfix sessions never ran the full
+suite. Rules: (1) after fixing a failure, ALWAYS re-run the FULL suite — never conclude "now
+green" from the first fix; (2) a hotfix session that skips the full suite leaves landmines for
+the next session — run it before ending the session even when CI is deliberately not triggered
+(count `test result: ok` lines and expect the full binary count, currently ~156).
+
+## GOTCHA — a NEW `.sh` file's long header comment must not push `set -euo pipefail` past line 15
+
+`pre-write-script-check.sh` (script-failure-policy.md) blocks a brand-new `.sh` file's `Write` if
+`set -euo pipefail` isn't found within the file's first ~15 lines — but this repo's convention for
+a new acceptance-gate/guard script (`verify-device.sh`, `clock-offset-guard.sh`, `setup-imag.sh`,
+...) is a LONG header comment (checks list, env vars, rationale) BEFORE `set -euo pipefail`, often
+80+ lines. Those existing files predate the hook (or were edited incrementally past it); a fresh
+`Write` of a NEW file in that style gets hard-blocked (#821, `scripts/verify-imag.sh`'s first
+draft). Fix: shebang, a ONE-LINE summary comment pointing at "the extended header below", then
+`set -euo pipefail` on/before line ~7, then continue the FULL detailed header comment underneath
+it (bash comments work anywhere) — satisfies the hook without shrinking the documentation.
+
+## GOTCHA — a `scripts/lib/*.sh` "_cmd" helper embedded via `$(...)` mid-string gets its trailing newline STRIPPED, gluing it to whatever follows
+
+Several sourced libs (`scripts/lib/v4l2-neutral.sh`, and the same pattern is likely reusable
+elsewhere) expose functions that print REMOTE bash TEXT for the caller to embed via
+`$(...)` inside a larger ssh command string (e.g. `"...$(some_cmd_fn) more literal text..."`).
+**Bash's `$(...)` command substitution UNCONDITIONALLY STRIPS ALL trailing newlines from the
+captured output** — a completely standard, well-known behaviour (it's why `$(echo foo)` doesn't
+leave a stray blank line), but it is easy to forget when the thing being captured is MULTI-LINE
+REMOTE SCRIPT TEXT rather than a simple value. If the helper function's LAST printed statement
+relies on its own trailing newline to separate it from whatever literal text the caller
+concatenates immediately after the `$(...)` (as `[2/8]`/`[2b/8]` in `recording-e2e.sh` do — the
+embedding sits in the MIDDLE of a bigger command string, not at its end), that trailing newline is
+gone by the time the text is spliced in, and the function's last command silently swallows
+whatever follows as EXTRA ARGUMENTS.
+
+**Live incident (#744/#746, 2026-07-13):** `v4l2_neutral_set_default_cmd`'s last statement was
+`v4l2-ctl -d "$V4L2_NEUTRAL_NODE" --get-ctrl=saturation,contrast 2>/dev/null` (no trailing `;`).
+Embedded as `"...\n   $(v4l2_neutral_set_default_cmd) \\\n   rm -f /tmp/cbox-burn-cam6.log; ..."`,
+the stripped newline glued the two together into ONE command line:
+`v4l2-ctl ... --get-ctrl=saturation,contrast 2>/dev/null rm -f /tmp/cbox-burn-cam6.log` — v4l2-ctl
+errored `unknown arguments: rm`, and the intended `rm` never ran at all. This reproduced live on a
+real gate run (29265311504) and was only caught because the log showed the exact "unknown
+arguments: rm" text — a purely LOCAL `bash -n` syntax check on the reconstructed command string
+does NOT catch this class of bug (gluing valid-looking tokens onto a command's argv is still
+syntactically valid bash; it's a semantic error, not a parse error).
+
+**A subtler variant, if what follows is ALSO a bare `VAR=value` assignment (no command name), not
+an external command:** bash then treats the WHOLE glued sequence as a "prefix assignment before a
+command" if a real command eventually follows on the same unterminated line — which sets the
+variable ONLY in that ONE command's temporary environment, NOT persisting in the calling shell, so
+a LATER reference to that variable reads as unset/empty. This is easy to miss because it doesn't
+error at all; it just silently produces the wrong (empty/default) value downstream.
+
+**Fix, and the rule going forward for any NEW `_cmd`-style helper meant for mid-string embedding:**
+end the function's LAST printed statement with an explicit `;` (e.g.
+`'v4l2-ctl -d "$V4L2_NEUTRAL_NODE" --get-ctrl=saturation,contrast 2>/dev/null;'` as the final
+`printf` argument) — the literal `;` character survives the newline-strip and correctly terminates
+the statement regardless of what the caller concatenates immediately after it, whether that's
+another bare assignment, a real command, or nothing at all (a harmless trailing `;` at the very
+end of a script is valid bash). **Test this class of bug functionally, not just with `bash -n`:**
+reproduce the caller's EXACT embedding shape (a fake stand-in binary on `$PATH` logging its argv +
+a marker file a "next" command must remove) and assert the following command actually ran as its
+own statement — see `tests/harness_v4l2_neutral_744.rs`'s
+`set_default_cmd_embedding_never_glues_the_following_command_746` /
+`resolve_node_cmd_embedding_never_glues_the_following_command_746` for the pattern.
 
 ## GOTCHA — `gh pr merge` falsely refuses a green PR as "not up to date"; the direct REST call works
 
@@ -238,25 +397,60 @@ IS a branch-protection bypass and is banned regardless (`autonomous-quality-disc
 staleness problem; the plain REST merge call is the correct, non-bypassing path when EVERY actual
 required check is green and `gh pr merge` is merely being overcautious about it.
 
+## GOTCHA — `gh pr edit --body-file` fails with a GraphQL "Projects (classic)" error; use the REST PATCH instead
+
+`gh pr edit 704 --body-file <file>` (or `--body`) fails on this repo with `GraphQL: Projects
+(classic) is being deprecated...(repository.pullRequest.projectCards)` and exit code 1 — `gh`'s
+GraphQL mutation for editing a PR fetches the `projectCards` field in its response even when you
+never touch project cards, and this repo (or org) still has that legacy field wired up. The body
+is **silently NOT updated** when this happens (confirmed: re-reading the PR body afterward showed
+the OLD text). The direct REST PATCH sidesteps the broken GraphQL response entirely and works
+every time:
+
+```bash
+gh api repos/OWNER/REPO/pulls/<N> -X PATCH -F body=@/path/to/new-body.md
+```
+
+Same family as the `gh pr merge` GOTCHA above (a `gh` CLI convenience wrapper misbehaving on this
+specific repo; the equivalent raw REST call is the reliable fallback) — check the PATCH response's
+own `.body` (or re-`gh pr view --json body`) to confirm the write actually landed before trusting
+it, since a `gh pr edit` failure here is easy to miss (it prints an error to stderr but the exit
+code alone doesn't make the silent no-op obvious without a diff-back).
+
 ## GOTCHA — a live-triggered E2E gate run can race ahead of a mid-cycle fleet redeploy
 
 If a PR's fix requires a fleet redeploy to actually take effect on the live rig BEFORE the gate
 can pass (e.g. a WARN threshold recalibration — #685), the PR's own automatic `pull_request`-
 triggered "Full-path E2E" run can start (and fail, against the STILL-stale rig) before the redeploy
 finishes — pushing the fix and deploying it is NOT atomic with the CI trigger. Don't chase that
-failed run; once the redeploy is verified live (journal/WS read-back), get a FRESH run against the
-CURRENT rig state with:
+failed run; once the redeploy is verified live (journal/WS read-back), get a fresh REAL verdict.
+
+**CORRECTED 2026-07-12/13 (#717, #719/#726 dispatch) — this section used to recommend
+`gh workflow run "Full-path E2E ..." --ref dev` here. DO NOT DO THAT — it is DANGEROUSLY WRONG
+for this purpose.** `full-path-e2e.yml` branches `E2E_EXECUTE_VERDICT`/`ALL_CAMBOX` on
+`github.event_name == 'pull_request'` — a `workflow_dispatch` run (what `gh workflow run` always
+creates) ALWAYS gets `E2E_EXECUTE_VERDICT=0`/`ALL_CAMBOX=0` and stays in the OLD plan-print-only
+mode: it never decodes strih/stream, never computes a real verdict, and "succeeds" trivially —
+**yet GitHub still posts a check-run with the SAME required-check NAME on the SAME commit SHA**,
+which SATISFIES the PR's branch-protection requirement. Following this GOTCHA as originally
+written could let a genuinely broken PR merge behind a MEANINGLESS green. The correct way to get
+a fresh REAL verdict on an already-pushed commit (no new push, e.g. after a fleet-side fix or an
+infra repair with no code diff) is:
 
 ```bash
-gh workflow run "Full-path E2E (recording-based · hardware · self-hosted dev1)" --ref dev
+gh run rerun <the-original-pull_request-run-id>
 ```
 
-This creates a `workflow_dispatch` run against `dev`'s current HEAD SHA — GitHub attaches it to the
-SAME commit's check-runs, so once it succeeds the PR's required "Full-path E2E (rig zero-loss
-gate)" check is satisfied even though an EARLIER run on that same SHA failed (`gh pr view`'s cached
-`statusCheckRollup` may still show the old failure — trust `gh api .../commits/<sha>/check-runs`
-or attempt the actual merge for the authoritative live verdict). Same "manual re-trigger after a
-stale/superseded run" pattern the `linux-genlock.yml` GOTCHA above documents for a cancelled run.
+`gh run rerun` preserves the ORIGINAL trigger's event context (`github.event_name` stays
+`pull_request`), so `E2E_EXECUTE_VERDICT`/`ALL_CAMBOX` are correctly `1` again. Find the run id via
+`gh run list --branch dev --workflow "Full-path E2E (recording-based · hardware · self-hosted
+dev1)" --json databaseId,event,headSha` and pick the one with `"event": "pull_request"` matching
+your commit. Full detail + the "two same-commit `pull_request` runs can disagree for reasons
+outside your own diff" corollary: `.claude/skills/e2e`'s own `gh workflow run` section (the
+canonical source now — this CLAUDE.md section is kept only as a pointer + a loud warning against
+the old advice; do not restore the `gh workflow run` snippet here). Same "manual re-trigger after a
+stale/superseded run" IDEA the `linux-genlock.yml` GOTCHA above documents for a cancelled run — but
+`gh workflow run` is the WRONG mechanism for this specific workflow; `gh run rerun` is correct.
 
 ## Local Build Policy
 
@@ -308,6 +502,19 @@ entirely to `recording-verdict.rs`/`src/probe/` has **zero local verification pa
 compile check — until CI runs. Treat every such change with extra manual review rigor (type/
 signature checks, `cargo fmt --all -- --check`, diffing brace/paren balance against `origin/main`)
 before pushing, and expect CI to be the FIRST place a mistake surfaces.
+
+**Gotcha within that extra-review-rigor pass — adding an `f64` field to a probe-gated struct that
+derives `Eq` breaks the build (#726).** `f64`/`f32` have no `Eq` impl (NaN has no total order), so
+`#[derive(..., Eq, ...)]` on a struct that gains a field containing (or wrapping) a float no longer
+compiles. Since this lives under `src/probe/` it is INVISIBLE locally (per above) — the break only
+surfaces on CI. Before adding a float-carrying field to any `src/probe/*.rs` struct: `grep -n
+"derive(" <file>` for that struct and drop `Eq` if present (keep `PartialEq`/`Debug` — `assert_eq!`
+only needs those, never `Eq`), then `grep -rn "StructName" src/ tests/` to confirm nothing outside
+the file relies on the dropped `Eq` bound (a HashSet/BTreeSet key, a generic `T: Eq` constraint) —
+if something does, that's a real blocker to resolve, not just delete the derive. Example:
+`probe::recording_segments::CamboxSegment`/`SegmentedContinuity` dropped `Eq` when
+`presentation_cadence: Option<CadenceEvenness>` (which carries `f64` fractions) was added; verified
+clean via the grep above before pushing.
 
 **Bound the shared dev1 `target/` (backstop).** Even default-feature checks + rust-analyzer
 accumulate over a day (incremental cache, never purged). Keep it under ~4 GB:

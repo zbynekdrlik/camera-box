@@ -38,13 +38,15 @@
 
 use anyhow::{Context, Result};
 use camera_box::av_window::{self, AvSyncVerdict};
+use camera_box::frozen_leg::{frozen_leg_report, SegmentLeg};
+use camera_box::offline_ack;
 use camera_box::probe::av_sync_recording::{decode_av_marker_inputs, AvMarkerInputs};
 use camera_box::probe::burn_contiguity::{
-    burn_contiguity_in_window_with_step, BurnRate, InWindowMissingKind, NodeContiguity,
-    RecordedBurnFrame,
+    burn_contiguity_in_window_with_step, burn_contiguity_in_window_with_step_and_schedule,
+    BurnRate, InWindowMissingKind, NodeContiguity, RecordedBurnFrame,
 };
 use camera_box::probe::recording::{
-    analyze_recording_with_burns, analyze_recording_with_grouped_burns, extract_frames_png,
+    analyze_recording_with_burns, analyze_recording_with_grouped_burns_optical, extract_frames_png,
     select_frames_to_extract, RecordingFrame, DEFAULT_MAX_PIXEL_PROOF,
 };
 use camera_box::probe::recording_latency::{
@@ -53,17 +55,18 @@ use camera_box::probe::recording_latency::{
     n_camera_strih_samples, painter_internal_gen_to_flip, per_frame_latency_csv_rows,
     strih_stream_samples, strih_stream_samples_from_stream, write_latency_csv, HopLatency,
     LatencySample, RunIds, BURN_RUN_ID_CAM1, BURN_RUN_ID_CAM2, BURN_RUN_ID_CAM3, BURN_RUN_ID_CAM4,
-    BURN_RUN_ID_CAM5, BURN_RUN_ID_CAM6, BURN_RUN_ID_IMAG, BURN_RUN_ID_STREAM, BURN_RUN_ID_STRIH,
+    BURN_RUN_ID_CAM5, BURN_RUN_ID_CAM6, BURN_RUN_ID_CAM7, BURN_RUN_ID_IMAG, BURN_RUN_ID_STREAM,
+    BURN_RUN_ID_STRIH,
 };
 use camera_box::probe::recording_partial::RecordingPartial;
 use camera_box::probe::recording_segments::{
-    load_switch_schedule, place_frame_in_window, segment_continuity, SegmentFrame, SwitchWindow,
-    WindowPlacement, DEFAULT_TRANSITION_GUARD_NS,
+    load_switch_schedule, place_frame_in_window, raw_window_index, segment_continuity,
+    SegmentFrame, SwitchWindow, WindowPlacement, DEFAULT_TRANSITION_GUARD_NS,
 };
 use camera_box::probe::recording_verdict::{
     cam_strih_assessment, verdict, FrameTick, RecordingVerdict, VerdictConfig,
 };
-use camera_box::qpsk_marker::av_offset_candidates;
+use camera_box::qpsk_marker::{av_offset_candidates_deduped, DEDUPE_SAME_FID_WINDOW_S};
 use clap::Parser;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -198,6 +201,9 @@ struct Args {
     /// #312: cam6's capture-burn run_id (fleet growth 4→6, #451). See `--burn-cam3-run-id`.
     #[arg(long, default_value_t = BURN_RUN_ID_CAM6)]
     burn_cam6_run_id: u32,
+    /// #755: cam7's capture-burn run_id (fleet growth 6→7, #753). See `--burn-cam3-run-id`.
+    #[arg(long, default_value_t = BURN_RUN_ID_CAM7)]
+    burn_cam7_run_id: u32,
     /// #108: cam2's painter run_id (the `--run-id` the cam2 painter used). When set,
     /// cam2's QR is matched EXACTLY by this run_id, so the strih burn forwarded into
     /// the stream recording can NEVER be mistaken for cam2. Strongly recommended for
@@ -306,8 +312,16 @@ struct Args {
     av_min_matched: usize,
     /// #188 A/V-sync: half-width (ms) of the offset cluster window. Candidate offsets within
     /// ±this of the densest band are the real markers; the rest (false decodes, wrong-lap matches)
-    /// are rejected. Default 60.
-    #[arg(long, default_value_t = 60.0)]
+    /// are rejected. #733 (2026-07-13) tightened the default from 60 to 25: a real-data audit of 3
+    /// full-path-e2e gate runs found the OLD ±60ms window wide enough to occasionally swallow TWO
+    /// nearby sub-clusters into one (one run's mad_ms hit 32.7ms — a genuinely bimodal-looking
+    /// blend, not one tight cluster), while a tight-first sweep on the SAME real data showed each
+    /// run's true cluster is far more precise than that: even at ±15ms every run cleared
+    /// `MIN_AV_SAMPLES`(8) with mad_ms 7-9ms. ±25ms is the conservative middle ground — comfortable
+    /// margin above the 8-sample floor (19-24 matched candidates on all 3 real runs) while staying
+    /// far tighter than the old default (mad_ms 11-13ms vs 15-33ms). See `.claude/skills/av-sync`
+    /// for the full audit.
+    #[arg(long, default_value_t = 25.0)]
     av_cluster_tol_ms: f64,
     /// #624 deliverable 4 / #312 item 2 PR B: the expected/dialed A/V offset (ms) — the
     /// operator's live #398 dock reading (nominally ~0, since the dock is dialed to align video
@@ -316,6 +330,17 @@ struct Args {
     /// gates correctly. Default 0.0 (the "operator dials to ~0 in practice" default case).
     #[arg(long, default_value_t = 0.0)]
     av_expected_ms: f64,
+    /// #855: operator-acknowledged offline boxes, threaded from the shell-side
+    /// `CAMBOX_OFFLINE_ACK` / `rig-fleet.txt` ack (`scripts/lib/cambox-offline-ack.sh`) across
+    /// the shell -> Rust boundary. Same "box:reason,box:reason" format the shell side already
+    /// canonicalizes (a bare box name gets reason "unspecified") -- see `offline_ack::parse`.
+    /// Currently consumed ONLY by the ALL-CAMBOX per-camera A/V-sync gate (#624/#312's
+    /// `all_cambox_av_sync`): a box named here is reported EXCLUDED there instead of judged
+    /// UNKNOWN/FAIL on zero samples it was never going to produce. A box NOT named here keeps
+    /// the existing fail-closed default unchanged (#836: never widen the tolerance, never
+    /// downgrade the gate -- this only fixes WHO gets judged).
+    #[arg(long, default_value = "")]
+    offline_ack_cams: String,
 }
 
 impl Args {
@@ -464,7 +489,7 @@ const OPTICAL_UNDECODABLE_RATE_MAX: f64 = 0.005;
 /// NOTE: this is the CONTIGUITY/loss set. It is deliberately BROADER than
 /// [`OPTICAL_INJECTION_NODES`] (below), which drives the cam2→camera OPTICAL-INJECTION latency
 /// loop and excludes cam2 itself (cam2 cannot optically film its own monitor).
-const CAMERA_UNDER_TEST_NODES: [&str; 6] = ["cam1", "cam2", "cam3", "cam4", "cam5", "cam6"];
+const CAMERA_UNDER_TEST_NODES: [&str; 7] = ["cam1", "cam2", "cam3", "cam4", "cam5", "cam6", "cam7"];
 
 /// #312 — the SUBSET of [`CAMERA_UNDER_TEST_NODES`] that physically films cam2's painted
 /// monitor via the HDMI-splitter optical loopback (a real lens + capture card pointed at cam2's
@@ -475,7 +500,7 @@ const CAMERA_UNDER_TEST_NODES: [&str; 6] = ["cam1", "cam2", "cam3", "cam4", "cam
 /// framebuffer paint, not a real optical-injection latency). cam2 still gets its own DIGITAL
 /// contiguity/loss proof via [`CAMERA_UNDER_TEST_NODES`] above — only this narrower optical
 /// latency measurement excludes it.
-const OPTICAL_INJECTION_NODES: [&str; 5] = ["cam1", "cam3", "cam4", "cam5", "cam6"];
+const OPTICAL_INJECTION_NODES: [&str; 6] = ["cam1", "cam3", "cam4", "cam5", "cam6", "cam7"];
 
 /// The full trustworthy verdict for one node: the contiguity result plus, when not
 /// contiguous, every missing id classified from the pixels.
@@ -1097,6 +1122,147 @@ fn partition_frames_by_window(
     (out, no_anchor)
 }
 
+/// #706 — the switch-schedule context [`scope_camera_window_to_own_schedule`] needs to restrict a
+/// `CAMERA_UNDER_TEST_NODES` node's in-window delivered-frame set to ONLY its own program
+/// window(s). `Copy` (both fields are plain slices/an int) so passing it through the #186 loop's
+/// 8 iterations is free; `None` throughout means "no switch schedule" (the single-camera-
+/// continuously-on-program mode) and leaves every existing caller/fixture unchanged.
+#[derive(Debug, Clone, Copy)]
+struct ScheduleScope<'a> {
+    /// The parsed `--switch-schedule` windows (shared with the #312 sweep — see the hoisted
+    /// `switch_schedule` binding in `build_and_print_verdict`).
+    schedule: &'a [SwitchWindow],
+    /// The SAME anchor priority (a node burn's render time, falling back to cam2's optical paint)
+    /// `frame_gen_ts_anchor`/#312's own placement uses — kept identical so the #186 per-camera
+    /// scoping here and the #312 per-segment sweep can never attribute a frame to a different
+    /// cambox window than each other.
+    anchor_run_ids: &'a [u32],
+    /// The transition guard (ns) discarded on each side of every schedule boundary — the SAME
+    /// `--switch-guard-ns` value the #312 sweep uses (`args.switch_guard_ns`).
+    guard_ns: i64,
+}
+
+/// #706 — restrict a `CAMERA_UNDER_TEST_NODES` node's in-window delivered-frame set to ONLY the
+/// frames that fall inside THIS node's own switch-schedule program window(s) (post-transition-
+/// guard), when the ALL-CAMBOX fused sweep supplies a `--switch-schedule`.
+///
+/// ## The bug this closes
+///
+/// In the ALL-CAMBOX sweep (#312) every `CAMERA_UNDER_TEST_NODES` entry is on strih PROGRAM for
+/// only its OWN ~30s window(s) out of the whole ~300s recording — the other ~5/6 (or more, with 6
+/// camboxes) of the time a DIFFERENT cambox is selected and this node's burn CANNOT appear at all
+/// (by design — not loss). [`in_window_burn_frames`]'s own boundary is the WHOLE-RECORDING cam2
+/// optical span, which does not know this: every OTHER camera's program time is included in "this
+/// node's window", so every one of those delivered frames (which genuinely never carry THIS
+/// node's burn) is misclassified BURN-UNREADABLE — confirmed live (#706): a 300s / 6-camera sweep
+/// reported ~7000-8500 phantom BURN-UNREADABLE PER camera (~46000-47000 total) with 0 REAL DROP
+/// and 0 genuine chain loss on any leg. Restricting to this node's OWN schedule window(s) —
+/// mirroring EXACTLY how [`partition_frames_by_window`]/[`segment_continuity`] already attribute a
+/// frame to a cambox for the #312 sweep, via the SAME [`frame_gen_ts_anchor`] +
+/// [`place_frame_in_window`] — makes the two per-camera gates agree on which frames belong to
+/// which camera, and removes the phantom count entirely.
+///
+/// `scope: None` (no `--switch-schedule` — the single-camera-continuously-on-program mode, e.g.
+/// #204/#216's existing fixtures) leaves `window` UNCHANGED — this function only ever NARROWS the
+/// window, never widens it, and only for [`CAMERA_UNDER_TEST_NODES`] (strih/stream are recorded
+/// continuously throughout regardless of which cambox is on program, so they need no scoping and
+/// this is a no-op for them even when a schedule IS supplied).
+fn scope_camera_window_to_own_schedule(
+    window: Vec<RecordedBurnFrame>,
+    node: &str,
+    source: &[RecordingFrame],
+    all_burn_run_ids: &[u32],
+    cam2_run_id: Option<u32>,
+    scope: Option<ScheduleScope<'_>>,
+) -> Vec<RecordedBurnFrame> {
+    let Some(scope) = scope else {
+        return window;
+    };
+    if !CAMERA_UNDER_TEST_NODES.contains(&node) {
+        return window;
+    }
+    // frame_index -> gen_ts_ns anchor, computed ONCE over `source` — the SAME anchor priority
+    // (a node burn's render time, falling back to cam2's optical paint) #312's own placement uses,
+    // so a frame can never be attributed to a different window here than it would be there.
+    let gen_ts_by_index: HashMap<u64, i64> = source
+        .iter()
+        .filter_map(|f| {
+            frame_gen_ts_anchor(f, scope.anchor_run_ids, all_burn_run_ids, cam2_run_id)
+                .map(|ts| (f.frame_index, ts))
+        })
+        .collect();
+    window
+        .into_iter()
+        .filter(|rbf| {
+            let Some(&gen_ts) = gen_ts_by_index.get(&rbf.frame_index) else {
+                // No anchor at all on the original frame ⇒ cannot be placed on the schedule
+                // timeline ⇒ excluded (mirrors `segment_frames_from_recording`'s `no_anchor`
+                // exclusion — never silently counted as this node's own window).
+                return false;
+            };
+            match place_frame_in_window(gen_ts, scope.schedule, scope.guard_ns) {
+                WindowPlacement::In(wi) => scope.schedule[wi].cambox.eq_ignore_ascii_case(node),
+                WindowPlacement::Guard | WindowPlacement::Outside => false,
+            }
+        })
+        .collect()
+}
+
+/// #708/#741 — for EACH entry of `window`, compute which `--switch-schedule` window index (if
+/// any) it belongs to, for the SOLE purpose of feeding
+/// [`burn_contiguity_in_window_with_step_and_schedule`]'s `crossed_window_boundary` check (this
+/// function's only caller/consumer — see that function's `window_of` parameter).
+///
+/// #741 fix (live-investigated, 2026-07-15): this used to reuse [`place_frame_in_window`] — the
+/// GUARD-filtered placement content-attribution uses everywhere else — but that made the #708
+/// exception structurally unable to fire for the exact case it exists to except. A genuine
+/// program switch changes the active render source within roughly one render tick (~30ms) of
+/// the schedule boundary; the settle-time guard band (`scope.guard_ns`, ~1s) is far wider than
+/// that, so the LAST frame before a real cut and the FIRST frame after it are — by construction
+/// — both inside the guard band on their own side, both reading back `Guard` (mapped to `None`
+/// below the old way). `crossed_window_boundary` only ever fires on `(Some(pw), Some(cw))`, so it
+/// silently stayed `false` on every real boundary crossing, misclassifying the expected
+/// per-source free-running-counter discontinuity as a `RealDrop` (confirmed live: both fresh
+/// investigation runs' every single flagged "real_drop" landed within 1–32ms of an actual
+/// `--switch-schedule` boundary — well inside the guard band, never a genuine mid-window gap).
+///
+/// This now uses [`raw_window_index`] — the SAME schedule-interval lookup `place_frame_in_window`
+/// performs internally, just WITHOUT its settle-time guard layered on top. Content attribution
+/// elsewhere ([`scope_camera_window_to_own_schedule`], the #312 sweep) is completely unaffected —
+/// they still call `place_frame_in_window` directly and keep the guard, which is correct for
+/// THEIR purpose (deciding which cambox's tally a frame counts toward). Only the boundary-
+/// crossing QUESTION ("did the schedule's active window change between these two frames") needs
+/// the guard-free answer, because the guard's settle-time margin is exactly what was hiding the
+/// boundary from it.
+///
+/// `None` at a position ⇒ the frame's own gen_ts anchor is missing, or it fell genuinely outside
+/// every scheduled window — [`burn_contiguity_in_window_with_step_and_schedule`] treats an
+/// unknown window on EITHER side of a comparison as "assume the SAME window" (never silently
+/// suppresses a real anomaly), so returning `None` here is always the conservative, safe choice.
+fn attribute_window_indices(
+    window: &[RecordedBurnFrame],
+    source: &[RecordingFrame],
+    all_burn_run_ids: &[u32],
+    cam2_run_id: Option<u32>,
+    scope: ScheduleScope<'_>,
+) -> Vec<Option<usize>> {
+    let gen_ts_by_index: HashMap<u64, i64> = source
+        .iter()
+        .filter_map(|f| {
+            frame_gen_ts_anchor(f, scope.anchor_run_ids, all_burn_run_ids, cam2_run_id)
+                .map(|ts| (f.frame_index, ts))
+        })
+        .collect();
+    window
+        .iter()
+        .map(|rbf| {
+            gen_ts_by_index
+                .get(&rbf.frame_index)
+                .and_then(|&gen_ts| raw_window_index(gen_ts, scope.schedule))
+        })
+        .collect()
+}
+
 /// Build the trustworthy verdict for one node from the decoded stream frames: run the
 /// IN-WINDOW per-recorded-frame contiguity check (#198 — rate-aware: cam1's burn is per-EMIT
 /// so a forward integer gap is a REAL drop, strih/stream's is per-RENDER so a forward gap is
@@ -1109,12 +1275,19 @@ fn partition_frames_by_window(
 /// `optical` carries the precomputed [`OpticalSpanFacts`] for `spec.source` (the #363 undecodable
 /// count + the #373 span frames), computed ONCE per source by the caller so two nodes sharing a
 /// recording do not rescan it (#374 nit 1).
+///
+/// `schedule_scope` (#706): `Some` ⇒ this node's in-window delivered-frame set (the DELIVERED
+/// universe `expected_count`/`present_count`/`burn_unreadable` are all computed FROM) is further
+/// restricted to ONLY this node's own switch-schedule program window(s) — see
+/// [`scope_camera_window_to_own_schedule`]. `None` ⇒ today's unscoped whole-recording-optical-span
+/// window, unchanged.
 fn node_verdict_with_optical(
     spec: &NodeSpec,
     all_burn_run_ids: &[u32],
     optical: OpticalSpanFacts,
     out_dir: &Path,
     max_pixel_proof: usize,
+    schedule_scope: Option<ScheduleScope<'_>>,
 ) -> Result<NodeVerdict> {
     let node = spec.node;
     // #133: read this node's burn from its OWN source recording (cam1 = the clean 1080p strih
@@ -1130,7 +1303,39 @@ fn node_verdict_with_optical(
         spec.rate,
         spec.cam2_run_id,
     );
-    let in_window = burn_contiguity_in_window_with_step(node, &window, spec.rate, spec.step);
+    // #706 — in the ALL-CAMBOX fused sweep, further restrict to ONLY this node's own
+    // switch-schedule program window(s) (no-op for strih/stream, and a no-op whenever no
+    // `--switch-schedule` was supplied — see `scope_camera_window_to_own_schedule`'s doc).
+    let window = scope_camera_window_to_own_schedule(
+        window,
+        node,
+        source,
+        all_burn_run_ids,
+        spec.cam2_run_id,
+        schedule_scope,
+    );
+    // #708 — strih's OWN 911002 burn is emitted by SIX INDEPENDENT free-running per-source
+    // filter instances (one per raw `NDI camN` input — see `attribute_window_indices`'s doc), so
+    // a backward id jump landing EXACTLY at a confirmed program-switch boundary is the EXPECTED
+    // counter-instance change, not a lost frame (live-proven on 2 independent CI runs: every
+    // flagged id was found present both in strih's own recording and downstream at stream).
+    // Scoped to "strih" ONLY — the one node this mechanism is proven for; "stream"'s 911004 burn
+    // is a single continuous counter on one fixed input, so this is a pure no-op for it either
+    // way, but keeping the exception explicitly node-scoped avoids ever touching its behavior.
+    let window_of: Option<Vec<Option<usize>>> = if node == "strih" {
+        schedule_scope.map(|scope| {
+            attribute_window_indices(&window, source, all_burn_run_ids, spec.cam2_run_id, scope)
+        })
+    } else {
+        None
+    };
+    let in_window = burn_contiguity_in_window_with_step_and_schedule(
+        node,
+        &window,
+        spec.rate,
+        spec.step,
+        window_of.as_deref(),
+    );
     let contiguity = in_window.contiguity;
     // #363/#373 — the optical facts (undecodable count + span frames) are computed ONCE per source
     // by the caller and passed in (#374 nit 1: strih + stream share the stream recording, so this
@@ -2223,19 +2428,25 @@ fn decode_for(path: Option<&Path>, expected_node_burns: &[u32]) -> Result<Option
 
 /// #632 gap 1 — [`decode_for`] with the #207 fast-path gate split into MANDATORY (always
 /// required) + ANY-OF (whichever ONE of [`CAMERA_UNDER_TEST_NODES`] is actually deployed this
-/// run) groups — see [`analyze_recording_with_grouped_burns`]. Used for the fused strih/stream
+/// run) groups — see [`analyze_recording_with_grouped_burns_optical`]. Used for the fused strih/stream
 /// decode in `main()` so a cam3/cam4/cam5/cam6/cam2-deployed run gets the same #207 fast path a
 /// cam1-deployed run always could.
 fn decode_for_grouped(
     path: Option<&Path>,
     mandatory_burns: &[u32],
     any_of_burns: &[u32],
+    min_distinct_optical: Option<(u32, usize)>,
 ) -> Result<Option<DecodedRec>> {
     let Some(path) = path else {
         return Ok(None);
     };
-    let frames = analyze_recording_with_grouped_burns(path, mandatory_burns, any_of_burns)
-        .with_context(|| format!("analyze recording {}", path.display()))?;
+    let frames = analyze_recording_with_grouped_burns_optical(
+        path,
+        mandatory_burns,
+        any_of_burns,
+        min_distinct_optical,
+    )
+    .with_context(|| format!("analyze recording {}", path.display()))?;
     Ok(Some(DecodedRec {
         frames,
         rec_path: Some(path.to_path_buf()),
@@ -2329,15 +2540,20 @@ fn main() -> Result<()> {
     // cam1 only) for the #207 fast gate. #632 gap 1: the camera-under-test slot is an ANY-OF
     // group (cam1..cam6 are mutually exclusive — only the deployed one's burn ever appears), not
     // a hardcoded cam1-only mandatory check — see `camera_under_test_burn_ids`.
+    // #707: strih/stream also require both cam2 dual-QR Vernier halves before skipping the
+    // robust retry — see `extract_partial`'s identical wiring for the full reasoning.
+    let min_distinct_optical = args.cam2_pin().map(|run_id| (run_id, 2));
     let strih = decode_for_grouped(
         args.strih.as_deref(),
         &[args.burn_strih_run_id],
         &camera_under_test_burn_ids(&args),
+        min_distinct_optical,
     )?;
     let stream = decode_for_grouped(
         args.stream.as_deref(),
         &[args.burn_strih_run_id, args.burn_stream_run_id],
         &camera_under_test_burn_ids(&args),
+        min_distinct_optical,
     )?;
     // #463: imag now carries its OWN digital corner burn (run_id BURN_RUN_ID_IMAG) — decode for
     // it so the #207 fast/robust gate looks for it. Backward compatible: a recording with no
@@ -2428,6 +2644,17 @@ fn build_and_print_verdict(
     // #105 4-node machine-readable report (per-node verdict + per-hop loss + latency),
     // built incrementally and written to --json for the 2-graph report renderer.
     let mut report = serde_json::json!({ "nodes": {}, "hops": {}, "latency": {} });
+
+    // #706 — load the switch schedule ONCE, up front, so it is available BOTH to the #186
+    // per-camera loss loop below (which needs it to scope each CAMERA_UNDER_TEST_NODES node's
+    // window to its OWN program segment(s) — see `scope_camera_window_to_own_schedule`) AND to
+    // the #312 per-segment sweep further down (which previously re-loaded + re-parsed the same
+    // file itself). One parse, one source of truth, both consumers always agree on the windows.
+    let switch_schedule: Option<Vec<SwitchWindow>> = args
+        .switch_schedule
+        .as_ref()
+        .map(|p| load_switch_schedule(p))
+        .transpose()?;
 
     // The recording file backing each node's frames, for pixel proof. `None` ⇒ the frames came
     // from a merged per-box partial (the recording is on its own box, never copied here #208).
@@ -2765,6 +2992,7 @@ fn build_and_print_verdict(
         let cam4_ids = burn_ids_in(cam1_source, args.burn_cam4_run_id);
         let cam5_ids = burn_ids_in(cam1_source, args.burn_cam5_run_id);
         let cam6_ids = burn_ids_in(cam1_source, args.burn_cam6_run_id);
+        let cam7_ids = burn_ids_in(cam1_source, args.burn_cam7_run_id);
         // #632 gap 2: resolve which CAMERA_UNDER_TEST_NODES entry actually produced ids in this
         // run, for the cam2→SOURCE V4L2 capture-drop label further down (independent of this
         // `if let` block's scope).
@@ -2775,6 +3003,7 @@ fn build_and_print_verdict(
             !cam4_ids.is_empty(),
             !cam5_ids.is_empty(),
             !cam6_ids.is_empty(),
+            !cam7_ids.is_empty(),
         );
         let strih_ids_seq = burn_ids_in(stream_frames, args.burn_strih_run_id);
         let stream_ids_seq = burn_ids_in(stream_frames, args.burn_stream_run_id);
@@ -2784,6 +3013,7 @@ fn build_and_print_verdict(
             || !cam4_ids.is_empty()
             || !cam5_ids.is_empty()
             || !cam6_ids.is_empty()
+            || !cam7_ids.is_empty()
             || !strih_ids_seq.is_empty()
             || !stream_ids_seq.is_empty();
         if any_burn {
@@ -2792,19 +3022,21 @@ fn build_and_print_verdict(
                 "=== #174 FULL-CHAIN per-hop verdict (camera-under-test from the {cam1_source_label}; strih/stream from the stream recording) ==="
             );
             println!(
-                "  burn ids: cam1={} cam2={} cam3={} cam4={} cam5={} cam6={} (from {cam1_source_label}) strih={} stream={} (stream recording)",
+                "  burn ids: cam1={} cam2={} cam3={} cam4={} cam5={} cam6={} cam7={} (from {cam1_source_label}) strih={} stream={} (stream recording)",
                 cam1_ids.len(),
                 cam2_ids.len(),
                 cam3_ids.len(),
                 cam4_ids.len(),
                 cam5_ids.len(),
                 cam6_ids.len(),
+                cam7_ids.len(),
                 strih_ids_seq.len(),
                 stream_ids_seq.len()
             );
             report["full_chain"]["burn_ids_present"] = serde_json::json!({
                 "cam1": cam1_ids.len(), "cam2": cam2_ids.len(), "cam3": cam3_ids.len(),
                 "cam4": cam4_ids.len(), "cam5": cam5_ids.len(), "cam6": cam6_ids.len(),
+                "cam7": cam7_ids.len(),
                 "strih": strih_ids_seq.len(), "stream": stream_ids_seq.len(),
             });
             report["full_chain"]["cam1_source"] = serde_json::json!(cam1_source_label);
@@ -2822,19 +3054,21 @@ fn build_and_print_verdict(
                 || !cam3_ids.is_empty()
                 || !cam4_ids.is_empty()
                 || !cam5_ids.is_empty()
-                || !cam6_ids.is_empty();
+                || !cam6_ids.is_empty()
+                || !cam7_ids.is_empty();
             if strih_data.is_some() && !camera_under_test_measured {
                 eprintln!(
                     "WARNING: --strih supplied but NO camera-under-test burn found in the strih \
-                     recording (checked cam1={}, cam2={}, cam3={}, cam4={}, cam5={}, cam6={}) — \
-                     the camera→strih hop is UNMEASURED this run (burn OFF or not reaching \
-                     strih). A ZERO-loss headline below covers strih/stream ONLY.",
+                     recording (checked cam1={}, cam2={}, cam3={}, cam4={}, cam5={}, cam6={}, \
+                     cam7={}) — the camera→strih hop is UNMEASURED this run (burn OFF or not \
+                     reaching strih). A ZERO-loss headline below covers strih/stream ONLY.",
                     args.burn_cam1_run_id,
                     args.burn_cam2_run_id,
                     args.burn_cam3_run_id,
                     args.burn_cam4_run_id,
                     args.burn_cam5_run_id,
-                    args.burn_cam6_run_id
+                    args.burn_cam6_run_id,
+                    args.burn_cam7_run_id
                 );
                 report["full_chain"]["cam1_unmeasured"] = serde_json::json!(true);
             }
@@ -2856,6 +3090,7 @@ fn build_and_print_verdict(
                 args.burn_cam4_run_id,
                 args.burn_cam5_run_id,
                 args.burn_cam6_run_id,
+                args.burn_cam7_run_id,
                 args.burn_strih_run_id,
                 args.burn_stream_run_id,
             ];
@@ -2878,6 +3113,21 @@ fn build_and_print_verdict(
             // optical-span scan twice.
             let stream_optical = optical_span_facts(stream_frames, &all_burns, cam2_pin);
             let cam1_optical = optical_span_facts(cam1_source, &all_burns, cam2_pin);
+            // #706 — the switch-schedule scope for the CAMERA_UNDER_TEST_NODES entries in the
+            // loop below (see `scope_camera_window_to_own_schedule`'s doc): restricts each
+            // camera's in-window delivered-frame set to ONLY its own program window(s) in the
+            // ALL-CAMBOX fused sweep. `None` (no `--switch-schedule`) leaves every node's window
+            // unchanged — the pre-#706 single-camera-continuously-on-program behavior.
+            // `schedule_anchor_run_ids` mirrors the SAME priority (strih render time, then
+            // stream) the #312 sweep further down uses to place a frame on the schedule
+            // timeline — `Copy`, so it costs nothing to pass through all 8 loop iterations.
+            let schedule_anchor_run_ids = [args.burn_strih_run_id, args.burn_stream_run_id];
+            let schedule_scope: Option<ScheduleScope<'_>> =
+                switch_schedule.as_deref().map(|schedule| ScheduleScope {
+                    schedule,
+                    anchor_run_ids: &schedule_anchor_run_ids,
+                    guard_ns: args.switch_guard_ns,
+                });
             // #364 — the colour gate samples a recording by path; strih and stream both point at the
             // stream recording, so without memoization that recording is colour-sampled TWICE
             // (identical work — mirrors the #374 nit 1 dedup of the optical scan). Cache the per-path
@@ -3030,6 +3280,27 @@ fn build_and_print_verdict(
                     cam1_carried_colour,
                 ),
                 (
+                    // #755 — cam7 (fleet growth 6→7, #753), see the cam3 comment above.
+                    NodeSpec {
+                        node: "cam7",
+                        burn_run_id: args.burn_cam7_run_id,
+                        rate: BurnRate::PerEmittedFrame,
+                        source: cam1_source,
+                        rec_path: cam1_rec_path,
+                        cam2_run_id: cam2_pin,
+                        step: node_render_step(
+                            "cam7",
+                            args.strih_emit_fps,
+                            args.stream_capture_fps,
+                            args.refresh_hz,
+                            args.capture_fps,
+                        ),
+                    },
+                    !cam7_ids.is_empty(),
+                    cam1_optical,
+                    cam1_carried_colour,
+                ),
+                (
                     NodeSpec {
                         node: "strih",
                         burn_run_id: args.burn_strih_run_id,
@@ -3083,6 +3354,7 @@ fn build_and_print_verdict(
                     optical,
                     &args.out_dir,
                     args.max_pixel_proof,
+                    schedule_scope,
                 )?;
                 // #364 — the per-camera COLOUR gate: charge any reference patch wrong on a majority
                 // of sampled frames as a HARD fail (mirrors the optical read). 0 when `--colour-gate`
@@ -3553,10 +3825,12 @@ fn build_and_print_verdict(
     // cambox program windows (by burn gen_ts_ns, minus the transition guard on each boundary) and
     // verify the painted-tick continuity PER cambox. Gates the headline alongside the per-node burn
     // verdict so a single cambox dropping in ITS ~30s window fails the run.
-    if let Some(schedule_path) = &args.switch_schedule {
+    if let Some(schedule) = switch_schedule.as_deref() {
         match &stream_frames_opt {
             Some(stream_frames) => {
-                let schedule = load_switch_schedule(schedule_path)?;
+                // #706: `schedule` is the ONE parse of `--switch-schedule`, hoisted to the top of
+                // this function (shared with the #186 per-camera scoping above) — no longer
+                // re-loaded/re-parsed here.
                 // The painted tick's by-design step in the stream recording = the decimation of the
                 // 60Hz painter at the recording rate (refresh_hz / stream_capture_fps = 2). Derived
                 // from the configured fps when --switch-expected-step is 0, else the explicit value.
@@ -3586,6 +3860,7 @@ fn build_and_print_verdict(
                     args.burn_cam4_run_id,
                     args.burn_cam5_run_id,
                     args.burn_cam6_run_id,
+                    args.burn_cam7_run_id,
                     args.burn_strih_run_id,
                     args.burn_stream_run_id,
                 ];
@@ -3596,7 +3871,7 @@ fn build_and_print_verdict(
                     cam2_pin,
                 );
                 let seg =
-                    segment_continuity(&seg_frames, &schedule, args.switch_guard_ns, expected_step);
+                    segment_continuity(&seg_frames, schedule, args.switch_guard_ns, expected_step);
                 println!();
                 println!(
                     "=== #312 ALL-CAMBOX per-segment continuity ({} window(s), guard {} ns, painted-tick step {}) ===",
@@ -3621,7 +3896,69 @@ fn build_and_print_verdict(
                     if let Some(note) = &s.note {
                         println!("      ⚠ {note}");
                     }
+                    // Issue 889 (2026-07-30 user decision on issue 883) visibility requirement 1:
+                    // a loud WARN naming this ticket for EVERY window whose STRICT verdict
+                    // (`s.pass`) is false — even though `overall_pass` no longer fails on
+                    // copies/gaps alone (see the summary line after this loop). `s.relaxed_pass`
+                    // still failing here means the window's failure is NOT this relaxation (an
+                    // absent cambox / undecodable over the floor), so the wording says which.
+                    if !s.pass {
+                        if s.relaxed_pass {
+                            println!(
+                                "      ⚠ #889 REPORT-ONLY: copies={} gaps={} would FAIL the pre-889 \
+                                 strict rule, but does NOT gate overall_pass (see issue #889).",
+                                s.copies, s.gaps
+                            );
+                        } else {
+                            println!(
+                                "      ⚠ #889: this window ALSO fails the RELAXED verdict (not \
+                                 issue 889's doing — frame_count==0 or undecodable over the \
+                                 issue-881 floor) — it still fails overall_pass."
+                            );
+                        }
+                    }
+                    // #726: presentation-cadence EVENNESS — REPORTED only (not yet gate-enforced;
+                    // see src/presentation_cadence.rs). `None` on any window with no painted tick
+                    // (every non-cam2 window in a sweep).
+                    if let Some(pc) = &s.presentation_cadence {
+                        println!(
+                            "      cadence: evenness={:.3} uniform={}/{} duplicate={} catchup={} paired_events={} other={}",
+                            pc.evenness_score,
+                            pc.uniform_steps,
+                            pc.sample_deltas,
+                            pc.duplicate_steps,
+                            pc.catchup_steps,
+                            pc.paired_events,
+                            pc.other_steps
+                        );
+                        // #726 MISCALIBRATION FIX: the auto-calibrated (data-derived) reading +
+                        // raw delta histogram, printed alongside the caller-supplied-step line
+                        // above so a self-consistency mismatch is visible directly in the report
+                        // (a zero-copies/zero-gaps window should show derived_uniform close to
+                        // sample_deltas even when the line above's `uniform` is near 0 — see
+                        // src/presentation_cadence.rs).
+                        println!(
+                            "      cadence(derived): step={} uniform={}/{} ({:.3}) histogram={:?}",
+                            pc.derived_expected_step,
+                            pc.derived_uniform_steps,
+                            pc.sample_deltas,
+                            pc.derived_uniform_fraction,
+                            pc.delta_histogram
+                        );
+                    }
                 }
+                // Issue 889 visibility requirement 3 — this summary line prints UNCONDITIONALLY,
+                // whether or not any window failed, so silence is never mistaken for strictness.
+                // Requirement 4 — hardcoded, one-line-deletable, no env knob (see the field's own
+                // doc in `crate::probe::recording_segments::SegmentedContinuity` for the restore
+                // path — issue 883 item 4 + two consecutive clean strict runs).
+                println!(
+                    "  ⚠ #889 REPORT-ONLY: {}/{} cambox window(s) would FAIL the pre-889 strict \
+                     copies/gaps rule (windows_failed_report_only). This term no longer gates \
+                     overall_pass — see issue #889 for the decision record and restore path.",
+                    seg.windows_failed_report_only,
+                    seg.segments.len()
+                );
                 if no_anchor > 0 {
                     println!(
                         "  ({no_anchor} recorded frame(s) had no burn/optical gen_ts anchor — not placed)"
@@ -3650,6 +3987,48 @@ fn build_and_print_verdict(
                 }
                 report["all_cambox_continuity"] = seg_json;
                 all_pass &= seg.overall_pass;
+
+                // #758 item 4 — the frozen-leg classifier: distinguishes a SUSTAINED camera
+                // freeze (hard-fail) from isolated stale-replay frames (informational-only,
+                // never gates) using the SAME per-window copies/frames/duration `seg.segments`
+                // already carries. Separate from `seg.overall_pass` above (which ALSO fails on
+                // undecodable/gaps, unrelated to freeze/replay) — this is specifically the
+                // #758-motivated distinction run 1299588287's own forensics conflated (cam2/3/4/6's
+                // 1-3 replayed frames misread as "freezes"; only cam7 was genuinely frozen).
+                let leg_segments: Vec<SegmentLeg> = seg
+                    .segments
+                    .iter()
+                    .map(|s| SegmentLeg {
+                        cambox: &s.cambox,
+                        copies: s.copies,
+                        frames: s.frames,
+                        start_ns: s.start_ns,
+                        end_ns: s.end_ns,
+                    })
+                    .collect();
+                let leg_report = frozen_leg_report(&leg_segments);
+                for f in &leg_report.frozen {
+                    println!("  {}", f.message());
+                }
+                for s in &leg_report.stale_replay {
+                    println!("  {}", s.message());
+                }
+                report["frozen_leg"] = serde_json::json!({
+                    "frozen": leg_report.frozen.iter().map(|f| serde_json::json!({
+                        "cambox": f.cambox,
+                        "since_ns": f.since_ns,
+                        "copies": f.copies,
+                        "approx_stale_secs": f.approx_stale_secs,
+                        "density": f.density,
+                        "message": f.message(),
+                    })).collect::<Vec<_>>(),
+                    "stale_replay": leg_report.stale_replay.iter().map(|s| serde_json::json!({
+                        "cambox": s.cambox,
+                        "copies": s.copies,
+                        "message": s.message(),
+                    })).collect::<Vec<_>>(),
+                });
+                all_pass &= !leg_report.any_frozen();
 
                 // #467/#583 — extend the ALL-CAMBOX sweep to ALSO cover imag-nb's OWN recording:
                 // place its frames onto the SAME schedule timeline (anchored on imag's #463 digital
@@ -3701,7 +4080,7 @@ fn build_and_print_verdict(
                         &[BURN_RUN_ID_IMAG],
                         &[BURN_RUN_ID_IMAG],
                         cam2_pin,
-                        &schedule,
+                        schedule,
                         args.switch_guard_ns,
                     );
                     println!();
@@ -3848,6 +4227,7 @@ fn build_and_print_verdict(
                     args.burn_cam4_run_id,
                     args.burn_cam5_run_id,
                     args.burn_cam6_run_id,
+                    args.burn_cam7_run_id,
                     args.burn_strih_run_id,
                     args.burn_stream_run_id,
                 ];
@@ -3856,7 +4236,7 @@ fn build_and_print_verdict(
                     &anchor_run_ids,
                     &latency_all_burns,
                     cam2_pin,
-                    &schedule,
+                    schedule,
                     args.switch_guard_ns,
                 );
                 println!();
@@ -3877,8 +4257,9 @@ fn build_and_print_verdict(
                         "cam4" => args.burn_cam4_run_id,
                         "cam5" => args.burn_cam5_run_id,
                         "cam6" => args.burn_cam6_run_id,
+                        "cam7" => args.burn_cam7_run_id,
                         _ => unreachable!(
-                            "OPTICAL_INJECTION_NODES is exactly cam1/cam3/cam4/cam5/cam6"
+                            "OPTICAL_INJECTION_NODES is exactly cam1/cam3/cam4/cam5/cam6/cam7"
                         ),
                     };
                     let other_burns: Vec<u32> = latency_all_burns
@@ -4008,6 +4389,14 @@ fn build_and_print_verdict(
                 // is not yet closed/proven, and this field's purpose right now is to let a
                 // manual re-verification run SEE whether the applied differentiated offsets
                 // collapsed the delivery-time spread, not to add a new standing CI requirement.
+                //
+                // #714: keyed by camera, populated below when a --strih recording is present —
+                // consumed further down by the A/V-sync block's `av_window::derive_camera_av_sync`
+                // (a camera's own #286 delivery p50, re-centering cam2's whole-recording A/V
+                // offset for a camera whose own per-window A/V pooling is sample-starved).
+                let mut camera_delivery_p50: std::collections::HashMap<&str, f64> =
+                    std::collections::HashMap::new();
+                let mut delivery_p50s_ms: Vec<f64> = Vec::new();
                 if let Some((strih_frames, _)) = &strih_data {
                     println!();
                     println!(
@@ -4022,6 +4411,7 @@ fn build_and_print_verdict(
                         args.burn_cam4_run_id,
                         args.burn_cam5_run_id,
                         args.burn_cam6_run_id,
+                        args.burn_cam7_run_id,
                     ];
                     let delivery_samples = n_camera_strih_samples(
                         strih_frames,
@@ -4029,13 +4419,13 @@ fn build_and_print_verdict(
                         &delivery_camera_burn_ids,
                     );
                     let mut delivery_json = serde_json::Map::new();
-                    let mut delivery_p50s_ms: Vec<f64> = Vec::new();
                     for (&camera, samples) in
                         CAMERA_UNDER_TEST_NODES.iter().zip(delivery_samples.iter())
                     {
                         let lat = hop_latency(&format!("{camera}->strih (delivery)"), samples);
                         if let Some(h) = &lat {
                             delivery_p50s_ms.push(h.stats.p50_ms);
+                            camera_delivery_p50.insert(camera, h.stats.p50_ms); // #714
                         }
                         println!(
                             "  {camera}: samples={}, p50={}",
@@ -4127,11 +4517,22 @@ fn build_and_print_verdict(
                         av.emit_log.len(),
                         av.audio_markers.len()
                     );
+                    // #855: operator-acknowledged offline boxes (CAMBOX_OFFLINE_ACK / rig-fleet.txt,
+                    // carried here via --offline-ack-cams) are EXCLUDED from this gate below,
+                    // never judged UNKNOWN/FAIL on samples they were never going to produce. A box
+                    // NOT in this map keeps the existing fail-closed default (#836).
+                    let offline_ack_map = offline_ack::parse(&args.offline_ack_cams);
                     let mut av_json = serde_json::Map::new();
                     // #624 deliverable 4 / #312 item 2 PR B: every camera under test must PASS
                     // the ±20ms A/V-offset gate for the run's overall verdict to pass — folded
                     // into `all_pass` below, alongside all_cambox_continuity + all_cambox_latency.
                     let mut av_all_pass = true;
+                    // #714 pass 1: compute every camera's OWN pooled measurement first (UNCHANGED
+                    // logic from before), keyed by camera name — so cam2's own measured offset is
+                    // available before ANY camera's derivation below regardless of loop order
+                    // (CAMERA_UNDER_TEST_NODES lists cam2 second, not first).
+                    let mut cam_syncs: std::collections::HashMap<&str, av_window::CameraAvSync> =
+                        std::collections::HashMap::new();
                     for &camera in CAMERA_UNDER_TEST_NODES.iter() {
                         // cam2 is the emitter/painter itself: it has NO own schedule window where
                         // the optical dual-QR is visible (cam2's OWN camera does not film its own
@@ -4155,8 +4556,15 @@ fn build_and_print_verdict(
                                     av.fps,
                                     av.video_start_s,
                                 );
-                                let cands =
-                                    av_offset_candidates(&av.emit_log, &av.audio_markers, &ticks);
+                                // #733 — deduped: collapse near-simultaneous duplicate decodes of
+                                // the SAME marker (a real-data audit found 37-84ms-apart same-fid
+                                // pairs) before clustering.
+                                let cands = av_offset_candidates_deduped(
+                                    &av.emit_log,
+                                    &av.audio_markers,
+                                    &ticks,
+                                    DEDUPE_SAME_FID_WINDOW_S,
+                                );
                                 (1, vec![cands])
                             } else {
                                 let mut matched = 0usize;
@@ -4174,10 +4582,11 @@ fn build_and_print_verdict(
                                         av.fps,
                                         av.video_start_s,
                                     );
-                                    per_window.push(av_offset_candidates(
+                                    per_window.push(av_offset_candidates_deduped(
                                         &av.emit_log,
                                         &av.audio_markers,
                                         &ticks,
+                                        DEDUPE_SAME_FID_WINDOW_S,
                                     ));
                                 }
                                 (matched, per_window)
@@ -4188,8 +4597,68 @@ fn build_and_print_verdict(
                             av_window::MIN_AV_SAMPLES,
                             args.av_cluster_tol_ms,
                         );
-                        let gate_pass =
-                            av_window::av_offset_gate_pass(&cam_sync, args.av_expected_ms);
+                        cam_syncs.insert(camera, cam_sync);
+                    }
+                    // #714: cam2's own measured offset — the anchor every Unknown non-cam2
+                    // camera's derived estimate re-centers against below. `None` when cam2 itself
+                    // is Unknown this run (derive_camera_av_sync then fails closed for every
+                    // camera, never fabricating a number from a missing anchor).
+                    let cam2_offset_ms = cam_syncs.get("cam2").and_then(|s| s.av_offset_ms);
+                    for &camera in CAMERA_UNDER_TEST_NODES.iter() {
+                        let whole_recording = camera == "cam2";
+                        let cam_sync = cam_syncs.get(camera).expect(
+                            "#714: every CAMERA_UNDER_TEST_NODES entry populated in pass 1 above",
+                        );
+                        // #855: an operator-acknowledged offline box is reported EXCLUDED here,
+                        // never judged — it never gets a chance to fail the gate on zero samples
+                        // that were never going to exist. Skips derivation/gate-pass entirely and
+                        // is NEVER folded into `av_all_pass` (below), so it can neither pass nor
+                        // fail the gate, only be visibly skipped. A box NOT in offline_ack_map
+                        // falls through to the unchanged fail-closed path below.
+                        if let Some(reason) = offline_ack_map.get(camera) {
+                            println!(
+                                "  {camera}: EXCLUDED — operator-acknowledged offline ({reason}) \
+                                 [gate SKIPPED, #855]"
+                            );
+                            av_json.insert(
+                                camera.to_string(),
+                                serde_json::json!({
+                                    "node": camera,
+                                    "excluded": true,
+                                    "exclude_reason": reason,
+                                    "verdict": "excluded",
+                                    "gate_pass": serde_json::Value::Null,
+                                    "windows": cam_sync.windows,
+                                    "candidates": cam_sync.candidates,
+                                    "cluster_samples": cam_sync.cluster_samples,
+                                    "av_offset_ms": serde_json::Value::Null,
+                                    "mad_ms": serde_json::Value::Null,
+                                    "effective_offset_ms": serde_json::Value::Null,
+                                }),
+                            );
+                            continue;
+                        }
+                        // #714: for a non-cam2 camera that came back Unknown (per-window sample
+                        // starvation — see av_window::derive_camera_av_sync's own doc comment for
+                        // why this is sound, not fabricated), attempt the derived estimate from
+                        // cam2's own offset + this camera's #286 delivery-latency delta. Never for
+                        // cam2 itself (it has its own real measurement) and never when the real
+                        // per-window measurement already succeeded.
+                        let derived =
+                            if !whole_recording && cam_sync.verdict == AvSyncVerdict::Unknown {
+                                av_window::derive_camera_av_sync(
+                                    cam2_offset_ms,
+                                    camera_delivery_p50.get(camera).copied(),
+                                    &delivery_p50s_ms,
+                                    args.av_expected_ms,
+                                )
+                            } else {
+                                None
+                            };
+                        let gate_pass = match &derived {
+                            Some(d) => d.gate_pass,
+                            None => av_window::av_offset_gate_pass(cam_sync, args.av_expected_ms),
+                        };
                         av_all_pass &= gate_pass;
                         println!(
                             "  {camera}: {} windows={} candidates={} cluster_samples={} → {} \
@@ -4202,36 +4671,80 @@ fn build_and_print_verdict(
                             cam_sync.windows,
                             cam_sync.candidates,
                             cam_sync.cluster_samples,
-                            match cam_sync.verdict {
-                                AvSyncVerdict::Measured => format!(
+                            match (cam_sync.verdict, &derived) {
+                                (AvSyncVerdict::Measured, _) => format!(
                                     "{:.1}ms (mad {:.1}ms)",
                                     cam_sync.av_offset_ms.unwrap_or(0.0),
                                     cam_sync.mad_ms.unwrap_or(0.0)
                                 ),
-                                AvSyncVerdict::Unknown => "UNKNOWN (too few samples)".to_string(),
+                                (AvSyncVerdict::Unknown, Some(d)) => format!(
+                                    "DERIVED {:.1}ms (#714: cam2 {:.1}ms + this camera's #286 \
+                                     delivery delta, cross-camera delivery spread ±{:.1}ms)",
+                                    d.derived_offset_ms,
+                                    cam2_offset_ms.unwrap_or(0.0),
+                                    d.delivery_spread_ms,
+                                ),
+                                (AvSyncVerdict::Unknown, None) => {
+                                    "UNKNOWN (too few samples, no derivation possible)".to_string()
+                                }
                             },
                             if gate_pass { "PASS" } else { "FAIL" }
                         );
-                        av_json.insert(
-                            camera.to_string(),
-                            serde_json::json!({
-                                "node": camera,
-                                "windowing": if whole_recording { "whole_recording" } else { "per_window" },
-                                "windows": cam_sync.windows,
-                                "candidates": cam_sync.candidates,
-                                "cluster_samples": cam_sync.cluster_samples,
-                                "av_offset_ms": cam_sync.av_offset_ms,
-                                "mad_ms": cam_sync.mad_ms,
-                                "verdict": match cam_sync.verdict {
-                                    AvSyncVerdict::Measured => "measured",
-                                    AvSyncVerdict::Unknown => "unknown",
-                                },
-                                "gate_pass": gate_pass,
-                            }),
-                        );
+                        let verdict_label = match (cam_sync.verdict, &derived) {
+                            (AvSyncVerdict::Measured, _) => "measured",
+                            (AvSyncVerdict::Unknown, Some(_)) => "derived",
+                            (AvSyncVerdict::Unknown, None) => "unknown",
+                        };
+                        let mut cam_json = serde_json::json!({
+                            "node": camera,
+                            "windowing": if whole_recording { "whole_recording" } else { "per_window" },
+                            "windows": cam_sync.windows,
+                            "candidates": cam_sync.candidates,
+                            "cluster_samples": cam_sync.cluster_samples,
+                            "av_offset_ms": cam_sync.av_offset_ms,
+                            "mad_ms": cam_sync.mad_ms,
+                            "verdict": verdict_label,
+                            "gate_pass": gate_pass,
+                            // #714/#689 — the ONE computable per-camera A/V offset the gate/report
+                            // read (measured value for cam2, sound derived value for a starved
+                            // camera, null only for a genuine unknown) — so the raw verdict is
+                            // never a bare `av_offset_ms=null` for a camera we DO have a number for
+                            // (the "silent cam2-only" the #714 one-full-test mandate forbids). The
+                            // `verdict` label above still says which kind of value this is.
+                            "effective_offset_ms":
+                                av_window::effective_offset_ms(cam_sync, derived.as_ref()),
+                        });
+                        if let Some(d) = &derived {
+                            // #714: a DERIVED estimate is reported under its OWN fields, never
+                            // written into `av_offset_ms`/`mad_ms` (which stay null — those are
+                            // reserved for a genuine per-camera MEASUREMENT) — so no consumer can
+                            // mistake a derived number for an independently measured one.
+                            cam_json["derived_offset_ms"] = serde_json::json!(d.derived_offset_ms);
+                            cam_json["derived_from_cam2_offset_ms"] =
+                                serde_json::json!(cam2_offset_ms);
+                            cam_json["derived_delivery_spread_ms"] =
+                                serde_json::json!(d.delivery_spread_ms);
+                            cam_json["derived_note"] = serde_json::json!(
+                                "estimated (#714) from cam2's own measured whole-recording A/V \
+                                 offset re-centered on this camera's own #286 delivery-latency \
+                                 delta -- NOT an independent audio/video measurement for this \
+                                 camera"
+                            );
+                        }
+                        av_json.insert(camera.to_string(), cam_json);
                     }
+                    // #861 (user decision on #856, 2026-07-29): the A/V-offset gate is
+                    // TEMPORARILY report-only — still measured, still printed, still fails
+                    // CLOSED on thin/absent data, but no longer folded into `all_pass`. Program
+                    // audio drifts ~160ms/hour against video (epic #800, foreign clock domain),
+                    // so a constant video-delay offset cannot hold ±20ms until per-source ASRC
+                    // (#803) lands. Mirrors the #286 cross-camera delivery-latency spread term's
+                    // existing report-only shape exactly (same wording, same JSON pattern) — see
+                    // `all_cambox_delivery_latency_spread_never_gates_all_pass_286`. Re-arming
+                    // this into `all_pass` is tracked on #861.
                     println!(
-                        "  >>> #624 deliverable 4 A/V-offset gate: expected={:.1}ms tolerance=±{:.1}ms → {}",
+                        "  >>> #624 deliverable 4 A/V-offset gate: expected={:.1}ms tolerance=±{:.1}ms → {} \
+                         (report-only — does NOT gate all_pass, pending ASRC, see #861)",
                         args.av_expected_ms,
                         av_window::AV_OFFSET_GATE_TOLERANCE_MS,
                         if av_all_pass { "PASS" } else { "FAIL" }
@@ -4245,19 +4758,25 @@ fn build_and_print_verdict(
                         serde_json::json!(av_window::AV_OFFSET_GATE_TOLERANCE_MS),
                     );
                     av_json.insert("gate_pass".to_string(), serde_json::json!(av_all_pass));
+                    // #861: unambiguous machine-readable flag alongside `gate_pass` — this term's
+                    // measured PASS/FAIL no longer decides `overall_pass` (see `gate_pass` above
+                    // for the measured value; this field says whether it COUNTS).
+                    av_json.insert("gates_overall_pass".to_string(), serde_json::json!(false));
                     av_json.insert(
                         "gate".to_string(),
                         serde_json::json!(format!(
-                            "enforced — every camera under test must be within ±{:.0}ms of \
-                             expected_ms (#624 deliverable 4 / #312 item 2 PR B)",
+                            "report-only — does NOT gate overall_pass, pending ASRC (#861); every \
+                             camera under test is still measured against ±{:.0}ms of expected_ms \
+                             (#624 deliverable 4 / #312 item 2 PR B)",
                             av_window::AV_OFFSET_GATE_TOLERANCE_MS
                         )),
                     );
                     report["all_cambox_av_sync"] = serde_json::Value::Object(av_json);
-                    // #312 item 2 PR B: the per-camera A/V-offset gate now folds into the run's
-                    // overall verdict, same severity as all_cambox_continuity / all_cambox_latency
-                    // above — no separate "advisory" tier. See av_window's module doc comment.
-                    all_pass &= av_all_pass;
+                    // #861: DELIBERATELY not folded into `all_pass` (see the report-only note
+                    // above) — `av_all_pass` is still computed and reported, same severity/rigor
+                    // as before, it just no longer decides the run's overall verdict. Zero-loss
+                    // (all_cambox_continuity / burn-id contiguity, `seg.overall_pass` above)
+                    // remains STRICT and is completely unaffected by this.
                 }
             }
             None => {
@@ -4323,6 +4842,7 @@ fn resolve_camera_under_test_label(
     cam4_present: bool,
     cam5_present: bool,
     cam6_present: bool,
+    cam7_present: bool,
 ) -> &'static str {
     if !cam1_present {
         for (node, present) in [
@@ -4331,6 +4851,7 @@ fn resolve_camera_under_test_label(
             ("cam4", cam4_present),
             ("cam5", cam5_present),
             ("cam6", cam6_present),
+            ("cam7", cam7_present),
         ] {
             if present {
                 return node;
@@ -4352,6 +4873,7 @@ fn burn_run_id_for_camera(node: &str, args: &Args) -> u32 {
         "cam4" => args.burn_cam4_run_id,
         "cam5" => args.burn_cam5_run_id,
         "cam6" => args.burn_cam6_run_id,
+        "cam7" => args.burn_cam7_run_id,
         _ => unreachable!(
             "burn_run_id_for_camera called with {node:?} — expected a CAMERA_UNDER_TEST_NODES entry"
         ),
@@ -4497,6 +5019,70 @@ fn extract_partial_flagged_frames(
         flagged.extend(iw.missing_slots.iter().map(|s| s.frame_index));
     }
 
+    // #707 EVENT-FORENSICS: when the stream box's extract is given the SAME `--switch-schedule`
+    // the merge step uses, ALSO flag the ±2-frame neighbourhood of every located residual
+    // copy/gap event (`crate::residual_events::residual_events`, via the #312 sweep's own
+    // `segment_continuity`) — extending the #186 pixel-proof machinery so a forensics dossier
+    // gets real pixels for the event, not just the JSON. Only the stream box carries the
+    // continuous recording the sweep is windowed over (the strih box's own recording is a
+    // DIFFERENT, per-camera partial view — see `segment_frames_from_recording`'s own doc). A
+    // missing/unparsable schedule degrades gracefully (WARN, no residual-event flagging) — the
+    // existing undecodable + missing-burn flagging above is unaffected either way.
+    if box_name == "stream" {
+        if let Some(schedule_path) = &args.switch_schedule {
+            match load_switch_schedule(schedule_path) {
+                Ok(schedule) => {
+                    let expected_step = if args.switch_expected_step > 0 {
+                        args.switch_expected_step
+                    } else {
+                        camera_box::recording_span_gate::painted_tick_step(
+                            args.refresh_hz,
+                            args.stream_capture_fps,
+                        )
+                    };
+                    let anchor_run_ids = [args.burn_strih_run_id, args.burn_stream_run_id];
+                    let (seg_frames, _no_anchor) = segment_frames_from_recording(
+                        frames,
+                        &anchor_run_ids,
+                        &all_burns,
+                        cam2_pin,
+                    );
+                    let seg = segment_continuity(
+                        &seg_frames,
+                        &schedule,
+                        args.switch_guard_ns,
+                        expected_step,
+                    );
+                    const RESIDUAL_EVENT_NEIGHBOUR_FRAMES: u64 = 2;
+                    for ev in &seg.residual_events {
+                        let lo = ev
+                            .frame_index
+                            .saturating_sub(RESIDUAL_EVENT_NEIGHBOUR_FRAMES);
+                        let hi = ev.frame_index + RESIDUAL_EVENT_NEIGHBOUR_FRAMES;
+                        flagged.extend(lo..=hi);
+                    }
+                    if !seg.residual_events.is_empty() {
+                        println!(
+                            "#707 event-forensics [stream]: {} residual copy/gap event(s) across \
+                             {} switch-schedule window(s) → their ±{RESIDUAL_EVENT_NEIGHBOUR_FRAMES}-frame \
+                             neighbourhoods added to the pixel-proof flag set.",
+                            seg.residual_events.len(),
+                            seg.segments.len(),
+                        );
+                    }
+                }
+                Err(e) => {
+                    eprintln!(
+                        "WARNING: #707 event-forensics: could not load --switch-schedule {} \
+                         ({e:#}) — residual copy/gap events will NOT get pixel proof on this \
+                         extract (the existing undecodable/missing-burn flagging is unaffected).",
+                        schedule_path.display()
+                    );
+                }
+            }
+        }
+    }
+
     flagged.sort_unstable();
     flagged.dedup();
     (flagged, undecodable)
@@ -4577,16 +5163,26 @@ fn extract_partial(args: &Args, box_name: &str) -> Result<()> {
     // deployed this run — mutually exclusive, so "at least one" unlocks the fast path exactly
     // like the historically-hardcoded cam1-only check did for cam1 specifically). imag has no
     // camera-under-test any-of group, so it keeps the plain mandatory-only decode unchanged.
+    //
+    // #707: strih AND stream ALSO carry the cam2 dual-QR Vernier optical read baked into their
+    // recorded pixels (whichever cambox is on program at that instant), so both now ALSO require
+    // both Vernier halves before skipping the #202 robust retry — see
+    // `decode_qr_luma_all_fast_then_robust_grouped_pathed_optical`'s doc for the full reasoning.
+    // `args.cam2_pin()` is `None` only for an unpinned (`--cam2-run-id 0`) debug invocation, in
+    // which case this is byte-for-byte the pre-#707 gate.
+    let min_distinct_optical = args.cam2_pin().map(|run_id| (run_id, 2));
     let frames = match box_name {
-        "strih" => analyze_recording_with_grouped_burns(
+        "strih" => analyze_recording_with_grouped_burns_optical(
             rec_path,
             &[args.burn_strih_run_id],
             &camera_under_test_burn_ids(args),
+            min_distinct_optical,
         ),
-        "stream" => analyze_recording_with_grouped_burns(
+        "stream" => analyze_recording_with_grouped_burns_optical(
             rec_path,
             &[args.burn_strih_run_id, args.burn_stream_run_id],
             &camera_under_test_burn_ids(args),
+            min_distinct_optical,
         ),
         _ => analyze_recording_with_burns(rec_path, &expected_burns),
     }
@@ -4867,9 +5463,17 @@ fn report_pulled_back_pixel_proofs(box_paths: &[(String, PathBuf)]) {
 #[cfg(test)]
 mod tests {
     use super::{
-        frame_is_delivered_optical, in_window_burn_frames, node_burn_id_on,
-        node_verdict_with_optical, optical_span_facts, parse_cam1_capture_stats_str, parse_grab_ts,
-        parse_painter_flip_str, parse_painter_ticks_str,
+        frame_is_delivered_optical,
+        in_window_burn_frames,
+        node_burn_id_on,
+        node_verdict_with_optical,
+        optical_span_facts,
+        parse_cam1_capture_stats_str,
+        parse_grab_ts,
+        parse_painter_flip_str,
+        parse_painter_ticks_str,
+        // #706
+        scope_camera_window_to_own_schedule,
     };
 
     /// #312 — locks the key design split: `CAMERA_UNDER_TEST_NODES` (digital contiguity) is
@@ -4887,7 +5491,7 @@ mod tests {
             "#312: cam2 must NOT be an optical-injection node — it is the painter itself, with \
              no second camera-vs-monitor optical hop to measure"
         );
-        for cam in ["cam1", "cam3", "cam4", "cam5", "cam6"] {
+        for cam in ["cam1", "cam3", "cam4", "cam5", "cam6", "cam7"] {
             assert!(
                 super::CAMERA_UNDER_TEST_NODES.contains(&cam)
                     && super::OPTICAL_INJECTION_NODES.contains(&cam),
@@ -4926,6 +5530,7 @@ mod tests {
             super::BURN_RUN_ID_STREAM,
             super::BURN_RUN_ID_IMAG,
             super::BURN_RUN_ID_CAM4,
+            super::BURN_RUN_ID_CAM7,
         ];
         assert!(
             !other_reserved.contains(&args.burn_cam3_run_id),
@@ -4936,23 +5541,24 @@ mod tests {
         );
     }
 
-    /// #312 — cam2/cam5/cam6's default capture-burn run_ids must ALSO be unique among every
-    /// other reserved id (mirrors the #24 cam3 regression test above — the same class of latent
-    /// collision bug is exactly what reserving a FRESH id per new camera-under-test guards
-    /// against). All NINE reserved ids must be pairwise distinct.
+    /// #312/#755 — cam2/cam5/cam6/cam7's default capture-burn run_ids must ALSO be unique among
+    /// every other reserved id (mirrors the #24 cam3 regression test above — the same class of
+    /// latent collision bug is exactly what reserving a FRESH id per new camera-under-test guards
+    /// against). All TEN reserved ids must be pairwise distinct.
     #[test]
-    fn all_nine_reserved_burn_run_ids_are_pairwise_distinct_312() {
+    fn all_ten_reserved_burn_run_ids_are_pairwise_distinct_755() {
         use clap::Parser;
         use std::collections::HashSet;
 
         let args = super::Args::parse_from(["recording-verdict"]);
-        let ids: [(&str, u32); 9] = [
+        let ids: [(&str, u32); 10] = [
             ("cam1", super::BURN_RUN_ID_CAM1),
             ("cam2", args.burn_cam2_run_id),
             ("cam3", super::BURN_RUN_ID_CAM3),
             ("cam4", super::BURN_RUN_ID_CAM4),
             ("cam5", args.burn_cam5_run_id),
             ("cam6", args.burn_cam6_run_id),
+            ("cam7", args.burn_cam7_run_id),
             ("strih", super::BURN_RUN_ID_STRIH),
             ("stream", super::BURN_RUN_ID_STREAM),
             ("imag", super::BURN_RUN_ID_IMAG),
@@ -4999,7 +5605,16 @@ mod tests {
         max_pixel_proof: usize,
     ) -> anyhow::Result<super::NodeVerdict> {
         let optical = optical_span_facts(spec.source, all_burn_run_ids, spec.cam2_run_id);
-        node_verdict_with_optical(spec, all_burn_run_ids, optical, out_dir, max_pixel_proof)
+        // #706: every existing fixture using this helper predates the switch-schedule scoping —
+        // `None` reproduces their exact pre-#706 unscoped behavior (whole-recording optical span).
+        node_verdict_with_optical(
+            spec,
+            all_burn_run_ids,
+            optical,
+            out_dir,
+            max_pixel_proof,
+            None,
+        )
     }
 
     // ---- #198 in-window burn-contiguity wiring (the bug-level regression) ----
@@ -5253,6 +5868,7 @@ mod tests {
 
     const CAM5B: u32 = super::BURN_RUN_ID_CAM5; // #312 cam5's OWN per-EMIT capture burn run_id (911010)
     const CAM6B: u32 = super::BURN_RUN_ID_CAM6; // #312 cam6's OWN per-EMIT capture burn run_id (911011)
+    const CAM7B: u32 = super::BURN_RUN_ID_CAM7; // #755 cam7's OWN per-EMIT capture burn run_id (911012)
 
     /// Build a window of N delivered frames carrying BOTH cam5's and cam6's digital burns in
     /// every frame (a synthetic-only shortcut — in any REAL run only one of cam1/cam2/cam3/cam4/
@@ -5330,6 +5946,74 @@ mod tests {
             v["full_chain"]["burn_ids_present"]["cam6"],
             serde_json::json!(60),
             "#312: all 60 cam6 burn ids decoded: {}",
+            v["full_chain"]["burn_ids_present"]
+        );
+    }
+
+    /// #755 — a window of N delivered frames carrying cam7's OWN digital capture-burn in every
+    /// frame (mirrors [`window_cam5_and_cam6`] for the 7th camera, #753).
+    fn window_cam7(n: u32, with_stream: bool) -> Vec<RecordingFrame> {
+        (0..n)
+            .map(|i| {
+                let mut ps: Vec<(u32, u32)> = vec![(CAM2, 100 + i), (CAM7B, 9500 + i)];
+                ps.push((STRIH, 1670 + 3 * i));
+                if with_stream {
+                    ps.push((STREAM, 12000 + 3 * i));
+                }
+                frame(i as u64, &ps)
+            })
+            .collect()
+    }
+
+    /// #755 — extends the #186 per-node digital-burn contiguity check to CAM7 (fleet growth 6→7,
+    /// #753). A contiguous cam7 burn end-to-end ⇒ the fused verdict reports node "cam7" ZERO loss,
+    /// exactly like cam5/cam6 — locks that the new `NodeSpec` tuple, the `--burn-cam7-run-id`
+    /// plumbing, and the `CAMERA_UNDER_TEST_NODES` membership all wired correctly (a missing site
+    /// would leave cam7 unmeasured / absent from the report, the "NO SAMPLES" mode #286 fixed).
+    #[test]
+    fn cam7_digital_burn_extends_the_186_contiguity_check_755() {
+        use super::{build_and_print_verdict, Cam1Source, DecodedRec};
+        use clap::Parser;
+
+        let args = super::Args::parse_from(["recording-verdict", "--min-secs", "1"]);
+        let strih_frames = window_cam7(60, false);
+        let stream_frames = window_cam7(60, true);
+
+        let (v, pass) = build_and_print_verdict(
+            &args,
+            Some(DecodedRec {
+                frames: strih_frames,
+                rec_path: None,
+            }),
+            Some(DecodedRec {
+                frames: stream_frames,
+                rec_path: None,
+            }),
+            Cam1Source::Absent,
+            None,
+            None,
+            None, // #461: no imag frames in this test
+            None, // #312 item 2 (PR A): no carried A/V-sync inputs in this test
+        )
+        .expect("verdict");
+
+        assert!(pass, "#755: contiguous cam7 burn ⇒ overall PASS: {v}");
+        let loss = &v["full_chain"]["loss"];
+        assert_eq!(
+            loss["cam7"]["zero_loss"],
+            serde_json::json!(true),
+            "#755: cam7 must be verdicted ZERO loss when its OWN burn is contiguous: {loss}"
+        );
+        for absent in ["cam1", "cam3", "cam4", "cam5", "cam6"] {
+            assert!(
+                loss.get(absent).is_none(),
+                "#755: {absent} never emitted this run ⇒ must NOT appear in the loss report: {loss}"
+            );
+        }
+        assert_eq!(
+            v["full_chain"]["burn_ids_present"]["cam7"],
+            serde_json::json!(60),
+            "#755: all 60 cam7 burn ids decoded: {}",
             v["full_chain"]["burn_ids_present"]
         );
     }
@@ -6246,6 +6930,123 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Issue 889 (2026-07-30 user decision on issue 883) end-to-end: a stale/frozen painted-tick
+    /// copy in the single all-cambox window (undecodable=0) must still be COMPUTED and printed
+    /// in the verdict JSON, must still fail that window's STRICT `pass`, but must NO LONGER fail
+    /// `all_cambox_continuity.overall_pass` — and `windows_failed_report_only` must report it.
+    #[test]
+    fn all_cambox_continuity_copy_alone_is_report_only_end_to_end_889() {
+        use super::{build_and_print_verdict, Cam1Source, DecodedRec};
+        use clap::Parser;
+
+        const ONE_S: i64 = 1_000_000_000;
+        let base = 1_000 * ONE_S;
+        let win = 5 * ONE_S;
+        let sched = format!(
+            r#"[{{"cambox":"CAM1","start_ns":{a},"end_ns":{b}}}]"#,
+            a = base,
+            b = base + win
+        );
+        let dir = std::env::temp_dir().join(format!("cb-889-copy-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sched_path = dir.join("switch-schedule.json");
+        std::fs::write(&sched_path, &sched).unwrap();
+
+        let mut stream_frames: Vec<RecordingFrame> = Vec::new();
+        for i in 0..20u64 {
+            let gen_ts = base + (i as i64 + 1) * (ONE_S / 10);
+            let optical = 1000u32 + 2 * i as u32; // clean step-2 sequence, undecodable=0 throughout
+            stream_frames.push(RecordingFrame {
+                frame_index: i,
+                payloads: vec![
+                    Payload {
+                        run_id: STRIH,
+                        frame_id: 1670 + i as u32,
+                        gen_ts_ns: gen_ts,
+                    },
+                    Payload {
+                        run_id: CAM2,
+                        frame_id: optical,
+                        gen_ts_ns: gen_ts,
+                    },
+                ],
+                tick: Some(optical),
+            });
+        }
+        // Insert ONE extra frame right after index 9, repeating index 9's tick verbatim (a
+        // stale/frozen copy) WITHOUT removing/overwriting any real tick value -- the distinct
+        // present-tick sequence stays fully contiguous (no incidental gap), isolating `copies`
+        // from `gaps` so this test proves copies alone is report-only.
+        let dup_gen_ts = base + 10 * (ONE_S / 10) + (ONE_S / 100); // strictly between i=9 and i=10
+        stream_frames.insert(
+            10,
+            RecordingFrame {
+                frame_index: 9_000,
+                payloads: vec![
+                    Payload {
+                        run_id: STRIH,
+                        frame_id: 9_670,
+                        gen_ts_ns: dup_gen_ts,
+                    },
+                    Payload {
+                        run_id: CAM2,
+                        frame_id: 1018, // == index 9's optical tick (1000 + 2*9)
+                        gen_ts_ns: dup_gen_ts,
+                    },
+                ],
+                tick: Some(1018),
+            },
+        );
+
+        let args = super::Args::parse_from([
+            "recording-verdict",
+            "--switch-schedule",
+            sched_path.to_str().unwrap(),
+            "--switch-guard-ns",
+            "0",
+            "--switch-expected-step",
+            "2",
+        ]);
+        let (v, _) = build_and_print_verdict(
+            &args,
+            None,
+            Some(DecodedRec {
+                frames: stream_frames,
+                rec_path: None,
+            }),
+            Cam1Source::Absent,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("verdict");
+
+        let seg = &v["all_cambox_continuity"];
+        assert_eq!(
+            seg["segments"][0]["copies"],
+            serde_json::json!(1),
+            "889: the copy is still COMPUTED and printed: {seg}"
+        );
+        assert_eq!(
+            seg["segments"][0]["pass"],
+            serde_json::json!(false),
+            "889: the STRICT per-window verdict still fails on the copy: {seg}"
+        );
+        assert_eq!(
+            seg["overall_pass"],
+            serde_json::json!(true),
+            "889: a copy alone (undecodable=0) no longer fails overall_pass: {seg}"
+        );
+        assert_eq!(
+            seg["windows_failed_report_only"],
+            serde_json::json!(1),
+            "889: the verdict JSON must carry the machine-readable report-only count: {seg}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// #467 — extend the #312 ALL-CAMBOX `--switch-schedule` sweep to ALSO gate imag-nb's OWN
     /// per-segment continuity. imag's frames are placed onto the SAME schedule timeline (anchored
     /// on its #463 digital corner burn, [`super::BURN_RUN_ID_IMAG`]) and its own painted-tick
@@ -7078,6 +7879,25 @@ mod tests {
         av: Option<AvMarkerInputs>,
         av_expected_ms: f64,
     ) -> serde_json::Value {
+        build_all_cambox_av_sync_fixture_with_ack(tag, cameras, av, av_expected_ms, "", None)
+    }
+
+    /// #855 — same as [`build_all_cambox_av_sync_fixture`], plus a `--offline-ack-cams` value
+    /// (the raw `CAMBOX_OFFLINE_ACK`-format string) threaded through to the CLI args, so a test
+    /// can prove an acked-offline camera is reported EXCLUDED rather than judged. `#861` adds an
+    /// optional `--cam1-capture-stats` sidecar path — a real, TOP-LEVEL, unconditional zero-loss
+    /// signal (`cam2_present -> capture-drop`, `all_pass &= capture_zero`), completely independent
+    /// of the switch-schedule/AV plumbing this fixture otherwise builds — so a test can inject a
+    /// genuine zero-loss defect that must still fail `overall_pass` regardless of the (now
+    /// report-only) A/V-offset term.
+    fn build_all_cambox_av_sync_fixture_with_ack(
+        tag: &str,
+        cameras: &[(&str, u32, i64)],
+        av: Option<AvMarkerInputs>,
+        av_expected_ms: f64,
+        offline_ack_cams: &str,
+        cam1_capture_stats: Option<&std::path::Path>,
+    ) -> serde_json::Value {
         use super::{build_and_print_verdict, Cam1Source, DecodedRec};
         use clap::Parser;
 
@@ -7130,17 +7950,24 @@ mod tests {
             }
         }
 
-        let args = super::Args::parse_from([
-            "recording-verdict",
-            "--switch-schedule",
-            sched_path.to_str().unwrap(),
-            "--switch-guard-ns",
-            "0",
-            "--switch-expected-step",
-            "2",
-            "--av-expected-ms",
-            &av_expected_ms.to_string(),
-        ]);
+        let mut argv: Vec<String> = vec![
+            "recording-verdict".to_string(),
+            "--switch-schedule".to_string(),
+            sched_path.to_str().unwrap().to_string(),
+            "--switch-guard-ns".to_string(),
+            "0".to_string(),
+            "--switch-expected-step".to_string(),
+            "2".to_string(),
+            "--av-expected-ms".to_string(),
+            av_expected_ms.to_string(),
+            "--offline-ack-cams".to_string(),
+            offline_ack_cams.to_string(),
+        ];
+        if let Some(stats_path) = cam1_capture_stats {
+            argv.push("--cam1-capture-stats".to_string());
+            argv.push(stats_path.to_str().unwrap().to_string());
+        }
+        let args = super::Args::parse_from(argv);
 
         let (v, _pass) = build_and_print_verdict(
             &args,
@@ -7169,8 +7996,10 @@ mod tests {
     /// deliverable 4 / PR B) the per-camera `gate_pass` field: at the default `av_expected_ms=0`,
     /// cam1's real 500ms offset is far outside the ±20ms bound (FAILS the gate despite being a
     /// real, clean measurement — the gate is about closeness to expected, not data quality), and
-    /// every Unknown camera fails closed too — so the run's `overall_pass` MUST be false
-    /// regardless of what the loss/latency gates alone would have decided.
+    /// every Unknown camera fails closed too. **#861 (2026-07-29): this term is now report-only**
+    /// — it still measures/fails closed exactly as before, it just no longer decides
+    /// `overall_pass` (see `all_cambox_av_sync_gate_failure_no_longer_forces_the_overall_verdict_
+    /// to_fail_861` for that proof).
     #[test]
     fn all_cambox_av_sync_measures_a_real_camera_and_fails_closed_on_the_rest_312() {
         let emit_log: Vec<(u8, u32, i64)> = (0..10u8).map(|k| (k, 1000 + k as u32, 0)).collect();
@@ -7274,26 +8103,31 @@ mod tests {
             serde_json::json!(false),
             "#624: the OVERALL av_sync gate must be false when ANY camera fails: {av_sync}"
         );
+        // #861 (2026-07-29 user decision on #856): the gate is now report-only pending ASRC
+        // (#803) — the string must say so, and an explicit machine-readable flag says it does
+        // NOT decide `overall_pass` (see `all_cambox_av_sync_gate_failure_no_longer_forces_the_
+        // overall_verdict_to_fail_861` below for the actual overall_pass proof).
         assert!(
-            av_sync["gate"].as_str().unwrap().contains("enforced"),
-            "#312 PR B: the gate string must say it is enforced now: {av_sync}"
+            av_sync["gate"].as_str().unwrap().contains("report-only"),
+            "#861: the gate string must say it is report-only now, pending ASRC: {av_sync}"
         );
         assert_eq!(
-            v["overall_pass"],
+            av_sync["gates_overall_pass"],
             serde_json::json!(false),
-            "#624/#312 PR B: the run's overall verdict MUST fail when the av_sync gate fails -- \
-             regardless of what the loss/latency gates alone would have decided: {v}"
+            "#861: the JSON must be unambiguous that this term does not decide overall_pass: {av_sync}"
         );
     }
 
-    /// #624 deliverable 4 / #312 item 2 PR B — a FAILING av_sync gate forces the run's overall
-    /// verdict to FAIL, unconditionally (the AND-in semantics: `all_pass &= av_all_pass`, and
-    /// ANDing with `false` can never be undone by any other gate). This SUPERSEDES PR A's
-    /// `all_cambox_av_sync_never_affects_the_overall_verdict_312` — that test asserted the
-    /// opposite invariant (block reported but never gates), which was PR A's OWN explicitly
-    /// temporary contract ("PR B wires it"); this test proves PR B actually did.
+    /// #861 (2026-07-29 user decision on #856) — a FAILING av_sync gate must NOT change the run's
+    /// overall verdict: `all_pass &= av_all_pass` was REMOVED from the caller (report-only, same
+    /// shape as the #286 cross-camera delivery-latency spread term). This SUPERSEDES the old
+    /// `all_cambox_av_sync_gate_failure_forces_the_overall_verdict_to_fail_312_624` (#624/#312 PR
+    /// B), which asserted the OPPOSITE invariant when the gate was still wired into `all_pass`.
+    /// **This is the exact test #861 (re-arm after ASRC, #803) will need to invert back** — when
+    /// this test starts failing because `overall_pass` differs between the two fixtures, that is
+    /// the signal the gate has been re-wired and this test's assertion must flip.
     #[test]
-    fn all_cambox_av_sync_gate_failure_forces_the_overall_verdict_to_fail_312_624() {
+    fn all_cambox_av_sync_gate_failure_no_longer_forces_the_overall_verdict_to_fail_861() {
         let emit_log: Vec<(u8, u32, i64)> = (0..10u8).map(|k| (k, 1000 + k as u32, 0)).collect();
         let audio_markers: Vec<(f64, u8)> = (0..10u8).map(|k| (k as f64 / 30.0 - 0.5, k)).collect();
         let av = AvMarkerInputs {
@@ -7307,8 +8141,10 @@ mod tests {
 
         // cam1 measures a real 500ms offset; expected_ms=0 puts it far outside +/-20ms -> the
         // av_sync gate FAILS (cam3/cam4/cam5/cam6 are Unknown too, doubly so).
-        let with_av = build_all_cambox_av_sync_fixture("gate-fail-with", cameras, Some(av), 0.0);
-        let without_av = build_all_cambox_av_sync_fixture("gate-fail-without", cameras, None, 0.0);
+        let with_av =
+            build_all_cambox_av_sync_fixture("gate-fail-with-861", cameras, Some(av), 0.0);
+        let without_av =
+            build_all_cambox_av_sync_fixture("gate-fail-without-861", cameras, None, 0.0);
 
         assert!(
             !with_av["all_cambox_av_sync"].is_null(),
@@ -7324,27 +8160,92 @@ mod tests {
             "sanity: the av_sync gate must actually be failing in this fixture: {with_av}"
         );
         assert_eq!(
-            with_av["overall_pass"],
+            with_av["all_cambox_av_sync"]["gates_overall_pass"],
             serde_json::json!(false),
-            "#624/#312 PR B: a failing av_sync gate MUST force overall_pass=false, regardless of \
-             whatever the loss/latency gates alone computed (without_av={without_av}): {with_av}"
+            "#861: the JSON must say plainly that this failing term does not gate: {with_av}"
+        );
+        // The point of this test: a FAILING av_sync gate is now a no-op on overall_pass, exactly
+        // like the already-passing sibling test below proves for a PASSING gate — with_av and
+        // without_av share identical loss/latency contribution (same frames/schedule), so their
+        // overall_pass must be IDENTICAL regardless of what the (failing) av_sync gate measured.
+        assert_eq!(
+            with_av["overall_pass"], without_av["overall_pass"],
+            "#861: a FAILING av_sync gate must be a no-op on the overall verdict (report-only, \
+             pending ASRC #803) -- with={with_av}, without={without_av}"
         );
     }
 
-    /// #624 deliverable 4 / #312 item 2 PR B — a PASSING av_sync gate (every one of the 6
-    /// CAMERA_UNDER_TEST_NODES measured cleanly within +/-20ms of `--av-expected-ms`) must NOT
-    /// change the run's overall verdict vs the identical run with no av_sync inputs at all --
-    /// `all_pass &= true` is a no-op. Proves the "AND-in" wiring in BOTH directions together with
-    /// the sibling gate-failure test above, without needing to know the loss/latency gates' own
-    /// PASS/FAIL value for this synthetic fixture (both runs share the identical frames/schedule,
-    /// so their loss/latency contribution is identical either way).
+    /// #861 — zero-loss enforcement is completely UNAFFECTED by the A/V-offset term becoming
+    /// report-only above: a real zero-loss defect (a cam2→SOURCE V4L2 capture-drop,
+    /// `--cam1-capture-stats`) still forces `overall_pass=false`, unconditionally. This gate
+    /// (`all_pass &= capture_zero` in `recording-verdict.rs`) is TOP-LEVEL — parsed and applied
+    /// whenever `--cam1-capture-stats` is supplied, with NO dependency on `--switch-schedule` /
+    /// `--stream` / the A/V-sync plumbing at all — so it is untouched by this PR's edit and is the
+    /// most direct, unambiguous proof that removing the A/V term from `all_pass` did not weaken
+    /// any OTHER gate's severity. The A/V inputs here are the same clean 500ms fixture used by the
+    /// sibling PASS test (does not matter either way — the point is the capture-drop alone).
+    #[test]
+    fn zero_loss_capture_drop_still_fails_overall_pass_regardless_of_av_gate_861() {
+        let emit_log: Vec<(u8, u32, i64)> = (0..10u8).map(|k| (k, 1000 + k as u32, 0)).collect();
+        let audio_markers: Vec<(f64, u8)> = (0..10u8)
+            .map(|k| (k as f64 / 30.0 - 0.5, k)) // video_ts(1000+k) - 0.5s = k/30.0 - 0.5
+            .collect();
+        let av = AvMarkerInputs {
+            fps: 30.0,
+            video_start_s: 0.0,
+            emit_log,
+            audio_markers,
+        };
+        let cameras: &[(&str, u32, i64)] = &[("CAM1", CAM1B, 800_000_000)];
+
+        let dir = std::env::temp_dir().join(format!("cb-861-capture-drop-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let stats_path = dir.join("cam1-capture-stats.txt");
+        std::fs::write(&stats_path, "v4l2_dropped=7\nframes_captured=1000\n").unwrap();
+
+        // av_expected_ms=500.0 matches the constructed clean 500ms offset -- the A/V term PASSES
+        // cleanly here (unlike the sibling FAIL test above); the only defect in this run is the
+        // injected capture-drop.
+        let v = build_all_cambox_av_sync_fixture_with_ack(
+            "zero-loss-capture-drop-861",
+            cameras,
+            Some(av),
+            500.0,
+            "",
+            Some(&stats_path),
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(
+            v["full_chain"]["loss"]["cam2_cam1"]["zero_loss"],
+            serde_json::json!(false),
+            "sanity: the injected capture-drop must actually be non-zero in this fixture: {v}"
+        );
+        assert_eq!(
+            v["overall_pass"],
+            serde_json::json!(false),
+            "#861: a real zero-loss defect (camera-leg V4L2 capture drop) must still force \
+             overall_pass=false -- completely unaffected by the A/V-offset term becoming \
+             report-only: {v}"
+        );
+    }
+
+    /// #624 deliverable 4 / #312 item 2 PR B (still true post-#861) — a PASSING av_sync gate
+    /// (every one of the 6 CAMERA_UNDER_TEST_NODES measured cleanly within +/-20ms of
+    /// `--av-expected-ms`) must NOT change the run's overall verdict vs the identical run with no
+    /// av_sync inputs at all. Since #861 this is a no-op for TWO independent reasons at once
+    /// (the term is report-only now AND `av_all_pass` itself is true) — proves the report-only
+    /// wiring holds in BOTH directions together with the sibling gate-FAILURE test above, without
+    /// needing to know the loss/latency gates' own PASS/FAIL value for this synthetic fixture
+    /// (both runs share the identical frames/schedule, so their loss/latency contribution is
+    /// identical either way).
     #[test]
     fn all_cambox_av_sync_gate_pass_does_not_change_the_overall_verdict_312_624() {
-        // 5 windows (cam1/cam3/cam4/cam5/cam6), 20 frames each = 100 frames, optical ticks
-        // 1000..=1099 contiguous across ALL windows. emit_log covers the FULL 1000..=1099 range
-        // so EVERY window (and cam2's whole-recording pool over all 100 frames) decodes a dense,
-        // clean 500ms offset -- no Unknown camera anywhere.
-        const N: usize = 100;
+        // 6 windows (cam1/cam3/cam4/cam5/cam6/cam7 — #755), 20 frames each = 120 frames, optical
+        // ticks 1000..=1119 contiguous across ALL windows. emit_log covers the FULL 1000..=1119
+        // range so EVERY window (and cam2's whole-recording pool over all 120 frames) decodes a
+        // dense, clean 500ms offset -- no Unknown camera anywhere.
+        const N: usize = 120;
         let emit_log: Vec<(u8, u32, i64)> = (0..N).map(|k| (k as u8, 1000 + k as u32, 0)).collect();
         let audio_markers: Vec<(f64, u8)> = (0..N)
             .map(|k| (k as f64 / 30.0 - 0.5, k as u8)) // video_ts(1000+k) - 0.5s = k/30.0 - 0.5
@@ -7361,6 +8262,7 @@ mod tests {
             ("CAM4", super::BURN_RUN_ID_CAM4, 790_000_000),
             ("CAM5", CAM5B, 805_000_000),
             ("CAM6", CAM6B, 815_000_000),
+            ("CAM7", CAM7B, 810_000_000),
         ];
 
         // expected_ms=500.0 matches the constructed clean offset exactly -> every camera passes.
@@ -7372,7 +8274,7 @@ mod tests {
             !with_av["all_cambox_av_sync"].is_null(),
             "sanity: the WITH-av_sync run must actually have reported the block: {with_av}"
         );
-        for cam in ["cam1", "cam2", "cam3", "cam4", "cam5", "cam6"] {
+        for cam in ["cam1", "cam2", "cam3", "cam4", "cam5", "cam6", "cam7"] {
             assert_eq!(
                 with_av["all_cambox_av_sync"][cam]["verdict"],
                 serde_json::json!("measured"),
@@ -7393,6 +8295,390 @@ mod tests {
             with_av["overall_pass"], without_av["overall_pass"],
             "#624/#312 PR B: a PASSING av_sync gate must be a no-op on the overall verdict -- \
              with={with_av}, without={without_av}"
+        );
+    }
+
+    /// #855 — an operator-acknowledged offline box (CAMBOX_OFFLINE_ACK / rig-fleet.txt, threaded
+    /// via `--offline-ack-cams`) must be reported EXCLUDED, never judged: cam5/cam6/cam7 never
+    /// appear in this fixture's switch schedule at all (same "absent from the sweep" shape the
+    /// #312/#624 test above already covers), but are ACKED here -- so instead of the previous
+    /// fail-closed "unknown, gate_pass=false", each must come back `verdict:"excluded"`,
+    /// `excluded:true`, its `exclude_reason` carried verbatim, and `gate_pass` NULL (never judged
+    /// pass or fail). cam4 is deliberately left OUT of the ack -- it is ALSO absent from the
+    /// schedule, and must keep the UNCHANGED fail-closed behaviour (#836: this fix changes WHO
+    /// gets judged, never HOW harshly).
+    #[test]
+    fn all_cambox_av_sync_offline_acked_camera_is_excluded_not_judged_855() {
+        let emit_log: Vec<(u8, u32, i64)> = (0..10u8).map(|k| (k, 1000 + k as u32, 0)).collect();
+        let audio_markers: Vec<(f64, u8)> = (0..10u8)
+            .map(|k| (k as f64 / 30.0 - 0.5, k)) // video_ts(1000+k) - 0.5s = k/30.0 - 0.5
+            .collect();
+        let av = AvMarkerInputs {
+            fps: 30.0,
+            video_start_s: 0.0,
+            emit_log,
+            audio_markers,
+        };
+        let cameras: &[(&str, u32, i64)] =
+            &[("CAM1", CAM1B, 800_000_000), ("CAM3", CAM3B, 820_000_000)];
+        let v = build_all_cambox_av_sync_fixture_with_ack(
+            "offline-ack-855",
+            cameras,
+            Some(av),
+            0.0,
+            "cam5:powered-off-2026-07-27,cam6:powered-off-2026-07-27,cam7:powered-off-2026-07-27",
+            None,
+        );
+        let av_sync = &v["all_cambox_av_sync"];
+        for cam in ["cam5", "cam6", "cam7"] {
+            assert_eq!(
+                av_sync[cam]["verdict"],
+                serde_json::json!("excluded"),
+                "#855: {cam} is acked offline -> excluded, never judged: {av_sync}"
+            );
+            assert_eq!(
+                av_sync[cam]["excluded"],
+                serde_json::json!(true),
+                "#855: {cam}'s excluded flag must be set: {av_sync}"
+            );
+            assert_eq!(
+                av_sync[cam]["exclude_reason"],
+                serde_json::json!("powered-off-2026-07-27"),
+                "#855: {cam}'s ack reason must be carried verbatim into the JSON: {av_sync}"
+            );
+            assert!(
+                av_sync[cam]["gate_pass"].is_null(),
+                "#855: an excluded camera's gate_pass must be null (never judged pass or fail), \
+                 not fabricated true/false: {av_sync}"
+            );
+        }
+        assert_eq!(
+            av_sync["cam4"]["verdict"],
+            serde_json::json!("unknown"),
+            "#855: cam4 is NOT acked -- absent-from-sweep must keep failing closed unchanged: {av_sync}"
+        );
+        assert_eq!(
+            av_sync["cam4"]["gate_pass"],
+            serde_json::json!(false),
+            "#855/#836: an unacked absent camera must still fail the gate -- excluding requires \
+             an EXPLICIT ack, never a bare lack of data: {av_sync}"
+        );
+    }
+
+    /// #855 acceptance — every currently-unscheduled camera acked offline must NEVER drag the
+    /// OVERALL `all_cambox_av_sync.gate_pass` down, even though NONE of them appear in the
+    /// switch schedule at all (only CAM1 is scheduled here; cam3/cam4/cam5/cam6/cam7 are all
+    /// acked). Contrasted against the identical fixture with NO acks, which fails closed exactly
+    /// like the pre-#855 behaviour -- proving this is a real behavioural change, not just a
+    /// per-camera cosmetic label.
+    #[test]
+    fn all_cambox_av_sync_gate_pass_true_when_every_unscheduled_camera_is_acked_855() {
+        let emit_log: Vec<(u8, u32, i64)> = (0..10u8).map(|k| (k, 1000 + k as u32, 0)).collect();
+        let audio_markers: Vec<(f64, u8)> = (0..10u8)
+            .map(|k| (k as f64 / 30.0 - 0.5, k)) // video_ts(1000+k) - 0.5s = k/30.0 - 0.5
+            .collect();
+        let av = AvMarkerInputs {
+            fps: 30.0,
+            video_start_s: 0.0,
+            emit_log,
+            audio_markers,
+        };
+        let cameras: &[(&str, u32, i64)] = &[("CAM1", CAM1B, 800_000_000)];
+        // 500ms is the constructed clean offset (video_ts(1000+k) - audio_ts = 0.5s, #312's
+        // established convention) -- av_expected_ms=500.0 makes cam1's (and cam2's) real
+        // measurement PASS, isolating this test to the exclusion behaviour of the other 5.
+        let acked = build_all_cambox_av_sync_fixture_with_ack(
+            "unscheduled-acked-855",
+            cameras,
+            Some(av.clone()),
+            500.0,
+            "cam3:reason,cam4:reason,cam5:reason,cam6:reason,cam7:reason",
+            None,
+        );
+        let unacked = build_all_cambox_av_sync_fixture_with_ack(
+            "unscheduled-unacked-855",
+            cameras,
+            Some(av),
+            500.0,
+            "",
+            None,
+        );
+
+        assert_eq!(
+            acked["all_cambox_av_sync"]["gate_pass"],
+            serde_json::json!(true),
+            "#855: every unscheduled camera was acked -> only cam1+cam2 are judged, both pass \
+             (measured 500ms == expected_ms 500) -> the overall gate must be true: \
+             {acked}"
+        );
+        assert_eq!(
+            unacked["all_cambox_av_sync"]["gate_pass"],
+            serde_json::json!(false),
+            "sanity: the IDENTICAL fixture with NO acks reproduces the pre-#855 fail-closed bug \
+             (cam3..cam7 absent+unacked -> unknown -> gate FAILS) -- proving the ack is what \
+             changed the outcome, not an unrelated fixture difference: {unacked}"
+        );
+    }
+
+    // ---- #714 — per-camera A/V coverage: a sample-starved (Unknown) camera gets a DERIVED
+    // estimate from cam2's own measured offset + this camera's #286 delivery-latency delta,
+    // whenever a --strih recording (delivery latency) is ALSO supplied this run. ----
+
+    /// Combines `build_all_cambox_av_sync_fixture`'s stream-recording construction (cam2's
+    /// optical dual-QR + each window's camera burn, feeding the A/V candidate pooling) with
+    /// `build_all_cambox_delivery_latency_fixture`'s strih-recording construction (each window's
+    /// camera burn + strih's own render burn, feeding `all_cambox_delivery_latency`) over the
+    /// SAME switch-schedule windows — so both blocks are populated from ONE consistent fixture,
+    /// letting a camera that is Unknown in `all_cambox_av_sync` ALSO have a #286 delivery sample
+    /// for `av_window::derive_camera_av_sync` to re-center against. `cameras` is `(cambox label,
+    /// camera burn run_id, delivery latency ns for strih)`.
+    fn build_all_cambox_av_sync_with_delivery_fixture(
+        tag: &str,
+        cameras: &[(&str, u32, i64)],
+        av: Option<AvMarkerInputs>,
+        av_expected_ms: f64,
+    ) -> serde_json::Value {
+        use super::{build_and_print_verdict, Cam1Source, DecodedRec};
+        use clap::Parser;
+
+        const ONE_S: i64 = 1_000_000_000;
+        let base = 6_000 * ONE_S;
+        let win = 5 * ONE_S;
+        let dir = std::env::temp_dir().join(format!("cb-714-avdel-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sched_path = dir.join("switch-schedule.json");
+        let windows_json: Vec<String> = cameras
+            .iter()
+            .enumerate()
+            .map(|(wi, &(label, _, _))| {
+                let start_ns = base + (wi as i64) * win;
+                let end_ns = start_ns + win;
+                format!(r#"{{"cambox":"{label}","start_ns":{start_ns},"end_ns":{end_ns}}}"#)
+            })
+            .collect();
+        std::fs::write(&sched_path, format!("[{}]", windows_json.join(","))).unwrap();
+
+        let mut stream_frames: Vec<RecordingFrame> = Vec::new();
+        let mut strih_frames: Vec<RecordingFrame> = Vec::new();
+        let mut idx = 0u64;
+        for (wi, &(_, camera_burn, delivery_latency_ns)) in cameras.iter().enumerate() {
+            let wstart = base + (wi as i64) * win;
+            for j in 0..20i64 {
+                let ts = wstart + (j + 1) * (ONE_S / 5);
+                let optical = 1000u32 + idx as u32;
+                stream_frames.push(RecordingFrame {
+                    frame_index: idx,
+                    payloads: vec![
+                        Payload {
+                            run_id: STRIH,
+                            frame_id: 1670 + idx as u32,
+                            gen_ts_ns: ts,
+                        },
+                        Payload {
+                            run_id: CAM2,
+                            frame_id: optical,
+                            gen_ts_ns: ts,
+                        },
+                        Payload {
+                            run_id: camera_burn,
+                            frame_id: 5000 + idx as u32,
+                            gen_ts_ns: ts,
+                        },
+                    ],
+                    tick: Some(optical),
+                });
+                strih_frames.push(RecordingFrame {
+                    frame_index: idx,
+                    payloads: vec![
+                        Payload {
+                            run_id: camera_burn,
+                            frame_id: 8000 + idx as u32,
+                            gen_ts_ns: ts,
+                        },
+                        Payload {
+                            run_id: STRIH,
+                            frame_id: 1670 + idx as u32,
+                            gen_ts_ns: ts + delivery_latency_ns,
+                        },
+                    ],
+                    tick: None,
+                });
+                idx += 1;
+            }
+        }
+
+        let args = super::Args::parse_from([
+            "recording-verdict",
+            "--switch-schedule",
+            sched_path.to_str().unwrap(),
+            "--switch-guard-ns",
+            "0",
+            "--switch-expected-step",
+            "2",
+            "--av-expected-ms",
+            &av_expected_ms.to_string(),
+        ]);
+
+        let (v, _pass) = build_and_print_verdict(
+            &args,
+            Some(DecodedRec {
+                frames: strih_frames,
+                rec_path: None,
+            }),
+            Some(DecodedRec {
+                frames: stream_frames,
+                rec_path: None,
+            }),
+            Cam1Source::Absent,
+            None,
+            None,
+            None, // #461: no imag frames in this fixture
+            av,
+        )
+        .expect("verdict");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        v
+    }
+
+    /// HEADLINE (#714): cam1's window carries 10 real, dense A/V candidates → Measured. cam3's
+    /// window carries ZERO A/V candidates (its ticks fall outside the emit-log range, mirroring
+    /// the sibling #312 fixture) → Unknown on its own — but BOTH cameras (plus cam2) have a
+    /// #286 delivery-latency sample this run, so cam3 gets a DERIVED estimate instead of a bare
+    /// "unknown", satisfying the #714 acceptance bar ("a value or reasoned bound for EVERY
+    /// camera"). cam4/cam5/cam6 never appear in the sweep at all (no delivery sample either) →
+    /// stay genuinely "unknown" (never a fabricated derivation from zero evidence).
+    #[test]
+    fn all_cambox_av_sync_derives_a_per_camera_estimate_for_a_sample_starved_camera_714() {
+        let emit_log: Vec<(u8, u32, i64)> = (0..10u8).map(|k| (k, 1000 + k as u32, 0)).collect();
+        let audio_markers: Vec<(f64, u8)> = (0..10u8).map(|k| (k as f64 / 30.0 - 0.5, k)).collect();
+        let av = AvMarkerInputs {
+            fps: 30.0,
+            video_start_s: 0.0,
+            emit_log,
+            audio_markers,
+        };
+        // cam1: delivery p50 = 800ms. cam3: delivery p50 = 840ms (40ms above cam1's) — mean of
+        // the two = 820ms, so cam3's derived offset = cam2's own offset + (840 - 820) = +20ms.
+        let v = build_all_cambox_av_sync_with_delivery_fixture(
+            "derive",
+            &[("CAM1", CAM1B, 800_000_000), ("CAM3", CAM3B, 840_000_000)],
+            Some(av),
+            0.0,
+        );
+
+        let av_sync = &v["all_cambox_av_sync"];
+        assert_eq!(
+            av_sync["cam1"]["verdict"],
+            serde_json::json!("measured"),
+            "sanity: cam1 must be a real measurement in this fixture: {av_sync}"
+        );
+        let cam2_offset = av_sync["cam2"]["av_offset_ms"]
+            .as_f64()
+            .expect("sanity: cam2 must be measured (whole-recording pool): {av_sync}");
+        assert_eq!(
+            av_sync["cam3"]["verdict"],
+            serde_json::json!("derived"),
+            "#714: cam3 is sample-starved on its own (0 candidates) but a delivery sample \
+             exists ⇒ DERIVED, never a bare unknown: {av_sync}"
+        );
+        assert!(
+            av_sync["cam3"]["av_offset_ms"].is_null(),
+            "#714: a derived estimate must NOT be written into av_offset_ms (reserved for a \
+             genuine independent measurement): {av_sync}"
+        );
+        let derived_offset = av_sync["cam3"]["derived_offset_ms"]
+            .as_f64()
+            .expect("#714: cam3 must carry derived_offset_ms: {av_sync}");
+        assert!(
+            (derived_offset - (cam2_offset + 20.0)).abs() < 1e-6,
+            "#714: expected cam2_offset({cam2_offset}) + (840 - 820) = {}, got {derived_offset}: {av_sync}",
+            cam2_offset + 20.0
+        );
+        assert_eq!(
+            av_sync["cam3"]["derived_from_cam2_offset_ms"],
+            serde_json::json!(cam2_offset),
+            "#714: the derivation's own cam2 anchor must be reported for traceability: {av_sync}"
+        );
+        assert_eq!(
+            av_sync["cam3"]["derived_delivery_spread_ms"],
+            serde_json::json!(40.0),
+            "#714: spread = max(840) - min(800) = 40ms: {av_sync}"
+        );
+        assert!(
+            av_sync["cam3"]["derived_note"]
+                .as_str()
+                .unwrap()
+                .contains("estimated"),
+            "#714: the derivation must be self-labeled, never presented as a real measurement: {av_sync}"
+        );
+        for absent in ["cam4", "cam5", "cam6"] {
+            assert_eq!(
+                av_sync[absent]["verdict"],
+                serde_json::json!("unknown"),
+                "#714: {absent} never appeared in this sweep (no delivery sample either) -> \
+                 genuinely unknown, never a fabricated derivation from zero evidence: {av_sync}"
+            );
+            assert!(
+                av_sync[absent]["derived_offset_ms"].is_null(),
+                "#714: {absent} must not carry a derived field when no derivation was possible: {av_sync}"
+            );
+        }
+    }
+
+    /// #714: the derived estimate's OWN gate can disagree with cam2's — a camera whose delivery
+    /// p50 is far enough above the mean pushes the re-centered offset outside ±20ms even though
+    /// cam2's own measured offset is safely inside it.
+    #[test]
+    fn all_cambox_av_sync_derived_gate_can_fail_even_when_cam2_itself_passes_714() {
+        let emit_log: Vec<(u8, u32, i64)> = (0..10u8).map(|k| (k, 1000 + k as u32, 0)).collect();
+        // Real markers land exactly at video_ts(1000+k) - 0.005s ⇒ cam1's (and cam2's own
+        // whole-recording) measured offset is a clean +5ms — safely inside ±20ms of expected=0.
+        let audio_markers: Vec<(f64, u8)> =
+            (0..10u8).map(|k| (k as f64 / 30.0 - 0.005, k)).collect();
+        let av = AvMarkerInputs {
+            fps: 30.0,
+            video_start_s: 0.0,
+            emit_log,
+            audio_markers,
+        };
+        // cam1: 800ms delivery. cam3: 870ms delivery (70ms above cam1's, mean=835ms) -> cam3's
+        // derived offset = 5 + (870 - 835) = 5 + 35 = 40ms -> OUTSIDE +/-20ms even though cam2's
+        // own measured +5ms offset comfortably passes.
+        let v = build_all_cambox_av_sync_with_delivery_fixture(
+            "derive-fail",
+            &[("CAM1", CAM1B, 800_000_000), ("CAM3", CAM3B, 870_000_000)],
+            Some(av),
+            0.0,
+        );
+
+        let av_sync = &v["all_cambox_av_sync"];
+        assert_eq!(
+            av_sync["cam2"]["gate_pass"],
+            serde_json::json!(true),
+            "sanity: cam2's own +5ms measured offset must pass the gate: {av_sync}"
+        );
+        assert_eq!(
+            av_sync["cam3"]["verdict"],
+            serde_json::json!("derived"),
+            "sanity: cam3 must reach the derived path: {av_sync}"
+        );
+        let derived_offset = av_sync["cam3"]["derived_offset_ms"].as_f64().unwrap();
+        assert!(
+            (derived_offset - 40.0).abs() < 1e-6,
+            "expected 5.0 + (870 - 835) = 40.0, got {derived_offset}: {av_sync}"
+        );
+        assert_eq!(
+            av_sync["cam3"]["gate_pass"],
+            serde_json::json!(false),
+            "#714: a re-centered offset outside +/-20ms must FAIL, independent of cam2's own \
+             PASS: {av_sync}"
+        );
+        assert_eq!(
+            v["overall_pass"],
+            serde_json::json!(false),
+            "#714: a failing DERIVED gate must force overall_pass=false, same severity as a \
+             failing MEASURED gate: {v}"
         );
     }
 
@@ -7874,6 +9160,7 @@ mod tests {
                 super::BURN_RUN_ID_CAM4,
                 CAM5B,
                 CAM6B,
+                CAM7B,
                 STRIH
             ]),
             "strih partial carries every CAMERA_UNDER_TEST_NODES id (#632) + strih"
@@ -7887,6 +9174,7 @@ mod tests {
                 super::BURN_RUN_ID_CAM4,
                 CAM5B,
                 CAM6B,
+                CAM7B,
                 STRIH,
                 STREAM
             ]),
@@ -7905,12 +9193,12 @@ mod tests {
     fn resolve_camera_under_test_label_defaults_to_cam1() {
         use super::resolve_camera_under_test_label;
         assert_eq!(
-            resolve_camera_under_test_label(true, false, false, false, false, false),
+            resolve_camera_under_test_label(true, false, false, false, false, false, false),
             "cam1",
             "cam1 present ⇒ cam1 (even if, hypothetically, another id were also present)"
         );
         assert_eq!(
-            resolve_camera_under_test_label(false, false, false, false, false, false),
+            resolve_camera_under_test_label(false, false, false, false, false, false, false),
             "cam1",
             "nothing present ⇒ the pre-#632 default, unchanged"
         );
@@ -7923,29 +9211,34 @@ mod tests {
     fn resolve_camera_under_test_label_resolves_to_the_deployed_camera() {
         use super::resolve_camera_under_test_label;
         assert_eq!(
-            resolve_camera_under_test_label(false, false, true, false, false, false),
+            resolve_camera_under_test_label(false, false, true, false, false, false, false),
             "cam3",
             "#632: cam1 absent, cam3 present ⇒ label must be cam3, not the stale cam1"
         );
         assert_eq!(
-            resolve_camera_under_test_label(false, false, false, true, false, false),
+            resolve_camera_under_test_label(false, false, false, true, false, false, false),
             "cam4",
             "#632: cam4 deployed ⇒ cam4"
         );
         assert_eq!(
-            resolve_camera_under_test_label(false, true, false, false, false, false),
+            resolve_camera_under_test_label(false, true, false, false, false, false, false),
             "cam2",
             "#632: cam2 (the fixed painter, ALSO camera-under-test role per #312) ⇒ cam2"
         );
         assert_eq!(
-            resolve_camera_under_test_label(false, false, false, false, true, false),
+            resolve_camera_under_test_label(false, false, false, false, true, false, false),
             "cam5",
             "#632: cam5 deployed ⇒ cam5"
         );
         assert_eq!(
-            resolve_camera_under_test_label(false, false, false, false, false, true),
+            resolve_camera_under_test_label(false, false, false, false, false, true, false),
             "cam6",
             "#632: cam6 deployed ⇒ cam6"
+        );
+        assert_eq!(
+            resolve_camera_under_test_label(false, false, false, false, false, false, true),
+            "cam7",
+            "#755: cam7 deployed ⇒ cam7"
         );
     }
 
@@ -8578,6 +9871,386 @@ mod tests {
             "clean 60->30 decimation on cam1 (ids step by 2) is ZERO loss (#571): {:?}",
             v.contiguity
         );
+    }
+
+    // ---- #706 — ALL-CAMBOX switch-schedule scoping (the fused-sweep BURN-UNREADABLE bug) ----
+
+    /// Like [`frame`], but each payload also carries an explicit `gen_ts_ns` — needed to place a
+    /// frame on a `--switch-schedule` timeline (#706). `frame()` hard-codes `gen_ts_ns: 1` for
+    /// every payload, which every OTHER test in this file is fine with since none of them place
+    /// frames on a schedule timeline.
+    fn frame_at(frame_index: u64, payloads: &[(u32, u32, i64)]) -> RecordingFrame {
+        let payloads: Vec<Payload> = payloads
+            .iter()
+            .map(|&(run_id, frame_id, gen_ts_ns)| Payload {
+                run_id,
+                frame_id,
+                gen_ts_ns,
+            })
+            .collect();
+        let tick = payloads.iter().map(|p| p.frame_id).max();
+        RecordingFrame {
+            frame_index,
+            payloads,
+            tick,
+        }
+    }
+
+    /// #706 regression (the pure scoping function) — a `CAMERA_UNDER_TEST_NODES` node's
+    /// in-window delivered-frame set must be restricted to ONLY its own switch-schedule program
+    /// window(s), never the whole recording. Two schedule windows: `[0,1000)` is cam1's OWN
+    /// program time, `[1000,2000)` is a DIFFERENT cambox's (CAM3). cam1's burn is present on the
+    /// first pair of frames (its own window) and absent on the second pair (CAM3's window — cam1
+    /// physically cannot appear there, by design, not loss). Pre-#706 (no scoping) BOTH pairs
+    /// would count toward cam1's window, manufacturing 2 phantom BURN-UNREADABLE frames.
+    #[test]
+    fn scope_camera_window_excludes_other_cambox_program_time_706() {
+        let schedule = vec![
+            super::SwitchWindow {
+                cambox: "CAM1".to_string(),
+                start_ns: 0,
+                end_ns: 1000,
+            },
+            super::SwitchWindow {
+                cambox: "CAM3".to_string(),
+                start_ns: 1000,
+                end_ns: 2000,
+            },
+        ];
+        let source: Vec<RecordingFrame> = vec![
+            frame_at(0, &[(STRIH, 1, 100)]),
+            frame_at(1, &[(STRIH, 2, 200)]),
+            frame_at(2, &[(STRIH, 3, 1100)]),
+            frame_at(3, &[(STRIH, 4, 1200)]),
+        ];
+        let window = vec![
+            super::RecordedBurnFrame {
+                frame_index: 0,
+                burn_id: Some(5000),
+            },
+            super::RecordedBurnFrame {
+                frame_index: 1,
+                burn_id: Some(5001),
+            },
+            super::RecordedBurnFrame {
+                frame_index: 2,
+                burn_id: None,
+            },
+            super::RecordedBurnFrame {
+                frame_index: 3,
+                burn_id: None,
+            },
+        ];
+        let scope = super::ScheduleScope {
+            schedule: &schedule,
+            anchor_run_ids: &[STRIH],
+            guard_ns: 0,
+        };
+        let scoped = scope_camera_window_to_own_schedule(
+            window,
+            "cam1",
+            &source,
+            &[STRIH],
+            None,
+            Some(scope),
+        );
+        assert_eq!(
+            scoped,
+            vec![
+                super::RecordedBurnFrame {
+                    frame_index: 0,
+                    burn_id: Some(5000),
+                },
+                super::RecordedBurnFrame {
+                    frame_index: 1,
+                    burn_id: Some(5001),
+                },
+            ],
+            "#706: cam1's window must be scoped to ONLY its own schedule window (frames 0/1) — \
+             cam3's program-time frames (2/3, where cam1 CANNOT carry a burn by design) must be \
+             excluded, not counted as cam1's phantom BURN-UNREADABLE"
+        );
+    }
+
+    /// #706 — `None` schedule scope must leave the window UNCHANGED (the pre-#706
+    /// single-camera-continuously-on-program behavior every existing fixture relies on).
+    #[test]
+    fn scope_camera_window_none_scope_is_a_no_op_706() {
+        let window = vec![
+            super::RecordedBurnFrame {
+                frame_index: 0,
+                burn_id: Some(1),
+            },
+            super::RecordedBurnFrame {
+                frame_index: 1,
+                burn_id: None,
+            },
+        ];
+        let source: Vec<RecordingFrame> = Vec::new();
+        let scoped =
+            scope_camera_window_to_own_schedule(window.clone(), "cam1", &source, &[], None, None);
+        assert_eq!(
+            scoped, window,
+            "#706: no --switch-schedule ⇒ window must pass through unchanged"
+        );
+    }
+
+    /// #706 — a non-`CAMERA_UNDER_TEST_NODES` node (strih/stream) must never be schedule-scoped,
+    /// even when a schedule IS supplied — those nodes are recorded continuously regardless of
+    /// which cambox is on program.
+    #[test]
+    fn scope_camera_window_never_scopes_non_camera_under_test_nodes_706() {
+        let schedule = vec![super::SwitchWindow {
+            cambox: "CAM1".to_string(),
+            start_ns: 0,
+            end_ns: 1,
+        }];
+        let window = vec![super::RecordedBurnFrame {
+            frame_index: 0,
+            burn_id: Some(1),
+        }];
+        // gen_ts 500 falls OUTSIDE the only window — if this node were (wrongly) scoped, it
+        // would be filtered out; strih/stream must come back UNCHANGED regardless.
+        let source: Vec<RecordingFrame> = vec![frame_at(0, &[(STRIH, 1, 500)])];
+        let scope = super::ScheduleScope {
+            schedule: &schedule,
+            anchor_run_ids: &[STRIH],
+            guard_ns: 0,
+        };
+        let scoped = scope_camera_window_to_own_schedule(
+            window.clone(),
+            "strih",
+            &source,
+            &[STRIH],
+            None,
+            Some(scope),
+        );
+        assert_eq!(
+            scoped, window,
+            "#706: strih/stream nodes must never be schedule-scoped"
+        );
+    }
+
+    /// #706 END-TO-END — `node_verdict_with_optical` with a switch-schedule scope must report
+    /// `is_zero()==true` for a camera-under-test node that is delivery-clean WITHIN its own
+    /// program window, even though the SAME recording carries a long stretch where a DIFFERENT
+    /// cambox is on program (and this node's burn is legitimately absent there). Pre-#706 this
+    /// synthetic recording would have reported the off-program stretch as BURN-UNREADABLE and
+    /// FAILED a genuinely zero-loss camera — reproducing the LIVE gate finding (#706: ~7000-8500
+    /// phantom BURN-UNREADABLE per camera, 0 REAL DROP, 0 genuine chain loss).
+    #[test]
+    fn node_verdict_with_optical_all_cambox_scope_ignores_other_cambox_program_time_706() {
+        let schedule = vec![
+            super::SwitchWindow {
+                cambox: "CAM1".to_string(),
+                start_ns: 0,
+                end_ns: 1000,
+            },
+            super::SwitchWindow {
+                cambox: "CAM3".to_string(),
+                start_ns: 1000,
+                end_ns: 2000,
+            },
+        ];
+        let mut stream: Vec<RecordingFrame> = Vec::new();
+        // Window 0 (cam1's own): 3 clean delivered frames, cam1 burn present + step-2 decimated.
+        for i in 0..3u32 {
+            stream.push(frame_at(
+                i as u64,
+                &[
+                    (CAM2, 100 + i, 100 + i as i64),
+                    (CAM1B, 2000 + i * 2, 100 + i as i64),
+                ],
+            ));
+        }
+        // Window 1 (a DIFFERENT cambox's own): 3 delivered frames, NO cam1 burn at all — cam1
+        // physically cannot appear while another cambox is on program.
+        for i in 0..3u32 {
+            stream.push(frame_at(3 + i as u64, &[(CAM2, 200 + i, 1100 + i as i64)]));
+        }
+        let optical = optical_span_facts(&stream, &[CAM1B, STRIH, STREAM], None);
+        let scope = super::ScheduleScope {
+            schedule: &schedule,
+            anchor_run_ids: &[STRIH, STREAM],
+            guard_ns: 0,
+        };
+        let v = node_verdict_with_optical(
+            &super::NodeSpec {
+                node: "cam1",
+                burn_run_id: CAM1B,
+                rate: BurnRate::PerEmittedFrame,
+                source: &stream,
+                rec_path: None,
+                cam2_run_id: None,
+                step: super::node_render_step("cam1", 60.0, 30.0, 60.0, 30.0), // = 2
+            },
+            &[CAM1B, STRIH, STREAM],
+            optical,
+            std::path::Path::new("/tmp"),
+            0,
+            Some(scope),
+        )
+        .unwrap();
+        assert!(
+            v.is_zero(),
+            "#706: cam1's OWN schedule window is delivery-clean; a different cambox's program \
+             time (where cam1 legitimately never appears) must NOT be counted as cam1's phantom \
+             BURN-UNREADABLE — got {:?}",
+            v.contiguity
+        );
+        assert_eq!(v.burn_unreadable(), 0, "#706: no phantom BURN-UNREADABLE");
+        assert_eq!(v.real_drops(), 0, "#706: no phantom REAL DROP either");
+    }
+
+    /// #708 END-TO-END — the LIVE incident reproduced through the FULL `node_verdict_with_optical`
+    /// pipeline for the "strih" node specifically (not just the pure kernel tested directly in
+    /// `burn_contiguity.rs`). strih's window stays genuinely UNSCOPED here
+    /// (`scope_camera_window_to_own_schedule` is a documented no-op for strih/stream, #706 — this
+    /// is a SEPARATE, additional mechanism on top of it), but the id sequence still carries a
+    /// backward jump landing EXACTLY at a confirmed `--switch-schedule` window boundary — the
+    /// EXACT shape of the live #708 finding (cam5's own free-running 911002 counter range
+    /// `66709..=67840` overlapped cam6's `66934..=68067`, both proven present in the real
+    /// recording, both downstream at stream — genuinely never lost). Without the fix this
+    /// would report a phantom `real_drop` at frame_index 2; with it, ZERO loss.
+    #[test]
+    fn node_verdict_with_optical_strih_backward_jump_at_confirmed_window_boundary_is_zero_loss_708()
+    {
+        let schedule = vec![
+            super::SwitchWindow {
+                cambox: "CAM4".to_string(),
+                start_ns: 0,
+                end_ns: 1000,
+            },
+            super::SwitchWindow {
+                cambox: "CAM2".to_string(),
+                start_ns: 1000,
+                end_ns: 2000,
+            },
+        ];
+        let stream: Vec<RecordingFrame> = vec![
+            frame_at(0, &[(CAM2, 900, 100), (STRIH, 100, 100)]),
+            frame_at(1, &[(CAM2, 901, 200), (STRIH, 103, 200)]),
+            // Window boundary at t=1000: a DIFFERENT source's OWN independent 911002 filter
+            // instance cuts onto program — its free-running counter value (101) is LOWER than
+            // the previous window's tail (103). Pre-#708 this reads as a backward-jump fault.
+            frame_at(2, &[(CAM2, 902, 1100), (STRIH, 101, 1100)]),
+            frame_at(3, &[(CAM2, 903, 1200), (STRIH, 106, 1200)]),
+        ];
+        let optical = optical_span_facts(&stream, &[STRIH, STREAM], None);
+        let scope = super::ScheduleScope {
+            schedule: &schedule,
+            anchor_run_ids: &[STRIH, STREAM],
+            guard_ns: 0,
+        };
+        let v = node_verdict_with_optical(
+            &super::NodeSpec {
+                node: "strih",
+                burn_run_id: STRIH,
+                rate: BurnRate::PerRenderTick,
+                source: &stream,
+                rec_path: None,
+                cam2_run_id: None,
+                step: super::node_render_step("strih", 60.0, 30.0, 60.0, 30.0),
+            },
+            &[STRIH, STREAM],
+            optical,
+            std::path::Path::new("/tmp"),
+            0,
+            Some(scope),
+        )
+        .unwrap();
+        assert!(
+            v.is_zero(),
+            "#708: a backward jump landing exactly at a CONFIRMED window boundary must not be a \
+             phantom drop — got {:?}",
+            v.contiguity
+        );
+        assert_eq!(v.real_drops(), 0, "#708: no phantom REAL DROP");
+    }
+
+    #[test]
+    fn node_verdict_with_optical_strih_backward_jump_within_the_real_transition_guard_is_zero_loss_741(
+    ) {
+        // #741: the #708 test above uses `guard_ns: 0`, which never exercises the ACTUAL bug --
+        // #708's exception is derived from `attribute_window_indices`'s window_of, which used to
+        // route through the GUARD-filtered `place_frame_in_window`. In PRODUCTION `guard_ns` is
+        // `DEFAULT_TRANSITION_GUARD_NS` (1s), and a genuine program switch changes the active
+        // render source within roughly one render tick (~30ms) of the boundary -- so the frames
+        // straddling a REAL cut are, by construction, ALWAYS inside that much-wider 1s guard band
+        // on their own side. Live-investigated (2026-07-15, #741): both fresh CI runs' every
+        // single flagged "real_drop" landed within 1-32ms of an actual switch-schedule boundary
+        // -- reproduced here with a jump 30ms before the boundary and 13ms after it, matching the
+        // measured magnitudes exactly.
+        let guard_ns = super::DEFAULT_TRANSITION_GUARD_NS;
+        let boundary_ns: i64 = 1_000_000_000; // 1s
+        let schedule = vec![
+            super::SwitchWindow {
+                cambox: "CAM4".to_string(),
+                start_ns: 0,
+                end_ns: boundary_ns,
+            },
+            super::SwitchWindow {
+                cambox: "CAM2".to_string(),
+                start_ns: boundary_ns,
+                end_ns: boundary_ns + 1_000_000_000,
+            },
+        ];
+        let before_ns = boundary_ns - 30_000_000; // 30ms before the cut
+        let after_ns = boundary_ns + 13_000_000; // 13ms after the cut
+        let stream: Vec<RecordingFrame> = vec![
+            frame_at(
+                0,
+                &[
+                    (CAM2, 900, before_ns - 100_000_000),
+                    (STRIH, 100, before_ns - 100_000_000),
+                ],
+            ),
+            // Last frame of window0, well inside the 1s guard on the "before" side.
+            frame_at(1, &[(CAM2, 901, before_ns), (STRIH, 103, before_ns)]),
+            // First frame of window1, well inside the 1s guard on the "after" side. A DIFFERENT
+            // source's own independent 911002 filter instance cuts onto program -- its
+            // free-running counter value (101) is LOWER than the previous window's tail (103).
+            frame_at(2, &[(CAM2, 902, after_ns), (STRIH, 101, after_ns)]),
+            frame_at(
+                3,
+                &[
+                    (CAM2, 903, after_ns + 100_000_000),
+                    (STRIH, 106, after_ns + 100_000_000),
+                ],
+            ),
+        ];
+        let optical = optical_span_facts(&stream, &[STRIH, STREAM], None);
+        let scope = super::ScheduleScope {
+            schedule: &schedule,
+            anchor_run_ids: &[STRIH, STREAM],
+            guard_ns,
+        };
+        let v = node_verdict_with_optical(
+            &super::NodeSpec {
+                node: "strih",
+                burn_run_id: STRIH,
+                rate: BurnRate::PerRenderTick,
+                source: &stream,
+                rec_path: None,
+                cam2_run_id: None,
+                step: super::node_render_step("strih", 60.0, 30.0, 60.0, 30.0),
+            },
+            &[STRIH, STREAM],
+            optical,
+            std::path::Path::new("/tmp"),
+            0,
+            Some(scope),
+        )
+        .unwrap();
+        assert!(
+            v.is_zero(),
+            "#741: a backward jump landing within the REAL (1s) transition guard of a CONFIRMED \
+             window boundary must not be a phantom drop -- the guard-filtered window_of used to \
+             blind attribute_window_indices to exactly this case (both sides always land inside \
+             the guard on a genuine cut) -- got {:?}",
+            v.contiguity
+        );
+        assert_eq!(v.real_drops(), 0, "#741: no phantom REAL DROP");
     }
 
     #[test]

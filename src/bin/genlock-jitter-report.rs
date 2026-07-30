@@ -19,15 +19,25 @@
 //! ```text
 //! genlock-jitter-report < obs.log
 //! genlock-jitter-report --file /path/to/obs.log
+//! genlock-jitter-report --file /path/to/obs.log --json
 //! ```
+//!
+//! `--json` (#757): prints [`camera_box::jitter_audit::summaries_to_json`]'s per-source
+//! object instead of the text table — the machine-readable shape a pre-record phase
+//! calibrator (`scripts/prerecord_phase_calibrate.py`) consumes to reconstruct each source's
+//! absolute cam→strih transit latency (`latency_ms + mean_head_skew_ms`) without a full
+//! recording. The text table stays the default (unchanged) for a human reading it directly.
 //!
 //! **Exit codes:** `0` — at least one source's audit lines were found and reported;
 //! `2` — no `genlock-fifo audit` lines found in the input, or an I/O error reading it.
 
-use camera_box::jitter_audit::{parse_audit_lines, summarize_all};
+use camera_box::jitter_audit::{parse_audit_lines, summaries_to_json, summarize_all};
 use std::io::Read;
 
 fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let json_mode = args.iter().any(|a| a == "--json");
+
     let text = match read_input() {
         Ok(t) => t,
         Err(e) => {
@@ -46,6 +56,12 @@ fn main() {
     }
 
     let summaries = summarize_all(&samples);
+
+    if json_mode {
+        println!("{}", summaries_to_json(&summaries));
+        return;
+    }
+
     println!(
         "{:<20} {:>8} {:>11} {:>11} {:>7} {:>14} {:>8} {:>9} {:>16} {:>17} {:>11}",
         "source",
@@ -79,17 +95,27 @@ fn main() {
 }
 
 /// Read the input text: `--file <path>` if given, else stdin.
+///
+/// #757: LOSSY UTF-8 decode (`String::from_utf8_lossy`), never `read_to_string`'s strict
+/// decode. A real strih OBS log pulled via PowerShell `Get-Content` over ssh can carry a
+/// handful of invalid UTF-8 bytes from a console-encoding hop (the multi-byte "≈" glyph in
+/// `latency_ms=N (≈F frames @ ...)` is the observed offender) — a STRICT read fails on the
+/// very first bad byte anywhere in a 600KB+ log, discarding every otherwise-parseable audit
+/// line in the whole file. A lossy read changes nothing for a genuinely clean line: the
+/// corrupted bytes only ever land inside decorative text `parse_audit_line` already treats
+/// as skippable (no `key=value` token can contain a raw non-ASCII byte in the first place).
 fn read_input() -> std::io::Result<String> {
     let args: Vec<String> = std::env::args().collect();
     let mut it = args.iter().skip(1);
     while let Some(arg) = it.next() {
         if arg == "--file" {
             if let Some(path) = it.next() {
-                return std::fs::read_to_string(path);
+                let bytes = std::fs::read(path)?;
+                return Ok(String::from_utf8_lossy(&bytes).into_owned());
             }
         }
     }
-    let mut buf = String::new();
-    std::io::stdin().read_to_string(&mut buf)?;
-    Ok(buf)
+    let mut buf = Vec::new();
+    std::io::stdin().read_to_end(&mut buf)?;
+    Ok(String::from_utf8_lossy(&buf).into_owned())
 }

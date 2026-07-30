@@ -78,6 +78,18 @@ pub const TOP_MARGIN_PX: u32 = 24;
 /// it derives the central gap with this same qr_size by default.
 pub const DEFAULT_QR_SIZE: u32 = 700;
 
+/// #718/#754 — crop height (px), measured from the top, for a `frac` fraction of `frame_h`,
+/// floor-clamped to `[1, frame_h]`. Pure arithmetic seam shared by the two probe-gated retry
+/// crops that need it: `qr::robust_optical_top_band` (the #754 continuity-decode top-band
+/// recovery) and `colour_sample::detect_dual_qr`'s OWN retry (#718 — the colour-gate localizer
+/// never got the #754 fix at all). Both crops are `(0, 0, w, this_height)` — top-left anchored,
+/// so a grid detected inside the crop keeps VALID full-frame pixel coordinates, no transform
+/// needed. Kept here (not duplicated in each probe-gated call site) so the crop-height math has
+/// ONE source of truth and is Tier-0 unit-tested without pulling in `image`/`rqrr` (#185).
+pub fn top_band_crop_height(frame_h: u32, frac: f32) -> u32 {
+    (((frame_h as f32) * frac) as u32).clamp(1, frame_h.max(1))
+}
+
 /// Inner margin (px) inset on EACH side of the central gap before the colour column, so a patch
 /// never touches a QR edge (covers the QR quiet zone + any integer rounding in the gap geometry).
 pub const COLUMN_INNER_MARGIN_PX: u32 = 10;
@@ -511,5 +523,33 @@ mod tests {
             }),
             "disjoint"
         );
+    }
+
+    #[test]
+    fn top_band_crop_height_matches_the_754_production_constant() {
+        // 1080 * 0.67 = 723.6 -> floors to 723 (matches qr.rs's own historical inline computation,
+        // proven live on the #754/#718 fixtures — never round UP past what the pixels support).
+        assert_eq!(top_band_crop_height(1080, 0.67), 723);
+    }
+
+    #[test]
+    fn top_band_crop_height_floor_clamps_to_at_least_one_px() {
+        // A degenerate 0-height frame must never divide-by-zero or panic downstream — clamp to 1.
+        assert_eq!(top_band_crop_height(0, 0.67), 1);
+        // A vanishingly small frac still yields >= 1px, never 0 (a 0px crop is unusable).
+        assert_eq!(top_band_crop_height(100, 0.0), 1);
+    }
+
+    #[test]
+    fn top_band_crop_height_never_exceeds_frame_height() {
+        // frac >= 1.0 clamps to the full frame height, never overshoots it.
+        assert_eq!(top_band_crop_height(1080, 1.0), 1080);
+        assert_eq!(top_band_crop_height(1080, 2.5), 1080);
+    }
+
+    #[test]
+    fn top_band_crop_height_scales_with_frame_height() {
+        // A 4K-tall frame gets a proportionally taller crop, not a fixed pixel count.
+        assert_eq!(top_band_crop_height(2160, 0.67), 1447);
     }
 }

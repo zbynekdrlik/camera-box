@@ -49,8 +49,10 @@ fn recording_verdict_on_imag_script_exists() {
     }
 }
 
-/// UNLIKE its Windows siblings, this script must target imag over PLAIN SSH (the ssh/scp-denied
-/// constraint is specific to Windows) — it must reference the imag box IP and NEVER the win-*
+/// UNLIKE its Windows siblings' DEFAULT planner mode, this script must target imag over PLAIN SSH
+/// (imag-nb is a plain Linux box reached directly, same access class as cam1/cam2; the Windows
+/// siblings default to the win-* MCP for a GUI-adjacent workflow, though #701/#703 gave them an
+/// opt-in --execute ssh path too) — it must reference the imag box IP and NEVER the win-*
 /// MCP names (those are strictly for strih/stream).
 #[test]
 fn on_imag_helper_targets_imag_over_plain_ssh_not_mcp() {
@@ -106,6 +108,21 @@ fn build_onimag_command_produces_a_safely_quoted_command() {
     assert!(
         cmd.contains("--imag") && cmd.contains("--out"),
         "#462: the on-imag command must forward the --imag/--out args. Got: {cmd:?}"
+    );
+    // #767 follow-up (live stutter, 2026-07-15 ~18:10): the on-imag decode ran UNTHROTTLED at
+    // 313% CPU (+ its ffmpeg child) alongside production OBS (~400% -- with keep-alive ALL 16
+    // NDI receivers decode continuously), driving load to 27 on a 16-thread box; the starved
+    // NDI decode threads made every source stutter on the projection while the compositor still
+    // reported 60fps. The decode is a BATCH job: it must run nice -n 19 and pinned to cores
+    // 12-15 -- fully OFF the cores OBS is pinned to (taskset -c 2-11 in the watchdog/systemd-run
+    // launch), so it can never compete with the production render/decode again.
+    assert!(
+        cmd.contains("nice -n 19"),
+        "#767: the on-imag decode must run at nice 19 (batch priority). Got: {cmd:?}"
+    );
+    assert!(
+        cmd.contains("taskset -c 12-15"),
+        "#767: the on-imag decode must be pinned OFF the OBS cores (2-11) onto 12-15. Got: {cmd:?}"
     );
     // The space-containing path must be safely quoted (bash %q either backslash-escapes the
     // space or single-quotes the whole token) — re-running the printed command line through bash

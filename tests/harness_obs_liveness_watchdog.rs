@@ -6,7 +6,8 @@
 //! WebSocket `GetStats` on strih+stream (no ssh/MCP needed for DETECTION), runs the strict
 //! `obs_watchdog::classify` verdict, and — once a wedge is CONFIRMED over 2 consecutive passes —
 //! fires a Discord alert carrying the exact agent-driven recovery command (a dev1 timer cannot
-//! itself force-kill/relaunch obs64 on Windows — ssh is denied, the win-* MCP is agent-only).
+//! itself force-kill/relaunch obs64 on Windows — the win-* MCP is agent-only, and a headless
+//! ssh-based recovery was never built even though #701 proved plain scp/ssh reaches strih/stream).
 //!
 //! These are pure-shell / content tests — NO rig, NO OBS, NO MCP. We test the pure decision
 //! functions (obs_watchdog_confirm / obs_watchdog_alert_throttle) and the wrapper script's wiring +
@@ -297,7 +298,7 @@ fn watchdog_polls_both_broadcast_boxes_via_the_python_probe() {
 #[test]
 fn watchdog_embeds_the_agent_driven_recovery_command() {
     // The auto-recover design decision (#391): a dev1 timer cannot itself force-kill/relaunch
-    // obs64 (ssh denied, win-* MCP is agent-only). The alert MUST embed the exact recovery
+    // obs64 (win-* MCP is agent-only, no headless ssh recovery built yet). The alert MUST embed the exact recovery
     // command so recovery is a single paste-and-go for whichever agent sees the alert.
     let src = fs::read_to_string(watchdog()).unwrap();
     assert!(

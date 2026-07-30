@@ -6,10 +6,13 @@
 # big (no multi-GB recording ever lands here, only the small partial JSON + a handful of #186
 # pixel-proof PNGs).
 #
-# WHY THIS SCRIPT ACTUALLY EXECUTES (unlike its Windows siblings): win-strih / win-stream-snv are
-# reached ONLY via the win-* MCP — ssh/scp to those Windows boxes is DENIED on this rig, so those
-# two sibling scripts are PURE PLANNERS: they print the exact command for an agent/operator to
-# paste into the MCP Shell. imag-nb is a plain Ubuntu box (same access class as cam1/cam2 — see
+# WHY THIS SCRIPT ACTUALLY EXECUTES (unlike its Windows siblings BY DEFAULT): win-strih /
+# win-stream-snv are reached via the win-* MCP by default, and their two sibling scripts default
+# to PURE PLANNER mode: they print the exact command for an agent/operator to paste into the MCP
+# Shell — #701 proved plain scp/ssh actually reaches strih/stream too (targets.md creds), and #703
+# already wired an opt-in `--execute` mode into both siblings that runs the SAME shape of flow
+# this script always has (see their own headers); planner mode just stays their default for a
+# manual/workflow_dispatch run. imag-nb is a plain Ubuntu box (same access class as cam1/cam2 — see
 # targets.md's "Linux OBS Targets" table, SSH newlevel/newlevel) — bash CAN ssh/scp it directly.
 # So THIS script does the real work itself: deploy the verdict binary (if not already there),
 # run the extract-partial ON imag against its LOCAL recording, and scp the small results back to
@@ -48,7 +51,13 @@ set -euo pipefail
 # only, %q-quoted — no dev1 path, no unescaped argument) WITHOUT touching the network.
 build_onimag_command() {
   local exe="$1"; shift
-  printf 'RUST_LOG=info %q' "$exe"
+  # #767: the decode is a BATCH job on a box running PRODUCTION OBS — with the keep-alive build
+  # all 16 NDI receivers decode continuously (~4 cores), and an unthrottled decode (313% CPU +
+  # ffmpeg child) drove load to 27 → starved NDI threads → user-visible stutter on the
+  # projection while the compositor still reported 60fps (live, 2026-07-15). nice 19 + pinned
+  # to cores 12-15, fully OFF the cores OBS is pinned to (taskset -c 2-11 at launch). The
+  # ffmpeg child inherits both. Decode takes longer on 4 E-cores — irrelevant for a batch job.
+  printf 'nice -n 19 taskset -c 12-15 env RUST_LOG=info %q' "$exe"
   local a
   for a in "$@"; do
     printf ' %q' "$a"

@@ -16,9 +16,11 @@ and this ticket, #454 (the runbook + the acceptance gate below). See also `.clau
 for the DanteSync clock, realtime CPU isolation, and rig-recovery background this runbook builds
 on top of.
 
-**cam7 does NOT exist (#593)** — the user only expressed FUTURE interest in a 7th camera; no
-box has ever been built or connected. It is deliberately absent from `camera-set.sh`'s active
-fleet map below; add it (one line) when a real cam7 box exists.
+**cam7 EXISTS now (#753, 2026-07-14)** — the #593 "user only expressed future interest" premise
+is superseded: the user brought the hardware, it was built + provisioned via this exact runbook
+(create-usb-linux.sh --target-disk /dev/sda, setup-device.sh CAM7 --binary, verify-device.sh
+ALL CLEAR 21/21). It is now a full fleet member in `camera-set.sh`'s active map below (10.77.9.67,
+Elgato 4K S).
 
 ## The 4-phase flow
 
@@ -192,6 +194,22 @@ something `verify-device.sh` should be loosened to tolerate.
   4. `apt-mark hold linux-image-<pinned>-generic linux-headers-<pinned>-generic` — re-pin the
      CURRENT (surviving) kernel so a future `apt-get upgrade` can't silently pull in a new one
      again. Never leave the box unheld after cleanup.
+- **A DIFFERENT apt-BROKEN signature on cam3 (#743/#750, 2026-07-14) — `linux-image-generic`
+  depends on a kernel version that was never installed, blocking ANY `apt-get install` fleet-wide,
+  not just kernel ops:**
+  ```
+  E: Unmet dependencies. Try 'apt --fix-broken install' with no packages (or specify a solution).
+   linux-image-generic : Depends: linux-image-6.8.0-124-generic but it is not going to be installed
+  ```
+  Distinct from the held-metapackage-on-purge gotcha above (that one is triggered by REMOVING an
+  old kernel; this one blocks EVERY normal install, unprovoked). **Do NOT run
+  `apt --fix-broken install` blind** on a #295/#547-hardened appliance — it may try to install/
+  remove a kernel under the brick-hardening guards. For installing ONE unrelated package (the
+  live case: `psmisc`) while the real fix is pending, bypass the full dependency-graph resolver
+  entirely: `cd /tmp && apt-get download <pkg> && dpkg -i <pkg>*.deb` — downloads + installs just
+  that .deb without touching the broken kernel chain. Root cause not yet diagnosed (tracked #750)
+  — investigate `dpkg -l | grep linux-image`, `apt-mark showhold`, `uname -r` before attempting a
+  real fix.
 - **`setup-device.sh` re-run against an already-booted ro appliance now self-remounts (#599)** —
   STEP 15-18 (fwupd purge, package install, timesync/linuxptp purge, fstab rewrite) all need a
   writable root; `ensure_root_writable()`/`restore_root_mode()` detect a ro root, remount rw for
@@ -253,14 +271,12 @@ Single source of truth for NAME → IP / NDI source name / genlock FPS, used by 
 ```
 cam1 -> 10.77.9.61 / "CAM1 (usb)"     cam5 -> 10.77.9.65 / "CAM5 (usb)"
 cam2 -> 10.77.9.62 / "CAM2 (usb)"     cam6 -> 10.77.9.66 / "CAM6 (usb)"
-cam3 -> 10.77.9.63 / "CAM3 (usb)"
+cam3 -> 10.77.9.63 / "CAM3 (usb)"     cam7 -> 10.77.9.67 / "CAM7 (usb)" (#753, 2026-07-14)
 cam4 -> 10.77.9.64 / "CAM4 (usb)"
-
-cam7 -> NOT BUILT (#593) — no box exists; add a row here (mirroring the six above) when it does.
 ```
 
-All six emit genlock at 60fps today (`CAMERA_GENLOCK_FPS`, per-cam table in `camera_resolve()`).
-Adding cam7 (or any further camera) means editing `camera-set.sh` ONCE — every script downstream
+All seven emit genlock at 60fps today (`CAMERA_GENLOCK_FPS`, per-cam table in `camera_resolve()`).
+Adding an 8th (or further) camera means editing `camera-set.sh` ONCE — every script downstream
 (including `verify-device.sh`) picks it up automatically.
 
 **Gotcha — removing/adding a fleet camera changes behavior DIFFERENTLY across resolvers (#593),
@@ -333,14 +349,14 @@ keep cam2 on ExecStart (not migrate it to config.toml, which would have required
 the WHOLE fleet in one pass — the fleet-wide drift-guard loop:
 
 ```bash
-scripts/verify-fleet.sh                 # cam1..cam6 (or camera-set.sh's CAMERA_SET override)
+scripts/verify-fleet.sh                 # cam1..cam7 (or camera-set.sh's CAMERA_SET override)
 CAMERA_SET="cam1 cam3" scripts/verify-fleet.sh   # a subset
 ```
 
 Each box in the set is checked for SSH reachability FIRST — an offline box (mid-reboot/deploy)
 is reported **SKIPPED**, never a hard FAIL; only a reachable box that fails
 `verify-device.sh`'s own acceptance gate counts as a fleet FAIL. An unresolvable camera NAME
-(e.g. `cam7` — never built, #593) is a distinct **invalid** verdict, not SKIPPED. Exit
+(e.g. a typo like `cam9`) is a distinct **invalid** verdict, not SKIPPED. Exit
 status is nonzero iff at least one reachable box FAILed (a fleet of all-SKIPPED/all-PASS boxes
 exits 0). Run it periodically (or after any fleet-wide change) to catch drift before it becomes
 a live-event surprise, instead of re-deriving each box's state by hand.

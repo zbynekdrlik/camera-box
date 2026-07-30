@@ -21,7 +21,7 @@
 #   scripts/deploy-fleet.sh                       # deploy latest successful main ci.yml artifact to cam1-6
 #   scripts/deploy-fleet.sh --run <run-id>        # pin a specific GitHub Actions run id
 #   scripts/deploy-fleet.sh --binary ./dist/camera-box   # deploy an already-downloaded CI binary
-#   CAMERA_SET="cam2" scripts/deploy-fleet.sh     # restrict to a subset (default: cam1 cam2 cam3 cam4 cam5 cam6)
+#   CAMERA_SET="cam2" scripts/deploy-fleet.sh     # restrict to a subset (default: $CAMERA_ACTIVE_SET, camera-set.sh; today cam1-4, #827)
 #
 # Env:
 #   SSH_PASS   camera root password (default: newlevel)
@@ -47,7 +47,7 @@ SSH_PASS="${SSH_PASS:-newlevel}"
 REPO="${REPO:-zbynekdrlik/camera-box}"
 BRANCH="${BRANCH:-main}"
 ARTIFACT="${ARTIFACT:-camera-box-linux-amd64}"
-SET="${CAMERA_SET:-cam1 cam2 cam3 cam4 cam5 cam6}"
+SET="${CAMERA_SET:-$CAMERA_ACTIVE_SET}"
 
 RUN_ID=""
 BINARY=""

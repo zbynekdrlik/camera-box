@@ -42,7 +42,7 @@
 #
 # Options:
 #   --so-path PATH     the candidate NDI Linux runtime .so to roll out (required)
-#   --set "cam1 ..."    camera set to upgrade (default: cam1 cam2 cam3 cam4 cam5 cam6)
+#   --set "cam1 ..."    camera set to upgrade (default: $CAMERA_ACTIVE_SET, camera-set.sh; today cam1-4, #827)
 #   --canary "camN ..." pin the canary camera SET (space-separated; default: one representative
 #                       per distinct NDI-runtime box-class present in --set — #452, so a
 #                       real-file/no-strings box like cam3 always gets its own canary proof
@@ -338,7 +338,7 @@ NDI_DEST_DIR="${NDI_DEST_DIR:-/usr/lib/ndi}"
 . "$HERE/lib/cli-log.sh"   # log()/info()/warn()/err() (#559, shared with deploy-fleet.sh + verify-fleet.sh)
 
 SO_PATH=""
-SET="${CAMERA_SET:-cam1 cam2 cam3 cam4 cam5 cam6}"
+SET="${CAMERA_SET:-$CAMERA_ACTIVE_SET}"
 CANARY_OVERRIDE=""
 FORCE=0
 DRY_RUN=0

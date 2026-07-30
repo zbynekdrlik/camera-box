@@ -1033,3 +1033,31 @@ fn release_workflow_does_not_package_setup_sh() {
          never be copied into artifacts/ or listed as a release asset again"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// #743 — a fresh provision lacked `psmisc` (provides `fuser`), exposed by cam2's 2026-07-13
+// rebuild: `scripts/rig-mode.sh test` FALSE-FAILED its #464 KMS-held check (`fuser -s
+// /dev/dri/card1` -> "command not found" -> the check read "not held" even though the painter
+// was alive), and `scripts/recording-e2e.sh`'s [2/8]/[2b/8] capture-release busy-wait
+// (`while fuser -s $V4L2_NEUTRAL_NODE ...`) silently became a no-op the SAME way — `fuser` exits
+// 127 on a box that doesn't have it, which reads as "already released" to the `while` condition,
+// making the wait guard inert without any visible error. Same dual-bake precedent as #362 above:
+// both live-install builders must carry it so a re-provisioned box never regresses.
+
+/// `psmisc` joins the SAME two builder scripts the #362 NDI runtime deps live in.
+const PSMISC_PACKAGE: &str = "psmisc";
+
+/// 12. Every builder must install `psmisc` (provides `fuser`) — without it, rig-mode.sh's #464
+///     KMS-held check false-FAILs and recording-e2e.sh's capture-release busy-wait silently no-ops.
+#[test]
+fn builders_install_psmisc_743() {
+    for script in NDI_RUNTIME_SCRIPTS {
+        let body = read(script);
+        assert!(
+            appears_on_active_line(&body, PSMISC_PACKAGE),
+            "{script} must install `psmisc` (provides `fuser`) on a real command line (not just \
+             a comment/echo) — a fresh cam2 clone had no `fuser` at all, false-FAILing rig-mode.sh's \
+             #464 KMS-held check and silently no-op'ing recording-e2e.sh's capture-release wait (#743)"
+        );
+    }
+}

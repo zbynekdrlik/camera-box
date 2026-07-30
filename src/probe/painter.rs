@@ -85,6 +85,11 @@ pub struct PaintParams {
     /// monitor's colours be checked by eye AND sampled per-patch from the recording
     /// (the #364 colour gate). When `false` the canvas carries only the QR(s).
     pub colour_scale: bool,
+    /// #751: also paint the constant-velocity motion sweep (a bright ball sweeping the bottom
+    /// band) so judder is visible BY EYE on the monitor / multiview / recording, not only via QR
+    /// decode. Fully outside the dual-QR + colour-scale zones. Default: ON in --paint-only mode
+    /// (the permanent cam2 painter shows it), OFF otherwise.
+    pub motion_sweep: bool,
 }
 
 /// Vernier dual-QR ids for refresh counter `tick`. LEFT carries the latest EVEN
@@ -95,6 +100,23 @@ pub fn vernier_ids(tick: u64) -> (u32, u32) {
     let left = tick & !1; // latest even <= tick
     let right = if tick == 0 { 0 } else { (tick - 1) | 1 }.min(tick); // latest odd <= tick
     (left as u32, right as u32)
+}
+
+/// #854: per-side "last stamped" `gen_ts_ns` for the dual-QR Vernier, persisted across painter
+/// ticks by the caller so the SETTLED side's rendered payload stays byte-identical to the
+/// previous tick — only the FRESH side (the one whose `frame_id` just changed, per
+/// [`vernier_ids`]) gets a new `gen_ts_ns` baked into its payload this tick. Before this existed,
+/// `paint_one_frame` stamped a fresh `gen_ts_ns` into BOTH halves every tick regardless of which
+/// side changed, so the settled half's QR pixels silently differed tick-to-tick too — defeating
+/// the anti-blur/tear-tolerance guarantee ([`vernier_ids`]'s own doc comment: "the other is
+/// settled (sharp)"). The tick's own returned/logged `gen_ts_ns` (the ground truth
+/// `recording-verdict` joins on by tick/frame_id) is UNCHANGED by this — it is still the fresh
+/// clock read every tick; only the SETTLED side's BAKED payload now correctly reflects when that
+/// content was actually last generated instead of claiming "now".
+#[derive(Debug, Clone, Copy, Default)]
+struct VernierGenTs {
+    left: i64,
+    right: i64,
 }
 
 /// Render + present ONE frame and return `(logical_id, gen_ts_ns, flip_ts_ns)`.
@@ -123,6 +145,7 @@ fn paint_one_frame(
     start: Instant,
     frame_id: u32,
     refresh_tick: u64,
+    vernier_gen: &mut VernierGenTs,
 ) -> Result<(u32, i64, i64)> {
     let gen_ts_ns = clock_ns(start, params.wall_clock);
 
@@ -133,15 +156,28 @@ fn paint_one_frame(
         // tick. Exactly one half changes per refresh — the other is settled (sharp).
         let (l, r) = vernier_ids(refresh_tick);
         let logical_id = l.max(r); // the freshly-painted half's id
+                                   // #854: left is fresh exactly on EVEN ticks (vernier_ids' `l == tick` there); right is
+                                   // fresh on ODD ticks, PLUS tick 0 (the bootstrap — both sides start fresh together, same
+                                   // as vernier_ids(0) == (0, 0)). Only a fresh side's stored gen_ts_ns advances this tick;
+                                   // a settled side keeps whatever it was last stamped with, so its payload — and therefore
+                                   // its rendered QR pixels — is byte-identical to the previous tick.
+        let left_fresh = refresh_tick.is_multiple_of(2);
+        let right_fresh = refresh_tick == 0 || !refresh_tick.is_multiple_of(2);
+        if left_fresh {
+            vernier_gen.left = gen_ts_ns;
+        }
+        if right_fresh {
+            vernier_gen.right = gen_ts_ns;
+        }
         let left_payload = Payload {
             run_id: params.run_id,
             frame_id: l,
-            gen_ts_ns,
+            gen_ts_ns: vernier_gen.left,
         };
         let right_payload = Payload {
             run_id: params.run_id,
             frame_id: r,
-            gen_ts_ns,
+            gen_ts_ns: vernier_gen.right,
         };
         (
             logical_id,
@@ -176,6 +212,18 @@ fn paint_one_frame(
             params.canvas_h,
             params.qr_size,
             crate::probe::qr::TOP_MARGIN_PX,
+        );
+    }
+
+    // #751 — paint the motion sweep LAST (over the blank bottom band, clear of every decode zone),
+    // keyed on `refresh_tick` (the per-frame counter that advances in BOTH single- and dual-QR
+    // modes), so its position is a pure function of the painter frame index.
+    if params.motion_sweep {
+        crate::probe::qr::blit_motion_sweep_bgra(
+            &mut bgra,
+            params.canvas_w,
+            params.canvas_h,
+            refresh_tick,
         );
     }
 
@@ -254,10 +302,18 @@ pub fn run_painter(
 
     // Dual-QR Vernier: counts refreshes so vernier_ids can assign stable left/right ids.
     let mut refresh_tick: u64 = 0;
+    // #854: per-side last-stamped gen_ts_ns, persisted across ticks — see VernierGenTs.
+    let mut vernier_gen = VernierGenTs::default();
 
     while !stop.load(Ordering::Relaxed) {
-        let (logical_id, gen_ts_ns, flip_ts_ns) =
-            paint_one_frame(presenter.as_mut(), &params, start, frame_id, refresh_tick)?;
+        let (logical_id, gen_ts_ns, flip_ts_ns) = paint_one_frame(
+            presenter.as_mut(),
+            &params,
+            start,
+            frame_id,
+            refresh_tick,
+            &mut vernier_gen,
+        )?;
         emitted
             .lock()
             .unwrap()
@@ -300,7 +356,7 @@ pub fn run_painter(
 
 #[cfg(test)]
 mod tests {
-    use super::{paint_one_frame, vernier_ids, PaintParams};
+    use super::{paint_one_frame, vernier_ids, PaintParams, VernierGenTs};
     use crate::probe::presenter::{Presenter, PresenterKind};
     use anyhow::Result;
     use std::time::{Duration, Instant};
@@ -339,6 +395,7 @@ mod tests {
             wall_clock: false,
             dual_qr: false,
             colour_scale: false,
+            motion_sweep: false,
         }
     }
 
@@ -354,7 +411,8 @@ mod tests {
         };
         let params = test_params();
         let start = Instant::now();
-        let (id, gen_ts, flip_ts) = paint_one_frame(&mut p, &params, start, 0, 0).unwrap();
+        let (id, gen_ts, flip_ts) =
+            paint_one_frame(&mut p, &params, start, 0, 0, &mut VernierGenTs::default()).unwrap();
         assert_eq!(id, 0, "single-QR logical id is the frame_id");
         assert!(flip_ts >= gen_ts, "flip_ts >= gen_ts always");
         let gap_ms = (flip_ts - gen_ts) as f64 / 1_000_000.0;
@@ -376,7 +434,8 @@ mod tests {
         let mut params = test_params();
         params.dual_qr = true;
         let start = Instant::now();
-        let (id, gen_ts, flip_ts) = paint_one_frame(&mut p, &params, start, 0, 4).unwrap();
+        let (id, gen_ts, flip_ts) =
+            paint_one_frame(&mut p, &params, start, 0, 4, &mut VernierGenTs::default()).unwrap();
         // refresh_tick 4 ⇒ vernier_ids(4) = (4, 3) ⇒ logical_id = max = 4.
         assert_eq!(
             id, 4,
@@ -385,6 +444,96 @@ mod tests {
         assert!(
             flip_ts >= gen_ts,
             "flip_ts >= gen_ts on instant present too"
+        );
+    }
+
+    /// A presenter that stores the last frame it was given, so a test can decode what was
+    /// actually rendered (paint_one_frame itself only returns the (id, gen_ts, flip_ts) tuple,
+    /// not the pixels).
+    struct CapturingPresenter {
+        dims: (u32, u32),
+        last: Option<Vec<u8>>,
+    }
+    impl Presenter for CapturingPresenter {
+        fn dimensions(&self) -> (u32, u32) {
+            self.dims
+        }
+        fn present(&mut self, bgra: &[u8]) -> Result<()> {
+            self.last = Some(bgra.to_vec());
+            Ok(())
+        }
+        fn paces_on_present(&self) -> bool {
+            false
+        }
+    }
+
+    fn decode_payload(
+        bgra: &[u8],
+        w: u32,
+        h: u32,
+        frame_id: u32,
+    ) -> crate::probe::payload::Payload {
+        let luma = crate::probe::luma::bgra_to_luma(bgra, w, h, w * 4);
+        crate::probe::qr::decode_qr_luma_all(luma)
+            .into_iter()
+            .find(|p| p.frame_id == frame_id)
+            .unwrap_or_else(|| panic!("frame_id {frame_id} not found in decoded payloads"))
+    }
+
+    /// #854 RED: the dual-QR Vernier anti-blur/tear-tolerance guarantee ("the settled half is
+    /// byte-identical to the previous tick, so a capture straddling the refresh boundary reads
+    /// the same bits regardless of which side of the seam it lands on") does NOT hold today —
+    /// `paint_one_frame` stamps a FRESH gen_ts_ns into BOTH halves' payloads every tick,
+    /// regardless of which side's frame_id actually changed. Real-rig evidence (#854): a capture
+    /// straddling exactly one 60Hz refresh shows ~50% data-module bit errors on whichever side
+    /// it reads mid-transition — consistent with the settled side's payload (and therefore its
+    /// QR pixels) silently changing every tick.
+    ///
+    /// tick 2 -> vernier_ids(2) = (2, 1): LEFT just became fresh (id 2).
+    /// tick 3 -> vernier_ids(3) = (2, 3): LEFT is now SETTLED (still id 2); RIGHT is fresh (id 3).
+    /// The LEFT payload decoded from each tick's rendered canvas must be byte-identical.
+    #[test]
+    fn settled_left_half_payload_is_byte_identical_across_the_next_tick() {
+        let (w, h, qr) = (1920u32, 1080u32, 700u32);
+        let mut p = CapturingPresenter {
+            dims: (w, h),
+            last: None,
+        };
+        let mut params = test_params();
+        params.dual_qr = true;
+        params.canvas_w = w;
+        params.canvas_h = h;
+        params.qr_size = qr;
+        let start = Instant::now();
+        let mut vernier = VernierGenTs::default();
+
+        let (_, gen2, _) = paint_one_frame(&mut p, &params, start, 0, 2, &mut vernier).unwrap();
+        let bgra2 = p.last.clone().unwrap();
+        std::thread::sleep(Duration::from_micros(1));
+        let (_, gen3, _) = paint_one_frame(&mut p, &params, start, 0, 3, &mut vernier).unwrap();
+        let bgra3 = p.last.clone().unwrap();
+
+        let left2 = decode_payload(&bgra2, w, h, 2);
+        let left3 = decode_payload(&bgra3, w, h, 2);
+        let right3 = decode_payload(&bgra3, w, h, 3);
+
+        assert_eq!(
+            left2.gen_ts_ns, gen2,
+            "the fresh side's payload carries the tick's own gen_ts_ns"
+        );
+        assert_eq!(
+            right3.gen_ts_ns, gen3,
+            "the fresh side's payload carries the tick's own gen_ts_ns"
+        );
+        assert_ne!(
+            gen2, gen3,
+            "two distinct ticks must stamp two distinct clock reads"
+        );
+        assert_eq!(
+            left3, left2,
+            "#854: the SETTLED left half's payload (frame_id AND gen_ts_ns) must be byte-\
+             identical across the tick where only the right half changes — a capture straddling \
+             this refresh boundary must read the same bits either side of the seam"
         );
     }
 

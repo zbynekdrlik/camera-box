@@ -77,3 +77,49 @@ capture_rate_journalctl_cmd() {
     printf 'journalctl -u camera-box --no-pager -n %s 2>/dev/null' "$lines"
   fi
 }
+
+# capture_rate_window_journalctl_cmd INVOCATION_ID SINCE_EPOCH UNTIL_EPOCH -> the REMOTE
+# journalctl command text that reads ONLY the CURRENT camera-box.service process instance's
+# (#693 _SYSTEMD_INVOCATION_ID scoping) log lines whose OWN timestamp falls within
+# [SINCE_EPOCH, UNTIL_EPOCH] (systemd's native absolute-time `--since=@N`/`--until=@N` form -- no
+# bash-side timestamp parsing needed here, unlike scripts/clock-offset-guard.sh's
+# freshest_offset_us, which has to parse `-o short-iso` lines itself because it grades an
+# ALREADY-FETCHED window; this builder instead pushes the window bound down into journalctl
+# itself, which is simpler and can't drift from what journalctl considers "the timestamp").
+#
+# #705: this is the mid-RECORDING sibling of capture_rate_journalctl_cmd (above, which reads the
+# last N lines BEFORE a run even starts). A clean [0/8] preflight only proves the source camera
+# was healthy at start -- the #656/#663 ShadowCast judder is confirmed to RECUR mid-session (PR
+# #704's own real-verdict CI run: cam1's own recurrence_heal_count=30 at the time), so callers
+# pass the recording's own StartRecord..StopRecord epoch seconds to prove (or disprove) a defect
+# recurred DURING the recording, not just before it. Falls back to the unscoped `-u camera-box`
+# form when INVOCATION_ID is empty, same fallback contract as capture_rate_journalctl_cmd.
+capture_rate_window_journalctl_cmd() {
+  local invocation_id="${1:-}" since_epoch="${2:-}" until_epoch="${3:-}"
+  if [ -n "$invocation_id" ]; then
+    printf 'journalctl _SYSTEMD_INVOCATION_ID=%s --since=@%s --until=@%s --no-pager 2>/dev/null' \
+      "$invocation_id" "$since_epoch" "$until_epoch"
+  else
+    printf 'journalctl -u camera-box --since=@%s --until=@%s --no-pager 2>/dev/null' \
+      "$since_epoch" "$until_epoch"
+  fi
+}
+
+# capture_rate_recurrence_message CAMERA_NAME MATCHED_LINE -> the operator-facing diagnostic for
+# a #656/#663-class capture-rate defect that RECURRED DURING the recording window (as opposed to
+# only failing the pre-recording [0/8] preflight, capture_rate_preflight_message above) -- #705.
+# Reuses the SAME captured/configured-fps extraction so the message carries real numbers, but is
+# phrased DISTINCTLY ("RECURRED DURING") so a human/CI reader can immediately tell this apart
+# from a genuine chain-loss/zero-loss regression surfaced elsewhere in the verdict, without
+# manually correlating journalctl timestamps against the recording window by hand (exactly the
+# manual-correlation pain #703's own PR #704 diagnosis required).
+capture_rate_recurrence_message() {
+  local cam="$1" line="$2" captured configured
+  captured="$(printf '%s' "$line" | grep -oE '[0-9]+\.[0-9]+ fps captured' | head -1 | grep -oE '[0-9]+\.[0-9]+')"
+  configured="$(printf '%s' "$line" | grep -oE '[0-9]+\.[0-9]+ fps configured' | head -1 | grep -oE '[0-9]+\.[0-9]+')"
+  if [ -n "$captured" ] && [ -n "$configured" ]; then
+    echo "${cam} capture-rate defect RECURRED DURING this recording (~${captured}fps, expected ${configured}fps) — see #656/#663/#705; this is a KNOWN grabber judder recurrence, not necessarily a NEW chain-loss regression"
+  else
+    echo "${cam} capture-rate defect RECURRED DURING this recording (see #656/#663/#705): ${line}"
+  fi
+}

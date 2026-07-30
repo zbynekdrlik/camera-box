@@ -33,8 +33,19 @@ use crate::qpsk_marker::{cluster_offset_ms, decode_markers, AudioParams, AvOffse
 /// densest-cluster estimator, exactly as offline.
 pub const DOCK_QPSK_THRESHOLD: f64 = 0.35;
 
-/// Half-width (ms) of the offset cluster window — MATCHES the offline `av_cluster_tol_ms` default.
-/// Candidate `video − audio` offsets within ±this of the densest band are the real markers.
+/// Half-width (ms) of the offset cluster window. Candidate `video − audio` offsets within ±this
+/// of the densest band are the real markers.
+///
+/// #733 (2026-07-13) tightened the OFFLINE `av_cluster_tol_ms` default from 60 to 25ms (a
+/// real-data audit found the wider window occasionally blending two nearby sub-clusters into one
+/// noisier band). This constant — the LIVE dock's own window — was deliberately left AT 60ms
+/// rather than changed to match: the live dock operates very differently from the offline
+/// one-shot per-recording decode (a continuous [`DOCK_CLUSTER_WINDOW_NS`]-rolling estimate, with
+/// its own separate honesty gate [`DOCK_CLUSTER_MAX_MAD_MS`] already rejecting a diffuse/false-only
+/// band), and this constant is mirrored BYTE-FOR-BYTE into the vendored C++ dock — changing it
+/// safely needs the ~150min genlock vendored-OBS build cycle to verify, out of scope for #733's
+/// pure-Rust audit. Filed #735 to evaluate tightening this one too — do NOT assume the two
+/// values are in sync; check #735's status before relying on "matches the offline default" again.
 pub const DOCK_CLUSTER_TOL_MS: f64 = 60.0;
 
 /// Minimum tightly-clustered offset candidates before the dock trusts (and displays) a Latency.

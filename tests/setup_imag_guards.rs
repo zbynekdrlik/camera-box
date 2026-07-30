@@ -167,23 +167,51 @@ fn setup_imag_autostart_strips_saved_projectors_522() {
         .find("saved_projectors")
         .expect("saved_projectors strip must be present");
     // must run BEFORE OBS launches so OBS loads the stripped collection (restore happens at load).
+    // #840: the autostart no longer runs a bare `taskset -c __ISOLCPUS__ obs &` itself -- it now
+    // launches OBS THROUGH imag-obs-start.sh (the same path the operator's menu uses), passed the
+    // DERIVED isolated-CPU set via an exported env var. The __ISOLCPUS__ placeholder mechanism
+    // (step 8's derived set, sed'd in after the heredoc) is unchanged; only WHERE it lands moved
+    // from a direct taskset argument to an env-var export. Ordering contract unchanged.
     let launch = body
-        .find("taskset -c 2-11 obs &")
-        .expect("the autostart OBS launch must be present");
+        .find(r#"export IMAG_ISOLATED_CPUS="__ISOLCPUS__""#)
+        .expect(
+            "the autostart's IMAG_ISOLATED_CPUS export (feeding imag-obs-start.sh) must be present",
+        );
     assert!(
         strip < launch,
-        "the saved_projectors strip must run BEFORE the autostart launches OBS (#522)"
+        "the saved_projectors strip must run BEFORE the autostart launches OBS (#522/#840)"
     );
 }
 
-/// The scene seeder must create all six cameras, bind them 1:1 to the fleet NDI names, and
+/// The scene seeder must create all seven cameras, bind them 1:1 to the fleet NDI names, and
 /// run the canvas at 1080p60 — the whole point of the box.
+///
+/// #791: this test used to pin the LITERAL `range(1, 7)` (1..=6) as the required contract — which
+/// is the exact bug this ticket fixes: cam7 (10.77.9.67, wired into the fleet by #753) was
+/// silently EXCLUDED from imag's own scene set because the range's upper bound was never widened,
+/// and the boot-time `--bootstrap` self-heal therefore never created/repaired "Cam 7"/"MV Cam 7"
+/// or enforced their Multiview membership. The fix makes the count a named, ENV-OVERRIDABLE
+/// constant (never a bare hardcoded literal again — mirrors the CAMERA_ACTIVE_SET
+/// single-source-of-truth philosophy, `.claude/rules/camera-active-set.md`) that currently
+/// resolves to 7 -- so this test now pins the ABSENCE of the old literal, the presence of the
+/// override mechanism, and the actual resolved cam7 behavior.
 #[test]
-fn imag_scenes_seeds_six_cams_at_1080p60() {
+fn imag_scenes_seeds_seven_cams_at_1080p60_no_hardcoded_range() {
     let body = read(SCENES);
     assert!(
-        body.contains("range(1, 7)"),
-        "{SCENES} must iterate cameras 1..=6 (all six NDI cams)"
+        !body.contains("CAMS = range(1, 7)"),
+        "{SCENES} must NOT hardcode `CAMS = range(1, 7)` (1..=6) again — this silently excluded \
+         cam7 (#753/#791) from imag's own scene set."
+    );
+    assert!(
+        body.contains("IMAG_SCENE_CAM_COUNT")
+            && body.contains(r#"os.environ.get("IMAG_SCENE_CAM_COUNT", "7")"#),
+        "{SCENES} must derive the scene-camera count from an env-overridable \
+         IMAG_SCENE_CAM_COUNT (default 7), never a bare literal (#791)."
+    );
+    assert!(
+        body.contains("CAMS = range(1, IMAG_SCENE_CAM_COUNT + 1)"),
+        "{SCENES} must build CAMS from IMAG_SCENE_CAM_COUNT, not a second hardcoded value."
     );
     for needle in ["CANVAS_W, CANVAS_H, FPS = 1920, 1080, 60", "\"ndi_source\""] {
         assert!(
@@ -194,6 +222,43 @@ fn imag_scenes_seeds_six_cams_at_1080p60() {
     assert!(
         body.contains("(usb)"),
         "{SCENES} must bind inputs to the fleet `CAM<n> (usb)` NDI source names"
+    );
+
+    // The BEHAVIORAL proof (importing the module with/without IMAG_SCENE_CAM_COUNT actually
+    // resolves CAMS correctly) lives in tests/python/test_imag_scenes_verify_parity.py, NOT here
+    // -- imag_scenes.py imports the `websocket` pip package at module level (line ~53), which is
+    // only installed in the dedicated "Python harness tests" CI job (pytest tests/python), never
+    // in the plain cargo-test/coverage jobs a Rust test runs under. A bare
+    // `Command::new("python3")` import from THIS file broke CI (websocket ModuleNotFoundError)
+    // the first time this test was written with an inline behavioral check -- static text
+    // assertions only here; the real import-and-run proof belongs in the python suite that
+    // actually has the dependency.
+}
+
+/// #791: the canonical 17-scene ORDER and the 10 canonical NDI-source bindings must be derived
+/// (from CAMS), never a second hand-maintained list that could silently drift from the seeder's
+/// own CAMS-derived scene set.
+#[test]
+fn imag_scenes_defines_canonical_order_and_ndi_sources_derived_from_cams() {
+    let body = read(SCENES);
+    for needle in [
+        "CANONICAL_SCENE_ORDER",
+        "CANONICAL_NDI_SOURCES",
+        "def scene_order_mismatch(",
+        "def ndi_source_mismatches(",
+        "def verify_parity(",
+        "--verify-parity",
+    ] {
+        assert!(
+            body.contains(needle),
+            "{SCENES} must define `{needle}` (#791 operator-parity verification)."
+        );
+    }
+    assert!(
+        body.contains("[f\"Cam {n}\" for n in reversed(list(CAMS))]")
+            && body.contains("[f\"MV Cam {n}\" for n in CAMS]"),
+        "{SCENES}: CANONICAL_SCENE_ORDER must be DERIVED from CAMS, not a second hardcoded list \
+         of scene names that could drift from the actual seeded set."
     );
 }
 
@@ -243,30 +308,32 @@ fn imag_scenes_projector_selects_by_hdmi_not_edp_522() {
 }
 
 // ============================================================================================
-// #501 -- MV monitor-only twin scenes feed the built-in multiview from LOW-bandwidth NDI
-// receivers (genlock_monitor=true -> vendor/distroav's genlock lockdown MONITOR-SOURCE
-// exception, ~9x cheaper than the full-bw "Cam N" receivers) so the #276/#278/#293
-// render-budget decouple keeps the program at 60fps with the multiview open. Root cause
-// (runtime-proven with an eglSwapBuffers-counting shim, #501 comment 2026-07-04): a single
-// multiview render costs ~80ms CPU because its 6 cells render ALL 6 cameras' FULL-1080p NDI
-// sources, whose async texture uploads happen ONLY during the multiview's own render.
+// #501→#783 -- MV twin scenes for the built-in multiview. HISTORY: #501 fed them from
+// LOW-bandwidth NDI receivers (genlock_monitor=true, the vendor/distroav MONITOR-SOURCE
+// exception) because 7x full-1080p decode collapsed the render budget. #783 (2026-07-15,
+// user-driven) RETIRED the low-bw twins: the #767 keep-alive build removed the twins' reason
+// to exist, and post-reboot the twin receivers degraded badly (relock every ~4s = the laggy
+// multiview the user hit live). The "MV Cam N" cells now nest the SAME full-bw "NDI CAMn"
+// inputs the program uses -- identical frames + genlock timing, zero proxy lag. Live-measured
+// after the switch: 60fps / 2.3ms / 0 skips / CPU 3-12%, better than with the twins.
 // ============================================================================================
 
-/// The seeder must create a SEPARATE low-bandwidth "MV Cam N" twin scene per camera, bound to
-/// the SAME fleet NDI name but flagged genlock_monitor=true so the vendor/distroav lockdown
-/// forces low-bandwidth receive instead of the certified highest-bandwidth default.
+/// #783: the seeder must create the 6 "MV Cam N" twin scenes, each nesting the SAME full-bw
+/// "NDI CAMn" input the program scenes use (same-source pivot) -- and the retired #501
+/// low-bandwidth path (genlock_monitor=true twin receivers) must NOT come back: it degraded
+/// after every reboot (relock ~4s) and was removed deliberately.
 #[test]
-fn imag_scenes_seeds_six_low_bandwidth_mv_monitor_scenes() {
+fn imag_scenes_seeds_six_mv_twins_nesting_the_same_source_mains() {
     let body = read(SCENES);
     assert!(
-        body.contains("f\"MV Cam {n}\""),
-        "{SCENES} must seed 6 \"MV Cam N\" monitor-only twin scenes (camera-box #501)"
+        body.contains("f\"MV Cam {n}\", f\"NDI CAM{n}\""),
+        "{SCENES} must seed 6 \"MV Cam N\" twin scenes each nesting the SAME \"NDI CAMn\" input \
+         the program uses (the #783 same-source pivot)"
     );
     assert!(
-        body.contains("\"genlock_monitor\": True"),
-        "{SCENES} must set genlock_monitor=true on the MV twin's NDI input settings -- this is \
-         the flag vendor/distroav's genlock lockdown reads to force LOW-bandwidth NDI receive \
-         instead of the certified HIGHEST (camera-box #501)"
+        !body.contains("\"genlock_monitor\": True"),
+        "{SCENES}: the #501 low-bandwidth twin-receiver path (genlock_monitor=true) was RETIRED \
+         by #783 (post-reboot relock degradation) -- it must not be reintroduced silently"
     );
     let mv_block_start = body
         .find("f\"MV Cam {n}\"")
@@ -485,11 +552,11 @@ fn setup_imag_manifest_lookup_never_inlined_in_multi_arg_call() {
         );
     }
     assert_eq!(
-        call_lines, 6,
-        "{SETUP}: expected exactly 6 manifest_sha_for_path call sites — the install-time verify \
-         (libobs.so.30 + distroav.so + #499 bin/obs) PLUS the #472 no-op re-verify (same three \
-         files, looked up again from the CACHED manifest) — found {call_lines}; update this test \
-         if the call count genuinely changed"
+        call_lines, 8,
+        "{SETUP}: expected exactly 8 manifest_sha_for_path call sites — the install-time verify \
+         (libobs.so.30 + distroav.so + #499 bin/obs + #756 libobs-opengl.so.30) PLUS the #472 \
+         no-op re-verify (same four files, looked up again from the CACHED manifest) — found \
+         {call_lines}; update this test if the call count genuinely changed"
     );
 }
 
@@ -807,7 +874,7 @@ fn setup_imag_clears_obs_crash_sentinel_before_launch() {
         .find("rm -rf \"${OBS_CFG}/.sentinel\"")
         .expect("sentinel-clear line must exist");
     let obs_launch = body
-        .find("nohup taskset -c 2-11 obs >/tmp/obs-launch.log")
+        .find(r#"nohup taskset -c "$IMAG_ISOLATED_CPUS" obs >/tmp/obs-launch.log"#)
         .expect("{SETUP} must launch obs via nohup (pinned to the #483 P-core block)");
     assert!(
         sentinel_clear < obs_launch,
@@ -1173,7 +1240,7 @@ fn setup_imag_boot_safety_net_precedes_lowlatency_and_isolation_steps() {
         .find("Low-latency kernel (#482)")
         .expect("the #482 lowlatency-kernel step must exist");
     let isolation_step = body
-        .find("CPU isolation (#483)")
+        .find("CPU affinity (#483/#842)")
         .expect("the #483 CPU-isolation step must exist");
     assert!(
         safety_step < lowlatency_step && lowlatency_step < isolation_step,
@@ -1188,13 +1255,28 @@ fn setup_imag_boot_safety_net_precedes_lowlatency_and_isolation_steps() {
 #[test]
 fn setup_imag_holds_generic_kernel_packages_487() {
     let body = read(SETUP);
-    const HOLD_CMD: &str =
-        "apt-mark hold linux-image-generic-hwe-24.04 linux-headers-generic-hwe-24.04";
+    // #820: the hold is now built from the packages that are actually INSTALLED — holding a
+    // not-installed HWE name blocked step 7's own lowlatency install. Same pin, gated by dpkg.
+    for pkg in [
+        "linux-image-generic-hwe-24.04",
+        "linux-headers-generic-hwe-24.04",
+        "linux-generic-hwe-24.04",
+    ] {
+        assert!(
+            body.contains(pkg),
+            "{SETUP} must still pin `{pkg}` (imag runs the HWE kernel line, not the plain \
+             -generic names the cam fleet's setup-device.sh uses) so a surprise kernel can never \
+             be installed (#487, extends #295)"
+        );
+    }
     assert!(
-        body.contains(HOLD_CMD),
-        "{SETUP} must run `{HOLD_CMD}` (imag runs the HWE kernel line, not the plain -generic \
-         names the cam fleet's setup-device.sh uses) so a surprise kernel can never be installed \
-         (#487, extends #295)"
+        body.contains("apt-mark hold \"${KERNEL_HOLD_PKGS[@]}\""),
+        "{SETUP} must apt-mark hold the collected kernel package list (#487/#820)"
+    );
+    assert!(
+        body.contains("dpkg -s \"$p\" >/dev/null 2>&1 && KERNEL_HOLD_PKGS+=(\"$p\")"),
+        "{SETUP} must hold ONLY installed kernel packages — a hold on a not-installed name makes \
+         apt refuse step 7's linux-lowlatency-hwe-24.04 install (#820, live on .187)"
     );
 }
 
@@ -1325,7 +1407,7 @@ fn setup_imag_safe_grub_regen_helper_defined_with_full_295_contract() {
 fn setup_imag_installs_lowlatency_config_not_a_kernel_downgrade_482() {
     let body = read(SETUP);
     assert!(
-        body.contains("apt-get install -y linux-lowlatency-hwe-24.04"),
+        body.contains("apt-get install -y --allow-change-held-packages linux-lowlatency-hwe-24.04"),
         "{SETUP} must install linux-lowlatency-hwe-24.04 (#482) — the meta/config package that \
          pulls in `lowlatency-kernel` without swapping the kernel image"
     );
@@ -1398,44 +1480,54 @@ fn setup_imag_holds_lowlatency_config_packages_after_install_482() {
     );
 }
 
-/// #483: the CPU-isolation grub.d drop-in must carry the EXACT live-verified cmdline — the P-core
-/// block cpu2-11 isolated for OBS, nohz_full scoped ONLY to the future genlock render-tick pair
-/// (10,11 — not the whole block, per #303's load-balancing-signal caveat), and IRQs parked off
-/// the isolated block.
+/// #842 (recurrence of #784): `setup-imag.sh` must NEVER write a kernel-cmdline isolation
+/// (`isolcpus=`/`nohz_full=`/`irqaffinity=`) drop-in again — measured live to disable scheduler
+/// load balancing for the listed CPUs, piling 114 of OBS's 119 threads onto ONE core (60fps ->
+/// ~53fps NDI receive, 7-10 underruns/s). #784 hand-fixed the OLD box (.182) by deleting this
+/// exact drop-in on 2026-07-15, but the SOURCE was never changed, so #816's topology-derived
+/// rewrite reproduced the identical defect on the replacement notebook. The AFFINITY-only pin
+/// (taskset via /etc/imag-isolated-cpus.conf, fed by the SAME imag_cpu_isolation_plan derivation)
+/// is UNCHANGED and must still be written — only the kernel-level isolation is gone.
 #[test]
-fn setup_imag_writes_isolation_grub_dropin_with_exact_cmdline_483() {
+fn setup_imag_never_writes_kernel_isolcpus_dropin_842() {
     let body = read(SETUP);
     assert!(
-        body.contains("/etc/default/grub.d/98-imag-isolation.cfg"),
-        "{SETUP} must write /etc/default/grub.d/98-imag-isolation.cfg (#483)"
+        !body.contains("isolcpus=${IMAG_ISOLATED_CPUS}")
+            && !body.contains("nohz_full=${IMAG_NOHZ_CPUS}"),
+        "{SETUP}: must NEVER write isolcpus=/nohz_full= to a GRUB_CMDLINE_LINUX_DEFAULT drop-in \
+         (#784/#842 regression -- disables scheduler load balancing for a many-threaded OBS \
+         process, piling threads onto a single core)"
     );
     assert!(
-        body.contains(
-            r#"GRUB_CMDLINE_LINUX_DEFAULT="$GRUB_CMDLINE_LINUX_DEFAULT isolcpus=2,3,4,5,6,7,8,9,10,11 nohz_full=10,11 irqaffinity=0,1,12,13,14,15""#
-        ),
-        "{SETUP} 98-imag-isolation.cfg must carry the EXACT live-verified cmdline: \
-         isolcpus=2-11 (whole P-core block for OBS), nohz_full=10,11 ONLY (the future genlock \
-         render-tick core pair, not the whole block — #303), irqaffinity=0,1,12,13,14,15 (#483)"
-    );
-    assert!(
-        !body.contains("rcu_nocbs=10,11") && !body.contains("rcu_nocbs=2,3,4,5,6,7,8,9,10,11"),
-        "{SETUP}: 98-imag-isolation.cfg must NOT duplicate rcu_nocbs — #482's 99-lowlatency.cfg \
-         already sets rcu_nocbs=all (which covers 10,11), reconciled per the #482 LIVE-DONE \
-         comment"
+        body.contains("printf '%s\\n' \"$IMAG_ISOLATED_CPUS\" > /etc/imag-isolated-cpus.conf"),
+        "{SETUP}: the AFFINITY-only persisted config (/etc/imag-isolated-cpus.conf, feeding \
+         imag-obs-start.sh's taskset pin) must still be written -- restricting OBS to a core mask \
+         is fine, only kernel-level *isolation* of those cores was the #842 regression"
     );
 }
 
-/// #483: the isolation drop-in write must be followed by a CALL to safe_grub_regen (not merely
-/// its definition) so grub.cfg is actually regenerated with the initrd-guarantee + validation —
-/// never a raw `update-grub` bypassing the #295 safety net.
+/// #842: `setup-imag.sh` must SELF-HEAL a leftover `/etc/default/grub.d/98-imag-isolation.cfg`
+/// from a previous provisioning run (or a hand-applied #483/#816-era config) — remove it and
+/// regenerate grub via the existing `safe_grub_regen` helper (never a raw `update-grub`, #295).
 #[test]
-fn setup_imag_isolation_step_calls_safe_grub_regen_not_raw_update_grub_483() {
+fn setup_imag_self_heals_leftover_isolation_dropin_and_regens_grub_842() {
     let body = read(SETUP);
-    let isolation_write = body
-        .find("/etc/default/grub.d/98-imag-isolation.cfg")
-        .expect("the isolation grub.d write must exist");
+    let removal_check = body
+        .find("if [ -f /etc/default/grub.d/98-imag-isolation.cfg ]")
+        .expect(
+            "{SETUP} must check for a leftover /etc/default/grub.d/98-imag-isolation.cfg (#842 \
+             self-heal, the same discipline every other drift-prone config in this script uses)",
+        );
+    let rm_call = body
+        .find("rm -f /etc/default/grub.d/98-imag-isolation.cfg")
+        .expect("{SETUP} must `rm -f` the leftover isolation drop-in when found (#842)");
+    assert!(
+        removal_check < rm_call,
+        "{SETUP}: the existence check must come BEFORE the rm -f (#842 self-heal ordering)"
+    );
     // The LAST occurrence of "safe_grub_regen" in the file must be a bare CALL (not the `() {`
-    // definition) — i.e. step 8 actually invokes the helper after writing its own drop-in.
+    // definition), and it must come AFTER the self-heal removal — grub.cfg is only correctly
+    // regenerated once the stale drop-in is actually gone.
     let last_mention = body
         .rfind("safe_grub_regen")
         .expect("safe_grub_regen must be mentioned (defined + called)");
@@ -1443,21 +1535,16 @@ fn setup_imag_isolation_step_calls_safe_grub_regen_not_raw_update_grub_483() {
     assert!(
         trailing.starts_with("safe_grub_regen\n"),
         "{SETUP}: the LAST occurrence of `safe_grub_regen` must be a bare call on its own line \
-         (step 8 invoking the helper), not the `() {{` definition — a defined-but-never-called \
-         helper would leave 98-imag-isolation.cfg (and 99-lowlatency.cfg) never picked up by \
-         grub-mkconfig"
+         (the #842 self-heal invoking the helper), not the `() {{` definition"
     );
     assert!(
-        isolation_write < last_mention,
-        "{SETUP}: safe_grub_regen must be CALLED after the 98-imag-isolation.cfg drop-in is \
-         written (#483)"
+        rm_call < last_mention,
+        "{SETUP}: safe_grub_regen must be CALLED after the leftover drop-in is removed (#842)"
     );
     // Never a raw ad-hoc `update-grub` call OUTSIDE the safe_grub_regen helper itself — the whole
     // point of #487/#295 is that grub is NEVER regenerated without the initrd-guarantee first.
-    // Found in review: an exact `t == "update-grub"` match has a latent gap -- it would miss a
-    // future rogue call written as `update-grub 2>&1`, `update-grub --foo`, or with a trailing
-    // redirect/comment (the first-word-of-the-line IS the invoked command regardless of what
-    // follows it). Match on the first whitespace-separated token instead of the whole line.
+    // Match on the first whitespace-separated token so a trailing redirect/comment can't hide a
+    // rogue call.
     let raw_update_grub_calls = body
         .lines()
         .filter(|l| {
@@ -1473,25 +1560,36 @@ fn setup_imag_isolation_step_calls_safe_grub_regen_not_raw_update_grub_483() {
     );
 }
 
-/// #483/#522: OBS must be pinned to the isolated P-core block cpu2-11 on BOTH launch paths — the
-/// boot-time openbox autostart script AND the script's own provisioning-time launcher. Without
-/// this, isolcpus (once active after the next boot) would STARVE OBS onto cpu0,1,12-15 — the
-/// tiny remainder reserved for GNOME/housekeeping/E-cores (live-verified finding, #483 comment).
-/// #522 replaced the old GNOME `.config/autostart/obs.desktop` sed-patch mechanism (dead code on
-/// this lightdm+openbox box, which never read XDG autostart) with a real openbox autostart
-/// script — the taskset pin now lives THERE instead of a sed-patched .desktop `Exec=` line.
+/// #483/#522/#840: OBS must be pinned to the isolated P-core block cpu2-11 on BOTH launch paths —
+/// the boot-time openbox autostart script (via imag-obs-start.sh, #840) AND the script's own
+/// provisioning-time launcher. Without this, isolcpus (once active after the next boot) would
+/// STARVE OBS onto cpu0,1,12-15 — the tiny remainder reserved for GNOME/housekeeping/E-cores
+/// (live-verified finding, #483 comment). #522 replaced the old GNOME
+/// `.config/autostart/obs.desktop` sed-patch mechanism (dead code on this lightdm+openbox box,
+/// which never read XDG autostart) with a real openbox autostart script; #840 then unified that
+/// script's OWN OBS launch with the operator's manual "Spustit OBS" path (imag-obs-start.sh) —
+/// the DERIVED isolated set now reaches imag-obs-start.sh via an exported env var rather than a
+/// direct taskset argument inline in the autostart heredoc.
 #[test]
 fn setup_imag_pins_obs_to_pcore_block_on_both_launch_paths_483() {
     let body = read(SETUP);
     assert!(
-        body.contains("taskset -c 2-11 obs &"),
-        "{SETUP}: the openbox autostart script (#522) must launch OBS via `taskset -c 2-11 obs` \
-         — without it, isolcpus would starve the boot-launched OBS onto cpu0,1,12-15"
+        body.contains(r#"export IMAG_ISOLATED_CPUS="__ISOLCPUS__""#),
+        "{SETUP}: the openbox autostart script must export IMAG_ISOLATED_CPUS=<the DERIVED \
+         isolated set> (the __ISOLCPUS__ placeholder step 8 sed's in, #816) before calling \
+         imag-obs-start.sh (#840) — without the pin, isolcpus would starve the boot-launched OBS \
+         onto the housekeeping CPUs"
     );
     assert!(
-        body.contains("nohup taskset -c 2-11 obs >/tmp/obs-launch.log"),
-        "{SETUP} must launch OBS via `taskset -c 2-11 obs` in the provisioning-time launcher \
-         (#483), matching the boot-time openbox autostart script"
+        body.contains("/usr/local/bin/imag-obs-start.sh"),
+        "{SETUP}: the openbox autostart script must launch OBS THROUGH imag-obs-start.sh (#840) \
+         — a second, separate launch mechanism is what let the boot path silently diverge from \
+         the operator's manual path and drop the projector self-heal"
+    );
+    assert!(
+        body.contains(r#"nohup taskset -c "$IMAG_ISOLATED_CPUS" obs >/tmp/obs-launch.log"#),
+        "{SETUP} must launch OBS pinned to the same DERIVED isolated set in the provisioning-time \
+         launcher (#483/#816), matching the boot-time openbox autostart script"
     );
 }
 
@@ -1553,7 +1651,7 @@ fn setup_imag_leaves_desktop_icon_unpinned_483() {
 /// TOTAL_STEPS must match the actual number of `step()` calls in the script — a drift here means
 /// either a step was added without bumping the counter (progress display under-counts) or the
 /// counter was bumped without adding a step (display over-counts). This is a general invariant,
-/// re-verified here because #541 added the dev1 drift-guard SSH-key step (18 -> 19).
+/// re-verified here because #731 added the Companion Satellite step (19 -> 20).
 #[test]
 fn setup_imag_total_steps_matches_actual_step_calls() {
     let body = read(SETUP);
@@ -1574,8 +1672,9 @@ fn setup_imag_total_steps_matches_actual_step_calls() {
         })
         .count();
     assert_eq!(
-        declared, 19,
-        "TOTAL_STEPS must be 19 after #541 added the dev1 drift-guard SSH-key step to the prior 18"
+        declared, 21,
+        "TOTAL_STEPS must be 21 after #882 added the OBS-supervision/wallpaper-alert/core-dump \
+         provisioning step to the prior 20"
     );
     assert_eq!(
         actual, declared,
@@ -1844,13 +1943,13 @@ fn setup_imag_nvidia_step_reuses_safe_grub_regen_500() {
 fn setup_imag_nvidia_step_lands_between_cpu_isolation_and_ndi_runtime_500() {
     let body = read(SETUP);
     let cpu_isolation = body
-        .find("CPU isolation (#483)")
+        .find("CPU affinity (#483/#842)")
         .expect("the #483 CPU isolation step must exist");
     let nvidia_step = body
         .find("NVIDIA dGPU driver (#500)")
         .expect("the #500 NVIDIA driver step must exist");
     let ndi_step = body
-        .find("NDI runtime 6.3.2 from cam1")
+        .find("NDI runtime 6.3.2 from ${NDI_PEER}")
         .expect("the NDI runtime step must exist");
     assert!(
         cpu_isolation < nvidia_step && nvidia_step < ndi_step,
@@ -1939,66 +2038,135 @@ fn setup_imag_autostart_primaries_panel_not_hdmi_522() {
     );
 }
 
-/// The autostart script must launch OBS taskset-pinned to the isolated P-core block, exactly as
-/// the provisioning-time launcher does (#483) — a reboot must not silently starve OBS.
+/// #840/#884: the autostart script must launch OBS THROUGH the imag-obs.service systemd unit
+/// (whose own ExecStart still runs imag-obs-start.sh, taskset-pinned to the isolated P-core block
+/// via an exported env var — exactly as the provisioning-time launcher pins directly, #483) — a
+/// reboot must not silently starve OBS. #884: the call site switched from a direct
+/// imag-obs-start.sh invocation to `systemctl --user start imag-obs.service` so the boot launch
+/// is systemd-SUPERVISED (Restart=on-failure) instead of a bare, unsupervised script call — this
+/// is the fix for the setup-imag.sh/live-box divergence that would otherwise silently regress a
+/// fresh reprovision back to the unsupervised state behind the 2026-07-30 ~70-minute OBS outage.
 #[test]
 fn setup_imag_autostart_launches_obs_pinned_522() {
     let body = read(SETUP);
     assert!(
-        body.contains("taskset -c 2-11 obs &"),
-        "{SETUP}: the openbox autostart script must launch OBS via `taskset -c 2-11 obs` (#483) \
-         — without it, isolcpus would starve the boot-launched OBS onto cpu0,1,12-15"
+        body.contains(r#"export IMAG_ISOLATED_CPUS="__ISOLCPUS__""#)
+            && body.contains("systemctl --user start imag-obs.service"),
+        "{SETUP}: the openbox autostart script must export IMAG_ISOLATED_CPUS=<the DERIVED \
+         isolated set> and launch OBS through imag-obs.service (#483/#816/#840/#884) — without \
+         the pin, isolcpus would starve the boot-launched OBS onto the housekeeping CPUs"
     );
 }
 
-/// The autostart script must wait for the OBS WebSocket (:4455) to come up BEFORE seeding — a
-/// race here would run imag_scenes.py against a not-yet-listening OBS and silently no-op.
+/// #884: the openbox autostart must NO LONGER call imag-obs-start.sh directly — that direct call
+/// is exactly the divergence from the live box (10.77.9.182, already switched by hand as part of
+/// accepting issue 882) that would silently regress a fresh reprovision back to the unsupervised
+/// state that produced the 2026-07-30 ~70-minute OBS outage.
+#[test]
+fn setup_imag_autostart_no_longer_calls_imag_obs_start_directly_884() {
+    let body = read(SETUP);
+    assert!(
+        !body.contains("/usr/local/bin/imag-obs-start.sh >>/tmp/imag-seed.log"),
+        "{SETUP}: the openbox autostart must no longer call imag-obs-start.sh directly with the \
+         old inline log redirect — it must launch OBS through the imag-obs.service systemd unit \
+         instead (#884), so a re-provision doesn't silently strip supervision"
+    );
+}
+
+/// #884: step 21 must now ENABLE + START imag-obs.service (previously install-only, deliberately,
+/// until the autostart call-site switch above landed) — this commit IS that switch.
+#[test]
+fn setup_imag_step21_enables_and_starts_obs_service_884() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("systemctl --user enable --now imag-obs.service"),
+        "{SETUP} step 21 must `systemctl --user enable --now imag-obs.service` now that the \
+         autostart call-site switch has landed (#884) — previously installed but deliberately \
+         left disabled to avoid racing two launchers"
+    );
+    assert!(
+        !body.contains("imag-obs.service installed (NOT enabled"),
+        "{SETUP}: the stale 'installed (NOT enabled — enable by hand once the switch has landed)' \
+         echo must be removed (#884) — this commit IS that switch"
+    );
+}
+
+/// #840/#884: the autostart script must DELEGATE the WebSocket wait + seed + projector-open
+/// sequence to imag-obs-start.sh (invoked THROUGH the imag-obs.service unit since #884), rather
+/// than duplicating a bare inline wait loop — the OLD inline 30s `/dev/tcp` wait (no
+/// obs-process-liveness check, its failure swallowed by `|| true`) is exactly what let a slow
+/// boot silently drop the projector self-heal (live capture on 10.77.9.187: imag_scenes.py's
+/// ConnectionRefusedError in /tmp/imag-seed.log, timestamped at boot). The export must happen
+/// BEFORE the delegated call, and the saved_projectors strip (which must run before OBS ever
+/// loads the scene collection) must happen BEFORE the export.
 #[test]
 fn setup_imag_autostart_waits_for_websocket_before_seeding_522() {
     let body = read(SETUP);
-    let wait_loop = body
-        .find("/dev/tcp/127.0.0.1/4455")
-        .expect("{SETUP}: the autostart script must wait on 127.0.0.1:4455 before seeding");
-    let obs_launch = body
-        .find("taskset -c 2-11 obs &")
-        .expect("obs launch must exist in the autostart script");
+    let strip = body
+        .find("saved_projectors")
+        .expect("{SETUP}: the saved_projectors strip must be present");
+    let export = body
+        .find(r#"export IMAG_ISOLATED_CPUS="__ISOLCPUS__""#)
+        .expect("{SETUP}: the autostart script must export IMAG_ISOLATED_CPUS before launching");
+    // #884: anchor on the FULL delegated call including its `|| true` guard -- this exact literal
+    // (the "start", as opposed to step 21's "enable --now") only ever appears once in the file, at
+    // the autostart's own call site, so there is no earlier-occurrence self-collision risk (the
+    // class documented in this repo's CLAUDE.md GOTCHA on anchor collisions) the way the OLD bare
+    // script-path anchor had against the step-16 install block.
+    let delegated_call = body
+        .find("systemctl --user start imag-obs.service || true")
+        .expect("{SETUP}: the autostart script must call systemctl --user start imag-obs.service");
     assert!(
-        obs_launch < wait_loop,
-        "{SETUP}: OBS must be launched BEFORE the autostart script waits for its WebSocket to \
-         come up"
+        strip < export && export < delegated_call,
+        "{SETUP}: ordering must be saved_projectors-strip < IMAG_ISOLATED_CPUS export < the \
+         imag-obs.service start call (#840/#884) — imag-obs-start.sh (invoked by the unit) still \
+         owns the WebSocket wait, the seed, and the projector-open, which used to be duplicated \
+         inline here"
     );
 }
 
-/// The autostart script must self-heal BOTH the scene/#507-multiview-membership seed AND the
-/// projector layout on EVERY boot — a reboot must never require a human to re-run
-/// imag_scenes.py by hand.
+/// #840: the autostart script must NOT duplicate the inline WebSocket-wait/seed/projector-open
+/// sequence any more — that duplication (a second launch mechanism, fragile and silently
+/// swallowing its own failure) is the root cause this ticket fixes. The whole sequence now lives
+/// in imag-obs-start.sh (covered by tests/harness_imag_obs_start_stop_840.rs) and is invoked as
+/// ONE call from the autostart script.
 #[test]
-fn setup_imag_autostart_seeds_and_opens_projectors_522() {
+fn setup_imag_autostart_no_longer_duplicates_the_launch_sequence_840() {
     let body = read(SETUP);
     assert!(
-        body.contains(r#"--host 127.0.0.1"#),
-        "{SETUP}: the autostart script must invoke imag_scenes.py against the LOCAL OBS \
-         (127.0.0.1) — it runs ON the box, not remotely from dev1"
+        !body.contains("taskset -c __ISOLCPUS__ obs &"),
+        "{SETUP}: the autostart script must NOT run a bare `taskset -c __ISOLCPUS__ obs &` \
+         itself any more — OBS is launched BY imag-obs-start.sh (#840), which the autostart \
+         script now delegates to"
     );
-    let seed_call = body
-        .find(r#""$PYBIN" "$SCN" --host 127.0.0.1 >"#)
-        .expect("{SETUP}: the autostart script must run the seed (no --projector) invocation");
-    let projector_call = body
-        .find(r#""$PYBIN" "$SCN" --host 127.0.0.1 --projector"#)
-        .expect("{SETUP}: the autostart script must ALSO run the --projector invocation");
+    let autostart_start = body
+        .find(r#"cat > "$USER_HOME/.config/openbox/autostart" <<'AUTOSTART_EOF'"#)
+        .expect("the openbox autostart heredoc write must exist");
+    // rfind, not find -- the OPENING line itself already contains the literal "AUTOSTART_EOF" (as
+    // part of `<<'AUTOSTART_EOF'`), so an unscoped `find` would latch onto that same line instead
+    // of the real closing terminator many lines later (the exact anchor-collision class this
+    // repo's CLAUDE.md GOTCHA warns about). Only two occurrences of this literal exist in the
+    // whole file (confirmed: `grep -n AUTOSTART_EOF scripts/setup-imag.sh`), so `rfind` is safe.
+    let autostart_end = body
+        .rfind("AUTOSTART_EOF")
+        .expect("the AUTOSTART_EOF heredoc terminator must exist");
+    let autostart_body = &body[autostart_start..autostart_end];
     assert!(
-        seed_call < projector_call,
-        "{SETUP}: the seed invocation (scenes/#507 multiview membership) must run BEFORE \
-         --projector, so the projectors open against a fully-seeded scene collection"
+        !autostart_body.contains(r#""$PYBIN" "$SCN""#),
+        "{SETUP}: the autostart heredoc body must no longer invoke imag_scenes.py directly \
+         (neither the bare seed nor --projector) -- imag-obs-start.sh (which the autostart now \
+         calls) owns that sequence via its OWN --bootstrap invocation (#840), which ALSO \
+         correctly restores the operator's last program scene on boot (#785) -- something the \
+         old bare (non-bootstrap) autostart seed call never did"
     );
 }
 
 /// setup-imag.sh must actually INSTALL imag_scenes.py + a websocket-client dependency onto the
-/// box at a fixed path, and the __PYBIN__/__SCN__ placeholders left in the quoted heredoc must
-/// actually get substituted — a literal "__PYBIN__" left in the generated file would make the
-/// boot-time self-heal a permanent no-op. The boot hook cannot depend on a hand-made venv or a
-/// checked-out copy of the repo (setup-imag.sh runs standalone on the box, per its own step-12
-/// comment: "no sibling scripts/... checked out there").
+/// box at a fixed path (#522). The boot hook cannot depend on a hand-made venv or a checked-out
+/// copy of the repo (setup-imag.sh runs standalone on the box, per its own step-12 comment: "no
+/// sibling scripts/... checked out there"). #840: the autostart heredoc no longer invokes
+/// imag_scenes.py directly at all (imag-obs-start.sh owns that now), so the __PYBIN__/__SCN__
+/// placeholders it used to interpolate are gone too — only __ISOLCPUS__ still needs substituting.
 #[test]
 fn setup_imag_installs_imag_scenes_py_and_websocket_dep_522() {
     let body = read(SETUP);
@@ -2017,12 +2185,15 @@ fn setup_imag_installs_imag_scenes_py_and_websocket_dep_522() {
         "{SETUP} must actually fetch/install scripts/imag_scenes.py onto the box (via gh api or \
          curl) — not just reference the path"
     );
+    // #840: the autostart heredoc no longer interpolates __PYBIN__/__SCN__ (it no longer invokes
+    // imag_scenes.py directly at all -- see setup_imag_autostart_no_longer_duplicates_the_
+    // launch_sequence_840) -- only __ISOLCPUS__ is still substituted post-heredoc.
     let sed_sub = body
-        .find(r#"sed -i "s#__PYBIN__#${PYBIN}#; s#__SCN__#${SCN}#""#)
+        .find(r#"sed -i "s#__ISOLCPUS__#${IMAG_ISOLATED_CPUS}#""#)
         .expect(
-            "{SETUP} must sed-substitute the __PYBIN__/__SCN__ placeholders with the actual \
-             resolved paths right after writing the heredoc — a literal __PYBIN__ left in the \
-             generated file would make the boot-time self-heal a permanent no-op",
+            "{SETUP} must sed-substitute the __ISOLCPUS__ placeholder with the DERIVED isolated \
+             set right after writing the heredoc — a literal __ISOLCPUS__ left in the generated \
+             file would make the boot-time CPU pin a permanent no-op (#840)",
         );
     let heredoc_write = body
         .find(r#"cat > "$USER_HOME/.config/openbox/autostart" <<'AUTOSTART_EOF'"#)
@@ -2030,6 +2201,55 @@ fn setup_imag_installs_imag_scenes_py_and_websocket_dep_522() {
     assert!(
         heredoc_write < sed_sub,
         "{SETUP}: the placeholder substitution must happen AFTER the heredoc is written"
+    );
+}
+
+/// #840: setup-imag.sh must actually INSTALL /usr/local/bin/imag-obs-start.sh AND
+/// /usr/local/bin/imag-obs-stop.sh onto the box, fetched from the SAME genlock repo dev branch
+/// imag_scenes.py already uses. Before this ticket NEITHER file was ever provisioned by this
+/// script (confirmed: zero references to either filename anywhere in setup-imag.sh) — they only
+/// existed on the live box because a prior session hand-placed them. Since the rewritten
+/// autostart now HARD-DEPENDS on imag-obs-start.sh existing (see
+/// setup_imag_autostart_launches_obs_pinned_522), a from-scratch reprovision without this step
+/// would boot into an autostart calling a script that was never installed.
+#[test]
+fn setup_imag_installs_obs_start_stop_scripts_840() {
+    let body = read(SETUP);
+    assert!(
+        body.contains(r#"OBS_START_SH="/usr/local/bin/imag-obs-start.sh""#),
+        "{SETUP} must resolve a fixed on-box install path for imag-obs-start.sh (#840)"
+    );
+    assert!(
+        body.contains("scripts/imag-obs-start.sh?ref=dev") && body.contains("gh api"),
+        "{SETUP} must actually fetch scripts/imag-obs-start.sh from the genlock repo via gh api \
+         (#840) — not just reference the path"
+    );
+    assert!(
+        body.contains(r#"OBS_STOP_SH="/usr/local/bin/imag-obs-stop.sh""#),
+        "{SETUP} must resolve a fixed on-box install path for imag-obs-stop.sh (#840)"
+    );
+    assert!(
+        body.contains("scripts/imag-obs-stop.sh?ref=dev") && body.contains("gh api"),
+        "{SETUP} must actually fetch scripts/imag-obs-stop.sh from the genlock repo via gh api \
+         (#840) — not just reference the path"
+    );
+    // Both installs must be executable and must happen BEFORE the autostart heredoc is written
+    // (the heredoc references /usr/local/bin/imag-obs-start.sh, so it must already exist by then
+    // for the ordering to make operational sense, even though the heredoc itself is inert text
+    // until the NEXT boot).
+    let start_chmod = body
+        .find(r#"chmod 755 "$OBS_START_SH""#)
+        .expect("{SETUP} must chmod 755 the installed imag-obs-start.sh (#840)");
+    let stop_chmod = body
+        .find(r#"chmod 755 "$OBS_STOP_SH""#)
+        .expect("{SETUP} must chmod 755 the installed imag-obs-stop.sh (#840)");
+    let heredoc_write = body
+        .find(r#"cat > "$USER_HOME/.config/openbox/autostart" <<'AUTOSTART_EOF'"#)
+        .expect("the openbox autostart heredoc write must exist");
+    assert!(
+        start_chmod < heredoc_write && stop_chmod < heredoc_write,
+        "{SETUP}: both imag-obs-start.sh and imag-obs-stop.sh must be installed BEFORE the \
+         autostart heredoc is written (#840) -- the autostart references imag-obs-start.sh"
     );
 }
 
@@ -2296,8 +2516,11 @@ fn setup_imag_504_reasserts_dm_symlink_after_purge() {
         .find("ln -sf /lib/systemd/system/lightdm.service /etc/systemd/system/display-manager.service")
         .expect("DM symlink switch present");
     let purge_idx = body.find("apt-get purge").expect("GNOME purge present");
+    // #823: the compare is now canonical-vs-canonical (imag_same_unit) — the old literal
+    // `/lib/...` string could never match on a usrmerge box. Same assertion, same fail-loud, same
+    // position after the purge.
     let reassert_idx = body
-        .find(r#"[ "$(readlink -f /etc/systemd/system/display-manager.service)" = "/lib/systemd/system/lightdm.service" ]"#)
+        .find("imag_same_unit /etc/systemd/system/display-manager.service /lib/systemd/system/lightdm.service")
         .expect(
             "{SETUP} (#504) must re-verify the display-manager symlink AFTER the GNOME purge — a \
              package postrm (gdm3) running after the initial switch could silently re-point it back",
@@ -2415,17 +2638,20 @@ fn setup_imag_grants_rtprio_for_genlock_rt_pin_484() {
          ~10 the #484 render-tick thread requests) — the ulimit that lets a non-root user request \
          SCHED_FIFO"
     );
-    // It must be reserved together with the #483 CPU-isolation those cores exist for: the drop-in
-    // is written after the #483 grub-isolation step (they are one concern — reserve + grant).
+    // It must be reserved together with the #483/#842 CPU-affinity reservation those cores exist
+    // for: the drop-in is written after step 8's IMAG_ISOLATED_CPUS derivation (they are one
+    // concern — reserve + grant). #842 removed the kernel-cmdline isolcpus/nohz_full literal this
+    // anchored on before; anchor on the persisted affinity config write instead, which #842 keeps
+    // unchanged.
     let iso_idx = body
-        .find("isolcpus=2,3,4,5,6,7,8,9,10,11 nohz_full=10,11")
-        .expect("the #483 CPU-isolation cmdline must still be present");
+        .find("printf '%s\\n' \"$IMAG_ISOLATED_CPUS\" > /etc/imag-isolated-cpus.conf")
+        .expect("the #483/#816/#842 CPU-affinity persistence must still be present");
     let rtprio_idx = body
         .find("/etc/security/limits.d/95-imag-genlock-rtprio.conf")
         .expect("the #484 rtprio drop-in must be present");
     assert!(
         iso_idx < rtprio_idx,
-        "{SETUP}: the #484 rtprio grant must be written alongside/after the #483 CPU-isolation \
+        "{SETUP}: the #484 rtprio grant must be written alongside/after the #483/#842 CPU-affinity \
          reservation (the reserved cores + the rtprio grant are one appliance-hardening concern)"
     );
 }
@@ -2521,5 +2747,541 @@ fn setup_imag_driftguard_pubkey_step_owned_by_desktop_user_541() {
         body.contains(r#"sudo -u "$DESKTOP_USER" tee -a "$AUTH_KEYS""#),
         "{SETUP}: the #541 key APPEND must also run as the desktop user (`sudo -u \"$DESKTOP_USER\" \
          tee -a \"$AUTH_KEYS\"`), not as root"
+    );
+}
+
+/// #727 — imag-nb is a PRODUCTION device: a short accidental press of its power button
+/// suspended/shut it down during the 2026-07-12 live event. The fleet's cam boxes already
+/// protect against this (setup-device.sh STEP 12: HandlePowerKey/HandleSuspendKey/
+/// HandleHibernateKey=ignore) — imag-nb's step 5 only ever covered the LID + idle/blank/lock
+/// path, never the physical power button. This must be persisted so a re-provision (or a new
+/// imag-class box) keeps the protection — the live drop-in applied by hand during the event
+/// does not survive a fresh `setup-imag.sh` run.
+#[test]
+fn setup_imag_ignores_power_button_727() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("99-production-no-powerkey.conf"),
+        "{SETUP} must write a `99-production-no-powerkey.conf` logind drop-in (matching the \
+         live-applied file, #727) — a re-provision must not lose the power-button protection \
+         applied by hand during the 2026-07-12 event"
+    );
+    let powerkey_conf = body
+        .find("99-production-no-powerkey.conf")
+        .expect("checked above");
+    // The heredoc body that follows the `cat >` for this file must carry all three key-handling
+    // directives — scope the search to a bounded window right after the filename so this test
+    // can't accidentally match an unrelated HandlePowerKey mention elsewhere in the script.
+    let window = &body[powerkey_conf..(powerkey_conf + 400).min(body.len())];
+    for needle in [
+        "HandlePowerKey=ignore",
+        "HandleSuspendKey=ignore",
+        "HandleHibernateKey=ignore",
+    ] {
+        assert!(
+            window.contains(needle),
+            "{SETUP}: the #727 99-production-no-powerkey.conf drop-in must set `{needle}` — a \
+             short physical power-button press must never suspend/shutdown this production box"
+        );
+    }
+}
+
+/// The #727 power-button drop-in must actually take effect: `systemctl restart systemd-logind`
+/// (or an equivalent reload) must run AFTER the file is written, in the SAME step as step 5's
+/// existing lid/sleep drop-in — otherwise the new directives sit on disk unread until some
+/// LATER unrelated restart happens to pick them up.
+#[test]
+fn setup_imag_reloads_logind_after_powerkey_conf_727() {
+    let body = read(SETUP);
+    let powerkey_conf = body.find("99-production-no-powerkey.conf").expect(
+        "{SETUP} must have the #727 power-key drop-in (see setup_imag_ignores_power_button_727)",
+    );
+    let restart = body
+        .find("systemctl restart systemd-logind")
+        .expect("{SETUP} must restart systemd-logind to apply the logind.conf.d drop-ins");
+    assert!(
+        restart > powerkey_conf,
+        "{SETUP}: `systemctl restart systemd-logind` must come AFTER the #727 \
+         99-production-no-powerkey.conf is written, or the new directives never take effect \
+         this run"
+    );
+}
+
+// ============================================================================================
+// #731 — Companion Satellite install for the Stream Deck connected to imag-nb (server
+// companion.lan). Codifies the step that installs bitfocus/companion-satellite as a headless
+// systemd service, points it at the Companion server, and works around the systemd hwdb/uaccess
+// ACL trap that otherwise silently prevents the headless service user from opening the Stream
+// Deck's hidraw device — all live-verified on imag-nb 2026-07-13 (satellite connected to
+// Companion 4.3.4 over tcp://companion.lan:16622, REST /api/surfaces lists the Stream Deck MK.2).
+// ============================================================================================
+
+/// The step must exist, invoke the OFFICIAL bitfocus/companion-satellite installer (never a
+/// hand-rolled reimplementation of apt/node/build steps), and be idempotent-safe to re-run.
+#[test]
+fn setup_imag_installs_companion_satellite_731() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("step 20 \"Companion Satellite for the connected Stream Deck"),
+        "{SETUP}: must have a step 20 that installs Companion Satellite (#731)"
+    );
+    assert!(
+        body.contains(
+            "https://raw.githubusercontent.com/bitfocus/companion-satellite/main/pi-image/install.sh"
+        ),
+        "{SETUP}: must install via the OFFICIAL bitfocus/companion-satellite installer script, \
+         never a hand-rolled reimplementation"
+    );
+}
+
+/// COMPANION_HOST must be an env-overridable constant defaulting to companion.lan (the ticket's
+/// server), with a documented COMPANION_HOST_IP fallback for the .lan DNS caveat the ticket flags.
+#[test]
+fn setup_imag_companion_host_defaults_and_ip_fallback_731() {
+    let body = read(SETUP);
+    assert!(
+        body.contains(r#"COMPANION_HOST="${COMPANION_HOST:-companion.lan}""#),
+        "{SETUP}: COMPANION_HOST must default to companion.lan and be env-overridable"
+    );
+    assert!(
+        body.contains(r#"COMPANION_HOST_IP="${COMPANION_HOST_IP:-}""#),
+        "{SETUP}: COMPANION_HOST_IP must be a declared env-overridable fallback for the .lan DNS \
+         caveat (targets.md) when COMPANION_HOST doesn't resolve"
+    );
+    let getent = body.find("getent hosts \"$COMPANION_HOST\"").expect(
+        "{SETUP}: must check whether COMPANION_HOST actually resolves before configuring it",
+    );
+    let ip_fallback = body[getent..]
+        .find("COMPANION_TARGET=\"$COMPANION_HOST_IP\"")
+        .map(|i| getent + i);
+    assert!(
+        ip_fallback.is_some(),
+        "{SETUP}: on a resolution failure the step must fall back to COMPANION_HOST_IP when given"
+    );
+}
+
+/// /boot/satellite-config must be (re)written EVERY run with COMPANION_IP + REST_PORT — this is
+/// the correct idempotent re-point mechanism (fixup-pi-config.js imports it fresh on every
+/// satellite.service start, then resets the file to a blank template), not a one-shot file.
+#[test]
+fn setup_imag_writes_boot_satellite_config_731() {
+    let body = read(SETUP);
+    let heredoc = body
+        .find("cat > /boot/satellite-config")
+        .expect("{SETUP}: must write /boot/satellite-config (imported by fixup-pi-config.js)");
+    let window = &body[heredoc..(heredoc + 400).min(body.len())];
+    assert!(
+        window.contains("COMPANION_IP=$COMPANION_TARGET"),
+        "{SETUP}: /boot/satellite-config must set COMPANION_IP to the resolved target. Got:\n{window}"
+    );
+    assert!(
+        window.contains("REST_PORT=9999"),
+        "{SETUP}: /boot/satellite-config must enable the REST server on :9999 (used for \
+         verification -- GET /api/status, /api/surfaces). Got:\n{window}"
+    );
+}
+
+/// The systemd hwdb/uaccess ACL workaround must be present: without it, the headless "satellite"
+/// service user cannot open the Stream Deck's hidraw device even though 50-satellite.rules (the
+/// official installer's own udev rule) correctly sets GROUP=satellite -- live-confirmed 2026-07-13
+/// ("cannot open device with path /dev/hidraw3" until this rule was added).
+#[test]
+fn setup_imag_strips_uaccess_tag_for_av_production_controllers_731() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("99-companion-satellite-no-uaccess.rules"),
+        "{SETUP}: must write a udev rule file numbered AFTER 70-uaccess.rules (tag removal must \
+         run after the tag is added) to strip the uaccess ACL override for AV-production-\
+         controller HID surfaces (Stream Deck etc.)"
+    );
+    let rule = body
+        .find("SUBSYSTEM==\"hidraw\", ENV{ID_AV_PRODUCTION_CONTROLLER}==\"1\", TAG-=\"uaccess\"")
+        .expect(
+            "{SETUP}: the udev rule must strip TAG-=\"uaccess\" for \
+             ENV{ID_AV_PRODUCTION_CONTROLLER}==\"1\" hidraw devices",
+        );
+    let reload = body[rule..]
+        .find("udevadm control --reload-rules")
+        .map(|i| rule + i);
+    assert!(
+        reload.is_some(),
+        "{SETUP}: must reload udev rules AFTER writing the no-uaccess rule file, or it never \
+         takes effect this run"
+    );
+    // A device that already gained the restrictive ACL on a PRIOR boot/run needs an explicit
+    // reset now -- a fresh hotplug alone won't gain one going forward, but an already-present
+    // device's existing ACL must be cleared for THIS run to actually work.
+    assert!(
+        body.contains("setfacl -b"),
+        "{SETUP}: must clear any stale ACL already applied to an already-plugged AV-production-\
+         controller device (a future hotplug self-heals via the udev rule alone, but an \
+         already-present device needs an explicit reset)"
+    );
+}
+
+/// The satellite systemd service must be enabled (survives reboot) AND actively started/verified
+/// this run -- not just "enabled" with no confirmation it actually came up.
+#[test]
+fn setup_imag_enables_and_verifies_satellite_service_731() {
+    let body = read(SETUP);
+    let step20 = body
+        .find("step 20 \"Companion Satellite")
+        .expect("{SETUP}: step 20 must exist");
+    let next_step = body[step20..]
+        .find("\necho -e \"${GREEN}========")
+        .map(|i| step20 + i)
+        .unwrap_or(body.len());
+    let region = &body[step20..next_step];
+    assert!(
+        region.contains("systemctl enable satellite"),
+        "{SETUP}: step 20 must `systemctl enable satellite` so it survives reboot. Got:\n{region}"
+    );
+    assert!(
+        region.contains("systemctl restart satellite"),
+        "{SETUP}: step 20 must (re)start the satellite service this run. Got:\n{region}"
+    );
+    assert!(
+        region.contains("systemctl is-active --quiet satellite"),
+        "{SETUP}: step 20 must actively VERIFY the service came up (not just enable+start blindly \
+         and hope). Got:\n{region}"
+    );
+}
+
+// ============================================================================================
+// #756 (live wedge, 2026-07-15) — the genlock hot-swap must ALSO swap libobs-opengl.so.30, a
+// SEPARATE shared library (add_library(libobs-opengl SHARED), vendor/obs-studio/libobs-opengl/
+// CMakeLists.txt) from libobs.so.30. Fix B (commits 0632cb548/ceadfda58) lives ENTIRELY in
+// vendor/obs-studio/libobs-opengl/gl-x11-egl.c -- but the #460/#499 hot-swap only ever named
+// LIBOBS_REAL/DISTROAV_REAL/OBS_FRONTEND_REAL, never libobs-opengl.so.30, so EVERY genlock
+// hot-swap up to and including today's GENLOCK_BUILD_SHA.txt marker silently left the ORIGINAL
+// (July 4, pre-Fix-B) libobs-opengl.so.30 in place on imag-nb -- the SHA marker claimed the
+// current dev HEAD was deployed while the actual loaded library was 11 days stale. A fresh wedge
+// was captured live (06:12, 2026-07-15) blocking in the EXACT xcb_wait_for_reply <-
+// get_window_geometry call chain Fix B was supposed to have eliminated -- direct proof the
+// deployed bytes never changed. Mirrors the #499 frontend-binary fix exactly (same shape: a
+// SEPARATE artifact silently excluded from the swap loop).
+// ============================================================================================
+
+/// The hot-swap must overwrite the REAL libobs-opengl.so.30 path, not just libobs.so.30.
+#[test]
+fn setup_imag_hotswaps_libobs_opengl_756() {
+    let body = read(SETUP);
+    assert!(
+        body.contains(r#"LIBOBS_OPENGL_REAL="/usr/lib/x86_64-linux-gnu/libobs-opengl.so.30""#),
+        "{SETUP} must define LIBOBS_OPENGL_REAL -- the genlock hot-swap must ALSO swap \
+         libobs-opengl.so.30, a SEPARATE shared library from libobs.so.30 that carries the \
+         #756 Fix B X11/EGL client-size cache (gl-x11-egl.c). Without this the deployed box \
+         silently keeps running a stale libobs-opengl.so.30 forever, no matter how many times \
+         the hot-swap 'succeeds' and updates its SHA marker."
+    );
+    assert!(
+        body.contains(
+            r#"BUNDLE_LIBOBS_OPENGL="$GENLOCK_TMP/bundle/lib/x86_64-linux-gnu/libobs-opengl.so.30""#
+        ),
+        "{SETUP} must resolve the bundle's libobs-opengl.so.30 path -- the genlock bundle \
+         (obs-genlock-linux-x86_64) already carries it (confirmed live in \
+         /opt/obs-genlock/BUNDLE_MANIFEST.json: lib/x86_64-linux-gnu/libobs-opengl.so.30)"
+    );
+}
+
+/// libobs-opengl.so.30's sha must be looked up via manifest_sha_for_path and actually
+/// verify_file_sha'd -- the same integrity discipline already applied to libobs.so.30/
+/// distroav.so/bin/obs (#120/#499).
+#[test]
+fn setup_imag_verifies_libobs_opengl_via_bundle_manifest_756() {
+    let body = read(SETUP);
+    let want = body
+        .find("WANT_LIBOBS_OPENGL_SHA=\"$(manifest_sha_for_path")
+        .expect("libobs-opengl.so.30 expected sha must be looked up via manifest_sha_for_path");
+    let verify = body
+        .find("verify_file_sha \"$BUNDLE_LIBOBS_OPENGL\" \"$WANT_LIBOBS_OPENGL_SHA\"")
+        .expect("bundle libobs-opengl.so.30 must actually be verify_file_sha'd against its looked-up sha");
+    assert!(
+        want < verify,
+        "{SETUP}: WANT_LIBOBS_OPENGL_SHA must be resolved BEFORE the verify_file_sha call"
+    );
+    assert!(
+        body.contains("'lib/x86_64-linux-gnu/libobs-opengl.so.30'"),
+        "{SETUP}: the manifest lookup for libobs-opengl.so.30 must use the literal manifest \
+         relpath 'lib/x86_64-linux-gnu/libobs-opengl.so.30' (matches the #120 \
+         BUNDLE_MANIFEST.json entry, live-confirmed on imag-nb)"
+    );
+}
+
+/// The stock PPA libobs-opengl.so.30 must be backed up ONCE (mirrors the existing
+/// STOCK_BACKUP guard for libobs.so.30/distroav.so -- same #185 bounded-backup discipline).
+#[test]
+fn setup_imag_backs_up_stock_libobs_opengl_once_756() {
+    let body = read(SETUP);
+    let stock_block_start = body
+        .find(r#"if [ ! -d "$STOCK_BACKUP" ]; then"#)
+        .expect("the stock backup guard block must exist");
+    let install = body
+        .find(r#"install -m 0644 -o root -g root "$BUNDLE_LIBOBS_OPENGL" "$LIBOBS_OPENGL_REAL""#)
+        .expect("the libobs-opengl.so.30 install call must exist");
+    assert!(
+        stock_block_start < install,
+        "{SETUP}: the stock backup block must run BEFORE libobs-opengl.so.30 is overwritten"
+    );
+    let stock_block_end = body[stock_block_start..]
+        .find("\n\tif [ ! -f \"$OBS_FRONTEND_STOCK_BACKUP\" ]")
+        .map(|i| stock_block_start + i)
+        .unwrap_or(install);
+    let stock_block = &body[stock_block_start..stock_block_end];
+    assert!(
+        stock_block.contains(r#"cp -a "$LIBOBS_OPENGL_REAL" "$STOCK_BACKUP/libobs-opengl.so.30""#),
+        "{SETUP}: the ONE-TIME stock backup block must ALSO copy libobs-opengl.so.30, mirroring \
+         the libobs.so.30/distroav.so stock backups already there. Got block:\n{stock_block}"
+    );
+}
+
+/// The PREVIOUS-build rollback backup (overwritten on every swap) must ALSO cover
+/// libobs-opengl.so.30 -- otherwise a rollback to "the previous deployed build" would silently
+/// leave libobs-opengl.so.30 on whatever it happened to be, defeating the rollback.
+#[test]
+fn setup_imag_previous_backup_covers_libobs_opengl_756() {
+    let body = read(SETUP);
+    assert!(
+        body.contains(r#"cp -a "$LIBOBS_OPENGL_REAL" "$PREV_BACKUP/libobs-opengl.so.30""#),
+        "{SETUP}: the PREV_BACKUP rollback dir must ALSO capture libobs-opengl.so.30 before the \
+         swap, mirroring the existing libobs.so.30/distroav.so/obs PREV_BACKUP copies"
+    );
+}
+
+/// libobs-opengl.so.30 install must preserve library permissions (0644), matching
+/// libobs.so.30/distroav.so (0755 is reserved for the executable frontend binary, #499).
+#[test]
+fn setup_imag_installs_libobs_opengl_with_library_perms_756() {
+    let body = read(SETUP);
+    assert!(
+        body.contains(
+            r#"install -m 0644 -o root -g root "$BUNDLE_LIBOBS_OPENGL" "$LIBOBS_OPENGL_REAL""#
+        ),
+        "{SETUP} must `install -m 0644` libobs-opengl.so.30 -- a shared library (like \
+         libobs.so.30/distroav.so), not an executable"
+    );
+}
+
+/// A post-swap SONAME sanity check for libobs-opengl.so.30, mirroring the existing libobs.so.30
+/// SONAME check -- refuse a mismatched/wrong-ABI file.
+#[test]
+fn setup_imag_verifies_libobs_opengl_soname_postswap_756() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("SONAME.*\\[libobs-opengl\\.so\\.30\\]"),
+        "{SETUP} must readelf -d the swapped libobs-opengl.so.30 and grep its SONAME, mirroring \
+         the existing libobs.so.30 SONAME sanity check -- refuse a mismatched/wrong-ABI file"
+    );
+}
+
+/// The #472 no-op re-verify (cached-manifest byte re-check on an unchanged-SHA re-run) must ALSO
+/// cover libobs-opengl.so.30 -- otherwise a re-run could report "already deployed" while
+/// libobs-opengl.so.30 was tampered/reverted underneath the marker, exactly the class of bug
+/// this whole fix exists to close (a marker that lies about what bytes are actually on disk).
+#[test]
+fn setup_imag_noop_reverify_covers_libobs_opengl_756() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("WANT_LIBOBS_OPENGL_SHA_CACHED")
+            && body.contains("GOT_LIBOBS_OPENGL_SHA_CACHED")
+            && body.contains(r#"sha256sum "$LIBOBS_OPENGL_REAL""#),
+        "{SETUP}: the #472 cached-manifest re-verify (which decides whether a same-SHA re-run is \
+         a genuine no-op) must ALSO re-hash the currently-installed libobs-opengl.so.30 against \
+         the cached manifest -- otherwise a silently-reverted/tampered libobs-opengl.so.30 would \
+         never be caught on a no-op re-run, the exact 'marker lies about the bytes' bug class \
+         this fix exists to close"
+    );
+    assert!(
+        body.contains(r#"[ -f "$LIBOBS_OPENGL_REAL" ]"#),
+        "{SETUP}: the NOOP_VALID existence check must ALSO require libobs-opengl.so.30 to exist \
+         on disk, not just libobs.so.30/distroav.so/bin/obs"
+    );
+}
+
+// ============================================================================================
+// #791 — imag reprovision parity: canonical operator scene collection + OBS dock persistence.
+// ============================================================================================
+
+/// Root cause 2 (#791): imag_scenes.py's WS-based seed deliberately never creates the hand-built
+/// operator scenes ("resolume imag" / "MW resolume imag" / the base "Scene") -- a from-scratch box
+/// silently lacked them (and Cam 7/MV Cam 7, and the whole correct scene ORDER) until an operator
+/// rebuilt them by hand. The fix commits the CANONICAL 17-scene collection captured live off the
+/// incumbent box and installs it via setup-imag.sh, ONLY on a genuinely fresh box (never
+/// overwriting an existing collection).
+#[test]
+fn setup_imag_installs_canonical_scene_collection_when_none_exists() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("imag-obs-scenes-canonical.json"),
+        "{SETUP} must fetch scripts/imag-obs-scenes-canonical.json (the canonical 17-scene \
+         collection, #791)."
+    );
+    assert!(
+        body.contains(r#"if ! ls "$SCENES_DIR"/*.json >/dev/null 2>&1; then"#),
+        "{SETUP}: the canonical scene collection must be installed ONLY when the box has NO \
+         existing scene collection file (operator-wins -- never overwrite a live box's own \
+         collection, #791)."
+    );
+    let install = body
+        .find("imag-obs-scenes-canonical.json")
+        .expect("canonical scene collection fetch must be present");
+    let window = &body[install.saturating_sub(400)..(install + 400).min(body.len())];
+    assert!(
+        window.contains("gh api") && window.contains(r#""repos/${GENLOCK_REPO}/contents/"#),
+        "{SETUP}: the canonical scene collection must be fetched via `gh api` against \
+         ${{GENLOCK_REPO}} (dev) -- the same convention imag_scenes.py itself is fetched with, \
+         since this script has no sibling repo checkout at runtime on the box. Got:\n{window}"
+    );
+    assert!(
+        window.contains("Untitled.json"),
+        "{SETUP}: the canonical collection must be installed as Untitled.json (matching the \
+         SceneCollectionFile name OBS already uses on both known imag boxes). Got:\n{window}"
+    );
+}
+
+/// The canonical-scene-collection install must run inside/after step 13 (OBS pre-seed) and
+/// strictly BEFORE step 17 (OBS is actually launched) -- installing it after OBS's first launch
+/// would be a no-op (OBS would already have created its own blank default collection by then).
+#[test]
+fn setup_imag_canonical_scenes_install_runs_before_obs_launch() {
+    let body = read(SETUP);
+    let install = body
+        .find("imag-obs-scenes-canonical.json")
+        .expect("canonical scene collection fetch must be present");
+    let launch = body
+        .find("step 17 \"Launch OBS on the desktop session")
+        .expect("step 17 (Launch OBS) must be present");
+    assert!(
+        install < launch,
+        "{SETUP}: the canonical scene collection MUST be installed BEFORE step 17 launches OBS \
+         for the first time -- installing it after launch is a no-op (#791)."
+    );
+}
+
+/// The canonical scene collection JSON itself must be valid JSON, carry the exact 17-scene
+/// `scene_order` this ticket documents (Scene, Cam 7..Cam 1, resolume imag, MV Cam 1..7, MW
+/// resolume imag), and bind the 3 Resolume/overlay NDI sources no automated seeder creates.
+#[test]
+fn canonical_scene_collection_json_has_the_exact_17_scene_order() {
+    let path = manifest_dir().join("scripts/imag-obs-scenes-canonical.json");
+    let body =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let out = std::process::Command::new("python3")
+        .arg("-c")
+        .arg(
+            "import json, sys; \
+             d = json.load(open(sys.argv[1])); \
+             print([s['name'] for s in d['scene_order']]); \
+             ndi = {s['name']: s.get('settings', {}).get('ndi_source_name') \
+                    for s in d['sources'] if s.get('id') == 'ndi_source'}; \
+             print(ndi)",
+        )
+        .arg(&path)
+        .output()
+        .expect("run python3 to parse the canonical scene collection JSON");
+    assert!(
+        out.status.success(),
+        "canonical scene collection JSON must parse as valid JSON: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(
+            "['Scene', 'Cam 7', 'Cam 6', 'Cam 5', 'Cam 4', 'Cam 3', 'Cam 2', 'Cam 1', \
+             'resolume imag', 'MV Cam 1', 'MV Cam 2', 'MV Cam 3', 'MV Cam 4', 'MV Cam 5', \
+             'MV Cam 6', 'MV Cam 7', 'MW resolume imag']"
+        ),
+        "canonical scene collection must carry the exact 17-scene order documented on #791. \
+         Got:\n{stdout}"
+    );
+    for needle in [
+        "'MW imag resolume': 'RESOLUME-SNV (Arena - To imag obs)'",
+        "'NDI resolume imag': 'RESOLUME-SNV (Arena - To imag obs)'",
+        "'imag overlay': 'RESOLUME-SNV (Arena - imag overlay)'",
+    ] {
+        assert!(
+            stdout.contains(needle),
+            "canonical scene collection must bind `{needle}` -- one of the 3 Resolume/overlay \
+             NDI sources no automated seeder creates (#791). Got:\n{stdout}"
+        );
+    }
+    // Never allow the checked-in artifact to silently rot into "not what's captured".
+    assert!(!body.is_empty());
+}
+
+/// Root cause 4 (#791): OBS only persists `[BasicWindow]` `geometry`/`DockState` on a clean exit
+/// -- imag-nb runs 24/7 and has therefore never shed one on its own (confirmed live: neither
+/// known imag box's global.ini has ever carried these keys). setup-imag.sh must seed a known-good
+/// captured default the FIRST time a box provisions, and must never overwrite a real one an
+/// operator's own clean exit already produced.
+#[test]
+fn setup_imag_seeds_dockstate_when_missing_never_overwrites() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("if ! grep -q '^DockState=' \"$f\"; then"),
+        "{SETUP} must seed [BasicWindow] DockState ONLY when missing (operator-wins -- never \
+         overwrite a real captured layout from an actual clean exit, #791)."
+    );
+    assert!(
+        body.contains("DOCKSTATE_GEOMETRY=") && body.contains("DOCKSTATE_BLOB="),
+        "{SETUP} must define the captured geometry/DockState base64 blobs (#791)."
+    );
+    // The base64 blobs contain literal `/` characters (confirmed: DockState starts "AAAA/w...")
+    // -- sed's own `s/.../.../ ` delimiter would collide with that. Must use awk (or an
+    // equivalent non-colliding mechanism), never a plain sed substitution here.
+    let seed_start = body
+        .find("if ! grep -q '^DockState=' \"$f\"; then")
+        .expect("DockState seed block must be present");
+    // Scope to "up to step 14" (well past the block's own close) rather than hunting the exact
+    // closing `fi` indentation -- the block contains a NESTED if/fi (the [BasicWindow]-exists
+    // branch) whose own 8-space-indented `fi` would otherwise wrongly satisfy a naive
+    // `"\n    fi\n"` search (a 4-space `fi\n` is a substring of an 8-space-indented `        fi\n`
+    // line too).
+    let step14 = body
+        .find("step 14 \"Desktop de-jitter")
+        .expect("step 14 must be present");
+    let region = &body[seed_start..step14];
+    assert!(
+        region.contains("awk -v geo=") && region.contains("DOCKSTATE_BLOB"),
+        "{SETUP}: the DockState insertion must use awk (never sed, whose `/` delimiter would \
+         collide with the base64 blob's own literal `/` characters). Got:\n{region}"
+    );
+    assert!(
+        !region.contains("sed -i"),
+        "{SETUP}: the DockState insertion must NOT use sed -- the captured base64 blob contains \
+         literal `/` characters that collide with sed's `s/.../.../ ` delimiter. Got:\n{region}"
+    );
+}
+
+/// The DockState seed must run inside seed_ini() so it applies to BOTH global.ini and user.ini
+/// (the same two files every other pre-seed key in this function already targets), and therefore
+/// BEFORE step 17 launches OBS for the first time.
+#[test]
+fn setup_imag_dockstate_seed_applies_to_both_ini_files_before_obs_launch() {
+    let body = read(SETUP);
+    let seed_fn_start = body
+        .find("seed_ini() {")
+        .expect("seed_ini() must be defined");
+    let dockstate = body
+        .find("if ! grep -q '^DockState=' \"$f\"; then")
+        .expect("DockState seed block must be present");
+    let global_call = body
+        .find(r#"seed_ini "$OBS_CFG/global.ini""#)
+        .expect("seed_ini must be called for global.ini");
+    let user_call = body
+        .find(r#"seed_ini "$OBS_CFG/user.ini""#)
+        .expect("seed_ini must be called for user.ini");
+    assert!(
+        seed_fn_start < dockstate && dockstate < global_call && global_call < user_call,
+        "{SETUP}: the DockState seed must live INSIDE seed_ini() (so it applies to both \
+         global.ini and user.ini), before both call sites."
+    );
+    let launch = body
+        .find("step 17 \"Launch OBS on the desktop session")
+        .expect("step 17 (Launch OBS) must be present");
+    assert!(
+        user_call < launch,
+        "{SETUP}: the DockState seed must complete BEFORE step 17 launches OBS for the first \
+         time (#791)."
     );
 }

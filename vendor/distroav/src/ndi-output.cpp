@@ -139,6 +139,22 @@ typedef struct {
 	size_t audio_conv_buffer_size;
 	int32_t no_connections;
 	std::chrono::time_point<std::chrono::steady_clock> last_conn_check;
+
+	// camera-box #874: NDI OUTPUT-side send-path audit -- mirrors the input-side
+	// genlock-fifo audit (obs-source.c genlock_audit_log) so a send-side stall is
+	// as visible as a receive-side one. `audit_offered` counts every
+	// ndi_output_rawvideo entry (a frame libobs handed to this output);
+	// `audit_sent` counts every send_send_video_async_v2 call actually made (the
+	// SDK call returns void, so this is "attempted", not confirmed-delivered).
+	// `audit_send_wait_ns`/`audit_max_send_wait_ns` are the cumulative/peak time
+	// spent inside that call -- a large cumulative value proves the async send is
+	// serialising on the receiver; a near-zero value with offered far below the
+	// canvas rate moves the fault upstream into libobs's output path.
+	uint64_t audit_offered;
+	uint64_t audit_sent;
+	uint64_t audit_send_wait_ns;
+	uint64_t audit_max_send_wait_ns;
+	std::chrono::time_point<std::chrono::steady_clock> audit_last_log;
 } ndi_output_t;
 
 const char *ndi_output_getname(void *)
@@ -187,6 +203,14 @@ void *ndi_output_create(obs_data_t *settings, obs_output_t *output)
 	// initialize last_conn_check so first check will occur immediately
 	o->no_connections = -1;
 	o->last_conn_check = std::chrono::steady_clock::time_point();
+
+	// camera-box #874: explicit zero-init for clarity, mirroring last_conn_check
+	// above (bzalloc already zero-fills, but state the intent).
+	o->audit_offered = 0;
+	o->audit_sent = 0;
+	o->audit_send_wait_ns = 0;
+	o->audit_max_send_wait_ns = 0;
+	o->audit_last_log = std::chrono::steady_clock::time_point();
 
 	obs_log(LOG_DEBUG, "-ndi_output_create(name='%s', groups='%s', ...)", name, groups);
 	return o;
@@ -385,6 +409,12 @@ void ndi_output_destroy(void *data)
 void ndi_output_rawvideo(void *data, video_data *frame)
 {
 	auto o = (ndi_output_t *)data;
+
+	// camera-box #874: count EVERY entry -- a frame libobs handed to this output --
+	// before any of the guards below, so a frame that never reaches the send call
+	// still shows up as `dropped` in the audit line.
+	o->audit_offered++;
+
 	if (!o->started || !o->frame_width || !o->frame_height)
 		return;
 
@@ -439,7 +469,37 @@ void ndi_output_rawvideo(void *data, video_data *frame)
 		video_frame.line_stride_in_bytes = frame->linesize[0];
 	}
 
+	// camera-box #874: time the async send call itself -- this is the load-bearing
+	// number. send_send_video_async_v2 blocks until the PREVIOUS async frame was
+	// consumed (NDI's async contract), so a large cumulative wait here proves the
+	// send is serialising on the receiver; a near-zero wait with `offered` far
+	// above `sent`'s rate would instead point upstream, into libobs's output path.
+	auto send_start = std::chrono::steady_clock::now();
 	ndiLib->send_send_video_async_v2(o->ndi_sender, &video_frame);
+	auto send_end = std::chrono::steady_clock::now();
+
+	o->audit_sent++;
+	uint64_t send_wait_ns =
+		(uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(send_end - send_start).count();
+	o->audit_send_wait_ns += send_wait_ns;
+	if (send_wait_ns > o->audit_max_send_wait_ns)
+		o->audit_max_send_wait_ns = send_wait_ns;
+
+	// One audit line per output every ~5s, mirroring genlock_audit_log's cadence
+	// and guard shape (libobs/obs-source.c) -- the first call only seeds
+	// audit_last_log so the very first line waits a full interval rather than
+	// firing immediately.
+	if (o->audit_last_log == std::chrono::steady_clock::time_point())
+		o->audit_last_log = send_end;
+	if (send_end - o->audit_last_log >= std::chrono::seconds(5)) {
+		o->audit_last_log = send_end;
+		obs_log(LOG_INFO,
+			"genlock-ndi-output audit '%s': offered=%llu sent=%llu dropped=%llu "
+			"send_wait_ms=%.3f max_send_wait_ms=%.3f (#874)",
+			o->ndi_name, (unsigned long long)o->audit_offered, (unsigned long long)o->audit_sent,
+			(unsigned long long)(o->audit_offered - o->audit_sent),
+			(double)o->audit_send_wait_ns / 1.0e6, (double)o->audit_max_send_wait_ns / 1.0e6);
+	}
 }
 
 void ndi_output_rawaudio(void *data, audio_data *frame)

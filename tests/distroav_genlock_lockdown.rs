@@ -20,10 +20,11 @@
 //!
 //! Certified genlock values (read live from the working prod input `NDI cam5`,
 //! 2026-06-22): `ndi_sync` = 2 (SOURCE_TIMECODE / source timing), `genlock_fifo` =
-//! true, `ndi_behavior` = 2 (STOP_RESUME_LAST_FRAME), `ndi_recv_hw_accel` = true,
-//! `ndi_bw_mode` = 0 (highest), `latency` = 0 (NORMAL), `ndi_audio` = false,
-//! `ndi_framesync` = false, `ndi_fix_alpha_blending` = false. The two user knobs
-//! (`ndi_source_name`, `genlock_preload`) are NEVER forced.
+//! true, `ndi_behavior` = 2 (STOP_RESUME_LAST_FRAME) -- RE-CERTIFIED #764 (2026-07-15) to
+//! `ndi_behavior` = 0 (KEEP_ACTIVE), see tests/distroav_ndi_keepalive_764.rs --
+//! `ndi_recv_hw_accel` = true, `ndi_bw_mode` = 0 (highest), `latency` = 0 (NORMAL),
+//! `ndi_audio` = false, `ndi_framesync` = false, `ndi_fix_alpha_blending` = false. The two
+//! user knobs (`ndi_source_name`, `genlock_preload`) are NEVER forced.
 //!
 //! This is a SOURCE-presence guard (same convention as
 //! tests/distroav_source_config_lock.rs, tests/genlock_preload.rs,
@@ -92,7 +93,11 @@ fn genlock_certified_forcer_exists_and_sets_every_certified_key() {
     // dropped/weakened force fails AND an upstream property add can't reintroduce a live knob.
     let must_force: &[&str] = &[
         "{PROP_SYNC, false, PROP_SYNC_NDI_SOURCE_TIMECODE, false}",
-        "{PROP_BEHAVIOR, false, PROP_BEHAVIOR_STOP_RESUME_LAST_FRAME, false}",
+        // #764 (event-critical, 2026-07-15): re-certified from STOP_RESUME_LAST_FRAME to
+        // KEEP_ACTIVE -- STOP_RESUME_LAST_FRAME tore the receiver thread down on every hide,
+        // paying a full NDI reconnect on every program cut back to that camera. See
+        // tests/distroav_ndi_keepalive_764.rs for the full #764 patch guard.
+        "{PROP_BEHAVIOR, false, PROP_BEHAVIOR_KEEP_ACTIVE, false}",
         "{PROP_BANDWIDTH, false, PROP_BW_HIGHEST, false}",
         "{PROP_LATENCY, false, PROP_LATENCY_NORMAL, false}",
         "{PROP_TIMEOUT, false, PROP_TIMEOUT_KEEP_CONTENT, false}",
@@ -194,6 +199,51 @@ fn getproperties_is_the_hard_whitelist() {
              source/Genlock/Latency/burn (everything else is forced, not shown)."
         );
     }
+}
+
+/// #257 — the NAMED whitelist table itself must exist (not just its per-prop effects, already
+/// covered by `getproperties_is_the_hard_whitelist` above): a future refactor could rename/inline
+/// it away and still happen to add the same five props one-off, silently losing the "one
+/// auditable COMPLEMENT-of-the-forced-table" property #257 is built on. Mirrors the pwsh
+/// production-build gate's own `-notmatch 'GENLOCK_WHITELIST_PROPS'` check
+/// (`.github/workflows/windows-genlock.yml`), asserted here against the real vendored source so
+/// it runs on every push, not only on a manual `workflow_dispatch`.
+#[test]
+fn genlock_whitelist_table_is_declared() {
+    let squished = squish(&vendor_file(NDI_SOURCE));
+    assert!(
+        squished.contains("const char *const GENLOCK_WHITELIST_PROPS[] = {"),
+        "{NDI_SOURCE}: #257 — the GENLOCK_WHITELIST_PROPS const table declaration is gone. \
+         Re-apply the #257 hard-lock UI whitelist as a single named table (the COMPLEMENT of \
+         GENLOCK_FORCED_SETTINGS), not one-off obs_properties_add_* calls."
+    );
+}
+
+/// #257 — the per-source Measurement-burn toggle (`PROP_BURN`, exposed by the whitelist UI above)
+/// must actually be APPLIED live at update time, not just present in the UI: `ndi_source_update`
+/// must resolve + invoke the runtime-exported `obs_source_set_genlock_burn` setter, or toggling
+/// the UI checkbox would be visually present but functionally inert (no OBS restart needed —
+/// see the `resolve_set_genlock_burn` doc comment). Mirrors the pwsh production-build gate's own
+/// `-notmatch 'obs_source_set_genlock_burn'` check, asserted here against the real vendored
+/// source (scoped to `ndi_source_update`'s own body, stronger than the pwsh whole-file substring
+/// check) so it runs on every push, not only on a manual `workflow_dispatch`.
+#[test]
+fn update_applies_the_measurement_burn_toggle_live() {
+    let src = vendor_file(NDI_SOURCE);
+    assert!(
+        squish(&src).contains("obs_source_set_genlock_burn"),
+        "{NDI_SOURCE}: #257 — obs_source_set_genlock_burn is gone from the file entirely; the \
+         per-source Measurement-burn toggle can no longer be applied at runtime. Re-apply the \
+         #257 burn-toggle wiring."
+    );
+    let body = squish(fn_body(&src, "void ndi_source_update("));
+    assert!(
+        body.contains("resolve_set_genlock_burn()"),
+        "{NDI_SOURCE}: #257 — ndi_source_update no longer resolves/applies the runtime \
+         obs_source_set_genlock_burn setter. The PROP_BURN UI checkbox would be present but \
+         functionally inert (never toggles the actual per-source burn flag). Re-apply the #257 \
+         burn-toggle apply call in ndi_source_update."
+    );
 }
 
 /// #501: the built-in OBS multiview costs ~80ms/render on imag-nb's Linux/OpenGL build because

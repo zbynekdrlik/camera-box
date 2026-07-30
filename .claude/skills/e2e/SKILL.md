@@ -73,6 +73,15 @@ Trustworthy E2E zero-loss proof from RECORDED OBS OUTPUT.
 broadcast camera (30fps) films monitor → cam1 ShadowCast → camera-box → "CAM1 (usb)" NDI →
 strih OBS PHASE2-PROBE program → stream OBS program. Both record locally.
 
+**#728 GOTCHA (2026-07-12): cam1's grabber card is no longer a ShadowCast.** The user
+physically swapped it with cam5's card — cam1 now has an **Elgato 4K S** on `/dev/video1`
+(cam5 now has the ShadowCast 2, on `/dev/video0`). The description above is historically
+accurate for when this proof was run (2026-06-17); read "cam1 ShadowCast" in older sections
+of this skill as "whatever grabber card cam1 had AT THE TIME" — check the LIVE fleet table
+in `targets.md` for the current assignment before assuming a specific model/device node.
+`grabber_model_for_hostname`'s static table is likewise OPERATIONAL/historical only —
+`capture_rate_health::resolve_grabber_model` resolves the actual RUNTIME card at boot.
+
 **Dual-QR Vernier (the method):** `frame-probe --paint-only --dual-qr` renders TWO QRs at 60Hz:
 LEFT=latest even tick, RIGHT=latest odd tick. ONE half changes per refresh (anti-blur, always ≥1
 cleanly decodable). Decode BOTH per recorded frame; `tick = max(left_even, right_odd)` = exact
@@ -114,9 +123,12 @@ renders its report via `scripts/recording-e2e-report.py` (in repo).
 ## Camera Pre-Run Checklist (#220) — cam1 optical settings the harness CANNOT auto-set
 
 The cam2→cam1 OPTICAL injection leg (cam1 broadcast camera filming the cam2 monitor QR) depends on
-the cam1 camera's MANUAL settings. The harness CANNOT read or set them: camera-box reads
-`/dev/video0` (the ShadowCast capture card), which does NOT expose the BMPCC's shutter/focus/
-exposure. `recording-e2e.sh` PRINTS this checklist at startup; satisfy it BEFORE every proof run:
+the cam1 camera's MANUAL settings. The harness CANNOT read or set them: camera-box reads whatever
+grabber card is CURRENTLY on cam1 (`/dev/video0` when it was the ShadowCast card; `/dev/video1`
+since the 2026-07-12 #728 swap to an Elgato 4K S — check `targets.md`'s live fleet table, never
+assume the device path), which does NOT expose the BMPCC's shutter/focus/exposure regardless of
+which grabber model is plugged in. `recording-e2e.sh` PRINTS this checklist at startup; satisfy it
+BEFORE every proof run:
 
 - **Shutter FAST: ≥ 1/500 s (ideally 1/1000)** — a slow shutter integrates a full 60Hz monitor
   refresh and SMEARS the dual-QR Vernier mid-change (one half changes per refresh), so the optical
@@ -151,6 +163,38 @@ Re-confirmed LIVE 2026-07-09 (via linux-cam1/cam3/cam4 MCP): all three STILL hav
 and every `card0-HDMI-A-*` connector reports `disconnected` — cam3's SSH is reachable now
 (contrary to an earlier 2026-07-05 note that it was down); worth re-checking whenever this
 hardware gap is revisited.
+
+## Fleet size is `CAMERA_ACTIVE_SET` (#827, 2026-07-27) — reversible retirement, ONE declared list
+
+**cam5/cam6/cam7 are RETIRED from the active fleet as of 2026-07-27** — their USB grabber cards
+were returned to their owner and the boxes are powered off. cam4 stays active (its card is
+scheduled to be fitted, #828). This is a **binding, REVERSIBLE** retirement per the owner's own
+directive: *"dufam ze to odobratie cam5 az cam7 urobis tak aby ked zasa budu k dispozicii si to
+vedel znova lahko povolit"* — re-enabling a returned box must be a one-line change, never
+archaeology through a deleted diff.
+
+**The mechanism:** `scripts/camera-set.sh` declares `CAMERA_ACTIVE_SET` (default `"cam1 cam2 cam3
+cam4"`) as the **ONE** list of cameras physically installed today. `camera_resolve()` /
+`camera_strih_route()` still resolve **every** camera the fleet has ever wired (cam1-cam7 — IP,
+NDI source, genlock fps, strih scene/route are FACTS, never deleted); only `CAMERA_ACTIVE_SET`
+membership decides who is actually swept/preflighted/mapped today. Every fleet-wide consumer
+derives from it: `recording-e2e.sh`'s `[0/8]` preflight, the `[2b/8]` ALL_CAMBOX deploy loop, the
+cleanup restore loops, `TRANSPORT_SAMPLER_BOXES`, the BURN_TARGETS strih-input extension, and the
+`CAMBOX_SWEEP` default all iterate `camera_active_secondary_set()` / `camera_active_sweep_pairs()`
+/ `CAMERA_ACTIVE_SET` directly — none of them independently enumerate a camera list any more.
+`scripts/set-ndi-mapping.py` mirrors this with its own `--active` flag (defaulting to the
+`CAMERA_ACTIVE_SET` env var — `scripts/rig-mode.sh` passes it straight through), filtering its
+full 7-camera `FULL_MAP` fact table down to the active pins via `active_map()`.
+
+**RE-ENABLE PROCEDURE (memorize this, it's the whole point):** cam5 (or cam6/cam7) comes back?
+Add its name to `CAMERA_ACTIVE_SET` in `scripts/camera-set.sh` (one line), then rerun the gate.
+Nothing else needs to change — every derived consumer picks it up automatically. Proven by
+`tests/harness_camera_set.rs`'s `camera_active_set_env_override_reactivates_a_retired_camera`,
+`tests/harness_cambox_parallel_restore_712.rs`'s
+`all_cambox_restore_loop_contacts_a_reactivated_retired_camera`, and the sibling reversibility
+tests in `harness_cambox_parallel_restore_713.rs` / `harness_recording_e2e_paths.rs` /
+`harness_rig_ndi_mapping.rs` / `tests/python/test_cambox_sweep_mapping.py` — each drives the env
+override directly and asserts the retired camera actually flows back through, end to end.
 
 ## `recording-e2e.sh` now drives cam1, cam3, cam4, cam5, OR cam6 as the SOURCE camera (#24 item 1, PR #631; #312 item 1 added cam5/cam6)
 
@@ -233,10 +277,16 @@ Use the FRESH CI probe-tools (linux for cam1/cam2 deploy, windows verdict.exe) a
    before trusting a run** (must be `1920x1080`) — a regression here silently softens the burns.
    (Profile-param changes don't hot-apply to a running output — they take effect at OBS launch.)
 
-**DanteSync gate prerequisite (the harness can't HTTP-fetch :8898):** read `\\.\pipe\dantesync`
-on strih+stream via the win-* MCP (PipeDirection.In; strip the 4-byte header to the leading `{`),
-write `{ntp_offset_us,is_locked,mode,...}` to `/tmp/recording-e2e-<RUN_ID>/dante-{strih,stream}.json`
-BEFORE launching the harness. Then the gate passes all 4 nodes.
+**DanteSync gate prerequisite — NO manual pre-fetch needed (#648, since 2026-07-10).** The harness
+fetches each Windows box's DanteSync status itself, LIVE over HTTP from dantesync#47's own network
+endpoint (`http://<host>:8898/status`) — `recording-e2e.sh` passes `--win-http strih=… --win-http
+stream=…` straight into `scripts/dantesync-gate.sh`. No win-* MCP, no operator pre-fetch, no
+`/tmp/recording-e2e-<RUN_ID>/dante-{strih,stream}.json` file — that pre-#648 flow was removed in
+`e2cfeb3d7` and nothing in this harness writes those files any more. Just launch the harness; the
+gate queries all 4 nodes (cam1/cam2 over SSH+HTTP, strih/stream over HTTP) on its own and fails
+fast if any is unreachable/stale/drifted/PTP-degraded. (If you see a `dante-*.json` file already
+sitting in a run's `$OUTDIR`, it's a stray leftover from someone following this stale advice in the
+past, not something the harness produced — the harness now warns loudly about it, #835.)
 
 **dev1↔painter clock-offset gate — ALL_CAMBOX sweep ONLY (#326):** the all-cambox sweep stamps
 each program-switch WINDOW boundary on dev1's CLOCK_REALTIME, while `recording-verdict
@@ -251,7 +301,9 @@ offsets on the shared strih basis), and FAILS FAST (exit 20) if it exceeds the g
 The pure comparator (`painter_offset_check`) lives in `clock-offset-guard.sh` and is unit-tested
 in `tests/clock_offset_guard.rs`; the gate flow is unit-tested no-rig in
 `tests/clock_offset_painter_gate.rs` by feeding `DEV1_DANTE_JOURNAL` / `PAINTER_DANTE_JOURNAL`
-fixture files (same "pre-fetch status to a file" trick the DanteSync gate uses for Windows nodes).
+fixture files (a TEST-ONLY env-var injection seam, not a live-run pre-fetch — this gate has no
+Windows-node leg at all, dev1↔painter only; do not confuse it with the DanteSync gate above, which
+queries strih/stream LIVE over HTTP and needs no pre-fetched file either, #648).
 
 **Decode on stream.lan (#193), NOT dev1:** the strih recording lives on the strih box; copy it
 DIRECTLY strih→stream box (`New-PSDrive \\10.77.9.204\C$` + Copy-Item, ~751MB in ~7s, NEVER via
@@ -329,18 +381,22 @@ gates `is_zero()` alongside contiguity + `optical_undecodable`.
   `dual_qr_gap()` helper, so painter and gate compute IDENTICAL rects. At default 1920×1080 / qr 700
   / tm 24 the column is x∈[840,1080), y∈[24,724). The gate iterates the SAME table:
   - `src/colour_verify.rs` (Tier-0, default features — the JUDGEMENT, mutation-tested): sampler +
-    `classify_patch` (chromatic: Grayscale if chroma<40 / HueShift if hue err>30° / else Pass —
-    neutral: NeutralTint if chroma>48 / else Pass) + `summarize_node_colour` (strict-majority vote
-    over sampled frames). A burn-covered patch is `Unsamplable` → SKIPPED, not charged (a real colour
-    defect is global → still fails on the visible patches); fail-closed only when NOTHING is checkable.
+    `classify_patch` (chromatic: Grayscale if chroma<`GRAYSCALE_CHROMA_MIN` / HueShift if hue
+    err>30° / else Pass — neutral: NeutralTint if chroma>`NEUTRAL_CHROMA_MAX` / else Pass) +
+    `summarize_node_colour` (strict-majority vote over sampled frames). A burn-covered patch is
+    `Unsamplable` → SKIPPED, not charged (a real colour defect is global → still fails on the
+    visible patches); fail-closed only when NOTHING is checkable. **Read the two constants'
+    values from the CODE, never hardcode them here** — both have been recalibrated more than once
+    against real rig data (`NEUTRAL_CHROMA_MAX` 48→72 on the 2026-06-30 recording;
+    `GRAYSCALE_CHROMA_MIN` 40→24 on the #740 splitter/disk-incident recalibration, below) and will
+    likely move again if the rig's physical setup changes.
   - **#364 calibration — gate on HUE + CHROMA, NOT brightness.** The level/sRGB-distance check was
     REMOVED: the rig's optical capture is ~7× DIM by physics (60 Hz monitor + 1/1000 s shutter samples
-    ~1 ms mid-redraw), so a distance/level check only false-fails a correct camera. REAL per-patch
-    measurement of a genuine cam1 chain frame: every patch correct hue (≤19.6°) + chroma (≥50
-    chromatic, ≤38 neutral cast), 9/13 failed ONLY on level. Dropping it is NOT weakening — every real
-    fault (grayscale collapse, dead channel, hue shift, WB cast) still fails on hue/chroma. Locked by
-    `real_rig_dim_capture_passes_while_grayscale_and_dead_channel_fail` with genuine sampled values
-    (real→PASS 13/13, grayscale→FAIL, dead-red→FAIL). `NEUTRAL_CHROMA_MAX`=48 (real cast maxes 38).
+    ~1 ms mid-redraw), so a distance/level check only false-fails a correct camera. Dropping it is NOT
+    weakening — every real fault (grayscale collapse, dead channel, hue shift, WB cast) still fails on
+    hue/chroma. Locked by `real_rig_dim_capture_passes_while_grayscale_and_dead_channel_fail`
+    (2026-06-30 fixture) and `splitter_and_disk_incident_dim_capture_passes_post_recalibration_740`
+    (2026-07-14 fixture, current rig baseline) with genuine sampled values.
   - `src/probe/colour_sample.rs` (probe, CI-only — the I/O glue): `node_burn_exclusions` +
     `extract_recording_colour_summary` (ffmpeg input-seek, N evenly-spaced RGB frames).
 - **#364 rig finding — why the column moved to the central gap:** the original BOTTOM-band scale
@@ -361,6 +417,40 @@ gates `is_zero()` alongside contiguity + `optical_undecodable`.
   is the sharp discriminator (exposure/compression robust). The recorded fixture (with a bad-colour
   variant) is what locks the bar end-to-end on the rig.
 
+**#740 (RESOLVED 2026-07-14) — the RED and BLUE reference patches failed identically on EVERY node
+(cam1-6, strih, stream) after a NAMED physical incident, not a code regression.** Two overlapping
+rig incidents (#737 — cam2's dying disk corrupting its own HDMI display output that drives the
+colour scale, fixed 2026-07-13 13:41; #729 — the downstream HDMI splitter's 4/6 dead ports,
+re-cabled ~14:11 same day) settled the rig's achievable red/blue chroma onto a new, genuinely
+dimmer, but STABLE baseline (red 33-36 / blue 37-38, vs the pre-incident 117-128). Every other
+chromatic patch (green/cyan/magenta/yellow) stayed comfortably >90 throughout — red/blue were
+always the rig's two weakest chromatic patches even pre-incident, just with more headroom over the
+OLD 40 floor. `imag` (a physically separate apparatus) never faltered, confirming it wasn't a code
+bug. Fixed by recalibrating `GRAYSCALE_CHROMA_MIN` 40→24 (same ~26% headroom ratio the old
+threshold held over ITS baseline), with the full dated evidence trail in the constant's own doc
+comment (`src/colour_verify.rs`). **Never loosen this threshold without equivalent dated,
+named-mechanism evidence** — see the #740 GitHub thread + the doc comment for the full playbook.
+
+**Diagnostic technique — building a chroma timeseries from historical local runs (reusable for
+any "is this a physical rig change or a code regression" question).** Every `--colour-gate` run's
+per-patch means are logged (ANSI-coloured) as `colour-dump (localized per-patch mean) patch=N
+expected=... mean=... chroma=... hue=... frames=12` lines inside
+`/tmp/recording-e2e-<RUN_ID>/{strih,stream}-extract-<RUN_ID>.log` — one line per patch (0-12, order
+white/black/R/G/B/C/M/Y/g0/g64/g128/g192/g255, `PATCH_COLOURS`). To extract a timeseries across
+many past runs (strip the ANSI codes FIRST or `grep "patch=N "` silently matches nothing):
+```bash
+for f in $(grep -rl "colour-dump" /tmp/recording-e2e-*/strih-extract-*.log 2>/dev/null); do
+  mtime=$(stat -c '%y' "$f" | cut -d. -f1)
+  clean=$(sed -r 's/\x1b\[[0-9;]*m//g' "$f")
+  red=$(echo "$clean" | grep "patch=2 " | grep -oE "chroma=[0-9.]+" | head -1)   # patch=4 for blue
+  echo "$mtime  RED:$red  $(basename "$f")"
+done | sort
+```
+This is how #740's before/mid/post-incident phases (117-128 → 87-89 → 26-38, settling stable) were
+proven from local `/tmp` history alone, with zero rig access needed — the `verdict-<RUN_ID>.json`
+itself only carries the pass/fail COUNT (`colour_fail`), never the raw per-patch chroma, so the
+`*-extract-*.log` files are the only source for the actual numbers.
+
 ## Rig TEST / EVENT Mode Switch (#247) — `scripts/rig-mode.sh`
 
 THE deterministic, single-source-of-truth switch between TEST mode (QR/E2E measurement) and EVENT
@@ -368,7 +458,8 @@ mode (clean prod broadcast). Replaces the ad-hoc, context-dependent switching th
 burn left ON in the prod **Machine** env painted QR on the LIVE broadcast, and genlock left in a test
 state. The settings below are PINNED in the script; do NOT improvise them.
 
-Run from dev1 (ssh to the cam boxes is ALLOWED; ssh to the Windows boxes is DENIED, so the OBS side
+Run from dev1 (ssh to the cam boxes is ALLOWED; ssh to strih/stream also WORKS as of #701, but
+driving/verifying a live GUI OBS action is exactly what the win-* MCP is for, so the OBS side
 is PRINTED as the exact step to paste into the box's win-* MCP Shell — the WS burn toggle
 `obs_burn_filter.py add|remove` and, only if OBS is wedged, the env-free
 `launch-obs-genlock.sh --box {strih|stream} --force` relaunch):
@@ -489,6 +580,125 @@ timeout-bounded + pkill -9), `tests/python/test_obs_phase2_timeout.py` (the pure
 **Any NEW blocking obs-websocket/ssh call in a cleanup/trap MUST be timeout-wrapped and ordered after
 the cam-device free.**
 
+**GOTCHA — `gh run cancel` on an ALL_CAMBOX run can cut the cleanup trap off MID-LOOP, before it
+reaches every cambox (2026-07-12, #709 dispatch).** The bounded-per-step timeout guards above
+protect against a HUNG step, but a GitHub Actions **cancellation** kills the whole runner PROCESS
+directly — it does not wait for a bash trap's SEQUENTIAL per-cambox loop (`pkill -9 -f
+'camera-box-burn-'` → restart, once per active box in `CAMBOX_SWEEP`) to finish all six iterations.
+Live incident: cancelling a redundant (docs-only, no new verification value) ALL_CAMBOX run mid-sweep
+left `camera-box-burn-cam3/4/5/6` still holding their video devices and those four boxes'
+`camera-box.service` crash-looping ("Device or resource busy") — cam1/cam2 were ALREADY restored
+(cleanup had reached them before the cancel landed), the burns were left ON on every strih NDI input
+(visible-QR risk on a live broadcast), and cam2's own `camera-box.service` was ALSO crash-looping on
+`/dev/video1` from a stray `camera-box-burn-cam2-*`. **Whenever you cancel an ALL_CAMBOX (or any
+multi-cambox) run, do NOT trust the cancellation to have finished cleanup — explicitly re-verify
+EVERY cambox** (`ps aux | grep camera-box-burn` + `systemctl is-active camera-box` on all 6 boxes),
+EVERY strih NDI input's burn state (`obs_burn_filter.py check` on `NDI cam1`..`NDI cam6`, not just
+the default program source), and the rig-busy-check, before considering the rig clean. Fix pattern:
+`pkill -9 -f 'camera-box-burn-'` + `rm -f /tmp/camera-box-burn-*` + `systemctl restart camera-box`
+per stray box, `obs_burn_filter.py remove` per stray-burn input.
+
+**#712 (2026-07-12) — the cam3/4/5/6 loop is now PARALLEL, shrinking (not eliminating) this
+window.** `cleanup()`'s cam3/4/5/6 restore now backgrounds all 4 boxes' ssh restores at once and
+waits for them via `scripts/lib/cambox-parallel-restore.sh`'s `cambox_parallel_wait_and_report`, so
+the loop's wall-clock is bounded by the SLOWEST single box instead of the SUM of 4 (a real
+functional timing proof lives in `tests/harness_cambox_parallel_restore_712.rs`). This makes a
+cancellation landing mid-loop far less likely, but a SIGKILL can still land inside the shorter
+window — the manual re-verify steps above (`ps aux`/`systemctl is-active`/`obs_burn_filter.py
+check`/`rig-busy-check` on EVERY box) are still the correct backstop after any cancelled
+ALL_CAMBOX run, never assume the parallelization alone makes cleanup atomic.
+
+**#713 (2026-07-12) — extended to ALL 6 boxes (cam1 + the cam3/4/5/6 loop + cam2/painter, one
+shared `CAMBOX_PARALLEL_PIDS`/`LABELS` group, ONE `cambox_parallel_wait_and_report` call at the
+end) — but this ALSO concentrates more simultaneous outbound ssh sessions from dev1, and tripped
+the pre-existing `#675` SSH-connection-contention condition on the very first live run after it
+shipped (all 6 boxes hit "restore failed/timed out" within ~2s of the group launching — too fast
+for a genuine 30s timeout, consistent with an immediate connection-level rejection, not 6
+independent hangs).** The rig ended up fully healthy anyway — the SEPARATE, unaffected `#684`
+FINAL-verify pass (sequential, still runs after the parallel group) caught every box not-yet-
+active and its own `#675` one-retry mechanism recovered all 6. **Lesson for the next widening of
+this parallel group (or any similar N-way ssh fan-out from dev1 to the cam fleet): concentrating
+MORE simultaneous outbound connections trades a smaller cancellation-stranding window for a HIGHER
+chance of tripping `#675`'s connection contention on a normal (non-cancelled) exit — both are real
+trade-offs, not free.** Filed as `#715` (root cause + a stagger/sshd-limit fix are NOT yet
+investigated — a fresh gate-run's cleanup log is the way to check: grep for `WARNING #712 ...
+failed/timed out` immediately after `#328 FREE cam1/cam2 capture devices FIRST`; its absence, or a
+much smaller fraction of boxes hitting it, is the signal a fix landed).
+
+## GPU/encode-contention correlation technique (#674, 2026-07-12) — epoch-join a nvidia-smi sampler against the harness's OWN real window boundaries
+
+To test whether imag-nb's GPU/NVENC state correlates with a per-window judder-density metric
+(`all_cambox_continuity.imag.segments[].optical_stuck_density`) WITHOUT touching any rig config:
+
+1. **Sampler**: `scripts/imag-gpu-contention-sampler.sh` (committed) — a bounded-duration loop of
+   `nvidia-smi --query-gpu=utilization.gpu,memory.used,encoder.stats.sessionCount
+   --format=csv,noheader,nounits`, one CSV row per sample with a `date +%s.%3N` epoch timestamp.
+   Arm it (`nohup ... &`, `IMAG_GPU_SAMPLE_DURATION_SECS=900` is a safe default) BEFORE triggering
+   the gate run — you don't know exactly how long preflight/setup will take before `StartRecord`
+   actually fires, so budget generously; a duration too short truncates the TAIL of the recording
+   (confirmed live: a 900s window armed ~620s before `StartRecord` actually fired left the LAST
+   ~29s of a ~306s recording uncovered — always check via the exact math below and disclose any
+   gap honestly rather than silently extrapolating).
+2. **Real epoch window boundaries — read `switch-schedule.json`, not the printed log lines.**
+   `/tmp/recording-e2e-<RUN_ID>/switch-schedule.json` (still on dev1 after a self-hosted-runner
+   gate run — check there BEFORE spending rig time on a fresh repro, mirrors the `#708` lesson)
+   has each window's REAL `start_ns`/`end_ns` on dev1's own epoch clock (`n / 1e9` for seconds).
+   Since dev1 and imag-nb are both DanteSync-synced sub-ms, a straight epoch-second join between
+   the GPU CSV and these window bounds is valid at any sampling cadence coarser than ~10ms — no
+   manual clock-offset correction needed, unlike the painter-vs-dev1 `#326` gate's own correction
+   (that gate compares two DIFFERENT clocks' RAW offsets; this join compares two ALREADY-
+   DanteSync-disciplined epoch clocks directly).
+3. **Join**: for each window, filter GPU-CSV rows to `[start_ns/1e9, end_ns/1e9]`, average. Print
+   samples-covered vs window-duration per row so a gap (see point 1) is visible in the output, not
+   silently averaged over a partial window.
+4. Result this run (2026-07-12): GPU util/VRAM/encoder-sessions were COMPLETELY FLAT throughout —
+   REJECTS "GPU/encode contention builds up during the recording" as `#674`'s judder mechanism (no
+   growth to correlate against a judder density that was ALSO flat, just already-elevated). Full
+   writeup on `#674`'s own thread.
+
+## Emit-rate-deficit / freeze-jump discriminator (#707 B1, 2026-07-14) — 3-layer read: LINK vs BOX-EMIT vs SDK
+
+When `all_cambox_continuity` shows freeze+jump on a cambox (big deltas 7-12 in the window's
+`presentation_cadence.delta_histogram`, i.e. frozen frames then a jump), locate the loss LAYER with
+three signals instead of guessing:
+
+1. **LINK** — the box→strih TCP transport sampler (`scripts/lib/transport-sampler.sh`, armed `[5b/8]`,
+   harvested `[7c/8]` into the run dir as `transport-sampler-<cam>-<RUN_ID>.csv`). Columns:
+   `epoch_ms,iface,send_q_bytes,retrans_total,rx_errors,rx_dropped,tx_errors,tx_dropped`. Over the
+   window: `send_q_bytes max` (0 = TCP never backed up), `retrans_total` DELTA (0 = no wire loss),
+   `tx_err/tx_drop` DELTA. All flat → LINK is CLEAN, loss is upstream of the socket. (`rx_dropped`
+   is INBOUND, not the emit path — benign background multicast; ignore it.)
+2. **BOX EMIT PATH** — the box's own `camera-box` 5s `Streaming:` journal report:
+   `N fps emitted / M fps captured (S sent, C captured, D capture-dropped)`. **`captured`≈60 + `D`=0
+   but `sent` << `captured` = the emit path fell behind capture** (frames captured, never emitted).
+   That is the loss layer. The box's OWN `#707 genlock emit-gate SKIPPED …` diagnostic names the exact
+   mechanism (the genlock emit gate leaps past boundary intervals on a clock discontinuity / stalled
+   poll). `src/emit_rate_ring.rs` (prong 1) pins the exact 1s bucket — but see the deploy gotcha below.
+3. **NDI SDK internal** — only if LINK clean AND emit≈capture (no box deficit) yet strih still froze.
+
+**Confounds that fooled the first read (be honest, don't overstate):**
+- The E2E **burn binary** (`camera-box-burn-<RUN_ID>`) runs alongside `camera-box` and oversubscribes
+  the **3-core** cam boxes (load ~5.9) → ALL boxes drop to ~46fps emit DURING the test. That is a
+  TEST-MEASUREMENT artifact, NOT the production mechanism. Re-check emit rate in PRODUCTION (no burn,
+  post-cleanup): the genuine defect is the box that STAYS degraded (live #707: only CAM1 = 55.8fps +
+  ~64 emit-gate skips/30s; cam3/4/5/2 = 60fps/0 skips, cam6 minor). Chronic if it survives a
+  `systemctl restart camera-box`.
+- The `#707 emit-gate SKIPPED` diagnostic is unthrottled (~10/s → rsyslogd ~37% + journald ~15% CPU on
+  3 cores) — a logging-CPU feedback loop that WORSENS the emit stall (filed #752). Suspect it whenever
+  a box shows rsyslogd/journald high in `ps` during an emit deficit.
+
+## GOTCHA — the E2E harness does NOT deploy the main `camera-box` binary; new `src/main.rs` instrumentation won't be on the boxes after an E2E run
+
+`recording-e2e.sh` `[2/8]`/`[2b/8]` deploys + runs the **burn binary** (`camera-box-burn-<RUN_ID>.service`
+from `USE_PREBUILT_PROBE_DIR`) and `systemctl restart camera-box` — but the restarted service is the
+**INSTALLED `/usr/local/bin/camera-box`** (the production build), NOT a HEAD build. So a change to
+`src/main.rs` / any lib the main binary uses (e.g. the #707 `src/emit_rate_ring.rs` emit-1s report) is
+CI-green but **NOT present on the cam boxes after an E2E gate run** — verify with
+`strings /usr/local/bin/camera-box | grep <your-new-log-string>` (0 = not deployed). To exercise
+main-binary instrumentation on the rig you must fleet-deploy camera-box (`scripts/deploy-fleet.sh` /
+upgrade-fleet), separately from the E2E run. The strih/stream `obs.dll` (genlock) IS what a genlock
+deploy updates; the cam-box main binary is a DIFFERENT artifact on a DIFFERENT deploy path.
+
 ## Painter ground-truth CSV lifecycle + recording orphan guard (#355 / #359)
 
 **frame-probe writes the painter ground-truth `/tmp/painter.csv` ONLY on its clean `--duration-secs`
@@ -512,6 +722,66 @@ aborts the run. The start branch reads `GetRecordStatus`, on an active orphan lo
 `OBS_RECORD_FINALIZE_POLL_S` (2 s) until `outputActive=False`, bounded by
 `OBS_RECORD_FINALIZE_TIMEOUT_S` (120 s) — FAIL LOUD (`SystemExit`) on timeout, never a doomed
 `StartRecord`. Guard: `tests/python/test_obs_phase2_record.py`.
+
+**RESOLVED (#709, 2026-07-12) — imag-nb's OBS can silently never actually start a recording:
+root cause was a GPU VRAM leak exhausting NVENC's encoder-init headroom, NOT a WebSocket/RPC
+bug.** Live incident: `[5/8]` logged `10.77.9.182: recording STARTED` (obs-websocket's
+`StartRecord` only calls the frontend API and never verifies the encoder actually initialized —
+so a genuinely-failed start still returns `result:true`), then the SEPARATE #627 post-start
+liveness poll caught it 4s later — `outputActive=[False, False]`, `outputBytes` STATIC.
+
+**Diagnostic gotcha — imag-nb's OBS log uses LOCAL time (Europe/Prague, CEST, UTC+2), not UTC.**
+The original write-up ("imag's OBS log showed ZERO lines of any kind in the window") was a
+TIMEZONE MISREAD: grepping the log for the UTC failure timestamp (`04:21:33`) found nothing
+because the log's own timestamps are LOCAL (`06:21:33`). Always confirm the box's actual TZ
+(`timedatectl` / compare `date` vs `date -u`) and convert the CI run's UTC timestamps before
+concluding a log is silent.
+
+**Real root cause, found once the log was read at the correct (local) time:**
+```
+[obs-nvenc] init_encoder_h264: nv.nvEncInitializeEncoder(enc->session, &enc->params) failed: 10
+    (NV_ENC_ERR_OUT_OF_MEMORY)
+[obs-nvenc] init_encoder_h264: ... failed: 10 (NV_ENC_ERR_OUT_OF_MEMORY)   (2nd fallback attempt)
+Already in non_texture encoder, can't fall back further!
+```
+imag's OBS had run 5 days without a restart; its render pipeline (6 continuous NDI genlock feeds +
+the built-in Multiview) had leaked GPU VRAM up to 6872MiB of 8151MiB total (`nvidia-smi`), leaving
+only ~1058MiB free — not enough for NVENC's recording-encoder session to initialize. Fix: restart
+OBS on imag-nb (`pkill -9 -x obs`, matching `setup-imag.sh`'s own hot-swap relaunch pattern) —
+confirmed live: VRAM dropped to ~302MiB used, and StartRecord then wrote real, growing bytes.
+Prevention shipped: `scripts/lib/imag-gpu-guard.sh` + a new `[4e/8]` `recording-e2e.sh` preflight
+(before `[5/8] StartRecord`) that reads free VRAM via nvidia-smi and fails fast with an actionable
+message when it drops below `IMAG_GPU_MIN_FREE_MIB` (default 1500MiB) — see
+`tests/harness_imag_gpu_guard.rs`.
+
+**GOTCHA hit fixing #709 — a manual `pkill -9 -x obs` + relaunch on imag-nb that skips the
+`saved_projectors`-strip step opens DUPLICATE projectors and regresses the render-budget gate.**
+`setup-imag.sh`'s openbox autostart script strips `saved_projectors` from the scene-collection
+JSON BEFORE every launch specifically so a restart never restores a stale saved projector pair
+(see the `#522` note earlier in this file) — but that step lives ONLY in the autostart script, not
+in a bare manual `pkill+relaunch` driven by hand over ssh. Skipping it let OBS restore ONE stale
+Program+Multiview projector pair on launch, and then re-running `imag_scenes.py --projector`
+(to reseed scenes) opened a SECOND pair — `wmctrl -l` showed FOUR projector windows (2×Program +
+2×Multiview) instead of the intended two. Consequence: the compositor draws everything TWICE per
+frame, which silently regressed imag's OWN `[4d/8]` render-budget gate (60.00fps/0% skip →
+~57fps/2.5-10% skip, `#405/#406` gate) — a SEPARATE, self-inflicted failure mode from #709 itself,
+that showed up as a NEW red gate on the very next CI rerun. Fix: close the duplicate pair
+(`wmctrl -i -c <id>`, Linux-side — there is no WS request to close a projector, same limitation as
+the Windows boxes) — or better, ALWAYS strip `saved_projectors` BEFORE any manual imag-nb OBS
+relaunch, exactly mirroring the autostart script's own sequence:
+```bash
+pkill -9 -x obs; # wait for death
+for f in ~/.config/obs-studio/basic/scenes/*.json; do
+  python3 -c "import json,sys; p=sys.argv[1]; d=json.load(open(p)); d['saved_projectors']=[]; json.dump(d,open(p,'w'))" "$f"
+done
+DISPLAY=:0 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus XAUTHORITY=~/.Xauthority \
+  taskset -c 2-11 obs &   # then re-seed via imag_scenes.py --host 127.0.0.1 [--projector]
+```
+Verified live: after the properly-sequenced restart, imag held 60.00fps / ~5ms render / 0% skip —
+even better than the pre-incident baseline. This is the imag-nb-specific manifestation of the
+obs-ops skill's existing "a force-kill relaunch restores a STALE saved config" gotcha — same class
+of bug, worth checking `wmctrl -l` (window COUNT, not just presence) after ANY manual imag-nb OBS
+restart, not just after a genlock hot-swap.
 
 ## Local test verification gotchas (Tier-0)
 
@@ -603,6 +873,28 @@ is Phase-2, a DistroAV burn-filter change held off the 2.5h windows-genlock buil
   (e.g. CAM3 down) never reads as a pass. Active set today (#312 items 1+3) = ALL SIX cameras
   (CAM1/2/3/4/5/6) — see the updated Phase-2 paragraph below.
 
+## A DIFFERENT per-node metric (`full_chain.loss`, the #186 headline) was NOT schedule-scoped until #706 — the bug class to watch for
+
+The `all_cambox_continuity` gate above (#312) has ALWAYS been correctly schedule-windowed — but a
+SEPARATE, older per-node metric — `full_chain.loss.<cam>` (`expected_count`/`present_count`/
+`burn_unreadable`, the #186 headline verdict `node_verdict_with_optical` builds via
+`in_window_burn_frames`) — was NOT: its window was the WHOLE-RECORDING cam2 optical span, a
+leftover from before the ALL-CAMBOX sweep existed (when a single camera was continuously on
+program for the whole test). In the fused ALL-CAMBOX sweep each `CAMERA_UNDER_TEST_NODES` entry is
+on program for only its OWN ~1/6-to-2/6 share of the recording — so #186's un-scoped window folded
+every OTHER camera's program time into "this node's window" and misclassified it BURN-UNREADABLE:
+~47000 phantom ids fleet-wide (#706), ~7250-8530 PER camera. **The tell**, if you ever see this
+recur on a NEW per-node metric someone adds to the ALL-CAMBOX sweep: `burn_unreadable[cam] ≈
+expected_count[cam] × (fraction of the recording OTHER camboxes were on program)`, i.e.
+`expected_count[cam]` sits near the WHOLE recording's frame count instead of near
+`present_count[cam]`. The fix pattern (`scope_camera_window_to_own_schedule`,
+`src/bin/recording-verdict.rs`): reuse the SAME `frame_gen_ts_anchor` + `place_frame_in_window`
+the #312 sweep already uses to restrict the new metric's window to that camera's own schedule
+window(s) — never invent a second attribution scheme, or the two gates can disagree. Duration-floor
+/ optical-undecodable-rate style metrics (`optical_span_facts`) should usually stay
+WHOLE-recording — those measure "did the session run long enough" / "did the shared optical read
+stay clean", legitimately session-wide properties, not per-camera-program-time ones.
+
 ## #681 — a per-adjacent-pair delta walk is a BIASED estimator; use whole-window NET span instead
 
 `window_segment`'s `gaps` count (via `painted_tick_gaps`, #625) went through TWO bugs on the SAME
@@ -650,9 +942,10 @@ AND the DEFAULT per-box `MERGE_ARGS` (the `--merge-partials` step). The per-camb
 calls), so the merge path produces it IDENTICALLY to the fused/legacy path — the all-cambox verdict
 now runs ON the stream box (#193, decode where the video lives), NOT forced onto dev1. The old guard
 that forced `VERDICT_ON_STREAM=0` is GONE (#332). Just run `ALL_CAMBOX=1 bash scripts/recording-e2e.sh`
-(default `VERDICT_ON_STREAM=1`). Sweep config: `CAMBOX_SWEEP` (default, since #312 items 1+3:
-**`Cam 5:CAM1 Cam 1:CAM3 Cam 3:CAM4 Cam 2:CAM2 Cam 4:CAM5 Cam 6:CAM6`** — ALL SIX cameras, incl.
-cam2), `SEGMENT_SECS` (default 30).
+(default `VERDICT_ON_STREAM=1`). Sweep config: `CAMBOX_SWEEP` (default, since #312 items 1+3, #753
+fleet growth 6→7 + the 1:1 mapping pivot 2026-07-14:
+**`Cam 1:CAM1 Cam 2:CAM2 Cam 3:CAM3 Cam 4:CAM4 Cam 5:CAM5 Cam 6:CAM6 Cam 7:CAM7`** — ALL SEVEN
+cameras, incl. cam2), `SEGMENT_SECS` (default 30).
 
 **cam2's #333 exclusion was CORRECTED by #312 — do NOT reintroduce it.** #333 originally excluded
 CAM2/.62 (the dual-QR painter) reasoning "while painting it emits no camera NDI so its window is
@@ -845,19 +1138,61 @@ strih's SOURCE role.** A `CAM=cam4` run's cam4/strih/stream hops can be fully ZE
 STILL fails — because imag structurally always measures cam1's physical feed (Phase-1 provisioning,
 `IMAG_PROG_SCENE` fixed constant). If cam1 has an active hardware defect, imag inherits it in EVERY
 run no matter which camera is under test elsewhere — this is not a bug, don't try to route imag's
-scene to a different camera to "fix" it (that would defeat its diagnostic purpose).
+scene to a different camera to "fix" it (that would defeat its diagnostic purpose). Under
+`ALL_CAMBOX=1` this is HARD-ENFORCED, not just a default: `scripts/recording-e2e.sh` line ~131
+errors out if `CAMERA_NAME != cam1` when `ALL_CAMBOX=1` — every `all_cambox_continuity.imag`-based
+gate run is ALWAYS a cam1-vs-imag measurement underneath.
 
-**`#656`/`#663` self-heal firing on the E2E harness's OWN ad-hoc burn-enabled SOURCE-camera deploy
-kills that camera's digital burn measurement for the REST OF THE RUN, with no respawn (filed
-#668).** `recording-e2e.sh`'s `[2/8]` deploy is a plain `nohup camera-box-burn-<RUN_ID> &` — NOT a
-systemd unit. If the SOURCE camera's `#656` capture-rate defect fires mid-recording, `#663`'s
-self-heal exits the process (code 77) EXPECTING systemd's `Restart=always` to bring it back — but
-nothing is watching this ad-hoc process, so it just stays dead. Symptom: that camera's `#186`
-zero-loss verdict shows a burn-id sequence that stops dead partway through with everything after
-classified `BURN-UNREADABLE`. Diagnostic: check `/tmp/cbox-burn.log` on the SOURCE camera for a
-`#656 capture-delivery-rate DEFECTIVE` / `#663 self-heal` block around the point the ids stop.
-Workaround: pick a currently-healthy `CAM=` (check `journalctl -u camera-box | grep -iE
-'Streaming:|WARN'` on each candidate box for a recent/active `#656` WARN before committing to it).
+**Don't misread `all_cambox_continuity.imag.segments[].cambox` as "which camera imag is
+showing" — it's a borrowed TIME-WINDOW label, not imag's actual source (#674, 2026-07-12).**
+imag's OWN OBS scene never moves off `Cam 1` during an `ALL_CAMBOX` sweep (previous paragraph) —
+the per-segment `cambox: "CAM1"/"CAM3"/...` values are the SAME schedule-window boundaries the
+general (strih-side) `all_cambox_continuity.segments` uses, reused here purely so the two arrays
+line up 1:1 for reporting. So an `imag.segments[3].cambox == "CAM2"` entry does NOT mean imag was
+looking at physical cam2 in that window — it was still looking at cam1, during the time slot
+strih happened to have cam2 on program. Confirmed live: imag's `optical_stuck_density` is
+TIME-elapsed-correlated (rises through the recording, same shape on every camera label) while the
+general `all_cambox_continuity.segments` copies/gaps are PER-PHYSICAL-CAMERA-correlated (cam5/
+cam2 bad in both their turns, others clean) — two different signatures, proving they measure two
+different things. A SEPARATE naming collision compounds the risk: imag-nb's own OBS source named
+`NDI CAM1` subscribes to the raw NDI advertisement `"CAM1 (usb)"` — literally physical box
+hostname `cam1` (10.77.9.61) — which is UNRELATED to the schedule label `CAM1` (which maps to
+physical **cam5** via `CAMBOX_SWEEP`, per this skill's own delivery-latency section below). Two
+completely different "CAM1"s in the same investigation; keep them straight.
+
+**`#656`/`#663` self-heal firing on the E2E harness's OWN burn-enabled SOURCE-camera deploy USED TO
+kill that camera's digital burn measurement for the REST OF THE RUN, with no respawn — fixed by
+#668 (STATUS: shipped, not just filed).** `recording-e2e.sh`'s `[2/8]`/`[2b/8]` deploy now runs
+under a real TRANSIENT `systemd-run --unit=camera-box-burn-<RUN_ID>[-<cam>] --collect
+--property=Restart=on-failure` unit for every camera under an ALL_CAMBOX sweep (cam1's own
+dedicated path AND the `_ccn`/`_cunit` loop for cam2-6) — a mid-recording `#656`/`#663` self-heal
+exit (code 77) now respawns instead of dying silently. If you still see a burn-id sequence stop
+dead partway through (`#186` verdict shows everything after classified `BURN-UNREADABLE`), it is
+NOT this now-fixed class — investigate fresh.
+
+**Finding a PAST run's cam-box capture-rate telemetry (`Streaming: X fps emitted / Y fps
+captured`) — `journalctl -u camera-box-burn-<RUN_ID>` is EMPTY of application output; the real
+source is `/tmp/cbox-burn.log`, and it is OVERWRITTEN before every new burn (2026-07-12, #674
+confirmation, #716 filed).** During an actual gate-run recording, the PERSISTENT
+`camera-box.service` is stopped (to free the capture device) and the transient burn unit above
+takes over — but `systemd-run`'s `--property=StandardOutput=append:/tmp/cbox-burn.log
+--property=StandardError=append:/tmp/cbox-burn.log` redirects the binary's own stdout/stderr
+DIRECTLY to that file, never to journald. `journalctl -u camera-box-burn-<RUN_ID>` only ever shows
+systemd lifecycle lines (`Started`/`Deactivated`/`Consumed ... CPU time`) — zero `Streaming:`/WARN
+content, on ANY invocation, past or present; this is NOT the #693 stale-cross-restart class (the
+data was never in journald to begin with — invocation-ID scoping doesn't help). Worse: `[2/8]`
+does `rm -f /tmp/cbox-burn.log` before EVERY new burn, so **only the MOST RECENT run's raw fps log
+survives on the box at any moment** — with `full-path-e2e` firing roughly every 30-45 min on this
+repo, a specific past run's telemetry is often already gone by the time you go looking for it.
+`$OUTDIR/cam1-capture-stats.txt` (a coarse END-OF-RUN total: `v4l2_dropped=N`,
+`frames_captured=N`, scp'd back to dev1 already) survives per-run but has no per-window
+granularity. **#716 (open)** proposes persisting `/tmp/cbox-burn.log` to dev1 per run the same
+way. Until it lands: if you need a SPECIFIC past run's fps history and it's not the latest one,
+it's gone — don't waste time hunting journald or CI logs for it (checked both, neither has it).
+Workaround for "pick a currently-healthy `CAM=` before starting a NEW test" (a live, forward-
+looking check, not a past-run lookup): `journalctl -u camera-box | grep -iE 'Streaming:|WARN'` on
+each candidate box IS valid for this — that reads the PERSISTENT service, which only runs
+between/before tests, not during one.
 
 **Killing a `python.exe` process on a `win-*` MCP box by NAME can kill the MCP's OWN backend and
 drop the tool's transport.** The `win-strih`/`win-stream-snv` MCP server's own remote agent runs AS
@@ -893,6 +1228,67 @@ So `window_segment` computes the painted-tick continuity DIRECTLY: a forward ski
 repeated tick is a `copy`; `undecodable` is the direct `None` count. It mirrors `burn_contiguity`'s
 definitions but treats a duplicate as a copy, never burn-unreadable. Regression-locked by
 `non_adjacent_freeze_hiding_a_real_drop_still_fails`.
+
+## Discord full-report after every full-path E2E run (#711) — the field-mapping decisions
+
+`scripts/e2e_discord_report.py` (pure, fixture-tested — `tests/python/test_e2e_discord_report.py`)
+composes the Slovak per-run Discord report from the merged verdict JSON. It reads ONLY existing
+fields — no new measurement was added — so the value is entirely in which JSON block answers which
+of the user's 6 required questions. Read this BEFORE changing the verdict JSON schema (a renamed/
+moved field silently breaks the report with no compile-time signal — only the fixture tests catch
+it) or before re-deriving this mapping from scratch:
+
+- **"Zero-loss cesta do STREAMU" (per camera)** → `full_chain.loss.camN` (the #186 headline
+  burn-id-contiguity gate — `real_drops`/`burn_unreadable`/`present_count`/`expected_count`).
+- **"Zero-loss cesta do IMAG" (per camera)** → `all_cambox_continuity.imag.segments`, aggregated
+  per `cambox` label (a camera cycles through several segments — sum `copies`/`gaps`/`undecodable`,
+  AND every segment's `pass` for that cambox). Falls back to the single combined
+  `full_chain.loss.imag` node (`imag_optical_beat_pass`) on a non-`ALL_CAMBOX` run, where imag has
+  no per-camera breakdown at all.
+- **"Latencia — stabilita + minimálna latencia do imag"** → `all_cambox_latency` (the SOURCE-side
+  `cam2→camera-capture` hop, 5 cams, cam2 excluded — see the section above this one, "measures
+  SOURCE-side `d_X`"). **There is NO measured camera→imag latency field in this codebase today.**
+  `all_cambox_latency`'s minimum is reported as an honest FLOOR (imag receives the SAME camera NDI
+  before strih ever touches it, so imag's real latency is ≥ this number, plus imag's own unmeasured
+  receive/hold time) — never claimed as the actual imag number. If a real camera→imag latency hop
+  is ever added, point this section at it directly instead of the floor.
+- **"Video sync NDI kamier v strih OBS (delivery-latency spread, per-camera holds)"** →
+  `all_cambox_delivery_latency` (the RECEIVER-side `strih_burn − camera_burn` hop, all 6 cams incl.
+  cam2, #286/#624) — the issue's own parenthetical names this block directly, word for word.
+- **A/V UNKNOWN reasons** — never a bare "UNKNOWN": `candidates==0` → `"tichá stopa"` (the literal
+  phrase issue #711 requires for a silent audio track); `candidates>0` but `cluster_samples==0` →
+  `"nedostatok konzistentných vzoriek"`. Distinguishing these two matters — #709's real run had
+  BOTH in the same JSON (cam2 measured, the other 5 candidates-present-but-unclustered) and a
+  single generic "UNKNOWN" would have hidden that cam2's mic path was fine while the others simply
+  didn't have a usable window.
+- **#714 (2026-07-12) — SUPERSEDES the old "only cam2 can ever be Measured" framing.** The 5
+  non-cam2 cameras' UNKNOWN was root-caused (not just described) as pure sample-density starvation
+  — live data showed their per-window candidate counts ARE non-zero and roughly proportional to
+  window duration (the dual-QR ticks genuinely decode fine in every camera's own window, per the
+  rig's shared-HDMI-splitter optical-injection topology), they just can't accumulate
+  `MIN_AV_SAMPLES` real matches in a single ~30-60s slot (cam2's own whole-300s pool only clears
+  the floor at ~1 real match per ~10-13s). `av_window::derive_camera_av_sync` now gives every
+  such camera a DERIVED estimate (cam2's own offset re-centered on this camera's own `#286`
+  delivery-latency delta vs the run's mean) — reported as `verdict=="derived"`, NEVER conflated
+  with `"measured"`. The Discord composer renders it as `"ODVODENÉ <value>"`. A camera is a bare
+  `"unknown"` now ONLY when there's no `#286` delivery sample to derive from either (e.g. no
+  `--strih` recording supplied, or that camera never appeared in the sweep at all).
+- **Known-blocker ticket hints** (`KNOWN_BLOCKER_HINTS` in the composer) are annotations ONLY — the
+  technical description on each line (e.g. "Kontinuita medzi kamerami (stream): FAIL") is always
+  accurate on its own from the JSON; the `#707`/`#588`/`#604`/`#689`/`#641` pointers are a
+  convenience that WILL go stale as those tickets close. Update the dict when they do; a stale
+  pointer degrades to "a still-correct FAIL with an outdated ticket number", never a false claim.
+
+**Delivery mechanism** — `scripts/lib/e2e-discord-report.sh`, called from `[8/8]`'s
+`E2E_EXECUTE_VERDICT=1` branch in `recording-e2e.sh` (the ONE code path both the CI PR gate and a
+manual supervisor-driven run share). Reuses the bot-token `#notifications` POST this skill's own
+"Discord CI Notifications" section documents — fail-open by design (runs under `set +e`, restores
+the caller's `errexit` before returning), so a Discord outage can never fail the real gate.
+**Verify delivery the same way as everywhere else in this skill: the created-message `id`, not
+`fetch_messages`** (this channel isn't allowlisted for the in-session Discord plugin) — `curl -H
+"Authorization: Bot $DISCORD_BOT_TOKEN" ".../channels/<id>/messages?limit=N"` reads recent messages
+back directly when you need to eyeball real content (used to verify #711 end-to-end against a live
+CI run before closing the issue).
 
 ## Verdict ACCOUNTING seam — headline COUNT vs pass/FAIL are separate (safe place to fix over-counts)
 
@@ -958,11 +1354,24 @@ continuously even when the underlying camera NDI is stuck. Hashing a Multiview t
 imageWidth: 320}`. A live-but-dark camera still has sensor noise (hash changes every sample at
 mean luma ~5–7); a frozen NDI repeats identical PNG bytes → STATIC → FAIL.
 
-**Precondition (#276):** the Multiview projector must be OPEN on strih so all raw NDI inputs
-are rendering. A source that is not rendering produces all-black frames (identical hashes) and
-is correctly detected as FROZEN — the right fail-safe to prevent wasting a run on a dead feed.
+**Precondition — GONE since #747 (2026-07-13): the gate now WARMS each input itself.** The old
+"Multiview projector must be open" precondition (#276) was silently INVALIDATED the same day it
+was written by #730/#508's Multiview decoupling (see the GOTCHA below) — a decoupled Multiview
+renders low-bandwidth `MV Cam N` TWIN clones, not these raw main inputs, so keeping it open no
+longer keeps `NDI cam4`/`NDI cam6` etc. rendering at all. The fix: before sampling EACH source,
+`frozen-camera-gate.py` now sets that input's wrapping strih `Cam N` scene (see
+`scripts/strih_mv_scenes.py`'s naming convention — `_scene_for_input('NDI cam5') == 'Cam 5'`) to
+PREVIEW (Studio Mode, always on on strih/stream) and settles `--warm-settle` seconds (default
+3.0, `FROZEN_CAM_WARM_SETTLE_S`) BEFORE taking that source's samples — this genuinely opens/
+refreshes the DistroAV receiver. Frozen = repeated identical hash WHILE ACTIVATED; a null/
+identical-cold read is no longer possible because nothing is ever sampled cold. The original
+preview scene is restored once every source has been sampled. The companion
+`scripts/warm_cam_scenes.py` (new `[4f/8]` step) does the SAME cycle-and-restore once, right
+before `[5/8] StartRecord`, so the `[6/8]` ALL_CAMBOX sweep's first cut to each camera isn't
+ALSO a cold connect.
 
-**Sources checked by default:** `NDI cam1, NDI cam2, NDI cam3, NDI cam5` (the raw strih inputs).
+**Sources checked by default:** `NDI cam1, NDI cam2, NDI cam3, NDI cam4, NDI cam5, NDI cam6,
+NDI cam7` (the raw strih inputs; #753 fleet growth 6→7 extended this).
 
 **Threshold:** > 3 consecutive identical hashes = FROZEN. A run of ≤ 3 identical is allowed
 (e.g. sensor temporarily settling). Fail-closed: < 2 successful samples also = FROZEN.
@@ -983,7 +1392,7 @@ is correctly detected as FROZEN — the right fail-safe to prevent wasting a run
 ```bash
 FROZEN_CAM_THRESHOLD=3      # consecutive-static threshold (default 3)
 FROZEN_CAM_SAMPLES=8        # samples to collect (default 8 → ~8 s window)
-FROZEN_CAM_SOURCES="NDI cam1,NDI cam2,NDI cam3,NDI cam5"  # sources to check
+FROZEN_CAM_SOURCES="NDI cam1,NDI cam2,NDI cam3,NDI cam4,NDI cam5,NDI cam6,NDI cam7"  # sources to check
 FROZEN_GATE_BIN=/path/to/frozen-camera-gate  # binary path (auto-discovered via PROBE_BIN_DIR)
 ```
 
@@ -994,6 +1403,34 @@ FROZEN_GATE_BIN=/path/to/frozen-camera-gate  # binary path (auto-discovered via 
 
 **CI artifact:** `frozen-camera-gate` is built (default features) alongside the probe tools
 and uploaded into the `probe-tools-linux-amd64` artifact.
+
+**GOTCHA — ROOT-CAUSED + FIXED (#747, 2026-07-13): "FROZEN" in the FAIL message did NOT always
+mean "genuinely stuck repeating the same frame" — read this if you ever see it again post-fix.**
+`_screenshot_hash` returns `None` on BOTH failure shapes: (a) a real frozen NDI source (>3
+identical hashes in a row), AND (b) a hard `GetSourceScreenshot` RPC/decode failure for that
+source — the fail-closed `< 2 successful samples = FROZEN` branch fires identically for either
+cause, and the FAIL message reads the same either way (`FROZEN: NDI cam4, NDI cam6`). **Check the
+RAW timeline JSON printed just before the FAIL line** to tell them apart: a genuinely-stuck camera
+shows the SAME real hash repeated; an availability failure shows `null` for EVERY sample.
+
+**Root cause (confirmed live):** `NDI cam4`/`NDI cam6` were the ONLY main inputs with
+`GetSourceActive.videoShowing=false` at gate time — a decoupled Multiview (#730/#508) no longer
+gives them a rendering surface, so a not-showing DistroAV source genuinely does not render at
+all (not a receiver/network fault). 3 consecutive full E2E attempts (including one on a pure-docs
+commit — proving it was rig state, not the code under test) reproduced `[null]*8` for both;
+putting either camera's scene on PREVIEW made it `videoShowing=true` within 5s with real
+screenshot data. **Fixed** by the per-source warm-up described above — see the "Precondition"
+paragraph. Verified on the first post-fix gate run: `[4c/8]` PASS with full live hash timelines
+for every input including cam4/cam6.
+
+**Side-effect the fix introduced (tracked on #747 itself, next dispatch's item, NOT re-opened
+here):** the warm-up phases add real wall-clock time (5 sources × (settle + samples×cadence) ≈
+50s) between `[3/8]`'s painter launch and `[5/8]` StartRecord. A painter started with a fixed
+`--duration-secs` can now expire BEFORE `StopRecord` if that budget doesn't account for the added
+warm-up time — the tail of the recording reads fully undecodable (`painted tick == none`), not a
+new zero-loss defect. If you see a run's LAST one or two ALL_CAMBOX windows FULLY undecodable
+(100% of frames, not a partial rate), check the painter's `--duration-secs` against the actual
+elapsed wall-clock from painter-launch to StopRecord before treating it as a real regression.
 
 ---
 
@@ -1157,6 +1594,26 @@ supervisor re-decode of 572001 is the real proof.** The honest gate uses RUN-LEN
   `capture-rate-guard.sh` E2E preflight only catches (a), not (b). If a restart-survival or
   full-path E2E run fails ONLY on imag's `#588` judder gate (never on delivery/burn contiguity),
   re-check cam1's capture rate and USB-reset it before assuming a code regression.
+- **#674 CLOSED (2026-07-12) — the "subtler version" above is CONFIRMED, with a precise number:
+  imag's `#588` judder is a faithful pixel-level relay of cam1's OWN chronic ~64fps-captured/
+  60fps-emitted rate, not a downstream/software artifact.** Freshly measured across an ENTIRE
+  5-min recording (`/tmp/cbox-burn.log` for `RECORDING_E2E_RUN_ID=1740128460` — see the
+  cam-box-telemetry-retrieval note above): captured fps rock-steady 63.9-64.0 in EVERY window,
+  zero capture-dropped, zero self-heal/WARN lines anywhere — this is a CHRONIC, always-on
+  condition (also confirmed live outside any recording, twice, at different times), not an
+  intermittent "episode". The math: (64.0-60.0)/60.0=6.67% lines up almost exactly with imag's
+  measured 6.76-7.04% judder density for that same run. Matches #685's already-established
+  mechanism precisely ("internal resampling → duplicate-frame bursts" from the ShadowCast 2's
+  free-running USB clock) — self-heal correctly did NOT fire (6.67% sits inside the post-#685
+  `SHADOWCAST2_CAPTURE_RATE_TOLERANCE_PCT=10.0` envelope; that's intended, not a gap). **Residual
+  open lead, NOT chased further:** a DIFFERENT run in the same investigation (`1790862887`) showed
+  a DECLINING judder shape (6.98%→0.47%→back to 4.3% within one 5-min recording) that a purely
+  chronic/always-on mechanism does not by itself explain — its own raw fps log was already
+  overwritten by the time it was checked (the exact #716 gap), so this specific run's cam1 rate
+  could not be verified. If `#716` lands and a future dispatch has spare E2E budget, checking a
+  fresh decline-shaped run's own `/tmp/cbox-burn.log` (or, better, `capture-rate-selfheal.state`'s
+  `last_heal_epoch_s`, per the diagnostic two entries below) against its own judder shape would
+  close that residual question.
 - **Diagnosing an imag freeze/stall during an ALL_CAMBOX sweep: always check CAM1's own self-heal
   state, never whichever camera strih's sweep window LABEL happens to show at that moment (#670,
   2026-07-11).** imag's PROGRAM-feeding input (`NDI CAM1`) is FIXED to cam1's own feed for the
@@ -1200,12 +1657,18 @@ supervisor re-decode of 572001 is the real proof.** The honest gate uses RUN-LEN
   not catch it (exactly the failure mode that shipped the original #580 sign-flipped fixture).**
 
 **`recording-verdict-on-imag.sh` ACTUALLY EXECUTES — it does NOT just print a plan, unlike its
-strih/stream siblings.** `recording-verdict-on-strih.sh` / `-on-stream.sh` are pure PLANNERS
-because ssh/scp to the Windows boxes is DENIED on this rig (the win-* MCP is the only path). imag-nb
-is a plain Ubuntu box, same access class as cam1/cam2 (`targets.md`'s "Linux OBS Targets" row, SSH
-`newlevel`/`newlevel`) — bash CAN ssh/scp it directly, so the on-imag helper deploys the verdict
-binary (skip if already present+executable), runs `--extract-partial imag` over ssh, and scp's the
-small partial (+ `#186` pixel-proof dir) back to dev1 itself, in the SAME script invocation. Don't
+strih/stream siblings BY DEFAULT.** `recording-verdict-on-strih.sh` / `-on-stream.sh` default to
+pure PLANNER mode (a MCP-pasteable plan) — historically because ssh/scp to the Windows boxes was
+believed DENIED on this rig; #701 proved plain OpenSSH+password ssh/scp actually WORKS against
+strih/stream specifically with the `targets.md` creds, and #703 already wired an opt-in
+`--execute` mode into both scripts that runs the SAME shape of flow imag-nb always used (see
+each script's own header). Planner mode stays the default for a manual/`workflow_dispatch`
+operator run; `--execute` is what the REQUIRED CI merge gate uses (`E2E_EXECUTE_VERDICT=1`).
+imag-nb is a plain Ubuntu box, same access class as cam1/cam2 (`targets.md`'s "Linux OBS Targets"
+row, SSH `newlevel`/`newlevel`) — bash CAN ssh/scp it directly, so the on-imag helper deploys the
+verdict binary (skip if already present+executable), runs `--extract-partial imag` over ssh, and
+scp's the small partial (+ `#186` pixel-proof dir) back to dev1 itself, in the SAME script
+invocation. Don't
 be misled by the on-strih/on-stream "printed plan" pattern when writing a similar helper for a
 Linux/ssh-reachable box — check the access class first.
 
@@ -1220,13 +1683,16 @@ list is exempt from `set -e`, so a failure degrades gracefully (the optional art
 `$IMAG_PARTIAL` — simply stays absent, and a downstream `if [ -f "$IMAG_PARTIAL" ]` guard omits it
 from the merge). Apply this to ANY new fallible call added inside that branch, not just imag's.
 
-**imag's camera mapping is a CLEAN 1:1, unlike strih's drift-corrected `#399` mapping.** strih's
-program input showing cam1 is `NDI cam5` (a historical drift-correction — see `#399` in this file's
-sibling sections / `.claude/skills/genlock`). imag's Phase-1 provisioning (`setup-imag.sh`, #458)
-pins `NDI CAM1`..`NDI CAM6` → `CAMx (usb)` 1:1 fresh, so imag's input showing cam1 (the SOURCE
-camera that films cam2's monitor) is simply `NDI CAM1` / scene `Cam 1`
-(`IMAG_PROG_SOURCE`/`IMAG_PROG_SCENE` in both `recording-e2e.sh` and `rig-mode.sh`). Don't assume
-the two boxes' camera→input naming matches — they're maintained independently.
+**imag's camera mapping is a CLEAN 1:1 — and since #753 (2026-07-14) strih's is too.** Before the
+pivot, strih's program input showing cam1 used to be `NDI cam5` (a historical drift-corrected
+offset mapping — see `#399` in this file's sibling sections / `.claude/skills/genlock`, marked
+HISTORY there now). imag's Phase-1 provisioning (`setup-imag.sh`, #458) pins `NDI CAM1`..`NDI
+CAM7` → `CAMx (usb)` 1:1 fresh; strih's binding user directive rebind (2026-07-14) brought strih
+to the SAME 1:1 shape. So both boxes' input showing cam1 (the SOURCE camera that films cam2's
+monitor) are now simply `NDI CAM1`/scene `Cam 1` on imag and `NDI cam1`/scene `Cam 1` on strih
+(`IMAG_PROG_SOURCE`/`IMAG_PROG_SCENE`, `STRIH_PROG_SOURCE`/`STRIH_PROG_SCENE` — all four now agree
+in SHAPE, though imag keeps its own uppercase `CAMx (usb)`/`NDI CAMx` naming convention, still
+maintained independently of strih's lowercase `NDI camx`).
 
 **`rig-mode.sh` extends `obs_burn_targets()`/`toggle_burn` to imag for free** — the array's own
 `#252` design comment explicitly anticipated "a third box", so TEST mode turning imag's 911003 burn
@@ -1311,6 +1777,47 @@ started one. A leftover recording blocks every subsequent CI gate run as RIG_BUS
 manually diagnoses it (rig-busy-gate.sh now prints per-box timecode + stray-vs-broadcast hints,
 #649 item 3).
 
+## RESOLVED (#734, 2026-07-13) — a manual `rig-mode.sh test` right before the CI E2E gate no longer breaks `[3/8]`/#431; the collision is self-healed
+
+**Superseded the GOTCHA that used to live here** ("avoid a manual `rig-mode.sh test` invocation
+before a push" — that workaround is no longer needed; both orders now work).
+
+**Root cause, confirmed** (reproduced 2/2 the same night, then root-caused): `rig-mode.sh test`
+and the CI harness's own `[3/8]` step both launch a `frame-probe --paint-only` process on cam2
+(same pidfile, same fb0) — but `[3/8]` never killed a PRE-EXISTING one before waiting for
+`/dev/fb0` and launching its own. A manual `rig-mode.sh test` process left running holds BOTH
+`/dev/fb0` AND the audio-marker's ALSA device (`hw:CARD=PCH,DEV=3`) EXCLUSIVELY:
+- the `fuser -s /dev/fb0` wait loop merely times out after 15s (busy or not, no failure branch)
+  and launches a SECOND frame-probe anyway;
+- the #420 "RUNNING" self-check reads the DEVICE-scoped `/proc/asound/PCH/pcm3p/sub0/status` —
+  this reports `state: RUNNING` from the OLD still-alive process regardless of whether the run's
+  own NEW process ever managed to open the device;
+- the #431 emission-growth check polls THIS run's own `--marker-log` file
+  (`/tmp/av-markers.csv`), which the new process never writes to if its own `--audio-marker` open
+  failed on the busy device.
+
+Net effect: `PASS: #420 ... RUNNING` immediately followed by `FAIL: #431 ... has NOT GROWN` —
+device-scoped check passes on the OLD process, file-scoped check fails on the silently-broken NEW
+one.
+
+**Fix**: `[3/8]`'s `_cam2_kill_existing` step (`scripts/recording-e2e.sh`) unconditionally
+`pkill -x frame-probe`s BEFORE the fb0-fuser wait loop, then polls `pgrep -x frame-probe` (bounded,
+~10s) until it reports nothing — applied to BOTH the ALL_CAMBOX and plain single-camera
+`_cam2_prep` branches. Deliberately does NOT try to REUSE a foreign running painter instead of
+killing it: it paints a DIFFERENT `--run-id` than the gate's own `$RUN_ID`, and
+`recording-verdict`'s decode only trusts markers/QR burns carrying its OWN run id — reusing a
+stale process's output would silently record the wrong run's content.
+
+**Verified two ways**: Rust harness tests
+(`tests/harness_recording_e2e_cam2_kill_existing_painter_734.rs`, bound to the dedicated
+`_cam2_kill_existing` step — NOT a bare `pkill -x frame-probe` substring search, which ALSO
+matches a pre-existing, unrelated `on_fail_cmd` argument in the same block and would false-GREEN
+even pre-fix); AND live on the rig — restored TEST mode (painter confirmed RUNNING), then ran the
+exact kill+verify-dead commands directly against it: `pkill -x frame-probe` killed it, the
+`pgrep -x frame-probe` poll confirmed it gone after 1 cycle (0.5s), `fuser -s /dev/fb0` then
+correctly reported fb0 free — the exact precondition that broke `[3/8]` twice is now cleanly
+self-healed. **No more need to avoid running `rig-mode.sh test` before a push.**
+
 ## TOPOLOGY FACT — ONE camera + HDMI splitter feeds ALL cam boxes the IDENTICAL signal (owner-corrected 2026-07-10)
 
 The optical leg is: cam2 paints its monitor → **ONE physical camera** films that monitor → the
@@ -1325,6 +1832,378 @@ IDENTICAL video signal. There are NOT separate cameras per box. Consequences:
 - Capture-rate health check first: `journalctl -u camera-box | grep Streaming:` — captured fps
   must be ≈ the configured rate (60). Over-delivery (62-64fps) = defective USB grabber state →
   USB-reset it (#656 prevention adds an automatic WARN + E2E preflight for this).
+
+## CORRECTION (2026-07-12, #708) — the `all_cambox_continuity` schedule labels ARE 1:1 physical box numbers; the prior GOTCHA table here was WRONG
+
+**PRE-2026-07-14 HISTORY — the mechanism below (inversion-cancellation) is now MOOT.** #753's
+binding user directive (2026-07-14) pivoted strih's NDI-input→camera mapping itself to a literal
+1:1 (no more inversion at ANY layer — see the genlock skill's "strih NDI Input → Camera Mapping"
+section and `set-ndi-mapping.py`'s module docstring). The CONCLUSION this section proves —
+**schedule label CAMN == physical box camN, no translation needed** — is still true today, now
+for the simpler reason that there is no inversion left anywhere in the chain to cancel. The
+INVESTIGATION below (three cross-checked methods proving the OLD inverted mapping's
+cancellation) is kept as historical record of how that was established; do not re-derive it, and
+do not expect the CAMBOX_SWEEP pairing it references (`Cam 5:CAM1` etc) to still exist — see
+`recording-e2e.sh`'s CAMBOX_SWEEP default for the current 1:1 pairs.
+
+An earlier version of this section (written during #707) claimed `label CAM1 -> physical cam5`
+etc. and warned to "translate before drawing any per-box conclusion". **That table was
+empirically WRONG — verified live 2026-07-12 during #708 via three independent, cross-checked
+methods:**
+
+1. **SSH `hostname` on all 6 boxes directly**: `10.77.9.61`=`CAM1`, `.62`=`CAM2`, `.63`=`CAM3`,
+   `.64`=`CAM4`, `.65`=`CAM5`, `.66`=`cam6` — i.e. box IP N has hostname `CAMN` (or `camN`), no
+   reshuffle.
+2. **`os_hostname()` (src/main.rs) feeds the NDI sender name directly** (`src/ndi.rs`: sender =
+   `<hostname> (usb)`) — so box camN broadcasts NDI name `CAMN (usb)`, confirmed by the ORIGINAL
+   (correct, still-standing) "strih NDI Input -> Camera Mapping (INVERTED)" table earlier in the
+   genlock skill: `NDI src "CAM1 (usb)" == real camera CAM1 (10.77.9.61)`.
+3. **Live `GetSceneItemList` on strih for every `Cam N` scene** (2026-07-12) proves each scene
+   name contains the SAME-NUMBERED `NDI camN` input 1:1 (`Cam 5` → `['ASIO zvuk','NDI cam5']`,
+   `Cam 4` → `['NDI cam4']`, etc.) — there is NO scene-level inversion. The ONLY inversion in the
+   whole chain is the INPUT-OBJECT-NAME → SENDER binding (`scripts/set-ndi-mapping.py`
+   `DEFAULT_MAP`, e.g. input `"NDI cam5"` receives sender `"CAM1 (usb)"` = box cam1) — a
+   DIFFERENT layer from the schedule label, and the inversions there exactly CANCEL the
+   `CAMBOX_SWEEP` scene/label pairing (`Cam 5:CAM1`, `Cam 1:CAM3`, `Cam 3:CAM4`, `Cam 2:CAM2`,
+   `Cam 4:CAM5`, `Cam 6:CAM6`) — so **schedule label CAMN, box camN, and the NDI sender name
+   `CAMN (usb)` are always the SAME physical machine.** Cross-checked a 4th way against a real CI
+   run's own `[seg N/10] <LABEL> via '<scene>' switched at <ns>` log lines (run 29174543633):
+   `CAM1 via 'Cam 5'`, `CAM3 via 'Cam 1'`, `CAM4 via 'Cam 3'`, `CAM2 via 'Cam 2'`, `CAM5 via 'Cam 4'`,
+   `CAM6 via 'Cam 6'` — exactly matches `CAMBOX_SWEEP`, confirming `label CAMN == box camN` with
+   no translation needed.
+
+**Do NOT re-apply the deleted "CAM1→cam5" table.** If `CAMBOX_SWEEP`'s scene:label PAIRING itself
+is ever edited to use a non-identity mapping (e.g. `Cam 3:CAM1`), the label would then differ from
+the box — always re-derive from the CURRENT `CAMBOX_SWEEP` value + a live `GetSceneItemList` check
+(method 3 above) rather than trusting any hardcoded table, this one included.
+
+## Diagnosing `all_cambox_continuity` copies/gaps growth — accounting vs genlock vs REAL box defect (#707, 2026-07-12)
+
+When `copies`/`gaps` look elevated or growing across a run, don't guess — run this triage in order
+(each step rules out one whole class of cause; all three were needed to reach ground truth once):
+
+1. **Read `src/probe/recording_segments.rs::window_segment` + its unit tests first** — it is
+   decimation-aware (`expected_step`), order-independent for `gaps` (#625), and windows are fully
+   isolated (`prev_recorded` resets per window) — an accounting bug here would show as a FIXED
+   pattern every run, not noisy per-run variance.
+2. **Pull live `genlock-fifo audit` lines from BOTH strih's per-camera ingests AND stream's PGM
+   ingest**, scoped to the exact StartRecord→StopRecord wall-clock window (find it via
+   `gh run view <id> --log | grep -iE 'StartRecord|StopRecord'`):
+   ```powershell
+   Select-String -Path $log -Pattern "genlock-fifo audit" |
+     Where-Object { $_.Line -match "^HH:(MM_RANGE)" }
+   ```
+   Group by source, diff `underruns`/`holds`/`overruns`/`backward_steps`/`depth` first-vs-last in
+   the window. Flat + zero-growth across the whole window on BOTH boxes = genlock/FIFO is clean,
+   the cause is elsewhere.
+3. **Pull live `journalctl -u camera-box --since <window start> --until <window end> | grep -E
+   "Streaming:|DEFECTIVE|WARN"` on the PHYSICAL boxes** (translate schedule labels first, see
+   above) for the exact window. A `captured` fps that stays healthy (~60) while `emitted` sags
+   below it — sometimes with an explicit `#666 emit-delivery-rate DEFECTIVE` WARN in the log — is
+   a REAL box-level emit-pipeline defect (the #656/#663/#665/#666 family), not a measurement bug
+   and not a genlock issue. `#665`/`#666` are the standing tracker for this defect class; a fresh
+   `all_cambox_continuity` red run that traces to it is that defect's materialization, not a new
+   root cause — link back to them instead of re-diagnosing from scratch.
+4. **Two DIRECT diagnostics now exist (#707, 2026-07-12) — check these FIRST, before falling back
+   to fps-delta archaeology.** `journalctl -u camera-box | grep '#707'` on the affected box for the
+   SAME window: `#707 NDI blocking send STALL on '<sender>'` means the SYNCHRONOUS
+   `NDIlib_send_send_video_v2` call itself blocked (network/receiver backpressure — confirms the
+   #656/#663/#665/#666 family's long-standing "network/genlock-gate hiccup" suspicion for THIS
+   occurrence); `#707 genlock emit-gate SKIPPED N boundary interval(s)` means a clock discontinuity
+   (a DanteSync NTP/PTP step, or a stalled poll) leapt `ndi::genlock_emit_gate`'s boundary past
+   frame(s) that were never emitted. Neither firing during a confirmed emit-rate deficit rules both
+   out and points elsewhere (capture-side queuing, scheduling). See `src/send_stall.rs` /
+   `ndi::boundary_skip_count` for the pure decisions.
+5. **Painter-common-source discriminator (#707, 2026-07-13) — two cheap checks, EXISTING data,
+   before hypothesizing a per-box defect.** If a breach window's `copies`/`gaps` COULD be a
+   monitor/painter presentation slip (since every cambox films the SAME shared monitor, see the
+   TOPOLOGY FACT above) rather than a per-box USB/emit defect, both checks below run against data
+   already on disk — no new recording:
+   - **imag's own continuous optical Δ0 rate during the OTHER camera's exact breach window.** imag
+     watches the shared monitor continuously via cam1 regardless of which cambox strih's schedule
+     had in program. Extract `RecordingFrame.tick` per frame from `imag-partial-<run>.json`
+     (`"tick"` field = the JSON serialization of `RecordingFrame::tick`, already excludes node
+     burns — see `src/probe/recording.rs`), walk consecutive present ticks, count Δ0 in a ±15s
+     margin around the breach window (use the SAME `start_ns`/`end_ns` from `switch-schedule.json`,
+     NOT a hand-picked wall-clock guess). A monitor-side event should burst imag's rate ABOVE its
+     own baseline at that instant; no burst = the monitor almost certainly did NOT glitch there.
+   - **The painter's OWN `flip_ts_ns` log is DIRECT ground truth, stronger than imag's inference** —
+     see "Painter ground-truth CSV lifecycle" above for the CSV schema. Compute the flip-to-flip
+     interval for every tick (`flip_ts_ns[i] - flip_ts_ns[i-1]`); a genuinely missed vblank shows as
+     an interval ~2x the ~16.7ms (60Hz) median, a double-flip as ~0. Zero anomalies + <1ms stdev in
+     the exact breach window (even though the SAME recording's `all_cambox_continuity` failed hard
+     that instant) is a DIRECT refutation of the painter as the common source — not an absence of
+     correlation, an absence of the physical event itself.
+   - **SUPERSEDED (2026-07-13) — don't hand-reimplement `window_segment` in Python; RE-RUN the
+     real binary via `--merge-partials` instead, and it EXACTLY reproduces the live verdict,
+     including the #726 `presentation_cadence` per-window breakdown for free.** A hand
+     re-derivation hits two silent traps: (1) `all_cambox_continuity`'s `SegmentFrame`s come from
+     the **STREAM partial's `frames`, never strih's** (`segment_frames_from_recording(stream_frames,
+     ...)` in `src/bin/recording-verdict.rs` — a comment right above the `MERGE_ARGS` construction
+     in `scripts/recording-e2e.sh` says so explicitly: "the all-cambox segmentation reads the
+     SINGLE continuous stream recording's frames, carried in `stream=$STREAM_PARTIAL`"); reading
+     strih's partial instead gets `frames`/`undecodable` right (both tolerant of the anchor) but
+     `copies` silently wrong. (2) `gaps` (`painted_tick_gaps`, #625/#681) is a WHOLE-WINDOW
+     **net-span** calculation (`expected_count(from first/last tick at `expected_step`) −
+     present_count(distinct sorted values)`) — it is NOT an event-by-event pairing and has NO
+     adjacency/order dependence, so it is exquisitely sensitive to using a version of the binary
+     whose `painted_tick_gaps` logic predates a fix (an old cached artifact, e.g. from `/tmp/probe-
+     tools-*` downloaded days earlier, silently produced `gaps=287` instead of the correct `15` for
+     an identical input — no error, just a wrong-but-plausible number). **The reliable recipe:**
+     download the CURRENT CI run's `probe-tools-linux-amd64` artifact (`gh run download <run-id>
+     -n probe-tools-linux-amd64`, `chmod +x recording-verdict`), then feed it the run's own
+     on-disk `strih-partial-<run>.json` + `stream-partial-<run>.json` + `switch-schedule.json`
+     with the SAME flags `scripts/recording-e2e.sh`'s `MERGE_ARGS` uses (all default-valued run
+     ids — `--burn-cam1-run-id 911001` ... `--burn-cam6-run-id 911011 --burn-strih-run-id 911002
+     --burn-stream-run-id 911004 --cam2-run-id <RUN_ID> --capture-fps 30 --strih-emit-fps 30
+     --stream-capture-fps 30 --imag-capture-fps 60 --min-secs 300 --av-expected-ms 0`):
+     ```bash
+     recording-verdict --merge-partials strih=strih-partial-<RUN>.json \
+       --merge-partials stream=stream-partial-<RUN>.json \
+       --min-secs 300 --capture-fps 30 --strih-emit-fps 30 --stream-capture-fps 30 \
+       --imag-capture-fps 60 --cam2-run-id <RUN> \
+       --burn-cam1-run-id 911001 --burn-cam2-run-id 911009 --burn-cam3-run-id 911008 \
+       --burn-cam4-run-id 911007 --burn-cam5-run-id 911010 --burn-cam6-run-id 911011 \
+       --burn-strih-run-id 911002 --burn-stream-run-id 911004 --av-expected-ms 0 \
+       --switch-schedule switch-schedule.json --json out.json
+     ```
+     Verified byte-exact against 5 independent recordings' original `verdict-<run>.json` segments
+     (every `frames`/`undecodable`/`copies`/`gaps`/`first_tick`/`last_tick` matched). This is now
+     the go-to technique for ANY question that needs per-window sub-detail the top-level verdict
+     JSON doesn't carry (e.g. the `presentation_cadence` breakdown below) — never hand-reimplement.
+   - **Discriminator result (2026-07-13, #707) — the "balanced dup-then-catchup-skip" optical
+     sampling-beat hypothesis is CONTRADICTED by the data.** `presentation_cadence`
+     (`src/presentation_cadence.rs`, #726) already computes the EXACT signature a phase-drift beat
+     would produce: `paired_events` = adjacent `(duplicate, catchup)` pairs, i.e. `Δtick=0`
+     IMMEDIATELY followed by `Δtick = 2×expected_step`. Recomputed all 5 available runs (50
+     windows total) via the recipe above: **`paired_events=0` AND `catchup_steps=0` in EVERY
+     SINGLE window**, including the two large spike windows (CAM1 33/33, CAM6 15/15) where
+     `copies` happens to exactly equal `gaps`. Also checked the broader claim "`copies`≈`gaps`
+     always" directly: across the 50 windows, only 15/32 non-clean windows are EXACTLY balanced
+     (47%) — the rest show a genuine ±1-3 imbalance (e.g. `copies=2 gaps=0`, `copies=0 gaps=2`,
+     `copies=1 gaps=3`) that a uniform physical beat should not produce. Note `painted_tick_gaps`
+     is a whole-window NET-SPAN diff (`expected_count − distinct_present_count`), NOT an
+     event-pairing computation — a window where `copies` happens to equal `gaps` is an ARITHMETIC
+     COINCIDENCE of that window's specific tick span/distinct-count, not evidence of temporal
+     pairing on its own; `presentation_cadence`'s `paired_events` is the actual, purpose-built test
+     for temporal pairing, and it is uniformly zero. Conclusion: the two big spikes are real,
+     structurally distinct events (a 33-tick and 15-tick contiguous span, `copies` and `gaps`
+     genuinely equal), but NOT explained by an immediate dup+catchup optical beat — cause remains
+     open. Full evidence on #707's own thread.
+   - **Event-anatomy result (2026-07-13, #707) — no forced mechanism.** Per-event tables (frame
+     index / tick / ±5-frame context / wall-clock spacing) for both spikes vs 3 small-residual
+     windows: the delta-histogram SHAPE is identical everywhere (dominated by Δ=1 + a periodic
+     Δ=6/7/8 catchup cluster that stays roughly CONSTANT ~130-140/window regardless of duplicate
+     count 1-33 — decoupled from the duplicates), and ZERO outlier/backward deltas anywhere. The
+     two spikes are TIGHT TEMPORAL BURSTS (33 duplicates in 5.3s of a 30.2s window, 15 in 6.4s),
+     front-loaded into the first ~1/5-1/6 of their window — NOT a slow drift spread evenly across
+     it. Small-residual duplicates by contrast are isolated, 8-14s apart. No mechanism proposed;
+     tables posted honestly to #707.
+   - **Post-switch receiver bandwidth-ramp hypothesis (2026-07-13, #707) — REFUTED, code AND
+     data.** See the genlock skill's `PROP_BANDWIDTH` note (searchable there) for the code-level
+     half: strih's camera NDI sources are ALWAYS `PROP_BW_HIGHEST`, no bandwidth-mode-switching
+     mechanism exists on strih at all (the one that does, #501's `genlock_monitor` twin-scene
+     low-bandwidth override, is imag-nb-only). Data-level: strih's own `genlock-fifo audit 'NDI
+     camN'` `received` counter increments by EXACTLY 300 every 5s sample (a flat 60.0fps) straight
+     through both switch instants and both entire duplicate bursts, with `depth` never moving off
+     its steady-state value — zero evidence of an arrival-rate dip or ramp anywhere.
+   - **Net result after 3 independent mechanism tests tonight, all refuted**: painter/monitor
+     presentation slip, optical sampling beat, post-switch bandwidth ramp. The two spikes remain
+     real, structurally clean (no real-loss signature at all — see above), genuinely unexplained.
+     `send_stall.rs` + `boundary_skip_count` (already deployed fleet-wide) are armed for the next
+     natural recurrence; this section + the `--merge-partials`/event-anatomy techniques are the
+     starting point for whoever picks this up next.
+   - **HYPOTHESIS 4 (decoder MISREADS) — REFUTED with near-certainty, AND the real root cause found
+     + fixed (2026-07-13, #707).** Raw recordings for both spike runs were already purged (checked
+     live on strih+stream via MCP — only sparse UNDECODABLE-classified pixel PNGs remain, none at
+     the copy/gap frame indices), so pixel re-decode was impossible. Instead: the QR wire format
+     (`src/probe/payload.rs`) carries a CRC32-checked `(run_id, frame_id, gen_ts_ns)`, and the
+     painter's own ground-truth CSV (`painter-<run>.csv`, `tick,gen_ts_ns,flip_ts_ns`) logs every
+     REAL refresh. Per `painter::paint_one_frame`, at refresh `T` with `gen_ts_ns=G_T`, BOTH Vernier
+     halves (`vernier_ids(T)`) are re-stamped with `G_T` — so the full set of (frame_id, gen_ts_ns)
+     pairs a CORRECT decode could ever produce is fully computable from the CSV alone (2 pairs per
+     real tick). Cross-checked all decoded cam2-optical payloads across all 5 available verdicts:
+     **92939/92939 matched a real painted tick exactly — zero hallucinated/misread values.** H4
+     refuted (false-positive odds for a random CRC32 match: ~2^-32/payload, negligible over ~93k
+     checks).
+   - **But every one of the 33+15 burst frames had exactly ONE optical payload (always the "held"
+     half), never two** — root cause: the #207 fast/robust decode gate
+     (`decode_qr_luma_all_fast_then_robust_grouped_pathed`, `src/probe/qr.rs`) only ever checked
+     digital NODE BURNS before skipping the #202 robust tiled retry — never the dual-QR Vernier's
+     own two-half completeness. A frame where the plain pass read the (easy, digital) burns fine
+     but missed the actively-repainting Vernier half took the FAST path anyway, silently skipping
+     the ALREADY-PROVEN robust recovery. **Fixed** (commits `f25031088`→`6e8fff279`, TDD RED→GREEN,
+     8 new tests, CI green incl. `cargo clippy --all-features -D warnings` and
+     `cargo nextest --all-features`): added a third `min_distinct_optical` gate dimension —
+     `decode_qr_luma_all_fast_then_robust_grouped_pathed_optical`/
+     `decode_recording_frame_with_grouped_burns_optical`/
+     `analyze_recording_with_grouped_burns_optical`, wired into BOTH `extract_partial`'s
+     "strih"/"stream" decode-in-place arms AND the legacy fused `main()` path via
+     `args.cam2_pin().map(|run_id| (run_id, 2))`.
+   - **Measured effect on a real rig run (RECORDING_E2E_RUN_ID `1492415599`, 2026-07-13): residual
+     collapsed from up to 1863 copies/1862 gaps (this ticket's worst historical run) to 5 copies /
+     7 gaps total across 10 windows** — no more large single-window spikes (max 1/window). Still
+     not literally zero (`all_cambox_continuity.overall_pass` stays `false` on the strict
+     `copies==0 && gaps==0` bar) — whether to accept a small calibrated tolerance for this residual
+     is a product decision raised to the user on #707's own thread, not decided here.
+   - **USER DECISION (2026-07-13): NO tolerance — every residual deviation gets its own documented
+     reason instead. #707 EVENT-FORENSICS tooling built + fixture-tested the same day** (live
+     harvesting resumes once cam2's disk is fixed, #737): `src/residual_events.rs` (Tier-0 pure
+     module) locates a `Copy` event on every recorded-order adjacent tick repeat and a `Gap` event
+     on a backward jump or a forward jump beyond `|Δ|>10` (this section's own outlier threshold,
+     reused as the discriminator) — reported as `residual_events[]` on `CamboxSegment` /
+     `SegmentedContinuity` in the verdict JSON, each with frame index, tick values, wall-clock
+     epoch second, and switch-schedule offset. The stream box's `--extract-partial`, when given the
+     same `--switch-schedule` the merge already consumes, now flags each event's ±2-frame
+     neighbourhood for #186 pixel proof (`recording-e2e.sh` pushes the schedule to the stream box
+     for this). `scripts/event-forensics-dossier.py` (offline, given the verdict JSON + already-
+     pulled strih genlock-FIFO-audit lines + per-camera journal lines) groups matching log lines
+     under each event by wall-clock second, ready for whoever picks up the next real residual —
+     don't hand-grep, run this first. The Discord report (#711) now prints "Odchýlky s dôvodmi: N
+     s dôkazmi / M otvorených" every run.
+   - **#852 (2026-07-28) — a large `residual_events` Gap-kind count is EXPECTED (not a bug) when
+     that segment's `undecodable` is high, and does NOT mean the chain dropped that many frames.**
+     The first real `all_cambox_continuity` verdict off the whole fleet (run 1867252327) showed
+     every segment's authoritative `gaps` field at 0 while `residual_events` reported 388 Gap-kind
+     entries fleet-wide — read at a glance this LOOKS like the `gaps`/`residual_events` accounting
+     disagreeing. Pulling every event's `tick_before`/`tick_after` delta straight from the verdict
+     JSON showed all 388 sit in `[11,53]` (median 15) — moderate jumps, not the `#707` anatomy's
+     "no outliers anywhere" signature. Root cause: that run's `undecodable` rate was ~64%
+     fleet-wide (vs the `#707` anatomy's clean calibration samples), so two successfully-decoded
+     frames are routinely several ticks apart in recorded order — `residual_events` (deliberately
+     UNCREDITED, per its own module doc) correctly flags each such jump past
+     `GAP_OUTLIER_ABS_DELTA` as a candidate, while `gaps` (credits up to `undecodable` slots,
+     `#625`/`#681`) correctly finds no PROVEN hole. **Diagnostic recipe for the next time this
+     pattern recurs:** before suspecting a verdict-logic bug, (1) check that segment's own
+     `undecodable` field — if it's in the hundreds, a moderate residual `Gap` delta is expected
+     noise, not a defect; (2) pull the actual deltas
+     (`tick_after - tick_before` per Gap-kind `residual_events` entry) straight from the verdict
+     JSON and confirm they cluster in a plausible "several undecoded ticks" range rather than
+     being genuinely huge/random. A locked regression test
+     (`residual_gap_events_can_be_nonzero_while_authoritative_gaps_stays_zero_852` in
+     `src/probe/recording_segments.rs`) reproduces this exact shape synthetically so a future
+     change never wires `residual_events` into `pass`, nor "fixes" `gaps` to match it. The
+     ACTUAL reason `overall_pass=false` on that run was the high `undecodable` itself — a
+     chronic, physical camera shutter/focus/exposure decode-quality issue (see `#312`'s own
+     repeated history above), tracked separately as `#853`, not a code defect.
+   - **Hit the `gh workflow run` (`workflow_dispatch`) plan-only trap myself despite it already
+     being fully documented** (see "`gh workflow run`... is the LEGACY plan-only soak" section
+     below, and `CLAUDE.md`'s own GOTCHA at "a live-triggered E2E gate run can race ahead of a
+     mid-cycle fleet redeploy" — both already correct on disk). **Root cause of MY mistake: I
+     trusted the project CLAUDE.md text embedded in my system-prompt snapshot instead of doing a
+     live `Read` of the actual file before acting** — a PRIOR session had already corrected that
+     CLAUDE.md section (and cross-referenced this skill's own canonical section below) sometime
+     after my snapshot was taken, but I never re-read the live file to pick up the fix. Recovered
+     via `gh run rerun <the pull_request-triggered run>` per the existing playbook, exactly as
+     documented. **Lesson: for a critical live-workflow gotcha on a SHARED dev1 checkout (other
+     sessions can and do correct CLAUDE.md concurrently), live-`Read` the actual file rather than
+     trusting the system-prompt snapshot, especially right before an action (like triggering CI)
+     that a stale gotcha could make expensive to get wrong.**
+
+## RESOLVED (#708, 2026-07-12) — strih's OWN `full_chain.loss.strih.real_drops` periodic 4-frame residual was a per-source-counter accounting artifact, NOT loss
+
+**#741 RESOLVED (2026-07-15, commit `4346f4993`) — the residual case WAS the #708 window-boundary
+class after all; the 2026-07-13 note below (kept for the methodology-failure lesson) reached the
+WRONG conclusion off a data-source bug.** Re-running the ACTUAL `recording-verdict` binary against
+fresh partial-JSON data found every flagged id landing within **1-32ms** of a real
+`--switch-schedule` boundary — the OPPOSITE of the stale "~4.2s before, well outside the 1s guard"
+claim below. The 2026-07-13 investigation's timestamp lookup used **strih-partial's own local
+`gen_ts_ns`** for the 911002 burn; the CORRECT source is the **stream-partial's forwarded 911002
+payloads** (strih's burn is read downstream, from the stream recording — same as
+`full_chain.loss.strih` itself computes it). Using the wrong file introduced a systematic offset
+that made real ~30ms-from-boundary events look like ~4.2s-before-boundary events, sending the whole
+"periodic ~30s timer" theory down a dead end.
+
+**The REAL root cause:** `attribute_window_indices()` computed each frame's window placement via
+the GUARD-filtered `place_frame_in_window` (the guard exists for CONTENT attribution — see
+`RESOLVED #708` below). A genuine program switch changes the active render source within ~30ms of
+the boundary; the settle-time guard band is ~1s — so the last frame before a real cut and the
+first frame after it are, by construction, ALWAYS inside the guard band on their own side, both
+reading back `None`. `crossed_window_boundary` only fires on `(Some, Some)` with differing window
+indices, so it could never fire for the exact case it exists to except.
+
+**Fix:** a new `raw_window_index()` (`src/probe/recording_segments.rs`) — the same schedule-
+interval lookup `place_frame_in_window` does internally, minus the guard — replaces
+`place_frame_in_window` as `attribute_window_indices`'s placement source. `window_of` has exactly
+ONE consumer (`crossed_window_boundary`), so content attribution elsewhere is unaffected. New test
+`node_verdict_with_optical_strih_backward_jump_within_the_real_transition_guard_is_zero_loss_741`
+uses a REALISTIC `guard_ns` (the existing #708 test uses `guard_ns: 0`, which structurally can
+never produce the `Guard`/`None` case — why the original fix looked complete while leaving this
+gap).
+
+**Reusable lesson (why the 2026-07-13 note below got it backwards):** when correlating a flagged
+node's frame against `switch-schedule.json`, always use the SAME data source the metric itself
+reads from — for `full_chain.loss.strih` that is the **stream-partial's forwarded 911002
+payloads**, never a different node's own local partial, even one that also happens to carry a
+911002-tagged burn. Two different files carrying "the same run_id" are not interchangeable
+timestamp sources unless you've confirmed they're the SAME decode pass.
+
+---
+
+**STALE, WRONG CONCLUSION (2026-07-13) — kept only for the methodology-failure lesson above, do
+NOT reuse this analysis:** a residual 5-real-drop case survived #708's fix on a run that DID
+supply `--switch-schedule`, with the exact `first_id > last_id` non-monotonic tell this section
+describes — CONFIRMED on a second independent run to be a periodic ~30s-interval phenomenon,
+NOT the #708 window-boundary-placement class. Two runs ~20 min apart both flagged 5 ids at
+near-identical `frame_index` (within ±35 frames). Cross-referencing each flagged frame's
+`gen_ts_ns` against `switch-schedule.json` shows every occurrence sits ~4.2-4.3s BEFORE the NEXT
+window's start — well outside the 1s transition guard, so #708's window-placement suppression is
+NOT the relevant class here. Elapsed-time gaps between events are consistent near-multiples of the
+~30.2s window length (a fixed-period ~30s timer/health-check/self-heal cycle landing at roughly the
+same phase within whichever window it falls in, firing in only 5 of 10 windows because its own
+period doesn't exactly match the schedule's). Root cause NOT YET FOUND — see #741 for the full
+per-run frame_index/timing correlation before re-deriving this from scratch.
+
+`full_chain.loss.strih` (a DIFFERENT metric from `all_cambox_continuity` above — see the "A
+DIFFERENT per-node metric" section elsewhere in this file) periodically flagged exactly 4
+`real_drop` ids per ~300s ALL_CAMBOX run, always landing in a schedule window ~9.5-10.3s after a
+program switch. **Root cause (dated, pre-#730): strih's 911002 render-tick burn is emitted by SIX
+INDEPENDENT free-running DistroAV filter instances — one per raw `NDI camN` input** (`BURN_TARGETS`
+attaches it to every input so whichever gets cut to program already carries it), and the
+always-open Multiview projector (#365's own precondition, at the time) kept ALL SIX rendering
+continuously — so all 6 counters free-ran the WHOLE recording regardless of which was on-air, and
+their numeric ranges routinely OVERLAP (proven live: one run's cam5 range `66709..=67840`
+overlapped cam6's very next window `66934..=68067`). `burn_contiguity_in_window_with_step`'s
+backward-jump check (`id < prev` ⇒ `RealDrop`) was built for ONE genuine monotonic counter — it
+misread the EXPECTED counter-instance discontinuity at every program switch as a reorder fault.
+
+**STALE as of #730/#508 (2026-07-13) — see the #747 GOTCHA above:** the Multiview projector no
+longer keeps every raw `NDI camN` input rendering (it shows low-bandwidth `MV Cam N` twins
+instead), so this "all 6 free-run continuously" premise may no longer hold going forward — if
+#741's investigation resumes, re-verify the burn-filter's actual per-input render-activity
+assumption against the CURRENT (post-decoupling) Multiview wiring before reusing this analysis.
+
+**The decisive discriminator, done OFFLINE with zero new rig time** (per the dispatch's own
+instruction — cheapest first): pull the flagged ids' exact values from the verdict JSON's
+`full_chain.loss.strih.classified[]` (NOT `frame_index` — that field is an internal sort-position,
+NOT the video frame the id was decoded at; use `.id`), then grep BOTH the same run's already-local
+`strih-partial-<run>.json` AND `stream-partial-<run>.json` (`frames[].payloads[]` where
+`run_id==911002`) for that exact `frame_id`. If it's present in BOTH (own recording AND
+downstream), it was never lost anywhere — SPURIOUS. This is the diagnostic-time twin of the
+already-shipped #356 cross-recording reconciliation fix (same "does the downstream recording
+prove delivery" idea, applied by hand during investigation instead of automatically in the
+verdict). **Two locally-cached CI runs' full partials (multi-MB JSON + pixel-proof dirs) survive
+in `/tmp/recording-e2e-<run>/` on dev1 for a long time after the run — check there BEFORE
+spending rig time on a fresh repro; the evidence may already exist.**
+
+**The fix** (`src/probe/burn_contiguity.rs` + `src/bin/recording-verdict.rs`): a NEW `window_of`
+parameter (computed by reusing the EXISTING `frame_gen_ts_anchor`/`place_frame_in_window` #706/#312
+already use, so it can never disagree with them) suppresses the backward-jump/decimation-excess
+classification ONLY when the previous and current present frame are CONFIRMED to sit in two
+DIFFERENT `--switch-schedule` windows. A backward jump WITHIN one window (the SAME counter
+instance, which can never legitimately go backward) still FAILS. An UNKNOWN window on either side
+never suppresses. Scoped strictly to `node=="strih"` (the one node proven to have this
+multi-counter mechanism — `stream`'s 911004 burn is a single continuous counter on one fixed
+input). See `burn_contiguity_in_window_with_step_and_schedule`'s doc comment for the full
+reasoning; 9 new unit tests lock it, RED-then-GREEN in commit order (`c57f204a8`/`d8f2a5b8b`).
+
+**Reusable lesson for the NEXT per-node burn oddity:** before assuming a flagged id is a genuine
+drop, check whether that node's burn is attached to MULTIPLE concurrently-active sources (any
+`BURN_TARGETS`-style fan-out) rather than one single fixed input — a multi-instance free-running
+counter's numeric ranges are NOT globally ordered by wall-clock time, so any contiguity check
+built assuming "one monotonic counter" will misfire at every source-switch boundary. The tell:
+grouping the flagged run's payloads by switch-schedule window and checking each window's own
+`min(id)..=max(id)` range for OVERLAP with a NON-adjacent (by camera identity) window.
 
 ## Cheap standalone repro of ONE recording-e2e.sh step (#627) — don't run the full 30-min harness
 
@@ -1352,6 +2231,17 @@ subcommands the harness itself calls, directly from dev1, against the idle rig:
 
 This was how #627's `genlock_latency_ms_src` transition hypothesis was tested live (9 varied
 attempts in a few minutes total, 0 reproductions) — much cheaper than 9 full 30-min E2E runs.
+
+**#710 — the #627 liveness check now TOLERATES a leading cold-start `False` sample.** A FRESH OBS
+process's NVENC/CUDA cold-init can take slightly longer than one liveness poll (`OBS_RECORD_
+LIVENESS_POLL_S`, default 2s) to flip `outputActive` to `True` — live repro on imag-nb verifying
+#709: `active=[False, True] bytes=[0, 623840]` was a GENUINE recording, but the old "any `False` =
+DEAD" rule false-aborted it. `_record_liveness_verdict` (`scripts/obs_phase2.py`) now walks to the
+FIRST `True` sample before applying the death checks: a LEADING run of `False` is tolerated as long
+as everything from the first `True` onward stays `True`. A `True→False` transition anywhere
+(started then died) or an all-`False` window (never started) still fail hard, unchanged — #627's
+original protection is fully preserved. Only matters on the FIRST `StartRecord` right after a fresh
+OBS process restart; a warm, already-running OBS is unaffected.
 
 ## `_assert_program_nonblack` can false-positive on dim (not black) production content — #677
 
@@ -1391,3 +2281,181 @@ DanteSync variant, which sidesteps the journal entirely by preferring dantesync#
 no live incident yet — filed as #694, not fixed**: `scripts/deploy-fleet.sh` (emit-ok + fatal
 checks), `scripts/verify-device.sh` (device acceptance), `scripts/upgrade-fleet-ndi.sh` (emit-ok
 + fatal checks). If ANY of those ever false-fails on a stale line, this is the fix pattern.
+
+## "Fleet-synchronized" kernel/USB anomaly across all 6 cam boxes → check the E2E harness's OWN restart first (#687)
+
+Any kernel/USB message that fires at nearly the SAME wall-clock second across ALL 6 cam boxes
+(observed: `uvcvideo ... Non-zero status (-71) in video completion handler` on every box, #687) is
+NOT automatically evidence of a mysterious external network/avahi/MCP trigger — check whether it
+is simply a SIDE EFFECT of `camera-box.service` being restarted fleet-wide first.
+`scripts/recording-e2e.sh` / `scripts/rig-mode.sh` explicitly `systemctl restart camera-box` on
+each involved cambox as part of E2E test setup/cleanup (`scripts/lib/camera-box-restart-verify.sh`,
+`rig-mode.sh:242`, `recording-e2e.sh:552/828/878/1253`), SSH'd to each box in SEQUENCE (never in
+parallel) — this is why the restarts (and any USB-open-quirk side effect) land within a ~10-45s
+window across the fleet rather than the literal same second, and why the pattern recurs
+irregularly (matching however often E2E gate cycles have been dispatched, not a fixed cadence).
+**Confirm/rule out fast**: `journalctl --since '<T-5s>' --until '<T+5s>'` on the box at the exact
+anomaly timestamp — if `systemd[1]: Starting camera-box.service` appears in the SAME second, the
+anomaly is that restart's side effect, done (#687's EPROTO -71 is the well-known harmless
+first-open UVC-driver quirk: it fires once right as the freshly-opened `/dev/videoN` settles, with
+no re-enumeration or speed downgrade following). **Journalctl retention gotcha (bit this
+investigation once)**: a cam box's journald only retains the CURRENT boot's log
+(`journalctl --list-boots` shows a single boot) — evidence from a multi-day-old incident is
+usually already gone if the box rebooted since; reproduce fresh instead of chasing stale
+timestamps. Don't reach for the #656/#663/#685 capture-rate self-heal mechanism as the explanation
+without checking first — it leaves its OWN distinct signature (`authorized`/`unbind` USB-reset log
+lines), absent from a plain harness-triggered restart.
+
+## `gh workflow run` (`workflow_dispatch`) on `full-path-e2e.yml` is the LEGACY plan-only soak — USELESS for a real red-set delta (#717, 2026-07-12)
+
+`full-path-e2e.yml` branches its whole behavior on `github.event_name`: `E2E_EXECUTE_VERDICT` and
+`ALL_CAMBOX` are BOTH `${{ github.event_name == 'pull_request' && '1' || '0' }}` — so a
+`workflow_dispatch` run (manually fired via `gh workflow run "Full-path E2E ..." --ref dev` or the
+GitHub UI "Run workflow" button) ALWAYS runs with `E2E_EXECUTE_VERDICT=0` and single-camera
+`ALL_CAMBOX=0`: it stays in the OLD plan-print-only mode (never decodes strih/stream, never
+computes a real verdict) and therefore "succeeds" trivially almost every time. **This is a trap
+when trying to get a fresh post-fix verdict on a commit that's already pushed** — triggering via
+`workflow_dispatch` burns ~15 min of rig time and reports a meaningless green.
+
+**The required gate only computes a REAL verdict on a `pull_request` (synchronize) event** — i.e.
+the automatic run that fires when you push to the branch a PR tracks (PR #704 → `dev`). To get a
+FRESH real verdict on an ALREADY-PUSHED commit without creating a new push (e.g. after a
+fleet/rig-side change with no code diff, like a manual binary deploy), use:
+
+```bash
+gh run rerun <the-original-pull_request-run-id>
+```
+
+`gh run rerun` preserves the ORIGINAL trigger's event context (`github.event_name` stays
+`pull_request`), so `E2E_EXECUTE_VERDICT`/`ALL_CAMBOX` are correctly `1` again — unlike a fresh
+`gh workflow run`, which always dispatches as `workflow_dispatch`. Find the run id via
+`gh run list --branch dev --workflow "Full-path E2E (recording-based · hardware · self-hosted dev1)" --json databaseId,event,headSha` and pick the one with `"event": "pull_request"` matching your
+commit.
+
+**Two same-commit `pull_request` runs 25 minutes apart can disagree for reasons OUTSIDE your own
+diff** — a live #717 verification saw the first attempt compute a real verdict cleanly
+(`--colour-gate` localized fine on both strih+stream) while a re-run of the SAME commit 25 min
+later hit `--colour-gate: could not localize the dual-QR colour scale in ANY of 12 sampled frames`
+on BOTH boxes (filed as #718 — a new, unrelated blocker). Don't assume a second run's failure is
+caused by your own change just because it's the same commit; diff the TWO runs' logs
+(`gh api repos/OWNER/REPO/actions/jobs/<job-id>/logs`, or `gh api .../attempts/<N>/jobs` to fetch a
+specific earlier attempt after a `gh run rerun`) before concluding anything.
+
+## GOTCHA — `timeout CMD` cannot invoke a shell FUNCTION (only an executable)
+
+`timeout SECS win_ssh_run ...` (or any `timeout`-wrapped call to a sourced bash function like
+`win_ssh_run`/`win_ssh_upload` from `scripts/lib/win-ssh-exec.sh`) fails with `timeout: failed to
+run command 'win_ssh_run': No such file or directory` — `timeout` `execvp()`s its argument
+directly; it never goes through the calling shell, so a shell FUNCTION (not a file on `$PATH`) is
+invisible to it. This bites specifically when adding a NEW bounded win_ssh_run call somewhere that
+didn't have one before (confirmed live, #748, run 29281776692) — every EXISTING sibling call in
+`recording-e2e.sh` either has no `timeout` wrapper, or already routes through the fix below.
+
+**Fix:** wrap in `bash -c`, re-sourcing the lib INSIDE that subshell (so bash, not `execvp`,
+resolves the function):
+```bash
+timeout "$T" bash -c '. "$1"; win_ssh_run "$2" "$3" "$4" "$5"' _ \
+  "$HERE/lib/win-ssh-exec.sh" "$USER" "$PW" "$HOST" "$PS_CMD"
+```
+(positional args after the placeholder `_` land as `$1`.. inside the `bash -c` script — avoids
+quoting hazards from interpolating them directly into the script string.)
+
+## GOTCHA — OBS-WS `StopRecord`'s RPC reply can race the mp4 muxer's own finalize (moov atom)
+
+`obs_phase2.py record --host <box> --action stop` returns as soon as the `StopRecord` WebSocket
+RPC replies with the file path — this is NOT proof the mp4 is fully written. Reading the file
+(e.g. `ffmpeg -i <path> -af volumedetect`) less than ~1s later can hit `moov atom not found` /
+`Invalid data found when processing input` — the muxer hadn't finished writing the trailing moov
+atom + closing the handle yet. This is INVISIBLE on the real ~300s recording (plenty of natural
+delay before `[7/8]`'s later download/decode) but bites hard on any SHORT probe recording read
+immediately after its own stop (confirmed live, #748's audio-presence preflight, run 29282790031).
+
+**Fix — a BOUNDED RETRY on the read** (same shape as the `[4c/8]` frozen-camera gate's
+reconnect-race retry), NOT a longer blind sleep before the first read (`no-timeout-band-aids.md`):
+a transient finalize-race clears within 1-2 retries (a 3s settle between attempts is plenty,
+live-verified); a genuine failure (ffmpeg missing, wrong path) fails identically on every attempt
+and still surfaces the same operator message once attempts are exhausted — the retry never masks
+a real problem, only absorbs the transient one.
+
+## imag MV cells are SAME-SOURCE since 2026-07-15 — the #501 low-bw twins are GONE (do not resurrect)
+
+The "MV Cam N" cells on imag nest the SAME full-bw `NDI CAMx` main inputs the program uses —
+the `#501` `MV CAMx` genlock_monitor twin receivers are GONE (scenes + seed; final state after a
+same-night detour, see #783/#784). THE REAL story of why twins ever seemed necessary: EVERY
+"7×fullHD collapses imag" measurement (incl. the 53-59fps FAILs) was taken while the box secretly
+ran ALL OBS threads on ONE core (latent isolcpus, #784). With a clean cmdline + full scheduler,
+same-source measures: all 7 fullHD arrivals exactly 60fps, render 60fps / 4.8ms / 0 skip, CPU
+18%, load 2.8 — twins are pure waste there. Consequences for gate/tooling: imag has NO `MV CAMx`
+inputs any more —
+`imag_latency_enforce.py` finds 9 NDI inputs (7 mains + 2 resolume), not 16; any check/metric
+enumerating imag `MV CAM*` inputs (#761-era) must be re-pointed or it silently no-ops.
+
+**Seed transform-preserve (#783):** `imag_scenes.py seed()` sets a scene item's transform ONLY
+when the item was just created — an EXISTING item's transform is the OPERATOR'S (hand-tuned
+LED-wall crop) and is never touched. Never re-add an unconditional `SetSceneItemTransform` to a
+boot/relaunch path — a hard reboot's autostart seed wiping the operator's transforms is the exact
+2026-07-15 incident this guards.
+
+**Seed is OPERATOR-WINS by default; enforcement ONLY behind `--bootstrap` (#785):** the same
+principle generalized to ALL seed writes. A bare `imag_scenes.py` run only CREATES missing
+objects — it never re-binds an existing input's settings/latency, never re-mutes, never switches
+program scene, never toggles Studio Mode (live-proven: an operator's unmuted NDI CAM7 survives a
+bare reseed byte-identical). The enforcement set (bindings+latency self-heal, mutes, program=
+"Cam 1", Studio ON) runs ONLY with `--bootstrap`, passed by exactly TWO callers: the openbox
+autostart (boot) and the watchdog tier-a recovery (fresh OBS after relaunch — repo copy
+`scripts/imag-obs-watchdog.py` in parity). When adding ANY new seed write, decide its class
+explicitly: create-missing (always OK) vs enforce (must go behind `BOOTSTRAP or not item_existed`)
+— an unconditional write on a running production OBS is the "skripty mi kazia nastavenia" bug
+class, never "self-healing".
+
+**imag touchpad (`#779`):** libinput `Scrolling Pixel Distance` hard-caps at **50** (BadValue
+above it) — 50 is the gentlest scroll possible; persisted in
+`/etc/X11/xorg.conf.d/30-touchpad-tap.conf` together with Tapping/TappingDrag/NaturalScrolling.
+
+## GOTCHA — latentná GRUB zmena sa aktivuje až REBOOTOM; isolcpus = single-core OBS (#784, 2026-07-15)
+
+`/etc/default/grub.d/98-imag-isolation.cfg` (isolcpus=2-11, z #484 experimentu 4.7.). KOREKCIA
+PO OVERENÍ BOOT HISTÓRIE: izolácia bola AKTÍVNA minimálne od 14.7. 21:31 (boot -5..-2 všetky s
+isolcpus v cmdline) — box na nej "fungoval" celé dni, lebo ľahká architektúra (klonové MV bunky +
+spiace mains) sa zmestila na JEDNO 4,5 GHz jadro a všetky metriky vyzerali zdravo. Kolaps
+neprišiel aktiváciou míny rebootom, ale KOMBINÁCIOU: studený štart všetkých prijímačov na jednom
+jadre (relock búrka) + následný same-source pokus (7×fullHD decode na to isté jadro). **isolcpus jadrá plánovač nebalancuje**, takže OBS s
+`taskset -c 2-11` skončil s ~200 vláknami na JEDNOM jadre (cpu2) — full-bw NDI decode padol na
+~24 fps/kameru, SDK fronta narástla na ~2 s lag; low-bw klony (lacný decode) pritom išli 60 fps.
+Sieť/hodiny/GL/render metriky boli ČISTÉ — jediné priame tely: (1) `ps -L -o tid,comm,psr` →
+všetky vlákna psr=rovnaké číslo; (2) susedné jadrá na 800 MHz pri "vyťaženom" procese;
+(3) full-bw arrival « low-bw arrival na tom istom boxe. Diagnostika arrival rate: delta
+`received=` z genlock-fifo audit riadkov za N sekúnd. Fix: cfg zmazaný + update-grub (definitívne
+po ďalšom reboote); interim `taskset -a -pc <neizolované jadrá>` na bežiaci obs okamžite uvoľní.
+**Pravidlo: isolcpus NIKDY pre viacvláknový proces s range maskou** — len s explicitným
+per-vlákno pinovaním. Po KAŽDOM reboote rig boxu over `/proc/cmdline` proti očakávaniu
+(drift-guard fazeta = #780 balík). A pri "reboot všetko rozbil": `ls -la /etc/default/grub.d/` —
+mtime súborov prezradí míny čakajúce od posledného bootu.
+
+## Fleet-preflight ack (#758) had NO way in from CI, and conflated "reachable" with "healthy" (#827)
+
+`recording-e2e.sh`'s `[0/8]` ALL_CAMBOX fleet preflight (#758) already had the
+`CAMBOX_OFFLINE_ACK` exclusion mechanism (`scripts/lib/cambox-offline-ack.sh`) — but
+`.github/workflows/full-path-e2e.yml` never SET it, so the required `pull_request` gate hard-failed
+the instant the physical fleet was smaller than 7 boxes (2026-07-27, cam4's grabber card removed,
+cam5/6/7 powered off). Two fixes, both in `scripts/lib/cambox-offline-ack.sh`:
+
+- **CI wiring:** `cambox_offline_ack_effective(explicit, file)` — an explicit env value (a manual
+  `workflow_dispatch`'s new `offline_ack` input) wins outright; empty falls back to a checked-in
+  repo-level default file, **`rig-fleet.txt`** (repo root, `box:reason` per line, `#`
+  comments/blanks ignored). The automatic `pull_request` gate carries NO inputs, so it ALWAYS uses
+  `rig-fleet.txt` — keep that file in sync with the physical rig state, or a genuinely-down box
+  will hard-fail the gate again.
+- **The subtler bug:** the OLD stale-ack check decided "stale" purely from `ping` success — so a
+  box that is REACHABLE (OS/network up) but UNHEALTHY (`camera-box.service` stuck `activating`
+  forever because its grabber card is physically absent — exactly cam4's case) could never be
+  acked at all; acking it hit the STALE hard-fail immediately. Fixed by
+  `cambox_offline_ack_decide(status, acked)` — a single healthy/unhealthy/unreachable ×
+  acked/unacked decision matrix (`ok`/`stale`/`exclude`/`fail`); the health check
+  (`preflight_fleet_check_verdict`) now runs on every REACHABLE box regardless of ack status, and
+  staleness is decided from that health verdict, not from `ping` alone. **Lesson for any future
+  ack/exclusion mechanism: never let a cheap liveness probe (ping, process-exists) stand in for the
+  actual health check when deciding whether an acknowledgment is "stale".**
+- `cambox_offline_ack_excluded_json(boxes)` builds the `[{"box":..,"reason":..}]` array
+  jq-merged into the run's verdict JSON as `.excluded_cams` right after the merge writes it — so a
+  partial-fleet run can never be misread as full-fleet-clean from the JSON alone.

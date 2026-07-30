@@ -9,8 +9,9 @@
 //! SOURCE OF TRUTH: identical PINNED settings every time, no improvisation.
 //!
 //! The CAM side is automated over ssh (ssh to the cam boxes is ALLOWED); the Windows OBS side is
-//! PRINTED as the exact `launch-obs-genlock.sh --mode {test|event}` step (ssh to Windows is denied —
-//! the agent drives the win-* MCP). Same PURE-PLANNER model as tests/launch_obs_genlock.rs: these
+//! PRINTED as the exact `launch-obs-genlock.sh --mode {test|event}` step (a GUI relaunch is what
+//! the win-* MCP is for — #701 proved plain scp/ssh reaches strih/stream too, but that doesn't
+//! drive/verify a GUI app). Same PURE-PLANNER model as tests/launch_obs_genlock.rs: these
 //! tests source the REAL script (its `BASH_SOURCE != $0` guard skips main), call its pure remote-
 //! command builders, and assert the PINNED painter flags + the safety properties (free /dev/fb0,
 //! fail loud on a missing binary, the PID-file stop that avoids the `pkill -f` self-match footgun,
@@ -621,7 +622,7 @@ fn no_cmdline_matching_pkill_on_executable_lines() {
 
 /// #257: the burn is toggled over OBS WebSocket (no --mode relaunch). `obs_burn_targets` lists the
 /// strih + stream program inputs; `burn_action_for_mode` maps test->add (burn ON), event->remove
-/// (burn OFF). The genlock relaunch note (printed, ssh denied) is env-free — no --mode.
+/// (burn OFF). The genlock relaunch note (printed, via win-* MCP) is env-free — no --mode.
 #[test]
 fn burn_targets_cover_both_boxes() {
     let targets = run_sourced("obs_burn_targets");
@@ -642,9 +643,14 @@ fn burn_targets_cover_both_boxes() {
 #[test]
 fn burn_targets_cover_imag_too() {
     let targets = run_sourced("obs_burn_targets");
+    // #832: IMAG_IP now defaults to the ACTIVE imag host resolved by scripts/imag-host.sh — the
+    // replacement notebook, not the retired incumbent (#831 HDMI disconnected). Since the
+    // 2026-07-29 IP swap the imag ROLE permanently holds .182 and the retired box sits at .189,
+    // so this asserts .182 = the LIVE imag box. See tests/harness_imag_host.rs for the
+    // reversibility proof.
     assert!(
         targets.contains("10.77.9.182") && targets.contains("imag"),
-        "#462: obs_burn_targets must include imag-nb. got=\n{targets}"
+        "#462/#832: obs_burn_targets must include imag-nb at its ACTIVE resolved host. got=\n{targets}"
     );
 }
 
@@ -654,9 +660,11 @@ fn burn_targets_cover_imag_too() {
 #[test]
 fn imag_prog_source_constant_defaults_to_ndi_cam1() {
     let s = fs::read_to_string(script()).expect("read rig-mode.sh");
+    // #832: IMAG_IP's default is no longer an independently hardcoded literal here -- it is
+    // derived by sourcing scripts/imag-host.sh (see tests/harness_imag_host.rs).
     assert!(
-        s.contains("IMAG_IP=\"${IMAG_IP:-10.77.9.182}\""),
-        "#462: rig-mode.sh must define IMAG_IP (default 10.77.9.182)."
+        s.contains(". \"$RIG_MODE_DIR/imag-host.sh\""),
+        "#832: rig-mode.sh must source scripts/imag-host.sh to derive IMAG_IP."
     );
     assert!(
         s.contains("IMAG_PROG_SOURCE=\"${IMAG_PROG_SOURCE:-NDI CAM1}\""),
@@ -867,5 +875,110 @@ fn script_is_source_safe() {
     assert!(
         out.contains("SOURCED_OK"),
         "#247: the script must be source-safe (BASH_SOURCE != $0 guard) — sourcing ran main"
+    );
+}
+
+/// #868 — on the PAINTER box, EVENT mode must NOT demand that `CAMERA_BOX_NO_DISPLAY=1` has
+/// disappeared, and must NOT demand that camera-box owns `/dev/fb0`.
+///
+/// #863 made `/etc/systemd/system/camera-box.service.d/cam2-no-display.conf` PERMANENT on cam2,
+/// because `cam2-painter.service` is the sole owner of that box's monitor. EVENT mode's step (5)
+/// still encoded the pre-#863 contract, so on cam2 it could only ever FAIL:
+///
+/// ```text
+/// FAIL: camera-box Environment still carries CAMERA_BOX_NO_DISPLAY=1 — interkom monitor not restored
+/// ```
+///
+/// That is not cosmetic: the non-zero exit stranded EVENT mode's own burn-clear sweep, leaving
+/// `genlock_burn=true` on strih's `NDI cam1`, which then made the next Full-path E2E gate run refuse
+/// in its `#758` preflight. The verify must branch on whether this box HAS a dedicated painter unit
+/// (the same condition `cam2_painter_service_start_cmds` already guards on), asserting the state that
+/// is actually correct there: transient drop-in gone, `camera-box` active, `cam2-painter` active, and
+/// `/dev/fb0` held (by the painter).
+#[test]
+fn event_mode_painter_box_expects_the_permanent_no_display_dropin_868() {
+    let p = painter_stop();
+    // The NO_DISPLAY assert must be REACHED ONLY on a box with no painter unit — i.e. it sits inside
+    // a branch labelled for this ticket, not at the top level of step (5). Anchoring on the `#868`
+    // label rather than on `systemctl list-unit-files cam2-painter.service` is deliberate: that
+    // string ALREADY appears earlier (the #440 stop/start guards), so a position check against it
+    // would pass vacuously without any branch existing.
+    let branch_pos = p
+        .find("#868")
+        .expect("#868: expected the painter-box verify branch, labelled #868");
+    let nodisplay_assert = p
+        .find("interkom monitor not restored")
+        .expect("#868: the non-painter-box NO_DISPLAY assert must still exist (#528)");
+    assert!(
+        branch_pos < nodisplay_assert,
+        "#868: on the painter box the permanent #863 drop-in MUST remain, so the NO_DISPLAY assert \
+         has to sit behind the painter-box branch — not run unconditionally. Got:\n{p}"
+    );
+}
+
+#[test]
+fn event_mode_painter_box_verifies_the_painter_service_owns_the_monitor_868() {
+    let p = painter_stop();
+    assert!(
+        p.contains("is-active cam2-painter"),
+        "#868: on the painter box EVENT mode must verify cam2-painter is ACTIVE (it, not camera-box, \
+         owns the monitor after #863). Got:\n{p}"
+    );
+    assert!(
+        p.contains("#868"),
+        "#868: the painter-box branch must be labelled so a future reader sees why the asserts \
+         differ per box. Got:\n{p}"
+    );
+}
+
+/// #868 — a FAILED cam-side restore must never strand a measurement burn ON.
+///
+/// `do_event` runs the cam-side restore BEFORE `toggle_burn event`, under `set -euo pipefail`. So a
+/// non-zero cam_ssh aborted the whole function and the burn-clear never ran — live cost: `NDI cam1`
+/// on strih kept `genlock_burn=true`, and the next Full-path E2E gate run refused in its `#758`
+/// preflight ("genlock_burn is still ON from a prior run"). The failure is now RECORDED, the
+/// burn-clear still runs, and the recorded failure is folded into the final exit status — so
+/// deferring it cannot SWALLOW it either.
+#[test]
+fn event_mode_cam_restore_failure_does_not_strand_the_burn_clear_868() {
+    let whole = fs::read_to_string(script()).expect("read rig-mode.sh");
+    // Bound to do_event's BODY. Anchoring on the whole file is what this repo's own gotcha warns
+    // about: prose ABOVE a call site can contain the same literal as the call, so `.find()` grabs
+    // the comment instead of the code (it did, on the first attempt at this test).
+    let body_start = whole
+        .find("\ndo_event() {")
+        .expect("#868: expected do_event to exist");
+    let body_end = whole[body_start..]
+        .find("\nmain() {")
+        .map(|i| body_start + i)
+        .expect("#868: expected main() to bound do_event's body");
+    let s = &whole[body_start..body_end];
+    let cam_call = s
+        .find("cam_ssh \"$(painter_stop_remote")
+        .expect("#868: expected do_event's cam-side restore call");
+    // The real call site, never the explanatory comment above it: the invocation is indented and
+    // starts the line.
+    let burn_clear = s
+        .find("\n  toggle_burn event")
+        .expect("#868: expected do_event's burn-clear invocation");
+    assert!(
+        cam_call < burn_clear,
+        "#868: this test assumes the documented order (cam restore, then burn clear) — if that \
+         changed, revisit the fix's premise"
+    );
+    // The cam-side failure must be CAPTURED, not allowed to abort before the burn-clear.
+    let capture = s
+        .find("|| _cam_restore_rc=$?")
+        .expect("#868: the cam-side restore's failure must be captured, not left to `set -e`");
+    assert!(
+        capture < burn_clear,
+        "#868: the capture must happen BEFORE the burn-clear, or `set -e` still aborts first"
+    );
+    // ...and must still make EVENT mode fail: the recorded rc has to reach the final exit decision.
+    let tail = &s[burn_clear..];
+    assert!(
+        tail.contains("_cam_restore_rc:-0") && tail.contains("exit 1"),
+        "#868: the recorded cam-side failure must be folded into the final exit status — deferring \
+         it past the burn-clear must not swallow it. Got tail:\n{tail}"
     );
 }

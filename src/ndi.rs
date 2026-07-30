@@ -242,6 +242,16 @@ type NDIlib_recv_capture_v3_fn = unsafe extern "C" fn(
     u32,
 ) -> c_int;
 #[allow(non_camel_case_types)]
+#[repr(C)]
+struct NDIlib_metadata_frame_t {
+    length: c_int,
+    timecode: i64,
+    p_data: *const c_char,
+}
+#[allow(non_camel_case_types)]
+type NDIlib_recv_send_metadata_fn =
+    unsafe extern "C" fn(*mut c_void, *const NDIlib_metadata_frame_t) -> bool;
+#[allow(non_camel_case_types)]
 type NDIlib_recv_free_video_v2_fn =
     unsafe extern "C" fn(*mut c_void, *const NDIlib_video_frame_v2_recv_t);
 
@@ -264,6 +274,7 @@ struct NdiLib {
     recv_destroy: NDIlib_recv_destroy_fn,
     recv_capture_v3: NDIlib_recv_capture_v3_fn,
     recv_free_video_v2: NDIlib_recv_free_video_v2_fn,
+    recv_send_metadata: NDIlib_recv_send_metadata_fn,
 }
 
 impl NdiLib {
@@ -373,6 +384,9 @@ impl NdiLib {
             let recv_free_video_v2: NDIlib_recv_free_video_v2_fn = *library
                 .get::<NDIlib_recv_free_video_v2_fn>(b"NDIlib_recv_free_video_v2")
                 .context("NDIlib_recv_free_video_v2 not found")?;
+            let recv_send_metadata: NDIlib_recv_send_metadata_fn = *library
+                .get::<NDIlib_recv_send_metadata_fn>(b"NDIlib_recv_send_metadata")
+                .context("NDIlib_recv_send_metadata not found")?;
 
             // Initialize NDI
             if !initialize() {
@@ -396,6 +410,7 @@ impl NdiLib {
                 recv_destroy,
                 recv_capture_v3,
                 recv_free_video_v2,
+                recv_send_metadata,
             })
         }
     }
@@ -500,6 +515,20 @@ fn reannounce_dance<O: NdiSendOps>(
 /// not required to coincide. `interval_ns == 0` disables the gate and is the
 /// guarded divisor case, matching [`next_boundary_100ns`] / [`fps_from_frame_rate`]
 /// which also guard a zero divisor rather than panicking.
+/// #707 B1 — the largest lag (in whole emit-boundary intervals) the emit gate absorbs by
+/// CATCHING UP one interval at a time (emitting each merely-late buffered frame for its own
+/// boundary) before it gives up and grid-resyncs (leaps forward, dropping the intervening
+/// boundaries). Grounded in the capture path: `src/capture.rs` opens a V4L2 mmap stream 4 buffers
+/// deep (`Stream::with_buffers(.., 4)`), so a CPU-starvation stall (the #752 log storm) can buffer
+/// AT MOST ~4 real captured frames before the device drops (capture-dropped increments) — a lag
+/// this size or smaller is a bounded buffered-drain whose frames must all be emitted, NOT a
+/// discontinuity. 8 = 2× that depth (margin for a slightly-deeper transient) while staying far
+/// below a genuine wall-clock STEP: the DanteSync sawtooth is sub-ms (< 1 interval, never even
+/// reaches the resync branch), and a real cold-boot NTP acquire steps by seconds (hundreds of
+/// intervals >> 8) → still grid-resyncs, exactly as before (#131). See
+/// [`genlock_emit_gate`]'s resync branch.
+pub const GENLOCK_MAX_CATCHUP_INTERVALS: u64 = 8;
+
 pub fn genlock_emit_gate(now_ns: u64, next_boundary_ns: u64, interval_ns: u64) -> (bool, u64) {
     // Guard the divisor: a zero interval means genlock is off — never emit, and
     // never modulo/divide by zero (would panic on this pub API surface).
@@ -528,10 +557,55 @@ pub fn genlock_emit_gate(now_ns: u64, next_boundary_ns: u64, interval_ns: u64) -
     // Crossed the boundary: emit this (freshest) frame, advance the boundary.
     let mut next = boundary + interval_ns;
     if next <= now_ns {
-        // Fell behind (clock slew/jump or a slow capture) — resync forward.
-        next = now_ns - (now_ns % interval_ns) + interval_ns;
+        // Fell behind. #707 B1: distinguish a bounded jitter / CPU-starvation BUFFERED-DRAIN (the
+        // freeze mechanism) from a genuine large wall-clock discontinuity (a DanteSync step). The
+        // V4L2 capture queue is 4 buffers deep (`capture.rs`), so a starvation stall can buffer at
+        // most ~4 REAL captured frames before the device drops; the loop drains them one-per-poll
+        // at ~the same late wall clock, and EACH must be emitted (advance ONE interval to fill its
+        // own boundary). The OLD unconditional grid-resync below leaped past those boundaries and
+        // decimated the whole burst but its first frame — dropping ~N-1 of every buffered drain,
+        // which IS the measured 60->44fps emit collapse and the strih underrun-then-jump freeze.
+        // Only a lag beyond GENLOCK_MAX_CATCHUP_INTERVALS (which a 4-deep queue can never produce
+        // as buffered frames — it must be a real clock STEP) grid-resyncs, as before (#131), so an
+        // NTP/PTP jump never triggers a pathologically long stale catch-up.
+        let lag_intervals = (now_ns - boundary) / interval_ns; // >= 1 here (next <= now_ns)
+        if lag_intervals > GENLOCK_MAX_CATCHUP_INTERVALS {
+            // Real discontinuity — resync forward to the grid boundary just after `now`.
+            next = now_ns - (now_ns % interval_ns) + interval_ns;
+        }
+        // else: keep next = boundary + interval_ns — emit this (fresh, merely-late) frame for the
+        // next un-emitted boundary; the emit rate self-heals one frame at a time (no permanent
+        // un-emitted boundary → no emit-rate deficit).
     }
     (true, next)
+}
+
+/// #707 — how many WHOLE emit-boundary intervals were SKIPPED (never emitted) between the
+/// `next_boundary_ns` this capture loop held BEFORE calling [`genlock_emit_gate`] and the
+/// boundary it returned. A normal `emit=false` poll (decimated, between boundaries) leaves the
+/// boundary unchanged (0 skipped); a normal `emit=true` poll advances by exactly ONE
+/// `interval_ns` (0 skipped — that's the expected single-frame cadence, not a skip). Anything
+/// LARGER than one interval means [`genlock_emit_gate`]'s own forward-resync branch fired — a
+/// clock discontinuity (a DanteSync NTP/PTP step correction, or a stalled poll) leapt the wall
+/// clock past one or more boundaries that were therefore NEVER emitted, which is the exact
+/// mechanism a #666/#707-class transient emit-rate deficit would show if a clock step is its
+/// cause. This is the missing direct evidence for that specific hypothesis (as
+/// [`crate::send_stall`]'s doc comment covers the sibling "blocking network send" hypothesis) —
+/// two independent, non-overlapping diagnostics for the same still-open emit-rate-deficit
+/// family, so a future recurrence can show WHICH mechanism (or neither) actually fired.
+///
+/// `old_boundary_ns == 0` is the gate's own "uninitialized" sentinel (see
+/// [`genlock_emit_gate`]'s own init branch) — the very first call always advances from 0 to a
+/// real boundary and must NEVER be misread as a multi-interval skip, so it always reports 0.
+/// A backward step (`new_boundary_ns <= old_boundary_ns`, e.g. the gate's own backward-jump
+/// re-latch, or a decimated poll where the boundary is simply unchanged) also reports 0 — this
+/// counts only FORWARD skips, the only direction that actually drops un-emitted boundaries.
+pub fn boundary_skip_count(old_boundary_ns: u64, new_boundary_ns: u64, interval_ns: u64) -> u64 {
+    if interval_ns == 0 || old_boundary_ns == 0 || new_boundary_ns <= old_boundary_ns {
+        return 0;
+    }
+    let advanced = new_boundary_ns - old_boundary_ns;
+    (advanced / interval_ns).saturating_sub(1)
 }
 
 /// #297 — read the host's current usable (up, non-loopback, IPv4) network addresses into a
@@ -1076,8 +1150,31 @@ impl NdiSender {
         };
 
         // SYNCHRONOUS send - blocks until NDI accepts frame (lowest latency)
+        //
+        // #707 — time this exact blocking call. The #656/#663/#665/#666 emit-rate-deficit family
+        // has only ever measured the downstream 5s-averaged symptom (emitted fps < configured
+        // send fps); this pinpoints, per-call, whether the SDK's own blocking send is where the
+        // time actually goes (network/receiver backpressure) — see `crate::send_stall`.
+        let send_started = std::time::Instant::now();
         unsafe {
             (self.lib.send_send_video_v2)(self.sender, &video_frame);
+        }
+        let send_duration_ms = send_started.elapsed().as_secs_f64() * 1000.0;
+        let configured_fps =
+            fps_from_frame_rate(self.frame_rate.numerator, self.frame_rate.denominator) as f64;
+        if configured_fps > 0.0 {
+            let frame_interval_ms = 1000.0 / configured_fps;
+            if crate::send_stall::is_send_stall(send_duration_ms, frame_interval_ms) {
+                tracing::warn!(
+                    "{}",
+                    crate::send_stall::send_stall_warning(
+                        &self.ndi_name.to_string_lossy(),
+                        send_duration_ms,
+                        frame_interval_ms,
+                        configured_fps,
+                    )
+                );
+            }
         }
 
         self.frame_count += 1;
@@ -1267,6 +1364,19 @@ impl NdiReceiver {
 
     /// Capture next video frame (blocking with timeout)
     /// Returns None if no frame available within timeout
+    /// #797 — send receiver metadata (e.g. the DistroAV hw-accel request
+    /// `<ndi_video_codec type="hardware"/>`), verbatim what the vendored ndi-source does.
+    pub fn send_metadata(&mut self, xml: &str) -> Result<()> {
+        let c = CString::new(xml)?;
+        let frame = NDIlib_metadata_frame_t {
+            length: xml.len() as c_int,
+            timecode: 0,
+            p_data: c.as_ptr(),
+        };
+        unsafe { (self.lib.recv_send_metadata)(self.receiver, &frame) };
+        Ok(())
+    }
+
     pub fn capture_frame(&mut self, timeout_ms: u32) -> Result<Option<ReceivedFrame>> {
         let mut video_frame: NDIlib_video_frame_v2_recv_t = unsafe { std::mem::zeroed() };
 
@@ -1847,6 +1957,113 @@ mod tests {
         assert_eq!(next2, 555);
     }
 
+    // #707 — boundary_skip_count: the "was a boundary skipped" diagnostic decision.
+
+    #[test]
+    fn skip_count_zero_on_uninitialized_sentinel() {
+        // old_boundary_ns == 0 is the gate's own "uninitialized" sentinel — the very first
+        // call's huge jump from 0 must never read as a skip.
+        assert_eq!(boundary_skip_count(0, 100 * I30, I30), 0);
+    }
+
+    #[test]
+    fn skip_count_zero_on_unchanged_boundary_decimated_poll() {
+        // A decimated (emit=false) poll leaves the boundary unchanged.
+        let boundary = 5 * I30;
+        assert_eq!(boundary_skip_count(boundary, boundary, I30), 0);
+    }
+
+    #[test]
+    fn skip_count_zero_on_normal_single_interval_advance() {
+        // The expected steady-state emit=true advance: exactly one interval, no skip.
+        let old = 5 * I30;
+        let new = old + I30;
+        assert_eq!(boundary_skip_count(old, new, I30), 0);
+    }
+
+    #[test]
+    fn skip_count_reports_a_multi_interval_forward_jump() {
+        // A clock step (or a stalled poll) that leapt the boundary forward by 6 intervals in
+        // one call means 5 boundaries were never emitted.
+        let old = 10 * I30;
+        let new = old + 6 * I30;
+        assert_eq!(boundary_skip_count(old, new, I30), 5);
+    }
+
+    #[test]
+    fn skip_count_zero_on_backward_step() {
+        // A backward clock step re-latches to a SMALLER boundary — never a forward skip.
+        let old = 100 * I30;
+        let new = 40 * I30;
+        assert_eq!(boundary_skip_count(old, new, I30), 0);
+    }
+
+    #[test]
+    fn skip_count_zero_when_interval_is_zero_genlock_off() {
+        assert_eq!(boundary_skip_count(5 * I30, 200 * I30, 0), 0);
+    }
+
+    #[test]
+    fn skip_count_matches_genlock_emit_gate_forward_resync_live() {
+        // End-to-end: drive genlock_emit_gate through a real forward clock STEP (a lag beyond
+        // GENLOCK_MAX_CATCHUP_INTERVALS, so it grid-resyncs rather than #707 catching up) and
+        // confirm boundary_skip_count reads the same skip the gate's own resync branch took.
+        let boundary = 10 * I30;
+        let jump = GENLOCK_MAX_CATCHUP_INTERVALS + 4; // 12 intervals — past the catch-up bound
+        let jumped_now = boundary + jump * I30 + 500; // 12+ intervals past the pending boundary
+        let (emit, next) = genlock_emit_gate(jumped_now, boundary, I30);
+        assert!(emit, "a capture at/after the boundary always emits");
+        assert_eq!(
+            boundary_skip_count(boundary, next, I30),
+            jump,
+            "beyond the catch-up bound the gate's forward-resync must be visible as a {jump}-boundary skip"
+        );
+    }
+
+    #[test]
+    fn emit_gate_catches_up_a_buffered_drain_without_dropping_707_b1() {
+        // #707 B1 — the CAM1 FREEZE mechanism. At a matched capture==genlock rate the box
+        // captures a steady 60fps (0 capture-dropped), but a CPU-starvation stall (the #752 log
+        // storm) delays the emit-thread poll for a few intervals; V4L2 then holds the captured
+        // frames (queue depth 4, `capture.rs` `Stream::with_buffers(.., 4)`) and the loop drains
+        // them back-to-back at ~the SAME late wall clock.
+        //
+        // OLD gate: the first drained frame emits, then the forward-resync LEAPS the boundary grid
+        // past the rest, so every following buffered frame lands BETWEEN boundaries and is
+        // DECIMATED (emit=false) — captured-but-never-emitted. A 4-frame drain => 1 emit + 3
+        // dropped => the measured 60->44fps emit collapse and the strih underrun-then-jump freeze.
+        //
+        // FIXED gate (bounded catch-up): a lag within GENLOCK_MAX_CATCHUP_INTERVALS advances ONE
+        // interval per emit, so each buffered (fresh, merely-late) frame fills the next un-emitted
+        // boundary — all 4 emit, no drop. Drives the exact drain and asserts every buffered frame
+        // emits.
+        let i = I30;
+        let b0 = 10 * i; // an aligned pending boundary (grid-aligned so the arithmetic is exact)
+        let stall_intervals = 4u64; // the emit poll was starved ~4 intervals ...
+        let depth = 4u64; // ... and V4L2 held its 4-deep queue meanwhile (capture.rs)
+                          // Resume: the loop drains `depth` buffered frames in a tight loop, all at ~the same wall
+                          // clock `resume` (a few ns apart — well within one interval).
+        let resume = b0 + stall_intervals * i;
+        let mut next_boundary = b0;
+        let mut emitted = 0u64;
+        for k in 0..depth {
+            let now = resume + k; // k ns apart — all inside the same interval
+            let (emit, nb) = genlock_emit_gate(now, next_boundary, i);
+            next_boundary = nb;
+            if emit {
+                emitted += 1;
+            }
+        }
+        assert_eq!(
+            emitted,
+            depth,
+            "every buffered capture in a bounded starvation drain must EMIT (fill its own \
+             boundary), not be leaped-past and decimated — a {depth}-frame drain that emits only 1 \
+             is the #707 B1 freeze (1 emit + {} captured-but-never-emitted)",
+            depth - 1
+        );
+    }
+
     #[test]
     fn genlock_gate_advance_is_boundary_plus_interval_not_resync() {
         // Misaligned boundary, now exactly at it (and < boundary+interval, so the
@@ -1864,19 +2081,45 @@ mod tests {
 
     #[test]
     fn genlock_gate_resyncs_when_far_behind() {
-        // now is several intervals past the boundary (gap/jump): emit, and the
-        // next boundary must jump forward to just-after-now, not boundary+1.
+        // A lag BEYOND GENLOCK_MAX_CATCHUP_INTERVALS is a genuine wall-clock discontinuity (a real
+        // clock step, not a bounded buffered-drain): emit, then grid-resync forward to just-after
+        // `now`, dropping the intervening boundaries (no buffered captures existed to fill them).
         let boundary = 3 * I30;
-        let now = boundary + 4 * I30 + 17; // ~4 intervals late
+        let lag = GENLOCK_MAX_CATCHUP_INTERVALS + 4; // safely past the catch-up bound
+        let now = boundary + lag * I30 + 17;
         let (emit, next) = genlock_emit_gate(now, boundary, I30);
         assert!(emit);
         let realigned = now - (now % I30) + I30;
         assert_eq!(
             next, realigned,
-            "must resync forward, not creep one interval"
+            "beyond the catch-up bound must resync forward, not creep one interval"
         );
         assert!(next > now);
         assert_ne!(next, boundary + I30);
+    }
+
+    #[test]
+    fn genlock_gate_catches_up_within_the_bound_instead_of_resyncing() {
+        // #707 B1 — a MODERATE lag (within GENLOCK_MAX_CATCHUP_INTERVALS, i.e. a bounded V4L2
+        // buffered-drain) must advance exactly ONE interval — emit the merely-late frame for the
+        // next un-emitted boundary — NOT grid-resync (which would decimate the rest of the drain,
+        // the freeze). A misaligned boundary distinguishes the +interval advance (boundary+I) from
+        // the resync-realigned value.
+        let boundary = 7 * I30 + 5;
+        let lag = GENLOCK_MAX_CATCHUP_INTERVALS; // exactly at the bound → still catch up (> is the resync gate)
+        let now = boundary + lag * I30 + 11;
+        let (emit, next) = genlock_emit_gate(now, boundary, I30);
+        assert!(emit);
+        assert_eq!(
+            next,
+            boundary + I30,
+            "within the catch-up bound: advance ONE interval (fill the next boundary), never leap"
+        );
+        assert_ne!(
+            next,
+            now - (now % I30) + I30,
+            "must NOT resync-realign within the catch-up bound"
+        );
     }
 
     #[test]

@@ -402,26 +402,83 @@ async fn run_capture_loop(
         None
     };
 
-    // Open capture device at 1920x1080 @ 60fps.
-    //
-    // Select the V4L2 picture controls to ENFORCE at open (see
-    // `select_capture_controls`):
-    // - `CAMERA_BOX_CAPTURE_CONTROLS` set  -> that explicit override,
-    // - else `--record-grab`               -> the certified SHARP set (saturation=0,
-    //                                          contrast=75) so the filmed QR decodes (#156),
-    // - else PRODUCTION                    -> the certified COLOUR set (#296) so a stray
-    //                                          saturation=0 left by a prior grab can NEVER
-    //                                          persist and turn the live cameras grayscale.
-    let env_spec = std::env::var("CAMERA_BOX_CAPTURE_CONTROLS").ok();
-    let capture_controls: Vec<camera_box::capture::CaptureControl> =
-        camera_box::capture::select_capture_controls(env_spec.as_deref(), record_grab.is_some());
-    if capture_controls.is_empty() {
-        tracing::info!("no v4l2 capture controls to enforce at open (explicit empty override)");
+    // #685/#728/#729 — resolve this box's grabber model ONCE, up front, BEFORE deciding which
+    // v4l2 controls to enforce (colour policy, #729) and BEFORE the capture-rate self-heal
+    // envelope (#685/#663) — both consumers now share ONE detection instead of drifting apart.
+    // Prefers the real OS-level hostname (`os_hostname()`) over the config-derived `hostname`
+    // parameter — see that function's doc for why (the deployed fleet's config.toml doesn't set
+    // it). `Copy`, so it moves into the `'static` spawn_blocking closure below for free.
+    let resolved_hostname = {
+        let os = os_hostname();
+        if os.is_empty() {
+            hostname.to_string()
+        } else {
+            os
+        }
+    };
+    // #728 — best-effort RUNTIME detection: read the actual plugged-in card's V4L2 `card`
+    // string. A physical card swap changes what's plugged in without changing the box's
+    // hostname, so the static hostname->model table alone silently desyncs from reality the
+    // moment a card moves (the 2026-07-12 cam1<->cam5 reshuffle). `query_card_name` is
+    // best-effort (never fatal) — `resolve_grabber_model` falls back to the hostname
+    // convention whenever detection is unavailable or unrecognized.
+    let detected_card = camera_box::capture::query_card_name(device_path);
+    let grabber_model = camera_box::capture_rate_health::resolve_grabber_model(
+        &resolved_hostname,
+        detected_card.as_deref(),
+    );
+    let hostname_model =
+        camera_box::capture_rate_health::grabber_model_for_hostname(&resolved_hostname);
+    if grabber_model != hostname_model {
+        tracing::warn!(
+            "grabber model MISMATCH: hostname '{}' convention says {}, but the plugged-in \
+             card ({:?}) resolves to {} — using the RUNTIME-detected model (a physical card \
+             swap changed what's on this box; #728/#729 never trust the stale hostname \
+             mapping over live hardware)",
+            resolved_hostname,
+            hostname_model,
+            detected_card,
+            grabber_model
+        );
     } else {
         tracing::info!(
-            "enforcing {} certified v4l2 capture control(s) at open \
-             (#296 colour self-heal / #156 sharp grab)",
-            capture_controls.len()
+            "grabber model: {} (hostname '{}', detected card: {:?})",
+            grabber_model,
+            resolved_hostname,
+            detected_card
+        );
+    }
+
+    // Open capture device at 1920x1080 @ 60fps.
+    //
+    // Select the V4L2 picture controls to ENFORCE at open (see `select_capture_controls`):
+    // - `CAMERA_BOX_CAPTURE_CONTROLS` set -> that explicit override, regardless of model,
+    // - else                              -> #729 zero-touch by default: NO controls at all
+    //                                         unless `grabber_model` has a documented, proven
+    //                                         need (ShadowCast 2's #296 grab-time grayscale-brick
+    //                                         risk, or Elgato 4K S's #729-follow-up corrective
+    //                                         saturation set for its own ISP tint). Plug-and-play
+    //                                         for every other card — factory defaults, no
+    //                                         ceremony.
+    let env_spec = std::env::var("CAMERA_BOX_CAPTURE_CONTROLS").ok();
+    let capture_controls: Vec<camera_box::capture::CaptureControl> =
+        camera_box::capture::select_capture_controls(
+            grabber_model,
+            env_spec.as_deref(),
+            record_grab.is_some(),
+        );
+    if capture_controls.is_empty() {
+        tracing::info!(
+            "no v4l2 capture controls to enforce at open (zero-touch: {} has no documented \
+             need, or an explicit empty override) — #729",
+            grabber_model
+        );
+    } else {
+        tracing::info!(
+            "enforcing {} certified v4l2 capture control(s) at open ({} documented need / \
+             explicit override)",
+            capture_controls.len(),
+            grabber_model
         );
     }
     let mut capture = VideoCapture::open_with_controls(device_path, &capture_controls)?;
@@ -433,24 +490,6 @@ async fn run_capture_loop(
     // loop below runs on a `'static` spawn_blocking closure, so the borrowed `device_path: &str`
     // parameter can't be captured directly).
     let device_path_owned = device_path.to_string();
-
-    // #685 — resolve this box's grabber model from its hostname ONCE, up front, so the capture
-    // loop's #656/#663 capture-rate check below can use a per-model tolerance instead of one
-    // strict global default (ShadowCast 2's characteristic USB quantization wobble is far wider
-    // than the other grabber models' — see `capture_rate_health::GrabberModel`). Prefers the
-    // real OS-level hostname (`os_hostname()`) over the config-derived `hostname` parameter —
-    // see that function's doc for why (the deployed fleet's config.toml doesn't set it).
-    // `Copy`, so it moves into the `'static` spawn_blocking closure below for free.
-    let resolved_hostname = {
-        let os = os_hostname();
-        if os.is_empty() {
-            hostname.to_string()
-        } else {
-            os
-        }
-    };
-    let grabber_model =
-        camera_box::capture_rate_health::grabber_model_for_hostname(&resolved_hostname);
 
     // Genlock #11: optionally emit NDI at a target broadcast rate, decimating the
     // faster capture onto DanteSync wall-clock boundaries, so a downstream
@@ -517,6 +556,66 @@ async fn run_capture_loop(
     tracing::info!("NDI sender ready, streaming as '{}'", ndi_name);
     tracing::info!("ZERO-COPY mode: AVX2 SIMD + sync send for lowest latency");
 
+    // #792 — optional SECONDARY 30fps NDI stream: 2-frame temporal blend of the emitted 60fps
+    // pairs, published as "<machine> (30p)" alongside the primary. OFF unless
+    // CAMERA_BOX_PUBLISH_30P=1 (unset ⇒ bit-identical legacy behavior). The tee into this path
+    // is bounded + drop-on-full, so the 60p hot path can NEVER block on it; a sender-create
+    // failure disables the feature loudly and leaves the 60p stream untouched.
+    let publish_30p_cfg = camera_box::publish_30p::Config::from_process_env();
+    let effective_emit_fps = send_rate.numerator as f64 / send_rate.denominator.max(1) as f64;
+    // Review finding (#792): a sub-60 emit path breaks the blend premise itself (pairs are no
+    // longer adjacent ~16.7ms exposures) AND would halve the output under a 30/1 label — hard
+    // OPT-OUT, not warn-and-proceed. 59.0 so a 60000/1001 capture is not spuriously disabled.
+    let mut publish_30p_tee: Option<camera_box::publish_30p::Tee> = if publish_30p_cfg.enabled
+        && effective_emit_fps < 59.0
+    {
+        tracing::warn!(
+            "#792 publish-30p requires a ~60fps emit path (effective {:.1} fps) — feature DISABLED, 60p unaffected",
+            effective_emit_fps
+        );
+        None
+    } else if publish_30p_cfg.enabled {
+        let name_30p = camera_box::publish_30p::derive_30p_name(ndi_name);
+        match NdiSender::new(
+            &name_30p,
+            camera_box::capture::FrameRate {
+                numerator: 30,
+                denominator: 1,
+            },
+        ) {
+            Ok(mut s) => {
+                // The worker consumes emitted pairs (external cadence) and stamps each output
+                // with its pair's FIRST frame's genlock timecode — no internal pacing sleep.
+                s.set_external_pacing(true);
+                match camera_box::publish_30p::spawn(s, publish_30p_cfg) {
+                    Ok(tee) => {
+                        tracing::info!(
+                            "#792 publish-30p ACTIVE: streaming as '{}' (blend={}, channel depth {})",
+                            name_30p,
+                            publish_30p_cfg.blend,
+                            camera_box::publish_30p::CHANNEL_DEPTH
+                        );
+                        Some(tee)
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            "#792 publish-30p worker spawn FAILED ({e}) — secondary stream disabled, 60p unaffected"
+                        );
+                        None
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!(
+                    "#792 publish-30p sender create FAILED ({e}) — secondary stream disabled, 60p unaffected"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // #105 node 2 — cam1 grab recorder (TEST mode). Connect BEFORE the loop so the
     // dev1 ffmpeg listener is bound and the sidecar header is written; a connect
     // failure is fatal (the operator asked to record — don't silently NDI-only).
@@ -564,6 +663,18 @@ async fn run_capture_loop(
         let mut frame_count: u64 = 0; // frames captured this report window
         let mut emit_count: u64 = 0; // frames actually sent to NDI this window
         let mut last_report = std::time::Instant::now();
+        // #707 B1 — per-second emit/capture ring. A MONOTONIC epoch (never the wall clock — this
+        // ticket is about DanteSync wall-clock seams) buckets emit/capture into 1-second slices so a
+        // sub-5s emit pause (the #707 freeze) surfaces instead of averaging into the 5s report.
+        let ring_epoch = std::time::Instant::now();
+        let mut emit_ring = camera_box::emit_rate_ring::EmitRateRing::new(
+            camera_box::emit_rate_ring::DEFAULT_RING_SECONDS,
+        );
+        // #752 — coalesce the per-gate-call emit-gate-skip WARN (previously ~10/s on a skipping
+        // box → rsyslogd 37% + journald 15% CPU on the 3-core boxes, a starvation feedback loop)
+        // into ONE aggregated WARN per 5s Streaming report. The per-skip detail is accumulated
+        // here and drained on the report tick below.
+        let mut emit_skip_log = camera_box::emit_skip_log::EmitGateSkipLog::new();
 
         // #299 — colour-capture metric: sample chroma once per CHROMA_SAMPLE_FRAMES
         // captured frames (≈1 Hz at 60 fps) and log alongside the 5-second fps report.
@@ -587,6 +698,14 @@ async fn run_capture_loop(
         // tick, zero loss) is unaffected by capture-side wobble and stays strict by design.
         let capture_rate_tolerance_pct =
             camera_box::capture_rate_health::tolerance_pct_for_model(grabber_model);
+        // #717 — SUSTAINED-band capture-rate health: a SEPARATE, narrower consecutive-breach
+        // counter/tolerance, so a genuinely chronic deviation (e.g. cam1's #674 63.9-64.0fps)
+        // still trips self-heal even when it stays comfortably inside the wide jitter-band
+        // tolerance above (#685's correct-for-short-bursts widening, which #717 leaves
+        // unchanged). See `capture_rate_health::sustained_tolerance_pct_for_model`'s doc.
+        let mut consecutive_sustained_breaches: u32 = 0;
+        let sustained_rate_tolerance_pct =
+            camera_box::capture_rate_health::sustained_tolerance_pct_for_model(grabber_model);
         // #666 — emit-vs-capture health: consecutive-breach counter for the SAME pure
         // `capture_rate_health` decision, but checked against the configured genlock SEND rate
         // (`send_fps`, below) instead of the negotiated capture rate — catches a defect in the
@@ -735,6 +854,9 @@ async fn run_capture_loop(
         let mut next_boundary_ns: u64 = 0;
 
         while running_capture.load(Ordering::Relaxed) {
+            // #707 B1 — snapshot the emit counter before the frame closure so the per-second ring
+            // can attribute exactly this frame's emit (0 or 1) after it returns.
+            let emit_before = emit_count;
             // ZERO-COPY: Process frame directly from mmap buffer without copying
             let result = capture.process_frame(|data, info| {
                 // #286 — periodically re-sample the monotonic->realtime clock offset. Counts
@@ -762,15 +884,57 @@ async fn run_capture_loop(
                     ));
                 }
 
+                // #707 — did THIS frame's blocking V4L2 dequeue itself stall? Checked on EVERY
+                // captured frame (regardless of emit/decimate decisions below), mirroring the
+                // offset-sample/chroma-sample blocks above. See `capture_stall`'s module doc: this
+                // is the missing capture-side half of the `send_stall` observability pair — a
+                // WARN here on the NEXT natural CAM1-class recurrence, at the same time as an
+                // `all_cambox_delivery_latency` spike, confirms the V4L2/USB/driver layer as the
+                // mechanism; silence here (as already confirmed for `send_stall` on a real 2026-
+                // 07-14 recurrence) would point elsewhere (e.g. strih's own presentation cadence,
+                // per #726).
+                if configured_capture_fps > 0.0 {
+                    let capture_frame_interval_ms = 1000.0 / configured_capture_fps;
+                    if camera_box::capture_stall::is_capture_stall(
+                        info.dequeue_duration_ms,
+                        capture_frame_interval_ms,
+                    ) {
+                        tracing::warn!(
+                            "{}",
+                            camera_box::capture_stall::capture_stall_warning(
+                                info.dequeue_duration_ms,
+                                capture_frame_interval_ms,
+                                configured_capture_fps,
+                            )
+                        );
+                    }
+                }
+
                 if out_interval_ns > 0 {
                     // Genlock decimation: emit only the capture at/after each
                     // wall-clock boundary (pure logic in ndi::genlock_emit_gate).
+                    let prev_boundary_ns = next_boundary_ns;
                     let (emit, next) = camera_box::ndi::genlock_emit_gate(
                         wall_clock_ns(),
                         next_boundary_ns,
                         out_interval_ns,
                     );
                     next_boundary_ns = next;
+                    // #707 — a clock discontinuity (DanteSync NTP/PTP step, or a stalled poll)
+                    // can leap the gate's boundary past one or more intervals that are then
+                    // NEVER emitted — the missing direct evidence for whether a clock step is
+                    // what's behind a #666/#707-class transient emit-rate deficit. See
+                    // `ndi::boundary_skip_count`'s own doc comment.
+                    let skipped = camera_box::ndi::boundary_skip_count(
+                        prev_boundary_ns,
+                        next_boundary_ns,
+                        out_interval_ns,
+                    );
+                    if skipped > 0 {
+                        // #752 — do NOT log per skip (that was the ~10/s storm). Accumulate; the
+                        // 5s Streaming report below drains ONE aggregated WARN with the count.
+                        emit_skip_log.record(skipped);
+                    }
                     if !emit {
                         return; // between boundaries — decimate (don't send)
                     }
@@ -900,11 +1064,44 @@ async fn run_capture_loop(
                 }
                 emit_count += 1; // reached only when the frame passed the gate
                 tee_grab(data);
+                // #792 — tee the emitted frame to the optional 30p publisher LAST (one bounded
+                // memcpy + try_send, drop-on-full: never blocks this 60p hot path). Production
+                // path only — the probe burn path above returns before reaching here.
+                if let Some(t) = publish_30p_tee.as_mut() {
+                    t.tee(data, info, capture_timecode_100ns);
+                }
             });
 
             match result {
                 Ok(()) => {
                     frame_count += 1;
+
+                    // #707 B1 — feed the per-second emit/capture ring (MONOTONIC clock) so a
+                    // sub-5s emit pause surfaces instead of averaging into the 5s report. WARN the
+                    // instant any completed 1-second bucket's emit dips below the send floor: this
+                    // is the box-side prong of #707 B1's freeze discriminator — if it fires during
+                    // a strih freeze the box emit path dipped; if the box stays clean (buckets ~60)
+                    // while strih freezes, the loss is downstream (link / NDI SDK), read off the
+                    // transport sampler instead.
+                    let emitted_this = (emit_count - emit_before) as u32;
+                    let now_mono_ns = ring_epoch.elapsed().as_nanos() as u64;
+                    for bucket in emit_ring.observe(now_mono_ns, emitted_this, 1) {
+                        if camera_box::emit_rate_ring::emit_bucket_below_floor(
+                            bucket.emit,
+                            send_fps as f64,
+                            camera_box::emit_rate_ring::BUCKET_FLOOR_FRACTION,
+                        ) {
+                            tracing::warn!(
+                                "#707 B1 emit-1s DIP: a 1-second window emitted {} frames vs a {} fps configured send rate (floor {:.0}) while capture stayed {} that second — a sub-5s emit pause on THIS box. Discriminator: during a strih freeze this WARN = the box emit path dipped; if the box stays clean while strih freezes, the loss is downstream (link/NDI SDK — read the transport sampler CSV). recent emit-1s: {:?} cap-1s: {:?}",
+                                bucket.emit,
+                                send_fps,
+                                send_fps as f64 * camera_box::emit_rate_ring::BUCKET_FLOOR_FRACTION,
+                                bucket.capture,
+                                emit_ring.emit_buckets(),
+                                emit_ring.capture_buckets(),
+                            );
+                        }
+                    }
 
                     // Report fps every 5 seconds. Under genlock decimation the
                     // emit rate (frames actually sent) differs from the capture
@@ -977,6 +1174,31 @@ async fn run_capture_loop(
                                 corrupted
                             );
                         }
+                        // #707 B1 — print the per-second emit/capture ring alongside the 5s
+                        // average so a sub-5s emit pause (the #707 freeze) is visible in the log
+                        // even when it averaged out of the fps line above. Buckets are oldest-first,
+                        // one per completed 1-second window.
+                        tracing::info!(
+                            "#707 emit-1s: {:?} cap-1s: {:?} (1-second buckets, oldest first)",
+                            emit_ring.emit_buckets(),
+                            emit_ring.capture_buckets(),
+                        );
+
+                        // #752 — ONE aggregated emit-gate-skip WARN per report window (drains +
+                        // resets the accumulator). A clean window logs nothing; a skipping window
+                        // logs a single line with the event count + total boundaries skipped,
+                        // instead of the ~10/s per-skip storm that starved the emit thread.
+                        if let Some((skip_events, skip_total)) = emit_skip_log.take() {
+                            tracing::warn!(
+                                "{}",
+                                camera_box::emit_skip_log::skip_summary_warning(
+                                    skip_events,
+                                    skip_total,
+                                    5
+                                )
+                            );
+                        }
+
                         // #656 — capture-delivery-rate health: WARN when the captured fps has
                         // sustained a >1% deviation from the device's negotiated capture rate
                         // for CAPTURE_RATE_WARN_WINDOWS consecutive report windows (a real
@@ -994,19 +1216,60 @@ async fn run_capture_loop(
                                 consecutive_rate_breaches,
                                 rate_deviant,
                             );
-                        if camera_box::capture_rate_health::should_warn(
+                        let jitter_confirmed = camera_box::capture_rate_health::should_warn(
                             consecutive_rate_breaches,
                             camera_box::capture_rate_health::CAPTURE_RATE_WARN_WINDOWS,
-                        ) {
-                            tracing::warn!(
-                                "#656 capture-delivery-rate DEFECTIVE: {:.2} fps captured vs {:.2} fps configured/negotiated (>{:.1}% deviation sustained for {} consecutive report windows, ~{}s, {} tolerance) — USB-reset the capture device (see #656, #685)",
-                                cap_fps,
-                                configured_capture_fps,
-                                capture_rate_tolerance_pct,
-                                consecutive_rate_breaches,
-                                consecutive_rate_breaches as u64 * 5,
-                                grabber_model
+                        );
+
+                        // #717 — SUSTAINED-band check: a SEPARATE, narrower tolerance
+                        // (`sustained_rate_tolerance_pct`) + a longer required run
+                        // (`SUSTAINED_WARN_WINDOWS`, 60s) so a genuinely chronic deviation (e.g.
+                        // cam1's #674 chronic 63.9-64.0fps) still trips self-heal even while it
+                        // stays comfortably inside the wide jitter floor above — #685's widening
+                        // is still correct for genuinely short-lived quantization jitter (band
+                        // (a)); this catches band (b), the sustained case #685 over-corrected
+                        // away. See `capture_rate_health::sustained_tolerance_pct_for_model`'s doc.
+                        let sustained_deviant = camera_box::capture_rate_health::is_rate_deviant(
+                            cap_fps,
+                            configured_capture_fps,
+                            sustained_rate_tolerance_pct,
+                        );
+                        consecutive_sustained_breaches =
+                            camera_box::capture_rate_health::next_consecutive_breaches(
+                                consecutive_sustained_breaches,
+                                sustained_deviant,
                             );
+                        let sustained_confirmed = camera_box::capture_rate_health::should_warn(
+                            consecutive_sustained_breaches,
+                            camera_box::capture_rate_health::SUSTAINED_WARN_WINDOWS,
+                        );
+
+                        if camera_box::capture_rate_selfheal::should_trigger_selfheal(
+                            jitter_confirmed,
+                            sustained_confirmed,
+                        ) {
+                            if jitter_confirmed {
+                                tracing::warn!(
+                                    "#656 capture-delivery-rate DEFECTIVE: {:.2} fps captured vs {:.2} fps configured/negotiated (>{:.1}% deviation sustained for {} consecutive report windows, ~{}s, {} tolerance) — USB-reset the capture device (see #656, #685)",
+                                    cap_fps,
+                                    configured_capture_fps,
+                                    capture_rate_tolerance_pct,
+                                    consecutive_rate_breaches,
+                                    consecutive_rate_breaches as u64 * 5,
+                                    grabber_model
+                                );
+                            } else {
+                                tracing::warn!(
+                                    "#717 capture-delivery-rate SUSTAINED defect: {:.2} fps captured vs {:.2} fps configured/negotiated (>{:.1}% deviation sustained for {} consecutive report windows, ~{}s) — inside {}'s wide {:.1}% jitter-tolerant envelope but PERSISTENT beyond the #717 60s sustained bar, reset-fixable per #642/#674 evidence — USB-reset the capture device (see #717, #674, #685, #663)",
+                                    cap_fps,
+                                    configured_capture_fps,
+                                    sustained_rate_tolerance_pct,
+                                    consecutive_sustained_breaches,
+                                    consecutive_sustained_breaches as u64 * 5,
+                                    grabber_model,
+                                    capture_rate_tolerance_pct
+                                );
+                            }
 
                             // #663 — self-heal: the #656 fix (a manual USB reset) is only
                             // TEMPORARY — the same defect recurred within hours, three times in

@@ -1,6 +1,6 @@
 [package]
 name = "camera-box"
-version = "1.7.0-dev.346"
+version = "1.7.0-dev.395"
 edition = "2021"
 authors = ["zbynekdrlik"]
 description = "Simple USB video capture to NDI streaming appliance"
@@ -88,6 +88,10 @@ criterion = { version = "0.5", features = ["html_reports"] }
 # so the probe feature still activates the cross-platform crates (image/rqrr/…) while
 # the KMS/fb modules that need drm are cfg(target_os="linux")-gated out.
 probe = ["dep:crc", "dep:qrcode", "dep:rqrr", "dep:image", "dep:drm", "dep:lz4_flex"]
+
+[[bin]]
+name = "ndi-recv-probe"
+path = "src/bin/ndi-recv-probe.rs"
 
 [[bin]]
 name = "frozen-camera-gate"

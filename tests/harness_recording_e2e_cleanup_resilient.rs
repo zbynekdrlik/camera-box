@@ -26,10 +26,22 @@ fn read(p: &str) -> String {
 
 /// The body of cleanup() — from `cleanup()` to the `\ntrap ` that installs it (same slice the
 /// sibling cleanup tests use).
+///
+/// #758 fix: anchors on the literal function DEFINITION `"cleanup() {"`, not the bare `"cleanup()"`
+/// substring. The bare substring matches the FIRST occurrence anywhere in the file — which, well
+/// before this fix, was actually a PROSE COMMENT ("...cleanup() clears any leftover drop-in...",
+/// line 57 in the file this was written against), not the real `cleanup() {` function definition
+/// ~550 lines later. That mis-anchor happened to be harmless only because no unguarded
+/// obs_phase2/obs_burn_filter call existed anywhere in the (accidentally too-wide) byte range
+/// between that comment and the real trap line — until #758 added one in the [0/8]/[1/8] preflight
+/// section (which runs ONCE per run, long before cleanup() and completely outside the EXIT/HUP/
+/// INT/TERM trap this file is actually about), which the mis-anchored slice then wrongly swept in
+/// and flagged. `"cleanup() {"` (with the opening brace) is unambiguous — it is real bash syntax
+/// nothing else in this file's prose ever writes verbatim.
 fn cleanup_body(s: &str) -> String {
     let start = s
-        .find("cleanup()")
-        .expect("recording-e2e.sh must define cleanup()");
+        .find("cleanup() {")
+        .expect("recording-e2e.sh must define cleanup() {");
     let end = s[start..]
         .find("\ntrap ")
         .map(|i| start + i)
@@ -114,7 +126,7 @@ fn cleanup_kills_the_cam_name_infixed_all_cambox_burn_binaries() {
     let body = cleanup_body(&read("scripts/recording-e2e.sh"));
 
     let loop_region_start = body
-        .find("for _cip in \"$CAM3_IP\"")
+        .find("for _ccn in $(camera_active_secondary_set)")
         .expect("#624/#312: cleanup() must have the cam3/4/5/6 ALL_CAMBOX restore loop");
     // Code-review finding: bound loop_region's RIGHT edge at the cam2/painter block's own start —
     // an unbounded `&body[loop_region_start..]` would run to the end of cleanup() and swallow the

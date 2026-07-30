@@ -74,6 +74,14 @@ struct gl_windowinfo {
 	 */
 	xcb_window_t window;
 	EGLSurface surface;
+
+	/* camera-box #756 Fix B: cached client size, kept in sync by
+	 * gl_x11_egl_platform_init_swapchain() (seeded) and gl_x11_egl_update() (refreshed on an
+	 * actual resize) instead of gl_x11_egl_getclientsize() doing a BLOCKING xcb_get_geometry
+	 * round-trip to Xorg on every call. See the getclientsize function below for the full
+	 * root-cause writeup. */
+	uint32_t cached_cx;
+	uint32_t cached_cy;
 };
 
 struct gl_platform {
@@ -246,7 +254,10 @@ static void gl_context_destroy(struct gl_platform *plat)
 static struct gl_windowinfo *gl_x11_egl_windowinfo_create(const struct gs_init_data *info)
 {
 	UNUSED_PARAMETER(info);
-	return bmalloc(sizeof(struct gl_windowinfo));
+	/* #756 Fix B: bzalloc (not bmalloc) so cached_cx/cached_cy start at a well-defined 0
+	 * rather than uninitialized bytes -- both real values are always assigned in
+	 * gl_x11_egl_platform_init_swapchain() before this windowinfo is ever used for rendering. */
+	return bzalloc(sizeof(struct gl_windowinfo));
 }
 
 static void gl_x11_egl_windowinfo_destroy(struct gl_windowinfo *info)
@@ -427,6 +438,10 @@ static bool gl_x11_egl_platform_init_swapchain(struct gs_swap_chain *swap)
 
 	swap->wi->window = wid;
 	swap->wi->surface = surface;
+	/* #756 Fix B: seed the client-size cache from the geometry this function ALREADY fetched
+	 * (the new child window `wid` was created at exactly this size) -- no extra query. */
+	swap->wi->cached_cx = geometry->width;
+	swap->wi->cached_cy = geometry->height;
 
 	xcb_map_window(xcb_conn, wid);
 
@@ -473,16 +488,31 @@ static void *gl_x11_egl_device_get_device_obj(gs_device_t *device)
 
 static void gl_x11_egl_getclientsize(const struct gs_swap_chain *swap, uint32_t *width, uint32_t *height)
 {
-	xcb_connection_t *xcb_conn = XGetXCBConnection(swap->device->plat->xdisplay);
-	xcb_window_t window = swap->wi->window;
-
-	xcb_get_geometry_reply_t *geometry = get_window_geometry(xcb_conn, window);
-	if (geometry) {
-		*width = geometry->width;
-		*height = geometry->height;
-	}
-
-	free(geometry);
+	/* camera-box #756 Fix B: read the CACHED client size instead of a BLOCKING geometry
+	 * round-trip to Xorg on every call. gl_getclientsize() (gl-nix.c) has
+	 * exactly ONE caller: device_set_viewport() (gl-subsystem.c:1372), invoked from
+	 * gs_viewport_pop() for EVERY async source's texrender, i.e. potentially dozens of times
+	 * per frame across every open display/projector. A synchronous X round-trip here means
+	 * the graphics thread stalls on Xorg's reply latency, not GPU/CPU work.
+	 *
+	 * Root-caused live on imag-nb (2026-07-15): with the Multiview + Program projectors both
+	 * open (dozens of these calls/frame), a real wedge showed the graphics thread parked in
+	 * xcb_wait_for_reply() inside this exact call chain (device_set_viewport ->
+	 * gl_x11_egl_getclientsize -> the blocking geometry helper this used to call), with the
+	 * GPU locked at a healthy clock and near-idle (~19% util, 0.02s GSP-RPC probe) and CPU
+	 * idle -- i.e. 100% wait-on-Xorg, not compute-bound. Program fps collapsed from 60 to
+	 * under 15 as accumulated crashed-GL-client state degraded Xorg's own reply latency.
+	 *
+	 * The cache (struct gl_windowinfo.cached_cx/cy) is seeded at swap-chain creation
+	 * (gl_x11_egl_platform_init_swapchain, from a geometry query it performs anyway, once)
+	 * and refreshed by gl_x11_egl_update() -- which OBS's own render loop calls precisely
+	 * when the display's real size changes (render_display_begin(), obs-display.c, only
+	 * calls gs_resize() when display->cx/cy actually differ from the incoming size) -- so
+	 * this stays correct across every real resize while eliminating the per-viewport X
+	 * round-trip entirely. The blocking geometry helper above this function is untouched and
+	 * still used by the one-time swap-chain-creation path. */
+	*width = swap->wi->cached_cx;
+	*height = swap->wi->cached_cy;
 }
 
 static void gl_x11_egl_update(gs_device_t *device)
@@ -494,6 +524,16 @@ static void gl_x11_egl_update(gs_device_t *device)
 
 	xcb_configure_window(XGetXCBConnection(display), window, XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT,
 			     values);
+
+	/* #756 Fix B: refresh the client-size cache here -- device_resize() (gl-subsystem.c)
+	 * always sets device->cur_swap->info.cx/cy to the NEW size BEFORE calling gl_update()
+	 * (which reaches this function), and OBS's own render loop (render_display_begin(),
+	 * obs-display.c) only ever calls gs_resize() -- the path that leads here -- when the
+	 * display's actual size CHANGED. So this keeps the cache exactly in sync with the real
+	 * window size on every genuine resize, at zero extra X11 cost (the values are already in
+	 * hand, no additional round-trip). */
+	device->cur_swap->wi->cached_cx = device->cur_swap->info.cx;
+	device->cur_swap->wi->cached_cy = device->cur_swap->info.cy;
 }
 
 static void gl_x11_egl_clear_context(gs_device_t *device)

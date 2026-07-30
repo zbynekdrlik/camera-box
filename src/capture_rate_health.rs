@@ -96,6 +96,57 @@ pub fn grabber_model_for_hostname(hostname: &str) -> GrabberModel {
     }
 }
 
+/// #728/#729 — map a V4L2 `VIDIOC_QUERYCAP` `card` string (e.g. `"Elgato 4K S: Elgato 4K S"`,
+/// `"ShadowCast 2: ShadowCast 2"`, `"NZXT Signal HD60 Video: NZXT Si..."` — all live-observed
+/// verbatim, 2026-07-12) to its [`GrabberModel`]. This is the RUNTIME counterpart of
+/// [`grabber_model_for_hostname`]'s OPERATIONAL (hostname-convention) mapping — a physical
+/// card swap changes what's plugged into a box without changing its hostname, so the static
+/// table alone silently desyncs from reality the moment a card moves (the #728 cam1<->cam5
+/// reshuffle: cam1's hostname still says "ShadowCast 2" per the table, but the box now
+/// physically has an Elgato 4K S). Case-insensitive substring match (driver `card` strings
+/// vary in exact punctuation/repetition across firmware, e.g. the model name appearing twice
+/// separated by `: `) — never an exact-string match, which would be brittle to a firmware
+/// string tweak. Unrecognized/empty input is `GrabberModel::Unknown`, same never-guess
+/// contract as the hostname mapping.
+pub fn grabber_model_from_card_name(card: &str) -> GrabberModel {
+    let lower = card.to_ascii_lowercase();
+    if lower.contains("shadowcast") {
+        GrabberModel::ShadowCast2
+    } else if lower.contains("elgato") {
+        GrabberModel::Elgato4kS
+    } else if lower.contains("nzxt") || lower.contains("signal hd60") {
+        GrabberModel::NzxtSignalHd60
+    } else {
+        GrabberModel::Unknown
+    }
+}
+
+/// #728/#729 — resolve a box's grabber model, preferring LIVE hardware truth over the static
+/// hostname convention whenever it's available and recognized. This is the single shared seam
+/// both tickets asked for: #728's self-heal envelope selection and #729's colour-control
+/// policy both key off whatever this function returns, so a physical card swap can never
+/// desync the two from each other or from reality.
+///
+/// - `detected_card` is `Some` and [`grabber_model_from_card_name`] recognizes it -> that
+///   model wins, EVEN IF it disagrees with `grabber_model_for_hostname(hostname)` (the swap
+///   case — runtime hardware is always more current than the hostname convention).
+/// - `detected_card` is `None` (the query failed/unavailable) OR doesn't match any known
+///   model -> fall back to `grabber_model_for_hostname(hostname)`, same never-guess-past-
+///   Unknown contract as before. An unrecognized card string is NOT trusted enough to
+///   override a known hostname mapping, but also never fabricates a match.
+///
+/// Pure — logging a detected mismatch (so a swap is visible in the journal, per #729's "no
+/// ceremony, just log it plainly") is the caller's job, not this function's.
+pub fn resolve_grabber_model(hostname: &str, detected_card: Option<&str>) -> GrabberModel {
+    if let Some(card) = detected_card {
+        let from_card = grabber_model_from_card_name(card);
+        if from_card != GrabberModel::Unknown {
+            return from_card;
+        }
+    }
+    grabber_model_for_hostname(hostname)
+}
+
 /// #685 — ShadowCast 2's per-model capture-rate tolerance (percent). Set to cover the FULL live-
 /// observed characteristic-wobble range with margin (~55fps-64.02fps against a 60.000fps
 /// negotiated rate = up to ~8.3% deviation — #656, #663, #665) while still catching a genuinely
@@ -115,6 +166,56 @@ pub fn tolerance_pct_for_model(model: GrabberModel) -> f64 {
         }
     }
 }
+
+/// #717 — SUSTAINED-band capture-rate deviation tolerance (percent) for ShadowCast 2. #685's wide
+/// `SHADOWCAST2_CAPTURE_RATE_TOLERANCE_PCT` (10%) correctly tolerates ShadowCast 2's characteristic
+/// SHORT-LIVED quantization jitter (band (a): deviation bursts that self-recover within ~60s) —
+/// but it ALSO swallowed a genuinely SUSTAINED, reset-fixable defect (band (b): the #674 closure
+/// evidence — cam1 held a rock-steady 63.9-64.0fps, a 6.5-6.67% deviation, for an ENTIRE 10-window
+/// gate recording, producing 6.67% duplicate frames / visible program judder that imag's own
+/// density gate correctly failed on). A USB reset PROVABLY fixes this class of defect (#642: a
+/// reset took cam1 from 64.02fps to a stable 60.1-60.5fps) — a fixable defect is not "a model
+/// characteristic to tolerate" (see the project's calibrate-artifact-vs-fix-robustness playbook
+/// note). This SEPARATE, narrower floor is what the SUSTAINED check (`SUSTAINED_WARN_WINDOWS`,
+/// 60s) uses instead of the wide jitter floor, so a deviation this size that actually PERSISTS
+/// still trips self-heal even though it never reaches the wide 10% jitter floor.
+pub const SHADOWCAST2_SUSTAINED_TOLERANCE_PCT: f64 = 2.0;
+
+/// #717 — number of consecutive 5s report windows a SUSTAINED-band deviation must hold before it
+/// counts as a real, reset-worthy defect rather than ShadowCast 2's short-lived quantization
+/// jitter. 12 windows @ 5s = 60s — double `CAPTURE_RATE_WARN_WINDOWS`'s 30s (the jitter-band/#656
+/// WARN cadence, left unchanged) — per #717's explicit "sustained >= 60s" acceptance bar: long
+/// enough that a burst which self-recovers inside 60s (band (a), tolerated) never trips it, short
+/// enough that a genuinely chronic defect (band (b)) is caught well before a 300s+ E2E recording
+/// completes.
+pub const SUSTAINED_WARN_WINDOWS: u32 = 12;
+
+/// The SUSTAINED-band capture-rate deviation tolerance (percent) to use for a self-heal decision,
+/// given this box's grabber model. `GrabberModel::ShadowCast2` gets the narrow
+/// `SHADOWCAST2_SUSTAINED_TOLERANCE_PCT` (2%) — a SEPARATE, TIGHTER floor than its own
+/// (jitter-band) `tolerance_pct_for_model` (10%) — so a sustained-but-under-10%-deviation defect
+/// (#674's chronic 64fps) still trips self-heal even though it never reaches the wide jitter
+/// floor. Every other model returns the SAME value as `tolerance_pct_for_model` — their
+/// single-band strict tolerance already IS the sustained tolerance, so pairing it with
+/// `SUSTAINED_WARN_WINDOWS` (60s) makes the sustained check a strict SUPERSET of their existing
+/// 30s jitter-band trigger: it can never fire before the jitter-band one already did, so their
+/// self-heal cadence is UNCHANGED by #717.
+pub fn sustained_tolerance_pct_for_model(model: GrabberModel) -> f64 {
+    match model {
+        GrabberModel::ShadowCast2 => SHADOWCAST2_SUSTAINED_TOLERANCE_PCT,
+        GrabberModel::NzxtSignalHd60 | GrabberModel::Elgato4kS | GrabberModel::Unknown => {
+            tolerance_pct_for_model(model)
+        }
+    }
+}
+
+// Both sides are `const`-derived; these are compile-time assertions (clippy: assertions_on_constants)
+// pinning the #717 two-band invariant: the sustained floor sits strictly BETWEEN the strict
+// default and ShadowCast 2's own wide jitter floor, and its required window count is strictly
+// longer than the jitter band's.
+const _: () = assert!(SHADOWCAST2_SUSTAINED_TOLERANCE_PCT < SHADOWCAST2_CAPTURE_RATE_TOLERANCE_PCT);
+const _: () = assert!(SHADOWCAST2_SUSTAINED_TOLERANCE_PCT > CAPTURE_RATE_TOLERANCE_PCT);
+const _: () = assert!(SUSTAINED_WARN_WINDOWS > CAPTURE_RATE_WARN_WINDOWS);
 
 /// True when `captured_fps` deviates from `configured_fps` by more than `tolerance_pct`
 /// percent. `configured_fps <= 0.0` (or any non-finite input) is treated as "no valid
@@ -342,6 +443,102 @@ mod tests {
         assert_eq!(grabber_model_for_hostname("CAM7"), GrabberModel::Unknown);
     }
 
+    // -----------------------------------------------------------------------------------------
+    // #728/#729 — runtime card-name detection + the shared resolve_grabber_model seam. Live
+    // `card` strings captured 2026-07-12 via `v4l2-ctl --info` on the real fleet.
+    // -----------------------------------------------------------------------------------------
+
+    #[test]
+    fn grabber_model_from_card_name_matches_live_fleet_strings() {
+        assert_eq!(
+            grabber_model_from_card_name("Elgato 4K S: Elgato 4K S"),
+            GrabberModel::Elgato4kS
+        );
+        assert_eq!(
+            grabber_model_from_card_name("ShadowCast 2: ShadowCast 2"),
+            GrabberModel::ShadowCast2
+        );
+        assert_eq!(
+            grabber_model_from_card_name("NZXT Signal HD60 Video: NZXT Si"),
+            GrabberModel::NzxtSignalHd60
+        );
+    }
+
+    #[test]
+    fn grabber_model_from_card_name_is_case_insensitive() {
+        assert_eq!(
+            grabber_model_from_card_name("elgato 4k s"),
+            GrabberModel::Elgato4kS
+        );
+        assert_eq!(
+            grabber_model_from_card_name("SHADOWCAST 2"),
+            GrabberModel::ShadowCast2
+        );
+    }
+
+    #[test]
+    fn grabber_model_from_card_name_unrecognized_is_unknown_never_guessed() {
+        assert_eq!(
+            grabber_model_from_card_name("Some Other Webcam"),
+            GrabberModel::Unknown
+        );
+        assert_eq!(grabber_model_from_card_name(""), GrabberModel::Unknown);
+    }
+
+    /// The #728 decisive scenario: cam1's hostname convention still says ShadowCast 2, but
+    /// the box now physically has an Elgato 4K S (the live card swap). Runtime truth must
+    /// win — this is the whole point of the shared detection seam.
+    #[test]
+    fn resolve_grabber_model_runtime_detection_wins_over_stale_hostname_728() {
+        assert_eq!(
+            resolve_grabber_model("CAM1", Some("Elgato 4K S: Elgato 4K S")),
+            GrabberModel::Elgato4kS,
+            "a physically swapped card must resolve to what's ACTUALLY plugged in, not what \
+             the hostname convention used to say"
+        );
+        // The other half of the same reshuffle: cam5's hostname says Elgato, but the
+        // ShadowCast 2 physically sits there now.
+        assert_eq!(
+            resolve_grabber_model("CAM5", Some("ShadowCast 2: ShadowCast 2")),
+            GrabberModel::ShadowCast2
+        );
+    }
+
+    #[test]
+    fn resolve_grabber_model_falls_back_to_hostname_when_detection_unavailable() {
+        // Detection failed (device query error, or called before the device is open) — the
+        // hostname convention is still the best available answer, never a hard failure.
+        assert_eq!(
+            resolve_grabber_model("CAM4", None),
+            GrabberModel::NzxtSignalHd60
+        );
+    }
+
+    #[test]
+    fn resolve_grabber_model_falls_back_to_hostname_when_card_name_unrecognized() {
+        // A detected-but-unrecognized card string (a brand-new grabber model, or a firmware
+        // string this mapping doesn't know yet) is not trusted enough to override a KNOWN
+        // hostname mapping — but also never invents a match.
+        assert_eq!(
+            resolve_grabber_model("CAM2", Some("Some Brand New Grabber")),
+            GrabberModel::ShadowCast2
+        );
+    }
+
+    #[test]
+    fn resolve_grabber_model_no_stored_state_is_zero_touch_unknown() {
+        // Neither the hostname nor the detected card resolves to anything known — the
+        // "no stored state" fixture: must land on Unknown, never a guessed model.
+        assert_eq!(
+            resolve_grabber_model("dev-laptop", None),
+            GrabberModel::Unknown
+        );
+        assert_eq!(
+            resolve_grabber_model("dev-laptop", Some("Unbranded HDMI Grabber")),
+            GrabberModel::Unknown
+        );
+    }
+
     #[test]
     fn tolerance_is_strict_1pct_for_every_model_except_shadowcast2() {
         assert_eq!(
@@ -420,6 +617,109 @@ mod tests {
         let elgato_tol = tolerance_pct_for_model(GrabberModel::Elgato4kS);
         assert!(is_rate_deviant(62.0, 60.0, nzxt_tol));
         assert!(is_rate_deviant(62.0, 60.0, elgato_tol));
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // #717 — two-band ShadowCast 2 envelope: a SEPARATE, narrower SUSTAINED-band tolerance
+    // (2%, `SUSTAINED_WARN_WINDOWS`=60s) catches a genuinely chronic defect that #685's wide
+    // 10%/30s jitter band correctly tolerates as short-lived characteristic wobble.
+    // -----------------------------------------------------------------------------------------
+
+    #[test]
+    fn real_674_chronic_64fps_is_sustained_deviant_under_shadowcast2() {
+        // #674 closure evidence: cam1 held 63.9-64.0fps rock-steady for an entire recording —
+        // 6.5-6.67% deviation from the 60.0 negotiated rate. Must trip the SUSTAINED band even
+        // though it stays comfortably inside ShadowCast 2's wide 10% jitter floor.
+        let sustained_tol = sustained_tolerance_pct_for_model(GrabberModel::ShadowCast2);
+        assert!(is_rate_deviant(63.9, 60.0, sustained_tol));
+        assert!(is_rate_deviant(64.0, 60.0, sustained_tol));
+        // Confirm it is NOT deviant under the wide jitter floor — #717 must not disturb the
+        // jitter band itself (that's #685's own, still-correct behavior), only ADD the
+        // sustained one.
+        let jitter_tol = tolerance_pct_for_model(GrabberModel::ShadowCast2);
+        assert!(!is_rate_deviant(63.9, 60.0, jitter_tol));
+        assert!(!is_rate_deviant(64.0, 60.0, jitter_tol));
+    }
+
+    #[test]
+    fn short_lived_quantization_readings_within_2pct_stay_healthy_under_sustained_band() {
+        let tol = sustained_tolerance_pct_for_model(GrabberModel::ShadowCast2);
+        for captured in [60.0, 60.1, 60.5, 59.5, 61.1, 58.9] {
+            assert!(
+                !is_rate_deviant(captured, 60.0, tol),
+                "captured={captured} should be within ShadowCast 2's {tol}% sustained-band \
+                 tolerance"
+            );
+        }
+    }
+
+    #[test]
+    fn sustained_tolerance_is_narrower_than_jitter_tolerance_for_shadowcast2_only() {
+        assert!(
+            sustained_tolerance_pct_for_model(GrabberModel::ShadowCast2)
+                < tolerance_pct_for_model(GrabberModel::ShadowCast2)
+        );
+    }
+
+    #[test]
+    fn sustained_tolerance_equals_jitter_tolerance_for_every_other_model() {
+        for model in [
+            GrabberModel::NzxtSignalHd60,
+            GrabberModel::Elgato4kS,
+            GrabberModel::Unknown,
+        ] {
+            assert_eq!(
+                sustained_tolerance_pct_for_model(model),
+                tolerance_pct_for_model(model),
+                "{model} must not get a separate sustained floor — its single-band strict \
+                 tolerance already covers both roles, so #717 must not change its behavior"
+            );
+        }
+    }
+
+    #[test]
+    fn sustained_warn_windows_is_60_seconds_double_the_jitter_warn_windows() {
+        assert_eq!(SUSTAINED_WARN_WINDOWS, CAPTURE_RATE_WARN_WINDOWS * 2);
+    }
+
+    #[test]
+    fn real_674_scenario_sustained_warn_fires_exactly_at_60s_never_earlier() {
+        // Mirrors `real_656_scenario_warns_exactly_at_the_configured_window` but for the
+        // sustained band, fed #674's actual live chronic reading (64.0fps).
+        let tol = sustained_tolerance_pct_for_model(GrabberModel::ShadowCast2);
+        let mut consecutive = 0u32;
+        for i in 1..=(SUSTAINED_WARN_WINDOWS + 2) {
+            let deviant = is_rate_deviant(64.0, 60.0, tol);
+            assert!(deviant);
+            consecutive = next_consecutive_breaches(consecutive, deviant);
+            let warn = should_warn(consecutive, SUSTAINED_WARN_WINDOWS);
+            if i < SUSTAINED_WARN_WINDOWS {
+                assert!(!warn, "window {i} should not warn yet");
+            } else {
+                assert!(warn, "window {i} should warn");
+            }
+        }
+    }
+
+    #[test]
+    fn a_burst_shorter_than_60s_never_reaches_the_sustained_threshold() {
+        // Band (a): a deviation burst that self-recovers before SUSTAINED_WARN_WINDOWS (60s) is
+        // tolerated — the whole point of splitting the two bands (#717).
+        let tol = sustained_tolerance_pct_for_model(GrabberModel::ShadowCast2);
+        let mut consecutive = 0u32;
+        // 8 deviant windows (40s) then recovery, well short of the 12-window (60s) threshold.
+        for _ in 0..8 {
+            let deviant = is_rate_deviant(64.0, 60.0, tol);
+            consecutive = next_consecutive_breaches(consecutive, deviant);
+            assert!(!should_warn(consecutive, SUSTAINED_WARN_WINDOWS));
+        }
+        let healthy = is_rate_deviant(60.05, 60.0, tol); // well within 2% -> not deviant
+        assert!(!healthy);
+        consecutive = next_consecutive_breaches(consecutive, healthy);
+        assert_eq!(
+            consecutive, 0,
+            "a healthy window must reset the sustained-band streak"
+        );
     }
 
     #[test]

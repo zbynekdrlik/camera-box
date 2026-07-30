@@ -951,3 +951,216 @@ per-camera latency — each was independently missed at some point), (5) add the
 `scripts/recording-e2e.sh`. Grep for an EXISTING camera's id (e.g. `911007` for cam4) across
 `src/` and `scripts/` to find every site that needs the new id added alongside it — that is a
 faster and more reliable check than trying to remember the list above.
+
+## The painted (cam2 optical Vernier) `tick` has REAL jitter — never bucket its recorded-order deltas by exact equality (#726)
+
+`RecordingFrame.tick` (this file's doc, ~L128) is "the highest `frame_id` among the decoded
+OPTICAL (cam2 dual-QR) payloads — left QR carries the latest even tick, right the latest odd, the
+freshest sharp region wins". On a REAL rig recording (CI run 29209662091, RUN_ID 142901047, 9436
+frames, painted-tick step logged as 2 — a 60fps painter into a 30fps canvas) the RECORDED-order
+consecutive deltas of this `tick` were measured directly (raw Python over the decoded
+`strih-partial-<id>.json`, independent of any Rust bucketing):
+
+```
+delta=1:  83.1% (7841/9434)
+delta=7:  15.6% (1475/9434)
+delta=0:   0.06% (6 -- true duplicates, agrees with the independently-computed `copies` field)
+mean delta: 2.0004  (matches expected_step=2's long-run average almost exactly)
+```
+
+Essentially NO individual delta equals 2, yet the MEAN matches the expected 2:1 decimation ratio
+almost perfectly — i.e. `gaps`/net-loss accounting (which nets over the whole window, per
+`painted_tick_gaps`'s sorted net-span math, see `painted_tick_gaps.rs`) reads clean, but a
+per-step EXACT-equality classifier would misread this as "never on-cadence". This is NOT
+reordering in the #133/#196/#216 sense (only 2 of 9434 deltas were negative) — it's genuine,
+LARGE, real per-step jitter inherent to the multi-hop chain (painter vblank-paced draw -> cam2's
+own physical camera capturing that monitor -> cam2's NDI emit -> strih's genlock ingest, see the
+genlock skill's `#726` "Mechanism A" note for why a mostly-small-step-plus-periodic-larger-catchup
+shape is exactly what a per-source release-cadence backlog/relock pattern would produce).
+
+**Consequence for any new per-step statistic on this signal** (e.g. `src/presentation_cadence.rs`,
+#726's presentation-cadence-evenness metric): an exact-delta==expected_step classifier is
+USELESS on real data — it will bucket nearly everything as "other" regardless of whether the
+recording is genuinely smooth or judder-y. `delta==0` (true duplicate) stays a RELIABLE,
+jitter-immune signal (an exact repeat essentially never happens by jitter coincidence — cross-check
+against the existing `copies` field, which is computed the same way and agreed exactly in this
+run). Any "on-cadence" classification needs a TOLERANCE band calibrated from real healthy-run data
+like the numbers above (or an entirely different statistic, e.g. mean/stddev over a window) —
+never bare equality. This mirrors the exact lesson `painted_tick_gaps` already learned twice (#625
+sorted-order tolerance, #681 net-span vs a biased per-pair walk) for the SAME underlying signal.
+
+## #853 GOTCHA — a self-check re-decoding "did ANY QR decode" is USELESS on this recording; it must scope to non-burn payloads
+
+`extract_frames_png`'s `sharp_qr_but_flagged_undecodable` self-check re-decodes an "undecodable"
+frame's pixels via `decode_qr_luma_all_robust` and used to ask "is the result non-empty". On this
+recording that question is **guaranteed true on every single undecodable frame**, regardless of
+whether the cam2 optical Vernier ever decodes — because `payloads` here always ALSO includes the
+node burns (strih/stream/camN), which are digitally composited (not photographed) and therefore
+always crisp and always decodable. Proven directly on run 1867252327's `stream-partial.json`: all
+5879 `tick == None` frames had non-empty `payloads`, every one of them containing exactly the 3
+node burns and ZERO optical payload.
+
+**The general lesson: ANY diagnostic self-check on this file that asks "did the robust decode find
+something" must filter to the SPECIFIC signal in question** (here: non-burn/optical, via
+`crate::optical_payload_check::has_non_burn_payload(payloads.iter().map(|p| p.run_id),
+&NODE_BURN_RUN_IDS)` — the SAME `NODE_BURN_RUN_IDS` exclusion `RecordingFrame::tick` already
+applies). "Something decoded" is not evidence about anything specific when burns are
+near-universally present; only "the RIGHT thing decoded" is. Independently confirmed the pixels
+themselves (not just our decoder) genuinely lack the optical payload: OpenCV's `QRCodeDetector`
+and `zbarimg` (zero shared code with our rqrr pipeline) both fail to extract the optical Vernier
+payload on all 30 sampled real frames, even on tight isolated crops with denoise/upscale variants.
+
+**Important scale correction vs #376 above:** #376 calibrated a RATE CEILING (0.5%) for the
+`optical_undecodable` metric on `NodeVerdict` in `recording-verdict.rs` — a genuinely small
+residual moiré floor, USER-APPROVED as acceptable. `all_cambox_continuity`'s per-segment
+`undecodable` (added later by #312, a DIFFERENT metric with its own hard `== 0` requirement, no
+calibrated floor at all) showed **~62-64%** on the same class of artifact — two and a half orders
+of magnitude above the #376 floor. That gap is too large to be "the same calibrated moiré, just
+recalibrate the number" — it means something about this metric's decode path, camera framing, or
+recording generation is materially different/worse than what #376 measured, and needs real
+investigation (filed as #854), not a threshold bump. Never conflate "a calibrated floor exists for
+metric A" with "therefore a huge rate on metric B is also just calibration" — check the actual
+prior floor's MAGNITUDE before assuming the same class of fix applies.
+
+## #854 — the ~62-64% optical failure is `DataEcc` (module bit-error), not a localization/format
+## problem — and a comprehensive offline preprocessing sweep found NO software fix (don't re-try these)
+
+Following up #853: the ~62-64% fleet-wide cam2-optical-Vernier undecodable rate is REAL (confirmed
+independently by OpenCV `QRCodeDetector` and `zbarimg`, zero shared code with our rqrr pipeline —
+both LOCATE the finder patterns but fail to decode the payload on every sampled real frame). #854
+root-caused this PRECISELY and exhausted a systematic software-decode sweep — read this before
+proposing another blur/threshold/downscale variant for this specific failure; it's already been
+tried and measured.
+
+**Root cause, precisely — `rqrr`'s own typed error, not "moiré" in general:** every failing frame's
+`Grid::decode()` returns `DeQRError::DataEcc` ("could not correct errors"), **never** `FormatEcc`
+or `InvalidVersion`. That means: finder-pattern location succeeds (2 grids always detected),
+format info (EC level + mask, itself BCH-protected — MORE fragile than the data ECC) reads
+correctly, and grid SIZE reads correctly (33×33 modules = QR version 4, ~16.2–16.5px module pitch
+measured directly off `rqrr`'s own `Grid::bounds`). The failure is narrowly in the DATA MODULE
+bits — too many of ~1000 modules read wrong for Reed-Solomon to correct. This rules out a
+detection/localization gap (unlike #202/#207/#754, which WERE genuine decoder-coverage gaps,
+proven recoverable) — there is nothing here for a better crop/localizer to fix.
+
+**Sample discipline — don't trust the 30-frame pixel-proof cap alone.** Those 30 PNGs are the
+FIRST 30 of 6620 flagged frames (`frame_index` 20–311) — i.e. the recording's OPENING decile,
+independently measured at only ~18.7% undecodable (the EASIEST region; deciles 1–9 run 54–72%).
+Any offline technique sweep against ONLY the 30-cap risks tuning to the easy region. #854 pulled
+18 MORE real frames directly from the source recording via `ffmpeg -vf select=eq(n\,N)` on the
+box (spread across decile 5, ~71.6% undecodable — the hardest region) and re-ran every technique
+against the combined 48-frame set. Conclusions were IDENTICAL on both samples — do the same
+before trusting any future measurement against this recording.
+
+**Techniques tried, all against real captured pixels, `rqrr` as the scoring decoder — DO NOT
+RE-TRY these on the same failure without new information:**
+
+| Technique | Result over 48 real confirmed-failing frames |
+|---|---|
+| Today's shipped `decode_qr_luma_all` / `robust_optical_top_band` | 0/48 (matches production) |
+| Gaussian blur (σ 0.5–3.0) + Otsu | 1/48 |
+| Box blur (r 1–3px) + Otsu | 1/48 |
+| Downscale→upscale anti-alias (2×–4×) + Otsu | 1/48 |
+| Local adaptive threshold (box-mean − C, r 15/25/35) | 1/48 |
+| Homography-based per-module resample (below) | 0/48 |
+
+Every "1/48" hit across every technique is the **exact same single frame**, never a second — noise
+on one borderline frame, not a systematic improvement.
+
+**The homography experiment (worth understanding even though it also failed):** reused `rqrr`'s
+OWN located grid geometry — its public `Grid::bounds` (4 corners, computed by the SAME finder
+detection that already succeeds) — to reconstruct the exact projective homography (classic
+Heckbert unit-square→quad closed form: `bounds` sits at grid coords `(0,0)-(N,0)-(N,N)-(0,N)`,
+`N=size+1`, matching the unit-square corner order exactly). Sampled a neighborhood-MEDIAN around
+each of the ~1000 module centers from the ORIGINAL unbinarized grayscale (window scaled to the
+measured module pitch, tried 0.3×–1.3×), thresholded on the SAMPLED MODULE POPULATION's own Otsu
+split (not the whole frame's), and fed the resulting bits back into `rqrr`'s own Reed-Solomon
+`decode()` via a fresh `SimpleGrid::from_func` — i.e. kept everything `rqrr` already gets right
+(location/format/version/ECC) and replaced ONLY the single-pixel-per-module sample with genuine
+area integration + a population-local threshold. **Zero improvement at any window size** — strong
+evidence the corruption is a real per-module SIGNAL-level effect (not a single noisy sample a
+wider look would average out). `Grid::new(custom_bitgrid).decode()` is a legitimate way to replay
+a custom module-sampling strategy through rqrr's real ECC/version/format machinery, if a future
+idea needs it — the plumbing works, it's the "read the module better" idea itself that didn't pan
+out here.
+
+**"Temporal fusion across held frames" does NOT apply to this painter — checked, not assumed.**
+Consecutive captured frames never carry the same optical `frame_id`: the Vernier tick advances by
+2–3 on EVERY captured frame (e.g. `frame_index` 4756→4759→4760→4762→4763 carries optical ids
+11678→11684→11686→11689→11692, read directly off the merged partial JSON). There is no held frame
+to average across with this painter's current cadence — don't propose this fix again unless the
+painter's own hold behavior changes.
+
+**What's left is NOT a decode-side software fix.** A larger QR module size on the PAINTER side is
+a real remaining lever, but it is a pattern/wire-geometry change, not a post-processing tweak: it
+needs a FRESH live rig capture to validate (nothing in an existing recording can prove a
+not-yet-painted larger QR decodes better), it falls under `pattern-change-needs-decode-fixture`
+(#751/#754 — real offline decode-fixture proof required, which needs that fresh capture first),
+and it cascades through the #463 four-place burn/geometry parity system + the wire-format fixture
+lock. That escalation (vs. physical camera adjustment) is a direction decision, not a continuation
+of this software sweep.
+
+## #854 follow-up — TEARING CONFIRMED: the decisive discriminator method (don't re-derive it)
+
+The `DataEcc` root cause above is real but doesn't distinguish "moiré/signal-level noise" from
+"the recorded frame contains rows from TWO different painter instants" (display/rolling-shutter
+tearing). This was settled DECISIVELY offline, using ground truth already on disk — no rig time.
+
+**The trick: `painter-<run>.csv` is exact ground truth, and the Payload encoder is deterministic.**
+`painter-<run>.csv` (`tick,gen_ts_ns,flip_ts_ns`) is the painter's own log of exactly what it
+rendered, every tick. `vernier_ids(tick)` (`src/probe/painter.rs`) is a pure function, and the
+Payload wire format (`P{run_id}.{frame_id}.{gen_ts_ns}.{crc32}`, `src/probe/payload.rs`) is
+encoded via `qrcode::QrCode::with_error_correction_level(_, EcLevel::H)` — deterministic given
+the same crate version (Cargo.lock pins `qrcode 0.14.1`, `rqrr 0.9.3`). So for ANY candidate
+painter tick you can reconstruct the EXACT module bit grid that was actually rendered, byte-for-
+byte, and diff it against the CAPTURED module bits sampled off a failing frame.
+
+**Empirical fact used to build candidate payloads:** a cleanly-decoded frame's LEFT and RIGHT
+payloads both carry `gen_ts_ns == painter.csv[tick].gen_ts_ns` for the SAME `tick` (confirmed by
+cross-referencing `stream-partial-<run>.json`'s decoded `payloads[]` against `painter.csv`) —
+`paint_one_frame` stamps ONE fresh `gen_ts_ns` per tick and uses it for BOTH halves regardless of
+which one visually changes. So candidate tick `T`'s left/right payload strings are fully
+determined by `painter.csv[T]` alone.
+
+**Sample the CAPTURED bits via rqrr's OWN per-module sampler — don't reimplement one.**
+`rqrr::Grid<G>`'s `grid` field is public; `RefGridImage::bit(y, x)` (reached via the `BitGrid`
+trait on `grid.grid`) is a single masked-bit sample per module — literally the same raw bit
+rqrr's own decoder reads before Reed-Solomon. No custom homography/resampler needed for this
+diagnostic (that machinery is for trying to IMPROVE the read, a different goal, see above).
+
+**Function modules dilute a naive full-row diff — filter them out empirically.** Finder/timing/
+format-info modules match ANY candidate trivially (they don't depend on payload data), which
+makes a row look "close" even for a WRONG candidate. Don't hand-derive the ISO structural-layout
+table: encode ~15 wildly different synthetic payloads (varying run_id/frame_id/gen_ts_ns widely,
+enough to also vary the auto-selected mask pattern) and mark as "function" every module position
+that's IDENTICAL across all of them. Diff DATA MODULES ONLY, per row.
+
+**Node burns can land on the SAME grid size as the dual-QR** (both use the same Payload format;
+similar string lengths land on the same QR version) — `rqrr::PreparedImage::detect_grids()`
+returns all of them (5 total: 2 dual-QR + 3 burns on this recording). Size alone doesn't separate
+them; the dual-QR pair sits at a distinctly smaller `mean_y` (higher up the frame) than the
+node-burn trio — select the 2 grids with the smallest `mean_y` among same-size candidates.
+
+**The result (camera-box#854, run 1867252327):** in 28 of 30 tested failing frames, one specific
+candidate tick `T` zeroes out EVERY data-module bit in the TOP ~12 of 33 rows, and the VERY NEXT
+painter tick `T+1` (Δtick=1, ~16.6 ms later — one 60 Hz refresh) SIMULTANEOUSLY zeroes out every
+data-module bit in the remaining rows — together covering all 33 rows with ZERO residual errors,
+confirmed independently on the LEFT and RIGHT Vernier halves, splitting at the IDENTICAL row
+within each frame. Any wrong candidate scores ~250–450 mismatches out of 830 data modules (the
+~50% "uncorrelated masked bits" baseline) — the transition from 0 to ~50% is a sharp step at
+exactly Δtick=0 vs ±1, not a gradual "similar string" gradient (confirmed adversarially: two
+candidates sharing the SAME `frame_id` but differing only in which tick's `gen_ts_ns` they carry
+score 336 vs 292 total mismatches with the top-row-clean-count jumping 3→12 — a real structural
+step, not noise). The seam row is essentially CONSTANT (12/33 or 13/33) across most of the tested
+span — consistent with the rig's disciplined genlock holding a stable phase between camera
+exposure and painter refresh, and itself a second line of evidence against "moiré" (which would
+depend only on fixed geometry, not on a threshold split against specific temporal ticks). Full
+writeup + numbers: `gh issue view 854 --comments` (2026-07-28 comment). Reproduction crate (kept
+OUTSIDE this repo, per convention): `~/devel/tearing-probe-854`.
+
+**Consequence:** this is a genuine optical-chain TEMPORAL artifact (two different painter instants
+in one recorded frame), not decoder-side and not general signal noise — no image-processing
+technique can ever fix it (matches the exhaustive 0/48 sweep above exactly). The two real fix
+directions are a painter-side hold-for-2-refreshes mitigation (software-only, no rig time, trades
+away half the Vernier's temporal resolution) or camera/capture-side shutter/frame-timing
+synchronization to the display's refresh (needs an operator at the rig) — a genuine direction
+decision, left on the ticket, not implemented here.

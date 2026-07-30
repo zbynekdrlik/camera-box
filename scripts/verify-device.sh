@@ -68,7 +68,28 @@
 #   (s) /var/log tmpfs is bounded against runaway growth -- /etc/logrotate.d/rsyslog has a `size`
 #       cap AND a systemd timer drop-in checks far more often than the stock daily cadence (#679;
 #       a chatty logger filled the fixed 50MB tmpfs in ~4-5 days and crashed cam2's
-#       camera-box.service)
+#       camera-box.service). SUPERSEDED by #762 once rsyslog is genuinely purged (the (u) check
+#       below) -- /etc/logrotate.d/rsyslog is one of rsyslog's OWN conffiles and is removed with
+#       it, so this check passes as "N/A, superseded" on a #762-hardened box instead of FAILing
+#       on a file that can no longer exist
+#   (t) `fuser` (psmisc) is installed -- a fresh cam2 clone had none at all, which false-FAILed
+#       rig-mode.sh's #464 KMS-held check AND silently no-op'd recording-e2e.sh's capture-release
+#       busy-wait (fuser exits 127 -> the wait's `while fuser ...` condition reads false
+#       immediately, same as "already released") -- (#743)
+#   (u) rsyslog is PURGED (not merely masked) AND journald has a RuntimeMaxUse=20M drop-in
+#       (#762 -- rsyslog is redundant on this appliance, journald already captures everything;
+#       a live cam1 incident showed a full /var/log tmpfs put rsyslogd into a write-error
+#       feedback loop burning 42.8% CPU and starving the camera-box send path)
+#   (v) cam2 ONLY: the PERMANENT devel-mode dual-QR painter (cam2-painter.service) is installed,
+#       active, and genuinely painting (presenter-aware journal read, KMS-or-fbdev per #464) --
+#       AND camera-box's own display thread is permanently disabled on this box so it can never
+#       contest /dev/fb0 with the painter (#863)
+#   (w) the installed /etc/udev/rules.d/99-camera-box.rules wires the video4linux "add" event to
+#       the guarded helper script (never the fleet's old UNCONDITIONAL restart, #894) AND the LIVE
+#       capture grabber's USB power/control currently reads "on" -- a box that silently drifted
+#       back to `auto` (the #894 amplifying re-enumeration feedback loop) FAILS this check instead
+#       of degrading invisibly. N/A (not a FAIL) when the box has no capture grabber fitted at all
+#       (cam4, #828).
 #
 # Exit: 0 iff every check passes. Non-zero if ANY check FAILs or is UNREADABLE (test-strictness --
 # an unreachable/unreadable check is a FAIL, never a silent pass).
@@ -88,9 +109,18 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
                                       # drift-guard.sh's --check-imag facet since #596)
 # shellcheck source=scripts/lib/log-bound.sh
 . "$HERE/lib/log-bound.sh"       # log_bound_verdict/log_bound_gather_remote_snippet (#679)
+# shellcheck source=scripts/lib/log-diet.sh
+. "$HERE/lib/log-diet.sh"        # log_diet_provision_verdict/log_diet_gather_remote_snippet (#762)
 # shellcheck source=scripts/lib/capture-rate-guard.sh
 . "$HERE/lib/capture-rate-guard.sh"  # invocation-id-scoped journalctl builder (#694, shared
                                      # with deploy-fleet.sh + upgrade-fleet-ndi.sh)
+# shellcheck source=scripts/lib/v4l2-neutral.sh
+. "$HERE/lib/v4l2-neutral.sh"    # v4l2_neutral_resolve_node_cmd -- resolves the LIVE capture
+                                 # node for the (w) power/control drift read (#894)
+# shellcheck source=scripts/lib/udev-camera-box.sh
+. "$HERE/lib/udev-camera-box.sh" # udev_camera_box_rule_is_burn_gated/
+                                 # udev_camera_box_grabber_power_control_read_cmd/_from_output/
+                                 # _power_control_is_on -- the (w) check (#894)
 # clock-offset-guard.sh is sourced ONLY for its pure functions; its own
 # `[ "${BASH_SOURCE[0]}" != "${0}" ]` guard skips clock-offset-guard.sh's own `main "$@"` flow.
 # shellcheck source=scripts/clock-offset-guard.sh
@@ -511,6 +541,13 @@ Checks:
   (o) NDI runtime pinned to the fleet version (NDI_VERSION_PIN, default 6.3.2)
   (q) WARNING only: stale .bak cruft under the NDI dir or the systemd drop-in dir (#453)
   (r) dantesync is the SOLE timesync authority -- no competing daemon installed/active/enabled (#591)
+  (s) /var/log tmpfs bounded against runaway growth -- logrotate size cap + frequent rotation (#679)
+  (t) fuser (psmisc) is installed (#743)
+  (u) rsyslog PURGED (not just masked) + journald RuntimeMaxUse capped (#762)
+  (v) cam2 ONLY: permanent devel-mode dual-QR painter installed+active+painting, camera-box
+      permanently no-display so it never contests /dev/fb0 (#863)
+  (w) udev rule is burn-gated (never the old unconditional restart) AND the live grabber's USB
+      power/control currently reads "on" (drift check; N/A when no grabber is fitted, #894)
 
 Env: KERNEL_PIN (optional exact running-kernel pin), NDI_VERSION_PIN (default 6.3.2),
      DANTESYNC_OFFSET_FRESHNESS_S (max age of a fresh [NTP] offset line, default 300),
@@ -695,22 +732,76 @@ else
   fi
 fi
 
-# (s) /var/log tmpfs bounded against runaway growth (#679) ---------------------------------------
+# (s) /var/log tmpfs bounded against runaway growth (#679, SUPERSEDED by #762 once rsyslog is
+# purged) -------------------------------------------------------------------------------------
 # Every box's /var/log is a fixed 50MB tmpfs; the stock logrotate config rotates ONLY on a weekly
 # calendar with no `size` cap, so a chatty logger (dantesync's per-second [PTP] Drift line was the
 # fleet's dominant volume driver) filled it in ~4-5 days and crashed cam2's camera-box.service
 # (2026-07-11). log_bound_verdict (scripts/lib/log-bound.sh) requires a `size` cap on
 # /etc/logrotate.d/rsyslog AND a systemd timer drop-in that checks far more often than daily.
+#
+# #762: once rsyslog is genuinely PURGED (the (u) check below), /etc/logrotate.d/rsyslog is
+# REMOVED WITH IT (a package conffile) -- the #679 size-cap check then becomes structurally
+# impossible to satisfy on a box that is otherwise CORRECTLY hardened, which would be a false
+# FAIL. Gather the #762 rsyslog/journald state FIRST (shared with the (u) check below -- one ssh
+# round trip covers both) and skip the #679 logrotate check entirely when rsyslog is confirmed
+# purged; only fall back to the full log_bound_verdict when rsyslog is still present (a box not
+# yet re-provisioned onto the #762 fix).
 rc=0
-LOG_BOUND_STATE="$(ssh_box "$(log_bound_gather_remote_snippet)")" || rc=$?
-if [ "$rc" -ne 0 ] || [ -z "$LOG_BOUND_STATE" ]; then
-  fail "could not read logrotate/timer state over SSH (rc=$rc) -- cannot certify /var/log is bounded against runaway growth (#679)"
+LOG_DIET_STATE="$(ssh_box "$(log_diet_gather_remote_snippet)")" || rc=$?
+if [ "$rc" -ne 0 ] || [ -z "$LOG_DIET_STATE" ]; then
+  fail "could not read rsyslog/journald state over SSH (rc=$rc) -- cannot certify /var/log is bounded (#679/#762)"
+elif log_diet_rsyslog_purged "$LOG_DIET_STATE"; then
+  ok "/var/log tmpfs bound: rsyslog is purged -- #679's logrotate size-cap is superseded by the #762 journald RuntimeMaxUse cap (checked at (u) below)"
 else
-  LOG_BOUND_VERDICT="$(log_bound_verdict "$LOG_BOUND_STATE")"
-  if [ "$LOG_BOUND_VERDICT" = "ok" ]; then
-    ok "/var/log tmpfs is bounded -- logrotate size cap + frequent (#679) rotation check both present"
+  rc=0
+  LOG_BOUND_STATE="$(ssh_box "$(log_bound_gather_remote_snippet)")" || rc=$?
+  if [ "$rc" -ne 0 ] || [ -z "$LOG_BOUND_STATE" ]; then
+    fail "could not read logrotate/timer state over SSH (rc=$rc) -- cannot certify /var/log is bounded against runaway growth (#679)"
   else
-    fail "log bound: ${LOG_BOUND_VERDICT#FAIL: }"
+    LOG_BOUND_VERDICT="$(log_bound_verdict "$LOG_BOUND_STATE")"
+    if [ "$LOG_BOUND_VERDICT" = "ok" ]; then
+      ok "/var/log tmpfs is bounded -- logrotate size cap + frequent (#679) rotation check both present"
+    else
+      fail "log bound: ${LOG_BOUND_VERDICT#FAIL: }"
+    fi
+  fi
+fi
+
+# (t) fuser (psmisc) installed (#743) -------------------------------------------------------------
+# A fresh cam2 clone had NO fuser at all: rig-mode.sh's #464 KMS-held check false-FAILed (fuser
+# exits 127, which the check's own `if fuser -s ...` reads the SAME as "not held" even though the
+# painter was genuinely alive), and recording-e2e.sh's capture-release busy-wait
+# (`while fuser -s $NODE ...`) silently became a no-op the same way. `command -v` alone proves the
+# binary is present and on PATH -- exactly what both harness call sites need.
+rc=0
+FUSER_PATH="$(ssh_box "command -v fuser 2>/dev/null")" || rc=$?
+if [ "$rc" -eq 0 ] && [ -n "$FUSER_PATH" ]; then
+  ok "fuser present ($FUSER_PATH) -- psmisc installed (#743)"
+else
+  fail "fuser not found on PATH (ssh rc=$rc) -- psmisc missing; rig-mode.sh's #464 KMS-held check \
+and recording-e2e.sh's capture-release wait both silently degrade without it (#743)"
+fi
+
+# (u) rsyslog PURGED + journald RuntimeMaxUse capped (#762) ---------------------------------------
+# rsyslog is redundant on this appliance -- journald already captures everything, and nothing
+# reads /var/log/syslog on a read-only appliance with no operator logging in. A live cam1
+# incident (2026-07-15) showed a full /var/log tmpfs put rsyslogd into a write-error feedback
+# loop (~400 lines/s, 42.8% CPU), starving the camera-box send path badly enough to measurably
+# drift NDI delivery timing. log_diet_provision_verdict (scripts/lib/log-diet.sh) fails LOUD if
+# rsyslog is still installed/active/enabled (masking alone is not enough) OR the journald
+# RuntimeMaxUse=20M drop-in is missing/wrong. Reuses $LOG_DIET_STATE already gathered at (s)
+# above -- ONE ssh round trip covers both checks.
+if [ -z "${LOG_DIET_STATE:-}" ]; then
+  fail "could not read rsyslog/journald state over SSH -- cannot certify the #762 logging diet is applied"
+else
+  LOG_DIET_VERDICT="$(log_diet_provision_verdict "$LOG_DIET_STATE")"
+  if [ "$LOG_DIET_VERDICT" = "ok" ]; then
+    ok "rsyslog purged + journald RuntimeMaxUse=${LOG_DIET_JOURNALD_RUNTIME_MAX} drop-in present (#762)"
+  else
+    while IFS= read -r _reason; do
+      [ -n "$_reason" ] && fail "log diet: ${_reason#FAIL: }"
+    done <<< "$LOG_DIET_VERDICT"
   fi
 fi
 
@@ -825,6 +916,88 @@ fi
 # no longer applies: the HDMI cameraman preview is UNCONDITIONAL and fleet-wide, baked into the
 # binary's own DEFAULT_DISPLAY_SOURCE default -- there is no per-box config left to drift from or
 # lose. See src/main.rs::resolve_display_config (unit tested) for the current contract.
+
+# (v) cam2-only: the PERMANENT devel-mode dual-QR painter is installed, active, and genuinely
+# painting -- and camera-box on cam2 must never contest /dev/fb0 (#863) --------------------------
+# #863: cam2-painter.service was referenced everywhere (rig-mode.sh's #440 stop/start guards,
+# recording-e2e.sh's cleanup()) but was never actually installed by setup-device.sh -- this check
+# is the acceptance gate that catches that gap ever recurring on a re-provisioned/replaced box.
+if [ "$NAME_UPPER" = "CAM2" ]; then
+  rc=0
+  PAINTER_UNIT_FILES="$(ssh_box "systemctl list-unit-files cam2-painter.service 2>/dev/null")" || rc=$?
+  if [ "$rc" -ne 0 ] || [ -z "$PAINTER_UNIT_FILES" ]; then
+    fail "cam2-painter.service not installed on cam2 (#863 -- the permanent devel-mode QR painter; ssh rc=$rc)"
+  else
+    rc=0
+    PAINTER_ACTIVE="$(ssh_box "systemctl is-active cam2-painter.service 2>/dev/null")" || rc=$?
+    if ! active_state_is_active "$PAINTER_ACTIVE"; then
+      fail "cam2-painter.service not active (state='${PAINTER_ACTIVE:-<none>}', ssh rc=$rc)"
+    else
+      ok "cam2-painter.service active (#863 permanent devel-mode QR painter)"
+      rc=0
+      PAINTER_JOURNAL="$(ssh_box "journalctl -u cam2-painter.service -n 200 --no-pager 2>/dev/null")" || rc=$?
+      if [ "$rc" -ne 0 ]; then
+        fail "could not read cam2-painter.service journal to confirm it is genuinely painting (ssh rc=$rc)"
+      elif printf '%s' "$PAINTER_JOURNAL" | grep -q 'presenter: using DRM/KMS page-flip'; then
+        if printf '%s' "$PAINTER_JOURNAL" | grep -q 'vblank-locked'; then
+          ok "cam2-painter.service genuinely painting (KMS page-flip, vblank-locked)"
+        else
+          fail "cam2-painter.service selected KMS but never confirmed vblank-locked (see journalctl -u cam2-painter.service)"
+        fi
+      elif printf '%s' "$PAINTER_JOURNAL" | grep -qi 'falling back to fbdev'; then
+        ok "cam2-painter.service genuinely painting (fbdev fallback presenter)"
+      else
+        fail "cam2-painter.service active but no presenter-selection log line found -- cannot confirm it is genuinely painting (see journalctl -u cam2-painter.service)"
+      fi
+    fi
+  fi
+  # camera-box must NEVER contest /dev/fb0 on cam2 -- the permanent no-display drop-in must be
+  # baked in so a reboot can't silently regress this (see cam2_painter_no_display_dropin_content
+  # in setup-device.sh).
+  rc=0
+  NODISPLAY_ENV="$(ssh_box "systemctl show -p Environment --value camera-box 2>/dev/null")" || rc=$?
+  if [ "$rc" -eq 0 ] && printf '%s' "$NODISPLAY_ENV" | grep -q 'CAMERA_BOX_NO_DISPLAY=1'; then
+    ok "camera-box permanently no-display on cam2 (#863 -- cam2-painter.service owns /dev/fb0)"
+  else
+    fail "camera-box on cam2 is NOT permanently no-display (Environment='${NODISPLAY_ENV:-<none>}', ssh rc=$rc) -- it will contest /dev/fb0 with cam2-painter.service"
+  fi
+fi
+
+# (w) udev hotplug rule is burn-gated + live USB autosuspend has not drifted back to auto (#894) -
+# The fleet's OLD rule unconditionally restarted production camera-box.service on every
+# video4linux "add" event, stealing the device back from an in-flight E2E camera-box-burn-*.service
+# (77/NOPERM, misreported as frozen_leg on the camera). The fix (scripts/lib/udev-camera-box.sh) is
+# a guarded rule + helper script installed by setup-device.sh/create-usb-linux.sh; this check
+# proves the box actually has it, and that the LIVE grabber's USB power/control has not silently
+# drifted back to `auto` (the same #894 comment's measured amplifying re-enumeration feedback loop).
+wrc=0
+UDEV_RULE_TEXT="$(ssh_box "cat /etc/udev/rules.d/99-camera-box.rules 2>/dev/null")" || wrc=$?
+if [ "$wrc" -ne 0 ]; then
+  fail "could not read /etc/udev/rules.d/99-camera-box.rules (ssh rc=$wrc)"
+elif [ -z "$UDEV_RULE_TEXT" ]; then
+  fail "/etc/udev/rules.d/99-camera-box.rules is missing -- production is NOT protected from an E2E burn-unit device-steal (#894)"
+elif ! udev_camera_box_rule_is_burn_gated "$UDEV_RULE_TEXT"; then
+  fail "/etc/udev/rules.d/99-camera-box.rules is NOT burn-gated (still the fleet's old unconditional restart, or something else entirely, #894): $UDEV_RULE_TEXT"
+else
+  ok "udev hotplug rule wired to the burn-gated helper (#894)"
+fi
+
+pcrc=0
+POWER_CONTROL_OUT="$(ssh_box "$(v4l2_neutral_resolve_node_cmd)
+if [ -e \"\$V4L2_NEUTRAL_NODE\" ]; then echo CAMERA_BOX_VIDEO_NODE_EXISTS=1; else echo CAMERA_BOX_VIDEO_NODE_EXISTS=0; fi
+$(udev_camera_box_grabber_power_control_read_cmd)")" || pcrc=$?
+if [ "$pcrc" -ne 0 ]; then
+  fail "could not read the live capture grabber's USB power/control (ssh rc=$pcrc)"
+elif ! printf '%s' "$POWER_CONTROL_OUT" | grep -q 'CAMERA_BOX_VIDEO_NODE_EXISTS=1'; then
+  ok "no capture grabber fitted -- USB power/control drift check N/A (#828)"
+else
+  GRABBER_POWER_CONTROL="$(udev_camera_box_grabber_power_control_from_output "$POWER_CONTROL_OUT")"
+  if udev_camera_box_power_control_is_on "$GRABBER_POWER_CONTROL"; then
+    ok "capture grabber USB power/control=on (autosuspend off, #894)"
+  else
+    fail "capture grabber USB power/control='${GRABBER_POWER_CONTROL:-<unreadable>}' -- drifted away from 'on' (#894's amplifying re-enumeration feedback loop; the udev rule should have re-applied this on the last hotplug)"
+  fi
+fi
 
 # (q) .bak cruft drift -- WARNING only, never a FAIL (#453) -------------------------------------
 # Reuses NDI_LS gathered in (g)/(o); a second ssh call lists the systemd drop-in dir. Inert

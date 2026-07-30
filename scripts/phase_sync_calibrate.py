@@ -72,8 +72,25 @@ GENLOCK_SRC_LATENCY_KEY = "genlock_latency_ms_src"
 # here as `read_current_latency`'s sane display default when a source has no genlock setting
 # yet -- the FORMULA itself, #438, now lives in exactly one place: the compiled
 # `phase-sync-gate` binary this script shells out to below.)
+#
+# Raising this to 55 was tried on 2026-07-29 (issue 707) on the strength of a live FIFO relock
+# audit; a controlled before/after on the real rig REFUTED the hypothesis (continuity events
+# 12 -> 11, unchanged -- see src/phase_sync.rs's own doc for the full account). Do not raise
+# this again without a fresh controlled before/after measurement.
 PHASE_SYNC_FLOOR_MS = 3
 PHASE_SYNC_CAP_MS = 2000
+
+
+def enforce_jitter_floor_ms(new_ms) -> int:
+    """Clamp `new_ms` (the FINAL genlock_latency_ms_src value about to be written) up to
+    at least PHASE_SYNC_FLOOR_MS. This is a SEPARATE guard from the offset kernel's own clamp --
+    `compute_phase_sync_offsets`/the compiled `phase-sync-gate` binary already respects the
+    floor as part of the offset formula -- so this exists purely so the value actually WRITTEN
+    to OBS can never go under the floor regardless of how it got here (a future caller bypassing
+    the kernel, a manual override, or -- concretely -- av_sync_calibrate.py writing the SAME
+    genlock_latency_ms_src property afterwards and undercutting it).
+    """
+    return max(int(new_ms), PHASE_SYNC_FLOOR_MS)
 
 # #636 -- the SAME persist-location gap #465 fixed in av_sync_calibrate.py. Canonical
 # Windows-side destination this script's payload MUST end up at for the #390 drift-guard pin
@@ -107,10 +124,11 @@ def remote_push_plan(host: str, payload: dict) -> str:
     connects to `--host` over the OBS WebSocket and does NOT need to run ON that box, so
     `default_last_json_path()` normally falls back to a LOCAL path (no PROGRAMDATA env var on a
     Linux control host) that nothing on the stream box can read -- the same gap #465 found and
-    fixed in `av_sync_calibrate.py`. scp/ssh to the Windows boxes is DENIED on this rig
-    (`recording-fetch-windows.sh`, `obs-self-heal-install.sh`) -- the only established channel
-    to place a file there is the win-* MCP `FileWrite` tool, and this script has no MCP access
-    of its own. So instead of silently leaving an unreachable local file, print the exact
+    fixed in `av_sync_calibrate.py`. scp/ssh to the Windows boxes was historically believed
+    DENIED on this rig (`recording-fetch-windows.sh`, `obs-self-heal-install.sh` use the same
+    PLAN convention); #701 proved plain scp/ssh actually reaches strih/stream with the
+    targets.md creds, but this script has no ssh/MCP access of its own -- it just prints the
+    plan. So instead of silently leaving an unreachable local file, print the exact
     destination + content (same PLAN convention as `obs-self-heal-install.sh` /
     `av_sync_calibrate.remote_push_plan`) so the caller can paste it straight into a FileWrite
     call.
@@ -120,7 +138,7 @@ def remote_push_plan(host: str, payload: dict) -> str:
     content = json.dumps(payload, indent=2)
     return (
         "[phase-sync] REMOTE PUSH REQUIRED -- this file was persisted LOCALLY, not on the OBS box.\n"
-        "[phase-sync]   scp/ssh to Windows is denied; push it via the win-* MCP FileWrite tool:\n"
+        "[phase-sync]   this script has no MCP/ssh access -- push it via the win-* MCP FileWrite tool:\n"
         f"[phase-sync]   host={host}  mcp={mcp_line}\n"
         f"[phase-sync]   dest={REMOTE_PROGRAMDATA_JSON_PATH}\n"
         f"[phase-sync]   content:\n{content}"
@@ -248,7 +266,12 @@ def apply_latency(ws, source: str, current_ms: int, new_ms: int) -> int:
     `current_ms` and FAILS LOUD -- the source is never left half-set. If even the rollback
     read-back mismatches, prints a LOUD warning (manual check required) before still failing
     loud.
+
+    #707: `new_ms` is clamped to >= PHASE_SYNC_FLOOR_MS HERE too (not just inside the offset
+    kernel/main()'s preview) -- this is the point every write to genlock_latency_ms_src funnels
+    through, so it is where the floor is enforced no matter how `new_ms` was computed.
     """
+    new_ms = enforce_jitter_floor_ms(new_ms)
     print(f"[phase-sync] SET '{source}' {GENLOCK_SRC_LATENCY_KEY}: {current_ms} -> {new_ms}")
     _rpc(ws, "SetInputSettings", {
         "inputName": source,
@@ -303,6 +326,31 @@ def write_last_json(json_path: Path, cameras: list) -> dict:
     return payload
 
 
+def apply_margin(offsets: dict, margin_ms: float) -> dict:
+    """#757 -- PURE: shift every computed offset by a UNIFORM +margin_ms, rounded to the
+    nearest whole ms (genlock_latency_ms_src is an integer OBS setting).
+
+    Why a uniform shift preserves the kernel's own convention: `compute_phase_sync_offsets`
+    pins the SLOWEST source at the floor and holds every other source back by exactly how much
+    earlier it would otherwise present -- i.e. `offset[cam] = floor + (slowest - own)`. Adding
+    the SAME constant to every value leaves `(slowest - own)` (the RELATIVE spread the
+    "slowest lowest pin, fastest highest" convention depends on) completely unchanged; it only
+    raises the FLOOR itself from `floor` to `floor + margin_ms`. This is the fix for #757's
+    2026-07-15 live regression: a camera pinned with ZERO headroom above its own measured
+    transit sits exactly at the ts-align release deadline, so ordinary jitter flips individual
+    frames across the slot boundary (a duplicate on one side, a gap on the other -- the
+    observed uniform copies≈gaps pattern on every camera). A margin held above every
+    camera's own measured transit, not just the slowest one, gives ordinary jitter somewhere
+    to land without crossing the deadline.
+
+    `margin_ms <= 0` is a no-op (returns `offsets` unchanged, same dict values) -- callers that
+    don't have a margin estimate yet keep today's exact behavior. Never mutates the input dict.
+    """
+    if margin_ms <= 0:
+        return dict(offsets)
+    return {source: round(value + margin_ms) for source, value in offsets.items()}
+
+
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -324,15 +372,29 @@ def main():
         help="path to the phase-sync-gate Rust binary (#438) "
              "(default: probed from PHASE_SYNC_GATE_BIN or PROBE_BIN_DIR)",
     )
+    ap.add_argument(
+        "--margin-ms", type=float, default=0.0,
+        help="#757: uniformly raise every computed offset by this many ms above the floor "
+             "(jitter headroom -- see apply_margin's own doc). Default 0 (no change, today's "
+             "exact behavior).",
+    )
     args = ap.parse_args()
 
     measured = load_measured_json(args.measured_json)
     offsets = compute_phase_sync_offsets(measured, gate_bin=args.gate_bin)
+    if args.margin_ms > 0:
+        before = dict(offsets)
+        offsets = apply_margin(offsets, args.margin_ms)
+        print(
+            f"[phase-sync] #757 margin={args.margin_ms:.1f}ms applied to every offset "
+            f"(before -> after): "
+            + ", ".join(f"{s}: {before[s]}->{offsets[s]}" for s in sorted(offsets))
+        )
 
     ws = _conn(args.host, args.password)
     plan = []
     for source, latency_ms in measured.items():
-        new_ms = offsets[source]
+        new_ms = enforce_jitter_floor_ms(offsets[source])
         current = read_current_latency(ws, source)
         print(
             f"[phase-sync] source='{source}' measured_latency={latency_ms:.1f}ms "

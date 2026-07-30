@@ -1,0 +1,12 @@
+{
+  "overall_pass": true,
+  "min_secs": 300.0,
+  "full_chain": {
+    "zero_loss": true,
+    "real_drops": 0,
+    "loss": {
+      "cam1": {"zero_loss": true, "real_drops": 0, "burn_unreadable": 0, "present_count": 9293, "expected_count": 9293},
+      "imag": {"zero_loss": true, "imag_optical_beat_pass": true}
+    }
+  }
+}

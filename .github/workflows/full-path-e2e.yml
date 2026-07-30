@@ -64,6 +64,15 @@ on:
         # disk preflight fails early otherwise). Ideal soak (1800 s) is an operator opt-in.
         description: "Steady-state run seconds (>=300; cam1 grab ~20 MB/s on dev1)"
         default: "300"
+      offline_ack:
+        # #827: overrides the checked-in rig-fleet.txt default outright (an operator dispatching
+        # manually with a DIFFERENT physical rig state than the checked-in file — e.g. a box came
+        # back, or a NEW box just went down) — comma-separated "box:reason" pairs, same format
+        # scripts/lib/cambox-offline-ack.sh already parses (e.g. "cam5:powered-off-2026-07-27").
+        # Leave empty (default) to use the checked-in rig-fleet.txt as-is. The automatic
+        # pull_request gate below (which carries NO inputs) always falls through to rig-fleet.txt.
+        description: "CAMBOX_OFFLINE_ACK override (comma 'box:reason' pairs; empty = use rig-fleet.txt)"
+        default: ""
   # #406/#312 item5: the automatic BLOCKING merge gate. Fires on every dev->main PR
   # open/update — the busy-gate step protects the live rig, so this can safely run
   # unattended (never on every push to dev — only when a PR targeting main exists/changes).
@@ -73,7 +82,7 @@ on:
 
 permissions:
   contents: read
-  pull-requests: read  # #646: the docs-only detection step reads the PR diff via `gh pr diff`
+  actions: read  # #703: the Windows-verdict-artifact fetch step queries ci.yml's runs (gh run list/download)
 
 # Workflow-level: supersede a stale run on a re-push to the SAME PR (or the same ref for a
 # manual dispatch) so a fast follow-up push doesn't leave an old 30-min-busy-wait run burning
@@ -104,7 +113,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Detect docs-only diff (#646 — skip busy-gate+E2E on docs-only PRs)
+      - name: Detect docs-only diff (#646 — skip busy-gate+E2E on docs-only PRs; #746 fail-open, local git diff)
         id: docs-only
         # #646: a RUNTIME `if:`-based skip, NEVER `on.pull_request.paths`/`paths-ignore` at the
         # trigger level — a trigger-level path filter means a docs-only PR gets NO check run at
@@ -113,33 +122,110 @@ jobs:
         # runs the job and reports a genuine (skipped) outcome instead. workflow_dispatch has no
         # PR to diff — never treated as docs-only, always runs in full (an operator-run manual
         # soak should never be silently skipped).
+        #
+        # #746: this used to derive the changed-file list via the GitHub PR-diff CLI call, run
+        # under a strict shell mode that exits on the first error. GitHub's PR-diff API REFUSES
+        # once a PR's accumulated diff crosses its size limit ("too large") — a long-lived
+        # dev->main accumulator PR (like #704) eventually crosses that wall, and the strict shell
+        # mode turned that refusal into an immediate non-zero exit, killing the WHOLE job
+        # (busy-gate + recording-e2e never even started) — the REQUIRED merge gate could no
+        # longer produce a result at all, on any future push, no matter how healthy the rig was.
+        # Fixed two ways:
+        #   1. Derive the changed-file list LOCALLY: fetch main, then diff the two commits'
+        #      trees directly (deliberately NOT a merge-base-relative diff — actions/checkout@v4's
+        #      default shallow (depth=1) checkout has no shared history to compute a merge-base
+        #      from, so that form would itself fail on every single run). A local diff has no API
+        #      size limit at all — the checkout is already on disk.
+        #   2. FAIL OPEN: any failure deriving the list (a broken fetch, an unexpected git error)
+        #      is treated as "NOT docs-only" so the full E2E always runs — a broken OPTIMIZATION
+        #      (the docs-only skip) must never block, or silently skip, the REQUIRED gate itself.
+        #      This is why the step no longer runs in strict/exit-on-error mode: the detection is
+        #      wrapped in its own `if`, and the docs_only output is written exactly once,
+        #      unconditionally, after that if/else — both the success and the fail-open path
+        #      always reach it.
         if: github.event_name == 'pull_request'
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          set -euo pipefail
-          CHANGED="$(gh pr diff ${{ github.event.pull_request.number }} --name-only)"
-          echo "changed files:"
-          echo "$CHANGED"
-          DOCS_ONLY=true
-          while IFS= read -r f; do
-            [ -z "$f" ] && continue
-            case "$f" in
-              *.md|docs/*|.claude/*) ;;
-              *) DOCS_ONLY=false ;;
-            esac
-          done <<< "$CHANGED"
+          set -uo pipefail
+          DOCS_ONLY=false
+          if git fetch origin main 2>/dev/null && CHANGED="$(git diff --name-only origin/main HEAD 2>/dev/null)"; then
+            echo "changed files:"
+            echo "$CHANGED"
+            DOCS_ONLY=true
+            while IFS= read -r f; do
+              [ -z "$f" ] && continue
+              case "$f" in
+                *.md|docs/*|.claude/*) ;;
+                *) DOCS_ONLY=false ;;
+              esac
+            done <<< "$CHANGED"
+          else
+            echo "WARNING (#746): could not derive the changed-file list locally -- failing OPEN (treating as NOT docs-only; the full E2E gate will run)" >&2
+          fi
           echo "docs_only=$DOCS_ONLY" >> "$GITHUB_OUTPUT"
           echo "Docs-only PR: $DOCS_ONLY"
 
       - name: Rig-busy gate — refuse to reroute prod OBS while a REAL broadcast is live (#406/#312)
         # Polls OBS WebSocket on strih+stream (GetStreamStatus/GetRecordStatus) for up to 30 min.
         # Distinct exit codes: 0 = free (proceed), 42 = still busy after the budget, 43 = rig
-        # unreachable (fails CLOSED, never assumes "free"). See scripts/rig-busy-gate.sh.
+        # unreachable (fails CLOSED, never assumes "free"), 44 = the #830 shared cross-repo rig
+        # lease is held by a LIVE foreign holder (e.g. restreamer's own CI) -- named explicitly
+        # instead of an ambiguous RIG_BUSY. See scripts/rig-busy-gate.sh + scripts/lib/rig-lease.sh.
         # #646: SKIPPED (reported skipped, not silently absent) on a confirmed docs-only PR;
         # always runs for workflow_dispatch (manual soak) regardless.
         if: github.event_name == 'workflow_dispatch' || steps.docs-only.outputs.docs_only != 'true'
+        env:
+          # #830: identify THIS run to the shared rig lease so a foreign gate (restreamer,
+          # zbynekdrlik/restreamer#349) can name us instead of guessing from OBS state alone.
+          RIG_LEASE_REPO: ${{ github.repository }}
+          RIG_LEASE_RUN_ID: ${{ github.run_id }}
+          RIG_LEASE_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RIG_LEASE_JOB: ${{ github.job }}
         run: bash scripts/rig-busy-gate.sh
+
+      - name: Fetch the matching Windows recording-verdict.exe for THIS commit (#703)
+        # #703: E2E_EXECUTE_VERDICT=1 (below) makes recording-e2e.sh ACTUALLY DECODE strih+stream
+        # over ssh instead of merely printing a plan for a human to paste — it needs a REAL
+        # recording-verdict.exe built from THIS exact commit. ci.yml's own "windows-probe" job
+        # already builds+uploads it (the probe-tools-windows-amd64 artifact) — but ci.yml
+        # deliberately triggers on `push: [dev, main]` ONLY, never `pull_request` (see its own
+        # header comment: "fire CI once per commit"), so this PR's head commit already has (or
+        # will shortly have) a ci.yml run from the ORIGINAL push to dev — `pr-merge-policy.md`'s
+        # own flow drives dev's CI green BEFORE opening the dev->main PR, so in the normal case
+        # this is already done; the bounded poll below is the safety margin for a fast PR. Never
+        # build a second Windows toolchain here — this job runs on the LAN-only self-hosted
+        # runner (no Windows cross-compile). workflow_dispatch (manual operator soak) does NOT
+        # need this — it stays in plan-print mode (E2E_EXECUTE_VERDICT stays 0), so this step is
+        # scoped to `pull_request` only (same docs-only skip as the sibling steps).
+        if: github.event_name == 'pull_request' && steps.docs-only.outputs.docs_only != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          SHA="${{ github.event.pull_request.head.sha }}"
+          echo "Waiting for ci.yml's windows-probe artifact for commit $SHA ..."
+          FOUND_RUN_ID=""
+          for i in $(seq 1 60); do
+            FOUND_RUN_ID="$(gh run list --workflow ci.yml --json databaseId,headSha,status,conclusion \
+              --jq ".[] | select(.headSha==\"$SHA\" and .status==\"completed\" and .conclusion==\"success\") | .databaseId" \
+              | head -1)"
+            if [ -n "$FOUND_RUN_ID" ]; then
+              echo "Found successful ci.yml run $FOUND_RUN_ID for $SHA"
+              break
+            fi
+            # Report any run for this SHA that IS visible (queued/in_progress/failed) so a stuck
+            # wait is diagnosable from the log, not silent polling.
+            gh run list --workflow ci.yml --json databaseId,headSha,status,conclusion \
+              --jq ".[] | select(.headSha==\"$SHA\") | \"  run \\(.databaseId): status=\\(.status) conclusion=\\(.conclusion)\"" || true
+            sleep 20
+          done
+          if [ -z "$FOUND_RUN_ID" ]; then
+            echo "::error::#703 no successful ci.yml run found for commit $SHA after the poll budget (20 min) — cannot fetch the Windows recording-verdict.exe for this commit."
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/win-probe-tools"
+          gh run download "$FOUND_RUN_ID" -n probe-tools-windows-amd64 --dir "$RUNNER_TEMP/win-probe-tools"
+          test -f "$RUNNER_TEMP/win-probe-tools/recording-verdict.exe"
+          echo "WIN_VERDICT_EXE_LOCAL=$RUNNER_TEMP/win-probe-tools/recording-verdict.exe" >> "$GITHUB_ENV"
 
       - name: Recording-based 4-node cam2→cam1→strih→stream zero-loss E2E (HARD GATE)
         # recording-e2e.sh runs recording-verdict with the strict any-drop-fails verdict
@@ -166,6 +252,27 @@ jobs:
           # `workflow_dispatch` operator soak keeps its existing single-camera behavior (never
           # silently widened by this flip; a future ticket can add an explicit input for it).
           ALL_CAMBOX: ${{ github.event_name == 'pull_request' && '1' || '0' }}
+          # #703: the required pull_request gate must ACTUALLY EXECUTE the zero-loss/A/V verdict
+          # (the fix this PR delivers), never just print a plan nobody runs. WIN_VERDICT_EXE_LOCAL
+          # is set by the fetch step immediately above (pull_request only). workflow_dispatch
+          # (manual operator soak) is UNCHANGED — stays in plan-print mode for the MCP holder.
+          E2E_EXECUTE_VERDICT: ${{ github.event_name == 'pull_request' && '1' || '0' }}
+          # #711: the SAME bot-token #notifications path ci.yml's/this workflow's own "Discord
+          # alert" steps already use (see .claude/skills/ci) — recording-e2e.sh's own
+          # E2E_EXECUTE_VERDICT=1 branch posts the full Slovak report via
+          # scripts/lib/e2e-discord-report.sh when the merge verdict is genuinely computed.
+          # Fail-open: a missing/failing POST here never fails this step (see that file's header).
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          DISCORD_CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_ID }}
+          # #827: the automatic pull_request gate carries NO workflow_dispatch inputs, so this is
+          # always empty for it — recording-e2e.sh's own cambox_offline_ack_effective then falls
+          # through to the checked-in rig-fleet.txt default. A manual workflow_dispatch's
+          # offline_ack input, when non-empty, overrides that default outright.
+          CAMBOX_OFFLINE_ACK: ${{ github.event_name == 'workflow_dispatch' && inputs.offline_ack || '' }}
+        # #832: this workflow never hardcodes an imag-nb address itself — recording-e2e.sh
+        # resolves the ACTIVE imag host from scripts/imag-host.sh (the ONE declared source of
+        # truth, reversible between the incumbent 10.77.9.182 and the replacement 10.77.9.187).
+        # A future imag swap is a one-line change in that file, never a workflow edit.
         # #657: `exec` REPLACES this step's process image with recording-e2e.sh's own bash — a
         # plain `bash scripts/recording-e2e.sh` forks a NESTED child the Actions runner never
         # signals directly (empirically confirmed: it signals only the single top-level step PID
@@ -177,16 +284,64 @@ jobs:
         # the actual trap-holding process.
         run: exec bash scripts/recording-e2e.sh
 
+      - name: Fail-closed structural guard — verdict JSON MUST exist with overall_pass=true (#703)
+        # Independent BACKSTOP against a REGRESSION of the #703 bug: some FUTURE code path in
+        # recording-e2e.sh that exits 0 without the verdict ever being computed (exactly what
+        # this issue reported — the required gate went green while [8/8] only PRINTED a plan,
+        # scp/ssh to Windows was never executed). This re-asserts the verdict JSON genuinely
+        # exists AND overall_pass=true, read straight from the file the harness itself writes —
+        # independent of (and in addition to) the harness's own exit code. `always()` so it still
+        # runs (and reports clearly) even when the E2E step above already failed. Scoped to
+        # `pull_request` only — E2E_EXECUTE_VERDICT is 0 for workflow_dispatch (manual operator
+        # soak), which legitimately never produces this file automatically (the MCP holder runs
+        # the merge afterward, outside this job) — this guard would wrongly red-X that flow.
+        if: always() && github.event_name == 'pull_request' && steps.docs-only.outputs.docs_only != 'true'
+        run: |
+          set -euo pipefail
+          RUN_ID="${RECORDING_E2E_RUN_ID:-}"
+          if [ -z "$RUN_ID" ]; then
+            echo "::error::#703 fail-closed guard: RECORDING_E2E_RUN_ID was never set by recording-e2e.sh — the harness did not even reach the point a run id exists. The gate must not be green."
+            exit 1
+          fi
+          VERDICT_JSON="/tmp/recording-e2e-${RUN_ID}/verdict-${RUN_ID}.json"
+          if [ ! -f "$VERDICT_JSON" ]; then
+            echo "::error::#703 fail-closed guard: $VERDICT_JSON does not exist — the recording zero-loss/A/V verdict was NEVER COMPUTED. This is exactly the #703 bug; the job must not go green without a real verdict."
+            exit 1
+          fi
+          OVERALL="$(jq -r '.overall_pass' "$VERDICT_JSON")"
+          echo "verdict JSON: $VERDICT_JSON  overall_pass=$OVERALL"
+          if [ "$OVERALL" != "true" ]; then
+            echo "::error::#703 fail-closed guard: overall_pass=$OVERALL (not true) in $VERDICT_JSON — the zero-loss/A/V verdict genuinely FAILED."
+            exit 1
+          fi
+          echo "#703 fail-closed guard PASSED: $VERDICT_JSON exists and overall_pass=true."
+
       - name: Upload verdict JSON + report PNG + pixel proof
         if: always() # keep the evidence even on a failing verdict
         uses: actions/upload-artifact@v4
         with:
           name: recording-e2e-full-path
+          # #703: scoped to THIS run's own RECORDING_E2E_RUN_ID (set by recording-e2e.sh via
+          # GITHUB_ENV) — the old unscoped `/tmp/recording-e2e-*/...` glob picked up EVERY old
+          # verdict JSON left on this self-hosted runner's /tmp from unrelated past sessions
+          # (confirmed live: 29 stale verdicts uploaded alongside 0 for the run's own RUN_ID),
+          # actively misleading forensics. Empty RECORDING_E2E_RUN_ID (the harness crashed before
+          # ever setting it) safely matches nothing — if-no-files-found: warn handles that.
           path: |
-            /tmp/recording-e2e-*/verdict-*.json
-            /tmp/recording-e2e-*/report-*.png
-            /tmp/recording-e2e-*/pixel-proof/**
+            /tmp/recording-e2e-${{ env.RECORDING_E2E_RUN_ID }}/verdict-*.json
+            /tmp/recording-e2e-${{ env.RECORDING_E2E_RUN_ID }}/report-*.png
+            /tmp/recording-e2e-${{ env.RECORDING_E2E_RUN_ID }}/pixel-proof/**
           if-no-files-found: warn
+
+      - name: Release the shared rig lease (#830 — cleanup, always, incl. cancellation)
+        # #830: released here (never only on scripts/rig-busy-gate.sh's own success path) so a
+        # cancelled run, or a later step failing, still frees the rig for restreamer's CI
+        # (zbynekdrlik/restreamer#349) instead of leaving a dangling lease. Safe no-op if this run
+        # never acquired the lease at all (docs-only skip, or a fast-failed busy-gate).
+        if: always()
+        env:
+          RIG_LEASE_RUN_ID: ${{ github.run_id }}
+        run: bash scripts/rig-lease-release.sh
 
       - name: Discord alert on frame-loss regression (bot API → #notifications)
         if: failure()

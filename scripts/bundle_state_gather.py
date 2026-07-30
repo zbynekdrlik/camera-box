@@ -131,6 +131,89 @@ def ndi_input_latency_csv(ndi_inputs):
     return ",".join(f"{name}={latency}" for name, latency in pairs)
 
 
+# #826 — filename pattern for a launchable OBS-shaped executable: `obs<digits>.exe` (obs64.exe,
+# obs32.exe, the pinned genlock build's own name) OR a legacy `<name>ME.exe`-style build (the
+# pre-genlock era's own naming, e.g. a literal "2ME.exe"). Case-insensitive — Windows filenames.
+_OBS_EXE_RE = re.compile(r"(?i)^(obs\d*\.exe|\S*me\.exe)$")
+
+
+def obs_installs_under(scan_roots):
+    """#826 — every launchable OBS-shaped executable found under *scan_roots* (each walked
+    recursively), sorted (case-insensitively) and comma-joined. Mirrors `distroav_dll_paths`'s
+    walk-and-collect shape exactly (same "PURE, fed real filesystem roots" pattern already
+    established in this module).
+
+    A folder renamed aside (e.g. `D:\\_APPS\\_RETIRED_1ME-obs_2026-07-27`) is STILL walked and its
+    exe is STILL reported — this is the whole point of the #826 acceptance: renaming a dormant
+    install out of the way is not the same as removing it, and it can still be launched by hand
+    (the exact 2026-07-27 incident: an agent ran a dead-variable-referenced `.lnk` and woke a
+    year-old OBS 31.1.2, which then squatted TCP :4455 before the pinned genlock build could).
+
+    "" when no *scan_roots* entry exists or none contains a match (never guessed)."""
+    found = []
+    for root in scan_roots:
+        if not root or not os.path.isdir(root):
+            continue
+        for dirpath, _dirnames, filenames in os.walk(root):
+            for name in filenames:
+                if _OBS_EXE_RE.match(name):
+                    found.append(os.path.join(dirpath, name))
+    return ",".join(sorted(found, key=str.lower))
+
+
+def obs_process_count_from_listing(text):
+    """#826 — count of currently-running OBS-class processes, from a plain newline-separated list
+    of process NAMES (no `.exe` suffix — the shape `Get-Process | Select-Object -ExpandProperty
+    Name` produces on Windows). Matches `obs<digits>` case-insensitively (obs64, obs32, bare obs).
+
+    "" (never "0") when *text* itself is empty/unread — an unreachable box must read UNKNOWN, not
+    a false "zero processes confirmed running" (the same never-a-false-clean discipline every
+    other facet in this module follows)."""
+    if not (text or "").strip():
+        return ""
+    count = 0
+    for line in text.splitlines():
+        if re.match(r"(?i)^obs\d*$", line.strip()):
+            count += 1
+    return str(count)
+
+
+# #826 — NL_STARTUP.ahk's own variable syntax (confirmed live on strih, issue #826 comments):
+#   app1_run  := 1
+#   app1_path := "C:\ProgramData\...\OBS Studio.lnk"
+#   app1_binarypath := "D:\_APPS\1ME-obs\1ME.lnk"     <- the dead leftover that caused the incident
+#   app2_run  := 0
+#   app2_path := "D:\_APPS\2ME-obs\2ME.lnk"
+def ahk_app1_shortcut_path(text):
+    """#826 — the `app1_path := "..."` shortcut NL_STARTUP.ahk launches. Only the FIRST match is
+    used (AHK assigns each variable once). "" when absent — this box has no NL_STARTUP.ahk at all
+    (only strih runs it; stream has none, per `.claude/skills/obs-ops`), or the text is unread."""
+    m = re.search(r'app1_path\s*:=\s*"([^"]*)"', text or "")
+    return m.group(1) if m else ""
+
+
+def ahk_app1_run(text):
+    """#826 — the `app1_run := N` flag: "1" enabled / "0" disabled / "" if the line is absent
+    (no NL_STARTUP.ahk on this box, or unread)."""
+    m = re.search(r"app1_run\s*:=\s*(\d+)", text or "")
+    return m.group(1) if m else ""
+
+
+def ahk_dead_config_present(text):
+    """#826 — "1" when NL_STARTUP.ahk still carries the dead `app1_binarypath` leftover (the exact
+    variable an agent mistook for the box's canonical launcher during the #826 incident) OR an
+    ENABLED `app2_run := 1` block (the issue's "config states one truth" cleanup requirement).
+    "0" when the text was read and neither leftover is present. "" (UNKNOWN, distinct from "read
+    and clean") when there is no AHK text to read at all — e.g. this box has no NL_STARTUP.ahk."""
+    t = text or ""
+    if not t.strip():
+        return ""
+    has_dead_binarypath = "app1_binarypath" in t
+    m = re.search(r"app2_run\s*:=\s*(\d+)", t)
+    app2_enabled = bool(m and m.group(1) == "1")
+    return "1" if (has_dead_binarypath or app2_enabled) else "0"
+
+
 def record_dir_stats(record_dir):
     """#652: PURE, testable filesystem stats over the top-level files of *record_dir* (the OBS
     record directory) — powers the `/record-dir-stats.json` endpoint (bundle-state-server.py),
@@ -180,6 +263,34 @@ def record_dir_stats(record_dir):
     return {"total_bytes": total_bytes, "file_count": file_count, "oldest_mtime": oldest_mtime}
 
 
+def genlock_build_sha_from_file(path):
+    """#756 — the box's DEPLOYED genlock build commit SHA, read from its `GENLOCK_BUILD_SHA.txt`
+    (imag: `/opt/obs-genlock/GENLOCK_BUILD_SHA.txt`; the Windows boxes: the SAME file in the
+    deployed genlock bundle). This is the value the #756 CROSS-BOX parity gate compares across the
+    fleet — a peer-parity assert (every box on ONE build) that catches the stale-imag skew the
+    origin/main ref-compare misses during a long-lived dev train (#530/#756).
+
+    Returns the stripped first non-empty line, or "" when the file is missing / unreadable / empty
+    (UNKNOWN downstream — never a guessed or fabricated SHA; the parity engine treats an unread box
+    as INCOMPLETE and refuses, per drift-guard's never-a-false-clean contract). Only the leading
+    token of the first non-blank line is kept, so a stray trailing comment/newline in the marker
+    file can never leak into the compared SHA."""
+    if not path:
+        return ""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if line:
+                    return line.split()[0]
+    except OSError as e:
+        print(
+            f"WARNING: genlock_build_sha_from_file: could not read {path!r}: {e}",
+            file=sys.stderr,
+        )
+    return ""
+
+
 def build_bundle_state(
     *,
     obs_version="",
@@ -190,13 +301,41 @@ def build_bundle_state(
     ndi_input_latency="",
     distroav_dll_paths="",
     genlock_capability="",
+    genlock_build_sha="",
+    obs_installs="",
+    port4455_owner_path="",
+    port4455_owner_version="",
+    obs_process_count="",
+    ahk_app1_shortcut_path="",
+    ahk_app1_run="",
+    ahk_dead_config_present="",
+    shortcut_target_path="",
+    shortcut_workdir="",
 ):
     """Assemble the flat bundle-state dict `version-integrity-gate.sh --win-state`'s
     `compare_args_from_state()` parses. Every value is a STRING (its regex requires a quoted JSON
     string — a bare number/bool would silently fail to match and read as UNKNOWN, the opposite of
     what a present-but-unread value should mean). A key whose gather came back empty is OMITTED
     entirely (cleaner payload; compare_args_from_state treats an absent key and an empty-string
-    value identically — both UNKNOWN — so this is a presentation choice, not a behavior one)."""
+    value identically — both UNKNOWN — so this is a presentation choice, not a behavior one).
+
+    #756: `genlock_build_sha` is the box's deployed genlock build SHA — the version-integrity gate
+    reads it out of every box's state and runs the CROSS-BOX parity assert (fleet must be on ONE
+    build). Same omit-when-empty rule as every other facet.
+
+    #826: the strih OBS-identity machine-check facet — `obs_installs` (every launchable OBS-shaped
+    exe found), `port4455_owner_path`/`port4455_owner_version` (the process actually owning TCP
+    :4455, matched by PATH not just process name — the exact hole the 2026-07-27 incident exposed),
+    `obs_process_count` (must be exactly one running), and the startup-chain facts read off
+    NL_STARTUP.ahk (`ahk_app1_shortcut_path`/`ahk_app1_run`/`ahk_dead_config_present`) + the
+    Start-Menu shortcut's own resolution (`shortcut_target_path`/`shortcut_workdir`). Same
+    omit-when-empty rule; `version-integrity-gate.sh` treats the whole group as opt-in per box
+    (skipped entirely until a box's bundle-state-server reports at least one of them).
+
+    Note: `dantesync_version` was added here for #862, then REVERTED in its own follow-up fix —
+    the deployed strih/stream servers never picked up the new key (half-wired), and the gate now
+    reads every node's dantesync version uniformly via `dantesync --version` over SSH instead
+    (scripts/dantesync-version-gate.sh), with no bundle-state involvement at all."""
     values = {
         "obs_version": obs_version,
         "distroav_version": distroav_version,
@@ -206,5 +345,15 @@ def build_bundle_state(
         "ndi_input_latency": ndi_input_latency,
         "distroav_dll_paths": distroav_dll_paths,
         "genlock_capability": genlock_capability,
+        "obs_installs": obs_installs,
+        "port4455_owner_path": port4455_owner_path,
+        "port4455_owner_version": port4455_owner_version,
+        "obs_process_count": obs_process_count,
+        "ahk_app1_shortcut_path": ahk_app1_shortcut_path,
+        "ahk_app1_run": ahk_app1_run,
+        "ahk_dead_config_present": ahk_dead_config_present,
+        "shortcut_target_path": shortcut_target_path,
+        "shortcut_workdir": shortcut_workdir,
+        "genlock_build_sha": genlock_build_sha,
     }
     return {k: v for k, v in values.items() if v}

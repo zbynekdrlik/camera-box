@@ -29,6 +29,12 @@ pub mod ndi;
 pub mod genlock_stamp;
 #[cfg(target_os = "linux")]
 pub mod ndi_display;
+// #792 — optional secondary 30fps NDI stream (2-frame temporal blend of the emitted 60fps
+// pairs). Linux-gated in lock-step with capture/ndi (it carries capture::FrameInfo across a
+// channel and owns a second NdiSender); the pairing/blend/config logic is plain std and
+// unit-tests Tier-0 on the Linux `test` CI job (default features).
+#[cfg(target_os = "linux")]
+pub mod publish_30p;
 pub mod vban;
 
 // #464 — the pure Auto-fallback PRESENTER decision (`resolve_presenter_kind`), extracted out of
@@ -45,6 +51,11 @@ pub mod reannounce;
 // #367 — colour-scale reference layout (pure geometry + colour table). Cross-platform, no
 // probe deps, so it unit-tests Tier-0; the probe-gated framebuffer blit lives in `probe::qr`.
 pub mod colour_scale;
+
+// #751 — constant-velocity motion sweep (the UFO-test element) for the cam2 painter. Pure
+// geometry + position math (no probe deps, unit-tests Tier-0); the probe-gated framebuffer blit
+// lives in `probe::qr` and the painter only CALLS it.
+pub mod motion_sweep;
 
 // #188/#145 — QR-based (QPSK) audio marker, byte-compatible with the norihiro
 // obs-audio-video-sync-dock protocol. Pure Tier-0 (encode + decode + estimator); the continuous-feed
@@ -111,6 +122,12 @@ pub mod burn_reconcile;
 // samples → FROZEN. Pure Rust, no probe deps, so it unit-tests Tier-0; the OBS I/O lives in
 // `scripts/frozen-camera-gate.py`; the thin CLI binary lives in `src/bin/frozen-camera-gate.rs`.
 pub mod frozen_camera;
+
+// #758 item 4 — the frozen-leg classifier: distinguishes a SUSTAINED camera freeze (hard-fail)
+// from isolated stale-replay frames (informational-only) from a segment's own copies/frames/
+// duration (the SAME data probe::recording_segments::CamboxSegment already computes). Pure
+// Rust, no probe deps, no image/rqrr — unit-tests Tier-0.
+pub mod frozen_leg;
 
 // #89 — pure DXGI device-lost (GPU TDR / driver-internal-error) log-signature matcher, extracted
 // from `probe::obs_log_audit` (#81) to a crate-root pure module so the default-feature
@@ -225,6 +242,14 @@ pub mod capture_rate_selfheal;
 // instead of its own inline recorded-order walk.
 pub mod painted_tick_gaps;
 
+// #859 — the genlock FIFO's BACKLOG-STORM threshold, made latency-relative. `obs-source.c`'s bare
+// `GENLOCK_QDEPTH_RELOCK 6` was calibrated on "steady depth is ~1-2 at any skew" (its own comment),
+// which is false for a source configured DEEP: the stream box's `NDI 2ME PGM` sits at depth 29 on
+// the 923 ms latency #856's A/V controller must set, so the backlog branch fires every tick and
+// sheds a frame on every jitter excursion. No probe deps, so it unit-tests Tier-0; the probe-gated
+// `probe::genlock::ReleaseCadence` and the C `GENLOCK_QDEPTH_RELOCK` both derive from here.
+pub mod genlock_backlog;
+
 // #660 — the fbdev "visible page" byte range to BLANK on `probe::kms::KmsPresenter` teardown, so
 // releasing DRM master reveals a deterministic black frame instead of whatever ARBITRARILY OLD
 // content another writer (the fbdev-fallback presenter, or camera-box's own `--display` module)
@@ -232,6 +257,80 @@ pub mod painted_tick_gaps;
 // decoding at the imag optical read's recording tail. No probe deps, so it unit-tests Tier-0; the
 // probe-gated `probe::fb::blank_fbdev` (the actual ioctl + write) uses this geometry decision.
 pub mod fb_blank;
+
+// #707 — NDI blocking-send STALL diagnostic (pure decision). Given how long a SINGLE blocking
+// `NDIlib_send_send_video_v2` call took and the sender's configured frame interval, decides
+// whether THIS call stalled — the missing direct evidence the #656/#663/#665/#666/#707
+// emit-rate-deficit family has never had (only the downstream 5s-averaged emitted-fps symptom
+// was ever measured). No probe deps, so it unit-tests Tier-0; `ndi::NdiSender::
+// send_frame_data_with_timecode` times the real call and WARNs via this decision.
+pub mod send_stall;
+
+// #707 — V4L2 capture DEQUEUE stall diagnostic (pure decision). Given how long a SINGLE blocking
+// `process_frame` dequeue (`self.stream.next()`, a VIDIOC_DQBUF under the hood) took and the
+// capture device's own configured frame interval, decides whether THIS dequeue stalled — the
+// capture-side half of the observability pair `send_stall` started on the NDI-send side. No probe
+// deps, so it unit-tests Tier-0; `main.rs`'s own capture loop times the real dequeue (via
+// `capture::FrameInfo::dequeue_duration_ms`) and WARNs via this decision.
+pub mod capture_stall;
+
+// #726 — presentation-cadence EVENNESS metric (pure decision). Given the per-frame painted-tick
+// sequence in RECORDED order (the same `SegmentFrame.tick` data `probe::recording_segments::
+// window_segment` already extracts), classifies whether a recording's 60fps->30fps downsample is
+// SMOOTH (uniform `expected_step` cadence) or JUDDERY (paired duplicate+catchup spacing — the
+// "15fps-like" live-event symptom the existing loss/continuity gates were blind to). No probe
+// deps, so it unit-tests Tier-0; `probe::recording_segments::window_segment` reports it as a new
+// field on `CamboxSegment` (REPORTED metric first — not yet gate-enforced pending calibration).
+pub mod presentation_cadence;
+
+// #707 EVENT-FORENSICS — per-event residual copy/gap detection (pure decision). Given the same
+// per-frame painted-tick data `presentation_cadence`/`painted_tick_gaps` already consume, locates
+// SPECIFIC recorded frames as Copy/Gap events (frame index, tick values, wall-clock second, switch-
+// schedule offset) so every residual deviation `window_segment` counts gets its own evidence
+// bundle, per the user's binding #707 decision ("every residual deviation must have its own
+// documented reason"). No probe deps, so it unit-tests Tier-0; `probe::recording_segments::
+// window_segment` reports the events as a new field on `CamboxSegment` /
+// `SegmentedContinuity`, and `recording-verdict`'s per-box `--extract-partial` flags their
+// neighbouring frames for #186 pixel proof.
+pub mod residual_events;
+
+// #707 B1 — per-second emit/capture rate ring (pure decision). The 5s `Streaming:` report averages
+// fps over the whole window, so a sub-5s EMIT PAUSE (the #707 freeze) can hide in it. This ring
+// keeps the last N completed 1-second (emit, capture) buckets so `main.rs` prints a compact
+// `emit-1s:` line and WARNs the instant any single second's emit dips below the send floor — the
+// box-side prong of #707 B1's freeze discriminator. No probe deps, so it unit-tests Tier-0.
+pub mod emit_rate_ring;
+
+// #752 — rate-limit the #707 genlock emit-gate-skip diagnostic. Pure accumulator that coalesces
+// the ~10/s per-skip WARN into ONE aggregated line per 5s report window, killing the rsyslogd/
+// journald CPU-starvation feedback loop on the 3-core boxes. No probe deps, unit-tests Tier-0.
+pub mod emit_skip_log;
+
+// #853 — is a decoded QR payload list evidence of a genuine OPTICAL (non-burn) read, or only the
+// easy, always-present digital node burns? No probe deps, so it unit-tests Tier-0;
+// `probe::recording::extract_frames_png`'s `sharp_qr_but_flagged_undecodable` self-check calls it
+// instead of asking "did ANY QR decode" (guaranteed true on every #853 fleet-wide undecodable
+// frame purely from the always-crisp node burns).
+pub mod optical_payload_check;
+
+// #855 — parse the shell-side CAMBOX_OFFLINE_ACK / rig-fleet.txt ack format on the Rust side, so
+// recording-verdict's all_cambox_av_sync gate can report an acked-offline box EXCLUDED instead of
+// judging it UNKNOWN/FAIL on samples it was never going to produce. No probe deps, so it unit
+// tests Tier-0.
+pub mod offline_ack;
+
+// #881 (via #854/#707) — the TEMPORARY calibrated floor for the all-cambox segment continuity's
+// optical `undecodable` term (a physical 60Hz temporal-tear artifact of the test camera's
+// monitor, not chain loss). No probe deps, so it unit-tests Tier-0;
+// `probe::recording_segments::window_segment`/`segment_continuity` only CALL it. Deleted
+// together with #881 (connect cam2's 120Hz monitor, restore the term to absolute zero).
+pub mod optical_floor;
+
+// #889 (user decision on #883, 2026-07-30) — the per-cambox-window `copies`/`gaps` terms become
+// REPORT-ONLY (still computed, still printed, no longer fail the window/run). No probe deps, so
+// it unit-tests Tier-0; `probe::recording_segments::window_segment` calls this and wires the
+// result onto `CamboxSegment`. TEMPORARY, restore-gated on #883 item 4 + two clean strict runs.
+pub mod window_gate;
 
 #[cfg(feature = "probe")]
 pub mod probe;

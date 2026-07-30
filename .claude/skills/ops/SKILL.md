@@ -8,6 +8,38 @@ description: >
 
 # Camera-box Ops
 
+## Diagnostika: "multiview nejde plynulo" pri ČISTOM renderi = počítaj dantesync Stepped (2026-07-18)
+
+Operator feel "MV nie je 30fps" while strih GetStats shows a PERFECT render (30.0fps, 0% skips)
+and inputs show 60fps arrivals with zero holds in a short window: the hitches are sporadic
+per-cell TS-ALIGN holds caused by sender CLOCK STEPS — count them per cam box:
+`journalctl -u dantesync --since "-30 min" | grep -c Stepped`. Live event 2026-07-18: 1-33
+steps/30min per cam (~100 fleet-wide = a visible hitch somewhere in the grid every ~18s) from
+NTP jitter on the loaded venue LAN; at home offsets are sub-100µs with zero steps. Each ~1-2ms
+step jumps that camera's genlock timecodes -> its cell holds a frame -> a single-cell hic. An
+OBS restart does NOT help (nothing accumulates receiver-side); robustness/alarming is
+dantesync#50. Second (structural) component of the feel: MV cells are sharp 60->30 decimation
+judder — the #792 "CAMn (30p)" blend streams are the designed cure once strih consumes them.
+
+## Venue/event network — MikroTik topology + the microburst egress-drop gotcha (#797, 2026-07-18)
+
+The traveling rig LAN is all-MikroTik, ssh user `admin` (password = the fleet deploy pw — memory
+`cam-fleet-deploy-credential`, NOT committed): router_snv RB4011 = 10.77.8.1; CRS310-8G+2S+
+switches: foh1_audio 10.77.9.2, stage_av 10.77.9.3, foh1_video 10.77.9.4, foh2_video 10.77.9.5.
+10G SFP+ trunks between them; port naming `etherN::dante|::basic|::trunk`. Map a device to its
+physical port: `/interface bridge host print where mac-address=XX:...` per switch (a MAC learned
+on a `::trunk` port means "behind that trunk, next switch").
+
+**GOTCHA — a 2.5G edge port fed from a 10G trunk TAIL-DROPS microbursts with the default buffer
+split** (CRS310 default `shared-buffers=40%`): live incident = imag on foh2 ether3 dropped ~8
+pkt/s (`/interface ethernet print stats` → `tx-drop-queue1-packet`), strih on the 10G SFP+ port
+clean. Fix (applied 2026-07-18, KEEP): `/interface ethernet switch qos settings set
+shared-buffers=80%` → drops 0. Check drops first on any "receiver gets less than sender sends"
+report: `:local a [/interface ethernet get [find name~"etherX"] tx-drop-packet]; :delay 6s; ...`.
+NOTE: eliminating these drops did NOT lift the imag 50fps cap (#797 — NDI sender-side pacing vs
+the Linux receiver; post-event lab plan on the ticket). Also: cam boxes sit on `::dante`-named
+ports in places — verify no future Dante QoS policy throttles video there.
+
 ## DanteSync Cluster Clock
 
 DanteSync (`~/devel/dantetimesync`) is the cluster wall-clock basis for genlock (#8/#42).
@@ -134,8 +166,11 @@ PowerShell-native `sc.exe` invocation returned EMPTY output over the win-* MCP S
 2026-07-08 probe of both boxes) + a PLAIN (no `cmd /c` wrapper needed)
 `reg query HKLM\SYSTEM\CurrentControlSet\Services\W32Time\Parameters /v Type | Out-String -Width 300`
 + `w32tm /query /status`. Write each box's combined output to a file and pass `--win-status
-NAME=FILE` (mirrors `scripts/dantesync-gate.sh`'s own convention exactly — ssh to Windows is
-denied, so this gate is offline-fixture-file-only, no live-SSH branch). A box with no
+NAME=FILE` (the shared `scripts/lib/win-status-args.sh` NAME=FILE parser — `scripts/
+dantesync-gate.sh` used the identical convention for its own Windows nodes until #835 removed it
+there in favor of a live `--win-http` fetch; this gate's inputs are `sc`/`reg`/`w32tm`
+service-control TEXT the win-* MCP is the natural fit for anyway, with no HTTP equivalent to
+migrate to, so it stays offline-fixture-file-only with no live-SSH branch). A box with no
 status file is UNKNOWN, never a silent pass. Live 2026-07-08 readings (both already fixed, both
 PASS): strih `STATE=STOPPED START_TYPE=DISABLED Type=NoSync`, stream `STATE=STOPPED
 START_TYPE=DISABLED Type=NTP` (a harmless leftover config value — DISABLED means it can never run
@@ -219,6 +254,42 @@ the gate until someone notices. There is no repo script that CREATES this task (
 committed setup script, per #650's own history) — if a future re-provision recreates it from
 scratch, re-apply this `Set-ScheduledTask` hardening (or fold it into whatever script eventually
 DOES create the task).
+
+**RECURRED 2026-07-12/13 (#732) — `RestartCount=999` does NOT cover every death mode.** Found
+strih's `BundleStateServer` dead AGAIN, 3 days after the above hardening, with a DIFFERENT
+`LastTaskResult`: `1073807364` = `0x40010004` (`SCHED_S_TASK_TERMINATED`) — an
+`SCHED_S_*`-class (informational/SUCCESS) code, NOT a `SCHED_E_*`/`0xC0*` FAILURE code. Windows
+Task Scheduler's restart-on-failure logic only re-launches after a genuine error exit; a
+"terminated" result (an explicit stop, a session/parent teardown, etc.) is NOT treated as a
+failure, so `RestartCount` never engages for THIS class of death — structurally different from the
+07-10 crash (`0xC000013A`) the hardening targeted. `Get-ScheduledTask` still showed the settings
+intact (`RestartCount=999` etc.) — the hardening didn't regress, it's just insufficient by design
+for a non-failure termination. Same fix (`Start-ScheduledTask -TaskName "BundleStateServer"`,
+confirm via `bundle-state-server.log`'s tail — NOT via `Invoke-WebRequest` over the win-strih MCP
+Shell, which hung/timed out both times despite the server itself logging a prompt `200` response
+to the SAME request within the same second; trust `curl http://<box>:8899/bundle-state.json` run
+FROM dev1 instead, or the server's own log, over an MCP-Shell-side `Invoke-WebRequest`).
+**#732 proposes the real fix**: an ACTIVE health-check watchdog (mirroring `#391`
+`obs-liveness-watchdog`) that periodically probes `:8899` and restarts the task regardless of its
+last exit code — a passive Task-Scheduler restart-on-failure setting can never catch a
+"terminated but scheduler considers that fine" death, no matter how high `RestartCount` is set.
+
+**A THIRD failure mode (found 2026-07-14, #756): the task can be UP and healthy, but running a
+STALE deployed copy of `bundle-state-server.py`/`bundle_state_gather.py` that predates a recent
+schema change to the payload — the running code is simply NOT what's currently committed in the
+repo.** `curl http://<box>:8899/bundle-state.json` on both strih and stream came back with the
+whole `genlock_build_sha` key MISSING even though `bundle_state_gather.py`'s committed source
+(unmodified in the working tree) already had `genlock_build_sha_from_file(...)` wired in — the
+`.py` files under `C:\ProgramData\camera-box\` were dated days before that change landed. This is
+NOT a scheduled-task-health problem (the task was `Running`, `LastTaskResult=0`) — it's a plain
+**deploy drift**: nothing automatically pushes a new commit's `scripts/bundle-state-server.py` /
+`scripts/bundle_state_gather.py` to the boxes; a code change to these files needs an EXPLICIT
+redeploy (`FileWrite` the current committed content to `C:\ProgramData\camera-box\`) + a restart
+of the running `python.exe` (killing the stale PID is enough — the `run-bundle-state-server.ps1`
+supervisor loop relaunches it within ~5s, picking up the new file) before its payload reflects the
+new schema. **Whenever you add/change a field these two files gather, always confirm live** (`curl
+.../bundle-state.json` on BOTH strih and stream, not just one) that the NEW field is actually
+present in the served payload — don't assume "the repo has it" means "the boxes serve it".
 
 ## Device Deployment
 
@@ -557,7 +628,7 @@ clear-signal-only. Full procedure: `systemd/rig-restore-watchdog.README.md`. Ena
 cp systemd/rig-restore-watchdog.{service,timer} ~/.config/systemd/user/
 # strih OBS-WS secret is NOT committed — supply it via a LOCAL drop-in (mode 0600, not git):
 mkdir -p ~/.config/systemd/user/rig-restore-watchdog.service.d
-printf '[Service]\nEnvironment=OBS_WS_PASSWORD=<strih WS pw — local memory, NOT committed>\nEnvironment=CAM_PW=newlevel\n' \
+printf '[Service]\nEnvironment=OBS_WS_PASSWORD=<strih WS pw — local memory, NOT committed>\nEnvironment=CAM_PW=<fleet deploy pw — memory cam-fleet-deploy-credential, NOT committed>\n' \
   > ~/.config/systemd/user/rig-restore-watchdog.service.d/override.conf
 systemctl --user daemon-reload
 systemctl --user enable --now rig-restore-watchdog.timer
@@ -887,6 +958,44 @@ systemctl is-active camera-box             # confirm active, then fuser /dev/fb0
 Check ALL of cam2/cam3/cam4/cam5/cam6 (not just the one you noticed) — an interrupted ALL_CAMBOX
 run orphans all of them at once, not just one.
 
+## #722 — the SAME self-match footgun also hits `pgrep -c -f` (read-only, not just `pkill -f`), and two commands double-print their own value on "failure"
+
+The #626/#640 self-match above is about `pkill -f` SELF-KILLING mid-script (silent, catastrophic).
+`pgrep -c -f PATTERN` has the identical root cause but a subtler symptom: it doesn't kill
+anything, it just returns a WRONG COUNT. Live-caught (2026-07-13, the #722 EVENT-mode CONTRACT's
+fleet paint-process sweep): `ssh cam1 "PAINT_COUNT=\$(pgrep -c -f -- --paint-only ...); ..."`
+reported `PAINT_COUNT=2` on every cam box, even with zero real painters running — the ENCLOSING
+`bash -c "$WHOLE_SCRIPT"` process's own `/proc/PID/cmdline` contains the literal search pattern
+(it's part of the script text ssh sends), so `pgrep -f` counts that shell itself as a match.
+
+**When the anchor trick (#626/#640) doesn't apply** — you're searching for a literal FLAG
+(`--paint-only`) that could legitimately appear anywhere in a real target's argv, so there's no
+digit/letter boundary to anchor against — **obfuscate the pattern instead**: base64-encode it in
+the script's SOURCE TEXT, decode into a runtime variable, search on the DECODED value. The literal
+substring then never appears in any process's cmdline except a genuine match's own:
+```bash
+pattern_b64="$(printf '%s' --paint-only | base64 | tr -d '\n')"   # built LOCALLY, dev1-side
+# embedded into the remote script as literal source text — the ONLY occurrence of the base64
+# blob, never the raw pattern:
+cat <<REMOTE
+PAINT_PATTERN=\$(printf '%s' '$pattern_b64' | base64 -d)
+PAINT_COUNT=\$(pgrep -c -f -- "\$PAINT_PATTERN" 2>/dev/null)
+REMOTE
+```
+Before writing ANY `pgrep -f`/`pkill -f`/`grep -f`-style check whose pattern text will appear
+verbatim in the ssh command string itself, ask: can the anchor trick work here (a target-only
+argv boundary), or does the pattern need obfuscating (a literal flag/string with no safe anchor)?
+
+**Second, unrelated bug in the SAME check, same incident:** `pgrep -c` prints its own count
+(even `"0"` on zero matches) but ALSO exits NON-ZERO when the count is 0 — and `systemctl
+is-active` prints its own state word (`inactive`/`failed`/...) while ALSO exiting non-zero for
+anything but `active`. A naive `VAR=$(cmd || echo fallback)` then DOUBLE-PRINTS: `cmd`'s own
+stdout PLUS the fallback, e.g. `PAINT_COUNT="0\n0"` or `SERVICE_ACTIVE="inactive\nunknown"`. Fix:
+trust the command's own printed value; only substitute a fallback when the variable is genuinely
+EMPTY: `VAR=$(cmd 2>/dev/null); VAR="${VAR:-fallback}"` — never `$(cmd || echo fallback)` for any
+command that prints a value on its "failure" exit path (`pgrep -c`, `systemctl is-active`, and
+likely others — check what a command prints on ITS OWN non-zero path before reaching for `||`).
+
 ## #625 — a RECORDED-order tick/id walk misreads a benign stream-recording reorder as a fault
 
 The stream recording is documented (`#133`/`#196`/`#216`) to occasionally deliver a frame
@@ -1045,6 +1154,19 @@ attempt's timestamp precisely) rather than trusting a small `-n` tail — or gre
 unbounded journal (`journalctl -u camera-box | grep -E "..."`) when hunting a specific one-shot
 event rather than the routine per-window noise.
 
+**For a SCRIPTED windowed read (a gate, not a human doing live verification), prefer
+`--since=@EPOCH --until=@EPOCH`** (systemd's native absolute-time epoch-seconds form) over
+`HH:MM:SS` strings — no timezone ambiguity, no `date +%H:%M:%S` formatting step, and it composes
+directly with a `$(date +%s)` snapshot taken at the moment the window opens/closes. #705's
+mid-recording capture-rate recheck (`capture_rate_window_journalctl_cmd`,
+`scripts/lib/capture-rate-guard.sh`) uses exactly this: snapshot `START_EPOCH`/`END_EPOCH` around
+the operation being bracketed, then `journalctl _SYSTEMD_INVOCATION_ID=<id> --since=@$START_EPOCH
+--until=@$END_EPOCH` — simpler than this repo's other pattern (`freshest_offset_us` in
+`scripts/clock-offset-guard.sh`), which has to parse `-o short-iso` timestamps back OUT of an
+already-fetched window because it grades a value gathered for a different purpose; a NEW gate that
+controls its own fetch should push the window bound into journalctl itself instead of re-deriving
+that parsing.
+
 **Generic across the fleet:** this lives in the shared capture loop every cam box runs — no per-box
 config. Any cam box (cam1, cam3, or any future box) running a ShadowCast-class or similar USB
 capture dongle that drifts off its negotiated rate self-heals identically once deployed.
@@ -1095,3 +1217,104 @@ systemctl is-active camera-box   # confirm it wasn't already down; restart if it
 This is a STOPGAP ONLY — the tmpfs refills on the same ~4-5 day cadence until dantesync's own
 per-second PTP debug logging is throttled/leveled down (dantesync is a separate repo, tracked on
 `#679` — do not attempt that fix from this repo).
+
+## GOTCHA — live `journalctl -f` tailing on a cam box for diagnostics is DANGEROUS; retention is already only 2-20 minutes (#707, 2026-07-14)
+
+**Never leave an unfiltered `journalctl -f` (or `dmesg -w`) running on a cam box while investigating
+something** — confirmed live while root-causing #707's CAM1 residual: an unfiltered tail (piped to a
+file for later inspection) generated enough volume that, combined with the box already sitting close
+to its `/var/log` 50MB tmfps ceiling (the #679 gotcha above), it tipped `rsyslogd` into a
+`No space left on device` write-failure retry SPIRAL — hundreds of thousands of duplicate lines in
+under 10 minutes, which then ALSO filled `/tmp` (a separate 100MB tmpfs) via the runaway capture file
+itself. This didn't just risk disk — it produced ONE fully CONTAMINATED gate run (`all_cambox_continuity`
+copies=844/846, delivery-latency p50=27.8s/max=215s on CAM1) that looked like a catastrophic new
+finding but was entirely an artifact of the monitoring itself, not a real recurrence. **Two separate
+lessons:**
+
+1. **Even under NORMAL conditions, the live journal retains only ~2-20 minutes** on these boxes
+   (tmpfs-backed, aggressively vacuumed under any real log volume) — a post-hoc `journalctl --since/
+   --until` query for a burst that happened even 10-15 minutes ago will very likely come back empty.
+   There is NO reliable way to retroactively inspect a cam box's journal for an event more than a few
+   minutes old. If you need evidence from a specific mechanism, you MUST be tailing (safely, see below)
+   BEFORE the event happens, not querying after.
+2. **If you must live-tail for a specific diagnostic, filter to an EXACT, narrow, low-frequency
+   pattern with `grep -F`/`grep -E --line-buffered` PIPED on the remote host** (so only matching lines
+   ever hit disk) — e.g. `journalctl -f -o short-iso --no-pager | grep --line-buffered -F 'blocking
+   send STALL' > /tmp/x.log &`. NEVER use a broad pattern like `error` or `stall` alone — `rsyslogd`'s
+   OWN cascading disk-full messages contain generic words like "error" and will match, turning your
+   "safe" filtered tail into the same runaway spiral. Check `df -h /tmp` periodically while it runs,
+   and ALWAYS kill the tail process (by PID, never `pkill -f '<pattern>'` — the pattern can self-match
+   your own `ssh ... "pkill -f '<pattern>' ..."` command line and kill the SSH session instead, see
+   `capture` skill's V4L2/rig-mode `pgrep -x` footgun for the same self-match class) and delete the
+   capture file the moment you're done, before triggering another rig run.
+
+**Separate, unrelated tmpfs accumulation bug found the same session: #749** — `recording-e2e.sh`
+never cleans up its per-run `camera-box-burn-<RUN_ID>` binaries in `/tmp` (a DIFFERENT, also-100MB
+tmpfs from `/var/log`), so repeated gate runs alone (no live-tailing needed) eventually fill it and
+break the next run's `scp` deploy outright. `df -h /tmp` (not just `/var/log`) belongs in the health
+check above when investigating ANY cam box weirdness, especially right before/after a `full-path-e2e`
+run.
+
+## #731 — Companion Satellite on imag-nb (headless Stream Deck client) — the systemd hwdb/uaccess ACL trap
+
+imag-nb (10.77.9.182) runs Bitfocus Companion Satellite as a headless systemd service so the
+physically-connected Elgato Stream Deck can drive Bitfocus Companion running on the SEPARATE
+`companion.lan` (10.77.9.205) box. Installed via `scripts/setup-imag.sh` step 20 (idempotent,
+safe to re-run) — installs via the OFFICIAL `bitfocus/companion-satellite` installer script
+(`pi-image/install.sh`, creates a dedicated `satellite` system user + a `satellite.service`
+systemd unit), never a hand-rolled reimplementation.
+
+**Config mechanism — `/boot/satellite-config` is a PER-START import, not one-shot.**
+`fixup-pi-config.js` (the service's `ExecStartPre`) re-reads `/boot/satellite-config` on EVERY
+service start, imports `COMPANION_IP`/`REST_PORT` into the persisted
+`/home/satellite/satellite-config.json`, THEN resets the boot file back to a blank commented
+template. So (re-)pointing the satellite at a different Companion host is: write
+`/boot/satellite-config` fresh with the real values, then `systemctl restart satellite` — NOT a
+one-time file that only matters on first install.
+
+**GOTCHA — the officially-installed `50-satellite.rules` udev rule (`GROUP=satellite,
+MODE=660`) can be silently OVERRIDDEN by systemd's own hwdb/uaccess mechanism, leaving the
+headless service user unable to open the device (live-confirmed 2026-07-13).** Any HID device
+systemd's hwdb classifies as an "AV production controller" (`ID_AV_PRODUCTION_CONTROLLER=1` env
+var, set via `SUBSYSTEM=="hidraw", IMPORT{builtin}="hwdb"` — the Elgato Stream Deck matches this)
+gets tagged `uaccess` by `/usr/lib/udev/rules.d/70-uaccess.rules:89`
+(`SUBSYSTEM=="hidraw", ENV{ID_AV_PRODUCTION_CONTROLLER}=="1", TAG+="uaccess"`). systemd-logind
+then grants a PER-SEAT ACL to whichever user owns the active graphical session (the desktop
+autologin user, `newlevel` on imag-nb) — and that ACL grant **explicitly sets `group::---`**,
+which REPLACES the plain group-permission bits entirely once any ACL exists on the file (POSIX
+ACL semantics: an ACL present means the traditional `group` bits are ignored in favor of the
+ACL's own `group::` entry). Symptom: `journalctl -u satellite` shows
+`Open "streamdeck:..." failed: ... cannot open device with path /dev/hidrawN` even though
+`ls -l /dev/hidrawN` correctly shows `crw-rw----+ 1 root satellite` (the `+` is the tell — an ACL
+is present and is silently overriding what the ownership line implies).
+
+**Fix — strip the uaccess tag for these devices, numbered AFTER `70-uaccess.rules` (tag removal
+must run after the tag is added):**
+```
+# /etc/udev/rules.d/99-companion-satellite-no-uaccess.rules
+SUBSYSTEM=="hidraw", ENV{ID_AV_PRODUCTION_CONTROLLER}=="1", TAG-="uaccess"
+```
+`udevadm control --reload-rules && udevadm trigger --subsystem-match=hidraw` applies it going
+forward (a FUTURE hotplug/reboot never gains the ACL). A device that's ALREADY plugged in and
+already carries the stale ACL from before the rule existed needs an explicit
+`setfacl -b /dev/hidrawN` reset — the udev rule alone doesn't retroactively strip an
+already-applied ACL. Both steps are baked into `setup-imag.sh` step 20 (loops every
+`ID_AV_PRODUCTION_CONTROLLER=1` hidraw device and resets its ACL on every run — idempotent-safe).
+
+**Verify:** `journalctl -u satellite -n 30` should show `Connected to Companion:
+CompanionVersion="..."` with no `cannot open device` error, and `curl
+http://127.0.0.1:9999/api/surfaces` (the satellite's own REST server, note the `/api/` prefix —
+plain `/status`/`/surfaces` 404) should list the claimed surface, e.g.
+`[{"pluginId":"elgato-stream-deck",...,"surfaceId":"streamdeck:...","productName":"Elgato Stream
+Deck MK.2"}]`. This proves the TECHNICAL connection + surface claim — it does NOT prove the
+operator's actual Companion button config is wired up correctly on the Companion server side
+(adding/mapping the surface in Companion's own web UI is a separate, human step).
+
+**Reusable lesson for ANY future headless-service-needs-a-HID-device work on a Linux desktop
+box** (imag-nb or any future similar provision): the `70-uaccess.rules`/`logind` ACL mechanism
+exists to let a LOGGED-IN desktop user access convenience devices (webcams, joysticks, "AV
+production controllers", smartcards, etc.) without root — it actively fights a udev rule that
+tries to grant GROUP-based access instead, because ONCE an ACL exists on a file, the ACL wins
+over the group bits entirely. Any headless service (not tied to a login session) that needs to
+open such a device needs its own `TAG-="uaccess"` rule numbered after `70-`, not just a
+`GROUP=`/`MODE=` rule alone.

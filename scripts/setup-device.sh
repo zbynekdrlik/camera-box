@@ -37,6 +37,17 @@ fail() {
                             # sourced (unmodified) by verify-device.sh's (s) check and
                             # create-usb-linux.sh, single source of truth for the size cap + paths
 
+# shellcheck source=scripts/lib/log-diet.sh
+. "$HERE/lib/log-diet.sh"  # log_diet_journald_dropin (#762) -- also sourced (unmodified) by
+                           # verify-device.sh's (u) check and create-usb-linux.sh, single source
+                           # of truth for the journald RuntimeMaxUse cap path/value
+
+# shellcheck source=scripts/lib/udev-camera-box.sh
+. "$HERE/lib/udev-camera-box.sh"  # udev_camera_box_rules_content/udev_camera_box_helper_script_content
+                                   # (#894) -- also sourced (unmodified) by verify-device.sh's (w)
+                                   # check and create-usb-linux.sh, single source of truth for the
+                                   # conditional restart-on-hotplug + autosuspend-on-readd udev rule
+
 # GitHub repo + CI dev-build channel for installing the fleet-matching binary (#457 -- the fleet
 # runs CI dev-builds, e.g. 1.7.0-dev.157, never a GitHub release; see STEP 3 below).
 GITHUB_REPO="zbynekdrlik/camera-box"
@@ -100,6 +111,65 @@ cleanup_bak_cruft() {
             echo "  Removed stale cruft: $f"
         done
     done
+}
+
+# cam2_is_painter_box DEVICE_NAME -> 0 iff DEVICE_NAME (already uppercased by resolve_device_name)
+# is "CAM2", the ONE fixed painter box. #863: cam2 is permanently excluded from
+# camera_strih_route() (scripts/camera-set.sh / recording-e2e.sh) -- its monitor is a diagnostic
+# screen, never a camera-operator return preview. This is a FIXED-ROLE gate (like cam1 being the
+# default source camera), NOT a re-introduction of the per-box preview-routing table #528
+# rejected -- it decides nothing about WHICH camera's feed shows anywhere, only whether THIS one
+# architecturally-fixed box gets the permanent devel-mode painter installed.
+cam2_is_painter_box() {
+    [ "${1:-}" = "CAM2" ]
+}
+
+# cam2_painter_no_display_dropin_content -> the systemd drop-in text that makes camera-box on
+# cam2 PERMANENTLY skip its own --display thread (#863). cam2-painter.service (below) is the SOLE
+# owner of cam2's /dev/fb0 / DRM master -- if camera-box's own unconditional HDMI preview (#528)
+# also grabbed it, the two would race the same physical output with undefined visual result, the
+# same conflict rig-mode.sh's TRANSIENT #291 no-display drop-in avoids during a measurement
+# window. Here it's PERMANENT because cam2's painter role is architecturally fixed, not a
+# per-run state.
+cam2_painter_no_display_dropin_content() {
+    cat <<'EOF'
+[Service]
+# #863: cam2 is the fixed painter box -- camera-box's own display thread must never grab
+# /dev/fb0 (or DRM master) here; cam2-painter.service is always the sole owner of this
+# box's monitor.
+Environment=CAMERA_BOX_NO_DISPLAY=1
+EOF
+}
+
+# cam2_painter_service_unit_content -> the systemd unit text for the PERMANENT devel-mode dual-QR
+# painter (#863 -- "V devel režime má na cam2 monitore trvale bežať QR"). Mirrors the exact
+# pinned flags rig-mode.sh's TEST-mode painter uses (qr-size 700, paint-fps 60, --dual-qr) MINUS
+# the QPSK audio marker (this is a passive visual health display, not a measurement run) --
+# colour-scale/motion-sweep already default ON under --paint-only (src/bin/frame-probe.rs), so
+# nothing else needs to be passed. duration-secs is a large-but-finite bound (~1 year) because
+# frame-probe has no "run forever" mode; Restart=always self-heals both that eventual natural
+# exit and any crash, so the monitor practically never goes dark on its own.
+cam2_painter_service_unit_content() {
+    cat <<'EOF'
+[Unit]
+Description=cam2 permanent dual-QR devel-mode painter (#863)
+Documentation=https://github.com/zbynekdrlik/camera-box
+After=camera-box.service
+Wants=camera-box.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/frame-probe --paint-only --dual-qr --qr-size 700 --paint-fps 60 --duration-secs 31536000
+Restart=always
+RestartSec=2
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cam2-painter
+
+[Install]
+WantedBy=multi-user.target
+EOF
 }
 
 # root_mount_is_readonly OPTS -> 0 iff the FIRST comma-token of a mount-options string is exactly
@@ -337,6 +407,60 @@ elif command -v gh >/dev/null 2>&1 && [ -n "${GH_TOKEN:-}" ]; then
     rm -rf "$DIST_DIR"
 else
     fail "gh CLI unavailable or GH_TOKEN unset -- cannot auto-fetch the fleet dev-build. Install manually, or re-run with --binary <url|path> / CAMERA_BOX_BINARY_URL"
+fi
+
+# =============================================================================
+# STEP 3b: cam2 ONLY -- install the permanent devel-mode dual-QR painter (#863)
+# =============================================================================
+# #863: "V devel režime má na cam2 monitore trvale bežať QR" -- cam2_painter_service_stop_cmds/
+# start_cmds in scripts/rig-mode.sh (#440) and recording-e2e.sh's cleanup() `systemctl start
+# cam2-painter` have ALWAYS assumed this unit exists; it was simply never installed anywhere --
+# this STEP is the missing provisioning path (#863's root cause). Enable-only, like camera-box's
+# own STEP 7 below: this script never starts services live, everything here takes effect on the
+# next reboot.
+if cam2_is_painter_box "$DEVICE_NAME"; then
+    echo ""
+    echo -e "${GREEN}[3b] Installing cam2 permanent dual-QR devel-mode painter (#863)...${NC}"
+    # Same resolution shape as STEP 3's camera-box binary fetch (local path / URL override /
+    # default CI artifact download), scoped to the probe-tools-linux-amd64 artifact's frame-probe
+    # binary.
+    FRAME_PROBE_SRC="${FRAME_PROBE_BINARY_URL:-}"
+    if [ -n "$FRAME_PROBE_SRC" ] && [ -f "$FRAME_PROBE_SRC" ]; then
+        echo "  Using local frame-probe: $FRAME_PROBE_SRC"
+        install -m 0755 "$FRAME_PROBE_SRC" /usr/local/bin/frame-probe
+    elif [ -n "$FRAME_PROBE_SRC" ]; then
+        echo "  Downloading frame-probe from: $FRAME_PROBE_SRC"
+        curl -fsSL "$FRAME_PROBE_SRC" -o /usr/local/bin/frame-probe \
+            || fail "could not download frame-probe from $FRAME_PROBE_SRC"
+        chmod +x /usr/local/bin/frame-probe
+    elif command -v gh >/dev/null 2>&1 && [ -n "${GH_TOKEN:-}" ]; then
+        echo "  Fetching probe-tools-linux-amd64 CI artifact (branch: $CI_BRANCH)..."
+        PROBE_RUN_ID="$(gh run list --repo "$GITHUB_REPO" --branch "$CI_BRANCH" --workflow ci.yml \
+            --status success --limit 1 --json databaseId -q '.[0].databaseId // empty' 2>/dev/null || true)"
+        [ -n "$PROBE_RUN_ID" ] || fail "no successful CI run found on branch '$CI_BRANCH' -- cannot fetch frame-probe (#863). Install manually to /usr/local/bin/frame-probe, or re-run with FRAME_PROBE_BINARY_URL=<url|path>."
+        PROBE_DIST_DIR="$(mktemp -d)"
+        if gh run download "$PROBE_RUN_ID" --repo "$GITHUB_REPO" -n probe-tools-linux-amd64 --dir "$PROBE_DIST_DIR" 2>/dev/null \
+            && [ -f "$PROBE_DIST_DIR/frame-probe" ]; then
+            install -m 0755 "$PROBE_DIST_DIR/frame-probe" /usr/local/bin/frame-probe
+            echo "  frame-probe installed from CI run $PROBE_RUN_ID"
+        else
+            rm -rf "$PROBE_DIST_DIR"
+            fail "gh run download failed for run $PROBE_RUN_ID -- could not fetch frame-probe (probe-tools-linux-amd64 artifact, #863)"
+        fi
+        rm -rf "$PROBE_DIST_DIR"
+    else
+        fail "gh CLI unavailable or GH_TOKEN unset -- cannot auto-fetch frame-probe (probe-tools-linux-amd64 CI artifact, #863). Install manually, or re-run with FRAME_PROBE_BINARY_URL=<url|path>."
+    fi
+
+    # #863: cam2's OWN camera-box must never contest /dev/fb0 -- see the cam2_painter_no_display_
+    # dropin_content() header comment above for the full story.
+    mkdir -p /etc/systemd/system/camera-box.service.d
+    cam2_painter_no_display_dropin_content > /etc/systemd/system/camera-box.service.d/cam2-no-display.conf
+    cam2_painter_service_unit_content > /etc/systemd/system/cam2-painter.service
+    systemctl daemon-reload
+    systemctl enable cam2-painter.service
+    echo "  cam2-painter.service installed + enabled (permanent dual-QR, qr-size 700, 60fps -- takes effect after reboot, #863)"
+    echo "  camera-box.service.d/cam2-no-display.conf installed -- camera-box will never grab /dev/fb0 on cam2 (after reboot)"
 fi
 
 # =============================================================================
@@ -836,9 +960,12 @@ apt-get update -qq
 # #362: include the FULL NDI/audio runtime dep set so a fresh box can RUN camera-box (the CAM3
 # clone crash-looped on missing libndi deps): libasound2t64 (ALSA, intercom), libavahi-common3
 # (libndi links it alongside libavahi-client3), and avahi-utils (avahi-browse for diagnosis).
-apt-get install -y -qq avahi-daemon libavahi-client3 libavahi-common3 avahi-utils libasound2t64 v4l-utils alsa-utils ethtool curl ca-certificates 2>/dev/null || true
+# #743: psmisc (provides `fuser`) joins the same dual-bake as create-usb-linux.sh -- a fresh
+# cam2 clone (2026-07-13) had no `fuser`, false-FAILing rig-mode.sh's #464 KMS-held check AND
+# silently no-op'ing recording-e2e.sh's capture-release busy-wait.
+apt-get install -y -qq avahi-daemon libavahi-client3 libavahi-common3 avahi-utils libasound2t64 v4l-utils alsa-utils ethtool curl ca-certificates psmisc 2>/dev/null || true
 systemctl enable avahi-daemon
-echo "  Installed: avahi-daemon, libavahi-client3, libavahi-common3, avahi-utils, libasound2t64, v4l-utils, alsa-utils, ethtool, curl, ca-certificates"
+echo "  Installed: avahi-daemon, libavahi-client3, libavahi-common3, avahi-utils, libasound2t64, v4l-utils, alsa-utils, ethtool, curl, ca-certificates, psmisc"
 
 # Create rc.local for power management settings (USB autosuspend, etc.)
 cat > /etc/rc.local << 'RCEOF'
@@ -864,6 +991,27 @@ exit 0
 RCEOF
 chmod +x /etc/rc.local
 echo "  Created: /etc/rc.local (USB autosuspend off, CPU performance)"
+
+# #894: rc.local (above) only applies USB-autosuspend-off ONCE at boot -- a grabber that
+# re-enumerates LATER comes back at the kernel default `auto` (measured fleet-wide: the box that
+# stayed at `on` had zero re-enumerations that day; the two that drifted to `auto` had 5 and 1, an
+# amplifying feedback loop). Install a udev rule that re-applies it on EVERY video4linux "add",
+# scoped to the grabber that actually fired (never a blanket SUBSYSTEM=="usb" match) via the
+# helper script below. The SAME rule also replaces the fleet's old UNCONDITIONAL
+# "restart camera-box.service on hotplug" rule (traced to the retired scripts/setup.sh, #563 --
+# it never migrated into this script) with a CONDITIONAL one: skip the restart while an E2E
+# camera-box-burn-*.service owns the device, so a benign USB re-enumeration during a measurement
+# run can no longer steal the capture node back from the burn unit (77/NOPERM, mislabeled as a
+# frozen camera in the verdict).
+mkdir -p /etc/udev/rules.d
+udev_camera_box_rules_content > /etc/udev/rules.d/99-camera-box.rules
+udev_camera_box_helper_script_content > /usr/local/bin/camera-box-udev-video-add.sh
+chmod +x /usr/local/bin/camera-box-udev-video-add.sh
+# Reload the rule DB now so a re-provisioning pass against an already-booted box picks it up
+# immediately -- this is NOT starting/restarting camera-box.service itself (that stays deferred to
+# the next reboot, per this script's own convention), just refreshing udev's own rule cache.
+udevadm control --reload-rules 2>/dev/null || true
+echo "  Installed: /etc/udev/rules.d/99-camera-box.rules + /usr/local/bin/camera-box-udev-video-add.sh (#894 -- conditional hotplug restart + autosuspend re-apply)"
 
 # =============================================================================
 # STEP 17: Install dantesync (PTP time synchronization) -- the SOLE clock authority
@@ -903,6 +1051,26 @@ for _u in ptp4l phc2sys; do
     systemctl mask "$_u" 2>/dev/null || true
 done
 echo "  #591/#597: purged + masked competing timesync daemons (dantesync is the sole clock authority)"
+
+# #762: rsyslog is REDUNDANT on this appliance -- journald already captures everything (the
+# ACTUAL log store any operator/harness reads, e.g. `journalctl -u camera-box`), and nothing
+# reads /var/log/syslog on a read-only appliance with no operator logging in. A live incident
+# (cam1, 2026-07-15) showed rsyslogd enter a write-error feedback loop once the 50MB /var/log
+# tmpfs filled -- write fails, logs the failure, journald forwards it, write fails again -- at
+# ~400 lines/s, burning 42.8% CPU and starving the camera-box send path badly enough to
+# measurably drift NDI delivery timing. Same disable -> purge -> mask discipline as the
+# #591/#597 stanzas above -- purge, not just mask (a masked-but-installed daemon can still be
+# re-enabled). Cap journald's own RuntimeMaxUse so the journal itself can never grow to fill the
+# SAME tmpfs rsyslog used to (log_diet_journald_dropin, scripts/lib/log-diet.sh -- single source
+# of truth shared with verify-device.sh's (u) check and create-usb-linux.sh).
+systemctl disable --now rsyslog 2>/dev/null || true
+apt-get purge -y rsyslog 2>/dev/null \
+    || dpkg --purge --force-depends rsyslog 2>/dev/null || true
+systemctl mask rsyslog 2>/dev/null || true
+mkdir -p "$(dirname "$LOG_DIET_JOURNALD_DROPIN_PATH")"
+log_diet_journald_dropin > "$LOG_DIET_JOURNALD_DROPIN_PATH"
+systemctl restart systemd-journald 2>/dev/null || true
+echo "  #762: purged rsyslog + capped journald RuntimeMaxUse=${LOG_DIET_JOURNALD_RUNTIME_MAX} (log-storm CPU/disk fix)"
 
 DANTESYNC_INSTALLED=false
 

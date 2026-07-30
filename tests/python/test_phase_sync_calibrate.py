@@ -178,6 +178,41 @@ class TestLoadMeasuredJson:
             phase_sync_calibrate.load_measured_json(str(p))
 
 
+class TestApplyMargin:
+    """#757 (2026-07-15 live regression): zero-headroom pins produced a uniform copies≈gaps
+    pattern on EVERY camera (ordinary jitter flipping frames across the ts-align deadline).
+    apply_margin() raises the floor by a uniform constant without disturbing the relative
+    "slowest lowest pin, fastest highest" ordering the offset kernel already establishes."""
+
+    def test_shifts_every_offset_by_the_same_constant(self):
+        offsets = {"NDI cam1": 3, "NDI cam4": 47, "NDI cam5": 8}
+        out = phase_sync_calibrate.apply_margin(offsets, 10)
+        assert out == {"NDI cam1": 13, "NDI cam4": 57, "NDI cam5": 18}
+
+    def test_preserves_relative_ordering_and_differences(self):
+        offsets = {"NDI cam1": 3, "NDI cam4": 47}
+        out = phase_sync_calibrate.apply_margin(offsets, 15)
+        assert out["NDI cam4"] - out["NDI cam1"] == offsets["NDI cam4"] - offsets["NDI cam1"]
+
+    def test_rounds_to_the_nearest_whole_ms(self):
+        offsets = {"NDI cam1": 3.0}
+        out = phase_sync_calibrate.apply_margin(offsets, 10.6)
+        assert out == {"NDI cam1": 14}  # round(13.6) == 14
+
+    def test_zero_or_negative_margin_is_a_noop(self):
+        offsets = {"NDI cam1": 3, "NDI cam4": 47}
+        assert phase_sync_calibrate.apply_margin(offsets, 0) == offsets
+        assert phase_sync_calibrate.apply_margin(offsets, -5) == offsets
+
+    def test_never_mutates_the_input_dict(self):
+        offsets = {"NDI cam1": 3}
+        phase_sync_calibrate.apply_margin(offsets, 10)
+        assert offsets == {"NDI cam1": 3}, "apply_margin must not mutate its input"
+
+    def test_empty_offsets_returns_empty(self):
+        assert phase_sync_calibrate.apply_margin({}, 10) == {}
+
+
 # ---------------------------------------------------------------------------
 # fake OBS-websocket RPC layer (mirrors tests/python/test_av_sync_calibrate.py's FakeObs,
 # extended to track PER-SOURCE state since #286 applies N sources, not one)
@@ -233,7 +268,10 @@ class TestReadCurrentLatency:
         def rpc(ws, method, params=None, ignore_err=False, timeout_s=None):
             return {"inputSettings": {}}
         monkeypatch.setattr(phase_sync_calibrate, "_rpc", rpc)
-        assert phase_sync_calibrate.read_current_latency(None, "NDI cam5") == 3
+        assert (
+            phase_sync_calibrate.read_current_latency(None, "NDI cam5")
+            == phase_sync_calibrate.PHASE_SYNC_FLOOR_MS
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -313,6 +351,38 @@ class TestApplyLatencyRollback:
 
 
 # ---------------------------------------------------------------------------
+# #707 -- the FINAL applied genlock_latency_ms_src must never go below PHASE_SYNC_FLOOR_MS,
+# enforced at the point of application (apply_latency), not just inside the offset kernel --
+# so a future caller (or av_sync_calibrate.py writing the SAME property afterwards, see that
+# script's own mirrored test) can never silently undercut it.
+# ---------------------------------------------------------------------------
+
+class TestApplyLatencyEnforcesJitterFloor:
+    def test_below_floor_target_is_clamped_up_before_writing(self, monkeypatch):
+        fake = FakeObs(latencies={"NDI cam5": 450})
+        monkeypatch.setattr(phase_sync_calibrate, "_rpc", fake.rpc)
+        actual = phase_sync_calibrate.apply_latency(None, "NDI cam5", 450, 1)
+        assert actual == phase_sync_calibrate.PHASE_SYNC_FLOOR_MS
+
+        sets = fake.set_calls()
+        latency_sets = [
+            p for _, p in sets
+            if p.get("inputName") == "NDI cam5"
+            and phase_sync_calibrate.GENLOCK_SRC_LATENCY_KEY in p.get("inputSettings", {})
+        ]
+        assert len(latency_sets) == 1, f"expected exactly one apply (no rollback), got {sets}"
+        assert latency_sets[0]["inputSettings"][
+            phase_sync_calibrate.GENLOCK_SRC_LATENCY_KEY
+        ] == phase_sync_calibrate.PHASE_SYNC_FLOOR_MS
+
+    def test_a_value_already_above_the_floor_is_unaffected(self, monkeypatch):
+        fake = FakeObs(latencies={"NDI cam5": 450})
+        monkeypatch.setattr(phase_sync_calibrate, "_rpc", fake.rpc)
+        actual = phase_sync_calibrate.apply_latency(None, "NDI cam5", 450, 200)
+        assert actual == 200
+
+
+# ---------------------------------------------------------------------------
 # (f) write_last_json shape
 # ---------------------------------------------------------------------------
 
@@ -358,8 +428,10 @@ class TestDefaultLastJsonPath:
 # (i) #636 -- remote push plan: the SAME persist-location gap #465 fixed in
 # av_sync_calibrate.py. This script also connects to --host over the OBS WebSocket and does
 # not need to run ON the stream box, so default_last_json_path() falls back to a LOCAL path
-# nothing on the stream box can read. scp/ssh to Windows is denied, so the only established
-# channel to place a file there is the win-* MCP FileWrite tool, driven by the operator/agent.
+# nothing on the stream box can read. scp/ssh to Windows was historically believed denied; #701
+# proved plain scp/ssh actually reaches strih/stream, but for a short in-memory JSON blob like
+# this one, the established channel this script still uses is the win-* MCP FileWrite tool,
+# driven by the operator/agent.
 # remote_push_plan() prints an explicit, copy-pasteable plan -- same convention as
 # av_sync_calibrate.remote_push_plan() / obs-self-heal-install.sh's PLAN block.
 # ---------------------------------------------------------------------------

@@ -195,9 +195,12 @@ fn strih_recovery_script_stops_ahk_before_kill_and_restarts_after_verify() {
     let verify_pos = p
         .find("VerifyRecovered:")
         .expect("strih script must contain the explicit VerifyRecovered step");
+    // #867: anchor on the Step 4/4 marker rather than the raw relaunch text — the same
+    // ahk_resolve_and_relaunch_ps() block is ALSO embedded earlier (inside the reused
+    // launch-obs-genlock.sh program's own Step 2/4), so a bare text anchor would be ambiguous.
     let start_ahk_pos = p
-        .find("Start-Process -FilePath 'AutoHotkey64.exe'")
-        .expect("strih script must contain a real AutoHotkey64 restart command");
+        .find("Step 4/4: RestartAhk")
+        .expect("strih script must contain the Step 4/4 AutoHotkey64 restart step");
 
     assert!(
         stop_ahk_pos < kill_obs_pos,
@@ -227,9 +230,9 @@ fn stream_recovery_script_never_touches_ahk() {
          Program:\n{p}"
     );
     assert!(
-        !p.contains("Start-Process -FilePath 'AutoHotkey64.exe'"),
-        "stream has no AHK watcher — must not emit a real AutoHotkey64 start command. \
-         Program:\n{p}"
+        !p.contains("$ahkScriptPath"),
+        "stream has no AHK watcher — must not embed the AutoHotkey64 resolve+relaunch machinery \
+         (#867's ahk_resolve_and_relaunch_ps) at all. Program:\n{p}"
     );
     assert!(
         p.contains("no-op") && p.contains("AutoHotkey64"),
@@ -283,14 +286,61 @@ fn restart_ahk_runs_regardless_of_verify_outcome() {
         .find("$verified  = ")
         .expect("verify assignment must exist");
     let restart_pos = p
-        .find("Start-Process -FilePath 'AutoHotkey64.exe'")
-        .expect("restart command must exist");
+        .find("Step 4/4: RestartAhk")
+        .expect("restart step must exist");
     // No `if ($verified)` gate wraps the restart — the restart line appears unconditionally
     // right after the verify block, not inside a conditional branch on $verified.
     let between = &p[verify_pos..restart_pos];
     assert!(
         !between.contains("if ($verified)") && !between.contains("if (-not $verified)"),
         "#411: RestartAhk must NOT be gated on $verified — it always runs. Between:\n{between}"
+    );
+}
+
+/// #867: the AutoHotkey64 restart must NEVER rely on a bare `-FilePath 'AutoHotkey64.exe'` launch
+/// — AHK v2 is installed user-scoped under `%LOCALAPPDATA%\Programs\AutoHotkey\v2\` and is NOT on
+/// PATH (confirmed live on strih via comment #5121884098 on #867), so a bare exe-name launch can
+/// never resolve. This is the exact shape that root-caused a real strih outage.
+#[test]
+fn strih_ahk_restart_never_uses_bare_exe_name_867() {
+    let p = recovery_script_strih();
+    assert!(
+        !p.contains("-FilePath 'AutoHotkey64.exe'")
+            && !p.contains("-FilePath \"AutoHotkey64.exe\""),
+        "#867: must never launch AutoHotkey64 by a bare exe name relying on PATH. Program:\n{p}"
+    );
+    assert!(
+        p.contains("LOCALAPPDATA") && p.contains("AutoHotkey\\v2\\AutoHotkey64.exe"),
+        "#867: must probe the user-scoped %LOCALAPPDATA%\\Programs\\AutoHotkey\\v2\\ install \
+         location. Program:\n{p}"
+    );
+}
+
+/// #867: the restart must be VERIFIED (poll `Get-Process AutoHotkey64`) and log an explicit
+/// FATAL line — never a blind unconditional success claim — when it does not come back.
+#[test]
+fn strih_ahk_restart_is_verified_and_logs_fatal_on_failure_867() {
+    let p = recovery_script_strih();
+    assert!(
+        p.contains("Get-Process AutoHotkey64") && p.contains("$ahkRelaunchVerified"),
+        "#867: the AHK restart must poll Get-Process AutoHotkey64 and record whether it \
+         verified. Program:\n{p}"
+    );
+    let step4_pos = p
+        .find("Step 4/4: RestartAhk")
+        .expect("Step 4/4 marker must exist");
+    let success_pos = p[step4_pos..]
+        .find("RestartAhk: AutoHotkey64 relaunched via")
+        .map(|off| off + step4_pos)
+        .expect("a success log line naming the relaunch target must exist");
+    let fatal_pos = p[step4_pos..]
+        .find("FATAL: RestartAhk failed")
+        .map(|off| off + step4_pos)
+        .expect("an explicit FATAL log line must exist when the relaunch is not verified");
+    assert!(
+        success_pos < fatal_pos,
+        "#867: success log line must precede the failure log line (both inside the same \
+         if/else on $ahkRelaunchVerified). Program:\n{p}"
     );
 }
 
@@ -366,7 +416,7 @@ fn recovery_lock_merge_precedes_steps_and_explicit_clear_follows_them() {
         .find("$state.recovery_in_progress = $false")
         .expect("explicit lock-clear line must exist");
     let restart_ahk_pos = p
-        .find("Start-Process -FilePath 'AutoHotkey64.exe'")
+        .find("Step 4/4: RestartAhk")
         .expect("RestartAhk step must exist");
     assert!(
         merge_pos < stop_ahk_pos,

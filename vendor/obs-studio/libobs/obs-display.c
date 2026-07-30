@@ -268,17 +268,48 @@ void render_display(struct obs_display *display)
 	 * skipped at most OBS_DISPLAY_MAX_CONSECUTIVE_SKIPS ticks in a row; the (K+1)-th over-budget
 	 * tick is FORCED to render (and the per-display skip counter resets after the draw, below).
 	 * So the Multiview throttles to a reduced-but-NONZERO cadence (~15fps at K=3) instead of
-	 * freezing — decouple, not disable (the multiview-must-not-affect-program rule). */
+	 * freezing — decouple, not disable (the multiview-must-not-affect-program rule).
+	 *
+	 * #756 (imag-nb live finding): the budget gate above is SOFT — a monitoring display cheap
+	 * enough to always fit under the remaining budget (imag's Multiview: ~6.7-10.45ms EWMA
+	 * under a ~15ms budget) is NEVER actually throttled by it, even though render_divisor
+	 * marks it for 1/divisor cadence. render_frame_counter is a hard per-instance tick
+	 * counter, incremented every tick this display is throttleable (regardless of
+	 * skip/render outcome); obs_display_should_skip() uses it to ALWAYS skip a
+	 * cadence-ineligible tick regardless of cost/budget, closing that gap while the
+	 * existing budget-based over-budget throttle (and its #293 floor) still applies on top,
+	 * on the cadence-eligible ticks. */
 	if (display->render_divisor > 1) {
+		display->render_frame_counter++;
 		const uint64_t interval = obs->video.video_frame_interval_ns;
 		const uint64_t tick_start = obs->video.graphics_frame_start_ns;
 		const uint64_t ewma = display->render_ewma_ns;
+		/* camera-box #776: the frontend's divisor (2, OBSProjector.cpp) is calibrated for
+		 * 60fps-class canvases (60/2 = 30fps multiview cells). On a 30fps canvas the SAME
+		 * constant halves the multiview to a visibly choppy 15fps while the budget gate
+		 * below shows real headroom (strih: ~15ms free of the ~30ms budget; user-caught
+		 * 2026-07-15). Treat the frontend's value as the throttleable-display MARKER plus
+		 * an UPPER BOUND, and derive the EFFECTIVE divisor from the canvas rate targeting
+		 * ~30fps cells: round(33.3ms / frame_interval), clamped to [1, frontend divisor].
+		 * 60fps canvas -> 2 (imag, unchanged); 30fps canvas -> 1 (multiview renders every
+		 * tick). An effective divisor of 1 stays budget-gated (obs-display-budget.h #776):
+		 * the program always has priority on a tight tick, and the #293 anti-starvation
+		 * floor still applies. */
+		uint32_t effective_divisor = display->render_divisor;
+		if (interval != 0) {
+			const uint64_t target_cell_interval_ns = 33333333; /* ~30fps cells */
+			uint32_t derived = (uint32_t)((target_cell_interval_ns + interval / 2) / interval);
+			if (derived < 1)
+				derived = 1;
+			if (derived < effective_divisor)
+				effective_divisor = derived;
+		}
 		if (ewma != 0 && interval != 0 && tick_start != 0) {
 			const uint64_t now = os_gettime_ns();
 			const uint64_t elapsed = (now > tick_start) ? (now - tick_start) : 0;
 			const uint64_t budget = interval - interval / 10; /* 90% safety margin */
-			if (obs_display_should_skip(display->render_divisor, ewma, elapsed, budget,
-						    display->render_consecutive_skips)) {
+			if (obs_display_should_skip(effective_divisor, display->render_frame_counter,
+						    ewma, elapsed, budget, display->render_consecutive_skips)) {
 				display->render_consecutive_skips++;
 				return;
 			}

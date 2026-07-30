@@ -50,19 +50,17 @@ fn full_path_e2e_yml_never_uses_trigger_level_path_filter() {
 }
 
 /// A docs-only-detection step must exist, gated to pull_request events only (a workflow_dispatch
-/// manual soak has no PR diff to inspect and must never be treated as docs-only), and must derive
-/// the changed-files list via the GitHub API/CLI (`gh pr diff`), never a trigger-level filter.
+/// manual soak has no PR diff to inspect and must never be treated as docs-only), runtime-derived
+/// (never a trigger-level filter), and must write its verdict to GITHUB_OUTPUT. #746 changed HOW
+/// the changed-files list is derived (a local `git diff`, not the `gh pr diff` API — see
+/// tests/harness_full_path_e2e_docs_only_fail_open_746.rs for that mechanism's own pins); this
+/// test only pins the parts #746 did NOT change.
 #[test]
 fn full_path_e2e_yml_has_docs_only_detection_step() {
     let s = read_workflow();
     assert!(
         s.contains("id: docs-only"),
         "#646: a step with id: docs-only must exist so later steps can reference its output"
-    );
-    assert!(
-        s.contains("gh pr diff"),
-        "#646: the docs-only detection must derive the changed-files list via `gh pr diff` \
-         (runtime, not a trigger-level path filter)"
     );
     assert!(
         s.contains("docs_only=") && s.contains("GITHUB_OUTPUT"),
@@ -156,18 +154,8 @@ fn full_path_e2e_yml_recording_step_is_conditioned_on_docs_only() {
     );
 }
 
-/// `gh pr diff` needs read access to the PR — the workflow's permissions block must grant it
-/// explicitly (least-privilege, not relying on an implicit default).
-#[test]
-fn full_path_e2e_yml_permissions_include_pull_requests_read() {
-    let s = read_workflow();
-    let perm_pos = s
-        .find("permissions:")
-        .expect("permissions: block must exist");
-    let jobs_pos = s.find("\njobs:").unwrap_or(s.len());
-    let perm_block = &s[perm_pos..jobs_pos];
-    assert!(
-        perm_block.contains("pull-requests: read"),
-        "#646: permissions must include pull-requests: read (gh pr diff needs it): {perm_block}"
-    );
-}
+// #746 SUPERSEDES this test (removed, not just left stale): the docs-only step no longer calls
+// `gh pr diff` (it derives the changed-file list via a local `git diff` instead, which needs no
+// PR-scoped permission at all), so `pull-requests: read` was dropped from the permissions block
+// as an unused least-privilege cleanup. The opposite assertion now lives in
+// tests/harness_full_path_e2e_docs_only_fail_open_746.rs::permissions_no_longer_require_pull_requests_read_746.

@@ -265,21 +265,32 @@ obs_canvas_t *obs_load_canvas(obs_data_t *data)
 /* Free canvas mix (if any) */
 void obs_canvas_clear_mix(obs_canvas_t *canvas)
 {
-	if (!canvas->mix)
+	/* camera-box #793: DETACH the pointer BEFORE freeing the mix. The old order
+	 * (free under mixes_mutex, THEN canvas->mix = NULL) left canvas->mix dangling
+	 * for the whole locked free section — obs_get_video() on an obs-websocket
+	 * pooled thread (Companion's GetStats fired on every connect) read the freed
+	 * mix and passed a garbage video_t* into video_output_get_skipped_frames
+	 * (live crashes 2026-07-18: "segfault at 7e1" = garbage base + parent offset,
+	 * killing the imag wall mid-event). Readers now see either the valid mix or
+	 * NULL — never freed memory. (Full fix would refcount mixes; this ordering +
+	 * the NULL-safe obs_get_video + the video-io getter guards closes the
+	 * practical window.) */
+	struct obs_core_video_mix *old_mix = canvas->mix;
+	if (!old_mix)
 		return;
+
+	canvas->mix = NULL;
 
 	pthread_mutex_lock(&obs->video.mixes_mutex);
 	for (size_t i = 0; i < obs->video.mixes.num; i++) {
 		struct obs_core_video_mix *mix = obs->video.mixes.array[i];
-		if (mix == canvas->mix) {
+		if (mix == old_mix) {
 			da_erase(obs->video.mixes, i);
 			obs_free_video_mix(mix);
 			break;
 		}
 	}
 	pthread_mutex_unlock(&obs->video.mixes_mutex);
-
-	canvas->mix = NULL;
 }
 
 /* Clear mixes attached to canvases */

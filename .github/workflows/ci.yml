@@ -305,7 +305,11 @@ jobs:
         # missing), so it must be present for the test module to import.
         # matplotlib: scripts/latency-line-report.py (#209 continuous-line latency
         # proof) imports it at module load; the plotter test renders a real PNG.
-        run: pip install pytest websocket-client matplotlib
+        # opencv-python-headless + numpy: scripts/qr_screenshot_check.py (#722 pixel
+        # proof) decodes QR codes from OBS screenshots via cv2.QRCodeDetector;
+        # headless avoids pulling in GUI/X11 deps this CI runner doesn't have.
+        # Pillow + qrcode: test-only, generate REAL fixture QR codes to decode back.
+        run: pip install pytest websocket-client matplotlib opencv-python-headless numpy Pillow qrcode
 
       - name: Run harness unit tests (#149 self-verify guard)
         # PYTEST_DISABLE_PLUGIN_AUTOLOAD keeps the run hermetic (no third-party

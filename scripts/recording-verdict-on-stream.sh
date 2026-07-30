@@ -31,9 +31,21 @@
 #       --out-dir 'C:\\camera-box\\verdict-out' \
 #       -- <recording-verdict args, paths already Windows-style>
 #
+# #703: --execute switches this script to ACTUALLY RUN the plan over ssh/scp (no MCP, no
+# human paste-step) — #701 proved plain OpenSSH+password ssh/scp works on this rig for stream
+# specifically. Needs --verdict-exe-local <dev1 path to the CI-built recording-verdict.exe>
+# (always uploaded fresh — correctness over speed, the exe is ~3MB) and --local-out-dir <dev1
+# dir to pull the partial + #186 pixel-proof dir into>. Planner mode (no --execute, the
+# default) is UNCHANGED — still the pure text-only plan for a human/MCP operator run.
+#
 # Env:
-#   STREAM_BOX (default 10.77.9.204) — informational; the MCP target is win-stream-snv.
+#   STREAM_BOX (default 10.77.9.204) — ssh/MCP target.
+#   STREAM_USER / STREAM_PW (default newlevel / newlevel, per targets.md) — --execute only.
 set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/win-ssh-exec.sh
+. "$HERE/lib/win-ssh-exec.sh"
 
 # Build the PowerShell command line that runs the verdict ON the stream box. RUST_LOG=info so
 # the per-recording decode progress is visible (the agent's liveness signal). The verdict
@@ -63,9 +75,14 @@ build_onbox_command() {
 # calling build_onbox_command) does NOT trigger arg-parsing against the sourcing shell's $@.
 main() {
   local STREAM_BOX="${STREAM_BOX:-10.77.9.204}"
+  local STREAM_USER="${STREAM_USER:-newlevel}"
+  local STREAM_PW="${STREAM_PW:-newlevel}"
   local VERDICT_EXE='C:\camera-box\recording-verdict.exe'
   local OUT_DIR='C:\camera-box\verdict-out'
   local STREAM_REC=""
+  local EXECUTE=0
+  local VERDICT_EXE_LOCAL=""
+  local LOCAL_OUT_DIR=""
   # Everything after `--` is passed verbatim to recording-verdict on the box.
   local -a PASS_ARGS=()
   while [ "$#" -gt 0 ]; do
@@ -78,10 +95,13 @@ main() {
           return 0
         fi
         shift 2 ;;
-      --stream-rec)  STREAM_REC="$2"; shift 2 ;;
-      --verdict-exe) VERDICT_EXE="$2"; shift 2 ;;
-      --out-dir)     OUT_DIR="$2"; shift 2 ;;
-      --)            shift; PASS_ARGS=("$@"); break ;;
+      --stream-rec)         STREAM_REC="$2"; shift 2 ;;
+      --verdict-exe)        VERDICT_EXE="$2"; shift 2 ;;
+      --out-dir)            OUT_DIR="$2"; shift 2 ;;
+      --execute)            EXECUTE=1; shift 1 ;;
+      --verdict-exe-local)  VERDICT_EXE_LOCAL="$2"; shift 2 ;;
+      --local-out-dir)      LOCAL_OUT_DIR="$2"; shift 2 ;;
+      --)                   shift; PASS_ARGS=("$@"); break ;;
       *) echo "unknown arg: $1" >&2; exit 2 ;;
     esac
   done
@@ -102,6 +122,44 @@ main() {
     fi
   done
   if [ -n "$OUT_PARTIAL" ]; then PIXELS_DIR="${OUT_PARTIAL%.json}-pixels"; fi
+
+  if [ "$EXECUTE" = "1" ]; then
+    if [ -z "$OUT_PARTIAL" ]; then
+      echo "ERROR: --execute needs a --out <partial.json> inside the forwarded args" >&2
+      exit 2
+    fi
+    if [ -z "$LOCAL_OUT_DIR" ]; then
+      echo "ERROR: --execute needs --local-out-dir <dev1 dir to pull results into>" >&2
+      exit 2
+    fi
+    command -v sshpass >/dev/null 2>&1 || {
+      echo "ERROR: sshpass not found — needed to ssh/scp into stream (#701/#703)." >&2
+      exit 1
+    }
+    echo "[recording-verdict-on-stream] --execute: ensuring $OUT_DIR exists on stream (${STREAM_BOX})"
+    win_ssh_run "$STREAM_USER" "$STREAM_PW" "$STREAM_BOX" \
+      "New-Item -ItemType Directory -Force -Path \"$OUT_DIR\" | Out-Null"
+    if [ -n "$VERDICT_EXE_LOCAL" ]; then
+      echo "[recording-verdict-on-stream] deploying $VERDICT_EXE_LOCAL -> ${STREAM_BOX}:${VERDICT_EXE} (always fresh — correctness over speed)"
+      win_ssh_upload "$STREAM_USER" "$STREAM_PW" "$STREAM_BOX" "$VERDICT_EXE_LOCAL" "$VERDICT_EXE"
+    fi
+    echo "[recording-verdict-on-stream] running on stream (${STREAM_BOX}): $ONBOX_CMD"
+    win_ssh_run "$STREAM_USER" "$STREAM_PW" "$STREAM_BOX" "$ONBOX_CMD"
+    mkdir -p "$LOCAL_OUT_DIR"
+    local partial_base local_partial
+    partial_base="$(win_ssh_basename "$OUT_PARTIAL")" # #703: plain `basename` doesn't split on \
+    local_partial="$LOCAL_OUT_DIR/$partial_base"
+    echo "[recording-verdict-on-stream] pulling back $OUT_PARTIAL -> $local_partial"
+    win_ssh_download "$STREAM_USER" "$STREAM_PW" "$STREAM_BOX" "$OUT_PARTIAL" "$local_partial"
+    if win_ssh_path_exists "$STREAM_USER" "$STREAM_PW" "$STREAM_BOX" "$PIXELS_DIR"; then
+      echo "[recording-verdict-on-stream] pulling back #186 pixel proofs $PIXELS_DIR -> $LOCAL_OUT_DIR/"
+      win_ssh_download_dir "$STREAM_USER" "$STREAM_PW" "$STREAM_BOX" "$PIXELS_DIR" "$LOCAL_OUT_DIR/"
+    else
+      echo "[recording-verdict-on-stream] no pixel-proof dir on stream — clean run, nothing flagged"
+    fi
+    echo "[recording-verdict-on-stream] done: partial at $local_partial"
+    return 0
+  fi
 
   # STEP 3 pull-back text: per-box extract (a partial JSON + its <partial>-pixels dir) vs the
   # legacy fused mode (a --json verdict + the OUT_DIR\pixel-proof PNGs).

@@ -41,11 +41,20 @@ struct RunResult {
 }
 
 fn run_gate(fake_py: &str, iterations: &str, sleep_secs: &str) -> RunResult {
+    // #830: isolate the shared cross-repo rig lease to a per-test tempdir -- never the real
+    // /var/tmp/rig-lease (this repo's shared dev1 checkout runs tests from multiple
+    // workers/parallel threads, see CLAUDE.md's shared-checkout GOTCHA). Derived from fake_py's
+    // own parent dir (already a fresh tempdir per test) so this helper's signature stays stable.
+    let lease_dir = Path::new(fake_py)
+        .parent()
+        .expect("fake_py must have a parent dir")
+        .join("rig-lease-830");
     let out = Command::new("bash")
         .arg(script_path())
         .env("OBS_PHASE2_PY", fake_py)
         .env("RIG_BUSY_GATE_ITERATIONS", iterations)
         .env("RIG_BUSY_GATE_SLEEP_SECS", sleep_secs)
+        .env("RIG_LEASE_DIR", lease_dir)
         .env_remove("GITHUB_STEP_SUMMARY")
         .output()
         .expect("run rig-busy-gate.sh");

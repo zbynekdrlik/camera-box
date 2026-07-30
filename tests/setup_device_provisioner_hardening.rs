@@ -634,3 +634,108 @@ fn create_usb_linux_sources_log_bound_and_writes_both_files_into_the_chroot() {
          chroot too (#679)"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// #762 — rsyslog is REDUNDANT on the cam appliances: PURGE it (journald already captures
+// everything; nothing reads /var/log/syslog on a ro appliance) + cap journald's own
+// RuntimeMaxUse so the journal itself can never fill the SAME tmpfs rsyslog used to. A live
+// cam1 incident (2026-07-15) showed rsyslogd enter a write-error feedback loop once the 50MB
+// /var/log tmpfs filled -- ~400 lines/s, 42.8% CPU -- starving the camera-box send path badly
+// enough to measurably drift NDI delivery timing. Same disable -> purge -> mask discipline as
+// the #591/#597 competing-timesync-daemon purge above (rsyslog is architecturally the same
+// class: a redundant daemon that must be GONE, not merely masked).
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn setup_device_purges_rsyslog() {
+    let body = read_script();
+    assert!(
+        on_noncomment_line(&body, "apt-get purge -y rsyslog"),
+        "setup-device.sh must `apt-get purge` rsyslog (#762) -- journald already captures \
+         everything on this read-only appliance; masking alone leaves the package installed"
+    );
+    assert!(
+        on_noncomment_line(&body, "systemctl mask rsyslog"),
+        "setup-device.sh must also MASK rsyslog as a backstop so a re-install cannot silently \
+         re-activate it (#762, mirrors the #591/#597 competing-daemon discipline)"
+    );
+    assert!(
+        on_noncomment_line(&body, "systemctl disable --now rsyslog"),
+        "setup-device.sh must disable+stop rsyslog before purging it (#762)"
+    );
+}
+
+#[test]
+fn setup_device_rsyslog_purge_runs_after_the_timesync_purge_stanza() {
+    // Not a HARD ordering requirement the way timesync-before-dantesync is (nothing installs
+    // rsyslog later in this script the way dantesync gets installed after its competing purge)
+    // -- but the #762 stanza is written immediately after the #591/#597 block for readability,
+    // so pin that the rsyslog purge exists at all somewhere after it starts.
+    let body = read_script();
+    let timesync_idx = first_noncomment_idx(&body, r#"apt-get purge -y "$_ts""#)
+        .expect("the #591 competing-timesync purge must be present");
+    let rsyslog_idx = first_noncomment_idx(&body, "apt-get purge -y rsyslog")
+        .expect("the #762 rsyslog purge must be present");
+    assert!(
+        rsyslog_idx > timesync_idx,
+        "the #762 rsyslog purge (line {rsyslog_idx}) should follow the #591 timesync purge \
+         stanza (line {timesync_idx}) for readability"
+    );
+}
+
+#[test]
+fn setup_device_sources_log_diet_and_writes_the_journald_dropin() {
+    let body = read_script();
+    assert!(
+        on_noncomment_line(&body, ". \"$HERE/lib/log-diet.sh\""),
+        "setup-device.sh must source scripts/lib/log-diet.sh (#762) -- the shared journald \
+         RuntimeMaxUse drop-in content generator"
+    );
+    assert!(
+        on_noncomment_line(
+            &body,
+            "log_diet_journald_dropin > \"$LOG_DIET_JOURNALD_DROPIN_PATH\""
+        ),
+        "setup-device.sh must write the journald RuntimeMaxUse drop-in via \
+         log_diet_journald_dropin (#762)"
+    );
+    assert!(
+        on_noncomment_line(&body, "systemctl restart systemd-journald"),
+        "setup-device.sh must restart systemd-journald after writing the #762 drop-in so the \
+         cap takes effect immediately on a re-provisioned already-booted box"
+    );
+}
+
+#[test]
+fn create_usb_purges_rsyslog_from_the_base_image() {
+    // #762: mirrors create_usb_purges_timesyncd_from_the_base_image -- purge the redundant
+    // daemon in the chroot so a freshly-imaged box never ships it at all.
+    let body = read_usb_script();
+    assert!(
+        on_noncomment_line(&body, "apt-get purge -y rsyslog"),
+        "create-usb-linux.sh must `apt-get purge` rsyslog from the base image (#762)"
+    );
+    assert!(
+        on_noncomment_line(&body, "systemctl mask rsyslog"),
+        "create-usb-linux.sh must also MASK rsyslog as a backstop in the chroot (#762)"
+    );
+}
+
+#[test]
+fn create_usb_linux_sources_log_diet_and_writes_the_journald_dropin_into_the_chroot() {
+    let body = read_usb_script();
+    assert!(
+        on_noncomment_line(&body, ". \"$SCRIPT_DIR/lib/log-diet.sh\""),
+        "create-usb-linux.sh must source scripts/lib/log-diet.sh (#762) -- the SAME content \
+         generator setup-device.sh uses, so the RuntimeMaxUse cap can never drift between the \
+         two provisioners"
+    );
+    assert!(
+        on_noncomment_line(
+            &body,
+            "log_diet_journald_dropin > \"$MOUNT_ROOT$LOG_DIET_JOURNALD_DROPIN_PATH\""
+        ),
+        "create-usb-linux.sh must write the journald RuntimeMaxUse drop-in into the base-image \
+         chroot (#762) -- closes the window before setup-device.sh ever runs"
+    );
+}

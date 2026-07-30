@@ -43,6 +43,15 @@ SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 . "$SCRIPT_DIR/lib/log-bound.sh"  # log_bound_logrotate_config/log_bound_timer_dropin (#679) --
                                   # SAME source of truth as setup-device.sh/verify-device.sh
 
+# shellcheck source=scripts/lib/log-diet.sh
+. "$SCRIPT_DIR/lib/log-diet.sh"  # log_diet_journald_dropin (#762) -- SAME source of truth as
+                                 # setup-device.sh/verify-device.sh
+
+# shellcheck source=scripts/lib/udev-camera-box.sh
+. "$SCRIPT_DIR/lib/udev-camera-box.sh"  # udev_camera_box_rules_content/
+                                        # udev_camera_box_helper_script_content (#894) -- SAME
+                                        # source of truth as setup-device.sh/verify-device.sh
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -228,6 +237,22 @@ EOF
     log_bound_logrotate_config > "$MOUNT_ROOT$LOG_BOUND_LOGROTATE_PATH"
     log_bound_timer_dropin > "$MOUNT_ROOT$LOG_BOUND_TIMER_DROPIN_PATH"
 
+    # #762: cap journald's own RuntimeMaxUse from first boot too (the rsyslog PURGE itself runs
+    # inside the chroot below, alongside the #591/#597 competing-daemon purge -- this file write
+    # just needs to land before that chroot script runs). See scripts/lib/log-diet.sh.
+    mkdir -p "$MOUNT_ROOT$(dirname "$LOG_DIET_JOURNALD_DROPIN_PATH")"
+    log_diet_journald_dropin > "$MOUNT_ROOT$LOG_DIET_JOURNALD_DROPIN_PATH"
+
+    # #894: bake the SAME conditional hotplug-restart + autosuspend-reapply udev rule setup-device.sh
+    # installs (see scripts/lib/udev-camera-box.sh) into the base image too -- a fresh USB build must
+    # never regress to the old fleet's UNCONDITIONAL "restart camera-box.service on hotplug" rule
+    # (traced to the retired scripts/setup.sh, #563) for even one boot before a re-provisioning pass.
+    # Plain file writes, no chroot needed (nothing here calls apt/systemctl).
+    mkdir -p "$MOUNT_ROOT/etc/udev/rules.d" "$MOUNT_ROOT/usr/local/bin"
+    udev_camera_box_rules_content > "$MOUNT_ROOT/etc/udev/rules.d/99-camera-box.rules"
+    udev_camera_box_helper_script_content > "$MOUNT_ROOT/usr/local/bin/camera-box-udev-video-add.sh"
+    chmod +x "$MOUNT_ROOT/usr/local/bin/camera-box-udev-video-add.sh"
+
     # Create setup script to run inside chroot
     cat > "$MOUNT_ROOT/tmp/setup.sh" << 'SETUP_EOF'
 #!/bin/bash
@@ -256,12 +281,17 @@ apt-get install -y \
 # /usr/lib/ndi was not on the dynamic-linker path, and no avahi-daemon ran for the mDNS NDI-source
 # discovery libndi performs. avahi-daemon is mDNS only — no conflict with DanteSync's clock ownership
 # (cam4 runs both). These are public Ubuntu packages (main/universe), installable in the chroot.
+# #743: psmisc (provides `fuser`) joins the SAME dual-bake here + setup-device.sh -- a fresh
+# cam2 clone (2026-07-13) had no `fuser` at all, false-FAILing rig-mode.sh's #464 KMS-held check
+# AND silently no-op'ing recording-e2e.sh's capture-release busy-wait (`fuser` exits 127 ->
+# the `while` loop's condition reads false immediately, same as "already released").
 apt-get install -y \
     libasound2t64 \
     libavahi-client3 \
     libavahi-common3 \
     avahi-daemon \
-    avahi-utils
+    avahi-utils \
+    psmisc
 
 # Put /usr/lib/ndi on the dynamic-linker path so dlopen("libndi.so") resolves once the (licensing-
 # restricted) NDI lib is copied in — without it a fresh box fails on "libndi.so: cannot open shared
@@ -322,6 +352,18 @@ apt-get purge -y linuxptp 2>/dev/null \
 for _u in ptp4l phc2sys; do
     systemctl mask "$_u" 2>/dev/null || true
 done
+
+# #762: rsyslog is REDUNDANT on this appliance -- journald already captures everything, and
+# nothing reads /var/log/syslog on a read-only appliance with no operator logging in. A live
+# incident (cam1, 2026-07-15) showed rsyslogd enter a write-error feedback loop once the 50MB
+# /var/log tmpfs filled, burning 42.8% CPU and starving the camera-box send path. Same
+# disable -> purge -> mask discipline as the #591/#597 stanzas above -- purge, not just mask.
+# The journald RuntimeMaxUse drop-in itself is already written onto the base image above
+# (before this chroot script runs); this only needs to purge the redundant daemon.
+systemctl disable --now rsyslog 2>/dev/null || true
+apt-get purge -y rsyslog 2>/dev/null \
+    || dpkg --purge --force-depends rsyslog 2>/dev/null || true
+systemctl mask rsyslog 2>/dev/null || true
 
 # Create user newlevel
 useradd -m -s /bin/bash -G sudo newlevel

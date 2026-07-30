@@ -7,6 +7,21 @@ stream recording and reports the offset. Convention: `av_offset_ms = video − a
 **negative = video LEADS audio** → ADD `latency_adjust_ms` (= −offset) to the video
 source's genlock latency (DistroAV "Latency (ms)" on the program NDI input, hot-apply).
 
+## The `latency_adjust_ms = −offset` (1:1) model did NOT hold on a live recalibration — verify, don't assume one move lands inside ±20ms (2026-07-14, #689)
+
+The convention above says: set the video source's genlock hold by `−offset`, expecting the next
+run's offset to be ~0. A live supervisor recalibration on run 581523199 contradicted a clean 1:1
+response: cam2 measured **−43.16ms at stream hold 925**, the hold was moved **+43ms to 968**
+(exactly `−offset`), yet the NEXT run measured cam2 at **+24.98ms** — a +68ms swing for a +43ms
+move (it OVERSHOT ~0 by ~25ms and flipped sign), still outside the ±20ms bound. Whether that ~25ms
+is a genuinely-non-unity slope or run-to-run measurement variance in the baseline is unresolved on
+one data point — but the operational takeaway is firm: **do NOT assume a single `−offset` hold
+nudge will land the measured leg inside ±20ms.** After any hold change, re-run the fused gate and
+READ cam2's `av_offset_ms` back; expect to iterate (this run needs a further −~15ms nudge toward
+hold ~950), or fall back to the operator dock (#690, which was NOT demoted for exactly this reason).
+Every camera's honest post-move offset is now readable directly from `all_cambox_av_sync.<cam>.effective_offset_ms`
+(#689/#714 — measured for cam2, sound derived for the sample-starved cameras, null only for a genuine unknown).
+
 ## Run recipe
 
 **#420 (2026-07-02): the earlier "−70.2 ms ±10 @ NDI 2ME PGM latency 1000 ms" result is
@@ -108,7 +123,10 @@ at all, that was a wrong assumption in an earlier session's comment).
 **Fixed**: `main()` now prints an explicit REMOTE PUSH plan (dest path + resolved win-* MCP tool +
 exact JSON content) whenever the write lands off-box. The operator/agent completes the transfer
 via `win-stream-snv FileWrite` to `C:\ProgramData\camera-box\av-sync-last.json` — same PLAN
-convention `obs-self-heal-install.sh` already uses (scp/ssh to Windows is denied on this rig).
+convention `obs-self-heal-install.sh` already uses (historically because scp/ssh to Windows was
+believed denied on this rig; #701 proved plain scp/ssh actually works against strih/stream with
+the targets.md creds — for a short in-memory JSON blob like this one either path works fine, this
+skill just hasn't been migrated off the original MCP-FileWrite plan).
 
 **Correction (was wrongly claimed on #465's thread): the #398 A/V-sync dock does NOT read
 `av-sync-last.json`.** Checked the vendored dock source
@@ -209,3 +227,151 @@ audit-logging feature (2026-07-10) entirely; clicking Start against a real, conf
 signal for >4 minutes left Latency/Index/Audio Frequency/Video Index/Audio Index all at `-` the
 whole time. Rebuild+redeploy tracked in #698 — do NOT attempt to verify the dock's live lock again
 until that lands AND the volumedetect pre-flight above is clean.
+
+## #689 (2026-07-12) — segment-by-segment remote diagnosis: cam2's HDA/HDMI-audio path checked via ELD, not just ALSA PCM state
+
+When a recorded marker is silent (`-91dB`, above) and the ALSA PCM `state=RUNNING`/`owner_pid`
+check (the #690 finding above) already proved the SOFTWARE side is healthy, the next remotely-
+checkable segment is whether the physical HDMI sink (the monitor) is genuinely negotiated as a
+real audio-capable device — not assumed. On cam2 (`ssh root@10.77.9.62`):
+
+```bash
+cat /proc/asound/PCH/eld#2.*        # one file per pin×converter combo (usually 32+ entries)
+amixer -c PCH contents              # includes the raw ELD bytes + 'HDMI/DP,pcm=N Jack' on/off
+```
+
+Exactly ONE `eld#` entry should read `monitor_present 1` / `eld_valid 1`, with `monitor_name`,
+`speakers=[0x1] FL/FR`, `sad0_coding_type LPCM`, and real sample-rate/bit-depth lists — cross-check
+`monitor_name` against the vendor's own published spec (web search) to confirm the monitor
+genuinely ships with built-in speakers (some monitors declare HDMI-audio-passthrough capability in
+their EDID without a physical speaker — the ELD alone doesn't prove speaker hardware exists).
+`amixer -c PCH contents`'s `'HDMI/DP,pcm=N Jack'` control should read `on` for the SAME device
+number the marker emitter targets (`hw:CARD=PCH,DEV=N`), and every `IEC958 Playback Switch`
+control should read `on` (the only software mute point HDMI audio has on this card — if this
+doesn't exist or reads `off`, that IS a remotely-fixable cause, unmute it and re-test before
+concluding "physical"). Cross-check `dmesg -T | grep -iE 'hdmi|jack|audio'` + `journalctl -k
+--since "<window>" | grep -i hdmi` for any hotplug/EDID-change event correlated with when the
+silence started — no events across the whole uptime rules out a recent cable/monitor-state change
+as the cause. If ALL of this reads healthy (as it did 2026-07-12), the remaining candidates are
+100% physical (monitor's own OSD volume/mute — its speaker hardware is real per the spec check
+above, but its volume is controlled by physical buttons with no software knob) or need Dante
+Controller GUI access (not remotely reachable via SSH — check whether a win-* MCP target has it
+installed before ruling this segment fully unreachable).
+
+## #690 — before attempting the dock's live-lock verification, check `mbc` is reachable FIRST
+
+`mbc` (Master Broadcast Console, 10.77.9.232) is "often OFF outside broadcasts" (`targets.md`) —
+the dock (same as any #689-style measurement) needs its LIVE master-mix audio, so attempting a
+live-lock test while it's off just burns a cycle for a guaranteed no-lock. Cheap one-shot check
+BEFORE any rig-mode.sh test / dock-Start attempt:
+```bash
+timeout 5 bash -c "echo > /dev/tcp/10.77.9.232/22" 2>&1 && echo "MBC UP" || echo "MBC UNREACHABLE"
+```
+"No route to host" = genuinely off (not a firewall/credential issue) — same failure shape #689's
+2026-07-11/12 comments already documented for this exact host. Confirmed live 2026-07-12 (#710/
+#712/#690 dispatch): `mbc` stayed unreachable across the whole session (checked repeatedly,
+09:40-10:03 CEST) — combined with `rig-busy-check` staying idle the whole time, this was purely an
+mbc-power block, not a live-broadcast-timing one. The one-page Slovak operator procedure for the
+dock (`docs/operator-av-sync-dock-sk.md`) was written from source (`vendor/av-sync-dock/src/
+sync-test-dock.cpp`'s `on_start_stop()` + `data/locale/en-US.ini`'s exact UI label text) and
+existing documented findings — but the actual "dock locks on real signal, updates live, survives a
+camera switch" proof (with a screenshot) is STILL not re-confirmed as of 2026-07-12; #690 stays
+OPEN. Re-attempt the live-lock test whenever `mbc` is reachable AND the rig is idle.
+
+## #725/#689 (2026-07-13) — which cam2 HDMI pin is REALLY live: read `codec_cvt_nid`, don't trust
+## a remembered `eld#X.Y` index or `aplay -l`'s cached device name
+
+The #725 finding ("pin shuffled from DEV=3 to DEV=7 after a reboot") recorded a SPECIFIC `eld#2.4`
+index as corresponding to DEV=7 at the time it was written — but ELD pin/converter numbering can
+re-shuffle on a LATER reboot too, so that specific `eld#X.Y` → `DEV=N` mapping is a snapshot, not a
+durable fact. `aplay -l`'s device NAME (e.g. `device 3: HDMI 0 [BenQ GL2480]`) is ALSO not reliable
+evidence of which pin is currently live — that name string looks like it can be a load-time cache
+that doesn't necessarily update on a later EDID renegotiation.
+
+The reliable, direct answer is inside the ELD entry that currently reads `monitor_present 1` /
+`eld_valid 1`:
+```bash
+cat /proc/asound/PCH/eld#2.4        # (or whichever index currently shows monitor_present=1)
+# ...
+# codec_cvt_nid   0x3                <- THIS is the converter/PCM device number, in hex
+```
+`codec_cvt_nid` directly names the PCM converter node — `0x3` means the live sink is
+`hw:CARD=PCH,DEV=3`, regardless of which `eld#` index it currently lives at or what `aplay -l`
+happens to have cached. Cross-check against `aplay -l` for a sanity read, but trust `codec_cvt_nid`
+when they disagree. Live 2026-07-13: found `codec_cvt_nid=0x3` (i.e. DEV=3, the hardcoded default
+every marker path already uses) was CORRECTLY live again, even though #725 had found DEV=7 live the
+evening before — the pin re-shuffled AGAIN sometime between the two checks (plausibly the owner's
+live rig work or a jack replug that same night). #725's underlying bug (no DYNAMIC resolution, only
+a hardcoded default) is still real and unfixed — this is just the fast, reliable way to check
+"is the hardcoded default CURRENTLY correct" before assuming a silent/off-timing recording.
+
+## #689 (2026-07-13) — NEVER derive a `hold_new` recommendation from ONE gate run; the measurement
+## itself has real run-to-run noise comparable to the ±20ms gate tolerance
+
+3 consecutive full-path-e2e gate runs, ~30-35 min apart, same unchanged 925ms hold, same unchanged
+code, produced cam2 `av_offset_ms` of −33.9 / −64.25 / −21.4 ms (`mad_ms` 22.85 / 15.29 / 32.72 —
+only ONE of three cleared this project's own mad≤20ms trust bar). All three breach ±20ms, so "the
+hold is off" is a safe conclusion — but the exact magnitude swings by >40ms across barely an hour of
+otherwise-idle rig time, which is NOT explainable by hold drift (confirmed live via `GetInputSettings`
+unchanged at 925 throughout) or by #725's pin question (confirmed DEV=3 correctly live throughout,
+via the `codec_cvt_nid` check above). Before ever recommending (let alone applying) a `hold_new`
+from a SINGLE run's number, pull at least 2-3 independent full-gate runs spread over the session and
+report the SPREAD, not just the latest value — a single-run recommendation risks overshooting or
+undershooting by the same margin the spread itself shows. Filed #733 to audit whether this is a real
+clustering-algorithm (`src/av_window.rs`) sensitivity issue (candidate multimodality, 33ms video-tick
+quantization interacting with the ±60ms `av_cluster_tol_ms` window) rather than a genuine physical
+drift.
+
+## #733 (RESOLVED, 2026-07-13) — the clustering window WAS too wide; a much tighter estimator ships, but the run-to-run swing is PROVEN chain-level, not algorithmic
+
+The #689 finding above was investigated end to end. Method: pull the RAW pre-clustering candidate
+data (not just the final verdict) straight off the stream box — `C:\camera-box\verdict-out\
+stream-partial-<RUN_ID>.json` carries `frames` (every decoded video tick) + `av_sync.emit_log` +
+`av_sync.audio_markers` for that run (the box keeps these even though only the summary JSON/PNG get
+uploaded as a GH artifact). Reimplement `window_ticks`/`av_offset_candidates`/`cluster_offset_ms`
+exactly (any language) and cross-validate against the published `av_offset_ms`/`matched`/`mad_ms`
+before trusting the reproduction.
+
+Two real, shipped findings from that data:
+1. **Same-`frame_id` duplicate detections** (37-84ms apart, present in all 3 runs) were inflating
+   the sample count — fixed via `qpsk_marker::av_offset_candidates_deduped` (Tier-0, TDD).
+2. **The old ±60ms cluster window was wide enough to blend two nearby sub-clusters** — binning one
+   run's raw candidates in 10ms bins showed two separate density bumps ~70ms apart that the 120ms
+   window swallowed into one noisier blend (that run's outlier `mad_ms=32.7`). A **tight-first
+   sweep** (successively widen `cluster_tol_ms` from 15ms up until `MIN_AV_SAMPLES` clears) on the
+   SAME deduped data showed each run individually has a MUCH more precise true cluster (mad_ms
+   7-9ms at ±15ms, vs 15-33ms at the old ±60ms default) — `--av-cluster-tol-ms` tightened to 25ms.
+
+**The real conclusion — and the reusable lesson**: even at that MUCH tighter precision, the 3 runs'
+offsets STILL disagreed by ~50ms (-20.83/-59.67/-6.10ms). A materially more precise estimator did
+NOT converge the runs toward one number — proving the instability is genuinely chain-level (ALSA
+ring-delay compensation, acoustic path variance, the mbc mastering chain's own state, or similar),
+not a clustering artifact. **Do NOT pool raw candidates across separate runs/sessions to
+manufacture one "average" number when you haven't first checked whether the underlying quantity is
+even stable across them** — pooling here would have silently discarded 2/3 of the real (disagreeing)
+signal as if it were noise. When #689 (or a future hold-derivation ticket) is next worked: use the
+tightened defaults (mad_ms 7-13ms is the new "healthy" reference), gather a genuinely long baseline
+(many runs across a wide time span), and look for correlation with anything observable before
+trusting an average — one night's 3 runs is still not enough.
+
+The LIVE dock's own `DOCK_CLUSTER_TOL_MS` (`src/av_sync_dock.rs`) was deliberately left at 60ms —
+it's mirrored byte-for-byte into the vendored C++ dock and needs the ~150min genlock build cycle to
+verify safely. Filed #735 to evaluate it separately with the SAME tight-first-sweep methodology,
+against the live dock's own continuous-rolling candidate stream.
+
+## `gh pr edit` / `gh issue edit --body` can fail on a GraphQL error UNRELATED to your edit — use the REST PATCH instead
+
+On this repo, `gh pr edit 704 --body "..."` (or `-F file`) can return:
+```
+GraphQL: Projects (classic) is being deprecated in favor of the new Projects experience... (repository.pullRequest.projectCards)
+```
+and the edit **silently does NOT apply** (the command exits 1, body unchanged) — this is `gh`'s own
+GraphQL mutation trying to also fetch/refresh a deprecated `projectCards` field unrelated to the body
+edit itself, not a problem with your content. Workaround — call the REST API directly, which has no
+such field:
+```bash
+python3 -c "import json; json.dump({'body': open('body.md').read()}, open('body.json','w'))"
+gh api repos/OWNER/REPO/pulls/<N> -X PATCH --input body.json
+```
+Confirm with `gh pr view <N> --json body -q '.body'` afterward — don't assume the plain `gh pr edit`
+error means your content was rejected; it may just mean this unrelated GraphQL field choked.

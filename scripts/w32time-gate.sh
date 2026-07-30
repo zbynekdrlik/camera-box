@@ -10,9 +10,10 @@
 # boxes were fixed live 2026-07-07 (W32Time Stopped + Disabled) but until this gate that was a
 # manual, unverified invariant — nothing prevented drift back (see .claude/skills/ops/SKILL.md).
 #
-# NODE ACCESS: ssh to the Windows OBS boxes is DENIED (see scripts/dantesync-gate.sh's own header
-# for the identical constraint on its Windows half), so this script cannot gather W32Time state
-# itself. The caller (the autopilot worker / operator, who HAS the win-* MCP) runs
+# NODE ACCESS: this script has no headless ssh-based gather of its own (see
+# scripts/dantesync-gate.sh's own header for the identical situation on its Windows half — #701
+# proved plain scp/ssh reaches strih/stream, but the `sc`/`reg`/`w32tm` console state here is
+# still gathered via the win-* MCP, not migrated). The caller (the autopilot worker / operator, who HAS the win-* MCP) runs
 # w32time_gather_remote_snippet()'s read-only command block on each box and writes the combined
 # output to a local file, then passes it via --win-status NAME=FILE — the SAME pattern
 # dantesync-gate.sh already uses for strih/stream. A box with NO status file is UNKNOWN -> the
@@ -57,8 +58,8 @@ Usage:
 
 Options:
   --win-status N=FILE  a Windows box N whose combined W32Time status text (sc query + sc qc +
-                       reg query Type + w32tm /query /status) the caller wrote to FILE (ssh to
-                       Windows is denied; the win-* MCP holder pre-fetches it via
+                       reg query Type + w32tm /query /status) the caller wrote to FILE (this gate
+                       has no headless ssh gather; the win-* MCP holder pre-fetches it via
                        w32time_gather_remote_snippet()). Repeatable.
 
 Exit: 0 = all boxes OK, 20 = a box FAILED (active or latent 2nd authority), 11 = a box

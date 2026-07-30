@@ -80,10 +80,11 @@ def remote_push_plan(host: str, payload: dict) -> str:
     `default_last_json_path()` normally falls back to a LOCAL path (no PROGRAMDATA env var on a
     Linux control host) that nothing on the stream box can read -- confirmed live on #465 (no
     av-sync-last.json anywhere under C:\\ProgramData\\camera-box on the stream box after an
-    off-box --apply run). scp/ssh to the Windows boxes is DENIED on this rig
-    (`recording-fetch-windows.sh`, `obs-self-heal-install.sh`) -- the only established channel
-    to place a file there is the win-* MCP `FileWrite` tool, and this script has no MCP access
-    of its own. So instead of silently leaving an unreachable local file, print the exact
+    off-box --apply run). scp/ssh to the Windows boxes was historically believed DENIED on this
+    rig (`recording-fetch-windows.sh`, `obs-self-heal-install.sh` use the same PLAN convention);
+    #701 proved plain scp/ssh actually reaches strih/stream with the targets.md creds, but this
+    script has no ssh/MCP access of its own (or MCP access at all) -- it just prints the plan. So
+    instead of silently leaving an unreachable local file, print the exact
     destination + content (same PLAN convention as `obs-self-heal-install.sh`) so the caller
     can paste it straight into a FileWrite call.
     """
@@ -92,7 +93,7 @@ def remote_push_plan(host: str, payload: dict) -> str:
     content = json.dumps(payload, indent=2)
     return (
         "[av-sync] REMOTE PUSH REQUIRED -- this file was persisted LOCALLY, not on the OBS box.\n"
-        "[av-sync]   scp/ssh to Windows is denied; push it via the win-* MCP FileWrite tool:\n"
+        "[av-sync]   this script has no MCP/ssh access -- push it via the win-* MCP FileWrite tool:\n"
         f"[av-sync]   host={host}  mcp={mcp_line}\n"
         f"[av-sync]   dest={REMOTE_PROGRAMDATA_JSON_PATH}\n"
         f"[av-sync]   content:\n{content}"

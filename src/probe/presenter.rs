@@ -96,11 +96,48 @@ pub fn open_presenter(
             // #660: `fb_device` is passed through even on the KMS path so its `Drop` can blank
             // that device before releasing DRM master — see `crate::fb_blank`. KMS itself still
             // never reads/writes it during normal operation.
-            let kms_result = KmsPresenter::open(drm_device, fb_device, canvas_w, canvas_h);
+            let mut kms_result = KmsPresenter::open(drm_device, fb_device, canvas_w, canvas_h);
+            let mut opened_device = drm_device.to_string();
+            // #854: `/dev/dri/cardN` numbering is NOT a stable ABI — a kernel/driver update or a
+            // reboot can renumber the i915 KMS device on a single-GPU box with no other change at
+            // all (confirmed live on cam2: card1 on 2026-07-04, card0 by 2026-07-28, no card1 node
+            // at all). Before giving up on the tear-free double-buffered KMS path and quietly
+            // falling back to the imperfect single-buffered fbdev presenter, try every OTHER
+            // `/dev/dri/cardN` present — `order_drm_card_candidates` (Tier-0 tested) decides which
+            // and in what order; only the directory read + the actual open attempts are I/O here.
+            if kms_result.is_err() {
+                if let Ok(read_dir) = std::fs::read_dir("/dev/dri") {
+                    let entries: Vec<String> = read_dir
+                        .filter_map(|e| e.ok())
+                        .map(|e| e.path().to_string_lossy().into_owned())
+                        .collect();
+                    for candidate in crate::presenter_kind::order_drm_card_candidates(&entries) {
+                        if candidate == opened_device {
+                            continue; // already tried above
+                        }
+                        match KmsPresenter::open(&candidate, fb_device, canvas_w, canvas_h) {
+                            Ok(p) => {
+                                tracing::warn!(
+                                    "presenter: configured DRM device {} unavailable, found a \
+                                     working KMS device at {} instead -- /dev/dri card \
+                                     numbering has likely shifted (#854); update --drm-device \
+                                     to stop relying on this fallback",
+                                    opened_device,
+                                    candidate
+                                );
+                                kms_result = Ok(p);
+                                opened_device = candidate;
+                                break;
+                            }
+                            Err(_) => continue,
+                        }
+                    }
+                }
+            }
             let resolved = resolve_presenter_kind(kind, kms_result.is_ok());
             match (resolved.kind, kms_result) {
                 (PresenterKind::Kms, Ok(p)) => {
-                    tracing::info!("presenter: using DRM/KMS page-flip ({})", drm_device);
+                    tracing::info!("presenter: using DRM/KMS page-flip ({})", opened_device);
                     Ok(Box::new(p))
                 }
                 (PresenterKind::Fbdev, Err(e)) => {

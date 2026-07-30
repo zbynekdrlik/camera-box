@@ -20,14 +20,17 @@ fn read(p: &str) -> String {
 // [0/8] reachability preflight + host lists (recording-e2e.sh:144, per the issue text).
 // ---------------------------------------------------------------------------
 
-/// imag-nb must be a named topology constant (10.77.9.182) and must appear in the [0/8]
-/// reachability preflight's host list alongside cam1/cam2/strih/stream.
+/// imag-nb must be a named topology constant (resolved via scripts/imag-host.sh, #832) and must
+/// appear in the [0/8] reachability preflight's host list alongside cam1/cam2/strih/stream.
 #[test]
 fn recording_e2e_defines_imag_ip_and_checks_it_reachable() {
     let s = read("scripts/recording-e2e.sh");
+    // #832: IMAG_IP's default is no longer an independently hardcoded literal here -- it is
+    // derived by sourcing scripts/imag-host.sh (the ONE declared imag host, reversible between
+    // the incumbent .182 and the replacement .187 — see tests/harness_imag_host.rs).
     assert!(
-        s.contains("IMAG_IP=\"${IMAG_IP:-10.77.9.182}\""),
-        "#462: recording-e2e.sh must define IMAG_IP (default 10.77.9.182, the Linux OBS target)."
+        s.contains(". \"$HERE/imag-host.sh\""),
+        "#832: recording-e2e.sh must source scripts/imag-host.sh to derive IMAG_IP."
     );
     let preflight = s
         .find("reachability preflight")
@@ -59,19 +62,32 @@ fn recording_e2e_defines_imag_capture_fps_default_60() {
 
 // ---------------------------------------------------------------------------
 // [4d/8] render-budget-gate call site — `--box imag=10.77.9.182:60` (issue text point 3).
+//
+// issue 888 (2026-07-30, temporary user-directed relaxation) SPLIT this from one joint 3-box
+// call into TWO separate render-budget-gate.py invocations: strih+stream stay strict in their
+// own call, imag is measured by its OWN separate, report-only call (no `exit 1`, a loud WARN
+// naming issue 888/886). See tests/harness_render_budget_imag_report_only_888.rs for the full
+// lock on the split's non-aborting/WARN/no-env-knob shape — this file only guards that strih and
+// stream keep their 30fps boxes and that imag is no longer folded into their same call/window.
 // ---------------------------------------------------------------------------
 
-/// The render-budget-gate call MUST include imag at its 60fps target, alongside strih/stream at
-/// 30fps — the exact `--box imag=…:60` the issue asks for. The generic Python tool needs NO logic
-/// change (per the issue text) — only this call site.
+/// strih/stream MUST keep their own `--box …:30` args in their own (still-strict) call, and imag
+/// must NOT be part of that same call/window any more (issue 888 split it out into its own
+/// separate, report-only call — locked in tests/harness_render_budget_imag_report_only_888.rs).
 #[test]
-fn render_budget_gate_call_site_includes_imag_at_60fps() {
+fn render_budget_gate_strih_stream_call_site_no_longer_includes_imag_888() {
     let s = read("scripts/recording-e2e.sh");
+    // Anchor on `--box "strih=` (NOT the bare "render-budget-gate.py" script name) -- #758 added
+    // an EARLIER, imag-only render-budget-gate.py preflight call (an [1/8] render-health check,
+    // before ANY box is deployed), so `.find("render-budget-gate.py")` would now latch onto that
+    // one-box call instead of this [4d/8] call site. `--box "strih=` is unique to this call (the
+    // [1/8] preflight never measures strih) and is therefore anchor-stable regardless of how many
+    // OTHER render-budget-gate.py invocations get added elsewhere in the future.
     let call = s
-        .find("render-budget-gate.py")
-        .expect("recording-e2e.sh must invoke render-budget-gate.py");
-    // Scope to the actual invocation block (a handful of lines after the binary name).
-    let window = &s[call..(call + 500).min(s.len())];
+        .find("--box \"strih=")
+        .expect("recording-e2e.sh must invoke render-budget-gate.py with a strih box");
+    // Scope to the actual invocation block (a handful of lines around the strih box arg).
+    let window = &s[call.saturating_sub(200)..(call + 500).min(s.len())];
     assert!(
         window.contains("--box \"strih=${STRIH}:${RENDER_TARGET_FPS_STRIH:-30}\""),
         "render-budget-gate call must keep the strih=…:30 box. Got:\n{window}"
@@ -81,9 +97,9 @@ fn render_budget_gate_call_site_includes_imag_at_60fps() {
         "render-budget-gate call must keep the stream=…:30 box. Got:\n{window}"
     );
     assert!(
-        window.contains("--box \"imag=${IMAG_IP}:${RENDER_TARGET_FPS_IMAG:-60}\""),
-        "#462: render-budget-gate call must add imag=…:60 (imag-nb's own low-latency rate). \
-         Got:\n{window}"
+        !window.contains("--box \"imag="),
+        "issue 888: imag must no longer be folded into the strih/stream call/window -- it must \
+         be measured by its OWN separate, report-only call. Got:\n{window}"
     );
 }
 
@@ -215,28 +231,50 @@ fn imag_scenes_pins_verified_1to1_camera_mapping_526() {
     );
 }
 
-/// #502: imag must run on a named ADVANCED profile with a native-1080p60 NVENC h264 mkv recording,
-/// not the naive default Simple profile (x264 @ 6 Mbps 'Stream' quality, which softens the E2E
+/// #502/#847: imag must run on a named ADVANCED profile with a native-1080p60 mkv recording, not
+/// the naive default Simple profile (x264 @ 6 Mbps 'Stream' quality, which softens the E2E
 /// QR/burns). imag records its own program for the topology-v2 verdict, so the recording must be
 /// native-resolution + high quality. Verified live 2026-07-05: produces a 1920x1080@60 h264-NVENC
-/// .mkv. Guard the seed_profile() settings so a regression can't silently drop it.
+/// .mkv on the INCUMBENT (RTX 5050) box.
+///
+/// #847 SUPERSEDES this test's original premise: the recording encoder is no longer a hardcoded
+/// `obs_nvenc_h264_tex` literal -- the replacement notebook (10.77.9.187, Intel iGPU only) never
+/// initializes NVENC, so a hardcoded-NVENC seed silently produced 0-byte recordings there (live-
+/// diagnosed, see the #847 issue). `seed_profile()` now takes `has_discrete_nvidia` and derives
+/// the encoder via `select_rec_encoder()`: NVENC when a discrete NVIDIA GPU is present (byte-for-
+/// byte unchanged for the incumbent box), `obs_x264` (live-proven to work) otherwise -- NEVER qsv
+/// (live-tested and confirmed unreliable on this hardware/build, see the #847 design comment).
+/// Pin the NEW hardware-aware contract instead of the old hardcoded one.
 #[test]
-fn imag_scenes_seeds_advanced_nvenc_recording_profile_502() {
+fn imag_scenes_seeds_advanced_hardware_aware_recording_profile_847() {
     let s = read("scripts/imag_scenes.py");
     for needle in [
         r#""profileName": "imag-60fps""#,
         r#"("Output", "Mode", "Advanced")"#,
-        r#"("AdvOut", "RecEncoder", "obs_nvenc_h264_tex")"#,
+        r#"("AdvOut", "RecEncoder", rec_encoder)"#,
         r#"("AdvOut", "RecRescale", "false")"#,
         r#"("AdvOut", "RecFormat2", "mkv")"#,
-        "seed_profile(obs)",
+        "def seed_profile(obs: Obs, has_discrete_nvidia: bool) -> None:",
+        "rec_encoder = select_rec_encoder(has_discrete_nvidia)",
+        "def select_rec_encoder(has_discrete_nvidia: bool) -> str:",
+        r#"return "obs_nvenc_h264_tex" if has_discrete_nvidia else "obs_x264""#,
     ] {
         assert!(
             s.contains(needle),
-            "#502: imag_scenes.py must contain `{needle}` (Advanced NVENC native-1080p mkv \
-             recording profile, applied before the scene seed)"
+            "#847: imag_scenes.py must contain `{needle}` (Advanced, hardware-aware-encoder, \
+             native-1080p mkv recording profile, applied before the scene seed)"
         );
     }
+    // Never qsv as an actual RecEncoder VALUE (a quoted string literal) -- live-tested and
+    // confirmed unreliable on this hardware/build (MFX_ERR_UNSUPPORTED at Init()); shipping it
+    // would silently reproduce the exact zero-bytes failure #847 exists to fix. The design-
+    // rationale comment above mentions the bare (unquoted) name "obs_qsv11_v2" for context, which
+    // is fine -- only a QUOTED literal (something the code could actually return/assign) is banned.
+    assert!(
+        !s.contains("\"obs_qsv11"),
+        "#847: imag_scenes.py must never select a qsv encoder id as a string literal -- \
+         live-proven unreliable on 10.77.9.187"
+    );
 }
 
 // ---------------------------------------------------------------------------

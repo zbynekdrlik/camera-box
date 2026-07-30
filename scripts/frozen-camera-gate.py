@@ -14,10 +14,18 @@ NOTE: why raw NDI inputs, not Multiview tiles?
   A live-but-dark camera still has sensor noise (hash changes every sample at
   mean luma ~5–7), while a frozen NDI repeats identical PNG bytes → STATIC.
 
-Precondition (#276): the Multiview projector must be OPEN on strih so that all
-  raw NDI inputs are rendering.  The gate fails a camera that is not rendering
-  (all-black frames hash identically), which is the correct fail-safe: a camera
-  that would show static during a recording should block the run.
+#747: the gate WARMS each camera input itself — there is no external precondition.
+  Post-#730/#508 Multiview decoupling, a raw NDI input that is not currently SHOWING on
+  any surface does not render at all (GetSourceScreenshot returns null / repeats stale
+  bytes forever — indistinguishable from a genuine freeze). Before sampling each source,
+  its wrapping strih 'Cam N' scene (the per-camera scene convention — see
+  scripts/strih_mv_scenes.py) is set to PREVIEW (Studio Mode) and given a short settle,
+  which opens/refreshes that camera's DistroAV receiver; only THEN are the samples taken.
+  Repeated identical hashes while genuinely activated are a real freeze; a source with no
+  known 'Cam N' scene (a non-canonical --sources override) is sampled cold, same as
+  pre-#747 behaviour. The previous "keep the Multiview projector open" precondition is
+  obsolete: the decoupled built-in Multiview renders low-bandwidth "MV Cam N" twin clones
+  (#730), not these raw main inputs, so it no longer keeps them warm either way.
 
 Usage:
   python3 scripts/frozen-camera-gate.py --host 10.77.9.202 [options]
@@ -38,6 +46,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -51,6 +60,23 @@ except ImportError:
 
 
 # ─── pure helpers (unit-testable without OBS) ────────────────────────────────
+
+# #747: strih's per-camera scenes follow the SAME "Cam N" convention documented in
+# scripts/strih_mv_scenes.py (is_cam_scene/cam_input_name), which maps 'Cam N' -> 'NDI camN'.
+# This is the REVERSE direction: given the raw input name this gate checks, find the scene
+# that wraps it, so it can be put on PREVIEW to warm the receiver before sampling.
+_INPUT_SCENE_RE = re.compile(r"^NDI cam(\d+)$")
+
+
+def _scene_for_input(source_name: str) -> "str | None":
+    """Map a raw NDI camera INPUT name ('NDI cam5') to the strih 'Cam N' SCENE that wraps
+    it (#747), so the per-source warm-up can put that scene on PREVIEW before sampling.
+    Returns None for any source name that doesn't match the canonical 'NDI cam<N>' shape
+    (e.g. a caller-supplied non-standard --sources value) — the warm-up step is then
+    skipped for that source and it is sampled cold, same as pre-#747 behaviour."""
+    m = _INPUT_SCENE_RE.match(source_name)
+    return f"Cam {m.group(1)}" if m else None
+
 
 def _hash_png(data: bytes) -> str:
     """SHA-1 of raw PNG bytes → hex string.  Used for frame-to-frame freshness
@@ -179,22 +205,51 @@ def _capture_timelines(
     sources: "list[str]",
     n_samples: int,
     cadence_s: float,
+    warm_settle_s: float = 0.0,
 ) -> "dict[str, list[str | None]]":
-    """Capture *n_samples* screenshots of each source at *cadence_s* intervals.
+    """Capture *n_samples* screenshots of EACH source in turn, at *cadence_s* intervals.
 
-    Returns {source_name: [hash_or_None, ...]}.
-    Prints per-sample progress to stderr so the operator can see what is happening."""
+    #747: before sampling a source, its wrapping strih scene (see _scene_for_input) is put
+    on PREVIEW (Studio Mode) and given *warm_settle_s* seconds to settle — this opens/
+    refreshes that camera's DistroAV receiver. Post-#730/#508 Multiview decoupling, a raw
+    NDI input not currently SHOWING on any surface does not render at all, so sampling it
+    cold is indistinguishable from a genuine freeze. Samples taken AFTER the warm settle
+    measure the real, activated feed: repeated identical hashes THERE are a genuine freeze,
+    not a cold-receiver artifact. A source with no known scene (*_scene_for_input* returns
+    None), or *warm_settle_s* <= 0 (warming disabled, e.g. Studio Mode is off), is sampled
+    without warming — same as pre-#747 behaviour.
+
+    Returns {source_name: [hash_or_None, ...]}. Prints per-sample progress to stderr."""
     timelines: dict[str, list[str | None]] = {s: [] for s in sources}
-    for i in range(n_samples):
-        sys.stderr.write(f"  sample {i + 1}/{n_samples}")
-        for src in sources:
+    for src in sources:
+        scene = _scene_for_input(src)
+        if scene and warm_settle_s > 0:
+            sys.stderr.write(
+                f"  [warm] {src} -> preview {scene!r}, settling {warm_settle_s}s (#747)\n"
+            )
+            _rpc(ws, "SetCurrentPreviewScene", {"sceneName": scene}, ignore_err=True)
+            time.sleep(warm_settle_s)
+        for i in range(n_samples):
             h = _screenshot_hash(ws, src)
             timelines[src].append(h)
-            sys.stderr.write(f"  {src}={'ok' if h else 'FAIL'}")
-        sys.stderr.write("\n")
-        if i < n_samples - 1:
-            time.sleep(cadence_s)
+            sys.stderr.write(f"  sample {i + 1}/{n_samples}  {src}={'ok' if h else 'FAIL'}\n")
+            if i < n_samples - 1:
+                time.sleep(cadence_s)
     return timelines
+
+
+def _resolve_original_preview(ws) -> "tuple[bool, str | None]":
+    """Read Studio Mode + the operator's CURRENT preview scene, once, before any warm-up
+    starts (#747) — so main() can restore it when the gate finishes. Returns (False, None)
+    without reading the preview scene at all when Studio Mode is off (nothing to warm with,
+    nothing to restore either)."""
+    studio = bool(_rpc(ws, "GetStudioModeEnabled", ignore_err=True).get("studioModeEnabled"))
+    if not studio:
+        return False, None
+    orig_preview = _rpc(ws, "GetCurrentPreviewScene", ignore_err=True).get(
+        "currentPreviewSceneName"
+    )
+    return True, orig_preview
 
 
 def _run_verdict(
@@ -231,6 +286,10 @@ def main():
                     help="consecutive static samples before FROZEN (default: 3)")
     ap.add_argument("--verdict-bin", default="",
                     help="path to frozen-camera-gate binary (default: auto-discover)")
+    ap.add_argument("--warm-settle", type=float, default=3.0,
+                    help="seconds to settle after putting a camera's scene on PREVIEW, "
+                         "before sampling it (default: 3.0; #747). Skipped when Studio "
+                         "Mode is off.")
     args = ap.parse_args()
 
     password = os.environ.get("OBS_PASSWORD", args.password)
@@ -239,10 +298,8 @@ def main():
 
     sys.stderr.write(
         f"[frozen-camera-gate] host={args.host} sources={sources} "
-        f"samples={args.samples} cadence={args.cadence}s threshold={args.threshold}\n"
-    )
-    sys.stderr.write(
-        f"[frozen-camera-gate] precondition: Multiview projector must be OPEN (#276)\n"
+        f"samples={args.samples} cadence={args.cadence}s threshold={args.threshold} "
+        f"warm_settle={args.warm_settle}s\n"
     )
 
     try:
@@ -251,9 +308,25 @@ def main():
         sys.stderr.write(f"ERROR: cannot connect to OBS at {args.host}:{PORT}: {e}\n")
         sys.exit(2)
 
+    studio, orig_preview = False, None
     try:
-        timelines = _capture_timelines(ws, sources, args.samples, args.cadence)
+        studio, orig_preview = _resolve_original_preview(ws)
+        warm_settle_s = args.warm_settle if studio else 0.0
+        if studio:
+            sys.stderr.write(
+                f"[frozen-camera-gate] Studio Mode ON — warming each camera scene onto "
+                f"preview ({warm_settle_s}s settle) before sampling it (#747); will restore "
+                f"preview to {orig_preview!r} afterward\n"
+            )
+        else:
+            sys.stderr.write(
+                "[frozen-camera-gate] WARNING: Studio Mode is OFF — cannot warm camera "
+                "scenes onto preview; sampling sources as-is (#747 warm-up skipped)\n"
+            )
+        timelines = _capture_timelines(ws, sources, args.samples, args.cadence, warm_settle_s)
     finally:
+        if studio and orig_preview:
+            _rpc(ws, "SetCurrentPreviewScene", {"sceneName": orig_preview}, ignore_err=True)
         try:
             ws.close()
         except Exception:
@@ -270,8 +343,9 @@ def main():
     else:
         sys.stderr.write(
             f"[frozen-camera-gate] FAIL — {verdict_out} "
-            f"(check that the Multiview projector is open and that the camera box "
-            f"and its NDI source are running)\n"
+            f"(each source was warmed onto PREVIEW before sampling, #747 — check the "
+            f"camera box and its NDI source are actually running/live, not the Multiview "
+            f"projector)\n"
         )
 
     sys.exit(exit_code)

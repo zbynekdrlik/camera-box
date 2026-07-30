@@ -40,6 +40,56 @@ Clear `%APPDATA%\obs-studio\.sentinel\*` before relaunch — stale sentinel file
 `DisableSafeModePrompt=true` but clearing sentinels is the reliable fix. Avoids safe-mode
 which disables DistroAV + genlock.
 
+### GOTCHA — an OBS launched over plain SSH DIES when the ssh session closes (#859, cost a live outage)
+
+**Launching OBS from an ssh-spawned PowerShell "works" and then silently takes the box down
+minutes later.** Windows OpenSSH runs each session's processes in a job object and tears the whole
+tree down at disconnect, so `Start-Process obs64` over ssh gives a fully healthy OBS — it renders,
+NDI delivers, the genlock FIFOs lock, the launch wrapper's own log verification PASSES — and then
+obs64 is killed the moment the ssh command returns. **Live incident 2026-07-29:** the DLL hot-swap
+for #859 was driven over ssh (the `#701 plain scp/ssh DOES work` note above is about FILE COPY, not
+about launching a GUI app); both strih AND stream were left with **no OBS at all**, discovered only
+when a follow-up check showed `obs64=0` on both. The wrapper's `#257 OK: obs64 PID … launched` line
+is NOT evidence of persistence — it is evidence of a launch that is about to be reaped.
+
+- **Preferred: the win-* MCP `Shell`.** It holds a persistent session, so the launch survives. This
+  is what "run the program via the win-* MCP Shell" in the wrapper's own header means — it is not a
+  stylistic preference.
+- **When the box has NO MCP** (e.g. `win-strih` configured in `.mcp.json` but not connected this
+  session): create the process so it BREAKS AWAY from the ssh job object —
+  ```powershell
+  Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
+    CommandLine      = "C:\Program Files\obs-studio\bin\64bit\obs64.exe"
+    CurrentDirectory = "C:\Program Files\obs-studio\bin\64bit"
+  }
+  ```
+  Verified to survive the disconnect (`rc=0`, and the pid is still there from a FRESH ssh session).
+  Note it takes `CurrentDirectory`, so the cwd requirement above is still satisfied.
+- **Dead ends, do not retry:** `schtasks /run` on an `/IT` task returns `ERROR: Element not found`,
+  and the same task with a near-future time trigger never fires (`Last Result: 267011` = never ran)
+  — `/IT` will not start from a non-interactive context even though `Get-Process explorer` shows a
+  live desktop session. `Start-Process explorer.exe <lnk>` did not launch OBS at all.
+- **ALWAYS verify from a SECOND, fresh ssh connection** after any launch — a check inside the same
+  session that launched it cannot see the teardown. Health bar is the existing one: exactly ONE
+  obs64, >100 MB (900 MB–1.4 GB when warm), port 4455 listening, a log whose mtime is advancing.
+- **On strih, expect AHK to add a SECOND obs64** a few seconds later (it keys on the obs64 WINDOW —
+  see "AHK on strih"). After a manual relaunch, count instances and kill the small (~70 MB) one that
+  owns neither :4455 nor the newest log; keep the warm one.
+- **After ANY force-kill relaunch, re-check `genlock_burn` before trusting the box for a gate run.**
+  The measurement burn is a per-source runtime bool that lives in the scene collection, so a
+  force-kill loses the E2E's burn-OFF cleanup and OBS restores the last SAVED state — which, if the
+  kill landed after a gate run had turned burns on, is burns ON. Live 2026-07-29: the swap's
+  force-kill left `genlock_burn=True` on all four strih cam inputs AND on stream's `NDI 2ME PGM`,
+  and the next gate run aborted at `[0/8]` with `FAIL: strih NDI cam1: genlock_burn is still ON from
+  a prior…` before computing any verdict. Same class as #844 (a cancelled run leaking the burn), but
+  reached through a force-kill rather than a cancel. Check + clear, no restart needed:
+  ```bash
+  python3 scripts/obs_burn_filter.py check  --host 10.77.9.202 --input "NDI cam1"
+  python3 scripts/obs_burn_filter.py remove --host 10.77.9.202 --input "NDI cam1"   # per input
+  ```
+  This composes with the existing "force-kill relaunch restores a STALE saved config" section below
+  — the burn is one more piece of state that silently reverts.
+
 ## Healthy OBS Proof
 
 - Exactly ONE obs64 process
@@ -74,7 +124,9 @@ child-PEB read was needed to prove the var was inherited — all gone with the e
 **Every OBS (re)launch — deploy, crash-recovery, reboot — MUST go through
 `scripts/launch-obs-genlock.sh`. Do NOT hand-roll a `Start-Process` for the broadcast OBS.**
 
-The wrapper is the PURE planner (scp/ssh to Windows is denied — the agent drives the win-* MCP). It
+The wrapper is the PURE planner — the agent drives the win-* MCP (a GUI relaunch + on-screen log
+verification is exactly what the win-* MCP is for; #701 proved plain scp/ssh DOES work against
+strih/stream, but that doesn't help drive/verify a GUI app). It
 PRINTS the exact PowerShell program to paste into the box's `win-strih` / `win-stream-snv` MCP
 `Shell`. The emitted program, in ONE self-contained run: clears `%APPDATA%\obs-studio\.sentinel\*`,
 launches obs64 cwd=`bin\64bit`, then VERIFIES the OBS log shows `genlock: … render tick ENABLED` (the
@@ -105,6 +157,17 @@ PEB, read via `NtQueryInformationProcess` + `ReadProcessMemory` (PEB+0x20 → Pr
 +0x80 → Environment, +0x3F0 → EnvironmentSize; `OpenProcess(0x0410,…)` = QUERY_INFORMATION | VM_READ).
 With genlock now a build default this verification is no longer needed — genlock state is read from
 the OBS log (`render tick ENABLED`).
+
+## GOTCHA — NDI source dropdown is an EDITABLE combo: never type into it when the finder list is empty (#795)
+
+Live incident (2026-07-17 event): the strih→stream feed collapsed (network), the operator opened
+the DistroAV source properties to re-pick — the NDI list was EMPTY (discovery lost on the sick
+network) and the dropdown is an editable combobox, so keystrokes MANGLED the stored source name
+character by character ('NDI 2ME-PGM' → 'N2ME-PGM' → '2ME-PGM'), each update pointing at a
+nonexistent source → black, unrecoverable from the UI. Recovery = restart OBS (the saved scene
+JSON still holds the last-SAVED correct name). Operator guidance until #795 lands (list-only
+selector): when a feed dies, do NOT open/edit the source picker — restart OBS via the launcher.
+The mangled names are visible in the log as successive `[distroav] NDI Source Updated:` lines.
 
 ## Recovery — Do It Autonomously (Never Ask)
 
@@ -186,8 +249,10 @@ fires a Discord alert once a wedge is confirmed over 2 consecutive passes — se
 `systemd/obs-liveness-watchdog.README.md` for the install/live-verify procedure. **Detection is
 fully automatic from dev1 (no ssh/MCP needed for `GetStats`); recovery from THIS dev1 timer is
 agent-driven** — the alert embeds the exact `scripts/launch-obs-genlock.sh --box <box> --force`
-command, because ssh to these boxes is denied and the win-* MCP is agent-only (a dev1 timer cannot
-itself force-kill or relaunch obs64.exe). When you (the agent) see that alert, just run the
+command, because the win-* MCP is agent-only (a dev1 timer has no agent session to drive it) and
+this recovery step was never migrated to a headless ssh path even though #701 proved plain
+scp/ssh DOES reach strih/stream (a bare systemd timer still cannot itself force-kill or relaunch
+obs64.exe today). When you (the agent) see that alert, just run the
 embedded recovery command — do NOT ask before recovering (same "recover it, don't ask" rule as the
 rest of this file).
 
@@ -284,6 +349,15 @@ To restart strih's OBS mid-session: kill obs64 + relaunch via `scripts/launch-ob
 strih --force` (genlock comes up automatically — it is a build default, #257, no env needed). AHK then
 sees OBS running and won't re-add another one.
 
+**AHK is STRIH-ONLY — `build_launch_program` takes a third arg `HAS_AHK` (#792 guard repair,
+2026-07-16).** The #786 audio-gate redraw loop brackets AHK (stop-first/restart-last), but ONLY a
+box that actually runs the watcher may get those commands: `build_launch_program OBS_DIR FORCE 1`
+(default = strih behavior) emits the bracket; `... 0` (stream — the `--box stream` case and
+obs-self-heal-install.sh both pass 0) emits documented no-ops instead. Pinned by
+`tests/launch_obs_genlock.rs::program_without_ahk_watcher_carries_no_ahk_commands_786` and the
+`#411` self-heal stream guard — a new caller of `build_launch_program` must pass the box-correct
+third arg, never rely on the default for stream.
+
 **GOTCHA — a libobs HOT-SWAP (deploying a new `obs.dll`) needs AHK STOPPED for the swap window, not
 just kill+relaunch.** AHK's `SafeLoop` (`Run obs64` after a ~5 s delay when its window is gone, polled
 every 1 s) is fine for a fast restart, but a DLL swap is multi-step (kill obs64 → `Copy-Item` the new
@@ -296,8 +370,41 @@ AutoHotkey64` FIRST → kill obs64 → backup + copy the new obs.dll (verify `Ge
 restart AHK sees the OBS window already up → takes the `else Startup()` branch (no "zapnúť všetko?"
 MsgBox) and won't double-launch. (Proven on the 2026-06-27 #147 obs.dll deploy.)
 
+**GOTCHA (#767 deploy, 2026-07-15) — EVERY Windows hot-swap MUST also update
+`C:\Program Files\obs-studio\GENLOCK_BUILD_SHA.txt` to the deployed build's commit SHA** (same
+role as imag's `/opt/obs-genlock/GENLOCK_BUILD_SHA.txt`; the bundle-state-server serves it as
+`genlock_build_sha` and the #756 CROSS-BOX parity facet in the fused E2E's `[0/8]`
+version-integrity gate compares it across strih+stream+imag). Swapping the DLLs without the
+marker leaves the box reporting the OLD SHA → `genlock_parity DRIFT` → the E2E gate REFUSES the
+rig at minute 0 (live incident: the first post-#767-deploy gate run failed exactly this way —
+imag=dede91825, strih=stream=2789f46c). Write it BOM-free:
+`[IO.File]::WriteAllText('C:\Program Files\obs-studio\GENLOCK_BUILD_SHA.txt', "<sha>`n",
+(New-Object System.Text.UTF8Encoding $false))`.
+
 strih has OTHER OBS installs in `D:\_APPS` (1ME/2ME/vestibul/input/light) — do NOT touch;
 broadcast = the Program Files 2ME one only.
+
+**GOTCHA (#867, 2026-07-29) — `AutoHotkey64.exe` is NOT on PATH; a bare `-FilePath
+'AutoHotkey64.exe'` (as the hot-swap recipe above literally shows) can never resolve.** AHK v2 is
+installed on strih USER-SCOPED under
+`C:\Users\newlevel\AppData\Local\Programs\AutoHotkey\v2\AutoHotkey64.exe` (also
+`...\AutoHotkey\UX\AutoHotkeyUX.exe`) — confirmed live, `where AutoHotkey64.exe` returns nothing.
+The `.ahk` file association DOES work (it lives in HKCU, not HKCR/HKLM, so a non-interactive
+`assoc .ahk` misleadingly reports "not found" — that's expected, not evidence AHK is missing).
+Root cause of a real strih outage: a prior obs.dll hot-swap run's `Stop-Process -Name
+AutoHotkey64 -Force` (correctly, before touching obs64) followed by exactly the bare
+`Start-Process -FilePath "D:\_APPS\NL_STARTUP.ahk"` this doc used to show — the restart step
+was never verified, silently failed, and strih ran with no live respawn watcher for hours before
+the user noticed. `scripts/obs-self-heal-install.sh` and `scripts/launch-obs-genlock.sh` had the
+identical shape (`ahk_start_block` / `ahk_restart_ps`) and got the real fix: both now source
+**`scripts/lib/ahk-watchdog.sh`'s `ahk_resolve_and_relaunch_ps`**, which probes, in order,
+`%LOCALAPPDATA%\Programs\AutoHotkey\v2\`, `%ProgramFiles%\AutoHotkey\v2\`,
+`%ProgramFiles%\AutoHotkey\`, then the NL_STARTUP Startup shortcut, then `Get-Command
+AutoHotkey64.exe` (PATH) — and then POLLS `Get-Process AutoHotkey64` for up to ~10s
+(`$ahkRelaunchVerified`/`$ahkRelaunchTarget`) instead of unconditionally logging success. **Any
+future manual/ad-hoc AHK restart (including a one-off hot-swap paste like the recipe two
+sections above) should reuse that shared function rather than a bare `-FilePath` relaunch, and
+should always verify with `Get-Process AutoHotkey64` before trusting it came back.**
 
 ## A force-kill relaunch restores a STALE saved config — clean the baseline before measuring (#276 deploy)
 
@@ -324,6 +431,18 @@ restored heavier state.
   Skipped/Total) at T0, wait N s, snapshot again → DELTAS (renderSkipped delta, outputFps) are immune to
   startup transient and to the huge cumulative counters. `renderSkippedFrames` = GPU compositor missed
   the 60fps deadline; `outputSkippedFrames` = encoder dropped a broadcast frame (the one that matters).
+  No dedicated CLI verb exists for a one-off ad-hoc read on OTHER boxes — call the RPC directly (#726):
+  ```python
+  import sys; sys.path.insert(0, "scripts")
+  import obs_phase2 as op
+  ws = op._conn("10.77.9.202", "<strih WS password — local memory, not committed>")  # stream: "10.77.9.204", "" (no auth)
+  print(op._rpc(ws, "GetStats"))
+  ws.close()
+  ```
+  On strih specifically, `scripts/strih_mv_scenes.py --host 10.77.9.202 --password <pw> --stats
+  <seconds>` (#730) now DOES give a one-shot before/after-friendly delta report (activeFps,
+  avgRenderMs, renderSkipped/renderTotal + %, outputSkipped/outputTotal) without hand-rolling the
+  RPC — reuse it instead of the raw snippet above when measuring strih.
 - **Open the built-in Multiview projector:** `OpenVideoMixProjector {videoMixType:
   OBS_WEBSOCKET_VIDEO_MIX_TYPE_MULTIVIEW, monitorIndex:0}` (fullscreen). There is **no WS request to
   CLOSE a projector** — close it by `PostMessage WM_CLOSE (0x0010)` to the window titled
@@ -354,3 +473,19 @@ lets a stale copy silently shadow the intended genlock build (the mixed-version 
   (`distroav_dll_paths`) and FAILS if there is more than one, or the lone one is off canonical.
   Pinned in `vendor/README.md` as `canonical_plugin_path`. Do NOT remove the canonical copy —
   only ever clean a duplicate in a SHADOW path (and only after confirming which is canonical).
+
+## #786 — stream OBS A/V sync mimo o ~0.9s po štarte: ASIO launch race → audio buffering 960ms (sticky)
+
+libobs GLOBAL audio buffering is a one-way ratchet (grows on late audio, NEVER shrinks until OBS
+restart). On SOME stream-OBS launches the 'ASIO Input Capture' source on **VB-Matrix VASIO-8**
+floods stale audio in the ~1s window before **Dante Virtual Soundcard** finishes initializing →
+43× "adding 21 ms" in 0.9s → `Max audio buffering reached!` → 960ms, stuck for the whole session.
+Healthy launch = exactly ONE `adding 64 milliseconds` line, peak 64ms. Effect: audio +896ms vs
+normal → the operator's ~900ms genlock latency reads as ~2000ms-worth wrong; OBS restart with a
+clean launch restores it. **Launch-window only** — a 7h bad session showed ZERO further growth, so
+it cannot flip spontaneously mid-event; only a relaunch re-rolls the dice.
+
+**Diagnóza (10s):** v čerstvom logu `Select-String "Max audio buffering|total audio buffering"` —
+`960` = zlý štart (reštartuj OBS kým nie je 64ms); `64` = čistý. **Núdzová kompenzácia naživo bez
+reštartu:** genlock latency +~900ms (overené operátorom). Trvalý fix = launch-gate v
+`launch-obs-genlock.sh` (#786).

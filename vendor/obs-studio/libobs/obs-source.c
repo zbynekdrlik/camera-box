@@ -3649,6 +3649,12 @@ static void obs_source_output_video_internal(obs_source_t *source, const struct 
 		/* camera-box #126: an explicit flush re-arms the latch here; clear the
 		 * consecutive-empty run too so it can't carry a stale count into the rebuild. */
 		source->genlock_empty_run = 0;
+		/* camera-box #741/#707 B2: the source went inactive (flushed) — the whole delay
+		 * line is gone, so the last CONFIRMED source-rate multiple is genuinely stale.
+		 * Clear it HERE (the reset site the #726 clears missed) so a resumed source
+		 * re-confirms N from scratch instead of trusting a pre-flush latch. Mirror: a
+		 * fresh src/probe/genlock.rs ReleaseCadence starts with last_known_n = 0. */
+		source->genlock_last_known_n = 0;
 		free_async_cache(source);
 		pthread_mutex_unlock(&source->async_mutex);
 		return;
@@ -3656,10 +3662,20 @@ static void obs_source_output_video_internal(obs_source_t *source, const struct 
 
 	source_profiler_async_frame_received(source);
 
+	/* camera-box #797 instrumentation: time the two candidate stall stages of the
+	 * receive-thread submit path — cache_video (async_mutex #1 wait + possible alloc +
+	 * 4MB copy_frame_data) and the async_mutex #2 wait below. Rate-limited slow-call
+	 * log (>5ms total, max ~1 line/s) with a cumulative slow counter, so a systematic
+	 * ~3-4ms/frame stall (the 50-of-60fps pull-loop quantizer) is unmissable in the
+	 * imag OBS log within seconds. Pure diagnosis — remove after #797 closes. */
+	uint64_t iv797_t0 = os_gettime_ns();
+
 	struct obs_source_frame *output = cache_video(source, frame);
 
+	uint64_t iv797_t1 = os_gettime_ns();
 	/* ------------------------------------------- */
 	pthread_mutex_lock(&source->async_mutex);
+	uint64_t iv797_t2 = os_gettime_ns();
 	if (output) {
 		if (os_atomic_dec_long(&output->refs) == 0) {
 			obs_source_frame_destroy(output);
@@ -3689,6 +3705,24 @@ static void obs_source_output_video_internal(obs_source_t *source, const struct 
 		}
 	}
 	pthread_mutex_unlock(&source->async_mutex);
+
+	{
+		/* #797: see the comment above iv797_t0. */
+		uint64_t iv797_t3 = os_gettime_ns();
+		if (iv797_t3 - iv797_t0 > 5000000ULL) {
+			static volatile long iv797_slow_count = 0;
+			static uint64_t iv797_last_log_ns = 0;
+			os_atomic_inc_long((long *)&iv797_slow_count);
+			if (iv797_t3 - iv797_last_log_ns > 1000000000ULL) {
+				iv797_last_log_ns = iv797_t3;
+				blog(LOG_INFO,
+				     "genlock #797 slow output_video '%s': total=%.2fms cache_video=%.2fms lock2_wait=%.2fms (slow_total=%ld)",
+				     obs_source_get_name(source), (double)(iv797_t3 - iv797_t0) / 1e6,
+				     (double)(iv797_t1 - iv797_t0) / 1e6, (double)(iv797_t2 - iv797_t1) / 1e6,
+				     iv797_slow_count);
+			}
+		}
+	}
 }
 
 void obs_source_output_video(obs_source_t *source, const struct obs_source_frame *frame)
@@ -4256,8 +4290,38 @@ static uint32_t genlock_clamp_preload_u32(uint32_t v)
  * (present_ts > boundary + 2.25*interval), which EMBEDS the constant stamp->arrival
  * skew — the 2026-07-02 live canary (skew 59 ms at the 3 ms reserve) relock-stormed:
  * dropped_due 2918 of 4202 received, relocks 1076. Depth is immune to any constant
- * skew. Mirror of src/probe/genlock.rs ReleaseCadence::QDEPTH_RELOCK. */
-#define GENLOCK_QDEPTH_RELOCK 6
+ * skew. Mirror of src/probe/genlock.rs ReleaseCadence::QDEPTH_RELOCK_MARGIN.
+ *
+ * camera-box #859: this is now the MARGIN above the depth a source's own configured latency
+ * implies, NOT the whole threshold — see genlock_backlog_relock_qdepth() below. The old bare
+ * constant encoded the assumption stated a few lines up ("steady depth is ~1-2 at any skew"),
+ * which is true only for a SHALLOW source. A source pinned deep (the stream box's 'NDI 2ME PGM'
+ * runs 923 ms to A/V-align against the mbc's 1 s mastering) has a steady depth of ~28, so
+ * `28 > 6` was permanently true and the backlog branch fired EVERY tick: relocks incremented
+ * once per frame, and every arrival-jitter excursion to due==2 erased a frame (dropped_due) that
+ * the next tick repeated (holds). Measured live as +59 duplicate / +57 skipped frames injected
+ * into the strih->stream hop, against 2 duplicates in 9626 frames on the cam->strih leg whose
+ * sources all sit below the bare 6. Mirror of src/probe/genlock.rs QDEPTH_RELOCK_MARGIN and
+ * src/genlock_backlog.rs QDEPTH_RELOCK_MARGIN (the Tier-0 unit-tested decision). */
+#define GENLOCK_QDEPTH_RELOCK_MARGIN 6
+/* camera-box #741/#707 B2: how many of the front queued frames genlock_measure_source_multiple
+ * scans for a strictly-increasing consecutive pair. Reading only array[0..1] read INCONCLUSIVE on
+ * a DUPLICATE front stamp / arrival-non-monotonic seam, so a jittery 60-into-30 input crawled;
+ * scanning the first few entries recovers one real source interval past a leading degenerate pair.
+ * Mirror: src/probe/genlock.rs ReleaseCadence::MEASURE_SCAN_DEPTH. */
+#define GENLOCK_MEASURE_SCAN_DEPTH 6
+/* camera-box #859 follow-up: hysteresis, in frames, a queue must exceed its OWN steady target
+ * depth (genlock_backlog_relock_qdepth() minus GENLOCK_QDEPTH_RELOCK_MARGIN) before the
+ * slew-limited settle-back DRAIN engages. Without this, ordinary arrival jitter around the
+ * target would trigger a drain with nothing genuinely excess to shed. Mirror:
+ * src/genlock_backlog.rs DRAIN_HYSTERESIS_FRAMES (Tier-0 unit-tested). */
+#define GENLOCK_DRAIN_HYSTERESIS_FRAMES 2
+/* camera-box #859 follow-up: minimum render ticks between two DRAIN events — bounds the drain
+ * to at most one frame per this many ticks, which is what makes it structurally incapable of
+ * reproducing the every-tick paired duplicate/skip storm the (correctly) disabled per-tick
+ * backlog-relock branch used to cause as a side effect of trimming the queue on every tick.
+ * Mirror: src/genlock_backlog.rs DRAIN_MIN_TICK_INTERVAL. */
+#define GENLOCK_DRAIN_MIN_TICK_INTERVAL 30
 /* genlock_latency_ms() is declared further down (after the #184 ms-knob block); forward
  * declare it so genlock_preload_default() can branch on whether the ms knob is set. */
 static uint32_t genlock_latency_ms(void);
@@ -4775,6 +4839,138 @@ static void genlock_audit_log(obs_source_t *source, uint64_t now_ns)
 }
 /* ---- end genlock FIFO preload + audit ------------------------------------ */
 
+/* camera-box #726 STICKY-N: FRESHLY measure this genlock source's integer rate multiple N from
+ * the STAMP GRID of the front queued frames, or 0 when it cannot be measured this tick. The delta
+ * of a strictly-increasing consecutive stamp pair is the true source frame interval regardless of
+ * arrival jitter (a single NDI source delivers in monotonic capture order). A 60fps source into
+ * a 30fps canvas stamps every ~16.6ms, so canvas_interval / src_interval ~= 2 => N==2; a 1:1 source
+ * (30fps into 30fps) stamps every canvas interval => N==1 (the present-oldest lossless-drain STEADY
+ * path is then unchanged). #741/#707 B2: SCAN the first GENLOCK_MEASURE_SCAN_DEPTH entries for that
+ * pair rather than reading only array[0..1] — a DUPLICATE front stamp / arrival-non-monotonic seam
+ * at array[0..1] used to read INCONCLUSIVE and (sustained) crawl. Returns 0 = INCONCLUSIVE: fewer
+ * than 2 queued frames, or NO strictly-increasing pair in the scan window. A non-zero return
+ * (N>=1) is a genuine measurement — the CONFIRMATION authority; the sticky latch
+ * (genlock_effective_source_multiple) bridges ONLY the 0 ticks. Mirror of src/probe/genlock.rs
+ * ReleaseCadence::measure_source_multiple. */
+static inline uint32_t genlock_measure_source_multiple(const obs_source_t *source, uint64_t canvas_interval_ns)
+{
+	if (canvas_interval_ns == 0 || source->async_frames.num < 2)
+		return 0; /* inconclusive: fewer than 2 queued frames */
+	/* #741/#707 B2 ROBUST: the very front pair (array[0],array[1]) can be momentarily
+	 * degenerate — a DUPLICATE capture stamp (t1==t0) or an arrival-order non-monotonic
+	 * seam (t1<t0). Reading ONLY array[0..1] then returned INCONCLUSIVE, and a SUSTAINED
+	 * inconclusive run on a jittery 60-into-30 input dropped the release to the present-oldest
+	 * CRAWL (#707 B2: a window uniform=0.481, histogram {1:295,2:407,3:102,7:39}). Scan the
+	 * first K queued entries for the FIRST strictly-increasing CONSECUTIVE pair — that delta is
+	 * one real source frame interval regardless of a leading duplicate. Still 0 (inconclusive)
+	 * when NO increasing pair exists in the window: the fix WIDENS the search, it never
+	 * fabricates a measurement (the sticky latch bridges the 0). */
+	const size_t scan = source->async_frames.num < (size_t)GENLOCK_MEASURE_SCAN_DEPTH
+				    ? source->async_frames.num
+				    : (size_t)GENLOCK_MEASURE_SCAN_DEPTH;
+	uint64_t src_interval = 0;
+	for (size_t i = 0; i + 1 < scan; i++) {
+		const uint64_t a = source->async_frames.array[i]->timestamp;
+		const uint64_t b = source->async_frames.array[i + 1]->timestamp;
+		if (b > a) {
+			src_interval = b - a;
+			break;
+		}
+	}
+	if (src_interval == 0)
+		return 0; /* inconclusive: no strictly-increasing pair in the first K entries */
+	/* round-to-nearest N = canvas / src; clamp to >=1 (a slower-than-canvas source reads 1). */
+	const uint64_t n = (canvas_interval_ns + src_interval / 2) / src_interval;
+	return (uint32_t)(n < 1 ? 1 : n);
+}
+
+/* camera-box #726 STICKY-N: the EFFECTIVE source rate multiple to release at THIS tick. A fresh
+ * measurement (genlock_measure_source_multiple) is the CONFIRMATION authority — when the front pair
+ * is measurable it WINS and updates the latch (so a genuine 1:1 rate re-latches to 1 => the
+ * present-oldest lossless path, byte-identical). When the front pair is INCONCLUSIVE (momentary
+ * async_frames.num < 2 / a non-monotonic clock-step seam) it BRIDGES with the last confirmed
+ * multiple instead of crawling — the #726 win5/win6 residual fix (a jittery input's sustained
+ * inconclusive run under-drained the queue into the backlog storm). It NEVER invents a multiple: an
+ * unconfirmed latch (0) reads 1. The latch is CLEARED on acquire/relock/gap/backward-step (see the
+ * callers below) so a stale N cannot outlive its rate. Takes a NON-const source (writes the latch).
+ * Mirror of src/probe/genlock.rs ReleaseCadence::effective_source_multiple. */
+static inline uint32_t genlock_effective_source_multiple(obs_source_t *source, uint64_t canvas_interval_ns)
+{
+	const uint32_t fresh = genlock_measure_source_multiple(source, canvas_interval_ns);
+	if (fresh >= 1) {
+		source->genlock_last_known_n = fresh; /* fresh measurement is the confirmation authority */
+		return fresh;
+	}
+	/* inconclusive — bridge with the last confirmed multiple; never invent (0 -> 1). */
+	return source->genlock_last_known_n >= 1 ? source->genlock_last_known_n : 1;
+}
+
+/* camera-box #859: the BACKLOG-STORM queue-depth threshold for a source, relative to the depth
+ * that source's OWN configured latency implies. A queue is only in backlog when it exceeds the
+ * buffer it was deliberately configured to hold, plus the original GENLOCK_QDEPTH_RELOCK_MARGIN.
+ *
+ * The source-rate multiple matters: async_frames counts frames as the SOURCE delivered them, so a
+ * 60 fps input on a 30 fps canvas queues two entries per canvas interval and its implied depth is
+ * twice what the canvas rate alone would suggest.
+ *
+ * READ-ONLY on purpose — it uses the PURE genlock_measure_source_multiple with the sticky latch as
+ * fallback, NOT genlock_effective_source_multiple, which WRITES source->genlock_last_known_n. This
+ * threshold is consulted on ticks that never latched before, and merely computing a threshold must
+ * not acquire a write path. Same value, no new side effect.
+ *
+ * Round-to-nearest, matching genlock_source_drop_cap's own latency->frames rounding so the two
+ * latency-derived quantities in this FIFO agree. A degenerate interval yields the bare margin —
+ * identical to the pre-#859 behaviour — rather than dividing by zero.
+ *
+ * Mirror of src/genlock_backlog.rs backlog_relock_threshold (Tier-0 unit-tested) and
+ * src/probe/genlock.rs ReleaseCadence::backlog_relock_qdepth — keep all three in lock-step. */
+static size_t genlock_backlog_relock_qdepth(const obs_source_t *source, uint32_t reserve_ms, uint64_t interval)
+{
+	if (interval == 0)
+		return GENLOCK_QDEPTH_RELOCK_MARGIN;
+	const uint32_t measured = genlock_measure_source_multiple(source, interval);
+	const uint32_t n = measured >= 1 ? measured
+					 : (source->genlock_last_known_n >= 1 ? source->genlock_last_known_n : 1);
+	const uint64_t held_ns = (uint64_t)reserve_ms * 1000000ULL * (uint64_t)n;
+	const uint64_t depth = (held_ns + interval / 2) / interval;
+	return (size_t)(depth + GENLOCK_QDEPTH_RELOCK_MARGIN);
+}
+
+/* camera-box #859 follow-up: SLEW-LIMITED SETTLE-BACK DRAIN decision — should this tick shed
+ * exactly ONE EXTRA frame to settle the queue back toward the depth its OWN configured latency
+ * implies, after a setpoint change? The #859 fix above stopped the backlog-relock branch firing
+ * every tick in steady state, but that branch was ALSO the FIFO's only mechanism for shedding
+ * excess queue depth after a genlock latency SETPOINT INCREASE. With it gated off, the plain
+ * N==1 steady release (exactly one frame per tick) holds depth CONSTANT forever: it never falls
+ * further behind, but it never catches up either. Measured live: a +34 ms setpoint step produced
+ * +134 ms of ACTUAL delay, stable across 6 consecutive samples 20+ minutes apart — a parked
+ * overshoot, not a decaying transient.
+ *
+ * This is a bounded, ADDITIONAL path alongside the unchanged backlog-relock branch: at most once
+ * every GENLOCK_DRAIN_MIN_TICK_INTERVAL ticks, while depth exceeds the target implied by
+ * reserve_ms plus GENLOCK_DRAIN_HYSTERESIS_FRAMES, shed exactly one extra frame. The rate is
+ * bounded by construction, so it can never reproduce the every-tick paired duplicate/skip storm
+ * the disabled branch used to cause.
+ *
+ * READ-ONLY like genlock_backlog_relock_qdepth (same rationale: a decision getter must not
+ * acquire a write path) — uses the pure measurement with the sticky latch as fallback.
+ *
+ * Mirror of src/genlock_backlog.rs should_drain_one (Tier-0 unit-tested) and
+ * src/probe/genlock.rs ReleaseCadence::should_drain_one — keep all three in lock-step. */
+static bool genlock_should_drain_one(const obs_source_t *source, uint32_t reserve_ms, uint64_t interval)
+{
+	if (interval == 0)
+		return false;
+	const uint32_t measured = genlock_measure_source_multiple(source, interval);
+	const uint32_t n = measured >= 1 ? measured
+					 : (source->genlock_last_known_n >= 1 ? source->genlock_last_known_n : 1);
+	const uint64_t held_ns = (uint64_t)reserve_ms * 1000000ULL * (uint64_t)n;
+	const uint64_t target = (held_ns + interval / 2) / interval;
+	const uint64_t depth = (uint64_t)source->async_frames.num;
+	return depth > target + GENLOCK_DRAIN_HYSTERESIS_FRAMES &&
+	       source->genlock_ticks_since_drain >= GENLOCK_DRAIN_MIN_TICK_INTERVAL;
+}
+
 static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 {
 	struct obs_source_frame *next_frame = source->async_frames.array[0];
@@ -4939,6 +5135,10 @@ static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 						 * boundary the step invalidated. */
 						source->genlock_locked_next_boundary_ns =
 							next_frame->timestamp + interval;
+						/* #726 STICKY-N: a backward clock-step re-anchor is a
+						 * source-timeline discontinuity -- clear the confirmed-N
+						 * latch so the post-step stream re-confirms its multiple. */
+						source->genlock_last_known_n = 0;
 						source->genlock_frames_consumed++;
 						source->last_frame_ts = next_frame->timestamp;
 						genlock_audit_log(source, now_ns);
@@ -4977,8 +5177,12 @@ static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 				 * EMBEDS the constant stamp->arrival skew (59 ms live at the 3 ms
 				 * reserve) and relock-stormed — dropped_due 2918 of 4202 received
 				 * (69 %), relocks 1076. v2 guards backlog QUEUE-RELATIVE (depth >
-				 * GENLOCK_QDEPTH_RELOCK — steady depth is ~1-2 at any skew, the
-				 * boundary paces arrivals) and releases strict FIFO on the STEADY
+				 * genlock_backlog_relock_qdepth() — #859: the depth the source's OWN
+				 * configured latency implies, plus GENLOCK_QDEPTH_RELOCK_MARGIN. The
+				 * pre-#859 bare constant assumed "steady depth is ~1-2 at any skew",
+				 * true only for a SHALLOW source; a source pinned deep for A/V
+				 * alignment sat permanently above it and relocked every tick)
+				 * and releases strict FIFO on the STEADY
 				 * path (present the OLDEST matured frame; a transient 2-frame
 				 * maturation drains losslessly next tick). EVERY discarded frame
 				 * counts into genlock_dropped_due (steady state drops ZERO).
@@ -4989,10 +5193,24 @@ static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 				 * incl. the deep-skew and mid-run-skew-shift regression locks,
 				 * are the proof harness). */
 				size_t release;
+				/* camera-box #859 follow-up: true only on the plain N==1 STEADY
+				 * release path below (release=1/tick) — the ONE case this
+				 * ticket's evidence found holds queue depth CONSTANT forever
+				 * after a setpoint-change overshoot. Every other path already has
+				 * its own catch-up behaviour and is left untouched. */
+				bool drain_eligible = false;
 				if (source->genlock_locked_next_boundary_ns == 0) {
 					/* UNLOCKED — ACQUIRE: the first wall-due frame locks the
 					 * cadence. Jump to the newest due (a startup backlog is stale
 					 * by definition), counting the older ones dropped. */
+					/* #726 STICKY-N: a fresh acquire (cold start OR after a source
+					 * reset that zeroed the boundary) re-confirms the source
+					 * multiple from scratch -- clear the latch so a stale N from a
+					 * previous lock can't outlive it. */
+					source->genlock_last_known_n = 0;
+					/* #859 follow-up: a fresh lock starts the settle clock over —
+					 * nothing has overshot yet immediately after acquiring. */
+					source->genlock_ticks_since_drain = 0;
 					if (due == 0) {
 						/* #148: a BENIGN source-early HOLD (frames queued, none
 						 * yet due) -> genlock_holds, NOT a true-empty
@@ -5002,7 +5220,9 @@ static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 						return false;
 					}
 					release = due;
-				} else if (source->async_frames.num > GENLOCK_QDEPTH_RELOCK &&
+				} else if (source->async_frames.num >
+						   genlock_backlog_relock_qdepth(source, reserve_ms,
+										 interval) &&
 					   due > 0) {
 					/* BACKLOG STORM (v2 — queue-relative, NEVER wall-boundary
 					 * drift): a stall's burst or a persistent inflow>presentation
@@ -5017,18 +5237,66 @@ static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 					 * past the reserve yet) deliberately falls through: the
 					 * STEADY path drains it, or this branch fires once it ages. */
 					source->genlock_relocks++;
+					/* #741/#707 B2: do NOT clear genlock_last_known_n here. A
+					 * backlog re-lock is a QUEUE-DEPTH event, NOT evidence the
+					 * source RATE changed — the #726 clear made the very next
+					 * INCONCLUSIVE tick crawl at N=1, which under a steady 60-into-30
+					 * backlog re-grew the queue and re-triggered THIS relock: a
+					 * self-sustaining crawl->relock loop (the #707 B2 crawl window,
+					 * uniform=0.481). The latch bridges the post-relock inconclusive
+					 * ticks with the still-correct multiple; a genuine rate change is
+					 * re-confirmed by the next measurable front pair, and a real
+					 * source-timeline discontinuity still clears it at
+					 * acquire / gap resync / backward clock-step / flush. */
 					release = due;
 				} else if (source->async_frames.array[0]->timestamp <=
 					   source->genlock_locked_next_boundary_ns) {
 					/* STEADY (strict FIFO): the queue head matured by the LOCKED
-					 * boundary — present the OLDEST matured frame, exactly one in
-					 * steady state at any arrival skew. Presenting oldest (v1
-					 * presented the newest matured and dropped the rest) is what
-					 * makes a transient 2-frame maturation LOSSLESS: the extra
-					 * frame drains on the next tick (depth-bounded by the backlog
-					 * guard above). The boundary re-anchors to the presented
-					 * stamp below so small stamp jitter cannot accumulate. */
-					release = 1;
+					 * boundary. */
+					if (genlock_effective_source_multiple(source, interval) >= 2) {
+						/* camera-box #726: the source runs at an integer multiple
+						 * N>=2 of the canvas render-tick rate (a 60fps NDI source
+						 * into a 30fps canvas). The present-OLDEST path CRAWLS here:
+						 * one canvas interval lands a HAIR under N source intervals
+						 * (30fps 33_333_333 ns vs 2*60fps 33_333_334 ns), so the
+						 * boundary matures only ONE frame per tick while N arrive —
+						 * content plays at ~1/N speed and the queue grows until the
+						 * backlog storm above catches up with a JUMP (the live-event
+						 * "like 15fps" judder, #726). Instead mature every frame up
+						 * to the boundary PLUS a half-interval slack (so the frame
+						 * ~one canvas interval ahead — the hair-past-boundary one —
+						 * is included, the #136 boundary-churn tolerance), release
+						 * the NEWEST and retire the older matured one(s) into
+						 * genlock_dropped_due (the erase loop below). The boundary
+						 * re-anchors to the presented stamp, advancing ONE canvas
+						 * interval (= N source frames) per tick: a uniform
+						 * every-Nth-frame cadence tracking real time, slew-immune
+						 * (keys on the boundary, not the wall). Mirror of
+						 * src/probe/genlock.rs ReleaseCadence::tick N>=2 path. */
+						const uint64_t mature_deadline =
+							source->genlock_locked_next_boundary_ns +
+							interval / 2;
+						size_t matured_n = 0;
+						while (matured_n < source->async_frames.num &&
+						       source->async_frames.array[matured_n]->timestamp <=
+							       mature_deadline)
+							matured_n++;
+						release = matured_n > 0 ? matured_n : 1;
+					} else {
+						/* present the OLDEST matured frame, exactly one in steady
+						 * state at any arrival skew. Presenting oldest (v1 presented
+						 * the newest matured and dropped the rest) is what makes a
+						 * transient 2-frame maturation LOSSLESS: the extra frame
+						 * drains on the next tick (depth-bounded by the backlog
+						 * guard above). The boundary re-anchors to the presented
+						 * stamp below so small stamp jitter cannot accumulate.
+						 * N==1 is byte-identical to pre-#726. */
+						release = 1;
+						/* #859 follow-up: this is the ONE path the ticket's
+						 * evidence identified as holding depth CONSTANT forever
+						 * — eligible for the bounded settle-back drain below. */
+						drain_eligible = true;
+					}
 				} else if (present_ts >= source->async_frames.array[0]->timestamp) {
 					/* GAP RESYNC: nothing matured, but the oldest queued frame is
 					 * BEYOND the boundary and has aged past the reserve —
@@ -5036,6 +5304,11 @@ static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 					 * Present it and re-anchor the boundary to the real stream;
 					 * not a drop of ours (nothing is discarded), not a relock (no
 					 * catch-up jump). */
+					/* #726 STICKY-N: a GAP RESYNC means upstream skipped stamps
+					 * (sender restart / upstream loss) -- the source timeline (and
+					 * possibly its rate) changed; clear the latch so the post-gap
+					 * stream re-confirms its multiple. */
+					source->genlock_last_known_n = 0;
 					release = 1;
 				} else {
 					/* HOLD: the boundary's frame has not arrived. LATE only if
@@ -5062,6 +5335,36 @@ static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 					da_erase(source->async_frames, 0);
 					remove_async_frame(source, dropped);
 					source->genlock_dropped_due++;
+				}
+				/* camera-box #859 follow-up: SLEW-LIMITED SETTLE-BACK DRAIN. Only on
+				 * the plain N==1 steady path (drain_eligible). Drops the CURRENT
+				 * oldest (array[0] — what would otherwise be presented this tick)
+				 * and presents the NEXT one instead (array[0] AFTER this erase) —
+				 * the same drop-older/present-newest idiom the ACQUIRE / backlog
+				 * relock / N>=2 paths above already use. This is NOT equivalent to
+				 * keeping the same presented frame and dropping the one behind it:
+				 * that alternative desyncs the re-anchored boundary from the real
+				 * (evenly-spaced) frame timeline, so the VERY NEXT tick reads as a
+				 * HOLD and the queue regains via GAP RESYNC exactly what the drain
+				 * just shed — a self-cancelling no-op, confirmed by simulation
+				 * before landing here. At most ONE extra frame leaves the queue
+				 * this tick, bounded to at most once per
+				 * GENLOCK_DRAIN_MIN_TICK_INTERVAL ticks by genlock_should_drain_one(),
+				 * so it can never reproduce the every-tick backlog-relock burst.
+				 * Mirror: src/genlock_backlog.rs should_drain_one (Tier-0 tested) /
+				 * src/probe/genlock.rs ReleaseCadence::should_drain_one. */
+				if (drain_eligible) {
+					if (genlock_should_drain_one(source, reserve_ms, interval) &&
+					    source->async_frames.num > 1) {
+						struct obs_source_frame *drained =
+							source->async_frames.array[0];
+						da_erase(source->async_frames, 0);
+						remove_async_frame(source, drained);
+						source->genlock_dropped_due++;
+						source->genlock_ticks_since_drain = 0;
+					} else {
+						source->genlock_ticks_since_drain++;
+					}
 				}
 				next_frame = source->async_frames.array[0];
 				/* The lock advances exactly one interval past the presented stamp

@@ -369,6 +369,73 @@ fn dantesync_offset_verdict_absent_when_no_offset_line() {
     assert_eq!(offset_verdict(DS_ABSENT), "absent");
 }
 
+// #767-era measurement noise (live, 2026-07-15, E2E runs 29413733037/29419195600): under E2E
+// network load the per-sample [NTP] offset MEASUREMENT spikes to ~2-3ms for a SINGLE sample
+// (cam5 -2787us, cam7 -2316us) while PTP stays NANO-locked and the surrounding samples read
+// tens of us -- the clock is fine, the one measurement is noisy. Grading the single freshest
+// sample makes the gate flake exactly during E2E load; the verdict therefore grades the MEDIAN
+// of the fresh samples among the last 5 offset lines. The bound (2000us) is UNCHANGED and a
+// SUSTAINED out-of-bound offset (the real cam5/6 5.28s class) still hard-fails.
+const DS_FRESH_SPIKE_AMID_OK: &str = "\
+2026-07-07T18:36:20+02:00 CAM5 dantesync[900]: [NTP] offset:-20us (threshold:535us, adaptive)
+2026-07-07T18:36:28+02:00 CAM5 dantesync[900]: [NTP] offset:+34us (threshold:535us, adaptive)
+2026-07-07T18:36:36+02:00 CAM5 dantesync[900]: [NTP] offset:-15us (threshold:535us, adaptive)
+2026-07-07T18:36:44+02:00 CAM5 dantesync[900]: [PTP] NANO  Drift:   -486ns/s  Adj: +6.82ppm
+2026-07-07T18:36:45+02:00 CAM5 dantesync[900]: [NTP] offset:-2787us
+2026-07-07T18:36:46+02:00 CAM5 dantesync[900]: [PTP] NANO  Drift:   +253ns/s  Adj: +6.81ppm
+";
+
+const DS_FRESH_SUSTAINED_DRIFT: &str = "\
+2026-07-07T18:36:20+02:00 CAM5 dantesync[900]: [NTP] offset:+2624us
+2026-07-07T18:36:28+02:00 CAM5 dantesync[900]: [NTP] offset:+2508us
+2026-07-07T18:36:36+02:00 CAM5 dantesync[900]: [NTP] offset:+2865us
+2026-07-07T18:36:44+02:00 CAM5 dantesync[900]: [PTP] NANO  Drift:   -486ns/s  Adj: +6.82ppm
+2026-07-07T18:36:46+02:00 CAM5 dantesync[900]: [PTP] NANO  Drift:   +253ns/s  Adj: +6.81ppm
+";
+
+#[test]
+fn dantesync_offset_verdict_tolerates_a_single_fresh_measurement_spike() {
+    // One fresh ~2.8ms sample amid fresh tens-of-us samples = measurement noise, PTP still
+    // locked -> the median is in-bound -> "ok". (Pre-#767-fix this graded the single freshest
+    // sample and returned "drift" -- the exact E2E-load flake.)
+    assert_eq!(offset_verdict(DS_FRESH_SPIKE_AMID_OK), "ok");
+}
+
+// A SAME-SIGN NOISE BURST: the 3 freshest samples spike high in one direction (live cam5
+// 12:26-12:30: +2624, +2508, +2865 consecutive; run 29420477560 graded cam7 "drift" on median
+// 2113us) while the 8 samples just before read tens of us. A 5-sample window is
+// majority-covered by such a burst; ping RTT on the loaded rig LAN jitters to ~3.5ms on EVERY
+// box, so a short burst is measurement physics, not a clock step (PTP stays NANO). An
+// 11-sample window (~5min at the ~30s cadence; the journal gather is -n 400, so depth exists)
+// keeps the median on the in-bound bulk while a genuine step shifts ALL samples and still
+// drifts.
+const DS_FRESH_BURST_AMID_OK: &str = "\
+2026-07-07T18:33:20+02:00 CAM7 dantesync[900]: [NTP] offset:-20us (threshold:535us, adaptive)
+2026-07-07T18:33:50+02:00 CAM7 dantesync[900]: [NTP] offset:+34us (threshold:535us, adaptive)
+2026-07-07T18:34:20+02:00 CAM7 dantesync[900]: [NTP] offset:-15us (threshold:535us, adaptive)
+2026-07-07T18:34:50+02:00 CAM7 dantesync[900]: [NTP] offset:+109us (threshold:535us, adaptive)
+2026-07-07T18:35:20+02:00 CAM7 dantesync[900]: [NTP] offset:-103us (threshold:535us, adaptive)
+2026-07-07T18:35:50+02:00 CAM7 dantesync[900]: [NTP] offset:+55us (threshold:535us, adaptive)
+2026-07-07T18:36:05+02:00 CAM7 dantesync[900]: [NTP] offset:-130us (threshold:535us, adaptive)
+2026-07-07T18:36:15+02:00 CAM7 dantesync[900]: [NTP] offset:+88us (threshold:535us, adaptive)
+2026-07-07T18:36:25+02:00 CAM7 dantesync[900]: [NTP] offset:+2113us
+2026-07-07T18:36:35+02:00 CAM7 dantesync[900]: [NTP] offset:+2316us
+2026-07-07T18:36:45+02:00 CAM7 dantesync[900]: [NTP] offset:+2787us
+2026-07-07T18:36:46+02:00 CAM7 dantesync[900]: [PTP] NANO  Drift:   +253ns/s  Adj: +6.81ppm
+";
+
+#[test]
+fn dantesync_offset_verdict_tolerates_a_fresh_noise_burst_at_the_window_edge() {
+    assert_eq!(offset_verdict(DS_FRESH_BURST_AMID_OK), "ok");
+}
+
+#[test]
+fn dantesync_offset_verdict_still_drifts_on_sustained_out_of_bound_offset() {
+    // EVERY fresh sample out of bound -> the median is out of bound -> "drift". The median is
+    // noise-rejection, never a weakening of the 2000us bound.
+    assert_eq!(offset_verdict(DS_FRESH_SUSTAINED_DRIFT), "drift");
+}
+
 #[test]
 fn dantesync_offset_verdict_fails_closed_on_a_malformed_freshness_window() {
     // Same fail-closed property as freshest_offset_us, proven through the actual verdict every
@@ -728,6 +795,102 @@ fn ptp_check_maps_state_to_exit_code() {
     }
 }
 
+// --- gm_source_ip_from_pipe_json / gm_matches_expected / gm_check (#834) --------------------
+//
+// #834 (2026-07-28): the stream box reported is_locked=true/settled=true while PTP-locked to a
+// FOREIGN grandmaster (10.77.7.109 instead of the rig's 10.77.9.184) and sat 14.7ms out. The
+// fixtures below (HTTP_STATUS_STRIH_FIXTURE / HTTP_STATUS_STREAM_FIXTURE, declared further down
+// in this file for the #648 freshness tests) are the REAL captured payloads from that exact
+// incident — strih on the rig's own grandmaster, stream locked to the foreign one.
+
+#[test]
+fn gm_source_ip_from_pipe_json_reads_the_real_field() {
+    let out = run_sourced(
+        "gm_source_ip_from_pipe_json \"$JSON\"",
+        &[("JSON", HTTP_STATUS_STRIH_FIXTURE)],
+    );
+    assert_eq!(
+        out.trim(),
+        "10.77.9.184",
+        "must read strih's gm_source_ip: {out:?}"
+    );
+
+    let out = run_sourced(
+        "gm_source_ip_from_pipe_json \"$JSON\"",
+        &[("JSON", HTTP_STATUS_STREAM_FIXTURE)],
+    );
+    assert_eq!(
+        out.trim(),
+        "10.77.7.109",
+        "must read stream's FOREIGN gm_source_ip (#834): {out:?}"
+    );
+}
+
+#[test]
+fn gm_source_ip_from_pipe_json_empty_when_field_absent() {
+    let out = run_sourced(
+        "gm_source_ip_from_pipe_json \"$JSON\"",
+        &[("JSON", "{\"is_locked\":true,\"mode\":\"NANO\"}")],
+    );
+    assert_eq!(
+        out.trim(),
+        "",
+        "no gm_source_ip field -> UNKNOWN (empty), never a guessed match: {out:?}"
+    );
+}
+
+#[test]
+fn gm_matches_expected_true_only_on_exact_nonempty_match() {
+    let out = run_sourced(
+        r#"
+        for a in "10.77.9.184:10.77.9.184:YES" "10.77.7.109:10.77.9.184:NO" ":10.77.9.184:NO" "10.77.9.184::NO"; do
+          actual="${a%%:*}"; rest="${a#*:}"; expected="${rest%%:*}"; want="${rest#*:}"
+          if gm_matches_expected "$actual" "$expected"; then got=YES; else got=NO; fi
+          [ "$got" = "$want" ] && echo "OK $a" || echo "MISMATCH $a got=$got"
+        done
+        "#,
+        &[],
+    );
+    assert!(
+        !out.contains("MISMATCH"),
+        "gm_matches_expected produced a mismatch: {out}"
+    );
+}
+
+#[test]
+fn gm_check_ok_foreign_and_unknown() {
+    // strih locked to the rig's own GM -> OK (rc 0).
+    let out = run_sourced(
+        "set +e; gm_check strih \"$ACTUAL\" 10.77.9.184; echo \"rc=$?\"",
+        &[("ACTUAL", "10.77.9.184")],
+    );
+    assert!(
+        out.contains("GM OK") && out.contains("rc=0"),
+        "matching grandmaster must be OK: {out:?}"
+    );
+
+    // stream locked to a FOREIGN grandmaster -> FOREIGN (rc 2), the #834 shape — this must fail
+    // even though the node's own offset/is_locked might read healthy in isolation.
+    let out = run_sourced(
+        "set +e; gm_check stream \"$ACTUAL\" 10.77.9.184; echo \"rc=$?\"",
+        &[("ACTUAL", "10.77.7.109")],
+    );
+    assert!(
+        out.contains("GM FOREIGN") && out.contains("rc=2"),
+        "a foreign grandmaster must FAIL (#834), never look OK: {out:?}"
+    );
+
+    // gm_source_ip unread -> UNKNOWN (rc 3), never a silent pass.
+    let out = run_sourced(
+        "set +e; gm_check node \"$ACTUAL\" 10.77.9.184; echo \"rc=$?\"",
+        &[("ACTUAL", "")],
+    );
+    assert!(
+        out.contains("GM UNKNOWN") && out.contains("rc=3"),
+        "an unread grandmaster must be UNKNOWN, never OK: {out:?}"
+    );
+}
+
 // --- updated_ts_from_pipe_json / pipe_json_freshness_verdict (#648) -------------------------
 //
 // dantesync#47 gave every managed box a network status endpoint (http://<box>:8898/status)
@@ -876,5 +1039,376 @@ fn pipe_json_freshness_verdict_stale_when_updated_ts_is_in_the_future() {
         out.trim(),
         "stale",
         "updated_ts 854s in the caller's future must be stale, not fresh: {out:?}"
+    );
+}
+
+// --- Multi-sample offset + stability grading (#836) ------------------------------------------
+//
+// offset_check grades a SINGLE read of "ntp_offset_us" against the bound -- close to a coin flip
+// on a noisy Windows/HTTP node (live data, #836: 22 reads 25s apart on the stream box, only 2/22
+// individually land inside the existing 2000us bound). These pure functions turn a SEQUENCE of
+// raw status-JSON reads of the SAME node into a graded verdict: the MEDIAN of the samples that
+// are DISTINCT by "updated_ts" against the existing bound, PLUS a NEW spread/stability check a
+// single-read gate could never make at all. No network, no sleep -- every payload sequence below
+// is a fixture built at test time.
+
+/// A minimal DanteSync status-pipe JSON blob carrying just updated_ts + ntp_offset_us -- enough
+/// for distinct_offset_samples_us/median_of_ints/spread_of_ints, which read only those two
+/// fields.
+fn pipe_json(ts: i64, offset_us: i64) -> String {
+    format!("{{\"updated_ts\":{ts},\"ntp_offset_us\":{offset_us},\"is_locked\":true,\"mode\":\"NANO\"}}")
+}
+
+#[test]
+fn distinct_offset_samples_us_dedupes_a_repeated_updated_ts() {
+    // Three reads: the 2nd repeats the 1st's updated_ts EXACTLY (the daemon re-serving its own
+    // cached value before its next refresh, #836 point 5) -- must be skipped, never counted as a
+    // second independent sample, even though its VALUE differs from the 1st.
+    let payloads = format!(
+        "{}\n{}\n{}\n",
+        pipe_json(1000, 500),
+        pipe_json(1000, 999), // same ts as the line above -> not independent -> skipped
+        pipe_json(1025, 700), // ts advanced -> a genuinely new sample
+    );
+    let out = run_sourced(
+        "distinct_offset_samples_us \"$P\"",
+        &[("P", payloads.as_str())],
+    );
+    let vals: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        vals,
+        vec!["500", "700"],
+        "the ts-repeated read must be dropped, not double-counted: {out:?}"
+    );
+}
+
+#[test]
+fn distinct_offset_samples_us_skips_unparseable_reads_without_disturbing_the_ts_tracker() {
+    // A malformed/empty line in the middle (a failed individual read within a gathered sequence)
+    // must contribute nothing -- it neither counts as a sample NOR resets the last-accepted-ts
+    // tracker, so the read right after it is still correctly compared against the LAST GOOD ts.
+    let payloads = format!("{}\n\n{}\n", pipe_json(1000, 111), pipe_json(1000, 222));
+    let out = run_sourced(
+        "distinct_offset_samples_us \"$P\"",
+        &[("P", payloads.as_str())],
+    );
+    assert_eq!(
+        out.lines().collect::<Vec<_>>(),
+        vec!["111"],
+        "empty line must be skipped, and the SAME ts right after it must still dedupe against \
+         the last good sample: {out:?}"
+    );
+}
+
+#[test]
+fn median_of_ints_computes_the_lower_median() {
+    let out = run_sourced("median_of_ints \"$L\"", &[("L", "5\n1\n3")]);
+    assert_eq!(out.trim(), "3", "median of [1,3,5] must be 3: {out:?}");
+
+    // Even count -> LOWER median (position int((4+1)/2)=2 of the sorted list), same convention
+    // as the journal path's _fresh_offset_median_us.
+    let out = run_sourced("median_of_ints \"$L\"", &[("L", "4\n1\n3\n2")]);
+    assert_eq!(
+        out.trim(),
+        "2",
+        "lower median of [1,2,3,4] must be 2: {out:?}"
+    );
+
+    let out = run_sourced("median_of_ints \"$L\"", &[("L", "")]);
+    assert_eq!(out.trim(), "", "empty list -> empty median: {out:?}");
+}
+
+#[test]
+fn spread_of_ints_is_max_minus_min_or_empty_under_two_values() {
+    let out = run_sourced("spread_of_ints \"$L\"", &[("L", "5\n-3\n10")]);
+    assert_eq!(
+        out.trim(),
+        "13",
+        "spread of [-3,5,10] must be 10-(-3)=13: {out:?}"
+    );
+
+    let out = run_sourced("spread_of_ints \"$L\"", &[("L", "42")]);
+    assert_eq!(
+        out.trim(),
+        "",
+        "spread is undefined with fewer than 2 values: {out:?}"
+    );
+
+    let out = run_sourced("spread_of_ints \"$L\"", &[("L", "")]);
+    assert_eq!(out.trim(), "", "spread of an empty list -> empty: {out:?}");
+}
+
+#[test]
+fn sampled_offset_verdict_ok_when_median_and_spread_both_in_bound() {
+    let payloads = format!(
+        "{}\n{}\n{}\n",
+        pipe_json(1000, 150),
+        pipe_json(1025, 200),
+        pipe_json(1050, 175),
+    );
+    let out = run_sourced(
+        "sampled_offset_verdict \"$P\" 2000 2000 3",
+        &[("P", payloads.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "ok",
+        "tight, in-bound samples must verdict ok: {out:?}"
+    );
+}
+
+#[test]
+fn sampled_offset_verdict_drift_when_median_exceeds_bound_but_spread_is_tight() {
+    let payloads = format!(
+        "{}\n{}\n{}\n",
+        pipe_json(1000, 8000),
+        pipe_json(1025, 8200),
+        pipe_json(1050, 8100),
+    );
+    let out = run_sourced(
+        "sampled_offset_verdict \"$P\" 2000 2000 3",
+        &[("P", payloads.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "drift",
+        "median clearly over bound, samples tight together -> drift only: {out:?}"
+    );
+}
+
+#[test]
+fn sampled_offset_verdict_unstable_when_median_is_fine_but_samples_scatter_wildly() {
+    // THE new failure mode (#836 point 3): a node whose median offset looks perfect (well within
+    // the 2000us bound) but whose individual readings scatter across tens of milliseconds --
+    // "a node scattering +-20ms around a median of 200us must also fail". A single-read gate can
+    // never see this at all; it can only ever grade whichever ONE value it happened to draw.
+    let payloads = format!(
+        "{}\n{}\n{}\n{}\n{}\n",
+        pipe_json(1000, -19800),
+        pipe_json(1025, 20100),
+        pipe_json(1050, 200), // the median
+        pipe_json(1075, -19500),
+        pipe_json(1100, 19900),
+    );
+    let out = run_sourced(
+        "sampled_offset_verdict \"$P\" 2000 2000 3",
+        &[("P", payloads.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "unstable",
+        "median in-bound but wildly scattered samples must FAIL as unstable, never look ok: {out:?}"
+    );
+}
+
+#[test]
+fn sampled_offset_verdict_drift_unstable_when_both_median_and_spread_fail() {
+    let payloads = format!(
+        "{}\n{}\n{}\n",
+        pipe_json(1000, 25000),
+        pipe_json(1025, -25000),
+        pipe_json(1050, 30000),
+    );
+    let out = run_sourced(
+        "sampled_offset_verdict \"$P\" 2000 2000 3",
+        &[("P", payloads.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "drift_unstable",
+        "both median AND spread failing must report both, not collapse to one: {out:?}"
+    );
+}
+
+#[test]
+fn sampled_offset_verdict_insufficient_when_too_few_distinct_samples() {
+    // Every read repeats the SAME updated_ts (a static/stuck fixture, or a node whose refresh
+    // interval is longer than the whole sampling window) -> only 1 distinct sample, below the
+    // required minimum of 3 -> "insufficient", NEVER a silent pass even though that one value is
+    // comfortably in-bound (#836 point 5, second half: "too few distinct samples must itself be
+    // a failure, never a silent pass on one").
+    let payloads = format!(
+        "{}\n{}\n{}\n",
+        pipe_json(1000, 50),
+        pipe_json(1000, 50),
+        pipe_json(1000, 50)
+    );
+    let out = run_sourced(
+        "sampled_offset_verdict \"$P\" 2000 2000 3",
+        &[("P", payloads.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "insufficient",
+        "1 distinct sample of the required 3 must never grade as ok: {out:?}"
+    );
+}
+
+#[test]
+fn sampled_offset_verdict_fails_closed_on_malformed_thresholds() {
+    let payloads = format!(
+        "{}\n{}\n{}\n",
+        pipe_json(1000, 100),
+        pipe_json(1025, 110),
+        pipe_json(1050, 90),
+    );
+    for (bound, stability, min_distinct) in [
+        ("abc", "2000", "3"),
+        ("2000", "abc", "3"),
+        ("2000", "2000", "abc"),
+    ] {
+        let out = run_sourced(
+            &format!("sampled_offset_verdict \"$P\" '{bound}' '{stability}' '{min_distinct}'"),
+            &[("P", payloads.as_str())],
+        );
+        assert_eq!(
+            out.trim(),
+            "insufficient",
+            "malformed threshold bound={bound:?} stability={stability:?} min_distinct={min_distinct:?} \
+             must refuse to grade, not silently pass: {out:?}"
+        );
+    }
+}
+
+#[test]
+fn sampled_offset_report_prints_distinct_count_median_and_spread() {
+    let payloads = format!(
+        "{}\n{}\n{}\n",
+        pipe_json(1000, 100),
+        pipe_json(1025, 300),
+        pipe_json(1050, 200),
+    );
+    let out = run_sourced("sampled_offset_report \"$P\"", &[("P", payloads.as_str())]);
+    assert_eq!(
+        out.trim(),
+        "3 200 200",
+        "distinct=3, median=200 (lower median of [100,200,300]), spread=300-100=200: {out:?}"
+    );
+
+    // Fewer than 2 samples -> spread is "NA"; zero samples -> both are "NA".
+    let one = pipe_json(1000, 42);
+    let out = run_sourced("sampled_offset_report \"$P\"", &[("P", one.as_str())]);
+    assert_eq!(
+        out.trim(),
+        "1 42 NA",
+        "a single sample has a median but no defined spread: {out:?}"
+    );
+    let out = run_sourced("sampled_offset_report \"$P\"", &[("P", "")]);
+    assert_eq!(
+        out.trim(),
+        "0 NA NA",
+        "zero samples -> both median and spread are NA: {out:?}"
+    );
+}
+
+#[test]
+fn sampled_offset_check_reports_median_and_spread_on_every_outcome_and_returns_the_matching_rc() {
+    // OK: rc 0, and the line still carries both numbers.
+    let ok_payloads = format!(
+        "{}\n{}\n{}\n",
+        pipe_json(1000, 100),
+        pipe_json(1025, 150),
+        pipe_json(1050, 120),
+    );
+    let out = run_sourced(
+        "set +e; sampled_offset_check strih \"$P\" 2000 2000 3; echo \"rc=$?\"",
+        &[("P", ok_payloads.as_str())],
+    );
+    assert!(
+        out.contains("OK")
+            && out.contains("median")
+            && out.contains("spread")
+            && out.contains("rc=0"),
+        "an OK verdict must still print median+spread: {out:?}"
+    );
+
+    // UNSTABLE: rc 2 (a hard failure, exactly like DRIFT -- never easier), and the line names it.
+    let unstable_payloads = format!(
+        "{}\n{}\n{}\n",
+        pipe_json(1000, -19800),
+        pipe_json(1025, 200),
+        pipe_json(1050, 20100),
+    );
+    let out = run_sourced(
+        "set +e; sampled_offset_check stream \"$P\" 2000 2000 3; echo \"rc=$?\"",
+        &[("P", unstable_payloads.as_str())],
+    );
+    assert!(
+        out.contains("UNSTABLE") && out.contains("rc=2"),
+        "a scattered-but-in-bound-median node must be reported UNSTABLE with a hard-fail rc=2, \
+         so it is never any easier to pass than a plain DRIFT: {out:?}"
+    );
+
+    // insufficient distinct samples: rc 3 (UNKNOWN), never a silent pass.
+    let dup_payloads = format!("{}\n{}\n", pipe_json(2000, 50), pipe_json(2000, 50));
+    let out = run_sourced(
+        "set +e; sampled_offset_check cam1 \"$P\" 2000 2000 3; echo \"rc=$?\"",
+        &[("P", dup_payloads.as_str())],
+    );
+    assert!(
+        out.contains("UNKNOWN") && out.contains("rc=3"),
+        "too few distinct samples must be UNKNOWN (rc=3), never a silent OK: {out:?}"
+    );
+}
+
+#[test]
+fn sampled_offset_verdict_on_the_live_836_stream_box_trail_fails_on_both_axes() {
+    // The EXACT #834/#836 regression data: 22 reads, 25s apart, from the live stream box. Only
+    // 2/22 individual samples land inside the 2000us bound -- the single-read gate this ticket
+    // replaces would have passed roughly 1 run in 10 on this UNCHANGED, genuinely-bad node.
+    // Consecutive duplicate VALUES (2014,2014 / 7482,7482 / 14862,14862) are modeled with the
+    // SAME updated_ts as their predecessor (the daemon's refresh interval hadn't advanced yet,
+    // #836 point 5) so distinct_offset_samples_us must drop them -- 22 raw reads, 3 dropped as
+    // non-independent duplicates -> 19 distinct samples.
+    let raw: [(i64, i64); 22] = [
+        (0, -15913),
+        (25, -18750),
+        (50, 3982),
+        (75, 19344),
+        (100, 632),
+        (125, 21205),
+        (150, 7737),
+        (175, 10481),
+        (200, 2014),
+        (200, 2014), // duplicate ts+value of the line above -- not independent
+        (225, 22860),
+        (250, 4784),
+        (275, 19515),
+        (300, 4223),
+        (325, 7482),
+        (325, 7482), // duplicate ts+value of the line above -- not independent
+        (350, 22421),
+        (375, 5404),
+        (400, 1998),
+        (425, 10040),
+        (450, 14862),
+        (450, 14862), // duplicate ts+value of the line above -- not independent
+    ];
+    let mut payloads = String::new();
+    for (ts, off) in raw {
+        payloads.push_str(&pipe_json(ts, off));
+        payloads.push('\n');
+    }
+
+    let distinct = run_sourced(
+        "distinct_offset_samples_us \"$P\"",
+        &[("P", payloads.as_str())],
+    );
+    assert_eq!(
+        distinct.lines().count(),
+        19,
+        "22 raw reads with 3 same-ts duplicates must yield exactly 19 distinct samples: {distinct:?}"
+    );
+
+    let verdict = run_sourced(
+        "sampled_offset_verdict \"$P\" 2000 2000 3",
+        &[("P", payloads.as_str())],
+    );
+    assert_eq!(
+        verdict.trim(),
+        "drift_unstable",
+        "the live #836 stream-box trail must fail on BOTH the median (well over 2000us) AND the \
+         spread (samples range from -18750 to 22860) -- the exact node the single-read gate could \
+         pass ~10% of the time must now fail every time: {verdict:?}"
     );
 }

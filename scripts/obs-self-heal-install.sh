@@ -9,7 +9,8 @@
 # fails the exact overnight/unattended case the watchdog exists to cover (the founding incident:
 # stream OBS wedged for ~25 HOURS and nothing acted on it). This script emits the Windows-LOCAL
 # mechanism that closes that gap: a per-box Task Scheduler job (~2 min cadence) that runs entirely
-# on the box itself — no ssh (denied), no MCP (agent-only), no agent session required.
+# on the box itself — no ssh round-trip, no MCP, no agent session required (a LOCAL scheduled job
+# has no reason to reach back out over either channel).
 #
 # HOW THE PIECES FIT (mirrors scripts/launch-obs-genlock.sh's own model exactly):
 #   - NEITHER decision this script needs is reimplemented in PowerShell:
@@ -31,7 +32,9 @@
 #   - The kill+relaunch step REUSES `launch-obs-genlock.sh`'s `build_launch_program` VERBATIM (this
 #     script sources that file) — there is ONE idempotent, self-verifying obs64 launch path in this
 #     whole repo, never a second hand-rolled one.
-#   - scp/ssh to Windows is DENIED — this script is the PURE PLANNER an agent/supervisor pastes
+#   - this script is the PURE PLANNER an agent/supervisor pastes (#701 proved plain scp/ssh
+#     reaches strih/stream, but WRITING a recovery script + REGISTERING a Task Scheduler job is
+#     exactly what the win-* MCP Shell is for here, not a ssh workaround)
 #     into the box's `win-strih` / `win-stream-snv` MCP `Shell` to WRITE the recovery script +
 #     REGISTER the Task Scheduler job. It runs NO PowerShell itself and needs no Windows access —
 #     `tests/obs_self_heal_install.rs` sources it and asserts the emitted PowerShell/XML is well
@@ -55,6 +58,10 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Sourcing (not executing) launch-obs-genlock.sh: its own source-guard stops right after defining
 # build_launch_program, so this ONLY pulls in that pure function — nothing runs.
 . "$HERE/launch-obs-genlock.sh"
+# shellcheck source=scripts/lib/ahk-watchdog.sh
+# Explicit even though launch-obs-genlock.sh above already sources this transitively — never rely
+# on a transitive path staying wired.
+. "$HERE/lib/ahk-watchdog.sh"
 
 # --- PURE functions (no network, no MCP, no Windows — unit-tested by sourcing this script) --------
 
@@ -89,9 +96,11 @@ build_recovery_script() {
 
   # REUSE launch-obs-genlock.sh's own planner for the kill+relaunch+log-verify step — force=1
   # (self-heal only ever acts on a CONFIRMED wedge, so it always force-kills). This is the ONE
-  # launch path; nothing here re-derives it.
-  local kill_relaunch_program
-  kill_relaunch_program="$(build_launch_program "$obs_dir" "1")"
+  # launch path; nothing here re-derives it. has_ahk mirrors the block below: only strih runs the
+  # AHK watcher, so only strih's embedded program may carry a real AutoHotkey64 command (#786).
+  local kill_relaunch_program launch_has_ahk
+  if [ "$box" = "strih" ]; then launch_has_ahk=1; else launch_has_ahk=0; fi
+  kill_relaunch_program="$(build_launch_program "$obs_dir" "1" "$launch_has_ahk")"
 
   # AHK auto-respawn only exists on strih (.claude/skills/obs-ops "AHK on strih") — stream has no
   # second watcher to race, so its Stop/RestartAhk steps are documented no-ops, never a guess at a
@@ -103,9 +112,18 @@ Stop-Process -Name AutoHotkey64 -Force -ErrorAction SilentlyContinue
 Write-SelfHealLog "StopAhk: AutoHotkey64 stopped (or was not running) — obs64 is now safe to touch"
 PS1
 )
-    ahk_start_block=$(cat <<'PS1'
-Start-Process -FilePath 'AutoHotkey64.exe' -ArgumentList '"D:\_APPS\NL_STARTUP.ahk"'
-Write-SelfHealLog "RestartAhk: AutoHotkey64 relaunched (crash/reboot auto-respawn restored)"
+    local ahk_relaunch_ps
+    ahk_relaunch_ps="$(ahk_resolve_and_relaunch_ps)"
+    # #867: log an explicit FATAL line when the relaunch is not verified, never a blind success
+    # claim — this recovery pass otherwise keeps running (a scheduled task retries ~every 2 min
+    # regardless), so this is log-only, not a hard exit.
+    ahk_start_block=$(cat <<PS1
+${ahk_relaunch_ps}
+if (\$ahkRelaunchVerified) {
+  Write-SelfHealLog "RestartAhk: AutoHotkey64 relaunched via \$ahkRelaunchTarget (crash/reboot auto-respawn restored)"
+} else {
+  Write-SelfHealLog "FATAL: RestartAhk failed -- AutoHotkey64 did not come back after relaunch (target=\$ahkRelaunchTarget) -- strih has NO respawn watcher until this is fixed"
+}
 PS1
 )
   else
@@ -511,7 +529,9 @@ main() {
 
   cat <<PLAN
 # ===== #411 obs-self-heal install plan — box=${box} (${mcp}, ${box_ip}) =====
-# scp/ssh to Windows is DENIED — the agent/supervisor runs this via the ${mcp} MCP Shell.
+# Run this via the ${mcp} MCP Shell — writing the recovery script + registering the Task
+# Scheduler job is exactly what the win-* MCP is for (#701: plain scp/ssh DOES reach strih/stream,
+# but that doesn't replace registering a scheduled task).
 #
 # STEP 0: deploy the obs-watchdog-gate.exe AND obs-self-heal-gate.exe CI artifacts (both ship in
 #         probe-tools-windows-amd64) to C:\\ProgramData\\camera-box\\ on this box (FileUpload via

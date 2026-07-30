@@ -1,0 +1,6 @@
+[Unit]
+Description=Refresh wall-fallback background from the resolume imag scene
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/imag-wallpaper-refresh.sh

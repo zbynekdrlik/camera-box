@@ -303,6 +303,46 @@ pub fn burn_contiguity_in_window_with_step(
     rate: BurnRate,
     expected_step: i64,
 ) -> InWindowContiguity {
+    burn_contiguity_in_window_with_step_and_schedule(node, frames, rate, expected_step, None)
+}
+
+/// #708 — identical computation to [`burn_contiguity_in_window_with_step`], but additionally
+/// told which `--switch-schedule` window (if any) each entry of `frames` belongs to, via
+/// `window_of[i]` aligned 1:1 with `frames[i]` (`None` ⇒ unknown: no schedule was supplied, the
+/// frame carried no gen_ts anchor, or it fell in a transition guard / outside every window).
+///
+/// ## Why strih needed this (the bug this closes)
+///
+/// strih's OWN 911002 render-tick burn is attached to EVERY raw `NDI camN` input (six
+/// INDEPENDENT DistroAV filter instances — one per source — so whichever gets cut to PROGRAM
+/// already carries a burn; `recording-e2e.sh`'s `BURN_TARGETS`), and each instance's counter
+/// free-runs for the WHOLE recording regardless of whether that source is currently on air (the
+/// Multiview projector keeps every raw input rendering — a `#365` hard precondition). So the six
+/// counters' numeric ranges are NOT one global monotone sequence: they routinely OVERLAP
+/// (live-proven, #708: one run's cam5 range was `66709..=67840`, cam6's `66934..=68067` — cam6's
+/// own counter reached a value cam5's counter ALSO covers, at a completely different wall-clock
+/// time). [`burn_contiguity_in_window_with_step`]'s per-render backward-jump check (below) — built
+/// for a genuine SINGLE free-running counter, where a backward jump can only mean reorder/
+/// corruption — misreads the EXPECTED counter-instance change at a program switch as that same
+/// fault: every one of a run's flagged strih `real_drop` ids was found, byte-for-byte, both in
+/// strih's own recording AND (independently) downstream in the stream recording — genuinely never
+/// lost anywhere, on two independent CI runs (issue #708 evidence).
+///
+/// The fix: when the caller CONFIRMS (via `window_of`) that the previous present frame and the
+/// current one sit in two DIFFERENT `--switch-schedule` windows, the backward-jump / decimation-
+/// excess checks for THIS ONE comparison are suppressed — it is the EXPECTED per-source counter
+/// discontinuity, not a fault. An UNKNOWN window on either side (no schedule, no anchor, inside a
+/// guard) NEVER suppresses — it falls back to the strict pre-#708 behavior, so this can only ever
+/// NARROW the flagged set on a CONFIRMED boundary, never accidentally mask a genuine in-window
+/// fault (a backward jump within ONE window — the SAME free-running counter instance, which can
+/// never legitimately go backward — still FAILS exactly as before).
+pub fn burn_contiguity_in_window_with_step_and_schedule(
+    node: &str,
+    frames: &[RecordedBurnFrame],
+    rate: BurnRate,
+    expected_step: i64,
+    window_of: Option<&[Option<usize>]>,
+) -> InWindowContiguity {
     let present_ids: Vec<u32> = frames.iter().filter_map(|f| f.burn_id).collect();
     let first_id = present_ids.first().copied();
     let last_id = present_ids.last().copied();
@@ -377,16 +417,39 @@ pub fn burn_contiguity_in_window_with_step(
     // dropped from the front (review finding #2). Each None accounts for ITS own id, nothing else.
     let mut unreadable_consumed: BTreeSet<u32> = BTreeSet::new();
     let mut nones_since_prev: u32 = 0;
-    for f in frames {
+    // #708 — the schedule-window index of the previous PRESENT frame. Mirrors `prev_present`'s
+    // own carry-across-`None`-frames semantics (only updated on a `Some` arm), so a run of
+    // BURN-UNREADABLE frames spanning a window boundary never resets it prematurely. `None`
+    // whenever `window_of` is absent (the overwhelming majority of callers — see the
+    // `burn_contiguity_in_window_with_step` wrapper) or a specific frame's window is unknown.
+    let mut prev_present_window: Option<usize> = None;
+    for (i, f) in frames.iter().enumerate() {
         match f.burn_id {
             Some(id) => {
                 id_to_frame.entry(id).or_insert(f.frame_index);
+                let cur_window = window_of.and_then(|w| w.get(i).copied().flatten());
+                // #708 — a schedule-window boundary crossing is CONFIRMED only when BOTH sides'
+                // windows are known and differ; any unknown side falls back to the strict
+                // pre-#708 behavior (see the function doc — never silently masks a genuine fault).
+                let crossed_window_boundary = matches!(
+                    (prev_present_window, cur_window),
+                    (Some(pw), Some(cw)) if pw != cw
+                );
                 if let Some(prev) = prev_present {
                     // Per-render (strih/stream): a monotone free-running counter can ONLY advance,
                     // so a backward jump is a reorder/corruption fault — ALWAYS counted. (cam1
                     // uses the set-based check below instead; a cam1 backward jump to a present id
                     // is just the softened recording delivering it late, never a fault.)
-                    if id < prev && matches!(rate, BurnRate::PerRenderTick) {
+                    // #708 EXCEPTION — a backward jump landing EXACTLY at a CONFIRMED
+                    // `--switch-schedule` window boundary is the EXPECTED per-source free-running
+                    // counter discontinuity (strih's 911002 burn runs one independent counter per
+                    // raw camera input — see the function doc), not a lost frame. Suppressed ONLY
+                    // for this one boundary comparison; a backward jump WITHIN one window (the
+                    // SAME counter instance, which can never legitimately go backward) still FAILS.
+                    if id < prev
+                        && matches!(rate, BurnRate::PerRenderTick)
+                        && !crossed_window_boundary
+                    {
                         non_present_delivered = non_present_delivered.saturating_add(1);
                         missing_slots.push(MissingSlot {
                             id,
@@ -415,7 +478,14 @@ pub fn burn_contiguity_in_window_with_step(
                     // strictly inside (prev, id) ⇒ below max_present ⇒ never collide with a
                     // synthetic None id (seeded above max_present) or a present id.
                     // (cam1's per-emit forward gap is handled set-wise below — neither acts here.)
-                    if matches!(rate, BurnRate::PerRenderTick) && expected_step >= 2 && id > prev {
+                    // #708 — a decimation-excess computation across a CONFIRMED window boundary is
+                    // equally meaningless (the two ids come from two unrelated free-running
+                    // counters, so their numeric distance is not a real gap size); same suppression.
+                    if matches!(rate, BurnRate::PerRenderTick)
+                        && expected_step >= 2
+                        && id > prev
+                        && !crossed_window_boundary
+                    {
                         let gap = id as i64 - prev as i64;
                         let excess = gap / expected_step - 1 - i64::from(nones_since_prev);
                         if excess > 0 {
@@ -431,6 +501,7 @@ pub fn burn_contiguity_in_window_with_step(
                     }
                 }
                 prev_present = Some(id);
+                prev_present_window = cur_window;
                 nones_since_prev = 0;
             }
             None => {
@@ -833,6 +904,158 @@ mod tests {
         assert_eq!(w.contiguity.missing_ids, vec![101]);
         assert_eq!(w.missing_slots[0].kind, InWindowMissingKind::RealDrop);
         assert_eq!(w.missing_slots[0].frame_index, 2);
+    }
+
+    // ============================================================================
+    // #708 — a backward id jump landing EXACTLY at a CONFIRMED `--switch-schedule` window
+    // boundary is the EXPECTED per-source free-running counter discontinuity (strih's 911002
+    // burn is one independent counter per raw camera input — see
+    // `burn_contiguity_in_window_with_step_and_schedule`'s doc), not a real drop. These tests
+    // exercise the new `window_of` parameter directly (no CLI / schedule-file machinery needed
+    // — `attribute_window_indices` in `recording-verdict.rs` is the thin glue that computes it
+    // from a real `--switch-schedule`; this pure kernel just needs the resulting index).
+    // ============================================================================
+
+    #[test]
+    fn backward_jump_across_a_confirmed_window_boundary_is_not_a_fault_708() {
+        // Same shape as `in_window_backward_jump_is_a_reorder_fault` (id goes 100 -> 103 -> 101,
+        // a backward jump) EXCEPT the backward-jumping frame (index 2) is CONFIRMED to belong to
+        // a DIFFERENT schedule window (1) than the previous present frame (index 1, window 0).
+        // Live-proven mechanism (#708): strih's own 911002 burn runs one free-running counter PER
+        // raw camera input, so a program switch legitimately hands the recording a numerically
+        // UNRELATED (often lower) value — not a lost frame. Both flagged ids in the real incident
+        // were independently found present, byte-for-byte, in strih's own recording AND
+        // downstream at stream.
+        let frames = [
+            rbf(0, Some(100)),
+            rbf(1, Some(103)),
+            rbf(2, Some(101)), // backward jump, but window CHANGED -> not a fault
+            rbf(3, Some(106)),
+        ];
+        let window_of = [Some(0), Some(0), Some(1), Some(1)];
+        let w = burn_contiguity_in_window_with_step_and_schedule(
+            "strih",
+            &frames,
+            BurnRate::PerRenderTick,
+            1,
+            Some(&window_of),
+        );
+        assert!(
+            w.contiguity.is_contiguous(),
+            "a backward jump AT a confirmed window boundary must be suppressed: {:?}",
+            w.contiguity
+        );
+        assert!(w.contiguity.missing_ids.is_empty());
+        assert_eq!(w.contiguity.present_count, 4);
+        assert_eq!(w.contiguity.expected_count, 4);
+    }
+
+    #[test]
+    fn backward_jump_within_one_window_still_a_fault_708() {
+        // Regression guard: the #708 exception must NEVER swallow a genuine in-window fault.
+        // Identical id sequence to the test above, but ALL frames are attributed to the SAME
+        // window (0) — a real free-running counter can never legitimately go backward within one
+        // window, so this must still FAIL exactly like the pre-#708 behavior.
+        let frames = [
+            rbf(0, Some(100)),
+            rbf(1, Some(103)),
+            rbf(2, Some(101)), // backward jump, SAME window -> still a fault
+            rbf(3, Some(106)),
+        ];
+        let window_of = [Some(0), Some(0), Some(0), Some(0)];
+        let w = burn_contiguity_in_window_with_step_and_schedule(
+            "strih",
+            &frames,
+            BurnRate::PerRenderTick,
+            1,
+            Some(&window_of),
+        );
+        assert!(
+            !w.contiguity.is_contiguous(),
+            "a backward jump WITHIN one window is still a real fault: {:?}",
+            w.contiguity
+        );
+        assert_eq!(w.contiguity.missing_ids, vec![101]);
+        assert_eq!(w.missing_slots[0].kind, InWindowMissingKind::RealDrop);
+    }
+
+    #[test]
+    fn backward_jump_with_unknown_window_on_either_side_still_a_fault_708() {
+        // An UNKNOWN window (no schedule anchor, inside a transition guard, or outside every
+        // window — `None`) on EITHER side must NEVER suppress: only a CONFIRMED (Some != Some)
+        // boundary crossing does. This is what keeps the exception safe when the schedule can't
+        // place a frame — never silently mask a drop just because attribution was incomplete.
+        let frames = [
+            rbf(0, Some(100)),
+            rbf(1, Some(103)),
+            rbf(2, Some(101)), // backward jump, window UNKNOWN -> still a fault
+            rbf(3, Some(106)),
+        ];
+        let window_of = [Some(0), Some(0), None, Some(1)];
+        let w = burn_contiguity_in_window_with_step_and_schedule(
+            "strih",
+            &frames,
+            BurnRate::PerRenderTick,
+            1,
+            Some(&window_of),
+        );
+        assert!(
+            !w.contiguity.is_contiguous(),
+            "an unknown window must never suppress a backward-jump fault: {:?}",
+            w.contiguity
+        );
+        assert_eq!(w.contiguity.missing_ids, vec![101]);
+    }
+
+    #[test]
+    fn decimation_excess_across_a_confirmed_window_boundary_is_not_a_fault_708() {
+        // The SAME #708 exception must ALSO cover the decimated-hop (`expected_step >= 2`)
+        // forward-gap-excess branch: a huge forward jump straddling a confirmed window boundary
+        // is two unrelated counters' values, not a real gap size, so it must NOT be charged as
+        // decimation-excess REAL DROPs either.
+        let frames = [
+            rbf(0, Some(100)),
+            rbf(1, Some(102)),
+            rbf(2, Some(50_000)), // huge forward jump, but window CHANGED -> not a fault
+            rbf(3, Some(50_002)),
+        ];
+        let window_of = [Some(0), Some(0), Some(1), Some(1)];
+        let w = burn_contiguity_in_window_with_step_and_schedule(
+            "strih",
+            &frames,
+            BurnRate::PerRenderTick,
+            2, // decimated hop
+            Some(&window_of),
+        );
+        assert!(
+            w.contiguity.is_contiguous(),
+            "a decimation-excess landing AT a confirmed window boundary must be suppressed: {:?}",
+            w.contiguity
+        );
+        assert!(w.contiguity.missing_ids.is_empty());
+    }
+
+    #[test]
+    fn window_of_none_is_byte_identical_to_the_pre_708_wrapper() {
+        // The back-compat wrapper (`burn_contiguity_in_window_with_step`, used by every existing
+        // caller/fixture) must produce EXACTLY the same verdict as calling the new function
+        // directly with `window_of: None` — the #708 exception is strictly opt-in.
+        let frames = [
+            rbf(0, Some(100)),
+            rbf(1, Some(103)),
+            rbf(2, Some(101)), // backward jump, no window info at all -> still a fault
+            rbf(3, Some(106)),
+        ];
+        let via_wrapper =
+            burn_contiguity_in_window_with_step("strih", &frames, BurnRate::PerRenderTick, 1);
+        let via_direct = burn_contiguity_in_window_with_step_and_schedule(
+            "strih",
+            &frames,
+            BurnRate::PerRenderTick,
+            1,
+            None,
+        );
+        assert_eq!(via_wrapper.contiguity, via_direct.contiguity);
     }
 
     #[test]

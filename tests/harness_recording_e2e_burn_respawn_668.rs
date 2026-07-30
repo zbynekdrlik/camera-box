@@ -138,7 +138,7 @@ fn cleanup_stops_the_transient_burn_units_before_the_pkill_668() {
 
     // cam1's restore block: from the top of cleanup() to the ALL_CAMBOX loop's own start.
     let cam1_end = body
-        .find("for _cip in \"$CAM3_IP\"")
+        .find("for _ccn in $(camera_active_secondary_set)")
         .expect("#668: expected the cam3/4/5/6 ALL_CAMBOX restore loop after cam1's block");
     let cam1_block = &body[..cam1_end];
     let cam1_stop = cam1_block
@@ -156,7 +156,7 @@ fn cleanup_stops_the_transient_burn_units_before_the_pkill_668() {
 
     // cam3/4/5/6 restore loop: bounded to its own `done`, mirroring the sibling cleanup test.
     let loop_start = body
-        .find("for _cip in \"$CAM3_IP\"")
+        .find("for _ccn in $(camera_active_secondary_set)")
         .expect("#624/#312: cleanup() must have the cam3/4/5/6 ALL_CAMBOX restore loop");
     let painter_region_start = body
         .find("root@\"$PAINTER_IP\" \"pkill -x frame-probe")

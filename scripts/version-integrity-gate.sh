@@ -88,10 +88,177 @@ compare_args_from_state() {
     done
 }
 
+# state_json_value FILE KEY -> the string value of "KEY":"<value>" in the flat JSON state object
+# FILE, or "" if absent/unreadable/no such file. #826 — generalized out of what used to be the
+# #756-only `genlock_build_sha_from_state` (behavior-preserving refactor: every existing caller/test
+# of that name keeps working, now implemented as a one-line call here) so every single-key facet
+# added since (obs_installs, port4455_owner_path, ...) reuses ONE tolerant parser instead of a new
+# copy-pasted grep|sed each time. Same tolerant flat-JSON parse as compare_args_from_state: match
+# `"KEY": "<value>"`, unescape \\ -> \ and \" -> ", take the first match only.
+state_json_value() {
+  local file="$1" key="$2"
+  [ -f "$file" ] || return 0
+  local pair val
+  pair="$(grep -oE "\"${key}\"[[:space:]]*:[[:space:]]*\"(\\\\.|[^\"\\\\])*\"" "$file" 2>/dev/null | head -1)"
+  [ -z "$pair" ] && return 0
+  val="$(printf '%s' "$pair" | sed -E 's/^"[^"]*"[[:space:]]*:[[:space:]]*"(.*)"$/\1/')"
+  val="${val//\\\\/\\}"
+  val="${val//\\\"/\"}"
+  printf '%s' "$val"
+}
+
+# genlock_build_sha_from_state FILE -> the #756 `genlock_build_sha` value from the flat JSON state
+# object FILE, or "" if absent/unreadable. This key is NOT a drift-guard --compare key (it is not
+# emitted by compare_args_from_state above and never fed to drift-guard --compare) — it is read
+# separately here and handed to the CROSS-BOX parity engine (genlock_build_parity_report). "" when
+# the box's state has no such key yet -- ENFORCED (#758): the parity engine's OWN "<2 read SHAs"
+# branch now returns UNKNOWN (a real gate-blocking condition), so an un-upgraded/unread box's
+# bundle-state-server is itself flagged, never silently skipped.
+genlock_build_sha_from_state() {
+  state_json_value "$1" genlock_build_sha
+}
+
+# --- #826: strih OBS-identity machine-check facet — PURE verdict functions -------------------
+#
+# The 2026-07-27 incident: a hand-launched stale `1ME` OBS 31.1.2 install squatted TCP :4455 while
+# this gate's own parity marker still described the pinned genlock 32.1.2 build -- the harness
+# silently drove/measured the WRONG renderer for a whole gate cycle (issue #826, retitled after
+# investigation). These four verdicts consume the facts scripts/bundle_state_gather.py's
+# `build_bundle_state` now gathers (obs_installs, port4455_owner_path/_version,
+# obs_process_count, ahk_app1_shortcut_path/_run/_dead_config_present, shortcut_target_path/
+# _workdir) and are wired into `main` below as an OPT-IN per-box/per-key facet -- exactly like
+# `genlock_build_sha`'s original #756 landing -- so every existing fixture and the live fleet keep
+# gating exactly as today until the supervisor redeploys bundle-state-server.py with this facet.
+
+DEFAULT_OBS_INSTALL_EXE='C:\Program Files\obs-studio\bin\64bit\obs64.exe'
+DEFAULT_OBS_INSTALL_WORKDIR='C:\Program Files\obs-studio\bin\64bit'
+DEFAULT_STARTUP_SHORTCUT='C:\ProgramData\Microsoft\Windows\Start Menu\Programs\OBS Studio.lnk'
+
+# obs_installs_verdict PINNED_EXE INSTALLS_CSV -> acceptance #1: exactly ONE launchable OBS install
+# may exist on the box (the pinned genlock build). Any OTHER obs*.exe/*ME.exe path found -- INCLUDING
+# one sitting in a `_RETIRED_*` folder, renaming aside is not removing -- is DRIFT, named explicitly.
+# INSTALLS_CSV empty -> UNKNOWN (the scan itself did not run, or found nothing at all -- not even
+# the pinned one -- never a false "clean").
+obs_installs_verdict() {
+  local pinned="$1" csv="$2"
+  if [ -z "$csv" ]; then
+    printf '  %-22s UNKNOWN  (no obs_installs reported -- install scan unread)\n' "obs_installs"
+    return 11
+  fi
+  local OLDIFS="$IFS"; IFS=','
+  # shellcheck disable=SC2206
+  local -a paths=($csv)
+  IFS="$OLDIFS"
+  local -a extras=()
+  local found_pinned=0 p
+  for p in "${paths[@]}"; do
+    if [ "${p,,}" = "${pinned,,}" ]; then
+      found_pinned=1
+    else
+      extras+=("$p")
+    fi
+  done
+  if [ "${#extras[@]}" -gt 0 ] || [ "$found_pinned" -eq 0 ]; then
+    local missing_note=""
+    [ "$found_pinned" -eq 0 ] && missing_note="; the pinned genlock build itself was NOT found"
+    printf '  %-22s DRIFT    (expected exactly ONE launchable OBS install (%s); found extra/other: %s%s)\n' \
+      "obs_installs" "$pinned" "${extras[*]:-<none>}" "$missing_note"
+    return 20
+  fi
+  printf '  %-22s OK       (exactly one launchable OBS install: %s)\n' "obs_installs" "$pinned"
+  return 0
+}
+
+# port_identity_verdict PINNED_EXE PINNED_VERSION OWNER_PATH OWNER_VERSION -> acceptance #2: the
+# process owning TCP :4455 must BE the pinned install, matched by PATH (never just process name --
+# the exact hole the 2026-07-27 incident exposed: OBS 31.1.2 squatted the port while a same-named
+# `obs64.exe` process was assumed to be the genlock build), and its version must match the pin.
+# Empty OWNER_PATH -> UNKNOWN (unread, never assumed clean).
+port_identity_verdict() {
+  local pinned_exe="$1" pinned_ver="$2" owner_path="$3" owner_ver="$4"
+  if [ -z "$owner_path" ]; then
+    printf '  %-22s UNKNOWN  (port :4455 owner unread)\n' "port4455_identity"
+    return 11
+  fi
+  if [ "${owner_path,,}" != "${pinned_exe,,}" ]; then
+    printf '  %-22s DRIFT    (:4455 is owned by %s, expected the pinned genlock install %s -- the harness would drive/measure the WRONG OBS)\n' \
+      "port4455_identity" "$owner_path" "$pinned_exe"
+    return 20
+  fi
+  if [ -n "$pinned_ver" ] && [ -n "$owner_ver" ] && [ "$owner_ver" != "$pinned_ver" ]; then
+    printf '  %-22s DRIFT    (:4455 owner %s reports version %s, expected pinned %s)\n' \
+      "port4455_identity" "$owner_path" "$owner_ver" "$pinned_ver"
+    return 20
+  fi
+  printf '  %-22s OK       (:4455 owned by the pinned install %s, version %s)\n' \
+    "port4455_identity" "$owner_path" "${owner_ver:-$pinned_ver}"
+  return 0
+}
+
+# obs_process_count_verdict COUNT -> acceptance #3: exactly ONE OBS-class process may be running --
+# zero (not up at all) or 2+ (a second install alive alongside the genlock one) are both DRIFT.
+# Empty COUNT -> UNKNOWN (unread).
+obs_process_count_verdict() {
+  local count="$1"
+  if [ -z "$count" ]; then
+    printf '  %-22s UNKNOWN  (OBS process count unread)\n' "obs_process_count"
+    return 11
+  fi
+  if [ "$count" != "1" ]; then
+    printf '  %-22s DRIFT    (%s OBS-class process(es) running, expected exactly 1)\n' "obs_process_count" "$count"
+    return 20
+  fi
+  printf '  %-22s OK       (exactly 1 OBS-class process running)\n' "obs_process_count"
+  return 0
+}
+
+# startup_chain_verdict PINNED_EXE PINNED_WORKDIR PINNED_SHORTCUT AHK_APP1_SHORTCUT AHK_APP1_RUN
+#   AHK_DEAD_CONFIG SHORTCUT_TARGET SHORTCUT_WORKDIR
+# -> acceptance #4 (NL_STARTUP.ahk app1 + the Start Menu shortcut both resolve to the pinned
+# install, with the pinned working directory) PLUS the issue's "config states one truth" cleanup
+# requirement (AHK_DEAD_CONFIG="1" -> the dead app1_binarypath leftover or an enabled app2_* block
+# is still present -- itself a DRIFT, even when app1 otherwise resolves correctly). Any of
+# AHK_APP1_SHORTCUT / SHORTCUT_TARGET / SHORTCUT_WORKDIR empty -> UNKNOWN (unread) -- the CALLER
+# only invokes this at all for a box that reported ahk_app1_shortcut_path in the first place (only
+# strih runs NL_STARTUP.ahk; a box with none of these keys never engages this facet, see main()).
+startup_chain_verdict() {
+  local pinned_exe="$1" pinned_workdir="$2" pinned_shortcut="$3"
+  local ahk_shortcut="$4" ahk_run="$5" ahk_dead="$6"
+  local shortcut_target="$7" shortcut_workdir="$8"
+
+  if [ -z "$ahk_shortcut" ] || [ -z "$shortcut_target" ] || [ -z "$shortcut_workdir" ]; then
+    printf '  %-22s UNKNOWN  (startup chain unread: NL_STARTUP.ahk / Start Menu shortcut not gathered)\n' "startup_chain"
+    return 11
+  fi
+
+  local -a problems=()
+  [ "$ahk_run" != "1" ] && problems+=("app1_run is not enabled (=${ahk_run:-<unread>})")
+  [ "${ahk_shortcut,,}" != "${pinned_shortcut,,}" ] && problems+=("app1_path points at ${ahk_shortcut}, expected the Start Menu shortcut ${pinned_shortcut}")
+  [ "${shortcut_target,,}" != "${pinned_exe,,}" ] && problems+=("the Start Menu shortcut resolves to ${shortcut_target}, expected ${pinned_exe}")
+  [ "${shortcut_workdir,,}" != "${pinned_workdir,,}" ] && problems+=("the Start Menu shortcut's working directory is ${shortcut_workdir}, expected ${pinned_workdir}")
+  [ "$ahk_dead" = "1" ] && problems+=("NL_STARTUP.ahk still carries the dead app1_binarypath / enabled app2_* leftover -- remove it so the config states one truth")
+
+  if [ "${#problems[@]}" -gt 0 ]; then
+    local joined
+    joined="$(IFS='; '; echo "${problems[*]}")"
+    printf '  %-22s DRIFT    (%s)\n' "startup_chain" "$joined"
+    return 20
+  fi
+  printf '  %-22s OK       (NL_STARTUP.ahk app1 + Start Menu shortcut both resolve to the pinned install, workdir %s)\n' "startup_chain" "$pinned_workdir"
+  return 0
+}
+
 # --- source-guard: when sourced (the unit tests), stop here --------------------------------
 if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
   return 0
 fi
+
+# The cross-box genlock-parity engine (#756) lives in drift-guard.sh; source it so the FLOW below
+# can call genlock_build_parity_report directly (drift-guard's own source-guard returns before its
+# main, so this pulls in its pure functions only). Sourced AFTER our source-guard, so the gate's own
+# unit tests (which source THIS file for its pure parsers) never pull the engine in.
+# shellcheck source=/dev/null
+. "$DRIFT_GUARD"
 
 # --- flow (executed only when run directly) ------------------------------------------------
 
@@ -115,7 +282,9 @@ Options:
   --manifest PATH   the build-under-test BUNDLE_MANIFEST.json — when set, applied to every box that
                     does not already carry a manifest= in its state (activates the BUILD-SHA facet).
   --win-state N=FILE  a box N whose observed drift-guard stack state JSON the caller wrote to FILE
-                    (ssh denied; the win-* MCP holder pre-fetches it). Repeatable. A box with no
+                    (this gate has no headless ssh gather of its own; the win-* MCP holder
+                    pre-fetches it -- #701 proved plain scp/ssh reaches strih/stream, not migrated
+                    here). Repeatable. A box with no
                     file is UNKNOWN -> the gate refuses.
 
 Exit: 0 = every box matches the pinned set (proceed), 20 = a box DRIFTED (REFUSED),
@@ -126,11 +295,17 @@ EOF
 main() {
   local readme="$DEFAULT_README" manifest=""
   local -a win_state=()
+  # #756 — extra box genlock-build SHAs supplied directly (LABEL=SHA), for boxes not gated via
+  # --win-state (imag-nb is SSH-reachable, so recording-e2e.sh reads its GENLOCK_BUILD_SHA.txt and
+  # passes it here). Repeatable. Combined with the SHAs read out of each --win-state file for the
+  # CROSS-BOX parity assert.
+  local -a genlock_sha=()
   while [ $# -gt 0 ]; do
     case "$1" in
-      --readme)     shift; readme="${1:-}" ;;
-      --manifest)   shift; manifest="${1:-}" ;;
-      --win-state)  shift; win_state+=("${1:-}") ;;
+      --readme)      shift; readme="${1:-}" ;;
+      --manifest)    shift; manifest="${1:-}" ;;
+      --win-state)   shift; win_state+=("${1:-}") ;;
+      --genlock-sha) shift; genlock_sha+=("${1:-}") ;;
       -h|--help)    usage; exit 0 ;;
       --*)          echo "unknown option: $1" >&2; usage >&2; exit 1 ;;
       *)            echo "unexpected argument: $1" >&2; usage >&2; exit 1 ;;
@@ -188,7 +363,110 @@ main() {
       11) unknown=$((unknown + 1)); unknown_boxes+=("$name") ;;
       *)  echo "    !! drift-guard exited ${rc} for ${name} (engine/usage error)" >&2; bad=$((bad + 1)) ;;
     esac
+
+    # #826 — strih OBS-identity machine-check facet, OPT-IN per box (mirrors #756's original
+    # landing): engage the generic install/port/process-count trio ONLY when this box's state
+    # reports at least one of the three keys -- an un-upgraded bundle-state-server (the entire
+    # fleet, until the supervisor redeploys it) is silently skipped here, never a false DRIFT/
+    # UNKNOWN, exactly like genlock_build_sha before #758 enforced it fleet-wide.
+    local obs_installs_csv port4455_owner_path port4455_owner_ver obs_proc_count
+    obs_installs_csv="$(state_json_value "$file" obs_installs)"
+    port4455_owner_path="$(state_json_value "$file" port4455_owner_path)"
+    port4455_owner_ver="$(state_json_value "$file" port4455_owner_version)"
+    obs_proc_count="$(state_json_value "$file" obs_process_count)"
+    if [ -n "$obs_installs_csv" ] || [ -n "$port4455_owner_path" ] || [ -n "$obs_proc_count" ]; then
+      local pinned_obs_ver=""
+      pinned_obs_ver="$(pinned_obs_version "$readme" 2>/dev/null)" || pinned_obs_ver=""
+      local frc=0
+
+      engine_out="$(obs_installs_verdict "$DEFAULT_OBS_INSTALL_EXE" "$obs_installs_csv")" || frc=$?
+      printf '%s\n' "$engine_out" | sed 's/^/    /'
+      case "$frc" in
+        0)  ok=$((ok + 1)) ;;
+        20) bad=$((bad + 1)) ;;
+        11) unknown=$((unknown + 1)); unknown_boxes+=("${name}:obs_installs") ;;
+      esac
+
+      frc=0
+      engine_out="$(port_identity_verdict "$DEFAULT_OBS_INSTALL_EXE" "$pinned_obs_ver" "$port4455_owner_path" "$port4455_owner_ver")" || frc=$?
+      printf '%s\n' "$engine_out" | sed 's/^/    /'
+      case "$frc" in
+        0)  ok=$((ok + 1)) ;;
+        20) bad=$((bad + 1)) ;;
+        11) unknown=$((unknown + 1)); unknown_boxes+=("${name}:port4455_identity") ;;
+      esac
+
+      frc=0
+      engine_out="$(obs_process_count_verdict "$obs_proc_count")" || frc=$?
+      printf '%s\n' "$engine_out" | sed 's/^/    /'
+      case "$frc" in
+        0)  ok=$((ok + 1)) ;;
+        20) bad=$((bad + 1)) ;;
+        11) unknown=$((unknown + 1)); unknown_boxes+=("${name}:obs_process_count") ;;
+      esac
+    fi
+
+    # #826 — startup-chain facet, scoped to boxes that actually run NL_STARTUP.ahk (only strih --
+    # stream has none, per .claude/skills/obs-ops). A box with no ahk_app1_shortcut_path key at
+    # all never engages this check; one that DOES report it is held fail-closed on every other
+    # startup-chain fact (startup_chain_verdict's own UNKNOWN branch).
+    local ahk_shortcut
+    ahk_shortcut="$(state_json_value "$file" ahk_app1_shortcut_path)"
+    if [ -n "$ahk_shortcut" ]; then
+      local ahk_run ahk_dead shortcut_target shortcut_workdir
+      ahk_run="$(state_json_value "$file" ahk_app1_run)"
+      ahk_dead="$(state_json_value "$file" ahk_dead_config_present)"
+      shortcut_target="$(state_json_value "$file" shortcut_target_path)"
+      shortcut_workdir="$(state_json_value "$file" shortcut_workdir)"
+      local frc2=0
+      engine_out="$(startup_chain_verdict "$DEFAULT_OBS_INSTALL_EXE" "$DEFAULT_OBS_INSTALL_WORKDIR" "$DEFAULT_STARTUP_SHORTCUT" \
+        "$ahk_shortcut" "$ahk_run" "$ahk_dead" "$shortcut_target" "$shortcut_workdir")" || frc2=$?
+      printf '%s\n' "$engine_out" | sed 's/^/    /'
+      case "$frc2" in
+        0)  ok=$((ok + 1)) ;;
+        20) bad=$((bad + 1)) ;;
+        11) unknown=$((unknown + 1)); unknown_boxes+=("${name}:startup_chain") ;;
+      esac
+    fi
   done
+
+  # #756 — CROSS-BOX genlock-build PARITY: every fleet box must run ONE deployed genlock build. This
+  # catches the stale-imag skew the per-box origin/main ref-compare (drift-guard --check-imag) misses
+  # during a long-lived dev train (#530/#756: imag ran a stale lineage, segfaulted, wedged the GPU).
+  # Gather each box's live GENLOCK_BUILD_SHA.txt: from every --win-state box's state JSON (served by
+  # its bundle-state-server) + every --genlock-sha LABEL=SHA supplied directly (imag, read over ssh
+  # by recording-e2e.sh). ENFORCED (#758): the parity engine is fail-closed (an unread box, OR fewer
+  # than 2 read peers, is UNKNOWN — a REAL gate-blocking condition, never a silent skip).
+  local -a parity_args=()
+  local ge gname gsha
+  for entry in "${win_state[@]}"; do
+    gname="${entry%%=*}"; file="${entry#*=}"
+    gsha=""
+    [ -n "$file" ] && [ -s "$file" ] && gsha="$(genlock_build_sha_from_state "$file")"
+    parity_args+=("${gname}=${gsha}")
+  done
+  for ge in "${genlock_sha[@]}"; do
+    parity_args+=("$ge")
+  done
+  # #756/#758 — ENFORCED (no longer opt-in/dormant, per the user's explicit escalation after
+  # today's imag stale-build incident): the parity engine ALWAYS runs now, unconditionally — its
+  # OWN "fewer than 2 read peers" branch already returns UNKNOWN (11), which this case statement
+  # already treats as a gate-blocking condition exactly like every other facet's UNKNOWN. The old
+  # `nonempty -ge 2` gate existed ONLY to skip calling the engine at all while the fleet's
+  # bundle-state-servers were still being upgraded (#756 rollout) -- that rollout is complete
+  # (strih+stream+imag all report genlock_build_sha as of 2026-07-14 ~21:40), so a box that fails
+  # to report one now is itself a REAL, actionable gap (a stale/unread bundle-state-server), never
+  # a reason to silently skip the whole facet.
+  echo "  -- cross-box genlock parity (#756, ENFORCED) --"
+  local prc=0 parity_out=""
+  parity_out="$(genlock_build_parity_report "${parity_args[@]}")" || prc=$?
+  printf '%s\n' "$parity_out" | sed 's/^/    /'
+  case "$prc" in
+    0)  ok=$((ok + 1)) ;;
+    20) bad=$((bad + 1)) ;;
+    11) unknown=$((unknown + 1)); unknown_boxes+=("genlock_parity") ;;
+    *)  echo "    !! genlock_build_parity_report exited ${prc} (engine error)" >&2; bad=$((bad + 1)) ;;
+  esac
 
   echo
   if [ "$bad" -gt 0 ]; then

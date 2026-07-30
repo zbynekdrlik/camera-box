@@ -20,6 +20,8 @@
 #include <util/platform.h>
 #include <util/threading.h>
 #include <media-io/video-frame.h>
+#include <chrono>
+#include <cstdint>
 
 #include <QDesktopServices>
 #include <QUrl>
@@ -57,6 +59,28 @@ typedef struct {
 	std::chrono::time_point<std::chrono::steady_clock> last_video_conn_check;
 	int32_t no_audio_connections;
 	std::chrono::time_point<std::chrono::steady_clock> last_audio_conn_check;
+
+	// camera-box #874: NDI FILTER-side send-path audit -- the aux-sender
+	// counterpart of ndi-output.cpp's audit_* fields (see there for the full
+	// rationale). `ndi_filter` is the send path for the DEDICATED NDI OUTPUT
+	// filters (interkom, MULTIVIEW, Grading, ...), which the #874 output-only
+	// audit does not cover -- so a stall on one of these aux senders (the
+	// issue-707 interkom culprit) was previously invisible in the log.
+	// `audit_offered`/`audit_sent`/`audit_send_wait_ns`/`audit_max_send_wait_ns`
+	// mirror ndi-output.cpp's fields exactly (same meaning, same cumulative-
+	// since-creation semantics, never reset except at filter creation).
+	// `audit_mutex_wait_ns`/`audit_max_mutex_wait_ns` are UNIQUE to this file:
+	// they isolate time spent ACQUIRING ndi_sender_video_mutex from time spent
+	// INSIDE send_send_video_v2 -- a high mutex wait with a low send wait means
+	// this sender is queued behind another lock holder, not slow on its own
+	// send; that distinction decides the shape of the issue-707 fix.
+	uint64_t audit_offered;
+	uint64_t audit_sent;
+	uint64_t audit_send_wait_ns;
+	uint64_t audit_max_send_wait_ns;
+	uint64_t audit_mutex_wait_ns;
+	uint64_t audit_max_mutex_wait_ns;
+	std::chrono::time_point<std::chrono::steady_clock> audit_last_log;
 } ndi_filter_t;
 
 const char *ndi_filter_getname(void *)
@@ -162,6 +186,12 @@ void ndi_filter_raw_video(void *data, video_data *frame)
 {
 	auto f = (ndi_filter_t *)data;
 
+	// camera-box #874: count EVERY entry -- a frame handed to this filter's
+	// send path -- before any guards, mirroring ndi-output.cpp's audit_offered
+	// so a frame that never reaches the send call still shows up as a gap
+	// between offered and sent.
+	f->audit_offered++;
+
 	pthread_mutex_lock(&f->ndi_sender_video_mutex);
 
 	if (!f->ndi_sender) {
@@ -203,9 +233,59 @@ void ndi_filter_raw_video(void *data, video_data *frame)
 		video_frame.line_stride_in_bytes = frame->linesize[0];
 	}
 
+	// camera-box #874: time acquiring the send mutex separately from the send
+	// call itself -- timestamps only around the EXISTING lock, no new lock and
+	// no widening of what it protects. A high mutex_wait with a low send_wait
+	// means this sender is queued behind another lock holder, not slow on its
+	// own send -- that distinction decides the shape of the issue-707 fix.
+	auto mutex_wait_start = std::chrono::steady_clock::now();
 	pthread_mutex_lock(&f->ndi_sender_video_mutex);
-	if (f->ndi_sender)
+	auto mutex_wait_end = std::chrono::steady_clock::now();
+	uint64_t mutex_wait_ns =
+		(uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(mutex_wait_end - mutex_wait_start)
+			.count();
+	f->audit_mutex_wait_ns += mutex_wait_ns;
+	if (mutex_wait_ns > f->audit_max_mutex_wait_ns)
+		f->audit_max_mutex_wait_ns = mutex_wait_ns;
+
+	if (f->ndi_sender) {
+		// camera-box #874: time the synchronous send call itself -- this is
+		// the load-bearing number. send_send_video_v2 blocks until the frame
+		// is accepted, so a large cumulative/peak wait here proves THIS
+		// sender is stalling on its own send (e.g. interkom under load,
+		// issue 707), independent of any queueing on the mutex above.
+		auto send_start = std::chrono::steady_clock::now();
 		ndiLib->send_send_video_v2(f->ndi_sender, &video_frame);
+		auto send_end = std::chrono::steady_clock::now();
+
+		f->audit_sent++;
+		uint64_t send_wait_ns =
+			(uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(send_end - send_start).count();
+		f->audit_send_wait_ns += send_wait_ns;
+		if (send_wait_ns > f->audit_max_send_wait_ns)
+			f->audit_max_send_wait_ns = send_wait_ns;
+
+		// One audit line per filter every ~5s, mirroring ndi-output.cpp's
+		// genlock-ndi-output audit cadence and guard shape -- the first call
+		// only seeds audit_last_log so the very first line waits a full
+		// interval rather than firing immediately. Logged here (sender known
+		// non-null, lock still held) so send_get_source_name is safe to call,
+		// matching the connection-check log earlier in this same function.
+		if (f->audit_last_log == std::chrono::steady_clock::time_point())
+			f->audit_last_log = send_end;
+		if (send_end - f->audit_last_log >= std::chrono::seconds(5)) {
+			f->audit_last_log = send_end;
+			auto ndi_source = ndiLib->send_get_source_name(f->ndi_sender);
+			obs_log(LOG_INFO,
+				"genlock-ndi-filter audit '%s': offered=%llu sent=%llu "
+				"send_wait_ms=%.3f max_send_wait_ms=%.3f mutex_wait_ms=%.3f "
+				"max_mutex_wait_ms=%.3f (#874)",
+				ndi_source->p_ndi_name, (unsigned long long)f->audit_offered,
+				(unsigned long long)f->audit_sent, (double)f->audit_send_wait_ns / 1.0e6,
+				(double)f->audit_max_send_wait_ns / 1.0e6, (double)f->audit_mutex_wait_ns / 1.0e6,
+				(double)f->audit_max_mutex_wait_ns / 1.0e6);
+		}
+	}
 	pthread_mutex_unlock(&f->ndi_sender_video_mutex);
 }
 
@@ -442,6 +522,18 @@ void *ndi_filter_create(obs_data_t *settings, obs_source_t *obs_source)
 	pthread_mutex_init(&f->ndi_sender_audio_mutex, NULL);
 	obs_get_video_info(&f->ovi);
 	obs_get_audio_info(&f->oai);
+
+	// camera-box #874: explicit zero-init for clarity, mirroring
+	// ndi-output.cpp's ndi_output_create (bzalloc already zero-fills; this
+	// states the intent). Only the video-capable filter type sends video, so
+	// ndi_filter_create_audioonly does not need these.
+	f->audit_offered = 0;
+	f->audit_sent = 0;
+	f->audit_send_wait_ns = 0;
+	f->audit_max_send_wait_ns = 0;
+	f->audit_mutex_wait_ns = 0;
+	f->audit_max_mutex_wait_ns = 0;
+	f->audit_last_log = std::chrono::steady_clock::time_point();
 
 	ndi_filter_update(f, settings);
 

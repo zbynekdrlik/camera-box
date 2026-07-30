@@ -99,6 +99,62 @@ fn run_start_epoch_is_captured() {
     );
 }
 
+/// #747 — the [3/8] cam2 painter must stay ALIVE from its launch, through the pre-record
+/// warm-up/gate budget AND the whole DURATION recording, self-exiting (writing its ground-truth
+/// CSV) only AFTER [7/8] StopRecord. The old fixed `--duration-secs $((DURATION+60))` slack was
+/// sized BEFORE the #747 frozen-camera-gate warm-up ([4c/8]) and scene warm-up ([4f/8]) phases
+/// were added between the launch and [5/8] StartRecord (~50s+, plus up to ~120s of frozen-gate
+/// retries on a marginal rig); with them the painter self-exited ~47s BEFORE StopRecord, so the
+/// last ~1.5 verdict windows went dark (windows 8-9 all-undecodable). Two things this locks:
+/// (1) the slack is a NAMED, generously-sized constant covering the worst-case pre-record budget;
+/// (2) the painter `--duration-secs` and the PAINTER_EXIT_DEADLINE self-exit wait use the SAME
+/// constant — two independent `DURATION+60` literals silently drift, and a shorter deadline than
+/// the painter's real lifetime makes the wait give up before self-exit → a STALE CSV is pulled.
+#[test]
+fn painter_duration_slack_covers_prerecord_warmup_and_is_lockstep() {
+    let s = read();
+    // The slack must be a single named constant, not two bare `DURATION+60` literals.
+    let def = s
+        .lines()
+        .map(str::trim_start)
+        .find(|l| l.starts_with("PAINTER_PRE_RECORD_SLACK_SECS="))
+        .expect(
+            "#747: the painter slack must be a NAMED constant (PAINTER_PRE_RECORD_SLACK_SECS=…) \
+             referenced by BOTH the painter --duration-secs and PAINTER_EXIT_DEADLINE — not two \
+             independent DURATION+60 literals that can silently drift",
+        );
+    // Extract the numeric default from `${PAINTER_PRE_RECORD_SLACK_SECS:-NNN}`.
+    let n: u32 = def
+        .split(":-")
+        .nth(1)
+        .and_then(|rest| {
+            rest.trim_matches(|c: char| !c.is_ascii_digit())
+                .parse()
+                .ok()
+        })
+        .expect("#747: PAINTER_PRE_RECORD_SLACK_SECS must have a numeric default (${…:-NNN})");
+    assert!(
+        n >= 180,
+        "#747: the painter slack (got {n}s) must cover the worst-case pre-record warm-up + \
+         frozen-gate-retry budget so the painter self-exits AFTER StopRecord — the old +60s let \
+         it die ~47s early, darkening the last ~1.5 verdict windows"
+    );
+    // Lock-step: the painter --duration-secs must add the named constant …
+    assert!(
+        s.contains("--duration-secs $((DURATION + PAINTER_PRE_RECORD_SLACK_SECS))"),
+        "#747: the painter --duration-secs must be $((DURATION + PAINTER_PRE_RECORD_SLACK_SECS)), \
+         not a bare DURATION+60"
+    );
+    // … and PAINTER_EXIT_DEADLINE (the self-exit wait) must add the SAME constant, so the wait
+    // matches the painter's real lifetime (no early give-up → stale CSV).
+    assert!(
+        s.contains("DURATION + PAINTER_PRE_RECORD_SLACK_SECS ))")
+            || s.contains("DURATION + PAINTER_PRE_RECORD_SLACK_SECS))"),
+        "#747: PAINTER_EXIT_DEADLINE must add the SAME PAINTER_PRE_RECORD_SLACK_SECS as the \
+         painter --duration-secs, so the self-exit wait matches the painter's real lifetime"
+    );
+}
+
 /// Characterization: the edited script must still pass `bash -n` (no syntax break).
 #[test]
 fn recording_e2e_passes_bash_syntax_check() {

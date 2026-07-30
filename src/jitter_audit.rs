@@ -193,6 +193,15 @@ pub struct AuditSummary {
     pub max_abs_head_skew_ms: i64,
     /// Mean `|ts_head_skew_ms|` across the window — the typical arrival jitter.
     pub mean_abs_head_skew_ms: f64,
+    /// #757 — SIGNED mean `ts_head_skew_ms` across the window (never `.abs()`'d, unlike
+    /// `mean_abs_head_skew_ms` above). This is the correction signal a pre-record phase
+    /// calibrator needs: a genlocked source's TRUE cam→strih transit time is approximately
+    /// `latency_ms + mean_head_skew_ms` (positive skew = frame arrived AFTER its scheduled
+    /// release, i.e. the applied pin under-estimates true transit; negative = the pin has
+    /// slack to spare). The `.abs()`'d field above answers "how much jitter", this one
+    /// answers "which direction, on average" — needed to reconstruct an absolute latency the
+    /// #286 `compute_phase_sync_offsets` kernel can re-pin from, without a full recording.
+    pub mean_head_skew_ms: f64,
     /// The deepest FIFO depth/peak observed across the window.
     pub peak_depth: u64,
 }
@@ -206,6 +215,9 @@ pub fn summarize(samples: &[AuditSample]) -> Option<AuditSummary> {
     let abs_skews: Vec<i64> = samples.iter().map(|s| s.ts_head_skew_ms.abs()).collect();
     let max_abs_head_skew_ms = abs_skews.iter().copied().max().unwrap_or(0);
     let mean_abs_head_skew_ms = abs_skews.iter().sum::<i64>() as f64 / samples.len() as f64;
+    // #757: SIGNED mean, no `.abs()` — see the field doc for why the sign matters.
+    let mean_head_skew_ms =
+        samples.iter().map(|s| s.ts_head_skew_ms).sum::<i64>() as f64 / samples.len() as f64;
     let peak_depth = samples
         .iter()
         .map(|s| s.peak as u64)
@@ -226,8 +238,32 @@ pub fn summarize(samples: &[AuditSample]) -> Option<AuditSummary> {
         delta_late_holds: last.late_holds.saturating_sub(first.late_holds),
         max_abs_head_skew_ms,
         mean_abs_head_skew_ms,
+        mean_head_skew_ms,
         peak_depth,
     })
+}
+
+/// #757 — JSON-serialize a slice of [`AuditSummary`] as one JSON object keyed by `source`
+/// name, each value carrying the fields a pre-record phase calibrator needs
+/// (`latency_ms` + `mean_head_skew_ms` reconstructs the absolute cam→strih transit time —
+/// see `mean_head_skew_ms`'s own doc). Used by `genlock-jitter-report --json`. Every summary
+/// is included unfiltered/unrenamed — a caller needing only e.g. `"NDI cam<N>"` strih sources
+/// filters the result afterward, this function never guesses which subset matters.
+pub fn summaries_to_json(summaries: &[AuditSummary]) -> serde_json::Value {
+    let mut out = serde_json::Map::new();
+    for s in summaries {
+        out.insert(
+            s.source.clone(),
+            serde_json::json!({
+                "samples": s.samples,
+                "latency_ms": s.latency_ms,
+                "mean_head_skew_ms": s.mean_head_skew_ms,
+                "mean_abs_head_skew_ms": s.mean_abs_head_skew_ms,
+                "max_abs_head_skew_ms": s.max_abs_head_skew_ms,
+            }),
+        );
+    }
+    serde_json::Value::Object(out)
 }
 
 /// Convenience: group `samples` by source, then [`summarize`] each group. One
@@ -365,6 +401,41 @@ mod tests {
     }
 
     #[test]
+    fn summarize_computes_the_signed_mean_head_skew_not_absolute_757() {
+        // #757: a pre-record phase calibrator needs the SIGNED mean skew (direction, not just
+        // magnitude) to reconstruct an absolute cam->strih transit time from the applied pin.
+        // mean(-3, 6) must be +1.5, never |{-3,6}| mean = 4.5 (that's mean_abs_head_skew_ms).
+        let mut first = parse_audit_line(SAMPLE_LINE_CAM1).unwrap();
+        let mut last = first.clone();
+        first.ts_head_skew_ms = -3;
+        last.ts_head_skew_ms = 6;
+
+        let summary = summarize(&[first, last]).expect("2 samples must summarize");
+        assert!(
+            (summary.mean_head_skew_ms - 1.5).abs() < 1e-9,
+            "signed mean(-3, 6) == 1.5, got {}",
+            summary.mean_head_skew_ms
+        );
+        // Sanity: a symmetric window must average toward zero on the SIGNED mean even though
+        // the ABS mean stays clearly positive -- proves the two fields really are distinct.
+        let mut neg = parse_audit_line(SAMPLE_LINE_CAM1).unwrap();
+        let mut pos = neg.clone();
+        neg.ts_head_skew_ms = -10;
+        pos.ts_head_skew_ms = 10;
+        let symmetric = summarize(&[neg, pos]).unwrap();
+        assert!(
+            (symmetric.mean_head_skew_ms - 0.0).abs() < 1e-9,
+            "signed mean(-10, 10) == 0.0, got {}",
+            symmetric.mean_head_skew_ms
+        );
+        assert!(
+            (symmetric.mean_abs_head_skew_ms - 10.0).abs() < 1e-9,
+            "abs mean(|-10|, |10|) == 10.0 (unchanged, distinct field), got {}",
+            symmetric.mean_abs_head_skew_ms
+        );
+    }
+
+    #[test]
     fn summarize_single_sample_window_has_zero_deltas() {
         let s = parse_audit_line(SAMPLE_LINE_CAM1).unwrap();
         let summary = summarize(std::slice::from_ref(&s)).unwrap();
@@ -385,6 +456,34 @@ mod tests {
         assert_eq!(summaries[0].samples, 2);
         assert_eq!(summaries[1].source, "NDI cam2");
         assert_eq!(summaries[1].samples, 1);
+    }
+
+    #[test]
+    fn summaries_to_json_carries_source_latency_and_signed_skew_757() {
+        let cam2 = SAMPLE_LINE_CAM1
+            .replace("NDI cam1", "NDI cam2")
+            .replace("ts_head_skew_ms=-2", "ts_head_skew_ms=6");
+        let text = format!("{SAMPLE_LINE_CAM1}\n{cam2}");
+        let samples = parse_audit_lines(&text);
+        let summaries = summarize_all(&samples);
+        let json = summaries_to_json(&summaries);
+        let obj = json.as_object().expect("must be a JSON object");
+        assert_eq!(obj.len(), 2, "one entry per source");
+
+        let cam1 = &obj["NDI cam1"];
+        assert_eq!(cam1["latency_ms"], 3);
+        assert_eq!(cam1["mean_head_skew_ms"], -2.0);
+        assert_eq!(cam1["samples"], 1);
+
+        let cam2 = &obj["NDI cam2"];
+        assert_eq!(cam2["latency_ms"], 3);
+        assert_eq!(cam2["mean_head_skew_ms"], 6.0);
+    }
+
+    #[test]
+    fn summaries_to_json_of_empty_input_is_an_empty_object() {
+        let json = summaries_to_json(&[]);
+        assert_eq!(json, serde_json::json!({}));
     }
 
     #[test]

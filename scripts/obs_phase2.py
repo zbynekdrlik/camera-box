@@ -65,6 +65,13 @@ RECORD_FINALIZE_POLL_S = float(os.environ.get("OBS_RECORD_FINALIZE_POLL_S", "2")
 # proceeding into a multi-minute sleep that ends in a 0-byte file. Env-overridable.
 RECORD_LIVENESS_SAMPLES = int(os.environ.get("OBS_RECORD_LIVENESS_SAMPLES", "2"))
 RECORD_LIVENESS_POLL_S = float(os.environ.get("OBS_RECORD_LIVENESS_POLL_S", "2"))
+# #767 follow-up (live incident, run 29417639968): imag's NVENC cold-init takes ~3s from
+# StartRecord to the muxer actually writing, and outputBytes lags a further beat -- the fixed
+# 2x2s window alone saw active=[False, True] bytes=[0, 0] and aborted a HEALTHY recording (the
+# file grew to 296MB until cleanup stopped it). When the last fixed-window sample is ACTIVE with
+# bytes still 0, keep polling at 1s inside this bounded grace budget and pass as soon as bytes
+# appear; an output still at 0 bytes after the whole budget is genuinely dead (#627) and aborts.
+RECORD_LIVENESS_BYTES_GRACE_S = float(os.environ.get("OBS_RECORD_LIVENESS_BYTES_GRACE_S", "8"))
 
 # #63/#149: the probe ndi_source MUST be configured EXACTLY like the live, certified, proven-
 # working genlock camera inputs (NDI cam1/3/5 on strih) so the harness measures the SAME config
@@ -501,9 +508,10 @@ def _restore_test_latency(ws, host, state, calibrated_latency_ms=None):
     `calibrated_latency_ms` (#691 belt-and-braces, OPTIONAL): the known-good prod value
     from `av-sync-last.json` on the OBS box's own ProgramData, gathered by the operator/
     agent and passed in — mirrors drift-guard.sh's `av_sync_calibrated_ms` best-effort
-    cross-check for the SAME file, since this function has no ssh/scp path to read the
-    Windows box's filesystem directly (`av_sync_calibrate.py`'s own `remote_push_plan`
-    doc: scp/ssh to Windows is denied on this rig). When supplied, the FINAL restored
+    cross-check for the SAME file, since this function itself has no ssh/scp path of its own to
+    read the Windows box's filesystem directly (`av_sync_calibrate.py`'s own `remote_push_plan`
+    prints a win-* MCP plan instead -- #701 proved plain scp/ssh reaches strih/stream, but
+    that script still has no MCP/ssh access of its own). When supplied, the FINAL restored
     value is cross-checked against it and a LOUD warn fires on mismatch — this catches
     the case the snapshot-vs-restore check above CANNOT: the snapshot itself already
     being wrong (e.g. this run's snapshot captured a value a PRIOR run's incomplete
@@ -1479,20 +1487,38 @@ def _record_liveness_verdict(active_flags, byte_counts):
 
     Never silently passes:
       - no samples at all -> DEAD (a caller bug, never treated as "live by default"),
-      - any sample with outputActive=False -> DEAD (the output died during the check window),
+      - outputActive never goes True during the whole window -> DEAD (never started),
+      - outputActive goes False AFTER having been True -> DEAD (the output died during the
+        check window — #627's original "started then died" symptom),
       - the LAST sample's outputBytes <= 0 -> DEAD (the exact #627 symptom: StartRecord
         reported success but the output wrote nothing for the whole run),
       - byte count did not GROW across the window (>=2 samples, last <= first) -> DEAD (the
         output started writing something then stalled/froze immediately — byte>0-only would
         miss this).
 
+    #710 cold-start tolerance: a LEADING run of outputActive=False is tolerated (NOT treated
+    as dead) as long as every sample from the first True onward stays True — a fresh OBS
+    process's NVENC/CUDA cold-init can take slightly longer than one liveness poll to flip
+    outputActive to True, even though the recording genuinely starts fine within the SAME
+    liveness window's next sample (live repro: active=[False, True] bytes=[0, 623840] on a
+    cold imag-nb OBS restart). This does NOT weaken the "started then died" or "never
+    started" checks above — those keep failing hard, unchanged.
+
     Returns (is_live: bool, reason: str) — *reason* is empty when is_live is True, else it
     explains the failure for the caller's abort message.
     """
     if not active_flags:
         return False, "no GetRecordStatus samples were taken"
-    if any(not active for active in active_flags):
-        return False, f"outputActive went False during the liveness window (samples={active_flags})"
+    first_true = next((i for i, active in enumerate(active_flags) if active), None)
+    if first_true is None:
+        return False, (
+            f"outputActive stayed False for the whole liveness window (samples={active_flags}) "
+            f"— recording never started"
+        )
+    if any(not active for active in active_flags[first_true:]):
+        return False, (
+            f"outputActive went False during the liveness window (samples={active_flags})"
+        )
     if not byte_counts or byte_counts[-1] <= 0:
         got = byte_counts[-1] if byte_counts else "unknown"
         return False, (
@@ -1531,14 +1557,41 @@ def _assert_record_is_live(ws, host, samples=None, poll_s=None):
         active_flags.append(status.get("outputActive", False))
         byte_counts.append(status.get("outputBytes", -1))
     is_live, reason = _record_liveness_verdict(active_flags, byte_counts)
+    # #767 byte-counter grace: the output IS active but bytes are still exactly 0 -- a slow
+    # NVENC cold-init (imag) rather than a dead output. Keep polling at 1s inside the bounded
+    # grace budget; pass as soon as bytes appear, abort per #627 if the whole budget stays 0.
+    grace_used = 0.0
+    while (
+        not is_live
+        and active_flags[-1]
+        and byte_counts[-1] == 0
+        and grace_used < RECORD_LIVENESS_BYTES_GRACE_S
+    ):
+        time.sleep(1)
+        grace_used += 1.0
+        status = _rpc(ws, "GetRecordStatus")
+        active_flags.append(status.get("outputActive", False))
+        byte_counts.append(status.get("outputBytes", -1))
+        is_live, reason = _record_liveness_verdict(active_flags, byte_counts)
     if not is_live:
         raise SystemExit(
             f"[obs] {host}: recording FAILED the post-start liveness check — {reason}. "
             f"Aborting NOW instead of burning the full run on a dead-on-arrival recording "
             f"(#627). active={active_flags} bytes={byte_counts}"
         )
+    cold_start_note = ""
+    if grace_used > 0:
+        cold_start_note = (
+            f" (bytes appeared only after {grace_used:.0f}s grace -- slow NVENC cold-init)"
+        )
+    if active_flags and not active_flags[0]:
+        # #710: surface when the cold-start tolerance actually fired, so a run log can be
+        # grepped for how often the FIRST post-restart StartRecord needed the extra sample.
+        # (+= so the #767 grace note above survives when BOTH fired -- the typical imag case.)
+        cold_start_note += " (cold start — first sample was still warming up, tolerated per #710)"
     sys.stderr.write(
-        f"[obs] {host}: recording liveness OK (active={active_flags} bytes={byte_counts})\n"
+        f"[obs] {host}: recording liveness OK (active={active_flags} bytes={byte_counts})"
+        f"{cold_start_note}\n"
     )
 
 
@@ -1624,6 +1677,69 @@ def record(a):
                 print("stray=false path=")
         else:
             raise SystemExit(f"unknown --action {a.action!r}")
+    finally:
+        ws.close()
+
+
+def stream_status(a):
+    """#722 EVENT-mode CONTRACT item 4: read-only `GetStreamStatus`, printed the SAME
+    "active=<bool> path=<...>" shape `record --action status` already uses (path is always
+    empty for streaming -- there's no output file -- kept for a stable, easily-`grep`able
+    two-field format across both actions). Never starts/stops anything -- this is a pure check,
+    the streaming-side counterpart of `record --action status`."""
+    ws = _conn(a.host, a.password)
+    try:
+        s = _rpc(ws, "GetStreamStatus")
+        print(f"active={s.get('outputActive', False)} path=")
+    finally:
+        ws.close()
+
+
+def latency_check(a):
+    """#722 EVENT-mode CONTRACT item 6: is *a.source*'s `genlock_latency_ms_src` (on *a.host*)
+    equal to the CALIBRATED value from av-sync-last.json (the #691 stomp-protection prod source
+    of truth)? If not, RESTORE it to the calibrated value (a test window may have left it off --
+    event mode must actively fix this, not just report it) and re-verify. Prints
+    "current=<int|unknown> calibrated=<int> restored=<bool> final=<int|unknown>" and exits 0 iff
+    the FINAL value (after any restore attempt) matches the calibrated value -- exits 1 if it
+    could not be brought back in line (never silently reports success on an unrestored
+    mismatch)."""
+    ws = _conn(a.host, a.password)
+    try:
+        settings = _rpc(ws, "GetInputSettings", {"inputName": a.source}, ignore_err=True).get(
+            "inputSettings", {}
+        )
+        current = settings.get(_GENLOCK_SRC_LATENCY_KEY)
+        restored = False
+        final = current
+        if current != a.calibrated_ms:
+            sys.stderr.write(
+                f"[latency-check] {a.host}: '{a.source}' {_GENLOCK_SRC_LATENCY_KEY}={current!r} "
+                f"!= calibrated={a.calibrated_ms} -- RESTORING to the calibrated value.\n"
+            )
+            _rpc(
+                ws,
+                "SetInputSettings",
+                {
+                    "inputName": a.source,
+                    "inputSettings": {_GENLOCK_SRC_LATENCY_KEY: a.calibrated_ms},
+                    "overlay": True,
+                },
+                ignore_err=True,
+            )
+            readback = _rpc(
+                ws, "GetInputSettings", {"inputName": a.source}, ignore_err=True
+            ).get("inputSettings", {})
+            final = readback.get(_GENLOCK_SRC_LATENCY_KEY)
+            restored = True
+        ok = final == a.calibrated_ms
+        print(f"current={current} calibrated={a.calibrated_ms} restored={restored} final={final}")
+        if not ok:
+            sys.stderr.write(
+                f"FAIL: [latency-check] {a.host}: '{a.source}' could not be brought to the "
+                f"calibrated value {a.calibrated_ms} (final={final!r}) -- manual check required.\n"
+            )
+        sys.exit(0 if ok else 1)
     finally:
         ws.close()
 
@@ -1840,6 +1956,111 @@ def rig_busy_check(a):
     print(json.dumps(out))
 
 
+def open_projectors(a):
+    """#758 preflight — imag-nb's Multiview AND Program projectors must be OPEN before ANY run
+    starts (the user's explicit, binding requirement: "MULTIVIEW MUSI BYT ZAPNUTE ako podmienka
+    preflight pred tym nez sa rozbehne akykolvek test" — a run must NEVER begin with Multiview
+    closed).
+
+    obs-websocket 5.x has NO "is a projector currently open" introspection request (no
+    GetProjectorList equivalent exists in the protocol) — so this ALWAYS, idempotently, OPENS
+    both projectors via OpenVideoMixProjector rather than trying to check-then-open. Opening an
+    ALREADY-open projector on the same monitor just re-positions/replaces the same window
+    (harmless) — this is how "auto-open if closed" works without a separate check step the API
+    can't actually provide. `_rpc`'s default `ignore_err=False` means a failed request RAISES
+    (propagates as a non-zero exit) — the caller's preflight step must never silently continue
+    with a projector that failed to open.
+
+    #840: monitor indices are DERIVED from a live GetMonitorList call, keyed on each monitor's
+    connector TYPE (HDMI = the external Program projector; anything else = the internal panel
+    driving Multiview) — NEVER hardcoded. The old `monitorIndex 0 = DP-0 -> Multiview /
+    monitorIndex 1 = HDMI-0 -> Program` mapping only worked "by luck" because the index ORDER
+    happened to match the incumbent box's topology; the replacement notebook enumerates
+    eDP-1/HDMI-1 instead of DP-0/HDMI-0, and a box that ever enumerates HDMI as index 0 would have
+    silently sent Program to the panel and Multiview to the projector. Mirrors
+    imag_scenes.py::projector()'s existing, already-correct selection rule (#522/#488) — the two
+    scripts have no shared module today (a separate #791-class scaffolding gap, out of THIS
+    ticket's scope), so the small selection logic is duplicated here rather than imported. Unlike
+    imag_scenes.py::projector() (an operator-convenience script that only WARNs on a missing
+    panel), this function is a preflight/verify GATE (recording-e2e.sh's `[0/8]`,
+    verify-imag.sh) — it FAILS LOUD (raises) when EITHER expected connector is absent, never
+    silently continues.
+
+    #882: a failure to even establish the WebSocket session (OBS process not accepting the
+    handshake, wrong password, connection dropped mid-negotiation) is caught HERE and re-raised
+    labelled as a connection/handshake failure — distinct from the "no matching monitor"
+    RuntimeErrors below, which are a genuinely different cause (the connection succeeded; the
+    box's reported monitors just don't include the expected connector type). The imag-nb outage
+    this issue investigates showed a single generic fallback message for ANY failure ("check
+    DP-0/HDMI-0 are connected monitors") even when the true cause was "OBS was not running at
+    all" — recording-e2e.sh's own preflight now probes process/port liveness separately
+    (scripts/lib/imag-obs-reachability.sh) BEFORE calling this, so by the time this raises, the
+    remaining real causes are exactly: handshake/auth (this branch) or no matching monitor
+    (below)."""
+    try:
+        ws = _conn(a.host, a.password)
+    except Exception as e:
+        raise RuntimeError(
+            f"could not establish an OBS WebSocket handshake/auth session with {a.host} -- {e}"
+        ) from e
+    try:
+        mons = _rpc(ws, "GetMonitorList").get("monitors", [])
+        panel = [m for m in mons if "HDMI" not in m.get("monitorName", "")]
+        hdmi = [m for m in mons if "HDMI" in m.get("monitorName", "")]
+
+        if not panel:
+            raise RuntimeError(
+                "no panel (non-HDMI) monitor detected for the Multiview projector -- "
+                f"(monitors: {[m.get('monitorName') for m in mons]})"
+            )
+        _rpc(ws, "OpenVideoMixProjector", {
+            "videoMixType": "OBS_WEBSOCKET_VIDEO_MIX_TYPE_MULTIVIEW",
+            "monitorIndex": panel[0]["monitorIndex"],
+        })
+        print(f"opened/confirmed Multiview projector on monitorIndex {panel[0]['monitorIndex']} "
+              f"({panel[0].get('monitorName')}) [panel]")
+
+        if not hdmi:
+            raise RuntimeError(
+                "no HDMI projector monitor detected -- connect the HDMI monitor first "
+                f"(monitors: {[m.get('monitorName') for m in mons]})"
+            )
+        _rpc(ws, "OpenVideoMixProjector", {
+            "videoMixType": "OBS_WEBSOCKET_VIDEO_MIX_TYPE_PROGRAM",
+            "monitorIndex": hdmi[0]["monitorIndex"],
+        })
+        print(f"opened/confirmed Program projector on monitorIndex {hdmi[0]['monitorIndex']} "
+              f"({hdmi[0].get('monitorName')}) [HDMI]")
+    finally:
+        ws.close()
+
+
+def ensure_studio_mode_on(a):
+    """#767 preflight — Studio Mode must be ON on EVERY broadcast box, imag included (user hard
+    rule, 2026-07-15: without Studio Mode the multiview's Preview cell is DEAD — "studio mode je
+    'MUST BE', NEMOZES HO PODLA NALADY VYPINAT"). This INVERTS the former #758
+    ensure-studio-mode-off step, which was written when Studio ON measurably collapsed imag's
+    render (38-42fps/~23ms on the pre-#767 distroav.so — receiver teardown churn on the preview
+    scene's hide/show). With the #767 keep-alive DistroAV build the churn is gone and imag holds
+    60.0fps / ~1.8ms render WITH Studio ON + Multiview + 7 cams + overlays (measured 2026-07-15,
+    5x5s GetStats samples). The gate therefore now measures render health in the PRODUCTION
+    state: Studio ON. ALWAYS (idempotently) turns it ON, never silently leaves a stale OFF state
+    to hide a Studio-ON render regression from the render-health preflight."""
+    ws = _conn(a.host, a.password)
+    try:
+        before = bool(_rpc(ws, "GetStudioModeEnabled", ignore_err=True).get("studioModeEnabled"))
+        if before:
+            print("imag Studio Mode already ON — ok (production state)")
+        else:
+            _rpc(ws, "SetStudioModeEnabled", {"studioModeEnabled": True})
+            print(
+                "imag Studio Mode was OFF — turned ON (production parity; the Preview cell in "
+                "the multiview needs it — user hard rule 2026-07-15, #767)"
+            )
+    finally:
+        ws.close()
+
+
 def program_scene(a):
     """#281 Fix#3: print the current program scene name to stdout (one line).
 
@@ -1858,7 +2079,10 @@ def program_scene(a):
 def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name in ("setup", "teardown", "record", "prod-scene", "switch", "program-scene"):
+    for name in (
+        "setup", "teardown", "record", "prod-scene", "switch", "program-scene",
+        "stream-status", "latency-check", "open-projectors", "ensure-studio-mode-on",
+    ):
         p = sub.add_parser(name)
         p.add_argument("--host", required=True)
         p.add_argument("--password", default="")
@@ -1867,6 +2091,14 @@ def main():
                 "--action", required=True,
                 choices=("start", "stop", "status", "guard"),
             )
+        if name == "latency-check":
+            # #722 EVENT-mode CONTRACT item 6: the per-source input to check/restore (typically
+            # the stream box's 'NDI 2ME PGM' program-genlock input) + the calibrated value from
+            # av-sync-last.json (gathered by the caller, this process has no ssh/scp path of its
+            # own to read that file directly -- same constraint drift-guard.sh and
+            # _restore_test_latency already document for the SAME file).
+            p.add_argument("--source", required=True)
+            p.add_argument("--calibrated-ms", type=int, required=True)
         if name == "prod-scene":
             # #163: route program to a CERTIFIED PROD scene and record IT (no colliding
             # probe ndi_source). --program-scene is the existing prod scene to record;
@@ -1942,7 +2174,10 @@ def main():
     a = ap.parse_args()
     {"setup": setup, "teardown": teardown, "record": record,
      "prod-scene": prod_scene, "switch": switch,
-     "program-scene": program_scene, "rig-busy-check": rig_busy_check}[a.cmd](a)
+     "program-scene": program_scene, "rig-busy-check": rig_busy_check,
+     "stream-status": stream_status, "latency-check": latency_check,
+     "open-projectors": open_projectors,
+     "ensure-studio-mode-on": ensure_studio_mode_on}[a.cmd](a)
 
 
 if __name__ == "__main__":

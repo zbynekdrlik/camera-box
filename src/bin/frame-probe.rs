@@ -106,6 +106,13 @@ struct Args {
     /// --colour-scale=false.
     #[arg(long, num_args = 0..=1, default_missing_value = "true")]
     colour_scale: Option<bool>,
+    /// Paint the #751 constant-velocity motion sweep (a bright ball sweeping the bottom band) so
+    /// judder is visible BY EYE on the monitor, multiview, and recording. It stays fully outside
+    /// the dual-QR and colour-scale zones (a fused run still decodes clean). Defaults ON in
+    /// `--paint-only` mode (the permanent cam2 painter shows it) and OFF otherwise; override with
+    /// `--motion-sweep` or `--motion-sweep=false`.
+    #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+    motion_sweep: Option<bool>,
     /// Paint QR frames DIRECTLY into an NDI sender with this name (no
     /// framebuffer, no capture hardware) at an exact --paint-fps. The
     /// software-only source for genlock validation (#42) and the OBS-bypass
@@ -211,6 +218,9 @@ fn main() -> Result<()> {
     // painter shows it without a flag change) and OFF otherwise; an explicit
     // --colour-scale[=bool] always wins.
     let colour_scale = args.colour_scale.unwrap_or(args.paint_only);
+    // #751: the motion sweep defaults ON in --paint-only mode (the permanent cam2 painter shows
+    // it without a flag change) and OFF otherwise; an explicit --motion-sweep[=bool] always wins.
+    let motion_sweep = args.motion_sweep.unwrap_or(args.paint_only);
 
     tracing::info!(
         "frame-probe start: mode={:?} run_id={} source={:?} paint_fps={} dur={}s",
@@ -242,6 +252,7 @@ fn main() -> Result<()> {
         wall_clock: args.wall_clock,
         dual_qr: args.dual_qr,
         colour_scale,
+        motion_sweep,
         paint_log: args.paint_log.clone(),
         audio_marker: args.audio_marker,
         audio_marker_device: args.audio_marker_device.clone(),

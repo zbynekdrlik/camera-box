@@ -233,6 +233,45 @@ freshest_offset_us() {
   printf '%s' "$off_us"
 }
 
+# _fresh_offset_median_us JOURNAL FRESHNESS_S [K] -> the lower MEDIAN of the individually-FRESH
+# samples among the K (default 5) most recent "[NTP] offset:" lines; "" when none is fresh and
+# parseable. #767-era measurement-noise rejection (live, 2026-07-15): under E2E network load a
+# SINGLE [NTP] offset sample spikes to ~2-3ms (cam5 -2787us, cam7 -2316us) while PTP stays
+# NANO-locked and the surrounding samples read tens of us -- the CLOCK is fine, the one
+# measurement is noisy, and a verdict graded on the single freshest sample flakes exactly when
+# an E2E run loads the LAN. The median across the recent fresh samples rejects a lone spike
+# while a SUSTAINED out-of-bound offset (the real cam5/6 5.28s class) still lands every sample
+# out of bound -> median out of bound -> drift. Freshness is checked PER SAMPLE against the
+# newest journal line, same knob + same fail-closed non-numeric handling as freshest_offset_us.
+# (freshest_offset_us itself is left single-sample: its #326 painter-gate caller compares two
+# boxes' raw values relatively and owns its own tolerance.)
+_fresh_offset_median_us() {
+  local journal="$1" fresh="$2" k="${3:-5}"
+  local iso_re='[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[+-][0-9]{2}:[0-9]{2}'
+  local now_iso now_e lines line off_iso off_e off_us
+  local -a vals=()
+  if ! printf '%s' "$fresh" | grep -qE '^[0-9]+$'; then
+    printf ''
+    return 0
+  fi
+  now_iso="$(printf '%s\n' "$journal" | grep -oE "^$iso_re" | tail -1 || true)"
+  now_e="$(_short_iso_epoch "$now_iso")"
+  [ -n "$now_e" ] || { printf ''; return 0; }
+  lines="$(printf '%s\n' "$journal" | grep -E '\[NTP\] offset:' | tail -n "$k" || true)"
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    off_iso="$(printf '%s' "$line" | grep -oE "^$iso_re" | head -1 || true)"
+    off_e="$(_short_iso_epoch "$off_iso")"
+    [ -n "$off_e" ] || continue
+    [ "$((now_e - off_e))" -le "$fresh" ] || continue
+    off_us="$(printf '%s' "$line" | sed -n 's/.*\[NTP\] offset:+\{0,1\}\(-\{0,1\}[0-9][0-9]*\)us.*/\1/p' | head -1 || true)"
+    printf '%s' "$off_us" | grep -qE '^-?[0-9]+$' || continue
+    vals+=("$off_us")
+  done <<< "$lines"
+  [ "${#vals[@]}" -gt 0 ] || { printf ''; return 0; }
+  printf '%s\n' "${vals[@]}" | sort -n | awk -v n="${#vals[@]}" 'NR == int((n+1)/2) { print; exit }'
+}
+
 # dantesync_offset_verdict JOURNAL FRESHNESS_S BOUND_US -> "ok" | "drift" | "stale" | "absent".
 # Supersedes the age-blind dantesync_offset_ok (which read the LAST "[NTP] offset:" line via tail -1
 # regardless of age -- on cam5/6 that graded on a STALE boot-STEP line, the #550 bug). It finds the
@@ -254,7 +293,13 @@ dantesync_offset_verdict() {
     printf 'absent\n'
     return 0
   fi
-  off_us="$(freshest_offset_us "$journal" "$fresh")"
+  # #767: grade the MEDIAN of the recent fresh samples, not the single freshest one -- see
+  # _fresh_offset_median_us above for the measurement-noise rationale. Contract unchanged.
+  # Window K=11 (~5min at the ~30s sample cadence): a same-sign 2-3-sample burst under E2E
+  # LAN load majority-covers a 5-window (live cam5 +2624/+2508/+2865 consecutive; cam7 median
+  # 2113 in run 29420477560) but stays a minority of 11; a genuine clock step shifts ALL
+  # samples and still drifts. Callers gather journalctl -n 400, so the depth exists.
+  off_us="$(_fresh_offset_median_us "$journal" "$fresh" 11)"
   if [ -z "$off_us" ]; then
     printf 'stale\n'
     return 0
@@ -358,6 +403,53 @@ ptp_check() {
   esac
 }
 
+# --- GRANDMASTER identity (#834) -------------------------------------------------------------
+#
+# #834 (stream box, 2026-07-28): a node reported `is_locked:true`/`settled:true` while sitting
+# 14.7 ms off the rig -- it had PTP-locked to a FOREIGN grandmaster (`gm_source_ip:10.77.7.109`)
+# instead of the rig's own `10.77.9.184`. `is_locked` alone only proves the servo is disciplined
+# to SOME clock; it says nothing about WHICH one. A node faithfully locked to the wrong
+# grandmaster reads every local health indicator green while being genuinely 15 ms out -- the same
+# false-green shape as the #591 competing-timesync-daemon incident, but the mechanism here is
+# grandmaster ELECTION, not a second daemon. Every node in the rig must agree on the SAME
+# `gm_source_ip`; this is a gated FACT distinct from (and in addition to) the offset bound.
+
+# gm_source_ip_from_pipe_json TEXT -> the `"gm_source_ip"` string field value in TEXT (a DanteSync
+# status-pipe/HTTP JSON blob -- the SAME blob offset_us_from_pipe_json/ptp_locked_from_pipe_json
+# read), "" if the field is absent/unparseable. `|| true` survives a no-match under set -e/
+# pipefail (same convention as every other *_from_pipe_json parser in this file).
+gm_source_ip_from_pipe_json() {
+  printf '%s' "$1" | grep -oE '"gm_source_ip"[[:space:]]*:[[:space:]]*"[^"]*"' \
+    | sed -n 's/.*"gm_source_ip"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | tail -1 || true
+}
+
+# gm_matches_expected ACTUAL EXPECTED -> 0 iff both are non-empty and IDENTICAL. An empty ACTUAL
+# (the field was unreadable) is never treated as a match -- test-strictness: a grandmaster we
+# could not read must never look correct, exactly the "unreachable = FAIL" contract every other
+# check in this file follows.
+gm_matches_expected() {
+  [ -n "$1" ] && [ -n "$2" ] && [ "$1" = "$2" ]
+}
+
+# gm_check LABEL ACTUAL EXPECTED -> prints a status line; returns 0 OK / 2 FOREIGN-GM / 3 UNKNOWN.
+# A foreign or unreadable grandmaster is ALWAYS a hard fail regardless of how small the node's own
+# offset looks at that instant (#834: "is_locked:true" was true while 15 ms out) -- callers must
+# gate on this in addition to, never instead of, the offset/PTP-lock checks above.
+gm_check() {
+  local label="$1" actual="$2" expected="$3"
+  if [ -z "$actual" ]; then
+    printf '  %-14s GM UNKNOWN   (gm_source_ip unread; expected %s)\n' "$label" "$expected"
+    return 3
+  fi
+  if gm_matches_expected "$actual" "$expected"; then
+    printf '  %-14s GM OK        (locked to the rig grandmaster %s)\n' "$label" "$actual"
+    return 0
+  fi
+  printf '  %-14s GM FOREIGN   (locked to %s, rig grandmaster is %s -- #834: is_locked can be true while badly out)\n' \
+    "$label" "$actual" "$expected"
+  return 2
+}
+
 # offset_check LABEL OFFSET_US BOUND_US -> prints a status line; returns 0 OK / 2 DRIFT /
 # 3 UNKNOWN. OK iff |OFFSET_US| <= BOUND_US (NUMERIC compare). An empty OFFSET_US is UNKNOWN,
 # never OK — an offset we could not read must never look in-bound (test-strictness: no silent
@@ -379,6 +471,192 @@ offset_check() {
   fi
   printf '  %-14s DRIFT    (offset %s us, |%s| > %s us bound)\n' "$label" "$offset" "$mag" "$bound"
   return 2
+}
+
+# --- Multi-sample offset + stability grading (#836) -----------------------------------------
+#
+# offset_check (above) grades a SINGLE read of "ntp_offset_us" against the bound -- for the
+# Windows/HTTP status-pipe signal that is close to a coin flip on a noisy node: live data (#836,
+# stream box, 22 reads 25s apart) shows only 2/22 individual reads landing inside the existing
+# 2000us bound, so the SAME unchanged node passes or fails almost at random depending purely on
+# which instant it happened to be sampled. There was also no check at all for how much the
+# readings SCATTER between samples -- a node whose offset bounces wildly is invisible to a
+# single-read gate as long as one lucky read is in-bound. And the daemon's HTTP endpoint only
+# refreshes on its own cadence, so back-to-back reads can return the byte-identical "updated_ts"
+# (observed live: 2014,2014 / 7482,7482 6-25s apart) -- these are NOT independent measurements.
+#
+# These functions turn a SEQUENCE of raw status-JSON reads of the SAME node (gathered by the
+# caller -- dantesync-gate.sh's gather_http_samples, the only IMPURE piece of this feature) into
+# a graded verdict: the MEDIAN of the DISTINCT samples against the EXISTING, UNCHANGED bound
+# (better estimator, same bound -- a lucky/unlucky single sample can no longer decide the node),
+# PLUS a NEW check a single-sample gate could never make at all: the SPREAD (max-min) of those
+# same distinct samples against a stability threshold, so a node whose readings scatter widely
+# FAILS even when its median looks perfect (its timestamps are equally unusable either way). Too
+# few distinct samples (below MIN_DISTINCT) is itself a hard failure -- never a silent pass on
+# one lucky read. Net effect vs the single-read gate: strictly MORE ways to fail, never fewer;
+# the bound itself never moves.
+
+# distinct_offset_samples_us PAYLOADS_NEWLINE -> newline list of the DISTINCT ntp_offset_us
+# values in PAYLOADS_NEWLINE (one raw status-JSON blob per line, in the order they were read).
+# ASSUMES each individual read's payload is itself a SINGLE line -- true of every real capture in
+# this file (dantesync#47's HTTP endpoint always serves compact, non-pretty-printed JSON; see the
+# fixtures throughout this file and tests/clock_offset_guard.rs) and of gather_http_samples in
+# dantesync-gate.sh (which newline-joins the reads it gathers). If a future endpoint ever emitted
+# multi-line JSON, a read would fail safe here (its "updated_ts"/"ntp_offset_us" wouldn't be found
+# on any single line -> skipped, never miscounted or misread), never a false pass.
+#
+# A read is counted as a NEW independent sample only when its "updated_ts" differs from the last
+# ACCEPTED sample's "updated_ts" -- a read whose updated_ts repeats the last accepted one is the
+# daemon re-serving its own cached value between refreshes and is skipped, never double-counted
+# (#836 point 5). A read with an unparseable/missing updated_ts OR ntp_offset_us is also skipped
+# entirely (it neither counts as a new sample nor resets the "last accepted" tracker) -- the same
+# "cannot prove it -> do not count it" discipline as every other parser in this file.
+distinct_offset_samples_us() {
+  local payloads="$1" line ts off prev_ts=""
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    ts="$(updated_ts_from_pipe_json "$line")"
+    [ -n "$ts" ] || continue
+    if [ -n "$prev_ts" ] && [ "$ts" = "$prev_ts" ]; then
+      continue
+    fi
+    off="$(offset_us_from_pipe_json "$line")"
+    [ -n "$off" ] || continue
+    printf '%s\n' "$off"
+    prev_ts="$ts"
+  done <<< "$payloads"
+}
+
+# median_of_ints LIST_NEWLINE -> the LOWER median of the integers in LIST_NEWLINE (one per line;
+# non-integer lines are ignored), "" if none. Same convention as the journal path's
+# _fresh_offset_median_us (sort -n, pick position int((n+1)/2)) so both estimators round the same
+# way on an even count.
+median_of_ints() {
+  local list="$1" n
+  n="$(printf '%s\n' "$list" | grep -cE '^-?[0-9]+$' || true)"
+  [ "${n:-0}" -gt 0 ] || { printf ''; return 0; }
+  printf '%s\n' "$list" | grep -E '^-?[0-9]+$' | sort -n \
+    | awk -v n="$n" 'NR == int((n+1)/2) { print; exit }'
+}
+
+# spread_of_ints LIST_NEWLINE -> max(LIST) - min(LIST) over the integers in LIST_NEWLINE (one per
+# line; non-integer lines are ignored), "" if fewer than 2 valid values (scatter is undefined from
+# a single point -- the caller's own MIN_DISTINCT gate normally keeps this from mattering, but the
+# function stays honest standalone).
+spread_of_ints() {
+  local list="$1" n v max min first=1
+  n="$(printf '%s\n' "$list" | grep -cE '^-?[0-9]+$' || true)"
+  [ "${n:-0}" -ge 2 ] || { printf ''; return 0; }
+  while IFS= read -r v; do
+    printf '%s' "$v" | grep -qE '^-?[0-9]+$' || continue
+    if [ "$first" = 1 ]; then
+      max="$v"; min="$v"; first=0
+    else
+      [ "$v" -gt "$max" ] && max="$v"
+      [ "$v" -lt "$min" ] && min="$v"
+    fi
+  done <<< "$list"
+  printf '%s' "$((max - min))"
+}
+
+# sampled_offset_verdict PAYLOADS_NEWLINE BOUND_US STABILITY_US MIN_DISTINCT ->
+#   "insufficient" | "drift" | "unstable" | "drift_unstable" | "ok"
+#   insufficient -- fewer than MIN_DISTINCT distinct samples were obtained (#836 point 5, second
+#                   half) OR BOUND_US/STABILITY_US/MIN_DISTINCT is not a plain non-negative
+#                   integer -- never grade on data we cannot prove is enough.
+#   drift          -- the MEDIAN of the distinct samples exceeds BOUND_US (spread in bound).
+#   unstable       -- the median is in-bound but the SPREAD exceeds STABILITY_US (#836 point 3 --
+#                     a NEW failure mode the single-read gate could never detect at all).
+#   drift_unstable -- both the median AND the spread fail.
+#   ok             -- median in-bound AND (fewer than 2 samples, so spread is undefined, OR
+#                     spread in-bound).
+sampled_offset_verdict() {
+  local payloads="$1" bound="$2" stability="$3" min_distinct="$4"
+  local samples n median spread drift=0 unstable=0
+  if ! printf '%s' "$bound" | grep -qE '^[0-9]+$' \
+     || ! printf '%s' "$stability" | grep -qE '^[0-9]+$' \
+     || ! printf '%s' "$min_distinct" | grep -qE '^[0-9]+$'; then
+    printf 'insufficient\n'
+    return 0
+  fi
+  samples="$(distinct_offset_samples_us "$payloads")"
+  n="$(printf '%s\n' "$samples" | grep -cE '^-?[0-9]+$' || true)"
+  n="${n:-0}"
+  if [ "$n" -lt "$min_distinct" ]; then
+    printf 'insufficient\n'
+    return 0
+  fi
+  median="$(median_of_ints "$samples")"
+  [ -n "$median" ] || { printf 'insufficient\n'; return 0; }
+  [ "$(abs_int "$median")" -gt "$bound" ] && drift=1
+  if [ "$n" -ge 2 ]; then
+    spread="$(spread_of_ints "$samples")"
+    [ -n "$spread" ] && [ "$spread" -gt "$stability" ] && unstable=1
+  fi
+  if [ "$drift" = 1 ] && [ "$unstable" = 1 ]; then
+    printf 'drift_unstable\n'
+  elif [ "$drift" = 1 ]; then
+    printf 'drift\n'
+  elif [ "$unstable" = 1 ]; then
+    printf 'unstable\n'
+  else
+    printf 'ok\n'
+  fi
+}
+
+# sampled_offset_report PAYLOADS_NEWLINE -> "DISTINCT MEDIAN SPREAD" (space-separated; MEDIAN/
+# SPREAD print as "NA" when undefined -- zero samples, or fewer than 2 for SPREAD). Lets a caller
+# print BOTH numbers on every status line regardless of pass/fail (#836 point 4: "a red says which
+# kind of bad it is").
+sampled_offset_report() {
+  local payloads="$1" samples n median spread
+  samples="$(distinct_offset_samples_us "$payloads")"
+  n="$(printf '%s\n' "$samples" | grep -cE '^-?[0-9]+$' || true)"
+  n="${n:-0}"
+  median="NA"
+  spread="NA"
+  [ "$n" -ge 1 ] && median="$(median_of_ints "$samples")"
+  if [ "$n" -ge 2 ]; then
+    spread="$(spread_of_ints "$samples")"
+  fi
+  printf '%s %s %s\n' "$n" "${median:-NA}" "${spread:-NA}"
+}
+
+# sampled_offset_check LABEL PAYLOADS_NEWLINE BOUND_US STABILITY_US MIN_DISTINCT -> prints ONE
+# status line (median + spread + distinct count, always -- #836 point 4) and returns 0 OK /
+# 2 DRIFT-or-UNSTABLE / 3 UNKNOWN (insufficient distinct samples or malformed input). Same rc
+# contract as offset_check (0/2/3) so node_verdict's OK/BAD/UNKNOWN combiner (dantesync-gate.sh)
+# is unchanged -- a stability failure is exactly as hard a failure as a location (drift) failure.
+sampled_offset_check() {
+  local label="$1" payloads="$2" bound="$3" stability="$4" min_distinct="$5"
+  local verdict report n median spread
+  verdict="$(sampled_offset_verdict "$payloads" "$bound" "$stability" "$min_distinct")"
+  report="$(sampled_offset_report "$payloads")"
+  n="$(printf '%s' "$report" | awk '{print $1}')"
+  median="$(printf '%s' "$report" | awk '{print $2}')"
+  spread="$(printf '%s' "$report" | awk '{print $3}')"
+  case "$verdict" in
+    ok)
+      printf '  %-14s OK       (median %sus <= %sus bound; spread %sus, stability %sus; %s distinct samples)\n' \
+        "$label" "$median" "$bound" "$spread" "$stability" "$n"
+      return 0 ;;
+    drift)
+      printf '  %-14s DRIFT    (median %sus > %sus bound; spread %sus, stability %sus; %s distinct samples)\n' \
+        "$label" "$median" "$bound" "$spread" "$stability" "$n"
+      return 2 ;;
+    unstable)
+      printf '  %-14s UNSTABLE (median %sus <= %sus bound; spread %sus > %sus stability -- #836 scattered/unusable; %s distinct samples)\n' \
+        "$label" "$median" "$bound" "$spread" "$stability" "$n"
+      return 2 ;;
+    drift_unstable)
+      printf '  %-14s DRIFT+UNSTABLE (median %sus > %sus bound; spread %sus > %sus stability; %s distinct samples)\n' \
+        "$label" "$median" "$bound" "$spread" "$stability" "$n"
+      return 2 ;;
+    *)
+      printf '  %-14s UNKNOWN  (only %s distinct sample(s) [median %sus, spread %sus], need >= %s -- refresh-interval duplicates, #836)\n' \
+        "$label" "$n" "$median" "$spread" "$min_distinct"
+      return 3 ;;
+  esac
 }
 
 # offset_verdict_check LABEL JOURNAL FRESHNESS_S BOUND_US -> prints a status line; returns 0 OK /

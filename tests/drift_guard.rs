@@ -1328,7 +1328,9 @@ fn compare_build_sha_facet_dormant_without_a_manifest() {
 // deploy, EVERY file the bundle shipped must match the manifest byte-for-byte on the live box, and
 // the deploy FAILS on ANY mismatch (missing, extra-via-unread, or sha-drifted file) — so a partial
 // or corrupted deploy (one file silently stale) can never pass. The live per-file hashes are
-// gathered off the Windows box (Get-FileHash over each deployed bundle file, ssh denied) and fed as
+// gathered off the Windows box (Get-FileHash over each deployed bundle file, via the win-* MCP
+// Shell -- #701 proved plain scp/ssh reaches strih/stream and #703's win-ssh-exec.sh proves a
+// remote PowerShell command CAN run over ssh too, but this facet has not been migrated) and fed as
 // a comma-separated `relpath=sha256` list via the new `bundle_hashes=` observed key; the engine
 // walks the manifest's files[] and compares each. The manifest path uses forward slashes (the
 // genlock-manifest.sh layout), so the observed relpaths must match that convention.
@@ -2491,6 +2493,134 @@ fn genlock_build_drift_report_unknown_names_the_box_when_sha_unread_548() {
     assert!(
         out.contains("UNKNOWN") && out.contains("not read") && out.contains("stream"),
         "must say UNKNOWN / not read and name the stream box, never OK: {out:?}"
+    );
+}
+
+// ---- #756 — genlock_build_parity_report: CROSS-BOX peer parity (not a ref-compare) ------------
+// The ref-compare facets above (imag_/genlock_build_drift_report) read "OK: current with
+// origin/main" for a box that is generations behind its PEERS during a long-lived dev train (the
+// live boxes run unmerged PR builds AHEAD of origin/main). #756: the imag segfault + GPU wedge
+// happened while imag ran a STALE lineage that the ref-compare could never flag. This peer-parity
+// facet asserts every fleet box's DEPLOYED build SHA is IDENTICAL — any skew FAILS, no git ref
+// involved. Pure: the caller gathers each box's live GENLOCK_BUILD_SHA.txt; this decides.
+
+#[test]
+fn genlock_build_parity_report_ok_when_whole_fleet_on_one_build_756() {
+    // Every box read + all identical -> OK, exit 0, the fleet is on ONE lineage.
+    let body = r#"
+        rc=0
+        genlock_build_parity_report "imag=26de1c3c2" "strih=26de1c3c2" "stream=26de1c3c2" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[]);
+    assert!(out.contains("RC=0"), "unified fleet -> clean exit: {out:?}");
+    assert!(
+        out.contains("genlock_parity")
+            && out.contains("OK")
+            && out.contains("ONE genlock build")
+            && out.contains("26de1c3c2"),
+        "must report genlock_parity OK with the shared build: {out:?}"
+    );
+    assert!(
+        !out.contains("DRIFT"),
+        "no drift for a unified fleet: {out:?}"
+    );
+}
+
+#[test]
+fn genlock_build_parity_report_drift_and_fails_loud_when_one_box_skews_756() {
+    // imag on an OLDER build than strih/stream (the #756 scenario) -> a proven skew -> DRIFT exit
+    // 20, naming every box's SHA + the #460 hot-swap remediation. This is the false OK the
+    // ref-compare could not catch during the PR #704 train.
+    let body = r#"
+        rc=0
+        genlock_build_parity_report "imag=STALE111" "strih=26de1c3c2" "stream=26de1c3c2" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[]);
+    assert!(
+        out.contains("RC=20"),
+        "a fleet skew -> DRIFT exit 20: {out:?}"
+    );
+    assert!(
+        out.contains("genlock_parity")
+            && out.contains("DRIFT")
+            && out.contains("SKEW")
+            && out.contains("STALE111")
+            && out.contains("26de1c3c2"),
+        "DRIFT must name the skew + every box's SHA: {out:?}"
+    );
+    assert!(
+        out.contains("#460") || out.contains("hot-swap"),
+        "must give the concrete remediation (hot-swap the lagging box): {out:?}"
+    );
+}
+
+#[test]
+fn genlock_build_parity_report_drift_wins_even_when_a_third_box_is_unread_756() {
+    // A DEFINITE skew between the two boxes we COULD read must FAIL LOUD even though a third box is
+    // unread — a proven split is a proven split, never downgraded to UNKNOWN by an unreadable peer.
+    let body = r#"
+        rc=0
+        genlock_build_parity_report "imag=STALE111" "strih=26de1c3c2" "stream=" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[]);
+    assert!(
+        out.contains("RC=20"),
+        "a proven skew beats an unread third box -> DRIFT 20, not UNKNOWN: {out:?}"
+    );
+    assert!(
+        out.contains("DRIFT") && out.contains("SKEW"),
+        "must report the skew: {out:?}"
+    );
+}
+
+#[test]
+fn genlock_build_parity_report_unknown_when_a_box_is_unread_never_a_false_ok_756() {
+    // strih/stream agree but imag's SHA is unread (ssh hiccup) -> the parity picture is INCOMPLETE
+    // -> UNKNOWN exit 11, NOT a false OK. imag being stale is the exact thing we must not miss, so
+    // an unreadable imag can never pass.
+    let body = r#"
+        rc=0
+        genlock_build_parity_report "imag=" "strih=26de1c3c2" "stream=26de1c3c2" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[]);
+    assert!(
+        out.contains("RC=11"),
+        "an unread box -> UNKNOWN exit 11, never OK: {out:?}"
+    );
+    assert!(
+        out.contains("genlock_parity")
+            && out.contains("UNKNOWN")
+            && out.contains("INCOMPLETE")
+            && out.contains("imag"),
+        "must say UNKNOWN/INCOMPLETE and name the unread box: {out:?}"
+    );
+    assert!(
+        !out.contains("OK       "),
+        "must not report a false OK: {out:?}"
+    );
+}
+
+#[test]
+fn genlock_build_parity_report_unknown_when_fewer_than_two_peers_756() {
+    // Only one box read -> nothing to compare against -> UNKNOWN exit 11 (a parity check needs >=2
+    // peers; a lone box proves nothing about fleet agreement).
+    let body = r#"
+        rc=0
+        genlock_build_parity_report "imag=26de1c3c2" "strih=" "stream=" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[]);
+    assert!(
+        out.contains("RC=11"),
+        "fewer than two read peers -> UNKNOWN exit 11: {out:?}"
+    );
+    assert!(
+        out.contains("UNKNOWN") && out.contains("INCOMPLETE"),
+        "must report the incomplete/unknown parity: {out:?}"
     );
 }
 

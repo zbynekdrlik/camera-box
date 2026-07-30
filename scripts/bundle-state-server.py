@@ -68,6 +68,24 @@ DEFAULT_NDI_RUNTIME_DLL = r"C:\Program Files\NDI\NDI 6 Tools\Runtime\Processing.
 # The two static OBS module scan paths (the third, %APPDATA%\obs-studio\plugins, is resolved from
 # the environment below — mirrors bundle_state_gather.DISTROAV_SCAN_ROOTS + drift-guard.md 1c).
 APPDATA_DISTROAV_ROOT = "obs-studio/plugins"
+# #756 — the deployed genlock bundle's build-SHA marker on a Windows box (the SAME
+# GENLOCK_BUILD_SHA.txt imag serves from /opt/obs-genlock/). Read-only; "" if absent (a stock/
+# non-genlock install, or a build predating the marker) -> UNKNOWN, never a guessed SHA.
+DEFAULT_GENLOCK_BUILD_SHA_FILE = r"C:\Program Files\obs-studio\GENLOCK_BUILD_SHA.txt"
+
+# #826 — the strih OBS-identity machine-check facet. The 2026-07-27 incident: a hand-launched
+# stale `1ME` OBS 31.1.2 install squatted TCP :4455 while this box's own parity marker still
+# described the pinned genlock 32.1.2 build. These defaults are read-only scan roots/paths; every
+# gather below degrades to "" (UNKNOWN downstream) on any failure, never a guessed value.
+DEFAULT_OBS_INSTALL_SCAN_ROOTS = (
+    r"C:\Program Files\obs-studio",
+    r"D:\_APPS",
+)
+DEFAULT_STARTUP_SHORTCUT = r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs\OBS Studio.lnk"
+# Only strih runs NL_STARTUP.ahk (stream has none, per .claude/skills/obs-ops) — a box without
+# this file simply gathers "" for every ahk_* key, which the gate correctly reads as "this facet
+# does not apply here" rather than a failure (see version-integrity-gate.sh's startup_chain scope).
+DEFAULT_AHK_PATH = r"D:\_APPS\NL_STARTUP.ahk"
 
 
 def log(msg):
@@ -111,6 +129,87 @@ def ndi_runtime_version(dll_path):
         return ""
 
 
+def port4455_owner():
+    """#826 — the exe PATH (never just a process name) + FileVersion of whatever process is
+    LISTENING on TCP :4455 right now, via one PowerShell round-trip (Get-NetTCPConnection ->
+    Get-Process -> Get-Item VersionInfo). This is the exact hole the 2026-07-27 incident exposed:
+    a same-NAMED `obs64.exe` process can be a totally different, stale install — matching by name
+    alone would have missed it. Returns (path, version), each "" on any failure/absence (no
+    listener, PowerShell error, process vanished between the two calls) — never a guessed value."""
+    try:
+        out = subprocess.run(
+            [
+                "powershell", "-NoProfile", "-NonInteractive", "-Command",
+                "$c = Get-NetTCPConnection -LocalPort 4455 -State Listen "
+                "-ErrorAction SilentlyContinue | Select-Object -First 1; "
+                "if ($c) { $p = Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue; "
+                "if ($p -and $p.Path) { $p.Path; (Get-Item -LiteralPath $p.Path).VersionInfo.FileVersion } }",
+            ],
+            capture_output=True, text=True, timeout=15, check=True,
+        )
+        lines = [ln for ln in out.stdout.splitlines() if ln.strip()]
+        path = lines[0].strip() if len(lines) >= 1 else ""
+        version = lines[1].strip() if len(lines) >= 2 else ""
+        return path, version
+    except (subprocess.SubprocessError, OSError) as e:
+        log(f"WARNING: could not read the :4455 port owner: {e}")
+        return "", ""
+
+
+def obs_process_list():
+    """#826 — every running process NAME matching an OBS-shaped filter (Get-Process -Name obs*),
+    newline-joined — feeds bsg.obs_process_count_from_listing. "" on any failure (never a guessed
+    count; the gate then reads this box's process count as UNKNOWN, not "zero confirmed")."""
+    try:
+        out = subprocess.run(
+            [
+                "powershell", "-NoProfile", "-NonInteractive", "-Command",
+                "Get-Process -Name 'obs*' -ErrorAction SilentlyContinue "
+                "| Select-Object -ExpandProperty Name",
+            ],
+            capture_output=True, text=True, timeout=15, check=True,
+        )
+        return out.stdout
+    except (subprocess.SubprocessError, OSError) as e:
+        log(f"WARNING: could not list OBS-class processes: {e}")
+        return ""
+
+
+def read_ahk_text(ahk_path):
+    """#826 — the raw text of NL_STARTUP.ahk, a plain local file (no PowerShell needed — this
+    process already runs ON the box). "" if the file is absent (stream, which runs no
+    NL_STARTUP.ahk at all — the correct, non-failure UNKNOWN) or unreadable."""
+    try:
+        with open(ahk_path, "r", encoding="utf-8", errors="replace") as f:
+            return f.read()
+    except OSError as e:
+        log(f"INFO: no NL_STARTUP.ahk at {ahk_path} ({e}) — this box likely runs none")
+        return ""
+
+
+def resolve_shortcut(lnk_path):
+    """#826 — a Windows .lnk shortcut's own TargetPath + WorkingDirectory, via the same
+    WScript.Shell COM technique scripts/launch-obs-genlock.sh already uses to launch OBS through
+    its Start-Menu shortcut. Returns (target, workdir), each "" on any failure (missing shortcut,
+    powershell error) — never a guessed value."""
+    try:
+        out = subprocess.run(
+            [
+                "powershell", "-NoProfile", "-NonInteractive", "-Command",
+                f"$s = New-Object -ComObject WScript.Shell; "
+                f"$l = $s.CreateShortcut('{lnk_path}'); $l.TargetPath; $l.WorkingDirectory",
+            ],
+            capture_output=True, text=True, timeout=15, check=True,
+        )
+        lines = out.stdout.splitlines()
+        target = lines[0].strip() if len(lines) >= 1 else ""
+        workdir = lines[1].strip() if len(lines) >= 2 else ""
+        return target, workdir
+    except (subprocess.SubprocessError, OSError) as e:
+        log(f"WARNING: could not resolve shortcut {lnk_path!r}: {e}")
+        return "", ""
+
+
 def gather_ndi_inputs(host, password):
     """{name: {"kind": ..., "settings": {...}}} for every ndi_source-kind input, over the local
     obs-websocket — mirrors ~/.cache/obsprobe/obs_inputs.py's shape (bundle_state_gather.
@@ -143,7 +242,13 @@ def gather_record_directory(host, password):
         ws.close()
 
 
-def gather_bundle_state(obs_host, password, obs_log_dir, ndi_runtime_dll, distroav_scan_roots):
+def gather_bundle_state(
+    obs_host, password, obs_log_dir, ndi_runtime_dll, distroav_scan_roots,
+    genlock_build_sha_file=DEFAULT_GENLOCK_BUILD_SHA_FILE,
+    obs_install_scan_roots=DEFAULT_OBS_INSTALL_SCAN_ROOTS,
+    startup_shortcut=DEFAULT_STARTUP_SHORTCUT,
+    ahk_path=DEFAULT_AHK_PATH,
+):
     """Build the fresh bundle-state dict for THIS request — every gather is attempted
     independently so one failing facet (e.g. OBS-WS momentarily unreachable) does not blank out
     the log-derived facets that still read fine; each key that could not be read is simply
@@ -155,6 +260,12 @@ def gather_bundle_state(obs_host, password, obs_log_dir, ndi_runtime_dll, distro
     except Exception as e:  # noqa: BLE001 - any WS/RPC failure must not crash the whole response
         log(f"WARNING: could not gather NDI input latency over obs-websocket: {e}")
 
+    # #826 — the strih OBS-identity machine-check facet (each gather independent, same
+    # never-let-one-failure-blank-the-rest discipline as every other facet here).
+    port_owner_path, port_owner_version = port4455_owner()
+    ahk_text = read_ahk_text(ahk_path)
+    shortcut_target, shortcut_workdir = resolve_shortcut(startup_shortcut)
+
     return bsg.build_bundle_state(
         obs_version=bsg.obs_version_from_log(log_text),
         distroav_version=bsg.distroav_version_from_log(log_text),
@@ -164,6 +275,18 @@ def gather_bundle_state(obs_host, password, obs_log_dir, ndi_runtime_dll, distro
         ndi_input_latency=bsg.ndi_input_latency_csv(ndi_inputs),
         distroav_dll_paths=bsg.distroav_dll_paths(distroav_scan_roots),
         genlock_capability=bsg.genlock_capability_from_log(log_text),
+        # #756 — the deployed genlock build SHA for the cross-box parity gate.
+        genlock_build_sha=bsg.genlock_build_sha_from_file(genlock_build_sha_file),
+        # #826 — the strih OBS-identity machine-check facet.
+        obs_installs=bsg.obs_installs_under(obs_install_scan_roots),
+        port4455_owner_path=port_owner_path,
+        port4455_owner_version=port_owner_version,
+        obs_process_count=bsg.obs_process_count_from_listing(obs_process_list()),
+        ahk_app1_shortcut_path=bsg.ahk_app1_shortcut_path(ahk_text),
+        ahk_app1_run=bsg.ahk_app1_run(ahk_text),
+        ahk_dead_config_present=bsg.ahk_dead_config_present(ahk_text),
+        shortcut_target_path=shortcut_target,
+        shortcut_workdir=shortcut_workdir,
     )
 
 
@@ -199,6 +322,10 @@ def make_handler(args, state):
                 payload = gather_bundle_state(
                     args.obs_host, args.password, args.obs_log_dir,
                     args.ndi_runtime_dll, self._distroav_scan_roots(),
+                    args.genlock_build_sha_file,
+                    obs_install_scan_roots=args.obs_install_scan_root,
+                    startup_shortcut=args.startup_shortcut,
+                    ahk_path=args.ahk_path,
                 )
             except Exception as e:  # noqa: BLE001 - never let a gather bug hang the gate forever
                 log(f"ERROR: bundle-state gather failed: {e}")
@@ -302,7 +429,22 @@ def main(argv=None):
         default=os.path.join(os.environ.get("APPDATA", ""), "obs-studio", "logs"),
     )
     ap.add_argument("--ndi-runtime-dll", default=DEFAULT_NDI_RUNTIME_DLL)
+    # #756 — the deployed genlock build-SHA marker file for the cross-box parity gate. Default is
+    # the Windows bundle path; imag's service passes /opt/obs-genlock/GENLOCK_BUILD_SHA.txt.
+    ap.add_argument("--genlock-build-sha-file", default=DEFAULT_GENLOCK_BUILD_SHA_FILE)
+    # #826 — the strih OBS-identity machine-check facet. --obs-install-scan-root is repeatable;
+    # --ahk-path defaults to strih's NL_STARTUP.ahk -- a box that has none (stream) just gathers ""
+    # for every ahk_* key, which the gate correctly reads as "this facet does not apply here".
+    ap.add_argument(
+        "--obs-install-scan-root", action="append", default=None,
+        help="a root to scan for launchable obs*.exe/*ME.exe installs (repeatable; "
+             f"default: {', '.join(DEFAULT_OBS_INSTALL_SCAN_ROOTS)})",
+    )
+    ap.add_argument("--startup-shortcut", default=DEFAULT_STARTUP_SHORTCUT)
+    ap.add_argument("--ahk-path", default=DEFAULT_AHK_PATH)
     args = ap.parse_args(argv)
+    if args.obs_install_scan_root is None:
+        args.obs_install_scan_root = list(DEFAULT_OBS_INSTALL_SCAN_ROOTS)
 
     state = _State()
     handler = make_handler(args, state)

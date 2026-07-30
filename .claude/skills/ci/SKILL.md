@@ -71,6 +71,31 @@ Confirm via the created-message `id` in the response body.
 The Discord bot can't `fetch_messages` on these channels from an in-session Discord plugin
 (not allowlisted) — verify delivery by the bot REST POST returning a message `id`.
 
+**#711/#719 Discord report routing:** `scripts/lib/e2e-discord-report.sh` prefers
+`DISCORD_NOTIFICATION_CHANNEL_ZBYNEK` (the owner's own thread, push-notifies via a
+`<@DISCORD_MENTION_ZBYNEK>` prefix on chunk 1) over the plain `#notifications` channel
+(`DISCORD_CHANNEL_ID`, now a logged fallback only — the user does not watch it and Discord never
+pushes a phone notification without a mention/DM). CI (`full-path-e2e.yml`) passes only
+`DISCORD_BOT_TOKEN`/`DISCORD_CHANNEL_ID` as GitHub secrets — the owner-thread vars are backfilled
+from `~/.claude/channels/discord/.env` on every send (this runs on the dev1 self-hosted runner, so
+that file is always present), preserving an already-set `DISCORD_BOT_TOKEN` so CI's real secret is
+never shadowed by the local file's own value.
+
+**TESTING PATTERN — a fake `curl` on PATH that records multi-line argv safely.** A test that drives
+a bash function calling `curl -d "$payload" ...` and wants to assert on the ACTUAL payload sent
+must capture the fake curl's argv into a log file — but the payload itself (a composed Discord
+report) is MULTI-LINE, so a newline-delimited log is ambiguous (one arg's embedded newlines look
+identical to arg boundaries). Use ASCII Record Separator (`\x1e`) between args and Group Separator
+(`\x1d`) between calls instead — bytes that never occur in real curl argv (headers, JSON, URLs):
+```bash
+# fake curl:
+{ for a in "$@"; do printf '%s\x1e' "$a"; done; printf '\x1d'; } >> "$CURL_LOG"
+printf '{"id":"999"}\n200'   # canned success response, mirrors `curl -w '\n%{http_code}'`
+```
+Parse in the test harness by splitting on `\x1d` then `\x1e`. See
+`tests/harness_e2e_discord_report_owner_thread_719.rs` for the full pattern (PATH-stub convention,
+same family as `tests/harness_deploy_fleet.rs`'s `sshpass`/`gh` stubs).
+
 ## Probe Binary Flow — Run on stream.lan, NOT dev1
 
 OBS records the 0.7–6 GB program file on stream box (10.77.9.204 — strong CPU, fast disks).
@@ -101,7 +126,12 @@ scripts/recording-verdict-on-stream.sh \
 `VERDICT_ON_STREAM=0` selects the legacy decode-on-dev1 path (kept for boxes without
 uploaded verdict.exe).
 
-scp/ssh to Windows (stream.lan) is **DENIED** on this rig — use the win-stream-snv MCP.
+scp/ssh to Windows (stream.lan) was historically believed **DENIED** on this rig — corrected below
+(the #703 section further down): plain OpenSSH+password scp/ssh actually WORKS against stream.lan
+with the targets.md creds, and is now what `E2E_EXECUTE_VERDICT=1` uses for real. This section's
+`FileDownload`/manual-plan flow (win-stream-snv MCP) is still the fallback for a manual/
+`workflow_dispatch` operator run, or for pulling files above the few-MB point where `FileDownload`
+itself breaks (see #701) — for anything sizeable, prefer scp directly.
 ffmpeg/ffprobe are already installed on stream.lan (winget; ffmpeg 8.0.1 on PATH).
 
 ## Probe is CI-only locally — never compile `--features probe` on dev1 (#185)
@@ -357,3 +387,84 @@ gh api repos/OWNER/REPO/pulls/N -X PATCH --input payload.json
 live, it wrote the PR body as the literal 20-character string `"@/tmp/pr-body.md"`, not the file's
 contents. Always build a small JSON payload file and use `--input`, never trust `-f key=@file` to
 read from disk here.
+
+## #703 — ssh/scp to strih+stream WORKS (retires the "scp/ssh to Windows is DENIED" premise for
+## THESE TWO boxes) — but scp has TWO live-verified Windows-path gotchas of its own
+
+`#701` first proved plain `sshpass -p "$PW" ssh/scp $USER@10.77.9.202`/`.204` (creds in
+`targets.md`) works cleanly. `#703` wired this into the REQUIRED merge gate for real
+(`scripts/lib/win-ssh-exec.sh`, `recording-verdict-on-strih.sh`/`-on-stream.sh --execute`,
+`recording-e2e.sh`'s `E2E_EXECUTE_VERDICT=1`) and the FIRST real CI execution immediately hit two
+new, previously-unreachable bugs (nothing had ever really run before, so nothing had ever
+exercised these paths) — don't re-derive, they're fixed + regression-tested in `win-ssh-exec.sh`:
+
+1. **`scp user@host:'C:\camera-box\...\x.json' dest` fails `No such file or directory` even
+   though the file genuinely exists on the box** — live-reproduced on strih. The IDENTICAL file
+   via forward slashes (`C:/camera-box/.../x.json`) downloads fine, byte-identical. This is
+   SOURCE-side (download/pull) ONLY — the OPPOSITE direction (`scp local user@host:'C:\...'`,
+   i.e. upload/push to a backslash DESTINATION) is UNAFFECTED, separately live-verified. Fix:
+   `win_ssh_scp_source_path()` converts `\`→`/` before building the scp remote SOURCE spec;
+   `win_ssh_upload`'s destination stays untouched (converting it would be an unrequested,
+   unverified change to a direction that already works).
+2. **Plain bash `basename` doesn't split on `\`** — fed a backslash Windows path it finds no `/`
+   and returns the WHOLE STRING unchanged, corrupting the local pull-back destination into a
+   nonsense nested path (`$LOCAL_OUT_DIR/C:\camera-box\verdict-out\...json`, live-observed in a
+   failed run's log). Fix: `win_ssh_basename()` normalizes to `/` first, then strips.
+
+`recording-verdict.exe` ITSELF (Rust `std::fs`, and its own decode/write paths) has no problem
+with EITHER separator for reading/writing — confirmed live: `--strih`/`--stream` args populated
+from OBS's own StopRecord return already use forward slashes (`D:/_REC/....mkv`) and decoded
+fine; the harness's own hardcoded `C:\camera-box\...` constants wrote fine too. The bug is
+PURELY in the scp CLIENT's own remote-SOURCE-spec parsing, nothing else.
+
+**Also found the same session — a PRE-EXISTING "MCP push instruction, never actually executed"
+gap**: the cam2 A/V-sync marker CSV push to the stream box (`recording-e2e.sh`'s `[8/8b-pre]`)
+was PRINT-ONLY even before #703 (an "MCP operator, please FileUpload this" instruction) — since
+`[8/8]` never really executed ANYTHING pre-#703, this was never actually exercised either. The
+first real `E2E_EXECUTE_VERDICT=1` + `ALL_CAMBOX=1` run exposed it: `recording-verdict.exe`'s
+`--av-marker-log` read failed `os error 2` on a CSV that was never actually uploaded. Fixed by
+`win_ssh_upload`-ing it for real in execute mode. **Lesson for the NEXT "wire real execution"
+ticket in this harness: grep the WHOLE `[8/8]` region for every remaining `echo "... FileUpload
+..."` / `FileDownload` MCP-instruction line before declaring the per-box flow fully executed —
+each one is a potential same-class gap**, invisible until something finally tries to really run
+the step that depends on it.
+
+**Diagnosing a widespread ALL_CAMBOX continuity/AV-sync gate failure — check for a recurring
+known hardware defect BEFORE assuming a new bug.** When the fused verdict fails broadly (every
+camera, not one), cross-reference the SOURCE camera's OWN journal against the recording's exact
+timestamp window (`journalctl -u camera-box --since '<start>' --until '<end>'`) for the #656/#663
+ShadowCast over-delivery signature (`NN fps captured` where NN > 61, `V4L2_BUF_FLAG_ERROR` WARNs)
+and its `/run/camera-box/capture-rate-selfheal.state`'s `recurrence_heal_count` — a nonzero,
+climbing count during the EXACT recording window is a strong signal the whole failure is that
+already-tracked recurring defect, not a new regression. `#705` filed the follow-up gap this
+exposed: the `[0/8]` `capture-rate-guard.sh` preflight only checks ONCE at start, so a mid-
+recording recurrence (confirmed to happen — #656/#663 documented as recurring "same-day") burns
+the full run budget with no early abort and no self-evident diagnostic.
+
+## `gh` CLI GraphQL "Projects (classic)" error — mutations need the REST fallback (#711)
+
+**This repo's `gh issue view --comments`, `gh pr edit --body-file`, and similar `gh` subcommands
+that build a GraphQL query with `projectCards` in their default field set FAIL outright** with
+`GraphQL: Projects (classic) is being deprecated ... (repository.pullRequest.projectCards)` (or
+`repository.issue.projectCards`) — a `gh` CLI bug hitting repos that have (or had) a classic
+Project board, unrelated to anything in the command's own arguments. Confirmed live twice in one
+session (#711): `gh issue view 711 --comments` and `gh pr edit 704 --body-file ...` both failed
+this way with exit 1, silently doing NOTHING (no comment data returned / no body update applied)
+— it is NOT a partial success, treat the exit-1 as a real failure and verify afterward.
+
+**Read fallback:** drop `--comments`/the failing flag and use `--json` instead:
+`gh issue view <N> --json comments -q '.comments[] | ...'` (the plain JSON query path avoids the
+`projectCards` field the buggy default view builds).
+
+**Write fallback (PR/issue body edits) — go around `gh pr edit`/`gh issue edit` entirely via the
+REST API, which never touches the broken GraphQL field:**
+```bash
+jq -Rs '{body: .}' new_body.md > payload.json
+gh api -X PATCH repos/OWNER/REPO/pulls/<N>   --input payload.json --silent   # PR body
+gh api -X PATCH repos/OWNER/REPO/issues/<N>  --input payload.json --silent   # issue body
+```
+**`gh api -f body=@file` does NOT read the file** (unlike `gh issue create -F`) — it sets the
+literal string `@/path/to/file` as the value. Build a proper JSON payload with `jq -Rs` and pass
+it via `--input <file>` (or `--input -` from a pipe) instead. Always `gh pr view <N> --json body`
+afterward to confirm the write actually landed — the GraphQL failure mode looks identical to a
+successful no-op until you check.

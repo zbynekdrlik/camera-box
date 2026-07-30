@@ -16,6 +16,7 @@
 ******************************************************************************/
 
 #include "plugin-main.h"
+#include <chrono>
 #include "ndi-finder.h"
 
 #include <util/platform.h>
@@ -83,6 +84,37 @@ static set_genlock_fifo_fn resolve_set_genlock_fifo()
 				"the Genlock checkbox is inert (stock OBS?)");
 	}
 	return fn;
+}
+
+/* camera-box #764: GETTER counterpart of resolve_set_genlock_fifo, same runtime-resolve
+ * rationale (stock SDK headers at DistroAV build time have no genlock symbols). Used by the
+ * receiver thread's keep-alive check below — never a link-time call. A stock (unpatched) OBS
+ * build resolves nullptr here, so genlock_source_is_active() below safely reports "not
+ * genlocked" and the thread keeps stock DistroAV's original hide/deactivate behavior. */
+typedef bool (*get_genlock_fifo_fn)(const obs_source_t *);
+static get_genlock_fifo_fn resolve_get_genlock_fifo()
+{
+	static get_genlock_fifo_fn fn = nullptr;
+	static bool tried = false;
+	if (!tried) {
+		tried = true;
+		fn = (get_genlock_fifo_fn)resolve_obs_export("obs_source_get_genlock_fifo");
+		if (!fn)
+			obs_log(LOG_WARNING,
+				"genlock: obs_source_get_genlock_fifo not exported by this OBS build — "
+				"the NDI receiver keep-alive fix is inert (stock OBS?)");
+	}
+	return fn;
+}
+
+/* camera-box #764 (event-critical, 2026-07-15): is `source` a genlocked source RIGHT NOW?
+ * Pure passthrough to the runtime-resolved getter -- honest false (never a guess) when the
+ * export isn't available. */
+static bool genlock_source_is_active(obs_source_t *source)
+{
+	if (auto get_genlock = resolve_get_genlock_fifo())
+		return get_genlock(source);
+	return false;
 }
 
 /* camera-box #257: per-source MEASUREMENT-BURN setter, runtime-resolved by name — same
@@ -229,6 +261,11 @@ typedef struct ndi_source_t {
 	uint32_t height;
 
 	uint64_t last_frame_timestamp;
+
+	/* camera-box #764: logs the "NDI receiver keep-alive" line exactly ONCE per source, the
+	 * first time the receiver thread actually skips the hidden-source pause because genlock
+	 * keep-alive is active — never spammed every ~5ms loop tick. */
+	bool logged_genlock_keepalive;
 } ndi_source_t;
 
 static obs_source_t *find_filter_by_id(obs_source_t *context, const char *id)
@@ -335,10 +372,22 @@ const char *ndi_source_getname(void *)
  * force_genlock_certified_settings() iterates it, so a value can never silently drift and an
  * upstream property the operator could otherwise see is pinned to its zero-loss certified
  * value. The values were read live from the working prod input `NDI cam5`:
- *   ndi_sync=2 (SOURCE_TIMECODE), ndi_behavior=2 (LAST_FRAME), ndi_bw_mode=0 (highest),
+ *   ndi_sync=2 (SOURCE_TIMECODE), ndi_behavior=0 (KEEP_ACTIVE, #764), ndi_bw_mode=0 (highest),
  *   latency=0 (NORMAL), ndi_recv_hw_accel=true, ndi_audio=false, ndi_framesync=false,
  *   ndi_fix_alpha_blending=false, yuv_range=partial, yuv_colorspace=BT.709,
- *   timeout=KEEP_CONTENT, ptz=off. */
+ *   timeout=KEEP_CONTENT, ptz=off.
+ *
+ * camera-box #764 (event-critical, 2026-07-15): ndi_behavior changed from
+ * STOP_RESUME_LAST_FRAME to KEEP_ACTIVE. Root cause: a strih/imag NDI cam source that is
+ * hidden (not on program/preview/any active view) had its receiver THREAD FULLY TORN DOWN
+ * (ndi_source_hidden -> ndi_source_thread_stop -> ndiLib->recv_destroy) because
+ * STOP_RESUME_LAST_FRAME is the ONE behavior value that does NOT satisfy
+ * ndi_source_hidden's own `s->config.behavior != PROP_BEHAVIOR_KEEP_ACTIVE` guard — every cut
+ * TO a previously-hidden camera therefore paid a full NDI reconnect (recv_create + renegotiate
+ * + resync) before the FIRST warm frame, discovered as dropped/delayed frames on program cuts.
+ * KEEP_ACTIVE keeps the receiver thread (and, with the #764 change to the thread loop below,
+ * frame decode) running continuously regardless of visibility -- a cut is then just OBS
+ * switching which existing warm source to render, no reconnect. */
 struct genlock_forced_setting {
 	const char *prop;
 	bool is_bool;
@@ -347,7 +396,7 @@ struct genlock_forced_setting {
 };
 static const struct genlock_forced_setting GENLOCK_FORCED_SETTINGS[] = {
 	{PROP_SYNC, false, PROP_SYNC_NDI_SOURCE_TIMECODE, false},
-	{PROP_BEHAVIOR, false, PROP_BEHAVIOR_STOP_RESUME_LAST_FRAME, false},
+	{PROP_BEHAVIOR, false, PROP_BEHAVIOR_KEEP_ACTIVE, false}, /* #764: was STOP_RESUME_LAST_FRAME */
 	{PROP_BANDWIDTH, false, PROP_BW_HIGHEST, false},
 	{PROP_LATENCY, false, PROP_LATENCY_NORMAL, false},
 	{PROP_TIMEOUT, false, PROP_TIMEOUT_KEEP_CONTENT, false},
@@ -556,6 +605,14 @@ void *ndi_source_thread(void *data)
 
 	int64_t timestamp_audio = 0;
 	int64_t timestamp_video = 0;
+
+	/* camera-box #797 recv-timing instrumentation: locate the ~50-of-60fps pull-loop
+	 * throttle. Times recv_capture_v3 (wait for SDK) vs process_video2+free (our cost,
+	 * dominated by obs_source_output_video) per VIDEO frame; logs a 5s summary per
+	 * source. Pure diagnosis — remove after #797 closes. */
+	uint64_t t797_n = 0;
+	double t797_cap_sum = 0, t797_cap_max = 0, t797_out_sum = 0, t797_out_max = 0;
+	auto t797_last_log = std::chrono::steady_clock::now();
 
 	//
 	// Main NDI receiver loop: BEGIN
@@ -825,10 +882,27 @@ void *ndi_source_thread(void *data)
 		// scenes have NDI sources that are not being shown and behavior is set to Keep Active. Without this check,
 		// the fps of OBS can decrease dramatically, especially with multiple 4K 60 sources.
 		//
-		if (!obs_source_showing(s->obs_source)) {
+		// camera-box #764 (event-critical, 2026-07-15): UNCONDITIONAL keep-alive for genlocked
+		// sources -- decode+output (this frame-pull loop) never pauses on hidden, regardless of
+		// the stock FPS concern above. Root cause of the original concern: the vanilla
+		// worry conflates DECODE cost with UPLOAD (GPU texture) cost. Decode/output here is
+		// obs_source_output_video2/obs_source_output_audio, which for an ASYNC source only
+		// enqueues into OBS's own frame cache -- the actual GPU texture upload happens lazily,
+		// LATER, only for a source that is actually rendered (on program/preview/multiview).
+		// A hidden source therefore costs decode CPU but ZERO extra render-thread/GPU budget,
+		// live-measured and proven safe (imag: 7 full-1080p decodes hold 60fps; it was the
+		// UPLOAD side of #501's monitor-bandwidth finding that was ever expensive, not decode).
+		// Scoped to genlocked sources only (genlock_source_is_active) -- a non-genlock/aux
+		// input (or this fix running on a stock, unpatched OBS where the getter resolves
+		// nullptr) keeps the ORIGINAL stock behavior exactly as before, unchanged.
+		if (!obs_source_showing(s->obs_source) && !genlock_source_is_active(s->obs_source)) {
 			// Avoid busy-waiting when the source is hidden but kept active.
 			std::this_thread::sleep_for(std::chrono::milliseconds(5));
 			continue;
+		}
+		if (!obs_source_showing(s->obs_source) && !s->logged_genlock_keepalive) {
+			s->logged_genlock_keepalive = true;
+			obs_log(LOG_INFO, "genlock: NDI receiver keep-alive (no sleep on hide) '%s'", obs_source_name);
 		}
 
 		if (ndi_frame_sync) {
@@ -873,8 +947,10 @@ void *ndi_source_thread(void *data)
 			//
 			// !ndi_frame_sync
 			//
+			auto t797_c0 = std::chrono::steady_clock::now();
 			frame_received =
 				ndiLib->recv_capture_v3(ndi_receiver, &video_frame, &audio_frame, nullptr, 100);
+			auto t797_c1 = std::chrono::steady_clock::now();
 
 			if (frame_received == NDIlib_frame_type_audio) {
 				//
@@ -896,6 +972,28 @@ void *ndi_source_thread(void *data)
 				ndi_source_thread_process_video2(s, &video_frame, s->obs_source, &obs_video_frame);
 
 				ndiLib->recv_free_video_v2(ndi_receiver, &video_frame);
+				{
+					auto t797_c2 = std::chrono::steady_clock::now();
+					double cap_ms = std::chrono::duration<double, std::milli>(t797_c1 - t797_c0).count();
+					double out_ms = std::chrono::duration<double, std::milli>(t797_c2 - t797_c1).count();
+					t797_n++;
+					t797_cap_sum += cap_ms;
+					t797_out_sum += out_ms;
+					if (cap_ms > t797_cap_max)
+						t797_cap_max = cap_ms;
+					if (out_ms > t797_out_max)
+						t797_out_max = out_ms;
+					if (std::chrono::duration<double>(t797_c2 - t797_last_log).count() >= 5.0 && t797_n > 0) {
+						obs_log(LOG_INFO,
+							"recv-timing #797 '%s': n=%llu cap_avg=%.2fms cap_max=%.2fms out_avg=%.2fms out_max=%.2fms",
+							obs_source_name, (unsigned long long)t797_n,
+							t797_cap_sum / (double)t797_n, t797_cap_max,
+							t797_out_sum / (double)t797_n, t797_out_max);
+						t797_n = 0;
+						t797_cap_sum = t797_cap_max = t797_out_sum = t797_out_max = 0;
+						t797_last_log = t797_c2;
+					}
+				}
 				continue;
 			}
 

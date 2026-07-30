@@ -1442,6 +1442,23 @@ pub struct CadenceOutcome {
 pub struct ReleaseCadence {
     /// The boundary (capture-stamp instant) the NEXT tick will mature. `None` ⇒ unlocked.
     locked_next_boundary_ns: Option<u64>,
+    /// camera-box #726 STICKY-N: the last CONFIRMED integer source-rate multiple (0 = none yet).
+    /// The per-tick front-2-pair measurement ([`Self::measure_source_multiple`]) reads
+    /// INCONCLUSIVE whenever the queue momentarily holds <2 frames or the front pair is
+    /// non-monotonic (a DanteSync clock-step seam / out-of-order arrival) — on a jittery
+    /// 60-into-30 input that dropped the release back to the present-oldest CRAWL for sustained
+    /// runs (win5/win6 / CAM1 live, #726, `relocks` climbing ~2/s while sibling inputs stayed
+    /// flat). This latch remembers the last confirmed multiple so an inconclusive tick reuses it
+    /// instead of crawling; a fresh measurement is always the CONFIRMATION authority and updates
+    /// it (a 1:1 rate re-latches to 1 → byte-identical), and it is CLEARED on relock/gap/acquire
+    /// so a stale N can never outlive the rate it described. Mirror of the C field
+    /// `obs_source_t::genlock_last_known_n` (obs-internal.h).
+    last_known_n: u32,
+    /// #859 follow-up: render ticks since the last SLEW-LIMITED SETTLE-BACK DRAIN fired (see
+    /// [`Self::should_drain_one`]). Reset to 0 exactly when a drain fires; incremented every
+    /// other plain-N==1-steady tick. Mirror of the C field
+    /// `obs_source_t::genlock_ticks_since_drain` (obs-internal.h).
+    ticks_since_last_drain: u64,
 }
 
 impl ReleaseCadence {
@@ -1480,6 +1497,13 @@ impl ReleaseCadence {
         let Some(boundary) = self.locked_next_boundary_ns else {
             // ACQUIRE: first frame due by the wall deadline locks the cadence. Jump to the
             // newest due (startup backlog is stale by definition), counting the older ones.
+            // #726 STICKY-N: a fresh acquire (cold start OR after a source reset that zeroed the
+            // boundary) re-confirms the source multiple from scratch — clear the latch so a stale
+            // N from a previous lock can't outlive it.
+            self.last_known_n = 0;
+            // #859 follow-up: a fresh lock starts the settle clock over — nothing has
+            // overshot yet immediately after acquiring.
+            self.ticks_since_last_drain = 0;
             let due = queue.iter().take_while(|&&ts| ts <= deadline).count();
             if due == 0 {
                 return hold(false);
@@ -1503,10 +1527,10 @@ impl ReleaseCadence {
         // immune to the constant stamp→arrival skew. v1 guarded on `deadline − boundary`,
         // which EMBEDS that skew — the live canary (skew 59 ms, reserve 3 ms) relock-stormed:
         // dropped_due 2918/4202, relocks 1076. Steady depth is ~1–2 at ANY skew (the boundary
-        // paces arrivals), so depth > QDEPTH_RELOCK is unambiguous backlog; re-lock to the
+        // paces arrivals), so depth > backlog_relock_qdepth() is unambiguous backlog (#859: latency-relative); re-lock to the
         // newest due frame, counting every jumped frame (the catch-up keeps the IMAG latency
         // contract and the drop is VISIBLE).
-        if queue.len() > Self::QDEPTH_RELOCK {
+        if queue.len() > self.backlog_relock_qdepth(queue, reserve_ms, interval_ns) {
             let due = queue.iter().take_while(|&&ts| ts <= deadline).count();
             if due > 0 {
                 let mut dropped = Vec::with_capacity(due - 1);
@@ -1515,6 +1539,13 @@ impl ReleaseCadence {
                 }
                 let presented = queue.pop_front().expect("due frame");
                 self.locked_next_boundary_ns = Some(presented + interval_ns);
+                // #741/#707 B2: do NOT clear last_known_n here. A backlog re-lock is a QUEUE-DEPTH
+                // event, NOT evidence the source RATE changed — the #726 clear made the next
+                // INCONCLUSIVE tick crawl (N=1), re-growing the queue and re-triggering this relock
+                // (a self-sustaining crawl loop, the #707 B2 crawl window uniform=0.481). The latch
+                // bridges the post-relock inconclusive ticks; a genuine rate change re-confirms via
+                // the next measurable front pair; a real source-timeline discontinuity still clears
+                // it at acquire / gap resync / backward clock-step (and, in the C, flush/inactive).
                 return CadenceOutcome {
                     presented: Some(presented),
                     dropped,
@@ -1527,17 +1558,86 @@ impl ReleaseCadence {
             // branch re-fires once they age.
         }
 
-        // STEADY (strict FIFO): release the OLDEST frame matured by the LOCKED boundary —
-        // exactly one in steady state at any arrival skew. Presenting oldest (v1 presented
-        // newest and dropped the rest) is what makes a transient 2-frame maturation lossless:
-        // the extra frame drains on the next tick (depth-bounded by the relock above).
+        // STEADY (strict FIFO): release the frame(s) matured by the LOCKED boundary.
         let matured = queue.iter().take_while(|&&ts| ts <= boundary).count();
         if matured > 0 {
+            // camera-box #726: when the source runs at an integer multiple N>=2 of the canvas
+            // render-tick rate (a 60fps NDI source into a 30fps canvas), the present-OLDEST-matured
+            // path CRAWLS: the LOCKED boundary re-anchors to the presented stamp, and one canvas
+            // interval lands a HAIR under N source intervals (30fps interval 33_333_333 ns vs
+            // 2×60fps 33_333_334 ns), so the boundary matures only ONE frame per tick while N arrive
+            // — content plays at ~1/N speed and the per-source queue grows ~(N-1) frames/tick until
+            // the backlog storm above catches up with a multi-frame JUMP. That crawl-then-jump is the
+            // live-event "like 15fps" judder (#726). FIX: for a structural N>=2 source, mature the
+            // frames up to the boundary PLUS a half-interval slack (so the frame ~one canvas interval
+            // ahead — the hair-past-boundary one — is included, the #136 boundary-churn tolerance),
+            // present the NEWEST of them and retire the older matured one(s) into `dropped`. The
+            // boundary re-anchors to that presented stamp, so it advances ONE canvas interval (=
+            // N source frames) per tick — a uniform every-Nth-frame cadence that tracks real time.
+            // Keying on the phase-locked BOUNDARY (not the wall clock) keeps it slew-immune — the
+            // whole point of #401. Gated on the source being STRUCTURALLY at N>=2 (from the stamp
+            // grid, not arrival timing) so a TRANSIENT 1:1 double-maturation stays LOSSLESS via the
+            // present-oldest drain below — N==1 is byte-identical.
+            // #726 STICKY-N (win5/win6 residual): the gate is the STICKY effective multiple, not a
+            // per-tick front-2 re-derivation — an inconclusive tick (momentary num<2 / a
+            // non-monotonic clock-step seam) bridges with the last CONFIRMED N instead of crawling
+            // to present-oldest (which under-drained the queue into the backlog storm live). A fresh
+            // measurement still wins (a genuine 1:1 rate re-latches to 1), and the latch is cleared
+            // on acquire/relock/gap so a stale N cannot outlive its rate.
+            if self.effective_source_multiple(queue, interval_ns) >= 2 {
+                let mature_deadline = boundary + interval_ns / 2;
+                let matured_n = queue
+                    .iter()
+                    .take_while(|&&ts| ts <= mature_deadline)
+                    .count()
+                    .max(1);
+                let mut dropped = Vec::with_capacity(matured_n - 1);
+                for _ in 0..matured_n - 1 {
+                    dropped.push(queue.pop_front().expect("older matured"));
+                }
+                let presented = queue.pop_front().expect("newest matured");
+                self.locked_next_boundary_ns = Some(presented + interval_ns);
+                return CadenceOutcome {
+                    presented: Some(presented),
+                    dropped,
+                    late_hold: false,
+                    relocked: false,
+                };
+            }
+            // N==1: present the OLDEST matured frame — exactly one in steady state; a transient
+            // 2-frame maturation drains losslessly next tick (byte-identical to pre-#726).
+            //
+            // #859 follow-up: this is the ONE path the ticket's evidence found holds queue
+            // depth CONSTANT forever after a setpoint-change overshoot (release=1/tick against
+            // an inflow of exactly one). Check the slew-limited drain BEFORE popping anything,
+            // so the depth it observes matches what the C's genlock_should_drain_one reads
+            // (queue depth before this tick's release) — mirrors genlock_backlog_relock_qdepth's
+            // own READ-ONLY convention.
+            //
+            // On a drain tick, drop the CURRENT oldest (what would otherwise be presented) and
+            // present the NEXT one instead, re-anchoring the boundary to IT — the same
+            // drop-older/present-newest idiom the ACQUIRE/relock/N>=2 paths already use. Simply
+            // keeping the same presented frame and dropping the one behind it does NOT converge:
+            // it desyncs the re-anchored boundary from the real (evenly-spaced) frame timeline,
+            // so the VERY NEXT tick reads as a HOLD (nothing yet matured) and the queue regains
+            // via a GAP RESYNC exactly what the drain just shed — a self-cancelling no-op,
+            // confirmed by simulation before this was caught.
+            let drain = self.should_drain_one(queue, reserve_ms, interval_ns);
+            let mut dropped = Vec::new();
+            if drain && queue.len() > 1 {
+                let stale = queue
+                    .pop_front()
+                    .expect("drain: queue.len() > 1 checked above");
+                dropped.push(stale);
+                self.ticks_since_last_drain = 0;
+            } else {
+                self.ticks_since_last_drain = self.ticks_since_last_drain.saturating_add(1);
+            }
             let presented = queue.pop_front().expect("matured frame");
             self.locked_next_boundary_ns = Some(presented + interval_ns);
             return CadenceOutcome {
                 presented: Some(presented),
-                dropped: Vec::new(),
+                dropped,
                 late_hold: false,
                 relocked: false,
             };
@@ -1551,6 +1651,10 @@ impl ReleaseCadence {
             if deadline >= oldest {
                 let presented = queue.pop_front().expect("oldest");
                 self.locked_next_boundary_ns = Some(presented + interval_ns);
+                // #726 STICKY-N: a GAP RESYNC means upstream skipped stamps (sender restart /
+                // upstream loss) — the source timeline (and possibly its rate) changed. Clear the
+                // latch so the post-gap stream re-confirms its multiple.
+                self.last_known_n = 0;
                 return CadenceOutcome {
                     presented: Some(presented),
                     dropped: Vec::new(),
@@ -1565,11 +1669,175 @@ impl ReleaseCadence {
         hold(deadline >= boundary)
     }
 
-    /// Queue depth above which the cadence re-locks to the live edge (backlog storm).
-    /// Steady-state depth is ~1–2 at any arrival skew (the boundary paces arrivals), so 6
-    /// is unambiguous backlog while tolerating burst jitter; a stall's burst catches up
-    /// within one tick with every jumped frame counted.
-    const QDEPTH_RELOCK: usize = 6;
+    /// #859 — the MARGIN above the depth a source's own configured latency implies, before its
+    /// queue counts as a backlog storm. This was the WHOLE threshold until #859, which encoded
+    /// the assumption "steady depth is ~1–2 at any arrival skew (the boundary paces arrivals)" —
+    /// true only for a SHALLOW source. A source pinned deep (923 ms on the stream box's
+    /// `NDI 2ME PGM`, to A/V-align against the mbc's 1 s mastering) has a steady depth of ~28, so
+    /// the bare 6 was permanently exceeded and the cadence relocked EVERY tick, shedding a frame
+    /// on every arrival-jitter excursion to `due == 2` and repeating one on the next.
+    ///
+    /// Mirror of the C `GENLOCK_QDEPTH_RELOCK_MARGIN` and of
+    /// [`crate::genlock_backlog::QDEPTH_RELOCK_MARGIN`], which carries the Tier-0 unit tests.
+    const QDEPTH_RELOCK_MARGIN: usize = 6;
+
+    /// The backlog-storm queue-depth threshold for THIS source's configured latency: a depth
+    /// strictly greater than this is a backlog. Delegates the arithmetic to the Tier-0-tested
+    /// [`crate::genlock_backlog::backlog_relock_threshold`].
+    ///
+    /// The source-rate multiple matters: `queue` holds frames as the SOURCE delivered them, so a
+    /// 60-into-30 input queues two entries per canvas interval and implies twice the depth the
+    /// canvas rate alone would give. Mirror of the C `genlock_backlog_relock_qdepth`.
+    fn backlog_relock_qdepth(
+        &self,
+        queue: &std::collections::VecDeque<u64>,
+        reserve_ms: u32,
+        interval_ns: u64,
+    ) -> usize {
+        if interval_ns == 0 {
+            return Self::QDEPTH_RELOCK_MARGIN;
+        }
+        // READ-ONLY on purpose: use the PURE measurement with the sticky latch as fallback rather
+        // than `effective_source_multiple`, which takes `&mut self` and would latch `last_known_n`
+        // as a side effect of merely computing a threshold — on ticks that never touched it
+        // before. Same value, no new write path in a getter.
+        //
+        // The source rate as an EXACT rational, never a truncated integer fps: a 29.97 canvas
+        // would floor to 29 and under-state the implied depth. source_fps = 1e9 * n / interval_ns.
+        let n = Self::measure_source_multiple(queue, interval_ns)
+            .unwrap_or(self.last_known_n)
+            .max(1);
+        let (Ok(src_num), Ok(src_den)) = (
+            u32::try_from(1_000_000_000u64.saturating_mul(n as u64)),
+            u32::try_from(interval_ns),
+        ) else {
+            // Rates this extreme are not representable in the shared helper's u32 form; fall back
+            // to the pre-#859 bare margin rather than inventing a threshold.
+            return Self::QDEPTH_RELOCK_MARGIN;
+        };
+        let threshold =
+            crate::genlock_backlog::backlog_relock_threshold(reserve_ms, src_num, src_den);
+        usize::try_from(threshold).unwrap_or(usize::MAX)
+    }
+
+    /// #859 follow-up — SLEW-LIMITED SETTLE-BACK DRAIN decision: should THIS tick shed exactly
+    /// ONE EXTRA frame to settle the queue back toward the depth its own configured latency
+    /// implies, after a setpoint change? Delegates the Tier-0-tested decision to
+    /// [`crate::genlock_backlog::should_drain_one`]; only the source-rate-adjusted fps
+    /// conversion (identical to [`Self::backlog_relock_qdepth`]'s own conversion) lives here.
+    ///
+    /// READ-ONLY like `backlog_relock_qdepth` (same rationale — a decision getter must not
+    /// acquire a write path): uses the pure measurement with the sticky latch as fallback, never
+    /// `effective_source_multiple`. `queue.len()` is read BEFORE the caller pops the presented
+    /// frame, matching the C `genlock_should_drain_one`, which reads `async_frames.num` before
+    /// the caller's own removal of the presented frame.
+    ///
+    /// Mirror of the C `genlock_should_drain_one`.
+    fn should_drain_one(
+        &self,
+        queue: &std::collections::VecDeque<u64>,
+        reserve_ms: u32,
+        interval_ns: u64,
+    ) -> bool {
+        if interval_ns == 0 {
+            return false;
+        }
+        let n = Self::measure_source_multiple(queue, interval_ns)
+            .unwrap_or(self.last_known_n)
+            .max(1);
+        let (Ok(src_num), Ok(src_den)) = (
+            u32::try_from(1_000_000_000u64.saturating_mul(n as u64)),
+            u32::try_from(interval_ns),
+        ) else {
+            // Rates this extreme are not representable in the shared helper's u32 form; never
+            // drain on an unrepresentable rate rather than inventing a decision.
+            return false;
+        };
+        crate::genlock_backlog::should_drain_one(
+            queue.len() as u64,
+            reserve_ms,
+            src_num,
+            src_den,
+            self.ticks_since_last_drain,
+        )
+    }
+
+    /// #741/#707 B2 — how many front queued frames [`Self::measure_source_multiple`] scans for a
+    /// strictly-increasing consecutive pair. Reading only the front pair read INCONCLUSIVE on a
+    /// duplicate/degenerate front stamp, so a jittery 60-into-30 input crawled; scanning the first
+    /// few entries recovers one real source interval past a leading duplicate. Mirror of the C
+    /// `#define GENLOCK_MEASURE_SCAN_DEPTH`.
+    const MEASURE_SCAN_DEPTH: usize = 6;
+
+    /// camera-box #726 STICKY-N — FRESHLY measure the integer source-rate multiple N from the
+    /// STAMP GRID of the front queued frames, or `None` when it cannot be measured this tick. The
+    /// delta of a strictly-increasing consecutive stamp pair is the true source frame interval
+    /// regardless of arrival jitter (a single NDI source delivers in monotonic capture order). A
+    /// 60fps source into a 30fps canvas stamps every 16.6ms → `canvas / src ≈ 2` → `Some(2)`; a
+    /// 1:1 source (30fps into 30fps) stamps every 33.3ms → `Some(1)`.
+    ///
+    /// #741/#707 B2: SCAN the first [`Self::MEASURE_SCAN_DEPTH`] entries for that pair rather than
+    /// reading only `front()`/`get(1)` — a DUPLICATE front stamp or an arrival-non-monotonic seam
+    /// at the very front used to read INCONCLUSIVE and (sustained) crawl. `None` = INCONCLUSIVE —
+    /// fewer than 2 queued frames, or NO strictly-increasing pair in the scan window. `Some(N)`
+    /// (N>=1) is a genuine measurement and the CONFIRMATION authority; the sticky latch bridges
+    /// ONLY the `None` ticks (see
+    /// [`Self::effective_source_multiple`]). Mirror of the C helper `genlock_measure_source_multiple`
+    /// in obs-source.c.
+    fn measure_source_multiple(
+        queue: &std::collections::VecDeque<u64>,
+        canvas_interval_ns: u64,
+    ) -> Option<u32> {
+        if canvas_interval_ns == 0 {
+            return None;
+        }
+        // #741/#707 B2 ROBUST: scan the first K entries for the FIRST strictly-increasing
+        // consecutive pair (skip a degenerate front pair — a DUPLICATE stamp or an arrival
+        // non-monotonic seam). That delta is one real source interval past a leading duplicate;
+        // reading only the front pair used to read INCONCLUSIVE there and (sustained) crawl. Still
+        // None when NO increasing pair exists in the window — the fix widens the search, never
+        // fabricates a measurement (the sticky latch bridges the None).
+        let scan = queue.len().min(Self::MEASURE_SCAN_DEPTH);
+        let mut src_interval = 0u64;
+        for i in 0..scan.saturating_sub(1) {
+            let a = queue[i];
+            let b = queue[i + 1];
+            if b > a {
+                src_interval = b - a;
+                break;
+            }
+        }
+        if src_interval == 0 {
+            return None; // inconclusive: no strictly-increasing pair in the first K entries
+        }
+        // Round-to-nearest N = canvas / src; clamp to >=1 (a slower-than-canvas source reads 1).
+        let n = (canvas_interval_ns + src_interval / 2) / src_interval;
+        Some(n.max(1) as u32)
+    }
+
+    /// camera-box #726 STICKY-N — the EFFECTIVE source-rate multiple to release at THIS tick.
+    ///
+    /// A fresh measurement ([`Self::measure_source_multiple`]) is the CONFIRMATION authority: when
+    /// the front pair is measurable it WINS and updates the latch (so a genuine 1:1 rate re-latches
+    /// to 1 → the present-oldest lossless path, byte-identical). When the front pair is INCONCLUSIVE
+    /// (momentary num<2 / a non-monotonic clock-step seam) it BRIDGES with the last confirmed
+    /// multiple instead of crawling — the #726 residual fix. It NEVER invents a multiple: an
+    /// unconfirmed latch (0) reads 1. The latch is CLEARED on relock/gap/acquire (see [`Self::tick`])
+    /// so a stale N can never outlive the rate it described. Mirror of the C helper
+    /// `genlock_effective_source_multiple` in obs-source.c.
+    fn effective_source_multiple(
+        &mut self,
+        queue: &std::collections::VecDeque<u64>,
+        canvas_interval_ns: u64,
+    ) -> u32 {
+        match Self::measure_source_multiple(queue, canvas_interval_ns) {
+            Some(n) => {
+                self.last_known_n = n; // fresh measurement is the confirmation authority
+                n
+            }
+            None => self.last_known_n.max(1), // bridge with the latch; never invent (0 -> 1)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1695,6 +1963,57 @@ mod tests {
         results
     }
 
+    /// #726 — drive the cadence with a SOURCE arriving at `src_interval_ns` into a CANVAS whose
+    /// render tick fires at `canvas_interval_ns` (the live 60fps-camera-into-30fps-strih-canvas
+    /// case). The render-tick wall time slews ±2ms; frames arrive `skew_ns` after their stamp
+    /// with the same deterministic ±4ms NDI jitter the 1:1 sim uses. Returns
+    /// `(presented_src_frame_indices, dropped_src_frame_indices)` — each stamp mapped back to its
+    /// source-frame INDEX `(ts − BASE) / src_interval_ns`, so a test reads the PRESENTATION
+    /// CADENCE directly (consecutive index deltas): a smooth every-Nth-frame cadence at N =
+    /// canvas/src is Δ==N uniform; the pre-#726 crawl is Δ==1 punctuated by backlog-storm jumps.
+    fn run_cadence_sim_ratio(
+        reserve_ms: u32,
+        src_interval_ns: u64,
+        canvas_interval_ns: u64,
+        skew_ns: u64,
+        n_src_frames: u64,
+    ) -> (Vec<u64>, Vec<u64>) {
+        const BASE: u64 = 1_000_000_000_000;
+        let mut cadence = ReleaseCadence::new();
+        let mut queue: std::collections::VecDeque<u64> = std::collections::VecDeque::new();
+        let mut next_arrival: u64 = 0;
+        let mut presented_idx = Vec::new();
+        let mut dropped_idx = Vec::new();
+        // Enough canvas ticks to drain every source frame (source runs faster than the canvas).
+        let n_ticks = n_src_frames * src_interval_ns / canvas_interval_ns + 40;
+        for k in 0..n_ticks {
+            let slew: i64 = if k % 2 == 0 { 2_000_000 } else { -2_000_000 };
+            let wall = (BASE + k * canvas_interval_ns).saturating_add_signed(slew);
+            // A source frame enters the queue once its arrival instant (stamp + skew + ±4ms
+            // jitter) has passed. next_arrival is processed in order, so the queue stays
+            // monotonic in stamps regardless of the jitter (a later frame never overtakes).
+            while next_arrival < n_src_frames
+                && BASE
+                    + next_arrival * src_interval_ns
+                    + skew_ns
+                    + ((next_arrival * 2_654_435_761) % 8_000_001)
+                    - 4_000_000
+                    <= wall
+            {
+                queue.push_back(BASE + next_arrival * src_interval_ns);
+                next_arrival += 1;
+            }
+            let out = cadence.tick(wall, reserve_ms, canvas_interval_ns, &mut queue);
+            if let Some(ts) = out.presented {
+                presented_idx.push((ts - BASE) / src_interval_ns);
+            }
+            for d in out.dropped {
+                dropped_idx.push((d - BASE) / src_interval_ns);
+            }
+        }
+        (presented_idx, dropped_idx)
+    }
+
     /// #401 REGRESSION LOCK — the measured live failure: at a grid-aligned reserve
     /// (16 ms ≈ one 60 Hz interval) the pre-#401 per-tick wall-compare release churned
     /// hold↔drop and delivered only ~44 of 60 distinct fps on `NDI cam5` (and 43.8 at
@@ -1767,6 +2086,277 @@ mod tests {
         let mut uniq = presented.clone();
         uniq.dedup();
         assert_eq!(uniq.len(), 600);
+    }
+
+    /// #726 REGRESSION LOCK — the live-event "like 15fps" judder at a 30fps canvas. A 60fps
+    /// NDI source feeding a 30fps canvas must present a UNIFORM every-2nd-frame cadence (each
+    /// presented frame is exactly 2 source frames past the previous, so presented content tracks
+    /// real time), NOT the pre-#726 crawl: STEADY presented the OLDEST matured frame and advanced
+    /// the boundary by one CANVAS interval, so content advanced only +1 SOURCE frame per tick
+    /// while real time advanced 2 → content fell progressively behind (playing ~half speed), the
+    /// per-source queue grew ~1 frame/tick until `genlock_backlog_relock_qdepth()` fired the backlog storm,
+    /// which JUMPED ~+7 frames (~5×/s). The crawl+jump nets to the right average (2.0/frame → the
+    /// loss gates stay clean, which is why every earlier gate was blind to it) but visibly halves
+    /// perceived motion. The fix: when the source is at an integer multiple N>=2 of the canvas
+    /// rate (derived from the stamp grid), STEADY presents the NEWEST matured frame and retires
+    /// the older matured one(s), collapsing the delta histogram to a clean Δ==2.
+    #[test]
+    fn cadence_60_into_30_presents_uniform_every_second_frame() {
+        const SRC_I: u64 = 16_666_667; // 60 Hz source (cam2 painter / camera emit)
+        const CANVAS_I: u64 = 33_333_333; // 30 Hz strih canvas render tick
+                                          // reserve 3ms = the production genlock floor; 20ms stamp→arrival skew = the measured live
+                                          // pipeline latency (same as the 1:1 sims).
+        let (presented, _dropped) = run_cadence_sim_ratio(3, SRC_I, CANVAS_I, 20_000_000, 400);
+        // Skip the ACQUIRE / cold-start window (matches the live win0 "cold-start noise on top"
+        // vs the clean win1/win2); read the steady-state cadence.
+        let steady: Vec<u64> = presented.iter().skip(15).copied().collect();
+        assert!(
+            steady.len() > 100,
+            "#726: expected a long steady presented window, got {}",
+            steady.len()
+        );
+        let deltas: Vec<i64> = steady
+            .windows(2)
+            .map(|w| w[1] as i64 - w[0] as i64)
+            .collect();
+        let mut hist = std::collections::BTreeMap::new();
+        for &d in &deltas {
+            *hist.entry(d).or_insert(0usize) += 1;
+        }
+        let uniform = deltas.iter().filter(|&&d| d == 2).count();
+        let frac = uniform as f64 / deltas.len() as f64;
+        assert!(
+            frac > 0.95,
+            "#726: a 60fps source into a 30fps canvas must present a UNIFORM every-2nd-frame \
+             cadence (Δ==2 source frames per presented frame); got {:.1}% uniform of {} deltas, \
+             histogram {:?} — the pre-#726 crawl (mostly Δ==1) then backlog jump (Δ==7) is the \
+             live-event 15fps-like judder",
+            frac * 100.0,
+            deltas.len(),
+            hist
+        );
+        // No net loss: mean delta ≈ 2 (every-other-frame, long-run real-time).
+        let mean: f64 = deltas.iter().map(|&d| d as f64).sum::<f64>() / deltas.len() as f64;
+        assert!(
+            (mean - 2.0).abs() < 0.1,
+            "#726: 60→30 mean presented-frame step must be ≈2 (got {mean:.3})"
+        );
+        // Cadence never runs backward.
+        assert!(
+            deltas.iter().all(|&d| d >= 1),
+            "#726: presentation order must be preserved"
+        );
+    }
+
+    /// #726 — the fix must NOT change the 1:1 (source rate == canvas rate) path: a 30fps source
+    /// into a 30fps canvas still presents EVERY frame exactly once with nothing dropped (the
+    /// present-oldest lossless drain). `measure_source_multiple` is derived from the STAMP
+    /// GRID (33.3ms stamps → N==1), so the multi-consume never engages here.
+    #[test]
+    fn cadence_30_into_30_still_lossless_every_frame() {
+        const I: u64 = 33_333_333; // 30 Hz source AND 30 Hz canvas — the 1:1 stream 'NDI 2ME PGM' path
+        let (presented, dropped) = run_cadence_sim_ratio(3, I, I, 20_000_000, 300);
+        let steady: Vec<u64> = presented.iter().skip(15).copied().collect();
+        let deltas: Vec<i64> = steady
+            .windows(2)
+            .map(|w| w[1] as i64 - w[0] as i64)
+            .collect();
+        assert!(
+            deltas.iter().all(|&d| d == 1),
+            "#726: a 1:1 source must present EVERY frame (Δ==1), never skip — the multi-consume \
+             must stay gated to the integer-multiple case"
+        );
+        assert!(
+            dropped.is_empty(),
+            "#726: a 1:1 source must drop NOTHING (got {} drops) — the present-oldest lossless \
+             drain path is unchanged for N==1",
+            dropped.len()
+        );
+    }
+
+    /// #726 RESIDUAL (win5/win6 / CAM1 live, 2026-07-13) RED→GREEN — STICKY-N.
+    ///
+    /// The fast-swap fix (dev.355) made STEADY multi-consume when the front-2 pair measures a
+    /// structural N>=2. But that per-tick re-derivation reads INCONCLUSIVE whenever the queue
+    /// momentarily holds <2 frames OR the front pair is non-monotonic (a DanteSync clock-step
+    /// seam / out-of-order arrival) — and on a jittery input (win6/'NDI cam5'→CAM1) a SUSTAINED
+    /// run of inconclusive detections dropped the release back to the present-oldest CRAWL (Δ==1),
+    /// under-drained the queue, and backlog-stormed (the live {1:459,7:46} histogram, `relocks`
+    /// climbing ~2/s while sibling 60-in-30 inputs stayed flat in the SAME window).
+    ///
+    /// The fix LATCHES the last CONFIRMED multiple and reuses it to bridge an inconclusive tick,
+    /// so the cadence stays at N even across momentary jitter. A fresh measurement is always the
+    /// confirmation authority (a genuine 1:1 rate re-latches to 1 → byte-identical). This test
+    /// drives the N-decision through a clean-then-inconclusive sequence: the pre-sticky code
+    /// returns 1 (crawl) on the inconclusive states; sticky-N returns the latched 2.
+    #[test]
+    fn sticky_n_bridges_inconclusive_ticks_after_confirming_the_multiple() {
+        use std::collections::VecDeque;
+        const CANVAS: u64 = 33_333_333; // 30 Hz canvas
+        let mut cadence = ReleaseCadence::new();
+
+        // A clean 60fps front pair (16.6ms apart) CONFIRMS N==2 and latches it.
+        let clean: VecDeque<u64> = [1_000_000_000, 1_016_666_667, 1_033_333_334].into();
+        assert_eq!(
+            cadence.effective_source_multiple(&clean, CANVAS),
+            2,
+            "#726: a clean 60fps front pair must confirm N==2"
+        );
+
+        // INCONCLUSIVE #1 — only ONE frame queued (num<2). The pre-sticky code reads 1 (crawl);
+        // sticky-N must reuse the latched 2.
+        let one: VecDeque<u64> = [2_000_000_000].into();
+        assert_eq!(
+            cadence.effective_source_multiple(&one, CANVAS),
+            2,
+            "#726 STICKY-N: a momentary num<2 drain must reuse the latched N (2), not crawl to 1"
+        );
+
+        // INCONCLUSIVE #2 — non-monotonic front pair (a clock-step seam, arrival out of stamp
+        // order). Pre-sticky reads 1; sticky-N must still bridge with the latched 2.
+        let seam: VecDeque<u64> = [3_000_000_000, 2_999_000_000, 3_016_000_000].into();
+        assert_eq!(
+            cadence.effective_source_multiple(&seam, CANVAS),
+            2,
+            "#726 STICKY-N: a non-monotonic front pair must reuse the latched N (2), not crawl"
+        );
+
+        // A GENUINE 1:1 measurement (33.3ms front pair) is the confirmation authority — it wins
+        // and RE-LATCHES to 1 (a real rate change), so the fix never fossilises a stale multiple.
+        let onetoone: VecDeque<u64> = [4_000_000_000, 4_033_333_333].into();
+        assert_eq!(
+            cadence.effective_source_multiple(&onetoone, CANVAS),
+            1,
+            "#726: a fresh 1:1 measurement must win and re-latch to 1 (rate change), never keep 2"
+        );
+
+        // Now an inconclusive tick reuses the RE-LATCHED 1 (not the stale 2) — never invents N.
+        let one2: VecDeque<u64> = [5_000_000_000].into();
+        assert_eq!(
+            cadence.effective_source_multiple(&one2, CANVAS),
+            1,
+            "#726 STICKY-N: after a 1:1 re-latch, an inconclusive tick reuses 1, not the old 2"
+        );
+    }
+
+    /// #726 STICKY-N — a FRESH ReleaseCadence with no confirmed multiple yet must NOT invent one:
+    /// an inconclusive first tick (num<2) reads 1 (present-oldest), never a fabricated N>=2. The
+    /// latch only ever holds a value the front pair actually confirmed.
+    #[test]
+    fn sticky_n_never_invents_a_multiple_before_confirmation() {
+        use std::collections::VecDeque;
+        const CANVAS: u64 = 33_333_333;
+        let mut cadence = ReleaseCadence::new();
+        let one: VecDeque<u64> = [1_000_000_000].into();
+        assert_eq!(
+            cadence.effective_source_multiple(&one, CANVAS),
+            1,
+            "#726: an inconclusive tick before any confirmation must read 1, never invent N>=2"
+        );
+    }
+
+    /// #741 (#707 B2) RED→GREEN — `measure_source_multiple` must SCAN past a degenerate front pair.
+    ///
+    /// The pre-#741 measure read ONLY `array[0]`/`array[1]`, so a DUPLICATE capture stamp at the
+    /// front returned INCONCLUSIVE (`None`). Sustained on a jittery 60-into-30 input that dropped
+    /// the release to the present-oldest CRAWL — the B2 half of #707 (a window with `uniform=0.481`,
+    /// histogram `{1:295,2:407,3:102,7:39}`: +1 steps at half rate, i.e. consecutive ids WERE
+    /// present, not an arrival problem). Scanning the first K queued entries for the FIRST
+    /// strictly-increasing CONSECUTIVE pair recovers one real source interval past a leading
+    /// duplicate, so a fresh measurement re-confirms N instead of falling to the crawl.
+    #[test]
+    fn measure_scans_past_a_degenerate_front_pair_741() {
+        use std::collections::VecDeque;
+        const CANVAS: u64 = 33_333_333; // 30 Hz canvas
+        const SRC: u64 = 16_666_667; // 60 Hz source (N == 2)
+        let base = 1_000_000_000u64;
+
+        // Regression: a clean 60fps front pair still measures N==2 (the fix only WIDENS the search).
+        let clean: VecDeque<u64> = [base, base + SRC, base + 2 * SRC].into();
+        assert_eq!(
+            ReleaseCadence::measure_source_multiple(&clean, CANVAS),
+            Some(2),
+            "#741: a clean front pair must still measure N==2"
+        );
+
+        // DUPLICATE front stamp: pre-#741 array[0..1]-only measure reads t1<=t0 => None (crawl).
+        // Post-fix: skip the equal pair, the next consecutive pair (base, base+SRC) = one real
+        // source interval => N==2.
+        let dup_front: VecDeque<u64> = [base, base, base + SRC, base + 2 * SRC].into();
+        assert_eq!(
+            ReleaseCadence::measure_source_multiple(&dup_front, CANVAS),
+            Some(2),
+            "#741 B2: a duplicate front stamp must not read INCONCLUSIVE — scan to the next \
+             strictly-increasing consecutive pair for one real source interval (N==2)"
+        );
+
+        // A 1:1 (30-into-30) duplicate-led queue must still re-latch to N==1 (never fabricate 2).
+        let dup_one_to_one: VecDeque<u64> = [base, base, base + CANVAS, base + 2 * CANVAS].into();
+        assert_eq!(
+            ReleaseCadence::measure_source_multiple(&dup_one_to_one, CANVAS),
+            Some(1),
+            "#741: a duplicate-led 1:1 queue must measure N==1, not a fabricated multiple"
+        );
+
+        // Genuinely inconclusive — NO strictly-increasing pair anywhere in the scan window: still
+        // None. The fix widens the search; it never fabricates a measurement.
+        let all_flat: VecDeque<u64> = [base, base, base, base].into();
+        assert_eq!(
+            ReleaseCadence::measure_source_multiple(&all_flat, CANVAS),
+            None,
+            "#741: a queue with no strictly-increasing pair in the first K entries stays \
+             inconclusive (None) — never fabricate a measurement"
+        );
+
+        // Fewer than 2 queued frames stays inconclusive (nothing to compare).
+        let one: VecDeque<u64> = [base].into();
+        assert_eq!(
+            ReleaseCadence::measure_source_multiple(&one, CANVAS),
+            None,
+            "#741: fewer than 2 queued frames stays inconclusive"
+        );
+    }
+
+    /// #741 (#707 B2) RED→GREEN — a BACKLOG-STORM relock must NOT clear the sticky-N latch.
+    ///
+    /// A queue-depth relock (a burst catch-up) is NOT evidence the source RATE changed. Clearing
+    /// `last_known_n` there forced the very next INCONCLUSIVE tick to crawl at N==1, which under a
+    /// steady 60-into-30 backlog re-grew the queue and re-triggered the relock: a self-sustaining
+    /// crawl→relock loop (the #707 B2 crawl window). The latch must SURVIVE a relock; it is cleared
+    /// only on a genuine source-timeline discontinuity (acquire / gap resync / backward clock-step).
+    #[test]
+    fn backlog_relock_preserves_the_confirmed_multiple_741() {
+        use std::collections::VecDeque;
+        const SRC: u64 = 16_666_667; // 60 Hz source
+        const CANVAS: u64 = 33_333_333; // 30 Hz canvas
+        let mut cadence = ReleaseCadence::new();
+
+        // Confirm N==2 from a clean 60fps front pair → latches last_known_n = 2.
+        let clean: VecDeque<u64> =
+            [1_000_000_000, 1_000_000_000 + SRC, 1_000_000_000 + 2 * SRC].into();
+        assert_eq!(cadence.effective_source_multiple(&clean, CANVAS), 2);
+        assert_eq!(cadence.last_known_n, 2, "setup: N==2 must be latched");
+
+        // Lock the cadence, then feed a genuine BACKLOG STORM (> the backlog threshold in frames, all aged
+        // past the reserve so `due > 0`) — the relock branch.
+        cadence.locked_next_boundary_ns = Some(2_000_000_000);
+        let base = 3_000_000_000u64;
+        let mut queue: VecDeque<u64> = (0..(ReleaseCadence::QDEPTH_RELOCK_MARGIN as u64 + 3))
+            .map(|i| base + i * SRC)
+            .collect();
+        let wall_now = base + 100 * SRC; // every queued frame is due
+        let out = cadence.tick(wall_now, 3, CANVAS, &mut queue);
+
+        assert!(
+            out.relocked,
+            "#741 setup: the backlog storm must hit the relock branch (got {out:?})"
+        );
+        assert_eq!(
+            cadence.last_known_n, 2,
+            "#741 B2: a backlog-storm relock is a queue-depth event, NOT a rate change — it must \
+             PRESERVE the confirmed N (2); clearing it re-crawls on the next inconclusive tick and \
+             re-triggers the relock (the self-sustaining crawl the fix removes)"
+        );
     }
 
     /// #401 — a genuine upstream STALL must still catch up (the IMAG latency contract):

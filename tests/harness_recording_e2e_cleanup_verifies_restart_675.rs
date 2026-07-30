@@ -68,7 +68,7 @@ fn recording_e2e_sources_the_restart_verify_helper() {
 fn cleanup_verifies_cam1_restart() {
     let body = cleanup_body(&read("scripts/recording-e2e.sh"));
     let loop_start = body
-        .find("for _cip in \"$CAM3_IP\"")
+        .find("for _ccn in $(camera_active_secondary_set)")
         .expect("#624/#312: cleanup() must have the cam3/4/5/6 ALL_CAMBOX restore loop");
     let cam1_block = &body[..loop_start];
 
@@ -91,7 +91,7 @@ fn cleanup_verifies_cam1_restart() {
 fn cleanup_verifies_all_cambox_loop_restart() {
     let body = cleanup_body(&read("scripts/recording-e2e.sh"));
     let loop_start = body
-        .find("for _cip in \"$CAM3_IP\"")
+        .find("for _ccn in $(camera_active_secondary_set)")
         .expect("#624/#312: cleanup() must have the cam3/4/5/6 ALL_CAMBOX restore loop");
     let painter_region_start = body
         .find("root@\"$PAINTER_IP\" \"pkill -x frame-probe")
