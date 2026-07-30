@@ -326,5 +326,11 @@ pub mod offline_ack;
 // together with #881 (connect cam2's 120Hz monitor, restore the term to absolute zero).
 pub mod optical_floor;
 
+// #889 (user decision on #883, 2026-07-30) — the per-cambox-window `copies`/`gaps` terms become
+// REPORT-ONLY (still computed, still printed, no longer fail the window/run). No probe deps, so
+// it unit-tests Tier-0; `probe::recording_segments::window_segment` calls this and wires the
+// result onto `CamboxSegment`. TEMPORARY, restore-gated on #883 item 4 + two clean strict runs.
+pub mod window_gate;
+
 #[cfg(feature = "probe")]
 pub mod probe;
