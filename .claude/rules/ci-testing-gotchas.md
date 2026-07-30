@@ -12,6 +12,26 @@ paths:
 
 # CI + bash-test-harness gotchas (#826)
 
+## Splitting ONE combined multi-`--box`-style gate call into TWO calls silently stales a window-bounded "all boxes in this window" test (#888)
+
+When a gate step invokes the same tool once with several `--box`/similar repeated args in one
+call (e.g. `render-budget-gate.py --box strih=... --box stream=... --box imag=...` in
+`scripts/recording-e2e.sh`'s `[4d/8]`), and you deliberately split it into TWO separate
+invocations (one term needs different pass/fail handling than the others — #888's imag-report-
+only relaxation is the concrete case), any EXISTING test that anchors on the first arg and reads
+a fixed byte window (`&s[call.saturating_sub(200)..(call + 500).min(s.len())]`) expecting to find
+ALL the args in that ONE window will not error loudly — it will either still pass by coincidence
+(if the window happens to be wide enough to still reach the second call) or fail with a confusing
+"missing box" message that reads like the split broke wiring, when really the test just encodes
+the OLD combined-call invariant. **Before splitting a multi-arg call like this, grep every test
+file for the FIRST arg's literal (e.g. `--box "strih=`) and re-read what its window assertions
+actually check** — a positive assertion for an arg that moved to the OTHER call needs to become
+either a negative assertion (`!window.contains(...)`, proving the split, as in
+`tests/harness_imag_topology.rs`'s `render_budget_gate_strih_stream_call_site_no_longer_includes_imag_888`)
+or a brand new test scoped to the NEW call's own region (bounded from the first call's closing
+`fi` to the next step's banner, as in `tests/harness_render_budget_imag_report_only_888.rs`) —
+never left as a stale assertion that happens to still pass.
+
 ## Raising a shared formula constant (a `PHASE_SYNC_FLOOR_MS`-style floor/cap) breaks EVERY hardcoded literal test expectation that assumed the old value -- across BOTH languages (#707)
 
 Several "pure kernel" constants in this repo are deliberately duplicated across THREE places:
