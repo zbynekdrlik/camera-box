@@ -1672,8 +1672,9 @@ fn setup_imag_total_steps_matches_actual_step_calls() {
         })
         .count();
     assert_eq!(
-        declared, 20,
-        "TOTAL_STEPS must be 20 after #731 added the Companion Satellite step to the prior 19"
+        declared, 21,
+        "TOTAL_STEPS must be 21 after #882 added the OBS-supervision/wallpaper-alert/core-dump \
+         provisioning step to the prior 20"
     );
     assert_eq!(
         actual, declared,

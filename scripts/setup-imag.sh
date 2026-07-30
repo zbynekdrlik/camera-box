@@ -53,7 +53,7 @@ DEV1_DRIFTGUARD_PUBKEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB/akQWI95uekn0/CRfQ
 # commented instance of the SAME key already being present (e.g. installed by hand with the local
 # ~/.ssh/id_ed25519.pub file's own comment).
 DEV1_DRIFTGUARD_PUBKEY_TYPE_BLOB="${DEV1_DRIFTGUARD_PUBKEY% *}"
-TOTAL_STEPS=20
+TOTAL_STEPS=21
 # #731: Companion Satellite server this box connects the local Stream Deck to. .lan DNS is
 # usually fine on this LAN (companion.lan -> companion-snv.lan, verified live 2026-07-13) but can
 # be flaky like any other .lan name on this network -- COMPANION_HOST_IP is the documented
@@ -1751,6 +1751,57 @@ for i in $(seq 1 10); do
     sleep 1
 done
 echo "  satellite service active + enabled at boot, configured for $COMPANION_TARGET (REST :9999)"
+
+# =============================================================================
+step 21 "OBS supervision + wallpaper-refresh alert + core dumps (#882)"
+# =============================================================================
+# #882: imag-obs-start.sh/imag-obs-stop.sh were already fetched in step 16 above -- this step adds
+# (a) systemd-coredump, so LimitCORE=infinity's captured cores actually land somewhere inspectable
+# (ulimit -c was 0 and kernel.core_pattern was a bare non-piped "core" before this, leaving the
+# 2026-07-30 segfault with nothing debuggable); (b) imag-wallpaper-refresh.sh + its timer, which
+# was hand-installed on the live box only before this ticket -- the exact same "never actually
+# provisioned" gap #840 already found for imag-obs-start.sh/stop.sh -- enabled here so a fresh box
+# gets the obs-down Discord alert automatically; (c) the imag-obs.service unit file itself,
+# INSTALLED but deliberately NOT enabled here (see the comment at its `systemctl --user enable`
+# call site below for why) -- mirrors the #391 liveness-watchdog's own "ships disabled, live-verify
+# before turning it on" precedent, since wiring it into the boot path means editing the heavily
+# anchored openbox autostart heredoc above (~113 pinned literals/orderings across this file, see
+# the top-level CLAUDE.md GOTCHA) -- a deliberately separate, dedicated change, tracked as its own
+# follow-up rather than risked inside this already-large ticket.
+
+DEBIAN_FRONTEND=noninteractive apt-get install -y systemd-coredump >/dev/null \
+    || fail "systemd-coredump install failed -- needed so LimitCORE=infinity's captured cores land somewhere inspectable (#882)"
+
+WALLPAPER_SH="/usr/local/bin/imag-wallpaper-refresh.sh"
+gh api -H "Accept: application/vnd.github.raw" \
+    "repos/${GENLOCK_REPO}/contents/scripts/imag-wallpaper-refresh.sh?ref=dev" \
+    > "$WALLPAPER_SH" \
+    || fail "could not fetch scripts/imag-wallpaper-refresh.sh from ${GENLOCK_REPO} (dev) via gh api"
+chmod 755 "$WALLPAPER_SH"
+
+sudo -u "$DESKTOP_USER" mkdir -p "$USER_HOME/.config/systemd/user"
+for unit in imag-obs.service imag-wallpaper-refresh.service imag-wallpaper-refresh.timer; do
+    gh api -H "Accept: application/vnd.github.raw" \
+        "repos/${GENLOCK_REPO}/contents/systemd/${unit}?ref=dev" \
+        > "$USER_HOME/.config/systemd/user/${unit}" \
+        || fail "could not fetch systemd/${unit} from ${GENLOCK_REPO} (dev) via gh api"
+done
+chown -R "$DESKTOP_USER:$DESKTOP_USER" "$USER_HOME/.config/systemd"
+
+UID_DESKTOP="$(id -u "$DESKTOP_USER")"
+sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="/run/user/${UID_DESKTOP}" DBUS_SESSION_BUS_ADDRESS="$UBUS" \
+    systemctl --user daemon-reload || fail "systemctl --user daemon-reload failed"
+sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="/run/user/${UID_DESKTOP}" DBUS_SESSION_BUS_ADDRESS="$UBUS" \
+    systemctl --user enable --now imag-wallpaper-refresh.timer \
+    || echo "  WARNING: could not enable imag-wallpaper-refresh.timer -- the obs-down alert will not fire until this is fixed"
+echo "  imag-wallpaper-refresh.timer enabled (obs-down Discord alert every 5 min)"
+# imag-obs.service is installed but NOT enabled here -- enabling it means the boot-time openbox
+# autostart (which currently launches OBS by calling imag-obs-start.sh DIRECTLY) and systemd BOTH
+# trying to own the launch, which would race two OBS instances on every boot unless the autostart
+# is ALSO switched to `systemctl --user start imag-obs.service` -- a deliberate, separately
+# reviewed change (see the step header above). Enable it by hand once that switch has landed:
+#   systemctl --user enable --now imag-obs.service
+echo "  imag-obs.service installed (NOT enabled -- see step header comment; enable by hand once the autostart boot-launch switch has landed)"
 
 echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}imag-nb base provisioning DONE (genlock build: $(cat "$GENLOCK_MARKER_DIR/GENLOCK_BUILD_SHA.txt" 2>/dev/null || echo unknown))${NC}"
