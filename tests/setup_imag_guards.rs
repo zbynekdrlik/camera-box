@@ -2038,28 +2038,67 @@ fn setup_imag_autostart_primaries_panel_not_hdmi_522() {
     );
 }
 
-/// #840: the autostart script must launch OBS THROUGH imag-obs-start.sh, taskset-pinned to the
-/// isolated P-core block via an exported env var — exactly as the provisioning-time launcher
-/// pins directly (#483) — a reboot must not silently starve OBS.
+/// #840/#884: the autostart script must launch OBS THROUGH the imag-obs.service systemd unit
+/// (whose own ExecStart still runs imag-obs-start.sh, taskset-pinned to the isolated P-core block
+/// via an exported env var — exactly as the provisioning-time launcher pins directly, #483) — a
+/// reboot must not silently starve OBS. #884: the call site switched from a direct
+/// imag-obs-start.sh invocation to `systemctl --user start imag-obs.service` so the boot launch
+/// is systemd-SUPERVISED (Restart=on-failure) instead of a bare, unsupervised script call — this
+/// is the fix for the setup-imag.sh/live-box divergence that would otherwise silently regress a
+/// fresh reprovision back to the unsupervised state behind the 2026-07-30 ~70-minute OBS outage.
 #[test]
 fn setup_imag_autostart_launches_obs_pinned_522() {
     let body = read(SETUP);
     assert!(
         body.contains(r#"export IMAG_ISOLATED_CPUS="__ISOLCPUS__""#)
-            && body.contains("/usr/local/bin/imag-obs-start.sh"),
+            && body.contains("systemctl --user start imag-obs.service"),
         "{SETUP}: the openbox autostart script must export IMAG_ISOLATED_CPUS=<the DERIVED \
-         isolated set> and launch OBS through imag-obs-start.sh (#483/#816/#840) — without the \
-         pin, isolcpus would starve the boot-launched OBS onto the housekeeping CPUs"
+         isolated set> and launch OBS through imag-obs.service (#483/#816/#840/#884) — without \
+         the pin, isolcpus would starve the boot-launched OBS onto the housekeeping CPUs"
     );
 }
 
-/// #840: the autostart script must DELEGATE the WebSocket wait + seed + projector-open sequence
-/// to imag-obs-start.sh, rather than duplicating a bare inline wait loop — the OLD inline 30s
-/// `/dev/tcp` wait (no obs-process-liveness check, its failure swallowed by `|| true`) is exactly
-/// what let a slow boot silently drop the projector self-heal (live capture on 10.77.9.187:
-/// imag_scenes.py's ConnectionRefusedError in /tmp/imag-seed.log, timestamped at boot). The
-/// export must happen BEFORE the delegated call, and the saved_projectors strip (which must run
-/// before OBS ever loads the scene collection) must happen BEFORE the export.
+/// #884: the openbox autostart must NO LONGER call imag-obs-start.sh directly — that direct call
+/// is exactly the divergence from the live box (10.77.9.182, already switched by hand as part of
+/// accepting issue 882) that would silently regress a fresh reprovision back to the unsupervised
+/// state that produced the 2026-07-30 ~70-minute OBS outage.
+#[test]
+fn setup_imag_autostart_no_longer_calls_imag_obs_start_directly_884() {
+    let body = read(SETUP);
+    assert!(
+        !body.contains("/usr/local/bin/imag-obs-start.sh >>/tmp/imag-seed.log"),
+        "{SETUP}: the openbox autostart must no longer call imag-obs-start.sh directly with the \
+         old inline log redirect — it must launch OBS through the imag-obs.service systemd unit \
+         instead (#884), so a re-provision doesn't silently strip supervision"
+    );
+}
+
+/// #884: step 21 must now ENABLE + START imag-obs.service (previously install-only, deliberately,
+/// until the autostart call-site switch above landed) — this commit IS that switch.
+#[test]
+fn setup_imag_step21_enables_and_starts_obs_service_884() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("systemctl --user enable --now imag-obs.service"),
+        "{SETUP} step 21 must `systemctl --user enable --now imag-obs.service` now that the \
+         autostart call-site switch has landed (#884) — previously installed but deliberately \
+         left disabled to avoid racing two launchers"
+    );
+    assert!(
+        !body.contains("imag-obs.service installed (NOT enabled"),
+        "{SETUP}: the stale 'installed (NOT enabled — enable by hand once the switch has landed)' \
+         echo must be removed (#884) — this commit IS that switch"
+    );
+}
+
+/// #840/#884: the autostart script must DELEGATE the WebSocket wait + seed + projector-open
+/// sequence to imag-obs-start.sh (invoked THROUGH the imag-obs.service unit since #884), rather
+/// than duplicating a bare inline wait loop — the OLD inline 30s `/dev/tcp` wait (no
+/// obs-process-liveness check, its failure swallowed by `|| true`) is exactly what let a slow
+/// boot silently drop the projector self-heal (live capture on 10.77.9.187: imag_scenes.py's
+/// ConnectionRefusedError in /tmp/imag-seed.log, timestamped at boot). The export must happen
+/// BEFORE the delegated call, and the saved_projectors strip (which must run before OBS ever
+/// loads the scene collection) must happen BEFORE the export.
 #[test]
 fn setup_imag_autostart_waits_for_websocket_before_seeding_522() {
     let body = read(SETUP);
@@ -2069,19 +2108,20 @@ fn setup_imag_autostart_waits_for_websocket_before_seeding_522() {
     let export = body
         .find(r#"export IMAG_ISOLATED_CPUS="__ISOLCPUS__""#)
         .expect("{SETUP}: the autostart script must export IMAG_ISOLATED_CPUS before launching");
-    // Anchor on the FULL delegated invocation line, not the bare path -- the bare path ALSO
-    // appears earlier, in the step-16 install block that fetches imag-obs-start.sh onto the box
-    // (see setup_imag_installs_obs_start_stop_scripts_840) -- `.find()` would otherwise latch
-    // onto that earlier occurrence instead of the actual autostart call (the exact self-collision
-    // class documented in this repo's CLAUDE.md GOTCHA on anchor collisions).
+    // #884: anchor on the FULL delegated call including its `|| true` guard -- this exact literal
+    // (the "start", as opposed to step 21's "enable --now") only ever appears once in the file, at
+    // the autostart's own call site, so there is no earlier-occurrence self-collision risk (the
+    // class documented in this repo's CLAUDE.md GOTCHA on anchor collisions) the way the OLD bare
+    // script-path anchor had against the step-16 install block.
     let delegated_call = body
-        .find("/usr/local/bin/imag-obs-start.sh >>/tmp/imag-seed.log")
-        .expect("{SETUP}: the autostart script must call imag-obs-start.sh");
+        .find("systemctl --user start imag-obs.service || true")
+        .expect("{SETUP}: the autostart script must call systemctl --user start imag-obs.service");
     assert!(
         strip < export && export < delegated_call,
         "{SETUP}: ordering must be saved_projectors-strip < IMAG_ISOLATED_CPUS export < the \
-         imag-obs-start.sh call (#840) — imag-obs-start.sh itself owns the WebSocket wait, the \
-         seed, and the projector-open, which used to be duplicated inline here"
+         imag-obs.service start call (#840/#884) — imag-obs-start.sh (invoked by the unit) still \
+         owns the WebSocket wait, the seed, and the projector-open, which used to be duplicated \
+         inline here"
     );
 }
 
@@ -2102,8 +2142,13 @@ fn setup_imag_autostart_no_longer_duplicates_the_launch_sequence_840() {
     let autostart_start = body
         .find(r#"cat > "$USER_HOME/.config/openbox/autostart" <<'AUTOSTART_EOF'"#)
         .expect("the openbox autostart heredoc write must exist");
+    // rfind, not find -- the OPENING line itself already contains the literal "AUTOSTART_EOF" (as
+    // part of `<<'AUTOSTART_EOF'`), so an unscoped `find` would latch onto that same line instead
+    // of the real closing terminator many lines later (the exact anchor-collision class this
+    // repo's CLAUDE.md GOTCHA warns about). Only two occurrences of this literal exist in the
+    // whole file (confirmed: `grep -n AUTOSTART_EOF scripts/setup-imag.sh`), so `rfind` is safe.
     let autostart_end = body
-        .find("AUTOSTART_EOF")
+        .rfind("AUTOSTART_EOF")
         .expect("the AUTOSTART_EOF heredoc terminator must exist");
     let autostart_body = &body[autostart_start..autostart_end];
     assert!(

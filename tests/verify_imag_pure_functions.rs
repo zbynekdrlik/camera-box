@@ -817,6 +817,159 @@ fn imag_watchdog_installed_but_disabled_requires_all_three_facts() {
     );
 }
 
+// ---------------------------------------------------------------------------------------------
+// (t) imag-obs.service supervision (#884, follow-up to #882) — the openbox-autostart-vs-live-box
+// divergence: the live box (10.77.9.182) already runs the boot launch through the supervised
+// systemd unit (enabled+active, Restart=on-failure), but setup-imag.sh still wrote the OLD direct
+// script call and verify-imag.sh had ZERO checks for any of this — so a fresh reprovision would
+// silently regress to the unsupervised state that produced the 2026-07-30 ~70-minute OBS outage,
+// and the acceptance gate would certify that regression as ALL CLEAR.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn imag_obs_service_state_ok_requires_enabled_and_active() {
+    let (code, out, err) = run_sourced(
+        r#"
+        if imag_obs_service_state_ok "enabled" "active"; then echo YES; else echo NO; fi
+        if imag_obs_service_state_ok "disabled" "active"; then echo YES; else echo NO; fi
+        if imag_obs_service_state_ok "enabled" "inactive"; then echo YES; else echo NO; fi
+        if imag_obs_service_state_ok "not-found" "inactive"; then echo YES; else echo NO; fi
+        # whitespace from a real `systemctl --user is-enabled` reply (trailing newline) must not
+        # break the comparison
+        if imag_obs_service_state_ok "$(printf 'enabled\n')" "$(printf 'active\n')"; then echo YES; else echo NO; fi
+        "#,
+    );
+    assert_eq!(code, 0, "stderr: {err}");
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec!["YES", "NO", "NO", "NO", "YES"],
+        "imag-obs.service must be BOTH enabled AND active — a re-provisioned box with the unit \
+         merely installed (not enabled) or enabled-but-not-running must fail: {out:?}"
+    );
+}
+
+#[test]
+fn imag_obs_service_restart_is_on_failure_rejects_always() {
+    let (code, out, err) = run_sourced(
+        r#"
+        if imag_obs_service_restart_is_on_failure "Restart=on-failure"; then echo YES; else echo NO; fi
+        # issue 788's operator-fighting bug: an always-restart fights a deliberate manual quit
+        if imag_obs_service_restart_is_on_failure "Restart=always"; then echo YES; else echo NO; fi
+        if imag_obs_service_restart_is_on_failure "Restart=no"; then echo YES; else echo NO; fi
+        if imag_obs_service_restart_is_on_failure ""; then echo YES; else echo NO; fi
+        if imag_obs_service_restart_is_on_failure "$(printf 'Restart=on-failure\n')"; then echo YES; else echo NO; fi
+        "#,
+    );
+    assert_eq!(code, 0, "stderr: {err}");
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec!["YES", "NO", "NO", "NO", "YES"],
+        "Restart must be EXACTLY on-failure — never 'always' (issue 788's operator-fighting bug, \
+         an always-restart fights a deliberate manual quit): {out:?}"
+    );
+}
+
+#[test]
+fn imag_autostart_launches_via_service_not_script_884() {
+    let (code, out, err) = run_sourced(
+        r#"
+        # #884: the healthy, current form
+        GOOD='sleep 1
+export IMAG_ISOLATED_CPUS="2,3,4,5,6,7"
+systemctl --user start imag-obs.service || true'
+        if imag_autostart_launches_via_service_not_script "$GOOD"; then echo YES; else echo NO; fi
+
+        # the OLD, regressed form (pre-#884) — direct script call, no systemd supervision
+        BAD='sleep 1
+export IMAG_ISOLATED_CPUS="2,3,4,5,6,7"
+/usr/local/bin/imag-obs-start.sh >>/tmp/imag-seed.log 2>&1 || true'
+        if imag_autostart_launches_via_service_not_script "$BAD"; then echo YES; else echo NO; fi
+
+        # a header COMMENT mentioning imag-obs-start.sh in prose (as this repo's own comments do)
+        # must NOT be mistaken for a direct CODE call — only real code lines matter (the exact
+        # anchor-collision class this repo's CLAUDE.md GOTCHA warns about)
+        COMMENTED='# imag-obs-start.sh is invoked BY the unit below (#840/#884), not called here
+systemctl --user start imag-obs.service || true'
+        if imag_autostart_launches_via_service_not_script "$COMMENTED"; then echo YES; else echo NO; fi
+
+        # neither call present at all -> fail closed
+        if imag_autostart_launches_via_service_not_script "sleep 1"; then echo YES; else echo NO; fi
+        "#,
+    );
+    assert_eq!(code, 0, "stderr: {err}");
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec!["YES", "NO", "YES", "NO"],
+        "the autostart must launch via imag-obs.service, never a direct imag-obs-start.sh call — \
+         a prose comment mentioning the script name must not be mistaken for the call: {out:?}"
+    );
+}
+
+#[test]
+fn imag_core_pattern_captures_dumps_requires_a_piped_collector() {
+    let (code, out, err) = run_sourced(
+        r#"
+        if imag_core_pattern_captures_dumps "|/usr/lib/systemd/systemd-coredump %P %u %g %s %t 9223372036854775808 %h %d"; then echo YES; else echo NO; fi
+        if imag_core_pattern_captures_dumps "core"; then echo YES; else echo NO; fi
+        if imag_core_pattern_captures_dumps "core.%p"; then echo YES; else echo NO; fi
+        if imag_core_pattern_captures_dumps ""; then echo YES; else echo NO; fi
+        "#,
+    );
+    assert_eq!(code, 0, "stderr: {err}");
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec!["YES", "NO", "NO", "NO"],
+        "kernel.core_pattern must be a PIPED collector (systemd-coredump/apport) — a bare/relative \
+         pattern can silently drop a core (wrong cwd, read-only rootfs) even with an unlimited \
+         ulimit: {out:?}"
+    );
+}
+
+#[test]
+fn imag_obs_core_dumps_enabled_requires_unlimited_both_columns() {
+    let (code, out, err) = run_sourced(
+        r#"
+        if imag_obs_core_dumps_enabled "Max core file size        unlimited            unlimited            bytes"; then echo YES; else echo NO; fi
+        # the #882 root cause: ulimit -c was 0, so the 2026-07-30 segfault left nothing debuggable
+        if imag_obs_core_dumps_enabled "Max core file size        0                    0                    bytes"; then echo YES; else echo NO; fi
+        if imag_obs_core_dumps_enabled "Max core file size        unlimited            0                    bytes"; then echo YES; else echo NO; fi
+        if imag_obs_core_dumps_enabled ""; then echo YES; else echo NO; fi
+        "#,
+    );
+    assert_eq!(code, 0, "stderr: {err}");
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec!["YES", "NO", "NO", "NO"],
+        "the LIVE obs process's own /proc/<pid>/limits must show Max core file size unlimited on \
+         BOTH the soft and hard column — proof LimitCORE=infinity is actually applied to the \
+         running process, not just configured in the unit file: {out:?}"
+    );
+}
+
+#[test]
+fn verify_imag_wires_the_new_884_checks_into_the_live_flow() {
+    let body = std::fs::read_to_string(script()).unwrap();
+    for needle in [
+        "imag_obs_service_state_ok",
+        "imag_obs_service_restart_is_on_failure",
+        "imag_autostart_launches_via_service_not_script",
+        "imag_core_pattern_captures_dumps",
+        "imag_obs_core_dumps_enabled",
+    ] {
+        assert!(
+            body.matches(needle).count() >= 2,
+            "verify-imag.sh must both DEFINE and CALL {needle} in its live flow (#884) — a pure \
+             function that is only ever defined and never invoked provides zero acceptance \
+             coverage"
+        );
+    }
+}
+
 #[test]
 fn verify_imag_exits_nonzero_on_any_failed_check() {
     let body = std::fs::read_to_string(script()).unwrap();
