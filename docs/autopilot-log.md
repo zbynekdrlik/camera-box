@@ -6368,3 +6368,28 @@ a new PR or merge -- rides the already-open dev->main PR #704 train, added a `##
 section + `Closes #883` to its body (same convention as #862/#882 before it). Playbook: new
 `.claude/rules/gap-metric-reconciliation.md` (both divergence directions + the "pull real data
 from a historical CI run's own log" technique), router line added to CLAUDE.md.
+
+## #888 (2026-07-30) — RE-GATE: imag's [4d/8] render-budget term made report-only (temporary, user-directed)
+
+Design posted BEFORE code (root cause + approach + rejected alternatives):
+https://github.com/zbynekdrlik/camera-box/issues/888#issuecomment-5131191762
+
+RED: `1b89733b7` (`tests/harness_render_budget_imag_report_only_888.rs`,
+`strih_stream_render_budget_call_stays_strict_and_excludes_imag` +
+`imag_render_budget_call_is_report_only_and_names_888_and_886`) — fails against the pre-existing
+single joint 3-box `render-budget-gate.py` call.
+GREEN: `cdfd1fd4d` — split `[4d/8]` in `scripts/recording-e2e.sh` into two invocations: strih+stream
+unchanged (still `exit 1`), imag alone in a new non-aborting branch that WARNs either way, naming
+issue 888 and issue 886 in words, no env-var knob (hardcoded, one-line-deletable). Updated the
+pre-existing `tests/harness_imag_topology.rs` window test
+(`render_budget_gate_strih_stream_call_site_no_longer_includes_imag_888`) that used to assert imag
+was part of the same call — it isn't any more, by design.
+`render_budget::classify`, `render-budget-gate.py`'s own thresholds, the `[1/8]` imag render-health
+preflight, and every zero-loss delivery term are untouched.
+Docs: `40beed8f3` — new playbook section in `.claude/rules/ci-testing-gotchas.md` (splitting a
+combined multi-`--box` call stales a window-bounded test).
+`cargo fmt`/`check`/`clippy --all-targets -- -D warnings` clean; full `cargo test` green except 3
+pre-existing failures in `tests/setup_imag_guards.rs` that belong to the CONCURRENT worker's
+in-flight issue 884 RED commit (`abc4497b8`, not touched by this ticket — confirmed via
+`git diff --stat` showing zero diff on `scripts/setup-imag.sh`/`scripts/verify-imag.sh` from this
+session). Rides the already-open dev->main PR #704 train — added `Closes #888` to its body.
