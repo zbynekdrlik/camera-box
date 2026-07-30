@@ -3896,6 +3896,27 @@ fn build_and_print_verdict(
                     if let Some(note) = &s.note {
                         println!("      ⚠ {note}");
                     }
+                    // Issue 889 (2026-07-30 user decision on issue 883) visibility requirement 1:
+                    // a loud WARN naming this ticket for EVERY window whose STRICT verdict
+                    // (`s.pass`) is false — even though `overall_pass` no longer fails on
+                    // copies/gaps alone (see the summary line after this loop). `s.relaxed_pass`
+                    // still failing here means the window's failure is NOT this relaxation (an
+                    // absent cambox / undecodable over the floor), so the wording says which.
+                    if !s.pass {
+                        if s.relaxed_pass {
+                            println!(
+                                "      ⚠ #889 REPORT-ONLY: copies={} gaps={} would FAIL the pre-889 \
+                                 strict rule, but does NOT gate overall_pass (see issue #889).",
+                                s.copies, s.gaps
+                            );
+                        } else {
+                            println!(
+                                "      ⚠ #889: this window ALSO fails the RELAXED verdict (not \
+                                 issue 889's doing — frame_count==0 or undecodable over the \
+                                 issue-881 floor) — it still fails overall_pass."
+                            );
+                        }
+                    }
                     // #726: presentation-cadence EVENNESS — REPORTED only (not yet gate-enforced;
                     // see src/presentation_cadence.rs). `None` on any window with no painted tick
                     // (every non-cam2 window in a sweep).
@@ -3926,6 +3947,18 @@ fn build_and_print_verdict(
                         );
                     }
                 }
+                // Issue 889 visibility requirement 3 — this summary line prints UNCONDITIONALLY,
+                // whether or not any window failed, so silence is never mistaken for strictness.
+                // Requirement 4 — hardcoded, one-line-deletable, no env knob (see the field's own
+                // doc in `crate::probe::recording_segments::SegmentedContinuity` for the restore
+                // path — issue 883 item 4 + two consecutive clean strict runs).
+                println!(
+                    "  ⚠ #889 REPORT-ONLY: {}/{} cambox window(s) would FAIL the pre-889 strict \
+                     copies/gaps rule (windows_failed_report_only). This term no longer gates \
+                     overall_pass — see issue #889 for the decision record and restore path.",
+                    seg.windows_failed_report_only,
+                    seg.segments.len()
+                );
                 if no_anchor > 0 {
                     println!(
                         "  ({no_anchor} recorded frame(s) had no burn/optical gen_ts anchor — not placed)"
@@ -6892,6 +6925,123 @@ mod tests {
             labels,
             vec!["CAM1", "CAM4"],
             "#332: both swept (non-painter) camboxes are attributed in the merge"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Issue 889 (2026-07-30 user decision on issue 883) end-to-end: a stale/frozen painted-tick
+    /// copy in the single all-cambox window (undecodable=0) must still be COMPUTED and printed
+    /// in the verdict JSON, must still fail that window's STRICT `pass`, but must NO LONGER fail
+    /// `all_cambox_continuity.overall_pass` — and `windows_failed_report_only` must report it.
+    #[test]
+    fn all_cambox_continuity_copy_alone_is_report_only_end_to_end_889() {
+        use super::{build_and_print_verdict, Cam1Source, DecodedRec};
+        use clap::Parser;
+
+        const ONE_S: i64 = 1_000_000_000;
+        let base = 1_000 * ONE_S;
+        let win = 5 * ONE_S;
+        let sched = format!(
+            r#"[{{"cambox":"CAM1","start_ns":{a},"end_ns":{b}}}]"#,
+            a = base,
+            b = base + win
+        );
+        let dir = std::env::temp_dir().join(format!("cb-889-copy-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sched_path = dir.join("switch-schedule.json");
+        std::fs::write(&sched_path, &sched).unwrap();
+
+        let mut stream_frames: Vec<RecordingFrame> = Vec::new();
+        for i in 0..20u64 {
+            let gen_ts = base + (i as i64 + 1) * (ONE_S / 10);
+            let optical = 1000u32 + 2 * i as u32; // clean step-2 sequence, undecodable=0 throughout
+            stream_frames.push(RecordingFrame {
+                frame_index: i,
+                payloads: vec![
+                    Payload {
+                        run_id: STRIH,
+                        frame_id: 1670 + i as u32,
+                        gen_ts_ns: gen_ts,
+                    },
+                    Payload {
+                        run_id: CAM2,
+                        frame_id: optical,
+                        gen_ts_ns: gen_ts,
+                    },
+                ],
+                tick: Some(optical),
+            });
+        }
+        // Insert ONE extra frame right after index 9, repeating index 9's tick verbatim (a
+        // stale/frozen copy) WITHOUT removing/overwriting any real tick value -- the distinct
+        // present-tick sequence stays fully contiguous (no incidental gap), isolating `copies`
+        // from `gaps` so this test proves copies alone is report-only.
+        let dup_gen_ts = base + 10 * (ONE_S / 10) + (ONE_S / 100); // strictly between i=9 and i=10
+        stream_frames.insert(
+            10,
+            RecordingFrame {
+                frame_index: 9_000,
+                payloads: vec![
+                    Payload {
+                        run_id: STRIH,
+                        frame_id: 9_670,
+                        gen_ts_ns: dup_gen_ts,
+                    },
+                    Payload {
+                        run_id: CAM2,
+                        frame_id: 1018, // == index 9's optical tick (1000 + 2*9)
+                        gen_ts_ns: dup_gen_ts,
+                    },
+                ],
+                tick: Some(1018),
+            },
+        );
+
+        let args = super::Args::parse_from([
+            "recording-verdict",
+            "--switch-schedule",
+            sched_path.to_str().unwrap(),
+            "--switch-guard-ns",
+            "0",
+            "--switch-expected-step",
+            "2",
+        ]);
+        let (v, _) = build_and_print_verdict(
+            &args,
+            None,
+            Some(DecodedRec {
+                frames: stream_frames,
+                rec_path: None,
+            }),
+            Cam1Source::Absent,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("verdict");
+
+        let seg = &v["all_cambox_continuity"];
+        assert_eq!(
+            seg["segments"][0]["copies"],
+            serde_json::json!(1),
+            "889: the copy is still COMPUTED and printed: {seg}"
+        );
+        assert_eq!(
+            seg["segments"][0]["pass"],
+            serde_json::json!(false),
+            "889: the STRICT per-window verdict still fails on the copy: {seg}"
+        );
+        assert_eq!(
+            seg["overall_pass"],
+            serde_json::json!(true),
+            "889: a copy alone (undecodable=0) no longer fails overall_pass: {seg}"
+        );
+        assert_eq!(
+            seg["windows_failed_report_only"],
+            serde_json::json!(1),
+            "889: the verdict JSON must carry the machine-readable report-only count: {seg}"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
