@@ -54,9 +54,7 @@
 ///
 /// TEMPORARY — deleted together with this module when **#881** (connect cam2's 120Hz monitor,
 /// restore the optical term to absolute zero) lands.
-// RED (test(#854): [red]): placeholder pre-#881 value — the absolute-zero behavior the gate has
-// today. The [green] commit sets this to the calibrated value (4) documented above.
-pub const PER_WINDOW_UNDECODABLE_FLOOR: u32 = 0;
+pub const PER_WINDOW_UNDECODABLE_FLOOR: u32 = 4;
 
 /// Run-wide (summed across every window in a recording) optical `undecodable` allowance. The
 /// calibration run (`1039420389`) measured 3 total; 8 is 2.7x that headroom while staying BELOW
@@ -65,9 +63,7 @@ pub const PER_WINDOW_UNDECODABLE_FLOOR: u32 = 0;
 ///
 /// TEMPORARY — deleted together with this module when **#881** (connect cam2's 120Hz monitor,
 /// restore the optical term to absolute zero) lands.
-// RED (test(#854): [red]): placeholder pre-#881 value — the absolute-zero behavior the gate has
-// today. The [green] commit sets this to the calibrated value (8) documented above.
-pub const RUN_UNDECODABLE_FLOOR: u32 = 0;
+pub const RUN_UNDECODABLE_FLOOR: u32 = 8;
 
 /// Is this ONE window's optical `undecodable` count within the #881 calibrated floor?
 ///
@@ -139,8 +135,14 @@ mod tests {
 
     #[test]
     fn run_wide_floor_boundary_eight_passes_nine_fails() {
-        assert!(run_within_floor(8), "8 is exactly the run-wide floor -> within");
-        assert!(!run_within_floor(9), "9 exceeds the run-wide floor of 8 -> FAIL");
+        assert!(
+            run_within_floor(8),
+            "8 is exactly the run-wide floor -> within"
+        );
+        assert!(
+            !run_within_floor(9),
+            "9 exceeds the run-wide floor of 8 -> FAIL"
+        );
     }
 
     #[test]

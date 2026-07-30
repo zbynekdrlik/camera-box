@@ -32,7 +32,12 @@
 //!   delivers a frame "softened"/out of order, `#133`/`#196`/`#216` — a RECORDED-order walk
 //!   misreads that benign reorder as a fault; see [`window_segment`] and
 //!   [`crate::painted_tick_gaps::painted_tick_gaps`]).
-//! - `pass`: `frames > 0 && undecodable == 0 && copies == 0 && gaps == 0`.
+//! - `pass`: `frames > 0 && <undecodable within the issue 881 calibrated floor> && copies == 0 &&
+//!   gaps == 0`. The whole-run `overall_pass` ALSO requires the SUM of `undecodable` across every
+//!   window to stay within its own run-wide floor (see [`segment_continuity`]) — see
+//!   `crate::optical_floor` for the rationale (a physical 60Hz temporal-tear artifact of the test
+//!   camera's monitor, not chain loss) and why the floor is TEMPORARY (deleted with #881).
+//!   `copies == 0` and `gaps == 0` are NOT part of the floor and are never relaxed.
 //!
 //! The painted tick increments PER PAINTED FRAME and is captured at the cambox rate, so its
 //! by-design step in the recording is the decimation factor (`expected_step`): cam→strih 60fps
@@ -119,7 +124,11 @@ pub struct CamboxSegment {
     /// First / last painted tick seen in-window (informational; `None` ⇒ no readable tick).
     pub first_tick: Option<u32>,
     pub last_tick: Option<u32>,
-    /// This cambox's segment is clean ⇔ `frames > 0 && undecodable == 0 && copies == 0 && gaps == 0`.
+    /// This cambox's segment is clean ⇔ `frames > 0 && crate::optical_floor::
+    /// window_within_floor(undecodable, frames) && copies == 0 && gaps == 0`. #881: the optical
+    /// `undecodable` term carries a TEMPORARY calibrated floor (a physical 60Hz temporal-tear
+    /// artifact of the test camera's monitor, not chain loss) — `copies` and `gaps` are NOT
+    /// floored and are never relaxed. See `crate::optical_floor` for the full rationale.
     pub pass: bool,
     /// #333: an explicit human diagnostic, populated ONLY for a `frames == 0` window — the most
     /// likely cause is the dual-QR PAINTER box (it does not emit its own camera NDI while painting,
@@ -148,7 +157,11 @@ pub struct CamboxSegment {
 pub struct SegmentedContinuity {
     /// One verdict per schedule window, in schedule order.
     pub segments: Vec<CamboxSegment>,
-    /// PASS ⇔ the schedule is non-empty AND EVERY window is clean (every covered cambox passed).
+    /// PASS ⇔ the schedule is non-empty AND EVERY window is clean (every covered cambox passed)
+    /// AND the SUM of `undecodable` across every window stays within #881's run-wide calibrated
+    /// floor (`crate::optical_floor::run_within_floor`) — the load-bearing half of the floor: a
+    /// per-window-only check would let many windows each individually within floor sum past the
+    /// pre-#707 regression level undetected. TEMPORARY; deleted with #881.
     pub overall_pass: bool,
     /// The transition guard applied (ns).
     pub guard_ns: i64,
@@ -322,6 +335,13 @@ pub fn segment_continuity(
         segments.push(seg);
     }
 
+    // #881 — the run-wide half of the calibrated optical-undecodable floor: the SUM across every
+    // window must ALSO stay within its own cap, even when every individual window already passed
+    // its own per-window term (see `crate::optical_floor`'s "Two terms, not one" — a per-window-
+    // only check would let the pre-#707 regression level through undetected).
+    let total_undecodable: u32 = segments.iter().map(|s| s.undecodable).sum();
+    overall_pass &= crate::optical_floor::run_within_floor(total_undecodable);
+
     SegmentedContinuity {
         segments,
         overall_pass,
@@ -431,7 +451,13 @@ fn window_segment(
     let first_tick = frames.iter().find_map(|f| f.tick);
     let last_tick = frames.iter().rev().find_map(|f| f.tick);
 
-    let pass = frame_count > 0 && undecodable == 0 && copies == 0 && gaps == 0;
+    // #881 — the per-window half of the calibrated optical-undecodable floor (TEMPORARY; a
+    // physical 60Hz temporal-tear artifact of the test camera's monitor, not chain loss — see
+    // `crate::optical_floor`). `copies == 0` and `gaps == 0` are NOT floored and never relaxed.
+    let pass = frame_count > 0
+        && crate::optical_floor::window_within_floor(undecodable, frame_count)
+        && copies == 0
+        && gaps == 0;
     // #333: a ZERO-frame window is empty by construction, not chain loss — flag it loudly so it is
     // not misread as a continuity break. The dominant cause is sweeping the dual-QR painter box
     // (it does not emit its own camera NDI while painting, #179) or a down / non-emitting box.
@@ -486,6 +512,34 @@ mod tests {
             start_ns,
             end_ns,
         }
+    }
+
+    /// #881 — build a window's worth of step-1 frames (gen_ts spaced by `dt`, strictly inside
+    /// `[start_ns, end_ns)`) with `undecodable` of them (a single CONTIGUOUS block starting at
+    /// the window's midpoint) carrying `tick: None` instead of their would-be value. The missing
+    /// block is a genuine internal "hole" in the present-tick sequence, exactly credited by
+    /// `painted_tick_gaps` against the `undecodable` count (see `crate::painted_tick_gaps`) — so
+    /// this produces `gaps == 0` and `copies == 0` regardless of `undecodable`, isolating the
+    /// optical `undecodable` term the #881 floor calibrates.
+    fn window_frames_with_undecodable(
+        start_ns: i64,
+        dt: i64,
+        n: usize,
+        start_tick: u32,
+        undecodable: usize,
+    ) -> Vec<SegmentFrame> {
+        let mid = n / 2;
+        (0..n)
+            .map(|i| SegmentFrame {
+                frame_index: i as u64,
+                gen_ts_ns: start_ns + dt + (i as i64) * dt,
+                tick: if i >= mid && i < mid + undecodable {
+                    None
+                } else {
+                    Some(start_tick + i as u32)
+                },
+            })
+            .collect()
     }
 
     #[test]
@@ -556,8 +610,13 @@ mod tests {
     }
 
     #[test]
-    fn undecodable_frame_in_one_window_fails_that_cambox() {
-        // cam2 has one delivered frame with no painted tick (None) → undecodable → FAIL.
+    fn single_undecodable_frame_within_calibrated_floor_passes_881() {
+        // #881 calibrated floor: cam2 has ONE delivered frame with no painted tick (None) —
+        // 1 undecodable is within the per-window floor (<=4) and the run-wide floor (<=8), and
+        // copies/gaps are both 0, so this window (and the whole run) now PASSES. Before #881
+        // this exact sequence FAILED on the optical `undecodable` term alone; it must not
+        // anymore — the residual is a physical 60Hz temporal-tear artifact of the test camera's
+        // monitor, not chain loss (issue 854 design).
         let schedule = vec![win("cam1", 0, 1000), win("cam2", 1000, 2000)];
         let mut frames = clean_frames(0, 100, 4, 1, 100);
         frames.extend([
@@ -578,11 +637,14 @@ mod tests {
             },
         ]);
         let v = segment_continuity(&frames, &schedule, 0, 1);
-        assert!(!v.overall_pass);
+        assert!(
+            v.overall_pass,
+            "1 undecodable is within the #881 calibrated floor: {v:?}"
+        );
         assert!(v.segments[0].pass);
         assert!(
-            !v.segments[1].pass,
-            "undecodable ⇒ FAIL: {:?}",
+            v.segments[1].pass,
+            "1 undecodable, 0 copies, 0 gaps -> within floor -> PASS: {:?}",
             v.segments[1]
         );
         assert_eq!(
@@ -594,6 +656,154 @@ mod tests {
             v.segments[1].gaps, 0,
             "the None is undecodable, not a gap (credited): {:?}",
             v.segments[1]
+        );
+    }
+
+    #[test]
+    fn single_window_five_undecodable_exceeds_per_window_floor_fails_881() {
+        // Acceptance criterion 3 (issue 854 design): 5 undecodable in ONE window exceeds the
+        // #881 per-window floor (<=4) even though the window is otherwise clean (copies=0,
+        // gaps=0) — the per-window term must catch a localized degradation on its own.
+        let schedule = vec![win("cam2", 0, 60_000)];
+        let frames = window_frames_with_undecodable(0, 1000, 50, 1000, 5);
+        let v = segment_continuity(&frames, &schedule, 0, 1);
+        assert_eq!(v.segments[0].undecodable, 5);
+        assert_eq!(v.segments[0].copies, 0, "{:?}", v.segments[0]);
+        assert_eq!(v.segments[0].gaps, 0, "{:?}", v.segments[0]);
+        assert!(
+            !v.segments[0].pass,
+            "5 undecodable exceeds the per-window floor of 4: {:?}",
+            v.segments[0]
+        );
+        assert!(!v.overall_pass);
+    }
+
+    #[test]
+    fn undecodable_within_floor_but_a_copy_present_still_fails_881() {
+        // The #881 floor governs ONLY the optical `undecodable` term. A copy (or a gap) in the
+        // SAME window must still fail it even when undecodable alone would be within floor —
+        // `copies == 0` / `gaps == 0` are not relaxed, now or ever (issue 854 design).
+        let schedule = vec![win("cam2", 0, 10_000)];
+        let frames = vec![
+            SegmentFrame {
+                frame_index: 0,
+                gen_ts_ns: 100,
+                tick: Some(500),
+            },
+            SegmentFrame {
+                frame_index: 1,
+                gen_ts_ns: 200,
+                tick: Some(500),
+            }, // copy
+            SegmentFrame {
+                frame_index: 2,
+                gen_ts_ns: 300,
+                tick: None,
+            }, // 1 undecodable — within floor on its own
+            SegmentFrame {
+                frame_index: 3,
+                gen_ts_ns: 400,
+                tick: Some(502),
+            },
+        ];
+        let v = segment_continuity(&frames, &schedule, 0, 1);
+        assert_eq!(v.segments[0].undecodable, 1);
+        assert_eq!(v.segments[0].copies, 1);
+        assert!(
+            !v.segments[0].pass,
+            "a copy still fails the window even though undecodable=1 is within the floor: {:?}",
+            v.segments[0]
+        );
+        assert!(!v.overall_pass);
+    }
+
+    #[test]
+    fn real_measured_run_1039420389_passes_with_calibrated_floor_881() {
+        // Run 1039420389 (CI run 30521066155, dev @ d381b0aee) — the primary calibration source
+        // for the #881 floor (issue 854 comment 5128509160). copies=0 and gaps=0 on EVERY
+        // window; undecodable spread 0,0,0,0,0,1,0,0,0,2 across CAM1..CAM4 — 3 total / 8464
+        // frames = 0.035%. Acceptance criterion 1 (issue 854 design).
+        let frame_counts = [846u32, 846, 847, 847, 847, 847, 848, 846, 846, 844];
+        let undecodable_counts = [0usize, 0, 0, 0, 0, 1, 0, 0, 0, 2];
+        let camboxes = [
+            "cam1", "cam2", "cam3", "cam4", "cam1", "cam2", "cam3", "cam4", "cam1", "cam2",
+        ];
+        let dt = 1000i64;
+        let mut schedule = Vec::new();
+        let mut frames = Vec::new();
+        let mut cursor = 0i64;
+        for (w, (&fc, &ud)) in frame_counts
+            .iter()
+            .zip(undecodable_counts.iter())
+            .enumerate()
+        {
+            let n = fc as usize;
+            let start = cursor;
+            let end = start + (n as i64 + 2) * dt;
+            schedule.push(win(camboxes[w], start, end));
+            frames.extend(window_frames_with_undecodable(start, dt, n, 1000, ud));
+            cursor = end;
+        }
+        let v = segment_continuity(&frames, &schedule, 0, 1);
+        assert_eq!(
+            v.segments.iter().map(|s| s.undecodable).sum::<u32>(),
+            3,
+            "sanity: 3 undecodable total across the run: {v:?}"
+        );
+        assert!(
+            v.segments.iter().all(|s| s.copies == 0 && s.gaps == 0),
+            "every window clean on copies/gaps, matching the measured run: {v:?}"
+        );
+        assert!(
+            v.overall_pass,
+            "run 1039420389's exact numbers must PASS under the #881 calibrated floor: {v:?}"
+        );
+    }
+
+    #[test]
+    fn pre_707_regression_level_still_fails_run_wide_cap_even_with_clean_copies_and_gaps_881() {
+        // THE most important test (acceptance criterion 2, issue 854 design). EACH of 10
+        // windows here carries exactly 1 undecodable frame (well within the per-window floor of
+        // 4) and is individually clean on copies/gaps — a per-window-only check would let every
+        // one of these 10 windows PASS. But the SUM across the whole run is 10, the pre-#707
+        // regression level (#707's own before/after: 10 -> 3 undecodable) — a gate that would
+        // have passed the bug it was written after is not a gate, so the run-wide cap (<=8) must
+        // catch this even though the per-window term alone does not.
+        let n = 50;
+        let dt = 1000i64;
+        let window_span = (n as i64 + 2) * dt;
+        let camboxes = ["cam1", "cam2", "cam3", "cam4"];
+        let mut schedule = Vec::new();
+        let mut frames = Vec::new();
+        for w in 0..10 {
+            let start = w as i64 * window_span;
+            let end = start + window_span;
+            schedule.push(win(camboxes[w % camboxes.len()], start, end));
+            frames.extend(window_frames_with_undecodable(
+                start,
+                dt,
+                n,
+                1000 + (w as u32) * 1000,
+                1,
+            ));
+        }
+        let v = segment_continuity(&frames, &schedule, 0, 1);
+        assert_eq!(
+            v.segments.iter().map(|s| s.undecodable).sum::<u32>(),
+            10,
+            "sanity: 10 windows x 1 undecodable each: {v:?}"
+        );
+        assert!(
+            v.segments.iter().all(|s| s.copies == 0 && s.gaps == 0),
+            "every window is clean on copies/gaps: {v:?}"
+        );
+        assert!(
+            v.segments.iter().all(|s| s.undecodable <= 4),
+            "every window individually is within the per-window floor: {v:?}"
+        );
+        assert!(
+            !v.overall_pass,
+            "the pre-#707 regression level (10 total) must still FAIL on the run-wide cap: {v:?}"
         );
     }
 
@@ -1281,12 +1491,16 @@ mod tests {
                 "delta 14 at expected_step 2 -> (14/2)-1 = 6 missing slots: {e:?}"
             );
         }
-        // The segment still correctly FAILS: `undecodable>0` is an independent, deliberate
-        // `pass` criterion (real confidence in zero-loss, not just "no PROVEN hole") -- `gaps==0`
-        // alone is necessary but not sufficient. This is NOT a false negative.
+        // The segment still correctly FAILS: 15 undecodable is FAR beyond even #881's calibrated
+        // per-window floor (<=4 -- a temporary allowance for a physical 60Hz temporal-tear
+        // artifact, not a licence for a genuinely low-confidence window like this one) -- an
+        // independent, deliberate `pass` criterion (real confidence in zero-loss, not just "no
+        // PROVEN hole") -- `gaps==0` alone is necessary but not sufficient. This is NOT a false
+        // negative.
         assert!(
             !seg.pass,
-            "undecodable>0 still fails pass, honestly reflecting low decode confidence: {seg:?}"
+            "undecodable(15) far exceeds the #881 per-window floor, still fails pass, honestly \
+             reflecting low decode confidence: {seg:?}"
         );
     }
 }
