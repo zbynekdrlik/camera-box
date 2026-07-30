@@ -194,6 +194,10 @@ CAMBOX_OFFLINE_ACK="$(cambox_offline_ack_effective "${CAMBOX_OFFLINE_ACK:-}" "$R
 # / "capability missing (#756 regression)" instead of "the tool is not installed" (#822 class).
 # shellcheck source=scripts/lib/imag-require-remote-tool.sh
 . "$HERE/lib/imag-require-remote-tool.sh"
+# #882: distinguish "OBS process absent" / "port 4455 not listening" from a deeper projector-open
+# failure -- the same class as #833's missing-tool check above, applied to OBS liveness itself.
+# shellcheck source=scripts/lib/imag-obs-reachability.sh
+. "$HERE/lib/imag-obs-reachability.sh"
 # #835: a dante-*.json file already sitting in $OUTDIR that this harness did not write is the
 # artifact of a stale manual pre-fetch runbook (removed by #648, but nothing warned when someone
 # still followed it) or a reused RUN_ID whose dir was never cleaned -- must announce itself, not
@@ -787,13 +791,31 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
     esac
   done
 
+  # #882: distinguish process-absent / port-not-listening BEFORE ever attempting to open the
+  # projectors. The 2026-07-30 outage left every subsequent preflight failure reading a WRONG
+  # generic message (hardcoding a connector pair that isn't even present on this box) even when
+  # the true cause was "OBS was not running at all" -- a one-line honest diagnosis here replaces
+  # what was ~30 minutes of investigation.
+  echo "[0/8] imag-nb OBS reachability probe (process/port) — #882"
+  _imag_reach_probe="$(sshpass -p "${IMAG_PW:-newlevel}" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 \
+    "${IMAG_USER:-newlevel}@$IMAG_IP" "$(imag_obs_reachability_probe_cmd)" 2>/dev/null || true)"
+  _imag_reach_msg="$(imag_obs_reachability_message "$_imag_reach_probe")"
+  if [ -n "$_imag_reach_msg" ]; then
+    echo "ERROR: [preflight] FAIL: imag-nb (${IMAG_IP}): ${_imag_reach_msg}" >&2
+    exit 1
+  fi
+
   # imag-nb's Multiview AND Program projectors must be OPEN before ANY run starts — the user's
   # explicit, binding requirement ("MULTIVIEW MUSI BYT ZAPNUTE ako podmienka preflight pred tym
   # nez sa rozbehne akykolvek test"). obs-websocket has no "is it open" query, so this ALWAYS
-  # (idempotently) opens both — a failed open is a loud preflight FAIL, never a silent skip.
+  # (idempotently) opens both — a failed open is a loud preflight FAIL, never a silent skip. By
+  # this point the #882 reachability probe above already ruled out process-absent/port-closed, so
+  # a failure HERE is either a WS handshake/auth problem or no matching monitor -- open_projectors
+  # itself now labels those two cases distinctly (scripts/obs_phase2.py); never re-assert a
+  # hardcoded connector name on top of its already-accurate message.
   echo "[0/8] imag-nb Multiview + Program projectors must be OPEN (#758)"
   if ! python3 "$HERE/obs_phase2.py" open-projectors --host "$IMAG_IP" 2>&1 | sed 's/^/    [imag projectors] /'; then
-    echo "ERROR: [preflight] FAIL: imag-nb (${IMAG_IP}): could not open the Multiview/Program projectors — check imag-nb's OBS WebSocket is reachable and DP-0/HDMI-0 are actually connected monitors." >&2
+    echo "ERROR: [preflight] FAIL: imag-nb (${IMAG_IP}): open-projectors failed — see the [imag projectors] output above for the exact cause (#882)." >&2
     exit 1
   fi
 
