@@ -1,0 +1,28 @@
+[Unit]
+Description=imag-nb supervised OBS (genlock) -- auto-restart on segfault, #882
+Documentation=https://github.com/zbynekdrlik/camera-box
+After=graphical-session.target
+Wants=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/imag-obs-start.sh
+ExecStop=/usr/local/bin/imag-obs-stop.sh --exec-stop
+# on-failure (never `always`) restarts ONLY on an abnormal/signal-based death (a real segfault) --
+# a clean exit(0), e.g. the operator quitting OBS's own UI, is left alone. Reviving a tight-poll
+# always-relaunch watchdog is exactly what was stood down 2026-07-16 for fighting the operator on
+# a deliberate manual quit (issue 788) -- see the #882 design comment for the full reasoning.
+Restart=on-failure
+RestartSec=2
+# #882: enable core dumps for this unit's process tree (obs inherits this) -- ulimit -c was 0 on
+# imag-nb, so the 2026-07-30 segfault left nothing debuggable. Requires systemd-coredump installed
+# (scripts/setup-imag.sh) so the piped kernel.core_pattern actually captures something.
+LimitCORE=infinity
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=imag-obs
+
+[Install]
+WantedBy=graphical-session.target
