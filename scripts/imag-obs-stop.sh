@@ -16,7 +16,29 @@
 # to the pre-existing SIGTERM/SIGKILL ladder if OBS does not exit on its own within budget.
 #
 # Use this for EVERY deliberate OBS stop (deploys, recovery, operator menu) — never bare pkill.
+#
+# #882: a PLAIN invocation (no --exec-stop) FIRST checks whether imag-obs.service (the new
+# systemd supervision unit) is active, and if so delegates to `systemctl --user stop` instead of
+# running the ladder below directly. This matters because systemd's Restart=on-failure only
+# suppresses itself for a stop IT initiated — an external `pkill`/direct kill of the tracked obs
+# process looks like an unexpected crash and gets auto-relaunched regardless of how "graceful" the
+# kill was. That is EXACTLY the bug the stood-down imag-obs-watchdog.py had (issue 788: it fought
+# the operator on every deliberate manual quit) — routing every deliberate stop through systemctl
+# is what keeps the NEW supervision unit from reintroducing it. `--exec-stop` is the mode the
+# unit's own ExecStop= line passes (systemd is ALREADY the one stopping it there) and skips this
+# delegation to avoid recursing back into `systemctl stop` mid-stop.
 set -euo pipefail
+
+EXEC_STOP_MODE=0
+if [ "${1:-}" = "--exec-stop" ]; then
+    EXEC_STOP_MODE=1
+fi
+
+if [ "$EXEC_STOP_MODE" -eq 0 ] && systemctl --user is-active --quiet imag-obs.service 2>/dev/null; then
+    echo "imag-obs.service je aktivny -- zastavujem cez systemd (systemctl stop), aby to Restart=on-failure nebral ako pad"
+    systemctl --user stop imag-obs.service
+    exit 0
+fi
 
 STATE="$HOME/.config/imag-last-program"
 
