@@ -6334,3 +6334,37 @@ NOT open a new PR or merge, per dispatch instructions -- rides the already-open 
 (still BLOCKED on #707). Added a `## #862` status section + `Closes #862` to PR #704's body
 (matches this PR's own established per-ticket section convention, e.g. #758/#863); #862 itself
 left OPEN (auto-closes at PR #704's eventual merge, same disposition as #758/#863 on this PR).
+
+## 2026-07-30 -- #883 gate real-loss reconciliation (gaps>0, residual_events=0 unlocatable) -- PR #704 train
+
+Root cause: `painted_tick_gaps` (whole-window, order-independent net-span) and `residual_events`
+(recorded-order, per-transition, GAP_OUTLIER_ABS_DELTA=10 threshold) genuinely diverge when the
+real deficit is small/diffuse -- CAM1 window 9 of run 1412981627 (CI run 30529550814) had
+gaps=2, delta histogram {1:11, 2:840, 3:9, 8:1}, every delta under the outlier ceiling, so nothing
+flagged it. Fixed via a new crate-root fallback,
+`residual_events::locate_best_candidate_for_unattributed_gap` -- fires only when gaps>0 and the
+base walk found zero Gap events, anchoring on the single largest recorded-order delta, reusing
+the authoritative `gaps` value for `missing_slots` (never a conflicting re-derived number). Never
+touches the OPPOSITE, already-locked divergence (#852: gaps==0, events non-empty).
+
+RED `43d16f134` (stub + failing crate-root + probe-gated tests) -> GREEN `a40031f60` (real impl +
+wiring in `window_segment`). `cargo test --lib residual_events` 16/16; full default-feature `cargo
+test --lib` 768/768; `cargo test --no-run` compiles clean. CI (build/lint/test, run 30542521821)
+green, 3397/3397 nextest tests including both new ones
+(`residual_events::tests::diffuse_small_gap_with_no_outlier_delta_is_still_located_883`,
+`probe::recording_segments::tests::diffuse_gap_with_no_outlier_delta_is_still_located_end_to_end_883`).
+
+Items 2/3 (where the gap falls, window-length anomaly) answered by analysis, no code: pulled real
+per-segment switch timestamps from the CI run's own `--log` (no new gate run) -- window 9's extra
+length is one specific switch call running ~0.5s longer than every other one that run, a one-off
+latency blip, not systemic; the window's own 1s transition guard rules out a boundary-attribution
+artifact. Posted as `gh issue comment 883` (design before RED:
+https://github.com/zbynekdrlik/camera-box/issues/883#issuecomment-5130629845; items 2/3 analysis:
+https://github.com/zbynekdrlik/camera-box/issues/883#issuecomment-5130778228).
+
+Item 4 (chase the loss itself) explicitly out of scope for this PR per dispatch -- left open,
+follow-up once a fresh gate run (blocked today by #886) reaches a real verdict again. Did NOT open
+a new PR or merge -- rides the already-open dev->main PR #704 train, added a `## #883` status
+section + `Closes #883` to its body (same convention as #862/#882 before it). Playbook: new
+`.claude/rules/gap-metric-reconciliation.md` (both divergence directions + the "pull real data
+from a historical CI run's own log" technique), router line added to CLAUDE.md.
