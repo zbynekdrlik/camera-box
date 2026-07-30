@@ -28,6 +28,7 @@ Rust app for embedded NDI cameras (CAM1-4): multi-camera NDI streaming with soft
 - `recording-e2e.sh` cleanup()'s always-runs stream-latency restore composing with a late OBS write (#856) + the 703 byte-window test → `.claude/rules/recording-e2e-cleanup-composition.md` (auto-loads on its `paths:`)
 - `setup-device.sh`/`verify-device.sh` companion conventions (enable-only never live-start, the `(q)`-must-stay-last check ordering, cam2-painter display-ownership, #863) → `.claude/rules/provisioning-scripts.md` (auto-loads on its `paths:`)
 - Reading dantesync's own VERSION (`dantesync --version` answers on every platform, no journal/bundle-state coupling, pin-vs-relative-parity comparison model, #862) → `.claude/rules/dantesync-version-reading.md` (auto-loads on its `paths:`)
+- imag-nb OBS runtime supervision + alerting (dev1-side-only alerting topology, systemd Restart=on-failure vs the issue-788 operator-fighting bug, wait-on-child-pid pattern, #882) → `.claude/rules/imag-obs-supervision.md` (auto-loads on its `paths:`)
 
 ## DO NOT DELETE These Files
 
