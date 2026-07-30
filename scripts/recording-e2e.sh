@@ -183,6 +183,11 @@ CAMBOX_OFFLINE_ACK="$(cambox_offline_ack_effective "${CAMBOX_OFFLINE_ACK:-}" "$R
 # not at decode time.
 # shellcheck source=scripts/lib/live-freeze-watch.sh
 . "$HERE/lib/live-freeze-watch.sh"
+# #882: restart-and-settle for the [1/8] imag render-health sweep -- window 1 (right after a
+# fresh OBS start) can measure a real, transient warm-up dip that is not a regression; the pure
+# decision lives here so classify() itself (src/render_budget.rs) stays untouched/strict.
+# shellcheck source=scripts/lib/render-health-warmup.sh
+. "$HERE/lib/render-health-warmup.sh"
 # #833: a MISSING tool on imag-nb (wmctrl, nm) must never be read as a MEASURED zero/empty
 # result -- the #756 projector-count preflight and the [1/8] nm divisor-capability check both
 # shell a remote helper on imag-nb; an absent helper used to be silently misread as "0 projectors"
@@ -1393,14 +1398,29 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
   RENDER_HEALTH_WINDOWS="${RENDER_HEALTH_WINDOWS:-5}"
   RENDER_HEALTH_WINDOW_S="${RENDER_HEALTH_WINDOW_S:-6}"
   for _rhw in $(seq 1 "$RENDER_HEALTH_WINDOWS"); do
-    if ! OBS_PASSWORD_IMAG="${OBS_PASSWORD_IMAG:-${OBS_PASSWORD:-}}" \
+    # #882: capture the REAL python exit code via PIPESTATUS (not the pipeline's own `sed`-decided
+    # status) inside an `if`, which is exempt from `set -e` regardless of AND/OR position -- so a
+    # failing window 1 never aborts the script before render_health_window_outcome gets to decide.
+    if OBS_PASSWORD_IMAG="${OBS_PASSWORD_IMAG:-${OBS_PASSWORD:-}}" \
         python3 "$HERE/render-budget-gate.py" \
         --box "imag=${IMAG_IP}:${RENDER_TARGET_FPS_IMAG:-60}" \
         --window-s "$RENDER_HEALTH_WINDOW_S" --verdict-bin "$PROBE_BIN_DIR/render-budget-gate" \
         2>&1 | sed "s/^/    [imag render-health w${_rhw}\/${RENDER_HEALTH_WINDOWS}] /"; then
-      echo "ERROR: [preflight] FAIL: imag render pod budgetom s MV otvoreným (window ${_rhw}/${RENDER_HEALTH_WINDOWS}) — skontroluj divisor/projektory/zataz." >&2
-      exit 1
+      _rhw_rc=0
+    else
+      _rhw_rc="${PIPESTATUS[0]}"
     fi
+    _rhw_outcome="$(render_health_window_outcome "$_rhw" "$_rhw_rc" | sed -n 's/^outcome=//p')"
+    case "$_rhw_outcome" in
+      PASS) : ;;
+      WARMUP)
+        echo "WARN: [preflight] imag render-health window ${_rhw}/${RENDER_HEALTH_WINDOWS} FAILED but is the non-counting WARM-UP window (post-restart NDI-lock/shader settle, #882) — tolerated, continuing to the remaining (strict) windows." >&2
+        ;;
+      *)
+        echo "ERROR: [preflight] FAIL: imag render pod budgetom s MV otvoreným (window ${_rhw}/${RENDER_HEALTH_WINDOWS}, NOT the warm-up window — #882) — skontroluj divisor/projektory/zataz." >&2
+        exit 1
+        ;;
+    esac
   done
 
   # #758 preflight item — MV render-DIVISOR CAPABILITY check (a #756 follow-up item). Distinct
