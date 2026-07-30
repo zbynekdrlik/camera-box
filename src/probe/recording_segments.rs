@@ -496,15 +496,13 @@ fn window_segment(
 
     // #881 — the per-window half of the calibrated optical-undecodable floor (TEMPORARY; a
     // physical 60Hz temporal-tear artifact of the test camera's monitor, not chain loss — see
-    // `crate::optical_floor`).
-    let pass = frame_count > 0
-        && crate::optical_floor::window_within_floor(undecodable, frame_count)
-        && copies == 0
-        && gaps == 0;
-    // Issue 889 RED-stub: `relaxed_pass` is not yet wired to `crate::window_gate::decide` -- it
-    // still mirrors the strict `pass` above, so every test asserting the actual relaxation fails
-    // on purpose. The GREEN commit replaces this with the real `window_gate::decide` call.
-    let relaxed_pass = pass;
+    // `crate::optical_floor`). Issue 889 (2026-07-30 user decision on issue 883): `pass` keeps its
+    // STRICT, UNCHANGED meaning (`copies == 0 && gaps == 0` still required); the RELAXED verdict
+    // that actually feeds `overall_pass` is `relaxed_pass` below — see `crate::window_gate` for
+    // the full decision record + restore path.
+    let gate = crate::window_gate::decide(frame_count, undecodable, copies, gaps);
+    let pass = gate.strict_pass;
+    let relaxed_pass = gate.relaxed_pass;
     // #333: a ZERO-frame window is empty by construction, not chain loss — flag it loudly so it is
     // not misread as a continuity break. The dominant cause is sweeping the dual-QR painter box
     // (it does not emit its own camera NDI while painting, #179) or a down / non-emitting box.
