@@ -453,3 +453,62 @@ neither of which needs a cmdline flag) — that is a NEW, explicit, tested, per-
 design of its own, never a blanket range-mask isolation reintroduced "because it was there before".
 #784 said it plainly: isolation may return "LEN s explicitným per-thread pinningom" (only with
 explicit per-thread pinning) — this is still the bar.
+
+## New `verify-imag.sh` checks MUST run BEFORE any check that restarts/replaces OBS (#884)
+
+`verify-imag.sh`'s check (o) (#840) restarts OBS via a DIRECT SSH invocation —
+`ssh_box "/usr/local/bin/imag-obs-stop.sh && /usr/local/bin/imag-obs-start.sh"` — deliberately
+bypassing systemctl, to prove the box's OWN operator restart path re-establishes the projectors.
+**Any check added AFTER this point in the file observes a DIFFERENT obs process than the one the
+box booted with** — one launched by a bare script invocation, not by `imag-obs.service`. Confirmed
+live (#884, 2026-07-30): `systemctl --user is-active imag-obs.service` reads `inactive` right after
+check (o) runs (systemd loses track of the main process once the wrapper's own blocking `wait`
+returns for THAT invocation), and the fresh obs process it spawned shows `Max core file size = 0`
+in `/proc/<pid>/limits`, not `unlimited` — `LimitCORE=infinity` is a systemd cgroup property, never
+inherited by a bare SSH-invoked script. The #884 supervision checks (unit enabled+active,
+`Restart=` value, autostart wiring, core-dump enablement) were first appended at the very end of
+the file (after check (r)) and ALL four false-FAILED on an otherwise perfectly healthy,
+correctly-provisioned box for exactly this reason. Fixed by moving the whole block to run
+immediately BEFORE check (o) instead — pinned by
+`verify_imag_reads_884_service_state_before_the_840_restart_wipes_it` in
+`tests/verify_imag_pure_functions.rs`. **The general rule: before appending a new acceptance check
+to this file, check whether check (o)'s restart call sits ABOVE your intended insertion point —
+if so, your check reads post-restart state, which is a DIFFERENT (and usually untracked, degraded)
+process than the box's normal boot-time state.**
+
+## `verify-imag.sh` currently HANGS FOREVER on every run — filed as #890, not fixed by #884
+
+Live-caught while verifying #884: the interaction above isn't just an ordering bug — check (o)'s
+direct-invocation restart doesn't just start an untracked obs, it **never returns control to the
+calling SSH session at all**, so the WHOLE `verify-imag.sh` run hangs indefinitely and never
+reaches ALL CLEAR / VERIFY FAILED. Root cause: #882's `83900d990` added a blocking tail to
+`imag-obs-start.sh` — `wait "$OBS_PID"; exit "$OBS_EXIT"` — so that when launched THROUGH
+`imag-obs.service` (`ExecStart=imag-obs-start.sh`), systemd's Type=simple tracking sees OBS's own
+exit code (needed for `Restart=on-failure` to tell a segfault from a deliberate quit — the correct
+design for the systemd path). But check (o) (#840, written BEFORE #882) invokes this SAME script
+DIRECTLY over SSH with no systemd involved — and `ssh_box` has no timeout wrapper — so the same
+blocking `wait` now hangs the SSH command for as long as OBS keeps running, which is indefinitely.
+Confirmed live: a stuck run's process tree showed the SSH command (`sshpass ... ssh ... newlevel@
+10.77.9.182 /usr/local/bin/imag-obs-stop.sh && /usr/local/bin/imag-obs-start.sh`) still alive with
+a perfectly healthy `obs` underneath it 20+ minutes later. **This means EVERY invocation of
+`scripts/verify-imag.sh` right now hangs forever** — not fixed here (a genuinely different
+subsystem/root-cause than #884's own scope; needs its own design decision on how to reconcile the
+two — background the SSH call, wrap it in a bounded `timeout` + separate poll, or make
+`imag-obs-start.sh` skip the blocking tail when it detects a non-systemd invocation). Filed as #890
+with full evidence. If you need `verify-imag.sh`'s ALL CLEAR verdict before #890 lands, expect to
+have to kill the hung run and verify the individual checks you care about directly over SSH
+instead (as #884's own live verification did).
+
+## A reading taken RIGHT AFTER rapid consecutive OBS restarts can be transiently wrong — reread once settled before trusting it or filing it
+
+Two DIFFERENT checks (OBS thread-core-concentration #842/#784, and the scenes/Multiview
+`imag_scenes.py` bare-mode output parse) both showed a FAIL during #884's live verification, on a
+box that had just been restarted several times in quick succession (by hand, chasing the #890 hang
+above). Both checks came back clean moments later on the SAME box once it had settled for a couple
+of minutes with no further restarts — `ps -L -o psr= -C obs` redistributed from a transient pileup
+to a healthy spread, and a fresh `imag_scenes.py --host` call printed the expected clean 4-line
+output that the check's own `^scenes: N/N OK` / `^MV scenes: N/N ... OK` line-anchored greps
+correctly matched. **Before filing a live acceptance-check failure as a genuine regression, take a
+SECOND reading after the box has been left alone for a minute or two** — a reading captured
+mid-flight of your OWN repeated manual restarts is not evidence of steady-state behavior, and
+filing it as a bug wastes a future session re-diagnosing noise.
