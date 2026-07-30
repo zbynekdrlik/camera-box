@@ -951,6 +951,31 @@ fn imag_obs_core_dumps_enabled_requires_unlimited_both_columns() {
     );
 }
 
+/// Live-caught on 10.77.9.182 (#884): check (o)'s restart-proof (#840) calls
+/// imag-obs-stop.sh/imag-obs-start.sh DIRECTLY over SSH, bypassing systemctl entirely -- which
+/// leaves imag-obs.service `inactive (dead)` (systemd loses track of the main process once the
+/// wrapper's own blocking `wait` returns) and starts a fresh, UNTRACKED obs process with NO
+/// LimitCORE applied (confirmed live: the post-restart process showed `Max core file size = 0`,
+/// not unlimited -- LimitCORE is a systemd-applied cgroup property, never inherited by a bare SSH
+/// invocation). The #884 checks MUST read the box's state BEFORE this restart runs, or they
+/// falsely FAIL a genuinely healthy, correctly-provisioned box every single time this gate runs.
+#[test]
+fn verify_imag_reads_884_service_state_before_the_840_restart_wipes_it() {
+    let body = std::fs::read_to_string(script()).unwrap();
+    let service_check = body
+        .find("systemctl --user is-enabled imag-obs.service")
+        .expect("the imag-obs.service enabled/active check must exist (#884)");
+    let restart_call = body
+        .find(r#"/usr/local/bin/imag-obs-stop.sh && /usr/local/bin/imag-obs-start.sh"#)
+        .expect("check (o)'s restart-proof call must exist (#840)");
+    assert!(
+        service_check < restart_call,
+        "the #884 imag-obs.service checks must run BEFORE check (o)'s restart-proof (#840) -- \
+         reading them afterward would falsely FAIL a genuinely healthy, correctly-provisioned box \
+         (live-confirmed on 10.77.9.182, see this test's own doc comment)"
+    );
+}
+
 #[test]
 fn verify_imag_wires_the_new_884_checks_into_the_live_flow() {
     let body = std::fs::read_to_string(script()).unwrap();
