@@ -1566,16 +1566,22 @@ rm -rf "$HOME/.config/obs-studio/.sentinel"/* 2>/dev/null || true
 for f in "$HOME"/.config/obs-studio/basic/scenes/*.json; do
   [ -f "$f" ] && python3 -c "import json,sys; p=sys.argv[1]; d=json.load(open(p)); d['saved_projectors']=[]; json.dump(d,open(p,'w'))" "$f" 2>/dev/null || true
 done
-# #840: boot now runs OBS through the SAME operator path as the "Spustit OBS" right-click menu
-# entry (imag-obs-start.sh) instead of a separate inline launch+wait+seed -- a second launch
-# mechanism (a bare 30s WebSocket wait with NO obs-process-liveness check, its failure swallowed
-# by `|| true`) is what let the boot path silently drop the projector self-heal while the manual
-# path kept working: a real capture on 10.77.9.187 showed imag_scenes.py failing with
-# ConnectionRefusedError at boot because the OLD inline wait loop timed out before OBS's
-# WebSocket came up. imag-obs-start.sh's own 90s wait DOES check obs process liveness while
-# polling, and is the SAME path exercised by the operator menu -- one launch mechanism, not two.
+# #840: boot runs OBS through the SAME operator path as the "Spustit OBS" right-click menu entry
+# instead of a separate inline launch+wait+seed -- a second launch mechanism (a bare 30s WebSocket
+# wait with NO obs-process-liveness check, its failure swallowed by `|| true`) is what let the boot
+# path silently drop the projector self-heal while the manual path kept working: a real capture on
+# 10.77.9.187 showed imag_scenes.py failing with ConnectionRefusedError at boot because the OLD
+# inline wait loop timed out before OBS's WebSocket came up. That operator script's own 90s wait
+# DOES check obs process liveness while polling.
+# #884 (follow-up to issue 882): the call below now goes THROUGH the systemd unit rather than
+# invoking the operator script directly -- the unit's own ExecStart still runs that identical
+# script, so every WebSocket-wait/seed/projector guarantee above is unchanged, but the launch is
+# now systemd-SUPERVISED (Restart=on-failure): a future segfault auto-restarts instead of leaving
+# OBS dead until the next reboot, which is exactly what happened for ~70 minutes before issue 882
+# added the unit. Enabling the unit without ALSO switching this call site would race two launchers
+# at boot -- this line and the `enable --now` below (step 21) are a single, paired change.
 export IMAG_ISOLATED_CPUS="__ISOLCPUS__"
-/usr/local/bin/imag-obs-start.sh >>/tmp/imag-seed.log 2>&1 || true
+systemctl --user start imag-obs.service || true
 AUTOSTART_EOF
 sed -i "s#__ISOLCPUS__#${IMAG_ISOLATED_CPUS}#" "$USER_HOME/.config/openbox/autostart"
 chmod +x "$USER_HOME/.config/openbox/autostart"
@@ -1764,13 +1770,12 @@ step 21 "OBS supervision unit + wallpaper-refresh provisioning + core dumps (#88
 # behavior is unchanged from before #882 -- the obs-down ALERT is fired from a separate, DEV1-side
 # watchdog, scripts/imag-obs-alert-watchdog.sh, since imag-nb has no ~/devel/airuleset checkout or
 # Discord credentials to fire it itself -- confirmed live); (c) the imag-obs.service unit file
-# itself, INSTALLED but deliberately NOT enabled here (see the comment at its
-# `systemctl --user enable` call site below for why) -- mirrors the #391 liveness-watchdog's own
-# "ships disabled, live-verify before turning it on" precedent, since wiring it into the boot path
-# means editing the heavily anchored openbox autostart heredoc above (~113 pinned
-# literals/orderings across this file, see the top-level CLAUDE.md GOTCHA) -- a deliberately
-# separate, dedicated change, tracked as its own follow-up rather than risked inside this already-
-# large ticket.
+# itself, installed AND enabled+started (issue 884, follow-up to this ticket): the boot-time
+# openbox autostart heredoc above now launches OBS THROUGH this unit rather than calling the
+# operator script directly, so enabling it here no longer races two launchers -- it is the ONLY
+# launcher now. Restart=on-failure gives OBS supervised auto-restart on a real segfault that a
+# bare script call never had (the 2026-07-30 outage this whole feature exists to prevent
+# recurring).
 
 DEBIAN_FRONTEND=noninteractive apt-get install -y systemd-coredump >/dev/null \
     || fail "systemd-coredump install failed -- needed so LimitCORE=infinity's captured cores land somewhere inspectable (#882)"
@@ -1798,13 +1803,12 @@ sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="/run/user/${UID_DESKTOP}" DBUS_SESSION_
     systemctl --user enable --now imag-wallpaper-refresh.timer \
     || echo "  WARNING: could not enable imag-wallpaper-refresh.timer -- the wall-fallback screenshot will go stale"
 echo "  imag-wallpaper-refresh.timer enabled (wall-fallback screenshot refresh every 5 min; the obs-down Discord alert is a SEPARATE dev1-side watchdog, scripts/imag-obs-alert-watchdog.sh)"
-# imag-obs.service is installed but NOT enabled here -- enabling it means the boot-time openbox
-# autostart (which currently launches OBS by calling imag-obs-start.sh DIRECTLY) and systemd BOTH
-# trying to own the launch, which would race two OBS instances on every boot unless the autostart
-# is ALSO switched to `systemctl --user start imag-obs.service` -- a deliberate, separately
-# reviewed change (see the step header above). Enable it by hand once that switch has landed:
-#   systemctl --user enable --now imag-obs.service
-echo "  imag-obs.service installed (NOT enabled -- see step header comment; enable by hand once the autostart boot-launch switch has landed)"
+# issue 884: the autostart heredoc above now calls through this unit instead of the operator
+# script directly, so enable+start is safe here -- see the step header comment for why.
+sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="/run/user/${UID_DESKTOP}" DBUS_SESSION_BUS_ADDRESS="$UBUS" \
+    systemctl --user enable --now imag-obs.service \
+    || fail "systemctl --user enable --now imag-obs.service failed"
+echo "  imag-obs.service enabled + started (OBS boot launch is now systemd-supervised, Restart=on-failure; issue 884)"
 
 echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}imag-nb base provisioning DONE (genlock build: $(cat "$GENLOCK_MARKER_DIR/GENLOCK_BUILD_SHA.txt" 2>/dev/null || echo unknown))${NC}"

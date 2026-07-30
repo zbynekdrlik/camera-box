@@ -98,6 +98,13 @@ set -euo pipefail
 #   (s) OBS threads are NOT concentrated onto a single CPU core (#842 -- the DIRECT SYMPTOM check,
 #       independent of the (d) cmdline check, so a future variant of the same defect class can't
 #       pass silently just because it doesn't happen to write a kernel-cmdline token)
+#   (t) imag-obs.service supervision (#884, follow-up to #882): the unit is installed+enabled+
+#       active; its Restart= property is EXACTLY on-failure (never "always" -- issue 788's
+#       operator-fighting bug); the openbox autostart's boot launch goes through the unit rather
+#       than calling the operator script directly; core dumps are ACTUALLY enabled -- kernel
+#       core_pattern is a piped collector AND the live obs process's own /proc/<pid>/limits shows
+#       an unlimited core-file size (proves LimitCORE=infinity is applied to the real process, not
+#       just configured in the unit file)
 #
 # Every remote helper this gate shells out to (wmctrl, python3) is preflighted BY NAME before use
 # (#822 pattern) -- a missing tool is reported as a missing tool, never folded into a failed
@@ -454,6 +461,68 @@ imag_watchdog_installed_but_disabled() {
   imag_regular_executable_file "$script_mode" || return 1
   printf '%s' "$unit_list" | grep -qF "imag-obs-watchdog.service" || return 1
   [ "$enabled" = "disabled" ]
+}
+
+# --- (t) imag-obs.service supervision (#884, follow-up to #882) -------------------------------
+#
+# The live box (10.77.9.182) already runs the boot launch through the supervised systemd unit
+# (enabled+active, Restart=on-failure), but setup-imag.sh used to write the OLD direct
+# imag-obs-start.sh call, and this whole area had ZERO acceptance checks -- so a fresh reprovision
+# would silently regress to the unsupervised state that produced the 2026-07-30 ~70-minute OBS
+# outage, and this gate would have certified that regression as ALL CLEAR.
+
+# imag_obs_service_state_ok IS_ENABLED IS_ACTIVE -> 0 iff both trimmed args are EXACTLY "enabled"
+# and "active" respectively (a `systemctl --user is-enabled`/`is-active` reply, whitespace-trimmed
+# since a real SSH capture carries a trailing newline). A re-provisioned box with the unit merely
+# installed (is-enabled would report "disabled") or enabled-but-not-running (is-active anything
+# other than "active") must fail here.
+imag_obs_service_state_ok() {
+  local enabled active
+  enabled="$(printf '%s' "$1" | tr -d '[:space:]')"
+  active="$(printf '%s' "$2" | tr -d '[:space:]')"
+  [ "$enabled" = "enabled" ] && [ "$active" = "active" ]
+}
+
+# imag_obs_service_restart_is_on_failure RESTART_PROPERTY_LINE -> 0 iff the trimmed
+# `systemctl --user show imag-obs.service --property=Restart` reply is EXACTLY "Restart=on-failure"
+# -- never "always" (issue 788's operator-fighting bug: a tight auto-relaunch loop fights a
+# deliberate manual quit, which is why the imag-obs-watchdog was stood down in the first place).
+imag_obs_service_restart_is_on_failure() {
+  [ "$(printf '%s' "$1" | tr -d '[:space:]')" = "Restart=on-failure" ]
+}
+
+# imag_autostart_launches_via_service_not_script AUTOSTART_TEXT -> 0 iff AUTOSTART_TEXT (the live
+# openbox autostart file's contents, already read at check (g)) calls
+# `systemctl --user start imag-obs.service` and does NOT directly invoke imag-obs-start.sh as CODE
+# (#884 -- that direct call is exactly the divergence that would silently strip supervision on a
+# re-provision). Full-line comments (this repo's own header/inline comments legitimately mention
+# imag-obs-start.sh in prose) are stripped FIRST so a comment referencing the script name is never
+# mistaken for a real call -- the same self-collision class this repo's CLAUDE.md GOTCHA warns
+# about for static-anchor tests.
+imag_autostart_launches_via_service_not_script() {
+  local code
+  code="$(printf '%s\n' "$1" | grep -vE '^[[:space:]]*#')"
+  printf '%s' "$code" | grep -qF "systemctl --user start imag-obs.service" \
+    && ! printf '%s' "$code" | grep -q "imag-obs-start.sh"
+}
+
+# imag_core_pattern_captures_dumps CORE_PATTERN_TEXT -> 0 iff CORE_PATTERN_TEXT (the box's
+# `/proc/sys/kernel/core_pattern`) is a PIPED collector (starts with '|', e.g. systemd-coredump or
+# apport) rather than a bare/relative pattern like "core" or "core.%p" -- #882's root cause: even
+# with an unlimited ulimit, an unpiped pattern can silently drop a core (wrong cwd, a read-only
+# rootfs), and a piped collector is the only configuration this repo has verified actually keeps a
+# crash inspectable.
+imag_core_pattern_captures_dumps() {
+  case "$1" in '|'*) return 0 ;; *) return 1 ;; esac
+}
+
+# imag_obs_core_dumps_enabled LIMITS_LINE -> 0 iff LIMITS_LINE (a `grep -i "Max core file size"
+# /proc/<obs-pid>/limits` line from the LIVE obs process) shows BOTH the soft and hard column as
+# "unlimited". This proves LimitCORE=infinity is actually APPLIED to the real running process, not
+# merely configured in the unit file -- the #882 root cause: ulimit -c was 0, so the 2026-07-30
+# segfault produced nothing debuggable.
+imag_obs_core_dumps_enabled() {
+  printf '%s' "$1" | grep -qE '^Max core file size[[:space:]]+unlimited[[:space:]]+unlimited'
 }
 
 # --- source-guard: when sourced (the unit tests), stop here -- never run the live SSH/WS flow.
@@ -946,6 +1015,60 @@ elif imag_dockstate_present "$GLOBAL_INI"; then
   ok "OBS dock layout (incl. the Stats dock) persisted in global.ini -- survives a restart (#791)"
 else
   fail "global.ini has no DockState -- the Stats dock (and any other dock arrangement) will NOT survive an OBS restart (#791)"
+fi
+
+# (t) imag-obs.service supervision: installed+enabled+active, Restart=on-failure, autostart wired
+# through the unit (not a direct script call), core dumps ACTUALLY enabled (#884, follow-up to
+# #882) ------------------------------------------------------------------------------------------
+rc=0
+OBS_SVC_ENABLED="$(ssh_box "systemctl --user is-enabled imag-obs.service 2>/dev/null || true")" || rc=$?
+OBS_SVC_ACTIVE="$(ssh_box "systemctl --user is-active imag-obs.service 2>/dev/null || true")" || true
+if [ "$rc" -ne 0 ] || [ -z "$OBS_SVC_ENABLED" ]; then
+  fail "imag-obs.service enabled/active state unreadable (ssh rc=$rc)"
+elif imag_obs_service_state_ok "$OBS_SVC_ENABLED" "$OBS_SVC_ACTIVE"; then
+  ok "imag-obs.service enabled + active -- the openbox autostart's boot launch is systemd-supervised (#884)"
+else
+  fail "imag-obs.service NOT enabled+active (enabled='${OBS_SVC_ENABLED}', active='${OBS_SVC_ACTIVE}') -- a re-provision without this leaves OBS unsupervised, the state behind the 2026-07-30 outage (#882/#884)"
+fi
+
+rc=0
+OBS_SVC_RESTART="$(ssh_box "systemctl --user show imag-obs.service --property=Restart 2>/dev/null")" || rc=$?
+if [ "$rc" -ne 0 ] || [ -z "$OBS_SVC_RESTART" ]; then
+  fail "imag-obs.service Restart= property unreadable (ssh rc=$rc)"
+elif imag_obs_service_restart_is_on_failure "$OBS_SVC_RESTART"; then
+  ok "imag-obs.service Restart=on-failure (never 'always' -- issue 788's operator-fighting bug)"
+else
+  fail "imag-obs.service Restart is NOT exactly 'on-failure' (got '${OBS_SVC_RESTART}') -- 'always' fights a deliberate operator quit (issue 788)"
+fi
+
+if imag_autostart_launches_via_service_not_script "${AUTOSTART:-}"; then
+  ok "openbox autostart launches OBS via imag-obs.service, not a direct script call (#884)"
+else
+  fail "openbox autostart does NOT launch OBS via imag-obs.service -- a re-provision would silently strip supervision, regressing to the 2026-07-30 outage (#884)"
+fi
+
+rc=0
+CORE_PATTERN="$(ssh_box "cat /proc/sys/kernel/core_pattern 2>/dev/null")" || rc=$?
+if [ "$rc" -ne 0 ] || [ -z "$CORE_PATTERN" ]; then
+  fail "kernel.core_pattern unreadable (ssh rc=$rc)"
+elif imag_core_pattern_captures_dumps "$CORE_PATTERN"; then
+  ok "kernel.core_pattern is a piped collector ('${CORE_PATTERN}') -- crashes are captured (#882)"
+else
+  fail "kernel.core_pattern is NOT a piped collector ('${CORE_PATTERN}') -- a future segfault could silently drop its core even with an unlimited ulimit (#882)"
+fi
+
+rc=0
+OBS_PID="$(ssh_box "pgrep -x obs | head -1" || true)"
+OBS_CORE_LIMIT=""
+if [ -n "$OBS_PID" ]; then
+  OBS_CORE_LIMIT="$(ssh_box "grep -i 'Max core file size' /proc/${OBS_PID}/limits 2>/dev/null")" || rc=$?
+fi
+if [ -z "$OBS_PID" ] || [ -z "$OBS_CORE_LIMIT" ]; then
+  fail "could not read the live obs process's core-dump limit (pid='${OBS_PID:-<none>}', ssh rc=$rc)"
+elif imag_obs_core_dumps_enabled "$OBS_CORE_LIMIT"; then
+  ok "obs process core dumps enabled (Max core file size = unlimited, #882)"
+else
+  fail "obs process core dumps NOT enabled ('${OBS_CORE_LIMIT}') -- a future segfault would again leave nothing debuggable (#882)"
 fi
 
 echo ""
