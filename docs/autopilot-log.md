@@ -6393,3 +6393,52 @@ pre-existing failures in `tests/setup_imag_guards.rs` that belong to the CONCURR
 in-flight issue 884 RED commit (`abc4497b8`, not touched by this ticket — confirmed via
 `git diff --stat` showing zero diff on `scripts/setup-imag.sh`/`scripts/verify-imag.sh` from this
 session). Rides the already-open dev->main PR #704 train — added `Closes #888` to its body.
+
+## issue 884: wire imag-obs.service into the openbox autostart boot path (follow-up to issue 882)
+
+Version bump: `b55f3dd6b` -> 1.7.0-dev.394.
+Design comment: gh issue comment (posted before RED, https://github.com/zbynekdrlik/camera-box/issues/884#issuecomment-5131220994).
+
+RED: `abc4497b8` -- static-anchor + pure-function tests proving the boot-path divergence:
+`setup-imag.sh` still wrote the OLD direct `imag-obs-start.sh` autostart call (the live box
+10.77.9.182 already ran through the supervised systemd unit since accepting issue 882 by hand),
+and `verify-imag.sh` had zero checks for unit installed+enabled+active, `Restart=` value,
+autostart wiring, or actual core-dump enablement. Drive-by fix: an existing
+`setup_imag_autostart_no_longer_duplicates_the_launch_sequence_840` test's unscoped
+`body.find("AUTOSTART_EOF")` silently matched the SAME literal inside the heredoc's own OPENING
+`<<'AUTOSTART_EOF'` marker instead of the real closing terminator -- switched to `rfind`.
+
+GREEN: `31bbf8851` -- autostart heredoc now calls `systemctl --user start imag-obs.service || true`;
+step 21 now `enable --now`s the unit. `verify-imag.sh` gains 5 hard-FAIL checks (never warn):
+`imag_obs_service_state_ok`, `imag_obs_service_restart_is_on_failure` (exactly `on-failure`, never
+`always` -- issue 788's operator-fighting bug), `imag_autostart_launches_via_service_not_script`,
+`imag_core_pattern_captures_dumps`, `imag_obs_core_dumps_enabled`.
+
+Live-verification caught a REAL ordering bug: the new checks were first appended after check (o)
+(#840's restart-proof, which restarts OBS via a DIRECT SSH invocation bypassing systemctl) --
+confirmed on 10.77.9.182 that this leaves `imag-obs.service` `inactive` and starts an untracked
+obs process with `Max core file size = 0`, not unlimited. Second RED/GREEN pair:
+`f24715286`/`2a8e8b29d` -- moved the whole check block to run BEFORE check (o), pinned by
+`verify_imag_reads_884_service_state_before_the_840_restart_wipes_it`.
+
+`cargo fmt`/`check`/`clippy --all-targets -- -D warnings` clean; full `cargo test` green (174
+binaries, 2619 tests, 0 failures). Live-verified twice on 10.77.9.182 (after restoring the box to
+a clean, systemd-tracked OBS launch via `imag-obs-stop.sh` + `systemctl --user start
+imag-obs.service`): all 5 new checks report `[OK]`.
+
+Two genuinely unrelated pre-existing issues surfaced during live verification, filed separately
+(out of scope per the bundling gate): issue 890 (`verify-imag.sh` hangs forever on every run --
+check (o)'s restart-proof never returns, an issue 882/840 interaction: issue 882's blocking
+`wait "$OBS_PID"` tail in `imag-obs-start.sh` never lets the direct-invocation SSH call in check
+(o) return) and issue 891 (imag-nb still has `systemd-timesyncd` installed, violating the
+already-shipped issue 591 gate). Two OTHER transient-looking failures (OBS thread-core
+concentration, scenes/Multiview parse) did NOT reproduce on a settled box and were correctly NOT
+filed -- see `.claude/rules/imag-nb-provisioning.md`'s new sections for the full detail on all of
+this.
+
+Docs: `6cb8dddb6` -- playbook additions in `.claude/rules/imag-nb-provisioning.md`.
+
+Rides the already-open dev->main PR #704 train (blocked on the unrelated hardware E2E gate,
+issue 886) -- added `Closes #884` to its body via the REST PATCH method (`gh pr edit
+--body-file` fails on this repo, see CLAUDE.md GOTCHA). Not merged -- PR #704's own merge/deploy
+is out of this ticket's scope, gated on issue 886 being resolved separately.
