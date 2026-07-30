@@ -6442,3 +6442,59 @@ Rides the already-open dev->main PR #704 train (blocked on the unrelated hardwar
 issue 886) -- added `Closes #884` to its body via the REST PATCH method (`gh pr edit
 --body-file` fails on this repo, see CLAUDE.md GOTCHA). Not merged -- PR #704's own merge/deploy
 is out of this ticket's scope, gated on issue 886 being resolved separately.
+
+## Issue 889 -- RE-GATE: per-cambox-window copies/gaps become report-only (user decision 2026-07-30)
+
+Top-priority, user-sanctioned relaxation (explicitly heavier than issue 888 -- relaxes the core
+zero-loss CLAIM, not a measurement cost) unblocking PR #704's 38 finished tickets. `copies`/`gaps`
+per-cambox-window terms of the issue-186 zero-loss verdict no longer force `overall_pass=false` --
+still computed, still printed, still in the verdict JSON. `undecodable`/issue-881 floor,
+`frame_count > 0`, the run-wide undecodable cap, the duration floor, and the frozen-leg
+sustained-freeze classifier are all completely untouched.
+
+Design comment (root cause + approach + rejected alternative) posted BEFORE the first commit:
+https://github.com/zbynekdrlik/camera-box/issues/889#issuecomment-5131980119
+
+New pure crate-root module `src/window_gate.rs` (Tier-0 testable, mirrors `optical_floor.rs` /
+the issue-861 A/V-offset report-only shape) decides both the pre-889 STRICT verdict
+(`WindowGateDecision::strict_pass`, byte-identical to the old `CamboxSegment::pass`) and the new
+`relaxed_pass` that `overall_pass` now folds. TDD RED (`fe7d74fa2`) -> GREEN (`450b899b8`) --
+7/7 tests, verified LOCALLY via the sanctioned Tier-0 bypass (`cargo test --lib window_gate #
+airuleset:build-ok`).
+
+The probe-gated wiring (`src/probe/recording_segments.rs`, `tests/switch_schedule_continuity.rs`)
+has ZERO local verification path (this repo bans compiling `--features probe` locally, not even a
+compile check) -- RED (`797ecc25e`, rewrote ~6 tests that used to assert `overall_pass` fails on
+copies/gaps alone + 2 new tests for `windows_failed_report_only`) -> GREEN (`146b24632`, wires
+`window_gate::decide` into `window_segment`; `CamboxSegment.pass` stays STRICT/unchanged,
+`overall_pass` folds the new `relaxed_pass`). CI run 30552169303 confirmed GREEN: 3417/3417 tests
+passed, 0 failed, 0 skipped -- every renamed/new test (`gap_in_one_window_fails_strict_but_889_
+relaxes_overall_pass`, `copy_stale_frame_in_one_window_fails_strict_but_889_relaxes_overall`,
+`undecodable_within_floor_and_a_copy_present_now_passes_relaxed_but_still_fails_strict_889`,
+`undecodable_over_floor_combined_with_a_copy_still_fails_overall_889`,
+`windows_failed_report_only_counts_strict_failures_across_a_mixed_run_889`, all 7
+`window_gate::tests::*`, `switch_schedule_continuity::one_cambox_dropping_fails_strict_but_889_
+relaxes_overall`) passed.
+
+Visibility (`37e3bb4f9`, `src/bin/recording-verdict.rs`): a loud per-window WARN naming issue 889
+for every strict-failing window, an unconditional summary line (prints whether or not any window
+failed) carrying `windows_failed_report_only`, the same count as an always-serialized JSON field
+on `SegmentedContinuity`, hardcoded/one-line-deletable, no env knob. New end-to-end test
+`all_cambox_continuity_copy_alone_is_report_only_end_to_end_889` proves the whole wiring through
+`build_and_print_verdict`, not just the pure decision.
+
+Rides the already-open dev->main PR #704 train -- added `Closes #889` to its body via the REST
+PATCH method. As of this entry the regular `CI` workflow is fully green (run 30552169303) but the
+hardware `Full-path E2E` gate (run 30552168761) was still in progress, triggered by a shared-
+checkout push from the concurrent issue-884 worker that carried commits up through `146b24632`.
+The `37e3bb4f9` visibility commit is staged LOCALLY, deliberately unpushed at the time of this
+entry, to avoid cancelling that in-flight hardware run over a commit that changes no gate logic
+(see `.claude/rules/ci-testing-gotchas.md`'s concurrency-group GOTCHA). Not merged -- the
+supervisor owns the merge and the remaining hardware-gate wait.
+
+Honest assessment of what `overall_pass` still asserts after this relaxation: every scheduled
+cambox window produced frames (no box silently absent), the run-wide + per-window optical-
+undecodable term stays within the issue-881 calibrated floor, and the whole recording clears the
+300s duration floor. It no longer asserts the painted-tick sequence is free of stale-copy/dropped-
+frame defects per window -- that is exactly, and only, what this ticket relaxes, and the strict
+verdict + the report-only WARN keep that fact visible in every run's log and every verdict JSON.
