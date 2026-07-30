@@ -1984,8 +1984,25 @@ def open_projectors(a):
     imag_scenes.py::projector() (an operator-convenience script that only WARNs on a missing
     panel), this function is a preflight/verify GATE (recording-e2e.sh's `[0/8]`,
     verify-imag.sh) — it FAILS LOUD (raises) when EITHER expected connector is absent, never
-    silently continues."""
-    ws = _conn(a.host, a.password)
+    silently continues.
+
+    #882: a failure to even establish the WebSocket session (OBS process not accepting the
+    handshake, wrong password, connection dropped mid-negotiation) is caught HERE and re-raised
+    labelled as a connection/handshake failure — distinct from the "no matching monitor"
+    RuntimeErrors below, which are a genuinely different cause (the connection succeeded; the
+    box's reported monitors just don't include the expected connector type). The imag-nb outage
+    this issue investigates showed a single generic fallback message for ANY failure ("check
+    DP-0/HDMI-0 are connected monitors") even when the true cause was "OBS was not running at
+    all" — recording-e2e.sh's own preflight now probes process/port liveness separately
+    (scripts/lib/imag-obs-reachability.sh) BEFORE calling this, so by the time this raises, the
+    remaining real causes are exactly: handshake/auth (this branch) or no matching monitor
+    (below)."""
+    try:
+        ws = _conn(a.host, a.password)
+    except Exception as e:
+        raise RuntimeError(
+            f"could not establish an OBS WebSocket handshake/auth session with {a.host} -- {e}"
+        ) from e
     try:
         mons = _rpc(ws, "GetMonitorList").get("monitors", [])
         panel = [m for m in mons if "HDMI" not in m.get("monitorName", "")]
