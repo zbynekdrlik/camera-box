@@ -33,11 +33,15 @@
 //!   misreads that benign reorder as a fault; see [`window_segment`] and
 //!   [`crate::painted_tick_gaps::painted_tick_gaps`]).
 //! - `pass`: `frames > 0 && <undecodable within the issue 881 calibrated floor> && copies == 0 &&
-//!   gaps == 0`. The whole-run `overall_pass` ALSO requires the SUM of `undecodable` across every
-//!   window to stay within its own run-wide floor (see [`segment_continuity`]) — see
-//!   `crate::optical_floor` for the rationale (a physical 60Hz temporal-tear artifact of the test
-//!   camera's monitor, not chain loss) and why the floor is TEMPORARY (deleted with #881).
-//!   `copies == 0` and `gaps == 0` are NOT part of the floor and are never relaxed.
+//!   gaps == 0` — the STRICT verdict, UNCHANGED meaning. See `crate::optical_floor` for the
+//!   `undecodable` floor's rationale (a physical 60Hz temporal-tear artifact of the test camera's
+//!   monitor, not chain loss) and why it is TEMPORARY (deleted with #881).
+//! - `relaxed_pass` (issue 889, 2026-07-30 user decision): `frames > 0 && <undecodable within the
+//!   #881 floor>` — `copies`/`gaps` do NOT participate. This is the verdict `overall_pass` folds;
+//!   `pass` stays strict and is never silently dropped (it drives the issue-889 per-window WARN).
+//!   Computed by [`crate::window_gate::decide`] — see that module for the full decision record.
+//!   The whole-run `overall_pass` ALSO requires the SUM of `undecodable` across every window to
+//!   stay within its own run-wide floor (see [`segment_continuity`]).
 //!
 //! The painted tick increments PER PAINTED FRAME and is captured at the cambox rate, so its
 //! by-design step in the recording is the decimation factor (`expected_step`): cam→strih 60fps
@@ -127,9 +131,20 @@ pub struct CamboxSegment {
     /// This cambox's segment is clean ⇔ `frames > 0 && crate::optical_floor::
     /// window_within_floor(undecodable, frames) && copies == 0 && gaps == 0`. #881: the optical
     /// `undecodable` term carries a TEMPORARY calibrated floor (a physical 60Hz temporal-tear
-    /// artifact of the test camera's monitor, not chain loss) — `copies` and `gaps` are NOT
-    /// floored and are never relaxed. See `crate::optical_floor` for the full rationale.
+    /// artifact of the test camera's monitor, not chain loss) — see `crate::optical_floor` for the
+    /// full rationale. **UNCHANGED, strict, byte-for-byte the same boolean it has always held —
+    /// issue 889 does NOT redefine this field.** `overall_pass` no longer folds `pass` directly
+    /// (see `relaxed_pass` below); `pass` still drives the issue-889 per-window WARN and the
+    /// `windows_failed_report_only` count on [`SegmentedContinuity`].
     pub pass: bool,
+    /// Issue 889 (2026-07-30 user decision on issue 883): the verdict actually folded into
+    /// `overall_pass` — `frame_count > 0 && <undecodable within the #881 floor>`, WITHOUT
+    /// `copies`/`gaps`. Computed by [`crate::window_gate::decide`]. `copies`/`gaps` stay computed
+    /// and printed above (report-only, never silently dropped) — this field is the ONLY thing
+    /// that changed about how this window feeds the run's overall verdict. TEMPORARY,
+    /// restore-gated on issue 883 item 4 (root-cause the loss) + two consecutive clean STRICT
+    /// runs — see `crate::window_gate` for the full decision record.
+    pub relaxed_pass: bool,
     /// #333: an explicit human diagnostic, populated ONLY for a `frames == 0` window — the most
     /// likely cause is the dual-QR PAINTER box (it does not emit its own camera NDI while painting,
     /// #179) or a down / non-emitting box, NOT a chain frame loss. Surfaced so an empty window is
@@ -157,11 +172,14 @@ pub struct CamboxSegment {
 pub struct SegmentedContinuity {
     /// One verdict per schedule window, in schedule order.
     pub segments: Vec<CamboxSegment>,
-    /// PASS ⇔ the schedule is non-empty AND EVERY window is clean (every covered cambox passed)
+    /// PASS ⇔ the schedule is non-empty AND EVERY window's [`CamboxSegment::relaxed_pass`] holds
     /// AND the SUM of `undecodable` across every window stays within #881's run-wide calibrated
     /// floor (`crate::optical_floor::run_within_floor`) — the load-bearing half of the floor: a
     /// per-window-only check would let many windows each individually within floor sum past the
-    /// pre-#707 regression level undetected. TEMPORARY; deleted with #881.
+    /// pre-#707 regression level undetected. The `undecodable` floor is TEMPORARY; deleted with
+    /// #881. **Issue 889 (2026-07-30 user decision on issue 883): this now folds `relaxed_pass`,
+    /// NOT the strict `pass` — the per-window `copies`/`gaps` terms are report-only** (see
+    /// `windows_failed_report_only` below and `crate::window_gate` for the full decision record).
     pub overall_pass: bool,
     /// The transition guard applied (ns).
     pub guard_ns: i64,
@@ -172,6 +190,13 @@ pub struct SegmentedContinuity {
     /// Frames whose `gen_ts_ns` fell in NO scheduled window (recorded outside any cambox's
     /// program window — reported for honesty, not attributed to any cambox).
     pub unplaceable_frames: u32,
+    /// Issue 889 visibility requirement 2 — the count of windows whose STRICT verdict
+    /// ([`CamboxSegment::pass`]) is `false`, i.e. how many windows would have FAILED under the
+    /// pre-889 rule. Always serialized (never skipped), even at 0, so silence is never mistaken
+    /// for strictness — the caller (`recording-verdict`) prints the matching loud WARN block
+    /// unconditionally too. A nonzero count here with `overall_pass == true` is #889's relaxation
+    /// visibly doing its job, not a hidden regression.
+    pub windows_failed_report_only: u32,
     /// #707 EVENT-FORENSICS — every segment's [`CamboxSegment::residual_events`], concatenated in
     /// schedule order, for a caller that wants the whole run's residual events without walking
     /// `segments` itself (e.g. the Discord report / the collector script).
@@ -330,7 +355,9 @@ pub fn segment_continuity(
             &window_frames[wi],
             expected_step,
         );
-        overall_pass &= seg.pass;
+        // Issue 889 (2026-07-30 user decision on issue 883): fold the RELAXED verdict, not the
+        // strict `pass` — `copies`/`gaps` are report-only now. See `crate::window_gate`.
+        overall_pass &= seg.relaxed_pass;
         all_residual_events.extend(seg.residual_events.iter().cloned());
         segments.push(seg);
     }
@@ -338,13 +365,20 @@ pub fn segment_continuity(
     // #881 — the run-wide half of the calibrated optical-undecodable floor: the SUM across every
     // window must ALSO stay within its own cap, even when every individual window already passed
     // its own per-window term (see `crate::optical_floor`'s "Two terms, not one" — a per-window-
-    // only check would let the pre-#707 regression level through undetected).
+    // only check would let the pre-#707 regression level through undetected). UNTOUCHED by
+    // issue 889 — the undecodable floor is not one of the relaxed terms.
     let total_undecodable: u32 = segments.iter().map(|s| s.undecodable).sum();
     overall_pass &= crate::optical_floor::run_within_floor(total_undecodable);
+
+    // Issue 889 visibility requirement 2 — how many windows would have FAILED under the pre-889
+    // strict rule, regardless of whether the run-wide relaxed verdict passes. Always computed,
+    // never gated on `overall_pass`'s own value.
+    let windows_failed_report_only = segments.iter().filter(|s| !s.pass).count() as u32;
 
     SegmentedContinuity {
         segments,
         overall_pass,
+        windows_failed_report_only,
         guard_ns,
         residual_events: all_residual_events,
         expected_step,
@@ -462,11 +496,15 @@ fn window_segment(
 
     // #881 — the per-window half of the calibrated optical-undecodable floor (TEMPORARY; a
     // physical 60Hz temporal-tear artifact of the test camera's monitor, not chain loss — see
-    // `crate::optical_floor`). `copies == 0` and `gaps == 0` are NOT floored and never relaxed.
+    // `crate::optical_floor`).
     let pass = frame_count > 0
         && crate::optical_floor::window_within_floor(undecodable, frame_count)
         && copies == 0
         && gaps == 0;
+    // Issue 889 RED-stub: `relaxed_pass` is not yet wired to `crate::window_gate::decide` -- it
+    // still mirrors the strict `pass` above, so every test asserting the actual relaxation fails
+    // on purpose. The GREEN commit replaces this with the real `window_gate::decide` call.
+    let relaxed_pass = pass;
     // #333: a ZERO-frame window is empty by construction, not chain loss — flag it loudly so it is
     // not misread as a continuity break. The dominant cause is sweeping the dual-QR painter box
     // (it does not emit its own camera NDI while painting, #179) or a down / non-emitting box.
@@ -487,6 +525,7 @@ fn window_segment(
         first_tick,
         last_tick,
         pass,
+        relaxed_pass,
         note,
         presentation_cadence,
         residual_events,
@@ -574,8 +613,11 @@ mod tests {
     }
 
     #[test]
-    fn gap_in_one_window_fails_that_cambox_others_pass_overall_fail() {
-        // cam1 clean; cam2 has a tick that skips by 3 (a real drop at step 1) → cam2 FAILs.
+    fn gap_in_one_window_fails_strict_but_889_relaxes_overall_pass() {
+        // cam1 clean; cam2 has a tick that skips by 3 (a real drop at step 1). Issue 889
+        // (2026-07-30 user decision on issue 883): `gaps` is now report-only — the STRICT
+        // per-window `pass` still catches it (unchanged), but `overall_pass` folds
+        // `relaxed_pass` and no longer fails on a gap alone (undecodable=0, frame_count>0).
         let schedule = vec![win("cam1", 0, 1000), win("cam2", 1000, 2000)];
         let mut frames = clean_frames(0, 100, 6, 1, 100);
         // cam2: 500,501,504,505 — 502,503 absent (a real gap), step 1.
@@ -602,20 +644,32 @@ mod tests {
             },
         ]);
         let v = segment_continuity(&frames, &schedule, 0, 1);
-        assert!(!v.overall_pass, "a gap ⇒ overall FAIL: {v:?}");
+        assert!(
+            v.overall_pass,
+            "889: a gap alone (undecodable=0) no longer fails overall_pass: {v:?}"
+        );
         assert!(v.segments[0].pass, "cam1 still clean: {:?}", v.segments[0]);
         assert!(
             !v.segments[1].pass,
-            "cam2 has the gap → FAIL: {:?}",
+            "cam2's STRICT verdict still catches the gap (unchanged): {:?}",
+            v.segments[1]
+        );
+        assert!(
+            v.segments[1].relaxed_pass,
+            "889: cam2's relaxed verdict passes despite the gap: {:?}",
             v.segments[1]
         );
         assert!(
             v.segments[1].gaps >= 1,
-            "cam2 gap counted: {:?}",
+            "889: gaps is still COMPUTED and printed, only report-only: {:?}",
             v.segments[1]
         );
         assert_eq!(v.segments[1].undecodable, 0);
         assert_eq!(v.segments[1].copies, 0);
+        assert_eq!(
+            v.windows_failed_report_only, 1,
+            "889: exactly one window would have failed under the strict rule: {v:?}"
+        );
     }
 
     #[test]
@@ -688,10 +742,13 @@ mod tests {
     }
 
     #[test]
-    fn undecodable_within_floor_but_a_copy_present_still_fails_881() {
-        // The #881 floor governs ONLY the optical `undecodable` term. A copy (or a gap) in the
-        // SAME window must still fail it even when undecodable alone would be within floor —
-        // `copies == 0` / `gaps == 0` are not relaxed, now or ever (issue 854 design).
+    fn undecodable_within_floor_and_a_copy_present_now_passes_relaxed_but_still_fails_strict_889() {
+        // The #881 floor governs ONLY the optical `undecodable` term. A copy in the SAME window
+        // used to still fail the window (`copies == 0` / `gaps == 0` were "not relaxed, now or
+        // ever" per issue 854's design) -- issue 889 (2026-07-30 user decision on issue 883)
+        // supersedes exactly that framing for copies/gaps: the STRICT verdict is UNCHANGED
+        // (still fails on the copy), but the RELAXED verdict that now feeds `overall_pass`
+        // ignores it, since undecodable=1 is within the #881 floor on its own.
         let schedule = vec![win("cam2", 0, 10_000)];
         let frames = vec![
             SegmentFrame {
@@ -720,10 +777,19 @@ mod tests {
         assert_eq!(v.segments[0].copies, 1);
         assert!(
             !v.segments[0].pass,
-            "a copy still fails the window even though undecodable=1 is within the floor: {:?}",
+            "889: the STRICT verdict still fails on the copy, unchanged: {:?}",
             v.segments[0]
         );
-        assert!(!v.overall_pass);
+        assert!(
+            v.segments[0].relaxed_pass,
+            "889: the RELAXED verdict passes -- copy is report-only, undecodable(1) within floor: {:?}",
+            v.segments[0]
+        );
+        assert!(
+            v.overall_pass,
+            "889: overall_pass now folds relaxed_pass, so this run PASSES: {v:?}"
+        );
+        assert_eq!(v.windows_failed_report_only, 1);
     }
 
     #[test]
@@ -817,8 +883,10 @@ mod tests {
     }
 
     #[test]
-    fn copy_stale_frame_in_one_window_fails_that_cambox() {
-        // cam2 repeats a painted tick (500,500,501) → a stale/frozen copy → FAIL.
+    fn copy_stale_frame_in_one_window_fails_strict_but_889_relaxes_overall() {
+        // cam2 repeats a painted tick (500,500,501) → a stale/frozen copy → STRICT FAIL.
+        // Issue 889 (2026-07-30 user decision on issue 883): `copies` is report-only now, so
+        // `overall_pass` (which folds `relaxed_pass`) PASSES this run (undecodable=0).
         let schedule = vec![win("cam1", 0, 1000), win("cam2", 1000, 2000)];
         let mut frames = clean_frames(0, 100, 4, 1, 100);
         frames.extend([
@@ -839,26 +907,41 @@ mod tests {
             },
         ]);
         let v = segment_continuity(&frames, &schedule, 0, 1);
-        assert!(!v.overall_pass);
+        assert!(
+            v.overall_pass,
+            "889: a copy alone no longer fails overall_pass: {v:?}"
+        );
         assert!(v.segments[0].pass);
-        assert!(!v.segments[1].pass, "a copy ⇒ FAIL: {:?}", v.segments[1]);
+        assert!(
+            !v.segments[1].pass,
+            "889: the STRICT verdict still catches the copy: {:?}",
+            v.segments[1]
+        );
+        assert!(
+            v.segments[1].relaxed_pass,
+            "889: the relaxed verdict passes despite the copy: {:?}",
+            v.segments[1]
+        );
         assert_eq!(
             v.segments[1].copies, 1,
-            "exactly one copy: {:?}",
+            "889: still COMPUTED and printed, exactly one copy: {:?}",
             v.segments[1]
         );
         assert_eq!(v.segments[1].gaps, 0);
         assert_eq!(v.segments[1].undecodable, 0);
+        assert_eq!(v.windows_failed_report_only, 1);
     }
 
     #[test]
-    fn non_adjacent_freeze_hiding_a_real_drop_still_fails() {
+    fn non_adjacent_freeze_hiding_a_real_drop_still_fails_strict() {
         // REGRESSION (code-review finding): at expected_step=1 the per-node burn check's
         // PerEmittedFrame #226 logic would reclassify the dropped tick 102 as BURN-UNREADABLE
         // (a non-adjacent duplicate 100 sits in the gap) while a consecutive-only copy counter
-        // misses that non-adjacent freeze → a FALSE PASS. The direct painted-tick walk must FAIL:
-        // ticks 100,101,100,103 carry a backward jump (the frozen 100 after 101) AND a forward
-        // skip to 103 (102 dropped). Neither is silently cleared.
+        // misses that non-adjacent freeze → a FALSE PASS. The direct painted-tick walk must
+        // STILL FAIL STRICT: ticks 100,101,100,103 carry a backward jump (the frozen 100 after
+        // 101) AND a forward skip to 103 (102 dropped). Neither is silently cleared -- issue 889
+        // (2026-07-30 user decision on issue 883) only changes whether this window's FAILURE
+        // gates `overall_pass`; it does NOT touch whether `gaps` is correctly computed at all.
         let schedule = vec![win("cam1", 0, 10_000)];
         let frames = vec![
             SegmentFrame {
@@ -884,13 +967,23 @@ mod tests {
         ];
         let v = segment_continuity(&frames, &schedule, 0, 1);
         assert!(
-            !v.overall_pass,
-            "a hidden drop behind a non-adjacent freeze must FAIL: {v:?}"
+            !v.segments[0].pass,
+            "a hidden drop behind a non-adjacent freeze must still fail STRICT: {v:?}"
         );
         assert!(
             v.segments[0].gaps >= 1,
             "the real drop is counted as a gap, not silently cleared: {:?}",
             v.segments[0]
+        );
+        // 889: undecodable=0 and frame_count>0, so the RELAXED verdict (which ignores gaps) now
+        // passes -- proving `gaps` is still computed correctly even though it no longer gates.
+        assert!(
+            v.segments[0].relaxed_pass,
+            "889: relaxed verdict ignores gaps (undecodable within floor): {v:?}"
+        );
+        assert!(
+            v.overall_pass,
+            "889: overall_pass folds relaxed_pass: {v:?}"
         );
     }
 
@@ -947,7 +1040,9 @@ mod tests {
     #[test]
     fn benign_delivery_reorder_never_masks_a_real_drop_625() {
         // The reorder-tolerance fix must never MASK a genuine drop either: 1004 is truly missing
-        // (never delivered) on top of the same 1002/1006-adjacent reorder pattern.
+        // (never delivered) on top of the same 1002/1006-adjacent reorder pattern. Issue 889
+        // (2026-07-30 user decision on issue 883): `gaps` is report-only for `overall_pass` now,
+        // but it must still be COMPUTED correctly -- the STRICT per-window `pass` still fails.
         let schedule = vec![win("cam1", 0, 10_000)];
         let frames = vec![
             SegmentFrame {
@@ -973,13 +1068,20 @@ mod tests {
         ];
         let v = segment_continuity(&frames, &schedule, 0, 2);
         assert!(
-            !v.overall_pass,
-            "the genuinely-missing 1004 must still FAIL the window: {v:?}"
+            !v.segments[0].pass,
+            "the genuinely-missing 1004 must still fail STRICT: {v:?}"
         );
         assert_eq!(
             v.segments[0].gaps, 1,
             "exactly the one genuinely-missing tick, reorder or not: {:?}",
             v.segments[0]
+        );
+        // 889: undecodable=0 here, so the relaxed verdict (which ignores gaps) passes -- proving
+        // the gap is still correctly located/counted even though it no longer gates overall_pass.
+        assert!(v.segments[0].relaxed_pass);
+        assert!(
+            v.overall_pass,
+            "889: overall_pass folds relaxed_pass: {v:?}"
         );
     }
 
@@ -1150,14 +1252,20 @@ mod tests {
     fn step_2_data_with_expected_step_1_flags_gaps() {
         // The SAME step-2 data judged at expected_step=1 (no decimation expected) flags gaps —
         // proving the step parameter actually drives the check (a mutant fixing step→1 fails).
+        // Issue 889 (2026-07-30 user decision on issue 883): gaps no longer gate `overall_pass`,
+        // so this now PASSES relaxed even though the STRICT per-window `pass` still fails.
         let schedule = vec![win("cam1", 0, 100_000)];
         let frames = clean_frames(0, 1000, 10, 2, 1000);
         let v = segment_continuity(&frames, &schedule, 0, 1);
         assert!(
-            !v.overall_pass,
-            "step-2 data at expected_step=1 ⇒ gaps: {v:?}"
+            !v.segments[0].pass,
+            "step-2 data at expected_step=1 ⇒ gaps ⇒ STRICT fail: {v:?}"
         );
         assert!(v.segments[0].gaps >= 1, "gaps flagged: {:?}", v.segments[0]);
+        assert!(
+            v.overall_pass,
+            "889: gaps alone no longer fails overall_pass: {v:?}"
+        );
     }
 
     #[test]
@@ -1548,5 +1656,102 @@ mod tests {
         assert_eq!(seg.residual_events[0].missing_slots, Some(2));
         // The run-level flattened list must carry it too (#707 wiring, unaffected by #883).
         assert_eq!(v.residual_events.len(), 1, "{:?}", v.residual_events);
+    }
+
+    // ---- issue 889 (2026-07-30 user decision on issue 883): copies/gaps become report-only ----
+
+    #[test]
+    fn windows_failed_report_only_counts_strict_failures_across_a_mixed_run_889() {
+        // 3 windows: cam1 clean, cam2 has a copy only (would have failed strict), cam3 clean.
+        // `overall_pass` folds the RELAXED verdict -> PASSES; `windows_failed_report_only` still
+        // honestly counts the one window that would have failed under the pre-889 strict rule.
+        let schedule = vec![
+            win("cam1", 0, 1000),
+            win("cam2", 1000, 2000),
+            win("cam3", 2000, 3000),
+        ];
+        let mut frames = clean_frames(0, 100, 4, 1, 100);
+        frames.extend([
+            SegmentFrame {
+                frame_index: 100,
+                gen_ts_ns: 1100,
+                tick: Some(500),
+            },
+            SegmentFrame {
+                frame_index: 101,
+                gen_ts_ns: 1200,
+                tick: Some(500),
+            }, // cam2 copy
+            SegmentFrame {
+                frame_index: 102,
+                gen_ts_ns: 1300,
+                tick: Some(501),
+            },
+        ]);
+        frames.extend(clean_frames(2000, 100, 4, 1, 900));
+        let v = segment_continuity(&frames, &schedule, 0, 1);
+        assert!(
+            v.overall_pass,
+            "889: only a report-only term is dirty anywhere in this run: {v:?}"
+        );
+        assert!(v.segments[0].pass, "cam1 clean");
+        assert!(!v.segments[1].pass, "cam2 has the copy -> STRICT fail");
+        assert!(v.segments[2].pass, "cam3 clean");
+        assert_eq!(
+            v.windows_failed_report_only, 1,
+            "exactly cam2's window would have failed under the strict rule: {v:?}"
+        );
+    }
+
+    #[test]
+    fn undecodable_over_floor_combined_with_a_copy_still_fails_overall_889() {
+        // 889 relaxes ONLY copies/gaps -- an undecodable count that ALSO breaches the #881
+        // per-window floor must still fail `overall_pass` even when a copy is present too (the
+        // relaxation must never "rescue" a window that fails for an untouched reason).
+        // 1000,1000(copy),1001, then 5x None (undecodable -- over the floor of 4), then 1002.
+        let schedule = vec![win("cam2", 0, 10_000)];
+        let mut frames = vec![
+            SegmentFrame {
+                frame_index: 0,
+                gen_ts_ns: 100,
+                tick: Some(1000),
+            },
+            SegmentFrame {
+                frame_index: 1,
+                gen_ts_ns: 200,
+                tick: Some(1000),
+            }, // copy
+            SegmentFrame {
+                frame_index: 2,
+                gen_ts_ns: 300,
+                tick: Some(1001),
+            },
+        ];
+        for i in 0..5u64 {
+            frames.push(SegmentFrame {
+                frame_index: 3 + i,
+                gen_ts_ns: 400 + (i as i64) * 100,
+                tick: None,
+            });
+        }
+        frames.push(SegmentFrame {
+            frame_index: 8,
+            gen_ts_ns: 900,
+            tick: Some(1002),
+        });
+        let v = segment_continuity(&frames, &schedule, 0, 1);
+        assert_eq!(v.segments[0].undecodable, 5, "{:?}", v.segments[0]);
+        assert_eq!(v.segments[0].copies, 1, "{:?}", v.segments[0]);
+        assert!(!v.segments[0].pass, "strict fails: {:?}", v.segments[0]);
+        assert!(
+            !v.segments[0].relaxed_pass,
+            "889: relaxed ALSO fails -- the optical floor (undecodable=5 > 4) is untouched: {:?}",
+            v.segments[0]
+        );
+        assert!(
+            !v.overall_pass,
+            "889 never rescues an undecodable-over-floor window: {v:?}"
+        );
+        assert_eq!(v.windows_failed_report_only, 1);
     }
 }
