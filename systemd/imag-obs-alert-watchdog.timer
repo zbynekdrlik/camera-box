@@ -1,0 +1,16 @@
+[Unit]
+# Fires the #882 imag-nb OBS liveness alert every 5 min, matching imag-wallpaper-refresh.timer's
+# own cadence on imag-nb so the two detections stay in lockstep. Confirm threshold 1 means a dead
+# OBS pages within ~5 minutes of onset — closing the gap that let the real incident (imag-nb OBS
+# segfaulted, dark for ~70 minutes) go completely unalerted.
+Description=Run the camera-box imag-nb OBS liveness alert every 5 min (#882)
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=20s
+Persistent=false
+
+[Install]
+WantedBy=timers.target

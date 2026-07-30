@@ -95,28 +95,14 @@ fn wallpaper_refresh_unit_files_exist_and_match_the_live_box() {
 }
 
 // ================================================================================================
-// scripts/imag-wallpaper-refresh.sh — the alert wiring (#882 item 2)
+// scripts/imag-wallpaper-refresh.sh — item 2's alert do NOT live here (corrected after live
+// verification, #882): imag-nb is a remote appliance box with no ~/devel/airuleset checkout and
+// no Discord credentials, so it structurally CANNOT fire the notify call itself -- a first
+// attempt to alert directly from this script failed live every time. The alert moved to a
+// DEV1-SIDE watchdog (scripts/imag-obs-alert-watchdog.sh, tests/harness_imag_obs_alert_watchdog_882.rs)
+// that polls imag-nb over SSH via the SAME #882 reachability probe this file's [0/8] preflight
+// tests already cover. This script is UNCHANGED from before #882 -- screenshot refresh only.
 // ================================================================================================
-
-#[test]
-fn wallpaper_refresh_sources_the_391_decision_lib_never_a_new_poller() {
-    let body = read(WALLPAPER_SCRIPT);
-    assert!(
-        body.contains("obs-watchdog-decision.sh"),
-        "must reuse the #391 pure decision functions (obs_watchdog_confirm / \
-         obs_watchdog_alert_throttle) -- never invent a second poller/alert mechanism"
-    );
-}
-
-#[test]
-fn wallpaper_refresh_alerts_via_the_same_notify_path_as_391() {
-    let body = read(WALLPAPER_SCRIPT);
-    assert!(
-        body.contains("airuleset.py"),
-        "must fire through the SAME airuleset.py notify path #391's watchdog already uses, \
-         never a hand-rolled Discord call"
-    );
-}
 
 #[test]
 fn wallpaper_refresh_still_keeps_the_existing_fallback_when_obs_is_down() {

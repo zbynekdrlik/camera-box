@@ -1,0 +1,11 @@
+[Unit]
+# imag-nb OBS liveness alert (#882), DEV1-SIDE. ONE measure -> decide -> alert pass.
+Description=camera-box imag-nb OBS liveness alert (#882) — one measure/decide/alert pass
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Service]
+Type=oneshot
+# %h = the installing user's home. Adjust if the checkout lives elsewhere on dev1.
+ExecStart=%h/devel/camera-box/scripts/imag-obs-alert-watchdog.sh
+# One ssh round-trip to imag-nb; give it room but never hang the timer.
+TimeoutStartSec=30
