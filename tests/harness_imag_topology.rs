@@ -62,20 +62,27 @@ fn recording_e2e_defines_imag_capture_fps_default_60() {
 
 // ---------------------------------------------------------------------------
 // [4d/8] render-budget-gate call site — `--box imag=10.77.9.182:60` (issue text point 3).
+//
+// issue 888 (2026-07-30, temporary user-directed relaxation) SPLIT this from one joint 3-box
+// call into TWO separate render-budget-gate.py invocations: strih+stream stay strict in their
+// own call, imag is measured by its OWN separate, report-only call (no `exit 1`, a loud WARN
+// naming issue 888/886). See tests/harness_render_budget_imag_report_only_888.rs for the full
+// lock on the split's non-aborting/WARN/no-env-knob shape — this file only guards that strih and
+// stream keep their 30fps boxes and that imag is no longer folded into their same call/window.
 // ---------------------------------------------------------------------------
 
-/// The render-budget-gate call MUST include imag at its 60fps target, alongside strih/stream at
-/// 30fps — the exact `--box imag=…:60` the issue asks for. The generic Python tool needs NO logic
-/// change (per the issue text) — only this call site.
+/// strih/stream MUST keep their own `--box …:30` args in their own (still-strict) call, and imag
+/// must NOT be part of that same call/window any more (issue 888 split it out into its own
+/// separate, report-only call — locked in tests/harness_render_budget_imag_report_only_888.rs).
 #[test]
-fn render_budget_gate_call_site_includes_imag_at_60fps() {
+fn render_budget_gate_strih_stream_call_site_no_longer_includes_imag_888() {
     let s = read("scripts/recording-e2e.sh");
     // Anchor on `--box "strih=` (NOT the bare "render-budget-gate.py" script name) -- #758 added
     // an EARLIER, imag-only render-budget-gate.py preflight call (an [1/8] render-health check,
     // before ANY box is deployed), so `.find("render-budget-gate.py")` would now latch onto that
-    // one-box call instead of this THREE-box [4d/8] call site. `--box "strih=` is unique to this
-    // call (the [1/8] preflight never measures strih) and is therefore anchor-stable regardless
-    // of how many OTHER render-budget-gate.py invocations get added elsewhere in the future.
+    // one-box call instead of this [4d/8] call site. `--box "strih=` is unique to this call (the
+    // [1/8] preflight never measures strih) and is therefore anchor-stable regardless of how many
+    // OTHER render-budget-gate.py invocations get added elsewhere in the future.
     let call = s
         .find("--box \"strih=")
         .expect("recording-e2e.sh must invoke render-budget-gate.py with a strih box");
@@ -90,9 +97,9 @@ fn render_budget_gate_call_site_includes_imag_at_60fps() {
         "render-budget-gate call must keep the stream=…:30 box. Got:\n{window}"
     );
     assert!(
-        window.contains("--box \"imag=${IMAG_IP}:${RENDER_TARGET_FPS_IMAG:-60}\""),
-        "#462: render-budget-gate call must add imag=…:60 (imag-nb's own low-latency rate). \
-         Got:\n{window}"
+        !window.contains("--box \"imag="),
+        "issue 888: imag must no longer be folded into the strih/stream call/window -- it must \
+         be measured by its OWN separate, report-only call. Got:\n{window}"
     );
 }
 
