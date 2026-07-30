@@ -319,5 +319,12 @@ pub mod optical_payload_check;
 // tests Tier-0.
 pub mod offline_ack;
 
+// #881 (via #854/#707) — the TEMPORARY calibrated floor for the all-cambox segment continuity's
+// optical `undecodable` term (a physical 60Hz temporal-tear artifact of the test camera's
+// monitor, not chain loss). No probe deps, so it unit-tests Tier-0;
+// `probe::recording_segments::window_segment`/`segment_continuity` only CALL it. Deleted
+// together with #881 (connect cam2's 120Hz monitor, restore the term to absolute zero).
+pub mod optical_floor;
+
 #[cfg(feature = "probe")]
 pub mod probe;
