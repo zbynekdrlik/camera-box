@@ -1791,3 +1791,72 @@ fn recording_e2e_rejects_all_cambox_combined_with_a_non_cam1_source_camera() {
          primary SOURCE camera too would double-deploy the same physical box."
     );
 }
+
+// ---------------------------------------------------------------------------
+// #862 — fleet-wide dantesync VERSION-PARITY gate wiring.
+//
+// Neither the DanteSync NTP+PTP gate (#7) nor the version-integrity gate (#123) ever checks the
+// dantesync DAEMON's own version -- a fleet running a pre-#53-burst-filter dantesync (#836/#851's
+// imag-nb/dev1 drift) can pass both cleanly. This gate is the missing check: every managed node,
+// including dev1 itself (the box running this very script), must report a dantesync version
+// matching the fleet pin. These guards lock the wiring so a refactor cannot silently drop it.
+// ---------------------------------------------------------------------------
+
+/// recording-e2e.sh must invoke the dantesync version-parity gate, reusing the SAME
+/// VERSION_STRIH_STATE/VERSION_STREAM_STATE bundle-state files the version-integrity gate above
+/// already fetched (dantesync_version is one more key in that SAME payload, #862 point 1) --
+/// never a second, independently-fetched state file for the same two boxes.
+#[test]
+fn recording_e2e_runs_the_dantesync_version_gate() {
+    let s = read("scripts/recording-e2e.sh");
+    assert!(
+        s.contains("dantesync-version-gate.sh"),
+        "#862: recording-e2e.sh must invoke dantesync-version-gate.sh"
+    );
+    assert!(
+        s.contains("--win-state \"strih=$VERSION_STRIH_STATE\""),
+        "#862: the dantesync version gate must reuse the SAME strih bundle-state file as #123 \
+         (missing -> UNKNOWN -> refuse), never a second independent fetch"
+    );
+    assert!(
+        s.contains("--win-state \"stream=$VERSION_STREAM_STATE\""),
+        "#862: the dantesync version gate must reuse the SAME stream bundle-state file as #123"
+    );
+}
+
+/// dev1 itself (the box running this gate) must be checked -- #862 point 2: the harness's own
+/// host is never exempt from the fleet-wide parity check just because it is convenient.
+#[test]
+fn dantesync_version_gate_checks_dev1_itself() {
+    let s = read("scripts/recording-e2e.sh");
+    let gate_idx = s
+        .find("dantesync-version-gate.sh")
+        .expect("recording-e2e.sh must invoke dantesync-version-gate.sh");
+    // The --local dev1 flag must appear as part of THIS gate's own invocation (within a short
+    // window after the binary name), not merely exist somewhere unrelated in the file.
+    let window = &s[gate_idx..(gate_idx + 400).min(s.len())];
+    assert!(
+        window.contains("--local dev1") || window.contains("--local \"dev1\""),
+        "#862 point 2: dev1 must be passed to the dantesync version gate via --local -- \
+         the harness's own host must never be silently exempted. window={window:?}"
+    );
+}
+
+/// The dantesync version-parity gate must run BEFORE StartRecord (#862) -- fail fast on a
+/// version-drifted fleet before any measurement, exactly like the DanteSync NTP+PTP gate and the
+/// version-integrity gate above it.
+#[test]
+fn dantesync_version_gate_runs_before_any_recording() {
+    let s = read("scripts/recording-e2e.sh");
+    let gate = s
+        .find("dantesync-version-gate.sh")
+        .expect("recording-e2e.sh must invoke dantesync-version-gate.sh");
+    let start_record = s
+        .find("StartRecord on strih")
+        .expect("recording-e2e.sh must start OBS recording");
+    assert!(
+        gate < start_record,
+        "#862: the dantesync version-parity gate must run BEFORE StartRecord (fail fast on a \
+         version-drifted fleet)"
+    );
+}
