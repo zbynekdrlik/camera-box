@@ -98,6 +98,23 @@ itself needed to fix that run, HOLD the push until the hardware run reaches a te
 worker dispatch does not own the hardware gate (the supervisor does, per the autopilot-worker
 brief), and cancelling real rig time for an unrelated docs/log commit wastes it for nothing.
 
+**In a two-(or-more)-worker shared checkout (see the top-level CLAUDE.md's shared-checkout GOTCHA),
+your OWN just-triggered E2E run can get cancelled again moments later WITHOUT you pushing anything
+further (2026-07-30, issue 889 session).** Confirmed live: worker A held its push until an
+in-flight E2E (SHA X) reached a terminal state, then pushed its own final commit (SHA Y) once
+that was true — correctly following the rule above. The fresh E2E run for SHA Y still got
+`cancelled` within ~10 minutes with `git log origin/dev` showing NO new commit on top of Y at all.
+The cause: worker B (a different ticket, same shared PR) pushed its OWN commit in the same window,
+which per the concurrency group above (keyed on the PR NUMBER, so every worker on this PR shares
+ONE slot) cancels whichever `pull_request` E2E run is currently occupying it, whether or not that
+run belongs to "your" SHA. **This is expected turbulence in a multi-worker PR, not a sign your
+push broke something** — do not `gh run rerun` it yourself to "fix" it (that is still the
+supervisor's call, per the same brief), and do not treat the cancellation as evidence of a defect
+in your own commit. The regular (non-hardware) `CI` workflow run for your SHA is the one that
+actually proves your code — if IT shows `success`, your work is verified regardless of how many
+times the shared PR's hardware slot gets bounced around by concurrent pushes before the
+supervisor gets a clean run through it.
+
 ## `run_sourced`-style bash test harnesses inherit the sourced script's OWN `set -e`
 
 `tests/version_integrity_gate.rs`'s `run_sourced` helper (and any similar harness in this repo
