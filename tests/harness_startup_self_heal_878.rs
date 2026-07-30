@@ -265,8 +265,8 @@ fn assert_wrapper_delegates(real_lib_rel: &str, real_call: &str, wrapper_call: &
     let harness = format!(
         "set -uo pipefail\n. {real_lib:?}\n. {:?}\n{real_call} > {:?}\n{wrapper_call} > {:?}",
         lib_script(),
-        &real_out,
-        &wrap_out,
+        real_out,
+        wrap_out,
     );
     let out = Command::new("bash")
         .arg("-c")
