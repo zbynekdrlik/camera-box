@@ -139,6 +139,12 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # 0-255 Elgato 4K S cards (their own default is 128).
 # shellcheck source=scripts/lib/v4l2-neutral.sh
 . "$HERE/lib/v4l2-neutral.sh"
+# #707: give the [2/8]/[2b/8] burn-mode systemd-run unit the SAME CPU affinity mask production's
+# camera-box.service carries (issue 289's CPUAffinity= drop-in only ever applies to a unit
+# literally named camera-box.service -- the transient burn unit got none at all). Derived from
+# the box's own /sys/devices/system/cpu/isolated at deploy time, never a hardcoded core number.
+# shellcheck source=scripts/lib/cpu-affinity-burn.sh
+. "$HERE/lib/cpu-affinity-burn.sh"
 # #749: sweep stale /tmp/camera-box-burn-* binaries a prior run's own cleanup() failed to remove
 # (a flaky ssh round-trip, #737) BEFORE this run's own scp deploy -- each box's /tmp is a 100MB
 # tmpfs that CAN fill outright (CAM1 + CAM6 both hit 100% live) and fail the deploy hard.
@@ -1485,10 +1491,12 @@ sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$CAM1_IP" \
    $(v4l2_neutral_resolve_node_cmd) \
    i=0; while fuser -s \$V4L2_NEUTRAL_NODE 2>/dev/null && [ \$i -lt 30 ]; do sleep 0.5; i=\$((i+1)); done; \
    $(v4l2_neutral_set_default_cmd) \
+   $(cpu_affinity_burn_resolve_cmd) \
    rm -f /tmp/cbox-burn.log; \
    systemd-run --unit=$CAM1_BURN_UNIT --collect \
      --property=Restart=on-failure --property=RestartSec=3 \
      --property=StandardOutput=append:/tmp/cbox-burn.log --property=StandardError=append:/tmp/cbox-burn.log \
+     \$CPU_AFFINITY_BURN_PROPERTY \
      --setenv=CAMERA_BOX_GENLOCK_FPS=$GENLOCK_FPS --setenv=CAMERA_BOX_BURN_RUN_ID=$SRC_BURN_RUN_ID \
      --setenv=CAMERA_BOX_CAPTURE_STATS=/tmp/cam1-capture-stats.txt --setenv=NDI_RUNTIME_DIR_V6=/usr/lib/ndi \
      $CAM1_BURN_BIN"
@@ -1546,10 +1554,12 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
        $(v4l2_neutral_resolve_node_cmd) \
        i=0; while fuser -s \$V4L2_NEUTRAL_NODE 2>/dev/null && [ \$i -lt 30 ]; do sleep 0.5; i=\$((i+1)); done; \
        $(v4l2_neutral_set_default_cmd) \
+       $(cpu_affinity_burn_resolve_cmd) \
        rm -f /tmp/cbox-burn-${_cn}.log; \
        systemd-run --unit=$_cunit --collect \
          --property=Restart=on-failure --property=RestartSec=3 \
          --property=StandardOutput=append:/tmp/cbox-burn-${_cn}.log --property=StandardError=append:/tmp/cbox-burn-${_cn}.log \
+         \$CPU_AFFINITY_BURN_PROPERTY \
          ${_cnodisplay_setenv}--setenv=CAMERA_BOX_GENLOCK_FPS=$GENLOCK_FPS --setenv=CAMERA_BOX_BURN_RUN_ID=$_cburn \
          --setenv=NDI_RUNTIME_DIR_V6=/usr/lib/ndi \
          $_cbin"

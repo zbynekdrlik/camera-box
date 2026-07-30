@@ -224,7 +224,8 @@ fn regression_cam1_systemd_run_carries_the_property_707() {
         .expect("#668/#707: expected the deploy block to end at its post-launch `sleep 4`");
     let block = &text[deploy_start..deploy_end];
     assert!(
-        block.contains("cpu_affinity_burn_resolve_cmd") && block.contains("CPU_AFFINITY_BURN_PROPERTY"),
+        block.contains("cpu_affinity_burn_resolve_cmd")
+            && block.contains("CPU_AFFINITY_BURN_PROPERTY"),
         "#707: the [2/8] cam1 deploy's systemd-run invocation must carry the SAME CPU affinity \
          mask production has, via the shared helper. Block:\n{block}"
     );
