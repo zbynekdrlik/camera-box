@@ -160,7 +160,11 @@ fn message_for_reachable_is_empty_caller_proceeds_to_the_real_attempt() {
 
 #[test]
 fn no_message_ever_hardcodes_a_wrong_connector_name() {
-    for probe in ["OBS_PROCESS_ABSENT", "OBS_PORT_NOT_LISTENING", "OBS_REACHABLE"] {
+    for probe in [
+        "OBS_PROCESS_ABSENT",
+        "OBS_PORT_NOT_LISTENING",
+        "OBS_REACHABLE",
+    ] {
         let msg = message_for(probe);
         assert!(
             !msg.contains("DP-0") && !msg.contains("HDMI-0"),

@@ -159,7 +159,11 @@ fn obs_reachable_never_alerts() {
     let h = Harness::new("OBS_REACHABLE");
     let (code, _out, err) = h.run_main();
     assert_eq!(code, 0, "stderr={err}");
-    assert_eq!(h.notify_call_count(), 0, "a healthy imag-nb must never alert");
+    assert_eq!(
+        h.notify_call_count(),
+        0,
+        "a healthy imag-nb must never alert"
+    );
 }
 
 #[test]

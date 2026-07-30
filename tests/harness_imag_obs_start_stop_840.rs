@@ -229,7 +229,9 @@ fn imag_obs_start_idempotent_already_running_path_is_unchanged_882() {
         body.contains("OBS uz bezi -- nic nerobim."),
         "{START} must still print the existing idempotent no-op message"
     );
-    let idempotent = body.find("OBS uz bezi").expect("idempotent message present");
+    let idempotent = body
+        .find("OBS uz bezi")
+        .expect("idempotent message present");
     let launch = body
         .find("obs --disable-shutdown-check &")
         .expect("launch line present");
