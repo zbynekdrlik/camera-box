@@ -350,5 +350,11 @@ pub mod phase_sync_active_floor;
 // `probe::burn_contiguity::burn_contiguity_in_window_with_step_and_schedule` calls it.
 pub mod window_boundary_tolerance;
 
+// #804 (epic #800 A/V-desync endgame round) — ASRC bench harness: two independent free-running
+// clock domains simulated deterministically, with the TDD RED/GREEN gate #803's real ASRC (a
+// per-source rate estimator + libswresample soft compensation in the vendored libobs) must
+// satisfy. No probe deps, so it unit-tests Tier-0 on a plain CI/bench machine — no rig required.
+pub mod asrc_bench;
+
 #[cfg(feature = "probe")]
 pub mod probe;
