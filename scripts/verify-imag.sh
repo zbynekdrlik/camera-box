@@ -367,14 +367,20 @@ imag_nvidia_verdict() {
 # was wired into the fleet and imag_scenes.py's own CAMS range still excluded it (the exact bug
 # this whole ticket exists to catch). The caller passes the CURRENT expected count (derived from
 # imag_scenes.py's own IMAG_SCENE_CAM_COUNT default/override), never a re-hardcoded number here.
+#
+# #843: the MV line's real text is "MV scenes: N/N (multiview, low-bw) OK" -- imag_scenes.py's
+# own f-string prints that qualifier BETWEEN the count and OK. The regex below matches it
+# verbatim rather than an assumed "MV scenes: N/N OK" shape, which could never match on any box
+# (confirmed via git log -p: wrong since the check's very first commit, not a regression).
 imag_scenes_output_ok() {
   local out="$1" count="$2"
   [ -n "$count" ] || return 1
-  # Line-anchored (^) -- "MV scenes: N/N OK" contains "scenes: N/N OK" as a plain SUBSTRING, so an
-  # unanchored -F match would wrongly pass the main-scenes check off the MV line alone even when
-  # the main "scenes: N/N" line reports a shortfall. Anchor each to its own line's start.
+  # Line-anchored (^) -- "MV scenes: N/N ... OK" contains "scenes: N/N ... OK" as a plain
+  # SUBSTRING, so an unanchored -F match would wrongly pass the main-scenes check off the MV line
+  # alone even when the main "scenes: N/N" line reports a shortfall. Anchor each to its own
+  # line's start.
   printf '%s\n' "$out" | grep -qE "^scenes: ${count}/${count} OK" \
-    && printf '%s\n' "$out" | grep -qE "^MV scenes: ${count}/${count} OK"
+    && printf '%s\n' "$out" | grep -qE "^MV scenes: ${count}/${count} \(multiview, low-bw\) OK"
 }
 
 # --- (q) canonical scene ORDER + NDI-source bindings (imag_scenes.py --verify-parity, #791) ---

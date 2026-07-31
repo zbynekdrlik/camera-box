@@ -595,16 +595,21 @@ fn gm_check_composes_correctly_when_reused_from_clock_offset_guard_sh() {
 fn imag_scenes_output_ok_requires_both_sets_complete() {
     // #791: imag_scenes_output_ok now takes an EXPECTED_COUNT parameter (cam7 widened the fleet
     // from 6 to 7; the count must never be re-hardcoded as a literal "6" here again).
+    //
+    // #843: the OUT/SHORT fixtures below use imag_scenes.py's REAL printed line --
+    // "MV scenes: N/N (multiview, low-bw) OK" -- not the old assumed "MV scenes: N/N OK" shape.
+    // The regex must match the ACTUAL producer output, confirmed live on 10.77.9.187 2026-07-28
+    // (see #843), never an assumed format.
     let (code, out, err) = run_sourced(
         r#"
         OUT="video: 1920x1080@60/1 OK
 scenes: 7/7 OK
-MV scenes: 7/7 OK"
+MV scenes: 7/7 (multiview, low-bw) OK"
         if imag_scenes_output_ok "$OUT" 7; then echo YES; else echo NO; fi
 
         SHORT="video: 1920x1080@60/1 OK
 scenes: 6/7 MISSING ['Cam 7']
-MV scenes: 7/7 OK"
+MV scenes: 7/7 (multiview, low-bw) OK"
         if imag_scenes_output_ok "$SHORT" 7; then echo YES; else echo NO; fi
 
         # A stale caller that forgot to pass the count at all must fail closed, not silently
@@ -617,7 +622,8 @@ MV scenes: 7/7 OK"
     assert_eq!(
         lines,
         vec!["YES", "NO", "NO"],
-        "a short scene set must fail the gate, and a missing count must fail closed: {out:?}"
+        "a healthy real MV-scenes line must PASS, a short scene set must fail the gate, and a \
+         missing count must fail closed: {out:?}"
     );
 }
 

@@ -231,6 +231,24 @@ def compute_phase_sync_offsets(measured: dict, gate_bin: "str | None" = None) ->
     return _run_gate_bin(measured, gate_bin)
 
 
+def active_ndi_sources() -> set:
+    """#893 -- the 'NDI camN' strih source names for every camera currently in
+    CAMERA_ACTIVE_SET (env var, default "cam1 cam2 cam3 cam4" -- same read convention
+    set-ndi-mapping.py's DEFAULT_ACTIVE_SET already uses). Mirrors
+    scripts/camera-set.sh's camera_active_ndi_sources_excluding_csv naming convention
+    ("NDI {cam}") exactly.
+
+    main() restricts --measured-json to this set before computing/applying offsets -- a
+    source outside it (a retired camera's stale entry, a foreign/stray key) is dropped and
+    WARNED about, never silently fed into the "slowest source" determination or written a
+    pin. This is the fix for #893's live regression: a stale measured-json entry for a
+    retired camera could otherwise corrupt the whole formula's notion of "slowest", and
+    --apply could write a pin to a camera that isn't even installed.
+    """
+    raw = os.environ.get("CAMERA_ACTIVE_SET", "cam1 cam2 cam3 cam4")
+    return {f"NDI {tok.strip()}" for tok in raw.replace(",", " ").split() if tok.strip()}
+
+
 def load_measured_json(path: str) -> dict:
     """Load {source_name: latency_ms} from a JSON file -- the per-camera measured cam->strih
     latencies (e.g. hand-assembled from `n_camera_median_latency_ms` output, keyed by the
@@ -380,7 +398,25 @@ def main():
     )
     args = ap.parse_args()
 
-    measured = load_measured_json(args.measured_json)
+    measured_all = load_measured_json(args.measured_json)
+
+    # #893: restrict to CAMERA_ACTIVE_SET BEFORE computing anything -- a source outside the
+    # active set (a retired camera's stale entry) must never enter the "slowest source"
+    # determination, and must never receive an applied pin.
+    active = active_ndi_sources()
+    measured = {s: v for s, v in measured_all.items() if s in active}
+    dropped = sorted(set(measured_all) - set(measured))
+    if dropped:
+        sys.stderr.write(
+            f"[phase-sync] #893 WARNING: ignoring non-active source(s) not in "
+            f"CAMERA_ACTIVE_SET: {', '.join(dropped)}\n"
+        )
+    if not measured:
+        sys.stderr.write(
+            "[phase-sync] #893 WARNING: no ACTIVE camera present in --measured-json -- "
+            "nothing to calibrate\n"
+        )
+
     offsets = compute_phase_sync_offsets(measured, gate_bin=args.gate_bin)
     if args.margin_ms > 0:
         before = dict(offsets)

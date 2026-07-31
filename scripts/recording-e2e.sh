@@ -1371,7 +1371,7 @@ else
   # by #757's new step 4f (a pre-record phase auto-pin, see further down this file)
   # pre-record phase auto-pin step (phase-sync-gate computes the offsets, genlock-jitter-report
   # parses the calibration window's audit log).
-  cargo build --release --bin frozen-camera-gate --bin render-budget-gate --bin av-restart-sync-gate --bin zero-loss-restart-gate --bin phase-sync-gate --bin genlock-jitter-report  # airuleset:build-ok
+  cargo build --release --bin frozen-camera-gate --bin render-budget-gate --bin av-restart-sync-gate --bin zero-loss-restart-gate --bin phase-sync-gate --bin genlock-jitter-report --bin phase-sync-active-floor-gate  # airuleset:build-ok
 fi
 
 # #758 item 1 (continued) — per-camera NDI liveness. Needs frozen-camera-gate (just
@@ -2732,6 +2732,26 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
   python3 "$HERE/imag_latency_enforce.py" --host "$IMAG_IP" --password "${IMAG_PW:-newlevel}" 2>&1 \
     | sed 's/^/    [imag-latency] /'
   set -e
+fi
+
+# [4h/8] #893 — machine-checked gate: at least one camera in CAMERA_ACTIVE_SET must sit at the
+# strih phase-sync floor (min(pin[c] for c in CAMERA_ACTIVE_SET) == 3ms -- the "slowest active
+# camera pinned at the floor" convention phase_sync_calibrate.py implements). Reads the LIVE
+# pins over OBS WebSocket -- never the persisted phase-sync-last.json, which is exactly what
+# let #893's live-vs-file divergence go unnoticed (the file kept showing a healthy 2026-07-09
+# calibration while the live pins had all drifted away from it) -- and FAILS the run HERE, before
+# StartRecord, rather than after a ~25-minute recording. Owner directive (#893): "nech to je tiez
+# v gate ze minimalne jedna aktivna kamera musi mat latenciu 3ms, nech sa tu dalsie tyzdne
+# nekrutime vo veciach ktore uz si vedel".
+if [ "${ALL_CAMBOX:-0}" = "1" ]; then
+  echo "[4h/8] #893 phase-sync active-floor gate — at least one ACTIVE strih camera must sit at the 3ms floor"
+  python3 "$HERE/phase_sync_active_floor_check.py" --host "$STRIH" --password "$STRIH_PW" \
+    --active-set "$CAMERA_ACTIVE_SET" \
+    --gate-bin "$PROBE_BIN_DIR/phase-sync-active-floor-gate" \
+    || {
+      echo "ERROR: [preflight] FAIL: #893 no ACTIVE camera sits at the strih phase-sync floor -- the slowest-active-camera-at-3ms convention has drifted. Recalibrate: python3 scripts/phase_sync_calibrate.py --host \$STRIH --measured-json <path> --apply" >&2
+      exit 1
+    }
 fi
 
 # #758 item 3 — arm the in-run freeze watch for the WHOLE recording window (StartRecord through

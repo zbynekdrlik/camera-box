@@ -108,10 +108,43 @@ REAL target with one live command BEFORE designing the whole gate around it — 
 fail-closed gate that will hard-block real work the moment the assumption is wrong. A design
 comment stating the premise as settled fact is not the same as having checked it live.
 
+## 5. `[1/8]` imag render-health preflight can fail on marginal fps (~57.5-57.65) with NO code change involved — check #865/#880/#886/#888 before suspecting your own diff (2026-07-31)
+
+The `[1/8]` imag render-health preflight (burn OFF, PROGRAM must hold 60fps with MV open) is
+**deliberately kept STRICT** even though the LATER `[4d/8]` render-budget gate's imag term was
+relaxed to report-only by #888 — #888's own body states this explicitly: *"The `[1/8]` imag
+render-health preflight (burn OFF) — unchanged, still aborts. This keeps a genuinely sick imag
+[box from silently passing]."* So a `[1/8]` failure is NOT covered by #888's relaxation and will
+still abort the run, exit 1, well before StartRecord — and well before any LATER preflight you
+may have just added gets a chance to run at all (confirmed live, 2026-07-31: a batch adding a
+brand-new `[4h/8]` preflight never even reached it because `[1/8]` aborted first).
+
+Two independent, ALREADY-TRACKED, unrelated-to-your-diff root causes can produce this:
+- **#865/#886** — the measurement burn itself costs ~11.5ms of imag's 16.67ms budget (this is
+  what #888 relaxed `[4d/8]` for — burn ON, mid-run). Not the cause of a `[1/8]` (burn OFF)
+  failure, but the same family.
+- **#880** — imag's iGPU clock floor (`gt_min_freq_mhz` pinned to the hardware ceiling per
+  `.claude/rules/imag-nb-provisioning.md`'s `#841` section) "may not hold": `gt_act_freq_mhz` has
+  been observed at 650-750MHz against a pinned 1400MHz floor — an open, tracked "candidate for
+  transient render-budget spikes". A `[1/8]` window reading 57.5-57.65fps (just ~2.5fps under
+  target, window 2 of 5 — NOT the tolerated warm-up window 1) is exactly this class of marginal,
+  load-dependent shortfall, not a deterministic regression.
+
+**Before touching any code over a `[1/8]` failure:** grep `gh issue list --search "render-health"`
+/ `"imag render fps"` for the open tracking tickets (#865/#880/#886/#888 as of 2026-07-31) — if
+your diff never touched `scripts/recording-e2e.sh`'s `[1/8]` block, `render-health-warmup.sh`, or
+imag's own render/GPU code, this is very likely the SAME known marginal-headroom class. Per
+`ci-monitoring.md`'s "one rerun rules out a transient" — `gh run rerun <run-id>` (never a fresh
+`gh workflow run`, which loses the `pull_request` event context, see this project's own
+`gh workflow run` GOTCHA in the top-level CLAUDE.md) is the correct, cheap way to check before
+investigating further or filing anything new.
+
 ## The general shape
 
 A hard gate that refuses in its first seconds is almost always reporting either (a) a **rig-side
 standing service that is not running** (incidents 1-3 above — check liveness of the gate's own
-dependencies first), or (b) a **read-path built on an unverified assumption about how to reach the
+dependencies first), (b) a **read-path built on an unverified assumption about how to reach the
 signal at all** (incident 4 — re-derive the value with one live command against the real target
-before trusting the design comment's claim). Never weaken the gate to get past either.
+before trusting the design comment's claim), or (c) a **known, already-tracked marginal-headroom
+preflight** (incident 5 — check the open tracking tickets before suspecting your own diff). Never
+weaken the gate to get past any of them.

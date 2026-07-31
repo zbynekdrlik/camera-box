@@ -1,6 +1,6 @@
 [package]
 name = "camera-box"
-version = "1.7.0-dev.395"
+version = "1.7.0-dev.396"
 edition = "2021"
 authors = ["zbynekdrlik"]
 description = "Simple USB video capture to NDI streaming appliance"
@@ -120,6 +120,10 @@ path = "src/bin/zero-loss-restart-gate.rs"
 [[bin]]
 name = "phase-sync-gate"
 path = "src/bin/phase-sync-gate.rs"
+
+[[bin]]
+name = "phase-sync-active-floor-gate"
+path = "src/bin/phase-sync-active-floor-gate.rs"
 
 [[bin]]
 name = "genlock-jitter-report"
