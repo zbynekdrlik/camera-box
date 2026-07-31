@@ -6878,6 +6878,17 @@ mod tests {
 
         // (b) 1:1 hop (--capture-fps 60 ⇒ step 1): the SAME gap stays a REAL DROP — the #356
         // SAFETY never-mask invariant, unchanged where the forward-gap signal is valid.
+        //
+        // #904 reconciliation: `build_and_print_verdict` now tolerates up to
+        // `REAL_DROPS_ALLOWANCE_DEFAULT` (2) genuine real_drops on a camera-under-test node
+        // before failing the headline (the owner-directed small allowance issue 904 adds) — a
+        // SINGLE injected gap (this test's original fixture) now falls WITHIN that allowance and
+        // legitimately passes, which is issue 904's own intended behavior, not a regression. This
+        // SAFETY test's actual invariant — a genuine real drop is never silently reclassified as
+        // zero-loss — still needs proving BEYOND the allowance, so the fixture now injects
+        // REAL_DROPS_ALLOWANCE_DEFAULT + 1 (3) well-separated gaps, matching the same "one past
+        // the allowance" fixture shape issue 904's own
+        // `real_drops_one_beyond_the_904_default_allowance_still_fails_904` test already uses.
         let args_1to1 = super::Args::parse_from([
             "recording-verdict",
             "--min-secs",
@@ -6885,14 +6896,15 @@ mod tests {
             "--capture-fps",
             "60",
         ]);
+        let gaps_beyond_allowance = [100, 250, 400]; // 3 gaps > REAL_DROPS_ALLOWANCE_DEFAULT (2)
         let (v2, pass2) = build_and_print_verdict(
             &args_1to1,
             Some(DecodedRec {
-                frames: window(N, false, Some(5)),
+                frames: window_multi_gap(N, false, &gaps_beyond_allowance),
                 rec_path: None,
             }),
             Some(DecodedRec {
-                frames: window(N, true, Some(5)),
+                frames: window_multi_gap(N, true, &gaps_beyond_allowance),
                 rec_path: None,
             }),
             Cam1Source::Absent,
@@ -6902,12 +6914,15 @@ mod tests {
             None, // #312 item 2 (PR A): no carried A/V-sync inputs in this test
         )
         .expect("verdict");
-        assert!(!pass2, "#356: a genuine 1:1-hop cam1 loss ⇒ overall FAIL");
+        assert!(
+            !pass2,
+            "#356: a genuine 1:1-hop cam1 loss beyond the issue-904 allowance ⇒ overall FAIL"
+        );
         assert_eq!(v2["full_chain"]["zero_loss"], serde_json::json!(false));
         assert!(
-            v2["full_chain"]["real_drops"].as_u64().unwrap() >= 1,
-            "#356 SAFETY: on the 1:1 hop a cam1 id absent from BOTH recordings MUST stay REAL \
-             DROP — never masked: {}",
+            v2["full_chain"]["real_drops"].as_u64().unwrap() > super::REAL_DROPS_ALLOWANCE_DEFAULT as u64,
+            "#356 SAFETY: on the 1:1 hop cam1 ids absent from BOTH recordings, beyond the issue-904 \
+             allowance, MUST stay REAL DROP — never masked: {}",
             v2["full_chain"]
         );
     }
