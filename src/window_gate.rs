@@ -6,11 +6,12 @@
 //! the full decision record (the failing evidence, run 30547146285) and the 3-part restore path
 //! (root-cause #883 item 4, two consecutive clean STRICT runs, delete this relaxation).
 //!
-//! **Not relaxed by this module, now or ever:** the `#881` calibrated optical-`undecodable`
-//! floor, `frame_count > 0`, the whole-run duration floor, and the `#186` run-wide `undecodable`
-//! cap — those are computed and folded in exactly as before; see `crate::optical_floor` and
-//! `probe::recording_segments::segment_continuity`. This module touches ONLY the `copies`/`gaps`
-//! terms.
+//! **Not relaxed by this module:** `frame_count > 0` and the whole-run duration floor — those are
+//! computed and folded in exactly as before. The `#881` calibrated optical-`undecodable` floor
+//! (per-window here, run-wide in `probe::recording_segments::segment_continuity`) WAS in that
+//! "never relaxed" set until issue 915 (2026-08-01, user decision) made it report-only too, using
+//! the exact same shape this module already established for `copies`/`gaps` — see
+//! `crate::optical_floor::gates_overall_pass` for the seam and restore path (issue 905).
 //!
 //! ## Why this lives at the crate root (default features), not in `probe`
 //!
@@ -44,12 +45,11 @@ pub struct WindowGateDecision {
 }
 
 impl WindowGateDecision {
-    /// `true` exactly when THIS window's `copies`/`gaps` term is the reason `strict_pass` and
-    /// `relaxed_pass` disagree — i.e. #889's relaxation, and only #889's relaxation, is doing
-    /// work on this window. `frame_count == 0` and an over-floor `undecodable` fail BOTH verdicts
-    /// (never just `strict_pass`), so this can never true-positive on those — see
-    /// `undecodable_over_floor_fails_both_verdicts_even_with_clean_copies_gaps_889` and
-    /// `zero_frames_fails_both_verdicts_889` below.
+    /// `true` exactly when THIS window's `copies`/`gaps` term (issue 889) and/or the optical
+    /// undecodable floor (issue 915) is the reason `strict_pass` and `relaxed_pass` disagree —
+    /// i.e. some report-only relaxation, and only a report-only relaxation, is doing work on this
+    /// window. `frame_count == 0` fails BOTH verdicts unconditionally (an absent cambox proves
+    /// nothing either way, never relaxed) — see `zero_frames_fails_both_verdicts_889` below.
     pub fn relaxed_by_889(&self) -> bool {
         !self.strict_pass && self.relaxed_pass
     }
@@ -60,12 +60,18 @@ impl WindowGateDecision {
 /// frame contents, it only combines counts that are already known).
 pub fn decide(frame_count: u32, undecodable: u32, copies: u32, gaps: u32) -> WindowGateDecision {
     let undecodable_ok = crate::optical_floor::window_within_floor(undecodable, frame_count);
-    // #889: `relaxed_pass` does NOT look at `copies`/`gaps` at all -- only `frame_count > 0` and
-    // the #881 optical floor, both untouched by this relaxation.
-    let relaxed_pass = frame_count > 0 && undecodable_ok;
-    // `strict_pass` keeps the pre-#889 meaning byte-for-byte: relaxed_pass PLUS the two terms
-    // #889 makes report-only.
-    let strict_pass = relaxed_pass && copies == 0 && gaps == 0;
+    // Issue 915 (2026-08-01, user decision): the optical undecodable floor (issue 881) becomes
+    // report-only while cam1's grabber (issue 909) + the 120Hz monitor (issue 881) are unresolved
+    // -- `undecodable_ok` above is UNCHANGED (still fully computed, still feeds `strict_pass`
+    // below byte-for-byte) but no longer participates in the RELAXED verdict that feeds
+    // `overall_pass` when `crate::optical_floor::gates_overall_pass()` is false. Restore: flip
+    // that one function back to `true` (see its own doc for the full restore path on issue 905).
+    let relaxed_pass =
+        frame_count > 0 && (undecodable_ok || !crate::optical_floor::gates_overall_pass());
+    // `strict_pass` keeps its pre-889-AND-pre-915 meaning byte-for-byte: frame_count>0 &&
+    // undecodable within floor && copies==0 && gaps==0 -- computed directly (no longer derived
+    // from `relaxed_pass`, since issue 915 decoupled the floor from that derivation).
+    let strict_pass = frame_count > 0 && undecodable_ok && copies == 0 && gaps == 0;
     WindowGateDecision {
         strict_pass,
         relaxed_pass,
