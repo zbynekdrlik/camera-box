@@ -249,3 +249,23 @@ reused inner program), not on any part of the shared helper's own body. Before t
 `.find()`-based ordering test after extracting shared logic into a lib, grep the FULL generated
 output for your anchor string and confirm it is genuinely unique — `grep -c` on the harness's
 captured stdout, not just eyeballing the source.
+
+## Piping the FULL local `cargo test` run through `tail` hides an early failure AND makes the exit code lie (#895)
+
+The top-level CLAUDE.md's "one failing test binary makes `cargo test` SKIP the remaining
+binaries" gotcha means the mandatory FULL-suite re-run (after touching `recording-e2e.sh` /
+`rig-mode.sh`) must genuinely see the WHOLE run, not a tail of it. Two independent traps stack
+here: (1) `cargo test 2>&1 | tail -100` silently discards every line BEFORE the last 100 — if the
+run has ~180 test binaries, an EARLY failure and everything after it up to the last 100 lines is
+invisible, so "no FAILED in what I can see" is not proof of a clean run; (2) the shell reports the
+exit code of the LAST command in an unguarded pipe (`tail`, which itself almost always exits 0) —
+not `cargo test`'s own exit code — so even a background-task "completed exit code 0" summary can be
+misleading when the command was piped through `tail` without `set -o pipefail`.
+
+**Fix: redirect the full run to a FILE (never pipe through `tail`), then check the exit code of the
+`cargo test` command itself, separately** — e.g. `cargo test > run.log 2>&1; echo "EXIT:$?" >>
+run.log`. Grep the untruncated file for `test result: FAILED` (must be zero hits) and count `test
+result: ok` lines against the expected total binary count, and treat the trailing `EXIT:0`/`EXIT:1`
+line as the authoritative signal, not a background-task summary of a piped command. A long run may
+need `run_in_background` (the default 120s foreground timeout backgrounds it anyway) — that's fine,
+just read the FULL log file once the notification arrives, never a `tail`-truncated one.
