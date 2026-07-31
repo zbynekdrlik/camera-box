@@ -152,9 +152,18 @@ impl StaleReplayLeg {
 }
 
 /// The full frozen-leg report over every window of a fused verdict run: which cameras HARD-FAIL
-/// ([`FrozenLeg`], gates `overall_pass`) and which merely carry isolated stale-replay windows
-/// ([`StaleReplayLeg`], informational — reported but never gates). A camera can appear in EITHER
-/// list per window it triggers; sorted (cambox, then window start) for deterministic output.
+/// ([`FrozenLeg`]) and which merely carry isolated stale-replay windows ([`StaleReplayLeg`],
+/// informational — reported but never gates). A camera can appear in EITHER list per window it
+/// triggers; sorted (cambox, then window start) for deterministic output.
+///
+/// This standalone aggregator is a legacy convenience, exercised only by this module's own
+/// tests — `recording-verdict.rs`'s actual attribution path goes through
+/// `crate::self_heal_attribution::attribute_self_heal` (which calls [`classify_leg`] directly, not
+/// this function), whose own report additionally re-attributes a hard-frozen window to
+/// `self_heal_reset` when a correlating USB-reset event fired (issue 895). See
+/// `self_heal_attribution::SelfHealAttributionReport::overall_pass_contribution` for issue 914
+/// (2026-08-01): the caller no longer folds either `any_frozen`/`any_self_heal()` into
+/// `overall_pass` while cam1's grabber defect (issue 909) remains physically unresolved.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct FrozenLegReport {
     pub frozen: Vec<FrozenLeg>,
@@ -162,7 +171,7 @@ pub struct FrozenLegReport {
 }
 
 impl FrozenLegReport {
-    /// True the moment ANY window HARD-FROZE — the fused verdict's `all_pass &=` gate.
+    /// True the moment ANY window HARD-FROZE.
     pub fn any_frozen(&self) -> bool {
         !self.frozen.is_empty()
     }
@@ -170,9 +179,10 @@ impl FrozenLegReport {
 
 /// Classify every window in `segments` and aggregate into one [`FrozenLegReport`]. Pure — no I/O,
 /// no probe deps; the caller supplies the segment data (from `CamboxSegment` fields) and prints
-/// [`FrozenLeg::message`] / [`StaleReplayLeg::message`] for each entry, then ANDs
-/// `!report.any_frozen()` into the fused verdict's `all_pass`, exactly like every other
-/// `all_cambox_*` gate in `recording-verdict.rs`.
+/// [`FrozenLeg::message`] / [`StaleReplayLeg::message`] for each entry. See this module's own
+/// struct-level doc above for why the real `recording-verdict.rs` attribution path calls
+/// `self_heal_attribution::attribute_self_heal` (which uses [`classify_leg`] directly) instead of
+/// this aggregator, and why neither folds into `overall_pass` as of issue 914.
 pub fn frozen_leg_report(segments: &[SegmentLeg<'_>]) -> FrozenLegReport {
     let mut frozen = Vec::new();
     let mut stale_replay = Vec::new();

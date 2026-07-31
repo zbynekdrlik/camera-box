@@ -4203,6 +4203,19 @@ fn build_and_print_verdict(
                         ev.cambox, ev.at_ns
                     );
                 }
+                // #914 (2026-08-01, user decision -- mirrors issue 889's report-only pattern and
+                // issue 861's caller-only decoupling): frozen_leg/self_heal_reset no longer gate
+                // `overall_pass` while cam1's ShadowCast 2 grabber defect (issue 909) remains
+                // physically unresolved -- restore path on issue 905 (flip
+                // `SelfHealAttributionReport::overall_pass_contribution` back to
+                // `!any_frozen() && !any_self_heal()` once cam1 is physically replaced and a
+                // stable week passes with no self-heal escalations). `gates_overall_pass` below
+                // mirrors the exact field name/shape `all_cambox_av_sync` already established for
+                // issue 861 -- an unambiguous machine-readable flag alongside the still-fully-
+                // computed frozen/self-heal findings.
+                let frozen_self_heal_gate_note = "report-only -- does NOT gate overall_pass, \
+                     pending cam1 hardware fix (see issue #914 for the decision record and issue \
+                     #905 for the restore path)";
                 report["frozen_leg"] = serde_json::json!({
                     "frozen": leg_report.frozen.iter().map(|f| serde_json::json!({
                         "cambox": f.cambox,
@@ -4233,8 +4246,31 @@ fn build_and_print_verdict(
                         "at_ns": ev.at_ns,
                     })).collect::<Vec<_>>(),
                 });
-                all_pass &= !leg_report.any_frozen();
-                all_pass &= !leg_report.any_self_heal();
+                if let Some(obj) = report["frozen_leg"].as_object_mut() {
+                    obj.insert("gates_overall_pass".to_string(), serde_json::json!(false));
+                    obj.insert(
+                        "gate".to_string(),
+                        serde_json::json!(frozen_self_heal_gate_note),
+                    );
+                }
+                if let Some(obj) = report["self_heal_reset"].as_object_mut() {
+                    obj.insert("gates_overall_pass".to_string(), serde_json::json!(false));
+                    obj.insert(
+                        "gate".to_string(),
+                        serde_json::json!(frozen_self_heal_gate_note),
+                    );
+                }
+                // #914 visibility requirement (mirrors issue 889 requirement 3): prints
+                // UNCONDITIONALLY, whether or not anything fired, so silence is never mistaken
+                // for strictness.
+                println!(
+                    "  >>> #914 REPORT-ONLY: frozen_leg={} self_heal_reset={} \
+                     unattributed_events={} -- {frozen_self_heal_gate_note}",
+                    leg_report.frozen.len(),
+                    leg_report.self_heal.len(),
+                    leg_report.unattributed_events.len()
+                );
+                all_pass &= leg_report.overall_pass_contribution();
 
                 // #467/#583 — extend the ALL-CAMBOX sweep to ALSO cover imag-nb's OWN recording:
                 // place its frames onto the SAME schedule timeline (anchored on imag's #463 digital
