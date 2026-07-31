@@ -485,6 +485,27 @@ fn frame_is_delivered_optical(
 /// discipline) — it tolerates the rig's proven moiré floor, never a genuine read failure.
 const OPTICAL_UNDECODABLE_RATE_MAX: f64 = 0.005;
 
+/// #904 — owner-directed, deliberate relaxation of the absolute-zero `real_drops` bar on the
+/// camera-under-test ("endpoint") nodes ONLY. `burn_unreadable`, colour, the optical span floor,
+/// frozen-camera and delivery-latency terms are ALL untouched — see
+/// [`NodeVerdict::is_zero_within_allowance`]. Small enough to absorb the one-off single-frame
+/// artifacts we keep seeing (e.g. #903's 30us program-switch boundary case), far too small to
+/// hide a genuine transport regression (the ticket's own text: a real failure produces drops in
+/// the hundreds, not single digits). #905 tracks putting the bar back down once the backlog of
+/// individual artifacts is cleared — NEVER raise this further without a fresh measured incident
+/// and its own re-tighten ticket, same discipline as [`OPTICAL_UNDECODABLE_RATE_MAX`].
+const REAL_DROPS_ALLOWANCE_DEFAULT: u32 = 2;
+
+/// #904 — env-overridable read of the per-node `real_drops` allowance (mirrors the
+/// `CAMERA_BOX_DECODE_WORKERS` idiom in `src/probe/recording.rs`: a non-numeric or absent value
+/// silently falls back to [`REAL_DROPS_ALLOWANCE_DEFAULT`], never panics).
+fn real_drops_allowance() -> u32 {
+    std::env::var("CAMERA_BOX_REAL_DROPS_ALLOWANCE")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .unwrap_or(REAL_DROPS_ALLOWANCE_DEFAULT)
+}
+
 /// #24/#312 — the node labels that occupy the "camera under test" role: whichever physical
 /// source camera(s) are deployed with `CAMERA_BOX_BURN_RUN_ID` set this run. In the plain
 /// single-camera mode exactly ONE produces a non-empty id set (mutually exclusive); in the
@@ -596,6 +617,40 @@ impl NodeVerdict {
             && self.optical_undecodable_ok()
             && self.colour_fail == 0
             && self.imag_burn_ok()
+    }
+    /// #904 — the SAME headline decision as [`Self::is_zero`], except the non-imag PRIMARY
+    /// signal ([`Self::optical_ok`]'s strict-contiguity fallback) also accepts up to `allowance`
+    /// `real_drops()` on this node, PROVIDED `burn_unreadable() == 0` — an unreadable burn stays
+    /// an unconditional hard fail (the ticket's own "does NOT touch burn_unreadable" line), only
+    /// a small number of genuinely-missing frames is tolerated. `allowance == 0` reproduces
+    /// [`Self::is_zero`] EXACTLY (this is the RED→GREEN default-preserves-behavior line — a node
+    /// with any real drop still fails at allowance 0, same as today). imag is UNAFFECTED either
+    /// way: [`Self::optical_ok`]'s `imag_optical_beat_pass()` branch is used verbatim, the
+    /// allowance only ever reaches the non-imag `contiguity`-based fallback.
+    fn is_zero_within_allowance(&self, allowance: u32) -> bool {
+        self.optical_ok_within_allowance(allowance)
+            && self.optical_undecodable_ok()
+            && self.colour_fail == 0
+            && self.imag_burn_ok()
+    }
+    /// #904 — [`Self::optical_ok`] generalized with a `real_drops()` allowance on the non-imag
+    /// fallback (imag's `imag_optical_beat_pass()` branch is untouched, same as
+    /// [`Self::optical_ok`]). A node with NO burn at all (`first_id.is_none()`) still never
+    /// passes — nothing was proven, allowance or not.
+    fn optical_ok_within_allowance(&self, allowance: u32) -> bool {
+        self.imag_optical_beat_pass().unwrap_or_else(|| {
+            self.contiguity.first_id.is_some()
+                && self.burn_unreadable() == 0
+                && self.real_drops() <= allowance as usize
+        })
+    }
+    /// #904 — true iff this node PASSES [`Self::is_zero_within_allowance`] with `allowance` ONLY
+    /// because it carries `1..=allowance` real drops (i.e. it would have FAILED at allowance 0,
+    /// [`Self::is_zero`]). Drives the LOUD "this pass consumed slack" reporting — a run must never
+    /// silently look identical to a genuine zero-loss pass when it only cleared the gate because
+    /// of #904's relaxation.
+    fn consumed_real_drops_allowance(&self, allowance: u32) -> bool {
+        self.is_zero_within_allowance(allowance) && !self.is_zero()
     }
     /// #580 — the PRIMARY signal's pass/fail: [`Self::imag_optical_beat_pass`] when set (imag's
     /// beat-aware optical verdict), else the UNCHANGED strict `contiguity.is_contiguous()` every
@@ -1696,7 +1751,7 @@ fn build_node_colour_fail(
 /// already explained the failure. Previously an empty burn window WITH interior optical holes
 /// co-printed BOTH the OPTICAL-UNDECODABLE line and the NO-burn line (redundant output); the
 /// `explained` guard removes the duplication without dropping any specific reason.
-fn node_verdict_lines(v: &NodeVerdict, span_ok: bool) -> Vec<String> {
+fn node_verdict_lines(v: &NodeVerdict, span_ok: bool, allowance: u32) -> Vec<String> {
     let c = &v.contiguity;
     let span = match (c.first_id, c.last_id) {
         (Some(f), Some(l)) => format!("ids {f}..={l}, {} present", c.present_count),
@@ -1710,7 +1765,21 @@ fn node_verdict_lines(v: &NodeVerdict, span_ok: bool) -> Vec<String> {
     // line (the no-overstatement rule). When `is_zero() && !span_ok` we fall through; the non-zero
     // branches below are all empty for a clean node, so this returns no per-node line and the
     // headline's COLLAPSED line stands as the sole verdict.
-    if v.is_zero() && span_ok {
+    if v.is_zero_within_allowance(allowance) && span_ok {
+        // #904 — LOUD, never silent: this specific pass only cleared the gate because of the
+        // real_drops allowance (it would have FAILED at allowance 0 — see
+        // `consumed_real_drops_allowance`). Printed FIRST, before the "ZERO loss" line below, so
+        // it can never be missed scrolling past — a pass that consumed slack must be visibly
+        // distinguishable from a genuine zero-loss pass (#905 tracks re-tightening the bar).
+        if v.consumed_real_drops_allowance(allowance) {
+            lines.push(format!(
+                "  [{}] ZERO loss WITHIN ALLOWANCE — {} real drop(s) consumed the #904 \
+                 per-node allowance of {allowance} (burn_unreadable stays 0; #905 tracks \
+                 re-tightening this back down).",
+                c.node,
+                v.real_drops()
+            ));
+        }
         // #463 — imag: when the recording ALSO carried a decoded digital corner burn, say so —
         // two independent zero-loss proofs, not just the optical one. Includes the burn's own
         // id range + present count (comprehensive-logging: values, not just a bare label) —
@@ -1747,6 +1816,15 @@ fn node_verdict_lines(v: &NodeVerdict, span_ok: bool) -> Vec<String> {
                     beat.surplus
                 )
             }
+            // #904 — a non-imag node (imag_optical_beat is always None there) that only passed
+            // via the real_drops allowance is NOT strictly contiguous — say so honestly instead
+            // of the blanket "CONTIGUOUS" claim (the same no-overstatement discipline the imag
+            // beat-compensation branch above already follows).
+            None if v.consumed_real_drops_allowance(allowance) => format!(
+                "burn-id sequence has {} real drop(s) WITHIN the #904 allowance (not strictly \
+                 contiguous) AND cam2 optical read complete",
+                v.real_drops()
+            ),
             _ => "burn-id sequence CONTIGUOUS AND cam2 optical read complete".to_string(),
         };
         lines.push(format!(
@@ -1923,9 +2001,11 @@ fn node_verdict_lines(v: &NodeVerdict, span_ok: bool) -> Vec<String> {
     lines
 }
 
-/// Print the ONE trustworthy binary verdict for a node, human-readable, no jargon.
-fn print_node_verdict(v: &NodeVerdict, span_ok: bool) {
-    for line in node_verdict_lines(v, span_ok) {
+/// Print the ONE trustworthy binary verdict for a node, human-readable, no jargon. `allowance` is
+/// the #904 per-node `real_drops` allowance (0 reproduces the pre-#904 strict behavior exactly —
+/// see [`NodeVerdict::is_zero_within_allowance`]).
+fn print_node_verdict(v: &NodeVerdict, span_ok: bool, allowance: u32) {
+    for line in node_verdict_lines(v, span_ok, allowance) {
         println!("{line}");
     }
 }
@@ -1933,17 +2013,19 @@ fn print_node_verdict(v: &NodeVerdict, span_ok: bool) {
 /// JSON for one node's trustworthy verdict. `analyzed_secs` / `span_ok` / `min_secs` are the #373
 /// headline duration gate (the analyzed optical span and whether it cleared the floor), so the
 /// report explains a FAIL caused by a collapsed/partial optical read — not just a bare
-/// `overall_pass: false`. `zero_loss` here is the per-node DELIVERY gate (`is_zero`); the headline
-/// `overall_pass` ANDs it with `span_ok`.
+/// `overall_pass: false`. `zero_loss` here is the per-node DELIVERY gate, #904-allowance-aware
+/// (`is_zero_within_allowance`, `allowance == 0` ⇒ byte-identical to the pre-#904 `is_zero()`);
+/// the headline `overall_pass` ANDs it with `span_ok`.
 fn node_verdict_json(
     v: &NodeVerdict,
     analyzed_secs: f64,
     span_ok: bool,
     min_secs: f64,
+    allowance: u32,
 ) -> serde_json::Value {
     serde_json::json!({
         "node": v.contiguity.node,
-        "zero_loss": v.is_zero(),
+        "zero_loss": v.is_zero_within_allowance(allowance),
         "first_id": v.contiguity.first_id,
         "last_id": v.contiguity.last_id,
         "present_count": v.contiguity.present_count,
@@ -1951,6 +2033,13 @@ fn node_verdict_json(
         "missing_ids": v.contiguity.missing_ids,
         "real_drops": v.real_drops(),
         "burn_unreadable": v.burn_unreadable(),
+        // #904 — LOUD, always present (not just when consumed): the allowance THIS node was
+        // judged against, and whether this specific pass only cleared the gate because of it.
+        // `real_drops_allowance` is 0 for imag (untouched by #904; see its call site) and the
+        // configured value (env `CAMERA_BOX_REAL_DROPS_ALLOWANCE`, default
+        // `REAL_DROPS_ALLOWANCE_DEFAULT`) for every camera-under-test node.
+        "real_drops_allowance": allowance,
+        "consumed_real_drops_allowance": v.consumed_real_drops_allowance(allowance),
         "optical_undecodable": v.optical_undecodable,
         // #376 — the calibrated moiré-floor gate. `optical_undecodable_ok` is the per-node term
         // `is_zero()` ANDs in; the rate + ceiling are surfaced alongside the raw count so a JSON
@@ -3149,6 +3238,10 @@ fn build_and_print_verdict(
                 "=== #186 ZERO-LOSS VERDICT — per-node burn-id contiguity (the ONE trustworthy check) ==="
             );
             let mut node_verdicts: Vec<NodeVerdict> = Vec::new();
+            // #904 — read ONCE, reused by every camera-under-test node's headline decision below
+            // AND its per-node JSON (never re-read per node — a mid-run env change must not shift
+            // the bar between nodes of the SAME run).
+            let real_drops_allowance = real_drops_allowance();
             // `stream_path` (the strih/stream nodes' pixel-proof recording) is computed once
             // above, alongside the cam1 source selection.
             // #198: cam1's burn increments per EMITTED frame (src/main.rs), so its in-window id
@@ -3480,7 +3573,7 @@ fn build_and_print_verdict(
                 let span_ok = nv.span_ok(node_fps, cfg.min_secs);
                 // Printed AFTER span_ok is known so the per-node line can be suppressed on a
                 // delivery-clean-but-collapsed-span node (no "ZERO loss" contradicting the headline).
-                print_node_verdict(&nv, span_ok);
+                print_node_verdict(&nv, span_ok, real_drops_allowance);
                 if !span_ok {
                     println!(
                         "  [{}] NOT zero — analyzed optical span {:.1}s < {:.1}s floor: the cam2 \
@@ -3489,19 +3582,27 @@ fn build_and_print_verdict(
                         spec.node, span_secs, cfg.min_secs, nv.optical_span_frames
                     );
                 }
-                all_pass &= nv.is_zero() && span_ok;
+                all_pass &= nv.is_zero_within_allowance(real_drops_allowance) && span_ok;
                 report["full_chain"]["loss"][spec.node] =
-                    node_verdict_json(&nv, span_secs, span_ok, cfg.min_secs);
+                    node_verdict_json(&nv, span_secs, span_ok, cfg.min_secs, real_drops_allowance);
                 node_verdicts.push(nv);
             }
             // The single binary headline, in plain words.
             let total_real: usize = node_verdicts.iter().map(NodeVerdict::real_drops).sum();
             let total_burn_unreadable: usize =
                 node_verdicts.iter().map(NodeVerdict::burn_unreadable).sum();
-            // #373 — the headline is ZERO loss only when every node is delivery-clean AND its
-            // analyzed optical span cleared the duration floor (no vacuous pass over a collapsed read).
+            // #904 — which camera-under-test node(s), if any, only passed because of the
+            // real_drops allowance — the LOUD run-level signal (#905 tracks re-tightening).
+            let allowance_consumed_nodes: Vec<String> = node_verdicts
+                .iter()
+                .filter(|nv| nv.consumed_real_drops_allowance(real_drops_allowance))
+                .map(|nv| nv.contiguity.node.clone())
+                .collect();
+            // #373 — the headline is ZERO loss only when every node is delivery-clean (#904:
+            // within its real_drops allowance) AND its analyzed optical span cleared the duration
+            // floor (no vacuous pass over a collapsed read).
             let all_zero = node_verdicts.iter().all(|nv| {
-                nv.is_zero()
+                nv.is_zero_within_allowance(real_drops_allowance)
                     && nv.span_ok(
                         camera_box::recording_span_gate::node_capture_fps(
                             &nv.contiguity.node,
@@ -3512,9 +3613,19 @@ fn build_and_print_verdict(
                         cfg.min_secs,
                     )
             });
-            if all_zero {
+            if all_zero && allowance_consumed_nodes.is_empty() {
                 println!(
                     "  >>> ZERO loss: all burn-id sequences CONTIGUOUS (no missing id on any node)."
+                );
+            } else if all_zero {
+                // #904 — LOUD: a genuine pass, but NOT a strict zero-loss pass — never let this
+                // look identical to the clean branch above. #905 tracks re-tightening the bar.
+                println!(
+                    "  >>> ZERO loss WITHIN ALLOWANCE (#904): {total_real} real drop(s) total, \
+                     within the per-node allowance of {real_drops_allowance} on: {} — 0 \
+                     BURN-UNREADABLE, everything else at the usual strict bar. #905 tracks \
+                     putting this allowance back down.",
+                    allowance_consumed_nodes.join(", ")
                 );
             } else {
                 println!(
@@ -3523,6 +3634,11 @@ fn build_and_print_verdict(
                 );
             }
             report["full_chain"]["zero_loss"] = serde_json::Value::Bool(all_zero);
+            // #904 — always present (not just when consumed) so a JSON consumer can see the bar
+            // this run was judged against, and which node(s) (if any) needed it.
+            report["full_chain"]["real_drops_allowance"] = serde_json::json!(real_drops_allowance);
+            report["full_chain"]["real_drops_allowance_consumed_nodes"] =
+                serde_json::json!(allowance_consumed_nodes);
             report["full_chain"]["real_drops"] = serde_json::json!(total_real);
             report["full_chain"]["burn_unreadable"] = serde_json::json!(total_burn_unreadable);
             // (The old cam2-tick-keyed strih→stream/cam1→strih dropped/phantom loss was
@@ -3850,7 +3966,11 @@ fn build_and_print_verdict(
         );
         let span_secs = nv.analyzed_span_secs(node_fps);
         let span_ok = nv.span_ok(node_fps, cfg.min_secs);
-        print_node_verdict(&nv, span_ok);
+        // #904 — imag is UNTOUCHED by the real_drops allowance (allowance=0 here reproduces the
+        // pre-#904 strict `is_zero()` exactly; imag's own gate is the beat-aware optical verdict,
+        // not the non-imag contiguity fallback the allowance applies to — see
+        // `NodeVerdict::optical_ok_within_allowance`).
+        print_node_verdict(&nv, span_ok, 0);
         if !span_ok {
             println!(
                 "  [imag] NOT zero — analyzed optical span {:.1}s < {:.1}s floor: the cam2 \
@@ -3860,7 +3980,7 @@ fn build_and_print_verdict(
             );
         }
         all_pass &= nv.is_zero() && span_ok;
-        let mut imag_json = node_verdict_json(&nv, span_secs, span_ok, cfg.min_secs);
+        let mut imag_json = node_verdict_json(&nv, span_secs, span_ok, cfg.min_secs, 0);
         // #575 — note the boundary trim honestly: the exact lead/tail frame counts excluded from
         // imag's optical tick + digital burn contiguity checks before this verdict was computed.
         imag_json["boundary_trim_lead_frames"] =
@@ -5756,6 +5876,25 @@ mod tests {
             .collect()
     }
 
+    /// #904 — like [`window`], but injects a genuine cam1 forward gap at EVERY position in
+    /// `gaps_at` (each one a SEPARATE missing id, never merged — positions must be spaced apart).
+    /// Used to build fixtures with a KNOWN, controllable count of REAL DROP ids (rather than
+    /// `window`'s single optional gap) to exercise the #904 per-node real_drops allowance.
+    fn window_multi_gap(n: u32, with_stream: bool, gaps_at: &[u32]) -> Vec<RecordingFrame> {
+        (0..n)
+            .map(|i| {
+                let mut ps: Vec<(u32, u32)> = vec![(CAM2, 100 + i)];
+                let skipped_before = gaps_at.iter().filter(|&&g| i >= g).count() as u32;
+                ps.push((CAM1B, 5000 + i + skipped_before));
+                ps.push((STRIH, 1670 + 3 * i));
+                if with_stream {
+                    ps.push((STREAM, 9000 + 3 * i));
+                }
+                frame(i as u64, &ps)
+            })
+            .collect()
+    }
+
     /// #571 — like [`window`], but frame `cam1_none_at` carries NO cam1 burn payload at all (a
     /// `None`): the frame is still DELIVERED (its cam2 optical QR and the strih burn are present),
     /// its cam1 burn just did not decode. On the DECIMATED cam(60fps)→strih(30fps) hop this — not
@@ -6771,6 +6910,215 @@ mod tests {
              DROP — never masked: {}",
             v2["full_chain"]
         );
+    }
+
+    // ---- #904 — the small, explicit, LOUD real_drops allowance ----
+
+    /// #904 — exactly `REAL_DROPS_ALLOWANCE_DEFAULT` (2) genuine 1:1-hop cam1 real drops MUST
+    /// still PASS the headline (the small, explicit allowance this ticket adds), and the pass
+    /// MUST be visibly distinguishable from a genuine zero-loss pass: `real_drops_allowance` +
+    /// `consumed_real_drops_allowance` are carried on the per-node JSON, the run-level
+    /// `real_drops_allowance_consumed_nodes` names cam1, and the printed lines say so LOUDLY
+    /// (never silent — the ticket's core requirement).
+    #[test]
+    fn real_drops_within_the_904_default_allowance_passes_and_is_reported_loudly_904() {
+        use super::{build_and_print_verdict, Cam1Source, DecodedRec};
+        use clap::Parser;
+        const N: u32 = 600;
+        // Two well-separated genuine gaps ⇒ exactly 2 REAL DROP ids on the 1:1 hop.
+        let gaps = [100, 300];
+        let args = super::Args::parse_from([
+            "recording-verdict",
+            "--min-secs",
+            "1",
+            "--capture-fps",
+            "60",
+        ]);
+        let (v, pass) = build_and_print_verdict(
+            &args,
+            Some(DecodedRec {
+                frames: window_multi_gap(N, false, &gaps),
+                rec_path: None,
+            }),
+            Some(DecodedRec {
+                frames: window_multi_gap(N, true, &gaps),
+                rec_path: None,
+            }),
+            Cam1Source::Absent,
+            None,
+            None,
+            None, // #461: no imag frames in this test
+            None, // #312 item 2 (PR A): no carried A/V-sync inputs in this test
+        )
+        .expect("verdict");
+        assert!(
+            pass,
+            "#904: 2 real drops is exactly the default allowance ⇒ must still PASS: {v}"
+        );
+        assert_eq!(v["full_chain"]["zero_loss"], serde_json::json!(true));
+        assert_eq!(v["full_chain"]["real_drops"], serde_json::json!(2));
+        assert_eq!(v["full_chain"]["burn_unreadable"], serde_json::json!(0));
+        assert_eq!(
+            v["full_chain"]["real_drops_allowance"],
+            serde_json::json!(super::REAL_DROPS_ALLOWANCE_DEFAULT)
+        );
+        assert_eq!(
+            v["full_chain"]["real_drops_allowance_consumed_nodes"],
+            serde_json::json!(["cam1"]),
+            "#904: the run-level LOUD signal must name cam1 as having consumed the allowance: {}",
+            v["full_chain"]
+        );
+        let cam1_loss = &v["full_chain"]["loss"]["cam1"];
+        assert_eq!(
+            cam1_loss["real_drops_allowance"],
+            serde_json::json!(super::REAL_DROPS_ALLOWANCE_DEFAULT)
+        );
+        assert_eq!(
+            cam1_loss["consumed_real_drops_allowance"],
+            serde_json::json!(true),
+            "#904: the per-node JSON must ALSO carry the loud consumed signal: {cam1_loss}"
+        );
+        assert_eq!(cam1_loss["zero_loss"], serde_json::json!(true));
+    }
+
+    /// #904 — ONE real drop beyond the default allowance (3 > 2) MUST still FAIL — the allowance
+    /// is small and explicit, never open-ended; a genuine regression is never masked by it.
+    #[test]
+    fn real_drops_one_beyond_the_904_default_allowance_still_fails_904() {
+        use super::{build_and_print_verdict, Cam1Source, DecodedRec};
+        use clap::Parser;
+        const N: u32 = 600;
+        let gaps = [100, 250, 400];
+        let args = super::Args::parse_from([
+            "recording-verdict",
+            "--min-secs",
+            "1",
+            "--capture-fps",
+            "60",
+        ]);
+        let (v, pass) = build_and_print_verdict(
+            &args,
+            Some(DecodedRec {
+                frames: window_multi_gap(N, false, &gaps),
+                rec_path: None,
+            }),
+            Some(DecodedRec {
+                frames: window_multi_gap(N, true, &gaps),
+                rec_path: None,
+            }),
+            Cam1Source::Absent,
+            None,
+            None,
+            None, // #461: no imag frames in this test
+            None, // #312 item 2 (PR A): no carried A/V-sync inputs in this test
+        )
+        .expect("verdict");
+        assert!(
+            !pass,
+            "#904: 3 real drops is ONE past the default allowance of 2 ⇒ must still FAIL: {v}"
+        );
+        assert_eq!(v["full_chain"]["zero_loss"], serde_json::json!(false));
+        assert_eq!(v["full_chain"]["real_drops"], serde_json::json!(3));
+        assert!(
+            v["full_chain"]["real_drops_allowance_consumed_nodes"]
+                .as_array()
+                .expect("real_drops_allowance_consumed_nodes must be a JSON array")
+                .is_empty(),
+            "#904: a node that FAILED never counts as having 'consumed' the allowance: {}",
+            v["full_chain"]
+        );
+    }
+
+    /// #904 — `is_zero_within_allowance(0)` must be BYTE-IDENTICAL to the pre-#904 `is_zero()` on
+    /// both a clean node AND a node carrying a real drop — the documented "default keeps current
+    /// behavior" requirement, proven at the pure-method level (independent of whichever numeric
+    /// default `REAL_DROPS_ALLOWANCE_DEFAULT` happens to be).
+    #[test]
+    fn allowance_zero_matches_pre_904_is_zero_exactly_904() {
+        let clean = window_multi_gap(200, false, &[]);
+        let tmp = tempfile::tempdir().unwrap();
+        let v_clean = node_verdict(
+            &super::NodeSpec {
+                node: "cam1",
+                burn_run_id: CAM1B,
+                rate: BurnRate::PerEmittedFrame,
+                source: &clean,
+                rec_path: None,
+                cam2_run_id: None,
+                step: 1,
+            },
+            &[CAM1B, STRIH, STREAM],
+            tmp.path(),
+            0,
+        )
+        .unwrap();
+        assert!(v_clean.is_zero());
+        assert_eq!(v_clean.is_zero_within_allowance(0), v_clean.is_zero());
+        assert!(!v_clean.consumed_real_drops_allowance(0));
+
+        let one_drop = window_multi_gap(200, false, &[100]);
+        let v_drop = node_verdict(
+            &super::NodeSpec {
+                node: "cam1",
+                burn_run_id: CAM1B,
+                rate: BurnRate::PerEmittedFrame,
+                source: &one_drop,
+                rec_path: None,
+                cam2_run_id: None,
+                step: 1,
+            },
+            &[CAM1B, STRIH, STREAM],
+            tmp.path(),
+            0,
+        )
+        .unwrap();
+        assert_eq!(v_drop.real_drops(), 1);
+        assert!(
+            !v_drop.is_zero(),
+            "a genuine real drop must fail is_zero(): {v_drop:?}"
+        );
+        assert_eq!(
+            v_drop.is_zero_within_allowance(0),
+            v_drop.is_zero(),
+            "#904: allowance 0 must reproduce is_zero() exactly, even with a real drop present"
+        );
+        assert!(!v_drop.consumed_real_drops_allowance(0));
+    }
+
+    /// #904 — `burn_unreadable` stays an UNCONDITIONAL hard fail, regardless of how large the
+    /// real_drops allowance is (the ticket's own "does NOT touch burn_unreadable" line). A frame
+    /// that WAS delivered (cam2's optical marker present) but carries no readable cam1 burn must
+    /// still fail even against a huge allowance.
+    #[test]
+    fn burn_unreadable_is_never_excused_by_any_real_drops_allowance_904() {
+        let frames = window_none(200, false, 100);
+        let tmp = tempfile::tempdir().unwrap();
+        let v = node_verdict(
+            &super::NodeSpec {
+                node: "cam1",
+                burn_run_id: CAM1B,
+                rate: BurnRate::PerEmittedFrame,
+                source: &frames,
+                rec_path: None,
+                cam2_run_id: None,
+                step: 1,
+            },
+            &[CAM1B, STRIH, STREAM],
+            tmp.path(),
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            v.real_drops(),
+            0,
+            "the missing cam1 burn is BURN-UNREADABLE, not a real drop"
+        );
+        assert!(v.burn_unreadable() >= 1, "{v:?}");
+        assert!(
+            !v.is_zero_within_allowance(1000),
+            "#904: burn_unreadable must stay a hard fail even against a huge allowance: {v:?}"
+        );
+        assert!(!v.consumed_real_drops_allowance(1000));
     }
 
     /// #356/#571 — GENUINE loss on the DECIMATED hop is a DELIVERED strih frame carrying NO
@@ -11316,7 +11664,7 @@ mod tests {
             "the strih burn never decoded"
         );
         assert_eq!(v.optical_undecodable, 1, "frame 1 is one optical hole");
-        let lines = super::node_verdict_lines(&v, true);
+        let lines = super::node_verdict_lines(&v, true, 0);
         assert!(
             lines.iter().any(|l| l.contains("OPTICAL-UNDECODABLE")),
             "the specific optical fault line must print: {lines:?}"
@@ -11354,7 +11702,7 @@ mod tests {
         .unwrap();
         assert!(v.contiguity.first_id.is_none());
         assert_eq!(v.optical_undecodable, 0, "no interior optical hole here");
-        let lines = super::node_verdict_lines(&v, true);
+        let lines = super::node_verdict_lines(&v, true, 0);
         assert!(
             lines.iter().any(|l| l.contains("NO burn id decoded")),
             "the sole-reason no-burn line must still print: {lines:?}"
@@ -11776,7 +12124,7 @@ mod tests {
             "an absent burn must FAIL fail-closed, not vacuously pass (#585)"
         );
         // The printed reason must name the absent burn, honestly.
-        let lines = super::node_verdict_lines(&nv, true);
+        let lines = super::node_verdict_lines(&nv, true, 0);
         assert!(
             lines
                 .iter()
@@ -12161,7 +12509,7 @@ mod tests {
         // #580 review: the raw strict-step-1 "missing ids" print must NOT co-print alongside the
         // burn-broken message once the optical beat itself passed (it would misleadingly blame
         // the optical read for the burn's own failure).
-        let lines = super::node_verdict_lines(&nv, true);
+        let lines = super::node_verdict_lines(&nv, true, 0);
         assert!(
             lines.iter().any(|l| l.contains("digital corner burn")),
             "the burn-broken fault line must print: {lines:?}"
@@ -12184,7 +12532,7 @@ mod tests {
             .collect();
         let nv = node_verdict_for_imag(&frames, None);
         assert!(!nv.is_zero(), "sanity: a frozen read must fail: {nv:?}");
-        let lines = super::node_verdict_lines(&nv, true);
+        let lines = super::node_verdict_lines(&nv, true, 0);
         assert!(
             !lines.is_empty(),
             "a FAILING node must never print an empty (silent) verdict (#580 finding 1): {lines:?}"
@@ -12225,7 +12573,7 @@ mod tests {
             "the 20-frame Δ0 copy run must fail the optical no-copy gate: {nv:?}"
         );
         assert!(!nv.is_zero(), "a content freeze must fail the node: {nv:?}");
-        let lines = super::node_verdict_lines(&nv, true);
+        let lines = super::node_verdict_lines(&nv, true, 0);
         assert!(
             lines
                 .iter()
@@ -12247,7 +12595,7 @@ mod tests {
             nv.is_zero() && !nv.contiguity.is_contiguous(),
             "sanity: {nv:?}"
         );
-        let lines = super::node_verdict_lines(&nv, true);
+        let lines = super::node_verdict_lines(&nv, true, 0);
         let pass_line = lines
             .iter()
             .find(|l| l.contains("ZERO loss"))
@@ -12280,7 +12628,7 @@ mod tests {
         // #580v2: paired with a clean burn (now the sole delivery authority).
         let frames = imag_window_beat_with_burn();
         let nv = node_verdict_for_imag(&frames, None);
-        let j = node_verdict_json(&nv, 300.0, true, 300.0);
+        let j = node_verdict_json(&nv, 300.0, true, 300.0, 0);
         assert_eq!(j["zero_loss"], serde_json::json!(true), "{j}");
         assert!(
             !nv.contiguity.missing_ids.is_empty(),
