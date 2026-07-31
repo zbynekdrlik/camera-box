@@ -137,17 +137,18 @@ fn window_overlaps_event(start_ns: i64, end_ns: i64, at_ns: i64, margin_ns: i64)
 /// uses), then re-attribute any HARD-FROZEN window whose span (padded by
 /// [`SELF_HEAL_CORRELATION_MARGIN_NS`] either side) contains a same-camera self-heal reset event
 /// to `self_heal_reset` instead of `frozen_leg`. Events not consumed by any window still gate the
-/// run via `unattributed_events` (see `SelfHealAttributionReport::any_self_heal`).
-///
-/// #895 RED-commit note: this stub deliberately performs NO re-attribution yet — every event ends
-/// up `unattributed_events` and every genuinely-frozen window still stays `frozen`, exactly
-/// today's (bug) behavior, so the tests below that expect real correlation fail here.
+/// run via `unattributed_events` (see `SelfHealAttributionReport::any_self_heal`). Each event
+/// correlates to AT MOST one window (first match wins, `consumed` guards against double-counting
+/// one reset across two overlapping-margin windows).
 pub fn attribute_self_heal(
     segments: &[SegmentLeg<'_>],
     events: &[SelfHealResetEvent],
 ) -> SelfHealAttributionReport {
     let mut frozen = Vec::new();
     let mut stale_replay = Vec::new();
+    let mut self_heal = Vec::new();
+    let mut consumed = vec![false; events.len()];
+
     for s in segments {
         let window_secs = ((s.end_ns - s.start_ns).max(0) as f64) / 1_000_000_000.0;
         match classify_leg(s.copies, s.frames, window_secs) {
@@ -160,22 +161,56 @@ pub fn attribute_self_heal(
                 copies,
                 approx_stale_secs,
                 density,
-            } => frozen.push(FrozenLeg {
-                cambox: s.cambox.to_string(),
-                since_ns: s.start_ns,
-                copies,
-                approx_stale_secs,
-                density,
-            }),
+            } => {
+                let matched = events.iter().enumerate().find(|(i, e)| {
+                    !consumed[*i]
+                        && e.cambox == s.cambox
+                        && window_overlaps_event(
+                            s.start_ns,
+                            s.end_ns,
+                            e.at_ns,
+                            SELF_HEAL_CORRELATION_MARGIN_NS,
+                        )
+                });
+                if let Some((idx, ev)) = matched {
+                    consumed[idx] = true;
+                    self_heal.push(SelfHealAttributedLeg {
+                        cambox: s.cambox.to_string(),
+                        since_ns: s.start_ns,
+                        reset_at_ns: ev.at_ns,
+                        copies,
+                        approx_stale_secs,
+                        density,
+                    });
+                } else {
+                    frozen.push(FrozenLeg {
+                        cambox: s.cambox.to_string(),
+                        since_ns: s.start_ns,
+                        copies,
+                        approx_stale_secs,
+                        density,
+                    });
+                }
+            }
         }
     }
+
     frozen.sort_by(|a, b| a.cambox.cmp(&b.cambox).then(a.since_ns.cmp(&b.since_ns)));
     stale_replay.sort_by(|a, b| a.cambox.cmp(&b.cambox));
+    self_heal.sort_by(|a, b| a.cambox.cmp(&b.cambox).then(a.since_ns.cmp(&b.since_ns)));
+
+    let unattributed_events: Vec<SelfHealResetEvent> = events
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !consumed[*i])
+        .map(|(_, e)| e.clone())
+        .collect();
+
     SelfHealAttributionReport {
         frozen,
         stale_replay,
-        self_heal: Vec::new(),
-        unattributed_events: events.to_vec(),
+        self_heal,
+        unattributed_events,
     }
 }
 
