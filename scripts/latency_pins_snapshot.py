@@ -8,8 +8,10 @@ measures every source's delivery; this script turns that into the per-source lat
 the Discord report (scripts/e2e_discord_report.py, _section_latency_pins) surfaces every run.
 
 Gathers, over OBS WebSocket -- LIVE, never hardcoded -- the CURRENTLY-CONFIGURED
-genlock_latency_ms_src for every strih 'NDI cam<N>' + 'MV NDI cam<N>' (N=1..7) and imag
-'NDI CAM<N>' + 'MV CAM<N>' (N=1..7), the stream 'NDI 2ME PGM' hold, reads
+genlock_latency_ms_src for every strih 'NDI cam<N>' + 'MV NDI cam<N>' and imag 'NDI CAM<N>' +
+'MV CAM<N>', for N in CAMERA_ACTIVE_SET (#893 -- env var, default cam1-4; NEVER a literal
+N=1..7 range, see .claude/rules/camera-active-set.md -- a retired camera's stale pin must never
+be swept/reported as if it meant anything), the stream 'NDI 2ME PGM' hold, reads
 ~/.camera-box/av-sync-last.json for the source-of-truth applied hold, and computes a RECOMMENDED
 pin set from THIS run's own delivery-latency table by shelling out to the SAME compiled
 phase-sync-gate binary phase_sync_calibrate.py (#286/#438) already uses -- one formula
@@ -46,7 +48,27 @@ from obs_phase2 import _conn, _rpc  # noqa: E402
 from phase_sync_calibrate import compute_phase_sync_offsets  # noqa: E402
 
 GENLOCK_SRC_LATENCY_KEY = "genlock_latency_ms_src"
-CAMERAS = (1, 2, 3, 4, 5, 6, 7)
+
+
+def active_camera_numbers() -> tuple:
+    """#893 -- the camera numbers to sweep, derived from CAMERA_ACTIVE_SET (env var, default
+    "cam1 cam2 cam3 cam4" -- same read convention set-ndi-mapping.py's DEFAULT_ACTIVE_SET
+    already uses), NEVER a literal N=1..7 range (.claude/rules/camera-active-set.md).
+
+    This used to be a hardcoded `CAMERAS = (1, 2, 3, 4, 5, 6, 7)` tuple -- the exact bug shape
+    that let this script sweep+report RETIRED cameras' pins (cam5/6/7) as if they meant
+    anything, which is precisely what masked #893's live regression (a stale pin on retired
+    cam5 sitting at the floor while every camera actually in CAMERA_ACTIVE_SET had drifted
+    upward). Read FRESH on every call (never cached at import time) so a caller/test can
+    override the env var per-invocation.
+    """
+    raw = os.environ.get("CAMERA_ACTIVE_SET", "cam1 cam2 cam3 cam4")
+    out = []
+    for tok in raw.replace(",", " ").split():
+        tok = tok.strip()
+        if tok.startswith("cam") and tok[3:].isdigit():
+            out.append(int(tok[3:]))
+    return tuple(out) if out else (1, 2, 3, 4)
 
 
 def av_sync_last_path() -> Path:
@@ -74,7 +96,8 @@ def read_pin(ws, source_name: str) -> "int | None":
 
 
 def snapshot_box_pins(host: str, password: str, main_fmt: str, mv_fmt: str) -> dict:
-    """Connect to `host`, read main+MV pins for cam1..7 using the given name templates (e.g.
+    """Connect to `host`, read main+MV pins for every camera in `active_camera_numbers()` (#893
+    -- CAMERA_ACTIVE_SET, never a literal cam1..7 range) using the given name templates (e.g.
     "NDI cam{n}" / "MV NDI cam{n}" for strih, "NDI CAM{n}" / "MV CAM{n}" for imag). Returns
     {"cam<n>": {"main_ms": v_or_None, "mv_ms": v_or_None}, ...}, or {} on a connect failure --
     never a half-filled table that looks more complete than what was actually read."""
@@ -85,7 +108,7 @@ def snapshot_box_pins(host: str, password: str, main_fmt: str, mv_fmt: str) -> d
         print(f"WARNING: latency_pins_snapshot: could not connect to {host}: {e}", file=sys.stderr)
         return out
     try:
-        for n in CAMERAS:
+        for n in active_camera_numbers():
             main = read_pin(ws, main_fmt.format(n=n))
             mv = read_pin(ws, mv_fmt.format(n=n))
             out[f"cam{n}"] = {"main_ms": main, "mv_ms": mv}
