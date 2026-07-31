@@ -83,6 +83,22 @@ pub fn run_within_floor(total_undecodable: u32) -> bool {
     total_undecodable <= RUN_UNDECODABLE_FLOOR
 }
 
+/// #915 (2026-08-01, user decision -- mirrors the issue-914 pattern for `SelfHealAttributionReport
+/// ::overall_pass_contribution`): whether [`window_within_floor`]/[`run_within_floor`] fold into
+/// the fused verdict's relaxed/overall pass. Both functions above are UNCHANGED — still fully
+/// computed and reported (feeding the STRICT `CamboxSegment::pass` field byte-for-byte); only the
+/// CALLERS (`crate::window_gate::decide` for the per-window term, `probe::recording_segments::
+/// segment_continuity` for the run-wide term) stop folding their result into the relaxed/overall
+/// verdict when this returns `false`.
+///
+/// STUB (pre-915 behavior, kept strict on purpose): this is the RED commit — the body still
+/// returns the OLD strict decision (`true`, i.e. the floor still gates) so the new test below
+/// (which expects the RELAXED, always-`false` behavior) fails. The GREEN commit flips the body to
+/// a hardcoded `false`.
+pub fn gates_overall_pass() -> bool {
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -166,6 +182,22 @@ mod tests {
             !run_within_floor(total),
             "10 total undecodable (the pre-#707 regression level) must FAIL the run-wide cap \
              even though every individual window passed its own per-window floor"
+        );
+    }
+
+    // --- gates_overall_pass (issue 915) ---------------------------------------------------
+
+    #[test]
+    fn gates_overall_pass_is_report_only_915() {
+        // #915 (2026-08-01, user decision): cam1's ShadowCast 2 grabber defect (issue 909) trips
+        // the run-wide floor on a hardware fault unrelated to any PR's own diff (run 30671860323:
+        // 10 undecodable, all in CAM1 windows, CAM2/CAM4 measured 0). The floor's own math
+        // (`window_within_floor`/`run_within_floor` above) stays UNCHANGED; only whether it can
+        // fail the run changes.
+        assert!(
+            !gates_overall_pass(),
+            "#915: the optical undecodable floor must be report-only while issue 909 (cam1 \
+             grabber) + issue 881 (120Hz monitor) remain unresolved"
         );
     }
 }
