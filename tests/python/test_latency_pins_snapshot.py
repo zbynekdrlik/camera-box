@@ -6,9 +6,12 @@ Covers, with NO live OBS/network:
   a. delivery_p50_table() -- pure extraction of {camN: p50_ms} from a verdict dict.
   b. read_pin() -- honest None on a missing key / missing source / a failed RPC, never a
      silently-defaulted floor value.
-  c. snapshot_box_pins() -- reads main+MV for cam1..7 via the given name templates; returns {}
-     (never a half-filled table) on a connect failure.
-  d. load_av_sync_last() -- reads the source-of-truth JSON; {} when absent/malformed.
+  c. active_camera_numbers() (#893) -- derives the camera numbers to sweep from
+     CAMERA_ACTIVE_SET, never a literal N=1..7 range.
+  d. snapshot_box_pins() -- reads main+MV for every camera in the ACTIVE set (#893 -- was a
+     literal cam1..7 sweep) via the given name templates; returns {} (never a half-filled
+     table) on a connect failure.
+  e. load_av_sync_last() -- reads the source-of-truth JSON; {} when absent/malformed.
 """
 import json
 import pathlib
@@ -91,11 +94,37 @@ class TestReadPin:
 
 
 # ---------------------------------------------------------------------------
-# snapshot_box_pins -- main+MV for cam1..7, honest {} on connect failure
+# active_camera_numbers -- #893: derive from CAMERA_ACTIVE_SET, never a literal N=1..7 range
+# ---------------------------------------------------------------------------
+
+class TestActiveCameraNumbers:
+    def test_default_is_cam1_through_4(self, monkeypatch):
+        monkeypatch.delenv("CAMERA_ACTIVE_SET", raising=False)
+        assert lps.active_camera_numbers() == (1, 2, 3, 4)
+
+    def test_env_override_narrows_the_set(self, monkeypatch):
+        monkeypatch.setenv("CAMERA_ACTIVE_SET", "cam1 cam3")
+        assert lps.active_camera_numbers() == (1, 3)
+
+    def test_env_override_widens_to_a_retired_camera(self, monkeypatch):
+        monkeypatch.setenv("CAMERA_ACTIVE_SET", "cam1 cam2 cam3 cam4 cam5")
+        assert lps.active_camera_numbers() == (1, 2, 3, 4, 5)
+
+    def test_comma_separated_override_is_also_accepted(self, monkeypatch):
+        monkeypatch.setenv("CAMERA_ACTIVE_SET", "cam1,cam2")
+        assert lps.active_camera_numbers() == (1, 2)
+
+
+# ---------------------------------------------------------------------------
+# snapshot_box_pins -- main+MV for every camera in the ACTIVE set (#893), honest {} on connect
+# failure
 # ---------------------------------------------------------------------------
 
 class TestSnapshotBoxPins:
-    def test_reads_main_and_mv_for_all_seven_cameras(self, monkeypatch):
+    def test_reads_main_and_mv_for_each_camera_in_the_default_active_set(self, monkeypatch):
+        # #893: no CAMERA_ACTIVE_SET override -> the default active set (cam1-4), never the old
+        # literal cam1..7 sweep. A retired camera (cam5/6/7) must not even be attempted.
+        monkeypatch.delenv("CAMERA_ACTIVE_SET", raising=False)
         monkeypatch.setattr(lps, "_conn", lambda host, password: FakeWS())
 
         def fake_read_pin(ws, name):
@@ -105,9 +134,40 @@ class TestSnapshotBoxPins:
 
         monkeypatch.setattr(lps, "read_pin", fake_read_pin)
         result = lps.snapshot_box_pins("10.77.9.202", "", "NDI cam{n}", "MV NDI cam{n}")
-        assert len(result) == 7
+        assert len(result) == 4
+        assert set(result.keys()) == {"cam1", "cam2", "cam3", "cam4"}
         assert result["cam3"] == {"main_ms": 3, "mv_ms": 103}
-        assert result["cam7"] == {"main_ms": 7, "mv_ms": 107}
+
+    def test_camera_active_set_env_override_narrows_the_sweep(self, monkeypatch):
+        # #893: CAMERA_ACTIVE_SET is the ONE source of truth for which cameras get swept --
+        # never a second hardcoded list. Overriding it to a subset must narrow the read, and a
+        # camera OUTSIDE the override (even one inside the module's own default) must not be
+        # read at all.
+        monkeypatch.setenv("CAMERA_ACTIVE_SET", "cam1 cam3")
+        monkeypatch.setattr(lps, "_conn", lambda host, password: FakeWS())
+
+        def fake_read_pin(ws, name):
+            n = int("".join(ch for ch in name if ch.isdigit()))
+            return n if "MV" not in name else 100 + n
+
+        monkeypatch.setattr(lps, "read_pin", fake_read_pin)
+        result = lps.snapshot_box_pins("10.77.9.202", "", "NDI cam{n}", "MV NDI cam{n}")
+        assert set(result.keys()) == {"cam1", "cam3"}
+
+    def test_camera_active_set_env_override_widens_the_sweep_to_a_retired_camera(self, monkeypatch):
+        # #827-style reversibility: re-adding a retired camera to CAMERA_ACTIVE_SET must make it
+        # swept again with zero code changes -- mirrors camera-set.sh's own re-enable procedure.
+        monkeypatch.setenv("CAMERA_ACTIVE_SET", "cam1 cam2 cam3 cam4 cam5")
+        monkeypatch.setattr(lps, "_conn", lambda host, password: FakeWS())
+
+        def fake_read_pin(ws, name):
+            n = int("".join(ch for ch in name if ch.isdigit()))
+            return n if "MV" not in name else 100 + n
+
+        monkeypatch.setattr(lps, "read_pin", fake_read_pin)
+        result = lps.snapshot_box_pins("10.77.9.202", "", "NDI cam{n}", "MV NDI cam{n}")
+        assert "cam5" in result
+        assert "cam6" not in result
 
     def test_connect_failure_returns_empty_never_a_half_filled_table(self, monkeypatch):
         def raising_conn(host, password):
