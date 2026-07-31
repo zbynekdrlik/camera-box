@@ -45,6 +45,18 @@
 //! undecodable frames in one run — MORE than the pre-#707 regression level (10) this whole gate
 //! was written to catch. So the floor has both a per-window AND a run-wide (summed across every
 //! window) term; a gate that would pass the bug it was written after is not a gate.
+//!
+//! ## #915 (2026-08-01) — the floor itself became report-only
+//!
+//! cam1's ShadowCast 2 grabber hardware defect (issue 909) trips the run-wide floor on a hardware
+//! fault completely unrelated to the chain under test (run 30671860323: 10 undecodable, all in
+//! CAM1 windows, CAM2/CAM4 measured 0 — a real optical/monitor artifact would spread evenly across
+//! every box sharing the splitter). [`window_within_floor`]/[`run_within_floor`] above are
+//! UNCHANGED — still fully computed, still feed the STRICT `CamboxSegment::pass` field
+//! byte-for-byte — but [`gates_overall_pass`] now decides whether their result folds into the
+//! RELAXED verdict that actually decides `overall_pass`. Hardcoded `false` until BOTH issue 909
+//! (cam1 physically replaced) and issue 881 (120Hz monitor) land — tracked as a restore item on
+//! issue 905.
 
 /// Per-window optical `undecodable` allowance. The observed max on a single window across the
 /// calibration runs is 2 (issue 854 comment 5128509160's table); 4 is 2x that headroom. Treating
@@ -91,12 +103,13 @@ pub fn run_within_floor(total_undecodable: u32) -> bool {
 /// segment_continuity` for the run-wide term) stop folding their result into the relaxed/overall
 /// verdict when this returns `false`.
 ///
-/// STUB (pre-915 behavior, kept strict on purpose): this is the RED commit — the body still
-/// returns the OLD strict decision (`true`, i.e. the floor still gates) so the new test below
-/// (which expects the RELAXED, always-`false` behavior) fails. The GREEN commit flips the body to
-/// a hardcoded `false`.
+/// Report-only (hardcoded `false`) while cam1's ShadowCast 2 grabber defect (issue 909) and the
+/// 60Hz test-camera monitor (issue 881's own 120Hz replacement) remain physically unresolved. No
+/// env knob — same no-knob discipline issue 889 established. Restore path tracked on issue 905:
+/// once cam1 is physically replaced AND issue 881 (120Hz monitor) lands, flip this back to `true`
+/// — a one-line change, exactly the shape this function exists to make possible.
 pub fn gates_overall_pass() -> bool {
-    true
+    false
 }
 
 #[cfg(test)]
