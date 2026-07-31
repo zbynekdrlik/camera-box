@@ -30,6 +30,7 @@ Rust app for embedded NDI cameras (CAM1-4): multi-camera NDI streaming with soft
 - Reading dantesync's own VERSION (`dantesync --version` answers on every platform, no journal/bundle-state coupling, pin-vs-relative-parity comparison model, #862) → `.claude/rules/dantesync-version-reading.md` (auto-loads on its `paths:`)
 - imag-nb OBS runtime supervision + alerting (dev1-side-only alerting topology, systemd Restart=on-failure vs the issue-788 operator-fighting bug, wait-on-child-pid pattern, #882) → `.claude/rules/imag-obs-supervision.md` (auto-loads on its `paths:`)
 - `gaps` vs `residual_events` divergence (two independently-correct metrics, both directions locked by tests, #852/#883) + pulling real per-segment data from a historical CI run's own log → `.claude/rules/gap-metric-reconciliation.md` (auto-loads on its `paths:`)
+- phase-sync calibrator/snapshot test writes clobbering the real `~/.camera-box/phase-sync-last.json`, + recalibrating from a recent green run's own verdict JSON instead of a fresh ~1h E2E run (#893) → `.claude/rules/phase-sync-calibrator-testing.md` (auto-loads on its `paths:`)
 
 ## DO NOT DELETE These Files
 
