@@ -36,11 +36,15 @@
 #   EVENT : cam2 — stop the painter cleanly (via its PID file — NOT a naive `pkill -f frame-probe`,
 #                  which would self-kill a shell whose cmdline contains "frame-probe"); the QPSK audio
 #                  marker is a THREAD inside that same process (#420: no separate stop needed), so this
-#                  also stops the marker. RESTORE the permanent cam2-painter.service stopped above
-#                  (#440: symmetric guard). REMOVE the transient CAMERA_BOX_NO_DISPLAY=1 drop-in
-#                  TEST mode installed (#291/#528), then reload + restart camera-box and verify the
-#                  service is active + the unconditional HDMI preview restored. Then PRINT the OBS
-#                  event step (burns OFF: the #246 guard; the wrapper refuses to launch otherwise).
+#                  also stops the marker. STOP + DISABLE the permanent cam2-painter.service if present
+#                  (#892: EVENT mode must NEVER (re)start it — a live-broadcast QR hazard, and
+#                  disabling closes the reboot path too; superseded the old #440 "restore" call).
+#                  REMOVE the transient CAMERA_BOX_NO_DISPLAY=1 drop-in TEST mode installed
+#                  (#291/#528), then reload + restart camera-box and verify the service is active +
+#                  the unconditional HDMI preview restored (on a box WITHOUT a dedicated painter
+#                  unit — a painter box's monitor stays owned by the now-stopped painter, #863).
+#                  Then PRINT the OBS event step (burns OFF: the #246 guard; the wrapper refuses to
+#                  launch otherwise).
 #
 # The painter binary on cam2 comes from the CI probe-tools-linux-amd64 artifact:
 #   gh run download <latest CI run> -n probe-tools-linux-amd64
@@ -217,17 +221,24 @@ fi
 REMOTE
 }
 
-# cam2_painter_service_start_cmds -> the REMOTE bash (#440) that RESTORES the PERMANENT
-# `cam2-painter.service` stopped by cam2_painter_service_stop_cmds above (symmetric guard) — so
-# EVENT mode leaves the permanent dual-QR painter running as it was before TEST mode, on a box
-# where the unit is installed; a box without it is unaffected.
-cam2_painter_service_start_cmds() {
+# cam2_painter_service_disable_cmds -> the REMOTE bash (#892) EVENT mode runs INSTEAD of the old
+# #440 "restore" call. The #440 assumption ("EVENT always follows TEST, and TEST is what stopped
+# the permanent painter, so EVENT should put it back") is WRONG for EVENT mode: `rig-mode.sh
+# event` can be invoked on an already-clean rig with no TEST session preceding it, and (re)starting
+# the permanent painter in that case puts a QR straight onto the LIVE BROADCAST (cam2's monitor is
+# what the whole cambox fleet films via the splitter) -- live-caught 2026-07-30. So EVENT mode must
+# instead STOP (idempotent -- in case something raced it back on) AND DISABLE the unit, so neither
+# this call nor a later reboot (the unit's own `enabled` + `Restart=always` state -- the SECOND
+# incident on #892, a bare reboot re-armed the QR 3h after a manual stop) can bring the QR back on
+# its own. A box without the unit installed is unaffected, same guard shape as #440.
+cam2_painter_service_disable_cmds() {
   cat <<'REMOTE'
 if systemctl list-unit-files cam2-painter.service >/dev/null 2>&1; then
-  echo "[#440] cam2-painter.service present -> restarting (restore the permanent dual-QR painter for EVENT mode)"
-  systemctl start cam2-painter.service 2>/dev/null || true
+  echo "[#892] cam2-painter.service present -> stopping + disabling (EVENT mode must never leave a QR painter that can return on its own, whether via a restart call or a later reboot)"
+  systemctl stop cam2-painter.service 2>/dev/null || true
+  systemctl disable cam2-painter.service 2>/dev/null || true
 else
-  echo "[#440] cam2-painter.service not installed on this box -> nothing to restore"
+  echo "[#892] cam2-painter.service not installed on this box -> nothing to stop/disable"
 fi
 REMOTE
 }
@@ -399,10 +410,11 @@ fi
 # (2) belt-and-suspenders: pkill -x matches the process NAME only (comm), so it can NEVER match the
 #     remote shell's own cmdline — immune to the self-match that strands cleanups (NOT pkill -f).
 pkill -x frame-probe 2>/dev/null || true
-# (2.5) #440: restore the PERMANENT cam2-painter.service that TEST mode stopped above (symmetric
-#       guard — a box without the unit is unaffected), so normal broadcast operation resumes with
-#       the permanent dual-QR painter running again.
-$(cam2_painter_service_start_cmds)
+# (2.5) #892: stop + disable the PERMANENT cam2-painter.service if present -- EVENT mode must
+#       NEVER (re)start it (the old #440 "restore" call was the live-broadcast QR hazard this
+#       ticket fixes), and disabling closes the reboot path too. A box without the unit is
+#       unaffected.
+$(cam2_painter_service_disable_cmds)
 # (3) wait until /dev/fb0 is released by the painter, then RESTORE the unconditional-preview
 #     camera-box (#291/#528): remove the transient CAMERA_BOX_NO_DISPLAY=1 drop-in TEST mode
 #     installed, reload, and RESTART so the unit's Environment drops the opt-out and camera-box
@@ -419,30 +431,28 @@ if [ "\$(systemctl is-active camera-box 2>/dev/null)" != "active" ]; then
   systemctl status camera-box --no-pager >&2 2>/dev/null || true
   exit 1
 fi
-# (5) verify the monitor is restored. WHICH state is correct depends on the box (#868): a box with a
-#     dedicated cam2-painter.service carries a PERMANENT no-display drop-in
+# (5) verify the monitor is left CLEAN. WHICH state is correct depends on the box (#868/#892): a
+#     box with a dedicated cam2-painter.service carries a PERMANENT no-display drop-in
 #     (/etc/systemd/system/camera-box.service.d/cam2-no-display.conf, #863) precisely so camera-box's
 #     display thread NEVER grabs /dev/fb0 or DRM master there — the painter service is the sole owner
-#     of that monitor. Asserting the pre-#863 contract on such a box could only ever FAIL, and the
-#     non-zero exit stranded EVENT mode's own burn-clear sweep (a burn left ON then made the next
-#     Full-path E2E gate run refuse in its #758 preflight). So branch on the unit's presence — the
-#     same condition the #440 stop/start guards use, one notion of "painter box" in this script.
+#     of that monitor, EVEN when it is stopped. Asserting the pre-#863 contract on such a box could
+#     only ever FAIL, and the non-zero exit stranded EVENT mode's own burn-clear sweep (a burn left
+#     ON then made the next Full-path E2E gate run refuse in its #758 preflight). So branch on the
+#     unit's presence — the same condition the #440/#892 stop/disable guard uses, one notion of
+#     "painter box" in this script.
 if systemctl list-unit-files cam2-painter.service >/dev/null 2>&1; then
-  # #868 painter box: NO_DISPLAY is EXPECTED to remain (the permanent #863 drop-in). What must hold
-  # is that the TRANSIENT drop-in is gone (removed above), camera-box is active (checked in (4)),
-  # cam2-painter is active, and /dev/fb0 IS held — by the painter, not by camera-box.
-  i=0; while [ "\$(systemctl is-active cam2-painter 2>/dev/null)" != "active" ] && [ \$i -lt 20 ]; do sleep 0.5; i=\$((i+1)); done
-  if [ "\$(systemctl is-active cam2-painter 2>/dev/null)" != "active" ]; then
-    echo "FAIL: #868 painter box but cam2-painter is not active — nothing is painting this monitor" >&2
+  # #868/#892 painter box: the permanent #863 NO_DISPLAY drop-in is untouched by any of this (a
+  # separate, static, provisioning-time config) — camera-box will never re-grab fb0 here regardless.
+  # Per #892, cam2-painter must now be INACTIVE (never restored) — so fb0 ends up correctly UNHELD
+  # (a blank monitor, not a QR) after EVENT mode. What must hold: the TRANSIENT drop-in is gone
+  # (removed above), camera-box is active (checked in (4)), and cam2-painter is confirmed STOPPED.
+  i=0; while [ "\$(systemctl is-active cam2-painter 2>/dev/null)" = "active" ] && [ \$i -lt 20 ]; do sleep 0.5; i=\$((i+1)); done
+  if [ "\$(systemctl is-active cam2-painter 2>/dev/null)" = "active" ]; then
+    echo "FAIL: #892 painter box but cam2-painter is still active — EVENT mode must leave it stopped, never painting the live broadcast" >&2
     systemctl status cam2-painter --no-pager >&2 2>/dev/null || true
     exit 1
   fi
-  i=0; while ! fuser -s /dev/fb0 2>/dev/null && [ \$i -lt 20 ]; do sleep 0.5; i=\$((i+1)); done
-  if ! fuser -s /dev/fb0 2>/dev/null; then
-    echo "FAIL: #868 cam2-painter active but /dev/fb0 not held — the permanent dual-QR painter is not painting" >&2
-    exit 1
-  fi
-  echo "PASS: transient painter stopped, camera-box active, permanent cam2-painter restored (holding /dev/fb0)"
+  echo "PASS: #892 transient painter stopped, camera-box active, permanent cam2-painter stopped+disabled (no QR can return, including across a reboot)"
 else
   #     The EFFECTIVE Environment no longer carries CAMERA_BOX_NO_DISPLAY=1 (same resolved-check
   #     shape TEST mode uses — 'systemctl show', NOT 'systemctl cat', so a silently-failed drop-in
