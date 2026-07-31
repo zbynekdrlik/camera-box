@@ -383,18 +383,19 @@ pub fn segment_continuity(
     }
 
     // #881 — the run-wide half of the calibrated optical-undecodable floor: the SUM across every
-    // window must ALSO stay within its own cap, even when every individual window already passed
-    // its own per-window term (see `crate::optical_floor`'s "Two terms, not one" — a per-window-
-    // only check would let the pre-#707 regression level through undetected). UNTOUCHED by
-    // issue 889 — the undecodable floor is not one of the relaxed terms.
+    // window (see `crate::optical_floor`'s "Two terms, not one" — a per-window-only check would
+    // let the pre-#707 regression level through undetected). UNCHANGED computation from before
+    // issue 915 (still summed, still compared against `RUN_UNDECODABLE_FLOOR` exactly as before).
     //
-    // #915 RED commit stub: this line still folds `run_wide_undecodable_within_floor` directly
-    // (the pre-915 strict behavior) -- the tests below, which expect the report-only contract,
-    // fail against it. The GREEN commit ORs in `!crate::optical_floor::gates_overall_pass()`.
+    // Issue 915 (2026-08-01 user decision): this no longer FORCES `overall_pass` to fail while
+    // `crate::optical_floor::gates_overall_pass()` is `false` — report-only while cam1's grabber
+    // (issue 909) + the 120Hz monitor (issue 881) are unresolved. Restore: flip that one function
+    // back to `true` (issue 905).
     let total_undecodable: u32 = segments.iter().map(|s| s.undecodable).sum();
     let run_wide_undecodable_within_floor =
         crate::optical_floor::run_within_floor(total_undecodable);
-    overall_pass &= run_wide_undecodable_within_floor;
+    overall_pass &=
+        run_wide_undecodable_within_floor || !crate::optical_floor::gates_overall_pass();
 
     // Issue 889 visibility requirement 2 — how many windows would have FAILED under the pre-889
     // strict rule, regardless of whether the run-wide relaxed verdict passes. Always computed,
