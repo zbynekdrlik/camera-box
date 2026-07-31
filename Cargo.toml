@@ -122,6 +122,10 @@ name = "phase-sync-gate"
 path = "src/bin/phase-sync-gate.rs"
 
 [[bin]]
+name = "phase-sync-active-floor-gate"
+path = "src/bin/phase-sync-active-floor-gate.rs"
+
+[[bin]]
 name = "genlock-jitter-report"
 path = "src/bin/genlock-jitter-report.rs"
 
