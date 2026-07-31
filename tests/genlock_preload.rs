@@ -1499,6 +1499,40 @@ mod vendored_source {
     }
 
     #[test]
+    fn asrc_default_on_present_in_vendored_source() {
+        // #912: issue 803 added the per-source ASRC servo (asrc_enabled bool, bzalloc
+        // zero-inits it to false) but NOTHING in the vendored tree ever called
+        // obs_source_set_asrc_enabled() — the servo shipped permanently inert, exactly the
+        // "special command-line tweak nobody remembers to call" the user flagged. #912 makes
+        // ASRC a BUILD DEFAULT (mirror of issue 257's render-tick/ts-align hard-lock): every
+        // source created via obs_source_create_internal() starts with asrc_enabled = true, no
+        // env, no per-source opt-in required. The setter/getter stay EXPORTed as an optional
+        // override path (parity with obs_source_set_genlock_burn under the #257 FIFO default).
+        let src = squish(&vendor_file(OBS_SOURCE));
+        assert!(
+            src.contains("source->asrc_enabled = true;"),
+            "{OBS_SOURCE}: #912 — obs_source_create_internal no longer defaults asrc_enabled to \
+             true; ASRC would silently ship OFF again (the forgettable-toggle problem #912 \
+             exists to kill). Re-apply the build-default init."
+        );
+        // The setter/getter must still exist and be EXPORTed — #912 keeps them as an optional
+        // override path, it does not remove the API (mirror of the #245/#257 latency + burn
+        // setters staying live under their own hard-locked defaults).
+        assert!(
+            src.contains("void obs_source_set_asrc_enabled(obs_source_t *source, bool")
+                && src.contains("bool obs_source_get_asrc_enabled("),
+            "{OBS_SOURCE}: #912 — obs_source_set/get_asrc_enabled is gone; the build-default \
+             change must keep the override API, not remove it."
+        );
+        let api = squish(&vendor_file(OBS_API));
+        assert!(
+            api.contains("EXPORT void obs_source_set_asrc_enabled(obs_source_t *source, bool"),
+            "{OBS_API}: #912 — obs_source_set_asrc_enabled is not EXPORTed; DistroAV/any future \
+             GUI override could not resolve the setter."
+        );
+    }
+
+    #[test]
     fn build_latch_drains_burst_to_target_in_vendored_source() {
         // #116: the genlock_fifo branch of ready_async_frame must DRAIN the excess
         // oldest frames at the build latch (and after a preload-change re-arm) so every
@@ -2558,6 +2592,26 @@ mod distroav_source {
              GENLOCK_MAX_SOURCE_FPS drop-cap arrival-fps budget; a subtree pull could hot-swap an \
              obs.dll that re-caps latency at ~450ms. Add the pwsh #292 gate, mirroring windows-genlock.yml."
         );
+    }
+
+    #[test]
+    fn windows_genlock_workflows_gate_on_asrc_default_on() {
+        // #912: BOTH the slow and fast Windows production builds must re-assert the ASRC
+        // build-default token in pwsh BEFORE their build (this Linux Rust guard can't compile
+        // on the runner) — a `git subtree pull` (#44) that silently reverts the default-on init
+        // would ship an obs.dll where ASRC is inert again, un-gated, exactly the regression #912
+        // exists to prevent. Mirror of every other #257-style hard-lock lock-step guard here.
+        for (wf_const, wf_path) in [
+            (WINDOWS_GENLOCK_WF, "windows-genlock.yml"),
+            (WINDOWS_GENLOCK_FAST_WF, "windows-genlock-fast.yml"),
+        ] {
+            let wf = squish(&vendor_file(wf_const));
+            assert!(
+                wf.contains("source->asrc_enabled = true;"),
+                "{wf_path}: #912 — the build no longer gates on the ASRC default-on init \
+                 (source->asrc_enabled = true;); re-add the pwsh #912 gate."
+            );
+        }
     }
 
     #[test]
