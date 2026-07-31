@@ -277,13 +277,43 @@ impl Default for RealtimeAsrcCompensator {
 
 impl AsrcCompensator for RealtimeAsrcCompensator {
     fn compensate(&mut self, raw_advance_s: f64, master_block_s: f64) -> f64 {
-        // test(#803): [red] stub -- pass-through only, proves the gate/convergence/clamp/slew
-        // tests below genuinely fail without the real servo logic (restored in the next commit).
-        let _ = self.estimated_ppm;
-        let _ = self.applied_ppm;
-        let _ = self.elapsed_lock_s;
-        let _ = master_block_s;
-        raw_advance_s
+        if master_block_s <= 0.0 {
+            // A non-positive block duration carries no timing information (e.g. a duplicate or
+            // backward wall-clock read) — pass through unchanged rather than divide by a
+            // non-positive number.
+            return raw_advance_s;
+        }
+
+        // This block's instantaneous rate ratio, straight from the observation — exactly the
+        // "delivered samples / wall-clock window" measurement issue #803 specifies, using the
+        // SAME master-clock basis the video FIFO release already uses (genlock_wall_now_ns() on
+        // the C side).
+        let instantaneous_ppm = (raw_advance_s / master_block_s - 1.0) * 1_000_000.0;
+
+        // TIME-based EMA smoothing factor: alpha = 1 - exp(-block/tau), so convergence speed is
+        // independent of how the caller chunks audio callbacks (a real device may deliver
+        // anywhere from a few ms to tens of ms per callback, unlike this bench's fixed BLOCK_S).
+        let alpha = 1.0 - (-master_block_s / TIME_CONSTANT_S).exp();
+        self.estimated_ppm = alpha * instantaneous_ppm + (1.0 - alpha) * self.estimated_ppm;
+
+        self.elapsed_lock_s += master_block_s;
+
+        // Default-safe: no lock yet -> target zero compensation, never guess from a
+        // still-converging estimate. Once locked, clamp the estimate to the hard ppm bound before
+        // ever using it as a target.
+        let target_ppm = if self.elapsed_lock_s < MIN_LOCK_S {
+            0.0
+        } else {
+            self.estimated_ppm.clamp(-MAX_PPM, MAX_PPM)
+        };
+
+        // Slew-limit the APPLIED correction toward the target — caps how fast the resample-ratio
+        // nudge may change, independent of how fast the estimate itself moves.
+        let max_step = MAX_SLEW_PPM_PER_S * master_block_s;
+        let delta = (target_ppm - self.applied_ppm).clamp(-max_step, max_step);
+        self.applied_ppm += delta;
+
+        raw_advance_s / (1.0 + self.applied_ppm / 1_000_000.0)
     }
 }
 
