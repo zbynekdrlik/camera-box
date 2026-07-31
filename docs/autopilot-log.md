@@ -6532,3 +6532,34 @@ dev->main PR #897 (originally opened for #894/#895) -- added `Closes #898` to it
 REST PATCH method (`gh pr edit --body-file` still fails with the GraphQL "Projects (classic)"
 error on this repo). Not merged -- the supervisor owns the merge and the Full-path E2E hardware
 gate wait (run 30635625094 was already in progress for this SHA at push time).
+
+## #912 — ASRC always-on-by-default (build const, no toggle)
+
+PR #911 (#803) added the per-source ASRC servo (asrc-compensator.{h,c} + asrc_enabled bool on
+struct obs_source) but nothing ever called obs_source_set_asrc_enabled() -- permanently inert,
+the user's "forgettable command-line tweak" complaint. #912 makes it a BUILD DEFAULT, mirroring
+#257's render-tick/ts-align hard-lock: obs_source_create_internal() sets
+source->asrc_enabled = true; no env, no per-source opt-in. Setter/getter stay EXPORTed as an
+optional override path (nothing calls them). No source-class exclusion / GUI checkbox needed --
+asrc_process_audio() measures wall-clock block duration vs frame count, not source PTS, so a
+media seek doesn't corrupt the estimate; the existing clamp (+-300ppm) + slew (5ppm/s) already
+bound any transient fallout. Design comment posted before any code:
+https://github.com/zbynekdrlik/camera-box/issues/912#issuecomment-5147590238
+
+RED `a3d5f81fa` (two new tests: vendored_source::asrc_default_on_present_in_vendored_source +
+distroav_source::windows_genlock_workflows_gate_on_asrc_default_on in
+tests/genlock_preload.rs, confirmed failing under `cargo test --features probe --test
+genlock_preload asrc -- --nocapture`) / GREEN `cb92f28a6` (obs-source.c default-on init +
+doc-comment updates + both windows-genlock{,-fast}.yml pwsh gates in lock-step). Discovered #803
+shipped with ZERO lock-step anchors for the whole ASRC feature despite this repo's own
+convention -- #912 added the first ones (for the default-on token only); the rest of #803's
+servo wiring stays unguarded for a future ticket to anchor if it touches that code. Documented in
+.claude/skills/genlock/SKILL.md (new "#803/#912" section).
+
+Full local suite: 178 `test result: ok` / 0 FAILED (one `verify_imag_pure_functions` test flaked
+under full parallel load, reproduced clean twice in isolation + CI green on the same commit --
+noted in .claude/rules/ci-testing-gotchas.md as a new parallel-load-flake entry, not a real
+regression). probe-features genlock_preload.rs: 99/99 tests green (`cargo test --features probe
+--test genlock_preload`). Version bumped 1.7.0-dev.400 -> .401 (`500cc0d65`). Not yet pushed /
+no PR opened -- code + tests + docs only per the dispatch's scope limit (no rig deploy, no
+merge); handing back for CI + hardware E2E gate.
