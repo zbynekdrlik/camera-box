@@ -48,11 +48,11 @@ pub const DEFAULT_BOUNDARY_TOLERANCE_NS: i64 = 200_000_000;
 /// list). A negative `tolerance_ns` is floored to 0, never a negative tolerance — mirrors
 /// `probe::recording_segments::place_frame_in_window`'s own `guard_ns.max(0)`. An empty
 /// `boundaries` slice is never near anything.
-pub fn near_any_boundary(_gen_ts_ns: i64, _boundaries: &[i64], _tolerance_ns: i64) -> bool {
-    // #903 [red]: deliberate no-op stub — every timestamp reads as "not near" any boundary,
-    // exactly today's bug behavior (no tolerance applied anywhere). The [green] commit implements
-    // the real distance check.
-    false
+pub fn near_any_boundary(gen_ts_ns: i64, boundaries: &[i64], tolerance_ns: i64) -> bool {
+    let tolerance_ns = tolerance_ns.max(0);
+    boundaries
+        .iter()
+        .any(|&b| (gen_ts_ns - b).abs() <= tolerance_ns)
 }
 
 #[cfg(test)]
