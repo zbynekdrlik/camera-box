@@ -135,11 +135,14 @@ impl SelfHealAttributionReport {
     /// (`recording-verdict.rs`) stops ANDing them into `all_pass`, exactly like issue 861 did for
     /// `av_window::av_offset_gate_pass`.
     ///
-    /// STUB (pre-914 behavior, kept strict on purpose): this is the RED commit -- the body still
-    /// returns the OLD strict decision so the new tests below (which expect the RELAXED, always-
-    /// true behavior) fail. The GREEN commit flips the body to a hardcoded `true`.
+    /// Report-only (hardcoded `true` = never contributes a failure) while cam1's ShadowCast 2
+    /// grabber defect (issue 909) remains physically unresolved. No env knob -- same no-knob
+    /// discipline issue 889 established. Restore path tracked on issue 905: once cam1 is
+    /// physically replaced and a stable week passes with no self-heal escalations, flip this
+    /// back to `!self.any_frozen() && !self.any_self_heal()` -- a one-line change, exactly the
+    /// shape this method exists to make possible.
     pub fn overall_pass_contribution(&self) -> bool {
-        !self.any_frozen() && !self.any_self_heal()
+        true
     }
 }
 
