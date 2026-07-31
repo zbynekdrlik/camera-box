@@ -343,5 +343,12 @@ pub mod window_gate;
 // (src/bin/) reads live pins over OBS WS and hands them in.
 pub mod phase_sync_active_floor;
 
+// #903 — the boundary TOLERANCE for confirming a backward burn-id jump crosses a
+// `--switch-schedule` program-switch boundary, when the exact-instant `raw_window_index` equality
+// test alone cannot see it (clock disagreement between dev1 and the painter, bounded only by the
+// #326 gate's 200ms guarantee). No probe deps, so it unit-tests Tier-0;
+// `probe::burn_contiguity::burn_contiguity_in_window_with_step_and_schedule` calls it.
+pub mod window_boundary_tolerance;
+
 #[cfg(feature = "probe")]
 pub mod probe;
