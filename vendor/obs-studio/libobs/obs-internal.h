@@ -911,10 +911,13 @@ struct obs_source {
 	audio_resampler_t *resampler;
 	/* camera-box #803: per-source ASRC (async sample-rate conversion) servo, continuously
 	 * holding this source's audio timeline on the video master clock. `asrc_enabled` is a
-	 * plain runtime bool (default OFF, same convention as genlock_burn -- toggled live via
-	 * obs_source_set_asrc_enabled(), no restart needed); `asrc` is the servo's own state
-	 * (see media-io/asrc-compensator.h), mutated ONLY from process_audio() on this source's
-	 * own audio-ingest call path (single-writer, no lock needed for the struct itself).
+	 * plain runtime bool -- #912: default ON (a BUILD DEFAULT set in
+	 * obs_source_create_internal(), mirroring issue 257's render-tick/ts-align hard-lock), NOT
+	 * default OFF any more; it CAN still be toggled live via obs_source_set_asrc_enabled() (no
+	 * restart needed), but that setter is now only an optional override path, never the normal
+	 * way ASRC gets turned on. `asrc` is the servo's own state (see
+	 * media-io/asrc-compensator.h), mutated ONLY from process_audio() on this source's own
+	 * audio-ingest call path (single-writer, no lock needed for the struct itself).
 	 * `asrc_last_wall_ns`/`asrc_has_last_wall` track the wall-clock timestamp of the PREVIOUS
 	 * audio callback (genlock_wall_now_ns(), the same basis the video FIFO release uses) so
 	 * process_audio() can measure this callback's true master-clock block duration. */

@@ -202,6 +202,29 @@ jobs:
           }
           Write-Output "per-source genlock latency (ms) override present + #257 floor 3 (build const, 1->3/0->3) + genlock default-ON — OK"
 
+      # #912: ASRC (issue 803's per-source clock-drift servo) must be a BUILD DEFAULT, mirroring
+      # the #257 render-tick/ts-align hard-lock — no env, no per-source opt-in required. Nothing
+      # in the vendored tree ever called obs_source_set_asrc_enabled(), so the servo shipped
+      # permanently inert until this default-on init; a `git subtree pull` (#44) reverting it back
+      # to a bzalloc-zero default would silently re-inert ASRC. Mirrors the canonical Linux-CI
+      # guard tests/genlock_preload.rs::vendored_source::asrc_default_on_present_in_vendored_source
+      # (probe-gated, can't compile on this windows runner). Keep both in lock-step.
+      - name: Assert ASRC always-on-by-default (#912)
+        shell: pwsh
+        run: |
+          $obs = (Get-Content "vendor/obs-studio/libobs/obs-source.c" -Raw) -replace '\s+', ' '
+          if ($obs -notmatch [regex]::Escape('source->asrc_enabled = true;')) {
+            Write-Error "obs-source.c: obs_source_create_internal no longer defaults asrc_enabled to true — #912 ASRC build-default reverted (would ship silently OFF again)"; exit 1
+          }
+          if ($obs -notmatch [regex]::Escape('void obs_source_set_asrc_enabled(obs_source_t *source, bool')) {
+            Write-Error "obs-source.c: obs_source_set_asrc_enabled missing — the #912 optional override API must stay live"; exit 1
+          }
+          $api = (Get-Content "vendor/obs-studio/libobs/obs.h" -Raw) -replace '\s+', ' '
+          if ($api -notmatch [regex]::Escape('EXPORT void obs_source_set_asrc_enabled(obs_source_t *source, bool')) {
+            Write-Error "obs.h: obs_source_set_asrc_enabled not EXPORTed — #912 override path unreachable"; exit 1
+          }
+          Write-Output "ASRC always-on-by-default (#912 build-default init + live override API kept) — OK"
+
       # #116: assert the build-latch drain-to-target patch is present in the vendored
       # OBS source BEFORE the 150-min build, so a future `git subtree pull` (#44) that
       # reverts it fails HERE rather than shipping a binary where cameras freeze at
