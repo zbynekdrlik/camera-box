@@ -41,13 +41,46 @@ funnels through that exact log line before assuming this coverage holds.
 `src/self_heal_attribution.rs::attribute_self_heal` re-attributes a classified-`Frozen` window to
 `self_heal_reset` ONLY when a same-camera reset event correlates (within
 `SELF_HEAL_CORRELATION_MARGIN_NS`, 5s either side of the window). It does NOT drop the event —
-`any_self_heal()` stays true (gating `all_pass`) even for an event that never correlates to any
-classified window, and even when the correlated window's stale frames were reattributed away from
-`frozen_leg`. The run still fails; only the LABEL changes from "camera fault" to "run-integrity
-event" (see `recording-verdict.rs`'s `report["self_heal_reset"]` JSON block). Never change this
-module to unconditionally swallow a self-heal event just because it also correlates to a window —
-the underlying rate defect (#728) is real and unresolved, and silently tolerating it would be
-exactly the "suppress" branch the ticket's own design note rejected.
+`any_self_heal()` stays true even for an event that never correlates to any classified window, and
+even when the correlated window's stale frames were reattributed away from `frozen_leg`. Only the
+LABEL changes from "camera fault" to "run-integrity event" (see `recording-verdict.rs`'s
+`report["self_heal_reset"]` JSON block). Never change this module to unconditionally swallow a
+self-heal event just because it also correlates to a window — the underlying rate defect (#728) is
+real and unresolved, and silently tolerating it would be exactly the "suppress" branch the ticket's
+own design note rejected. (`any_self_heal()`/`any_frozen()` no longer fold into `all_pass` as of
+#914 below — but they still stay true/computed for exactly this reason: the run-integrity signal
+must never be silently dropped, only decoupled from the pass/fail decision.)
+
+## #914 (2026-08-01) — frozen_leg/self_heal_reset became report-only; the pure-decision seam this created
+
+cam1's ShadowCast 2 grabber hardware defect (#909) fails the fused verdict's `overall_pass` on a
+hardware fault completely unrelated to whatever the PR's own diff changed (a ~5.5min E2E window has
+a high chance of catching one of cam1's 0.6-8s USB-reset freezes). Per the user's standing
+gate-relax-and-move-forward directive (2026-07-31, mirrors #889's report-only pattern and #861's
+caller-only decoupling): `SelfHealAttributionReport::overall_pass_contribution()` is now hardcoded
+`true` — `any_frozen()`/`any_self_heal()` above are COMPLETELY UNCHANGED (still fully computed,
+printed, JSON-reported with a new `gates_overall_pass: false` field mirroring `all_cambox_av_sync`'s
+#861 shape), only the CALLER (`recording-verdict.rs`) stopped ANDing them into `all_pass`. Restore
+path on #905: flip the method body back to `!any_frozen() && !any_self_heal()` once cam1 is
+physically replaced and a stable week passes with no self-heal escalations — a one-line change,
+which is the whole reason this method exists as its own seam rather than inlining the decision at
+each call site.
+
+**Testing a probe-gated report-only decoupling with no local run path — the DIFFERENTIAL fixture
+technique.** `recording-verdict.rs` is `required-features = ["probe"]` (this repo's Local Build
+Policy — see the project CLAUDE.md), so any end-to-end test added to it has ZERO local
+compile/test path; the first time it actually runs is CI. Rather than asserting an ABSOLUTE
+`overall_pass == true` on a hand-built fixture (which silently assumes every OTHER unrelated gate
+in that huge function also happens to pass with your minimal fixture — fragile, and you cannot
+verify it locally before pushing), build TWO otherwise-IDENTICAL fixtures — one WITH the
+term-under-test firing, one WITHOUT — and assert `overall_pass` is IDENTICAL between them. This is
+exactly `#861`'s own precedent
+(`all_cambox_av_sync_gate_failure_no_longer_forces_the_overall_verdict_to_fail_861`) and it fully
+sidesteps needing to know or guess the absolute pass/fail value of the OTHER gates — see
+`frozen_leg_and_self_heal_reset_no_longer_gate_the_overall_verdict_914` in
+`src/bin/recording-verdict.rs` for the worked example (a genuinely HARD-FROZEN window forced via 5
+duplicate-tick frames at density 0.20, well above `frozen_leg::FROZEN_DENSITY_THRESHOLD`, plus an
+unattributed self-heal event on a cambox name that never appears in the schedule).
 
 ## Scope the mid-recording scan to EVERY active camera, not just the source camera
 

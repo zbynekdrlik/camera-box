@@ -6563,3 +6563,39 @@ regression). probe-features genlock_preload.rs: 99/99 tests green (`cargo test -
 --test genlock_preload`). Version bumped 1.7.0-dev.400 -> .401 (`500cc0d65`). Not yet pushed /
 no PR opened -- code + tests + docs only per the dispatch's scope limit (no rig deploy, no
 merge); handing back for CI + hardware E2E gate.
+
+## Issue 914 (2026-08-01) -- frozen_leg + self_heal_reset become report-only
+
+Root cause: cam1's ShadowCast 2 grabber hardware defect (issue 909, USB-reset loop, 0.6-8s
+freezes) fails the fused verdict on a hardware fault unrelated to any PR's own diff -- caught PR
+913 (ASRC always-on) on `frozen_leg: CAM1 copies=17/22` with everything else green. Design
+comment (root cause / chosen approach / rejected per-camera-exemption alternative) posted before
+any code: https://github.com/zbynekdrlik/camera-box/issues/914#issuecomment-5148077887.
+
+RED `3aca71c0e` / GREEN `9723b8ea9` (Tier-0, locally verified: `cargo test --lib
+self_heal_attribution` 16/16 ok) -- added `SelfHealAttributionReport::overall_pass_contribution()`
+hardcoded `true`, mirrors the issue-889 no-knob discipline and issue-861's caller-only decoupling
+shape. RED `bcb5765f4` / GREEN `54d002cc1` (probe-gated `recording-verdict.rs`, no local run
+path -- differential end-to-end fixture test mirroring issue 861's own precedent: build two
+otherwise-identical fixtures, one with a genuinely HARD-FROZEN window + an unattributed self-heal
+event, one without, and assert `overall_pass` is IDENTICAL between them rather than asserting an
+absolute true/false). Also fixed `frozen_leg.rs`'s now-stale `FrozenLegReport` doc, which claimed
+its `any_frozen()` still gates `all_pass` (it never actually did -- the real path goes through
+`self_heal_attribution::attribute_self_heal`, and neither gates anything after this change).
+
+New JSON fields `gates_overall_pass: false` + `gate` note string on both `frozen_leg` and
+`self_heal_reset` blocks, mirroring `all_cambox_av_sync`'s issue-861 shape exactly. issue 895's
+attribution rule (self-heal reset must never misreport as frozen_leg) completely untouched --
+only the fold into `all_pass` changed. Restore path tracked on issue 905.
+
+Vehicle: folded into the already-open PR 913 (ASRC always-on, issue 912) via a REST PATCH body
+update (`gh pr edit` is broken on this repo -- GraphQL projectCards error, see CLAUDE.md GOTCHA);
+PR body now carries `Closes #912` + `Closes #914`. Local checks green: `cargo fmt --all --check`,
+`cargo check`, `cargo clippy --all-targets -- -D warnings`, `cargo test --no-run` (all default
+features). Pushed as `54d002cc1`; CI (push) green; Full-path E2E (hardware gate, the exact
+scenario this ticket fixes) triggered and in progress at hand-back time -- this is the LIVE proof
+the fix works or not, left for the supervisor to watch to terminal.
+
+Playbook: `.claude/rules/self-heal-frozen-leg-attribution.md` -- new "#914" section (the
+decoupling itself + the differential-fixture testing technique for a probe-gated report-only
+change with no local run path).
