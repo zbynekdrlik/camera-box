@@ -38,7 +38,7 @@
 
 use anyhow::{Context, Result};
 use camera_box::av_window::{self, AvSyncVerdict};
-use camera_box::frozen_leg::{frozen_leg_report, SegmentLeg};
+use camera_box::frozen_leg::SegmentLeg;
 use camera_box::offline_ack;
 use camera_box::probe::av_sync_recording::{decode_av_marker_inputs, AvMarkerInputs};
 use camera_box::probe::burn_contiguity::{
@@ -67,6 +67,7 @@ use camera_box::probe::recording_verdict::{
     cam_strih_assessment, verdict, FrameTick, RecordingVerdict, VerdictConfig,
 };
 use camera_box::qpsk_marker::{av_offset_candidates_deduped, DEDUPE_SAME_FID_WINDOW_S};
+use camera_box::self_heal_attribution::{attribute_self_heal, SelfHealResetEvent};
 use clap::Parser;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -341,6 +342,16 @@ struct Args {
     /// downgrade the gate -- this only fixes WHO gets judged).
     #[arg(long, default_value = "")]
     offline_ack_cams: String,
+    /// #895: a `capture_rate_selfheal` (#663) USB-reset event detected by the harness during THIS
+    /// recording window (`scripts/lib/self-heal-attribution.sh`'s mid-recording scan, wired at
+    /// `recording-e2e.sh`'s `[7b/8]`), so the `frozen_leg` classifier never misreports the
+    /// resulting stale/duplicate frames as a camera fault. Repeat per event:
+    /// `--self-heal-reset cam1:1785439475449374588 --self-heal-reset cam1:1785439600100000000`.
+    /// A malformed token is silently dropped (`SelfHealResetEvent::parse`) rather than erroring —
+    /// the harness's own scan output is the only producer, and a partially-unparseable token must
+    /// never abort an otherwise-valid verdict run.
+    #[arg(long, value_name = "CAMBOX:EPOCH_NS")]
+    self_heal_reset: Vec<String>,
 }
 
 impl Args {
@@ -4006,12 +4017,32 @@ fn build_and_print_verdict(
                         end_ns: s.end_ns,
                     })
                     .collect();
-                let leg_report = frozen_leg_report(&leg_segments);
+                // #895 — correlate the harness's --self-heal-reset events (recording-e2e.sh's
+                // [7b/8] mid-recording scan, scripts/lib/self-heal-attribution.sh) against these
+                // SAME windows BEFORE emitting frozen_leg, so a capture_rate_selfheal (#663)
+                // USB-reset firing during the recording is attributed to self_heal_reset, never
+                // misreported as a camera fault. A malformed token is silently dropped — the
+                // harness's own scan is the only producer.
+                let self_heal_events: Vec<SelfHealResetEvent> = args
+                    .self_heal_reset
+                    .iter()
+                    .filter_map(|t| SelfHealResetEvent::parse(t))
+                    .collect();
+                let leg_report = attribute_self_heal(&leg_segments, &self_heal_events);
                 for f in &leg_report.frozen {
                     println!("  {}", f.message());
                 }
                 for s in &leg_report.stale_replay {
                     println!("  {}", s.message());
+                }
+                for sh in &leg_report.self_heal {
+                    println!("  {}", sh.message());
+                }
+                for ev in &leg_report.unattributed_events {
+                    println!(
+                        "  self_heal_reset: {} at {} (epoch ns) -- no correlating classified window, still counts as a run-integrity event (#895)",
+                        ev.cambox, ev.at_ns
+                    );
                 }
                 report["frozen_leg"] = serde_json::json!({
                     "frozen": leg_report.frozen.iter().map(|f| serde_json::json!({
@@ -4028,7 +4059,23 @@ fn build_and_print_verdict(
                         "message": s.message(),
                     })).collect::<Vec<_>>(),
                 });
+                report["self_heal_reset"] = serde_json::json!({
+                    "attributed": leg_report.self_heal.iter().map(|sh| serde_json::json!({
+                        "cambox": sh.cambox,
+                        "since_ns": sh.since_ns,
+                        "reset_at_ns": sh.reset_at_ns,
+                        "copies": sh.copies,
+                        "approx_stale_secs": sh.approx_stale_secs,
+                        "density": sh.density,
+                        "message": sh.message(),
+                    })).collect::<Vec<_>>(),
+                    "unattributed_events": leg_report.unattributed_events.iter().map(|ev| serde_json::json!({
+                        "cambox": ev.cambox,
+                        "at_ns": ev.at_ns,
+                    })).collect::<Vec<_>>(),
+                });
                 all_pass &= !leg_report.any_frozen();
+                all_pass &= !leg_report.any_self_heal();
 
                 // #467/#583 — extend the ALL-CAMBOX sweep to ALSO cover imag-nb's OWN recording:
                 // place its frames onto the SAME schedule timeline (anchored on imag's #463 digital
