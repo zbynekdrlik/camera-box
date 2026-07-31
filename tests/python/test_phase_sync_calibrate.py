@@ -22,6 +22,10 @@ Covers, with NO live OBS:
      set, falls back to a local path otherwise (testable off-rig).
   h. CLI wiring -- dry-run by default (no SetInputSettings without --apply); --apply drives the
      full multi-camera apply + persist flow, one genlock latency per strih source.
+  i. active_ndi_sources() / main()'s active-set filter (#893) -- --measured-json entries for a
+     source NOT in CAMERA_ACTIVE_SET are ignored (WARNED, never silently applied) before offsets
+     are computed/applied, so a stale/foreign source can never corrupt the "slowest" formula or
+     get a pin written to it.
 """
 import json
 import pathlib
@@ -482,6 +486,15 @@ class TestRemotePushPlan:
 # ---------------------------------------------------------------------------
 
 class TestCLI:
+    @pytest.fixture(autouse=True)
+    def _default_active_set(self, monkeypatch):
+        # #893: main() now restricts --measured-json to CAMERA_ACTIVE_SET. Default it to cover
+        # every camera name this file's fixtures use (cam1/cam3/cam4/cam5) so pre-#893 scenarios
+        # keep exercising exactly what they always tested, unaffected by the new filter. A test
+        # that specifically wants to exercise the filter overrides this with its own
+        # monkeypatch.setenv() call.
+        monkeypatch.setenv("CAMERA_ACTIVE_SET", "cam1 cam3 cam4 cam5")
+
     def test_dry_run_never_calls_set_input_settings(self, monkeypatch, tmp_path):
         fake = FakeObs(latencies={"NDI cam5": 450, "NDI cam1": 450})
         monkeypatch.setattr(phase_sync_calibrate, "_rpc", fake.rpc)
@@ -647,3 +660,101 @@ class TestCLI:
         phase_sync_calibrate.main()
         out = capsys.readouterr().out
         assert "REMOTE PUSH REQUIRED" not in out
+
+
+# ---------------------------------------------------------------------------
+# (i) active_ndi_sources() / main()'s active-set filter -- #893
+# ---------------------------------------------------------------------------
+
+class TestActiveNdiSources:
+    def test_default_is_cam1_through_4(self, monkeypatch):
+        monkeypatch.delenv("CAMERA_ACTIVE_SET", raising=False)
+        assert phase_sync_calibrate.active_ndi_sources() == {
+            "NDI cam1", "NDI cam2", "NDI cam3", "NDI cam4",
+        }
+
+    def test_env_override_narrows_and_widens(self, monkeypatch):
+        monkeypatch.setenv("CAMERA_ACTIVE_SET", "cam1 cam5")
+        assert phase_sync_calibrate.active_ndi_sources() == {"NDI cam1", "NDI cam5"}
+
+
+class TestCLIActiveSetFilter:
+    def test_a_non_active_source_is_ignored_never_applied(self, monkeypatch, tmp_path):
+        # The exact live #893 shape: --measured-json carries a RETIRED camera's source
+        # alongside real active ones. It must be dropped before computing offsets AND never
+        # get a SetInputSettings call -- never silently corrupt the "slowest" determination or
+        # get a pin written.
+        monkeypatch.setenv("CAMERA_ACTIVE_SET", "cam1 cam3")
+        fake = FakeObs(latencies={"NDI cam1": 450, "NDI cam3": 450, "NDI cam5": 450})
+        monkeypatch.setattr(phase_sync_calibrate, "_rpc", fake.rpc)
+        monkeypatch.setattr(phase_sync_calibrate, "_conn", lambda host, password="": None)
+
+        seen_measured = {}
+
+        def fake_run_gate_bin(measured, gate_bin=None):
+            seen_measured.update(measured)
+            return {s: 3 for s in measured}
+
+        monkeypatch.setattr(phase_sync_calibrate, "_run_gate_bin", fake_run_gate_bin)
+        measured_path = tmp_path / "measured.json"
+        measured_path.write_text(json.dumps(
+            {"NDI cam1": 90.0, "NDI cam3": 80.0, "NDI cam5": 999.0}
+        ))
+        json_path = tmp_path / "phase-sync-last.json"
+        monkeypatch.setattr(
+            sys, "argv",
+            ["phase_sync_calibrate.py", "--host", "10.77.9.202",
+             "--measured-json", str(measured_path), "--apply", "--json-path", str(json_path)],
+        )
+        phase_sync_calibrate.main()
+
+        assert "NDI cam5" not in seen_measured, (
+            "a source outside CAMERA_ACTIVE_SET must never reach compute_phase_sync_offsets"
+        )
+        assert set(seen_measured) == {"NDI cam1", "NDI cam3"}
+        assert not any(p.get("inputName") == "NDI cam5" for _, p in fake.set_calls()), (
+            "a non-active source must never receive a SetInputSettings call"
+        )
+
+    def test_non_active_source_warns_on_stderr(self, monkeypatch, tmp_path, capsys):
+        monkeypatch.setenv("CAMERA_ACTIVE_SET", "cam1")
+        fake = FakeObs(latencies={"NDI cam1": 450, "NDI cam5": 450})
+        monkeypatch.setattr(phase_sync_calibrate, "_rpc", fake.rpc)
+        monkeypatch.setattr(phase_sync_calibrate, "_conn", lambda host, password="": None)
+        monkeypatch.setattr(
+            phase_sync_calibrate, "_run_gate_bin",
+            lambda measured, gate_bin=None: {s: 3 for s in measured},
+        )
+        measured_path = tmp_path / "measured.json"
+        measured_path.write_text(json.dumps({"NDI cam1": 90.0, "NDI cam5": 999.0}))
+        json_path = tmp_path / "phase-sync-last.json"
+        monkeypatch.setattr(
+            sys, "argv",
+            ["phase_sync_calibrate.py", "--host", "10.77.9.202",
+             "--measured-json", str(measured_path), "--apply", "--json-path", str(json_path)],
+        )
+        phase_sync_calibrate.main()
+        err = capsys.readouterr().err
+        assert "NDI cam5" in err, f"dropping a non-active source must be WARNED, got stderr={err!r}"
+
+    def test_no_active_source_present_warns_and_applies_nothing(self, monkeypatch, tmp_path, capsys):
+        monkeypatch.setenv("CAMERA_ACTIVE_SET", "cam1")
+        fake = FakeObs(latencies={"NDI cam5": 450})
+        monkeypatch.setattr(phase_sync_calibrate, "_rpc", fake.rpc)
+        monkeypatch.setattr(phase_sync_calibrate, "_conn", lambda host, password="": None)
+        monkeypatch.setattr(
+            phase_sync_calibrate, "_run_gate_bin",
+            lambda measured, gate_bin=None: {s: 3 for s in measured},
+        )
+        measured_path = tmp_path / "measured.json"
+        measured_path.write_text(json.dumps({"NDI cam5": 999.0}))
+        json_path = tmp_path / "phase-sync-last.json"
+        monkeypatch.setattr(
+            sys, "argv",
+            ["phase_sync_calibrate.py", "--host", "10.77.9.202",
+             "--measured-json", str(measured_path), "--apply", "--json-path", str(json_path)],
+        )
+        phase_sync_calibrate.main()
+        assert fake.set_calls() == [], "no active camera present -- nothing must be applied"
+        err = capsys.readouterr().err
+        assert "no ACTIVE camera" in err.lower() or "cam5" in err
