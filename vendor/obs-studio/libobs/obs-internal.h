@@ -34,6 +34,7 @@
 #include "graphics/matrix4.h"
 
 #include "media-io/audio-resampler.h"
+#include "media-io/asrc-compensator.h" /* camera-box #803 */
 #include "media-io/video-io.h"
 #include "media-io/audio-io.h"
 
@@ -908,6 +909,19 @@ struct obs_source {
 	float *audio_mix_buf[MAX_AUDIO_CHANNELS];
 	struct resample_info sample_info;
 	audio_resampler_t *resampler;
+	/* camera-box #803: per-source ASRC (async sample-rate conversion) servo, continuously
+	 * holding this source's audio timeline on the video master clock. `asrc_enabled` is a
+	 * plain runtime bool (default OFF, same convention as genlock_burn -- toggled live via
+	 * obs_source_set_asrc_enabled(), no restart needed); `asrc` is the servo's own state
+	 * (see media-io/asrc-compensator.h), mutated ONLY from process_audio() on this source's
+	 * own audio-ingest call path (single-writer, no lock needed for the struct itself).
+	 * `asrc_last_wall_ns`/`asrc_has_last_wall` track the wall-clock timestamp of the PREVIOUS
+	 * audio callback (genlock_wall_now_ns(), the same basis the video FIFO release uses) so
+	 * process_audio() can measure this callback's true master-clock block duration. */
+	bool asrc_enabled;
+	struct asrc_compensator asrc;
+	uint64_t asrc_last_wall_ns;
+	bool asrc_has_last_wall;
 	pthread_mutex_t audio_actions_mutex;
 	pthread_mutex_t audio_buf_mutex;
 	pthread_mutex_t audio_mutex;

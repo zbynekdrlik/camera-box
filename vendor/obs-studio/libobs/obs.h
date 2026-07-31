@@ -1587,6 +1587,20 @@ EXPORT uint32_t obs_source_get_genlock_latency_ms(const obs_source_t *source);
 EXPORT void obs_source_set_genlock_burn(obs_source_t *source, bool enabled);
 EXPORT bool obs_source_get_genlock_burn(const obs_source_t *source);
 
+/* camera-box #803: per-source ASRC (async sample-rate conversion) toggle -- continuously holds
+ * this source's audio timeline on the video master clock via a servo (media-io/asrc-compensator.h)
+ * driving a soft libswresample resample-ratio nudge (audio_resampler_set_compensation_ppm()), so a
+ * foreign audio clock domain (e.g. Waves/Dante program audio at events) no longer accumulates
+ * unbounded drift against the video master clock (epic #800). A plain runtime bool, same shape as
+ * obs_source_set_genlock_burn -- default OFF for every source; wiring it on for a specific
+ * program-audio source is a deploy-time config step, not a code change. Enabling it forces the
+ * source's audio_resampler to exist even when its sample rate already matches the mix (needed so
+ * there is a swresample context to apply the compensation through); disabling it reverts to the
+ * normal fast-path behavior on the next reset_resampler() call (a format change, or toggling this
+ * flag itself). */
+EXPORT void obs_source_set_asrc_enabled(obs_source_t *source, bool enabled);
+EXPORT bool obs_source_get_asrc_enabled(const obs_source_t *source);
+
 /** Used to decouple audio from video so that audio doesn't attempt to sync up
  * with video.  I.E. Audio acts independently.  Only works when in unbuffered
  * mode. */
