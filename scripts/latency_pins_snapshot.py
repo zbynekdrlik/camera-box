@@ -9,9 +9,10 @@ the Discord report (scripts/e2e_discord_report.py, _section_latency_pins) surfac
 
 Gathers, over OBS WebSocket -- LIVE, never hardcoded -- the CURRENTLY-CONFIGURED
 genlock_latency_ms_src for every strih 'NDI cam<N>' + 'MV NDI cam<N>' and imag 'NDI CAM<N>' +
-'MV CAM<N>', for N in CAMERA_ACTIVE_SET (#893 -- env var, default cam1-4; NEVER a literal
-N=1..7 range, see .claude/rules/camera-active-set.md -- a retired camera's stale pin must never
-be swept/reported as if it meant anything), the stream 'NDI 2ME PGM' hold, reads
+'MV CAM<N>', for N in CAMERA_ACTIVE_SET (#893 -- env var, default cam1/cam2/cam4 (#898:
+cam3 retired 2026-07-31, grabber card destroyed); NEVER a literal N=1..7 range, see
+.claude/rules/camera-active-set.md -- a retired camera's stale pin must never be swept/reported
+as if it meant anything), the stream 'NDI 2ME PGM' hold, reads
 ~/.camera-box/av-sync-last.json for the source-of-truth applied hold, and computes a RECOMMENDED
 pin set from THIS run's own delivery-latency table by shelling out to the SAME compiled
 phase-sync-gate binary phase_sync_calibrate.py (#286/#438) already uses -- one formula
@@ -52,8 +53,9 @@ GENLOCK_SRC_LATENCY_KEY = "genlock_latency_ms_src"
 
 def active_camera_numbers() -> tuple:
     """#893 -- the camera numbers to sweep, derived from CAMERA_ACTIVE_SET (env var, default
-    "cam1 cam2 cam3 cam4" -- same read convention set-ndi-mapping.py's DEFAULT_ACTIVE_SET
-    already uses), NEVER a literal N=1..7 range (.claude/rules/camera-active-set.md).
+    "cam1 cam2 cam4" (#898: cam3 retired 2026-07-31) -- same read convention
+    set-ndi-mapping.py's DEFAULT_ACTIVE_SET already uses), NEVER a literal N=1..7 range
+    (.claude/rules/camera-active-set.md).
 
     This used to be a hardcoded `CAMERAS = (1, 2, 3, 4, 5, 6, 7)` tuple -- the exact bug shape
     that let this script sweep+report RETIRED cameras' pins (cam5/6/7) as if they meant
@@ -62,7 +64,7 @@ def active_camera_numbers() -> tuple:
     upward). Read FRESH on every call (never cached at import time) so a caller/test can
     override the env var per-invocation.
     """
-    raw = os.environ.get("CAMERA_ACTIVE_SET", "cam1 cam2 cam3 cam4")
+    raw = os.environ.get("CAMERA_ACTIVE_SET", "cam1 cam2 cam4")
     out = []
     for tok in raw.replace(",", " ").split():
         tok = tok.strip()

@@ -35,15 +35,16 @@ from latency_pins_snapshot import read_pin  # reuse the proven honest-None read 
 
 def active_camera_names(explicit: "str | None" = None) -> list:
     """#893 -- the active camera names, split from `explicit` if given, else CAMERA_ACTIVE_SET
-    (env var, default "cam1 cam2 cam3 cam4") -- NEVER a literal range
-    (.claude/rules/camera-active-set.md). Read fresh on every call.
+    (env var, default "cam1 cam2 cam4" -- #898: cam3 retired 2026-07-31, grabber card
+    destroyed) -- NEVER a literal range (.claude/rules/camera-active-set.md). Read fresh on
+    every call.
 
     `explicit` mirrors set-ndi-mapping.py's `--active` flag: the caller (recording-e2e.sh)
     passes `--active-set "$CAMERA_ACTIVE_SET"` explicitly on the command line rather than
     relying on the shell variable happening to be an EXPORTED env var reaching this Python
     subprocess -- the same safer convention that script's own CLI already established.
     """
-    raw = explicit if explicit is not None else os.environ.get("CAMERA_ACTIVE_SET", "cam1 cam2 cam3 cam4")
+    raw = explicit if explicit is not None else os.environ.get("CAMERA_ACTIVE_SET", "cam1 cam2 cam4")
     return [tok.strip() for tok in raw.replace(",", " ").split() if tok.strip()]
 
 

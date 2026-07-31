@@ -28,12 +28,20 @@ ACTIVE mapping, but REVERSIBLY.** The test rig shrank: cam5/cam6/cam7's USB grab
 returned to their owner and those boxes are powered off. The owner's binding requirement: this
 retirement MUST be a one-line reversal when the boxes come back — so `FULL_MAP` below keeps
 EVERY camera's pin as a FACT (never deleted), and `--active` (defaulting to the `CAMERA_ACTIVE_SET`
-env var camera-set.sh exports, or "cam1 cam2 cam3 cam4" if that's unset too) filters it down to
+env var camera-set.sh exports, or "cam1 cam2 cam4" if that's unset too) filters it down to
 the pins actually ENFORCED this run. Re-enable procedure: cam5 back? add "cam5" to
 CAMERA_ACTIVE_SET in scripts/camera-set.sh (scripts/rig-mode.sh passes it through automatically
 via `--active "$CAMERA_ACTIVE_SET"`), rerun the gate — nothing here needs to change. Whatever OBS
 scenes for a retired input remain configured on strih are simply no longer enforced while
 inactive — they carry no live camera feed anyway.
+
+**#898 RETIREMENT (2026-07-31) — cam3 ALSO removed from the ACTIVE mapping, same mechanism.**
+cam3's grabber card was physically destroyed (moved into cam1 during the #728/#688 power-supply
+recovery), leaving cam3 with zero capture hardware. Retired via the exact same reversible
+`CAMERA_ACTIVE_SET` membership mechanism as #827 above — `FULL_MAP`'s "NDI cam3"→"CAM3 (usb)"
+pin stays a FACT, never deleted; DEFAULT_ACTIVE_SET's fallback literal moved from
+"cam1 cam2 cam3 cam4" to "cam1 cam2 cam4". Re-enable procedure: once a replacement grabber card
+is fitted, add "cam3" back to CAMERA_ACTIVE_SET — nothing here needs to change.
 
 Pre-2026-07-14 HISTORY (superseded, kept for context only — do NOT use): the mapping used to be
 OFFSET by one slot for the six original cameras (NDI cam5→CAM1, NDI cam1→CAM3, NDI cam3→CAM4,
@@ -55,7 +63,7 @@ Usage:
   python3 scripts/set-ndi-mapping.py --host 10.77.9.202 [--password PW]
   python3 scripts/set-ndi-mapping.py --host 10.77.9.202 --verify-only   # check, do not set
   python3 scripts/set-ndi-mapping.py --map "NDI cam1=CAM1 (usb)" ...     # override the pins
-  python3 scripts/set-ndi-mapping.py --active "cam1 cam2 cam3 cam4 cam5" ...  # reactivate cam5
+  python3 scripts/set-ndi-mapping.py --active "cam1 cam2 cam4 cam5" ...  # reactivate cam5
 """
 import argparse
 import base64
@@ -91,7 +99,7 @@ DEFAULT_MAP = FULL_MAP
 # exactly (this module is invoked as a standalone subprocess, so it reads the SAME env var rather
 # than re-declaring its own separate default; when unset, falls back to the identical literal
 # camera-set.sh itself defaults to, so the two can never silently disagree).
-DEFAULT_ACTIVE_SET = os.environ.get("CAMERA_ACTIVE_SET", "cam1 cam2 cam3 cam4")
+DEFAULT_ACTIVE_SET = os.environ.get("CAMERA_ACTIVE_SET", "cam1 cam2 cam4")
 
 
 def _camera_name_of(ndi_input):
@@ -206,8 +214,8 @@ def main():
     ap.add_argument(
         "--active",
         default=None,
-        help="#827: space/comma-separated camera names to enforce (default: $CAMERA_ACTIVE_SET "
-        "env, or 'cam1 cam2 cam3 cam4'). Ignored when --map is given explicitly.",
+        help="#827/#898: space/comma-separated camera names to enforce (default: "
+        "$CAMERA_ACTIVE_SET env, or 'cam1 cam2 cam4'). Ignored when --map is given explicitly.",
     )
     ap.add_argument("--verify-only", action="store_true", help="check + report, do not set")
     args = ap.parse_args()
