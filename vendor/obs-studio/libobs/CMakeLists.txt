@@ -148,6 +148,8 @@ target_sources(
 target_sources(
   libobs
   PRIVATE
+    media-io/asrc-compensator.c
+    media-io/asrc-compensator.h
     media-io/audio-io.c
     media-io/audio-io.h
     media-io/audio-math.h

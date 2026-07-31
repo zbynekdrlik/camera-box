@@ -295,6 +295,14 @@ static bool obs_source_init(struct obs_source *source)
 	 * from the DistroAV PROP_BURN field; read by the QR burn filter each render. */
 	source->genlock_burn = false;
 
+	/* camera-box #803: per-source ASRC servo OFF at create (bzalloc already zeroes
+	 * asrc_enabled/asrc_last_wall_ns/asrc_has_last_wall; explicit for intent). Init the servo
+	 * struct itself so its first real compensate() call starts from a clean 0ppm/no-lock
+	 * state regardless of what bzalloc happened to leave (defensive — bzalloc already gives
+	 * all-zero fields, which IS the correct init state here, but asrc_compensator_init() is
+	 * the single source of truth other call sites — a future reset — should also use). */
+	asrc_compensator_init(&source->asrc);
+
 	source->private_settings = obs_data_create();
 	return true;
 }
@@ -4034,9 +4042,23 @@ static inline void reset_resampler(obs_source_t *source, const struct obs_source
 	audio_resampler_destroy(source->resampler);
 	source->resampler = NULL;
 	source->resample_offset = 0;
+	/* camera-box #803: a format change re-arms the servo's lock delay -- the swresample
+	 * context that carries the compensation state was just torn down, so any prior applied
+	 * ppm no longer means anything to the new one. Default-safe: start at 0ppm/no-lock
+	 * exactly like source creation. */
+	asrc_compensator_init(&source->asrc);
+	source->asrc_has_last_wall = false;
 
-	if (source->sample_info.samples_per_sec == obs_info->samples_per_sec &&
-	    source->sample_info.format == obs_info->format && source->sample_info.speakers == obs_info->speakers) {
+	const bool formats_match = source->sample_info.samples_per_sec == obs_info->samples_per_sec &&
+				    source->sample_info.format == obs_info->format &&
+				    source->sample_info.speakers == obs_info->speakers;
+
+	/* camera-box #803: an ASRC-enabled source ALWAYS gets a resampler, even when its declared
+	 * sample rate already matches the mix -- the servo needs a real swresample context to
+	 * apply audio_resampler_set_compensation_ppm() through (the fast-path "just copy the
+	 * samples" branch below has no such context). A non-ASRC source keeps the original
+	 * fast-path behavior unchanged. */
+	if (formats_match && !source->asrc_enabled) {
 		source->audio_failed = false;
 		return;
 	}
@@ -4123,17 +4145,68 @@ static void process_audio_balancing(struct obs_source *source, uint32_t frames, 
 }
 
 /* resamples/remixes new audio to the designated main audio output format */
+/* forward decl (#803): genlock_wall_now_ns() is defined further down (the video-FIFO wall-clock
+ * helper) but process_audio() needs it as the ASRC servo's master-clock basis -- same forward-decl
+ * convention as genlock_source_drop_cap() above (without it MSVC assumes an implicit int-returning
+ * extern, C4013 -> C2220 as an error). */
+static inline uint64_t genlock_wall_now_ns(void);
+
+/* camera-box #803: run this source's ASRC servo for one audio callback (only when
+ * obs_source_set_asrc_enabled() has turned it on for this source) and push the resulting ppm
+ * into the swresample context via the soft compensation wrapper. `frames`/`samples_per_sec` are
+ * the RAW (pre-resample) values from the callback -- the servo measures the source's OWN upstream
+ * clock, before any resampling changes the sample count. No-op (and safely skipped) on the very
+ * first callback after a reset, since there is no previous wall-clock sample to measure a block
+ * duration against yet. */
+static inline void asrc_process_audio(obs_source_t *source, uint32_t frames, uint32_t samples_per_sec)
+{
+	if (!source->asrc_enabled || !source->resampler || samples_per_sec == 0)
+		return;
+
+	const uint64_t wall_now_ns = genlock_wall_now_ns();
+
+	if (!source->asrc_has_last_wall) {
+		source->asrc_last_wall_ns = wall_now_ns;
+		source->asrc_has_last_wall = true;
+		return;
+	}
+
+	const double master_block_s = (double)(wall_now_ns - source->asrc_last_wall_ns) / 1000000000.0;
+	source->asrc_last_wall_ns = wall_now_ns;
+
+	const double raw_advance_s = (double)frames / (double)samples_per_sec;
+	double applied_ppm = 0.0;
+	asrc_compensator_compensate(&source->asrc, raw_advance_s, master_block_s, &applied_ppm);
+
+	/* Refresh the compensation over a 1s window every callback -- swr_set_compensation()
+	 * replaces any still-pending ramp, so re-issuing it each callback keeps the correction
+	 * continuously tracking the servo's current estimate (audio-resampler-ffmpeg.c's own doc
+	 * comment on this wrapper). */
+	audio_resampler_set_compensation_ppm(source->resampler, applied_ppm, 1000);
+
+	double cumulative_correction_ms = 0.0;
+	if (asrc_compensator_should_log(&source->asrc, &cumulative_correction_ms)) {
+		blog(LOG_INFO,
+		     "asrc: source '%s' estimated=%.2fppm applied=%.2fppm cumulative_correction=%.3fms/%.0fs (#803)",
+		     obs_source_get_name(source), source->asrc.estimated_ppm, applied_ppm, cumulative_correction_ms,
+		     ASRC_LOG_INTERVAL_S);
+	}
+}
+
 static void process_audio(obs_source_t *source, const struct obs_source_audio *audio)
 {
 	uint32_t frames = audio->frames;
 	bool mono_output;
 
 	if (source->sample_info.samples_per_sec != audio->samples_per_sec ||
-	    source->sample_info.format != audio->format || source->sample_info.speakers != audio->speakers)
+	    source->sample_info.format != audio->format || source->sample_info.speakers != audio->speakers ||
+	    (source->asrc_enabled && !source->resampler))
 		reset_resampler(source, audio);
 
 	if (source->audio_failed)
 		return;
+
+	asrc_process_audio(source, audio->frames, audio->samples_per_sec);
 
 	if (source->resampler) {
 		uint8_t *output[MAX_AV_PLANES];
@@ -7152,6 +7225,29 @@ void obs_source_set_genlock_burn(obs_source_t *source, bool enabled)
 bool obs_source_get_genlock_burn(const obs_source_t *source)
 {
 	return obs_source_valid(source, "obs_source_get_genlock_burn") ? source->genlock_burn : false;
+}
+
+/* camera-box #803: per-source ASRC toggle. A plain bool write (same shape as
+ * obs_source_set_genlock_burn) -- the audio thread's read in process_audio()/asrc_process_audio()
+ * is a single bool check (not torn on the target ABIs), and the servo itself is only ever mutated
+ * from that same single audio-ingest call path, so no additional lock is needed here. Turning it
+ * ON when the source's resampler doesn't exist yet is picked up lazily on the NEXT audio callback
+ * (process_audio()'s reset_resampler() condition includes `asrc_enabled && !resampler`) rather
+ * than forcing the reset from this (potentially different) calling thread. */
+void obs_source_set_asrc_enabled(obs_source_t *source, bool enabled)
+{
+	if (!obs_source_valid(source, "obs_source_set_asrc_enabled"))
+		return;
+	const bool prev = source->asrc_enabled;
+	source->asrc_enabled = enabled;
+	if (prev != enabled)
+		blog(LOG_INFO, "asrc: %s for source '%s' (#803)", enabled ? "ENABLED" : "disabled",
+		     obs_source_get_name(source));
+}
+
+bool obs_source_get_asrc_enabled(const obs_source_t *source)
+{
+	return obs_source_valid(source, "obs_source_get_asrc_enabled") ? source->asrc_enabled : false;
 }
 
 void obs_source_set_async_unbuffered(obs_source_t *source, bool unbuffered)

@@ -15,6 +15,7 @@
     along with this program.  If not, see <http://www.gnu.org/licenses/>.
 ******************************************************************************/
 
+#include <math.h> /* camera-box #803: llround() for audio_resampler_set_compensation_ppm */
 #include "../util/bmem.h"
 #include "audio-resampler.h"
 #include "audio-io.h"
@@ -215,4 +216,23 @@ bool audio_resampler_resample(audio_resampler_t *rs, uint8_t *output[], uint32_t
 
 	*out_frames = (uint32_t)ret;
 	return true;
+}
+
+void audio_resampler_set_compensation_ppm(audio_resampler_t *rs, double ppm, uint32_t distance_ms)
+{
+	if (!rs || !rs->context)
+		return;
+
+	/* swr_set_compensation(ctx, sample_delta, compensation_distance) ramps the resample
+	 * ratio to make up `sample_delta` OUTPUT samples over the next `compensation_distance`
+	 * OUTPUT samples, then holds. Re-issuing it every `distance_ms` (or sooner) with a
+	 * freshly-computed delta keeps the correction continuously applied at the servo's
+	 * current ppm estimate -- camera-box #803's "plynulá kompenzácia ... bez kliku". */
+	const int64_t distance_samples = ((int64_t)rs->output_freq * (int64_t)distance_ms) / 1000;
+	if (distance_samples <= 0)
+		return;
+
+	const int sample_delta = (int)llround(ppm / 1000000.0 * (double)distance_samples);
+
+	swr_set_compensation(rs->context, sample_delta, (int)distance_samples);
 }
