@@ -128,18 +128,23 @@ mod tests {
     }
 
     #[test]
-    fn undecodable_over_floor_fails_both_verdicts_even_with_clean_copies_gaps_889() {
-        // #889 does not touch the #881 optical floor -- the run-wide/per-window undecodable term
-        // stays strict regardless of copies/gaps.
+    fn undecodable_over_floor_now_passes_relaxed_but_fails_strict_915() {
+        // Issue 915 (2026-08-01, user decision): the optical undecodable floor is now
+        // report-only -- an over-floor undecodable count no longer fails the RELAXED verdict
+        // (only frame_count==0 does), even though the STRICT verdict still fails on it exactly
+        // as before.
         let d = decide(10, 5, 0, 0); // 5 undecodable of 10 frames -- past the #881 per-window floor (4)
-        assert!(!d.strict_pass);
         assert!(
-            !d.relaxed_pass,
-            "undecodable over floor must still fail relaxed too: {d:?}"
+            !d.strict_pass,
+            "the optical floor still fails the STRICT verdict, unchanged: {d:?}"
         );
         assert!(
-            !d.relaxed_by_889(),
-            "not #889's doing -- the optical floor fails both: {d:?}"
+            d.relaxed_pass,
+            "#915: undecodable over floor no longer fails the relaxed verdict: {d:?}"
+        );
+        assert!(
+            d.relaxed_by_889(),
+            "#915's floor relaxation is now what's rescuing this window: {d:?}"
         );
     }
 
