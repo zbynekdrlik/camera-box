@@ -710,11 +710,11 @@ pub fn parse_ffprobe_start_time(s: &str) -> f64 {
 /// real offset now converges over several runs instead of jumping to (or past) the hardware
 /// ceiling/floor on a single bad measurement.
 ///
-/// #871 [red]: deliberate stub — `max_step_ms` is accepted but NOT yet applied, exactly today's
-/// bug behavior (only the hardware [3, 2000] range is enforced). The [green] commit implements
-/// the step clamp.
-pub fn required_delay_ms(current_delay_ms: i32, offset_ms: f64, _max_step_ms: i32) -> i32 {
-    ((current_delay_ms as f64 - offset_ms).round() as i32).clamp(3, 2000)
+pub fn required_delay_ms(current_delay_ms: i32, offset_ms: f64, max_step_ms: i32) -> i32 {
+    let raw = (current_delay_ms as f64 - offset_ms).round() as i32;
+    let lo = current_delay_ms - max_step_ms;
+    let hi = current_delay_ms + max_step_ms;
+    raw.clamp(lo, hi).clamp(3, 2000)
 }
 
 /// Linear-interpolate the video time of a target cam2 `frame_id` from the recorded dual-QR
@@ -1022,10 +1022,10 @@ mod tests {
         assert_eq!(required_delay_ms(1000, 30.0, 50), 970); // video lags → reduce
         assert_eq!(required_delay_ms(1000, -30.0, 50), 1030); // video leads → increase
         assert_eq!(required_delay_ms(1000, 0.6, 50), 999); // rounds to nearest int
-        // The hardware [3, 2000] floor/ceiling still applies AFTER the step clamp, when the
-        // current value is already close enough to the edge that even one clamped step overshoots
-        // it (current near the floor/ceiling, not near 1000 -- a clamped step alone would NOT
-        // reach these edges from 1000).
+                                                           // The hardware [3, 2000] floor/ceiling still applies AFTER the step clamp, when the
+                                                           // current value is already close enough to the edge that even one clamped step overshoots
+                                                           // it (current near the floor/ceiling, not near 1000 -- a clamped step alone would NOT
+                                                           // reach these edges from 1000).
         assert_eq!(required_delay_ms(10, 5000.0, 50), 3); // clamp low
         assert_eq!(required_delay_ms(1990, -5000.0, 50), 2000); // clamp high
     }

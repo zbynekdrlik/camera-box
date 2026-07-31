@@ -140,12 +140,21 @@ def required_delay_ms(current_delay_ms: int, offset_ms: float) -> int:
     bites, prints a LOUD line (raw target, applied value, remaining residual) to stderr so a
     persistent large residual is never silent.
 
-    #871 [red]: deliberate stub -- AV_SYNC_MAX_STEP_MS is NOT yet applied, exactly today's bug
-    behavior (only the hardware [3, 2000] range is enforced). The [green] commit implements the
-    step clamp.
     """
     raw = round(current_delay_ms - offset_ms)
-    return max(LATENCY_MIN, min(LATENCY_MAX, raw))
+    lo = current_delay_ms - AV_SYNC_MAX_STEP_MS
+    hi = current_delay_ms + AV_SYNC_MAX_STEP_MS
+    stepped = max(lo, min(hi, raw))
+    result = max(LATENCY_MIN, min(LATENCY_MAX, stepped))
+    if stepped != raw:
+        residual = raw - result
+        sys.stderr.write(
+            f"[av-sync] STEP CLAMPED: raw target={raw}ms (offset={offset_ms:.1f}ms, "
+            f"current={current_delay_ms}ms) -> applying {result}ms this run "
+            f"(max step +/-{AV_SYNC_MAX_STEP_MS}ms/run); residual {residual:+d}ms remains "
+            f"for future runs\n"
+        )
+    return result
 
 
 def offset_from_verdict_json(path: str) -> float:
