@@ -4,12 +4,15 @@ paths:
   - "scripts/recording-e2e.sh"
   - "scripts/rig-mode.sh"
   - "scripts/set-ndi-mapping.py"
+  - "scripts/latency_pins_snapshot.py"
+  - "scripts/phase_sync_active_floor_check.py"
+  - "scripts/phase_sync_calibrate.py"
 ---
 
 # CAMERA_ACTIVE_SET — every fleet-enumeration consumer MUST derive from it, never a literal range
 
 `CAMERA_ACTIVE_SET` (`scripts/camera-set.sh`, #827) is the ONE declared list of cameras physically
-installed and active TODAY (default `cam1 cam2 cam3 cam4`; cam5/cam6/cam7 retired but fully
+installed and active TODAY (default `cam1 cam2 cam4`; cam3/cam5/cam6/cam7 retired but fully
 resolvable — see the header comment in `camera-set.sh`). **Every place that needs "the list of
 cameras to check/sample/sweep right now" must derive it from `CAMERA_ACTIVE_SET`, not from a
 literal range or its own hardcoded list.** A retired camera's facts (IP, NDI source name, genlock
@@ -65,3 +68,39 @@ property that matters: (a) the default active set never includes a retired camer
 list, even with an empty exclusion, and (b) overriding `CAMERA_ACTIVE_SET` to re-add a retired
 camera makes it flow through to every derived consumer, proving the reversal actually works (not
 just a comment claiming it does).
+
+## Retiring a camera (#898, 2026-07-31) — the default LITERAL is independently duplicated in FOUR
+standalone Python scripts, grep the whole repo before trusting one file's change is enough
+
+Changing which cameras are in the default `CAMERA_ACTIVE_SET` is NOT a one-file edit, even though
+`camera-set.sh` is the "ONE declared list" for every SOURCED bash consumer. Four standalone Python
+subprocesses (`set-ndi-mapping.py`'s `DEFAULT_ACTIVE_SET`, `latency_pins_snapshot.py`'s
+`active_camera_numbers()`, `phase_sync_active_floor_check.py`'s `active_camera_names()`,
+`phase_sync_calibrate.py`'s `active_ndi_sources()`) each carry their OWN fallback literal matching
+camera-set.sh's default — by design (they read the same `$CAMERA_ACTIVE_SET` env var but are never
+`source`d, so each needs its own Python-side default for when the caller invokes them directly
+without exporting the var). This is the exact same class of gotcha `ci-testing-gotchas.md`
+documents for a shared numeric constant duplicated across languages (#707) — it applies just as
+much to a shared STRING default. **Before changing `CAMERA_ACTIVE_SET`'s default membership, `grep
+-rn "cam1 cam2 cam4"` (or whatever the current literal is) across `scripts/*.sh` AND `scripts/*.py`
+AND `tests/**/*.rs` AND `tests/python/*.py`** — missing any one of the four Python fallbacks (or
+their own default-set unit tests) leaves a script that silently disagrees with camera-set.sh the
+moment it runs without the env var exported (e.g. invoked directly by hand, or by a caller that
+forgot to pass `--active-set`/export the var).
+
+## A "default active set proves parallelism" test can lose its power when the default shrinks
+
+`tests/harness_cambox_parallel_restore_712.rs`'s `all_cambox_restore_loop_runs_in_parallel_not_sequentially`
+measured wall-clock time against the DEFAULT active set specifically to prove 2+ boxes are
+contacted CONCURRENTLY, not sequentially. Retiring cam3 shrank the default secondary set
+(`camera_active_secondary_set()`, i.e. active minus cam1/cam2) to a SINGLE camera (cam4 alone) —
+with only one box, sequential and parallel execution are indistinguishable by wall-clock, so the
+test would have kept passing while silently losing its ability to catch a real sequential-loop
+regression. **When a retirement shrinks a "must run in parallel" test's DEFAULT-derived box count
+below 2, widen that specific test via an explicit `CAMERA_ACTIVE_SET` override** (this ticket used
+`"cam1 cam2 cam4 cam5"` — the real default plus a temporarily-reactivated retired camera, reusing
+the same reversibility mechanism the adjacent reactivation test already proves) rather than leaving
+the timing assertion trivially true. The SIBLING test in `_713.rs` (the whole device-restore phase:
+cam1 + painter + the secondary set) didn't need this treatment because it still had 3 boxes
+(cam1/painter/cam4) after the retirement — check the ACTUAL box count each parallelism test's
+default resolves to, not just whether "some test still covers it".
