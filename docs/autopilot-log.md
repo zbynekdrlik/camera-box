@@ -6498,3 +6498,37 @@ undecodable term stays within the issue-881 calibrated floor, and the whole reco
 300s duration floor. It no longer asserts the painted-tick sequence is free of stale-copy/dropped-
 frame defects per window -- that is exactly, and only, what this ticket relaxes, and the strict
 verdict + the report-only WARN keep that fact visible in every run's log and every verdict JSON.
+
+## 2026-07-31 — #898 cam3 grabber card destroyed, retired from CAMERA_ACTIVE_SET -- rides PR #897
+
+cam3's grabber card physically destroyed (12V USB-C brick on VBUS during a power test destroyed
+cam1's original card + a powered hub); cam3's own card moved into cam1 as recovery, leaving cam3
+with zero capture hardware. Retired cam3 from the default active fleet EXACTLY the way
+cam5/cam6/cam7 were retired previously (issue 827): membership only, never a deleted case arm.
+`scripts/camera-set.sh`'s `CAMERA_ACTIVE_SET` default moved from `cam1 cam2 cam3 cam4` to
+`cam1 cam2 cam4`; `camera_resolve()`/`camera_strih_route()`'s cam3 case arms untouched -- cam3
+stays fully resolvable as a FACT. The identical fallback literal independently mirrored (by
+design) in four standalone Python scripts (`set-ndi-mapping.py` DEFAULT_ACTIVE_SET,
+`latency_pins_snapshot.py` active_camera_numbers, `phase_sync_active_floor_check.py`
+active_camera_names, `phase_sync_calibrate.py` active_ndi_sources) updated the same way.
+
+RED `cdc750b6e` (9 Rust test files + 4 Python test files updated to assert the new 3-camera
+default) / GREEN `451a7a52a` (the 5 production files). RED confirmed genuinely by temporarily
+reverting the 5 production files to their pre-fix committed state and re-running the affected
+suites live (7 failures in harness_camera_set, 2 in harness_rig_ndi_mapping, 1 in
+harness_cambox_parallel_restore_713, 1 in harness_recording_e2e_paths, 5 in pytest), then
+restoring the fix and confirming GREEN. New test
+`camera_set_cam3_retired_898_still_resolves_as_fact_but_not_active` locks the invariant the
+ticket depends on. `harness_cambox_parallel_restore_712`'s default-parallelism proof widened via
+an explicit `CAMERA_ACTIVE_SET` override (default cam4 + a reactivated cam5) since the default
+secondary set shrank to a single camera, too small on its own to prove genuine multi-box
+concurrency; `harness_cambox_parallel_restore_713`'s sibling test (3 boxes: cam1+painter+cam4)
+kept using the real default since it still has enough boxes to prove parallelism.
+
+Full local suite green after both commits: 178 Rust `test result: ok` / 0 FAILED, 647 pytest
+passed / 0 failed. Ordinary push-triggered `CI` workflow green (run 30635622736, all real jobs
+`success`; Mutation Testing + Notify-on-red correctly `skipped`). Rides the already-open
+dev->main PR #897 (originally opened for #894/#895) -- added `Closes #898` to its body via the
+REST PATCH method (`gh pr edit --body-file` still fails with the GraphQL "Projects (classic)"
+error on this repo). Not merged -- the supervisor owns the merge and the Full-path E2E hardware
+gate wait (run 30635625094 was already in progress for this SHA at push time).

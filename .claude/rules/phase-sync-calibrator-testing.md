@@ -69,3 +69,39 @@ Always verify the result with an INDEPENDENT live read-back afterward (a fresh `
 call, or the `phase-sync-active-floor-gate`/`phase_sync_active_floor_check.py` pair) rather than
 trusting only the calibrator's own internal read-back-and-verify step — two independent reads
 proving the same state is stronger evidence than one.
+
+**Cheaper still — `phase-sync-last.json` is ITSELF a valid `--measured-json` source.** The
+persisted file already stores each camera's `latency_ms`, and that field is the
+**pin-INDEPENDENT** transit (`prerecord_phase_calibrate.py` computes it as
+`latency_ms + mean_head_skew_ms` — the active pin corrected by the signed deviation from its own
+release schedule), **not** the observed delivery latency. So `{c["source"]: c["latency_ms"] for c
+in json.load(open(...))["cameras"]}` — optionally filtered to the current `CAMERA_ACTIVE_SET` —
+feeds straight back into `phase_sync_calibrate.py --measured-json` with no artifact download and
+no rig measurement at all. Do NOT make the same substitution with a verdict's
+`all_cambox_delivery_latency[camN].p50_ms` **as a drop-in for a subset re-anchor**: that block is
+measured WITH the pins applied, so its per-camera ordering can invert against the true transits
+(live 2026-07-31: the verdict showed cam3 as the FASTEST at 47.3ms while its true transit of
+81.9ms made it the SLOWEST — it merely sat at the 3ms floor). The artifact path above stays
+correct for a FULL recalibration of every camera, where the whole pin set is recomputed together;
+the persisted-file path is what you want when re-anchoring an unchanged rig.
+
+# Retiring a camera from `CAMERA_ACTIVE_SET` breaks the phase-sync floor gate — it removes the ANCHOR
+
+The mutual convention pins the SLOWEST camera at the 3ms floor and holds every faster one back by
+its head start. So the camera sitting at the floor is, by construction, the slowest box on the
+rig — and dropping THAT camera from the active set leaves every survivor pinned above the floor,
+failing the `[4h/8]` active-floor preflight (`no active camera at the floor -- lowest active pin
+is cam1=21ms`) on the very next run. Nothing drifted physically; the convention lost its
+reference. Live: issue 898 retired cam3 (grabber card destroyed), and cam3 was the anchor
+(`latency_ms=81.85 -> pin 3`, vs cam1/2/4 at 63.93/63.23/62.36 -> 21/22/22).
+
+**The fix is a re-anchor, not a re-measurement** — feed the calibrator the ACTIVE subset of the
+persisted measurements (above) and it re-derives the set: cam1/2/4 went `21/22/22 -> 3/4/5`, a
+pure constant −18ms shift that preserves the mutual differences (0/+1/+2) EXACTLY and simply
+presents the whole set 18ms earlier. **Expect the mirror-image shift when the camera comes
+back**: re-adding the slowest box makes it the anchor again and pushes every other pin back up by
+that same constant, so re-activation is never just the one-line `CAMERA_ACTIVE_SET` edit — run
+the calibrator in the same breath. Note that `phase-sync-active-floor-gate` is NOT in the CI
+`probe-tools-linux-amd64` artifact (the harness builds these gate bins itself at
+`recording-e2e.sh`'s own build step); to run the independent check by hand, build just that one
+small default-feature bin: `cargo build --release --bin phase-sync-active-floor-gate  # airuleset:build-ok`.

@@ -129,6 +129,12 @@ pub mod frozen_camera;
 // Rust, no probe deps, no image/rqrr — unit-tests Tier-0.
 pub mod frozen_leg;
 
+// #895 — re-attributes a frozen_leg window to self_heal_reset when a capture_rate_selfheal (#663)
+// USB reset correlates with it, so a self-heal reset firing mid-measurement is never again
+// misreported as a frozen camera. Extends frozen_leg's classification; pure, no probe deps —
+// unit-tests Tier-0.
+pub mod self_heal_attribution;
+
 // #89 — pure DXGI device-lost (GPU TDR / driver-internal-error) log-signature matcher, extracted
 // from `probe::obs_log_audit` (#81) to a crate-root pure module so the default-feature
 // watchdog/self-heal pipeline can share the exact same match — never a second drifting copy.
@@ -336,6 +342,13 @@ pub mod window_gate;
 // No probe deps, so it unit-tests Tier-0; the `phase-sync-active-floor-gate` CLI binary
 // (src/bin/) reads live pins over OBS WS and hands them in.
 pub mod phase_sync_active_floor;
+
+// #903 — the boundary TOLERANCE for confirming a backward burn-id jump crosses a
+// `--switch-schedule` program-switch boundary, when the exact-instant `raw_window_index` equality
+// test alone cannot see it (clock disagreement between dev1 and the painter, bounded only by the
+// #326 gate's 200ms guarantee). No probe deps, so it unit-tests Tier-0;
+// `probe::burn_contiguity::burn_contiguity_in_window_with_step_and_schedule` calls it.
+pub mod window_boundary_tolerance;
 
 #[cfg(feature = "probe")]
 pub mod probe;

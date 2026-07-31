@@ -38,7 +38,7 @@
 
 use anyhow::{Context, Result};
 use camera_box::av_window::{self, AvSyncVerdict};
-use camera_box::frozen_leg::{frozen_leg_report, SegmentLeg};
+use camera_box::frozen_leg::SegmentLeg;
 use camera_box::offline_ack;
 use camera_box::probe::av_sync_recording::{decode_av_marker_inputs, AvMarkerInputs};
 use camera_box::probe::burn_contiguity::{
@@ -67,6 +67,7 @@ use camera_box::probe::recording_verdict::{
     cam_strih_assessment, verdict, FrameTick, RecordingVerdict, VerdictConfig,
 };
 use camera_box::qpsk_marker::{av_offset_candidates_deduped, DEDUPE_SAME_FID_WINDOW_S};
+use camera_box::self_heal_attribution::{attribute_self_heal, SelfHealResetEvent};
 use clap::Parser;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -341,6 +342,16 @@ struct Args {
     /// downgrade the gate -- this only fixes WHO gets judged).
     #[arg(long, default_value = "")]
     offline_ack_cams: String,
+    /// #895: a `capture_rate_selfheal` (#663) USB-reset event detected by the harness during THIS
+    /// recording window (`scripts/lib/self-heal-attribution.sh`'s mid-recording scan, wired at
+    /// `recording-e2e.sh`'s `[7b/8]`), so the `frozen_leg` classifier never misreports the
+    /// resulting stale/duplicate frames as a camera fault. Repeat per event:
+    /// `--self-heal-reset cam1:1785439475449374588 --self-heal-reset cam1:1785439600100000000`.
+    /// A malformed token is silently dropped (`SelfHealResetEvent::parse`) rather than erroring —
+    /// the harness's own scan output is the only producer, and a partially-unparseable token must
+    /// never abort an otherwise-valid verdict run.
+    #[arg(long, value_name = "CAMBOX:EPOCH_NS")]
+    self_heal_reset: Vec<String>,
 }
 
 impl Args {
@@ -1239,13 +1250,26 @@ fn scope_camera_window_to_own_schedule(
 /// every scheduled window — [`burn_contiguity_in_window_with_step_and_schedule`] treats an
 /// unknown window on EITHER side of a comparison as "assume the SAME window" (never silently
 /// suppresses a real anomaly), so returning `None` here is always the conservative, safe choice.
+///
+/// #903 — the SECOND element of the returned tuple is the companion `near_boundary_of` signal:
+/// for each entry of `window`, is that frame's own `gen_ts_ns` within
+/// [`camera_box::window_boundary_tolerance::DEFAULT_BOUNDARY_TOLERANCE_NS`] of ANY schedule
+/// boundary instant (a window's `start_ns` or `end_ns`)? `raw_window_index`'s exact `>=`/`<`
+/// interval test has no tolerance at all, and the boundary instant (dev1's clock) and `gen_ts_ns`
+/// (the painter's clock) are only ever guaranteed to agree within the `#326` gate's 200ms — so a
+/// genuine crossing can still read back as the SAME window on both sides when clock disagreement
+/// puts a frame on the "wrong" side of the exact boundary by less than that (confirmed live: run
+/// 30637408198's one wrongly-charged jump landed its frame 30 microseconds on the old side).
+/// `burn_contiguity_in_window_with_step_and_schedule`'s `near_boundary_of` parameter uses this as
+/// an ADDITIONAL confirmation on top of (never a replacement for) the exact window-index check —
+/// never fires when either side's window is unknown, exactly like the exact check.
 fn attribute_window_indices(
     window: &[RecordedBurnFrame],
     source: &[RecordingFrame],
     all_burn_run_ids: &[u32],
     cam2_run_id: Option<u32>,
     scope: ScheduleScope<'_>,
-) -> Vec<Option<usize>> {
+) -> (Vec<Option<usize>>, Vec<bool>) {
     let gen_ts_by_index: HashMap<u64, i64> = source
         .iter()
         .filter_map(|f| {
@@ -1253,14 +1277,36 @@ fn attribute_window_indices(
                 .map(|ts| (f.frame_index, ts))
         })
         .collect();
-    window
+    // #903 — the flat list of every schedule window's start/end instant, the boundary set
+    // `near_any_boundary` measures distance against.
+    let boundaries: Vec<i64> = scope
+        .schedule
+        .iter()
+        .flat_map(|w| [w.start_ns, w.end_ns])
+        .collect();
+    let window_of = window
         .iter()
         .map(|rbf| {
             gen_ts_by_index
                 .get(&rbf.frame_index)
                 .and_then(|&gen_ts| raw_window_index(gen_ts, scope.schedule))
         })
-        .collect()
+        .collect();
+    let near_boundary_of = window
+        .iter()
+        .map(|rbf| {
+            gen_ts_by_index
+                .get(&rbf.frame_index)
+                .is_some_and(|&gen_ts| {
+                    camera_box::window_boundary_tolerance::near_any_boundary(
+                        gen_ts,
+                        &boundaries,
+                        camera_box::window_boundary_tolerance::DEFAULT_BOUNDARY_TOLERANCE_NS,
+                    )
+                })
+        })
+        .collect();
+    (window_of, near_boundary_of)
 }
 
 /// Build the trustworthy verdict for one node from the decoded stream frames: run the
@@ -1322,19 +1368,23 @@ fn node_verdict_with_optical(
     // Scoped to "strih" ONLY — the one node this mechanism is proven for; "stream"'s 911004 burn
     // is a single continuous counter on one fixed input, so this is a pure no-op for it either
     // way, but keeping the exception explicitly node-scoped avoids ever touching its behavior.
-    let window_of: Option<Vec<Option<usize>>> = if node == "strih" {
+    let window_attribution: Option<(Vec<Option<usize>>, Vec<bool>)> = if node == "strih" {
         schedule_scope.map(|scope| {
             attribute_window_indices(&window, source, all_burn_run_ids, spec.cam2_run_id, scope)
         })
     } else {
         None
     };
+    let window_of: Option<Vec<Option<usize>>> = window_attribution.as_ref().map(|(w, _)| w.clone());
+    // #903 — the companion near-boundary tolerant signal (see `attribute_window_indices`'s doc).
+    let near_boundary_of: Option<Vec<bool>> = window_attribution.as_ref().map(|(_, nb)| nb.clone());
     let in_window = burn_contiguity_in_window_with_step_and_schedule(
         node,
         &window,
         spec.rate,
         spec.step,
         window_of.as_deref(),
+        near_boundary_of.as_deref(),
     );
     let contiguity = in_window.contiguity;
     // #363/#373 — the optical facts (undecodable count + span frames) are computed ONCE per source
@@ -4006,12 +4056,32 @@ fn build_and_print_verdict(
                         end_ns: s.end_ns,
                     })
                     .collect();
-                let leg_report = frozen_leg_report(&leg_segments);
+                // #895 — correlate the harness's --self-heal-reset events (recording-e2e.sh's
+                // [7b/8] mid-recording scan, scripts/lib/self-heal-attribution.sh) against these
+                // SAME windows BEFORE emitting frozen_leg, so a capture_rate_selfheal (#663)
+                // USB-reset firing during the recording is attributed to self_heal_reset, never
+                // misreported as a camera fault. A malformed token is silently dropped — the
+                // harness's own scan is the only producer.
+                let self_heal_events: Vec<SelfHealResetEvent> = args
+                    .self_heal_reset
+                    .iter()
+                    .filter_map(|t| SelfHealResetEvent::parse(t))
+                    .collect();
+                let leg_report = attribute_self_heal(&leg_segments, &self_heal_events);
                 for f in &leg_report.frozen {
                     println!("  {}", f.message());
                 }
                 for s in &leg_report.stale_replay {
                     println!("  {}", s.message());
+                }
+                for sh in &leg_report.self_heal {
+                    println!("  {}", sh.message());
+                }
+                for ev in &leg_report.unattributed_events {
+                    println!(
+                        "  self_heal_reset: {} at {} (epoch ns) -- no correlating classified window, still counts as a run-integrity event (#895)",
+                        ev.cambox, ev.at_ns
+                    );
                 }
                 report["frozen_leg"] = serde_json::json!({
                     "frozen": leg_report.frozen.iter().map(|f| serde_json::json!({
@@ -4028,7 +4098,23 @@ fn build_and_print_verdict(
                         "message": s.message(),
                     })).collect::<Vec<_>>(),
                 });
+                report["self_heal_reset"] = serde_json::json!({
+                    "attributed": leg_report.self_heal.iter().map(|sh| serde_json::json!({
+                        "cambox": sh.cambox,
+                        "since_ns": sh.since_ns,
+                        "reset_at_ns": sh.reset_at_ns,
+                        "copies": sh.copies,
+                        "approx_stale_secs": sh.approx_stale_secs,
+                        "density": sh.density,
+                        "message": sh.message(),
+                    })).collect::<Vec<_>>(),
+                    "unattributed_events": leg_report.unattributed_events.iter().map(|ev| serde_json::json!({
+                        "cambox": ev.cambox,
+                        "at_ns": ev.at_ns,
+                    })).collect::<Vec<_>>(),
+                });
                 all_pass &= !leg_report.any_frozen();
+                all_pass &= !leg_report.any_self_heal();
 
                 // #467/#583 — extend the ALL-CAMBOX sweep to ALSO cover imag-nb's OWN recording:
                 // place its frames onto the SAME schedule timeline (anchored on imag's #463 digital
@@ -10251,6 +10337,171 @@ mod tests {
             v.contiguity
         );
         assert_eq!(v.real_drops(), 0, "#741: no phantom REAL DROP");
+    }
+
+    #[test]
+    fn node_verdict_with_optical_strih_backward_jump_30us_before_boundary_is_zero_loss_903() {
+        // #903 -- THE bug #741 did not cover. The live diagnosis (run 30637408198): the
+        // backward-jumping frame's own gen_ts landed 30 MICROSECONDS on the OLD side of its
+        // boundary, so BOTH the previous present frame AND the jump frame itself resolve to the
+        // SAME (old) window via `raw_window_index` (an exact `>=`/`<` interval test) -- the #708
+        // exact check alone reads "no crossing" and charges it. Unlike the #741 fixture (whose
+        // jump frame already lands on the CORRECT side of the boundary, just deep inside the 1s
+        // guard band), this fixture's jump frame stays on the WRONG side of the exact boundary --
+        // only the #903 near-boundary tolerant signal can confirm this one.
+        let guard_ns = super::DEFAULT_TRANSITION_GUARD_NS;
+        let boundary_ns: i64 = 1_000_000_000; // 1s
+        let schedule = vec![
+            super::SwitchWindow {
+                cambox: "CAM4".to_string(),
+                start_ns: 0,
+                end_ns: boundary_ns,
+            },
+            super::SwitchWindow {
+                cambox: "CAM2".to_string(),
+                start_ns: boundary_ns,
+                end_ns: boundary_ns + 1_000_000_000,
+            },
+        ];
+        // The previous present frame sits well inside window0, far from the boundary (not near).
+        let prev_ns = boundary_ns - 100_000_000; // 100ms before
+                                                 // The backward-jumping frame: this run's real offset, 30 MICROSECONDS before the boundary
+                                                 // -- still strictly < boundary_ns, so raw_window_index reads window0 here too (SAME as
+                                                 // prev_ns's window), even though the switch has genuinely already happened.
+        let jump_ns = boundary_ns - 30_000; // 0.030ms = 30_000ns before
+                                            // The next frame, well inside window1 (the new counter continuing forward).
+        let next_ns = boundary_ns + 100_000_000;
+        let stream: Vec<RecordingFrame> = vec![
+            frame_at(
+                0,
+                &[
+                    (CAM2, 900, prev_ns - 100_000_000),
+                    (STRIH, 100, prev_ns - 100_000_000),
+                ],
+            ),
+            // Well inside window0, far from the boundary -- window_of == Some(0), not near.
+            frame_at(1, &[(CAM2, 901, prev_ns), (STRIH, 103, prev_ns)]),
+            // The backward jump: A DIFFERENT source's own independent 911002 filter instance cut
+            // onto program -- its free-running counter value (101) is LOWER than the previous
+            // window's tail (103) -- but its gen_ts is only 30us before the boundary, so
+            // window_of ALSO reads Some(0) here (the SAME window as the previous frame).
+            frame_at(2, &[(CAM2, 902, jump_ns), (STRIH, 101, jump_ns)]),
+            frame_at(3, &[(CAM2, 903, next_ns), (STRIH, 106, next_ns)]),
+        ];
+        let optical = optical_span_facts(&stream, &[STRIH, STREAM], None);
+        let scope = super::ScheduleScope {
+            schedule: &schedule,
+            anchor_run_ids: &[STRIH, STREAM],
+            guard_ns,
+        };
+        let v = node_verdict_with_optical(
+            &super::NodeSpec {
+                node: "strih",
+                burn_run_id: STRIH,
+                rate: BurnRate::PerRenderTick,
+                source: &stream,
+                rec_path: None,
+                cam2_run_id: None,
+                step: super::node_render_step("strih", 60.0, 30.0, 60.0, 30.0),
+            },
+            &[STRIH, STREAM],
+            optical,
+            std::path::Path::new("/tmp"),
+            0,
+            Some(scope),
+        )
+        .unwrap();
+        assert!(
+            v.is_zero(),
+            "#903: a backward jump landing only 30us before a CONFIRMED window boundary must not \
+             be a phantom drop -- the exact window-index test alone cannot see it, only the \
+             near-boundary tolerant signal can -- got {:?}",
+            v.contiguity
+        );
+        assert_eq!(v.real_drops(), 0, "#903: no phantom REAL DROP");
+    }
+
+    #[test]
+    fn node_verdict_with_optical_strih_backward_jump_far_from_any_boundary_still_charged_903() {
+        // #903's hard constraint: a genuine fault occurring far from every schedule boundary must
+        // still FAIL -- the near-boundary tolerance must never degrade into "ignore backward
+        // jumps". Same id sequence as the #708/#741 fixtures, but BOTH present frames straddling
+        // the backward jump sit deep inside window0, nowhere near boundary_ns.
+        let guard_ns = super::DEFAULT_TRANSITION_GUARD_NS;
+        let boundary_ns: i64 = 1_000_000_000; // 1s
+        let schedule = vec![
+            super::SwitchWindow {
+                cambox: "CAM4".to_string(),
+                start_ns: 0,
+                end_ns: boundary_ns,
+            },
+            super::SwitchWindow {
+                cambox: "CAM2".to_string(),
+                start_ns: boundary_ns,
+                end_ns: boundary_ns + 1_000_000_000,
+            },
+        ];
+        // Deep inside window0 -- 500ms from the boundary, far past the 200ms tolerance.
+        let mid_ns = boundary_ns / 2;
+        let stream: Vec<RecordingFrame> = vec![
+            frame_at(
+                0,
+                &[
+                    (CAM2, 900, mid_ns - 20_000_000),
+                    (STRIH, 100, mid_ns - 20_000_000),
+                ],
+            ),
+            frame_at(1, &[(CAM2, 901, mid_ns), (STRIH, 103, mid_ns)]),
+            // Genuine in-window backward jump -- a real fault, far from any boundary.
+            frame_at(
+                2,
+                &[
+                    (CAM2, 902, mid_ns + 20_000_000),
+                    (STRIH, 101, mid_ns + 20_000_000),
+                ],
+            ),
+            frame_at(
+                3,
+                &[
+                    (CAM2, 903, mid_ns + 40_000_000),
+                    (STRIH, 106, mid_ns + 40_000_000),
+                ],
+            ),
+        ];
+        let optical = optical_span_facts(&stream, &[STRIH, STREAM], None);
+        let scope = super::ScheduleScope {
+            schedule: &schedule,
+            anchor_run_ids: &[STRIH, STREAM],
+            guard_ns,
+        };
+        let v = node_verdict_with_optical(
+            &super::NodeSpec {
+                node: "strih",
+                burn_run_id: STRIH,
+                rate: BurnRate::PerRenderTick,
+                source: &stream,
+                rec_path: None,
+                cam2_run_id: None,
+                step: super::node_render_step("strih", 60.0, 30.0, 60.0, 30.0),
+            },
+            &[STRIH, STREAM],
+            optical,
+            std::path::Path::new("/tmp"),
+            0,
+            Some(scope),
+        )
+        .unwrap();
+        assert!(
+            !v.is_zero(),
+            "#903: a backward jump far from every boundary must still be a REAL fault -- the \
+             tolerance must never mask a genuine drop -- got {:?}",
+            v.contiguity
+        );
+        assert_eq!(
+            v.real_drops(),
+            1,
+            "#903: exactly one genuine REAL DROP, still charged"
+        );
     }
 
     #[test]

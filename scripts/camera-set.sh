@@ -23,6 +23,13 @@
 # source name, genlock fps, strih scene/NDI-input route) stays intact below, fully resolvable —
 # retirement is expressed ONLY as membership in `CAMERA_ACTIVE_SET`, never as a deleted case arm.
 #
+# #898 (2026-07-31) — cam3 ALSO RETIRED from the ACTIVE fleet, same mechanism: its USB grabber
+# card was physically DESTROYED (a 12V USB-C brick put 12V on VBUS during the #728/#688 power
+# test, destroying cam1's original card + a powered hub; cam3's card was then moved into cam1 as
+# recovery, per #898). cam3 has zero capture hardware today and no replacement exists yet. Its
+# facts (IP, NDI source, genlock fps, strih scene/NDI-input route) stay intact below exactly like
+# cam5/cam6/cam7 — retirement is membership-only here too.
+#
 # **CAMERA_ACTIVE_SET is the ONE declared list of cameras physically installed and active TODAY.**
 # Every fleet-wide consumer (recording-e2e.sh's preflight/sweep/burn-target loops,
 # set-ndi-mapping.py's enforced pins via its own --active flag, deploy-fleet.sh/verify-fleet.sh/
@@ -30,14 +37,16 @@
 # recording-e2e.sh) DERIVES its working set from this ONE line — never a second hardcoded
 # enumeration of "which cams exist right now".
 #
-# **RE-ENABLE PROCEDURE (the whole point of this design):** a retired camera (e.g. cam5) coming
-# back online is re-activated by adding its name back to CAMERA_ACTIVE_SET below (or overriding
-# the env var for a one-off run: `CAMERA_ACTIVE_SET="cam1 cam2 cam3 cam4 cam5" ...`). Nothing
-# else needs to change — camera_resolve/camera_strih_route already know it fully, and every
-# consumer that derives from CAMERA_ACTIVE_SET (or camera_active_secondary_set below) picks it up
-# automatically on its next run. See tests/harness_camera_set.rs's
-# `camera_active_set_env_override_reactivates_a_retired_camera` for the proof this actually works.
-CAMERA_ACTIVE_SET="${CAMERA_ACTIVE_SET:-cam1 cam2 cam3 cam4}"
+# **RE-ENABLE PROCEDURE (the whole point of this design):** a retired camera (e.g. cam3, once a
+# replacement grabber card is fitted, or cam5) coming back online is re-activated by adding its
+# name back to CAMERA_ACTIVE_SET below (or overriding the env var for a one-off run:
+# `CAMERA_ACTIVE_SET="cam1 cam2 cam3 cam4" ...`). Nothing else needs to change —
+# camera_resolve/camera_strih_route already know it fully, and every consumer that derives from
+# CAMERA_ACTIVE_SET (or camera_active_secondary_set below) picks it up automatically on its next
+# run. See tests/harness_camera_set.rs's `camera_active_set_env_override_reactivates_a_retired_camera`
+# / `camera_set_cam3_retired_898_still_resolves_as_fact_but_not_active` for the proof this
+# actually works.
+CAMERA_ACTIVE_SET="${CAMERA_ACTIVE_SET:-cam1 cam2 cam4}"
 
 # This file is meant to be SOURCED, not executed — it defines functions and a default, and
 # performs no side effects on its own. Direct execution prints the resolved default set.

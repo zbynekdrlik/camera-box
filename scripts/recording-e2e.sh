@@ -210,6 +210,12 @@ CAMBOX_OFFLINE_ACK="$(cambox_offline_ack_effective "${CAMBOX_OFFLINE_ACK:-}" "$R
 # frozen camera in recording-verdict.rs's frozen_leg).
 # shellcheck source=scripts/lib/udev-camera-box.sh
 . "$HERE/lib/udev-camera-box.sh"
+# #895: self_heal_reset_window_journalctl_cmd/_events_from_output/_scan_message -- the
+# post-StopRecord self-heal-RESET scan below (a capture_rate_selfheal USB reset firing during the
+# recording must be attributed to self_heal_reset, never silently misread as frozen_leg on the
+# camera).
+# shellcheck source=scripts/lib/self-heal-attribution.sh
+. "$HERE/lib/self-heal-attribution.sh"
 camera_resolve "${CAM:-cam1}"
 # #24 item 1: this harness's SOURCE-camera role (the physical box filming cam2's monitor via
 # the optical loopback + carrying the #174 render-time capture burn) is one of
@@ -3008,6 +3014,46 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
   done
 fi
 
+# [7b/8] #895: self-heal-RESET scan. Keys on the RESET event itself
+# ("#663 self-heal: USB reset attempt #N succeeded") rather than either upstream detection band's
+# WARN text, so a reset triggered via EITHER the #656 jitter band OR the #717 sustained band is
+# caught by ONE check (scripts/lib/self-heal-attribution.sh's own header explains why the
+# capture-rate-guard.sh mid-recording recheck further below -- cam1/jitter-only -- does not already
+# cover this). Swept across EVERY active camera (not just the source camera), scoped to the EXACT
+# recording window via each box's own CURRENT camera-box.service InvocationID (the [2/8] redeploy
+# earlier in this run restarts camera-box, so the invocation id must be re-resolved here, never
+# reused from an earlier preflight -- same #693/#705 discipline the capture-rate-guard check uses).
+# Detected events are printed loudly NOW (never only in post-hoc forensics) and threaded into
+# recording-verdict.rs below via --self-heal-reset so the pure self_heal_attribution module can
+# re-attribute any correlating frozen_leg window -- ALLOWED to fire (never suppressed), and never
+# silently swallowed: an event with no correlating window still gates the run (#895).
+echo "[7b/8] self-heal reset scan (#895) — did capture_rate_selfheal (#663) USB-reset any active camera's capture device during the recording window?"
+SELF_HEAL_RESET_EVENTS=()
+_self_heal_reset_scan() {  # camname ip
+  local _scn="$1" _sip="$2" _sinv _sout _sns _sfound=0
+  _sinv="$(sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$_sip" \
+    "systemctl show -p InvocationID --value camera-box 2>/dev/null" 2>/dev/null || true)"
+  _sout="$(sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$_sip" \
+    "$(self_heal_reset_window_journalctl_cmd "$_sinv" "$CAPTURE_RATE_WINDOW_START_EPOCH" "$CAPTURE_RATE_WINDOW_END_EPOCH")" \
+    2>/dev/null || true)"
+  while IFS= read -r _sns; do
+    [ -z "$_sns" ] && continue
+    _sfound=1
+    echo "    $(self_heal_reset_scan_message "$_scn" "$_sns")"
+    SELF_HEAL_RESET_EVENTS+=("${_scn}:${_sns}")
+  done <<< "$(self_heal_reset_events_from_output "$_sout")"
+  if [ "$_sfound" -eq 0 ]; then
+    echo "    $_scn: no self-heal reset in this recording window — OK"
+  fi
+}
+_self_heal_reset_scan "$CAMERA_NAME" "$CAM1_IP"
+if [ "${ALL_CAMBOX:-0}" = "1" ]; then
+  for _cn_ip_sh in "${CAMBOX_SECONDARY_DEPLOY[@]}"; do
+    _cn="${_cn_ip_sh%%=*}"; _crest="${_cn_ip_sh#*=}"; _cip="${_crest%%=*}"
+    _self_heal_reset_scan "$_cn" "$_cip"
+  done
+fi
+
 # [7c/8] #707 B1 transport sampler (second prong) — stop the per-box samplers armed in [5b/8] and
 # harvest each per-run CSV into the run dir (scp), so the TCP Send-Q / retransmit / NIC-counter
 # timeline lands BESIDE the recordings + verdict for the freeze discriminator. Already inside the
@@ -3502,6 +3548,16 @@ continuing WITHOUT the imag partial; the merge below will omit --merge-partials 
   if [ "${ALL_CAMBOX:-0}" = "1" ] && [ -f "$SWITCH_SCHEDULE_JSON" ]; then
     MERGE_ARGS+=(--switch-schedule "$SWITCH_SCHEDULE_JSON")
     echo "    #332 all-cambox: --switch-schedule $SWITCH_SCHEDULE_JSON (per-cambox continuity in the merge, ON the stream box)"
+  fi
+  # #895: thread every self-heal-RESET event detected during the recording (the [7b/8] scan above)
+  # into the merge/verdict call, so the pure self_heal_attribution module can re-attribute any
+  # correlating frozen_leg window instead of misreporting it as a camera fault. An empty array
+  # (the common case — no self-heal fired) adds nothing.
+  if [ "${#SELF_HEAL_RESET_EVENTS[@]}" -gt 0 ]; then
+    for _sh_event in "${SELF_HEAL_RESET_EVENTS[@]}"; do
+      MERGE_ARGS+=(--self-heal-reset "$_sh_event")
+    done
+    echo "    #895: --self-heal-reset x${#SELF_HEAL_RESET_EVENTS[@]} (${SELF_HEAL_RESET_EVENTS[*]})"
   fi
   printf '      %q ' "$VERDICT_BIN" "${MERGE_ARGS[@]}"; echo
 

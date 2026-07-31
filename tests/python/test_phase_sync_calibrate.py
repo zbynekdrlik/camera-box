@@ -667,10 +667,11 @@ class TestCLI:
 # ---------------------------------------------------------------------------
 
 class TestActiveNdiSources:
-    def test_default_is_cam1_through_4(self, monkeypatch):
+    def test_default_is_cam1_cam2_cam4(self, monkeypatch):
+        # #898 (2026-07-31): cam3 retired from the default active set (grabber card destroyed).
         monkeypatch.delenv("CAMERA_ACTIVE_SET", raising=False)
         assert phase_sync_calibrate.active_ndi_sources() == {
-            "NDI cam1", "NDI cam2", "NDI cam3", "NDI cam4",
+            "NDI cam1", "NDI cam2", "NDI cam4",
         }
 
     def test_env_override_narrows_and_widens(self, monkeypatch):

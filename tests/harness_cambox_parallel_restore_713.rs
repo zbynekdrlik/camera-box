@@ -285,10 +285,11 @@ fn write_driver(
 
 /// THE HEADLINE REAL PROOF: extract the ACTUAL whole device-restore phase from
 /// recording-e2e.sh (no rig, no ssh) and measure wall-clock with ALL_CAMBOX=1 + the DEFAULT
-/// active set (so cam1 + cam3/4 + cam2/painter = 4 boxes total are active — #827: cam5/cam6/cam7
-/// retired). 4 boxes at a simulated ~300ms round-trip each: SEQUENTIAL would take >=1200ms;
-/// PARALLEL must take well under that (bounded here at 700ms) — and all 4 boxes must still have
-/// genuinely been contacted (never skipped for speed).
+/// active set (so cam1 + cam4 + cam2/painter = 3 boxes total are active — #827: cam5/cam6/cam7
+/// retired; #898 (2026-07-31): cam3 also retired, grabber card destroyed). 3 boxes at a
+/// simulated ~300ms round-trip each: SEQUENTIAL would take >=900ms; PARALLEL must take well
+/// under that (bounded here at 600ms) — and all 3 boxes must still have genuinely been
+/// contacted (never skipped for speed).
 #[test]
 fn whole_device_restore_phase_runs_in_parallel_not_sequentially() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -312,19 +313,25 @@ fn whole_device_restore_phase_runs_in_parallel_not_sequentially() {
     );
 
     let log = fs::read_to_string(&log_path).unwrap_or_default();
-    for ip in ["10.9.9.1", "10.9.9.3", "10.9.9.4", "10.9.9.2"] {
+    for ip in ["10.9.9.1", "10.9.9.4", "10.9.9.2"] {
         assert!(
             log.contains(ip),
-            "#713/#827: every one of the 4 default-active boxes (cam1 + cam3/4 + cam2/painter) \
-             must actually be contacted (found in the fake timeout()'s call log) — parallelizing \
-             must never skip a box for speed. Log:\n{log}"
+            "#713/#827/#898: every one of the 3 default-active boxes (cam1 + cam4 + \
+             cam2/painter) must actually be contacted (found in the fake timeout()'s call log) — \
+             parallelizing must never skip a box for speed. Log:\n{log}"
         );
     }
+    assert!(
+        !log.contains("10.9.9.3"),
+        "#898: cam3 is retired from the default active set (grabber card destroyed) and must \
+         NOT be contacted by the default-active restore phase. Log:\n{log}"
+    );
 
     assert!(
-        elapsed.as_millis() < 700,
-        "#713: 4 boxes at a simulated ~300ms round-trip each MUST run in PARALLEL (bounded well \
-         under the ~1200ms a SEQUENTIAL phase would take), not one after another. Elapsed: {:?}",
+        elapsed.as_millis() < 600,
+        "#713/#898: 3 boxes at a simulated ~300ms round-trip each MUST run in PARALLEL (bounded \
+         well under the ~900ms a SEQUENTIAL phase would take), not one after another. \
+         Elapsed: {:?}",
         elapsed
     );
 }
