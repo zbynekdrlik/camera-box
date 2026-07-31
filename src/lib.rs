@@ -332,5 +332,10 @@ pub mod optical_floor;
 // result onto `CamboxSegment`. TEMPORARY, restore-gated on #883 item 4 + two clean strict runs.
 pub mod window_gate;
 
+// #893 (2026-07-30) — the "at least one ACTIVE camera sits at the phase-sync floor" gate term.
+// No probe deps, so it unit-tests Tier-0; the `phase-sync-active-floor-gate` CLI binary
+// (src/bin/) reads live pins over OBS WS and hands them in.
+pub mod phase_sync_active_floor;
+
 #[cfg(feature = "probe")]
 pub mod probe;
