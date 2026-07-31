@@ -50,6 +50,14 @@ GENLOCK_SRC_LATENCY_KEY = "genlock_latency_ms_src"
 LATENCY_MIN = 3
 LATENCY_MAX = 2000
 
+# #871: the max ms one run's required_delay_ms() may move the applied latency AWAY from its
+# current value, applied BEFORE the LATENCY_MIN/MAX hardware clamp. Env-overridable so the
+# operator keeps the knob without a rebuild. Default 50ms: damage-limits a single untrustworthy
+# measurement (a delivery defect corrupting the video timebase, #707) to an inaudible shift that
+# self-corrects on the next good run, rather than jumping the whole raw distance in one step (the
+# incident this fixes moved genlock_latency_ms_src 920 -> 1845ms in ONE run).
+AV_SYNC_MAX_STEP_MS = int(os.environ.get("AV_SYNC_MAX_STEP_MS", "50"))
+
 DEFAULT_SOURCE = "NDI 2ME PGM"
 
 # Canonical Windows-side destination this script's payload MUST end up at for the #390
@@ -122,10 +130,19 @@ def required_delay_ms(current_delay_ms: int, offset_ms: float) -> int:
     """Required genlock video-delay to zero the measured offset.
 
     MIRRORS `camera_box::qpsk_marker::required_delay_ms` (src/qpsk_marker.rs) EXACTLY — same
-    sign, same clamp, same rounding. Keep the two in lock-step; do not diverge.
+    sign, same step clamp, same hardware clamp, same rounding. Keep the two in lock-step; do not
+    diverge.
 
-    `offset_ms = video_time - audio_time`; positive (video lags) -> REDUCE the delay. Clamped to
-    the DistroAV genlock range [3, 2000] ms.
+    `offset_ms = video_time - audio_time`; positive (video lags) -> REDUCE the delay. #871: the
+    per-run STEP is clamped to `current_delay_ms +/- AV_SYNC_MAX_STEP_MS` BEFORE the DistroAV
+    hardware genlock range [3, 2000] ms clamp -- a single run may only move the applied latency by
+    a small correction, never the whole raw distance in one step. When the step clamp actually
+    bites, prints a LOUD line (raw target, applied value, remaining residual) to stderr so a
+    persistent large residual is never silent.
+
+    #871 [red]: deliberate stub -- AV_SYNC_MAX_STEP_MS is NOT yet applied, exactly today's bug
+    behavior (only the hardware [3, 2000] range is enforced). The [green] commit implements the
+    step clamp.
     """
     raw = round(current_delay_ms - offset_ms)
     return max(LATENCY_MIN, min(LATENCY_MAX, raw))

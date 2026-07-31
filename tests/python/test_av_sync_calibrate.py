@@ -39,24 +39,68 @@ import av_sync_calibrate  # noqa: E402
 
 class TestRequiredDelayMs:
     def test_video_lags_audio_reduces_delay(self):
-        # video lags audio (+120 ms) -> reduce delay. Rust: required_delay_ms(1000, 120.0) == 880
-        assert av_sync_calibrate.required_delay_ms(1000, 120.0) == 880
+        # video lags audio (+30 ms, within the default 50ms/run step) -> reduce delay by exactly
+        # the measured offset. Rust: required_delay_ms(1000, 30.0, 50) == 970
+        assert av_sync_calibrate.required_delay_ms(1000, 30.0) == 970
 
     def test_video_leads_audio_increases_delay(self):
-        # video leads audio (-120 ms) -> increase delay. Rust: required_delay_ms(1000, -120.0) == 1120
-        assert av_sync_calibrate.required_delay_ms(1000, -120.0) == 1120
+        # video leads audio (-30 ms, within step) -> increase delay by exactly the offset.
+        # Rust: required_delay_ms(1000, -30.0, 50) == 1030
+        assert av_sync_calibrate.required_delay_ms(1000, -30.0) == 1030
 
     def test_clamps_low(self):
-        assert av_sync_calibrate.required_delay_ms(1000, 5000.0) == 3
+        # current is already near the floor -- even a step-clamped move overshoots it, so the
+        # hardware floor still applies AFTER the #871 step clamp (mirrors Rust's
+        # required_delay_ms(10, 5000.0, 50) == 3 -- current=1000 would NOT reach the floor via a
+        # single clamped 50ms step, so this uses a current near the edge on purpose).
+        assert av_sync_calibrate.required_delay_ms(10, 5000.0) == 3
 
     def test_clamps_high(self):
-        assert av_sync_calibrate.required_delay_ms(1000, -5000.0) == 2000
+        assert av_sync_calibrate.required_delay_ms(1990, -5000.0) == 2000
 
     def test_already_at_floor_stays_at_floor(self):
         assert av_sync_calibrate.required_delay_ms(3, 0.0) == 3
 
     def test_rounds_to_nearest_int(self):
         assert av_sync_calibrate.required_delay_ms(1000, 0.6) == 999  # round(1000 - 0.6) = 999
+
+
+# ---------------------------------------------------------------------------
+# (a2) #871 -- required_delay_ms() per-run STEP clamp
+# ---------------------------------------------------------------------------
+
+class TestRequiredDelayMsStepClamp:
+    def test_large_offset_clamped_to_default_step(self):
+        # #871: a single run may only move the applied latency by +/- AV_SYNC_MAX_STEP_MS
+        # (default 50ms), never jump the whole raw distance in one step -- the incident this
+        # fixes moved genlock_latency_ms_src 920 -> 1845ms (a ~925ms single-run correction) off a
+        # measurement whose video timebase was corrupted by a delivery defect (#707).
+        assert av_sync_calibrate.required_delay_ms(1000, 925.0) == 950  # not 75
+
+    def test_large_negative_offset_clamped_to_default_step(self):
+        assert av_sync_calibrate.required_delay_ms(1000, -925.0) == 1050  # not 1925
+
+    def test_step_clamp_respects_env_override(self, monkeypatch):
+        monkeypatch.setattr(av_sync_calibrate, "AV_SYNC_MAX_STEP_MS", 10)
+        assert av_sync_calibrate.required_delay_ms(1000, 925.0) == 990
+
+    def test_step_clamp_prints_loud_line_with_raw_and_residual(self, monkeypatch, capsys):
+        # raw = round(1000 - 925) = 75; clamped result = 950; residual = raw - result = -875.
+        av_sync_calibrate.required_delay_ms(1000, 925.0)
+        err = capsys.readouterr().err
+        assert "STEP CLAMPED" in err, f"expected a LOUD stderr line, got: {err!r}"
+        assert "75" in err, f"raw target must be visible: {err!r}"
+        assert "950" in err, f"applied (clamped) value must be visible: {err!r}"
+        assert "-875" in err, f"remaining residual must be visible: {err!r}"
+
+    def test_no_log_when_within_step(self, capsys):
+        av_sync_calibrate.required_delay_ms(1000, 30.0)
+        err = capsys.readouterr().err
+        assert err == "", f"no clamp bit -- must stay silent, got: {err!r}"
+
+    def test_default_max_step_is_50ms(self):
+        if "AV_SYNC_MAX_STEP_MS" not in __import__("os").environ:
+            assert av_sync_calibrate.AV_SYNC_MAX_STEP_MS == 50
 
 
 # ---------------------------------------------------------------------------
@@ -338,7 +382,9 @@ class TestCLI:
         )
         av_sync_calibrate.main()
 
-        assert fake.latency_ms == 330  # required_delay_ms(450, 120.0) == round(450-120) == 330
+        # #871: raw = round(450-120) = 330, but the per-run step clamp (default 50ms) limits the
+        # move to current-50 = 400 -- not the full 120ms in one step.
+        assert fake.latency_ms == 400
         assert json_path.exists()
         data = json.loads(json_path.read_text())
         assert data["applied_latency_ms"] == fake.latency_ms

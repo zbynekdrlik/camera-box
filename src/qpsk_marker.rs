@@ -702,8 +702,18 @@ pub fn parse_ffprobe_start_time(s: &str) -> f64 {
 }
 
 /// Required genlock video-delay to zero the measured offset. `offset_ms = video − audio`; positive
-/// (video lags) → REDUCE the delay. Clamped to the genlock range [3, 2000] ms.
-pub fn required_delay_ms(current_delay_ms: i32, offset_ms: f64) -> i32 {
+/// (video lags) → REDUCE the delay. The per-run STEP is clamped to `current_delay_ms +/-
+/// max_step_ms` BEFORE the hardware genlock range [3, 2000] ms clamp (#871): a single run may
+/// only move the applied latency by a small correction, never the whole raw distance in one
+/// step — the incident this fixes moved `genlock_latency_ms_src` 920 -> 1845ms in ONE run off a
+/// measurement whose video timebase was corrupted by a delivery defect (#707). A genuinely large
+/// real offset now converges over several runs instead of jumping to (or past) the hardware
+/// ceiling/floor on a single bad measurement.
+///
+/// #871 [red]: deliberate stub — `max_step_ms` is accepted but NOT yet applied, exactly today's
+/// bug behavior (only the hardware [3, 2000] range is enforced). The [green] commit implements
+/// the step clamp.
+pub fn required_delay_ms(current_delay_ms: i32, offset_ms: f64, _max_step_ms: i32) -> i32 {
     ((current_delay_ms as f64 - offset_ms).round() as i32).clamp(3, 2000)
 }
 
@@ -1007,10 +1017,28 @@ mod tests {
 
     #[test]
     fn required_delay_sign_and_clamp() {
-        assert_eq!(required_delay_ms(1000, 120.0), 880); // video lags → reduce
-        assert_eq!(required_delay_ms(1000, -120.0), 1120); // video leads → increase
-        assert_eq!(required_delay_ms(1000, 5000.0), 3); // clamp low
-        assert_eq!(required_delay_ms(1000, -5000.0), 2000); // clamp high
+        // Within the per-run step budget (50ms) -- pure sign + rounding, unaffected by the #871
+        // step clamp.
+        assert_eq!(required_delay_ms(1000, 30.0, 50), 970); // video lags → reduce
+        assert_eq!(required_delay_ms(1000, -30.0, 50), 1030); // video leads → increase
+        assert_eq!(required_delay_ms(1000, 0.6, 50), 999); // rounds to nearest int
+        // The hardware [3, 2000] floor/ceiling still applies AFTER the step clamp, when the
+        // current value is already close enough to the edge that even one clamped step overshoots
+        // it (current near the floor/ceiling, not near 1000 -- a clamped step alone would NOT
+        // reach these edges from 1000).
+        assert_eq!(required_delay_ms(10, 5000.0, 50), 3); // clamp low
+        assert_eq!(required_delay_ms(1990, -5000.0, 50), 2000); // clamp high
+    }
+
+    #[test]
+    fn required_delay_ms_step_clamp_871() {
+        // #871: a single run may only move the applied latency by +/- max_step_ms, never jump
+        // the whole raw distance in one step -- the incident this fixes moved
+        // `genlock_latency_ms_src` 920 -> 1845ms (a ~925ms single-run correction) off a
+        // measurement whose video timebase was corrupted by a delivery defect (#707).
+        assert_eq!(required_delay_ms(1000, 925.0, 50), 950); // not 75 -- clamped to current-50
+        assert_eq!(required_delay_ms(1000, -925.0, 50), 1050); // not 1925 -- clamped to current+50
+        assert_eq!(required_delay_ms(1000, 925.0, 10), 990); // a tighter step budget clamps tighter
     }
 
     #[test]
