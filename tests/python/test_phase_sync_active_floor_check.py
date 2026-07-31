@@ -49,6 +49,13 @@ class TestActiveCameraNames:
         monkeypatch.setenv("CAMERA_ACTIVE_SET", "   ")
         assert psafc.active_camera_names() == []
 
+    def test_explicit_arg_wins_over_env(self, monkeypatch):
+        # #893: recording-e2e.sh passes --active-set "$CAMERA_ACTIVE_SET" explicitly on the
+        # command line (mirrors set-ndi-mapping.py's --active) rather than relying on the
+        # shell variable happening to be exported to this Python subprocess.
+        monkeypatch.setenv("CAMERA_ACTIVE_SET", "cam1 cam2 cam3 cam4")
+        assert psafc.active_camera_names("cam5 cam6") == ["cam5", "cam6"]
+
 
 # ---------------------------------------------------------------------------
 # read_active_pins

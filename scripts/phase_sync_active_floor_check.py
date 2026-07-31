@@ -33,10 +33,17 @@ from obs_phase2 import _conn  # noqa: E402
 from latency_pins_snapshot import read_pin  # reuse the proven honest-None read # noqa: E402
 
 
-def active_camera_names() -> list:
-    """#893 -- CAMERA_ACTIVE_SET (env var, default "cam1 cam2 cam3 cam4"), split into names --
-    NEVER a literal range (.claude/rules/camera-active-set.md). Read fresh on every call."""
-    raw = os.environ.get("CAMERA_ACTIVE_SET", "cam1 cam2 cam3 cam4")
+def active_camera_names(explicit: "str | None" = None) -> list:
+    """#893 -- the active camera names, split from `explicit` if given, else CAMERA_ACTIVE_SET
+    (env var, default "cam1 cam2 cam3 cam4") -- NEVER a literal range
+    (.claude/rules/camera-active-set.md). Read fresh on every call.
+
+    `explicit` mirrors set-ndi-mapping.py's `--active` flag: the caller (recording-e2e.sh)
+    passes `--active-set "$CAMERA_ACTIVE_SET"` explicitly on the command line rather than
+    relying on the shell variable happening to be an EXPORTED env var reaching this Python
+    subprocess -- the same safer convention that script's own CLI already established.
+    """
+    raw = explicit if explicit is not None else os.environ.get("CAMERA_ACTIVE_SET", "cam1 cam2 cam3 cam4")
     return [tok.strip() for tok in raw.replace(",", " ").split() if tok.strip()]
 
 
@@ -95,9 +102,14 @@ def main(argv=None) -> int:
     ap.add_argument("--host", required=True)
     ap.add_argument("--password", default="")
     ap.add_argument("--gate-bin", default=None)
+    ap.add_argument(
+        "--active-set", default=None,
+        help="space/comma-separated camera names (default: $CAMERA_ACTIVE_SET, "
+             "same convention as set-ndi-mapping.py's --active)",
+    )
     args = ap.parse_args(argv)
 
-    active_set = active_camera_names()
+    active_set = active_camera_names(args.active_set)
     if not active_set:
         print("ERROR: CAMERA_ACTIVE_SET resolved to an empty list -- nothing to gate", file=sys.stderr)
         return 2
