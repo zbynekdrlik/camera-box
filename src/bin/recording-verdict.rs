@@ -7496,6 +7496,183 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Issue 914 (2026-08-01, user decision -- mirrors issue 889's report-only shape and issue
+    /// 861's caller-only decoupling): a genuinely HARD-FROZEN cambox window (issue 758's
+    /// classifier) plus an unattributed `#663` self-heal reset event must no longer force the
+    /// FUSED `overall_pass` to fail. Uses the SAME differential-fixture proof issue 861 used
+    /// (`all_cambox_av_sync_gate_failure_no_longer_forces_the_overall_verdict_to_fail_861`)
+    /// rather than asserting an absolute `overall_pass == true`, because many OTHER unrelated
+    /// gates in this function also fold into `overall_pass` and this test must stay valid
+    /// regardless of their state: build two otherwise-IDENTICAL fixtures, one with the
+    /// frozen/self-heal findings, one without, and prove `overall_pass` is IDENTICAL between
+    /// them. This is the exact test a future re-tightening (issue 905's restore path) will need
+    /// to invert.
+    #[test]
+    fn frozen_leg_and_self_heal_reset_no_longer_gate_the_overall_verdict_914() {
+        use super::{build_and_print_verdict, Cam1Source, DecodedRec};
+        use clap::Parser;
+
+        const ONE_S: i64 = 1_000_000_000;
+        let base = 1_000 * ONE_S;
+        let win = 5 * ONE_S;
+        let sched = format!(
+            r#"[{{"cambox":"CAM1","start_ns":{a},"end_ns":{b}}}]"#,
+            a = base,
+            b = base + win
+        );
+
+        fn build_fixture(
+            tag: &str,
+            base: i64,
+            sched: &str,
+            frozen: bool,
+            self_heal_reset: Option<&str>,
+        ) -> serde_json::Value {
+            const ONE_S: i64 = 1_000_000_000;
+            let dir = std::env::temp_dir().join(format!("cb-914-{tag}-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let sched_path = dir.join("switch-schedule.json");
+            std::fs::write(&sched_path, sched).unwrap();
+
+            let mut stream_frames: Vec<RecordingFrame> = Vec::new();
+            for i in 0..20u64 {
+                let gen_ts = base + (i as i64 + 1) * (ONE_S / 10);
+                let optical = 1000u32 + 2 * i as u32; // clean step-2 sequence, undecodable=0
+                stream_frames.push(RecordingFrame {
+                    frame_index: i,
+                    payloads: vec![
+                        Payload {
+                            run_id: STRIH,
+                            frame_id: 1670 + i as u32,
+                            gen_ts_ns: gen_ts,
+                        },
+                        Payload {
+                            run_id: CAM2,
+                            frame_id: optical,
+                            gen_ts_ns: gen_ts,
+                        },
+                    ],
+                    tick: Some(optical),
+                });
+            }
+            if frozen {
+                // 5 consecutive duplicates of index 9's tick (1018), inserted right after index
+                // 9 -- `copies=5` against `frames=25` -> density 0.20, ABOVE
+                // `frozen_leg::FROZEN_DENSITY_THRESHOLD` (0.10) -> genuinely HARD-FROZEN (not
+                // merely stale_replay, whose isolated-copy allowance is also 5 -- this proves
+                // DENSITY, not just count, is what trips it here). The real present-tick
+                // sequence around the duplicates stays perfectly contiguous (step 2), isolating
+                // this fixture's ONLY defect to the copies/frozen classification.
+                for k in 0..5u64 {
+                    let dup_gen_ts = base + 9 * (ONE_S / 10) + (k as i64 + 1) * (ONE_S / 1000);
+                    stream_frames.insert(
+                        10 + k as usize,
+                        RecordingFrame {
+                            frame_index: 9_000 + k,
+                            payloads: vec![
+                                Payload {
+                                    run_id: STRIH,
+                                    frame_id: 9_670 + k as u32,
+                                    gen_ts_ns: dup_gen_ts,
+                                },
+                                Payload {
+                                    run_id: CAM2,
+                                    frame_id: 1018, // == index 9's optical tick
+                                    gen_ts_ns: dup_gen_ts,
+                                },
+                            ],
+                            tick: Some(1018),
+                        },
+                    );
+                }
+            }
+
+            let mut argv = vec![
+                "recording-verdict".to_string(),
+                "--switch-schedule".to_string(),
+                sched_path.to_str().unwrap().to_string(),
+                "--switch-guard-ns".to_string(),
+                "0".to_string(),
+                "--switch-expected-step".to_string(),
+                "2".to_string(),
+            ];
+            if let Some(tok) = self_heal_reset {
+                argv.push("--self-heal-reset".to_string());
+                argv.push(tok.to_string());
+            }
+            let args = super::Args::parse_from(argv);
+            let (v, _) = build_and_print_verdict(
+                &args,
+                None,
+                Some(DecodedRec {
+                    frames: stream_frames,
+                    rec_path: None,
+                }),
+                Cam1Source::Absent,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("verdict");
+            let _ = std::fs::remove_dir_all(&dir);
+            v
+        }
+
+        let clean = build_fixture("clean", base, &sched, false, None);
+        // "CAM_UNRELATED" never appears in any schedule window in this fixture, so this event
+        // can never correlate to a classified window -- guaranteed `unattributed_events`,
+        // independent of the frozen fixture on CAM1.
+        let with_events = build_fixture(
+            "frozen",
+            base,
+            &sched,
+            true,
+            Some("CAM_UNRELATED:1000000000000"),
+        );
+
+        assert_eq!(
+            clean["frozen_leg"]["frozen"]
+                .as_array()
+                .map(|a| a.len())
+                .unwrap_or(0),
+            0,
+            "sanity: the clean fixture must have no frozen windows: {clean}"
+        );
+        assert_eq!(
+            with_events["frozen_leg"]["frozen"]
+                .as_array()
+                .map(|a| a.len())
+                .unwrap_or(0),
+            1,
+            "sanity: this fixture must genuinely classify one HARD-FROZEN window: {with_events}"
+        );
+        assert_eq!(
+            with_events["self_heal_reset"]["unattributed_events"]
+                .as_array()
+                .map(|a| a.len())
+                .unwrap_or(0),
+            1,
+            "sanity: the self-heal event on an unrelated cambox must stay unattributed: {with_events}"
+        );
+        assert_eq!(
+            with_events["frozen_leg"]["gates_overall_pass"],
+            serde_json::json!(false),
+            "914: the JSON must say plainly this term does not gate overall_pass: {with_events}"
+        );
+        assert_eq!(
+            with_events["self_heal_reset"]["gates_overall_pass"],
+            serde_json::json!(false),
+            "914: same for self_heal_reset: {with_events}"
+        );
+        assert_eq!(
+            clean["overall_pass"], with_events["overall_pass"],
+            "914: a genuinely frozen window + an unattributed self-heal event must be a no-op on \
+             the overall verdict (report-only, pending cam1 hardware fix issue 909 -- restore \
+             path issue 905): clean={clean}, with_events={with_events}"
+        );
+    }
+
     /// #467 — extend the #312 ALL-CAMBOX `--switch-schedule` sweep to ALSO gate imag-nb's OWN
     /// per-segment continuity. imag's frames are placed onto the SAME schedule timeline (anchored
     /// on its #463 digital corner burn, [`super::BURN_RUN_ID_IMAG`]) and its own painted-tick
