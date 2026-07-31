@@ -92,13 +92,16 @@ pub fn phase_sync_active_floor_verdict(
         return ActiveFloorVerdict::NoActiveCamerasMeasured;
     };
 
-    // #893 RED-commit stub (deliberately wrong -- proves the tests actually exercise the floor
-    // comparison before the real fix lands in the next commit).
-    let _ = PHASE_SYNC_FLOOR_MS;
-    ActiveFloorVerdict::Fail {
-        min_active_ms: min_ms,
-        min_active_camera: min_camera.clone(),
-        active_pins,
+    if min_ms == PHASE_SYNC_FLOOR_MS {
+        ActiveFloorVerdict::Pass {
+            floor_camera: min_camera.clone(),
+        }
+    } else {
+        ActiveFloorVerdict::Fail {
+            min_active_ms: min_ms,
+            min_active_camera: min_camera.clone(),
+            active_pins,
+        }
     }
 }
 
@@ -117,7 +120,13 @@ mod tests {
     #[test]
     fn passes_when_the_slowest_active_camera_sits_at_the_floor() {
         // Mirrors the healthy 2026-07-09 calibration in #893's own evidence table.
-        let p = pins(&[("cam5", 3), ("cam1", 3), ("cam4", 8), ("cam6", 13), ("cam3", 20)]);
+        let p = pins(&[
+            ("cam5", 3),
+            ("cam1", 3),
+            ("cam4", 8),
+            ("cam6", 13),
+            ("cam3", 20),
+        ]);
         let v = phase_sync_active_floor_verdict(&p, &active(&["cam1", "cam3", "cam4"]));
         assert_eq!(
             v,
