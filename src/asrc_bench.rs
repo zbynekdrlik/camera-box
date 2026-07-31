@@ -198,6 +198,95 @@ pub fn max_abs_offset_ms(trace: &[f64]) -> f64 {
     trace.iter().fold(0.0_f64, |acc, &v| acc.max(v.abs()))
 }
 
+/// Hard bound issue #803's real servo clamps applied compensation to, in parts-per-million — an
+/// order of magnitude above any measured worst case (epic #800: ~25-50 ppm), so it only ever
+/// engages as a safety backstop against a bad measurement, never in ordinary operation.
+pub const MAX_PPM: f64 = 300.0;
+
+/// Hard bound on how fast the APPLIED compensation may change, in ppm per second of master-clock
+/// time — keeps the resample-ratio nudge inaudible (issue #803: "nepočuteľné, žiadne kliky") even
+/// if the estimator's target jumps abruptly.
+pub const MAX_SLEW_PPM_PER_S: f64 = 5.0;
+
+/// EMA time constant, in seconds, of the real per-source rate estimator. Long enough to be
+/// robust to per-callback jitter (issue #803: "dlhý horizont, robustný na callback jitter") while
+/// still meeting the ticket's own convergence text (<5 ppm at ~2 min, ~1 ppm at ~10 min, at the
+/// #800 worst-case 50 ppm — see `estimator_converges_within_the_tickets_own_bounds` below).
+pub const TIME_CONSTANT_S: f64 = 20.0;
+
+/// Minimum wall-clock time the estimator must observe before ANY compensation is applied — the
+/// "default-safe: zero compensation when the servo has no lock" requirement from issue #803. Below
+/// this window the servo has not seen enough of the source's real clock to trust an estimate.
+pub const MIN_LOCK_S: f64 = 5.0;
+
+/// The REAL per-source ASRC servo issue #803 ports into vendored libobs
+/// (`vendor/obs-studio/libobs/media-io/asrc-compensator.c` — kept a line-by-line equivalent
+/// mirror of this struct's logic; see that file's own doc comment). Unlike [`EmaRateCompensator`]
+/// above (the bench's original teaching/proof-of-mechanism model, block-count-based), this is the
+/// actual production design:
+///
+/// - a TIME-based (not block-count-based) EMA — real audio callbacks vary in frame count, so
+///   smoothing must key on elapsed wall time, not a fixed block count;
+/// - a hard ppm clamp (`MAX_PPM`) on the estimate used as the correction TARGET;
+/// - a slew limiter (`MAX_SLEW_PPM_PER_S`) on the APPLIED correction, independent of how fast the
+///   raw estimate itself moves, so a single noisy measurement can never produce an audible step;
+/// - a minimum-lock startup delay (`MIN_LOCK_S`) before any correction is applied at all.
+///
+/// Validated against the SAME `simulate_offset_trace_ms` gate issue #804 built, per that module's
+/// own instruction not to invent a second, unrelated proof.
+#[derive(Debug, Clone, Copy)]
+pub struct RealtimeAsrcCompensator {
+    /// Running EMA estimate of the source's true rate offset from master, in ppm.
+    estimated_ppm: f64,
+    /// The correction actually being applied right now (post-clamp, post-slew), in ppm.
+    applied_ppm: f64,
+    /// Cumulative master-clock time observed since construction — gates the `MIN_LOCK_S` startup
+    /// delay.
+    elapsed_lock_s: f64,
+}
+
+impl RealtimeAsrcCompensator {
+    /// Build a compensator with no prior observations — starts at 0 ppm (assume locked) and
+    /// applies no correction until `MIN_LOCK_S` of master-clock time has been observed.
+    pub fn new() -> Self {
+        Self {
+            estimated_ppm: 0.0,
+            applied_ppm: 0.0,
+            elapsed_lock_s: 0.0,
+        }
+    }
+
+    /// The current raw EMA rate estimate, in ppm — exposed for tests/telemetry (mirrors the C
+    /// side's periodic ~60s log line, issue #803's telemetry requirement).
+    pub fn estimated_ppm(&self) -> f64 {
+        self.estimated_ppm
+    }
+
+    /// The correction actually being applied right now (post-clamp, post-slew), in ppm — exposed
+    /// for tests/telemetry.
+    pub fn applied_ppm(&self) -> f64 {
+        self.applied_ppm
+    }
+}
+
+impl Default for RealtimeAsrcCompensator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AsrcCompensator for RealtimeAsrcCompensator {
+    fn compensate(&mut self, raw_advance_s: f64, master_block_s: f64) -> f64 {
+        // test(#803): [red] stub -- pass-through only, proves the gate/convergence/clamp/slew
+        // tests below genuinely fail without the real servo logic (restored in the next commit).
+        let _ = self.estimated_ppm;
+        let _ = self.applied_ppm;
+        let _ = self.elapsed_lock_s;
+        let _ = master_block_s;
+        raw_advance_s
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -303,6 +392,157 @@ mod tests {
             worst < GATE_MAX_OFFSET_MS,
             "expected EMA-compensated |offset| to stay under {GATE_MAX_OFFSET_MS}ms for a \
              negative-ppm (slow) audio clock too, got a peak of {worst}ms"
+        );
+    }
+
+    // ---- #803: the REAL per-source servo (RealtimeAsrcCompensator), validated against the SAME
+    // gate #804 built, per asrc_bench's own instruction not to invent a second, unrelated proof. ----
+
+    /// THE gate for issue #803 itself: the production-shaped servo (time-based EMA + hard clamp +
+    /// slew limit + lock delay — everything the C port in vendor/obs-studio mirrors) must satisfy
+    /// the identical 4h/50ppm/40ms bound issue #804 proved the shape against.
+    #[test]
+    fn realtime_compensator_stays_within_gate_bound_over_4h_at_worst_case_ppm() {
+        let mut compensator = RealtimeAsrcCompensator::new();
+        let trace = simulate_offset_trace_ms(WORST_CASE_PPM, GATE_DURATION_S, &mut compensator);
+        let worst = max_abs_offset_ms(&trace);
+        assert!(
+            worst < GATE_MAX_OFFSET_MS,
+            "expected the realtime servo's |offset| to stay under {GATE_MAX_OFFSET_MS}ms across a \
+             {GATE_DURATION_S}s run at {WORST_CASE_PPM}ppm, got a peak of {worst}ms"
+        );
+        assert!(
+            (compensator.applied_ppm() - WORST_CASE_PPM).abs() < 1.0,
+            "expected the applied compensation to converge close to the true {WORST_CASE_PPM}ppm \
+             offset over a {GATE_DURATION_S}s run, got {}ppm",
+            compensator.applied_ppm()
+        );
+    }
+
+    /// Symmetric for a slow (negative-ppm) crystal too — same reasoning as the EMA teaching model's
+    /// own symmetry test above.
+    #[test]
+    fn realtime_compensator_stays_bounded_for_negative_ppm_too() {
+        let mut compensator = RealtimeAsrcCompensator::new();
+        let trace = simulate_offset_trace_ms(-WORST_CASE_PPM, GATE_DURATION_S, &mut compensator);
+        let worst = max_abs_offset_ms(&trace);
+        assert!(
+            worst < GATE_MAX_OFFSET_MS,
+            "expected the realtime servo's |offset| to stay under {GATE_MAX_OFFSET_MS}ms for a \
+             negative-ppm (slow) audio clock too, got a peak of {worst}ms"
+        );
+    }
+
+    /// Convergence-speed check straight from issue #803's own acceptance text: "<5 ppm za ~2 min,
+    /// ~1 ppm za 10 min" at the #800 worst-case ppm. Feeds the servo BLOCK_S-sized ticks (same
+    /// cadence the bench uses elsewhere) at a constant WORST_CASE_PPM drift and checks the
+    /// estimate's error at each named horizon.
+    #[test]
+    fn estimator_converges_within_the_tickets_own_bounds() {
+        let clock = DriftingAudioClock::new(WORST_CASE_PPM);
+        let mut compensator = RealtimeAsrcCompensator::new();
+        let mut elapsed_s = 0.0_f64;
+        let mut error_at_2min = None;
+        let mut error_at_10min = None;
+        while elapsed_s < 601.0 {
+            let raw = clock.raw_advance(BLOCK_S);
+            let _ = compensator.compensate(raw, BLOCK_S);
+            elapsed_s += BLOCK_S;
+            if error_at_2min.is_none() && elapsed_s >= 120.0 {
+                error_at_2min = Some((compensator.estimated_ppm() - WORST_CASE_PPM).abs());
+            }
+            if error_at_10min.is_none() && elapsed_s >= 600.0 {
+                error_at_10min = Some((compensator.estimated_ppm() - WORST_CASE_PPM).abs());
+            }
+        }
+        let err_2min = error_at_2min.expect("2min horizon reached");
+        let err_10min = error_at_10min.expect("10min horizon reached");
+        assert!(
+            err_2min < 5.0,
+            "expected estimator error < 5ppm at ~2min, got {err_2min}ppm"
+        );
+        assert!(
+            err_10min < 1.0,
+            "expected estimator error < 1ppm at ~10min, got {err_10min}ppm"
+        );
+    }
+
+    /// Default-safe requirement: before `MIN_LOCK_S` of master-clock time has been observed, the
+    /// servo must apply EXACTLY zero compensation — no lock yet means never guess.
+    #[test]
+    fn realtime_compensator_applies_zero_compensation_before_lock() {
+        let mut compensator = RealtimeAsrcCompensator::new();
+        // One block well inside the MIN_LOCK_S startup window.
+        let raw = DriftingAudioClock::new(WORST_CASE_PPM).raw_advance(1.0);
+        let corrected = compensator.compensate(raw, 1.0);
+        assert_eq!(
+            compensator.applied_ppm(),
+            0.0,
+            "expected zero applied compensation before the {MIN_LOCK_S}s lock window elapses"
+        );
+        assert_eq!(
+            corrected, raw,
+            "expected the pre-lock corrected advance to equal the raw advance exactly (no \
+             compensation applied yet)"
+        );
+    }
+
+    /// Hard-bound requirement: even when the observed instantaneous rate implies an offset far
+    /// beyond any realistic crystal drift, the APPLIED compensation must never exceed `MAX_PPM`.
+    #[test]
+    fn realtime_compensator_clamps_applied_ppm_to_the_hard_bound() {
+        let mut compensator = RealtimeAsrcCompensator::new();
+        // A synthetic, unrealistically large offset (10,000 ppm) fed for long enough that both
+        // the EMA estimate and the slew-limited applied value have every chance to converge.
+        let extreme_clock = DriftingAudioClock::new(10_000.0);
+        for _ in 0..7200 {
+            // 7200 * 1.0s = 2h of 1s blocks — ample time for the 20s time-constant EMA to
+            // converge AND for the slew limiter (5 ppm/s) to catch up to a clamped 300ppm target.
+            let raw = extreme_clock.raw_advance(1.0);
+            let _ = compensator.compensate(raw, 1.0);
+        }
+        assert!(
+            compensator.applied_ppm() <= MAX_PPM + 1e-6,
+            "expected applied compensation to never exceed the {MAX_PPM}ppm hard bound, got {}ppm",
+            compensator.applied_ppm()
+        );
+    }
+
+    /// Slew-limit requirement: the APPLIED ppm may not change faster than `MAX_SLEW_PPM_PER_S`
+    /// per second of master-clock time, even when the estimator's target jumps abruptly (a single
+    /// noisy/outlier measurement must never produce an audible step).
+    #[test]
+    fn realtime_compensator_never_exceeds_the_slew_limit_per_call() {
+        let mut compensator = RealtimeAsrcCompensator::new();
+        // Get past the lock window with a converged near-zero estimate first.
+        for _ in 0..10 {
+            let _ = compensator.compensate(1.0, 1.0);
+        }
+        let applied_before = compensator.applied_ppm();
+        // One abrupt 1-second block reporting an enormous instantaneous rate (a single outlier
+        // measurement, e.g. a scheduling hiccup) — the applied value must not jump further than
+        // the slew limit allows in that one second.
+        let raw = DriftingAudioClock::new(50_000.0).raw_advance(1.0);
+        let _ = compensator.compensate(raw, 1.0);
+        let step = (compensator.applied_ppm() - applied_before).abs();
+        assert!(
+            step <= MAX_SLEW_PPM_PER_S + 1e-9,
+            "expected the applied ppm to change by at most {MAX_SLEW_PPM_PER_S}ppm in a single \
+             1s block, got a step of {step}ppm"
+        );
+    }
+
+    /// Anti-tautology guard, mirrored for the realtime servo: a pass-through stub must still FAIL
+    /// this gate (already proven generically above via `NoCompensation`, restated here so the
+    /// realtime-servo test group is self-contained and doesn't rely on a shared fixture living
+    /// elsewhere in the file).
+    #[test]
+    fn realtime_gate_is_not_tautological() {
+        let mut stub = NoCompensation;
+        let trace = simulate_offset_trace_ms(WORST_CASE_PPM, GATE_DURATION_S, &mut stub);
+        assert!(
+            max_abs_offset_ms(&trace) > GATE_MAX_OFFSET_MS,
+            "a pass-through stub must still fail the realtime servo's gate bound"
         );
     }
 }
