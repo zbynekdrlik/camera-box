@@ -129,6 +129,12 @@ pub mod frozen_camera;
 // Rust, no probe deps, no image/rqrr — unit-tests Tier-0.
 pub mod frozen_leg;
 
+// #895 — re-attributes a frozen_leg window to self_heal_reset when a capture_rate_selfheal (#663)
+// USB reset correlates with it, so a self-heal reset firing mid-measurement is never again
+// misreported as a frozen camera. Extends frozen_leg's classification; pure, no probe deps —
+// unit-tests Tier-0.
+pub mod self_heal_attribution;
+
 // #89 — pure DXGI device-lost (GPU TDR / driver-internal-error) log-signature matcher, extracted
 // from `probe::obs_log_audit` (#81) to a crate-root pure module so the default-feature
 // watchdog/self-heal pipeline can share the exact same match — never a second drifting copy.
