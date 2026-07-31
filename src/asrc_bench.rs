@@ -153,12 +153,17 @@ impl EmaRateCompensator {
 }
 
 impl AsrcCompensator for EmaRateCompensator {
-    fn compensate(&mut self, raw_advance_s: f64, _master_block_s: f64) -> f64 {
-        // TODO(#804 green commit): not yet implemented — currently a bare pass-through, i.e.
-        // performs NO compensation at all. This is the RED state: the gate test below expects
-        // the compensated offset to stay bounded, which a pass-through cannot satisfy.
-        let _ = self.alpha;
-        raw_advance_s
+    fn compensate(&mut self, raw_advance_s: f64, master_block_s: f64) -> f64 {
+        // This block's instantaneous rate ratio, straight from the observation.
+        let instantaneous_ratio = raw_advance_s / master_block_s;
+        // EMA-smooth it into the running estimate (mirrors a real long-averaging-window rate
+        // estimator: robust to a single jittery block, converges to the true ratio when it is
+        // constant over many blocks).
+        self.estimated_ratio =
+            self.alpha * instantaneous_ratio + (1.0 - self.alpha) * self.estimated_ratio;
+        // Correct: dividing the raw advance by the current estimate re-paces the corrected
+        // timeline toward 1:1 with master as the estimate converges to the true ratio.
+        raw_advance_s / self.estimated_ratio
     }
 }
 
