@@ -329,8 +329,12 @@ fn write_driver(
     fs::write(driver_path, driver).expect("write driver");
 }
 
-/// THE HEADLINE REAL PROOF: run the ACTUAL extracted loop from recording-e2e.sh (no rig, no ssh)
-/// against the DEFAULT active set (cam1-4, so cam3/cam4 are the 2 secondaries). At a simulated
+/// THE HEADLINE REAL PROOF: run the ACTUAL extracted loop from recording-e2e.sh (no rig, no ssh).
+/// #898 (2026-07-31): cam3 retired from the DEFAULT active set (grabber card destroyed), so the
+/// default secondary set shrank to cam4 ALONE -- too small to prove genuine multi-box
+/// parallelism on its own. This test widens via an explicit CAMERA_ACTIVE_SET override
+/// (default cam4 + a reactivated cam5, mirroring the reversibility mechanism proven below) to
+/// keep exercising 2 REAL concurrent boxes through the actual derived code path. At a simulated
 /// ~300ms round-trip each: SEQUENTIAL would take >=600ms; PARALLEL must take well under that
 /// (bounded here at 500ms) — and both boxes must still have genuinely been contacted.
 #[test]
@@ -338,7 +342,7 @@ fn all_cambox_restore_loop_runs_in_parallel_not_sequentially() {
     let dir = tempfile::tempdir().expect("tempdir");
     let log_path = dir.path().join("calls.log");
     let driver_path = dir.path().join("driver.sh");
-    write_driver(&driver_path, &log_path, None);
+    write_driver(&driver_path, &log_path, Some("cam1 cam2 cam4 cam5"));
 
     let start = Instant::now();
     let out = Command::new("bash")
@@ -356,18 +360,18 @@ fn all_cambox_restore_loop_runs_in_parallel_not_sequentially() {
     );
 
     let log = fs::read_to_string(&log_path).unwrap_or_default();
-    for ip in ["10.9.9.3", "10.9.9.4"] {
+    for ip in ["10.9.9.4", "10.9.9.5"] {
         assert!(
             log.contains(ip),
-            "#712/#827: both default-active camboxes (cam3/cam4) must actually be contacted \
-             (found in the fake timeout()'s call log) — parallelizing must never skip a box for \
-             speed. Log:\n{log}"
+            "#712/#898: both active camboxes (cam4/cam5) must actually be contacted (found in \
+             the fake timeout()'s call log) — parallelizing must never skip a box for speed. \
+             Log:\n{log}"
         );
     }
 
     assert!(
         elapsed.as_millis() < 500,
-        "#712/#827: the cam3/cam4 boxes at a simulated ~300ms round-trip each MUST run in \
+        "#712/#898: the cam4/cam5 boxes at a simulated ~300ms round-trip each MUST run in \
          PARALLEL (bounded well under the ~600ms sequential SUM), not one after another. \
          Elapsed: {:?}",
         elapsed
@@ -401,9 +405,9 @@ fn all_cambox_restore_loop_contacts_a_reactivated_retired_camera() {
     for ip in ["10.9.9.3", "10.9.9.4", "10.9.9.5"] {
         assert!(
             log.contains(ip),
-            "#827: reactivating cam5 via CAMERA_ACTIVE_SET must make the restore loop contact \
-             it too (10.9.9.5), alongside the still-active cam3/cam4 -- proving the reversal \
-             actually works end-to-end. Log:\n{log}"
+            "#827/#898: reactivating cam3 and cam5 via CAMERA_ACTIVE_SET must make the restore \
+             loop contact both of them too (10.9.9.3, 10.9.9.5), alongside the still-active \
+             cam4 -- proving the reversal actually works end-to-end. Log:\n{log}"
         );
     }
     assert!(

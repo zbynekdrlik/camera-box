@@ -126,21 +126,22 @@ assert m.duplicates({"NDI cam1": "CAM4 (usb)", "NDI cam2": "CAM4 (usb)"}), "must
 }
 
 #[test]
-fn active_map_defaults_to_exactly_the_four_active_cameras() {
-    // #827: with no override, active_map() (and therefore parse_map_args(None), the no-`--map`
-    // path main() takes) must resolve to exactly cam1-4 -- the DEFAULT_ACTIVE_SET fallback.
+fn active_map_defaults_to_exactly_the_three_active_cameras() {
+    // #827/#898: with no override, active_map() (and therefore parse_map_args(None), the
+    // no-`--map` path main() takes) must resolve to exactly cam1/cam2/cam4 -- the
+    // DEFAULT_ACTIVE_SET fallback (cam3 retired 2026-07-31, grabber card destroyed).
     let (stdout, stderr) = run_py_check(
         r#"import os
 os.environ.pop("CAMERA_ACTIVE_SET", None)
 want = m.active_map()
 senders = sorted(s.split(" ", 1)[0] for _, s in want)
-assert senders == ["CAM1", "CAM2", "CAM3", "CAM4"], senders
+assert senders == ["CAM1", "CAM2", "CAM4"], senders
 assert m.parse_map_args(None) == want, "no --map -> active_map()"
 "#,
     );
     assert!(
         stdout.contains("OK"),
-        "#827 active_map default checks failed:\nstdout:{stdout}\nstderr:{stderr}"
+        "#898 active_map default checks failed:\nstdout:{stdout}\nstderr:{stderr}"
     );
 }
 
@@ -188,12 +189,12 @@ fn default_active_set_env_var_matches_camera_set_sh_exactly() {
     let py = read("scripts/set-ndi-mapping.py");
     let sh = read("scripts/camera-set.sh");
     assert!(
-        py.contains(r#"os.environ.get("CAMERA_ACTIVE_SET", "cam1 cam2 cam3 cam4")"#),
-        "set-ndi-mapping.py must read $CAMERA_ACTIVE_SET with the identical literal fallback \
-         camera-set.sh itself defaults to"
+        py.contains(r#"os.environ.get("CAMERA_ACTIVE_SET", "cam1 cam2 cam4")"#),
+        "#898: set-ndi-mapping.py must read $CAMERA_ACTIVE_SET with the identical literal \
+         fallback camera-set.sh itself defaults to (cam3 retired)"
     );
     assert!(
-        sh.contains(r#"CAMERA_ACTIVE_SET="${CAMERA_ACTIVE_SET:-cam1 cam2 cam3 cam4}""#),
-        "camera-set.sh must default CAMERA_ACTIVE_SET to the identical literal"
+        sh.contains(r#"CAMERA_ACTIVE_SET="${CAMERA_ACTIVE_SET:-cam1 cam2 cam4}""#),
+        "#898: camera-set.sh must default CAMERA_ACTIVE_SET to the identical literal"
     );
 }

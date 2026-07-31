@@ -98,9 +98,10 @@ class TestReadPin:
 # ---------------------------------------------------------------------------
 
 class TestActiveCameraNumbers:
-    def test_default_is_cam1_through_4(self, monkeypatch):
+    def test_default_is_cam1_cam2_cam4(self, monkeypatch):
+        # #898 (2026-07-31): cam3 retired from the default active set (grabber card destroyed).
         monkeypatch.delenv("CAMERA_ACTIVE_SET", raising=False)
-        assert lps.active_camera_numbers() == (1, 2, 3, 4)
+        assert lps.active_camera_numbers() == (1, 2, 4)
 
     def test_env_override_narrows_the_set(self, monkeypatch):
         monkeypatch.setenv("CAMERA_ACTIVE_SET", "cam1 cam3")
@@ -122,21 +123,22 @@ class TestActiveCameraNumbers:
 
 class TestSnapshotBoxPins:
     def test_reads_main_and_mv_for_each_camera_in_the_default_active_set(self, monkeypatch):
-        # #893: no CAMERA_ACTIVE_SET override -> the default active set (cam1-4), never the old
-        # literal cam1..7 sweep. A retired camera (cam5/6/7) must not even be attempted.
+        # #893: no CAMERA_ACTIVE_SET override -> the default active set (cam1/cam2/cam4, #898:
+        # cam3 retired 2026-07-31), never the old literal cam1..7 sweep. A retired camera
+        # (cam3/cam5/cam6/cam7) must not even be attempted.
         monkeypatch.delenv("CAMERA_ACTIVE_SET", raising=False)
         monkeypatch.setattr(lps, "_conn", lambda host, password: FakeWS())
 
         def fake_read_pin(ws, name):
-            # "NDI cam3" -> main=3, "MV NDI cam3" -> mv=103 (deterministic per-name stub)
+            # "NDI cam4" -> main=4, "MV NDI cam4" -> mv=104 (deterministic per-name stub)
             n = int("".join(ch for ch in name if ch.isdigit()))
             return n if "MV" not in name else 100 + n
 
         monkeypatch.setattr(lps, "read_pin", fake_read_pin)
         result = lps.snapshot_box_pins("10.77.9.202", "", "NDI cam{n}", "MV NDI cam{n}")
-        assert len(result) == 4
-        assert set(result.keys()) == {"cam1", "cam2", "cam3", "cam4"}
-        assert result["cam3"] == {"main_ms": 3, "mv_ms": 103}
+        assert len(result) == 3
+        assert set(result.keys()) == {"cam1", "cam2", "cam4"}
+        assert result["cam4"] == {"main_ms": 4, "mv_ms": 104}
 
     def test_camera_active_set_env_override_narrows_the_sweep(self, monkeypatch):
         # #893: CAMERA_ACTIVE_SET is the ONE source of truth for which cameras get swept --
