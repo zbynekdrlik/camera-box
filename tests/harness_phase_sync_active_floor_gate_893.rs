@@ -1,12 +1,29 @@
-//! #893 — phase-sync-active-floor-gate: cross-boundary guards.
+//! #893 — phase-sync-active-floor-gate: cross-boundary + wiring guards.
 //!
 //! The decision itself is unit-tested in `src/phase_sync_active_floor.rs` (7 pure tests). These
 //! tests lock the CLI boundary (correct JSON in/out, correct exit codes) through the actual
-//! built binary. The recording-e2e.sh WIRING guard is added separately, alongside the preflight
-//! itself (mirrors `harness_render_budget_gate.rs`'s own wiring guard for its gate).
+//! built binary, and that `scripts/recording-e2e.sh` actually wires the preflight (mirrors
+//! `harness_render_budget_gate.rs`'s own wiring guard for its gate) — so a broken pin set fails
+//! fast, before StartRecord, not after a 25-minute recording.
 
+use std::fs;
 use std::path::Path;
 use std::process::Command;
+
+fn read(p: &str) -> String {
+    let path = format!("{}/{}", env!("CARGO_MANIFEST_DIR"), p);
+    fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"))
+}
+
+#[test]
+fn recording_e2e_sh_wires_the_active_floor_gate() {
+    let s = read("scripts/recording-e2e.sh");
+    assert!(
+        s.contains("phase_sync_active_floor_check.py"),
+        "scripts/recording-e2e.sh must invoke the phase-sync-active-floor preflight (#893) so \
+         a broken pin set fails fast, before StartRecord, not after a 25-minute recording."
+    );
+}
 
 #[test]
 fn gate_bin_src_exists() {
