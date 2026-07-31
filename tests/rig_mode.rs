@@ -527,24 +527,41 @@ fn test_mode_stops_cam2_painter_service_before_launching_emitter() {
     );
 }
 
-/// #440: EVENT mode must restore the PERMANENT `cam2-painter.service` that TEST mode stopped above
-/// — symmetric guard, so a box without the unit is unaffected and normal broadcast operation
-/// resumes with the permanent painter running again.
+/// #892: EVENT mode must NEVER (re)start the PERMANENT `cam2-painter.service` — the old #440
+/// "symmetric guard, restore what TEST stopped" assumption is WRONG for EVENT mode: `rig-mode.sh
+/// event` can be invoked on an already-clean rig (no TEST session preceded it), and starting the
+/// permanent painter in that case puts a QR straight onto the live broadcast (cam2's monitor is
+/// what the whole cambox fleet films via the splitter) — live-caught 2026-07-30. EVENT mode must
+/// instead STOP (idempotent) and DISABLE the unit, so neither `rig-mode.sh event` itself nor a
+/// later reboot (the unit's own `enabled` + `Restart=always` state, the second incident on this
+/// ticket) can ever bring the QR back on its own.
 #[test]
-fn event_mode_restores_cam2_painter_service() {
+fn event_mode_disables_cam2_painter_service_892() {
     let p = painter_stop();
     assert!(
         p.contains("systemctl list-unit-files cam2-painter.service"),
-        "#440: EVENT mode must GUARD the cam2-painter.service restore (only act if the unit \
+        "#892: EVENT mode must GUARD the cam2-painter.service stop+disable (only act if the unit \
          exists). Got:\n{p}"
     );
     assert!(
-        p.contains("systemctl start cam2-painter.service"),
-        "#440: EVENT mode must restore (start) the permanent cam2-painter.service. Got:\n{p}"
+        !p.contains("systemctl start cam2-painter.service")
+            && !p.contains("systemctl restart cam2-painter.service"),
+        "#892: EVENT mode must NEVER (re)start the permanent cam2-painter.service — that is \
+         exactly the live-broadcast QR hazard this ticket fixes. Got:\n{p}"
     );
     assert!(
-        p.contains("[#440]"),
-        "#440: the cam2-painter.service restore must be logged clearly. Got:\n{p}"
+        p.contains("systemctl stop cam2-painter.service"),
+        "#892: EVENT mode must ensure cam2-painter.service is stopped. Got:\n{p}"
+    );
+    assert!(
+        p.contains("systemctl disable cam2-painter.service"),
+        "#892: EVENT mode must DISABLE cam2-painter.service so a reboot cannot re-arm the QR \
+         painter on its own (the second incident on #892: a bare reboot restarted it 3h after a \
+         manual stop). Got:\n{p}"
+    );
+    assert!(
+        p.contains("#892"),
+        "#892: the stop+disable must be logged clearly, referencing this ticket. Got:\n{p}"
     );
 }
 
@@ -916,18 +933,23 @@ fn event_mode_painter_box_expects_the_permanent_no_display_dropin_868() {
     );
 }
 
+/// #892 superseded the #868-era invariant here: on the painter box EVENT mode used to verify
+/// cam2-painter came back ACTIVE (restored). Per #892 it must now verify the OPPOSITE — the
+/// permanent painter is INACTIVE (never restored) — while camera-box's own permanent #863
+/// NO_DISPLAY drop-in stays untouched (a separate, static, provisioning-time config), so fb0
+/// ends up correctly UNHELD (blank monitor) rather than either painting a QR or fighting
+/// camera-box for the framebuffer.
 #[test]
-fn event_mode_painter_box_verifies_the_painter_service_owns_the_monitor_868() {
+fn event_mode_painter_box_verifies_the_painter_service_is_stopped_892() {
     let p = painter_stop();
     assert!(
         p.contains("is-active cam2-painter"),
-        "#868: on the painter box EVENT mode must verify cam2-painter is ACTIVE (it, not camera-box, \
-         owns the monitor after #863). Got:\n{p}"
+        "#892: on the painter box EVENT mode must verify cam2-painter's active state. Got:\n{p}"
     );
     assert!(
-        p.contains("#868"),
-        "#868: the painter-box branch must be labelled so a future reader sees why the asserts \
-         differ per box. Got:\n{p}"
+        p.contains("#868") || p.contains("#892"),
+        "#868/#892: the painter-box branch must be labelled so a future reader sees why the \
+         asserts differ per box. Got:\n{p}"
     );
 }
 
