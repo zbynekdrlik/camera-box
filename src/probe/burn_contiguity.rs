@@ -303,7 +303,7 @@ pub fn burn_contiguity_in_window_with_step(
     rate: BurnRate,
     expected_step: i64,
 ) -> InWindowContiguity {
-    burn_contiguity_in_window_with_step_and_schedule(node, frames, rate, expected_step, None)
+    burn_contiguity_in_window_with_step_and_schedule(node, frames, rate, expected_step, None, None)
 }
 
 /// #708 — identical computation to [`burn_contiguity_in_window_with_step`], but additionally
@@ -336,12 +336,26 @@ pub fn burn_contiguity_in_window_with_step(
 /// NARROW the flagged set on a CONFIRMED boundary, never accidentally mask a genuine in-window
 /// fault (a backward jump within ONE window — the SAME free-running counter instance, which can
 /// never legitimately go backward — still FAILS exactly as before).
+///
+/// #903 — `window_of`'s exact-instant equality alone can still miss a genuine crossing: the
+/// schedule boundary is dev1's clock, `gen_ts_ns` is the painter's, and the two are only ever
+/// guaranteed to agree within the `#326` gate's 200ms — nowhere near the resolution an exact
+/// `>=`/`<` window-index comparison demands. So `near_boundary_of` carries a SEPARATE, symmetric
+/// confirmation: is either present frame's own `gen_ts_ns` within tolerance
+/// (`crate::window_boundary_tolerance::DEFAULT_BOUNDARY_TOLERANCE_NS`) of ANY schedule boundary at
+/// all? When `window_of` reports the SAME (known) window on both sides — the exact test alone
+/// says "no crossing" — a `true` here CONFIRMS it anyway. Exactly like `window_of`, an unknown
+/// window on EITHER side never uses this signal to confirm (the caller still has no reliable
+/// window to trust); a jump far from every boundary (`near_boundary_of` false or entirely absent)
+/// is completely unaffected and still FAILS as before — this can only ever NARROW the flagged set
+/// further, never widen it beyond the near-boundary case #903 diagnosed.
 pub fn burn_contiguity_in_window_with_step_and_schedule(
     node: &str,
     frames: &[RecordedBurnFrame],
     rate: BurnRate,
     expected_step: i64,
     window_of: Option<&[Option<usize>]>,
+    near_boundary_of: Option<&[bool]>,
 ) -> InWindowContiguity {
     let present_ids: Vec<u32> = frames.iter().filter_map(|f| f.burn_id).collect();
     let first_id = present_ids.first().copied();
@@ -423,18 +437,36 @@ pub fn burn_contiguity_in_window_with_step_and_schedule(
     // whenever `window_of` is absent (the overwhelming majority of callers — see the
     // `burn_contiguity_in_window_with_step` wrapper) or a specific frame's window is unknown.
     let mut prev_present_window: Option<usize> = None;
+    // #903 — mirrors `prev_present_window`'s own carry-across-`None`-frames semantics: only
+    // updated on a `Some` arm, so a run of BURN-UNREADABLE frames spanning a boundary never
+    // resets it prematurely. `false` whenever `near_boundary_of` is absent (every caller before
+    // #903) or a specific frame's flag is unknown.
+    let mut prev_present_near_boundary: bool = false;
     for (i, f) in frames.iter().enumerate() {
         match f.burn_id {
             Some(id) => {
                 id_to_frame.entry(id).or_insert(f.frame_index);
                 let cur_window = window_of.and_then(|w| w.get(i).copied().flatten());
+                let cur_near_boundary = near_boundary_of
+                    .and_then(|nb| nb.get(i).copied())
+                    .unwrap_or(false);
                 // #708 — a schedule-window boundary crossing is CONFIRMED only when BOTH sides'
                 // windows are known and differ; any unknown side falls back to the strict
                 // pre-#708 behavior (see the function doc — never silently masks a genuine fault).
-                let crossed_window_boundary = matches!(
+                let confirmed_exact = matches!(
                     (prev_present_window, cur_window),
                     (Some(pw), Some(cw)) if pw != cw
                 );
+                // #903 — both windows KNOWN but EQUAL (the exact test alone says "no crossing")
+                // is confirmed ANYWAY when either present frame's own gen_ts sits within tolerance
+                // of a schedule boundary — the clock-disagreement case the exact test cannot see.
+                // Still requires BOTH windows known (never fires on an unknown side), preserving
+                // the #708 "never silently masks" invariant.
+                let confirmed_tolerant = matches!(
+                    (prev_present_window, cur_window),
+                    (Some(pw), Some(cw)) if pw == cw
+                ) && (prev_present_near_boundary || cur_near_boundary);
+                let crossed_window_boundary = confirmed_exact || confirmed_tolerant;
                 if let Some(prev) = prev_present {
                     // Per-render (strih/stream): a monotone free-running counter can ONLY advance,
                     // so a backward jump is a reorder/corruption fault — ALWAYS counted. (cam1
@@ -502,6 +534,7 @@ pub fn burn_contiguity_in_window_with_step_and_schedule(
                 }
                 prev_present = Some(id);
                 prev_present_window = cur_window;
+                prev_present_near_boundary = cur_near_boundary;
                 nones_since_prev = 0;
             }
             None => {
@@ -939,6 +972,7 @@ mod tests {
             BurnRate::PerRenderTick,
             1,
             Some(&window_of),
+            None,
         );
         assert!(
             w.contiguity.is_contiguous(),
@@ -969,6 +1003,7 @@ mod tests {
             BurnRate::PerRenderTick,
             1,
             Some(&window_of),
+            None,
         );
         assert!(
             !w.contiguity.is_contiguous(),
@@ -998,6 +1033,7 @@ mod tests {
             BurnRate::PerRenderTick,
             1,
             Some(&window_of),
+            None,
         );
         assert!(
             !w.contiguity.is_contiguous(),
@@ -1026,6 +1062,7 @@ mod tests {
             BurnRate::PerRenderTick,
             2, // decimated hop
             Some(&window_of),
+            None,
         );
         assert!(
             w.contiguity.is_contiguous(),
@@ -1054,8 +1091,139 @@ mod tests {
             BurnRate::PerRenderTick,
             1,
             None,
+            None,
         );
         assert_eq!(via_wrapper.contiguity, via_direct.contiguity);
+    }
+
+    // ============================================================================
+    // #903 — the SAME id sequence as `backward_jump_within_one_window_still_a_fault_708` (a
+    // backward jump `window_of` reports as the SAME window on both sides, so the #708 exact test
+    // alone does NOT confirm a crossing) is suppressed when the near-boundary tolerant signal
+    // confirms it instead — this run's real diagnosis (run 30637408198): a genuine counter-
+    // instance switch whose frame landed 30 MICROSECONDS on the wrong side of its schedule
+    // boundary, `window_of` alone blind to it exactly like the pre-#903 bug.
+    // ============================================================================
+
+    #[test]
+    fn backward_jump_same_window_but_near_boundary_is_suppressed_903() {
+        // Same shape/ids as `backward_jump_within_one_window_still_a_fault_708` (window_of reports
+        // window 0 on BOTH sides — no exact crossing), but the backward-jumping frame (index 2) IS
+        // near a schedule boundary (this run's real case: its gen_ts landed 30us on the wrong
+        // side) — the #903 tolerant signal must confirm the crossing anyway.
+        let frames = [
+            rbf(0, Some(100)),
+            rbf(1, Some(103)),
+            rbf(2, Some(101)), // backward jump, SAME window, but NEAR a boundary -> not a fault
+            rbf(3, Some(106)),
+        ];
+        let window_of = [Some(0), Some(0), Some(0), Some(0)];
+        let near_boundary_of = [false, false, true, false];
+        let w = burn_contiguity_in_window_with_step_and_schedule(
+            "strih",
+            &frames,
+            BurnRate::PerRenderTick,
+            1,
+            Some(&window_of),
+            Some(&near_boundary_of),
+        );
+        assert!(
+            w.contiguity.is_contiguous(),
+            "a backward jump in the SAME window but near a boundary must be suppressed (#903): {:?}",
+            w.contiguity
+        );
+        assert!(w.contiguity.missing_ids.is_empty());
+        assert_eq!(w.contiguity.present_count, 4);
+        assert_eq!(w.contiguity.expected_count, 4);
+    }
+
+    #[test]
+    fn backward_jump_far_from_any_boundary_still_a_fault_903() {
+        // The hard constraint from #903: a genuine fault occurring far from every schedule
+        // boundary must NOT be suppressed just because SOME near-boundary info was supplied for
+        // the run — only the specific frame(s) actually near a boundary get the tolerant
+        // confirmation. Identical id sequence, but near_boundary_of is all false.
+        let frames = [
+            rbf(0, Some(100)),
+            rbf(1, Some(103)),
+            rbf(2, Some(101)), // backward jump, SAME window, NOT near any boundary -> still a fault
+            rbf(3, Some(106)),
+        ];
+        let window_of = [Some(0), Some(0), Some(0), Some(0)];
+        let near_boundary_of = [false, false, false, false];
+        let w = burn_contiguity_in_window_with_step_and_schedule(
+            "strih",
+            &frames,
+            BurnRate::PerRenderTick,
+            1,
+            Some(&window_of),
+            Some(&near_boundary_of),
+        );
+        assert!(
+            !w.contiguity.is_contiguous(),
+            "a backward jump far from every boundary is still a real fault (#903): {:?}",
+            w.contiguity
+        );
+        assert_eq!(w.contiguity.missing_ids, vec![101]);
+        assert_eq!(w.missing_slots[0].kind, InWindowMissingKind::RealDrop);
+    }
+
+    #[test]
+    fn backward_jump_near_boundary_but_unknown_window_still_a_fault_903() {
+        // The #708 invariant extends to the #903 tolerant signal too: an UNKNOWN window on EITHER
+        // side must NEVER suppress, even when the near-boundary flag is true — a near-boundary
+        // signal is only ever a confirmation ON TOP of two KNOWN, equal windows, never a
+        // substitute for knowing the window at all.
+        let frames = [
+            rbf(0, Some(100)),
+            rbf(1, Some(103)),
+            rbf(2, Some(101)), // backward jump, window UNKNOWN, near boundary -> still a fault
+            rbf(3, Some(106)),
+        ];
+        let window_of = [Some(0), Some(0), None, Some(1)];
+        let near_boundary_of = [false, false, true, true];
+        let w = burn_contiguity_in_window_with_step_and_schedule(
+            "strih",
+            &frames,
+            BurnRate::PerRenderTick,
+            1,
+            Some(&window_of),
+            Some(&near_boundary_of),
+        );
+        assert!(
+            !w.contiguity.is_contiguous(),
+            "an unknown window must never suppress, even with a near-boundary flag (#903): {:?}",
+            w.contiguity
+        );
+        assert_eq!(w.contiguity.missing_ids, vec![101]);
+    }
+
+    #[test]
+    fn near_boundary_of_none_is_byte_identical_to_the_pre_903_behavior() {
+        // `near_boundary_of: None` (every caller/fixture before #903, incl. the back-compat
+        // wrapper) must produce EXACTLY the pre-#903 verdict — the #903 tolerant signal is
+        // strictly opt-in, mirroring #708's own `window_of: None` back-compat guarantee.
+        let frames = [
+            rbf(0, Some(100)),
+            rbf(1, Some(103)),
+            rbf(2, Some(101)), // backward jump, SAME window, no near-boundary info at all
+            rbf(3, Some(106)),
+        ];
+        let window_of = [Some(0), Some(0), Some(0), Some(0)];
+        let without_signal = burn_contiguity_in_window_with_step_and_schedule(
+            "strih",
+            &frames,
+            BurnRate::PerRenderTick,
+            1,
+            Some(&window_of),
+            None,
+        );
+        assert!(
+            !without_signal.contiguity.is_contiguous(),
+            "no near-boundary info supplied ⇒ falls back to the strict pre-#903 behavior: {:?}",
+            without_signal.contiguity
+        );
+        assert_eq!(without_signal.contiguity.missing_ids, vec![101]);
     }
 
     #[test]
