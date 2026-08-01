@@ -303,6 +303,23 @@ Camera→strih hops: genlock tick active but camera ingests are NOT genlock_fifo
 Rollback = stop OBS, robocopy backups back over `C:\Program Files\obs-studio` + the
 ProgramData distroav, clear `%APPDATA%\obs-studio\.sentinel\*`, relaunch.
 
+## GOTCHA — a vendored obs-websocket change deploys ONLY via the FULL windows-genlock build (#806, 2026-08-01)
+
+A change under `vendor/obs-studio/plugins/obs-websocket/` (e.g. #806's `SetAsrcOuterBiasPpm`/
+`GetAsrcOuterBiasPpm` request pair) has NO fast deploy path and NO Linux compile coverage:
+
+- **`windows-genlock-fast.yml` ships only `obs-genlock-fast-dll` (obs.dll) + `distroav-fast-dll`**
+  — its compile-gate job DOES build all plugins (so a green FAST run proves the C++ compiles on
+  Windows), but `obs-websocket.dll` is never staged/uploaded. Deploying just the FAST obs.dll
+  leaves the OLD obs-websocket.dll live — the new requests silently absent.
+- **`linux-genlock.yml`'s compile gate passes `ENABLE_PLUGINS=OFF`** — vendored obs-websocket is
+  NOT compiled on Linux at all; "vendored C/C++ green on Linux" says nothing about it.
+- Deploy path: `gh workflow run "Windows genlock build (vendored OBS + DistroAV)" --ref main`
+  (manual dispatch, ~35 min with warm caches) → artifact `obs-genlock-windows-x64` → the
+  FULL-BUNDLE runbook below (obs-websocket.dll rides `obs-plugins\64bit`).
+- After relaunch, functionally verify the new request over WS (`obs_phase2._rpc(ws, '<NewRequest>',
+  …)`) — a stale obs-websocket.dll answers `GetVersion` fine and only fails on the NEW request.
+
 ## FULL-BUNDLE in-place deploy runbook (#726 session, 2026-07-14) — the AHK-watchdog gotcha
 
 When to full-bundle vs obs.dll-only: a **struct change** to `obs_source` (e.g. #726's
