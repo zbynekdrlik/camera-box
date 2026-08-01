@@ -337,7 +337,9 @@ impl RollingOffsetCluster {
     /// sample, so the window's own median/MAD are correct for the NEW delay immediately — no need
     /// to wait for fresh markers to dilute the stale ones.
     pub fn rebase(&mut self, delta_ms: f64) {
-        let _ = delta_ms; // #926 fix-up RED: pre-fix behavior -- rebase() was a no-op
+        for (_, offset) in self.samples.iter_mut() {
+            *offset -= delta_ms;
+        }
     }
 }
 
@@ -467,12 +469,20 @@ impl DockLockCorrector {
         current_delay_ms: i32,
         now_ns: u64,
     ) -> DockLockAction {
-        // #926 fix-up RED: pre-fix behavior -- no finite guard, no margin (mad_ms unused).
-        let _ = mad_ms;
         if !locked {
             return DockLockAction::Hold;
         }
-        let g = offset_ms.floor();
+        if !offset_ms.is_finite() {
+            return DockLockAction::Hold;
+        }
+        let margin = if mad_ms.is_finite() {
+            mad_ms.clamp(DOCK_LOCK_MIN_MARGIN_MS, DOCK_CLUSTER_MAX_MAD_MS)
+        } else {
+            DOCK_LOCK_MIN_MARGIN_MS
+        };
+        // Clamp BEFORE the later `as i64` casts (finding 5): offset_ms is finite but could still
+        // be astronomically large, which would otherwise risk an overflowing add below.
+        let g = (offset_ms - margin).floor().clamp(-1_000_000.0, 1_000_000.0);
         if g == 0.0 {
             return DockLockAction::Hold; // already ts_ms in [margin, margin + 1) -- nothing to do
         }
