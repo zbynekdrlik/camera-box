@@ -4,6 +4,9 @@ paths:
   - "src/asrc*.rs"
   - "vendor/**/swresample*"
   - "vendor/**/*asrc*"
+  - "scripts/av_sync_outer_loop_guard.py"
+  - "scripts/av_sync_measure.py"
+  - "vendor/**/RequestHandler_Inputs.cpp"
 ---
 
 # ASRC bench harness (#804, epic #800 A/V-desync endgame round)
@@ -115,3 +118,59 @@ forbids it, CI is the first place a C mistake surfaces).
   pending ramp, so a steady ppm becomes a steadily-refreshed short ramp in practice. Wrapped in
   `audio_resampler_set_compensation_ppm()` (`media-io/audio-resampler.{h,c}`) so no caller touches
   swresample directly — mirrors how `audio_resampler_resample()` already layers over `swr_convert`.
+
+## #806's outer loop — `OuterLoopGuard` (new module, NOT an extension of the bench trait) + the C/WS/Python chain
+
+Unlike #803 (which extends `RealtimeAsrcCompensator` in THIS file), #806 is a genuinely SEPARATE,
+higher-level concept and lives in its own module `src/asrc_outer_loop.rs` — it operates on ~7-minute
+SyncNet measurements, not per-audio-callback blocks, so it does not implement `AsrcCompensator` at
+all. It only PRODUCES a `bias_ppm` value; `RealtimeAsrcCompensator` gained a small, separate
+extension (`set_outer_bias_ppm`/`outer_bias_ppm`, `OUTER_BIAS_MAX_PPM=10.0` in THIS file) to
+consume it, folded additively into the existing `target_ppm` calc before the `MAX_PPM` clamp.
+
+**The full chain, five pieces, none of them the inner ASRC estimator itself:**
+1. `src/asrc_outer_loop.rs::OuterLoopGuard` — the pure "brain" (3-sample sliding window, 40ms
+   sustained-average threshold, 1ppm/step rate limit, ±10ppm hard clamp). Tier-0 tested.
+2. `asrc-compensator.{h,c}` — `outer_bias_ppm` field + set/get, same file #803 already ported.
+3. `obs.h`/`obs-source.c` — `obs_source_set/get_asrc_outer_bias_ppm`, a CORE (type-agnostic) export
+   forwarding to `source->asrc`. Core, not DistroAV, because #803's own design comment already
+   established the program-audio source ('mbc') is NOT an NDI/DistroAV source — a DistroAV-only
+   settings key would silently do nothing for the one source that matters.
+4. `vendor/obs-studio/plugins/obs-websocket/src/requesthandler/RequestHandler_Inputs.cpp` (+ the
+   `.h` declaration + the `RequestHandler.cpp` dispatch-table entry) — a NEW request pair
+   `SetAsrcOuterBiasPpm`/`GetAsrcOuterBiasPpm`, mirroring `SetInputMute`/`GetInputMute` field for
+   field (`AcquireInput` by name/uuid, `ValidateNumber` for the range, then a straight call into
+   the core export). **obs-websocket lives INSIDE `vendor/obs-studio` itself** (built as part of
+   the same CMake project, unlike DistroAV) — it links directly against the new core export at
+   compile time, no `resolve_obs_export`-style runtime symbol resolution needed (that dance is
+   ONLY for DistroAV, which builds against stock SDK headers as a separate project).
+5. `scripts/av_sync_outer_loop_guard.py` — a literal Python mirror of piece 1 (same constants,
+   same formula, own pytest suite) for the actual watchdog, wired into
+   `scripts/av_sync_measure.py`'s existing `--loop` mode via `--outer-loop`/`--outer-loop-state`/
+   `--outer-loop-source`/`--ws-host`/`--ws-password`; applies via piece 4's requests with the same
+   verify+rollback-on-mismatch pattern `av_sync_calibrate.py`'s `apply_latency()` already
+   established for the genlock-latency knob (#358).
+
+**Gotcha: a "sliding window across process iterations" caller must NOT reload the guard from disk
+every call.** `--loop` mode calls `one_measurement()` fresh roughly every 7 minutes from the SAME
+long-running watchdog process. `OuterLoopGuard`'s own window is deliberately NOT persisted to disk
+(only `bias_ppm` is, for surviving a genuine process restart — see the struct's own doc comment) —
+so a naive `run_outer_loop()` that does `load_outer_loop_guard(state_path)` fresh on every call
+would re-create an EMPTY window every single time, and the "3-sample sustained average" the whole
+design depends on would never accumulate across the ~21 minutes it is supposed to span. The fix
+(`av_sync_measure.py`'s `_get_outer_loop_guard`/`_OUTER_LOOP_GUARDS`): cache the live `OuterLoopGuard`
+object in a module-level dict keyed by state path, so it survives in-process across `--loop`
+iterations; only the FIRST access per key loads the persisted bias from disk. A test that calls
+`run_outer_loop()` `WINDOW_N` times in a row and expects a correction to fire on the last call is
+exactly what catches a regression here (`test_sustained_correction_applies_persists_and_reports` in
+`tests/python/test_av_sync_outer_loop_apply.py`) — a version that reloads from disk each time
+passes every OTHER test but fails that one silently (0 WS calls, no exception).
+
+**The sign convention (`residual_ms > 0` → nudge `bias_ppm` UP) is a DELIBERATE, DOCUMENTED, but
+NOT live-validated choice** (see `src/asrc_outer_loop.rs`'s own doc comment for the full
+reasoning). It is bounded safe either way (±10ppm max, 1ppm/step, only after a sustained window) —
+if the first live watchdog run shows the residual growing FASTER after a correction instead of
+shrinking, invert the single `direction`/`avg_residual_ms > 0.0` line in BOTH
+`src/asrc_outer_loop.rs::OuterLoopGuard::observe` AND its Python mirror
+`av_sync_outer_loop_guard.py`, and re-run both test suites (several tests pin the CURRENT sign
+explicitly and will need their expected signs flipped too).

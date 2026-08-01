@@ -9,6 +9,7 @@ paths:
   - "scripts/lib/win-status-args.sh"
   - "scripts/lib/stale-artifact-guard.sh"
   - "scripts/dantesync-version-gate.sh"
+  - "scripts/obs_burn_filter.py"
   - ".claude/skills/e2e/SKILL.md"
 ---
 
@@ -138,6 +139,35 @@ imag's own render/GPU code, this is very likely the SAME known marginal-headroom
 `gh workflow run`, which loses the `pull_request` event context, see this project's own
 `gh workflow run` GOTCHA in the top-level CLAUDE.md) is the correct, cheap way to check before
 investigating further or filing anything new.
+
+## 6. `[0/8]` genlock_burn preflight fails on ONE named input — check EVERY input before re-triggering, not just the one in the error (2026-08-01)
+
+The `[0/8]` OBS pre-run state preflight checks per-source `genlock_burn` and aborts on the FIRST
+stray-ON input it finds, e.g. `FAIL: strih NDI cam1: genlock_burn is still ON from a prior run`.
+A live run (issue 805 session) hit exactly this, cleared cam1 with the printed
+`obs_burn_filter.py remove` command, and would have re-triggered straight into a SECOND identical
+failure: a broad `obs_burn_filter.py check` sweep across every strih input (cam1-cam7) AND the
+stream program input found THREE MORE independently stuck-ON sources (`NDI cam2`, `NDI cam4` on
+strih; `NDI 2ME PGM` on stream) that the preflight had not even reached yet — evidently left over
+from a prior aborted/cancelled run (the concurrency-cancel gotcha in
+`.claude/rules/ci-testing-gotchas.md` means an in-flight recording-e2e.sh run can be killed
+mid-flight by a later push, before its own cleanup/EVENT-mode step runs).
+
+**Before re-triggering a failed `[0/8]`-style burn-state preflight, sweep and clear ALL relevant
+inputs in one pass, not just the one the error named:**
+```bash
+for cam in "NDI cam1" "NDI cam2" "NDI cam3" "NDI cam4" "NDI cam5" "NDI cam6" "NDI cam7"; do
+  python3 scripts/obs_burn_filter.py check --host 10.77.9.202 --input "$cam" --password "$OBS_WS_PW"
+done
+python3 scripts/obs_burn_filter.py check --host 10.77.9.204 --input "NDI 2ME PGM" --password "$OBS_WS_PW"
+# also verify no stray recording/streaming is active (GetRecordStatus/GetStreamStatus over WS) on
+# both boxes before re-triggering — a half-finished prior run can leave either engaged too.
+```
+`remove` every `burn_on=True` hit, THEN `gh run rerun <run-id>` (never a fresh
+`gh workflow run`, per this repo's own `gh workflow run` GOTCHA in the top-level CLAUDE.md — it
+loses the `pull_request` event context). This is rig-state cleanup, not a code regression — the
+preflight is doing exactly its job; don't waste a cycle by clearing one input and rerunning into
+the next one it hasn't gotten to yet.
 
 ## The general shape
 

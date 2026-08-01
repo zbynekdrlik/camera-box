@@ -6680,3 +6680,71 @@ supervisor/operator-driven at the next soundcheck.
 
 Playbook: `.claude/skills/av-sync/SKILL.md` -- new "#805 one-shot baseline calibration" section
 (procedure, when-to-recalibrate, the sub-frame-interpolation scope note).
+
+## Issue #806 (2026-08-01) — outer-loop guard: SyncNet residual feedback into ASRC (audio-side)
+
+Design comment: https://github.com/zbynekdrlik/camera-box/issues/806#issuecomment-5150080849
+(root cause, chosen 5-piece approach, rejected alternatives, safety-rail mapping to the ticket's
+own text).
+
+Commits (dev, this session):
+- `1f109be4c` test(#806): [red] pin outer-loop guard bias extension + windowed correction decision
+- `035831f8a` feat(#806): [green] implement outer-loop guard (RealtimeAsrcCompensator bias + OuterLoopGuard)
+- `23a2d7b59` feat(#806): port outer-loop bias into vendored libobs core
+- `b5908b6ee` feat(#806): add SetAsrcOuterBiasPpm/GetAsrcOuterBiasPpm obs-websocket requests
+- `669ff7b6f` feat(#806): av_sync_outer_loop_guard.py -- literal Python port of the Rust outer-loop guard
+- `cf32653ba` feat(#806): wire the outer-loop watchdog into av_sync_measure.py --loop
+
+RED (`cargo test --lib asrc_bench::` / `asrc_outer_loop::`, stubbed bodies): 4 tests failed --
+`outer_bias_shifts_applied_ppm_once_locked_on_a_perfect_clock` +
+`bias_never_exceeds_the_ticket_max_and_stops_reporting_once_saturated` +
+`sustained_positive_residual_nudges_bias_up_by_one_step` +
+`sustained_negative_residual_nudges_bias_down_by_one_step`. GREEN: all 25 asrc_bench +
+asrc_outer_loop tests pass after restoring the real implementation.
+
+Five pieces, no new IPC invented (full reasoning in the design comment + the updated
+`.claude/rules/asrc-bench-harness.md`): (1) `src/asrc_outer_loop.rs::OuterLoopGuard` — pure 3-sample
+window / 40ms sustained-threshold / 1ppm-step / ±10ppm-clamp guard; `RealtimeAsrcCompensator` gets
+a small `outer_bias_ppm` extension in `src/asrc_bench.rs`. (2) C mirror in the SAME
+`asrc-compensator.{h,c}` #803 already ported. (3) Core libobs export
+`obs_source_set/get_asrc_outer_bias_ppm` (type-agnostic, NOT DistroAV-specific -- the relevant
+program-audio source 'mbc' is not NDI-backed, per issue 803's own design comment). (4) A NEW
+obs-websocket request pair `SetAsrcOuterBiasPpm`/`GetAsrcOuterBiasPpm`
+(`RequestHandler_Inputs.cpp`), mirroring `SetInputMute`/`GetInputMute` -- reuses obs-websocket's
+existing, already-hardened machinery (it links straight against the new core export at compile
+time, since obs-websocket is built inside the same `vendor/obs-studio` monorepo, unlike DistroAV).
+(5) `scripts/av_sync_outer_loop_guard.py` (literal Python mirror, own pytest suite) wired into
+`scripts/av_sync_measure.py --loop` via `--outer-loop`/`--outer-loop-state`/`--outer-loop-source`/
+`--ws-host`/`--ws-password`; applies with the same verify+rollback-on-mismatch pattern
+`av_sync_calibrate.py`'s `apply_latency()` established (#358).
+
+A real bug caught during this session's own local testing (not a live-rig incident): a naive
+`run_outer_loop()` that reloaded the guard from disk on every `--loop` call would re-create an
+EMPTY sliding window every ~7-minute tick, so the "3-sample sustained average" the whole design
+depends on could never accumulate. Fixed with an in-process guard cache
+(`_get_outer_loop_guard`/`_OUTER_LOOP_GUARDS` in `av_sync_measure.py`) keyed by state path -- only
+the FIRST access per key loads the persisted `bias_ppm` from disk (surviving a genuine process
+restart); the window itself lives in-process for the life of the watchdog. Caught by
+`test_sustained_correction_applies_persists_and_reports` in
+`tests/python/test_av_sync_outer_loop_apply.py` (calls `run_outer_loop()` `WINDOW_N` times and
+expects the last call to fire a correction) -- full detail + the general lesson in the playbook.
+
+Verified locally: `cargo fmt --all -- --check`, `cargo clippy --all-targets -- -D warnings` (both
+clean), full `cargo test` (178/178 binaries green, 0 failed -- one-off Tier-0 bypass) after
+touching the vendored C, `python3 -m pytest tests/python` (702 passed, 0 failed) including the 20
+new Python tests (`test_av_sync_outer_loop_guard.py` 9 + `test_av_sync_outer_loop_apply.py` 11),
+plus 13 new Rust tests (5 in `asrc_bench.rs` + 8 in `asrc_outer_loop.rs`).
+
+NOT verified (explicitly out of this worker's reach, per the ticket's own dispatch instructions):
+the vendored C/C++ (`asrc-compensator.c`, `obs-source.c`/`obs.h`, the new obs-websocket request)
+has NO local build path (Tier 0) -- CI is the first place a C/C++ mistake in this port surfaces,
+same acceptance already established for #803/#912's own C ports. No rig deploy, no watchdog
+service start, no live multi-hour observation of a real correction -- in particular the CHOSEN
+SIGN CONVENTION (`residual_ms > 0` nudges `bias_ppm` UP) is a documented, bounded-safe, but
+NOT live-validated choice; see the module doc comment + the playbook for the flip-both-sides
+recovery procedure if the first live watchdog run shows it working backwards.
+
+PR: #919 (dev→main, opened this session).
+
+Playbook: `.claude/rules/asrc-bench-harness.md` -- new "#806's outer loop" section (the 5-piece
+chain, the in-process-cache-vs-reload-from-disk gotcha, the sign-convention flip procedure).

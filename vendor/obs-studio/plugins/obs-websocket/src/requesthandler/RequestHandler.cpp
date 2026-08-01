@@ -89,6 +89,8 @@ const std::unordered_map<std::string, RequestMethodHandler> RequestHandler::_han
 	{"GetInputMute", &RequestHandler::GetInputMute},
 	{"SetInputMute", &RequestHandler::SetInputMute},
 	{"ToggleInputMute", &RequestHandler::ToggleInputMute},
+	{"GetAsrcOuterBiasPpm", &RequestHandler::GetAsrcOuterBiasPpm}, // camera-box #806
+	{"SetAsrcOuterBiasPpm", &RequestHandler::SetAsrcOuterBiasPpm}, // camera-box #806
 	{"GetInputVolume", &RequestHandler::GetInputVolume},
 	{"SetInputVolume", &RequestHandler::SetInputVolume},
 	{"GetInputAudioBalance", &RequestHandler::GetInputAudioBalance},

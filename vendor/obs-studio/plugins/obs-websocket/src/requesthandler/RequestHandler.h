@@ -108,6 +108,8 @@ private:
 	RequestResult GetInputMute(const Request &);
 	RequestResult SetInputMute(const Request &);
 	RequestResult ToggleInputMute(const Request &);
+	RequestResult GetAsrcOuterBiasPpm(const Request &); // camera-box #806
+	RequestResult SetAsrcOuterBiasPpm(const Request &); // camera-box #806
 	RequestResult GetInputVolume(const Request &);
 	RequestResult SetInputVolume(const Request &);
 	RequestResult GetInputAudioBalance(const Request &);

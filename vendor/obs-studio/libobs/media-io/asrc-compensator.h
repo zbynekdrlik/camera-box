@@ -60,6 +60,14 @@ extern "C" {
  * Mirror of src/asrc_bench.rs MIN_LOCK_S. */
 #define ASRC_MIN_LOCK_S 5.0
 
+/* Hard bound on the OUTER-loop (camera-box #806) bias this servo will accept,
+ * in ppm -- the ticket's own "max +/-10 ppm uprava od inner-loop odhadu"
+ * safety rail. Applied at the setter below regardless of what the caller
+ * (the obs-websocket SetAsrcOuterBiasPpm request) already clamped -- never
+ * trust a single caller alone. Mirror of src/asrc_bench.rs
+ * OUTER_BIAS_MAX_PPM. */
+#define ASRC_OUTER_BIAS_MAX_PPM 10.0
+
 /* How often (seconds of master-clock time) the servo emits its telemetry log
  * line (issue #803: "každých 60 s log odhadnutého ppm + aplikovanej
  * kompenzácie + kumulatívneho rezídua"). Not present in the Rust reference
@@ -85,6 +93,11 @@ struct asrc_compensator {
 	double cumulative_correction_ms;
 	/* Master-clock time since the last telemetry log line -- gates ASRC_LOG_INTERVAL_S. */
 	double time_since_log_s;
+	/* camera-box #806: the OUTER-loop bias, in ppm -- folded additively into estimated_ppm
+	 * before the ASRC_MAX_PPM clamp inside asrc_compensator_compensate(). Zero (no-op) until
+	 * asrc_compensator_set_outer_bias_ppm() is called; every pre-#806 caller sees identical
+	 * behavior. Mirror of src/asrc_bench.rs RealtimeAsrcCompensator::outer_bias_ppm. */
+	double outer_bias_ppm;
 };
 
 /* Reset a servo to its just-constructed state: 0 ppm estimated/applied (assume
@@ -111,6 +124,18 @@ EXPORT double asrc_compensator_compensate(struct asrc_compensator *c, double raw
  * since the previous log line via `*cumulative_correction_ms_out`, then resets
  * that accumulator to 0 for the next interval. */
 EXPORT bool asrc_compensator_should_log(struct asrc_compensator *c, double *cumulative_correction_ms_out);
+
+/* camera-box #806: set the OUTER-loop bias, in ppm -- clamped to
+ * +/-ASRC_OUTER_BIAS_MAX_PPM unconditionally (never trust the caller alone to
+ * have already clamped; this field is reachable from outside this file via
+ * the obs-websocket SetAsrcOuterBiasPpm request). Takes effect on the NEXT
+ * asrc_compensator_compensate() call. Mirror of src/asrc_bench.rs
+ * RealtimeAsrcCompensator::set_outer_bias_ppm. */
+EXPORT void asrc_compensator_set_outer_bias_ppm(struct asrc_compensator *c, double bias_ppm);
+
+/* camera-box #806: the outer-loop bias currently in effect, in ppm -- exposed
+ * for telemetry (GetAsrcOuterBiasPpm) and tests. */
+EXPORT double asrc_compensator_get_outer_bias_ppm(const struct asrc_compensator *c);
 
 #ifdef __cplusplus
 }

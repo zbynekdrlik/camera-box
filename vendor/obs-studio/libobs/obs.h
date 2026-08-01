@@ -1601,6 +1601,18 @@ EXPORT bool obs_source_get_genlock_burn(const obs_source_t *source);
 EXPORT void obs_source_set_asrc_enabled(obs_source_t *source, bool enabled);
 EXPORT bool obs_source_get_asrc_enabled(const obs_source_t *source);
 
+/* camera-box #806: the OUTER-loop bias, in ppm, fed additively into this source's ASRC servo
+ * (media-io/asrc-compensator.h's asrc_compensator_set_outer_bias_ppm) -- a slow, SyncNet-driven
+ * correction of the inner ASRC loop's own long-term residual (epic #800), applied audio-side only.
+ * Clamped to [-10, 10] ppm at the servo's own setter regardless of what the caller already
+ * clamped. Reached from a Python watchdog (scripts/av_sync_outer_loop_guard.py, driven by
+ * scripts/av_sync_measure.py) over the obs-websocket SetAsrcOuterBiasPpm/GetAsrcOuterBiasPpm
+ * request pair -- source-name-addressed and therefore type-agnostic (works regardless of which
+ * input plugin backs the source), unlike a DistroAV-specific settings key. Default 0 (no-op) for
+ * every source; nothing calls the setter unless the watchdog is running. */
+EXPORT void obs_source_set_asrc_outer_bias_ppm(obs_source_t *source, double bias_ppm);
+EXPORT double obs_source_get_asrc_outer_bias_ppm(const obs_source_t *source);
+
 /** Used to decouple audio from video so that audio doesn't attempt to sync up
  * with video.  I.E. Audio acts independently.  Only works when in unbuffered
  * mode. */

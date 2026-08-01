@@ -24,6 +24,7 @@ void asrc_compensator_init(struct asrc_compensator *c)
 	c->elapsed_lock_s = 0.0;
 	c->cumulative_correction_ms = 0.0;
 	c->time_since_log_s = 0.0;
+	c->outer_bias_ppm = 0.0; /* camera-box #806 */
 }
 
 double asrc_compensator_compensate(struct asrc_compensator *c, double raw_advance_s, double master_block_s,
@@ -53,11 +54,15 @@ double asrc_compensator_compensate(struct asrc_compensator *c, double raw_advanc
 	c->elapsed_lock_s += master_block_s;
 
 	/* Default-safe: no lock yet -> target zero compensation, never guess from a
-	 * still-converging estimate. Once locked, clamp the estimate to the hard ppm bound before
-	 * ever using it as a target. */
+	 * still-converging estimate (camera-box #806: the outer-loop bias is folded in HERE, so
+	 * it is just as inert as the inner estimate before lock -- never applied on its own).
+	 * Once locked, add the outer-loop bias to the inner estimate and clamp the SUM to the
+	 * hard ppm bound before ever using it as a target. Mirror of src/asrc_bench.rs
+	 * RealtimeAsrcCompensator::compensate. */
 	const double target_ppm = (c->elapsed_lock_s < ASRC_MIN_LOCK_S)
 					   ? 0.0
-					   : asrc_clamp(c->estimated_ppm, -ASRC_MAX_PPM, ASRC_MAX_PPM);
+					   : asrc_clamp(c->estimated_ppm + c->outer_bias_ppm, -ASRC_MAX_PPM,
+							ASRC_MAX_PPM);
 
 	/* Slew-limit the APPLIED correction toward the target -- caps how fast the resample-ratio
 	 * nudge may change, independent of how fast the estimate itself moves. */
@@ -88,4 +93,14 @@ bool asrc_compensator_should_log(struct asrc_compensator *c, double *cumulative_
 	c->time_since_log_s = 0.0;
 	c->cumulative_correction_ms = 0.0;
 	return true;
+}
+
+void asrc_compensator_set_outer_bias_ppm(struct asrc_compensator *c, double bias_ppm)
+{
+	c->outer_bias_ppm = asrc_clamp(bias_ppm, -ASRC_OUTER_BIAS_MAX_PPM, ASRC_OUTER_BIAS_MAX_PPM);
+}
+
+double asrc_compensator_get_outer_bias_ppm(const struct asrc_compensator *c)
+{
+	return c->outer_bias_ppm;
 }

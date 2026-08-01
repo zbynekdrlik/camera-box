@@ -16,11 +16,15 @@ Usage:
   av_sync_measure.py --media clip.mp4 [--repo DIR] [--webhook URL] [--threshold-ms 60]
   av_sync_measure.py --grab srt://127.0.0.1:9998 --secs 20 [...]        # one-shot from live tap
   av_sync_measure.py --grab ... --loop 300 [...]                        # daemon: measure every 300 s
+  av_sync_measure.py --grab ... --loop 420 --outer-loop --ws-host 10.77.9.204 [...]
+      # #806 outer-loop watchdog: every confident window feeds OuterLoopGuard; a correction event
+      # applies the new bias over obs-websocket (SetAsrcOuterBiasPpm) and Discord-reports it.
 Exit codes: 0 measured, 2 unmeasurable window (low confidence), 1 error.
 """
 
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -30,8 +34,130 @@ import time
 import urllib.request
 from pathlib import Path
 
+# #806: outer-loop guard + its obs-websocket control channel. Only exercised by --outer-loop
+# (measure-only usage never calls these, so no connection is ever attempted); imported at module
+# level (not lazily) so tests can monkeypatch _conn/_rpc, same convention as av_sync_calibrate.py.
+from av_sync_outer_loop_guard import OuterLoopGuard
+from obs_phase2 import _conn, _rpc
+
 CONF_MIN = 4.0  # below this SyncNet's own confidence, the window is unusable (no face / no lips)
 FRAME_MS = 40  # syncnet pipeline is fixed 25 fps
+
+# #806: the program-audio source the outer-loop guard corrects. NOT an NDI/DistroAV source (see
+# issue #803's design comment) -- reached over the source-name-addressed, type-agnostic
+# SetAsrcOuterBiasPpm/GetAsrcOuterBiasPpm obs-websocket requests instead.
+DEFAULT_OUTER_LOOP_SOURCE = "mbc"
+
+
+def default_outer_loop_state_path() -> Path:
+    """Where the #806 watchdog persists its guard's current bias_ppm across restarts (the window
+    itself is intentionally NOT persisted, per OuterLoopGuard.from_bias_ppm's own doc comment).
+
+    Same %PROGRAMDATA%/camera-box convention as av_sync_calibrate.py's default_last_json_path() --
+    a DIFFERENT filename (this is a distinct piece of state), same fallback for off-rig testing.
+    """
+    programdata = os.environ.get("PROGRAMDATA")
+    if programdata:
+        return Path(programdata) / "camera-box" / "asrc-outer-loop-state.json"
+    return Path.home() / ".camera-box" / "asrc-outer-loop-state.json"
+
+
+def load_outer_loop_guard(path: Path) -> OuterLoopGuard:
+    """Load a persisted bias_ppm (if the file exists and parses) into a fresh guard; a
+    missing/corrupt file starts a guard at bias_ppm=0 -- default-safe, never guesses a bias."""
+    try:
+        data = json.loads(path.read_text())
+        return OuterLoopGuard.from_bias_ppm(float(data["bias_ppm"]))
+    except (FileNotFoundError, json.JSONDecodeError, KeyError, ValueError, TypeError):
+        return OuterLoopGuard()
+
+
+def save_outer_loop_state(path: Path, guard: OuterLoopGuard) -> None:
+    """Persist ONLY guard.bias_ppm, atomically (write-tmp + replace, mirrors
+    av_sync_calibrate.py's write_last_json() so a reader never observes a partial file)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps({"bias_ppm": guard.bias_ppm, "ts": time.time()}, indent=2))
+    tmp.replace(path)
+
+
+def apply_outer_bias(ws, source: str, current_ppm: float, new_ppm: float) -> float:
+    """Apply `new_ppm` via SetAsrcOuterBiasPpm on `source`, verify via GetAsrcOuterBiasPpm
+    read-back (the SAME #358 verify+rollback pattern av_sync_calibrate.py's apply_latency()
+    already established for the genlock-latency knob). On a read-back mismatch, ROLLS BACK to
+    `current_ppm` and FAILS LOUD -- the source is never left half-set."""
+    print(f"[av-sync] SET '{source}' asrc_outer_bias_ppm: {current_ppm} -> {new_ppm}")
+    _rpc(ws, "SetAsrcOuterBiasPpm", {"inputName": source, "biasPpm": new_ppm})
+    actual = _rpc(ws, "GetAsrcOuterBiasPpm", {"inputName": source}).get("biasPpm")
+    if actual is not None and abs(actual - new_ppm) < 1e-6:
+        print(f"[av-sync] VERIFIED '{source}' asrc_outer_bias_ppm={actual}")
+        return actual
+
+    sys.stderr.write(
+        f"[av-sync] read-back mismatch on '{source}': set {new_ppm}, got {actual!r} -- "
+        f"rolling back to {current_ppm}\n"
+    )
+    _rpc(ws, "SetAsrcOuterBiasPpm", {"inputName": source, "biasPpm": current_ppm})
+    rollback_actual = _rpc(ws, "GetAsrcOuterBiasPpm", {"inputName": source}).get("biasPpm")
+    if rollback_actual is None or abs(rollback_actual - current_ppm) >= 1e-6:
+        sys.stderr.write(
+            f"[av-sync] WARN rollback ALSO mismatched on '{source}': expected {current_ppm}, "
+            f"got {rollback_actual!r} -- manual check required!\n"
+        )
+    raise SystemExit(
+        f"[av-sync] FAILED to apply asrc_outer_bias_ppm={new_ppm} on '{source}' "
+        f"(read-back={actual!r}); rolled back to {current_ppm} "
+        f"(rollback read-back={rollback_actual!r}) -- source never left half-set"
+    )
+
+
+# #806: an in-PROCESS cache of live OuterLoopGuard objects, keyed by state path. `--loop` mode
+# calls one_measurement()/run_outer_loop() fresh every ~7 min from the SAME long-running process
+# (main()'s while-True), and the guard's own WINDOW_N-sample sliding window (deliberately NOT
+# persisted to disk, per OuterLoopGuard.from_bias_ppm's own doc comment -- only bias_ppm survives
+# a genuine process RESTART) would never accumulate across iterations if each call re-loaded a
+# brand-new guard from disk. This cache is what lets the window actually stay "sustained" across
+# the ~21 min (WINDOW_N * ~7 min) the guard needs to see before it ever acts, while a genuine
+# process restart still starts fresh from the persisted bias (first access per key loads from
+# disk; nothing here survives across a real restart, which is the correct behavior).
+_OUTER_LOOP_GUARDS: dict = {}
+
+
+def _get_outer_loop_guard(state_path: Path) -> OuterLoopGuard:
+    key = str(state_path)
+    if key not in _OUTER_LOOP_GUARDS:
+        _OUTER_LOOP_GUARDS[key] = load_outer_loop_guard(state_path)
+    return _OUTER_LOOP_GUARDS[key]
+
+
+def run_outer_loop(args, offset_ms: float) -> None:
+    """#806: feed one confident measurement's offset_ms into the live, in-process OuterLoopGuard
+    (see `_get_outer_loop_guard`'s own doc comment for why this must NOT reload from disk every
+    call); on a correction event, apply the new bias over obs-websocket and Discord-report it.
+    Never raises on a measurement that does not trigger a correction (the common case)."""
+    state_path = Path(args.outer_loop_state) if args.outer_loop_state else default_outer_loop_state_path()
+    guard = _get_outer_loop_guard(state_path)
+    event = guard.observe(offset_ms)
+    if event is None:
+        return
+
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    text = (
+        f"[{stamp}] outer-loop correction on '{args.outer_loop_source}': "
+        f"avg_residual={event.avg_residual_ms:+.1f}ms bias {event.previous_bias_ppm:+.2f}ppm -> "
+        f"{event.new_bias_ppm:+.2f}ppm"
+    )
+    print(text)
+
+    ws = _conn(args.ws_host, args.ws_password)
+    try:
+        apply_outer_bias(ws, args.outer_loop_source, event.previous_bias_ppm, event.new_bias_ppm)
+    finally:
+        ws.close()
+
+    save_outer_loop_state(state_path, guard)
+    if args.webhook:
+        notify_discord(args.webhook, f"🎚️ ASRC outer-loop: {text}")
 
 
 def run(cmd, **kw):
@@ -124,6 +250,11 @@ def one_measurement(args, repo: Path) -> int:
     print(line)
     if args.webhook and abs(offset_ms) >= args.threshold_ms:
         notify_discord(args.webhook, f"🎯 AV-sync watchdog: {verdict} (conf {conf:.1f})")
+    if getattr(args, "outer_loop", False):
+        # #806: feed this CONFIDENT measurement into the outer-loop guard. Independent of the
+        # --threshold-ms alert above -- the guard has its own 40ms sustained-average threshold and
+        # only acts every ~WINDOW_N windows, so this runs on every usable window regardless.
+        run_outer_loop(args, float(offset_ms))
     return 0
 
 
@@ -144,6 +275,23 @@ def main() -> int:
         help="append each window's raw measurement as JSONL for later baseline aggregation "
              "via `av_sync_calibrate.py --calibrate` (#805)",
     )
+    ap.add_argument(
+        "--outer-loop", action="store_true",
+        help="#806: feed every confident window into the outer-loop guard; on a correction "
+             "event, apply the new bias over obs-websocket and Discord-report it (--loop mode)",
+    )
+    ap.add_argument(
+        "--outer-loop-state", default=None,
+        help="override the guard state path (default: %%PROGRAMDATA%%/camera-box/"
+             "asrc-outer-loop-state.json)",
+    )
+    ap.add_argument(
+        "--outer-loop-source", default=DEFAULT_OUTER_LOOP_SOURCE,
+        help=f"obs-websocket input name the outer-loop bias is applied to (default: "
+             f"{DEFAULT_OUTER_LOOP_SOURCE!r})",
+    )
+    ap.add_argument("--ws-host", default=None, help="obs-websocket host (required with --outer-loop)")
+    ap.add_argument("--ws-password", default="", help="obs-websocket password")
     args = ap.parse_args()
 
     repo = Path(args.repo).resolve()
@@ -151,6 +299,8 @@ def main() -> int:
         sys.exit(f"ERROR: syncnet_python repo not found at {repo}")
     if not shutil.which("ffmpeg"):
         sys.exit("ERROR: ffmpeg not on PATH")
+    if args.outer_loop and not args.ws_host:
+        sys.exit("ERROR: --outer-loop requires --ws-host")
 
     if args.loop:
         if not args.grab:

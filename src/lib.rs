@@ -356,5 +356,10 @@ pub mod window_boundary_tolerance;
 // satisfy. No probe deps, so it unit-tests Tier-0 on a plain CI/bench machine — no rig required.
 pub mod asrc_bench;
 
+// #806 (epic #800 A/V-desync endgame round) — the outer-loop guard: a slow, SyncNet-driven
+// feedback loop correcting #803's inner ASRC servo's own long-term residual. Pure/Tier-0, mirrors
+// the asrc_bench.rs pattern; see the module's own doc comment for the root cause + design.
+pub mod asrc_outer_loop;
+
 #[cfg(feature = "probe")]
 pub mod probe;
