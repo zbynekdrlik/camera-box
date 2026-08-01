@@ -6640,3 +6640,43 @@ now carries `Closes #912` + `Closes #914` + `Closes #915`. Restore path on issue
 Playbook: new `.claude/rules/optical-undecodable-floor-report-only.md` -- the seam pattern, the
 scoped-JSON-key lesson, the two-independent-reasons WARN print, and the "a later-term RED test
 may already be neutralized by an earlier commit's fix in the same PR" testing gotcha.
+
+## Issue #805 (2026-08-01) — baseline calibration: N-window SyncNet average + sub-frame parabolic interpolation + 95% CI
+
+Commits: `a79256209` test [red] (aggregation/interpolation math + CLI mode, all failing --
+functions absent), `934b843a8` feat [green] (implementation).
+
+`scripts/av_sync_calibrate.py` gains an OFFLINE `--calibrate <jsonl>` mode (no OBS connection):
+`aggregate_syncnet_windows()` filters a JSONL log of SyncNet windows (av_sync_measure.py, #801)
+to `confidence >= CONF_MIN` (imported directly from av_sync_measure, never duplicated), averages
+their offsets, and reports a small-sample Student's-t 95% CI. `parabolic_subframe_offset()` is
+the classic 3-point extremum-vertex formula for sub-frame precision, applied by
+`window_offset_ms()` to an OPTIONAL `dist_curve` field per window record (falls back to the plain
+40ms-quantized value when absent -- see below). `baseline_latency_ms()` computes the one-shot
+absolute target WITHOUT the #871 per-run step clamp (an averaged N-window result is already
+trustworthy; only the DistroAV hardware range clamps it). `format_calibration_report()` prints
+"set 'NDI 2ME PGM' to Xms" + the CI; `--report-json` persists it for the ticket.
+
+`scripts/av_sync_measure.py` gets a matching `--calibration-log PATH` producer -- appends one
+JSONL record per measured window (usable and unmeasurable) during a soundcheck `--loop` run.
+
+**Honest scope note (also on the #805 design comment):** `SyncNetInstance.evaluate()` does
+return a real per-shift `dist` curve internally (confirmed via the public joonson/syncnet_python
+source), but `syncnet_python` is an external, non-vendored dependency -- not present anywhere on
+this machine or in CI -- so wiring real curve extraction into `measure()`'s subprocess-based
+stdout scrape needs a live checkout + GPU/CPU torch run to verify against, which this sandbox
+cannot do. The `dist_curve` field is wired end-to-end and fully tested against synthetic curves;
+real-curve extraction from a live syncnet_python is intentionally deferred as a follow-up
+(needs-user-decision -- depends on live verification against the actual installed version).
+
+Verified: full `python3 -m pytest tests/python/` (682 passed) after the change; a manual
+end-to-end smoke run of `av_sync_calibrate.py --calibrate` against a synthetic 6-window JSONL
+(realistic values drawn from the live ASRC telemetry comment on #805) produced a correct
+n=5/6, mean=+80.0ms, 95% CI ±35.1ms, recommendation 845ms (from current=925ms) report + JSON.
+`av_sync_measure.py --help` confirms `--calibration-log` is wired. NOT verified: a real live
+soundcheck recording through the actual syncnet_python pipeline (no such recording or GPU/torch
+environment available this session) -- the tooling is ready, the first real baseline run is
+supervisor/operator-driven at the next soundcheck.
+
+Playbook: `.claude/skills/av-sync/SKILL.md` -- new "#805 one-shot baseline calibration" section
+(procedure, when-to-recalibrate, the sub-frame-interpolation scope note).
