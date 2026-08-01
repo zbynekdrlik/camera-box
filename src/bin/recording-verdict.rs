@@ -324,6 +324,14 @@ struct Args {
     /// for the full audit.
     #[arg(long, default_value_t = 25.0)]
     av_cluster_tol_ms: f64,
+    /// issue 930 lipsync cross-validation: the SyncNet-aggregated offset (ms, video - audio) for
+    /// the PAIRED lipsync-test-mode recording of the SAME rig state, from `scripts/av_sync_measure.py`
+    /// + `scripts/av_sync_calibrate.py --calibrate` (its `mean_offset_ms`). Optional -- when given
+    /// together with `--av-sync`, adds a `lipsync_cross_check` object to the printed JSON
+    /// comparing it against this recording's own QR/QPSK offset (`camera_box::lipsync_cross_check`).
+    /// Report-only (see that module's `gates_overall_pass`) -- never affects this CLI's exit code.
+    #[arg(long)]
+    syncnet_offset_ms: Option<f64>,
     /// #624 deliverable 4 / #312 item 2 PR B: the expected/dialed A/V offset (ms) — the
     /// operator's live #398 dock reading (nominally ~0, since the dock is dialed to align video
     /// and audio). The per-camera A/V-offset gate measures each camera's DEVIATION from this
@@ -2592,6 +2600,25 @@ fn decode_for_grouped(
     }))
 }
 
+/// issue 930 — the lipsync cross-check for one `--av-sync` recording, extracted as its OWN
+/// decode-free function so a fixture test can exercise the wiring without a real recording
+/// decode (the rest of `run_av_sync` needs real files/ffprobe and has no such path — see
+/// CLAUDE.md's "No bypass exists for `src/bin/recording-verdict.rs`"). Returns `None` when the
+/// caller never supplied `--syncnet-offset-ms` (the pre-930 behavior: no `lipsync_cross_check`
+/// key at all), `Some` otherwise — `camera_box::lipsync_cross_check::evaluate` itself decides
+/// Agree/Disagree/Unknown.
+fn lipsync_cross_check_for(
+    qr_qpsk_offset_ms: f64,
+    syncnet_offset_ms: Option<f64>,
+) -> Option<camera_box::lipsync_cross_check::LipsyncCrossCheck> {
+    let syncnet_offset_ms = syncnet_offset_ms?;
+    Some(camera_box::lipsync_cross_check::evaluate(
+        Some(syncnet_offset_ms),
+        Some(qr_qpsk_offset_ms),
+        camera_box::lipsync_cross_check::LIPSYNC_CROSS_CHECK_TOLERANCE_MS,
+    ))
+}
+
 /// #188 A/V-SYNC MODE — measure + report the video↔audio offset from one recording.
 fn run_av_sync(args: &Args) -> Result<()> {
     let recording = args.av_sync.as_ref().expect("av_sync set");
@@ -2615,7 +2642,7 @@ fn run_av_sync(args: &Args) -> Result<()> {
     // adjust). Reported as a raw signed delta — the operator applies it to THEIR current value,
     // then clamps to the genlock range via required_delay_ms (a clamped absolute here would hide
     // the sign whenever the unknown current delay isn't passed in).
-    let json = serde_json::json!({
+    let mut json = serde_json::json!({
         "av_offset_ms": report.offset.offset_ms,
         "mad_ms": report.offset.mad_ms,
         "matched": report.offset.matched,
@@ -2626,6 +2653,28 @@ fn run_av_sync(args: &Args) -> Result<()> {
         "video_fps": report.fps,
         "latency_adjust_ms": -report.offset.offset_ms,
     });
+    // issue 930 — lipsync cross-validation: only added when the caller supplied the paired
+    // lipsync-test-mode run's SyncNet offset (never printed on a plain --av-sync call, so every
+    // pre-930 invocation's JSON shape is byte-for-byte unchanged).
+    if let Some(cross_check) =
+        lipsync_cross_check_for(report.offset.offset_ms, args.syncnet_offset_ms)
+    {
+        json["lipsync_cross_check"] = serde_json::json!({
+            "syncnet_offset_ms": cross_check.syncnet_offset_ms,
+            "qr_qpsk_offset_ms": cross_check.qr_qpsk_offset_ms,
+            "delta_ms": cross_check.delta_ms,
+            "tolerance_ms": cross_check.tolerance_ms,
+            "verdict": format!("{:?}", cross_check.verdict),
+            "gates_overall_pass": camera_box::lipsync_cross_check::gates_overall_pass(),
+        });
+        tracing::info!(
+            syncnet_offset_ms = ?cross_check.syncnet_offset_ms,
+            qr_qpsk_offset_ms = report.offset.offset_ms,
+            delta_ms = ?cross_check.delta_ms,
+            verdict = ?cross_check.verdict,
+            "issue 930 lipsync cross-check (report-only)"
+        );
+    }
     println!("{}", serde_json::to_string_pretty(&json)?);
     tracing::info!(
         av_offset_ms = report.offset.offset_ms,
@@ -13209,5 +13258,61 @@ mod tests {
         let defaults = Args::parse_from(["recording-verdict"]);
         assert_eq!(defaults.imag, None);
         assert_eq!(defaults.imag_capture_fps, 60.0);
+    }
+
+    // --- issue 930: lipsync cross-check wiring on --av-sync -----------------------------------
+
+    #[test]
+    fn cli_parses_syncnet_offset_ms_930() {
+        use super::Args;
+        use clap::Parser;
+        let args = Args::parse_from([
+            "recording-verdict",
+            "--av-sync",
+            "/tmp/stream-REC.mp4",
+            "--av-marker-log",
+            "/tmp/markers.csv",
+            "--syncnet-offset-ms",
+            "37.5",
+        ]);
+        assert_eq!(args.syncnet_offset_ms, Some(37.5));
+
+        // Omitted (the pre-930 default, and every existing --av-sync caller): None, so
+        // `lipsync_cross_check_for` short-circuits and no JSON key is ever added.
+        let defaults = Args::parse_from(["recording-verdict"]);
+        assert_eq!(defaults.syncnet_offset_ms, None);
+    }
+
+    #[test]
+    fn lipsync_cross_check_for_is_none_without_syncnet_offset_930() {
+        assert_eq!(super::lipsync_cross_check_for(12.0, None), None);
+    }
+
+    #[test]
+    fn lipsync_cross_check_for_agrees_within_tolerance_930() {
+        // 12.0 (QR/QPSK) vs 40.0 (SyncNet) -> delta 28.0, within the 50ms tolerance.
+        let cc = super::lipsync_cross_check_for(12.0, Some(40.0)).expect("Some when syncnet given");
+        assert_eq!(cc.qr_qpsk_offset_ms, Some(12.0));
+        assert_eq!(cc.syncnet_offset_ms, Some(40.0));
+        assert_eq!(cc.delta_ms, Some(28.0));
+        assert_eq!(
+            cc.verdict,
+            camera_box::lipsync_cross_check::LipsyncCrossCheckVerdict::Agree
+        );
+        assert!(
+            !camera_box::lipsync_cross_check::gates_overall_pass(),
+            "930: report-only from day one"
+        );
+    }
+
+    #[test]
+    fn lipsync_cross_check_for_disagrees_beyond_tolerance_930() {
+        // 0.0 (QR/QPSK) vs 500.0 (SyncNet) -> delta 500.0, far beyond the 50ms tolerance.
+        let cc = super::lipsync_cross_check_for(0.0, Some(500.0)).expect("Some when syncnet given");
+        assert_eq!(cc.delta_ms, Some(500.0));
+        assert_eq!(
+            cc.verdict,
+            camera_box::lipsync_cross_check::LipsyncCrossCheckVerdict::Disagree
+        );
     }
 }
