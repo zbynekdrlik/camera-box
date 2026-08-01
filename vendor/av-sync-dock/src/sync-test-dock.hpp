@@ -7,12 +7,21 @@
 #include <obs-frontend-api.h>
 #include "sync-test-output.hpp"
 
+class QShowEvent;
+class QHideEvent;
+
 class SyncTestDock : public QFrame {
 	Q_OBJECT
 
 public:
 	SyncTestDock(QWidget *parent = nullptr);
 	~SyncTestDock();
+
+protected:
+	// #926 fix-up (review finding 13): start/stop the ASRC poll timer with dock visibility -- no
+	// point polling CAMERA_BOX_ASRC_SOURCE_NAME once a second while the dock isn't even shown.
+	void showEvent(QShowEvent *event) override;
+	void hideEvent(QHideEvent *event) override;
 
 private:
 	QPushButton *startButton = nullptr;
@@ -41,6 +50,10 @@ private:
 	QPushButton *asrcTrimDownButton = nullptr;
 	QPushButton *asrcTrimUpButton = nullptr;
 	QTimer *asrcRefreshTimer = nullptr;
+
+	// #926 fix-up (review finding 16): latches the "source not on this box" log to ONCE (STRIH
+	// runs the same DLL but has no CAMERA_BOX_ASRC_SOURCE_NAME) instead of one line per 1s poll.
+	bool asrcSourceMissingLogged = false;
 
 private:
 	OBSOutput sync_test;

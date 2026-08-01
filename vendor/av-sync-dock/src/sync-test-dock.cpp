@@ -22,6 +22,8 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include <QVBoxLayout>
 #include <QTimer>
 #include <QMainWindow>
+#include <QShowEvent>
+#include <QHideEvent>
 #include <obs-frontend-api.h>
 #include "plugin-macros.generated.h"
 #include "sync-test-dock.hpp"
@@ -190,6 +192,25 @@ SyncTestDock::~SyncTestDock()
 	}
 }
 
+// #926 fix-up (review finding 13): the 1s ASRC poll timer should only run while the dock is
+// actually visible -- no point hitting obs_get_source_by_name once a second when the dock is
+// hidden (a different OBS dock tab active, or the dock undocked and minimized).
+void SyncTestDock::showEvent(QShowEvent *event)
+{
+	QFrame::showEvent(event);
+	if (asrcRefreshTimer && !asrcRefreshTimer->isActive()) {
+		asrcRefreshTimer->start(CAMERA_BOX_ASRC_REFRESH_MS);
+		refresh_asrc_ui(); // repaint immediately, don't wait a full interval after becoming visible
+	}
+}
+
+void SyncTestDock::hideEvent(QHideEvent *event)
+{
+	QFrame::hideEvent(event);
+	if (asrcRefreshTimer)
+		asrcRefreshTimer->stop();
+}
+
 void SyncTestDock::cb_frontend_event(enum obs_frontend_event event, void *param)
 {
 	// #690: OBS_FRONTEND_EVENT_FINISHED_LOADING fires once, after scene collection + all sources
@@ -269,6 +290,13 @@ void SyncTestDock::start()
 	received_audio_index_max = 256;
 	audio_index_max = 256;
 
+	// #926 fix-up (review finding 11): reset the plain-language status back to "measuring" on
+	// every (re)start -- otherwise a manual Stop+Start (or the #690 auto-start racing a leftover
+	// UI state) could leave the STALE "Locked"/"No test signal" text on screen even though the
+	// output was just freshly created and has decided nothing yet.
+	if (statusLabel)
+		statusLabel->setText(obs_module_text("Status.Measuring"));
+
 	auto *sh = obs_output_get_signal_handler(o);
 	signal_handler_connect(sh, "video_marker_found", cb_video_marker_found, this);
 	signal_handler_connect(sh, "audio_marker_found", cb_audio_marker_found, this);
@@ -297,6 +325,10 @@ void SyncTestDock::on_start_stop()
 
 		if (startButton)
 			startButton->setText(obs_module_text("Button.Start"));
+		// #926 fix-up (review finding 11): a manually-stopped dock must say so, not keep
+		// claiming "Locked -- holding sync" from before the stop.
+		if (statusLabel)
+			statusLabel->setText(obs_module_text("Status.Stopped"));
 	}
 }
 
@@ -365,7 +397,10 @@ void SyncTestDock::refresh_asrc_ui()
 {
 	OBSSourceAutoRelease src = obs_get_source_by_name(CAMERA_BOX_ASRC_SOURCE_NAME);
 	if (!src) {
-		asrcStateLabel->setText("-");
+		// #926 fix-up (review finding 16): a clear "not on this box" state -- STRIH runs the
+		// SAME plugin DLL but has no 'mbc' source, so a bare "-" reads as "broken" rather than
+		// "this box doesn't have it". Log the situation ONCE, not once per 1s poll tick.
+		asrcStateLabel->setText(obs_module_text("AsrcState.NotOnThisBox"));
 		asrcEstimatedLabel->setText("-");
 		asrcAppliedLabel->setText("-");
 		asrcTrimLabel->setText("-");
@@ -375,8 +410,16 @@ void SyncTestDock::refresh_asrc_ui()
 			asrcTrimDownButton->setEnabled(false);
 		if (asrcTrimUpButton)
 			asrcTrimUpButton->setEnabled(false);
+		if (!asrcSourceMissingLogged) {
+			asrcSourceMissingLogged = true;
+			blog(LOG_WARNING,
+			     "av-sync-dock: ASRC section unavailable -- source '%s' not found on this box "
+			     "(further occurrences suppressed until it appears)",
+			     CAMERA_BOX_ASRC_SOURCE_NAME);
+		}
 		return;
 	}
+	asrcSourceMissingLogged = false;
 
 	bool enabled = obs_source_get_asrc_enabled(src);
 	double estimated = obs_source_get_asrc_estimated_ppm(src);
