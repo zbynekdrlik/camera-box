@@ -450,9 +450,15 @@ mod tests {
         assert!(should_trigger_selfheal(true, false));
     }
 
+    // #909 RED marker: this now-CORRECT expectation contradicts the CURRENT implementation
+    // (`jitter_confirmed || sustained_confirmed`), which still returns `true` here — the test
+    // fails until the GREEN commit changes `should_trigger_selfheal` to ignore the sustained
+    // band. Per the user's #909 architectural ruling: a sustained over-rate INSIDE the wide
+    // jitter envelope is absorbed by the genlock decimation gate by design, so it must never by
+    // itself escalate to a USB reset (reserved for genuine out-of-envelope faults).
     #[test]
-    fn selfheal_triggers_on_sustained_band_alone() {
-        assert!(should_trigger_selfheal(false, true));
+    fn selfheal_sustained_band_alone_no_longer_triggers_reset_909() {
+        assert!(!should_trigger_selfheal(false, true));
     }
 
     #[test]
