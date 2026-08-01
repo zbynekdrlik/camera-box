@@ -24,6 +24,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include <stdlib.h>
 #include <algorithm>
 #include <mutex>
+#include <atomic>
 #include <complex>
 #include <vector>
 #include <utility>
@@ -53,6 +54,11 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 
 /* #398 fix: rolling window for the live-display median smoothing, see `cb_smooth_offset_ns`. */
 #define CAMERA_BOX_SMOOTH_WINDOW_NS 1000000000ULL
+
+/* #690: rate limit for the periodic audio/video decode diagnostic blog() line -- see
+ * st_raw_audio_camera_box's own comment for what it answers. 10s: frequent enough to be useful
+ * within a short live-check session, rare enough to never spam the OBS log. */
+#define CAMERA_BOX_DIAG_LOG_INTERVAL_NS 10000000000ULL
 
 /* There are several reason to limit the width and the height.
  * - Since a square of 3/8 QR-code-length is calculated using uint32_t,
@@ -190,6 +196,19 @@ struct sync_test_output
 	 * desync (like the closed #529) can be diagnosed from the OBS log alone. Pure/tested in
 	 * camera-box-audio.hpp (tests/av_sync_dock_audit_log.rs) — touched only on the audio thread. */
 	camerabox::CbLockAuditTracker cb_lock_audit;
+
+	/* #690: periodic live diagnostic -- tells a live session WHY the audio index/latency never
+	 * lock (does the demod see nothing / decode garbage / decode fine but never ring-hit or
+	 * cluster) and how well the video-QR decode is doing, from the OBS log alone (no rig access
+	 * needed to read it). video counters are written on the VIDEO thread and read on the AUDIO
+	 * thread (which owns the periodic log) -- atomic, no lock needed for plain counters. Ring
+	 * hit/miss and the log-rate-limit timestamp are touched only on the audio thread. */
+	std::atomic<uint64_t> cb_video_frames_seen{0};
+	std::atomic<uint64_t> cb_video_frames_decoded{0};
+	uint64_t cb_ring_hits = 0;   // decoded audio marker whose idx8 already had a valid video ring slot
+	uint64_t cb_ring_misses = 0; // decoded audio marker with no video ring slot yet (too early / lap gap)
+	bool cb_lock_state = false;  // last-known cluster lock state (mirrors CbLockAuditTracker's own)
+	uint64_t cb_diag_last_log_ns = 0;
 
 	~sync_test_output()
 	{
@@ -688,6 +707,8 @@ static void video_marker_found(struct sync_test_output *st, uint64_t timestamp, 
  * true if any camera-box QR decoded (and records it into the ring). */
 static bool st_raw_video_camera_box_decode(struct sync_test_output *st, struct video_data *frame)
 {
+	st->cb_video_frames_seen.fetch_add(1, std::memory_order_relaxed);
+
 	camerabox::CbTopBandPlan plan = camerabox::cb_top_band_decode_plan(st->video_width, st->video_height);
 	if (plan.band_h == 0 || plan.dst_w == 0 || plan.dst_h == 0)
 		return false;
@@ -769,6 +790,8 @@ static bool st_raw_video_camera_box_decode(struct sync_test_output *st, struct v
 			found_any = true;
 		}
 	}
+	if (found_any)
+		st->cb_video_frames_decoded.fetch_add(1, std::memory_order_relaxed);
 	return found_any;
 }
 
@@ -1067,8 +1090,11 @@ static void st_raw_audio_camera_box(struct sync_test_output *st, struct audio_da
 			valid = st->cb_video_valid[idx8];
 			video_ts = st->cb_video_ts_ns[idx8];
 		}
-		if (!valid)
+		if (!valid) {
+			st->cb_ring_misses++;
 			continue;
+		}
+		st->cb_ring_hits++;
 
 		const int64_t offset_ns =
 			resolve_ring_lap_offset_ns(audio_ts, video_ts, CAMERA_BOX_RING_CYCLE_NS);
@@ -1088,11 +1114,13 @@ static void st_raw_audio_camera_box(struct sync_test_output *st, struct audio_da
 		switch (audit_ev.kind) {
 		case camerabox::CbLockEventKind::Locked:
 		case camerabox::CbLockEventKind::Updated:
+			st->cb_lock_state = true;
 			blog(LOG_INFO, "av-sync-dock: %s offset=%.1fms source=cluster matched=%zu mad=%.1fms",
 			     audit_ev.kind == camerabox::CbLockEventKind::Locked ? "LOCKED" : "UPDATED",
 			     audit_ev.offset_ms, audit_ev.matched, audit_ev.mad_ms);
 			break;
 		case camerabox::CbLockEventKind::Unlocked:
+			st->cb_lock_state = false;
 			blog(LOG_WARNING, "av-sync-dock: UNLOCKED last_offset=%.1fms source=cluster", audit_ev.offset_ms);
 			break;
 		case camerabox::CbLockEventKind::None:
@@ -1129,6 +1157,31 @@ static void st_raw_audio_camera_box(struct sync_test_output *st, struct audio_da
 			calldata_set_ptr(&cd, "data", &data);
 			signal_handler_signal(sh, "audio_marker_found", &cd);
 		}
+	}
+
+	/* #690: rate-limited (~10s) INFO diagnostic -- answers, from the OBS log alone, whether the
+	 * demod sees nothing (preambles=0), sees candidates but they're garbage (preambles>0, crc_ok=0),
+	 * decodes fine but never ring-hits (crc_ok>0, ring_hit=0 — video QR isn't decoding the same
+	 * frame ids), or ring-hits but never clusters tight enough to lock (ring_hit>0, locked=no). Also
+	 * carries the video-QR pair rate so a low decode% doesn't need a separate investigation to see.
+	 * Low-noise by construction: one line per ~10s of live audio, never per-callback. */
+	if (st->cb_diag_last_log_ns == 0 ||
+	    frames->timestamp - st->cb_diag_last_log_ns >= CAMERA_BOX_DIAG_LOG_INTERVAL_NS) {
+		st->cb_diag_last_log_ns = frames->timestamp;
+		const uint64_t vseen = st->cb_video_frames_seen.load(std::memory_order_relaxed);
+		const uint64_t vdec = st->cb_video_frames_decoded.load(std::memory_order_relaxed);
+		const double vpct = vseen > 0 ? 100.0 * (double)vdec / (double)vseen : 0.0;
+		blog(LOG_INFO,
+		     "av-sync-dock: diag video_frames=%llu video_decoded=%llu(%.1f%%) "
+		     "audio_samples=%llu preambles=%llu crc_ok=%llu crc_fail=%llu "
+		     "ring_hit=%llu ring_miss=%llu locked=%s",
+		     (unsigned long long)vseen, (unsigned long long)vdec, vpct,
+		     (unsigned long long)st->cb_audio_pushed,
+		     (unsigned long long)st->cb_audio_dec->stats.preamble_screens_passed,
+		     (unsigned long long)st->cb_audio_dec->stats.crc_ok,
+		     (unsigned long long)st->cb_audio_dec->stats.crc_fail,
+		     (unsigned long long)st->cb_ring_hits, (unsigned long long)st->cb_ring_misses,
+		     st->cb_lock_state ? "yes" : "no");
 	}
 }
 

@@ -231,6 +231,28 @@ fn cmul(a: (f64, f64), b: (f64, f64)) -> (f64, f64) {
     (a.0 * b.0 - a.1 * b.1, a.0 * b.1 + a.1 * b.0)
 }
 
+/// Diagnostic counters for one [`decode_markers_with_stats`] call — the #690 live-dock ask: tell a
+/// live session apart-and-not-guessing WHETHER the demod (a) sees no candidate onsets at all (bad
+/// audio routing/level — `preamble_screens_passed == 0`), (b) sees candidates that never decode a
+/// valid marker (garbage/noise on the mix — `crc_fail > 0`, `crc_ok == 0`), or (c) decodes valid
+/// markers fine (`crc_ok > 0`) — in which case a still-empty live "Audio Index" points further
+/// downstream (the ring lookup / rolling-cluster lock gates in `av_sync_dock.rs`, not the demod
+/// itself). Pure counting, zero effect on [`decode_markers`]'s returned markers — mirrored
+/// byte-for-byte into `camera-box-audio.hpp`'s `CbDecodeStats`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DecodeStats {
+    /// Number of sample onsets whose 2-symbol preamble screen crossed `threshold` (a candidate the
+    /// demod attempted to fully decode). Zero means the demod never saw anything resembling the
+    /// marker's preamble in this window — the most likely cause is no/near-silent signal.
+    pub preamble_screens_passed: u64,
+    /// Of those candidates, how many decoded a valid marker (0xF preamble nibble + CRC-4 pass) —
+    /// equals the length of the returned `Vec`.
+    pub crc_ok: u64,
+    /// Of those candidates, how many failed the preamble-nibble or CRC-4 check (screened onset, but
+    /// not a real marker — normal on a music-laden mix; every real marker refines to CRC-valid).
+    pub crc_fail: u64,
+}
+
 /// Detect QPSK markers in mono f32 audio → `(audio_ts_s at signal start, index)` per marker.
 ///
 /// The norihiro demod (`sync-test-output.cpp::st_raw_audio_decode_data`): IQ-demodulate each symbol
@@ -240,7 +262,22 @@ fn cmul(a: (f64, f64), b: (f64, f64)) -> (f64, f64) {
 /// signs, then CRC-gate. A cheap normalized preamble-magnitude screen finds onsets; only CRC-valid
 /// candidates with a correctly-decoded 0xF preamble are accepted. `threshold` is the preamble screen
 /// (≈0.7 for a clean aligned marker; 0.4 is a robust default). Self-consistent with `marker_signal`.
+///
+/// Thin wrapper over [`decode_markers_with_stats`] (identical decode, stats discarded) — kept so
+/// every existing caller/test is untouched by the #690 diagnostics addition.
 pub fn decode_markers(samples: &[f32], p: &AudioParams, threshold: f64) -> Vec<(f64, u8)> {
+    decode_markers_with_stats(samples, p, threshold).0
+}
+
+/// Same decode as [`decode_markers`], plus [`DecodeStats`] counting how many candidate onsets were
+/// screened, and of those, how many decoded a valid marker vs. failed the preamble/CRC check. See
+/// [`DecodeStats`] for why this exists (the #690 live-dock "audio index never locks" diagnosis).
+pub fn decode_markers_with_stats(
+    samples: &[f32],
+    p: &AudioParams,
+    threshold: f64,
+) -> (Vec<(f64, u8)>, DecodeStats) {
+    let mut stats = DecodeStats::default();
     let ar = p.sample_rate as f64;
     let f = p.carrier_hz as f64;
     let c = p.c.max(1) as f64;
@@ -248,7 +285,7 @@ pub fn decode_markers(samples: &[f32], p: &AudioParams, threshold: f64) -> Vec<(
     let sig_len = signal_len(p);
     let n = samples.len();
     if sig_len == 0 || n < sig_len || sps < 1.0 {
-        return Vec::new();
+        return (Vec::new(), stats);
     }
     // Prefix sums (f64): signal·cos, signal·sin, signal² — absolute carrier phase. Any window's
     // IQ and energy are then O(1). Absolute-vs-relative phase differs only by a constant rotation,
@@ -295,6 +332,7 @@ pub fn decode_markers(samples: &[f32], p: &AudioParams, threshold: f64) -> Vec<(
     while i + sig_len <= n {
         let refph = preamble(i);
         if cmag(refph) / norm_at(i) >= threshold {
+            stats.preamble_screens_passed += 1;
             // The screen crosses threshold on the RISING edge, up to ~one symbol before the true
             // onset. Search forward across the whole preamble span (+ a few back) for the max
             // preamble magnitude — the true onset, where the 2-symbol window aligns with the 0xF
@@ -327,14 +365,16 @@ pub fn decode_markers(samples: &[f32], p: &AudioParams, threshold: f64) -> Vec<(
                 word |= sym << (N_PAYLOAD_BITS - 2 - 2 * k as u32);
             }
             if (word >> 16) & 0xF == PREAMBLE_NIBBLE && crc4_check(word, N_PAYLOAD_BITS) == 0 {
+                stats.crc_ok += 1;
                 out.push((base as f64 / ar, ((word >> 4) & 0xFF) as u8));
                 i = base + sig_len; // markers are far apart; skip past this one
                 continue;
             }
+            stats.crc_fail += 1;
         }
         i += 1;
     }
-    out
+    (out, stats)
 }
 
 /// The marker-log CSV header: a `#`-comment recording the emit `AudioParams` (the decoder MUST
@@ -1173,6 +1213,82 @@ mod tests {
             assert_eq!(found.len(), 1, "idx {idx}: got {found:?}");
             assert_eq!(found[0].1, idx, "idx {idx} decoded as {}", found[0].1);
         }
+    }
+
+    #[test]
+    fn decode_stats_count_one_clean_marker_as_a_single_preamble_screen_and_crc_ok() {
+        // #690: a clean, isolated marker screens its preamble exactly once and decodes CRC-clean —
+        // the "demod sees the marker and decodes it fine" case (crc_ok>0, crc_fail==0).
+        let p = AudioParams::rig60();
+        let sr = p.sample_rate as usize;
+        let idx = 77u8;
+        let mut buf = vec![0.0f32; sr / 2];
+        let start = sr / 10;
+        let sig = marker_signal(idx, &p);
+        buf[start..start + sig.len()].copy_from_slice(&sig);
+        let (found, stats) = decode_markers_with_stats(&buf, &p, 0.4);
+        assert_eq!(found.len(), 1, "got {found:?}");
+        assert_eq!(found[0].1, idx);
+        assert_eq!(
+            stats.crc_ok, 1,
+            "one clean marker decodes CRC-ok exactly once: {stats:?}"
+        );
+        assert!(
+            stats.preamble_screens_passed >= stats.crc_ok,
+            "every crc_ok decode started from a passed preamble screen: {stats:?}"
+        );
+        // decode_markers (the thin wrapper) must still return exactly the same markers.
+        assert_eq!(decode_markers(&buf, &p, 0.4), found);
+    }
+
+    #[test]
+    fn decode_stats_count_silence_as_zero_preamble_screens() {
+        // #690: no signal at all -> the demod never sees a candidate onset (the "bad audio
+        // routing/level" diagnosis — preamble_screens_passed == 0, not just crc_ok == 0).
+        let p = AudioParams::rig60();
+        let buf = vec![0.0f32; p.sample_rate as usize];
+        let (found, stats) = decode_markers_with_stats(&buf, &p, 0.4);
+        assert!(found.is_empty());
+        assert_eq!(stats.preamble_screens_passed, 0, "{stats:?}");
+        assert_eq!(stats.crc_ok, 0, "{stats:?}");
+        assert_eq!(stats.crc_fail, 0, "{stats:?}");
+    }
+
+    #[test]
+    fn decode_stats_count_a_corrupted_marker_as_a_screened_crc_failure() {
+        // #690: a marker whose payload got corrupted (a real CRC-4-false-accept-adjacent case, or a
+        // clipped/garbled capture) still screens its preamble (energy is there) but must NOT decode
+        // — the "sees candidates but they're garbage" diagnosis (preamble_screens_passed>0,
+        // crc_ok==0, crc_fail>0).
+        let p = AudioParams::rig60();
+        let sr = p.sample_rate as usize;
+        let idx = 200u8;
+        let mut buf = vec![0.0f32; sr / 2];
+        let start = sr / 10;
+        let mut sig = marker_signal(idx, &p);
+        // Negate one WHOLE symbol window (≈1/10th of the signal, well past the 2-symbol preamble)
+        // — this flips exactly that symbol's 2 decoded bits (both re/im signs invert under the
+        // linear IQ sum), corrupting an index-field bit while leaving the preamble energy (and
+        // hence the screen) intact. A partial-sample flip is not enough: the onset-refine search
+        // self-corrects small localized corruption (confirmed empirically), so the corruption must
+        // span a whole symbol to reliably break the CRC check.
+        let sym5_start = sig.len() * 5 / 10;
+        let sym5_end = sig.len() * 6 / 10;
+        for s in sig[sym5_start..sym5_end].iter_mut() {
+            *s = -*s;
+        }
+        buf[start..start + sig.len()].copy_from_slice(&sig);
+        let (found, stats) = decode_markers_with_stats(&buf, &p, 0.4);
+        assert!(
+            found.is_empty(),
+            "a corrupted marker must not decode a valid index: {found:?}"
+        );
+        assert!(
+            stats.preamble_screens_passed > 0,
+            "the demod must still see the corrupted marker's energy: {stats:?}"
+        );
+        assert_eq!(stats.crc_ok, 0, "{stats:?}");
+        assert!(stats.crc_fail > 0, "{stats:?}");
     }
 
     #[test]

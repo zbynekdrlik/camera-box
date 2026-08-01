@@ -82,6 +82,36 @@ sidesteps needing to know or guess the absolute pass/fail value of the OTHER gat
 duplicate-tick frames at density 0.20, well above `frozen_leg::FROZEN_DENSITY_THRESHOLD`, plus an
 unattributed self-heal event on a cambox name that never appears in the schedule).
 
+## #909 (2026-08-01) — the SUSTAINED band's own escalation was the harm; decouple it from the reset, don't chase the "hardware"
+
+The #914 report-only decoupling above treated `frozen_leg`/`self_heal_reset` as an unavoidable
+hardware fault to tolerate. Follow-up forensics on the SAME cam1 incident (issue 909) found the
+actual root cause one layer upstream: `should_trigger_selfheal` OR-combines TWO independent bands
+(jitter #656 + sustained #717) into ONE `SelfHealDecision::Heal` USB reset. cam1's chronic
+62-64fps deviation trips ONLY the sustained band (the jitter band's tolerance was deliberately
+widened by #685 so ShadowCast 2's model-typical wobble never reaches it) — and the genlock
+decimation gate in `src/main.rs` (emit the first capture at/after each DanteSync wall-clock
+boundary, drop the rest) already absorbs ANY capture over-rate into exact NDI output BY DESIGN.
+So the sustained-band trigger was resetting a card for behavior the appliance's own architecture
+already neutralizes — the USB reset firing mid-measured-window was the actual defect the E2E gate
+was catching, not a hardware fault worth replacing the card over.
+
+**Fix:** `should_trigger_selfheal(jitter_confirmed, _sustained_confirmed)` now returns
+`jitter_confirmed` only — the sustained band is still fully computed and logged
+(`tracing::info!`, informational-only) at its `src/main.rs` call site, never silently dropped,
+just decoupled from the reset action (the same "ALLOW never SUPPRESS" shape as #914 above). Only
+a genuinely out-of-envelope jitter-band deviation still triggers an actual USB reset.
+
+**The generalizable lesson, sharpened:** before accepting "the hardware is failing" as the
+conclusion from a self-heal/gate-failure investigation, check whether the SELF-HEAL ACTION
+ITSELF (not the condition it fires on) is the thing causing the observed harm — and whether an
+existing, unrelated piece of architecture (here: the decimation gate, built for an entirely
+different reason — genlock alignment) already tolerates the condition the action was reacting to.
+#914's report-only bypass was the right STOPGAP while that wasn't yet understood; #909 is the
+actual fix, and #914's bypass stays in place (restore path on #905) independent of this — it
+guards a DIFFERENT residual risk (a genuine jitter-band device fault still slipping through a
+short E2E window), not the sustained-band case this commit resolves.
+
 ## Scope the mid-recording scan to EVERY active camera, not just the source camera
 
 `capture_rate_selfheal` runs identically on every `camera-box` process — a scan that only queries

@@ -70,17 +70,30 @@ inline uint32_t cb_crc4_check(uint32_t data, uint32_t size)
 	return data;
 }
 
-/* Detect QPSK markers in mono f32 audio -> (audio_ts_s at signal start, index) per marker. A
- * byte-for-byte port of `crate::qpsk_marker::decode_markers`: absolute-phase prefix sums (cos/sin/
- * energy), a normalized 2-symbol preamble screen, a forward refine to the true onset, preamble
- * derotation, per-symbol quadrant bits, then a 0xF-preamble + CRC-4 gate. `c` is cycles-per-symbol
- * (1 at the rig). Keep IN SYNC with the Rust; the self-test cross-checks it. */
-inline std::vector<std::pair<double, uint8_t>>
-cb_decode_markers(const std::vector<float> &samples, uint32_t sample_rate, uint32_t carrier_hz,
-                  uint32_t c, double threshold)
+/* #690 -- diagnostic counters for one cb_decode_markers_with_stats() call (mirror of
+ * qpsk_marker::DecodeStats). Pure counting, zero effect on the returned markers -- lets a live
+ * session tell apart "the demod sees nothing" (preamble_screens_passed==0) from "sees candidates
+ * but they're garbage" (crc_fail>0, crc_ok==0) from "decodes fine" (crc_ok>0, in which case a
+ * still-empty live Audio Index points further downstream, at the ring lookup / cluster lock). */
+struct CbDecodeStats {
+	uint64_t preamble_screens_passed = 0;
+	uint64_t crc_ok = 0;
+	uint64_t crc_fail = 0;
+};
+
+/* Detect QPSK markers in mono f32 audio -> (audio_ts_s at signal start, index) per marker, PLUS
+ * CbDecodeStats. A byte-for-byte port of `crate::qpsk_marker::decode_markers_with_stats`:
+ * absolute-phase prefix sums (cos/sin/energy), a normalized 2-symbol preamble screen, a forward
+ * refine to the true onset, preamble derotation, per-symbol quadrant bits, then a 0xF-preamble +
+ * CRC-4 gate. `c` is cycles-per-symbol (1 at the rig). Keep IN SYNC with the Rust; the self-test
+ * cross-checks it. */
+inline std::pair<std::vector<std::pair<double, uint8_t>>, CbDecodeStats>
+cb_decode_markers_with_stats(const std::vector<float> &samples, uint32_t sample_rate, uint32_t carrier_hz,
+                             uint32_t c, double threshold)
 {
 	typedef std::complex<double> cd;
 	std::vector<std::pair<double, uint8_t>> out;
+	CbDecodeStats stats;
 
 	double ar = (double)sample_rate;
 	double f = (double)carrier_hz;
@@ -89,7 +102,7 @@ cb_decode_markers(const std::vector<float> &samples, uint32_t sample_rate, uint3
 	size_t sig_len = cb_signal_len(sample_rate, carrier_hz, (c < 1 ? 1 : c));
 	size_t n = samples.size();
 	if (sig_len == 0 || n < sig_len || sps < 1.0)
-		return out;
+		return std::make_pair(out, stats);
 
 	double w = 2.0 * CB_PI * f / ar;
 	std::vector<double> pc(n + 1, 0.0), ps(n + 1, 0.0), pe(n + 1, 0.0);
@@ -135,6 +148,7 @@ cb_decode_markers(const std::vector<float> &samples, uint32_t sample_rate, uint3
 	while (i + sig_len <= n) {
 		cd refph = preamble(i);
 		if (std::abs(refph) / norm_at(i) >= threshold) {
+			stats.preamble_screens_passed++;
 			size_t span = (size_t)std::ceil(2.0 * sps);
 			size_t lo = i >= 4 ? i - 4 : 0;
 			size_t base = i;
@@ -161,19 +175,35 @@ cb_decode_markers(const std::vector<float> &samples, uint32_t sample_rate, uint3
 				word |= sym << (CB_N_PAYLOAD_BITS - 2 - 2 * k);
 			}
 			if (((word >> 16) & 0xF) == CB_PREAMBLE_NIBBLE && cb_crc4_check(word, CB_N_PAYLOAD_BITS) == 0) {
+				stats.crc_ok++;
 				out.push_back(std::make_pair((double)base / ar, (uint8_t)((word >> 4) & 0xFF)));
 				i = base + sig_len; // markers are far apart; skip past this one
 				continue;
 			}
+			stats.crc_fail++;
 		}
 		i += 1;
 	}
-	return out;
+	return std::make_pair(out, stats);
+}
+
+/* Thin wrapper over cb_decode_markers_with_stats() (identical decode, stats discarded) -- kept so
+ * every existing caller (StreamingMarkerDecoder below, the self-test) is untouched by the #690
+ * diagnostics addition. Mirrors qpsk_marker::decode_markers. */
+inline std::vector<std::pair<double, uint8_t>>
+cb_decode_markers(const std::vector<float> &samples, uint32_t sample_rate, uint32_t carrier_hz,
+                  uint32_t c, double threshold)
+{
+	return cb_decode_markers_with_stats(samples, sample_rate, carrier_hz, c, threshold).first;
 }
 
 /* Streaming QPSK marker detector (mirror av_sync_dock::StreamingMarkerDecoder): a rolling window of
  * the most recent raw mono samples, re-decoded each push(), each marker reported ONCE by absolute
- * stream-sample index (dedup). */
+ * stream-sample index (dedup). `stats` accumulates CbDecodeStats across every push() -- see the
+ * Rust field doc (av_sync_dock::StreamingMarkerDecoder::stats) for the deliberate over-count
+ * caveat (each push() re-decodes the whole rolling window, so a real onset is re-screened/
+ * re-counted on every push() until it ages out of `capacity` -- fine for "zero vs nonzero" and
+ * rough relative magnitude, not an exact per-marker count). */
 struct StreamingMarkerDecoder {
 	uint32_t sample_rate;
 	uint32_t carrier_hz;
@@ -185,6 +215,7 @@ struct StreamingMarkerDecoder {
 	bool have_last;          // last_reported present?
 	uint64_t last_reported;  // absolute index of the last reported marker start
 	uint64_t min_gap;
+	CbDecodeStats stats;
 
 	StreamingMarkerDecoder(uint32_t sr, uint32_t f, uint32_t cc, double thr, size_t cap, uint64_t gap)
 		: sample_rate(sr), carrier_hz(f), c(cc), threshold(thr), capacity(cap < 1 ? 1 : cap),
@@ -203,8 +234,12 @@ struct StreamingMarkerDecoder {
 		}
 		std::vector<std::pair<uint64_t, uint8_t>> out;
 		double sr = (double)sample_rate;
-		std::vector<std::pair<double, uint8_t>> found =
-			cb_decode_markers(buf, sample_rate, carrier_hz, c, threshold);
+		std::pair<std::vector<std::pair<double, uint8_t>>, CbDecodeStats> decoded =
+			cb_decode_markers_with_stats(buf, sample_rate, carrier_hz, c, threshold);
+		std::vector<std::pair<double, uint8_t>> &found = decoded.first;
+		stats.preamble_screens_passed += decoded.second.preamble_screens_passed;
+		stats.crc_ok += decoded.second.crc_ok;
+		stats.crc_fail += decoded.second.crc_fail;
 		for (size_t k = 0; k < found.size(); k++) {
 			uint64_t abs = origin + (uint64_t)std::llround(found[k].first * sr);
 			bool is_new = !have_last || abs > last_reported + min_gap;
