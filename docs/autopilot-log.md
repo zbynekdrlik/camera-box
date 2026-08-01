@@ -6744,7 +6744,7 @@ SIGN CONVENTION (`residual_ms > 0` nudges `bias_ppm` UP) is a documented, bounde
 NOT live-validated choice; see the module doc comment + the playbook for the flip-both-sides
 recovery procedure if the first live watchdog run shows it working backwards.
 
-PR: dev→main (opened this session, see the PR list on the repo for the current number).
+PR: #919 (dev→main, opened this session).
 
 Playbook: `.claude/rules/asrc-bench-harness.md` -- new "#806's outer loop" section (the 5-piece
 chain, the in-process-cache-vs-reload-from-disk gotcha, the sign-convention flip procedure).
