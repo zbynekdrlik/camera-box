@@ -120,6 +120,42 @@ pub fn top_band_decode_plan(frame_w: u32, frame_h: u32) -> TopBandPlan {
     }
 }
 
+/// #921: caches the LAST (dst_w, dst_h) a quirc decode context was resized to, so a caller can skip
+/// a redundant `quirc_resize()` when the decode-plan geometry is unchanged from the previous call —
+/// true on every video frame after the first in the live dock, since `frame_w`/`frame_h` (and
+/// therefore [`top_band_decode_plan`]'s output) never change for the lifetime of the OBS raw-video
+/// output. The vendored `quirc_resize()` (`vendor/av-sync-dock/deps/quirc/lib/quirc.c`) has NO
+/// early-out for an unchanged size — it unconditionally `calloc`s 3 fresh buffers (image / pixels /
+/// flood_fill_vars) and frees the old ones on EVERY call. At the dock's 60fps that is 180 alloc+free
+/// calls/second for a size that is identical from the first frame onward: real allocator churn over
+/// an hours-long production session — a plausible contributor to video-QR decode reliability
+/// WORSENING with dock uptime (issue 921's own diagnostic: 55.6% shortly after launch, ~2% at
+/// steady state), distinct from the decode geometry/algorithm itself (proven correct on real
+/// captured frames — see `tests/av_sync_dock_video_decode_921.rs`). Mirrored byte-for-byte in
+/// `camerabox::CbQrResizeCache` (`camera-box-video.hpp`).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct QrResizeCache {
+    last_w: u32,
+    last_h: u32,
+    initialized: bool,
+}
+
+impl QrResizeCache {
+    /// Returns `true` iff a resize to `(w, h)` is actually needed given the cache's current state,
+    /// and updates the cache to `(w, h)` regardless of the return value — so the NEXT call reflects
+    /// reality even if the caller ignores a `true` result and resizes anyway. On an explicit resize
+    /// FAILURE the caller must reset the cache to `QrResizeCache::default()` (uninitialized) so the
+    /// very next call retries fresh — matching today's shipped retry-every-frame-on-failure
+    /// behavior instead of wrongly assuming a failed resize succeeded.
+    pub fn resize_needed(&mut self, w: u32, h: u32) -> bool {
+        let needed = !self.initialized || self.last_w != w || self.last_h != h;
+        self.last_w = w;
+        self.last_h = h;
+        self.initialized = true;
+        needed
+    }
+}
+
 /// Otsu's global threshold (0..=255) maximizing between-class variance of a gray histogram, with the
 /// standard plateau-midpoint refinement (a clean black/white capture cuts BETWEEN the two peaks, not
 /// at the dark peak). PURE + total: an empty/flat histogram returns 128 (a neutral mid-gray cut).
@@ -545,6 +581,37 @@ mod tests {
         assert_eq!(p.dst_h, 144);
         let d = top_band_decode_plan(1, 1);
         assert!(d.band_h >= 1 && d.dst_w >= 1 && d.dst_h >= 1, "{d:?}");
+    }
+
+    #[test]
+    fn qr_resize_cache_needs_resize_only_when_size_actually_changes() {
+        let mut c = QrResizeCache::default();
+        // First call: always needed (uninitialized).
+        assert!(c.resize_needed(760, 307));
+        // Repeated identical size: never needed again.
+        assert!(!c.resize_needed(760, 307));
+        assert!(!c.resize_needed(760, 307));
+        assert!(!c.resize_needed(760, 307));
+        // A genuinely different size (e.g. a real geometry change): needed again, once.
+        assert!(c.resize_needed(760, 300));
+        assert!(!c.resize_needed(760, 300));
+        // Width-only and height-only changes both count.
+        assert!(c.resize_needed(700, 300));
+        assert!(c.resize_needed(700, 250));
+        assert!(!c.resize_needed(700, 250));
+    }
+
+    #[test]
+    fn qr_resize_cache_reset_forces_a_fresh_resize() {
+        let mut c = QrResizeCache::default();
+        assert!(c.resize_needed(760, 307));
+        assert!(!c.resize_needed(760, 307));
+        // Simulate the caller resetting on an explicit resize failure.
+        c = QrResizeCache::default();
+        assert!(
+            c.resize_needed(760, 307),
+            "a reset cache must ask for a resize again, even at the SAME size as before the reset"
+        );
     }
 
     #[test]

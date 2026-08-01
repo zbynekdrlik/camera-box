@@ -58,6 +58,36 @@ inline CbTopBandPlan cb_top_band_decode_plan(uint32_t frame_w, uint32_t frame_h)
 	return p;
 }
 
+/* #921: caches the LAST (dst_w, dst_h) a quirc decode context was resized to, so a caller can skip
+ * a redundant quirc_resize() when the decode-plan geometry is unchanged from the previous call --
+ * true on every video frame after the first in the live dock, since video_width/video_height (and
+ * therefore cb_top_band_decode_plan's output) never change for the lifetime of the OBS raw-video
+ * output. quirc_resize() (deps/quirc/lib/quirc.c) has NO early-out for an unchanged size -- it
+ * unconditionally callocs 3 fresh buffers (image/pixels/flood_fill_vars) and frees the old ones on
+ * EVERY call, even when asked for the identical size. At the dock's 60fps that is 180 alloc/free
+ * calls/second for a size that never changes: real allocator churn a many-hours-long production
+ * session accumulates. Mirror: src/av_sync_dock.rs::QrResizeCache. */
+struct CbQrResizeCache {
+	uint32_t last_w = 0;
+	uint32_t last_h = 0;
+	bool initialized = false;
+};
+
+/* Returns true iff a resize to (w, h) is actually needed given the cache's current state, and
+ * updates the cache to (w, h) regardless of the return value -- so the NEXT call reflects reality
+ * even if the caller ignores a `true` result and resizes anyway. On an explicit resize FAILURE the
+ * caller must reset the cache to CbQrResizeCache() (uninitialized) so the very next call retries
+ * fresh -- matching the pre-#921 retry-every-frame-on-failure behavior instead of wrongly assuming
+ * a failed resize succeeded. */
+inline bool cb_qr_resize_needed(CbQrResizeCache &cache, uint32_t w, uint32_t h)
+{
+	bool needed = !cache.initialized || cache.last_w != w || cache.last_h != h;
+	cache.last_w = w;
+	cache.last_h = h;
+	cache.initialized = true;
+	return needed;
+}
+
 /* Otsu's global threshold (0..=255) with the plateau-midpoint refinement — a byte-for-byte port of
  * av_sync_dock::otsu_threshold (itself the proven src/probe/qr.rs threshold). Empty/flat -> 128. */
 inline uint8_t cb_otsu_threshold(const uint64_t hist[256])

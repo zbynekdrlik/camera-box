@@ -305,6 +305,26 @@ int main()
 		CHECK(dst[0] == 0 && dst[1] == 255 && dst[2] == 255 && dst[3] == 0, "box downscale block means");
 	}
 
+	/* 8. #921: CbQrResizeCache mirrors av_sync_dock::QrResizeCache -- needed only when the size
+	 * actually changes; a reset forces a fresh resize even at the SAME size as before the reset. */
+	{
+		CbQrResizeCache c;
+		CHECK(cb_qr_resize_needed(c, 760, 307), "resize cache: first call always needed");
+		CHECK(!cb_qr_resize_needed(c, 760, 307), "resize cache: repeated identical size not needed");
+		CHECK(!cb_qr_resize_needed(c, 760, 307), "resize cache: still not needed");
+		CHECK(cb_qr_resize_needed(c, 760, 300), "resize cache: a real size change is needed again");
+		CHECK(!cb_qr_resize_needed(c, 760, 300), "resize cache: settles at the new size");
+		CHECK(cb_qr_resize_needed(c, 700, 300), "resize cache: width-only change is needed");
+		CHECK(cb_qr_resize_needed(c, 700, 250), "resize cache: height-only change is needed");
+
+		CbQrResizeCache c2;
+		CHECK(cb_qr_resize_needed(c2, 760, 307), "resize cache: warm up");
+		CHECK(!cb_qr_resize_needed(c2, 760, 307), "resize cache: warmed up, not needed");
+		c2 = CbQrResizeCache();
+		CHECK(cb_qr_resize_needed(c2, 760, 307),
+		      "resize cache: a reset must force a fresh resize, even at the SAME size as before");
+	}
+
 	if (g_failures == 0) {
 		std::printf("camera-box-selftest: ALL PASS\n");
 		return 0;
