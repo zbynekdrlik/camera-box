@@ -219,6 +219,14 @@ pub const TIME_CONSTANT_S: f64 = 20.0;
 /// this window the servo has not seen enough of the source's real clock to trust an estimate.
 pub const MIN_LOCK_S: f64 = 5.0;
 
+/// Hard bound on the OUTER-loop (issue #806) bias this servo will accept, in ppm — the ticket's
+/// own "max +/-10 ppm uprava od inner-loop odhadu" safety rail. Applied at BOTH the setter (here)
+/// and, redundantly, at the [`crate::asrc_outer_loop::OuterLoopGuard`] that produces the bias
+/// value in the first place — belt+suspenders, since this field is also settable directly from
+/// outside this crate (the vendored C mirror / the obs-websocket control channel), and neither
+/// caller should be trusted alone to have already clamped.
+pub const OUTER_BIAS_MAX_PPM: f64 = 10.0;
+
 /// The REAL per-source ASRC servo issue #803 ports into vendored libobs
 /// (`vendor/obs-studio/libobs/media-io/asrc-compensator.c` — kept a line-by-line equivalent
 /// mirror of this struct's logic; see that file's own doc comment). Unlike [`EmaRateCompensator`]
@@ -243,6 +251,10 @@ pub struct RealtimeAsrcCompensator {
     /// Cumulative master-clock time observed since construction — gates the `MIN_LOCK_S` startup
     /// delay.
     elapsed_lock_s: f64,
+    /// The issue #806 OUTER-loop bias, in ppm — folded additively into `estimated_ppm` before the
+    /// `MAX_PPM` clamp (see [`Self::compensate`]). Zero (no-op) until something calls
+    /// [`Self::set_outer_bias_ppm`]; a fresh compensator behaves EXACTLY as before #806.
+    outer_bias_ppm: f64,
 }
 
 impl RealtimeAsrcCompensator {
@@ -253,6 +265,7 @@ impl RealtimeAsrcCompensator {
             estimated_ppm: 0.0,
             applied_ppm: 0.0,
             elapsed_lock_s: 0.0,
+            outer_bias_ppm: 0.0,
         }
     }
 
@@ -266,6 +279,19 @@ impl RealtimeAsrcCompensator {
     /// for tests/telemetry.
     pub fn applied_ppm(&self) -> f64 {
         self.applied_ppm
+    }
+
+    /// Set the issue #806 outer-loop bias, in ppm — clamped to `+/-OUTER_BIAS_MAX_PPM`
+    /// unconditionally (the caller's own clamping, e.g. [`crate::asrc_outer_loop::OuterLoopGuard`],
+    /// is never trusted alone). Takes effect on the NEXT [`Self::compensate`] call; inert (folded
+    /// into a target that is forced to 0.0) until the inner loop's own `MIN_LOCK_S` has elapsed.
+    pub fn set_outer_bias_ppm(&mut self, bias_ppm: f64) {
+        self.outer_bias_ppm = bias_ppm.clamp(-OUTER_BIAS_MAX_PPM, OUTER_BIAS_MAX_PPM);
+    }
+
+    /// The outer-loop bias currently in effect, in ppm — exposed for tests/telemetry.
+    pub fn outer_bias_ppm(&self) -> f64 {
+        self.outer_bias_ppm
     }
 }
 
@@ -299,11 +325,14 @@ impl AsrcCompensator for RealtimeAsrcCompensator {
         self.elapsed_lock_s += master_block_s;
 
         // Default-safe: no lock yet -> target zero compensation, never guess from a
-        // still-converging estimate. Once locked, clamp the estimate to the hard ppm bound before
-        // ever using it as a target.
+        // still-converging estimate (issue #806: the outer-loop bias is folded in HERE, so it is
+        // just as inert as the inner estimate before lock — never applied on its own). Once
+        // locked, add the outer-loop bias to the inner estimate and clamp the SUM to the hard ppm
+        // bound before ever using it as a target.
         let target_ppm = if self.elapsed_lock_s < MIN_LOCK_S {
             0.0
         } else {
+            // TEMP RED STUB (#806): outer_bias_ppm not yet folded in.
             self.estimated_ppm.clamp(-MAX_PPM, MAX_PPM)
         };
 
@@ -573,6 +602,87 @@ mod tests {
         assert!(
             max_abs_offset_ms(&trace) > GATE_MAX_OFFSET_MS,
             "a pass-through stub must still fail the realtime servo's gate bound"
+        );
+    }
+
+    // ---- #806: the OUTER-loop bias extension on RealtimeAsrcCompensator ------------------------
+
+    /// A fresh compensator's outer bias defaults to 0 ppm — a #806-unaware caller (every existing
+    /// call site as of this PR) sees EXACTLY the pre-#806 behavior.
+    #[test]
+    fn outer_bias_defaults_to_zero() {
+        let compensator = RealtimeAsrcCompensator::new();
+        assert_eq!(compensator.outer_bias_ppm(), 0.0);
+    }
+
+    /// The setter clamps to +/-OUTER_BIAS_MAX_PPM even when handed a wildly out-of-range value —
+    /// this field is also settable from outside this crate (the C mirror / obs-websocket), so the
+    /// clamp must hold regardless of whether the caller already clamped.
+    #[test]
+    fn set_outer_bias_ppm_clamps_to_the_hard_bound() {
+        let mut compensator = RealtimeAsrcCompensator::new();
+        compensator.set_outer_bias_ppm(9_999.0);
+        assert_eq!(compensator.outer_bias_ppm(), OUTER_BIAS_MAX_PPM);
+        compensator.set_outer_bias_ppm(-9_999.0);
+        assert_eq!(compensator.outer_bias_ppm(), -OUTER_BIAS_MAX_PPM);
+    }
+
+    /// A nonzero outer bias, once the inner loop has locked and converged on a PERFECT (0 ppm)
+    /// clock, must show up in `applied_ppm` — proving the bias actually reaches the correction
+    /// target rather than being a no-op field.
+    #[test]
+    fn outer_bias_shifts_applied_ppm_once_locked_on_a_perfect_clock() {
+        let mut compensator = RealtimeAsrcCompensator::new();
+        compensator.set_outer_bias_ppm(7.0);
+        let clock = DriftingAudioClock::new(0.0); // a perfectly-matched clock: estimated_ppm -> 0
+                                                  // Long enough for MIN_LOCK_S to elapse AND for the slew limiter (5 ppm/s) to fully catch
+                                                  // up to a 7ppm target (needs >=1.4s of slew headroom; give it ample margin).
+        for _ in 0..120 {
+            let raw = clock.raw_advance(1.0);
+            let _ = compensator.compensate(raw, 1.0);
+        }
+        assert!(
+            (compensator.applied_ppm() - 7.0).abs() < 1e-6,
+            "expected the 7ppm outer bias to fully reach applied_ppm on a perfectly-matched \
+             clock once converged, got {}ppm",
+            compensator.applied_ppm()
+        );
+    }
+
+    /// The outer bias is INERT before the inner loop's own `MIN_LOCK_S` — same default-safe
+    /// guarantee the inner estimate itself already has, now proven to also cover the bias term.
+    #[test]
+    fn outer_bias_is_inert_before_lock() {
+        let mut compensator = RealtimeAsrcCompensator::new();
+        compensator.set_outer_bias_ppm(OUTER_BIAS_MAX_PPM);
+        // One block, well inside the MIN_LOCK_S startup window.
+        let raw = DriftingAudioClock::new(0.0).raw_advance(1.0);
+        let _ = compensator.compensate(raw, 1.0);
+        assert_eq!(
+            compensator.applied_ppm(),
+            0.0,
+            "expected zero applied compensation before the {MIN_LOCK_S}s lock window elapses, \
+             even with a nonzero outer bias set"
+        );
+    }
+
+    /// The inner estimate and the outer bias combined must still respect the overall `MAX_PPM`
+    /// hard clamp — an already-saturated inner estimate plus the full +/-10ppm outer bias must
+    /// never push the correction TARGET past `MAX_PPM`.
+    #[test]
+    fn outer_bias_combined_with_a_saturated_inner_estimate_still_respects_max_ppm() {
+        let mut compensator = RealtimeAsrcCompensator::new();
+        compensator.set_outer_bias_ppm(OUTER_BIAS_MAX_PPM);
+        let extreme_clock = DriftingAudioClock::new(10_000.0);
+        for _ in 0..7200 {
+            let raw = extreme_clock.raw_advance(1.0);
+            let _ = compensator.compensate(raw, 1.0);
+        }
+        assert!(
+            compensator.applied_ppm() <= MAX_PPM + 1e-6,
+            "expected applied compensation to never exceed the {MAX_PPM}ppm hard bound even with \
+             the outer bias saturated, got {}ppm",
+            compensator.applied_ppm()
         );
     }
 }
