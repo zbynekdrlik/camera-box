@@ -26,12 +26,20 @@ set -euo pipefail
 #     --qrqpsk-recording   <path to the paired QR/QPSK TEST-mode stream recording> \
 #     --qrqpsk-marker-log  <path to that recording's cam2 QPSK emit-log CSV> \
 #     --verdict-bin <path to the recording-verdict binary> \
+#     --asset-baseline-ms <the pinned asset's own intrinsic A/V offset, ms> \
 #     [--workdir <scratch dir, default: a mktemp -d>]
 #
 # `--verdict-bin` is REQUIRED, with NO local-build default -- recording-verdict needs `--features
 # probe` to even exist as a binary, and this repo's Local Build Policy forbids building that
 # locally (Tier 0 -- CI builds it, download the probe-tools-linux-amd64 artifact). Mirrors
 # recording-verdict-on-imag.sh's own --verdict-bin (no baked-in default there either).
+#
+# `--asset-baseline-ms` is REQUIRED (issue 930 supervisor decision, issuecomment-5153948268): the
+# pinned lipsync asset itself measures an intrinsic -80ms A/V offset (SyncNet conf 8.0, two
+# independent seek methods -- see assets/lipsync/PROVENANCE.md), baked into the SOURCE clip, not
+# the rig. The raw aggregated SyncNet-on-rig-recording offset is `intrinsic_asset +
+# rig_chain_delta`; this flag's value is subtracted BEFORE the verdict so the cross-check compares
+# the RIG-ADDED delta against the QR/QPSK measurement, not a structurally-shifted total.
 #
 # Prints the final JSON (recording-verdict's own --av-sync + lipsync_cross_check output) to
 # stdout and a one-line human summary to stderr.
@@ -93,6 +101,18 @@ lipsync_mean_offset_from_report_json() {
   python3 -c 'import json,sys; print(json.loads(sys.argv[1])["mean_offset_ms"])' "$json_text"
 }
 
+# lipsync_subtract_baseline <aggregated_ms> <baseline_ms> -- issue 930 supervisor decision
+# (issuecomment-5153948268): the pinned lipsync asset itself measures an intrinsic -80ms A/V
+# offset (SyncNet conf 8.0, two independent seek methods -- assets/lipsync/PROVENANCE.md), baked
+# into the SOURCE clip rather than the rig. `aggregated_ms` (the raw SyncNet-on-rig-recording
+# mean) equals `intrinsic_asset + rig_chain_delta`; this returns the RIG-ADDED delta alone, which
+# is what the QR/QPSK cross-check verdict must compare against. Plain subtraction -- awk (already
+# available everywhere bash is) rather than adding a bc/jq dependency for one arithmetic op.
+lipsync_subtract_baseline() {
+  local aggregated_ms="$1" baseline_ms="$2"
+  awk -v a="$aggregated_ms" -v b="$baseline_ms" 'BEGIN { printf "%.10g\n", (a - b) }'
+}
+
 # --------------------------------------------------------------------------------------------- #
 # Orchestration (real network/filesystem effects) -- exercised end-to-end only by the supervisor
 # on the real rig, per issue 930's own scope boundary (this worker's dispatch delivers the code +
@@ -101,6 +121,7 @@ lipsync_mean_offset_from_report_json() {
 
 main() {
   local lipsync_recording="" qrqpsk_recording="" qrqpsk_marker_log="" verdict_bin=""
+  local asset_baseline_ms=""
   local workdir=""
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -108,14 +129,16 @@ main() {
       --qrqpsk-recording) qrqpsk_recording="$2"; shift 2 ;;
       --qrqpsk-marker-log) qrqpsk_marker_log="$2"; shift 2 ;;
       --verdict-bin) verdict_bin="$2"; shift 2 ;;
+      --asset-baseline-ms) asset_baseline_ms="$2"; shift 2 ;;
       --workdir) workdir="$2"; shift 2 ;;
-      *) echo "usage: $0 --lipsync-recording <p> --qrqpsk-recording <p> --qrqpsk-marker-log <p> --verdict-bin <p> [--workdir <d>]" >&2; exit 2 ;;
+      *) echo "usage: $0 --lipsync-recording <p> --qrqpsk-recording <p> --qrqpsk-marker-log <p> --verdict-bin <p> --asset-baseline-ms <ms> [--workdir <d>]" >&2; exit 2 ;;
     esac
   done
   [ -n "$lipsync_recording" ] || { echo "FAIL: --lipsync-recording is required" >&2; exit 2; }
   [ -n "$qrqpsk_recording" ] || { echo "FAIL: --qrqpsk-recording is required" >&2; exit 2; }
   [ -n "$qrqpsk_marker_log" ] || { echo "FAIL: --qrqpsk-marker-log is required" >&2; exit 2; }
   [ -n "$verdict_bin" ] || { echo "FAIL: --verdict-bin is required -- download the CI probe-tools-linux-amd64 artifact's recording-verdict binary (Tier 0: never build --features probe locally)" >&2; exit 2; }
+  [ -n "$asset_baseline_ms" ] || { echo "FAIL: --asset-baseline-ms is required -- the pinned lipsync asset has an intrinsic A/V offset (see assets/lipsync/PROVENANCE.md's Baseline section) that must be subtracted before the verdict (930, issuecomment-5153948268)" >&2; exit 2; }
   [ -f "$lipsync_recording" ] || { echo "FAIL: $lipsync_recording not found" >&2; exit 1; }
   [ -f "$qrqpsk_recording" ] || { echo "FAIL: $qrqpsk_recording not found" >&2; exit 1; }
   [ -f "$qrqpsk_marker_log" ] || { echo "FAIL: $qrqpsk_marker_log not found" >&2; exit 1; }
@@ -167,12 +190,14 @@ main() {
   local report_json="$workdir/lipsync-syncnet-agg.json"
   echo "[lipsync-cross-check] aggregating $calibration_log -> $report_json" >&2
   eval "$(lipsync_aggregate_cmd "$py" "$calibrate_script" "$calibration_log" "$report_json")" 1>&2
-  local syncnet_offset_ms
+  local syncnet_offset_ms rig_added_ms
   syncnet_offset_ms="$(lipsync_mean_offset_from_report_json "$(cat "$report_json")")"
-  echo "[lipsync-cross-check] SyncNet aggregated offset: ${syncnet_offset_ms}ms" >&2
+  rig_added_ms="$(lipsync_subtract_baseline "$syncnet_offset_ms" "$asset_baseline_ms")"
+  echo "[lipsync-cross-check] SyncNet aggregated offset (raw, includes asset baseline): ${syncnet_offset_ms}ms" >&2
+  echo "[lipsync-cross-check] asset baseline: ${asset_baseline_ms}ms -> rig-added offset (baseline-corrected): ${rig_added_ms}ms" >&2
 
   echo "[lipsync-cross-check] cross-checking against the paired QR/QPSK recording" >&2
-  eval "$(lipsync_verdict_cmd "$verdict_bin" "$qrqpsk_recording" "$qrqpsk_marker_log" "$syncnet_offset_ms")"
+  eval "$(lipsync_verdict_cmd "$verdict_bin" "$qrqpsk_recording" "$qrqpsk_marker_log" "$rig_added_ms")"
 
   if [ "$made_workdir" = true ]; then
     rm -rf "$workdir"

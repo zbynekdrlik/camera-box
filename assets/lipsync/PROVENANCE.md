@@ -46,3 +46,14 @@ its own intrinsic offset is expected small but is NOT assumed zero; whatever thi
 reports is the source asset's own residual, separate from anything the rig's playback/capture
 chain adds. Record the baseline's `AV offset` line in the paired-run evidence comment on issue
 930 alongside the cross-check result.
+
+### Baseline handling (measured + wired into the cross-check)
+
+The trimmed asset's own intrinsic offset was measured at **-80 ms** (SyncNet conf 8.0),
+confirmed with two independent seek methods on 2026-08-02 (the pinned recipe's input-seek AND a
+control re-trim using an exact output-seek — same result both ways, so the offset belongs to the
+source broadcast mix itself, not the trim recipe; see issuecomment-5153948268 on issue 930).
+`scripts/lipsync-cross-check.sh` takes this value via its required `--asset-baseline-ms` flag and
+subtracts it from the raw aggregated SyncNet offset BEFORE computing the cross-check verdict, so
+the verdict compares the rig-ADDED offset against the QR/QPSK measurement rather than a total
+that structurally includes this asset-intrinsic -80 ms.
