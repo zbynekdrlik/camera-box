@@ -130,13 +130,36 @@ impl OuterLoopGuard {
     /// (window not yet full, average within bounds, or already saturated at the clamp in the
     /// needed direction).
     pub fn observe(&mut self, residual_ms: f64) -> Option<CorrectionEvent> {
-        // TEMP RED STUB (#806): window bookkeeping kept (so the field stays genuinely used), but
-        // the actual sustained-threshold decision is not yet implemented.
         self.window.push(residual_ms);
         if self.window.len() > WINDOW_N {
             self.window.remove(0);
         }
-        None
+        if self.window.len() < WINDOW_N {
+            // Not enough sustained history yet — never act on a partial window.
+            return None;
+        }
+
+        let avg_residual_ms = self.window.iter().sum::<f64>() / self.window.len() as f64;
+        if avg_residual_ms.abs() <= RESIDUAL_THRESHOLD_MS {
+            return None;
+        }
+
+        let direction = if avg_residual_ms > 0.0 { 1.0 } else { -1.0 };
+        let candidate =
+            (self.bias_ppm + direction * STEP_PPM).clamp(-OUTER_BIAS_MAX_PPM, OUTER_BIAS_MAX_PPM);
+        if candidate == self.bias_ppm {
+            // Already saturated at the clamp in the direction this residual would push toward —
+            // no genuine change, so no telemetry event (nothing new to report/apply).
+            return None;
+        }
+
+        let previous_bias_ppm = self.bias_ppm;
+        self.bias_ppm = candidate;
+        Some(CorrectionEvent {
+            avg_residual_ms,
+            previous_bias_ppm,
+            new_bias_ppm: candidate,
+        })
     }
 }
 

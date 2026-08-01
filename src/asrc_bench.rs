@@ -332,8 +332,7 @@ impl AsrcCompensator for RealtimeAsrcCompensator {
         let target_ppm = if self.elapsed_lock_s < MIN_LOCK_S {
             0.0
         } else {
-            // TEMP RED STUB (#806): outer_bias_ppm not yet folded in.
-            self.estimated_ppm.clamp(-MAX_PPM, MAX_PPM)
+            (self.estimated_ppm + self.outer_bias_ppm).clamp(-MAX_PPM, MAX_PPM)
         };
 
         // Slew-limit the APPLIED correction toward the target — caps how fast the resample-ratio
