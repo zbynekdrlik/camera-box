@@ -249,6 +249,10 @@ static void *st_create(obs_data_t *, obs_output_t *output)
 		"void audio_marker_found(ptr data)",
 		"void qrcode_found(int timestamp, int x0, int y0, int x1, int y1, int x2, int y2, int x3, int y3)",
 		"void sync_found(ptr data)",
+		/* #926: the Locked/Unlocked half of the SAME cb_lock_audit transitions already blog()'d --
+		 * so the dock UI can show a plain "locked, aligning" / "no test signal, holding" status
+		 * without polling. Deliberately NOT fired on every Updated (no coarse state change). */
+		"void lock_state_changed(bool locked)",
 		NULL,
 	};
 	signal_handler_add_array(obs_output_get_signal_handler(output), signals);
@@ -637,6 +641,19 @@ static void signal_sync_found(obs_output_t *ctx, const struct sync_index *si)
 
 	calldata_set_ptr(&cd, "data", const_cast<sync_index *>(si));
 	signal_handler_signal(sh, "sync_found", &cd);
+}
+
+/* #926: fired on the Locked/Unlocked half of a cb_lock_audit transition -- see the signal's own
+ * registration comment in st_create(). */
+static void signal_lock_state_changed(obs_output_t *ctx, bool locked)
+{
+	uint8_t stack[64];
+	struct calldata cd;
+	calldata_init_fixed(&cd, stack, sizeof(stack));
+	auto *sh = obs_output_get_signal_handler(ctx);
+
+	calldata_set_bool(&cd, "locked", locked);
+	signal_handler_signal(sh, "lock_state_changed", &cd);
 }
 
 static void sync_index_found(struct sync_test_output *st, int index, uint64_t ts, bool is_video, uint32_t index_max)
@@ -1167,6 +1184,12 @@ static void st_raw_audio_camera_box(struct sync_test_output *st, struct audio_da
 			blog(LOG_INFO, "av-sync-dock: %s offset=%.1fms source=cluster matched=%zu mad=%.1fms",
 			     audit_ev.kind == camerabox::CbLockEventKind::Locked ? "LOCKED" : "UPDATED",
 			     audit_ev.offset_ms, audit_ev.matched, audit_ev.mad_ms);
+			/* #926: fire the coarse locked/unlocked status signal only on the ACTUAL boundary
+			 * crossing (Locked), not on every Updated -- Updated means "still locked, offset
+			 * moved", never a state change the dock's plain-language status text needs to know
+			 * about again. */
+			if (audit_ev.kind == camerabox::CbLockEventKind::Locked)
+				signal_lock_state_changed(st->context, true);
 			/* #926: on a genuine (fresh or meaningfully-changed) trustworthy lock, let the
 			 * corrector decide whether CAMERA_BOX_LOCK_SOURCE_NAME's genlock_latency_ms_src needs
 			 * nudging so the offset above never rests negative ("audio early"). Reads the CURRENT
@@ -1193,6 +1216,7 @@ static void st_raw_audio_camera_box(struct sync_test_output *st, struct audio_da
 		case camerabox::CbLockEventKind::Unlocked:
 			st->cb_lock_state = false;
 			blog(LOG_WARNING, "av-sync-dock: UNLOCKED last_offset=%.1fms source=cluster", audit_ev.offset_ms);
+			signal_lock_state_changed(st->context, false);
 			/* #926: no test signal / real event -- FREEZE, never chase drift on program material
 			 * (requirement 5). decide(locked=false, ...) is an explicit no-op by construction
 			 * (never touches the actuator or the corrector's own state); called here purely so the
