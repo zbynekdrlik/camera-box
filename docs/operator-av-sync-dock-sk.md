@@ -176,11 +176,14 @@ docku; opravu treba robiť podľa reálne zachyteného snímku, nie naslepo. Pos
 funkčne overený zo zdrojového kódu; finálne živé potvrdenie "dock sa zamkol a ukázal reálne číslo
 Latency" čaká na ďalší živý beh s bežiacim mbc (pozri #690 na GitHube).
 
-**Automatická korekcia (#926, pridané 2026-08-01):** kým dock ukazuje stav "Locked", sám naťahuje
-"NDI 2ME PGM → Latency (ms)" tak, aby výsledné "Latency" nikdy neostalo záporné ("Audio early" ako
-trvalý stav je fyzikálne nezmyselné — zvuk je vždy pomalší ako obraz). Krok po kroku sa hodnota
-mení najviac o pár ms naraz (aby to nebolo skokové/počuteľné), takže po veľkej odchýlke to chvíľu
-trvá, kým sa doladí — to je normálne. Keď testovací signál prestane bežať (krok 7), táto korekcia
-sa NATRVALO zamkne a dock ju už neupravuje počas živého vysielania. Zdrojovo:
+**Automatická korekcia (#926, pridané 2026-08-01, doladené 2026-08-01 po hĺbkovej revízii):** kým
+dock ukazuje stav "Locked", sám naťahuje "NDI 2ME PGM → Latency (ms)" tak, aby výsledné "Latency"
+nikdy neostalo záporné ("Audio early" ako trvalý stav je fyzikálne nezmyselné — zvuk je vždy
+pomalší ako obraz). Cieľom NIE JE presne 0ms — meranie má bežný šum ~desiatky ms, takže korekcia
+cieli na malú bezpečnú rezervu nad nulou (odvodenú od aktuálnej rozptýlenosti merania, min. 1ms),
+aby ju obyčajný šum merania nevrátil naspäť do zápornej hodnoty. Krok po kroku sa hodnota mení
+najviac o pár ms naraz (aby to nebolo skokové/počuteľné), takže po veľkej odchýlke to chvíľu trvá,
+kým sa doladí — to je normálne. Keď testovací signál prestane bežať (krok 7), táto korekcia sa
+NATRVALO zamkne a dock ju už neupravuje počas živého vysielania. Zdrojovo:
 `vendor/av-sync-dock/src/camera-box-audio.hpp` (`CbDockLockCorrector`) +
 `src/av_sync_dock.rs` (`DockLockCorrector`, referenčná Rust implementácia s testami).
