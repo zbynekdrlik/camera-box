@@ -482,7 +482,9 @@ impl DockLockCorrector {
         };
         // Clamp BEFORE the later `as i64` casts (finding 5): offset_ms is finite but could still
         // be astronomically large, which would otherwise risk an overflowing add below.
-        let g = (offset_ms - margin).floor().clamp(-1_000_000.0, 1_000_000.0);
+        let g = (offset_ms - margin)
+            .floor()
+            .clamp(-1_000_000.0, 1_000_000.0);
         if g == 0.0 {
             return DockLockAction::Hold; // already ts_ms in [margin, margin + 1) -- nothing to do
         }
@@ -833,7 +835,9 @@ mod tests {
                     "must land at the MINIMUM 1ms margin, not a bare 0: ts_new={ts_new}"
                 );
             }
-            DockLockAction::Hold => panic!("10ms of excess lateness must be corrected even with mad=0"),
+            DockLockAction::Hold => {
+                panic!("10ms of excess lateness must be corrected even with mad=0")
+            }
         }
     }
 
@@ -848,7 +852,9 @@ mod tests {
                     "margin must clamp at DOCK_CLUSTER_MAX_MAD_MS: ts_new={ts_new}"
                 );
             }
-            DockLockAction::Hold => panic!("100ms of excess lateness must be corrected even with an absurd mad"),
+            DockLockAction::Hold => {
+                panic!("100ms of excess lateness must be corrected even with an absurd mad")
+            }
         }
     }
 
@@ -874,14 +880,18 @@ mod tests {
             DockLockAction::Apply(v) => {
                 assert_eq!(v, 955, "huge positive offset -- step-capped increase")
             }
-            DockLockAction::Hold => panic!("a huge positive offset must still trigger a correction"),
+            DockLockAction::Hold => {
+                panic!("a huge positive offset must still trigger a correction")
+            }
         }
         let mut c2 = DockLockCorrector::new(5, 30.0);
         match c2.decide(true, -1e18, 5.0, 950, 1_000_000_000) {
             DockLockAction::Apply(v) => {
                 assert_eq!(v, 945, "huge negative offset -- step-capped decrease")
             }
-            DockLockAction::Hold => panic!("a huge negative offset must still trigger a correction"),
+            DockLockAction::Hold => {
+                panic!("a huge negative offset must still trigger a correction")
+            }
         }
     }
 
@@ -966,7 +976,10 @@ mod tests {
         let mut c = DockLockCorrector::new(50, 30.0);
         match c.decide(true, 42.0, 5.0, 950, 1_000_000_000) {
             DockLockAction::Apply(v) => {
-                assert_eq!(v, 987, "must increase delay to close the gap down to the 5ms margin")
+                assert_eq!(
+                    v, 987,
+                    "must increase delay to close the gap down to the 5ms margin"
+                )
             }
             DockLockAction::Hold => {
                 panic!("42ms of excess audio-lateness must trigger a correction")
@@ -1005,7 +1018,10 @@ mod tests {
         }
         let before = last.expect("locked at -52.2ms before rebase");
         assert!((before.offset_ms - (-52.2)).abs() < 1e-9, "{before:?}");
-        assert!(before.mad_ms < 1.0, "tight cluster before rebase: {before:?}");
+        assert!(
+            before.mad_ms < 1.0,
+            "tight cluster before rebase: {before:?}"
+        );
 
         // -52.2ms is audio-early, so the closed-form correction REDUCES the delay by 53ms
         // (delta_applied = floor(-52.2) = -53) -- every retained sample must shift UP by 53ms
@@ -1061,8 +1077,8 @@ mod tests {
             let mut trace = Vec::new();
             for _ in 0..14 {
                 t_ns += (DOCK_LOCK_MIN_REAPPLY_S as u64 + 1) * 1_000_000_000; // past cooldown
-                // Every tick a fresh raw +42ms sample arrives -- deliberately UNCHANGED regardless
-                // of branch, isolating rebase()'s own contribution (see doc comment above).
+                                                                              // Every tick a fresh raw +42ms sample arrives -- deliberately UNCHANGED regardless
+                                                                              // of branch, isolating rebase()'s own contribution (see doc comment above).
                 let est = cluster.push(t_ns, 42.0).expect("must stay locked");
                 let action = corrector.decide(true, est.offset_ms, est.mad_ms, current_delay, t_ns);
                 if let DockLockAction::Apply(new_delay) = action {
