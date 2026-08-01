@@ -287,3 +287,35 @@ FILE alone (`cargo test --test <file_stem>`); if it passes clean there AND the s
 green on CI, it's a local parallel-load flake — note it, don't file a ticket for an unreproduced
 single flake, and don't let it block an otherwise-verified change. Only escalate if the failure
 reproduces in isolation or CI itself goes red.
+
+## A red hardware Full-path E2E on YOUR PR can be caused by ANOTHER concurrent ticket's LIVE FLEET STATE drift — not your diff, and not a git-checkout race (#690/#923)
+
+The top-level CLAUDE.md's shared-checkout GOTCHA covers a `git`-level race (another worker's
+not-yet-fixed RED commit riding along on a shared push). This is a DIFFERENT, hardware-level
+variant with zero git interleaving involved: the `Full-path E2E (recording-based · hardware ·
+self-hosted dev1)` workflow's `[0/8]` preflight includes a **cross-box genlock-parity check**
+(`genlock_parity`, #756) that refuses the WHOLE run if the fleet's boxes (strih/stream/imag) are
+not all on the SAME genlock build SHA — a condition that can flip between two runs with **zero
+code change on either side**, purely because a completely unrelated ticket's rig-ops deploy
+hot-swapped a build onto one box but not the others in the meantime.
+
+**Live incident (2026-08-01, PR #922 / issue #690):** a PR touching ONLY `vendor/av-sync-dock/`
+(A/V-sync dock, unrelated to genlock builds) failed its required Full-path E2E with
+`genlock_parity DRIFT (... strih=b986152... stream=b986152... imag=9948ed8...)`. The immediately
+PRIOR Full-path E2E run (a different, unrelated PR) had passed ~1h45m earlier — proving the drift
+appeared in that window, from some OTHER process's rig deploy, not from this PR's diff.
+
+**Before debugging your own diff over a Full-path E2E failure:** read the failing preflight
+step's OWN log line — `genlock_parity` (or any of the other `[0/8]` drift-guard/DanteSync/
+version-integrity facets) failing means the RIG STATE is the problem, not your code, and no
+amount of re-reading your diff will explain it. Check whether the immediately-prior E2E run (same
+workflow, `gh run list --workflow "Full-path E2E..." --limit 5`) passed — if it did, and your diff
+doesn't touch genlock/build/deploy scripts, the drift happened independently of your work.
+
+**What to do:** file it as ITS OWN issue (never bundle it into your ticket's PR — a rig-ops
+fleet redeploy is categorically different work, per `drive-rig-steps-in-supervisor.md`-class
+scoping), reference the standing durable-fix ticket if one exists (#789 tracks "one canonical
+build fleet-wide" as the actual fix for this recurring class — see the closed #818 for the
+pattern's history), and leave your own PR open/unmerged pending that separate fix. Do NOT
+attempt the rig hot-swap yourself from an autopilot-worker session scoped to code+CI — that is a
+live rig-ops action outside a code ticket's scope, same as any other rig deploy decision.

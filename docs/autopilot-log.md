@@ -6748,3 +6748,37 @@ PR: #919 (dev→main, opened this session).
 
 Playbook: `.claude/rules/asrc-bench-harness.md` -- new "#806's outer loop" section (the 5-piece
 chain, the in-process-cache-vs-reload-from-disk gotcha, the sign-convention flip procedure).
+
+## #690 rescope (2026-08-01) — A/V-sync dock auto-start + live decode diagnostics
+
+Design comment: https://github.com/zbynekdrlik/camera-box/issues/690#issuecomment-5150679665
+(posted before commit `002fdc234`, per the design-before-code gate).
+
+Commits (dev): `d4f89c071` version bump 1.7.0-dev.405; `002fdc234` feat -- mirror QPSK decode
+diagnostics (`DecodeStats`) Rust + C++ + self-test; `aceeda664` feat -- surface live audio/video
+decode diagnostics in the dock's OBS log (ring hit/miss + video-frame counters + rate-limited
+INFO line); `e6ccdc2d9` feat -- auto-start the A/V-sync dock output on OBS load
+(`OBS_FRONTEND_EVENT_FINISHED_LOADING`); `27d9e9d83` docs -- operator doc update.
+
+New tests: `qpsk_marker::tests::decode_stats_count_*` (3), `av_sync_dock::tests::
+streaming_decoder_stats_are_zero_on_silence_and_nonzero_once_a_marker_streams_through`,
+`tests/av_sync_dock_autostart_guard.rs` (3), `tests/av_sync_dock_audio_diag_stats.rs` (2), plus
+extended `vendor/av-sync-dock/test/camera-box-selftest.cpp` (DecodeStats + StreamingMarkerDecoder
+stats cases). All feature-shaped (no bug fix in this ticket), no RED/GREEN pair needed.
+
+Video-QR decode rate (~2%, `Video Index ... 98% missed`) investigated -- no evident code bug,
+deliberately NOT tuned blind (this repo's own `pattern-change-needs-decode-fixture.md` HARD
+rule needs a real captured-frame fixture first). Filed as its own follow-up: #921.
+
+PR: #922 (dev->main). CI fully green (Lint/Test/Build/Coverage/Security/Shellcheck/Drift-guard,
+Windows genlock FAST compile gate). BLOCKED, unmerged: the hardware Full-path E2E required check
+failed on an UNRELATED fleet genlock-lineage drift (imag behind strih/stream) that appeared
+between the prior green E2E run and this one -- filed as #923 (rig-ops redeploy, tracked
+separately, durable fix already tracked as #789). Not fixed by this worker (out of scope: code +
+CI only, per this ticket's dispatch).
+
+Playbook: `.claude/rules/ci-testing-gotchas.md` -- new section on a hardware Full-path E2E
+failing from ANOTHER concurrent ticket's live fleet-state drift (genlock_parity), distinct from
+the existing git-checkout-race gotcha -- how to tell it apart from a real regression and what to
+do about it (file separately, never bundle into your own PR, never rig-hot-swap from a
+code-scoped worker session).
