@@ -320,20 +320,29 @@ pub fn is_interface_level_busid(busid: &str) -> bool {
     busid.contains(':')
 }
 
-/// #717 — two-band capture-rate self-heal trigger. Self-heal should fire once EITHER band
-/// confirms a defect: the existing wide JITTER band (`capture_rate_health::
-/// tolerance_pct_for_model` + `capture_rate_health::CAPTURE_RATE_WARN_WINDOWS`, 30s) OR the new
-/// narrow SUSTAINED band (`capture_rate_health::sustained_tolerance_pct_for_model` +
-/// `capture_rate_health::SUSTAINED_WARN_WINDOWS`, 60s). #685 widened ShadowCast 2's jitter floor
-/// to 10% so its characteristic short-lived quantization wobble (band (a)) never even reaches
-/// this decision — but that same wide floor ALSO swallowed a genuinely SUSTAINED, reset-fixable
-/// defect (band (b): #674's chronic 63.9-64.0fps, held for an entire recording). For every model
-/// except ShadowCast 2 the sustained band uses the SAME tolerance as the jitter band
-/// (`sustained_tolerance_pct_for_model` degenerately returns `tolerance_pct_for_model` for them),
-/// so their sustained arm is a strict superset of their own jitter arm's own 30s trigger and can
-/// never fire earlier — #717 changes NOTHING about their self-heal cadence.
-pub fn should_trigger_selfheal(jitter_confirmed: bool, sustained_confirmed: bool) -> bool {
-    jitter_confirmed || sustained_confirmed
+/// #909 — RESCOPED from #717's original two-band OR (history below, kept for context). The
+/// user's architectural ruling on #909: a grabber's own crystal/timer free-running against its
+/// HDMI input is EXPECTED, and `src/main.rs`'s genlock decimation gate (emit the first capture
+/// at/after each DanteSync wall-clock boundary, drop the rest — `CAMERA_BOX_GENLOCK_FPS`) already
+/// absorbs any capture over-rate into exact NDI output by design. cam1's own live incident proved
+/// the RESET was the actual harm, not the over-rate: a USB reset firing mid-measured-window
+/// produced an ~8.3s stale/copy gap that the E2E gate then misclassified as `frozen_leg` (#909's
+/// own evidence, 6 resets/hour, none holding). So only the JITTER band (`capture_rate_health::
+/// tolerance_pct_for_model` + `CAPTURE_RATE_WARN_WINDOWS`, 30s) — a deviation genuinely BEYOND
+/// even #685's widened per-model tolerance, i.e. a real device fault — still escalates to a USB
+/// reset. The SUSTAINED band (`sustained_tolerance_pct_for_model` + `SUSTAINED_WARN_WINDOWS`,
+/// 60s) stays fully computed and LOGGED at the call site (`src/main.rs`, informational only) —
+/// never silently dropped, only decoupled from the reset action, mirroring `self_heal_
+/// attribution.rs`'s "ALLOW never SUPPRESS" precedent (#895/#914).
+///
+/// `sustained_confirmed` is intentionally unread here (kept as a parameter for call-site
+/// symmetry — the caller always computes both bands — and so a genuinely new escalation-worthy
+/// band could be added here later without reshaping every call site). Original #717 history: for
+/// every model except ShadowCast 2 the sustained band uses the SAME tolerance as the jitter band,
+/// so their sustained arm was always a strict superset of their jitter arm and could never fire
+/// earlier — #717 (and this #909 rescope) changes NOTHING about their self-heal cadence.
+pub fn should_trigger_selfheal(jitter_confirmed: bool, _sustained_confirmed: bool) -> bool {
+    jitter_confirmed
 }
 
 /// Perform the actual USB reset on the capture device backing `video_device_path` (e.g.

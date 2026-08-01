@@ -1244,32 +1244,40 @@ async fn run_capture_loop(
                             camera_box::capture_rate_health::SUSTAINED_WARN_WINDOWS,
                         );
 
+                        // #909 — the SUSTAINED band alone (a chronic over-rate that stays inside
+                        // the wide jitter envelope, e.g. cam1's 62-64fps) is EXPECTED grabber
+                        // behavior, not a device fault: the genlock decimation gate above already
+                        // absorbs any capture over-rate into exact NDI output by design. Log it
+                        // informational-only — never escalate to a USB reset on this band alone
+                        // (a reset firing mid-measured-window is what actually broke #909's own
+                        // E2E runs). Only when the JITTER band ALSO confirms (genuinely beyond
+                        // #685's widened per-model tolerance) does the block below fire.
+                        if sustained_confirmed && !jitter_confirmed {
+                            tracing::info!(
+                                "#717 capture-delivery-rate SUSTAINED band confirmed (informational only, see #909): {:.2} fps captured vs {:.2} fps configured/negotiated (>{:.1}% deviation sustained for {} consecutive report windows, ~{}s) — inside {}'s wide {:.1}% jitter-tolerant envelope; the genlock decimation gate absorbs this over-rate into exact NDI output by design, so NO USB reset is triggered",
+                                cap_fps,
+                                configured_capture_fps,
+                                sustained_rate_tolerance_pct,
+                                consecutive_sustained_breaches,
+                                consecutive_sustained_breaches as u64 * 5,
+                                grabber_model,
+                                capture_rate_tolerance_pct
+                            );
+                        }
+
                         if camera_box::capture_rate_selfheal::should_trigger_selfheal(
                             jitter_confirmed,
                             sustained_confirmed,
                         ) {
-                            if jitter_confirmed {
-                                tracing::warn!(
-                                    "#656 capture-delivery-rate DEFECTIVE: {:.2} fps captured vs {:.2} fps configured/negotiated (>{:.1}% deviation sustained for {} consecutive report windows, ~{}s, {} tolerance) — USB-reset the capture device (see #656, #685)",
-                                    cap_fps,
-                                    configured_capture_fps,
-                                    capture_rate_tolerance_pct,
-                                    consecutive_rate_breaches,
-                                    consecutive_rate_breaches as u64 * 5,
-                                    grabber_model
-                                );
-                            } else {
-                                tracing::warn!(
-                                    "#717 capture-delivery-rate SUSTAINED defect: {:.2} fps captured vs {:.2} fps configured/negotiated (>{:.1}% deviation sustained for {} consecutive report windows, ~{}s) — inside {}'s wide {:.1}% jitter-tolerant envelope but PERSISTENT beyond the #717 60s sustained bar, reset-fixable per #642/#674 evidence — USB-reset the capture device (see #717, #674, #685, #663)",
-                                    cap_fps,
-                                    configured_capture_fps,
-                                    sustained_rate_tolerance_pct,
-                                    consecutive_sustained_breaches,
-                                    consecutive_sustained_breaches as u64 * 5,
-                                    grabber_model,
-                                    capture_rate_tolerance_pct
-                                );
-                            }
+                            tracing::warn!(
+                                "#656 capture-delivery-rate DEFECTIVE: {:.2} fps captured vs {:.2} fps configured/negotiated (>{:.1}% deviation sustained for {} consecutive report windows, ~{}s, {} tolerance) — USB-reset the capture device (see #656, #685)",
+                                cap_fps,
+                                configured_capture_fps,
+                                capture_rate_tolerance_pct,
+                                consecutive_rate_breaches,
+                                consecutive_rate_breaches as u64 * 5,
+                                grabber_model
+                            );
 
                             // #663 — self-heal: the #656 fix (a manual USB reset) is only
                             // TEMPORARY — the same defect recurred within hours, three times in
