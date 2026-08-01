@@ -7296,6 +7296,20 @@ double obs_source_get_asrc_outer_bias_ppm(const obs_source_t *source)
 		       : 0.0;
 }
 
+/* camera-box #926: read-only telemetry -- the servo's own live estimated/applied ppm, already
+ * maintained fields of struct asrc_compensator (asrc_process_audio() writes them every audio
+ * callback via asrc_compensator_compensate()). Plain forwards, no clamp/logic of their own; same
+ * torn-read tolerance as every other ASRC accessor in this file. */
+double obs_source_get_asrc_estimated_ppm(const obs_source_t *source)
+{
+	return obs_source_valid(source, "obs_source_get_asrc_estimated_ppm") ? source->asrc.estimated_ppm : 0.0;
+}
+
+double obs_source_get_asrc_applied_ppm(const obs_source_t *source)
+{
+	return obs_source_valid(source, "obs_source_get_asrc_applied_ppm") ? source->asrc.applied_ppm : 0.0;
+}
+
 void obs_source_set_async_unbuffered(obs_source_t *source, bool unbuffered)
 {
 	if (!obs_source_valid(source, "obs_source_set_async_unbuffered"))
