@@ -145,7 +145,8 @@ fn main_fails_loud_on_missing_required_args() {
 }
 
 /// `main` must fail loud when the given recordings don't exist, before ever calling ffmpeg/
-/// SyncNet/recording-verdict.
+/// SyncNet/recording-verdict. All required flags given (incl. --verdict-bin) so this test
+/// exercises the FILE-EXISTENCE check specifically, not an earlier missing-flag check.
 #[test]
 fn main_fails_loud_on_nonexistent_recordings() {
     let out = Command::new("bash")
@@ -156,7 +157,36 @@ fn main_fails_loud_on_nonexistent_recordings() {
         .arg("/nonexistent/qrqpsk.mp4")
         .arg("--qrqpsk-marker-log")
         .arg("/nonexistent/markers.csv")
+        .arg("--verdict-bin")
+        .arg("/nonexistent/recording-verdict")
         .output()
         .expect("spawn bash");
     assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("lipsync.mp4") || stderr.contains("not found"),
+        "930: must fail on the missing recording, not some earlier unrelated check: {stderr}"
+    );
+}
+
+/// `--verdict-bin` must be REQUIRED with no local-build default -- recording-verdict needs
+/// `--features probe` (Tier 0 forbids building that locally; CI/download only).
+#[test]
+fn verdict_bin_is_required_with_no_local_build_default() {
+    let out = Command::new("bash")
+        .arg(script())
+        .arg("--lipsync-recording")
+        .arg("/tmp/a.mp4")
+        .arg("--qrqpsk-recording")
+        .arg("/tmp/b.mp4")
+        .arg("--qrqpsk-marker-log")
+        .arg("/tmp/c.csv")
+        .output()
+        .expect("spawn bash");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--verdict-bin"),
+        "930: missing --verdict-bin must fail with a clear message: {stderr}"
+    );
 }

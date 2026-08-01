@@ -25,8 +25,13 @@ set -euo pipefail
 #     --lipsync-recording  <path to the lipsync-test-mode stream recording> \
 #     --qrqpsk-recording   <path to the paired QR/QPSK TEST-mode stream recording> \
 #     --qrqpsk-marker-log  <path to that recording's cam2 QPSK emit-log CSV> \
-#     [--verdict-bin <path to the CI-built recording-verdict binary, default: target/debug/recording-verdict>] \
+#     --verdict-bin <path to the recording-verdict binary> \
 #     [--workdir <scratch dir, default: a mktemp -d>]
+#
+# `--verdict-bin` is REQUIRED, with NO local-build default -- recording-verdict needs `--features
+# probe` to even exist as a binary, and this repo's Local Build Policy forbids building that
+# locally (Tier 0 -- CI builds it, download the probe-tools-linux-amd64 artifact). Mirrors
+# recording-verdict-on-imag.sh's own --verdict-bin (no baked-in default there either).
 #
 # Prints the final JSON (recording-verdict's own --av-sync + lipsync_cross_check output) to
 # stdout and a one-line human summary to stderr.
@@ -92,8 +97,7 @@ lipsync_mean_offset_from_report_json() {
 # --------------------------------------------------------------------------------------------- #
 
 main() {
-  local lipsync_recording="" qrqpsk_recording="" qrqpsk_marker_log=""
-  local verdict_bin="$REPO_ROOT/target/debug/recording-verdict"
+  local lipsync_recording="" qrqpsk_recording="" qrqpsk_marker_log="" verdict_bin=""
   local workdir=""
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -102,16 +106,17 @@ main() {
       --qrqpsk-marker-log) qrqpsk_marker_log="$2"; shift 2 ;;
       --verdict-bin) verdict_bin="$2"; shift 2 ;;
       --workdir) workdir="$2"; shift 2 ;;
-      *) echo "usage: $0 --lipsync-recording <p> --qrqpsk-recording <p> --qrqpsk-marker-log <p> [--verdict-bin <p>] [--workdir <d>]" >&2; exit 2 ;;
+      *) echo "usage: $0 --lipsync-recording <p> --qrqpsk-recording <p> --qrqpsk-marker-log <p> --verdict-bin <p> [--workdir <d>]" >&2; exit 2 ;;
     esac
   done
   [ -n "$lipsync_recording" ] || { echo "FAIL: --lipsync-recording is required" >&2; exit 2; }
   [ -n "$qrqpsk_recording" ] || { echo "FAIL: --qrqpsk-recording is required" >&2; exit 2; }
   [ -n "$qrqpsk_marker_log" ] || { echo "FAIL: --qrqpsk-marker-log is required" >&2; exit 2; }
+  [ -n "$verdict_bin" ] || { echo "FAIL: --verdict-bin is required -- download the CI probe-tools-linux-amd64 artifact's recording-verdict binary (Tier 0: never build --features probe locally)" >&2; exit 2; }
   [ -f "$lipsync_recording" ] || { echo "FAIL: $lipsync_recording not found" >&2; exit 1; }
   [ -f "$qrqpsk_recording" ] || { echo "FAIL: $qrqpsk_recording not found" >&2; exit 1; }
   [ -f "$qrqpsk_marker_log" ] || { echo "FAIL: $qrqpsk_marker_log not found" >&2; exit 1; }
-  [ -x "$verdict_bin" ] || { echo "FAIL: $verdict_bin not found/executable -- build/download the CI probe artifact first" >&2; exit 1; }
+  [ -x "$verdict_bin" ] || { echo "FAIL: $verdict_bin not found/executable -- download the CI probe-tools-linux-amd64 artifact first" >&2; exit 1; }
 
   local made_workdir=false
   if [ -z "$workdir" ]; then
