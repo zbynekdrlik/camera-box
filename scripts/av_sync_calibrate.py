@@ -42,6 +42,10 @@ from pathlib import Path
 # Reuse the proven obs-websocket v5 connection + RPC helpers (obs_burn_filter.py convention).
 from obs_phase2 import _conn, _rpc  # noqa: E402
 
+# #805 -- reuse av_sync_measure.py's own constants directly (never duplicate/mirror them --
+# CONF_MIN/FRAME_MS drifting apart silently would be worse than an import).
+from av_sync_measure import CONF_MIN, FRAME_MS  # noqa: E402
+
 # OBS property name for the per-source genlock latency (PROP_GENLOCK_LATENCY_MS_SRC in
 # ndi-source.cpp, DistroAV fork — the "Latency (ms)" slider per source).
 GENLOCK_SRC_LATENCY_KEY = "genlock_latency_ms_src"
@@ -248,14 +252,163 @@ def write_last_json(json_path: Path, source: str, offset_ms: float, applied_late
     return payload
 
 
+# ---------------------------------------------------------------------------
+# #805 -- baseline calibration: aggregate N confident SyncNet windows (av_sync_measure.py,
+# #801) into ONE trustworthy constant for the 'NDI 2ME PGM' latency knob, now that ASRC (#913)
+# keeps drift dead and the knob is a fixed value instead of a per-run correction target.
+# Fully offline -- no OBS connection needed, consumes a JSONL window log.
+# ---------------------------------------------------------------------------
+
+# Student's t two-tailed 95% critical values, keyed by degrees of freedom (n-1). Falls back to
+# the normal approximation (1.96) for df >= 30; for an in-between df not in the table, picks the
+# NEAREST TABULATED df AT OR BELOW (slightly wider CI, never narrower than warranted).
+_T95_TABLE = {
+    1: 12.706, 2: 4.303, 3: 3.182, 4: 2.776, 5: 2.571, 6: 2.447, 7: 2.365, 8: 2.306,
+    9: 2.262, 10: 2.228, 15: 2.131, 20: 2.086, 25: 2.060, 29: 2.045,
+}
+
+
+def _t95(df: int) -> float:
+    """Two-tailed 95% Student's-t critical value for `df` degrees of freedom."""
+    if df in _T95_TABLE:
+        return _T95_TABLE[df]
+    if df >= 30:
+        return 1.96
+    candidates = [k for k in _T95_TABLE if k <= df]
+    return _T95_TABLE[max(candidates)] if candidates else _T95_TABLE[1]
+
+
+def parabolic_subframe_offset(y_minus1: float, y0: float, y_plus1: float) -> float:
+    """Sub-bin vertex of the parabola through 3 equally-spaced points, as a fractional offset
+    in [-0.5, 0.5] bins from the CENTER point (`y0`). Standard 3-point extremum interpolation
+    (the same technique used for FFT peak-bin refinement) -- `y_minus1`/`y0`/`y_plus1` are the
+    SyncNet mean-distance values at bins (argmin-1, argmin, argmin+1); the true (sub-bin) offset
+    of the minimum is `argmin + parabolic_subframe_offset(...)`.
+
+    Falls back to 0.0 when the three points are collinear (no curvature to interpolate -- would
+    otherwise divide by ~0). Clamps to +/-0.5: the vertex formula assumes `y0` IS the local
+    extremum among the three; a curve that violates that precondition can produce a raw vertex
+    outside the center bin's own half-width, which would double-count into a neighboring bin.
+    """
+    denom = y_minus1 - 2.0 * y0 + y_plus1
+    if abs(denom) < 1e-12:
+        return 0.0
+    delta = 0.5 * (y_minus1 - y_plus1) / denom
+    return max(-0.5, min(0.5, delta))
+
+
+def window_offset_ms(record: dict, frame_ms: int = FRAME_MS) -> float:
+    """One SyncNet window's offset in ms, sub-frame-refined when a `dist_curve` is present.
+
+    `record`: `{"offset_frames": int, "confidence": float, "dist_curve": [y-1, y0, y+1]?}`.
+    `dist_curve`, when present, MUST be the 3 SyncNet per-shift mean-distance values centered on
+    the reported `offset_frames` bin. `av_sync_measure.py` does not yet expose SyncNet's internal
+    per-shift `dist` array (see the #805 design comment: SyncNetInstance.evaluate() returns it,
+    but the vendored `syncnet_python` checkout isn't in this repo to verify a wrapper against) --
+    so `dist_curve` is normally absent today and this returns the plain frame-quantized value.
+    The field exists so a future producer can slot in sub-frame data with zero API changes.
+    """
+    offset_frames = record["offset_frames"]
+    curve = record.get("dist_curve")
+    if curve and len(curve) == 3:
+        delta = parabolic_subframe_offset(curve[0], curve[1], curve[2])
+        return (offset_frames + delta) * frame_ms
+    return offset_frames * frame_ms
+
+
+def aggregate_syncnet_windows(
+    records: list, conf_min: float = CONF_MIN, frame_ms: int = FRAME_MS,
+) -> dict:
+    """Filter to confident windows, average their offsets, report a 95% CI.
+
+    Averaging N independent +/-`frame_ms`-quantized (or sub-frame-refined) measurements shrinks
+    the confidence interval via the standard error of the mean -- the #805 claim ("kvantizačný
+    šum +/-40ms sa priemerom zráža na +/-10-20ms"). Fails LOUD when zero windows meet `conf_min`
+    -- an empty calibration must never silently report a bogus 0ms baseline.
+    """
+    confident = [r for r in records if r.get("confidence", 0.0) >= conf_min]
+    if not confident:
+        raise SystemExit(
+            f"[av-sync] no confident windows (>= {conf_min}) among {len(records)} total -- "
+            f"cannot calibrate; capture more soundcheck audio or lower --conf-min"
+        )
+    offsets = [window_offset_ms(r, frame_ms) for r in confident]
+    n = len(offsets)
+    mean = sum(offsets) / n
+    if n >= 2:
+        variance = sum((x - mean) ** 2 for x in offsets) / (n - 1)
+        stdev = variance ** 0.5
+        ci95 = _t95(n - 1) * stdev / (n ** 0.5)
+    else:
+        stdev = 0.0
+        ci95 = None
+    return {
+        "n": n,
+        "n_total": len(records),
+        "mean_offset_ms": mean,
+        "stdev_ms": stdev,
+        "ci95_ms": ci95,
+    }
+
+
+def baseline_latency_ms(current_delay_ms: int, mean_offset_ms: float) -> int:
+    """The ABSOLUTE 'NDI 2ME PGM' genlock_latency_ms_src target for a one-shot baseline set.
+
+    Deliberately does NOT apply required_delay_ms()'s #871 per-run AV_SYNC_MAX_STEP_MS step
+    clamp: that clamp protects against a SINGLE untrustworthy measurement during incremental
+    per-run correction. This is the opposite situation -- an already-averaged, statistically
+    trustworthy result from N confident windows -- so it is allowed to move the full distance in
+    one shot. Only the DistroAV hardware range [LATENCY_MIN, LATENCY_MAX] still clamps it.
+    """
+    raw = round(current_delay_ms - mean_offset_ms)
+    return max(LATENCY_MIN, min(LATENCY_MAX, raw))
+
+
+def format_calibration_report(agg: dict, current_latency_ms: "int | None" = None) -> str:
+    """Human-readable calibration report -- 'set the knob to X ms' + the 95% CI."""
+    lines = [
+        f"[av-sync] CALIBRATION: n={agg['n']}/{agg['n_total']} confident windows, "
+        f"mean offset={agg['mean_offset_ms']:+.1f}ms, stdev={agg['stdev_ms']:.1f}ms"
+    ]
+    if agg["ci95_ms"] is not None:
+        lines.append(f"[av-sync]   95% CI: mean +/- {agg['ci95_ms']:.1f}ms")
+    else:
+        lines.append("[av-sync]   95% CI: n/a (need >=2 confident windows)")
+    if current_latency_ms is not None:
+        target = baseline_latency_ms(current_latency_ms, agg["mean_offset_ms"])
+        lines.append(
+            f"[av-sync] RECOMMENDATION: set 'NDI 2ME PGM' genlock_latency_ms_src to {target}ms "
+            f"(current={current_latency_ms}ms)"
+        )
+    else:
+        lines.append(
+            f"[av-sync] RECOMMENDATION: adjust 'NDI 2ME PGM' genlock_latency_ms_src by "
+            f"{-agg['mean_offset_ms']:+.1f}ms (pass --current-latency-ms for an absolute target)"
+        )
+    return "\n".join(lines)
+
+
+def load_calibration_windows(path: str) -> list:
+    """Read a JSONL calibration log (one window record per line, blank lines skipped) --
+    written by `av_sync_measure.py --calibration-log` during a soundcheck loop."""
+    records = []
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            records.append(json.loads(line))
+    return records
+
+
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    ap.add_argument("--host", required=True)
+    ap.add_argument("--host", default=None, help="OBS WS host (required unless --calibrate)")
     ap.add_argument("--password", default="")
     ap.add_argument("--source", default=DEFAULT_SOURCE)
-    group = ap.add_mutually_exclusive_group(required=True)
+    group = ap.add_mutually_exclusive_group()
     group.add_argument("--offset-ms", type=float, help="measured offset in ms (video - audio)")
     group.add_argument(
         "--verdict-json", type=str,
@@ -267,7 +420,40 @@ def main():
         help="override the av-sync-last.json write path "
              "(default: %%PROGRAMDATA%%/camera-box/av-sync-last.json)",
     )
+    # #805 -- offline baseline-calibration mode: no OBS connection, aggregates a JSONL log of
+    # SyncNet windows (`av_sync_measure.py --calibration-log`) into a one-shot recommendation.
+    ap.add_argument(
+        "--calibrate", type=str, default=None,
+        help="path to a JSONL calibration log -- aggregate N confident SyncNet windows into a "
+             "baseline recommendation; no --host/OBS connection needed",
+    )
+    ap.add_argument(
+        "--current-latency-ms", type=int, default=None,
+        help="current genlock_latency_ms_src on the source being calibrated, to compute an "
+             "absolute target (--calibrate mode only)",
+    )
+    ap.add_argument("--conf-min", type=float, default=CONF_MIN, help="--calibrate mode only")
+    ap.add_argument(
+        "--report-json", type=str, default=None,
+        help="also write the aggregation result as JSON to this path (--calibrate mode only, "
+             "for pasting into the ticket/log)",
+    )
     args = ap.parse_args()
+
+    if args.calibrate:
+        records = load_calibration_windows(args.calibrate)
+        agg = aggregate_syncnet_windows(records, conf_min=args.conf_min)
+        report = format_calibration_report(agg, args.current_latency_ms)
+        print(report)
+        if args.report_json:
+            Path(args.report_json).write_text(json.dumps(agg, indent=2))
+            print(f"[av-sync] wrote {args.report_json}")
+        return
+
+    if not args.host:
+        ap.error("--host is required unless --calibrate is given")
+    if args.offset_ms is None and not args.verdict_json:
+        ap.error("one of --offset-ms/--verdict-json is required unless --calibrate is given")
 
     offset = (
         args.offset_ms if args.offset_ms is not None
