@@ -393,6 +393,107 @@ if burn_gate_ok "$1"; then echo PROCEED; else echo ABORT; fi
     }
 }
 
+/// #924 (user directive): a leftover `genlock_burn=true` on a strih NDI input from a prior run
+/// that never reached cleanup() is a state THIS harness can set up itself — the `[0/8]` preflight
+/// must NORMALIZE it (idempotent `obs_burn_filter.py remove`), never ABORT and demand a human fix
+/// the rig first. Bounds the check to the burn-normalize loop specifically (from its own banner to
+/// the very next preflight step, the stray recording/streaming check), so a change to a SIBLING
+/// `[0/8]` step can never make this test pass/fail for the wrong reason.
+#[test]
+fn recording_e2e_burn_off_preflight_normalizes_instead_of_aborting_924() {
+    let s = read("scripts/recording-e2e.sh");
+    let start = s
+        .find("[0/8] OBS pre-run state")
+        .expect("recording-e2e.sh must have the [0/8] OBS pre-run state preflight banner");
+    let end = s[start..]
+        .find("for _pfhs in \"strih=$STRIH\"")
+        .map(|i| start + i)
+        .expect("expected the stray recording/streaming check to follow the burn-normalize loop");
+    let region = &s[start..end];
+    assert!(
+        region.contains("obs_burn_filter.py") && region.contains("remove"),
+        "#924: a leaked genlock_burn must be NORMALIZED via `obs_burn_filter.py remove` (the same \
+         idempotent primitive the #844/#878 startup self-heal already trusts), not merely detected. \
+         Got region:\n{region}"
+    );
+    assert!(
+        !region.contains("exit 1"),
+        "#924: the genlock_burn preflight must NEVER abort the run for a state THIS harness can \
+         normalize itself — TEST mode (burns available) is the rig's default. Got region:\n{region}"
+    );
+    assert!(
+        !region.contains("genlock_burn is still ON from a prior run"),
+        "#924: the old abort message must be fully replaced by a normalize action, not left behind \
+         as dead/unreachable text. Got region:\n{region}"
+    );
+    // The burn-ON CHECK itself (recon) must still run — normalization needs to know current state
+    // before clearing it, and this loop is the ONLY place that reads it for this purpose.
+    assert!(
+        region.contains("obs_burn_filter.py") && region.contains("check"),
+        "#924: normalization must still READ each input's current genlock_burn state before \
+         clearing it (never a blind unconditional remove with no visibility into what changed)"
+    );
+}
+
+/// #924 behavioral: mirror the ACTUAL control-flow shape of the `[0/8]` genlock_burn
+/// normalize loop (burn-on -> clear + continue; burn-off -> no-op + continue) in isolation, the
+/// same "reconstruct the real grep/case logic in a standalone snippet" pattern already used by
+/// `recording_e2e_burn_gate_proceeds_only_when_burns_on` above. Proves the loop NEVER aborts
+/// (exit code 0 either way) and that a normalize action fires ONLY when burn_on=True.
+#[test]
+fn recording_e2e_burn_normalize_gate_clears_and_never_aborts_924() {
+    let gate = r#"
+set -euo pipefail
+_pfburn="$1"
+case "$_pfburn" in
+  *burn_on=True*)
+    echo "NORMALIZED"
+    ;;
+esac
+echo "CONTINUED"
+"#;
+    let cases = [
+        (
+            "[burn] burn_on=True genlock_burn=True filter_on_input=True kind_registered=True input='NDI cam1'",
+            true,
+        ),
+        (
+            "[burn] burn_on=False genlock_burn=False filter_on_input=True kind_registered=True input='NDI cam1'",
+            false,
+        ),
+    ];
+    for (chk, expect_normalized) in cases {
+        let out = Command::new("bash")
+            .arg("-c")
+            .arg(gate)
+            .arg("bash") // $0
+            .arg(chk) // $1
+            .output()
+            .expect("run burn-normalize snippet");
+        assert!(
+            out.status.success(),
+            "#924: the normalize loop must never exit non-zero — got {:?}",
+            out.status
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.contains("CONTINUED"),
+            "#924: the loop must always continue past this input, on or off. Got {stdout:?} for {chk:?}"
+        );
+        if expect_normalized {
+            assert!(
+                stdout.contains("NORMALIZED"),
+                "#924: burn_on=True must trigger the normalize (clear) action. Got {stdout:?}"
+            );
+        } else {
+            assert!(
+                !stdout.contains("NORMALIZED"),
+                "#924: burn_on=False must NOT trigger any normalize action. Got {stdout:?}"
+            );
+        }
+    }
+}
+
 /// The DanteSync NTP+PTP gate must be the FIRST hard step (#7): it must appear in the
 /// script BEFORE the cam1/cam2 launch and the OBS recording start, so a not-locked cluster
 /// fails fast before any measurement.
