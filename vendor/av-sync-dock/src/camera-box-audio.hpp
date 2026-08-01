@@ -444,4 +444,84 @@ private:
 	double stable_tol_ms_;
 };
 
+/* ---- #926 auto-correction: hold genlock_latency_ms_src so audio is NEVER early (pure, no I/O) ----
+ *
+ * Mirror of src/av_sync_dock.rs::DockLockCorrector -- see that module's doc comment for the full
+ * closed-form proof. Summary: given the dock's own displayed offset (`ts_ms = audio_ts - video_ts`,
+ * the SAME sign as `CbAvOffset::offset_ms` / the Latency label), setting
+ * `new_delay = current_delay + floor(ts_ms)` changes `ts` by exactly `-floor(ts_ms)`, so the
+ * resulting ts always lands in `[0, 1)` -- 0ms or audio late by under 1ms, NEVER negative
+ * ("audio early", the forbidden steady state per issue #926's own directive). Only ever acts on a
+ * genuine CbLockEventKind::Locked/Updated transition (the caller passes locked=true only then);
+ * CbLockEventKind::Unlocked (real event: no QR, no marker) must pass locked=false, which always
+ * Holds -- freezes the actuator, implementing requirement 5 (measure-only, permanent lock) with no
+ * separate timeout, reusing CbLockAuditTracker's already-proven state machine. */
+static const int32_t CB_DOCK_LOCK_MAX_STEP_MS = 5;
+static const double CB_DOCK_LOCK_MIN_REAPPLY_S = 30.0;
+static const int32_t CB_DOCK_LOCK_LATENCY_MIN_MS = 3;
+static const int32_t CB_DOCK_LOCK_LATENCY_MAX_MS = 2000;
+
+struct CbDockLockAction {
+	bool apply = false; // false == Hold (do not touch the actuator)
+	int32_t new_delay_ms = 0; // meaningful only when apply == true
+};
+
+class CbDockLockCorrector {
+public:
+	CbDockLockCorrector(int32_t max_step_ms = CB_DOCK_LOCK_MAX_STEP_MS,
+	                    double min_reapply_s = CB_DOCK_LOCK_MIN_REAPPLY_S)
+		: max_step_ms_(max_step_ms), min_delay_ms_(CB_DOCK_LOCK_LATENCY_MIN_MS),
+		  max_delay_ms_(CB_DOCK_LOCK_LATENCY_MAX_MS), min_reapply_s_(min_reapply_s),
+		  have_last_applied_(false), last_applied_ns_(0)
+	{
+	}
+
+	/* locked: true only on a genuine Locked/Updated lock-audit transition; offset_ms: the locked
+	 * cluster offset in dock convention (audio_ts - video_ts), meaningful only when locked;
+	 * current_delay_ms: the actuator's CURRENT genlock_latency_ms_src, read fresh by the caller
+	 * (never cached); now_ns: the caller's own monotonic clock (e.g. the OBS pipeline timestamp)
+	 * for the cooldown. */
+	CbDockLockAction decide(bool locked, double offset_ms, int32_t current_delay_ms, uint64_t now_ns)
+	{
+		CbDockLockAction action;
+		if (!locked)
+			return action;
+
+		double g = std::floor(offset_ms);
+		if (g == 0.0)
+			return action; // already ts_ms in [0, 1) -- nothing to do
+
+		if (have_last_applied_) {
+			uint64_t elapsed_ns = now_ns > last_applied_ns_ ? now_ns - last_applied_ns_ : 0;
+			double elapsed_s = (double)elapsed_ns / 1000000000.0;
+			if (elapsed_s < min_reapply_s_)
+				return action; // cooldown -- let the last correction take effect first
+		}
+
+		int64_t raw = (int64_t)current_delay_ms + (int64_t)g;
+		int64_t lo = (int64_t)current_delay_ms - (int64_t)max_step_ms_;
+		int64_t hi = (int64_t)current_delay_ms + (int64_t)max_step_ms_;
+		int64_t stepped = raw < lo ? lo : (raw > hi ? hi : raw);
+		int64_t clampedw = stepped < (int64_t)min_delay_ms_ ? (int64_t)min_delay_ms_
+		                    : (stepped > (int64_t)max_delay_ms_ ? (int64_t)max_delay_ms_ : stepped);
+		int32_t clamped = (int32_t)clampedw;
+		if (clamped == current_delay_ms)
+			return action;
+
+		have_last_applied_ = true;
+		last_applied_ns_ = now_ns;
+		action.apply = true;
+		action.new_delay_ms = clamped;
+		return action;
+	}
+
+private:
+	int32_t max_step_ms_;
+	int32_t min_delay_ms_;
+	int32_t max_delay_ms_;
+	double min_reapply_s_;
+	bool have_last_applied_;
+	uint64_t last_applied_ns_;
+};
+
 } // namespace camerabox
