@@ -45,6 +45,18 @@
 //! undecodable frames in one run — MORE than the pre-#707 regression level (10) this whole gate
 //! was written to catch. So the floor has both a per-window AND a run-wide (summed across every
 //! window) term; a gate that would pass the bug it was written after is not a gate.
+//!
+//! ## #915 (2026-08-01) — the floor itself became report-only
+//!
+//! cam1's ShadowCast 2 grabber hardware defect (issue 909) trips the run-wide floor on a hardware
+//! fault completely unrelated to the chain under test (run 30671860323: 10 undecodable, all in
+//! CAM1 windows, CAM2/CAM4 measured 0 — a real optical/monitor artifact would spread evenly across
+//! every box sharing the splitter). [`window_within_floor`]/[`run_within_floor`] above are
+//! UNCHANGED — still fully computed, still feed the STRICT `CamboxSegment::pass` field
+//! byte-for-byte — but [`gates_overall_pass`] now decides whether their result folds into the
+//! RELAXED verdict that actually decides `overall_pass`. Hardcoded `false` until BOTH issue 909
+//! (cam1 physically replaced) and issue 881 (120Hz monitor) land — tracked as a restore item on
+//! issue 905.
 
 /// Per-window optical `undecodable` allowance. The observed max on a single window across the
 /// calibration runs is 2 (issue 854 comment 5128509160's table); 4 is 2x that headroom. Treating
@@ -81,6 +93,23 @@ pub fn window_within_floor(undecodable: u32, frame_count: u32) -> bool {
 /// cannot see — see the module doc's "Two terms, not one".
 pub fn run_within_floor(total_undecodable: u32) -> bool {
     total_undecodable <= RUN_UNDECODABLE_FLOOR
+}
+
+/// #915 (2026-08-01, user decision -- mirrors the issue-914 pattern for `SelfHealAttributionReport
+/// ::overall_pass_contribution`): whether [`window_within_floor`]/[`run_within_floor`] fold into
+/// the fused verdict's relaxed/overall pass. Both functions above are UNCHANGED — still fully
+/// computed and reported (feeding the STRICT `CamboxSegment::pass` field byte-for-byte); only the
+/// CALLERS (`crate::window_gate::decide` for the per-window term, `probe::recording_segments::
+/// segment_continuity` for the run-wide term) stop folding their result into the relaxed/overall
+/// verdict when this returns `false`.
+///
+/// Report-only (hardcoded `false`) while cam1's ShadowCast 2 grabber defect (issue 909) and the
+/// 60Hz test-camera monitor (issue 881's own 120Hz replacement) remain physically unresolved. No
+/// env knob — same no-knob discipline issue 889 established. Restore path tracked on issue 905:
+/// once cam1 is physically replaced AND issue 881 (120Hz monitor) lands, flip this back to `true`
+/// — a one-line change, exactly the shape this function exists to make possible.
+pub fn gates_overall_pass() -> bool {
+    false
 }
 
 #[cfg(test)]
@@ -166,6 +195,22 @@ mod tests {
             !run_within_floor(total),
             "10 total undecodable (the pre-#707 regression level) must FAIL the run-wide cap \
              even though every individual window passed its own per-window floor"
+        );
+    }
+
+    // --- gates_overall_pass (issue 915) ---------------------------------------------------
+
+    #[test]
+    fn gates_overall_pass_is_report_only_915() {
+        // #915 (2026-08-01, user decision): cam1's ShadowCast 2 grabber defect (issue 909) trips
+        // the run-wide floor on a hardware fault unrelated to any PR's own diff (run 30671860323:
+        // 10 undecodable, all in CAM1 windows, CAM2/CAM4 measured 0). The floor's own math
+        // (`window_within_floor`/`run_within_floor` above) stays UNCHANGED; only whether it can
+        // fail the run changes.
+        assert!(
+            !gates_overall_pass(),
+            "#915: the optical undecodable floor must be report-only while issue 909 (cam1 \
+             grabber) + issue 881 (120Hz monitor) remain unresolved"
         );
     }
 }

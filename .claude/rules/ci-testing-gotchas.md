@@ -269,3 +269,21 @@ result: ok` lines against the expected total binary count, and treat the trailin
 line as the authoritative signal, not a background-task summary of a piped command. A long run may
 need `run_in_background` (the default 120s foreground timeout backgrounds it anyway) — that's fine,
 just read the FULL log file once the notification arrives, never a `tail`-truncated one.
+
+## A single `verify_imag_pure_functions` test can FAIL under full-suite parallel `cargo test` load, yet pass every time in isolation (#912)
+
+Observed live (#912 session): a full `cargo test` run (~178 binaries) failed exactly one test,
+`imag_obs_log_checks_on_a_healthy_capture` in `tests/verify_imag_pure_functions.rs` — a
+bash-harness test that sources a script and greps a static fixture log, nothing timing-sensitive
+about its OWN logic. Re-running `cargo test --test verify_imag_pure_functions` alone (all 40 tests
+in that binary) passed clean, twice. CI (`gh run list --branch dev --workflow CI`) was green on
+the exact same commit both before and after. This is resource contention from running MANY test
+binaries concurrently on a shared dev1 box (shell/process-spawn pressure), not a real regression —
+the same class of flake `ci-testing-gotchas.md`'s "shared host path" and `set -e`/`wait` sections
+already describe, just observed for a new file.
+
+**Before treating a full-suite failure as a real regression:** re-run the SPECIFIC failing test
+FILE alone (`cargo test --test <file_stem>`); if it passes clean there AND the same commit is
+green on CI, it's a local parallel-load flake — note it, don't file a ticket for an unreproduced
+single flake, and don't let it block an otherwise-verified change. Only escalate if the failure
+reproduces in isolation or CI itself goes red.

@@ -233,6 +233,42 @@ imag contract) are byte-identical to before. The decision is Tier-0 unit-tested 
 (`latency_ms / 33.3` at 30 fps), not against a fixed number — and treat `relocks` climbing at frame
 rate on a *healthy* source as a threshold bug, not a transport problem.
 
+## #803/#912 — per-source ASRC clock-drift servo, ALWAYS ON BY DEFAULT (build const, no toggle)
+
+`vendor/obs-studio/libobs/media-io/asrc-compensator.{h,c}` is a per-source ASRC (async
+sample-rate conversion) servo — continuously nudges a source's swresample compensation (ppm) to
+hold its audio timeline on the video master clock, using `genlock_wall_now_ns()` (the same
+wall-clock basis the video FIFO release uses) as the reference, NOT the source's own presentation
+timestamps. Constants (`ASRC_MAX_PPM 300`, `ASRC_MAX_SLEW_PPM_PER_S 5`, `ASRC_TIME_CONSTANT_S 20`,
+`ASRC_MIN_LOCK_S 5`) MUST stay numerically identical to their Rust mirror `src/asrc_bench.rs` (the
+pure closed-form simulation, `.claude/rules/asrc-bench-harness.md`).
+
+**#803 (PR #911) shipped the servo wired to `struct obs_source`'s `asrc_enabled` bool but
+NOTHING in the vendored tree ever called `obs_source_set_asrc_enabled()`** — it was permanently
+inert. Worse: **it shipped with ZERO vendored-source lock-step anchors** (no
+`tests/genlock_preload.rs` guard, no pwsh gate in either `windows-genlock{,-fast}.yml`) despite
+this being the single most emphasized convention in this skill (see "CI exact-anchor guards live
+in YAML too" below) — a genuine gap in that session, not a one-off. **Lesson: never assume a
+vendored feature has its lock-step anchors just because this repo's convention says it should —
+grep `tests/genlock_preload.rs` and both workflow ymls for the issue number before treating "no
+anchor" as "nothing to guard."**
+
+#912 fixed the inert-by-default problem the same way #257 fixed the genlock env-knob problem: made
+it a BUILD DEFAULT (`obs_source_create_internal()` sets `source->asrc_enabled = true;`, no env, no
+per-source opt-in), kept the setter/getter EXPORTed as an optional override path only (nothing
+calls it), and added the FIRST lock-step anchors for this feature —
+`tests/genlock_preload.rs::vendored_source::asrc_default_on_present_in_vendored_source` +
+`::distroav_source::windows_genlock_workflows_gate_on_asrc_default_on` + a pwsh gate in both
+workflow ymls. #912 did NOT retroactively anchor the REST of #803 (the servo math, the
+process_audio() wiring) — that remains unguarded; a future ticket touching that code should add
+its own anchors rather than assume they exist.
+
+No source-class exclusion / GUI checkbox was added even though the issue explicitly allowed one:
+`asrc_process_audio()`'s `raw_advance_s` is `frames / samples_per_sec` and `master_block_s` comes
+from wall-clock, not from source PTS — a media/VLC source's seek changes content, not the real-time
+cadence of `process_audio()` calls, so the existing clamp+slew already bound any transient fallout.
+Non-audio sources never call `process_audio()` at all (pure no-op for them).
+
 ## Deployed State (strih + stream, since 2026-06-13)
 
 Both production broadcast OBS boxes upgraded in-place to the camera-box genlock build.

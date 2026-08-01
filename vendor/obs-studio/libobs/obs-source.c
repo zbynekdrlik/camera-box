@@ -542,6 +542,15 @@ static obs_source_t *obs_source_create_internal(const char *id, const char *name
 	source->flags = source->default_flags;
 	source->enabled = true;
 
+	/* camera-box #912: ASRC (per-source clock-drift compensation, issue 803) is a BUILD
+	 * DEFAULT, mirroring issue 257's render-tick/ts-align hard-lock -- no env, no per-source
+	 * opt-in required, so the servo can never ship silently inert again (nothing in the
+	 * vendored tree ever called obs_source_set_asrc_enabled(), which is exactly the
+	 * "forgettable command-line tweak" failure mode issue 912 exists to kill). The setter
+	 * stays live as an optional override path (parity with obs_source_set_genlock_burn under
+	 * the issue-257 FIFO default) -- it is just never the way ASRC gets turned ON. */
+	source->asrc_enabled = true;
+
 	/* audio deduplication initialization */
 	source->audio_is_duplicated = false;
 
@@ -7233,7 +7242,12 @@ bool obs_source_get_genlock_burn(const obs_source_t *source)
  * from that same single audio-ingest call path, so no additional lock is needed here. Turning it
  * ON when the source's resampler doesn't exist yet is picked up lazily on the NEXT audio callback
  * (process_audio()'s reset_resampler() condition includes `asrc_enabled && !resampler`) rather
- * than forcing the reset from this (potentially different) calling thread. */
+ * than forcing the reset from this (potentially different) calling thread.
+ *
+ * #912: obs_source_create_internal() now defaults every source's asrc_enabled to true (a BUILD
+ * DEFAULT, mirroring issue 257) -- this setter is kept EXPORTed as an optional override path (a
+ * future GUI property could still flip it off for some source class), but it is no longer the
+ * normal way ASRC gets turned on; nothing in this vendored tree calls it today. */
 void obs_source_set_asrc_enabled(obs_source_t *source, bool enabled)
 {
 	if (!obs_source_valid(source, "obs_source_set_asrc_enabled"))

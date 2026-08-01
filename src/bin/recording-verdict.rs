@@ -4066,24 +4066,40 @@ fn build_and_print_verdict(
                     if let Some(note) = &s.note {
                         println!("      ⚠ {note}");
                     }
-                    // Issue 889 (2026-07-30 user decision on issue 883) visibility requirement 1:
-                    // a loud WARN naming this ticket for EVERY window whose STRICT verdict
-                    // (`s.pass`) is false — even though `overall_pass` no longer fails on
-                    // copies/gaps alone (see the summary line after this loop). `s.relaxed_pass`
-                    // still failing here means the window's failure is NOT this relaxation (an
-                    // absent cambox / undecodable over the floor), so the wording says which.
+                    // Issue 889 (2026-07-30 user decision on issue 883) visibility requirement 1,
+                    // extended by issue 915 (2026-08-01 user decision): a loud WARN naming EVERY
+                    // report-only reason a window's STRICT verdict (`s.pass`) is false — even
+                    // though `overall_pass` no longer fails on copies/gaps OR the optical floor
+                    // alone (see the summary lines after this loop). Both reasons are independent
+                    // now, so a window can trip either or both while still passing relaxed; only
+                    // `frame_count == 0` still fails BOTH verdicts (the `else` branch below).
                     if !s.pass {
                         if s.relaxed_pass {
-                            println!(
-                                "      ⚠ #889 REPORT-ONLY: copies={} gaps={} would FAIL the pre-889 \
-                                 strict rule, but does NOT gate overall_pass (see issue #889).",
-                                s.copies, s.gaps
+                            let floor_ok = camera_box::optical_floor::window_within_floor(
+                                s.undecodable,
+                                s.frames,
                             );
+                            if !floor_ok {
+                                println!(
+                                    "      ⚠ #915 REPORT-ONLY: undecodable={} exceeds the \
+                                     issue-881 per-window floor, but does NOT gate overall_pass \
+                                     while issue 909 (cam1 grabber) + issue 881 (120Hz monitor) \
+                                     are unresolved (see issue #915).",
+                                    s.undecodable
+                                );
+                            }
+                            if s.copies != 0 || s.gaps != 0 {
+                                println!(
+                                    "      ⚠ #889 REPORT-ONLY: copies={} gaps={} would FAIL the pre-889 \
+                                     strict rule, but does NOT gate overall_pass (see issue #889).",
+                                    s.copies, s.gaps
+                                );
+                            }
                         } else {
                             println!(
-                                "      ⚠ #889: this window ALSO fails the RELAXED verdict (not \
-                                 issue 889's doing — frame_count==0 or undecodable over the \
-                                 issue-881 floor) — it still fails overall_pass."
+                                "      ⚠ this window ALSO fails the RELAXED verdict (not issue \
+                                 889's or issue 915's doing — frame_count==0) — it still fails \
+                                 overall_pass."
                             );
                         }
                     }
@@ -4129,6 +4145,20 @@ fn build_and_print_verdict(
                     seg.windows_failed_report_only,
                     seg.segments.len()
                 );
+                // Issue 915 (2026-08-01 user decision) visibility requirement, mirrors #889
+                // requirement 3 — prints UNCONDITIONALLY whether or not the run-wide floor was
+                // exceeded, so silence is never mistaken for strictness. Hardcoded,
+                // one-line-deletable — see `camera_box::optical_floor::gates_overall_pass` for
+                // the restore path on issue 905.
+                println!(
+                    "  ⚠ #915 REPORT-ONLY: run-wide undecodable={} (floor {}, within_floor={}) \
+                     -- no longer gates overall_pass while issue 909 (cam1 grabber) + issue 881 \
+                     (120Hz monitor) are unresolved (see issue #915 for the decision record and \
+                     issue #905 for the restore path).",
+                    seg.total_undecodable,
+                    camera_box::optical_floor::RUN_UNDECODABLE_FLOOR,
+                    seg.run_wide_undecodable_within_floor
+                );
                 if no_anchor > 0 {
                     println!(
                         "  ({no_anchor} recorded frame(s) had no burn/optical gen_ts anchor — not placed)"
@@ -4153,6 +4183,25 @@ fn build_and_print_verdict(
                     obj.insert(
                         "frames_without_anchor".to_string(),
                         serde_json::json!(no_anchor),
+                    );
+                    // Issue 915 (2026-08-01 user decision): an unambiguous machine-readable flag
+                    // scoped to the optical undecodable floor specifically (NOT a blanket
+                    // "gates_overall_pass" on the whole object — frame_count/schedule-non-empty
+                    // still gate this object's `overall_pass`, only the floor term stopped).
+                    // Mirrors the field name/shape issue 861/914 already established for their
+                    // fully-decoupled terms.
+                    obj.insert(
+                        "undecodable_floor_gates_overall_pass".to_string(),
+                        serde_json::json!(camera_box::optical_floor::gates_overall_pass()),
+                    );
+                    obj.insert(
+                        "undecodable_floor_gate".to_string(),
+                        serde_json::json!(
+                            "report-only -- the issue-881 optical undecodable floor (per-window \
+                             + run-wide) does NOT gate overall_pass, pending issue 909 (cam1 \
+                             grabber) + issue 881 (120Hz monitor) (see issue #915 for the \
+                             decision record and issue #905 for the restore path)"
+                        ),
                     );
                 }
                 report["all_cambox_continuity"] = seg_json;
@@ -4203,6 +4252,19 @@ fn build_and_print_verdict(
                         ev.cambox, ev.at_ns
                     );
                 }
+                // #914 (2026-08-01, user decision -- mirrors issue 889's report-only pattern and
+                // issue 861's caller-only decoupling): frozen_leg/self_heal_reset no longer gate
+                // `overall_pass` while cam1's ShadowCast 2 grabber defect (issue 909) remains
+                // physically unresolved -- restore path on issue 905 (flip
+                // `SelfHealAttributionReport::overall_pass_contribution` back to
+                // `!any_frozen() && !any_self_heal()` once cam1 is physically replaced and a
+                // stable week passes with no self-heal escalations). `gates_overall_pass` below
+                // mirrors the exact field name/shape `all_cambox_av_sync` already established for
+                // issue 861 -- an unambiguous machine-readable flag alongside the still-fully-
+                // computed frozen/self-heal findings.
+                let frozen_self_heal_gate_note = "report-only -- does NOT gate overall_pass, \
+                     pending cam1 hardware fix (see issue #914 for the decision record and issue \
+                     #905 for the restore path)";
                 report["frozen_leg"] = serde_json::json!({
                     "frozen": leg_report.frozen.iter().map(|f| serde_json::json!({
                         "cambox": f.cambox,
@@ -4233,8 +4295,31 @@ fn build_and_print_verdict(
                         "at_ns": ev.at_ns,
                     })).collect::<Vec<_>>(),
                 });
-                all_pass &= !leg_report.any_frozen();
-                all_pass &= !leg_report.any_self_heal();
+                if let Some(obj) = report["frozen_leg"].as_object_mut() {
+                    obj.insert("gates_overall_pass".to_string(), serde_json::json!(false));
+                    obj.insert(
+                        "gate".to_string(),
+                        serde_json::json!(frozen_self_heal_gate_note),
+                    );
+                }
+                if let Some(obj) = report["self_heal_reset"].as_object_mut() {
+                    obj.insert("gates_overall_pass".to_string(), serde_json::json!(false));
+                    obj.insert(
+                        "gate".to_string(),
+                        serde_json::json!(frozen_self_heal_gate_note),
+                    );
+                }
+                // #914 visibility requirement (mirrors issue 889 requirement 3): prints
+                // UNCONDITIONALLY, whether or not anything fired, so silence is never mistaken
+                // for strictness.
+                println!(
+                    "  >>> #914 REPORT-ONLY: frozen_leg={} self_heal_reset={} \
+                     unattributed_events={} -- {frozen_self_heal_gate_note}",
+                    leg_report.frozen.len(),
+                    leg_report.self_heal.len(),
+                    leg_report.unattributed_events.len()
+                );
+                all_pass &= leg_report.overall_pass_contribution();
 
                 // #467/#583 — extend the ALL-CAMBOX sweep to ALSO cover imag-nb's OWN recording:
                 // place its frames onto the SAME schedule timeline (anchored on imag's #463 digital
@@ -7494,6 +7579,306 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Issue 915 (2026-08-01, user decision) end-to-end: a single all-cambox window whose
+    /// undecodable count exceeds the issue-881 per-window floor (5 > 4) must still be COMPUTED
+    /// and printed in the verdict JSON, must still fail that window's STRICT `pass`, but must NO
+    /// LONGER fail `all_cambox_continuity.overall_pass` -- and the JSON must carry the new
+    /// `undecodable_floor_gates_overall_pass` machine-readable flag.
+    #[test]
+    fn all_cambox_continuity_undecodable_over_floor_is_report_only_end_to_end_915() {
+        use super::{build_and_print_verdict, Cam1Source, DecodedRec};
+        use clap::Parser;
+
+        const ONE_S: i64 = 1_000_000_000;
+        let base = 1_000 * ONE_S;
+        let win = 5 * ONE_S;
+        let sched = format!(
+            r#"[{{"cambox":"CAM1","start_ns":{a},"end_ns":{b}}}]"#,
+            a = base,
+            b = base + win
+        );
+        let dir = std::env::temp_dir().join(format!("cb-915-undecodable-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sched_path = dir.join("switch-schedule.json");
+        std::fs::write(&sched_path, &sched).unwrap();
+
+        let mut stream_frames: Vec<RecordingFrame> = Vec::new();
+        for i in 0..20u64 {
+            let gen_ts = base + (i as i64 + 1) * (ONE_S / 10);
+            // 5 undecodable frames (i in 5..10) inside an otherwise clean step-2 sequence -- the
+            // whole-window net-span gap this creates (1008 -> 1020) is exactly credited by the 5
+            // undecodable slots (painted_tick_gaps, issue 625), so copies=0 and gaps=0 stay
+            // clean and this fixture isolates the floor term alone. 5 exceeds the per-window
+            // floor (4) but stays within the run-wide floor (8).
+            let mut payloads = vec![Payload {
+                run_id: STRIH,
+                frame_id: 1670 + i as u32,
+                gen_ts_ns: gen_ts,
+            }];
+            let tick = if (5..10).contains(&i) {
+                None
+            } else {
+                let optical = 1000u32 + 2 * i as u32;
+                payloads.push(Payload {
+                    run_id: CAM2,
+                    frame_id: optical,
+                    gen_ts_ns: gen_ts,
+                });
+                Some(optical)
+            };
+            stream_frames.push(RecordingFrame {
+                frame_index: i,
+                payloads,
+                tick,
+            });
+        }
+
+        let args = super::Args::parse_from([
+            "recording-verdict",
+            "--switch-schedule",
+            sched_path.to_str().unwrap(),
+            "--switch-guard-ns",
+            "0",
+            "--switch-expected-step",
+            "2",
+        ]);
+        let (v, _) = build_and_print_verdict(
+            &args,
+            None,
+            Some(DecodedRec {
+                frames: stream_frames,
+                rec_path: None,
+            }),
+            Cam1Source::Absent,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("verdict");
+
+        let seg = &v["all_cambox_continuity"];
+        assert_eq!(
+            seg["segments"][0]["undecodable"],
+            serde_json::json!(5),
+            "915: the over-floor undecodable count is still COMPUTED and printed: {seg}"
+        );
+        assert_eq!(
+            seg["segments"][0]["copies"],
+            serde_json::json!(0),
+            "915: isolates the floor term -- no copies: {seg}"
+        );
+        assert_eq!(
+            seg["segments"][0]["gaps"],
+            serde_json::json!(0),
+            "915: isolates the floor term -- the net-span gap is fully credited by undecodable: {seg}"
+        );
+        assert_eq!(
+            seg["segments"][0]["pass"],
+            serde_json::json!(false),
+            "915: the STRICT per-window verdict still fails on the over-floor undecodable count: {seg}"
+        );
+        assert_eq!(
+            seg["overall_pass"],
+            serde_json::json!(true),
+            "915: an over-floor undecodable count alone no longer fails overall_pass: {seg}"
+        );
+        assert_eq!(
+            seg["total_undecodable"],
+            serde_json::json!(5),
+            "915: the run-wide sum is still COMPUTED and reported: {seg}"
+        );
+        assert_eq!(
+            seg["run_wide_undecodable_within_floor"],
+            serde_json::json!(true),
+            "915: 5 stays within the run-wide floor (8) -- isolates the per-window term: {seg}"
+        );
+        assert_eq!(
+            seg["undecodable_floor_gates_overall_pass"],
+            serde_json::json!(false),
+            "915: the verdict JSON must carry the machine-readable report-only flag: {seg}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Issue 914 (2026-08-01, user decision -- mirrors issue 889's report-only shape and issue
+    /// 861's caller-only decoupling): a genuinely HARD-FROZEN cambox window (issue 758's
+    /// classifier) plus an unattributed `#663` self-heal reset event must no longer force the
+    /// FUSED `overall_pass` to fail. Uses the SAME differential-fixture proof issue 861 used
+    /// (`all_cambox_av_sync_gate_failure_no_longer_forces_the_overall_verdict_to_fail_861`)
+    /// rather than asserting an absolute `overall_pass == true`, because many OTHER unrelated
+    /// gates in this function also fold into `overall_pass` and this test must stay valid
+    /// regardless of their state: build two otherwise-IDENTICAL fixtures, one with the
+    /// frozen/self-heal findings, one without, and prove `overall_pass` is IDENTICAL between
+    /// them. This is the exact test a future re-tightening (issue 905's restore path) will need
+    /// to invert.
+    #[test]
+    fn frozen_leg_and_self_heal_reset_no_longer_gate_the_overall_verdict_914() {
+        use super::{build_and_print_verdict, Cam1Source, DecodedRec};
+        use clap::Parser;
+
+        const ONE_S: i64 = 1_000_000_000;
+        let base = 1_000 * ONE_S;
+        let win = 5 * ONE_S;
+        let sched = format!(
+            r#"[{{"cambox":"CAM1","start_ns":{a},"end_ns":{b}}}]"#,
+            a = base,
+            b = base + win
+        );
+
+        fn build_fixture(
+            tag: &str,
+            base: i64,
+            sched: &str,
+            frozen: bool,
+            self_heal_reset: Option<&str>,
+        ) -> serde_json::Value {
+            const ONE_S: i64 = 1_000_000_000;
+            let dir = std::env::temp_dir().join(format!("cb-914-{tag}-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let sched_path = dir.join("switch-schedule.json");
+            std::fs::write(&sched_path, sched).unwrap();
+
+            let mut stream_frames: Vec<RecordingFrame> = Vec::new();
+            for i in 0..20u64 {
+                let gen_ts = base + (i as i64 + 1) * (ONE_S / 10);
+                let optical = 1000u32 + 2 * i as u32; // clean step-2 sequence, undecodable=0
+                stream_frames.push(RecordingFrame {
+                    frame_index: i,
+                    payloads: vec![
+                        Payload {
+                            run_id: STRIH,
+                            frame_id: 1670 + i as u32,
+                            gen_ts_ns: gen_ts,
+                        },
+                        Payload {
+                            run_id: CAM2,
+                            frame_id: optical,
+                            gen_ts_ns: gen_ts,
+                        },
+                    ],
+                    tick: Some(optical),
+                });
+            }
+            if frozen {
+                // 5 consecutive duplicates of index 9's tick (1018), inserted right after index
+                // 9 -- `copies=5` against `frames=25` -> density 0.20, ABOVE
+                // `frozen_leg::FROZEN_DENSITY_THRESHOLD` (0.10) -> genuinely HARD-FROZEN (not
+                // merely stale_replay, whose isolated-copy allowance is also 5 -- this proves
+                // DENSITY, not just count, is what trips it here). The real present-tick
+                // sequence around the duplicates stays perfectly contiguous (step 2), isolating
+                // this fixture's ONLY defect to the copies/frozen classification.
+                for k in 0..5u64 {
+                    let dup_gen_ts = base + 9 * (ONE_S / 10) + (k as i64 + 1) * (ONE_S / 1000);
+                    stream_frames.insert(
+                        10 + k as usize,
+                        RecordingFrame {
+                            frame_index: 9_000 + k,
+                            payloads: vec![
+                                Payload {
+                                    run_id: STRIH,
+                                    frame_id: 9_670 + k as u32,
+                                    gen_ts_ns: dup_gen_ts,
+                                },
+                                Payload {
+                                    run_id: CAM2,
+                                    frame_id: 1018, // == index 9's optical tick
+                                    gen_ts_ns: dup_gen_ts,
+                                },
+                            ],
+                            tick: Some(1018),
+                        },
+                    );
+                }
+            }
+
+            let mut argv = vec![
+                "recording-verdict".to_string(),
+                "--switch-schedule".to_string(),
+                sched_path.to_str().unwrap().to_string(),
+                "--switch-guard-ns".to_string(),
+                "0".to_string(),
+                "--switch-expected-step".to_string(),
+                "2".to_string(),
+            ];
+            if let Some(tok) = self_heal_reset {
+                argv.push("--self-heal-reset".to_string());
+                argv.push(tok.to_string());
+            }
+            let args = super::Args::parse_from(argv);
+            let (v, _) = build_and_print_verdict(
+                &args,
+                None,
+                Some(DecodedRec {
+                    frames: stream_frames,
+                    rec_path: None,
+                }),
+                Cam1Source::Absent,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("verdict");
+            let _ = std::fs::remove_dir_all(&dir);
+            v
+        }
+
+        let clean = build_fixture("clean", base, &sched, false, None);
+        // "CAM_UNRELATED" never appears in any schedule window in this fixture, so this event
+        // can never correlate to a classified window -- guaranteed `unattributed_events`,
+        // independent of the frozen fixture on CAM1.
+        let with_events = build_fixture(
+            "frozen",
+            base,
+            &sched,
+            true,
+            Some("CAM_UNRELATED:1000000000000"),
+        );
+
+        assert_eq!(
+            clean["frozen_leg"]["frozen"]
+                .as_array()
+                .map(|a| a.len())
+                .unwrap_or(0),
+            0,
+            "sanity: the clean fixture must have no frozen windows: {clean}"
+        );
+        assert_eq!(
+            with_events["frozen_leg"]["frozen"]
+                .as_array()
+                .map(|a| a.len())
+                .unwrap_or(0),
+            1,
+            "sanity: this fixture must genuinely classify one HARD-FROZEN window: {with_events}"
+        );
+        assert_eq!(
+            with_events["self_heal_reset"]["unattributed_events"]
+                .as_array()
+                .map(|a| a.len())
+                .unwrap_or(0),
+            1,
+            "sanity: the self-heal event on an unrelated cambox must stay unattributed: {with_events}"
+        );
+        assert_eq!(
+            with_events["frozen_leg"]["gates_overall_pass"],
+            serde_json::json!(false),
+            "914: the JSON must say plainly this term does not gate overall_pass: {with_events}"
+        );
+        assert_eq!(
+            with_events["self_heal_reset"]["gates_overall_pass"],
+            serde_json::json!(false),
+            "914: same for self_heal_reset: {with_events}"
+        );
+        assert_eq!(
+            clean["overall_pass"], with_events["overall_pass"],
+            "914: a genuinely frozen window + an unattributed self-heal event must be a no-op on \
+             the overall verdict (report-only, pending cam1 hardware fix issue 909 -- restore \
+             path issue 905): clean={clean}, with_events={with_events}"
+        );
     }
 
     /// #467 — extend the #312 ALL-CAMBOX `--switch-schedule` sweep to ALSO gate imag-nb's OWN

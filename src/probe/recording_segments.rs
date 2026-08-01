@@ -36,12 +36,15 @@
 //!   gaps == 0` — the STRICT verdict, UNCHANGED meaning. See `crate::optical_floor` for the
 //!   `undecodable` floor's rationale (a physical 60Hz temporal-tear artifact of the test camera's
 //!   monitor, not chain loss) and why it is TEMPORARY (deleted with #881).
-//! - `relaxed_pass` (issue 889, 2026-07-30 user decision): `frames > 0 && <undecodable within the
-//!   #881 floor>` — `copies`/`gaps` do NOT participate. This is the verdict `overall_pass` folds;
-//!   `pass` stays strict and is never silently dropped (it drives the issue-889 per-window WARN).
-//!   Computed by [`crate::window_gate::decide`] — see that module for the full decision record.
-//!   The whole-run `overall_pass` ALSO requires the SUM of `undecodable` across every window to
-//!   stay within its own run-wide floor (see [`segment_continuity`]).
+//! - `relaxed_pass` (issue 889, 2026-07-30 user decision): `frames > 0` — `copies`/`gaps` do NOT
+//!   participate, and (issue 915, 2026-08-01 user decision) neither does the #881 optical floor
+//!   while `crate::optical_floor::gates_overall_pass()` is `false`. This is the verdict
+//!   `overall_pass` folds; `pass` stays strict and is never silently dropped (it drives the
+//!   issue-889 per-window WARN). Computed by [`crate::window_gate::decide`] — see that module for
+//!   the full decision record. The whole-run `overall_pass` ALSO computes the SUM of `undecodable`
+//!   across every window against its own run-wide floor (see [`segment_continuity`] and
+//!   [`SegmentedContinuity::run_wide_undecodable_within_floor`]) — but, per issue 915, that sum no
+//!   longer FORCES a failure either while the same function returns `false`.
 //!
 //! The painted tick increments PER PAINTED FRAME and is captured at the cambox rate, so its
 //! by-design step in the recording is the decimation factor (`expected_step`): cam→strih 60fps
@@ -133,17 +136,20 @@ pub struct CamboxSegment {
     /// `undecodable` term carries a TEMPORARY calibrated floor (a physical 60Hz temporal-tear
     /// artifact of the test camera's monitor, not chain loss) — see `crate::optical_floor` for the
     /// full rationale. **UNCHANGED, strict, byte-for-byte the same boolean it has always held —
-    /// issue 889 does NOT redefine this field.** `overall_pass` no longer folds `pass` directly
-    /// (see `relaxed_pass` below); `pass` still drives the issue-889 per-window WARN and the
-    /// `windows_failed_report_only` count on [`SegmentedContinuity`].
+    /// neither issue 889 NOR issue 915 redefines this field.** `overall_pass` no longer folds
+    /// `pass` directly (see `relaxed_pass` below); `pass` still drives the issue-889 per-window
+    /// WARN and the `windows_failed_report_only` count on [`SegmentedContinuity`].
     pub pass: bool,
     /// Issue 889 (2026-07-30 user decision on issue 883): the verdict actually folded into
-    /// `overall_pass` — `frame_count > 0 && <undecodable within the #881 floor>`, WITHOUT
-    /// `copies`/`gaps`. Computed by [`crate::window_gate::decide`]. `copies`/`gaps` stay computed
-    /// and printed above (report-only, never silently dropped) — this field is the ONLY thing
-    /// that changed about how this window feeds the run's overall verdict. TEMPORARY,
-    /// restore-gated on issue 883 item 4 (root-cause the loss) + two consecutive clean STRICT
-    /// runs — see `crate::window_gate` for the full decision record.
+    /// `overall_pass` — `frame_count > 0`, WITHOUT `copies`/`gaps`. Issue 915 (2026-08-01 user
+    /// decision): the `<undecodable within the #881 floor>` term ALSO stopped participating here
+    /// while `crate::optical_floor::gates_overall_pass()` is `false` — see that function's doc for
+    /// the restore path on issue 905. Computed by [`crate::window_gate::decide`]. `copies`/`gaps`/
+    /// the floor stay computed and printed above (report-only, never silently dropped) — this
+    /// field is the ONLY thing that changed about how this window feeds the run's overall verdict.
+    /// TEMPORARY, restore-gated on issue 883 item 4 (root-cause the loss) + two consecutive clean
+    /// STRICT runs (issue 889's part) AND issue 909/881 (issue 915's part) — see
+    /// `crate::window_gate` for the full decision record.
     pub relaxed_pass: bool,
     /// #333: an explicit human diagnostic, populated ONLY for a `frames == 0` window — the most
     /// likely cause is the dual-QR PAINTER box (it does not emit its own camera NDI while painting,
@@ -173,13 +179,14 @@ pub struct SegmentedContinuity {
     /// One verdict per schedule window, in schedule order.
     pub segments: Vec<CamboxSegment>,
     /// PASS ⇔ the schedule is non-empty AND EVERY window's [`CamboxSegment::relaxed_pass`] holds
-    /// AND the SUM of `undecodable` across every window stays within #881's run-wide calibrated
-    /// floor (`crate::optical_floor::run_within_floor`) — the load-bearing half of the floor: a
-    /// per-window-only check would let many windows each individually within floor sum past the
-    /// pre-#707 regression level undetected. The `undecodable` floor is TEMPORARY; deleted with
-    /// #881. **Issue 889 (2026-07-30 user decision on issue 883): this now folds `relaxed_pass`,
-    /// NOT the strict `pass` — the per-window `copies`/`gaps` terms are report-only** (see
-    /// `windows_failed_report_only` below and `crate::window_gate` for the full decision record).
+    /// AND [`Self::run_wide_undecodable_within_floor`] holds OR no longer gates (see below). The
+    /// `undecodable` floor is TEMPORARY; deleted with #881. **Issue 889 (2026-07-30 user decision
+    /// on issue 883): this folds `relaxed_pass`, NOT the strict `pass` — the per-window
+    /// `copies`/`gaps` terms are report-only** (see `windows_failed_report_only` below and
+    /// `crate::window_gate` for the full decision record). **Issue 915 (2026-08-01 user decision):
+    /// the run-wide undecodable floor ALSO stopped gating this field — see
+    /// `run_wide_undecodable_within_floor` and `crate::optical_floor::gates_overall_pass` for the
+    /// decision record and restore path (issue 905).**
     pub overall_pass: bool,
     /// The transition guard applied (ns).
     pub guard_ns: i64,
@@ -197,6 +204,19 @@ pub struct SegmentedContinuity {
     /// unconditionally too. A nonzero count here with `overall_pass == true` is #889's relaxation
     /// visibly doing its job, not a hidden regression.
     pub windows_failed_report_only: u32,
+    /// Issue 915 visibility requirement — the SUM of `undecodable` across every window (the
+    /// run-wide half of the #881 calibrated floor's input). UNCHANGED computation from before
+    /// issue 915; always serialized so the run-wide reading stays visible even though it no
+    /// longer gates `overall_pass` — see [`Self::run_wide_undecodable_within_floor`].
+    pub total_undecodable: u32,
+    /// Issue 915 visibility requirement — was [`Self::total_undecodable`] within the #881
+    /// run-wide floor (`crate::optical_floor::run_within_floor`, `RUN_UNDECODABLE_FLOOR`)? This is
+    /// the pre-915 run-wide term, UNCHANGED in its own computation — it is now REPORT-ONLY: it no
+    /// longer forces `overall_pass` to fail while `crate::optical_floor::gates_overall_pass()` is
+    /// `false` (see that function's doc for the restore path on issue 905). Always serialized,
+    /// even when `true`, so a passing run's headroom is visible too — mirrors
+    /// `windows_failed_report_only`'s issue-889 visibility precedent.
+    pub run_wide_undecodable_within_floor: bool,
     /// #707 EVENT-FORENSICS — every segment's [`CamboxSegment::residual_events`], concatenated in
     /// schedule order, for a caller that wants the whole run's residual events without walking
     /// `segments` itself (e.g. the Discord report / the collector script).
@@ -363,12 +383,19 @@ pub fn segment_continuity(
     }
 
     // #881 — the run-wide half of the calibrated optical-undecodable floor: the SUM across every
-    // window must ALSO stay within its own cap, even when every individual window already passed
-    // its own per-window term (see `crate::optical_floor`'s "Two terms, not one" — a per-window-
-    // only check would let the pre-#707 regression level through undetected). UNTOUCHED by
-    // issue 889 — the undecodable floor is not one of the relaxed terms.
+    // window (see `crate::optical_floor`'s "Two terms, not one" — a per-window-only check would
+    // let the pre-#707 regression level through undetected). UNCHANGED computation from before
+    // issue 915 (still summed, still compared against `RUN_UNDECODABLE_FLOOR` exactly as before).
+    //
+    // Issue 915 (2026-08-01 user decision): this no longer FORCES `overall_pass` to fail while
+    // `crate::optical_floor::gates_overall_pass()` is `false` — report-only while cam1's grabber
+    // (issue 909) + the 120Hz monitor (issue 881) are unresolved. Restore: flip that one function
+    // back to `true` (issue 905).
     let total_undecodable: u32 = segments.iter().map(|s| s.undecodable).sum();
-    overall_pass &= crate::optical_floor::run_within_floor(total_undecodable);
+    let run_wide_undecodable_within_floor =
+        crate::optical_floor::run_within_floor(total_undecodable);
+    overall_pass &=
+        run_wide_undecodable_within_floor || !crate::optical_floor::gates_overall_pass();
 
     // Issue 889 visibility requirement 2 — how many windows would have FAILED under the pre-889
     // strict rule, regardless of whether the run-wide relaxed verdict passes. Always computed,
@@ -379,6 +406,8 @@ pub fn segment_continuity(
         segments,
         overall_pass,
         windows_failed_report_only,
+        total_undecodable,
+        run_wide_undecodable_within_floor,
         guard_ns,
         residual_events: all_residual_events,
         expected_step,
@@ -721,10 +750,12 @@ mod tests {
     }
 
     #[test]
-    fn single_window_five_undecodable_exceeds_per_window_floor_fails_881() {
-        // Acceptance criterion 3 (issue 854 design): 5 undecodable in ONE window exceeds the
-        // #881 per-window floor (<=4) even though the window is otherwise clean (copies=0,
-        // gaps=0) — the per-window term must catch a localized degradation on its own.
+    fn single_window_five_undecodable_exceeds_per_window_floor_fails_strict_passes_overall_915() {
+        // Acceptance criterion 3 (issue 854 design) for the STRICT verdict: 5 undecodable in ONE
+        // window exceeds the #881 per-window floor (<=4) even though the window is otherwise
+        // clean (copies=0, gaps=0) — `pass` must still catch a localized degradation on its own.
+        // Issue 915 (2026-08-01 user decision): the floor is now report-only, so `overall_pass`
+        // PASSES this run (the run-wide sum, 5, is also within the run-wide floor of 8).
         let schedule = vec![win("cam2", 0, 60_000)];
         let frames = window_frames_with_undecodable(0, 1000, 50, 1000, 5);
         let v = segment_continuity(&frames, &schedule, 0, 1);
@@ -733,10 +764,19 @@ mod tests {
         assert_eq!(v.segments[0].gaps, 0, "{:?}", v.segments[0]);
         assert!(
             !v.segments[0].pass,
-            "5 undecodable exceeds the per-window floor of 4: {:?}",
+            "5 undecodable exceeds the per-window floor of 4 -- STRICT still fails, unchanged: {:?}",
             v.segments[0]
         );
-        assert!(!v.overall_pass);
+        assert!(
+            v.segments[0].relaxed_pass,
+            "#915: the per-window floor no longer fails the relaxed verdict: {:?}",
+            v.segments[0]
+        );
+        assert!(
+            v.overall_pass,
+            "#915: the optical floor is report-only -- this run now PASSES overall: {v:?}"
+        );
+        assert_eq!(v.windows_failed_report_only, 1);
     }
 
     #[test]
@@ -834,14 +874,15 @@ mod tests {
     }
 
     #[test]
-    fn pre_707_regression_level_still_fails_run_wide_cap_even_with_clean_copies_and_gaps_881() {
-        // THE most important test (acceptance criterion 2, issue 854 design). EACH of 10
-        // windows here carries exactly 1 undecodable frame (well within the per-window floor of
-        // 4) and is individually clean on copies/gaps — a per-window-only check would let every
-        // one of these 10 windows PASS. But the SUM across the whole run is 10, the pre-#707
-        // regression level (#707's own before/after: 10 -> 3 undecodable) — a gate that would
-        // have passed the bug it was written after is not a gate, so the run-wide cap (<=8) must
-        // catch this even though the per-window term alone does not.
+    fn pre_707_regression_level_no_longer_fails_overall_pass_915() {
+        // THE most important test for issue 881's calibration (acceptance criterion 2, issue 854
+        // design) — now re-purposed for issue 915 (2026-08-01 user decision): EACH of 10 windows
+        // here carries exactly 1 undecodable frame (well within the per-window floor of 4) and is
+        // individually clean on copies/gaps. The SUM across the whole run is 10, the pre-#707
+        // regression level (#707's own before/after: 10 -> 3 undecodable) — `run_wide_undecodable_
+        // within_floor` still correctly computes this as OVER the run-wide cap (<=8), exactly as
+        // before issue 915. But it no longer FORCES `overall_pass` to fail: report-only while
+        // `crate::optical_floor::gates_overall_pass()` is `false`.
         let n = 50;
         let dt = 1000i64;
         let window_span = (n as i64 + 2) * dt;
@@ -874,9 +915,20 @@ mod tests {
             v.segments.iter().all(|s| s.undecodable <= 4),
             "every window individually is within the per-window floor: {v:?}"
         );
+        assert_eq!(
+            v.total_undecodable, 10,
+            "#915: the run-wide sum stays correctly computed: {v:?}"
+        );
         assert!(
-            !v.overall_pass,
-            "the pre-#707 regression level (10 total) must still FAIL on the run-wide cap: {v:?}"
+            !v.run_wide_undecodable_within_floor,
+            "#915: the run-wide floor computation itself is UNCHANGED -- 10 > 8 still reads as \
+             over-floor, it just no longer forces overall_pass to fail: {v:?}"
+        );
+        assert!(
+            v.overall_pass,
+            "#915: the pre-#707 regression level (10 total) no longer fails overall_pass -- \
+             report-only while cam1's grabber (issue 909) + the 120Hz monitor (issue 881) are \
+             unresolved: {v:?}"
         );
     }
 
@@ -1702,11 +1754,12 @@ mod tests {
     }
 
     #[test]
-    fn undecodable_over_floor_combined_with_a_copy_still_fails_overall_889() {
-        // 889 relaxes ONLY copies/gaps -- an undecodable count that ALSO breaches the #881
-        // per-window floor must still fail `overall_pass` even when a copy is present too (the
-        // relaxation must never "rescue" a window that fails for an untouched reason).
-        // 1000,1000(copy),1001, then 5x None (undecodable -- over the floor of 4), then 1002.
+    fn undecodable_over_floor_combined_with_a_copy_now_passes_overall_915() {
+        // Issue 915 (2026-08-01 user decision): the optical floor is now report-only too, on TOP
+        // of issue 889's copies/gaps relaxation -- a window that fails STRICT for BOTH an
+        // over-floor undecodable count AND a copy still passes the RELAXED verdict, and this run's
+        // total (5) is within the run-wide floor (8) as well, so `overall_pass` PASSES.
+        // 1000,1000(copy),1001, then 5x None (undecodable -- over the per-window floor of 4), then 1002.
         let schedule = vec![win("cam2", 0, 10_000)];
         let mut frames = vec![
             SegmentFrame {
@@ -1742,13 +1795,13 @@ mod tests {
         assert_eq!(v.segments[0].copies, 1, "{:?}", v.segments[0]);
         assert!(!v.segments[0].pass, "strict fails: {:?}", v.segments[0]);
         assert!(
-            !v.segments[0].relaxed_pass,
-            "889: relaxed ALSO fails -- the optical floor (undecodable=5 > 4) is untouched: {:?}",
+            v.segments[0].relaxed_pass,
+            "#915: relaxed now passes -- the optical floor (undecodable=5 > 4) is report-only too: {:?}",
             v.segments[0]
         );
         assert!(
-            !v.overall_pass,
-            "889 never rescues an undecodable-over-floor window: {v:?}"
+            v.overall_pass,
+            "#915: the optical floor no longer gates overall_pass, even combined with a copy: {v:?}"
         );
         assert_eq!(v.windows_failed_report_only, 1);
     }

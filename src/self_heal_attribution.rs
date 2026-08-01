@@ -127,6 +127,23 @@ impl SelfHealAttributionReport {
     pub fn any_self_heal(&self) -> bool {
         !self.self_heal.is_empty() || !self.unattributed_events.is_empty()
     }
+
+    /// #914 (2026-08-01, user decision -- mirrors the issue-889 report-only pattern / issue-861's
+    /// caller-only decoupling): whether this report's `frozen_leg`/`self_heal_reset` findings
+    /// should fold into the fused verdict's `overall_pass`. `any_frozen()`/`any_self_heal()` above
+    /// are UNCHANGED -- still fully computed, printed, and JSON-reported; only the caller
+    /// (`recording-verdict.rs`) stops ANDing them into `all_pass`, exactly like issue 861 did for
+    /// `av_window::av_offset_gate_pass`.
+    ///
+    /// Report-only (hardcoded `true` = never contributes a failure) while cam1's ShadowCast 2
+    /// grabber defect (issue 909) remains physically unresolved. No env knob -- same no-knob
+    /// discipline issue 889 established. Restore path tracked on issue 905: once cam1 is
+    /// physically replaced and a stable week passes with no self-heal escalations, flip this
+    /// back to `!self.any_frozen() && !self.any_self_heal()` -- a one-line change, exactly the
+    /// shape this method exists to make possible.
+    pub fn overall_pass_contribution(&self) -> bool {
+        true
+    }
 }
 
 fn window_overlaps_event(start_ns: i64, end_ns: i64, at_ns: i64, margin_ns: i64) -> bool {
@@ -427,6 +444,67 @@ mod tests {
         assert!(!report.any_frozen());
         assert_eq!(report.self_heal.len(), 2);
         assert!(report.unattributed_events.is_empty());
+    }
+
+    // ---- issue 914 (2026-08-01): frozen_leg/self_heal_reset become report-only ----
+
+    #[test]
+    fn a_genuinely_frozen_window_no_longer_contributes_a_failure_914() {
+        // Same fixture shape as `no_events_behaves_like_frozen_leg_report` above -- a genuinely
+        // HARD-FROZEN window, no correlating self-heal event.
+        let segments = vec![SegmentLeg {
+            cambox: "cam5",
+            copies: 300,
+            frames: 9000,
+            start_ns: 5_000_000_000,
+            end_ns: 305_000_000_000, // 300s window -> approx_stale ~10s -> Frozen
+        }];
+        let report = attribute_self_heal(&segments, &[]);
+        assert!(
+            report.any_frozen(),
+            "sanity: this fixture must genuinely classify Frozen: {report:?}"
+        );
+        assert!(
+            report.overall_pass_contribution(),
+            "#914: a genuinely frozen leg must no longer contribute a failure to overall_pass: {report:?}"
+        );
+    }
+
+    #[test]
+    fn an_unattributed_self_heal_event_no_longer_contributes_a_failure_914() {
+        // Same fixture shape as `an_event_with_no_frozen_window_at_all_still_gates_via_unattributed`
+        // above -- a self-heal reset that never correlates to any window.
+        let segments = vec![SegmentLeg {
+            cambox: "cam2",
+            copies: 0,
+            frames: 9000,
+            start_ns: 0,
+            end_ns: 30_000_000_000,
+        }];
+        let events = vec![SelfHealResetEvent {
+            cambox: "cam2".to_string(),
+            at_ns: 15_000_000_000,
+        }];
+        let report = attribute_self_heal(&segments, &events);
+        assert!(
+            report.any_self_heal(),
+            "sanity: this fixture must genuinely trip any_self_heal: {report:?}"
+        );
+        assert!(
+            report.overall_pass_contribution(),
+            "#914: a self-heal reset event must no longer contribute a failure to overall_pass: {report:?}"
+        );
+    }
+
+    #[test]
+    fn a_clean_report_also_contributes_no_failure_914() {
+        let report = SelfHealAttributionReport::default();
+        assert!(!report.any_frozen());
+        assert!(!report.any_self_heal());
+        assert!(
+            report.overall_pass_contribution(),
+            "a genuinely clean report must obviously never contribute a failure: {report:?}"
+        );
     }
 
     #[test]
