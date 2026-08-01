@@ -767,10 +767,17 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
       --linux "$(printf '%s' "$PREFLIGHT_DANTESYNC_LINUX" | grep -oE 'cam[3-7]=[^ ]*' | paste -sd' ' -)"
   fi
 
-  # strih genlock_burn must be OFF on every NDI input before we start (a force-killed OBS can
-  # resurrect a saved burn=true on scene-collection restore, the #246 leak class) + strih/stream/
-  # imag must not already be recording or streaming (a stray session from an aborted prior run).
-  echo "[0/8] OBS pre-run state — genlock_burn OFF on every strih NDI input, no stray recording/streaming (#758)"
+  # #924 (user directive, 2026-08-01): the rig's DEFAULT state, whenever the user has NOT asked
+  # for EVENT mode, is TEST mode -- burns available, QR painting, the sync marker audible. A
+  # harness starting on a rig in its own default state must SET UP whatever state it needs itself
+  # (exactly like [2/8]/[4b/8] below already turn burns ON with the correct per-run run_ids) --
+  # never abort and demand a human normalize the rig first. A leaked genlock_burn=true from a run
+  # that never reached cleanup() (the #246/#844 leak class -- e.g. a GH Actions concurrency-group
+  # cancel, see .claude/rules/ci-testing-gotchas.md) is exactly such a state: THIS harness can
+  # clear it itself, the same idempotent `obs_burn_filter.py remove` the #844/#878 startup
+  # self-heal above already trusts. NORMALIZE, don't abort -- strih/stream must still not already
+  # be recording/streaming below (a stray session this harness cannot safely take over itself).
+  echo "[0/8] OBS pre-run state — normalizing genlock_burn OFF on every strih NDI input (#924), no stray recording/streaming (#758)"
   # #827 follow-up: derive the checked camera list from CAMERA_ACTIVE_SET (camera-set.sh) minus
   # any acked-offline box -- never a literal 1..7 range (a retired camera must never be checked
   # here, regardless of what its strih OBS input still looks like).
@@ -779,8 +786,9 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
     _pfburn="$(python3 "$HERE/obs_burn_filter.py" check --host "$STRIH" --input "NDI cam${_n}" 2>/dev/null || true)"
     case "$_pfburn" in
       *burn_on=True*)
-        echo "ERROR: [preflight] FAIL: strih NDI cam${_n}: genlock_burn is still ON from a prior run — clear it (obs_burn_filter.py remove --host $STRIH --input 'NDI cam${_n}') before starting." >&2
-        exit 1
+        echo "    normalizing: strih NDI cam${_n} had genlock_burn ON from a prior run — clearing it (#924)"
+        python3 "$HERE/obs_burn_filter.py" remove --host "$STRIH" --input "NDI cam${_n}" 2>&1 \
+          | sed "s/^/    [normalize cam${_n}] /" || true
         ;;
     esac
   done
