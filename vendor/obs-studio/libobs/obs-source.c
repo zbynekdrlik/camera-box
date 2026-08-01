@@ -4195,10 +4195,14 @@ static inline void asrc_process_audio(obs_source_t *source, uint32_t frames, uin
 
 	double cumulative_correction_ms = 0.0;
 	if (asrc_compensator_should_log(&source->asrc, &cumulative_correction_ms)) {
+		/* camera-box #806: outer_bias_ppm appended -- "plna telemetria" for the outer-loop
+		 * guard's own correction, on the SAME pre-existing ~60s cadence (never a second log
+		 * line). Zero when no watchdog has ever called obs_source_set_asrc_outer_bias_ppm(). */
 		blog(LOG_INFO,
-		     "asrc: source '%s' estimated=%.2fppm applied=%.2fppm cumulative_correction=%.3fms/%.0fs (#803)",
-		     obs_source_get_name(source), source->asrc.estimated_ppm, applied_ppm, cumulative_correction_ms,
-		     ASRC_LOG_INTERVAL_S);
+		     "asrc: source '%s' estimated=%.2fppm applied=%.2fppm outer_bias=%.2fppm "
+		     "cumulative_correction=%.3fms/%.0fs (#803/#806)",
+		     obs_source_get_name(source), source->asrc.estimated_ppm, applied_ppm,
+		     source->asrc.outer_bias_ppm, cumulative_correction_ms, ASRC_LOG_INTERVAL_S);
 	}
 }
 
@@ -7262,6 +7266,34 @@ void obs_source_set_asrc_enabled(obs_source_t *source, bool enabled)
 bool obs_source_get_asrc_enabled(const obs_source_t *source)
 {
 	return obs_source_valid(source, "obs_source_get_asrc_enabled") ? source->asrc_enabled : false;
+}
+
+/* camera-box #806: the OUTER-loop bias setter/getter. A plain forward to source->asrc's own
+ * setter (media-io/asrc-compensator.c), which does the actual +/-10ppm clamp -- this function adds
+ * no logic of its own beyond validity + a telemetry log line on genuine change, same shape as
+ * obs_source_set_asrc_enabled above. Single-writer: only ever called from the obs-websocket
+ * request thread (SetAsrcOuterBiasPpm), and asrc_compensator_set_outer_bias_ppm() only ever writes
+ * the one outer_bias_ppm double field the audio-ingest thread reads once per callback -- an
+ * ordinary (non-atomic) plain double read/write race here is the SAME accepted shape as the
+ * pre-existing asrc_enabled bool above (a torn read is, at worst, one stale callback's worth of
+ * bias, self-correcting on the next callback; never a crash). */
+void obs_source_set_asrc_outer_bias_ppm(obs_source_t *source, double bias_ppm)
+{
+	if (!obs_source_valid(source, "obs_source_set_asrc_outer_bias_ppm"))
+		return;
+	const double prev = asrc_compensator_get_outer_bias_ppm(&source->asrc);
+	asrc_compensator_set_outer_bias_ppm(&source->asrc, bias_ppm);
+	const double applied = asrc_compensator_get_outer_bias_ppm(&source->asrc);
+	if (prev != applied)
+		blog(LOG_INFO, "asrc: outer-loop bias %.3fppm -> %.3fppm for source '%s' (#806)", prev, applied,
+		     obs_source_get_name(source));
+}
+
+double obs_source_get_asrc_outer_bias_ppm(const obs_source_t *source)
+{
+	return obs_source_valid(source, "obs_source_get_asrc_outer_bias_ppm")
+		       ? asrc_compensator_get_outer_bias_ppm(&source->asrc)
+		       : 0.0;
 }
 
 void obs_source_set_async_unbuffered(obs_source_t *source, bool unbuffered)
