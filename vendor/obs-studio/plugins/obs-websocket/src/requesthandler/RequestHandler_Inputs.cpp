@@ -474,6 +474,76 @@ RequestResult RequestHandler::ToggleInputMute(const Request &request)
 }
 
 /**
+ * camera-box #806: gets the current outer-loop ASRC bias (ppm) applied to an input's audio
+ * timeline -- the slow, SyncNet-driven correction of the inner ASRC servo's (#803) own long-term
+ * residual (epic #800). See obs.h's obs_source_get_asrc_outer_bias_ppm doc comment.
+ *
+ * @requestField ?inputName | String | Name of input to get the outer-loop ASRC bias of
+ * @requestField ?inputUuid | String | UUID of input to get the outer-loop ASRC bias of
+ *
+ * @responseField biasPpm | Number | The outer-loop ASRC bias currently applied, in ppm (range -10..10)
+ *
+ * @requestType GetAsrcOuterBiasPpm
+ * @complexity 2
+ * @rpcVersion -1
+ * @initialVersion 5.0.0
+ * @api requests
+ * @category inputs
+ */
+RequestResult RequestHandler::GetAsrcOuterBiasPpm(const Request &request)
+{
+	RequestStatus::RequestStatus statusCode;
+	std::string comment;
+	OBSSourceAutoRelease input = request.AcquireInput(statusCode, comment);
+	if (!input)
+		return RequestResult::Error(statusCode, comment);
+
+	if (!(obs_source_get_output_flags(input) & OBS_SOURCE_AUDIO))
+		return RequestResult::Error(RequestStatus::InvalidResourceState, "The specified input does not support audio.");
+
+	json responseData;
+	responseData["biasPpm"] = obs_source_get_asrc_outer_bias_ppm(input);
+	return RequestResult::Success(responseData);
+}
+
+/**
+ * camera-box #806: sets the outer-loop ASRC bias (ppm) applied to an input's audio timeline.
+ * Reached by the Python watchdog (scripts/av_sync_outer_loop_guard.py) on every correction event
+ * decided by the guard; never a manual/GUI control. Clamped to [-10, 10] at libobs's own setter
+ * regardless of the value sent here -- the range check below is defense in depth, not the only
+ * guard. See obs.h's obs_source_set_asrc_outer_bias_ppm doc comment.
+ *
+ * @requestField ?inputName | String  | Name of the input to set the outer-loop ASRC bias of
+ * @requestField ?inputUuid | String  | UUID of the input to set the outer-loop ASRC bias of
+ * @requestField biasPpm    | Number  | The outer-loop ASRC bias to apply, in ppm (range -10..10)
+ *
+ * @requestType SetAsrcOuterBiasPpm
+ * @complexity 2
+ * @rpcVersion -1
+ * @initialVersion 5.0.0
+ * @api requests
+ * @category inputs
+ */
+RequestResult RequestHandler::SetAsrcOuterBiasPpm(const Request &request)
+{
+	RequestStatus::RequestStatus statusCode;
+	std::string comment;
+	OBSSourceAutoRelease input = request.AcquireInput(statusCode, comment);
+	if (!(input && request.ValidateNumber("biasPpm", statusCode, comment, -10.0, 10.0)))
+		return RequestResult::Error(statusCode, comment);
+
+	if (!(obs_source_get_output_flags(input) & OBS_SOURCE_AUDIO))
+		return RequestResult::Error(RequestStatus::InvalidResourceState, "The specified input does not support audio.");
+
+	double biasPpm = request.RequestData["biasPpm"];
+	obs_source_set_asrc_outer_bias_ppm(input, biasPpm);
+
+	json responseData;
+	responseData["biasPpm"] = obs_source_get_asrc_outer_bias_ppm(input);
+	return RequestResult::Success(responseData);
+}
+
+/**
  * Gets the current volume setting of an input.
  *
  * @requestField ?inputName | String | Name of the input to get the volume of
