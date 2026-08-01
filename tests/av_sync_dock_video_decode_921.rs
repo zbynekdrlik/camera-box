@@ -2,8 +2,8 @@
 //!
 //! Issue 690 found the LIVE dock's video-QR decode rate collapsing to ~2% at steady state (from
 //! ~55.6% shortly after launch) even though `st_raw_video_camera_box_decode`
-//! (`vendor/av-sync-dock/src/sync-test-output.cpp`) already runs the #398 top-band + area-downscale
-//! + Otsu-binarized-retry decode, not norihiro's crude whole-frame downscale. Per this repo's
+//! (`vendor/av-sync-dock/src/sync-test-output.cpp`) already runs the #398 top-band, area-downscale,
+//! Otsu-binarized-retry decode, not norihiro's crude whole-frame downscale. Per this repo's
 //! standing rule (`.claude/rules/pattern-change-needs-decode-fixture.md`, "Zmena vzoru => decode
 //! fixture test"), NO decode change lands without an offline test over REAL captured frames — this
 //! is that harness.
