@@ -330,7 +330,9 @@ struct Args {
     /// given together with `--av-sync`, adds a `lipsync_cross_check` object to the printed JSON
     /// comparing it against this recording's own QR/QPSK offset (`camera_box::lipsync_cross_check`).
     /// Report-only (see that module's `gates_overall_pass`) -- never affects this CLI's exit code.
-    #[arg(long)]
+    /// `allow_negative_numbers`: video-earlier-than-audio is half the real outcome space and must
+    /// parse as a bare `-N` value (clap 4 otherwise reads a leading `-` as a new flag).
+    #[arg(long, allow_negative_numbers = true)]
     syncnet_offset_ms: Option<f64>,
     /// #624 deliverable 4 / #312 item 2 PR B: the expected/dialed A/V offset (ms) — the
     /// operator's live #398 dock reading (nominally ~0, since the dock is dialed to align video
@@ -13281,6 +13283,19 @@ mod tests {
         // `lipsync_cross_check_for` short-circuits and no JSON key is ever added.
         let defaults = Args::parse_from(["recording-verdict"]);
         assert_eq!(defaults.syncnet_offset_ms, None);
+
+        // Negative offset (video earlier than audio) must parse in bare space-separated form --
+        // without `allow_negative_numbers`, clap 4 reads a leading `-` as a new flag and errors.
+        let negative = Args::parse_from([
+            "recording-verdict",
+            "--av-sync",
+            "/tmp/stream-REC.mp4",
+            "--av-marker-log",
+            "/tmp/markers.csv",
+            "--syncnet-offset-ms",
+            "-37.5",
+        ]);
+        assert_eq!(negative.syncnet_offset_ms, Some(-37.5));
     }
 
     #[test]
