@@ -83,3 +83,10 @@ dist-111/
 
 # Windows build artifacts pulled for rig runs (never commit)
 dist-win/
+
+# issue 930 -- lipsync-test asset binaries (re-derived from assets/lipsync/PROVENANCE.md's
+# pinned URL+sha256 by scripts/lipsync-asset.sh; never committed -- PROVENANCE.md IS committed).
+assets/lipsync/*.ogv
+assets/lipsync/*.mp4
+assets/lipsync/*.jsonl
+assets/lipsync/*.jpg

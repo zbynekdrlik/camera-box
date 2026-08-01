@@ -90,6 +90,9 @@
 #       back to `auto` (the #894 amplifying re-enumeration feedback loop) FAILS this check instead
 #       of degrading invisibly. N/A (not a FAIL) when the box has no capture grabber fitted at all
 #       (cam4, #828).
+#   (x) ffmpeg is installed AND runs (`ffmpeg -version`) -- the #930 lipsync-test-mode runtime
+#       dependency (scripts/lipsync-test-mode.sh); any box may take cam2's painter role, so this
+#       is checked fleet-wide, never cam2-only.
 #
 # Exit: 0 iff every check passes. Non-zero if ANY check FAILs or is UNREADABLE (test-strictness --
 # an unreachable/unreadable check is a FAIL, never a silent pass).
@@ -997,6 +1000,22 @@ else
   else
     fail "capture grabber USB power/control='${GRABBER_POWER_CONTROL:-<unreadable>}' -- drifted away from 'on' (#894's amplifying re-enumeration feedback loop; the udev rule should have re-applied this on the last hotplug)"
   fi
+fi
+
+# (x) ffmpeg installed + runnable (#930 lipsync-test-mode runtime) -------------------------------
+# setup-device.sh installs ffmpeg (STEP 16) so ANY box can take cam2's lipsync-test-mode painter
+# role (scripts/lipsync-test-mode.sh); confirm it's actually present AND runnable, not just that
+# the apt-get step didn't error -- the same "trust but verify" gate the fuser check (t) above
+# already applies to psmisc. Inserted BEFORE (q) -- see .claude/rules/provisioning-scripts.md:
+# (q) is the intentionally-LAST check (tests/verify_device_pure_functions.rs asserts its block
+# runs to end-of-file), so any NEW check goes above it, never after.
+rc=0
+FFMPEG_VERSION_LINE="$(ssh_box "ffmpeg -version 2>/dev/null | head -1")" || rc=$?
+if [ "$rc" -eq 0 ] && [ -n "$FFMPEG_VERSION_LINE" ]; then
+  ok "ffmpeg present and runnable ($FFMPEG_VERSION_LINE) -- #930 lipsync-test-mode runtime"
+else
+  fail "ffmpeg not found/runnable on PATH (ssh rc=$rc) -- scripts/lipsync-test-mode.sh needs it \
+for the lipsync cross-validation TEST-mode variant (#930)"
 fi
 
 # (q) .bak cruft drift -- WARNING only, never a FAIL (#453) -------------------------------------

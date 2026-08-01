@@ -338,6 +338,12 @@ pub mod optical_floor;
 // result onto `CamboxSegment`. TEMPORARY, restore-gated on #883 item 4 + two clean strict runs.
 pub mod window_gate;
 
+// #930 (2026-08-01) — lipsync cross-validation gate: does SyncNet's neural offset (a real
+// talking-face clip, `scripts/av_sync_measure.py`'s #917 engine) agree with the QR/QPSK
+// `--av-sync` offset from a paired TEST-mode run? No probe deps, so it unit-tests Tier-0;
+// `src/bin/recording-verdict.rs`'s `run_av_sync` (`--av-sync` mode) is the sole caller.
+pub mod lipsync_cross_check;
+
 // #893 (2026-07-30) — the "at least one ACTIVE camera sits at the phase-sync floor" gate term.
 // No probe deps, so it unit-tests Tier-0; the `phase-sync-active-floor-gate` CLI binary
 // (src/bin/) reads live pins over OBS WS and hands them in.

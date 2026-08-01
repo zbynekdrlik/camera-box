@@ -967,6 +967,18 @@ apt-get install -y -qq avahi-daemon libavahi-client3 libavahi-common3 avahi-util
 systemctl enable avahi-daemon
 echo "  Installed: avahi-daemon, libavahi-client3, libavahi-common3, avahi-utils, libasound2t64, v4l-utils, alsa-utils, ethtool, curl, ca-certificates, psmisc"
 
+# #930: ffmpeg + EGL runtime for the lipsync cross-validation TEST-mode variant (any box may take
+# cam2's painter role -- unified provisioning, see the "Unified cam-box provisioning" playbook
+# entry) -- one ffmpeg process feeds BOTH /dev/fb0 (video) and the QPSK marker's ALSA device
+# (audio) from a single demux/decode timeline (scripts/lipsync-test-mode.sh). --no-install-
+# recommends keeps this to ~180MB instead of ~170MB of GTK/VA-API/pocketsphinx recommends
+# pulled in by a plain `apt-get install ffmpeg` (live-verified on cam2, #930); libegl1/
+# libegl-mesa0 are separate from libgl1-mesa-dri and were the actual missing piece behind an
+# initial "EGL not initialized" failure trying an SDL2/KMSDRM alternative (kept here anyway --
+# harmless, and useful if a future variant of this tool ever needs it).
+apt-get install -y -qq --no-install-recommends ffmpeg libsdl2-2.0-0 libegl1 libegl-mesa0 libgl1-mesa-dri
+echo "  Installed: ffmpeg, libsdl2-2.0-0, libegl1, libegl-mesa0, libgl1-mesa-dri (#930 lipsync-test-mode runtime)"
+
 # Create rc.local for power management settings (USB autosuspend, etc.)
 cat > /etc/rc.local << 'RCEOF'
 #!/bin/bash

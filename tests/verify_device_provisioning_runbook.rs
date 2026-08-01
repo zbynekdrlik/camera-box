@@ -174,6 +174,21 @@ fn verify_device_covers_fuser_psmisc_check_743() {
     );
 }
 
+/// #930 finding 10 — setup-device.sh (STEP 16) installs `ffmpeg` for the lipsync-test-mode
+/// runtime; verify-device.sh must certify it is actually present AND RUNNABLE on every box
+/// (never cam2-only, since any box may take cam2's painter role), the same setup/verify
+/// companion convention `provisioning-scripts.md` requires and the fuser check above already
+/// follows.
+#[test]
+fn verify_device_covers_ffmpeg_runtime_check_930() {
+    let body = read(VERIFY_SCRIPT);
+    assert!(
+        on_noncomment_line(&body, "ffmpeg -version"),
+        "{VERIFY_SCRIPT} must check ffmpeg is installed AND runnable via a real `ffmpeg \
+         -version` call (not just a comment) -- #930 lipsync-test-mode runtime"
+    );
+}
+
 #[test]
 fn verify_device_exits_nonzero_on_any_failed_check() {
     let body = read(VERIFY_SCRIPT);

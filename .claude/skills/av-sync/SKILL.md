@@ -424,3 +424,28 @@ gh api repos/OWNER/REPO/pulls/<N> -X PATCH --input body.json
 ```
 Confirm with `gh pr view <N> --json body -q '.body'` afterward — don't assume the plain `gh pr edit`
 error means your content was rejected; it may just mean this unrelated GraphQL field choked.
+
+## Running `av_sync_measure.py` STANDALONE on the stream box (verification off-repo) — stub `obs_phase2`
+
+Since the #917 dist-curve wiring, `scripts/av_sync_measure.py` imports TWO repo siblings at module
+load: `av_sync_outer_loop_guard` (small, self-contained — just copy it next to the script) and
+`obs_phase2` (`_conn`/`_rpc` — the whole OBS-WebSocket helper, NOT worth copying for a pure
+measurement/extraction check). For a standalone run on the stream box (e.g. verifying the
+dist-curve extraction against real data), pre-register a stub before importing the module:
+
+```python
+import sys, types
+stub = types.ModuleType('obs_phase2')
+stub._conn = stub._rpc = lambda *a, **k: (_ for _ in ()).throw(RuntimeError('stubbed'))
+sys.modules['obs_phase2'] = stub
+# then importlib-load av_sync_measure.py; the pure paths (_load_dist_tracks,
+# _mean_shift_curve, dist_curve_for_track) never touch OBS.
+```
+
+Real SyncNet reference data for such checks already sits on the stream box:
+`C:\avsync\diagwork\pywork\d\activesd.pckl` (3 face tracks from the 2026-07-19 `diag.mp4` run) —
+verified 2026-08-01 with merged-main code: 51-shift curve, argmin at 22 (center 25 ⇒ offset +3
+frames), 3-point `dist_curve` = [8.4821, 7.8127, 8.523]. Note the DEPLOYED
+`C:\avsync\av_sync_measure.py` is an OLD pre-#917 copy (7.2 kB, 2026-07-19) — the watchdog chain
+runs that one until #807 productization redeploys; don't read its behavior as the repo's HEAD.
+Clean up any `*verify*`/scratch `.py` you copy over when done.
