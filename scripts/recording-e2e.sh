@@ -133,6 +133,14 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # E2E_EXECUTE_VERDICT=1 branch of [8/8] below.
 # shellcheck source=scripts/lib/e2e-discord-report.sh
 . "$HERE/lib/e2e-discord-report.sh"
+# #887: imag's zero-loss proof used to stop at OBS's own self-reported compositor stats. A
+# REPORT-ONLY (never touches $GATE) independent check now compares the compositor's own
+# produced-frame count (imag_produced_frame_check.py, GetStats) against the i915 kernel's
+# per-CRTC CRC debugfs counter on the connector actually driving HDMI-A-1, sampled once during
+# the recording window (see the lib's own header for why this is a bounded SAMPLE, not a
+# whole-window capture).
+# shellcheck source=scripts/lib/imag-presented-frame-check.sh
+. "$HERE/lib/imag-presented-frame-check.sh"
 # #712: cleanup()'s cam3/4 ALL_CAMBOX restore loop used to ssh into each box SEQUENTIALLY —
 # a GH Actions cancellation kills the runner process directly, it does not wait for a 4-box
 # sequential loop to finish. cambox_parallel_wait_and_report waits for all 4 backgrounded
@@ -2914,6 +2922,51 @@ ALL_CAMBOX="${ALL_CAMBOX:-0}"
 # CAMERA_ACTIVE_SET; this default picks it up automatically.
 CAMBOX_SWEEP="${CAMBOX_SWEEP:-$(camera_active_sweep_pairs)}"
 SEGMENT_SECS="${SEGMENT_SECS:-30}"
+
+# #887: imag "produced vs presented" independent check -- REPORT-ONLY, never sets $GATE, never
+# aborts. See scripts/lib/imag-presented-frame-check.sh's own header for the full rationale +
+# honest scoping (every field name says "presented on HDMI-1"/"produced by the compositor",
+# never anything about the physical projection surface). Runs here, during the recording window
+# (after StartRecord, before the ALL_CAMBOX sweep / steady-state hold step that follows), so
+# the sample genuinely overlaps what the
+# recording itself is measuring. A box with no resolvable HDMI-A-1 (unplugged, no debugfs CRC
+# support) just means this diagnostic has nothing to report -- never a run failure.
+IMAG_PRESENTED_SAMPLE_S="${IMAG_PRESENTED_SAMPLE_S:-10}"
+echo "[5c/8] #887 imag presented-frame check (report-only) — sampling ${IMAG_PRESENTED_SAMPLE_S}s of HDMI-A-1's DRM CRC counter vs the compositor's own GetStats produced count"
+IMAG_PRESENTED_JSON="$OUTDIR/imag-presented-${RUN_ID}.json"
+_ipf_resolve_out="$(sshpass -p "${IMAG_PW:-newlevel}" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 \
+  "${IMAG_USER:-newlevel}@$IMAG_IP" "$(imag_presented_frame_resolve_cmd "${IMAG_PW:-newlevel}")" 2>/dev/null)" || _ipf_resolve_out=""
+_ipf_crtc_dir="$(printf '%s\n' "$_ipf_resolve_out" | sed -n 's/^IMAG_PRESENTED_CRTC_DIR=//p')"
+_ipf_card_num="$(printf '%s\n' "$_ipf_resolve_out" | sed -n 's/^IMAG_PRESENTED_CARD_NUM=//p')"
+if [ -n "$_ipf_crtc_dir" ] && [ -n "$_ipf_card_num" ]; then
+  _ipf_before="$(python3 "$HERE/imag_produced_frame_check.py" --host "$IMAG_IP" 2>/dev/null)" || _ipf_before=""
+  _ipf_sample_out="$(sshpass -p "${IMAG_PW:-newlevel}" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 \
+    "${IMAG_USER:-newlevel}@$IMAG_IP" \
+    "$(imag_presented_frame_sample_cmds "${IMAG_PW:-newlevel}" "$_ipf_card_num" "$_ipf_crtc_dir" "$IMAG_PRESENTED_SAMPLE_S")" 2>/dev/null)" || _ipf_sample_out=""
+  _ipf_after="$(python3 "$HERE/imag_produced_frame_check.py" --host "$IMAG_IP" 2>/dev/null)" || _ipf_after=""
+  _ipf_presented="$(printf '%s\n' "$_ipf_sample_out" | sed -n 's/.*presented_frame_count=\([0-9]*\).*/\1/p')"
+  _ipf_repeated="$(printf '%s\n' "$_ipf_sample_out" | sed -n 's/.*repeated_frame_count=\([0-9]*\).*/\1/p')"
+  _ipf_produced_before="$(printf '%s\n' "$_ipf_before" | sed -n 's/.*renderTotalFrames=\([0-9]*\).*/\1/p')"
+  _ipf_produced_after="$(printf '%s\n' "$_ipf_after" | sed -n 's/.*renderTotalFrames=\([0-9]*\).*/\1/p')"
+  _ipf_produced_delta="null"
+  if [ -n "$_ipf_produced_before" ] && [ -n "$_ipf_produced_after" ]; then
+    _ipf_produced_delta=$(( _ipf_produced_after - _ipf_produced_before ))
+  fi
+  echo "    #887: compositor_produced_frames=${_ipf_produced_delta} hdmi1_presented_frames=${_ipf_presented:-n/a} hdmi1_repeated_frames=${_ipf_repeated:-n/a} (sample window ${IMAG_PRESENTED_SAMPLE_S}s)"
+  cat > "$IMAG_PRESENTED_JSON" <<JSONEOF
+{
+  "note": "produced/presented describe imag's OWN compositor pipeline up to its HDMI-A-1 connector ONLY -- this does NOT verify the physical projection surface or anything downstream of the cable (issue 887 option 3, software-only)",
+  "sample_window_s": ${IMAG_PRESENTED_SAMPLE_S},
+  "compositor_produced_frames": ${_ipf_produced_delta},
+  "hdmi1_presented_frames": ${_ipf_presented:-null},
+  "hdmi1_repeated_frames": ${_ipf_repeated:-null}
+}
+JSONEOF
+  echo "    wrote $IMAG_PRESENTED_JSON"
+else
+  echo "    #887: could not resolve imag's HDMI-A-1 connector to a debugfs CRTC dir — skipping (report-only, never a run failure)"
+fi
+
 if [ "$ALL_CAMBOX" = "1" ]; then
   # #332: the all-cambox sweep now runs on the DEFAULT decode-on-stream path (VERDICT_ON_STREAM=1,
   # #193 — decode where the video lives, never pull the multi-GB recordings to dev1). The per-box

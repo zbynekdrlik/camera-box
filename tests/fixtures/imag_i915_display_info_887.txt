@@ -1,0 +1,25 @@
+CRTC info
+---------
+[CRTC:150:pipe A]:
+	uapi: enable=yes, active=yes, mode="": 60 138654 1920 1968 2000 2080 1080 1083 1088 1111 0x0 0x9
+	[ENCODER:506:DDI A/PHY A]: connectors:
+		[CONNECTOR:507:eDP-1]
+	underrun reporting: cpu=yes pch=yes
+[CRTC:268:pipe B]:
+	uapi: enable=yes, active=yes, mode="": 60 148500 1920 2008 2052 2200 1080 1084 1089 1125 0x0 0x5
+	[ENCODER:515:DDI TC1/PHY TC1]: connectors:
+		[CONNECTOR:516:HDMI-A-1]
+	underrun reporting: cpu=yes pch=yes
+[CRTC:386:pipe C]:
+	uapi: enable=no, active=no, mode="": 0 0 0 0 0 0 0 0 0 0 0x0 0x0
+	underrun reporting: cpu=yes pch=yes
+[CRTC:504:pipe D]:
+	uapi: enable=no, active=no, mode="": 0 0 0 0 0 0 0 0 0 0 0x0 0x0
+	underrun reporting: cpu=yes pch=yes
+
+Connector info
+--------------
+[CONNECTOR:507:eDP-1]: status: connected
+	physical dimensions: 330x210mm
+[CONNECTOR:516:HDMI-A-1]: status: connected
+	physical dimensions: 640x400mm
