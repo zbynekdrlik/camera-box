@@ -1613,6 +1613,18 @@ EXPORT bool obs_source_get_asrc_enabled(const obs_source_t *source);
 EXPORT void obs_source_set_asrc_outer_bias_ppm(obs_source_t *source, double bias_ppm);
 EXPORT double obs_source_get_asrc_outer_bias_ppm(const obs_source_t *source);
 
+/* camera-box #926: read-only telemetry getters for the servo's OWN live numbers -- the A/V-sync
+ * dock's ASRC transparency section surfaces these so an operator can see WHAT resampling is
+ * currently doing, not just that it is on/off. `estimated_ppm` is the servo's raw EMA rate
+ * estimate before slew-limiting; `applied_ppm` is the actual correction currently being applied
+ * (post-clamp, post-slew) -- both already live fields of `struct asrc_compensator` (see
+ * media-io/asrc-compensator.h), simply not exposed outside core until now. Trivial single-field
+ * reads off the same single-writer struct obs_source_get_asrc_enabled already reads (torn read
+ * across threads is, at worst, one stale audio-callback's worth -- same tolerance already
+ * accepted there). */
+EXPORT double obs_source_get_asrc_estimated_ppm(const obs_source_t *source);
+EXPORT double obs_source_get_asrc_applied_ppm(const obs_source_t *source);
+
 /** Used to decouple audio from video so that audio doesn't attempt to sync up
  * with video.  I.E. Audio acts independently.  Only works when in unbuffered
  * mode. */

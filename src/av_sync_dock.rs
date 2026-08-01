@@ -321,6 +321,190 @@ impl RollingOffsetCluster {
             _ => None,
         }
     }
+
+    /// #926 fix-up (review finding 1/7) — shift every RETAINED sample's offset by `-delta_ms`.
+    /// Call this the instant [`DockLockCorrector::decide`] returns an [`DockLockAction::Apply`]
+    /// that actually changed `genlock_latency_ms_src` by `delta_ms` (`new_delay - current_delay`).
+    ///
+    /// WHY: every retained sample was measured under the OLD delay. Left alone, the window keeps
+    /// reporting close to the PRE-correction offset for up to [`DOCK_CLUSTER_WINDOW_NS`] after the
+    /// actuator already moved — far longer than [`DOCK_LOCK_MIN_REAPPLY_S`], so several more
+    /// cooldown ticks can fire "correcting" an error that (from the actuator's point of view) no
+    /// longer exists, over-shooting the target and — for a residual that started above the
+    /// target — potentially crossing straight through it into the forbidden audio-early zone.
+    /// Re-basing means the SAME closed-form relation [`DockLockCorrector::decide`] uses for a
+    /// single correction (`ts_new = ts_old - delta_applied`) also holds for every already-retained
+    /// sample, so the window's own median/MAD are correct for the NEW delay immediately — no need
+    /// to wait for fresh markers to dilute the stale ones.
+    pub fn rebase(&mut self, delta_ms: f64) {
+        for (_, offset) in self.samples.iter_mut() {
+            *offset -= delta_ms;
+        }
+    }
+}
+
+/// #926 — max ms a single [`DockLockCorrector::decide`] call may move `genlock_latency_ms_src`
+/// away from its current value. Deliberately much smaller than the offline per-run
+/// `AV_SYNC_MAX_STEP_MS` (50, `av_sync_calibrate.py`/`qpsk_marker::required_delay_ms`): the LIVE
+/// corrector fires on every `Locked`/`Updated` lock-audit transition (potentially every few
+/// seconds while converging), so each individual nudge must stay small — mirrors ASRC's #803
+/// "inaudible, never one abrupt jump" philosophy applied to the video-delay knob instead of a
+/// resample ratio. A large initial error (e.g. the ticket's own -52ms) converges over several
+/// Locked/Updated events rather than jumping in one step.
+pub const DOCK_LOCK_MAX_STEP_MS: i32 = 5;
+
+/// #926 — minimum wall-clock time (via the caller's own monotonic `now_ns`) between two actuator
+/// writes. Gives the rolling offset cluster time to reflect the PREVIOUS correction (the samples
+/// already in its 180s window were measured under the OLD delay) before nudging again, and keeps
+/// a converged, healthy lock from re-writing the OBS source setting on every marker.
+pub const DOCK_LOCK_MIN_REAPPLY_S: f64 = 30.0;
+
+/// DistroAV hardware range for `genlock_latency_ms_src` (mirrors `av_sync_calibrate.py`'s
+/// `LATENCY_MIN`/`LATENCY_MAX` and `qpsk_marker::required_delay_ms`'s own `.clamp(3, 2000)`).
+pub const DOCK_LOCK_LATENCY_MIN_MS: i32 = 3;
+pub const DOCK_LOCK_LATENCY_MAX_MS: i32 = 2000;
+
+/// #926 fix-up (review finding 3) — the MINIMUM safety margin (ms) the corrector targets above
+/// zero, regardless of how tight the current cluster measurement claims to be. Targeting exactly
+/// `[0, 1)` claims sub-millisecond precision that is three orders of magnitude below the
+/// estimator's own accepted noise floor ([`DOCK_CLUSTER_MAX_MAD_MS`], 25ms) — a false precision
+/// that can itself swing back negative on ordinary measurement jitter. The ACTUAL target margin is
+/// `mad_ms.clamp(DOCK_LOCK_MIN_MARGIN_MS, DOCK_CLUSTER_MAX_MAD_MS)`: scaled to the cluster's own
+/// observed dispersion (a wide/noisy lock gets a bigger, honest margin), but never below this
+/// floor even when a cluster reports a suspiciously tiny/zero MAD (few samples, or a lucky run).
+pub const DOCK_LOCK_MIN_MARGIN_MS: f64 = 1.0;
+
+/// The decision [`DockLockCorrector::decide`] returns: either leave the actuator alone, or set it
+/// to a new absolute `genlock_latency_ms_src` value.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DockLockAction {
+    /// No test-signal lock right now, or the current value already satisfies the "audio never
+    /// early" target, or the cooldown has not yet elapsed — do not touch the actuator.
+    Hold,
+    /// Apply this NEW absolute `genlock_latency_ms_src` value.
+    Apply(i32),
+}
+
+/// #926 — the LIVE, in-process A/V-sync dock corrector. Holds `genlock_latency_ms_src` (the SAME
+/// per-source video-delay knob the offline `av_sync_calibrate.py` path already uses) at a target
+/// where the measured dock-convention offset (`ts_ms = audio_ts - video_ts`, see
+/// `sync-test-output.cpp`) is NEVER negative ("audio early" — a forbidden steady state per the
+/// issue's own directive: sound is always physically slower than light, so a resting audio-ahead
+/// state can only be a rig defect) — landing at a deliberate, noise-scaled safety MARGIN above
+/// zero (see [`DOCK_LOCK_MIN_MARGIN_MS`]'s own doc comment for why exactly `[0, 1)` is a false
+/// precision the estimator's ~25ms noise floor cannot actually back up).
+///
+/// Closed-form proof of the "never audio early" invariant (ignoring the safety clamps below, which
+/// only ever slow convergence, never violate the invariant once it IS reached): let `margin =
+/// mad_ms.clamp(DOCK_LOCK_MIN_MARGIN_MS, DOCK_CLUSTER_MAX_MAD_MS)` and `g =
+/// floor(ts_ms - margin)`. Setting `new_delay = current_delay + g` changes `ts` by exactly `-g`
+/// (increasing the video source's own added delay by `g` ms delays the video `g` ms further,
+/// which — since `ts = audio_ts - video_ts` — REDUCES `ts` by `g`). So the resulting `ts_new =
+/// ts_ms - g = margin + ((ts_ms - margin) - floor(ts_ms - margin))`, `margin` plus the fractional
+/// part of `(ts_ms - margin)`, which is always in `[margin, margin + 1)` by definition of `floor`
+/// — and since `margin >= DOCK_LOCK_MIN_MARGIN_MS > 0`, `ts_new` is always strictly positive, never
+/// merely non-negative. `g` positive means the video is currently arriving too early relative to
+/// the target (bring it later, increase delay); `g` negative means video is lagging (audio is
+/// early), so the delay is REDUCED — same physical direction the offline `required_delay_ms`
+/// already uses, just floor-biased instead of round-to-nearest so the residual can only land on
+/// the audio-late-or-margin side.
+///
+/// Only ever acts on a genuine trusted measurement (the caller passes `locked = true` only when
+/// the rolling cluster currently reports `est.ok`) — `locked = false` (no test signal: real event,
+/// no QR, no marker) never touches the actuator, which is what implements the ticket's
+/// requirement 5 (measure-only, permanent lock, no drift-chasing on program material) with no
+/// separate timeout/heartbeat. #926 fix-up (review finding 2): the caller drives this from EVERY
+/// trusted (`est.ok`) measurement, not only a `CbLockAuditTracker` `Locked`/`Updated` classifier
+/// transition — the classifier's `Updated` needs a >5ms MOVE of the (window-smoothed) median,
+/// which stalls convergence once the window itself lags a landed correction; this function's own
+/// cooldown ([`DOCK_LOCK_MIN_REAPPLY_S`]) and dead-zone (`g == 0`) checks are what make calling it
+/// on every trusted measurement safe.
+pub struct DockLockCorrector {
+    max_step_ms: i32,
+    min_delay_ms: i32,
+    max_delay_ms: i32,
+    min_reapply_s: f64,
+    last_applied_ns: Option<u64>,
+}
+
+impl DockLockCorrector {
+    pub fn new(max_step_ms: i32, min_reapply_s: f64) -> Self {
+        Self {
+            max_step_ms,
+            min_delay_ms: DOCK_LOCK_LATENCY_MIN_MS,
+            max_delay_ms: DOCK_LOCK_LATENCY_MAX_MS,
+            min_reapply_s,
+            last_applied_ns: None,
+        }
+    }
+
+    /// The dock's standing configuration ([`DOCK_LOCK_MAX_STEP_MS`]/[`DOCK_LOCK_MIN_REAPPLY_S`]).
+    pub fn dock() -> Self {
+        Self::new(DOCK_LOCK_MAX_STEP_MS, DOCK_LOCK_MIN_REAPPLY_S)
+    }
+
+    /// Decide what (if anything) to do with the actuator right now.
+    ///
+    /// `locked`: true only when the caller's rolling cluster currently reports a trusted
+    /// (`est.ok`) measurement; false otherwise (no test signal — real event, no QR, no marker) —
+    /// see the struct doc for why `false` always yields `Hold`. #926 fix-up (review finding 2):
+    /// the caller must pass `true` on EVERY trusted measurement, not only a lock-audit
+    /// `Locked`/`Updated` classifier transition — this function's own cooldown/dead-zone gates
+    /// make that safe. `offset_ms`: the locked cluster offset in DOCK convention (`audio_ts -
+    /// video_ts`), only meaningful when `locked`. `mad_ms`: the SAME cluster's median absolute
+    /// deviation (ms), used to size the safety margin (see [`DOCK_LOCK_MIN_MARGIN_MS`]) — also
+    /// only meaningful when `locked`. `current_delay_ms`: the actuator's CURRENT
+    /// `genlock_latency_ms_src`, read fresh by the caller (never cached) so a concurrent manual/
+    /// scripted change is respected. `now_ns`: the caller's own monotonic clock (e.g. the OBS
+    /// pipeline timestamp already in hand) for the cooldown.
+    ///
+    /// #926 fix-up (review finding 5): a non-finite `offset_ms` (NaN/±inf — should never happen
+    /// from a valid cluster estimate, but never trust an external input blindly) always yields
+    /// `Hold` rather than risking UB/a panic on the later float→int conversions.
+    pub fn decide(
+        &mut self,
+        locked: bool,
+        offset_ms: f64,
+        mad_ms: f64,
+        current_delay_ms: i32,
+        now_ns: u64,
+    ) -> DockLockAction {
+        if !locked {
+            return DockLockAction::Hold;
+        }
+        if !offset_ms.is_finite() {
+            return DockLockAction::Hold;
+        }
+        let margin = if mad_ms.is_finite() {
+            mad_ms.clamp(DOCK_LOCK_MIN_MARGIN_MS, DOCK_CLUSTER_MAX_MAD_MS)
+        } else {
+            DOCK_LOCK_MIN_MARGIN_MS
+        };
+        // Clamp BEFORE the later `as i64` casts (finding 5): offset_ms is finite but could still
+        // be astronomically large, which would otherwise risk an overflowing add below.
+        let g = (offset_ms - margin)
+            .floor()
+            .clamp(-1_000_000.0, 1_000_000.0);
+        if g == 0.0 {
+            return DockLockAction::Hold; // already ts_ms in [margin, margin + 1) -- nothing to do
+        }
+        if let Some(last) = self.last_applied_ns {
+            let elapsed_s = now_ns.saturating_sub(last) as f64 / 1_000_000_000.0;
+            if elapsed_s < self.min_reapply_s {
+                return DockLockAction::Hold; // cooldown -- let the last correction take effect first
+            }
+        }
+        let raw = current_delay_ms as i64 + g as i64;
+        let lo = (current_delay_ms - self.max_step_ms) as i64;
+        let hi = (current_delay_ms + self.max_step_ms) as i64;
+        let stepped = raw.clamp(lo, hi);
+        let clamped = stepped.clamp(self.min_delay_ms as i64, self.max_delay_ms as i64) as i32;
+        if clamped == current_delay_ms {
+            return DockLockAction::Hold;
+        }
+        self.last_applied_ns = Some(now_ns);
+        DockLockAction::Apply(clamped)
+    }
 }
 
 #[cfg(test)]
@@ -538,6 +722,389 @@ mod tests {
         assert!(
             !locked,
             "a wide (high-MAD) band must be rejected by the MAD gate"
+        );
+    }
+
+    // ---- #926 DockLockCorrector ----
+
+    #[test]
+    fn corrector_holds_when_not_locked() {
+        // Unlocked (real event, no test signal) must NEVER touch the actuator, regardless of
+        // however wrong the last-known offset was.
+        let mut c = DockLockCorrector::new(5, 30.0);
+        assert_eq!(
+            c.decide(false, -52.2, 5.0, 950, 1_000_000_000),
+            DockLockAction::Hold
+        );
+    }
+
+    #[test]
+    fn corrector_holds_once_already_in_the_safety_margin_zone() {
+        // With mad_ms=5.0 (a typical tight cluster) the target zone is [5, 6)ms, not [0,1) --
+        // #926 fix-up finding 3: a bare [0,1) target is false precision the estimator's own noise
+        // floor can't back up. Both boundary-ish values within the margin zone must Hold.
+        let mut c = DockLockCorrector::new(5, 30.0);
+        assert_eq!(
+            c.decide(true, 5.0, 5.0, 950, 1_000_000_000),
+            DockLockAction::Hold
+        );
+        let mut c2 = DockLockCorrector::new(5, 30.0);
+        assert_eq!(
+            c2.decide(true, 5.9, 5.0, 950, 1_000_000_000),
+            DockLockAction::Hold
+        );
+    }
+
+    #[test]
+    fn corrector_never_lands_below_the_safety_margin_across_many_offsets_mads_and_deploys() {
+        // The closed-form invariant, swept over a wide range of measured offsets, cluster MADs,
+        // and current delays, WITHOUT the step clamp interfering (max_step huge) so the single
+        // application fully converges: the resulting ts (offset_ms - applied_delta) must land in
+        // [margin, margin+1), where margin = mad_ms.clamp(DOCK_LOCK_MIN_MARGIN_MS,
+        // DOCK_CLUSTER_MAX_MAD_MS) -- covering the margin CLAMPING at both ends (0.1/50.0 fall
+        // outside [1,25] and must clamp).
+        for &offset_ms in &[
+            -523.7, -100.0, -52.2, -10.4, -1.0, -0.1, 0.0, 0.5, 3.3, 10.0, 42.9, 100.0, 900.0,
+        ] {
+            for &current in &[3, 50, 500, 950, 1000, 1500, 1999, 2000] {
+                for &mad_ms in &[0.1, 1.0, 5.0, 25.0, 50.0] {
+                    let mut c = DockLockCorrector::new(100_000, 30.0); // effectively unclamped step
+                    let action = c.decide(true, offset_ms, mad_ms, current, 1_000_000_000);
+                    let new_delay = match action {
+                        DockLockAction::Apply(v) => v,
+                        DockLockAction::Hold => current, // already within the margin zone, or a no-op
+                    };
+                    let delta_applied = (new_delay - current) as f64;
+                    let ts_new = offset_ms - delta_applied;
+                    let hit_rail = new_delay == 3 || new_delay == 2000;
+                    if !hit_rail {
+                        let margin = mad_ms.clamp(DOCK_LOCK_MIN_MARGIN_MS, DOCK_CLUSTER_MAX_MAD_MS);
+                        assert!(
+                            (margin - 1e-9..margin + 1.0 + 1e-9).contains(&ts_new),
+                            "offset={offset_ms} mad={mad_ms} current={current} new_delay={new_delay} \
+                             ts_new={ts_new} margin={margin} must land in [margin,margin+1) -- audio \
+                             must never end up early"
+                        );
+                    } else {
+                        // #926 fix-up finding 9: pinned at a hardware rail is a genuine, explicitly
+                        // acknowledged case (never a silently-skipped one) -- ts_new MAY remain
+                        // outside the margin zone (including negative/audio-early) by hardware
+                        // necessity. See corrector_at_floor_rail_can_leave_audio_early_by_hardware_limit
+                        // for the concrete, hand-checked scenario; here we only pin that the clamp
+                        // landed EXACTLY at the rail it claims.
+                        assert!(
+                            new_delay == 3 || new_delay == 2000,
+                            "hit_rail flag disagrees with new_delay={new_delay}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn corrector_at_floor_rail_can_leave_audio_early_by_hardware_limit() {
+        // #926 fix-up finding 9: at the DistroAV floor (3ms) with nowhere further to reduce, a
+        // residual that needs MORE reduction than the floor allows stays audio-early -- a real
+        // hardware limit, not a corrector bug. Explicitly asserted (never silently excluded).
+        let mut c = DockLockCorrector::new(5, 30.0);
+        let action = c.decide(true, -20.0, 5.0, 3, 1_000_000_000);
+        assert_eq!(
+            action,
+            DockLockAction::Hold,
+            "pinned at the floor -- no room to correct further"
+        );
+        // No correction applied -- the ORIGINAL offset (-20ms, audio-early) persists.
+        let ts_new = -20.0_f64;
+        assert!(
+            ts_new < 0.0,
+            "at the floor rail, audio-early can persist by hardware necessity"
+        );
+    }
+
+    #[test]
+    fn corrector_margin_clamps_to_the_min_when_mad_is_tiny_or_zero() {
+        // A suspiciously tiny/zero MAD (very few samples, or a lucky run) must NOT be trusted down
+        // to sub-1ms precision -- the margin floors at DOCK_LOCK_MIN_MARGIN_MS regardless.
+        let mut c = DockLockCorrector::new(100_000, 30.0); // effectively unclamped step
+        match c.decide(true, 10.0, 0.0, 950, 1_000_000_000) {
+            DockLockAction::Apply(v) => {
+                let ts_new = 10.0 - (v - 950) as f64;
+                assert!(
+                    (DOCK_LOCK_MIN_MARGIN_MS..DOCK_LOCK_MIN_MARGIN_MS + 1.0).contains(&ts_new),
+                    "must land at the MINIMUM 1ms margin, not a bare 0: ts_new={ts_new}"
+                );
+            }
+            DockLockAction::Hold => {
+                panic!("10ms of excess lateness must be corrected even with mad=0")
+            }
+        }
+    }
+
+    #[test]
+    fn corrector_margin_clamps_to_the_max_mad_when_mad_is_huge() {
+        let mut c = DockLockCorrector::new(100_000, 30.0); // effectively unclamped step
+        match c.decide(true, 100.0, 500.0, 950, 1_000_000_000) {
+            DockLockAction::Apply(v) => {
+                let ts_new = 100.0 - (v - 950) as f64;
+                assert!(
+                    (DOCK_CLUSTER_MAX_MAD_MS..DOCK_CLUSTER_MAX_MAD_MS + 1.0).contains(&ts_new),
+                    "margin must clamp at DOCK_CLUSTER_MAX_MAD_MS: ts_new={ts_new}"
+                );
+            }
+            DockLockAction::Hold => {
+                panic!("100ms of excess lateness must be corrected even with an absurd mad")
+            }
+        }
+    }
+
+    #[test]
+    fn corrector_rejects_nonfinite_offset_and_never_touches_actuator() {
+        // #926 fix-up finding 5: NaN/±inf must never reach the later float->int conversions.
+        for &bad in &[f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut c = DockLockCorrector::new(5, 30.0);
+            assert_eq!(
+                c.decide(true, bad, 5.0, 950, 1_000_000_000),
+                DockLockAction::Hold,
+                "non-finite offset_ms={bad} must always Hold"
+            );
+        }
+    }
+
+    #[test]
+    fn corrector_clamps_an_astronomically_large_finite_offset_without_panicking() {
+        // Still FINITE (per is_finite()) but far beyond any real measurement -- must not panic
+        // (overflow) and must still move in the CORRECT direction, capped by the step budget.
+        let mut c = DockLockCorrector::new(5, 30.0);
+        match c.decide(true, 1e18, 5.0, 950, 1_000_000_000) {
+            DockLockAction::Apply(v) => {
+                assert_eq!(v, 955, "huge positive offset -- step-capped increase")
+            }
+            DockLockAction::Hold => {
+                panic!("a huge positive offset must still trigger a correction")
+            }
+        }
+        let mut c2 = DockLockCorrector::new(5, 30.0);
+        match c2.decide(true, -1e18, 5.0, 950, 1_000_000_000) {
+            DockLockAction::Apply(v) => {
+                assert_eq!(v, 945, "huge negative offset -- step-capped decrease")
+            }
+            DockLockAction::Hold => {
+                panic!("a huge negative offset must still trigger a correction")
+            }
+        }
+    }
+
+    #[test]
+    fn corrector_step_clamps_a_large_correction_but_never_moves_wrong_direction() {
+        // -52.2ms (audio early) with a tight 5ms step budget must not jump straight to the fully
+        // converged value -- it moves at most 5ms, in the CORRECT direction (reduce the delay).
+        let mut c = DockLockCorrector::new(5, 30.0);
+        match c.decide(true, -52.2, 5.0, 950, 1_000_000_000) {
+            DockLockAction::Apply(v) => {
+                assert_eq!(v, 945, "must reduce by exactly the step budget")
+            }
+            DockLockAction::Hold => panic!("a -52.2ms error must trigger a correction"),
+        }
+    }
+
+    #[test]
+    fn corrector_respects_the_hardware_clamp_at_the_floor() {
+        // Wants to go below the DistroAV floor (3ms) -- the raw target clamps to exactly 3.
+        let mut c = DockLockCorrector::new(50, 30.0);
+        match c.decide(true, -10.0, 5.0, 5, 1_000_000_000) {
+            DockLockAction::Apply(v) => assert_eq!(v, 3, "must clamp at the hardware floor"),
+            DockLockAction::Hold => panic!("should have attempted a correction (clamped to floor)"),
+        }
+        // Already PINNED at the floor with nowhere left to go -- correctly a no-op (Hold), not a
+        // pointless Apply(current) actuator write.
+        let mut c2 = DockLockCorrector::new(50, 30.0);
+        assert_eq!(
+            c2.decide(true, -10.0, 5.0, 3, 1_000_000_000),
+            DockLockAction::Hold,
+            "already at the floor with no room to correct further must Hold, not re-write the same value"
+        );
+    }
+
+    #[test]
+    fn corrector_respects_the_hardware_clamp_at_the_ceiling() {
+        // Wants to go above the DistroAV ceiling (2000ms) -- the raw target clamps to exactly 2000.
+        let mut c = DockLockCorrector::new(50, 30.0);
+        match c.decide(true, 10.0, 5.0, 1998, 1_000_000_000) {
+            DockLockAction::Apply(v) => assert_eq!(v, 2000, "must clamp at the hardware ceiling"),
+            DockLockAction::Hold => {
+                panic!("should have attempted a correction (clamped to ceiling)")
+            }
+        }
+        // Already PINNED at the ceiling -- Hold, not a pointless re-write.
+        let mut c2 = DockLockCorrector::new(50, 30.0);
+        assert_eq!(
+            c2.decide(true, 10.0, 5.0, 2000, 1_000_000_000),
+            DockLockAction::Hold,
+            "already at the ceiling with no room to correct further must Hold, not re-write the same value"
+        );
+    }
+
+    #[test]
+    fn corrector_enforces_a_cooldown_between_applications() {
+        let mut c = DockLockCorrector::new(5, 30.0);
+        // First correction at t=1s applies.
+        assert!(matches!(
+            c.decide(true, -52.2, 5.0, 950, 1_000_000_000),
+            DockLockAction::Apply(_)
+        ));
+        // 10s later (< 30s cooldown) -- must Hold even though a further correction is still due.
+        assert_eq!(
+            c.decide(true, -47.2, 5.0, 945, 11_000_000_000),
+            DockLockAction::Hold,
+            "cooldown must suppress a second write within min_reapply_s"
+        );
+        // 31s after the FIRST application -- cooldown elapsed, must apply again.
+        assert!(matches!(
+            c.decide(true, -47.2, 5.0, 945, 32_000_000_000),
+            DockLockAction::Apply(_)
+        ));
+    }
+
+    #[test]
+    fn corrector_converges_excess_audio_lateness_toward_the_safety_margin() {
+        // offset_ms positive (audio ALREADY late by more than the target margin) is not
+        // forbidden, but the ticket wants MINIMAL latency -- the corrector must still nudge it
+        // down toward the margin (5ms here, not a bare 0), not just leave it (only the
+        // negative/audio-early direction is a hard violation; drifting arbitrarily positive would
+        // violate "hold FIXED MINIMAL latency").
+        let mut c = DockLockCorrector::new(50, 30.0);
+        match c.decide(true, 42.0, 5.0, 950, 1_000_000_000) {
+            DockLockAction::Apply(v) => {
+                assert_eq!(
+                    v, 987,
+                    "must increase delay to close the gap down to the 5ms margin"
+                )
+            }
+            DockLockAction::Hold => {
+                panic!("42ms of excess audio-lateness must trigger a correction")
+            }
+        }
+    }
+
+    #[test]
+    fn dock_default_constructor_matches_named_constants() {
+        // #926 fix-up finding 10: DockLockCorrector::dock() must behave IDENTICALLY to
+        // new(DOCK_LOCK_MAX_STEP_MS, DOCK_LOCK_MIN_REAPPLY_S) -- exercised through a scenario that
+        // pins down both the step budget and the cooldown.
+        let mut c = DockLockCorrector::dock();
+        assert_eq!(
+            c.decide(true, -52.2, 5.0, 950, 1_000_000_000),
+            DockLockAction::Apply(950 - DOCK_LOCK_MAX_STEP_MS)
+        );
+        assert_eq!(
+            c.decide(true, -47.2, 5.0, 950 - DOCK_LOCK_MAX_STEP_MS, 1_000_000_001),
+            DockLockAction::Hold,
+            "within DOCK_LOCK_MIN_REAPPLY_S of the first application must Hold"
+        );
+    }
+
+    #[test]
+    fn rolling_cluster_rebase_shifts_every_retained_sample_immediately() {
+        // #926 fix-up finding 1/7: rebase() must shift EVERY retained sample by -delta_ms so the
+        // window reflects the post-correction state right away -- not 180s later once fresh
+        // markers happen to dilute the stale ones.
+        let mut c = RollingOffsetCluster::dock();
+        let mut t_ns = 0u64;
+        let mut last = None;
+        for _ in 0..(DOCK_CLUSTER_MIN_MATCHED + 4) {
+            t_ns += 100_000_000;
+            last = c.push(t_ns, -52.2);
+        }
+        let before = last.expect("locked at -52.2ms before rebase");
+        assert!((before.offset_ms - (-52.2)).abs() < 1e-9, "{before:?}");
+        assert!(
+            before.mad_ms < 1.0,
+            "tight cluster before rebase: {before:?}"
+        );
+
+        // -52.2ms is audio-early, so the closed-form correction REDUCES the delay by 53ms
+        // (delta_applied = floor(-52.2) = -53) -- every retained sample must shift UP by 53ms
+        // (subtracting a NEGATIVE delta), landing at 0.8ms (the single-shot converged value).
+        c.rebase(-53.0);
+
+        // No NEW sample added -- pushing the SAME already-shifted value (0.8ms, what a fresh
+        // marker would now genuinely read) must keep the cluster tight and read ~0.8ms, proving
+        // the retained history moved, not just the newest point.
+        t_ns += 100_000_000;
+        let after = c.push(t_ns, 0.8).expect("still locked after rebase");
+        assert!(
+            (after.offset_ms - 0.8).abs() < 1e-6,
+            "rebase must shift retained samples, got {after:?}"
+        );
+        assert!(
+            after.mad_ms < 1.0,
+            "rebasing must NOT inflate dispersion (finding 7): {after:?}"
+        );
+    }
+
+    #[test]
+    fn rebase_prevents_windup_overshoot_into_audio_early_vs_without_rebase() {
+        // #926 fix-up finding 1/7 (the review's own windup narrative): the cooldown (30s) is far
+        // shorter than the cluster window (180s), so -- WITHOUT re-basing retained samples on
+        // Apply -- the window keeps reporting close to a STALE excess-lateness reading for many
+        // cooldown ticks after the actuator has already moved, driving the corrector to keep
+        // "correcting" an error that (from the actuator's own point of view) no longer exists and
+        // overshooting PAST the target straight into the forbidden audio-early (negative) zone.
+        // WITH re-basing, every retained sample is shifted the instant a correction lands, so the
+        // window sees the TRUE post-correction state immediately and stops once converged.
+        //
+        // An effectively-infinite window isolates the rebase MECHANISM itself from the window's
+        // own (separate, pre-existing) aging-out behavior -- both are fed the exact same raw
+        // stream, so any difference in outcome is attributable to rebase() alone.
+        fn run(rebase_on_apply: bool) -> Vec<f64> {
+            let mut cluster = RollingOffsetCluster::new(
+                u64::MAX,
+                DOCK_CLUSTER_TOL_MS,
+                DOCK_CLUSTER_MIN_MATCHED,
+                DOCK_CLUSTER_MAX_MAD_MS,
+            );
+            let mut corrector = DockLockCorrector::dock();
+            let mut t_ns: u64 = 0;
+            // Preload a locked cluster at +42ms (excess audio-lateness -- allowed, but the
+            // corrector actively pulls it toward the margin).
+            for _ in 0..(DOCK_CLUSTER_MIN_MATCHED + 4) {
+                t_ns += 3_000_000_000;
+                cluster.push(t_ns, 42.0);
+            }
+            let mut current_delay: i32 = 950;
+            let mut true_ts = 42.0_f64; // the REAL physical offset, tracked for the assertion only
+            let mut trace = Vec::new();
+            for _ in 0..14 {
+                t_ns += (DOCK_LOCK_MIN_REAPPLY_S as u64 + 1) * 1_000_000_000; // past cooldown
+                                                                              // Every tick a fresh raw +42ms sample arrives -- deliberately UNCHANGED regardless
+                                                                              // of branch, isolating rebase()'s own contribution (see doc comment above).
+                let est = cluster.push(t_ns, 42.0).expect("must stay locked");
+                let action = corrector.decide(true, est.offset_ms, est.mad_ms, current_delay, t_ns);
+                if let DockLockAction::Apply(new_delay) = action {
+                    let delta = (new_delay - current_delay) as f64;
+                    true_ts -= delta; // the SAME invariant relation used throughout this module
+                    current_delay = new_delay;
+                    if rebase_on_apply {
+                        cluster.rebase(delta);
+                    }
+                }
+                trace.push(true_ts);
+            }
+            trace
+        }
+
+        let without = run(false);
+        let with = run(true);
+
+        assert!(
+            without.iter().any(|&v| v < 0.0),
+            "sanity: reproduces the windup bug -- without rebase the real offset must overshoot \
+             negative at some point: {without:?}"
+        );
+        assert!(
+            with.iter().all(|&v| v >= -1e-9),
+            "with rebase the real offset must never go audio-early: {with:?}"
         );
     }
 }

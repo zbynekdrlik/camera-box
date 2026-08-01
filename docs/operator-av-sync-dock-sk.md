@@ -8,8 +8,13 @@ a zvuk vo vysielaní časovo zarovnaný (žiadne "posunuté pery"), a na dolaďo
 V OBS na počítači **stream** (10.77.9.204) je panel ("dock") s názvom **"Audio Video Sync"**.
 Keď sa spustí, počúva PRESNE ten istý zvuk a obraz, ktorý ide do živého vysielania (program +
 finálny zvukový mix) — nie žiadnu odbočku ani skúšobný signál naviac. Ak dock ukáže hodnotu
-"Latency" blízku 0, obraz a zvuk sú zarovnané. Ak nie, dolaďuje sa to jedným nastavením
-("Latency (ms)" na zdroji "NDI 2ME PGM"), popísaným nižšie.
+"Latency" blízku 0, obraz a zvuk sú zarovnané.
+
+**Od tohto ticketu (#926) sa dolaďuje SÁM, kým beží testovací signál** — dock nastavenie
+"NDI 2ME PGM → Latency (ms)" priamo upravuje, aby "Latency" nikdy neostala na zápornej hodnote
+("zvuk predbieha obraz" — to je zakázaný stav, zvuk je vo fyzike vždy pomalší ako obraz). Manuálne
+doladenie (krok 6 nižšie) je teraz len ZÁLOŽNÝ postup, keby automatika z nejakého dôvodu
+nefungovala.
 
 **Ak dock nič neukazuje (samé pomlčky `-`):** buď testovací tón nebeží, alebo zvuková vetva
 (mbc/Ableton) je momentálne stlmená/vypnutá — pozri krok 2 a 3.
@@ -68,16 +73,22 @@ Ak tlačidlo v docku ukazuje "Stop", dock už meria (viď krok 4) — over rovno
 
 | Pole v docku | Čo znamená |
 |---|---|
-| **Latency** | O koľko je zvuk a obraz mimo seba (v ms). Cieľ: blízko **0**. |
-| (pod Latency) | "Audio lagged" = zvuk ide neskôr; "Audio early" = zvuk predbieha obraz. |
+| **Status** (hore, veľkým písmom) | Jednoduchý stav: "Measuring..." (ešte sa nezamklo), "Locked -- holding sync" (zamklo, drží sa v sync), "No test signal -- holding last correction" (testovací signál nebeží — hodnota je zamrznutá na poslednej korekcii). |
+| **Latency** | O koľko je zvuk a obraz mimo seba (v ms). Cieľ: blízko **0**. Kým beží testovací signál a stav je "Locked", dock toto SÁM naťahuje smerom k 0/mierne kladnej hodnote — netreba nič robiť ručne. |
+| (pod Latency) | "Audio lagged" = zvuk ide neskôr (v poriadku); "Audio early" = zvuk predbieha obraz (dočasný prechodný stav počas doťahovania — v ustálenom stave sa toto už nemá objavovať). |
 | **Index / Audio Index / Video Index** | Interné čísla, podľa ktorých dock páruje obraz a zvuk — netreba im rozumieť, len že sa MENIA (nie samé pomlčky). |
 | **Audio Frequency** | Nameraná frekvencia testovacieho tónu — potvrdenie, že dock naozaj počuje ten správny tón. |
+| **Audio Resampling (ASRC)** sekcia | Transparentnosť dorovnávania rýchlosti zvuku (nezávislé od Latency vyššie): **State** (ON/OFF), **Estimated drift** / **Applied correction** (koľko odchýlky sa práve meria/opravuje, v ppm), **Manual trim** (ručná jemná úprava, tlačidlá `-`/`+`). Za normálnych okolností sa do toho nemá zasahovať — je to tu pre transparentnosť ("vidieť, čo sa deje"), nie pre bežné doladenie. |
 
 **Ak po ~10-15 sekundách zostávajú samé pomlčky `-`:** dock nič nepočuje/nevidí. Over znova
 krok 1-3 (mbc zapnuté? kanál odmutovaný? testovací tón naozaj beží?) — pozri aj sekciu
 "Keď to nefunguje" nižšie.
 
-### 6. Ak "Latency" nie je blízko 0 — dolaď
+### 6. Ak "Latency" po dlhšom čase stále nie je blízko 0 — ZÁLOŽNÝ manuálny postup
+
+Automatika (vyššie) by mala doladiť sama, kým beží testovací signál a dock ukazuje "Locked". Ak
+by to z nejakého dôvodu nefungovalo (napr. hodnota je mimo hardvérového rozsahu 3-2000 ms a
+automatika sa nevie dostať ďalej), dá sa doladiť aj ručne:
 
 1. V OBS na počítači "stream" nájdi v paneli **Sources** (Zdroje) položku **"NDI 2ME PGM"**.
 2. Klikni na ňu pravým tlačidlom → **Properties** (Vlastnosti) — alebo dvojklik.
@@ -96,6 +107,9 @@ scripts/rig-mode.sh event
 ```
 
 Toto vráti kameru cam2 späť do normálneho vysielacieho režimu (zhasne testovací QR, zastaví tón).
+Dock po tomto prejde do stavu "No test signal -- holding last correction" a hodnota "NDI 2ME PGM
+Latency (ms)", ktorú si automatika doladila v kroku 5, ostáva NATRVALO — dock ju už ďalej sám
+neupravuje (žiadne "naháňanie" driftu podľa bežného programového zvuku počas živého vysielania).
 
 ### 8. KRITICKY DÔLEŽITÉ — pred živým vysielaním vráť mikrofón na MUTED
 
@@ -161,3 +175,15 @@ snímok QR kódu (`Video Index ... 98% missed`) — to je vec obrazu/kamery/komp
 docku; opravu treba robiť podľa reálne zachyteného snímku, nie naslepo. Postup KROKOV vyššie je
 funkčne overený zo zdrojového kódu; finálne živé potvrdenie "dock sa zamkol a ukázal reálne číslo
 Latency" čaká na ďalší živý beh s bežiacim mbc (pozri #690 na GitHube).
+
+**Automatická korekcia (#926, pridané 2026-08-01, doladené 2026-08-01 po hĺbkovej revízii):** kým
+dock ukazuje stav "Locked", sám naťahuje "NDI 2ME PGM → Latency (ms)" tak, aby výsledné "Latency"
+nikdy neostalo záporné ("Audio early" ako trvalý stav je fyzikálne nezmyselné — zvuk je vždy
+pomalší ako obraz). Cieľom NIE JE presne 0ms — meranie má bežný šum ~desiatky ms, takže korekcia
+cieli na malú bezpečnú rezervu nad nulou (odvodenú od aktuálnej rozptýlenosti merania, min. 1ms),
+aby ju obyčajný šum merania nevrátil naspäť do zápornej hodnoty. Krok po kroku sa hodnota mení
+najviac o pár ms naraz (aby to nebolo skokové/počuteľné), takže po veľkej odchýlke to chvíľu trvá,
+kým sa doladí — to je normálne. Keď testovací signál prestane bežať (krok 7), táto korekcia sa
+NATRVALO zamkne a dock ju už neupravuje počas živého vysielania. Zdrojovo:
+`vendor/av-sync-dock/src/camera-box-audio.hpp` (`CbDockLockCorrector`) +
+`src/av_sync_dock.rs` (`DockLockCorrector`, referenčná Rust implementácia s testami).
