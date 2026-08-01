@@ -130,6 +130,93 @@ fn playback_cmds_fails_loud_if_ffmpeg_dies_immediately() {
     );
 }
 
+/// End-to-end pacing-guard fakes (930 finding 9) -- a fake `ffprobe` reports a fixed duration and
+/// a fake `ffmpeg` sleeps a controlled number of seconds for the ONE-SHOT preflight pass. Kept as
+/// its OWN `lipsync_pacing_guard_cmd` function (never folded into `lipsync_playback_cmds`) so
+/// this never touches the persistent launch's `/run/*.pid`/`/run/*.log` paths, which need a real
+/// root/remote session and would otherwise fail with a permission error under a non-root test
+/// runner (incl. CI's `ubuntu-latest`). Proves the guard's pass/fail behavior for real, not just
+/// via a text-pattern check on the source.
+fn run_pacing_guard(duration_secs: u32, sleep_secs: u32) -> std::process::Output {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let bin = tmp.path().join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    fs::write(
+        bin.join("ffprobe"),
+        format!("#!/usr/bin/env bash\necho {duration_secs}\n"),
+    )
+    .unwrap();
+    fs::write(
+        bin.join("ffmpeg"),
+        "#!/usr/bin/env bash\nsleep \"${FAKE_FFMPEG_SLEEP:-0}\"\n",
+    )
+    .unwrap();
+    for exe in [bin.join("ffprobe"), bin.join("ffmpeg")] {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&exe, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+    let path_env = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    Command::new("bash")
+        .arg("-c")
+        .arg(
+            ". \"$1\"; eval \"$(lipsync_pacing_guard_cmd /tmp/media.mp4 /dev/fb0 hw:CARD=PCH,DEV=3)\"",
+        )
+        .arg("bash")
+        .arg(script())
+        .env("PATH", path_env)
+        .env("FAKE_FFMPEG_SLEEP", sleep_secs.to_string())
+        .output()
+        .expect("spawn bash")
+}
+
+#[test]
+fn pacing_guard_passes_within_budget_930() {
+    let out = run_pacing_guard(2, 2);
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(out.status.success(), "930: expected pass: {stderr}");
+    // The pass-path "ok: ..." line is a plain `echo` (stdout) -- only the FAIL path is `>&2`'d.
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("pacing check passed"),
+        "930: stdout: {stdout} / stderr: {stderr}"
+    );
+}
+
+#[test]
+fn pacing_guard_fails_loud_when_elapsed_exceeds_budget_930() {
+    let out = run_pacing_guard(2, 5);
+    assert!(
+        !out.status.success(),
+        "930: must fail loud when elapsed (~5s) vs duration (2s) exceeds the ~1.01s budget"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("FAIL") && stderr.contains("pacing"),
+        "930: must fail loud with elapsed + duration in the message: {stderr}"
+    );
+}
+
+/// `cmd_start` must run the pacing guard on the uploaded remote path via its OWN dedicated
+/// `lipsync_pacing_guard_cmd` call, before the persistent playback launch -- a static-text pin
+/// alongside the end-to-end behavior proofs above.
+#[test]
+fn start_runs_the_pacing_guard_before_the_persistent_playback_930() {
+    let s = read("scripts/lipsync-test-mode.sh");
+    let guard_call_at = s
+        .find("cam_ssh \"$(lipsync_pacing_guard_cmd")
+        .expect("930: cmd_start must call lipsync_pacing_guard_cmd");
+    let playback_call_at = s
+        .find("cam_ssh \"$(lipsync_playback_cmds")
+        .expect("lipsync_playback_cmds call present");
+    assert!(
+        guard_call_at < playback_call_at,
+        "930: the pacing guard must run BEFORE the persistent playback launch"
+    );
+}
+
 /// The stop-playback command must key on the SAME pidfile the start command wrote.
 #[test]
 fn stop_playback_cmds_kills_by_the_same_pidfile() {
@@ -147,6 +234,41 @@ fn stop_subcommand_calls_rig_mode_sh_test_to_restore() {
         s.contains("rig-mode.sh") && s.contains("rig-mode.sh\" test"),
         "930: stop must restore via `rig-mode.sh test` (full re-verified restore), never a \
          hand-rolled partial one: {s}"
+    );
+}
+
+/// `cmd_start` must set an ERR trap (with `errtrace` enabled so it fires even for a failure
+/// inside a called function like `cam_ssh`) restoring TEST mode via `rig-mode.sh test` -- a
+/// scp/ssh failure between killing the TEST-mode painter and starting the lipsync playback must
+/// never leave cam2 with NEITHER the QR/QPSK painter NOR the lipsync playback running (930
+/// finding 8). The trap must be cleared once `cmd_start` completes successfully, so a later
+/// unrelated failure elsewhere in the script doesn't also trigger it.
+#[test]
+fn start_sets_an_err_trap_that_restores_test_mode_930() {
+    let s = read("scripts/lipsync-test-mode.sh");
+    assert!(
+        s.contains("set -o errtrace"),
+        "930: errtrace needed so the ERR trap fires for a failure inside a called function \
+         (cam_ssh), not just a bare command: {s}"
+    );
+    assert!(
+        s.contains(r#"trap 'bash "$HERE/rig-mode.sh" test' ERR"#),
+        "930: cmd_start must set an ERR trap that restores TEST mode via rig-mode.sh: {s}"
+    );
+    assert!(
+        s.contains("trap - ERR"),
+        "930: the ERR trap must be cleared once cmd_start completes successfully: {s}"
+    );
+    // The trap must be set AFTER the painter is already killed (the window it protects) and
+    // cleared BEFORE the function's final success message -- never wrapping the whole function.
+    let set_at = s.find("set -o errtrace").expect("errtrace present");
+    let kill_at = s
+        .find("cam_ssh \"$(lipsync_stop_painter_cmds")
+        .expect("painter kill present");
+    let clear_at = s.find("trap - ERR").expect("trap clear present");
+    assert!(
+        kill_at < set_at && set_at < clear_at,
+        "930: ERR trap must be scoped between the painter kill and the success clear"
     );
 }
 

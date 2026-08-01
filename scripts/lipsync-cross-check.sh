@@ -74,10 +74,13 @@ lipsync_aggregate_cmd() {
 
 # lipsync_verdict_cmd <verdict_bin> <qrqpsk_recording> <marker_log> <syncnet_offset_ms> -- the
 # final recording-verdict --av-sync call carrying the aggregated SyncNet offset (issue 930's own
-# --syncnet-offset-ms wiring), producing the printed cross-check JSON.
+# --syncnet-offset-ms wiring), producing the printed cross-check JSON. Uses the `=` form
+# (`--syncnet-offset-ms=<value>`) rather than the space form so a NEGATIVE offset (video earlier
+# than audio) still parses even against an older recording-verdict binary that predates
+# `allow_negative_numbers` on this flag -- belt-and-braces alongside the clap-side fix.
 lipsync_verdict_cmd() {
   local bin="$1" recording="$2" marker_log="$3" syncnet_offset_ms="$4"
-  printf '%s --av-sync %q --av-marker-log %q --syncnet-offset-ms %q' \
+  printf '%s --av-sync %q --av-marker-log %q --syncnet-offset-ms=%q' \
     "$(printf '%q' "$bin")" "$recording" "$marker_log" "$syncnet_offset_ms"
 }
 
@@ -125,6 +128,13 @@ main() {
   fi
   mkdir -p "$workdir"
 
+  # Remove any STALE chunk-*.mp4 left behind by a previous run against the SAME --workdir (an
+  # explicit, reused workdir is the only case this matters -- a fresh mktemp -d never has any).
+  # Without this, a previous run that produced MORE chunks than this run's segmenting step
+  # overwrites would leave leftover chunks in the glob below, silently measuring stale audio/video
+  # alongside (or instead of) this run's real data.
+  rm -f "$workdir"/chunk-*.mp4
+
   echo "[lipsync-cross-check] segmenting $lipsync_recording into ~20s chunks -> $workdir" >&2
   eval "$(lipsync_segment_cmd "$lipsync_recording" 20 "$workdir/chunk-%03d.mp4")" -loglevel error
 
@@ -133,15 +143,30 @@ main() {
   local py="${LIPSYNC_PYTHON:-python3}"
   local measure_script="${LIPSYNC_AV_SYNC_MEASURE:-$REPO_ROOT/scripts/av_sync_measure.py}"
   local calibrate_script="${LIPSYNC_AV_SYNC_CALIBRATE:-$REPO_ROOT/scripts/av_sync_calibrate.py}"
+  local measured=0 attempted=0
   for chunk in "$workdir"/chunk-*.mp4; do
     [ -f "$chunk" ] || continue
+    attempted=$((attempted + 1))
     echo "[lipsync-cross-check] measuring $chunk" >&2
-    eval "$(lipsync_measure_chunk_cmd "$py" "$measure_script" "$chunk" "$calibration_log")" || true
+    # av_sync_measure.py's own prose goes to stderr (1>&2) so it never lands on this script's
+    # stdout -- the header contract is: ONLY the final recording-verdict JSON reaches stdout.
+    if eval "$(lipsync_measure_chunk_cmd "$py" "$measure_script" "$chunk" "$calibration_log")" 1>&2; then
+      measured=$((measured + 1))
+    else
+      echo "[lipsync-cross-check] WARN: SyncNet measurement failed on $chunk (continuing)" >&2
+    fi
   done
+  # src/lipsync_cross_check.rs's tolerance math assumes >=2 confident SyncNet windows went into
+  # the aggregate -- silently proceeding on 0 or 1 measured chunks (the old `|| true` behavior)
+  # would let a near-total measurement failure produce a bogus-precision cross-check verdict.
+  if [ "$measured" -lt 2 ]; then
+    echo "FAIL: only $measured/$attempted chunk(s) measured successfully -- need >=2 confident SyncNet windows for the aggregate tolerance math" >&2
+    exit 1
+  fi
 
   local report_json="$workdir/lipsync-syncnet-agg.json"
   echo "[lipsync-cross-check] aggregating $calibration_log -> $report_json" >&2
-  eval "$(lipsync_aggregate_cmd "$py" "$calibrate_script" "$calibration_log" "$report_json")"
+  eval "$(lipsync_aggregate_cmd "$py" "$calibrate_script" "$calibration_log" "$report_json")" 1>&2
   local syncnet_offset_ms
   syncnet_offset_ms="$(lipsync_mean_offset_from_report_json "$(cat "$report_json")")"
   echo "[lipsync-cross-check] SyncNet aggregated offset: ${syncnet_offset_ms}ms" >&2

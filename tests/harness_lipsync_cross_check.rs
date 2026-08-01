@@ -90,7 +90,9 @@ fn aggregate_cmd_reuses_av_sync_calibrate_py_verbatim() {
 }
 
 /// The final verdict call must carry the aggregated SyncNet offset through issue 930's own
-/// `--syncnet-offset-ms` flag on the EXISTING `--av-sync`/`--av-marker-log` mode.
+/// `--syncnet-offset-ms` flag on the EXISTING `--av-sync`/`--av-marker-log` mode. Uses the `=`
+/// form (`--syncnet-offset-ms=<value>`) as belt-and-braces alongside the recording-verdict-side
+/// `allow_negative_numbers` fix -- the `=` form parses a leading `-` even on an older binary.
 #[test]
 fn verdict_cmd_wires_syncnet_offset_ms_onto_av_sync_mode() {
     let cmd = run_sourced(
@@ -100,8 +102,17 @@ fn verdict_cmd_wires_syncnet_offset_ms_onto_av_sync_mode() {
     assert!(cmd.contains("/tmp/qrqpsk.mp4"));
     assert!(cmd.contains("--av-marker-log"));
     assert!(cmd.contains("/tmp/markers.csv"));
-    assert!(cmd.contains("--syncnet-offset-ms"));
-    assert!(cmd.contains("37.5"));
+    assert!(cmd.contains("--syncnet-offset-ms=37.5"));
+}
+
+/// A NEGATIVE SyncNet offset (video earlier than audio -- half the real outcome space) must
+/// survive into the built command string in the SAME `=` form, never dropped or mangled.
+#[test]
+fn verdict_cmd_wires_a_negative_syncnet_offset_ms_930() {
+    let cmd = run_sourced(
+        "lipsync_verdict_cmd /repo/target/debug/recording-verdict /tmp/qrqpsk.mp4 /tmp/markers.csv -37.5",
+    );
+    assert!(cmd.contains("--syncnet-offset-ms=-37.5"), "cmd: {cmd}");
 }
 
 /// The report-JSON field extractor must pull the exact `mean_offset_ms` field
@@ -166,6 +177,232 @@ fn main_fails_loud_on_nonexistent_recordings() {
     assert!(
         stderr.contains("lipsync.mp4") || stderr.contains("not found"),
         "930: must fail on the missing recording, not some earlier unrelated check: {stderr}"
+    );
+}
+
+// --------------------------------------------------------------------------------------------- //
+// End-to-end `main()` fakes -- issue 930 findings 5/6/7 (stale-chunk cleanup, <2-measured fails
+// loud, stdout carries ONLY the final JSON). Real ffmpeg/python3/recording-verdict are replaced
+// with tiny fakes so these prove the ORCHESTRATION behavior without any real media/SyncNet/probe
+// dependency -- mirrors `tests/harness_lipsync_asset.rs`'s fake-ffmpeg-on-PATH pattern.
+// --------------------------------------------------------------------------------------------- //
+
+struct MainFakes {
+    tmp: tempfile::TempDir,
+}
+
+impl MainFakes {
+    /// Sets up: a fake `ffmpeg` on PATH that writes exactly 2 chunk files matching whatever
+    /// `%03d`-style segment pattern it's given; a fake "measure" script (run via `bash`, not
+    /// `python3`, through `LIPSYNC_PYTHON=bash`) that logs which media path it was called on to
+    /// `measured-list.txt` and either succeeds or fails per `$FAKE_MEASURE_FAIL`; a fake
+    /// "aggregate" script that writes a fixed valid report JSON; and a fake `recording-verdict`
+    /// binary that prints one fixed JSON line to stdout. All prose the real Python tools would
+    /// print goes to the fakes' OWN stdout so the redirect-to-stderr fix (finding 7) is provable.
+    fn setup() -> Self {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let bin = tmp.path().join("bin");
+        fs::create_dir_all(&bin).unwrap();
+
+        fs::write(
+            bin.join("ffmpeg"),
+            r#"#!/usr/bin/env bash
+pattern=""
+for a in "$@"; do
+  case "$a" in *%03d*) pattern="$a" ;; esac
+done
+[ -n "$pattern" ] || { echo "fake ffmpeg: no %03d pattern in argv: $*" >&2; exit 1; }
+printf -v f0 "$pattern" 0
+printf -v f1 "$pattern" 1
+: > "$f0"
+: > "$f1"
+"#,
+        )
+        .unwrap();
+
+        let measure = tmp.path().join("fake-measure.sh");
+        fs::write(
+            &measure,
+            r#"#!/usr/bin/env bash
+media="" cal=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --media) media="$2"; shift 2 ;;
+    --calibration-log) cal="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+echo "measure prose for $media"
+echo "$media" >> "$(dirname "$cal")/measured-list.txt"
+if [ -n "${FAKE_MEASURE_FAIL:-}" ]; then exit 1; fi
+echo '{"offset_ms": 12.5}' >> "$cal"
+"#,
+        )
+        .unwrap();
+
+        let aggregate = tmp.path().join("fake-aggregate.sh");
+        fs::write(
+            &aggregate,
+            r#"#!/usr/bin/env bash
+report=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --report-json) report="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+echo "aggregate prose"
+printf '%s' '{"n": 2, "n_total": 2, "mean_offset_ms": 12.5, "stdev_ms": 1.0, "ci95_ms": 2.0}' > "$report"
+"#,
+        )
+        .unwrap();
+
+        let verdict = tmp.path().join("fake-recording-verdict");
+        fs::write(
+            &verdict,
+            "#!/usr/bin/env bash\necho '{\"fake_verdict\": true}'\n",
+        )
+        .unwrap();
+
+        for exe in [
+            bin.join("ffmpeg"),
+            measure.clone(),
+            aggregate.clone(),
+            verdict.clone(),
+        ] {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&exe, fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+
+        Self { tmp }
+    }
+
+    fn measure(&self) -> PathBuf {
+        self.tmp.path().join("fake-measure.sh")
+    }
+    fn aggregate(&self) -> PathBuf {
+        self.tmp.path().join("fake-aggregate.sh")
+    }
+    fn verdict(&self) -> PathBuf {
+        self.tmp.path().join("fake-recording-verdict")
+    }
+    fn bin_dir(&self) -> PathBuf {
+        self.tmp.path().join("bin")
+    }
+}
+
+fn run_main(
+    fakes: &MainFakes,
+    workdir: &std::path::Path,
+    fail_measure: bool,
+) -> std::process::Output {
+    let lipsync = workdir.join("lipsync.mp4");
+    let qrqpsk = workdir.join("qrqpsk.mp4");
+    let markers = workdir.join("markers.csv");
+    for f in [&lipsync, &qrqpsk, &markers] {
+        fs::write(f, b"x").unwrap();
+    }
+    let path_env = format!(
+        "{}:{}",
+        fakes.bin_dir().display(),
+        std::env::var("PATH").unwrap()
+    );
+    let mut cmd = Command::new("bash");
+    cmd.arg(script())
+        .arg("--lipsync-recording")
+        .arg(&lipsync)
+        .arg("--qrqpsk-recording")
+        .arg(&qrqpsk)
+        .arg("--qrqpsk-marker-log")
+        .arg(&markers)
+        .arg("--verdict-bin")
+        .arg(fakes.verdict())
+        .arg("--workdir")
+        .arg(workdir)
+        .env("PATH", path_env)
+        .env("LIPSYNC_PYTHON", "bash")
+        .env("LIPSYNC_AV_SYNC_MEASURE", fakes.measure())
+        .env("LIPSYNC_AV_SYNC_CALIBRATE", fakes.aggregate());
+    if fail_measure {
+        cmd.env("FAKE_MEASURE_FAIL", "1");
+    }
+    cmd.output().expect("spawn bash")
+}
+
+/// A pre-existing `chunk-999.mp4` left in an explicit, reused `--workdir` from a PRIOR run must
+/// be removed before the new segmenting/measuring pass -- it must never end up in the measured
+/// list alongside (or instead of) the fresh chunks (930 finding 5).
+#[test]
+fn main_removes_stale_chunks_from_a_reused_workdir_930() {
+    let fakes = MainFakes::setup();
+    let workdir = tempfile::tempdir().expect("workdir");
+    fs::write(workdir.path().join("chunk-999.mp4"), b"stale").unwrap();
+
+    let out = run_main(&fakes, workdir.path(), false);
+    assert!(
+        out.status.success(),
+        "930: expected success: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !workdir.path().join("chunk-999.mp4").exists(),
+        "930: stale chunk-999.mp4 must be removed before segmenting"
+    );
+    let measured_list =
+        fs::read_to_string(workdir.path().join("measured-list.txt")).unwrap_or_default();
+    assert!(
+        !measured_list.contains("chunk-999.mp4"),
+        "930: stale chunk must never be measured: {measured_list}"
+    );
+}
+
+/// When fewer than 2 chunks measure successfully, `main` must FAIL LOUD (non-zero exit, clear
+/// message) rather than silently proceeding with `|| true` into a bogus-precision aggregate
+/// (930 finding 6 -- `src/lipsync_cross_check.rs`'s tolerance math assumes >=2 confident windows).
+#[test]
+fn main_fails_loud_when_fewer_than_two_chunks_measure_930() {
+    let fakes = MainFakes::setup();
+    let workdir = tempfile::tempdir().expect("workdir");
+
+    let out = run_main(&fakes, workdir.path(), true);
+    assert!(
+        !out.status.success(),
+        "930: must fail loud when every chunk measurement fails"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("only 0/2") || stderr.contains("need >=2"),
+        "930: stderr must clearly explain the insufficient-measurement failure: {stderr}"
+    );
+}
+
+/// stdout must carry ONLY the final recording-verdict JSON -- the intermediate measure/aggregate
+/// tools' own prose must land on stderr, never mixed into stdout (930 finding 7, the header's own
+/// documented contract).
+#[test]
+fn main_stdout_carries_only_the_final_json_930() {
+    let fakes = MainFakes::setup();
+    let workdir = tempfile::tempdir().expect("workdir");
+
+    let out = run_main(&fakes, workdir.path(), false);
+    assert!(
+        out.status.success(),
+        "930: expected success: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout.trim(),
+        r#"{"fake_verdict": true}"#,
+        "930: stdout must be exactly the final verdict JSON, nothing else"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("measure prose") && stderr.contains("aggregate prose"),
+        "930: the fakes' own prose must appear on STDERR instead: {stderr}"
     );
 }
 
