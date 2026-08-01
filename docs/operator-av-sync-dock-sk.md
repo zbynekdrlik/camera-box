@@ -53,11 +53,18 @@ skutočne hrá ("QPSK audio marker RUNNING").
 ### 4. V OBS na počítači "stream" otvor dock "Audio Video Sync"
 
 Ak dock nie je vidno v OBS: hore v menu **View → Docks → Audio Video Sync** (zaškrtni/zapni).
-Ak je už niekde pripnutý (napr. v bočnom paneli), len ho nájdi a klikni naň.
+Ak je už niekde pripnutý (napr. v bočnom paneli, prípadne skrytý za iným panelom ako záložka —
+pozri si aj susedné záložky), len ho nájdi a klikni naň.
 
-### 5. Klikni "Start" a sleduj hodnoty
+**Od #690 dock meria AUTOMATICKY** — sám sa spustí hneď po naštartovaní OBS (nie je to už
+zabudnuteľné tlačidlo, ktoré treba po každom reštarte OBS ručne odklikať). Zvyčajne teda stačí
+dock otvoriť a rovno sledovať hodnoty (krok 5) — netreba klikať Start. Ak by niekto meranie
+predtým ručne zastavil (tlačidlo ukazuje "Start", nie "Stop"), klikni naň.
 
-V docku klikni tlačidlo **Start**. Do pár sekúnd by sa mali začať napĺňať polia:
+### 5. Sleduj hodnoty (Start klikni len ak dock ešte nemeria)
+
+Ak tlačidlo v docku ukazuje "Stop", dock už meria (viď krok 4) — over rovno hodnoty. Ak ukazuje
+"Start", klikni naň. Do pár sekúnd by sa mali začať napĺňať polia:
 
 | Pole v docku | Čo znamená |
 |---|---|
@@ -120,6 +127,13 @@ istý, či si kanál vrátil späť, spusti tento test alebo sa opýtaj niekoho,
 - Ak nič z vyššie uvedeného nepomôže, ide pravdepodobne o technický problém — nahlás to (GitHub
   issue v projekte `camera-box`, alebo kontaktuj správcu systému), nesnaž sa to riešiť sám do
   hĺbky.
+- **Pre technikov (#690):** dock od tejto verzie píše do OBS logu (na "stream") každých ~10 s
+  jeden riadok `av-sync-dock: diag video_frames=... video_decoded=...(...%) audio_samples=...
+  preambles=... crc_ok=... crc_fail=... ring_hit=... ring_miss=... locked=...` — z neho sa dá bez
+  prístupu k rigu vyčítať, či problém je (a) obraz — kamera vôbec nevidí QR kód (nízke
+  `video_decoded`%), (b) zvuk — demodulátor nič nepočuje (`preambles=0`, zvuková vetva/hlasitosť),
+  (c) zvuk počuje, ale je to šum (`preambles>0`, `crc_ok=0`), alebo (d) zvuk dekóduje správne, ale
+  nepáruje sa s obrazom / nezamkne (`crc_ok>0`, `locked=no`).
 
 ## Poznámka pre technikov (dôvod, prečo dock číta práve tento zvuk/obraz)
 
@@ -133,10 +147,17 @@ sync-test-dock.cpp`, `on_start_stop()`). Latencia sa dolaďuje na zdroji `NDI 2M
 `Latency (ms)`, interne `genlock_latency_ms_src`), aplikuje sa okamžite za behu (hot-apply, bez
 reštartu OBS).
 
-**Stav overenia (2026-07-12):** binárka docku bola prestavaná a nasadená na `strih` aj `stream`
-(#698, SHA256 overené na oboch strojoch). Živé zamknutie docku na reálny signál k dnešnému dňu
-NEBOLO opätovne overené v tomto behu — `mbc` (10.77.9.232) bolo v čase tejto úlohy nedosiahnuteľné
-(pravdepodobne vypnuté mimo vysielania). Tento postup je zostavený zo zdrojového kódu docku a z
-doterajších zdokumentovaných zistení (#690, #689, `.claude/skills/av-sync/SKILL.md`) — funkčnosť
-KROKOV je správna, ale finálne živé potvrdenie "dock sa naozaj zamkol a ukázal reálne čísla" čaká
-na najbližšiu príležitosť, keď bude mbc zapnuté a rig voľný (pozri #690 na GitHube).
+**Stav overenia (2026-08-01):** živý test toho dňa ukázal `Audio Frequency = 442 Hz` (tón sa
+detegoval), ale `Audio Index`/`Latency` ostali na pomlčkách — a dock bol navyše treba ručne
+odklikať (po reštarte OBS zo dňa spal). Dve veci sa opravili priamo v tomto ticket-e:
+1. **Dock teraz meria AUTOMATICKY** po štarte OBS (viď krok 4 vyššie) — už netreba spoliehať sa na
+   to, že si niekto všimne, že treba kliknúť Start.
+2. **Pridaná diagnostika do OBS logu** (viď sekcia "Keď to nefunguje" vyššie) — ukáže PRESNE, kde
+   reťaz zvuk→obraz zlyháva (obraz nevidí QR / zvuk nič nepočuje / zvuk počuje šum / zvuk dekóduje
+   ale nezamkne), bez potreby ďalšieho živého behu na diagnostiku.
+
+Zostáva otvorené (sledované samostatne, #921): kamera pri 4-min behu 1.8.2026 dekódovala len ~2 %
+snímok QR kódu (`Video Index ... 98% missed`) — to je vec obrazu/kamery/kompresie, nie tohto
+docku; opravu treba robiť podľa reálne zachyteného snímku, nie naslepo. Postup KROKOV vyššie je
+funkčne overený zo zdrojového kódu; finálne živé potvrdenie "dock sa zamkol a ukázal reálne číslo
+Latency" čaká na ďalší živý beh s bežiacim mbc (pozri #690 na GitHube).
