@@ -976,7 +976,7 @@ echo "  Installed: avahi-daemon, libavahi-client3, libavahi-common3, avahi-utils
 # libegl-mesa0 are separate from libgl1-mesa-dri and were the actual missing piece behind an
 # initial "EGL not initialized" failure trying an SDL2/KMSDRM alternative (kept here anyway --
 # harmless, and useful if a future variant of this tool ever needs it).
-apt-get install -y -qq --no-install-recommends ffmpeg libsdl2-2.0-0 libegl1 libegl-mesa0 libgl1-mesa-dri 2>/dev/null || true
+apt-get install -y -qq --no-install-recommends ffmpeg libsdl2-2.0-0 libegl1 libegl-mesa0 libgl1-mesa-dri
 echo "  Installed: ffmpeg, libsdl2-2.0-0, libegl1, libegl-mesa0, libgl1-mesa-dri (#930 lipsync-test-mode runtime)"
 
 # Create rc.local for power management settings (USB autosuspend, etc.)

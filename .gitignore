@@ -89,3 +89,4 @@ dist-win/
 assets/lipsync/*.ogv
 assets/lipsync/*.mp4
 assets/lipsync/*.jsonl
+assets/lipsync/*.jpg

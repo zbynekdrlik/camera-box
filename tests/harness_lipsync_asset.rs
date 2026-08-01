@@ -235,3 +235,16 @@ fn main_with_unknown_subcommand_fails_loud_never_silently_succeeds() {
         "930: an unknown subcommand must exit non-zero, not silently do nothing"
     );
 }
+
+/// #930 finding 11 — `lipsync-asset.sh fetch` writes a `sample-frame.jpg` by-eye sanity check
+/// into `assets/lipsync/`, but the ignore rules only covered `*.ogv`/`*.mp4`/`*.jsonl` there.
+/// Never committed -- mirrors the OTHER lipsync asset binaries in the same directory.
+#[test]
+fn gitignore_covers_the_sample_frame_jpg_930() {
+    let gi = read(".gitignore");
+    assert!(
+        gi.lines().any(|l| l.trim() == "assets/lipsync/*.jpg"),
+        "930: .gitignore must ignore assets/lipsync/*.jpg (the sample-frame.jpg by-eye sanity \
+         check lipsync-asset.sh writes) -- same as the other lipsync asset binaries: {gi}"
+    );
+}

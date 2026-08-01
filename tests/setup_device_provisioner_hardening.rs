@@ -739,3 +739,27 @@ fn create_usb_linux_sources_log_diet_and_writes_the_journald_dropin_into_the_chr
          chroot (#762) -- closes the window before setup-device.sh ever runs"
     );
 }
+
+/// #930 finding 10 — the STEP 16 ffmpeg install (the lipsync-test-mode runtime dependency) must
+/// FAIL LOUD like the rest of this ticket's fail-loud posture (item 3 above), not swallow a real
+/// apt failure behind `2>/dev/null || true` and then print "Installed: ffmpeg, ..." regardless.
+/// Root is guaranteed writable during STEP 16 (#599's `ensure_root_writable` call runs before
+/// STEP 15), so there is no legitimate reason left for this ONE install line to swallow errors.
+#[test]
+fn setup_device_ffmpeg_install_fails_loud_930() {
+    let body = read_script();
+    let idx = body
+        .find("--no-install-recommends ffmpeg libsdl2-2.0-0")
+        .expect("the #930 ffmpeg apt-get install line must be present");
+    let line_start = body[..idx].rfind('\n').map(|nl| nl + 1).unwrap_or(0);
+    let line_end = body[idx..]
+        .find('\n')
+        .map(|e| idx + e)
+        .unwrap_or(body.len());
+    let full_line = &body[line_start..line_end];
+    assert!(
+        !full_line.contains("|| true") && !full_line.contains("2>/dev/null"),
+        "setup-device.sh's #930 ffmpeg install must fail loud (no `2>/dev/null || true` \
+         swallowing a real apt failure): {full_line}"
+    );
+}
