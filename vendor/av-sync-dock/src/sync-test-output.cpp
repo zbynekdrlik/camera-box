@@ -217,6 +217,12 @@ struct sync_test_output
 	uint64_t cb_audio_pushed = 0;
 	std::vector<uint8_t> cb_src_buf;
 
+	/* #921: skips the redundant per-frame quirc_resize(cb_qr, ...) once the decode-plan geometry
+	 * (a pure function of video_width/video_height, fixed for the output's lifetime) stops
+	 * changing -- see camera-box-video.hpp's own doc comment on CbQrResizeCache for why this
+	 * matters. Touched only on the video thread (same thread that owns cb_qr itself). */
+	camerabox::CbQrResizeCache cb_qr_resize_cache;
+
 	/* #634: audit-log lock/unlock/offset-update transitions of the cluster above, so a live
 	 * desync (like the closed #529) can be diagnosed from the OBS log alone. Pure/tested in
 	 * camera-box-audio.hpp (tests/av_sync_dock_audit_log.rs) — touched only on the audio thread. */
@@ -798,8 +804,17 @@ static bool st_raw_video_camera_box_decode(struct sync_test_output *st, struct v
 		st->cb_qr = quirc_new();
 	if (!st->cb_qr)
 		return false;
-	if (quirc_resize(st->cb_qr, plan.dst_w, plan.dst_h) < 0)
-		return false;
+	/* #921: geometry is a pure function of video_width/video_height, fixed for the output's
+	 * lifetime -- skip the resize once it has already been applied at this size (quirc_resize()
+	 * has no early-out of its own and unconditionally reallocs 3 buffers every call). On failure,
+	 * reset the cache so the very next frame retries fresh instead of wrongly trusting a failed
+	 * resize. */
+	if (camerabox::cb_qr_resize_needed(st->cb_qr_resize_cache, plan.dst_w, plan.dst_h)) {
+		if (quirc_resize(st->cb_qr, plan.dst_w, plan.dst_h) < 0) {
+			st->cb_qr_resize_cache = camerabox::CbQrResizeCache();
+			return false;
+		}
+	}
 
 	bool found_any = false;
 	// Pass 0: plain area-downscale + quirc's own adaptive threshold. Pass 1 (only if our QR was not

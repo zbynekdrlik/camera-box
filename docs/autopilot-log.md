@@ -6782,3 +6782,54 @@ failing from ANOTHER concurrent ticket's live fleet-state drift (genlock_parity)
 the existing git-checkout-race gotcha -- how to tell it apart from a real regression and what to
 do about it (file separately, never bundle into your own PR, never rig-hot-swap from a
 code-scoped worker session).
+
+## Issue 921: A/V-sync dock video-QR decode fixture harness + resize-churn fix (2026-08-01)
+
+Version bump 1.7.0-dev.408 (96cae8558). Design comment on #921 BEFORE any code (root cause
+re-investigated with real pixels; chosen approach; rejected alternative -- blind geometry tuning).
+
+Built the real-optical-frame decode fixture harness the ticket + `.claude/rules/
+pattern-change-needs-decode-fixture.md` mandate: `tests/av_sync_dock_video_decode_921.rs` compiles
++ runs the REAL vendored decode (`camera-box-video.hpp` geometry/downscale/Otsu + the vendored
+quirc) against 3 real captured PROGRAM-canvas frames (stream OBS scene PRO, cam2's dual-QR filmed
+by the broadcast camera during a live TEST session, converted to 8-bit grayscale raw so no
+`image`-crate dependency is needed at Tier-0). Result: **6/6 decode successfully with ZERO code
+changes** -- falsifies the "decode geometry/algorithm is broken" hypothesis with real pixels.
+
+That doesn't match a constant-miss algorithmic bug; it matches the diagnostic's own TEMPORAL shape
+(55.6% shortly after launch, ~2% at steady state -- worsening with uptime). Found a real,
+justified cause with that shape: `quirc_resize()` (vendored quirc, `deps/quirc/lib/quirc.c`) has
+NO early-out for an unchanged size -- unconditionally callocs 3 fresh buffers + frees the old ones
+EVERY call. The dock called it on EVERY video frame (60/s) for a size (`plan.dst_w`/`dst_h`) that
+is invariant across the output's entire lifetime -- 180 alloc+free/s of pure churn.
+
+RED: `test(#921): [red] real-optical-frame video-QR decode fixture harness` (1bae53b75) --
+Scenario B in the harness references `CbQrResizeCache`/`cb_qr_resize_needed`, which don't exist
+yet -- genuine compile-failure RED (this repo's real-frame decode already succeeds, so there's no
+runtime miss to pin; the missing cache IS the pinned defect, same "compile-fail RED" pattern
+`av_sync_dock_lock_926.rs` already established).
+
+GREEN: `fix(#921): [green] cache the dock's per-frame quirc resize (offline-proven)` (742e5fd7c)
+-- `CbQrResizeCache`/`cb_qr_resize_needed` (camera-box-video.hpp), mirrored byte-for-byte into
+`src/av_sync_dock.rs::QrResizeCache` (2 new Rust unit tests), wired into
+`st_raw_video_camera_box_decode` (resets cache on an explicit resize failure, matching the
+pre-fix retry-every-frame-on-failure behavior). Proven via the fixture harness: decode results
+IDENTICAL with/without the cache (still 6/6), `quirc_resize` calls drop from N to 1 across N
+repeated frames. Added a matching scenario to `camera-box-selftest.cpp` (repo convention: mirror
+change -> selftest case).
+
+Also: `style(#921)` cargo-fmt commit, `docs(#921)` clippy doc-list false-positive reword.
+
+Local: fmt/check/clippy(-D warnings, default features)/test-compile all clean. Full `cargo test`
+sweep: 183/183 binaries ok, 0 FAILED, exit 0.
+
+PR: #931 (dev->main, body phrased "partial for issue 921", NO closing keyword adjacent to #921 --
+this PR does not resolve the ticket by itself, live rig confirmation is separate follow-up work).
+Fast CI (Lint/Test/Build/Coverage/Security/Drift-Guard/Vendored-C++-compile-gate/Windows-probe-
+build/Windows-genlock-FAST) all green. Hardware Full-path E2E RED on an UNRELATED fleet
+genlock-lineage drift (imag lagging strih/stream, a NEW SHA pair -- the exact same class #923
+fixed hours earlier TODAY, now recurred) -- filed as #932, referencing #789 (the standing
+structural fix) and the documented resolution recipe in `.claude/rules/ci-testing-gotchas.md`.
+Not fixed by this worker (rig hot-swap is out of scope for a code+CI-only dispatch, per
+`drive-rig-steps-in-supervisor.md`). PR left unmerged, issue 921 left open pending live
+verification.

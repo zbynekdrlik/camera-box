@@ -319,6 +319,13 @@ A change under `vendor/obs-studio/plugins/obs-websocket/` (e.g. #806's `SetAsrcO
   FULL-BUNDLE runbook below (obs-websocket.dll rides `obs-plugins\64bit`).
 - After relaunch, functionally verify the new request over WS (`obs_phase2._rpc(ws, '<NewRequest>',
   …)`) — a stale obs-websocket.dll answers `GetVersion` fine and only fails on the NEW request.
+- **Same class (#926, 2026-08-01): `vendor/av-sync-dock/**` — the A/V sync dock plugin
+  `obs-audio-video-sync-dock.dll`** also has NO fast deploy path (FAST stages only obs.dll +
+  distroav.dll; the dock DLL rides `obs-plugins\64bit` in the FULL bundle only). Deploy-verify:
+  the dock's plugin-load line `[obs-audio-video-sync-dock] plugin loaded (version X)` in the fresh
+  OBS log + the dock's own `av-sync-dock: diag …` heartbeat every 10 s. Treat any future
+  `vendor/<plugin>/**` change the same way — check whether FAST stages that DLL before assuming a
+  hot-swap deployed it.
 
 ## FULL-BUNDLE in-place deploy runbook (#726 session, 2026-07-14) — the AHK-watchdog gotcha
 
