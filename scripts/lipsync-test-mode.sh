@@ -147,7 +147,9 @@ cmd_start() {
     echo "[lipsync-test-mode] FAIL: $media not found -- run 'lipsync-asset.sh fetch' first" >&2
     exit 1
   }
-  local remote_media="/root/lipsync-test.mp4"
+  # /run (tmpfs): cam2 is a READ-ONLY-root appliance (issue 547) -- /root is not writable, the
+  # first live run failed the scp with `dest open "/root/lipsync-test.mp4": Failure`.
+  local remote_media="/run/lipsync-test.mp4"
   echo "[lipsync-test-mode] cam2 (${PAINTER_IP}): stopping TEST-mode painter (frees /dev/fb0 + the ALSA marker device)"
   cam_ssh "$(lipsync_stop_painter_cmds "$PAINTER_PIDFILE")"
   # From here on cam2 has NEITHER the QR/QPSK painter NOR (yet) the lipsync playback running -- a
@@ -171,7 +173,7 @@ cmd_start() {
 cmd_stop() {
   echo "[lipsync-test-mode] cam2 (${PAINTER_IP}): stopping lipsync playback"
   cam_ssh "$(lipsync_stop_playback_cmds "$LIPSYNC_PLAYBACK_PIDFILE")" || true
-  cam_ssh "rm -f /root/lipsync-test.mp4" || true
+  cam_ssh "rm -f /run/lipsync-test.mp4" || true
   echo "[lipsync-test-mode] restoring TEST mode (dual-QR + QPSK marker) via rig-mode.sh test"
   bash "$HERE/rig-mode.sh" test
 }
