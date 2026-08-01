@@ -385,6 +385,32 @@ Confirmed nuances when the deploy is driven from a `mcp__win-strih__Shell` / `mc
   `GetInputSettings`→`inputSettings.latency` (0=Normal). WS password is in local memory
   (`rig-obs-ws-credentials`), `NDI_RUNTIME_DIR_V6=/usr/lib/ndi`.
 
+### Deploy-transfer + imag-restart gotchas from the #912 ASRC rollout (2026-08-01)
+
+- **A box CANNOT pull from a dev1 HTTP server — push dev1→box instead.** During the #912
+  obs.dll rollout, `python3 -m http.server` bound on dev1's rig IP was unreachable from strih
+  (100% ping loss strih→dev1; tcpdump on dev1 showed the ICMP echo requests ARRIVING with no
+  reply sent — dev1-initiated flows to the boxes worked fine the whole time). NOT root-caused
+  (tracked as a filed issue); until it is, deploy transfers must be DEV1-INITIATED: `sshpass
+  scp -O` to strih/stream (#701 creds in targets.md) and to imag. Also: dev1's rig-subnet
+  DHCP IP drifts (was .165, then .100) — read it fresh from `hostname -I`, never from an old
+  transcript.
+- **After the imag libobs hot-swap, VERIFY the obs process start time — the stop can race.**
+  A one-shot swap script (stop → install → start over one ssh call) left the ORIGINAL obs
+  process (old libobs still mapped) running while all bytes + markers reported success.
+  After any imag swap: `ps -o pid,lstart,cmd -C obs` and confirm STARTED is after the swap;
+  if not, `imag-obs-stop.sh` + `pkill -9 -x obs` + sentinel clear + `imag-obs-start.sh` as a
+  separate step. (Running `imag-obs-start.sh` via sudo also spews a harmless
+  `/tmp/imag-obs-start.log: Permission denied` — the log file is owned by newlevel; OBS itself
+  still launches as newlevel.)
+- **ASRC servo verification (#803/#912):** proof = periodic `asrc: source '<name>'
+  estimated=…ppm applied=…ppm cumulative_correction=…` lines (every 60 s per audio-carrying
+  source, `ASRC_LOG_INTERVAL_S`). No manual step needed — default-ON. A source with NO audio
+  (imag's video-only NDI ingests) logs nothing, which is correct default-safe behavior, not a
+  failure. A STARVED/dead audio source shows estimated ≈ -735k ppm pegged at the ±300 ppm
+  clamp — the clamp holding is by design; a permanently pegged clamp is a useful
+  source-starvation alert signal (noted on the baseline-calibration ticket, issue 805).
+
 ## Bundle version integrity (EPIC #125)
 
 **On-box build identity in the OBS title (#152):** the window title is composed in
