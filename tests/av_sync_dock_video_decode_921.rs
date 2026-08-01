@@ -230,7 +230,11 @@ fn real_optical_frames_decode_and_resize_is_cached() {
     ];
     for name in fixture_names {
         let p = fixtures_dir.join(name);
-        assert!(p.exists(), "#921: missing real-frame fixture {}", p.display());
+        assert!(
+            p.exists(),
+            "#921: missing real-frame fixture {}",
+            p.display()
+        );
     }
 
     let stamp = std::time::SystemTime::now()
