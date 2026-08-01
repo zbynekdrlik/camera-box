@@ -7,6 +7,55 @@ stream recording and reports the offset. Convention: `av_offset_ms = video − a
 **negative = video LEADS audio** → ADD `latency_adjust_ms` (= −offset) to the video
 source's genlock latency (DistroAV "Latency (ms)" on the program NDI input, hot-apply).
 
+## #805 (post-ASRC, 2026-08-01) — one-shot baseline calibration: N SyncNet windows → averaged constant, when to recalibrate
+
+Once ASRC servo (#913) is live, drift is compensated continuously — the `NDI 2ME PGM` genlock
+latency knob stops being a per-run correction target and becomes a fixed CONSTANT that only needs
+setting once, precisely. This is a **separate measurement path from the QPSK-marker recipe below**
+(`scripts/av_sync_measure.py`, #801 — an AI SyncNet lip-sync meter on the PROGRAM output itself,
+not the cam2 marker chain) — use it specifically for the one-time baseline, not for the recurring
+per-run QPSK measurement.
+
+**Procedure:**
+1. During a soundcheck (or any segment with real speech/faces on program), run
+   `av_sync_measure.py --grab <program tap URL> --loop 30 --calibration-log calib.jsonl` for
+   several minutes — each window (usable or not) is appended as one JSON line
+   (`{offset_frames, confidence, usable}`). Aim for at least 5–10 confident windows
+   (`confidence >= 4.0`); band/graphics segments are expected to be skipped (marked `usable:
+   false`), not an error.
+2. Read the current knob value: `GetInputSettings` on `NDI 2ME PGM` → `genlock_latency_ms_src`
+   (or from a recent drift-guard/dashboard read).
+3. Aggregate: `av_sync_calibrate.py --calibrate calib.jsonl --current-latency-ms <current>
+   --report-json calib-report.json`. Output: `n` confident windows used, the mean offset, a 95%
+   confidence interval (Student's-t for small samples — averaging N independent
+   ±40ms-quantized windows shrinks the CI via the standard error of the mean, per the #805
+   design), and the RECOMMENDATION line — the exact absolute `genlock_latency_ms_src` to set.
+   Unlike the incremental per-run controller (`required_delay_ms`, #871's step clamp), this
+   ONE-SHOT baseline is allowed to move the full distance in a single set — it's an already
+   averaged, trustworthy result, not a single untrustworthy measurement.
+4. Set the recommended value on `NDI 2ME PGM` (via `av_sync_calibrate.py --host ... --offset-ms
+   <mean offset> --apply`, or directly via OBS WS `SetInputSettings`), then re-run the fused
+   E2E gate / a QPSK-marker measurement to confirm the residual is near zero.
+5. Paste the `--report-json` output into the calibration ticket for the record.
+
+**Sub-frame precision (parabolic interpolation) — implemented, not yet wired to a live curve.**
+`window_offset_ms()`/`parabolic_subframe_offset()` in `av_sync_calibrate.py` refine a window's
+offset below the 40ms SyncNet frame quantization via the classic 3-point parabola-vertex
+technique, IF the window record carries an optional `dist_curve` (the 3 SyncNet per-shift
+mean-distance values around the reported bin). `SyncNetInstance.evaluate()` does return that raw
+`dist` array internally, but `syncnet_python` is an external, non-vendored dependency (not present
+in this repo or CI) — extracting it into `av_sync_measure.py`'s subprocess-based `measure()`
+needs a live checkout + GPU/CPU torch run to verify against, which is out of scope for this
+tooling ticket (see the design comment on #805). Until that wiring lands, every window uses the
+plain frame-quantized value (still correctly averaged + CI'd — just ±40ms grain per window
+instead of sub-frame).
+
+**When to recalibrate:** after ANY change to the audio chain or network path between the program
+output and the measurement tap — a new audio interface/driver, an ASIO buffer-size change, a
+Dante/network topology change, an OBS/DistroAV version bump, or a genlock latency architecture
+change. NOT needed after a routine per-run QPSK-marker check (that path still self-corrects via
+ASRC); this baseline is the STARTING POINT that per-run measurement drifts around.
+
 ## The `latency_adjust_ms = −offset` (1:1) model did NOT hold on a live recalibration — verify, don't assume one move lands inside ±20ms (2026-07-14, #689)
 
 The convention above says: set the video source's genlock hold by `−offset`, expecting the next

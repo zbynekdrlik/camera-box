@@ -64,6 +64,14 @@ def measure(repo: Path, media: Path, workdir: Path):
     return tracks
 
 
+def log_calibration_window(path: str, record: dict) -> None:
+    """#805 -- append one JSON line per measured window (usable AND unmeasurable) for later
+    baseline aggregation via `av_sync_calibrate.py --calibrate`. JSONL so a long soundcheck
+    `--loop` run can append safely without re-reading/re-writing the whole file each round."""
+    with open(path, "a") as f:
+        f.write(json.dumps(record) + "\n")
+
+
 def notify_discord(webhook: str, text: str) -> None:
     data = json.dumps({"content": text}).encode()
     req = urllib.request.Request(webhook, data=data, headers={"Content-Type": "application/json"})
@@ -91,9 +99,19 @@ def one_measurement(args, repo: Path) -> int:
         best = max(tracks, key=lambda t: t[1], default=(0, 0.0))
         print(f"[{stamp}] UNMEASURABLE window (best confidence {best[1]:.1f} < {CONF_MIN}"
               f" — no usable face/lips; band/graphics segments are expected to skip)")
+        if getattr(args, "calibration_log", None):
+            log_calibration_window(
+                args.calibration_log,
+                {"ts": stamp, "offset_frames": best[0], "confidence": best[1], "usable": False},
+            )
         return 2
 
     offset_frames, conf = max(usable, key=lambda t: t[1])
+    if getattr(args, "calibration_log", None):
+        log_calibration_window(
+            args.calibration_log,
+            {"ts": stamp, "offset_frames": offset_frames, "confidence": conf, "usable": True},
+        )
     offset_ms = offset_frames * FRAME_MS
     knob = -offset_ms
     if offset_ms > 0:
@@ -121,6 +139,11 @@ def main() -> int:
     ap.add_argument("--threshold-ms", type=int, default=60)
     ap.add_argument("--loop", type=int, metavar="SECS",
                     help="daemon mode: repeat every SECS (grab mode only)")
+    ap.add_argument(
+        "--calibration-log", default=None,
+        help="append each window's raw measurement as JSONL for later baseline aggregation "
+             "via `av_sync_calibrate.py --calibrate` (#805)",
+    )
     args = ap.parse_args()
 
     repo = Path(args.repo).resolve()

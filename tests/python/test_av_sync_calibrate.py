@@ -468,3 +468,190 @@ class TestCLI:
         av_sync_calibrate.main()
         out = capsys.readouterr().out
         assert "REMOTE PUSH REQUIRED" not in out
+
+
+# ---------------------------------------------------------------------------
+# #805 -- baseline calibration: aggregate N confident SyncNet windows -> average +
+# sub-frame (parabolic) precision + 95% CI, offline (no OBS connection needed).
+# ---------------------------------------------------------------------------
+
+class TestParabolicSubframeOffset:
+    def test_symmetric_curve_returns_zero(self):
+        # true minimum exactly centered -- no sub-bin correction needed.
+        assert av_sync_calibrate.parabolic_subframe_offset(5.0, 0.0, 5.0) == 0.0
+
+    def test_peak_skewed_right_gives_positive_delta(self):
+        # right neighbor is closer to the minimum than the left -- true minimum sits slightly
+        # to the RIGHT of the reported bin.
+        delta = av_sync_calibrate.parabolic_subframe_offset(5.0, 0.0, 1.0)
+        assert 0.0 < delta <= 0.5
+
+    def test_peak_skewed_left_gives_negative_delta(self):
+        delta = av_sync_calibrate.parabolic_subframe_offset(1.0, 0.0, 5.0)
+        assert -0.5 <= delta < 0.0
+
+    def test_flat_curve_no_curvature_returns_zero(self):
+        # collinear points (denominator ~0) -- nothing to interpolate, don't blow up.
+        assert av_sync_calibrate.parabolic_subframe_offset(1.0, 2.0, 3.0) == 0.0
+
+    def test_degenerate_curve_clamps_to_half_bin(self):
+        # y-1=1, y0=0, y+1=-100: center is NOT the true local minimum (violates the normal
+        # precondition) -- raw vertex formula would overshoot past +/-0.5; must clamp.
+        delta = av_sync_calibrate.parabolic_subframe_offset(1.0, 0.0, -100.0)
+        assert delta == -0.5
+
+
+class TestWindowOffsetMs:
+    def test_no_curve_falls_back_to_frame_quantized(self):
+        ms = av_sync_calibrate.window_offset_ms({"offset_frames": 2, "confidence": 9.0})
+        assert ms == 80.0  # 2 * FRAME_MS(40)
+
+    def test_with_curve_applies_subframe_refinement(self):
+        # right neighbor closer to the min -> true offset sits slightly above bin 2.
+        rec = {"offset_frames": 2, "confidence": 9.0, "dist_curve": [5.0, 0.0, 1.0]}
+        ms = av_sync_calibrate.window_offset_ms(rec)
+        assert 80.0 < ms < 80.0 + 40.0 * 0.5
+
+    def test_negative_offset_frames(self):
+        ms = av_sync_calibrate.window_offset_ms({"offset_frames": -3, "confidence": 9.0})
+        assert ms == -120.0
+
+
+class TestAggregateSyncnetWindows:
+    def test_filters_by_confidence_and_averages(self):
+        records = [
+            {"offset_frames": 2, "confidence": 9.0},   # 80ms, confident
+            {"offset_frames": 3, "confidence": 8.0},   # 120ms, confident
+            {"offset_frames": 20, "confidence": 1.0},  # low confidence -- excluded
+        ]
+        agg = av_sync_calibrate.aggregate_syncnet_windows(records)
+        assert agg["n"] == 2
+        assert agg["n_total"] == 3
+        assert agg["mean_offset_ms"] == pytest.approx(100.0)
+
+    def test_no_confident_windows_fails_loud(self):
+        records = [{"offset_frames": 20, "confidence": 1.0}]
+        with pytest.raises(SystemExit):
+            av_sync_calibrate.aggregate_syncnet_windows(records)
+
+    def test_single_window_has_no_ci(self):
+        agg = av_sync_calibrate.aggregate_syncnet_windows([{"offset_frames": 2, "confidence": 9.0}])
+        assert agg["n"] == 1
+        assert agg["ci95_ms"] is None
+
+    def test_multi_window_ci_shrinks_quantization_noise(self):
+        # #805's own claim: averaging N +/-40ms-quantized windows should give a CI narrower than
+        # a single frame's raw quantization step.
+        records = [
+            {"offset_frames": 2, "confidence": 9.0},
+            {"offset_frames": 3, "confidence": 9.0},
+            {"offset_frames": 2, "confidence": 9.0},
+            {"offset_frames": 3, "confidence": 9.0},
+            {"offset_frames": 2, "confidence": 9.0},
+        ]
+        agg = av_sync_calibrate.aggregate_syncnet_windows(records)
+        assert agg["n"] == 5
+        assert agg["ci95_ms"] is not None
+        assert agg["ci95_ms"] < 40.0
+
+    def test_respects_custom_conf_min(self):
+        records = [{"offset_frames": 2, "confidence": 5.0}]
+        with pytest.raises(SystemExit):
+            av_sync_calibrate.aggregate_syncnet_windows(records, conf_min=6.0)
+        agg = av_sync_calibrate.aggregate_syncnet_windows(records, conf_min=4.0)
+        assert agg["n"] == 1
+
+
+class TestBaselineLatencyMs:
+    def test_moves_the_full_distance_no_step_clamp(self):
+        # unlike required_delay_ms(), a baseline recalibration is the trusted averaged result --
+        # allowed to jump the FULL distance in one shot (only the hardware range clamps it).
+        assert av_sync_calibrate.baseline_latency_ms(1000, 925.0) == 75
+
+    def test_clamps_to_hardware_floor(self):
+        assert av_sync_calibrate.baseline_latency_ms(10, 5000.0) == av_sync_calibrate.LATENCY_MIN
+
+    def test_clamps_to_hardware_ceiling(self):
+        assert av_sync_calibrate.baseline_latency_ms(1990, -5000.0) == av_sync_calibrate.LATENCY_MAX
+
+
+class TestFormatCalibrationReport:
+    def test_reports_recommendation_without_current_latency(self):
+        agg = {"n": 3, "n_total": 3, "mean_offset_ms": 50.0, "stdev_ms": 5.0, "ci95_ms": 6.0}
+        report = av_sync_calibrate.format_calibration_report(agg)
+        assert "n=3/3" in report
+        assert "CI" in report
+        assert "-50.0" in report  # adjust by -offset when no absolute target is computable
+
+    def test_reports_absolute_target_with_current_latency(self):
+        agg = {"n": 3, "n_total": 3, "mean_offset_ms": 50.0, "stdev_ms": 5.0, "ci95_ms": 6.0}
+        report = av_sync_calibrate.format_calibration_report(agg, current_latency_ms=1000)
+        assert "950" in report  # baseline_latency_ms(1000, 50.0) == 950
+        assert "1000" in report
+
+    def test_reports_na_ci_for_single_window(self):
+        agg = {"n": 1, "n_total": 1, "mean_offset_ms": 50.0, "stdev_ms": 0.0, "ci95_ms": None}
+        report = av_sync_calibrate.format_calibration_report(agg)
+        assert "n/a" in report
+
+
+class TestLoadCalibrationWindows:
+    def test_reads_jsonl_skipping_blank_lines(self, tmp_path):
+        p = tmp_path / "calib.jsonl"
+        p.write_text(
+            json.dumps({"offset_frames": 2, "confidence": 9.0}) + "\n"
+            "\n"
+            + json.dumps({"offset_frames": 3, "confidence": 8.0}) + "\n"
+        )
+        records = av_sync_calibrate.load_calibration_windows(str(p))
+        assert len(records) == 2
+        assert records[0]["offset_frames"] == 2
+        assert records[1]["offset_frames"] == 3
+
+
+class TestCLICalibrateMode:
+    def test_calibrate_mode_needs_no_host(self, tmp_path, capsys):
+        log_path = tmp_path / "calib.jsonl"
+        log_path.write_text(
+            "\n".join(
+                json.dumps({"offset_frames": f, "confidence": 9.0}) for f in (2, 3, 2)
+            )
+            + "\n"
+        )
+        with pytest.MonkeyPatch.context() as m:
+            m.setattr(
+                sys, "argv",
+                ["av_sync_calibrate.py", "--calibrate", str(log_path)],
+            )
+            av_sync_calibrate.main()
+        out = capsys.readouterr().out
+        assert "CALIBRATION" in out
+        assert "RECOMMENDATION" in out
+
+    def test_calibrate_mode_with_current_latency_and_report_json(self, tmp_path, capsys):
+        log_path = tmp_path / "calib.jsonl"
+        log_path.write_text(json.dumps({"offset_frames": 2, "confidence": 9.0}) + "\n")
+        report_path = tmp_path / "report.json"
+        with pytest.MonkeyPatch.context() as m:
+            m.setattr(
+                sys, "argv",
+                ["av_sync_calibrate.py", "--calibrate", str(log_path),
+                 "--current-latency-ms", "1000", "--report-json", str(report_path)],
+            )
+            av_sync_calibrate.main()
+        out = capsys.readouterr().out
+        assert "920" in out  # baseline_latency_ms(1000, 80.0) == round(1000-80) == 920
+
+        assert report_path.exists()
+        data = json.loads(report_path.read_text())
+        assert data["n"] == 1
+
+    def test_no_mode_selected_fails_loud(self, monkeypatch):
+        monkeypatch.setattr(sys, "argv", ["av_sync_calibrate.py"])
+        with pytest.raises(SystemExit):
+            av_sync_calibrate.main()
+
+    def test_offset_mode_without_calibrate_still_requires_host(self, monkeypatch):
+        monkeypatch.setattr(sys, "argv", ["av_sync_calibrate.py", "--offset-ms", "10"])
+        with pytest.raises(SystemExit):
+            av_sync_calibrate.main()

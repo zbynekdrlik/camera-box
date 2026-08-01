@@ -75,7 +75,12 @@ strih OBS PHASE2-PROBE program → stream OBS program. Both record locally.
 
 **#728 GOTCHA (2026-07-12): cam1's grabber card is no longer a ShadowCast.** The user
 physically swapped it with cam5's card — cam1 now has an **Elgato 4K S** on `/dev/video1`
-(cam5 now has the ShadowCast 2, on `/dev/video0`). The description above is historically
+(cam5 now has the ShadowCast 2, on `/dev/video0`).
+**UPDATE (2026-08-01, issue 909):** the cards moved AGAIN — cam1's live journal shows a
+**ShadowCast 2** (the dying card behind the issue-909 USB-reset loop and the issue-914/915
+report-only relaxations). The #728 sentence above is itself historical now; the only reliable
+source is the LIVE box (`capture_rate_health::resolve_grabber_model` at boot / the journal),
+never any static table in this skill or `targets.md`. The description above is historically
 accurate for when this proof was run (2026-06-17); read "cam1 ShadowCast" in older sections
 of this skill as "whatever grabber card cam1 had AT THE TIME" — check the LIVE fleet table
 in `targets.md` for the current assignment before assuming a specific model/device node.
