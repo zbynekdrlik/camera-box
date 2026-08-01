@@ -60,6 +60,14 @@ with this program; if not, write to the Free Software Foundation, Inc.,
  * within a short live-check session, rare enough to never spam the OBS log. */
 #define CAMERA_BOX_DIAG_LOG_INTERVAL_NS 10000000000ULL
 
+/* #926: the video-delay actuator `CbDockLockCorrector` drives -- the SAME per-source
+ * `genlock_latency_ms_src` knob `scripts/av_sync_calibrate.py` already nudges OFFLINE, on the
+ * SAME 'NDI 2ME PGM' program NDI source (`av_sync_calibrate.py`'s own DEFAULT_SOURCE). Hardcoded,
+ * no env var, per this repo's hard-lock philosophy (issue #257: no forgettable/mysterious knobs) --
+ * matching how every other rig constant in this file is a compile-time literal, not a runtime
+ * override. */
+#define CAMERA_BOX_LOCK_SOURCE_NAME "NDI 2ME PGM"
+
 /* There are several reason to limit the width and the height.
  * - Since a square of 3/8 QR-code-length is calculated using uint32_t,
  *   the 3/8 of width or height cannot exceed the square root of uint32_t max.
@@ -196,6 +204,13 @@ struct sync_test_output
 	 * desync (like the closed #529) can be diagnosed from the OBS log alone. Pure/tested in
 	 * camera-box-audio.hpp (tests/av_sync_dock_audit_log.rs) — touched only on the audio thread. */
 	camerabox::CbLockAuditTracker cb_lock_audit;
+
+	/* #926: holds CAMERA_BOX_LOCK_SOURCE_NAME's genlock_latency_ms_src so the dock's own displayed
+	 * offset (audio_ts - video_ts) never rests negative ("audio early", a forbidden steady state).
+	 * Only ever acts on a Locked/Updated lock-audit transition above; an Unlocked transition (real
+	 * event, no test signal) freezes it -- see camera-box-audio.hpp's own doc comment. Touched only
+	 * on the audio thread. */
+	camerabox::CbDockLockCorrector cb_lock_corrector;
 
 	/* #690: periodic live diagnostic -- tells a live session WHY the audio index/latency never
 	 * lock (does the demod see nothing / decode garbage / decode fine but never ring-hit or
@@ -1031,6 +1046,40 @@ static inline void st_raw_audio_test_preamble(struct sync_test_output *st, uint6
 	}
 }
 
+/* #926: read CAMERA_BOX_LOCK_SOURCE_NAME's CURRENT genlock_latency_ms_src -- always read fresh
+ * (never cached) so a concurrent manual/scripted change (an operator, or av_sync_calibrate.py) is
+ * respected rather than clobbered. Returns false if the source does not exist right now (e.g. the
+ * scene collection hasn't loaded it yet) -- the caller must not apply a correction without a real
+ * current value to correct FROM. */
+static bool cb_read_lock_latency_ms(int32_t *out_ms)
+{
+	obs_source_t *src = obs_get_source_by_name(CAMERA_BOX_LOCK_SOURCE_NAME);
+	if (!src)
+		return false;
+	obs_data_t *settings = obs_source_get_settings(src);
+	*out_ms = (int32_t)obs_data_get_int(settings, "genlock_latency_ms_src");
+	obs_data_release(settings);
+	obs_source_release(src);
+	return true;
+}
+
+/* #926: apply a NEW absolute genlock_latency_ms_src to CAMERA_BOX_LOCK_SOURCE_NAME, mirroring the
+ * SAME settings-update mechanism `scripts/av_sync_calibrate.py`'s `apply_latency()` performs over
+ * the OBS WebSocket (GetInputSettings/SetInputSettings), done here in-process instead. Returns
+ * false if the source does not exist right now. */
+static bool cb_apply_lock_latency_ms(int32_t new_ms)
+{
+	obs_source_t *src = obs_get_source_by_name(CAMERA_BOX_LOCK_SOURCE_NAME);
+	if (!src)
+		return false;
+	obs_data_t *settings = obs_source_get_settings(src);
+	obs_data_set_int(settings, "genlock_latency_ms_src", (long long)new_ms);
+	obs_source_update(src, settings);
+	obs_data_release(settings);
+	obs_source_release(src);
+	return true;
+}
+
 /* #398 fix (Audio Index + Latency never locked): camera-box's OWN audio decode path, used once the
  * video QR has put us in camera-box mode. norihiro's `st_raw_audio*` demod cannot decode our marker
  * at c=1 (its `c1 = c/2` = 0 collapses the preamble finder; its 6-symbol read can't recover the
@@ -1118,10 +1167,39 @@ static void st_raw_audio_camera_box(struct sync_test_output *st, struct audio_da
 			blog(LOG_INFO, "av-sync-dock: %s offset=%.1fms source=cluster matched=%zu mad=%.1fms",
 			     audit_ev.kind == camerabox::CbLockEventKind::Locked ? "LOCKED" : "UPDATED",
 			     audit_ev.offset_ms, audit_ev.matched, audit_ev.mad_ms);
+			/* #926: on a genuine (fresh or meaningfully-changed) trustworthy lock, let the
+			 * corrector decide whether CAMERA_BOX_LOCK_SOURCE_NAME's genlock_latency_ms_src needs
+			 * nudging so the offset above never rests negative ("audio early"). Reads the CURRENT
+			 * value fresh (never cached) so a concurrent manual/scripted change is respected. */
+			{
+				int32_t current_ms = 0;
+				if (cb_read_lock_latency_ms(&current_ms)) {
+					camerabox::CbDockLockAction act =
+						st->cb_lock_corrector.decide(true, audit_ev.offset_ms, current_ms,
+						                             audio_ts);
+					if (act.apply && cb_apply_lock_latency_ms(act.new_delay_ms)) {
+						blog(LOG_INFO,
+						     "av-sync-dock: LOCK-CORRECT genlock_latency_ms_src %d -> %dms "
+						     "(measured offset=%.1fms)",
+						     (int)current_ms, (int)act.new_delay_ms, audit_ev.offset_ms);
+					}
+				} else {
+					blog(LOG_WARNING,
+					     "av-sync-dock: LOCK-CORRECT skipped -- source '%s' not found",
+					     CAMERA_BOX_LOCK_SOURCE_NAME);
+				}
+			}
 			break;
 		case camerabox::CbLockEventKind::Unlocked:
 			st->cb_lock_state = false;
 			blog(LOG_WARNING, "av-sync-dock: UNLOCKED last_offset=%.1fms source=cluster", audit_ev.offset_ms);
+			/* #926: no test signal / real event -- FREEZE, never chase drift on program material
+			 * (requirement 5). decide(locked=false, ...) is an explicit no-op by construction
+			 * (never touches the actuator or the corrector's own state); called here purely so the
+			 * Unlocked branch documents the freeze in the same place its Locked/Updated sibling
+			 * documents the correction, rather than relying on the reader to infer it from the
+			 * absence of a call. */
+			(void)st->cb_lock_corrector.decide(false, 0.0, 0, audio_ts);
 			break;
 		case camerabox::CbLockEventKind::None:
 		default:
