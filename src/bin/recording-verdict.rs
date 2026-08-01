@@ -326,8 +326,8 @@ struct Args {
     av_cluster_tol_ms: f64,
     /// issue 930 lipsync cross-validation: the SyncNet-aggregated offset (ms, video - audio) for
     /// the PAIRED lipsync-test-mode recording of the SAME rig state, from `scripts/av_sync_measure.py`
-    /// + `scripts/av_sync_calibrate.py --calibrate` (its `mean_offset_ms`). Optional -- when given
-    /// together with `--av-sync`, adds a `lipsync_cross_check` object to the printed JSON
+    /// and `scripts/av_sync_calibrate.py --calibrate` (its `mean_offset_ms`). Optional -- when
+    /// given together with `--av-sync`, adds a `lipsync_cross_check` object to the printed JSON
     /// comparing it against this recording's own QR/QPSK offset (`camera_box::lipsync_cross_check`).
     /// Report-only (see that module's `gates_overall_pass`) -- never affects this CLI's exit code.
     #[arg(long)]
