@@ -388,7 +388,9 @@ struct RollingOffsetCluster {
 	 * comment for the full closed-form justification. */
 	void rebase(double delta_ms)
 	{
-		(void)delta_ms; // #926 fix-up RED: pre-fix behavior -- rebase() was a no-op
+		for (std::deque<std::pair<uint64_t, double>>::iterator it = samples.begin(); it != samples.end();
+		     ++it)
+			it->second -= delta_ms;
 	}
 };
 
@@ -539,15 +541,21 @@ public:
 	CbDockLockAction decide(bool locked, double offset_ms, double mad_ms, int32_t current_delay_ms,
 	                        uint64_t now_ns)
 	{
-		// #926 fix-up RED: pre-fix behavior -- no finite guard, no margin (mad_ms unused).
-		(void)mad_ms;
 		CbDockLockAction action;
 		if (!locked)
 			return action;
 
-		double g = std::floor(offset_ms);
+		if (!std::isfinite(offset_ms))
+			return action;
+
+		double margin = std::isfinite(mad_ms) ? cb_clamp_f64(mad_ms, CB_DOCK_LOCK_MIN_MARGIN_MS,
+		                                                      CB_CLUSTER_MAX_MAD_MS)
+		                                       : CB_DOCK_LOCK_MIN_MARGIN_MS;
+		// Clamp BEFORE the later int64_t casts (finding 5): offset_ms is finite but could still be
+		// astronomically large, which would otherwise risk UB on the cast / an overflowing add.
+		double g = cb_clamp_f64(std::floor(offset_ms - margin), -1000000.0, 1000000.0);
 		if (g == 0.0)
-			return action; // already ts_ms in [0, 1) -- nothing to do
+			return action; // already ts_ms in [margin, margin + 1) -- nothing to do
 
 		if (have_last_applied_) {
 			uint64_t elapsed_ns = now_ns > last_applied_ns_ ? now_ns - last_applied_ns_ : 0;
