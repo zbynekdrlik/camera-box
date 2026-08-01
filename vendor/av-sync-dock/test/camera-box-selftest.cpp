@@ -135,6 +135,51 @@ int main()
 		CHECK(ok == 256, "all 256 indices round-trip through cb_decode_markers");
 	}
 
+	/* 2b. #690: CbDecodeStats mirrors qpsk_marker::DecodeStats (mirrors the Rust
+	 * decode_stats_count_* tests). A clean marker -> crc_ok==1, preamble_screens_passed>=crc_ok,
+	 * crc_fail==0. Silence -> all-zero. A marker with one whole symbol window negated (corrupts an
+	 * index-field bit while leaving the preamble energy intact) -> screened but never CRC-valid. */
+	{
+		std::vector<float> buf(48000 / 2, 0.0f);
+		std::vector<float> sig = marker_signal(77);
+		size_t start = 48000 / 10;
+		for (size_t j = 0; j < sig.size(); j++)
+			buf[start + j] = sig[j];
+		std::pair<std::vector<std::pair<double, uint8_t>>, CbDecodeStats> r =
+			cb_decode_markers_with_stats(buf, 48000, 442, 1, 0.4);
+		CHECK(r.first.size() == 1 && r.first[0].second == 77, "clean marker still decodes idx 77");
+		CHECK(r.second.crc_ok == 1, "clean marker: crc_ok == 1");
+		CHECK(r.second.preamble_screens_passed >= r.second.crc_ok, "screens >= crc_ok");
+		// cb_decode_markers (thin wrapper) returns the identical markers.
+		std::vector<std::pair<double, uint8_t>> plain = cb_decode_markers(buf, 48000, 442, 1, 0.4);
+		CHECK(plain.size() == r.first.size() && plain[0].second == r.first[0].second,
+		      "cb_decode_markers wrapper matches cb_decode_markers_with_stats");
+	}
+	{
+		std::vector<float> silence(48000, 0.0f);
+		std::pair<std::vector<std::pair<double, uint8_t>>, CbDecodeStats> r =
+			cb_decode_markers_with_stats(silence, 48000, 442, 1, 0.4);
+		CHECK(r.first.empty(), "silence decodes nothing");
+		CHECK(r.second.preamble_screens_passed == 0, "silence: no preamble screens");
+		CHECK(r.second.crc_ok == 0 && r.second.crc_fail == 0, "silence: crc counters stay zero");
+	}
+	{
+		std::vector<float> buf(48000 / 2, 0.0f);
+		std::vector<float> sig = marker_signal(200);
+		size_t sym5_start = sig.size() * 5 / 10, sym5_end = sig.size() * 6 / 10;
+		for (size_t j = sym5_start; j < sym5_end; j++)
+			sig[j] = -sig[j];
+		size_t start = 48000 / 10;
+		for (size_t j = 0; j < sig.size(); j++)
+			buf[start + j] = sig[j];
+		std::pair<std::vector<std::pair<double, uint8_t>>, CbDecodeStats> r =
+			cb_decode_markers_with_stats(buf, 48000, 442, 1, 0.4);
+		CHECK(r.first.empty(), "corrupted marker must not decode a valid index");
+		CHECK(r.second.preamble_screens_passed > 0, "corrupted marker: still screened");
+		CHECK(r.second.crc_ok == 0, "corrupted marker: never crc_ok");
+		CHECK(r.second.crc_fail > 0, "corrupted marker: counted as crc_fail");
+	}
+
 	/* 3. Streaming dedup: two markers fed in small chunks, each reported exactly once with the right
 	 * index (mirrors av_sync_dock::streaming_decoder_reports_each_marker_once...). */
 	{
@@ -159,6 +204,20 @@ int main()
 			CHECK(std::llabs((long long)got[0].first - (long long)sr) < 8, "streaming: pos0");
 			CHECK(std::llabs((long long)got[1].first - (long long)(sr * 5)) < 8, "streaming: pos1");
 		}
+		// #690: the two decoded markers must have driven StreamingMarkerDecoder::stats.crc_ok >= 2.
+		CHECK(dec.stats.crc_ok >= 2, "streaming: stats.crc_ok reflects the decoded markers");
+		CHECK(dec.stats.preamble_screens_passed >= dec.stats.crc_ok, "streaming: screens >= crc_ok");
+	}
+	{
+		// #690: a fresh decoder over pure silence must report all-zero stats.
+		StreamingMarkerDecoder dec(48000, 442, 1, CB_QPSK_THRESHOLD, cb_signal_len(48000, 442, 1) * 3,
+		                           (uint64_t)cb_signal_len(48000, 442, 1));
+		CHECK(dec.stats.preamble_screens_passed == 0 && dec.stats.crc_ok == 0 && dec.stats.crc_fail == 0,
+		      "streaming: fresh decoder stats start at zero");
+		std::vector<float> silence(4800, 0.0f);
+		dec.push(silence.data(), silence.size());
+		CHECK(dec.stats.preamble_screens_passed == 0 && dec.stats.crc_ok == 0,
+		      "streaming: silence push leaves stats at zero");
 	}
 
 	/* 4. Rolling cluster locks the real offset among a heavy false-decode scatter, and rejects a

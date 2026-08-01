@@ -25,7 +25,9 @@
 //!      large, with an Otsu-binarized retry — the same techniques `src/probe/qr.rs` proved on the
 //!      real soft optical frames (#202/#363). The geometry is [`top_band_decode_plan`].
 
-use crate::qpsk_marker::{cluster_offset_ms, decode_markers, AudioParams, AvOffset};
+use crate::qpsk_marker::{
+    cluster_offset_ms, decode_markers_with_stats, AudioParams, AvOffset, DecodeStats,
+};
 
 /// QPSK preamble-screen threshold for the live decode — MATCHES the proven offline
 /// `recording-verdict --av-sync` default (`av_threshold`). Low enough to catch a marker buried in
@@ -161,8 +163,8 @@ pub fn otsu_threshold(hist: &[u64; 256]) -> u8 {
 }
 
 /// Streaming QPSK marker detector for the LIVE audio path: keeps a rolling window of the most recent
-/// raw mono samples, runs the proven [`decode_markers`] over it each `push`, and returns each NEWLY
-/// detected marker as `(absolute_sample_index_from_stream_start, index)`.
+/// raw mono samples, runs the proven [`crate::qpsk_marker::decode_markers`] over it each `push`, and
+/// returns each NEWLY detected marker as `(absolute_sample_index_from_stream_start, index)`.
 ///
 /// WHY a rolling window over the batched `decode_markers` (rather than a bespoke incremental demod):
 /// `decode_markers` is round-trip tested for every one of the 256 indices AT the rig's c=1 and under
@@ -188,6 +190,16 @@ pub struct StreamingMarkerDecoder {
     last_reported: Option<u64>,
     /// Minimum absolute-index gap for a detection to count as a NEW marker (dedup width).
     min_gap: u64,
+    /// #690 — cumulative [`DecodeStats`] across every `push()` call, for the live dock's periodic
+    /// audio diagnostic (`sync-test-output.cpp`'s rate-limited INFO log). Counts are a DELIBERATE
+    /// over-count, not a per-marker tally: each `push()` re-decodes the WHOLE rolling window, so a
+    /// real onset near the front of the window gets re-screened/re-counted on every subsequent
+    /// `push()` until it ages out of `capacity` — the same reason `push()`'s own dedup (`last_reported`
+    /// / `min_gap`) exists for the returned markers. That's fine for this counter's purpose: telling
+    /// "zero vs nonzero" (does the demod see anything at all / does anything ever decode) and rough
+    /// relative magnitude (`crc_fail` swamping `crc_ok` means mostly noise) — never an exact count of
+    /// distinct real markers (use the deduped `push()` return value / [`RollingOffsetCluster`] for that).
+    stats: DecodeStats,
 }
 
 impl StreamingMarkerDecoder {
@@ -203,11 +215,13 @@ impl StreamingMarkerDecoder {
             origin: 0,
             last_reported: None,
             min_gap: min_gap.max(1),
+            stats: DecodeStats::default(),
         }
     }
 
     /// Append `samples`, trim to `capacity`, decode the window, and return the ABSOLUTE start index
-    /// and `index` of each newly detected marker (in ascending absolute order).
+    /// and `index` of each newly detected marker (in ascending absolute order). Also accumulates
+    /// [`Self::stats`] — see its field doc for the over-counting caveat.
     pub fn push(&mut self, samples: &[f32]) -> Vec<(u64, u8)> {
         self.buf.extend_from_slice(samples);
         if self.buf.len() > self.capacity {
@@ -217,7 +231,12 @@ impl StreamingMarkerDecoder {
         }
         let mut out = Vec::new();
         let sr = self.params.sample_rate as f64;
-        for (ts_s, idx) in decode_markers(&self.buf, &self.params, self.threshold) {
+        let (markers, batch_stats) =
+            decode_markers_with_stats(&self.buf, &self.params, self.threshold);
+        self.stats.preamble_screens_passed += batch_stats.preamble_screens_passed;
+        self.stats.crc_ok += batch_stats.crc_ok;
+        self.stats.crc_fail += batch_stats.crc_fail;
+        for (ts_s, idx) in markers {
             // decode_markers reports the marker start in seconds within the window; convert to an
             // absolute stream index. Round to the nearest sample so the same marker seen in two
             // overlapping windows maps to an identical absolute index (stable dedup).
@@ -232,6 +251,12 @@ impl StreamingMarkerDecoder {
             }
         }
         out
+    }
+
+    /// Cumulative decode diagnostics since construction — see [`Self::stats`]'s field doc for what
+    /// these counts mean (and why they over-count relative to distinct real markers).
+    pub fn stats(&self) -> DecodeStats {
+        self.stats
     }
 }
 
@@ -383,6 +408,47 @@ mod tests {
             "m1 pos {found:?}"
         );
         assert_eq!(found[1].1, frame_id_to_index(2431));
+    }
+
+    #[test]
+    fn streaming_decoder_stats_are_zero_on_silence_and_nonzero_once_a_marker_streams_through() {
+        // #690: the live-dock audio diagnostic reads `stats()` — pin that it starts at all-zero
+        // (silence) and that a real marker fed through `push()` (even split across chunks, the
+        // production shape) drives `crc_ok` above zero with no `crc_fail` needed for a clean signal.
+        let p = AudioParams::rig60();
+        let mut dec = StreamingMarkerDecoder::new(
+            p,
+            DOCK_QPSK_THRESHOLD,
+            signal_len(&p) * 3,
+            signal_len(&p) as u64,
+        );
+        let s0 = dec.stats();
+        assert_eq!(s0.preamble_screens_passed, 0);
+        assert_eq!(s0.crc_ok, 0);
+        assert_eq!(s0.crc_fail, 0);
+
+        let sr = p.sample_rate as usize;
+        let mut stream = vec![0.0f32; sr]; // 1 s
+        let s = marker_signal(42, &p);
+        stream[sr / 4..sr / 4 + s.len()].copy_from_slice(&s);
+        let mut found: Vec<(u64, u8)> = Vec::new();
+        for chunk in stream.chunks(480) {
+            found.extend(dec.push(chunk));
+        }
+        assert_eq!(
+            found.len(),
+            1,
+            "sanity: the marker itself decoded: {found:?}"
+        );
+        let s1 = dec.stats();
+        assert!(
+            s1.crc_ok >= 1,
+            "a decoded marker must count as at least one crc_ok: {s1:?}"
+        );
+        assert!(
+            s1.preamble_screens_passed >= s1.crc_ok,
+            "every crc_ok started as a passed screen: {s1:?}"
+        );
     }
 
     #[test]
