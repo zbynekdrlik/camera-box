@@ -40,6 +40,13 @@ Three scripts, in this order. None of it is manual work; a notebook swap is repo
 4. VERIFY       scripts/verify-imag.sh                              (from dev1, #821)
 ```
 
+**Driving step 3 from dev1 over a plain (no-tty) ssh call:** `sudo` cannot prompt, so a bare
+`ssh newlevel@imag "sudo env … bash /tmp/setup-imag.sh --yes"` fails with `a terminal is
+required to read the password`. Use `echo <pw> | sudo -S env GENLOCK_RUN_ID=<run> CAM_PW=…
+GH_TOKEN=$(gh auth token) bash /tmp/setup-imag.sh --yes` (password via stdin) — confirmed live
+on the 2026-08-01 hot-swap passes. After ANY hot-swap, still verify the obs process START TIME
+is newer than the swap (`ps -o pid,lstart -C obs`) per the #912 restart-race gotcha.
+
 **Step 4 is MANDATORY — no imag box is ever reported "ready" without its output.** #821: the
 replacement notebook (.187) was once reported "verified booted from disk" on the strength of the
 installer's OWN claim of success, when it was in fact still on gdm3 with a login prompt — no

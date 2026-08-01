@@ -25,6 +25,7 @@ Exit codes: 0 measured, 2 unmeasurable window (low confidence), 1 error.
 import argparse
 import json
 import os
+import pickle
 import re
 import shutil
 import subprocess
@@ -172,8 +173,79 @@ def grab_clip(url: str, secs: int, out: Path) -> None:
         sys.exit(f"ERROR: grab failed: {r.stderr.strip()[:300]}")
 
 
+def _mean_shift_curve(dist_track) -> "list[float]":
+    """#917 -- reduce ONE track's raw per-frame distance array (shape (nframes, win_size), exactly
+    what the vendored `run_syncnet.py` (stock, unmodified upstream joonson/syncnet_python) already
+    dumps to `pickle.dump(dists, fil)` at the end of its OWN run) to the per-shift MEAN distance
+    curve `SyncNetInstance.evaluate()` computes internally
+    (`mdist = torch.mean(torch.stack(dists,1),1)`) but does not return or print. Pure list/float
+    math -- no numpy/torch import needed in THIS module (unpickling a numpy array still works;
+    numpy is already a declared dependency everywhere this script actually runs -- the live
+    syncnet_python venv and the repo's own CI pytest job).
+
+    Verified LIVE (2026-08-01, real stream-box syncnet_python install) to reproduce SyncNet's own
+    `mdist` bit-for-bit: averaging `dists_npy` (the pickle's per-track array) over the frame axis
+    and locating its argmin reproduced the EXACT SAME integer "AV offset" SyncNet itself printed,
+    for all 3 real face tracks in a real 35s soundcheck clip.
+    """
+    frames = [[float(x) for x in row] for row in dist_track]
+    if not frames:
+        return []
+    n = len(frames)
+    win = len(frames[0])
+    return [sum(frame[i] for frame in frames) / n for i in range(win)]
+
+
+def dist_curve_for_track(dist_track, offset_frames: int) -> "list[float] | None":
+    """#917 -- the 3-point SyncNet mean-distance window `[argmin-1, argmin, argmin+1]` that
+    `av_sync_calibrate.py`'s `parabolic_subframe_offset()`/`window_offset_ms()` (#805) consumes
+    via the optional `dist_curve` field, for sub-frame refinement of the plain frame-quantized
+    offset. Returns `None` (== today's exact frame-quantized behavior, zero regression) when:
+      - `dist_track` is falsy/empty/too short to have 3 shift bins,
+      - the argmin derived from the curve does NOT match SyncNet's own reported `offset_frames`
+        (a pickle/track-count mismatch -- never guess a curve for the wrong track), or
+      - the argmin sits at either EDGE of the shift window (no neighbor on one side to fit a
+        parabola through).
+    """
+    curve = _mean_shift_curve(dist_track)
+    if len(curve) < 3:
+        return None
+    minidx = min(range(len(curve)), key=lambda i: curve[i])
+    vshift = (len(curve) - 1) // 2
+    derived_offset = vshift - minidx
+    if derived_offset != offset_frames:
+        return None
+    if minidx == 0 or minidx == len(curve) - 1:
+        return None
+    return [curve[minidx - 1], curve[minidx], curve[minidx + 1]]
+
+
+def _load_dist_tracks(workdir: Path, ref: str) -> "list | None":
+    """#917 -- load the per-track raw per-shift distance arrays the vendored, UNMODIFIED
+    `run_syncnet.py` already dumps unconditionally to `<data_dir>/pywork/<ref>/activesd.pckl`
+    after every run (one array per face track, in the SAME order `run_syncnet.py` evaluates them
+    -- the same order its "AV offset"/"Confidence" log lines are printed in). Returns `None`
+    (never raises) on ANY failure to read/parse it -- a missing or malformed pickle must degrade
+    extraction to today's plain frame-quantized offset, never break a measurement.
+    """
+    path = workdir / "pywork" / ref / "activesd.pckl"
+    try:
+        with open(path, "rb") as f:
+            data = pickle.load(f)
+    except (OSError, pickle.UnpicklingError, EOFError, ImportError, AttributeError, ValueError):
+        return None
+    if not isinstance(data, list):
+        return None
+    return data
+
+
 def measure(repo: Path, media: Path, workdir: Path):
-    """Run syncnet_python's two stages; return list of (offset_frames, confidence) per track."""
+    """Run syncnet_python's two stages; return list of (offset_frames, confidence, dist_curve)
+    per track. `dist_curve` (#917) is the 3 SyncNet per-shift mean-distance values around the
+    reported offset bin -- see `dist_curve_for_track` -- or `None` when unavailable (exactly
+    today's plain frame-quantized behavior). Consumed by `av_sync_calibrate.py`'s
+    `window_offset_ms()` (#805) for sub-frame refinement of the baseline calibration.
+    """
     py = sys.executable
     ref = "m"
     for stage in ("run_pipeline.py", "run_syncnet.py"):
@@ -182,12 +254,21 @@ def measure(repo: Path, media: Path, workdir: Path):
         if stage == "run_pipeline.py" and r.returncode != 0:
             sys.exit(f"ERROR: {stage} failed: {(r.stderr or r.stdout).strip()[-300:]}")
         out = (r.stdout or "") + (r.stderr or "")
-    tracks = []
     # SyncNetInstance logs per track: "AV offset:  N" then "Confidence: C"
     offsets = [int(m) for m in re.findall(r"AV offset:\s*(-?\d+)", out)]
     confs = [float(m) for m in re.findall(r"Confidence:\s*([\d.]+)", out)]
-    tracks = list(zip(offsets, confs))
-    return tracks
+
+    dist_tracks = _load_dist_tracks(workdir, ref)
+    if dist_tracks is not None and len(dist_tracks) == len(offsets):
+        curves = [
+            dist_curve_for_track(track, off) for track, off in zip(dist_tracks, offsets)
+        ]
+    else:
+        # Missing pickle, OR its track count disagrees with the regex-parsed log lines -- never
+        # guess which curve belongs to which track; fall back to plain frame-quantized for all.
+        curves = [None] * len(offsets)
+
+    return list(zip(offsets, confs, curves))
 
 
 def log_calibration_window(path: str, record: dict) -> None:
@@ -207,6 +288,18 @@ def notify_discord(webhook: str, text: str) -> None:
         print(f"WARN: discord webhook failed: {exc}")
 
 
+def _calibration_record(stamp: str, offset_frames: int, confidence: float, usable: bool,
+                         dist_curve) -> dict:
+    """#917 -- build one `--calibration-log` JSONL record. `dist_curve` is included ONLY when
+    present (not `None`) so a run with no real curve produces the EXACT SAME record shape as
+    before #917 -- `av_sync_calibrate.py`'s `window_offset_ms()` already treats a missing
+    `dist_curve` key as "no sub-frame data" via `record.get("dist_curve")`."""
+    rec = {"ts": stamp, "offset_frames": offset_frames, "confidence": confidence, "usable": usable}
+    if dist_curve is not None:
+        rec["dist_curve"] = dist_curve
+    return rec
+
+
 def one_measurement(args, repo: Path) -> int:
     with tempfile.TemporaryDirectory(prefix="avsync-") as td:
         workdir = Path(td)
@@ -222,21 +315,21 @@ def one_measurement(args, repo: Path) -> int:
     usable = [t for t in tracks if t[1] >= CONF_MIN]
     stamp = time.strftime("%Y-%m-%d %H:%M:%S")
     if not usable:
-        best = max(tracks, key=lambda t: t[1], default=(0, 0.0))
+        best = max(tracks, key=lambda t: t[1], default=(0, 0.0, None))
         print(f"[{stamp}] UNMEASURABLE window (best confidence {best[1]:.1f} < {CONF_MIN}"
               f" — no usable face/lips; band/graphics segments are expected to skip)")
         if getattr(args, "calibration_log", None):
             log_calibration_window(
                 args.calibration_log,
-                {"ts": stamp, "offset_frames": best[0], "confidence": best[1], "usable": False},
+                _calibration_record(stamp, best[0], best[1], False, best[2] if len(best) > 2 else None),
             )
         return 2
 
-    offset_frames, conf = max(usable, key=lambda t: t[1])
+    offset_frames, conf, dist_curve = max(usable, key=lambda t: t[1])
     if getattr(args, "calibration_log", None):
         log_calibration_window(
             args.calibration_log,
-            {"ts": stamp, "offset_frames": offset_frames, "confidence": conf, "usable": True},
+            _calibration_record(stamp, offset_frames, conf, True, dist_curve),
         )
     offset_ms = offset_frames * FRAME_MS
     knob = -offset_ms

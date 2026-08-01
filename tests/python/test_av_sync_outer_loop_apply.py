@@ -203,7 +203,7 @@ class TestRunOuterLoopWiring:
         assert "outer-loop" in reported[0][1]
 
     def test_one_measurement_only_runs_outer_loop_when_flag_set(self, monkeypatch, tmp_path):
-        monkeypatch.setattr(av_sync_measure, "measure", lambda repo, media, workdir: [(2, 9.0)])
+        monkeypatch.setattr(av_sync_measure, "measure", lambda repo, media, workdir: [(2, 9.0, None)])
         called = []
         monkeypatch.setattr(av_sync_measure, "run_outer_loop", lambda args, offset_ms: called.append(offset_ms))
 
