@@ -319,3 +319,22 @@ build fleet-wide" as the actual fix for this recurring class — see the closed 
 pattern's history), and leave your own PR open/unmerged pending that separate fix. Do NOT
 attempt the rig hot-swap yourself from an autopilot-worker session scoped to code+CI — that is a
 live rig-ops action outside a code ticket's scope, same as any other rig deploy decision.
+
+**SUPERVISOR resolution recipe (how #923 was actually converged, 2026-08-01):** when the
+Windows boxes sit on a MAIN-merge SHA (a full windows-genlock build on main) but
+`linux-genlock.yml` has no run at that SHA (it push-triggers only on dev; by the time you'd
+dispatch `--ref main`, main HEAD may already have moved past the deployed SHA via a later
+vendor-untouched merge), you can still build the EXACT parity SHA for imag: `git tag
+genlock-parity-<short> <full-sha> && git push origin <tag>`, then `gh workflow run
+linux-genlock.yml --ref <tag>` — the artifact stamps `git rev-parse HEAD` at the checked-out
+ref, so a tag dispatch yields a byte-exact `GENLOCK_BUILD_SHA.txt` match with the deployed
+Windows bundle. Deploy to imag via `setup-imag.sh --yes` with `GENLOCK_RUN_ID=<that run>`
+(the canonical hot-swap path, all manifest verifies included), then verify per the #912
+restart-race gotcha (`ps -o pid,lstart -C obs` newer than the swap + `render tick ENABLED` in
+the newest log). And when a LATER merge will redeploy the Windows boxes anyway (e.g. shipping a
+new plugin DLL), converge ALL THREE boxes in that one pass — windows bundle to strih/stream +
+`linux-genlock` dispatch at the same ref for imag — so parity never has a stale-box window.
+Post-E2E leftover: aborted runs can leak `genlock_burn=true` on strih camera inputs, which the
+[0/8] preflight then refuses one input per attempt; clear ALL of them in one sweep
+(`obs_burn_filter.py check`+`remove` over `NDI cam1..7`) instead of chasing the gate's
+one-at-a-time errors (#924 tracks making the preflight normalize this itself).
