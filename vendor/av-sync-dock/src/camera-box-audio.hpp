@@ -10,9 +10,16 @@
  * the deployed dock shows an empty Audio Index and empty Latency. This header instead MIRRORS
  * camera-box's OWN QPSK demod (`crate::qpsk_marker::decode_markers`, round-trip tested for all 256
  * indices AT c=1) plus the streaming wrapper + rolling densest-cluster estimator from
- * `src/av_sync_dock.rs`. Every function here is a byte-for-byte port of that Rust; the committed
- * `test/camera-box-selftest.cpp` cross-checks this port against the Rust results, and the Rust
- * Tier-0 tests are the authoritative gate.
+ * `src/av_sync_dock.rs`. Every function here is a byte-for-byte port of that Rust; the Rust Tier-0
+ * tests remain the authoritative gate. Cross-checking lives in TWO places, by function age (#926
+ * fix-up review finding 15 — this note replaces a stale claim that ALL of this header is
+ * cross-checked by the committed `test/camera-box-selftest.cpp`, which is only true for the
+ * original #398 functions): the #398-era decode/cluster/top-band/otsu functions ARE cross-checked
+ * there; every NEWER addition (`CbLockAuditTracker` #634, `CbDockLockCorrector` #926) instead has
+ * its OWN dedicated Rust-driven twin harness (`tests/av_sync_dock_audit_log.rs`,
+ * `tests/av_sync_dock_lock_926.rs`) that compiles+runs a tiny real C++ program against this exact
+ * header, off-rig, with no vendored-OBS build needed — check the function's own doc comment for
+ * which harness actually exercises it before assuming the selftest covers it.
  *
  * Dependency-free (STL + <cmath> only) so it compiles standalone (C++11) and the self-test runs
  * without libobs/quirc/Qt. Keep in sync with `src/av_sync_dock.rs` and `src/qpsk_marker.rs`.
@@ -373,6 +380,16 @@ struct RollingOffsetCluster {
 		none.mad_ms = 0.0;
 		return none;
 	}
+
+	/* #926 fix-up (review finding 1/7) -- mirror of av_sync_dock::RollingOffsetCluster::rebase():
+	 * shift every RETAINED sample's offset by -delta_ms the instant a correction of delta_ms
+	 * (new_delay - current_delay) actually lands, so the window reflects the post-correction
+	 * state immediately instead of lagging for up to window_ns. See the Rust method's own doc
+	 * comment for the full closed-form justification. */
+	void rebase(double delta_ms)
+	{
+		(void)delta_ms; // #926 fix-up RED: pre-fix behavior -- rebase() was a no-op
+	}
 };
 
 /* ---- #634 audit-logging: lock-state transition classification (pure, no I/O) ----
@@ -444,22 +461,54 @@ private:
 	double stable_tol_ms_;
 };
 
+/* small named clamp helpers (#926 fix-up review finding 14 -- replaces a hand-rolled nested-ternary
+ * `clampedw` expression that used to live inline in CbDockLockCorrector::decide()). cb_clamp_f64
+ * treats a NaN input as "below lo" (NaN comparisons are always false, so `v < lo`/`v > hi` both
+ * evaluate false for a NaN `v` -- falling through to `return v` would silently propagate the NaN;
+ * the explicit `v == v` guard, false only for NaN, catches that and returns the floor instead). */
+inline int64_t cb_clamp_i64(int64_t v, int64_t lo, int64_t hi)
+{
+	if (v < lo)
+		return lo;
+	if (v > hi)
+		return hi;
+	return v;
+}
+
+inline double cb_clamp_f64(double v, double lo, double hi)
+{
+	if (!(v == v))
+		return lo; // NaN guard
+	if (v < lo)
+		return lo;
+	if (v > hi)
+		return hi;
+	return v;
+}
+
 /* ---- #926 auto-correction: hold genlock_latency_ms_src so audio is NEVER early (pure, no I/O) ----
  *
  * Mirror of src/av_sync_dock.rs::DockLockCorrector -- see that module's doc comment for the full
  * closed-form proof. Summary: given the dock's own displayed offset (`ts_ms = audio_ts - video_ts`,
- * the SAME sign as `CbAvOffset::offset_ms` / the Latency label), setting
- * `new_delay = current_delay + floor(ts_ms)` changes `ts` by exactly `-floor(ts_ms)`, so the
- * resulting ts always lands in `[0, 1)` -- 0ms or audio late by under 1ms, NEVER negative
- * ("audio early", the forbidden steady state per issue #926's own directive). Only ever acts on a
- * genuine CbLockEventKind::Locked/Updated transition (the caller passes locked=true only then);
- * CbLockEventKind::Unlocked (real event: no QR, no marker) must pass locked=false, which always
- * Holds -- freezes the actuator, implementing requirement 5 (measure-only, permanent lock) with no
- * separate timeout, reusing CbLockAuditTracker's already-proven state machine. */
+ * the SAME sign as `CbAvOffset::offset_ms` / the Latency label) and a noise-scaled safety MARGIN
+ * (`mad_ms.clamp(CB_DOCK_LOCK_MIN_MARGIN_MS, CB_CLUSTER_MAX_MAD_MS)` -- #926 fix-up review finding
+ * 3: targeting a bare `[0, 1)` claims sub-millisecond precision the ~25ms cluster noise floor
+ * cannot back up), setting `new_delay = current_delay + floor(ts_ms - margin)` changes `ts` by
+ * exactly `-floor(ts_ms - margin)`, so the resulting ts always lands in `[margin, margin + 1)` --
+ * margin or audio late by under 1ms beyond it, NEVER negative ("audio early", the forbidden steady
+ * state per issue #926's own directive). Only ever acts on a genuine TRUSTED measurement (the
+ * caller passes locked=true only when the rolling cluster currently reports est.ok -- #926 fix-up
+ * review finding 2: EVERY trusted measurement, not only a CbLockAuditTracker Locked/Updated
+ * classifier transition, whose Updated needs a >5ms move of the window-smoothed median and stalls
+ * convergence once the window lags a landed correction); locked=false (no test signal: real event,
+ * no QR, no marker) always Holds -- freezes the actuator, implementing requirement 5 (measure-only,
+ * permanent lock) with no separate timeout. */
 static const int32_t CB_DOCK_LOCK_MAX_STEP_MS = 5;
 static const double CB_DOCK_LOCK_MIN_REAPPLY_S = 30.0;
 static const int32_t CB_DOCK_LOCK_LATENCY_MIN_MS = 3;
 static const int32_t CB_DOCK_LOCK_LATENCY_MAX_MS = 2000;
+/* #926 fix-up review finding 3 -- mirror of av_sync_dock::DOCK_LOCK_MIN_MARGIN_MS. */
+static const double CB_DOCK_LOCK_MIN_MARGIN_MS = 1.0;
 
 struct CbDockLockAction {
 	bool apply = false; // false == Hold (do not touch the actuator)
@@ -476,13 +525,22 @@ public:
 	{
 	}
 
-	/* locked: true only on a genuine Locked/Updated lock-audit transition; offset_ms: the locked
-	 * cluster offset in dock convention (audio_ts - video_ts), meaningful only when locked;
+	/* locked: true only when the caller's rolling cluster currently reports a trusted (est.ok)
+	 * measurement -- pass true on EVERY such measurement (#926 fix-up finding 2), never only on a
+	 * lock-audit classifier transition. offset_ms: the locked cluster offset in dock convention
+	 * (audio_ts - video_ts), meaningful only when locked. mad_ms: the SAME cluster's median
+	 * absolute deviation (ms), used to size the safety margin -- meaningful only when locked.
 	 * current_delay_ms: the actuator's CURRENT genlock_latency_ms_src, read fresh by the caller
 	 * (never cached); now_ns: the caller's own monotonic clock (e.g. the OBS pipeline timestamp)
-	 * for the cooldown. */
-	CbDockLockAction decide(bool locked, double offset_ms, int32_t current_delay_ms, uint64_t now_ns)
+	 * for the cooldown.
+	 *
+	 * #926 fix-up finding 5: a non-finite offset_ms (NaN/+-inf) always Holds rather than risking
+	 * UB on the later float->int conversions. */
+	CbDockLockAction decide(bool locked, double offset_ms, double mad_ms, int32_t current_delay_ms,
+	                        uint64_t now_ns)
 	{
+		// #926 fix-up RED: pre-fix behavior -- no finite guard, no margin (mad_ms unused).
+		(void)mad_ms;
 		CbDockLockAction action;
 		if (!locked)
 			return action;
@@ -501,10 +559,8 @@ public:
 		int64_t raw = (int64_t)current_delay_ms + (int64_t)g;
 		int64_t lo = (int64_t)current_delay_ms - (int64_t)max_step_ms_;
 		int64_t hi = (int64_t)current_delay_ms + (int64_t)max_step_ms_;
-		int64_t stepped = raw < lo ? lo : (raw > hi ? hi : raw);
-		int64_t clampedw = stepped < (int64_t)min_delay_ms_ ? (int64_t)min_delay_ms_
-		                    : (stepped > (int64_t)max_delay_ms_ ? (int64_t)max_delay_ms_ : stepped);
-		int32_t clamped = (int32_t)clampedw;
+		int64_t stepped = cb_clamp_i64(raw, lo, hi);
+		int32_t clamped = (int32_t)cb_clamp_i64(stepped, (int64_t)min_delay_ms_, (int64_t)max_delay_ms_);
 		if (clamped == current_delay_ms)
 			return action;
 
