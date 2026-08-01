@@ -34,6 +34,7 @@ Rust app for embedded NDI cameras (CAM1-4): multi-camera NDI streaming with soft
 - udev device ownership during an E2E burn run (burn-vs-production `/dev/videoN` ownership, the burn-gated hotplug rule, autosuspend re-apply on re-enumeration, the real-unplug-vs-self-heal kernel-signature discriminator, #894) → `.claude/rules/udev-device-ownership.md` (auto-loads on its `paths:`)
 - self-heal reset must never misreport as frozen_leg (two independent trigger bands sharing one reset log line, ALLOW-not-SUPPRESS correlation, all-active-camera scan scope, #895) → `.claude/rules/self-heal-frozen-leg-attribution.md` (auto-loads on its `paths:`)
 - ASRC bench harness (two-clock-domain simulation, the `AsrcCompensator` seam #803 mirrors, EMA convergence closed form, the RED/GREEN stub-then-restore TDD pattern, #804) → `.claude/rules/asrc-bench-harness.md` (auto-loads on its `paths:`)
+- Optical undecodable floor report-only decoupling (`gates_overall_pass()` seam mirroring #914, strict-vs-relaxed independence, scoped JSON flag naming, #915) → `.claude/rules/optical-undecodable-floor-report-only.md` (auto-loads on its `paths:`)
 
 ## DO NOT DELETE These Files
 

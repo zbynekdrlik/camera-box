@@ -6599,3 +6599,44 @@ the fix works or not, left for the supervisor to watch to terminal.
 Playbook: `.claude/rules/self-heal-frozen-leg-attribution.md` -- new "#914" section (the
 decoupling itself + the differential-fixture testing technique for a probe-gated report-only
 change with no local run path).
+
+## Issue 915 (2026-08-01) -- optical undecodable floor becomes report-only
+
+E2E gate on PR 913 failed a THIRD time (run 30671860323) on the run-wide optical `undecodable`
+floor (10 > 8, `src/optical_floor.rs::run_within_floor`) -- all 10 undecodable frames land in CAM1
+windows, CAM2/CAM4 measured 0. Same root cause issue 914 just fixed (cam1's ShadowCast 2 grabber
+defect, issue 909): a real optical/monitor artifact would spread evenly across every box sharing
+the splitter, so 100% CAM1 concentration is the hardware defect's signature, not a real
+regression. Design comment posted before any code:
+issuecomment-5148386328.
+
+Mirrors issue 914's `SelfHealAttributionReport::overall_pass_contribution()` seam exactly:
+`optical_floor::gates_overall_pass() -> bool`, hardcoded `false`. `window_within_floor`/
+`run_within_floor` stay UNCHANGED (still feed `CamboxSegment::pass` byte-for-byte); only the
+CALLERS (`window_gate::decide()` for the per-window term, `recording_segments::
+segment_continuity()` for the run-wide term) stop folding the floor's result into `relaxed_pass`/
+`overall_pass`.
+
+RED/GREEN #1 (Tier-0, locally verified): `optical_floor::gates_overall_pass()` --
+`13c5664f6` / `d3edbacf5`.
+RED/GREEN #2 (Tier-0, locally verified): `window_gate::decide()` --
+`6141c8b58` / `9229c16f3`.
+RED/GREEN #3 (probe-gated, no local run path -- extra manual review rigor: fmt/check/clippy/
+test --no-run all green on default features): `recording_segments::segment_continuity()` --
+`9d5838846` / `89f4dcb81`.
+Report-only annotations + one new end-to-end test in `recording-verdict.rs` (also probe-gated, no
+gating-logic change, same rigor): `d68b3c8e3`.
+
+New `SegmentedContinuity` fields `total_undecodable`/`run_wide_undecodable_within_floor` (always
+serialized, mirrors `windows_failed_report_only`'s issue-889 visibility precedent). New
+`all_cambox_continuity` JSON keys `undecodable_floor_gates_overall_pass`/`undecodable_floor_gate`
+(SCOPED name, not a blanket `gates_overall_pass` on the whole object -- frame_count/schedule
+emptiness still gate it).
+
+Vehicle: folded into the already-open PR 913 (ASRC always-on, issue 912; issue 914 already
+folded in) via the same REST PATCH body-update path (`gh pr edit` broken on this repo). PR body
+now carries `Closes #912` + `Closes #914` + `Closes #915`. Restore path on issue 905.
+
+Playbook: new `.claude/rules/optical-undecodable-floor-report-only.md` -- the seam pattern, the
+scoped-JSON-key lesson, the two-independent-reasons WARN print, and the "a later-term RED test
+may already be neutralized by an earlier commit's fix in the same PR" testing gotcha.
