@@ -68,6 +68,16 @@ with this program; if not, write to the Free Software Foundation, Inc.,
  * override. */
 #define CAMERA_BOX_LOCK_SOURCE_NAME "NDI 2ME PGM"
 
+/* #926 fix-up (review finding 6): how long (ns) a video-QR-decode signal is trusted as "the test
+ * signal is genuinely still here" before the corrector refuses to actuate on it. Generously above
+ * the ~3-5s real marker cadence and the video ring's own ~4.3s lap (CAMERA_BOX_RING_CYCLE_NS), so
+ * normal jitter never trips it, while a video path that has GENUINELY stopped (real event: camera
+ * unplugged, QR obscured) ages out well within one operator glance at the log. `cb_video_valid[]`
+ * otherwise latches true FOREVER once any frame with a given idx8 ever decoded -- this bounds how
+ * old a paired video timestamp is allowed to be before it is trusted for either ring pairing or
+ * actuation. */
+#define CAMERA_BOX_TEST_SIGNAL_FRESH_NS 20000000000ULL
+
 /* There are several reason to limit the width and the height.
  * - Since a square of 3/8 QR-code-length is calculated using uint32_t,
  *   the 3/8 of width or height cannot exceed the square root of uint32_t max.
@@ -179,6 +189,13 @@ struct sync_test_output
 	bool cb_video_valid[256] = {false};
 	bool cb_mode_active = false;
 
+	/* #926 fix-up (review finding 6): the video_ts of the MOST RECENT successful video-QR decode,
+	 * across ANY ring slot -- the overall "is the test signal genuinely still here right now"
+	 * signal, distinct from a single ring slot's own per-idx8 freshness (both are checked against
+	 * CAMERA_BOX_TEST_SIGNAL_FRESH_NS). Written on the video thread in `cb_video_qr_record`, read
+	 * on the audio thread under the same mutex as the other cb_video_* fields. */
+	uint64_t cb_video_last_decode_ts_ns = 0;
+
 	/* #398 fix: rolling history of recently-resolved (audio_ts, offset_ns) samples for
 	 * `cb_smooth_offset_ns` — median-smooths the displayed offset so a single false CRC-4 accept
 	 * (~1/16 likely on real program audio) can't show garbage (review MEDIUM finding). Touched
@@ -224,6 +241,12 @@ struct sync_test_output
 	uint64_t cb_ring_misses = 0; // decoded audio marker with no video ring slot yet (too early / lap gap)
 	bool cb_lock_state = false;  // last-known cluster lock state (mirrors CbLockAuditTracker's own)
 	uint64_t cb_diag_last_log_ns = 0;
+
+	/* #926 fix-up (review finding 9/16): latches so each condition logs ONCE (and again after it
+	 * clears and re-occurs) instead of spamming a blog() line per trusted marker while the
+	 * condition persists. Touched only on the audio thread. */
+	bool cb_lock_source_missing_logged = false; // CAMERA_BOX_LOCK_SOURCE_NAME not found
+	bool cb_rail_pinned_logged = false;         // pinned at a hardware rail with audio still early
 
 	~sync_test_output()
 	{
@@ -459,6 +482,7 @@ static void cb_video_qr_record(struct sync_test_output *st, uint32_t frame_id, u
 		st->cb_video_ts_ns[low] = video_ts;
 		st->cb_video_valid[low] = true;
 		st->cb_mode_active = true;
+		st->cb_video_last_decode_ts_ns = video_ts; // #926 fix-up finding 6: overall freshness signal
 		st->f = CAMERA_BOX_AUDIO_F_HZ;
 		st->c = CAMERA_BOX_AUDIO_C;
 		st->q_ms = CAMERA_BOX_AUDIO_Q_MS;
@@ -1008,6 +1032,13 @@ static inline void st_raw_audio_decode_data(struct sync_test_output *st, std::co
 		cb_valid = st->cb_video_valid[idx8];
 		cb_video_ts = st->cb_video_ts_ns[idx8];
 	}
+	// #926 fix-up (review finding 6): same ring-slot freshness gate as st_raw_audio_camera_box's
+	// own lookup -- see that call site's comment for why.
+	if (cb_valid) {
+		uint64_t age = audio_ts > cb_video_ts ? audio_ts - cb_video_ts : cb_video_ts - audio_ts;
+		if (age > CAMERA_BOX_TEST_SIGNAL_FRESH_NS)
+			cb_valid = false;
+	}
 	if (cb_active && cb_valid) {
 		int64_t raw_offset_ns = resolve_ring_lap_offset_ns(audio_ts, cb_video_ts, CAMERA_BOX_RING_CYCLE_NS);
 
@@ -1080,21 +1111,58 @@ static bool cb_read_lock_latency_ms(int32_t *out_ms)
 	return true;
 }
 
-/* #926: apply a NEW absolute genlock_latency_ms_src to CAMERA_BOX_LOCK_SOURCE_NAME, mirroring the
- * SAME settings-update mechanism `scripts/av_sync_calibrate.py`'s `apply_latency()` performs over
- * the OBS WebSocket (GetInputSettings/SetInputSettings), done here in-process instead. Returns
- * false if the source does not exist right now. */
-static bool cb_apply_lock_latency_ms(int32_t new_ms)
+/* #926 fix-up (review finding 4, covers 8/12): apply a NEW absolute genlock_latency_ms_src to
+ * CAMERA_BOX_LOCK_SOURCE_NAME, mirroring the SAME settings-update mechanism
+ * `scripts/av_sync_calibrate.py`'s `apply_latency()` performs over the OBS WebSocket
+ * (GetInputSettings/SetInputSettings), done here in-process instead -- but marshaled onto the OBS
+ * UI thread via `obs_queue_task`, never mutated directly from the raw-audio callback (the core
+ * AUDIO thread): mutating a LIVE source's settings `obs_data` (no internal mutex of its own) from
+ * a real-time audio callback races the video thread's own reads/writes of the same source and any
+ * UI/WebSocket access, and `obs_get_source_by_name` itself takes the global sources-list mutex,
+ * which the UI thread is the expected/serialized caller of throughout the rest of this codebase.
+ * The queued task uses a FRESH `obs_data_create()` holding only the ONE key -- never the shared
+ * `obs_source_get_settings()` object handed back in place (finding 12's fragile "mutate the live
+ * settings object" idiom) -- and reads the value back right after the update to catch a mismatch
+ * (finding 8) close to the write. Fire-and-forget (`wait=false`): the audio thread must never
+ * block on the UI thread's own scheduling. */
+struct CbApplyLockLatencyTask {
+	int32_t new_delay_ms;
+};
+
+static void cb_apply_lock_latency_task(void *param)
 {
+	auto *task = (CbApplyLockLatencyTask *)param;
+	const int32_t new_ms = task->new_delay_ms;
+	delete task;
+
 	obs_source_t *src = obs_get_source_by_name(CAMERA_BOX_LOCK_SOURCE_NAME);
-	if (!src)
-		return false;
-	obs_data_t *settings = obs_source_get_settings(src);
+	if (!src) {
+		blog(LOG_WARNING, "av-sync-dock: LOCK-CORRECT apply skipped (UI thread) -- source '%s' not found",
+		     CAMERA_BOX_LOCK_SOURCE_NAME);
+		return;
+	}
+
+	obs_data_t *settings = obs_data_create();
 	obs_data_set_int(settings, "genlock_latency_ms_src", (long long)new_ms);
 	obs_source_update(src, settings);
 	obs_data_release(settings);
+
+	obs_data_t *readback = obs_source_get_settings(src);
+	const int32_t got = (int32_t)obs_data_get_int(readback, "genlock_latency_ms_src");
+	obs_data_release(readback);
 	obs_source_release(src);
-	return true;
+
+	if (got != new_ms) {
+		blog(LOG_WARNING,
+		     "av-sync-dock: LOCK-CORRECT read-back mismatch on '%s' -- wrote %d, read back %d",
+		     CAMERA_BOX_LOCK_SOURCE_NAME, (int)new_ms, (int)got);
+	}
+}
+
+static void cb_apply_lock_latency_ms(int32_t new_ms)
+{
+	auto *task = new CbApplyLockLatencyTask{new_ms};
+	obs_queue_task(OBS_TASK_UI, cb_apply_lock_latency_task, task, false);
 }
 
 /* #398 fix (Audio Index + Latency never locked): camera-box's OWN audio decode path, used once the
@@ -1151,10 +1219,23 @@ static void st_raw_audio_camera_box(struct sync_test_output *st, struct audio_da
 
 		bool valid;
 		uint64_t video_ts;
+		uint64_t video_last_decode_ts;
 		{
 			std::unique_lock<std::mutex> lock(st->mutex);
 			valid = st->cb_video_valid[idx8];
 			video_ts = st->cb_video_ts_ns[idx8];
+			video_last_decode_ts = st->cb_video_last_decode_ts_ns;
+		}
+		/* #926 fix-up (review finding 6): age out a stale ring slot -- `cb_video_valid[]`
+		 * otherwise latches true FOREVER once any frame with this idx8 ever decoded, so a video
+		 * path that has genuinely stopped (real event: camera unplugged, QR obscured) would keep
+		 * pairing fresh audio markers against a video timestamp from potentially hours ago. A slot
+		 * written within CAMERA_BOX_TEST_SIGNAL_FRESH_NS is trusted; anything older is treated
+		 * exactly like "no video ring hit yet". */
+		if (valid) {
+			uint64_t age = audio_ts > video_ts ? audio_ts - video_ts : video_ts - audio_ts;
+			if (age > CAMERA_BOX_TEST_SIGNAL_FRESH_NS)
+				valid = false;
 		}
 		if (!valid) {
 			st->cb_ring_misses++;
@@ -1169,13 +1250,15 @@ static void st_raw_audio_camera_box(struct sync_test_output *st, struct audio_da
 
 		/* #634: audit-log the lock/unlock/offset-update transition (if any) BEFORE the est.ok
 		 * gate below, so an unlock (est.ok going false) is also logged, not silently swallowed
-		 * by the `continue`. CbLockAuditTracker is pure/tested; this is only the blog() glue.
-		 * Deliberately NOT logging `idx8` here (review finding): this loop's CbAvOffset comes
-		 * from EVERY CRC-4-accepted marker candidate, including the ~1/16 false-decode rate this
-		 * file documents below -- a false marker can still recompute an already-locked cluster,
-		 * so idx8 at this point is not reliably "the frame this lock belongs to". The offset/
-		 * matched/mad_ms are the real "source of the value" (the densest cluster), and those are
-		 * unaffected by which single candidate triggered the recompute. */
+		 * by the `continue`. CbLockAuditTracker is pure/tested; this is only the blog() glue --
+		 * PURELY for the UI/log lock-state status now (#926 fix-up finding 2 moved the actuator
+		 * off this classifier entirely, see below). Deliberately NOT logging `idx8` here (review
+		 * finding): this loop's CbAvOffset comes from EVERY CRC-4-accepted marker candidate,
+		 * including the ~1/16 false-decode rate this file documents below -- a false marker can
+		 * still recompute an already-locked cluster, so idx8 at this point is not reliably "the
+		 * frame this lock belongs to". The offset/matched/mad_ms are the real "source of the
+		 * value" (the densest cluster), and those are unaffected by which single candidate
+		 * triggered the recompute. */
 		camerabox::CbLockAuditEvent audit_ev = st->cb_lock_audit.push(est);
 		switch (audit_ev.kind) {
 		case camerabox::CbLockEventKind::Locked:
@@ -1190,44 +1273,90 @@ static void st_raw_audio_camera_box(struct sync_test_output *st, struct audio_da
 			 * about again. */
 			if (audit_ev.kind == camerabox::CbLockEventKind::Locked)
 				signal_lock_state_changed(st->context, true);
-			/* #926: on a genuine (fresh or meaningfully-changed) trustworthy lock, let the
-			 * corrector decide whether CAMERA_BOX_LOCK_SOURCE_NAME's genlock_latency_ms_src needs
-			 * nudging so the offset above never rests negative ("audio early"). Reads the CURRENT
-			 * value fresh (never cached) so a concurrent manual/scripted change is respected. */
-			{
-				int32_t current_ms = 0;
-				if (cb_read_lock_latency_ms(&current_ms)) {
-					camerabox::CbDockLockAction act =
-						st->cb_lock_corrector.decide(true, audit_ev.offset_ms, current_ms,
-						                             audio_ts);
-					if (act.apply && cb_apply_lock_latency_ms(act.new_delay_ms)) {
-						blog(LOG_INFO,
-						     "av-sync-dock: LOCK-CORRECT genlock_latency_ms_src %d -> %dms "
-						     "(measured offset=%.1fms)",
-						     (int)current_ms, (int)act.new_delay_ms, audit_ev.offset_ms);
-					}
-				} else {
-					blog(LOG_WARNING,
-					     "av-sync-dock: LOCK-CORRECT skipped -- source '%s' not found",
-					     CAMERA_BOX_LOCK_SOURCE_NAME);
-				}
-			}
 			break;
 		case camerabox::CbLockEventKind::Unlocked:
 			st->cb_lock_state = false;
 			blog(LOG_WARNING, "av-sync-dock: UNLOCKED last_offset=%.1fms source=cluster", audit_ev.offset_ms);
 			signal_lock_state_changed(st->context, false);
-			/* #926: no test signal / real event -- FREEZE, never chase drift on program material
-			 * (requirement 5). decide(locked=false, ...) is an explicit no-op by construction
-			 * (never touches the actuator or the corrector's own state); called here purely so the
-			 * Unlocked branch documents the freeze in the same place its Locked/Updated sibling
-			 * documents the correction, rather than relying on the reader to infer it from the
-			 * absence of a call. */
-			(void)st->cb_lock_corrector.decide(false, 0.0, 0, audio_ts);
 			break;
 		case camerabox::CbLockEventKind::None:
 		default:
 			break;
+		}
+
+		/* #926 fix-up (review finding 2): drive the corrector from EVERY trusted measurement
+		 * (est.ok), never from the audit classifier above -- CbLockAuditTracker's Updated only
+		 * fires on a >5ms MOVE of the (window-smoothed) median, which stalls convergence once the
+		 * window itself lags a landed correction. decide()'s own cooldown + dead-zone gate is what
+		 * makes calling it on every trusted push safe.
+		 *
+		 * #926 fix-up (review finding 6): additionally require the OVERALL test signal to be
+		 * FRESH (a video QR decode within CAMERA_BOX_TEST_SIGNAL_FRESH_NS) before actuating --
+		 * never gating the measurement/telemetry below (est.ok / signal_sync_found are untouched).
+		 * Without this, a stray CRC-4 false decode landing on some idx8 ring slot could eventually
+		 * build a spurious cluster (over a long enough deployment) and actuate the program
+		 * source's latency during a REAL live show that has genuinely lost its test signal, since
+		 * cb_mode_active never resets on its own. */
+		if (est.ok) {
+			const uint64_t age_signal =
+				audio_ts > video_last_decode_ts ? audio_ts - video_last_decode_ts : 0;
+			const bool signal_fresh = age_signal <= CAMERA_BOX_TEST_SIGNAL_FRESH_NS;
+			if (signal_fresh) {
+				int32_t current_ms = 0;
+				if (cb_read_lock_latency_ms(&current_ms)) {
+					st->cb_lock_source_missing_logged = false;
+					camerabox::CbDockLockAction act = st->cb_lock_corrector.decide(
+						true, est.offset_ms, est.mad_ms, current_ms, audio_ts);
+					if (act.apply) {
+						const double delta_ms = (double)(act.new_delay_ms - current_ms);
+						cb_apply_lock_latency_ms(act.new_delay_ms);
+						/* #926 fix-up (review finding 1/7): shift every retained cluster
+						 * sample by the applied delta so the window reflects the
+						 * POST-correction state immediately -- see
+						 * RollingOffsetCluster::rebase()'s own doc comment for the full
+						 * closed-form justification (mirrors src/av_sync_dock.rs). */
+						st->cb_offset_cluster.rebase(delta_ms);
+						st->cb_rail_pinned_logged = false;
+						blog(LOG_INFO,
+						     "av-sync-dock: LOCK-CORRECT requested genlock_latency_ms_src %d "
+						     "-> %dms (measured offset=%.1fms)",
+						     (int)current_ms, (int)act.new_delay_ms, est.offset_ms);
+					} else if (est.offset_ms < 0.0 &&
+					           (current_ms <= camerabox::CB_DOCK_LOCK_LATENCY_MIN_MS ||
+					            current_ms >= camerabox::CB_DOCK_LOCK_LATENCY_MAX_MS)) {
+						/* #926 fix-up (review finding 9): pinned at a hardware rail with
+						 * the invariant still violated -- a genuine hardware limit, not a
+						 * corrector bug, but it must be VISIBLE rather than silently
+						 * persisting. */
+						if (!st->cb_rail_pinned_logged) {
+							st->cb_rail_pinned_logged = true;
+							blog(LOG_WARNING,
+							     "av-sync-dock: LOCK-CORRECT pinned at the hardware %s "
+							     "(%dms) with audio still EARLY by %.1fms -- cannot "
+							     "correct further",
+							     current_ms <= camerabox::CB_DOCK_LOCK_LATENCY_MIN_MS
+								     ? "floor"
+								     : "ceiling",
+							     (int)current_ms, -est.offset_ms);
+						}
+					} else {
+						st->cb_rail_pinned_logged = false;
+					}
+				} else if (!st->cb_lock_source_missing_logged) {
+					/* #926 fix-up (review finding 16): log the missing lock source ONCE
+					 * (not per trusted marker) -- STRIH runs the same DLL but has neither
+					 * CAMERA_BOX_LOCK_SOURCE_NAME nor CAMERA_BOX_ASRC_SOURCE_NAME. */
+					st->cb_lock_source_missing_logged = true;
+					blog(LOG_WARNING,
+					     "av-sync-dock: LOCK-CORRECT unavailable -- source '%s' not found on "
+					     "this box (further occurrences suppressed until it appears)",
+					     CAMERA_BOX_LOCK_SOURCE_NAME);
+				}
+			}
+		} else {
+			// No trusted measurement right now -- FREEZE, never chase drift on program material
+			// (requirement 5). decide(locked=false, ...) is an explicit no-op by construction.
+			(void)st->cb_lock_corrector.decide(false, 0.0, 0.0, 0, audio_ts);
 		}
 
 		if (!est.ok)
