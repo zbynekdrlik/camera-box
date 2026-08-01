@@ -302,11 +302,11 @@ def window_offset_ms(record: dict, frame_ms: int = FRAME_MS) -> float:
 
     `record`: `{"offset_frames": int, "confidence": float, "dist_curve": [y-1, y0, y+1]?}`.
     `dist_curve`, when present, MUST be the 3 SyncNet per-shift mean-distance values centered on
-    the reported `offset_frames` bin. `av_sync_measure.py` does not yet expose SyncNet's internal
-    per-shift `dist` array (see the #805 design comment: SyncNetInstance.evaluate() returns it,
-    but the vendored `syncnet_python` checkout isn't in this repo to verify a wrapper against) --
-    so `dist_curve` is normally absent today and this returns the plain frame-quantized value.
-    The field exists so a future producer can slot in sub-frame data with zero API changes.
+    the reported `offset_frames` bin. `av_sync_measure.py`'s `measure()` populates this (#917) by
+    reading the raw per-track distance array the vendored `run_syncnet.py` already dumps to
+    `activesd.pckl` and averaging it over the frame axis -- `dist_curve` is `None` only when that
+    extraction was unavailable (missing pickle, track-count mismatch, or the argmin sitting at
+    either edge of the shift window), in which case this returns the plain frame-quantized value.
     """
     offset_frames = record["offset_frames"]
     curve = record.get("dist_curve")
