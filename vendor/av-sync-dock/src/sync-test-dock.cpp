@@ -87,14 +87,34 @@ SyncTestDock::SyncTestDock(QWidget *parent) : QFrame(parent)
 
 	mainLayout->addLayout(topLayout);
 	setLayout(mainLayout);
+
+	// #690: auto-start once OBS has finished loading — see cb_frontend_event()'s own comment for
+	// why (the dock used to sit stopped on dashes after every OBS relaunch until someone noticed
+	// and clicked Start; that is exactly the "forgettable toggle" the standing HARD rule bans).
+	obs_frontend_add_event_callback(cb_frontend_event, this);
 }
 
 SyncTestDock::~SyncTestDock()
 {
+	obs_frontend_remove_event_callback(cb_frontend_event, this);
 	if (sync_test) {
 		obs_output_stop(sync_test);
 		sync_test = nullptr;
 	}
+}
+
+void SyncTestDock::cb_frontend_event(enum obs_frontend_event event, void *param)
+{
+	// #690: OBS_FRONTEND_EVENT_FINISHED_LOADING fires once, after scene collection + all sources
+	// are up — video/audio core is already live by then (module load, where this dock itself is
+	// created, runs before it). Idempotent: only starts if not already running, so a user who
+	// manually stopped it BEFORE this fires (impossible in practice — the event fires once, very
+	// early) is never fought with.
+	if (event != OBS_FRONTEND_EVENT_FINISHED_LOADING)
+		return;
+	auto *dock = (SyncTestDock *)param;
+	if (!dock->sync_test)
+		dock->start();
 }
 
 extern "C" QWidget *create_sync_test_dock()
@@ -138,36 +158,41 @@ void SyncTestDock::cb_sync_found(void *param, calldata_t *cd)
 	QMetaObject::invokeMethod(dock, [dock, found]() { dock->on_sync_found(found); });
 }
 
+void SyncTestDock::start()
+{
+	OBSOutputAutoRelease o = obs_output_create(OUTPUT_ID, "sync-test-output", nullptr, nullptr);
+	if (!o) {
+		blog(LOG_ERROR, "Failed to create sync-test-output.");
+		return;
+	}
+
+	last_video_ix = last_audio_ix = -1;
+	missed_video_ix = missed_audio_ix = 0;
+	received_video_ix = received_audio_ix = 0;
+	received_video_index_max = 256;
+	received_audio_index_max = 256;
+	audio_index_max = 256;
+
+	auto *sh = obs_output_get_signal_handler(o);
+	signal_handler_connect(sh, "video_marker_found", cb_video_marker_found, this);
+	signal_handler_connect(sh, "audio_marker_found", cb_audio_marker_found, this);
+	signal_handler_connect(sh, "sync_found", cb_sync_found, this);
+
+	bool success = obs_output_start(o);
+
+	if (!success)
+		latencyPolarity->setText(obs_module_text("Display.Polarity.Failure"));
+
+	if (startButton)
+		startButton->setText(obs_module_text("Button.Stop"));
+
+	sync_test = o;
+}
+
 void SyncTestDock::on_start_stop()
 {
 	if (!sync_test) /* request to start */ {
-		OBSOutputAutoRelease o = obs_output_create(OUTPUT_ID, "sync-test-output", nullptr, nullptr);
-		if (!o) {
-			blog(LOG_ERROR, "Failed to create sync-test-output.");
-			return;
-		}
-
-		last_video_ix = last_audio_ix = -1;
-		missed_video_ix = missed_audio_ix = 0;
-		received_video_ix = received_audio_ix = 0;
-		received_video_index_max = 256;
-		received_audio_index_max = 256;
-		audio_index_max = 256;
-
-		auto *sh = obs_output_get_signal_handler(o);
-		signal_handler_connect(sh, "video_marker_found", cb_video_marker_found, this);
-		signal_handler_connect(sh, "audio_marker_found", cb_audio_marker_found, this);
-		signal_handler_connect(sh, "sync_found", cb_sync_found, this);
-
-		bool success = obs_output_start(o);
-
-		if (!success)
-			latencyPolarity->setText(obs_module_text("Display.Polarity.Failure"));
-
-		if (startButton)
-			startButton->setText(obs_module_text("Button.Stop"));
-
-		sync_test = o;
+		start();
 	}
 	else /* request to stop */ {
 		obs_output_stop(sync_test);

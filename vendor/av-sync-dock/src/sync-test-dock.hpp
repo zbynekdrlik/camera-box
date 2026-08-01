@@ -3,6 +3,7 @@
 #include <QPushButton>
 #include <QLabel>
 #include <obs.hpp>
+#include <obs-frontend-api.h>
 #include "sync-test-output.hpp"
 
 class SyncTestDock : public QFrame {
@@ -38,6 +39,7 @@ private:
 
 private:
 	void on_start_stop();
+	void start(); // #690: the "request to start" half of on_start_stop(), also called auto-on-load.
 
 	void on_video_marker_found(video_marker_found_s data);
 	void on_audio_marker_found(audio_marker_found_s data);
@@ -46,4 +48,9 @@ private:
 	static void cb_video_marker_found(void *param, calldata_t *cd);
 	static void cb_audio_marker_found(void *param, calldata_t *cd);
 	static void cb_sync_found(void *param, calldata_t *cd);
+
+	// #690: auto-start the measurement output once OBS has finished loading (vs. sitting stopped on
+	// dashes after every OBS relaunch, waiting for a manual click — the "forgettable toggle" this
+	// ticket fixes). Registered in the constructor, removed in the destructor.
+	static void cb_frontend_event(enum obs_frontend_event event, void *param);
 };
