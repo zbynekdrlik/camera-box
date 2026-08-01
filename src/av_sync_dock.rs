@@ -422,21 +422,29 @@ impl DockLockCorrector {
         current_delay_ms: i32,
         now_ns: u64,
     ) -> DockLockAction {
-        // #926 [RED stub]: reference fields so `cargo clippy -D warnings` stays clean on this
-        // temporarily-stubbed commit (an unused struct field is a hard clippy error) -- see
-        // .claude/rules/asrc-bench-harness.md's documented RED/GREEN recipe for this repo.
-        let _ = (
-            locked,
-            offset_ms,
-            current_delay_ms,
-            now_ns,
-            self.max_step_ms,
-            self.min_delay_ms,
-            self.max_delay_ms,
-            self.min_reapply_s,
-            self.last_applied_ns,
-        );
-        DockLockAction::Hold
+        if !locked {
+            return DockLockAction::Hold;
+        }
+        let g = offset_ms.floor();
+        if g == 0.0 {
+            return DockLockAction::Hold; // already ts_ms in [0, 1) -- nothing to do
+        }
+        if let Some(last) = self.last_applied_ns {
+            let elapsed_s = now_ns.saturating_sub(last) as f64 / 1_000_000_000.0;
+            if elapsed_s < self.min_reapply_s {
+                return DockLockAction::Hold; // cooldown -- let the last correction take effect first
+            }
+        }
+        let raw = current_delay_ms as i64 + g as i64;
+        let lo = (current_delay_ms - self.max_step_ms) as i64;
+        let hi = (current_delay_ms + self.max_step_ms) as i64;
+        let stepped = raw.clamp(lo, hi);
+        let clamped = stepped.clamp(self.min_delay_ms as i64, self.max_delay_ms as i64) as i32;
+        if clamped == current_delay_ms {
+            return DockLockAction::Hold;
+        }
+        self.last_applied_ns = Some(now_ns);
+        DockLockAction::Apply(clamped)
     }
 }
 
