@@ -111,7 +111,19 @@ jobs:
       group: loopback-e2e-hardware
       cancel-in-progress: false
     steps:
+      # #949: fetch-depth 0 (full history) — version-integrity-gate.sh's cross-box genlock-parity
+      # facet now runs a REAL `git diff`/`git rev-parse` (scripts/drift-guard.sh's
+      # genlock_parity_equivalent) against each box's live GENLOCK_BUILD_SHA.txt to tell a
+      # cosmetic label-only mismatch (a Windows-only vendor change, #949) apart from a real fleet
+      # skew. A box's SHA is often an OLDER commit, not the branch tip — actions/checkout@v4's
+      # default shallow (depth=1) clone would not carry it, and the gate's own `git fetch origin`
+      # (a plain, unqualified fetch) only refreshes ref TIPS, it does not retroactively deepen
+      # history behind a shallow boundary. Without this, the gate would fail-closed (DRIFT) on
+      # exactly the case #949 exists to fix. Mirrors the `mutants` job in ci.yml, which already
+      # needed the same for `--in-diff`.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Detect docs-only diff (#646 — skip busy-gate+E2E on docs-only PRs; #746 fail-open, local git diff)
         id: docs-only
