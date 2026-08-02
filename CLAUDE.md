@@ -37,6 +37,7 @@ Rust app for embedded NDI cameras (CAM1-4): multi-camera NDI streaming with soft
 - ASRC bench harness (two-clock-domain simulation, the `AsrcCompensator` seam #803 mirrors, EMA convergence closed form, the RED/GREEN stub-then-restore TDD pattern, #804) → `.claude/rules/asrc-bench-harness.md` (auto-loads on its `paths:`)
 - Optical undecodable floor report-only decoupling (`gates_overall_pass()` seam mirroring #914, strict-vs-relaxed independence, scoped JSON flag naming, #915) → `.claude/rules/optical-undecodable-floor-report-only.md` (auto-loads on its `paths:`)
 - `DockLockCorrector` hold-band boundary tuning (verify what the test suite pins before closing/widening an interval — degenerate vs ordinary margin, #942) → `.claude/rules/dock-lock-hold-band.md` (auto-loads on its `paths:`)
+- Inspecting live rig state without fooling yourself (a merged `vendor/<plugin>/**` fix is NOT deployed; nested PowerShell over ssh fails SILENTLY; the painter is `frame-probe` on DRM so an all-zero `/dev/fb0` proves nothing) → `.claude/rules/rig-state-inspection.md` (auto-loads on its `paths:`)
 
 ## DO NOT DELETE These Files
 
