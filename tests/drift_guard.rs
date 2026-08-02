@@ -2624,6 +2624,217 @@ fn genlock_build_parity_report_unknown_when_fewer_than_two_peers_756() {
     );
 }
 
+// ---- #949 — genlock_build_parity_report: EQUIV=label_a:label_b overrides a LABEL-only skew ----
+// A Windows-only vendor/av-sync-dock/** change advances strih/stream's GENLOCK_BUILD_SHA.txt past
+// a SHA imag's build (linux-genlock.yml, which excludes vendor/av-sync-dock/**) can never reach —
+// even though imag's actual built bytes never changed. The caller (version-integrity-gate.sh)
+// resolves this via real `git diff` (genlock_parity_equivalent, tested further below) and hands the
+// verdict in as an EQUIV marker; these tests exercise the PURE decision layer with pre-computed
+// markers, no git involved — the real incident SHAs are used purely as realistic literal values.
+
+const IMAG_INCIDENT_SHA: &str = "2a12a6a9991eeeae5580a6fbe047d60275d0c8b2";
+const WIN_INCIDENT_SHA: &str = "d77426c758074686b7bc8716962f0042fa8687bf";
+
+#[test]
+fn genlock_build_parity_report_ok_when_equiv_markers_cover_every_mismatched_pair_949() {
+    // The REAL #949 incident shape: strih/stream share one SHA, imag reports a DIFFERENT (but,
+    // per the caller's git-diff check, content-equivalent) SHA. Both mismatched pairs carry an
+    // EQUIV marker -> the label-only skew is explained away -> OK, exit 0, never DRIFT.
+    let body = format!(
+        r#"
+        rc=0
+        genlock_build_parity_report "imag={IMAG_INCIDENT_SHA}" "strih={WIN_INCIDENT_SHA}" "stream={WIN_INCIDENT_SHA}" \
+          "EQUIV=imag:strih" "EQUIV=imag:stream" || rc=$?
+        echo "RC=$rc"
+        "#
+    );
+    let out = run_sourced(&body, &[]);
+    assert!(
+        out.contains("RC=0"),
+        "every mismatched pair EQUIV-covered -> clean exit: {out:?}"
+    );
+    assert!(
+        out.contains("genlock_parity") && out.contains("OK") && out.contains("PARITY"),
+        "must report genlock_parity OK via the #949 content-equivalence path: {out:?}"
+    );
+    assert!(
+        !out.contains("DRIFT"),
+        "an EQUIV-explained label mismatch must never read as DRIFT: {out:?}"
+    );
+}
+
+#[test]
+fn genlock_build_parity_report_still_drifts_on_a_pair_the_equiv_markers_do_not_cover_949() {
+    // EQUIV covers imag~strih only; stream is a THIRD, genuinely different, unexplained SHA ->
+    // that pair is a real unexplained skew and must still DRIFT even though ANOTHER pair in the
+    // same call is EQUIV-covered. EQUIV markers are pair-scoped, never a blanket "trust everything".
+    let body = format!(
+        r#"
+        rc=0
+        genlock_build_parity_report "imag={IMAG_INCIDENT_SHA}" "strih={WIN_INCIDENT_SHA}" "stream=UNRELATED999" \
+          "EQUIV=imag:strih" || rc=$?
+        echo "RC=$rc"
+        "#
+    );
+    let out = run_sourced(&body, &[]);
+    assert!(
+        out.contains("RC=20"),
+        "an unexplained pair must still DRIFT even when a sibling pair is EQUIV-covered: {out:?}"
+    );
+    assert!(
+        out.contains("DRIFT") && out.contains("SKEW"),
+        "must report the unexplained skew: {out:?}"
+    );
+}
+
+#[test]
+fn genlock_parity_consumed_paths_matches_the_ci_workflow_path_filters_949() {
+    // Lock-step assertion (per this repo's convention, e.g. tests/vendored_cpp_compile_gate.rs):
+    // the pure lookup table must never silently drift out of sync with the REAL CI trigger path
+    // filters it is meant to mirror. imag's own build trigger is linux-genlock.yml's `on.push.paths`
+    // (deliberately WITHOUT vendor/av-sync-dock/**, a Windows-only OBS dock DLL); every other
+    // (Windows) box's is windows-genlock-fast.yml's (WITH vendor/av-sync-dock/**).
+    let linux_wf =
+        std::fs::read_to_string(manifest_dir().join(".github/workflows/linux-genlock.yml"))
+            .expect("read linux-genlock.yml");
+    let windows_wf =
+        std::fs::read_to_string(manifest_dir().join(".github/workflows/windows-genlock-fast.yml"))
+            .expect("read windows-genlock-fast.yml");
+
+    assert!(
+        linux_wf.contains("vendor/obs-studio/**") && linux_wf.contains("vendor/distroav/**"),
+        "linux-genlock.yml must still trigger on vendor/obs-studio/** + vendor/distroav/** — \
+         genlock_parity_consumed_paths(imag) mirrors exactly this set"
+    );
+    assert!(
+        !linux_wf.contains("vendor/av-sync-dock/**"),
+        "linux-genlock.yml must still NOT trigger on vendor/av-sync-dock/** (a Windows-only OBS \
+         dock DLL) — this is the #949 root cause; if this ever starts triggering on it, \
+         genlock_parity_consumed_paths(imag) must gain it too"
+    );
+    assert!(
+        windows_wf.contains("vendor/obs-studio/**")
+            && windows_wf.contains("vendor/distroav/**")
+            && windows_wf.contains("vendor/av-sync-dock/**"),
+        "windows-genlock-fast.yml must still trigger on all three vendor dirs — \
+         genlock_parity_consumed_paths(<a Windows box>) mirrors exactly this set"
+    );
+
+    let body = r#"
+        genlock_parity_consumed_paths imag
+        echo "---"
+        genlock_parity_consumed_paths strih
+        echo "---"
+        genlock_parity_consumed_paths stream
+    "#;
+    let out = run_sourced(body, &[]);
+    let sections: Vec<&str> = out.split("---\n").collect();
+    assert_eq!(sections.len(), 3, "expected 3 sections: {out:?}");
+    assert_eq!(
+        sections[0].trim(),
+        "vendor/obs-studio\nvendor/distroav",
+        "imag's consumed set must be exactly the linux-genlock.yml pair, no av-sync-dock: {out:?}"
+    );
+    for win_section in [sections[1], sections[2]] {
+        assert_eq!(
+            win_section.trim(),
+            "vendor/obs-studio\nvendor/distroav\nvendor/av-sync-dock",
+            "a Windows box's consumed set must be exactly windows-genlock-fast.yml's three dirs: {out:?}"
+        );
+    }
+}
+
+// ---- #949 — genlock_parity_equivalent: the IMPURE real-git content check ----------------------
+// No live SSH/box needed — runs against THIS repo's own checkout (tests process cwd = crate root,
+// per imag_genlock_range_log's established convention above), which has the real incident commits.
+
+#[test]
+fn genlock_parity_equivalent_true_for_the_949_incident_pair_over_imags_own_consumed_paths() {
+    // THE regression proof at the impure-git layer: strih/stream's real deployed SHA vs imag's real
+    // deployed SHA from the live 2026-08-02 incident (run 30768287281 / PR #948) — the ONLY vendor
+    // commit between them (a48b56380) touches vendor/av-sync-dock only, which is NOT in imag's own
+    // consumed set. Restricted to imag's set (vendor/obs-studio, vendor/distroav), the diff is
+    // empty -> content-equivalent -> the fleet's label mismatch is cosmetic, not a real skew.
+    let body = format!(
+        r#"
+        rc=0
+        genlock_parity_equivalent "$(pwd)" "{WIN_INCIDENT_SHA}" "{IMAG_INCIDENT_SHA}" \
+          $(genlock_parity_consumed_paths imag) || rc=$?
+        echo "RC=$rc"
+        "#
+    );
+    let out = run_sourced(&body, &[]);
+    assert!(
+        out.contains("RC=0"),
+        "the #949 incident pair must be content-equivalent over imag's own consumed paths: {out:?}"
+    );
+}
+
+#[test]
+fn genlock_parity_equivalent_false_for_the_949_incident_pair_over_the_windows_consumed_set() {
+    // The SAME pair, but checked over a WINDOWS box's own (larger) consumed set — which DOES
+    // include vendor/av-sync-dock. This must NOT be equivalent: two Windows boxes genuinely
+    // differing in av-sync-dock content IS a real functional skew for them (never laundered away).
+    let body = format!(
+        r#"
+        rc=0
+        genlock_parity_equivalent "$(pwd)" "{WIN_INCIDENT_SHA}" "{IMAG_INCIDENT_SHA}" \
+          $(genlock_parity_consumed_paths strih) || rc=$?
+        echo "RC=$rc"
+        "#
+    );
+    let out = run_sourced(&body, &[]);
+    assert_eq!(
+        out.trim(),
+        "RC=1",
+        "over the Windows (av-sync-dock-inclusive) set the same pair must NOT read equivalent          (RC must be EXACTLY 1, not e.g. a 127 command-not-found masquerading as a substring          match): {out:?}"
+    );
+}
+
+#[test]
+fn genlock_parity_equivalent_false_for_a_real_vendor_obs_studio_skew_949() {
+    // Criterion #3: a GENUINE vendor/obs-studio (or vendor/distroav) difference must still DRIFT —
+    // the strictness this whole facet exists for must survive #949's fix. Real commit pair: only
+    // the newer commit touches vendor/obs-studio/libobs/obs.h + obs-source.c + asrc-compensator.*
+    // + the obs-websocket requesthandler — genuinely different built bytes, not a label mismatch.
+    const OLDER: &str = "cb92f28a6a90a89b2877f7d00dde93561ae9a70c";
+    const NEWER: &str = "f6477a4fe6a7b7a36e6351d13ed106e10d673356";
+    let body = format!(
+        r#"
+        rc=0
+        genlock_parity_equivalent "$(pwd)" "{OLDER}" "{NEWER}" \
+          $(genlock_parity_consumed_paths imag) || rc=$?
+        echo "RC=$rc"
+        "#
+    );
+    let out = run_sourced(&body, &[]);
+    assert_eq!(
+        out.trim(),
+        "RC=1",
+        "a genuine vendor/obs-studio content difference must NEVER read as equivalent (RC must be          EXACTLY 1): {out:?}"
+    );
+}
+
+#[test]
+fn genlock_parity_equivalent_false_for_an_unresolvable_sha_never_a_false_pass_949() {
+    // Fail-closed requirement: a SHA the local repo cannot resolve (never fetched, force-pushed
+    // away, a corrupted/garbage marker) must never be silently treated as equivalent.
+    let body = format!(
+        r#"
+        rc=0
+        genlock_parity_equivalent "$(pwd)" "0000000000000000000000000000000000000000" "{WIN_INCIDENT_SHA}" \
+          $(genlock_parity_consumed_paths strih) || rc=$?
+        echo "RC=$rc"
+        "#
+    );
+    let out = run_sourced(&body, &[]);
+    assert_eq!(
+        out.trim(),
+        "RC=1",
+        "an unresolvable SHA must fail closed (NOT equivalent, RC must be EXACTLY 1), never a          silent pass: {out:?}"
+    );
+}
+
 #[test]
 fn imag_genlock_range_log_rejects_option_shaped_box_sha_never_a_false_ok_531() {
     // #531 review: `imag_genlock_range_log` feeds an UNVALIDATED box_sha (read over SSH from
