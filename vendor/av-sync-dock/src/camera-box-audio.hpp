@@ -495,16 +495,23 @@ inline double cb_clamp_f64(double v, double lo, double hi)
  * the SAME sign as `CbAvOffset::offset_ms` / the Latency label) and a noise-scaled safety MARGIN
  * (`mad_ms.clamp(CB_DOCK_LOCK_MIN_MARGIN_MS, CB_CLUSTER_MAX_MAD_MS)` -- #926 fix-up review finding
  * 3: targeting a bare `[0, 1)` claims sub-millisecond precision the ~25ms cluster noise floor
- * cannot back up), setting `new_delay = current_delay + floor(ts_ms - margin)` changes `ts` by
- * exactly `-floor(ts_ms - margin)`, so the resulting ts always lands in `[margin, margin + 1)` --
- * margin or audio late by under 1ms beyond it, NEVER negative ("audio early", the forbidden steady
- * state per issue #926's own directive). Only ever acts on a genuine TRUSTED measurement (the
- * caller passes locked=true only when the rolling cluster currently reports est.ok -- #926 fix-up
- * review finding 2: EVERY trusted measurement, not only a CbLockAuditTracker Locked/Updated
- * classifier transition, whose Updated needs a >5ms move of the window-smoothed median and stalls
- * convergence once the window lags a landed correction); locked=false (no test signal: real event,
- * no QR, no marker) always Holds -- freezes the actuator, implementing requirement 5 (measure-only,
- * permanent lock) with no separate timeout. */
+ * cannot back up), issue #942 widens the HOLD BAND to `[margin, 2*margin)` -- as wide as the SAME
+ * clamped dispersion the low edge already uses, instead of the fixed 1ms dead zone that
+ * limit-cycled the live actuator against the cluster's own 10-25ms measurement noise (never
+ * settling: 339-470 actuator writes/session on the live rig). An offset already inside the band is
+ * a plain Hold. Otherwise, setting `new_delay = current_delay + round(ts_ms - mid)` (mid =
+ * 1.5*margin, the band's own middle -- stepping toward the middle rather than the low edge means a
+ * landed correction has headroom on both sides, so it can't immediately re-trip the opposite
+ * direction on ordinary jitter the size of the band) changes `ts` by exactly `-round(ts_ms - mid)`,
+ * so the resulting ts always lands in `[mid-0.5, mid+0.5] subseteq [margin, 2*margin]` -- margin or
+ * more, NEVER negative ("audio early", the forbidden steady state per issue #926's own directive).
+ * Only ever acts on a genuine TRUSTED measurement (the caller passes locked=true only when the
+ * rolling cluster currently reports est.ok -- #926 fix-up review finding 2: EVERY trusted
+ * measurement, not only a CbLockAuditTracker Locked/Updated classifier transition, whose Updated
+ * needs a >5ms move of the window-smoothed median and stalls convergence once the window lags a
+ * landed correction); locked=false (no test signal: real event, no QR, no marker) always Holds --
+ * freezes the actuator, implementing requirement 5 (measure-only, permanent lock) with no separate
+ * timeout. */
 static const int32_t CB_DOCK_LOCK_MAX_STEP_MS = 5;
 static const double CB_DOCK_LOCK_MIN_REAPPLY_S = 30.0;
 static const int32_t CB_DOCK_LOCK_LATENCY_MIN_MS = 3;
@@ -551,11 +558,14 @@ public:
 		double margin = std::isfinite(mad_ms) ? cb_clamp_f64(mad_ms, CB_DOCK_LOCK_MIN_MARGIN_MS,
 		                                                      CB_CLUSTER_MAX_MAD_MS)
 		                                       : CB_DOCK_LOCK_MIN_MARGIN_MS;
-		// Clamp BEFORE the later int64_t casts (finding 5): offset_ms is finite but could still be
-		// astronomically large, which would otherwise risk UB on the cast / an overflowing add.
-		double g = cb_clamp_f64(std::floor(offset_ms - margin), -1000000.0, 1000000.0);
-		if (g == 0.0)
-			return action; // already ts_ms in [margin, margin + 1) -- nothing to do
+		// #942 -- the hold BAND scales with the cluster's own measured noise instead of a fixed 1ms
+		// dead zone: [band_lo, band_hi) = [margin, 2*margin), i.e. as wide as the SAME clamped
+		// dispersion the low edge already uses. Any offset already inside it is left alone -- no
+		// actuator write at all.
+		double band_lo = margin;
+		double band_hi = margin * 2.0;
+		if (offset_ms >= band_lo && offset_ms < band_hi)
+			return action; // already inside the noise-scaled hold band
 
 		if (have_last_applied_) {
 			uint64_t elapsed_ns = now_ns > last_applied_ns_ ? now_ns - last_applied_ns_ : 0;
@@ -563,6 +573,13 @@ public:
 			if (elapsed_s < min_reapply_s_)
 				return action; // cooldown -- let the last correction take effect first
 		}
+
+		// Step toward the band's MIDDLE, not its low edge (#942) -- a landed correction then has
+		// headroom on both sides of the band instead of sitting right at its boundary. Clamp
+		// BEFORE the later int64_t casts (finding 5): offset_ms is finite but could still be
+		// astronomically large, which would otherwise risk UB on the cast / an overflowing add.
+		double mid = margin * 1.5;
+		double g = cb_clamp_f64(std::round(offset_ms - mid), -1000000.0, 1000000.0);
 
 		int64_t raw = (int64_t)current_delay_ms + (int64_t)g;
 		int64_t lo = (int64_t)current_delay_ms - (int64_t)max_step_ms_;

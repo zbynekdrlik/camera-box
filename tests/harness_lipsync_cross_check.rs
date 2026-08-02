@@ -89,6 +89,33 @@ fn aggregate_cmd_reuses_av_sync_calibrate_py_verbatim() {
     assert!(cmd.contains("/tmp/agg.json"));
 }
 
+/// `lipsync_subtract_baseline` must return the RIG-ADDED delta (raw aggregated offset minus the
+/// asset's own intrinsic baseline) -- issue 930 supervisor decision (issuecomment-5153948268):
+/// the pinned asset measures its own -80ms intrinsic offset, so the raw SyncNet-on-rig-recording
+/// mean is `intrinsic_asset + rig_chain_delta` until this subtraction isolates the rig's part.
+#[test]
+fn subtract_baseline_isolates_the_rig_added_delta_930() {
+    let cmd = run_sourced("lipsync_subtract_baseline -75.0 -80.0");
+    let val: f64 = cmd.trim().parse().expect("numeric output");
+    assert_eq!(val, 5.0, "930: -75.0 - (-80.0) must be 5.0: {cmd}");
+}
+
+/// A positive aggregated offset with a positive baseline.
+#[test]
+fn subtract_baseline_positive_values_930() {
+    let cmd = run_sourced("lipsync_subtract_baseline 90.0 80.0");
+    let val: f64 = cmd.trim().parse().expect("numeric output");
+    assert_eq!(val, 10.0, "930: 90.0 - 80.0 must be 10.0: {cmd}");
+}
+
+/// A negative aggregated offset with a zero baseline must pass through unchanged.
+#[test]
+fn subtract_baseline_negative_aggregated_zero_baseline_930() {
+    let cmd = run_sourced("lipsync_subtract_baseline -37.5 0");
+    let val: f64 = cmd.trim().parse().expect("numeric output");
+    assert_eq!(val, -37.5, "930: -37.5 - 0 must be -37.5: {cmd}");
+}
+
 /// The final verdict call must carry the aggregated SyncNet offset through issue 930's own
 /// `--syncnet-offset-ms` flag on the EXISTING `--av-sync`/`--av-marker-log` mode. Uses the `=`
 /// form (`--syncnet-offset-ms=<value>`) as belt-and-braces alongside the recording-verdict-side
@@ -170,6 +197,8 @@ fn main_fails_loud_on_nonexistent_recordings() {
         .arg("/nonexistent/markers.csv")
         .arg("--verdict-bin")
         .arg("/nonexistent/recording-verdict")
+        .arg("--asset-baseline-ms")
+        .arg("-80")
         .output()
         .expect("spawn bash");
     assert!(!out.status.success());
@@ -320,6 +349,8 @@ fn run_main(
         .arg(&markers)
         .arg("--verdict-bin")
         .arg(fakes.verdict())
+        .arg("--asset-baseline-ms")
+        .arg("-80")
         .arg("--workdir")
         .arg(workdir)
         .env("PATH", path_env)
@@ -425,5 +456,29 @@ fn verdict_bin_is_required_with_no_local_build_default() {
     assert!(
         stderr.contains("--verdict-bin"),
         "930: missing --verdict-bin must fail with a clear message: {stderr}"
+    );
+}
+
+/// `--asset-baseline-ms` must be REQUIRED -- the pinned asset has its own intrinsic A/V offset
+/// (930 supervisor decision, issuecomment-5153948268) that must be subtracted before the verdict.
+#[test]
+fn asset_baseline_ms_is_required() {
+    let out = Command::new("bash")
+        .arg(script())
+        .arg("--lipsync-recording")
+        .arg("/tmp/a.mp4")
+        .arg("--qrqpsk-recording")
+        .arg("/tmp/b.mp4")
+        .arg("--qrqpsk-marker-log")
+        .arg("/tmp/c.csv")
+        .arg("--verdict-bin")
+        .arg("/tmp/recording-verdict")
+        .output()
+        .expect("spawn bash");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--asset-baseline-ms"),
+        "930: missing --asset-baseline-ms must fail with a clear message: {stderr}"
     );
 }

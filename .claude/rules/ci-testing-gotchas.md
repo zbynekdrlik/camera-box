@@ -338,3 +338,31 @@ Post-E2E leftover: aborted runs can leak `genlock_burn=true` on strih camera inp
 [0/8] preflight then refuses one input per attempt; clear ALL of them in one sweep
 (`obs_burn_filter.py check`+`remove` over `NDI cam1..7`) instead of chasing the gate's
 one-at-a-time errors (#924 tracks making the preflight normalize this itself).
+
+**A SECOND, DIFFERENT log signature for the same class of "not your diff" failure — `UNKNOWN`
+(incomplete read), not `DRIFT` (mismatched SHAs) (#942, 2026-08-02).** The `[0/8]` version-
+integrity gate's `strih` read specifically depends on an ACTIVE win-\* MCP session writing its
+observed state to a file (`stream`'s equivalent read succeeds automatically via an HTTP
+`:8899` endpoint; `strih`'s apparently does not have that same automated path). When no such
+session is populating it — observed live when the rig was mid a supervisor-owned live
+measurement across two consecutive pushes on the same PR (#943) — the exact log shape is:
+
+```
+NOTE: could not fetch version-integrity state from 10.77.9.202 (http :8899) — the
+      win-* MCP holder must write the drift-guard observed values to .../version-strih.json,
+      else the gate refuses.
+...
+strih          UNKNOWN  (no state file ... — win-* MCP fetch missing)
+...
+genlock_parity UNKNOWN  (cross-box genlock parity INCOMPLETE — read [stream=..., imag=...]; UNREAD: strih)
+!! GATE INCOMPLETE: 2 box(es) UNKNOWN: strih genlock_parity — NOT clean.
+```
+
+Same response as the DRIFT variant above: this is rig-state, not your diff (confirmed here by a
+PR touching ONLY `src/av_sync_dock.rs`/its tests/the C++ mirror header — nothing genlock/version-
+pin related). Do NOT touch win-\* MCP yourself if the dispatch says the rig is mid a live
+measurement you must not disturb — that is exactly what's blocking the automated populate step.
+Leave the PR open, comment the evidence on the ticket, and let whoever owns the rig moment (the
+supervisor, or the live measurement concluding) get the state populated; then `gh run rerun
+<run-id>` (never a fresh `gh workflow run`, per the `linux-genlock.yml`/`full-path-e2e.yml`
+GOTCHA in the top-level CLAUDE.md) on the SAME commit gets a real verdict with no new push.

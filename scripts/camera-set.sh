@@ -46,7 +46,18 @@
 # run. See tests/harness_camera_set.rs's `camera_active_set_env_override_reactivates_a_retired_camera`
 # / `camera_set_cam3_retired_898_still_resolves_as_fact_but_not_active` for the proof this
 # actually works.
-CAMERA_ACTIVE_SET="${CAMERA_ACTIVE_SET:-cam1 cam2 cam4}"
+#
+# cam4 RETIRED 2026-08-02 (issue 947): its NZXT Signal HD60 grabber wedges the capture leg within
+# 3-9 minutes of every start — three reproductions in 75 minutes, each preceded by a uvcvideo -71
+# burst, once with a USB re-enumeration. camera-box keeps the node open and its NDI ports bound
+# while emitting nothing, so the box looks alive and the E2E gate aborts at [1/8] FROZEN. The
+# hardware call (reseat/replace the grabber, or power-cycle the box) is an OPEN question on issue
+# 947 and needs someone at the rig; until then cam4 is membership-retired here exactly like
+# cam3/cam5/cam6/cam7 so the fleet runs on cam1+cam2 and A/V work is not blocked by it.
+# Re-activation is the one-line add-back below (cam1 holds the 3ms phase-sync floor either way, so
+# no re-anchor is needed to REMOVE cam4 — but re-ADDING it must run the calibrator, see
+# .claude/rules/phase-sync-calibrator-testing.md).
+CAMERA_ACTIVE_SET="${CAMERA_ACTIVE_SET:-cam1 cam2}"
 
 # This file is meant to be SOURCED, not executed — it defines functions and a default, and
 # performs no side effects on its own. Direct execution prints the resolved default set.

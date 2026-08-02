@@ -432,18 +432,32 @@ pub enum DockLockAction {
 ///
 /// Closed-form proof of the "never audio early" invariant (ignoring the safety clamps below, which
 /// only ever slow convergence, never violate the invariant once it IS reached): let `margin =
-/// mad_ms.clamp(DOCK_LOCK_MIN_MARGIN_MS, DOCK_CLUSTER_MAX_MAD_MS)` and `g =
-/// floor(ts_ms - margin)`. Setting `new_delay = current_delay + g` changes `ts` by exactly `-g`
-/// (increasing the video source's own added delay by `g` ms delays the video `g` ms further,
-/// which — since `ts = audio_ts - video_ts` — REDUCES `ts` by `g`). So the resulting `ts_new =
-/// ts_ms - g = margin + ((ts_ms - margin) - floor(ts_ms - margin))`, `margin` plus the fractional
-/// part of `(ts_ms - margin)`, which is always in `[margin, margin + 1)` by definition of `floor`
-/// — and since `margin >= DOCK_LOCK_MIN_MARGIN_MS > 0`, `ts_new` is always strictly positive, never
-/// merely non-negative. `g` positive means the video is currently arriving too early relative to
-/// the target (bring it later, increase delay); `g` negative means video is lagging (audio is
-/// early), so the delay is REDUCED — same physical direction the offline `required_delay_ms`
-/// already uses, just floor-biased instead of round-to-nearest so the residual can only land on
-/// the audio-late-or-margin side.
+/// mad_ms.clamp(DOCK_LOCK_MIN_MARGIN_MS, DOCK_CLUSTER_MAX_MAD_MS)` and the HOLD BAND be `[lo, hi) =
+/// [margin, 2 * margin)` — #942: the band's width equals `margin` itself (the SAME clamped
+/// dispersion the low edge already uses), instead of the fixed 1ms dead zone that limit-cycled the
+/// live actuator against the cluster's own 10-25ms measurement noise (339-470 actuator writes per
+/// session on the live rig, never settling). Any `ts_ms` already inside `[lo, hi)` is a plain
+/// `Hold` — trivially satisfies the invariant since `lo = margin >= DOCK_LOCK_MIN_MARGIN_MS > 0`.
+/// Otherwise let `mid = 1.5 * margin` (the band's own middle) and `g = round(ts_ms - mid)`.
+/// Setting `new_delay = current_delay + g` changes `ts` by exactly `-g` (increasing the video
+/// source's own added delay by `g` ms delays the video `g` ms further, which — since `ts =
+/// audio_ts - video_ts` — REDUCES `ts` by `g`). So the resulting `ts_new = ts_ms - g = mid +
+/// ((ts_ms - mid) - g)`, and since `g` is the NEAREST integer to `ts_ms - mid`, `|(ts_ms - mid) -
+/// g| <= 0.5`, i.e. `ts_new` is in `[mid - 0.5, mid + 0.5]`. Because `margin >=
+/// DOCK_LOCK_MIN_MARGIN_MS = 1.0`, `mid - 0.5 = 1.5*margin - 0.5 >= margin = lo` and `mid + 0.5 <=
+/// 2*margin = hi` — so `ts_new` always lands inside `[lo, hi]` (note: the CLOSED interval — `hi`
+/// itself is a reachable value of `ts_new`, even though the hold-band CHECK above is half-open;
+/// landing exactly on `hi` is not a resting state, it is corrected by exactly one more step toward
+/// `mid` on the next trusted measurement, then settles — see
+/// `corrector_settles_within_one_extra_tick_when_a_landed_correction_hits_the_bands_exact_edge`),
+/// and since `lo = margin > 0`, `ts_new` is always strictly positive, never merely non-negative.
+/// `g` positive means the video
+/// is currently arriving too early relative to the target (bring it later, increase delay); `g`
+/// negative means video is lagging (audio is early), so the delay is REDUCED — same physical
+/// direction the offline `required_delay_ms` already uses. Stepping toward the band's MIDDLE
+/// rather than its edge (the pre-#942 formula effectively targeted `lo`) means a landed correction
+/// lands with headroom on both sides of the band, so it cannot immediately re-trip the opposite
+/// direction on ordinary measurement jitter the size of the band itself.
 ///
 /// Only ever acts on a genuine trusted measurement (the caller passes `locked = true` only when
 /// the rolling cluster currently reports `est.ok`) — `locked = false` (no test signal: real event,
@@ -453,8 +467,8 @@ pub enum DockLockAction {
 /// trusted (`est.ok`) measurement, not only a `CbLockAuditTracker` `Locked`/`Updated` classifier
 /// transition — the classifier's `Updated` needs a >5ms MOVE of the (window-smoothed) median,
 /// which stalls convergence once the window itself lags a landed correction; this function's own
-/// cooldown ([`DOCK_LOCK_MIN_REAPPLY_S`]) and dead-zone (`g == 0`) checks are what make calling it
-/// on every trusted measurement safe.
+/// cooldown ([`DOCK_LOCK_MIN_REAPPLY_S`]) and hold-band (`[margin, 2*margin)`, #942) checks are
+/// what make calling it on every trusted measurement safe.
 pub struct DockLockCorrector {
     max_step_ms: i32,
     min_delay_ms: i32,
@@ -516,13 +530,21 @@ impl DockLockCorrector {
         } else {
             DOCK_LOCK_MIN_MARGIN_MS
         };
-        // Clamp BEFORE the later `as i64` casts (finding 5): offset_ms is finite but could still
-        // be astronomically large, which would otherwise risk an overflowing add below.
-        let g = (offset_ms - margin)
-            .floor()
-            .clamp(-1_000_000.0, 1_000_000.0);
-        if g == 0.0 {
-            return DockLockAction::Hold; // already ts_ms in [margin, margin + 1) -- nothing to do
+        // #942 -- the hold BAND scales with the cluster's own measured noise instead of a fixed
+        // 1ms dead zone: [band_lo, band_hi) = [margin, 2*margin), i.e. as wide as the SAME clamped
+        // dispersion the low edge already uses. Any offset already inside it is left alone -- no
+        // actuator write at all (this is what stopped the live limit-cycle: a 10-25ms noise field
+        // no longer trips a 1ms-wide window on nearly every trusted sample). Deliberately
+        // HALF-OPEN at the upper edge, matching the deliberate "nudge toward mid, not just past
+        // the edge" intent for a residual sitting exactly at 2*margin (review finding, investigated
+        // and reverted -- see corrector_settles_within_one_extra_tick_when_a_landed_correction_
+        // hits_the_bands_exact_edge: closing this edge broke the tested nudge-to-middle behavior at
+        // ordinary margins; the narrow-margin case this was meant to help is provably NOT a
+        // recurring limit-cycle -- it resolves in exactly one more correction, then Holds).
+        let band_lo = margin;
+        let band_hi = margin * 2.0;
+        if offset_ms >= band_lo && offset_ms < band_hi {
+            return DockLockAction::Hold; // already inside the noise-scaled hold band
         }
         if let Some(last) = self.last_applied_ns {
             let elapsed_s = now_ns.saturating_sub(last) as f64 / 1_000_000_000.0;
@@ -530,6 +552,13 @@ impl DockLockCorrector {
                 return DockLockAction::Hold; // cooldown -- let the last correction take effect first
             }
         }
+        // Step toward the band's MIDDLE, not its low edge (#942) -- a landed correction then has
+        // headroom on both sides of the band instead of sitting right at its boundary, so it can't
+        // immediately re-trip the opposite direction on ordinary jitter the size of the band
+        // itself. Clamp BEFORE the later `as i64` casts (finding 5): offset_ms is finite but could
+        // still be astronomically large, which would otherwise risk an overflowing add below.
+        let mid = margin * 1.5;
+        let g = (offset_ms - mid).round().clamp(-1_000_000.0, 1_000_000.0);
         let raw = current_delay_ms as i64 + g as i64;
         let lo = (current_delay_ms - self.max_step_ms) as i64;
         let hi = (current_delay_ms + self.max_step_ms) as i64;
@@ -807,9 +836,10 @@ mod tests {
 
     #[test]
     fn corrector_holds_once_already_in_the_safety_margin_zone() {
-        // With mad_ms=5.0 (a typical tight cluster) the target zone is [5, 6)ms, not [0,1) --
-        // #926 fix-up finding 3: a bare [0,1) target is false precision the estimator's own noise
-        // floor can't back up. Both boundary-ish values within the margin zone must Hold.
+        // With mad_ms=5.0 (a typical tight cluster) the target hold band is [5, 10)ms (#942: width
+        // scales with the same clamped margin), not a bare [0,1) -- #926 fix-up finding 3: a bare
+        // [0,1) target is false precision the estimator's own noise floor can't back up. Both
+        // boundary-ish values within the band must Hold.
         let mut c = DockLockCorrector::new(5, 30.0);
         assert_eq!(
             c.decide(true, 5.0, 5.0, 950, 1_000_000_000),
@@ -822,14 +852,131 @@ mod tests {
         );
     }
 
+    // ---- #942: hold band scales with the cluster's own noise, never a fixed 1ms dead zone ----
+
+    #[test]
+    fn corrector_never_actuates_once_offset_settles_inside_the_noise_scaled_band() {
+        // The live-rig bug (#942): with mad_ms ~15 (the ticket's own measured 10.0-18.0ms field),
+        // the OLD 1ms-wide dead zone ([margin, margin+1)) actuated on nearly every trusted sample,
+        // because a realistic noisy offset almost never lands in a 1ms window. The fix widens the
+        // hold band to [margin, 2*margin) -- as wide as the cluster's own measured dispersion. A
+        // deterministic "noisy but settled" sequence (offsets wandering inside the band, the way a
+        // converged lock's own measurement noise would look) must produce ZERO Apply actions.
+        let mad_ms = 15.0; // inside [DOCK_LOCK_MIN_MARGIN_MS, DOCK_CLUSTER_MAX_MAD_MS] already
+        let band_lo = mad_ms; // margin == mad_ms here (no clamping needed)
+        let band_hi = mad_ms * 2.0;
+        // A deterministic pseudo-noisy sequence spanning most of the band width, landing strictly
+        // inside [band_lo, band_hi) on every sample -- the realistic "settled lock, still jittering
+        // on measurement noise" case the ticket describes.
+        let offsets = [
+            15.5, 22.0, 29.4, 18.0, 26.5, 16.2, 28.9, 21.0, 24.7, 17.3, 27.8, 19.9, 23.3, 15.9,
+        ];
+        for &off in &offsets {
+            assert!(
+                off >= band_lo && off < band_hi,
+                "test fixture bug: {off} must itself be inside [{band_lo}, {band_hi})"
+            );
+        }
+        let mut c = DockLockCorrector::new(5, 30.0);
+        let mut applies = 0usize;
+        // Cooldown satisfied on every sample (30s apart, min_reapply_s == 30.0) so a lingering
+        // cooldown gate can never be the reason nothing applies -- only the band itself must.
+        for (i, &off) in offsets.iter().enumerate() {
+            let now_ns = (i as u64 + 1) * 30_000_000_000;
+            if matches!(
+                c.decide(true, off, mad_ms, 950, now_ns),
+                DockLockAction::Apply(_)
+            ) {
+                applies += 1;
+            }
+        }
+        assert_eq!(
+            applies, 0,
+            "a noisy-but-in-band offset sequence must never actuate the live A/V actuator (#942)"
+        );
+    }
+
+    #[test]
+    fn corrector_still_corrects_the_forbidden_audio_early_zone_below_the_band_floor() {
+        // The #942 hold-band widening must NOT weaken the "audio never early" invariant: an offset
+        // below the band's low edge (including outright negative -- audio physically ahead of
+        // video) still triggers a correction, exactly as before the fix.
+        let mut c = DockLockCorrector::new(5, 30.0);
+        assert!(
+            matches!(
+                c.decide(true, -5.0, 15.0, 950, 1_000_000_000),
+                DockLockAction::Apply(_)
+            ),
+            "an offset below the hold band's floor must still correct, never silently Hold"
+        );
+        let mut c2 = DockLockCorrector::new(5, 30.0);
+        assert!(
+            matches!(
+                c2.decide(true, 0.0, 15.0, 950, 1_000_000_000),
+                DockLockAction::Apply(_)
+            ),
+            "offset_ms == 0.0 (audio/video coincident) is still below margin -- must correct"
+        );
+    }
+
+    #[test]
+    fn corrector_settles_within_one_extra_tick_when_a_landed_correction_hits_the_bands_exact_edge()
+    {
+        // #942 review finding, investigated: at the narrowest possible band (margin floors at
+        // DOCK_LOCK_MIN_MARGIN_MS == 1.0, e.g. mad_ms <= 1.0 or non-finite), round()-to-mid
+        // targeting can land ts_new EXACTLY at the band's upper edge (2*margin) -- a value the
+        // closed-form proof's [mid-0.5, mid+0.5] guarantee explicitly allows. The band's own
+        // Hold check is half-open ([lo, hi)), so that landed value is (correctly) treated as
+        // "still outside" on the very next measurement -- but this is NOT a recurrence of the
+        // #942 limit-cycle: it costs exactly ONE extra correction (nudging toward the band's
+        // middle, same as at any other margin), which lands solidly inside the band and Holds
+        // permanently after that. Making the upper edge inclusive to avoid this one extra tick
+        // was tried and REVERTED -- it broke the deliberate "still nudge toward mid, don't just
+        // stop at the edge" behavior for ordinary (non-degenerate) margins, pinned by
+        // corrector_respects_the_hardware_clamp_at_the_ceiling. This test instead pins the
+        // property that actually matters: the sequence TERMINATES within one extra tick, it
+        // never keeps cycling.
+        let mad_ms = 1.0; // margin floors at DOCK_LOCK_MIN_MARGIN_MS == 1.0, band width == 1.0
+        let mut c = DockLockCorrector::new(5, 30.0);
+        let action1 = c.decide(true, 0.0, mad_ms, 950, 1_000_000_000);
+        let delay1 = match action1 {
+            DockLockAction::Apply(v) => v,
+            DockLockAction::Hold => {
+                panic!("offset_ms=0.0 is well outside the band -- must correct")
+            }
+        };
+        let ts1 = 0.0 - (delay1 - 950) as f64;
+        assert!(
+            (2.0 - 1e-9..2.0 + 1e-9).contains(&ts1),
+            "test setup: this scenario must land exactly at the band's upper edge (2.0): ts1={ts1}"
+        );
+
+        // One more trusted measurement of that SAME landed value, past cooldown: the corrector
+        // may nudge it once more toward mid, but the RESULT must then be a genuine resting state.
+        let action2 = c.decide(true, ts1, mad_ms, delay1, 32_000_000_000);
+        let (delay2, ts2) = match action2 {
+            DockLockAction::Apply(v) => (v, ts1 - (v - delay1) as f64),
+            DockLockAction::Hold => (delay1, ts1), // already acceptable -- also a valid outcome
+        };
+
+        // A THIRD trusted measurement of the resulting (now-stable) offset must Hold -- proving
+        // the sequence terminates within one extra tick, never limit-cycles.
+        let action3 = c.decide(true, ts2, mad_ms, delay2, 63_000_000_000);
+        assert_eq!(
+            action3,
+            DockLockAction::Hold,
+            "must settle within at most one extra correction, never keep cycling: ts1={ts1} ts2={ts2}"
+        );
+    }
+
     #[test]
     fn corrector_never_lands_below_the_safety_margin_across_many_offsets_mads_and_deploys() {
         // The closed-form invariant, swept over a wide range of measured offsets, cluster MADs,
         // and current delays, WITHOUT the step clamp interfering (max_step huge) so the single
         // application fully converges: the resulting ts (offset_ms - applied_delta) must land in
-        // [margin, margin+1), where margin = mad_ms.clamp(DOCK_LOCK_MIN_MARGIN_MS,
-        // DOCK_CLUSTER_MAX_MAD_MS) -- covering the margin CLAMPING at both ends (0.1/50.0 fall
-        // outside [1,25] and must clamp).
+        // the #942 hold band [margin, 2*margin), where margin = mad_ms.clamp(
+        // DOCK_LOCK_MIN_MARGIN_MS, DOCK_CLUSTER_MAX_MAD_MS) -- covering the margin CLAMPING at
+        // both ends (0.1/50.0 fall outside [1,25] and must clamp).
         for &offset_ms in &[
             -523.7, -100.0, -52.2, -10.4, -1.0, -0.1, 0.0, 0.5, 3.3, 10.0, 42.9, 100.0, 900.0,
         ] {
@@ -846,10 +993,11 @@ mod tests {
                     let hit_rail = new_delay == 3 || new_delay == 2000;
                     if !hit_rail {
                         let margin = mad_ms.clamp(DOCK_LOCK_MIN_MARGIN_MS, DOCK_CLUSTER_MAX_MAD_MS);
+                        let band_hi = margin * 2.0;
                         assert!(
-                            (margin - 1e-9..margin + 1.0 + 1e-9).contains(&ts_new),
+                            (margin - 1e-9..band_hi + 1e-9).contains(&ts_new),
                             "offset={offset_ms} mad={mad_ms} current={current} new_delay={new_delay} \
-                             ts_new={ts_new} margin={margin} must land in [margin,margin+1) -- audio \
+                             ts_new={ts_new} margin={margin} must land in [margin,2*margin) -- audio \
                              must never end up early"
                         );
                     } else {
@@ -914,9 +1062,11 @@ mod tests {
         match c.decide(true, 100.0, 500.0, 950, 1_000_000_000) {
             DockLockAction::Apply(v) => {
                 let ts_new = 100.0 - (v - 950) as f64;
+                // #942: the hold band is [margin, 2*margin), so a clamped margin of
+                // DOCK_CLUSTER_MAX_MAD_MS (25) gives band [25, 50) -- ts_new must land in it.
                 assert!(
-                    (DOCK_CLUSTER_MAX_MAD_MS..DOCK_CLUSTER_MAX_MAD_MS + 1.0).contains(&ts_new),
-                    "margin must clamp at DOCK_CLUSTER_MAX_MAD_MS: ts_new={ts_new}"
+                    (DOCK_CLUSTER_MAX_MAD_MS..DOCK_CLUSTER_MAX_MAD_MS * 2.0).contains(&ts_new),
+                    "margin-scaled band must clamp its low edge at DOCK_CLUSTER_MAX_MAD_MS: ts_new={ts_new}"
                 );
             }
             DockLockAction::Hold => {
@@ -1035,17 +1185,17 @@ mod tests {
 
     #[test]
     fn corrector_converges_excess_audio_lateness_toward_the_safety_margin() {
-        // offset_ms positive (audio ALREADY late by more than the target margin) is not
-        // forbidden, but the ticket wants MINIMAL latency -- the corrector must still nudge it
-        // down toward the margin (5ms here, not a bare 0), not just leave it (only the
-        // negative/audio-early direction is a hard violation; drifting arbitrarily positive would
-        // violate "hold FIXED MINIMAL latency").
+        // offset_ms positive (audio ALREADY late by more than the hold band) is not forbidden, but
+        // the ticket wants MINIMAL latency -- the corrector must still nudge it down toward the
+        // band's MIDDLE (#942: 7.5ms -> nearest integer step 7ms with mad_ms=5.0, band [5,10)), not
+        // just leave it (only the negative/audio-early direction is a hard violation; drifting
+        // arbitrarily positive would violate "hold FIXED MINIMAL latency").
         let mut c = DockLockCorrector::new(50, 30.0);
         match c.decide(true, 42.0, 5.0, 950, 1_000_000_000) {
             DockLockAction::Apply(v) => {
                 assert_eq!(
-                    v, 987,
-                    "must increase delay to close the gap down to the 5ms margin"
+                    v, 985,
+                    "must increase delay to close the gap toward the middle of the [5,10) band"
                 )
             }
             DockLockAction::Hold => {

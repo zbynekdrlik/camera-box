@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::Parser;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::signal;
 use tracing_subscriber::EnvFilter;
@@ -654,6 +654,60 @@ async fn run_capture_loop(
         );
     }
 
+    // #945 — capture-wedge self-watchdog. `VideoCapture::process_frame`'s blocking V4L2 dequeue
+    // can wedge (never return) on a USB completion-handler fault, freezing the ENTIRE capture
+    // loop below at that one call site — including every existing observability check
+    // (capture_stall, capture_rate_health/selfheal, the 5s stats tick), all of which only run
+    // once process_frame() returns. So the watchdog MUST live on a genuinely separate thread that
+    // can never itself be blocked by the same dequeue: it polls a monotonic heartbeat the capture
+    // loop updates immediately after every process_frame() call returns (Ok or Err — see
+    // `capture_wedge`'s module doc for why that is content-agnostic and never fires on a genuine
+    // no-signal condition), and forces a restart the moment that heartbeat has gone stale for
+    // `capture_wedge::CAPTURE_WEDGE_THRESHOLD_S`.
+    let wedge_heartbeat_ns = Arc::new(AtomicU64::new(0));
+    let wedge_watchdog_epoch = std::time::Instant::now();
+    {
+        let heartbeat = Arc::clone(&wedge_heartbeat_ns);
+        let running_watchdog = Arc::clone(&running);
+        std::thread::Builder::new()
+            .name("capture-wedge-watchdog".into())
+            .spawn(move || {
+                // Poll well inside the wedge threshold so the watchdog itself can never add more
+                // than one poll interval of detection latency.
+                let poll_interval = std::time::Duration::from_secs(5);
+                while running_watchdog.load(Ordering::Relaxed) {
+                    std::thread::sleep(poll_interval);
+                    if !running_watchdog.load(Ordering::Relaxed) {
+                        break; // normal shutdown in progress — never misreport as a wedge
+                    }
+                    let now_ns = wedge_watchdog_epoch.elapsed().as_nanos() as u64;
+                    let last_progress_ns = heartbeat.load(Ordering::Relaxed);
+                    let seconds_since_last_progress =
+                        now_ns.saturating_sub(last_progress_ns) as f64 / 1_000_000_000.0;
+                    if camera_box::capture_wedge::evaluate_wedge(
+                        seconds_since_last_progress,
+                        camera_box::capture_wedge::CAPTURE_WEDGE_THRESHOLD_S,
+                    ) == camera_box::capture_wedge::WedgeVerdict::Wedged
+                    {
+                        tracing::error!(
+                            "{}",
+                            camera_box::capture_wedge::capture_wedge_message(
+                                seconds_since_last_progress,
+                                camera_box::capture_wedge::CAPTURE_WEDGE_THRESHOLD_S,
+                            )
+                        );
+                        // The capture loop is provably dead (its own blocking dequeue never
+                        // returned) — a graceful in-process shutdown of ITS state is not
+                        // reachable from here, so exit immediately. systemd's Restart=always
+                        // (camera-box.service, unchanged) brings the process back up against a
+                        // fresh device open.
+                        std::process::exit(camera_box::capture_wedge::CAPTURE_WEDGE_EXIT_CODE);
+                    }
+                }
+            })
+            .expect("failed to spawn #945 capture-wedge watchdog thread");
+    }
+
     // Spawn capture loop in blocking task - minimal overhead for lowest latency
     let running_capture = Arc::clone(&running);
     let capture_handle = tokio::task::spawn_blocking(move || {
@@ -1071,6 +1125,17 @@ async fn run_capture_loop(
                     t.tee(data, info, capture_timecode_100ns);
                 }
             });
+
+            // #945 — heartbeat: `capture.process_frame(...)` above just RETURNED (Ok or Err,
+            // checked below) — proof the blocking V4L2 dequeue is not wedged. Updated
+            // unconditionally on EITHER outcome, and unconditional on whether a frame was
+            // actually emitted/interesting inside the closure above, so a genuine no-signal
+            // condition (the device still delivering blank frames or a fast repeating error)
+            // never itself starves the heartbeat — see `capture_wedge`'s module doc.
+            wedge_heartbeat_ns.store(
+                wedge_watchdog_epoch.elapsed().as_nanos() as u64,
+                Ordering::Relaxed,
+            );
 
             match result {
                 Ok(()) => {

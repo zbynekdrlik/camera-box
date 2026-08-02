@@ -760,19 +760,40 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
   done
   echo "    excluded (acked-offline): ${PREFLIGHT_EXCLUDED_CAMS:-none}"
 
-  # dantesync freshest-offset sanity for the active secondary cameras (cam1/cam2 already covered
-  # by the DanteSync gate above) — reuses the SAME dantesync-gate.sh this harness already trusts,
-  # just widened to the rest of the ACTIVE fleet (camera_active_secondary_set(), #827), excluding
-  # any box acked-offline above. The cam[3-7] pattern is a harmless SUPERSET match -- only names
-  # that were actually iterated above (i.e. currently active) ever appear in
-  # PREFLIGHT_DANTESYNC_LINUX in the first place, so this never needs editing when
-  # CAMERA_ACTIVE_SET changes.
-  if [ -n "$PREFLIGHT_DANTESYNC_LINUX" ]; then
-    echo "[0/8] dantesync freshest-offset sanity — ${PREFLIGHT_TARGET_NAMES#cam1 cam2 } (#758/#827)"
+  # #947: dantesync freshest-offset sanity for the active SECONDARY cameras only (cam1/cam2 are
+  # already covered by the main DanteSync gate above) -- reuses the SAME dantesync-gate.sh this
+  # harness already trusts. Membership is derived from camera_active_secondary_set()
+  # (camera-set.sh, #827), filtered down to whatever actually came back healthy in
+  # PREFLIGHT_DANTESYNC_LINUX above (so a box acked-offline above is correctly excluded too) --
+  # NEVER a literal cam[3-7] range. The old `grep -oE 'cam[3-7]=...'` pattern tested the WRONG
+  # thing: it filtered PREFLIGHT_DANTESYNC_LINUX (which always holds cam1/cam2, already gated
+  # above) by a hardcoded number range instead of testing "is this box a SECONDARY camera" via
+  # CAMERA_ACTIVE_SET. With CAMERA_ACTIVE_SET="cam1 cam2" (cam4 retired, #947) the secondary set
+  # is EMPTY, so the old `if [ -n "$PREFLIGHT_DANTESYNC_LINUX" ]` guard passed (cam1/cam2 are
+  # always in there) while the grep filter yielded nothing -- dantesync-gate.sh correctly refused
+  # a zero-node --linux ("no nodes to gate"), failing the whole preflight even though cam1+cam2
+  # were both already gated clean above (run 30761247629). Deriving membership from
+  # camera_active_secondary_set() means this never needs editing again when CAMERA_ACTIVE_SET
+  # changes -- re-enabling a retired camera just flows through automatically.
+  PREFLIGHT_DANTESYNC_SECONDARY=""
+  PREFLIGHT_DANTESYNC_SECONDARY_NAMES=""
+  for _pfdsl in $PREFLIGHT_DANTESYNC_LINUX; do
+    _pfdslbox="${_pfdsl%%=*}"
+    case " $(camera_active_secondary_set) " in
+      *" ${_pfdslbox} "*)
+        PREFLIGHT_DANTESYNC_SECONDARY="${PREFLIGHT_DANTESYNC_SECONDARY:+$PREFLIGHT_DANTESYNC_SECONDARY }${_pfdsl}"
+        PREFLIGHT_DANTESYNC_SECONDARY_NAMES="${PREFLIGHT_DANTESYNC_SECONDARY_NAMES:+$PREFLIGHT_DANTESYNC_SECONDARY_NAMES }${_pfdslbox}"
+        ;;
+    esac
+  done
+  if [ -n "$PREFLIGHT_DANTESYNC_SECONDARY" ]; then
+    echo "[0/8] dantesync freshest-offset sanity — ${PREFLIGHT_DANTESYNC_SECONDARY_NAMES} (#758/#827/#947)"
     "$HERE/dantesync-gate.sh" \
       --bound-us "${CLOCK_GUARD_BOUND_US:-2000}" \
       --win-http-port "${WIN_DANTE_PORT:-8898}" \
-      --linux "$(printf '%s' "$PREFLIGHT_DANTESYNC_LINUX" | grep -oE 'cam[3-7]=[^ ]*' | paste -sd' ' -)"
+      --linux "$PREFLIGHT_DANTESYNC_SECONDARY"
+  else
+    echo "[0/8] dantesync freshest-offset sanity — skipped: no secondary cameras in CAMERA_ACTIVE_SET, cam1+cam2 are already fully covered by the main DanteSync gate above (#947)"
   fi
 
   # #924 (user directive, 2026-08-01): the rig's DEFAULT state, whenever the user has NOT asked

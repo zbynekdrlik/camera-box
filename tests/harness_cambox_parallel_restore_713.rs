@@ -313,25 +313,33 @@ fn whole_device_restore_phase_runs_in_parallel_not_sequentially() {
     );
 
     let log = fs::read_to_string(&log_path).unwrap_or_default();
-    for ip in ["10.9.9.1", "10.9.9.4", "10.9.9.2"] {
+    for ip in ["10.9.9.1", "10.9.9.2"] {
         assert!(
             log.contains(ip),
-            "#713/#827/#898: every one of the 3 default-active boxes (cam1 + cam4 + \
+            "#713/#827/#898/issue 947: every one of the 2 default-active boxes (cam1 + \
              cam2/painter) must actually be contacted (found in the fake timeout()'s call log) — \
              parallelizing must never skip a box for speed. Log:\n{log}"
         );
     }
-    assert!(
-        !log.contains("10.9.9.3"),
-        "#898: cam3 is retired from the default active set (grabber card destroyed) and must \
-         NOT be contacted by the default-active restore phase. Log:\n{log}"
-    );
+    for (ip, why) in [
+        ("10.9.9.3", "cam3 (#898, grabber card destroyed)"),
+        (
+            "10.9.9.4",
+            "cam4 (issue 947, grabber wedges the capture leg)",
+        ),
+    ] {
+        assert!(
+            !log.contains(ip),
+            "{why} is retired from the default active set and must NOT be contacted by the \
+             default-active restore phase. Log:\n{log}"
+        );
+    }
 
     assert!(
         elapsed.as_millis() < 600,
-        "#713/#898: 3 boxes at a simulated ~300ms round-trip each MUST run in PARALLEL (bounded \
-         well under the ~900ms a SEQUENTIAL phase would take), not one after another. \
-         Elapsed: {:?}",
+        "#713/#898/issue 947: the default-active boxes at a simulated ~300ms round-trip each \
+         MUST run in PARALLEL (bounded well under the time a SEQUENTIAL phase would take), not \
+         one after another. Elapsed: {:?}",
         elapsed
     );
 }

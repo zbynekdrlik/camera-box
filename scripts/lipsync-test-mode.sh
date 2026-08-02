@@ -61,6 +61,18 @@ PID=\$(cat '$pidfile' 2>/dev/null || true)
 if [ -n "\$PID" ] && kill -0 "\$PID" 2>/dev/null; then
   kill "\$PID" 2>/dev/null || true
   for _ in 1 2 3 4 5 6 7 8 9 10; do kill -0 "\$PID" 2>/dev/null || break; sleep 0.3; done
+  # issue 930 live incident: a wedged painter SURVIVED the bare TERM (kept flipping KMS pages,
+  # so the whole lipsync recording captured the dual-QR instead of the face while ffmpeg wrote
+  # into an invisible fb0). Escalate to SIGKILL, and FAIL LOUD if even that leaves it alive --
+  # a surviving painter makes the upcoming playback silently unrecordable.
+  if kill -0 "\$PID" 2>/dev/null; then
+    kill -9 "\$PID" 2>/dev/null || true
+    for _ in 1 2 3 4 5; do kill -0 "\$PID" 2>/dev/null || break; sleep 0.3; done
+  fi
+  if kill -0 "\$PID" 2>/dev/null; then
+    echo "FAIL: TEST-mode painter (pid \$PID) survived TERM+KILL -- refusing to start lipsync playback under a live painter" >&2
+    exit 1
+  fi
 fi
 rm -f '$pidfile'
 CMDS
@@ -147,7 +159,9 @@ cmd_start() {
     echo "[lipsync-test-mode] FAIL: $media not found -- run 'lipsync-asset.sh fetch' first" >&2
     exit 1
   }
-  local remote_media="/root/lipsync-test.mp4"
+  # /run (tmpfs): cam2 is a READ-ONLY-root appliance (issue 547) -- /root is not writable, the
+  # first live run failed the scp with `dest open "/root/lipsync-test.mp4": Failure`.
+  local remote_media="/run/lipsync-test.mp4"
   echo "[lipsync-test-mode] cam2 (${PAINTER_IP}): stopping TEST-mode painter (frees /dev/fb0 + the ALSA marker device)"
   cam_ssh "$(lipsync_stop_painter_cmds "$PAINTER_PIDFILE")"
   # From here on cam2 has NEITHER the QR/QPSK painter NOR (yet) the lipsync playback running -- a
@@ -171,7 +185,7 @@ cmd_start() {
 cmd_stop() {
   echo "[lipsync-test-mode] cam2 (${PAINTER_IP}): stopping lipsync playback"
   cam_ssh "$(lipsync_stop_playback_cmds "$LIPSYNC_PLAYBACK_PIDFILE")" || true
-  cam_ssh "rm -f /root/lipsync-test.mp4" || true
+  cam_ssh "rm -f /run/lipsync-test.mp4" || true
   echo "[lipsync-test-mode] restoring TEST mode (dual-QR + QPSK marker) via rig-mode.sh test"
   bash "$HERE/rig-mode.sh" test
 }
