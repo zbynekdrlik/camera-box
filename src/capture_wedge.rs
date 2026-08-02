@@ -33,10 +33,65 @@
 //! `capture_rate_selfheal`'s existing 77/78) rather than reusing or overloading the `#663
 //! self-heal` log shape existing forensics already key on.
 //!
-//! #945 RED marker: `evaluate_wedge`/`capture_wedge_message`/`WedgeVerdict`/
-//! `CAPTURE_WEDGE_THRESHOLD_S`/`CAPTURE_WEDGE_EXIT_CODE` are NOT YET IMPLEMENTED — this is the RED
-//! commit (proves via compile failure that today's code decides nothing at all about a wedge).
-//! Implemented in the immediately-following GREEN commit.
+/// How many seconds the capture loop's blocking dequeue may go WITHOUT RETURNING AT ALL before
+/// the watchdog treats it as WEDGED. The existing "Streaming:" stats tick fires every 5s, so this
+/// is ~5 ticks (25s) — long enough that one unlucky slow tick's jitter never trips it, short
+/// enough to catch a genuine wedge (the live #945 incident: 48 CONSECUTIVE minutes of total
+/// silence) in well under a minute instead of 43+ minutes late.
+pub const CAPTURE_WEDGE_THRESHOLD_S: f64 = 25.0;
+
+/// Process exit code used when the watchdog forces a restart because the capture loop is
+/// provably wedged. Distinct from `capture_rate_selfheal::SELF_HEAL_EXIT_CODE` (77) and
+/// `SELF_HEAL_RESET_FAILED_EXIT_CODE` (78) so `systemctl status`/journal forensics can always
+/// tell a capture-wedge restart apart from a `#663` USB-reset restart or a genuine crash.
+pub const CAPTURE_WEDGE_EXIT_CODE: i32 = 79;
+
+/// The watchdog's verdict for THIS poll, given how long it has been since the capture loop last
+/// proved it made progress (a `process_frame()` call returning, Ok or Err).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WedgeVerdict {
+    /// The loop returned from its blocking dequeue recently enough — alive.
+    Alive,
+    /// No progress for at least the threshold — the loop is provably dead.
+    Wedged,
+}
+
+/// Pure decision: given `seconds_since_last_progress` (wall/monotonic elapsed time since the
+/// capture loop's heartbeat last advanced) and `threshold_s` (the configured wedge threshold),
+/// decide whether the capture loop is WEDGED.
+///
+/// A non-finite or negative `seconds_since_last_progress` (should never happen from a real
+/// `Instant::elapsed()` reading, but a defensive guard costs nothing — mirrors
+/// `capture_stall::is_capture_stall`'s own guard shape) never wedges. A non-positive `threshold_s`
+/// (a disabled/misconfigured watchdog) also never wedges — it must never be interpreted as
+/// "always wedged".
+pub fn evaluate_wedge(seconds_since_last_progress: f64, threshold_s: f64) -> WedgeVerdict {
+    if !seconds_since_last_progress.is_finite()
+        || seconds_since_last_progress < 0.0
+        || threshold_s <= 0.0
+    {
+        return WedgeVerdict::Alive;
+    }
+    if seconds_since_last_progress >= threshold_s {
+        WedgeVerdict::Wedged
+    } else {
+        WedgeVerdict::Alive
+    }
+}
+
+/// Build the CRITICAL, uniquely grep-able message the watchdog logs right before it exits the
+/// process. Pure string formatting so the exact wording is unit-tested here, mirroring
+/// `capture_stall::capture_stall_warning`'s convention. Deliberately names `#945`, `CRITICAL`, and
+/// the exact exit code so this event can never be confused with a `#663 self-heal` restart or a
+/// generic crash in the journal/forensics.
+pub fn capture_wedge_message(seconds_since_last_progress: f64, threshold_s: f64) -> String {
+    format!(
+        "CRITICAL #945: capture/emit thread WEDGED — the blocking V4L2 dequeue (VIDIOC_DQBUF) has \
+         not returned in {seconds_since_last_progress:.1}s (>= {threshold_s:.1}s threshold); the \
+         process is alive (other threads keep running) but the capture loop is provably dead — \
+         exiting now (code {CAPTURE_WEDGE_EXIT_CODE}) so systemd's Restart=always recovers it. See #945."
+    )
+}
 
 #[cfg(test)]
 mod tests {
@@ -114,7 +169,10 @@ mod tests {
             evaluate_wedge(f64::INFINITY, CAPTURE_WEDGE_THRESHOLD_S),
             WedgeVerdict::Alive
         );
-        assert_eq!(evaluate_wedge(-1.0, CAPTURE_WEDGE_THRESHOLD_S), WedgeVerdict::Alive);
+        assert_eq!(
+            evaluate_wedge(-1.0, CAPTURE_WEDGE_THRESHOLD_S),
+            WedgeVerdict::Alive
+        );
     }
 
     #[test]
