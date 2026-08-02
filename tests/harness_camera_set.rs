@@ -201,15 +201,18 @@ fn camera_set_reject_message_still_lists_all_seven_cameras() {
 }
 
 #[test]
-fn camera_active_set_default_is_exactly_cam1_cam2_cam4() {
+fn camera_active_set_default_is_exactly_cam1_cam2_947() {
     // CAMERA_ACTIVE_SET is the ONE declared list of cameras physically installed TODAY. #898
     // (2026-07-31): cam3's grabber card was physically destroyed (moved into cam1 during the
     // #728/#688 recovery) -- retired from the active set exactly like cam5/cam6/cam7 (#827).
+    // issue 947 (2026-08-02): cam4 retired too -- its NZXT Signal HD60 grabber wedges the capture
+    // leg within minutes of every start (process stays alive emitting nothing), so it is
+    // membership-retired until the hardware call is made at the rig.
     let s = read("scripts/camera-set.sh");
     assert!(
-        s.contains("CAMERA_ACTIVE_SET=\"${CAMERA_ACTIVE_SET:-cam1 cam2 cam4}\""),
-        "#898: CAMERA_ACTIVE_SET default must be exactly the three active cameras (cam1, cam2, \
-         cam4) -- cam3 retired (grabber card destroyed)."
+        s.contains("CAMERA_ACTIVE_SET=\"${CAMERA_ACTIVE_SET:-cam1 cam2}\""),
+        "issue 947: CAMERA_ACTIVE_SET default must be exactly the two active cameras (cam1, \
+         cam2) -- cam3 and cam4 retired."
     );
 }
 
@@ -288,13 +291,15 @@ camera_active_secondary_set
 
 #[test]
 fn camera_active_secondary_set_excludes_cam1_and_cam2_by_default() {
-    // #898: the default active set is now cam1/cam2/cam4 (cam3 retired, grabber card destroyed);
-    // the "secondary" (non-source, non-painter) camera the ALL_CAMBOX sweep cuts in is cam4 only.
+    // issue 947: the default active set is now cam1/cam2 only (cam3 and cam4 both retired), so
+    // there is NO secondary camera left for the ALL_CAMBOX sweep to cut in -- the derived set is
+    // empty, and that must be expressed as an empty string rather than silently falling back to
+    // some literal camera list.
     assert_eq!(
         active_secondary_set(None),
-        "cam4",
-        "#898: the default secondary set must be exactly cam4 (cam1=source, cam2=painter, cam3 \
-         retired)"
+        "",
+        "issue 947: with only cam1=source and cam2=painter active, the secondary set must be \
+         empty (cam3 and cam4 retired)"
     );
 }
 
@@ -507,9 +512,9 @@ fn camera_active_excluding_never_includes_a_retired_camera_even_with_empty_exclu
     // excluded.
     assert_eq!(
         active_excluding(None, ""),
-        "cam1 cam2 cam4",
-        "#898: camera_active_excluding with no exclusion must return exactly the active set \
-         (cam3 retired)"
+        "cam1 cam2",
+        "issue 947: camera_active_excluding with no exclusion must return exactly the active set \
+         (cam3 and cam4 retired)"
     );
 }
 
@@ -563,14 +568,17 @@ fn camera_active_ndi_sources_excluding_csv_never_includes_a_retired_camera() {
     // strih OBS input is STILL PRESENT (NDI cam5/cam6/cam7 scene-collection entries were never
     // deleted, #827) must not appear in the sampled/checked source list -- with NO exclusion
     // passed at all, since retirement (not acking) is what keeps them out. #898 (2026-07-31):
-    // cam3 joins the retired set (grabber card destroyed).
+    // cam3 joins the retired set (grabber card destroyed). issue 947 (2026-08-02): cam4 joins it
+    // too (grabber wedges the capture leg within minutes of every start) -- and cam4 is exactly
+    // the case this property protects, because its strih input "NDI cam4" is still present and
+    // still sampled by the [1/8] frozen-camera preflight if the derivation leaks it.
     let csv = active_ndi_sources_excluding_csv(None, "");
     assert_eq!(
-        csv, "NDI cam1,NDI cam2,NDI cam4",
-        "#898: a retired camera (cam3/cam5/cam6/cam7) must never appear in the derived NDI \
-         source CSV, regardless of whether its strih OBS input still exists"
+        csv, "NDI cam1,NDI cam2",
+        "issue 947: a retired camera (cam3/cam4/cam5/cam6/cam7) must never appear in the derived \
+         NDI source CSV, regardless of whether its strih OBS input still exists"
     );
-    for retired in ["NDI cam3", "NDI cam5", "NDI cam6", "NDI cam7"] {
+    for retired in ["NDI cam3", "NDI cam4", "NDI cam5", "NDI cam6", "NDI cam7"] {
         assert!(
             !csv.contains(retired),
             "{retired} must not appear in the derived source list -- it is retired from \
