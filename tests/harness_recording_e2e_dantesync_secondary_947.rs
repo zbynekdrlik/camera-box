@@ -40,12 +40,10 @@ fn manifest_dir() -> PathBuf {
 /// (`#924`'s OBS pre-run-state normalize step). This slices the REAL script text, never a
 /// hand-copied mirror.
 fn secondary_gate_region(s: &str) -> &str {
-    let start = s
-        .find("# #947: dantesync freshest-offset sanity")
-        .expect(
-            "#947: recording-e2e.sh must have the dantesync-secondary preflight comment banner \
+    let start = s.find("# #947: dantesync freshest-offset sanity").expect(
+        "#947: recording-e2e.sh must have the dantesync-secondary preflight comment banner \
              (the SECONDARY-camera-only gate, distinct from the main DanteSync gate earlier)",
-        );
+    );
     let end = s[start..]
         .find("# #924 (user directive")
         .map(|i| start + i)
@@ -58,13 +56,19 @@ fn secondary_gate_region(s: &str) -> &str {
 /// `CAMERA_ACTIVE_SET` + `PREFLIGHT_DANTESYNC_LINUX`, and point `$HERE` at a tempdir holding a
 /// fake `dantesync-gate.sh` that logs its own argv to `$CALL_LOG` and exits 0. Returns
 /// (captured stdout, contents of the call log -- empty string if never invoked).
-fn run_secondary_gate(camera_active_set: &str, preflight_dantesync_linux: &str) -> (String, String) {
+fn run_secondary_gate(
+    camera_active_set: &str,
+    preflight_dantesync_linux: &str,
+) -> (String, String) {
     let tmp = tempfile::tempdir().expect("tempdir");
     let here = tmp.path();
     let call_log = here.join("dantesync-gate-calls.log");
     let fake = here.join("dantesync-gate.sh");
-    fs::write(&fake, "#!/usr/bin/env bash\necho \"$@\" >> \"$CALL_LOG\"\nexit 0\n")
-        .expect("write fake dantesync-gate.sh");
+    fs::write(
+        &fake,
+        "#!/usr/bin/env bash\necho \"$@\" >> \"$CALL_LOG\"\nexit 0\n",
+    )
+    .expect("write fake dantesync-gate.sh");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
