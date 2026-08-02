@@ -61,6 +61,18 @@ PID=\$(cat '$pidfile' 2>/dev/null || true)
 if [ -n "\$PID" ] && kill -0 "\$PID" 2>/dev/null; then
   kill "\$PID" 2>/dev/null || true
   for _ in 1 2 3 4 5 6 7 8 9 10; do kill -0 "\$PID" 2>/dev/null || break; sleep 0.3; done
+  # issue 930 live incident: a wedged painter SURVIVED the bare TERM (kept flipping KMS pages,
+  # so the whole lipsync recording captured the dual-QR instead of the face while ffmpeg wrote
+  # into an invisible fb0). Escalate to SIGKILL, and FAIL LOUD if even that leaves it alive --
+  # a surviving painter makes the upcoming playback silently unrecordable.
+  if kill -0 "\$PID" 2>/dev/null; then
+    kill -9 "\$PID" 2>/dev/null || true
+    for _ in 1 2 3 4 5; do kill -0 "\$PID" 2>/dev/null || break; sleep 0.3; done
+  fi
+  if kill -0 "\$PID" 2>/dev/null; then
+    echo "FAIL: TEST-mode painter (pid \$PID) survived TERM+KILL -- refusing to start lipsync playback under a live painter" >&2
+    exit 1
+  fi
 fi
 rm -f '$pidfile'
 CMDS
