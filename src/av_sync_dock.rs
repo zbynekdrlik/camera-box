@@ -909,6 +909,38 @@ mod tests {
     }
 
     #[test]
+    fn corrector_holds_when_a_landed_correction_lands_exactly_on_the_bands_upper_edge() {
+        // #942 review finding: at the narrowest possible band (margin floors at
+        // DOCK_LOCK_MIN_MARGIN_MS == 1.0, e.g. mad_ms <= 1.0 or non-finite), round()-to-mid
+        // targeting can land ts_new EXACTLY at the band's upper edge (2*margin) -- a value the
+        // closed-form proof's [mid-0.5, mid+0.5] guarantee explicitly allows, but a half-open
+        // [lo, hi) Hold check then treats as "still outside", causing one pointless extra
+        // actuation the very next time the SAME now-converged offset is measured.
+        let mad_ms = 1.0; // margin floors at DOCK_LOCK_MIN_MARGIN_MS == 1.0, band width == 1.0
+        let mut c = DockLockCorrector::new(5, 30.0);
+        let action = c.decide(true, 0.0, mad_ms, 950, 1_000_000_000);
+        let new_delay = match action {
+            DockLockAction::Apply(v) => v,
+            DockLockAction::Hold => panic!("offset_ms=0.0 is well outside the band -- must correct"),
+        };
+        let delta = (new_delay - 950) as f64;
+        let ts_new = 0.0 - delta;
+        assert!(
+            (2.0 - 1e-9..2.0 + 1e-9).contains(&ts_new),
+            "test setup: this scenario must land exactly at the band's upper edge (2.0): ts_new={ts_new}"
+        );
+        // The SAME already-converged offset, measured again once the cooldown elapses, must now
+        // Hold -- landing exactly on the upper edge is a valid resting state, not "still needs
+        // correcting" (which would otherwise re-trip a pointless extra actuation forever).
+        let action2 = c.decide(true, ts_new, mad_ms, new_delay, 32_000_000_000);
+        assert_eq!(
+            action2,
+            DockLockAction::Hold,
+            "a correction landing exactly on the band's upper edge must be recognized as settled"
+        );
+    }
+
+    #[test]
     fn corrector_never_lands_below_the_safety_margin_across_many_offsets_mads_and_deploys() {
         // The closed-form invariant, swept over a wide range of measured offsets, cluster MADs,
         // and current delays, WITHOUT the step clamp interfering (max_step huge) so the single
