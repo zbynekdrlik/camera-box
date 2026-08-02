@@ -777,9 +777,14 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
   # changes -- re-enabling a retired camera just flows through automatically.
   PREFLIGHT_DANTESYNC_SECONDARY=""
   PREFLIGHT_DANTESYNC_SECONDARY_NAMES=""
+  # Resolve the secondary membership ONCE -- it is a pure function of CAMERA_ACTIVE_SET and cannot
+  # change mid-loop, so re-invoking it per candidate would just re-parse the same set in a fresh
+  # subshell each iteration (the sibling cleanup() loops resolve it once, as their loop head, for
+  # the same reason -- do NOT repeat their loop-head text here, it is a pinned static anchor).
+  _pfdsl_secondary=" $(camera_active_secondary_set) "
   for _pfdsl in $PREFLIGHT_DANTESYNC_LINUX; do
     _pfdslbox="${_pfdsl%%=*}"
-    case " $(camera_active_secondary_set) " in
+    case "$_pfdsl_secondary" in
       *" ${_pfdslbox} "*)
         PREFLIGHT_DANTESYNC_SECONDARY="${PREFLIGHT_DANTESYNC_SECONDARY:+$PREFLIGHT_DANTESYNC_SECONDARY }${_pfdsl}"
         PREFLIGHT_DANTESYNC_SECONDARY_NAMES="${PREFLIGHT_DANTESYNC_SECONDARY_NAMES:+$PREFLIGHT_DANTESYNC_SECONDARY_NAMES }${_pfdslbox}"
