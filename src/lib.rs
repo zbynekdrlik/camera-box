@@ -367,5 +367,11 @@ pub mod asrc_bench;
 // the asrc_bench.rs pattern; see the module's own doc comment for the root cause + design.
 pub mod asrc_outer_loop;
 
+// #945 — capture/emit-thread WEDGE self-watchdog: the pure decision for whether the capture
+// loop's blocking V4L2 dequeue has gone stale long enough to treat the loop as provably dead.
+// No probe deps, so it unit-tests Tier-0; `src/main.rs`'s capture loop + a dedicated watchdog
+// thread call into it.
+pub mod capture_wedge;
+
 #[cfg(feature = "probe")]
 pub mod probe;
