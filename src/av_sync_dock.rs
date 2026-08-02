@@ -822,6 +822,73 @@ mod tests {
         );
     }
 
+    // ---- #942: hold band scales with the cluster's own noise, never a fixed 1ms dead zone ----
+
+    #[test]
+    fn corrector_never_actuates_once_offset_settles_inside_the_noise_scaled_band() {
+        // The live-rig bug (#942): with mad_ms ~15 (the ticket's own measured 10.0-18.0ms field),
+        // the OLD 1ms-wide dead zone ([margin, margin+1)) actuated on nearly every trusted sample,
+        // because a realistic noisy offset almost never lands in a 1ms window. The fix widens the
+        // hold band to [margin, 2*margin) -- as wide as the cluster's own measured dispersion. A
+        // deterministic "noisy but settled" sequence (offsets wandering inside the band, the way a
+        // converged lock's own measurement noise would look) must produce ZERO Apply actions.
+        let mad_ms = 15.0; // inside [DOCK_LOCK_MIN_MARGIN_MS, DOCK_CLUSTER_MAX_MAD_MS] already
+        let band_lo = mad_ms; // margin == mad_ms here (no clamping needed)
+        let band_hi = mad_ms * 2.0;
+        // A deterministic pseudo-noisy sequence spanning most of the band width, landing strictly
+        // inside [band_lo, band_hi) on every sample -- the realistic "settled lock, still jittering
+        // on measurement noise" case the ticket describes.
+        let offsets = [
+            15.5, 22.0, 29.4, 18.0, 26.5, 16.2, 28.9, 21.0, 24.7, 17.3, 27.8, 19.9, 23.3, 15.9,
+        ];
+        for &off in &offsets {
+            assert!(
+                off >= band_lo && off < band_hi,
+                "test fixture bug: {off} must itself be inside [{band_lo}, {band_hi})"
+            );
+        }
+        let mut c = DockLockCorrector::new(5, 30.0);
+        let mut applies = 0usize;
+        // Cooldown satisfied on every sample (30s apart, min_reapply_s == 30.0) so a lingering
+        // cooldown gate can never be the reason nothing applies -- only the band itself must.
+        for (i, &off) in offsets.iter().enumerate() {
+            let now_ns = (i as u64 + 1) * 30_000_000_000;
+            if matches!(
+                c.decide(true, off, mad_ms, 950, now_ns),
+                DockLockAction::Apply(_)
+            ) {
+                applies += 1;
+            }
+        }
+        assert_eq!(
+            applies, 0,
+            "a noisy-but-in-band offset sequence must never actuate the live A/V actuator (#942)"
+        );
+    }
+
+    #[test]
+    fn corrector_still_corrects_the_forbidden_audio_early_zone_below_the_band_floor() {
+        // The #942 hold-band widening must NOT weaken the "audio never early" invariant: an offset
+        // below the band's low edge (including outright negative -- audio physically ahead of
+        // video) still triggers a correction, exactly as before the fix.
+        let mut c = DockLockCorrector::new(5, 30.0);
+        assert!(
+            matches!(
+                c.decide(true, -5.0, 15.0, 950, 1_000_000_000),
+                DockLockAction::Apply(_)
+            ),
+            "an offset below the hold band's floor must still correct, never silently Hold"
+        );
+        let mut c2 = DockLockCorrector::new(5, 30.0);
+        assert!(
+            matches!(
+                c2.decide(true, 0.0, 15.0, 950, 1_000_000_000),
+                DockLockAction::Apply(_)
+            ),
+            "offset_ms == 0.0 (audio/video coincident) is still below margin -- must correct"
+        );
+    }
+
     #[test]
     fn corrector_never_lands_below_the_safety_margin_across_many_offsets_mads_and_deploys() {
         // The closed-form invariant, swept over a wide range of measured offsets, cluster MADs,
