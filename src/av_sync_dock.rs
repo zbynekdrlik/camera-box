@@ -445,8 +445,13 @@ pub enum DockLockAction {
 /// ((ts_ms - mid) - g)`, and since `g` is the NEAREST integer to `ts_ms - mid`, `|(ts_ms - mid) -
 /// g| <= 0.5`, i.e. `ts_new` is in `[mid - 0.5, mid + 0.5]`. Because `margin >=
 /// DOCK_LOCK_MIN_MARGIN_MS = 1.0`, `mid - 0.5 = 1.5*margin - 0.5 >= margin = lo` and `mid + 0.5 <=
-/// 2*margin = hi` — so `ts_new` always lands inside `[lo, hi]`, and since `lo = margin > 0`,
-/// `ts_new` is always strictly positive, never merely non-negative. `g` positive means the video
+/// 2*margin = hi` — so `ts_new` always lands inside `[lo, hi]` (note: the CLOSED interval — `hi`
+/// itself is a reachable value of `ts_new`, even though the hold-band CHECK above is half-open;
+/// landing exactly on `hi` is not a resting state, it is corrected by exactly one more step toward
+/// `mid` on the next trusted measurement, then settles — see
+/// `corrector_settles_within_one_extra_tick_when_a_landed_correction_hits_the_bands_exact_edge`),
+/// and since `lo = margin > 0`, `ts_new` is always strictly positive, never merely non-negative.
+/// `g` positive means the video
 /// is currently arriving too early relative to the target (bring it later, increase delay); `g`
 /// negative means video is lagging (audio is early), so the delay is REDUCED — same physical
 /// direction the offline `required_delay_ms` already uses. Stepping toward the band's MIDDLE
@@ -529,7 +534,13 @@ impl DockLockCorrector {
         // 1ms dead zone: [band_lo, band_hi) = [margin, 2*margin), i.e. as wide as the SAME clamped
         // dispersion the low edge already uses. Any offset already inside it is left alone -- no
         // actuator write at all (this is what stopped the live limit-cycle: a 10-25ms noise field
-        // no longer trips a 1ms-wide window on nearly every trusted sample).
+        // no longer trips a 1ms-wide window on nearly every trusted sample). Deliberately
+        // HALF-OPEN at the upper edge, matching the deliberate "nudge toward mid, not just past
+        // the edge" intent for a residual sitting exactly at 2*margin (review finding, investigated
+        // and reverted -- see corrector_settles_within_one_extra_tick_when_a_landed_correction_
+        // hits_the_bands_exact_edge: closing this edge broke the tested nudge-to-middle behavior at
+        // ordinary margins; the narrow-margin case this was meant to help is provably NOT a
+        // recurring limit-cycle -- it resolves in exactly one more correction, then Holds).
         let band_lo = margin;
         let band_hi = margin * 2.0;
         if offset_ms >= band_lo && offset_ms < band_hi {
@@ -909,34 +920,52 @@ mod tests {
     }
 
     #[test]
-    fn corrector_holds_when_a_landed_correction_lands_exactly_on_the_bands_upper_edge() {
-        // #942 review finding: at the narrowest possible band (margin floors at
+    fn corrector_settles_within_one_extra_tick_when_a_landed_correction_hits_the_bands_exact_edge()
+    {
+        // #942 review finding, investigated: at the narrowest possible band (margin floors at
         // DOCK_LOCK_MIN_MARGIN_MS == 1.0, e.g. mad_ms <= 1.0 or non-finite), round()-to-mid
         // targeting can land ts_new EXACTLY at the band's upper edge (2*margin) -- a value the
-        // closed-form proof's [mid-0.5, mid+0.5] guarantee explicitly allows, but a half-open
-        // [lo, hi) Hold check then treats as "still outside", causing one pointless extra
-        // actuation the very next time the SAME now-converged offset is measured.
+        // closed-form proof's [mid-0.5, mid+0.5] guarantee explicitly allows. The band's own
+        // Hold check is half-open ([lo, hi)), so that landed value is (correctly) treated as
+        // "still outside" on the very next measurement -- but this is NOT a recurrence of the
+        // #942 limit-cycle: it costs exactly ONE extra correction (nudging toward the band's
+        // middle, same as at any other margin), which lands solidly inside the band and Holds
+        // permanently after that. Making the upper edge inclusive to avoid this one extra tick
+        // was tried and REVERTED -- it broke the deliberate "still nudge toward mid, don't just
+        // stop at the edge" behavior for ordinary (non-degenerate) margins, pinned by
+        // corrector_respects_the_hardware_clamp_at_the_ceiling. This test instead pins the
+        // property that actually matters: the sequence TERMINATES within one extra tick, it
+        // never keeps cycling.
         let mad_ms = 1.0; // margin floors at DOCK_LOCK_MIN_MARGIN_MS == 1.0, band width == 1.0
         let mut c = DockLockCorrector::new(5, 30.0);
-        let action = c.decide(true, 0.0, mad_ms, 950, 1_000_000_000);
-        let new_delay = match action {
+        let action1 = c.decide(true, 0.0, mad_ms, 950, 1_000_000_000);
+        let delay1 = match action1 {
             DockLockAction::Apply(v) => v,
-            DockLockAction::Hold => panic!("offset_ms=0.0 is well outside the band -- must correct"),
+            DockLockAction::Hold => {
+                panic!("offset_ms=0.0 is well outside the band -- must correct")
+            }
         };
-        let delta = (new_delay - 950) as f64;
-        let ts_new = 0.0 - delta;
+        let ts1 = 0.0 - (delay1 - 950) as f64;
         assert!(
-            (2.0 - 1e-9..2.0 + 1e-9).contains(&ts_new),
-            "test setup: this scenario must land exactly at the band's upper edge (2.0): ts_new={ts_new}"
+            (2.0 - 1e-9..2.0 + 1e-9).contains(&ts1),
+            "test setup: this scenario must land exactly at the band's upper edge (2.0): ts1={ts1}"
         );
-        // The SAME already-converged offset, measured again once the cooldown elapses, must now
-        // Hold -- landing exactly on the upper edge is a valid resting state, not "still needs
-        // correcting" (which would otherwise re-trip a pointless extra actuation forever).
-        let action2 = c.decide(true, ts_new, mad_ms, new_delay, 32_000_000_000);
+
+        // One more trusted measurement of that SAME landed value, past cooldown: the corrector
+        // may nudge it once more toward mid, but the RESULT must then be a genuine resting state.
+        let action2 = c.decide(true, ts1, mad_ms, delay1, 32_000_000_000);
+        let (delay2, ts2) = match action2 {
+            DockLockAction::Apply(v) => (v, ts1 - (v - delay1) as f64),
+            DockLockAction::Hold => (delay1, ts1), // already acceptable -- also a valid outcome
+        };
+
+        // A THIRD trusted measurement of the resulting (now-stable) offset must Hold -- proving
+        // the sequence terminates within one extra tick, never limit-cycles.
+        let action3 = c.decide(true, ts2, mad_ms, delay2, 63_000_000_000);
         assert_eq!(
-            action2,
+            action3,
             DockLockAction::Hold,
-            "a correction landing exactly on the band's upper edge must be recognized as settled"
+            "must settle within at most one extra correction, never keep cycling: ts1={ts1} ts2={ts2}"
         );
     }
 
