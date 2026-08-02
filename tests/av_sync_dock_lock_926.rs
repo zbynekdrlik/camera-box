@@ -110,7 +110,7 @@ int main()
     {
         CbDockLockCorrector c(50, 30.0);
         CbDockLockAction a = c.decide(true, 42.0, 5.0, 950, 1000000000ull);
-        CHECK(a.apply && a.new_delay_ms == 987, "42ms of excess audio-lateness must be reduced to the margin");
+        CHECK(a.apply && a.new_delay_ms == 985, "42ms of excess audio-lateness must be reduced toward the band's middle (#942)");
     }
 
     // (8) The never-below-margin invariant, swept across a range of offsets/mads/current-delays
@@ -130,7 +130,9 @@ int main()
                         double delta_applied = (double)(new_delay - currents[ci]);
                         double ts_new = offsets[oi] - delta_applied;
                         double margin = mads[mi] < 1.0 ? 1.0 : (mads[mi] > 25.0 ? 25.0 : mads[mi]);
-                        CHECK(ts_new >= margin - 1e-9 && ts_new < margin + 1.0 + 1e-9,
+                        // #942: the hold band is [margin, 2*margin), not [margin, margin+1).
+                        double band_hi = margin * 2.0;
+                        CHECK(ts_new >= margin - 1e-9 && ts_new < band_hi + 1e-9,
                               "never-below-margin invariant violated for some (offset, mad, current) triple");
                     } else {
                         CHECK(new_delay == 3 || new_delay == 2000, "hit_rail flag disagrees with new_delay");
@@ -173,8 +175,10 @@ int main()
         CbDockLockAction a2 = c2.decide(true, 100.0, 500.0, 950, 1000000000ull);
         CHECK(a2.apply, "100ms excess must be corrected even with an absurd mad");
         double ts_new2 = 100.0 - (double)(a2.new_delay_ms - 950);
-        CHECK(ts_new2 >= CB_CLUSTER_MAX_MAD_MS - 1e-9 && ts_new2 < CB_CLUSTER_MAX_MAD_MS + 1.0 + 1e-9,
-              "margin must clamp at CB_CLUSTER_MAX_MAD_MS");
+        // #942: hold band is [margin, 2*margin), so a clamped margin of CB_CLUSTER_MAX_MAD_MS
+        // gives band [25, 50).
+        CHECK(ts_new2 >= CB_CLUSTER_MAX_MAD_MS - 1e-9 && ts_new2 < CB_CLUSTER_MAX_MAD_MS * 2.0 + 1e-9,
+              "margin-scaled band must clamp its low edge at CB_CLUSTER_MAX_MAD_MS");
     }
 
     // (11) #926 fix-up finding 10: the DEFAULT-constructed corrector (dock()-equivalent) must
@@ -220,6 +224,29 @@ int main()
         CHECK(after.ok && std::fabs(after.offset_ms - 0.8) < 1e-6,
               "rebase must shift retained samples so the window reads the post-correction value");
         CHECK(after.mad_ms < 1.0, "rebasing must not inflate dispersion (finding 7)");
+    }
+
+    // (13) #942: the hold band scales with the cluster's own noise -- a noisy-but-in-band sequence
+    // (mad_ms=15, mirroring the ticket's own measured 10.0-18.0ms field) must never actuate, while
+    // an offset below the band floor (including 0.0/negative) must still correct.
+    {
+        double mad_ms = 15.0;
+        double offsets[] = {15.5, 22.0, 29.4, 18.0, 26.5, 16.2, 28.9, 21.0, 24.7, 17.3, 27.8, 19.9, 23.3, 15.9};
+        CbDockLockCorrector c;
+        int applies = 0;
+        for (size_t i = 0; i < sizeof(offsets) / sizeof(offsets[0]); i++) {
+            uint64_t now_ns = (uint64_t)(i + 1) * 30000000000ull;
+            if (c.decide(true, offsets[i], mad_ms, 950, now_ns).apply)
+                applies++;
+        }
+        CHECK(applies == 0, "a noisy-but-in-band offset sequence must never actuate (#942)");
+
+        CbDockLockCorrector c2;
+        CHECK(c2.decide(true, -5.0, 15.0, 950, 1000000000ull).apply,
+              "an offset below the hold band's floor must still correct, never silently Hold");
+        CbDockLockCorrector c3;
+        CHECK(c3.decide(true, 0.0, 15.0, 950, 1000000000ull).apply,
+              "offset_ms == 0.0 (audio/video coincident) is still below margin -- must correct");
     }
 
     if (g_failures == 0) {
