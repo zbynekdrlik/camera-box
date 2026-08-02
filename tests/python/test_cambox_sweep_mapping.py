@@ -133,12 +133,18 @@ def test_cambox_sweep_default_covers_every_camera_in_the_canonical_active_mappin
     )
 
 
-def test_default_active_set_is_exactly_three_cameras():
+def test_default_active_set_is_exactly_two_cameras_947():
     """#827: cam5/cam6/cam7 retired (grabber cards returned to their owner, boxes powered off).
-    #898 (2026-07-31): cam3 ALSO retired (grabber card physically destroyed) -- today's declared
-    active fleet is exactly cam1/cam2/cam4."""
+    #898 (2026-07-31): cam3 ALSO retired (grabber card physically destroyed).
+    issue 947 (2026-08-02): cam4 ALSO retired -- its grabber wedges the capture leg within minutes
+    of every start -- so today's declared active fleet is exactly cam1/cam2."""
     canonical = _scene_to_camera_from_active_map()
-    assert set(canonical.values()) == {"CAM1", "CAM2", "CAM4"}, canonical
+    assert set(canonical.values()) == {"CAM1", "CAM2"}, canonical
+    for retired in ("CAM3", "CAM4", "CAM5", "CAM6", "CAM7"):
+        assert retired not in canonical.values(), (
+            f"{retired} is retired from CAMERA_ACTIVE_SET -- it must not appear in the "
+            f"default resolved map: {canonical}"
+        )
 
 
 def test_reactivating_a_retired_camera_flows_through_both_sources_of_truth():
