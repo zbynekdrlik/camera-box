@@ -140,6 +140,22 @@ the project `CLAUDE.md`), so the tree is never clean for a deploy. Add
 `# airuleset:deploy-dirty-ok <reason>` inline on each Bash call in this repo that does the
 transfer/deploy.
 
+### 5b. The FAST-DLL variant (libobs-only change) — when the full bundle is overkill (issue 960, 2026-08-03)
+
+When the merged vendor change touches ONLY `vendor/obs-studio/libobs/**` (compiles into `obs.dll`),
+the `windows-genlock-fast` artifact (`obs-genlock-fast-dll`: obs.dll + GENLOCK_BUILD_SHA.txt +
+fast manifest, ~1.3 MB) replaces steps 1-2 above — but FIRST prove the fast build's tree matches
+the merged head: `git diff <fast-build-sha> <merged-head> -- vendor/` must be EMPTY (the fast run
+may have fired on an earlier commit whose later siblings were Rust/tests-only). Copy the artifact's
+`GENLOCK_BUILD_SHA.txt` to the install root; do NOT copy its manifest (it lists only obs.dll —
+overwriting the box's full-bundle `BUNDLE_MANIFEST.json` would misdescribe the install). Relaunch:
+resolve the box's `OBS Studio.lnk` TargetPath+Arguments via `WScript.Shell` COM and pass THAT as
+the `Win32_Process Create` CommandLine — a bare-exe CIM launch silently drops the box-specific
+shortcut params (strih's `--enable-media-stream --verbose` for the interkom Browser source; on
+stream the lnk targets the guarded launcher, which then owns the issue-786 redraw). PowerShell
+gotcha from the same session: `(Get-Content file)[0]` on a ONE-line file indexes a CHAR (String,
+not array) — read markers with `-TotalCount 1` or guard on type.
+
 ## 6. A hook-BLOCKED Bash call runs NOTHING — including its own heredocs
 
 When a PreToolUse hook blocks a Bash call, the ENTIRE call is refused — a heredoc inside that call
