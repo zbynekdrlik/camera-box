@@ -247,6 +247,61 @@ fn is_stale_empty_epoch_is_stale_even_when_the_arithmetic_would_otherwise_read_f
 }
 
 // ================================================================================================
+// scripts/lib/avsync-heartbeat.sh -- issue 968's verdict-forward pure helpers.
+// ================================================================================================
+
+#[test]
+fn last_status_picks_the_status_of_the_last_numeric_line_968() {
+    let segment = "garbage\n100\tno-signal: clip too small (94869 B)\n200\tmeasured: OK verdict\n";
+    let (code, out, err) = run_lib(&format!("avsync_heartbeat_last_status '{segment}'"));
+    assert_eq!(code, 0, "stderr={err}");
+    assert_eq!(out.trim(), "measured: OK verdict");
+}
+
+#[test]
+fn last_status_is_empty_when_nothing_parses_968() {
+    let (code, out, err) = run_lib("avsync_heartbeat_last_status ''");
+    assert_eq!(code, 0, "stderr={err}");
+    assert_eq!(out.trim(), "");
+}
+
+#[test]
+fn is_forwardable_verdict_true_for_a_real_zniz_or_zvys_recommendation_968() {
+    for status in [
+        "measured: [2026-07-26 14:25:40] AV offset +2 fr (+80 ms) conf 3.6 :: audio predbieha video o ~80 ms -> ZNIZ '2ME PGM' latency o 80",
+        "measured: [2026-07-26 14:25:40] AV offset -2 fr (-80 ms) conf 3.6 :: video predbieha audio o ~80 ms -> ZVYS '2ME PGM' latency o 80",
+    ] {
+        let (code, _out, err) = run_lib(&format!(
+            "avsync_heartbeat_is_forwardable_verdict \"{status}\""
+        ));
+        assert_eq!(
+            code, 0,
+            "a genuine measured misalignment verdict (ZNIZ/ZVYS) must be forwardable: {status} stderr={err}"
+        );
+    }
+}
+
+#[test]
+fn is_forwardable_verdict_false_for_heartbeat_only_states_968() {
+    // #968: silence when in sync, message when misaligned -- mirrors av_sync_measure.py's own
+    // threshold semantics. None of these must be forwarded.
+    for status in [
+        "no-signal: clip too small (94869 B)",
+        "measured: TIMEOUT: av_sync_measure.py did not complete within 180s -- killed to prevent a wedged watchdog loop",
+        "measured: [2026-07-26 14:25:40] AV offset +0 fr (+0 ms) conf 3.6 :: A/V sync OK (offset 0 ms)",
+        "",
+    ] {
+        let (code, _out, err) = run_lib(&format!(
+            "avsync_heartbeat_is_forwardable_verdict \"{status}\""
+        ));
+        assert_eq!(
+            code, 1,
+            "a heartbeat-only / in-sync state must NEVER be forwarded: {status:?} stderr={err}"
+        );
+    }
+}
+
+// ================================================================================================
 // Behavioral: run main() with a stubbed `sshpass` returning a fixed combined probe response, and a
 // fake `python3` standing in for the real notify call.
 // ================================================================================================
@@ -255,6 +310,7 @@ fn fake_bin_dir(
     watchdog_body: &str,
     vlc_body: &str,
     notify_marker: &std::path::Path,
+    discord_marker: &std::path::Path,
 ) -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("tempdir");
     let sshpass = dir.path().join("sshpass");
@@ -286,6 +342,23 @@ fn fake_bin_dir(
     std::os::unix::fs::PermissionsExt::set_mode(&mut perm2, 0o755);
     fs::set_permissions(&python3, perm2).unwrap();
 
+    // #968 -- fake `curl` standing in for the real Discord bot-API POST. Logs its FULL argv (which
+    // includes the -d JSON payload) to discord_marker, and mimics real `curl -o /dev/null -w
+    // '%{http_code}'` by printing ONLY "200" to stdout (no trailing newline, matching curl's own
+    // -w format behavior) -- never a real network call from a test.
+    let curl = dir.path().join("curl");
+    fs::write(
+        &curl,
+        format!(
+            "#!/bin/sh\necho \"CALLED: $*\" >> {}\nprintf '200'\nexit 0\n",
+            discord_marker.display()
+        ),
+    )
+    .expect("write curl stub");
+    let mut perm3 = fs::metadata(&curl).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perm3, 0o755);
+    fs::set_permissions(&curl, perm3).unwrap();
+
     dir
 }
 
@@ -293,6 +366,8 @@ struct Harness {
     _tmp: tempfile::TempDir,
     state_file: PathBuf,
     marker_file: PathBuf,
+    discord_marker_file: PathBuf,
+    discord_env_file: PathBuf,
     fake_bin: tempfile::TempDir,
 }
 
@@ -301,30 +376,48 @@ impl Harness {
         let tmp = tempfile::tempdir().expect("tempdir");
         let state_file = tmp.path().join("state");
         let marker_file = tmp.path().join("notify-calls.log");
-        let fake_bin = fake_bin_dir(watchdog_body, vlc_body, &marker_file);
+        let discord_marker_file = tmp.path().join("discord-calls.log");
+        let discord_env_file = tmp.path().join("discord.env");
+        // #968 -- a fixture Discord .env, isolated per test (never the real
+        // ~/.claude/channels/discord/.env -- ci-testing-gotchas.md's shared-host-path lesson).
+        fs::write(
+            &discord_env_file,
+            "DISCORD_BOT_TOKEN=fake-test-token\nDISCORD_MENTION_ZBYNEK=123456789012345678\n",
+        )
+        .expect("write discord env fixture");
+        let fake_bin = fake_bin_dir(watchdog_body, vlc_body, &marker_file, &discord_marker_file);
         Harness {
             _tmp: tmp,
             state_file,
             marker_file,
+            discord_marker_file,
+            discord_env_file,
             fake_bin,
         }
     }
 
     fn run_main(&self) -> (i32, String, String) {
+        self.run_main_with(&[])
+    }
+
+    fn run_main_with(&self, extra_env: &[(&str, &str)]) -> (i32, String, String) {
         let path = format!(
             "{}:{}",
             self.fake_bin.path().display(),
             std::env::var("PATH").unwrap_or_default()
         );
-        let out = Command::new("bash")
-            .arg("-c")
+        let mut cmd = Command::new("bash");
+        cmd.arg("-c")
             .arg(". \"$SCRIPT\"\nmain")
             .env("SCRIPT", script())
             .env("AVSYNC_HEARTBEAT_STATE_FILE", &self.state_file)
             .env("AIRULESET_NOTIFY", "/dev/null/does-not-matter")
-            .env("PATH", path)
-            .output()
-            .expect("run bash harness");
+            .env("AVSYNC_DISCORD_ENV", &self.discord_env_file)
+            .env("PATH", path);
+        for (k, v) in extra_env {
+            cmd.env(k, v);
+        }
+        let out = cmd.output().expect("run bash harness");
         (
             out.status.code().unwrap_or(-1),
             String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -337,6 +430,22 @@ impl Harness {
             .unwrap_or_default()
             .lines()
             .count()
+    }
+
+    fn discord_call_count(&self) -> usize {
+        fs::read_to_string(&self.discord_marker_file)
+            .unwrap_or_default()
+            .lines()
+            .count()
+    }
+
+    fn discord_last_call(&self) -> String {
+        fs::read_to_string(&self.discord_marker_file)
+            .unwrap_or_default()
+            .lines()
+            .last()
+            .unwrap_or_default()
+            .to_string()
     }
 }
 
@@ -351,6 +460,10 @@ fn fresh_body(status: &str) -> String {
 }
 
 const STALE_BODY: &str = "1000000000\tstale-old";
+
+// #968 -- a FIXED epoch (never `$(date +%s)`) so repeated Harness::run_main() calls in the same
+// test see the byte-identical epoch every time (needed for the "never forwarded twice" proof).
+const MEASURED_ZNIZ_BODY: &str = "1785778776\tmeasured: [2026-07-26 14:25:40] AV offset +2 fr (+80 ms) conf 3.6 :: audio predbieha video o ~80 ms -> ZNIZ '2ME PGM' latency o 80";
 
 #[test]
 fn both_legs_fresh_never_alerts() {
@@ -444,6 +557,7 @@ fn dry_run_never_calls_notify() {
         .env("SCRIPT", script())
         .env("AVSYNC_HEARTBEAT_STATE_FILE", &h.state_file)
         .env("AIRULESET_NOTIFY", "/dev/null/does-not-matter")
+        .env("AVSYNC_DISCORD_ENV", &h.discord_env_file)
         .env("PATH", path)
         .output()
         .expect("run bash harness");
@@ -452,6 +566,11 @@ fn dry_run_never_calls_notify() {
         h.notify_call_count(),
         0,
         "DRY_RUN=1 must never fire a real notify call"
+    );
+    assert_eq!(
+        h.discord_call_count(),
+        0,
+        "DRY_RUN=1 must never fire a real Discord verdict-forward post either"
     );
 }
 
@@ -507,6 +626,132 @@ fn empty_probe_output_ssh_failure_never_falsely_alerts() {
     assert_eq!(
         calls, 0,
         "an ssh failure must never be read as a false stale alert"
+    );
+}
+
+// ================================================================================================
+// issue 968 -- the durable Discord verdict-forward leg (dev1-side bot POST).
+// ================================================================================================
+
+#[test]
+fn fresh_measured_verdict_forwards_exactly_once_with_the_expected_message_shape_968() {
+    let h = Harness::new(MEASURED_ZNIZ_BODY, &fresh_body("ok"));
+    let (code, _out, err) = h.run_main();
+    assert_eq!(code, 0, "stderr={err}");
+    assert_eq!(
+        h.discord_call_count(),
+        1,
+        "a fresh measured misalignment verdict must forward exactly once"
+    );
+    let call = h.discord_last_call();
+    assert!(
+        call.contains("<@123456789012345678>"),
+        "must prepend the owner mention (bare numeric DISCORD_MENTION_ZBYNEK wrapped as <@id>): {call}"
+    );
+    assert!(
+        call.contains("A/V-sync meranie:"),
+        "must use the expected message shape: {call}"
+    );
+    assert!(
+        call.contains(
+            "AV offset +2 fr (+80 ms) conf 3.6 :: audio predbieha video o ~80 ms -> ZNIZ"
+        ),
+        "must carry the FULL av_sync_measure.py verdict text (the 'measured: ' prefix stripped): {call}"
+    );
+    assert!(
+        call.contains("Authorization: Bot fake-test-token"),
+        "must authenticate with the bot token read from the fixture .env: {call}"
+    );
+    assert!(
+        call.contains("channels/1373592666733940816/messages"),
+        "must POST to the alerts-snv thread by default: {call}"
+    );
+}
+
+#[test]
+fn the_same_epoch_is_never_forwarded_twice_968() {
+    let h = Harness::new(MEASURED_ZNIZ_BODY, &fresh_body("ok"));
+    let (code, _out, err) = h.run_main();
+    assert_eq!(code, 0, "stderr={err}");
+    assert_eq!(h.discord_call_count(), 1);
+
+    let (code2, _out2, err2) = h.run_main();
+    assert_eq!(code2, 0, "stderr={err2}");
+    assert_eq!(
+        h.discord_call_count(),
+        1,
+        "the SAME epoch must never be forwarded twice, even on a repeated pass"
+    );
+}
+
+#[test]
+fn no_signal_and_timeout_and_in_sync_lines_never_forward_968() {
+    let no_signal = Harness::new(
+        &fresh_body("no-signal: clip too small (94869 B)"),
+        &fresh_body("ok"),
+    );
+    no_signal.run_main();
+    assert_eq!(
+        no_signal.discord_call_count(),
+        0,
+        "a no-signal heartbeat must never forward"
+    );
+
+    let timeout = Harness::new(
+        &fresh_body(
+            "measured: TIMEOUT: av_sync_measure.py did not complete within 180s -- killed to prevent a wedged watchdog loop",
+        ),
+        &fresh_body("ok"),
+    );
+    timeout.run_main();
+    assert_eq!(
+        timeout.discord_call_count(),
+        0,
+        "a measured TIMEOUT (no ZNIZ/ZVYS recommendation) must never forward"
+    );
+
+    let in_sync = Harness::new(
+        &fresh_body(
+            "measured: [2026-08-03 20:00:00] AV offset +0 fr (+0 ms) conf 3.6 :: A/V sync OK (offset 0 ms)",
+        ),
+        &fresh_body("ok"),
+    );
+    in_sync.run_main();
+    assert_eq!(
+        in_sync.discord_call_count(),
+        0,
+        "an in-sync measured verdict must never forward -- silence when in sync, message when misaligned"
+    );
+}
+
+#[test]
+fn dry_run_never_posts_a_forwardable_verdict_but_logs_the_decision_968() {
+    let h = Harness::new(MEASURED_ZNIZ_BODY, &fresh_body("ok"));
+    let path = format!(
+        "{}:{}",
+        h.fake_bin.path().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(". \"$SCRIPT\"\nDRY_RUN=1\nmain")
+        .env("SCRIPT", script())
+        .env("AVSYNC_HEARTBEAT_STATE_FILE", &h.state_file)
+        .env("AIRULESET_NOTIFY", "/dev/null/does-not-matter")
+        .env("AVSYNC_DISCORD_ENV", &h.discord_env_file)
+        .env("PATH", path)
+        .output()
+        .expect("run bash harness");
+    assert!(out.status.success());
+    assert_eq!(
+        h.discord_call_count(),
+        0,
+        "DRY_RUN=1 must never actually POST a forwardable verdict"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("[dry-run] WOULD forward verdict"),
+        "must log the would-forward decision even though it never posts: {stderr}"
     );
 }
 
