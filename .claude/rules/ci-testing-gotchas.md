@@ -451,6 +451,47 @@ commit exists). **`gh run view --log` retention is finite** — very old runs in
 an empty log; treat those as "unreachable", not as evidence either way, and lean on the runs that
 DO return data.
 
+## `gh run view --log` can return ZERO lines for a freshly-completed run — fall back to the jobs API
+
+Reading a hardware-gate run's log minutes after it finished, `gh run view <id> --log` and
+`gh run view --job <job-id> --log` both returned **completely empty output** (`wc -l` = 0) with no
+error and exit 0 — indistinguishable from "the run printed nothing". The run was `completed/success`
+and its log was genuinely there; only the `gh run view` path failed to produce it. The REST endpoint
+worked immediately on the same run:
+
+```bash
+jid=$(gh run view <run-id> --json jobs --jq '.jobs[0].databaseId')
+gh api repos/zbynekdrlik/camera-box/actions/jobs/"$jid"/logs | grep -aE '<pattern>'
+```
+
+Note the `grep -a` — the API streams the log as raw bytes that grep may otherwise treat as binary
+and silently reduce to "Binary file matches". This is distinct from the finite-RETENTION case
+documented above (an OLD run whose log is genuinely gone): here the log exists and is current, and
+an empty `gh run view --log` must NOT be read as "the step produced no output" or, worse, as
+evidence a gate step did not run.
+
+## A static-anchor test that SLICES a region leaves everything outside that region unguarded — including the step's own log banner
+
+`tests/harness_render_budget_imag_report_only_888.rs` slices its asserted region from
+`--box "strih=` to `[4e/8]` and asserts hard on the strictness of the code inside it. When issue 888
+flipped imag's `[4d/8]` term from report-only back to STRICT, every in-region assertion was updated
+and the full suite went green — but the step's `echo "[4d/8] ..."` BANNER sits a few lines ABOVE
+`--box "strih=`, i.e. outside the slice, and kept printing `imag is measured but REPORT-ONLY
+(issue 888, temporary — see below)` into every gate run's log while the code aborted on failure.
+The gate was strict; its own log said it was advisory.
+
+Two rules follow, both generalizing past this one file:
+
+1. **A step's log banner is part of its contract, not decoration.** Whatever a `[N/8]` banner claims
+   about strictness/scope is what the next person debugging an abort will believe. When you change a
+   term's strictness, the banner is part of the change — grep the step's `echo` lines, not just the
+   branch you edited.
+2. **When writing a slice-based anchor test, deliberately decide where the region STARTS.** If the
+   contract you are pinning includes prose printed by the step, the region must begin at the banner
+   (or a second assertion must cover it). A region chosen for convenience — "start at the first
+   unique anchor I could find" — silently excludes everything before it, and green tests will then
+   certify a lie.
+
 ## A trailing `///` doc-comment block at the end of a `.rs` test file fails to compile if nothing follows it
 
 `error: expected item after doc comment` — a doc comment (`///`) must document an ITEM (a
