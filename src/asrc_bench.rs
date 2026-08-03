@@ -258,13 +258,18 @@ pub const MAX_SANE_INSTANTANEOUS_PPM: f64 = 100_000.0;
 /// dividing one block's own small, individually-noisy raw/master pair); (2) it is small relative
 /// to `TIME_CONSTANT_S` (20s), so it barely perturbs the EMA's own convergence — the time-based
 /// EMA discretization `alpha = 1 - exp(-dt/tau)` is mathematically EXACT for any `dt` as long as
-/// the driving ratio is constant over that `dt` (true within any 1s window), so windowed sampling
-/// produces an IDENTICAL estimator trajectory to continuous per-block sampling at the same
-/// wall-clock horizons; (3) it degenerates EXACTLY to the pre-#962 per-block behavior for any call
-/// whose OWN `master_block_s` already reaches 1.0s (the window closes on that single call, the
-/// windowed ppm reduces algebraically to that block's own instantaneous ratio) — every existing
-/// #803/#806/#960 test in this file already calls `compensate()` with blocks that sum to exactly
-/// 1.0s per window, so none of them need their assertions changed.
+/// the driving ratio is CONSTANT over that `dt`: for that idealized (noise-free) comparison,
+/// windowed sampling produces an IDENTICAL estimator trajectory to continuous per-block sampling
+/// at the same wall-clock horizons (proven by the existing gate/convergence tests below, which
+/// feed exactly this kind of constant-ppm synthetic clock and pass bit-for-bit either way). The
+/// REAL small-block case (a genuinely constant true drift, sampled through noisy/bursty block
+/// deliveries) is a close approximation rather than a literal identity — but an extremely tight
+/// one here, since the window is only `WINDOW_S / TIME_CONSTANT_S = 0.05` of the EMA's own time
+/// constant; (3) it degenerates EXACTLY to the pre-#962 per-block behavior for any call whose OWN
+/// `master_block_s` already reaches 1.0s (the window closes on that single call, the windowed ppm
+/// reduces algebraically to that block's own instantaneous ratio) — every existing servo test in
+/// this file already calls `compensate()` with blocks that sum to exactly 1.0s per window, so none
+/// of them need their assertions changed.
 pub const WINDOW_S: f64 = 1.0;
 
 /// The REAL per-source ASRC servo issue #803 ports into vendored libobs
@@ -428,22 +433,27 @@ impl AsrcCompensator for RealtimeAsrcCompensator {
             // ceiling carries no real timing information (the source was genuinely
             // starved/bursting for MOST of this window, not just jittery in how it delivered
             // otherwise-real samples) -- REJECT the whole window: no EMA update, no
-            // elapsed_lock_s credit (a garbage window must not count toward "the servo has
-            // observed enough real data to trust its estimate"). Attribute every block that fed
-            // this window to starved_block_count, preserving the pre-#962 telemetry meaning ("how
-            // many audio blocks were part of an unusable measurement") at window granularity.
+            // elapsed_lock_s credit, no target recompute, NO SLEW STEP -- HOLD applied_ppm at
+            // EXACTLY its pre-rejection value (even if it was still mid-transition toward an
+            // already-decided, legitimate target from an earlier accepted window; a garbage
+            // window must not be allowed to continue advancing that transition either).
+            // Mirrors the pre-#962 per-block early-return exactly, now at window granularity.
+            // Attribute every block that fed this window to starved_block_count, preserving the
+            // pre-#962 telemetry meaning ("how many audio blocks were part of an unusable
+            // measurement") at window granularity.
             if window_ppm.abs() > MAX_SANE_INSTANTANEOUS_PPM {
                 self.starved_block_count =
                     self.starved_block_count.saturating_add(window_block_count);
-            } else {
-                // TIME-based EMA smoothing factor over the WINDOW's real duration -- mathematically
-                // identical to updating per-block with the same total elapsed time (the
-                // discretization alpha = 1 - exp(-dt/tau) is exact for a piecewise-constant
-                // driving value; see WINDOW_S's own doc comment).
-                let alpha = 1.0 - (-window_master_s / TIME_CONSTANT_S).exp();
-                self.estimated_ppm = alpha * window_ppm + (1.0 - alpha) * self.estimated_ppm;
-                self.elapsed_lock_s += window_master_s;
+                return self.corrected_advance(raw_advance_s);
             }
+
+            // TIME-based EMA smoothing factor over the WINDOW's real duration -- mathematically
+            // identical to updating per-block with the same total elapsed time (the
+            // discretization alpha = 1 - exp(-dt/tau) is exact for a piecewise-constant driving
+            // value; see WINDOW_S's own doc comment).
+            let alpha = 1.0 - (-window_master_s / TIME_CONSTANT_S).exp();
+            self.estimated_ppm = alpha * window_ppm + (1.0 - alpha) * self.estimated_ppm;
+            self.elapsed_lock_s += window_master_s;
         }
 
         // Default-safe: no lock yet -> target zero compensation, never guess from a
@@ -1025,7 +1035,9 @@ mod tests {
     fn windowed_estimator_still_rejects_a_genuinely_starved_tiny_block_source_962() {
         let mut compensator = RealtimeAsrcCompensator::new();
         // Converge on a healthy small-block source first (reuses the #962 fixture at 0 true ppm).
-        feed_bursty_small_blocks(&mut compensator, 0.0, 400); // ~2.1s, past MIN_LOCK_S
+        // ~400 pairs * ~5.33ms/pair =~ 2.13s -- below MIN_LOCK_S (5s); this phase only needs to
+        // establish "no spurious starvation on healthy small blocks", not reach lock.
+        feed_bursty_small_blocks(&mut compensator, 0.0, 400);
         assert_eq!(
             compensator.starved_block_count(),
             0,

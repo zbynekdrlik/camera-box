@@ -55,6 +55,14 @@ double asrc_compensator_compensate(struct asrc_compensator *c, double raw_advanc
 	c->window_master_s += master_block_s;
 	c->window_block_count++;
 
+	/* camera-box #962: true only for a call that just closed a REJECTED window -- gates the
+	 * target/slew block below OFF (HOLDING applied_ppm at exactly its pre-rejection value, even
+	 * mid-transition toward an already-decided target) while still letting the corrected-advance
+	 * computation and the UNCONDITIONAL telemetry accumulation below run every call, exactly like
+	 * the pre-#962 per-block guard did (a sustained starve must never go silent in the ~60s log
+	 * cadence -- see the telemetry comment further down). */
+	bool window_rejected_this_call = false;
+
 	if (c->window_master_s >= ASRC_WINDOW_S) {
 		/* This window closes -- compute ONE windowed ppm value from the duration-weighted
 		 * sums (not this block's own instantaneous ratio) and feed THAT into the EMA/
@@ -76,6 +84,7 @@ double asrc_compensator_compensate(struct asrc_compensator *c, double raw_advanc
 		 * blocks were part of an unusable measurement") at window granularity. */
 		if (fabs(window_ppm) > ASRC_MAX_SANE_INSTANTANEOUS_PPM) {
 			c->starved_block_count += window_block_count;
+			window_rejected_this_call = true;
 		} else {
 			/* TIME-based EMA smoothing factor over the WINDOW's real duration --
 			 * mathematically identical to updating per-block with the same total elapsed
@@ -87,22 +96,30 @@ double asrc_compensator_compensate(struct asrc_compensator *c, double raw_advanc
 		}
 	}
 
-	/* Default-safe: no lock yet -> target zero compensation, never guess from a
-	 * still-converging estimate (camera-box #806: the outer-loop bias is folded in HERE, so it
-	 * is just as inert as the inner estimate before lock -- never applied on its own). Once
-	 * locked, add the outer-loop bias to the inner estimate and clamp the SUM to the hard ppm
-	 * bound before ever using it as a target. Mirror of src/asrc_bench.rs
-	 * RealtimeAsrcCompensator::compensate. */
-	const double target_ppm = (c->elapsed_lock_s < ASRC_MIN_LOCK_S)
-					   ? 0.0
-					   : asrc_clamp(c->estimated_ppm + c->outer_bias_ppm, -ASRC_MAX_PPM,
-							ASRC_MAX_PPM);
+	/* camera-box #962: a REJECTED window HOLDS applied_ppm at EXACTLY its pre-rejection value --
+	 * no target recompute, no slew step -- even if it was still mid-transition toward an
+	 * already-decided, legitimate target from an earlier accepted window (a garbage window must
+	 * not be allowed to continue advancing that transition either). Mirrors the pre-#962
+	 * per-block early-return exactly, now at window granularity, while still letting the shared
+	 * corrected-advance/telemetry tail below run unconditionally. */
+	if (!window_rejected_this_call) {
+		/* Default-safe: no lock yet -> target zero compensation, never guess from a
+		 * still-converging estimate (camera-box #806: the outer-loop bias is folded in HERE, so
+		 * it is just as inert as the inner estimate before lock -- never applied on its own).
+		 * Once locked, add the outer-loop bias to the inner estimate and clamp the SUM to the
+		 * hard ppm bound before ever using it as a target. Mirror of src/asrc_bench.rs
+		 * RealtimeAsrcCompensator::compensate. */
+		const double target_ppm = (c->elapsed_lock_s < ASRC_MIN_LOCK_S)
+						   ? 0.0
+						   : asrc_clamp(c->estimated_ppm + c->outer_bias_ppm, -ASRC_MAX_PPM,
+								ASRC_MAX_PPM);
 
-	/* Slew-limit the APPLIED correction toward the target -- caps how fast the resample-ratio
-	 * nudge may change, independent of how fast the estimate itself moves. */
-	const double max_step = ASRC_MAX_SLEW_PPM_PER_S * master_block_s;
-	const double delta = asrc_clamp(target_ppm - c->applied_ppm, -max_step, max_step);
-	c->applied_ppm += delta;
+		/* Slew-limit the APPLIED correction toward the target -- caps how fast the
+		 * resample-ratio nudge may change, independent of how fast the estimate itself moves. */
+		const double max_step = ASRC_MAX_SLEW_PPM_PER_S * master_block_s;
+		const double delta = asrc_clamp(target_ppm - c->applied_ppm, -max_step, max_step);
+		c->applied_ppm += delta;
+	}
 
 	const double corrected_advance_s = raw_advance_s / (1.0 + c->applied_ppm / 1000000.0);
 
@@ -111,8 +128,8 @@ double asrc_compensator_compensate(struct asrc_compensator *c, double raw_advanc
 	 * every call regardless of window-open/window-closed/starved-window state above) so the
 	 * ~60s log cadence never goes silent during a sustained starve -- exactly the moment the
 	 * new starved_blocks=N telemetry is most needed. camera-box #962: uses whatever applied_ppm
-	 * is in effect (target_ppm does not move during a rejected window, since estimated_ppm is
-	 * held), so it still reports the real correction being applied to this real audio. */
+	 * is in effect (HELD bit-exact on a rejected window -- see window_rejected_this_call above),
+	 * so it still reports the real correction being applied to this real audio. */
 	c->cumulative_correction_ms += fabs(raw_advance_s - corrected_advance_s) * 1000.0;
 	c->time_since_log_s += master_block_s;
 

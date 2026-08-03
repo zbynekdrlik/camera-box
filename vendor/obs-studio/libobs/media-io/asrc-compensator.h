@@ -161,10 +161,16 @@ EXPORT void asrc_compensator_init(struct asrc_compensator *c);
  * swr_set_compensation() call and for telemetry). camera-box #962: internally
  * accumulates raw_advance_s/master_block_s into a duration-weighted WINDOW
  * (ASRC_WINDOW_S) and only estimates/gates once per window close -- the
- * estimate/applied ppm only actually CHANGE on a call that closes a window;
- * every call still returns a corrected advance using whatever applied_ppm is
- * currently in effect. Mirror of RealtimeAsrcCompensator::compensate() in
- * src/asrc_bench.rs -- keep the two numerically identical. */
+ * ESTIMATE (and the correction TARGET derived from it) only actually change on
+ * a call that closes an ACCEPTED window. applied_ppm itself still slews
+ * toward the current target on every call (not just window-close calls),
+ * EXCEPT a call that closes a REJECTED window, which HOLDS applied_ppm at
+ * exactly its pre-rejection value (no target recompute, no slew step) -- a
+ * starved window must not be allowed to keep advancing an already-decided,
+ * legitimate slew transition either. Every call still returns a corrected
+ * advance using whatever applied_ppm is currently in effect. Mirror of
+ * RealtimeAsrcCompensator::compensate() in src/asrc_bench.rs -- keep the two
+ * numerically identical. */
 EXPORT double asrc_compensator_compensate(struct asrc_compensator *c, double raw_advance_s, double master_block_s,
 					   double *applied_ppm_out);
 
