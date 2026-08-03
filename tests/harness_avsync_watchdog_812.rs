@@ -355,7 +355,7 @@ fn install_plan_keeps_the_bare_task_names_literally_968() {
     assert!(out.status.success());
     let plan = String::from_utf8_lossy(&out.stdout);
     for needle in [
-        "the current `avsync-watchdog` task already targets",
+        "`avsync-watchdog` task already targets -- no task-action",
         "register the NEW `avsync-vlc-monitor` task",
     ] {
         assert!(
