@@ -33,15 +33,26 @@ avsync_heartbeat_probe_cmd() {
 # to "print everything to EOF, then drop the last line" instead of failing safe symmetrically with
 # its "vlc" sibling (whose range simply never matches and correctly prints nothing) -- caught by
 # code review, fixed here.
+#
+# #968: the REAL remote probe runs via cmd.exe, whose `echo TEXT & next` syntax includes a
+# TRAILING SPACE before the `&` as part of TEXT, and every line arrives CRLF-terminated over ssh
+# -- neither survives an exact `$`-anchored sed match. Normalize BOTH away up front: strip every
+# `\r` byte (heartbeat content never legitimately contains one) and tolerate optional trailing
+# whitespace on the separator line itself. Without this, the separator never matched at all: the
+# "vlc" side read permanently empty (a false CONFIRMED-stale alert every ~1h on a healthy box)
+# while the "watchdog" side accidentally leaked the vlc line into its own segment instead (the
+# unmatched end-pattern falls back to "print to EOF minus the trailing line", which is the
+# probe's own trailing blank line, not the real vlc content).
 avsync_heartbeat_extract_segment() {
   local out="$1" which="$2"
+  out="${out//$'\r'/}"
   case "$out" in
     *"$AVSYNC_HB_SEP"*) : ;;
     *) return 0 ;;   # separator absent entirely -- fail safe: BOTH sides empty, never guess
   esac
   case "$which" in
-    watchdog) printf '%s\n' "$out" | sed -n "1,/^${AVSYNC_HB_SEP}\$/p" | sed '$d' ;;
-    vlc)      printf '%s\n' "$out" | sed -n "/^${AVSYNC_HB_SEP}\$/,\$p" | sed '1d' ;;
+    watchdog) printf '%s\n' "$out" | sed -n "1,/^${AVSYNC_HB_SEP}[[:space:]]*\$/p" | sed '$d' ;;
+    vlc)      printf '%s\n' "$out" | sed -n "/^${AVSYNC_HB_SEP}[[:space:]]*\$/,\$p" | sed '1d' ;;
     *) return 1 ;;
   esac
 }

@@ -175,7 +175,7 @@ main() {
 # STEP 0: deploy the 3 script files (FileUpload/FileWrite via ${mcp}):
 #   scripts/avsync-watchdog.ps1      -> C:\\avsync\\watchdog.ps1               (OVERWRITES the
 #                                        existing hand-built file at the SAME path the current
-#                                        `avsync-watchdog` task already targets -- no task-action
+#                                        \`avsync-watchdog\` task already targets -- no task-action
 #                                        change needed for this one)
 #   scripts/avsync-vlc-monitor.ps1   -> C:\\avsync\\avsync-vlc-monitor.ps1     (new file)
 #   scripts/avsync-keepalive.ps1     -> C:\\avsync\\avsync-keepalive.ps1       (new file)
