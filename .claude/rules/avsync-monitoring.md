@@ -91,3 +91,72 @@ tickets, cited only for context). Same fix as documented at the top level: write
 391" (no `#`) instead, or reference the RULE/PATTERN by name instead of the ticket number. Two
 separate hits in one session confirms this is worth checking proactively — before writing ANY
 commit message that cites a past ticket for context, scan it for a bare `#<digits>` first.
+
+## Live-verify defects found post-merge (#968) — never trust a fixture that sanitizes the real wire shape
+
+Three genuine defects shipped in the #812/#807 PR (#967) and were only caught by the supervisor's
+LIVE post-merge deploy verification, not by the (green) test suite — each is its own reusable
+lesson for this file's scripts:
+
+1. **`echo TEXT & next` on cmd.exe includes the trailing SPACE before `&` as part of TEXT, and
+   every remote line arrives CRLF-terminated over ssh — never exact-line-match a cmd.exe-echoed
+   marker without stripping `\r` and tolerating trailing whitespace first.**
+   `avsync_heartbeat_extract_segment()`'s sed anchors were an exact `^SEP$` match; the real
+   separator line printed as `---AVSYNC-HB-SEP--- \r\n` (note the space before the CR) never
+   matched it. The pre-968 behavioral test fixture emitted clean LF-only output with no trailing
+   space and never caught this — **a test fixture for a cmd.exe-driven probe must byte-match the
+   REAL captured shape (CRLF + any incidental trailing space from the shell's own `&`-splitting),
+   not a hand-typed "clean" approximation.** Fix: normalize once, at the top of the parsing
+   function — strip every `\r` byte, then tolerate `[[:space:]]*` before the end-of-line anchor.
+2. **`Where-Object { $_.CommandLine -like "*<bare-script-name>*" }` matches ANY process whose
+   command-line TEXT merely QUOTES that filename — not just a process actually RUNNING it.** Live
+   incident (2026-08-03): a diagnostic MCP powershell whose command text contained the literal
+   `watchdog.ps1` inside an unrelated `Get-CimInstance` filter string was counted as "the watchdog
+   already running", masking a genuinely dead process. Fix: match must require the FULL invocation
+   — the `-File` flag immediately adjacent to the exact (regex-escaped) script PATH, e.g.
+   `-match "-File\s+\"?$([regex]::Escape($scriptPath))\"?"` — never a bare filename substring, and
+   never just the full path alone without the `-File` anchor either (a path could still appear in
+   unrelated log/print text).
+3. **An unquoted heredoc (`cat <<PLAN`, needed for `${var}` interpolation) executes EVERY unescaped
+   backtick pair in its body, including ones meant purely as prose emphasis** — same class as the
+   top-level CLAUDE.md's `git commit -m` backtick GOTCHA, just inside a heredoc instead of a commit
+   message. A missed `` `task-name` `` (vs. the correctly-escaped `` \`task-name\` `` used
+   elsewhere in the SAME heredoc) silently deletes that text from the printed output and prints
+   `line N: task-name: command not found` to stderr. **Before trusting "it must be fine, most of
+   the backticks in this heredoc are already escaped" — grep every backtick in the heredoc body
+   individually**; a partially-fixed heredoc (some escaped, some not) is exactly what shipped here.
+   A regression test for this class should assert BOTH that a real run produces EMPTY stderr AND
+   that specific backtick-quoted phrases survive verbatim in the output — a bare "does the plan
+   still mention the task name" check can pass trivially even when ONE occurrence was deleted, as
+   long as ANOTHER (already-escaped) mention of the same name exists elsewhere in the same output.
+
+## Discord delivery: the bot cannot mint webhooks — the DURABLE path is a dev1-side bot-API forward, not the webhook file
+
+`avsync-watchdog.ps1`'s original design reads a Discord webhook URL from an uncommitted local file
+on the stream box (`C:\avsync\discord-webhook.txt`) and lets `av_sync_measure.py` POST directly to
+it. This has **no self-service path to ever get populated**: the `claude_robot` bot has no
+`MANAGE_WEBHOOKS` permission guild-wide (confirmed live via `POST /channels/.../webhooks` →
+`Missing Permissions`), so nobody running as that bot identity can ever mint the webhook URL the
+file is supposed to contain. The webhook-file mechanism stays wired as a harmless optional
+fallback (a human can still paste a URL there by hand), but it is NOT the delivery path this repo
+relies on.
+
+**Incident that motivated the fix (issue 968, discovered 2026-08-03):** on 2026-07-26 the user WAS
+actually receiving real A/V-sync verdict messages (`📐 A/V-sync meranie: [...] :: ... -> ZNIZ '2ME
+PGM' latency o 80`) in the `alerts-snv` Discord thread (thread id `1373592666733940816`, parent
+channel `🔥poznamky-live`, guild NewLevelMedia) — but they were posted by a **live agent-session
+loop**, not a durable service. The moment that session ended, delivery silently died with no
+trace. This is the SAME class of failure `.claude/rules/imag-obs-supervision.md`'s dev1-side-
+alerting topology already exists to prevent (a remote box/process cannot durably self-report), and
+the fix is the SAME shape: `scripts/avsync-heartbeat-alert-watchdog.sh`'s `maybe_forward_verdict`
+now forwards a genuinely NEW measured misalignment verdict (a `"measured: "` heartbeat status
+carrying a ZNIZ/ZVYS recommendation — silence when in sync, message when misaligned, mirroring
+`av_sync_measure.py`'s own threshold semantics) directly from the dev1 systemd timer via a bot-API
+POST, using the SAME `Authorization: Bot <token>` + `User-Agent: DiscordBot (...)` header shape
+`~/devel/airuleset/notify/*.py`'s own `_post_discord`/`_discord_api` use (never invent a second
+convention) — read at runtime from the local uncommitted `~/.claude/channels/discord/.env`
+(`AVSYNC_DISCORD_ENV` env-overridable for tests), never committed. Only the channel/thread IDs
+(not secrets) are committed to the repo. State (which epoch was last forwarded) persists via the
+SAME state-file mechanism the confirm/throttle legs already use, so a repeated pass with the SAME
+epoch never double-posts, and `--dry-run` still advances that state (mirrors `process_leg`'s own
+convention — only the actual POST is skipped, never the bookkeeping).

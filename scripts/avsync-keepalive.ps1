@@ -22,9 +22,17 @@ function Log($m) {
 # CommandLine names SCRIPT_NAME is running (matching on CommandLine, not just process name, so
 # this check is never confused by ANY other powershell.exe on the box -- including itself);
 # relaunches SCRIPT_PATH (hidden, detached) if not found.
+#
+# #968: a bare "*$scriptName*" substring match counts ANY process whose command-line TEXT merely
+# QUOTES that filename as "already running" -- confirmed live, a diagnostic MCP powershell whose
+# command text contained the literal script name inside an unrelated Get-CimInstance filter
+# string was counted as the real watchdog, masking a genuinely dead process. Anchor on the FULL
+# invocation instead: the "-File" launch flag immediately adjacent to the exact script PATH
+# (optionally quoted), so only a REAL launch of this script can satisfy the check.
 function Ensure-Running([string]$scriptName, [string]$scriptPath) {
+  $escapedPath = [regex]::Escape($scriptPath)
   $running = Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
-    Where-Object { $_.CommandLine -and $_.CommandLine -like "*$scriptName*" }
+    Where-Object { $_.CommandLine -and $_.CommandLine -match "-File\s+`"?$escapedPath`"?" }
   if ($running) {
     Log "$scriptName already running (pid $($running[0].ProcessId)) - no-op"
     return

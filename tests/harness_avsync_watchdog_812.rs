@@ -159,6 +159,36 @@ fn avsync_keepalive_ps1_checks_and_relaunches_both_long_running_loops() {
     );
 }
 
+#[test]
+fn ensure_running_matches_the_full_invocation_path_never_a_bare_script_name_968() {
+    // #968: a bare script-name substring match (`-like "*$scriptName*"`) counts ANY process whose
+    // command-line TEXT merely quotes that filename as "already running" -- confirmed live
+    // 2026-08-03: a diagnostic MCP powershell whose command text contained the literal
+    // "watchdog.ps1" inside an unrelated Get-CimInstance filter string was counted as the real
+    // watchdog, masking a genuinely dead process. The match must anchor on the FULL invocation:
+    // the "-File" flag immediately adjacent to the exact script PATH, not just the bare filename.
+    let body = read(KEEPALIVE_PS1);
+    let where_idx = body
+        .find("Where-Object")
+        .expect("must have a Where-Object filter");
+    let filter_region = &body[where_idx..(where_idx + 220).min(body.len())];
+    assert!(
+        filter_region.contains("-File"),
+        "the match must anchor on the -File invocation flag, never a bare filename substring \
+         with no launch-flag context: {filter_region}"
+    );
+    assert!(
+        filter_region.contains("$scriptPath") || filter_region.contains("$escapedPath"),
+        "the match must require the FULL script PATH parameter, not just $scriptName: {filter_region}"
+    );
+    assert!(
+        !filter_region.contains("*$scriptName*"),
+        "must NOT match on a bare $scriptName substring -- any process merely quoting the \
+         filename text (e.g. a diagnostic shell's own filter string) would falsely count as \
+         'already running': {filter_region}"
+    );
+}
+
 // ================================================================================================
 // scripts/avsync-watchdog-install.sh — PURE planner: Task Scheduler XML for the keep-alive task
 // (Repetition trigger, ships disabled) and the new vlc-monitor task (BootTrigger).
@@ -282,6 +312,56 @@ fn install_plan_covers_all_three_files_and_both_new_tasks() {
         assert!(
             plan.contains(needle),
             "install plan missing '{needle}': {plan}"
+        );
+    }
+}
+
+#[test]
+fn install_plan_produces_empty_stderr_968() {
+    // #968: the plan is printed via an UNQUOTED `cat <<PLAN` heredoc (needed for ${mcp}/${box_ip}
+    // interpolation) whose body ALSO contains backtick-quoted task names -- bash command-
+    // substitutes each unescaped pair, which fails ("command not found") and silently deletes the
+    // backticked text from the printed plan. Confirmed live: "line 170: avsync-watchdog: command
+    // not found" on stderr. A clean run must produce NO stderr output at all.
+    let script = manifest_dir().join(INSTALL_SH);
+    let out = Command::new("bash")
+        .arg(&script)
+        .output()
+        .expect("run install script directly");
+    assert!(out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.trim().is_empty(),
+        "the heredoc must never command-substitute backtick-quoted names in its own plan text: \
+         stderr={stderr}"
+    );
+}
+
+#[test]
+fn install_plan_keeps_the_bare_task_names_literally_968() {
+    // #968: the bare (non-`.ps1`-suffixed) task-name literals `avsync-watchdog` and
+    // `avsync-vlc-monitor` were backtick-quoted UNESCAPED in the heredoc body (STEP 0 / STEP 2)
+    // and got silently command-substituted away -- the pre-968 `install_plan_covers_all_three_
+    // files_and_both_new_tasks` test never caught this because it only checked the `.ps1`-
+    // suffixed file names (never backtick-quoted) and the plan's OTHER, already-escaped mentions
+    // of these same task names (e.g. STEP 1's `` \`avsync-watchdog\` ``) kept the bare substring
+    // present overall even with STEP 0's occurrence deleted. Anchor on the EXACT phrases around
+    // the two previously-unescaped occurrences so this genuinely discriminates the bug.
+    let script = manifest_dir().join(INSTALL_SH);
+    let out = Command::new("bash")
+        .arg(&script)
+        .output()
+        .expect("run install script directly");
+    assert!(out.status.success());
+    let plan = String::from_utf8_lossy(&out.stdout);
+    for needle in [
+        "`avsync-watchdog` task already targets -- no task-action",
+        "register the NEW `avsync-vlc-monitor` task",
+    ] {
+        assert!(
+            plan.contains(needle),
+            "backtick-quoted phrase '{needle}' must survive in the printed plan, not be \
+             silently command-substituted away: {plan}"
         );
     }
 }
