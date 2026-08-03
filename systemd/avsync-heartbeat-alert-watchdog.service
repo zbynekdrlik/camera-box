@@ -1,0 +1,11 @@
+[Unit]
+# stream-box avsync heartbeat alert (#812/#807), DEV1-SIDE. ONE measure -> decide -> alert pass.
+Description=camera-box avsync heartbeat alert (#812/#807) — one measure/decide/alert pass
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Service]
+Type=oneshot
+# %h = the installing user's home. Adjust if the checkout lives elsewhere on dev1.
+ExecStart=%h/devel/camera-box/scripts/avsync-heartbeat-alert-watchdog.sh
+# One ssh round-trip to the stream box; give it room but never hang the timer.
+TimeoutStartSec=30
