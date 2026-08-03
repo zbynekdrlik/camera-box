@@ -500,8 +500,84 @@ imag_build_drift_report() {
     "deploy the latest build via setup-imag.sh step-12 at a safe off-event time" "$@"
 }
 
-# genlock_build_parity_report LABEL=SHA... -> #756 CROSS-BOX genlock-build PARITY: do the LIVE
-# deployed genlock build SHAs of the fleet boxes (imag + strih + stream) all MATCH EACH OTHER?
+# genlock_parity_consumed_paths LABEL -> #949: the vendor/** paths whose content actually SHIPS in
+# LABEL's genlock build, mirrored 1:1 off the REAL CI trigger path filters so this table can never
+# silently drift out of sync with what actually rebuilds each platform:
+#   - "imag"          -> linux-genlock.yml's own `on.push.paths` (vendor/obs-studio/**,
+#                        vendor/distroav/** — deliberately NOT vendor/av-sync-dock, a Windows-only
+#                        OBS dock DLL imag never links against)
+#   - anything else    -> windows-genlock-fast.yml's `on.push.paths` (adds vendor/av-sync-dock/**)
+# (see tests/drift_guard.rs's genlock_parity_consumed_paths_matches_the_ci_workflow_path_filters_949
+# for the lock-step assertion against the two workflow files themselves.) PURE — a lookup table, no
+# I/O. An unrecognized label gets the WINDOWS (superset) set: the fail-closed default that can never
+# make a real consumed dir silently invisible to the #949 content-equivalence check below.
+genlock_parity_consumed_paths() {
+  case "$1" in
+    imag) printf 'vendor/obs-studio\nvendor/distroav\n' ;;
+    *)    printf 'vendor/obs-studio\nvendor/distroav\nvendor/av-sync-dock\n' ;;
+  esac
+}
+
+# genlock_parity_equivalent REPO_ROOT SHA_A SHA_B PATH... -> #949 IMPURE git check: do SHA_A and
+# SHA_B have byte-IDENTICAL content over the given PATHs, in the git repo at REPO_ROOT?
+#
+# WHY THIS EXISTS — `genlock_build_parity_report` below used to treat ANY raw-string SHA mismatch
+# as a proven fleet skew. But `linux-genlock.yml`'s push trigger deliberately excludes
+# vendor/av-sync-dock/** (a Windows-only OBS dock DLL) — so a Windows-only vendor change advances
+# strih/stream's deployed GENLOCK_BUILD_SHA.txt to a SHA imag's build can NEVER be produced at
+# through the normal trigger, even though imag's actual built bytes never changed (#949; live on
+# run 30768287281 / PR #948). This function is how the caller (version-integrity-gate.sh's flow)
+# tells a genuine cross-box skew apart from a mere LABEL mismatch: restrict the diff to the
+# INTERSECTION of the two boxes' own consumed vendor paths (genlock_parity_consumed_paths above).
+#
+# Fail-closed (never a false "equivalent"): EITHER sha failing to resolve as a commit in REPO_ROOT
+# (a shallow/incomplete checkout, a force-pushed-away commit, a corrupted marker file) is treated
+# exactly like a genuine content difference — returns 1 (NOT equivalent), never assumed equivalent
+# merely because it could not be checked. No network call happens here (the caller runs `git fetch
+# origin` once, up front, before calling this per pair) — a fetch failure there already degrades to
+# "may fail to resolve", which this function turns into the same safe 1 (not equivalent), never a
+# pass. `--end-of-options` mirrors `imag_genlock_range_log`'s defense against an option-shaped
+# (corrupted) SHA value being silently consumed as a git flag instead of a revision.
+#
+# IMPURE (real git I/O against REPO_ROOT) — like `imag_genlock_range_log`, it needs no live SSH/box
+# to unit test: it runs against THIS repo's own checkout (tests/drift_guard.rs passes "$(pwd)"),
+# which always has real historical commits to exercise both the equivalent and the genuinely-
+# skewed case against real vendor/** history.
+genlock_parity_equivalent() {
+  local repo_root="$1" sha_a="$2" sha_b="$3"
+  shift 3
+  local -a paths=("$@")
+  git -C "$repo_root" rev-parse --quiet --verify --end-of-options "${sha_a}^{commit}" \
+    >/dev/null 2>&1 || return 1
+  git -C "$repo_root" rev-parse --quiet --verify --end-of-options "${sha_b}^{commit}" \
+    >/dev/null 2>&1 || return 1
+  git -C "$repo_root" diff --quiet --end-of-options "$sha_a" "$sha_b" -- "${paths[@]}" 2>/dev/null
+}
+
+# genlock_parity_diff_paths REPO_ROOT SHA_A SHA_B PATH... -> #949: the ACTUAL file paths that
+# differ between SHA_A and SHA_B, restricted to PATH..., one per line (git diff --name-only).
+# Used ONLY to make a genuine DRIFT message actionable (name what changed, not just "SHAs differ")
+# once genlock_parity_equivalent has already said "not equivalent" — a caller that only needs the
+# yes/no verdict calls genlock_parity_equivalent alone and never pays for this. Same fail-closed
+# resolution as genlock_parity_equivalent (an unresolvable sha yields EMPTY output, never a
+# fabricated path list) — empty output here means either sha could not be resolved, or (should not
+# happen if the caller only calls this after a confirmed non-equivalent verdict) the diff is
+# genuinely empty. IMPURE — real git I/O against REPO_ROOT, same convention as
+# genlock_parity_equivalent (tests/drift_guard.rs exercises it against this repo's own history).
+genlock_parity_diff_paths() {
+  local repo_root="$1" sha_a="$2" sha_b="$3"
+  shift 3
+  local -a paths=("$@")
+  git -C "$repo_root" rev-parse --quiet --verify --end-of-options "${sha_a}^{commit}" \
+    >/dev/null 2>&1 || return 0
+  git -C "$repo_root" rev-parse --quiet --verify --end-of-options "${sha_b}^{commit}" \
+    >/dev/null 2>&1 || return 0
+  git -C "$repo_root" diff --name-only --end-of-options "$sha_a" "$sha_b" -- "${paths[@]}" 2>/dev/null
+}
+
+# genlock_build_parity_report LABEL=SHA... [EQUIV=LABEL_A:LABEL_B]... [DIFF=LABEL_A:LABEL_B:PATHS]...
+# -> #756 CROSS-BOX genlock-build PARITY: do the LIVE deployed genlock build SHAs of the fleet
+# boxes (imag + strih + stream) all MATCH EACH OTHER?
 #
 # WHY THIS EXISTS — the false OK `genlock_build_drift_report`/`imag_build_drift_report` cannot
 # escape: those compare a box against ORIGIN/MAIN's vendored-genlock HEAD. But the live fleet runs
@@ -513,20 +589,43 @@ imag_build_drift_report() {
 # či sú všade najnovšie verzie"). The ONLY trustworthy assertion is PEER parity: every box's
 # DEPLOYED build SHA must be IDENTICAL. Any skew = FAIL, no git ref involved.
 #
-# Each arg is `LABEL=SHA` — the box's live `GENLOCK_BUILD_SHA.txt` (imag: /opt/obs-genlock/…, read
+# Each `LABEL=SHA` arg is the box's live `GENLOCK_BUILD_SHA.txt` (imag: /opt/obs-genlock/…, read
 # over ssh; the Windows boxes: the SAME file in the deployed genlock bundle, served by the standing
 # :8899 bundle-state service and threaded in by `version-integrity-gate.sh`). A box whose SHA came
-# back empty is UNREAD, never silently dropped. PURE — the caller gathers the SHAs; this decides.
+# back empty is UNREAD, never silently dropped.
+#
+# #949 — a raw-string mismatch between two boxes is no longer, by itself, proof of a real skew: a
+# Windows-only vendor change can leave imag's LABEL behind even though its actual built bytes are
+# unchanged. The caller (version-integrity-gate.sh) resolves this BEFORE calling here, via
+# `genlock_parity_equivalent` restricted to each pair's consumed-path intersection, and passes the
+# verdict as an `EQUIV=LABEL_A:LABEL_B` marker (order-independent) for every pair it proved
+# content-identical. This function stays PURE — no I/O — it only consumes the pre-computed EQUIV
+# markers; a mismatched pair with NO marker is treated exactly as before #949: a real, unexplained
+# skew, DRIFT. An OPTIONAL `DIFF=LABEL_A:LABEL_B:PATHS` marker (PATHS = comma-joined file paths,
+# from genlock_parity_equivalent's sibling genlock_parity_diff_paths) makes an unexplained skew's
+# DRIFT message name the actual files that differ, not just the two boxes' opaque SHAs — the issue
+# this facet exists for is otherwise "hard to act on" (#949).
 #
 # Verdict ordering is fail-closed, never a silent clean (the engine's exit-code contract, matching
-# every other facet): a DEFINITE skew among the boxes we COULD read WINS (report it even if a third
-# box is unread — a proven skew is a proven skew); else any unread box OR fewer than two read peers
-# is UNKNOWN (parity can't be certified — never a false OK for an incomplete picture); else every
-# box read and all identical is OK. Returns 0 OK / 20 DRIFT / 11 UNKNOWN.
+# every other facet): a DEFINITE, UNEXPLAINED skew among the boxes we COULD read WINS (report it
+# even if a third box is unread — a proven skew is a proven skew); else any unread box OR fewer than
+# two read peers is UNKNOWN (parity can't be certified — never a false OK for an incomplete
+# picture); else every box read and every pair either byte-identical or EQUIV-covered is OK. Returns
+# 0 OK / 20 DRIFT / 11 UNKNOWN.
 genlock_build_parity_report() {
-  local -a read_labels=() read_shas=() unread=()
+  local -a read_labels=() read_shas=() unread=() equiv_pairs=() diff_pairs=()
   local arg label sha pairs=""
   for arg in "$@"; do
+    case "$arg" in
+      EQUIV=*)
+        equiv_pairs+=("${arg#EQUIV=}")
+        continue
+        ;;
+      DIFF=*)
+        diff_pairs+=("${arg#DIFF=}")
+        continue
+        ;;
+    esac
     label="${arg%%=*}"
     sha="${arg#*=}"
     if [ -z "$sha" ]; then
@@ -538,16 +637,46 @@ genlock_build_parity_report() {
     fi
   done
 
-  # 1. A DEFINITE skew among the boxes we COULD read wins — even if another box is unread. A proven
-  #    fleet split must FAIL LOUD regardless of a third box's readability.
+  # 1. A DEFINITE, UNEXPLAINED skew among the boxes we COULD read wins — even if another box is
+  #    unread. A proven fleet split must FAIL LOUD regardless of a third box's readability. A pair
+  #    whose raw SHAs differ but which the caller already proved content-equivalent (an EQUIV
+  #    marker naming this exact pair, either order) is NOT a skew — #949.
   if [ "${#read_shas[@]}" -ge 2 ]; then
-    local first="${read_shas[0]}" i skew=0
-    for i in "${!read_shas[@]}"; do
-      [ "${read_shas[$i]}" != "$first" ] && skew=1
+    local i j e is_equiv skew=0 skew_pairs="" n="${#read_shas[@]}"
+    local pair_note dla drest dlb dpths dpaths
+    for ((i = 0; i < n; i++)); do
+      for ((j = i + 1; j < n; j++)); do
+        [ "${read_shas[$i]}" = "${read_shas[$j]}" ] && continue
+        is_equiv=0
+        for e in "${equiv_pairs[@]}"; do
+          if [ "$e" = "${read_labels[$i]}:${read_labels[$j]}" ] \
+            || [ "$e" = "${read_labels[$j]}:${read_labels[$i]}" ]; then
+            is_equiv=1
+            break
+          fi
+        done
+        [ "$is_equiv" -eq 1 ] && continue
+        skew=1
+        pair_note="${read_labels[$i]}~${read_labels[$j]}"
+        # #949: if the caller supplied a matching DIFF= marker, name the actual differing paths
+        # (never fabricated — only appended when the caller's own git-diff already found them).
+        dpaths=""
+        for e in "${diff_pairs[@]}"; do
+          dla="${e%%:*}"; drest="${e#*:}"
+          dlb="${drest%%:*}"; dpths="${drest#*:}"
+          if { [ "$dla" = "${read_labels[$i]}" ] && [ "$dlb" = "${read_labels[$j]}" ]; } \
+            || { [ "$dla" = "${read_labels[$j]}" ] && [ "$dlb" = "${read_labels[$i]}" ]; }; then
+            dpaths="$dpths"
+            break
+          fi
+        done
+        [ -n "$dpaths" ] && pair_note="${pair_note} [changed: ${dpaths}]"
+        skew_pairs="${skew_pairs:+$skew_pairs, }${pair_note}"
+      done
     done
     if [ "$skew" -eq 1 ]; then
-      printf '  %-22s DRIFT    (genlock build SKEW across the fleet — boxes are NOT on one lineage: %s; hot-swap the current linux-genlock build onto the lagging box(es) [#460 runbook] so the whole fleet runs ONE build)\n' \
-        "genlock_parity" "$pairs"
+      printf '  %-22s DRIFT    (genlock build SKEW across the fleet — boxes are NOT on one lineage: %s; unexplained skew: %s; hot-swap the current linux-genlock build onto the lagging box(es) [#460 runbook] so the whole fleet runs ONE build)\n' \
+        "genlock_parity" "$pairs" "$skew_pairs"
       return 20
     fi
   fi
@@ -560,9 +689,20 @@ genlock_build_parity_report() {
     return 11
   fi
 
-  # 3. Every box read, all identical -> the whole fleet is on ONE genlock build.
-  printf '  %-22s OK       (all %s fleet boxes on ONE genlock build: %s)\n' \
-    "genlock_parity" "${#read_shas[@]}" "${read_shas[0]}"
+  # 3. Every box read; every pair is either byte-identical or EQUIV-proven content-identical -> ONE
+  #    effective lineage. Keep the ORIGINAL wording (existing callers grep for it) for the plain
+  #    all-byte-identical fast path; use a #949-specific wording only when labels genuinely differ.
+  local all_identical=1 k
+  for ((k = 1; k < ${#read_shas[@]}; k++)); do
+    [ "${read_shas[$k]}" != "${read_shas[0]}" ] && all_identical=0
+  done
+  if [ "$all_identical" -eq 1 ]; then
+    printf '  %-22s OK       (all %s fleet boxes on ONE genlock build: %s)\n' \
+      "genlock_parity" "${#read_shas[@]}" "${read_shas[0]}"
+  else
+    printf '  %-22s OK       (all %s fleet boxes in genlock-build PARITY — labels differ but every pair is content-identical over its consumed vendor paths [#949]: %s)\n' \
+      "genlock_parity" "${#read_shas[@]}" "$pairs"
+  fi
   return 0
 }
 

@@ -63,7 +63,15 @@ jobs:
     # 25min is ~2.5x the baseline — generous headroom, still bounded.
     timeout-minutes: 25
     steps:
+      # #949: fetch-depth 0 (full history) — tests/drift_guard.rs's genlock_parity_equivalent
+      # tests run a REAL `git diff`/`git rev-parse` against real historical vendor/** commits (the
+      # incident SHAs + a genuine vendor/obs-studio skew pair) to prove the #949 fix end-to-end.
+      # actions/checkout@v4's default shallow (depth=1) clone does not carry those commits, so
+      # they'd fail to resolve and fail CLOSED (never equivalent) — a false RED here, not a real
+      # bug. Mirrors the `mutants` job below, which already needed the same for `--in-diff`.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -116,7 +124,11 @@ jobs:
     name: Code Coverage
     runs-on: ubuntu-latest
     steps:
+      # #949: same fetch-depth 0 reason as the `test` job above — this job runs the exact same
+      # test suite (cargo llvm-cov nextest) and hits the same real-git-history tests.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable

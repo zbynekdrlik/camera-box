@@ -296,6 +296,98 @@ fn gate_refuses_when_only_windows_boxes_report_a_build_and_imag_is_unread_756() 
     let _ = std::fs::remove_file(&t);
 }
 
+// ---- #949 — a Windows-only vendor change must not block the fleet on a cosmetic LABEL skew ----
+// THE regression test for the actual bug (live 2026-08-02, run 30768287281 / PR #948):
+// linux-genlock.yml's push trigger deliberately excludes vendor/av-sync-dock/** (a Windows-only
+// OBS dock DLL), so a Windows-only vendor change advances strih/stream's deployed
+// GENLOCK_BUILD_SHA.txt to a SHA imag's own build can never reach — even though imag's ACTUAL
+// built bytes never changed. These are the REAL SHAs from that incident: the only vendor commit
+// between them (a48b56380) touches vendor/av-sync-dock/** only.
+const WIN_INCIDENT_SHA_949: &str = "d77426c758074686b7bc8716962f0042fa8687bf";
+const IMAG_INCIDENT_SHA_949: &str = "2a12a6a9991eeeae5580a6fbe047d60275d0c8b2";
+
+#[test]
+fn gate_passes_when_a_windows_only_vendor_change_advances_strih_stream_past_imags_reachable_sha_949(
+) {
+    // Before the #949 fix this call reproduces the live incident verbatim: strih/stream share ONE
+    // real SHA, imag reports a DIFFERENT real SHA, and the only vendor commit between them touches
+    // vendor/av-sync-dock only — imag's binaries are byte-identical, so this must be GATE PASS (0),
+    // never DRIFT. Uses `run_gate`, whose subprocess `current_dir` is this repo's own checkout (real
+    // git history for both SHAs), so the fix's real `git diff` path is exercised end-to-end, not
+    // just the pure decision layer (see tests/drift_guard.rs for that half).
+    let s = write_state(
+        "strih_949_incident",
+        &with_sha(STRIH_PINNED, WIN_INCIDENT_SHA_949),
+    );
+    let t = write_state(
+        "stream_949_incident",
+        &with_sha(STREAM_PINNED, WIN_INCIDENT_SHA_949),
+    );
+    let (code, stdout, stderr) = run_gate(&[
+        "--win-state",
+        &format!("strih={}", s.display()),
+        "--win-state",
+        &format!("stream={}", t.display()),
+        "--genlock-sha",
+        &format!("imag={IMAG_INCIDENT_SHA_949}"),
+    ]);
+    assert_eq!(
+        code, 0,
+        "a Windows-only vendor change (imag's actual bytes unchanged) must PASS, not DRIFT the \
+         whole gate. stdout={stdout} stderr={stderr}"
+    );
+    assert!(stdout.contains("GATE PASS"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("genlock_parity") && stdout.contains("OK") && stdout.contains("PARITY"),
+        "the parity facet must report OK via the #949 content-equivalence path: {stdout}"
+    );
+    assert!(
+        !stdout.contains("SKEW"),
+        "must never report a genlock_parity SKEW for a cosmetic label-only mismatch: {stdout}"
+    );
+    let _ = std::fs::remove_file(&s);
+    let _ = std::fs::remove_file(&t);
+}
+
+#[test]
+fn gate_still_refuses_a_genuine_vendor_obs_studio_skew_after_the_949_fix() {
+    // The strictness #949 must NOT weaken: a REAL vendor/obs-studio content difference (not just a
+    // label mismatch) must still DRIFT the gate. Real commit pair — only the newer one touches
+    // vendor/obs-studio/libobs/obs.h + obs-source.c + asrc-compensator.* + the obs-websocket
+    // requesthandler; genuinely different built bytes on both the Windows AND Linux consumed sets.
+    const OLDER: &str = "cb92f28a6a90a89b2877f7d00dde93561ae9a70c";
+    const NEWER: &str = "f6477a4fe6a7b7a36e6351d13ed106e10d673356";
+    let s = write_state("strih_949_real_skew", &with_sha(STRIH_PINNED, NEWER));
+    let t = write_state("stream_949_real_skew", &with_sha(STREAM_PINNED, NEWER));
+    let (code, stdout, stderr) = run_gate(&[
+        "--win-state",
+        &format!("strih={}", s.display()),
+        "--win-state",
+        &format!("stream={}", t.display()),
+        "--genlock-sha",
+        &format!("imag={OLDER}"),
+    ]);
+    assert_eq!(
+        code, 20,
+        "a genuine vendor/obs-studio content skew must still REFUSE (20) after #949. \
+         stdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        stdout.contains("genlock_parity") && stdout.contains("DRIFT") && stdout.contains("SKEW"),
+        "must still report the real cross-box genlock SKEW: {stdout}"
+    );
+    // #949: the gate's own flow must compute the real offending paths end-to-end (not just at the
+    // pure-decision layer, tested separately in tests/drift_guard.rs) — the issue explicitly asked
+    // for a message naming the offending paths, "not just the SHAs".
+    assert!(
+        stdout.contains("vendor/obs-studio/libobs/obs.h"),
+        "the gate must name a real offending path end-to-end, not just opaque SHAs: {stdout}"
+    );
+    assert!(stderr.contains("GATE FAILED"), "stderr: {stderr}");
+    let _ = std::fs::remove_file(&s);
+    let _ = std::fs::remove_file(&t);
+}
+
 #[test]
 fn gate_refuses_when_a_box_has_drifted() {
     // strih is on a DIFFERENT obs version than the pinned 32.1.2 (a randomly-deployed / stale build).

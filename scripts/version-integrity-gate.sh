@@ -457,9 +457,85 @@ main() {
   # (strih+stream+imag all report genlock_build_sha as of 2026-07-14 ~21:40), so a box that fails
   # to report one now is itself a REAL, actionable gap (a stale/unread bundle-state-server), never
   # a reason to silently skip the whole facet.
-  echo "  -- cross-box genlock parity (#756, ENFORCED) --"
+  #
+  # #949 — a Windows-only vendor/av-sync-dock/** change advances strih/stream's deployed
+  # GENLOCK_BUILD_SHA.txt to a SHA imag's OWN build trigger (linux-genlock.yml, which deliberately
+  # excludes vendor/av-sync-dock/**) can never be built at -- even though imag's actual built
+  # bytes never changed. A raw-string mismatch is therefore NOT proof of a real skew by itself;
+  # before handing the raw LABEL=SHA readings to the (still string-comparing) engine, resolve every
+  # PAIR of boxes reporting a non-empty, DIFFERENT-string SHA into a real git content check, scoped
+  # to the INTERSECTION of the two boxes' own consumed vendor paths (genlock_parity_consumed_paths)
+  # -- an empty `git diff` there means the label mismatch is cosmetic, and an `EQUIV=labelA:labelB`
+  # marker is appended so the engine treats that ONE pair as in parity. A pair whose diff is
+  # NON-empty, or whose SHA cannot be resolved at all (fail-closed -- never a silent pass), gets NO
+  # marker and still DRIFTs exactly as before #949. Boxes already byte-identical need no git call
+  # at all (the engine's own fast path). Carries BOTH EQUIV= markers (pair proven content-
+  # identical) and DIFF= markers (pair genuinely differs -- names the actual paths so the DRIFT
+  # message stays actionable) -- genlock_build_parity_report tells them apart by prefix.
+  local -a equiv_args=()
+  local -a __ep_a=() __ep_b=()
+  local pi pj la sa lb sb
+  local any_mismatch=0
+  for ((pi = 0; pi < ${#parity_args[@]}; pi++)); do
+    for ((pj = pi + 1; pj < ${#parity_args[@]}; pj++)); do
+      sa="${parity_args[$pi]#*=}"
+      sb="${parity_args[$pj]#*=}"
+      if [ -n "$sa" ] && [ -n "$sb" ] && [ "$sa" != "$sb" ]; then
+        any_mismatch=1
+      fi
+    done
+  done
+  if [ "$any_mismatch" -eq 1 ]; then
+    local repo_root=""
+    repo_root="$(cd "$HERE/.." 2>/dev/null && pwd)" || repo_root=""
+    if [ -z "$repo_root" ]; then
+      echo "WARN: could not resolve version-integrity-gate.sh's own repo root -- skipping #949 genlock parity content-equivalence check (a label-only mismatch will DRIFT even if the content is identical)" >&2
+    else
+      timeout 15 git -C "$repo_root" fetch origin --quiet 2>/dev/null \
+        || echo "WARN: git fetch origin failed (or timed out) -- #949 genlock parity content-check may see a stale origin (a genuinely new SHA may fail to resolve and DRIFT)" >&2
+      local pth pb found_p
+      for ((pi = 0; pi < ${#parity_args[@]}; pi++)); do
+        for ((pj = pi + 1; pj < ${#parity_args[@]}; pj++)); do
+          la="${parity_args[$pi]%%=*}"; sa="${parity_args[$pi]#*=}"
+          lb="${parity_args[$pj]%%=*}"; sb="${parity_args[$pj]#*=}"
+          [ -z "$sa" ] || [ -z "$sb" ] && continue
+          [ "$sa" = "$sb" ] && continue
+          __ep_a=()
+          while IFS= read -r pth; do [ -n "$pth" ] && __ep_a+=("$pth"); done \
+            < <(genlock_parity_consumed_paths "$la")
+          __ep_b=()
+          while IFS= read -r pth; do [ -n "$pth" ] && __ep_b+=("$pth"); done \
+            < <(genlock_parity_consumed_paths "$lb")
+          local -a inter=()
+          for pth in "${__ep_a[@]}"; do
+            found_p=0
+            for pb in "${__ep_b[@]}"; do [ "$pb" = "$pth" ] && found_p=1 && break; done
+            [ "$found_p" -eq 1 ] && inter+=("$pth")
+          done
+          if [ "${#inter[@]}" -eq 0 ]; then
+            continue
+          fi
+          if genlock_parity_equivalent "$repo_root" "$sa" "$sb" "${inter[@]}"; then
+            equiv_args+=("EQUIV=${la}:${lb}")
+          else
+            # #949: not equivalent (a real diff, or an unresolvable sha). Try to name the ACTUAL
+            # differing paths so a genuine DRIFT is actionable, not just "two opaque SHAs differ" —
+            # empty output here (unresolvable sha) simply means no DIFF= marker is added, and the
+            # DRIFT message falls back to its pre-#949 wording.
+            local diff_paths=""
+            diff_paths="$(genlock_parity_diff_paths "$repo_root" "$sa" "$sb" "${inter[@]}" \
+              | paste -sd, - 2>/dev/null || true)"
+            if [ -n "$diff_paths" ]; then
+              equiv_args+=("DIFF=${la}:${lb}:${diff_paths}")
+            fi
+          fi
+        done
+      done
+    fi
+  fi
+  echo "  -- cross-box genlock parity (#756/#949, ENFORCED) --"
   local prc=0 parity_out=""
-  parity_out="$(genlock_build_parity_report "${parity_args[@]}")" || prc=$?
+  parity_out="$(genlock_build_parity_report "${parity_args[@]}" "${equiv_args[@]}")" || prc=$?
   printf '%s\n' "$parity_out" | sed 's/^/    /'
   case "$prc" in
     0)  ok=$((ok + 1)) ;;
