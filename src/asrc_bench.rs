@@ -227,6 +227,23 @@ pub const MIN_LOCK_S: f64 = 5.0;
 /// caller should be trusted alone to have already clamped.
 pub const OUTER_BIAS_MAX_PPM: f64 = 10.0;
 
+/// issue #960: sanity ceiling on a single block's `instantaneous_ppm`, in ppm — above this, the
+/// block carries no real timing information (a starved or bursting audio source, e.g. a
+/// muted/idle device path delivering near-zero samples) and must be REJECTED rather than folded
+/// into the EMA. Live incident: a starved source (~26.24% of the samples its elapsed wall-clock
+/// window implies) produced `instantaneous_ppm ≈ -737,600`, and with no gate the EMA converged
+/// toward it and the servo railed at `-MAX_PPM` permanently.
+///
+/// 100,000 ppm (10%) is chosen to clear three boundaries with margin: (1) two orders of magnitude
+/// above `MAX_PPM` (300, itself already "an order of magnitude above any measured worst case
+/// ~25-50ppm"), so no real clock plausibly reaches it; (2) a clean 2x above the largest SYNTHETIC
+/// stress value this file's own tests already feed to exercise the hard-clamp/slew-limit logic
+/// (50,000 ppm, a deliberately extreme but non-starved "outlier measurement" in
+/// `realtime_compensator_never_exceeds_the_slew_limit_per_call`) — those tests keep proving the
+/// clamp/slew math, not this guard; (3) more than 7x below the observed live defect (737,600
+/// ppm), so the reported bug is caught with comfortable margin.
+pub const MAX_SANE_INSTANTANEOUS_PPM: f64 = 100_000.0;
+
 /// The REAL per-source ASRC servo issue #803 ports into vendored libobs
 /// (`vendor/obs-studio/libobs/media-io/asrc-compensator.c` — kept a line-by-line equivalent
 /// mirror of this struct's logic; see that file's own doc comment). Unlike [`EmaRateCompensator`]
@@ -238,7 +255,10 @@ pub const OUTER_BIAS_MAX_PPM: f64 = 10.0;
 /// - a hard ppm clamp (`MAX_PPM`) on the estimate used as the correction TARGET;
 /// - a slew limiter (`MAX_SLEW_PPM_PER_S`) on the APPLIED correction, independent of how fast the
 ///   raw estimate itself moves, so a single noisy measurement can never produce an audible step;
-/// - a minimum-lock startup delay (`MIN_LOCK_S`) before any correction is applied at all.
+/// - a minimum-lock startup delay (`MIN_LOCK_S`) before any correction is applied at all;
+/// - a starvation/activity guard (`MAX_SANE_INSTANTANEOUS_PPM`, issue #960) rejecting a block
+///   whose instantaneous ppm is not a plausible clock-drift measurement at all (a starved/bursting
+///   source), holding state rather than folding garbage into the estimate.
 ///
 /// Validated against the SAME `simulate_offset_trace_ms` gate issue #804 built, per that module's
 /// own instruction not to invent a second, unrelated proof.
@@ -328,6 +348,18 @@ impl AsrcCompensator for RealtimeAsrcCompensator {
         // SAME master-clock basis the video FIFO release already uses (genlock_wall_now_ns() on
         // the C side).
         let instantaneous_ppm = (raw_advance_s / master_block_s - 1.0) * 1_000_000.0;
+
+        // issue #960: a block whose instantaneous ppm magnitude clears the sanity ceiling carries
+        // no real timing information (starved/bursting source, not clock drift) — REJECT it: no
+        // EMA update, no elapsed_lock_s credit (a garbage block must not count toward "the servo
+        // has observed enough real data to trust its estimate"), no slew step. HOLD whatever
+        // applied_ppm was already in effect and keep applying just that unchanged correction to
+        // this callback's real audio (the samples themselves are real even when the elapsed-time
+        // basis used to measure them is garbage).
+        if instantaneous_ppm.abs() > MAX_SANE_INSTANTANEOUS_PPM {
+            self.starved_block_count += 1;
+            return raw_advance_s / (1.0 + self.applied_ppm / 1_000_000.0);
+        }
 
         // TIME-based EMA smoothing factor: alpha = 1 - exp(-block/tau), so convergence speed is
         // independent of how the caller chunks audio callbacks (a real device may deliver

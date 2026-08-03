@@ -4194,15 +4194,20 @@ static inline void asrc_process_audio(obs_source_t *source, uint32_t frames, uin
 	audio_resampler_set_compensation_ppm(source->resampler, applied_ppm, 1000);
 
 	double cumulative_correction_ms = 0.0;
-	if (asrc_compensator_should_log(&source->asrc, &cumulative_correction_ms)) {
+	uint32_t starved_block_count = 0;
+	if (asrc_compensator_should_log(&source->asrc, &cumulative_correction_ms, &starved_block_count)) {
 		/* camera-box #806: outer_bias_ppm appended -- "plna telemetria" for the outer-loop
 		 * guard's own correction, on the SAME pre-existing ~60s cadence (never a second log
-		 * line). Zero when no watchdog has ever called obs_source_set_asrc_outer_bias_ppm(). */
+		 * line). Zero when no watchdog has ever called obs_source_set_asrc_outer_bias_ppm().
+		 * camera-box #960: starved_blocks appended -- makes a starved/invalid-block state
+		 * explicit instead of only ever showing an estimated/applied pair with no indication
+		 * anything was rejected. Zero on a healthy source. */
 		blog(LOG_INFO,
 		     "asrc: source '%s' estimated=%.2fppm applied=%.2fppm outer_bias=%.2fppm "
-		     "cumulative_correction=%.3fms/%.0fs (#803/#806)",
+		     "cumulative_correction=%.3fms/%.0fs starved_blocks=%u (#803/#806/#960)",
 		     obs_source_get_name(source), source->asrc.estimated_ppm, applied_ppm,
-		     source->asrc.outer_bias_ppm, cumulative_correction_ms, ASRC_LOG_INTERVAL_S);
+		     source->asrc.outer_bias_ppm, cumulative_correction_ms, ASRC_LOG_INTERVAL_S,
+		     starved_block_count);
 	}
 }
 

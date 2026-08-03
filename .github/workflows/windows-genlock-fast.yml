@@ -153,6 +153,33 @@ jobs:
           }
           Write-Output "ASRC always-on-by-default (#912 build-default init + live override API kept) — OK"
 
+      # #960: the ASRC estimator must reject a starved/bursting block (no real timing
+      # information) rather than fold it into the EMA and rail the servo at -ASRC_MAX_PPM. The
+      # FAST path COMPILES the real vendored C (a broken patch fails the build), but had NO
+      # source-text token gate for #960 — a `git subtree pull` (#44) could hot-swap an obs.dll
+      # where the guard silently reverted. Mirrors the canonical Linux-CI guard
+      # tests/genlock_preload.rs::vendored_source::asrc_starvation_guard_present_in_vendored_source
+      # (probe-gated, can't compile on this runner). Keep both in lock-step.
+      - name: Assert ASRC starvation guard present (#960)
+        shell: pwsh
+        run: |
+          $h = (Get-Content "vendor/obs-studio/libobs/media-io/asrc-compensator.h" -Raw) -replace '\s+', ' '
+          if ($h -notmatch [regex]::Escape('#define ASRC_MAX_SANE_INSTANTANEOUS_PPM 100000.0')) {
+            Write-Error "asrc-compensator.h: #960 starvation-guard sanity ceiling (ASRC_MAX_SANE_INSTANTANEOUS_PPM) missing or changed"; exit 1
+          }
+          if ($h -notmatch [regex]::Escape('uint32_t starved_block_count;')) {
+            Write-Error "asrc-compensator.h: #960 starved_block_count telemetry field missing from struct asrc_compensator"; exit 1
+          }
+          $c = (Get-Content "vendor/obs-studio/libobs/media-io/asrc-compensator.c" -Raw) -replace '\s+', ' '
+          if ($c -notmatch [regex]::Escape('if (fabs(instantaneous_ppm) > ASRC_MAX_SANE_INSTANTANEOUS_PPM) {')) {
+            Write-Error "asrc-compensator.c: #960 starvation guard missing — a starved block would be folded into the EMA and rail the servo again"; exit 1
+          }
+          $src = (Get-Content "vendor/obs-studio/libobs/obs-source.c" -Raw) -replace '\s+', ' '
+          if ($src -notmatch [regex]::Escape('starved_blocks=%u')) {
+            Write-Error "obs-source.c: #960 asrc: telemetry log line no longer reports starved_blocks=N"; exit 1
+          }
+          Write-Output "ASRC starvation guard present (#960 sanity ceiling + rejection branch + telemetry) — OK"
+
       # #942: the A/V-sync dock's in-process lock corrector must be MONITOR-ONLY by build
       # default — the E2E gate (scripts/av_sync_calibrate.py --apply) is the only CONTINUOUS/
       # closed-loop writer of genlock_latency_ms_src (scripts/obs_phase2.py's own bounded
