@@ -8,6 +8,8 @@ paths:
   - "scripts/dantesync-gate.sh"
   - "scripts/clock-offset-guard.sh"
   - "scripts/*_calibrate.py"
+  - "scripts/recording-e2e.sh"
+  - "scripts/rig-mode.sh"
 ---
 
 # CI + bash-test-harness gotchas (#826)
@@ -409,3 +411,49 @@ own commit — the fix is the documented escape hatch, not rewording the message
 path: append `# airuleset:foreign-ok <reason>` to the `git commit` command. Confirmed harmless
 here (nothing was written to the airuleset repo; the commit only touched
 `.claude/rules/rig-state-inspection.md` inside camera-box).
+
+## Restoring a temporarily-relaxed STRICT gate term: mine historical CI runs, and check whether the ticket's own "closes when" premise redirects to a DUPLICATE (#888, 2026-08-03)
+
+When a RE-GATE-style ticket says "restore to strict once issue N lands", checking `gh issue view N
+--json state` alone is not enough — **N may be CLOSED as a duplicate of a DIFFERENT, still-open
+canonical ticket** (here: #886 was closed 2026-07-30 as "Duplicate of #865"; #865 carried the real
+root-cause discussion and was still OPEN with no matching fix commit in `git log`). Reading only
+the referenced ticket's `state` field would have wrongly concluded the precondition was met, or
+wrongly concluded it was NOT met and left a coin-flip gate report-only forever. **Always follow a
+closed issue's own close comment for a "Duplicate of #M" redirect and check M's state too before
+trusting a "closes when X lands" premise.**
+
+Once the redirect is found and the literal fix commit still doesn't exist, that does NOT
+automatically mean "don't restore" — check the ACTUAL, CURRENT, MEASURED state instead of the
+premise's literal wording. The technique (same family as `.claude/rules/phase-sync-calibrator-
+testing.md` and `.claude/rules/gap-metric-reconciliation.md` — recalibrate/verify from a recent
+CI run's own data rather than triggering a fresh soak — here applied specifically to RESTORING a
+previously-relaxed term):
+
+```bash
+gh run list --workflow "Full-path E2E (recording-based · hardware · self-hosted dev1)" \
+  --json databaseId,conclusion,createdAt,event -L 60 \
+  --jq '.[] | select(.event=="pull_request") | "\(.databaseId) \(.createdAt) \(.conclusion)"'
+# then per run:
+gh run view <id> --log | grep -E "imag (PASSED|MISSED) its render budget"   # the term's own verdict
+gh run view <id> --log | grep -E "imag burn-check.*burn_on=True"           # confirm the condition
+#                                                                             being measured (burns
+#                                                                             ON) was actually true
+```
+
+Pull EVERY reachable `pull_request`-triggered hardware-gate run since the relaxation landed, not
+just the 2-3 most recent — a wide, multi-day sample (#888 used 10 runs across 2.5 days) is far
+stronger evidence than one more manual soak, and it also reveals WHERE the transition happened
+(here: a clean MISS→PASS boundary the same evening `issue 884`'s imag-obs.service supervision
+deployed — consistent with `issue 799`'s documented "restart clears render degradation" pattern,
+though this was recorded as a hypothesis, not a verified causal claim, since no #865/#886-titled
+commit exists). **`gh run view --log` retention is finite** — very old runs in the list may return
+an empty log; treat those as "unreachable", not as evidence either way, and lean on the runs that
+DO return data.
+
+## A trailing `///` doc-comment block at the end of a `.rs` test file fails to compile if nothing follows it
+
+`error: expected item after doc comment` — a doc comment (`///`) must document an ITEM (a
+function, struct, etc.); a closing explanatory note at the END of a test file with no more `#[test]`
+functions after it needs a plain `//` comment, not `///`. Easy to trip when replacing/removing the
+last test function in a file and leaving a trailing note behind.
