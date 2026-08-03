@@ -486,6 +486,16 @@ pub fn marker_coverage_overlaps_video_ticks(
     e_lo <= v_hi && v_lo <= e_hi
 }
 
+/// Render a `frame_id_range` result for a human-readable message: `[lo, hi]`, or a plain "no
+/// ticks decoded at all" phrase for `None` — a bare `{:?}` of `None` read as an odd dangling word
+/// ("...tick range None.") in [`marker_coverage_gap_message`]'s prose.
+fn format_frame_id_range(r: Option<(u32, u32)>) -> String {
+    match r {
+        Some((lo, hi)) => format!("[{lo}, {hi}]"),
+        None => "none (no ticks decoded at all)".to_string(),
+    }
+}
+
 /// #936: the loud, self-diagnosing message `recording-verdict --av-sync` bails with when
 /// [`marker_coverage_overlaps_video_ticks`] returns `false`. Pure string formatting so the wording
 /// (and the actual computed ranges) is unit-tested here.
@@ -493,12 +503,12 @@ pub fn marker_coverage_gap_message(
     emit_log: &[(u8, u32, i64)],
     video_ticks: &[(u32, f64)],
 ) -> String {
-    let emit_range = frame_id_range(emit_log.iter().map(|(_, fid, _)| *fid));
-    let video_range = frame_id_range(video_ticks.iter().map(|(t, _)| *t));
+    let emit_range = format_frame_id_range(frame_id_range(emit_log.iter().map(|(_, fid, _)| *fid)));
+    let video_range = format_frame_id_range(frame_id_range(video_ticks.iter().map(|(t, _)| *t)));
     format!(
         "REFUSING to measure A/V-sync (#936 fail-closed guard): the marker emit-log's frame_id \
-         coverage {emit_range:?} does NOT overlap the recording's own decoded video tick range \
-         {video_range:?}. The marker thread most likely died (or the wrong emit-log/recording \
+         coverage {emit_range} does NOT overlap the recording's own decoded video tick range \
+         {video_range}. The marker thread most likely died (or the wrong emit-log/recording \
          pair was given) before or after this recording — pairing by decoded audio index alone \
          would otherwise produce a plausible-looking but MEANINGLESS offset from CRC-4 false \
          decodes (live incident: av_offset_ms=-544.8 matched=41 mad_ms=12.0, all against a marker \
@@ -1264,6 +1274,24 @@ mod tests {
         assert!(msg.contains("13500"));
         assert!(msg.contains("97200"));
         assert!(msg.contains("108000"));
+    }
+
+    #[test]
+    fn marker_coverage_gap_message_reads_cleanly_when_no_video_ticks_decoded_at_all() {
+        // Review follow-up (#936): a bare `{:?}` of `None` used to read as a dangling word
+        // ("...tick range None."). No video ticks decoded is a real case (the recording's dual-QR
+        // never decoded at all) and must read as a plain sentence, not leak Rust's Option syntax.
+        let emit_log = vec![(0u8, 0u32, 0i64), (1, 13_500, 1)];
+        let msg = marker_coverage_gap_message(&emit_log, &[]);
+        assert!(
+            !msg.contains("None"),
+            "must not leak Option's Debug syntax: {msg}"
+        );
+        assert!(msg.contains("no ticks decoded"));
+        assert!(
+            msg.contains("[0, 13500]"),
+            "emit range still renders numerically: {msg}"
+        );
     }
 
     #[test]

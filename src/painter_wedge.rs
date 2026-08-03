@@ -33,6 +33,21 @@
 //! `.claude/rules/self-heal-frozen-leg-attribution.md` this event stays its OWN distinctly-worded
 //! CRITICAL line + its OWN exit code (never overloaded onto `#945`'s or `#663`'s wording).
 //!
+//! **Review follow-up (#936): the "mirrors #945 exactly" claim above needs one caveat.** The
+//! `#945` capture-wedge precedent runs `VideoCapture::open_with_controls(...)` to completion on
+//! the main thread BEFORE its watchdog thread is even spawned, so device-open latency is never
+//! charged against `CAPTURE_WEDGE_THRESHOLD_S`. The painter-wedge watchdog is spawned in
+//! `run.rs` BEFORE the painter thread (and its `open_presenter()` call — device open,
+//! `acquire_master_lock`, connector/mode enumeration, the two `make_slot()` dumb-buffer
+//! allocations, the initial `set_crtc`, none of which has any inner timeout of its own) —
+//! `run_painter` therefore seeds the SAME heartbeat immediately after `open_presenter()` succeeds,
+//! before its paint loop starts, so `PAINTER_WEDGE_THRESHOLD_S` only ever measures PER-FRAME
+//! stalls, matching the #945 precedent's actual (not just narrated) behavior. Without that seed, a
+//! legitimately slow open (a cold boot's connector/EDID probing, or the GPU/DRM subsystem still
+//! settling right after a PREVIOUS wedge-triggered restart) could trip the watchdog before the
+//! painter ever paints a frame — turning one recoverable wedge into a self-sustaining crash loop
+//! on `cam2-painter.service`'s `Restart=always`/`RestartSec=2`.
+//!
 /// How many seconds the painter loop may go WITHOUT a successful `paint_one_frame()` completing
 /// before the watchdog treats it as WEDGED. The KMS vblank-locked path ticks every ~16.6ms (60Hz);
 /// `KmsPresenter::wait_flip_complete()`'s OWN internal 500ms non-blocking-poll timeout already

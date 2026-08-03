@@ -118,9 +118,11 @@ fn spawn_painter_wedge_watchdog(heartbeat: Arc<AtomicU64>, stop: Arc<AtomicBool>
         .name("painter-wedge-watchdog".into())
         .spawn(move || {
             // Poll well inside the wedge threshold so the watchdog itself can never add more
-            // than one poll interval of detection latency.
+            // than one poll interval of detection latency. Checks `stop` BEFORE and AFTER the
+            // sleep (mirrors src/main.rs's #945 capture-wedge watchdog exactly) so a `stop`
+            // already true at spawn time is caught without waiting a full poll interval first.
             let poll_interval = Duration::from_millis(500);
-            loop {
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
                 std::thread::sleep(poll_interval);
                 if stop.load(std::sync::atomic::Ordering::Relaxed) {
                     break; // normal shutdown in progress -- never misreport as a wedge

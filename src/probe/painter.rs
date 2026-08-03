@@ -278,6 +278,20 @@ pub fn run_painter(
         params.canvas_w,
         params.canvas_h,
     )?;
+    // #936 review follow-up: seed the heartbeat the INSTANT open_presenter() succeeds, before the
+    // paint loop even starts. open_presenter() (device open, acquire_master_lock, connector/mode
+    // enumeration, the two make_slot() dumb-buffer allocations, the initial set_crtc) has NO inner
+    // timeout of its own and can legitimately take longer than PAINTER_WEDGE_THRESHOLD_S (a cold
+    // boot's connector/EDID probing, or the GPU/DRM subsystem still settling right after a PREVIOUS
+    // wedge-triggered restart) -- without this seed the watchdog's clock starts at `start` (process
+    // spawn) and would blame that legitimate open latency on the paint loop, potentially exiting
+    // before the painter ever paints its first frame and turning one recoverable wedge into a
+    // self-sustaining crash loop on cam2-painter.service's Restart=always/RestartSec=2. This
+    // matches the #945 capture_wedge precedent's ACTUAL behavior (VideoCapture::open_with_controls
+    // runs to completion on the main thread BEFORE that watchdog thread is even spawned, so device-
+    // open cost is never charged against ITS threshold either) -- the loop below then updates this
+    // same heartbeat every frame, so from here on the threshold measures only PER-FRAME stalls.
+    heartbeat.store(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
     let flip_paced = presenter.paces_on_present();
     if flip_paced {
         if presenter.phase_locked() {
