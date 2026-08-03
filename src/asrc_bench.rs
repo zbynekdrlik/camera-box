@@ -742,29 +742,37 @@ mod tests {
     #[test]
     fn starved_block_does_not_corrupt_the_estimate_960() {
         let mut compensator = RealtimeAsrcCompensator::new();
-        // Converge on a perfectly-matched clock first, well past MIN_LOCK_S, so estimated_ppm/
-        // applied_ppm are known-settled at ~0 before the starved block hits.
+        // Converge on a perfectly-matched (ppm=0) clock first, well past MIN_LOCK_S. With no
+        // drift, instantaneous_ppm is exactly 0.0 every block, so the EMA/applied stay exactly
+        // 0.0 (bit-for-bit) -- not merely "close to zero".
         for _ in 0..10 {
             let _ = compensator.compensate(1.0, 1.0);
         }
-        assert!(compensator.estimated_ppm().abs() < 1e-9);
-        assert!(compensator.applied_ppm().abs() < 1e-9);
+        assert_eq!(compensator.estimated_ppm(), 0.0);
+        assert_eq!(compensator.applied_ppm(), 0.0);
 
         // issue #960: the exact live incident — a starved block reporting -737,600ppm.
         let starved = DriftingAudioClock::new(-737_600.0);
         let raw = starved.raw_advance(1.0);
         let _ = compensator.compensate(raw, 1.0);
 
-        assert!(
-            compensator.estimated_ppm().abs() < 1.0,
+        // The guard's rejection path is an EARLY RETURN that never touches estimated_ppm/
+        // applied_ppm at all -- so both must stay EXACTLY at their pre-block value (not just
+        // "close"), which is what makes this assertion non-tautological: any regression that
+        // lets the garbage ppm leak even partially into the EMA (a weakened guard, an off-by-one
+        // threshold, a partial slew step) would move these away from bit-exact 0.0.
+        assert_eq!(
+            compensator.estimated_ppm(),
+            0.0,
             "expected a starved block to be REJECTED (estimate left at its pre-block value), got \
              estimated_ppm={} — the -737,600ppm garbage was folded into the EMA, exactly the \
              #960 defect",
             compensator.estimated_ppm()
         );
-        assert!(
-            compensator.applied_ppm().abs() < 1.0,
-            "expected the applied correction to stay HELD near its pre-starvation value, got \
+        assert_eq!(
+            compensator.applied_ppm(),
+            0.0,
+            "expected the applied correction to stay HELD at its pre-starvation value, got \
              {}ppm — a starved block must never rail the servo toward -MAX_PPM",
             compensator.applied_ppm()
         );
