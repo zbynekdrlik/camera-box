@@ -37,6 +37,16 @@ static int g_failures = 0;
 
 int main()
 {
+    // (0) #942 -- the corrector is monitor-only by build default: the pure decision seam a
+    // caller MUST consult before ever writing a decide() Apply result to the live actuator is
+    // hard-locked false, with no env/WebSocket/per-source way to flip it at runtime.
+    CHECK(!CB_DOCK_LOCK_ACTUATION_ENABLED,
+          "issue 942: CB_DOCK_LOCK_ACTUATION_ENABLED must stay hard-locked false -- the E2E gate "
+          "(scripts/av_sync_calibrate.py --apply) is the sole writer of genlock_latency_ms_src");
+    CHECK(!cb_dock_lock_may_actuate(),
+          "issue 942: cb_dock_lock_may_actuate() must read straight from "
+          "CB_DOCK_LOCK_ACTUATION_ENABLED and return false");
+
     // (1) Unlocked (real event, no test signal) never touches the actuator.
     {
         CbDockLockCorrector c;

@@ -1322,7 +1322,13 @@ static void st_raw_audio_camera_box(struct sync_test_output *st, struct audio_da
 					st->cb_lock_source_missing_logged = false;
 					camerabox::CbDockLockAction act = st->cb_lock_corrector.decide(
 						true, est.offset_ms, est.mad_ms, current_ms, audio_ts);
-					if (act.apply) {
+					/* #942 -- the E2E gate (scripts/av_sync_calibrate.py --apply) is the SOLE
+					 * writer of genlock_latency_ms_src; two independent actuators on one plant
+					 * never converge (root-cause evidence on the #942 ticket). decide()'s own
+					 * band/step/cooldown logic is UNCHANGED (`.claude/rules/dock-lock-hold-
+					 * band.md`) -- only whether a computed Apply is ever WRITTEN changes, gated
+					 * on the hard-locked cb_dock_lock_may_actuate() seam. */
+					if (act.apply && camerabox::cb_dock_lock_may_actuate()) {
 						const double delta_ms = (double)(act.new_delay_ms - current_ms);
 						cb_apply_lock_latency_ms(act.new_delay_ms);
 						/* #926 fix-up (review finding 1/7): shift every retained cluster
@@ -1335,6 +1341,23 @@ static void st_raw_audio_camera_box(struct sync_test_output *st, struct audio_da
 						blog(LOG_INFO,
 						     "av-sync-dock: LOCK-CORRECT requested genlock_latency_ms_src %d "
 						     "-> %dms (measured offset=%.1fms)",
+						     (int)current_ms, (int)act.new_delay_ms, est.offset_ms);
+					} else if (act.apply) {
+						/* #942 -- monitor-only: decide() computed a real correction, but the
+						 * gate is the sole writer, so this is DISPLAYED as a suggestion and
+						 * never applied -- no cb_apply_lock_latency_ms(), no rebase() (rebase
+						 * assumes a real actuator move happened, which this is not). decide()
+						 * only returns apply=true when its clamped target differs from the
+						 * CURRENT actuator value (a value pinned exactly at a rail always
+						 * clamps back to itself -- Hold), so reaching here means we are not
+						 * currently stuck at a rail; reset the dedup flag the same way the
+						 * write branch above does, so a LATER genuine rail-pinned state still
+						 * gets its own fresh warning. */
+						st->cb_rail_pinned_logged = false;
+						blog(LOG_INFO,
+						     "av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src %d "
+						     "-> %dms (measured offset=%.1fms) [monitor-only -- #942 gate is "
+						     "the sole writer]",
 						     (int)current_ms, (int)act.new_delay_ms, est.offset_ms);
 					} else if (est.offset_ms < 0.0 &&
 					           (current_ms <= camerabox::CB_DOCK_LOCK_LATENCY_MIN_MS ||

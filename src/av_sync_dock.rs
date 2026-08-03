@@ -410,6 +410,32 @@ pub const DOCK_LOCK_LATENCY_MAX_MS: i32 = 2000;
 /// floor even when a cluster reports a suspiciously tiny/zero MAD (few samples, or a lucky run).
 pub const DOCK_LOCK_MIN_MARGIN_MS: f64 = 1.0;
 
+/// #942 — BUILD DEFAULT, not a runtime toggle: the E2E gate (`scripts/av_sync_calibrate.py
+/// --apply`) is the SOLE writer of `genlock_latency_ms_src`. Two independent actuators writing
+/// the SAME live knob never converge — the gate measures against ground truth (the QPSK marker +
+/// the optical burns) and is read-back-verified once per run with a clamped step; this corrector
+/// only ever servos against its OWN recent output, with no ground truth of its own. Root-cause
+/// evidence (a 20-run random walk while both actuators were live, and a directly-sampled ±5ms
+/// limit cycle with zero gate activity in flight) is recorded on the #942 ticket. This mirrors
+/// the SAME hard-lock convention as #257 (genlock env removal) and #912 (ASRC default-on) — no
+/// env var, no WebSocket flag, no per-source opt-in; flipping it back on is a deliberate future
+/// code change, never a config value. [`dock_lock_may_actuate`] is the pure decision seam a
+/// caller MUST consult before ever writing `genlock_latency_ms_src` from a
+/// [`DockLockCorrector::decide`] result — the corrector keeps MEASURING and its caller keeps
+/// DISPLAYING the computed offset/margin/implied correction (a "suggested: +N ms"), it simply
+/// never applies it while this is `false`.
+pub const DOCK_LOCK_ACTUATION_ENABLED: bool = false;
+
+/// The pure decision seam: may a [`DockLockCorrector::decide`] result that returned
+/// [`DockLockAction::Apply`] actually be written to the live `genlock_latency_ms_src` actuator
+/// right now? #942: hard-locked `false` by build default — see [`DOCK_LOCK_ACTUATION_ENABLED`]'s
+/// own doc comment. The C++ dock mirrors this exact function (`cb_dock_lock_may_actuate` in
+/// `vendor/av-sync-dock/src/camera-box-audio.hpp`) and gates its own actuator-write call site on
+/// it, never on re-deriving the decision inline.
+pub fn dock_lock_may_actuate() -> bool {
+    DOCK_LOCK_ACTUATION_ENABLED
+}
+
 /// The decision [`DockLockCorrector::decide`] returns: either leave the actuator alone, or set it
 /// to a new absolute `genlock_latency_ms_src` value.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -818,6 +844,23 @@ mod tests {
         assert!(
             !locked,
             "a wide (high-MAD) band must be rejected by the MAD gate"
+        );
+    }
+
+    // ---- #942 monitor-only hard lock ----
+
+    #[test]
+    fn dock_lock_actuation_is_hard_locked_off_942() {
+        // The E2E gate (scripts/av_sync_calibrate.py --apply) is the SOLE writer of
+        // genlock_latency_ms_src -- the corrector must never be permitted to actuate, by build
+        // default, with no env/WebSocket/per-source escape hatch. This is the pure Tier-0 half of
+        // the #942 fix; the C++ caller (vendor/av-sync-dock/src/sync-test-output.cpp) gates its
+        // own actuator-write call site on the mirrored cb_dock_lock_may_actuate() and is pinned by
+        // the vendored-source guard in tests/genlock_preload.rs.
+        assert!(
+            !dock_lock_may_actuate(),
+            "#942: DOCK_LOCK_ACTUATION_ENABLED must stay hard-locked false -- the dock corrector \
+             must never write genlock_latency_ms_src while the E2E gate is the sole writer"
         );
     }
 

@@ -1055,6 +1055,9 @@ mod vendored_source {
     pub const NDI_BURN_FILTER: &str = "vendor/distroav/src/ndi-burn-filter.cpp";
     pub const WINDOWS_GENLOCK_WF: &str = ".github/workflows/windows-genlock.yml";
     pub const WINDOWS_GENLOCK_FAST_WF: &str = ".github/workflows/windows-genlock-fast.yml";
+    // #942: the LIVE dock's pure decision header + its OBS glue caller.
+    pub const AV_SYNC_DOCK_AUDIO: &str = "vendor/av-sync-dock/src/camera-box-audio.hpp";
+    pub const AV_SYNC_DOCK_OUTPUT: &str = "vendor/av-sync-dock/src/sync-test-output.cpp";
 
     /// Read the libobs `#define MAX_ASYNC_FRAMES <n>` literal from the vendored
     /// source so the preload-cap invariant tracks upstream instead of being
@@ -2261,6 +2264,51 @@ mod vendored_source {
             !src.contains("put_bgra(buf, stride, frame_w, frame_h, (uint32_t)(ox + xx)"),
             "{BURN_QR}: #275 — the per-pixel white put_bgra loop is BACK; that is the slow \
              path #275 removed."
+        );
+    }
+
+    // ---- #942 dock lock corrector is monitor-only by build default ----------
+
+    #[test]
+    fn dock_lock_corrector_is_monitor_only_by_build_default_942() {
+        // #942: two independent actuators were writing the SAME live genlock_latency_ms_src knob
+        // (the E2E gate, ground-truth-verified once per run; and this in-process corrector,
+        // servoing against its own recent output with no ground truth) — a 20-run random walk
+        // that never converged. The gate is now the SOLE writer; the corrector keeps MEASURING
+        // and DISPLAYING (offset/mad/implied correction) but must never itself write the knob.
+        // Mirror of tests/genlock_preload.rs::vendored_source::asrc_default_on_present_in_vendored_source
+        // (#912) — same hard-lock convention (build default, no env/WebSocket/per-source toggle).
+        let audio = squish(&vendor_file(AV_SYNC_DOCK_AUDIO));
+        assert!(
+            audio.contains("bool CB_DOCK_LOCK_ACTUATION_ENABLED = false;"),
+            "{AV_SYNC_DOCK_AUDIO}: #942 — CB_DOCK_LOCK_ACTUATION_ENABLED is missing or not \
+             hard-locked false; the dock corrector must never write genlock_latency_ms_src while \
+             the E2E gate is the sole writer."
+        );
+        assert!(
+            audio.contains("bool cb_dock_lock_may_actuate()")
+                && audio.contains("return CB_DOCK_LOCK_ACTUATION_ENABLED;"),
+            "{AV_SYNC_DOCK_AUDIO}: #942 — the pure decision seam cb_dock_lock_may_actuate() is \
+             missing; the caller has nothing to gate its actuator write on."
+        );
+
+        let output = squish(&vendor_file(AV_SYNC_DOCK_OUTPUT));
+        assert!(
+            output.contains("if (act.apply && camerabox::cb_dock_lock_may_actuate())"),
+            "{AV_SYNC_DOCK_OUTPUT}: #942 — the LOCK-CORRECT apply call site is not gated on \
+             cb_dock_lock_may_actuate(); the corrector would still write genlock_latency_ms_src."
+        );
+        assert!(
+            !output.contains("audio_ts); if (act.apply) {"),
+            "{AV_SYNC_DOCK_OUTPUT}: #942 — the decide() call is still followed by an UNGATED \
+             `if (act.apply)` actuator-write branch; the corrector must consult \
+             cb_dock_lock_may_actuate() first (a later `else if (act.apply)` monitor-only branch \
+             is fine and expected — this checks the FIRST, write-capable branch only)."
+        );
+        assert!(
+            output.contains("LOCK-CORRECT SUGGESTED genlock_latency_ms_src"),
+            "{AV_SYNC_DOCK_OUTPUT}: #942 — the monitor-only path must still log the SUGGESTED \
+             correction (offset/implied target) even though it is never applied."
         );
     }
 }

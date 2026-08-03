@@ -225,6 +225,35 @@ jobs:
           }
           Write-Output "ASRC always-on-by-default (#912 build-default init + live override API kept) — OK"
 
+      # #942: the A/V-sync dock's in-process lock corrector must be MONITOR-ONLY by build
+      # default — the E2E gate (scripts/av_sync_calibrate.py --apply) is the SOLE writer of
+      # genlock_latency_ms_src. Two independent actuators writing the same live knob never
+      # converge (root-cause evidence on the #942 ticket: a 20-run random walk while both were
+      # live). Same hard-lock convention as #257/#912 above — no env, no WebSocket flag, no
+      # per-source opt-in; the write call site must consult the hard-locked
+      # cb_dock_lock_may_actuate() seam before ever applying a decide() result. Mirrors the
+      # canonical Linux-CI guard tests/genlock_preload.rs::vendored_source::
+      # dock_lock_corrector_is_monitor_only_by_build_default_942 (probe-gated, can't compile on
+      # this windows runner). Keep both in lock-step.
+      - name: Assert dock lock corrector is monitor-only by default (#942)
+        shell: pwsh
+        run: |
+          $audio = (Get-Content "vendor/av-sync-dock/src/camera-box-audio.hpp" -Raw) -replace '\s+', ' '
+          if ($audio -notmatch [regex]::Escape('bool CB_DOCK_LOCK_ACTUATION_ENABLED = false;')) {
+            Write-Error "camera-box-audio.hpp: CB_DOCK_LOCK_ACTUATION_ENABLED missing or not hard-locked false — #942 monitor-only default reverted (dock corrector would write genlock_latency_ms_src again)"; exit 1
+          }
+          if ($audio -notmatch [regex]::Escape('bool cb_dock_lock_may_actuate()')) {
+            Write-Error "camera-box-audio.hpp: cb_dock_lock_may_actuate() missing — the #942 pure decision seam is gone, the caller has nothing to gate its actuator write on"; exit 1
+          }
+          $output = (Get-Content "vendor/av-sync-dock/src/sync-test-output.cpp" -Raw) -replace '\s+', ' '
+          if ($output -notmatch [regex]::Escape('if (act.apply && camerabox::cb_dock_lock_may_actuate())')) {
+            Write-Error "sync-test-output.cpp: the LOCK-CORRECT apply call site is no longer gated on cb_dock_lock_may_actuate() — #942 monitor-only default reverted"; exit 1
+          }
+          if ($output -match [regex]::Escape('audio_ts); if (act.apply) {')) {
+            Write-Error "sync-test-output.cpp: an UNGATED if (act.apply) actuator-write branch is back right after decide() — #942 gate bypassed"; exit 1
+          }
+          Write-Output "dock lock corrector monitor-only by default (#942 hard-locked seam + gated call site) — OK"
+
       # #116: assert the build-latch drain-to-target patch is present in the vendored
       # OBS source BEFORE the 150-min build, so a future `git subtree pull` (#44) that
       # reverts it fails HERE rather than shipping a binary where cameras freeze at

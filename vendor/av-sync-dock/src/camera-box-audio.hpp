@@ -519,6 +519,27 @@ static const int32_t CB_DOCK_LOCK_LATENCY_MAX_MS = 2000;
 /* #926 fix-up review finding 3 -- mirror of av_sync_dock::DOCK_LOCK_MIN_MARGIN_MS. */
 static const double CB_DOCK_LOCK_MIN_MARGIN_MS = 1.0;
 
+/* #942 -- BUILD DEFAULT, not a runtime toggle: the E2E gate (scripts/av_sync_calibrate.py
+ * --apply) is the SOLE writer of genlock_latency_ms_src. Two independent actuators writing the
+ * SAME live knob never converge -- the gate measures against ground truth (the QPSK marker + the
+ * optical burns) and is read-back-verified once per run with a clamped step; this corrector only
+ * ever servos against its OWN recent output, with no ground truth of its own (root-cause evidence
+ * on the #942 ticket: a 20-run random walk while both actuators were live, and a directly-sampled
+ * +-5ms limit cycle with zero gate activity in flight). Mirrors the SAME hard-lock convention as
+ * #257 (genlock env removal) and #912 (ASRC default-on) -- no env var, no WebSocket flag, no
+ * per-source opt-in; flipping this back on is a deliberate future code change, never a config
+ * value. Mirror of src/av_sync_dock.rs::DOCK_LOCK_ACTUATION_ENABLED / dock_lock_may_actuate() --
+ * the caller (sync-test-output.cpp) MUST consult cb_dock_lock_may_actuate() before ever writing a
+ * decide() Apply result to the live actuator; the corrector keeps MEASURING and its caller keeps
+ * DISPLAYING the computed offset/margin/implied correction (a "SUGGESTED" log line), it simply
+ * never applies it while this is false. */
+static const bool CB_DOCK_LOCK_ACTUATION_ENABLED = false;
+
+inline bool cb_dock_lock_may_actuate()
+{
+	return CB_DOCK_LOCK_ACTUATION_ENABLED;
+}
+
 struct CbDockLockAction {
 	bool apply = false; // false == Hold (do not touch the actuator)
 	int32_t new_delay_ms = 0; // meaningful only when apply == true
