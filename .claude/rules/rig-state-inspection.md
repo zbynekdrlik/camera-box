@@ -133,7 +133,8 @@ the plain-ssh counterpart of that same runbook.
    BOTH `render tick ENABLED` and the specific plugin's own load line, and print them. Restart AHK
    last, also via `Invoke-CimMethod`, only on the box that had it running.
 
-**This repo's `pre-deploy-clean-tree.sh` hook will block every scp above** — `targets.md` carries
+**The global airuleset `pre-deploy-clean-tree.sh` hook (lives in `~/devel/airuleset/hooks/`, not
+in this repo) will block every scp above** — `targets.md` carries
 local-only rig IPs and is permanently uncommitted by design (see "DO NOT DELETE These Files" in
 the project `CLAUDE.md`), so the tree is never clean for a deploy. Add
 `# airuleset:deploy-dirty-ok <reason>` inline on each Bash call in this repo that does the

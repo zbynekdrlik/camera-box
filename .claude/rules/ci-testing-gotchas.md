@@ -366,3 +366,46 @@ Leave the PR open, comment the evidence on the ticket, and let whoever owns the 
 supervisor, or the live measurement concluding) get the state populated; then `gh run rerun
 <run-id>` (never a fresh `gh workflow run`, per the `linux-genlock.yml`/`full-path-e2e.yml`
 GOTCHA in the top-level CLAUDE.md) on the SAME commit gets a real verdict with no new push.
+
+## A branch's own explanatory comment can DEFEAT a negative-substring anchor test written against it (#942 hardening session, 2026-08-02/03)
+
+When writing a NEGATIVE check ("this branch must never call X") against one of the vendored
+`av-sync-dock` C++ files by slicing a region and asserting `!region.contains("X(")`, check whether
+that exact region's own comment ALREADY explains what the branch does NOT do, using the same
+literal call text — e.g. a monitor-only branch's comment reading "no cb_apply_lock_latency_ms(),
+no rebase() (rebase assumes a real actuator move happened, which this is not)". A naive
+`squish()`ed (whitespace-collapsed, comments left in) substring check on that region finds the
+PROSE, not a real call, which can mask a genuine future regression (the check still "passes" for
+the wrong reason) or, worse, misfire on an innocent comment edit.
+
+**Fix: strip `//` and `/* ... */` comments from the vendored text BEFORE slicing for a
+negative-substring check** — a small line/block-comment stripper preserving newlines (so
+`//`-comment scope stays correct) is enough; it doesn't need string/char-literal awareness for
+this repo's vendored C++, since it's only ever used to bound an ASCII substring search, never to
+reconstruct compilable source. See `strip_cpp_comments()` in
+`tests/genlock_preload.rs::vendored_source` and its use in
+`dock_lock_corrector_is_monitor_only_by_build_default_942`'s branch-scoped
+`cb_apply_lock_latency_ms(`/`rebase(` check. A POSITIVE anchor (pinning that code X DOES exist at
+a specific location) does not need this — comments don't accidentally satisfy a positive check the
+same way, though it's still worth grepping the count including comments to confirm uniqueness.
+
+**Before trusting ANY new anchor (positive or negative) in this file class: prove it bites.**
+Temporarily mutate a SCRATCH COPY of the vendored/workflow text (never `vendor/` itself, and never
+leave a real file mutated — `cp` to a backup, mutate the REAL non-vendor file in place if it isn't
+`vendor/`, run the specific test, confirm the expected FAIL, then restore from the backup and
+`md5sum`-verify it matches the pre-mutation hash byte-for-byte) or run the exact same
+squish/strip/slice logic in a throwaway `python3` one-liner against the file content read via
+`open()` — either proves the anchor actually catches the regression it exists to prevent, rather
+than merely "looking right". An anchor you never watched fail is not a proven anchor.
+
+## A commit message merely MENTIONING the airuleset hooks PATH in prose can false-trip `block-foreign-airuleset-write.sh`
+
+The hook scans the whole `git commit` command TEXT (including a heredoc `-m` body) for anything
+that looks like a write to `~/devel/airuleset/**` — it does not distinguish "this command writes
+to that path" from "this commit message's PROSE happens to mention that path" (e.g. correcting a
+doc pointer that wrongly said a hook lives in this repo, when it actually lives in
+`~/devel/airuleset/hooks/`). This is a genuine false positive in a foreign (non-airuleset) repo's
+own commit — the fix is the documented escape hatch, not rewording the message to hide the
+path: append `# airuleset:foreign-ok <reason>` to the `git commit` command. Confirmed harmless
+here (nothing was written to the airuleset repo; the commit only touched
+`.claude/rules/rig-state-inspection.md` inside camera-box).

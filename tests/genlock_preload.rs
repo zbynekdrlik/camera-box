@@ -1039,6 +1039,55 @@ mod vendored_source {
         s.split_whitespace().collect::<Vec<_>>().join(" ")
     }
 
+    /// #942 hardening: strip `//` line comments and `/* ... */` block comments from a C/C++
+    /// source string before slicing it for a branch-scoped negative check. Naive (no
+    /// string/char-literal awareness), which is fine here -- it is only ever used to bound a
+    /// slice for an ASCII substring search, never to reconstruct compilable source -- but it
+    /// exists specifically because a vendored comment can EXPLAIN what a branch must NOT do
+    /// using the exact same literal text a negative check searches for (see
+    /// `dock_lock_corrector_is_monitor_only_by_build_default_942`'s own comment: "no
+    /// cb_apply_lock_latency_ms(), no rebase()"), which would otherwise self-defeat the check.
+    fn strip_cpp_comments(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        let bytes = s.as_bytes();
+        let mut i = 0;
+        let mut in_line = false;
+        let mut in_block = false;
+        while i < bytes.len() {
+            let c = bytes[i] as char;
+            if in_line {
+                if c == '\n' {
+                    in_line = false;
+                    out.push('\n');
+                }
+                i += 1;
+                continue;
+            }
+            if in_block {
+                if c == '*' && i + 1 < bytes.len() && bytes[i + 1] as char == '/' {
+                    in_block = false;
+                    i += 2;
+                    continue;
+                }
+                i += 1;
+                continue;
+            }
+            if c == '/' && i + 1 < bytes.len() && bytes[i + 1] as char == '/' {
+                in_line = true;
+                i += 2;
+                continue;
+            }
+            if c == '/' && i + 1 < bytes.len() && bytes[i + 1] as char == '*' {
+                in_block = true;
+                i += 2;
+                continue;
+            }
+            out.push(c);
+            i += 1;
+        }
+        out
+    }
+
     pub const OBS_SOURCE: &str = "vendor/obs-studio/libobs/obs-source.c";
     const OBS_INTERNAL: &str = "vendor/obs-studio/libobs/obs-internal.h";
     pub const OBS_API: &str = "vendor/obs-studio/libobs/obs.h";
@@ -2274,7 +2323,10 @@ mod vendored_source {
         // #942: two independent actuators were writing the SAME live genlock_latency_ms_src knob
         // (the E2E gate, ground-truth-verified once per run; and this in-process corrector,
         // servoing against its own recent output with no ground truth) — a 20-run random walk
-        // that never converged. The gate is now the SOLE writer; the corrector keeps MEASURING
+        // that never converged. The gate is now the only CONTINUOUS/closed-loop writer (a
+        // separate, bounded snapshot-and-restore exception exists around a single delivery-
+        // verify test run — scripts/obs_phase2.py::_snapshot_and_set_test_latency, #358/#691 —
+        // which is not a second closed-loop actuator); the corrector keeps MEASURING
         // and DISPLAYING (offset/mad/implied correction) but must never itself write the knob.
         // Mirror of tests/genlock_preload.rs::vendored_source::asrc_default_on_present_in_vendored_source
         // (#912) — same hard-lock convention (build default, no env/WebSocket/per-source toggle).
@@ -2305,11 +2357,97 @@ mod vendored_source {
              cb_dock_lock_may_actuate() first (a later `else if (act.apply)` monitor-only branch \
              is fine and expected — this checks the FIRST, write-capable branch only)."
         );
+        // #942 hardening: the two checks above only prove the gated `if`'s TEXT exists
+        // somewhere in the file and that ONE specific ungated phrasing is absent -- neither
+        // proves the actuator WRITE actually lives strictly inside the gated branch. Renaming
+        // `audio_ts` or reflowing the `if` onto a different line would silently pass both while
+        // an actuator write sat anywhere else, including inside the monitor-only sibling below.
+        // Pin both halves precisely instead: (a) the write is the FIRST statement immediately
+        // inside the cb_dock_lock_may_actuate()-gated `if`, and (b) the monitor-only
+        // `else if (act.apply)` sibling -- which computes the SAME real correction but must
+        // only ever DISPLAY it -- never itself gains a write.
+        assert!(
+            output.contains(
+                "if (act.apply && camerabox::cb_dock_lock_may_actuate()) { \
+                 const double delta_ms = (double)(act.new_delay_ms - current_ms); \
+                 cb_apply_lock_latency_ms(act.new_delay_ms);"
+            ),
+            "{AV_SYNC_DOCK_OUTPUT}: #942 — cb_apply_lock_latency_ms() is no longer the first \
+             statement immediately inside the cb_dock_lock_may_actuate()-gated `if` branch; the \
+             write may have moved outside the gate even though the gated `if` text still exists \
+             somewhere else in the file."
+        );
+        // The monitor-only sibling: strip comments first. Its own explanatory comment
+        // literally reads "no cb_apply_lock_latency_ms(), no rebase()" to document what the
+        // branch must NOT do -- a naive substring check on the raw text (with comments left in)
+        // would find that prose and could mask a real regression, or misfire on an innocent
+        // comment edit. See strip_cpp_comments()'s own doc comment for why.
+        let output_nc = squish(&strip_cpp_comments(&vendor_file(AV_SYNC_DOCK_OUTPUT)));
+        const MONITOR_BRANCH_START: &str = "else if (act.apply) {";
+        assert_eq!(
+            output_nc.matches(MONITOR_BRANCH_START).count(),
+            1,
+            "{AV_SYNC_DOCK_OUTPUT}: #942 — \"{MONITOR_BRANCH_START}\" (comments stripped) is no \
+             longer unique in this file; the branch-slice below would grab the wrong region."
+        );
+        let branch_pos = output_nc.find(MONITOR_BRANCH_START).unwrap_or_else(|| {
+            panic!(
+                "{AV_SYNC_DOCK_OUTPUT}: #942 — the monitor-only `else if (act.apply)` branch \
+                 (sibling of the gated write branch) is gone; cannot verify it stayed write-free."
+            )
+        });
+        let after_branch_start = &output_nc[branch_pos + MONITOR_BRANCH_START.len()..];
+        let branch_end = after_branch_start.find("} else if").unwrap_or_else(|| {
+            panic!(
+                "{AV_SYNC_DOCK_OUTPUT}: #942 — could not find the end of the monitor-only \
+                 branch (no following `}} else if`); cannot bound the slice to check it."
+            )
+        });
+        let monitor_branch = &after_branch_start[..branch_end];
+        assert!(
+            !monitor_branch.contains("cb_apply_lock_latency_ms("),
+            "{AV_SYNC_DOCK_OUTPUT}: #942 — the monitor-only `else if (act.apply)` branch now \
+             calls cb_apply_lock_latency_ms() -- it must only ever LOG the suggested correction, \
+             never apply it (that would silently reintroduce the #942 dual-actuator write)."
+        );
+        assert!(
+            !monitor_branch.contains("rebase("),
+            "{AV_SYNC_DOCK_OUTPUT}: #942 — the monitor-only `else if (act.apply)` branch now \
+             calls rebase() -- rebase() assumes a real actuator move happened, which a \
+             monitor-only suggestion is not."
+        );
         assert!(
             output.contains("LOCK-CORRECT SUGGESTED genlock_latency_ms_src"),
             "{AV_SYNC_DOCK_OUTPUT}: #942 — the monitor-only path must still log the SUGGESTED \
              correction (offset/implied target) even though it is never applied."
         );
+    }
+
+    #[test]
+    fn windows_genlock_workflows_gate_on_dock_lock_monitor_only_942() {
+        // #942 hardening: this Linux-CI guard (above) can't compile on the Windows runner, so
+        // BOTH production build workflows must re-assert the #942 hard-lock in pwsh BEFORE their
+        // build — mirror of windows_genlock_workflows_gate_on_asrc_default_on (#912). Without
+        // this test, deleting BOTH pwsh gate steps entirely is invisible to CI: nothing else
+        // pins that the steps exist at all, only what they check while present.
+        for (wf_const, wf_path) in [
+            (WINDOWS_GENLOCK_WF, "windows-genlock.yml"),
+            (WINDOWS_GENLOCK_FAST_WF, "windows-genlock-fast.yml"),
+        ] {
+            let wf = squish(&vendor_file(wf_const));
+            assert!(
+                wf.contains("bool CB_DOCK_LOCK_ACTUATION_ENABLED = false;"),
+                "{wf_path}: #942 — the pwsh gate no longer asserts \
+                 CB_DOCK_LOCK_ACTUATION_ENABLED is hard-locked false; re-add the pwsh #942 gate."
+            );
+            assert!(
+                wf.contains("return CB_DOCK_LOCK_ACTUATION_ENABLED;"),
+                "{wf_path}: #942 hardening — the pwsh gate no longer asserts \
+                 cb_dock_lock_may_actuate()'s BODY still returns CB_DOCK_LOCK_ACTUATION_ENABLED \
+                 directly (only checking the function EXISTS is not enough — its body could be \
+                 rewritten to `return true;` and still pass); re-add the #942 body check."
+            );
+        }
     }
 }
 

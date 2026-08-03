@@ -411,8 +411,11 @@ pub const DOCK_LOCK_LATENCY_MAX_MS: i32 = 2000;
 pub const DOCK_LOCK_MIN_MARGIN_MS: f64 = 1.0;
 
 /// #942 — BUILD DEFAULT, not a runtime toggle: the E2E gate (`scripts/av_sync_calibrate.py
-/// --apply`) is the SOLE writer of `genlock_latency_ms_src`. Two independent actuators writing
-/// the SAME live knob never converge — the gate measures against ground truth (the QPSK marker +
+/// --apply`) is the only CONTINUOUS/closed-loop writer of `genlock_latency_ms_src` (a bounded,
+/// snapshot-and-restored exception exists — `scripts/obs_phase2.py::_snapshot_and_set_test_latency`,
+/// #358/#691 — which force-sets and later restores the value around one delivery-verify test run;
+/// it is not a second closed-loop actuator). Two independent actuators writing the SAME live knob
+/// never converge — the gate measures against ground truth (the QPSK marker +
 /// the optical burns) and is read-back-verified once per run with a clamped step; this corrector
 /// only ever servos against its OWN recent output, with no ground truth of its own. Root-cause
 /// evidence (a 20-run random walk while both actuators were live, and a directly-sampled ±5ms
