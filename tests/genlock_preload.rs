@@ -2299,9 +2299,11 @@ mod vendored_source {
              cb_dock_lock_may_actuate(); the corrector would still write genlock_latency_ms_src."
         );
         assert!(
-            !output.contains("if (act.apply) {"),
-            "{AV_SYNC_DOCK_OUTPUT}: #942 — an UNGATED `if (act.apply)` actuator-write branch is \
-             still present; the corrector must consult cb_dock_lock_may_actuate() first."
+            !output.contains("audio_ts); if (act.apply) {"),
+            "{AV_SYNC_DOCK_OUTPUT}: #942 — the decide() call is still followed by an UNGATED \
+             `if (act.apply)` actuator-write branch; the corrector must consult \
+             cb_dock_lock_may_actuate() first (a later `else if (act.apply)` monitor-only branch \
+             is fine and expected — this checks the FIRST, write-capable branch only)."
         );
         assert!(
             output.contains("LOCK-CORRECT SUGGESTED genlock_latency_ms_src"),
