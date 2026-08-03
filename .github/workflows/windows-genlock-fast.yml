@@ -154,10 +154,15 @@ jobs:
           Write-Output "ASRC always-on-by-default (#912 build-default init + live override API kept) — OK"
 
       # #942: the A/V-sync dock's in-process lock corrector must be MONITOR-ONLY by build
-      # default — the E2E gate (scripts/av_sync_calibrate.py --apply) is the SOLE writer of
-      # genlock_latency_ms_src. The FAST path does NOT build obs-audio-video-sync-dock.dll (it
-      # stages only obs.dll + distroav.dll), but the vendored source is still present in this
-      # checkout, so a `git subtree pull` (#44) style revert on THIS branch would otherwise be
+      # default — the E2E gate (scripts/av_sync_calibrate.py --apply) is the only CONTINUOUS/
+      # closed-loop writer of genlock_latency_ms_src (scripts/obs_phase2.py's own bounded
+      # snapshot-and-restore around a single delivery-verify test run, #358/#691, is a separate,
+      # non-closed-loop exception — it is not a second actuator). This FAST path's OWN job (the
+      # one running this step) does NOT itself build obs-audio-video-sync-dock.dll — the
+      # separate distroav-compile-check job in this same workflow does compile it ("Compile-check
+      # av-sync-dock"), but neither job STAGES/deploys it (staging here covers only obs.dll +
+      # distroav.dll). Either way the vendored source is present in this checkout, so a
+      # `git subtree pull` (#44) style revert on THIS branch would otherwise be
       # invisible until the next full build, hours later. Static source-text check only (mirrors
       # the #912 ASRC gate above and the canonical Linux-CI guard tests/genlock_preload.rs::
       # vendored_source::dock_lock_corrector_is_monitor_only_by_build_default_942, probe-gated,
@@ -171,6 +176,13 @@ jobs:
           }
           if ($audio -notmatch [regex]::Escape('bool cb_dock_lock_may_actuate()')) {
             Write-Error "camera-box-audio.hpp: cb_dock_lock_may_actuate() missing — the #942 pure decision seam is gone, the caller has nothing to gate its actuator write on"; exit 1
+          }
+          # #942 hardening: the check above only proves the FUNCTION exists, not that its BODY
+          # still reads the hard-locked constant — a body rewritten to `return true;` or an
+          # env-driven escape hatch keeps CB_DOCK_LOCK_ACTUATION_ENABLED const-false and passes
+          # every check above while shipping a WRITING corrector on this exact build.
+          if ($audio -notmatch [regex]::Escape('return CB_DOCK_LOCK_ACTUATION_ENABLED;')) {
+            Write-Error "camera-box-audio.hpp: cb_dock_lock_may_actuate() no longer returns CB_DOCK_LOCK_ACTUATION_ENABLED directly — #942 seam body may have been rewritten to bypass the hard lock"; exit 1
           }
           $output = (Get-Content "vendor/av-sync-dock/src/sync-test-output.cpp" -Raw) -replace '\s+', ' '
           if ($output -notmatch [regex]::Escape('if (act.apply && camerabox::cb_dock_lock_may_actuate())')) {
