@@ -174,3 +174,52 @@ shrinking, invert the single `direction`/`avg_residual_ms > 0.0` line in BOTH
 `src/asrc_outer_loop.rs::OuterLoopGuard::observe` AND its Python mirror
 `av_sync_outer_loop_guard.py`, and re-run both test suites (several tests pin the CURRENT sign
 explicitly and will need their expected signs flipped too).
+
+## #962's windowed measurement — per-block instantaneous ppm is unmeasurable noise for small blocks
+
+The pre-#962 estimator computed `instantaneous_ppm` from ONE audio callback's own
+`raw_advance_s`/`master_block_s` pair. For small blocks (mbc's 128-sample Dante VSC blocks,
+2.667ms each), normal wall-clock delivery jitter (a few hundred microseconds) swings that ratio
+into the hundreds-of-thousands-to-millions ppm range, tripping #960's `MAX_SANE_INSTANTANEOUS_PPM`
+ceiling on almost every block — the guard was correctly protecting against garbage, but the
+MEASUREMENT itself was broken at this block size (mbc ended up 100% starved-rejected, servo
+permanently neutral). Fix: accumulate `raw_advance_s`/`master_block_s` DURATION-WEIGHTED SUMS
+across consecutive `compensate()` calls into a running window (`WINDOW_S`/`ASRC_WINDOW_S`), and
+compute ONE ppm value from the sums when the window closes — summing physical durations first
+cancels arrival-timing jitter exactly, since a burst-then-catch-up pair still sums to the correct
+total wall time and total delivered-sample duration. The #960 ceiling stays applied to this
+WINDOWED value, so a genuinely starved source is still caught.
+
+**`WINDOW_S = 1.0` was picked specifically so every pre-existing test needs ZERO changes** — it
+degenerates EXACTLY to the old per-block behavior for any call whose own `master_block_s` already
+reaches 1.0s (the window closes on that single call, the windowed ppm reduces algebraically to
+that block's own instantaneous ratio). Every `RealtimeAsrcCompensator` test in this file already
+calls `compensate()` with >=1.0s blocks per call — so picking a window size at or below the
+smallest block size any EXISTING test uses is a reusable trick for migrating a per-block gate to a
+per-window gate with no test-fixture rewrites, when that's compatible with the real-world block
+sizes you're trying to fix (verify the target small-block source's true block size is much smaller
+than the chosen window, so real windowing/averaging still happens there).
+
+**Gotcha — restructuring a per-block early-return into a per-window early-return can silently
+break UNCONDITIONAL trailing work in the C mirror.** The pre-#962 C `compensate()` used an
+`if (starved) {...} else {EMA/target/slew...}` shape where BOTH branches fell through to shared
+tail code (the `corrected_advance_s` computation + the UNCONDITIONAL
+`cumulative_correction_ms`/`time_since_log_s` telemetry accumulation, explicitly documented as
+"kept UNCONDITIONAL... so the ~60s log cadence never goes silent during a sustained starve"). A
+naive `return` inside the windowed rejection branch (mirroring the RUST reference's own early
+return, which has no telemetry fields to preserve) SKIPS that unconditional tail in C — silently
+reintroducing exactly the "log goes silent during a sustained starve" defect the earlier guard
+fixed. **Fix pattern: use a local bool flag (`window_rejected_this_call`) set inside the rejection
+branch, and gate ONLY the target/slew block on `if (!flag)` — never a hard `return` — so the
+shared telemetry tail always runs.** This asymmetry (Rust: safe early return; C: needs a flag
+because of trailing unconditional telemetry) is worth checking EVERY time a future ticket adds an
+early-exit branch to this pair — the Rust reference's simplicity can mask a C-side telemetry
+regression if you port the shape 1:1 without checking what runs after the branch in C.
+
+**Test fixture for a synthetic small-block bursty source** — `feed_bursty_small_blocks(compensator,
+true_ppm, n_pairs)` in `src/asrc_bench.rs`'s test module: feeds PAIRS of fixed-size blocks (the
+mbc 128-sample size) with a fixed total pair wall-time (derived from `true_ppm`) but split
+UNEVENLY (10%/90%) between the two blocks in each pair — reproduces real bursty delivery (some
+blocks arrive almost back-to-back, the next "catches up") while the pair's aggregate wall time
+still correctly totals what `true_ppm` implies. Reusable for any future test needing a
+small-block, jittery-but-honest audio source at a controllable true ppm.
