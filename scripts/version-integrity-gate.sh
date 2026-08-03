@@ -469,7 +469,9 @@ main() {
   # marker is appended so the engine treats that ONE pair as in parity. A pair whose diff is
   # NON-empty, or whose SHA cannot be resolved at all (fail-closed -- never a silent pass), gets NO
   # marker and still DRIFTs exactly as before #949. Boxes already byte-identical need no git call
-  # at all (the engine's own fast path).
+  # at all (the engine's own fast path). Carries BOTH EQUIV= markers (pair proven content-
+  # identical) and DIFF= markers (pair genuinely differs -- names the actual paths so the DRIFT
+  # message stays actionable) -- genlock_build_parity_report tells them apart by prefix.
   local -a equiv_args=()
   local -a __ep_a=() __ep_b=()
   local pi pj la sa lb sb
@@ -510,8 +512,22 @@ main() {
             for pb in "${__ep_b[@]}"; do [ "$pb" = "$pth" ] && found_p=1 && break; done
             [ "$found_p" -eq 1 ] && inter+=("$pth")
           done
-          if [ "${#inter[@]}" -gt 0 ] && genlock_parity_equivalent "$repo_root" "$sa" "$sb" "${inter[@]}"; then
+          if [ "${#inter[@]}" -eq 0 ]; then
+            continue
+          fi
+          if genlock_parity_equivalent "$repo_root" "$sa" "$sb" "${inter[@]}"; then
             equiv_args+=("EQUIV=${la}:${lb}")
+          else
+            # #949: not equivalent (a real diff, or an unresolvable sha). Try to name the ACTUAL
+            # differing paths so a genuine DRIFT is actionable, not just "two opaque SHAs differ" —
+            # empty output here (unresolvable sha) simply means no DIFF= marker is added, and the
+            # DRIFT message falls back to its pre-#949 wording.
+            local diff_paths="" diff_line
+            diff_paths="$(genlock_parity_diff_paths "$repo_root" "$sa" "$sb" "${inter[@]}" \
+              | paste -sd, - 2>/dev/null || true)"
+            if [ -n "$diff_paths" ]; then
+              equiv_args+=("DIFF=${la}:${lb}:${diff_paths}")
+            fi
           fi
         done
       done

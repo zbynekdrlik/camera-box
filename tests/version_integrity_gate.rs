@@ -376,6 +376,13 @@ fn gate_still_refuses_a_genuine_vendor_obs_studio_skew_after_the_949_fix() {
         stdout.contains("genlock_parity") && stdout.contains("DRIFT") && stdout.contains("SKEW"),
         "must still report the real cross-box genlock SKEW: {stdout}"
     );
+    // #949: the gate's own flow must compute the real offending paths end-to-end (not just at the
+    // pure-decision layer, tested separately in tests/drift_guard.rs) — the issue explicitly asked
+    // for a message naming the offending paths, "not just the SHAs".
+    assert!(
+        stdout.contains("vendor/obs-studio/libobs/obs.h"),
+        "the gate must name a real offending path end-to-end, not just opaque SHAs: {stdout}"
+    );
     assert!(stderr.contains("GATE FAILED"), "stderr: {stderr}");
     let _ = std::fs::remove_file(&s);
     let _ = std::fs::remove_file(&t);

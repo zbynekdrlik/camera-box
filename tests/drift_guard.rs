@@ -2787,7 +2787,9 @@ fn genlock_parity_equivalent_false_for_the_949_incident_pair_over_the_windows_co
     assert_eq!(
         out.trim(),
         "RC=1",
-        "over the Windows (av-sync-dock-inclusive) set the same pair must NOT read equivalent          (RC must be EXACTLY 1, not e.g. a 127 command-not-found masquerading as a substring          match): {out:?}"
+        "over the Windows (av-sync-dock-inclusive) set the same pair must NOT read equivalent \
+         (RC must be EXACTLY 1, not e.g. a 127 command-not-found masquerading as a substring \
+         match): {out:?}"
     );
 }
 
@@ -2811,7 +2813,8 @@ fn genlock_parity_equivalent_false_for_a_real_vendor_obs_studio_skew_949() {
     assert_eq!(
         out.trim(),
         "RC=1",
-        "a genuine vendor/obs-studio content difference must NEVER read as equivalent (RC must be          EXACTLY 1): {out:?}"
+        "a genuine vendor/obs-studio content difference must NEVER read as equivalent (RC must \
+         be EXACTLY 1): {out:?}"
     );
 }
 
@@ -2831,7 +2834,86 @@ fn genlock_parity_equivalent_false_for_an_unresolvable_sha_never_a_false_pass_94
     assert_eq!(
         out.trim(),
         "RC=1",
-        "an unresolvable SHA must fail closed (NOT equivalent, RC must be EXACTLY 1), never a          silent pass: {out:?}"
+        "an unresolvable SHA must fail closed (NOT equivalent, RC must be EXACTLY 1), never a \
+         silent pass: {out:?}"
+    );
+}
+
+// ---- #949 — genlock_parity_diff_paths + the DIFF= marker: naming the offending paths ----------
+// The issue body explicitly asked for this: "a message naming the offending paths (not just the
+// SHAs — the current message is hard to act on)".
+
+#[test]
+fn genlock_parity_diff_paths_names_the_real_files_that_changed_949() {
+    const OLDER: &str = "cb92f28a6a90a89b2877f7d00dde93561ae9a70c";
+    const NEWER: &str = "f6477a4fe6a7b7a36e6351d13ed106e10d673356";
+    let body = format!(
+        r#"
+        genlock_parity_diff_paths "$(pwd)" "{OLDER}" "{NEWER}" \
+          $(genlock_parity_consumed_paths imag)
+        "#
+    );
+    let out = run_sourced(&body, &[]);
+    assert!(
+        out.contains("vendor/obs-studio/libobs/obs.h"),
+        "must name a real changed file: {out:?}"
+    );
+    assert!(
+        out.contains("vendor/obs-studio/libobs/obs-source.c"),
+        "must name every real changed file, not just the first: {out:?}"
+    );
+}
+
+#[test]
+fn genlock_parity_diff_paths_empty_for_an_unresolvable_sha_never_a_fabricated_list_949() {
+    let body = r#"
+        genlock_parity_diff_paths "$(pwd)" "0000000000000000000000000000000000000000" \
+          "d77426c758074686b7bc8716962f0042fa8687bf" vendor/obs-studio
+    "#;
+    let out = run_sourced(body, &[]);
+    assert_eq!(
+        out.trim(),
+        "",
+        "an unresolvable sha must yield NO paths — never a fabricated/misleading list: {out:?}"
+    );
+}
+
+#[test]
+fn genlock_build_parity_report_drift_message_names_the_offending_paths_when_diff_marker_given_949()
+{
+    // A DIFF=label_a:label_b:paths marker (the caller's pre-computed real-git-diff paths) must
+    // make it into the DRIFT message for that exact pair — the actionability the issue asked for.
+    let body = r#"
+        rc=0
+        genlock_build_parity_report "imag=AAA" "strih=BBB" "stream=BBB" \
+          "DIFF=imag:strih:vendor/obs-studio/libobs/obs.h,vendor/obs-studio/libobs/obs-source.c" \
+          "DIFF=imag:stream:vendor/obs-studio/libobs/obs.h,vendor/obs-studio/libobs/obs-source.c" \
+          || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[]);
+    assert!(out.contains("RC=20"), "still a real DRIFT: {out:?}");
+    assert!(
+        out.contains("vendor/obs-studio/libobs/obs.h")
+            && out.contains("vendor/obs-studio/libobs/obs-source.c"),
+        "the DRIFT message must name the actual offending paths from the DIFF= marker: {out:?}"
+    );
+}
+
+#[test]
+fn genlock_build_parity_report_drift_message_has_no_path_detail_without_a_diff_marker_949() {
+    // No DIFF= marker supplied (e.g. the caller's git work failed to resolve a path list) -> the
+    // message falls back to the pre-#949 wording, never fabricates path detail from nothing.
+    let body = r#"
+        rc=0
+        genlock_build_parity_report "imag=AAA" "strih=BBB" "stream=BBB" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[]);
+    assert!(out.contains("RC=20"), "still a real DRIFT: {out:?}");
+    assert!(
+        !out.contains("changed:"),
+        "must never print a '[changed: ...]' annotation with no DIFF= marker to back it: {out:?}"
     );
 }
 

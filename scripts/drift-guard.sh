@@ -554,9 +554,30 @@ genlock_parity_equivalent() {
   git -C "$repo_root" diff --quiet --end-of-options "$sha_a" "$sha_b" -- "${paths[@]}" 2>/dev/null
 }
 
-# genlock_build_parity_report LABEL=SHA... [EQUIV=LABEL_A:LABEL_B]... -> #756 CROSS-BOX
-# genlock-build PARITY: do the LIVE deployed genlock build SHAs of the fleet boxes (imag + strih +
-# stream) all MATCH EACH OTHER?
+# genlock_parity_diff_paths REPO_ROOT SHA_A SHA_B PATH... -> #949: the ACTUAL file paths that
+# differ between SHA_A and SHA_B, restricted to PATH..., one per line (git diff --name-only).
+# Used ONLY to make a genuine DRIFT message actionable (name what changed, not just "SHAs differ")
+# once genlock_parity_equivalent has already said "not equivalent" — a caller that only needs the
+# yes/no verdict calls genlock_parity_equivalent alone and never pays for this. Same fail-closed
+# resolution as genlock_parity_equivalent (an unresolvable sha yields EMPTY output, never a
+# fabricated path list) — empty output here means either sha could not be resolved, or (should not
+# happen if the caller only calls this after a confirmed non-equivalent verdict) the diff is
+# genuinely empty. IMPURE — real git I/O against REPO_ROOT, same convention as
+# genlock_parity_equivalent (tests/drift_guard.rs exercises it against this repo's own history).
+genlock_parity_diff_paths() {
+  local repo_root="$1" sha_a="$2" sha_b="$3"
+  shift 3
+  local -a paths=("$@")
+  git -C "$repo_root" rev-parse --quiet --verify --end-of-options "${sha_a}^{commit}" \
+    >/dev/null 2>&1 || return 0
+  git -C "$repo_root" rev-parse --quiet --verify --end-of-options "${sha_b}^{commit}" \
+    >/dev/null 2>&1 || return 0
+  git -C "$repo_root" diff --name-only --end-of-options "$sha_a" "$sha_b" -- "${paths[@]}" 2>/dev/null
+}
+
+# genlock_build_parity_report LABEL=SHA... [EQUIV=LABEL_A:LABEL_B]... [DIFF=LABEL_A:LABEL_B:PATHS]...
+# -> #756 CROSS-BOX genlock-build PARITY: do the LIVE deployed genlock build SHAs of the fleet
+# boxes (imag + strih + stream) all MATCH EACH OTHER?
 #
 # WHY THIS EXISTS — the false OK `genlock_build_drift_report`/`imag_build_drift_report` cannot
 # escape: those compare a box against ORIGIN/MAIN's vendored-genlock HEAD. But the live fleet runs
@@ -580,7 +601,10 @@ genlock_parity_equivalent() {
 # verdict as an `EQUIV=LABEL_A:LABEL_B` marker (order-independent) for every pair it proved
 # content-identical. This function stays PURE — no I/O — it only consumes the pre-computed EQUIV
 # markers; a mismatched pair with NO marker is treated exactly as before #949: a real, unexplained
-# skew, DRIFT.
+# skew, DRIFT. An OPTIONAL `DIFF=LABEL_A:LABEL_B:PATHS` marker (PATHS = comma-joined file paths,
+# from genlock_parity_equivalent's sibling genlock_parity_diff_paths) makes an unexplained skew's
+# DRIFT message name the actual files that differ, not just the two boxes' opaque SHAs — the issue
+# this facet exists for is otherwise "hard to act on" (#949).
 #
 # Verdict ordering is fail-closed, never a silent clean (the engine's exit-code contract, matching
 # every other facet): a DEFINITE, UNEXPLAINED skew among the boxes we COULD read WINS (report it
@@ -589,12 +613,16 @@ genlock_parity_equivalent() {
 # picture); else every box read and every pair either byte-identical or EQUIV-covered is OK. Returns
 # 0 OK / 20 DRIFT / 11 UNKNOWN.
 genlock_build_parity_report() {
-  local -a read_labels=() read_shas=() unread=() equiv_pairs=()
+  local -a read_labels=() read_shas=() unread=() equiv_pairs=() diff_pairs=()
   local arg label sha pairs=""
   for arg in "$@"; do
     case "$arg" in
       EQUIV=*)
         equiv_pairs+=("${arg#EQUIV=}")
+        continue
+        ;;
+      DIFF=*)
+        diff_pairs+=("${arg#DIFF=}")
         continue
         ;;
     esac
@@ -615,6 +643,7 @@ genlock_build_parity_report() {
   #    marker naming this exact pair, either order) is NOT a skew — #949.
   if [ "${#read_shas[@]}" -ge 2 ]; then
     local i j e is_equiv skew=0 skew_pairs="" n="${#read_shas[@]}"
+    local pair_note dla drest dlb dpths dpaths
     for ((i = 0; i < n; i++)); do
       for ((j = i + 1; j < n; j++)); do
         [ "${read_shas[$i]}" = "${read_shas[$j]}" ] && continue
@@ -628,7 +657,21 @@ genlock_build_parity_report() {
         done
         [ "$is_equiv" -eq 1 ] && continue
         skew=1
-        skew_pairs="${skew_pairs:+$skew_pairs, }${read_labels[$i]}~${read_labels[$j]}"
+        pair_note="${read_labels[$i]}~${read_labels[$j]}"
+        # #949: if the caller supplied a matching DIFF= marker, name the actual differing paths
+        # (never fabricated — only appended when the caller's own git-diff already found them).
+        dpaths=""
+        for e in "${diff_pairs[@]}"; do
+          dla="${e%%:*}"; drest="${e#*:}"
+          dlb="${drest%%:*}"; dpths="${drest#*:}"
+          if { [ "$dla" = "${read_labels[$i]}" ] && [ "$dlb" = "${read_labels[$j]}" ]; } \
+            || { [ "$dla" = "${read_labels[$j]}" ] && [ "$dlb" = "${read_labels[$i]}" ]; }; then
+            dpaths="$dpths"
+            break
+          fi
+        done
+        [ -n "$dpaths" ] && pair_note="${pair_note} [changed: ${dpaths}]"
+        skew_pairs="${skew_pairs:+$skew_pairs, }${pair_note}"
       done
     done
     if [ "$skew" -eq 1 ]; then
