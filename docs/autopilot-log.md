@@ -6927,3 +6927,139 @@ deploy session (visible in the docs commit right before this ticket's dispatch),
 this PR's diff (never deployed anywhere yet) and not fixable from this ticket's code+CI scope.
 Left OPEN pending fleet convergence + a `gh run rerun` (never a fresh `gh workflow run`, per this
 file's own GOTCHA) on the same commit.
+
+#812 (avsync watchdog scheduled-task / Discord-webhook / heartbeat) + #807 (self-verifying VLC
+program-audio monitor) -- bundled batch, supervisor-dispatched after live read-only ssh
+investigation of the stream box's stale hand-built scripts:
+
+Version: `78aa3aaf1` bump to 1.7.0-dev.422.
+
+RED/GREEN, first pass: `test(#812)` `c63366687` / `fix(#812)` `fa6a2cda7` -- `scripts/
+avsync-watchdog.ps1` (repo-tracked replacement for the box's hand-built loop) wires `--webhook`
+(read from an uncommitted local secret file, never a repo literal), writes a heartbeat every pass
+regardless of outcome, and bounds the python `av_sync_measure.py` call to 180s via a direct
+`Start-Process`+`WaitForExit`+`Stop-Process -Id` handle (the root incident's own "two orphan
+python PIDs...consistent with a hung av_sync_measure.py" evidence). New dev1-side
+`scripts/avsync-heartbeat-alert-watchdog.sh` + `scripts/lib/avsync-heartbeat.sh` +
+`systemd/avsync-heartbeat-alert-watchdog.{service,timer}` poll both heartbeat files over ssh every
+5 min, reusing the existing `scripts/lib/obs-watchdog-decision.sh` confirm/throttle logic (never a
+third alerting mechanism).
+
+RED/GREEN, #807: `test(#807)` `63bd7f48d` / `fix(#807)` `d1c05847f` -- `scripts/
+avsync-vlc-monitor.ps1` asserts the RTMP source is actually publishing (ffprobe) BEFORE ever
+concluding VLC itself is frozen (the old hand-built script's log showed an infinite restart loop
+against a genuinely idle source), audits the configured playback device (a Focusrite, confirmed
+ABSENT on the box) and fails loud naming it instead of silently restarting into the same failure,
+hardcodes the correct grab URL (a hand-typed URL missing the stream-key playpath was the actual
+root cause), and writes its own heartbeat the shared dev1-side watchdog above already polls.
+
+Docs: `docs(#812)` `ea7ebf218` -- playbook entry for the Task Scheduler keep-alive idiom, the
+dev1-heartbeat-alert topology generalization (process/WS probe -> arbitrary heartbeat FILE), and
+the bounded-external-call mechanism choice (`Start-Process`+`WaitForExit` vs `Start-Job`).
+
+Review-driven RED/GREEN: `test(#812)` `b6e0212e2` / `fix(#812)` `c23f7e285` -- code review caught
+four bugs: `avsync_heartbeat_is_stale`'s original string-concatenated arg validation let an EMPTY
+epoch silently vanish and read FRESH by coincidence (fixed to validate each field individually);
+`avsync_heartbeat_extract_segment`'s "watchdog" side fell back to "print everything to EOF minus
+the last line" when the separator was entirely absent, asymmetric with the "vlc" side's correct
+empty-on-no-separator behavior (fixed to fail safe symmetrically); the new keep-alive Task
+Scheduler XML never referenced its own task name in `<Description>` (mirrors
+`obs-self-heal-install.sh`'s own convention, fixed); and the keep-alive task's design comment
+promised "every ~5 min PLUS a BootTrigger" but the shipped XML had only the Repetition trigger
+(fixed -- a fresh boot now gets an immediate first check instead of waiting a full interval).
+
+Local: fmt/check/clippy(-D warnings, default features)/`cargo test --no-run` clean every cycle.
+Per-issue RED->GREEN suites green: `tests/harness_avsync_watchdog_812.rs` 9/9,
+`tests/harness_avsync_vlc_monitor_807.rs` 6/6, `tests/harness_avsync_heartbeat_alert_watchdog.rs`
+17/17.
+
+PR: #967 (`Fix avsync watchdog Discord/heartbeat + self-verifying VLC monitor (#812, #807)`),
+`Closes #812` + `Closes #807`. CI all green. Merged `00193d0fc` 2026-08-03.
+
+Deploy (supervisor, post-merge, evening of 2026-08-03): all 3 new/changed script files
+hash-verified onto the stream box (10.77.9.204); `avsync-vlc-monitor` + `avsync-keepalive`
+scheduled tasks registered. Live-verified: `avsync-keepalive` healthy-box dry run correctly
+no-op'd for both loops; a simulated-crash run correctly relaunched the killed loop -- then
+`avsync-keepalive` task ENABLED. dev1 `avsync-heartbeat-alert-watchdog.timer` installed but left
+STOPPED pending #968 (see below) -- a real pass during this same verification window produced a
+FALSE `vlc` CONFIRMED-stale alert (the separator-matching defect below), so the timer was
+deliberately not left running.
+
+Live post-merge verification ALSO surfaced three genuine defects, none caught by the (green) test
+suite -- immediately filed and fixed as issue 968 (own entry below): the CRLF/trailing-space
+separator match, the keep-alive's bare-substring CommandLine match, and one unescaped heredoc
+backtick in the install-plan printer.
+
+#968 (avsync #812/#807 live-verify defects: probe separator CRLF+space, keepalive false
+CommandLine match, install-plan heredoc backticks) -- immediate follow-up fix, same session
+evening, all three defects reproduced LIVE by the supervisor during #967's own post-merge
+verification (see above):
+
+Version: `d4663bb46` bump to 1.7.0-dev.423.
+
+Design + STEP-0-validation comments posted on issue 968 before any code (re-derived each defect
+directly from the committed source, not just the issue's live evidence) -- during this pass,
+corrected the design comment's initial claim that BOTH the STEP 0 (`avsync-watchdog`) and STEP 2
+(`avsync-vlc-monitor`) heredoc occurrences were unescaped: the committed baseline (`c23f7e285`)
+already had STEP 2 correctly escaped; only STEP 0 was genuinely broken, matching the issue's own
+reported error text exactly (only one "command not found" ever surfaced). The initial misread
+traced to a `grep` run against a momentarily-dirty shared working tree (this repo's `~/devel/
+camera-box` checkout has no per-worker git worktree isolation -- see the top-level CLAUDE.md
+GOTCHA) while another concurrent camera-box session was active; corrected via a follow-up `gh
+issue comment` before implementing.
+
+RED: `test(#968)` `ab6395a0a` -- `tests/harness_avsync_heartbeat_alert_watchdog.rs`'s
+`extract_segment` fixture now byte-matches the REAL captured cmd.exe probe output (trailing space
++ CRLF on the separator line) instead of the pre-968 clean-LF stub, flipping several previously-
+green alert-count tests RED (a healthy box would falsely alert); `tests/harness_
+avsync_watchdog_812.rs` gained a test asserting `Ensure-Running`'s match requires the `-File` flag
+adjacent to the full script path (fails against the bare `*$scriptName*` substring match), and two
+tests asserting the install plan's stderr is empty and specific backtick-quoted phrases survive
+verbatim (both fail against the unescaped STEP 0 backtick).
+
+GREEN: `fix(#968)` `90b06083c` -- `avsync_heartbeat_extract_segment()` strips every `\r` byte up
+front and tolerates trailing whitespace before the separator anchor; `Ensure-Running` now matches
+`-File\s+"?<regex-escaped-path>"?` instead of a bare filename substring; the STEP 0 backtick pair
+escaped to match the heredoc's own established convention.
+
+Test correction: `test(#968)` `479deb321` -- one new assertion (`install_plan_keeps_the_bare_
+task_names_literally_968`) needed a needle fully within one printed line; the original spanned a
+line-wrap in the real heredoc output and could never match regardless of the fix.
+
+Scope addition (supervisor-directed mid-ticket, evidence: a 2026-07-26 Discord screenshot): the
+durable Discord verdict-forward leg. On 2026-07-26 the user WAS receiving real A/V-sync verdict
+messages in the `alerts-snv` thread, posted by a live agent-session loop, not a durable service --
+delivery died the moment that session ended. Also confirmed live: `claude_robot` cannot mint a
+Discord webhook (no `MANAGE_WEBHOOKS` guild-wide), so `avsync-watchdog.ps1`'s own webhook-file
+design has no self-service path to ever work; it stays as a harmless optional fallback.
+
+RED: `test(#968)` `f426f8964` -- new pure-function tests for `avsync_heartbeat_last_status` /
+`avsync_heartbeat_is_forwardable_verdict` (not yet added) and behavioral tests (Harness extended
+with a fake `curl` stub + isolated Discord `.env` fixture) proving a fresh measured ZNIZ/ZVYS
+verdict forwards exactly once with the expected shape, the same epoch never forwards twice,
+no-signal/TIMEOUT/in-sync lines never forward, and `--dry-run` never posts but logs the decision.
+
+GREEN: `fix(#968)` `ff9ff724e` -- `avsync_heartbeat_last_status`/`avsync_heartbeat_is_forwardable_
+verdict` added to the pure lib; `scripts/avsync-heartbeat-alert-watchdog.sh` gained
+`DISCORD_ENV_FILE`/`DISCORD_THREAD_ID` config, `read_discord_env_field`/`discord_mention_prefix`
+(mirrors airuleset's own `notify.mention_prefix` semantics), `post_discord_verdict` (same
+`Authorization: Bot`/`User-Agent` header shape as `~/devel/airuleset/notify/*.py`'s own Discord
+POST), and `maybe_forward_verdict` (forwards at most once per epoch via the existing state-file
+mechanism, state advances even in `--dry-run`), wired into `main()` after both legs' `process_leg`
+calls.
+
+Playbook: `.claude/rules/avsync-monitoring.md` extended with all three live-verify lessons (cmd.exe
+CRLF+trailing-space, CommandLine full-path matching, unquoted-heredoc backtick execution) plus the
+Discord bot-cannot-mint-webhooks / durable-forwarder topology note.
+
+Local: fmt/check/clippy(-D warnings, default features)/shellcheck clean every cycle. Full `cargo
+test` sweep run after touching scripts/avsync-heartbeat-alert-watchdog.sh + scripts/
+avsync-watchdog-install.sh + scripts/avsync-keepalive.ps1 (the recording-e2e.sh/rig-mode.sh
+anchor-collision class doesn't apply to these files directly, but ran the full sweep anyway per
+general discipline) -- see the PR for the exact binary/pass count.
+
+PR: TBD (opened after this entry). Post-merge deploy (supervisor): scp the fixed
+`avsync-keepalive.ps1` to the stream box, re-enable + one clean pass of the dev1
+`avsync-heartbeat-alert-watchdog.timer`, re-verify the keepalive crash-relaunch once more with the
+stricter match, and drive a real measurable clip through the rig to prove one genuine verdict
+lands in the `alerts-snv` thread.
