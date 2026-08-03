@@ -123,6 +123,33 @@ fn extract_segment_splits_on_the_separator_both_directions() {
 }
 
 #[test]
+fn extract_segment_with_no_separator_fails_safe_symmetrically_on_both_sides() {
+    // Review-caught bug: without the separator (a truncated/partial ssh read), the "vlc" branch
+    // correctly returned empty (its own sed range never matches, so it prints nothing) but the
+    // "watchdog" branch's range (`1,/^SEP$/p`) silently fell back to "print everything up to
+    // EOF, then drop the last line" -- discarding possibly-fresh content instead of failing safe
+    // like its sibling. Both sides must come back EMPTY when the separator is genuinely absent.
+    let no_separator = "100\tsomething-with-no-separator-at-all\n";
+    let (code, out, err) = run_lib(&format!(
+        "avsync_heartbeat_extract_segment '{no_separator}' watchdog"
+    ));
+    assert_eq!(code, 0, "stderr={err}");
+    assert!(
+        out.trim().is_empty(),
+        "watchdog side must be empty when the separator never appears, got: {out:?}"
+    );
+
+    let (code2, out2, err2) = run_lib(&format!(
+        "avsync_heartbeat_extract_segment '{no_separator}' vlc"
+    ));
+    assert_eq!(code2, 0, "stderr={err2}");
+    assert!(
+        out2.trim().is_empty(),
+        "vlc side must be empty when the separator never appears, got: {out2:?}"
+    );
+}
+
+#[test]
 fn last_epoch_picks_the_last_numeric_line_ignoring_noise() {
     let segment = "garbage\n100\tok\n200\tok2\n";
     let (code, out, err) = run_lib(&format!("avsync_heartbeat_last_epoch '{segment}'"));
@@ -159,6 +186,22 @@ fn is_stale_false_within_window_true_beyond_it() {
     assert_eq!(
         code_stale, 0,
         "age=1000s beyond a 300s window must be STALE: {e2}"
+    );
+}
+
+#[test]
+fn is_stale_empty_epoch_is_stale_even_when_the_arithmetic_would_otherwise_read_fresh() {
+    // Review-caught bug: the original implementation string-concatenated all three args before
+    // checking "all digits", so an EMPTY $epoch simply vanished from the concatenation instead of
+    // producing a non-digit/empty result -- it fell through to `age = now - epoch` where bash
+    // arithmetic silently treats an empty operand as 0. With a `now` SMALLER than `stale` (unlike
+    // the pre-existing `is_stale_true_for_missing_or_unparseable...` test's `now=1000, stale=300`,
+    // where age=1000 happens to exceed stale=300 and masks the bug by coincidence), the computed
+    // age reads well within the window and the function wrongly returns FRESH (exit 1).
+    let (code, _out, err) = run_lib("avsync_heartbeat_is_stale '' 100 300");
+    assert_eq!(
+        code, 0,
+        "an empty epoch must be STALE regardless of how the arithmetic would otherwise read: {err}"
     );
 }
 

@@ -200,6 +200,27 @@ fn build_boot_task_xml_produces_a_boottrigger_only_no_repetition() {
 }
 
 #[test]
+fn build_boot_task_xml_names_the_task_in_its_own_description() {
+    // Review-caught: unlike its mirrored sibling (obs-self-heal-install.sh's build_task_xml,
+    // which threads task_name into <Description>), this function accepted task_name but never
+    // referenced it in the emitted XML -- a real (if cosmetic) deviation from the pattern it
+    // explicitly claims to mirror.
+    let (code, out, err) = run_sourced(
+        r#"build_boot_task_xml "avsync-vlc-monitor" 'C:\avsync\avsync-vlc-monitor.ps1' "desc""#,
+    );
+    assert_eq!(code, 0, "stderr={err}");
+    let desc_idx = out
+        .find("<Description>")
+        .expect("must have a Description element");
+    let desc_region = &out[desc_idx..(desc_idx + 120).min(out.len())];
+    assert!(
+        desc_region.contains("avsync-vlc-monitor"),
+        "the task name must appear in its own Description, matching obs-self-heal-install.sh's \
+         own build_task_xml convention: {desc_region}"
+    );
+}
+
+#[test]
 fn build_keepalive_task_xml_has_a_repetition_trigger_and_ships_disabled() {
     let (code, out, err) = run_sourced(
         r#"build_keepalive_task_xml "avsync-keepalive" 'C:\avsync\avsync-keepalive.ps1' "5""#,
@@ -217,6 +238,22 @@ fn build_keepalive_task_xml_has_a_repetition_trigger_and_ships_disabled() {
     assert!(
         out.contains("avsync-keepalive.ps1"),
         "must target the keepalive script: {out}"
+    );
+}
+
+#[test]
+fn build_keepalive_task_xml_also_has_a_boot_trigger_matching_its_own_design_comment() {
+    // Review-caught: issue 812's own design comment says the keep-alive task is invoked "every
+    // ~5 min PLUS a BootTrigger" -- the shipped XML had only a Repetition TimeTrigger, no boot
+    // trigger, a real (if low-impact) deviation from the stated design.
+    let (code, out, err) = run_sourced(
+        r#"build_keepalive_task_xml "avsync-keepalive" 'C:\avsync\avsync-keepalive.ps1' "5""#,
+    );
+    assert_eq!(code, 0, "stderr={err}");
+    assert!(
+        out.contains("<BootTrigger>"),
+        "must ALSO fire once at boot (design-comment fidelity), not rely solely on the first \
+         Repetition tick: {out}"
     );
 }
 
