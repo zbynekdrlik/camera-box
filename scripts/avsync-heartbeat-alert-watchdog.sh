@@ -57,6 +57,17 @@ ALERT_THROTTLE_PASSES="${AVSYNC_HEARTBEAT_ALERT_THROTTLE_PASSES:-12}"   # ~1h at
 NOTIFY="${AIRULESET_NOTIFY:-$HOME/devel/airuleset/airuleset.py}"
 REPO_SLUG="${AVSYNC_HEARTBEAT_REPO:-zbynekdrlik/camera-box}"
 
+# issue 968 -- the DURABLE Discord verdict-forward leg (dev1-side, direct bot API POST). On
+# 2026-07-26 the user WAS receiving these same verdict messages, but posted by a live agent-
+# session loop straight into the alerts-snv thread -- not a durable service, which is why delivery
+# died the moment that session ended. Also confirmed live: the claude_robot bot cannot mint a
+# Discord webhook (no MANAGE_WEBHOOKS guild-wide), so avsync-watchdog.ps1's own
+# C:\avsync\discord-webhook.txt design has no self-service path to ever get a working URL -- it
+# stays wired as a harmless optional fallback, but the DELIVERED path is this dev1-side forwarder,
+# mirroring this repo's own established dev1-side-alerting topology (see the file header above and
+# .claude/rules/avsync-monitoring.md).
+DISCORD_ENV_FILE="${AVSYNC_DISCORD_ENV:-$HOME/.claude/channels/discord/.env}"
+DISCORD_THREAD_ID="${AVSYNC_DISCORD_THREAD_ID:-1373592666733940816}"   # alerts-snv thread
 
 STATE_DIR="${AVSYNC_HEARTBEAT_STATE_DIR:-${XDG_RUNTIME_DIR:-/tmp}}"
 STATE_FILE="${AVSYNC_HEARTBEAT_STATE_FILE:-$STATE_DIR/camera-box-avsync-heartbeat.state}"
@@ -84,6 +95,74 @@ write_state_field() {
   { [ -f "$STATE_FILE" ] && grep -v "^${key}=" "$STATE_FILE"; printf '%s=%s\n' "$key" "$val"; } \
     > "$tmp" 2>/dev/null || true
   mv -f "$tmp" "$STATE_FILE" 2>/dev/null || true
+}
+
+# ── Discord verdict-forward leg (dev1-side bot POST -- issue 968) ───────────────────────────────
+read_discord_env_field() {
+  local key="$1"
+  [ -f "$DISCORD_ENV_FILE" ] || { printf ''; return 0; }
+  sed -n "s/^${key}=//p" "$DISCORD_ENV_FILE" 2>/dev/null | tail -1
+}
+
+# discord_mention_prefix -> "<@id> " for a bare numeric DISCORD_MENTION_ZBYNEK, the value verbatim
+# + a space when it's already shaped (<@...>, @here, ...), or "" when unset -- mirrors airuleset's
+# own notify.mention_prefix() semantics exactly (never invent a second mention convention).
+discord_mention_prefix() {
+  local val
+  val="$(read_discord_env_field DISCORD_MENTION_ZBYNEK)"
+  [ -n "$val" ] || return 0
+  case "$val" in
+    *[!0-9]*) printf '%s ' "$val" ;;
+    *) printf '<@%s> ' "$val" ;;
+  esac
+}
+
+# post_discord_verdict TEXT -> POST TEXT (with the owner mention prepended) to the alerts-snv
+# thread via the bot token. A missing token or a failed POST is logged loudly but NEVER aborts the
+# pass (this watchdog must survive and keep polling -- see the file header's set -uo pipefail
+# convention). Never called in --dry-run (see maybe_forward_verdict).
+post_discord_verdict() {
+  local text="$1" token content escaped http_code
+  token="$(read_discord_env_field DISCORD_BOT_TOKEN)"
+  if [ -z "$token" ]; then
+    log "VERDICT-FORWARD: no DISCORD_BOT_TOKEN configured at $DISCORD_ENV_FILE -- skipping post (non-fatal)"
+    return 0
+  fi
+  content="$(discord_mention_prefix)${text}"
+  # Minimal, deliberate JSON string escaping (never a generic library) -- our own generated text
+  # is a single line with no control characters; only a literal backslash or double-quote could
+  # ever appear (e.g. inside av_sync_measure.py's own quoted "'2ME PGM'" text).
+  escaped="$(printf '%s' "$content" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+  http_code="$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+    -H "Authorization: Bot $token" \
+    -H 'Content-Type: application/json' \
+    -H 'User-Agent: DiscordBot (https://github.com/zbynekdrlik/airuleset, 1.0)' \
+    -d "{\"content\":\"${escaped}\"}" \
+    "https://discord.com/api/v10/channels/${DISCORD_THREAD_ID}/messages" 2>/dev/null || echo "000")"
+  case "$http_code" in
+    2??) log "VERDICT-FORWARD: posted to thread $DISCORD_THREAD_ID" ;;
+    *) log "VERDICT-FORWARD: Discord POST failed (http=$http_code, non-fatal)" ;;
+  esac
+}
+
+# maybe_forward_verdict EPOCH STATUS -> forwards a genuinely NEW measured misalignment verdict to
+# Discord at most ONCE per epoch (persisted via the shared state-file mechanism, key
+# "watchdog_verdict_forwarded_epoch"). State advances even in --dry-run (mirrors process_leg's own
+# convention: only the ACTUAL post is skipped, never the bookkeeping) so a real run afterward still
+# sees the SAME epoch as already handled.
+maybe_forward_verdict() {
+  local epoch="$1" status="$2" prev_epoch text
+  [ -n "$epoch" ] || return 0
+  avsync_heartbeat_is_forwardable_verdict "$status" || return 0
+  prev_epoch="$(read_state_field "watchdog_verdict_forwarded_epoch" "")"
+  [ "$epoch" != "$prev_epoch" ] || return 0
+  write_state_field "watchdog_verdict_forwarded_epoch" "$epoch"
+  text="📐 A/V-sync meranie: ${status#measured: }"
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "[dry-run] WOULD forward verdict: $text"
+    return 0
+  fi
+  post_discord_verdict "$text"
 }
 
 # ── one leg's confirm/throttle/alert pass -- reused for BOTH "watchdog" and "vlc" ───────────────
@@ -145,14 +224,16 @@ main() {
     return 0
   fi
 
-  local watchdog_segment vlc_segment watchdog_epoch vlc_epoch
+  local watchdog_segment vlc_segment watchdog_epoch vlc_epoch watchdog_status
   watchdog_segment="$(avsync_heartbeat_extract_segment "$PROBE_OUT" watchdog)"
   vlc_segment="$(avsync_heartbeat_extract_segment "$PROBE_OUT" vlc)"
   watchdog_epoch="$(avsync_heartbeat_last_epoch "$watchdog_segment")"
   vlc_epoch="$(avsync_heartbeat_last_epoch "$vlc_segment")"
+  watchdog_status="$(avsync_heartbeat_last_status "$watchdog_segment")"
 
   process_leg "watchdog" "$watchdog_epoch"
   process_leg "vlc" "$vlc_epoch"
+  maybe_forward_verdict "$watchdog_epoch" "$watchdog_status"
 
   log "pass end"
 }

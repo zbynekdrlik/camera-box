@@ -63,6 +63,34 @@ avsync_heartbeat_last_epoch() {
   printf '%s\n' "$1" | awk -F'\t' '$1 ~ /^[0-9]+$/ {e=$1} END{if (e!="") print e}'
 }
 
+# avsync_heartbeat_last_status SEGMENT -> the status text (everything after the epoch's own TAB)
+# of the LAST numeric-epoch line in SEGMENT -- issue 968's verdict-forward leg reads this to get
+# the full "measured: ..." (or "no-signal: ...") text worth deciding on. Empty when nothing parses
+# (mirrors avsync_heartbeat_last_epoch's own contract exactly).
+avsync_heartbeat_last_status() {
+  printf '%s\n' "$1" | awk -F'\t' '$1 ~ /^[0-9]+$/ {line=$0} END{if (line!="") {sub(/^[^\t]*\t/,"",line); print line}}'
+}
+
+# avsync_heartbeat_is_forwardable_verdict STATUS_TEXT -> exit 0 when STATUS_TEXT is a genuine
+# measured MISALIGNMENT verdict worth forwarding to Discord (issue 968): it must start with the
+# "measured: " prefix avsync-watchdog.ps1's Write-Heartbeat uses for a completed measurement pass
+# AND carry one of av_sync_measure.py's own ZNIZ/ZVYS correction recommendations. This mirrors
+# av_sync_measure.py's OWN threshold semantics exactly (silence when in sync, message when
+# misaligned) -- a "measured: ... A/V sync OK (offset 0 ms)" line, a "measured: TIMEOUT: ..." line,
+# and every "no-signal: ..." line are ALL heartbeat-only states and must NEVER forward. Exit 1
+# otherwise.
+avsync_heartbeat_is_forwardable_verdict() {
+  local status="$1"
+  case "$status" in
+    "measured: "*) : ;;
+    *) return 1 ;;
+  esac
+  case "$status" in
+    *ZNIZ*|*ZVYS*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # avsync_heartbeat_is_stale EPOCH NOW STALE_SEC -> exit 0 (STALE, including unparseable/missing) /
 # 1 (fresh). Inverted sense vs a plain "is_fresh" check ON PURPOSE -- this lib's caller wants
 # "wedged=1 means alert", so a missing/corrupt heartbeat must default to the ALERTING answer, never
