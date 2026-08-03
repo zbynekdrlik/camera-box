@@ -7058,8 +7058,50 @@ avsync-watchdog-install.sh + scripts/avsync-keepalive.ps1 (the recording-e2e.sh/
 anchor-collision class doesn't apply to these files directly, but ran the full sweep anyway per
 general discipline): 190/190 binaries ok, 0 FAILED, exit 0.
 
-PR: TBD (opened after this entry). Post-merge deploy (supervisor): scp the fixed
-`avsync-keepalive.ps1` to the stream box, re-enable + one clean pass of the dev1
-`avsync-heartbeat-alert-watchdog.timer`, re-verify the keepalive crash-relaunch once more with the
-stricter match, and drive a real measurable clip through the rig to prove one genuine verdict
-lands in the `alerts-snv` thread.
+PR: #969 (`Fix avsync #812/#807 live-verify defects + durable Discord verdict forward (#968)`),
+`Closes #968`. CI green (3727/3727 tests, fmt+clippy+shellcheck+security+drift-guard clean).
+
+Independent review (Explore subagent, `superpowers:requesting-code-review` pass, git range
+`c23f7e285..6231789a1`) reproduced every RED->GREEN pair by directly executing the script content
+at each cited commit (not just trusting test prose), and pulled the real CI job logs for the final
+commit. Verdict: 0 Critical, 3 Important, 5 Minor, "ready to merge: yes". All 8 addressed in a
+follow-up commit before merge:
+
+- Important: `post_discord_verdict`'s curl call had no timeout, unlike this repo's two OTHER
+  Discord-posting scripts (`scripts/lib/e2e-discord-report.sh`, `scripts/lib/
+  event-mode-discord-confirm.sh`, both `curl -sS --max-time 10`) -- added the same flag, same
+  convention, never invented a second one.
+- Important: a failed POST discarded the response body, logging only a bare http code -- switched
+  to the SAME `-w '\n%{http_code}'` + body/code split + `jq -n --arg c ... '{content:$c}'` payload
+  shape those two sibling scripts already use (this bit an actual live incident: the exact same
+  bot identity already once hit `no MANAGE_WEBHOOKS guild-wide` -- diagnosability matters).
+- Important (process note, not re-fixed): the reviewer independently confirmed that the
+  `fix(#968): [green]` commit `90b06083c` did NOT actually leave
+  `install_plan_keeps_the_bare_task_names_literally_968` passing at that exact SHA (the needle
+  crossed a line-wrap) -- already self-corrected same-session by `479deb321` before any push;
+  documented here rather than rewriting history.
+- Minor: switched to `jq`'s existing convention for the payload (was hand-rolled `sed` escaping)
+  -- discovered mid-fix that `jq -n`'s default pretty-printed (multi-line) output, which BOTH
+  sibling scripts already produce too, broke this ticket's OWN test counting method (one curl call
+  logged as 4 "calls" via a naive `.lines().count()`) -- fixed the TEST's own call-counting to
+  split on an explicit per-invocation delimiter instead of raw newlines, matching the sibling
+  scripts' real (working, deployed) shape rather than papering over it with `-c`.
+- Minor: added a length cap (`DISCORD_VERDICT_MAX_CONTENT=1900`, mirrors airuleset's own
+  `notify._MAX_CONTENT`) plus a test proving an oversize verdict text is capped before posting.
+- Minor: added the missing no-tab-line edge-case test for `avsync_heartbeat_last_status` (traced
+  by hand as already-safe; now also test-proven).
+- Minor: fixed the stale `systemd/avsync-heartbeat-alert-watchdog.service` comment (it described
+  only the ssh round-trip; now also names the Discord POST sharing the same `TimeoutStartSec`
+  budget).
+- Minor: documented (rather than changed) the deliberate choice to keep `read_discord_env_field`'s
+  per-key `sed` reader instead of switching to `event-mode-discord-confirm.sh`'s "source the whole
+  .env" convention -- a per-key extract never executes the file as shell code, a real (if narrow)
+  safety trade-off, not an oversight.
+
+Post-review re-run: `cargo fmt --all --check` / `cargo clippy --all-targets -- -D warnings`
+(default features) / `shellcheck` all clean; full `cargo test` sweep 190/190 binaries ok, 0 FAILED.
+
+Post-merge deploy (supervisor): scp the fixed `avsync-keepalive.ps1` to the stream box, re-enable
++ one clean pass of the dev1 `avsync-heartbeat-alert-watchdog.timer`, re-verify the keepalive
+crash-relaunch once more with the stricter match, and drive a real measurable clip through the rig
+to prove one genuine verdict lands in the `alerts-snv` thread.

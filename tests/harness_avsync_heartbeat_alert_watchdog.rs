@@ -266,6 +266,17 @@ fn last_status_is_empty_when_nothing_parses_968() {
 }
 
 #[test]
+fn last_status_returns_the_line_unchanged_when_it_has_no_tab_968() {
+    // Review-noted edge case: a numeric-epoch line with no TAB separator at all (malformed
+    // heartbeat write). sub()'s no-match leaves `line` unchanged -- the caller
+    // (avsync_heartbeat_is_forwardable_verdict) then correctly rejects it (no "measured: " prefix
+    // survives), so this is safe by construction, not just by accident.
+    let (code, out, err) = run_lib("avsync_heartbeat_last_status '100'");
+    assert_eq!(code, 0, "stderr={err}");
+    assert_eq!(out.trim(), "100");
+}
+
+#[test]
 fn is_forwardable_verdict_true_for_a_real_zniz_or_zvys_recommendation_968() {
     for status in [
         "measured: [2026-07-26 14:25:40] AV offset +2 fr (+80 ms) conf 3.6 :: audio predbieha video o ~80 ms -> ZNIZ '2ME PGM' latency o 80",
@@ -343,18 +354,24 @@ fn fake_bin_dir(
     fs::set_permissions(&python3, perm2).unwrap();
 
     // #968 -- fake `curl` standing in for the real Discord bot-API POST. Logs its FULL argv (which
-    // includes the -d JSON payload) to discord_marker, and mimics real `curl -o /dev/null -w
-    // '%{http_code}'` by printing ONLY "200" to stdout (no trailing newline, matching curl's own
-    // -w format behavior) -- never a real network call from a test.
+    // includes the -d JSON payload) to discord_marker, and mimics real `curl -w '\n%{http_code}'`
+    // (body, then a literal newline, then the code -- post_discord_verdict's own split point) by
+    // printing a body + "\n" + an http code, both overridable via env vars so a SINGLE stub covers
+    // both the success path and a failure-with-diagnostic-body test -- never a real network call.
+    // Built by plain concatenation (not a second format! pass) so the literal `{}`/`${...}` shell
+    // syntax below never has to survive format!'s own brace-escaping rules.
     let curl = dir.path().join("curl");
-    fs::write(
-        &curl,
-        format!(
-            "#!/bin/sh\necho \"CALLED: $*\" >> {}\nprintf '200'\nexit 0\n",
-            discord_marker.display()
-        ),
+    // A per-call delimiter is required, not just a trailing newline: the REAL post_discord_verdict
+    // builds its -d payload via `jq -n` (matching scripts/lib/e2e-discord-report.sh's own
+    // established convention, which -- like jq's default -- pretty-prints with embedded real
+    // newlines), so ONE curl invocation's logged argv can itself span several lines. Counting raw
+    // `.lines()` would over-count a single call; the delimiter makes call boundaries explicit.
+    let curl_script = format!(
+        "#!/bin/sh\nprintf '\\n===CURL_CALL===\\n' >> {marker}\necho \"CALLED: $*\" >> {marker}\n",
+        marker = discord_marker.display()
     )
-    .expect("write curl stub");
+        + "printf '%s\\n%s' \"${FAKE_CURL_BODY:-{}}\" \"${FAKE_CURL_HTTP_CODE:-200}\"\nexit 0\n";
+    fs::write(&curl, curl_script).expect("write curl stub");
     let mut perm3 = fs::metadata(&curl).unwrap().permissions();
     std::os::unix::fs::PermissionsExt::set_mode(&mut perm3, 0o755);
     fs::set_permissions(&curl, perm3).unwrap();
@@ -409,22 +426,44 @@ impl Harness {
         self.run_bash_body(". \"$SCRIPT\"\nDRY_RUN=1\nmain")
     }
 
+    // #968 -- lets a test force the fake curl stub's response (FAKE_CURL_HTTP_CODE/
+    // FAKE_CURL_BODY) to exercise post_discord_verdict's failure-logging branch, e.g. reproducing
+    // the real "no MANAGE_WEBHOOKS" 403-with-body class of failure this PR's own design comment
+    // discusses. Real, exercised generality (unlike the earlier unused extra_env plumbing this
+    // replaced) -- see fake_curl_failure_response_is_logged_with_its_body_968.
+    fn run_main_with_fake_curl(&self, http_code: &str, body: &str) -> (i32, String, String) {
+        self.run_bash_body_with_env(
+            ". \"$SCRIPT\"\nmain",
+            &[("FAKE_CURL_HTTP_CODE", http_code), ("FAKE_CURL_BODY", body)],
+        )
+    }
+
     fn run_bash_body(&self, body: &str) -> (i32, String, String) {
+        self.run_bash_body_with_env(body, &[])
+    }
+
+    fn run_bash_body_with_env(
+        &self,
+        body: &str,
+        extra_env: &[(&str, &str)],
+    ) -> (i32, String, String) {
         let path = format!(
             "{}:{}",
             self.fake_bin.path().display(),
             std::env::var("PATH").unwrap_or_default()
         );
-        let out = Command::new("bash")
-            .arg("-c")
+        let mut cmd = Command::new("bash");
+        cmd.arg("-c")
             .arg(body)
             .env("SCRIPT", script())
             .env("AVSYNC_HEARTBEAT_STATE_FILE", &self.state_file)
             .env("AIRULESET_NOTIFY", "/dev/null/does-not-matter")
             .env("AVSYNC_DISCORD_ENV", &self.discord_env_file)
-            .env("PATH", path)
-            .output()
-            .expect("run bash harness");
+            .env("PATH", path);
+        for (k, v) in extra_env {
+            cmd.env(k, v);
+        }
+        let out = cmd.output().expect("run bash harness");
         (
             out.status.code().unwrap_or(-1),
             String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -439,20 +478,24 @@ impl Harness {
             .count()
     }
 
-    fn discord_call_count(&self) -> usize {
+    // Split on the "===CURL_CALL===" delimiter (never a bare .lines() count -- one call's own
+    // logged argv can itself contain embedded newlines, since the real payload comes from jq's
+    // pretty-printed default output; see fake_bin_dir's curl stub).
+    fn discord_calls(&self) -> Vec<String> {
         fs::read_to_string(&self.discord_marker_file)
             .unwrap_or_default()
-            .lines()
-            .count()
+            .split("===CURL_CALL===")
+            .map(|s| s.to_string())
+            .filter(|s| !s.trim().is_empty())
+            .collect()
+    }
+
+    fn discord_call_count(&self) -> usize {
+        self.discord_calls().len()
     }
 
     fn discord_last_call(&self) -> String {
-        fs::read_to_string(&self.discord_marker_file)
-            .unwrap_or_default()
-            .lines()
-            .last()
-            .unwrap_or_default()
-            .to_string()
+        self.discord_calls().last().cloned().unwrap_or_default()
     }
 }
 
@@ -659,6 +702,37 @@ fn fresh_measured_verdict_forwards_exactly_once_with_the_expected_message_shape_
         call.contains("channels/1373592666733940816/messages"),
         "must POST to the alerts-snv thread by default: {call}"
     );
+    assert!(
+        call.contains("--max-time 10"),
+        "review-noted: the POST must be bounded (mirrors scripts/lib/e2e-discord-report.sh's own \
+         curl --max-time 10 convention) so a stalled connection can never wedge this pass beyond \
+         the systemd unit's own budget: {call}"
+    );
+}
+
+#[test]
+fn fake_curl_failure_response_is_logged_with_its_body_968() {
+    // Review-noted: post_discord_verdict must log the Discord API's response BODY on a non-200,
+    // not just the bare http code -- diagnosability matters here (this exact bot identity already
+    // once hit a real Discord permission wall, "no MANAGE_WEBHOOKS guild-wide", per this same
+    // ticket's own design comment). A failure must still be non-fatal (the pass must survive).
+    let h = Harness::new(MEASURED_ZNIZ_BODY, &fresh_body("ok"));
+    let (code, _out, err) = h.run_main_with_fake_curl(
+        "403",
+        "{\"message\": \"Missing Permissions\", \"code\": 50013}",
+    );
+    assert_eq!(
+        code, 0,
+        "a failed Discord POST must never abort the pass: stderr={err}"
+    );
+    assert!(
+        err.contains("HTTP '403'"),
+        "must log the actual failing http code: {err}"
+    );
+    assert!(
+        err.contains("Missing Permissions"),
+        "must log the response BODY, not just the bare code, for diagnosability: {err}"
+    );
 }
 
 #[test]
@@ -714,6 +788,25 @@ fn no_signal_and_timeout_and_in_sync_lines_never_forward_968() {
         in_sync.discord_call_count(),
         0,
         "an in-sync measured verdict must never forward -- silence when in sync, message when misaligned"
+    );
+}
+
+#[test]
+fn an_oversize_verdict_text_is_capped_before_posting_968() {
+    // Review-noted: mirrors airuleset's own notify._MAX_CONTENT truncation -- Discord's own
+    // message cap is 2000 chars; post_discord_verdict must never send more than
+    // DISCORD_VERDICT_MAX_CONTENT (1900) regardless of how long the underlying verdict text is.
+    let huge_status = format!("measured: {} ZNIZ", "x".repeat(3000));
+    let h = Harness::new(&format!("1785778776\t{huge_status}"), &fresh_body("ok"));
+    let (code, _out, err) = h.run_main();
+    assert_eq!(code, 0, "stderr={err}");
+    assert_eq!(h.discord_call_count(), 1);
+    let call = h.discord_last_call();
+    let x_count = call.matches('x').count();
+    assert!(
+        x_count < 2000,
+        "the forwarded content must be capped well below the full 3000-char verdict text \
+         (DISCORD_VERDICT_MAX_CONTENT=1900): x_count={x_count}"
     );
 }
 

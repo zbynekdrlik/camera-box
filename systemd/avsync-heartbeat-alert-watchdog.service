@@ -7,5 +7,7 @@ Documentation=https://github.com/zbynekdrlik/camera-box
 Type=oneshot
 # %h = the installing user's home. Adjust if the checkout lives elsewhere on dev1.
 ExecStart=%h/devel/camera-box/scripts/avsync-heartbeat-alert-watchdog.sh
-# One ssh round-trip to the stream box; give it room but never hang the timer.
+# One ssh round-trip to the stream box, PLUS (issue 968) an optional bounded Discord verdict-
+# forward POST (curl --max-time 10) sharing this same budget -- give it room but never hang the
+# timer.
 TimeoutStartSec=30

@@ -98,6 +98,11 @@ write_state_field() {
 }
 
 # ── Discord verdict-forward leg (dev1-side bot POST -- issue 968) ───────────────────────────────
+# Deliberately a per-key sed read (mirrors THIS file's own read_state_field convention) rather than
+# sourcing the whole .env like scripts/lib/event-mode-discord-confirm.sh does -- sourcing executes
+# the file as shell code; a per-key extract never does, regardless of what else might someday land
+# in that file. Review-noted: this is a second, marginally more defensive, convention for the SAME
+# config file rather than the sourcing one -- kept deliberately, not an oversight.
 read_discord_env_field() {
   local key="$1"
   [ -f "$DISCORD_ENV_FILE" ] || { printf ''; return 0; }
@@ -117,32 +122,42 @@ discord_mention_prefix() {
   esac
 }
 
+# Discord's own message cap (2000 chars) minus headroom -- mirrors airuleset's own
+# notify._MAX_CONTENT (~/devel/airuleset/notify/__init__.py) exactly, never a second number.
+readonly DISCORD_VERDICT_MAX_CONTENT=1900
+
 # post_discord_verdict TEXT -> POST TEXT (with the owner mention prepended) to the alerts-snv
-# thread via the bot token. A missing token or a failed POST is logged loudly but NEVER aborts the
-# pass (this watchdog must survive and keep polling -- see the file header's set -uo pipefail
-# convention). Never called in --dry-run (see maybe_forward_verdict).
+# thread via the bot token. A missing token or a failed POST is logged loudly (including the
+# response BODY on failure -- diagnosability matters here: this exact bot identity already once
+# hit a Discord permission wall, see the design comment) but NEVER aborts the pass (this watchdog
+# must survive and keep polling -- see the file header's set -uo pipefail convention). Bounded with
+# --max-time (mirrors scripts/lib/e2e-discord-report.sh / event-mode-discord-confirm.sh's own
+# Discord POST calls exactly -- never a second timeout convention) so a stalled connection can
+# never wedge this pass beyond the systemd unit's own TimeoutStartSec budget. Never called in
+# --dry-run (see maybe_forward_verdict).
 post_discord_verdict() {
-  local text="$1" token content escaped http_code
+  local text="$1" token content payload response http_code body
   token="$(read_discord_env_field DISCORD_BOT_TOKEN)"
   if [ -z "$token" ]; then
     log "VERDICT-FORWARD: no DISCORD_BOT_TOKEN configured at $DISCORD_ENV_FILE -- skipping post (non-fatal)"
     return 0
   fi
   content="$(discord_mention_prefix)${text}"
-  # Minimal, deliberate JSON string escaping (never a generic library) -- our own generated text
-  # is a single line with no control characters; only a literal backslash or double-quote could
-  # ever appear (e.g. inside av_sync_measure.py's own quoted "'2ME PGM'" text).
-  escaped="$(printf '%s' "$content" | sed 's/\\/\\\\/g; s/"/\\"/g')"
-  http_code="$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+  content="${content:0:$DISCORD_VERDICT_MAX_CONTENT}"
+  payload="$(jq -n --arg c "$content" '{content:$c}')"
+  response="$(curl -sS --max-time 10 -w '\n%{http_code}' -X POST \
     -H "Authorization: Bot $token" \
     -H 'Content-Type: application/json' \
     -H 'User-Agent: DiscordBot (https://github.com/zbynekdrlik/airuleset, 1.0)' \
-    -d "{\"content\":\"${escaped}\"}" \
-    "https://discord.com/api/v10/channels/${DISCORD_THREAD_ID}/messages" 2>/dev/null || echo "000")"
-  case "$http_code" in
-    2??) log "VERDICT-FORWARD: posted to thread $DISCORD_THREAD_ID" ;;
-    *) log "VERDICT-FORWARD: Discord POST failed (http=$http_code, non-fatal)" ;;
-  esac
+    -d "$payload" \
+    "https://discord.com/api/v10/channels/${DISCORD_THREAD_ID}/messages" 2>&1)"
+  http_code="${response##*$'\n'}"
+  body="${response%$'\n'*}"
+  if [ "$http_code" != "200" ]; then
+    log "VERDICT-FORWARD: Discord POST returned HTTP '$http_code' (expected 200, non-fatal). Response body: $body"
+    return 0
+  fi
+  log "VERDICT-FORWARD: posted to thread $DISCORD_THREAD_ID (message id: $(printf '%s' "$body" | jq -r '.id // "unknown"' 2>/dev/null))"
 }
 
 # maybe_forward_verdict EPOCH STATUS -> forwards a genuinely NEW measured misalignment verdict to
