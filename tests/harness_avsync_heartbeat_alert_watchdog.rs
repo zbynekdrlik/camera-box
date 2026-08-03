@@ -123,6 +123,47 @@ fn extract_segment_splits_on_the_separator_both_directions() {
 }
 
 #[test]
+fn extract_segment_tolerates_real_cmdexe_crlf_and_trailing_space_before_separator_968() {
+    // #968: cmd.exe's `echo TEXT & next` emits the separator with a TRAILING SPACE, and every
+    // line arrives CRLF-terminated over ssh -- this fixture byte-matches the REAL captured probe
+    // output from the live incident (2026-08-03 19:40). Pre-968, the exact-line sed anchors never
+    // matched this shape: the vlc leg read permanently empty (<none>), producing a false
+    // CONFIRMED-stale alert every ~1h even though the on-box heartbeat file was genuinely fresh.
+    let combined = "1785778776\tno-signal: clip too small (94869 B)\r\n---AVSYNC-HB-SEP--- \r\n1785778799\tok, audio-device-missing\r\n";
+
+    let (code, out, err) = run_lib(&format!(
+        "avsync_heartbeat_extract_segment '{combined}' watchdog"
+    ));
+    assert_eq!(code, 0, "stderr={err}");
+    assert!(
+        out.contains("1785778776") && !out.contains("1785778799"),
+        "watchdog segment must extract its own epoch and never leak into the vlc side: {out:?}"
+    );
+
+    let (code2, out2, err2) = run_lib(&format!(
+        "avsync_heartbeat_extract_segment '{combined}' vlc"
+    ));
+    assert_eq!(code2, 0, "stderr={err2}");
+    assert!(
+        out2.contains("1785778799") && !out2.contains("1785778776"),
+        "vlc segment must extract its own epoch -- pre-968 this came back EMPTY (permanently \
+         <none>) because the CRLF+trailing-space separator never matched the exact-line anchor: {out2:?}"
+    );
+
+    // Prove the whole pipeline, not just the split: the extracted vlc segment must parse cleanly
+    // through avsync_heartbeat_last_epoch to the REAL fresh epoch, never empty.
+    let (code3, out3, err3) = run_lib(&format!(
+        "avsync_heartbeat_last_epoch \"$(avsync_heartbeat_extract_segment '{combined}' vlc)\""
+    ));
+    assert_eq!(code3, 0, "stderr={err3}");
+    assert_eq!(
+        out3.trim(),
+        "1785778799",
+        "the vlc leg's last_epoch must read the REAL fresh epoch, never come back empty/<none>"
+    );
+}
+
+#[test]
 fn extract_segment_with_no_separator_fails_safe_symmetrically_on_both_sides() {
     // Review-caught bug: without the separator (a truncated/partial ssh read), the "vlc" branch
     // correctly returned empty (its own sed range never matches, so it prints nothing) but the
@@ -219,8 +260,12 @@ fn fake_bin_dir(
     let sshpass = dir.path().join("sshpass");
     fs::write(
         &sshpass,
+        // #968: emit the REAL cmd.exe-shaped output -- CRLF line endings, and a trailing space
+        // before the separator (byte-matching the live captured probe: "...SEP--- \r\n"). The
+        // pre-968 stub emitted clean LF-only output with no trailing space and never exercised
+        // the actual defect (extract_segment's exact-line sed anchors silently never matching).
         format!(
-            "#!/bin/sh\nprintf '%s\\n' \"{watchdog_body}\"\necho '---AVSYNC-HB-SEP---'\nprintf '%s\\n' \"{vlc_body}\"\nexit 0\n"
+            "#!/bin/sh\nprintf '%s\\r\\n' \"{watchdog_body}\"\nprintf '%s\\r\\n' '---AVSYNC-HB-SEP--- '\nprintf '%s\\r\\n' \"{vlc_body}\"\nexit 0\n"
         ),
     )
     .expect("write sshpass");
