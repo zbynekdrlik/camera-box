@@ -2113,7 +2113,7 @@ if [ "$frozen_ok" -ne 1 ]; then
   exit 1
 fi
 
-echo "[4d/8] #405/#406/#462 render-budget gate — with burns ON + Multiview open, strih+stream MUST hold the render frame budget (strih 30fps, stream 30fps — Topology v2, #459: strih's 60fps IMAG role moved to imag-nb, which now carries its own render-budget floor too); imag is measured but REPORT-ONLY (issue 888, temporary — see below)"
+echo "[4d/8] #405/#406/#462 render-budget gate — with burns ON + Multiview open, strih+stream MUST hold the render frame budget (strih 30fps, stream 30fps — Topology v2, #459: strih's 60fps IMAG role moved to imag-nb, which now carries its own render-budget floor too); imag is measured too (60fps) and is STRICT as well (issue 888) — the step aborts if any of the three boxes misses its budget"
 # The 2026-07-02 regression (found when strih was STILL the 60fps LED-wall IMAG box, pre-#459): a
 # measurement burn left ON dropped strih RENDER 60->27fps (36ms > 16.6ms/60fps budget) while the
 # encoder outputFps stayed a DUPLICATED 60 (green) — and NOTHING
