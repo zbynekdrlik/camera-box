@@ -7056,7 +7056,7 @@ Local: fmt/check/clippy(-D warnings, default features)/shellcheck clean every cy
 test` sweep run after touching scripts/avsync-heartbeat-alert-watchdog.sh + scripts/
 avsync-watchdog-install.sh + scripts/avsync-keepalive.ps1 (the recording-e2e.sh/rig-mode.sh
 anchor-collision class doesn't apply to these files directly, but ran the full sweep anyway per
-general discipline) -- see the PR for the exact binary/pass count.
+general discipline): 190/190 binaries ok, 0 FAILED, exit 0.
 
 PR: TBD (opened after this entry). Post-merge deploy (supervisor): scp the fixed
 `avsync-keepalive.ps1` to the stream box, re-enable + one clean pass of the dev1
