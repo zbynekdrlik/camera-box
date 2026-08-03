@@ -2113,7 +2113,7 @@ if [ "$frozen_ok" -ne 1 ]; then
   exit 1
 fi
 
-echo "[4d/8] #405/#406/#462 render-budget gate — with burns ON + Multiview open, strih+stream MUST hold the render frame budget (strih 30fps, stream 30fps — Topology v2, #459: strih's 60fps IMAG role moved to imag-nb, which now carries its own render-budget floor too); imag is measured but REPORT-ONLY (issue 888, temporary — see below)"
+echo "[4d/8] #405/#406/#462 render-budget gate — with burns ON + Multiview open, strih+stream MUST hold the render frame budget (strih 30fps, stream 30fps — Topology v2, #459: strih's 60fps IMAG role moved to imag-nb, which now carries its own render-budget floor too); imag is measured too (60fps) and is STRICT as well (issue 888) — the step aborts if any of the three boxes misses its budget"
 # The 2026-07-02 regression (found when strih was STILL the 60fps LED-wall IMAG box, pre-#459): a
 # measurement burn left ON dropped strih RENDER 60->27fps (36ms > 16.6ms/60fps budget) while the
 # encoder outputFps stayed a DUPLICATED 60 (green) — and NOTHING
@@ -2141,26 +2141,27 @@ if ! OBS_PASSWORD_STRIH="${OBS_PASSWORD:-}" OBS_PASSWORD_STREAM="${OBS_PASSWORD:
   exit 1
 fi
 
-# issue 888 (RE-GATE, TEMPORARY, user-directed 2026-07-30): imag's own render-budget term is
-# REPORT-ONLY here, not strict, until issue 886 lands. Root cause (measured, reproduces to within
-# 0.2ms across 3 runs): the #404-style measurement burn costs ~11.5ms of imag's 16.67ms (60fps)
-# frame budget -- the INSTRUMENT's own cost, not a product regression (burn OFF: imag renders
-# 4.5-5.9ms, zero skips, every window -- see the still-STRICT [1/8] preflight above, unchanged).
-# Three consecutive gate runs failed on this one term with no verdict ever produced, leaving 37
-# bundled, otherwise-finished tickets stuck behind it. This branch logs a loud WARN whether imag
-# PASSES or FAILS, so nobody reads silence as strictness, and it NEVER aborts. Hardcoded and
-# one-line-deletable -- deliberately NOT an env knob (a silent env default is exactly how
-# "temporary" becomes permanent). Restoring strictness needs ALL FOUR conditions in issue 888;
-# until then this stays, and this comment (+ the WARN) stays visible in every run's log.
-if OBS_PASSWORD_IMAG="${OBS_PASSWORD_IMAG:-${OBS_PASSWORD:-}}" \
+# issue 888 (RE-GATE, RESTORED to STRICT 2026-08-03): imag's own render-budget term was
+# temporarily non-aborting (user-directed 2026-07-30) while its measurement burn cost ~11.5ms of
+# imag's 16.67ms (60fps) frame budget, leaving under 1ms of headroom -- a coin-flip gate that
+# blocked PR #704 (37 bundled, otherwise-finished tickets) for three consecutive runs. That
+# relaxation is now retired: 10 independent `Full-path E2E` gate runs from 2026-07-30 19:20
+# through 2026-08-03 (burns confirmed ON via each run's own burn-check log) all PASS this term,
+# with imag comfortably at 4.8-6.5ms against the 16.67ms budget -- 10+ms of real headroom, not the
+# under-1ms margin that motivated the relaxation. See the design comment on issue 888 for the full
+# dataset. This call is strict again: same abort shape as strih/stream, same underlying
+# render-budget-gate.py / render_budget::classify threshold (untouched throughout).
+if ! OBS_PASSWORD_IMAG="${OBS_PASSWORD_IMAG:-${OBS_PASSWORD:-}}" \
     python3 "$HERE/render-budget-gate.py" \
       --box "imag=${IMAG_IP}:${RENDER_TARGET_FPS_IMAG:-60}" \
       --window-s "${RENDER_GATE_WINDOW_S:-6}"; then
-  echo "WARN: [render-budget-gate][imag REPORT-ONLY -- issue 888] imag PASSED its render budget this run." >&2
-else
-  echo "WARN: [render-budget-gate][imag REPORT-ONLY -- issue 888] imag MISSED its render budget with burns ON -- NOT aborting (temporary relaxation, user directive 2026-07-30)." >&2
-  echo "WARN: [render-budget-gate][imag REPORT-ONLY -- issue 888] measured cause (issue 886): the measurement burn costs ~11.5ms of imag's 16.67ms frame budget -- the instrument's own cost, not a product regression." >&2
-  echo "WARN: [render-budget-gate][imag REPORT-ONLY -- issue 888] this term is restored to STRICT once issue 886 lands and two consecutive runs show real headroom -- see issue 888 for the exact restore conditions." >&2
+  echo "    [render-budget-gate] imag missed the render frame budget with burns ON — aborting BEFORE recording (#405/#888)." >&2
+  echo "    A recording made in this state would judder (encoder duplicates frames) yet pass delivery-contiguity." >&2
+  echo "    Root cause is almost always the expensive measurement burn (#404 full-frame readback) or a render regression." >&2
+  echo "    This term was temporarily relaxed 2026-07-30..2026-08-03 (issue 888) and was restored to strict" >&2
+  echo "    once 10 consecutive runs showed real headroom -- if it is failing again now, that is a genuine" >&2
+  echo "    regression, not the original #865/#886 marginal-headroom condition. See issue 888 for history." >&2
+  exit 1
 fi
 
 echo "[4e/8] #709/#845 imag-nb headroom preflight — StartRecord's encoder needs real free memory (dGPU VRAM if this box has one, else system RAM on an iGPU-only box)"

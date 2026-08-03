@@ -6833,3 +6833,46 @@ structural fix) and the documented resolution recipe in `.claude/rules/ci-testin
 Not fixed by this worker (rig hot-swap is out of scope for a code+CI-only dispatch, per
 `drive-rig-steps-in-supervisor.md`). PR left unmerged, issue 921 left open pending live
 verification.
+
+## #888 (2026-08-03) -- RE-GATE: restore imag's [4d/8] render-budget term to STRICT
+
+Version bump: 1.7.0-dev.416 -> 417 (c6ad08019). Design comment posted to #888 before any code
+commit: https://github.com/zbynekdrlik/camera-box/issues/888#issuecomment-5162466812 -- corrects
+the mistaken premise that #886 "landed" (it was closed 2026-07-30 as a duplicate of #865, which
+is still OPEN, no code fix found for the QR-cache/burn-removal candidates), then grounds the
+restore in real measured data instead: 10 independent Full-path E2E pull_request runs from
+2026-07-30 19:20 through 2026-08-03 (burns confirmed ON via each run's own burn-check log) all
+PASS imag's render-budget term at 4.8-6.5ms against the 16.67ms budget -- well past the ticket's
+own two-consecutive-run restore bar. Likely cause (hypothesis, not verified): issue 884's
+imag-obs.service supervision (Restart=on-failure, landed same evening as the last MISS) giving
+imag a clean OBS start, per issue 799's documented restart-clears-degradation pattern.
+
+RED: `test(#888)` 18425ff6d -- rewrote
+tests/harness_render_budget_imag_report_only_888.rs's second test
+(`imag_render_budget_call_is_strict_again_after_888_restore`, replacing
+`imag_render_budget_call_is_report_only_and_names_888_and_886`) to assert `exit 1` present + no
+report-only language in imag's render-budget-gate region. Confirmed RED against the pre-fix
+report-only code (1 passed / 1 failed).
+
+GREEN: `fix(#888)` e85067e7d -- flipped imag's separate render-budget-gate.py call from
+WARN-only/never-aborting back to the same `if ! ...; then ...; exit 1; fi` shape strih/stream
+already use. No threshold change (render-budget-gate.py / render_budget::classify untouched). Kept
+the two-call split from cdfd1fd4d (imag stays its own call) rather than re-merging into one
+3-box call -- smaller blast radius, and the sibling test proving the split
+(`strih_stream_render_budget_call_stays_strict_and_excludes_imag`) needed no change.
+
+Local: fmt/check/clippy(-D warnings, default features)/test-compile all clean. Full `cargo test`
+sweep (touched scripts/recording-e2e.sh, mandatory per top-level CLAUDE.md GOTCHA): first pass hit
+1 failure (`foreign_lease_released_within_wait_budget_lets_us_proceed` in
+tests/harness_rig_busy_gate_lease_830.rs, a timing-sensitive lease-wait test wholly unrelated to
+this diff), which stopped scheduling remaining binaries (123/174 ran). Isolated re-run of that
+one file passed clean (6/6) -- the #912-class parallel-load flake. Full re-run: 187/187 binaries
+ok, 0 FAILED, exit 0.
+
+Bookkeeping alongside this ticket: #865 closed as overcome (evidence: same 10-run dataset; its
+symptom no longer reproduces) -- see
+https://github.com/zbynekdrlik/camera-box/issues/865#issuecomment-5162569949. #886 already closed
+(dup of #865, unchanged). #880 (iGPU clock floor, still open) untouched -- a genuinely different,
+unresolved risk.
+
+PR: TBD (opened after this entry).
