@@ -234,10 +234,11 @@ pub const OUTER_BIAS_MAX_PPM: f64 = 10.0;
 /// window implies) produced `instantaneous_ppm ≈ -737,600`, and with no gate the EMA converged
 /// toward it and the servo railed at `-MAX_PPM` permanently.
 ///
-/// 100,000 ppm (10%) is chosen to clear three boundaries with margin: (1) two orders of magnitude
-/// above `MAX_PPM` (300, itself already "an order of magnitude above any measured worst case
-/// ~25-50ppm"), so no real clock plausibly reaches it; (2) a clean 2x above the largest SYNTHETIC
-/// stress value this file's own tests already feed to exercise the hard-clamp/slew-limit logic
+/// 100,000 ppm (10%) is chosen to clear three boundaries with margin: (1) ~333x (roughly 2.5
+/// orders of magnitude) above `MAX_PPM` (300, itself already "an order of magnitude above any
+/// measured worst case ~25-50ppm"), so no real clock plausibly reaches it; (2) a clean 2x above
+/// the largest SYNTHETIC stress value this file's own tests already feed to exercise the
+/// hard-clamp/slew-limit logic
 /// (50,000 ppm, a deliberately extreme but non-starved "outlier measurement" in
 /// `realtime_compensator_never_exceeds_the_slew_limit_per_call`) — those tests keep proving the
 /// clamp/slew math, not this guard; (3) more than 7x below the observed live defect (737,600
@@ -326,6 +327,15 @@ impl RealtimeAsrcCompensator {
     pub fn starved_block_count(&self) -> u32 {
         self.starved_block_count
     }
+
+    /// The audio-timeline advance AFTER applying whatever `applied_ppm` is CURRENTLY in effect —
+    /// the single formula both the starved-rejection path and the normal (post-EMA/slew) path in
+    /// [`Self::compensate`] return. Factored out (`/review` finding on issue #960) so the two call
+    /// sites can never silently drift apart the way this project's C/Rust mirrors have before —
+    /// see the top-level CLAUDE.md's repeated "mirror drifted apart" GOTCHAs.
+    fn corrected_advance(&self, raw_advance_s: f64) -> f64 {
+        raw_advance_s / (1.0 + self.applied_ppm / 1_000_000.0)
+    }
 }
 
 impl Default for RealtimeAsrcCompensator {
@@ -357,8 +367,8 @@ impl AsrcCompensator for RealtimeAsrcCompensator {
         // this callback's real audio (the samples themselves are real even when the elapsed-time
         // basis used to measure them is garbage).
         if instantaneous_ppm.abs() > MAX_SANE_INSTANTANEOUS_PPM {
-            self.starved_block_count += 1;
-            return raw_advance_s / (1.0 + self.applied_ppm / 1_000_000.0);
+            self.starved_block_count = self.starved_block_count.saturating_add(1);
+            return self.corrected_advance(raw_advance_s);
         }
 
         // TIME-based EMA smoothing factor: alpha = 1 - exp(-block/tau), so convergence speed is
@@ -386,7 +396,7 @@ impl AsrcCompensator for RealtimeAsrcCompensator {
         let delta = (target_ppm - self.applied_ppm).clamp(-max_step, max_step);
         self.applied_ppm += delta;
 
-        raw_advance_s / (1.0 + self.applied_ppm / 1_000_000.0)
+        self.corrected_advance(raw_advance_s)
     }
 }
 
@@ -836,6 +846,34 @@ mod tests {
             "expected starved blocks to grant NO lock credit — one real block afterward should \
              still be pre-lock, got applied_ppm={}",
             compensator.applied_ppm()
+        );
+    }
+
+    /// Boundary check for the `>` comparison itself (`/review` finding on issue #960): a block
+    /// just BELOW the sanity ceiling is still treated as real (folded into the EMA, never
+    /// flagged), and a block just ABOVE it is rejected. Pins the strict `>` (not `>=`) choice
+    /// explicitly, on values comfortably clear of floating-point rounding noise (±1ppm at this
+    /// magnitude), so a future edit can't silently flip which side of the ceiling is "sane"
+    /// without a test noticing.
+    #[test]
+    fn threshold_boundary_960() {
+        let mut below = RealtimeAsrcCompensator::new();
+        let raw_below = DriftingAudioClock::new(MAX_SANE_INSTANTANEOUS_PPM - 1.0).raw_advance(1.0);
+        let _ = below.compensate(raw_below, 1.0);
+        assert_eq!(
+            below.starved_block_count(),
+            0,
+            "expected a block just BELOW MAX_SANE_INSTANTANEOUS_PPM to be treated as real, not \
+             starved"
+        );
+
+        let mut above = RealtimeAsrcCompensator::new();
+        let raw_above = DriftingAudioClock::new(MAX_SANE_INSTANTANEOUS_PPM + 1.0).raw_advance(1.0);
+        let _ = above.compensate(raw_above, 1.0);
+        assert_eq!(
+            above.starved_block_count(),
+            1,
+            "expected a block just ABOVE MAX_SANE_INSTANTANEOUS_PPM to be rejected as starved"
         );
     }
 }
