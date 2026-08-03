@@ -6876,3 +6876,54 @@ https://github.com/zbynekdrlik/camera-box/issues/865#issuecomment-5162569949. #8
 unresolved risk.
 
 PR: TBD (opened after this entry).
+
+---
+
+#962 (ASRC estimator per-block measurement unmeasurable for small-block bursty sources, e.g. mbc
+128-sample Dante VSC blocks 100% starved-rejected under #960's per-block guard):
+
+Version: `ce44d0d45` bump to 1.7.0-dev.420.
+
+RED: `test(#962)` `8b7835530` -- two new tests
+(`windowed_estimator_measures_a_small_drift_from_tiny_bursty_blocks_962`,
+`windowed_estimator_still_rejects_a_genuinely_starved_tiny_block_source_962`) feeding a synthetic
+small-block bursty stream (mbc's exact 128-sample/48kHz block size, 10%/90% burst/catch-up
+wall-clock split) confirmed failing against the unmodified per-block estimator (45002/45002 and
+800/800 blocks flagged starved, true drift never measured).
+
+GREEN: `fix(#962)` `5c8e7d714` -- `RealtimeAsrcCompensator` (src/asrc_bench.rs) and its C mirror
+(vendor/obs-studio/libobs/media-io/asrc-compensator.{h,c}) now accumulate
+raw_advance_s/master_block_s duration-weighted sums into a 1.0s measurement window (WINDOW_S/
+ASRC_WINDOW_S); one windowed ppm value is computed from the sums once the window closes and fed
+into the EMA, with the #960 sanity ceiling kept, now applied to the windowed value. WINDOW_S=1.0
+was chosen so every existing #803/#806/#960 test (all using >=1.0s blocks per call) needed zero
+changes -- window closes on the same call, bit-identical results. Lock-step CI anchors updated in
+tests/genlock_preload.rs (new asrc_starvation_guard_gates_the_windowed_ppm_962 replacing the stale
+per-block literal-text check) and both windows-genlock.yml/windows-genlock-fast.yml pwsh gates.
+
+Review-driven RED/GREEN: `test(#962)` `07a053e6d` / `fix(#962)` `23031abfd` -- code review (general-
+purpose subagent, checked out both RED/GREEN commits into disposable worktrees, ran real tests)
+caught that the initial windowed fix let a REJECTED window continue advancing an already-in-
+progress slew transition instead of freezing applied_ppm (the original per-block guard's
+invariant). New test rejected_window_holds_applied_ppm_even_mid_slew_962 confirmed RED against
+5c8e7d714, then GREEN after restoring the freeze in both Rust (plain early return) and C (a
+window_rejected_this_call flag gating only the target/slew block, since C's
+cumulative_correction_ms/time_since_log_s telemetry accumulation must stay unconditional -- a
+naive early return there would have silently reintroduced the "log cadence goes silent during a
+sustained starve" defect the earlier guard fixed; caught and corrected during this same pass).
+Also fixed two inaccurate doc/test comments the review flagged.
+
+Local: fmt/check/clippy(-D warnings, default features) clean both cycles. Full `cargo test` sweep
+(touched src/asrc_bench.rs + vendored C, not the recording-e2e.sh/rig-mode.sh anchor-collision
+class, but ran the full sweep anyway per general discipline): 187/187 binaries ok, 0 FAILED, both
+before and after the review fix.
+
+PR: #963 (`fix(#962): windowed duration-weighted ASRC estimator for small bursty blocks`).
+CI: CI/Test/Build/Lint/Code Coverage/Python harness tests/Shellcheck/Security Audit/Drift Guard all
+green on `23031abfd`. `Full-path E2E (rig zero-loss gate)` BLOCKED across 3 separate runs by a
+persistent live-rig genlock_parity DRIFT (strih=stream=9b14a274b73a448c, imag=d77426c75807468 --
+identical SHAs every run) -- a pre-existing fleet-convergence state from a concurrent rig-ops
+deploy session (visible in the docs commit right before this ticket's dispatch), not caused by
+this PR's diff (never deployed anywhere yet) and not fixable from this ticket's code+CI scope.
+Left OPEN pending fleet convergence + a `gh run rerun` (never a fresh `gh workflow run`, per this
+file's own GOTCHA) on the same commit.
