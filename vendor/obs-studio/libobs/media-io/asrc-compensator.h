@@ -74,18 +74,30 @@ extern "C" {
  * (which has no logging concern) -- a C-side-only constant. */
 #define ASRC_LOG_INTERVAL_S 60.0
 
-/* issue #960: sanity ceiling on a single block's instantaneous ppm -- above this, the block
- * carries no real timing information (a starved or bursting audio source, e.g. a muted/idle
- * device path delivering near-zero samples) and must be REJECTED rather than folded into the
- * EMA. Live incident: a starved source (~26.24% of the samples its elapsed wall-clock window
- * implies) produced an instantaneous ppm of ~-737,600, and with no gate the EMA converged toward
- * it and the servo railed at -ASRC_MAX_PPM permanently. 100,000 ppm (10%) clears three
- * boundaries with margin: two orders of magnitude above ASRC_MAX_PPM (itself already an order of
- * magnitude above any measured worst case), a clean 2x above the largest synthetic stress value
- * the Rust reference's own test suite feeds to exercise the hard-clamp/slew-limit logic (50,000
- * ppm), and more than 7x below the observed live defect (737,600 ppm). Mirror of
+/* issue #960: sanity ceiling on the (issue #962: WINDOWED, duration-weighted-summed) measured
+ * ppm -- above this, the measurement carries no real timing information (a starved or bursting
+ * audio source, e.g. a muted/idle device path delivering near-zero samples) and must be REJECTED
+ * rather than folded into the EMA. Live incident: a starved source (~26.24% of the samples its
+ * elapsed wall-clock window implies) produced a measured ppm of ~-737,600, and with no gate the
+ * EMA converged toward it and the servo railed at -ASRC_MAX_PPM permanently. 100,000 ppm (10%)
+ * clears three boundaries with margin: two orders of magnitude above ASRC_MAX_PPM (itself already
+ * an order of magnitude above any measured worst case), a clean 2x above the largest synthetic
+ * stress value the Rust reference's own test suite feeds to exercise the hard-clamp/slew-limit
+ * logic (50,000 ppm), and more than 7x below the observed live defect (737,600 ppm). Mirror of
  * src/asrc_bench.rs MAX_SANE_INSTANTANEOUS_PPM -- keep numerically identical. */
 #define ASRC_MAX_SANE_INSTANTANEOUS_PPM 100000.0
+
+/* issue #962: duration of the measurement WINDOW, in seconds of master-clock time, over which
+ * raw_advance_s and master_block_s are duration-weighted SUMMED before computing a single
+ * windowed ppm value to feed the EMA (and to gate against ASRC_MAX_SANE_INSTANTANEOUS_PPM) --
+ * fixes per-block instantaneous ppm being unmeasurable noise for small, bursty-delivery blocks
+ * (e.g. mbc's 128-sample Dante VSC blocks, 2.667ms each, 100% starved-rejected under the pre-#962
+ * per-block guard). 1.0s spans ~375 of those blocks -- ample duration-weighted averaging for
+ * arrival-timing jitter to cancel completely -- while staying small relative to
+ * ASRC_TIME_CONSTANT_S (20s), so it barely perturbs the EMA's own convergence (the time-based EMA
+ * discretization is mathematically exact for any window length when the driving ratio is
+ * constant over it). Mirror of src/asrc_bench.rs WINDOW_S -- keep numerically identical. */
+#define ASRC_WINDOW_S 1.0
 
 /* Per-source servo state. One instance lives per obs_source_t (see
  * obs-internal.h's `struct asrc_compensator asrc` field) and is mutated only
@@ -115,8 +127,24 @@ struct asrc_compensator {
 	 * telemetry read -- reset to 0 whenever asrc_compensator_should_log() returns true (same
 	 * reset-on-read convention as cumulative_correction_ms above). Mirror of src/asrc_bench.rs
 	 * RealtimeAsrcCompensator::starved_block_count (which never resets -- a C-only logging-
-	 * cadence concern, same as ASRC_LOG_INTERVAL_S itself). */
+	 * cadence concern, same as ASRC_LOG_INTERVAL_S itself). camera-box #962: on a rejected WINDOW
+	 * close, incremented by window_block_count (every block that fed the rejected window), not
+	 * just by one. */
 	uint32_t starved_block_count;
+	/* camera-box #962: duration-weighted sum of raw_advance_s observed in the CURRENT (not yet
+	 * closed) measurement window. Mirror of src/asrc_bench.rs
+	 * RealtimeAsrcCompensator::window_raw_s. */
+	double window_raw_s;
+	/* camera-box #962: duration-weighted sum of master_block_s observed in the CURRENT window --
+	 * once this reaches ASRC_WINDOW_S, the window closes: a single windowed ppm is computed from
+	 * window_raw_s/window_master_s, fed to the EMA (or rejected under the #960 ceiling), and both
+	 * sums reset to 0.0 for the next window. Mirror of src/asrc_bench.rs
+	 * RealtimeAsrcCompensator::window_master_s. */
+	double window_master_s;
+	/* camera-box #962: count of individual audio blocks folded into the CURRENT (not yet closed)
+	 * window -- reset to 0 alongside the sums above whenever the window closes. Mirror of
+	 * src/asrc_bench.rs RealtimeAsrcCompensator::window_block_count. */
+	uint32_t window_block_count;
 };
 
 /* Reset a servo to its just-constructed state: 0 ppm estimated/applied (assume
@@ -130,9 +158,13 @@ EXPORT void asrc_compensator_init(struct asrc_compensator *c);
  * SAME wall-clock basis genlock_wall_now_ns() uses for the video FIFO
  * release), returns the advance AFTER compensation and reports the CURRENT
  * applied ppm via `*applied_ppm_out` (for translating into a
- * swr_set_compensation() call and for telemetry). Mirror of
- * RealtimeAsrcCompensator::compensate() in src/asrc_bench.rs -- keep the two
- * numerically identical. */
+ * swr_set_compensation() call and for telemetry). camera-box #962: internally
+ * accumulates raw_advance_s/master_block_s into a duration-weighted WINDOW
+ * (ASRC_WINDOW_S) and only estimates/gates once per window close -- the
+ * estimate/applied ppm only actually CHANGE on a call that closes a window;
+ * every call still returns a corrected advance using whatever applied_ppm is
+ * currently in effect. Mirror of RealtimeAsrcCompensator::compensate() in
+ * src/asrc_bench.rs -- keep the two numerically identical. */
 EXPORT double asrc_compensator_compensate(struct asrc_compensator *c, double raw_advance_s, double master_block_s,
 					   double *applied_ppm_out);
 
