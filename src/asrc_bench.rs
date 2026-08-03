@@ -876,4 +876,111 @@ mod tests {
             "expected a block just ABOVE MAX_SANE_INSTANTANEOUS_PPM to be rejected as starved"
         );
     }
+
+    // ---- #962: per-block instantaneous ppm is unmeasurable noise for small, bursty-delivery
+    // blocks (the live mbc incident: 128-sample Dante VSC blocks, 100% starved-rejected under the
+    // pre-#962 per-block guard). These are RED against the CURRENT (per-block) estimator -- see
+    // the module's #962 design comment (`gh issue view 962 --comments`) for the full mechanism. --
+
+    /// Feed `n_pairs` PAIRS of tiny (128-sample @ 48kHz, the live mbc Dante-VSC block size) blocks
+    /// into `compensator`, each pair sharing a fixed total wall-clock duration corresponding to
+    /// `true_ppm` but split UNEVENLY (10%/90%) between the two blocks -- reproducing REAL bursty
+    /// delivery (some blocks arrive almost back-to-back, the next "catches up"), while the pair's
+    /// AGGREGATE wall time still correctly totals what `true_ppm` implies. `raw_advance_s` is the
+    /// FIXED per-block sample-count-stamped duration for every block (OBS stamps sample count 1:1
+    /// -- drift never shows up per block, only in how much real wall time it took to deliver a
+    /// fixed sample count); the injected ppm and the burst/catch-up jitter both live entirely in
+    /// `master_block_s`. This is exactly the #962 live mechanism: dividing two small, individually
+    /// jittery numbers (one block's own raw_advance_s / master_block_s) amplifies the jitter into
+    /// an implausible instantaneous ppm, even though the AGGREGATE (summed) ratio over many blocks
+    /// correctly reflects the true, small underlying drift.
+    fn feed_bursty_small_blocks(
+        compensator: &mut RealtimeAsrcCompensator,
+        true_ppm: f64,
+        n_pairs: u32,
+    ) {
+        const NOMINAL_BLOCK_S: f64 = 128.0 / 48_000.0; // #962: the live mbc Dante-VSC block size
+        const SMALL_SPLIT: f64 = 0.1; // 10%/90% burst/catch-up wall-clock split
+        let true_ratio = 1.0 + true_ppm / 1_000_000.0;
+        let pair_master_s = 2.0 * NOMINAL_BLOCK_S / true_ratio;
+        for _ in 0..n_pairs {
+            let _ = compensator.compensate(NOMINAL_BLOCK_S, pair_master_s * SMALL_SPLIT);
+            let _ = compensator.compensate(NOMINAL_BLOCK_S, pair_master_s * (1.0 - SMALL_SPLIT));
+        }
+    }
+
+    /// THE gate for issue #962 itself: a small ("a few ppm") TRUE drift, delivered as tiny bursty
+    /// blocks matching the live mbc incident exactly (128 samples @ 48kHz, uneven wall-clock
+    /// delivery timing per block), must be MEASURED -- not just safely ignored -- by the
+    /// estimator. Runs long enough (~2min) for convergence per the SAME bound
+    /// `estimator_converges_within_the_tickets_own_bounds` already established. RED against the
+    /// current per-block estimator: every individual block's own instantaneous ppm (~+-4,000,000
+    /// from the 10%/90% split alone, regardless of the injected true ppm) wildly clears the #960
+    /// ceiling, so the current code rejects essentially every block and never measures the true
+    /// drift at all -- exactly the live mbc defect (`starved_blocks=22500/60s` = 100%).
+    #[test]
+    fn windowed_estimator_measures_a_small_drift_from_tiny_bursty_blocks_962() {
+        const TRUE_PPM: f64 = 5.0; // "a few ppm" per issue #962's own framing
+        let mut compensator = RealtimeAsrcCompensator::new();
+        // ~2 minutes of pairs (pair wall time ~= 2*128/48000 =~ 5.333ms at this small ppm) --
+        // trivial deterministic loop, no real sleep.
+        let pair_wall_s = 2.0 * (128.0 / 48_000.0) / (1.0 + TRUE_PPM / 1_000_000.0);
+        let n_pairs = (120.0 / pair_wall_s).ceil() as u32;
+        feed_bursty_small_blocks(&mut compensator, TRUE_PPM, n_pairs);
+
+        assert_eq!(
+            compensator.starved_block_count(),
+            0,
+            "expected zero blocks flagged as starved -- the AGGREGATE ppm from real (if unevenly \
+             delivered) audio is nowhere near the #960 sanity ceiling, only each individual \
+             block's own instantaneous ratio is, got {} starved blocks out of {} fed",
+            compensator.starved_block_count(),
+            n_pairs * 2
+        );
+        let err = (compensator.estimated_ppm() - TRUE_PPM).abs();
+        assert!(
+            err < 1.0,
+            "expected the estimator to measure the true {TRUE_PPM}ppm drift from tiny bursty \
+             (mbc-sized) blocks within 1ppm after ~2min, got estimated_ppm={} (err={err}ppm)",
+            compensator.estimated_ppm()
+        );
+    }
+
+    /// The #960 sanity ceiling must still catch a GENUINELY starved source (not just jittery
+    /// delivery of otherwise-real samples) even when it arrives as tiny blocks -- the exact live
+    /// #960 incident (a source delivering ~26.24% of the samples its elapsed wall-clock window
+    /// implies, i.e. instantaneous ppm ~=-737,600) must still be rejected, whether the source
+    /// uses large paced blocks (already proven by the three #960 tests above) or tiny bursty
+    /// ones. RED against the current per-block estimator for the same reason as the test above:
+    /// the healthy baseline phase alone already gets ~100% rejected by 10%/90%-split jitter, so
+    /// `starved_block_count()` is nonzero before the deliberately-starved phase even starts.
+    #[test]
+    fn windowed_estimator_still_rejects_a_genuinely_starved_tiny_block_source_962() {
+        let mut compensator = RealtimeAsrcCompensator::new();
+        // Converge on a healthy small-block source first (reuses the #962 fixture at 0 true ppm).
+        feed_bursty_small_blocks(&mut compensator, 0.0, 400); // ~2.1s, past MIN_LOCK_S
+        assert_eq!(
+            compensator.starved_block_count(),
+            0,
+            "expected a healthy (if unevenly-delivered) tiny-block source to never be flagged as \
+             starved, got {} starved blocks",
+            compensator.starved_block_count()
+        );
+
+        // Now genuinely starved: #960's own -737,600ppm case, still as tiny blocks -- this must
+        // be rejected, and the (converged, ~0) estimate must not move.
+        let before = compensator.estimated_ppm();
+        feed_bursty_small_blocks(&mut compensator, -737_600.0, 400);
+        assert_eq!(
+            compensator.estimated_ppm(),
+            before,
+            "expected a genuinely starved tiny-block source to be rejected, leaving the estimate \
+             exactly where it was ({before}), got {}",
+            compensator.estimated_ppm()
+        );
+        assert!(
+            compensator.starved_block_count() > 0,
+            "expected the genuinely starved window(s) to be counted as starved"
+        );
+    }
 }
