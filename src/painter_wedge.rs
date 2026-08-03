@@ -33,10 +33,40 @@
 //! `.claude/rules/self-heal-frozen-leg-attribution.md` this event stays its OWN distinctly-worded
 //! CRITICAL line + its OWN exit code (never overloaded onto `#945`'s or `#663`'s wording).
 //!
-//! #936 RED marker: `PAINTER_WEDGE_THRESHOLD_S`/`PAINTER_WEDGE_EXIT_CODE`/`painter_wedge_message`
-//! are NOT YET IMPLEMENTED — this is the RED commit (proves via compile failure that today's code
-//! decides nothing at all about a painter wedge). Implemented in the immediately-following GREEN
-//! commit.
+/// How many seconds the painter loop may go WITHOUT a successful `paint_one_frame()` completing
+/// before the watchdog treats it as WEDGED. The KMS vblank-locked path ticks every ~16.6ms (60Hz);
+/// `KmsPresenter::wait_flip_complete()`'s OWN internal 500ms non-blocking-poll timeout already
+/// bails (and unwinds the painter thread with a clean `Err`) well before this fires on an ordinary
+/// "flip issued, event never arrived" stall — so this threshold exists for the harder case: a
+/// block inside `page_flip()`'s ioctl issuance itself (or a genuine kernel D-state hang) that
+/// `wait_flip_complete` never even gets scheduled to reach. ~6x the existing 500ms internal bound
+/// gives that ordinary path ample margin to finish unwinding on its own; still catches a genuine
+/// indefinite hang in single-digit seconds instead of leaving an entire multi-minute recording
+/// silently ruined (issue 930's paired run).
+pub const PAINTER_WEDGE_THRESHOLD_S: f64 = 3.0;
+
+/// Process exit code used when the watchdog forces an exit because the painter loop is provably
+/// wedged. Distinct from `capture_wedge::CAPTURE_WEDGE_EXIT_CODE` (79) and the `#663`/self-heal
+/// codes (77/78) so `systemctl status`/journal forensics can always tell a painter-wedge exit
+/// apart from a capture-side wedge or a USB self-heal restart.
+pub const PAINTER_WEDGE_EXIT_CODE: i32 = 80;
+
+/// Build the CRITICAL, uniquely grep-able message the watchdog logs right before it exits the
+/// process. Pure string formatting so the exact wording is unit-tested here, mirroring
+/// `capture_wedge::capture_wedge_message`'s convention. Names #936, the DRM/KMS hypothesis, and the
+/// exact exit code so this event can never be confused with a `#945` capture wedge or a `#663`
+/// self-heal restart.
+pub fn painter_wedge_message(seconds_since_last_progress: f64, threshold_s: f64) -> String {
+    format!(
+        "CRITICAL #936: painter thread WEDGED — no frame painted in \
+         {seconds_since_last_progress:.1}s (>= {threshold_s:.1}s threshold); the process is alive \
+         (other threads keep running) but the DRM/KMS present() call is provably stuck — likely a \
+         kernel-level GPU/display hang (TASK_UNINTERRUPTIBLE / \"D state\"), which NO signal \
+         (including SIGKILL) can preempt until the blocking kernel call itself returns. Exiting \
+         now (code {PAINTER_WEDGE_EXIT_CODE}) so a supervisor (systemd Restart=always on \
+         cam2-painter.service, or the rig operator's own tooling) can recover it. See #936."
+    )
+}
 
 #[cfg(test)]
 mod tests {
