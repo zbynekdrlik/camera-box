@@ -522,7 +522,7 @@ main() {
             # differing paths so a genuine DRIFT is actionable, not just "two opaque SHAs differ" —
             # empty output here (unresolvable sha) simply means no DIFF= marker is added, and the
             # DRIFT message falls back to its pre-#949 wording.
-            local diff_paths="" diff_line
+            local diff_paths=""
             diff_paths="$(genlock_parity_diff_paths "$repo_root" "$sa" "$sb" "${inter[@]}" \
               | paste -sd, - 2>/dev/null || true)"
             if [ -n "$diff_paths" ]; then
