@@ -1111,6 +1111,69 @@ mod tests {
         assert_eq!(reassembled, serialize_qpsk_marker_log(&log, &params));
     }
 
+    // #936 — marker_coverage_overlaps_video_ticks / marker_coverage_gap_message /
+    // qpsk_marker_died_message. RED marker: none of these three exist yet -- proven by compile
+    // failure. Implemented in the immediately-following GREEN commit.
+
+    #[test]
+    fn marker_coverage_overlap_true_when_ranges_share_a_frame_id() {
+        let emit_log = vec![(0u8, 100u32, 0i64), (1, 13_500, 225_000_000_000)];
+        let video_ticks = vec![(13_000u32, 0.0f64), (13_600, 1.0)];
+        assert!(marker_coverage_overlaps_video_ticks(&emit_log, &video_ticks));
+    }
+
+    #[test]
+    fn marker_coverage_overlap_false_on_the_live_936_incident_shape() {
+        // Painter F (#936): marker log covered frame_ids ~[0, 13_500] (died after ~225s @ 60fps);
+        // the recording's video tick range was ~[97_200, 108_000] (started ~27 min into the same
+        // session, 24 min after the marker died) -- two disjoint slices of the SAME counter.
+        let emit_log = vec![(0u8, 0u32, 0i64), (1, 13_500, 225_000_000_000)];
+        let video_ticks = vec![(97_200u32, 1620.0f64), (108_000, 1800.0)];
+        assert!(!marker_coverage_overlaps_video_ticks(&emit_log, &video_ticks));
+    }
+
+    #[test]
+    fn marker_coverage_overlap_touching_boundaries_count_as_overlap() {
+        // Inclusive boundary: emit range ends exactly where the video range begins.
+        let emit_log = vec![(0u8, 0u32, 0i64), (1, 1000, 1)];
+        let video_ticks = vec![(1000u32, 0.0f64), (1100, 1.0)];
+        assert!(marker_coverage_overlaps_video_ticks(&emit_log, &video_ticks));
+    }
+
+    #[test]
+    fn marker_coverage_overlap_empty_video_ticks_never_overlaps() {
+        let emit_log = vec![(0u8, 0u32, 0i64)];
+        assert!(!marker_coverage_overlaps_video_ticks(&emit_log, &[]));
+    }
+
+    #[test]
+    fn marker_coverage_overlap_empty_emit_log_never_overlaps() {
+        let video_ticks = vec![(0u32, 0.0f64)];
+        assert!(!marker_coverage_overlaps_video_ticks(&[], &video_ticks));
+    }
+
+    #[test]
+    fn marker_coverage_gap_message_carries_the_ranges_and_936() {
+        let emit_log = vec![(0u8, 0u32, 0i64), (1, 13_500, 1)];
+        let video_ticks = vec![(97_200u32, 0.0f64), (108_000, 1.0)];
+        let msg = marker_coverage_gap_message(&emit_log, &video_ticks);
+        assert!(msg.contains("#936"));
+        assert!(msg.contains("REFUSING"));
+        assert!(msg.contains("0"));
+        assert!(msg.contains("13500"));
+        assert!(msg.contains("97200"));
+        assert!(msg.contains("108000"));
+    }
+
+    #[test]
+    fn qpsk_marker_died_message_carries_the_reason_and_936() {
+        let msg = qpsk_marker_died_message("ALSA writei after recover: Broken pipe");
+        assert!(msg.contains("#936"));
+        assert!(msg.contains("CRITICAL"));
+        assert!(msg.contains("ALSA writei after recover: Broken pipe"));
+        assert!(msg.to_lowercase().contains("marker"));
+    }
+
     #[test]
     fn crc4_roundtrip_matches_norihiro() {
         // Encoder (crc4) and decoder-check (crc4_check) must agree byte-for-byte with norihiro,
