@@ -115,6 +115,42 @@ fn imag_render_budget_call_is_strict_again_after_888_restore() {
     );
 }
 
+/// The `[4d/8]` step's own BANNER echo (printed at the top of the step, before ANY box is
+/// measured) must not lie about imag's strictness. The banner sits ~1760 chars BEFORE the
+/// `--box "strih=` anchor every other test in this file/`harness_imag_topology.rs` scopes its
+/// window from, so it was outside every existing assertion and stayed stale through the restore
+/// (2026-08-03 supervisor-found defect on PR #957): it still read
+/// `imag is measured but REPORT-ONLY (issue 888, temporary — see below)` even though the actual
+/// gate call below it was already restored to `exit 1`.
+#[test]
+fn banner_no_longer_advertises_imag_as_report_only_or_temporary() {
+    let s = read("scripts/recording-e2e.sh");
+    let banner_start = s
+        .find("[4d/8] #405/#406/#462 render-budget gate")
+        .expect("recording-e2e.sh must have the [4d/8] render-budget gate banner echo");
+    let line_end = s[banner_start..]
+        .find('\n')
+        .expect("the [4d/8] banner echo must be a single line ending in a newline");
+    let banner_line = &s[banner_start..(banner_start + line_end)];
+    let upper = banner_line.to_uppercase();
+    assert!(
+        !upper.contains("REPORT-ONLY") && !upper.contains("REPORT ONLY"),
+        "issue 888 (restored 2026-08-03): the [4d/8] banner must not advertise imag as \
+         report-only any more -- all three boxes (strih/stream/imag) are strict now. \
+         Got:\n{banner_line}"
+    );
+    assert!(
+        !banner_line.to_lowercase().contains("temporary"),
+        "issue 888 (restored 2026-08-03): the [4d/8] banner must not call imag's strictness \
+         temporary any more. Got:\n{banner_line}"
+    );
+    assert!(
+        !banner_line.to_lowercase().contains("non-aborting"),
+        "issue 888 (restored 2026-08-03): the [4d/8] banner must not describe imag's term as \
+         non-aborting under any wording. Got:\n{banner_line}"
+    );
+}
+
 // The `strih_stream_render_budget_call_stays_strict_and_excludes_imag` test above still proves
 // the split itself (imag measured by its OWN call, not re-merged into the strih/stream one) — no
 // separate test needed here; restoring strictness only changes imag's OWN call's abort behavior.
