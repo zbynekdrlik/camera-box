@@ -1616,15 +1616,9 @@ mod vendored_source {
              log line anymore."
         );
 
-        let c = squish(&vendor_file(ASRC_COMPENSATOR_C));
-        assert!(
-            c.contains("if (fabs(instantaneous_ppm) > ASRC_MAX_SANE_INSTANTANEOUS_PPM) {")
-                && c.contains("c->starved_block_count++;"),
-            "{ASRC_COMPENSATOR_C}: #960 — asrc_compensator_compensate no longer rejects a \
-             starved/bursting block; it would fold garbage back into the EMA and rail the servo, \
-             exactly the #960 defect."
-        );
-
+        // issue #962: the rejection check now gates the WINDOWED (duration-weighted-summed) ppm
+        // value, not a single block's own instantaneous ratio -- see
+        // asrc_starvation_guard_gates_the_windowed_ppm_962 below for that literal-text anchor.
         // The vendored caller (obs-source.c) must actually surface the starved state in its
         // telemetry log line, not just compute it and drop it on the floor.
         let src = squish(&vendor_file(OBS_SOURCE));
@@ -1636,6 +1630,38 @@ mod vendored_source {
             "{OBS_SOURCE}: #960 — the asrc: telemetry log line no longer reports \
              starved_blocks=N; a starved source would silently poison the log again with no \
              indication anything was rejected."
+        );
+    }
+
+    #[test]
+    fn asrc_starvation_guard_gates_the_windowed_ppm_962() {
+        // issue #962: the #960 starvation guard must gate the WINDOWED (duration-weighted-summed)
+        // ppm value, not a single block's own instantaneous ratio -- per-block instantaneous ppm
+        // is unmeasurable noise for small, bursty-delivery blocks (the live mbc incident). A
+        // `git subtree pull` (#44) or hand-edit reverting to a per-block gate would silently
+        // reintroduce the "small blocks 100% starved-rejected, servo neutral" #962 defect.
+        let h = squish(&vendor_file(ASRC_COMPENSATOR_H));
+        assert!(
+            h.contains("#define ASRC_WINDOW_S 1.0"),
+            "{ASRC_COMPENSATOR_H}: #962 — the measurement-window duration constant \
+             (ASRC_WINDOW_S) is missing or its value changed; re-apply/re-sync with \
+             src/asrc_bench.rs's WINDOW_S."
+        );
+        assert!(
+            h.contains("double window_raw_s;")
+                && h.contains("double window_master_s;")
+                && h.contains("uint32_t window_block_count;"),
+            "{ASRC_COMPENSATOR_H}: #962 — the window-accumulator fields (window_raw_s/\
+             window_master_s/window_block_count) are missing from struct asrc_compensator."
+        );
+
+        let c = squish(&vendor_file(ASRC_COMPENSATOR_C));
+        assert!(
+            c.contains("if (fabs(window_ppm) > ASRC_MAX_SANE_INSTANTANEOUS_PPM) {")
+                && c.contains("c->starved_block_count += window_block_count;"),
+            "{ASRC_COMPENSATOR_C}: #962 — asrc_compensator_compensate no longer gates the \
+             starvation ceiling on the WINDOWED ppm value; it would either fold small-bursty-block \
+             garbage back into the EMA (no windowing at all) or reintroduce the #960 defect."
         );
     }
 

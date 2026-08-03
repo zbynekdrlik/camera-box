@@ -170,15 +170,34 @@ jobs:
           if ($h -notmatch [regex]::Escape('uint32_t starved_block_count;')) {
             Write-Error "asrc-compensator.h: #960 starved_block_count telemetry field missing from struct asrc_compensator"; exit 1
           }
-          $c = (Get-Content "vendor/obs-studio/libobs/media-io/asrc-compensator.c" -Raw) -replace '\s+', ' '
-          if ($c -notmatch [regex]::Escape('if (fabs(instantaneous_ppm) > ASRC_MAX_SANE_INSTANTANEOUS_PPM) {')) {
-            Write-Error "asrc-compensator.c: #960 starvation guard missing — a starved block would be folded into the EMA and rail the servo again"; exit 1
-          }
           $src = (Get-Content "vendor/obs-studio/libobs/obs-source.c" -Raw) -replace '\s+', ' '
           if ($src -notmatch [regex]::Escape('starved_blocks=%u')) {
             Write-Error "obs-source.c: #960 asrc: telemetry log line no longer reports starved_blocks=N"; exit 1
           }
           Write-Output "ASRC starvation guard present (#960 sanity ceiling + rejection branch + telemetry) — OK"
+
+      # #962: the #960 starvation ceiling must gate the WINDOWED (duration-weighted-summed) ppm
+      # value, not a single block's own instantaneous ratio — per-block instantaneous ppm is
+      # unmeasurable noise for small, bursty-delivery blocks (the live mbc incident: 128-sample
+      # Dante VSC blocks, 100% starved-rejected under the pre-#962 per-block guard). Mirrors the
+      # canonical Linux-CI guard
+      # tests/genlock_preload.rs::vendored_source::asrc_starvation_guard_gates_the_windowed_ppm_962
+      # (probe-gated, can't compile on this runner). Keep both in lock-step.
+      - name: Assert ASRC estimator windows its measurement before gating (#962)
+        shell: pwsh
+        run: |
+          $h = (Get-Content "vendor/obs-studio/libobs/media-io/asrc-compensator.h" -Raw) -replace '\s+', ' '
+          if ($h -notmatch [regex]::Escape('#define ASRC_WINDOW_S 1.0')) {
+            Write-Error "asrc-compensator.h: #962 measurement-window duration constant (ASRC_WINDOW_S) missing or changed"; exit 1
+          }
+          if ($h -notmatch [regex]::Escape('double window_raw_s;') -or $h -notmatch [regex]::Escape('double window_master_s;') -or $h -notmatch [regex]::Escape('uint32_t window_block_count;')) {
+            Write-Error "asrc-compensator.h: #962 window-accumulator fields missing from struct asrc_compensator"; exit 1
+          }
+          $c = (Get-Content "vendor/obs-studio/libobs/media-io/asrc-compensator.c" -Raw) -replace '\s+', ' '
+          if ($c -notmatch [regex]::Escape('if (fabs(window_ppm) > ASRC_MAX_SANE_INSTANTANEOUS_PPM) {') -or $c -notmatch [regex]::Escape('c->starved_block_count += window_block_count;')) {
+            Write-Error "asrc-compensator.c: #962 starvation ceiling no longer gates the WINDOWED ppm value"; exit 1
+          }
+          Write-Output "ASRC windowed measurement present (#962 window constant + accumulator fields + windowed gate) — OK"
 
       # #942: the A/V-sync dock's in-process lock corrector must be MONITOR-ONLY by build
       # default — the E2E gate (scripts/av_sync_calibrate.py --apply) is the only CONTINUOUS/

@@ -227,12 +227,12 @@ pub const MIN_LOCK_S: f64 = 5.0;
 /// caller should be trusted alone to have already clamped.
 pub const OUTER_BIAS_MAX_PPM: f64 = 10.0;
 
-/// issue #960: sanity ceiling on a single block's `instantaneous_ppm`, in ppm — above this, the
-/// block carries no real timing information (a starved or bursting audio source, e.g. a
-/// muted/idle device path delivering near-zero samples) and must be REJECTED rather than folded
-/// into the EMA. Live incident: a starved source (~26.24% of the samples its elapsed wall-clock
-/// window implies) produced `instantaneous_ppm ≈ -737,600`, and with no gate the EMA converged
-/// toward it and the servo railed at `-MAX_PPM` permanently.
+/// issue #960: sanity ceiling on the (issue #962: WINDOWED, duration-weighted-summed) measured
+/// ppm, in ppm — above this, the measurement carries no real timing information (a starved or
+/// bursting audio source, e.g. a muted/idle device path delivering near-zero samples) and must be
+/// REJECTED rather than folded into the EMA. Live incident: a starved source (~26.24% of the
+/// samples its elapsed wall-clock window implies) produced a measured ppm of ~-737,600, and with
+/// no gate the EMA converged toward it and the servo railed at `-MAX_PPM` permanently.
 ///
 /// 100,000 ppm (10%) is chosen to clear three boundaries with margin: (1) ~333x (roughly 2.5
 /// orders of magnitude) above `MAX_PPM` (300, itself already "an order of magnitude above any
@@ -244,6 +244,33 @@ pub const OUTER_BIAS_MAX_PPM: f64 = 10.0;
 /// clamp/slew math, not this guard; (3) more than 7x below the observed live defect (737,600
 /// ppm), so the reported bug is caught with comfortable margin.
 pub const MAX_SANE_INSTANTANEOUS_PPM: f64 = 100_000.0;
+
+/// issue #962: duration of the measurement WINDOW, in seconds of master-clock time, over which
+/// `raw_advance_s` and `master_block_s` are duration-weighted SUMMED before computing a single
+/// windowed ppm value to feed the EMA (and to gate against `MAX_SANE_INSTANTANEOUS_PPM`) — see the
+/// module's #962 design comment (`gh issue view 962 --comments`) for the full mechanism this
+/// fixes (per-block instantaneous ppm is unmeasurable noise for small, bursty-delivery blocks,
+/// e.g. mbc's 128-sample Dante VSC blocks, 2.667ms each).
+///
+/// `1.0` second is chosen so that: (1) it spans ~375 of mbc's 2.667ms blocks — ample
+/// duration-weighted averaging for arrival-timing jitter to cancel completely (summing physical
+/// durations first is EXACT regardless of how unevenly the underlying blocks are chunked, unlike
+/// dividing one block's own small, individually-noisy raw/master pair); (2) it is small relative
+/// to `TIME_CONSTANT_S` (20s), so it barely perturbs the EMA's own convergence — the time-based
+/// EMA discretization `alpha = 1 - exp(-dt/tau)` is mathematically EXACT for any `dt` as long as
+/// the driving ratio is CONSTANT over that `dt`: for that idealized (noise-free) comparison,
+/// windowed sampling produces an IDENTICAL estimator trajectory to continuous per-block sampling
+/// at the same wall-clock horizons (proven by the existing gate/convergence tests below, which
+/// feed exactly this kind of constant-ppm synthetic clock and pass bit-for-bit either way). The
+/// REAL small-block case (a genuinely constant true drift, sampled through noisy/bursty block
+/// deliveries) is a close approximation rather than a literal identity — but an extremely tight
+/// one here, since the window is only `WINDOW_S / TIME_CONSTANT_S = 0.05` of the EMA's own time
+/// constant; (3) it degenerates EXACTLY to the pre-#962 per-block behavior for any call whose OWN
+/// `master_block_s` already reaches 1.0s (the window closes on that single call, the windowed ppm
+/// reduces algebraically to that block's own instantaneous ratio) — every existing servo test in
+/// this file already calls `compensate()` with blocks that sum to exactly 1.0s per window, so none
+/// of them need their assertions changed.
+pub const WINDOW_S: f64 = 1.0;
 
 /// The REAL per-source ASRC servo issue #803 ports into vendored libobs
 /// (`vendor/obs-studio/libobs/media-io/asrc-compensator.c` — kept a line-by-line equivalent
@@ -257,9 +284,16 @@ pub const MAX_SANE_INSTANTANEOUS_PPM: f64 = 100_000.0;
 /// - a slew limiter (`MAX_SLEW_PPM_PER_S`) on the APPLIED correction, independent of how fast the
 ///   raw estimate itself moves, so a single noisy measurement can never produce an audible step;
 /// - a minimum-lock startup delay (`MIN_LOCK_S`) before any correction is applied at all;
-/// - a starvation/activity guard (`MAX_SANE_INSTANTANEOUS_PPM`, issue #960) rejecting a block
-///   whose instantaneous ppm is not a plausible clock-drift measurement at all (a starved/bursting
-///   source), holding state rather than folding garbage into the estimate.
+/// - a starvation/activity guard (`MAX_SANE_INSTANTANEOUS_PPM`, issue #960) rejecting a
+///   MEASUREMENT whose ppm is not a plausible clock-drift value at all (a starved/bursting
+///   source), holding state rather than folding garbage into the estimate;
+/// - issue #962: WINDOWED, duration-weighted measurement — `raw_advance_s`/`master_block_s` are
+///   summed across consecutive `compensate()` calls into a running window (see [`WINDOW_S`]) and
+///   ONE ppm value is computed from the sums (not a per-block ratio) each time the window closes,
+///   which is what the EMA and the #960 ceiling above actually see. This is what makes small,
+///   bursty-delivery blocks (e.g. mbc's 128-sample Dante VSC blocks) measurable at all — dividing
+///   one block's own tiny raw/master pair amplifies arrival-timing jitter into an implausible
+///   instantaneous ratio, but summing durations first cancels that jitter exactly.
 ///
 /// Validated against the SAME `simulate_offset_trace_ms` gate issue #804 built, per that module's
 /// own instruction not to invent a second, unrelated proof.
@@ -270,7 +304,9 @@ pub struct RealtimeAsrcCompensator {
     /// The correction actually being applied right now (post-clamp, post-slew), in ppm.
     applied_ppm: f64,
     /// Cumulative master-clock time observed since construction — gates the `MIN_LOCK_S` startup
-    /// delay.
+    /// delay. issue #962: only accrues on an ACCEPTED window close (see [`Self::compensate`]),
+    /// exactly mirroring the pre-#962 "starved data grants no lock credit" invariant, now applied
+    /// at window instead of per-block granularity.
     elapsed_lock_s: f64,
     /// The issue #806 OUTER-loop bias, in ppm — folded additively into `estimated_ppm` before the
     /// `MAX_PPM` clamp (see [`Self::compensate`]). Zero (no-op) until something calls
@@ -280,8 +316,21 @@ pub struct RealtimeAsrcCompensator {
     /// [`Self::compensate`]) — exposed for tests/telemetry, mirrors the C side's periodic ~60s
     /// log line reporting `starved_blocks=N`. Zero for a fresh compensator; never decreases on
     /// the Rust side (the C mirror resets its own copy on each telemetry read — a C-only,
-    /// logging-cadence concern this bench has no equivalent of).
+    /// logging-cadence concern this bench has no equivalent of). issue #962: on a rejected WINDOW
+    /// close, incremented by `window_block_count` (every block that fed the rejected window),
+    /// preserving the pre-#962 telemetry meaning at window granularity.
     starved_block_count: u32,
+    /// issue #962: duration-weighted sum of `raw_advance_s` observed in the CURRENT (not yet
+    /// closed) measurement window.
+    window_raw_s: f64,
+    /// issue #962: duration-weighted sum of `master_block_s` observed in the CURRENT window —
+    /// once this reaches [`WINDOW_S`], the window closes: a single windowed ppm is computed from
+    /// `window_raw_s`/`window_master_s`, fed to the EMA (or rejected under the #960 ceiling), and
+    /// both sums reset to 0.0 for the next window.
+    window_master_s: f64,
+    /// issue #962: count of individual audio blocks folded into the CURRENT (not yet closed)
+    /// window — reset to 0 alongside the sums above whenever the window closes.
+    window_block_count: u32,
 }
 
 impl RealtimeAsrcCompensator {
@@ -294,6 +343,9 @@ impl RealtimeAsrcCompensator {
             elapsed_lock_s: 0.0,
             outer_bias_ppm: 0.0,
             starved_block_count: 0,
+            window_raw_s: 0.0,
+            window_master_s: 0.0,
+            window_block_count: 0,
         }
     }
 
@@ -353,31 +405,56 @@ impl AsrcCompensator for RealtimeAsrcCompensator {
             return raw_advance_s;
         }
 
-        // This block's instantaneous rate ratio, straight from the observation — exactly the
-        // "delivered samples / wall-clock window" measurement issue #803 specifies, using the
-        // SAME master-clock basis the video FIFO release already uses (genlock_wall_now_ns() on
-        // the C side).
-        let instantaneous_ppm = (raw_advance_s / master_block_s - 1.0) * 1_000_000.0;
+        // issue #962: accumulate this block's DURATION-WEIGHTED contribution into the current
+        // measurement window -- summing first (rather than ratio-ing this one block alone) is
+        // what cancels arrival-timing jitter: a genuinely bursty-but-otherwise-healthy source
+        // (e.g. mbc's 128-sample Dante VSC blocks) delivers real samples at an uneven wall-clock
+        // cadence, but the SUM of delivered-sample-duration over the SUM of elapsed wall time
+        // still converges to the source's true clock ratio, regardless of how unevenly the
+        // underlying blocks were chunked. See the module's #962 design comment / WINDOW_S doc
+        // comment for the full mechanism.
+        self.window_raw_s += raw_advance_s;
+        self.window_master_s += master_block_s;
+        self.window_block_count += 1;
 
-        // issue #960: a block whose instantaneous ppm magnitude clears the sanity ceiling carries
-        // no real timing information (starved/bursting source, not clock drift) — REJECT it: no
-        // EMA update, no elapsed_lock_s credit (a garbage block must not count toward "the servo
-        // has observed enough real data to trust its estimate"), no slew step. HOLD whatever
-        // applied_ppm was already in effect and keep applying just that unchanged correction to
-        // this callback's real audio (the samples themselves are real even when the elapsed-time
-        // basis used to measure them is garbage).
-        if instantaneous_ppm.abs() > MAX_SANE_INSTANTANEOUS_PPM {
-            self.starved_block_count = self.starved_block_count.saturating_add(1);
-            return self.corrected_advance(raw_advance_s);
+        if self.window_master_s >= WINDOW_S {
+            // This window closes -- compute ONE windowed ppm value from the duration-weighted
+            // sums (not this block's own instantaneous ratio) and feed THAT into the EMA/
+            // lock-credit logic below, exactly the shape the pre-#962 code applied per-block.
+            let window_ppm = (self.window_raw_s / self.window_master_s - 1.0) * 1_000_000.0;
+            let window_master_s = self.window_master_s;
+            let window_block_count = self.window_block_count;
+            self.window_raw_s = 0.0;
+            self.window_master_s = 0.0;
+            self.window_block_count = 0;
+
+            // issue #960 (now applied to the WINDOW value, not a single block's instantaneous
+            // ratio -- issue #962): a window whose aggregate ppm magnitude clears the sanity
+            // ceiling carries no real timing information (the source was genuinely
+            // starved/bursting for MOST of this window, not just jittery in how it delivered
+            // otherwise-real samples) -- REJECT the whole window: no EMA update, no
+            // elapsed_lock_s credit, no target recompute, NO SLEW STEP -- HOLD applied_ppm at
+            // EXACTLY its pre-rejection value (even if it was still mid-transition toward an
+            // already-decided, legitimate target from an earlier accepted window; a garbage
+            // window must not be allowed to continue advancing that transition either).
+            // Mirrors the pre-#962 per-block early-return exactly, now at window granularity.
+            // Attribute every block that fed this window to starved_block_count, preserving the
+            // pre-#962 telemetry meaning ("how many audio blocks were part of an unusable
+            // measurement") at window granularity.
+            if window_ppm.abs() > MAX_SANE_INSTANTANEOUS_PPM {
+                self.starved_block_count =
+                    self.starved_block_count.saturating_add(window_block_count);
+                return self.corrected_advance(raw_advance_s);
+            }
+
+            // TIME-based EMA smoothing factor over the WINDOW's real duration -- mathematically
+            // identical to updating per-block with the same total elapsed time (the
+            // discretization alpha = 1 - exp(-dt/tau) is exact for a piecewise-constant driving
+            // value; see WINDOW_S's own doc comment).
+            let alpha = 1.0 - (-window_master_s / TIME_CONSTANT_S).exp();
+            self.estimated_ppm = alpha * window_ppm + (1.0 - alpha) * self.estimated_ppm;
+            self.elapsed_lock_s += window_master_s;
         }
-
-        // TIME-based EMA smoothing factor: alpha = 1 - exp(-block/tau), so convergence speed is
-        // independent of how the caller chunks audio callbacks (a real device may deliver
-        // anywhere from a few ms to tens of ms per callback, unlike this bench's fixed BLOCK_S).
-        let alpha = 1.0 - (-master_block_s / TIME_CONSTANT_S).exp();
-        self.estimated_ppm = alpha * instantaneous_ppm + (1.0 - alpha) * self.estimated_ppm;
-
-        self.elapsed_lock_s += master_block_s;
 
         // Default-safe: no lock yet -> target zero compensation, never guess from a
         // still-converging estimate (issue #806: the outer-loop bias is folded in HERE, so it is
@@ -874,6 +951,157 @@ mod tests {
             above.starved_block_count(),
             1,
             "expected a block just ABOVE MAX_SANE_INSTANTANEOUS_PPM to be rejected as starved"
+        );
+    }
+
+    // ---- #962: per-block instantaneous ppm is unmeasurable noise for small, bursty-delivery
+    // blocks (the live mbc incident: 128-sample Dante VSC blocks, 100% starved-rejected under the
+    // pre-#962 per-block guard). These are RED against the CURRENT (per-block) estimator -- see
+    // the module's #962 design comment (`gh issue view 962 --comments`) for the full mechanism. --
+
+    /// Feed `n_pairs` PAIRS of tiny (128-sample @ 48kHz, the live mbc Dante-VSC block size) blocks
+    /// into `compensator`, each pair sharing a fixed total wall-clock duration corresponding to
+    /// `true_ppm` but split UNEVENLY (10%/90%) between the two blocks -- reproducing REAL bursty
+    /// delivery (some blocks arrive almost back-to-back, the next "catches up"), while the pair's
+    /// AGGREGATE wall time still correctly totals what `true_ppm` implies. `raw_advance_s` is the
+    /// FIXED per-block sample-count-stamped duration for every block (OBS stamps sample count 1:1
+    /// -- drift never shows up per block, only in how much real wall time it took to deliver a
+    /// fixed sample count); the injected ppm and the burst/catch-up jitter both live entirely in
+    /// `master_block_s`. This is exactly the #962 live mechanism: dividing two small, individually
+    /// jittery numbers (one block's own raw_advance_s / master_block_s) amplifies the jitter into
+    /// an implausible instantaneous ppm, even though the AGGREGATE (summed) ratio over many blocks
+    /// correctly reflects the true, small underlying drift.
+    fn feed_bursty_small_blocks(
+        compensator: &mut RealtimeAsrcCompensator,
+        true_ppm: f64,
+        n_pairs: u32,
+    ) {
+        const NOMINAL_BLOCK_S: f64 = 128.0 / 48_000.0; // #962: the live mbc Dante-VSC block size
+        const SMALL_SPLIT: f64 = 0.1; // 10%/90% burst/catch-up wall-clock split
+        let true_ratio = 1.0 + true_ppm / 1_000_000.0;
+        let pair_master_s = 2.0 * NOMINAL_BLOCK_S / true_ratio;
+        for _ in 0..n_pairs {
+            let _ = compensator.compensate(NOMINAL_BLOCK_S, pair_master_s * SMALL_SPLIT);
+            let _ = compensator.compensate(NOMINAL_BLOCK_S, pair_master_s * (1.0 - SMALL_SPLIT));
+        }
+    }
+
+    /// THE gate for issue #962 itself: a small ("a few ppm") TRUE drift, delivered as tiny bursty
+    /// blocks matching the live mbc incident exactly (128 samples @ 48kHz, uneven wall-clock
+    /// delivery timing per block), must be MEASURED -- not just safely ignored -- by the
+    /// estimator. Runs long enough (~2min) for convergence per the SAME bound
+    /// `estimator_converges_within_the_tickets_own_bounds` already established. RED against the
+    /// current per-block estimator: every individual block's own instantaneous ppm (~+-4,000,000
+    /// from the 10%/90% split alone, regardless of the injected true ppm) wildly clears the #960
+    /// ceiling, so the current code rejects essentially every block and never measures the true
+    /// drift at all -- exactly the live mbc defect (`starved_blocks=22500/60s` = 100%).
+    #[test]
+    fn windowed_estimator_measures_a_small_drift_from_tiny_bursty_blocks_962() {
+        const TRUE_PPM: f64 = 5.0; // "a few ppm" per issue #962's own framing
+        let mut compensator = RealtimeAsrcCompensator::new();
+        // ~2 minutes of pairs (pair wall time ~= 2*128/48000 =~ 5.333ms at this small ppm) --
+        // trivial deterministic loop, no real sleep.
+        let pair_wall_s = 2.0 * (128.0 / 48_000.0) / (1.0 + TRUE_PPM / 1_000_000.0);
+        let n_pairs = (120.0 / pair_wall_s).ceil() as u32;
+        feed_bursty_small_blocks(&mut compensator, TRUE_PPM, n_pairs);
+
+        assert_eq!(
+            compensator.starved_block_count(),
+            0,
+            "expected zero blocks flagged as starved -- the AGGREGATE ppm from real (if unevenly \
+             delivered) audio is nowhere near the #960 sanity ceiling, only each individual \
+             block's own instantaneous ratio is, got {} starved blocks out of {} fed",
+            compensator.starved_block_count(),
+            n_pairs * 2
+        );
+        let err = (compensator.estimated_ppm() - TRUE_PPM).abs();
+        assert!(
+            err < 1.0,
+            "expected the estimator to measure the true {TRUE_PPM}ppm drift from tiny bursty \
+             (mbc-sized) blocks within 1ppm after ~2min, got estimated_ppm={} (err={err}ppm)",
+            compensator.estimated_ppm()
+        );
+    }
+
+    /// The #960 sanity ceiling must still catch a GENUINELY starved source (not just jittery
+    /// delivery of otherwise-real samples) even when it arrives as tiny blocks -- the exact live
+    /// #960 incident (a source delivering ~26.24% of the samples its elapsed wall-clock window
+    /// implies, i.e. instantaneous ppm ~=-737,600) must still be rejected, whether the source
+    /// uses large paced blocks (already proven by the three #960 tests above) or tiny bursty
+    /// ones. RED against the current per-block estimator for the same reason as the test above:
+    /// the healthy baseline phase alone already gets ~100% rejected by 10%/90%-split jitter, so
+    /// `starved_block_count()` is nonzero before the deliberately-starved phase even starts.
+    #[test]
+    fn windowed_estimator_still_rejects_a_genuinely_starved_tiny_block_source_962() {
+        let mut compensator = RealtimeAsrcCompensator::new();
+        // Converge on a healthy small-block source first (reuses the #962 fixture at 0 true ppm).
+        // ~400 pairs * ~5.33ms/pair =~ 2.13s -- below MIN_LOCK_S (5s); this phase only needs to
+        // establish "no spurious starvation on healthy small blocks", not reach lock.
+        feed_bursty_small_blocks(&mut compensator, 0.0, 400);
+        assert_eq!(
+            compensator.starved_block_count(),
+            0,
+            "expected a healthy (if unevenly-delivered) tiny-block source to never be flagged as \
+             starved, got {} starved blocks",
+            compensator.starved_block_count()
+        );
+
+        // Now genuinely starved: #960's own -737,600ppm case, still as tiny blocks -- this must
+        // be rejected, and the (converged, ~0) estimate must not move.
+        let before = compensator.estimated_ppm();
+        feed_bursty_small_blocks(&mut compensator, -737_600.0, 400);
+        assert_eq!(
+            compensator.estimated_ppm(),
+            before,
+            "expected a genuinely starved tiny-block source to be rejected, leaving the estimate \
+             exactly where it was ({before}), got {}",
+            compensator.estimated_ppm()
+        );
+        assert!(
+            compensator.starved_block_count() > 0,
+            "expected the genuinely starved window(s) to be counted as starved"
+        );
+    }
+
+    /// #962 review finding: a REJECTED window must HOLD applied_ppm bit-exact -- including when
+    /// the servo is still mid-SLEW toward an already-decided (legitimate, pre-starvation) target,
+    /// not just when it has already converged (every other test above only exercises the case
+    /// where applied_ppm is ALREADY at target when starvation hits, which masks this). Mirrors
+    /// the pre-#962 per-block early-return exactly, now at window granularity: a starved
+    /// measurement must not even continue advancing an already-approved slew transition.
+    #[test]
+    fn rejected_window_holds_applied_ppm_even_mid_slew_962() {
+        let mut compensator = RealtimeAsrcCompensator::new();
+        // 5 x 1.0s blocks of an extreme (10,000ppm) clock -- locks past MIN_LOCK_S on the 5th
+        // call (elapsed_lock_s reaches exactly 5.0 that same call) with an EMA estimate already
+        // far past MAX_PPM, so the target clamps to 300 immediately -- but the slew limiter
+        // (5ppm/s) only lets applied_ppm reach 5.0 in that one call, nowhere near the 300 target.
+        // Genuinely mid-slew.
+        let extreme_clock = DriftingAudioClock::new(10_000.0);
+        for _ in 0..5 {
+            let raw = extreme_clock.raw_advance(1.0);
+            let _ = compensator.compensate(raw, 1.0);
+        }
+        let applied_before = compensator.applied_ppm();
+        assert!(
+            applied_before > 0.0 && applied_before < 300.0,
+            "expected applied_ppm to be genuinely mid-slew (0 < applied < 300 target) after 5 \
+             locked calls, got {applied_before} -- test setup assumption broken"
+        );
+
+        // ONE starved window (the #960 live incident value) -- must be REJECTED and must NOT let
+        // the slew step continue advancing toward the (unaffected) target.
+        let starved = DriftingAudioClock::new(-737_600.0);
+        let raw = starved.raw_advance(1.0);
+        let _ = compensator.compensate(raw, 1.0);
+
+        assert_eq!(
+            compensator.applied_ppm(),
+            applied_before,
+            "expected a REJECTED window to HOLD applied_ppm exactly, even mid-slew toward an \
+             already-decided target -- got applied_ppm={} (was {applied_before}), meaning the \
+             starved window was allowed to continue advancing an in-progress slew transition",
+            compensator.applied_ppm()
         );
     }
 }
