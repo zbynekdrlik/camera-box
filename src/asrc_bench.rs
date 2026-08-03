@@ -1050,4 +1050,46 @@ mod tests {
             "expected the genuinely starved window(s) to be counted as starved"
         );
     }
+
+    /// #962 review finding: a REJECTED window must HOLD applied_ppm bit-exact -- including when
+    /// the servo is still mid-SLEW toward an already-decided (legitimate, pre-starvation) target,
+    /// not just when it has already converged (every other test above only exercises the case
+    /// where applied_ppm is ALREADY at target when starvation hits, which masks this). Mirrors
+    /// the pre-#962 per-block early-return exactly, now at window granularity: a starved
+    /// measurement must not even continue advancing an already-approved slew transition.
+    #[test]
+    fn rejected_window_holds_applied_ppm_even_mid_slew_962() {
+        let mut compensator = RealtimeAsrcCompensator::new();
+        // 5 x 1.0s blocks of an extreme (10,000ppm) clock -- locks past MIN_LOCK_S on the 5th
+        // call (elapsed_lock_s reaches exactly 5.0 that same call) with an EMA estimate already
+        // far past MAX_PPM, so the target clamps to 300 immediately -- but the slew limiter
+        // (5ppm/s) only lets applied_ppm reach 5.0 in that one call, nowhere near the 300 target.
+        // Genuinely mid-slew.
+        let extreme_clock = DriftingAudioClock::new(10_000.0);
+        for _ in 0..5 {
+            let raw = extreme_clock.raw_advance(1.0);
+            let _ = compensator.compensate(raw, 1.0);
+        }
+        let applied_before = compensator.applied_ppm();
+        assert!(
+            applied_before > 0.0 && applied_before < 300.0,
+            "expected applied_ppm to be genuinely mid-slew (0 < applied < 300 target) after 5 \
+             locked calls, got {applied_before} -- test setup assumption broken"
+        );
+
+        // ONE starved window (the #960 live incident value) -- must be REJECTED and must NOT let
+        // the slew step continue advancing toward the (unaffected) target.
+        let starved = DriftingAudioClock::new(-737_600.0);
+        let raw = starved.raw_advance(1.0);
+        let _ = compensator.compensate(raw, 1.0);
+
+        assert_eq!(
+            compensator.applied_ppm(),
+            applied_before,
+            "expected a REJECTED window to HOLD applied_ppm exactly, even mid-slew toward an \
+             already-decided target -- got applied_ppm={} (was {applied_before}), meaning the \
+             starved window was allowed to continue advancing an in-progress slew transition",
+            compensator.applied_ppm()
+        );
+    }
 }
