@@ -1346,7 +1346,14 @@ static void st_raw_audio_camera_box(struct sync_test_output *st, struct audio_da
 						/* #942 -- monitor-only: decide() computed a real correction, but the
 						 * gate is the sole writer, so this is DISPLAYED as a suggestion and
 						 * never applied -- no cb_apply_lock_latency_ms(), no rebase() (rebase
-						 * assumes a real actuator move happened, which this is not). */
+						 * assumes a real actuator move happened, which this is not). decide()
+						 * only returns apply=true when its clamped target differs from the
+						 * CURRENT actuator value (a value pinned exactly at a rail always
+						 * clamps back to itself -- Hold), so reaching here means we are not
+						 * currently stuck at a rail; reset the dedup flag the same way the
+						 * write branch above does, so a LATER genuine rail-pinned state still
+						 * gets its own fresh warning. */
+						st->cb_rail_pinned_logged = false;
 						blog(LOG_INFO,
 						     "av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src %d "
 						     "-> %dms (measured offset=%.1fms) [monitor-only -- #942 gate is "
