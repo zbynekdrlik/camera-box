@@ -39,6 +39,14 @@ pub type QpskMarkerLog = Vec<(u8, u32, i64)>;
 pub struct QpskEmitter {
     handle: JoinHandle<()>,
     log: Arc<Mutex<QpskMarkerLog>>,
+    /// #936: `Some(reason)` the instant `run_emit` returns `Err` (the loop's `while
+    /// !stop.load(...)` condition means an early return can ONLY happen via the `?` on a write
+    /// failure — a clean shutdown always returns `Ok(())` after `stop` becomes true). `None` while
+    /// still running OR after a clean stop-triggered exit. The caller's control loop
+    /// (`probe::run::run_paint_only`) polls [`Self::death_reason`] to fail the WHOLE run loudly
+    /// the instant the marker dies, instead of silently completing the full duration on a
+    /// truncated marker log (script-failure-policy).
+    died: Arc<Mutex<Option<String>>>,
 }
 
 impl QpskEmitter {
@@ -56,6 +64,8 @@ impl QpskEmitter {
     ) -> Result<QpskEmitter> {
         let log = Arc::new(Mutex::new(Vec::new()));
         let log_thread = log.clone();
+        let died = Arc::new(Mutex::new(None));
+        let died_thread = died.clone();
         // Open before the thread so a bad device fails the run loudly (not silently in a thread).
         let pcm = open_playback(&device, params.sample_rate)?;
         // #431: create/truncate the incremental marker-log file (header only) NOW, synchronously,
@@ -87,10 +97,23 @@ impl QpskEmitter {
                 &log_thread,
                 log_file,
             ) {
-                eprintln!("[qpsk-marker] emit thread error: {e:#}");
+                let msg = format!("{e:#}");
+                eprintln!("[qpsk-marker] emit thread error: {msg}");
+                // #936: record the death reason where the caller's control loop can see it — the
+                // eprintln! above alone never reached run_paint_only, which is exactly how three
+                // independent live sessions died silently mid-run while the painter kept painting.
+                *died_thread.lock().unwrap() = Some(msg);
             }
         });
-        Ok(QpskEmitter { handle, log })
+        Ok(QpskEmitter { handle, log, died })
+    }
+
+    /// #936: `Some(reason)` iff the emit loop died before an external `stop` request (an
+    /// unrecoverable ALSA write failure) — `None` while still alive or after a clean
+    /// stop-triggered exit. Poll this from the caller's control loop to catch a silent marker
+    /// death mid-run instead of only finding out at the final `join()`.
+    pub fn death_reason(&self) -> Option<String> {
+        self.died.lock().unwrap().clone()
     }
 
     pub fn join(self) -> QpskMarkerLog {

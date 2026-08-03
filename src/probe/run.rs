@@ -106,11 +106,61 @@ pub fn default_paint_fps(
     }
 }
 
+/// #936: spawn the painter-wedge watchdog thread (see `crate::painter_wedge`'s module doc) —
+/// polls `heartbeat` (stamped by `run_painter` after every successful frame) and forces the
+/// process to exit loudly the moment it goes stale, because a genuine DRM/KMS kernel hang can
+/// park the painter thread in an uninterruptible wait that no signal (not even SIGKILL) can
+/// preempt — mirrors `src/main.rs`'s #945 capture-wedge watchdog exactly. The returned thread is
+/// deliberately never joined by the caller: its own loop breaks cleanly once `stop` is set
+/// (normal shutdown), so it is safe to let it run detached until then.
+fn spawn_painter_wedge_watchdog(heartbeat: Arc<AtomicU64>, stop: Arc<AtomicBool>, start: Instant) {
+    std::thread::Builder::new()
+        .name("painter-wedge-watchdog".into())
+        .spawn(move || {
+            // Poll well inside the wedge threshold so the watchdog itself can never add more
+            // than one poll interval of detection latency.
+            let poll_interval = Duration::from_millis(500);
+            loop {
+                std::thread::sleep(poll_interval);
+                if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    break; // normal shutdown in progress -- never misreport as a wedge
+                }
+                let now_ns = start.elapsed().as_nanos() as u64;
+                let last_progress_ns = heartbeat.load(std::sync::atomic::Ordering::Relaxed);
+                let seconds_since_last_progress =
+                    now_ns.saturating_sub(last_progress_ns) as f64 / 1_000_000_000.0;
+                if crate::capture_wedge::evaluate_wedge(
+                    seconds_since_last_progress,
+                    crate::painter_wedge::PAINTER_WEDGE_THRESHOLD_S,
+                ) == crate::capture_wedge::WedgeVerdict::Wedged
+                {
+                    tracing::error!(
+                        "{}",
+                        crate::painter_wedge::painter_wedge_message(
+                            seconds_since_last_progress,
+                            crate::painter_wedge::PAINTER_WEDGE_THRESHOLD_S,
+                        )
+                    );
+                    // The painter thread is provably dead (its own blocking DRM call never
+                    // returned) -- a graceful in-process shutdown of ITS state is not reachable
+                    // from here, so exit immediately. A supervisor (systemd Restart=always on
+                    // cam2-painter.service, or the rig operator's own tooling) recovers it.
+                    std::process::exit(crate::painter_wedge::PAINTER_WEDGE_EXIT_CODE);
+                }
+            }
+        })
+        .expect("failed to spawn #936 painter-wedge watchdog thread");
+}
+
 pub fn run(cfg: RunConfig) -> Result<AnalysisReport> {
     let start = Instant::now();
     let stop = Arc::new(AtomicBool::new(false));
     let emitted: Arc<Mutex<Vec<(u32, i64, i64)>>> = Arc::new(Mutex::new(Vec::new()));
     let observed: Arc<Mutex<Vec<Observed>>> = Arc::new(Mutex::new(Vec::new()));
+    // #936: painter-wedge watchdog heartbeat -- always constructed (not gated on any flag) so a
+    // DRM/KMS-level hang self-detects regardless of mode.
+    let painter_heartbeat_ns = Arc::new(AtomicU64::new(0));
+    spawn_painter_wedge_watchdog(painter_heartbeat_ns.clone(), stop.clone(), start);
 
     let reader_handle = {
         let stop = stop.clone();
@@ -130,6 +180,7 @@ pub fn run(cfg: RunConfig) -> Result<AnalysisReport> {
     let painter_handle = {
         let stop = stop.clone();
         let emitted = emitted.clone();
+        let heartbeat = painter_heartbeat_ns.clone();
         let params = PaintParams {
             run_id: cfg.run_id,
             fb_device: cfg.fb_device.clone(),
@@ -147,7 +198,7 @@ pub fn run(cfg: RunConfig) -> Result<AnalysisReport> {
             colour_scale: cfg.colour_scale,
             motion_sweep: cfg.motion_sweep,
         };
-        std::thread::spawn(move || run_painter(params, start, stop, emitted, None, None))
+        std::thread::spawn(move || run_painter(params, start, stop, emitted, None, None, heartbeat))
     };
 
     // Run for the duration, but stop early if either thread dies (e.g. the
@@ -230,10 +281,15 @@ pub fn run_paint_only(cfg: &RunConfig) -> Result<u64> {
     // vblank-locked paint path.
     let current_id = Arc::new(AtomicU32::new(0));
     let refresh_out = Arc::new(AtomicU64::new(0));
+    // #936: painter-wedge watchdog heartbeat -- always constructed (not gated on
+    // cfg.audio_marker) so a DRM/KMS-level hang self-detects on every --paint-only run.
+    let painter_heartbeat_ns = Arc::new(AtomicU64::new(0));
+    spawn_painter_wedge_watchdog(painter_heartbeat_ns.clone(), stop.clone(), start);
 
     let painter_handle = {
         let stop = stop.clone();
         let emitted = emitted.clone();
+        let heartbeat = painter_heartbeat_ns.clone();
         let current_id_p = if cfg.audio_marker {
             Some(current_id.clone())
         } else {
@@ -262,7 +318,15 @@ pub fn run_paint_only(cfg: &RunConfig) -> Result<u64> {
             motion_sweep: cfg.motion_sweep,
         };
         std::thread::spawn(move || {
-            run_painter(params, start, stop, emitted, current_id_p, refresh_out_p)
+            run_painter(
+                params,
+                start,
+                stop,
+                emitted,
+                current_id_p,
+                refresh_out_p,
+                heartbeat,
+            )
         })
     };
 
@@ -296,6 +360,17 @@ pub fn run_paint_only(cfg: &RunConfig) -> Result<u64> {
     while Instant::now() < deadline {
         if painter_handle.is_finished() {
             break;
+        }
+        // #936: fail the WHOLE run loudly the moment the QPSK marker thread dies before this
+        // loop ever requests `stop` -- previously a silent ALSA-write death left the painter
+        // running the full configured duration on a frozen marker log, so a LATER recording
+        // measured against that dead coverage window still produced a plausible-looking (but
+        // meaningless) offset from CRC-4 false decodes (see `qpsk_marker::qpsk_marker_died_message`
+        // and the `--av-sync` fail-closed guard, `qpsk_marker::marker_coverage_overlaps_video_ticks`).
+        if let Some(reason) = audio_emitter.as_ref().and_then(|e| e.death_reason()) {
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            painter_handle.join().expect("painter panicked")?;
+            anyhow::bail!("{}", crate::qpsk_marker::qpsk_marker_died_message(&reason));
         }
         std::thread::sleep(Duration::from_millis(100));
     }
