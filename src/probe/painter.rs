@@ -250,6 +250,13 @@ fn paint_one_frame(
 /// the painter's own generate→render→wait-for-vblank time (~16-30ms @ 60Hz). For the
 /// fbdev presenter `present()` returns immediately, so `flip_ts_ns` is the post-write
 /// instant; it is still >= `gen_ts_ns` (time only moves forward).
+///
+/// `heartbeat` is #936's painter-wedge watchdog progress marker (see
+/// `crate::painter_wedge`'s module doc): stamped with the monotonic elapsed-since-`start` ns
+/// immediately after every successful `paint_one_frame()` call, unconditional on `dual_qr`/
+/// `audio_marker` — a SEPARATE watchdog thread (spawned by the caller, `probe::run`) polls it and
+/// forces the process to exit loudly the moment it goes stale, because a genuine DRM/KMS kernel
+/// hang can leave this whole thread parked in an uninterruptible wait that no signal can preempt.
 pub fn run_painter(
     params: PaintParams,
     start: Instant,
@@ -257,6 +264,7 @@ pub fn run_painter(
     emitted: Arc<Mutex<Vec<(u32, i64, i64)>>>,
     current_id: Option<Arc<AtomicU32>>,
     refresh_out: Option<Arc<AtomicU64>>,
+    heartbeat: Arc<AtomicU64>,
 ) -> Result<()> {
     // #289 — keep the QR painter OFF the isolated capture core (onto the general
     // cores 0-2) so on the painter box (.62) generation can never steal from the
@@ -270,6 +278,20 @@ pub fn run_painter(
         params.canvas_w,
         params.canvas_h,
     )?;
+    // #936 review follow-up: seed the heartbeat the INSTANT open_presenter() succeeds, before the
+    // paint loop even starts. open_presenter() (device open, acquire_master_lock, connector/mode
+    // enumeration, the two make_slot() dumb-buffer allocations, the initial set_crtc) has NO inner
+    // timeout of its own and can legitimately take longer than PAINTER_WEDGE_THRESHOLD_S (a cold
+    // boot's connector/EDID probing, or the GPU/DRM subsystem still settling right after a PREVIOUS
+    // wedge-triggered restart) -- without this seed the watchdog's clock starts at `start` (process
+    // spawn) and would blame that legitimate open latency on the paint loop, potentially exiting
+    // before the painter ever paints its first frame and turning one recoverable wedge into a
+    // self-sustaining crash loop on cam2-painter.service's Restart=always/RestartSec=2. This
+    // matches the #945 capture_wedge precedent's ACTUAL behavior (VideoCapture::open_with_controls
+    // runs to completion on the main thread BEFORE that watchdog thread is even spawned, so device-
+    // open cost is never charged against ITS threshold either) -- the loop below then updates this
+    // same heartbeat every frame, so from here on the threshold measures only PER-FRAME stalls.
+    heartbeat.store(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
     let flip_paced = presenter.paces_on_present();
     if flip_paced {
         if presenter.phase_locked() {
@@ -314,6 +336,10 @@ pub fn run_painter(
             refresh_tick,
             &mut vernier_gen,
         )?;
+        // #936: progress proof for the painter-wedge watchdog — stamped the INSTANT
+        // paint_one_frame() (render + present()) returns, unconditional on mode, mirroring
+        // #945's "immediately after process_frame() returns" placement.
+        heartbeat.store(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
         emitted
             .lock()
             .unwrap()

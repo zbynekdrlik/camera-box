@@ -154,7 +154,27 @@ the `Win32_Process Create` CommandLine — a bare-exe CIM launch silently drops 
 shortcut params (strih's `--enable-media-stream --verbose` for the interkom Browser source; on
 stream the lnk targets the guarded launcher, which then owns the issue-786 redraw). PowerShell
 gotcha from the same session: `(Get-Content file)[0]` on a ONE-line file indexes a CHAR (String,
-not array) — read markers with `-TotalCount 1` or guard on type.
+not array) — read markers with `-TotalCount 1` or guard on type (or wrap in `@(Get-Content …)` so
+`[0]` is always a line).
+
+**A libobs-touching deploy MUST converge ALL THREE boxes — imag included — or the next E2E
+refuses on genlock_parity (issue 962 session, 2026-08-03).** The fast-DLL variant above covers
+only strih+stream, but imag-nb consumes the SAME `vendor/obs-studio/**` tree (its libobs.so.30);
+the drift-guard cross-box parity check (issue 949 model) compares each pair's deployed
+GENLOCK_BUILD_SHA over the INTERSECTION of consumed vendor paths, so a real libobs diff between
+the Windows boxes' new sha and imag's old sha = DRIFT = every subsequent Full-path E2E run is
+REFUSED at preflight. Live cost: the issue-960 deploy updated strih+stream only, and the very
+next PR's E2E failed 3× on `genlock_parity DRIFT` before any verdict. Converge imag in the same
+deploy cycle: `gh run download <linux-genlock run at the same/vendor-equivalent sha> -n
+obs-genlock-linux-x86_64` + `-n distroav-linux-fast-so`, verify all four files against the
+bundle's own BUNDLE_MANIFEST.json, install libobs.so.30 + libobs-opengl.so.30 + /usr/bin/obs +
+distroav.so exactly per setup-imag.sh step-12 semantics (backups to /opt/obs-backup/previous,
+SONAME + `nm -D -u … obs_display_set_render_divisor` checks, markers into /opt/obs-genlock/),
+then restart via imag-obs-stop.sh + `pkill -9 -x obs` + sentinel clear + a DETACHED
+`setsid nohup imag-obs-start.sh` (a foreground start over ssh holds the session past the tool
+timeout), and verify from a FRESH ssh: `ps -o pid,lstart -C obs` start time AFTER the swap (the
+#912 stop-race), `render tick ENABLED` in the newest OBS log, and both Projector windows present
+(proof the start script's seed phase completed).
 
 ## 6. A hook-BLOCKED Bash call runs NOTHING — including its own heredocs
 

@@ -449,3 +449,59 @@ frames), 3-point `dist_curve` = [8.4821, 7.8127, 8.523]. Note the DEPLOYED
 `C:\avsync\av_sync_measure.py` is an OLD pre-#917 copy (7.2 kB, 2026-07-19) — the watchdog chain
 runs that one until #807 productization redeploys; don't read its behavior as the repo's HEAD.
 Clean up any `*verify*`/scratch `.py` you copy over when done.
+
+## FAIL-CLOSED marker-coverage guard (#936) — `emit_ts_ns` is process-monotonic, use `frame_id` ranges instead of wall-clock
+
+`recording-verdict --av-sync` (`av_sync_from_recording`, `src/probe/av_sync_recording.rs`) pairs a
+recording's decoded AUDIO INDEX against the cam2 emit-log's `frame_id`s — with NO check, before
+#936, that the emit-log was actually alive during this recording. Live incident: the QPSK marker
+thread died silently ~24 minutes before a recording was made (see `src/qpsk_marker.rs`'s marker
+silent-death gotcha below); the "measurement" against that dead window still produced a
+plausible-looking `av_offset_ms=-544.8 matched=41 mad_ms=12.0` — every existing count/spread
+threshold passed on pure CRC-4 false decodes.
+
+**Do NOT try to fix this class of bug with a wall-clock check** — `emit_ts_ns` in the marker log
+CSV is `clock_ns(start, wall_clock)` where `start` is the frame-probe PROCESS's own `Instant`, and
+neither `rig-mode.sh` nor `setup-device.sh`'s painter invocations pass `--wall-clock` — so it is
+monotonic-since-THIS-SESSION's-start, not an absolute epoch, and the marker (cam2) + the recording
+(the stream box) are two DIFFERENT machines anyway. Anchoring it to `SystemTime::now()` and
+reading the recording's real wall-clock window from container `creation_time` was considered and
+REJECTED — it needs new cross-machine plumbing and `creation_time` isn't reliably present/accurate
+on an OBS-muxed live recording.
+
+**The actual fix, `qpsk_marker::marker_coverage_overlaps_video_ticks`:** `frame_id` is a single
+monotonically-increasing counter for the lifetime of ONE painter session (the emit-log's
+`current_id`, shared with the painted dual-QR's own logical id — see `vernier_ids`). The
+recording's decoded VIDEO tick range (`analyze_recording`'s `.tick`, already built as `ticks` in
+this exact function) is read straight off the video, independent of whether the marker thread is
+alive. So the emit-log's `frame_id` range and the recording's video tick range are two slices of
+the SAME counter — checking whether they OVERLAP needs **zero cross-machine wall-clock alignment**
+at all. Wired in right after `ticks`/`emit_log` are both built, BEFORE the (slower) audio decode,
+so a rejection fails fast (`anyhow::ensure!`, loud bail with both actual ranges printed).
+
+**The guard's own blind spot** (documented, not yet hardened): a STALE copy of an OLD session's
+emit-log paired against a NEW session's recording, where the two sessions' frame_id ranges happen
+to coincidentally overlap. This is an operator-error scenario (fetching the wrong marker-log
+snapshot), not the demonstrated failure — the marker-log CSV is truncated fresh (`File::create`)
+at every new painter-session start, so using the CURRENT `/run/rig-qpsk-markers.csv` from the SAME
+running session as the recording is always safe.
+
+**Reusable pattern for a THIRD instance of "verdict pairs by decoded value, no coverage check":**
+if a future measurement path pairs two independently-decoded signals via a shared id/index with no
+check they were captured in the same window, check whether a monotonic per-session COUNTER (not a
+wall-clock timestamp) already exists on both sides before reaching for cross-machine time sync —
+it is usually there for free and needs no new plumbing.
+
+## QPSK marker thread can die silently mid-session (#936) — check `probe::qpsk_emit::QpskEmitter::death_reason()` if a marker log looks short
+
+Before #936, `QpskEmitter`'s emit thread (`src/probe/qpsk_emit.rs`) only `eprintln!`'d an
+unrecoverable ALSA write failure — the painter kept painting for the whole configured duration on
+a marker log that had silently stopped growing. Three independent live sessions the same night
+died after as little as 18s of a 220s+ run. Now: the thread records its death reason in a shared
+cell (`death_reason()`), and `probe::run::run_paint_only`'s control loop polls it every 100ms and
+fails the WHOLE `--paint-only` run loudly the instant it sees one — so a truncated
+`/run/rig-qpsk-markers.csv` on a box that's still running today means either the marker thread is
+about to (or already did) crash the whole process, or you're looking at an OLD session's leftover
+file from before this fix. If you see a suspiciously short marker log with the painter process
+still alive, check `journalctl`/the process's own log for the `CRITICAL #936: QPSK A/V-sync marker
+thread DIED` line before assuming the recording captured a healthy window.

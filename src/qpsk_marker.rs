@@ -436,6 +436,108 @@ pub fn parse_qpsk_marker_log(csv: &str) -> Vec<(u8, u32, i64)> {
     out
 }
 
+/// (min, max) of an iterator of `u32` ticks/frame_ids, or `None` if the iterator was empty.
+/// Private helper shared by [`marker_coverage_overlaps_video_ticks`] and
+/// [`marker_coverage_gap_message`] so the two never compute the range differently.
+fn frame_id_range(ids: impl Iterator<Item = u32>) -> Option<(u32, u32)> {
+    let mut it = ids;
+    let first = it.next()?;
+    let (mut lo, mut hi) = (first, first);
+    for v in it {
+        lo = lo.min(v);
+        hi = hi.max(v);
+    }
+    Some((lo, hi))
+}
+
+/// #936 FAIL-CLOSED GUARD: does the marker emit-log's `frame_id` coverage overlap the recording's
+/// own DECODED VIDEO tick range?
+///
+/// `frame_id` is a single monotonically-increasing counter for the lifetime of ONE painter
+/// session (`probe::painter::vernier_ids` on the probe-gated side) — the emit-log's `frame_id`
+/// column is stamped from that SAME running session's `current_id` at the moment each marker
+/// fires, and a recording's decoded video `tick` (== the painted dual-QR `frame_id` shown on
+/// screen) is read straight off the video, entirely independent of whether the marker thread is
+/// alive. So if the marker thread died a while before (or the log/recording pair is simply
+/// wrong), the emit-log's `frame_id` range and the recording's video tick range are two DISJOINT
+/// slices of that same counter — no wall-clock alignment between the two machines is needed at
+/// all: this overlap check alone proves whether the emit-log's coverage actually spans the moment
+/// the recording captured.
+///
+/// Live incident (#936): a marker log covering frame_ids roughly `[0, 13_500]` (a session that
+/// died after ~225s at 60fps) was still paired — via decoded AUDIO INDEX alone, which this
+/// function does NOT look at — against a recording whose video tick range was roughly
+/// `[97_200, 108_000]` (started ~27 minutes into the SAME session, 24 minutes after the marker
+/// died). The existing plausibility thresholds (`matched >= 8`, `mad <= 20ms`) both passed on
+/// pure CRC-4 false-decode scatter. This function returns `false` for exactly that shape —
+/// disjoint ranges — so the caller refuses to measure instead of reporting a meaningless number.
+///
+/// Empty `emit_log` or `video_ticks` never overlaps (there is nothing to overlap with).
+pub fn marker_coverage_overlaps_video_ticks(
+    emit_log: &[(u8, u32, i64)],
+    video_ticks: &[(u32, f64)],
+) -> bool {
+    let Some((e_lo, e_hi)) = frame_id_range(emit_log.iter().map(|(_, fid, _)| *fid)) else {
+        return false;
+    };
+    let Some((v_lo, v_hi)) = frame_id_range(video_ticks.iter().map(|(t, _)| *t)) else {
+        return false;
+    };
+    e_lo <= v_hi && v_lo <= e_hi
+}
+
+/// Render a `frame_id_range` result for a human-readable message: `[lo, hi]`, or a plain "no
+/// ticks decoded at all" phrase for `None` — a bare `{:?}` of `None` read as an odd dangling word
+/// ("...tick range None.") in [`marker_coverage_gap_message`]'s prose.
+fn format_frame_id_range(r: Option<(u32, u32)>) -> String {
+    match r {
+        Some((lo, hi)) => format!("[{lo}, {hi}]"),
+        None => "none (no ticks decoded at all)".to_string(),
+    }
+}
+
+/// #936: the loud, self-diagnosing message `recording-verdict --av-sync` bails with when
+/// [`marker_coverage_overlaps_video_ticks`] returns `false`. Pure string formatting so the wording
+/// (and the actual computed ranges) is unit-tested here.
+pub fn marker_coverage_gap_message(
+    emit_log: &[(u8, u32, i64)],
+    video_ticks: &[(u32, f64)],
+) -> String {
+    let emit_range = format_frame_id_range(frame_id_range(emit_log.iter().map(|(_, fid, _)| *fid)));
+    let video_range = format_frame_id_range(frame_id_range(video_ticks.iter().map(|(t, _)| *t)));
+    format!(
+        "REFUSING to measure A/V-sync (#936 fail-closed guard): the marker emit-log's frame_id \
+         coverage {emit_range} does NOT overlap the recording's own decoded video tick range \
+         {video_range}. The marker thread most likely died (or the wrong emit-log/recording \
+         pair was given) before or after this recording — pairing by decoded audio index alone \
+         would otherwise produce a plausible-looking but MEANINGLESS offset from CRC-4 false \
+         decodes (live incident: av_offset_ms=-544.8 matched=41 mad_ms=12.0, all against a marker \
+         log that had already gone silent 24 minutes earlier). Re-fetch a marker log that was \
+         actually alive during this recording."
+    )
+}
+
+/// #936: the CRITICAL message `probe::run::run_paint_only` bails with when the QPSK marker emit
+/// thread (`probe::qpsk_emit::QpskEmitter`) returns before the run's normal shutdown (`stop` was
+/// requested) — e.g. an unrecoverable ALSA write failure. Pure string formatting so the wording is
+/// unit-tested here; the actual detection (comparing the emitter's death-reason cell against
+/// `stop`) lives in the probe-gated caller (no local test path — see CLAUDE.md).
+///
+/// Live incident (#936): three independent painter sessions on the SAME night died silently
+/// mid-run (one after as little as 18s of a 220s+ session), each time leaving the painter itself
+/// running fine while the marker log simply stopped growing — nothing failed loudly, so a LATER
+/// recording measured against the resulting dead coverage window (see
+/// [`marker_coverage_overlaps_video_ticks`]) still produced a plausible-looking verdict.
+pub fn qpsk_marker_died_message(reason: &str) -> String {
+    format!(
+        "CRITICAL #936: QPSK A/V-sync marker thread DIED before the run's normal shutdown \
+         (reason: {reason}) — the marker log stopped growing while the painter kept painting, \
+         which would silently leave a LATER recording measured against a dead (non-emitting) \
+         coverage window. Failing the whole --paint-only run now instead of completing the \
+         configured duration on a truncated marker log."
+    )
+}
+
 /// A/V offset estimate from index-paired (video_ts, audio_ts) samples (salvaged from the scrapped
 /// chirp `av_sync`; the QPSK path pairs by exact decoded index, so no timing search is needed).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1109,6 +1211,96 @@ mod tests {
             reassembled.push_str(&qpsk_marker_log_row(*idx, *fid, *ts));
         }
         assert_eq!(reassembled, serialize_qpsk_marker_log(&log, &params));
+    }
+
+    // #936 — marker_coverage_overlaps_video_ticks / marker_coverage_gap_message /
+    // qpsk_marker_died_message. RED marker: none of these three exist yet -- proven by compile
+    // failure. Implemented in the immediately-following GREEN commit.
+
+    #[test]
+    fn marker_coverage_overlap_true_when_ranges_share_a_frame_id() {
+        let emit_log = vec![(0u8, 100u32, 0i64), (1, 13_500, 225_000_000_000)];
+        let video_ticks = vec![(13_000u32, 0.0f64), (13_600, 1.0)];
+        assert!(marker_coverage_overlaps_video_ticks(
+            &emit_log,
+            &video_ticks
+        ));
+    }
+
+    #[test]
+    fn marker_coverage_overlap_false_on_the_live_936_incident_shape() {
+        // Painter F (#936): marker log covered frame_ids ~[0, 13_500] (died after ~225s @ 60fps);
+        // the recording's video tick range was ~[97_200, 108_000] (started ~27 min into the same
+        // session, 24 min after the marker died) -- two disjoint slices of the SAME counter.
+        let emit_log = vec![(0u8, 0u32, 0i64), (1, 13_500, 225_000_000_000)];
+        let video_ticks = vec![(97_200u32, 1620.0f64), (108_000, 1800.0)];
+        assert!(!marker_coverage_overlaps_video_ticks(
+            &emit_log,
+            &video_ticks
+        ));
+    }
+
+    #[test]
+    fn marker_coverage_overlap_touching_boundaries_count_as_overlap() {
+        // Inclusive boundary: emit range ends exactly where the video range begins.
+        let emit_log = vec![(0u8, 0u32, 0i64), (1, 1000, 1)];
+        let video_ticks = vec![(1000u32, 0.0f64), (1100, 1.0)];
+        assert!(marker_coverage_overlaps_video_ticks(
+            &emit_log,
+            &video_ticks
+        ));
+    }
+
+    #[test]
+    fn marker_coverage_overlap_empty_video_ticks_never_overlaps() {
+        let emit_log = vec![(0u8, 0u32, 0i64)];
+        assert!(!marker_coverage_overlaps_video_ticks(&emit_log, &[]));
+    }
+
+    #[test]
+    fn marker_coverage_overlap_empty_emit_log_never_overlaps() {
+        let video_ticks = vec![(0u32, 0.0f64)];
+        assert!(!marker_coverage_overlaps_video_ticks(&[], &video_ticks));
+    }
+
+    #[test]
+    fn marker_coverage_gap_message_carries_the_ranges_and_936() {
+        let emit_log = vec![(0u8, 0u32, 0i64), (1, 13_500, 1)];
+        let video_ticks = vec![(97_200u32, 0.0f64), (108_000, 1.0)];
+        let msg = marker_coverage_gap_message(&emit_log, &video_ticks);
+        assert!(msg.contains("#936"));
+        assert!(msg.contains("REFUSING"));
+        assert!(msg.contains("0"));
+        assert!(msg.contains("13500"));
+        assert!(msg.contains("97200"));
+        assert!(msg.contains("108000"));
+    }
+
+    #[test]
+    fn marker_coverage_gap_message_reads_cleanly_when_no_video_ticks_decoded_at_all() {
+        // Review follow-up (#936): a bare `{:?}` of `None` used to read as a dangling word
+        // ("...tick range None."). No video ticks decoded is a real case (the recording's dual-QR
+        // never decoded at all) and must read as a plain sentence, not leak Rust's Option syntax.
+        let emit_log = vec![(0u8, 0u32, 0i64), (1, 13_500, 1)];
+        let msg = marker_coverage_gap_message(&emit_log, &[]);
+        assert!(
+            !msg.contains("None"),
+            "must not leak Option's Debug syntax: {msg}"
+        );
+        assert!(msg.contains("no ticks decoded"));
+        assert!(
+            msg.contains("[0, 13500]"),
+            "emit range still renders numerically: {msg}"
+        );
+    }
+
+    #[test]
+    fn qpsk_marker_died_message_carries_the_reason_and_936() {
+        let msg = qpsk_marker_died_message("ALSA writei after recover: Broken pipe");
+        assert!(msg.contains("#936"));
+        assert!(msg.contains("CRITICAL"));
+        assert!(msg.contains("ALSA writei after recover: Broken pipe"));
+        assert!(msg.to_lowercase().contains("marker"));
     }
 
     #[test]

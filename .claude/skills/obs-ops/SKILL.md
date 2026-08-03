@@ -65,6 +65,21 @@ is NOT evidence of persistence — it is evidence of a launch that is about to b
   ```
   Verified to survive the disconnect (`rc=0`, and the pid is still there from a FRESH ssh session).
   Note it takes `CurrentDirectory`, so the cwd requirement above is still satisfied.
+  - **GOTCHA (2026-08-03, live user complaint): the CIM-created process lands in SESSION 0 —
+    INVISIBLE at the physical console.** Windows OpenSSH runs in session 0, and
+    `Win32_Process.Create` inherits the caller's session, so the launched OBS survives the
+    disconnect but has NO window on the operator's desktop (`tasklist` shows
+    `Session Name=Services, Session#=0`; `MainWindowTitle` empty). Everything HEADLESS keeps
+    working — NDI output, WebSocket :4455, genlock log lines, recording — so every remote
+    verification passes while the operator at the rig sees "OBS nebeží" (the #962-deploy relaunch
+    did exactly this to BOTH boxes + strih's AutoHotkey64). So the CIM fallback is a DEGRADED
+    last resort for keeping the broadcast chain alive when no MCP exists, NEVER an acceptable
+    end state: as soon as the win-* MCP is back, force-kill the session-0 instance and relaunch
+    via the MCP `Shell` (the MCP server runs in the interactive session — check with
+    `(Get-Process -Id $PID).SessionId` → must be `1`). Acceptance check after ANY launch:
+    `Get-Process obs64 | Format-List Id,SessionId,MainWindowTitle` must show `SessionId: 1` AND a
+    non-empty window title. On strih, restart AutoHotkey64 the same way (MCP Shell, session 1) —
+    an ssh-restarted AHK is equally invisible and can't drive session-1 windows.
 - **Dead ends, do not retry:** `schtasks /run` on an `/IT` task returns `ERROR: Element not found`,
   and the same task with a near-future time trigger never fires (`Last Result: 267011` = never ran)
   — `/IT` will not start from a non-interactive context even though `Get-Process explorer` shows a

@@ -10,8 +10,9 @@
 
 use crate::probe::recording::analyze_recording;
 use crate::qpsk_marker::{
-    av_offset_candidates_deduped, cluster_offset_ms, decode_markers, parse_ffprobe_start_time,
-    parse_qpsk_marker_log, AudioParams, AvOffset, DEDUPE_SAME_FID_WINDOW_S,
+    av_offset_candidates_deduped, cluster_offset_ms, decode_markers, marker_coverage_gap_message,
+    marker_coverage_overlaps_video_ticks, parse_ffprobe_start_time, parse_qpsk_marker_log,
+    AudioParams, AvOffset, DEDUPE_SAME_FID_WINDOW_S,
 };
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -193,6 +194,20 @@ pub fn av_sync_from_recording(
     }
     ticks.sort_by_key(|&(t, _)| t);
     let video_ticks = ticks.len();
+
+    // #936 FAIL-CLOSED GUARD: the emit-log's frame_id coverage must overlap the recording's own
+    // decoded video tick range, or REFUSE to measure — otherwise a marker thread that died before
+    // (or after) this recording pairs decoded-audio-index-only against pure CRC-4 false decodes
+    // and produces a plausible-looking but MEANINGLESS offset (live incident: av_offset_ms=-544.8
+    // matched=41 mad_ms=12.0, clearing every existing plausibility threshold). Checked BEFORE the
+    // (slow) audio decode below so a rejection fails fast. See
+    // `qpsk_marker::marker_coverage_overlaps_video_ticks`'s doc comment for why a frame_id-range
+    // check needs no wall-clock alignment between the two machines that produced these files.
+    anyhow::ensure!(
+        marker_coverage_overlaps_video_ticks(&emit_log, &ticks),
+        "{}",
+        marker_coverage_gap_message(&emit_log, &ticks)
+    );
 
     // Audio: extract the mbc track → QPSK markers (audio_ts, index), on the container origin.
     let audio = extract_audio_mono_f32(recording, audio_track, params.sample_rate)?;

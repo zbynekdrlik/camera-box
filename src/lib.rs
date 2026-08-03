@@ -373,5 +373,13 @@ pub mod asrc_outer_loop;
 // thread call into it.
 pub mod capture_wedge;
 
+// #936 — painter WEDGE self-watchdog: the pure decision + message for whether the KMS/DRM painter
+// loop's blocking present() call has gone stale long enough to treat it as provably wedged (a
+// SIGTERM/SIGKILL-immune kernel-level D-state hang, the same failure class #945 root-caused on
+// the capture side three days earlier). No probe deps (reuses capture_wedge's generic threshold
+// math), so it unit-tests Tier-0; `src/probe/run.rs`'s `run_paint_only`/`run` + a dedicated
+// watchdog thread call into it, and `src/probe/painter.rs`'s `run_painter` writes the heartbeat.
+pub mod painter_wedge;
+
 #[cfg(feature = "probe")]
 pub mod probe;
