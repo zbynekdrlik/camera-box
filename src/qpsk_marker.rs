@@ -1211,7 +1211,10 @@ mod tests {
     fn marker_coverage_overlap_true_when_ranges_share_a_frame_id() {
         let emit_log = vec![(0u8, 100u32, 0i64), (1, 13_500, 225_000_000_000)];
         let video_ticks = vec![(13_000u32, 0.0f64), (13_600, 1.0)];
-        assert!(marker_coverage_overlaps_video_ticks(&emit_log, &video_ticks));
+        assert!(marker_coverage_overlaps_video_ticks(
+            &emit_log,
+            &video_ticks
+        ));
     }
 
     #[test]
@@ -1221,7 +1224,10 @@ mod tests {
         // session, 24 min after the marker died) -- two disjoint slices of the SAME counter.
         let emit_log = vec![(0u8, 0u32, 0i64), (1, 13_500, 225_000_000_000)];
         let video_ticks = vec![(97_200u32, 1620.0f64), (108_000, 1800.0)];
-        assert!(!marker_coverage_overlaps_video_ticks(&emit_log, &video_ticks));
+        assert!(!marker_coverage_overlaps_video_ticks(
+            &emit_log,
+            &video_ticks
+        ));
     }
 
     #[test]
@@ -1229,7 +1235,10 @@ mod tests {
         // Inclusive boundary: emit range ends exactly where the video range begins.
         let emit_log = vec![(0u8, 0u32, 0i64), (1, 1000, 1)];
         let video_ticks = vec![(1000u32, 0.0f64), (1100, 1.0)];
-        assert!(marker_coverage_overlaps_video_ticks(&emit_log, &video_ticks));
+        assert!(marker_coverage_overlaps_video_ticks(
+            &emit_log,
+            &video_ticks
+        ));
     }
 
     #[test]
