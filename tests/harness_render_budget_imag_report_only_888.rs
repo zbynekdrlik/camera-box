@@ -1,19 +1,24 @@
 //! issue 888 — RE-GATE: temporary, user-directed (2026-07-30) relaxation of the `[4d/8]`
-//! render-budget gate's IMAG term to REPORT-ONLY, while strih + stream stay STRICT.
+//! render-budget gate's IMAG term to REPORT-ONLY, while strih + stream stay STRICT — RESTORED to
+//! STRICT here once real measured data (10 independent `Full-path E2E` runs, 2026-07-30 19:20
+//! through 2026-08-03, imag comfortably at 4.8-6.4ms against its 16.67ms budget with burns
+//! confirmed ON) showed the relaxation's own restore bar met many times over. See the design
+//! comment on issue 888 for the full dataset and the reasoning.
 //!
-//! Root cause (issue 886, measured, reproduces to within 0.2ms across 3 runs): the measurement
-//! burn costs ~11.5ms of imag's 16.67ms (60fps) frame budget — the instrument's own cost, not a
-//! product regression (burn OFF: imag renders 4.5-5.9ms, zero skips, every window — the STILL
-//! STRICT `[1/8]` render-health preflight above proves this). Three consecutive gate runs failed
-//! on this one term, blocking PR #704 (37 bundled, otherwise-finished tickets) from ever reaching
-//! a verdict. The user's directive: release this ONE term, keep everything else strict, iterate.
+//! Original root cause (issue 886 / issue 865, measured 2026-07-30): the measurement burn cost
+//! ~11.5ms of imag's 16.67ms (60fps) frame budget — the instrument's own cost, not a product
+//! regression. Three consecutive gate runs failed on this one term, blocking PR #704 (37 bundled,
+//! otherwise-finished tickets) from ever reaching a verdict, which is why the term was relaxed to
+//! report-only in the first place (`cdfd1fd4d`).
 //!
-//! Locks BOTH directions so a future edit can't silently widen (or narrow) the relaxation:
-//! - imag's render-budget-gate.py call must be its OWN, separate, NON-aborting invocation that
-//!   logs a loud WARN (pass or fail) naming issue 888 and issue 886 in words, with no `exit 1`
-//!   anywhere in its branch and no new env-var bypass knob.
-//! - strih + stream must remain in their OWN, separate, still-STRICT invocation (same `--box`
-//!   args, still `exit 1` on failure) — and imag must NOT be in that same call any more.
+//! Locks BOTH directions of the RESTORED state so a future edit can't silently re-relax (or
+//! silently merge back) the gate:
+//! - imag's render-budget-gate.py call stays its OWN, separate invocation (positioned after the
+//!   strih/stream call's closing `fi`, before `[4e/8]`, exactly where the relaxation put it) but
+//!   is STRICT again: `exit 1` on failure, same shape strih/stream already use — no more
+//!   WARN-without-abort branch, no env-var bypass knob.
+//! - strih + stream remain in their OWN, separate, still-STRICT invocation (same `--box` args,
+//!   still `exit 1` on failure) — and imag must NOT be back in that same call/window.
 //!
 //! Pure static (`fs::read_to_string` + substring/ordering asserts) — mirrors the style of
 //! tests/harness_imag_topology.rs and tests/harness_render_budget_gate.rs; no OBS, no ssh, no
@@ -64,11 +69,10 @@ fn strih_stream_render_budget_call_stays_strict_and_excludes_imag() {
 
 /// imag's render-budget term must be measured by its OWN separate render-budget-gate.py call,
 /// positioned after the strih/stream call's closing `fi` and before the `[4e/8]` step, and that
-/// call must be REPORT-ONLY: no `exit 1` anywhere in its region, a loud WARN logged either way,
-/// and the WARN text names both issue 888 (this relaxation) and issue 886 (the measured root
-/// cause) in words — plus no new env-var bypass knob (a hardcoded, one-line-deletable branch).
+/// call must be STRICT AGAIN (restored by issue 888, 2026-08-03): `exit 1` on failure, same shape
+/// strih/stream already use — no more WARN-without-abort branch, no env-var bypass knob.
 #[test]
-fn imag_render_budget_call_is_report_only_and_names_888_and_886() {
+fn imag_render_budget_call_is_strict_again_after_888_restore() {
     let s = read("scripts/recording-e2e.sh");
     let strih_call = s
         .find("--box \"strih=")
@@ -88,30 +92,29 @@ fn imag_render_budget_call_is_report_only_and_names_888_and_886() {
          separately from strih/stream. Got:\n{region}"
     );
     assert!(
-        !region.contains("exit 1"),
-        "issue 888: imag's render-budget term must be REPORT-ONLY — no exit 1 anywhere in this \
-         region. Got:\n{region}"
+        region.contains("exit 1"),
+        "issue 888 (restored 2026-08-03): imag's render-budget term must be STRICT again — an \
+         `exit 1` must exist in this region, same as strih/stream. Got:\n{region}"
     );
     assert!(
-        region.contains("WARN"),
-        "issue 888: imag's render-budget result (pass OR fail) must be logged loudly (WARN), so \
-         nobody reads silence as strictness. Got:\n{region}"
+        !region.to_uppercase().contains("REPORT-ONLY") && !region.contains("NOT aborting"),
+        "issue 888 (restored 2026-08-03): no report-only / non-aborting language should remain in \
+         this region — the term is strict again. Got:\n{region}"
     );
     assert!(
-        region.contains("issue 888"),
-        "issue 888: the WARN text must name issue 888 (this relaxation ticket) in words. \
-         Got:\n{region}"
-    );
-    assert!(
-        region.contains("issue 886"),
-        "issue 888: the WARN text must name issue 886 (the measured root cause) in words. \
+        region.contains("issue 888") || region.contains("#888"),
+        "issue 888: the abort message should still name issue 888 for history/traceability. \
          Got:\n{region}"
     );
     let region_upper = region.to_uppercase();
     assert!(
         !region_upper.contains("SKIP_IMAG_RENDER")
             && !region_upper.contains("IMAG_RENDER_GATE_SKIP"),
-        "issue 888: must be a hardcoded, one-line-deletable branch — NEVER a new env-var bypass \
-         knob (a silent env default is exactly how 'temporary' becomes permanent). Got:\n{region}"
+        "issue 888: must never gain a new env-var bypass knob (a silent env default is exactly \
+         how a relaxation quietly comes back). Got:\n{region}"
     );
 }
+
+// The `strih_stream_render_budget_call_stays_strict_and_excludes_imag` test above still proves
+// the split itself (imag measured by its OWN call, not re-merged into the strih/stream one) — no
+// separate test needed here; restoring strictness only changes imag's OWN call's abort behavior.
