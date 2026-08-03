@@ -227,6 +227,24 @@ pub const MIN_LOCK_S: f64 = 5.0;
 /// caller should be trusted alone to have already clamped.
 pub const OUTER_BIAS_MAX_PPM: f64 = 10.0;
 
+/// issue #960: sanity ceiling on a single block's `instantaneous_ppm`, in ppm — above this, the
+/// block carries no real timing information (a starved or bursting audio source, e.g. a
+/// muted/idle device path delivering near-zero samples) and must be REJECTED rather than folded
+/// into the EMA. Live incident: a starved source (~26.24% of the samples its elapsed wall-clock
+/// window implies) produced `instantaneous_ppm ≈ -737,600`, and with no gate the EMA converged
+/// toward it and the servo railed at `-MAX_PPM` permanently.
+///
+/// 100,000 ppm (10%) is chosen to clear three boundaries with margin: (1) ~333x (roughly 2.5
+/// orders of magnitude) above `MAX_PPM` (300, itself already "an order of magnitude above any
+/// measured worst case ~25-50ppm"), so no real clock plausibly reaches it; (2) a clean 2x above
+/// the largest SYNTHETIC stress value this file's own tests already feed to exercise the
+/// hard-clamp/slew-limit logic
+/// (50,000 ppm, a deliberately extreme but non-starved "outlier measurement" in
+/// `realtime_compensator_never_exceeds_the_slew_limit_per_call`) — those tests keep proving the
+/// clamp/slew math, not this guard; (3) more than 7x below the observed live defect (737,600
+/// ppm), so the reported bug is caught with comfortable margin.
+pub const MAX_SANE_INSTANTANEOUS_PPM: f64 = 100_000.0;
+
 /// The REAL per-source ASRC servo issue #803 ports into vendored libobs
 /// (`vendor/obs-studio/libobs/media-io/asrc-compensator.c` — kept a line-by-line equivalent
 /// mirror of this struct's logic; see that file's own doc comment). Unlike [`EmaRateCompensator`]
@@ -238,7 +256,10 @@ pub const OUTER_BIAS_MAX_PPM: f64 = 10.0;
 /// - a hard ppm clamp (`MAX_PPM`) on the estimate used as the correction TARGET;
 /// - a slew limiter (`MAX_SLEW_PPM_PER_S`) on the APPLIED correction, independent of how fast the
 ///   raw estimate itself moves, so a single noisy measurement can never produce an audible step;
-/// - a minimum-lock startup delay (`MIN_LOCK_S`) before any correction is applied at all.
+/// - a minimum-lock startup delay (`MIN_LOCK_S`) before any correction is applied at all;
+/// - a starvation/activity guard (`MAX_SANE_INSTANTANEOUS_PPM`, issue #960) rejecting a block
+///   whose instantaneous ppm is not a plausible clock-drift measurement at all (a starved/bursting
+///   source), holding state rather than folding garbage into the estimate.
 ///
 /// Validated against the SAME `simulate_offset_trace_ms` gate issue #804 built, per that module's
 /// own instruction not to invent a second, unrelated proof.
@@ -255,6 +276,12 @@ pub struct RealtimeAsrcCompensator {
     /// `MAX_PPM` clamp (see [`Self::compensate`]). Zero (no-op) until something calls
     /// [`Self::set_outer_bias_ppm`]; a fresh compensator behaves EXACTLY as before #806.
     outer_bias_ppm: f64,
+    /// issue #960: cumulative count of blocks REJECTED as starved/bursting (see
+    /// [`Self::compensate`]) — exposed for tests/telemetry, mirrors the C side's periodic ~60s
+    /// log line reporting `starved_blocks=N`. Zero for a fresh compensator; never decreases on
+    /// the Rust side (the C mirror resets its own copy on each telemetry read — a C-only,
+    /// logging-cadence concern this bench has no equivalent of).
+    starved_block_count: u32,
 }
 
 impl RealtimeAsrcCompensator {
@@ -266,6 +293,7 @@ impl RealtimeAsrcCompensator {
             applied_ppm: 0.0,
             elapsed_lock_s: 0.0,
             outer_bias_ppm: 0.0,
+            starved_block_count: 0,
         }
     }
 
@@ -293,6 +321,21 @@ impl RealtimeAsrcCompensator {
     pub fn outer_bias_ppm(&self) -> f64 {
         self.outer_bias_ppm
     }
+
+    /// issue #960: cumulative count of blocks rejected as starved/bursting since construction —
+    /// exposed for tests/telemetry (mirrors the C side's `starved_blocks=N` telemetry field).
+    pub fn starved_block_count(&self) -> u32 {
+        self.starved_block_count
+    }
+
+    /// The audio-timeline advance AFTER applying whatever `applied_ppm` is CURRENTLY in effect —
+    /// the single formula both the starved-rejection path and the normal (post-EMA/slew) path in
+    /// [`Self::compensate`] return. Factored out (`/review` finding on issue #960) so the two call
+    /// sites can never silently drift apart the way this project's C/Rust mirrors have before —
+    /// see the top-level CLAUDE.md's repeated "mirror drifted apart" GOTCHAs.
+    fn corrected_advance(&self, raw_advance_s: f64) -> f64 {
+        raw_advance_s / (1.0 + self.applied_ppm / 1_000_000.0)
+    }
 }
 
 impl Default for RealtimeAsrcCompensator {
@@ -315,6 +358,18 @@ impl AsrcCompensator for RealtimeAsrcCompensator {
         // SAME master-clock basis the video FIFO release already uses (genlock_wall_now_ns() on
         // the C side).
         let instantaneous_ppm = (raw_advance_s / master_block_s - 1.0) * 1_000_000.0;
+
+        // issue #960: a block whose instantaneous ppm magnitude clears the sanity ceiling carries
+        // no real timing information (starved/bursting source, not clock drift) — REJECT it: no
+        // EMA update, no elapsed_lock_s credit (a garbage block must not count toward "the servo
+        // has observed enough real data to trust its estimate"), no slew step. HOLD whatever
+        // applied_ppm was already in effect and keep applying just that unchanged correction to
+        // this callback's real audio (the samples themselves are real even when the elapsed-time
+        // basis used to measure them is garbage).
+        if instantaneous_ppm.abs() > MAX_SANE_INSTANTANEOUS_PPM {
+            self.starved_block_count = self.starved_block_count.saturating_add(1);
+            return self.corrected_advance(raw_advance_s);
+        }
 
         // TIME-based EMA smoothing factor: alpha = 1 - exp(-block/tau), so convergence speed is
         // independent of how the caller chunks audio callbacks (a real device may deliver
@@ -341,7 +396,7 @@ impl AsrcCompensator for RealtimeAsrcCompensator {
         let delta = (target_ppm - self.applied_ppm).clamp(-max_step, max_step);
         self.applied_ppm += delta;
 
-        raw_advance_s / (1.0 + self.applied_ppm / 1_000_000.0)
+        self.corrected_advance(raw_advance_s)
     }
 }
 
@@ -682,6 +737,143 @@ mod tests {
             "expected applied compensation to never exceed the {MAX_PPM}ppm hard bound even with \
              the outer bias saturated, got {}ppm",
             compensator.applied_ppm()
+        );
+    }
+
+    // ---- #960: starvation/activity guard — a block with no real timing information must never
+    // be folded into the estimate or rail the servo. -----------------------------------------
+
+    /// THE gate for issue #960 itself: the live incident reproduced exactly (a starved source
+    /// delivering ~26.24% of the samples its elapsed wall-clock window implies, i.e.
+    /// `DriftingAudioClock::new(-737_600.0)` — the same instantaneous ppm the stream-OBS log
+    /// showed for 'ASIO Input Capture'/'test-audio'). One such block must be REJECTED: the
+    /// estimate and the applied correction must stay at their pre-block (converged, ~0) value,
+    /// never railed toward -ASRC_MAX_PPM.
+    #[test]
+    fn starved_block_does_not_corrupt_the_estimate_960() {
+        let mut compensator = RealtimeAsrcCompensator::new();
+        // Converge on a perfectly-matched (ppm=0) clock first, well past MIN_LOCK_S. With no
+        // drift, instantaneous_ppm is exactly 0.0 every block, so the EMA/applied stay exactly
+        // 0.0 (bit-for-bit) -- not merely "close to zero".
+        for _ in 0..10 {
+            let _ = compensator.compensate(1.0, 1.0);
+        }
+        assert_eq!(compensator.estimated_ppm(), 0.0);
+        assert_eq!(compensator.applied_ppm(), 0.0);
+
+        // issue #960: the exact live incident — a starved block reporting -737,600ppm.
+        let starved = DriftingAudioClock::new(-737_600.0);
+        let raw = starved.raw_advance(1.0);
+        let _ = compensator.compensate(raw, 1.0);
+
+        // The guard's rejection path is an EARLY RETURN that never touches estimated_ppm/
+        // applied_ppm at all -- so both must stay EXACTLY at their pre-block value (not just
+        // "close"), which is what makes this assertion non-tautological: any regression that
+        // lets the garbage ppm leak even partially into the EMA (a weakened guard, an off-by-one
+        // threshold, a partial slew step) would move these away from bit-exact 0.0.
+        assert_eq!(
+            compensator.estimated_ppm(),
+            0.0,
+            "expected a starved block to be REJECTED (estimate left at its pre-block value), got \
+             estimated_ppm={} — the -737,600ppm garbage was folded into the EMA, exactly the \
+             #960 defect",
+            compensator.estimated_ppm()
+        );
+        assert_eq!(
+            compensator.applied_ppm(),
+            0.0,
+            "expected the applied correction to stay HELD at its pre-starvation value, got \
+             {}ppm — a starved block must never rail the servo toward -MAX_PPM",
+            compensator.applied_ppm()
+        );
+    }
+
+    /// The rejection must be OBSERVABLE, not just silently protective — issue #960 asks that the
+    /// periodic telemetry log be able to report a starved/invalid-block state explicitly. A
+    /// sustained starvation (several callbacks in a row, e.g. an ASIO dropout) must keep counting,
+    /// and a healthy block afterward must not inflate the count further (proves the guard is
+    /// scoped to genuinely-invalid blocks, not a sticky/latched state).
+    #[test]
+    fn starved_block_is_counted_960() {
+        let mut compensator = RealtimeAsrcCompensator::new();
+        assert_eq!(compensator.starved_block_count(), 0);
+
+        let starved = DriftingAudioClock::new(-737_600.0);
+        let raw = starved.raw_advance(1.0);
+        let _ = compensator.compensate(raw, 1.0);
+        assert_eq!(
+            compensator.starved_block_count(),
+            1,
+            "expected one starved block to increment the counter exactly once"
+        );
+
+        let _ = compensator.compensate(raw, 1.0);
+        assert_eq!(
+            compensator.starved_block_count(),
+            2,
+            "expected a second consecutive starved block to keep counting"
+        );
+
+        let _ = compensator.compensate(1.0, 1.0); // a healthy block
+        assert_eq!(
+            compensator.starved_block_count(),
+            2,
+            "expected a healthy block to leave the starved counter unchanged"
+        );
+    }
+
+    /// A starved block must grant NO lock credit — it carries no real information about the
+    /// source's true clock rate, so it must not count toward `MIN_LOCK_S` any more than it counts
+    /// toward the estimate. Feed far more than `MIN_LOCK_S` worth of STARVED blocks, then one
+    /// healthy block that is on its own well inside the lock window — if starved blocks wrongly
+    /// granted lock credit, the servo would already be "locked" and immediately apply a nonzero
+    /// correction; if they don't, applied_ppm must still be exactly 0 (pre-lock).
+    #[test]
+    fn starved_blocks_grant_no_lock_credit_960() {
+        let mut compensator = RealtimeAsrcCompensator::new();
+        let starved = DriftingAudioClock::new(-737_600.0);
+        for _ in 0..20 {
+            // 20 x 1s = 20s of starved blocks — well past MIN_LOCK_S (5s) if wrongly credited.
+            let raw = starved.raw_advance(1.0);
+            let _ = compensator.compensate(raw, 1.0);
+        }
+        // One healthy block, 1s — well INSIDE MIN_LOCK_S on its own.
+        let raw = DriftingAudioClock::new(WORST_CASE_PPM).raw_advance(1.0);
+        let _ = compensator.compensate(raw, 1.0);
+        assert_eq!(
+            compensator.applied_ppm(),
+            0.0,
+            "expected starved blocks to grant NO lock credit — one real block afterward should \
+             still be pre-lock, got applied_ppm={}",
+            compensator.applied_ppm()
+        );
+    }
+
+    /// Boundary check for the `>` comparison itself (`/review` finding on issue #960): a block
+    /// just BELOW the sanity ceiling is still treated as real (folded into the EMA, never
+    /// flagged), and a block just ABOVE it is rejected. Pins the strict `>` (not `>=`) choice
+    /// explicitly, on values comfortably clear of floating-point rounding noise (±1ppm at this
+    /// magnitude), so a future edit can't silently flip which side of the ceiling is "sane"
+    /// without a test noticing.
+    #[test]
+    fn threshold_boundary_960() {
+        let mut below = RealtimeAsrcCompensator::new();
+        let raw_below = DriftingAudioClock::new(MAX_SANE_INSTANTANEOUS_PPM - 1.0).raw_advance(1.0);
+        let _ = below.compensate(raw_below, 1.0);
+        assert_eq!(
+            below.starved_block_count(),
+            0,
+            "expected a block just BELOW MAX_SANE_INSTANTANEOUS_PPM to be treated as real, not \
+             starved"
+        );
+
+        let mut above = RealtimeAsrcCompensator::new();
+        let raw_above = DriftingAudioClock::new(MAX_SANE_INSTANTANEOUS_PPM + 1.0).raw_advance(1.0);
+        let _ = above.compensate(raw_above, 1.0);
+        assert_eq!(
+            above.starved_block_count(),
+            1,
+            "expected a block just ABOVE MAX_SANE_INSTANTANEOUS_PPM to be rejected as starved"
         );
     }
 }

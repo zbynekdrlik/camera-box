@@ -74,6 +74,19 @@ extern "C" {
  * (which has no logging concern) -- a C-side-only constant. */
 #define ASRC_LOG_INTERVAL_S 60.0
 
+/* issue #960: sanity ceiling on a single block's instantaneous ppm -- above this, the block
+ * carries no real timing information (a starved or bursting audio source, e.g. a muted/idle
+ * device path delivering near-zero samples) and must be REJECTED rather than folded into the
+ * EMA. Live incident: a starved source (~26.24% of the samples its elapsed wall-clock window
+ * implies) produced an instantaneous ppm of ~-737,600, and with no gate the EMA converged toward
+ * it and the servo railed at -ASRC_MAX_PPM permanently. 100,000 ppm (10%) clears three
+ * boundaries with margin: two orders of magnitude above ASRC_MAX_PPM (itself already an order of
+ * magnitude above any measured worst case), a clean 2x above the largest synthetic stress value
+ * the Rust reference's own test suite feeds to exercise the hard-clamp/slew-limit logic (50,000
+ * ppm), and more than 7x below the observed live defect (737,600 ppm). Mirror of
+ * src/asrc_bench.rs MAX_SANE_INSTANTANEOUS_PPM -- keep numerically identical. */
+#define ASRC_MAX_SANE_INSTANTANEOUS_PPM 100000.0
+
 /* Per-source servo state. One instance lives per obs_source_t (see
  * obs-internal.h's `struct asrc_compensator asrc` field) and is mutated only
  * from the audio-ingest call path (process_audio(), always invoked from the
@@ -98,6 +111,12 @@ struct asrc_compensator {
 	 * asrc_compensator_set_outer_bias_ppm() is called; every pre-#806 caller sees identical
 	 * behavior. Mirror of src/asrc_bench.rs RealtimeAsrcCompensator::outer_bias_ppm. */
 	double outer_bias_ppm;
+	/* camera-box #960: cumulative count of blocks REJECTED as starved/bursting since the last
+	 * telemetry read -- reset to 0 whenever asrc_compensator_should_log() returns true (same
+	 * reset-on-read convention as cumulative_correction_ms above). Mirror of src/asrc_bench.rs
+	 * RealtimeAsrcCompensator::starved_block_count (which never resets -- a C-only logging-
+	 * cadence concern, same as ASRC_LOG_INTERVAL_S itself). */
+	uint32_t starved_block_count;
 };
 
 /* Reset a servo to its just-constructed state: 0 ppm estimated/applied (assume
@@ -122,8 +141,13 @@ EXPORT double asrc_compensator_compensate(struct asrc_compensator *c, double raw
  * immediately after a true return, using estimated_ppm/applied_ppm and the
  * cumulative correction below). Returns the cumulative |raw-corrected| ms
  * since the previous log line via `*cumulative_correction_ms_out`, then resets
- * that accumulator to 0 for the next interval. */
-EXPORT bool asrc_compensator_should_log(struct asrc_compensator *c, double *cumulative_correction_ms_out);
+ * that accumulator to 0 for the next interval. Also returns the count of
+ * blocks REJECTED as starved/bursting (camera-box #960) since the previous
+ * log line via `*starved_block_count_out`, then resets that accumulator to 0
+ * too -- so a starved/invalid-block state is explicit in telemetry instead of
+ * silently hiding behind an estimated/applied pair alone. */
+EXPORT bool asrc_compensator_should_log(struct asrc_compensator *c, double *cumulative_correction_ms_out,
+					 uint32_t *starved_block_count_out);
 
 /* camera-box #806: set the OUTER-loop bias, in ppm -- clamped to
  * +/-ASRC_OUTER_BIAS_MAX_PPM unconditionally (never trust the caller alone to

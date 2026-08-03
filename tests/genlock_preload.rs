@@ -1107,6 +1107,10 @@ mod vendored_source {
     // #942: the LIVE dock's pure decision header + its OBS glue caller.
     pub const AV_SYNC_DOCK_AUDIO: &str = "vendor/av-sync-dock/src/camera-box-audio.hpp";
     pub const AV_SYNC_DOCK_OUTPUT: &str = "vendor/av-sync-dock/src/sync-test-output.cpp";
+    // #803/#960: the per-source ASRC servo -- constants/struct live in the header, the
+    // starvation guard's logic in the .c.
+    pub const ASRC_COMPENSATOR_H: &str = "vendor/obs-studio/libobs/media-io/asrc-compensator.h";
+    pub const ASRC_COMPENSATOR_C: &str = "vendor/obs-studio/libobs/media-io/asrc-compensator.c";
 
     /// Read the libobs `#define MAX_ASYNC_FRAMES <n>` literal from the vendored
     /// source so the preload-cap invariant tracks upstream instead of being
@@ -1581,6 +1585,57 @@ mod vendored_source {
             api.contains("EXPORT void obs_source_set_asrc_enabled(obs_source_t *source, bool"),
             "{OBS_API}: #912 — obs_source_set_asrc_enabled is not EXPORTed; DistroAV/any future \
              GUI override could not resolve the setter."
+        );
+    }
+
+    #[test]
+    fn asrc_starvation_guard_present_in_vendored_source() {
+        // #960: the ASRC estimator (asrc-compensator.{h,c}) must reject a block whose
+        // instantaneous ppm carries no real timing information (a starved/bursting source, the
+        // live incident's -737,600ppm) rather than fold it into the EMA and rail the servo. A
+        // `git subtree pull` (#44) or any future hand-edit reverting this guard would silently
+        // reintroduce the diagnostic-poisoning/rail-on-garbage defect #960 fixed.
+        let h = squish(&vendor_file(ASRC_COMPENSATOR_H));
+        assert!(
+            h.contains("#define ASRC_MAX_SANE_INSTANTANEOUS_PPM 100000.0"),
+            "{ASRC_COMPENSATOR_H}: #960 — the starvation-guard sanity ceiling \
+             (ASRC_MAX_SANE_INSTANTANEOUS_PPM) is missing or its value changed; re-apply/re-sync \
+             with src/asrc_bench.rs's MAX_SANE_INSTANTANEOUS_PPM."
+        );
+        assert!(
+            h.contains("uint32_t starved_block_count;"),
+            "{ASRC_COMPENSATOR_H}: #960 — the starved_block_count telemetry field is missing from \
+             struct asrc_compensator."
+        );
+        assert!(
+            h.contains(
+                "EXPORT bool asrc_compensator_should_log(struct asrc_compensator *c, double *cumulative_correction_ms_out, uint32_t *starved_block_count_out);"
+            ),
+            "{ASRC_COMPENSATOR_H}: #960 — asrc_compensator_should_log no longer reports \
+             starved_block_count_out; the starved/invalid-block state can't reach the telemetry \
+             log line anymore."
+        );
+
+        let c = squish(&vendor_file(ASRC_COMPENSATOR_C));
+        assert!(
+            c.contains("if (fabs(instantaneous_ppm) > ASRC_MAX_SANE_INSTANTANEOUS_PPM) {")
+                && c.contains("c->starved_block_count++;"),
+            "{ASRC_COMPENSATOR_C}: #960 — asrc_compensator_compensate no longer rejects a \
+             starved/bursting block; it would fold garbage back into the EMA and rail the servo, \
+             exactly the #960 defect."
+        );
+
+        // The vendored caller (obs-source.c) must actually surface the starved state in its
+        // telemetry log line, not just compute it and drop it on the floor.
+        let src = squish(&vendor_file(OBS_SOURCE));
+        assert!(
+            src.contains("starved_blocks=%u")
+                && src.contains(
+                    "asrc_compensator_should_log(&source->asrc, &cumulative_correction_ms, &starved_block_count)"
+                ),
+            "{OBS_SOURCE}: #960 — the asrc: telemetry log line no longer reports \
+             starved_blocks=N; a starved source would silently poison the log again with no \
+             indication anything was rejected."
         );
     }
 
@@ -2796,6 +2851,31 @@ mod distroav_source {
                 wf.contains("source->asrc_enabled = true;"),
                 "{wf_path}: #912 — the build no longer gates on the ASRC default-on init \
                  (source->asrc_enabled = true;); re-add the pwsh #912 gate."
+            );
+        }
+    }
+
+    #[test]
+    fn windows_genlock_workflows_gate_on_asrc_starvation_guard() {
+        // #960: BOTH the slow and fast Windows production builds must re-assert the ASRC
+        // starvation-guard tokens in pwsh BEFORE their build (this Linux Rust guard can't compile
+        // on the runner) — a `git subtree pull` (#44) or hand-edit that silently reverts the
+        // guard would ship an obs.dll where a starved source rails the servo again, exactly the
+        // #960 defect. Mirror of every other lock-step guard here (see #912's own version above).
+        for (wf_const, wf_path) in [
+            (WINDOWS_GENLOCK_WF, "windows-genlock.yml"),
+            (WINDOWS_GENLOCK_FAST_WF, "windows-genlock-fast.yml"),
+        ] {
+            let wf = squish(&vendor_file(wf_const));
+            assert!(
+                wf.contains("ASRC_MAX_SANE_INSTANTANEOUS_PPM 100000.0"),
+                "{wf_path}: #960 — the build no longer gates on the starvation-guard sanity \
+                 ceiling (ASRC_MAX_SANE_INSTANTANEOUS_PPM); re-add the pwsh #960 gate."
+            );
+            assert!(
+                wf.contains("starved_blocks=%u"),
+                "{wf_path}: #960 — the build no longer gates on the starved_blocks telemetry \
+                 field reaching the asrc: log line; re-add the pwsh #960 gate."
             );
         }
     }
