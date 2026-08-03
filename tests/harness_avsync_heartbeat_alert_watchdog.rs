@@ -397,27 +397,34 @@ impl Harness {
     }
 
     fn run_main(&self) -> (i32, String, String) {
-        self.run_main_with(&[])
+        self.run_bash_body(". \"$SCRIPT\"\nmain")
     }
 
-    fn run_main_with(&self, extra_env: &[(&str, &str)]) -> (i32, String, String) {
+    // #968 -- DRY_RUN=1 is a plain shell variable the script's arg-parsing case statement sets
+    // from a positional arg, never read from the environment, so injecting it means prepending it
+    // to the sourced script body (not an env var) -- shared here so every dry-run test reuses the
+    // SAME fake-bin + fixture wiring as run_main() instead of duplicating the whole Command::new
+    // setup per call site.
+    fn run_dry_run(&self) -> (i32, String, String) {
+        self.run_bash_body(". \"$SCRIPT\"\nDRY_RUN=1\nmain")
+    }
+
+    fn run_bash_body(&self, body: &str) -> (i32, String, String) {
         let path = format!(
             "{}:{}",
             self.fake_bin.path().display(),
             std::env::var("PATH").unwrap_or_default()
         );
-        let mut cmd = Command::new("bash");
-        cmd.arg("-c")
-            .arg(". \"$SCRIPT\"\nmain")
+        let out = Command::new("bash")
+            .arg("-c")
+            .arg(body)
             .env("SCRIPT", script())
             .env("AVSYNC_HEARTBEAT_STATE_FILE", &self.state_file)
             .env("AIRULESET_NOTIFY", "/dev/null/does-not-matter")
             .env("AVSYNC_DISCORD_ENV", &self.discord_env_file)
-            .env("PATH", path);
-        for (k, v) in extra_env {
-            cmd.env(k, v);
-        }
-        let out = cmd.output().expect("run bash harness");
+            .env("PATH", path)
+            .output()
+            .expect("run bash harness");
         (
             out.status.code().unwrap_or(-1),
             String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -546,22 +553,8 @@ fn recovery_then_a_new_outage_alerts_again() {
 #[test]
 fn dry_run_never_calls_notify() {
     let h = Harness::new(STALE_BODY, STALE_BODY);
-    let path = format!(
-        "{}:{}",
-        h.fake_bin.path().display(),
-        std::env::var("PATH").unwrap_or_default()
-    );
-    let out = Command::new("bash")
-        .arg("-c")
-        .arg(". \"$SCRIPT\"\nDRY_RUN=1\nmain")
-        .env("SCRIPT", script())
-        .env("AVSYNC_HEARTBEAT_STATE_FILE", &h.state_file)
-        .env("AIRULESET_NOTIFY", "/dev/null/does-not-matter")
-        .env("AVSYNC_DISCORD_ENV", &h.discord_env_file)
-        .env("PATH", path)
-        .output()
-        .expect("run bash harness");
-    assert!(out.status.success());
+    let (code, _out, err) = h.run_dry_run();
+    assert_eq!(code, 0, "stderr={err}");
     assert_eq!(
         h.notify_call_count(),
         0,
@@ -727,31 +720,16 @@ fn no_signal_and_timeout_and_in_sync_lines_never_forward_968() {
 #[test]
 fn dry_run_never_posts_a_forwardable_verdict_but_logs_the_decision_968() {
     let h = Harness::new(MEASURED_ZNIZ_BODY, &fresh_body("ok"));
-    let path = format!(
-        "{}:{}",
-        h.fake_bin.path().display(),
-        std::env::var("PATH").unwrap_or_default()
-    );
-    let out = Command::new("bash")
-        .arg("-c")
-        .arg(". \"$SCRIPT\"\nDRY_RUN=1\nmain")
-        .env("SCRIPT", script())
-        .env("AVSYNC_HEARTBEAT_STATE_FILE", &h.state_file)
-        .env("AIRULESET_NOTIFY", "/dev/null/does-not-matter")
-        .env("AVSYNC_DISCORD_ENV", &h.discord_env_file)
-        .env("PATH", path)
-        .output()
-        .expect("run bash harness");
-    assert!(out.status.success());
+    let (code, _out, err) = h.run_dry_run();
+    assert_eq!(code, 0, "stderr={err}");
     assert_eq!(
         h.discord_call_count(),
         0,
         "DRY_RUN=1 must never actually POST a forwardable verdict"
     );
-    let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("[dry-run] WOULD forward verdict"),
-        "must log the would-forward decision even though it never posts: {stderr}"
+        err.contains("[dry-run] WOULD forward verdict"),
+        "must log the would-forward decision even though it never posts: {err}"
     );
 }
 
