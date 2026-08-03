@@ -45,6 +45,11 @@
 /// silently ruined (issue 930's paired run).
 pub const PAINTER_WEDGE_THRESHOLD_S: f64 = 3.0;
 
+// Compile-time guarantee (not a runtime clippy::assertions_on_constants target): the threshold
+// must always give the existing 500ms wait_flip_complete() event timeout ample margin to unwind
+// on its own first, so this watchdog never double-reports that already-handled stall as a wedge.
+const _: () = assert!(PAINTER_WEDGE_THRESHOLD_S >= 2.0);
+
 /// Process exit code used when the watchdog forces an exit because the painter loop is provably
 /// wedged. Distinct from `capture_wedge::CAPTURE_WEDGE_EXIT_CODE` (79) and the `#663`/self-heal
 /// codes (77/78) so `systemctl status`/journal forensics can always tell a painter-wedge exit
@@ -108,19 +113,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn threshold_is_meaningfully_above_the_existing_500ms_kms_event_timeout() {
-        // wait_flip_complete()'s own internal timeout is 500ms — the ordinary "flip issued, event
-        // never arrives" stall already self-resolves there (the painter thread returns Err and
-        // exits on its own well under 1s). This watchdog exists for the HARDER case (a block
-        // before that guard is ever reached) so its threshold must be meaningfully larger, never
-        // so tight that it double-reports the SAME already-handled 500ms timeout as a wedge.
-        assert!(
-            PAINTER_WEDGE_THRESHOLD_S >= 2.0,
-            "painter wedge threshold ({PAINTER_WEDGE_THRESHOLD_S}s) must give the existing 500ms \
-             wait_flip_complete() timeout ample margin to unwind on its own first"
-        );
-    }
+    // The "threshold is meaningfully above the existing 500ms KMS event timeout" guarantee is now
+    // a compile-time `const _: () = assert!(...)` right after PAINTER_WEDGE_THRESHOLD_S's
+    // definition (a runtime assert on a const value trips clippy::assertions_on_constants).
 
     // painter_wedge_message — pure message formatting.
 
