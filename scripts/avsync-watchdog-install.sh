@@ -38,7 +38,7 @@ build_boot_task_xml() {
 <?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
-    <Description>${description}</Description>
+    <Description>${task_name}: ${description}</Description>
   </RegistrationInfo>
   <Triggers>
     <BootTrigger>
@@ -68,9 +68,12 @@ XML
 
 # build_keepalive_task_xml TASK_NAME PS1_PATH INTERVAL_MIN -> a Task Scheduler XML that runs
 # PS1_PATH every INTERVAL_MIN minutes, indefinitely (Repetition trigger, mirrors
-# scripts/obs-self-heal-install.sh's own build_task_xml exactly). Ships with Enabled=false -- the
-# supervisor enables it only after live-verifying (per #812's design comment: a healthy-box dry
-# run must be a no-op, and a simulated-crash run must genuinely relaunch the missing process).
+# scripts/obs-self-heal-install.sh's own build_task_xml exactly) PLUS once at boot -- code review
+# caught that this design was stated in issue 812's own design comment ("every ~5 min PLUS a
+# BootTrigger") but the first cut shipped the Repetition trigger only; a fresh boot would otherwise
+# wait up to a full interval before the first keep-alive check ever ran. Ships with Enabled=false
+# -- the supervisor enables it only after live-verifying (per the design comment: a healthy-box
+# dry run must be a no-op, and a simulated-crash run must genuinely relaunch the missing process).
 build_keepalive_task_xml() {
   local task_name="$1" ps1_path="$2" interval_min="$3"
   local ps1_path_xml="${ps1_path//&/&amp;}"
@@ -81,6 +84,9 @@ build_keepalive_task_xml() {
     <Description>#812/#807 camera-box avsync-keepalive (${task_name}) -- periodic check-and-relaunch for watchdog.ps1 and avsync-vlc-monitor.ps1. Ships DISABLED; enable only after supervisor live-verify.</Description>
   </RegistrationInfo>
   <Triggers>
+    <BootTrigger>
+      <StartBoundary>2026-01-01T00:00:00</StartBoundary>
+    </BootTrigger>
     <TimeTrigger>
       <Repetition>
         <Interval>PT${interval_min}M</Interval>

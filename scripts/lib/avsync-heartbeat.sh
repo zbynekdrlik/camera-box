@@ -27,9 +27,18 @@ avsync_heartbeat_probe_cmd() {
 }
 
 # avsync_heartbeat_extract_segment PROBE_OUTPUT WHICH -> echoes the "watchdog" or "vlc" half of a
-# probe_cmd's combined output, split on the separator line. Empty when that half never appeared.
+# probe_cmd's combined output, split on the separator line. Empty when that half never appeared --
+# INCLUDING when the separator itself is missing entirely (a truncated/partial ssh read): without
+# the explicit guard below, the "watchdog" side's sed range (`1,/^SEP$/p`) would silently fall back
+# to "print everything to EOF, then drop the last line" instead of failing safe symmetrically with
+# its "vlc" sibling (whose range simply never matches and correctly prints nothing) -- caught by
+# code review, fixed here.
 avsync_heartbeat_extract_segment() {
   local out="$1" which="$2"
+  case "$out" in
+    *"$AVSYNC_HB_SEP"*) : ;;
+    *) return 0 ;;   # separator absent entirely -- fail safe: BOTH sides empty, never guess
+  esac
   case "$which" in
     watchdog) printf '%s\n' "$out" | sed -n "1,/^${AVSYNC_HB_SEP}\$/p" | sed '$d' ;;
     vlc)      printf '%s\n' "$out" | sed -n "/^${AVSYNC_HB_SEP}\$/,\$p" | sed '1d' ;;
@@ -47,11 +56,18 @@ avsync_heartbeat_last_epoch() {
 # 1 (fresh). Inverted sense vs a plain "is_fresh" check ON PURPOSE -- this lib's caller wants
 # "wedged=1 means alert", so a missing/corrupt heartbeat must default to the ALERTING answer, never
 # to "fresh" (this repo's standing fail-loud-not-guess convention -- never silently assume health).
+#
+# Each of the three args is validated INDIVIDUALLY (never by concatenating them first) -- code
+# review caught that the original `case "$epoch$now$stale" in *[!0-9]*|"")` concatenation let an
+# EMPTY $epoch silently vanish from the joined string instead of tripping the guard, so bash
+# arithmetic below then read the missing epoch as 0 and could compute a small, in-window "age"
+# purely by chance (masked in the original unit tests because their chosen $now/$stale happened to
+# still land the resulting age outside the window; a smaller $now exposed it reading FRESH, wrongly).
 avsync_heartbeat_is_stale() {
   local epoch="${1:-}" now="${2:-}" stale="${3:-}"
-  case "$epoch$now$stale" in
-    *[!0-9]* | "") return 0 ;;   # any non-digit (or empty) field -> not provably fresh -> STALE
-  esac
+  case "$epoch" in '' | *[!0-9]*) return 0 ;; esac
+  case "$now" in '' | *[!0-9]*) return 0 ;; esac
+  case "$stale" in '' | *[!0-9]*) return 0 ;; esac
   local age=$(( now - epoch ))
   [ "$age" -ge 0 ] && [ "$age" -le "$stale" ] && return 1   # fresh
   return 0   # stale (negative age -- clock skew/corrupt -- or genuinely too old)
