@@ -39,6 +39,7 @@ Rust app for embedded NDI cameras (CAM1-4): multi-camera NDI streaming with soft
 - `DockLockCorrector` hold-band boundary tuning (verify what the test suite pins before closing/widening an interval — degenerate vs ordinary margin, #942) → `.claude/rules/dock-lock-hold-band.md` (auto-loads on its `paths:`)
 - Inspecting AND deploying live rig state without fooling yourself (a merged `vendor/<plugin>/**` fix is NOT deployed; nested PowerShell over ssh fails SILENTLY; the painter is `frame-probe` on DRM so an all-zero `/dev/fb0` proves nothing; the plain-ssh FULL-BUNDLE deploy recipe; a hook-blocked Bash call runs none of its heredocs either) → `.claude/rules/rig-state-inspection.md` (auto-loads on its `paths:`)
 - Heartbeat wedge-watchdog recipe for a NEW blocking-hardware call site that can hang forever (the D-state/no-signal-can-preempt root cause, the 4-piece pattern, threshold-vs-existing-inner-timeout sizing, the `const _: () = assert!(...)` clippy gotcha, #945/#936) → `.claude/rules/wedge-watchdog-pattern.md` (auto-loads on its `paths:`)
+- Stream-box avsync watchdog + VLC monitor + dev1 heartbeat alert (Task Scheduler keep-alive idiom, generalizing the dev1-side alert topology to a heartbeat FILE, the multi-file-one-ssh-call `type ... & echo SEP & type ...` trick, bounding an external call by what needs killing, #812/#807) → `.claude/rules/avsync-monitoring.md` (auto-loads on its `paths:`)
 
 ## DO NOT DELETE These Files
 

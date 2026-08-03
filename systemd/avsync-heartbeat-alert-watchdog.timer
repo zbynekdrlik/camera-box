@@ -1,0 +1,16 @@
+[Unit]
+# Fires the #812/#807 stream-box avsync heartbeat alert every 5 min. Confirm threshold 1 (a stale
+# heartbeat pages within ~5 minutes of onset) matches the #882 imag-nb sibling's own reasoning --
+# closing the exact gap that let the real incident (avsync-watchdog task never firing since
+# 2026-07-24, log frozen since 2026-07-28, discovered only after a live event) go unalerted.
+Description=Run the camera-box avsync heartbeat alert every 5 min (#812/#807)
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=20s
+Persistent=false
+
+[Install]
+WantedBy=timers.target
