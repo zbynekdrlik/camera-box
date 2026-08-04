@@ -313,7 +313,12 @@ if pattern == "bursty":
             i += 1
         time.sleep(0.1)
 elif pattern == "crash":
-    for i in range(3):
+    # Emits a FULL, cleanly-paced run (same cadence as "steady") so elapsed/cadence alone would
+    # look perfectly fine -- then exits nonzero AFTER all frames, simulating e.g. a late
+    # fbdev/alsa write failure. This is the genuine false-pass scenario: without a returncode
+    # check, a crash-after-good-data run would be silently reported as a PASS.
+    for i in range(n):
+        time.sleep(1.0 / 60.0)
         emit(i)
     sys.exit(3)
 else:
