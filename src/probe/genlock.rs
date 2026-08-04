@@ -1729,8 +1729,11 @@ impl ReleaseCadence {
             // to the pre-#859 bare margin rather than inventing a threshold.
             return Self::QDEPTH_RELOCK_MARGIN;
         };
+        // #940 piece 2: `n` is ALREADY measured above (used for the steady-depth SOURCE-rate
+        // scaling via src_num/src_den) — reuse it for the MARGIN scaling too. Mirror of the C
+        // `genlock_backlog_relock_qdepth`.
         let threshold =
-            crate::genlock_backlog::backlog_relock_threshold(reserve_ms, src_num, src_den);
+            crate::genlock_backlog::backlog_relock_threshold(reserve_ms, src_num, src_den, n);
         usize::try_from(threshold).unwrap_or(usize::MAX)
     }
 

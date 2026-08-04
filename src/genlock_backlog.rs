@@ -105,10 +105,10 @@ pub fn backlog_relock_threshold(
     latency_ms: u32,
     fps_num: u32,
     fps_den: u32,
-    _source_multiple: u32,
+    source_multiple: u32,
 ) -> u64 {
-    // #940 RED: source_multiple not yet applied -- pre-fix (bare, unscaled margin) behaviour.
-    steady_depth_frames(latency_ms, fps_num, fps_den).saturating_add(QDEPTH_RELOCK_MARGIN)
+    let margin = QDEPTH_RELOCK_MARGIN.saturating_mul(source_multiple.max(1) as u64);
+    steady_depth_frames(latency_ms, fps_num, fps_den).saturating_add(margin)
 }
 
 /// #859 follow-up — the SLEW-LIMITED SETTLE-BACK DRAIN.
