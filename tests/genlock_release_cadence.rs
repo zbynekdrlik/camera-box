@@ -468,3 +468,62 @@ fn relock_events_log_phase_evidence_940() {
         );
     }
 }
+
+#[test]
+fn ts_align_deadline_is_phase_pinned_to_the_wall_grid_940() {
+    // #940 piece 3 — the structural fix. The pre-#940 ts-align reserve deadline was a raw
+    // continuous quantity (wall_now - reserve), making "which frame releases now" a
+    // function of the EXACT sub-ms instant a lock/relock happens to fire -- a hidden
+    // per-lock-episode phase, re-sampled on every ACQUIRE/RELOCK, observed live as a
+    // ±1-2-frame A/V-offset step between lock episodes at deep latency. Quantizing the
+    // deadline to the canvas frame GRID (floor(deadline/interval)*interval) makes it a
+    // pure function of wall time instead. The pure floor/hysteresis math is Tier-0
+    // unit-tested in src/genlock_backlog.rs; this guards the C wiring.
+    let src = squish(&vendor_file(OBS_SOURCE));
+    assert!(
+        src.contains("static inline uint64_t genlock_phase_pin_deadline("),
+        "{OBS_SOURCE}: #940 piece 3 — the grid-quantization helper \
+         (genlock_phase_pin_deadline) is gone; the deadline reverted to the raw continuous \
+         quantity that re-samples a different phase every lock episode. Mirror: \
+         src/genlock_backlog.rs phase_pinned_deadline (Tier-0 unit-tested)."
+    );
+    // The floor-to-grid ARITHMETIC itself (not just the helper's existence) — a subtree
+    // pull or a "simplify this" edit could keep the helper but neuter its body.
+    assert!(
+        src.contains("(deadline_ns / interval_ns) * interval_ns"),
+        "{OBS_SOURCE}: #940 piece 3 — genlock_phase_pin_deadline no longer computes the \
+         floor-to-grid quotient (deadline_ns / interval_ns) * interval_ns; re-apply."
+    );
+    // Wired IN at the ts-align call site for the reserve_ms>0 (deep-latency, ms-granular)
+    // path — only defining the helper without calling it is dead code (same "assert the
+    // call site, not just the helper" discipline #859 already applies).
+    assert!(
+        src.contains("present_ts = genlock_phase_pin_deadline(present_ts, interval);"),
+        "{OBS_SOURCE}: #940 piece 3 — genlock_phase_pin_deadline is defined but not CALLED \
+         from the ts-align reserve-ms release path; the deadline would stay un-quantized \
+         and the deep-latency phase step would persist."
+    );
+    // The hysteresis slack on the grid comparison — without it, a frame captured
+    // essentially exactly on a grid line flips due/not-due from ordinary sub-ms
+    // render-tick jitter on the floor division (the design's own documented risk).
+    assert!(
+        src.contains("#define GENLOCK_PHASE_PIN_HYSTERESIS_NS 5000000ULL"),
+        "{OBS_SOURCE}: #940 piece 3 — the grid-comparison hysteresis constant \
+         (GENLOCK_PHASE_PIN_HYSTERESIS_NS, must stay 5ms) is missing or changed; without \
+         it a frame landing exactly on a grid line could flap due/not-due. Mirror: \
+         src/genlock_backlog.rs PHASE_PIN_HYSTERESIS_NS."
+    );
+    assert!(
+        src.contains("array[due]->timestamp <= present_ts + due_hysteresis_ns"),
+        "{OBS_SOURCE}: #940 piece 3 — the due-computation loop no longer applies the \
+         grid-comparison hysteresis (due_hysteresis_ns); re-apply."
+    );
+    // Gated to the reserve_ms>0 path ONLY — the (effectively unused on this build's
+    // #257-floored latency) frame-count preload path must stay byte-identical.
+    assert!(
+        src.contains("reserve_ms > 0 ? GENLOCK_PHASE_PIN_HYSTERESIS_NS : 0"),
+        "{OBS_SOURCE}: #940 piece 3 — the grid hysteresis is no longer gated to the \
+         reserve_ms>0 (ms-granular deep-latency) path; the frame-count preload path must \
+         stay byte-identical to its pre-#940 behaviour."
+    );
+}
