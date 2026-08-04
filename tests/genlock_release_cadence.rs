@@ -537,7 +537,9 @@ fn backlog_relock_margin_scales_with_the_source_multiple_940() {
     // latency, while a 30-into-30 source (n=1) stays byte-identical.
     let src = squish(&vendor_file(OBS_SOURCE));
     assert!(
-        src.contains("return (size_t)(depth + (uint64_t)GENLOCK_QDEPTH_RELOCK_MARGIN * (uint64_t)n);"),
+        src.contains(
+            "return (size_t)(depth + (uint64_t)GENLOCK_QDEPTH_RELOCK_MARGIN * (uint64_t)n);"
+        ),
         "{OBS_SOURCE}: #940 piece 2 — genlock_backlog_relock_qdepth no longer scales the \
          margin by the measured source multiple n; re-apply. Mirror: \
          src/genlock_backlog.rs backlog_relock_threshold (Tier-0 unit-tested)."

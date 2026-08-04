@@ -5053,7 +5053,15 @@ static size_t genlock_backlog_relock_qdepth(const obs_source_t *source, uint32_t
 					 : (source->genlock_last_known_n >= 1 ? source->genlock_last_known_n : 1);
 	const uint64_t held_ns = (uint64_t)reserve_ms * 1000000ULL * (uint64_t)n;
 	const uint64_t depth = (held_ns + interval / 2) / interval;
-	return (size_t)(depth + GENLOCK_QDEPTH_RELOCK_MARGIN);
+	/* camera-box #940 piece 2: scale the MARGIN by the source's own rate multiple n -- a
+	 * 60-into-30 camera ingest queues an ARRIVAL SURPLUS of n frames per canvas tick (plus
+	 * measured cam->strih jitter that bunches them further), which permanently exceeds the
+	 * bare (n==1) margin at the rig's shallow per-source latencies and fires the
+	 * backlog-relock branch on ~every tick (~35-70/5min window, live #940 audit). n==1
+	 * (every 30-into-30 source, incl. this ticket's own 'NDI 2ME PGM') is BYTE-IDENTICAL to
+	 * the pre-#940 threshold. Mirror: src/genlock_backlog.rs backlog_relock_threshold
+	 * (Tier-0 unit-tested). */
+	return (size_t)(depth + (uint64_t)GENLOCK_QDEPTH_RELOCK_MARGIN * (uint64_t)n);
 }
 
 /* camera-box #859 follow-up: SLEW-LIMITED SETTLE-BACK DRAIN decision — should this tick shed
