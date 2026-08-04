@@ -7142,5 +7142,37 @@ windows-genlock.yml and windows-genlock-fast.yml, for all three pieces.
 
 CI: Linux genlock build + Windows genlock FAST + Windows manifest gate all green (vendored-C
 compiles + gates pass on both platforms). Rust CI (Test/Coverage/Lint/etc.) green after the
-fixture fix. Full-path E2E (hardware) gate still running at end of this worker's session -- see
-PR #973 for final status.
+fixture fix. Full-path E2E (hardware) gate failed rig-side (fleet preflight, cam2
+camera-box.service inactive) on the first attempt -- traced to a premature docs-only push
+cancelling the prior E2E run mid-cleanup (see the PR's #940 issue comment for the full trace);
+supervisor owns the rig repair + rerun.
+
+Deep review findings (`superpowers:requesting-code-review`, fresh subagent, independently ran the
+test suite at intermediate commits): 0 critical, 2 important (both addressed same session), 3
+informational/confirmed-sound.
+- Important 1 (fixed, `185036d55`): commit `38ea3e2b3`'s correctness fix (scale the log
+  subtraction by `n_for_log`) shipped a Rust-side anchor but NO matching pwsh anchor in either
+  Windows workflow yml -- added.
+- Important 2 (process note, not re-fixed -- same convention as the earlier #968 entry above):
+  two commit messages misstate what they contain, discovered via `git show --stat` at each SHA.
+  `353e298f9`'s message says the C helper (`genlock_phase_pin_deadline`/
+  `GENLOCK_PHASE_PIN_HYSTERESIS_NS`) was "already added to obs-source.c as groundwork (this
+  commit's parent)" -- false; that commit's own diff touches ONLY tests/genlock_release_cadence.rs,
+  and its parent (`3f863a968`) touches only src/genlock_backlog.rs. The C helper was sitting
+  UNCOMMITTED in the working tree at both points and was first actually committed by `6923bd6e3`.
+  `6923bd6e3`'s message claims "cargo test --lib genlock_backlog::tests 17/17 green (piece 3
+  parts)" -- true of the WORKING TREE at the time, but that commit's own diff does not touch
+  src/genlock_backlog.rs at all, so checking out `6923bd6e3` fresh reproduces 16/17 (the piece-3
+  Rust GREEN restoration was never committed on its own -- it landed bundled inside the NEXT
+  commit, `9d343cbc8`, nominally piece 2's RED commit, whose diff necessarily carries both the
+  leftover piece-3 restoration and the new piece-2 stub together). Root cause: after confirming a
+  RED/GREEN pair locally, the GREEN Rust state was left uncommitted while work moved on to the C
+  side, and the next `git commit -- <path>` pathspec (which commits a path's FULL CURRENT
+  working-tree content, the exact top-level-CLAUDE.md GOTCHA) silently absorbed it. No shipped
+  behavior is wrong (final HEAD state is correct and fully tested at every SHA that actually
+  matters for CI), but a `git bisect` against this range would be misled at `6923bd6e3`/`353e298f9`.
+  Not re-fixed (history stays append-only per this repo's convention); documented here instead.
+
+Post-review re-run: `cargo fmt --all --check` / `cargo clippy --all-targets -- -D warnings`
+(default features) clean; `cargo test --lib genlock_backlog::tests` 20/20 ok; `cargo test --test
+genlock_release_cadence` 12/12 ok.
