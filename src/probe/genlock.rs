@@ -2356,9 +2356,16 @@ mod tests {
 
         // Lock the cadence, then feed a genuine BACKLOG STORM (> the backlog threshold in frames, all aged
         // past the reserve so `due > 0`) — the relock branch.
+        //
+        // #940 piece 2: the threshold this queue must exceed is now
+        // steady_depth_frames(...) + QDEPTH_RELOCK_MARGIN * n (n=2 here, a confirmed
+        // 60-into-30 source) instead of the pre-#940 bare + QDEPTH_RELOCK_MARGIN — at this
+        // fixture's shallow reserve_ms=3, steady_depth_frames rounds to 0, so the threshold
+        // is QDEPTH_RELOCK_MARGIN * 2. `* 2 + 3` reliably exceeds it (was `+ 3` pre-#940,
+        // when the threshold was the bare QDEPTH_RELOCK_MARGIN).
         cadence.locked_next_boundary_ns = Some(2_000_000_000);
         let base = 3_000_000_000u64;
-        let mut queue: VecDeque<u64> = (0..(ReleaseCadence::QDEPTH_RELOCK_MARGIN as u64 + 3))
+        let mut queue: VecDeque<u64> = (0..(ReleaseCadence::QDEPTH_RELOCK_MARGIN as u64 * 2 + 3))
             .map(|i| base + i * SRC)
             .collect();
         let wall_now = base + 100 * SRC; // every queued frame is due
