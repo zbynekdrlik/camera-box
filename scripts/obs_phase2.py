@@ -2100,6 +2100,33 @@ def program_rendered_input(a):
     print(src)
 
 
+def assert_program_nonblack(a):
+    """#901 gap 1: optical proof the current (or `a.scene`, if given) program scene is genuinely
+    rendering non-black content — a READ-ONLY verification call, never a control op (no
+    SetCurrentProgramScene, unlike switch()). Reuses the EXIST­ING `_assert_program_nonblack`
+    helper — the same polled luma-peak self-check switch()/prod_scene() already use — so a caller
+    that just wants proof "something real is on program right now" gets the identical, already-
+    calibrated logic rather than a second, divergent black-check.
+
+    Live evidence this closes (2026-08-04 supervisor comment on issue 901): a painter process can
+    be alive, its pidfile correct, its marker CSV growing, and ALSA RUNNING, while the actual
+    rendered program is BLACK for the whole run — process-alive is not QR-on-screen."""
+    ws = _conn(a.host, a.password)
+    try:
+        scene = a.scene or _rpc(ws, "GetCurrentProgramScene").get("currentProgramSceneName", "")
+        if not scene:
+            raise SystemExit(f"[obs] {a.host}: could not resolve a program scene to check")
+        _assert_program_nonblack(
+            ws, a.host, scene, a.label or "#901 chain-verify",
+            "The camera/source feeding it is not delivering real frames — process-alive is not "
+            "proof of QR-on-screen (issue 901).",
+            min_mean=a.min_mean,
+        )
+    finally:
+        ws.close()
+    print(f"PASS: {a.host} program scene '{scene}' NON-BLACK")
+
+
 def program_scene(a):
     """#281 Fix#3: print the current program scene name to stdout (one line).
 
@@ -2121,7 +2148,7 @@ def main():
     for name in (
         "setup", "teardown", "record", "prod-scene", "switch", "program-scene",
         "stream-status", "latency-check", "open-projectors", "ensure-studio-mode-on",
-        "program-rendered-input",
+        "program-rendered-input", "assert-program-nonblack",
     ):
         p = sub.add_parser(name)
         p.add_argument("--host", required=True)
@@ -2129,6 +2156,13 @@ def main():
         if name == "program-rendered-input":
             # #901 gap 3: which scene to inspect — omitted -> the CURRENT program scene.
             p.add_argument("--scene", default="")
+        if name == "assert-program-nonblack":
+            # #901 gap 1: which scene to check — omitted -> the CURRENT program scene (read-only,
+            # never switches). --label tags the log lines; --min-mean overrides the shared
+            # helper's env-resolved default floor (see _assert_program_nonblack's own docstring).
+            p.add_argument("--scene", default="")
+            p.add_argument("--label", default="")
+            p.add_argument("--min-mean", type=float, default=None)
         if name == "record":
             p.add_argument(
                 "--action", required=True,
@@ -2221,7 +2255,8 @@ def main():
      "stream-status": stream_status, "latency-check": latency_check,
      "open-projectors": open_projectors,
      "ensure-studio-mode-on": ensure_studio_mode_on,
-     "program-rendered-input": program_rendered_input}[a.cmd](a)
+     "program-rendered-input": program_rendered_input,
+     "assert-program-nonblack": assert_program_nonblack}[a.cmd](a)
 
 
 if __name__ == "__main__":
