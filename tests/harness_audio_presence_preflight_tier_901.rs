@@ -84,7 +84,10 @@ fn thresholds_are_overridable() {
 fn dead_message_names_the_chain_and_never_claims_merely_quiet() {
     let (_ok, m) = run("audio_preflight_dead_message -91.0");
     for needle in ["mbc", "Dante", "901"] {
-        assert!(m.contains(needle), "dead message must mention {needle:?}: {m}");
+        assert!(
+            m.contains(needle),
+            "dead message must mention {needle:?}: {m}"
+        );
     }
     assert!(
         m.to_lowercase().contains("dead") || m.to_lowercase().contains("silen"),
@@ -103,5 +106,8 @@ fn quiet_message_notes_it_is_non_blocking_and_references_976() {
         m.to_lowercase().contains("warn") || m.to_lowercase().contains("proceed"),
         "quiet message must make clear this does not block: {m}"
     );
-    assert!(m.contains("-65"), "quiet message must include the measured level: {m}");
+    assert!(
+        m.contains("-65"),
+        "quiet message must include the measured level: {m}"
+    );
 }

@@ -144,6 +144,17 @@ RIG_MODE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # sit indefinitely in a test state with prod unprotected). Run an active E2E to keep it fresh.
 # shellcheck source=scripts/lib/rig-heartbeat.sh
 . "$RIG_MODE_DIR/lib/rig-heartbeat.sh"
+# #901: SINGLE SOURCE OF TRUTH for the measurement-audio-arrival tier decision (dead/quiet/
+# audible + message builders) — shared with recording-e2e.sh's own STRICT [4b2/8] preflight
+# (audio_preflight_is_silent etc., untouched), which sources the SAME file for the parse/probe
+# helpers verify_measurement_audio_arrives (below) reuses.
+# shellcheck source=scripts/lib/audio-presence-preflight.sh
+. "$RIG_MODE_DIR/lib/audio-presence-preflight.sh"
+# #901: win_ssh_run — the plain-ssh PowerShell execution helper (#703/#701) verify_measurement_
+# audio_arrives (below) reuses to run ffmpeg volumedetect on stream, mirroring recording-e2e.sh's
+# own [4b2/8] preflight call shape exactly.
+# shellcheck source=scripts/lib/win-ssh-exec.sh
+. "$RIG_MODE_DIR/lib/win-ssh-exec.sh"
 
 # --- pinned constants (overridable via env, but DEFAULTS are the single source of truth) -----------
 CAM_PW="${CAM_PW:-newlevel}"                 # dev-rig LAN root pw (same as the sibling e2e scripts)
@@ -500,6 +511,30 @@ IMAG_PROG_SOURCE="${IMAG_PROG_SOURCE:-NDI CAM1}"        # imag input showing cam
 IMAG_PROG_SCENE="${IMAG_PROG_SCENE:-Cam 1}"             # imag scene showing cam1 — routed to PROGRAM in TEST mode
 OBS_WS_PASSWORD="${OBS_WS_PASSWORD:-}"
 
+# #901: whole-chain TEST-mode verification constants (issue 901). STREAM_USER/STREAM_PW mirror
+# recording-e2e.sh's own defaults exactly (same box, same creds) — needed here because
+# verify_measurement_audio_arrives (below) drives a plain-ssh PowerShell call (win_ssh_run) on
+# stream to run ffmpeg volumedetect on a short probe recording, the SAME mechanism recording-
+# e2e.sh's [4b2/8] preflight already uses for the identical measurement.
+STREAM_USER="${STREAM_USER:-newlevel}"
+STREAM_PW="${STREAM_PW:-newlevel}"
+MBC_INPUT_NAME="${MBC_INPUT_NAME:-mbc}"                 # stream OBS input carrying the Dante mic
+# AUDIO_CHAIN_PROBE_SECS: a SHORT probe (default 5s) — rig-mode.sh test is a quick switch, not a
+# full preflight (recording-e2e.sh's own [4b2/8] uses 15s). AUDIO_CHAIN_DEAD_DB/_WARN_DB feed
+# audio_preflight_tier (scripts/lib/audio-presence-preflight.sh): below DEAD = hard FAIL (a
+# genuinely dead chain — the original 2026-07-31 "sound card off" incident); DEAD..WARN = report
+# only, non-blocking (the current issue-976 known ~26dB degradation must never wedge a TEST
+# restore); >= WARN = a clean PASS.
+AUDIO_CHAIN_PROBE_SECS="${AUDIO_CHAIN_PROBE_SECS:-5}"
+AUDIO_CHAIN_DEAD_DB="${AUDIO_CHAIN_DEAD_DB:--80}"
+AUDIO_CHAIN_WARN_DB="${AUDIO_CHAIN_WARN_DB:--60}"
+# RIG_MODE_AUDIO_CHAIN_ENABLE: an individual opt-out for the measurement-audio-arrival probe
+# specifically (the slowest of the #901 chain checks, and the only one needing Windows ssh
+# creds) — mirrors recording-e2e.sh's own AUDIO_PREFLIGHT_ENABLE convention for the identical
+# class of preflight. The other #901 checks (optical, mbc transport, program-scene assert,
+# rendered-input burn) are cheap WS-only calls and are not individually gateable.
+RIG_MODE_AUDIO_CHAIN_ENABLE="${RIG_MODE_AUDIO_CHAIN_ENABLE:-1}"
+
 # obs_burn_targets -> the host=ip=source burn triples, one per line "ip|source|box".
 obs_burn_targets() {
   printf '%s|%s|%s\n' "$STRIH_IP" "$STRIH_PROG_SOURCE" strih
@@ -622,6 +657,17 @@ enforce_strih_ndi_mapping() {
   python3 "$here/set-ndi-mapping.py" --host "$STRIH_IP" --password "$OBS_WS_PASSWORD" \
     --active "$CAMERA_ACTIVE_SET" \
     2>&1 | sed 's/^/    [strih ndi-map] /' || rc=$?
+  # #901 gap 4: ALSO run a REPORT-ONLY verify sweep across the FULL 7-camera table (not just the
+  # currently active subset) — live evidence: an INACTIVE camera's mangled NDI pin ('NDI cam5'
+  # ndi_source_name mangled to 'h') went uncaught because only the active subset was ever
+  # checked. Never hard-fails: an unused/offline camera's stale label carries no operational
+  # risk, and hard-failing here would wedge every TEST restore over cosmetic drift on hardware
+  # nobody is using right now (same "don't gate on something that doesn't matter operationally"
+  # principle as the audio-chain tiering below).
+  echo "[obs strih ${STRIH_IP}] #901 report-only full-table drift sweep (ALL 7 known cameras, active or not):"
+  python3 "$here/set-ndi-mapping.py" --host "$STRIH_IP" --password "$OBS_WS_PASSWORD" \
+    --active "cam1 cam2 cam3 cam4 cam5 cam6 cam7" --verify-only \
+    2>&1 | sed 's/^/    [strih ndi-map full-table] /' || true
   return $rc
 }
 
@@ -639,6 +685,138 @@ set_imag_test_program() {
   python3 "$here/obs_phase2.py" switch --host "$IMAG_IP" --program-scene "$IMAG_PROG_SCENE" \
     --password "$OBS_WS_PASSWORD" 2>&1 | sed 's/^/    [imag program] /' || rc=$?
   return $rc
+}
+
+# --- #901: whole-chain verification (issue 901) — TEST mode used to prove only the CAM side
+# (painter alive, ALSA RUNNING, marker CSV growing) and report "cam side PASS" as a full-rig
+# green. Live evidence closed here: 2026-07-31 the mbc sound card was off and TEST mode still
+# PASSED; 2026-08-04 the painter was alive + marker CSV growing while the program was BLACK for a
+# whole 150s recording, stream's program scene was left on 'PRO', burns landed on non-rendered
+# inputs, and an inactive camera's mangled NDI pin went uncaught. The five functions below close
+# each of those gaps; see the design comment on issue 901 for the full root-cause -> approach ->
+# rejected-alternative writeup.
+
+# verify_stream_program_phase2 -> #901 gap 2: ASSERT + SET stream's PROGRAM to PHASE2-PROBE (the
+# canonical obs_phase2.py probe scene, same SCENE constant it already owns) instead of the old
+# printed-but-never-enforced confirm-the-scene prose hint this replaces. Reuses the EXISTING
+# `switch` action (SetCurrentProgramScene + its #312 polled non-black self-check) — the identical
+# mechanism set_imag_test_program above already uses for imag, applied to stream here.
+verify_stream_program_phase2() {
+  local here rc=0
+  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || here=""
+  echo "[obs stream ${STREAM_IP}] #901 assert+set PROGRAM = 'PHASE2-PROBE' (was: a printed hint, never enforced)"
+  python3 "$here/obs_phase2.py" switch --host "$STREAM_IP" --program-scene "PHASE2-PROBE" \
+    --password "$OBS_WS_PASSWORD" 2>&1 | sed 's/^/    [stream program] /' || rc=$?
+  return $rc
+}
+
+# resolve_and_burn_rendered_inputs -> #901 gap 3: for strih + stream, resolve which source is
+# ACTUALLY rendered on program right now (obs_phase2.py program-rendered-input) and, if it
+# differs from the pinned STRIH_PROG_SOURCE/STREAM_PROG_SOURCE default, ALSO burn it. ADDITIVE
+# ONLY — the fixed-target burn toggled earlier in do_test (toggle_burn test, unchanged) stays the
+# safety net; every existing burn-state check keyed on the fixed names is untouched. Live
+# evidence this closes: strih's program scene rendered 'NDI cam2' while the pinned default burn
+# target was 'NDI cam1' — the burn never reached the input actually on screen. Best-effort: a
+# resolution failure (an empty/misconfigured scene) WARNS, never aborts the TEST switch.
+resolve_and_burn_rendered_inputs() {
+  local here ip default_src box resolved rc out
+  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || here=""
+  while IFS='|' read -r ip default_src box; do
+    [ -n "$ip" ] || continue
+    rc=0
+    resolved="$(python3 "$here/obs_phase2.py" program-rendered-input --host "$ip" \
+      --password "$OBS_WS_PASSWORD" 2>&1)" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+      echo "WARNING: [#901] ${box}: could not resolve the actually-rendered program input (${resolved}) -- the pinned default '${default_src}' burn from earlier still stands." >&2
+      continue
+    fi
+    if [ "$resolved" = "$default_src" ]; then
+      echo "[obs ${box} ${ip}] #901 actually-rendered input matches the pinned default ('${resolved}') -- no extra burn needed."
+      continue
+    fi
+    echo "[obs ${box} ${ip}] #901 actually-rendered input ('${resolved}') DIFFERS from the pinned default ('${default_src}') -- burning it too:"
+    out="$(python3 "$here/obs_burn_filter.py" add --host "$ip" --input "$resolved" --password "$OBS_WS_PASSWORD" 2>&1)" || {
+      echo "WARNING: [#901] ${box}: failed to burn the actually-rendered input '${resolved}': ${out}" >&2
+      continue
+    }
+    echo "$out" | sed "s/^/    [${box} rendered-burn] /"
+  done < <(printf '%s|%s|%s\n' "$STRIH_IP" "$STRIH_PROG_SOURCE" strih; printf '%s|%s|%s\n' "$STREAM_IP" "$STREAM_PROG_SOURCE" stream)
+  return 0
+}
+
+# verify_optical_qr_visible -> #901 gap 1: the optical proof that strih's CURRENT program scene
+# is genuinely rendering non-black content — the same polled luma-peak self-check switch()/
+# set_imag_test_program above already use, applied WITHOUT switching scenes (read-only, never a
+# control op). Live evidence this closes: the cam2 painter PID was alive, its pidfile matched,
+# its marker CSV was growing, and ALSA reported RUNNING — yet the actual rendered program was
+# BLACK for the whole 150s recording. Process-alive is not QR-on-screen.
+verify_optical_qr_visible() {
+  local here
+  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || here=""
+  echo "[obs strih ${STRIH_IP}] #901 optical proof: current program scene must render NON-BLACK (camera actually sees content)"
+  python3 "$here/obs_phase2.py" assert-program-nonblack --host "$STRIH_IP" \
+    --password "$OBS_WS_PASSWORD" --label "#901 chain-verify" 2>&1 | sed 's/^/    [strih optical] /'
+}
+
+# verify_mbc_dante_transport -> #901 original item 2: hard-fail loud, BEFORE the measurement-
+# audio probe below, when the mbc Dante transport is unambiguously wrong (muted, or bound to
+# something other than the Dante Virtual Soundcard device) — a one-call OBS-WS read
+# (device_id + mute), no probe recording needed. "A muted/rerouted/renamed input is exactly as
+# fatal as a dead card" (issue 901).
+verify_mbc_dante_transport() {
+  local here
+  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || here=""
+  echo "[obs stream ${STREAM_IP}] #901 mbc Dante-transport check (device bound + unmuted): input='${MBC_INPUT_NAME}'"
+  python3 "$here/obs_phase2.py" mbc-input-check --host "$STREAM_IP" --input "$MBC_INPUT_NAME" \
+    --password "$OBS_WS_PASSWORD" 2>&1 | sed 's/^/    [stream mbc] /'
+}
+
+# verify_measurement_audio_arrives -> #901 original item 1, THE HEADLINE FIX: proves the
+# measurement audio genuinely ARRIVES at stream OBS, not just that cam2's emitter is running.
+# Reuses the SAME proven mechanism recording-e2e.sh's [4b2/8] preflight uses for the identical
+# measurement (a short probe recording + ffmpeg volumedetect, scripts/lib/audio-presence-
+# preflight.sh) rather than a live InputVolumeMeters event subscription this code-only pass could
+# not calibrate/verify against real hardware (see the issue 901 design comment). Three-tier,
+# NON-BLOCKING verdict via audio_preflight_tier (distinct from recording-e2e.sh's own STRICT
+# single-threshold gate, which is untouched): "dead" -> hard FAIL (the original 2026-07-31 "sound
+# card off" incident this ticket exists to close); "quiet" -> WARN + report, TEST mode proceeds
+# (the current, known issue-976 mbc degradation must never wedge a rig-mode restore); "audible"
+# -> PASS.
+verify_measurement_audio_arrives() {
+  if [ "$RIG_MODE_AUDIO_CHAIN_ENABLE" != "1" ]; then
+    echo "[#901] measurement-audio-arrival check SKIPPED (RIG_MODE_AUDIO_CHAIN_ENABLE=0)"
+    return 0
+  fi
+  local here path out db tier
+  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || here=""
+  echo "[obs stream ${STREAM_IP}] #901 measurement-audio ARRIVAL: short (${AUDIO_CHAIN_PROBE_SECS}s) probe recording + ffmpeg volumedetect"
+  python3 "$here/obs_phase2.py" record --host "$STREAM_IP" --action start --password "$OBS_WS_PASSWORD" >/dev/null
+  sleep "$AUDIO_CHAIN_PROBE_SECS"
+  path="$(python3 "$here/obs_phase2.py" record --host "$STREAM_IP" --action stop --password "$OBS_WS_PASSWORD" || true)"
+  if [ -z "$path" ]; then
+    echo "ERROR: $(audio_preflight_norec_message)" >&2
+    exit 1
+  fi
+  out="$(win_ssh_run "$STREAM_USER" "$STREAM_PW" "$STREAM_IP" "$(audio_preflight_volumedetect_ps "$path")" 2>&1 || true)"
+  db="$(audio_preflight_parse_max_db "$out" || true)"
+  win_ssh_run "$STREAM_USER" "$STREAM_PW" "$STREAM_IP" "$(audio_preflight_delete_ps "$path")" >/dev/null 2>&1 || true
+  if [ -z "$db" ]; then
+    echo "ERROR: $(audio_preflight_unreadable_message)" >&2
+    exit 1
+  fi
+  tier="$(audio_preflight_tier "$db" "$AUDIO_CHAIN_DEAD_DB" "$AUDIO_CHAIN_WARN_DB")"
+  case "$tier" in
+    "dead")
+      echo "ERROR: $(audio_preflight_dead_message "$db" "$AUDIO_CHAIN_DEAD_DB")" >&2
+      exit 1
+      ;;
+    "quiet")
+      echo "$(audio_preflight_quiet_message "$db" "$AUDIO_CHAIN_WARN_DB")"
+      ;;
+    "audible")
+      echo "    ok: mbc measurement audio AUDIBLE (max_volume ${db} dB >= ${AUDIO_CHAIN_WARN_DB} dB)"
+      ;;
+  esac
 }
 
 # print_genlock_relaunch_note MODE -> the genlock RELAUNCH step (printed, not run — a GUI OBS
@@ -764,17 +942,34 @@ do_test() {
   echo "[obs] #462 ensure imag-nb's PROGRAM shows cam1 (EPIC #466 Topology v2 — cam→imag proof):"
   set_imag_test_program
   echo
+  echo "[obs] #901 gap 2: assert+set stream's PROGRAM = PHASE2-PROBE (was a printed hint, now enforced):"
+  verify_stream_program_phase2
+  echo
+  echo "[obs] #901 gap 3: resolve + burn the ACTUALLY-RENDERED program inputs (in addition to the pinned defaults):"
+  resolve_and_burn_rendered_inputs
+  echo
+  echo "[obs] #901 gap 1: optical proof — strih's live program scene must render NON-BLACK:"
+  verify_optical_qr_visible
+  echo
+  echo "[obs] #901 item 2: mbc Dante-transport check (device bound + unmuted):"
+  verify_mbc_dante_transport
+  echo
+  echo "[obs] #901 item 1 (the headline fix): measurement-audio ARRIVAL end to end:"
+  verify_measurement_audio_arrives
+  echo
   print_genlock_relaunch_note test
   echo
   echo "ACHIEVED (cam side): cam2 painting dual-QR ${QR_SIZE}px on /dev/fb0 (pidfile ${PAINTER_PIDFILE})."
   echo "                     cam2 camera-box still ACTIVE in no-display mode (#291: NOT stopped — capture+emit keep running)."
   echo "                     cam2 QPSK audio marker RUNNING+VERIFIED on ${resolved_marker_device} (#420/#725: live-resolved device, cadence ${AUDIO_MARKER_CADENCE_TICKS} ticks, log ${AUDIO_MARKER_LOG})."
-  echo "                     -> verify cam2's NDI actually reaches strih on the rig (this switch does not prove the emit)."
   echo "                     cam1 (${CAM1_IP}) left on its DEPLOYED service (already at the 30 fps test rate)."
   echo "ACHIEVED (obs side): genlock_burn=true on strih + stream + imag program inputs (WebSocket, no relaunch)."
   echo "                     imag-nb (${IMAG_IP}) PROGRAM routed to '${IMAG_PROG_SCENE}' (cam1, #462)."
-  echo "NEXT: confirm the PHASE2-PROBE scene + native-1080p recording per the e2e/obs-ops skill -> TEST mode."
-  echo "RESULT: TEST mode — cam side PASS, burns ON."
+  echo "                     stream PROGRAM asserted+set to 'PHASE2-PROBE' (#901 — enforced, not merely recommended)."
+  echo "ACHIEVED (chain, #901): strih's live program scene confirmed NON-BLACK — the camera genuinely sees content, not just a live process."
+  echo "                        mbc Dante transport confirmed bound + unmuted on stream."
+  echo "                        measurement-audio arrival checked end to end (verdict printed above — PASS / non-blocking WARN / hard FAIL)."
+  echo "RESULT: TEST mode — WHOLE CHAIN verified (cam emission + OBS program/burn/mapping + optical proof + Dante transport + measurement-audio arrival)."
 }
 
 # event_mode_ledger_cleanup -> #723: read cam2's rig-test LEDGER and terminate EVERY registered

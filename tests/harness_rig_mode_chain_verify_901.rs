@@ -61,7 +61,10 @@ fn defines_mbc_input_name_and_audio_chain_thresholds() {
         r#"AUDIO_CHAIN_WARN_DB="${AUDIO_CHAIN_WARN_DB:--60}""#,
         "RIG_MODE_AUDIO_CHAIN_ENABLE=",
     ] {
-        assert!(s.contains(needle), "#901: rig-mode.sh must define {needle:?}");
+        assert!(
+            s.contains(needle),
+            "#901: rig-mode.sh must define {needle:?}"
+        );
     }
 }
 
