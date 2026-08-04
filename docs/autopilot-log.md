@@ -7105,3 +7105,74 @@ Post-merge deploy (supervisor): scp the fixed `avsync-keepalive.ps1` to the stre
 + one clean pass of the dev1 `avsync-heartbeat-alert-watchdog.timer`, re-verify the keepalive
 crash-relaunch once more with the stricter match, and drive a real measurable clip through the rig
 to prove one genuine verdict lands in the `alerts-snv` thread.
+
+## #940 -- deep-latency A/V offset steps between lock episodes (2026-08-04)
+
+Design (issuecomment-5178557305), implemented in order 1 -> 3 -> 2, PR #973:
+
+- `7eaed241b`/`c24c51a03`: piece 1 -- per-event `genlock-relock` log line (depth,
+  steady_depth_frames, due, erased, head_skew_ms, wall_grid_phase_ns) in the backlog-storm relock
+  branch. RED test `relock_events_log_phase_evidence_940`.
+- `3f863a968`/`353e298f9`/`6923bd6e3`: piece 3 -- `phase_pinned_deadline`/`PHASE_PIN_HYSTERESIS_NS`
+  (Tier-0, src/genlock_backlog.rs) + C `genlock_phase_pin_deadline`/`GENLOCK_PHASE_PIN_HYSTERESIS_NS`,
+  wired into the reserve_ms>0 ts-align release path only. RED tests
+  `phase_pinned_deadline_floors_to_the_grid_940` + siblings,
+  `ts_align_deadline_is_phase_pinned_to_the_wall_grid_940`.
+- `9d343cbc8`/`f583b4814`/`fd519c613`/`b7a01b3cc`: piece 2 -- `backlog_relock_threshold` gained an
+  explicit `source_multiple` param, scaling `QDEPTH_RELOCK_MARGIN` (byte-identical at multiple=1,
+  doubled at multiple=2 for a 60-into-30 camera ingest). Wired into both
+  `ReleaseCadence::backlog_relock_qdepth` (Rust, probe-gated) and C
+  `genlock_backlog_relock_qdepth`. RED tests
+  `arrival_surplus_aware_margin_doubles_for_a_60_into_30_source_940`,
+  `backlog_relock_margin_scales_with_the_source_multiple_940`.
+- `f2d1b6f6a`/`38ea3e2b3`: correctness fix found before push -- piece 1's log subtracted the
+  UNSCALED margin after piece 2 scaled it; fixed to re-derive `n` and subtract `MARGIN*n`.
+- `a1f1fc57f`: CI caught a stale #741 probe-gated test fixture
+  (`backlog_relock_preserves_the_confirmed_multiple_741`) whose 60-into-30 queue depth was tuned
+  to the OLD bare-margin threshold; updated to exceed the new (correctly higher) threshold.
+
+Decision: `src/probe/genlock.rs`'s `ReleaseCadence::tick` (CI-only probe-gated simulation, dozens
+of hardcoded exact-outcome tests, none locally re-verifiable under this repo's Tier-0 policy) is
+deliberately NOT wired to piece 3's grid-pin -- documented scope note at the call site. Piece 2
+IS wired into both sides (its Rust call site already measured the needed `n` for the steady-depth
+scaling, so reusing it for the margin was low-risk).
+
+Lock-step anchors: tests/genlock_release_cadence.rs (Tier-0) + pwsh gates in BOTH
+windows-genlock.yml and windows-genlock-fast.yml, for all three pieces.
+
+CI: Linux genlock build + Windows genlock FAST + Windows manifest gate all green (vendored-C
+compiles + gates pass on both platforms). Rust CI (Test/Coverage/Lint/etc.) green after the
+fixture fix. Full-path E2E (hardware) gate failed rig-side (fleet preflight, cam2
+camera-box.service inactive) on the first attempt -- traced to a premature docs-only push
+cancelling the prior E2E run mid-cleanup (see the PR's #940 issue comment for the full trace);
+supervisor owns the rig repair + rerun.
+
+Deep review findings (`superpowers:requesting-code-review`, fresh subagent, independently ran the
+test suite at intermediate commits): 0 critical, 2 important (both addressed same session), 3
+informational/confirmed-sound.
+- Important 1 (fixed, `185036d55`): commit `38ea3e2b3`'s correctness fix (scale the log
+  subtraction by `n_for_log`) shipped a Rust-side anchor but NO matching pwsh anchor in either
+  Windows workflow yml -- added.
+- Important 2 (process note, not re-fixed -- same convention as the earlier #968 entry above):
+  two commit messages misstate what they contain, discovered via `git show --stat` at each SHA.
+  `353e298f9`'s message says the C helper (`genlock_phase_pin_deadline`/
+  `GENLOCK_PHASE_PIN_HYSTERESIS_NS`) was "already added to obs-source.c as groundwork (this
+  commit's parent)" -- false; that commit's own diff touches ONLY tests/genlock_release_cadence.rs,
+  and its parent (`3f863a968`) touches only src/genlock_backlog.rs. The C helper was sitting
+  UNCOMMITTED in the working tree at both points and was first actually committed by `6923bd6e3`.
+  `6923bd6e3`'s message claims "cargo test --lib genlock_backlog::tests 17/17 green (piece 3
+  parts)" -- true of the WORKING TREE at the time, but that commit's own diff does not touch
+  src/genlock_backlog.rs at all, so checking out `6923bd6e3` fresh reproduces 16/17 (the piece-3
+  Rust GREEN restoration was never committed on its own -- it landed bundled inside the NEXT
+  commit, `9d343cbc8`, nominally piece 2's RED commit, whose diff necessarily carries both the
+  leftover piece-3 restoration and the new piece-2 stub together). Root cause: after confirming a
+  RED/GREEN pair locally, the GREEN Rust state was left uncommitted while work moved on to the C
+  side, and the next `git commit -- <path>` pathspec (which commits a path's FULL CURRENT
+  working-tree content, the exact top-level-CLAUDE.md GOTCHA) silently absorbed it. No shipped
+  behavior is wrong (final HEAD state is correct and fully tested at every SHA that actually
+  matters for CI), but a `git bisect` against this range would be misled at `6923bd6e3`/`353e298f9`.
+  Not re-fixed (history stays append-only per this repo's convention); documented here instead.
+
+Post-review re-run: `cargo fmt --all --check` / `cargo clippy --all-targets -- -D warnings`
+(default features) clean; `cargo test --lib genlock_backlog::tests` 20/20 ok; `cargo test --test
+genlock_release_cadence` 12/12 ok.

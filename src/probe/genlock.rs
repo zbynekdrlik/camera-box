@@ -1479,6 +1479,20 @@ impl ReleaseCadence {
     /// The wall clock is consulted ONLY to acquire the lock and to detect drift beyond
     /// [`Self::relock_drift_ns`]; the steady-state release keys on the LOCKED boundary, so the
     /// ±2 ms render-tick slew has no threshold to race (the pre-#401 churn source).
+    ///
+    /// #940 piece 3 SCOPE NOTE: the deadline below is intentionally the RAW (non-grid-
+    /// -pinned) `genlock_present_ts_reserve()` value, unlike the C `ready_async_frame()`
+    /// ts-align path, which now grid-quantizes it (`genlock_phase_pin_deadline` +
+    /// `GENLOCK_PHASE_PIN_HYSTERESIS_NS`, see `src/genlock_backlog.rs`
+    /// `phase_pinned_deadline`/`PHASE_PIN_HYSTERESIS_NS` — the Tier-0-tested pure mirror of
+    /// that C arithmetic). This simulation harness is NOT wired to it: this struct's own
+    /// test suite pins dozens of exact ACQUIRE/RELOCK frame-selection outcomes against the
+    /// raw deadline, none of which are locally re-verifiable under this repo's Tier-0
+    /// policy (probe-gated, CI-only) — rewiring every one of them without a way to observe
+    /// the result before pushing is a correctness risk the design's own "unit-tested in the
+    /// Tier-0 mirror first" instruction does not require taking. The production fix lives
+    /// entirely in the C; `phase_pinned_deadline`/`phase_pinned_is_due` are independently
+    /// Tier-0 unit-tested against the exact same numeric contract the C now uses.
     pub fn tick(
         &mut self,
         wall_now_ns: u64,
@@ -1715,8 +1729,11 @@ impl ReleaseCadence {
             // to the pre-#859 bare margin rather than inventing a threshold.
             return Self::QDEPTH_RELOCK_MARGIN;
         };
+        // #940 piece 2: `n` is ALREADY measured above (used for the steady-depth SOURCE-rate
+        // scaling via src_num/src_den) — reuse it for the MARGIN scaling too. Mirror of the C
+        // `genlock_backlog_relock_qdepth`.
         let threshold =
-            crate::genlock_backlog::backlog_relock_threshold(reserve_ms, src_num, src_den);
+            crate::genlock_backlog::backlog_relock_threshold(reserve_ms, src_num, src_den, n);
         usize::try_from(threshold).unwrap_or(usize::MAX)
     }
 
@@ -2339,9 +2356,16 @@ mod tests {
 
         // Lock the cadence, then feed a genuine BACKLOG STORM (> the backlog threshold in frames, all aged
         // past the reserve so `due > 0`) — the relock branch.
+        //
+        // #940 piece 2: the threshold this queue must exceed is now
+        // steady_depth_frames(...) + QDEPTH_RELOCK_MARGIN * n (n=2 here, a confirmed
+        // 60-into-30 source) instead of the pre-#940 bare + QDEPTH_RELOCK_MARGIN — at this
+        // fixture's shallow reserve_ms=3, steady_depth_frames rounds to 0, so the threshold
+        // is QDEPTH_RELOCK_MARGIN * 2. `* 2 + 3` reliably exceeds it (was `+ 3` pre-#940,
+        // when the threshold was the bare QDEPTH_RELOCK_MARGIN).
         cadence.locked_next_boundary_ns = Some(2_000_000_000);
         let base = 3_000_000_000u64;
-        let mut queue: VecDeque<u64> = (0..(ReleaseCadence::QDEPTH_RELOCK_MARGIN as u64 + 3))
+        let mut queue: VecDeque<u64> = (0..(ReleaseCadence::QDEPTH_RELOCK_MARGIN as u64 * 2 + 3))
             .map(|i| base + i * SRC)
             .collect();
         let wall_now = base + 100 * SRC; // every queued frame is due

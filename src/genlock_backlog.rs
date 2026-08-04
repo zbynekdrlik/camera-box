@@ -76,8 +76,39 @@ pub fn steady_depth_frames(latency_ms: u32, fps_num: u32, fps_den: u32) -> u64 {
 
 /// The backlog-relock threshold for a source: a queue depth STRICTLY GREATER than this is a
 /// backlog storm. Callers keep the `depth > threshold` comparison shape they already had.
-pub fn backlog_relock_threshold(latency_ms: u32, fps_num: u32, fps_den: u32) -> u64 {
-    steady_depth_frames(latency_ms, fps_num, fps_den).saturating_add(QDEPTH_RELOCK_MARGIN)
+///
+/// #940 piece 2 — the MARGIN is now scaled by `source_multiple`: the source's own integer
+/// rate multiple over the canvas (1 for a 1:1 30-into-30 hop like the stream box's
+/// `NDI 2ME PGM`; 2 for a 60-into-30 camera ingest). A 60-into-30 source queues an ARRIVAL
+/// SURPLUS of 2 frames per canvas render tick, plus the measured cam→strih arrival jitter
+/// (~8 ms, docs/genlock-latency-floor-rationale, issue #272) that bunches those arrivals
+/// 3-4 deep transiently — the bare (unscaled) margin is exceeded on ~every tick even at the
+/// rig's shallow per-source latencies, firing the backlog-relock branch PERMANENTLY
+/// (~35-70 relocks per 5-minute window measured live on `NDI cam1`/`NDI cam2`, issue #940).
+/// Scaling the margin by the source multiple absorbs that structural arrival surplus
+/// without touching the depth a genuinely deep-latency source implies
+/// ([`steady_depth_frames`] itself is untouched).
+///
+/// `source_multiple = 1` is BYTE-IDENTICAL to the pre-#940 threshold for every 30-into-30
+/// source on the rig (`QDEPTH_RELOCK_MARGIN * 1 == QDEPTH_RELOCK_MARGIN`) — see
+/// `arrival_surplus_margin_is_a_no_op_for_a_1to1_source_940`. `source_multiple` is an
+/// EXPLICIT caller-supplied value (never inferred from `fps_num`/`fps_den` here) because the
+/// caller already has to measure/track it separately for the STEADY depth's own
+/// SOURCE-rate requirement (see this module's `steady_depth_frames` doc) — the C caller has
+/// `genlock_effective_source_multiple(source, interval)`; the Rust caller has
+/// `ReleaseCadence::effective_source_multiple`. A degenerate `source_multiple` of `0`
+/// (should never happen — callers already `.max(1)` their own measured value) is floored to
+/// `1` here too, so it can never silently zero out the margin.
+///
+/// Mirror of the C `genlock_backlog_relock_qdepth()` (obs-source.c) — keep both in lock-step.
+pub fn backlog_relock_threshold(
+    latency_ms: u32,
+    fps_num: u32,
+    fps_den: u32,
+    source_multiple: u32,
+) -> u64 {
+    let margin = QDEPTH_RELOCK_MARGIN.saturating_mul(source_multiple.max(1) as u64);
+    steady_depth_frames(latency_ms, fps_num, fps_den).saturating_add(margin)
 }
 
 /// #859 follow-up — the SLEW-LIMITED SETTLE-BACK DRAIN.
@@ -127,6 +158,57 @@ pub fn should_drain_one(
         && ticks_since_last_drain >= DRAIN_MIN_TICK_INTERVAL
 }
 
+/// #940 piece 3 — the STRUCTURAL fix for the deep-latency A/V-offset step. Quantizes an
+/// already-computed ts-align RESERVE deadline (the Rust `genlock_present_ts_reserve()`, the
+/// C `genlock_present_ts_reserve()`) to the canvas frame GRID:
+///
+/// `phase_pinned_deadline(raw_deadline_ns, interval_ns) = floor(raw_deadline_ns / interval_ns) * interval_ns`
+///
+/// WHY: the pre-#940 deadline was a raw continuous quantity (`wall_now - latency`), so
+/// "which frame is due right now" depended on the EXACT sub-ms instant a lock/relock
+/// happened to fire — a hidden per-lock-episode phase, re-sampled on every ACQUIRE and
+/// every BACKLOG-STORM relock, measured live as a ±1–2-frame A/V-offset step between lock
+/// episodes at deep latency (issue #940: -12..-131 ms band, later +39..+105 ms band with
+/// the confounding dock-corrector wander eliminated). Quantizing removes the dependency on
+/// exactly WHEN a relock fires: due-ness becomes a pure function of wall time.
+///
+/// A degenerate `interval_ns` (0 — unknown video info) returns the raw deadline unchanged
+/// rather than dividing by zero, matching every other genlock helper's degenerate-interval
+/// convention in this module.
+///
+/// Mirror of the C `genlock_phase_pin_deadline()` (obs-source.c) — keep both in lock-step.
+/// See [`PHASE_PIN_HYSTERESIS_NS`] for the companion grid-comparison hysteresis this
+/// quantization requires (the design's own documented risk: a frame arriving essentially
+/// exactly on a grid line must not flap due/not-due from ordinary render-tick jitter on
+/// this floor division).
+pub fn phase_pinned_deadline(raw_deadline_ns: u64, interval_ns: u64) -> u64 {
+    if interval_ns == 0 {
+        return raw_deadline_ns;
+    }
+    (raw_deadline_ns / interval_ns) * interval_ns
+}
+
+/// #940 piece 3 — the hysteresis SLACK added to [`phase_pinned_deadline`]'s output before
+/// the `due` comparison. Sized well below one frame interval at ANY rig fps (33.3 ms @
+/// 30 fps, 16.6 ms @ 60 fps — see [`phase_pin_hysteresis_is_a_small_fraction_of_any_rig_frame_interval_940`]),
+/// so it can never pull in an extra frame; it exists ONLY to stop a frame captured
+/// essentially exactly on a grid line from flipping due/not-due tick to tick because of
+/// ordinary sub-ms render-tick slew on the floor division above — the same shape of guard
+/// `genlock_present_ts`'s existing `+interval/2` boundary-churn bias already applies to the
+/// (separate, frame-count) preload path, sized here instead to the sub-frame reserve-ms
+/// deadline this quantizes.
+///
+/// Mirror of the C `GENLOCK_PHASE_PIN_HYSTERESIS_NS` (obs-source.c).
+pub const PHASE_PIN_HYSTERESIS_NS: u64 = 5_000_000; // 5 ms
+
+/// Is `frame_ts_ns` due against the phase-pinned `deadline_ns` (already
+/// [`phase_pinned_deadline`]'s output), with [`PHASE_PIN_HYSTERESIS_NS`] slack? The
+/// comparison is inclusive at the hysteresis boundary (`<=`), matching every other due/not-due
+/// comparison in this codebase (`ts <= present_ts`).
+pub fn phase_pinned_is_due(frame_ts_ns: u64, deadline_ns: u64) -> bool {
+    frame_ts_ns <= deadline_ns.saturating_add(PHASE_PIN_HYSTERESIS_NS)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -137,7 +219,8 @@ mod tests {
     #[test]
     fn deep_latency_source_does_not_read_as_backlog_at_its_own_steady_depth_859() {
         // Live values from the stream box audit: latency_ms=923 on a 30.000 fps canvas.
-        let t = backlog_relock_threshold(923, 30, 1);
+        // 'NDI 2ME PGM' is a 30-into-30 (1:1) hop, so source_multiple=1.
+        let t = backlog_relock_threshold(923, 30, 1, 1);
         assert!(
             t >= 29,
             "#859: observed steady depth 29 must not exceed the backlog threshold ({t})"
@@ -164,14 +247,17 @@ mod tests {
     /// imag latency contract — at both canvas rates.
     #[test]
     fn sub_half_frame_latency_threshold_is_byte_identical_to_the_bare_constant_859() {
-        // The 3 ms global default / imag contract — the load-bearing case, unchanged at any rate.
-        assert_eq!(backlog_relock_threshold(3, 30, 1), QDEPTH_RELOCK_MARGIN);
-        assert_eq!(backlog_relock_threshold(3, 60, 1), QDEPTH_RELOCK_MARGIN);
+        // The 3 ms global default / imag contract — the load-bearing case, unchanged at any
+        // rate. #940 piece 2: source_multiple=1 isolates the STEADY-DEPTH-vs-fps behaviour
+        // this test is actually about, independent of the NEW margin-scaling piece 2 adds
+        // (see arrival_surplus_aware_margin_doubles_for_a_60_into_30_source_940 for that).
+        assert_eq!(backlog_relock_threshold(3, 30, 1, 1), QDEPTH_RELOCK_MARGIN);
+        assert_eq!(backlog_relock_threshold(3, 60, 1, 1), QDEPTH_RELOCK_MARGIN);
 
         // Anything implying <0.5 frames rounds to 0 implied depth => the bare constant.
         for (latency_ms, num) in [(3u32, 30u32), (8, 30), (16, 30), (3, 60), (8, 60)] {
             assert_eq!(
-                backlog_relock_threshold(latency_ms, num, 1),
+                backlog_relock_threshold(latency_ms, num, 1, 1),
                 QDEPTH_RELOCK_MARGIN,
                 "{latency_ms}ms @{num}fps implies <0.5 frames — threshold must stay the bare 6"
             );
@@ -187,18 +273,20 @@ mod tests {
     /// configured buffer as a backlog.
     #[test]
     fn deeper_shallow_sources_move_with_their_own_configured_depth_859() {
+        // All 1:1 30-into-30 (source_multiple=1) — the strih PGM/PVW class, not a camera
+        // ingest.
         assert_eq!(
-            backlog_relock_threshold(21, 30, 1),
+            backlog_relock_threshold(21, 30, 1, 1),
             7,
             "21ms -> 1 frame + 6"
         );
         assert_eq!(
-            backlog_relock_threshold(26, 30, 1),
+            backlog_relock_threshold(26, 30, 1, 1),
             7,
             "26ms -> 1 frame + 6"
         );
         assert_eq!(
-            backlog_relock_threshold(55, 30, 1),
+            backlog_relock_threshold(55, 30, 1, 1),
             8,
             "55ms -> 2 frames + 6"
         );
@@ -230,7 +318,10 @@ mod tests {
             1,
             "the canvas rate would say 1 — too low"
         );
-        assert_eq!(backlog_relock_threshold(26, 60, 1), 8);
+        // #940 piece 2: source_multiple=1 isolates the pre-#940 steady-depth-vs-fps
+        // behaviour this test is about (the NEW margin scaling for a genuine 60-into-30
+        // source is arrival_surplus_aware_margin_doubles_for_a_60_into_30_source_940).
+        assert_eq!(backlog_relock_threshold(26, 60, 1, 1), 8);
 
         // The hop this ticket is about is 30-into-30, so the two rates coincide there.
         assert_eq!(
@@ -244,19 +335,80 @@ mod tests {
     fn degenerate_frame_rate_implies_no_depth_rather_than_dividing_by_zero() {
         assert_eq!(steady_depth_frames(923, 0, 1), 0);
         assert_eq!(steady_depth_frames(923, 30, 0), 0);
-        assert_eq!(backlog_relock_threshold(923, 0, 0), QDEPTH_RELOCK_MARGIN);
+        assert_eq!(backlog_relock_threshold(923, 0, 0, 1), QDEPTH_RELOCK_MARGIN);
     }
 
     /// A genuine storm on a deep source is STILL caught — the bar does not move, it moves WITH the
     /// source. #401's own scenario (a stall's burst landing at once) is far above the threshold.
     #[test]
     fn a_real_backlog_storm_on_a_deep_source_is_still_caught_859() {
-        let t = backlog_relock_threshold(923, 30, 1);
+        let t = backlog_relock_threshold(923, 30, 1, 1);
         // A one-second stall on a 30 fps source lands ~30 frames ON TOP of the steady 28.
         let burst_depth = 28 + 30;
         assert!(
             burst_depth as u64 > t,
             "a stall's burst (depth {burst_depth}) must still exceed the threshold ({t})"
+        );
+    }
+
+    // ---- #940 piece 2: arrival-surplus-aware relock threshold ----------------------------
+
+    /// The no-op guarantee that makes piece 2 safe to ship to the whole rig: for every
+    /// 30-into-30 source (source_multiple=1), the margin-scaled threshold is BYTE-IDENTICAL
+    /// to the bare pre-#940 formula (steady_depth_frames + the unscaled QDEPTH_RELOCK_MARGIN).
+    #[test]
+    fn arrival_surplus_margin_is_a_no_op_for_a_1to1_source_940() {
+        for (latency_ms, num, den) in [(923u32, 30u32, 1u32), (3, 30, 1), (26, 30, 1), (55, 30, 1)]
+        {
+            assert_eq!(
+                backlog_relock_threshold(latency_ms, num, den, 1),
+                steady_depth_frames(latency_ms, num, den) + QDEPTH_RELOCK_MARGIN,
+                "{latency_ms}ms @{num}/{den}fps, source_multiple=1 must equal the bare \
+                 pre-#940 formula exactly"
+            );
+        }
+    }
+
+    /// The mechanism piece 2 fixes: a 60-into-30 camera ingest churns permanently at its
+    /// shallow per-source latency because the arrival SURPLUS (2 frames/tick) plus jitter
+    /// bunches transiently past the bare margin. Doubling the margin for a measured
+    /// source_multiple=2 absorbs the observed bunching (peaks 5-8, live #940 audit) without
+    /// touching the depth the latency itself implies.
+    #[test]
+    fn arrival_surplus_aware_margin_doubles_for_a_60_into_30_source_940() {
+        // NDI cam2: 4ms configured, 60fps source -- steady_depth_frames(4,60,1) == 0 (implies
+        // <0.5 frame), so the pre-#940 threshold was the bare 6, permanently exceeded by the
+        // observed 3-4-deep bunching (issue #940 audit-log correlation).
+        let steady = steady_depth_frames(4, 60, 1);
+        assert_eq!(
+            steady, 0,
+            "4ms @60fps implies <0.5 frame (sanity: this is the live #940 cam2 case)"
+        );
+        assert_eq!(
+            backlog_relock_threshold(4, 60, 1, 2),
+            steady + QDEPTH_RELOCK_MARGIN * 2,
+            "60-into-30 (source_multiple=2) must scale the MARGIN, not just the depth"
+        );
+        assert_eq!(backlog_relock_threshold(4, 60, 1, 2), 12);
+
+        // The stream box's 'NDI 2ME PGM' (30-into-30, this ticket's own #859 regression case)
+        // must NOT move: it is source_multiple=1, so its threshold stays exactly 34.
+        assert_eq!(backlog_relock_threshold(923, 30, 1, 1), 34);
+    }
+
+    /// A degenerate `source_multiple` of `0` (should never happen -- callers already
+    /// `.max(1)` their own measured value) must behave as multiple=1, never as a zero
+    /// margin -- the same degenerate-input discipline every other function in this module
+    /// applies.
+    #[test]
+    fn arrival_surplus_margin_source_multiple_zero_behaves_as_one_940() {
+        assert_eq!(
+            backlog_relock_threshold(3, 30, 1, 0),
+            backlog_relock_threshold(3, 30, 1, 1)
+        );
+        assert_eq!(
+            backlog_relock_threshold(4, 60, 1, 0),
+            backlog_relock_threshold(4, 60, 1, 1)
         );
     }
 
@@ -371,5 +523,99 @@ mod tests {
             1,
             DRAIN_MIN_TICK_INTERVAL
         ));
+    }
+
+    // ---- #940 piece 3: phase-pinned deadline + grid-comparison hysteresis ----------------
+
+    const I30: u64 = 33_333_333; // ~30 Hz frame interval (ns)
+    const I60: u64 = 16_666_667; // ~60 Hz frame interval (ns)
+
+    /// The core floor-to-grid arithmetic, at a plain round interval so the numbers are
+    /// easy to verify by hand.
+    #[test]
+    fn phase_pinned_deadline_floors_to_the_grid_940() {
+        // 100 / 30 = 3.33 -> floor 3 -> 90.
+        assert_eq!(phase_pinned_deadline(100, 30), 90);
+        // Already exactly on a grid line -> unchanged (idempotent).
+        assert_eq!(phase_pinned_deadline(90, 30), 90);
+        // One ns short of the NEXT grid line still floors DOWN to the current one, never up.
+        assert_eq!(phase_pinned_deadline(119, 30), 90);
+        assert_eq!(phase_pinned_deadline(120, 30), 120);
+        // Zero deadline (early-boot wall clock) -> zero, not a panic.
+        assert_eq!(phase_pinned_deadline(0, 30), 0);
+    }
+
+    /// The same arithmetic at the rig's REAL frame intervals, so the magnitude of what the
+    /// floor can shift a deadline by is visible in the test itself, not just asserted as an
+    /// abstract property. Worst case is just under one full interval earlier than the raw
+    /// (continuous) deadline — the bounded, deliberate cost of removing the lock-history
+    /// dependency (see the module doc on [`phase_pinned_deadline`]).
+    #[test]
+    fn phase_pinned_deadline_shifts_at_most_just_under_one_interval_940() {
+        for interval in [I30, I60] {
+            let raw = 900_000_000_000u64 + interval - 1; // one ns short of the next grid line
+            let pinned = phase_pinned_deadline(raw, interval);
+            assert!(
+                pinned <= raw,
+                "the grid floor must never move the deadline LATER"
+            );
+            assert!(
+                raw - pinned < interval,
+                "the grid floor must never shift the deadline by a WHOLE interval or more \
+                 (raw={raw}, pinned={pinned}, interval={interval})"
+            );
+        }
+    }
+
+    /// Degenerate interval (0 — unknown video info) must return the raw deadline unchanged,
+    /// matching every other genlock helper's degenerate-interval convention in this module
+    /// (never divide by zero, never invent a value).
+    #[test]
+    fn phase_pinned_deadline_degenerate_interval_returns_raw_940() {
+        assert_eq!(phase_pinned_deadline(123_456, 0), 123_456);
+        assert_eq!(phase_pinned_deadline(0, 0), 0);
+    }
+
+    /// The grid-comparison hysteresis: a frame captured essentially exactly on a grid line
+    /// (i.e. just PAST the phase-pinned deadline) must still read as due, within
+    /// [`PHASE_PIN_HYSTERESIS_NS`] — this is the flapping guard the design's own risk note
+    /// calls out. A frame beyond the hysteresis window stays not-due.
+    #[test]
+    fn phase_pinned_is_due_applies_hysteresis_at_the_boundary_940() {
+        let deadline = 900_000_000_000u64;
+        assert!(
+            phase_pinned_is_due(deadline, deadline),
+            "exactly at the deadline must be due"
+        );
+        assert!(
+            phase_pinned_is_due(deadline + PHASE_PIN_HYSTERESIS_NS, deadline),
+            "exactly at the hysteresis boundary must still be due (inclusive)"
+        );
+        assert!(
+            !phase_pinned_is_due(deadline + PHASE_PIN_HYSTERESIS_NS + 1, deadline),
+            "one ns past the hysteresis boundary must NOT be due"
+        );
+        assert!(
+            phase_pinned_is_due(deadline - 1, deadline),
+            "a frame already past due (ts before the deadline) stays due"
+        );
+    }
+
+    /// Sanity invariant: the hysteresis must stay a SMALL fraction of a frame interval at
+    /// the fastest rate this rig ever runs (60 fps) — this is what makes it structurally
+    /// incapable of pulling in an extra frame. If a future edit ever grows this constant
+    /// toward a real fraction of an interval, this test catches it immediately rather than
+    /// relying on someone noticing during review.
+    #[test]
+    #[allow(clippy::assertions_on_constants)] // deliberate compile-time invariant, kept as a
+                                              // runtime test for consistency with this file's
+                                              // other tests (never a const {} block).
+    fn phase_pin_hysteresis_is_a_small_fraction_of_any_rig_frame_interval_940() {
+        assert!(
+            PHASE_PIN_HYSTERESIS_NS < I60 / 2,
+            "PHASE_PIN_HYSTERESIS_NS ({PHASE_PIN_HYSTERESIS_NS} ns) must stay well under \
+             half a 60fps frame interval ({} ns), or it risks pulling in an extra frame",
+            I60 / 2
+        );
     }
 }

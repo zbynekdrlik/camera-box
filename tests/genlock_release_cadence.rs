@@ -282,7 +282,16 @@ fn sticky_n_latch_lifecycle_and_robust_measure_741() {
     let relock_pos = raw
         .find("source->genlock_relocks++;")
         .expect("#741: the backlog-storm relock branch (genlock_relocks++) must be present");
-    let window_end = (relock_pos + 800).min(raw.len());
+    // #940 piece 1: a fixed `relock_pos + 800` byte window is a PROXY for "the same relock
+    // branch" and rots as the branch grows (the exact #859 lesson `ts_align_hold_counts_
+    // as_hold_not_underrun` already documents above) — the #940 phase-evidence log line
+    // pushed `release = due;` past the old 800-byte cap. Scope to the ENCLOSING FUNCTION
+    // instead (up to the next top-level `static` definition), which cannot rot as the
+    // branch grows.
+    let window_end = raw[relock_pos..]
+        .find("\nstatic ")
+        .map(|rel| relock_pos + rel)
+        .unwrap_or(raw.len());
     let after_relock = &raw[relock_pos..window_end];
     let release_off = after_relock
         .find("release = due;")
@@ -415,4 +424,154 @@ fn raw_drain_erases_index_zero(raw: &str) -> bool {
     let window_end = (drain_pos + 600).min(raw.len());
     let window = &raw[drain_pos..window_end];
     window.contains("da_erase(source->async_frames, 0);") && !window.contains("array[1]")
+}
+
+#[test]
+fn relock_events_log_phase_evidence_940() {
+    // #940 piece 1 — INSTRUMENT each backlog-relock event with the phase evidence needed
+    // to attribute a future ±1–2-frame A/V-offset step to (or rule it out from) a
+    // specific relock: current depth, steady_depth_frames, due count, erased count, head
+    // skew, and the deadline's own remainder mod the frame interval (the "wall-grid
+    // phase" — piece 3 drives this to a fixed value; today it wanders, which IS the
+    // hidden phase state #940 is chasing). Logged ONCE PER EVENT inside the
+    // BACKLOG-STORM relock branch (genlock_relocks++), not folded into the periodic 5s
+    // audit line (which samples a snapshot, not a per-event trace). A subtree pull or
+    // edit dropping this silently removes the only per-event evidence #940's analysis
+    // depends on.
+    let raw = vendor_file(OBS_SOURCE);
+    let relock_pos = raw
+        .find("source->genlock_relocks++;")
+        .expect("#940: the backlog-storm relock branch (genlock_relocks++) must be present");
+    let release_off = raw[relock_pos..]
+        .find("release = due;")
+        .expect("#940: the relock branch must still release the due frame (release = due;)");
+    let relock_branch = &raw[relock_pos..relock_pos + release_off];
+    assert!(
+        relock_branch.contains("genlock-relock"),
+        "{OBS_SOURCE}: #940 piece 1 — the per-event relock log line (\"genlock-relock\") \
+         is gone from the backlog-storm branch; re-apply the phase-evidence instrumentation."
+    );
+    let squished = squish(relock_branch);
+    for field in [
+        "depth=%zu",
+        "steady_depth_frames=%zu",
+        "due=%zu",
+        "erased=%zu",
+        "head_skew_ms=%lld",
+        "wall_grid_phase_ns=%lld",
+    ] {
+        assert!(
+            squished.contains(field),
+            "{OBS_SOURCE}: #940 piece 1 — the relock phase-evidence log line is missing \
+             field `{field}`; re-apply the full instrumentation (depth / \
+             steady_depth_frames / due / erased / head_skew_ms / wall_grid_phase_ns)."
+        );
+    }
+    // #940 piece 1 correctness fix: the logged steady_depth_frames must subtract the FULL
+    // scaled margin (piece 2: GENLOCK_QDEPTH_RELOCK_MARGIN * n) that
+    // genlock_backlog_relock_qdepth() now returns, not the bare margin — else a 60-into-30
+    // source (n>=2) logs an inflated steady_depth_frames by MARGIN*(n-1). Anchored on the
+    // exact scaled-subtraction expression so a future edit that reverts to a bare-margin
+    // subtraction (correct pre-piece-2, wrong once the margin is scaled) is caught.
+    assert!(
+        squished.contains("(size_t)GENLOCK_QDEPTH_RELOCK_MARGIN * (size_t)n_for_log"),
+        "{OBS_SOURCE}: #940 piece 1 — the relock log's steady_depth_frames computation no \
+         longer subtracts the source-multiple-scaled margin (GENLOCK_QDEPTH_RELOCK_MARGIN * \
+         n_for_log); it would log an inflated value on every 60-into-30 source once piece 2's \
+         scaled margin is in effect."
+    );
+}
+
+#[test]
+fn ts_align_deadline_is_phase_pinned_to_the_wall_grid_940() {
+    // #940 piece 3 — the structural fix. The pre-#940 ts-align reserve deadline was a raw
+    // continuous quantity (wall_now - reserve), making "which frame releases now" a
+    // function of the EXACT sub-ms instant a lock/relock happens to fire -- a hidden
+    // per-lock-episode phase, re-sampled on every ACQUIRE/RELOCK, observed live as a
+    // ±1-2-frame A/V-offset step between lock episodes at deep latency. Quantizing the
+    // deadline to the canvas frame GRID (floor(deadline/interval)*interval) makes it a
+    // pure function of wall time instead. The pure floor/hysteresis math is Tier-0
+    // unit-tested in src/genlock_backlog.rs; this guards the C wiring.
+    let src = squish(&vendor_file(OBS_SOURCE));
+    assert!(
+        src.contains("static inline uint64_t genlock_phase_pin_deadline("),
+        "{OBS_SOURCE}: #940 piece 3 — the grid-quantization helper \
+         (genlock_phase_pin_deadline) is gone; the deadline reverted to the raw continuous \
+         quantity that re-samples a different phase every lock episode. Mirror: \
+         src/genlock_backlog.rs phase_pinned_deadline (Tier-0 unit-tested)."
+    );
+    // The floor-to-grid ARITHMETIC itself (not just the helper's existence) — a subtree
+    // pull or a "simplify this" edit could keep the helper but neuter its body.
+    assert!(
+        src.contains("(deadline_ns / interval_ns) * interval_ns"),
+        "{OBS_SOURCE}: #940 piece 3 — genlock_phase_pin_deadline no longer computes the \
+         floor-to-grid quotient (deadline_ns / interval_ns) * interval_ns; re-apply."
+    );
+    // Wired IN at the ts-align call site for the reserve_ms>0 (deep-latency, ms-granular)
+    // path — only defining the helper without calling it is dead code (same "assert the
+    // call site, not just the helper" discipline #859 already applies).
+    assert!(
+        src.contains("present_ts = genlock_phase_pin_deadline(present_ts, interval);"),
+        "{OBS_SOURCE}: #940 piece 3 — genlock_phase_pin_deadline is defined but not CALLED \
+         from the ts-align reserve-ms release path; the deadline would stay un-quantized \
+         and the deep-latency phase step would persist."
+    );
+    // The hysteresis slack on the grid comparison — without it, a frame captured
+    // essentially exactly on a grid line flips due/not-due from ordinary sub-ms
+    // render-tick jitter on the floor division (the design's own documented risk).
+    assert!(
+        src.contains("#define GENLOCK_PHASE_PIN_HYSTERESIS_NS 5000000ULL"),
+        "{OBS_SOURCE}: #940 piece 3 — the grid-comparison hysteresis constant \
+         (GENLOCK_PHASE_PIN_HYSTERESIS_NS, must stay 5ms) is missing or changed; without \
+         it a frame landing exactly on a grid line could flap due/not-due. Mirror: \
+         src/genlock_backlog.rs PHASE_PIN_HYSTERESIS_NS."
+    );
+    assert!(
+        src.contains("array[due]->timestamp <= present_ts + due_hysteresis_ns"),
+        "{OBS_SOURCE}: #940 piece 3 — the due-computation loop no longer applies the \
+         grid-comparison hysteresis (due_hysteresis_ns); re-apply."
+    );
+    // Gated to the reserve_ms>0 path ONLY — the (effectively unused on this build's
+    // #257-floored latency) frame-count preload path must stay byte-identical.
+    assert!(
+        src.contains("reserve_ms > 0 ? GENLOCK_PHASE_PIN_HYSTERESIS_NS : 0"),
+        "{OBS_SOURCE}: #940 piece 3 — the grid hysteresis is no longer gated to the \
+         reserve_ms>0 (ms-granular deep-latency) path; the frame-count preload path must \
+         stay byte-identical to its pre-#940 behaviour."
+    );
+}
+
+#[test]
+fn backlog_relock_margin_scales_with_the_source_multiple_940() {
+    // #940 piece 2 — arrival-surplus-aware relock threshold. genlock_backlog_relock_qdepth()
+    // already MEASURES the source's own rate multiple `n` (for the steady-depth SOURCE-rate
+    // scaling); piece 2 reuses that SAME `n` to scale the MARGIN too, so a 60-into-30 camera
+    // ingest (n=2) stops relocking on routine arrival surplus at its shallow per-source
+    // latency, while a 30-into-30 source (n=1) stays byte-identical.
+    let src = squish(&vendor_file(OBS_SOURCE));
+    assert!(
+        src.contains(
+            "return (size_t)(depth + (uint64_t)GENLOCK_QDEPTH_RELOCK_MARGIN * (uint64_t)n);"
+        ),
+        "{OBS_SOURCE}: #940 piece 2 — genlock_backlog_relock_qdepth no longer scales the \
+         margin by the measured source multiple n; re-apply. Mirror: \
+         src/genlock_backlog.rs backlog_relock_threshold (Tier-0 unit-tested)."
+    );
+    // The OLD flat-add form (margin never scaled) must be GONE — a subtree pull or a
+    // "simplify this" edit reverting to it would silently reintroduce the #940 churn on
+    // every 60-into-30 camera ingest.
+    assert!(
+        !src.contains("return (size_t)(depth + GENLOCK_QDEPTH_RELOCK_MARGIN);"),
+        "{OBS_SOURCE}: #940 piece 2 — the OLD unscaled-margin return is BACK; the arrival-\
+         -surplus-aware scaling reverted."
+    );
+    // The margin CONSTANT itself must stay the original 6 — piece 2 changed what the margin
+    // is MULTIPLIED BY, not the margin's own value (same discipline #859's own test already
+    // applies to this constant).
+    assert!(
+        src.contains("#define GENLOCK_QDEPTH_RELOCK_MARGIN 6"),
+        "{OBS_SOURCE}: #940 piece 2 — the backlog MARGIN constant is no longer the original \
+         6; #940 scales the margin BY the source multiple, it must never also widen the \
+         constant itself."
+    );
 }
