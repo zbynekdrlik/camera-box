@@ -80,6 +80,13 @@ is NOT evidence of persistence — it is evidence of a launch that is about to b
     `Get-Process obs64 | Format-List Id,SessionId,MainWindowTitle` must show `SessionId: 1` AND a
     non-empty window title. On strih, restart AutoHotkey64 the same way (MCP Shell, session 1) —
     an ssh-restarted AHK is equally invisible and can't drive session-1 windows.
+  - **REPEATED 2026-08-04 (issue-940 fast-DLL rollout — the user's 3rd "OBS nebeží" complaint):
+    the ssh+CIM relaunch was used even though BOTH win-* MCPs were connected, and the session-0
+    instances sat invisible for ~3.5 h passing every headless check (WS, NDI, recording, burns).
+    The rule is therefore absolute: when a `win-strih`/`win-stream-snv` MCP is CONNECTED, the
+    ssh+CIM launch path is BANNED for GUI apps — launch via the MCP `Shell` only, and end every
+    relaunch with the SessionId+MainWindowTitle acceptance check above ON BOTH obs64 AND (strih)
+    AutoHotkey64. A relaunch that skips that check is not a completed relaunch.**
 - **Dead ends, do not retry:** `schtasks /run` on an `/IT` task returns `ERROR: Element not found`,
   and the same task with a near-future time trigger never fires (`Last Result: 267011` = never ran)
   — `/IT` will not start from a non-interactive context even though `Get-Process explorer` shows a
