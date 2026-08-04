@@ -2061,21 +2061,50 @@ def ensure_studio_mode_on(a):
         ws.close()
 
 
+# Audio-only inputKinds can never carry the video burn filter (live evidence 2026-08-04: strih's
+# 'Cam 2' scene lists 'ASIO zvuk' (asio_input_capture) before 'NDI cam2', and the burn attach on
+# the audio input failed loudly). The rendered-input resolver skips these; anything else (NDI,
+# capture cards, media, browser, even a nested scene) is a plausible video carrier.
+_AUDIO_ONLY_INPUT_KINDS = frozenset({
+    "asio_input_capture",
+    "wasapi_input_capture",
+    "wasapi_output_capture",
+    "wasapi_process_output_capture",
+    "pulse_input_capture",
+    "pulse_output_capture",
+    "alsa_input_capture",
+    "jack_output_capture",
+    "coreaudio_input_capture",
+    "coreaudio_output_capture",
+    "sck_audio_capture",
+    "audio_line",
+})
+
+
 def _first_enabled_scene_item_source(items):
     """#901 gap 3 (pure, testable — no I/O): given a GetSceneItemList `sceneItems` list, return
-    the `sourceName` of the first ENABLED item, or None if the list is empty or nothing in it is
+    the `sourceName` of the first ENABLED item that can plausibly RENDER (skipping audio-only
+    inputKinds — see _AUDIO_ONLY_INPUT_KINDS), or None if the list is empty or nothing in it is
     enabled. A real GetSceneItemList response always carries `sceneItemEnabled`, but an item
-    missing the key is treated as enabled (defensive default — never silently skipped).
+    missing the key is treated as enabled (defensive default — never silently skipped). If ONLY
+    audio-only items are enabled, the first enabled one is still returned (the caller's burn
+    attach then warns loudly) rather than None, which would abort the whole chain-verify.
 
     This is the "what is ACTUALLY rendered" resolution the fixed STRIH_PROG_SOURCE/
     STREAM_PROG_SOURCE burn-target constants in rig-mode.sh cannot provide: those name a scene's
     EXPECTED source, this reads what a scene's CURRENT program item genuinely is (live evidence,
     2026-08-04: strih's program scene rendered 'NDI cam2' while the fixed default was
     'NDI cam1' — the burn landed on the wrong, non-rendered input)."""
+    first_enabled = None
     for item in items:
-        if bool(item.get("sceneItemEnabled", True)):
-            return item.get("sourceName")
-    return None
+        if not bool(item.get("sceneItemEnabled", True)):
+            continue
+        if first_enabled is None:
+            first_enabled = item.get("sourceName")
+        if item.get("inputKind") in _AUDIO_ONLY_INPUT_KINDS:
+            continue
+        return item.get("sourceName")
+    return first_enabled
 
 
 def program_rendered_input(a):
