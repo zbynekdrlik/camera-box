@@ -527,3 +527,36 @@ fn ts_align_deadline_is_phase_pinned_to_the_wall_grid_940() {
          stay byte-identical to its pre-#940 behaviour."
     );
 }
+
+#[test]
+fn backlog_relock_margin_scales_with_the_source_multiple_940() {
+    // #940 piece 2 — arrival-surplus-aware relock threshold. genlock_backlog_relock_qdepth()
+    // already MEASURES the source's own rate multiple `n` (for the steady-depth SOURCE-rate
+    // scaling); piece 2 reuses that SAME `n` to scale the MARGIN too, so a 60-into-30 camera
+    // ingest (n=2) stops relocking on routine arrival surplus at its shallow per-source
+    // latency, while a 30-into-30 source (n=1) stays byte-identical.
+    let src = squish(&vendor_file(OBS_SOURCE));
+    assert!(
+        src.contains("return (size_t)(depth + (uint64_t)GENLOCK_QDEPTH_RELOCK_MARGIN * (uint64_t)n);"),
+        "{OBS_SOURCE}: #940 piece 2 — genlock_backlog_relock_qdepth no longer scales the \
+         margin by the measured source multiple n; re-apply. Mirror: \
+         src/genlock_backlog.rs backlog_relock_threshold (Tier-0 unit-tested)."
+    );
+    // The OLD flat-add form (margin never scaled) must be GONE — a subtree pull or a
+    // "simplify this" edit reverting to it would silently reintroduce the #940 churn on
+    // every 60-into-30 camera ingest.
+    assert!(
+        !src.contains("return (size_t)(depth + GENLOCK_QDEPTH_RELOCK_MARGIN);"),
+        "{OBS_SOURCE}: #940 piece 2 — the OLD unscaled-margin return is BACK; the arrival-\
+         -surplus-aware scaling reverted."
+    );
+    // The margin CONSTANT itself must stay the original 6 — piece 2 changed what the margin
+    // is MULTIPLIED BY, not the margin's own value (same discipline #859's own test already
+    // applies to this constant).
+    assert!(
+        src.contains("#define GENLOCK_QDEPTH_RELOCK_MARGIN 6"),
+        "{OBS_SOURCE}: #940 piece 2 — the backlog MARGIN constant is no longer the original \
+         6; #940 scales the margin BY the source multiple, it must never also widen the \
+         constant itself."
+    );
+}
