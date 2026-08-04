@@ -417,6 +417,13 @@ jobs:
               Write-Error "obs-source.c: the relock phase-evidence log line is missing field '$field' — #940 piece 1 reverted"; exit 1
             }
           }
+          # #940 piece 1 correctness fix: steady_depth_frames_for_log must subtract the FULL
+          # source-multiple-SCALED margin (piece 2: MARGIN * n), not the bare margin — else a
+          # 60-into-30 source (n>=2) logs an inflated value. Mirrors the Rust-side anchor in
+          # tests/genlock_release_cadence.rs::relock_events_log_phase_evidence_940.
+          if ($src -notmatch [regex]::Escape('(size_t)GENLOCK_QDEPTH_RELOCK_MARGIN * (size_t)n_for_log')) {
+            Write-Error "obs-source.c: the relock log's steady_depth_frames no longer subtracts the scaled margin (GENLOCK_QDEPTH_RELOCK_MARGIN * n_for_log) — #940 piece 1 correctness fix reverted"; exit 1
+          }
           Write-Output "#940 piece 1 relock phase-evidence instrumentation present — OK"
 
       # #940 piece 3: fail fast if the ts-align reserve deadline is no longer phase-pinned to
