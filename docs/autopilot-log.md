@@ -7105,3 +7105,42 @@ Post-merge deploy (supervisor): scp the fixed `avsync-keepalive.ps1` to the stre
 + one clean pass of the dev1 `avsync-heartbeat-alert-watchdog.timer`, re-verify the keepalive
 crash-relaunch once more with the stricter match, and drive a real measurable clip through the rig
 to prove one genuine verdict lands in the `alerts-snv` thread.
+
+## #940 -- deep-latency A/V offset steps between lock episodes (2026-08-04)
+
+Design (issuecomment-5178557305), implemented in order 1 -> 3 -> 2, PR #973:
+
+- `7eaed241b`/`c24c51a03`: piece 1 -- per-event `genlock-relock` log line (depth,
+  steady_depth_frames, due, erased, head_skew_ms, wall_grid_phase_ns) in the backlog-storm relock
+  branch. RED test `relock_events_log_phase_evidence_940`.
+- `3f863a968`/`353e298f9`/`6923bd6e3`: piece 3 -- `phase_pinned_deadline`/`PHASE_PIN_HYSTERESIS_NS`
+  (Tier-0, src/genlock_backlog.rs) + C `genlock_phase_pin_deadline`/`GENLOCK_PHASE_PIN_HYSTERESIS_NS`,
+  wired into the reserve_ms>0 ts-align release path only. RED tests
+  `phase_pinned_deadline_floors_to_the_grid_940` + siblings,
+  `ts_align_deadline_is_phase_pinned_to_the_wall_grid_940`.
+- `9d343cbc8`/`f583b4814`/`fd519c613`/`b7a01b3cc`: piece 2 -- `backlog_relock_threshold` gained an
+  explicit `source_multiple` param, scaling `QDEPTH_RELOCK_MARGIN` (byte-identical at multiple=1,
+  doubled at multiple=2 for a 60-into-30 camera ingest). Wired into both
+  `ReleaseCadence::backlog_relock_qdepth` (Rust, probe-gated) and C
+  `genlock_backlog_relock_qdepth`. RED tests
+  `arrival_surplus_aware_margin_doubles_for_a_60_into_30_source_940`,
+  `backlog_relock_margin_scales_with_the_source_multiple_940`.
+- `f2d1b6f6a`/`38ea3e2b3`: correctness fix found before push -- piece 1's log subtracted the
+  UNSCALED margin after piece 2 scaled it; fixed to re-derive `n` and subtract `MARGIN*n`.
+- `a1f1fc57f`: CI caught a stale #741 probe-gated test fixture
+  (`backlog_relock_preserves_the_confirmed_multiple_741`) whose 60-into-30 queue depth was tuned
+  to the OLD bare-margin threshold; updated to exceed the new (correctly higher) threshold.
+
+Decision: `src/probe/genlock.rs`'s `ReleaseCadence::tick` (CI-only probe-gated simulation, dozens
+of hardcoded exact-outcome tests, none locally re-verifiable under this repo's Tier-0 policy) is
+deliberately NOT wired to piece 3's grid-pin -- documented scope note at the call site. Piece 2
+IS wired into both sides (its Rust call site already measured the needed `n` for the steady-depth
+scaling, so reusing it for the margin was low-risk).
+
+Lock-step anchors: tests/genlock_release_cadence.rs (Tier-0) + pwsh gates in BOTH
+windows-genlock.yml and windows-genlock-fast.yml, for all three pieces.
+
+CI: Linux genlock build + Windows genlock FAST + Windows manifest gate all green (vendored-C
+compiles + gates pass on both platforms). Rust CI (Test/Coverage/Lint/etc.) green after the
+fixture fix. Full-path E2E (hardware) gate still running at end of this worker's session -- see
+PR #973 for final status.
