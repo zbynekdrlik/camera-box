@@ -113,16 +113,30 @@ import time
 media, fb, audio = sys.argv[1:4]
 
 
-def ffprobe(extra_args):
+def ffprobe(extra_args, what):
     out = subprocess.run(
         ["ffprobe"] + extra_args + [media], capture_output=True, text=True
     )
+    if out.returncode != 0:
+        sys.stderr.write(
+            "FAIL: lipsync playback pacing check -- ffprobe could not determine {} for "
+            "{!r} (exit {}): {}\n".format(what, media, out.returncode, out.stderr.strip())
+        )
+        sys.exit(1)
     return out.stdout.strip()
 
 
-duration = float(
-    ffprobe(["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0"])
+duration_raw = ffprobe(
+    ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0"], "duration"
 )
+try:
+    duration = float(duration_raw)
+except ValueError:
+    sys.stderr.write(
+        "FAIL: lipsync playback pacing check -- ffprobe returned an unparseable duration "
+        "{!r} for {!r}\n".format(duration_raw, media)
+    )
+    sys.exit(1)
 
 fps_raw = ffprobe(
     [
@@ -134,7 +148,8 @@ fps_raw = ffprobe(
         "stream=r_frame_rate",
         "-of",
         "csv=p=0",
-    ]
+    ],
+    "fps",
 )
 try:
     num, _, den = fps_raw.partition("/")
@@ -149,7 +164,14 @@ except (ValueError, ZeroDivisionError):
     fps = 60.0
 nominal_ms = 1000.0 / fps
 
-startup_skip_s = float(os.environ.get("LIPSYNC_PACING_STARTUP_SKIP_S", "2"))
+try:
+    startup_skip_s = float(os.environ.get("LIPSYNC_PACING_STARTUP_SKIP_S", "2"))
+except ValueError:
+    sys.stderr.write(
+        "WARN: LIPSYNC_PACING_STARTUP_SKIP_S={!r} is not a number -- defaulting to "
+        "2s\n".format(os.environ.get("LIPSYNC_PACING_STARTUP_SKIP_S"))
+    )
+    startup_skip_s = 2.0
 
 cmd = [
     "ffmpeg",
@@ -244,6 +266,9 @@ CMDS
 # /dev/fb0's own lack of a clock means ALSA backpressure alone does not pace the video (measured:
 # 4-5-frame bursts, ~80ms stalls); this is the SAME fix as `lipsync_pacing_guard_cmd`'s, applied
 # to the actual persistent playback that plays during a recording, not just the preflight check.
+# Deliberately does NOT carry `-vf showinfo` -- that is a one-shot MEASUREMENT instrument for the
+# preflight guard only; adding it here would cost real CPU on every frame of the actual
+# (potentially long) recording for no benefit once the preflight has already verified pacing.
 # Callers should run `lipsync_pacing_guard_cmd` first (see above).
 lipsync_playback_cmds() {
   local media="$1" fb="$2" audio="$3" pidfile="$4"
