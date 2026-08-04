@@ -169,6 +169,30 @@ loses the `pull_request` event context). This is rig-state cleanup, not a code r
 preflight is doing exactly its job; don't waste a cycle by clearing one input and rerunning into
 the next one it hasn't gotten to yet.
 
+## 7. A FAILED gate run leaves camera-box.service STOPPED on the cam boxes it already touched AND the standing TEST painter DEAD — verify BOTH camboxes + painter before `gh run rerun` (2026-08-04)
+
+The gate stops `camera-box.service` on the cam boxes as part of its flow; on an early abort
+(prerequisite/preflight failure, mid-run error) its cleanup does NOT restore them, and the
+standing TEST-mode painter (`frame-probe --paint-only`) is killed and not restarted either. Live
+sequence 2026-08-04: run 1 failed mid-run and left cam1 AND cam2 stopped (11:27:40 / 11:27:59 UTC,
+~19 s apart); only cam1 was noticed and restored, so the rerun failed at fleet preflight on
+`cam2: camera-box.service is inactive` — a full wasted cycle. Before ANY rerun:
+
+```bash
+for ip in 61 62; do sshpass -p "$CAM_PW" ssh root@10.77.9.$ip \
+  'hostname; systemctl is-active camera-box; pgrep -c frame-probe || true'; done
+# restore: systemctl start camera-box (per box) + OBS_WS_PASSWORD=... scripts/rig-mode.sh test
+```
+
+Two compounding cam2 gotchas (both burned cycles the same day, tracked on issue 971):
+- **The ShadowCast can re-enter its sustained over-rate state (61.3–64 fps captured, `corrupted=4`
+  at open) on ANY fresh device open** — including the service start you just did to fix the stop.
+  After every cam2 service (re)start, read one `Streaming:` journal line and require
+  `60.0 fps captured` + a static corrupted count; over-rate → issue-656 USB reset
+  (deauthorize/reauthorize device 2-2), which cleared it 3/3 times.
+- **Video nodes RENUMBER after a USB reset** (video0 → video1/video2 and back) — resolve the
+  interface live (`ls /sys/class/video4linux/` + `readlink -f .../device`), never hardcode video0.
+
 ## The general shape
 
 A hard gate that refuses in its first seconds is almost always reporting either (a) a **rig-side
