@@ -816,6 +816,13 @@ verify_measurement_audio_arrives() {
     "audible")
       echo "    ok: mbc measurement audio AUDIBLE (max_volume ${db} dB >= ${AUDIO_CHAIN_WARN_DB} dB)"
       ;;
+    *)
+      # Defensive: audio_preflight_tier is a well-tested pure function that only ever returns
+      # dead/quiet/audible -- an unmatched value here means the LIB and this script have drifted.
+      # Never silently proceed on an unrecognized verdict.
+      echo "ERROR: [#901] unexpected audio_preflight_tier result '${tier}' for max_volume ${db} dB -- treating as a hard failure (lib/script drift)." >&2
+      exit 1
+      ;;
   esac
 }
 
