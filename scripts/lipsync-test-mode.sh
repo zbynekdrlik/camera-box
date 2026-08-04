@@ -78,34 +78,143 @@ rm -f '$pidfile'
 CMDS
 }
 
-# lipsync_pacing_guard_cmd MEDIA FB_DEVICE AUDIO_DEVICE -- issue 930 finding 9: /dev/fb0 has no
-# clock of its own -- ffmpeg's frame pacing rests entirely on ALSA backpressure from the audio
-# sink. A multi-minute pacing skew would silently masquerade as rig A/V disagreement in the
-# cross-check, not as a playback bug. Before committing to the persistent looped background
-# playback (`lipsync_playback_cmds` below), play the asset through ONCE in the foreground (no
-# re-pacing logic, just measure + assert) and compare wall-clock elapsed against `ffprobe`'s own
-# reported duration; FAIL LOUD with both numbers if the gap exceeds a small budget (0.5% of
-# duration + 1s constant). Kept as its OWN function/ssh round trip (not folded into
-# `lipsync_playback_cmds`) so it never touches the persistent launch's `/run/*.pid`/`/run/*.log`
-# paths -- those need a real root/remote session, while this guard is independently testable.
+# lipsync_pacing_guard_cmd MEDIA FB_DEVICE AUDIO_DEVICE -- issue 930 finding 9 (elapsed-vs-
+# duration budget) + the follow-up pacing-hypothesis measurement (comment on #930): /dev/fb0 has
+# no clock of its own -- ffmpeg's frame pacing rests entirely on ALSA backpressure from the audio
+# sink, and WITHOUT `-re` (real-time input read rate) that backpressure does NOT actually pace the
+# video: a direct wall-clock measurement found frames delivered in 4-5-frame BURSTS ~4ms apart
+# separated by ~80ms STALLS (a ~12.5fps slideshow), while running ~5% cumulatively fast vs audio --
+# and the OLD elapsed-vs-duration-only check PASSED throughout, because ffmpeg's total wall-clock
+# runtime is governed by the audio drain, not by whether the video was paced evenly inside that
+# window. `-re` (added below and in `lipsync_playback_cmds`) fixes the pacing (measured: p50
+# 16.663ms, std 1.7ms, zero stalls, steady-state drift <1ms/40s); this guard now ALSO instruments
+# the SAME foreground pass with `-vf showinfo` and a python3 probe that wall-clock-timestamps every
+# frame the filter reports, so a future pacing regression can never again hide behind a
+# total-elapsed-only budget check. Cadence is asserted from `startup_skip_s` seconds in (default
+# 2s, overridable via LIPSYNC_PACING_STARTUP_SKIP_S -- the fix's own one-time ~0.5s startup step is
+# a documented, accepted exception, not a defect) onward: p95 deviation from the asset's own
+# nominal (fps-derived) frame interval must stay within 5ms, zero deltas may exceed 33ms (a
+# dropped-frame-class stall), and fewer than 2% of deltas may be sub-4ms bursts. Kept as its OWN
+# function/ssh round trip (not folded into `lipsync_playback_cmds`) so it never touches the
+# persistent launch's `/run/*.pid`/`/run/*.log` paths -- those need a real root/remote session,
+# while this guard is independently testable (a fake ffmpeg/ffprobe on PATH, see
+# tests/harness_lipsync_test_mode.rs). The python3 probe is piped to `python3 -` via a nested
+# heredoc rather than written to a file under /run -- same "prints remote bash, no network in the
+# function itself" convention, without needing real filesystem access to construct/test the string.
 lipsync_pacing_guard_cmd() {
   local media="$1" fb="$2" audio="$3"
   cat <<CMDS
-DURATION=\$(ffprobe -v error -show_entries format=duration -of csv=p=0 '$media')
-START=\$(date +%s.%N)
-ffmpeg -y -i '$media' \\
-  -map 0:v -pix_fmt bgra -f fbdev '$fb' \\
-  -map 0:a -ac 2 -f alsa '$audio' \\
-  -loglevel error
-END=\$(date +%s.%N)
-ELAPSED=\$(awk -v s="\$START" -v e="\$END" 'BEGIN{printf "%.3f", e - s}')
-BUDGET=\$(awk -v d="\$DURATION" 'BEGIN{printf "%.3f", d * 0.005 + 1}')
-OVER=\$(awk -v e="\$ELAPSED" -v d="\$DURATION" -v b="\$BUDGET" 'BEGIN{diff = e - d; if (diff < 0) diff = -diff; print (diff > b) ? 1 : 0}')
-if [ "\$OVER" = "1" ]; then
-  echo "FAIL: lipsync playback pacing check -- elapsed=\${ELAPSED}s vs asset duration=\${DURATION}s exceeds the \${BUDGET}s budget (fbdev/ALSA pacing drift)" >&2
-  exit 1
-fi
-echo "ok: playback pacing check passed (elapsed=\${ELAPSED}s duration=\${DURATION}s budget=\${BUDGET}s)"
+python3 - '$media' '$fb' '$audio' <<'PYEOF'
+import os
+import subprocess
+import sys
+import time
+
+media, fb, audio = sys.argv[1:4]
+
+
+def ffprobe(extra_args):
+    out = subprocess.run(
+        ["ffprobe"] + extra_args + [media], capture_output=True, text=True
+    )
+    return out.stdout.strip()
+
+
+duration = float(
+    ffprobe(["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0"])
+)
+
+fps_raw = ffprobe(
+    [
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=r_frame_rate",
+        "-of",
+        "csv=p=0",
+    ]
+)
+try:
+    num, _, den = fps_raw.partition("/")
+    fps = float(num) / float(den) if den else float(num)
+    if fps <= 0:
+        raise ValueError(fps)
+except (ValueError, ZeroDivisionError):
+    sys.stderr.write(
+        "WARN: could not parse fps from ffprobe output {!r} -- defaulting to "
+        "60fps for the cadence nominal\n".format(fps_raw)
+    )
+    fps = 60.0
+nominal_ms = 1000.0 / fps
+
+startup_skip_s = float(os.environ.get("LIPSYNC_PACING_STARTUP_SKIP_S", "2"))
+
+cmd = [
+    "ffmpeg",
+    "-y",
+    "-re",
+    "-i",
+    media,
+    "-map",
+    "0:v",
+    "-vf",
+    "showinfo",
+    "-pix_fmt",
+    "bgra",
+    "-nostats",
+    "-f",
+    "fbdev",
+    fb,
+    "-map",
+    "0:a",
+    "-ac",
+    "2",
+    "-f",
+    "alsa",
+    audio,
+]
+
+start = time.monotonic()
+proc = subprocess.Popen(
+    cmd, stderr=subprocess.PIPE, stdout=subprocess.DEVNULL, text=True, bufsize=1
+)
+frame_times = []
+for line in proc.stderr:
+    if "Parsed_showinfo" in line and "pts_time" in line:
+        frame_times.append(time.monotonic() - start)
+proc.wait()
+elapsed = time.monotonic() - start
+
+budget = duration * 0.005 + 1
+elapsed_over = abs(elapsed - duration) > budget
+
+deltas_ms = []
+for i in range(1, len(frame_times)):
+    if frame_times[i] >= startup_skip_s:
+        deltas_ms.append((frame_times[i] - frame_times[i - 1]) * 1000.0)
+
+n = len(deltas_ms)
+stalls = sum(1 for d in deltas_ms if d > 33.0)
+bursts = sum(1 for d in deltas_ms if d < 4.0)
+burst_frac = (bursts / n) if n else 0.0
+devs = sorted(abs(d - nominal_ms) for d in deltas_ms)
+p95_dev = devs[int(0.95 * (len(devs) - 1))] if devs else 0.0
+
+cadence_bad = n > 0 and (p95_dev > 5.0 or stalls > 0 or burst_frac >= 0.02)
+
+summary = (
+    "elapsed={:.3f}s duration={:.3f}s budget={:.3f}s cadence nominal={:.3f}ms "
+    "p95_dev={:.3f}ms stalls(>33.0ms)={} bursts(<4.0ms)={:.1f}% deltas={}"
+).format(elapsed, duration, budget, nominal_ms, p95_dev, stalls, burst_frac * 100.0, n)
+
+if elapsed_over or cadence_bad:
+    sys.stderr.write("FAIL: lipsync playback pacing check -- " + summary + "\n")
+    sys.exit(1)
+
+print("ok: playback pacing check passed (" + summary + ")")
+PYEOF
 CMDS
 }
 
@@ -114,11 +223,15 @@ CMDS
 # 930): bgra pixel format (matches src/probe/fb.rs's own painter convention), -ac 2 (the ALSA
 # device refused a mono stream in the live sanity test), backgrounded + its PID tracked so `stop`
 # can find it. `-stream_loop -1` loops the (short, ~60s) asset continuously for an arbitrary-length
-# recording window. Callers should run `lipsync_pacing_guard_cmd` first (see above).
+# recording window. `-re` (930 pacing follow-up) reads the input in real time -- without it
+# /dev/fb0's own lack of a clock means ALSA backpressure alone does not pace the video (measured:
+# 4-5-frame bursts, ~80ms stalls); this is the SAME fix as `lipsync_pacing_guard_cmd`'s, applied
+# to the actual persistent playback that plays during a recording, not just the preflight check.
+# Callers should run `lipsync_pacing_guard_cmd` first (see above).
 lipsync_playback_cmds() {
   local media="$1" fb="$2" audio="$3" pidfile="$4"
   cat <<CMDS
-nohup ffmpeg -y -stream_loop -1 -i '$media' \\
+nohup ffmpeg -y -re -stream_loop -1 -i '$media' \\
   -map 0:v -pix_fmt bgra -f fbdev '$fb' \\
   -map 0:a -ac 2 -f alsa '$audio' \\
   > /run/rig-lipsync-playback.log 2>&1 &
