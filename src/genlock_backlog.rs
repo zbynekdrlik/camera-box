@@ -127,6 +127,57 @@ pub fn should_drain_one(
         && ticks_since_last_drain >= DRAIN_MIN_TICK_INTERVAL
 }
 
+/// #940 piece 3 — the STRUCTURAL fix for the deep-latency A/V-offset step. Quantizes an
+/// already-computed ts-align RESERVE deadline (the Rust `genlock_present_ts_reserve()`, the
+/// C `genlock_present_ts_reserve()`) to the canvas frame GRID:
+///
+/// `phase_pinned_deadline(raw_deadline_ns, interval_ns) = floor(raw_deadline_ns / interval_ns) * interval_ns`
+///
+/// WHY: the pre-#940 deadline was a raw continuous quantity (`wall_now - latency`), so
+/// "which frame is due right now" depended on the EXACT sub-ms instant a lock/relock
+/// happened to fire — a hidden per-lock-episode phase, re-sampled on every ACQUIRE and
+/// every BACKLOG-STORM relock, measured live as a ±1–2-frame A/V-offset step between lock
+/// episodes at deep latency (issue #940: -12..-131 ms band, later +39..+105 ms band with
+/// the confounding dock-corrector wander eliminated). Quantizing removes the dependency on
+/// exactly WHEN a relock fires: due-ness becomes a pure function of wall time.
+///
+/// A degenerate `interval_ns` (0 — unknown video info) returns the raw deadline unchanged
+/// rather than dividing by zero, matching every other genlock helper's degenerate-interval
+/// convention in this module.
+///
+/// Mirror of the C `genlock_phase_pin_deadline()` (obs-source.c) — keep both in lock-step.
+/// See [`PHASE_PIN_HYSTERESIS_NS`] for the companion grid-comparison hysteresis this
+/// quantization requires (the design's own documented risk: a frame arriving essentially
+/// exactly on a grid line must not flap due/not-due from ordinary render-tick jitter on
+/// this floor division).
+pub fn phase_pinned_deadline(raw_deadline_ns: u64, _interval_ns: u64) -> u64 {
+    // #940 RED: not yet quantized to the grid -- pre-fix behaviour (the raw continuous
+    // deadline), so the new tests below fail against it.
+    raw_deadline_ns
+}
+
+/// #940 piece 3 — the hysteresis SLACK added to [`phase_pinned_deadline`]'s output before
+/// the `due` comparison. Sized well below one frame interval at ANY rig fps (33.3 ms @
+/// 30 fps, 16.6 ms @ 60 fps — see [`phase_pin_hysteresis_is_a_small_fraction_of_any_rig_frame_interval_940`]),
+/// so it can never pull in an extra frame; it exists ONLY to stop a frame captured
+/// essentially exactly on a grid line from flipping due/not-due tick to tick because of
+/// ordinary sub-ms render-tick slew on the floor division above — the same shape of guard
+/// `genlock_present_ts`'s existing `+interval/2` boundary-churn bias already applies to the
+/// (separate, frame-count) preload path, sized here instead to the sub-frame reserve-ms
+/// deadline this quantizes.
+///
+/// Mirror of the C `GENLOCK_PHASE_PIN_HYSTERESIS_NS` (obs-source.c).
+pub const PHASE_PIN_HYSTERESIS_NS: u64 = 0; // #940 RED: no slack yet -- pre-fix behaviour.
+
+/// Is `frame_ts_ns` due against the phase-pinned `deadline_ns` (already
+/// [`phase_pinned_deadline`]'s output), with [`PHASE_PIN_HYSTERESIS_NS`] slack? The
+/// comparison is inclusive at the hysteresis boundary (`<=`), matching every other due/not-due
+/// comparison in this codebase (`ts <= present_ts`).
+pub fn phase_pinned_is_due(frame_ts_ns: u64, deadline_ns: u64) -> bool {
+    // #940 RED: no hysteresis applied yet.
+    frame_ts_ns <= deadline_ns
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -371,5 +422,93 @@ mod tests {
             1,
             DRAIN_MIN_TICK_INTERVAL
         ));
+    }
+
+    // ---- #940 piece 3: phase-pinned deadline + grid-comparison hysteresis ----------------
+
+    const I30: u64 = 33_333_333; // ~30 Hz frame interval (ns)
+    const I60: u64 = 16_666_667; // ~60 Hz frame interval (ns)
+
+    /// The core floor-to-grid arithmetic, at a plain round interval so the numbers are
+    /// easy to verify by hand.
+    #[test]
+    fn phase_pinned_deadline_floors_to_the_grid_940() {
+        // 100 / 30 = 3.33 -> floor 3 -> 90.
+        assert_eq!(phase_pinned_deadline(100, 30), 90);
+        // Already exactly on a grid line -> unchanged (idempotent).
+        assert_eq!(phase_pinned_deadline(90, 30), 90);
+        // One ns short of the NEXT grid line still floors DOWN to the current one, never up.
+        assert_eq!(phase_pinned_deadline(119, 30), 90);
+        assert_eq!(phase_pinned_deadline(120, 30), 120);
+        // Zero deadline (early-boot wall clock) -> zero, not a panic.
+        assert_eq!(phase_pinned_deadline(0, 30), 0);
+    }
+
+    /// The same arithmetic at the rig's REAL frame intervals, so the magnitude of what the
+    /// floor can shift a deadline by is visible in the test itself, not just asserted as an
+    /// abstract property. Worst case is just under one full interval earlier than the raw
+    /// (continuous) deadline — the bounded, deliberate cost of removing the lock-history
+    /// dependency (see the module doc on [`phase_pinned_deadline`]).
+    #[test]
+    fn phase_pinned_deadline_shifts_at_most_just_under_one_interval_940() {
+        for interval in [I30, I60] {
+            let raw = 900_000_000_000u64 + interval - 1; // one ns short of the next grid line
+            let pinned = phase_pinned_deadline(raw, interval);
+            assert!(pinned <= raw, "the grid floor must never move the deadline LATER");
+            assert!(
+                raw - pinned < interval,
+                "the grid floor must never shift the deadline by a WHOLE interval or more \
+                 (raw={raw}, pinned={pinned}, interval={interval})"
+            );
+        }
+    }
+
+    /// Degenerate interval (0 — unknown video info) must return the raw deadline unchanged,
+    /// matching every other genlock helper's degenerate-interval convention in this module
+    /// (never divide by zero, never invent a value).
+    #[test]
+    fn phase_pinned_deadline_degenerate_interval_returns_raw_940() {
+        assert_eq!(phase_pinned_deadline(123_456, 0), 123_456);
+        assert_eq!(phase_pinned_deadline(0, 0), 0);
+    }
+
+    /// The grid-comparison hysteresis: a frame captured essentially exactly on a grid line
+    /// (i.e. just PAST the phase-pinned deadline) must still read as due, within
+    /// [`PHASE_PIN_HYSTERESIS_NS`] — this is the flapping guard the design's own risk note
+    /// calls out. A frame beyond the hysteresis window stays not-due.
+    #[test]
+    fn phase_pinned_is_due_applies_hysteresis_at_the_boundary_940() {
+        let deadline = 900_000_000_000u64;
+        assert!(
+            phase_pinned_is_due(deadline, deadline),
+            "exactly at the deadline must be due"
+        );
+        assert!(
+            phase_pinned_is_due(deadline + PHASE_PIN_HYSTERESIS_NS, deadline),
+            "exactly at the hysteresis boundary must still be due (inclusive)"
+        );
+        assert!(
+            !phase_pinned_is_due(deadline + PHASE_PIN_HYSTERESIS_NS + 1, deadline),
+            "one ns past the hysteresis boundary must NOT be due"
+        );
+        assert!(
+            phase_pinned_is_due(deadline - 1, deadline),
+            "a frame already past due (ts before the deadline) stays due"
+        );
+    }
+
+    /// Sanity invariant: the hysteresis must stay a SMALL fraction of a frame interval at
+    /// the fastest rate this rig ever runs (60 fps) — this is what makes it structurally
+    /// incapable of pulling in an extra frame. If a future edit ever grows this constant
+    /// toward a real fraction of an interval, this test catches it immediately rather than
+    /// relying on someone noticing during review.
+    #[test]
+    fn phase_pin_hysteresis_is_a_small_fraction_of_any_rig_frame_interval_940() {
+        assert!(
+            PHASE_PIN_HYSTERESIS_NS < I60 / 2,
+            "PHASE_PIN_HYSTERESIS_NS ({PHASE_PIN_HYSTERESIS_NS} ns) must stay well under \
+             half a 60fps frame interval ({} ns), or it risks pulling in an extra frame",
+            I60 / 2
+        );
     }
 }
