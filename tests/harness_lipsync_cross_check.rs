@@ -75,6 +75,34 @@ fn measure_chunk_cmd_reuses_av_sync_measure_py_verbatim() {
     assert!(cmd.contains("/tmp/cal.jsonl"));
 }
 
+/// 930 tooling finding (issuecomment-5179960868): av_sync_measure.py accepts `--repo DIR` (a
+/// non-default syncnet_python checkout, e.g. dev2's GPU checkout) but this script never passed
+/// it -- an optional 5th arg must become a `--repo` flag when given.
+#[test]
+fn measure_chunk_cmd_wires_repo_flag_when_given_930() {
+    let cmd = run_sourced(
+        "lipsync_measure_chunk_cmd python3 /repo/scripts/av_sync_measure.py /tmp/chunk-000.mp4 /tmp/cal.jsonl /opt/syncnet_python",
+    );
+    assert!(
+        cmd.contains("--repo /opt/syncnet_python"),
+        "930: a given repo path must become a --repo flag on the measure call: {cmd}"
+    );
+}
+
+/// The 4-arg call (today's shape, no repo override) must NOT grow a `--repo` flag -- leaves
+/// av_sync_measure.py's own default checkout path (REPO_ROOT/syncnet_python) in effect,
+/// byte-identical to before this knob existed.
+#[test]
+fn measure_chunk_cmd_omits_repo_flag_when_not_given_930() {
+    let cmd = run_sourced(
+        "lipsync_measure_chunk_cmd python3 /repo/scripts/av_sync_measure.py /tmp/chunk-000.mp4 /tmp/cal.jsonl",
+    );
+    assert!(
+        !cmd.contains("--repo"),
+        "930: no repo override given must NOT add a --repo flag: {cmd}"
+    );
+}
+
 /// The aggregate call must reuse av_sync_calibrate.py's EXISTING `--calibrate`/`--report-json`
 /// flags (issue 805's SEM-shrinking aggregator, already unit-tested) -- zero new math here.
 #[test]
@@ -253,16 +281,17 @@ printf -v f1 "$pattern" 1
         fs::write(
             &measure,
             r#"#!/usr/bin/env bash
-media="" cal=""
+media="" cal="" repo=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --media) media="$2"; shift 2 ;;
     --calibration-log) cal="$2"; shift 2 ;;
+    --repo) repo="$2"; shift 2 ;;
     *) shift ;;
   esac
 done
 echo "measure prose for $media"
-echo "$media" >> "$(dirname "$cal")/measured-list.txt"
+echo "$media repo=$repo" >> "$(dirname "$cal")/measured-list.txt"
 if [ -n "${FAKE_MEASURE_FAIL:-}" ]; then exit 1; fi
 echo '{"offset_ms": 12.5}' >> "$cal"
 "#,
@@ -434,6 +463,86 @@ fn main_stdout_carries_only_the_final_json_930() {
     assert!(
         stderr.contains("measure prose") && stderr.contains("aggregate prose"),
         "930: the fakes' own prose must appear on STDERR instead: {stderr}"
+    );
+}
+
+/// 930 tooling finding (issuecomment-5179960868): `main` must read a `LIPSYNC_SYNCNET_REPO` env
+/// override and thread it into EVERY per-chunk measure call -- end-to-end proof (not just the
+/// pure command-builder test above) that the wiring is real, using the fakes' own
+/// measured-list.txt log.
+#[test]
+fn main_threads_lipsync_syncnet_repo_env_into_every_chunk_measure_call_930() {
+    let fakes = MainFakes::setup();
+    let workdir = tempfile::tempdir().expect("workdir");
+    let lipsync = workdir.path().join("lipsync.mp4");
+    let qrqpsk = workdir.path().join("qrqpsk.mp4");
+    let markers = workdir.path().join("markers.csv");
+    for f in [&lipsync, &qrqpsk, &markers] {
+        fs::write(f, b"x").unwrap();
+    }
+    let path_env = format!(
+        "{}:{}",
+        fakes.bin_dir().display(),
+        std::env::var("PATH").unwrap()
+    );
+    let out = Command::new("bash")
+        .arg(script())
+        .arg("--lipsync-recording")
+        .arg(&lipsync)
+        .arg("--qrqpsk-recording")
+        .arg(&qrqpsk)
+        .arg("--qrqpsk-marker-log")
+        .arg(&markers)
+        .arg("--verdict-bin")
+        .arg(fakes.verdict())
+        .arg("--asset-baseline-ms")
+        .arg("-80")
+        .arg("--workdir")
+        .arg(workdir.path())
+        .env("PATH", path_env)
+        .env("LIPSYNC_PYTHON", "bash")
+        .env("LIPSYNC_AV_SYNC_MEASURE", fakes.measure())
+        .env("LIPSYNC_AV_SYNC_CALIBRATE", fakes.aggregate())
+        .env("LIPSYNC_SYNCNET_REPO", "/opt/syncnet_python")
+        .output()
+        .expect("spawn bash");
+    assert!(
+        out.status.success(),
+        "930: expected success: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let measured_list =
+        fs::read_to_string(workdir.path().join("measured-list.txt")).unwrap_or_default();
+    let lines: Vec<&str> = measured_list.lines().filter(|l| !l.is_empty()).collect();
+    assert!(
+        !lines.is_empty(),
+        "930: expected at least one measured chunk: {measured_list}"
+    );
+    assert!(
+        lines
+            .iter()
+            .all(|l| l.contains("repo=/opt/syncnet_python")),
+        "930: LIPSYNC_SYNCNET_REPO must be threaded into EVERY chunk's --repo flag: {measured_list}"
+    );
+}
+
+/// `main` must read `LIPSYNC_SYNCNET_REPO` BEFORE the per-chunk measure call that consumes it --
+/// a static-text pin alongside the end-to-end proof above.
+#[test]
+fn main_reads_lipsync_syncnet_repo_env_before_the_measure_call_930() {
+    let s = fs::read_to_string(script()).expect("read script");
+    let repo_read_at = s.find("LIPSYNC_SYNCNET_REPO").unwrap_or_else(|| {
+        panic!(
+            "930: main() must read a LIPSYNC_SYNCNET_REPO env override (av_sync_measure.py's own \
+             --repo default is otherwise the only option): {s}"
+        )
+    });
+    let measure_call_at = s
+        .find("eval \"$(lipsync_measure_chunk_cmd")
+        .expect("930: lipsync_measure_chunk_cmd call present");
+    assert!(
+        repo_read_at < measure_call_at,
+        "930: LIPSYNC_SYNCNET_REPO must be read BEFORE the per-chunk measure call it feeds: {s}"
     );
 }
 
