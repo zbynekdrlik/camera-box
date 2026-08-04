@@ -43,6 +43,17 @@ set -euo pipefail
 #
 # Prints the final JSON (recording-verdict's own --av-sync + lipsync_cross_check output) to
 # stdout and a one-line human summary to stderr.
+#
+# Env:
+#   LIPSYNC_PYTHON              python3 interpreter override (default: python3)
+#   LIPSYNC_AV_SYNC_MEASURE     av_sync_measure.py path override
+#   LIPSYNC_AV_SYNC_CALIBRATE   av_sync_calibrate.py path override
+#   LIPSYNC_SYNCNET_REPO        av_sync_measure.py --repo passthrough (issue 930 tooling finding,
+#                                issuecomment-5179960868): points EVERY per-chunk SyncNet
+#                                measurement at a non-default syncnet_python checkout (e.g. dev2's
+#                                GPU checkout -- dev1's CPU-only wheels are impractical for this
+#                                workload). Unset/empty (the default) leaves av_sync_measure.py's
+#                                own default checkout path (REPO_ROOT/syncnet_python) in effect.
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$HERE/.." && pwd)"
@@ -62,13 +73,25 @@ lipsync_segment_cmd() {
     "$input" "$secs" "$out_pattern"
 }
 
-# lipsync_measure_chunk_cmd <python> <av_sync_measure.py> <chunk> <calibration_log> -- one
-# SyncNet measurement of a single ~20s chunk, appending to the shared calibration-log JSONL
+# lipsync_measure_chunk_cmd <python> <av_sync_measure.py> <chunk> <calibration_log> [<repo>] --
+# one SyncNet measurement of a single ~20s chunk, appending to the shared calibration-log JSONL
 # (issue 917's engine; the JSONL is what av_sync_calibrate.py --calibrate then aggregates).
+#
+# Optional 5th arg (issue 930 tooling finding, issuecomment-5179960868): av_sync_measure.py
+# accepts `--repo DIR` (default REPO_ROOT/syncnet_python) but this call never passed it, so a
+# non-default syncnet_python checkout (e.g. dev2's GPU checkout, used live because dev1's CPU-only
+# wheels are impractical for this workload) could only be reached by placing/symlinking it at the
+# hardcoded default path. When given, becomes a `--repo` flag; omitted/empty (today's default,
+# byte-identical to before this knob existed) leaves av_sync_measure.py's own default in effect.
 lipsync_measure_chunk_cmd() {
-  local py="$1" script="$2" chunk="$3" calibration_log="$4"
-  printf '%s %s --media %q --calibration-log %q' \
-    "$(printf '%q' "$py")" "$(printf '%q' "$script")" "$chunk" "$calibration_log"
+  local py="$1" script="$2" chunk="$3" calibration_log="$4" repo="${5:-}"
+  local cmd
+  cmd="$(printf '%s %s --media %q --calibration-log %q' \
+    "$(printf '%q' "$py")" "$(printf '%q' "$script")" "$chunk" "$calibration_log")"
+  if [ -n "$repo" ]; then
+    cmd="$cmd $(printf -- '--repo %q' "$repo")"
+  fi
+  printf '%s' "$cmd"
 }
 
 # lipsync_aggregate_cmd <python> <av_sync_calibrate.py> <calibration_log> <report_json> -- the
@@ -166,6 +189,11 @@ main() {
   local py="${LIPSYNC_PYTHON:-python3}"
   local measure_script="${LIPSYNC_AV_SYNC_MEASURE:-$REPO_ROOT/scripts/av_sync_measure.py}"
   local calibrate_script="${LIPSYNC_AV_SYNC_CALIBRATE:-$REPO_ROOT/scripts/av_sync_calibrate.py}"
+  # issue 930 tooling finding (issuecomment-5179960868): av_sync_measure.py's own --repo default
+  # (REPO_ROOT/syncnet_python) is the only checkout it can otherwise reach. LIPSYNC_SYNCNET_REPO
+  # lets a caller point every chunk measurement at a different checkout (e.g. dev2's GPU checkout);
+  # empty (the default) omits --repo entirely, leaving av_sync_measure.py's own default in effect.
+  local syncnet_repo="${LIPSYNC_SYNCNET_REPO:-}"
   local measured=0 attempted=0
   for chunk in "$workdir"/chunk-*.mp4; do
     [ -f "$chunk" ] || continue
@@ -173,7 +201,7 @@ main() {
     echo "[lipsync-cross-check] measuring $chunk" >&2
     # av_sync_measure.py's own prose goes to stderr (1>&2) so it never lands on this script's
     # stdout -- the header contract is: ONLY the final recording-verdict JSON reaches stdout.
-    if eval "$(lipsync_measure_chunk_cmd "$py" "$measure_script" "$chunk" "$calibration_log")" 1>&2; then
+    if eval "$(lipsync_measure_chunk_cmd "$py" "$measure_script" "$chunk" "$calibration_log" "$syncnet_repo")" 1>&2; then
       measured=$((measured + 1))
     else
       echo "[lipsync-cross-check] WARN: SyncNet measurement failed on $chunk (continuing)" >&2

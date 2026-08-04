@@ -656,3 +656,192 @@ fn start_with_a_missing_media_file_fails_loud_before_touching_the_network() {
          so a hang/network-error here would mean the file-existence check was skipped)"
     );
 }
+
+// --------------------------------------------------------------------------------------------- //
+// 930 follow-up (issuecomment-5179960868): the paired cross-check measured a CONSTANT rig-added
+// SyncNet offset of -334ms on this exact playback (video leads audio -- the ALSA output pipeline
+// on hw:CARD=PCH,DEV=3 delays audible audio by roughly that much, same class as the documented
+// 124ms QPSK ring bias). LIPSYNC_AUDIO_LEAD_MS cancels it by delaying the VIDEO demux (via
+// -itsoffset on a SECOND -i of the same asset) relative to the audio demux -- the ticket's own
+// stated equivalent of "advancing audio" (only the RELATIVE offset between the two streams
+// matters for lipsync perception). Still exactly ONE ffmpeg PROCESS (one PID, unchanged
+// pidfile/kill lifecycle) -- two demuxes INSIDE it, never two competing processes.
+// --------------------------------------------------------------------------------------------- //
+
+/// LIPSYNC_AUDIO_LEAD_MS=0 (the knob's off position) must be BYTE-IDENTICAL to today's
+/// single-demux command -- the knob must be a true no-op at zero, so this iteration cannot
+/// regress any rig behavior that hasn't opted into it. Also true when the arg is omitted
+/// entirely (back-compat with every pre-930-iteration call site/test).
+#[test]
+fn playback_cmds_zero_lead_is_byte_identical_to_original_930() {
+    let without_lead_arg = run_sourced(
+        "lipsync_playback_cmds /root/lipsync-test.mp4 /dev/fb0 hw:CARD=PCH,DEV=3 /run/rig-lipsync-playback.pid",
+    );
+    let with_zero_lead = run_sourced(
+        "lipsync_playback_cmds /root/lipsync-test.mp4 /dev/fb0 hw:CARD=PCH,DEV=3 /run/rig-lipsync-playback.pid 0",
+    );
+    assert_eq!(
+        without_lead_arg, with_zero_lead,
+        "930: LIPSYNC_AUDIO_LEAD_MS=0 (or the arg omitted) must be byte-identical to today's \
+         single-demux command: without_lead_arg={without_lead_arg} with_zero_lead={with_zero_lead}"
+    );
+    assert_eq!(
+        without_lead_arg.matches("nohup ffmpeg").count(),
+        1,
+        "930: the zero-lead path keeps exactly ONE ffmpeg process: {without_lead_arg}"
+    );
+    assert_eq!(
+        without_lead_arg
+            .matches("-i '/root/lipsync-test.mp4'")
+            .count(),
+        1,
+        "930: zero-lead path = exactly ONE demux of the asset (today's shape): {without_lead_arg}"
+    );
+}
+
+/// LIPSYNC_AUDIO_LEAD_MS > 0 must compensate by delaying VIDEO (a second demux of the SAME asset,
+/// carrying a positive -itsoffset -- ffmpeg semantics: positive itsoffset DELAYS that input's
+/// streams) relative to audio (the first, undelayed demux) -- still inside the SAME single
+/// ffmpeg process/PID.
+#[test]
+fn playback_cmds_applies_audio_lead_via_video_itsoffset_930() {
+    let cmds = run_sourced(
+        "lipsync_playback_cmds /root/lipsync-test.mp4 /dev/fb0 hw:CARD=PCH,DEV=3 /run/rig-lipsync-playback.pid 330",
+    );
+    assert_eq!(
+        cmds.matches("nohup ffmpeg").count(),
+        1,
+        "930 audio-lead: still ONE ffmpeg process (two demuxes inside it), never two competing \
+         processes -- the stop path assumes a single pidfile/PID: {cmds}"
+    );
+    assert_eq!(
+        cmds.matches("-i '/root/lipsync-test.mp4'").count(),
+        2,
+        "930 audio-lead: video needs its OWN demux of the same file to carry the -itsoffset \
+         delay independently of audio's (undelayed) demux: {cmds}"
+    );
+    assert!(
+        cmds.contains("-itsoffset 0.330"),
+        "930: LIPSYNC_AUDIO_LEAD_MS=330 must become a 0.330s -itsoffset on the delayed (video) \
+         input: {cmds}"
+    );
+    assert!(
+        cmds.contains("-map 1:v"),
+        "930: video must come from the SECOND (itsoffset-delayed) input: {cmds}"
+    );
+    assert!(
+        cmds.contains("-map 0:a"),
+        "930: audio must come from the FIRST (undelayed) input -- effectively advanced relative \
+         to the now-delayed video: {cmds}"
+    );
+    assert_eq!(
+        cmds.matches("-stream_loop -1").count(),
+        2,
+        "930: BOTH demuxes must loop independently -- the asset is short (~60s): {cmds}"
+    );
+    assert_eq!(
+        cmds.matches("-re -stream_loop -1 -i").count(),
+        2,
+        "930: BOTH demuxes need real-time pacing (the pre-existing #930 pacing-guard finding), \
+         not just one: {cmds}"
+    );
+    assert!(
+        cmds.contains("audio_lead_ms=330"),
+        "930: the success message must report the applied lead for operator visibility: {cmds}"
+    );
+}
+
+/// A fractional-ms lead (not a round hundreds value) must still convert cleanly to seconds --
+/// proves the ms->s conversion isn't hardcoded/special-cased for 330 alone.
+#[test]
+fn playback_cmds_converts_an_arbitrary_lead_ms_to_seconds_930() {
+    let cmds = run_sourced(
+        "lipsync_playback_cmds /root/lipsync-test.mp4 /dev/fb0 hw:CARD=PCH,DEV=3 /run/rig-lipsync-playback.pid 125",
+    );
+    assert!(
+        cmds.contains("-itsoffset 0.125"),
+        "930: 125ms must become 0.125s: {cmds}"
+    );
+}
+
+/// `LIPSYNC_AUDIO_LEAD_MS` must default to 330 (seeded from the paired cross-check measurement,
+/// issuecomment-5179960868: rig-added offset -334ms) when the script is sourced with no override.
+#[test]
+fn lipsync_audio_lead_ms_env_defaults_to_330_930() {
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(". \"$1\"; echo \"$LIPSYNC_AUDIO_LEAD_MS\"")
+        .arg("bash")
+        .arg(script())
+        .output()
+        .expect("spawn bash");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout.trim(),
+        "330",
+        "930: default audio-lead compensation must be 330ms (seeded from issuecomment-5179960868's \
+         -334ms measurement): {stdout}"
+    );
+}
+
+/// `cmd_start` must pass `$LIPSYNC_AUDIO_LEAD_MS` through to `lipsync_playback_cmds` as its 5th
+/// arg -- a static-text pin alongside the functional proofs above.
+#[test]
+fn start_passes_audio_lead_ms_to_playback_cmds_930() {
+    let s = read("scripts/lipsync-test-mode.sh");
+    assert!(
+        s.contains(
+            "cam_ssh \"$(lipsync_playback_cmds \"$remote_media\" \"$LIPSYNC_FB_DEVICE\" \"$LIPSYNC_AUDIO_DEVICE\" \"$LIPSYNC_PLAYBACK_PIDFILE\" \"$LIPSYNC_AUDIO_LEAD_MS\")\""
+        ),
+        "930: cmd_start must pass LIPSYNC_AUDIO_LEAD_MS through to lipsync_playback_cmds as its \
+         5th arg: {s}"
+    );
+}
+
+/// A non-integer `LIPSYNC_AUDIO_LEAD_MS` must fail loud, before any ssh/scp attempt -- same
+/// fail-fast discipline as the missing-media-file check above.
+#[test]
+fn start_fails_loud_on_a_non_integer_audio_lead_ms_930() {
+    let out = Command::new("bash")
+        .arg(script())
+        .arg("start")
+        .env("LIPSYNC_AUDIO_LEAD_MS", "abc")
+        .output()
+        .expect("spawn bash");
+    assert!(
+        !out.status.success(),
+        "930: a non-integer LIPSYNC_AUDIO_LEAD_MS must fail loud before touching the network"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("LIPSYNC_AUDIO_LEAD_MS"),
+        "930: failure message must name the bad env var: {stderr}"
+    );
+}
+
+/// A negative `LIPSYNC_AUDIO_LEAD_MS` must also fail loud -- the knob's defined semantics are
+/// "0 = off, positive = delay video by that many ms"; a negative value has no defined meaning for
+/// the chosen -itsoffset mechanism.
+#[test]
+fn start_fails_loud_on_a_negative_audio_lead_ms_930() {
+    let out = Command::new("bash")
+        .arg(script())
+        .arg("start")
+        .env("LIPSYNC_AUDIO_LEAD_MS", "-5")
+        .output()
+        .expect("spawn bash");
+    assert!(
+        !out.status.success(),
+        "930: a negative LIPSYNC_AUDIO_LEAD_MS must fail loud -- undefined for this knob"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("LIPSYNC_AUDIO_LEAD_MS"),
+        "930: failure message must name the bad env var: {stderr}"
+    );
+}

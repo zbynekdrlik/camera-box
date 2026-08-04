@@ -32,6 +32,17 @@ set -euo pipefail
 #                          SAME device the QPSK marker uses, per issue 930's scope item 2)
 #   LIPSYNC_PLAYBACK_PIDFILE  where this script's own ffmpeg PID is tracked on cam2 (default
 #                             /run/rig-lipsync-playback.pid)
+#   LIPSYNC_AUDIO_LEAD_MS  static audio-lead compensation, in ms (default 330, non-negative
+#                          integer only). Issue 930 follow-up (issuecomment-5179960868): a paired
+#                          QR/QPSK-vs-SyncNet cross-check on this exact playback measured a
+#                          CONSTANT rig-added offset of -334ms (video LEADS audio) -- the ALSA
+#                          output pipeline on LIPSYNC_AUDIO_DEVICE delays audible audio by roughly
+#                          that much, the same class as the documented 124ms QPSK ring bias.
+#                          LIPSYNC_AUDIO_LEAD_MS cancels it by delaying the VIDEO demux by that
+#                          many ms relative to audio (the ticket's own stated equivalent of
+#                          "advancing audio" -- only the RELATIVE offset between the two streams
+#                          matters for lipsync perception). 0 = today's behavior, byte-identical
+#                          single-demux command (no compensation).
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$HERE/.." && pwd)"
@@ -42,6 +53,13 @@ PAINTER_PIDFILE="${PAINTER_PIDFILE:-/run/rig-painter.pid}"
 LIPSYNC_FB_DEVICE="${LIPSYNC_FB_DEVICE:-/dev/fb0}"
 LIPSYNC_AUDIO_DEVICE="${LIPSYNC_AUDIO_DEVICE:-hw:CARD=PCH,DEV=3}"
 LIPSYNC_PLAYBACK_PIDFILE="${LIPSYNC_PLAYBACK_PIDFILE:-/run/rig-lipsync-playback.pid}"
+LIPSYNC_AUDIO_LEAD_MS="${LIPSYNC_AUDIO_LEAD_MS:-330}"
+case "$LIPSYNC_AUDIO_LEAD_MS" in
+  ''|*[!0-9]*)
+    echo "[lipsync-test-mode] FAIL: LIPSYNC_AUDIO_LEAD_MS must be a non-negative integer (ms), got '$LIPSYNC_AUDIO_LEAD_MS'" >&2
+    exit 1
+    ;;
+esac
 
 # --------------------------------------------------------------------------------------------- #
 # PURE functions (print remote-bash text; no network) -- sourced + unit-tested by
@@ -257,22 +275,35 @@ PYEOF
 CMDS
 }
 
-# lipsync_playback_cmds MEDIA FB_DEVICE AUDIO_DEVICE PLAYBACK_PIDFILE -- the ONE persistent ffmpeg
-# process feeding both sinks from a single demux/decode timeline (live-verified on cam2, issue
-# 930): bgra pixel format (matches src/probe/fb.rs's own painter convention), -ac 2 (the ALSA
-# device refused a mono stream in the live sanity test), backgrounded + its PID tracked so `stop`
-# can find it. `-stream_loop -1` loops the (short, ~60s) asset continuously for an arbitrary-length
-# recording window. `-re` (930 pacing follow-up) reads the input in real time -- without it
-# /dev/fb0's own lack of a clock means ALSA backpressure alone does not pace the video (measured:
-# 4-5-frame bursts, ~80ms stalls); this is the SAME fix as `lipsync_pacing_guard_cmd`'s, applied
-# to the actual persistent playback that plays during a recording, not just the preflight check.
-# Deliberately does NOT carry `-vf showinfo` -- that is a one-shot MEASUREMENT instrument for the
-# preflight guard only; adding it here would cost real CPU on every frame of the actual
-# (potentially long) recording for no benefit once the preflight has already verified pacing.
+# lipsync_playback_cmds MEDIA FB_DEVICE AUDIO_DEVICE PLAYBACK_PIDFILE [AUDIO_LEAD_MS] -- the ONE
+# persistent ffmpeg process feeding both sinks (live-verified on cam2, issue 930): bgra pixel
+# format (matches src/probe/fb.rs's own painter convention), -ac 2 (the ALSA device refused a mono
+# stream in the live sanity test), backgrounded + its PID tracked so `stop` can find it.
+# `-stream_loop -1` loops the (short, ~60s) asset continuously for an arbitrary-length recording
+# window. `-re` (930 pacing follow-up) reads the input in real time -- without it /dev/fb0's own
+# lack of a clock means ALSA backpressure alone does not pace the video (measured: 4-5-frame
+# bursts, ~80ms stalls); same fix as `lipsync_pacing_guard_cmd`'s. Deliberately does NOT carry
+# `-vf showinfo` -- that is a one-shot MEASUREMENT instrument for the preflight guard only.
 # Callers should run `lipsync_pacing_guard_cmd` first (see above).
+#
+# AUDIO_LEAD_MS (issue 930 follow-up, issuecomment-5179960868): the paired QR/QPSK-vs-SyncNet
+# cross-check on this exact playback measured a CONSTANT rig-added offset of -334ms (video LEADS
+# audio) -- the ALSA output pipeline on $audio delays audible audio by roughly that much, same
+# class as the documented 124ms QPSK ring bias. Omitted or 0 (the default before this knob
+# existed) emits the ORIGINAL single-demux command BYTE-FOR-BYTE -- see
+# tests/harness_lipsync_test_mode.rs playback_cmds_zero_lead_is_byte_identical_to_original_930.
+# A positive value cancels the measured delay by opening a SECOND demux of the SAME asset for
+# VIDEO ONLY, carrying a positive `-itsoffset` (ffmpeg semantics: positive itsoffset DELAYS that
+# input's streams) -- the ticket's own stated equivalent of "advancing audio" (only the RELATIVE
+# offset between the two streams matters for lipsync perception, not which one is nominally
+# "early"/"late" from ffmpeg's own process-start clock). Audio keeps coming from the FIRST,
+# undelayed demux. Still exactly ONE ffmpeg process/PID -- the existing single-pidfile kill
+# lifecycle in `lipsync_stop_playback_cmds` is unchanged; two competing processes that could drift
+# apart was deliberately rejected (issue 930 design comment).
 lipsync_playback_cmds() {
-  local media="$1" fb="$2" audio="$3" pidfile="$4"
-  cat <<CMDS
+  local media="$1" fb="$2" audio="$3" pidfile="$4" lead_ms="${5:-0}"
+  if [ "$lead_ms" -eq 0 ]; then
+    cat <<CMDS
 nohup ffmpeg -y -re -stream_loop -1 -i '$media' \\
   -map 0:v -pix_fmt bgra -f fbdev '$fb' \\
   -map 0:a -ac 2 -f alsa '$audio' \\
@@ -283,6 +314,23 @@ sleep 1
 PID=\$(cat '$pidfile')
 kill -0 "\$PID" 2>/dev/null || { echo "FAIL: lipsync playback ffmpeg (pid \$PID) died immediately -- see /run/rig-lipsync-playback.log" >&2; cat /run/rig-lipsync-playback.log >&2 || true; exit 1; }
 echo "ok: lipsync playback running (pid \$PID, media=$media, fb=$fb, audio=$audio)"
+CMDS
+    return
+  fi
+  local lead_s
+  lead_s="$(awk -v ms="$lead_ms" 'BEGIN { printf "%.3f", ms / 1000 }')"
+  cat <<CMDS
+nohup ffmpeg -y -re -stream_loop -1 -i '$media' \\
+  -itsoffset $lead_s -re -stream_loop -1 -i '$media' \\
+  -map 1:v -pix_fmt bgra -f fbdev '$fb' \\
+  -map 0:a -ac 2 -f alsa '$audio' \\
+  > /run/rig-lipsync-playback.log 2>&1 &
+echo \$! > '$pidfile'
+disown
+sleep 1
+PID=\$(cat '$pidfile')
+kill -0 "\$PID" 2>/dev/null || { echo "FAIL: lipsync playback ffmpeg (pid \$PID) died immediately -- see /run/rig-lipsync-playback.log" >&2; cat /run/rig-lipsync-playback.log >&2 || true; exit 1; }
+echo "ok: lipsync playback running (pid \$PID, media=$media, fb=$fb, audio=$audio, audio_lead_ms=$lead_ms)"
 CMDS
 }
 
@@ -331,8 +379,8 @@ cmd_start() {
   sshpass -p "$CAM_PW" scp -o StrictHostKeyChecking=no -o ConnectTimeout=10 "$media" root@"${PAINTER_IP}:${remote_media}"
   echo "[lipsync-test-mode] cam2: pacing sanity check (fb=${LIPSYNC_FB_DEVICE}, audio=${LIPSYNC_AUDIO_DEVICE})"
   cam_ssh "$(lipsync_pacing_guard_cmd "$remote_media" "$LIPSYNC_FB_DEVICE" "$LIPSYNC_AUDIO_DEVICE")"
-  echo "[lipsync-test-mode] cam2: starting lipsync playback (fb=${LIPSYNC_FB_DEVICE}, audio=${LIPSYNC_AUDIO_DEVICE})"
-  cam_ssh "$(lipsync_playback_cmds "$remote_media" "$LIPSYNC_FB_DEVICE" "$LIPSYNC_AUDIO_DEVICE" "$LIPSYNC_PLAYBACK_PIDFILE")"
+  echo "[lipsync-test-mode] cam2: starting lipsync playback (fb=${LIPSYNC_FB_DEVICE}, audio=${LIPSYNC_AUDIO_DEVICE}, audio_lead_ms=${LIPSYNC_AUDIO_LEAD_MS})"
+  cam_ssh "$(lipsync_playback_cmds "$remote_media" "$LIPSYNC_FB_DEVICE" "$LIPSYNC_AUDIO_DEVICE" "$LIPSYNC_PLAYBACK_PIDFILE" "$LIPSYNC_AUDIO_LEAD_MS")"
   trap - ERR
   echo "[lipsync-test-mode] RESULT: lipsync-test mode ACTIVE on cam2 -- record now, then run 'lipsync-test-mode.sh stop' to restore TEST mode"
 }

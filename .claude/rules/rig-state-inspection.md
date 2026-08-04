@@ -155,7 +155,14 @@ shortcut params (strih's `--enable-media-stream --verbose` for the interkom Brow
 stream the lnk targets the guarded launcher, which then owns the issue-786 redraw). PowerShell
 gotcha from the same session: `(Get-Content file)[0]` on a ONE-line file indexes a CHAR (String,
 not array) — read markers with `-TotalCount 1` or guard on type (or wrap in `@(Get-Content …)` so
-`[0]` is always a line).
+`[0]` is always a line). Two more from the issue-940 deploy (2026-08-04): (a) the boxes' lnk
+locations DIFFER — stream has `C:\Users\Public\Desktop\OBS Studio.lnk`, strih has ONLY
+`C:\ProgramData\Microsoft\Windows\Start Menu\Programs\OBS Studio.lnk` (directly in `Programs\`,
+NOT in an `OBS Studio\` subfolder) — a candidate list missing that exact path silently falls back
+to a bare-exe launch that drops strih's `--enable-media-stream` (interkom Browser source dead);
+(b) after `Stop-Process -Force` on a warm ~1 GB obs64, the `bin\64bit\obs.dll` file handle can
+stay LOCKED past a 3 s sleep — the swap's Copy-Item fails `being used by another process`; wait
+~5 s+ or retry the copy once after the process list confirms obs64 is gone.
 
 **A libobs-touching deploy MUST converge ALL THREE boxes — imag included — or the next E2E
 refuses on genlock_parity (issue 962 session, 2026-08-03).** The fast-DLL variant above covers
