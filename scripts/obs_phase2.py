@@ -2061,6 +2061,117 @@ def ensure_studio_mode_on(a):
         ws.close()
 
 
+def _first_enabled_scene_item_source(items):
+    """#901 gap 3 (pure, testable — no I/O): given a GetSceneItemList `sceneItems` list, return
+    the `sourceName` of the first ENABLED item, or None if the list is empty or nothing in it is
+    enabled. A real GetSceneItemList response always carries `sceneItemEnabled`, but an item
+    missing the key is treated as enabled (defensive default — never silently skipped).
+
+    This is the "what is ACTUALLY rendered" resolution the fixed STRIH_PROG_SOURCE/
+    STREAM_PROG_SOURCE burn-target constants in rig-mode.sh cannot provide: those name a scene's
+    EXPECTED source, this reads what a scene's CURRENT program item genuinely is (live evidence,
+    2026-08-04: strih's program scene rendered 'NDI cam2' while the fixed default was
+    'NDI cam1' — the burn landed on the wrong, non-rendered input)."""
+    for item in items:
+        if bool(item.get("sceneItemEnabled", True)):
+            return item.get("sourceName")
+    return None
+
+
+def program_rendered_input(a):
+    """#901 gap 3: print (stdout) the source/input name OBS is ACTUALLY rendering in the current
+    (or `a.scene`, if given) program scene — resolved via GetSceneItemList, not assumed from a
+    fixed constant. Callers (rig-mode.sh) use this to burn/verify the input that is genuinely
+    visible right now, in ADDITION to (never instead of) the pinned default target."""
+    ws = _conn(a.host, a.password)
+    try:
+        scene = a.scene or _rpc(ws, "GetCurrentProgramScene").get("currentProgramSceneName", "")
+        if not scene:
+            raise SystemExit(f"[obs] {a.host}: could not resolve a program scene to inspect")
+        items = _rpc(ws, "GetSceneItemList", {"sceneName": scene}).get("sceneItems", [])
+        src = _first_enabled_scene_item_source(items)
+        if src is None:
+            raise SystemExit(
+                f"[obs] {a.host}: program scene '{scene}' has NO enabled scene item — cannot "
+                f"resolve what is actually rendered."
+            )
+    finally:
+        ws.close()
+    print(src)
+
+
+def assert_program_nonblack(a):
+    """#901 gap 1: optical proof the current (or `a.scene`, if given) program scene is genuinely
+    rendering non-black content — a READ-ONLY verification call, never a control op (no
+    SetCurrentProgramScene, unlike switch()). Reuses the EXISTING `_assert_program_nonblack`
+    helper — the same polled luma-peak self-check switch()/prod_scene() already use — so a caller
+    that just wants proof "something real is on program right now" gets the identical, already-
+    calibrated logic rather than a second, divergent black-check.
+
+    Live evidence this closes (2026-08-04 supervisor comment on issue 901): a painter process can
+    be alive, its pidfile correct, its marker CSV growing, and ALSA RUNNING, while the actual
+    rendered program is BLACK for the whole run — process-alive is not QR-on-screen."""
+    ws = _conn(a.host, a.password)
+    try:
+        scene = a.scene or _rpc(ws, "GetCurrentProgramScene").get("currentProgramSceneName", "")
+        if not scene:
+            raise SystemExit(f"[obs] {a.host}: could not resolve a program scene to check")
+        _assert_program_nonblack(
+            ws, a.host, scene, a.label or "#901 chain-verify",
+            "The camera/source feeding it is not delivering real frames — process-alive is not "
+            "proof of QR-on-screen (issue 901).",
+            min_mean=a.min_mean,
+        )
+    finally:
+        ws.close()
+    print(f"PASS: {a.host} program scene '{scene}' NON-BLACK")
+
+
+DANTE_MBC_DEVICE_ID = "Dante Virtual Soundcard (x64)"  # issue 901 item 2: the expected device
+
+
+def _mbc_transport_problem(device_id, muted, expected_device_id):
+    """#901 original item 2 (pure, testable — no I/O): return a short problem string naming
+    what's wrong with the mbc Dante transport, or None if it checks out. "A muted/rerouted/
+    renamed input is exactly as fatal as a dead card and is a one-call read" (issue 901) — this
+    is that one-call read's pure decision, checked over the OBS-WS input settings/mute state
+    ALONE (no probe recording, no event subscription). Mute is checked FIRST and reported alone
+    even when the device is ALSO wrong — one clear message, not a pile.
+
+    Does NOT (cannot, from OBS-WS input state alone) confirm the Windows `dvs_service` is
+    running — that needs a live Windows service-name check this code-only pass could not verify
+    against real hardware; see the issue 901 design comment for the filed follow-up."""
+    if muted:
+        return "input is MUTED (mute must be OFF for the measurement chain to be usable)"
+    if not device_id:
+        return "input has NO device_id bound (device_id is empty/unset)"
+    if device_id != expected_device_id:
+        return f"input device_id is {device_id!r}, expected {expected_device_id!r} (rerouted/renamed?)"
+    return None
+
+
+def mbc_input_check(a):
+    """#901 original item 2: hard-fail loud, BEFORE any measurement-audio probe, when the mbc
+    Dante transport is unambiguously wrong (muted, or bound to something other than the Dante
+    Virtual Soundcard device) — one cheap OBS-WS read, no probe recording needed."""
+    ws = _conn(a.host, a.password)
+    try:
+        settings = _rpc(ws, "GetInputSettings", {"inputName": a.input}).get("inputSettings", {})
+        device_id = settings.get("device_id", "")
+        muted = bool(_rpc(ws, "GetInputMute", {"inputName": a.input}).get("inputMuted"))
+    finally:
+        ws.close()
+    problem = _mbc_transport_problem(device_id, muted, a.expected_device_id)
+    if problem:
+        raise SystemExit(
+            f"[obs] {a.host}: mbc Dante-transport check FAIL on '{a.input}' — {problem}. Check "
+            f"the mbc Ableton mic channel + Dante routing into stream OBS (targets.md mbc row "
+            f"has the checklist). This must be fixed before the measurement audio can ever "
+            f"arrive (issue 901)."
+        )
+    print(f"PASS: {a.host} '{a.input}' Dante transport OK (device_id={device_id!r}, muted=False)")
+
+
 def program_scene(a):
     """#281 Fix#3: print the current program scene name to stdout (one line).
 
@@ -2082,10 +2193,26 @@ def main():
     for name in (
         "setup", "teardown", "record", "prod-scene", "switch", "program-scene",
         "stream-status", "latency-check", "open-projectors", "ensure-studio-mode-on",
+        "program-rendered-input", "assert-program-nonblack", "mbc-input-check",
     ):
         p = sub.add_parser(name)
         p.add_argument("--host", required=True)
         p.add_argument("--password", default="")
+        if name == "program-rendered-input":
+            # #901 gap 3: which scene to inspect — omitted -> the CURRENT program scene.
+            p.add_argument("--scene", default="")
+        if name == "assert-program-nonblack":
+            # #901 gap 1: which scene to check — omitted -> the CURRENT program scene (read-only,
+            # never switches). --label tags the log lines; --min-mean overrides the shared
+            # helper's env-resolved default floor (see _assert_program_nonblack's own docstring).
+            p.add_argument("--scene", default="")
+            p.add_argument("--label", default="")
+            p.add_argument("--min-mean", type=float, default=None)
+        if name == "mbc-input-check":
+            # #901 original item 2: which OBS input carries the Dante measurement mic, and the
+            # device_id it must be bound to.
+            p.add_argument("--input", default="mbc")
+            p.add_argument("--expected-device-id", default=DANTE_MBC_DEVICE_ID)
         if name == "record":
             p.add_argument(
                 "--action", required=True,
@@ -2177,7 +2304,10 @@ def main():
      "program-scene": program_scene, "rig-busy-check": rig_busy_check,
      "stream-status": stream_status, "latency-check": latency_check,
      "open-projectors": open_projectors,
-     "ensure-studio-mode-on": ensure_studio_mode_on}[a.cmd](a)
+     "ensure-studio-mode-on": ensure_studio_mode_on,
+     "program-rendered-input": program_rendered_input,
+     "assert-program-nonblack": assert_program_nonblack,
+     "mbc-input-check": mbc_input_check}[a.cmd](a)
 
 
 if __name__ == "__main__":
