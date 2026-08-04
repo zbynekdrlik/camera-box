@@ -148,6 +148,52 @@ fn run_pacing_guard(duration_secs: u32, sleep_secs: u32) -> std::process::Output
     .unwrap();
     fs::write(
         bin.join("ffmpeg"),
+        // Emits ONE showinfo-style line before sleeping -- a real ffmpeg with -vf showinfo
+        // always prints at least the first frame's line once it starts producing output, so a
+        // fake that emits ZERO frames on a clean exit is unrealistic and (930 review finding)
+        // would spuriously trip the "showinfo produced nothing" check added below. A single
+        // frame is not enough to form any delta (needs a PAIR), so this keeps these two tests
+        // exercising ONLY the elapsed-vs-duration budget check, exactly as before.
+        "#!/usr/bin/env bash\necho '[Parsed_showinfo_0 @ 0x0] n:   0 pts:     0 pts_time:0.000000' >&2\nsleep \"${FAKE_FFMPEG_SLEEP:-0}\"\n",
+    )
+    .unwrap();
+    for exe in [bin.join("ffprobe"), bin.join("ffmpeg")] {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&exe, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+    let path_env = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    Command::new("bash")
+        .arg("-c")
+        .arg(
+            ". \"$1\"; eval \"$(lipsync_pacing_guard_cmd /tmp/media.mp4 /dev/fb0 hw:CARD=PCH,DEV=3)\"",
+        )
+        .arg("bash")
+        .arg(script())
+        .env("PATH", path_env)
+        .env("FAKE_FFMPEG_SLEEP", sleep_secs.to_string())
+        .output()
+        .expect("spawn bash")
+}
+
+/// A genuinely EMPTY fake `ffmpeg` -- exits 0, prints NOTHING to stderr at all. Dedicated to
+/// proving the "showinfo produced zero parseable frames" guard (930 review finding): a real
+/// ffmpeg always prints at least one showinfo line if it ran and processed any frames, so zero
+/// lines on a clean exit means the instrumentation itself broke (e.g. ffmpeg's log format
+/// changed) -- NOT a verified pacing pass, and must not be silently reported as one.
+fn run_pacing_guard_zero_frames(duration_secs: u32, sleep_secs: u32) -> std::process::Output {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let bin = tmp.path().join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    fs::write(
+        bin.join("ffprobe"),
+        format!("#!/usr/bin/env bash\necho {duration_secs}\n"),
+    )
+    .unwrap();
+    fs::write(
+        bin.join("ffmpeg"),
         "#!/usr/bin/env bash\nsleep \"${FAKE_FFMPEG_SLEEP:-0}\"\n",
     )
     .unwrap();
@@ -170,6 +216,25 @@ fn run_pacing_guard(duration_secs: u32, sleep_secs: u32) -> std::process::Output
         .env("FAKE_FFMPEG_SLEEP", sleep_secs.to_string())
         .output()
         .expect("spawn bash")
+}
+
+#[test]
+fn pacing_guard_fails_loud_when_showinfo_produces_zero_frames_930() {
+    // Same duration/sleep as pacing_guard_passes_within_budget_930 below -- the elapsed check
+    // alone is satisfied, but zero showinfo lines were ever observed, so the guard must refuse
+    // to certify a pacing pass it never actually verified.
+    let out = run_pacing_guard_zero_frames(2, 2);
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        !out.status.success(),
+        "930: zero showinfo frames on a clean exit must FAIL -- the cadence was never actually \
+         verified, so this must not read as a pass: {stderr}"
+    );
+    assert!(
+        stderr.contains("FAIL") && stderr.contains("showinfo") && stderr.contains("zero"),
+        "930: failure message must say showinfo produced zero frames, not just report a \
+         (meaningless) cadence/elapsed verdict: {stderr}"
+    );
 }
 
 #[test]
