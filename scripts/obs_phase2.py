@@ -2103,7 +2103,7 @@ def program_rendered_input(a):
 def assert_program_nonblack(a):
     """#901 gap 1: optical proof the current (or `a.scene`, if given) program scene is genuinely
     rendering non-black content — a READ-ONLY verification call, never a control op (no
-    SetCurrentProgramScene, unlike switch()). Reuses the EXIST­ING `_assert_program_nonblack`
+    SetCurrentProgramScene, unlike switch()). Reuses the EXISTING `_assert_program_nonblack`
     helper — the same polled luma-peak self-check switch()/prod_scene() already use — so a caller
     that just wants proof "something real is on program right now" gets the identical, already-
     calibrated logic rather than a second, divergent black-check.
