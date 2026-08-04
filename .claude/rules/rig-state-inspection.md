@@ -195,3 +195,16 @@ After ANY hook block: re-run the FILE-CREATING part too, not just the part the h
 about. And prefer writing a script file in its OWN separate Bash call, apart from the call that
 transfers/runs it — that way a block on the transfer call can never silently destroy an artifact
 the write call already produced.
+
+## A just-stopped OBS recording is NOT immediately readable — StopRecord returns before the moov atom lands (issue 901 follow-up, 2026-08-04)
+
+OBS WebSocket `StopRecord` returns the recording's `outputPath` BEFORE the MP4 container is
+finalized: an ffmpeg/ffprobe read fired immediately over ssh fails `moov atom not found` /
+`Invalid data found when processing input`, and the IDENTICAL file parses fine seconds later
+(live-verified: same file, immediate read failed, retry parsed `max_volume -43.2 dB`). Any ad-hoc
+supervisor flow that stops a recording and then decodes/probes it in the SAME breath (volumedetect
+preflight, recording-verdict decode, ffprobe stream inspection) must retry the read, bounded —
+never conclude "unreadable/no audio" from the first attempt. `rig-mode.sh`'s
+`verify_measurement_audio_arrives` does this via `AUDIO_CHAIN_PARSE_RETRIES` (default 10 × 5 s);
+reuse that shape. A pure file COPY (scp/`copy`) right after stop has not shown this problem — the
+race is in reading the container structure, not the bytes being on disk.
