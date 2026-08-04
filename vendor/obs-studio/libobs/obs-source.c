@@ -5339,6 +5339,40 @@ static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 					 * re-confirmed by the next measurable front pair, and a real
 					 * source-timeline discontinuity still clears it at
 					 * acquire / gap resync / backward clock-step / flush. */
+					/* camera-box #940 piece 1: INSTRUMENT each relock event with the
+					 * phase evidence needed to attribute a future A/V-offset step to
+					 * (or rule it out from) a specific relock: current depth, the
+					 * depth the source's OWN configured latency implies
+					 * (steady_depth_frames), due count, how many frames this event
+					 * erases, head skew, and wall_grid_phase_ns — the deadline's own
+					 * remainder mod the frame interval. Today that phase wanders
+					 * tick to tick; piece 3 (phase-pinning) drives it to a FIXED
+					 * value — this line is what lets a future analysis prove that
+					 * empirically instead of assuming it. Logged once PER EVENT
+					 * (relocks are the exact events #940's investigation traced the
+					 * stepping to), never folded into the periodic 5s audit line
+					 * (a snapshot, not a per-event trace). Mirror: none — the
+					 * fields are plain arithmetic already available at this call
+					 * site, nothing to port to Rust. Guarded in
+					 * tests/genlock_release_cadence.rs (Tier-0) + both
+					 * windows-genlock*.yml (the #912 lock-step-anchor lesson). */
+					{
+						const size_t steady_depth_frames_for_log =
+							(size_t)genlock_backlog_relock_qdepth(
+								source, reserve_ms, interval) -
+							(size_t)GENLOCK_QDEPTH_RELOCK_MARGIN;
+						blog(LOG_INFO,
+						     "genlock-relock '%s': depth=%zu steady_depth_frames=%zu "
+						     "due=%zu erased=%zu head_skew_ms=%lld "
+						     "wall_grid_phase_ns=%lld interval_ns=%llu latency_ms=%u",
+						     source->context.name ? source->context.name : "?",
+						     source->async_frames.num, steady_depth_frames_for_log,
+						     due, due - 1,
+						     (long long)(source->genlock_last_head_skew_ns /
+								 1000000),
+						     (long long)(present_ts % interval),
+						     (unsigned long long)interval, reserve_ms);
+					}
 					release = due;
 				} else if (source->async_frames.array[0]->timestamp <=
 					   source->genlock_locked_next_boundary_ns) {

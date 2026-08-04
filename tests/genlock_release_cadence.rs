@@ -282,7 +282,16 @@ fn sticky_n_latch_lifecycle_and_robust_measure_741() {
     let relock_pos = raw
         .find("source->genlock_relocks++;")
         .expect("#741: the backlog-storm relock branch (genlock_relocks++) must be present");
-    let window_end = (relock_pos + 800).min(raw.len());
+    // #940 piece 1: a fixed `relock_pos + 800` byte window is a PROXY for "the same relock
+    // branch" and rots as the branch grows (the exact #859 lesson `ts_align_hold_counts_
+    // as_hold_not_underrun` already documents above) — the #940 phase-evidence log line
+    // pushed `release = due;` past the old 800-byte cap. Scope to the ENCLOSING FUNCTION
+    // instead (up to the next top-level `static` definition), which cannot rot as the
+    // branch grows.
+    let window_end = raw[relock_pos..]
+        .find("\nstatic ")
+        .map(|rel| relock_pos + rel)
+        .unwrap_or(raw.len());
     let after_relock = &raw[relock_pos..window_end];
     let release_off = after_relock
         .find("release = due;")
