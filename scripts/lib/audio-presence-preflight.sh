@@ -95,3 +95,44 @@ audio_preflight_unreadable_message() {
 audio_preflight_norec_message() {
   echo "measurement-audio preflight: the stream box returned NO recording path from StopRecord — the short probe recording never started (OBS WebSocket / encoder problem on stream). Cannot confirm the mbc measurement chain before the real run (#748)."
 }
+
+# --- #901: a THREE-tier, non-blocking classification for rig-mode.sh's own TEST-mode chain-verify
+# (a lighter-weight check than recording-e2e.sh's real STRICT gate above, which is UNCHANGED --
+# audio_preflight_is_silent/_silent_message keep serving that gate exactly as before). Issue 976
+# (open, 2026-08-04) is a KNOWN, currently-live ~26 dB degradation of the mbc measurement chain --
+# a single -60 dB hard cutoff would wedge every rig-mode TEST restore on that known-degraded-but-
+# real signal. So TEST mode gets a wider DEAD floor (default -80 dB: well above true digital
+# silence ~-91 dB, well below any real signal) for the hard fail, and treats anything between the
+# DEAD floor and the existing -60 dB WARN bar as QUIET -- reported, never blocking.
+
+# audio_preflight_tier DB [DEAD_DB=-80] [WARN_DB=-60] -> "dead" | "quiet" | "audible". Strict '<'
+# on both boundaries (mirrors audio_preflight_is_silent's own strict-< convention): exactly at a
+# boundary counts as the HEALTHIER side. Float-safe via awk (levels are like -5.4 / -91.0).
+audio_preflight_tier() {
+  local db="$1" dead_db="${2:--80}" warn_db="${3:--60}"
+  if awk -v d="$db" -v t="$dead_db" 'BEGIN { exit !((d + 0) < (t + 0)) }'; then
+    echo "dead"
+  elif awk -v d="$db" -v t="$warn_db" 'BEGIN { exit !((d + 0) < (t + 0)) }'; then
+    echo "quiet"
+  else
+    echo "audible"
+  fi
+}
+
+# audio_preflight_dead_message DB [DEAD_DB=-80] -> the hard-FAIL message for a genuinely dead
+# measurement-audio chain (rig-mode.sh test's own DEAD floor, distinct from the STRICT gate's
+# audio_preflight_silent_message above — same chain, different caller/threshold, so the two are
+# never confused when read out of context).
+audio_preflight_dead_message() {
+  local db="$1" dead_db="${2:--80}"
+  echo "measurement audio DEAD — measured max_volume ${db} dB (< ${dead_db} dB DEAD floor; digital silence is ~-91 dB, a live QPSK marker reads ~-5 dB). The mbc measurement-mic chain is genuinely silent: check the mbc Ableton mic channel is UNMUTED and the Dante routing into stream OBS (targets.md mbc row has the checklist). This is a HARD FAIL — rig-mode.sh test will not proceed on a dead measurement instrument (issue 901)."
+}
+
+# audio_preflight_quiet_message DB [WARN_DB=-60] -> the non-blocking WARN message for a present-
+# but-degraded chain (below the healthy -60 dB bar but above the DEAD floor) — reports the level
+# and moves on; never aborts rig-mode.sh test. Names the known issue-976 degradation so an
+# operator reading the log isn't left guessing whether this is a new problem.
+audio_preflight_quiet_message() {
+  local db="$1" warn_db="${2:--60}"
+  echo "WARN: measurement audio QUIET — measured max_volume ${db} dB (< ${warn_db} dB healthy bar, but above the DEAD floor — a real signal, just degraded). Matches the known, currently-open issue-976 mbc chain degradation (~26 dB below nominal); rig-mode.sh test PROCEEDS (non-blocking) — this is a report, not a failure."
+}
