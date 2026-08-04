@@ -511,6 +511,36 @@ fn pacing_guard_excludes_startup_window_from_cadence_assertion_930() {
     );
 }
 
+/// Independent code review finding: every other cadence test exercises the FAILING path (bursty)
+/// or a vacuous n==0 path (the skip-window test above) -- nothing ever proved the cadence math
+/// (p95 computation, the nominal-interval comparison, the threshold constants) actually reports a
+/// PASS with real n>0 delta data. A sign flip or a wrong operator in that arithmetic would go
+/// completely undetected by the rest of this file. Uses the "steady" fake pattern (real 1/60s
+/// python time.sleep() per frame, no ffmpeg/device overhead involved -- unlike the real-hardware
+/// pacing measurement in the design comment on issue 930, this is a lightweight, short (~330ms
+/// total) synthetic timing loop, chosen for a low flake footprint).
+#[test]
+fn pacing_guard_passes_steady_cadence_with_real_delta_data_930() {
+    let out = run_pacing_guard_cadence("steady", "0");
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        out.status.success(),
+        "930: a cleanly-paced steady stream must PASS the cadence assertion: stdout={stdout} \
+         stderr={stderr}"
+    );
+    assert!(
+        stdout.contains("pacing check passed") && stdout.contains("deltas="),
+        "930: the pass message must show real cadence data was computed (deltas=N, N>0), not \
+         just the elapsed-only budget: {stdout}"
+    );
+    assert!(
+        !stdout.contains("deltas=0"),
+        "930: this test's whole point is a NON-vacuous cadence verdict -- deltas=0 would mean \
+         no real delta data backed this PASS: {stdout}"
+    );
+}
+
 /// Self-review finding (before merge): the probe read `proc.stderr` for showinfo lines and
 /// computed a pass/fail verdict from whatever partial frame data it collected, WITHOUT ever
 /// checking ffmpeg's own exit code -- a genuine crash (e.g. `/dev/fb0` open failure) could leave
