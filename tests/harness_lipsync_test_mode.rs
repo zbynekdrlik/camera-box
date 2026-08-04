@@ -199,6 +199,188 @@ fn pacing_guard_fails_loud_when_elapsed_exceeds_budget_930() {
     );
 }
 
+/// 930 follow-up (pacing hypothesis, confirmed by direct measurement): without `-re` (real-time
+/// input read rate), `/dev/fb0` has no clock of its own and ALSA backpressure alone does NOT pace
+/// the video -- frames were measured arriving in 4-5-frame bursts ~4ms apart separated by ~80ms
+/// stalls. `-re` fixes this (measured: p50=16.663ms std=1.7ms, zero stalls, drift <1ms/40s) and
+/// must be present in BOTH ffmpeg invocations that actually play the asset.
+#[test]
+fn pacing_guard_cmd_includes_dash_re_for_realtime_pacing_930() {
+    let cmds = run_sourced("lipsync_pacing_guard_cmd /tmp/media.mp4 /dev/fb0 hw:CARD=PCH,DEV=3");
+    assert!(
+        cmds.contains("-re"),
+        "930: the pacing guard's ffmpeg invocation must read the input in REAL TIME (-re) -- \
+         without it, /dev/fb0's lack of its own clock means ALSA backpressure alone does not \
+         pace the video (measured: 4-5-frame bursts ~4ms apart, ~80ms stalls): {cmds}"
+    );
+}
+
+#[test]
+fn playback_cmds_includes_dash_re_for_realtime_pacing_930() {
+    let cmds = run_sourced(
+        "lipsync_playback_cmds /root/lipsync-test.mp4 /dev/fb0 hw:CARD=PCH,DEV=3 /run/rig-lipsync-playback.pid",
+    );
+    assert!(
+        cmds.contains("-re"),
+        "930: the PERSISTENT playback ffmpeg invocation must also read in real time (-re) -- \
+         same pacing bug as the guard, and this is what actually plays during a recording: {cmds}"
+    );
+}
+
+/// 930 follow-up: the OLD guard only checked TOTAL elapsed wall-clock vs `ffprobe`'s reported
+/// duration -- and that total is governed by the AUDIO drain, so it passed even while the video
+/// was catastrophically unpaced (see the two tests above). The guard must ALSO instrument the
+/// same foreground pass with `-vf showinfo` and assert per-frame cadence, so a pacing regression
+/// can never again hide behind a total-elapsed-only budget. Static-text pin on the thresholds
+/// (the functional proof is in `pacing_guard_catches_bursty_cadence_...` below).
+#[test]
+fn pacing_guard_cmd_asserts_per_frame_cadence_930() {
+    let cmds = run_sourced("lipsync_pacing_guard_cmd /tmp/media.mp4 /dev/fb0 hw:CARD=PCH,DEV=3");
+    assert!(
+        cmds.contains("showinfo"),
+        "930: the guard must instrument the SAME foreground pass with -vf showinfo to observe \
+         per-frame delivery timing: {cmds}"
+    );
+    assert!(
+        cmds.contains("33.0"),
+        "930: stall threshold (deltas >33ms) must be visible in the guard's own text: {cmds}"
+    );
+    assert!(
+        cmds.contains("4.0"),
+        "930: burst threshold (deltas <4ms) must be visible in the guard's own text: {cmds}"
+    );
+    assert!(
+        cmds.contains("5.0"),
+        "930: p95-deviation-from-nominal threshold (5ms) must be visible in the guard's own \
+         text: {cmds}"
+    );
+    assert!(
+        cmds.contains("0.02"),
+        "930: burst-fraction threshold (2% of deltas) must be visible in the guard's own text: \
+         {cmds}"
+    );
+    assert!(
+        cmds.contains("LIPSYNC_PACING_STARTUP_SKIP_S"),
+        "930: the one-time startup step must be excludable via an env override, default 2s: \
+         {cmds}"
+    );
+}
+
+/// Fakes for the CADENCE assertion (930 follow-up: per-frame pacing, not just total elapsed) --
+/// a fake `ffprobe` answers BOTH the pre-existing duration query and the (new) fps query, and a
+/// fake `ffmpeg` (itself a tiny python3 script, for precise controllable timing) prints
+/// synthetic showinfo-style frame lines to stderr on a controlled real-time cadence.
+/// `pattern="bursty"` reproduces the EXACT shape measured live on cam2 without `-re` (930
+/// comment): frame bursts a few ms apart separated by ~100ms stalls, with a TOTAL elapsed time
+/// that still lands well within the pre-existing elapsed-vs-duration budget -- proving the OLD
+/// check alone would have PASSED this broken pattern, and only the NEW cadence assertion catches
+/// it.
+fn run_pacing_guard_cadence(pattern: &str, startup_skip_s: &str) -> std::process::Output {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let bin = tmp.path().join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    fs::write(
+        bin.join("ffprobe"),
+        "#!/usr/bin/env bash\ncase \"$*\" in\n  *r_frame_rate*) echo \"60/1\" ;;\n  *) echo \"0.333333\" ;;\nesac\n",
+    )
+    .unwrap();
+    fs::write(
+        bin.join("ffmpeg"),
+        r#"#!/usr/bin/env python3
+import os
+import sys
+import time
+
+pattern = os.environ.get("FAKE_FFMPEG_PATTERN", "steady")
+n = 20
+
+
+def emit(i):
+    sys.stderr.write(
+        "[Parsed_showinfo_0 @ 0x0] n:{:4} pts:{:6} pts_time:{:.6f}\n".format(i, i, i / 60.0)
+    )
+    sys.stderr.flush()
+
+
+if pattern == "bursty":
+    i = 0
+    while i < n:
+        for _ in range(4):
+            if i >= n:
+                break
+            time.sleep(0.001)
+            emit(i)
+            i += 1
+        time.sleep(0.1)
+else:
+    for i in range(n):
+        time.sleep(1.0 / 60.0)
+        emit(i)
+
+sys.exit(0)
+"#,
+    )
+    .unwrap();
+    for exe in [bin.join("ffprobe"), bin.join("ffmpeg")] {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&exe, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+    let path_env = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    Command::new("bash")
+        .arg("-c")
+        .arg(
+            ". \"$1\"; eval \"$(lipsync_pacing_guard_cmd /tmp/media.mp4 /dev/fb0 hw:CARD=PCH,DEV=3)\"",
+        )
+        .arg("bash")
+        .arg(script())
+        .env("PATH", path_env)
+        .env("FAKE_FFMPEG_PATTERN", pattern)
+        .env("LIPSYNC_PACING_STARTUP_SKIP_S", startup_skip_s)
+        .output()
+        .expect("spawn bash")
+}
+
+#[test]
+fn pacing_guard_catches_bursty_cadence_when_elapsed_check_alone_would_pass_930() {
+    let out = run_pacing_guard_cadence("bursty", "0");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        !out.status.success(),
+        "930: a bursty pacing pattern (frame bursts a few ms apart, ~100ms stalls) must FAIL the \
+         cadence assertion even though its total elapsed time stays well within the old \
+         elapsed-vs-duration budget -- this is exactly the gap the old guard could not see: \
+         {stderr}"
+    );
+    assert!(
+        stderr.contains("FAIL") && stderr.contains("cadence"),
+        "930: must fail loud with cadence evidence in the message: {stderr}"
+    );
+    assert!(
+        stderr.contains("stalls"),
+        "930: failure message must show the stall count that tripped it: {stderr}"
+    );
+}
+
+#[test]
+fn pacing_guard_excludes_startup_window_from_cadence_assertion_930() {
+    // A skip window larger than the whole (synthetic, sub-second) clip means EVERY frame falls
+    // inside the excluded startup window -- zero deltas are asserted, so the guard falls back to
+    // the elapsed-vs-duration check alone and PASSES even for the same bursty fake that fails
+    // pacing_guard_catches_bursty_cadence_when_elapsed_check_alone_would_pass_930 above. Proves
+    // the startup-skip config (LIPSYNC_PACING_STARTUP_SKIP_S, default 2s in production) actually
+    // excludes what it claims to exclude.
+    let out = run_pacing_guard_cadence("bursty", "999");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "930: a startup skip window covering the whole clip must exclude all deltas from the \
+         cadence assertion, leaving only the (passing) elapsed check: {stderr}"
+    );
+}
+
 /// `cmd_start` must run the pacing guard on the uploaded remote path via its OWN dedicated
 /// `lipsync_pacing_guard_cmd` call, before the persistent playback launch -- a static-text pin
 /// alongside the end-to-end behavior proofs above.
