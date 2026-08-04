@@ -250,11 +250,7 @@ fn pacing_guard_fails_loud_with_a_clean_message_when_ffprobe_itself_fails_930() 
         "#!/usr/bin/env bash\necho 'moov atom not found' >&2\nexit 1\n",
     )
     .unwrap();
-    fs::write(
-        bin.join("ffmpeg"),
-        "#!/usr/bin/env bash\nsleep 0\n",
-    )
-    .unwrap();
+    fs::write(bin.join("ffmpeg"), "#!/usr/bin/env bash\nsleep 0\n").unwrap();
     for exe in [bin.join("ffprobe"), bin.join("ffmpeg")] {
         #[cfg(unix)]
         {
