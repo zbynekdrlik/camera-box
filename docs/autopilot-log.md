@@ -7176,3 +7176,41 @@ informational/confirmed-sound.
 Post-review re-run: `cargo fmt --all --check` / `cargo clippy --all-targets -- -D warnings`
 (default features) clean; `cargo test --lib genlock_backlog::tests` 20/20 ok; `cargo test --test
 genlock_release_cadence` 12/12 ok.
+
+## #930 -- lipsync audio-lead knob + SyncNet repo passthrough (2026-08-04), PR #974
+
+Code-only iteration on the ROZHODNUTE plan from issuecomment-5179960868 (paired cross-check
+measured a constant -334ms rig-added SyncNet-vs-QR/QPSK disagreement, isolated to cam2's own
+playback -- chain clean at +3.1ms):
+
+- `ff77c3fa8`/`87adf8519`: piece 1 -- `LIPSYNC_AUDIO_LEAD_MS` in `scripts/lipsync-test-mode.sh`
+  (default 330, seeded from the measurement). 0/omitted = today's byte-identical single-demux
+  command; a positive lead opens a SECOND demux of the same asset for VIDEO ONLY, carrying a
+  positive `-itsoffset` (delays that input), audio stays on the first/undelayed demux -- still ONE
+  ffmpeg process/PID. `cmd_start` wires the env through; non-integer/negative fails loud pre-ssh.
+  RED tests `playback_cmds_applies_audio_lead_via_video_itsoffset_930` + 5 siblings in
+  `tests/harness_lipsync_test_mode.rs` (28 tests total, 6 new).
+- `3e717c404`/`e81a28263`: piece 3 -- `LIPSYNC_SYNCNET_REPO` in `scripts/lipsync-cross-check.sh`,
+  threaded through `lipsync_measure_chunk_cmd`'s optional 5th arg into a `--repo` flag for
+  av_sync_measure.py (a tooling finding from the same paired run: no way to point at a non-default
+  syncnet_python checkout, e.g. dev2's GPU checkout). RED tests
+  `measure_chunk_cmd_wires_repo_flag_when_given_930` + 4 siblings in
+  `tests/harness_lipsync_cross_check.rs` (21 tests total, 5 new/changed).
+- `0962fa016`: deep-review finding (test anchor on a bare "LIPSYNC_SYNCNET_REPO" substring matched
+  the header doc comment first, not the real assignment) -- tightened to anchor on
+  `local syncnet_repo=...` directly.
+- Self-review false alarm, corrected before push: briefly suspected+"fixed"+tested a bash
+  octal-parsing bug in `[ "$lead_ms" -eq 0 ]` for leading-zero inputs (e.g. "08"); empirically
+  disproved (`test -eq`, unlike `$(( ))` arithmetic expansion, already parses plain decimal on
+  bash 5.2) and reverted both the fix and the tests before ever committing them.
+- Piece 2 (the live paired re-validation itself -- re-run the SAME cross-check, expect verdict
+  Agree) is explicitly a SUPERVISOR rig step, not this PR's job.
+
+BLOCKED on merge: "Full-path E2E (rig zero-loss gate)" fails twice (runs 30928193716, 30930649017,
+~45 min apart, across a commit that touched only a Rust test literal) with the IDENTICAL signature
+-- `#431 QPSK audio marker log has NOT GROWN across 3 poll(s)` -- a persistent cam2 TEST-mode
+painter/marker rig-state issue, unrelated to this diff (drift-guard for strih/stream both pass
+before it; confirmed independently by the deep-review subagent reading the same log). All other CI
+green; `mergeable: MERGEABLE`, `mergeStateStatus: BEHIND` (this repo's own documented harmless
+two-branch artifact). PR #974 left OPEN, issue #930 left OPEN -- handed off via issue comments for
+the supervisor to restore cam2's painter (rig-mode.sh test) and re-run the gate.
