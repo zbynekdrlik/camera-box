@@ -231,7 +231,7 @@ fn pacing_guard_fails_loud_when_showinfo_produces_zero_frames_930() {
          verified, so this must not read as a pass: {stderr}"
     );
     assert!(
-        stderr.contains("FAIL") && stderr.contains("showinfo") && stderr.contains("zero"),
+        stderr.contains("FAIL") && stderr.contains("showinfo") && stderr.contains("ZERO"),
         "930: failure message must say showinfo produced zero frames, not just report a \
          (meaningless) cadence/elapsed verdict: {stderr}"
     );

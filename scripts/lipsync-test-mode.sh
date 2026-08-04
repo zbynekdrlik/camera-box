@@ -195,6 +195,15 @@ if proc.returncode != 0:
     )
     sys.exit(1)
 
+if len(frame_times) == 0:
+    sys.stderr.write(
+        "FAIL: lipsync playback pacing check -- ffmpeg exited 0 after {:.3f}s but the "
+        "showinfo filter produced ZERO parseable frame lines -- cadence was never actually "
+        "observed (instrumentation regression, e.g. ffmpeg's log format changed), this is "
+        "NOT a verified pacing pass\n".format(elapsed)
+    )
+    sys.exit(1)
+
 budget = duration * 0.005 + 1
 elapsed_over = abs(elapsed - duration) > budget
 
