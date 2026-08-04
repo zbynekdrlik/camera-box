@@ -531,12 +531,18 @@ fn main_threads_lipsync_syncnet_repo_env_into_every_chunk_measure_call_930() {
 #[test]
 fn main_reads_lipsync_syncnet_repo_env_before_the_measure_call_930() {
     let s = fs::read_to_string(script()).expect("read script");
-    let repo_read_at = s.find("LIPSYNC_SYNCNET_REPO").unwrap_or_else(|| {
-        panic!(
-            "930: main() must read a LIPSYNC_SYNCNET_REPO env override (av_sync_measure.py's own \
-             --repo default is otherwise the only option): {s}"
-        )
-    });
+    // Anchor on the REAL assignment line, not a bare "LIPSYNC_SYNCNET_REPO" substring -- the
+    // header's own "Env:" doc comment also mentions the var name and sits even earlier in the
+    // file, which would make a bare-substring anchor pass trivially regardless of where the
+    // actual `local syncnet_repo=...` read ended up (code-review finding, PR #974).
+    let repo_read_at = s
+        .find("local syncnet_repo=\"${LIPSYNC_SYNCNET_REPO:-}\"")
+        .unwrap_or_else(|| {
+            panic!(
+                "930: main() must read a LIPSYNC_SYNCNET_REPO env override (av_sync_measure.py's \
+                 own --repo default is otherwise the only option): {s}"
+            )
+        });
     let measure_call_at = s
         .find("eval \"$(lipsync_measure_chunk_cmd")
         .expect("930: lipsync_measure_chunk_cmd call present");
