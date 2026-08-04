@@ -2061,6 +2061,45 @@ def ensure_studio_mode_on(a):
         ws.close()
 
 
+def _first_enabled_scene_item_source(items):
+    """#901 gap 3 (pure, testable — no I/O): given a GetSceneItemList `sceneItems` list, return
+    the `sourceName` of the first ENABLED item, or None if the list is empty or nothing in it is
+    enabled. A real GetSceneItemList response always carries `sceneItemEnabled`, but an item
+    missing the key is treated as enabled (defensive default — never silently skipped).
+
+    This is the "what is ACTUALLY rendered" resolution the fixed STRIH_PROG_SOURCE/
+    STREAM_PROG_SOURCE burn-target constants in rig-mode.sh cannot provide: those name a scene's
+    EXPECTED source, this reads what a scene's CURRENT program item genuinely is (live evidence,
+    2026-08-04: strih's program scene rendered 'NDI cam2' while the fixed default was
+    'NDI cam1' — the burn landed on the wrong, non-rendered input)."""
+    for item in items:
+        if bool(item.get("sceneItemEnabled", True)):
+            return item.get("sourceName")
+    return None
+
+
+def program_rendered_input(a):
+    """#901 gap 3: print (stdout) the source/input name OBS is ACTUALLY rendering in the current
+    (or `a.scene`, if given) program scene — resolved via GetSceneItemList, not assumed from a
+    fixed constant. Callers (rig-mode.sh) use this to burn/verify the input that is genuinely
+    visible right now, in ADDITION to (never instead of) the pinned default target."""
+    ws = _conn(a.host, a.password)
+    try:
+        scene = a.scene or _rpc(ws, "GetCurrentProgramScene").get("currentProgramSceneName", "")
+        if not scene:
+            raise SystemExit(f"[obs] {a.host}: could not resolve a program scene to inspect")
+        items = _rpc(ws, "GetSceneItemList", {"sceneName": scene}).get("sceneItems", [])
+        src = _first_enabled_scene_item_source(items)
+        if src is None:
+            raise SystemExit(
+                f"[obs] {a.host}: program scene '{scene}' has NO enabled scene item — cannot "
+                f"resolve what is actually rendered."
+            )
+    finally:
+        ws.close()
+    print(src)
+
+
 def program_scene(a):
     """#281 Fix#3: print the current program scene name to stdout (one line).
 
@@ -2082,10 +2121,14 @@ def main():
     for name in (
         "setup", "teardown", "record", "prod-scene", "switch", "program-scene",
         "stream-status", "latency-check", "open-projectors", "ensure-studio-mode-on",
+        "program-rendered-input",
     ):
         p = sub.add_parser(name)
         p.add_argument("--host", required=True)
         p.add_argument("--password", default="")
+        if name == "program-rendered-input":
+            # #901 gap 3: which scene to inspect — omitted -> the CURRENT program scene.
+            p.add_argument("--scene", default="")
         if name == "record":
             p.add_argument(
                 "--action", required=True,
@@ -2177,7 +2220,8 @@ def main():
      "program-scene": program_scene, "rig-busy-check": rig_busy_check,
      "stream-status": stream_status, "latency-check": latency_check,
      "open-projectors": open_projectors,
-     "ensure-studio-mode-on": ensure_studio_mode_on}[a.cmd](a)
+     "ensure-studio-mode-on": ensure_studio_mode_on,
+     "program-rendered-input": program_rendered_input}[a.cmd](a)
 
 
 if __name__ == "__main__":
