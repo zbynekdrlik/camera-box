@@ -312,6 +312,10 @@ if pattern == "bursty":
             emit(i)
             i += 1
         time.sleep(0.1)
+elif pattern == "crash":
+    for i in range(3):
+        emit(i)
+    sys.exit(3)
 else:
     for i in range(n):
         time.sleep(1.0 / 60.0)
@@ -378,6 +382,28 @@ fn pacing_guard_excludes_startup_window_from_cadence_assertion_930() {
         out.status.success(),
         "930: a startup skip window covering the whole clip must exclude all deltas from the \
          cadence assertion, leaving only the (passing) elapsed check: {stderr}"
+    );
+}
+
+/// Self-review finding (before merge): the probe read `proc.stderr` for showinfo lines and
+/// computed a pass/fail verdict from whatever partial frame data it collected, WITHOUT ever
+/// checking ffmpeg's own exit code -- a genuine crash (e.g. `/dev/fb0` open failure) could leave
+/// a coincidentally-plausible partial dataset and report a false PASS instead of the real
+/// failure. The probe must check `proc.returncode` and fail loud on a nonzero exit, independent
+/// of whatever cadence/elapsed numbers happened to be observed before the crash.
+#[test]
+fn pacing_guard_fails_loud_when_ffmpeg_itself_exits_nonzero_930() {
+    let out = run_pacing_guard_cadence("crash", "0");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        !out.status.success(),
+        "930: ffmpeg exiting nonzero must fail the guard regardless of any partial frame data \
+         collected before the crash: {stderr}"
+    );
+    assert!(
+        stderr.contains("FAIL") && stderr.contains("ffmpeg exited"),
+        "930: failure message must say the ffmpeg process itself failed, not just report a \
+         cadence/elapsed verdict over incomplete data: {stderr}"
     );
 }
 
