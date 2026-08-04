@@ -5407,10 +5407,22 @@ static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 					 * tests/genlock_release_cadence.rs (Tier-0) + both
 					 * windows-genlock*.yml (the #912 lock-step-anchor lesson). */
 					{
+						/* #940 piece 1: re-derive n the SAME way genlock_backlog_relock_qdepth()
+						 * did internally (READ-ONLY, same tick -> same result) so the logged
+						 * steady_depth_frames subtracts the FULL scaled margin (#940 piece 2:
+						 * MARGIN * n, not the bare MARGIN) -- otherwise a 60-into-30 source
+						 * (n>=2) would log an inflated steady_depth_frames by MARGIN*(n-1). */
+						const uint32_t measured_n_for_log =
+							genlock_measure_source_multiple(source, interval);
+						const uint32_t n_for_log =
+							measured_n_for_log >= 1
+								? measured_n_for_log
+								: (source->genlock_last_known_n >= 1 ? source->genlock_last_known_n
+												: 1);
 						const size_t steady_depth_frames_for_log =
 							(size_t)genlock_backlog_relock_qdepth(
 								source, reserve_ms, interval) -
-							(size_t)GENLOCK_QDEPTH_RELOCK_MARGIN;
+							(size_t)GENLOCK_QDEPTH_RELOCK_MARGIN * (size_t)n_for_log;
 						blog(LOG_INFO,
 						     "genlock-relock '%s': depth=%zu steady_depth_frames=%zu "
 						     "due=%zu erased=%zu head_skew_ms=%lld "
