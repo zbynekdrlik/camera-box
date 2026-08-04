@@ -4836,6 +4836,35 @@ static inline uint64_t genlock_present_ts_reserve(uint64_t wall_now_ns, uint32_t
 }
 /* ---- end #136 ------------------------------------------------------------- */
 
+/* camera-box #940 piece 3: PHASE-PIN the ts-align RESERVE deadline to the absolute wall-
+ * clock frame GRID -- floor(deadline_ns / interval_ns) * interval_ns -- so which-frame-
+ * releases-now becomes a pure FUNCTION of wall time instead of a hidden per-lock-episode
+ * state re-sampled by every ACQUIRE/relock. Root cause this removes: the pre-#940 deadline
+ * (genlock_present_ts_reserve above) is a raw continuous quantity, so "which frame is due"
+ * depends on the EXACT sub-ms instant a relock happens to fire -- measured live as a
+ * ±1-2-frame A/V-offset step between lock episodes at deep latency (issue #940). This
+ * helper is applied to genlock_present_ts_reserve()'s OUTPUT, not folded into it --
+ * genlock_present_ts_reserve() itself stays byte-identical (its own pre-#940 tests pin its
+ * exact arithmetic). A degenerate interval_ns (0 -- unknown video info) returns the
+ * deadline unchanged rather than dividing by zero. Mirror of camera-box
+ * src/genlock_backlog.rs phase_pinned_deadline (Tier-0 unit-tested). */
+static inline uint64_t genlock_phase_pin_deadline(uint64_t deadline_ns, uint64_t interval_ns)
+{
+	if (interval_ns == 0)
+		return deadline_ns;
+	return (deadline_ns / interval_ns) * interval_ns;
+}
+
+/* camera-box #940 piece 3: the grid-comparison HYSTERESIS slack -- a frame captured
+ * essentially exactly on a grid line must not flip due/not-due from ordinary sub-ms
+ * render-tick jitter on genlock_phase_pin_deadline()'s floor division (the design's own
+ * documented risk). Sized well below one frame interval at any rig fps (33.3ms @ 30fps,
+ * 16.6ms @ 60fps) so it can never pull in an extra frame -- the same shape of guard
+ * genlock_present_ts's existing +interval/2 boundary-churn bias already applies to the
+ * (separate, frame-count) preload path, sized here to the sub-frame reserve-ms deadline
+ * this quantizes. Mirror: src/genlock_backlog.rs PHASE_PIN_HYSTERESIS_NS. */
+#define GENLOCK_PHASE_PIN_HYSTERESIS_NS 5000000ULL /* 5 ms */
+
 /* camera-box #148 follow-up (#269 finding [5]): the ts-align decision sample
  * (genlock_last_present_ts / _due / _head_skew_ns) is written ONLY on a tick the ts-align
  * path ran, but genlock_audit_log prints it unconditionally — so a ts-align source that
@@ -5133,15 +5162,28 @@ static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 				 * single read also makes the skew measured at the SAME instant as the
 				 * deadline. */
 				const uint64_t wall_now = genlock_wall_now_ns();
-				const uint64_t present_ts =
+				uint64_t present_ts =
 					reserve_ms > 0
 						? genlock_present_ts_reserve(wall_now, reserve_ms)
 						: genlock_present_ts(wall_now, preload, interval);
+				/* camera-box #940 piece 3: PHASE-PIN the deadline to the wall-
+				 * clock frame grid -- ONLY the ms-granular reserve_ms>0 path
+				 * (the effectively-unused-on-this-build frame-count preload
+				 * path below is untouched, byte-identical). due_hysteresis_ns
+				 * absorbs ordinary sub-ms render-tick jitter on the floor
+				 * division (0 on the untouched path). Mirror:
+				 * src/genlock_backlog.rs phase_pinned_deadline /
+				 * PHASE_PIN_HYSTERESIS_NS. */
+				const uint64_t due_hysteresis_ns =
+					reserve_ms > 0 ? GENLOCK_PHASE_PIN_HYSTERESIS_NS : 0;
+				if (reserve_ms > 0)
+					present_ts = genlock_phase_pin_deadline(present_ts, interval);
 				/* due = prefix of queued frames at/before the deadline (a single
 				 * NDI source delivers in monotonic capture order). */
 				size_t due = 0;
 				while (due < source->async_frames.num &&
-				       source->async_frames.array[due]->timestamp <= present_ts)
+				       source->async_frames.array[due]->timestamp <=
+					       present_ts + due_hysteresis_ns)
 					due++;
 				/* camera-box #148: SAMPLE the ts-align decision inputs for the
 				 * periodic 5s audit line (present_ts / due / head-frame-vs-wall

@@ -1479,6 +1479,20 @@ impl ReleaseCadence {
     /// The wall clock is consulted ONLY to acquire the lock and to detect drift beyond
     /// [`Self::relock_drift_ns`]; the steady-state release keys on the LOCKED boundary, so the
     /// ±2 ms render-tick slew has no threshold to race (the pre-#401 churn source).
+    ///
+    /// #940 piece 3 SCOPE NOTE: the deadline below is intentionally the RAW (non-grid-
+    /// -pinned) `genlock_present_ts_reserve()` value, unlike the C `ready_async_frame()`
+    /// ts-align path, which now grid-quantizes it (`genlock_phase_pin_deadline` +
+    /// `GENLOCK_PHASE_PIN_HYSTERESIS_NS`, see `src/genlock_backlog.rs`
+    /// `phase_pinned_deadline`/`PHASE_PIN_HYSTERESIS_NS` — the Tier-0-tested pure mirror of
+    /// that C arithmetic). This simulation harness is NOT wired to it: this struct's own
+    /// test suite pins dozens of exact ACQUIRE/RELOCK frame-selection outcomes against the
+    /// raw deadline, none of which are locally re-verifiable under this repo's Tier-0
+    /// policy (probe-gated, CI-only) — rewiring every one of them without a way to observe
+    /// the result before pushing is a correctness risk the design's own "unit-tested in the
+    /// Tier-0 mirror first" instruction does not require taking. The production fix lives
+    /// entirely in the C; `phase_pinned_deadline`/`phase_pinned_is_due` are independently
+    /// Tier-0 unit-tested against the exact same numeric contract the C now uses.
     pub fn tick(
         &mut self,
         wall_now_ns: u64,

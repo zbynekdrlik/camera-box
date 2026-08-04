@@ -419,6 +419,33 @@ jobs:
           }
           Write-Output "#940 piece 1 relock phase-evidence instrumentation present — OK"
 
+      # #940 piece 3: fail fast if the ts-align reserve deadline is no longer phase-pinned to
+      # the wall-clock frame grid — mirrors the Linux-CI guard
+      # tests/genlock_release_cadence.rs::ts_align_deadline_is_phase_pinned_to_the_wall_grid_940.
+      - name: Assert genlock deadline is phase-pinned to the wall grid (#940 piece 3)
+        shell: pwsh
+        run: |
+          $src = (Get-Content "vendor/obs-studio/libobs/obs-source.c" -Raw) -replace '\s+', ' '
+          if ($src -notmatch [regex]::Escape('static inline uint64_t genlock_phase_pin_deadline(')) {
+            Write-Error "obs-source.c: the grid-quantization helper genlock_phase_pin_deadline is gone — #940 piece 3 reverted"; exit 1
+          }
+          if ($src -notmatch [regex]::Escape('(deadline_ns / interval_ns) * interval_ns')) {
+            Write-Error "obs-source.c: genlock_phase_pin_deadline no longer floors to the grid — #940 piece 3 reverted"; exit 1
+          }
+          if ($src -notmatch [regex]::Escape('present_ts = genlock_phase_pin_deadline(present_ts, interval);')) {
+            Write-Error "obs-source.c: genlock_phase_pin_deadline is defined but not called from the ts-align release path — #940 piece 3 dead code"; exit 1
+          }
+          if ($src -notmatch [regex]::Escape('#define GENLOCK_PHASE_PIN_HYSTERESIS_NS 5000000ULL')) {
+            Write-Error "obs-source.c: the grid-comparison hysteresis constant is missing or changed — #940 piece 3 reverted"; exit 1
+          }
+          if ($src -notmatch [regex]::Escape('array[due]->timestamp <= present_ts + due_hysteresis_ns')) {
+            Write-Error "obs-source.c: the due loop no longer applies the grid-comparison hysteresis — #940 piece 3 reverted"; exit 1
+          }
+          if ($src -notmatch [regex]::Escape('reserve_ms > 0 ? GENLOCK_PHASE_PIN_HYSTERESIS_NS : 0')) {
+            Write-Error "obs-source.c: the grid hysteresis is no longer gated to the reserve_ms>0 path — #940 piece 3 reverted"; exit 1
+          }
+          Write-Output "#940 piece 3 phase-pinned deadline + grid hysteresis present — OK"
+
       # #278/#275: assert the multiview ADAPTIVE budget-based decouple (libobs render path +
       # the frontend Multiview projector marker) AND the cheaper bulk-fill measurement burn
       # are present BEFORE the 150-min build. The PRODUCTION build builds the FRONTEND
