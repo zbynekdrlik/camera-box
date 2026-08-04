@@ -812,8 +812,10 @@ verify_measurement_audio_arrives() {
     if [ -n "$db" ]; then
       break
     fi
-    echo "    [#901] volumedetect not parseable yet (attempt ${attempt}/${AUDIO_CHAIN_PARSE_RETRIES}; recording likely still finalizing) -- retrying in ${AUDIO_CHAIN_PARSE_RETRY_DELAY_S}s"
-    sleep "$AUDIO_CHAIN_PARSE_RETRY_DELAY_S"
+    if [ "$attempt" -lt "$AUDIO_CHAIN_PARSE_RETRIES" ]; then
+      echo "    [#901] volumedetect not parseable yet (attempt ${attempt}/${AUDIO_CHAIN_PARSE_RETRIES}; recording likely still finalizing) -- retrying in ${AUDIO_CHAIN_PARSE_RETRY_DELAY_S}s"
+      sleep "$AUDIO_CHAIN_PARSE_RETRY_DELAY_S"
+    fi
   done
   win_ssh_run "$STREAM_USER" "$STREAM_PW" "$STREAM_IP" "$(audio_preflight_delete_ps "$path")" >/dev/null 2>&1 || true
   if [ -z "$db" ]; then
