@@ -467,6 +467,19 @@ fn relock_events_log_phase_evidence_940() {
              steady_depth_frames / due / erased / head_skew_ms / wall_grid_phase_ns)."
         );
     }
+    // #940 piece 1 correctness fix: the logged steady_depth_frames must subtract the FULL
+    // scaled margin (piece 2: GENLOCK_QDEPTH_RELOCK_MARGIN * n) that
+    // genlock_backlog_relock_qdepth() now returns, not the bare margin — else a 60-into-30
+    // source (n>=2) logs an inflated steady_depth_frames by MARGIN*(n-1). Anchored on the
+    // exact scaled-subtraction expression so a future edit that reverts to a bare-margin
+    // subtraction (correct pre-piece-2, wrong once the margin is scaled) is caught.
+    assert!(
+        squished.contains("(size_t)GENLOCK_QDEPTH_RELOCK_MARGIN * (size_t)n_for_log"),
+        "{OBS_SOURCE}: #940 piece 1 — the relock log's steady_depth_frames computation no \
+         longer subtracts the source-multiple-scaled margin (GENLOCK_QDEPTH_RELOCK_MARGIN * \
+         n_for_log); it would log an inflated value on every 60-into-30 source once piece 2's \
+         scaled margin is in effect."
+    );
 }
 
 #[test]
