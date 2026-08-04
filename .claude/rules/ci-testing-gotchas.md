@@ -498,3 +498,62 @@ Two rules follow, both generalizing past this one file:
 function, struct, etc.); a closing explanatory note at the END of a test file with no more `#[test]`
 functions after it needs a plain `//` comment, not `///`. Easy to trip when replacing/removing the
 last test function in a file and leaving a trailing note behind.
+
+## Writing a NEW block-comment header for a group of new functions self-collides with `.split("fn_name()")`-style slicing anchors -- three times in one session (issue 901)
+
+The duplicate-anchor class this file already documents (the `.find()`/`.split()` traps above)
+also bites the AUTHOR of a brand-new test, not just an editor of an existing one. Adding a NEW
+Rust static-anchor test file that slices `do_test()`'s body the same way `tests/rig_mode.rs`
+already does (`s.split("do_test()").nth(1).split("do_event()").next()`) is a SEPARATE occurrence
+of that exact split-delimiter text — if the NEW test file's own helper is written before checking
+whether the SAME literal `"funcname() {"` already occurs earlier in the source as a bare mention
+(not the real definition), `.find()`/`.split()` silently grabs the wrong occurrence and produces
+a confusing false pass/fail unrelated to the real assertion. This happened THREE times writing
+`tests/harness_rig_mode_chain_verify_901.rs` + the code it drove in `scripts/rig-mode.sh` in one
+sitting:
+
+1. My own new test used `.find("enforce_strih_ndi_mapping()")` to slice the function body — grabbed
+   an EXISTING header comment ~500 lines earlier that says "...enforce_strih_ndi_mapping() below
+   passes it..." instead of the real `enforce_strih_ndi_mapping() {` definition.
+2. My own new explanatory block comment ABOVE the newly-added functions (inserted before
+   `do_test()`'s own definition) literally wrote the words "do_test()" in prose — a NEW, earlier
+   occurrence of the exact split anchor `tests/rig_mode.rs` (a PRE-EXISTING sibling test file) AND
+   my own new test file both key on, silently truncating the sliced body to nothing.
+3. The same new block comment quoted the OLD hint text being removed ("NEXT: confirm the
+   PHASE2-PROBE scene...") verbatim, inside a sentence explaining what it replaces — which broke
+   my own new test asserting that exact string is now ABSENT from the file (the explanatory
+   comment itself still contained it).
+
+**Fix pattern, reusable:** (a) when writing a `.find()`/`.split()` anchor for a function body,
+anchor on `"funcname() {"` (the real definition's opening brace), never the bare `"funcname()"` —
+a bare call/mention can appear anywhere in prose; (b) when writing a NEW explanatory comment near
+an anchored function, NEVER spell out that function's call-syntax (`funcname()`) or the literal
+text of anything a negative-assertion test checks is now absent — describe it in prose without
+reproducing the exact banned/anchored string (e.g. "the old confirm-the-scene hint" instead of
+quoting it verbatim). Catch this class immediately by re-running the NEW test right after writing
+it, before trusting a green result — a false-negative slice often still "passes" a
+`!body.contains(...)` assertion for the wrong reason.
+
+## `full-path-e2e.yml` (the hardware gate) triggers ONLY on `pull_request` targeting main -- a plain `git push origin dev` with no open PR never re-runs it
+
+Confirmed from the workflow's own `on:` block: `pull_request: branches: [main]` +
+`workflow_dispatch` only -- no `push` trigger at all. This is the OPPOSITE of `linux-genlock.yml`
+(triggers on every push to `dev`, per the top-level CLAUDE.md GOTCHA) and means a small trailing
+commit pushed to `dev` with NO open PR (e.g. a docs-only autopilot-log entry, or any fix landed
+after a PR already merged) costs only the fast `CI` workflow (~7 min), never the ~30 min hardware
+gate -- useful when you need to push something to `dev` cheaply without burning rig time, and a
+reminder that the hardware gate's absence from a plain push run is NORMAL, not a sign anything is
+broken or skipped.
+
+## `set-ndi-mapping.py`'s plain (non `--verify-only`) run ALREADY re-reads + hard-fails on mismatch -- the gap was SCOPE (active-only), not a missing verify step
+
+Before assuming `enforce_strih_ndi_mapping()`'s call into `set-ndi-mapping.py` needs a "verify
+after set" step bolted on, read `set-ndi-mapping.py`'s own `main()`: even the plain (non
+`--verify-only`) path already re-reads every targeted input's binding AFTER setting it
+(`bindings = {inp: _get_binding(ws, inp) for inp, _ in want}`) and exits 1 on any mismatch
+(`wrong`). The real gap behind issue 901 gap 4 (an INACTIVE camera's mangled 'NDI cam5' pin going
+uncaught) was that `active_map()`/`--active "$CAMERA_ACTIVE_SET"` FILTERS `want` down to only the
+currently-active cameras BEFORE any of this runs -- an inactive camera's input is never even
+looked at, set OR verified. The fix is a SEPARATE, wider, report-only `--verify-only` sweep across
+the full 7-camera table, not a "second verify pass" on the same active-only set (which already
+verifies itself).

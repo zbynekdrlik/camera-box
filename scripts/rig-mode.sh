@@ -528,6 +528,11 @@ MBC_INPUT_NAME="${MBC_INPUT_NAME:-mbc}"                 # stream OBS input carry
 AUDIO_CHAIN_PROBE_SECS="${AUDIO_CHAIN_PROBE_SECS:-5}"
 AUDIO_CHAIN_DEAD_DB="${AUDIO_CHAIN_DEAD_DB:--80}"
 AUDIO_CHAIN_WARN_DB="${AUDIO_CHAIN_WARN_DB:--60}"
+# OBS StopRecord returns the recording path BEFORE the MP4's moov atom is finalized (live
+# evidence 2026-08-04: the immediate ffmpeg read failed "moov atom not found"; the IDENTICAL
+# file parsed fine shortly after). The volumedetect+parse below therefore retries, bounded:
+AUDIO_CHAIN_PARSE_RETRIES="${AUDIO_CHAIN_PARSE_RETRIES:-10}"
+AUDIO_CHAIN_PARSE_RETRY_DELAY_S="${AUDIO_CHAIN_PARSE_RETRY_DELAY_S:-5}"
 # RIG_MODE_AUDIO_CHAIN_ENABLE: an individual opt-out for the measurement-audio-arrival probe
 # specifically (the slowest of the #901 chain checks, and the only one needing Windows ssh
 # creds) — mirrors recording-e2e.sh's own AUDIO_PREFLIGHT_ENABLE convention for the identical
@@ -787,7 +792,7 @@ verify_measurement_audio_arrives() {
     echo "[#901] measurement-audio-arrival check SKIPPED (RIG_MODE_AUDIO_CHAIN_ENABLE=0)"
     return 0
   fi
-  local here path out db tier
+  local here path out db tier attempt
   here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || here=""
   echo "[obs stream ${STREAM_IP}] #901 measurement-audio ARRIVAL: short (${AUDIO_CHAIN_PROBE_SECS}s) probe recording + ffmpeg volumedetect"
   python3 "$here/obs_phase2.py" record --host "$STREAM_IP" --action start --password "$OBS_WS_PASSWORD" >/dev/null
@@ -797,8 +802,19 @@ verify_measurement_audio_arrives() {
     echo "ERROR: $(audio_preflight_norec_message)" >&2
     exit 1
   fi
-  out="$(win_ssh_run "$STREAM_USER" "$STREAM_PW" "$STREAM_IP" "$(audio_preflight_volumedetect_ps "$path")" 2>&1 || true)"
-  db="$(audio_preflight_parse_max_db "$out" || true)"
+  # Bounded retry: the freshly-stopped MP4 may not be finalized yet (moov race, see the
+  # AUDIO_CHAIN_PARSE_RETRIES comment in the config block above) -- keep re-reading until the
+  # parse yields a number or the attempts run out.
+  db=""
+  for attempt in $(seq 1 "$AUDIO_CHAIN_PARSE_RETRIES"); do
+    out="$(win_ssh_run "$STREAM_USER" "$STREAM_PW" "$STREAM_IP" "$(audio_preflight_volumedetect_ps "$path")" 2>&1 || true)"
+    db="$(audio_preflight_parse_max_db "$out" || true)"
+    if [ -n "$db" ]; then
+      break
+    fi
+    echo "    [#901] volumedetect not parseable yet (attempt ${attempt}/${AUDIO_CHAIN_PARSE_RETRIES}; recording likely still finalizing) -- retrying in ${AUDIO_CHAIN_PARSE_RETRY_DELAY_S}s"
+    sleep "$AUDIO_CHAIN_PARSE_RETRY_DELAY_S"
+  done
   win_ssh_run "$STREAM_USER" "$STREAM_PW" "$STREAM_IP" "$(audio_preflight_delete_ps "$path")" >/dev/null 2>&1 || true
   if [ -z "$db" ]; then
     echo "ERROR: $(audio_preflight_unreadable_message)" >&2

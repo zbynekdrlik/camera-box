@@ -7214,3 +7214,53 @@ before it; confirmed independently by the deep-review subagent reading the same 
 green; `mergeable: MERGEABLE`, `mergeStateStatus: BEHIND` (this repo's own documented harmless
 two-branch artifact). PR #974 left OPEN, issue #930 left OPEN -- handed off via issue comments for
 the supervisor to restore cam2's painter (rig-mode.sh test) and re-run the gate.
+
+## issue 901 -- rig-mode.sh `test` verifies the WHOLE chain, not just cam2's emission side (PR #981, merged 38cc5dc21)
+
+Code-only dispatch (no rig ssh/OBS-WS access) -- do_test() used to prove only cam2's emission
+side (painter alive, ALSA RUNNING, marker CSV growing) and print "cam side PASS" as a full-rig
+green, proven false 2026-07-31 (mbc sound card off, still PASSED) and again 2026-08-04 (painter
+alive + CSV growing while program was BLACK 150s; stream program left on 'PRO'; burns on
+non-rendered inputs; an inactive camera's mangled NDI pin uncaught). Added 5 new checks to
+do_test(), each with its own RED->GREEN commit pair:
+
+- `1dc0c848f`/`1227513d5`: `scripts/lib/audio-presence-preflight.sh` gains `audio_preflight_tier`
+  (dead/quiet/audible, DEAD floor -80dB vs the existing STRICT -60dB) + 2 message builders --
+  purely additive, the existing STRICT gate function used by recording-e2e.sh's real `[4b2/8]`
+  preflight is untouched. RED tests in `tests/harness_audio_presence_preflight_tier_901.rs` (7).
+- `ea8b7dd82`/`718359c84`: `obs_phase2.py` gains `program-rendered-input` (resolve the ACTUALLY-
+  rendered scene-item source via GetSceneItemList, not a fixed constant) --
+  `_first_enabled_scene_item_source` pure helper. Python tests (11).
+- `68ca6b374`/`187159b4f`: `obs_phase2.py` gains `assert-program-nonblack` (thin read-only wrapper
+  around the existing `_assert_program_nonblack` polled luma-peak self-check, applied to whatever
+  scene is currently on program -- process-alive is not QR-on-screen). Python tests (6).
+- `01f86a010`/`88e4fb7f2`: `obs_phase2.py` gains `mbc-input-check` (device_id + mute one-call
+  read, hard-fails on an unambiguously wrong Dante transport state). Python tests (11).
+- `5215052ed`/`856c69f73`/`1a1831107`/`d6ec2caf0`: `rig-mode.sh` do_test() wires all of the above
+  in: `verify_stream_program_phase2` (assert+set stream PROGRAM=PHASE2-PROBE, replacing the old
+  never-enforced hint), `resolve_and_burn_rendered_inputs` (ADDITIVE burn on the actually-rendered
+  input, alongside the existing fixed-target burn), `verify_optical_qr_visible`,
+  `verify_mbc_dante_transport`, `verify_measurement_audio_arrives` (short probe recording +
+  ffmpeg volumedetect, reusing recording-e2e.sh's own `[4b2/8]` mechanism, 3-tier non-blocking
+  verdict). `enforce_strih_ndi_mapping` gains a report-only full-7-camera-table drift sweep (not
+  just the active subset). Static-anchor RED tests in
+  `tests/harness_rig_mode_chain_verify_901.rs` (9). Final commit fixes a self-inflicted
+  duplicate-anchor bug (own new comment matched `.split("do_test()")`'s own anchor -- see
+  `ci-testing-gotchas.md`'s duplicated-anchor class) + a stray soft-hyphen typo + adds a
+  defensive default case to the tier dispatch.
+
+Design + validation + review comments posted on issue 901 before/after code per the standing
+gate. Full local suite green throughout: 192 Rust test binaries, 748 pytest tests,
+`shellcheck -S warning` clean, Tier-0 fmt/check/clippy/test-no-run all clean.
+
+Discovered (unrelated, filed separately, NOT part of this PR): `harness_rig_busy_gate_lease_830.rs`'s
+`foreign_lease_released_within_wait_budget_lets_us_proceed` flakes under sibling-test
+concurrency within its own binary (reproduced 2/3 runs of the whole file, always passes filtered
+alone) -- confirmed zero diff from this branch in the underlying `rig-busy-gate.sh`/`rig-lease.sh`
+files. Filed as #980.
+
+PR #981: CI green (all jobs, Mutation Testing correctly SKIPPED -- no `src/` Rust source changed,
+only tests+scripts), hardware "Full-path E2E" gate green (run 30944483426). Merged via direct
+REST API (`gh pr merge` kept refusing "not up to date" per this repo's own documented `behind`-
+artifact GOTCHA). Issue 901 deliberately left OPEN (per dispatch authority) -- the supervisor
+does the live rig verification of the new whole-chain checks and closes it.

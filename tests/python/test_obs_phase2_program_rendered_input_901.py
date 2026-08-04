@@ -145,3 +145,25 @@ def test_program_rendered_input_fails_loud_when_scene_has_no_enabled_item(monkey
     a = argparse.Namespace(host="10.77.9.202", password="", scene="")
     with pytest.raises(SystemExit):
         obs_phase2.program_rendered_input(a)
+
+
+def test_first_enabled_scene_item_source_skips_audio_only_inputs():
+    # Live evidence 2026-08-04 (first hardware run of the #901 chain-verify): strih's 'Cam 2'
+    # scene lists 'ASIO zvuk' (asio_input_capture) BEFORE 'NDI cam2' -- the resolver returned the
+    # audio input and the burn filter could not attach ("[burn] FAIL: burn filter did not attach
+    # to 'ASIO zvuk'"). An audio-only input can never carry the video burn; the resolver must
+    # return the first enabled item that can actually RENDER.
+    items = [
+        {"sourceName": "ASIO zvuk", "sceneItemEnabled": True, "inputKind": "asio_input_capture"},
+        {"sourceName": "NDI cam2", "sceneItemEnabled": True, "inputKind": "ndi_source"},
+    ]
+    assert obs_phase2._first_enabled_scene_item_source(items) == "NDI cam2"
+
+
+def test_first_enabled_scene_item_source_falls_back_when_only_audio_is_enabled():
+    # Defensive: a scene with ONLY audio items still returns SOMETHING (the caller's burn attach
+    # then warns loudly) rather than None (which would abort the whole chain-verify).
+    items = [
+        {"sourceName": "ASIO zvuk", "sceneItemEnabled": True, "inputKind": "asio_input_capture"},
+    ]
+    assert obs_phase2._first_enabled_scene_item_source(items) == "ASIO zvuk"

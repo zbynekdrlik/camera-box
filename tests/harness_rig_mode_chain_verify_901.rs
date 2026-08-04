@@ -289,3 +289,35 @@ fn enforce_strih_ndi_mapping_also_runs_a_report_only_full_table_sweep() {
          window was: {window:?}"
     );
 }
+
+// --- follow-up: volumedetect must retry until the MP4 is finalized (live 2026-08-04) ----------
+
+#[test]
+fn measurement_audio_volumedetect_retries_until_moov_finalized() {
+    // Live evidence 2026-08-04 (FIRST hardware run of this check): OBS StopRecord returns the
+    // recording path BEFORE the MP4's moov atom is finalized -- an immediate ffmpeg volumedetect
+    // fails "moov atom not found" (the IDENTICAL file parsed fine ~40s later: max_volume -43.2
+    // dB). The check must therefore RETRY the volumedetect+parse until it yields a number,
+    // bounded -- never a single immediate shot that reads a finalization race as "unreadable".
+    let s = read();
+    let def = s
+        .find("verify_measurement_audio_arrives() {")
+        .expect("verify_measurement_audio_arrives must be defined");
+    let body_end = s[def..].find("\n}\n").map(|i| def + i).unwrap_or(s.len());
+    let fn_body = &s[def..body_end];
+    assert!(
+        fn_body.contains("AUDIO_CHAIN_PARSE_RETRIES"),
+        "#901 follow-up: volumedetect must run inside a bounded retry loop (moov-finalization \
+         race) -- expected an AUDIO_CHAIN_PARSE_RETRIES-bounded loop"
+    );
+    let retry_pos = fn_body
+        .find("for attempt in")
+        .expect("#901 follow-up: expected a `for attempt in` retry loop around volumedetect+parse");
+    let volumedetect_pos = fn_body
+        .find("audio_preflight_volumedetect_ps")
+        .expect("volumedetect call must exist");
+    assert!(
+        retry_pos < volumedetect_pos,
+        "#901 follow-up: the retry loop must WRAP the volumedetect call (loop opens before it)"
+    );
+}
