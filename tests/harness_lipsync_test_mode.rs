@@ -237,6 +237,62 @@ fn pacing_guard_fails_loud_when_showinfo_produces_zero_frames_930() {
     );
 }
 
+/// A fake `ffprobe` that FAILS (nonzero exit, a message on stderr, nothing usable on stdout) --
+/// proves ffprobe failures (930 review finding) surface as a clean FAIL message quoting ffprobe's
+/// own stderr, not an uncaught Python traceback with no context about which command failed.
+#[test]
+fn pacing_guard_fails_loud_with_a_clean_message_when_ffprobe_itself_fails_930() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let bin = tmp.path().join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    fs::write(
+        bin.join("ffprobe"),
+        "#!/usr/bin/env bash\necho 'moov atom not found' >&2\nexit 1\n",
+    )
+    .unwrap();
+    fs::write(
+        bin.join("ffmpeg"),
+        "#!/usr/bin/env bash\nsleep 0\n",
+    )
+    .unwrap();
+    for exe in [bin.join("ffprobe"), bin.join("ffmpeg")] {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&exe, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+    let path_env = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(
+            ". \"$1\"; eval \"$(lipsync_pacing_guard_cmd /tmp/media.mp4 /dev/fb0 hw:CARD=PCH,DEV=3)\"",
+        )
+        .arg("bash")
+        .arg(script())
+        .env("PATH", path_env)
+        .output()
+        .expect("spawn bash");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        !out.status.success(),
+        "930: a failing ffprobe must fail the guard: {stderr}"
+    );
+    assert!(
+        stderr.contains("FAIL") && stderr.contains("ffprobe"),
+        "930: must be a clean FAIL message naming ffprobe as the cause, not an uncaught \
+         Python traceback with no context: {stderr}"
+    );
+    assert!(
+        stderr.contains("moov atom not found"),
+        "930: must surface ffprobe's OWN stderr so the real cause is visible: {stderr}"
+    );
+    assert!(
+        !stderr.contains("Traceback"),
+        "930: must not leak a raw Python traceback to the operator: {stderr}"
+    );
+}
+
 #[test]
 fn pacing_guard_passes_within_budget_930() {
     let out = run_pacing_guard(2, 2);
