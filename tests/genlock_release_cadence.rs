@@ -416,3 +416,46 @@ fn raw_drain_erases_index_zero(raw: &str) -> bool {
     let window = &raw[drain_pos..window_end];
     window.contains("da_erase(source->async_frames, 0);") && !window.contains("array[1]")
 }
+
+#[test]
+fn relock_events_log_phase_evidence_940() {
+    // #940 piece 1 — INSTRUMENT each backlog-relock event with the phase evidence needed
+    // to attribute a future ±1–2-frame A/V-offset step to (or rule it out from) a
+    // specific relock: current depth, steady_depth_frames, due count, erased count, head
+    // skew, and the deadline's own remainder mod the frame interval (the "wall-grid
+    // phase" — piece 3 drives this to a fixed value; today it wanders, which IS the
+    // hidden phase state #940 is chasing). Logged ONCE PER EVENT inside the
+    // BACKLOG-STORM relock branch (genlock_relocks++), not folded into the periodic 5s
+    // audit line (which samples a snapshot, not a per-event trace). A subtree pull or
+    // edit dropping this silently removes the only per-event evidence #940's analysis
+    // depends on.
+    let raw = vendor_file(OBS_SOURCE);
+    let relock_pos = raw
+        .find("source->genlock_relocks++;")
+        .expect("#940: the backlog-storm relock branch (genlock_relocks++) must be present");
+    let release_off = raw[relock_pos..]
+        .find("release = due;")
+        .expect("#940: the relock branch must still release the due frame (release = due;)");
+    let relock_branch = &raw[relock_pos..relock_pos + release_off];
+    assert!(
+        relock_branch.contains("genlock-relock"),
+        "{OBS_SOURCE}: #940 piece 1 — the per-event relock log line (\"genlock-relock\") \
+         is gone from the backlog-storm branch; re-apply the phase-evidence instrumentation."
+    );
+    let squished = squish(relock_branch);
+    for field in [
+        "depth=%zu",
+        "steady_depth_frames=%zu",
+        "due=%zu",
+        "erased=%zu",
+        "head_skew_ms=%lld",
+        "wall_grid_phase_ns=%lld",
+    ] {
+        assert!(
+            squished.contains(field),
+            "{OBS_SOURCE}: #940 piece 1 — the relock phase-evidence log line is missing \
+             field `{field}`; re-apply the full instrumentation (depth / \
+             steady_depth_frames / due / erased / head_skew_ms / wall_grid_phase_ns)."
+        );
+    }
+}
