@@ -66,10 +66,14 @@ fn clean_two_cambox_run_passes_overall() {
 }
 
 #[test]
-fn one_cambox_dropping_fails_strict_but_889_relaxes_overall() {
-    // Issue 889 (2026-07-30 user decision on issue 883): `gaps` is report-only now -- a dropped
-    // frame (undecodable=0) still fails the STRICT per-cambox verdict, but no longer fails
-    // `overall_pass`, which folds the relaxed verdict instead.
+fn one_cambox_dropping_of_two_exceeds_tolerance_fails_overall_889_regate() {
+    // Issue 889 (2026-07-30 user decision on issue 883) originally made `gaps` fully
+    // report-only. The 2026-08-05 RE-GATE (ticket 889 comment 5196190653) re-introduced a
+    // per-window SINGLETON tolerance (`crate::window_gate::WINDOW_COPIES_GAPS_TOLERANCE`) — this
+    // fixture's gap of 2 (the seam skips two painted-tick slots) EXCEEDS that tolerance, so
+    // `overall_pass` now correctly FAILS again, exactly like the STRICT per-cambox verdict
+    // already did. Renamed from `..._889_relaxes_overall` -- that claim is no longer true for a
+    // 2-slot drop.
     let schedule = parse_switch_schedule(two_window_schedule_json()).expect("schedule parses");
     let mut frames = clean_window_frames(0, 0, 1000); // cam1 clean
 
@@ -86,27 +90,31 @@ fn one_cambox_dropping_fails_strict_but_889_relaxes_overall() {
 
     let v = segment_continuity(&frames, &schedule, GUARD, STEP);
 
-    assert!(
-        v.overall_pass,
-        "889: a gap alone (undecodable=0) no longer fails overall_pass: {v:?}"
-    );
     assert!(v.segments[0].pass, "cam1 still clean: {:?}", v.segments[0]);
     assert!(
         !v.segments[1].pass,
         "cam2's STRICT verdict still catches the drop: {:?}",
         v.segments[1]
     );
-    assert!(
-        v.segments[1].relaxed_pass,
-        "889: cam2's relaxed verdict passes: {:?}",
+    assert_eq!(
+        v.segments[1].gaps, 2,
+        "889 re-gate: a 2-slot drop exceeds the singleton tolerance: {:?}",
         v.segments[1]
     );
     assert!(
-        v.segments[1].gaps >= 1,
-        "889: gap still COMPUTED and printed, only report-only: {:?}",
+        !v.segments[1].relaxed_pass,
+        "889 re-gate: cam2's gaps=2 exceeds the singleton tolerance -- relaxed must fail: {:?}",
         v.segments[1]
+    );
+    assert!(
+        !v.overall_pass,
+        "889 re-gate: a 2-slot drop must fail overall_pass again: {v:?}"
     );
     assert_eq!(v.windows_failed_report_only, 1);
+    assert_eq!(
+        v.windows_over_copies_gaps_tolerance, 1,
+        "889 re-gate: exactly cam2's window exceeds the tolerance: {v:?}"
+    );
 }
 
 #[test]

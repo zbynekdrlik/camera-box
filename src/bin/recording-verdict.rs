@@ -8204,20 +8204,25 @@ mod tests {
         );
         // 889 re-gate: the fixture's own copies=5 (against frames=25, density 0.20 -- the exact
         // shape the frozen_leg classifier needs to prove DENSITY, not just count) is FAR over
-        // the singleton tolerance, so this window (and therefore overall_pass) now correctly
-        // FAILS again -- this is the re-gate doing its job, not frozen_leg/self_heal_reset
-        // (which stay report-only, per the two assertions immediately above).
+        // the singleton tolerance, so this window (and therefore `all_cambox_continuity.
+        // overall_pass` specifically) now correctly FAILS again -- this is the re-gate doing its
+        // job, not frozen_leg/self_heal_reset (which stay report-only, per the two assertions
+        // immediately above). Scoped to `all_cambox_continuity.overall_pass`, NOT the top-level
+        // `overall_pass` -- this short synthetic fixture (a few seconds) always fails the
+        // UNRELATED `full_chain` 300s duration floor regardless of copies/gaps, so the top-level
+        // field is not a valid proxy for what this test is isolating (the same reason the
+        // ORIGINAL 914 test used a differential rather than an absolute assertion).
         assert_eq!(
-            clean["overall_pass"],
+            clean["all_cambox_continuity"]["overall_pass"],
             serde_json::json!(true),
-            "sanity: the clean fixture has no defects at all: {clean}"
+            "sanity: the clean fixture's all_cambox_continuity has no defects at all: {clean}"
         );
         assert_eq!(
-            with_events["overall_pass"],
+            with_events["all_cambox_continuity"]["overall_pass"],
             serde_json::json!(false),
-            "889 re-gate: copies=5 far exceeds the singleton tolerance -- overall_pass must FAIL \
-             again, even though frozen_leg/self_heal_reset themselves stay report-only: \
-             {with_events}"
+            "889 re-gate: copies=5 far exceeds the singleton tolerance -- \
+             all_cambox_continuity.overall_pass must FAIL again, even though \
+             frozen_leg/self_heal_reset themselves stay report-only: {with_events}"
         );
         assert_eq!(
             with_events["all_cambox_continuity"]["windows_over_copies_gaps_tolerance"],
