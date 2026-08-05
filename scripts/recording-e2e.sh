@@ -495,7 +495,15 @@ done
 # check itself (unlike #979's dev1 watchdog, which treats that case as "nothing to decide" -- a
 # per-PR CI gate has the opposite correct default for a probe failure this late in the preflight).
 echo "[0/8] obs64/AHK session-visibility gate — fail when strih/stream OBS (or strih AHK) is INVISIBLE to the operator (#977/#958)"
-_svg_strih_out="$(win_ssh_run "$STRIH_USER" "$STRIH_PW" "$STRIH" "$(obs_session_visibility_probe_ps 1)" 2>/dev/null || true)"
+# win_ssh_run BLOCKS until the remote command exits (its own doc comment: "the CALLER must bound
+# it with an outer timeout if a wedge must not hang forever") -- this step runs FIRST, before
+# every other gate, so an unbounded call here could hang up to ServerAliveInterval*
+# ServerAliveCountMax=600s per box. Same wrapper shape as the established [4b2/8] audio-preflight
+# precedent below (`timeout` execvp()s its command directly, so it cannot invoke a shell FUNCTION
+# like win_ssh_run -- route through `bash -c`, re-sourcing the lib inside that subshell).
+SVG_SSH_TIMEOUT="${SVG_SSH_TIMEOUT:-30}"
+_svg_strih_out="$(timeout "$SVG_SSH_TIMEOUT" bash -c '. "$1"; win_ssh_run "$2" "$3" "$4" "$5"' _ \
+  "$HERE/lib/win-ssh-exec.sh" "$STRIH_USER" "$STRIH_PW" "$STRIH" "$(obs_session_visibility_probe_ps 1)" 2>/dev/null || true)"
 _svg_strih_msg="$(obs_session_visibility_message "$_svg_strih_out" 1)"
 if [ -n "$_svg_strih_msg" ]; then
   echo "ERROR: [0/8] strih INVISIBLE: $_svg_strih_msg" >&2
@@ -503,11 +511,12 @@ if [ -n "$_svg_strih_msg" ]; then
   exit 1
 fi
 echo "    ok: strih obs64/AHK visible on the console (SessionId=1, window present)"
-_svg_stream_out="$(win_ssh_run "$STREAM_USER" "$STREAM_PW" "$STREAM" "$(obs_session_visibility_probe_ps 0)" 2>/dev/null || true)"
+_svg_stream_out="$(timeout "$SVG_SSH_TIMEOUT" bash -c '. "$1"; win_ssh_run "$2" "$3" "$4" "$5"' _ \
+  "$HERE/lib/win-ssh-exec.sh" "$STREAM_USER" "$STREAM_PW" "$STREAM" "$(obs_session_visibility_probe_ps 0)" 2>/dev/null || true)"
 _svg_stream_msg="$(obs_session_visibility_message "$_svg_stream_out" 0)"
 if [ -n "$_svg_stream_msg" ]; then
   echo "ERROR: [0/8] stream INVISIBLE: $_svg_stream_msg" >&2
-  echo "       Recovery: bash scripts/launch-obs-genlock.sh --box stream --force   # paste into the win-stream MCP Shell (session 1, never ssh+CIM — issue 958)" >&2
+  echo "       Recovery: bash scripts/launch-obs-genlock.sh --box stream --force   # paste into the win-stream-snv MCP Shell (session 1, never ssh+CIM — issue 958)" >&2
   exit 1
 fi
 echo "    ok: stream obs64 visible on the console (SessionId=1, window present)"

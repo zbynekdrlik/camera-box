@@ -98,6 +98,14 @@ PSAHK
   # program (log render tick, audio buffering) -- issue 958's real incident sat like this for
   # ~3.5h. has_ahk=1 (strih) also gates AutoHotkey64's session (a session-0 AHK re-spawns obs64
   # into session 0 forever); has_ahk=0 (stream, no AHK watcher) gets a documented no-op.
+  #
+  # Deliberately does NOT call scripts/lib/obs-session-visibility.sh's obs_session_visibility_*
+  # functions (#977/#979's shared detector) -- that lib's shape (Write-Output field lines, parsed
+  # back over ssh via bash-side sed) is built for the "ssh a probe, parse the reply" flow #977/#979
+  # use; THIS gate runs inline, already inside the SAME open PowerShell session pasted into the
+  # win-* MCP Shell, with no ssh round-trip at all. The two express the IDENTICAL criteria (obs64
+  # count==1, SessionId==1, non-empty MainWindowTitle; AHK count==1, SessionId==1) independently by
+  # necessity of the different execution model -- if the criteria ever change, update BOTH.
   local ahk_session_ps
   if [ "$has_ahk" = "1" ]; then
     ahk_session_ps=$(cat <<'PSAHKSESS'

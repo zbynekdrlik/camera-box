@@ -321,27 +321,37 @@ fn recording_e2e_bounds_both_win_ssh_run_calls_with_an_outer_timeout() {
         .find("obs64/AHK session-visibility gate")
         .expect("banner must exist")..];
     let window = &window[..window.len().min(2500)];
-    let strih_call_pos = window
-        .find("win_ssh_run \"$STRIH_USER\"")
-        .expect("a direct win_ssh_run call for strih must exist somewhere in this window");
-    let preceding = &window[..strih_call_pos];
+    // The established AUDIO_PREFLIGHT_SSH_TIMEOUT wrapper shape passes win_ssh_run's real args
+    // POSITIONALLY into an inner `bash -c '. "$1"; win_ssh_run "$2" "$3" "$4" "$5"'` (`timeout`
+    // execvp()s its command directly and cannot invoke a shell FUNCTION) -- so the literal text
+    // is `win_ssh_run "$2" "$3" "$4" "$5"`, with the REAL per-box args appearing afterward as the
+    // bash -c invocation's own trailing arguments. Anchor on those trailing args instead.
+    assert!(
+        window.contains("win_ssh_run \"$2\" \"$3\" \"$4\" \"$5\""),
+        "must use the bash -c positional-arg wrapper shape (timeout cannot execvp() a shell \
+         function). Window:\n{window}"
+    );
+    let strih_args_pos = window
+        .find("\"$STRIH_USER\" \"$STRIH_PW\" \"$STRIH\"")
+        .expect("the strih win_ssh_run call's real args must exist somewhere in this window");
+    let preceding = &window[..strih_args_pos];
     assert!(
         preceding
             .rfind("timeout ")
-            .map(|p| strih_call_pos - p < 200)
+            .map(|p| strih_args_pos - p < 300)
             .unwrap_or(false),
         "the strih win_ssh_run call must be preceded closely by a `timeout ` wrapper (mirrors \
          AUDIO_PREFLIGHT_SSH_TIMEOUT's own bash -c wrapper -- `timeout` cannot execvp() a shell \
          function directly). Window:\n{window}"
     );
-    let stream_call_pos = window
-        .find("win_ssh_run \"$STREAM_USER\"")
-        .expect("a direct win_ssh_run call for stream must exist somewhere in this window");
-    let preceding_stream = &window[..stream_call_pos];
+    let stream_args_pos = window
+        .find("\"$STREAM_USER\" \"$STREAM_PW\" \"$STREAM\"")
+        .expect("the stream win_ssh_run call's real args must exist somewhere in this window");
+    let preceding_stream = &window[..stream_args_pos];
     assert!(
         preceding_stream
             .rfind("timeout ")
-            .map(|p| stream_call_pos - p < 200)
+            .map(|p| stream_args_pos - p < 300)
             .unwrap_or(false),
         "the stream win_ssh_run call must ALSO be preceded closely by a `timeout ` wrapper. \
          Window:\n{window}"
