@@ -258,9 +258,9 @@ fn program_ahk_restart_is_verified_and_fails_loud_867() {
 /// #978/#958 — SESSION-VISIBILITY GATE: an obs64 launched via ssh+Invoke-CimMethod lands in
 /// Windows SessionId=0 (invisible on the console) yet passes every OTHER check in this program
 /// (log render tick, audio buffering). The verify must re-query FRESH and fail LOUD (distinct
-/// exit 8) unless exactly one obs64 has SessionId=1 AND a non-empty MainWindowTitle; on strih
-/// (has_ahk=1) it must ALSO assert AutoHotkey64 is SessionId=1 (a session-0 AHK re-spawns obs64
-/// into session 0 forever).
+/// exit 8) unless exactly one obs64 has SessionId == the ACTIVE interactive session (derived from
+/// explorer.exe, never hardcoded); on strih (has_ahk=1) it must ALSO assert AutoHotkey64 is in
+/// that same active session (a session-0 AHK re-spawns obs64 into session 0 forever).
 #[test]
 fn program_gates_on_session_visibility_978() {
     let p = program_default(); // has_ahk=1 (strih)
@@ -269,12 +269,12 @@ fn program_gates_on_session_visibility_978() {
         "#978: must assert exactly one obs64 process. Program:\n{p}"
     );
     assert!(
-        p.contains("$sessProc.SessionId -ne 1"),
-        "#978: must assert obs64's SessionId == 1. Program:\n{p}"
+        p.contains("$sessProc.SessionId -ne $activeSession"),
+        "#978: must assert obs64's SessionId == the active interactive session. Program:\n{p}"
     );
     assert!(
         p.contains("MainWindowTitle"),
-        "#978: must assert obs64 has a non-empty MainWindowTitle. Program:\n{p}"
+        "#978: must assert obs64 has a non-empty MainWindowTitle (same-session path). Program:\n{p}"
     );
     assert!(
         p.contains("exit 8"),
@@ -285,8 +285,56 @@ fn program_gates_on_session_visibility_978() {
         "#978: strih (has_ahk=1) must ALSO gate AutoHotkey64's SessionId. Program:\n{p}"
     );
     assert!(
-        p.contains("$ahkSessProcs[0].SessionId -ne 1"),
-        "#978: the strih AHK check must assert SessionId == 1. Program:\n{p}"
+        p.contains("$ahkSessProcs[0].SessionId -ne $activeSession"),
+        "#978: the strih AHK check must assert SessionId == the active interactive session. Program:\n{p}"
+    );
+}
+
+/// #978/#958 follow-up — the ACTIVE session must be DERIVED from explorer.exe, never hardcoded,
+/// and an absent explorer.exe (no interactive desktop session at all) must fail loud rather than
+/// silently comparing against an assumed session id.
+#[test]
+fn program_derives_active_session_from_explorer_never_hardcoded_958() {
+    let p = program_default();
+    assert!(
+        p.contains("Get-Process explorer"),
+        "#958: must derive the active session from explorer.exe. Program:\n{p}"
+    );
+    assert!(
+        p.contains("$activeSession = $activeSessProcs[0].SessionId"),
+        "#958: must assign the derived active session to $activeSession. Program:\n{p}"
+    );
+    assert!(
+        p.contains("$activeSessProcs.Count -lt 1"),
+        "#958: must fail loud when no explorer.exe process exists (no interactive desktop \
+         session). Program:\n{p}"
+    );
+    assert!(
+        !p.contains("SessionId -ne 1") && !p.contains("SessionId -eq 1"),
+        "#958: no session comparison may hardcode the literal 1 any more -- everything must \
+         compare against the derived $activeSession. Program:\n{p}"
+    );
+}
+
+/// #978/#958 follow-up — the MainWindowTitle assertion is CONTEXT-GATED: this program's own
+/// PowerShell session's SessionId ($PID-derived) is compared against obs64's before the title
+/// check is enforced, so the #859 no-MCP CIM-breakaway ssh fallback (a DIFFERENT session from
+/// obs64's) can't false-fail on a title Windows makes structurally unreadable cross-session.
+#[test]
+fn program_context_gates_the_title_check_on_own_vs_target_session_958() {
+    let p = program_default();
+    assert!(
+        p.contains("$ownSession = (Get-Process -Id $PID).SessionId"),
+        "#958: must derive this program's own running session via $PID. Program:\n{p}"
+    );
+    assert!(
+        p.contains("$ownSession -eq $sessProc.SessionId"),
+        "#958: the title check must be gated on own-session == target-session. Program:\n{p}"
+    );
+    assert!(
+        p.to_lowercase().contains("title check skipped"),
+        "#958: the cross-session branch must document that the title check is SKIPPED, not \
+         silently omitted. Program:\n{p}"
     );
 }
 
@@ -296,7 +344,8 @@ fn program_gates_on_session_visibility_978() {
 fn program_without_ahk_watcher_session_gate_has_no_real_ahk_check_978() {
     let p = run_sourced("build_launch_program 'C:\\Program Files\\obs-studio' 0 0");
     assert!(
-        p.contains("$sessObsProcs.Count -ne 1") && p.contains("$sessProc.SessionId -ne 1"),
+        p.contains("$sessObsProcs.Count -ne 1")
+            && p.contains("$sessProc.SessionId -ne $activeSession"),
         "#978: the obs64 session check must survive has_ahk=0 untouched. Program:\n{p}"
     );
     assert!(

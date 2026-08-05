@@ -185,9 +185,16 @@ impl Harness {
     }
 }
 
+// #958 follow-up: this watchdog ALWAYS probes over win_ssh_run (ssh from dev1) -- i.e. ALWAYS
+// cross-session from obs64's real console session. HEALTHY therefore uses an EMPTY title (the
+// real ssh-probe shape, per the supervisor's live root-cause on issue 958: MainWindowTitle is
+// structurally unreadable cross-session even on a perfectly healthy box) to prove the watchdog no
+// longer false-alerts forever on a healthy fleet. INVISIBLE keeps a genuine SessionId mismatch
+// (0 vs the active session 1), which must still alert regardless of title/session context.
 const HEALTHY: &str =
-    "OBS_COUNT=1\\nOBS_SESSION=1\\nOBS_TITLE=OBS\\nAHK_COUNT=1\\nAHK_SESSION=1\\n";
-const INVISIBLE: &str = "OBS_COUNT=1\\nOBS_SESSION=0\\nOBS_TITLE=OBS\\n";
+    "ACTIVE_SESSION=1\\nOWN_SESSION=0\\nOBS_COUNT=1\\nOBS_SESSION=1\\nOBS_TITLE=\\nAHK_COUNT=1\\nAHK_SESSION=1\\n";
+const INVISIBLE: &str =
+    "ACTIVE_SESSION=1\\nOWN_SESSION=0\\nOBS_COUNT=1\\nOBS_SESSION=0\\nOBS_TITLE=OBS\\n";
 
 #[test]
 fn both_boxes_healthy_never_alerts() {

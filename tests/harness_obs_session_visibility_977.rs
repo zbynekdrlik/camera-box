@@ -71,6 +71,26 @@ fn probe_ps_reads_obs64_session_and_title() {
     );
 }
 
+/// #958 follow-up (supervisor root-cause on issue 958) — the probe must ALSO emit the ACTIVE
+/// interactive console session (derived from explorer.exe, never hardcoded) and this probing
+/// shell's OWN session (via $PID), so the parser can context-gate the MainWindowTitle check.
+#[test]
+fn probe_ps_reads_active_and_own_session_958() {
+    let p = run_sourced("obs_session_visibility_probe_ps 1");
+    assert!(
+        p.contains("Get-Process explorer"),
+        "must derive the active session from explorer.exe. Program:\n{p}"
+    );
+    assert!(
+        p.contains("ACTIVE_SESSION="),
+        "must emit ACTIVE_SESSION. Program:\n{p}"
+    );
+    assert!(
+        p.contains("OWN_SESSION=") && p.contains("$PID"),
+        "must emit this probing shell's OWN_SESSION via $PID. Program:\n{p}"
+    );
+}
+
 #[test]
 fn probe_ps_has_ahk_1_also_probes_autohotkey() {
     let p = run_sourced("obs_session_visibility_probe_ps 1");
@@ -122,12 +142,30 @@ fn message(probe_out: &str, has_ahk: &str) -> String {
 
 #[test]
 fn healthy_strih_probe_is_fully_visible() {
-    let probe = "OBS_COUNT=1\nOBS_SESSION=1\nOBS_TITLE=OBS 30.2.3 - Profile: strih\nAHK_COUNT=1\nAHK_SESSION=1\n";
+    let probe = "ACTIVE_SESSION=1\nOWN_SESSION=1\nOBS_COUNT=1\nOBS_SESSION=1\nOBS_TITLE=OBS 30.2.3 - Profile: strih\nAHK_COUNT=1\nAHK_SESSION=1\n";
     let msg = message(probe, "1");
     assert_eq!(
         msg.trim(),
         "",
         "a fully healthy strih probe must return an empty message"
+    );
+}
+
+/// #958 follow-up — the supervisor's actual root-cause reproduction: a probe run over
+/// win_ssh_run (ssh from dev1, ALWAYS a different Windows session from obs64's) reads a healthy
+/// obs64 (SessionId matches the active console session) but an EMPTY MainWindowTitle, because
+/// EnumWindows cannot see across sessions. This is the exact false-INVISIBLE PR #989's E2E hit
+/// three times on a perfectly healthy strih box -- it must be reported fully VISIBLE.
+#[test]
+fn healthy_over_ssh_probe_with_empty_title_is_fully_visible_cross_session_958() {
+    let probe = "ACTIVE_SESSION=1\nOWN_SESSION=0\nOBS_COUNT=1\nOBS_SESSION=1\nOBS_TITLE=\nAHK_COUNT=1\nAHK_SESSION=1\n";
+    let msg = message(probe, "1");
+    assert_eq!(
+        msg.trim(),
+        "",
+        "a healthy obs64 read CROSS-SESSION (own session 0, obs64 in session 1, matching the \
+         active console session) must be VISIBLE even with an empty title -- the title is \
+         structurally unreadable cross-session, not a real invisibility. msg={msg:?}"
     );
 }
 
@@ -139,7 +177,7 @@ fn healthy_strih_probe_is_fully_visible() {
 /// the log line when GitHub Actions rendered it). Every field must tolerate CRLF input.
 #[test]
 fn crlf_line_endings_from_windows_do_not_cause_a_false_invisible() {
-    let probe = "OBS_COUNT=1\r\nOBS_SESSION=1\r\nOBS_TITLE=OBS 30.2.3 - Profile: strih\r\nAHK_COUNT=1\r\nAHK_SESSION=1\r\n";
+    let probe = "ACTIVE_SESSION=1\r\nOWN_SESSION=1\r\nOBS_COUNT=1\r\nOBS_SESSION=1\r\nOBS_TITLE=OBS 30.2.3 - Profile: strih\r\nAHK_COUNT=1\r\nAHK_SESSION=1\r\n";
     let msg = message(probe, "1");
     assert_eq!(
         msg.trim(),
@@ -152,8 +190,8 @@ fn crlf_line_endings_from_windows_do_not_cause_a_false_invisible() {
 #[test]
 fn crlf_session_zero_is_still_correctly_detected_as_invisible() {
     // The CRLF fix must not swallow a REAL invisibility finding either -- only strip the \r, never
-    // mask a genuine SessionId=0.
-    let probe = "OBS_COUNT=1\r\nOBS_SESSION=0\r\nOBS_TITLE=OBS\r\n";
+    // mask a genuine SessionId mismatch.
+    let probe = "ACTIVE_SESSION=1\r\nOWN_SESSION=0\r\nOBS_COUNT=1\r\nOBS_SESSION=0\r\nOBS_TITLE=OBS\r\n";
     let msg = message(probe, "0");
     assert!(
         msg.contains("SessionId") && msg.contains("958"),
@@ -163,7 +201,7 @@ fn crlf_session_zero_is_still_correctly_detected_as_invisible() {
 
 #[test]
 fn healthy_stream_probe_no_ahk_lines_is_fully_visible() {
-    let probe = "OBS_COUNT=1\nOBS_SESSION=1\nOBS_TITLE=OBS 30.2.3 - Profile: stream\n";
+    let probe = "ACTIVE_SESSION=1\nOWN_SESSION=1\nOBS_COUNT=1\nOBS_SESSION=1\nOBS_TITLE=OBS 30.2.3 - Profile: stream\n";
     let msg = message(probe, "0");
     assert_eq!(
         msg.trim(),
@@ -174,11 +212,29 @@ fn healthy_stream_probe_no_ahk_lines_is_fully_visible() {
 
 #[test]
 fn session_zero_obs_is_invisible() {
-    let probe = "OBS_COUNT=1\nOBS_SESSION=0\nOBS_TITLE=OBS 30.2.3\n";
+    // #958 follow-up: a genuine SessionId mismatch (obs64 in session 0, active console session
+    // is 1) must still fail -- this is the exact issue-958 incident signature, and it must
+    // reproduce REGARDLESS of whether the probing shell itself is same- or cross-session.
+    let probe = "ACTIVE_SESSION=1\nOWN_SESSION=0\nOBS_COUNT=1\nOBS_SESSION=0\nOBS_TITLE=OBS 30.2.3\n";
     let msg = message(probe, "0");
     assert!(
         msg.contains("SessionId") && msg.contains("958"),
-        "a SessionId=0 obs64 must be reported INVISIBLE, referencing issue 958. msg={msg:?}"
+        "a SessionId=0 obs64 (active session 1) must be reported INVISIBLE, referencing issue \
+         958. msg={msg:?}"
+    );
+}
+
+/// #958 follow-up — a probe with a real obs64 (count 1) but NO explorer.exe process at all (no
+/// interactive desktop session to compare against) must fail loud naming exactly that, never
+/// silently pass or crash on an empty $active_session comparison.
+#[test]
+fn no_active_session_found_is_reported_loud() {
+    let probe = "ACTIVE_SESSION=\nOWN_SESSION=0\nOBS_COUNT=1\nOBS_SESSION=1\nOBS_TITLE=\n";
+    let msg = message(probe, "0");
+    assert!(
+        !msg.trim().is_empty() && msg.to_lowercase().contains("explorer"),
+        "an absent explorer.exe (no active session to compare against) must be reported, never a \
+         silent pass. msg={msg:?}"
     );
 }
 
@@ -202,19 +258,25 @@ fn two_obs_processes_is_invisible() {
     );
 }
 
+/// #958 follow-up — a SAME-SESSION read (own session == obs64's session, e.g. pasted directly
+/// into the win-* MCP Shell) with a genuinely empty title must still FAIL: cross-session is the
+/// ONLY case where an empty title is excused (see healthy_over_ssh_probe_..._958 above), because
+/// there the title is unreadable BY DESIGN; same-session it is a real invisible-window finding.
 #[test]
-fn empty_window_title_is_invisible() {
-    let probe = "OBS_COUNT=1\nOBS_SESSION=1\nOBS_TITLE=\n";
+fn empty_window_title_is_invisible_when_same_session() {
+    let probe = "ACTIVE_SESSION=1\nOWN_SESSION=1\nOBS_COUNT=1\nOBS_SESSION=1\nOBS_TITLE=\n";
     let msg = message(probe, "0");
     assert!(
         msg.to_lowercase().contains("mainwindowtitle") || msg.to_lowercase().contains("window"),
-        "SessionId=1 but no window title must be reported. msg={msg:?}"
+        "SessionId matches the active session but no window title (SAME-session read) must be \
+         reported. msg={msg:?}"
     );
 }
 
 #[test]
 fn strih_ahk_session_zero_is_invisible_even_when_obs_is_fine() {
-    let probe = "OBS_COUNT=1\nOBS_SESSION=1\nOBS_TITLE=OBS\nAHK_COUNT=1\nAHK_SESSION=0\n";
+    let probe =
+        "ACTIVE_SESSION=1\nOWN_SESSION=1\nOBS_COUNT=1\nOBS_SESSION=1\nOBS_TITLE=OBS\nAHK_COUNT=1\nAHK_SESSION=0\n";
     let msg = message(probe, "1");
     assert!(
         msg.contains("AutoHotkey64") && msg.contains("958"),
@@ -224,7 +286,7 @@ fn strih_ahk_session_zero_is_invisible_even_when_obs_is_fine() {
 
 #[test]
 fn strih_ahk_missing_is_invisible() {
-    let probe = "OBS_COUNT=1\nOBS_SESSION=1\nOBS_TITLE=OBS\nAHK_COUNT=0\n";
+    let probe = "ACTIVE_SESSION=1\nOWN_SESSION=1\nOBS_COUNT=1\nOBS_SESSION=1\nOBS_TITLE=OBS\nAHK_COUNT=0\n";
     let msg = message(probe, "1");
     assert!(
         msg.contains("AutoHotkey64"),
@@ -236,7 +298,8 @@ fn strih_ahk_missing_is_invisible() {
 fn stream_ignores_ahk_fields_even_if_present() {
     // has_ahk=0 must never look at AHK_* fields at all -- a healthy obs64 + garbage AHK fields
     // must still read as fully visible on stream.
-    let probe = "OBS_COUNT=1\nOBS_SESSION=1\nOBS_TITLE=OBS\nAHK_COUNT=0\nAHK_SESSION=0\n";
+    let probe =
+        "ACTIVE_SESSION=1\nOWN_SESSION=1\nOBS_COUNT=1\nOBS_SESSION=1\nOBS_TITLE=OBS\nAHK_COUNT=0\nAHK_SESSION=0\n";
     let msg = message(probe, "0");
     assert_eq!(
         msg.trim(),
