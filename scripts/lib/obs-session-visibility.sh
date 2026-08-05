@@ -55,6 +55,10 @@ obs_session_visibility_message() {
     printf 'no probe output (ssh/connectivity failure -- box unreachable, or the command did not run)'
     return 0
   fi
+  # win_ssh_run's PowerShell probe returns Windows CRLF line endings -- strip the trailing \r from
+  # EVERY line before parsing, or a genuinely healthy box (count=1) fails the sed-captured value
+  # "1\r" != "1" comparison and gets misreported INVISIBLE (real-hardware regression, found live).
+  out="${out//$'\r'/}"
   local obs_count obs_session obs_title
   obs_count="$(printf '%s\n' "$out" | sed -n 's/^OBS_COUNT=//p' | tail -1)"
   obs_session="$(printf '%s\n' "$out" | sed -n 's/^OBS_SESSION=//p' | tail -1)"
