@@ -118,6 +118,70 @@ pub fn decide(frame_count: u32, undecodable: u32, copies: u32, gaps: u32) -> Win
     }
 }
 
+/// The reason(s) a single cambox window fails its RELAXED verdict (`WindowGateDecision::
+/// relaxed_pass == false`) -- extracted (issue-889 re-gate deep-review findings 1+2) so
+/// `src/bin/recording-verdict.rs`'s per-window WARN print (issue 889 visibility requirement 1,
+/// extended by issue 915 and the 2026-08-05 re-gate) matches on this instead of re-deriving the
+/// same conditions inline. The inline version being replaced misclassified a `frame_count == 0`
+/// window as an exceeded optical floor (`crate::optical_floor::window_within_floor`'s defensive
+/// `frame_count == 0` clause is not itself a "floor exceeded" signal), and worded the floor
+/// reason as "currently gates overall_pass" unconditionally even while
+/// `crate::optical_floor::gates_overall_pass()` is hardcoded `false` today.
+///
+/// Call this ONLY on a window whose `relaxed_pass` has already failed -- a window that PASSED its
+/// relaxed verdict has no "failure reason" (see the separate WITHIN-TOLERANCE / REPORT-ONLY
+/// prints `recording-verdict.rs` uses for that case). Calling it on a passing window is harmless
+/// (it re-derives the same conditions and returns an empty `Vec`, or a `FloorWithinReportOnly`
+/// reason that did not actually fail anything), but is not this function's intended use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelaxedFailureReason {
+    /// `frame_count == 0` -- an absent/non-emitting cambox. Never rescued by any relaxation, and
+    /// takes priority over every other reason: a 0-frame window's `copies`/`gaps`/`undecodable`
+    /// counts carry no meaningful signal.
+    EmptyWindow,
+    /// `copies` and/or `gaps` exceed the per-window singleton tolerance (the 2026-08-05 re-gate,
+    /// [`WINDOW_COPIES_GAPS_TOLERANCE`]).
+    OverCopiesGapsTolerance,
+    /// The issue-881 optical undecodable floor is exceeded AND it currently gates `overall_pass`
+    /// (`crate::optical_floor::gates_overall_pass() == true` -- the issue-905 restore-path state).
+    /// Hardcoded `false` today, so this variant cannot fire yet -- kept so the seam stays correct
+    /// once issue 905 restores the floor's gating.
+    FloorExceededGating,
+    /// The issue-881 optical undecodable floor is exceeded but stays REPORT-ONLY
+    /// (`crate::optical_floor::gates_overall_pass() == false`, today's state) -- worth printing
+    /// for context even on a window that already fails for another reason, but not itself why
+    /// the window fails.
+    FloorWithinReportOnly,
+}
+
+/// See [`RelaxedFailureReason`]'s own doc for the full rationale and call-site discipline.
+///
+/// KNOWN-BUGGY placeholder (issue-889 re-gate review finding 1's RED commit): mirrors the OLD
+/// `recording-verdict.rs` inline logic byte-for-byte, including its bug -- it does NOT check
+/// `frame_count == 0` before consulting the optical floor, so a 0-frame window is misclassified.
+/// Fixed in the immediately-following GREEN commit.
+pub fn relaxed_failure_reasons(
+    frames: u32,
+    undecodable: u32,
+    copies: u32,
+    gaps: u32,
+) -> Vec<RelaxedFailureReason> {
+    let mut reasons = Vec::new();
+    let over_tolerance =
+        copies > WINDOW_COPIES_GAPS_TOLERANCE || gaps > WINDOW_COPIES_GAPS_TOLERANCE;
+    if over_tolerance {
+        reasons.push(RelaxedFailureReason::OverCopiesGapsTolerance);
+    }
+    let floor_ok = crate::optical_floor::window_within_floor(undecodable, frames);
+    if !floor_ok {
+        reasons.push(RelaxedFailureReason::FloorExceededGating);
+    }
+    if !over_tolerance && floor_ok {
+        reasons.push(RelaxedFailureReason::EmptyWindow);
+    }
+    reasons
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -255,5 +319,24 @@ mod tests {
         let d = decide(847, 1, 0, 0);
         assert!(d.strict_pass);
         assert!(d.relaxed_pass);
+    }
+
+    // --- relaxed_failure_reasons (issue-889 re-gate deep-review findings 1+2) -------------------
+
+    #[test]
+    fn relaxed_failure_reasons_frames_zero_is_empty_window_889_review() {
+        // Finding 1 of the issue-889 re-gate review: a frame_count==0 window must classify as
+        // EmptyWindow, never as an exceeded optical floor --
+        // `optical_floor::window_within_floor`'s defensive `frame_count == 0` clause is not
+        // itself a "floor exceeded" signal. Against the KNOWN-BUGGY placeholder above (which
+        // checks `over_tolerance`/`floor_ok` before ever asking "is this window even empty"),
+        // this fails: `window_within_floor(0, 0)` returns `false` via that same defensive clause,
+        // so the buggy version reports `[FloorExceededGating]` instead.
+        let reasons = relaxed_failure_reasons(0, 0, 0, 0);
+        assert_eq!(
+            reasons,
+            vec![RelaxedFailureReason::EmptyWindow],
+            "a 0-frame window must classify as EmptyWindow alone, never a floor reason: {reasons:?}"
+        );
     }
 }
