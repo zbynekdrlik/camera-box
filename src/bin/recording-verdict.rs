@@ -8116,6 +8116,25 @@ mod tests {
             frozen: bool,
             self_heal_reset: Option<&str>,
         ) -> serde_json::Value {
+            build_fixture_with_min_secs(tag, base, sched, frozen, self_heal_reset, None)
+        }
+
+        // Finding 3 of the issue-889 re-gate deep review: the plain `build_fixture` above always
+        // uses the default `--min-secs` (300), so its fixtures' TOP-LEVEL `overall_pass` is
+        // permanently confounded by the unrelated full_chain 300s span floor (this synthetic
+        // recording spans ~2s) -- true regardless of self_heal_reset/frozen_leg's own gating, per
+        // the comment at the `clean`/`with_events` assertions below. `min_secs` lets a caller
+        // clear that confound (mirrors the `--min-secs 1` idiom already used throughout this
+        // file's test suite) so a TOP-LEVEL `overall_pass` differential can actually isolate a
+        // SPECIFIC term's contribution instead of always reading false regardless of it.
+        fn build_fixture_with_min_secs(
+            tag: &str,
+            base: i64,
+            sched: &str,
+            frozen: bool,
+            self_heal_reset: Option<&str>,
+            min_secs: Option<&str>,
+        ) -> serde_json::Value {
             const ONE_S: i64 = 1_000_000_000;
             let dir = std::env::temp_dir().join(format!("cb-914-{tag}-{}", std::process::id()));
             std::fs::create_dir_all(&dir).unwrap();
@@ -8187,6 +8206,10 @@ mod tests {
             if let Some(tok) = self_heal_reset {
                 argv.push("--self-heal-reset".to_string());
                 argv.push(tok.to_string());
+            }
+            if let Some(ms) = min_secs {
+                argv.push("--min-secs".to_string());
+                argv.push(ms.to_string());
             }
             let args = super::Args::parse_from(argv);
             let (v, _) = build_and_print_verdict(
@@ -8279,6 +8302,73 @@ mod tests {
             with_events["all_cambox_continuity"]["windows_over_copies_gaps_tolerance"],
             serde_json::json!(1),
             "889 re-gate: exactly the frozen window exceeds the tolerance: {with_events}"
+        );
+
+        // Finding 3 of the issue-889 re-gate deep review: everything above proves frozen_leg/
+        // self_heal_reset's OWN `gates_overall_pass` JSON field reads `false` (a hardcoded
+        // literal, see the `obj.insert("gates_overall_pass", ...)` call sites in
+        // `build_and_print_verdict` -- disconnected from `SelfHealAttributionReport::
+        // overall_pass_contribution()`, the function that ACTUALLY decides whether these terms
+        // fold into `all_pass`) -- but nothing above would catch a regression in that function
+        // itself, because `with_events`'s copies=5 defect ALREADY fails `all_cambox_continuity.
+        // overall_pass` on its own (the re-gate), confounding any differential at that level; the
+        // TOP-LEVEL `overall_pass` differential the ORIGINAL (pre-re-gate) #914 test used is
+        // ALSO confounded, but by something else entirely (the >=300s `full_chain` span floor,
+        // which fails unconditionally on this ~2s synthetic recording regardless of self-heal).
+        //
+        // The frozen term is no longer isolable on its own (a genuinely HARD-FROZEN window needs
+        // `copies` far past the singleton tolerance, which by itself already fails
+        // `all_cambox_continuity.overall_pass`). `self_heal_reset` IS still isolable: build a
+        // fixture IDENTICAL to a clean baseline except for ONE unattributed self-heal event, with
+        // the confounding span floor cleared via `--min-secs 1` (mirrors this file's own
+        // `--min-secs 1` idiom used throughout its other tests) so the top-level `overall_pass`
+        // differential actually isolates `self_heal_reset`'s own decoupling instead of always
+        // reading `false` regardless of it.
+        let clean_isolated =
+            build_fixture_with_min_secs("clean-isolated", base, &sched, false, None, Some("1"));
+        let self_heal_only = build_fixture_with_min_secs(
+            "self-heal-only",
+            base,
+            &sched,
+            false,
+            Some("CAM_UNRELATED:1000000000000"),
+            Some("1"),
+        );
+        assert_eq!(
+            self_heal_only["frozen_leg"]["frozen"]
+                .as_array()
+                .map(|a| a.len())
+                .unwrap_or(0),
+            0,
+            "sanity: this isolated fixture carries NO frozen defect -- its ONLY difference from \
+             clean_isolated is the self-heal event: {self_heal_only}"
+        );
+        assert_eq!(
+            self_heal_only["self_heal_reset"]["unattributed_events"]
+                .as_array()
+                .map(|a| a.len())
+                .unwrap_or(0),
+            1,
+            "sanity: the isolated fixture carries exactly one unattributed self-heal event: \
+             {self_heal_only}"
+        );
+        // Sanity: with the span-floor confound cleared, the clean baseline's TOP-LEVEL
+        // `overall_pass` genuinely reads `true` -- proving the differential below is not
+        // tautologically comparing two permanently-`false` values (which would prove nothing).
+        assert_eq!(
+            clean_isolated["overall_pass"],
+            serde_json::json!(true),
+            "sanity: with --min-secs 1 clearing the span-floor confound, the isolated clean \
+             fixture's top-level overall_pass must genuinely read true: {clean_isolated}"
+        );
+        assert_eq!(
+            clean_isolated["overall_pass"], self_heal_only["overall_pass"],
+            "914 regression guard: an unattributed self-heal event ALONE (no frozen defect, no \
+             copies/gaps defect) must be a no-op on the TOP-LEVEL overall_pass (report-only, \
+             pending cam1 hardware fix issue 909 -- restore path issue 905). Unlike the \
+             `with_events` fixture above (confounded by its own copies=5 re-gate failure), this \
+             differential genuinely isolates self_heal_reset's contribution: \
+             clean_isolated={clean_isolated}, self_heal_only={self_heal_only}"
         );
     }
 
