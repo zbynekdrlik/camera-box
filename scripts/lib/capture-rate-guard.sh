@@ -123,3 +123,56 @@ capture_rate_recurrence_message() {
     echo "${cam} capture-rate defect RECURRED DURING this recording (see #656/#663/#705): ${line}"
   fi
 }
+
+# (#992) capture_rate_defect_grep_pattern_all -> the EXTENDED alternation the mid-recording [7b/8]
+# #705 check greps for, covering every band that can indicate a capture-rate defect is active --
+# not just the #656 jitter WARN the narrow capture_rate_defect_grep_pattern (above) matches. The
+# rig-validated #889 failure mode (ShadowCast sustained ~62-64fps, INSIDE the widened #685 jitter
+# tolerance) trips only the #717 SUSTAINED band (informational-only, no reset yet) or the #971
+# CHRONIC band, never the #656 jitter WARN -- so the narrow pattern alone would still miss it even
+# once the journald-blindness below is fixed. #663 is the shared self-heal-RESET event line
+# (src/main.rs's SelfHealDecision::Heal arm, the SAME line self_heal_reset_grep_pattern in
+# scripts/lib/self-heal-attribution.sh keys on) -- included here too since a reset having fired at
+# all is itself proof a defect recurred, even if this check never sees the upstream band that
+# triggered it. Deliberately NOT reusing/replacing capture_rate_defect_grep_pattern -- the [0/8]
+# PRE-run preflight (which greps that narrow pattern) is unrelated to this mid-recording ticket and
+# stays untouched.
+capture_rate_defect_grep_pattern_all() {
+  echo '#656 capture-delivery-rate DEFECTIVE|#717 capture-delivery-rate SUSTAINED band confirmed|#971 capture-delivery-rate CHRONIC sustained-band DEFECTIVE|#663 self-heal: USB reset attempt'
+}
+
+# (#992) capture_rate_burn_log_grep_cmd LOG_PATH -> the REMOTE command text that greps a capture
+# burn instance's OWN log FILE (e.g. /tmp/cbox-burn.log) for capture_rate_defect_grep_pattern_all,
+# the journald-blind sibling of capture_rate_window_journalctl_cmd. During an E2E recording the
+# harness stops the camera-box.service unit and launches the SOURCE camera's capture as a
+# transient systemd-run unit whose stdout/stderr are redirected DIRECTLY to this log file
+# (--property=StandardOutput=append:... / StandardError=append:...) -- journald never sees a
+# single line of it, so a #705 check scoped to journalctl alone reads an empty/stale window and
+# always reports "ok" regardless of what the burn instance actually did (issue 992).
+#
+# No epoch time-window is needed here (unlike the journalctl-window sibling): the harness already
+# does `rm -f LOG_PATH` immediately before systemd-run launches the burn for THIS run, so the
+# file's entire lifetime is already 1:1 with this recording -- there is no cross-run staleness to
+# guard against the way journalctl (which spans unit restarts) needs one.
+#
+# Pure string builder (no ssh, no I/O) -- directly unit-testable without a live rig, same
+# convention as every other builder in this file.
+capture_rate_burn_log_grep_cmd() {
+  local log_path="$1"
+  printf 'grep -E '\''%s'\'' "%s" 2>/dev/null | tail -1' "$(capture_rate_defect_grep_pattern_all)" "$log_path"
+}
+
+# (#992) capture_rate_burn_log_recurrence_message CAMERA_NAME MATCHED_LINE -> like
+# capture_rate_recurrence_message, but names the burn-instance LOG FILE as the source (never
+# "journal") so an operator/CI reader can immediately tell which of the two checks caught the
+# defect, without guessing from the matched line's own text alone.
+capture_rate_burn_log_recurrence_message() {
+  local cam="$1" line="$2" captured configured
+  captured="$(printf '%s' "$line" | grep -oE '[0-9]+\.[0-9]+ fps captured' | head -1 | grep -oE '[0-9]+\.[0-9]+')"
+  configured="$(printf '%s' "$line" | grep -oE '[0-9]+\.[0-9]+ fps configured' | head -1 | grep -oE '[0-9]+\.[0-9]+')"
+  if [ -n "$captured" ] && [ -n "$configured" ]; then
+    echo "${cam} capture-rate defect RECURRED DURING this recording, per its OWN burn-instance log (~${captured}fps, expected ${configured}fps) — see #656/#663/#717/#971/#992; journald was blind to this (the burn instance logs to a file, not the journal)"
+  else
+    echo "${cam} capture-rate defect RECURRED DURING this recording, per its OWN burn-instance log (see #656/#663/#717/#971/#992): ${line}"
+  fi
+}

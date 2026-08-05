@@ -538,3 +538,162 @@ fn recording_e2e_post_check_reresolves_invocation_id_after_start_record_not_the_
         "#705: the fresh invocation id must be resolved BEFORE it is used"
     );
 }
+
+// -------------------------------------------------------------------------------------------
+// (#992) the [7b/8] #705 post-recording check is JOURNALD-BLIND during a real E2E run: the
+// harness stops camera-box.service and launches the source camera's capture as a transient
+// systemd-run unit whose stdout/stderr are redirected DIRECTLY to /tmp/cbox-burn.log --
+// journald never sees a line of it. Live false-negative (gate run 19150595): the check printed
+// "ok" while cam1's burn instance captured at 63.5-64.0fps for the whole window. Fix: ALSO grep
+// the burn instance's own log file, with a WIDENED pattern that also covers the #717
+// SUSTAINED / #971 CHRONIC bands (the #889-validated failure trips only those, never the #656
+// jitter WARN the original narrow pattern matched).
+// -------------------------------------------------------------------------------------------
+
+#[test]
+fn defect_grep_pattern_all_matches_every_band_the_narrow_pattern_misses() {
+    let pattern = run_sourced("capture_rate_defect_grep_pattern_all")
+        .trim()
+        .to_string();
+
+    let sustained_line = "#717 capture-delivery-rate SUSTAINED band confirmed (informational \
+         only FOR NOW, see #909/#971 -- this escalates once chronic): 63.90 fps captured vs \
+         60.00 fps configured/negotiated (>2.0% deviation sustained for 12 consecutive report \
+         windows, ~60s) -- inside the ShadowCast 2 wide 10.0% jitter-tolerant envelope; the genlock \
+         decimation gate absorbs this over-rate into exact NDI output by design, so NO USB \
+         reset is triggered yet";
+    let chronic_line = "#971 capture-delivery-rate CHRONIC sustained-band DEFECTIVE: 64.00 fps \
+         captured vs 60.00 fps configured/negotiated (>2.0% deviation held for 180 consecutive \
+         report windows, ~900s -- beyond the 900s chronic bar) -- USB-reset the capture device \
+         (see #971, #909, #717)";
+    let self_heal_line = "#663 self-heal: USB reset attempt #1 succeeded";
+    let jitter_line = "#656 capture-delivery-rate DEFECTIVE: 63.20 fps captured vs 60.00 fps \
+         configured/negotiated (>1.0% deviation sustained for 6 consecutive report windows, \
+         ~30s) -- USB-reset the capture device (see #656)";
+    let healthy_line =
+        "Streaming: 59.9 fps emitted / 60.02 fps captured (1798 sent, 1801 captured, 0 \
+         capture-dropped)";
+
+    for (label, line, must_match) in [
+        ("sustained", sustained_line, true),
+        ("chronic", chronic_line, true),
+        ("self-heal reset", self_heal_line, true),
+        ("jitter (still matched, unchanged)", jitter_line, true),
+        ("healthy", healthy_line, false),
+    ] {
+        let out = Command::new("bash")
+            .arg("-c")
+            .arg(format!("printf '%s\\n' '{line}' | grep -E -- '{pattern}'"))
+            .output()
+            .expect("failed to run grep");
+        assert_eq!(
+            out.status.success(),
+            must_match,
+            "capture_rate_defect_grep_pattern_all: '{label}' line match expectation failed \
+             (want match={must_match}). Pattern: {pattern}"
+        );
+    }
+}
+
+#[test]
+fn burn_log_grep_cmd_greps_the_given_path_with_the_extended_pattern() {
+    let out = run_sourced("capture_rate_burn_log_grep_cmd '/tmp/cbox-burn.log'");
+    let cmd = out.trim();
+    assert!(
+        cmd.contains("/tmp/cbox-burn.log"),
+        "#992: must grep the caller-supplied log path. Got: {cmd}"
+    );
+    assert!(
+        cmd.contains("#717 capture-delivery-rate SUSTAINED band confirmed"),
+        "#992: must use the EXTENDED (all-bands) pattern, not the narrow #656-only one. \
+         Got: {cmd}"
+    );
+    assert!(
+        cmd.starts_with("grep -E"),
+        "#992: must be a grep command (embeds via $(...) into a larger ssh command string). \
+         Got: {cmd}"
+    );
+}
+
+#[test]
+fn burn_log_grep_cmd_output_is_valid_remote_shell() {
+    let out = run_sourced("capture_rate_burn_log_grep_cmd '/tmp/cbox-burn.log'");
+    let cmd = out.trim();
+    let check = Command::new("bash")
+        .arg("-n")
+        .arg("-c")
+        .arg(format!(
+            "ssh dummy \"{cmd}\"",
+            cmd = cmd.replace('"', "\\\"")
+        ))
+        .output()
+        .expect("failed to run bash -n");
+    assert!(
+        check.status.success(),
+        "#992: capture_rate_burn_log_grep_cmd's output must be syntactically valid shell text.\n\
+         stderr={:?}",
+        String::from_utf8_lossy(&check.stderr)
+    );
+}
+
+#[test]
+fn burn_log_recurrence_message_names_the_log_file_never_journal() {
+    let out = run_sourced(
+        "capture_rate_burn_log_recurrence_message cam1 'WARN #717 capture-delivery-rate \
+         SUSTAINED band confirmed: 63.90 fps captured vs 60.00 fps configured/negotiated'",
+    );
+    let msg = out.trim();
+    assert!(
+        msg.contains("cam1") && msg.contains("burn-instance log"),
+        "#992: must name the camera and clearly identify the burn-instance LOG as the source. \
+         Got: {msg}"
+    );
+    // The message MAY explain that journald was blind (that's useful context) but must never
+    // misattribute the SOURCE of the match as "journal" -- distinct from
+    // capture_rate_recurrence_message, whose surrounding call site (recording-e2e.sh) labels its
+    // own success line "... in $CAMERA_NAME's journal ...".
+    assert!(
+        !msg.contains("in cam1's journal"),
+        "#992: must never claim the match came FROM the journal -- this message is for a defect \
+         found in the burn instance's OWN log file. Got: {msg}"
+    );
+}
+
+#[test]
+fn recording_e2e_post_check_also_scans_the_burn_instance_log_when_journald_is_clean() {
+    let s = read("scripts/recording-e2e.sh");
+    let check_header_pos = s
+        .find("capture-delivery-rate POST-recording check")
+        .expect("#705: the post-recording capture-rate check step must exist");
+    let check_ok_pos = s
+        .find("no capture-rate defect recurrence in $CAMERA_NAME's journal during the recording")
+        .expect("#705: the post-recording check must print a success line when clean");
+    assert!(
+        check_ok_pos > check_header_pos,
+        "the success echo must come after the check step header"
+    );
+    let this_check_block = &s[check_header_pos..check_ok_pos];
+
+    assert!(
+        this_check_block.contains("capture_rate_burn_log_grep_cmd"),
+        "#992: the post-recording check must ALSO grep the burn instance's own log file (the \
+         harness stops camera-box.service and redirects the burn's stdout/stderr straight to a \
+         file, never journald) -- journald alone false-passed a live over-rate recurrence \
+         (gate run 19150595). Block:\n{this_check_block}"
+    );
+    assert!(
+        this_check_block.contains("/tmp/cbox-burn.log"),
+        "#992: must scan the SOURCE camera's own burn log path. Block:\n{this_check_block}"
+    );
+    assert!(
+        this_check_block.contains("capture_rate_burn_log_recurrence_message"),
+        "#992: a burn-log match must be reported via the dedicated burn-log message formatter \
+         (never silently reusing the journald-only message, and never a third ad-hoc string). \
+         Block:\n{this_check_block}"
+    );
+    assert!(
+        this_check_block.contains("exit 1"),
+        "#992: a defect found in the burn log must still abort the run (exit 1), same as a \
+         journald-sourced match"
+    );
+}
