@@ -191,7 +191,8 @@ fn crlf_line_endings_from_windows_do_not_cause_a_false_invisible() {
 fn crlf_session_zero_is_still_correctly_detected_as_invisible() {
     // The CRLF fix must not swallow a REAL invisibility finding either -- only strip the \r, never
     // mask a genuine SessionId mismatch.
-    let probe = "ACTIVE_SESSION=1\r\nOWN_SESSION=0\r\nOBS_COUNT=1\r\nOBS_SESSION=0\r\nOBS_TITLE=OBS\r\n";
+    let probe =
+        "ACTIVE_SESSION=1\r\nOWN_SESSION=0\r\nOBS_COUNT=1\r\nOBS_SESSION=0\r\nOBS_TITLE=OBS\r\n";
     let msg = message(probe, "0");
     assert!(
         msg.contains("SessionId") && msg.contains("958"),
@@ -215,7 +216,8 @@ fn session_zero_obs_is_invisible() {
     // #958 follow-up: a genuine SessionId mismatch (obs64 in session 0, active console session
     // is 1) must still fail -- this is the exact issue-958 incident signature, and it must
     // reproduce REGARDLESS of whether the probing shell itself is same- or cross-session.
-    let probe = "ACTIVE_SESSION=1\nOWN_SESSION=0\nOBS_COUNT=1\nOBS_SESSION=0\nOBS_TITLE=OBS 30.2.3\n";
+    let probe =
+        "ACTIVE_SESSION=1\nOWN_SESSION=0\nOBS_COUNT=1\nOBS_SESSION=0\nOBS_TITLE=OBS 30.2.3\n";
     let msg = message(probe, "0");
     assert!(
         msg.contains("SessionId") && msg.contains("958"),
@@ -286,7 +288,8 @@ fn strih_ahk_session_zero_is_invisible_even_when_obs_is_fine() {
 
 #[test]
 fn strih_ahk_missing_is_invisible() {
-    let probe = "ACTIVE_SESSION=1\nOWN_SESSION=1\nOBS_COUNT=1\nOBS_SESSION=1\nOBS_TITLE=OBS\nAHK_COUNT=0\n";
+    let probe =
+        "ACTIVE_SESSION=1\nOWN_SESSION=1\nOBS_COUNT=1\nOBS_SESSION=1\nOBS_TITLE=OBS\nAHK_COUNT=0\n";
     let msg = message(probe, "1");
     assert!(
         msg.contains("AutoHotkey64"),
