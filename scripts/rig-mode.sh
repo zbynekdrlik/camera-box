@@ -497,6 +497,10 @@ STRIH_PROG_SOURCE="${STRIH_PROG_SOURCE:-NDI cam1}"      # strih program input, c
                                                           # mapping pivoted to 1:1, cam1 now rides
                                                           # 'NDI cam1' not the old 'NDI cam5')
 STREAM_PROG_SOURCE="${STREAM_PROG_SOURCE:-NDI 2ME PGM}" # stream program input (#246 burn target)
+# #985: stream's PRODUCTION program scene -- the calibrated A/V-align target TEST mode must be
+# PARKED on when it returns (never left on the measurement-only PHASE2-PROBE scene). Same
+# convention + default scripts/recording-e2e.sh:1291 already uses for this exact box/scene.
+STREAM_PROG_SCENE="${STREAM_PROG_SCENE:-PRO}"
 # #462 (EPIC #466 Topology v2): imag-nb — the new 60fps low-latency IMAG cutter. Its scene->camera
 # mapping is the Phase 1 1:1 pin (setup-imag.sh, #458): 'NDI CAM1'..'NDI CAM6' -> 'CAMx (usb)'
 # 1:1, so cam1 (the SOURCE camera that films cam2's monitor) rides 'NDI CAM1' / scene 'Cam 1'.
@@ -844,6 +848,23 @@ verify_measurement_audio_arrives() {
   esac
 }
 
+# restore_stream_program_pro -> #985: PARK stream's PROGRAM back on the certified production
+# scene ($STREAM_PROG_SCENE, default 'PRO') once the whole-chain checks above are done proving
+# the measurement path is alive -- TEST mode is the rig's STANDING state, not a bounded
+# measurement window, so leaving PROGRAM on the probe scene indefinitely parks the operator
+# monitor on a by-construction A/V-desynced feed (the probe input runs OBS's build-default
+# genlock_latency_ms_src while the certified prod input runs its calibrated hold -- live
+# evidence: a ~945ms divergence). Reuses the SAME `switch` action (SetCurrentProgramScene + its
+# #312 polled non-black self-check) the earlier gap-2 assert already uses -- no new OBS plumbing.
+restore_stream_program_pro() {
+  local here rc=0
+  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || here=""
+  echo "[obs stream ${STREAM_IP}] #985 restore PROGRAM to the production scene '${STREAM_PROG_SCENE}' (never park on the measurement-only probe scene)"
+  python3 "$here/obs_phase2.py" switch --host "$STREAM_IP" --program-scene "$STREAM_PROG_SCENE" \
+    --password "$OBS_WS_PASSWORD" 2>&1 | sed 's/^/    [stream restore] /' || rc=$?
+  return $rc
+}
+
 # print_genlock_relaunch_note MODE -> the genlock RELAUNCH step (printed, not run — a GUI OBS
 # launch goes via the win-* MCP; #701 proved plain scp/ssh reaches strih/stream, but that doesn't
 # drive/verify a GUI app). #257: env-free; the wrapper just verifies the genlock
@@ -982,6 +1003,9 @@ do_test() {
   echo "[obs] #901 item 1 (the headline fix): measurement-audio ARRIVAL end to end:"
   verify_measurement_audio_arrives
   echo
+  echo "[obs] #985: PARK stream's PROGRAM back on the production scene (never leave it on the measurement-only probe scene):"
+  restore_stream_program_pro
+  echo
   print_genlock_relaunch_note test
   echo
   echo "ACHIEVED (cam side): cam2 painting dual-QR ${QR_SIZE}px on /dev/fb0 (pidfile ${PAINTER_PIDFILE})."
@@ -990,7 +1014,7 @@ do_test() {
   echo "                     cam1 (${CAM1_IP}) left on its DEPLOYED service (already at the 30 fps test rate)."
   echo "ACHIEVED (obs side): genlock_burn=true on strih + stream + imag program inputs (WebSocket, no relaunch)."
   echo "                     imag-nb (${IMAG_IP}) PROGRAM routed to '${IMAG_PROG_SCENE}' (cam1, #462)."
-  echo "                     stream PROGRAM asserted+set to 'PHASE2-PROBE' (#901 — enforced, not merely recommended)."
+  echo "                     stream PROGRAM briefly proved alive on 'PHASE2-PROBE' (#901), then PARKED back on '${STREAM_PROG_SCENE}' (#985 — the calibrated production hold, never left desynced)."
   echo "ACHIEVED (chain, #901): strih's live program scene confirmed NON-BLACK — the camera genuinely sees content, not just a live process."
   echo "                        mbc Dante transport confirmed bound + unmuted on stream."
   echo "                        measurement-audio arrival checked end to end (verdict printed above — PASS / non-blocking WARN / hard FAIL)."

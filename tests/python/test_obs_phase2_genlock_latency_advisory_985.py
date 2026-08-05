@@ -36,7 +36,7 @@ def test_no_advisory_when_probe_matches_prod():
     assert obs_phase2._genlock_latency_advisory("stream", "NDI 2ME PGM", prod, probe) is None
 
 
-def test_advisory_fires_on_the_live_984_incident_values():
+def test_advisory_fires_on_the_live_985_incident_values():
     # The exact live divergence from issue 985: prod calibrated to 948ms, the probe input still
     # at OBS's 3ms build default.
     prod = {"genlock_latency_ms_src": 948}

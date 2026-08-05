@@ -322,6 +322,14 @@ _TEST_LATENCY_STATE_KEY = "test_latency_saved"
 # range [3, 2000]; prod 'NDI 2ME PGM' on stream runs 450ms for A/V-align).
 _GENLOCK_SRC_LATENCY_KEY = "genlock_latency_ms_src"
 
+# #985: genlock_latency_ms_src is DELIBERATELY excluded from _LOCKED_BASELINE_KEYS below (a probe
+# run must stay usable even when the probe input sits at OBS's build default while prod runs its
+# calibrated A/V-align hold) -- but that same exclusion means a probe measurement can SILENTLY
+# diverge from prod's A/V timing by up to a second with nobody told. Report it LOUDLY instead
+# (non-fatal -- see _genlock_latency_advisory below). Same key as _GENLOCK_SRC_LATENCY_KEY; kept
+# as its own name so a future rename of one doesn't silently desync the other (locked by a test).
+_GENLOCK_LATENCY_ADVISORY_KEY = _GENLOCK_SRC_LATENCY_KEY
+
 # Render-Delay filter kind (OBS filter id "gpu_delay" — gpu-delay.c).
 _GPU_DELAY_KIND = "gpu_delay"
 
@@ -636,6 +644,31 @@ def _assert_probe_matches_prod(host, prod_input_name, certified, probe_effective
     )
 
 
+def _genlock_latency_advisory(host, prod_input_name, certified, probe_effective):
+    """#985 (pure, testable): compare prod's vs the probe's genlock_latency_ms_src and return the
+    advisory string to print when they diverge, or None when they match (or either side is
+    unknown -- a missing/unread value is already fatal via _assert_probe_matches_prod's own
+    "no certified baseline" abort, so this stays defensive rather than mis-reporting).
+
+    UNLIKE _diverging_locked_keys / _assert_probe_matches_prod, this NEVER aborts the run --
+    genlock_latency_ms_src is intentionally excluded from _LOCKED_BASELINE_KEYS (the probe path
+    exists to prove LIVENESS, not to reproduce prod's A/V-align hold), so a divergence here is
+    EXPECTED, not an error. The only bug this closes is that the divergence was previously
+    completely silent -- nobody was told the probe path is not A/V-representative."""
+    key = _GENLOCK_LATENCY_ADVISORY_KEY
+    prod_ms = certified.get(key)
+    probe_ms = probe_effective.get(key)
+    if prod_ms is None or probe_ms is None or prod_ms == probe_ms:
+        return None
+    return (
+        f"[obs] {host}: #985 ADVISORY — probe input genlock_latency_ms_src={probe_ms!r} "
+        f"DIVERGES from certified prod input '{prod_input_name}' genlock_latency_ms_src="
+        f"{prod_ms!r}. This is EXPECTED (the locked baseline intentionally excludes A/V-align "
+        f"tuning) but means this probe path is NOT A/V-representative — never take an A/V-sync "
+        f"reading from it."
+    )
+
+
 def _load_state():
     """Read the per-host prev-scene state. Tolerates a MISSING or CORRUPT/truncated file
     (a crash mid-write can leave partial JSON) — returns {} rather than raising, so a bad
@@ -932,6 +965,12 @@ def setup(a):
     # with the certified prod settings (also defaults-merged) — see _effective_input_settings.
     probe_effective = _effective_input_settings(ws, INPUT)
     _assert_probe_matches_prod(a.host, prod_input_name, prod_settings, probe_effective)
+    # #985: genlock_latency_ms_src is NOT part of the locked baseline above (intentionally
+    # allowed to differ) -- report the divergence LOUDLY (non-fatal) so nobody mistakes this
+    # probe path for an A/V-representative measurement.
+    latency_advisory = _genlock_latency_advisory(a.host, prod_input_name, prod_settings, probe_effective)
+    if latency_advisory:
+        sys.stderr.write(latency_advisory + "\n")
 
     # Everything resolved AND self-verified — NOW switch program to the probe scene (kept to
     # the last step so any failure above leaves the live program where it was).
