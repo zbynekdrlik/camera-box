@@ -538,3 +538,433 @@ fn recording_e2e_post_check_reresolves_invocation_id_after_start_record_not_the_
         "#705: the fresh invocation id must be resolved BEFORE it is used"
     );
 }
+
+// -------------------------------------------------------------------------------------------
+// (#992) the [7b/8] #705 post-recording check is JOURNALD-BLIND during a real E2E run: the
+// harness stops camera-box.service and launches the source camera's capture as a transient
+// systemd-run unit whose stdout/stderr are redirected DIRECTLY to /tmp/cbox-burn.log --
+// journald never sees a line of it. Live false-negative (gate run 19150595): the check printed
+// "ok" while cam1's burn instance captured at 63.5-64.0fps for the whole window. Fix: ALSO grep
+// the burn instance's own log file.
+//
+// ROZHODNUTÉ (supervisor, gate rerun 31028767542 evidence, see issue 992 comment
+// https://github.com/zbynekdrlik/camera-box/issues/992#issuecomment-5195254731): the detection
+// itself works, but hard-failing on the #717 SUSTAINED band recreates the issue-909 mistake one
+// layer up -- that band is INFORMATIONAL BY DESIGN (the genlock decimation gate absorbs the
+// over-rate into exact NDI output), and cam1's ShadowCast 2 over-rate is CHRONIC, so a hard
+// #717 fail here would abort every run before the verdict is ever computed. The pattern is
+// therefore SPLIT: capture_rate_defect_grep_pattern_hard (#656/#971/#663 -- still exit 1) and
+// capture_rate_sustained_band_grep_pattern (#717 only -- report-only WARN, never exit 1). The
+// old union capture_rate_defect_grep_pattern_all is REMOVED (no caller needs the union once both
+// call sites grep the two bands separately).
+// -------------------------------------------------------------------------------------------
+
+#[test]
+fn defect_grep_pattern_hard_matches_hard_bands_only() {
+    let pattern = run_sourced("capture_rate_defect_grep_pattern_hard")
+        .trim()
+        .to_string();
+
+    let chronic_line = "#971 capture-delivery-rate CHRONIC sustained-band DEFECTIVE: 64.00 fps \
+         captured vs 60.00 fps configured/negotiated (>2.0% deviation held for 180 consecutive \
+         report windows, ~900s -- beyond the 900s chronic bar) -- USB-reset the capture device \
+         (see #971, #909, #717)";
+    let self_heal_line = "#663 self-heal: USB reset attempt #1 succeeded";
+    let jitter_line = "#656 capture-delivery-rate DEFECTIVE: 63.20 fps captured vs 60.00 fps \
+         configured/negotiated (>1.0% deviation sustained for 6 consecutive report windows, \
+         ~30s) -- USB-reset the capture device (see #656)";
+    let sustained_line = "#717 capture-delivery-rate SUSTAINED band confirmed (informational \
+         only FOR NOW, see #909/#971 -- this escalates once chronic): 63.90 fps captured vs \
+         60.00 fps configured/negotiated (>2.0% deviation sustained for 12 consecutive report \
+         windows, ~60s) -- inside the ShadowCast 2 wide 10.0% jitter-tolerant envelope; the genlock \
+         decimation gate absorbs this over-rate into exact NDI output by design, so NO USB \
+         reset is triggered yet";
+    let healthy_line =
+        "Streaming: 59.9 fps emitted / 60.02 fps captured (1798 sent, 1801 captured, 0 \
+         capture-dropped)";
+
+    for (label, line, must_match) in [
+        ("chronic", chronic_line, true),
+        ("self-heal reset", self_heal_line, true),
+        ("jitter (still matched, unchanged)", jitter_line, true),
+        (
+            "sustained (must NOT match the HARD pattern -- report-only per issue 992 ROZHODNUTÉ)",
+            sustained_line,
+            false,
+        ),
+        ("healthy", healthy_line, false),
+    ] {
+        let out = Command::new("bash")
+            .arg("-c")
+            .arg(format!("printf '%s\\n' '{line}' | grep -E -- '{pattern}'"))
+            .output()
+            .expect("failed to run grep");
+        assert_eq!(
+            out.status.success(),
+            must_match,
+            "capture_rate_defect_grep_pattern_hard: '{label}' line match expectation failed \
+             (want match={must_match}). Pattern: {pattern}"
+        );
+    }
+}
+
+#[test]
+fn capture_rate_defect_grep_pattern_hard_is_the_exact_three_band_alternation() {
+    let out = run_sourced("capture_rate_defect_grep_pattern_hard");
+    assert_eq!(
+        out.trim(),
+        "#656 capture-delivery-rate DEFECTIVE|#971 capture-delivery-rate CHRONIC sustained-band \
+         DEFECTIVE|#663 self-heal: USB reset attempt",
+        "issue 992 ROZHODNUTÉ: capture_rate_defect_grep_pattern_hard must be exactly the three \
+         HARD bands -- #656 jitter, #971 chronic escalation, #663 self-heal reset. Never the \
+         #717 sustained band (that one is report-only)."
+    );
+}
+
+#[test]
+fn sustained_band_grep_pattern_matches_only_717() {
+    let pattern = run_sourced("capture_rate_sustained_band_grep_pattern")
+        .trim()
+        .to_string();
+
+    let sustained_line = "#717 capture-delivery-rate SUSTAINED band confirmed (informational \
+         only FOR NOW, see #909/#971 -- this escalates once chronic): 63.90 fps captured vs \
+         60.00 fps configured/negotiated (>2.0% deviation sustained for 12 consecutive report \
+         windows, ~60s) -- inside the ShadowCast 2 wide 10.0% jitter-tolerant envelope; the genlock \
+         decimation gate absorbs this over-rate into exact NDI output by design, so NO USB \
+         reset is triggered yet";
+    let chronic_line = "#971 capture-delivery-rate CHRONIC sustained-band DEFECTIVE: 64.00 fps \
+         captured vs 60.00 fps configured/negotiated (>2.0% deviation held for 180 consecutive \
+         report windows, ~900s -- beyond the 900s chronic bar) -- USB-reset the capture device \
+         (see #971, #909, #717)";
+    let self_heal_line = "#663 self-heal: USB reset attempt #1 succeeded";
+    let jitter_line = "#656 capture-delivery-rate DEFECTIVE: 63.20 fps captured vs 60.00 fps \
+         configured/negotiated (>1.0% deviation sustained for 6 consecutive report windows, \
+         ~30s) -- USB-reset the capture device (see #656)";
+    let healthy_line =
+        "Streaming: 59.9 fps emitted / 60.02 fps captured (1798 sent, 1801 captured, 0 \
+         capture-dropped)";
+
+    for (label, line, must_match) in [
+        ("sustained", sustained_line, true),
+        (
+            "chronic (hard band, must NOT match the sustained-only pattern)",
+            chronic_line,
+            false,
+        ),
+        (
+            "self-heal reset (hard band, must NOT match)",
+            self_heal_line,
+            false,
+        ),
+        ("jitter (hard band, must NOT match)", jitter_line, false),
+        ("healthy", healthy_line, false),
+    ] {
+        let out = Command::new("bash")
+            .arg("-c")
+            .arg(format!("printf '%s\\n' '{line}' | grep -E -- '{pattern}'"))
+            .output()
+            .expect("failed to run grep");
+        assert_eq!(
+            out.status.success(),
+            must_match,
+            "capture_rate_sustained_band_grep_pattern: '{label}' line match expectation failed \
+             (want match={must_match}). Pattern: {pattern}"
+        );
+    }
+}
+
+#[test]
+fn capture_rate_sustained_band_grep_pattern_is_the_exact_717_signal() {
+    let out = run_sourced("capture_rate_sustained_band_grep_pattern");
+    assert_eq!(
+        out.trim(),
+        "#717 capture-delivery-rate SUSTAINED band confirmed",
+        "issue 992 ROZHODNUTÉ: capture_rate_sustained_band_grep_pattern must be exactly the \
+         #717 SUSTAINED-band signal, and nothing else."
+    );
+}
+
+#[test]
+fn capture_rate_defect_grep_pattern_all_was_removed_in_favor_of_the_hard_sustained_split() {
+    let s = read("scripts/lib/capture-rate-guard.sh");
+    assert!(
+        !s.contains("capture_rate_defect_grep_pattern_all"),
+        "issue 992 ROZHODNUTÉ: the union pattern is superseded by \
+         capture_rate_defect_grep_pattern_hard + capture_rate_sustained_band_grep_pattern -- it \
+         must be removed as dead code, not left alongside the split."
+    );
+}
+
+#[test]
+fn burn_log_grep_cmd_greps_the_given_path_with_the_given_pattern() {
+    let out = run_sourced(
+        "capture_rate_burn_log_grep_cmd '/tmp/cbox-burn.log' \
+         \"$(capture_rate_defect_grep_pattern_hard)\"",
+    );
+    let cmd = out.trim();
+    assert!(
+        cmd.contains("/tmp/cbox-burn.log"),
+        "#992: must grep the caller-supplied log path. Got: {cmd}"
+    );
+    assert!(
+        cmd.contains("#656 capture-delivery-rate DEFECTIVE"),
+        "#992: must embed whatever pattern the caller supplies (the HARD pattern, in this \
+         call) -- never a pattern hardcoded inside the function. Got: {cmd}"
+    );
+    assert!(
+        !cmd.contains("#717 capture-delivery-rate SUSTAINED band confirmed"),
+        "issue 992 ROZHODNUTÉ: a call passing the HARD pattern must never also embed the \
+         sustained-band literal. Got: {cmd}"
+    );
+    assert!(
+        cmd.starts_with("grep -E"),
+        "#992: must be a grep command (embeds via $(...) into a larger ssh command string). \
+         Got: {cmd}"
+    );
+}
+
+#[test]
+fn burn_log_grep_cmd_accepts_the_sustained_pattern_too() {
+    let out = run_sourced(
+        "capture_rate_burn_log_grep_cmd '/tmp/cbox-burn.log' \
+         \"$(capture_rate_sustained_band_grep_pattern)\"",
+    );
+    let cmd = out.trim();
+    assert!(
+        cmd.contains("#717 capture-delivery-rate SUSTAINED band confirmed"),
+        "issue 992 ROZHODNUTÉ: must embed the sustained-band pattern when the caller passes it \
+         -- the function is a generic PATTERN + LOG_PATH grep builder, not hardcoded to one \
+         band. Got: {cmd}"
+    );
+}
+
+#[test]
+fn burn_log_grep_cmd_output_is_valid_remote_shell() {
+    let out = run_sourced(
+        "capture_rate_burn_log_grep_cmd '/tmp/cbox-burn.log' \
+         \"$(capture_rate_defect_grep_pattern_hard)\"",
+    );
+    let cmd = out.trim();
+    let check = Command::new("bash")
+        .arg("-n")
+        .arg("-c")
+        .arg(format!(
+            "ssh dummy \"{cmd}\"",
+            cmd = cmd.replace('"', "\\\"")
+        ))
+        .output()
+        .expect("failed to run bash -n");
+    assert!(
+        check.status.success(),
+        "#992: capture_rate_burn_log_grep_cmd's output must be syntactically valid shell text.\n\
+         stderr={:?}",
+        String::from_utf8_lossy(&check.stderr)
+    );
+}
+
+#[test]
+fn burn_log_recurrence_message_names_the_log_file_never_journal() {
+    let out = run_sourced(
+        "capture_rate_burn_log_recurrence_message cam1 'WARN #971 capture-delivery-rate \
+         CHRONIC sustained-band DEFECTIVE: 64.00 fps captured vs 60.00 fps configured/negotiated'",
+    );
+    let msg = out.trim();
+    assert!(
+        msg.contains("cam1") && msg.contains("burn-instance log"),
+        "#992: must name the camera and clearly identify the burn-instance LOG as the source. \
+         Got: {msg}"
+    );
+    // The message MAY explain that journald was blind (that's useful context) but must never
+    // misattribute the SOURCE of the match as "journal" -- distinct from
+    // capture_rate_recurrence_message, whose surrounding call site (recording-e2e.sh) labels its
+    // own success line "... in $CAMERA_NAME's journal ...".
+    assert!(
+        !msg.contains("in cam1's journal"),
+        "#992: must never claim the match came FROM the journal -- this message is for a defect \
+         found in the burn instance's OWN log file. Got: {msg}"
+    );
+}
+
+#[test]
+fn sustained_band_warn_message_is_loud_names_the_journal_and_never_exits() {
+    let out = run_sourced(
+        "capture_rate_sustained_band_warn_message cam1 'WARN #717 capture-delivery-rate \
+         SUSTAINED band confirmed: 63.90 fps captured vs 60.00 fps configured/negotiated'",
+    );
+    let msg = out.trim();
+    assert!(
+        msg.starts_with("WARNING #992:"),
+        "issue 992 ROZHODNUTÉ: the sustained-band message must be a loud WARNING, clearly \
+         tagged #992 so a log reader can find the design decision. Got: {msg}"
+    );
+    assert!(
+        msg.contains("cam1") && msg.contains("journal"),
+        "must name the camera and identify the journal as the source. Got: {msg}"
+    );
+    assert!(
+        msg.contains("63.90 fps captured"),
+        "issue 992 ROZHODNUTÉ: must print the matched line verbatim so every run's log carries \
+         the over-rate evidence. Got: {msg}"
+    );
+    assert!(
+        msg.contains("909"),
+        "issue 992 ROZHODNUTÉ: should point at issue 909 (why this band is informational by \
+         design), so a reader lands on the rationale, not just the fact of the match. Got: {msg}"
+    );
+}
+
+#[test]
+fn burn_log_sustained_band_warn_message_is_loud_and_names_the_burn_log() {
+    let out = run_sourced(
+        "capture_rate_burn_log_sustained_band_warn_message cam1 'WARN #717 \
+         capture-delivery-rate SUSTAINED band confirmed: 63.90 fps captured vs 60.00 fps \
+         configured/negotiated'",
+    );
+    let msg = out.trim();
+    assert!(
+        msg.starts_with("WARNING #992:"),
+        "issue 992 ROZHODNUTÉ: must be a loud WARNING, clearly tagged #992. Got: {msg}"
+    );
+    assert!(
+        msg.contains("cam1") && msg.contains("burn-instance log"),
+        "must name the camera and identify the burn-instance log as the source (never \
+         \"journal\" -- same discriminator as capture_rate_burn_log_recurrence_message). \
+         Got: {msg}"
+    );
+    assert!(
+        !msg.contains("in cam1's journal"),
+        "must never misattribute the source as the journal. Got: {msg}"
+    );
+}
+
+#[test]
+fn recording_e2e_post_check_also_scans_the_burn_instance_log_when_journald_is_clean() {
+    let s = read("scripts/recording-e2e.sh");
+    let check_header_pos = s
+        .find("capture-delivery-rate POST-recording check")
+        .expect("#705: the post-recording capture-rate check step must exist");
+    let check_ok_pos = s
+        .find("no capture-rate defect recurrence in $CAMERA_NAME's journal during the recording")
+        .expect("#705: the post-recording check must print a success line when clean");
+    assert!(
+        check_ok_pos > check_header_pos,
+        "the success echo must come after the check step header"
+    );
+    let this_check_block = &s[check_header_pos..check_ok_pos];
+
+    assert!(
+        this_check_block.contains("capture_rate_burn_log_grep_cmd"),
+        "#992: the post-recording check must ALSO grep the burn instance's own log file (the \
+         harness stops camera-box.service and redirects the burn's stdout/stderr straight to a \
+         file, never journald) -- journald alone false-passed a live over-rate recurrence \
+         (gate run 19150595). Block:\n{this_check_block}"
+    );
+    assert!(
+        this_check_block.contains("/tmp/cbox-burn.log"),
+        "#992: must scan the SOURCE camera's own burn log path. Block:\n{this_check_block}"
+    );
+    assert!(
+        this_check_block.contains("capture_rate_burn_log_recurrence_message"),
+        "#992: a HARD burn-log match must be reported via the dedicated burn-log message \
+         formatter (never silently reusing the journald-only message, and never a third ad-hoc \
+         string). Block:\n{this_check_block}"
+    );
+    assert!(
+        this_check_block.contains("exit 1"),
+        "#992: a HARD defect found in the burn log must still abort the run (exit 1), same as \
+         a journald-sourced match"
+    );
+}
+
+#[test]
+fn recording_e2e_post_check_uses_the_hard_pattern_at_both_call_sites_never_the_removed_all_pattern()
+{
+    let s = read("scripts/recording-e2e.sh");
+    assert!(
+        !s.contains("capture_rate_defect_grep_pattern_all"),
+        "issue 992 ROZHODNUTÉ: capture_rate_defect_grep_pattern_all was removed in favor of the \
+         split hard/sustained patterns -- recording-e2e.sh must not reference it any more."
+    );
+    let check_header_pos = s
+        .find("capture-delivery-rate POST-recording check")
+        .expect("#705: the post-recording capture-rate check step must exist");
+    let check_ok_pos = s
+        .find("no capture-rate defect recurrence in $CAMERA_NAME's journal during the recording")
+        .expect("#705: the post-recording check must print a success line when clean");
+    let this_check_block = &s[check_header_pos..check_ok_pos];
+    let hard_calls = this_check_block
+        .matches("capture_rate_defect_grep_pattern_hard")
+        .count();
+    assert_eq!(
+        hard_calls, 2,
+        "issue 992 ROZHODNUTÉ: the HARD pattern must be grepped at BOTH call sites (journald \
+         window + burn log). Block:\n{this_check_block}"
+    );
+}
+
+#[test]
+fn recording_e2e_post_check_sustained_band_is_report_only_never_aborts() {
+    let s = read("scripts/recording-e2e.sh");
+    let check_header_pos = s
+        .find("capture-delivery-rate POST-recording check")
+        .expect("#705: the post-recording capture-rate check step must exist");
+    let check_ok_pos = s
+        .find("no capture-rate defect recurrence in $CAMERA_NAME's journal during the recording")
+        .expect("#705: the post-recording check must print a success line when clean");
+    let this_check_block = &s[check_header_pos..check_ok_pos];
+
+    let sustained_calls = this_check_block
+        .matches("capture_rate_sustained_band_grep_pattern")
+        .count();
+    assert_eq!(
+        sustained_calls, 2,
+        "issue 992 ROZHODNUTÉ: the sustained-band pattern must be grepped at BOTH call sites \
+         (journald window + burn log), separately from the hard pattern. \
+         Block:\n{this_check_block}"
+    );
+
+    assert!(
+        this_check_block.contains("capture_rate_sustained_band_warn_message"),
+        "issue 992 ROZHODNUTÉ: a journald-side sustained-band match must be reported via the \
+         dedicated WARN formatter. Block:\n{this_check_block}"
+    );
+    assert!(
+        this_check_block.contains("capture_rate_burn_log_sustained_band_warn_message"),
+        "issue 992 ROZHODNUTÉ: a burn-log-side sustained-band match must be reported via its \
+         OWN dedicated WARN formatter (never reusing the journald one, never a third ad-hoc \
+         string). Block:\n{this_check_block}"
+    );
+
+    // Scope tightly: from the journald-side sustained-band grep call through the start of the
+    // burn-log section (the burn-log HARD call, which begins that section) -- prove that region
+    // never exits, and does print the loud WARNING.
+    let first_sustained_pos = this_check_block
+        .find("capture_rate_sustained_band_grep_pattern")
+        .expect("sustained-band grep call must exist");
+    let burn_log_section_pos = this_check_block
+        .find("capture_rate_burn_log_grep_cmd")
+        .expect("burn-log grep call must exist");
+    assert!(
+        burn_log_section_pos > first_sustained_pos,
+        "the journald-side sustained-band check must come before the burn-log section begins"
+    );
+    let journald_sustained_region = &this_check_block[first_sustained_pos..burn_log_section_pos];
+    assert!(
+        !journald_sustained_region.contains("exit 1"),
+        "issue 992 ROZHODNUTÉ: a #717 SUSTAINED-band match must NEVER exit 1 -- it is \
+         informational by design (issue 909: absorbed by the genlock decimation gate). \
+         Region:\n{journald_sustained_region}"
+    );
+    // The "WARNING #992:" text itself lives inside capture_rate_sustained_band_warn_message's
+    // OWN echo (scripts/lib/capture-rate-guard.sh), not in recording-e2e.sh's source text -- so
+    // the caller-side region check is for the CALL to that formatter, not the literal string
+    // (that literal-text contract is pinned separately, on the formatter itself, by
+    // sustained_band_warn_message_is_loud_names_the_journal_and_never_exits above).
+    assert!(
+        journald_sustained_region.contains("capture_rate_sustained_band_warn_message"),
+        "issue 992 ROZHODNUTÉ: a journald-side sustained-band match must be reported via the \
+         dedicated WARN formatter, in this same tightly-scoped region (not just somewhere in \
+         the wider check block). Region:\n{journald_sustained_region}"
+    );
+}

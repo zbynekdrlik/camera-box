@@ -3222,18 +3222,64 @@ fi
 # distinctly from the preflight's own failure so a human/CI reader never again has to manually
 # correlate journalctl timestamps against the recording window by hand (exactly what #703's own
 # PR #704 diagnosis required).
-echo "[7b/8] capture-delivery-rate POST-recording check — $CAMERA_NAME must not have recurred a #656/#663 defect during the recording (#705)"
+#
+# (#992 ROZHODNUTÉ -- supervisor, gate rerun 31028767542 evidence, see issue 992 comment
+# https://github.com/zbynekdrlik/camera-box/issues/992#issuecomment-5195254731): HARD bands
+# (#656 jitter, #971 chronic escalation, #663 self-heal-RESET) still exit 1 unchanged. The #717
+# SUSTAINED band is INFORMATIONAL BY DESIGN (issue 909: the genlock decimation gate absorbs this
+# over-rate into exact NDI output, which is WHY 909 decoupled it from the USB reset one layer
+# down) -- cam1's ShadowCast 2 over-rate is CHRONIC (redevelops ~2min after any fresh device
+# open, issue 889), so hard-failing this gate on the same line one layer up would recreate the
+# issue-909 mistake: the gate would go permanently red before any verdict is ever computed, so
+# the dupe-preferring decimation fix this PR ships (whose entire point is producing clean
+# recordings UNDER over-rate) could never be proven -- exactly what happened in gate rerun
+# 31028767542. Grep the HARD pattern FIRST, then the SUSTAINED pattern SEPARATELY (never sharing
+# one `tail -1` -- a run containing BOTH a reset and a sustained line must never have the reset
+# masked by `tail -1` landing on the sustained line instead), at BOTH call sites below.
+echo "[7b/8] capture-delivery-rate POST-recording check — $CAMERA_NAME must not have recurred a #656/#663/#971 HARD defect during the recording (checked via BOTH journald AND the burn instance's own log); #717 SUSTAINED band is measured too but is REPORT-ONLY by design (issue 909 -- absorbed by the genlock decimation gate) and never fails this gate (#705/#992)"
 CAPTURE_RATE_WINDOW_INVOCATION_ID="$(sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$CAM1_IP" \
   "systemctl show -p InvocationID --value camera-box 2>/dev/null" 2>/dev/null || true)"
 CAPTURE_RATE_RECURRENCE_LINE="$(sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$CAM1_IP" \
-  "$(capture_rate_window_journalctl_cmd "$CAPTURE_RATE_WINDOW_INVOCATION_ID" "$CAPTURE_RATE_WINDOW_START_EPOCH" "$CAPTURE_RATE_WINDOW_END_EPOCH") | grep -E '$(capture_rate_defect_grep_pattern)' | tail -1" \
+  "$(capture_rate_window_journalctl_cmd "$CAPTURE_RATE_WINDOW_INVOCATION_ID" "$CAPTURE_RATE_WINDOW_START_EPOCH" "$CAPTURE_RATE_WINDOW_END_EPOCH") | grep -E '$(capture_rate_defect_grep_pattern_hard)' | tail -1" \
   2>/dev/null || true)"
 if [ -n "$CAPTURE_RATE_RECURRENCE_LINE" ]; then
   echo "ERROR: $(capture_rate_recurrence_message "$CAMERA_NAME" "$CAPTURE_RATE_RECURRENCE_LINE")" >&2
   echo "       matched journal line: $CAPTURE_RATE_RECURRENCE_LINE" >&2
   exit 1
 fi
-echo "    ok: no capture-rate defect recurrence in $CAMERA_NAME's journal during the recording window (${CAPTURE_RATE_WINDOW_START_EPOCH}..${CAPTURE_RATE_WINDOW_END_EPOCH})"
+# (#992 ROZHODNUTÉ) the #717 SUSTAINED band, checked separately from the HARD pattern above --
+# report-only, never exit 1 (see the design-decision comment at the top of this step).
+CAPTURE_RATE_WINDOW_SUSTAINED_LINE="$(sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$CAM1_IP" \
+  "$(capture_rate_window_journalctl_cmd "$CAPTURE_RATE_WINDOW_INVOCATION_ID" "$CAPTURE_RATE_WINDOW_START_EPOCH" "$CAPTURE_RATE_WINDOW_END_EPOCH") | grep -E '$(capture_rate_sustained_band_grep_pattern)' | tail -1" \
+  2>/dev/null || true)"
+if [ -n "$CAPTURE_RATE_WINDOW_SUSTAINED_LINE" ]; then
+  echo "$(capture_rate_sustained_band_warn_message "$CAMERA_NAME" "$CAPTURE_RATE_WINDOW_SUSTAINED_LINE")"
+fi
+# (#992) journald is BLIND to the actual E2E burn instance: the deploy step above
+# unconditionally does `systemctl stop camera-box` and launches $CAMERA_NAME's capture as a
+# TRANSIENT systemd-run unit whose stdout/stderr are redirected DIRECTLY to /tmp/cbox-burn.log
+# (--property=StandardOutput=append:.../StandardError=append:...) -- never through journald at
+# all. A clean journald read above therefore only proves the (killed) camera-box.service
+# process instance was clean before the stop; it says NOTHING about what actually ran during
+# this recording. Read the burn instance's own log file directly -- no epoch window needed here
+# (unlike the journalctl read above): the deploy step already does `rm -f /tmp/cbox-burn.log`
+# immediately before systemd-run launches THIS run's burn, so the file's entire content is
+# already scoped to this exact recording. Same HARD-first/SUSTAINED-second split as above.
+CAPTURE_RATE_BURN_LOG_LINE="$(sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$CAM1_IP" \
+  "$(capture_rate_burn_log_grep_cmd "/tmp/cbox-burn.log" "$(capture_rate_defect_grep_pattern_hard)")" \
+  2>/dev/null || true)"
+if [ -n "$CAPTURE_RATE_BURN_LOG_LINE" ]; then
+  echo "ERROR: $(capture_rate_burn_log_recurrence_message "$CAMERA_NAME" "$CAPTURE_RATE_BURN_LOG_LINE")" >&2
+  echo "       matched burn-instance log line: $CAPTURE_RATE_BURN_LOG_LINE" >&2
+  exit 1
+fi
+CAPTURE_RATE_BURN_LOG_SUSTAINED_LINE="$(sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$CAM1_IP" \
+  "$(capture_rate_burn_log_grep_cmd "/tmp/cbox-burn.log" "$(capture_rate_sustained_band_grep_pattern)")" \
+  2>/dev/null || true)"
+if [ -n "$CAPTURE_RATE_BURN_LOG_SUSTAINED_LINE" ]; then
+  echo "$(capture_rate_burn_log_sustained_band_warn_message "$CAMERA_NAME" "$CAPTURE_RATE_BURN_LOG_SUSTAINED_LINE")"
+fi
+echo "    ok: no capture-rate defect recurrence in $CAMERA_NAME's journal during the recording window (${CAPTURE_RATE_WINDOW_START_EPOCH}..${CAPTURE_RATE_WINDOW_END_EPOCH}) -- also checked its burn-instance log (/tmp/cbox-burn.log, #992); #717 SUSTAINED band (if any) was report-only and did not fail this gate (issue 909)"
 
 # #359: do NOT kill the painter early. frame-probe writes the ground-truth CSV ONLY on its clean
 # --duration-secs self-exit (src/probe/run.rs) — the old unconditional `pkill -x frame-probe` here

@@ -309,6 +309,21 @@ sshpass -p "$DEVICE_ROOT_PW" ssh root@10.77.9.6X "systemctl start camera-box && 
 
 Use IP addresses — `.lan` DNS may not resolve.
 
+**Main CI has NO fleet-deploy job (verified on the live job list, 2026-08-05)** — a merged
+dev→main PR builds + uploads the artifacts and stops there. Nothing pushes the new binary to the
+cam boxes. So "merged + main green" ≠ deployed: after every merge whose diff changes the
+`camera-box` binary's runtime behavior, the SUPERVISOR runs the recipe above against every
+`CAMERA_ACTIVE_SET` member (read the set from `scripts/camera-set.sh`, never a hardcoded list) and
+proves the new version live (`/usr/local/bin/camera-box --version` + `systemctl is-active` on each
+box, and the box's journal showing the new behavior). A box still logging the OLD message text
+after a merge is the tell that this step was skipped.
+
+**The dev1 checkout is PERMANENTLY dirty (`M targets.md` by design — local-only IP file), so the
+`pre-deploy-clean-tree.sh` hook blocks every scp/rsync from this repo.** For a deploy of the
+CI-BUILT ARTIFACT (bytes from the merged commit, not the working tree) the sanctioned bypass is
+annotating the command with `# airuleset:deploy-dirty-ok <why: CI artifact from <merge-sha>>`.
+Never use the bypass to ship a working-tree file — only artifact/committed-ref bytes.
+
 **#362 — a FRESH USB clone needs the NDI/audio RUNTIME deps baked in (re-image / #301 checklist).**
 A fresh CAM3 clone booted but camera-box crash-looped because libndi could not `dlopen`. If a fresh
 box crash-loops camera-box, check these four (the builders now bake all of them — verify if a clone

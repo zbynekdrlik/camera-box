@@ -27,6 +27,13 @@ pub mod ndi;
 // the ndi boundary math; its Tier-0 tests run on the Linux `test` CI job (default features).
 #[cfg(target_os = "linux")]
 pub mod genlock_stamp;
+// (#889) dupe-preferring decimation for the genlock capture->emit gate — a fast/over-rate
+// grabber's internal-buffer repeat gets preferentially shed over the genuine unique tick next to
+// it. Linux-gated because it wraps the ndi boundary math (`ndi::genlock_emit_gate`) and is
+// shaped around a raw V4L2 YUYV422 frame; pure logic otherwise, unit-tests Tier-0 on the Linux
+// `test` CI job (default features).
+#[cfg(target_os = "linux")]
+pub mod dupe_decimation;
 #[cfg(target_os = "linux")]
 pub mod ndi_display;
 // #792 — optional secondary 30fps NDI stream (2-frame temporal blend of the emitted 60fps
