@@ -115,6 +115,50 @@ fn do_test_asserts_and_sets_stream_program_to_phase2_probe() {
     assert!(fn_body.contains("PHASE2-PROBE"));
 }
 
+// #988: `teardown()` (every recording-e2e.sh run's cleanup) unbinds `phase2-probe-src` between
+// E2E runs -- the NORMAL rest state, not a fault -- so `switch` alone (which assumes the input is
+// already wired) guarantees gap-2 false-FAILs after every E2E run, including the PR-triggered
+// hardware gate that runs on every PR. Fix: establish the probe input via `obs_phase2.py setup`
+// BEFORE the existing switch+assert.
+#[test]
+fn verify_stream_program_phase2_establishes_the_probe_input_before_asserting_988() {
+    let s = read();
+    let def = s
+        .find("verify_stream_program_phase2() {")
+        .expect("verify_stream_program_phase2 must be defined");
+    let body_end = s[def..].find("\n}\n").map(|i| def + i).unwrap_or(s.len());
+    let fn_body = &s[def..body_end];
+
+    let setup_pos = fn_body.find("obs_phase2.py\" setup").expect(
+        "#988: verify_stream_program_phase2 must call `obs_phase2.py setup` to establish \
+         phase2-probe-src (teardown leaves it unbound between E2E runs) before the gap-2 assert",
+    );
+    let switch_pos = fn_body
+        .find("obs_phase2.py\" switch")
+        .expect("verify_stream_program_phase2 must still call `obs_phase2.py switch`");
+    assert!(
+        setup_pos < switch_pos,
+        "#988: the setup call must run BEFORE the existing switch+assert, not after"
+    );
+
+    // The setup call must target the SAME stream box, mark it terminal (stream has no downstream
+    // OBS hop for setup's own-output self-resolution to protect), and use the canonical strih
+    // Main Output upstream name (the SAME upstream the certified prod input already ingests).
+    assert!(
+        fn_body.contains(r#"--host "$STREAM_IP""#),
+        "the setup call must target STREAM_IP: {fn_body}"
+    );
+    assert!(
+        fn_body.contains("--upstream 'STRIH-SNV (2ME PGM)'"),
+        "the setup call must use strih's Main Output name as --upstream: {fn_body}"
+    );
+    assert!(
+        fn_body.contains("--terminal"),
+        "the setup call must pass --terminal (stream is a terminal box, no next OBS hop): \
+         {fn_body}"
+    );
+}
+
 #[test]
 fn do_test_resolves_and_burns_the_actually_rendered_inputs() {
     let s = read();
