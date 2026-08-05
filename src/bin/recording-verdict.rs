@@ -4118,12 +4118,13 @@ fn build_and_print_verdict(
                         println!("      ⚠ {note}");
                     }
                     // Issue 889 (2026-07-30 user decision on issue 883) visibility requirement 1,
-                    // extended by issue 915 (2026-08-01 user decision): a loud WARN naming EVERY
-                    // report-only reason a window's STRICT verdict (`s.pass`) is false — even
-                    // though `overall_pass` no longer fails on copies/gaps OR the optical floor
-                    // alone (see the summary lines after this loop). Both reasons are independent
-                    // now, so a window can trip either or both while still passing relaxed; only
-                    // `frame_count == 0` still fails BOTH verdicts (the `else` branch below).
+                    // extended by issue 915 (2026-08-01 user decision) and the 2026-08-05 RE-GATE
+                    // (ticket 889 comment 5196190653): a loud WARN naming EVERY reason a window's
+                    // STRICT verdict (`s.pass`) is false — whether or not that reason still gates
+                    // `overall_pass`. Since the re-gate, `copies`/`gaps` are ONLY rescued WITHIN
+                    // the per-window singleton tolerance (`seg.copies_gaps_tolerance`) — OVER it,
+                    // the window fails `relaxed_pass` again, so the `else` branch below is no
+                    // longer only `frame_count == 0` and must name the real reason(s).
                     if !s.pass {
                         if s.relaxed_pass {
                             let floor_ok = camera_box::optical_floor::window_within_floor(
@@ -4141,17 +4142,48 @@ fn build_and_print_verdict(
                             }
                             if s.copies != 0 || s.gaps != 0 {
                                 println!(
-                                    "      ⚠ #889 REPORT-ONLY: copies={} gaps={} would FAIL the pre-889 \
-                                     strict rule, but does NOT gate overall_pass (see issue #889).",
-                                    s.copies, s.gaps
+                                    "      ⚠ #889 WITHIN TOLERANCE: copies={} gaps={} fails the \
+                                     pre-889 strict rule, but stays within the per-window \
+                                     singleton tolerance ({}) and does NOT gate overall_pass \
+                                     (see issue #889 for the decision record).",
+                                    s.copies, s.gaps, seg.copies_gaps_tolerance
                                 );
                             }
                         } else {
-                            println!(
-                                "      ⚠ this window ALSO fails the RELAXED verdict (not issue \
-                                 889's or issue 915's doing — frame_count==0) — it still fails \
-                                 overall_pass."
+                            // `relaxed_pass` fails too — name every real reason: the copies/gaps
+                            // singleton tolerance exceeded (2026-08-05 re-gate), the undecodable
+                            // floor (only if issue 905 has since restored its own gate), and/or
+                            // frame_count == 0 (the only remaining possibility once neither of the
+                            // above applies).
+                            let over_tolerance = s.copies > seg.copies_gaps_tolerance
+                                || s.gaps > seg.copies_gaps_tolerance;
+                            if over_tolerance {
+                                println!(
+                                    "      ⚠ #889 RE-GATE FAIL: copies={} gaps={} exceeds the \
+                                     per-window singleton tolerance ({}) — this window FAILS \
+                                     overall_pass (see issue #889 for the decision record).",
+                                    s.copies, s.gaps, seg.copies_gaps_tolerance
+                                );
+                            }
+                            let floor_ok = camera_box::optical_floor::window_within_floor(
+                                s.undecodable,
+                                s.frames,
                             );
+                            if !floor_ok {
+                                println!(
+                                    "      ⚠ undecodable={} exceeds the issue-881 per-window \
+                                     floor and currently gates overall_pass (see issue #915 for \
+                                     the restore-path state).",
+                                    s.undecodable
+                                );
+                            }
+                            if !over_tolerance && floor_ok {
+                                println!(
+                                    "      ⚠ this window ALSO fails the RELAXED verdict (not \
+                                     issue 889's, issue 915's, nor the re-gate's doing — \
+                                     frame_count==0) — it still fails overall_pass."
+                                );
+                            }
                         }
                     }
                     // #726: presentation-cadence EVENNESS — REPORTED only (not yet gate-enforced;
@@ -4189,11 +4221,26 @@ fn build_and_print_verdict(
                 // Requirement 4 — hardcoded, one-line-deletable, no env knob (see the field's own
                 // doc in `crate::probe::recording_segments::SegmentedContinuity` for the restore
                 // path — issue 883 item 4 + two consecutive clean strict runs).
+                //
+                // 2026-08-05 RE-GATE (ticket 889 comment 5196190653): `windows_failed_report_only`
+                // (the STRICT absolute-zero count) no longer describes what actually gates
+                // `overall_pass` — that is now `windows_over_copies_gaps_tolerance` (the singleton
+                // tolerance, `seg.copies_gaps_tolerance`). Name the tolerance explicitly so a
+                // reader never mistakes "no longer gates" (no longer true) for the current
+                // behavior.
                 println!(
-                    "  ⚠ #889 REPORT-ONLY: {}/{} cambox window(s) would FAIL the pre-889 strict \
-                     copies/gaps rule (windows_failed_report_only). This term no longer gates \
-                     overall_pass — see issue #889 for the decision record and restore path.",
+                    "  ⚠ #889 STRICT-ZERO (report-only): {}/{} cambox window(s) would FAIL the \
+                     pre-889 absolute-zero copies/gaps rule (windows_failed_report_only) — this \
+                     count stays visible but does NOT by itself gate overall_pass.",
                     seg.windows_failed_report_only,
+                    seg.segments.len()
+                );
+                println!(
+                    "  ⚠ #889 RE-GATE (singleton tolerance={}): {}/{} cambox window(s) exceed the \
+                     per-window copies/gaps tolerance (windows_over_copies_gaps_tolerance) — THESE \
+                     windows DO gate overall_pass again (see issue #889 for the decision record).",
+                    seg.copies_gaps_tolerance,
+                    seg.windows_over_copies_gaps_tolerance,
                     seg.segments.len()
                 );
                 // Issue 915 (2026-08-01 user decision) visibility requirement, mirrors #889

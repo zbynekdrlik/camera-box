@@ -36,13 +36,17 @@
 //!   gaps == 0` — the STRICT verdict, UNCHANGED meaning. See `crate::optical_floor` for the
 //!   `undecodable` floor's rationale (a physical 60Hz temporal-tear artifact of the test camera's
 //!   monitor, not chain loss) and why it is TEMPORARY (deleted with #881).
-//! - `relaxed_pass` (issue 889, 2026-07-30 user decision): `frames > 0` — `copies`/`gaps` do NOT
-//!   participate, and (issue 915, 2026-08-01 user decision) neither does the #881 optical floor
-//!   while `crate::optical_floor::gates_overall_pass()` is `false`. This is the verdict
-//!   `overall_pass` folds; `pass` stays strict and is never silently dropped (it drives the
-//!   issue-889 per-window WARN). Computed by [`crate::window_gate::decide`] — see that module for
-//!   the full decision record. The whole-run `overall_pass` ALSO computes the SUM of `undecodable`
-//!   across every window against its own run-wide floor (see [`segment_continuity`] and
+//! - `relaxed_pass` (issue 889, 2026-07-30 user decision): originally `frames > 0` with
+//!   `copies`/`gaps` NOT participating at all, and (issue 915, 2026-08-01 user decision) neither
+//!   does the #881 optical floor while `crate::optical_floor::gates_overall_pass()` is `false`.
+//!   **2026-08-05 RE-GATE (ticket 889 comment 5196190653): `copies`/`gaps` re-joined this field,
+//!   gated by a per-window SINGLETON tolerance** (`crate::window_gate::WINDOW_COPIES_GAPS_TOLERANCE`,
+//!   currently 1) — at or under the tolerance the window still passes; over it, `relaxed_pass`
+//!   fails again. This is the verdict `overall_pass` folds; `pass` stays strict and is never
+//!   silently dropped (it drives the issue-889 per-window WARN). Computed by
+//!   [`crate::window_gate::decide`] — see that module for the full decision record. The whole-run
+//!   `overall_pass` ALSO computes the SUM of `undecodable` across every window against its own
+//!   run-wide floor (see [`segment_continuity`] and
 //!   [`SegmentedContinuity::run_wide_undecodable_within_floor`]) — but, per issue 915, that sum no
 //!   longer FORCES a failure either while the same function returns `false`.
 //!
@@ -141,15 +145,19 @@ pub struct CamboxSegment {
     /// WARN and the `windows_failed_report_only` count on [`SegmentedContinuity`].
     pub pass: bool,
     /// Issue 889 (2026-07-30 user decision on issue 883): the verdict actually folded into
-    /// `overall_pass` — `frame_count > 0`, WITHOUT `copies`/`gaps`. Issue 915 (2026-08-01 user
-    /// decision): the `<undecodable within the #881 floor>` term ALSO stopped participating here
-    /// while `crate::optical_floor::gates_overall_pass()` is `false` — see that function's doc for
-    /// the restore path on issue 905. Computed by [`crate::window_gate::decide`]. `copies`/`gaps`/
-    /// the floor stay computed and printed above (report-only, never silently dropped) — this
-    /// field is the ONLY thing that changed about how this window feeds the run's overall verdict.
-    /// TEMPORARY, restore-gated on issue 883 item 4 (root-cause the loss) + two consecutive clean
-    /// STRICT runs (issue 889's part) AND issue 909/881 (issue 915's part) — see
-    /// `crate::window_gate` for the full decision record.
+    /// `overall_pass` — `frame_count > 0`, originally WITHOUT `copies`/`gaps` at all. **2026-08-05
+    /// RE-GATE (ticket 889 comment 5196190653): `copies`/`gaps` re-joined this field, gated by a
+    /// per-window SINGLETON tolerance** (`crate::window_gate::WINDOW_COPIES_GAPS_TOLERANCE`) — a
+    /// window with `copies` or `gaps` at or under the tolerance still passes here; over it, this
+    /// field fails again (see `SegmentedContinuity::windows_over_copies_gaps_tolerance`). Issue
+    /// 915 (2026-08-01 user decision): the `<undecodable within the #881 floor>` term ALSO stopped
+    /// participating here while `crate::optical_floor::gates_overall_pass()` is `false` — see that
+    /// function's doc for the restore path on issue 905. Computed by
+    /// [`crate::window_gate::decide`]. `copies`/`gaps`/the floor stay computed and printed above
+    /// (visible via `pass`/`windows_failed_report_only`, never silently dropped) regardless of
+    /// this field's own value. Restore-gated on issue 883 item 4 (root-caused — DONE, PR #993) +
+    /// two consecutive clean STRICT runs (the remaining part of issue 889's restore path) AND
+    /// issue 909/881 (issue 915's part) — see `crate::window_gate` for the full decision record.
     pub relaxed_pass: bool,
     /// #333: an explicit human diagnostic, populated ONLY for a `frames == 0` window — the most
     /// likely cause is the dual-QR PAINTER box (it does not emit its own camera NDI while painting,
@@ -181,12 +189,15 @@ pub struct SegmentedContinuity {
     /// PASS ⇔ the schedule is non-empty AND EVERY window's [`CamboxSegment::relaxed_pass`] holds
     /// AND [`Self::run_wide_undecodable_within_floor`] holds OR no longer gates (see below). The
     /// `undecodable` floor is TEMPORARY; deleted with #881. **Issue 889 (2026-07-30 user decision
-    /// on issue 883): this folds `relaxed_pass`, NOT the strict `pass` — the per-window
-    /// `copies`/`gaps` terms are report-only** (see `windows_failed_report_only` below and
-    /// `crate::window_gate` for the full decision record). **Issue 915 (2026-08-01 user decision):
-    /// the run-wide undecodable floor ALSO stopped gating this field — see
-    /// `run_wide_undecodable_within_floor` and `crate::optical_floor::gates_overall_pass` for the
-    /// decision record and restore path (issue 905).**
+    /// on issue 883): this folds `relaxed_pass`, NOT the strict `pass`** (see
+    /// `windows_failed_report_only` below and `crate::window_gate` for the full decision record).
+    /// **2026-08-05 RE-GATE: `relaxed_pass` itself now requires `copies`/`gaps` to stay within the
+    /// per-window singleton tolerance** (`crate::window_gate::WINDOW_COPIES_GAPS_TOLERANCE`) — the
+    /// terms are no longer FULLY report-only, see `windows_over_copies_gaps_tolerance` below.
+    /// **Issue 915 (2026-08-01 user decision): the run-wide undecodable floor ALSO stopped gating
+    /// this field — see `run_wide_undecodable_within_floor` and
+    /// `crate::optical_floor::gates_overall_pass` for the decision record and restore path (issue
+    /// 905).**
     pub overall_pass: bool,
     /// The transition guard applied (ns).
     pub guard_ns: i64,
@@ -217,6 +228,21 @@ pub struct SegmentedContinuity {
     /// even when `true`, so a passing run's headroom is visible too — mirrors
     /// `windows_failed_report_only`'s issue-889 visibility precedent.
     pub run_wide_undecodable_within_floor: bool,
+    /// 2026-08-05 re-gate (ticket 889 comment 5196190653) — the per-window SINGLETON tolerance
+    /// actually applied when folding `copies`/`gaps` into `relaxed_pass`/`overall_pass`
+    /// (`crate::window_gate::WINDOW_COPIES_GAPS_TOLERANCE`), echoed here so the verdict JSON is
+    /// self-describing without needing the binary's source. Always serialized.
+    pub copies_gaps_tolerance: u32,
+    /// 2026-08-05 re-gate — how many windows exceed the singleton tolerance on `copies` AND/OR
+    /// `gaps` (i.e. `copies > copies_gaps_tolerance || gaps > copies_gaps_tolerance`) — these are
+    /// the windows that DO fail `overall_pass` again, as distinct from
+    /// [`Self::windows_failed_report_only`] (which counts the STRICT absolute-zero failures that
+    /// stay report-only regardless of the tolerance). Always serialized, even at 0, mirroring
+    /// `windows_failed_report_only`'s issue-889 visibility precedent — a nonzero
+    /// `windows_failed_report_only` with a ZERO `windows_over_copies_gaps_tolerance` is the
+    /// tolerance visibly absorbing a bounded residual, not a hidden regression; a nonzero
+    /// `windows_over_copies_gaps_tolerance` is a real, loud, gating failure.
+    pub windows_over_copies_gaps_tolerance: u32,
     /// #707 EVENT-FORENSICS — every segment's [`CamboxSegment::residual_events`], concatenated in
     /// schedule order, for a caller that wants the whole run's residual events without walking
     /// `segments` itself (e.g. the Discord report / the collector script).
@@ -402,12 +428,24 @@ pub fn segment_continuity(
     // never gated on `overall_pass`'s own value.
     let windows_failed_report_only = segments.iter().filter(|s| !s.pass).count() as u32;
 
+    // 2026-08-05 re-gate -- how many windows exceed the singleton tolerance on copies AND/OR gaps
+    // (the windows that DO gate `overall_pass` again, per `seg.relaxed_pass` above). Computed
+    // directly from the same counts `crate::window_gate::decide` already folded into
+    // `relaxed_pass`, so this can never disagree with what actually gated the run.
+    let copies_gaps_tolerance = crate::window_gate::WINDOW_COPIES_GAPS_TOLERANCE;
+    let windows_over_copies_gaps_tolerance = segments
+        .iter()
+        .filter(|s| s.copies > copies_gaps_tolerance || s.gaps > copies_gaps_tolerance)
+        .count() as u32;
+
     SegmentedContinuity {
         segments,
         overall_pass,
         windows_failed_report_only,
         total_undecodable,
         run_wide_undecodable_within_floor,
+        copies_gaps_tolerance,
+        windows_over_copies_gaps_tolerance,
         guard_ns,
         residual_events: all_residual_events,
         expected_step,

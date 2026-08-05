@@ -1,10 +1,27 @@
 //! #889 (2026-07-30, user decision on #883) — the per-cambox-window `#186` zero-loss verdict's
-//! `copies`/`gaps` terms become REPORT-ONLY: still computed, still printed, still written to the
-//! verdict JSON, but no longer force a window (or the run) to FAIL. This is the HEAVIEST
-//! relaxation in this repo's history — it relaxes the core zero-loss CLAIM itself, not a
+//! `copies`/`gaps` terms became REPORT-ONLY: still computed, still printed, still written to the
+//! verdict JSON, but no longer forced a window (or the run) to FAIL. This was the HEAVIEST
+//! relaxation in this repo's history — it relaxed the core zero-loss CLAIM itself, not a
 //! measurement cost (contrast #888, which only relaxed imag's render-budget term). See #889 for
 //! the full decision record (the failing evidence, run 30547146285) and the 3-part restore path
 //! (root-cause #883 item 4, two consecutive clean STRICT runs, delete this relaxation).
+//!
+//! ## 2026-08-05 RE-GATE — [`WINDOW_COPIES_GAPS_TOLERANCE`] (ticket 889 comment 5196190653)
+//!
+//! Root-cause condition 1 of the restore path above was met: the issue-971 dupe-preferring
+//! decimation fix (PR #993) directly attacks the over-rate-grabber duplicate/gap injection this
+//! relaxation existed for. Its MEASURED residual under live over-rate (run 31033239950 attempt 1)
+//! was max 1 copy AND max 1 gap per window — the decimation's bounded one-deferral-per-boundary
+//! design admits occasional singletons BY DESIGN. Per the user's standing 2026-07-31 directive
+//! ("jedna stratená snímka nie je problém — one lost frame per window is explicitly acceptable"),
+//! `copies`/`gaps` are re-gated with a per-window SINGLETON tolerance instead of either extreme:
+//! absolute zero (which would re-create a permanently-red gate on this bounded residual — the
+//! issue-909 class of mistake, just relocated) or leaving the terms permanently report-only (which
+//! would give up real regression protection against a return of the issue-971 10-45-per-window
+//! failure class). `relaxed_pass` now requires `copies <= WINDOW_COPIES_GAPS_TOLERANCE && gaps <=
+//! WINDOW_COPIES_GAPS_TOLERANCE` in addition to its prior terms — `strict_pass` (absolute zero)
+//! stays byte-for-byte unchanged, so the singleton residual stays fully VISIBLE (never silent)
+//! even though it no longer fails the run.
 //!
 //! **Not relaxed by this module:** `frame_count > 0` and the whole-run duration floor — those are
 //! computed and folded in exactly as before. The `#881` calibrated optical-`undecodable` floor
@@ -32,6 +49,17 @@
 //! `probe::recording_segments::CamboxSegment::pass` has always held) alongside the NEW relaxed
 //! verdict the caller actually folds into `overall_pass`.
 
+/// The per-window SINGLETON tolerance applied to `copies`/`gaps` when folding them back into
+/// `relaxed_pass`/`overall_pass` (2026-08-05 re-gate, ticket 889 comment 5196190653). Hardcoded,
+/// no env knob — a silent env default is exactly how "temporary" becomes permanent (the original
+/// issue-889 requirement 4), and this repo's standing rule is that a needed capability is always
+/// ON by default, never a forgettable toggle (`features-default-on-never-forgettable-toggle` in
+/// the project memory). A window with `copies > WINDOW_COPIES_GAPS_TOLERANCE` OR `gaps >
+/// WINDOW_COPIES_GAPS_TOLERANCE` fails [`WindowGateDecision::relaxed_pass`] again; at or under the
+/// tolerance it is absorbed (still visible via `strict_pass` / the #889 per-window WARN, never
+/// silent). See the module doc above for the measured evidence this value was calibrated against.
+pub const WINDOW_COPIES_GAPS_TOLERANCE: u32 = 1;
+
 /// The strict-vs-relaxed decision for one cambox window, given its already-computed counts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WindowGateDecision {
@@ -39,17 +67,23 @@ pub struct WindowGateDecision {
     /// #881 calibrated floor> && copies == 0 && gaps == 0`. Still computed, still exposed as
     /// `CamboxSegment::pass`, and drives the #889 loud per-window WARN — never silently dropped.
     pub strict_pass: bool,
-    /// #889: the verdict actually folded into `overall_pass` — `copies`/`gaps` do NOT
-    /// participate: `frame_count > 0 && <undecodable within the #881 floor>`.
+    /// The verdict actually folded into `overall_pass`. Issue 889 (2026-07-30): `frame_count > 0
+    /// && <undecodable within the #881 floor>`. 2026-08-05 RE-GATE: gained `&& copies <=
+    /// WINDOW_COPIES_GAPS_TOLERANCE && gaps <= WINDOW_COPIES_GAPS_TOLERANCE` — `copies`/`gaps` are
+    /// no longer fully report-only, they are tolerated up to the singleton threshold and gate
+    /// again above it.
     pub relaxed_pass: bool,
 }
 
 impl WindowGateDecision {
-    /// `true` exactly when THIS window's `copies`/`gaps` term (issue 889) and/or the optical
-    /// undecodable floor (issue 915) is the reason `strict_pass` and `relaxed_pass` disagree —
-    /// i.e. some report-only relaxation, and only a report-only relaxation, is doing work on this
-    /// window. `frame_count == 0` fails BOTH verdicts unconditionally (an absent cambox proves
-    /// nothing either way, never relaxed) — see `zero_frames_fails_both_verdicts_889` below.
+    /// `true` exactly when THIS window's `copies`/`gaps` term being WITHIN the singleton
+    /// tolerance (2026-08-05 re-gate) and/or the optical undecodable floor (issue 915) is the
+    /// reason `strict_pass` and `relaxed_pass` disagree — i.e. some report-only/tolerance
+    /// relaxation, and only that, is doing work on this window. `frame_count == 0` fails BOTH
+    /// verdicts unconditionally (an absent cambox proves nothing either way, never rescued) — see
+    /// `zero_frames_fails_both_verdicts_889` below. A window whose `copies`/`gaps` EXCEED the
+    /// tolerance fails both verdicts too (not rescued) — see the `..._over_singleton_tolerance_..`
+    /// tests below.
     pub fn relaxed_by_889(&self) -> bool {
         !self.strict_pass && self.relaxed_pass
     }
@@ -66,8 +100,14 @@ pub fn decide(frame_count: u32, undecodable: u32, copies: u32, gaps: u32) -> Win
     // below byte-for-byte) but no longer participates in the RELAXED verdict that feeds
     // `overall_pass` when `crate::optical_floor::gates_overall_pass()` is false. Restore: flip
     // that one function back to `true` (see its own doc for the full restore path on issue 905).
-    let relaxed_pass =
-        frame_count > 0 && (undecodable_ok || !crate::optical_floor::gates_overall_pass());
+    //
+    // 2026-08-05 RE-GATE: `copies`/`gaps` re-join the relaxed verdict, but only above the
+    // singleton tolerance -- see `WINDOW_COPIES_GAPS_TOLERANCE`'s own doc for the decision record.
+    let within_tolerance =
+        copies <= WINDOW_COPIES_GAPS_TOLERANCE && gaps <= WINDOW_COPIES_GAPS_TOLERANCE;
+    let relaxed_pass = frame_count > 0
+        && (undecodable_ok || !crate::optical_floor::gates_overall_pass())
+        && within_tolerance;
     // `strict_pass` keeps its pre-889-AND-pre-915 meaning byte-for-byte: frame_count>0 &&
     // undecodable within floor && copies==0 && gaps==0 -- computed directly (no longer derived
     // from `relaxed_pass`, since issue 915 decoupled the floor from that derivation).
