@@ -717,14 +717,22 @@ set_imag_test_program() {
 # certified genlock tuning, self-verifies the baseline, and switches program itself); the
 # pre-existing action below then stays as the gap-2 assertion, now a cheap double-check.
 verify_stream_program_phase2() {
-  local here rc=0
+  local here rc=0 setup_rc=0 switch_rc=0
   here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || here=""
   echo "[obs stream ${STREAM_IP}] #988 establishing the probe input first (teardown leaves it unbound between E2E runs, otherwise the assert below false-fails a healthy rig)"
   python3 "$here/obs_phase2.py" setup --host "$STREAM_IP" --upstream 'STRIH-SNV (2ME PGM)' \
-    --terminal --password "$OBS_WS_PASSWORD" 2>&1 | sed 's/^/    [stream probe setup] /' || rc=$?
+    --terminal --password "$OBS_WS_PASSWORD" 2>&1 | sed 's/^/    [stream probe setup] /' || setup_rc=$?
   echo "[obs stream ${STREAM_IP}] #901 assert+set PROGRAM = 'PHASE2-PROBE' (was: a printed hint, never enforced)"
   python3 "$here/obs_phase2.py" switch --host "$STREAM_IP" --program-scene "PHASE2-PROBE" \
-    --password "$OBS_WS_PASSWORD" 2>&1 | sed 's/^/    [stream program] /' || rc=$?
+    --password "$OBS_WS_PASSWORD" 2>&1 | sed 's/^/    [stream program] /' || switch_rc=$?
+  # #988 review finding: a bare shared `rc` masked WHICH of the two steps actually failed when
+  # both ran (a setup failure almost always makes switch's own non-black assert ALSO fail, so
+  # continuing is still correct -- but the final verdict line should name both step outcomes
+  # explicitly rather than leaving it to a log-prefix diff).
+  if [ "$setup_rc" -ne 0 ] || [ "$switch_rc" -ne 0 ]; then
+    echo "[obs stream ${STREAM_IP}] #988 gap-2 FAILED (setup_rc=${setup_rc} switch_rc=${switch_rc}) -- see the [stream probe setup]/[stream program] lines above for which step failed"
+    rc=1
+  fi
   return $rc
 }
 
