@@ -8320,19 +8320,22 @@ mod tests {
         // `copies` far past the singleton tolerance, which by itself already fails
         // `all_cambox_continuity.overall_pass`). `self_heal_reset` IS still isolable: build a
         // fixture IDENTICAL to a clean baseline except for ONE unattributed self-heal event, with
-        // the confounding span floor cleared via `--min-secs 1` (mirrors this file's own
-        // `--min-secs 1` idiom used throughout its other tests) so the top-level `overall_pass`
+        // the confounding span floor cleared via `--min-secs 0` (the fixture's `strih` node
+        // analyzed span, 20 ids at the default 30fps `--stream-capture-fps`, is only ~0.667s --
+        // even `--min-secs 1` still fails it; `--min-secs 0` removes the floor entirely, which is
+        // all this differential needs: it is isolating self_heal_reset's own contribution, not
+        // proving anything about the span floor itself) so the top-level `overall_pass`
         // differential actually isolates `self_heal_reset`'s own decoupling instead of always
         // reading `false` regardless of it.
         let clean_isolated =
-            build_fixture_with_min_secs("clean-isolated", base, &sched, false, None, Some("1"));
+            build_fixture_with_min_secs("clean-isolated", base, &sched, false, None, Some("0"));
         let self_heal_only = build_fixture_with_min_secs(
             "self-heal-only",
             base,
             &sched,
             false,
             Some("CAM_UNRELATED:1000000000000"),
-            Some("1"),
+            Some("0"),
         );
         assert_eq!(
             self_heal_only["frozen_leg"]["frozen"]
