@@ -459,15 +459,27 @@ mod tests {
         assert!(should_trigger_selfheal(true, false));
     }
 
-    // #909 RED marker: this now-CORRECT expectation contradicts the CURRENT implementation
-    // (`jitter_confirmed || sustained_confirmed`), which still returns `true` here — the test
-    // fails until the GREEN commit changes `should_trigger_selfheal` to ignore the sustained
-    // band. Per the user's #909 architectural ruling: a sustained over-rate INSIDE the wide
-    // jitter envelope is absorbed by the genlock decimation gate by design, so it must never by
-    // itself escalate to a USB reset (reserved for genuine out-of-envelope faults).
+    // #971 RED marker (REPLACES the #909 test below, which pinned the OPPOSITE expectation):
+    // this now-CORRECT expectation contradicts the CURRENT implementation
+    // (`fn should_trigger_selfheal(jitter_confirmed, _sustained_confirmed) -> bool {
+    // jitter_confirmed }`, which ignores its second argument entirely) — the test fails until
+    // the GREEN commit changes `should_trigger_selfheal` to `jitter_confirmed ||
+    // sustained_chronic`. Justification for replacing (not just adding to) the #909 test: issue
+    // 971's live evidence (2026-08-04, cam2 ShadowCast 2 — 63.75-64.0fps sustained for 458
+    // consecutive report windows) showed #909's premise ("the sustained band alone is absorbed
+    // by the genlock decimation gate by design, so it must never escalate to a reset") is true
+    // for RATE but not for MOTION CADENCE — a sustained-alone over-rate manufactures a real,
+    // visible dup+skip cadence defect (measured 16.5% irregular optical-tick steps, dropping to
+    // 0.6% after a manual USB reset) that the decimation gate does not cleanly absorb. The old
+    // #909 test asserted the literal opposite of what issue 971 now requires, so it is replaced
+    // here rather than kept alongside a contradictory new one. The second argument's MEANING
+    // also changes: it is no longer the 60s-confirm `sustained_confirmed` (kept, still computed,
+    // still used for the informational-only log) but a much longer `sustained_chronic` (see
+    // `capture_rate_health::CHRONIC_SUSTAINED_WARN_WINDOWS`, 15 min) — this test only exercises
+    // the pure boolean combinator, agnostic to which counter feeds it.
     #[test]
-    fn selfheal_sustained_band_alone_no_longer_triggers_reset_909() {
-        assert!(!should_trigger_selfheal(false, true));
+    fn selfheal_triggers_on_chronic_sustained_band_alone_971() {
+        assert!(should_trigger_selfheal(false, true));
     }
 
     #[test]
