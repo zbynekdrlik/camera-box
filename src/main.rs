@@ -755,22 +755,18 @@ async fn run_capture_loop(
         // #717 — SUSTAINED-band capture-rate health: a SEPARATE, narrower consecutive-breach
         // counter/tolerance for a deviation that stays comfortably inside the wide jitter-band
         // tolerance above (#685's correct-for-short-bursts widening, which #717 leaves
-        // unchanged). Confirmed at 60s (`SUSTAINED_WARN_WINDOWS`), it is informational-only
-        // (logged below); once CHRONIC (see `consecutive_chronic_breaches` below, #971) it also
-        // trips self-heal. See `capture_rate_health::sustained_tolerance_pct_for_model`'s doc.
+        // unchanged). The SAME streak is checked against TWO thresholds below (#971): confirmed
+        // at 60s (`SUSTAINED_WARN_WINDOWS`) it is informational-only; once it also reaches the
+        // much longer `CHRONIC_SUSTAINED_WARN_WINDOWS` (15 min) bar it trips self-heal too. One
+        // shared counter (not two) is deliberate — both checks are fed the exact SAME
+        // `sustained_deviant` flag from the exact same starting state, so a second counter would
+        // always equal this one; checking one streak against two thresholds is simpler and can
+        // never silently drift out of sync with itself. See `capture_rate_health::
+        // sustained_tolerance_pct_for_model`'s doc and `capture_rate_selfheal::
+        // should_trigger_selfheal`'s doc for the full root-cause -> approach writeup.
         let mut consecutive_sustained_breaches: u32 = 0;
         let sustained_rate_tolerance_pct =
             camera_box::capture_rate_health::sustained_tolerance_pct_for_model(grabber_model);
-        // #971 — CHRONIC-band capture-rate health: a THIRD consecutive-breach counter fed by the
-        // SAME `sustained_deviant` flag/tolerance as the 60s sustained-confirm above, but checked
-        // against the much longer `CHRONIC_SUSTAINED_WARN_WINDOWS` (15 min) bar instead. A
-        // sustained-alone deviation that PERSISTS this long (or recurs across device re-opens,
-        // each re-accumulating toward this same bar) is no longer tolerated as harmless — issue
-        // 971's live evidence: a sustained-alone 63.75-64.0fps over-rate manufactures a real,
-        // visible dup+skip motion-cadence defect the genlock decimation gate does not cleanly
-        // absorb. See `capture_rate_selfheal::should_trigger_selfheal`'s doc for the full
-        // root-cause -> approach writeup.
-        let mut consecutive_chronic_breaches: u32 = 0;
         // #666 — emit-vs-capture health: consecutive-breach counter for the SAME pure
         // `capture_rate_health` decision, but checked against the configured genlock SEND rate
         // (`send_fps`, below) instead of the negotiated capture rate — catches a defect in the
@@ -1320,18 +1316,13 @@ async fn run_capture_loop(
                             camera_box::capture_rate_health::SUSTAINED_WARN_WINDOWS,
                         );
 
-                        // #971 — CHRONIC-band check: the SAME `sustained_deviant` flag/tolerance
-                        // as the sustained-confirm above, but held to the much longer
-                        // `CHRONIC_SUSTAINED_WARN_WINDOWS` (15 min) bar before it counts. See
-                        // `capture_rate_selfheal::should_trigger_selfheal`'s doc for the full
+                        // #971 — CHRONIC-band check: the SAME streak (`consecutive_sustained_
+                        // breaches`) as the 60s sustained-confirm above, just held to the much
+                        // longer `CHRONIC_SUSTAINED_WARN_WINDOWS` (15 min) bar before it counts.
+                        // See `capture_rate_selfheal::should_trigger_selfheal`'s doc for the full
                         // root-cause -> approach writeup.
-                        consecutive_chronic_breaches =
-                            camera_box::capture_rate_health::next_consecutive_breaches(
-                                consecutive_chronic_breaches,
-                                sustained_deviant,
-                            );
                         let sustained_chronic = camera_box::capture_rate_health::should_warn(
-                            consecutive_chronic_breaches,
+                            consecutive_sustained_breaches,
                             camera_box::capture_rate_health::CHRONIC_SUSTAINED_WARN_WINDOWS,
                         );
 
@@ -1381,8 +1372,8 @@ async fn run_capture_loop(
                                     cap_fps,
                                     configured_capture_fps,
                                     sustained_rate_tolerance_pct,
-                                    consecutive_chronic_breaches,
-                                    consecutive_chronic_breaches as u64 * 5,
+                                    consecutive_sustained_breaches,
+                                    consecutive_sustained_breaches as u64 * 5,
                                     camera_box::capture_rate_health::CHRONIC_SUSTAINED_WARN_WINDOWS
                                         as u64
                                         * 5
