@@ -131,6 +131,36 @@ fn healthy_strih_probe_is_fully_visible() {
     );
 }
 
+/// #977 real-hardware regression (found live on PR #989's Full-path E2E run against the actual
+/// strih box, 2026-08-05): `win_ssh_run` returns Windows CRLF line endings. The sed-based field
+/// parser split on `\n` but left the trailing `\r` attached to each captured value (obs_count
+/// became the literal string "1\r"), so a GENUINELY healthy strih (obs64 count exactly 1) was
+/// misreported INVISIBLE with "obs64 process count=1" (the embedded \r then visually truncated
+/// the log line when GitHub Actions rendered it). Every field must tolerate CRLF input.
+#[test]
+fn crlf_line_endings_from_windows_do_not_cause_a_false_invisible() {
+    let probe = "OBS_COUNT=1\r\nOBS_SESSION=1\r\nOBS_TITLE=OBS 30.2.3 - Profile: strih\r\nAHK_COUNT=1\r\nAHK_SESSION=1\r\n";
+    let msg = message(probe, "1");
+    assert_eq!(
+        msg.trim(),
+        "",
+        "CRLF (Windows) line endings must parse identically to LF -- a real obs64 count=1/\
+         session=1 box must never be reported INVISIBLE just because ssh returned \\r\\n. msg={msg:?}"
+    );
+}
+
+#[test]
+fn crlf_session_zero_is_still_correctly_detected_as_invisible() {
+    // The CRLF fix must not swallow a REAL invisibility finding either -- only strip the \r, never
+    // mask a genuine SessionId=0.
+    let probe = "OBS_COUNT=1\r\nOBS_SESSION=0\r\nOBS_TITLE=OBS\r\n";
+    let msg = message(probe, "0");
+    assert!(
+        msg.contains("SessionId") && msg.contains("958"),
+        "a genuine SessionId=0 must still be detected under CRLF input. msg={msg:?}"
+    );
+}
+
 #[test]
 fn healthy_stream_probe_no_ahk_lines_is_fully_visible() {
     let probe = "OBS_COUNT=1\nOBS_SESSION=1\nOBS_TITLE=OBS 30.2.3 - Profile: stream\n";
