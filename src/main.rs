@@ -1338,7 +1338,7 @@ async fn run_capture_loop(
                         // become genuinely CHRONIC, does self-heal actually act.
                         if sustained_confirmed && !jitter_confirmed && !sustained_chronic {
                             tracing::info!(
-                                "#717 capture-delivery-rate SUSTAINED band confirmed (informational only, see #909): {:.2} fps captured vs {:.2} fps configured/negotiated (>{:.1}% deviation sustained for {} consecutive report windows, ~{}s) — inside {}'s wide {:.1}% jitter-tolerant envelope; the genlock decimation gate absorbs this over-rate into exact NDI output by design, so NO USB reset is triggered yet (see #971: escalates to a reset if this persists to {}s)",
+                                "#717 capture-delivery-rate SUSTAINED band confirmed (informational only FOR NOW, see #909/#971 — this escalates once chronic): {:.2} fps captured vs {:.2} fps configured/negotiated (>{:.1}% deviation sustained for {} consecutive report windows, ~{}s) — inside {}'s wide {:.1}% jitter-tolerant envelope; the genlock decimation gate absorbs this over-rate into exact NDI output by design, so NO USB reset is triggered yet (see #971: escalates to a reset if this persists to {}s)",
                                 cap_fps,
                                 configured_capture_fps,
                                 sustained_rate_tolerance_pct,
@@ -1357,14 +1357,26 @@ async fn run_capture_loop(
                             sustained_chronic,
                         ) {
                             if jitter_confirmed {
+                                // #971 review finding: when BOTH bands confirm the same window,
+                                // say so explicitly — otherwise the log reads as a plain jitter
+                                // event and hides that the sustained band has ALSO gone chronic
+                                // (harmless either way, since one reset covers both, but worth
+                                // naming for anyone reading the journal later).
+                                let chronic_note = if sustained_chronic {
+                                    " (the sustained band is ALSO chronic this window, see #971 \
+                                       — the same reset covers both)"
+                                } else {
+                                    ""
+                                };
                                 tracing::warn!(
-                                    "#656 capture-delivery-rate DEFECTIVE: {:.2} fps captured vs {:.2} fps configured/negotiated (>{:.1}% deviation sustained for {} consecutive report windows, ~{}s, {} tolerance) — USB-reset the capture device (see #656, #685)",
+                                    "#656 capture-delivery-rate DEFECTIVE: {:.2} fps captured vs {:.2} fps configured/negotiated (>{:.1}% deviation sustained for {} consecutive report windows, ~{}s, {} tolerance) — USB-reset the capture device (see #656, #685){}",
                                     cap_fps,
                                     configured_capture_fps,
                                     capture_rate_tolerance_pct,
                                     consecutive_rate_breaches,
                                     consecutive_rate_breaches as u64 * 5,
-                                    grabber_model
+                                    grabber_model,
+                                    chronic_note
                                 );
                             } else {
                                 tracing::warn!(
