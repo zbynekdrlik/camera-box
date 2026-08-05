@@ -125,11 +125,14 @@ fn painter_service_unit_content_pins_the_expected_flags() {
             "unit content missing {needle:?}:\n{out}"
         );
     }
-    // #420: this is a passive visual health display, NOT a measurement run -- it must NEVER
-    // carry the QPSK audio marker (that's the TEST-mode transient painter's job, rig-mode.sh).
+    // #984: the QPSK audio marker is now default-ON under --paint-only (mirrors colour-scale/
+    // motion-sweep) -- this unit must stay FLAG-FREE for it (an explicit --audio-marker here
+    // would be redundant, not wrong, but the whole point of #984's fix is that zero flags are
+    // needed for this permanent unit to be audible).
     assert!(
         !out.contains("--audio-marker"),
-        "the permanent devel-mode painter must NOT emit the QPSK audio marker: {out}"
+        "the permanent devel-mode painter's unit text must stay flag-free for the audio marker \
+         (default-ON under --paint-only covers it): {out}"
     );
 }
 

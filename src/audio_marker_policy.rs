@@ -44,10 +44,7 @@ pub const FALLBACK_MARKER_DEVICE: &str = "hw:CARD=PCH,DEV=3";
 /// shape in `src/bin/frame-probe.rs`. A run that is not `--paint-only` (the Phase-1 loopback /
 /// synth-ndi paths) never has real hardware audio to emit, so it stays off regardless.
 pub fn audio_marker_default_enabled(paint_only: bool) -> bool {
-    // #984 RED: stub reproducing TODAY's real bug (opt-in only, never default-on) --
-    // replaced with the real `paint_only` policy in the GREEN commit.
-    let _ = paint_only;
-    false
+    paint_only
 }
 
 /// One HDMI playback device parsed out of a live `aplay -l` transcript.
@@ -69,10 +66,52 @@ pub struct AplayHdmiDevice {
 /// regex `^card\ [0-9]+:\ ([A-Za-z0-9_]+)\ \[.*\],\ device\ ([0-9]+):\ (HDMI\ [0-9]+)\ \[(.*)\]$`
 /// field-for-field (no `regex` crate dependency — plain, checked string slicing).
 fn parse_aplay_hdmi_line(line: &str) -> Option<AplayHdmiDevice> {
-    // #984 RED: stub reproducing TODAY's real bug (no live device-resolution logic exists at
-    // all) -- replaced with the real parser in the GREEN commit.
-    let _ = line;
-    None
+    let rest = line.strip_prefix("card ")?;
+    let colon1 = rest.find(':')?;
+    let (num1, rest) = rest.split_at(colon1);
+    if num1.is_empty() || !num1.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let rest = rest.strip_prefix(':')?.strip_prefix(' ')?;
+
+    let bracket1 = rest.find(" [")?;
+    let cardname = &rest[..bracket1];
+    if cardname.is_empty()
+        || !cardname
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    {
+        return None;
+    }
+    let rest = &rest[bracket1 + 2..];
+    let close1 = rest.find(']')?;
+    // description (unused) = &rest[..close1]
+    let rest = &rest[close1 + 1..];
+    let rest = rest.strip_prefix(", device ")?;
+
+    let colon2 = rest.find(':')?;
+    let (num2, rest) = rest.split_at(colon2);
+    if num2.is_empty() || !num2.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let rest = rest.strip_prefix(':')?.strip_prefix(' ')?;
+
+    let bracket2 = rest.find(" [")?;
+    let slot = &rest[..bracket2];
+    let slot_num = slot.strip_prefix("HDMI ")?;
+    if slot_num.is_empty() || !slot_num.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let rest = &rest[bracket2 + 2..];
+    let monitor = rest.strip_suffix(']')?;
+
+    let has_monitor = !monitor.is_empty() && monitor != slot;
+    Some(AplayHdmiDevice {
+        card: cardname.to_string(),
+        dev: num2.to_string(),
+        has_monitor,
+        monitor_name: monitor.to_string(),
+    })
 }
 
 /// Parse a full `aplay -l` transcript into every HDMI playback device it lists — pure text

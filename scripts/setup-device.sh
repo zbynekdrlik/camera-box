@@ -143,12 +143,15 @@ EOF
 
 # cam2_painter_service_unit_content -> the systemd unit text for the PERMANENT devel-mode dual-QR
 # painter (#863 -- "V devel režime má na cam2 monitore trvale bežať QR"). Mirrors the exact
-# pinned flags rig-mode.sh's TEST-mode painter uses (qr-size 700, paint-fps 60, --dual-qr) MINUS
-# the QPSK audio marker (this is a passive visual health display, not a measurement run) --
-# colour-scale/motion-sweep already default ON under --paint-only (src/bin/frame-probe.rs), so
-# nothing else needs to be passed. duration-secs is a large-but-finite bound (~1 year) because
-# frame-probe has no "run forever" mode; Restart=always self-heals both that eventual natural
-# exit and any crash, so the monitor practically never goes dark on its own.
+# pinned flags rig-mode.sh's TEST-mode painter uses (qr-size 700, paint-fps 60, --dual-qr) --
+# colour-scale/motion-sweep AND (#984) the QPSK audio marker all default ON under --paint-only
+# (src/audio_marker_policy.rs / src/bin/frame-probe.rs), so nothing else needs to be passed for
+# this unit to be audible. #984: a permanently-missing --audio-marker flag here is exactly the
+# bug that left this unit painting QR forever with zero sound -- the marker's ALSA device is now
+# resolved LIVE (never a hardcoded pin) and a failure to open it degrades (loud ERROR, keeps
+# painting) instead of crashing the unit. duration-secs is a large-but-finite bound (~1 year)
+# because frame-probe has no "run forever" mode; Restart=always self-heals both that eventual
+# natural exit and any crash, so the monitor practically never goes dark on its own.
 cam2_painter_service_unit_content() {
     cat <<'EOF'
 [Unit]

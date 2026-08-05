@@ -124,16 +124,23 @@ struct Args {
     canvas_w: u32,
     #[arg(long, default_value_t = 1080)]
     canvas_h: u32,
-    /// #188: emit the QR-based (QPSK, norihiro-compatible) A/V-sync audio marker on the cam2 HDMI
-    /// audio output at the marker cadence. Use with --paint-only. The emitted
-    /// (index, frame_id, emit_ts_ns) rows are written to --marker-log so recording-verdict can pair
-    /// a decoded audio index → its dual-QR frame → the A/V offset.
-    #[arg(long, default_value_t = false)]
-    audio_marker: bool,
-    /// ALSA device string for the QPSK A/V-sync marker. Default = the cam2 monitor HDMI out
-    /// (card0 USB is the intercom, held exclusively by camera-box). Enumerate with `aplay -l`.
-    #[arg(long, default_value = "hw:CARD=PCH,DEV=3")]
-    audio_marker_device: String,
+    /// #188/#984: emit the QR-based (QPSK, norihiro-compatible) A/V-sync audio marker on the cam2
+    /// HDMI audio output at the marker cadence. The emitted (index, frame_id, emit_ts_ns) rows are
+    /// written to --marker-log so recording-verdict can pair a decoded audio index → its dual-QR
+    /// frame → the A/V offset. #984: default ON under --paint-only (hard-locked the way genlock
+    /// was in issue 257 — the SAME shape --colour-scale/--motion-sweep already use), OFF
+    /// otherwise. Force with --audio-marker / --audio-marker=true, disable with
+    /// --audio-marker=false.
+    #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+    audio_marker: Option<bool>,
+    /// ALSA device string for the QPSK A/V-sync marker. #984: when omitted AND the marker is
+    /// enabled, resolved LIVE from `aplay -l` (the first HDMI playback device that carries a
+    /// genuine, non-generic monitor name — mirrors scripts/lib/marker-device-resolve.sh exactly),
+    /// falling back to the pinned cam2 default (card0 USB is the intercom, held exclusively by
+    /// camera-box) only when nothing resolves. An explicit value always wins verbatim (never
+    /// re-resolved).
+    #[arg(long)]
+    audio_marker_device: Option<String>,
     /// Emit the QPSK marker every N painter refresh ticks (~5 s @ 60 Hz with the default 300).
     #[arg(long, default_value_t = 300)]
     audio_marker_cadence_ticks: u64,
@@ -177,7 +184,10 @@ fn main() -> Result<()> {
             "--paint-log only applies with --paint-only (it records the painter's emitted ticks)"
         );
     }
-    if (args.audio_marker || args.marker_log.is_some()) && !args.paint_only {
+    // #984: audio_marker is now Option<bool> (None ⇒ resolved by default policy below), so an
+    // EXPLICIT --audio-marker=false must never trip this bail — only an explicit true (or
+    // --marker-log) without --paint-only is a real misuse.
+    if (args.audio_marker == Some(true) || args.marker_log.is_some()) && !args.paint_only {
         anyhow::bail!(
             "--audio-marker / --marker-log only apply with --paint-only (the rig A/V-sync path)"
         );
@@ -221,6 +231,29 @@ fn main() -> Result<()> {
     // #751: the motion sweep defaults ON in --paint-only mode (the permanent cam2 painter shows
     // it without a flag change) and OFF otherwise; an explicit --motion-sweep[=bool] always wins.
     let motion_sweep = args.motion_sweep.unwrap_or(args.paint_only);
+    // #984: the QPSK audio marker defaults ON in --paint-only mode (so the permanent cam2 painter
+    // is audible without a flag change -- the bug this issue fixes) and OFF otherwise; an
+    // explicit --audio-marker[=bool] always wins. audio_marker_soft is true iff the marker was
+    // NOT explicitly requested -- a soft-enabled marker degrades (logs + keeps painting) instead
+    // of aborting the run when its PCM device is unavailable; an explicit request keeps the
+    // original hard-fail contract (issue 936).
+    let audio_marker_explicit = args.audio_marker.is_some();
+    let audio_marker = args.audio_marker.unwrap_or_else(|| {
+        camera_box::audio_marker_policy::audio_marker_default_enabled(args.paint_only)
+    });
+    let audio_marker_soft = !audio_marker_explicit;
+    // #984/#725: an explicit --audio-marker-device always wins verbatim; otherwise, when the
+    // marker is actually enabled, resolve it LIVE from `aplay -l` (never a hardcoded pin -- any
+    // HDMI renegotiation can move which DEV=N the physical monitor lands on).
+    let audio_marker_device = if let Some(explicit) = args.audio_marker_device.clone() {
+        explicit
+    } else if audio_marker {
+        resolve_audio_marker_device()
+    } else {
+        // Never actually used (the marker is disabled) -- keep a harmless placeholder so
+        // RunConfig's field stays a plain String.
+        camera_box::audio_marker_policy::FALLBACK_MARKER_DEVICE.to_string()
+    };
 
     tracing::info!(
         "frame-probe start: mode={:?} run_id={} source={:?} paint_fps={} dur={}s",
@@ -254,9 +287,10 @@ fn main() -> Result<()> {
         colour_scale,
         motion_sweep,
         paint_log: args.paint_log.clone(),
-        audio_marker: args.audio_marker,
-        audio_marker_device: args.audio_marker_device.clone(),
+        audio_marker,
+        audio_marker_device,
         audio_marker_cadence_ticks: args.audio_marker_cadence_ticks,
+        audio_marker_soft,
         marker_log: args.marker_log.clone(),
     };
 
@@ -321,6 +355,43 @@ fn main() -> Result<()> {
         Ok(())
     } else {
         std::process::exit(1);
+    }
+}
+
+/// #984/#725: resolve the QPSK audio-marker's ALSA device LIVE from this box's own `aplay -l`
+/// (never a hardcoded pin — any HDMI renegotiation can move which `DEV=N` the physical monitor
+/// lands on). Pure text-parsing decision lives in `camera_box::audio_marker_policy` (Tier-0
+/// unit-tested); this function is the thin I/O glue (exec `aplay`, log the outcome) that has no
+/// local verification path (frame-probe.rs is `required-features = ["probe"]`). Falls back to
+/// the pinned [`camera_box::audio_marker_policy::FALLBACK_MARKER_DEVICE`] — loudly — when `aplay`
+/// itself fails to run, or no HDMI device in its output carries a genuine monitor name. Mirrors
+/// `scripts/lib/marker-device-resolve.sh`'s `resolve_marker_device` (the bash TEST-mode
+/// equivalent) so both paths make the identical decision.
+fn resolve_audio_marker_device() -> String {
+    let aplay_text = match std::process::Command::new("aplay").arg("-l").output() {
+        Ok(out) => String::from_utf8_lossy(&out.stdout).into_owned(),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "#984: failed to run `aplay -l` for live audio-marker device resolution -- \
+                 falling back to the pinned default"
+            );
+            String::new()
+        }
+    };
+    match camera_box::audio_marker_policy::resolve_marker_device_from_aplay(&aplay_text) {
+        Some(device) => {
+            tracing::info!(device = %device, "#984/#725: resolved audio-marker device from live `aplay -l`");
+            device
+        }
+        None => {
+            tracing::warn!(
+                fallback = camera_box::audio_marker_policy::FALLBACK_MARKER_DEVICE,
+                "#984/#725: no HDMI device in live `aplay -l` carries a genuine monitor name -- \
+                 falling back to the pinned default (last resort)"
+            );
+            camera_box::audio_marker_policy::FALLBACK_MARKER_DEVICE.to_string()
+        }
     }
 }
 
