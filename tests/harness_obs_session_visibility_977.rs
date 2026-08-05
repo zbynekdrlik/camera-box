@@ -57,8 +57,14 @@ fn run_sourced(body: &str) -> String {
 #[test]
 fn probe_ps_reads_obs64_session_and_title() {
     let p = run_sourced("obs_session_visibility_probe_ps 1");
-    assert!(p.contains("Get-Process obs64"), "must probe obs64. Program:\n{p}");
-    assert!(p.contains("SessionId"), "must read SessionId. Program:\n{p}");
+    assert!(
+        p.contains("Get-Process obs64"),
+        "must probe obs64. Program:\n{p}"
+    );
+    assert!(
+        p.contains("SessionId"),
+        "must read SessionId. Program:\n{p}"
+    );
     assert!(
         p.contains("MainWindowTitle"),
         "must read MainWindowTitle. Program:\n{p}"
@@ -118,14 +124,22 @@ fn message(probe_out: &str, has_ahk: &str) -> String {
 fn healthy_strih_probe_is_fully_visible() {
     let probe = "OBS_COUNT=1\nOBS_SESSION=1\nOBS_TITLE=OBS 30.2.3 - Profile: strih\nAHK_COUNT=1\nAHK_SESSION=1\n";
     let msg = message(probe, "1");
-    assert_eq!(msg.trim(), "", "a fully healthy strih probe must return an empty message");
+    assert_eq!(
+        msg.trim(),
+        "",
+        "a fully healthy strih probe must return an empty message"
+    );
 }
 
 #[test]
 fn healthy_stream_probe_no_ahk_lines_is_fully_visible() {
     let probe = "OBS_COUNT=1\nOBS_SESSION=1\nOBS_TITLE=OBS 30.2.3 - Profile: stream\n";
     let msg = message(probe, "0");
-    assert_eq!(msg.trim(), "", "a fully healthy stream (no-AHK) probe must return an empty message");
+    assert_eq!(
+        msg.trim(),
+        "",
+        "a fully healthy stream (no-AHK) probe must return an empty message"
+    );
 }
 
 #[test]
@@ -194,7 +208,11 @@ fn stream_ignores_ahk_fields_even_if_present() {
     // must still read as fully visible on stream.
     let probe = "OBS_COUNT=1\nOBS_SESSION=1\nOBS_TITLE=OBS\nAHK_COUNT=0\nAHK_SESSION=0\n";
     let msg = message(probe, "0");
-    assert_eq!(msg.trim(), "", "has_ahk=0 must ignore AHK_* fields entirely. msg={msg:?}");
+    assert_eq!(
+        msg.trim(),
+        "",
+        "has_ahk=0 must ignore AHK_* fields entirely. msg={msg:?}"
+    );
 }
 
 #[test]
