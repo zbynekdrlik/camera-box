@@ -57,6 +57,13 @@ pub mod colour_scale;
 // lives in `probe::qr` and the painter only CALLS it.
 pub mod motion_sweep;
 
+// #984 — the QPSK A/V-sync audio marker's default-enable policy (mirrors the colour_scale/
+// motion_sweep default-on-under---paint-only shape) AND the pure ALSA HDMI-device-resolution
+// decision (mirrors scripts/lib/marker-device-resolve.sh). No probe deps, so it unit-tests
+// Tier-0; the probe-gated glue (`aplay -l` exec, PCM open) lives in `src/bin/frame-probe.rs` /
+// `probe::qpsk_emit` / `probe::run`.
+pub mod audio_marker_policy;
+
 // #188/#145 — QR-based (QPSK) audio marker, byte-compatible with the norihiro
 // obs-audio-video-sync-dock protocol. Pure Tier-0 (encode + decode + estimator); the continuous-feed
 // ALSA emitter (`probe::qpsk_emit`) and recording-verdict decode call into this. Supersedes the chirp.

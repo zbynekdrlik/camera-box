@@ -62,6 +62,15 @@ pub struct RunConfig {
     pub audio_marker_device: String,
     /// Emit the QPSK marker every N painter refresh ticks (~5 s @ 60 Hz with the default 300).
     pub audio_marker_cadence_ticks: u64,
+    /// #984: true iff `audio_marker` was enabled by the DEFAULT policy (no explicit
+    /// `--audio-marker` on the CLI) rather than an explicit caller request. A SOFT marker that
+    /// fails to open its PCM (or dies mid-run) degrades: `run_paint_only` logs an ERROR
+    /// periodically and keeps painting QR-only, instead of aborting the whole run (the permanent
+    /// cam2-painter.service must never crash-loop or go dark just because the audio pin is
+    /// temporarily unavailable). An EXPLICIT (`audio_marker_soft = false`) request keeps the
+    /// original hard-fail contract (issue 936 measurement-gate semantics, unchanged) — a
+    /// dead marker there must still fail the whole run loudly.
+    pub audio_marker_soft: bool,
     /// Optional path for `run_paint_only` to write the A/V-sync marker log CSV
     /// (`index,frame_id,emit_ts_ns`). `None` ⇒ no log written.
     pub marker_log: Option<PathBuf>,
@@ -338,27 +347,51 @@ pub fn run_paint_only(cfg: &RunConfig) -> Result<u64> {
     // INCREMENTALLY (not just on shutdown, below) — the hardened `#420` audible self-check
     // (scripts/lib/audio-marker-check.sh) polls that growth to prove real emission, not just an
     // ALSA PCM held RUNNING by the continuous-feed silence carrier alone.
+    // #984: a SOFT (default-enabled, never explicitly requested) marker must never crash the
+    // whole --paint-only run just because its PCM device is unavailable -- the permanent
+    // cam2-painter.service (Restart=always, duration ~1 year) would otherwise either blank the
+    // monitor forever (a persistent failure) or crash-loop every 2s (a transient one). An
+    // EXPLICIT `--audio-marker` request keeps the original hard-fail contract (issue 936).
+    let mut audio_marker_degraded = false;
     let audio_emitter = if cfg.audio_marker {
         let params = crate::qpsk_marker::AudioParams::rig60();
-        Some(
-            crate::probe::qpsk_emit::QpskEmitter::spawn(
-                cfg.audio_marker_device.clone(),
-                params,
-                current_id.clone(),
-                refresh_out.clone(),
-                stop.clone(),
-                start,
-                cfg.wall_clock,
-                cfg.audio_marker_cadence_ticks,
-                cfg.marker_log.clone(),
-            )
-            .with_context(|| format!("open audio-marker device {}", cfg.audio_marker_device))?,
-        )
+        match crate::probe::qpsk_emit::QpskEmitter::spawn(
+            cfg.audio_marker_device.clone(),
+            params,
+            current_id.clone(),
+            refresh_out.clone(),
+            stop.clone(),
+            start,
+            cfg.wall_clock,
+            cfg.audio_marker_cadence_ticks,
+            cfg.marker_log.clone(),
+        ) {
+            Ok(emitter) => Some(emitter),
+            Err(e) if cfg.audio_marker_soft => {
+                tracing::error!(
+                    device = %cfg.audio_marker_device,
+                    error = %format!("{e:#}"),
+                    "#984: audio-marker device failed to open -- continuing QR-only (degraded, \
+                     silent rig, no audio); this ERROR repeats periodically while degraded"
+                );
+                audio_marker_degraded = true;
+                None
+            }
+            Err(e) => {
+                return Err(e.context(format!(
+                    "open audio-marker device {}",
+                    cfg.audio_marker_device
+                )))
+            }
+        }
     } else {
         None
     };
 
     let deadline = Instant::now() + cfg.duration;
+    // #984: rate-limit the degraded-marker ERROR to roughly once per marker cadence period
+    // instead of once per 100ms poll tick -- loud, but not a journal flood.
+    let mut last_degraded_log = Instant::now();
     while Instant::now() < deadline {
         if painter_handle.is_finished() {
             break;
@@ -369,10 +402,24 @@ pub fn run_paint_only(cfg: &RunConfig) -> Result<u64> {
         // measured against that dead coverage window still produced a plausible-looking (but
         // meaningless) offset from CRC-4 false decodes (see `qpsk_marker::qpsk_marker_died_message`
         // and the `--av-sync` fail-closed guard, `qpsk_marker::marker_coverage_overlaps_video_ticks`).
+        //
+        // #984: in SOFT mode a mid-run death degrades exactly like a startup open failure (log +
+        // keep painting) instead of aborting -- an EXPLICIT (hard) request still bails as before.
         if let Some(reason) = audio_emitter.as_ref().and_then(|e| e.death_reason()) {
-            stop.store(true, std::sync::atomic::Ordering::Relaxed);
-            painter_handle.join().expect("painter panicked")?;
-            anyhow::bail!("{}", crate::qpsk_marker::qpsk_marker_died_message(&reason));
+            if cfg.audio_marker_soft {
+                audio_marker_degraded = true;
+            } else {
+                stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                painter_handle.join().expect("painter panicked")?;
+                anyhow::bail!("{}", crate::qpsk_marker::qpsk_marker_died_message(&reason));
+            }
+        }
+        if audio_marker_degraded && last_degraded_log.elapsed() >= Duration::from_secs(5) {
+            tracing::error!(
+                device = %cfg.audio_marker_device,
+                "#984: audio marker still DEGRADED (no audio) -- QR-only, rig is silent"
+            );
+            last_degraded_log = Instant::now();
         }
         std::thread::sleep(Duration::from_millis(100));
     }
