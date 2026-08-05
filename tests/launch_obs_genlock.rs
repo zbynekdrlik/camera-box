@@ -255,6 +255,60 @@ fn program_ahk_restart_is_verified_and_fails_loud_867() {
     let _ = exit_after_fail;
 }
 
+/// #978/#958 — SESSION-VISIBILITY GATE: an obs64 launched via ssh+Invoke-CimMethod lands in
+/// Windows SessionId=0 (invisible on the console) yet passes every OTHER check in this program
+/// (log render tick, audio buffering). The verify must re-query FRESH and fail LOUD (distinct
+/// exit 8) unless exactly one obs64 has SessionId=1 AND a non-empty MainWindowTitle; on strih
+/// (has_ahk=1) it must ALSO assert AutoHotkey64 is SessionId=1 (a session-0 AHK re-spawns obs64
+/// into session 0 forever).
+#[test]
+fn program_gates_on_session_visibility_978() {
+    let p = program_default(); // has_ahk=1 (strih)
+    assert!(
+        p.contains("$sessObsProcs.Count -ne 1"),
+        "#978: must assert exactly one obs64 process. Program:\n{p}"
+    );
+    assert!(
+        p.contains("$sessProc.SessionId -ne 1"),
+        "#978: must assert obs64's SessionId == 1. Program:\n{p}"
+    );
+    assert!(
+        p.contains("MainWindowTitle"),
+        "#978: must assert obs64 has a non-empty MainWindowTitle. Program:\n{p}"
+    );
+    assert!(
+        p.contains("exit 8"),
+        "#978: the session-visibility gate must fail with a distinct exit code (8). Program:\n{p}"
+    );
+    assert!(
+        p.contains("$ahkSessProcs") && p.contains("AutoHotkey64"),
+        "#978: strih (has_ahk=1) must ALSO gate AutoHotkey64's SessionId. Program:\n{p}"
+    );
+    assert!(
+        p.contains("$ahkSessProcs[0].SessionId -ne 1"),
+        "#978: the strih AHK check must assert SessionId == 1. Program:\n{p}"
+    );
+}
+
+/// #978 — a box with NO AutoHotkey64 watcher (stream) must NOT carry a real AutoHotkey64
+/// session-visibility check, only the obs64 one (mirrors the #786/#411 has_ahk=0 convention).
+#[test]
+fn program_without_ahk_watcher_session_gate_has_no_real_ahk_check_978() {
+    let p = run_sourced("build_launch_program 'C:\\Program Files\\obs-studio' 0 0");
+    assert!(
+        p.contains("SessProcs.Count -ne 1") && p.contains("SessionId -ne 1"),
+        "#978: the obs64 session check must survive has_ahk=0 untouched. Program:\n{p}"
+    );
+    assert!(
+        !p.contains("$ahkSessProcs"),
+        "#978: has_ahk=0 must not embed the real AutoHotkey64 session-visibility check. Program:\n{p}"
+    );
+    assert!(
+        p.to_lowercase().contains("no ahk auto-respawn watcher"),
+        "#978: has_ahk=0 must DOCUMENT the AHK session check as a no-op, not silently vanish. Program:\n{p}"
+    );
+}
+
 /// The FINAL verdict gates exit 0 on the render tick being ENABLED (the genlock build proof) and
 /// fails LOUD (non-zero exit) otherwise — never a silent stock/wrong-build launch.
 #[test]
