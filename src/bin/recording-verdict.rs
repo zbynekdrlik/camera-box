@@ -4150,38 +4150,75 @@ fn build_and_print_verdict(
                                 );
                             }
                         } else {
-                            // `relaxed_pass` fails too — name every real reason: the copies/gaps
-                            // singleton tolerance exceeded (2026-08-05 re-gate), the undecodable
-                            // floor (only if issue 905 has since restored its own gate), and/or
-                            // frame_count == 0 (the only remaining possibility once neither of the
-                            // above applies).
-                            let over_tolerance = s.copies > seg.copies_gaps_tolerance
-                                || s.gaps > seg.copies_gaps_tolerance;
-                            if over_tolerance {
-                                println!(
-                                    "      ⚠ #889 RE-GATE FAIL: copies={} gaps={} exceeds the \
-                                     per-window singleton tolerance ({}) — this window FAILS \
-                                     overall_pass (see issue #889 for the decision record).",
-                                    s.copies, s.gaps, seg.copies_gaps_tolerance
-                                );
-                            }
-                            let floor_ok = camera_box::optical_floor::window_within_floor(
-                                s.undecodable,
+                            // `relaxed_pass` fails too — name every real reason via the pure,
+                            // Tier-0-testable seam `camera_box::window_gate::
+                            // relaxed_failure_reasons` (issue-889 re-gate deep-review findings
+                            // 1+2, fixed through this seam rather than re-deriving the conditions
+                            // inline again): a frame_count==0 window is EmptyWindow (never
+                            // misread as an exceeded floor — the old inline logic here made that
+                            // exact mistake, since `optical_floor::window_within_floor`'s
+                            // defensive frame_count==0 clause always reads `false`), an
+                            // over-tolerance copies/gaps failure is OverCopiesGapsTolerance, and
+                            // an over-floor undecodable count is worded as actually gating
+                            // (FloorExceededGating) ONLY when `optical_floor::gates_overall_pass()`
+                            // is genuinely `true` — never unconditionally, since that flag is
+                            // hardcoded `false` today (see issue #915 for the restore path on
+                            // issue #905). A window can carry more than one reason at once (e.g.
+                            // over-tolerance copies/gaps AND a merely-report-only over-floor
+                            // undecodable count) — every applicable reason prints.
+                            let reasons = camera_box::window_gate::relaxed_failure_reasons(
                                 s.frames,
+                                s.undecodable,
+                                s.copies,
+                                s.gaps,
                             );
-                            if !floor_ok {
-                                println!(
-                                    "      ⚠ undecodable={} exceeds the issue-881 per-window \
-                                     floor and currently gates overall_pass (see issue #915 for \
-                                     the restore-path state).",
-                                    s.undecodable
-                                );
+                            for reason in &reasons {
+                                match reason {
+                                    camera_box::window_gate::RelaxedFailureReason::EmptyWindow => {
+                                        println!(
+                                            "      ⚠ this window fails the RELAXED verdict (not \
+                                             issue 889's, issue 915's, nor the re-gate's doing — \
+                                             frame_count==0) — it still fails overall_pass."
+                                        );
+                                    }
+                                    camera_box::window_gate::RelaxedFailureReason::OverCopiesGapsTolerance => {
+                                        println!(
+                                            "      ⚠ #889 RE-GATE FAIL: copies={} gaps={} \
+                                             exceeds the per-window singleton tolerance ({}) — \
+                                             this window FAILS overall_pass (see issue #889 for \
+                                             the decision record).",
+                                            s.copies, s.gaps, seg.copies_gaps_tolerance
+                                        );
+                                    }
+                                    camera_box::window_gate::RelaxedFailureReason::FloorExceededGating => {
+                                        println!(
+                                            "      ⚠ undecodable={} exceeds the issue-881 \
+                                             per-window floor and currently gates overall_pass \
+                                             (see issue #915 for the restore-path state).",
+                                            s.undecodable
+                                        );
+                                    }
+                                    camera_box::window_gate::RelaxedFailureReason::FloorWithinReportOnly => {
+                                        println!(
+                                            "      ⚠ #915 REPORT-ONLY: undecodable={} exceeds \
+                                             the issue-881 per-window floor, but does NOT gate \
+                                             overall_pass while issue 909 (cam1 grabber) + issue \
+                                             881 (120Hz monitor) are unresolved (see issue #915).",
+                                            s.undecodable
+                                        );
+                                    }
+                                }
                             }
-                            if !over_tolerance && floor_ok {
+                            if reasons.is_empty() {
+                                // Should not happen for a window that genuinely failed
+                                // `relaxed_pass` (`window_gate::decide` and `relaxed_failure_
+                                // reasons` derive the same conditions) — but a window that DOES
+                                // fail overall_pass must never print silence.
                                 println!(
-                                    "      ⚠ this window ALSO fails the RELAXED verdict (not \
-                                     issue 889's, issue 915's, nor the re-gate's doing — \
-                                     frame_count==0) — it still fails overall_pass."
+                                    "      ⚠ this window fails the RELAXED verdict for an \
+                                     unrecognized reason (frames={} undecodable={} copies={} \
+                                     gaps={}) — it still fails overall_pass.",
+                                    s.frames, s.undecodable, s.copies, s.gaps
                                 );
                             }
                         }
@@ -4300,6 +4337,20 @@ fn build_and_print_verdict(
                              grabber) + issue 881 (120Hz monitor) (see issue #915 for the \
                              decision record and issue #905 for the restore path)"
                         ),
+                    );
+                    // Finding 5 of the issue-889 re-gate deep review — a self-describing prose
+                    // gate key, mirroring `undecodable_floor_gate`'s idiom immediately above but
+                    // SCOPED by name to `copies`/`gaps` specifically (issue-915 lesson: never a
+                    // blanket "gate" key on the whole object). Unlike `undecodable_floor_gate`,
+                    // this one describes a term that DOES gate again above its tolerance — the
+                    // JSON is self-describing without needing the binary's source to know that.
+                    obj.insert(
+                        "copies_gaps_gate".to_string(),
+                        serde_json::json!(format!(
+                            "gates overall_pass above the per-window singleton tolerance ({}) -- \
+                             see issue #889 for the decision record",
+                            seg.copies_gaps_tolerance
+                        )),
                     );
                 }
                 report["all_cambox_continuity"] = seg_json;

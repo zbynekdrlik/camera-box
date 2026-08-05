@@ -156,28 +156,31 @@ pub enum RelaxedFailureReason {
 
 /// See [`RelaxedFailureReason`]'s own doc for the full rationale and call-site discipline.
 ///
-/// KNOWN-BUGGY placeholder (issue-889 re-gate review finding 1's RED commit): mirrors the OLD
-/// `recording-verdict.rs` inline logic byte-for-byte, including its bug -- it does NOT check
-/// `frame_count == 0` before consulting the optical floor, so a 0-frame window is misclassified.
-/// Fixed in the immediately-following GREEN commit.
+/// `frame_count == 0` is checked FIRST and short-circuits every other reason (finding 1 of the
+/// issue-889 re-gate review) -- the optical floor / tolerance checks below are meaningless on an
+/// empty window and must never be consulted for one. The floor reason's severity (`Gating` vs
+/// `WithinReportOnly`) is decided by `crate::optical_floor::gates_overall_pass()` (finding 2) --
+/// never worded as "currently gates overall_pass" unconditionally.
 pub fn relaxed_failure_reasons(
     frames: u32,
     undecodable: u32,
     copies: u32,
     gaps: u32,
 ) -> Vec<RelaxedFailureReason> {
+    if frames == 0 {
+        return vec![RelaxedFailureReason::EmptyWindow];
+    }
     let mut reasons = Vec::new();
-    let over_tolerance =
-        copies > WINDOW_COPIES_GAPS_TOLERANCE || gaps > WINDOW_COPIES_GAPS_TOLERANCE;
-    if over_tolerance {
+    if copies > WINDOW_COPIES_GAPS_TOLERANCE || gaps > WINDOW_COPIES_GAPS_TOLERANCE {
         reasons.push(RelaxedFailureReason::OverCopiesGapsTolerance);
     }
     let floor_ok = crate::optical_floor::window_within_floor(undecodable, frames);
     if !floor_ok {
-        reasons.push(RelaxedFailureReason::FloorExceededGating);
-    }
-    if !over_tolerance && floor_ok {
-        reasons.push(RelaxedFailureReason::EmptyWindow);
+        if crate::optical_floor::gates_overall_pass() {
+            reasons.push(RelaxedFailureReason::FloorExceededGating);
+        } else {
+            reasons.push(RelaxedFailureReason::FloorWithinReportOnly);
+        }
     }
     reasons
 }
@@ -187,7 +190,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn copies_alone_fails_strict_but_passes_relaxed_889() {
+    fn copies_at_singleton_tolerance_fails_strict_but_passes_relaxed_889() {
+        // Finding 4 of the issue-889 re-gate review: renamed from
+        // `copies_alone_fails_strict_but_passes_relaxed_889` -- that name/message implied "copies
+        // alone can never fail relaxed", which was true pre-re-gate but is no longer true (2+
+        // copies fails relaxed again, see `copies_over_singleton_tolerance_fails_relaxed_889_regate`
+        // below). The fixture value (1) is load-bearing: it passes ONLY because it sits AT the
+        // singleton tolerance, not because "copies" is exempt.
         let d = decide(100, 0, 1, 0);
         assert!(
             !d.strict_pass,
@@ -195,7 +204,8 @@ mod tests {
         );
         assert!(
             d.relaxed_pass,
-            "#889: copies alone must not fail the relaxed verdict: {d:?}"
+            "889 re-gate: 1 copy is AT the singleton tolerance, not over it -- must not fail \
+             relaxed: {d:?}"
         );
         assert!(d.relaxed_by_889());
     }
@@ -328,15 +338,63 @@ mod tests {
         // Finding 1 of the issue-889 re-gate review: a frame_count==0 window must classify as
         // EmptyWindow, never as an exceeded optical floor --
         // `optical_floor::window_within_floor`'s defensive `frame_count == 0` clause is not
-        // itself a "floor exceeded" signal. Against the KNOWN-BUGGY placeholder above (which
-        // checks `over_tolerance`/`floor_ok` before ever asking "is this window even empty"),
-        // this fails: `window_within_floor(0, 0)` returns `false` via that same defensive clause,
-        // so the buggy version reports `[FloorExceededGating]` instead.
+        // itself a "floor exceeded" signal. The RED commit for this test proved a prior version
+        // of this function (which checked `over_tolerance`/`floor_ok` before ever asking "is this
+        // window even empty") got this wrong, reporting `[FloorExceededGating]` instead.
         let reasons = relaxed_failure_reasons(0, 0, 0, 0);
         assert_eq!(
             reasons,
             vec![RelaxedFailureReason::EmptyWindow],
             "a 0-frame window must classify as EmptyWindow alone, never a floor reason: {reasons:?}"
+        );
+    }
+
+    #[test]
+    fn relaxed_failure_reasons_over_copies_tolerance_889_regate() {
+        // copies=2 exceeds the singleton tolerance; undecodable=0 stays within the floor -- the
+        // ONLY reason is OverCopiesGapsTolerance.
+        let reasons = relaxed_failure_reasons(100, 0, 2, 0);
+        assert_eq!(reasons, vec![RelaxedFailureReason::OverCopiesGapsTolerance]);
+    }
+
+    #[test]
+    fn relaxed_failure_reasons_within_tolerance_and_floor_is_empty_889_regate() {
+        // Finding 6 coverage: copies=1 AND gaps=1 sit AT the singleton tolerance (not over it),
+        // and undecodable=0 is within the floor -- a window with these counts does not actually
+        // fail `relaxed_pass` (see `copies_and_gaps_both_at_singleton_tolerance_pass_relaxed_889_
+        // regate` above), so it has NO failure reason. This function is only ever called by
+        // `recording-verdict.rs` on a window that already failed `relaxed_pass` -- this test just
+        // pins the seam's own boundary behavior independent of that call-site discipline.
+        let reasons = relaxed_failure_reasons(100, 0, 1, 1);
+        assert!(
+            reasons.is_empty(),
+            "copies=1 gaps=1 are both AT tolerance -- no failure reason applies: {reasons:?}"
+        );
+    }
+
+    #[test]
+    fn relaxed_failure_reasons_over_floor_is_report_only_today_889_regate() {
+        // Mirrors `undecodable_over_floor_now_passes_relaxed_but_fails_strict_915` above:
+        // undecodable=5 over the per-window floor (4), frames=10. `gates_overall_pass()` is
+        // hardcoded false today (issue 905's restore path is not yet landed), so this is
+        // FloorWithinReportOnly, never FloorExceededGating.
+        let reasons = relaxed_failure_reasons(10, 5, 0, 0);
+        assert_eq!(reasons, vec![RelaxedFailureReason::FloorWithinReportOnly]);
+    }
+
+    #[test]
+    fn relaxed_failure_reasons_over_tolerance_and_over_floor_both_reported_889_regate() {
+        // Finding 2's "else-arm" scenario: a window can fail overall_pass via OverCopiesGapsTolerance
+        // while ALSO carrying an over-floor undecodable count that is merely report-only today --
+        // both reasons are returned so the caller can print both, instead of the old code's
+        // misleading "currently gates overall_pass" wording for the floor half.
+        let reasons = relaxed_failure_reasons(10, 5, 2, 0);
+        assert_eq!(
+            reasons,
+            vec![
+                RelaxedFailureReason::OverCopiesGapsTolerance,
+                RelaxedFailureReason::FloorWithinReportOnly,
+            ]
         );
     }
 }
