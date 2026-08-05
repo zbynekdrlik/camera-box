@@ -8032,18 +8032,20 @@ mod tests {
     }
 
     /// Issue 914 (2026-08-01, user decision -- mirrors issue 889's report-only shape and issue
-    /// 861's caller-only decoupling): a genuinely HARD-FROZEN cambox window (issue 758's
-    /// classifier) plus an unattributed `#663` self-heal reset event must no longer force the
-    /// FUSED `overall_pass` to fail. Uses the SAME differential-fixture proof issue 861 used
-    /// (`all_cambox_av_sync_gate_failure_no_longer_forces_the_overall_verdict_to_fail_861`)
-    /// rather than asserting an absolute `overall_pass == true`, because many OTHER unrelated
-    /// gates in this function also fold into `overall_pass` and this test must stay valid
-    /// regardless of their state: build two otherwise-IDENTICAL fixtures, one with the
-    /// frozen/self-heal findings, one without, and prove `overall_pass` is IDENTICAL between
-    /// them. This is the exact test a future re-tightening (issue 905's restore path) will need
-    /// to invert.
+    /// 861's caller-only decoupling): the `frozen_leg` (issue 758) and `self_heal_reset`
+    /// CLASSIFIERS themselves are report-only annotations layered on TOP of the underlying
+    /// per-window `copies`/`gaps`/`undecodable` data -- their own `gates_overall_pass` JSON
+    /// fields must read `false`, always. **2026-08-05 RE-GATE (ticket 889 comment 5196190653):**
+    /// this fixture's "genuinely HARD-FROZEN" window is built from `copies=5` (density-based,
+    /// see the `frozen` block below) -- FAR over the per-window singleton tolerance
+    /// (`crate::window_gate::WINDOW_COPIES_GAPS_TOLERANCE`), so the UNDERLYING data now
+    /// correctly fails `overall_pass` again via the re-gate, independent of whatever
+    /// `frozen_leg`/`self_heal_reset` report. Renamed from `..._no_longer_gate_the_overall_
+    /// verdict_914` -- that claim is no longer true for a window this badly frozen; the
+    /// re-gate is SUPPOSED to catch exactly this class of regression. What issue 914 actually
+    /// established (the classifiers' OWN report-only status) is unchanged and still asserted.
     #[test]
-    fn frozen_leg_and_self_heal_reset_no_longer_gate_the_overall_verdict_914() {
+    fn frozen_leg_classifier_stays_report_only_but_its_copies_now_gate_overall_pass_889_regate() {
         use super::{build_and_print_verdict, Cam1Source, DecodedRec};
         use clap::Parser;
 
@@ -8200,11 +8202,27 @@ mod tests {
             serde_json::json!(false),
             "914: same for self_heal_reset: {with_events}"
         );
+        // 889 re-gate: the fixture's own copies=5 (against frames=25, density 0.20 -- the exact
+        // shape the frozen_leg classifier needs to prove DENSITY, not just count) is FAR over
+        // the singleton tolerance, so this window (and therefore overall_pass) now correctly
+        // FAILS again -- this is the re-gate doing its job, not frozen_leg/self_heal_reset
+        // (which stay report-only, per the two assertions immediately above).
         assert_eq!(
-            clean["overall_pass"], with_events["overall_pass"],
-            "914: a genuinely frozen window + an unattributed self-heal event must be a no-op on \
-             the overall verdict (report-only, pending cam1 hardware fix issue 909 -- restore \
-             path issue 905): clean={clean}, with_events={with_events}"
+            clean["overall_pass"],
+            serde_json::json!(true),
+            "sanity: the clean fixture has no defects at all: {clean}"
+        );
+        assert_eq!(
+            with_events["overall_pass"],
+            serde_json::json!(false),
+            "889 re-gate: copies=5 far exceeds the singleton tolerance -- overall_pass must FAIL \
+             again, even though frozen_leg/self_heal_reset themselves stay report-only: \
+             {with_events}"
+        );
+        assert_eq!(
+            with_events["all_cambox_continuity"]["windows_over_copies_gaps_tolerance"],
+            serde_json::json!(1),
+            "889 re-gate: exactly the frozen window exceeds the tolerance: {with_events}"
         );
     }
 

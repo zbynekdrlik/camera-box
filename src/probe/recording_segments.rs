@@ -678,11 +678,15 @@ mod tests {
     }
 
     #[test]
-    fn gap_in_one_window_fails_strict_but_889_relaxes_overall_pass() {
-        // cam1 clean; cam2 has a tick that skips by 3 (a real drop at step 1). Issue 889
-        // (2026-07-30 user decision on issue 883): `gaps` is now report-only — the STRICT
-        // per-window `pass` still catches it (unchanged), but `overall_pass` folds
-        // `relaxed_pass` and no longer fails on a gap alone (undecodable=0, frame_count>0).
+    fn gap_of_two_exceeds_singleton_tolerance_fails_overall_pass_889_regate() {
+        // cam1 clean; cam2 has a tick that skips by 3 (a real drop at step 1: 502,503 absent),
+        // i.e. gaps=2. Issue 889 (2026-07-30 user decision on issue 883) originally made `gaps`
+        // fully report-only here; the 2026-08-05 RE-GATE (ticket 889 comment 5196190653)
+        // re-introduced a per-window SINGLETON tolerance (`crate::window_gate::
+        // WINDOW_COPIES_GAPS_TOLERANCE`, currently 1) — gaps=2 EXCEEDS that tolerance, so this
+        // window (and therefore the run) now correctly FAILS `overall_pass` again. Renamed from
+        // `..._889_relaxes_overall_pass` — that name is no longer true for a 2-gap window; the
+        // STRICT per-window `pass` still catches it exactly as before (unchanged).
         let schedule = vec![win("cam1", 0, 1000), win("cam2", 1000, 2000)];
         let mut frames = clean_frames(0, 100, 6, 1, 100);
         // cam2: 500,501,504,505 — 502,503 absent (a real gap), step 1.
@@ -709,9 +713,10 @@ mod tests {
             },
         ]);
         let v = segment_continuity(&frames, &schedule, 0, 1);
-        assert!(
-            v.overall_pass,
-            "889: a gap alone (undecodable=0) no longer fails overall_pass: {v:?}"
+        assert_eq!(
+            v.segments[1].gaps, 2,
+            "isolates a 2-gap window: {:?}",
+            v.segments[1]
         );
         assert!(v.segments[0].pass, "cam1 still clean: {:?}", v.segments[0]);
         assert!(
@@ -720,20 +725,23 @@ mod tests {
             v.segments[1]
         );
         assert!(
-            v.segments[1].relaxed_pass,
-            "889: cam2's relaxed verdict passes despite the gap: {:?}",
+            !v.segments[1].relaxed_pass,
+            "889 re-gate: cam2's gaps=2 exceeds the singleton tolerance -- relaxed must fail: {:?}",
             v.segments[1]
         );
         assert!(
-            v.segments[1].gaps >= 1,
-            "889: gaps is still COMPUTED and printed, only report-only: {:?}",
-            v.segments[1]
+            !v.overall_pass,
+            "889 re-gate: a 2-gap window must fail overall_pass again: {v:?}"
         );
         assert_eq!(v.segments[1].undecodable, 0);
         assert_eq!(v.segments[1].copies, 0);
         assert_eq!(
             v.windows_failed_report_only, 1,
             "889: exactly one window would have failed under the strict rule: {v:?}"
+        );
+        assert_eq!(
+            v.windows_over_copies_gaps_tolerance, 1,
+            "889 re-gate: exactly cam2's window exceeds the tolerance: {v:?}"
         );
     }
 
@@ -1340,8 +1348,11 @@ mod tests {
     fn step_2_data_with_expected_step_1_flags_gaps() {
         // The SAME step-2 data judged at expected_step=1 (no decimation expected) flags gaps —
         // proving the step parameter actually drives the check (a mutant fixing step→1 fails).
-        // Issue 889 (2026-07-30 user decision on issue 883): gaps no longer gate `overall_pass`,
-        // so this now PASSES relaxed even though the STRICT per-window `pass` still fails.
+        // Issue 889 (2026-07-30 user decision on issue 883) originally made gaps fully
+        // report-only. The 2026-08-05 RE-GATE (ticket 889 comment 5196190653) re-introduced a
+        // per-window SINGLETON tolerance (`crate::window_gate::WINDOW_COPIES_GAPS_TOLERANCE`) —
+        // this fixture's gaps (9, far over the tolerance) now correctly fails `overall_pass`
+        // again, exactly like the STRICT per-window `pass` already did.
         let schedule = vec![win("cam1", 0, 100_000)];
         let frames = clean_frames(0, 1000, 10, 2, 1000);
         let v = segment_continuity(&frames, &schedule, 0, 1);
@@ -1351,8 +1362,12 @@ mod tests {
         );
         assert!(v.segments[0].gaps >= 1, "gaps flagged: {:?}", v.segments[0]);
         assert!(
-            v.overall_pass,
-            "889: gaps alone no longer fails overall_pass: {v:?}"
+            !v.segments[0].relaxed_pass,
+            "889 re-gate: gaps=9 far exceeds the singleton tolerance -- relaxed must fail: {v:?}"
+        );
+        assert!(
+            !v.overall_pass,
+            "889 re-gate: gaps far over tolerance must fail overall_pass again: {v:?}"
         );
     }
 
