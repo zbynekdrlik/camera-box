@@ -7287,3 +7287,7 @@ does the live rig verification of the new whole-chain checks and closes it.
   verification of the actual self-heal reset behavior + rig-mode.sh gap-2 on the real rig is the
   supervisor's, per this dispatch's code-only authority (no ssh/MCP to any rig box from this
   worker).
+  Post-review addendum: independent read-only review subagent found 0 Critical/Important code
+  defects, 3 cosmetic Minor items (2 for #971's log messages, 1 for #988's step-failure
+  attribution in rig-mode.sh's verdict line) -- all fixed same session (`6ad54fdea`, `ed1b3693a`),
+  not left as "nice to have" per this project's completion-report 🔵-findings-are-fixed policy.
