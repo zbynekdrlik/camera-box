@@ -912,7 +912,11 @@ async fn run_capture_loop(
         let out_interval_ns: u64 = genlock_fps
             .map(|f| 1_000_000_000u64 / f as u64)
             .unwrap_or(0);
-        let mut next_boundary_ns: u64 = 0;
+        // (#889) dupe-preferring decimation: owns the boundary + content-dupe-preference
+        // bookkeeping (replaces the bare `next_boundary_ns` local) so a fast/over-rate
+        // grabber's own internal-buffer repeat is preferentially shed over the genuine unique
+        // tick next to it. See `camera_box::dupe_decimation`'s module doc for the full mechanism.
+        let mut decimation_gate = camera_box::dupe_decimation::DecimationGate::new();
 
         while running_capture.load(Ordering::Relaxed) {
             // #707 B1 — snapshot the emit counter before the frame closure so the per-second ring
@@ -972,15 +976,21 @@ async fn run_capture_loop(
                 }
 
                 if out_interval_ns > 0 {
-                    // Genlock decimation: emit only the capture at/after each
-                    // wall-clock boundary (pure logic in ndi::genlock_emit_gate).
-                    let prev_boundary_ns = next_boundary_ns;
-                    let (emit, next) = camera_box::ndi::genlock_emit_gate(
-                        wall_clock_ns(),
-                        next_boundary_ns,
-                        out_interval_ns,
+                    // (#889) dupe-preferring decimation: pacing still decides WHEN a captured
+                    // frame must be shed (`ndi::genlock_emit_gate`, unchanged); the content hash
+                    // now decides WHICH captured frame is the victim — prefer shedding a
+                    // grabber-repeat dupe over the unique tick captured right next to it. See
+                    // `dupe_decimation`'s module doc for the full root-cause -> fix writeup.
+                    let prev_boundary_ns = decimation_gate.next_boundary_ns();
+                    let content_hash = camera_box::dupe_decimation::dupe_content_hash(
+                        data,
+                        info.width as usize,
+                        info.height as usize,
+                        info.stride as usize,
                     );
-                    next_boundary_ns = next;
+                    let emit =
+                        decimation_gate.poll(wall_clock_ns(), out_interval_ns, content_hash);
+                    let next_boundary_ns = decimation_gate.next_boundary_ns();
                     // #707 — a clock discontinuity (DanteSync NTP/PTP step, or a stalled poll)
                     // can leap the gate's boundary past one or more intervals that are then
                     // NEVER emitted — the missing direct evidence for whether a clock step is
@@ -997,7 +1007,7 @@ async fn run_capture_loop(
                         emit_skip_log.record(skipped);
                     }
                     if !emit {
-                        return; // between boundaries — decimate (don't send)
+                        return; // decimated -- either blind pacing or a preferred dupe shed
                     }
                 }
                 // #275b — ONE cam1 emit-instant wall-clock stamp (CLOCK_REALTIME, the DanteSync
@@ -1201,6 +1211,21 @@ async fn run_capture_loop(
                                 frame_count,
                                 dropped,
                                 corrupted
+                            );
+
+                            // (#889) periodic mechanism-visibility log — proves on a live box
+                            // that dupe-preferring decimation is actually shedding grabber
+                            // dupes (vs the pre-existing blind pacing drop), on the SAME 5s
+                            // cadence as the #752 emit-gate-skip summary below. Printed every
+                            // window (never suppressed on 0/0 — a healthy card legitimately
+                            // shows 0/0, which is the self-neutralizing behavior by design, not
+                            // the mechanism being off).
+                            let (dupe_shed, blind_shed) = decimation_gate.take_shed_counts();
+                            tracing::info!(
+                                "{}",
+                                camera_box::dupe_decimation::dupe_shed_summary(
+                                    dupe_shed, blind_shed, 5
+                                )
                             );
 
                             // #666 — emit-vs-capture health: WARN when the EMITTED fps has
