@@ -3222,18 +3222,36 @@ fi
 # distinctly from the preflight's own failure so a human/CI reader never again has to manually
 # correlate journalctl timestamps against the recording window by hand (exactly what #703's own
 # PR #704 diagnosis required).
-echo "[7b/8] capture-delivery-rate POST-recording check — $CAMERA_NAME must not have recurred a #656/#663 defect during the recording (#705)"
+echo "[7b/8] capture-delivery-rate POST-recording check — $CAMERA_NAME must not have recurred a #656/#663/#717/#971 defect during the recording, checked via BOTH journald AND the burn instance's own log (#705/#992)"
 CAPTURE_RATE_WINDOW_INVOCATION_ID="$(sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$CAM1_IP" \
   "systemctl show -p InvocationID --value camera-box 2>/dev/null" 2>/dev/null || true)"
 CAPTURE_RATE_RECURRENCE_LINE="$(sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$CAM1_IP" \
-  "$(capture_rate_window_journalctl_cmd "$CAPTURE_RATE_WINDOW_INVOCATION_ID" "$CAPTURE_RATE_WINDOW_START_EPOCH" "$CAPTURE_RATE_WINDOW_END_EPOCH") | grep -E '$(capture_rate_defect_grep_pattern)' | tail -1" \
+  "$(capture_rate_window_journalctl_cmd "$CAPTURE_RATE_WINDOW_INVOCATION_ID" "$CAPTURE_RATE_WINDOW_START_EPOCH" "$CAPTURE_RATE_WINDOW_END_EPOCH") | grep -E '$(capture_rate_defect_grep_pattern_all)' | tail -1" \
   2>/dev/null || true)"
 if [ -n "$CAPTURE_RATE_RECURRENCE_LINE" ]; then
   echo "ERROR: $(capture_rate_recurrence_message "$CAMERA_NAME" "$CAPTURE_RATE_RECURRENCE_LINE")" >&2
   echo "       matched journal line: $CAPTURE_RATE_RECURRENCE_LINE" >&2
   exit 1
 fi
-echo "    ok: no capture-rate defect recurrence in $CAMERA_NAME's journal during the recording window (${CAPTURE_RATE_WINDOW_START_EPOCH}..${CAPTURE_RATE_WINDOW_END_EPOCH})"
+# (#992) journald is BLIND to the actual E2E burn instance: the deploy step above
+# unconditionally does `systemctl stop camera-box` and launches $CAMERA_NAME's capture as a
+# TRANSIENT systemd-run unit whose stdout/stderr are redirected DIRECTLY to /tmp/cbox-burn.log
+# (--property=StandardOutput=append:.../StandardError=append:...) -- never through journald at
+# all. A clean journald read above therefore only proves the (killed) camera-box.service
+# process instance was clean before the stop; it says NOTHING about what actually ran during
+# this recording. Read the burn instance's own log file directly -- no epoch window needed here
+# (unlike the journalctl read above): the deploy step already does `rm -f /tmp/cbox-burn.log`
+# immediately before systemd-run launches THIS run's burn, so the file's entire content is
+# already scoped to this exact recording.
+CAPTURE_RATE_BURN_LOG_LINE="$(sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$CAM1_IP" \
+  "$(capture_rate_burn_log_grep_cmd "/tmp/cbox-burn.log")" \
+  2>/dev/null || true)"
+if [ -n "$CAPTURE_RATE_BURN_LOG_LINE" ]; then
+  echo "ERROR: $(capture_rate_burn_log_recurrence_message "$CAMERA_NAME" "$CAPTURE_RATE_BURN_LOG_LINE")" >&2
+  echo "       matched burn-instance log line: $CAPTURE_RATE_BURN_LOG_LINE" >&2
+  exit 1
+fi
+echo "    ok: no capture-rate defect recurrence in $CAMERA_NAME's journal during the recording window (${CAPTURE_RATE_WINDOW_START_EPOCH}..${CAPTURE_RATE_WINDOW_END_EPOCH}) -- also checked its burn-instance log (/tmp/cbox-burn.log, #992)"
 
 # #359: do NOT kill the painter early. frame-probe writes the ground-truth CSV ONLY on its clean
 # --duration-secs self-exit (src/probe/run.rs) — the old unconditional `pkill -x frame-probe` here
