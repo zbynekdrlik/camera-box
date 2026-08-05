@@ -320,7 +320,42 @@ pub fn is_interface_level_busid(busid: &str) -> bool {
     busid.contains(':')
 }
 
-/// #909 — RESCOPED from #717's original two-band OR (history below, kept for context). The
+/// #971 — RESCOPED AGAIN from #909 (doc below, kept for context/history — the #909 rationale
+/// about the RESET itself being harmful mid-measured-window still stands and is why this isn't
+/// simply reverted to #717's original two-band OR). Live-rig evidence (2026-08-04, cam2
+/// ShadowCast 2) showed #909's premise — "the genlock decimation gate absorbs any capture
+/// over-rate into exact NDI output by design, so the sustained band never needs to reset" — is
+/// true for RATE but NOT for MOTION CADENCE: a 63.75-64.0fps capture against a 60Hz HDMI source
+/// manufactures ~3.75 duplicate+skip pairs/s that decimation cannot cleanly undo. A 60s recording
+/// during the live incident measured 16.5% irregular optical-tick steps; a manual USB reset (the
+/// issue-656 sequence) dropped that to 0.6% by restoring 59.9-60.0fps. The defect also recurred
+/// across repeated device re-opens (2 of 4 in one day) — without automatic self-heal this needs a
+/// human to notice and manually re-run the reset every time.
+///
+/// The resolution: the JITTER band still arms immediately, unchanged (`capture_rate_health::
+/// tolerance_pct_for_model` + `CAPTURE_RATE_WARN_WINDOWS`, 30s — a real device fault genuinely
+/// beyond #685's widened per-model tolerance). The SUSTAINED band now ALSO arms, but ONLY once
+/// genuinely CHRONIC — confirmed for `capture_rate_health::CHRONIC_SUSTAINED_WARN_WINDOWS` (15
+/// min @ 5s/window, 15x the 60s bar the informational-only log at the `src/main.rs` call site
+/// still uses) consecutive report windows. #909's own finding — a reset firing mid-measured-
+/// window corrupted an E2E run, misclassified as `frozen_leg` — is exactly why this is a much
+/// longer bar than the 60s informational one, not a reversion to firing on it directly.
+/// `next_consecutive_breaches`'s existing "any healthy window resets the streak to 0" behavior
+/// (`capture_rate_health.rs`, unchanged) IS the hysteresis this needs: a borderline/flapping
+/// device can never accumulate to the 180-window chronic bar, so it can never reset-loop on this
+/// band alone. `decide_selfheal`'s existing throttle (`DEFAULT_MIN_HEAL_INTERVAL_S`, 10 min) and
+/// recurrence-escalation (`DEFAULT_RECURRENCE_WINDOW_S`/`DEFAULT_CRITICAL_ESCALATION_HEALS`) are
+/// reused UNCHANGED for this band too — no parallel throttle/escalation mechanism.
+///
+/// The caller (`src/main.rs`) computes `sustained_chronic` from a THIRD consecutive-breach
+/// counter fed by the SAME `sustained_deviant` flag the 60s-confirm `sustained_confirmed` already
+/// uses, just checked against the much longer `CHRONIC_SUSTAINED_WARN_WINDOWS` bar instead — the
+/// exact same mechanism the existing jitter/sustained split already uses (only tolerance + window
+/// count differ), never a parallel mechanism. This function stays a pure OR of two
+/// already-confirmed booleans, same shape as before this rescope.
+///
+/// ---- #909 (superseded by #971 above; kept for context/history) ----
+/// RESCOPED from #717's original two-band OR (history below, kept for context). The
 /// user's architectural ruling on #909: a grabber's own crystal/timer free-running against its
 /// HDMI input is EXPECTED, and `src/main.rs`'s genlock decimation gate (emit the first capture
 /// at/after each DanteSync wall-clock boundary, drop the rest — `CAMERA_BOX_GENLOCK_FPS`) already
@@ -335,14 +370,12 @@ pub fn is_interface_level_busid(busid: &str) -> bool {
 /// never silently dropped, only decoupled from the reset action, mirroring `self_heal_
 /// attribution.rs`'s "ALLOW never SUPPRESS" precedent (#895/#914).
 ///
-/// `sustained_confirmed` is intentionally unread here (kept as a parameter for call-site
-/// symmetry — the caller always computes both bands — and so a genuinely new escalation-worthy
-/// band could be added here later without reshaping every call site). Original #717 history: for
-/// every model except ShadowCast 2 the sustained band uses the SAME tolerance as the jitter band,
-/// so their sustained arm was always a strict superset of their jitter arm and could never fire
-/// earlier — #717 (and this #909 rescope) changes NOTHING about their self-heal cadence.
-pub fn should_trigger_selfheal(jitter_confirmed: bool, _sustained_confirmed: bool) -> bool {
-    jitter_confirmed
+/// Original #717 history: for every model except ShadowCast 2 the sustained band uses the SAME
+/// tolerance as the jitter band, so their sustained arm was always a strict superset of their
+/// jitter arm and could never fire earlier — #717 (and every rescope since) changes NOTHING
+/// about their self-heal cadence.
+pub fn should_trigger_selfheal(jitter_confirmed: bool, sustained_chronic: bool) -> bool {
+    jitter_confirmed || sustained_chronic
 }
 
 /// Perform the actual USB reset on the capture device backing `video_device_path` (e.g.
@@ -459,15 +492,27 @@ mod tests {
         assert!(should_trigger_selfheal(true, false));
     }
 
-    // #909 RED marker: this now-CORRECT expectation contradicts the CURRENT implementation
-    // (`jitter_confirmed || sustained_confirmed`), which still returns `true` here — the test
-    // fails until the GREEN commit changes `should_trigger_selfheal` to ignore the sustained
-    // band. Per the user's #909 architectural ruling: a sustained over-rate INSIDE the wide
-    // jitter envelope is absorbed by the genlock decimation gate by design, so it must never by
-    // itself escalate to a USB reset (reserved for genuine out-of-envelope faults).
+    // #971 RED marker (REPLACES the #909 test below, which pinned the OPPOSITE expectation):
+    // this now-CORRECT expectation contradicts the CURRENT implementation
+    // (`fn should_trigger_selfheal(jitter_confirmed, _sustained_confirmed) -> bool {
+    // jitter_confirmed }`, which ignores its second argument entirely) — the test fails until
+    // the GREEN commit changes `should_trigger_selfheal` to `jitter_confirmed ||
+    // sustained_chronic`. Justification for replacing (not just adding to) the #909 test: issue
+    // 971's live evidence (2026-08-04, cam2 ShadowCast 2 — 63.75-64.0fps sustained for 458
+    // consecutive report windows) showed #909's premise ("the sustained band alone is absorbed
+    // by the genlock decimation gate by design, so it must never escalate to a reset") is true
+    // for RATE but not for MOTION CADENCE — a sustained-alone over-rate manufactures a real,
+    // visible dup+skip cadence defect (measured 16.5% irregular optical-tick steps, dropping to
+    // 0.6% after a manual USB reset) that the decimation gate does not cleanly absorb. The old
+    // #909 test asserted the literal opposite of what issue 971 now requires, so it is replaced
+    // here rather than kept alongside a contradictory new one. The second argument's MEANING
+    // also changes: it is no longer the 60s-confirm `sustained_confirmed` (kept, still computed,
+    // still used for the informational-only log) but a much longer `sustained_chronic` (see
+    // `capture_rate_health::CHRONIC_SUSTAINED_WARN_WINDOWS`, 15 min) — this test only exercises
+    // the pure boolean combinator, agnostic to which counter feeds it.
     #[test]
-    fn selfheal_sustained_band_alone_no_longer_triggers_reset_909() {
-        assert!(!should_trigger_selfheal(false, true));
+    fn selfheal_triggers_on_chronic_sustained_band_alone_971() {
+        assert!(should_trigger_selfheal(false, true));
     }
 
     #[test]

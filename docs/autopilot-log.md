@@ -7264,3 +7264,30 @@ only tests+scripts), hardware "Full-path E2E" gate green (run 30944483426). Merg
 REST API (`gh pr merge` kept refusing "not up to date" per this repo's own documented `behind`-
 artifact GOTCHA). Issue 901 deliberately left OPEN (per dispatch authority) -- the supervisor
 does the live rig verification of the new whole-chain checks and closes it.
+
+- 2026-08-05 batch #971+#988 (autopilot-worker, code-only, one PR): #971 cam2 ShadowCast sustained
+  64fps over-rate must self-heal -- `should_trigger_selfheal` now `jitter_confirmed ||
+  sustained_chronic` (was `jitter_confirmed` only, issue 909). New `CHRONIC_SUSTAINED_WARN_WINDOWS`
+  (180 windows @ 5s = 15 min, 15x the existing 60s informational-only sustained-confirm bar) in
+  `capture_rate_health.rs`; `src/main.rs` checks the SAME `consecutive_sustained_breaches` streak
+  against both thresholds (self-review dropped an initially-added second counter that was always
+  numerically identical to the first -- redundant state, fixed same session). Hysteresis against
+  reset-looping comes free from the existing reset-on-any-healthy-window streak behavior;
+  `decide_selfheal`'s throttle/recurrence-escalation reused unchanged. RED `ec643c08d` -> GREEN
+  `ec2158c51` -> simplify `5a0da0c5f`. #988 rig-mode.sh gap-2 (`verify_stream_program_phase2`) now
+  runs `obs_phase2.py setup --host "$STREAM_IP" --upstream 'STRIH-SNV (2ME PGM)' --terminal` BEFORE
+  the pre-existing switch+assert -- `obs_phase2.py teardown()` unbinds `phase2-probe-src` between
+  every recording-e2e.sh run (the normal rest state), so the bare switch guaranteed a gap-2
+  false-FAIL after every E2E run including the PR-triggered hardware gate. `setup` is idempotent,
+  self-verifies the certified baseline, and switches program itself; the pre-existing switch+assert
+  stays as a cheap double-check. RED `e773be7e8` -> GREEN `f5fca9206`. Full local suite re-run after
+  the rig-mode.sh edit per the project's static-anchor discipline: 195 result-ok binaries, 0 failed,
+  0 panics, exit 0 -- no anchor collisions. Design + validated + review comments posted on both
+  issues before/after code per the standing gate. PR closes both #971 and #988 on merge; live rig
+  verification of the actual self-heal reset behavior + rig-mode.sh gap-2 on the real rig is the
+  supervisor's, per this dispatch's code-only authority (no ssh/MCP to any rig box from this
+  worker).
+  Post-review addendum: independent read-only review subagent found 0 Critical/Important code
+  defects, 3 cosmetic Minor items (2 for #971's log messages, 1 for #988's step-failure
+  attribution in rig-mode.sh's verdict line) -- all fixed same session (`6ad54fdea`, `ed1b3693a`),
+  not left as "nice to have" per this project's completion-report 🔵-findings-are-fixed policy.

@@ -753,10 +753,17 @@ async fn run_capture_loop(
         let capture_rate_tolerance_pct =
             camera_box::capture_rate_health::tolerance_pct_for_model(grabber_model);
         // #717 — SUSTAINED-band capture-rate health: a SEPARATE, narrower consecutive-breach
-        // counter/tolerance, so a genuinely chronic deviation (e.g. cam1's #674 63.9-64.0fps)
-        // still trips self-heal even when it stays comfortably inside the wide jitter-band
+        // counter/tolerance for a deviation that stays comfortably inside the wide jitter-band
         // tolerance above (#685's correct-for-short-bursts widening, which #717 leaves
-        // unchanged). See `capture_rate_health::sustained_tolerance_pct_for_model`'s doc.
+        // unchanged). The SAME streak is checked against TWO thresholds below (#971): confirmed
+        // at 60s (`SUSTAINED_WARN_WINDOWS`) it is informational-only; once it also reaches the
+        // much longer `CHRONIC_SUSTAINED_WARN_WINDOWS` (15 min) bar it trips self-heal too. One
+        // shared counter (not two) is deliberate — both checks are fed the exact SAME
+        // `sustained_deviant` flag from the exact same starting state, so a second counter would
+        // always equal this one; checking one streak against two thresholds is simpler and can
+        // never silently drift out of sync with itself. See `capture_rate_health::
+        // sustained_tolerance_pct_for_model`'s doc and `capture_rate_selfheal::
+        // should_trigger_selfheal`'s doc for the full root-cause -> approach writeup.
         let mut consecutive_sustained_breaches: u32 = 0;
         let sustained_rate_tolerance_pct =
             camera_box::capture_rate_health::sustained_tolerance_pct_for_model(grabber_model);
@@ -1309,40 +1316,81 @@ async fn run_capture_loop(
                             camera_box::capture_rate_health::SUSTAINED_WARN_WINDOWS,
                         );
 
-                        // #909 — the SUSTAINED band alone (a chronic over-rate that stays inside
-                        // the wide jitter envelope, e.g. cam1's 62-64fps) is EXPECTED grabber
-                        // behavior, not a device fault: the genlock decimation gate above already
-                        // absorbs any capture over-rate into exact NDI output by design. Log it
-                        // informational-only — never escalate to a USB reset on this band alone
-                        // (a reset firing mid-measured-window is what actually broke #909's own
-                        // E2E runs). Only when the JITTER band ALSO confirms (genuinely beyond
-                        // #685's widened per-model tolerance) does the block below fire.
-                        if sustained_confirmed && !jitter_confirmed {
+                        // #971 — CHRONIC-band check: the SAME streak (`consecutive_sustained_
+                        // breaches`) as the 60s sustained-confirm above, just held to the much
+                        // longer `CHRONIC_SUSTAINED_WARN_WINDOWS` (15 min) bar before it counts.
+                        // See `capture_rate_selfheal::should_trigger_selfheal`'s doc for the full
+                        // root-cause -> approach writeup.
+                        let sustained_chronic = camera_box::capture_rate_health::should_warn(
+                            consecutive_sustained_breaches,
+                            camera_box::capture_rate_health::CHRONIC_SUSTAINED_WARN_WINDOWS,
+                        );
+
+                        // #909/#971 — the SUSTAINED band alone (a chronic-looking over-rate that
+                        // stays inside the wide jitter envelope, e.g. cam1's 62-64fps) is EXPECTED
+                        // grabber behavior for a SHORT while — the genlock decimation gate above
+                        // absorbs any capture over-rate into exact NDI output BY DESIGN. Log it
+                        // informational-only while it's merely sustained, not yet chronic (guarded
+                        // `!sustained_chronic` so this line never claims "no USB reset triggered"
+                        // in the same window one actually does — see the #971 CHRONIC block
+                        // below). Only when the JITTER band ALSO confirms (genuinely beyond
+                        // #685's widened per-model tolerance), OR the sustained deviation has
+                        // become genuinely CHRONIC, does self-heal actually act.
+                        if sustained_confirmed && !jitter_confirmed && !sustained_chronic {
                             tracing::info!(
-                                "#717 capture-delivery-rate SUSTAINED band confirmed (informational only, see #909): {:.2} fps captured vs {:.2} fps configured/negotiated (>{:.1}% deviation sustained for {} consecutive report windows, ~{}s) — inside {}'s wide {:.1}% jitter-tolerant envelope; the genlock decimation gate absorbs this over-rate into exact NDI output by design, so NO USB reset is triggered",
+                                "#717 capture-delivery-rate SUSTAINED band confirmed (informational only FOR NOW, see #909/#971 — this escalates once chronic): {:.2} fps captured vs {:.2} fps configured/negotiated (>{:.1}% deviation sustained for {} consecutive report windows, ~{}s) — inside {}'s wide {:.1}% jitter-tolerant envelope; the genlock decimation gate absorbs this over-rate into exact NDI output by design, so NO USB reset is triggered yet (see #971: escalates to a reset if this persists to {}s)",
                                 cap_fps,
                                 configured_capture_fps,
                                 sustained_rate_tolerance_pct,
                                 consecutive_sustained_breaches,
                                 consecutive_sustained_breaches as u64 * 5,
                                 grabber_model,
-                                capture_rate_tolerance_pct
+                                capture_rate_tolerance_pct,
+                                camera_box::capture_rate_health::CHRONIC_SUSTAINED_WARN_WINDOWS
+                                    as u64
+                                    * 5
                             );
                         }
 
                         if camera_box::capture_rate_selfheal::should_trigger_selfheal(
                             jitter_confirmed,
-                            sustained_confirmed,
+                            sustained_chronic,
                         ) {
-                            tracing::warn!(
-                                "#656 capture-delivery-rate DEFECTIVE: {:.2} fps captured vs {:.2} fps configured/negotiated (>{:.1}% deviation sustained for {} consecutive report windows, ~{}s, {} tolerance) — USB-reset the capture device (see #656, #685)",
-                                cap_fps,
-                                configured_capture_fps,
-                                capture_rate_tolerance_pct,
-                                consecutive_rate_breaches,
-                                consecutive_rate_breaches as u64 * 5,
-                                grabber_model
-                            );
+                            if jitter_confirmed {
+                                // #971 review finding: when BOTH bands confirm the same window,
+                                // say so explicitly — otherwise the log reads as a plain jitter
+                                // event and hides that the sustained band has ALSO gone chronic
+                                // (harmless either way, since one reset covers both, but worth
+                                // naming for anyone reading the journal later).
+                                let chronic_note = if sustained_chronic {
+                                    " (the sustained band is ALSO chronic this window, see #971 \
+                                       — the same reset covers both)"
+                                } else {
+                                    ""
+                                };
+                                tracing::warn!(
+                                    "#656 capture-delivery-rate DEFECTIVE: {:.2} fps captured vs {:.2} fps configured/negotiated (>{:.1}% deviation sustained for {} consecutive report windows, ~{}s, {} tolerance) — USB-reset the capture device (see #656, #685){}",
+                                    cap_fps,
+                                    configured_capture_fps,
+                                    capture_rate_tolerance_pct,
+                                    consecutive_rate_breaches,
+                                    consecutive_rate_breaches as u64 * 5,
+                                    grabber_model,
+                                    chronic_note
+                                );
+                            } else {
+                                tracing::warn!(
+                                    "#971 capture-delivery-rate CHRONIC sustained-band DEFECTIVE: {:.2} fps captured vs {:.2} fps configured/negotiated (>{:.1}% deviation held for {} consecutive report windows, ~{}s — beyond the {}s chronic bar) — USB-reset the capture device (see #971, #909, #717)",
+                                    cap_fps,
+                                    configured_capture_fps,
+                                    sustained_rate_tolerance_pct,
+                                    consecutive_sustained_breaches,
+                                    consecutive_sustained_breaches as u64 * 5,
+                                    camera_box::capture_rate_health::CHRONIC_SUSTAINED_WARN_WINDOWS
+                                        as u64
+                                        * 5
+                                );
+                            }
 
                             // #663 — self-heal: the #656 fix (a manual USB reset) is only
                             // TEMPORARY — the same defect recurred within hours, three times in

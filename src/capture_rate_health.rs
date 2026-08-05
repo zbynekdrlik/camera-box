@@ -217,6 +217,25 @@ const _: () = assert!(SHADOWCAST2_SUSTAINED_TOLERANCE_PCT < SHADOWCAST2_CAPTURE_
 const _: () = assert!(SHADOWCAST2_SUSTAINED_TOLERANCE_PCT > CAPTURE_RATE_TOLERANCE_PCT);
 const _: () = assert!(SUSTAINED_WARN_WINDOWS > CAPTURE_RATE_WARN_WINDOWS);
 
+/// #971 — number of consecutive 5s report windows a SUSTAINED-band deviation must hold before it
+/// is genuinely CHRONIC — the bar `capture_rate_selfheal::should_trigger_selfheal` requires before
+/// arming an automatic USB reset off the sustained band alone (issue 909 disabled that entirely;
+/// issue 971's live evidence — 2026-08-04, cam2, 63.75-64.0fps sustained for 458 report windows —
+/// showed a sustained-only over-rate manufactures a real, visible dup+skip motion-cadence defect
+/// that the genlock decimation gate does NOT cleanly absorb, so it can no longer be tolerated
+/// forever). 180 windows @ 5s = 15 minutes — 15x `SUSTAINED_WARN_WINDOWS`'s 60s informational-only
+/// bar, so a device only ever gets automatically reset once the sustained deviation has PROVEN
+/// itself chronic, never on the same 60s signal that merely logs informational-only. The
+/// hysteresis this needs comes for free from `next_consecutive_breaches`'s existing "any healthy
+/// window resets the streak to 0" behavior (unchanged) — a borderline/flapping device can never
+/// accumulate to this bar, so it can never reset-loop on the sustained band alone.
+pub const CHRONIC_SUSTAINED_WARN_WINDOWS: u32 = 180;
+
+// #971 — the chronic bar must sit strictly beyond the 60s informational-only sustained bar (never
+// equal, never shorter) so the two log lines (informational vs reset-triggering) can never both
+// describe the exact same window.
+const _: () = assert!(CHRONIC_SUSTAINED_WARN_WINDOWS > SUSTAINED_WARN_WINDOWS);
+
 /// True when `captured_fps` deviates from `configured_fps` by more than `tolerance_pct`
 /// percent. `configured_fps <= 0.0` (or any non-finite input) is treated as "no valid
 /// configured rate to check against" — never deviant; callers only invoke this once a real
@@ -739,5 +758,91 @@ mod tests {
                 assert!(warn, "window {i} should warn");
             }
         }
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // #971 — the CHRONIC bar: a MUCH longer consecutive-window requirement than the 60s
+    // informational-only `SUSTAINED_WARN_WINDOWS`, so a sustained-alone deviation only arms an
+    // automatic USB reset once it has PROVEN itself chronic (issue 971's live evidence: a
+    // sustained-alone 63.75-64.0fps over-rate manufactures a real, visible dup+skip motion-cadence
+    // defect the genlock decimation gate cannot cleanly absorb).
+    // -----------------------------------------------------------------------------------------
+
+    #[test]
+    fn chronic_sustained_warn_windows_is_15x_the_sustained_confirm_971() {
+        assert_eq!(CHRONIC_SUSTAINED_WARN_WINDOWS, SUSTAINED_WARN_WINDOWS * 15);
+    }
+
+    #[test]
+    fn real_971_scenario_chronic_sustained_fires_exactly_at_the_configured_window_never_earlier() {
+        // #971 live incident reading: cam2 ShadowCast 2 held 63.75-64.0fps, well beyond the 2%
+        // sustained-band floor, for 458 consecutive report windows before manual intervention.
+        // Confirm the CHRONIC bar fires exactly at CHRONIC_SUSTAINED_WARN_WINDOWS, never earlier
+        // — including a run that has ALREADY passed the 60s informational-only bar but not yet
+        // the chronic one (borderline/short sustained must NOT trigger).
+        let tol = sustained_tolerance_pct_for_model(GrabberModel::ShadowCast2);
+        let mut consecutive = 0u32;
+        for i in 1..=(CHRONIC_SUSTAINED_WARN_WINDOWS + 2) {
+            let deviant = is_rate_deviant(63.75, 60.0, tol);
+            assert!(deviant);
+            consecutive = next_consecutive_breaches(consecutive, deviant);
+            let chronic = should_warn(consecutive, CHRONIC_SUSTAINED_WARN_WINDOWS);
+            if i < CHRONIC_SUSTAINED_WARN_WINDOWS {
+                assert!(!chronic, "window {i} must not be chronic yet");
+            } else {
+                assert!(chronic, "window {i} must be chronic");
+            }
+        }
+    }
+
+    #[test]
+    fn sustained_confirmed_at_60s_is_not_yet_chronic_971() {
+        // A run that reaches (and holds at) the 60s informational-only SUSTAINED_WARN_WINDOWS bar
+        // — the exact borderline the #909 informational log fires on — must NOT also count as
+        // CHRONIC. Borderline/short sustained does not arm self-heal.
+        let tol = sustained_tolerance_pct_for_model(GrabberModel::ShadowCast2);
+        let mut consecutive = 0u32;
+        for _ in 0..SUSTAINED_WARN_WINDOWS {
+            let deviant = is_rate_deviant(64.0, 60.0, tol);
+            consecutive = next_consecutive_breaches(consecutive, deviant);
+        }
+        assert!(
+            should_warn(consecutive, SUSTAINED_WARN_WINDOWS),
+            "sanity: the 60s informational bar must have fired by now"
+        );
+        assert!(
+            !should_warn(consecutive, CHRONIC_SUSTAINED_WARN_WINDOWS),
+            "60s of sustained deviation alone must not yet count as CHRONIC (15 min bar)"
+        );
+    }
+
+    #[test]
+    fn flapping_device_never_reaches_the_chronic_bar_971() {
+        // Hysteresis proof: a borderline device that alternates long deviant runs with single
+        // healthy windows (never holding continuously long enough) must NEVER reach the chronic
+        // bar, even though its CUMULATIVE deviant-window count over time far exceeds
+        // CHRONIC_SUSTAINED_WARN_WINDOWS. This is what prevents a flapping device from ever
+        // reset-looping on the sustained band alone.
+        let tol = sustained_tolerance_pct_for_model(GrabberModel::ShadowCast2);
+        let mut consecutive = 0u32;
+        let mut any_chronic = false;
+        let run_len = CHRONIC_SUSTAINED_WARN_WINDOWS - 1; // always just short of chronic
+        for _cycle in 0..10 {
+            for _ in 0..run_len {
+                let deviant = is_rate_deviant(64.0, 60.0, tol);
+                consecutive = next_consecutive_breaches(consecutive, deviant);
+                any_chronic |= should_warn(consecutive, CHRONIC_SUSTAINED_WARN_WINDOWS);
+            }
+            // One healthy window resets the streak — the device "flaps" back to healthy briefly.
+            let healthy = is_rate_deviant(60.0, 60.0, tol);
+            assert!(!healthy);
+            consecutive = next_consecutive_breaches(consecutive, healthy);
+            assert_eq!(consecutive, 0, "a healthy window must reset the streak");
+        }
+        assert!(
+            !any_chronic,
+            "a device that never holds deviant continuously for the full chronic bar must \
+             never be classified chronic, no matter how many cumulative deviant windows it logs"
+        );
     }
 }
