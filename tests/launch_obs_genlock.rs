@@ -296,7 +296,7 @@ fn program_gates_on_session_visibility_978() {
 fn program_without_ahk_watcher_session_gate_has_no_real_ahk_check_978() {
     let p = run_sourced("build_launch_program 'C:\\Program Files\\obs-studio' 0 0");
     assert!(
-        p.contains("SessProcs.Count -ne 1") && p.contains("SessionId -ne 1"),
+        p.contains("$sessObsProcs.Count -ne 1") && p.contains("$sessProc.SessionId -ne 1"),
         "#978: the obs64 session check must survive has_ahk=0 untouched. Program:\n{p}"
     );
     assert!(
