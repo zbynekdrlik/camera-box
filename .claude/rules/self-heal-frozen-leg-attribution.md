@@ -21,11 +21,26 @@ both funnel into the SAME `SelfHealDecision::Heal` reset — which logs a THIRD,
 `"#663 self-heal: USB reset attempt #N succeeded"`.
 
 `scripts/lib/capture-rate-guard.sh`'s existing mid-recording recheck (`[7b/8]` in
-`recording-e2e.sh`, a separate, already-shipped ticket) greps ONLY the `#656` jitter text. A reset
-triggered via the `#717` sustained band alone — exactly cam1's own characterized deviation (~2-3%,
-inside the wide jitter tolerance but past the narrower sustained one) — is therefore INVISIBLE to
-that check, reaches `recording-verdict.rs` unflagged, and its resulting duplicate/stale frames get
-classified `frozen_leg` on the camera.
+`recording-e2e.sh`, a separate, already-shipped ticket) originally grepped ONLY the `#656` jitter
+text. A reset triggered via the `#717` sustained band alone — exactly cam1's own characterized
+deviation (~2-3%, inside the wide jitter tolerance but past the narrower sustained one) — was
+therefore INVISIBLE to that check, reached `recording-verdict.rs` unflagged, and its resulting
+duplicate/stale frames got classified `frozen_leg` on the camera.
+
+**UPDATE (issue 992 / PR #993, 2026-08-05) — the `[7b/8]` check now reads BOTH journald AND the
+burn-instance's own log (`/tmp/cbox-burn.log` — the E2E harness stops `camera-box.service` and
+runs the burn as a transient systemd-run unit logging straight to that file, so journald alone is
+blind to the actual recording window), and its bands are SPLIT by severity:**
+- **HARD (`exit 1`):** `capture_rate_defect_grep_pattern_hard()` = `#656 ... DEFECTIVE` |
+  `#971 ... CHRONIC sustained-band DEFECTIVE` | `#663 self-heal: USB reset attempt` — genuine
+  defect declarations plus the shared reset EVENT line (the lesson below, applied).
+- **REPORT-ONLY (loud `WARNING #992:` line, never aborts):** `capture_rate_sustained_band_grep_pattern()`
+  = `#717 ... SUSTAINED band confirmed` — informational by design (the issue-909 section below:
+  the decimation gate absorbs over-rate; dupe-preferring as of issue 889), and CHRONIC on the
+  ShadowCast (redevelops ~2 min after any device open), so hard-failing on its mere presence made
+  the gate permanently red and aborted runs before the verdict — the copies/gaps windows in the
+  verdict are the real harm arbiter. The two bands are grepped SEPARATELY, hard first, so a
+  `tail -1` landing on a sustained line can never mask a reset.
 
 **The generalizable lesson: when a mid-recording forensic check greps for a detection-band's WARN
 text to catch a downstream EVENT, and the event has more than one independent trigger path, key on
