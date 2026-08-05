@@ -1,0 +1,16 @@
+[Unit]
+# Fires the #979 obs64/AHK session-visibility watchdog every ~5 min -- closes the gap #977's
+# per-PR E2E gate can't (the rig can degrade BETWEEN pushes; issue 958's real incident sat
+# invisible for ~3.5h before the user found it manually).
+# SHIPS DISABLED -- enabled/live-verified by the supervisor only. See the README.
+Description=Run the camera-box obs64/AHK session-visibility watchdog every ~5 min (#979)
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+Persistent=false
+
+[Install]
+WantedBy=timers.target

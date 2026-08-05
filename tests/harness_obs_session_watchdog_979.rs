@@ -194,7 +194,11 @@ fn both_boxes_healthy_never_alerts() {
     let h = Harness::new(HEALTHY);
     let (code, _out, err) = h.run_main();
     assert_eq!(code, 0, "stderr={err}");
-    assert_eq!(h.notify_call_count(), 0, "both boxes healthy must never alert");
+    assert_eq!(
+        h.notify_call_count(),
+        0,
+        "both boxes healthy must never alert"
+    );
 }
 
 #[test]
@@ -203,7 +207,11 @@ fn both_invisible_alerts_after_confirm_threshold_default_2() {
     // pass 1: confirm=1 for each box, no alert yet (default threshold 2)
     let (code1, _out1, err1) = h.run_main();
     assert_eq!(code1, 0, "stderr={err1}");
-    assert_eq!(h.notify_call_count(), 0, "first invisible pass must not alert yet");
+    assert_eq!(
+        h.notify_call_count(),
+        0,
+        "first invisible pass must not alert yet"
+    );
     // pass 2 (same state file): confirm=2 for each box, both alert -- one call per box
     let (code2, _out2, err2) = h.run_main();
     assert_eq!(code2, 0, "stderr={err2}");
