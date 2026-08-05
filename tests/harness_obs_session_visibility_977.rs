@@ -305,3 +305,67 @@ fn recording_e2e_calls_both_boxes_and_exits_1_on_failure() {
         "the failure text must embed the exact recovery command. Window:\n{window}"
     );
 }
+
+/// Deep-review finding (requesting-code-review pass on PR 989): `win_ssh_run` "BLOCKS until the
+/// remote command exits ... the CALLER must bound it with an outer `timeout` if a wedge must not
+/// hang forever" (its own doc comment). This [0/8] step runs FIRST, before every other gate, and
+/// the two new calls had NO timeout bound -- unlike this same file's own established precedent
+/// for this exact call shape (the [4b2/8] audio preflight's `timeout "$AUDIO_PREFLIGHT_SSH_TIMEOUT"
+/// bash -c '. "$1"; win_ssh_run ...'` wrapper, needed because `timeout` execvp()s its command
+/// directly and cannot invoke a shell FUNCTION). Both new win_ssh_run calls must use the SAME
+/// wrapper shape.
+#[test]
+fn recording_e2e_bounds_both_win_ssh_run_calls_with_an_outer_timeout() {
+    let body = read("scripts/recording-e2e.sh");
+    let window = &body[body
+        .find("obs64/AHK session-visibility gate")
+        .expect("banner must exist")..];
+    let window = &window[..window.len().min(2500)];
+    let strih_call_pos = window
+        .find("win_ssh_run \"$STRIH_USER\"")
+        .expect("a direct win_ssh_run call for strih must exist somewhere in this window");
+    let preceding = &window[..strih_call_pos];
+    assert!(
+        preceding
+            .rfind("timeout ")
+            .map(|p| strih_call_pos - p < 200)
+            .unwrap_or(false),
+        "the strih win_ssh_run call must be preceded closely by a `timeout ` wrapper (mirrors \
+         AUDIO_PREFLIGHT_SSH_TIMEOUT's own bash -c wrapper -- `timeout` cannot execvp() a shell \
+         function directly). Window:\n{window}"
+    );
+    let stream_call_pos = window
+        .find("win_ssh_run \"$STREAM_USER\"")
+        .expect("a direct win_ssh_run call for stream must exist somewhere in this window");
+    let preceding_stream = &window[..stream_call_pos];
+    assert!(
+        preceding_stream
+            .rfind("timeout ")
+            .map(|p| stream_call_pos - p < 200)
+            .unwrap_or(false),
+        "the stream win_ssh_run call must ALSO be preceded closely by a `timeout ` wrapper. \
+         Window:\n{window}"
+    );
+}
+
+/// Deep-review finding: the stream recovery message said "win-stream MCP Shell" -- every OTHER
+/// reference to stream's MCP shell in this file (and the actual tool, mcp__win-stream-snv__*)
+/// says "win-stream-snv". An operator hunting for a nonexistent "win-stream" tool during a real
+/// incident is exactly the failure this must avoid.
+#[test]
+fn recording_e2e_stream_recovery_message_names_the_correct_mcp_tool() {
+    let body = read("scripts/recording-e2e.sh");
+    let window = &body[body
+        .find("obs64/AHK session-visibility gate")
+        .expect("banner must exist")..];
+    let window = &window[..window.len().min(2500)];
+    assert!(
+        window.contains("win-stream-snv MCP Shell"),
+        "the stream recovery message must name the real tool, win-stream-snv (not win-stream). \
+         Window:\n{window}"
+    );
+    assert!(
+        !window.contains("win-stream MCP Shell"),
+        "must not carry the wrong ('win-stream', missing '-snv') tool name. Window:\n{window}"
+    );
+}
