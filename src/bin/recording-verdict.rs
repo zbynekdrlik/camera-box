@@ -4122,7 +4122,7 @@ fn build_and_print_verdict(
                     // (ticket 889 comment 5196190653): a loud WARN naming EVERY reason a window's
                     // STRICT verdict (`s.pass`) is false — whether or not that reason still gates
                     // `overall_pass`. Since the re-gate, `copies`/`gaps` are ONLY rescued WITHIN
-                    // the per-window singleton tolerance (`seg.copies_gaps_tolerance`) — OVER it,
+                    // the per-window tolerance (`seg.copies_gaps_tolerance`) — OVER it,
                     // the window fails `relaxed_pass` again, so the `else` branch below is no
                     // longer only `frame_count == 0` and must name the real reason(s).
                     if !s.pass {
@@ -4261,10 +4261,10 @@ fn build_and_print_verdict(
                 //
                 // 2026-08-05 RE-GATE (ticket 889 comment 5196190653): `windows_failed_report_only`
                 // (the STRICT absolute-zero count) no longer describes what actually gates
-                // `overall_pass` — that is now `windows_over_copies_gaps_tolerance` (the singleton
-                // tolerance, `seg.copies_gaps_tolerance`). Name the tolerance explicitly so a
-                // reader never mistakes "no longer gates" (no longer true) for the current
-                // behavior.
+                // `overall_pass` — that is now `windows_over_copies_gaps_tolerance` (the
+                // per-window tolerance, `seg.copies_gaps_tolerance`). Name the tolerance
+                // explicitly so a reader never mistakes "no longer gates" (no longer true) for
+                // the current behavior.
                 println!(
                     "  ⚠ #889 STRICT-ZERO (report-only): {}/{} cambox window(s) would FAIL the \
                      pre-889 absolute-zero copies/gaps rule (windows_failed_report_only) — this \
@@ -7615,9 +7615,10 @@ mod tests {
 
     /// Issue 889 re-gate (2026-08-05 ROZHODNUTÉ, ticket 889 comment 5196190653) end-to-end: a
     /// SINGLE stale/frozen painted-tick copy in the single all-cambox window (undecodable=0) sits
-    /// AT the singleton tolerance (`copies<=1`) — it must still be COMPUTED and printed in the
-    /// verdict JSON, must still fail that window's STRICT `pass`, but must NOT fail
-    /// `all_cambox_continuity.overall_pass` (the tolerance absorbs exactly one copy) — and
+    /// WITHIN the per-window tolerance (`copies<=WINDOW_COPIES_GAPS_TOLERANCE`, recalibrated 1 → 2
+    /// on 2026-08-06, ticket 889 comment 5198131539) — it must still be COMPUTED and printed in
+    /// the verdict JSON, must still fail that window's STRICT `pass`, but must NOT fail
+    /// `all_cambox_continuity.overall_pass` (the tolerance absorbs a single copy either way) — and
     /// `windows_failed_report_only` must still report it (strict-zero visibility is unaffected by
     /// the re-gate). Renamed from `..._copy_alone_is_report_only_end_to_end_889` — the old name
     /// implied copies never gate at all, which stopped being true once the re-gate landed; a
@@ -7738,22 +7739,28 @@ mod tests {
         );
         assert_eq!(
             seg["copies_gaps_tolerance"],
-            serde_json::json!(1),
-            "889 re-gate: the tolerance value must be echoed in the JSON: {seg}"
+            serde_json::json!(2),
+            "889 re-gate: the tolerance value must be echoed in the JSON (recalibrated 1 -> 2 on \
+             2026-08-06, ticket 889 comment 5198131539): {seg}"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Issue 889 re-gate (2026-08-05 ROZHODNUTÉ) differential proof: `overall_pass` must swing
-    /// from PASS to FAIL exactly at the singleton-tolerance boundary, and must NOT swing at all
-    /// when copies/gaps stay AT the tolerance (even combined). Uses the SAME differential-fixture
-    /// technique issue 914's `frozen_leg_and_self_heal_reset_no_longer_gate_the_overall_verdict_914`
-    /// established: build otherwise-IDENTICAL fixtures varying only the defect under test, and diff
-    /// `overall_pass` against a clean baseline, rather than asserting an absolute value (many other
-    /// unrelated gates also fold into `overall_pass`).
+    /// Issue 889 re-gate (2026-08-05 ROZHODNUTÉ, recalibrated 1 → 2 on 2026-08-06, ticket 889
+    /// comment 5198131539) differential proof: `overall_pass` must swing from PASS to FAIL exactly
+    /// at the tolerance boundary, and must NOT swing at all when copies/gaps stay AT the tolerance
+    /// (even combined). Uses the SAME differential-fixture technique issue 914's
+    /// `frozen_leg_and_self_heal_reset_no_longer_gate_the_overall_verdict_914` established: build
+    /// otherwise-IDENTICAL fixtures varying only the defect under test, and diff `overall_pass`
+    /// against a clean baseline, rather than asserting an absolute value (many other unrelated
+    /// gates also fold into `overall_pass`). Renamed from
+    /// `..._singleton_tolerance_boundary_...` — "singleton" (implying exactly one) stopped being
+    /// an accurate description once the tolerance became 2; the fixtures below now build AT the
+    /// tolerance and tolerance+1 through the const instead of hardcoded pre-recalibration
+    /// literals, so this test tracks whatever the tolerance is calibrated to.
     #[test]
-    fn copies_gaps_singleton_tolerance_boundary_gates_overall_pass_889_regate() {
+    fn copies_gaps_tolerance_boundary_gates_overall_pass_889_regate() {
         use super::{build_and_print_verdict, Cam1Source, DecodedRec};
         use clap::Parser;
 
@@ -7876,23 +7883,28 @@ mod tests {
             "sanity: the clean fixture must pass: {clean}"
         );
 
-        // (a) BOTH terms AT the singleton tolerance simultaneously -- must NOT swing overall_pass.
-        let at_tolerance = build_fixture("at-tolerance", base, &sched, 1, 1);
+        // Fixture knobs are `u32`; the const is `u32` too, so these read straight from it instead
+        // of hardcoding the pre-recalibration boundary (1/2) -- this test self-adjusts with any
+        // future recalibration of `WINDOW_COPIES_GAPS_TOLERANCE`.
+        let tolerance = camera_box::window_gate::WINDOW_COPIES_GAPS_TOLERANCE;
+
+        // (a) BOTH terms AT the tolerance simultaneously -- must NOT swing overall_pass.
+        let at_tolerance = build_fixture("at-tolerance", base, &sched, tolerance, tolerance);
         let at_seg = &at_tolerance["all_cambox_continuity"];
         assert_eq!(
             at_seg["segments"][0]["copies"],
-            serde_json::json!(1),
+            serde_json::json!(tolerance),
             "{at_seg}"
         );
         assert_eq!(
             at_seg["segments"][0]["gaps"],
-            serde_json::json!(1),
+            serde_json::json!(tolerance),
             "{at_seg}"
         );
         assert_eq!(
             clean["all_cambox_continuity"]["overall_pass"], at_seg["overall_pass"],
-            "889 re-gate: copies=1 AND gaps=1 together must be a no-op on overall_pass (both at \
-             the singleton tolerance): clean={clean}, at_tolerance={at_tolerance}"
+            "889 re-gate: copies AND gaps together must be a no-op on overall_pass (both at the \
+             tolerance): clean={clean}, at_tolerance={at_tolerance}"
         );
         assert_eq!(
             at_seg["windows_over_copies_gaps_tolerance"],
@@ -7901,11 +7913,11 @@ mod tests {
         );
 
         // (b) copies alone OVER tolerance -- must swing overall_pass to FAIL.
-        let copies_over = build_fixture("copies-over", base, &sched, 2, 0);
+        let copies_over = build_fixture("copies-over", base, &sched, tolerance + 1, 0);
         let copies_seg = &copies_over["all_cambox_continuity"];
         assert_eq!(
             copies_seg["segments"][0]["copies"],
-            serde_json::json!(2),
+            serde_json::json!(tolerance + 1),
             "{copies_seg}"
         );
         assert_eq!(
@@ -7915,8 +7927,8 @@ mod tests {
         );
         assert_ne!(
             clean["all_cambox_continuity"]["overall_pass"], copies_seg["overall_pass"],
-            "889 re-gate: 2 copies exceeds the singleton tolerance -- overall_pass must swing to \
-             FAIL: clean={clean}, copies_over={copies_over}"
+            "889 re-gate: copies over the tolerance -- overall_pass must swing to FAIL: \
+             clean={clean}, copies_over={copies_over}"
         );
         assert_eq!(
             copies_seg["overall_pass"],
@@ -7930,7 +7942,7 @@ mod tests {
         );
 
         // (c) gaps alone OVER tolerance -- must swing overall_pass to FAIL.
-        let gaps_over = build_fixture("gaps-over", base, &sched, 0, 2);
+        let gaps_over = build_fixture("gaps-over", base, &sched, 0, tolerance + 1);
         let gaps_seg = &gaps_over["all_cambox_continuity"];
         assert_eq!(
             gaps_seg["segments"][0]["copies"],
@@ -7939,13 +7951,13 @@ mod tests {
         );
         assert_eq!(
             gaps_seg["segments"][0]["gaps"],
-            serde_json::json!(2),
+            serde_json::json!(tolerance + 1),
             "{gaps_seg}"
         );
         assert_ne!(
             clean["all_cambox_continuity"]["overall_pass"], gaps_seg["overall_pass"],
-            "889 re-gate: 2 gaps exceeds the singleton tolerance -- overall_pass must swing to \
-             FAIL: clean={clean}, gaps_over={gaps_over}"
+            "889 re-gate: gaps over the tolerance -- overall_pass must swing to FAIL: \
+             clean={clean}, gaps_over={gaps_over}"
         );
         assert_eq!(
             gaps_seg["overall_pass"],
@@ -8088,8 +8100,9 @@ mod tests {
     /// per-window `copies`/`gaps`/`undecodable` data -- their own `gates_overall_pass` JSON
     /// fields must read `false`, always. **2026-08-05 RE-GATE (ticket 889 comment 5196190653):**
     /// this fixture's "genuinely HARD-FROZEN" window is built from `copies=5` (density-based,
-    /// see the `frozen` block below) -- FAR over the per-window singleton tolerance
-    /// (`crate::window_gate::WINDOW_COPIES_GAPS_TOLERANCE`), so the UNDERLYING data now
+    /// see the `frozen` block below) -- FAR over the per-window tolerance (recalibrated 1 → 2 on
+    /// 2026-08-06, ticket 889 comment 5198131539:
+    /// `crate::window_gate::WINDOW_COPIES_GAPS_TOLERANCE`), so the UNDERLYING data now
     /// correctly fails `overall_pass` again via the re-gate, independent of whatever
     /// `frozen_leg`/`self_heal_reset` report. Renamed from `..._no_longer_gate_the_overall_
     /// verdict_914` -- that claim is no longer true for a window this badly frozen; the
@@ -8277,15 +8290,15 @@ mod tests {
             "914: same for self_heal_reset: {with_events}"
         );
         // 889 re-gate: the fixture's own copies=5 (against frames=25, density 0.20 -- the exact
-        // shape the frozen_leg classifier needs to prove DENSITY, not just count) is FAR over
-        // the singleton tolerance, so this window (and therefore `all_cambox_continuity.
-        // overall_pass` specifically) now correctly FAILS again -- this is the re-gate doing its
-        // job, not frozen_leg/self_heal_reset (which stay report-only, per the two assertions
-        // immediately above). Scoped to `all_cambox_continuity.overall_pass`, NOT the top-level
-        // `overall_pass` -- this short synthetic fixture (a few seconds) always fails the
-        // UNRELATED `full_chain` 300s duration floor regardless of copies/gaps, so the top-level
-        // field is not a valid proxy for what this test is isolating (the same reason the
-        // ORIGINAL 914 test used a differential rather than an absolute assertion).
+        // shape the frozen_leg classifier needs to prove DENSITY, not just count) is FAR over the
+        // tolerance (recalibrated 1 → 2 on 2026-08-06), so this window (and therefore
+        // `all_cambox_continuity.overall_pass` specifically) now correctly FAILS again -- this is
+        // the re-gate doing its job, not frozen_leg/self_heal_reset (which stay report-only, per
+        // the two assertions immediately above). Scoped to `all_cambox_continuity.overall_pass`,
+        // NOT the top-level `overall_pass` -- this short synthetic fixture (a few seconds) always
+        // fails the UNRELATED `full_chain` 300s duration floor regardless of copies/gaps, so the
+        // top-level field is not a valid proxy for what this test is isolating (the same reason
+        // the ORIGINAL 914 test used a differential rather than an absolute assertion).
         assert_eq!(
             clean["all_cambox_continuity"]["overall_pass"],
             serde_json::json!(true),
@@ -8294,7 +8307,7 @@ mod tests {
         assert_eq!(
             with_events["all_cambox_continuity"]["overall_pass"],
             serde_json::json!(false),
-            "889 re-gate: copies=5 far exceeds the singleton tolerance -- \
+            "889 re-gate: copies=5 far exceeds the tolerance -- \
              all_cambox_continuity.overall_pass must FAIL again, even though \
              frozen_leg/self_heal_reset themselves stay report-only: {with_events}"
         );
@@ -8317,7 +8330,7 @@ mod tests {
         // which fails unconditionally on this ~2s synthetic recording regardless of self-heal).
         //
         // The frozen term is no longer isolable on its own (a genuinely HARD-FROZEN window needs
-        // `copies` far past the singleton tolerance, which by itself already fails
+        // `copies` far past the tolerance, which by itself already fails
         // `all_cambox_continuity.overall_pass`). `self_heal_reset` IS still isolable: build a
         // fixture IDENTICAL to a clean baseline except for ONE unattributed self-heal event, with
         // the confounding span floor cleared via `--min-secs 0` (the fixture's `strih` node

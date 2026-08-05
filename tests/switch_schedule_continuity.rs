@@ -66,24 +66,26 @@ fn clean_two_cambox_run_passes_overall() {
 }
 
 #[test]
-fn one_cambox_dropping_of_two_exceeds_tolerance_fails_overall_889_regate() {
+fn one_cambox_dropping_of_three_exceeds_tolerance_fails_overall_889_regate() {
     // Issue 889 (2026-07-30 user decision on issue 883) originally made `gaps` fully
-    // report-only. The 2026-08-05 RE-GATE (ticket 889 comment 5196190653) re-introduced a
-    // per-window SINGLETON tolerance (`crate::window_gate::WINDOW_COPIES_GAPS_TOLERANCE`) — this
-    // fixture's gap of 2 (the seam skips two painted-tick slots) EXCEEDS that tolerance, so
-    // `overall_pass` now correctly FAILS again, exactly like the STRICT per-cambox verdict
-    // already did. Renamed from `..._889_relaxes_overall` -- that claim is no longer true for a
-    // 2-slot drop.
+    // report-only. The 2026-08-05 RE-GATE (ticket 889 comment 5196190653), recalibrated 1 -> 2 on
+    // 2026-08-06 (ticket 889 comment 5198131539), re-introduced a per-window tolerance
+    // (`crate::window_gate::WINDOW_COPIES_GAPS_TOLERANCE`) — this fixture's gap of 3 (the seam
+    // skips three painted-tick slots, tolerance+1) EXCEEDS that tolerance, so `overall_pass` now
+    // correctly FAILS again, exactly like the STRICT per-cambox verdict already did. Renamed from
+    // `one_cambox_dropping_of_two_exceeds_tolerance_..._889_regate` (which was itself renamed
+    // from `..._889_relaxes_overall`) — the fixture now sits at tolerance+1 (3, not 2) so this
+    // test tracks whatever the tolerance is calibrated to.
     let schedule = parse_switch_schedule(two_window_schedule_json()).expect("schedule parses");
     let mut frames = clean_window_frames(0, 0, 1000); // cam1 clean
 
     // cam2: inject a REAL gap deep in the settled core (gen_ts 2.5s into its window) — the painted
-    // tick jumps by 6 (3 step-2 slots) where it should jump by 2, well past the guard.
+    // tick jumps by 8 (4 step-2 slots) where it should jump by 2, well past the guard.
     let mut cam2 = clean_window_frames(5 * S, 1000, 9000);
     let mid = cam2.len() / 2;
     for f in cam2.iter_mut().skip(mid) {
         if let Some(t) = f.tick.as_mut() {
-            *t += 4; // shift the tail up by 4 → a 6-step jump at the seam (a 2-frame drop)
+            *t += 6; // shift the tail up by 6 → an 8-step jump at the seam (a 3-frame drop)
         }
     }
     frames.extend(cam2);
@@ -97,18 +99,18 @@ fn one_cambox_dropping_of_two_exceeds_tolerance_fails_overall_889_regate() {
         v.segments[1]
     );
     assert_eq!(
-        v.segments[1].gaps, 2,
-        "889 re-gate: a 2-slot drop exceeds the singleton tolerance: {:?}",
+        v.segments[1].gaps, 3,
+        "889 re-gate: a 3-slot drop exceeds the tolerance: {:?}",
         v.segments[1]
     );
     assert!(
         !v.segments[1].relaxed_pass,
-        "889 re-gate: cam2's gaps=2 exceeds the singleton tolerance -- relaxed must fail: {:?}",
+        "889 re-gate: cam2's gaps=3 exceeds the tolerance -- relaxed must fail: {:?}",
         v.segments[1]
     );
     assert!(
         !v.overall_pass,
-        "889 re-gate: a 2-slot drop must fail overall_pass again: {v:?}"
+        "889 re-gate: a 3-slot drop must fail overall_pass again: {v:?}"
     );
     assert_eq!(v.windows_failed_report_only, 1);
     assert_eq!(

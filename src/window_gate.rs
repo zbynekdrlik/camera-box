@@ -30,6 +30,23 @@
 //! the exact same shape this module already established for `copies`/`gaps` — see
 //! `crate::optical_floor::gates_overall_pass` for the seam and restore path (issue 905).
 //!
+//! ## 2026-08-06 RECALIBRATION — tolerance 1 → 2 (issue 889 comment 5198131539)
+//!
+//! The tolerance above was calibrated from n=2 hardware runs (max 1 copy AND max 1 gap per
+//! window each). A THIRD valid run (same commit, same rig, the transient rig anomaly from a
+//! failed first attempt having cleared) measured the SAME order of total residual burden per run
+//! (~5-7 copies + ~5-7 gaps) but showed it can randomly CLUSTER onto fewer windows — per-window
+//! max across the three healthy runs is `{1, 1, 2}`, not a flat `1`. At tolerance=1 the gate was
+//! flaky by construction: a healthy run has a real chance of a window landing on 2 defects purely
+//! by how the same fixed total happens to distribute, and would FAIL a run that is not actually
+//! anomalous. Tolerance=2 absorbs that measured clustering while preserving full discrimination —
+//! the genuine anomaly (the failed first attempt) measured 9-15 copies and 8-15 gaps on EVERY
+//! window, 4.5x and more over the new threshold, so the re-gate still catches it every time. The
+//! rejected alternative (leave tolerance at 1 and re-run until a healthy run happens to pass) is
+//! the banned blind-rerun pattern — gambling on clustering instead of measuring it, ~40 min per
+//! rig cycle, and a gate that stays flaky for every future PR. See ticket 889 comment 5198131539
+//! for the full evidence (three run IDs, per-window breakdowns) this recalibration is based on.
+//!
 //! ## Why this lives at the crate root (default features), not in `probe`
 //!
 //! Same reasoning as `optical_floor.rs` / `av_window.rs`'s `#861` relaxation: the whole `probe`
@@ -49,16 +66,25 @@
 //! `probe::recording_segments::CamboxSegment::pass` has always held) alongside the NEW relaxed
 //! verdict the caller actually folds into `overall_pass`.
 
-/// The per-window SINGLETON tolerance applied to `copies`/`gaps` when folding them back into
-/// `relaxed_pass`/`overall_pass` (2026-08-05 re-gate, ticket 889 comment 5196190653). Hardcoded,
-/// no env knob — a silent env default is exactly how "temporary" becomes permanent (the original
-/// issue-889 requirement 4), and this repo's standing rule is that a needed capability is always
-/// ON by default, never a forgettable toggle (`features-default-on-never-forgettable-toggle` in
-/// the project memory). A window with `copies > WINDOW_COPIES_GAPS_TOLERANCE` OR `gaps >
-/// WINDOW_COPIES_GAPS_TOLERANCE` fails [`WindowGateDecision::relaxed_pass`] again; at or under the
-/// tolerance it is absorbed (still visible via `strict_pass` / the #889 per-window WARN, never
-/// silent). See the module doc above for the measured evidence this value was calibrated against.
-pub const WINDOW_COPIES_GAPS_TOLERANCE: u32 = 1;
+/// The per-window tolerance applied to `copies`/`gaps` when folding them back into
+/// `relaxed_pass`/`overall_pass` (2026-08-05 re-gate, ticket 889 comment 5196190653; recalibrated
+/// 1 → 2 on 2026-08-06, ticket 889 comment 5198131539). Hardcoded, no env knob — a silent env
+/// default is exactly how "temporary" becomes permanent (the original issue-889 requirement 4),
+/// and this repo's standing rule is that a needed capability is always ON by default, never a
+/// forgettable toggle (`features-default-on-never-forgettable-toggle` in the project memory). A
+/// window with `copies > WINDOW_COPIES_GAPS_TOLERANCE` OR `gaps > WINDOW_COPIES_GAPS_TOLERANCE`
+/// fails [`WindowGateDecision::relaxed_pass`] again; at or under the tolerance it is absorbed
+/// (still visible via `strict_pass` / the #889 per-window WARN, never silent).
+///
+/// **Calibration basis (issue 889 comment 5198131539):** three valid hardware runs on the same
+/// fix (PR #993's dupe-preferring decimation) measured a per-window max of `{1, 1, 2}` copies/gaps
+/// while carrying the same ~5-7-per-run total residual burden, randomly clustered — tolerance=1
+/// was calibrated on only two of those runs and is flaky by construction (a healthy run can land
+/// 2 defects on one window purely by clustering). The genuine anomaly run measured 9-15 copies and
+/// 8-15 gaps on EVERY window (4.5x+ over this threshold), so tolerance=2 keeps full discrimination
+/// against a real regression while no longer flaking on healthy clustering. See the module doc's
+/// 2026-08-06 RECALIBRATION section above for the full rationale and the rejected alternative.
+pub const WINDOW_COPIES_GAPS_TOLERANCE: u32 = 2;
 
 /// The strict-vs-relaxed decision for one cambox window, given its already-computed counts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,20 +96,20 @@ pub struct WindowGateDecision {
     /// The verdict actually folded into `overall_pass`. Issue 889 (2026-07-30): `frame_count > 0
     /// && <undecodable within the #881 floor>`. 2026-08-05 RE-GATE: gained `&& copies <=
     /// WINDOW_COPIES_GAPS_TOLERANCE && gaps <= WINDOW_COPIES_GAPS_TOLERANCE` — `copies`/`gaps` are
-    /// no longer fully report-only, they are tolerated up to the singleton threshold and gate
-    /// again above it.
+    /// no longer fully report-only, they are tolerated up to the calibrated per-window threshold
+    /// and gate again above it.
     pub relaxed_pass: bool,
 }
 
 impl WindowGateDecision {
-    /// `true` exactly when THIS window's `copies`/`gaps` term being WITHIN the singleton
-    /// tolerance (2026-08-05 re-gate) and/or the optical undecodable floor (issue 915) is the
-    /// reason `strict_pass` and `relaxed_pass` disagree — i.e. some report-only/tolerance
-    /// relaxation, and only that, is doing work on this window. `frame_count == 0` fails BOTH
-    /// verdicts unconditionally (an absent cambox proves nothing either way, never rescued) — see
-    /// `zero_frames_fails_both_verdicts_889` below. A window whose `copies`/`gaps` EXCEED the
-    /// tolerance fails both verdicts too (not rescued) — see the `..._over_singleton_tolerance_..`
-    /// tests below.
+    /// `true` exactly when THIS window's `copies`/`gaps` term being WITHIN the per-window
+    /// tolerance (2026-08-05 re-gate, recalibrated 2026-08-06) and/or the optical undecodable
+    /// floor (issue 915) is the reason `strict_pass` and `relaxed_pass` disagree — i.e. some
+    /// report-only/tolerance relaxation, and only that, is doing work on this window.
+    /// `frame_count == 0` fails BOTH verdicts unconditionally (an absent cambox proves nothing
+    /// either way, never rescued) — see `zero_frames_fails_both_verdicts_889` below. A window
+    /// whose `copies`/`gaps` EXCEED the tolerance fails both verdicts too (not rescued) — see the
+    /// `..._over_tolerance_..` tests below.
     pub fn relaxed_by_889(&self) -> bool {
         !self.strict_pass && self.relaxed_pass
     }
@@ -102,7 +128,8 @@ pub fn decide(frame_count: u32, undecodable: u32, copies: u32, gaps: u32) -> Win
     // that one function back to `true` (see its own doc for the full restore path on issue 905).
     //
     // 2026-08-05 RE-GATE: `copies`/`gaps` re-join the relaxed verdict, but only above the
-    // singleton tolerance -- see `WINDOW_COPIES_GAPS_TOLERANCE`'s own doc for the decision record.
+    // per-window tolerance -- see `WINDOW_COPIES_GAPS_TOLERANCE`'s own doc for the decision
+    // record (recalibrated 1 -> 2 on 2026-08-06, ticket 889 comment 5198131539).
     let within_tolerance =
         copies <= WINDOW_COPIES_GAPS_TOLERANCE && gaps <= WINDOW_COPIES_GAPS_TOLERANCE;
     let relaxed_pass = frame_count > 0
@@ -139,8 +166,8 @@ pub enum RelaxedFailureReason {
     /// takes priority over every other reason: a 0-frame window's `copies`/`gaps`/`undecodable`
     /// counts carry no meaningful signal.
     EmptyWindow,
-    /// `copies` and/or `gaps` exceed the per-window singleton tolerance (the 2026-08-05 re-gate,
-    /// [`WINDOW_COPIES_GAPS_TOLERANCE`]).
+    /// `copies` and/or `gaps` exceed the per-window tolerance (the 2026-08-05 re-gate,
+    /// recalibrated 2026-08-06, [`WINDOW_COPIES_GAPS_TOLERANCE`]).
     OverCopiesGapsTolerance,
     /// The issue-881 optical undecodable floor is exceeded AND it currently gates `overall_pass`
     /// (`crate::optical_floor::gates_overall_pass() == true` -- the issue-905 restore-path state).
@@ -190,49 +217,63 @@ mod tests {
     use super::*;
 
     #[test]
-    fn copies_at_singleton_tolerance_fails_strict_but_passes_relaxed_889() {
+    fn tolerance_is_calibrated_at_two_889_recalibration() {
+        // Pins the calibrated NUMBER itself, not just its use through the const (2026-08-06
+        // recalibration, ticket 889 comment 5198131539): three valid hardware runs measured a
+        // per-window max of {1, 1, 2} copies/gaps on the same fix, so tolerance=1 (calibrated on
+        // only two of those runs) was flaky by construction. See the const's own doc and the
+        // module doc's 2026-08-06 RECALIBRATION section for the full evidence.
+        assert_eq!(WINDOW_COPIES_GAPS_TOLERANCE, 2);
+    }
+
+    #[test]
+    fn copies_at_tolerance_fails_strict_but_passes_relaxed_889() {
         // Finding 4 of the issue-889 re-gate review: renamed from
         // `copies_alone_fails_strict_but_passes_relaxed_889` -- that name/message implied "copies
-        // alone can never fail relaxed", which was true pre-re-gate but is no longer true (2+
-        // copies fails relaxed again, see `copies_over_singleton_tolerance_fails_relaxed_889_regate`
-        // below). The fixture value (1) is load-bearing: it passes ONLY because it sits AT the
-        // singleton tolerance, not because "copies" is exempt.
-        let d = decide(100, 0, 1, 0);
+        // alone can never fail relaxed", which was true pre-re-gate but is no longer true (over
+        // the tolerance fails relaxed again, see `copies_over_tolerance_fails_relaxed_889_regate`
+        // below). 2026-08-06 recalibration: renamed again from
+        // `copies_at_singleton_tolerance_...` -- "singleton" (implying exactly one) stopped being
+        // an accurate description once the tolerance became 2. The fixture value tracks the const
+        // (not a literal) so this test self-adjusts with any future recalibration; it is
+        // load-bearing that it sits AT the tolerance, not under it.
+        let d = decide(100, 0, WINDOW_COPIES_GAPS_TOLERANCE, 0);
         assert!(
             !d.strict_pass,
             "a copy must still fail the strict verdict: {d:?}"
         );
         assert!(
             d.relaxed_pass,
-            "889 re-gate: 1 copy is AT the singleton tolerance, not over it -- must not fail \
-             relaxed: {d:?}"
+            "re-gate: copies AT the tolerance boundary, not over it, must not fail relaxed: {d:?}"
         );
         assert!(d.relaxed_by_889());
     }
 
     #[test]
-    fn gap_alone_within_tolerance_fails_strict_but_passes_relaxed_889() {
-        // 2026-08-05 re-gate (issue 889 ROZHODNUTÉ): a single gap sits AT the singleton
-        // tolerance -- still must not fail relaxed.
-        let d = decide(100, 0, 0, 1);
+    fn gap_alone_at_tolerance_fails_strict_but_passes_relaxed_889() {
+        // 2026-08-05 re-gate (issue 889 ROZHODNUTÉ), recalibrated 2026-08-06 (comment 5198131539):
+        // a gap AT the tolerance boundary -- still must not fail relaxed.
+        let d = decide(100, 0, 0, WINDOW_COPIES_GAPS_TOLERANCE);
         assert!(!d.strict_pass);
         assert!(
             d.relaxed_pass,
-            "889 re-gate: a single gap (at the singleton tolerance) must not fail relaxed: {d:?}"
+            "re-gate: a gap AT the tolerance boundary must not fail relaxed: {d:?}"
         );
         assert!(d.relaxed_by_889());
     }
 
     #[test]
-    fn copies_over_singleton_tolerance_fails_relaxed_889_regate() {
-        // 2026-08-05 re-gate: 2 copies exceeds the singleton tolerance (<=1) -- the window must
+    fn copies_over_tolerance_fails_relaxed_889_regate() {
+        // 2026-08-06 recalibration: renamed from `copies_over_singleton_tolerance_...` -- the
+        // fixture now sits at tolerance+1 (3) so this test tracks whatever the const is
+        // calibrated to instead of hardcoding the pre-recalibration boundary (2). The window must
         // FAIL the relaxed verdict again (this is the whole point of the re-gate: a return of the
         // issue-971 regression class, 10-45 copies/window, must fail loudly).
-        let d = decide(100, 0, 2, 0);
+        let d = decide(100, 0, WINDOW_COPIES_GAPS_TOLERANCE + 1, 0);
         assert!(!d.strict_pass);
         assert!(
             !d.relaxed_pass,
-            "889 re-gate: 2 copies exceeds the singleton tolerance -- must fail relaxed again: {d:?}"
+            "re-gate: copies over the tolerance -- must fail relaxed again: {d:?}"
         );
         assert!(
             !d.relaxed_by_889(),
@@ -241,27 +282,35 @@ mod tests {
     }
 
     #[test]
-    fn gaps_over_singleton_tolerance_fails_relaxed_889_regate() {
-        // 2026-08-05 re-gate: 2 gaps exceeds the singleton tolerance (<=1) -- must fail relaxed.
-        let d = decide(100, 0, 0, 2);
+    fn gaps_over_tolerance_fails_relaxed_889_regate() {
+        // 2026-08-06 recalibration: renamed from `gaps_over_singleton_tolerance_...`; fixture
+        // tracks the const (tolerance+1) instead of a hardcoded pre-recalibration literal.
+        let d = decide(100, 0, 0, WINDOW_COPIES_GAPS_TOLERANCE + 1);
         assert!(!d.strict_pass);
         assert!(
             !d.relaxed_pass,
-            "889 re-gate: 2 gaps exceeds the singleton tolerance -- must fail relaxed again: {d:?}"
+            "re-gate: gaps over the tolerance -- must fail relaxed again: {d:?}"
         );
         assert!(!d.relaxed_by_889());
     }
 
     #[test]
-    fn copies_and_gaps_both_at_singleton_tolerance_pass_relaxed_889_regate() {
-        // Mirrors the measured residual the threshold decision was calibrated against (run
-        // 31033239950 attempt 1, comment id 5195798868): windows with 1 copy AND 1 gap
-        // simultaneously, fully absorbed by the singleton tolerance.
-        let d = decide(100, 0, 1, 1);
+    fn copies_and_gaps_both_at_tolerance_pass_relaxed_889_regate() {
+        // Mirrors the measured residual the ORIGINAL (2026-08-05) threshold decision was
+        // calibrated against (run 31033239950 attempt 1, comment id 5195798868): windows with
+        // copies AND gaps simultaneously AT the tolerance, fully absorbed. 2026-08-06
+        // recalibration: renamed from `..._both_at_singleton_tolerance_...`, fixture now tracks
+        // the const (2, not the pre-recalibration 1).
+        let d = decide(
+            100,
+            0,
+            WINDOW_COPIES_GAPS_TOLERANCE,
+            WINDOW_COPIES_GAPS_TOLERANCE,
+        );
         assert!(!d.strict_pass);
         assert!(
             d.relaxed_pass,
-            "889 re-gate: copies=1 AND gaps=1 together must still pass relaxed (both at tolerance): {d:?}"
+            "re-gate: copies AND gaps together must still pass relaxed (both at tolerance): {d:?}"
         );
         assert!(d.relaxed_by_889());
     }
@@ -269,12 +318,19 @@ mod tests {
     #[test]
     fn copies_and_gaps_together_over_tolerance_fail_relaxed_889_regate() {
         // 2026-08-05 re-gate: both terms over tolerance together must fail relaxed -- this is the
-        // exact pre-fix regression shape (the original issue-889 failing evidence).
-        let d = decide(100, 0, 2, 3);
+        // exact pre-fix regression shape (the original issue-889 failing evidence). 2026-08-06
+        // recalibration: fixtures now sit at tolerance+1/tolerance+2 so this stays "both terms
+        // over, asymmetric" regardless of the calibrated tolerance value.
+        let d = decide(
+            100,
+            0,
+            WINDOW_COPIES_GAPS_TOLERANCE + 1,
+            WINDOW_COPIES_GAPS_TOLERANCE + 2,
+        );
         assert!(!d.strict_pass);
         assert!(
             !d.relaxed_pass,
-            "889 re-gate: copies=2 AND gaps=3 both exceed the singleton tolerance -- must fail relaxed: {d:?}"
+            "re-gate: copies AND gaps both exceed the tolerance -- must fail relaxed: {d:?}"
         );
         assert!(!d.relaxed_by_889());
     }
@@ -351,24 +407,32 @@ mod tests {
 
     #[test]
     fn relaxed_failure_reasons_over_copies_tolerance_889_regate() {
-        // copies=2 exceeds the singleton tolerance; undecodable=0 stays within the floor -- the
-        // ONLY reason is OverCopiesGapsTolerance.
-        let reasons = relaxed_failure_reasons(100, 0, 2, 0);
+        // 2026-08-06 recalibration: fixture tracks tolerance+1 (3) instead of the
+        // pre-recalibration hardcoded 2. undecodable=0 stays within the floor -- the ONLY reason
+        // is OverCopiesGapsTolerance.
+        let reasons = relaxed_failure_reasons(100, 0, WINDOW_COPIES_GAPS_TOLERANCE + 1, 0);
         assert_eq!(reasons, vec![RelaxedFailureReason::OverCopiesGapsTolerance]);
     }
 
     #[test]
     fn relaxed_failure_reasons_within_tolerance_and_floor_is_empty_889_regate() {
-        // Finding 6 coverage: copies=1 AND gaps=1 sit AT the singleton tolerance (not over it),
-        // and undecodable=0 is within the floor -- a window with these counts does not actually
-        // fail `relaxed_pass` (see `copies_and_gaps_both_at_singleton_tolerance_pass_relaxed_889_
-        // regate` above), so it has NO failure reason. This function is only ever called by
+        // Finding 6 coverage: copies AND gaps sit AT the tolerance (not over it), and
+        // undecodable=0 is within the floor -- a window with these counts does not actually fail
+        // `relaxed_pass` (see `copies_and_gaps_both_at_tolerance_pass_relaxed_889_regate` above),
+        // so it has NO failure reason. This function is only ever called by
         // `recording-verdict.rs` on a window that already failed `relaxed_pass` -- this test just
         // pins the seam's own boundary behavior independent of that call-site discipline.
-        let reasons = relaxed_failure_reasons(100, 0, 1, 1);
+        // 2026-08-06 recalibration: fixture tracks the const instead of the pre-recalibration
+        // hardcoded 1.
+        let reasons = relaxed_failure_reasons(
+            100,
+            0,
+            WINDOW_COPIES_GAPS_TOLERANCE,
+            WINDOW_COPIES_GAPS_TOLERANCE,
+        );
         assert!(
             reasons.is_empty(),
-            "copies=1 gaps=1 are both AT tolerance -- no failure reason applies: {reasons:?}"
+            "copies/gaps both AT tolerance -- no failure reason applies: {reasons:?}"
         );
     }
 
@@ -387,8 +451,10 @@ mod tests {
         // Finding 2's "else-arm" scenario: a window can fail overall_pass via OverCopiesGapsTolerance
         // while ALSO carrying an over-floor undecodable count that is merely report-only today --
         // both reasons are returned so the caller can print both, instead of the old code's
-        // misleading "currently gates overall_pass" wording for the floor half.
-        let reasons = relaxed_failure_reasons(10, 5, 2, 0);
+        // misleading "currently gates overall_pass" wording for the floor half. 2026-08-06
+        // recalibration: fixture tracks tolerance+1 (3) instead of the pre-recalibration
+        // hardcoded 2.
+        let reasons = relaxed_failure_reasons(10, 5, WINDOW_COPIES_GAPS_TOLERANCE + 1, 0);
         assert_eq!(
             reasons,
             vec![

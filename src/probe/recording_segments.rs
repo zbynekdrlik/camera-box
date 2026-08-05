@@ -40,9 +40,10 @@
 //!   `copies`/`gaps` NOT participating at all, and (issue 915, 2026-08-01 user decision) neither
 //!   does the #881 optical floor while `crate::optical_floor::gates_overall_pass()` is `false`.
 //!   **2026-08-05 RE-GATE (ticket 889 comment 5196190653): `copies`/`gaps` re-joined this field,
-//!   gated by a per-window SINGLETON tolerance** (`crate::window_gate::WINDOW_COPIES_GAPS_TOLERANCE`,
-//!   currently 1) — at or under the tolerance the window still passes; over it, `relaxed_pass`
-//!   fails again. This is the verdict `overall_pass` folds; `pass` stays strict and is never
+//!   gated by a per-window tolerance** (`crate::window_gate::WINDOW_COPIES_GAPS_TOLERANCE`,
+//!   recalibrated 1 → 2 on 2026-08-06, ticket 889 comment 5198131539) — at or under the tolerance
+//!   the window still passes; over it, `relaxed_pass` fails again. This is the verdict
+//!   `overall_pass` folds; `pass` stays strict and is never
 //!   silently dropped (it drives the issue-889 per-window WARN). Computed by
 //!   [`crate::window_gate::decide`] — see that module for the full decision record. The whole-run
 //!   `overall_pass` ALSO computes the SUM of `undecodable` across every window against its own
@@ -147,9 +148,10 @@ pub struct CamboxSegment {
     /// Issue 889 (2026-07-30 user decision on issue 883): the verdict actually folded into
     /// `overall_pass` — `frame_count > 0`, originally WITHOUT `copies`/`gaps` at all. **2026-08-05
     /// RE-GATE (ticket 889 comment 5196190653): `copies`/`gaps` re-joined this field, gated by a
-    /// per-window SINGLETON tolerance** (`crate::window_gate::WINDOW_COPIES_GAPS_TOLERANCE`) — a
-    /// window with `copies` or `gaps` at or under the tolerance still passes here; over it, this
-    /// field fails again (see `SegmentedContinuity::windows_over_copies_gaps_tolerance`). Issue
+    /// per-window tolerance** (`crate::window_gate::WINDOW_COPIES_GAPS_TOLERANCE`, recalibrated
+    /// 1 → 2 on 2026-08-06) — a window with `copies` or `gaps` at or under the tolerance still
+    /// passes here; over it, this field fails again (see
+    /// `SegmentedContinuity::windows_over_copies_gaps_tolerance`). Issue
     /// 915 (2026-08-01 user decision): the `<undecodable within the #881 floor>` term ALSO stopped
     /// participating here while `crate::optical_floor::gates_overall_pass()` is `false` — see that
     /// function's doc for the restore path on issue 905. Computed by
@@ -192,8 +194,9 @@ pub struct SegmentedContinuity {
     /// on issue 883): this folds `relaxed_pass`, NOT the strict `pass`** (see
     /// `windows_failed_report_only` below and `crate::window_gate` for the full decision record).
     /// **2026-08-05 RE-GATE: `relaxed_pass` itself now requires `copies`/`gaps` to stay within the
-    /// per-window singleton tolerance** (`crate::window_gate::WINDOW_COPIES_GAPS_TOLERANCE`) — the
-    /// terms are no longer FULLY report-only, see `windows_over_copies_gaps_tolerance` below.
+    /// per-window tolerance** (`crate::window_gate::WINDOW_COPIES_GAPS_TOLERANCE`, recalibrated
+    /// 1 → 2 on 2026-08-06) — the terms are no longer FULLY report-only, see
+    /// `windows_over_copies_gaps_tolerance` below.
     /// **Issue 915 (2026-08-01 user decision): the run-wide undecodable floor ALSO stopped gating
     /// this field — see `run_wide_undecodable_within_floor` and
     /// `crate::optical_floor::gates_overall_pass` for the decision record and restore path (issue
@@ -228,12 +231,13 @@ pub struct SegmentedContinuity {
     /// even when `true`, so a passing run's headroom is visible too — mirrors
     /// `windows_failed_report_only`'s issue-889 visibility precedent.
     pub run_wide_undecodable_within_floor: bool,
-    /// 2026-08-05 re-gate (ticket 889 comment 5196190653) — the per-window SINGLETON tolerance
-    /// actually applied when folding `copies`/`gaps` into `relaxed_pass`/`overall_pass`
+    /// 2026-08-05 re-gate (ticket 889 comment 5196190653, recalibrated 1 → 2 on 2026-08-06) — the
+    /// per-window tolerance actually applied when folding `copies`/`gaps` into
+    /// `relaxed_pass`/`overall_pass`
     /// (`crate::window_gate::WINDOW_COPIES_GAPS_TOLERANCE`), echoed here so the verdict JSON is
     /// self-describing without needing the binary's source. Always serialized.
     pub copies_gaps_tolerance: u32,
-    /// 2026-08-05 re-gate — how many windows exceed the singleton tolerance on `copies` AND/OR
+    /// 2026-08-05 re-gate — how many windows exceed the per-window tolerance on `copies` AND/OR
     /// `gaps` (i.e. `copies > copies_gaps_tolerance || gaps > copies_gaps_tolerance`) — these are
     /// the windows that DO fail `overall_pass` again, as distinct from
     /// [`Self::windows_failed_report_only`] (which counts the STRICT absolute-zero failures that
@@ -428,8 +432,8 @@ pub fn segment_continuity(
     // never gated on `overall_pass`'s own value.
     let windows_failed_report_only = segments.iter().filter(|s| !s.pass).count() as u32;
 
-    // 2026-08-05 re-gate -- how many windows exceed the singleton tolerance on copies AND/OR gaps
-    // (the windows that DO gate `overall_pass` again, per `seg.relaxed_pass` above). Computed
+    // 2026-08-05 re-gate -- how many windows exceed the per-window tolerance on copies AND/OR
+    // gaps (the windows that DO gate `overall_pass` again, per `seg.relaxed_pass` above). Computed
     // directly from the same counts `crate::window_gate::decide` already folded into
     // `relaxed_pass`, so this can never disagree with what actually gated the run.
     let copies_gaps_tolerance = crate::window_gate::WINDOW_COPIES_GAPS_TOLERANCE;
@@ -678,18 +682,21 @@ mod tests {
     }
 
     #[test]
-    fn gap_of_two_exceeds_singleton_tolerance_fails_overall_pass_889_regate() {
-        // cam1 clean; cam2 has a tick that skips by 3 (a real drop at step 1: 502,503 absent),
-        // i.e. gaps=2. Issue 889 (2026-07-30 user decision on issue 883) originally made `gaps`
-        // fully report-only here; the 2026-08-05 RE-GATE (ticket 889 comment 5196190653)
-        // re-introduced a per-window SINGLETON tolerance (`crate::window_gate::
-        // WINDOW_COPIES_GAPS_TOLERANCE`, currently 1) — gaps=2 EXCEEDS that tolerance, so this
-        // window (and therefore the run) now correctly FAILS `overall_pass` again. Renamed from
-        // `..._889_relaxes_overall_pass` — that name is no longer true for a 2-gap window; the
-        // STRICT per-window `pass` still catches it exactly as before (unchanged).
+    fn gap_of_three_exceeds_tolerance_fails_overall_pass_889_regate() {
+        // cam1 clean; cam2 has a tick that skips by 4 (a real drop at step 1: 502,503,504
+        // absent), i.e. gaps=3. Issue 889 (2026-07-30 user decision on issue 883) originally made
+        // `gaps` fully report-only here; the 2026-08-05 RE-GATE (ticket 889 comment 5196190653)
+        // re-introduced a per-window tolerance (`crate::window_gate::
+        // WINDOW_COPIES_GAPS_TOLERANCE`, recalibrated 1 -> 2 on 2026-08-06, ticket 889 comment
+        // 5198131539) — gaps=3 EXCEEDS that tolerance, so this window (and therefore the run) now
+        // correctly FAILS `overall_pass` again. Renamed from
+        // `gap_of_two_exceeds_singleton_tolerance_..._889_regate` (which was itself renamed from
+        // `..._889_relaxes_overall_pass`) — the fixture now sits at tolerance+1 (3, not 2) so this
+        // test tracks whatever the tolerance is calibrated to; the STRICT per-window `pass` still
+        // catches it exactly as before (unchanged).
         let schedule = vec![win("cam1", 0, 1000), win("cam2", 1000, 2000)];
         let mut frames = clean_frames(0, 100, 6, 1, 100);
-        // cam2: 500,501,504,505 — 502,503 absent (a real gap), step 1.
+        // cam2: 500,501,505,506 — 502,503,504 absent (a real gap), step 1.
         frames.extend([
             SegmentFrame {
                 frame_index: 100,
@@ -704,18 +711,18 @@ mod tests {
             SegmentFrame {
                 frame_index: 102,
                 gen_ts_ns: 1300,
-                tick: Some(504),
+                tick: Some(505),
             },
             SegmentFrame {
                 frame_index: 103,
                 gen_ts_ns: 1400,
-                tick: Some(505),
+                tick: Some(506),
             },
         ]);
         let v = segment_continuity(&frames, &schedule, 0, 1);
         assert_eq!(
-            v.segments[1].gaps, 2,
-            "isolates a 2-gap window: {:?}",
+            v.segments[1].gaps, 3,
+            "isolates a 3-gap window: {:?}",
             v.segments[1]
         );
         assert!(v.segments[0].pass, "cam1 still clean: {:?}", v.segments[0]);
@@ -726,12 +733,12 @@ mod tests {
         );
         assert!(
             !v.segments[1].relaxed_pass,
-            "889 re-gate: cam2's gaps=2 exceeds the singleton tolerance -- relaxed must fail: {:?}",
+            "889 re-gate: cam2's gaps=3 exceeds the tolerance -- relaxed must fail: {:?}",
             v.segments[1]
         );
         assert!(
             !v.overall_pass,
-            "889 re-gate: a 2-gap window must fail overall_pass again: {v:?}"
+            "889 re-gate: an over-tolerance gap window must fail overall_pass again: {v:?}"
         );
         assert_eq!(v.segments[1].undecodable, 0);
         assert_eq!(v.segments[1].copies, 0);
@@ -1349,10 +1356,11 @@ mod tests {
         // The SAME step-2 data judged at expected_step=1 (no decimation expected) flags gaps —
         // proving the step parameter actually drives the check (a mutant fixing step→1 fails).
         // Issue 889 (2026-07-30 user decision on issue 883) originally made gaps fully
-        // report-only. The 2026-08-05 RE-GATE (ticket 889 comment 5196190653) re-introduced a
-        // per-window SINGLETON tolerance (`crate::window_gate::WINDOW_COPIES_GAPS_TOLERANCE`) —
-        // this fixture's gaps (9, far over the tolerance) now correctly fails `overall_pass`
-        // again, exactly like the STRICT per-window `pass` already did.
+        // report-only. The 2026-08-05 RE-GATE (ticket 889 comment 5196190653, recalibrated 1 -> 2
+        // on 2026-08-06) re-introduced a per-window tolerance
+        // (`crate::window_gate::WINDOW_COPIES_GAPS_TOLERANCE`) — this fixture's gaps (9, far over
+        // the tolerance either way) now correctly fails `overall_pass` again, exactly like the
+        // STRICT per-window `pass` already did.
         let schedule = vec![win("cam1", 0, 100_000)];
         let frames = clean_frames(0, 1000, 10, 2, 1000);
         let v = segment_continuity(&frames, &schedule, 0, 1);
@@ -1363,7 +1371,7 @@ mod tests {
         assert!(v.segments[0].gaps >= 1, "gaps flagged: {:?}", v.segments[0]);
         assert!(
             !v.segments[0].relaxed_pass,
-            "889 re-gate: gaps=9 far exceeds the singleton tolerance -- relaxed must fail: {v:?}"
+            "889 re-gate: gaps=9 far exceeds the tolerance -- relaxed must fail: {v:?}"
         );
         assert!(
             !v.overall_pass,
@@ -1859,12 +1867,15 @@ mod tests {
         assert_eq!(v.windows_failed_report_only, 1);
     }
 
-    // ---- issue 889 re-gate (2026-08-05 ROZHODNUTÉ): singleton copies/gaps tolerance ----
+    // ---- issue 889 re-gate (2026-08-05 ROZHODNUTÉ, recalibrated 2026-08-06): copies/gaps
+    // tolerance ----
 
     #[test]
     fn windows_over_copies_gaps_tolerance_889_regate() {
-        // 3 windows: cam1 clean, cam2 has 2 copies (OVER the singleton tolerance -- must gate
-        // overall_pass again), cam3 clean.
+        // 3 windows: cam1 clean, cam2 has 3 copies (OVER the tolerance, recalibrated 1 -> 2 on
+        // 2026-08-06, ticket 889 comment 5198131539 -- must gate overall_pass again), cam3 clean.
+        // Renamed the fixture's copy count from 2 to 3 (tolerance+1) so it stays genuinely
+        // over-tolerance after the recalibration.
         let schedule = vec![
             win("cam1", 0, 1000),
             win("cam2", 1000, 3000),
@@ -1886,16 +1897,21 @@ mod tests {
                 frame_index: 102,
                 gen_ts_ns: 1300,
                 tick: Some(500),
-            }, // cam2 copy #2 -- over the singleton tolerance
+            }, // cam2 copy #2 -- AT the tolerance
             SegmentFrame {
                 frame_index: 103,
                 gen_ts_ns: 1400,
+                tick: Some(500),
+            }, // cam2 copy #3 -- over the tolerance
+            SegmentFrame {
+                frame_index: 104,
+                gen_ts_ns: 1500,
                 tick: Some(501),
             },
         ]);
         frames.extend(clean_frames(3000, 100, 4, 1, 900));
         let v = segment_continuity(&frames, &schedule, 0, 1);
-        assert_eq!(v.segments[1].copies, 2, "{:?}", v.segments[1]);
+        assert_eq!(v.segments[1].copies, 3, "{:?}", v.segments[1]);
         assert_eq!(
             v.segments[1].gaps, 0,
             "isolates copies alone: {:?}",
@@ -1908,7 +1924,7 @@ mod tests {
         );
         assert!(
             !v.segments[1].relaxed_pass,
-            "889 re-gate: 2 copies exceeds the singleton tolerance -- relaxed must fail too: {:?}",
+            "889 re-gate: 3 copies exceeds the tolerance -- relaxed must fail too: {:?}",
             v.segments[1]
         );
         assert!(
@@ -1932,7 +1948,9 @@ mod tests {
     #[test]
     fn windows_at_copies_gaps_tolerance_still_pass_overall_889_regate() {
         // Same shape as `windows_failed_report_only_counts_strict_failures_across_a_mixed_run_889`
-        // (cam2 has exactly 1 copy) -- proves the tolerance value itself, not just its absence.
+        // -- proves the tolerance value itself, not just its absence. 2026-08-06 recalibration
+        // (ticket 889 comment 5198131539): cam2 now carries 2 copies (the recalibrated tolerance
+        // value, was 1 pre-recalibration) so this stays AT the boundary rather than under it.
         let schedule = vec![
             win("cam1", 0, 1000),
             win("cam2", 1000, 2000),
@@ -1949,19 +1967,24 @@ mod tests {
                 frame_index: 101,
                 gen_ts_ns: 1200,
                 tick: Some(500),
-            }, // cam2 copy -- AT the singleton tolerance
+            }, // cam2 copy #1 -- AT the tolerance
             SegmentFrame {
                 frame_index: 102,
                 gen_ts_ns: 1300,
+                tick: Some(500),
+            }, // cam2 copy #2 -- AT the tolerance
+            SegmentFrame {
+                frame_index: 103,
+                gen_ts_ns: 1400,
                 tick: Some(501),
             },
         ]);
         frames.extend(clean_frames(2000, 100, 4, 1, 900));
         let v = segment_continuity(&frames, &schedule, 0, 1);
-        assert_eq!(v.segments[1].copies, 1, "{:?}", v.segments[1]);
+        assert_eq!(v.segments[1].copies, 2, "{:?}", v.segments[1]);
         assert!(
             v.segments[1].relaxed_pass,
-            "889 re-gate: a single copy stays within tolerance: {:?}",
+            "889 re-gate: copies AT the tolerance stay within it: {:?}",
             v.segments[1]
         );
         assert!(

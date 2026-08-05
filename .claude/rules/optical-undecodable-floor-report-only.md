@@ -56,14 +56,16 @@ Before issue 915, `!s.pass && !s.relaxed_pass` could ONLY mean `frame_count == 0
 over-floor `undecodable` (the two were coupled in one `if/else`). Issue 915 made the optical floor
 independently report-only, so a window could trip it while still passing `relaxed_pass` (`!floor_ok`
 prints the #915 line). **The 2026-08-05 RE-GATE (ticket 889 comment 5196190653) then took
-`copies`/`gaps` back OUT of "always report-only"**: above the per-window singleton tolerance
-(`crate::window_gate::WINDOW_COPIES_GAPS_TOLERANCE`) they are a real, loud, gating failure again
+`copies`/`gaps` back OUT of "always report-only"**: above the per-window tolerance
+(`crate::window_gate::WINDOW_COPIES_GAPS_TOLERANCE`, recalibrated 1 → 2 on 2026-08-06, ticket 889
+comment 5198131539 — three valid hardware runs measured a per-window max of `{1, 1, 2}`, so
+tolerance=1 was flaky by construction) they are a real, loud, gating failure again
 (`SegmentedContinuity::windows_over_copies_gaps_tolerance`) — only AT OR UNDER the tolerance do
 they stay absorbed (the `copies != 0 || gaps != 0` "#889 WITHIN TOLERANCE" print, still inside the
 `s.relaxed_pass == true` branch).
 
 Consequently the `else` branch (BOTH verdicts fail) is no longer just `frame_count == 0` — it is
-`frame_count == 0`, OR `copies`/`gaps` over the singleton tolerance (the dominant real-world cause
+`frame_count == 0`, OR `copies`/`gaps` over the tolerance (the dominant real-world cause
 today, since `gates_overall_pass()` is still hardcoded `false`), OR — once issue 905 restores
 `gates_overall_pass()` to `true` — an over-floor `undecodable`. `recording-verdict.rs` derives
 these via the pure, Tier-0-testable seam `crate::window_gate::relaxed_failure_reasons` /
