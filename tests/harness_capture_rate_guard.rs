@@ -878,8 +878,8 @@ fn recording_e2e_post_check_also_scans_the_burn_instance_log_when_journald_is_cl
 }
 
 #[test]
-fn recording_e2e_post_check_uses_the_hard_pattern_at_both_call_sites_never_the_removed_all_pattern(
-) {
+fn recording_e2e_post_check_uses_the_hard_pattern_at_both_call_sites_never_the_removed_all_pattern()
+{
     let s = read("scripts/recording-e2e.sh");
     assert!(
         !s.contains("capture_rate_defect_grep_pattern_all"),
@@ -956,9 +956,15 @@ fn recording_e2e_post_check_sustained_band_is_report_only_never_aborts() {
          informational by design (issue 909: absorbed by the genlock decimation gate). \
          Region:\n{journald_sustained_region}"
     );
+    // The "WARNING #992:" text itself lives inside capture_rate_sustained_band_warn_message's
+    // OWN echo (scripts/lib/capture-rate-guard.sh), not in recording-e2e.sh's source text -- so
+    // the caller-side region check is for the CALL to that formatter, not the literal string
+    // (that literal-text contract is pinned separately, on the formatter itself, by
+    // sustained_band_warn_message_is_loud_names_the_journal_and_never_exits above).
     assert!(
-        journald_sustained_region.contains("WARNING #992"),
-        "issue 992 ROZHODNUTÉ: a sustained-band match must print a loud WARNING #992 line. \
-         Region:\n{journald_sustained_region}"
+        journald_sustained_region.contains("capture_rate_sustained_band_warn_message"),
+        "issue 992 ROZHODNUTÉ: a journald-side sustained-band match must be reported via the \
+         dedicated WARN formatter, in this same tightly-scoped region (not just somewhere in \
+         the wider check block). Region:\n{journald_sustained_region}"
     );
 }

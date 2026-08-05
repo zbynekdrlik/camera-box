@@ -124,25 +124,44 @@ capture_rate_recurrence_message() {
   fi
 }
 
-# (#992) capture_rate_defect_grep_pattern_all -> the EXTENDED alternation the mid-recording [7b/8]
-# #705 check greps for, covering every band that can indicate a capture-rate defect is active --
-# not just the #656 jitter WARN the narrow capture_rate_defect_grep_pattern (above) matches. The
-# rig-validated #889 failure mode (ShadowCast sustained ~62-64fps, INSIDE the widened #685 jitter
-# tolerance) trips only the #717 SUSTAINED band (informational-only, no reset yet) or the #971
-# CHRONIC band, never the #656 jitter WARN -- so the narrow pattern alone would still miss it even
-# once the journald-blindness below is fixed. #663 is the shared self-heal-RESET event line
-# (src/main.rs's SelfHealDecision::Heal arm, the SAME line self_heal_reset_grep_pattern in
-# scripts/lib/self-heal-attribution.sh keys on) -- included here too since a reset having fired at
-# all is itself proof a defect recurred, even if this check never sees the upstream band that
-# triggered it. Deliberately NOT reusing/replacing capture_rate_defect_grep_pattern -- the [0/8]
-# PRE-run preflight (which greps that narrow pattern) is unrelated to this mid-recording ticket and
-# stays untouched.
-capture_rate_defect_grep_pattern_all() {
-  echo '#656 capture-delivery-rate DEFECTIVE|#717 capture-delivery-rate SUSTAINED band confirmed|#971 capture-delivery-rate CHRONIC sustained-band DEFECTIVE|#663 self-heal: USB reset attempt'
+# (#992 ROZHODNUTÉ -- supervisor, gate rerun 31028767542 evidence, see issue 992 comment
+# https://github.com/zbynekdrlik/camera-box/issues/992#issuecomment-5195254731)
+#
+# capture_rate_defect_grep_pattern_hard -> the alternation for the bands that are genuine defect
+# DECLARATIONS or EVENTS, and must still abort the run (exit 1): #656 (the original jitter WARN,
+# src/capture_rate_health.rs), #971 (the CHRONIC sustained-band escalation -- the appliance's own
+# escalation policy already decided this is a defect), and #663 (the shared self-heal-RESET event
+# line, src/main.rs's SelfHealDecision::Heal arm, the SAME line self_heal_reset_grep_pattern in
+# scripts/lib/self-heal-attribution.sh keys on -- a reset having fired at all is itself proof a
+# defect recurred and the window may be invalid, e.g. device renumbering).
+#
+# Deliberately EXCLUDES #717 SUSTAINED (see capture_rate_sustained_band_grep_pattern below): the
+# rig-validated issue 889 failure mode (ShadowCast sustained ~62-64fps, INSIDE the widened #685
+# jitter tolerance) trips ONLY the #717 band, which is informational by design (issue 909: the
+# genlock decimation gate absorbs the over-rate into exact NDI output before it ever reaches a
+# real defect) -- hard-failing this gate on that band recreates the issue-909 mistake one layer
+# up, since the over-rate is CHRONIC on cam1's ShadowCast 2 (redevelops ~2min after any fresh
+# device open, issue 889) and would permanently red this gate before any verdict is computed.
+#
+# Deliberately NOT reusing/replacing capture_rate_defect_grep_pattern (above, the narrow #656-only
+# pattern) -- the [0/8] PRE-run preflight is unrelated to this mid-recording ticket and stays
+# untouched.
+capture_rate_defect_grep_pattern_hard() {
+  echo '#656 capture-delivery-rate DEFECTIVE|#971 capture-delivery-rate CHRONIC sustained-band DEFECTIVE|#663 self-heal: USB reset attempt'
 }
 
-# (#992) capture_rate_burn_log_grep_cmd LOG_PATH -> the REMOTE command text that greps a capture
-# burn instance's OWN log FILE (e.g. /tmp/cbox-burn.log) for capture_rate_defect_grep_pattern_all,
+# (#992 ROZHODNUTÉ) capture_rate_sustained_band_grep_pattern -> the #717 SUSTAINED-band signal,
+# ALONE. Matching this band is measured and reported (a run's log must still carry the over-rate
+# evidence -- issue 889's own close conditions key on it) but must NEVER abort the run: see
+# capture_rate_defect_grep_pattern_hard's doc comment above for why, and
+# capture_rate_sustained_band_warn_message / capture_rate_burn_log_sustained_band_warn_message
+# below for the report-only WARN text.
+capture_rate_sustained_band_grep_pattern() {
+  echo '#717 capture-delivery-rate SUSTAINED band confirmed'
+}
+
+# (#992) capture_rate_burn_log_grep_cmd LOG_PATH PATTERN -> the REMOTE command text that greps a
+# capture burn instance's OWN log FILE (e.g. /tmp/cbox-burn.log) for the caller-supplied PATTERN,
 # the journald-blind sibling of capture_rate_window_journalctl_cmd. During an E2E recording the
 # harness stops the camera-box.service unit and launches the SOURCE camera's capture as a
 # transient systemd-run unit whose stdout/stderr are redirected DIRECTLY to this log file
@@ -155,11 +174,17 @@ capture_rate_defect_grep_pattern_all() {
 # file's entire lifetime is already 1:1 with this recording -- there is no cross-run staleness to
 # guard against the way journalctl (which spans unit restarts) needs one.
 #
+# (#992 ROZHODNUTÉ) PATTERN is now an explicit argument (was hardcoded to the old union pattern,
+# since removed) -- the caller greps this SAME log path twice, once with
+# capture_rate_defect_grep_pattern_hard (exit 1 on match) and once with
+# capture_rate_sustained_band_grep_pattern (WARN only), never sharing one `tail -1` so a reset
+# line can never be masked by a sustained line.
+#
 # Pure string builder (no ssh, no I/O) -- directly unit-testable without a live rig, same
 # convention as every other builder in this file.
 capture_rate_burn_log_grep_cmd() {
-  local log_path="$1"
-  printf 'grep -E '\''%s'\'' "%s" 2>/dev/null | tail -1' "$(capture_rate_defect_grep_pattern_all)" "$log_path"
+  local log_path="$1" pattern="$2"
+  printf 'grep -E '\''%s'\'' "%s" 2>/dev/null | tail -1' "$pattern" "$log_path"
 }
 
 # (#992) capture_rate_burn_log_recurrence_message CAMERA_NAME MATCHED_LINE -> like
@@ -175,4 +200,28 @@ capture_rate_burn_log_recurrence_message() {
   else
     echo "${cam} capture-rate defect RECURRED DURING this recording, per its OWN burn-instance log (see #656/#663/#717/#971/#992): ${line}"
   fi
+}
+
+# (#992 ROZHODNUTÉ) capture_rate_sustained_band_warn_message CAMERA_NAME MATCHED_LINE -> the
+# REPORT-ONLY diagnostic for a #717 SUSTAINED-band match found in the journald window. Unlike
+# capture_rate_recurrence_message (the HARD-fail sibling), this NEVER precedes an exit 1 -- the
+# band is informational by design (issue 909: the genlock decimation gate absorbs the over-rate
+# into exact NDI output before it ever becomes a real defect). Still prints the matched line
+# verbatim so every run's log carries the over-rate evidence (issue 889's own close conditions
+# key on it), and points at issue 909 so a reader lands on the rationale, not just the fact of
+# the match. "WARNING #992:" prefix makes this loud and greppable without being mistaken for one
+# of the ERROR/exit-1 lines above.
+capture_rate_sustained_band_warn_message() {
+  local cam="$1" line="$2"
+  echo "WARNING #992: ${cam} capture-delivery-rate SUSTAINED band confirmed in its journal during this recording -- informational by design (issue 909: absorbed by the genlock decimation gate), does NOT fail this gate: ${line}"
+}
+
+# (#992 ROZHODNUTÉ) capture_rate_burn_log_sustained_band_warn_message CAMERA_NAME MATCHED_LINE ->
+# the burn-instance-log sibling of capture_rate_sustained_band_warn_message above -- same
+# report-only contract, but names the burn-instance LOG as the source (never "journal"), mirroring
+# the same journal/burn-log discriminator capture_rate_recurrence_message /
+# capture_rate_burn_log_recurrence_message already keep distinct for the HARD-fail messages.
+capture_rate_burn_log_sustained_band_warn_message() {
+  local cam="$1" line="$2"
+  echo "WARNING #992: ${cam} capture-delivery-rate SUSTAINED band confirmed in its burn-instance log during this recording -- informational by design (issue 909: absorbed by the genlock decimation gate), does NOT fail this gate: ${line}"
 }
