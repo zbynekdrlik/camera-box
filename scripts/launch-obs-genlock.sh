@@ -93,6 +93,39 @@ PSAHK
     ahk_stop_ps='  # AutoHotkey64: no-op (this box has no AHK auto-respawn watcher -- nothing to stop)'
     ahk_restart_ps='# AutoHotkey64 restart: no-op (no AHK watcher on this box)'
   fi
+  # #978/#958 -- the SESSION-VISIBILITY GATE fragments. An obs64 launched via ssh+Invoke-CimMethod
+  # lands in Windows SessionId=0 (invisible on the console) yet passes every OTHER check in this
+  # program (log render tick, audio buffering) -- issue 958's real incident sat like this for
+  # ~3.5h. has_ahk=1 (strih) also gates AutoHotkey64's session (a session-0 AHK re-spawns obs64
+  # into session 0 forever); has_ahk=0 (stream, no AHK watcher) gets a documented no-op.
+  #
+  # Deliberately does NOT call scripts/lib/obs-session-visibility.sh's obs_session_visibility_*
+  # functions (#977/#979's shared detector) -- that lib's shape (Write-Output field lines, parsed
+  # back over ssh via bash-side sed) is built for the "ssh a probe, parse the reply" flow #977/#979
+  # use; THIS gate runs inline, already inside the SAME open PowerShell session pasted into the
+  # win-* MCP Shell, with no ssh round-trip at all. The two express the IDENTICAL criteria (obs64
+  # count==1, SessionId==the derived active console session, MainWindowTitle required only when
+  # this program's own session matches obs64's; AHK count==1, SessionId==the same derived active
+  # session) independently by necessity of the different execution model -- if the criteria ever
+  # change, update BOTH.
+  local ahk_session_ps
+  if [ "$has_ahk" = "1" ]; then
+    ahk_session_ps=$(cat <<'PSAHKSESS'
+$ahkSessProcs = @(Get-Process AutoHotkey64 -ErrorAction SilentlyContinue)
+if ($ahkSessProcs.Count -ne 1) {
+  Write-Error "#978 FAIL: expected exactly 1 AutoHotkey64 process on strih, found $($ahkSessProcs.Count) -- the respawn watcher is missing/duplicated (issue 958)."
+  exit 8
+}
+if ($ahkSessProcs[0].SessionId -ne $activeSession) {
+  Write-Error "#978 FAIL: AutoHotkey64 PID $($ahkSessProcs[0].Id) is in SessionId=$($ahkSessProcs[0].SessionId) (must be $activeSession, the active interactive session) -- a session-0 AHK re-spawns obs64 into session 0 forever (issue 958)."
+  exit 8
+}
+Write-Host "SESSION OK: AutoHotkey64 PID $($ahkSessProcs[0].Id) SessionId=$activeSession"
+PSAHKSESS
+)
+  else
+    ahk_session_ps='# AutoHotkey64 session check: no-op (this box has no AHK auto-respawn watcher)'
+  fi
   local bin64="${obs_dir}\\bin\\64bit"
   local exe="${bin64}\\obs64.exe"
   # Escape for the PowerShell SINGLE-quoted strings below: a literal ' is doubled to '' (the
@@ -248,6 +281,45 @@ ${ahk_stop_ps}
 }
 ${ahk_restart_ps}
 }
+
+# (3c) #978 SESSION-VISIBILITY GATE -- an obs64 launched via ssh+Invoke-CimMethod into Windows
+#     session 0 is fully healthy on every OTHER check above (log render tick, audio buffering) yet
+#     completely invisible to the operator (issue 958). Re-query FRESH (never trust a possibly-
+#     stale \$proc from the guarded-launcher's own redraw) and fail LOUD, non-zero, naming exactly
+#     what was found. The ACTIVE interactive session is derived from explorer.exe's SessionId
+#     (never hardcoded) -- and the MainWindowTitle assertion is CONTEXT-GATED: this program
+#     normally pastes into the win-* MCP Shell (session 1, same session as OBS), where the title
+#     check stays fully REQUIRED (unchanged strictness); the #859 no-MCP CIM-breakaway fallback can
+#     also run this program over ssh (a DIFFERENT session) -- there the title is structurally
+#     UNREADABLE cross-session (EnumWindows only sees the calling process's own window station), so
+#     the title check is SKIPPED (not failed) there and SessionId+count alone carry the gate.
+\$activeSessProcs = @(Get-Process explorer -ErrorAction SilentlyContinue)
+if (\$activeSessProcs.Count -lt 1) {
+  Write-Error "#978 FAIL: no explorer.exe process found -- cannot determine the active interactive console session on this box."
+  exit 8
+}
+\$activeSession = \$activeSessProcs[0].SessionId
+\$ownSession = (Get-Process -Id \$PID).SessionId
+\$sessObsProcs = @(Get-Process obs64 -ErrorAction SilentlyContinue)
+if (\$sessObsProcs.Count -ne 1) {
+  Write-Error "#978 FAIL: expected exactly 1 obs64 process, found \$(\$sessObsProcs.Count) -- investigate before trusting this box."
+  exit 8
+}
+\$sessProc = \$sessObsProcs[0]
+if (\$sessProc.SessionId -ne \$activeSession) {
+  Write-Error "#978 FAIL: obs64 PID \$(\$sessProc.Id) is in SessionId=\$(\$sessProc.SessionId) (must be \$activeSession, the active interactive session), MainWindowTitle='\$(\$sessProc.MainWindowTitle)' -- OBS is INVISIBLE to the operator (issue 958). Relaunch via the win-* MCP Shell (session 1), never ssh+Invoke-CimMethod."
+  exit 8
+}
+if (\$ownSession -eq \$sessProc.SessionId) {
+  if ([string]::IsNullOrEmpty(\$sessProc.MainWindowTitle)) {
+    Write-Error "#978 FAIL: obs64 PID \$(\$sessProc.Id) SessionId=\$activeSession but MainWindowTitle is EMPTY -- no visible window (issue 958). Investigate before trusting this box."
+    exit 8
+  }
+  Write-Host "SESSION OK: obs64 PID \$(\$sessProc.Id) SessionId=\$activeSession MainWindowTitle='\$(\$sessProc.MainWindowTitle)'"
+} else {
+  Write-Host "SESSION OK: obs64 PID \$(\$sessProc.Id) SessionId=\$activeSession (title check skipped -- this program is running cross-session, own SessionId=\$ownSession)"
+}
+${ahk_session_ps}
 
 # (4) VERIFY the fresh OBS log shows the genlock render tick ENABLED (the #257 build-default proof --
 #     same line drift-guard.sh genlock_capability_from_log + the rig validation key on) AND DistroAV

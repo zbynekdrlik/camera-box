@@ -96,6 +96,10 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # [8/8] E2E_EXECUTE_VERDICT=1 path — #701 proved ssh/scp works on this rig for these boxes).
 # shellcheck source=scripts/lib/win-ssh-exec.sh
 . "$HERE/lib/win-ssh-exec.sh"
+# #977/#978/#979: obs64/AHK Windows-session-visibility probe + pure message parser (issue 958) --
+# shared with the #979 dev1 watchdog, never a second detector for the same signal.
+# shellcheck source=scripts/lib/obs-session-visibility.sh
+. "$HERE/lib/obs-session-visibility.sh"
 # #863: WARN-only (never `exit`) verification that the PERMANENT cam2-painter.service genuinely
 # came back active + painting after cleanup() restarts it below -- a fire-and-forget restart call
 # that used to be a silent no-op (the permanent painter unit was never installed, see #863).
@@ -482,6 +486,40 @@ for hp in "$CAMERA_NAME=$CAM1_IP" "cam2(painter)=$PAINTER_IP" "strih=$STRIH" "st
   if ping -c1 -W2 "$_ip" >/dev/null 2>&1; then echo "    ok: $_name ($_ip)"; else
     echo "ERROR: $_name ($_ip) UNREACHABLE from dev1 — fix route/host, then re-run." >&2; exit 1; fi
 done
+
+# #977/#958: obs64/AHK Windows-session-visibility gate. A session-0 obs64 (launched via
+# ssh+Invoke-CimMethod) answers OBS WebSocket, serves NDI, and writes a normal log -- so it sails
+# through every OTHER [0/8] term below while being fully invisible to the operator on the console.
+# The real incident sat like this for ~3.5h before the user found it manually. FAIL LOUD (never a
+# silent pass) on strih OR stream being invisible, including an ssh/connectivity failure at this
+# check itself (unlike #979's dev1 watchdog, which treats that case as "nothing to decide" -- a
+# per-PR CI gate has the opposite correct default for a probe failure this late in the preflight).
+echo "[0/8] obs64/AHK session-visibility gate — fail when strih/stream OBS (or strih AHK) is INVISIBLE to the operator (#977/#958)"
+# win_ssh_run BLOCKS until the remote command exits (its own doc comment: "the CALLER must bound
+# it with an outer timeout if a wedge must not hang forever") -- this step runs FIRST, before
+# every other gate, so an unbounded call here could hang up to ServerAliveInterval*
+# ServerAliveCountMax=600s per box. Same wrapper shape as the established [4b2/8] audio-preflight
+# precedent below (`timeout` execvp()s its command directly, so it cannot invoke a shell FUNCTION
+# like win_ssh_run -- route through `bash -c`, re-sourcing the lib inside that subshell).
+SVG_SSH_TIMEOUT="${SVG_SSH_TIMEOUT:-30}"
+_svg_strih_out="$(timeout "$SVG_SSH_TIMEOUT" bash -c '. "$1"; win_ssh_run "$2" "$3" "$4" "$5"' _ \
+  "$HERE/lib/win-ssh-exec.sh" "$STRIH_USER" "$STRIH_PW" "$STRIH" "$(obs_session_visibility_probe_ps 1)" 2>/dev/null || true)"
+_svg_strih_msg="$(obs_session_visibility_message "$_svg_strih_out" 1)"
+if [ -n "$_svg_strih_msg" ]; then
+  echo "ERROR: [0/8] strih INVISIBLE: $_svg_strih_msg" >&2
+  echo "       Recovery: bash scripts/launch-obs-genlock.sh --box strih --force   # paste into the win-strih MCP Shell (session 1, never ssh+CIM — issue 958)" >&2
+  exit 1
+fi
+echo "    ok: strih obs64/AHK visible on the console (SessionId=1, window present)"
+_svg_stream_out="$(timeout "$SVG_SSH_TIMEOUT" bash -c '. "$1"; win_ssh_run "$2" "$3" "$4" "$5"' _ \
+  "$HERE/lib/win-ssh-exec.sh" "$STREAM_USER" "$STREAM_PW" "$STREAM" "$(obs_session_visibility_probe_ps 0)" 2>/dev/null || true)"
+_svg_stream_msg="$(obs_session_visibility_message "$_svg_stream_out" 0)"
+if [ -n "$_svg_stream_msg" ]; then
+  echo "ERROR: [0/8] stream INVISIBLE: $_svg_stream_msg" >&2
+  echo "       Recovery: bash scripts/launch-obs-genlock.sh --box stream --force   # paste into the win-stream-snv MCP Shell (session 1, never ssh+CIM — issue 958)" >&2
+  exit 1
+fi
+echo "    ok: stream obs64 visible on the console (SessionId=1, window present)"
 
 # Disk preflight (#179): the 7.3GB cam1 grab is GONE — only the two downloaded OBS program
 # recordings land on dev1 (~3 MB/s each, strih .mkv + stream .mp4). FAIL EARLY if $OUTDIR's

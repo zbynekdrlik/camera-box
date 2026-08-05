@@ -32,17 +32,22 @@ set -euo pipefail
 #                          SAME device the QPSK marker uses, per issue 930's scope item 2)
 #   LIPSYNC_PLAYBACK_PIDFILE  where this script's own ffmpeg PID is tracked on cam2 (default
 #                             /run/rig-lipsync-playback.pid)
-#   LIPSYNC_AUDIO_LEAD_MS  static audio-lead compensation, in ms (default 330, non-negative
-#                          integer only). Issue 930 follow-up (issuecomment-5179960868): a paired
-#                          QR/QPSK-vs-SyncNet cross-check on this exact playback measured a
-#                          CONSTANT rig-added offset of -334ms (video LEADS audio) -- the ALSA
-#                          output pipeline on LIPSYNC_AUDIO_DEVICE delays audible audio by roughly
-#                          that much, the same class as the documented 124ms QPSK ring bias.
-#                          LIPSYNC_AUDIO_LEAD_MS cancels it by delaying the VIDEO demux by that
-#                          many ms relative to audio (the ticket's own stated equivalent of
-#                          "advancing audio" -- only the RELATIVE offset between the two streams
-#                          matters for lipsync perception). 0 = today's behavior, byte-identical
-#                          single-demux command (no compensation).
+#   LIPSYNC_AUDIO_LEAD_MS  static audio-lead compensation, in ms (default 408, non-negative
+#                          integer only). Issue 930: two independent paired QR/QPSK-vs-SyncNet
+#                          cross-checks (issuecomment-5190993635, issuecomment-5191187944) derived
+#                          the harness's ALSA output pipeline depth D via R = C + L - D (R =
+#                          SyncNet-measured rig-added offset, C = the chain offset per QR/QPSK at
+#                          the same genlock_latency knob, L = this lead). D landed at ~408ms,
+#                          stable to ~3ms across two days, two different knobs, and two different
+#                          content windows -- NOT a single raw SyncNet reading (an earlier -334ms
+#                          figure silently included a run whose QR/QPSK leg never completed, so it
+#                          wrongly folded a nonzero chain offset into the harness constant; see the
+#                          ticket for the full derivation). LIPSYNC_AUDIO_LEAD_MS cancels D by
+#                          delaying the VIDEO demux by that many ms relative to audio (the ticket's
+#                          own stated equivalent of "advancing audio" -- only the RELATIVE offset
+#                          between the two streams matters for lipsync perception). 0 = today's
+#                          behavior, byte-identical single-demux command (no compensation). A
+#                          paired run at L=408 confirmed the fix: SyncNet-vs-QR/QPSK delta 0.036ms.
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$HERE/.." && pwd)"
@@ -53,7 +58,7 @@ PAINTER_PIDFILE="${PAINTER_PIDFILE:-/run/rig-painter.pid}"
 LIPSYNC_FB_DEVICE="${LIPSYNC_FB_DEVICE:-/dev/fb0}"
 LIPSYNC_AUDIO_DEVICE="${LIPSYNC_AUDIO_DEVICE:-hw:CARD=PCH,DEV=3}"
 LIPSYNC_PLAYBACK_PIDFILE="${LIPSYNC_PLAYBACK_PIDFILE:-/run/rig-lipsync-playback.pid}"
-LIPSYNC_AUDIO_LEAD_MS="${LIPSYNC_AUDIO_LEAD_MS:-330}"
+LIPSYNC_AUDIO_LEAD_MS="${LIPSYNC_AUDIO_LEAD_MS:-408}"
 case "$LIPSYNC_AUDIO_LEAD_MS" in
   ''|*[!0-9]*)
     echo "[lipsync-test-mode] FAIL: LIPSYNC_AUDIO_LEAD_MS must be a non-negative integer (ms), got '$LIPSYNC_AUDIO_LEAD_MS'" >&2
@@ -286,11 +291,13 @@ CMDS
 # `-vf showinfo` -- that is a one-shot MEASUREMENT instrument for the preflight guard only.
 # Callers should run `lipsync_pacing_guard_cmd` first (see above).
 #
-# AUDIO_LEAD_MS (issue 930 follow-up, issuecomment-5179960868): the paired QR/QPSK-vs-SyncNet
-# cross-check on this exact playback measured a CONSTANT rig-added offset of -334ms (video LEADS
-# audio) -- the ALSA output pipeline on $audio delays audible audio by roughly that much, same
-# class as the documented 124ms QPSK ring bias. Omitted or 0 (the default before this knob
-# existed) emits the ORIGINAL single-demux command BYTE-FOR-BYTE -- see
+# AUDIO_LEAD_MS (issue 930): two independent paired QR/QPSK-vs-SyncNet cross-checks derived the
+# ALSA output pipeline's depth D (via R = C + L - D, where R is the raw SyncNet-measured
+# rig-added offset and C is the chain offset the QR/QPSK leg measures at the SAME genlock_latency
+# knob) at ~408ms, stable to ~3ms across two days/knobs/content windows -- NOT a bare raw SyncNet
+# reading (an earlier -334ms figure silently folded in a nonzero chain offset from a run whose
+# QR/QPSK leg never completed; see the ticket for the derivation). Omitted or 0 (the default
+# before this knob existed) emits the ORIGINAL single-demux command BYTE-FOR-BYTE -- see
 # tests/harness_lipsync_test_mode.rs playback_cmds_zero_lead_is_byte_identical_to_original_930.
 # A positive value cancels the measured delay by opening a SECOND demux of the SAME asset for
 # VIDEO ONLY, carrying a positive `-itsoffset` (ffmpeg semantics: positive itsoffset DELAYS that
