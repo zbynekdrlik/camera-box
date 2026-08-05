@@ -706,7 +706,7 @@ fn playback_cmds_zero_lead_is_byte_identical_to_original_930() {
 #[test]
 fn playback_cmds_applies_audio_lead_via_video_itsoffset_930() {
     let cmds = run_sourced(
-        "lipsync_playback_cmds /root/lipsync-test.mp4 /dev/fb0 hw:CARD=PCH,DEV=3 /run/rig-lipsync-playback.pid 330",
+        "lipsync_playback_cmds /root/lipsync-test.mp4 /dev/fb0 hw:CARD=PCH,DEV=3 /run/rig-lipsync-playback.pid 408",
     );
     assert_eq!(
         cmds.matches("nohup ffmpeg").count(),
@@ -721,8 +721,8 @@ fn playback_cmds_applies_audio_lead_via_video_itsoffset_930() {
          delay independently of audio's (undelayed) demux: {cmds}"
     );
     assert!(
-        cmds.contains("-itsoffset 0.330"),
-        "930: LIPSYNC_AUDIO_LEAD_MS=330 must become a 0.330s -itsoffset on the delayed (video) \
+        cmds.contains("-itsoffset 0.408"),
+        "930: LIPSYNC_AUDIO_LEAD_MS=408 must become a 0.408s -itsoffset on the delayed (video) \
          input: {cmds}"
     );
     assert!(
@@ -746,13 +746,13 @@ fn playback_cmds_applies_audio_lead_via_video_itsoffset_930() {
          not just one: {cmds}"
     );
     assert!(
-        cmds.contains("audio_lead_ms=330"),
+        cmds.contains("audio_lead_ms=408"),
         "930: the success message must report the applied lead for operator visibility: {cmds}"
     );
 }
 
 /// A fractional-ms lead (not a round hundreds value) must still convert cleanly to seconds --
-/// proves the ms->s conversion isn't hardcoded/special-cased for 330 alone.
+/// proves the ms->s conversion isn't hardcoded/special-cased for 408 alone.
 #[test]
 fn playback_cmds_converts_an_arbitrary_lead_ms_to_seconds_930() {
     let cmds = run_sourced(
@@ -764,10 +764,13 @@ fn playback_cmds_converts_an_arbitrary_lead_ms_to_seconds_930() {
     );
 }
 
-/// `LIPSYNC_AUDIO_LEAD_MS` must default to 330 (seeded from the paired cross-check measurement,
-/// issuecomment-5179960868: rig-added offset -334ms) when the script is sourced with no override.
+/// `LIPSYNC_AUDIO_LEAD_MS` must default to 408 -- the corrected harness ALSA-pipeline-depth
+/// constant, derived via R = C + L - D from two independent paired QR/QPSK-vs-SyncNet cross-checks
+/// (issuecomment-5190993635, issuecomment-5191187944), stable to ~3ms across two days/knobs. The
+/// earlier 330 default was seeded from a run whose QR/QPSK leg never completed, silently folding a
+/// nonzero chain offset into what was assumed to be a pure harness constant.
 #[test]
-fn lipsync_audio_lead_ms_env_defaults_to_330_930() {
+fn lipsync_audio_lead_ms_env_defaults_to_408_930() {
     let out = Command::new("bash")
         .arg("-c")
         .arg(". \"$1\"; echo \"$LIPSYNC_AUDIO_LEAD_MS\"")
@@ -783,9 +786,9 @@ fn lipsync_audio_lead_ms_env_defaults_to_330_930() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert_eq!(
         stdout.trim(),
-        "330",
-        "930: default audio-lead compensation must be 330ms (seeded from issuecomment-5179960868's \
-         -334ms measurement): {stdout}"
+        "408",
+        "930: default audio-lead compensation must be 408ms (corrected harness ALSA-pipeline-depth \
+         constant, see issuecomment-5190993635/issuecomment-5191187944): {stdout}"
     );
 }
 
