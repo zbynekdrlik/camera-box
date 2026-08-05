@@ -1805,4 +1805,123 @@ mod tests {
         );
         assert_eq!(v.windows_failed_report_only, 1);
     }
+
+    // ---- issue 889 re-gate (2026-08-05 ROZHODNUTÉ): singleton copies/gaps tolerance ----
+
+    #[test]
+    fn windows_over_copies_gaps_tolerance_889_regate() {
+        // 3 windows: cam1 clean, cam2 has 2 copies (OVER the singleton tolerance -- must gate
+        // overall_pass again), cam3 clean.
+        let schedule = vec![
+            win("cam1", 0, 1000),
+            win("cam2", 1000, 3000),
+            win("cam3", 3000, 4000),
+        ];
+        let mut frames = clean_frames(0, 100, 4, 1, 100);
+        frames.extend([
+            SegmentFrame {
+                frame_index: 100,
+                gen_ts_ns: 1100,
+                tick: Some(500),
+            },
+            SegmentFrame {
+                frame_index: 101,
+                gen_ts_ns: 1200,
+                tick: Some(500),
+            }, // cam2 copy #1
+            SegmentFrame {
+                frame_index: 102,
+                gen_ts_ns: 1300,
+                tick: Some(500),
+            }, // cam2 copy #2 -- over the singleton tolerance
+            SegmentFrame {
+                frame_index: 103,
+                gen_ts_ns: 1400,
+                tick: Some(501),
+            },
+        ]);
+        frames.extend(clean_frames(3000, 100, 4, 1, 900));
+        let v = segment_continuity(&frames, &schedule, 0, 1);
+        assert_eq!(v.segments[1].copies, 2, "{:?}", v.segments[1]);
+        assert_eq!(
+            v.segments[1].gaps, 0,
+            "isolates copies alone: {:?}",
+            v.segments[1]
+        );
+        assert!(
+            !v.segments[1].pass,
+            "strict still fails on the copies: {:?}",
+            v.segments[1]
+        );
+        assert!(
+            !v.segments[1].relaxed_pass,
+            "889 re-gate: 2 copies exceeds the singleton tolerance -- relaxed must fail too: {:?}",
+            v.segments[1]
+        );
+        assert!(
+            !v.overall_pass,
+            "889 re-gate: an over-tolerance window must fail overall_pass again: {v:?}"
+        );
+        assert_eq!(
+            v.windows_over_copies_gaps_tolerance, 1,
+            "exactly cam2's window exceeds the tolerance: {v:?}"
+        );
+        assert_eq!(
+            v.copies_gaps_tolerance,
+            crate::window_gate::WINDOW_COPIES_GAPS_TOLERANCE,
+            "the tolerance value must be echoed in the JSON so it's self-describing: {v:?}"
+        );
+        // cam2's window still fails STRICT too (unaffected by the re-gate -- strict was always
+        // absolute-zero), so it also counts toward the pre-existing report-only metric.
+        assert_eq!(v.windows_failed_report_only, 1, "{v:?}");
+    }
+
+    #[test]
+    fn windows_at_copies_gaps_tolerance_still_pass_overall_889_regate() {
+        // Same shape as `windows_failed_report_only_counts_strict_failures_across_a_mixed_run_889`
+        // (cam2 has exactly 1 copy) -- proves the tolerance value itself, not just its absence.
+        let schedule = vec![
+            win("cam1", 0, 1000),
+            win("cam2", 1000, 2000),
+            win("cam3", 2000, 3000),
+        ];
+        let mut frames = clean_frames(0, 100, 4, 1, 100);
+        frames.extend([
+            SegmentFrame {
+                frame_index: 100,
+                gen_ts_ns: 1100,
+                tick: Some(500),
+            },
+            SegmentFrame {
+                frame_index: 101,
+                gen_ts_ns: 1200,
+                tick: Some(500),
+            }, // cam2 copy -- AT the singleton tolerance
+            SegmentFrame {
+                frame_index: 102,
+                gen_ts_ns: 1300,
+                tick: Some(501),
+            },
+        ]);
+        frames.extend(clean_frames(2000, 100, 4, 1, 900));
+        let v = segment_continuity(&frames, &schedule, 0, 1);
+        assert_eq!(v.segments[1].copies, 1, "{:?}", v.segments[1]);
+        assert!(
+            v.segments[1].relaxed_pass,
+            "889 re-gate: a single copy stays within tolerance: {:?}",
+            v.segments[1]
+        );
+        assert!(
+            v.overall_pass,
+            "889 re-gate: within-tolerance windows must not gate overall_pass: {v:?}"
+        );
+        assert_eq!(
+            v.windows_over_copies_gaps_tolerance, 0,
+            "no window exceeds the tolerance: {v:?}"
+        );
+        assert_eq!(
+            v.windows_failed_report_only, 1,
+            "still strict-fails (report-only): {v:?}"
+        );
+    }
 }

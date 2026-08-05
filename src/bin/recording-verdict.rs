@@ -7515,12 +7515,17 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Issue 889 (2026-07-30 user decision on issue 883) end-to-end: a stale/frozen painted-tick
-    /// copy in the single all-cambox window (undecodable=0) must still be COMPUTED and printed
-    /// in the verdict JSON, must still fail that window's STRICT `pass`, but must NO LONGER fail
-    /// `all_cambox_continuity.overall_pass` — and `windows_failed_report_only` must report it.
+    /// Issue 889 re-gate (2026-08-05 ROZHODNUTÉ, ticket 889 comment 5196190653) end-to-end: a
+    /// SINGLE stale/frozen painted-tick copy in the single all-cambox window (undecodable=0) sits
+    /// AT the singleton tolerance (`copies<=1`) — it must still be COMPUTED and printed in the
+    /// verdict JSON, must still fail that window's STRICT `pass`, but must NOT fail
+    /// `all_cambox_continuity.overall_pass` (the tolerance absorbs exactly one copy) — and
+    /// `windows_failed_report_only` must still report it (strict-zero visibility is unaffected by
+    /// the re-gate). Renamed from `..._copy_alone_is_report_only_end_to_end_889` — the old name
+    /// implied copies never gate at all, which stopped being true once the re-gate landed; a
+    /// single copy still passes because 1 <= the tolerance, not because the term is inert.
     #[test]
-    fn all_cambox_continuity_copy_alone_is_report_only_end_to_end_889() {
+    fn all_cambox_continuity_single_copy_within_tolerance_passes_overall_889_regate() {
         use super::{build_and_print_verdict, Cam1Source, DecodedRec};
         use clap::Parser;
 
@@ -7628,8 +7633,232 @@ mod tests {
             serde_json::json!(1),
             "889: the verdict JSON must carry the machine-readable report-only count: {seg}"
         );
+        assert_eq!(
+            seg["windows_over_copies_gaps_tolerance"],
+            serde_json::json!(0),
+            "889 re-gate: a single copy stays within tolerance -- no window is OVER tolerance: {seg}"
+        );
+        assert_eq!(
+            seg["copies_gaps_tolerance"],
+            serde_json::json!(1),
+            "889 re-gate: the tolerance value must be echoed in the JSON: {seg}"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Issue 889 re-gate (2026-08-05 ROZHODNUTÉ) differential proof: `overall_pass` must swing
+    /// from PASS to FAIL exactly at the singleton-tolerance boundary, and must NOT swing at all
+    /// when copies/gaps stay AT the tolerance (even combined). Uses the SAME differential-fixture
+    /// technique issue 914's `frozen_leg_and_self_heal_reset_no_longer_gate_the_overall_verdict_914`
+    /// established: build otherwise-IDENTICAL fixtures varying only the defect under test, and diff
+    /// `overall_pass` against a clean baseline, rather than asserting an absolute value (many other
+    /// unrelated gates also fold into `overall_pass`).
+    #[test]
+    fn copies_gaps_singleton_tolerance_boundary_gates_overall_pass_889_regate() {
+        use super::{build_and_print_verdict, Cam1Source, DecodedRec};
+        use clap::Parser;
+
+        const ONE_S: i64 = 1_000_000_000;
+        let base = 1_000 * ONE_S;
+        let win = 5 * ONE_S;
+        let sched = format!(
+            r#"[{{"cambox":"CAM1","start_ns":{a},"end_ns":{b}}}]"#,
+            a = base,
+            b = base + win
+        );
+
+        // `dup_count`: consecutive stale/frozen copies of index 9's tick inserted right after it
+        // (drives `copies`, never touches `gaps` -- the duplicate value is already present in the
+        // sorted-distinct set `painted_tick_gaps` consumes). `gap_extra_steps` (k): the LAST
+        // frame's optical tick is pushed `k` extra steps ahead of its normal value, opening exactly
+        // `k` missing distinct values in the sorted tick range (drives `gaps`, never touches
+        // `copies` -- every tick value, including the modified one, stays distinct). Both knobs are
+        // independent by construction, so a fixture can isolate either term or combine them.
+        fn build_fixture(
+            tag: &str,
+            base: i64,
+            sched: &str,
+            dup_count: u32,
+            gap_extra_steps: u32,
+        ) -> serde_json::Value {
+            const ONE_S: i64 = 1_000_000_000;
+            let dir =
+                std::env::temp_dir().join(format!("cb-889-regate-{tag}-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let sched_path = dir.join("switch-schedule.json");
+            std::fs::write(&sched_path, sched).unwrap();
+
+            let mut stream_frames: Vec<RecordingFrame> = Vec::new();
+            for i in 0..20u64 {
+                let gen_ts = base + (i as i64 + 1) * (ONE_S / 10);
+                // Clean step-2 sequence 1000..1038, EXCEPT the last frame (i==19) is pushed
+                // `gap_extra_steps` extra steps ahead when requested -- opening that many missing
+                // distinct values in the sorted tick range without touching any other frame.
+                let optical = if i == 19 {
+                    1000u32 + 2 * i as u32 + 2 * gap_extra_steps
+                } else {
+                    1000u32 + 2 * i as u32
+                };
+                stream_frames.push(RecordingFrame {
+                    frame_index: i,
+                    payloads: vec![
+                        Payload {
+                            run_id: STRIH,
+                            frame_id: 1670 + i as u32,
+                            gen_ts_ns: gen_ts,
+                        },
+                        Payload {
+                            run_id: CAM2,
+                            frame_id: optical,
+                            gen_ts_ns: gen_ts,
+                        },
+                    ],
+                    tick: Some(optical),
+                });
+            }
+            // Insert `dup_count` consecutive extra frames right after index 9, each repeating
+            // index 9's tick verbatim (1018) -- a stale/frozen copy run. The distinct present-tick
+            // sequence stays fully contiguous (the duplicate value is already present), isolating
+            // `copies` from `gaps`.
+            for k in 0..dup_count as u64 {
+                let dup_gen_ts = base + 9 * (ONE_S / 10) + (k as i64 + 1) * (ONE_S / 1000);
+                stream_frames.insert(
+                    10 + k as usize,
+                    RecordingFrame {
+                        frame_index: 9_000 + k,
+                        payloads: vec![
+                            Payload {
+                                run_id: STRIH,
+                                frame_id: 9_670 + k as u32,
+                                gen_ts_ns: dup_gen_ts,
+                            },
+                            Payload {
+                                run_id: CAM2,
+                                frame_id: 1018,
+                                gen_ts_ns: dup_gen_ts,
+                            },
+                        ],
+                        tick: Some(1018),
+                    },
+                );
+            }
+
+            let args = super::Args::parse_from([
+                "recording-verdict",
+                "--switch-schedule",
+                sched_path.to_str().unwrap(),
+                "--switch-guard-ns",
+                "0",
+                "--switch-expected-step",
+                "2",
+            ]);
+            let (v, _) = build_and_print_verdict(
+                &args,
+                None,
+                Some(DecodedRec {
+                    frames: stream_frames,
+                    rec_path: None,
+                }),
+                Cam1Source::Absent,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("verdict");
+            let _ = std::fs::remove_dir_all(&dir);
+            v
+        }
+
+        let clean = build_fixture("clean", base, &sched, 0, 0);
+        assert_eq!(
+            clean["all_cambox_continuity"]["overall_pass"],
+            serde_json::json!(true),
+            "sanity: the clean fixture must pass: {clean}"
+        );
+
+        // (a) BOTH terms AT the singleton tolerance simultaneously -- must NOT swing overall_pass.
+        let at_tolerance = build_fixture("at-tolerance", base, &sched, 1, 1);
+        let at_seg = &at_tolerance["all_cambox_continuity"];
+        assert_eq!(
+            at_seg["segments"][0]["copies"],
+            serde_json::json!(1),
+            "{at_seg}"
+        );
+        assert_eq!(
+            at_seg["segments"][0]["gaps"],
+            serde_json::json!(1),
+            "{at_seg}"
+        );
+        assert_eq!(
+            clean["all_cambox_continuity"]["overall_pass"], at_seg["overall_pass"],
+            "889 re-gate: copies=1 AND gaps=1 together must be a no-op on overall_pass (both at \
+             the singleton tolerance): clean={clean}, at_tolerance={at_tolerance}"
+        );
+        assert_eq!(
+            at_seg["windows_over_copies_gaps_tolerance"],
+            serde_json::json!(0),
+            "{at_seg}"
+        );
+
+        // (b) copies alone OVER tolerance -- must swing overall_pass to FAIL.
+        let copies_over = build_fixture("copies-over", base, &sched, 2, 0);
+        let copies_seg = &copies_over["all_cambox_continuity"];
+        assert_eq!(
+            copies_seg["segments"][0]["copies"],
+            serde_json::json!(2),
+            "{copies_seg}"
+        );
+        assert_eq!(
+            copies_seg["segments"][0]["gaps"],
+            serde_json::json!(0),
+            "{copies_seg}"
+        );
+        assert_ne!(
+            clean["all_cambox_continuity"]["overall_pass"], copies_seg["overall_pass"],
+            "889 re-gate: 2 copies exceeds the singleton tolerance -- overall_pass must swing to \
+             FAIL: clean={clean}, copies_over={copies_over}"
+        );
+        assert_eq!(
+            copies_seg["overall_pass"],
+            serde_json::json!(false),
+            "{copies_seg}"
+        );
+        assert_eq!(
+            copies_seg["windows_over_copies_gaps_tolerance"],
+            serde_json::json!(1),
+            "{copies_seg}"
+        );
+
+        // (c) gaps alone OVER tolerance -- must swing overall_pass to FAIL.
+        let gaps_over = build_fixture("gaps-over", base, &sched, 0, 2);
+        let gaps_seg = &gaps_over["all_cambox_continuity"];
+        assert_eq!(
+            gaps_seg["segments"][0]["copies"],
+            serde_json::json!(0),
+            "{gaps_seg}"
+        );
+        assert_eq!(
+            gaps_seg["segments"][0]["gaps"],
+            serde_json::json!(2),
+            "{gaps_seg}"
+        );
+        assert_ne!(
+            clean["all_cambox_continuity"]["overall_pass"], gaps_seg["overall_pass"],
+            "889 re-gate: 2 gaps exceeds the singleton tolerance -- overall_pass must swing to \
+             FAIL: clean={clean}, gaps_over={gaps_over}"
+        );
+        assert_eq!(
+            gaps_seg["overall_pass"],
+            serde_json::json!(false),
+            "{gaps_seg}"
+        );
+        assert_eq!(
+            gaps_seg["windows_over_copies_gaps_tolerance"],
+            serde_json::json!(1),
+            "{gaps_seg}"
+        );
     }
 
     /// Issue 915 (2026-08-01, user decision) end-to-end: a single all-cambox window whose

@@ -97,25 +97,72 @@ mod tests {
     }
 
     #[test]
-    fn gaps_alone_fails_strict_but_passes_relaxed_889() {
-        let d = decide(100, 0, 0, 2);
+    fn gap_alone_within_tolerance_fails_strict_but_passes_relaxed_889() {
+        // 2026-08-05 re-gate (issue 889 ROZHODNUTÉ): a single gap sits AT the singleton
+        // tolerance -- still must not fail relaxed.
+        let d = decide(100, 0, 0, 1);
         assert!(!d.strict_pass);
         assert!(
             d.relaxed_pass,
-            "#889: gaps alone must not fail the relaxed verdict: {d:?}"
+            "889 re-gate: a single gap (at the singleton tolerance) must not fail relaxed: {d:?}"
         );
         assert!(d.relaxed_by_889());
     }
 
     #[test]
-    fn copies_and_gaps_together_fail_strict_but_pass_relaxed_889() {
-        let d = decide(100, 0, 2, 3);
+    fn copies_over_singleton_tolerance_fails_relaxed_889_regate() {
+        // 2026-08-05 re-gate: 2 copies exceeds the singleton tolerance (<=1) -- the window must
+        // FAIL the relaxed verdict again (this is the whole point of the re-gate: a return of the
+        // issue-971 regression class, 10-45 copies/window, must fail loudly).
+        let d = decide(100, 0, 2, 0);
+        assert!(!d.strict_pass);
+        assert!(
+            !d.relaxed_pass,
+            "889 re-gate: 2 copies exceeds the singleton tolerance -- must fail relaxed again: {d:?}"
+        );
+        assert!(
+            !d.relaxed_by_889(),
+            "an over-tolerance window is not rescued by any report-only relaxation: {d:?}"
+        );
+    }
+
+    #[test]
+    fn gaps_over_singleton_tolerance_fails_relaxed_889_regate() {
+        // 2026-08-05 re-gate: 2 gaps exceeds the singleton tolerance (<=1) -- must fail relaxed.
+        let d = decide(100, 0, 0, 2);
+        assert!(!d.strict_pass);
+        assert!(
+            !d.relaxed_pass,
+            "889 re-gate: 2 gaps exceeds the singleton tolerance -- must fail relaxed again: {d:?}"
+        );
+        assert!(!d.relaxed_by_889());
+    }
+
+    #[test]
+    fn copies_and_gaps_both_at_singleton_tolerance_pass_relaxed_889_regate() {
+        // Mirrors the measured residual the threshold decision was calibrated against (run
+        // 31033239950 attempt 1, comment id 5195798868): windows with 1 copy AND 1 gap
+        // simultaneously, fully absorbed by the singleton tolerance.
+        let d = decide(100, 0, 1, 1);
         assert!(!d.strict_pass);
         assert!(
             d.relaxed_pass,
-            "#889: neither term alone nor together may fail relaxed: {d:?}"
+            "889 re-gate: copies=1 AND gaps=1 together must still pass relaxed (both at tolerance): {d:?}"
         );
         assert!(d.relaxed_by_889());
+    }
+
+    #[test]
+    fn copies_and_gaps_together_over_tolerance_fail_relaxed_889_regate() {
+        // 2026-08-05 re-gate: both terms over tolerance together must fail relaxed -- this is the
+        // exact pre-fix regression shape (the original issue-889 failing evidence).
+        let d = decide(100, 0, 2, 3);
+        assert!(!d.strict_pass);
+        assert!(
+            !d.relaxed_pass,
+            "889 re-gate: copies=2 AND gaps=3 both exceed the singleton tolerance -- must fail relaxed: {d:?}"
+        );
+        assert!(!d.relaxed_by_889());
     }
 
     #[test]
