@@ -208,3 +208,29 @@ never conclude "unreadable/no audio" from the first attempt. `rig-mode.sh`'s
 `verify_measurement_audio_arrives` does this via `AUDIO_CHAIN_PARSE_RETRIES` (default 10 × 5 s);
 reuse that shape. A pure file COPY (scp/`copy`) right after stop has not shown this problem — the
 race is in reading the container structure, not the bytes being on disk.
+
+## `pkill -f` over ssh kills YOUR OWN ssh session when the pattern appears in the command line (issue 984 deploy, 2026-08-05)
+
+`ssh cam2 'pkill -f "frame-probe --paint-only"; systemctl start ...'` died with exit 255 and the
+`systemctl start` NEVER RAN: the ssh session's own `bash -c` wrapper carries the literal pattern
+in ITS cmdline, so `pkill -f` matched and killed the enclosing shell (after killing the painter).
+Same class `scripts/lib/event-assert.sh`'s header documents for pgrep counting — its fix (base64
+the pattern so the literal never appears in any live cmdline) or simply running the pkill as its
+OWN ssh call (nothing after it in the same command) both work. Never put a `pkill -f <pattern>`
+plus follow-up steps in one remote command string that itself contains `<pattern>`.
+
+## Long-running remote decode/CLI on the Windows boxes: launch via CIM breakaway, not plain ssh (issue 930 calibration, 2026-08-05)
+
+The issue-859 "ssh-launched OBS dies at disconnect" class applies to ANY long process, incl.
+`recording-verdict.exe` decodes: two ~5-min `--av-sync` decodes launched via ssh+`Start-Process`
+died seconds after the ssh session returned (job-object teardown), leaving a truncated stdout file
+and NO stderr — looks exactly like a silent crash. The working recipe (headless CLI only — GUI
+apps still go through the win-* MCP per obs-ops):
+
+```powershell
+$cl = "cmd /c `"`"C:\camera-box\recording-verdict.exe`" --av-sync `"<rec.mp4>`" ... 1> out.json 2> err.log & echo done > done.marker`""
+Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $cl; CurrentDirectory = "C:\camera-box" }
+```
+
+Poll the `done.marker` file from fresh ssh calls (bounded loop). The `echo done > marker` inside
+the same `cmd /c` gives a reliable terminal signal a `Get-Process` poll cannot (PID reuse, races).
