@@ -5083,8 +5083,35 @@ static size_t genlock_backlog_relock_qdepth(const obs_source_t *source, uint32_t
  * READ-ONLY like genlock_backlog_relock_qdepth (same rationale: a decision getter must not
  * acquire a write path) — uses the pure measurement with the sticky latch as fallback.
  *
- * Mirror of src/genlock_backlog.rs should_drain_one (Tier-0 unit-tested) and
- * src/probe/genlock.rs ReleaseCadence::should_drain_one — keep all three in lock-step. */
+ * camera-box #998: the TARGET below is CEIL, not round-to-nearest (unlike
+ * genlock_backlog_relock_qdepth above, which stays round — a different quantity with a
+ * different, already-analyzed caller). The ts-align hold's own natural steady depth is
+ * ceil(latency/interval) + 1..+2 (plus arrival jitter) — strictly ABOVE the floor of
+ * latency/interval. Round-to-nearest picks the WRONG side of that whenever
+ * frac(latency/interval) < 0.5 (round == floor): the target undershoots the hold's true
+ * steady depth by exactly one frame, so `depth > target + GENLOCK_DRAIN_HYSTERESIS_FRAMES`
+ * holds PERMANENTLY even at the queue's own correct depth — this branch fires every
+ * GENLOCK_DRAIN_MIN_TICK_INTERVAL ticks, sheds a frame, the boundary re-anchors low, and the
+ * very next tick's hold regains it via a late hold: one duplicated + one skipped program
+ * frame every ~GENLOCK_DRAIN_MIN_TICK_INTERVAL ticks, forever, on any source whose latency
+ * happens to land below-half-frac. Measured live on the stream box's 'NDI 2ME PGM':
+ * +152 genlock_dropped_due / +151 late holds per ~355s run at reserve_ms=941 (frac .23),
+ * +161/+162 at 915 (frac .45); +0 at 856/891/930 (frac .68/.73/.90, where round==ceil
+ * already, so the bug was silent there — this is why it looked intermittent rather than
+ * a plain regression). CEIL is an upper bound of the natural depth, so it can never sit
+ * below it; at frac >= 0.5 ceil == round, so every previously-clean source is unaffected,
+ * and a genuine backlog (depth far past even the corrected target) still drains.
+ *
+ * This is a SEPARATE claim from the "self-cancelling no-op" comment further below, near the
+ * actual drop-older/present-newest call site: that comment's simulation validated the DROP
+ * IDIOM at a correctly-computed target. It did not (and could not) rule out this target
+ * itself picking the wrong value at frac<0.5 -- a different bug that reproduces the exact
+ * same visible symptom (one dup + one skip) via a different path.
+ *
+ * Mirror of src/genlock_backlog.rs should_drain_one / drain_target_frames (Tier-0
+ * unit-tested) and src/probe/genlock.rs ReleaseCadence::should_drain_one (a pure delegator
+ * to the Rust should_drain_one above -- no independent arithmetic there, so it inherits
+ * this fix automatically) — keep all three in lock-step. */
 static bool genlock_should_drain_one(const obs_source_t *source, uint32_t reserve_ms, uint64_t interval)
 {
 	if (interval == 0)
@@ -5093,7 +5120,7 @@ static bool genlock_should_drain_one(const obs_source_t *source, uint32_t reserv
 	const uint32_t n = measured >= 1 ? measured
 					 : (source->genlock_last_known_n >= 1 ? source->genlock_last_known_n : 1);
 	const uint64_t held_ns = (uint64_t)reserve_ms * 1000000ULL * (uint64_t)n;
-	const uint64_t target = (held_ns + interval / 2) / interval;
+	const uint64_t target = (held_ns + interval - 1) / interval; /* #998: CEIL, not round */
 	const uint64_t depth = (uint64_t)source->async_frames.num;
 	return depth > target + GENLOCK_DRAIN_HYSTERESIS_FRAMES &&
 	       source->genlock_ticks_since_drain >= GENLOCK_DRAIN_MIN_TICK_INTERVAL;
@@ -5534,7 +5561,12 @@ static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 				 * (evenly-spaced) frame timeline, so the VERY NEXT tick reads as a
 				 * HOLD and the queue regains via GAP RESYNC exactly what the drain
 				 * just shed — a self-cancelling no-op, confirmed by simulation
-				 * before landing here. At most ONE extra frame leaves the queue
+				 * before landing here (that simulation validated THIS DROP IDIOM at a
+				 * correctly-computed target; camera-box #998 found a SEPARATE bug in
+				 * genlock_should_drain_one()'s target itself — round-to-nearest instead
+				 * of ceil — that reproduced this exact same dup+skip symptom via a
+				 * different mechanism at frac<0.5; see that function's own comment).
+				 * At most ONE extra frame leaves the queue
 				 * this tick, bounded to at most once per
 				 * GENLOCK_DRAIN_MIN_TICK_INTERVAL ticks by genlock_should_drain_one(),
 				 * so it can never reproduce the every-tick backlog-relock burst.

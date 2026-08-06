@@ -201,7 +201,7 @@ pub fn should_drain_one(
     fps_den: u32,
     ticks_since_last_drain: u64,
 ) -> bool {
-    let target = steady_depth_frames(latency_ms, fps_num, fps_den); // TEMP-RED-CHECK #998
+    let target = drain_target_frames(latency_ms, fps_num, fps_den);
     depth > target.saturating_add(DRAIN_HYSTERESIS_FRAMES)
         && ticks_since_last_drain >= DRAIN_MIN_TICK_INTERVAL
 }
@@ -578,13 +578,41 @@ mod tests {
     /// #998 — pinned against the issue's own worked-by-hand values: ceil(latency*fps/1000/den).
     #[test]
     fn drain_target_frames_pinned_values_998() {
-        assert_eq!(drain_target_frames(941, 30, 1), 29, "941ms @30fps: ceil(28.23) = 29");
-        assert_eq!(drain_target_frames(915, 30, 1), 28, "915ms @30fps: ceil(27.45) = 28");
-        assert_eq!(drain_target_frames(891, 30, 1), 27, "891ms @30fps: ceil(26.73) = 27");
-        assert_eq!(drain_target_frames(930, 30, 1), 28, "930ms @30fps: ceil(27.90) = 28");
-        assert_eq!(drain_target_frames(856, 30, 1), 26, "856ms @30fps: ceil(25.68) = 26");
-        assert_eq!(drain_target_frames(941, 0, 1), 0, "degenerate fps_num => 0, never divides by zero");
-        assert_eq!(drain_target_frames(941, 30, 0), 0, "degenerate fps_den => 0, never divides by zero");
+        assert_eq!(
+            drain_target_frames(941, 30, 1),
+            29,
+            "941ms @30fps: ceil(28.23) = 29"
+        );
+        assert_eq!(
+            drain_target_frames(915, 30, 1),
+            28,
+            "915ms @30fps: ceil(27.45) = 28"
+        );
+        assert_eq!(
+            drain_target_frames(891, 30, 1),
+            27,
+            "891ms @30fps: ceil(26.73) = 27"
+        );
+        assert_eq!(
+            drain_target_frames(930, 30, 1),
+            28,
+            "930ms @30fps: ceil(27.90) = 28"
+        );
+        assert_eq!(
+            drain_target_frames(856, 30, 1),
+            26,
+            "856ms @30fps: ceil(25.68) = 26"
+        );
+        assert_eq!(
+            drain_target_frames(941, 0, 1),
+            0,
+            "degenerate fps_num => 0, never divides by zero"
+        );
+        assert_eq!(
+            drain_target_frames(941, 30, 0),
+            0,
+            "degenerate fps_den => 0, never divides by zero"
+        );
     }
 
     /// #998 — `drain_target_frames` must be a strict CEIL, never equal to the plain floor
