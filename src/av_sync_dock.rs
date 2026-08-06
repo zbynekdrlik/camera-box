@@ -715,6 +715,60 @@ mod tests {
         );
     }
 
+    // ---- #953 dock_lock_display_offset_ms (dock -> gate sign convention) ----
+
+    #[test]
+    fn dock_lock_display_offset_ms_negates_953() {
+        assert_eq!(dock_lock_display_offset_ms(-55.0), 55.0);
+        assert_eq!(dock_lock_display_offset_ms(30.0), -30.0);
+        assert_eq!(dock_lock_display_offset_ms(0.0), 0.0);
+    }
+
+    // ---- #953 dock_lock_suggested_target ----
+
+    #[test]
+    fn dock_lock_suggested_target_quiet_inside_noise_band_953() {
+        // offset within (-margin, margin) (margin = mad clamped to [1,25]) -> None (quiet), NOT
+        // the pre-#953 constant "-5ms" bug this ticket's live evidence documented.
+        assert_eq!(dock_lock_suggested_target(3.0, 10.0, 931), None);
+        assert_eq!(dock_lock_suggested_target(-9.9, 10.0, 931), None);
+    }
+
+    #[test]
+    fn dock_lock_suggested_target_targets_true_zero_not_1point5x_mad_953() {
+        // #953's own live evidence: a gate-convention (already sign-corrected) measured offset of
+        // -55ms at current=931 must target FULL alignment (931 - (-55) = 986) -- never a +/-5ms
+        // step and never the old actuator resting place (1.5*margin).
+        assert_eq!(dock_lock_suggested_target(-55.0, 24.6, 931), Some(986));
+    }
+
+    #[test]
+    fn dock_lock_suggested_target_matches_gate_direction_953() {
+        // Same sign convention/direction as qpsk_marker::required_delay_ms: positive (video lags
+        // audio) -> REDUCE the delay; negative (video leads) -> INCREASE it.
+        assert_eq!(dock_lock_suggested_target(30.0, 5.0, 1000), Some(970));
+        assert_eq!(dock_lock_suggested_target(-30.0, 5.0, 1000), Some(1030));
+    }
+
+    #[test]
+    fn dock_lock_suggested_target_clamps_to_hardware_rails_953() {
+        assert_eq!(
+            dock_lock_suggested_target(5000.0, 5.0, 10),
+            Some(DOCK_LOCK_LATENCY_MIN_MS)
+        );
+        assert_eq!(
+            dock_lock_suggested_target(-5000.0, 5.0, 1990),
+            Some(DOCK_LOCK_LATENCY_MAX_MS)
+        );
+    }
+
+    #[test]
+    fn dock_lock_suggested_target_non_finite_is_quiet_953() {
+        assert_eq!(dock_lock_suggested_target(f64::NAN, 10.0, 931), None);
+        assert_eq!(dock_lock_suggested_target(f64::INFINITY, 10.0, 931), None);
+        assert_eq!(dock_lock_suggested_target(f64::NEG_INFINITY, 10.0, 931), None);
+    }
+
     #[test]
     fn top_band_plan_4k_keeps_qr_large_and_within_cap() {
         // A 4K program frame: the top 72 % (1555 px) crop, downscaled so the long side (3840) hits
