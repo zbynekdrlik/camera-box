@@ -533,3 +533,26 @@ Live reference numbers (2026-08-06, knob 894, offline truth -0.06ms): deployed d
 display `-57.1 ms "Audio early"`, log offsets wandering +20..+47ms, lock/unlock churn ~10-15s,
 `Video Index (98% missed)` — the dock-vs-gate bias + churn is #999's scope; the offline
 `recording-verdict --av-sync` stays the calibrated reference.
+
+### A sign-convention fix can land in the LOG but miss the UI — always check EVERY consumer of the raw offset (#999, 2026-08-06)
+
+The `-57.1 ms "Audio early"` reading above turned out to be a REAL, provable bug, not (only)
+churn: `git show <953-commit> -- vendor/av-sync-dock/src/sync-test-dock.cpp` was EMPTY — #953's
+gate-convention negation (`cb_dock_lock_display_offset_ms()`) only ever got applied at the
+`blog()` call sites inside `st_raw_audio_camera_box` (`sync-test-output.cpp`'s LOCKED/UPDATED/
+UNLOCKED/SUGGESTED log lines). The dock's own on-screen "Latency" QLabel is a COMPLETELY SEPARATE
+code path (`SyncTestDock::on_sync_found` in `sync-test-dock.cpp`, driven by the `sync_index`
+calldata struct) that #953 never touched — it kept displaying the RAW, un-converted
+`ts = audio_ts - video_ts` the whole time. `-57.1ms` is almost exactly `-true_gate(~0) - 55`,
+issue 952's PRE-#953 `dock ~= -gate - 55` relation — the smoking gun that the UI field was still
+on the wrong side of the sign fix while the log lines (same session, same window) already read
+correctly (+20..+47ms). Fixed in #999's PR: `dock_latency_display_ms`/`cb_dock_latency_display_ms`
+(Rust + C++ twin-harness tested) threaded through a new `sync_index::gate_convention` flag
+(mirrors `audio_marker_found_s::sparse_index`'s exact purpose), applied at `on_sync_found`.
+
+**The general lesson:** when a sign/unit/convention fix touches a raw measurement that has
+MULTIPLE independent display/consumer sites (a log line AND a UI label AND a JSON field, say),
+grep for every OTHER place that reads the SAME raw quantity before declaring the fix complete —
+`git show <fix-commit> -- <other-file>` returning empty is the fast, decisive way to confirm a
+sibling file was never touched. A fix that only updates the log is a fix that looks complete in
+`journalctl`/CI evidence while the operator-visible number stays wrong.

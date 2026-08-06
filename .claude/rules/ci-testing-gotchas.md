@@ -557,3 +557,27 @@ currently-active cameras BEFORE any of this runs -- an inactive camera's input i
 looked at, set OR verified. The fix is a SEPARATE, wider, report-only `--verify-only` sweep across
 the full 7-camera table, not a "second verify pass" on the same active-only set (which already
 verifies itself).
+
+## Re-arming (or relaxing) a `gates_overall_pass()`-style seam: grep the WHOLE repo, not just the file that OWNS the seam (issue 861 re-arm, 2026-08-06)
+
+Flipping a report-only seam back to blocking (or vice versa) means EVERY pre-existing test that
+asserted the OLD JSON shape (`gates_overall_pass: false`, a "report-only" gate string, an
+unaffected exit code) now describes wrong behavior — the `bf12c1b84`/#889 precedent already
+documents finding and fixing these INSIDE the one file that owns the seam
+(`src/bin/recording-verdict.rs`). What that precedent under-warns about: **the SAME term can ALSO
+be exercised through a completely SEPARATE test file that spawns the compiled binary as a
+subprocess** (this repo's `tests/recording_verdict_merge_gate_exit_code.rs`, which proves the REAL
+`recording-verdict --merge-partials` PROCESS exits non-zero — a different assertion surface than
+the in-process `#[cfg(test)] mod tests` block, see that file's own doc comment for why the
+subprocess form exists). A `grep -n "gates_overall_pass\|<json-field-name>"
+src/bin/recording-verdict.rs` alone missed it entirely on the first pass; CI's `Test` job caught it
+on the SECOND push, costing a full CI round-trip that a repo-wide grep would have caught for free.
+
+**Before declaring a `gates_overall_pass()` re-arm complete:** `grep -rln "<the JSON field name>"
+--include="*.rs" --include="*.py" --include="*.sh" --include="*.yml" .` across the WHOLE repo, not
+scoped to the one `.rs` file that defines/consumes the seam — include subprocess-spawning test
+files, Python report/combine scripts (`scripts/*_report.py`, `scripts/*_combine*.py`), and CI
+workflow pwsh/bash assertions. Distinguish readers of the MEASURED value (`gate_pass` — unaffected
+by a re-arm, since the measurement itself never changed) from readers of the GATING flag/behavior
+(`gates_overall_pass`, an unconditional `overall_pass`/exit-code assertion on a fixture that fails
+the term) — only the latter class needs updating.
