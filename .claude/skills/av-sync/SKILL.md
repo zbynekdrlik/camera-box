@@ -505,3 +505,31 @@ about to (or already did) crash the whole process, or you're looking at an OLD s
 file from before this fix. If you see a suspiciously short marker log with the painter process
 still alive, check `journalctl`/the process's own log for the `CRITICAL #936: QPSK A/V-sync marker
 thread DIED` line before assuming the recording captured a healthy window.
+
+## Dock DLL deploy path (#953/#955/#986, 2026-08-06) — the fast artifact + hot-swap recipe
+
+`windows-genlock-fast.yml` uploads the compiled dock as artifact **`avsyncdock-fast-dll`**
+(added `aa4015e3c` — before that, NO artifact path existed and merged dock fixes silently never
+reached the rig; deployed DLLs were weeks stale). Deploy to a box:
+
+1. `gh run download <fast-run-id> -n avsyncdock-fast-dll` on dev1; scp the DLL to the box's
+   `C:\camera-box\obs-audio-video-sync-dock.dll.new` (scp = sanctioned file copy).
+2. Swap with OBS DOWN (DLL is locked while OBS runs). On strih kill AutoHotkey64 FIRST (it
+   respawns obs64), then obs64, then `Copy-Item` over
+   `C:\Program Files\obs-studio\obs-plugins\64bit\obs-audio-video-sync-dock.dll` (keep a .bak),
+   verify md5 vs dev1.
+3. Relaunch via the `launch-obs-genlock.sh --box <box> --force` planner: save its PowerShell body
+   to `C:\camera-box\<box>-relaunch.ps1` and run `powershell -NoProfile -ExecutionPolicy Bypass
+   -File ...` through the box's win-* MCP Shell (child inherits session 1 — GUI-visible). GOTCHA:
+   the planner's AHK-restart is gated on ITS OWN redraw loop having stopped AHK (`$ahkStopped`) —
+   if YOU pre-killed AHK in step 2, the planner exits 1 at the #978 "found 0 AutoHotkey64" check
+   and never restarts it; restart AHK manually (candidates + `D:\_APPS\NL_STARTUP.ahk` recipe are
+   in the planner body) and re-verify `genlock:.*render tick ENABLED` in the fresh OBS log.
+4. Verify the plugin line in the new log (`[obs-audio-video-sync-dock] plugin loaded`) + dock
+   LOCKED lines once marker+QR flow. `genlock_latency_ms_src` on `NDI 2ME PGM` survived the
+   force-kill relaunch (894 read back intact) — but read it back anyway.
+
+Live reference numbers (2026-08-06, knob 894, offline truth -0.06ms): deployed dock LOCKED with
+display `-57.1 ms "Audio early"`, log offsets wandering +20..+47ms, lock/unlock churn ~10-15s,
+`Video Index (98% missed)` — the dock-vs-gate bias + churn is #999's scope; the offline
+`recording-verdict --av-sync` stays the calibrated reference.
