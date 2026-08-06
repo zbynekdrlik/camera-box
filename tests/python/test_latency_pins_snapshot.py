@@ -98,10 +98,11 @@ class TestReadPin:
 # ---------------------------------------------------------------------------
 
 class TestActiveCameraNumbers:
-    def test_default_is_cam1_cam2_cam4(self, monkeypatch):
-        # #898 (2026-07-31): cam3 retired from the default active set (grabber card destroyed).
+    def test_default_is_cam1_cam2(self, monkeypatch):
+        # #947 (2026-08-06): cam4 removed from the rig (box never comes up on the network);
+        # default mirrors camera-set.sh's CAMERA_ACTIVE_SET = "cam1 cam2".
         monkeypatch.delenv("CAMERA_ACTIVE_SET", raising=False)
-        assert lps.active_camera_numbers() == (1, 2, 4)
+        assert lps.active_camera_numbers() == (1, 2)
 
     def test_env_override_narrows_the_set(self, monkeypatch):
         monkeypatch.setenv("CAMERA_ACTIVE_SET", "cam1 cam3")
