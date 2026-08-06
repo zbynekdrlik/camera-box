@@ -606,6 +606,60 @@ mod tests {
     use super::*;
     use crate::qpsk_marker::{frame_id_to_index, marker_signal, signal_len, AV_SYNC_RING_CYCLE_NS};
 
+    // ---- #955 DockLockOutcome ----
+
+    #[test]
+    fn dock_lock_outcome_apply_and_may_actuate_is_write_955() {
+        assert_eq!(
+            dock_lock_outcome(DockLockAction::Apply(945), true, -52.2, 950),
+            DockLockOutcome::Write
+        );
+    }
+
+    #[test]
+    fn dock_lock_outcome_apply_and_monitor_only_is_suggest_955() {
+        assert_eq!(
+            dock_lock_outcome(DockLockAction::Apply(945), false, -52.2, 950),
+            DockLockOutcome::Suggest
+        );
+    }
+
+    #[test]
+    fn dock_lock_outcome_hold_at_pinned_rail_with_audio_early_is_rail_warn_955() {
+        assert_eq!(
+            dock_lock_outcome(DockLockAction::Hold, false, -20.0, DOCK_LOCK_LATENCY_MIN_MS),
+            DockLockOutcome::RailWarn
+        );
+        assert_eq!(
+            dock_lock_outcome(DockLockAction::Hold, false, -20.0, DOCK_LOCK_LATENCY_MAX_MS),
+            DockLockOutcome::RailWarn
+        );
+    }
+
+    #[test]
+    fn dock_lock_outcome_hold_not_pinned_is_quiet_955() {
+        assert_eq!(
+            dock_lock_outcome(DockLockAction::Hold, false, 5.0, 950),
+            DockLockOutcome::Quiet
+        );
+        // #955: the rail check specifically requires offset_ms < 0.0 ("audio still early") --
+        // a non-negative offset never triggers RailWarn even while pinned at a rail, matching
+        // decide()'s own invariant (a rail-pinned POSITIVE offset is not a violation at all).
+        assert_eq!(
+            dock_lock_outcome(DockLockAction::Hold, false, 5.0, DOCK_LOCK_LATENCY_MIN_MS),
+            DockLockOutcome::Quiet
+        );
+    }
+
+    #[test]
+    fn dock_lock_outcome_may_actuate_is_irrelevant_while_holding_955() {
+        // may_actuate only distinguishes Write vs Suggest on the Apply arm.
+        assert_eq!(
+            dock_lock_outcome(DockLockAction::Hold, true, 5.0, 950),
+            DockLockOutcome::Quiet
+        );
+    }
+
     #[test]
     fn top_band_plan_4k_keeps_qr_large_and_within_cap() {
         // A 4K program frame: the top 72 % (1555 px) crop, downscaled so the long side (3840) hits
