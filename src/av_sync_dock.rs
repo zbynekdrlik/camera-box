@@ -601,6 +601,61 @@ impl DockLockCorrector {
     }
 }
 
+/// #955 — the log-level OUTCOME `sync-test-output.cpp` derives from a [`DockLockCorrector::decide`]
+/// result: whether to WRITE the actuator, DISPLAY a monitor-only suggestion, warn that a hardware
+/// rail is pinned with the "audio never early" invariant still violated, or say nothing. Extracted
+/// as a byte-identical pure function purely so this branch selection — previously ONLY a
+/// source-text grep away from a silent regression (the #942 fix-up review's own counter-example:
+/// moving the actuator write into the monitor-only branch still passed every existing text-anchor
+/// test) — gets a real behavioral test. Mirrors `cb_dock_lock_outcome()` in
+/// `vendor/av-sync-dock/src/camera-box-audio.hpp`; see `tests/av_sync_dock_outcome_955.rs` for the
+/// C++ twin harness. This does NOT change `decide()`'s own hold-band/step/cooldown math at all
+/// (`.claude/rules/dock-lock-hold-band.md`) — it only names the decision the caller already makes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DockLockOutcome {
+    /// `act` is `Apply` and actuation is currently permitted — write it to the live actuator.
+    Write,
+    /// `act` is `Apply` but actuation is NOT permitted (#942: monitor-only) — display it as a
+    /// suggestion, never write it.
+    Suggest,
+    /// `act` is `Hold` (already inside the band, or no room to correct further), but the
+    /// "audio never early" invariant is STILL violated because a hardware rail is pinned — a
+    /// genuine hardware limit, not a corrector bug, and it must stay VISIBLE.
+    RailWarn,
+    /// `act` is `Hold` and nothing is wrong — nothing to report this measurement.
+    Quiet,
+}
+
+/// See [`DockLockOutcome`]'s own doc comment. `offset_ms`/`current_ms` here are in `decide()`'s
+/// OWN native (dock) convention — this is the SAME rail-pinned check `decide()`'s caller already
+/// makes today (`est.offset_ms < 0.0` = "audio still early"), just named and extracted.
+pub fn dock_lock_outcome(
+    act: DockLockAction,
+    may_actuate: bool,
+    offset_ms: f64,
+    current_ms: i32,
+) -> DockLockOutcome {
+    match act {
+        DockLockAction::Apply(_) => {
+            if may_actuate {
+                DockLockOutcome::Write
+            } else {
+                DockLockOutcome::Suggest
+            }
+        }
+        DockLockAction::Hold => {
+            if offset_ms < 0.0
+                && (current_ms <= DOCK_LOCK_LATENCY_MIN_MS
+                    || current_ms >= DOCK_LOCK_LATENCY_MAX_MS)
+            {
+                DockLockOutcome::RailWarn
+            } else {
+                DockLockOutcome::Quiet
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

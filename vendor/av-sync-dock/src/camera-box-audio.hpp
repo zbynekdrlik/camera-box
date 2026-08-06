@@ -520,12 +520,15 @@ static const int32_t CB_DOCK_LOCK_LATENCY_MAX_MS = 2000;
 static const double CB_DOCK_LOCK_MIN_MARGIN_MS = 1.0;
 
 /* #942 -- BUILD DEFAULT, not a runtime toggle: the E2E gate (scripts/av_sync_calibrate.py
- * --apply) is the SOLE writer of genlock_latency_ms_src. Two independent actuators writing the
- * SAME live knob never converge -- the gate measures against ground truth (the QPSK marker + the
- * optical burns) and is read-back-verified once per run with a clamped step; this corrector only
- * ever servos against its OWN recent output, with no ground truth of its own (root-cause evidence
- * on the #942 ticket: a 20-run random walk while both actuators were live, and a directly-sampled
- * +-5ms limit cycle with zero gate activity in flight). Mirrors the SAME hard-lock convention as
+ * --apply) is the only CONTINUOUS/closed-loop writer of genlock_latency_ms_src (a separate,
+ * bounded snapshot-and-restore exception exists around a single delivery-verify test run --
+ * scripts/obs_phase2.py::_snapshot_and_set_test_latency, #358/#691 -- which is not a second
+ * closed-loop actuator). Two independent CONTINUOUS actuators writing the SAME live knob never
+ * converge -- the gate measures against ground truth (the QPSK marker + the optical burns) and is
+ * read-back-verified once per run with a clamped step; this corrector only ever servos against its
+ * OWN recent output, with no ground truth of its own (root-cause evidence on the #942 ticket: a
+ * 20-run random walk while both actuators were live, and a directly-sampled +-5ms limit cycle with
+ * zero gate activity in flight). Mirrors the SAME hard-lock convention as
  * #257 (genlock env removal) and #912 (ASRC default-on) -- no env var, no WebSocket flag, no
  * per-source opt-in; flipping this back on is a deliberate future code change, never a config
  * value. Mirror of src/av_sync_dock.rs::DOCK_LOCK_ACTUATION_ENABLED / dock_lock_may_actuate() --
@@ -625,5 +628,36 @@ private:
 	bool have_last_applied_;
 	uint64_t last_applied_ns_;
 };
+
+/* #955 -- the log-level OUTCOME sync-test-output.cpp derives from a CbDockLockAction result:
+ * whether to WRITE the actuator, DISPLAY a monitor-only suggestion, warn that a hardware rail is
+ * pinned with the "audio never early" invariant still violated, or say nothing. Extracted as a
+ * byte-identical pure function purely so this branch selection -- previously ONLY a source-text
+ * grep away from a silent regression (the #942 fix-up review's own counter-example: moving the
+ * actuator write into the monitor-only branch still passed every existing text-anchor test) --
+ * gets a real behavioral test (tests/av_sync_dock_outcome_955.rs). Mirror of
+ * src/av_sync_dock.rs::DockLockOutcome/dock_lock_outcome(). Does NOT change decide()'s own
+ * hold-band/step/cooldown math at all (.claude/rules/dock-lock-hold-band.md) -- it only names the
+ * decision the caller already makes. */
+enum class CbDockLockOutcome {
+	Write,    // act.apply && may_actuate -- write the new value to the live actuator
+	Suggest,  // act.apply && !may_actuate -- #942 monitor-only: display, never apply
+	RailWarn, // !act.apply, pinned at a hardware rail with "audio still early" unresolved
+	Quiet,    // !act.apply, nothing to report
+};
+
+/* offset_ms/current_ms here are in decide()'s OWN native (dock) convention -- the SAME
+ * rail-pinned check the caller already makes today (offset_ms < 0.0 == "audio still early"),
+ * just named and extracted. */
+inline CbDockLockOutcome cb_dock_lock_outcome(const CbDockLockAction &act, bool may_actuate,
+                                               double offset_ms, int32_t current_ms)
+{
+	if (act.apply)
+		return may_actuate ? CbDockLockOutcome::Write : CbDockLockOutcome::Suggest;
+	if (offset_ms < 0.0 && (current_ms <= CB_DOCK_LOCK_LATENCY_MIN_MS ||
+	                        current_ms >= CB_DOCK_LOCK_LATENCY_MAX_MS))
+		return CbDockLockOutcome::RailWarn;
+	return CbDockLockOutcome::Quiet;
+}
 
 } // namespace camerabox
