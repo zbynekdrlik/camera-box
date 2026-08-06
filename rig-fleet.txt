@@ -11,11 +11,14 @@
 # healthy fails the run LOUDLY as a stale ack (#758/#827); remove the line the moment the box is
 # back in the fleet.
 #
-# Current physical state (2026-07-28, #827):
-# cam4 is BACK in the fleet (2026-07-28): its grabber card (NZXT Signal HD60) was reseated -- the
-# USB-C connector had not been pushed fully home, so the card never enumerated at all (empty USB3
-# bus, no /dev/video*, camera-box crash-looping on "No video capture device found"). After the
-# reseat it enumerates, /dev/video0+1 exist and camera-box streams 60/60 fps with 0 dropped.
+# Current physical state (2026-08-06, issue 861 re-arm):
+# cam3: retired 2026-07-31 (issue 898) -- grabber card destroyed; box powered off / unreachable.
+# cam4: removed from the rig 2026-08-06 (issue 947) -- box never comes up on the network (MAC
+#   learned on no switch, ping/ssh dead); CAMERA_ACTIVE_SET default is "cam1 cam2".
+# Without these acks the re-armed A/V-offset gate (issue 861) fails closed forever on their
+# UNKNOWN (0 samples) verdicts -- an unacked absent camera must fail the gate by design (#855).
+cam3:grabber-destroyed-2026-07-31
+cam4:removed-from-rig-2026-08-06
 cam5:powered-off-2026-07-27
 cam6:powered-off-2026-07-27
 cam7:powered-off-2026-07-27
