@@ -763,20 +763,30 @@ pub struct LatencyDisplay {
 /// applies also inverts: a gate-POSITIVE offset (video lags audio) means audio arrived EARLIER —
 /// the "Audio early" text, which is norihiro's own NEGATIVE-branch label; a gate-NEGATIVE offset
 /// means "Audio lagged" (norihiro's own POSITIVE-branch label).
-pub fn dock_latency_display_ms(dock_native_ts_ns: i64, _gate_convention: bool) -> LatencyDisplay {
-    // #999 RED stub -- reproduces the CURRENT bug on purpose: `gate_convention` is ignored, so
-    // this is byte-for-byte the pre-fix `on_sync_found` (native convention always), regardless of
-    // which regime produced the event. The GREEN commit restores the real conversion.
+pub fn dock_latency_display_ms(dock_native_ts_ns: i64, gate_convention: bool) -> LatencyDisplay {
     let native_ms = dock_native_ts_ns as f64 / 1_000_000.0;
-    let polarity = if native_ms > 0.0 {
-        LatencyPolarity::Positive
-    } else if native_ms < 0.0 {
-        LatencyPolarity::Negative
+    let display_ms = if gate_convention {
+        dock_lock_display_offset_ms(native_ms)
+    } else {
+        native_ms
+    };
+    let polarity = if display_ms > 0.0 {
+        if gate_convention {
+            LatencyPolarity::Negative
+        } else {
+            LatencyPolarity::Positive
+        }
+    } else if display_ms < 0.0 {
+        if gate_convention {
+            LatencyPolarity::Positive
+        } else {
+            LatencyPolarity::Negative
+        }
     } else {
         LatencyPolarity::None
     };
     LatencyDisplay {
-        display_ms: native_ms,
+        display_ms,
         polarity,
     }
 }
