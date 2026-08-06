@@ -5173,21 +5173,26 @@ fn build_and_print_verdict(
                         }
                         av_json.insert(camera.to_string(), cam_json);
                     }
-                    // #861 (user decision on #856, 2026-07-29): the A/V-offset gate is
-                    // TEMPORARILY report-only — still measured, still printed, still fails
-                    // CLOSED on thin/absent data, but no longer folded into `all_pass`. Program
-                    // audio drifts ~160ms/hour against video (epic #800, foreign clock domain),
-                    // so a constant video-delay offset cannot hold ±20ms until per-source ASRC
-                    // (#803) lands. Mirrors the #286 cross-camera delivery-latency spread term's
-                    // existing report-only shape exactly (same wording, same JSON pattern) — see
-                    // `all_cambox_delivery_latency_spread_never_gates_all_pass_286`. Re-arming
-                    // this into `all_pass` is tracked on #861.
+                    // #861 (2026-08-06, re-armed after ASRC #803 proved stable — see
+                    // av_window::gates_overall_pass()'s own doc comment for the decision record):
+                    // was TEMPORARILY report-only since 2026-07-29 (user decision on #856) while
+                    // program audio drifted ~160ms/hour against video (epic #800, foreign clock
+                    // domain) — a constant video-delay offset could not hold ±20ms until
+                    // per-source ASRC landed. That precondition is now met, so this term folds
+                    // into `all_pass` again, mirroring the issue-914/915 `gates_overall_pass()`
+                    // seam exactly (applied in reverse: re-blocking, not relaxing).
+                    let av_gate_blocking = av_window::gates_overall_pass();
                     println!(
                         "  >>> #624 deliverable 4 A/V-offset gate: expected={:.1}ms tolerance=±{:.1}ms → {} \
-                         (report-only — does NOT gate all_pass, pending ASRC, see #861)",
+                         ({})",
                         args.av_expected_ms,
                         av_window::AV_OFFSET_GATE_TOLERANCE_MS,
-                        if av_all_pass { "PASS" } else { "FAIL" }
+                        if av_all_pass { "PASS" } else { "FAIL" },
+                        if av_gate_blocking {
+                            "BLOCKING — gates overall_pass again, re-armed after ASRC (#803), see #861"
+                        } else {
+                            "report-only — does NOT gate overall_pass, pending ASRC, see #861"
+                        }
                     );
                     av_json.insert(
                         "expected_ms".to_string(),
@@ -5198,25 +5203,39 @@ fn build_and_print_verdict(
                         serde_json::json!(av_window::AV_OFFSET_GATE_TOLERANCE_MS),
                     );
                     av_json.insert("gate_pass".to_string(), serde_json::json!(av_all_pass));
-                    // #861: unambiguous machine-readable flag alongside `gate_pass` — this term's
-                    // measured PASS/FAIL no longer decides `overall_pass` (see `gate_pass` above
-                    // for the measured value; this field says whether it COUNTS).
-                    av_json.insert("gates_overall_pass".to_string(), serde_json::json!(false));
+                    // #861: unambiguous machine-readable flag alongside `gate_pass` — whether this
+                    // term's measured PASS/FAIL COUNTS toward `overall_pass` (see `gate_pass`
+                    // above for the measured value itself).
+                    av_json.insert(
+                        "gates_overall_pass".to_string(),
+                        serde_json::json!(av_gate_blocking),
+                    );
                     av_json.insert(
                         "gate".to_string(),
-                        serde_json::json!(format!(
-                            "report-only — does NOT gate overall_pass, pending ASRC (#861); every \
-                             camera under test is still measured against ±{:.0}ms of expected_ms \
-                             (#624 deliverable 4 / #312 item 2 PR B)",
-                            av_window::AV_OFFSET_GATE_TOLERANCE_MS
-                        )),
+                        serde_json::json!(if av_gate_blocking {
+                            format!(
+                                "BLOCKING — every camera under test must be within ±{:.0}ms of \
+                                 expected_ms (#624 deliverable 4 / #312 item 2 PR B); re-armed \
+                                 after ASRC (#803) proved stable, see #861",
+                                av_window::AV_OFFSET_GATE_TOLERANCE_MS
+                            )
+                        } else {
+                            format!(
+                                "report-only — does NOT gate overall_pass, pending ASRC (#861); \
+                                 every camera under test is still measured against ±{:.0}ms of \
+                                 expected_ms (#624 deliverable 4 / #312 item 2 PR B)",
+                                av_window::AV_OFFSET_GATE_TOLERANCE_MS
+                            )
+                        }),
                     );
                     report["all_cambox_av_sync"] = serde_json::Value::Object(av_json);
-                    // #861: DELIBERATELY not folded into `all_pass` (see the report-only note
-                    // above) — `av_all_pass` is still computed and reported, same severity/rigor
-                    // as before, it just no longer decides the run's overall verdict. Zero-loss
-                    // (all_cambox_continuity / burn-id contiguity, `seg.overall_pass` above)
-                    // remains STRICT and is completely unaffected by this.
+                    // #861: folds into `all_pass` again — a no-op when the gate PASSES (av_all_pass
+                    // == true) or when `gates_overall_pass()` reverts to report-only in the future
+                    // (`!av_gate_blocking` short-circuits the OR to true); otherwise a FAILING
+                    // av_sync gate now forces `all_pass = false`, same severity as the loss/latency
+                    // gates. Zero-loss (all_cambox_continuity / burn-id contiguity, `seg.overall_pass`
+                    // above) remains STRICT and is completely unaffected by this either way.
+                    all_pass &= av_all_pass || !av_gate_blocking;
                 }
             }
             None => {
