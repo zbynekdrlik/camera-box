@@ -705,11 +705,13 @@ pub fn dock_lock_suggested_target(offset_ms: f64, mad_ms: f64, current_ms: i32) 
     // i32::MAX, which would underflow/overflow inside required_delay_ms's own
     // `current_delay_ms -/+ max_step_ms`.
     let unlimited_step = DOCK_LOCK_LATENCY_MAX_MS - DOCK_LOCK_LATENCY_MIN_MS;
-    Some(crate::qpsk_marker::required_delay_ms(
-        current_ms,
-        offset_ms,
-        unlimited_step,
-    ))
+    let target = crate::qpsk_marker::required_delay_ms(current_ms, offset_ms, unlimited_step);
+    // #953 review: `required_delay_ms` clamps to its OWN hardcoded [3, 2000] literal, which is
+    // correct today only because it happens to equal these named constants -- clamp explicitly
+    // against the named constants too so this function never silently diverges from the C++
+    // mirror (which clamps against CB_DOCK_LOCK_LATENCY_MIN_MS/MAX_MS by name) if either literal
+    // ever changes independently.
+    Some(target.clamp(DOCK_LOCK_LATENCY_MIN_MS, DOCK_LOCK_LATENCY_MAX_MS))
 }
 
 #[cfg(test)]
@@ -788,6 +790,23 @@ mod tests {
         // the pre-#953 constant "-5ms" bug this ticket's live evidence documented.
         assert_eq!(dock_lock_suggested_target(3.0, 10.0, 931), None);
         assert_eq!(dock_lock_suggested_target(-9.9, 10.0, 931), None);
+    }
+
+    #[test]
+    fn dock_lock_suggested_target_exact_margin_boundary_is_not_quiet_953() {
+        // The quiet check is a STRICT `<` — an offset exactly AT the margin is already outside
+        // the noise band and must produce a real suggestion, not be swallowed as "aligned".
+        assert_eq!(dock_lock_suggested_target(10.0, 10.0, 931), Some(921));
+        assert_eq!(dock_lock_suggested_target(-10.0, 10.0, 931), Some(941));
+    }
+
+    #[test]
+    fn dock_lock_suggested_target_non_finite_mad_falls_back_to_min_margin_953() {
+        // A non-finite mad_ms (no cluster dispersion yet) falls back to DOCK_LOCK_MIN_MARGIN_MS
+        // (1.0), not to "no noise floor at all" -- an offset just inside 1.0 is still quiet, one
+        // clearly outside it is not.
+        assert_eq!(dock_lock_suggested_target(0.5, f64::NAN, 931), None);
+        assert_eq!(dock_lock_suggested_target(5.0, f64::NAN, 931), Some(926));
     }
 
     #[test]

@@ -276,11 +276,20 @@ jobs:
             Write-Error "camera-box-audio.hpp: cb_dock_lock_may_actuate() no longer returns CB_DOCK_LOCK_ACTUATION_ENABLED directly — #942 seam body may have been rewritten to bypass the hard lock"; exit 1
           }
           $output = (Get-Content "vendor/av-sync-dock/src/sync-test-output.cpp" -Raw) -replace '\s+', ' '
-          if ($output -notmatch [regex]::Escape('if (act.apply && camerabox::cb_dock_lock_may_actuate())')) {
-            Write-Error "sync-test-output.cpp: the LOCK-CORRECT apply call site is no longer gated on cb_dock_lock_may_actuate() — #942 monitor-only default reverted"; exit 1
+          # #955: the Write/Suggest/RailWarn/Quiet decision is now the pure extracted
+          # cb_dock_lock_outcome() (tests/av_sync_dock_outcome_955.rs proves its OWN behavior);
+          # this only needs to prove the CALLER wires the real cb_dock_lock_may_actuate() seam
+          # into it (not a hardcoded true/false) and that the write is the first statement inside
+          # the resulting `case ...::Write:` arm.
+          if ($output -notmatch [regex]::Escape('camerabox::CbDockLockOutcome outcome = camerabox::cb_dock_lock_outcome( act, camerabox::cb_dock_lock_may_actuate(), est.offset_ms, current_ms); switch (outcome) { case camerabox::CbDockLockOutcome::Write: { const double delta_ms = (double)(act.new_delay_ms - current_ms); cb_apply_lock_latency_ms(act.new_delay_ms);')) {
+            Write-Error "sync-test-output.cpp: either cb_dock_lock_outcome() is no longer called with cb_dock_lock_may_actuate(), or cb_apply_lock_latency_ms() is no longer the first statement inside case CbDockLockOutcome::Write — #942 monitor-only default reverted"; exit 1
           }
-          if ($output -match [regex]::Escape('audio_ts); if (act.apply) {')) {
-            Write-Error "sync-test-output.cpp: an UNGATED if (act.apply) actuator-write branch is back right after decide() — #942 gate bypassed"; exit 1
+          # #942 hardening (#955 update): cb_apply_lock_latency_ms() must be called with its
+          # real argument in EXACTLY one place in the whole file (the gated Write case above) — a
+          # second call site would silently reintroduce the #942 dual-actuator write.
+          $applyCount = ([regex]::Matches($output, [regex]::Escape('cb_apply_lock_latency_ms(act.new_delay_ms)'))).Count
+          if ($applyCount -ne 1) {
+            Write-Error "sync-test-output.cpp: cb_apply_lock_latency_ms(act.new_delay_ms) appears $applyCount times (expected exactly 1) — #942 gate may be bypassed"; exit 1
           }
           Write-Output "dock lock corrector monitor-only by default (#942 hard-locked seam + gated call site) — OK"
 

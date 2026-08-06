@@ -1354,10 +1354,14 @@ static void st_raw_audio_camera_box(struct sync_test_output *st, struct audio_da
 						 * closed-form justification (mirrors src/av_sync_dock.rs). */
 						st->cb_offset_cluster.rebase(delta_ms);
 						st->cb_rail_pinned_logged = false;
+						// #953 -- same gate-convention sign fix as every other displayed offset
+						// in this function (currently unreachable while actuation is hard-locked
+						// off, #942, but kept consistent for if/when it is ever re-enabled).
 						blog(LOG_INFO,
 						     "av-sync-dock: LOCK-CORRECT requested genlock_latency_ms_src %d "
 						     "-> %dms (measured offset=%.1fms)",
-						     (int)current_ms, (int)act.new_delay_ms, est.offset_ms);
+						     (int)current_ms, (int)act.new_delay_ms,
+						     camerabox::cb_dock_lock_display_offset_ms(est.offset_ms));
 						break;
 					}
 					case camerabox::CbDockLockOutcome::Suggest: {
@@ -1379,10 +1383,11 @@ static void st_raw_audio_camera_box(struct sync_test_output *st, struct audio_da
 						 * when that target says the offset is already within the noise floor
 						 * (quiet inside the noise band, never "-5ms forever"). */
 						st->cb_rail_pinned_logged = false;
-						double gate_offset_ms = camerabox::cb_dock_lock_display_offset_ms(est.offset_ms);
+						double gate_offset_ms =
+							camerabox::cb_dock_lock_display_offset_ms(est.offset_ms);
 						camerabox::CbDockLockSuggestion suggestion =
 							camerabox::cb_dock_lock_suggested_target(gate_offset_ms, est.mad_ms,
-											  current_ms);
+												  current_ms);
 						if (suggestion.has_value)
 							blog(LOG_INFO,
 							     "av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src %d "

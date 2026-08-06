@@ -97,6 +97,24 @@ int main()
         }
     }
 
+    // (7) The quiet check is a STRICT `<` -- an offset exactly AT the margin is already outside
+    // the noise band and must produce a real suggestion, not be swallowed as "aligned".
+    {
+        CbDockLockSuggestion s1 = cb_dock_lock_suggested_target(10.0, 10.0, 931);
+        CHECK(s1.has_value && s1.target_ms == 921, "offset==margin must not be quiet (positive)");
+        CbDockLockSuggestion s2 = cb_dock_lock_suggested_target(-10.0, 10.0, 931);
+        CHECK(s2.has_value && s2.target_ms == 941, "offset==margin must not be quiet (negative)");
+    }
+
+    // (8) A non-finite mad_ms falls back to CB_DOCK_LOCK_MIN_MARGIN_MS (1.0), not "no noise
+    // floor at all".
+    {
+        CbDockLockSuggestion s1 = cb_dock_lock_suggested_target(0.5, std::nan(""), 931);
+        CHECK(!s1.has_value, "offset inside the 1.0ms fallback margin must be quiet");
+        CbDockLockSuggestion s2 = cb_dock_lock_suggested_target(5.0, std::nan(""), 931);
+        CHECK(s2.has_value && s2.target_ms == 926, "offset outside the fallback margin must suggest");
+    }
+
     std::printf("av_sync_dock_suggested_target_953: %d FAILURE(S)\n", g_failures);
     return g_failures == 0 ? 0 : 1;
 }
