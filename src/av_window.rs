@@ -147,6 +147,27 @@ pub fn av_offset_gate_pass(sync: &CameraAvSync, expected_ms: f64) -> bool {
     }
 }
 
+/// #861 (2026-08-06, user decision -- mirrors the issue-914/915 `gates_overall_pass()` seam
+/// exactly, applied in the RE-BLOCKING direction): whether [`av_offset_gate_pass`]'s per-camera
+/// PASS/FAIL result folds into the fused run's `overall_pass`. [`av_offset_gate_pass`] itself is
+/// UNCHANGED — still fully computed, still fail-closed on thin/absent data, still reported in
+/// `all_cambox_av_sync` exactly as before; only the CALLER (`bin/recording-verdict.rs`) decides
+/// whether the aggregate result (`av_all_pass`) folds into `all_pass`, gated on this function.
+///
+/// Report-only (`false`) since 2026-07-29 (issue 861, user decision on #856): program audio
+/// drifted ~160ms/hour against video in a foreign Waves/Dante clock domain (epic #800) — a
+/// constant video-delay offset could not hold ±20ms until per-source ASRC landed (#803). That
+/// precondition is now met: ASRC is live and build-default (#912), and the offline
+/// `recording-verdict --av-sync` chain converged predictably in one measured step on 2026-08-06
+/// (51.6ms -> 963 -> 913 -> 894 knob -> final av_offset_ms=-0.06ms, mad 11.8, matched 31 — issue
+/// 999 comment 2026-08-06 09:05 UTC). Restore path if this ever needs softening again: flip back
+/// to `false` with a fresh user decision citing live evidence the drift has returned — never a
+/// silent revert (see `all_cambox_av_sync_gate_failure_forces_the_overall_verdict_to_fail_861`,
+/// the regression test that fails if this function's return value silently reverts).
+pub fn gates_overall_pass() -> bool {
+    false // #861 RED stub -- temporarily reverted to prove the test catches it
+}
+
 /// #714/#689 — the ONE per-camera A/V offset a consumer (the #711 report, the merge path, a human
 /// reading the raw verdict) should read, so EVERY camera under test carries a computable number,
 /// not a `null` that has to be cross-read against a second field. It is:
@@ -288,6 +309,23 @@ pub fn derive_camera_av_sync(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---------------------------------------------------------------------
+    // gates_overall_pass (issue 861 re-arm)
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn gates_overall_pass_is_blocking_again_861() {
+        // ASRC (#803) is live and the offline chain converged (2026-08-06 measurement) -- the
+        // 2026-07-29 report-only relaxation is reversed. A silent revert to `false` here (without
+        // a fresh user decision) must fail this test loudly.
+        assert!(
+            gates_overall_pass(),
+            "#861: the A/V-offset term must gate overall_pass again now that ASRC is live and \
+             proven -- if this reverted to false, it must be a deliberate, cited user decision, \
+             never a silent regression"
+        );
+    }
 
     // ---------------------------------------------------------------------
     // pool_camera_av_sync
