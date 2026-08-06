@@ -59,7 +59,10 @@ prints the #915 line). **The 2026-08-05 RE-GATE (ticket 889 comment 5196190653) 
 `copies`/`gaps` back OUT of "always report-only"**: above the per-window tolerance
 (`crate::window_gate::WINDOW_COPIES_GAPS_TOLERANCE`, recalibrated 1 → 2 on 2026-08-06, ticket 889
 comment 5198131539 — three valid hardware runs measured a per-window max of `{1, 1, 2}`, so
-tolerance=1 was flaky by construction) they are a real, loud, gating failure again
+tolerance=1 was flaky by construction; recalibrated again 2 → 3 later the same day, ticket 889
+comment 5200533407 — a post-#998-fix run measured a healthy per-window max of `{1, 1, 2, 3}` with
+run-total burden identical to clean runs, so tolerance=2 was flaky by construction the same way)
+they are a real, loud, gating failure again
 (`SegmentedContinuity::windows_over_copies_gaps_tolerance`) — only AT OR UNDER the tolerance do
 they stay absorbed (the `copies != 0 || gaps != 0` "#889 WITHIN TOLERANCE" print, still inside the
 `s.relaxed_pass == true` branch).
