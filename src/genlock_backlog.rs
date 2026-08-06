@@ -125,7 +125,7 @@ pub fn backlog_relock_threshold(
 ///
 /// This is a bounded, ADDITIONAL path alongside the unchanged backlog-relock branch: at most
 /// once every [`DRAIN_MIN_TICK_INTERVAL`] ticks, while the queue sits more than
-/// [`DRAIN_HYSTERESIS_FRAMES`] above [`steady_depth_frames`], shed exactly ONE extra frame.
+/// [`DRAIN_HYSTERESIS_FRAMES`] above [`drain_target_frames`], shed exactly ONE extra frame.
 /// The rate is bounded by construction, so it can never reproduce the every-tick paired
 /// duplicate/skip storm the old (removed) per-tick trim caused.
 ///
@@ -140,12 +140,60 @@ pub const DRAIN_HYSTERESIS_FRAMES: u64 = 2;
 /// per-tick burst the disabled backlog-relock branch used to cause as a side effect.
 pub const DRAIN_MIN_TICK_INTERVAL: u64 = 30;
 
+/// #998 — the settle-back drain's own target, deliberately SEPARATE from
+/// [`steady_depth_frames`] even though the arithmetic is closely related.
+///
+/// The ts-align hold's natural steady depth is `ceil(latency/interval) + 1..+2` (plus arrival
+/// jitter) — a value that sits strictly ABOVE the floor of `latency/interval`. Reusing
+/// `steady_depth_frames`'s ROUND-to-nearest here (as the drain target did before #998) picks the
+/// WRONG side of that natural depth whenever `frac(latency_ms/interval) < 0.5`: round == floor,
+/// so the target undershoots the hold's true steady depth by exactly one frame. `depth > target +
+/// DRAIN_HYSTERESIS_FRAMES` then holds PERMANENTLY even though the queue sits at its own correct
+/// depth — the drain fires every [`DRAIN_MIN_TICK_INTERVAL`] ticks, sheds a frame
+/// (`dropped_due`), the boundary re-anchors low, and the very next tick's hold regains it via a
+/// `late_hold` — one duplicated + one skipped program frame every ~[`DRAIN_MIN_TICK_INTERVAL`]
+/// ticks, forever, on any source whose configured latency happens to land below-half-frac. Live
+/// evidence (stream box `NDI 2ME PGM`): +152 `dropped_due`/+151 `late_holds` per ~355s run at
+/// latency_ms=941 (frac .23), +161/+162 at 915 (frac .45); +0 at 856/891/930 (frac .68/.73/.90,
+/// where round == ceil already).
+///
+/// The fix is CEIL, not round: an upper bound of the hold's natural depth can never sit BELOW
+/// it, so the drain never mistakes the hold's own steady state for backlog. At
+/// `frac(latency_ms/interval) >= 0.5`, ceil == round, so this is byte-identical to the pre-#998
+/// drain target there — every clean-run source on the rig is unaffected (see
+/// `drain_target_is_byte_identical_to_round_at_frac_ge_half_998`); a genuine backlog (depth far
+/// above even the corrected target) still drains (see
+/// `should_drain_one_still_drains_a_genuine_backlog_998`).
+///
+/// Degenerate `fps_num`/`fps_den` (0) return 0, matching [`steady_depth_frames`]'s own
+/// convention, rather than dividing by zero.
+///
+/// Mirror of the C `genlock_should_drain_one()`'s target line (`(held_ns + interval - 1) /
+/// interval`) in `vendor/obs-studio/libobs/obs-source.c` — keep both in lock-step.
+/// `src/probe/genlock.rs ReleaseCadence::should_drain_one` delegates straight to
+/// [`should_drain_one`] below with no arithmetic of its own, so it inherits this fix
+/// automatically.
+pub fn drain_target_frames(latency_ms: u32, fps_num: u32, fps_den: u32) -> u64 {
+    if fps_num == 0 || fps_den == 0 {
+        return 0;
+    }
+    let den = 1000u64.saturating_mul(fps_den as u64);
+    let num = (latency_ms as u64).saturating_mul(fps_num as u64);
+    // Ceiling division: (num + den - 1) / den. den >= 1000 here (fps_den >= 1 checked above),
+    // so `den - 1` never underflows.
+    num.saturating_add(den - 1) / den
+}
+
 /// Should this tick shed exactly ONE EXTRA frame to slew the queue back toward the depth its
 /// own configured latency implies? `depth` is the queue depth observed THIS tick (before any
 /// release); `ticks_since_last_drain` is how many ticks have passed since the last time this
 /// returned `true` (the caller resets it to 0 exactly when it drains, and increments it every
-/// other tick). Degenerate `fps_num`/`fps_den` (0) route through [`steady_depth_frames`], which
+/// other tick). Degenerate `fps_num`/`fps_den` (0) route through [`drain_target_frames`], which
 /// returns 0 rather than dividing by zero — never panics.
+///
+/// #998: the target is [`drain_target_frames`] (CEIL), not [`steady_depth_frames`] (round) — see
+/// that function's doc for why reusing round here limit-cycled the drain against the ts-align
+/// hold whenever `frac(latency_ms/interval) < 0.5`.
 pub fn should_drain_one(
     depth: u64,
     latency_ms: u32,
@@ -153,7 +201,7 @@ pub fn should_drain_one(
     fps_den: u32,
     ticks_since_last_drain: u64,
 ) -> bool {
-    let target = steady_depth_frames(latency_ms, fps_num, fps_den);
+    let target = drain_target_frames(latency_ms, fps_num, fps_den);
     depth > target.saturating_add(DRAIN_HYSTERESIS_FRAMES)
         && ticks_since_last_drain >= DRAIN_MIN_TICK_INTERVAL
 }
@@ -523,6 +571,146 @@ mod tests {
             1,
             DRAIN_MIN_TICK_INTERVAL
         ));
+    }
+
+    // ---- #998: drain target CEIL, not round (frac(latency/interval) < 0.5 limit-cycle) ----
+
+    /// #998 — pinned against the issue's own worked-by-hand values: ceil(latency*fps/1000/den).
+    #[test]
+    fn drain_target_frames_pinned_values_998() {
+        assert_eq!(
+            drain_target_frames(941, 30, 1),
+            29,
+            "941ms @30fps: ceil(28.23) = 29"
+        );
+        assert_eq!(
+            drain_target_frames(915, 30, 1),
+            28,
+            "915ms @30fps: ceil(27.45) = 28"
+        );
+        assert_eq!(
+            drain_target_frames(891, 30, 1),
+            27,
+            "891ms @30fps: ceil(26.73) = 27"
+        );
+        assert_eq!(
+            drain_target_frames(930, 30, 1),
+            28,
+            "930ms @30fps: ceil(27.90) = 28"
+        );
+        assert_eq!(
+            drain_target_frames(856, 30, 1),
+            26,
+            "856ms @30fps: ceil(25.68) = 26"
+        );
+        assert_eq!(
+            drain_target_frames(941, 0, 1),
+            0,
+            "degenerate fps_num => 0, never divides by zero"
+        );
+        assert_eq!(
+            drain_target_frames(941, 30, 0),
+            0,
+            "degenerate fps_den => 0, never divides by zero"
+        );
+    }
+
+    /// #998 — `drain_target_frames` must be a strict CEIL, never equal to the plain floor
+    /// division, at every fractional latency this module's own fixtures exercise (a regression
+    /// here would silently resurrect the round-based bug via a "ceil" that isn't one).
+    #[test]
+    fn drain_target_frames_is_never_below_the_true_ceiling_998() {
+        for (latency_ms, fps_num, fps_den) in [
+            (941u32, 30u32, 1u32),
+            (915, 30, 1),
+            (891, 30, 1),
+            (930, 30, 1),
+            (856, 30, 1),
+            (957, 30, 1),
+        ] {
+            let target = drain_target_frames(latency_ms, fps_num, fps_den);
+            let floor = (latency_ms as u64 * fps_num as u64) / (1000 * fps_den as u64);
+            let exact_frames = (latency_ms as f64 * fps_num as f64) / (1000.0 * fps_den as f64);
+            assert!(
+                (target as f64) >= exact_frames,
+                "drain_target_frames({latency_ms},{fps_num},{fps_den}) = {target} must be >= the \
+                 exact frame count {exact_frames} (a true ceiling never rounds down)"
+            );
+            if exact_frames.fract() > 1e-9 {
+                assert_eq!(
+                    target,
+                    floor + 1,
+                    "a non-integer exact frame count must ceil up by exactly one from the floor"
+                );
+            }
+        }
+    }
+
+    /// #998 THE REGRESSION — the live limit-cycle at latency_ms=941 (frac .23): today's
+    /// round-based target is 28, so depth=31 (the observed steady depth) reads as
+    /// `31 > 28+2=30` => drains every tick even though the queue is at its OWN correct depth.
+    /// With the ceil target (29), `31 > 29+2=31` is FALSE — no drain.
+    #[test]
+    fn no_false_drain_at_frac_under_half_latency_941_998() {
+        assert!(
+            !should_drain_one(31, 941, 30, 1, DRAIN_MIN_TICK_INTERVAL),
+            "#998: the live steady depth (31) at latency_ms=941 (frac .23) must NOT read as \
+             backlog against the ceil target (29) + hysteresis (2) = 31 — depth must exceed the \
+             boundary, not merely reach it"
+        );
+    }
+
+    /// #998 — the SAME regression at latency_ms=915 (frac .45). The live break under the OLD
+    /// round-based target (27) is at depth=30 (`30 > 27+2=29` => TRUE); depth=29 was already
+    /// FALSE under the old code too (`29 > 29` is false). Both are pinned here so the fix is
+    /// verified against BOTH observed live depths, not just the one that flips.
+    #[test]
+    fn no_false_drain_at_frac_under_half_latency_915_998() {
+        assert!(
+            !should_drain_one(29, 915, 30, 1, DRAIN_MIN_TICK_INTERVAL),
+            "#998: depth=29 at latency_ms=915 (frac .45) must NOT drain against the ceil \
+             target (28) + hysteresis (2) = 30"
+        );
+        assert!(
+            !should_drain_one(30, 915, 30, 1, DRAIN_MIN_TICK_INTERVAL),
+            "#998: depth=30 at latency_ms=915 (frac .45) is the live break under the OLD \
+             round-based target (27+2=29, 30>29 => TRUE) — must NOT drain against the ceil \
+             target (28) + hysteresis (2) = 30"
+        );
+    }
+
+    /// #998 — a GENUINE backlog at the SAME anomalous latency (941) must still drain: the fix
+    /// narrows WHEN the drain fires, it must never disable it for an actually-excess queue.
+    #[test]
+    fn should_drain_one_still_drains_a_genuine_backlog_998() {
+        assert!(
+            should_drain_one(32, 941, 30, 1, DRAIN_MIN_TICK_INTERVAL),
+            "#998: depth=32 at latency_ms=941 is 1 frame past the ceil target (29) + \
+             hysteresis (2) = 31 — a real overshoot, must still drain (both before and after \
+             this fix — this is not a regression-only pin)"
+        );
+    }
+
+    /// #998 — clean-run behavior at `frac(latency/interval) >= 0.5` is BYTE-IDENTICAL: ceil ==
+    /// round there, so this pins the untouched boundary at latency_ms=891 (frac .73, one of the
+    /// ticket's own measured-clean values) both sides of the hysteresis band.
+    #[test]
+    fn drain_target_is_byte_identical_to_round_at_frac_ge_half_998() {
+        assert_eq!(
+            drain_target_frames(891, 30, 1),
+            steady_depth_frames(891, 30, 1),
+            "#998: at frac >= 0.5, ceil must equal round exactly"
+        );
+        assert!(
+            !should_drain_one(29, 891, 30, 1, DRAIN_MIN_TICK_INTERVAL),
+            "#998 no-regression: depth=29 at latency_ms=891 must NOT drain (target 27 + \
+             hysteresis 2 = 29, not strictly exceeded)"
+        );
+        assert!(
+            should_drain_one(30, 891, 30, 1, DRAIN_MIN_TICK_INTERVAL),
+            "#998 no-regression: depth=30 at latency_ms=891 MUST drain (one past the boundary) \
+             — unchanged from the pre-#998 round-based behavior since ceil==round here"
+        );
     }
 
     // ---- #940 piece 3: phase-pinned deadline + grid-comparison hysteresis ----------------

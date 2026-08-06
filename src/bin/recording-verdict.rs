@@ -4118,12 +4118,13 @@ fn build_and_print_verdict(
                         println!("      ⚠ {note}");
                     }
                     // Issue 889 (2026-07-30 user decision on issue 883) visibility requirement 1,
-                    // extended by issue 915 (2026-08-01 user decision): a loud WARN naming EVERY
-                    // report-only reason a window's STRICT verdict (`s.pass`) is false — even
-                    // though `overall_pass` no longer fails on copies/gaps OR the optical floor
-                    // alone (see the summary lines after this loop). Both reasons are independent
-                    // now, so a window can trip either or both while still passing relaxed; only
-                    // `frame_count == 0` still fails BOTH verdicts (the `else` branch below).
+                    // extended by issue 915 (2026-08-01 user decision) and the 2026-08-05 RE-GATE
+                    // (ticket 889 comment 5196190653): a loud WARN naming EVERY reason a window's
+                    // STRICT verdict (`s.pass`) is false — whether or not that reason still gates
+                    // `overall_pass`. Since the re-gate, `copies`/`gaps` are ONLY rescued WITHIN
+                    // the per-window tolerance (`seg.copies_gaps_tolerance`) — OVER it,
+                    // the window fails `relaxed_pass` again, so the `else` branch below is no
+                    // longer only `frame_count == 0` and must name the real reason(s).
                     if !s.pass {
                         if s.relaxed_pass {
                             let floor_ok = camera_box::optical_floor::window_within_floor(
@@ -4141,17 +4142,85 @@ fn build_and_print_verdict(
                             }
                             if s.copies != 0 || s.gaps != 0 {
                                 println!(
-                                    "      ⚠ #889 REPORT-ONLY: copies={} gaps={} would FAIL the pre-889 \
-                                     strict rule, but does NOT gate overall_pass (see issue #889).",
-                                    s.copies, s.gaps
+                                    "      ⚠ #889 WITHIN TOLERANCE: copies={} gaps={} fails the \
+                                     pre-889 strict rule, but stays within the per-window \
+                                     singleton tolerance ({}) and does NOT gate overall_pass \
+                                     (see issue #889 for the decision record).",
+                                    s.copies, s.gaps, seg.copies_gaps_tolerance
                                 );
                             }
                         } else {
-                            println!(
-                                "      ⚠ this window ALSO fails the RELAXED verdict (not issue \
-                                 889's or issue 915's doing — frame_count==0) — it still fails \
-                                 overall_pass."
+                            // `relaxed_pass` fails too — name every real reason via the pure,
+                            // Tier-0-testable seam `camera_box::window_gate::
+                            // relaxed_failure_reasons` (issue-889 re-gate deep-review findings
+                            // 1+2, fixed through this seam rather than re-deriving the conditions
+                            // inline again): a frame_count==0 window is EmptyWindow (never
+                            // misread as an exceeded floor — the old inline logic here made that
+                            // exact mistake, since `optical_floor::window_within_floor`'s
+                            // defensive frame_count==0 clause always reads `false`), an
+                            // over-tolerance copies/gaps failure is OverCopiesGapsTolerance, and
+                            // an over-floor undecodable count is worded as actually gating
+                            // (FloorExceededGating) ONLY when `optical_floor::gates_overall_pass()`
+                            // is genuinely `true` — never unconditionally, since that flag is
+                            // hardcoded `false` today (see issue #915 for the restore path on
+                            // issue #905). A window can carry more than one reason at once (e.g.
+                            // over-tolerance copies/gaps AND a merely-report-only over-floor
+                            // undecodable count) — every applicable reason prints.
+                            let reasons = camera_box::window_gate::relaxed_failure_reasons(
+                                s.frames,
+                                s.undecodable,
+                                s.copies,
+                                s.gaps,
                             );
+                            for reason in &reasons {
+                                match reason {
+                                    camera_box::window_gate::RelaxedFailureReason::EmptyWindow => {
+                                        println!(
+                                            "      ⚠ this window fails the RELAXED verdict (not \
+                                             issue 889's, issue 915's, nor the re-gate's doing — \
+                                             frame_count==0) — it still fails overall_pass."
+                                        );
+                                    }
+                                    camera_box::window_gate::RelaxedFailureReason::OverCopiesGapsTolerance => {
+                                        println!(
+                                            "      ⚠ #889 RE-GATE FAIL: copies={} gaps={} \
+                                             exceeds the per-window singleton tolerance ({}) — \
+                                             this window FAILS overall_pass (see issue #889 for \
+                                             the decision record).",
+                                            s.copies, s.gaps, seg.copies_gaps_tolerance
+                                        );
+                                    }
+                                    camera_box::window_gate::RelaxedFailureReason::FloorExceededGating => {
+                                        println!(
+                                            "      ⚠ undecodable={} exceeds the issue-881 \
+                                             per-window floor and currently gates overall_pass \
+                                             (see issue #915 for the restore-path state).",
+                                            s.undecodable
+                                        );
+                                    }
+                                    camera_box::window_gate::RelaxedFailureReason::FloorWithinReportOnly => {
+                                        println!(
+                                            "      ⚠ #915 REPORT-ONLY: undecodable={} exceeds \
+                                             the issue-881 per-window floor, but does NOT gate \
+                                             overall_pass while issue 909 (cam1 grabber) + issue \
+                                             881 (120Hz monitor) are unresolved (see issue #915).",
+                                            s.undecodable
+                                        );
+                                    }
+                                }
+                            }
+                            if reasons.is_empty() {
+                                // Should not happen for a window that genuinely failed
+                                // `relaxed_pass` (`window_gate::decide` and `relaxed_failure_
+                                // reasons` derive the same conditions) — but a window that DOES
+                                // fail overall_pass must never print silence.
+                                println!(
+                                    "      ⚠ this window fails the RELAXED verdict for an \
+                                     unrecognized reason (frames={} undecodable={} copies={} \
+                                     gaps={}) — it still fails overall_pass.",
+                                    s.frames, s.undecodable, s.copies, s.gaps
+                                );
+                            }
                         }
                     }
                     // #726: presentation-cadence EVENNESS — REPORTED only (not yet gate-enforced;
@@ -4189,11 +4258,26 @@ fn build_and_print_verdict(
                 // Requirement 4 — hardcoded, one-line-deletable, no env knob (see the field's own
                 // doc in `crate::probe::recording_segments::SegmentedContinuity` for the restore
                 // path — issue 883 item 4 + two consecutive clean strict runs).
+                //
+                // 2026-08-05 RE-GATE (ticket 889 comment 5196190653): `windows_failed_report_only`
+                // (the STRICT absolute-zero count) no longer describes what actually gates
+                // `overall_pass` — that is now `windows_over_copies_gaps_tolerance` (the
+                // per-window tolerance, `seg.copies_gaps_tolerance`). Name the tolerance
+                // explicitly so a reader never mistakes "no longer gates" (no longer true) for
+                // the current behavior.
                 println!(
-                    "  ⚠ #889 REPORT-ONLY: {}/{} cambox window(s) would FAIL the pre-889 strict \
-                     copies/gaps rule (windows_failed_report_only). This term no longer gates \
-                     overall_pass — see issue #889 for the decision record and restore path.",
+                    "  ⚠ #889 STRICT-ZERO (report-only): {}/{} cambox window(s) would FAIL the \
+                     pre-889 absolute-zero copies/gaps rule (windows_failed_report_only) — this \
+                     count stays visible but does NOT by itself gate overall_pass.",
                     seg.windows_failed_report_only,
+                    seg.segments.len()
+                );
+                println!(
+                    "  ⚠ #889 RE-GATE (singleton tolerance={}): {}/{} cambox window(s) exceed the \
+                     per-window copies/gaps tolerance (windows_over_copies_gaps_tolerance) — THESE \
+                     windows DO gate overall_pass again (see issue #889 for the decision record).",
+                    seg.copies_gaps_tolerance,
+                    seg.windows_over_copies_gaps_tolerance,
                     seg.segments.len()
                 );
                 // Issue 915 (2026-08-01 user decision) visibility requirement, mirrors #889
@@ -4253,6 +4337,20 @@ fn build_and_print_verdict(
                              grabber) + issue 881 (120Hz monitor) (see issue #915 for the \
                              decision record and issue #905 for the restore path)"
                         ),
+                    );
+                    // Finding 5 of the issue-889 re-gate deep review — a self-describing prose
+                    // gate key, mirroring `undecodable_floor_gate`'s idiom immediately above but
+                    // SCOPED by name to `copies`/`gaps` specifically (issue-915 lesson: never a
+                    // blanket "gate" key on the whole object). Unlike `undecodable_floor_gate`,
+                    // this one describes a term that DOES gate again above its tolerance — the
+                    // JSON is self-describing without needing the binary's source to know that.
+                    obj.insert(
+                        "copies_gaps_gate".to_string(),
+                        serde_json::json!(format!(
+                            "gates overall_pass above the per-window singleton tolerance ({}) -- \
+                             see issue #889 for the decision record",
+                            seg.copies_gaps_tolerance
+                        )),
                     );
                 }
                 report["all_cambox_continuity"] = seg_json;
@@ -7515,12 +7613,19 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Issue 889 (2026-07-30 user decision on issue 883) end-to-end: a stale/frozen painted-tick
-    /// copy in the single all-cambox window (undecodable=0) must still be COMPUTED and printed
-    /// in the verdict JSON, must still fail that window's STRICT `pass`, but must NO LONGER fail
-    /// `all_cambox_continuity.overall_pass` — and `windows_failed_report_only` must report it.
+    /// Issue 889 re-gate (2026-08-05 ROZHODNUTÉ, ticket 889 comment 5196190653) end-to-end: a
+    /// SINGLE stale/frozen painted-tick copy in the single all-cambox window (undecodable=0) sits
+    /// WITHIN the per-window tolerance (`copies<=WINDOW_COPIES_GAPS_TOLERANCE`, recalibrated
+    /// 1 → 2 → 3 on 2026-08-06, ticket 889 comments 5198131539 / 5200533407) — it must still be
+    /// COMPUTED and printed in the verdict JSON, must still fail that window's STRICT `pass`, but
+    /// must NOT fail `all_cambox_continuity.overall_pass` (the tolerance absorbs a single copy
+    /// either way) — and
+    /// `windows_failed_report_only` must still report it (strict-zero visibility is unaffected by
+    /// the re-gate). Renamed from `..._copy_alone_is_report_only_end_to_end_889` — the old name
+    /// implied copies never gate at all, which stopped being true once the re-gate landed; a
+    /// single copy still passes because 1 <= the tolerance, not because the term is inert.
     #[test]
-    fn all_cambox_continuity_copy_alone_is_report_only_end_to_end_889() {
+    fn all_cambox_continuity_single_copy_within_tolerance_passes_overall_889_regate() {
         use super::{build_and_print_verdict, Cam1Source, DecodedRec};
         use clap::Parser;
 
@@ -7628,8 +7733,243 @@ mod tests {
             serde_json::json!(1),
             "889: the verdict JSON must carry the machine-readable report-only count: {seg}"
         );
+        assert_eq!(
+            seg["windows_over_copies_gaps_tolerance"],
+            serde_json::json!(0),
+            "889 re-gate: a single copy stays within tolerance -- no window is OVER tolerance: {seg}"
+        );
+        assert_eq!(
+            seg["copies_gaps_tolerance"],
+            serde_json::json!(3),
+            "889 re-gate: the tolerance value must be echoed in the JSON (recalibrated 1 -> 2 -> 3 \
+             on 2026-08-06, ticket 889 comments 5198131539 / 5200533407): {seg}"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Issue 889 re-gate (2026-08-05 ROZHODNUTÉ, recalibrated 1 → 2 → 3 on 2026-08-06, ticket 889
+    /// comments 5198131539 / 5200533407) differential proof: `overall_pass` must swing from PASS
+    /// to FAIL exactly at the tolerance boundary, and must NOT swing at all when copies/gaps stay
+    /// AT the tolerance (even combined). Uses the SAME differential-fixture technique issue 914's
+    /// `frozen_leg_and_self_heal_reset_no_longer_gate_the_overall_verdict_914` established: build
+    /// otherwise-IDENTICAL fixtures varying only the defect under test, and diff `overall_pass`
+    /// against a clean baseline, rather than asserting an absolute value (many other unrelated
+    /// gates also fold into `overall_pass`). Renamed from
+    /// `..._singleton_tolerance_boundary_...` — "singleton" (implying exactly one) stopped being
+    /// an accurate description once the tolerance moved past 1; the fixtures below build AT the
+    /// tolerance and tolerance+1 through the const instead of hardcoded literals, so this test
+    /// tracks whatever the tolerance is calibrated to across every recalibration.
+    #[test]
+    fn copies_gaps_tolerance_boundary_gates_overall_pass_889_regate() {
+        use super::{build_and_print_verdict, Cam1Source, DecodedRec};
+        use clap::Parser;
+
+        const ONE_S: i64 = 1_000_000_000;
+        let base = 1_000 * ONE_S;
+        let win = 5 * ONE_S;
+        let sched = format!(
+            r#"[{{"cambox":"CAM1","start_ns":{a},"end_ns":{b}}}]"#,
+            a = base,
+            b = base + win
+        );
+
+        // `dup_count`: consecutive stale/frozen copies of index 9's tick inserted right after it
+        // (drives `copies`, never touches `gaps` -- the duplicate value is already present in the
+        // sorted-distinct set `painted_tick_gaps` consumes). `gap_extra_steps` (k): the LAST
+        // frame's optical tick is pushed `k` extra steps ahead of its normal value, opening exactly
+        // `k` missing distinct values in the sorted tick range (drives `gaps`, never touches
+        // `copies` -- every tick value, including the modified one, stays distinct). Both knobs are
+        // independent by construction, so a fixture can isolate either term or combine them.
+        fn build_fixture(
+            tag: &str,
+            base: i64,
+            sched: &str,
+            dup_count: u32,
+            gap_extra_steps: u32,
+        ) -> serde_json::Value {
+            const ONE_S: i64 = 1_000_000_000;
+            let dir =
+                std::env::temp_dir().join(format!("cb-889-regate-{tag}-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let sched_path = dir.join("switch-schedule.json");
+            std::fs::write(&sched_path, sched).unwrap();
+
+            let mut stream_frames: Vec<RecordingFrame> = Vec::new();
+            for i in 0..20u64 {
+                let gen_ts = base + (i as i64 + 1) * (ONE_S / 10);
+                // Clean step-2 sequence 1000..1038, EXCEPT the last frame (i==19) is pushed
+                // `gap_extra_steps` extra steps ahead when requested -- opening that many missing
+                // distinct values in the sorted tick range without touching any other frame.
+                let optical = if i == 19 {
+                    1000u32 + 2 * i as u32 + 2 * gap_extra_steps
+                } else {
+                    1000u32 + 2 * i as u32
+                };
+                stream_frames.push(RecordingFrame {
+                    frame_index: i,
+                    payloads: vec![
+                        Payload {
+                            run_id: STRIH,
+                            frame_id: 1670 + i as u32,
+                            gen_ts_ns: gen_ts,
+                        },
+                        Payload {
+                            run_id: CAM2,
+                            frame_id: optical,
+                            gen_ts_ns: gen_ts,
+                        },
+                    ],
+                    tick: Some(optical),
+                });
+            }
+            // Insert `dup_count` consecutive extra frames right after index 9, each repeating
+            // index 9's tick verbatim (1018) -- a stale/frozen copy run. The distinct present-tick
+            // sequence stays fully contiguous (the duplicate value is already present), isolating
+            // `copies` from `gaps`.
+            for k in 0..dup_count as u64 {
+                let dup_gen_ts = base + 9 * (ONE_S / 10) + (k as i64 + 1) * (ONE_S / 1000);
+                stream_frames.insert(
+                    10 + k as usize,
+                    RecordingFrame {
+                        frame_index: 9_000 + k,
+                        payloads: vec![
+                            Payload {
+                                run_id: STRIH,
+                                frame_id: 9_670 + k as u32,
+                                gen_ts_ns: dup_gen_ts,
+                            },
+                            Payload {
+                                run_id: CAM2,
+                                frame_id: 1018,
+                                gen_ts_ns: dup_gen_ts,
+                            },
+                        ],
+                        tick: Some(1018),
+                    },
+                );
+            }
+
+            let args = super::Args::parse_from([
+                "recording-verdict",
+                "--switch-schedule",
+                sched_path.to_str().unwrap(),
+                "--switch-guard-ns",
+                "0",
+                "--switch-expected-step",
+                "2",
+            ]);
+            let (v, _) = build_and_print_verdict(
+                &args,
+                None,
+                Some(DecodedRec {
+                    frames: stream_frames,
+                    rec_path: None,
+                }),
+                Cam1Source::Absent,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("verdict");
+            let _ = std::fs::remove_dir_all(&dir);
+            v
+        }
+
+        let clean = build_fixture("clean", base, &sched, 0, 0);
+        assert_eq!(
+            clean["all_cambox_continuity"]["overall_pass"],
+            serde_json::json!(true),
+            "sanity: the clean fixture must pass: {clean}"
+        );
+
+        // Fixture knobs are `u32`; the const is `u32` too, so these read straight from it instead
+        // of hardcoding the pre-recalibration boundary (1/2) -- this test self-adjusts with any
+        // future recalibration of `WINDOW_COPIES_GAPS_TOLERANCE`.
+        let tolerance = camera_box::window_gate::WINDOW_COPIES_GAPS_TOLERANCE;
+
+        // (a) BOTH terms AT the tolerance simultaneously -- must NOT swing overall_pass.
+        let at_tolerance = build_fixture("at-tolerance", base, &sched, tolerance, tolerance);
+        let at_seg = &at_tolerance["all_cambox_continuity"];
+        assert_eq!(
+            at_seg["segments"][0]["copies"],
+            serde_json::json!(tolerance),
+            "{at_seg}"
+        );
+        assert_eq!(
+            at_seg["segments"][0]["gaps"],
+            serde_json::json!(tolerance),
+            "{at_seg}"
+        );
+        assert_eq!(
+            clean["all_cambox_continuity"]["overall_pass"], at_seg["overall_pass"],
+            "889 re-gate: copies AND gaps together must be a no-op on overall_pass (both at the \
+             tolerance): clean={clean}, at_tolerance={at_tolerance}"
+        );
+        assert_eq!(
+            at_seg["windows_over_copies_gaps_tolerance"],
+            serde_json::json!(0),
+            "{at_seg}"
+        );
+
+        // (b) copies alone OVER tolerance -- must swing overall_pass to FAIL.
+        let copies_over = build_fixture("copies-over", base, &sched, tolerance + 1, 0);
+        let copies_seg = &copies_over["all_cambox_continuity"];
+        assert_eq!(
+            copies_seg["segments"][0]["copies"],
+            serde_json::json!(tolerance + 1),
+            "{copies_seg}"
+        );
+        assert_eq!(
+            copies_seg["segments"][0]["gaps"],
+            serde_json::json!(0),
+            "{copies_seg}"
+        );
+        assert_ne!(
+            clean["all_cambox_continuity"]["overall_pass"], copies_seg["overall_pass"],
+            "889 re-gate: copies over the tolerance -- overall_pass must swing to FAIL: \
+             clean={clean}, copies_over={copies_over}"
+        );
+        assert_eq!(
+            copies_seg["overall_pass"],
+            serde_json::json!(false),
+            "{copies_seg}"
+        );
+        assert_eq!(
+            copies_seg["windows_over_copies_gaps_tolerance"],
+            serde_json::json!(1),
+            "{copies_seg}"
+        );
+
+        // (c) gaps alone OVER tolerance -- must swing overall_pass to FAIL.
+        let gaps_over = build_fixture("gaps-over", base, &sched, 0, tolerance + 1);
+        let gaps_seg = &gaps_over["all_cambox_continuity"];
+        assert_eq!(
+            gaps_seg["segments"][0]["copies"],
+            serde_json::json!(0),
+            "{gaps_seg}"
+        );
+        assert_eq!(
+            gaps_seg["segments"][0]["gaps"],
+            serde_json::json!(tolerance + 1),
+            "{gaps_seg}"
+        );
+        assert_ne!(
+            clean["all_cambox_continuity"]["overall_pass"], gaps_seg["overall_pass"],
+            "889 re-gate: gaps over the tolerance -- overall_pass must swing to FAIL: \
+             clean={clean}, gaps_over={gaps_over}"
+        );
+        assert_eq!(
+            gaps_seg["overall_pass"],
+            serde_json::json!(false),
+            "{gaps_seg}"
+        );
+        assert_eq!(
+            gaps_seg["windows_over_copies_gaps_tolerance"],
+            serde_json::json!(1),
+            "{gaps_seg}"
+        );
     }
 
     /// Issue 915 (2026-08-01, user decision) end-to-end: a single all-cambox window whose
@@ -7756,18 +8096,21 @@ mod tests {
     }
 
     /// Issue 914 (2026-08-01, user decision -- mirrors issue 889's report-only shape and issue
-    /// 861's caller-only decoupling): a genuinely HARD-FROZEN cambox window (issue 758's
-    /// classifier) plus an unattributed `#663` self-heal reset event must no longer force the
-    /// FUSED `overall_pass` to fail. Uses the SAME differential-fixture proof issue 861 used
-    /// (`all_cambox_av_sync_gate_failure_no_longer_forces_the_overall_verdict_to_fail_861`)
-    /// rather than asserting an absolute `overall_pass == true`, because many OTHER unrelated
-    /// gates in this function also fold into `overall_pass` and this test must stay valid
-    /// regardless of their state: build two otherwise-IDENTICAL fixtures, one with the
-    /// frozen/self-heal findings, one without, and prove `overall_pass` is IDENTICAL between
-    /// them. This is the exact test a future re-tightening (issue 905's restore path) will need
-    /// to invert.
+    /// 861's caller-only decoupling): the `frozen_leg` (issue 758) and `self_heal_reset`
+    /// CLASSIFIERS themselves are report-only annotations layered on TOP of the underlying
+    /// per-window `copies`/`gaps`/`undecodable` data -- their own `gates_overall_pass` JSON
+    /// fields must read `false`, always. **2026-08-05 RE-GATE (ticket 889 comment 5196190653):**
+    /// this fixture's "genuinely HARD-FROZEN" window is built from `copies=5` (density-based,
+    /// see the `frozen` block below) -- FAR over the per-window tolerance (recalibrated 1 → 2 → 3
+    /// on 2026-08-06, ticket 889 comments 5198131539 / 5200533407:
+    /// `crate::window_gate::WINDOW_COPIES_GAPS_TOLERANCE`), so the UNDERLYING data now
+    /// correctly fails `overall_pass` again via the re-gate, independent of whatever
+    /// `frozen_leg`/`self_heal_reset` report. Renamed from `..._no_longer_gate_the_overall_
+    /// verdict_914` -- that claim is no longer true for a window this badly frozen; the
+    /// re-gate is SUPPOSED to catch exactly this class of regression. What issue 914 actually
+    /// established (the classifiers' OWN report-only status) is unchanged and still asserted.
     #[test]
-    fn frozen_leg_and_self_heal_reset_no_longer_gate_the_overall_verdict_914() {
+    fn frozen_leg_classifier_stays_report_only_but_its_copies_now_gate_overall_pass_889_regate() {
         use super::{build_and_print_verdict, Cam1Source, DecodedRec};
         use clap::Parser;
 
@@ -7786,6 +8129,25 @@ mod tests {
             sched: &str,
             frozen: bool,
             self_heal_reset: Option<&str>,
+        ) -> serde_json::Value {
+            build_fixture_with_min_secs(tag, base, sched, frozen, self_heal_reset, None)
+        }
+
+        // Finding 3 of the issue-889 re-gate deep review: the plain `build_fixture` above always
+        // uses the default `--min-secs` (300), so its fixtures' TOP-LEVEL `overall_pass` is
+        // permanently confounded by the unrelated full_chain 300s span floor (this synthetic
+        // recording spans ~2s) -- true regardless of self_heal_reset/frozen_leg's own gating, per
+        // the comment at the `clean`/`with_events` assertions below. `min_secs` lets a caller
+        // clear that confound (mirrors the `--min-secs 1` idiom already used throughout this
+        // file's test suite) so a TOP-LEVEL `overall_pass` differential can actually isolate a
+        // SPECIFIC term's contribution instead of always reading false regardless of it.
+        fn build_fixture_with_min_secs(
+            tag: &str,
+            base: i64,
+            sched: &str,
+            frozen: bool,
+            self_heal_reset: Option<&str>,
+            min_secs: Option<&str>,
         ) -> serde_json::Value {
             const ONE_S: i64 = 1_000_000_000;
             let dir = std::env::temp_dir().join(format!("cb-914-{tag}-{}", std::process::id()));
@@ -7859,6 +8221,10 @@ mod tests {
                 argv.push("--self-heal-reset".to_string());
                 argv.push(tok.to_string());
             }
+            if let Some(ms) = min_secs {
+                argv.push("--min-secs".to_string());
+                argv.push(ms.to_string());
+            }
             let args = super::Args::parse_from(argv);
             let (v, _) = build_and_print_verdict(
                 &args,
@@ -7924,11 +8290,102 @@ mod tests {
             serde_json::json!(false),
             "914: same for self_heal_reset: {with_events}"
         );
+        // 889 re-gate: the fixture's own copies=5 (against frames=25, density 0.20 -- the exact
+        // shape the frozen_leg classifier needs to prove DENSITY, not just count) is FAR over the
+        // tolerance (recalibrated 1 → 2 → 3 on 2026-08-06), so this window (and therefore
+        // `all_cambox_continuity.overall_pass` specifically) now correctly FAILS again -- this is
+        // the re-gate doing its job, not frozen_leg/self_heal_reset (which stay report-only, per
+        // the two assertions immediately above). Scoped to `all_cambox_continuity.overall_pass`,
+        // NOT the top-level `overall_pass` -- this short synthetic fixture (a few seconds) always
+        // fails the UNRELATED `full_chain` 300s duration floor regardless of copies/gaps, so the
+        // top-level field is not a valid proxy for what this test is isolating (the same reason
+        // the ORIGINAL 914 test used a differential rather than an absolute assertion).
         assert_eq!(
-            clean["overall_pass"], with_events["overall_pass"],
-            "914: a genuinely frozen window + an unattributed self-heal event must be a no-op on \
-             the overall verdict (report-only, pending cam1 hardware fix issue 909 -- restore \
-             path issue 905): clean={clean}, with_events={with_events}"
+            clean["all_cambox_continuity"]["overall_pass"],
+            serde_json::json!(true),
+            "sanity: the clean fixture's all_cambox_continuity has no defects at all: {clean}"
+        );
+        assert_eq!(
+            with_events["all_cambox_continuity"]["overall_pass"],
+            serde_json::json!(false),
+            "889 re-gate: copies=5 far exceeds the tolerance -- \
+             all_cambox_continuity.overall_pass must FAIL again, even though \
+             frozen_leg/self_heal_reset themselves stay report-only: {with_events}"
+        );
+        assert_eq!(
+            with_events["all_cambox_continuity"]["windows_over_copies_gaps_tolerance"],
+            serde_json::json!(1),
+            "889 re-gate: exactly the frozen window exceeds the tolerance: {with_events}"
+        );
+
+        // Finding 3 of the issue-889 re-gate deep review: everything above proves frozen_leg/
+        // self_heal_reset's OWN `gates_overall_pass` JSON field reads `false` (a hardcoded
+        // literal, see the `obj.insert("gates_overall_pass", ...)` call sites in
+        // `build_and_print_verdict` -- disconnected from `SelfHealAttributionReport::
+        // overall_pass_contribution()`, the function that ACTUALLY decides whether these terms
+        // fold into `all_pass`) -- but nothing above would catch a regression in that function
+        // itself, because `with_events`'s copies=5 defect ALREADY fails `all_cambox_continuity.
+        // overall_pass` on its own (the re-gate), confounding any differential at that level; the
+        // TOP-LEVEL `overall_pass` differential the ORIGINAL (pre-re-gate) #914 test used is
+        // ALSO confounded, but by something else entirely (the >=300s `full_chain` span floor,
+        // which fails unconditionally on this ~2s synthetic recording regardless of self-heal).
+        //
+        // The frozen term is no longer isolable on its own (a genuinely HARD-FROZEN window needs
+        // `copies` far past the tolerance, which by itself already fails
+        // `all_cambox_continuity.overall_pass`). `self_heal_reset` IS still isolable: build a
+        // fixture IDENTICAL to a clean baseline except for ONE unattributed self-heal event, with
+        // the confounding span floor cleared via `--min-secs 0` (the fixture's `strih` node
+        // analyzed span, 20 ids at the default 30fps `--stream-capture-fps`, is only ~0.667s --
+        // even `--min-secs 1` still fails it; `--min-secs 0` removes the floor entirely, which is
+        // all this differential needs: it is isolating self_heal_reset's own contribution, not
+        // proving anything about the span floor itself) so the top-level `overall_pass`
+        // differential actually isolates `self_heal_reset`'s own decoupling instead of always
+        // reading `false` regardless of it.
+        let clean_isolated =
+            build_fixture_with_min_secs("clean-isolated", base, &sched, false, None, Some("0"));
+        let self_heal_only = build_fixture_with_min_secs(
+            "self-heal-only",
+            base,
+            &sched,
+            false,
+            Some("CAM_UNRELATED:1000000000000"),
+            Some("0"),
+        );
+        assert_eq!(
+            self_heal_only["frozen_leg"]["frozen"]
+                .as_array()
+                .map(|a| a.len())
+                .unwrap_or(0),
+            0,
+            "sanity: this isolated fixture carries NO frozen defect -- its ONLY difference from \
+             clean_isolated is the self-heal event: {self_heal_only}"
+        );
+        assert_eq!(
+            self_heal_only["self_heal_reset"]["unattributed_events"]
+                .as_array()
+                .map(|a| a.len())
+                .unwrap_or(0),
+            1,
+            "sanity: the isolated fixture carries exactly one unattributed self-heal event: \
+             {self_heal_only}"
+        );
+        // Sanity: with the span-floor confound cleared, the clean baseline's TOP-LEVEL
+        // `overall_pass` genuinely reads `true` -- proving the differential below is not
+        // tautologically comparing two permanently-`false` values (which would prove nothing).
+        assert_eq!(
+            clean_isolated["overall_pass"],
+            serde_json::json!(true),
+            "sanity: with --min-secs 1 clearing the span-floor confound, the isolated clean \
+             fixture's top-level overall_pass must genuinely read true: {clean_isolated}"
+        );
+        assert_eq!(
+            clean_isolated["overall_pass"], self_heal_only["overall_pass"],
+            "914 regression guard: an unattributed self-heal event ALONE (no frozen defect, no \
+             copies/gaps defect) must be a no-op on the TOP-LEVEL overall_pass (report-only, \
+             pending cam1 hardware fix issue 909 -- restore path issue 905). Unlike the \
+             `with_events` fixture above (confounded by its own copies=5 re-gate failure), this \
+             differential genuinely isolates self_heal_reset's contribution: \
+             clean_isolated={clean_isolated}, self_heal_only={self_heal_only}"
         );
     }
 

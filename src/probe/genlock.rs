@@ -1749,6 +1749,13 @@ impl ReleaseCadence {
     /// frame, matching the C `genlock_should_drain_one`, which reads `async_frames.num` before
     /// the caller's own removal of the presented frame.
     ///
+    /// camera-box #998: this method has NO independent target arithmetic of its own — it
+    /// delegates the WHOLE decision, including the target computation, to
+    /// [`crate::genlock_backlog::should_drain_one`] below. That means the #998 round-to-ceil
+    /// fix (see [`crate::genlock_backlog::drain_target_frames`]'s doc for the frac<0.5
+    /// limit-cycle it fixes) is inherited here automatically — no change needed in this
+    /// probe-gated file to stay in lock-step with the crate-root Tier-0-tested source of truth.
+    ///
     /// Mirror of the C `genlock_should_drain_one`.
     fn should_drain_one(
         &self,

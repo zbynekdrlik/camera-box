@@ -50,15 +50,37 @@ misleading here. `recording-verdict.rs` instead adds `undecodable_floor_gates_ov
 `undecodable_floor_gate`, scoped by name to the specific term that changed. When decoupling only
 PART of a JSON object's gating, name the flag after the specific term, not the object.
 
-## The per-window WARN print now needs to distinguish TWO independent report-only reasons
+## The per-window WARN print now needs to distinguish MULTIPLE independent reasons (updated for the 2026-08-05 re-gate)
 
 Before issue 915, `!s.pass && !s.relaxed_pass` could ONLY mean `frame_count == 0` or an
-over-floor `undecodable` (the two were coupled in one `if/else`). After issue 915, copies/gaps
-(issue 889) and the optical floor (issue 915) are BOTH independently report-only, so a window can
-trip either or both while still passing `relaxed_pass` — `recording-verdict.rs`'s per-window WARN
-block checks each condition separately (`!floor_ok` prints the #915 line, `copies != 0 || gaps !=
-0` prints the #889 line, both can fire on the same window) instead of a single either/or branch.
-Only the `else` (both verdicts fail) narrows down to `frame_count == 0` alone now.
+over-floor `undecodable` (the two were coupled in one `if/else`). Issue 915 made the optical floor
+independently report-only, so a window could trip it while still passing `relaxed_pass` (`!floor_ok`
+prints the #915 line). **The 2026-08-05 RE-GATE (ticket 889 comment 5196190653) then took
+`copies`/`gaps` back OUT of "always report-only"**: above the per-window tolerance
+(`crate::window_gate::WINDOW_COPIES_GAPS_TOLERANCE`, recalibrated 1 → 2 on 2026-08-06, ticket 889
+comment 5198131539 — three valid hardware runs measured a per-window max of `{1, 1, 2}`, so
+tolerance=1 was flaky by construction; recalibrated again 2 → 3 later the same day, ticket 889
+comment 5200533407 — a post-#998-fix run measured a healthy per-window max of `{1, 1, 2, 3}` with
+run-total burden identical to clean runs, so tolerance=2 was flaky by construction the same way)
+they are a real, loud, gating failure again
+(`SegmentedContinuity::windows_over_copies_gaps_tolerance`) — only AT OR UNDER the tolerance do
+they stay absorbed (the `copies != 0 || gaps != 0` "#889 WITHIN TOLERANCE" print, still inside the
+`s.relaxed_pass == true` branch).
+
+Consequently the `else` branch (BOTH verdicts fail) is no longer just `frame_count == 0` — it is
+`frame_count == 0`, OR `copies`/`gaps` over the tolerance (the dominant real-world cause
+today, since `gates_overall_pass()` is still hardcoded `false`), OR — once issue 905 restores
+`gates_overall_pass()` to `true` — an over-floor `undecodable`. `recording-verdict.rs` derives
+these via the pure, Tier-0-testable seam `crate::window_gate::relaxed_failure_reasons` /
+`RelaxedFailureReason` (`EmptyWindow` / `OverCopiesGapsTolerance` / `FloorExceededGating` /
+`FloorWithinReportOnly`) rather than re-deriving the conditions inline — a window can carry more
+than one reason at once (e.g. over-tolerance copies/gaps AND a merely-report-only over-floor
+undecodable count), and `frame_count == 0` always short-circuits to `EmptyWindow` alone (an
+empty window's other counts carry no meaningful signal). The deep-review that found the OLD
+inline version's bug (it consulted the optical floor BEFORE checking `frame_count == 0`, so an
+empty window was misclassified as an exceeded floor — `window_within_floor`'s defensive
+`frame_count == 0` clause always reads `false`, which looks identical to a genuine floor breach
+unless checked first) is issue 889's re-gate deep-review findings 1+2.
 
 ## Testing pattern: a test written to prove the OLD strict fold may already be neutralized by an earlier commit in the same PR
 
