@@ -15,7 +15,7 @@
 //! unit-tests Tier-0 (default features) — the project's CLAUDE.md "Local Build Policy" mandate
 //! (a pure seam at the crate root, mirroring `switch_latency.rs` / `colour_scale.rs`).
 //!
-//! **PR B wires the ±20ms cross-window bound on top of [`CameraAvSync`]** (#312 item 2 / #624
+//! **PR B wires the tolerance-bounded cross-window gate on top of [`CameraAvSync`]** (#312 item 2 / #624
 //! deliverable 4) — see [`av_offset_gate_pass`]. PR A only reported `all_cambox_av_sync` (offsets,
 //! sample counts, any UNKNOWN cameras); this module also decides the per-camera PASS/FAIL that the
 //! caller (`bin/recording-verdict.rs`) folds into the run's overall verdict — reports it.
@@ -242,7 +242,7 @@ pub struct DerivedAvSync {
     pub derived_offset_ms: f64,
     /// The #286 delivery-latency cross-camera spread this run — the honest DIAGNOSTIC margin on
     /// the derivation (report-only field; see [`derive_camera_av_sync`]'s doc comment for why the
-    /// gate itself still applies the SAME ±20ms tolerance as a real measurement).
+    /// gate itself still applies the SAME [`AV_OFFSET_GATE_TOLERANCE_MS`] tolerance as a real measurement).
     pub delivery_spread_ms: f64,
     pub gate_pass: bool,
 }

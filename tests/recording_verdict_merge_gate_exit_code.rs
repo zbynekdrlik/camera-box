@@ -174,7 +174,7 @@ fn run_merge_subprocess(
 }
 
 /// #861 (2026-08-06, re-armed after ASRC #803 proved stable) — a REAL, cleanly-measured av-offset
-/// (500ms) far outside the default `--av-expected-ms 0` +/-20ms tolerance MUST make the
+/// (500ms) far outside the default `--av-expected-ms 0` gate tolerance MUST make the
 /// `--merge-partials` PROCESS exit non-zero again: the AV-offset gate (#641/#624 deliverable 4)
 /// is BLOCKING again, so a failing measurement here forces the merge's overall verdict to fail —
 /// proven through the REAL subprocess. This INVERTS
@@ -225,14 +225,14 @@ fn merge_subprocess_exits_nonzero_when_av_offset_gate_fails_861_rearmed() {
 
     assert_ne!(
         code, 0,
-        "#861: a 500ms av-offset (far outside the default +/-20ms gate) MUST make the merge \
+        "#861: a 500ms av-offset (far outside the default gate tolerance) MUST make the merge \
          PROCESS exit non-zero again (re-armed after ASRC #803): exit={code} output={text}"
     );
     let v = json.unwrap_or_else(|| panic!("verdict JSON not written at {json_path:?}: {text}"));
     assert_eq!(
         v["all_cambox_av_sync"]["cam1"]["gate_pass"],
         serde_json::json!(false),
-        "#624: cam1's measured 500ms offset must fail the +/-20ms gate: {v}"
+        "#624: cam1's measured 500ms offset must fail the gate tolerance: {v}"
     );
     assert_eq!(
         v["all_cambox_av_sync"]["gate_pass"],
@@ -248,6 +248,78 @@ fn merge_subprocess_exits_nonzero_when_av_offset_gate_fails_861_rearmed() {
         v["overall_pass"],
         serde_json::json!(false),
         "#861: overall_pass must be false when the av_sync gate fails (re-armed): {v}"
+    );
+}
+
+/// #861 vacuity control (review finding on PR #1002): every test in this file asserts a NON-zero
+/// exit, which proves nothing if the baseline single-window merge already exits non-zero for an
+/// unrelated reason. This is the exit-0 proof: the identical fixture shape with the markers
+/// aligned to a 0ms offset and the never-scheduled cameras operator-acked (cam3..cam7, the #855
+/// mechanism — without the acks their absent+unacked Unknown verdicts fail the gate closed by
+/// design) must make the merge process exit 0 with `overall_pass=true`. If THIS test goes red,
+/// the baseline is not green and the non-zero assertions above have no bite.
+#[test]
+fn merge_subprocess_exits_zero_when_av_offset_gate_passes_861_control() {
+    let dir = tempdir("av-pass-861-control");
+    let base = 5_000 * ONE_S_NS;
+    let win = 5 * ONE_S_NS;
+    let frames = window_frames(0, base, Some((BURN_RUN_ID_CAM1, 0)));
+    let sched = write_switch_schedule(&dir, &["CAM1"], base, win);
+
+    // Markers land exactly ON each video tick — a clean 0ms offset, dead-center in the gate.
+    let emit_log: Vec<(u8, u32, i64)> = (0..10u8).map(|k| (k, 1000 + k as u32, 0)).collect();
+    let audio_markers: Vec<(f64, u8)> = (0..10u8).map(|k| (k as f64 / 30.0, k)).collect();
+    let av = AvMarkerInputs {
+        fps: 30.0,
+        video_start_s: 0.0,
+        emit_log,
+        audio_markers,
+    };
+
+    let stream_partial = write_stream_partial(&dir, frames, Some(av));
+    let json_path = dir.join("verdict.json");
+    let pixel_proof_dir = dir.join("pixel-proof");
+    let (code, text, json) = run_merge_subprocess(
+        &stream_partial,
+        &json_path,
+        &[
+            "--switch-schedule",
+            sched.to_str().unwrap(),
+            "--switch-guard-ns",
+            "0",
+            "--switch-expected-step",
+            "2",
+            "--av-expected-ms",
+            "0",
+            "--offline-ack-cams",
+            "cam3:control-ack,cam4:control-ack,cam5:control-ack,cam6:control-ack,cam7:control-ack",
+            "--out-dir",
+            pixel_proof_dir.to_str().unwrap(),
+        ],
+    );
+
+    let v = json.unwrap_or_else(|| panic!("verdict JSON not written at {json_path:?}: {text}"));
+    assert_eq!(
+        v["all_cambox_av_sync"]["cam1"]["gate_pass"],
+        serde_json::json!(true),
+        "control: cam1's clean 0ms offset must pass the gate: {v}"
+    );
+    assert_eq!(
+        v["all_cambox_av_sync"]["gate_pass"],
+        serde_json::json!(true),
+        "control: with cam1+cam2 passing and every absent camera acked, the overall av_sync \
+         gate must pass: {v}"
+    );
+    assert_eq!(
+        v["overall_pass"],
+        serde_json::json!(true),
+        "control: the baseline single-window merge must be GREEN end-to-end — if this fails, \
+         the non-zero-exit assertions in this file prove nothing: {v}"
+    );
+    assert_eq!(
+        code, 0,
+        "control: a fully passing run must exit 0 through the real CLI: exit={code} \
+         output={text}"
     );
 }
 
