@@ -520,12 +520,15 @@ static const int32_t CB_DOCK_LOCK_LATENCY_MAX_MS = 2000;
 static const double CB_DOCK_LOCK_MIN_MARGIN_MS = 1.0;
 
 /* #942 -- BUILD DEFAULT, not a runtime toggle: the E2E gate (scripts/av_sync_calibrate.py
- * --apply) is the SOLE writer of genlock_latency_ms_src. Two independent actuators writing the
- * SAME live knob never converge -- the gate measures against ground truth (the QPSK marker + the
- * optical burns) and is read-back-verified once per run with a clamped step; this corrector only
- * ever servos against its OWN recent output, with no ground truth of its own (root-cause evidence
- * on the #942 ticket: a 20-run random walk while both actuators were live, and a directly-sampled
- * +-5ms limit cycle with zero gate activity in flight). Mirrors the SAME hard-lock convention as
+ * --apply) is the only CONTINUOUS/closed-loop writer of genlock_latency_ms_src (a separate,
+ * bounded snapshot-and-restore exception exists around a single delivery-verify test run --
+ * scripts/obs_phase2.py::_snapshot_and_set_test_latency, #358/#691 -- which is not a second
+ * closed-loop actuator). Two independent CONTINUOUS actuators writing the SAME live knob never
+ * converge -- the gate measures against ground truth (the QPSK marker + the optical burns) and is
+ * read-back-verified once per run with a clamped step; this corrector only ever servos against its
+ * OWN recent output, with no ground truth of its own (root-cause evidence on the #942 ticket: a
+ * 20-run random walk while both actuators were live, and a directly-sampled +-5ms limit cycle with
+ * zero gate activity in flight). Mirrors the SAME hard-lock convention as
  * #257 (genlock env removal) and #912 (ASRC default-on) -- no env var, no WebSocket flag, no
  * per-source opt-in; flipping this back on is a deliberate future code change, never a config
  * value. Mirror of src/av_sync_dock.rs::DOCK_LOCK_ACTUATION_ENABLED / dock_lock_may_actuate() --
@@ -625,5 +628,93 @@ private:
 	bool have_last_applied_;
 	uint64_t last_applied_ns_;
 };
+
+/* #955 -- the log-level OUTCOME sync-test-output.cpp derives from a CbDockLockAction result:
+ * whether to WRITE the actuator, DISPLAY a monitor-only suggestion, warn that a hardware rail is
+ * pinned with the "audio never early" invariant still violated, or say nothing. Extracted as a
+ * byte-identical pure function purely so this branch selection -- previously ONLY a source-text
+ * grep away from a silent regression (the #942 fix-up review's own counter-example: moving the
+ * actuator write into the monitor-only branch still passed every existing text-anchor test) --
+ * gets a real behavioral test (tests/av_sync_dock_outcome_955.rs). Mirror of
+ * src/av_sync_dock.rs::DockLockOutcome/dock_lock_outcome(). Does NOT change decide()'s own
+ * hold-band/step/cooldown math at all (.claude/rules/dock-lock-hold-band.md) -- it only names the
+ * decision the caller already makes. */
+enum class CbDockLockOutcome {
+	Write,    // act.apply && may_actuate -- write the new value to the live actuator
+	Suggest,  // act.apply && !may_actuate -- #942 monitor-only: display, never apply
+	RailWarn, // !act.apply, pinned at a hardware rail with "audio still early" unresolved
+	Quiet,    // !act.apply, nothing to report
+};
+
+/* offset_ms/current_ms here are in decide()'s OWN native (dock) convention -- the SAME
+ * rail-pinned check the caller already makes today (offset_ms < 0.0 == "audio still early"),
+ * just named and extracted. */
+inline CbDockLockOutcome cb_dock_lock_outcome(const CbDockLockAction &act, bool may_actuate,
+                                               double offset_ms, int32_t current_ms)
+{
+	if (act.apply)
+		return may_actuate ? CbDockLockOutcome::Write : CbDockLockOutcome::Suggest;
+	if (offset_ms < 0.0 && (current_ms <= CB_DOCK_LOCK_LATENCY_MIN_MS ||
+	                        current_ms >= CB_DOCK_LOCK_LATENCY_MAX_MS))
+		return CbDockLockOutcome::RailWarn;
+	return CbDockLockOutcome::Quiet;
+}
+
+/* #953 -- converts the dock's OWN native offset convention (ts = audio_ts - video_ts) into the
+ * gate's authoritative convention (offset_ms = video_time - audio_time,
+ * scripts/av_sync_calibrate.py::required_delay_ms) -- a pure sign negation. #952 (closed)
+ * established empirically that the two instruments disagree by dock ~= -gate - 55: this fixes the
+ * SIGN half of that relation; the residual ~55ms additive bias is UNQUANTIFIED (attributable to
+ * the different measurement taps -- digital NDI-internal burn vs optical camera+mic off the cam2
+ * monitor) and is intentionally NOT compensated here -- it needs a live re-measurement after this
+ * fix is deployed (tracked on its own follow-up issue), never a guessed constant in shipped code.
+ * Mirror of src/av_sync_dock.rs::dock_lock_display_offset_ms(). */
+inline double cb_dock_lock_display_offset_ms(double dock_offset_ms)
+{
+	return -dock_offset_ms;
+}
+
+/* #953 -- the pure alignment-target suggestion for the dock's DISPLAYED "SUGGESTED" advice.
+ * Unlike CbDockLockCorrector::decide() (which servos toward its own noise-scaled resting band,
+ * [margin, 2*margin) in the DOCK's native convention, and step-limits each tick to
+ * CB_DOCK_LOCK_MAX_STEP_MS because something is actually converging over many ticks), this
+ * targets TRUE ALIGNMENT -- driving the offset to zero -- in GATE convention (positive = video
+ * lags audio -> REDUCE the delay; the EXACT formula/sign av_sync_calibrate.py's
+ * required_delay_ms already uses), with NO per-tick step cap: nothing is ever applied (#942), so
+ * there is no "step" to limit and the on-screen number should say what the FULL correction is,
+ * not a meaningless step-limited increment (the #953 root cause: a live "SUGGESTED" value of
+ * exactly -5ms regardless of how large the true measured offset actually was).
+ *
+ * offset_ms here is ALREADY in gate convention -- the caller applies
+ * cb_dock_lock_display_offset_ms() first. has_value is false ("quiet") when non-finite, or when
+ * the offset is already within the SAME noise-scaled margin decide() uses
+ * (mad_ms.clamp(CB_DOCK_LOCK_MIN_MARGIN_MS, CB_CLUSTER_MAX_MAD_MS)) -- suggesting a correction
+ * smaller than the measurement noise floor claims false precision the ~10-25ms cluster estimator
+ * cannot back up. Mirror of src/av_sync_dock.rs::dock_lock_suggested_target(). */
+struct CbDockLockSuggestion {
+	bool has_value = false; // false == quiet (already aligned, or the offset was non-finite)
+	int32_t target_ms = 0;  // meaningful only when has_value == true
+};
+
+inline CbDockLockSuggestion cb_dock_lock_suggested_target(double offset_ms, double mad_ms,
+                                                           int32_t current_ms)
+{
+	CbDockLockSuggestion s;
+	if (!std::isfinite(offset_ms))
+		return s;
+	double margin = std::isfinite(mad_ms) ? cb_clamp_f64(mad_ms, CB_DOCK_LOCK_MIN_MARGIN_MS,
+	                                                      CB_CLUSTER_MAX_MAD_MS)
+	                                       : CB_DOCK_LOCK_MIN_MARGIN_MS;
+	if (std::fabs(offset_ms) < margin)
+		return s; // already aligned within the measurement noise floor
+	// #953: clamp BEFORE the int64_t cast (mirrors decide()'s own finding-5 precaution) -- offset_ms
+	// is finite but could still be astronomically large, which would otherwise risk UB on the cast.
+	double raw = cb_clamp_f64(std::round((double)current_ms - offset_ms), -1e9, 1e9);
+	int64_t clamped = cb_clamp_i64((int64_t)raw, (int64_t)CB_DOCK_LOCK_LATENCY_MIN_MS,
+	                                (int64_t)CB_DOCK_LOCK_LATENCY_MAX_MS);
+	s.has_value = true;
+	s.target_ms = (int32_t)clamped;
+	return s;
+}
 
 } // namespace camerabox

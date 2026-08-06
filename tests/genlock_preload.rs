@@ -2426,76 +2426,85 @@ mod vendored_source {
         );
 
         let output = squish(&vendor_file(AV_SYNC_DOCK_OUTPUT));
-        assert!(
-            output.contains("if (act.apply && camerabox::cb_dock_lock_may_actuate())"),
-            "{AV_SYNC_DOCK_OUTPUT}: #942 — the LOCK-CORRECT apply call site is not gated on \
-             cb_dock_lock_may_actuate(); the corrector would still write genlock_latency_ms_src."
-        );
-        assert!(
-            !output.contains("audio_ts); if (act.apply) {"),
-            "{AV_SYNC_DOCK_OUTPUT}: #942 — the decide() call is still followed by an UNGATED \
-             `if (act.apply)` actuator-write branch; the corrector must consult \
-             cb_dock_lock_may_actuate() first (a later `else if (act.apply)` monitor-only branch \
-             is fine and expected — this checks the FIRST, write-capable branch only)."
-        );
-        // #942 hardening: the two checks above only prove the gated `if`'s TEXT exists
-        // somewhere in the file and that ONE specific ungated phrasing is absent -- neither
-        // proves the actuator WRITE actually lives strictly inside the gated branch. Renaming
-        // `audio_ts` or reflowing the `if` onto a different line would silently pass both while
-        // an actuator write sat anywhere else, including inside the monitor-only sibling below.
-        // Pin both halves precisely instead: (a) the write is the FIRST statement immediately
-        // inside the cb_dock_lock_may_actuate()-gated `if`, and (b) the monitor-only
-        // `else if (act.apply)` sibling -- which computes the SAME real correction but must
-        // only ever DISPLAY it -- never itself gains a write.
+        // #955: the Write/Suggest/RailWarn/Quiet decision is now a pure extracted function
+        // (cb_dock_lock_outcome(), tests/av_sync_dock_outcome_955.rs proves its OWN behavior
+        // byte-identically); this file only needs to prove the CALLER actually wires the real
+        // cb_dock_lock_may_actuate() seam into it -- not a hardcoded true/false -- and that the
+        // resulting `switch` genuinely gates the write behind the Write case.
         assert!(
             output.contains(
-                "if (act.apply && camerabox::cb_dock_lock_may_actuate()) { \
+                "camerabox::CbDockLockOutcome outcome = camerabox::cb_dock_lock_outcome( \
+                 act, camerabox::cb_dock_lock_may_actuate(), est.offset_ms, current_ms); \
+                 switch (outcome) { \
+                 case camerabox::CbDockLockOutcome::Write: { \
                  const double delta_ms = (double)(act.new_delay_ms - current_ms); \
                  cb_apply_lock_latency_ms(act.new_delay_ms);"
             ),
-            "{AV_SYNC_DOCK_OUTPUT}: #942 — cb_apply_lock_latency_ms() is no longer the first \
-             statement immediately inside the cb_dock_lock_may_actuate()-gated `if` branch; the \
-             write may have moved outside the gate even though the gated `if` text still exists \
-             somewhere else in the file."
+            "{AV_SYNC_DOCK_OUTPUT}: #955 — either cb_dock_lock_outcome() is no longer called \
+             with cb_dock_lock_may_actuate() as its actuation-permission argument, or \
+             cb_apply_lock_latency_ms() is no longer the first statement immediately inside the \
+             `case camerabox::CbDockLockOutcome::Write:` arm; the write may have moved outside \
+             the gated case even though the pieces still exist somewhere else in the file."
         );
-        // The monitor-only sibling: strip comments first. Its own explanatory comment
+        // #942 hardening (unchanged intent, #955 update): the check above only proves the WRITE
+        // arm's text exists — it doesn't prove the write is UNREACHABLE from anywhere else. Pin
+        // that cb_apply_lock_latency_ms() is called with its real argument in EXACTLY one place
+        // in the whole file (the Write case above) — the Suggest case's own explanatory comment
+        // deliberately mentions the bare function NAME ("no cb_apply_lock_latency_ms()") to
+        // document what it must NOT do, so anchor on the full call form with its real argument,
+        // which that prose does not contain, instead of stripping comments.
+        assert_eq!(
+            output
+                .matches("cb_apply_lock_latency_ms(act.new_delay_ms)")
+                .count(),
+            1,
+            "{AV_SYNC_DOCK_OUTPUT}: #942/#955 — cb_apply_lock_latency_ms(act.new_delay_ms) must \
+             appear in EXACTLY one place (the gated Write case); a second call site would \
+             silently reintroduce the #942 dual-actuator write."
+        );
+        // The monitor-only Suggest case: strip comments first. Its own explanatory comment
         // literally reads "no cb_apply_lock_latency_ms(), no rebase()" to document what the
         // branch must NOT do -- a naive substring check on the raw text (with comments left in)
         // would find that prose and could mask a real regression, or misfire on an innocent
         // comment edit. See strip_cpp_comments()'s own doc comment for why.
         let output_nc = squish(&strip_cpp_comments(&vendor_file(AV_SYNC_DOCK_OUTPUT)));
-        const MONITOR_BRANCH_START: &str = "else if (act.apply) {";
+        const SUGGEST_CASE_START: &str = "case camerabox::CbDockLockOutcome::Suggest: {";
         assert_eq!(
-            output_nc.matches(MONITOR_BRANCH_START).count(),
+            output_nc.matches(SUGGEST_CASE_START).count(),
             1,
-            "{AV_SYNC_DOCK_OUTPUT}: #942 — \"{MONITOR_BRANCH_START}\" (comments stripped) is no \
+            "{AV_SYNC_DOCK_OUTPUT}: #955 — \"{SUGGEST_CASE_START}\" (comments stripped) is no \
              longer unique in this file; the branch-slice below would grab the wrong region."
         );
-        let branch_pos = output_nc.find(MONITOR_BRANCH_START).unwrap_or_else(|| {
+        let branch_pos = output_nc.find(SUGGEST_CASE_START).unwrap_or_else(|| {
             panic!(
-                "{AV_SYNC_DOCK_OUTPUT}: #942 — the monitor-only `else if (act.apply)` branch \
-                 (sibling of the gated write branch) is gone; cannot verify it stayed write-free."
+                "{AV_SYNC_DOCK_OUTPUT}: #955 — the monitor-only \
+                 `case camerabox::CbDockLockOutcome::Suggest:` arm is gone; cannot verify it \
+                 stayed write-free."
             )
         });
-        let after_branch_start = &output_nc[branch_pos + MONITOR_BRANCH_START.len()..];
-        let branch_end = after_branch_start.find("} else if").unwrap_or_else(|| {
-            panic!(
-                "{AV_SYNC_DOCK_OUTPUT}: #942 — could not find the end of the monitor-only \
-                 branch (no following `}} else if`); cannot bound the slice to check it."
-            )
-        });
+        let after_branch_start = &output_nc[branch_pos + SUGGEST_CASE_START.len()..];
+        const RAIL_WARN_CASE_START: &str = "case camerabox::CbDockLockOutcome::RailWarn:";
+        let branch_end = after_branch_start
+            .find(RAIL_WARN_CASE_START)
+            .unwrap_or_else(|| {
+                panic!(
+                    "{AV_SYNC_DOCK_OUTPUT}: #955 — could not find the end of the monitor-only \
+                 Suggest case (no following \"{RAIL_WARN_CASE_START}\"); cannot bound the slice \
+                 to check it."
+                )
+            });
         let monitor_branch = &after_branch_start[..branch_end];
         assert!(
             !monitor_branch.contains("cb_apply_lock_latency_ms("),
-            "{AV_SYNC_DOCK_OUTPUT}: #942 — the monitor-only `else if (act.apply)` branch now \
-             calls cb_apply_lock_latency_ms() -- it must only ever LOG the suggested correction, \
+            "{AV_SYNC_DOCK_OUTPUT}: #942 — the monitor-only Suggest case now calls \
+             cb_apply_lock_latency_ms() -- it must only ever LOG the suggested correction, \
              never apply it (that would silently reintroduce the #942 dual-actuator write)."
         );
         assert!(
             !monitor_branch.contains("rebase("),
-            "{AV_SYNC_DOCK_OUTPUT}: #942 — the monitor-only `else if (act.apply)` branch now \
-             calls rebase() -- rebase() assumes a real actuator move happened, which a \
-             monitor-only suggestion is not."
+            "{AV_SYNC_DOCK_OUTPUT}: #942 — the monitor-only Suggest case now calls rebase() -- \
+             rebase() assumes a real actuator move happened, which a monitor-only suggestion is \
+             not."
         );
         assert!(
             output.contains("LOCK-CORRECT SUGGESTED genlock_latency_ms_src"),

@@ -601,10 +601,251 @@ impl DockLockCorrector {
     }
 }
 
+/// #955 — the log-level OUTCOME `sync-test-output.cpp` derives from a [`DockLockCorrector::decide`]
+/// result: whether to WRITE the actuator, DISPLAY a monitor-only suggestion, warn that a hardware
+/// rail is pinned with the "audio never early" invariant still violated, or say nothing. Extracted
+/// as a byte-identical pure function purely so this branch selection — previously ONLY a
+/// source-text grep away from a silent regression (the #942 fix-up review's own counter-example:
+/// moving the actuator write into the monitor-only branch still passed every existing text-anchor
+/// test) — gets a real behavioral test. Mirrors `cb_dock_lock_outcome()` in
+/// `vendor/av-sync-dock/src/camera-box-audio.hpp`; see `tests/av_sync_dock_outcome_955.rs` for the
+/// C++ twin harness. This does NOT change `decide()`'s own hold-band/step/cooldown math at all
+/// (`.claude/rules/dock-lock-hold-band.md`) — it only names the decision the caller already makes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DockLockOutcome {
+    /// `act` is `Apply` and actuation is currently permitted — write it to the live actuator.
+    Write,
+    /// `act` is `Apply` but actuation is NOT permitted (#942: monitor-only) — display it as a
+    /// suggestion, never write it.
+    Suggest,
+    /// `act` is `Hold` (already inside the band, or no room to correct further), but the
+    /// "audio never early" invariant is STILL violated because a hardware rail is pinned — a
+    /// genuine hardware limit, not a corrector bug, and it must stay VISIBLE.
+    RailWarn,
+    /// `act` is `Hold` and nothing is wrong — nothing to report this measurement.
+    Quiet,
+}
+
+/// See [`DockLockOutcome`]'s own doc comment. `offset_ms`/`current_ms` here are in `decide()`'s
+/// OWN native (dock) convention — this is the SAME rail-pinned check `decide()`'s caller already
+/// makes today (`est.offset_ms < 0.0` = "audio still early"), just named and extracted.
+pub fn dock_lock_outcome(
+    act: DockLockAction,
+    may_actuate: bool,
+    offset_ms: f64,
+    current_ms: i32,
+) -> DockLockOutcome {
+    match act {
+        DockLockAction::Apply(_) => {
+            if may_actuate {
+                DockLockOutcome::Write
+            } else {
+                DockLockOutcome::Suggest
+            }
+        }
+        DockLockAction::Hold => {
+            if offset_ms < 0.0
+                && (current_ms <= DOCK_LOCK_LATENCY_MIN_MS
+                    || current_ms >= DOCK_LOCK_LATENCY_MAX_MS)
+            {
+                DockLockOutcome::RailWarn
+            } else {
+                DockLockOutcome::Quiet
+            }
+        }
+    }
+}
+
+/// #953 — converts the dock's OWN native offset convention (`ts = audio_ts - video_ts`) into the
+/// gate's authoritative convention (`offset_ms = video_time - audio_time`,
+/// `scripts/av_sync_calibrate.py::required_delay_ms` / [`crate::qpsk_marker::required_delay_ms`]) —
+/// a pure sign negation. #952 (closed) established empirically that the two instruments disagree
+/// by `dock ~= -gate - 55`: this fixes the SIGN half of that relation; the residual ~55ms additive
+/// bias is UNQUANTIFIED (attributable to the different measurement taps — digital NDI-internal
+/// burn vs optical camera+mic off the cam2 monitor) and is intentionally NOT compensated here — it
+/// needs a live re-measurement after this fix is deployed (tracked on its own follow-up issue),
+/// never a guessed constant in shipped code.
+pub fn dock_lock_display_offset_ms(dock_offset_ms: f64) -> f64 {
+    -dock_offset_ms
+}
+
+/// #953 — the pure alignment-target suggestion for the dock's DISPLAYED "SUGGESTED" advice.
+/// Unlike [`DockLockCorrector::decide`] (which servos toward its own noise-scaled resting band,
+/// `[margin, 2*margin)` in the DOCK's native convention, and step-limits each tick to
+/// [`DOCK_LOCK_MAX_STEP_MS`] because something is actually converging over many ticks), this
+/// targets TRUE ALIGNMENT — driving the offset to zero — in GATE convention (positive = video
+/// lags audio -> REDUCE the delay; the EXACT formula/sign [`crate::qpsk_marker::required_delay_ms`]
+/// already uses), with NO per-tick step cap: nothing is ever applied (#942), so there is no "step"
+/// to limit and the on-screen number should say what the FULL correction is, not a meaningless
+/// step-limited increment (the #953 root cause: a live "SUGGESTED" value of exactly -5ms
+/// regardless of how large the true measured offset actually was — comment 2026-08-05).
+///
+/// `offset_ms` here is ALREADY in gate convention — the caller applies
+/// [`dock_lock_display_offset_ms`] first. Returns `None` ("quiet") when non-finite, or when the
+/// offset is already within the SAME noise-scaled margin [`DockLockCorrector::decide`] uses
+/// (`mad_ms.clamp(DOCK_LOCK_MIN_MARGIN_MS, DOCK_CLUSTER_MAX_MAD_MS)`) — suggesting a correction
+/// smaller than the measurement noise floor claims false precision the ~10-25ms cluster estimator
+/// cannot back up.
+pub fn dock_lock_suggested_target(offset_ms: f64, mad_ms: f64, current_ms: i32) -> Option<i32> {
+    if !offset_ms.is_finite() {
+        return None;
+    }
+    let margin = if mad_ms.is_finite() {
+        mad_ms.clamp(DOCK_LOCK_MIN_MARGIN_MS, DOCK_CLUSTER_MAX_MAD_MS)
+    } else {
+        DOCK_LOCK_MIN_MARGIN_MS
+    };
+    if offset_ms.abs() < margin {
+        return None; // already aligned within the measurement noise floor
+    }
+    // #953: an "unlimited" step budget for required_delay_ms's own step-clamp -- wide enough that
+    // it can NEVER be the binding constraint versus the hardware rails
+    // [DOCK_LOCK_LATENCY_MIN_MS, DOCK_LOCK_LATENCY_MAX_MS] themselves, for ANY current_ms already
+    // inside that range (current_ms +/- (MAX-MIN) always reaches both rails). Deliberately NOT
+    // i32::MAX, which would underflow/overflow inside required_delay_ms's own
+    // `current_delay_ms -/+ max_step_ms`.
+    let unlimited_step = DOCK_LOCK_LATENCY_MAX_MS - DOCK_LOCK_LATENCY_MIN_MS;
+    let target = crate::qpsk_marker::required_delay_ms(current_ms, offset_ms, unlimited_step);
+    // #953 review: `required_delay_ms` clamps to its OWN hardcoded [3, 2000] literal, which is
+    // correct today only because it happens to equal these named constants -- clamp explicitly
+    // against the named constants too so this function never silently diverges from the C++
+    // mirror (which clamps against CB_DOCK_LOCK_LATENCY_MIN_MS/MAX_MS by name) if either literal
+    // ever changes independently.
+    Some(target.clamp(DOCK_LOCK_LATENCY_MIN_MS, DOCK_LOCK_LATENCY_MAX_MS))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::qpsk_marker::{frame_id_to_index, marker_signal, signal_len, AV_SYNC_RING_CYCLE_NS};
+
+    // ---- #955 DockLockOutcome ----
+
+    #[test]
+    fn dock_lock_outcome_apply_and_may_actuate_is_write_955() {
+        assert_eq!(
+            dock_lock_outcome(DockLockAction::Apply(945), true, -52.2, 950),
+            DockLockOutcome::Write
+        );
+    }
+
+    #[test]
+    fn dock_lock_outcome_apply_and_monitor_only_is_suggest_955() {
+        assert_eq!(
+            dock_lock_outcome(DockLockAction::Apply(945), false, -52.2, 950),
+            DockLockOutcome::Suggest
+        );
+    }
+
+    #[test]
+    fn dock_lock_outcome_hold_at_pinned_rail_with_audio_early_is_rail_warn_955() {
+        assert_eq!(
+            dock_lock_outcome(DockLockAction::Hold, false, -20.0, DOCK_LOCK_LATENCY_MIN_MS),
+            DockLockOutcome::RailWarn
+        );
+        assert_eq!(
+            dock_lock_outcome(DockLockAction::Hold, false, -20.0, DOCK_LOCK_LATENCY_MAX_MS),
+            DockLockOutcome::RailWarn
+        );
+    }
+
+    #[test]
+    fn dock_lock_outcome_hold_not_pinned_is_quiet_955() {
+        assert_eq!(
+            dock_lock_outcome(DockLockAction::Hold, false, 5.0, 950),
+            DockLockOutcome::Quiet
+        );
+        // #955: the rail check specifically requires offset_ms < 0.0 ("audio still early") --
+        // a non-negative offset never triggers RailWarn even while pinned at a rail, matching
+        // decide()'s own invariant (a rail-pinned POSITIVE offset is not a violation at all).
+        assert_eq!(
+            dock_lock_outcome(DockLockAction::Hold, false, 5.0, DOCK_LOCK_LATENCY_MIN_MS),
+            DockLockOutcome::Quiet
+        );
+    }
+
+    #[test]
+    fn dock_lock_outcome_may_actuate_is_irrelevant_while_holding_955() {
+        // may_actuate only distinguishes Write vs Suggest on the Apply arm.
+        assert_eq!(
+            dock_lock_outcome(DockLockAction::Hold, true, 5.0, 950),
+            DockLockOutcome::Quiet
+        );
+    }
+
+    // ---- #953 dock_lock_display_offset_ms (dock -> gate sign convention) ----
+
+    #[test]
+    fn dock_lock_display_offset_ms_negates_953() {
+        assert_eq!(dock_lock_display_offset_ms(-55.0), 55.0);
+        assert_eq!(dock_lock_display_offset_ms(30.0), -30.0);
+        assert_eq!(dock_lock_display_offset_ms(0.0), 0.0);
+    }
+
+    // ---- #953 dock_lock_suggested_target ----
+
+    #[test]
+    fn dock_lock_suggested_target_quiet_inside_noise_band_953() {
+        // offset within (-margin, margin) (margin = mad clamped to [1,25]) -> None (quiet), NOT
+        // the pre-#953 constant "-5ms" bug this ticket's live evidence documented.
+        assert_eq!(dock_lock_suggested_target(3.0, 10.0, 931), None);
+        assert_eq!(dock_lock_suggested_target(-9.9, 10.0, 931), None);
+    }
+
+    #[test]
+    fn dock_lock_suggested_target_exact_margin_boundary_is_not_quiet_953() {
+        // The quiet check is a STRICT `<` — an offset exactly AT the margin is already outside
+        // the noise band and must produce a real suggestion, not be swallowed as "aligned".
+        assert_eq!(dock_lock_suggested_target(10.0, 10.0, 931), Some(921));
+        assert_eq!(dock_lock_suggested_target(-10.0, 10.0, 931), Some(941));
+    }
+
+    #[test]
+    fn dock_lock_suggested_target_non_finite_mad_falls_back_to_min_margin_953() {
+        // A non-finite mad_ms (no cluster dispersion yet) falls back to DOCK_LOCK_MIN_MARGIN_MS
+        // (1.0), not to "no noise floor at all" -- an offset just inside 1.0 is still quiet, one
+        // clearly outside it is not.
+        assert_eq!(dock_lock_suggested_target(0.5, f64::NAN, 931), None);
+        assert_eq!(dock_lock_suggested_target(5.0, f64::NAN, 931), Some(926));
+    }
+
+    #[test]
+    fn dock_lock_suggested_target_targets_true_zero_not_1point5x_mad_953() {
+        // #953's own live evidence: a gate-convention (already sign-corrected) measured offset of
+        // -55ms at current=931 must target FULL alignment (931 - (-55) = 986) -- never a +/-5ms
+        // step and never the old actuator resting place (1.5*margin).
+        assert_eq!(dock_lock_suggested_target(-55.0, 24.6, 931), Some(986));
+    }
+
+    #[test]
+    fn dock_lock_suggested_target_matches_gate_direction_953() {
+        // Same sign convention/direction as qpsk_marker::required_delay_ms: positive (video lags
+        // audio) -> REDUCE the delay; negative (video leads) -> INCREASE it.
+        assert_eq!(dock_lock_suggested_target(30.0, 5.0, 1000), Some(970));
+        assert_eq!(dock_lock_suggested_target(-30.0, 5.0, 1000), Some(1030));
+    }
+
+    #[test]
+    fn dock_lock_suggested_target_clamps_to_hardware_rails_953() {
+        assert_eq!(
+            dock_lock_suggested_target(5000.0, 5.0, 10),
+            Some(DOCK_LOCK_LATENCY_MIN_MS)
+        );
+        assert_eq!(
+            dock_lock_suggested_target(-5000.0, 5.0, 1990),
+            Some(DOCK_LOCK_LATENCY_MAX_MS)
+        );
+    }
+
+    #[test]
+    fn dock_lock_suggested_target_non_finite_is_quiet_953() {
+        assert_eq!(dock_lock_suggested_target(f64::NAN, 10.0, 931), None);
+        assert_eq!(dock_lock_suggested_target(f64::INFINITY, 10.0, 931), None);
+        assert_eq!(
+            dock_lock_suggested_target(f64::NEG_INFINITY, 10.0, 931),
+            None
+        );
+    }
 
     #[test]
     fn top_band_plan_4k_keeps_qr_large_and_within_cap() {
