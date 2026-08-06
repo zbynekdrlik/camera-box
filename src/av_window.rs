@@ -461,16 +461,38 @@ mod tests {
 
     #[test]
     fn gate_fails_when_offset_outside_tolerance_of_expected() {
-        assert!(!av_offset_gate_pass(&measured(25.0), 0.0));
-        assert!(!av_offset_gate_pass(&measured(-25.0), 0.0));
+        assert!(!av_offset_gate_pass(
+            &measured(AV_OFFSET_GATE_TOLERANCE_MS + 5.0),
+            0.0
+        ));
+        assert!(!av_offset_gate_pass(
+            &measured(-(AV_OFFSET_GATE_TOLERANCE_MS + 5.0)),
+            0.0
+        ));
     }
 
     #[test]
     fn gate_measures_deviation_from_a_nonzero_expected_value_not_hardcoded_zero() {
         // The operator's live #398 dock may be dialed to a nonzero value — the gate must measure
-        // deviation FROM THAT expected value, never from a hardcoded 0.
-        assert!(av_offset_gate_pass(&measured(55.0), 50.0));
-        assert!(!av_offset_gate_pass(&measured(55.0), 0.0));
+        // deviation FROM THAT expected value, never from a hardcoded 0: the SAME measured value
+        // passes against a nearby expected and fails against 0.
+        let m = 50.0 + AV_OFFSET_GATE_TOLERANCE_MS + 5.0;
+        assert!(av_offset_gate_pass(&measured(m), m - 5.0));
+        assert!(!av_offset_gate_pass(&measured(m), 0.0));
+    }
+
+    /// #861 interim (2026-08-06): the tolerance is pinned at 90ms = the original ±20ms bound +
+    /// 2 frames @30fps (2 × 33.33 = 66.7, rounded up together to 90) — the deep-FIFO relock
+    /// lands its release phase ±1-2 frames differently per lock episode (live 4-run evidence on
+    /// issue #1003; the #940 phase-pin fix reduced but did not eliminate it), so a ±20ms bound
+    /// was a per-episode lottery, not a gate. Re-tightening 90 → 20 is issue #1003's acceptance
+    /// item 2 — when that lands, THIS test is the one-line flip back.
+    #[test]
+    fn tolerance_is_the_interim_90ms_episode_quantization_bound_861() {
+        assert_eq!(
+            AV_OFFSET_GATE_TOLERANCE_MS, 90.0,
+            "interim bound = 20 + 2 frames @30fps episode quantization (issue #1003 re-tightens)"
+        );
     }
 
     #[test]
