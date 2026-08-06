@@ -575,6 +575,29 @@ jobs:
         shell: bash
         run: cmake --build build_x64 --config RelWithDebInfo --parallel
 
+      # Deploy path for the vendored dock: the compile gate above already builds the REAL
+      # RelWithDebInfo obs-audio-video-sync-dock.dll, but until now nothing uploaded it — every
+      # merged vendor/av-sync-dock fix sat undeployed on the rig unless someone ran the 150-min
+      # full bundle (the exact miss the issue-953/955 session hit: three merged dock fixes,
+      # operator still seeing the old dock). Mirror of the distroav fast hot-swap pattern above.
+      - name: Stage the compiled av-sync-dock DLL (fast hot-swap)
+        shell: pwsh
+        run: |
+          $dll = Get-ChildItem -Recurse vendor/av-sync-dock/build_x64 -Filter obs-audio-video-sync-dock.dll |
+                 Where-Object { $_.FullName -notmatch 'CMakeFiles' } | Select-Object -First 1
+          if (!$dll) { Write-Error "obs-audio-video-sync-dock.dll not found after the dock build"; exit 1 }
+          New-Item -ItemType Directory -Force -Path avsyncdock-stage | Out-Null
+          Copy-Item $dll.FullName avsyncdock-stage/
+          git rev-parse HEAD | Out-File avsyncdock-stage/AVSYNCDOCK_BUILD_SHA.txt -Encoding ascii
+          Write-Output "staged dock dll from: $($dll.FullName)  size=$($dll.Length)"
+
+      - name: Upload av-sync-dock DLL (fast hot-swap)
+        uses: actions/upload-artifact@v4
+        with:
+          name: avsyncdock-fast-dll
+          path: avsyncdock-stage/
+          if-no-files-found: error
+
       - name: Compile gate passed
         shell: bash
         run: |
