@@ -9984,13 +9984,14 @@ mod tests {
     }
 
     /// #714: the derived estimate's OWN gate can disagree with cam2's — a camera whose delivery
-    /// p50 is far enough above the mean pushes the re-centered offset outside ±20ms even though
-    /// cam2's own measured offset is safely inside it.
+    /// p50 is far enough above the mean pushes the re-centered offset outside the tolerance even
+    /// though cam2's own measured offset is safely inside it.
     #[test]
     fn all_cambox_av_sync_derived_gate_can_fail_even_when_cam2_itself_passes_714() {
         let emit_log: Vec<(u8, u32, i64)> = (0..10u8).map(|k| (k, 1000 + k as u32, 0)).collect();
         // Real markers land exactly at video_ts(1000+k) - 0.005s ⇒ cam1's (and cam2's own
-        // whole-recording) measured offset is a clean +5ms — safely inside ±20ms of expected=0.
+        // whole-recording) measured offset is a clean +5ms — safely inside the tolerance of
+        // expected=0.
         let audio_markers: Vec<(f64, u8)> =
             (0..10u8).map(|k| (k as f64 / 30.0 - 0.005, k)).collect();
         let av = AvMarkerInputs {
@@ -9999,12 +10000,20 @@ mod tests {
             emit_log,
             audio_markers,
         };
-        // cam1: 800ms delivery. cam3: 870ms delivery (70ms above cam1's, mean=835ms) -> cam3's
-        // derived offset = 5 + (870 - 835) = 5 + 35 = 40ms -> OUTSIDE +/-20ms even though cam2's
-        // own measured +5ms offset comfortably passes.
+        // cam1: 800ms delivery. cam3: 2×(tolerance+10ms) above cam1's, so with the two-camera
+        // mean sitting halfway, cam3's re-centered delta = tolerance+10 and its derived offset =
+        // 5 + tolerance + 10 -> OUTSIDE the bound even though cam2's own measured +5ms offset
+        // comfortably passes. Tolerance-relative (not a literal delivery pair) so this test pins
+        // the SPEC at any bound — it survived the 20→90ms interim change of the issue-861 re-arm
+        // (episode quantization, re-tighten tracked on issue 1003) untouched in intent.
+        let delta_over_ms = super::av_window::AV_OFFSET_GATE_TOLERANCE_MS + 10.0;
+        let cam3_delivery_ns = 800_000_000 + (2.0 * delta_over_ms * 1_000_000.0) as i64;
         let v = build_all_cambox_av_sync_with_delivery_fixture(
             "derive-fail",
-            &[("CAM1", CAM1B, 800_000_000), ("CAM3", CAM3B, 870_000_000)],
+            &[
+                ("CAM1", CAM1B, 800_000_000),
+                ("CAM3", CAM3B, cam3_delivery_ns),
+            ],
             Some(av),
             0.0,
         );
@@ -10022,14 +10031,14 @@ mod tests {
         );
         let derived_offset = av_sync["cam3"]["derived_offset_ms"].as_f64().unwrap();
         assert!(
-            (derived_offset - 40.0).abs() < 1e-6,
-            "expected 5.0 + (870 - 835) = 40.0, got {derived_offset}: {av_sync}"
+            (derived_offset - (5.0 + delta_over_ms)).abs() < 1e-6,
+            "expected 5.0 + (tolerance + 10), got {derived_offset}: {av_sync}"
         );
         assert_eq!(
             av_sync["cam3"]["gate_pass"],
             serde_json::json!(false),
-            "#714: a re-centered offset outside +/-20ms must FAIL, independent of cam2's own \
-             PASS: {av_sync}"
+            "#714: a re-centered offset outside the tolerance must FAIL, independent of cam2's \
+             own PASS: {av_sync}"
         );
         assert_eq!(
             v["overall_pass"],
