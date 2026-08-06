@@ -1070,6 +1070,9 @@ static inline void st_raw_audio_decode_data(struct sync_test_output *st, std::co
 		si.video_ts = corrected_video_ts > 0 ? (uint64_t)corrected_video_ts : 0;
 		si.audio_ts = audio_ts;
 		si.index_max = 256;
+		// #999 -- this event is camera-box's own direct-ring measurement (dock-native convention);
+		// on_sync_found must gate-convert it, same as every other displayed offset since #953.
+		si.gate_convention = true;
 		signal_sync_found(st->context, &si);
 	}
 }
@@ -1445,6 +1448,9 @@ static void st_raw_audio_camera_box(struct sync_test_output *st, struct audio_da
 		si.video_ts = corrected_video_ts > 0 ? (uint64_t)corrected_video_ts : 0;
 		si.audio_ts = audio_ts;
 		si.index_max = 256;
+		// #999 -- same as the "still measuring" sync_found above: this is camera-box's own
+		// direct-ring measurement, gate-convert it for on_sync_found.
+		si.gate_convention = true;
 		signal_sync_found(st->context, &si);
 
 		// Audio Index (audio_marker_found): only for a marker whose own offset agrees with the lock

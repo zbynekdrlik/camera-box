@@ -27,6 +27,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include <obs-frontend-api.h>
 #include "plugin-macros.generated.h"
 #include "sync-test-dock.hpp"
+#include "camera-box-audio.hpp" // #999 -- cb_dock_latency_display_ms (on_sync_found gate-convert)
 
 #define ASSERT_THREAD(type)                                                                     \
 	do {                                                                                    \
@@ -373,12 +374,17 @@ void SyncTestDock::on_audio_marker_found(struct audio_marker_found_s data)
 
 void SyncTestDock::on_sync_found(sync_index data)
 {
-	int64_t ts = (int64_t)data.audio_ts - (int64_t)data.video_ts;
-	latencyDisplay->setText(QStringLiteral("%1 ms").arg(ts * 1e-6, 2, 'f', 1));
+	// #999 -- gate-convert camera-box's own direct-ring events (data.gate_convention == true) the
+	// SAME way #953 already converts every OBS log line; norihiro's legacy events
+	// (gate_convention == false) reproduce the original behavior byte-for-byte.
+	int64_t dock_native_ts_ns = (int64_t)data.audio_ts - (int64_t)data.video_ts;
+	camerabox::CbLatencyDisplay disp =
+		camerabox::cb_dock_latency_display_ms(dock_native_ts_ns, data.gate_convention);
+	latencyDisplay->setText(QStringLiteral("%1 ms").arg(disp.display_ms, 2, 'f', 1));
 	indexDisplay->setText(QStringLiteral("%1").arg(data.index));
-	if (ts > 0)
+	if (disp.polarity == camerabox::CbLatencyPolarity::Positive)
 		latencyPolarity->setText(obs_module_text("Display.Polarity.Positive"));
-	else if (ts < 0)
+	else if (disp.polarity == camerabox::CbLatencyPolarity::Negative)
 		latencyPolarity->setText(obs_module_text("Display.Polarity.Negative"));
 }
 

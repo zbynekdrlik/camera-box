@@ -674,6 +674,66 @@ inline double cb_dock_lock_display_offset_ms(double dock_offset_ms)
 	return -dock_offset_ms;
 }
 
+/* #999 -- which locale-key polarity label the dock's "Latency" QLabel should show. Maps 1:1 to
+ * Display.Polarity.Positive ("Audio lagged") / Display.Polarity.Negative ("Audio early") in
+ * vendor/av-sync-dock/data/locale/en-US.ini; None means the label is left UNTOUCHED (mirrors
+ * SyncTestDock::on_sync_found's original `if (ts>0) ... else if (ts<0) ...` -- an exact-zero ts
+ * updates neither branch). Mirror of src/av_sync_dock.rs::LatencyPolarity. */
+enum class CbLatencyPolarity {
+	None,
+	Positive,
+	Negative,
+};
+
+/* The dock's on-screen "Latency" number + which polarity label applies, for one sync_found event.
+ * Mirror of src/av_sync_dock.rs::LatencyDisplay. */
+struct CbLatencyDisplay {
+	double display_ms = 0.0;
+	CbLatencyPolarity polarity = CbLatencyPolarity::None;
+};
+
+/* #999 -- SyncTestDock::on_sync_found (sync-test-dock.cpp) is a code path #953 NEVER touched (git
+ * show <953-commit> -- sync-test-dock.cpp is empty). #953 fixed the sign convention only at the
+ * OBS **log** call sites inside st_raw_audio_camera_box (sync-test-output.cpp's LOCKED/UPDATED/
+ * UNLOCKED/SUGGESTED blog() lines, via cb_dock_lock_display_offset_ms()) -- a completely separate
+ * mechanism from the dock's own sync_index/on_sync_found UI-update path, which computes
+ * ts = audio_ts - video_ts directly and displays it in norihiro's ORIGINAL, un-gate-converted
+ * native convention (dock ~= -gate - 55, issue 952). Live evidence this explains (issue 999,
+ * 2026-08-06): the SAME session's operator screenshot showed Latency -57.1ms "Audio early"
+ * (dock-native, unconverted -- closely matches -true_gate_offset(~0) - 55 = -55) while the OBS
+ * log's LOCKED/UPDATED lines (already #953-converted) showed +20..+47ms for the identical
+ * measurement window, and the offline calibrated truth (recording-verdict --av-sync) read ~0ms.
+ *
+ * gate_convention selects whether cb_dock_lock_display_offset_ms()'s negation applies at all:
+ * true for camera-box's own direct-ring sync_found events (st_raw_audio_camera_box's two
+ * signal_sync_found call sites -- the ONLY events this fix targets), false for norihiro's own
+ * legacy list-based method (sync_index_found, the vestigial phone-based path this rig never uses
+ * in production -- camera-box mode and the legacy method are mutually exclusive per
+ * st_raw_video/st_raw_audio's existing cb_active gating). The flag is threaded through rather than
+ * hardcoded, mirroring the existing audio_marker_found_s::sparse_index flag's exact purpose: tell
+ * the dock UI handler which regime produced a given calldata event without inspecting global
+ * state from the signal handler. gate_convention=false reproduces norihiro's ORIGINAL
+ * on_sync_found behavior byte-for-byte (legacy path unchanged).
+ *
+ * When gate_convention is true, display_ms's sign inverts (the same negation
+ * cb_dock_lock_display_offset_ms() already applies to every log line), so the polarity LABEL that
+ * applies also inverts: a gate-POSITIVE offset (video lags audio) means audio arrived EARLIER --
+ * the "Audio early" text, which is norihiro's own NEGATIVE-branch label; a gate-NEGATIVE offset
+ * means "Audio lagged" (norihiro's own POSITIVE-branch label).
+ *
+ * Mirror of src/av_sync_dock.rs::dock_latency_display_ms(). */
+inline CbLatencyDisplay cb_dock_latency_display_ms(int64_t dock_native_ts_ns, bool gate_convention)
+{
+	CbLatencyDisplay d;
+	double native_ms = (double)dock_native_ts_ns / 1000000.0;
+	d.display_ms = gate_convention ? cb_dock_lock_display_offset_ms(native_ms) : native_ms;
+	if (d.display_ms > 0.0)
+		d.polarity = gate_convention ? CbLatencyPolarity::Negative : CbLatencyPolarity::Positive;
+	else if (d.display_ms < 0.0)
+		d.polarity = gate_convention ? CbLatencyPolarity::Positive : CbLatencyPolarity::Negative;
+	return d;
+}
+
 /* #953 -- the pure alignment-target suggestion for the dock's DISPLAYED "SUGGESTED" advice.
  * Unlike CbDockLockCorrector::decide() (which servos toward its own noise-scaled resting band,
  * [margin, 2*margin) in the DOCK's native convention, and step-limits each tick to

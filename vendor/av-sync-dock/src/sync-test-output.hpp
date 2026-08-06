@@ -113,4 +113,13 @@ struct sync_index
 	uint64_t video_ts = 0;
 	uint64_t audio_ts = 0;
 	uint32_t index_max = 256;
+	/* #999: true when this sync_found event came from camera-box's OWN direct ring lookup
+	 * (st_raw_audio_camera_box), whose ts = audio_ts - video_ts is in DOCK-NATIVE convention --
+	 * the SAME quantity cb_dock_lock_display_offset_ms() already negates into GATE convention
+	 * (video_time - audio_time) for every OBS-log line since #953. false for norihiro's own
+	 * legacy sync_index_found()-produced events (the vestigial phone-based method, mutually
+	 * exclusive with camera-box mode -- see st_raw_video/st_raw_audio's cb_active gating), whose
+	 * native convention this flag leaves untouched. Mirrors audio_marker_found_s::sparse_index's
+	 * exact purpose: tell the dock UI handler which regime produced a given calldata event. */
+	bool gate_convention = false;
 };
