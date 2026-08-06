@@ -9345,6 +9345,14 @@ mod tests {
             av_expected_ms.to_string(),
             "--offline-ack-cams".to_string(),
             offline_ack_cams.to_string(),
+            // Review finding on PR #1002 (issue 861 vacuity controls): without this, every
+            // fixture's sub-300s synthetic recording fails `span_ok` and forces
+            // `overall_pass=false` REGARDLESS of the gate under test -- no fixture-based
+            // overall_pass assertion in this file had any bite. Same convention the
+            // Args-based unit tests in this file already use (theirs pass 1; these
+            // single-window fixtures analyze only ~0.7s, so 0 is the honest floor here).
+            "--min-secs".to_string(),
+            "0".to_string(),
         ];
         if let Some(stats_path) = cam1_capture_stats {
             argv.push("--cam1-capture-stats".to_string());
@@ -9970,6 +9978,11 @@ mod tests {
             "2",
             "--av-expected-ms",
             &av_expected_ms.to_string(),
+            // Same span_ok vacuity guard as build_all_cambox_av_sync_fixture_with_ack (review
+            // finding on PR #1002): a sub-300s synthetic recording must not force
+            // overall_pass=false past the gate under test.
+            "--min-secs",
+            "0",
         ]);
 
         let (v, _pass) = build_and_print_verdict(
