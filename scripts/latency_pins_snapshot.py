@@ -53,7 +53,7 @@ GENLOCK_SRC_LATENCY_KEY = "genlock_latency_ms_src"
 
 def active_camera_numbers() -> tuple:
     """#893 -- the camera numbers to sweep, derived from CAMERA_ACTIVE_SET (env var, default
-    "cam1 cam2 cam4" (#898: cam3 retired 2026-07-31) -- same read convention
+    "cam1 cam2" (#947: cam4 removed 2026-08-06) -- same read convention
     set-ndi-mapping.py's DEFAULT_ACTIVE_SET already uses), NEVER a literal N=1..7 range
     (.claude/rules/camera-active-set.md).
 
@@ -64,7 +64,7 @@ def active_camera_numbers() -> tuple:
     upward). Read FRESH on every call (never cached at import time) so a caller/test can
     override the env var per-invocation.
     """
-    raw = os.environ.get("CAMERA_ACTIVE_SET", "cam1 cam2 cam4")
+    raw = os.environ.get("CAMERA_ACTIVE_SET", "cam1 cam2")
     out = []
     for tok in raw.replace(",", " ").split():
         tok = tok.strip()
