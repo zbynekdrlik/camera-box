@@ -20,13 +20,15 @@
 //! sample counts, any UNKNOWN cameras); this module also decides the per-camera PASS/FAIL that the
 //! caller (`bin/recording-verdict.rs`) folds into the run's overall verdict — reports it.
 //!
-//! **#861 (2026-07-29, user decision on #856): the ±20ms bound is temporarily REPORT-ONLY.**
-//! Epic #800 measured program audio drifting ~160ms/hour against video (foreign Waves/Dante clock
-//! domain, sample-count timestamping) — a constant video-delay offset cannot hold that inside
-//! ±20ms until per-source ASRC lands (#803). [`av_offset_gate_pass`] is UNCHANGED (still computed,
-//! still the pure fail-closed decision) — only the CALLER stopped folding its result into
-//! `overall_pass`, mirroring the #286 cross-camera spread term's report-only shape exactly. #861
-//! tracks re-arming it once ASRC is deployed and proven stable.
+//! **#861 (2026-07-29, user decision on #856): the ±20ms bound was temporarily REPORT-ONLY, now
+//! RE-ARMED (2026-08-06).** Epic #800 measured program audio drifting ~160ms/hour against video
+//! (foreign Waves/Dante clock domain, sample-count timestamping) — a constant video-delay offset
+//! could not hold that inside ±20ms until per-source ASRC landed (#803). ASRC is now live and
+//! build-default (#912), and the offline chain converged predictably on 2026-08-06 (issue 999
+//! comment 09:05 UTC) — see [`gates_overall_pass`] for the restore-path decision record.
+//! [`av_offset_gate_pass`] itself is UNCHANGED throughout (still computed, still the pure
+//! fail-closed decision) — only whether the CALLER folds its result into `overall_pass` changed,
+//! gated on [`gates_overall_pass`] (mirrors the issue-914/915 seam, applied in reverse).
 
 use crate::qpsk_marker::cluster_offset_ms;
 
@@ -165,7 +167,7 @@ pub fn av_offset_gate_pass(sync: &CameraAvSync, expected_ms: f64) -> bool {
 /// silent revert (see `all_cambox_av_sync_gate_failure_forces_the_overall_verdict_to_fail_861`,
 /// the regression test that fails if this function's return value silently reverts).
 pub fn gates_overall_pass() -> bool {
-    false // #861 RED stub -- temporarily reverted to prove the test catches it
+    true
 }
 
 /// #714/#689 — the ONE per-camera A/V offset a consumer (the #711 report, the merge path, a human
