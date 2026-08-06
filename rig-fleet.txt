@@ -11,14 +11,22 @@
 # healthy fails the run LOUDLY as a stale ack (#758/#827); remove the line the moment the box is
 # back in the fleet.
 #
-# Current physical state (2026-08-06, issue 861 re-arm):
-# cam3: retired 2026-07-31 (issue 898) -- grabber card destroyed; box powered off / unreachable.
-# cam4: removed from the rig 2026-08-06 (issue 947) -- box never comes up on the network (MAC
-#   learned on no switch, ping/ssh dead); CAMERA_ACTIVE_SET default is "cam1 cam2".
-# Without these acks the re-armed A/V-offset gate (issue 861) fails closed forever on their
-# UNKNOWN (0 samples) verdicts -- an unacked absent camera must fail the gate by design (#855).
+# Current physical state (2026-08-06 evening, post-event re-verification):
+# cam3: retired 2026-07-31 (issue 898) -- grabber card destroyed; box powered off / unreachable
+#   (re-verified this evening: ping dead).
+# cam4: BACK IN THE FLEET as of 2026-08-06 evening -- its ack line is REMOVED. Earlier today the
+#   box was unreachable and was acked as removed (issue 947); it has since come back and is
+#   HEALTHY by this repo's own preflight contract (SERVICE_ACTIVE=active EMITTER_COUNT=1
+#   STRAY_UNITS= on 10.77.9.64), and its feed is genuinely on air -- strih's 'NDI cam3' input
+#   (ndi_source_name 'CAM4 (usb)') renders a decodable dual-QR. Keeping the ack would be exactly
+#   the stale ack this file's rule above forbids: reachable + healthy + acked fails LOUDLY (#855).
+#   Note the separate, deliberate follow-up: cam4 is still NOT in camera-set.sh's
+#   CAMERA_ACTIVE_SET (default "cam1 cam2"), so no gate judges it yet -- putting it back into the
+#   judged fleet is a scope decision made there, never here.
+# Without the remaining acks the re-armed A/V-offset gate (issue 861) fails closed forever on
+# their UNKNOWN (0 samples) verdicts -- an unacked absent camera must fail the gate by design
+# (#855).
 cam3:grabber-destroyed-2026-07-31
-cam4:removed-from-rig-2026-08-06
 cam5:powered-off-2026-07-27
 cam6:powered-off-2026-07-27
 cam7:powered-off-2026-07-27
