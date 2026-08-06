@@ -68,6 +68,23 @@ this with two coupled pieces, BOTH required:
    SIGTERM/SIGKILL ladder becomes the unit's `ExecStop=` handler (invoked with `--exec-stop`,
    which skips the delegation check to avoid recursing back into `systemctl stop` mid-stop).
 
+## Invoking the unit over ssh — it is a USER unit (issue 998 deploy, 2026-08-06)
+
+`imag-obs.service` is a **user** unit, not a system one. Over ssh, `sudo systemctl start imag-obs`
+fails with `Unit imag-obs.service not found` — the system manager has never heard of it. The
+working invocation from a plain ssh session:
+
+```bash
+export XDG_RUNTIME_DIR=/run/user/$(id -u)
+systemctl --user start imag-obs   # / stop / restart / is-active
+```
+
+(without the `XDG_RUNTIME_DIR` export a non-graphical ssh session can't reach the user bus:
+`Failed to connect to bus`). And NEVER start obs directly with `setsid`/`nohup` "to get it up
+quickly" — that puts it OUTSIDE systemd supervision entirely (no `Restart=on-failure`, `ExecStop=`
+ladder bypassed), so a later `systemctl --user stop` won't own it. Kill any such stray and restart
+through the unit.
+
 ## Making a BACKGROUNDED child the unit's tracked "main process" (`Type=simple`)
 
 `imag-obs-start.sh` backgrounds `obs` with `&` and does post-launch setup (seed scenes, open

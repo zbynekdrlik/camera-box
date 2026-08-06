@@ -126,12 +126,18 @@ the plain-ssh counterpart of that same runbook.
 6. The deploy script must prove itself before you trust it: print `deployed_sha` read back from
    the box's own `GENLOCK_BUILD_SHA.txt`, and per changed component a box-vs-stage `Get-FileHash`
    comparison printing `match=True`. Never trust "robocopy said ok" alone.
-7. Relaunch in a SEPARATE `relaunch.ps1`: kill, clear sentinel, then `Invoke-CimMethod
-   -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine=...obs64.exe;
-   CurrentDirectory=...bin\64bit}` — **not** `Start-Process` (an ssh-spawned OBS started via
-   `Start-Process` dies when the ssh session closes, #859). Poll the newest log up to ~2 min for
-   BOTH `render tick ENABLED` and the specific plugin's own load line, and print them. Restart AHK
-   last, also via `Invoke-CimMethod`, only on the box that had it running.
+7. **SUPERSEDED FOR OBS/AHK (2026-08-06, issue 998 deploy):** the old recipe here — relaunch via
+   `Invoke-CimMethod Win32_Process Create` **over ssh** — puts obs64 (and AHK) into **session 0**:
+   invisible on the interactive desktop, and the E2E preflight session-visibility gate
+   (issue 958/977: obs64 SessionId must equal explorer.exe's) REJECTS every subsequent run. Worse,
+   an AHK landed in session 0 keeps re-spawning obs64 back into session 0 after you fix it. The
+   ONLY sanctioned OBS relaunch: generate the launch program with
+   `bash scripts/launch-obs-genlock.sh --box <strih|stream> --force` and run it through that box's
+   **win-\* MCP `Shell`** (which executes in the interactive session 1) — kill AHK first, launch
+   OBS, start AHK LAST (after obs64 is up, so no bare-exe respawn race). CIM-over-ssh remains fine
+   ONLY for headless CLI tools (the decode section below) where desktop visibility is irrelevant.
+   Poll the newest log up to ~2 min for BOTH `render tick ENABLED` and the specific plugin's own
+   load line, and print them.
 
 **The global airuleset `pre-deploy-clean-tree.sh` hook (lives in `~/devel/airuleset/hooks/`, not
 in this repo) will block every scp above** — `targets.md` carries
@@ -149,10 +155,12 @@ the merged head: `git diff <fast-build-sha> <merged-head> -- vendor/` must be EM
 may have fired on an earlier commit whose later siblings were Rust/tests-only). Copy the artifact's
 `GENLOCK_BUILD_SHA.txt` to the install root; do NOT copy its manifest (it lists only obs.dll —
 overwriting the box's full-bundle `BUNDLE_MANIFEST.json` would misdescribe the install). Relaunch:
-resolve the box's `OBS Studio.lnk` TargetPath+Arguments via `WScript.Shell` COM and pass THAT as
-the `Win32_Process Create` CommandLine — a bare-exe CIM launch silently drops the box-specific
-shortcut params (strih's `--enable-media-stream --verbose` for the interkom Browser source; on
-stream the lnk targets the guarded launcher, which then owns the issue-786 redraw). PowerShell
+per the SUPERSEDED note in step 7 above — win-\* MCP `Shell` running the `launch-obs-genlock.sh`
+planner output ONLY (never CIM-over-ssh, which lands OBS in session 0). Still resolve the box's
+`OBS Studio.lnk` TargetPath+Arguments (via `WScript.Shell` COM) rather than a bare exe path —
+a bare-exe launch silently drops the box-specific shortcut params (strih's
+`--enable-media-stream --verbose` for the interkom Browser source; on stream the lnk targets the
+guarded launcher, which then owns the issue-786 redraw). PowerShell
 gotcha from the same session: `(Get-Content file)[0]` on a ONE-line file indexes a CHAR (String,
 not array) — read markers with `-TotalCount 1` or guard on type (or wrap in `@(Get-Content …)` so
 `[0]` is always a line). Two more from the issue-940 deploy (2026-08-04): (a) the boxes' lnk
