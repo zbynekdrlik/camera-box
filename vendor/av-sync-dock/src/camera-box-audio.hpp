@@ -727,6 +727,10 @@ inline CbLatencyDisplay cb_dock_latency_display_ms(int64_t dock_native_ts_ns, bo
 	CbLatencyDisplay d;
 	double native_ms = (double)dock_native_ts_ns / 1000000.0;
 	d.display_ms = gate_convention ? cb_dock_lock_display_offset_ms(native_ms) : native_ms;
+	/* Negating an exactly-zero native reading yields IEEE -0.0, which QString renders as
+	 * "-0.0 ms" — normalize to +0.0 so a perfectly aligned chain never shows a minus sign. */
+	if (d.display_ms == 0.0)
+		d.display_ms = 0.0;
 	if (d.display_ms > 0.0)
 		d.polarity = gate_convention ? CbLatencyPolarity::Negative : CbLatencyPolarity::Positive;
 	else if (d.display_ms < 0.0)

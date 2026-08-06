@@ -1029,16 +1029,18 @@ static inline void st_raw_audio_decode_data(struct sync_test_output *st, std::co
 	calldata_set_ptr(&cd, "data", &data);
 	signal_handler_signal(sh, "audio_marker_found", &cd);
 
-	sync_index_found(st, idx8, audio_ts, false, data.index_max);
-
 	/* #398 Option A: direct camera-box video-ring lookup, independent of the list-based
-	 * `sync_index_found` above (which is now GATED OFF while camera-box mode is active — see the
-	 * #398 fix in `video_marker_found` — so THIS path is the sole authoritative sync_found source
-	 * for camera-box's own marker). `idx8` is exactly the frame_id low byte the emitter encoded
-	 * (`frame_id_to_index` in src/qpsk_marker.rs) — a direct hit means we know which video frame
-	 * was on screen when this marker sounded, MODULO the lap-aliasing `resolve_ring_lap_offset_ns`
-	 * corrects for (#398 review HIGH finding), and smoothed against CRC-4 false accepts by
-	 * `cb_smooth_offset_ns` (#398 review MEDIUM finding). */
+	 * `sync_index_found` below (which is GATED OFF while camera-box mode is active — the video
+	 * side is gated the same way in `video_marker_found`, and #999 made the audio side symmetric:
+	 * video entries queued into st->sync_indices BEFORE cb mode activated could otherwise still
+	 * pair against a later audio marker DURING cb mode and emit a legacy gate_convention=false
+	 * event, which post-#999 renders sign-flipped interleaved with converted ones — so THIS path
+	 * is the sole authoritative sync_found source for camera-box's own marker). `idx8` is exactly
+	 * the frame_id low byte the emitter encoded (`frame_id_to_index` in src/qpsk_marker.rs) — a
+	 * direct hit means we know which video frame was on screen when this marker sounded, MODULO
+	 * the lap-aliasing `resolve_ring_lap_offset_ns` corrects for (#398 review HIGH finding), and
+	 * smoothed against CRC-4 false accepts by `cb_smooth_offset_ns` (#398 review MEDIUM
+	 * finding). */
 	bool cb_active, cb_valid;
 	uint64_t cb_video_ts;
 	{
@@ -1047,6 +1049,8 @@ static inline void st_raw_audio_decode_data(struct sync_test_output *st, std::co
 		cb_valid = st->cb_video_valid[idx8];
 		cb_video_ts = st->cb_video_ts_ns[idx8];
 	}
+	if (!cb_active)
+		sync_index_found(st, idx8, audio_ts, false, data.index_max);
 	// #926 fix-up (review finding 6): same ring-slot freshness gate as st_raw_audio_camera_box's
 	// own lookup -- see that call site's comment for why.
 	if (cb_valid) {

@@ -17,6 +17,7 @@ use std::path::PathBuf;
 
 const DOCK_OUTPUT: &str = "vendor/av-sync-dock/src/sync-test-output.cpp";
 const DOCK_QR_HEADER: &str = "vendor/av-sync-dock/src/camera-box-qr.hpp";
+const DOCK_MAIN: &str = "vendor/av-sync-dock/src/sync-test-dock.cpp";
 
 fn vendor_file(rel: &str) -> String {
     let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel);
@@ -91,4 +92,29 @@ fn audio_decode_pairs_via_the_camera_box_video_ring() {
              pairing ring regressed or was reverted. Re-apply (Option A, #398)."
         );
     }
+}
+
+/// #999 — the display-path sign-convention WIRING (not the pure fn, which
+/// tests/av_sync_dock_latency_display_999.rs twin-tests): both camera-box emit sites must tag
+/// their sync_index events `si.gate_convention = true;`, and on_sync_found must route the event
+/// through `cb_dock_latency_display_ms`. A subtree pull (or careless revert) dropping any of
+/// these still COMPILES and every pure-fn test stays green — the exact "the fix never reached
+/// the display path" class issue 999 itself was. Mirrored pwsh anchors live in BOTH
+/// windows-genlock*.yml (the #269 lock-step pattern).
+#[test]
+fn on_sync_found_display_path_gate_conversion_is_wired_999() {
+    let out = squish(&vendor_file(DOCK_OUTPUT));
+    assert_eq!(
+        out.matches("si.gate_convention = true;").count(),
+        2,
+        "{DOCK_OUTPUT}: exactly TWO camera-box emit sites (the smoothed-ring one and the \
+         direct-ring one) must tag their events `si.gate_convention = true;` — a count drift \
+         means half the #999 display sign fix was dropped or a new emit site forgot the tag"
+    );
+    let dock = squish(&vendor_file(DOCK_MAIN));
+    assert!(
+        dock.contains("cb_dock_latency_display_ms(dock_native_ts_ns, data.gate_convention)"),
+        "{DOCK_MAIN}: on_sync_found no longer routes through cb_dock_latency_display_ms — the \
+         #999 display sign-convention fix was reverted from the UI handler"
+    );
 }

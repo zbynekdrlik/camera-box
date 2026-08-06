@@ -663,8 +663,8 @@ pub fn dock_lock_outcome(
 /// by `dock ~= -gate - 55`: this fixes the SIGN half of that relation; the residual ~55ms additive
 /// bias is UNQUANTIFIED (attributable to the different measurement taps — digital NDI-internal
 /// burn vs optical camera+mic off the cam2 monitor) and is intentionally NOT compensated here — it
-/// needs a live re-measurement after this fix is deployed (tracked on its own follow-up issue),
-/// never a guessed constant in shipped code.
+/// needs a live re-measurement after this fix is deployed (tracked on issue #1004), never a
+/// guessed constant in shipped code.
 pub fn dock_lock_display_offset_ms(dock_offset_ms: f64) -> f64 {
     -dock_offset_ms
 }
@@ -770,6 +770,9 @@ pub fn dock_latency_display_ms(dock_native_ts_ns: i64, gate_convention: bool) ->
     } else {
         native_ms
     };
+    // Negating an exactly-zero native reading yields IEEE -0.0, which formats as "-0.0" — a
+    // perfectly aligned chain must never show a minus sign (C++ twin normalizes identically).
+    let display_ms = if display_ms == 0.0 { 0.0 } else { display_ms };
     let polarity = if display_ms > 0.0 {
         if gate_convention {
             LatencyPolarity::Negative
@@ -831,6 +834,11 @@ mod tests {
 
         let d = dock_latency_display_ms(0, true);
         assert_eq!(d.display_ms, 0.0);
+        assert!(
+            d.display_ms.is_sign_positive(),
+            "gate-converted 0 must be +0.0, never IEEE -0.0 (formats as \"-0.0\"); \
+             0.0 == -0.0 so the assert_eq above alone cannot pin this"
+        );
         assert_eq!(d.polarity, LatencyPolarity::None);
     }
 

@@ -37,6 +37,7 @@ fn manifest_dir() -> PathBuf {
 
 const HARNESS_CPP: &str = r#"
 #include "camera-box-audio.hpp"
+#include <cmath>
 #include <cstdio>
 
 using namespace camerabox;
@@ -84,6 +85,8 @@ int main()
 
         d = cb_dock_latency_display_ms(0, true);
         CHECK(d.display_ms == 0.0, "gate-converted 0 must stay 0.0");
+        CHECK(!std::signbit(d.display_ms),
+              "gate-converted 0 must be +0.0, never IEEE -0.0 (QString would render \"-0.0 ms\")");
         CHECK(d.polarity == CbLatencyPolarity::None, "gate ts==0 must be None (label untouched)");
     }
 
@@ -202,10 +205,12 @@ fn cb_dock_latency_display_ms_matches_the_rust_gate_convention_negation() {
     let output_hpp_text =
         std::fs::read_to_string(&output_header).expect("read sync-test-output.hpp");
     assert!(
-        output_hpp_text.contains("gate_convention"),
-        "#999: struct sync_index in {} must carry a gate_convention field so on_sync_found can \
-         tell camera-box's own direct-ring events (gate convention) apart from norihiro's legacy \
-         list-based ones (native convention, unchanged)",
+        output_hpp_text.contains("bool gate_convention = false;"),
+        "#999: struct sync_index in {} must carry the literal `bool gate_convention = false;` \
+         field declaration (a bare substring match on the word would be satisfied by the doc \
+         comment alone — review finding on this PR) so on_sync_found can tell camera-box's own \
+         direct-ring events (gate convention) apart from norihiro's legacy list-based ones \
+         (native convention, unchanged)",
         output_header.display()
     );
 }
