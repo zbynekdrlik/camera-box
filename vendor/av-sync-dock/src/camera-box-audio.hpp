@@ -660,4 +660,61 @@ inline CbDockLockOutcome cb_dock_lock_outcome(const CbDockLockAction &act, bool 
 	return CbDockLockOutcome::Quiet;
 }
 
+/* #953 -- converts the dock's OWN native offset convention (ts = audio_ts - video_ts) into the
+ * gate's authoritative convention (offset_ms = video_time - audio_time,
+ * scripts/av_sync_calibrate.py::required_delay_ms) -- a pure sign negation. #952 (closed)
+ * established empirically that the two instruments disagree by dock ~= -gate - 55: this fixes the
+ * SIGN half of that relation; the residual ~55ms additive bias is UNQUANTIFIED (attributable to
+ * the different measurement taps -- digital NDI-internal burn vs optical camera+mic off the cam2
+ * monitor) and is intentionally NOT compensated here -- it needs a live re-measurement after this
+ * fix is deployed (tracked on its own follow-up issue), never a guessed constant in shipped code.
+ * Mirror of src/av_sync_dock.rs::dock_lock_display_offset_ms(). */
+inline double cb_dock_lock_display_offset_ms(double dock_offset_ms)
+{
+	return -dock_offset_ms;
+}
+
+/* #953 -- the pure alignment-target suggestion for the dock's DISPLAYED "SUGGESTED" advice.
+ * Unlike CbDockLockCorrector::decide() (which servos toward its own noise-scaled resting band,
+ * [margin, 2*margin) in the DOCK's native convention, and step-limits each tick to
+ * CB_DOCK_LOCK_MAX_STEP_MS because something is actually converging over many ticks), this
+ * targets TRUE ALIGNMENT -- driving the offset to zero -- in GATE convention (positive = video
+ * lags audio -> REDUCE the delay; the EXACT formula/sign av_sync_calibrate.py's
+ * required_delay_ms already uses), with NO per-tick step cap: nothing is ever applied (#942), so
+ * there is no "step" to limit and the on-screen number should say what the FULL correction is,
+ * not a meaningless step-limited increment (the #953 root cause: a live "SUGGESTED" value of
+ * exactly -5ms regardless of how large the true measured offset actually was).
+ *
+ * offset_ms here is ALREADY in gate convention -- the caller applies
+ * cb_dock_lock_display_offset_ms() first. has_value is false ("quiet") when non-finite, or when
+ * the offset is already within the SAME noise-scaled margin decide() uses
+ * (mad_ms.clamp(CB_DOCK_LOCK_MIN_MARGIN_MS, CB_CLUSTER_MAX_MAD_MS)) -- suggesting a correction
+ * smaller than the measurement noise floor claims false precision the ~10-25ms cluster estimator
+ * cannot back up. Mirror of src/av_sync_dock.rs::dock_lock_suggested_target(). */
+struct CbDockLockSuggestion {
+	bool has_value = false; // false == quiet (already aligned, or the offset was non-finite)
+	int32_t target_ms = 0;  // meaningful only when has_value == true
+};
+
+inline CbDockLockSuggestion cb_dock_lock_suggested_target(double offset_ms, double mad_ms,
+                                                           int32_t current_ms)
+{
+	CbDockLockSuggestion s;
+	if (!std::isfinite(offset_ms))
+		return s;
+	double margin = std::isfinite(mad_ms) ? cb_clamp_f64(mad_ms, CB_DOCK_LOCK_MIN_MARGIN_MS,
+	                                                      CB_CLUSTER_MAX_MAD_MS)
+	                                       : CB_DOCK_LOCK_MIN_MARGIN_MS;
+	if (std::fabs(offset_ms) < margin)
+		return s; // already aligned within the measurement noise floor
+	// #953: clamp BEFORE the int64_t cast (mirrors decide()'s own finding-5 precaution) -- offset_ms
+	// is finite but could still be astronomically large, which would otherwise risk UB on the cast.
+	double raw = cb_clamp_f64(std::round((double)current_ms - offset_ms), -1e9, 1e9);
+	int64_t clamped = cb_clamp_i64((int64_t)raw, (int64_t)CB_DOCK_LOCK_LATENCY_MIN_MS,
+	                                (int64_t)CB_DOCK_LOCK_LATENCY_MAX_MS);
+	s.has_value = true;
+	s.target_ms = (int32_t)clamped;
+	return s;
+}
+
 } // namespace camerabox

@@ -656,6 +656,62 @@ pub fn dock_lock_outcome(
     }
 }
 
+/// #953 — converts the dock's OWN native offset convention (`ts = audio_ts - video_ts`) into the
+/// gate's authoritative convention (`offset_ms = video_time - audio_time`,
+/// `scripts/av_sync_calibrate.py::required_delay_ms` / [`crate::qpsk_marker::required_delay_ms`]) —
+/// a pure sign negation. #952 (closed) established empirically that the two instruments disagree
+/// by `dock ~= -gate - 55`: this fixes the SIGN half of that relation; the residual ~55ms additive
+/// bias is UNQUANTIFIED (attributable to the different measurement taps — digital NDI-internal
+/// burn vs optical camera+mic off the cam2 monitor) and is intentionally NOT compensated here — it
+/// needs a live re-measurement after this fix is deployed (tracked on its own follow-up issue),
+/// never a guessed constant in shipped code.
+pub fn dock_lock_display_offset_ms(dock_offset_ms: f64) -> f64 {
+    -dock_offset_ms
+}
+
+/// #953 — the pure alignment-target suggestion for the dock's DISPLAYED "SUGGESTED" advice.
+/// Unlike [`DockLockCorrector::decide`] (which servos toward its own noise-scaled resting band,
+/// `[margin, 2*margin)` in the DOCK's native convention, and step-limits each tick to
+/// [`DOCK_LOCK_MAX_STEP_MS`] because something is actually converging over many ticks), this
+/// targets TRUE ALIGNMENT — driving the offset to zero — in GATE convention (positive = video
+/// lags audio -> REDUCE the delay; the EXACT formula/sign [`crate::qpsk_marker::required_delay_ms`]
+/// already uses), with NO per-tick step cap: nothing is ever applied (#942), so there is no "step"
+/// to limit and the on-screen number should say what the FULL correction is, not a meaningless
+/// step-limited increment (the #953 root cause: a live "SUGGESTED" value of exactly -5ms
+/// regardless of how large the true measured offset actually was — comment 2026-08-05).
+///
+/// `offset_ms` here is ALREADY in gate convention — the caller applies
+/// [`dock_lock_display_offset_ms`] first. Returns `None` ("quiet") when non-finite, or when the
+/// offset is already within the SAME noise-scaled margin [`DockLockCorrector::decide`] uses
+/// (`mad_ms.clamp(DOCK_LOCK_MIN_MARGIN_MS, DOCK_CLUSTER_MAX_MAD_MS)`) — suggesting a correction
+/// smaller than the measurement noise floor claims false precision the ~10-25ms cluster estimator
+/// cannot back up.
+pub fn dock_lock_suggested_target(offset_ms: f64, mad_ms: f64, current_ms: i32) -> Option<i32> {
+    if !offset_ms.is_finite() {
+        return None;
+    }
+    let margin = if mad_ms.is_finite() {
+        mad_ms.clamp(DOCK_LOCK_MIN_MARGIN_MS, DOCK_CLUSTER_MAX_MAD_MS)
+    } else {
+        DOCK_LOCK_MIN_MARGIN_MS
+    };
+    if offset_ms.abs() < margin {
+        return None; // already aligned within the measurement noise floor
+    }
+    // #953: an "unlimited" step budget for required_delay_ms's own step-clamp -- wide enough that
+    // it can NEVER be the binding constraint versus the hardware rails
+    // [DOCK_LOCK_LATENCY_MIN_MS, DOCK_LOCK_LATENCY_MAX_MS] themselves, for ANY current_ms already
+    // inside that range (current_ms +/- (MAX-MIN) always reaches both rails). Deliberately NOT
+    // i32::MAX, which would underflow/overflow inside required_delay_ms's own
+    // `current_delay_ms -/+ max_step_ms`.
+    let unlimited_step = DOCK_LOCK_LATENCY_MAX_MS - DOCK_LOCK_LATENCY_MIN_MS;
+    Some(crate::qpsk_marker::required_delay_ms(
+        current_ms,
+        offset_ms,
+        unlimited_step,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -766,7 +822,10 @@ mod tests {
     fn dock_lock_suggested_target_non_finite_is_quiet_953() {
         assert_eq!(dock_lock_suggested_target(f64::NAN, 10.0, 931), None);
         assert_eq!(dock_lock_suggested_target(f64::INFINITY, 10.0, 931), None);
-        assert_eq!(dock_lock_suggested_target(f64::NEG_INFINITY, 10.0, 931), None);
+        assert_eq!(
+            dock_lock_suggested_target(f64::NEG_INFINITY, 10.0, 931),
+            None
+        );
     }
 
     #[test]

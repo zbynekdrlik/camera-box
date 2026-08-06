@@ -1279,9 +1279,14 @@ static void st_raw_audio_camera_box(struct sync_test_output *st, struct audio_da
 		case camerabox::CbLockEventKind::Locked:
 		case camerabox::CbLockEventKind::Updated:
 			st->cb_lock_state = true;
+			/* #953 -- logged in GATE convention (offset_ms = video_time - audio_time), via
+			 * cb_dock_lock_display_offset_ms(), so this number agrees in SIGN with the E2E gate's
+			 * own av_offset_ms (#952 established the two disagreed: dock ~= -gate - 55). The
+			 * residual ~55ms bias is not compensated here -- see that function's own doc comment. */
 			blog(LOG_INFO, "av-sync-dock: %s offset=%.1fms source=cluster matched=%zu mad=%.1fms",
 			     audit_ev.kind == camerabox::CbLockEventKind::Locked ? "LOCKED" : "UPDATED",
-			     audit_ev.offset_ms, audit_ev.matched, audit_ev.mad_ms);
+			     camerabox::cb_dock_lock_display_offset_ms(audit_ev.offset_ms), audit_ev.matched,
+			     audit_ev.mad_ms);
 			/* #926: fire the coarse locked/unlocked status signal only on the ACTUAL boundary
 			 * crossing (Locked), not on every Updated -- Updated means "still locked, offset
 			 * moved", never a state change the dock's plain-language status text needs to know
@@ -1291,7 +1296,9 @@ static void st_raw_audio_camera_box(struct sync_test_output *st, struct audio_da
 			break;
 		case camerabox::CbLockEventKind::Unlocked:
 			st->cb_lock_state = false;
-			blog(LOG_WARNING, "av-sync-dock: UNLOCKED last_offset=%.1fms source=cluster", audit_ev.offset_ms);
+			// #953 -- same gate-convention sign fix as the LOCKED/UPDATED line above.
+			blog(LOG_WARNING, "av-sync-dock: UNLOCKED last_offset=%.1fms source=cluster",
+			     camerabox::cb_dock_lock_display_offset_ms(audit_ev.offset_ms));
 			signal_lock_state_changed(st->context, false);
 			break;
 		case camerabox::CbLockEventKind::None:
@@ -1353,23 +1360,37 @@ static void st_raw_audio_camera_box(struct sync_test_output *st, struct audio_da
 						     (int)current_ms, (int)act.new_delay_ms, est.offset_ms);
 						break;
 					}
-					case camerabox::CbDockLockOutcome::Suggest:
+					case camerabox::CbDockLockOutcome::Suggest: {
 						/* #942 -- monitor-only: decide() computed a real correction, but the
-						 * gate is the sole writer, so this is DISPLAYED as a suggestion and
-						 * never applied -- no cb_apply_lock_latency_ms(), no rebase() (rebase
-						 * assumes a real actuator move happened, which this is not). Reaching
-						 * here means we are not currently stuck at a rail (cb_dock_lock_outcome()
-						 * only returns Suggest when decide() returned Apply, which never happens
-						 * exactly at a value already pinned to itself); reset the dedup flag the
-						 * same way the write branch above does, so a LATER genuine rail-pinned
-						 * state still gets its own fresh warning. */
+						 * gate is the only continuous writer, so this is DISPLAYED as a
+						 * suggestion and never applied -- no cb_apply_lock_latency_ms(), no
+						 * rebase() (rebase assumes a real actuator move happened, which this is
+						 * not). Reaching here means we are not currently stuck at a rail
+						 * (cb_dock_lock_outcome() only returns Suggest when decide() returned
+						 * Apply, which never happens exactly at a value already pinned to
+						 * itself); reset the dedup flag the same way the write branch above does,
+						 * so a LATER genuine rail-pinned state still gets its own fresh warning.
+						 *
+						 * #953 -- the DISPLAYED value is no longer decide()'s own actuator-era
+						 * act.new_delay_ms (step-capped to CB_DOCK_LOCK_MAX_STEP_MS=5ms, which
+						 * live evidence showed printed a constant "-5ms" regardless of the true
+						 * measured offset). Instead: convert to gate convention (sign fix, #952)
+						 * and compute the FULL, uncapped alignment target -- and print NOTHING
+						 * when that target says the offset is already within the noise floor
+						 * (quiet inside the noise band, never "-5ms forever"). */
 						st->cb_rail_pinned_logged = false;
-						blog(LOG_INFO,
-						     "av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src %d "
-						     "-> %dms (measured offset=%.1fms) [monitor-only -- #942 gate is "
-						     "the sole writer]",
-						     (int)current_ms, (int)act.new_delay_ms, est.offset_ms);
+						double gate_offset_ms = camerabox::cb_dock_lock_display_offset_ms(est.offset_ms);
+						camerabox::CbDockLockSuggestion suggestion =
+							camerabox::cb_dock_lock_suggested_target(gate_offset_ms, est.mad_ms,
+											  current_ms);
+						if (suggestion.has_value)
+							blog(LOG_INFO,
+							     "av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src %d "
+							     "-> %dms (measured offset=%.1fms) [monitor-only -- the E2E gate "
+							     "is the only continuous writer]",
+							     (int)current_ms, (int)suggestion.target_ms, gate_offset_ms);
 						break;
+					}
 					case camerabox::CbDockLockOutcome::RailWarn:
 						/* #926 fix-up (review finding 9): pinned at a hardware rail with
 						 * the invariant still violated -- a genuine hardware limit, not a
