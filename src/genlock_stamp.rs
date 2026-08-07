@@ -204,9 +204,14 @@ mod tests {
             );
             // Grid alignment preserved: the stamp is an exact boundary of the shared
             // per-second grid (frame_k = second_start + k*UNITS/fps, multiply-then-divide).
+            // The inverse must be the CEIL division: boundary_k = floor(k*UNITS/fps) sits
+            // just UNDER k*UNITS/fps whenever fps does not divide UNITS evenly (e.g.
+            // boundary_1 at 30 fps = 333_333, not 333_333.33), so a floor inverse
+            // (in_second*fps/UNITS) under-recovers k by one and falsely flags an exact
+            // boundary as off-grid.
             let cs = (tc / SEC_100NS) * SEC_100NS;
             let in_second = tc - cs;
-            let k = in_second * fps / SEC_100NS;
+            let k = (in_second * fps + SEC_100NS - 1) / SEC_100NS;
             assert_eq!(
                 cs + k * SEC_100NS / fps,
                 tc,
