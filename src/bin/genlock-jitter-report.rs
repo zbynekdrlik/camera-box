@@ -63,7 +63,7 @@ fn main() {
     }
 
     println!(
-        "{:<20} {:>8} {:>11} {:>11} {:>7} {:>14} {:>8} {:>9} {:>16} {:>17} {:>11}",
+        "{:<20} {:>8} {:>11} {:>11} {:>7} {:>14} {:>8} {:>9} {:>13} {:>16} {:>17} {:>11}",
         "source",
         "samples",
         "latency_ms",
@@ -72,13 +72,16 @@ fn main() {
         "d_dropped_due",
         "d_relock",
         "d_latehold",
+        // #1009: window delta of the backward-step re-anchor TICK counter — any movement
+        // means the configured hold was bypassed during the window (healthy runs: 0).
+        "d_regimetick",
         "max_abs_skew_ms",
         "mean_abs_skew_ms",
         "peak_depth"
     );
     for s in &summaries {
         println!(
-            "{:<20} {:>8} {:>11} {:>11} {:>7} {:>14} {:>8} {:>9} {:>16} {:>17.2} {:>11}",
+            "{:<20} {:>8} {:>11} {:>11} {:>7} {:>14} {:>8} {:>9} {:>13} {:>16} {:>17.2} {:>11}",
             s.source,
             s.samples,
             s.latency_ms,
@@ -87,6 +90,7 @@ fn main() {
             s.delta_dropped_due,
             s.delta_relocks,
             s.delta_late_holds,
+            s.delta_backward_regime_ticks,
             s.max_abs_head_skew_ms,
             s.mean_abs_head_skew_ms,
             s.peak_depth

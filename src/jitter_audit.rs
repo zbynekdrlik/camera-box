@@ -273,6 +273,8 @@ pub fn summaries_to_json(summaries: &[AuditSummary]) -> serde_json::Value {
                 "mean_head_skew_ms": s.mean_head_skew_ms,
                 "mean_abs_head_skew_ms": s.mean_abs_head_skew_ms,
                 "max_abs_head_skew_ms": s.max_abs_head_skew_ms,
+                // #1009: the gate-facing hold-bypass signal (0 on a healthy window).
+                "delta_backward_regime_ticks": s.delta_backward_regime_ticks,
             }),
         );
     }

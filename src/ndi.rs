@@ -82,7 +82,16 @@ pub(crate) fn floor_boundary_100ns(now_100ns: i64, fps: i64) -> i64 {
     let current_second_100ns = (now_100ns / UNITS_PER_SECOND) * UNITS_PER_SECOND;
     let offset_in_second = now_100ns - current_second_100ns;
     // Which frame slot the instant falls in (0..fps-1); its own boundary is at-or-before.
-    let frame_in_second = (offset_in_second * fps) / UNITS_PER_SECOND;
+    let mut frame_in_second = (offset_in_second * fps) / UNITS_PER_SECOND;
+    // #1009 review fix: a boundary b_k = floor(k*UNITS/fps) can sit up to one unit BELOW
+    // the exact rational k*UNITS/fps (b_1 @30fps = 333_333, not 333_333.33), so the slot
+    // recovery above under-counts by one for an instant exactly ON such a boundary —
+    // promote when the NEXT slot's boundary is still at-or-before the instant (the
+    // under-count is provably at most one slot, so a single promotion suffices).
+    let next_slot_boundary = ((frame_in_second + 1) * UNITS_PER_SECOND) / fps;
+    if next_slot_boundary <= offset_in_second {
+        frame_in_second += 1;
+    }
     // Multiply before divide to maintain precision (same as the ceil twin).
     current_second_100ns + (frame_in_second * UNITS_PER_SECOND / fps)
 }

@@ -5393,8 +5393,19 @@ static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 							     source->async_frames.num);
 						}
 						source->genlock_in_backward_step = true;
+						/* #1009 review hardening: while the regime is active,
+						 * pending_ticks doubles as the consecutive-CLEAR counter for
+						 * the qualified EXIT — an over-margin tick (this re-anchor)
+						 * breaks any clear run. Also zeroes the entry run at entry.
+						 * Mirror of BackwardStepGuard (pending reset in the Reanchor
+						 * arms). */
+						source->genlock_backward_pending_ticks = 0;
 						/* #1009: count every re-anchored TICK (backward_steps counts
-						 * EVENTS) — the audit/gate counter a healthy run keeps at 0. */
+						 * EVENTS) — the audit/gate counter a healthy run keeps at 0.
+						 * Incremented AFTER the cadence-warn blog above, so a warn
+						 * prints the PRE-increment value (the Rust mirror increments
+						 * before computing warn — cosmetic only, the warn there
+						 * carries no count; noted so a parity audit doesn't chase it). */
 						source->genlock_backward_regime_ticks++;
 						next_frame = source->async_frames.array[0];
 						/* camera-box #401: the re-anchor presented a frame OUTSIDE the
@@ -5416,15 +5427,34 @@ static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 						return true;
 					}
 					if (!head_future) {
-						/* The condition is absent this tick: any pending qualification
-						 * is a transient (reset), and an ACTIVE regime just ENDED —
-						 * #1009 SELF-HEAL back to the configured hold. due==0 is no
-						 * longer a hold verdict by itself: the #401 cadence below may
-						 * still PRESENT a frame the LOCKED boundary has matured even
-						 * though the slewed wall deadline says not-due (#269 [2]). */
-						source->genlock_backward_pending_ticks = 0;
-						if (source->genlock_in_backward_step)
-							genlock_backward_regime_end(source, reserve_ms);
+						if (source->genlock_in_backward_step) {
+							/* #1009 review hardening: the EXIT is qualified like the
+							 * entry — the condition must stay clear for
+							 * GENLOCK_BACKWARD_STEP_SUSTAIN_TICKS CONSECUTIVE due==0
+							 * ticks before the regime ends (pending_ticks doubles as
+							 * the clear-run counter while in the regime). A condition
+							 * FLAPPING around the margin (a slewing clock at the
+							 * crossing: max_ts advances in interval quanta, so
+							 * head_future sawtooths) must NOT exit-and-re-enter per
+							 * flap — every exit costs a bounded ~latency_ms
+							 * re-ACQUIRE hold. While the clear run qualifies, fall
+							 * through to the #401 cadence (its live-edge boundary
+							 * keeps presenting). Mirror of
+							 * BackwardStepGuard::tick_due0's clear path. */
+							source->genlock_backward_pending_ticks++;
+							if (source->genlock_backward_pending_ticks >=
+							    GENLOCK_BACKWARD_STEP_SUSTAIN_TICKS) {
+								source->genlock_backward_pending_ticks = 0;
+								genlock_backward_regime_end(source, reserve_ms);
+							}
+						} else {
+							/* No regime: a not-yet-sustained entry run is a transient
+							 * — reset. due==0 is no longer a hold verdict by itself:
+							 * the #401 cadence below may still PRESENT a frame the
+							 * LOCKED boundary has matured even though the slewed wall
+							 * deadline says not-due (#269 [2]). */
+							source->genlock_backward_pending_ticks = 0;
+						}
 					}
 					/* head_future while still PENDING (not yet sustained): fall
 					 * through — the cadence presents/holds off its locked boundary;
@@ -5433,7 +5463,12 @@ static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 					 * hair-trigger (#1009). */
 				} else {
 					/* #269 [2]/#1009: a normal due tick ends any backward-step
-					 * regime — same SELF-HEAL contract as the due==0 clear path. */
+					 * regime — same SELF-HEAL contract as the due==0 clear path, but
+					 * IMMEDIATE (no sustain): frames aged past the reserve against
+					 * the wall deadline is structural proof the receiver clock
+					 * genuinely caught up (a marginal flap at the live edge only
+					 * ever produces young frames). Mirror of
+					 * BackwardStepGuard::tick_due_positive. */
 					source->genlock_backward_pending_ticks = 0;
 					if (source->genlock_in_backward_step)
 						genlock_backward_regime_end(source, reserve_ms);

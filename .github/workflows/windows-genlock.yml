@@ -408,7 +408,7 @@ jobs:
           if ($src -notmatch [regex]::Escape('#define GENLOCK_BACKWARD_STEP_MIN_MARGIN_NS 250000000ULL')) {
             Write-Error "obs-source.c: #1009 backward-step margin floor (250 ms) gone — the guard would hair-trigger on sender-ahead stamp skew again — re-apply"; exit 1
           }
-          if ($src -notmatch [regex]::Escape('#define GENLOCK_BACKWARD_STEP_SUSTAIN_TICKS 3')) {
+          if ($src -notmatch [regex]::Escape('#define GENLOCK_BACKWARD_STEP_SUSTAIN_TICKS 3 ')) {
             Write-Error "obs-source.c: #1009 backward-step sustained qualification gone — single-tick hair-trigger again — re-apply"; exit 1
           }
           if ($src -notmatch [regex]::Escape('source->genlock_backward_steps++')) {
