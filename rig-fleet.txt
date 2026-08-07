@@ -14,19 +14,21 @@
 # Current physical state (2026-08-06 evening, post-event re-verification):
 # cam3: retired 2026-07-31 (issue 898) -- grabber card destroyed; box powered off / unreachable
 #   (re-verified this evening: ping dead).
-# cam4: BACK IN THE FLEET as of 2026-08-06 evening -- its ack line is REMOVED. Earlier today the
-#   box was unreachable and was acked as removed (issue 947); it has since come back and is
-#   HEALTHY by this repo's own preflight contract (SERVICE_ACTIVE=active EMITTER_COUNT=1
-#   STRAY_UNITS= on 10.77.9.64), and its feed is genuinely on air -- strih's 'NDI cam3' input
-#   (ndi_source_name 'CAM4 (usb)') renders a decodable dual-QR. Keeping the ack would be exactly
-#   the stale ack this file's rule above forbids: reachable + healthy + acked fails LOUDLY (#855).
-#   Note the separate, deliberate follow-up: cam4 is still NOT in camera-set.sh's
-#   CAMERA_ACTIVE_SET (default "cam1 cam2"), so no gate judges it yet -- putting it back into the
-#   judged fleet is a scope decision made there, never here.
+# cam4: ON AIR but OUTSIDE the measured set -- ack RESTORED 2026-08-07 with this exact reason.
+#   The box is healthy (preflight contract passes on 10.77.9.64) and its feed genuinely renders
+#   on strih, so the 2026-08-06 "removed from rig" reason was stale. BUT cam4 is not in
+#   camera-set.sh's CAMERA_ACTIVE_SET (default "cam1 cam2"), so the burn sweep produces no
+#   delivery samples for it and the all-cambox A/V derivation is STRUCTURALLY impossible --
+#   E2E run 31157261313 proved it live: cam4 judged, windows=0 candidates=0, UNKNOWN, gate FAIL
+#   forever. Until cam4 is deliberately re-entered into CAMERA_ACTIVE_SET (the issue-753-class
+#   re-integration work: strih input/scene wiring + sweep membership), the honest state is
+#   "visible on air, unmeasurable, excluded from A/V judging" -- which is this ack. The stale-ack
+#   guard does not fire on it because cam4 is not a preflight target while outside the active set.
 # Without the remaining acks the re-armed A/V-offset gate (issue 861) fails closed forever on
 # their UNKNOWN (0 samples) verdicts -- an unacked absent camera must fail the gate by design
 # (#855).
 cam3:grabber-destroyed-2026-07-31
+cam4:on-air-but-outside-measured-set-2026-08-07
 cam5:powered-off-2026-07-27
 cam6:powered-off-2026-07-27
 cam7:powered-off-2026-07-27
