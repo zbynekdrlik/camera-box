@@ -172,6 +172,49 @@ mod tests {
         );
     }
 
+    /// #1009 (defect B): the emitted genlock stamp must be the frame boundary AT OR BEFORE
+    /// the capture instant — NEVER in the future. The ceil stamp (the strictly-NEXT
+    /// boundary) put every emitted frame 0..1 interval in the RECEIVER'S FUTURE by
+    /// construction, which is what armed the issue-147 backward-step hair-trigger overnight
+    /// (issue 1007 forensics: measured margin at trigger min 0.3 ms — network delay was the
+    /// ONLY headroom). Floor preserves the shared grid (still an exact boundary, so two
+    /// cameras capturing the same instant still stamp identically) while guaranteeing a
+    /// receiver comparing the stamp against its own wall clock never sees the future in
+    /// normal operation.
+    #[test]
+    fn stamp_is_at_or_before_the_capture_instant_never_future_1009() {
+        let fps = 30;
+        let base = 100 * SEC_100NS;
+        // Offsets across the second: exactly on a boundary (0), just after (1), mid-frame,
+        // just under / just over the first boundary, and the last 100ns of the second.
+        for off in [0i64, 1, 100_000, 333_332, 333_334, 5_000_000, 9_999_999] {
+            let capture = base + off;
+            let tc = genlock_emit_timecode_100ns(capture, capture, fps);
+            assert!(
+                tc <= capture,
+                "off {off}: stamp {tc} is IN THE FUTURE of the capture instant {capture} — \
+                 the ceil-to-boundary bias hands the receiver future-stamped frames in \
+                 normal operation (the issue-1007 hair-trigger arming, #1009)"
+            );
+            // Never more than one frame interval behind either (floor of the CURRENT
+            // interval, not some older boundary).
+            assert!(
+                capture - tc < SEC_100NS / fps + 1,
+                "off {off}: stamp {tc} fell more than one interval behind capture {capture}"
+            );
+            // Grid alignment preserved: the stamp is an exact boundary of the shared
+            // per-second grid (frame_k = second_start + k*UNITS/fps, multiply-then-divide).
+            let cs = (tc / SEC_100NS) * SEC_100NS;
+            let in_second = tc - cs;
+            let k = in_second * fps / SEC_100NS;
+            assert_eq!(
+                cs + k * SEC_100NS / fps,
+                tc,
+                "off {off}: stamp {tc} is not on the shared boundary grid"
+            );
+        }
+    }
+
     /// The monotonic->realtime offset must be re-sampled once the cadence interval has
     /// elapsed since the last sample — never immediately, never permanently skipped.
     #[test]
