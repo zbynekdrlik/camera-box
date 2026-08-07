@@ -43,6 +43,7 @@ Rust app for embedded NDI cameras (CAM1-4): multi-camera NDI streaming with soft
 - Stream-box avsync watchdog + VLC monitor + dev1 heartbeat alert (Task Scheduler keep-alive idiom, generalizing the dev1-side alert topology to a heartbeat FILE, the multi-file-one-ssh-call `type ... & echo SEP & type ...` trick, bounding an external call by what needs killing, #812/#807) → `.claude/rules/avsync-monitoring.md` (auto-loads on its `paths:`)
 - ssh vs win-* MCP on strih/stream — the HARD two-context rule (agent session = MCP ONLY, never ssh; headless CI/watchdog = ssh allowed but ONLY session-agnostic signals — session-0 `EnumWindows` blindness makes `MainWindowTitle` empty on a HEALTHY box, issue 958) → `.claude/rules/win-ssh-vs-mcp.md` (auto-loads on its `paths:`)
 - Genlock FIFO limit-cycle diagnosis from a failed E2E verdict (frozen_leg = per-window aggregate, copies≈gaps uniform = FIFO signature, stream 2ME PGM audit deltas, frac(latency/33.3)<0.5 discriminator, date-less OBS logs, #998) → `.claude/rules/genlock-fifo-limit-cycle-diagnosis.md` (auto-loads on its `paths:`)
+- Genlock hold-collapse diagnosis (A/V offset ≈ −latency_ms signature, the once-per-event backward-step latch that makes log silence lie, ceil-stamp hair-trigger, OBS-relaunch-only repair, 15-min offline arbiter recipe, Windows remote-grep traps, #1007/#1009) → `.claude/rules/genlock-hold-collapse-diagnosis.md` (auto-loads on its `paths:`)
 
 ## DO NOT DELETE These Files
 
