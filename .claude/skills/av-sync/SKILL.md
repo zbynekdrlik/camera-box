@@ -505,3 +505,54 @@ about to (or already did) crash the whole process, or you're looking at an OLD s
 file from before this fix. If you see a suspiciously short marker log with the painter process
 still alive, check `journalctl`/the process's own log for the `CRITICAL #936: QPSK A/V-sync marker
 thread DIED` line before assuming the recording captured a healthy window.
+
+## Dock DLL deploy path (#953/#955/#986, 2026-08-06) — the fast artifact + hot-swap recipe
+
+`windows-genlock-fast.yml` uploads the compiled dock as artifact **`avsyncdock-fast-dll`**
+(added `aa4015e3c` — before that, NO artifact path existed and merged dock fixes silently never
+reached the rig; deployed DLLs were weeks stale). Deploy to a box:
+
+1. `gh run download <fast-run-id> -n avsyncdock-fast-dll` on dev1; scp the DLL to the box's
+   `C:\camera-box\obs-audio-video-sync-dock.dll.new` (scp = sanctioned file copy).
+2. Swap with OBS DOWN (DLL is locked while OBS runs). On strih kill AutoHotkey64 FIRST (it
+   respawns obs64), then obs64, then `Copy-Item` over
+   `C:\Program Files\obs-studio\obs-plugins\64bit\obs-audio-video-sync-dock.dll` (keep a .bak),
+   verify md5 vs dev1.
+3. Relaunch via the `launch-obs-genlock.sh --box <box> --force` planner: save its PowerShell body
+   to `C:\camera-box\<box>-relaunch.ps1` and run `powershell -NoProfile -ExecutionPolicy Bypass
+   -File ...` through the box's win-* MCP Shell (child inherits session 1 — GUI-visible). GOTCHA:
+   the planner's AHK-restart is gated on ITS OWN redraw loop having stopped AHK (`$ahkStopped`) —
+   if YOU pre-killed AHK in step 2, the planner exits 1 at the #978 "found 0 AutoHotkey64" check
+   and never restarts it; restart AHK manually (candidates + `D:\_APPS\NL_STARTUP.ahk` recipe are
+   in the planner body) and re-verify `genlock:.*render tick ENABLED` in the fresh OBS log.
+4. Verify the plugin line in the new log (`[obs-audio-video-sync-dock] plugin loaded`) + dock
+   LOCKED lines once marker+QR flow. `genlock_latency_ms_src` on `NDI 2ME PGM` survived the
+   force-kill relaunch (894 read back intact) — but read it back anyway.
+
+Live reference numbers (2026-08-06, knob 894, offline truth -0.06ms): deployed dock LOCKED with
+display `-57.1 ms "Audio early"`, log offsets wandering +20..+47ms, lock/unlock churn ~10-15s,
+`Video Index (98% missed)` — the dock-vs-gate bias + churn is #999's scope; the offline
+`recording-verdict --av-sync` stays the calibrated reference.
+
+### A sign-convention fix can land in the LOG but miss the UI — always check EVERY consumer of the raw offset (#999, 2026-08-06)
+
+The `-57.1 ms "Audio early"` reading above turned out to be a REAL, provable bug, not (only)
+churn: `git show <953-commit> -- vendor/av-sync-dock/src/sync-test-dock.cpp` was EMPTY — #953's
+gate-convention negation (`cb_dock_lock_display_offset_ms()`) only ever got applied at the
+`blog()` call sites inside `st_raw_audio_camera_box` (`sync-test-output.cpp`'s LOCKED/UPDATED/
+UNLOCKED/SUGGESTED log lines). The dock's own on-screen "Latency" QLabel is a COMPLETELY SEPARATE
+code path (`SyncTestDock::on_sync_found` in `sync-test-dock.cpp`, driven by the `sync_index`
+calldata struct) that #953 never touched — it kept displaying the RAW, un-converted
+`ts = audio_ts - video_ts` the whole time. `-57.1ms` is almost exactly `-true_gate(~0) - 55`,
+issue 952's PRE-#953 `dock ~= -gate - 55` relation — the smoking gun that the UI field was still
+on the wrong side of the sign fix while the log lines (same session, same window) already read
+correctly (+20..+47ms). Fixed in #999's PR: `dock_latency_display_ms`/`cb_dock_latency_display_ms`
+(Rust + C++ twin-harness tested) threaded through a new `sync_index::gate_convention` flag
+(mirrors `audio_marker_found_s::sparse_index`'s exact purpose), applied at `on_sync_found`.
+
+**The general lesson:** when a sign/unit/convention fix touches a raw measurement that has
+MULTIPLE independent display/consumer sites (a log line AND a UI label AND a JSON field, say),
+grep for every OTHER place that reads the SAME raw quantity before declaring the fix complete —
+`git show <fix-commit> -- <other-file>` returning empty is the fast, decisive way to confirm a
+sibling file was never touched. A fix that only updates the log is a fix that looks complete in
+`journalctl`/CI evidence while the operator-visible number stays wrong.

@@ -663,8 +663,8 @@ pub fn dock_lock_outcome(
 /// by `dock ~= -gate - 55`: this fixes the SIGN half of that relation; the residual ~55ms additive
 /// bias is UNQUANTIFIED (attributable to the different measurement taps — digital NDI-internal
 /// burn vs optical camera+mic off the cam2 monitor) and is intentionally NOT compensated here — it
-/// needs a live re-measurement after this fix is deployed (tracked on its own follow-up issue),
-/// never a guessed constant in shipped code.
+/// needs a live re-measurement after this fix is deployed (tracked on issue #1004), never a
+/// guessed constant in shipped code.
 pub fn dock_lock_display_offset_ms(dock_offset_ms: f64) -> f64 {
     -dock_offset_ms
 }
@@ -714,10 +714,165 @@ pub fn dock_lock_suggested_target(offset_ms: f64, mad_ms: f64, current_ms: i32) 
     Some(target.clamp(DOCK_LOCK_LATENCY_MIN_MS, DOCK_LOCK_LATENCY_MAX_MS))
 }
 
+/// #999 — which locale-key polarity label the dock's "Latency" QLabel should show. Maps 1:1 to
+/// `Display.Polarity.Positive` ("Audio lagged") / `Display.Polarity.Negative` ("Audio early") in
+/// `vendor/av-sync-dock/data/locale/en-US.ini`; `None` means the label is left UNTOUCHED (mirrors
+/// `SyncTestDock::on_sync_found`'s original `if (ts>0) ... else if (ts<0) ...` — an exact-zero `ts`
+/// updates neither branch).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LatencyPolarity {
+    None,
+    Positive,
+    Negative,
+}
+
+/// The dock's on-screen "Latency" number + which polarity label applies, for one `sync_found`
+/// event.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LatencyDisplay {
+    pub display_ms: f64,
+    pub polarity: LatencyPolarity,
+}
+
+/// #999 — `SyncTestDock::on_sync_found` (`sync-test-dock.cpp`) is a code path #953 NEVER touched:
+/// `git show <953-commit> -- vendor/av-sync-dock/src/sync-test-dock.cpp` is empty. #953 fixed the
+/// sign convention only at the OBS **log** call sites inside `st_raw_audio_camera_box`
+/// (`sync-test-output.cpp`'s `LOCKED`/`UPDATED`/`UNLOCKED`/`SUGGESTED` `blog()` lines, via
+/// [`dock_lock_display_offset_ms`]) — a completely separate mechanism from the dock's own
+/// `sync_index`/`on_sync_found` UI-update path, which computes `ts = audio_ts - video_ts` directly
+/// and displays it in norihiro's ORIGINAL, un-gate-converted native convention (`dock ~= -gate -
+/// 55`, issue 952). Live evidence this explains (issue 999, 2026-08-06): the SAME session's
+/// operator screenshot showed `Latency -57.1ms "Audio early"` (dock-native, unconverted — closely
+/// matches `-true_gate_offset(~0) - 55 = -55`) while the OBS log's LOCKED/UPDATED lines (already
+/// #953-converted) showed `+20..+47ms` for the identical measurement window, and the offline
+/// calibrated truth (`recording-verdict --av-sync`) read `~0ms`.
+///
+/// `gate_convention` selects whether [`dock_lock_display_offset_ms`]'s negation applies at all:
+/// `true` for camera-box's own direct-ring `sync_found` events (`st_raw_audio_camera_box`'s two
+/// `signal_sync_found` call sites — the ONLY events this fix targets), `false` for norihiro's own
+/// legacy list-based method (`sync_index_found`, the vestigial phone-based path this rig never
+/// uses in production — camera-box mode and the legacy method are mutually exclusive per
+/// `st_raw_video`/`st_raw_audio`'s existing `cb_active` gating). The flag is threaded through
+/// rather than hardcoded, mirroring the existing `audio_marker_found_s::sparse_index` flag's exact
+/// purpose: tell the dock UI handler which regime produced a given calldata event without
+/// inspecting global state from the signal handler. `gate_convention=false` reproduces norihiro's
+/// ORIGINAL `on_sync_found` behavior byte-for-byte (legacy path unchanged).
+///
+/// When `gate_convention` is true, `display_ms`'s sign inverts (the same negation
+/// [`dock_lock_display_offset_ms`] already applies to every log line), so the polarity LABEL that
+/// applies also inverts: a gate-POSITIVE offset (video lags audio) means audio arrived EARLIER —
+/// the "Audio early" text, which is norihiro's own NEGATIVE-branch label; a gate-NEGATIVE offset
+/// means "Audio lagged" (norihiro's own POSITIVE-branch label).
+pub fn dock_latency_display_ms(dock_native_ts_ns: i64, gate_convention: bool) -> LatencyDisplay {
+    let native_ms = dock_native_ts_ns as f64 / 1_000_000.0;
+    let display_ms = if gate_convention {
+        dock_lock_display_offset_ms(native_ms)
+    } else {
+        native_ms
+    };
+    // Negating an exactly-zero native reading yields IEEE -0.0, which formats as "-0.0" — a
+    // perfectly aligned chain must never show a minus sign (C++ twin normalizes identically).
+    let display_ms = if display_ms == 0.0 { 0.0 } else { display_ms };
+    let polarity = if display_ms > 0.0 {
+        if gate_convention {
+            LatencyPolarity::Negative
+        } else {
+            LatencyPolarity::Positive
+        }
+    } else if display_ms < 0.0 {
+        if gate_convention {
+            LatencyPolarity::Positive
+        } else {
+            LatencyPolarity::Negative
+        }
+    } else {
+        LatencyPolarity::None
+    };
+    LatencyDisplay {
+        display_ms,
+        polarity,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::qpsk_marker::{frame_id_to_index, marker_signal, signal_len, AV_SYNC_RING_CYCLE_NS};
+
+    // ---- #999 dock_latency_display_ms ----
+
+    #[test]
+    fn dock_latency_display_ms_native_convention_matches_original_on_sync_found_999() {
+        // gate_convention=false must reproduce norihiro's ORIGINAL `on_sync_found` byte-for-byte:
+        // ts = audio_ts - video_ts, no negation, Positive when ts>0 ("Audio lagged" locale key).
+        let d = dock_latency_display_ms(5_000_000, false); // +5ms native
+        assert_eq!(d.display_ms, 5.0);
+        assert_eq!(d.polarity, LatencyPolarity::Positive);
+
+        let d = dock_latency_display_ms(-5_000_000, false); // -5ms native
+        assert_eq!(d.display_ms, -5.0);
+        assert_eq!(d.polarity, LatencyPolarity::Negative);
+
+        let d = dock_latency_display_ms(0, false);
+        assert_eq!(d.display_ms, 0.0);
+        assert_eq!(d.polarity, LatencyPolarity::None);
+    }
+
+    #[test]
+    fn dock_latency_display_ms_gate_convention_negates_sign_and_swaps_polarity_999() {
+        // gate_convention=true applies the SAME negation as dock_lock_display_offset_ms, and the
+        // polarity LABEL inverts along with the sign (a gate-positive offset = "Audio early", the
+        // locale Negative key -- the opposite branch from the native-convention test above for the
+        // SAME +5ms native reading).
+        let d = dock_latency_display_ms(5_000_000, true); // +5ms native -> gate -5.0
+        assert_eq!(d.display_ms, -5.0);
+        assert_eq!(d.polarity, LatencyPolarity::Positive);
+
+        let d = dock_latency_display_ms(-5_000_000, true); // -5ms native -> gate +5.0
+        assert_eq!(d.display_ms, 5.0);
+        assert_eq!(d.polarity, LatencyPolarity::Negative);
+
+        let d = dock_latency_display_ms(0, true);
+        assert_eq!(d.display_ms, 0.0);
+        assert!(
+            d.display_ms.is_sign_positive(),
+            "gate-converted 0 must be +0.0, never IEEE -0.0 (formats as \"-0.0\"); \
+             0.0 == -0.0 so the assert_eq above alone cannot pin this"
+        );
+        assert_eq!(d.polarity, LatencyPolarity::None);
+    }
+
+    #[test]
+    fn dock_latency_display_ms_matches_live_evidence_999() {
+        // issue 999's own live evidence (2026-08-06): dock-native ts ~= -57.1ms ("Latency -57.1ms
+        // Audio early") is roughly -true_gate(~0) - 55, issue 952's pre-#953 relation. Converted to
+        // gate convention it must land near the OBS log's own +20..+47ms window's sign/ballpark
+        // (positive, i.e. "video lags audio" / "Audio early" in gate terms), not remain negative.
+        let d = dock_latency_display_ms(-57_100_000, true);
+        assert_eq!(d.display_ms, 57.1);
+        assert_eq!(
+            d.polarity,
+            LatencyPolarity::Negative,
+            "gate-positive offset (video lags audio) must show the locale Negative key (\"Audio \
+             early\"): {d:?}"
+        );
+    }
+
+    #[test]
+    fn dock_latency_display_ms_gate_convention_is_the_exact_negation_of_native_999() {
+        // Property check across a spread of values: display_ms(gate) == -display_ms(native), and
+        // dock_lock_display_offset_ms is reused verbatim (never a second, independently-written
+        // negation that could silently drift from the log-line convention).
+        for ns in [-123_456_000_i64, -1, 0, 1, 999_999, 55_000_000, -57_100_000] {
+            let native = dock_latency_display_ms(ns, false);
+            let gate = dock_latency_display_ms(ns, true);
+            assert_eq!(
+                gate.display_ms,
+                dock_lock_display_offset_ms(native.display_ms),
+                "gate-convention display must equal dock_lock_display_offset_ms(native) for ns={ns}"
+            );
+        }
+    }
 
     // ---- #955 DockLockOutcome ----
 

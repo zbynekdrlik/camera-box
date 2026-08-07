@@ -37,10 +37,11 @@ class FakeWS:
 # ---------------------------------------------------------------------------
 
 class TestActiveCameraNames:
-    def test_default_is_cam1_cam2_cam4(self, monkeypatch):
-        # #898 (2026-07-31): cam3 retired from the default active set (grabber card destroyed).
+    def test_default_is_cam1_cam2(self, monkeypatch):
+        # #947 (2026-08-06): cam4 removed from the rig (box never comes up on the network);
+        # default mirrors camera-set.sh's CAMERA_ACTIVE_SET = "cam1 cam2".
         monkeypatch.delenv("CAMERA_ACTIVE_SET", raising=False)
-        assert psafc.active_camera_names() == ["cam1", "cam2", "cam4"]
+        assert psafc.active_camera_names() == ["cam1", "cam2"]
 
     def test_env_override(self, monkeypatch):
         monkeypatch.setenv("CAMERA_ACTIVE_SET", "cam1 cam5")

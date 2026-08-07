@@ -7291,3 +7291,28 @@ does the live rig verification of the new whole-chain checks and closes it.
   defects, 3 cosmetic Minor items (2 for #971's log messages, 1 for #988's step-failure
   attribution in rig-mode.sh's verdict line) -- all fixed same session (`6ad54fdea`, `ed1b3693a`),
   not left as "nice to have" per this project's completion-report 🔵-findings-are-fixed policy.
+
+- #999 (dock-vs-gate A/V offset sign-convention gap) + #861 (re-block A/V-offset gate, ASRC proven)
+  -- one bundled PR #1002. #999: root-caused `Latency -57.1ms "Audio early"` (2026-08-06 live
+  evidence) to `SyncTestDock::on_sync_found` (sync-test-dock.cpp) never getting #953's
+  gate-convention negation -- `git show <953-commit> -- sync-test-dock.cpp` was empty, confirming
+  #953 only fixed the LOG lines (blog() calls in sync-test-output.cpp), not the operator-visible
+  QLabel. Fixed via `dock_latency_display_ms`/`cb_dock_latency_display_ms` (Rust src/av_sync_dock.rs
+  + C++ camera-box-audio.hpp mirror, new twin-harness test tests/av_sync_dock_latency_display_999.rs)
+  threaded through a new `sync_index::gate_convention` flag (mirrors `sparse_index`'s pattern).
+  RED `ae756629d` -> GREEN `afa8ccd8c` (Rust); RED `01fef2d34` -> GREEN `03b6918e1` (C++ wiring).
+  Does NOT close #999 -- churn/decode-rate investigation needs the supervisor's live re-measurement
+  post-deploy (no rig access this dispatch), leaves #999 open.
+  #861: ASRC (#803) proven live + convergent (issue 999's own 2026-08-06 measurement chain:
+  51.6ms -> 963 -> 913 -> 894 knob -> -0.06ms). Re-armed `av_window::gates_overall_pass()`
+  (mirrors the issue-914/915 seam, applied in reverse) and folded `av_all_pass` back into
+  `all_pass` in recording-verdict.rs. RED `5ae5f34f1` -> GREEN `3bf8f7c4d` (pure seam);
+  RED `da27b9a72` -> GREEN `d42b26e91` (fold-in). CI caught a SECOND pre-existing test file this
+  session's own repo-wide grep missed on the first pass -- `tests/recording_verdict_merge_gate_
+  exit_code.rs` exercises the SAME term through the REAL compiled subprocess, a separate assertion
+  surface from the in-process test module; fixed `75b938f08` (inverted back to the ORIGINAL
+  pre-861 form, git `4743e2e9b`). Playbook: `.claude/rules/ci-testing-gotchas.md` gained the
+  "grep the WHOLE repo, not just the seam's own file" lesson; `.claude/skills/av-sync/SKILL.md`
+  gained the #999 root-cause writeup. Design + validated comments posted on both issues before
+  code per the standing gate. Shared checkout interleaved with another worker's #947 commits
+  (d6bb9e89a/4c725950b) mid-session -- unrelated, noted, no conflict.

@@ -242,3 +242,30 @@ Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ Comma
 
 Poll the `done.marker` file from fresh ssh calls (bounded loop). The `echo done > marker` inside
 the same `cmd /c` gives a reliable terminal signal a `Get-Process` poll cannot (PID reuse, races).
+
+## A "live" program is NOT a live INPUT — and shared WS passwords make IP-based identity checks lie (strih optical-NIC outage, 2026-08-06)
+
+Two traps from one incident (strih's optical NIC died; the box was off-network ~50 min while the
+rig looked half-alive):
+
+1. **Frozen-NDI-input diagnosis.** When a sender box drops off the network, DistroAV inputs HOLD
+   THE LAST FRAME silently. Screenshot-hash liveness on the receiving program is WORTHLESS as an
+   input check: the receiver's own advancing overlays (the 911004 stream-side burn) change pixels
+   every frame over a frozen input. The decisive check is PER-SOURCE QR/burn PAYLOADS decoded from
+   two program screenshots seconds apart: the frozen upstream payloads (cam2 dual-QR `P<run>`,
+   strih burn 911002) stay byte-identical while the receiver's own 911004 advances. In an
+   `--av-sync` decode the same failure reads as `video_ticks = 1` with every frame still
+   `with_qr` — QRs decode fine, they just never advance. Also: a recording can be PARTIALLY
+   frozen (feed died mid-recording) — recording 1 that day had ~65s live then froze, and still
+   produced a trustworthy cluster estimate from the live portion (ticks ≈ 30/s x live seconds is
+   the tell).
+
+2. **Box identity.** The rig's OBS WS password is SHARED across boxes (resolume-snv answered
+   strih's password at .201) and an established NDI :5960+ connection from the receiver does NOT
+   identify which INPUT it feeds. Identity comes from the DHCP lease/hostname
+   (`/ip dhcp-server lease print detail where address~"..."` on router 10.77.8.1, creds =
+   fleet pw) or the box's own scene/profile names — never from "the password worked".
+   L2 truth for a dead box: router `/ip arp print` `incomplete`, MAC absent from every switch's
+   `/interface bridge host print`, and the box's switch port (`/interface ethernet monitor <port>
+   once`) showing `no-link` = power/cable/NIC, not software. strih = MAC 5C:6A:80:F6:6C:F7 on
+   foh2_video (10.77.9.5) `sfp-sfpplus2::basic`.

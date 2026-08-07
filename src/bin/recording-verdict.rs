@@ -4926,7 +4926,7 @@ fn build_and_print_verdict(
                 // them through the small partial JSON — mirrors #377's `colour` carry exactly).
                 //
                 // PR A (#639) reported `all_cambox_av_sync` (offsets, sample counts, any UNKNOWN
-                // cameras) without gating `all_pass`. PR B (this) wires the ±20ms cross-window
+                // cameras) without gating `all_pass`. PR B (this) wires the tolerance-bounded cross-window
                 // bound (#624 deliverable 4, `av_window::av_offset_gate_pass`) into `all_pass` —
                 // same severity as the loss/latency-spread gates, no "advisory" tier.
                 let av_inputs: Option<AvMarkerInputs> =
@@ -4964,9 +4964,15 @@ fn build_and_print_verdict(
                     let offline_ack_map = offline_ack::parse(&args.offline_ack_cams);
                     let mut av_json = serde_json::Map::new();
                     // #624 deliverable 4 / #312 item 2 PR B: every camera under test must PASS
-                    // the ±20ms A/V-offset gate for the run's overall verdict to pass — folded
-                    // into `all_pass` below, alongside all_cambox_continuity + all_cambox_latency.
+                    // the A/V-offset gate (±AV_OFFSET_GATE_TOLERANCE_MS) for the run's overall
+                    // verdict to pass — folded into `all_pass` below, alongside
+                    // all_cambox_continuity + all_cambox_latency.
                     let mut av_all_pass = true;
+                    // #855/#861 fail-closed floor: how many cameras were actually JUDGED (not
+                    // ack-excluded). An ack list covering EVERY camera would otherwise leave the
+                    // AND-fold vacuously true — the one lever that could silently disable the
+                    // re-armed BLOCKING gate with zero measurements behind it.
+                    let mut av_judged_cameras: usize = 0;
                     // #714 pass 1: compute every camera's OWN pooled measurement first (UNCHANGED
                     // logic from before), keyed by camera name — so cam2's own measured offset is
                     // available before ANY camera's derivation below regardless of loop order
@@ -5100,6 +5106,7 @@ fn build_and_print_verdict(
                             None => av_window::av_offset_gate_pass(cam_sync, args.av_expected_ms),
                         };
                         av_all_pass &= gate_pass;
+                        av_judged_cameras += 1;
                         println!(
                             "  {camera}: {} windows={} candidates={} cluster_samples={} → {} \
                              [gate {}]",
@@ -5173,21 +5180,41 @@ fn build_and_print_verdict(
                         }
                         av_json.insert(camera.to_string(), cam_json);
                     }
-                    // #861 (user decision on #856, 2026-07-29): the A/V-offset gate is
-                    // TEMPORARILY report-only — still measured, still printed, still fails
-                    // CLOSED on thin/absent data, but no longer folded into `all_pass`. Program
-                    // audio drifts ~160ms/hour against video (epic #800, foreign clock domain),
-                    // so a constant video-delay offset cannot hold ±20ms until per-source ASRC
-                    // (#803) lands. Mirrors the #286 cross-camera delivery-latency spread term's
-                    // existing report-only shape exactly (same wording, same JSON pattern) — see
-                    // `all_cambox_delivery_latency_spread_never_gates_all_pass_286`. Re-arming
-                    // this into `all_pass` is tracked on #861.
+                    // #855/#861 fail-closed floor: zero judged cameras (every camera in the
+                    // sweep ack-excluded) is an UNMEASURED gate, never a pass — the ack list
+                    // must not be able to silently disable the re-armed BLOCKING gate.
+                    if av_judged_cameras == 0 {
+                        av_all_pass = false;
+                        println!(
+                            "  >>> #624 A/V-offset gate: ZERO cameras judged (every camera in \
+                             the sweep is operator-ack-excluded) — failing closed; an ack list \
+                             must never silently disable the re-armed gate (#855/#861)"
+                        );
+                    }
+                    av_json.insert(
+                        "judged_cameras".to_string(),
+                        serde_json::json!(av_judged_cameras),
+                    );
+                    // #861 (2026-08-06, re-armed after ASRC #803 proved stable — see
+                    // av_window::gates_overall_pass()'s own doc comment for the decision record):
+                    // was TEMPORARILY report-only since 2026-07-29 (user decision on #856) while
+                    // program audio drifted ~160ms/hour against video (epic #800, foreign clock
+                    // domain) — a constant video-delay offset could not hold ±20ms until
+                    // per-source ASRC landed. That precondition is now met, so this term folds
+                    // into `all_pass` again, mirroring the issue-914/915 `gates_overall_pass()`
+                    // seam exactly (applied in reverse: re-blocking, not relaxing).
+                    let av_gate_blocking = av_window::gates_overall_pass();
                     println!(
                         "  >>> #624 deliverable 4 A/V-offset gate: expected={:.1}ms tolerance=±{:.1}ms → {} \
-                         (report-only — does NOT gate all_pass, pending ASRC, see #861)",
+                         ({})",
                         args.av_expected_ms,
                         av_window::AV_OFFSET_GATE_TOLERANCE_MS,
-                        if av_all_pass { "PASS" } else { "FAIL" }
+                        if av_all_pass { "PASS" } else { "FAIL" },
+                        if av_gate_blocking {
+                            "BLOCKING — gates overall_pass again, re-armed after ASRC (#803), see #861"
+                        } else {
+                            "report-only — does NOT gate overall_pass, pending ASRC, see #861"
+                        }
                     );
                     av_json.insert(
                         "expected_ms".to_string(),
@@ -5198,25 +5225,39 @@ fn build_and_print_verdict(
                         serde_json::json!(av_window::AV_OFFSET_GATE_TOLERANCE_MS),
                     );
                     av_json.insert("gate_pass".to_string(), serde_json::json!(av_all_pass));
-                    // #861: unambiguous machine-readable flag alongside `gate_pass` — this term's
-                    // measured PASS/FAIL no longer decides `overall_pass` (see `gate_pass` above
-                    // for the measured value; this field says whether it COUNTS).
-                    av_json.insert("gates_overall_pass".to_string(), serde_json::json!(false));
+                    // #861: unambiguous machine-readable flag alongside `gate_pass` — whether this
+                    // term's measured PASS/FAIL COUNTS toward `overall_pass` (see `gate_pass`
+                    // above for the measured value itself).
+                    av_json.insert(
+                        "gates_overall_pass".to_string(),
+                        serde_json::json!(av_gate_blocking),
+                    );
                     av_json.insert(
                         "gate".to_string(),
-                        serde_json::json!(format!(
-                            "report-only — does NOT gate overall_pass, pending ASRC (#861); every \
-                             camera under test is still measured against ±{:.0}ms of expected_ms \
-                             (#624 deliverable 4 / #312 item 2 PR B)",
-                            av_window::AV_OFFSET_GATE_TOLERANCE_MS
-                        )),
+                        serde_json::json!(if av_gate_blocking {
+                            format!(
+                                "BLOCKING — every camera under test must be within ±{:.0}ms of \
+                                 expected_ms (#624 deliverable 4 / #312 item 2 PR B); re-armed \
+                                 after ASRC (#803) proved stable, see #861",
+                                av_window::AV_OFFSET_GATE_TOLERANCE_MS
+                            )
+                        } else {
+                            format!(
+                                "report-only — does NOT gate overall_pass, pending ASRC (#861); \
+                                 every camera under test is still measured against ±{:.0}ms of \
+                                 expected_ms (#624 deliverable 4 / #312 item 2 PR B)",
+                                av_window::AV_OFFSET_GATE_TOLERANCE_MS
+                            )
+                        }),
                     );
                     report["all_cambox_av_sync"] = serde_json::Value::Object(av_json);
-                    // #861: DELIBERATELY not folded into `all_pass` (see the report-only note
-                    // above) — `av_all_pass` is still computed and reported, same severity/rigor
-                    // as before, it just no longer decides the run's overall verdict. Zero-loss
-                    // (all_cambox_continuity / burn-id contiguity, `seg.overall_pass` above)
-                    // remains STRICT and is completely unaffected by this.
+                    // #861: folds into `all_pass` again — a no-op when the gate PASSES (av_all_pass
+                    // == true) or when `gates_overall_pass()` reverts to report-only in the future
+                    // (`!av_gate_blocking` short-circuits the OR to true); otherwise a FAILING
+                    // av_sync gate now forces `all_pass = false`, same severity as the loss/latency
+                    // gates. Zero-loss (all_cambox_continuity / burn-id contiguity, `seg.overall_pass`
+                    // above) remains STRICT and is completely unaffected by this either way.
+                    all_pass &= av_all_pass || !av_gate_blocking;
                 }
             }
             None => {
@@ -9304,6 +9345,14 @@ mod tests {
             av_expected_ms.to_string(),
             "--offline-ack-cams".to_string(),
             offline_ack_cams.to_string(),
+            // Review finding on PR #1002 (issue 861 vacuity controls): without this, every
+            // fixture's sub-300s synthetic recording fails `span_ok` and forces
+            // `overall_pass=false` REGARDLESS of the gate under test -- no fixture-based
+            // overall_pass assertion in this file had any bite. Same convention the
+            // Args-based unit tests in this file already use (theirs pass 1; these
+            // single-window fixtures analyze only ~0.7s, so 0 is the honest floor here).
+            "--min-secs".to_string(),
+            "0".to_string(),
         ];
         if let Some(stats_path) = cam1_capture_stats {
             argv.push("--cam1-capture-stats".to_string());
@@ -9336,12 +9385,13 @@ mod tests {
     /// all. cam2 pools the WHOLE recording (unwindowed) and picks up the SAME real cam1-range
     /// candidates. Asserts every fail-closed case from the same test in one shot, PLUS (#624
     /// deliverable 4 / PR B) the per-camera `gate_pass` field: at the default `av_expected_ms=0`,
-    /// cam1's real 500ms offset is far outside the ±20ms bound (FAILS the gate despite being a
+    /// cam1's real 500ms offset is far outside the tolerance bound (FAILS the gate despite being a
     /// real, clean measurement — the gate is about closeness to expected, not data quality), and
-    /// every Unknown camera fails closed too. **#861 (2026-07-29): this term is now report-only**
-    /// — it still measures/fails closed exactly as before, it just no longer decides
-    /// `overall_pass` (see `all_cambox_av_sync_gate_failure_no_longer_forces_the_overall_verdict_
-    /// to_fail_861` for that proof).
+    /// every Unknown camera fails closed too. **#861 (2026-08-06): this term is BLOCKING again**
+    /// (re-armed after ASRC #803 proved stable) — it measures/fails closed exactly as before, and
+    /// now ALSO decides `overall_pass` (see
+    /// `all_cambox_av_sync_gate_failure_forces_the_overall_verdict_to_fail_861_rearmed` for that
+    /// proof).
     #[test]
     fn all_cambox_av_sync_measures_a_real_camera_and_fails_closed_on_the_rest_312() {
         let emit_log: Vec<(u8, u32, i64)> = (0..10u8).map(|k| (k, 1000 + k as u32, 0)).collect();
@@ -9384,7 +9434,7 @@ mod tests {
         assert_eq!(
             av_sync["cam1"]["gate_pass"],
             serde_json::json!(false),
-            "#624: 500ms is far outside the +/-20ms bound of the default expected_ms=0: {av_sync}"
+            "#624: 500ms is far outside the tolerance bound of the default expected_ms=0: {av_sync}"
         );
         assert_eq!(
             av_sync["cam2"]["verdict"],
@@ -9445,31 +9495,41 @@ mod tests {
             serde_json::json!(false),
             "#624: the OVERALL av_sync gate must be false when ANY camera fails: {av_sync}"
         );
-        // #861 (2026-07-29 user decision on #856): the gate is now report-only pending ASRC
-        // (#803) — the string must say so, and an explicit machine-readable flag says it does
-        // NOT decide `overall_pass` (see `all_cambox_av_sync_gate_failure_no_longer_forces_the_
-        // overall_verdict_to_fail_861` below for the actual overall_pass proof).
+        // #861 (2026-08-06, re-armed after ASRC #803 proved stable): the gate is BLOCKING again —
+        // the string must say so, and an explicit machine-readable flag says it DOES decide
+        // `overall_pass` (see
+        // `all_cambox_av_sync_gate_failure_forces_the_overall_verdict_to_fail_861_rearmed` below
+        // for the actual overall_pass proof).
         assert!(
-            av_sync["gate"].as_str().unwrap().contains("report-only"),
-            "#861: the gate string must say it is report-only now, pending ASRC: {av_sync}"
+            !av_sync["gate"].as_str().unwrap().contains("report-only"),
+            "#861: the gate string must NOT say report-only anymore (re-armed): {av_sync}"
         );
         assert_eq!(
             av_sync["gates_overall_pass"],
-            serde_json::json!(false),
-            "#861: the JSON must be unambiguous that this term does not decide overall_pass: {av_sync}"
+            serde_json::json!(true),
+            "#861: the JSON must be unambiguous that this term decides overall_pass again: {av_sync}"
         );
     }
 
-    /// #861 (2026-07-29 user decision on #856) — a FAILING av_sync gate must NOT change the run's
-    /// overall verdict: `all_pass &= av_all_pass` was REMOVED from the caller (report-only, same
-    /// shape as the #286 cross-camera delivery-latency spread term). This SUPERSEDES the old
-    /// `all_cambox_av_sync_gate_failure_forces_the_overall_verdict_to_fail_312_624` (#624/#312 PR
-    /// B), which asserted the OPPOSITE invariant when the gate was still wired into `all_pass`.
-    /// **This is the exact test #861 (re-arm after ASRC, #803) will need to invert back** — when
-    /// this test starts failing because `overall_pass` differs between the two fixtures, that is
-    /// the signal the gate has been re-wired and this test's assertion must flip.
+    /// #861 (2026-08-06, re-armed after ASRC #803 proved stable) — a FAILING av_sync gate must
+    /// FORCE the run's overall verdict to fail again: `all_pass &= av_all_pass ||
+    /// !av_window::gates_overall_pass()` is back in the caller. This INVERTS
+    /// `all_cambox_av_sync_gate_failure_no_longer_forces_the_overall_verdict_to_fail_861` (the
+    /// 2026-07-29 report-only proof this test replaces) and restores the ORIGINAL pre-#861
+    /// invariant `all_cambox_av_sync_gate_failure_forces_the_overall_verdict_to_fail_312_624` once
+    /// asserted (git a30c8f53a). A silent revert of `av_window::gates_overall_pass()` back to
+    /// report-only would make this test FAIL loudly (see that function's own regression test,
+    /// `gates_overall_pass_is_blocking_again_861`, for the companion guard at the pure-decision
+    /// layer).
+    ///
+    /// VACUITY GUARD (review finding on this PR): the fixture's deliveries MUST keep the
+    /// cross-camera spread within `switch_latency::SPREAD_THRESHOLD_MS` (the earlier 800/820ms
+    /// pair had spread 20 > 16, so `all_pass &= sv.pass` already forced `overall_pass=false`
+    /// BEFORE the A/V fold ran — deleting the fold left this test green). The `without_av`
+    /// control proves every OTHER gate passes on this exact fixture, so the failing A/V fold is
+    /// the ONLY thing that can (and must) flip the with-av verdict.
     #[test]
-    fn all_cambox_av_sync_gate_failure_no_longer_forces_the_overall_verdict_to_fail_861() {
+    fn all_cambox_av_sync_gate_failure_forces_the_overall_verdict_to_fail_861_rearmed() {
         let emit_log: Vec<(u8, u32, i64)> = (0..10u8).map(|k| (k, 1000 + k as u32, 0)).collect();
         let audio_markers: Vec<(f64, u8)> = (0..10u8).map(|k| (k as f64 / 30.0 - 0.5, k)).collect();
         let av = AvMarkerInputs {
@@ -9478,23 +9538,28 @@ mod tests {
             emit_log,
             audio_markers,
         };
+        // Spread = 10ms <= the 16ms threshold -> the cross-camera spread gate PASSES; see the
+        // vacuity guard in the doc comment above.
         let cameras: &[(&str, u32, i64)] =
-            &[("CAM1", CAM1B, 800_000_000), ("CAM3", CAM3B, 820_000_000)];
+            &[("CAM1", CAM1B, 800_000_000), ("CAM3", CAM3B, 810_000_000)];
 
-        // cam1 measures a real 500ms offset; expected_ms=0 puts it far outside +/-20ms -> the
-        // av_sync gate FAILS (cam3/cam4/cam5/cam6 are Unknown too, doubly so).
+        // cam1 measures a real 500ms offset; expected_ms=0 puts it far outside the tolerance ->
+        // the av_sync gate FAILS (cam3/cam4/cam5/cam6 are Unknown too, doubly so).
         let with_av =
-            build_all_cambox_av_sync_fixture("gate-fail-with-861", cameras, Some(av), 0.0);
+            build_all_cambox_av_sync_fixture("gate-fail-with-861-rearmed", cameras, Some(av), 0.0);
         let without_av =
-            build_all_cambox_av_sync_fixture("gate-fail-without-861", cameras, None, 0.0);
+            build_all_cambox_av_sync_fixture("gate-fail-without-861-rearmed", cameras, None, 0.0);
 
+        assert_eq!(
+            without_av["overall_pass"],
+            serde_json::json!(true),
+            "vacuity control: with NO A/V inputs this exact fixture must pass every other gate \
+             (loss, latency, spread) — otherwise the with-av assertion below proves nothing \
+             about the A/V fold: {without_av}"
+        );
         assert!(
             !with_av["all_cambox_av_sync"].is_null(),
             "sanity: the WITH-av_sync run must actually have reported the block: {with_av}"
-        );
-        assert!(
-            without_av["all_cambox_av_sync"].is_null(),
-            "sanity: the WITHOUT-av_sync run must NOT report the block at all (unchanged from PR A): {without_av}"
         );
         assert_eq!(
             with_av["all_cambox_av_sync"]["gate_pass"],
@@ -9503,29 +9568,25 @@ mod tests {
         );
         assert_eq!(
             with_av["all_cambox_av_sync"]["gates_overall_pass"],
-            serde_json::json!(false),
-            "#861: the JSON must say plainly that this failing term does not gate: {with_av}"
+            serde_json::json!(true),
+            "#861: the JSON must say plainly that this failing term DOES gate again: {with_av}"
         );
-        // The point of this test: a FAILING av_sync gate is now a no-op on overall_pass, exactly
-        // like the already-passing sibling test below proves for a PASSING gate — with_av and
-        // without_av share identical loss/latency contribution (same frames/schedule), so their
-        // overall_pass must be IDENTICAL regardless of what the (failing) av_sync gate measured.
         assert_eq!(
-            with_av["overall_pass"], without_av["overall_pass"],
-            "#861: a FAILING av_sync gate must be a no-op on the overall verdict (report-only, \
-             pending ASRC #803) -- with={with_av}, without={without_av}"
+            with_av["overall_pass"],
+            serde_json::json!(false),
+            "#861: a failing av_sync gate MUST force overall_pass=false again, regardless of \
+             whatever the loss/latency gates alone computed: {with_av}"
         );
     }
 
-    /// #861 — zero-loss enforcement is completely UNAFFECTED by the A/V-offset term becoming
-    /// report-only above: a real zero-loss defect (a cam2→SOURCE V4L2 capture-drop,
-    /// `--cam1-capture-stats`) still forces `overall_pass=false`, unconditionally. This gate
-    /// (`all_pass &= capture_zero` in `recording-verdict.rs`) is TOP-LEVEL — parsed and applied
-    /// whenever `--cam1-capture-stats` is supplied, with NO dependency on `--switch-schedule` /
-    /// `--stream` / the A/V-sync plumbing at all — so it is untouched by this PR's edit and is the
-    /// most direct, unambiguous proof that removing the A/V term from `all_pass` did not weaken
-    /// any OTHER gate's severity. The A/V inputs here are the same clean 500ms fixture used by the
-    /// sibling PASS test (does not matter either way — the point is the capture-drop alone).
+    /// #861 — zero-loss enforcement is completely UNAFFECTED by the A/V-offset term's own
+    /// report-only-vs-blocking state (whichever it currently is): a real zero-loss defect (a
+    /// cam2→SOURCE V4L2 capture-drop, `--cam1-capture-stats`) still forces `overall_pass=false`,
+    /// unconditionally. This gate (`all_pass &= capture_zero` in `recording-verdict.rs`) is
+    /// TOP-LEVEL — parsed and applied whenever `--cam1-capture-stats` is supplied, with NO
+    /// dependency on `--switch-schedule` / `--stream` / the A/V-sync plumbing at all. The A/V
+    /// inputs here are the same clean 500ms fixture used by the sibling PASS test (does not matter
+    /// either way — the point is the capture-drop alone).
     #[test]
     fn zero_loss_capture_drop_still_fails_overall_pass_regardless_of_av_gate_861() {
         let emit_log: Vec<(u8, u32, i64)> = (0..10u8).map(|k| (k, 1000 + k as u32, 0)).collect();
@@ -9567,20 +9628,20 @@ mod tests {
             v["overall_pass"],
             serde_json::json!(false),
             "#861: a real zero-loss defect (camera-leg V4L2 capture drop) must still force \
-             overall_pass=false -- completely unaffected by the A/V-offset term becoming \
-             report-only: {v}"
+             overall_pass=false -- completely unaffected by the A/V-offset term's own \
+             report-only-vs-blocking state: {v}"
         );
     }
 
     /// #624 deliverable 4 / #312 item 2 PR B (still true post-#861) — a PASSING av_sync gate
-    /// (every one of the 6 CAMERA_UNDER_TEST_NODES measured cleanly within +/-20ms of
+    /// (every one of the 6 CAMERA_UNDER_TEST_NODES measured cleanly within the tolerance of
     /// `--av-expected-ms`) must NOT change the run's overall verdict vs the identical run with no
-    /// av_sync inputs at all. Since #861 this is a no-op for TWO independent reasons at once
-    /// (the term is report-only now AND `av_all_pass` itself is true) — proves the report-only
-    /// wiring holds in BOTH directions together with the sibling gate-FAILURE test above, without
-    /// needing to know the loss/latency gates' own PASS/FAIL value for this synthetic fixture
-    /// (both runs share the identical frames/schedule, so their loss/latency contribution is
-    /// identical either way).
+    /// av_sync inputs at all — `all_pass &= (true || ...)` is a no-op REGARDLESS of whether the
+    /// term is report-only or blocking (#861, re-armed 2026-08-06): a PASSING gate never changes
+    /// the fold either way. Proves the wiring is a true AND-in (never accidentally forcing a PASS
+    /// fixture to fail) together with the sibling gate-FAILURE test above, without needing to know
+    /// the loss/latency gates' own PASS/FAIL value for this synthetic fixture (both runs share the
+    /// identical frames/schedule, so their loss/latency contribution is identical either way).
     #[test]
     fn all_cambox_av_sync_gate_pass_does_not_change_the_overall_verdict_312_624() {
         // 6 windows (cam1/cam3/cam4/cam5/cam6/cam7 — #755), 20 frames each = 120 frames, optical
@@ -9598,10 +9659,15 @@ mod tests {
             emit_log,
             audio_markers,
         };
+        // Spread = 815-800 = 15ms <= the 16ms threshold — the earlier 790..820 fixture (spread
+        // 30) made BOTH runs fail on the spread gate, so the with==without equality below was
+        // `false == false` and could not detect a wiring bug that wrongly ANDs a PASSING gate
+        // (review finding on this PR). With every gate passing, `without_av` is genuinely true
+        // and the equality has bite.
         let cameras: &[(&str, u32, i64)] = &[
             ("CAM1", CAM1B, 800_000_000),
-            ("CAM3", CAM3B, 820_000_000),
-            ("CAM4", super::BURN_RUN_ID_CAM4, 790_000_000),
+            ("CAM3", CAM3B, 812_000_000),
+            ("CAM4", super::BURN_RUN_ID_CAM4, 803_000_000),
             ("CAM5", CAM5B, 805_000_000),
             ("CAM6", CAM6B, 815_000_000),
             ("CAM7", CAM7B, 810_000_000),
@@ -9611,6 +9677,14 @@ mod tests {
         let with_av = build_all_cambox_av_sync_fixture("gate-pass-with", cameras, Some(av), 500.0);
         let without_av =
             build_all_cambox_av_sync_fixture("gate-pass-without", cameras, None, 500.0);
+
+        assert_eq!(
+            without_av["overall_pass"],
+            serde_json::json!(true),
+            "vacuity control: with NO A/V inputs this fixture must pass every gate outright — \
+             otherwise the with==without equality below is false==false and proves nothing: \
+             {without_av}"
+        );
 
         assert!(
             !with_av["all_cambox_av_sync"].is_null(),
@@ -9762,6 +9836,51 @@ mod tests {
         );
     }
 
+    /// #855/#861 — the ack list must never be able to silently DISABLE the re-armed BLOCKING
+    /// gate: with EVERY camera in the sweep operator-ack-excluded, zero cameras are judged, the
+    /// AND-fold is vacuously true, and (pre this guard) a run that measured NOTHING reported
+    /// `gate_pass: true`. rig-fleet.txt already acks 5 of 7 cameras, so the ack file is a live
+    /// single lever — UNMEASURED must fail closed, and the JSON carries the judged count.
+    #[test]
+    fn all_cambox_av_sync_fails_closed_when_every_camera_is_ack_excluded_861() {
+        let emit_log: Vec<(u8, u32, i64)> = (0..10u8).map(|k| (k, 1000 + k as u32, 0)).collect();
+        let audio_markers: Vec<(f64, u8)> = (0..10u8).map(|k| (k as f64 / 30.0, k)).collect();
+        let av = AvMarkerInputs {
+            fps: 30.0,
+            video_start_s: 0.0,
+            emit_log,
+            audio_markers,
+        };
+        let cameras: &[(&str, u32, i64)] = &[("CAM1", CAM1B, 800_000_000)];
+        let v = build_all_cambox_av_sync_fixture_with_ack(
+            "all-acked-fails-closed-861",
+            cameras,
+            Some(av),
+            0.0,
+            "cam1:test-ack,cam2:test-ack,cam3:test-ack,cam4:test-ack,cam5:test-ack,\
+             cam6:test-ack,cam7:test-ack",
+            None,
+        );
+        let av_sync = &v["all_cambox_av_sync"];
+        assert_eq!(
+            av_sync["judged_cameras"],
+            serde_json::json!(0),
+            "#861: every camera acked -> zero judged, and the count must be reported: {av_sync}"
+        );
+        assert_eq!(
+            av_sync["gate_pass"],
+            serde_json::json!(false),
+            "#861: an all-acked (zero-measurement) A/V gate must FAIL closed, never report a \
+             vacuous pass: {av_sync}"
+        );
+        assert_eq!(
+            v["overall_pass"],
+            serde_json::json!(false),
+            "#861: the vacuous-pass guard must reach the overall verdict while the gate is \
+             blocking: {v}"
+        );
+    }
+
     // ---- #714 — per-camera A/V coverage: a sample-starved (Unknown) camera gets a DERIVED
     // estimate from cam2's own measured offset + this camera's #286 delivery-latency delta,
     // whenever a --strih recording (delivery latency) is ALSO supplied this run. ----
@@ -9859,6 +9978,11 @@ mod tests {
             "2",
             "--av-expected-ms",
             &av_expected_ms.to_string(),
+            // Same span_ok vacuity guard as build_all_cambox_av_sync_fixture_with_ack (review
+            // finding on PR #1002): a sub-300s synthetic recording must not force
+            // overall_pass=false past the gate under test.
+            "--min-secs",
+            "0",
         ]);
 
         let (v, _pass) = build_and_print_verdict(
@@ -9969,13 +10093,14 @@ mod tests {
     }
 
     /// #714: the derived estimate's OWN gate can disagree with cam2's — a camera whose delivery
-    /// p50 is far enough above the mean pushes the re-centered offset outside ±20ms even though
-    /// cam2's own measured offset is safely inside it.
+    /// p50 is far enough above the mean pushes the re-centered offset outside the tolerance even
+    /// though cam2's own measured offset is safely inside it.
     #[test]
     fn all_cambox_av_sync_derived_gate_can_fail_even_when_cam2_itself_passes_714() {
         let emit_log: Vec<(u8, u32, i64)> = (0..10u8).map(|k| (k, 1000 + k as u32, 0)).collect();
         // Real markers land exactly at video_ts(1000+k) - 0.005s ⇒ cam1's (and cam2's own
-        // whole-recording) measured offset is a clean +5ms — safely inside ±20ms of expected=0.
+        // whole-recording) measured offset is a clean +5ms — safely inside the tolerance of
+        // expected=0.
         let audio_markers: Vec<(f64, u8)> =
             (0..10u8).map(|k| (k as f64 / 30.0 - 0.005, k)).collect();
         let av = AvMarkerInputs {
@@ -9984,12 +10109,20 @@ mod tests {
             emit_log,
             audio_markers,
         };
-        // cam1: 800ms delivery. cam3: 870ms delivery (70ms above cam1's, mean=835ms) -> cam3's
-        // derived offset = 5 + (870 - 835) = 5 + 35 = 40ms -> OUTSIDE +/-20ms even though cam2's
-        // own measured +5ms offset comfortably passes.
+        // cam1: 800ms delivery. cam3: 2×(tolerance+10ms) above cam1's, so with the two-camera
+        // mean sitting halfway, cam3's re-centered delta = tolerance+10 and its derived offset =
+        // 5 + tolerance + 10 -> OUTSIDE the bound even though cam2's own measured +5ms offset
+        // comfortably passes. Tolerance-relative (not a literal delivery pair) so this test pins
+        // the SPEC at any bound — it survived the 20→90ms interim change of the issue-861 re-arm
+        // (episode quantization, re-tighten tracked on issue 1003) untouched in intent.
+        let delta_over_ms = super::av_window::AV_OFFSET_GATE_TOLERANCE_MS + 10.0;
+        let cam3_delivery_ns = 800_000_000 + (2.0 * delta_over_ms * 1_000_000.0) as i64;
         let v = build_all_cambox_av_sync_with_delivery_fixture(
             "derive-fail",
-            &[("CAM1", CAM1B, 800_000_000), ("CAM3", CAM3B, 870_000_000)],
+            &[
+                ("CAM1", CAM1B, 800_000_000),
+                ("CAM3", CAM3B, cam3_delivery_ns),
+            ],
             Some(av),
             0.0,
         );
@@ -10007,14 +10140,14 @@ mod tests {
         );
         let derived_offset = av_sync["cam3"]["derived_offset_ms"].as_f64().unwrap();
         assert!(
-            (derived_offset - 40.0).abs() < 1e-6,
-            "expected 5.0 + (870 - 835) = 40.0, got {derived_offset}: {av_sync}"
+            (derived_offset - (5.0 + delta_over_ms)).abs() < 1e-6,
+            "expected 5.0 + (tolerance + 10), got {derived_offset}: {av_sync}"
         );
         assert_eq!(
             av_sync["cam3"]["gate_pass"],
             serde_json::json!(false),
-            "#714: a re-centered offset outside +/-20ms must FAIL, independent of cam2's own \
-             PASS: {av_sync}"
+            "#714: a re-centered offset outside the tolerance must FAIL, independent of cam2's \
+             own PASS: {av_sync}"
         );
         assert_eq!(
             v["overall_pass"],

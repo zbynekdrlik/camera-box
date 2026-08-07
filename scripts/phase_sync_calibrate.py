@@ -233,9 +233,9 @@ def compute_phase_sync_offsets(measured: dict, gate_bin: "str | None" = None) ->
 
 def active_ndi_sources() -> set:
     """#893 -- the 'NDI camN' strih source names for every camera currently in
-    CAMERA_ACTIVE_SET (env var, default "cam1 cam2 cam4" -- #898: cam3 retired 2026-07-31,
-    grabber card destroyed -- same read convention set-ndi-mapping.py's DEFAULT_ACTIVE_SET
-    already uses). Mirrors
+    CAMERA_ACTIVE_SET (env var, default "cam1 cam2" -- #947: cam4 removed 2026-08-06,
+    box never comes up on the network -- same read convention set-ndi-mapping.py's
+    DEFAULT_ACTIVE_SET already uses). Mirrors
     scripts/camera-set.sh's camera_active_ndi_sources_excluding_csv naming convention
     ("NDI {cam}") exactly.
 
@@ -246,7 +246,7 @@ def active_ndi_sources() -> set:
     retired camera could otherwise corrupt the whole formula's notion of "slowest", and
     --apply could write a pin to a camera that isn't even installed.
     """
-    raw = os.environ.get("CAMERA_ACTIVE_SET", "cam1 cam2 cam4")
+    raw = os.environ.get("CAMERA_ACTIVE_SET", "cam1 cam2")
     return {f"NDI {tok.strip()}" for tok in raw.replace(",", " ").split() if tok.strip()}
 
 

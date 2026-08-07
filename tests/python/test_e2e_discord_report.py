@@ -188,7 +188,9 @@ class TestDerivedAvFixture:
         assert "cam2: offset 1.5ms" in av_section
 
     def test_a_failing_derived_gate_is_reported_with_the_fail_glyph(self):
-        # cam6's derived offset (24.7ms) is outside +/-20ms -> gate_pass=false in the fixture.
+        # The fixture hardcodes cam6's gate_pass=false alongside its 24.7ms derived offset — the
+        # renderer must show the fail glyph from the JSON verdict, never re-derive the gate from
+        # the offset value (the live tolerance is AV_OFFSET_GATE_TOLERANCE_MS in Rust, not here).
         av_section = self.report.split("4️⃣")[1].split("5️⃣")[0]
         cam6_line = next(line for line in av_section.splitlines() if "cam6" in line)
         assert "❌" in cam6_line

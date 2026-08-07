@@ -778,6 +778,9 @@ jobs:
           if ($src -notmatch [regex]::Escape('decode_camera_box_qr((char *)data.payload, &cb)')) { Write-Error "camera-box dual-QR try-first decode gone (#398) — dock reverted to norihiro-only"; exit 1 }
           if ($src -notmatch [regex]::Escape('cb_video_ts_ns[256]')) { Write-Error "camera-box video-ring (live pairing) gone (#398)"; exit 1 }
           if ($src -notmatch [regex]::Escape('signal_sync_found(st->context, &si)')) { Write-Error "camera-box live sync_found emit gone (#398) — dock would stop showing our live offset"; exit 1 }
+          if (([regex]::Matches($src, [regex]::Escape('si.gate_convention = true;'))).Count -ne 2) { Write-Error "camera-box gate_convention emit tags != 2 (#999) — the display sign-convention fix dropped from an emit site"; exit 1 }
+          $dock = (Get-Content "vendor/av-sync-dock/src/sync-test-dock.cpp" -Raw) -replace '\s+', ' '
+          if ($dock -notmatch [regex]::Escape('cb_dock_latency_display_ms(dock_native_ts_ns, data.gate_convention)')) { Write-Error "on_sync_found no longer routes through cb_dock_latency_display_ms (#999) — dock display sign fix reverted"; exit 1 }
           Write-Output "#398 camera-box dual-QR dock patch present - OK"
 
       # #188: build the A/V sync dock (norihiro/obs-audio-video-sync-dock, vendored) against the
