@@ -193,9 +193,13 @@ mod tests {
     fn stamp_is_at_or_before_the_capture_instant_never_future_1009() {
         let fps = 30;
         let base = 100 * SEC_100NS;
-        // Offsets across the second: exactly on a boundary (0), just after (1), mid-frame,
-        // just under / just over the first boundary, and the last 100ns of the second.
-        for off in [0i64, 1, 100_000, 333_332, 333_334, 5_000_000, 9_999_999] {
+        // Offsets across the second: exactly on a boundary (0 AND 333_333 — the integer
+        // floor of 10^7/30, the case a naive slot recovery under-counts, review finding
+        // on issue 1009), just after (1), mid-frame, just under / just over the first
+        // boundary, and the last 100ns of the second.
+        for off in [
+            0i64, 1, 100_000, 333_332, 333_333, 333_334, 5_000_000, 9_999_999,
+        ] {
             let capture = base + off;
             let tc = genlock_emit_timecode_100ns(capture, capture, fps);
             assert!(

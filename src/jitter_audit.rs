@@ -334,6 +334,18 @@ mod tests {
     }
 
     #[test]
+    fn summarize_deltas_the_backward_regime_tick_counter_1009() {
+        // The gate-facing signal is the WINDOW DELTA of the cumulative counter — any
+        // movement means the configured hold was bypassed during the window.
+        let mut first = parse_audit_line(SAMPLE_LINE_CAM1).unwrap();
+        let mut last = first.clone();
+        first.backward_regime_ticks = 4;
+        last.backward_regime_ticks = 9;
+        let s = summarize(&[first, last]).unwrap();
+        assert_eq!(s.delta_backward_regime_ticks, 5);
+    }
+
+    #[test]
     fn backward_regime_ticks_defaults_to_zero_on_a_pre_1009_line() {
         // A log captured from a pre-#1009 build has no backward_regime_ticks= token — the
         // parser must yield 0, never fail the line.
