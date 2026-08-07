@@ -820,12 +820,23 @@ pub fn genlock_release_guarded(
     // trigger depend on each source's queue depth (a backward step smaller than a deep
     // source's buffer leaves its oldest frame NOT-future, so it stays frozen while a shallow
     // source jumps to live — the exact cross-source DESYNC genlock prevents). The MAX is
-    // depth-independent, so all genlock sources re-anchor UNIFORMLY once the step exceeds one
-    // interval. A legitimate large per-source latency override (≤2000 ms) buffers PAST-stamped
-    // frames (ts ≤ wall_now, aging toward the deadline), whose max is never > wall_now +
-    // interval, so the guard never touches it.
+    // depth-independent, so all genlock sources re-anchor UNIFORMLY once the step exceeds the
+    // margin. A legitimate large per-source latency override (≤2000 ms) buffers PAST-stamped
+    // frames (ts ≤ wall_now, aging toward the deadline), whose max never exceeds the margin,
+    // so the guard never touches it.
+    //
+    // #1009: the margin is the RE-QUALIFIED max(3×interval, 250 ms) from the Tier-0 authority
+    // (src/genlock_backlog.rs backward_step_margin_ns) — the old ONE-interval margin sat only
+    // network-delay away from the sender's deliberate ceil-to-boundary future bias and fired
+    // on a few ms of inter-box skew (the 2026-08-07 overnight −900 ms hold collapse). The
+    // STATEFUL parts of #1009 (sustained-tick qualification + regime self-heal + bounded
+    // regime warns) live in the C and in src/genlock_backlog.rs BackwardStepGuard ONLY —
+    // this stateless per-tick mirror keeps just the raw condition in lock-step (same
+    // minimal-glue shape as the #940 phase-pin, which is also C+Tier-0-mirror only).
     let max_ts = queued_ts_ascending.iter().copied().max();
-    let backward_step = max_ts.is_some_and(|m| m > wall_now_ns.saturating_add(interval_ns));
+    let backward_step = max_ts.is_some_and(|m| {
+        m > wall_now_ns.saturating_add(crate::genlock_backlog::backward_step_margin_ns(interval_ns))
+    });
     if backward_step {
         // #269 [0]: RE-ANCHOR by presenting the OLDEST queued frame and dropping NOTHING
         // extra (drop_oldest = 0). The pre-step frames are real captures; the caller erases
@@ -3510,20 +3521,31 @@ mod tests {
         // shallow source jumped to live: the exact cross-source DESYNC genlock prevents. The
         // trigger must test the NEWEST (max-ts) queued frame instead.
         let wall0 = WBASE + 1000 * NS30;
-        // A 5-frame buffer; backward step = 6 intervals. The step exceeds the buffer (due==0,
-        // would freeze) but the OLDEST frame is NOT itself > one interval in the future — only
-        // the NEWEST is. A depth-independent (max-ts) trigger must still detect the step.
+        // A 5-frame buffer; backward step = 10 intervals (~333 ms — above the #1009
+        // re-qualified margin of max(3 intervals, 250 ms); the pre-#1009 revision of this
+        // test used a 6-interval/200 ms step, which the margin now deliberately does NOT
+        // treat as a backward step — the scenario scaled WITH the trigger, its point is
+        // unchanged). The step exceeds the buffer (due==0, would freeze) but the OLDEST
+        // frame is only 5 intervals (~167 ms) ahead — UNDER the margin — while the NEWEST
+        // is 9 intervals (~300 ms) ahead — OVER it. A depth-independent (max-ts) trigger
+        // must still detect the step.
         let queued: Vec<u64> = (1..=5u64).rev().map(|i| wall0 - i * NS30).collect(); // [-5..-1]
-        let wall_after = wall0 - 6 * NS30;
+        let wall_after = wall0 - 10 * NS30;
         let present_ts = genlock_present_ts_reserve(wall_after, RESERVE_MS);
         assert!(
             !genlock_release(present_ts, &queued).present,
             "setup: must be a due==0 freeze on the unguarded path"
         );
+        let margin = crate::genlock_backlog::backward_step_margin_ns(NS30);
         assert!(
-            queued[0] <= wall_after + NS30,
-            "setup: the OLDEST frame must NOT be > one interval ahead — else the old \
+            queued[0] <= wall_after + margin,
+            "setup: the OLDEST frame must NOT exceed the #1009 margin — else an \
              oldest-frame trigger would already catch it and there'd be nothing to fix"
+        );
+        assert!(
+            *queued.last().unwrap() > wall_after + margin,
+            "setup: the NEWEST frame must exceed the #1009 margin, else the guard has \
+             nothing to detect at any depth"
         );
 
         let g = genlock_release_guarded(wall_after, NS30, present_ts, &queued);

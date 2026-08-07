@@ -186,16 +186,28 @@ fn backward_step_recovery_survives_the_cadence() {
     // buffer, count once per event) must remain intact alongside the cadence — the
     // cadence must not regress it. (tests/genlock_preload.rs guards the full #147
     // contract probe-gated; this default-features guard pins the composition.)
+    // #1009: the detection is the RE-QUALIFIED one (margin + sustain), and leaving a
+    // regime must SELF-HEAL the configured hold (genlock_backward_regime_end zeroes the
+    // locked boundary -> re-ACQUIRE) — this default-features guard is the ONLY local
+    // (Tier-0-visible) anchor on the C tokens, so it pins the full #1009 set too.
     let src = squish(&vendor_file(OBS_SOURCE));
     for marker in [
-        "max_ts > wall_now + interval",
+        "max_ts > wall_now + backward_margin",
+        "genlock_backward_step_margin_ns(",
+        "#define GENLOCK_BACKWARD_STEP_MIN_MARGIN_NS 250000000ULL",
+        "#define GENLOCK_BACKWARD_STEP_SUSTAIN_TICKS 3",
+        "static void genlock_backward_regime_end(",
+        "source->genlock_locked_next_boundary_ns = 0;",
+        "genlock_backward_regime_end(source, reserve_ms);",
+        "source->genlock_backward_regime_ticks++",
+        "backward_regime_ticks=%llu",
         "source->genlock_backward_steps++",
         "source->genlock_in_backward_step = true",
     ] {
         assert!(
             src.contains(marker),
-            "{OBS_SOURCE}: #401/#147 — the backward-step recovery marker `{marker}` is \
-             gone; the cadence port regressed the #147/#269 re-anchor. Re-apply."
+            "{OBS_SOURCE}: #401/#147/#1009 — the backward-step recovery marker `{marker}` is \
+             gone; the cadence port regressed the #147/#269/#1009 re-anchor guard. Re-apply."
         );
     }
 }

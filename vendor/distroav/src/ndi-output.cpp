@@ -41,9 +41,20 @@ static FORCE_INLINE uint32_t min_uint32(uint32_t a, uint32_t b)
 // per-frame emit time so cam->OBS and OBS<->OBS share one timebase.
 //
 // Fix: stamp the OS wall clock (DanteSync-disciplined on the broadcast boxes,
-// every node sub-ms-locked) snapped to the next 1/fps frame boundary, in 100ns
-// units since the Unix epoch — the SAME basis and boundary math as the camera-box
-// sender's next_boundary_100ns (src/ndi.rs), so the two timebases align.
+// every node sub-ms-locked) snapped to the 1/fps frame boundary AT OR BEFORE the
+// emit instant, in 100ns units since the Unix epoch — the SAME per-second grid
+// and boundary math as the camera-box sender (src/ndi.rs), so the two timebases
+// align.
+//
+// camera-box #1009: the boundary is the FLOOR (at-or-before), never the
+// strictly-next (ceil) one. The ceil stamp dated every outgoing frame 0..1
+// interval into the RECEIVER'S FUTURE at the emit instant by construction,
+// leaving only network delay as margin against the receiver's issue-147
+// backward-step guard — the 2026-08-07 overnight −900 ms hold collapse fired on
+// 0.3-45 ms of measured excess exactly because of this bias. Floor keeps grid
+// alignment (an exact boundary, identical for any sender observing the same
+// instant) while guaranteeing stamps are never future-dated. Changed in
+// lock-step with the camera sender (src/ndi.rs floor_boundary_100ns).
 // ---------------------------------------------------------------------------
 static const int64_t GENLOCK_UNITS_PER_SECOND = 10000000; // 100ns units / second
 
@@ -57,28 +68,29 @@ static int64_t genlock_wall_now_100ns()
 		.count();
 }
 
-// Next 1/fps frame boundary at or after now_100ns, computed relative to each
-// second to avoid drift. Direct port of camera-box next_boundary_100ns
-// (src/ndi.rs) so OBS emit timecodes fall on the SAME grid the cameras use.
-// fps <= 0 -> now (no alignment).
-static int64_t genlock_next_boundary_100ns(int64_t now_100ns, int64_t fps)
+// The 1/fps frame boundary AT OR BEFORE now_100ns (camera-box #1009: FLOOR, never
+// the strictly-next/ceil boundary — see the header comment above), computed
+// relative to each second to avoid drift. Direct port of camera-box
+// floor_boundary_100ns (src/ndi.rs) so OBS emit timecodes fall on the SAME grid
+// the cameras use. fps <= 0 -> now (no alignment).
+static int64_t genlock_floor_boundary_100ns(int64_t now_100ns, int64_t fps)
 {
 	if (fps <= 0)
 		return now_100ns;
 	int64_t current_second = (now_100ns / GENLOCK_UNITS_PER_SECOND) * GENLOCK_UNITS_PER_SECOND;
 	int64_t offset_in_second = now_100ns - current_second;
+	// Which frame slot the instant falls in (0..fps-1); its own boundary is at-or-before.
 	int64_t frame_in_second = (offset_in_second * fps) / GENLOCK_UNITS_PER_SECOND;
-	int64_t next_frame_in_second = frame_in_second + 1;
-	if (next_frame_in_second >= fps)
-		return current_second + GENLOCK_UNITS_PER_SECOND;
-	return current_second + (next_frame_in_second * GENLOCK_UNITS_PER_SECOND / fps);
+	// Multiply before divide to maintain precision (same as the camera-box mirror).
+	return current_second + (frame_in_second * GENLOCK_UNITS_PER_SECOND / fps);
 }
 
 // Boundary-aligned real wall-clock emit timecode for a frame at `framerate` fps.
+// camera-box #1009: the boundary at-or-before the emit instant (floor).
 static int64_t genlock_emit_timecode_100ns(double framerate)
 {
 	int64_t fps = (int64_t)llround(framerate);
-	return genlock_next_boundary_100ns(genlock_wall_now_100ns(), fps);
+	return genlock_floor_boundary_100ns(genlock_wall_now_100ns(), fps);
 }
 
 typedef void (*uyvy_conv_function)(uint8_t *input[], uint32_t in_linesize[], uint32_t start_y, uint32_t end_y,

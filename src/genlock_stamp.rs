@@ -27,8 +27,8 @@ pub fn capture_realtime_100ns(capture_monotonic_100ns: i64, mono_to_real_offset_
     capture_monotonic_100ns.saturating_add(mono_to_real_offset_100ns)
 }
 
-/// The emitted frame's genlock NDI `timecode` (100ns units): the frame boundary at/after
-/// the frame's real CAPTURE instant. `arrival_realtime_100ns` is the wall-clock the send
+/// The emitted frame's genlock NDI `timecode` (100ns units): the frame boundary AT OR
+/// BEFORE the frame's real CAPTURE instant (#1009 — floor, never the future-dated ceil). `arrival_realtime_100ns` is the wall-clock the send
 /// thread observes for the SAME frame (post-dequeue); it is retained in the signature so
 /// callers can also compute the capture-vs-arrival divergence
 /// ([`stamp_arrival_divergence_100ns`], a per-camera latency proxy for the #624 gate), but
@@ -44,8 +44,12 @@ pub fn genlock_emit_timecode_100ns(
     // photon->dequeue latency d_X does NOT leak into the stamp — two cameras that filmed the
     // same real moment then emit the same timecode and the receiver genlock presents them
     // together. `arrival` is retained only for the divergence proxy below, never the basis.
+    // #1009: FLOOR — the boundary AT-OR-BEFORE the capture instant, never the strictly-next
+    // (ceil) one, which dated every stamp 0..1 interval into the receiver's future and armed
+    // the issue-147 backward-step hair-trigger (issue 1007: 0.3 ms measured margin). Grid
+    // alignment and the same-instant-same-stamp property are preserved (same per-second grid).
     let _ = arrival_realtime_100ns;
-    crate::ndi::next_boundary_100ns(capture_realtime_100ns, fps)
+    crate::ndi::floor_boundary_100ns(capture_realtime_100ns, fps)
 }
 
 /// The whole-frame divergence between where the ARRIVAL-based stamp would land and where the
@@ -66,8 +70,10 @@ pub fn stamp_arrival_divergence_100ns(
     arrival_realtime_100ns: i64,
     fps: i64,
 ) -> i64 {
-    crate::ndi::next_boundary_100ns(arrival_realtime_100ns, fps)
-        - crate::ndi::next_boundary_100ns(capture_realtime_100ns, fps)
+    // #1009: floor on both sides, in lock-step with the stamp itself (the proxy compares
+    // where the two stamps LAND, so it must use the same boundary convention).
+    crate::ndi::floor_boundary_100ns(arrival_realtime_100ns, fps)
+        - crate::ndi::floor_boundary_100ns(capture_realtime_100ns, fps)
 }
 
 /// How many CONSECUTIVE captured frames elapse before the monotonic->realtime offset
@@ -137,14 +143,16 @@ mod tests {
         );
     }
 
-    /// The stamped timecode is the frame boundary at/after the CAPTURE instant.
+    /// The stamped timecode is the frame boundary at/BEFORE the CAPTURE instant (#1009 —
+    /// floor; the pre-#1009 revision of this test pinned the ceil boundary, which is the
+    /// future-bias defect itself, so its expectation changed WITH the behavior).
     #[test]
     fn timecode_is_the_capture_boundary() {
         let fps = 30;
         let base = 100 * SEC_100NS;
-        let capture = base + 100_000; // 10 ms in -> next 30fps boundary is 33.33 ms
-        let expected = base + SEC_100NS / fps; // first 30fps boundary after the second start
-                                               // Even with a LATE arrival (next frame over), the timecode tracks capture, not arrival.
+        let capture = base + 100_000; // 10 ms in -> inside 30fps frame 0 (0..33.33 ms)
+        let expected = base; // frame 0's own boundary — at-or-before the capture instant
+                             // Even with a LATE arrival (next frame over), the timecode tracks capture, not arrival.
         assert_eq!(
             genlock_emit_timecode_100ns(capture, base + 400_000, fps),
             expected
@@ -170,6 +178,54 @@ mod tests {
             SEC_100NS / fps,
             "a card that lags into the next genlock frame diverges by exactly one frame"
         );
+    }
+
+    /// #1009 (defect B): the emitted genlock stamp must be the frame boundary AT OR BEFORE
+    /// the capture instant — NEVER in the future. The ceil stamp (the strictly-NEXT
+    /// boundary) put every emitted frame 0..1 interval in the RECEIVER'S FUTURE by
+    /// construction, which is what armed the issue-147 backward-step hair-trigger overnight
+    /// (issue 1007 forensics: measured margin at trigger min 0.3 ms — network delay was the
+    /// ONLY headroom). Floor preserves the shared grid (still an exact boundary, so two
+    /// cameras capturing the same instant still stamp identically) while guaranteeing a
+    /// receiver comparing the stamp against its own wall clock never sees the future in
+    /// normal operation.
+    #[test]
+    fn stamp_is_at_or_before_the_capture_instant_never_future_1009() {
+        let fps = 30;
+        let base = 100 * SEC_100NS;
+        // Offsets across the second: exactly on a boundary (0), just after (1), mid-frame,
+        // just under / just over the first boundary, and the last 100ns of the second.
+        for off in [0i64, 1, 100_000, 333_332, 333_334, 5_000_000, 9_999_999] {
+            let capture = base + off;
+            let tc = genlock_emit_timecode_100ns(capture, capture, fps);
+            assert!(
+                tc <= capture,
+                "off {off}: stamp {tc} is IN THE FUTURE of the capture instant {capture} — \
+                 the ceil-to-boundary bias hands the receiver future-stamped frames in \
+                 normal operation (the issue-1007 hair-trigger arming, #1009)"
+            );
+            // Never more than one frame interval behind either (floor of the CURRENT
+            // interval, not some older boundary).
+            assert!(
+                capture - tc < SEC_100NS / fps + 1,
+                "off {off}: stamp {tc} fell more than one interval behind capture {capture}"
+            );
+            // Grid alignment preserved: the stamp is an exact boundary of the shared
+            // per-second grid (frame_k = second_start + k*UNITS/fps, multiply-then-divide).
+            // The inverse must be the CEIL division: boundary_k = floor(k*UNITS/fps) sits
+            // just UNDER k*UNITS/fps whenever fps does not divide UNITS evenly (e.g.
+            // boundary_1 at 30 fps = 333_333, not 333_333.33), so a floor inverse
+            // (in_second*fps/UNITS) under-recovers k by one and falsely flags an exact
+            // boundary as off-grid.
+            let cs = (tc / SEC_100NS) * SEC_100NS;
+            let in_second = tc - cs;
+            let k = (in_second * fps + SEC_100NS - 1) / SEC_100NS;
+            assert_eq!(
+                cs + k * SEC_100NS / fps,
+                tc,
+                "off {off}: stamp {tc} is not on the shared boundary grid"
+            );
+        }
     }
 
     /// The monotonic->realtime offset must be re-sampled once the cadence interval has

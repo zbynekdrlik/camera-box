@@ -399,8 +399,17 @@ jobs:
           # #147: the backward wall-clock step (NTP/PTP sawtooth) re-anchor guard — without it the
           # ts-align release HOLDs (freezes the live program feed) indefinitely on a backward step.
           # #269 [3]: detection is on the MAX queued ts (depth-independent, uniform across sources).
-          if ($src -notmatch [regex]::Escape('max_ts > wall_now + interval')) {
-            Write-Error "obs-source.c: #147/#269 backward-clock-step detection (max queued ts > wall_now + interval) gone — ts-align would freeze the program feed on an NTP/PTP step — re-apply"; exit 1
+          # #1009: the trigger is RE-QUALIFIED — margin max(3 intervals, 250 ms) + sustained across
+          # consecutive due==0 ticks; the one-interval single-tick trigger fired on a few ms of
+          # sender-ahead stamp skew and permanently collapsed the deep hold (2026-08-07 −900 ms).
+          if ($src -notmatch [regex]::Escape('max_ts > wall_now + backward_margin')) {
+            Write-Error "obs-source.c: #147/#269/#1009 re-qualified backward-clock-step detection (max queued ts > wall_now + backward_margin) gone — either the guard is gone (freeze on an NTP/PTP step) or it reverted to the issue-1007 hair-trigger — re-apply"; exit 1
+          }
+          if ($src -notmatch [regex]::Escape('#define GENLOCK_BACKWARD_STEP_MIN_MARGIN_NS 250000000ULL')) {
+            Write-Error "obs-source.c: #1009 backward-step margin floor (250 ms) gone — the guard would hair-trigger on sender-ahead stamp skew again — re-apply"; exit 1
+          }
+          if ($src -notmatch [regex]::Escape('#define GENLOCK_BACKWARD_STEP_SUSTAIN_TICKS 3')) {
+            Write-Error "obs-source.c: #1009 backward-step sustained qualification gone — single-tick hair-trigger again — re-apply"; exit 1
           }
           if ($src -notmatch [regex]::Escape('source->genlock_backward_steps++')) {
             Write-Error "obs-source.c: #147 backward-step re-anchor counter (genlock_backward_steps) gone — re-apply"; exit 1
@@ -409,7 +418,16 @@ jobs:
           if ($src -notmatch [regex]::Escape('source->genlock_in_backward_step = true')) {
             Write-Error "obs-source.c: #269 [2] backward-step per-event latch (genlock_in_backward_step) gone — counter would over-report — re-apply"; exit 1
           }
-          Write-Output "genlock timestamp-aligned release patch present (#257 build-default ts-align + wall-clock guard + present_ts + #147 backward-step recovery) — OK"
+          # #1009 SELF-HEAL: leaving the regime must zero the locked boundary (re-ACQUIRE the
+          # configured hold) — without it a backward-step regime leaves the FIFO consuming at the
+          # live edge FOREVER (only an OBS relaunch cleared the overnight collapse).
+          if ($src -notmatch [regex]::Escape('genlock_backward_regime_end(source, reserve_ms);')) {
+            Write-Error "obs-source.c: #1009 regime-exit SELF-HEAL (genlock_backward_regime_end) gone — a hold collapse would be a permanent absorbing state again — re-apply"; exit 1
+          }
+          if ($src -notmatch [regex]::Escape('backward_regime_ticks=%llu')) {
+            Write-Error "obs-source.c: #1009 backward_regime_ticks audit exposure gone — a sustained hold-bypass regime would be invisible to the E2E/drift gates — re-apply"; exit 1
+          }
+          Write-Output "genlock timestamp-aligned release patch present (#257 build-default ts-align + wall-clock guard + present_ts + #147/#1009 re-qualified backward-step recovery + self-heal) — OK"
 
       # #940 piece 1: fail fast if the per-event relock phase-evidence log line is missing —
       # mirrors the Linux-CI guard
@@ -549,7 +567,19 @@ jobs:
           if ($src -match [regex]::Escape('audio_frame.timecode = NDIlib_send_timecode_synthesize')) {
             Write-Error "ndi-output.cpp: stock NDIlib_send_timecode_synthesize audio assignment is BACK — #78 reverted (#85)"; exit 1
           }
-          Write-Output "DistroAV real-wall-clock emit-timecode patch present (genlock_emit_timecode_100ns video + genlock_wall_now_100ns audio, no synthesize assignment) — OK"
+          # camera-box #1009: the emit stamp must be the FLOOR boundary (at-or-before the emit
+          # instant), never the strictly-next/ceil one — the ceil bias dated every frame 0..1
+          # interval into the receiver's future and armed the issue-147 hair-trigger (the
+          # 2026-08-07 overnight -900 ms hold collapse). Both the floor helper's presence AND
+          # the ceil helper's ABSENCE are gated (a subtree pull restoring the old helper name
+          # would silently re-bias the stamps).
+          if ($src -notmatch [regex]::Escape('return genlock_floor_boundary_100ns(genlock_wall_now_100ns(), fps);')) {
+            Write-Error "ndi-output.cpp: #1009 floor emit stamp (genlock_floor_boundary_100ns) gone — the sender future-bias (issue 1007 hair-trigger arming) is back"; exit 1
+          }
+          if ($src -match 'genlock_next_boundary_100ns') {
+            Write-Error "ndi-output.cpp: #1009 — the pre-1009 ceil boundary helper name is back; emit stamps may be future-dated again"; exit 1
+          }
+          Write-Output "DistroAV real-wall-clock emit-timecode patch present (genlock_emit_timecode_100ns video via #1009 floor boundary + genlock_wall_now_100ns audio, no synthesize assignment) — OK"
 
       # #93: assert the NDI source-name use-after-free fix is present in the vendored
       # DistroAV source BEFORE the 150-min build, so a future `git subtree pull` (#44)

@@ -257,6 +257,189 @@ pub fn phase_pinned_is_due(frame_ts_ns: u64, deadline_ns: u64) -> bool {
     frame_ts_ns <= deadline_ns.saturating_add(PHASE_PIN_HYSTERESIS_NS)
 }
 
+// ---------------------------------------------------------------------------------------------
+// #1009 — the backward-clock-step guard, RE-QUALIFIED (Tier-0 mirror of the C guard in
+// obs-source.c's ts-align release, the issue-147 branch).
+//
+// The overnight −900 ms collapse (issue 1007 forensics): the deployed guard triggers on
+// `max(queued ts) > wall_now + interval` during any routine due==0 hold tick — a margin of ONE
+// frame interval, single-tick — while the SENDER deliberately stamps up to one interval in the
+// FUTURE (ceil-to-boundary, defect B of issue 1009). Normal operation therefore sits only
+// `network delay` away from the trigger (measured excess at trigger: min 0.3 ms), so a few ms
+// of sender-ahead clock skew fires it every tick, the re-anchor re-locks the issue-401 cadence
+// boundary to the live edge, and NOTHING ever restores the configured hold — a permanent
+// absorbing live-edge state (depth 0-1 at a 894 ms knob, offline-verified −900.35 ms A/V).
+//
+// The re-qualified guard (this module is the authority; the C mirrors it in lock-step):
+//   * margin ≫ the sender's deliberate future bias: `max(3×interval, 250 ms)`, never one
+//     interval;
+//   * sustained: the condition must hold for `BACKWARD_STEP_SUSTAIN_TICKS` CONSECUTIVE due==0
+//     ticks before the first re-anchor — a single-tick excursion falls through to the cadence
+//     (which presents/holds normally off the locked stamp-relative boundary, so nothing
+//     freezes while qualifying);
+//   * self-heal: on leaving the regime the locked boundary is ZEROED, which is the existing
+//     ACQUIRE state — the wall-deadline path rebuilds the queue to the configured latency
+//     depth and re-locks (a bounded ~latency_ms transient, never a permanent collapse);
+//   * loud: entry warns once per event (as before), a PERSISTENT regime re-warns on a bounded
+//     cadence (older than BACKWARD_REGIME_WARN_AFTER_NS, at most once per
+//     BACKWARD_REGIME_WARN_INTERVAL_NS), and every re-anchor tick increments a cumulative
+//     `reanchor_ticks` counter the audit line / E2E gates can assert stays 0.
+// ---------------------------------------------------------------------------------------------
+
+/// The FLOOR of the backward-step trigger margin, ns (250 ms). A real NTP/PTP backward step in
+/// the issue-147 evidence is hundreds of ms to seconds; sender-ahead stamp skew (the issue-1007
+/// storm) measured tens of ms at the extreme. 250 ms cleanly separates the populations.
+pub const BACKWARD_STEP_MIN_MARGIN_NS: u64 = 250_000_000;
+
+/// The interval-scaled component of the trigger margin: at least 3 frame intervals, so the
+/// sender's deliberate ceil-to-boundary future bias (≤1 interval) plus arrival bunching can
+/// never come close, at any frame rate.
+pub const BACKWARD_STEP_MARGIN_INTERVALS: u64 = 3;
+
+/// How many CONSECUTIVE due==0 ticks the over-margin condition must persist before the guard
+/// fires its first re-anchor. A one/two-tick excursion (a stamp outlier, a mid-correction
+/// seam) is NOT a backward step.
+pub const BACKWARD_STEP_SUSTAIN_TICKS: u32 = 3;
+
+/// A re-anchor regime older than this is abnormal and must start re-warning (the once-per-latch
+/// entry WARN alone let the overnight collapse run silent for 3+ hours).
+pub const BACKWARD_REGIME_WARN_AFTER_NS: u64 = 2_000_000_000;
+
+/// Minimum spacing between bounded-cadence regime warnings (never per-tick log spam).
+pub const BACKWARD_REGIME_WARN_INTERVAL_NS: u64 = 5_000_000_000;
+
+/// The backward-step trigger margin for a given render interval: `max(3×interval, 250 ms)`.
+///
+/// Mirror of the C `genlock_backward_step_margin_ns()` (obs-source.c) — keep in lock-step.
+pub fn backward_step_margin_ns(interval_ns: u64) -> u64 {
+    (BACKWARD_STEP_MARGIN_INTERVALS * interval_ns).max(BACKWARD_STEP_MIN_MARGIN_NS)
+}
+
+/// What the guard decided for this tick. The caller (the C ts-align release / the test FIFO
+/// sim) applies the side effects; the guard owns only the qualification state machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackwardStepAction {
+    /// No over-margin condition and no regime active — a normal tick, fall through to the
+    /// cadence untouched.
+    None,
+    /// The over-margin condition is present but not yet sustained — fall through to the
+    /// cadence (NO re-anchor); the cadence's locked boundary keeps presenting/holding.
+    Pending,
+    /// A qualified, sustained backward step — re-anchor THIS tick: present the oldest queued
+    /// frame and re-lock the cadence boundary to it (+interval). `entry` = first tick of this
+    /// event (count it + entry WARN); `warn` = the bounded-cadence persistent-regime WARN is
+    /// due this tick.
+    Reanchor { entry: bool, warn: bool },
+    /// The regime just ENDED — self-heal: the caller must ZERO the locked cadence boundary so
+    /// the release re-ACQUIREs the configured hold from the wall deadline (queue rebuilds to
+    /// latency depth; bounded transient), then fall through to the cadence.
+    SelfHeal,
+}
+
+/// The per-source backward-step qualification state (mirrors the C per-source fields on
+/// `obs_source`: `genlock_in_backward_step`, `genlock_backward_pending_ticks`,
+/// `genlock_backward_regime_start_ns`, `genlock_backward_last_warn_ns`,
+/// `genlock_backward_regime_ticks`). One instance per genlock source, ticked only on the
+/// ts-align release path. This module is the Tier-0 authority; keep the C in lock-step.
+#[derive(Debug, Default)]
+pub struct BackwardStepGuard {
+    in_step: bool,
+    pending_ticks: u32,
+    regime_start_ns: u64,
+    last_warn_ns: u64,
+    reanchor_ticks: u64,
+}
+
+impl BackwardStepGuard {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Is a re-anchor regime currently latched (the C `genlock_in_backward_step`)?
+    pub fn in_step(&self) -> bool {
+        self.in_step
+    }
+
+    /// Cumulative re-anchor ticks across all regimes (the C `genlock_backward_regime_ticks`
+    /// audit counter). Healthy operation keeps this at 0.
+    pub fn reanchor_ticks(&self) -> u64 {
+        self.reanchor_ticks
+    }
+
+    /// Evaluate one due==0 hold tick. `max_queued_ts_ns` is the NEWEST queued stamp (the C
+    /// scans for the true max — arrival order is non-monotonic across a step seam),
+    /// `wall_now_ns` the receiver wall clock at the deadline read, `log_now_ns` the monotonic
+    /// clock used for the warn cadence (the C `now_ns` from os_gettime_ns).
+    pub fn tick_due0(
+        &mut self,
+        max_queued_ts_ns: u64,
+        wall_now_ns: u64,
+        interval_ns: u64,
+        log_now_ns: u64,
+    ) -> BackwardStepAction {
+        // #1009 re-qualified trigger: margin >> the sender's deliberate ceil-to-boundary
+        // future bias (max(3×interval, 250 ms)), so plain sender-ahead stamp skew can never
+        // come close — only a REAL local backward step exceeds it.
+        let head_future =
+            max_queued_ts_ns > wall_now_ns.saturating_add(backward_step_margin_ns(interval_ns));
+        if head_future {
+            if self.in_step {
+                // Regime continues: re-anchor, and re-warn on a bounded cadence once the
+                // regime is abnormal-old (> BACKWARD_REGIME_WARN_AFTER_NS), at most one warn
+                // per BACKWARD_REGIME_WARN_INTERVAL_NS — never per-tick, never
+                // once-per-latch-only. The entry WARN does not pre-arm the spacing: the
+                // FIRST cadence warn fires the moment the regime crosses the age threshold
+                // (last_warn_ns is 0 until a cadence warn actually fires).
+                self.reanchor_ticks += 1;
+                let warn = log_now_ns.saturating_sub(self.regime_start_ns)
+                    > BACKWARD_REGIME_WARN_AFTER_NS
+                    && log_now_ns.saturating_sub(self.last_warn_ns)
+                        >= BACKWARD_REGIME_WARN_INTERVAL_NS;
+                if warn {
+                    self.last_warn_ns = log_now_ns;
+                }
+                return BackwardStepAction::Reanchor { entry: false, warn };
+            }
+            // Not yet in a regime: the condition must SUSTAIN across consecutive due==0
+            // ticks before the first re-anchor — a 1-2 tick excursion falls through to the
+            // cadence (which presents/holds normally off its locked boundary).
+            self.pending_ticks = self.pending_ticks.saturating_add(1);
+            if self.pending_ticks >= BACKWARD_STEP_SUSTAIN_TICKS {
+                self.in_step = true;
+                self.regime_start_ns = log_now_ns;
+                self.last_warn_ns = 0;
+                self.reanchor_ticks += 1;
+                return BackwardStepAction::Reanchor {
+                    entry: true,
+                    warn: false,
+                };
+            }
+            return BackwardStepAction::Pending;
+        }
+        self.pending_ticks = 0;
+        if self.in_step {
+            // #1009 SELF-HEAL: the qualified regime ended — the caller must zero the locked
+            // cadence boundary so the release re-ACQUIREs the configured hold from the wall
+            // deadline (the collapse must never be an absorbing state).
+            self.in_step = false;
+            return BackwardStepAction::SelfHeal;
+        }
+        BackwardStepAction::None
+    }
+
+    /// A due>0 tick (frames matured against the wall deadline) — the condition is structurally
+    /// absent this tick. Ends any active regime with the same SELF-HEAL contract as
+    /// [`Self::tick_due0`]'s clear path.
+    pub fn tick_due_positive(&mut self) -> BackwardStepAction {
+        self.pending_ticks = 0;
+        if self.in_step {
+            self.in_step = false;
+            return BackwardStepAction::SelfHeal;
+        }
+        BackwardStepAction::None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -805,5 +988,441 @@ mod tests {
              half a 60fps frame interval ({} ns), or it risks pulling in an extra frame",
             I60 / 2
         );
+    }
+
+    // ------------------------------------------------------------------------------------
+    // #1009 — backward-step guard re-qualification + self-heal acceptance tests.
+    //
+    // The FIFO sim below models the C ts-align release exactly as obs-source.c structures
+    // it for a 1:1 (N==1) source: phase-pinned wall deadline -> due prefix scan -> the
+    // due==0 guard -> the issue-401 locked-boundary cadence (ACQUIRE / STEADY / GAP / HOLD).
+    // The backlog-storm and settle-drain branches are omitted — none of these scenarios
+    // exceeds the backlog threshold or holds a parked overshoot.
+    // ------------------------------------------------------------------------------------
+
+    const BASE_1009: u64 = 10_000_000_000_000;
+    const RESERVE_MS_1009: u32 = 894; // the live knob the overnight collapse bypassed
+    const RESERVE_NS_1009: u64 = RESERVE_MS_1009 as u64 * 1_000_000;
+
+    struct SimFifo1009 {
+        queue: std::collections::VecDeque<u64>,
+        boundary: u64,
+        guard: BackwardStepGuard,
+        holds: u64,
+        underruns: u64,
+        backward_events: u64,
+        regime_warns: u64,
+        selfheals: u64,
+        /// (tick index, wall - presented stamp) per presentation.
+        presented: Vec<(u64, i64)>,
+    }
+
+    impl SimFifo1009 {
+        fn new() -> Self {
+            Self {
+                queue: std::collections::VecDeque::new(),
+                boundary: 0,
+                guard: BackwardStepGuard::new(),
+                holds: 0,
+                underruns: 0,
+                backward_events: 0,
+                regime_warns: 0,
+                selfheals: 0,
+                presented: Vec::new(),
+            }
+        }
+
+        /// One render tick at receiver wall time `wall` (also the warn-cadence clock — the
+        /// sim never steps the log clock). Mirrors the C release path's decision order.
+        fn tick(&mut self, k: u64, wall: u64, log_now: u64) {
+            if self.queue.is_empty() {
+                // A true-empty BEFORE anything was ever presented is the startup build
+                // phase (the C holds/build-fill path, issue 269 [4]) — only a post-start
+                // empty is real starvation.
+                if !self.presented.is_empty() {
+                    self.underruns += 1;
+                }
+                return;
+            }
+            let present_ts = phase_pinned_deadline(wall.saturating_sub(RESERVE_NS_1009), I30);
+            // The C due scan is a PREFIX scan in arrival order.
+            let due = self
+                .queue
+                .iter()
+                .take_while(|&&ts| phase_pinned_is_due(ts, present_ts))
+                .count();
+            if due == 0 {
+                let max_ts = *self.queue.iter().max().unwrap();
+                match self.guard.tick_due0(max_ts, wall, I30, log_now) {
+                    BackwardStepAction::Reanchor { entry, warn } => {
+                        if entry {
+                            self.backward_events += 1;
+                        }
+                        if warn {
+                            self.regime_warns += 1;
+                        }
+                        let ts = self.queue.pop_front().unwrap();
+                        self.boundary = ts + I30;
+                        self.presented.push((k, wall as i64 - ts as i64));
+                        return;
+                    }
+                    BackwardStepAction::SelfHeal => {
+                        self.selfheals += 1;
+                        self.boundary = 0;
+                    }
+                    BackwardStepAction::Pending | BackwardStepAction::None => {}
+                }
+            } else if matches!(self.guard.tick_due_positive(), BackwardStepAction::SelfHeal) {
+                self.selfheals += 1;
+                self.boundary = 0;
+            }
+            // The issue-401 cadence, N==1 paths.
+            if self.boundary == 0 {
+                if due > 0 {
+                    // ACQUIRE: jump to the newest due frame.
+                    let mut ts = 0;
+                    for _ in 0..due {
+                        ts = self.queue.pop_front().unwrap();
+                    }
+                    self.boundary = ts + I30;
+                    self.presented.push((k, wall as i64 - ts as i64));
+                } else {
+                    self.holds += 1;
+                }
+            } else if *self.queue.front().unwrap() <= self.boundary {
+                // STEADY: the head matured by the locked boundary.
+                let ts = self.queue.pop_front().unwrap();
+                self.boundary = ts + I30;
+                self.presented.push((k, wall as i64 - ts as i64));
+            } else if present_ts >= *self.queue.front().unwrap() {
+                // GAP RESYNC: aged past the reserve, beyond the boundary.
+                let ts = self.queue.pop_front().unwrap();
+                self.boundary = ts + I30;
+                self.presented.push((k, wall as i64 - ts as i64));
+            } else {
+                self.holds += 1;
+            }
+        }
+    }
+
+    /// Drive `n_ticks` of a 30 fps receiver against a sender whose frames arrive with
+    /// `net_ns` transport delay, stamped with the WORST-CASE deployed ceil bias (a full
+    /// interval in the future at emit) plus a per-tick sender-clock-ahead skew from
+    /// `skew_at(k)`. `sender_period_ns` slightly above I30 produces the routine due==0
+    /// hold ticks of the live rig (boundary churn). `wall_offset_at(k)` models receiver
+    /// wall-clock steps (0 = none).
+    fn run_sim_1009(
+        fifo: &mut SimFifo1009,
+        n_ticks: u64,
+        sender_period_ns: u64,
+        net_ns: u64,
+        skew_at: impl Fn(u64) -> u64,
+        wall_offset_at: impl Fn(u64) -> i64,
+    ) {
+        let mut next_emit = 0u64;
+        for k in 0..n_ticks {
+            let true_now = BASE_1009 + k * I30;
+            // Deliver every frame emitted (plus transport delay) by this tick instant.
+            loop {
+                let e = BASE_1009 + next_emit * sender_period_ns;
+                if e + net_ns > true_now {
+                    break;
+                }
+                // Worst-case deployed sender stamp: ceil-to-boundary = up to one full
+                // interval ahead of the sender clock, which itself is `skew` ahead.
+                let stamp = e + skew_at(next_emit) + I30;
+                fifo.queue.push_back(stamp);
+                next_emit += 1;
+            }
+            let wall = (true_now as i64 + wall_offset_at(k)) as u64;
+            // The warn-cadence clock is monotonic (immune to the wall steps we model).
+            fifo.tick(k, wall, true_now);
+        }
+    }
+
+    /// Acceptance 1 (#1009): a sustained sender-ahead skew of 5-50 ms must NEVER fire the
+    /// backward-step path and NEVER collapse the configured hold. This is exactly the
+    /// overnight trigger shape (dantesync chase-step skew + the sender's ceil future bias).
+    #[test]
+    fn sender_ahead_skew_5_to_50ms_never_fires_the_guard_or_collapses_the_hold_1009() {
+        for skew_ms in [5u64, 20, 50] {
+            let skew = skew_ms * 1_000_000;
+            let mut fifo = SimFifo1009::new();
+            // Sender ~2% slow: routine due==0 hold ticks occur (the live boundary churn).
+            run_sim_1009(&mut fifo, 900, I30 + I30 / 50, 1_000_000, |_| skew, |_| 0);
+            assert_eq!(
+                fifo.backward_events, 0,
+                "skew {skew_ms} ms: the backward-step guard fired {} event(s) on plain \
+                 sender-ahead stamp skew — the issue-1007 hair-trigger (margin must be \
+                 >> the sender's one-interval future bias)",
+                fifo.backward_events
+            );
+            assert_eq!(
+                fifo.guard.reanchor_ticks(),
+                0,
+                "skew {skew_ms} ms: re-anchor ticks must stay 0 in normal operation"
+            );
+            // The hold must be the configured latency, not the live edge: presented frames
+            // in the settled tail sit ~reserve old (± 2 intervals of quantization).
+            let tail: Vec<i64> = fifo
+                .presented
+                .iter()
+                .filter(|(k, _)| *k >= 700)
+                .map(|(_, age)| *age)
+                .collect();
+            assert!(
+                !tail.is_empty(),
+                "skew {skew_ms} ms: the sim presented nothing in the settled tail"
+            );
+            let min_ok = RESERVE_NS_1009 as i64 - 2 * I30 as i64;
+            let max_ok = RESERVE_NS_1009 as i64 + 2 * I30 as i64;
+            for age in &tail {
+                assert!(
+                    (min_ok..=max_ok).contains(age),
+                    "skew {skew_ms} ms: presented-frame age {age} ns is outside the \
+                     configured hold {RESERVE_NS_1009}±2 intervals — the hold collapsed \
+                     (live-edge consumption)",
+                );
+            }
+        }
+    }
+
+    /// Acceptance 1b (#1009): when a sender-ahead skew CLEARS (the dantesync correction
+    /// lands), the hold must still be the configured latency afterwards — under the
+    /// deployed guard the build/steady phase was already absorbed into permanent live-edge
+    /// mode and never came back.
+    #[test]
+    fn hold_survives_a_sender_skew_episode_and_its_clearing_1009() {
+        let mut fifo = SimFifo1009::new();
+        // 40 ms sender-ahead skew for the first 300 ticks, then corrected to 0.
+        run_sim_1009(
+            &mut fifo,
+            900,
+            I30 + I30 / 50,
+            1_000_000,
+            |j| if j < 300 { 40_000_000 } else { 0 },
+            |_| 0,
+        );
+        assert_eq!(
+            fifo.backward_events, 0,
+            "a 40 ms sender-ahead episode fired the backward-step guard ({} events) — \
+             the hair-trigger defect",
+            fifo.backward_events
+        );
+        let tail: Vec<i64> = fifo
+            .presented
+            .iter()
+            .filter(|(k, _)| *k >= 750)
+            .map(|(_, age)| *age)
+            .collect();
+        assert!(!tail.is_empty(), "nothing presented in the settled tail");
+        let min_ok = RESERVE_NS_1009 as i64 - 2 * I30 as i64;
+        let max_ok = RESERVE_NS_1009 as i64 + 2 * I30 as i64;
+        for age in &tail {
+            assert!(
+                (min_ok..=max_ok).contains(age),
+                "after the skew episode cleared, presented-frame age {age} ns is outside \
+                 the configured hold {RESERVE_NS_1009}±2 intervals — the collapse is a \
+                 permanent absorbing state (no self-heal)",
+            );
+        }
+        assert_eq!(
+            fifo.underruns, 0,
+            "live-edge consumption starves the FIFO ({} underruns) — the hold collapsed",
+            fifo.underruns
+        );
+    }
+
+    /// Acceptance 2 + 3 (#1009): a REAL backward wall-clock step (500 ms here, >= the 250 ms
+    /// margin floor and sustained) must still recover per issue-147's original intent —
+    /// qualified (not single-tick), presenting throughout, loudly re-warning while the
+    /// regime persists — and once the clock is corrected the guard must SELF-HEAL back to
+    /// the configured hold within bounded time.
+    #[test]
+    fn real_backward_step_recovers_and_the_hold_returns_after_the_episode_1009() {
+        let mut fifo = SimFifo1009::new();
+        const STEP_AT: u64 = 400;
+        const STEP_LEN: u64 = 150; // 5 s regime — long enough to demand cadence re-warns
+        const STEP_NS: i64 = -500_000_000;
+        run_sim_1009(
+            &mut fifo,
+            900,
+            I30, // exact-rate sender: the step itself makes every tick due==0
+            1_000_000,
+            |_| 0,
+            |k| {
+                if (STEP_AT..STEP_AT + STEP_LEN).contains(&k) {
+                    STEP_NS
+                } else {
+                    0
+                }
+            },
+        );
+        // The step was detected and counted as ONE event.
+        assert_eq!(
+            fifo.backward_events, 1,
+            "a real 500 ms sustained backward step must be detected exactly once (got {})",
+            fifo.backward_events
+        );
+        // Sustained qualification: the guard must NOT re-anchor within the first
+        // BACKWARD_STEP_SUSTAIN_TICKS-1 ticks of the step (never a single-tick trigger).
+        let early_reanchors = fifo
+            .presented
+            .iter()
+            .filter(|(k, age)| {
+                (STEP_AT..STEP_AT + BACKWARD_STEP_SUSTAIN_TICKS as u64 - 1).contains(k)
+                    && *age > RESERVE_NS_1009 as i64 + STEP_NS.unsigned_abs() as i64 / 2
+            })
+            .count();
+        assert_eq!(
+            early_reanchors,
+            0,
+            "the guard re-anchored within the first {} ticks of the step — the sustained \
+             qualification is missing (single-tick hair-trigger)",
+            BACKWARD_STEP_SUSTAIN_TICKS - 1
+        );
+        // Presentation must CONTINUE through the regime (the issue-147 no-freeze intent).
+        let regime_presents = fifo
+            .presented
+            .iter()
+            .filter(|(k, _)| (STEP_AT..STEP_AT + STEP_LEN).contains(k))
+            .count();
+        assert!(
+            regime_presents as u64 >= STEP_LEN - 8,
+            "the feed must keep presenting through a backward-step regime \
+             (presented {regime_presents} of {STEP_LEN} regime ticks)"
+        );
+        // A regime older than BACKWARD_REGIME_WARN_AFTER_NS must re-warn on a bounded
+        // cadence — at least once for this 5 s regime, never per-tick spam.
+        assert!(
+            fifo.regime_warns >= 1,
+            "a 5 s re-anchor regime produced no bounded-cadence WARN — the silent-collapse \
+             defect (once-per-latch logging)"
+        );
+        assert!(
+            fifo.regime_warns <= 3,
+            "regime warns must be cadence-bounded, got {} for a 5 s regime",
+            fifo.regime_warns
+        );
+        // Re-anchor ticks were accounted (the audit/gate counter).
+        assert!(
+            fifo.guard.reanchor_ticks() > 0,
+            "a real regime must move the reanchor_ticks audit counter"
+        );
+        // SELF-HEAL: once the clock correction lands, the guard must hand the release back
+        // to the configured hold (boundary zeroed -> re-ACQUIRE at latency depth).
+        assert!(
+            fifo.selfheals >= 1,
+            "the regime ended but the guard never signalled SELF-HEAL — the hold-collapse \
+             is a permanent absorbing state"
+        );
+        // Bounded return: within ~latency + slack after the step ends, presented-frame age
+        // must be back at the configured hold.
+        let rebuild_deadline = STEP_AT + STEP_LEN + 27 + 30;
+        let tail: Vec<i64> = fifo
+            .presented
+            .iter()
+            .filter(|(k, _)| *k >= rebuild_deadline)
+            .map(|(_, age)| *age)
+            .collect();
+        assert!(
+            !tail.is_empty(),
+            "nothing presented after the rebuild window"
+        );
+        let min_ok = RESERVE_NS_1009 as i64 - 2 * I30 as i64;
+        let max_ok = RESERVE_NS_1009 as i64 + 2 * I30 as i64;
+        for age in &tail {
+            assert!(
+                (min_ok..=max_ok).contains(age),
+                "after the backward-step episode the hold must return to the configured \
+                 {RESERVE_NS_1009} ns within bounded time; presented age {age} ns"
+            );
+        }
+    }
+
+    /// #1009: the margin formula — max(3×interval, 250 ms) — and the guard actually
+    /// honouring it: a sustained condition BELOW the margin never fires; one ABOVE it
+    /// fires only after BACKWARD_STEP_SUSTAIN_TICKS consecutive ticks.
+    #[test]
+    fn margin_is_3_intervals_floored_at_250ms_and_the_guard_honours_it_1009() {
+        assert_eq!(
+            backward_step_margin_ns(I30),
+            BACKWARD_STEP_MIN_MARGIN_NS,
+            "3×33.3 ms = 100 ms < the 250 ms floor"
+        );
+        assert_eq!(
+            backward_step_margin_ns(I60),
+            BACKWARD_STEP_MIN_MARGIN_NS,
+            "3×16.7 ms = 50 ms < the 250 ms floor"
+        );
+        assert_eq!(
+            backward_step_margin_ns(100_000_000),
+            300_000_000,
+            "3 intervals wins once it exceeds the floor"
+        );
+
+        // Below the margin, sustained forever: never fires.
+        let mut g = BackwardStepGuard::new();
+        let wall = BASE_1009;
+        for t in 0..10u64 {
+            let a = g.tick_due0(wall + 240_000_000, wall, I30, wall + t);
+            assert!(
+                matches!(a, BackwardStepAction::None | BackwardStepAction::Pending),
+                "tick {t}: a sustained 240 ms excursion is BELOW the 250 ms margin and \
+                 must never re-anchor (got {a:?})"
+            );
+        }
+        assert_eq!(g.reanchor_ticks(), 0);
+
+        // Above the margin: Pending for the first SUSTAIN-1 ticks, Reanchor on the Nth.
+        let mut g = BackwardStepGuard::new();
+        for t in 0..(BACKWARD_STEP_SUSTAIN_TICKS - 1) {
+            let a = g.tick_due0(wall + 400_000_000, wall, I30, wall + t as u64);
+            assert_eq!(
+                a,
+                BackwardStepAction::Pending,
+                "tick {t}: an over-margin condition must QUALIFY (pending), not fire \
+                 single-tick"
+            );
+        }
+        let a = g.tick_due0(
+            wall + 400_000_000,
+            wall,
+            I30,
+            wall + BACKWARD_STEP_SUSTAIN_TICKS as u64,
+        );
+        assert_eq!(
+            a,
+            BackwardStepAction::Reanchor {
+                entry: true,
+                warn: false
+            },
+            "the {BACKWARD_STEP_SUSTAIN_TICKS}th consecutive over-margin tick fires the \
+             qualified re-anchor (entry edge)"
+        );
+    }
+
+    /// #1009: a 1-2 tick over-margin TRANSIENT (a stamp outlier, a correction seam) must
+    /// never fire, and leaving it must not self-heal-reset anything (no regime existed).
+    #[test]
+    fn a_short_over_margin_transient_never_fires_the_guard_1009() {
+        let mut g = BackwardStepGuard::new();
+        let wall = BASE_1009;
+        for t in 0..(BACKWARD_STEP_SUSTAIN_TICKS - 1) {
+            let a = g.tick_due0(wall + 900_000_000, wall, I30, wall + t as u64);
+            assert!(
+                matches!(a, BackwardStepAction::Pending),
+                "a not-yet-sustained over-margin tick must be Pending (got {a:?})"
+            );
+        }
+        // The condition clears before qualifying.
+        let a = g.tick_due0(wall + 10_000_000, wall, I30, wall + 10);
+        assert_eq!(
+            a,
+            BackwardStepAction::None,
+            "clearing an unqualified transient is a plain None (no regime ever started)"
+        );
+        assert_eq!(g.reanchor_ticks(), 0, "a transient must never re-anchor");
+        assert!(!g.in_step(), "a transient must never latch the regime");
     }
 }

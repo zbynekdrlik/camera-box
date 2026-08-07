@@ -6,10 +6,14 @@
 //! start and then free-runs, baking the start-time pipeline buffering into a FIXED
 //! ~150 ms lag between the emit timecode and the real frame instant (#76). The #78
 //! genlock fork replaces that in `vendor/distroav/src/ndi-output.cpp` with the OS
-//! wall clock (DanteSync-disciplined, every node sub-ms-locked), snapped to the next
-//! 1/fps frame boundary in 100 ns units since the Unix epoch — the SAME basis and
-//! boundary math as the camera-box sender (`src/ndi.rs`), so cam→OBS and OBS↔OBS
-//! latency share one timebase. That is what the QR latency instrument depends on.
+//! wall clock (DanteSync-disciplined, every node sub-ms-locked), snapped to the
+//! 1/fps frame boundary AT OR BEFORE the emit instant (#1009: FLOOR — the pre-1009
+//! ceil/strictly-next boundary dated every frame 0..1 interval into the receiver's
+//! future and armed the issue-147 backward-step hair-trigger, the 2026-08-07
+//! overnight −900 ms hold collapse) in 100 ns units since the Unix epoch — the SAME
+//! per-second grid and boundary math as the camera-box sender (`src/ndi.rs`
+//! `floor_boundary_100ns`), so cam→OBS and OBS↔OBS latency share one timebase. That
+//! is what the QR latency instrument depends on.
 //!
 //! This is a SOURCE-level guard, not a runtime test (same convention as
 //! tests/genlock_preload.rs and tests/obs_updater_disabled.rs): the genlock patch
@@ -77,6 +81,18 @@ fn output_video_timecode_uses_real_wall_clock_not_synthesize() {
          reverted; re-apply it."
     );
 
+    // #1009: the emit stamp must be the FLOOR boundary (at-or-before the emit instant) —
+    // both the floor helper's presence and the ceil helper's ABSENCE are pinned, so a
+    // subtree pull restoring the old helper silently re-biasing the stamps fails HERE.
+    assert!(
+        src.contains("return genlock_floor_boundary_100ns(genlock_wall_now_100ns(), fps);"),
+        "{NDI_OUTPUT}: #1009 — the emit timecode no longer stamps the FLOOR boundary          (genlock_floor_boundary_100ns); the sender future-bias that armed the issue-1007          backward-step hair-trigger is back. Re-apply the floor-stamp patch."
+    );
+    assert!(
+        !src.contains("genlock_next_boundary_100ns"),
+        "{NDI_OUTPUT}: #1009 — the pre-1009 ceil boundary helper name is back in the          output path; emit stamps may be future-dated again. Keep the floor helper          (mirror: src/ndi.rs floor_boundary_100ns)."
+    );
+
     // And the stock `synthesize` ASSIGNMENT must NOT be back in the output path. This
     // targets the assignment specifically (not the bare token, which legitimately
     // appears in the explanatory comment and in the unrelated ndi-filter.cpp path) so
@@ -127,5 +143,11 @@ fn windows_genlock_workflow_gates_on_the_timecode_patch() {
         "{WINDOWS_GENLOCK_WF}: the production build no longer asserts that the stock \
          `synthesize` assignment is ABSENT from the output path (#85) — the negative \
          guard that catches a silent #78 revert. Re-add the pwsh source-patch gate."
+    );
+    assert!(
+        wf.contains("return genlock_floor_boundary_100ns(genlock_wall_now_100ns(), fps);"),
+        "{WINDOWS_GENLOCK_WF}: the production build no longer asserts the #1009 FLOOR emit \
+         stamp — a subtree bump could restore the future-biased ceil stamp (the issue-1007 \
+         hair-trigger arming) while the version pin still passes. Re-add the pwsh #1009 gate."
     );
 }

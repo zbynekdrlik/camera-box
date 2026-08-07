@@ -69,11 +69,20 @@ jobs:
           # #147: the backward wall-clock step (NTP/PTP sawtooth) re-anchor guard — without it
           # the ts-align release FREEZES the program feed forever on a backward clock step.
           # #269 [3]: detection on the MAX queued ts (depth-independent, uniform across sources).
-          if ($src -notmatch [regex]::Escape('max_ts > wall_now + interval')) { Write-Error "backward-clock-step detection gone (#147/#269) — ts-align would freeze the program feed on an NTP/PTP step"; exit 1 }
+          # #1009: the trigger is RE-QUALIFIED — margin max(3 intervals, 250 ms) + sustained
+          # across consecutive due==0 ticks (the one-interval single-tick trigger fired on a few
+          # ms of sender-ahead stamp skew and permanently collapsed the deep hold overnight).
+          if ($src -notmatch [regex]::Escape('max_ts > wall_now + backward_margin')) { Write-Error "re-qualified backward-clock-step detection gone (#147/#269/#1009) — either the guard is gone (freeze on an NTP/PTP step) or it reverted to the issue-1007 hair-trigger"; exit 1 }
+          if ($src -notmatch [regex]::Escape('#define GENLOCK_BACKWARD_STEP_MIN_MARGIN_NS 250000000ULL')) { Write-Error "backward-step margin floor gone (#1009) — the guard would hair-trigger on sender-ahead stamp skew again"; exit 1 }
+          if ($src -notmatch [regex]::Escape('#define GENLOCK_BACKWARD_STEP_SUSTAIN_TICKS 3')) { Write-Error "backward-step sustained qualification gone (#1009) — single-tick hair-trigger again"; exit 1 }
           if ($src -notmatch [regex]::Escape('source->genlock_backward_steps++')) { Write-Error "backward-step re-anchor counter gone (#147)"; exit 1 }
           # #269 [2]: per-event latch — counter fires once per step, not per recovery tick.
           if ($src -notmatch [regex]::Escape('source->genlock_in_backward_step = true')) { Write-Error "backward-step per-event latch gone (#269 [2]) — counter would over-report"; exit 1 }
-          Write-Output "#136/#257 ts-align + render tick build-default (no env) + #147 backward-step recovery present — OK"
+          # #1009 SELF-HEAL: leaving the regime must zero the locked boundary (re-ACQUIRE the
+          # configured hold) — without it a regime leaves the FIFO at the live edge FOREVER.
+          if ($src -notmatch [regex]::Escape('genlock_backward_regime_end(source, reserve_ms);')) { Write-Error "backward-step regime-exit SELF-HEAL gone (#1009) — a hold collapse would be a permanent absorbing state again"; exit 1 }
+          if ($src -notmatch [regex]::Escape('backward_regime_ticks=%llu')) { Write-Error "backward_regime_ticks audit exposure gone (#1009) — a sustained hold-bypass regime would be invisible to the E2E/drift gates"; exit 1 }
+          Write-Output "#136/#257 ts-align + render tick build-default (no env) + #147/#1009 re-qualified backward-step recovery + self-heal present — OK"
 
       # #940 piece 1: fail fast if the per-event relock phase-evidence log line is missing —
       # mirrors the Linux-CI guard
