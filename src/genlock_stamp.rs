@@ -27,8 +27,8 @@ pub fn capture_realtime_100ns(capture_monotonic_100ns: i64, mono_to_real_offset_
     capture_monotonic_100ns.saturating_add(mono_to_real_offset_100ns)
 }
 
-/// The emitted frame's genlock NDI `timecode` (100ns units): the frame boundary at/after
-/// the frame's real CAPTURE instant. `arrival_realtime_100ns` is the wall-clock the send
+/// The emitted frame's genlock NDI `timecode` (100ns units): the frame boundary AT OR
+/// BEFORE the frame's real CAPTURE instant (#1009 — floor, never the future-dated ceil). `arrival_realtime_100ns` is the wall-clock the send
 /// thread observes for the SAME frame (post-dequeue); it is retained in the signature so
 /// callers can also compute the capture-vs-arrival divergence
 /// ([`stamp_arrival_divergence_100ns`], a per-camera latency proxy for the #624 gate), but
@@ -44,8 +44,12 @@ pub fn genlock_emit_timecode_100ns(
     // photon->dequeue latency d_X does NOT leak into the stamp — two cameras that filmed the
     // same real moment then emit the same timecode and the receiver genlock presents them
     // together. `arrival` is retained only for the divergence proxy below, never the basis.
+    // #1009: FLOOR — the boundary AT-OR-BEFORE the capture instant, never the strictly-next
+    // (ceil) one, which dated every stamp 0..1 interval into the receiver's future and armed
+    // the issue-147 backward-step hair-trigger (issue 1007: 0.3 ms measured margin). Grid
+    // alignment and the same-instant-same-stamp property are preserved (same per-second grid).
     let _ = arrival_realtime_100ns;
-    crate::ndi::next_boundary_100ns(capture_realtime_100ns, fps)
+    crate::ndi::floor_boundary_100ns(capture_realtime_100ns, fps)
 }
 
 /// The whole-frame divergence between where the ARRIVAL-based stamp would land and where the
@@ -66,8 +70,10 @@ pub fn stamp_arrival_divergence_100ns(
     arrival_realtime_100ns: i64,
     fps: i64,
 ) -> i64 {
-    crate::ndi::next_boundary_100ns(arrival_realtime_100ns, fps)
-        - crate::ndi::next_boundary_100ns(capture_realtime_100ns, fps)
+    // #1009: floor on both sides, in lock-step with the stamp itself (the proxy compares
+    // where the two stamps LAND, so it must use the same boundary convention).
+    crate::ndi::floor_boundary_100ns(arrival_realtime_100ns, fps)
+        - crate::ndi::floor_boundary_100ns(capture_realtime_100ns, fps)
 }
 
 /// How many CONSECUTIVE captured frames elapse before the monotonic->realtime offset
@@ -137,14 +143,16 @@ mod tests {
         );
     }
 
-    /// The stamped timecode is the frame boundary at/after the CAPTURE instant.
+    /// The stamped timecode is the frame boundary at/BEFORE the CAPTURE instant (#1009 —
+    /// floor; the pre-#1009 revision of this test pinned the ceil boundary, which is the
+    /// future-bias defect itself, so its expectation changed WITH the behavior).
     #[test]
     fn timecode_is_the_capture_boundary() {
         let fps = 30;
         let base = 100 * SEC_100NS;
-        let capture = base + 100_000; // 10 ms in -> next 30fps boundary is 33.33 ms
-        let expected = base + SEC_100NS / fps; // first 30fps boundary after the second start
-                                               // Even with a LATE arrival (next frame over), the timecode tracks capture, not arrival.
+        let capture = base + 100_000; // 10 ms in -> inside 30fps frame 0 (0..33.33 ms)
+        let expected = base; // frame 0's own boundary — at-or-before the capture instant
+                             // Even with a LATE arrival (next frame over), the timecode tracks capture, not arrival.
         assert_eq!(
             genlock_emit_timecode_100ns(capture, base + 400_000, fps),
             expected

@@ -567,7 +567,19 @@ jobs:
           if ($src -match [regex]::Escape('audio_frame.timecode = NDIlib_send_timecode_synthesize')) {
             Write-Error "ndi-output.cpp: stock NDIlib_send_timecode_synthesize audio assignment is BACK — #78 reverted (#85)"; exit 1
           }
-          Write-Output "DistroAV real-wall-clock emit-timecode patch present (genlock_emit_timecode_100ns video + genlock_wall_now_100ns audio, no synthesize assignment) — OK"
+          # camera-box #1009: the emit stamp must be the FLOOR boundary (at-or-before the emit
+          # instant), never the strictly-next/ceil one — the ceil bias dated every frame 0..1
+          # interval into the receiver's future and armed the issue-147 hair-trigger (the
+          # 2026-08-07 overnight -900 ms hold collapse). Both the floor helper's presence AND
+          # the ceil helper's ABSENCE are gated (a subtree pull restoring the old helper name
+          # would silently re-bias the stamps).
+          if ($src -notmatch [regex]::Escape('return genlock_floor_boundary_100ns(genlock_wall_now_100ns(), fps);')) {
+            Write-Error "ndi-output.cpp: #1009 floor emit stamp (genlock_floor_boundary_100ns) gone — the sender future-bias (issue 1007 hair-trigger arming) is back"; exit 1
+          }
+          if ($src -match 'genlock_next_boundary_100ns') {
+            Write-Error "ndi-output.cpp: #1009 — the pre-1009 ceil boundary helper name is back; emit stamps may be future-dated again"; exit 1
+          }
+          Write-Output "DistroAV real-wall-clock emit-timecode patch present (genlock_emit_timecode_100ns video via #1009 floor boundary + genlock_wall_now_100ns audio, no synthesize assignment) — OK"
 
       # #93: assert the NDI source-name use-after-free fix is present in the vendored
       # DistroAV source BEFORE the 150-min build, so a future `git subtree pull` (#44)

@@ -59,10 +59,41 @@ pub(crate) fn next_boundary_100ns(now_100ns: i64, fps: i64) -> i64 {
     }
 }
 
+/// #1009 — the frame boundary AT OR BEFORE `now_100ns` (the floor twin of
+/// [`next_boundary_100ns`]): same per-second grid, same multiply-then-divide precision,
+/// WITHOUT the `+1` ceil step. STAMPS use this; PACING keeps the ceil twin.
+///
+/// Why the split matters (the 2026-08-07 overnight −900 ms collapse, issue 1007): a stamp
+/// computed as the strictly-NEXT boundary is 0..1 interval in the RECEIVER'S FUTURE at the
+/// emit instant by construction, leaving only network delay as margin against the
+/// receiver's backward-step guard — a few ms of inter-box clock skew then reads as "frame
+/// from the future" in NORMAL operation. The boundary at-or-before the instant preserves
+/// the shared grid (two cameras capturing the same instant still stamp identically) while
+/// guaranteeing stamps are never future-dated. Sleeping to the NEXT boundary
+/// ([`wait_for_next_boundary_100ns`]) is inherently ceil and unaffected — by the time the
+/// sleep ends, its boundary is at-or-before "now" anyway.
+///
+/// Mirror of the DistroAV sender's `genlock_floor_boundary_100ns`
+/// (vendor/distroav/src/ndi-output.cpp) — keep both in lock-step.
+pub(crate) fn floor_boundary_100ns(now_100ns: i64, fps: i64) -> i64 {
+    if fps <= 0 {
+        return now_100ns;
+    }
+    let current_second_100ns = (now_100ns / UNITS_PER_SECOND) * UNITS_PER_SECOND;
+    let offset_in_second = now_100ns - current_second_100ns;
+    // Which frame slot the instant falls in (0..fps-1); its own boundary is at-or-before.
+    let frame_in_second = (offset_in_second * fps) / UNITS_PER_SECOND;
+    // Multiply before divide to maintain precision (same as the ceil twin).
+    current_second_100ns + (frame_in_second * UNITS_PER_SECOND / fps)
+}
+
 /// Block until the next aligned frame boundary and return its timecode. All
 /// cameras with NTP/PTP-synchronized clocks send frames at the same wall-clock
 /// boundaries, enabling software genlock across devices. Pure boundary math is
 /// in [`next_boundary_100ns`]; this wrapper only adds the real-clock sleep.
+/// (The returned stamp is at-or-before "now" by the time the sleep ends — a
+/// slept-to boundary never future-stamps, so this pacing path is NOT part of
+/// the issue-1009 ceil-bias defect.)
 #[inline]
 fn wait_for_next_boundary_100ns(fps: i64) -> i64 {
     let now_100ns = get_wall_clock_100ns();
@@ -105,9 +136,11 @@ fn fps_from_frame_rate(numerator: u32, denominator: u32) -> i64 {
 /// the stamped timecode is the EMITTED frame's gate boundary — immune to the burn-thread queue
 /// jitter that moving the send off the capture thread would otherwise inject into the genlock
 /// pacing. `fps` is the integer genlock rate; 0 yields the raw wall clock (a genlock no-op,
-/// matching [`next_boundary_100ns`]).
+/// matching [`floor_boundary_100ns`]). #1009: the stamp is the boundary AT-OR-BEFORE the gate
+/// instant — the gate just passed its boundary, so floor names THAT boundary; the old ceil
+/// dated the frame one interval into the receiver's future.
 pub fn boundary_timecode_100ns(fps: u32) -> i64 {
-    next_boundary_100ns(get_wall_clock_100ns(), fps as i64)
+    floor_boundary_100ns(get_wall_clock_100ns(), fps as i64)
 }
 
 // NDI SDK type definitions (minimal subset for video sending and receiving)
@@ -1067,8 +1100,10 @@ impl NdiSender {
     ) -> Result<()> {
         let fps = fps_from_frame_rate(self.frame_rate.numerator, self.frame_rate.denominator);
         let timecode = if self.external_pacing {
-            // Caller already gated this send to a wall-clock boundary; stamp it without sleeping.
-            next_boundary_100ns(get_wall_clock_100ns(), fps)
+            // Caller already gated this send to a wall-clock boundary; stamp it without
+            // sleeping. #1009: FLOOR — the boundary the gate just passed is at-or-before
+            // "now"; the old ceil stamp here dated the frame one interval into the future.
+            floor_boundary_100ns(get_wall_clock_100ns(), fps)
         } else {
             wait_for_next_boundary_100ns(fps)
         };
