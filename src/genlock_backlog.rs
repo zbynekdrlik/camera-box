@@ -337,15 +337,16 @@ pub enum BackwardStepAction {
 }
 
 /// The per-source backward-step qualification state (mirrors the C per-source fields on
-/// `obs_source`). One instance per genlock source, ticked only on the ts-align release path.
-///
-/// RED state (this commit): a FAITHFUL PORT of the DEPLOYED defective C semantics — trigger at
-/// one interval, single-tick, latch-only, no self-heal — so the acceptance tests below
-/// demonstrably FAIL against the behavior that collapsed the rig overnight. The GREEN commit
-/// replaces this implementation (only) with the re-qualified design above.
+/// `obs_source`: `genlock_in_backward_step`, `genlock_backward_pending_ticks`,
+/// `genlock_backward_regime_start_ns`, `genlock_backward_last_warn_ns`,
+/// `genlock_backward_regime_ticks`). One instance per genlock source, ticked only on the
+/// ts-align release path. This module is the Tier-0 authority; keep the C in lock-step.
 #[derive(Debug, Default)]
 pub struct BackwardStepGuard {
     in_step: bool,
+    pending_ticks: u32,
+    regime_start_ns: u64,
+    last_warn_ns: u64,
     reanchor_ticks: u64,
 }
 
@@ -376,27 +377,65 @@ impl BackwardStepGuard {
         interval_ns: u64,
         log_now_ns: u64,
     ) -> BackwardStepAction {
-        let _ = log_now_ns; // RED: the deployed guard has no warn cadence at all.
-                            // RED: the deployed hair-trigger — margin of ONE interval, fires the same tick.
-        let head_future = max_queued_ts_ns > wall_now_ns.saturating_add(interval_ns);
+        // #1009 re-qualified trigger: margin >> the sender's deliberate ceil-to-boundary
+        // future bias (max(3×interval, 250 ms)), so plain sender-ahead stamp skew can never
+        // come close — only a REAL local backward step exceeds it.
+        let head_future =
+            max_queued_ts_ns > wall_now_ns.saturating_add(backward_step_margin_ns(interval_ns));
         if head_future {
-            let entry = !self.in_step;
-            self.in_step = true;
-            self.reanchor_ticks += 1;
-            BackwardStepAction::Reanchor { entry, warn: false }
-        } else {
-            // RED: the deployed guard only clears the per-event latch; it never signals the
-            // caller to restore the configured hold (the permanent-collapse defect).
-            self.in_step = false;
-            BackwardStepAction::None
+            if self.in_step {
+                // Regime continues: re-anchor, and re-warn on a bounded cadence once the
+                // regime is abnormal-old (> BACKWARD_REGIME_WARN_AFTER_NS), at most one warn
+                // per BACKWARD_REGIME_WARN_INTERVAL_NS — never per-tick, never
+                // once-per-latch-only. The entry WARN does not pre-arm the spacing: the
+                // FIRST cadence warn fires the moment the regime crosses the age threshold
+                // (last_warn_ns is 0 until a cadence warn actually fires).
+                self.reanchor_ticks += 1;
+                let warn = log_now_ns.saturating_sub(self.regime_start_ns)
+                    > BACKWARD_REGIME_WARN_AFTER_NS
+                    && log_now_ns.saturating_sub(self.last_warn_ns)
+                        >= BACKWARD_REGIME_WARN_INTERVAL_NS;
+                if warn {
+                    self.last_warn_ns = log_now_ns;
+                }
+                return BackwardStepAction::Reanchor { entry: false, warn };
+            }
+            // Not yet in a regime: the condition must SUSTAIN across consecutive due==0
+            // ticks before the first re-anchor — a 1-2 tick excursion falls through to the
+            // cadence (which presents/holds normally off its locked boundary).
+            self.pending_ticks = self.pending_ticks.saturating_add(1);
+            if self.pending_ticks >= BACKWARD_STEP_SUSTAIN_TICKS {
+                self.in_step = true;
+                self.regime_start_ns = log_now_ns;
+                self.last_warn_ns = 0;
+                self.reanchor_ticks += 1;
+                return BackwardStepAction::Reanchor {
+                    entry: true,
+                    warn: false,
+                };
+            }
+            return BackwardStepAction::Pending;
         }
+        self.pending_ticks = 0;
+        if self.in_step {
+            // #1009 SELF-HEAL: the qualified regime ended — the caller must zero the locked
+            // cadence boundary so the release re-ACQUIREs the configured hold from the wall
+            // deadline (the collapse must never be an absorbing state).
+            self.in_step = false;
+            return BackwardStepAction::SelfHeal;
+        }
+        BackwardStepAction::None
     }
 
     /// A due>0 tick (frames matured against the wall deadline) — the condition is structurally
-    /// absent this tick.
+    /// absent this tick. Ends any active regime with the same SELF-HEAL contract as
+    /// [`Self::tick_due0`]'s clear path.
     pub fn tick_due_positive(&mut self) -> BackwardStepAction {
-        // RED: deployed semantics — clear the latch, nothing else.
-        self.in_step = false;
+        self.pending_ticks = 0;
+        if self.in_step {
+            self.in_step = false;
+            return BackwardStepAction::SelfHeal;
+        }
         BackwardStepAction::None
     }
 }
