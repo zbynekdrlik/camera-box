@@ -4865,6 +4865,55 @@ static inline uint64_t genlock_phase_pin_deadline(uint64_t deadline_ns, uint64_t
  * this quantizes. Mirror: src/genlock_backlog.rs PHASE_PIN_HYSTERESIS_NS. */
 #define GENLOCK_PHASE_PIN_HYSTERESIS_NS 5000000ULL /* 5 ms */
 
+/* camera-box #1009: the backward-step trigger margin -- must be >> the sender's deliberate
+ * ceil-to-boundary future bias (<= one interval; ndi-output.cpp genlock_emit_timecode_100ns /
+ * src/ndi.rs) plus any sane network delay + inter-box skew, so plain sender-ahead stamp skew
+ * can never fire the #147 guard. The 2026-08-07 overnight -900 ms collapse fired it at a
+ * measured excess of 0.3-45 ms against the old ONE-interval margin; a REAL NTP/PTP backward
+ * step is hundreds of ms to seconds, so max(3 intervals, 250 ms) cleanly separates the two
+ * populations. Mirror of src/genlock_backlog.rs backward_step_margin_ns /
+ * BACKWARD_STEP_MIN_MARGIN_NS / BACKWARD_STEP_MARGIN_INTERVALS (Tier-0 unit-tested). */
+#define GENLOCK_BACKWARD_STEP_MIN_MARGIN_NS 250000000ULL /* 250 ms */
+#define GENLOCK_BACKWARD_STEP_MARGIN_INTERVALS 3ULL
+/* camera-box #1009: the over-margin condition must SUSTAIN this many CONSECUTIVE due==0 ticks
+ * before the first re-anchor -- never a single-tick hair-trigger (a 1-2 tick excursion falls
+ * through to the #401 cadence, which presents/holds normally off its locked boundary).
+ * Mirror of src/genlock_backlog.rs BACKWARD_STEP_SUSTAIN_TICKS. */
+#define GENLOCK_BACKWARD_STEP_SUSTAIN_TICKS 3
+/* camera-box #1009: a re-anchor regime older than WARN_AFTER re-warns on a bounded cadence
+ * (at most one WARN per WARN_INTERVAL). The once-per-latch entry WARN alone let the overnight
+ * collapse run SILENT for 3+ hours (last log 05:09, still collapsed at 08:20). Mirror of
+ * src/genlock_backlog.rs BACKWARD_REGIME_WARN_AFTER_NS / BACKWARD_REGIME_WARN_INTERVAL_NS. */
+#define GENLOCK_BACKWARD_REGIME_WARN_AFTER_NS 2000000000ULL   /* 2 s */
+#define GENLOCK_BACKWARD_REGIME_WARN_INTERVAL_NS 5000000000ULL /* 5 s */
+
+static inline uint64_t genlock_backward_step_margin_ns(uint64_t interval_ns)
+{
+	const uint64_t scaled = GENLOCK_BACKWARD_STEP_MARGIN_INTERVALS * interval_ns;
+	return scaled > GENLOCK_BACKWARD_STEP_MIN_MARGIN_NS ? scaled : GENLOCK_BACKWARD_STEP_MIN_MARGIN_NS;
+}
+
+/* camera-box #1009 SELF-HEAL: leave a qualified backward-step regime and re-establish the
+ * CONFIGURED hold. Zeroing the locked boundary is the existing #401 ACQUIRE state: the
+ * wall-deadline path holds (genlock_holds) while the queue rebuilds to the configured latency
+ * depth, then re-locks -- a bounded ~latency_ms transient. Before #1009 NOTHING restored the
+ * hold after the condition cleared, so a re-anchor regime left the FIFO consuming at the live
+ * edge FOREVER (the -900 ms overnight collapse: depth 0-1 at a 894 ms knob for 4+ hours, only
+ * an OBS relaunch cleared it). Mirror of src/genlock_backlog.rs BackwardStepGuard::SelfHeal. */
+static void genlock_backward_regime_end(obs_source_t *source, uint32_t latency_ms)
+{
+	source->genlock_in_backward_step = false;
+	source->genlock_locked_next_boundary_ns = 0;
+	/* #726 STICKY-N: leaving the regime is a source-timeline seam like the re-anchor
+	 * itself -- the fresh ACQUIRE re-confirms the multiple from scratch. */
+	source->genlock_last_known_n = 0;
+	blog(LOG_WARNING,
+	     "genlock-fifo backward-step regime ENDED '%s': reanchor_ticks=%llu — re-acquiring the "
+	     "configured hold (latency %u ms) from the wall deadline (#1009)",
+	     source->context.name ? source->context.name : "?",
+	     (unsigned long long)source->genlock_backward_regime_ticks, latency_ms);
+}
+
 /* camera-box #148 follow-up (#269 finding [5]): the ts-align decision sample
  * (genlock_last_present_ts / _due / _head_skew_ns) is written ONLY on a tick the ts-align
  * path ran, but genlock_audit_log prints it unconditionally — so a ts-align source that
@@ -4926,6 +4975,12 @@ static void genlock_audit_log(obs_source_t *source, uint64_t now_ns)
 	     "src_latency_ms=%u global_latency_ms=%u "
 	     "preload=%u (=%llu ms) reserve_ms=%u cap=%zu empty_run=%u (re-arm@%u) "
 	     "ts_present=%llu ts_due=%u ts_head_skew_ms=%lld "
+	     /* camera-box #1009: cumulative backward-step RE-ANCHOR TICKS (backward_steps=
+	      * counts EVENTS; this counts every re-anchored tick, so a sustained regime is
+	      * visible as a climbing rate). Healthy operation keeps it at 0 -- the E2E/drift
+	      * gates assert the delta stays 0 across a run. Appended AFTER the existing
+	      * fields (scripts parse by field name; #401 anchor pins the earlier run). */
+	     "backward_regime_ticks=%llu "
 	     "(#70/#97/#126/#147/#148/#184/#235/#245/#401)",
 	     source->context.name ? source->context.name : "?",
 	     (unsigned long long)source->genlock_frames_received,
@@ -4955,7 +5010,8 @@ static void genlock_audit_log(obs_source_t *source, uint64_t now_ns)
 	      * this never prints a STALE sample from an earlier ts-align tick. */
 	     (unsigned long long)source->genlock_last_present_ts,
 	     source->genlock_last_due,
-	     (long long)(source->genlock_last_head_skew_ns / 1000000));
+	     (long long)(source->genlock_last_head_skew_ns / 1000000),
+	     (unsigned long long)source->genlock_backward_regime_ticks);
 }
 /* ---- end genlock FIFO preload + audit ------------------------------------ */
 
@@ -5267,8 +5323,27 @@ static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 						if (ts > max_ts)
 							max_ts = ts;
 					}
-					const bool head_future = max_ts > wall_now + interval;
-					if (head_future) {
+					/* camera-box #1009: RE-QUALIFIED trigger. The margin is
+					 * max(3 intervals, 250 ms) — far above the sender's deliberate
+					 * ceil-to-boundary future bias — AND the condition must SUSTAIN
+					 * GENLOCK_BACKWARD_STEP_SUSTAIN_TICKS consecutive due==0 ticks
+					 * before the FIRST re-anchor. The old one-interval single-tick
+					 * trigger fired on 0.3-45 ms of sender-ahead stamp skew (the
+					 * 2026-08-07 overnight -900 ms collapse) and its per-tick
+					 * re-anchor bypassed the configured hold permanently. While
+					 * qualifying (pending) the tick falls through to the #401
+					 * cadence below, which presents/holds normally off its locked
+					 * stamp-relative boundary — nothing freezes. Mirror of
+					 * src/genlock_backlog.rs BackwardStepGuard::tick_due0
+					 * (Tier-0 unit-tested). */
+					const uint64_t backward_margin = genlock_backward_step_margin_ns(interval);
+					const bool head_future = max_ts > wall_now + backward_margin;
+					if (head_future && !source->genlock_in_backward_step)
+						source->genlock_backward_pending_ticks++;
+					if (head_future &&
+					    (source->genlock_in_backward_step ||
+					     source->genlock_backward_pending_ticks >=
+						     GENLOCK_BACKWARD_STEP_SUSTAIN_TICKS)) {
 						/* RE-ANCHOR. #269 [0]: present the OLDEST queued frame and drop
 						 * NOTHING extra. The pre-step frames are real captures;
 						 * get_closest_frame erases the presented head each tick, so the buffer
@@ -5280,27 +5355,55 @@ static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 						 * #269 [2]: count + LOG_WARNING ONCE per EVENT (on the transition INTO
 						 * the re-anchor state), not every recovery tick — the old per-tick
 						 * increment counted one step as N and logged at frame rate, breaking
-						 * the 5 s audit-log gating. */
+						 * the 5 s audit-log gating. #1009: a PERSISTENT regime additionally
+						 * re-warns on a bounded cadence (below) — the entry-only WARN let the
+						 * overnight collapse run silent for 3+ hours. */
 						if (!source->genlock_in_backward_step) {
 							source->genlock_backward_steps++;
+							source->genlock_backward_regime_start_ns = now_ns;
+							source->genlock_backward_last_warn_ns = 0;
 							blog(LOG_WARNING,
 							     "genlock-fifo backward clock step '%s': max queued ts %llu > "
-							     "wall_now+interval (%llu) — re-anchoring (present oldest of "
-							     "%zu queued, preserve buffer) instead of freezing the program "
-							     "feed (#147)",
+							     "wall_now+margin (%llu, margin %llu ms, sustained %u ticks) — "
+							     "re-anchoring (present oldest of %zu queued, preserve buffer) "
+							     "instead of freezing the program feed (#147/#1009)",
 							     source->context.name ? source->context.name : "?",
 							     (unsigned long long)max_ts,
-							     (unsigned long long)(wall_now + interval),
+							     (unsigned long long)(wall_now + backward_margin),
+							     (unsigned long long)(backward_margin / 1000000),
+							     (unsigned)GENLOCK_BACKWARD_STEP_SUSTAIN_TICKS,
+							     source->async_frames.num);
+						} else if (now_ns - source->genlock_backward_regime_start_ns >
+								   GENLOCK_BACKWARD_REGIME_WARN_AFTER_NS &&
+							   now_ns - source->genlock_backward_last_warn_ns >=
+								   GENLOCK_BACKWARD_REGIME_WARN_INTERVAL_NS) {
+							/* #1009: bounded-cadence WARN — the regime is abnormal-old
+							 * (>2 s) and still re-anchoring every tick; last_warn_ns=0 at
+							 * entry so the FIRST cadence warn lands the moment the age
+							 * threshold is crossed, then at most one per 5 s. */
+							source->genlock_backward_last_warn_ns = now_ns;
+							blog(LOG_WARNING,
+							     "genlock-fifo backward-step regime persists '%s': %.1f s, "
+							     "reanchor_ticks=%llu depth=%zu — the configured hold is "
+							     "bypassed while the condition lasts (#1009)",
+							     source->context.name ? source->context.name : "?",
+							     (double)(now_ns - source->genlock_backward_regime_start_ns) /
+								     1e9,
+							     (unsigned long long)source->genlock_backward_regime_ticks,
 							     source->async_frames.num);
 						}
 						source->genlock_in_backward_step = true;
+						/* #1009: count every re-anchored TICK (backward_steps counts
+						 * EVENTS) — the audit/gate counter a healthy run keeps at 0. */
+						source->genlock_backward_regime_ticks++;
 						next_frame = source->async_frames.array[0];
 						/* camera-box #401: the re-anchor presented a frame OUTSIDE the
 						 * cadence — re-lock the boundary to it (presented + interval) so
 						 * the cadence's STEADY path continues the pre-step stamp grid
-						 * coherently once head_future clears (draining the seam one
+						 * coherently while the regime lasts (draining the seam one
 						 * matured frame per tick, no hold gap), instead of keying on a
-						 * boundary the step invalidated. */
+						 * boundary the step invalidated. (#1009: on regime EXIT the
+						 * boundary is ZEROED instead — see genlock_backward_regime_end.) */
 						source->genlock_locked_next_boundary_ns =
 							next_frame->timestamp + interval;
 						/* #726 STICKY-N: a backward clock-step re-anchor is a
@@ -5312,17 +5415,28 @@ static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 						genlock_audit_log(source, now_ns);
 						return true;
 					}
-					/* #269 [2]: not re-anchoring — clear the per-event latch so the
-					 * NEXT distinct backward step counts again. due==0 is no longer a
-					 * hold verdict by itself: the #401 cadence below may still PRESENT
-					 * a frame the LOCKED boundary has matured even though the slewed
-					 * wall deadline says not-due — exactly the per-tick wall-compare
-					 * churn (hold ↔ silent drop) the cadence removes. */
-					source->genlock_in_backward_step = false;
+					if (!head_future) {
+						/* The condition is absent this tick: any pending qualification
+						 * is a transient (reset), and an ACTIVE regime just ENDED —
+						 * #1009 SELF-HEAL back to the configured hold. due==0 is no
+						 * longer a hold verdict by itself: the #401 cadence below may
+						 * still PRESENT a frame the LOCKED boundary has matured even
+						 * though the slewed wall deadline says not-due (#269 [2]). */
+						source->genlock_backward_pending_ticks = 0;
+						if (source->genlock_in_backward_step)
+							genlock_backward_regime_end(source, reserve_ms);
+					}
+					/* head_future while still PENDING (not yet sustained): fall
+					 * through — the cadence presents/holds off its locked boundary;
+					 * the pending counter rides until the condition either sustains
+					 * (fires above) or clears (reset above). Never a single-tick
+					 * hair-trigger (#1009). */
 				} else {
-					/* #269 [2]: a normal due tick ends any backward-step recovery —
-					 * clear the per-event latch so the next step counts again. */
-					source->genlock_in_backward_step = false;
+					/* #269 [2]/#1009: a normal due tick ends any backward-step
+					 * regime — same SELF-HEAL contract as the due==0 clear path. */
+					source->genlock_backward_pending_ticks = 0;
+					if (source->genlock_in_backward_step)
+						genlock_backward_regime_end(source, reserve_ms);
 				}
 
 				/* ---- camera-box #401: PHASE-LOCKED release cadence (v2) ---------

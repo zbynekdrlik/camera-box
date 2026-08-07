@@ -820,12 +820,23 @@ pub fn genlock_release_guarded(
     // trigger depend on each source's queue depth (a backward step smaller than a deep
     // source's buffer leaves its oldest frame NOT-future, so it stays frozen while a shallow
     // source jumps to live — the exact cross-source DESYNC genlock prevents). The MAX is
-    // depth-independent, so all genlock sources re-anchor UNIFORMLY once the step exceeds one
-    // interval. A legitimate large per-source latency override (≤2000 ms) buffers PAST-stamped
-    // frames (ts ≤ wall_now, aging toward the deadline), whose max is never > wall_now +
-    // interval, so the guard never touches it.
+    // depth-independent, so all genlock sources re-anchor UNIFORMLY once the step exceeds the
+    // margin. A legitimate large per-source latency override (≤2000 ms) buffers PAST-stamped
+    // frames (ts ≤ wall_now, aging toward the deadline), whose max never exceeds the margin,
+    // so the guard never touches it.
+    //
+    // #1009: the margin is the RE-QUALIFIED max(3×interval, 250 ms) from the Tier-0 authority
+    // (src/genlock_backlog.rs backward_step_margin_ns) — the old ONE-interval margin sat only
+    // network-delay away from the sender's deliberate ceil-to-boundary future bias and fired
+    // on a few ms of inter-box skew (the 2026-08-07 overnight −900 ms hold collapse). The
+    // STATEFUL parts of #1009 (sustained-tick qualification + regime self-heal + bounded
+    // regime warns) live in the C and in src/genlock_backlog.rs BackwardStepGuard ONLY —
+    // this stateless per-tick mirror keeps just the raw condition in lock-step (same
+    // minimal-glue shape as the #940 phase-pin, which is also C+Tier-0-mirror only).
     let max_ts = queued_ts_ascending.iter().copied().max();
-    let backward_step = max_ts.is_some_and(|m| m > wall_now_ns.saturating_add(interval_ns));
+    let backward_step = max_ts.is_some_and(|m| {
+        m > wall_now_ns.saturating_add(crate::genlock_backlog::backward_step_margin_ns(interval_ns))
+    });
     if backward_step {
         // #269 [0]: RE-ANCHOR by presenting the OLDEST queued frame and dropping NOTHING
         // extra (drop_oldest = 0). The pre-step frames are real captures; the caller erases

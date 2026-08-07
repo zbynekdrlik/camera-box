@@ -1303,17 +1303,84 @@ mod vendored_source {
         // Rust mirror unit tests stay green (the probe-gated mirror compiles to nothing in
         // the default gate). Mirror of src/probe/genlock.rs genlock_release_guarded.
         let src = squish(&vendor_file(OBS_SOURCE));
-        // #269 [3]: the backward-step detection tests the MAX queued ts (a frame more than one
-        // interval AHEAD of the real wall clock = captured before a backward step, impossible
-        // for a live cap). The MAX (not array[0], the oldest) makes the trigger DEPTH-
-        // independent so every genlock source re-anchors uniformly (no shallow-jumps-while-
-        // deep-freezes cross-source desync).
+        // #269 [3]: the backward-step detection tests the MAX queued ts (a frame far AHEAD of
+        // the real wall clock = captured before a backward step, impossible for a live cap).
+        // The MAX (not array[0], the oldest) makes the trigger DEPTH-independent so every
+        // genlock source re-anchors uniformly (no shallow-jumps-while-deep-freezes
+        // cross-source desync). #1009: the compare is against wall_now + a RE-QUALIFIED
+        // margin (max(3 intervals, 250 ms)), never one interval — the one-interval margin
+        // sat only network-delay away from the sender's deliberate ceil-to-boundary future
+        // bias and fired on a few ms of inter-box skew (the 2026-08-07 overnight −900 ms
+        // hold collapse).
         assert!(
-            src.contains("max_ts > wall_now + interval"),
-            "{OBS_SOURCE}: #147/#269 [3] — the backward-clock-step detection (max queued ts > \
-             wall_now + interval) is gone; the ts-align release would FREEZE the program feed \
-             on an NTP/PTP backward step (or recover non-uniformly). Re-apply the re-anchor guard."
+            src.contains("max_ts > wall_now + backward_margin"),
+            "{OBS_SOURCE}: #147/#269 [3]/#1009 — the backward-clock-step detection (max queued \
+             ts > wall_now + backward_margin) is gone; the ts-align release would FREEZE the \
+             program feed on an NTP/PTP backward step (or recover non-uniformly, or regress to \
+             the issue-1007 hair-trigger). Re-apply the re-anchor guard."
         );
+        // #1009: the margin must be the re-qualified max(3 intervals, 250 ms) — in lock-step
+        // with src/genlock_backlog.rs backward_step_margin_ns (Tier-0 unit-tested).
+        for marker in [
+            "#define GENLOCK_BACKWARD_STEP_MIN_MARGIN_NS 250000000ULL",
+            "#define GENLOCK_BACKWARD_STEP_MARGIN_INTERVALS 3ULL",
+            "static inline uint64_t genlock_backward_step_margin_ns(",
+        ] {
+            assert!(
+                src.contains(marker),
+                "{OBS_SOURCE}: #1009 — the backward-step trigger margin marker `{marker}` is \
+                 gone; the guard reverted to the one-interval hair-trigger that collapsed the \
+                 894 ms hold overnight. Re-apply (mirror: src/genlock_backlog.rs \
+                 backward_step_margin_ns)."
+            );
+        }
+        // #1009: the trigger must be SUSTAINED across consecutive due==0 ticks, never
+        // single-tick.
+        for marker in [
+            "#define GENLOCK_BACKWARD_STEP_SUSTAIN_TICKS 3",
+            "source->genlock_backward_pending_ticks++",
+            "source->genlock_backward_pending_ticks >=",
+        ] {
+            assert!(
+                src.contains(marker),
+                "{OBS_SOURCE}: #1009 — the sustained-qualification marker `{marker}` is gone; \
+                 a single-tick excursion would re-anchor again. Re-apply (mirror: \
+                 src/genlock_backlog.rs BACKWARD_STEP_SUSTAIN_TICKS / BackwardStepGuard)."
+            );
+        }
+        // #1009 SELF-HEAL: leaving the regime must ZERO the locked boundary (the existing
+        // ACQUIRE state) so the configured hold is re-established — the pre-#1009 latch
+        // clear left the FIFO consuming at the live edge FOREVER (the permanent absorbing
+        // state of the overnight collapse).
+        for marker in [
+            "static void genlock_backward_regime_end(",
+            "source->genlock_locked_next_boundary_ns = 0;",
+            "genlock_backward_regime_end(source, reserve_ms);",
+        ] {
+            assert!(
+                src.contains(marker),
+                "{OBS_SOURCE}: #1009 — the regime-exit SELF-HEAL marker `{marker}` is gone; a \
+                 backward-step regime would again leave the hold collapsed permanently (only an \
+                 OBS relaunch cleared it). Re-apply (mirror: src/genlock_backlog.rs \
+                 BackwardStepGuard SelfHeal)."
+            );
+        }
+        // #1009: a PERSISTENT regime must re-warn on a bounded cadence and count every
+        // re-anchored tick into the dedicated audit counter (backward_steps counts events
+        // only — the entry-only WARN let the collapse run silent for 3+ hours).
+        for marker in [
+            "#define GENLOCK_BACKWARD_REGIME_WARN_AFTER_NS 2000000000ULL",
+            "#define GENLOCK_BACKWARD_REGIME_WARN_INTERVAL_NS 5000000000ULL",
+            "source->genlock_backward_regime_ticks++",
+            "backward_regime_ticks=%llu",
+        ] {
+            assert!(
+                src.contains(marker),
+                "{OBS_SOURCE}: #1009 — the persistent-regime visibility marker `{marker}` is \
+                 gone; a sustained hold-bypass would run silent/uncounted again. Re-apply \
+                 (mirror: src/genlock_backlog.rs BACKWARD_REGIME_WARN_* / reanchor_ticks)."
+            );
+        }
         // The re-anchor must COUNT the event (the genlock_backward_steps audit counter).
         assert!(
             src.contains("source->genlock_backward_steps++"),
@@ -1347,6 +1414,20 @@ mod vendored_source {
             "{OBS_INTERNAL}: #269 [2] — the genlock_in_backward_step latch field is gone; \
              re-apply (the per-event backward-step counter latch)."
         );
+        // #1009: the sustained-qualification + regime-visibility fields must exist in
+        // lock-step with the guard code and the Tier-0 mirror.
+        for field in [
+            "uint32_t genlock_backward_pending_ticks;",
+            "uint64_t genlock_backward_regime_start_ns;",
+            "uint64_t genlock_backward_last_warn_ns;",
+            "uint64_t genlock_backward_regime_ticks;",
+        ] {
+            assert!(
+                internal.contains(field),
+                "{OBS_INTERNAL}: #1009 — the backward-step guard field `{field}` is gone; \
+                 re-apply (mirror: src/genlock_backlog.rs BackwardStepGuard)."
+            );
+        }
     }
 
     #[test]
@@ -2929,9 +3010,16 @@ mod distroav_source {
              backward-step re-anchor counter (genlock_backward_steps); re-add the pwsh #147 gate."
         );
         assert!(
-            wf.contains("max_ts > wall_now + interval"),
-            "{WINDOWS_GENLOCK_WF}: #147/#269 [3] — the production build no longer asserts the \
-             backward-clock-step detection (max queued ts > wall_now + interval); re-add the pwsh #147 gate."
+            wf.contains("max_ts > wall_now + backward_margin"),
+            "{WINDOWS_GENLOCK_WF}: #147/#269 [3]/#1009 — the production build no longer asserts \
+             the re-qualified backward-clock-step detection (max queued ts > wall_now + \
+             backward_margin); re-add the pwsh #147/#1009 gate."
+        );
+        assert!(
+            wf.contains("genlock_backward_regime_end("),
+            "{WINDOWS_GENLOCK_WF}: #1009 — the production build no longer asserts the \
+             regime-exit SELF-HEAL (genlock_backward_regime_end); a subtree bump could ship an \
+             obs.dll whose hold-collapse is permanent again. Re-add the pwsh #1009 gate."
         );
     }
 
@@ -2949,9 +3037,16 @@ mod distroav_source {
              windows-genlock.yml."
         );
         assert!(
-            wf.contains("max_ts > wall_now + interval"),
-            "{WINDOWS_GENLOCK_FAST_WF}: #147/#269 [3] — the FAST build does not assert the \
-             backward-clock-step detection (max queued ts > wall_now + interval); add the pwsh #147 gate."
+            wf.contains("max_ts > wall_now + backward_margin"),
+            "{WINDOWS_GENLOCK_FAST_WF}: #147/#269 [3]/#1009 — the FAST build does not assert \
+             the re-qualified backward-clock-step detection (max queued ts > wall_now + \
+             backward_margin); add the pwsh #147/#1009 gate."
+        );
+        assert!(
+            wf.contains("genlock_backward_regime_end("),
+            "{WINDOWS_GENLOCK_FAST_WF}: #1009 — the FAST build does not assert the regime-exit \
+             SELF-HEAL (genlock_backward_regime_end); a hot-swapped obs.dll could revert to the \
+             permanent hold-collapse. Add the pwsh #1009 gate, mirroring windows-genlock.yml."
         );
     }
 

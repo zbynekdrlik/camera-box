@@ -27,7 +27,8 @@ use std::collections::HashMap;
 ///
 /// Field names mirror the log's `key=value` tokens exactly (see [`parse_audit_line`]).
 /// The counters (`received`, `consumed`, `underruns`, `holds`, `overruns`,
-/// `backward_steps`, `dropped_due`, `relocks`, `late_holds`, `empty_run`) are CUMULATIVE
+/// `backward_steps`, `backward_regime_ticks`, `dropped_due`, `relocks`, `late_holds`,
+/// `empty_run`) are CUMULATIVE
 /// since the source was created — they only ever increase — so a per-run answer needs the
 /// DELTA between the first and last sample of a captured window ([`summarize`]), never the
 /// raw value alone. `ts_head_skew_ms` is an instantaneous per-tick value, not cumulative.
@@ -64,6 +65,11 @@ pub struct AuditSample {
     /// Per-tick skew (ms) between the presented frame's timestamp and the release
     /// deadline — the ARRIVAL-JITTER signal #272 asks to measure against the reserve.
     pub ts_head_skew_ms: i64,
+    /// #1009 — CUMULATIVE backward-step re-anchor TICKS (`backward_steps` counts EVENTS;
+    /// this counts every re-anchored tick, so a sustained hold-bypass regime is visible as
+    /// a climbing rate). Healthy operation keeps it at 0; the E2E/drift gates assert the
+    /// window DELTA stays 0. Absent on pre-#1009 logs — parses as 0.
+    pub backward_regime_ticks: u64,
 }
 
 /// Parse ONE `genlock-fifo audit` log line into an [`AuditSample`].
@@ -135,6 +141,7 @@ pub fn parse_audit_line(line: &str) -> Option<AuditSample> {
             "ts_present" => set!(ts_present),
             "ts_due" => set!(ts_due),
             "ts_head_skew_ms" => set!(ts_head_skew_ms),
+            "backward_regime_ticks" => set!(backward_regime_ticks),
             _ => {}
         }
     }
@@ -185,6 +192,9 @@ pub struct AuditSummary {
     pub delta_holds: u64,
     pub delta_overruns: u64,
     pub delta_backward_steps: u64,
+    /// #1009 — window delta of the cumulative backward-step re-anchor TICK counter; any
+    /// movement here means the configured hold was bypassed during the window.
+    pub delta_backward_regime_ticks: u64,
     pub delta_dropped_due: u64,
     pub delta_relocks: u64,
     pub delta_late_holds: u64,
@@ -233,6 +243,9 @@ pub fn summarize(samples: &[AuditSample]) -> Option<AuditSummary> {
         delta_holds: last.holds.saturating_sub(first.holds),
         delta_overruns: last.overruns.saturating_sub(first.overruns),
         delta_backward_steps: last.backward_steps.saturating_sub(first.backward_steps),
+        delta_backward_regime_ticks: last
+            .backward_regime_ticks
+            .saturating_sub(first.backward_regime_ticks),
         delta_dropped_due: last.dropped_due.saturating_sub(first.dropped_due),
         delta_relocks: last.relocks.saturating_sub(first.relocks),
         delta_late_holds: last.late_holds.saturating_sub(first.late_holds),
@@ -287,7 +300,8 @@ mod tests {
         dropped_due=0 relocks=0 late_holds=0 locked=1 depth=3 peak=5 latency_ms=3 \
         (\u{2248}1 frames @ 30.000fps) src_latency_ms=0 global_latency_ms=3 preload=1 \
         (=33 ms) reserve_ms=3 cap=5 empty_run=0 (re-arm@10) ts_present=123456789012 \
-        ts_due=987 ts_head_skew_ms=-2 (#70/#97/#126/#147/#148/#184/#235/#245/#401)";
+        ts_due=987 ts_head_skew_ms=-2 backward_regime_ticks=4 \
+        (#70/#97/#126/#147/#148/#184/#235/#245/#401)";
 
     #[test]
     fn parses_every_field_from_a_real_audit_line() {
@@ -315,6 +329,17 @@ mod tests {
         assert_eq!(s.ts_present, 123456789012);
         assert_eq!(s.ts_due, 987);
         assert_eq!(s.ts_head_skew_ms, -2);
+        // #1009: the re-anchor tick counter parses from its audit token.
+        assert_eq!(s.backward_regime_ticks, 4);
+    }
+
+    #[test]
+    fn backward_regime_ticks_defaults_to_zero_on_a_pre_1009_line() {
+        // A log captured from a pre-#1009 build has no backward_regime_ticks= token — the
+        // parser must yield 0, never fail the line.
+        let old = SAMPLE_LINE_CAM1.replace("backward_regime_ticks=4 ", "");
+        let s = parse_audit_line(&old).expect("pre-#1009 line must still parse");
+        assert_eq!(s.backward_regime_ticks, 0);
     }
 
     #[test]
