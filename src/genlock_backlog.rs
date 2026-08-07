@@ -997,7 +997,12 @@ mod tests {
         /// sim never steps the log clock). Mirrors the C release path's decision order.
         fn tick(&mut self, k: u64, wall: u64, log_now: u64) {
             if self.queue.is_empty() {
-                self.underruns += 1;
+                // A true-empty BEFORE anything was ever presented is the startup build
+                // phase (the C holds/build-fill path, issue 269 [4]) — only a post-start
+                // empty is real starvation.
+                if !self.presented.is_empty() {
+                    self.underruns += 1;
+                }
                 return;
             }
             let present_ts = phase_pinned_deadline(wall.saturating_sub(RESERVE_NS_1009), I30);
