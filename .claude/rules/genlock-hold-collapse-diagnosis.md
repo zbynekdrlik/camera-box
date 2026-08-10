@@ -83,3 +83,30 @@ With the permanent cam2 painter running (`cam2-painter.service` — its drop-in 
 - `genlock-relock` lines are abnormal instants — hourly aggregates of them said "skew climbing
   906→1715" while the steady 5 s audit said stable ~900–1010. Aggregate the AUDIT, not the events.
 - dantesync logs are UTC; OBS logs are local (+2 in DST). Align before correlating.
+
+## Never measure A/V inside the post-relaunch settle window (live 2026-08-10, deploy of the fix)
+
+The relaunch the repair above prescribes is ALSO a measurement hazard: the ASRC servo pulls in
+over the first minutes, so an arbiter run started too soon measures the CONVERGENCE, not the
+steady state. Measured on the very deploy that shipped this ticket's fix, same box, same painter,
+~7 minutes apart:
+
+| Recording start | offset | mad | matched |
+|---|---|---|---|
+| T+3 min after relaunch | **−97.7 ms** | 14.9 | 18 |
+| T+10 min after relaunch | **−28.9 ms** | 12.6 | 20 |
+
+The live dock corroborated the transient in real time across the same window
+(−62.7 → −65.5 → −9.2 → +5.3 → +12.8 ms), which is what proves the first number was the servo
+settling and not a regression the fix introduced — two independent paths agreeing on the SHAPE.
+
+Rule: after ANY OBS relaunch, wait until the dock's own offset stops walking (typically ~5–10 min)
+before starting the arbiter recording, and read the dock across the recording window as a shape
+check. A single arbiter number taken cold after a relaunch is not evidence — the collapse
+signature is a hold that STAYS at −(latency) and never recovers, which a settling curve is not.
+
+## New-build liveness tell (post-#1009)
+
+`backward_regime_ticks=<n>` in the `genlock-fifo audit` line only exists in the #1009 build — its
+presence is a one-glance proof the deployed `obs.dll` is the fixed one, independent of any
+`GENLOCK_BUILD_SHA.txt` stamp (which a rollback leaves stale, since Copy-Item preserves mtime).
