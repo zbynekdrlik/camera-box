@@ -329,6 +329,11 @@ pub struct RollingOffsetCluster {
     min_matched: usize,
     max_mad_ms: f64,
     samples: std::collections::VecDeque<(u64, f64)>,
+    /// #999 — whether the LAST push() returned `Some` (a trusted estimate). Drives which MAD
+    /// ceiling `push()` applies next: the strict entry ceiling while `false`, the wider
+    /// [`DOCK_CLUSTER_HOLD_MULTIPLIER`]-scaled hold ceiling while `true`. See that constant's own
+    /// doc comment for why (issue 999 boundary-hugging chatter).
+    locked: bool,
 }
 
 impl RollingOffsetCluster {
@@ -339,6 +344,7 @@ impl RollingOffsetCluster {
             min_matched,
             max_mad_ms,
             samples: std::collections::VecDeque::new(),
+            locked: false,
         }
     }
 
@@ -355,6 +361,14 @@ impl RollingOffsetCluster {
     /// Add one `(sample_ts_ns, offset_ms)` candidate (offset already lap-resolved), prune samples
     /// older than the window, and return the TRUSTED cluster offset if the densest band now clears
     /// both the size and MAD gates — else `None` ("still measuring / no trustworthy lock").
+    ///
+    /// #999: the MAD gate is HYSTERETIC, not a single boundary. While NOT currently locked, a
+    /// fresh estimate must clear the strict `max_mad_ms` ceiling to acquire trust (unchanged — no
+    /// weakening of the entry bar). While ALREADY locked, the wider `max_mad_ms *
+    /// DOCK_CLUSTER_HOLD_MULTIPLIER` ceiling applies instead, so ordinary recompute noise that
+    /// briefly nudges `mad_ms` a few ms past the entry ceiling does not immediately flip the lock
+    /// off (see [`DOCK_CLUSTER_HOLD_MULTIPLIER`]'s own doc comment). `min_matched` is UNCHANGED in
+    /// both states — it is the independent safety net for genuine signal loss.
     pub fn push(&mut self, sample_ts_ns: u64, offset_ms: f64) -> Option<AvOffset> {
         self.samples.push_back((sample_ts_ns, offset_ms));
         while let Some(&(ts, _)) = self.samples.front() {
@@ -365,12 +379,19 @@ impl RollingOffsetCluster {
             }
         }
         let offsets: Vec<f64> = self.samples.iter().map(|&(_, o)| o).collect();
-        match cluster_offset_ms(&offsets, self.min_matched, self.tol_ms) {
-            Some(est) if est.matched >= self.min_matched && est.mad_ms <= self.max_mad_ms => {
+        let mad_ceiling_ms = if self.locked {
+            self.max_mad_ms * DOCK_CLUSTER_HOLD_MULTIPLIER
+        } else {
+            self.max_mad_ms
+        };
+        let result = match cluster_offset_ms(&offsets, self.min_matched, self.tol_ms) {
+            Some(est) if est.matched >= self.min_matched && est.mad_ms <= mad_ceiling_ms => {
                 Some(est)
             }
             _ => None,
-        }
+        };
+        self.locked = result.is_some();
+        result
     }
 
     /// #926 fix-up (review finding 1/7) — shift every RETAINED sample's offset by `-delta_ms`.
