@@ -414,6 +414,19 @@ struct RollingOffsetCluster {
 	}
 };
 
+/* #1005 -- mirror of av_sync_dock::corrected_video_ts_is_valid. Whether a sync-test-output.cpp
+ * camera-box emit site's corrected video timestamp (audio_ts - smoothed_ns / audio_ts -
+ * locked_ns, a SIGNED value) is usable at all. Both camera-box emit sites used to CLAMP a
+ * negative result to 0 instead of dropping the event -- a video_ts of exactly 0 is not a
+ * legitimate near-zero offset, it manufactures a GARBAGE whole-timeline-scale sync_found value
+ * (audio_ts - 0 == audio_ts). Preserves the OLD clamp's own boundary exactly (`> 0` was always
+ * the "keep as-is" side of that ternary) -- only the disposition of the invalid side changes
+ * (drop, not clamp-to-zero-and-emit-anyway) once wired at the call sites. */
+inline bool cb_corrected_video_ts_is_valid(int64_t corrected_video_ts)
+{
+	return corrected_video_ts > 0;
+}
+
 /* ---- #634 audit-logging: lock-state transition classification (pure, no I/O) ----
  *
  * The dock silently applies whatever `RollingOffsetCluster::push()` returns: a new
