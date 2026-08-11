@@ -1069,15 +1069,22 @@ static inline void st_raw_audio_decode_data(struct sync_test_output *st, std::co
 		}
 
 		int64_t corrected_video_ts = (int64_t)audio_ts - smoothed_ns;
-		struct sync_index si;
-		si.index = idx8;
-		si.video_ts = corrected_video_ts > 0 ? (uint64_t)corrected_video_ts : 0;
-		si.audio_ts = audio_ts;
-		si.index_max = 256;
-		// #999 -- this event is camera-box's own direct-ring measurement (dock-native convention);
-		// on_sync_found must gate-convert it, same as every other displayed offset since #953.
-		si.gate_convention = true;
-		signal_sync_found(st->context, &si);
+		// #1005 -- a corrected_video_ts that could not legitimately be produced (still negative
+		// after smoothing, e.g. early in a session before the estimate converges) must be
+		// DROPPED, never clamped to 0 and emitted anyway -- a clamped video_ts=0 manufactures a
+		// garbage whole-timeline-scale offset downstream.
+		if (camerabox::cb_corrected_video_ts_is_valid(corrected_video_ts)) {
+			struct sync_index si;
+			si.index = idx8;
+			si.video_ts = (uint64_t)corrected_video_ts;
+			si.audio_ts = audio_ts;
+			si.index_max = 256;
+			// #999 -- this event is camera-box's own direct-ring measurement (dock-native
+			// convention); on_sync_found must gate-convert it, same as every other displayed
+			// offset since #953.
+			si.gate_convention = true;
+			signal_sync_found(st->context, &si);
+		}
 	}
 }
 
@@ -1446,16 +1453,21 @@ static void st_raw_audio_camera_box(struct sync_test_output *st, struct audio_da
 
 		// Latency (sync_found): the locked cluster offset, as audio_ts - video_ts (dock convention).
 		const int64_t locked_ns = (int64_t)std::llround(est.offset_ms * 1000000.0);
-		struct sync_index si;
-		si.index = idx8;
 		const int64_t corrected_video_ts = (int64_t)audio_ts - locked_ns;
-		si.video_ts = corrected_video_ts > 0 ? (uint64_t)corrected_video_ts : 0;
-		si.audio_ts = audio_ts;
-		si.index_max = 256;
-		// #999 -- same as the "still measuring" sync_found above: this is camera-box's own
-		// direct-ring measurement, gate-convert it for on_sync_found.
-		si.gate_convention = true;
-		signal_sync_found(st->context, &si);
+		// #1005 -- same DROP-not-clamp fix as the "still measuring" sync_found above: never
+		// manufacture a garbage whole-timeline-scale offset from a video_ts that could not
+		// legitimately be produced.
+		if (camerabox::cb_corrected_video_ts_is_valid(corrected_video_ts)) {
+			struct sync_index si;
+			si.index = idx8;
+			si.video_ts = (uint64_t)corrected_video_ts;
+			si.audio_ts = audio_ts;
+			si.index_max = 256;
+			// #999 -- same as the "still measuring" sync_found above: this is camera-box's own
+			// direct-ring measurement, gate-convert it for on_sync_found.
+			si.gate_convention = true;
+			signal_sync_found(st->context, &si);
+		}
 
 		// Audio Index (audio_marker_found): only for a marker whose own offset agrees with the lock
 		// — a believed-REAL marker — so the displayed index is a genuine one, not a false blip.

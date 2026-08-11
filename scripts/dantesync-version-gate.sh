@@ -65,7 +65,9 @@ DEFAULT_FLEET_FILE="$HERE/../rig-fleet.txt"
 # fleet-convergence target — a deliberate, bump-on-purpose value in the SAME spirit as
 # verify-device.sh's NDI_VERSION_PIN: whoever executes a dantesync fleet upgrade (#851) bumps this
 # alongside the deploy, so the gate never silently drifts to "whatever happens to be out".
-DANTESYNC_VERSION_PIN="${DANTESYNC_VERSION_PIN:-1.8.25}"
+# Bumped 2026-08-11: fleet rolled to v1.8.30 (dantesync NTP server-mode self-discipline fix —
+# the master no longer free-runs at oscillator error; verified 8/8 boxes on the rollout day).
+DANTESYNC_VERSION_PIN="${DANTESYNC_VERSION_PIN:-1.8.30}"
 
 # --- PURE functions (no network, no SSH — unit-tested by sourcing this file) ------------------
 

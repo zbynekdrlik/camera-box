@@ -48,6 +48,7 @@ fn squish(s: &str) -> String {
 
 const NDI_OUTPUT: &str = "vendor/distroav/src/ndi-output.cpp";
 const WINDOWS_GENLOCK_WF: &str = ".github/workflows/windows-genlock.yml";
+const WINDOWS_GENLOCK_FAST_WF: &str = ".github/workflows/windows-genlock-fast.yml";
 
 #[test]
 fn output_video_timecode_uses_real_wall_clock_not_synthesize() {
@@ -149,5 +150,15 @@ fn windows_genlock_workflow_gates_on_the_timecode_patch() {
         "{WINDOWS_GENLOCK_WF}: the production build no longer asserts the #1009 FLOOR emit \
          stamp — a subtree bump could restore the future-biased ceil stamp (the issue-1007 \
          hair-trigger arming) while the version pin still passes. Re-add the pwsh #1009 gate."
+    );
+    // #1009 review follow-up: the FAST workflow ships distroav.dll for hot-swap, so the
+    // floor-stamp gate must exist there too — a direct-dispatch hot-swap would otherwise
+    // bypass the slow build's gate entirely.
+    let wff = squish(&vendor_file(WINDOWS_GENLOCK_FAST_WF));
+    assert!(
+        wff.contains("return genlock_floor_boundary_100ns(genlock_wall_now_100ns(), fps);"),
+        "{WINDOWS_GENLOCK_FAST_WF}: the FAST build (which ships distroav.dll for hot-swap) \
+         does not assert the #1009 FLOOR emit stamp; add the pwsh gate, mirroring \
+         windows-genlock.yml."
     );
 }

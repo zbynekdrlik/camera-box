@@ -949,6 +949,12 @@ fn gate_fails_a_win_http_node_whose_median_is_fine_but_samples_scatter_beyond_st
     // of 200us must also fail"). A single-read gate could never see this; it only ever grades
     // whichever ONE value it happened to draw, and several of these values ARE individually
     // in-bound.
+    //
+    // Uses "stream" (a CLIENT node), not "strih" -- #1014 made "strih" (the default
+    // --ntp-master) grade on median+freshness ONLY, so a scattered-but-in-bound-median "strih"
+    // fixture would now PASS instead of proving this generic full-grading stability check. See
+    // gate_a_win_http_ntp_master_ignores_spread_but_still_grades_median_1014 below for the
+    // master-specific counterpart of this exact fixture shape.
     let base = now_epoch();
     let responses = vec![
         http_status(base, -19800),
@@ -957,13 +963,17 @@ fn gate_fails_a_win_http_node_whose_median_is_fine_but_samples_scatter_beyond_st
         http_status(base + 3, -19500),
         http_status(base + 4, 19900),
     ];
-    let p = write_multi_read_fixture("strih_unstable", &responses);
+    let p = write_multi_read_fixture("stream_unstable", &responses);
     let (code, stdout, stderr) = run_gate_env(
         &[
             "--linux",
             "",
             "--win-http",
-            "strih=10.77.9.202",
+            "stream=10.77.9.204",
+            // #1014 review follow-up: only "stream" is configured, no "strih" -- opt OUT of the
+            // master-name validation (this test cares about generic client grading only).
+            "--ntp-master",
+            "",
             "--samples",
             "5",
             "--min-distinct",
@@ -971,7 +981,7 @@ fn gate_fails_a_win_http_node_whose_median_is_fine_but_samples_scatter_beyond_st
             "--window-s",
             "0",
         ],
-        &[("DANTESYNC_GATE_WIN_HTTP_STRIH", &p.display().to_string())],
+        &[("DANTESYNC_GATE_WIN_HTTP_STREAM", &p.display().to_string())],
     );
     assert_eq!(
         code, 20,
@@ -1213,5 +1223,460 @@ fn gate_refuses_when_min_distinct_exceeds_samples() {
     assert!(
         stderr.contains("--min-distinct") && stderr.contains("--samples"),
         "stderr must name both flags: {stderr}"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// #1014 -- the --win-http path had NO staleness check on the NTP MEASUREMENT itself (only the
+// general, PTP-driven updated_ts), and graded the NTP master (strih) with the same
+// median+spread/stability bar as a client node even though the master's spread is a by-design
+// UTC-residual correction-lag sawtooth since dantesync v1.8.30 (dantesync issue 71). These tests
+// cover all four fixture classes: FRESH (new fields present, in window), STALE (new fields
+// present, past window / ntp_failed), ABSENT (pre-1.8.30 payload, no ntp_age_s field at all --
+// the frozen-sample fallback), and the MASTER-SAWTOOTH case (median-only grading).
+// ---------------------------------------------------------------------------------------------
+
+/// A DanteSync HTTP status-pipe JSON payload carrying the v1.8.30 NTP-freshness fields
+/// (ntp_updated_ts/ntp_age_s/ntp_failed) alongside the pre-existing ones. `ntp_age_s_raw` is
+/// either a plain integer string or the literal "null".
+fn http_status_ntp(ts: u64, offset_us: i64, ntp_age_s_raw: &str, ntp_failed: bool) -> String {
+    format!(
+        "{{\"gm_source_ip\":\"10.77.9.184\",\"settled\":true,\"updated_ts\":{ts},\
+         \"is_locked\":true,\"ntp_offset_us\":{offset_us},\"mode\":\"NANO\",\
+         \"ntp_failed\":{ntp_failed},\"ntp_updated_ts\":{ts},\"ntp_age_s\":{ntp_age_s_raw}}}"
+    )
+}
+
+// --- Fixture class 1: FRESH (new fields present, in window) -- the happy path is unchanged ---
+
+#[test]
+fn gate_win_http_master_fresh_ntp_age_s_grades_ok_1014() {
+    let now = now_epoch();
+    let fresh = http_status_ntp(now, 100, "4", false);
+    let p = write_win_http_fixture("strih_1014_fresh", &fresh);
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--samples",
+            "1",
+            "--min-distinct",
+            "1",
+            "--window-s",
+            "0",
+        ],
+        &[("DANTESYNC_GATE_WIN_HTTP_STRIH", &p.display().to_string())],
+    );
+    assert_eq!(
+        code, 0,
+        "fresh ntp_age_s, in-bound offset, master node -> PASS. stdout={stdout} stderr={stderr}"
+    );
+    assert!(stdout.contains("GATE PASS"), "stdout: {stdout}");
+}
+
+// --- Fixture class 2: STALE (new fields present, past window, or ntp_failed) -- THE core fix -
+
+#[test]
+fn gate_win_http_stale_ntp_age_s_is_never_graded_as_drift_1014() {
+    // #1014's ORIGINAL live incident, reproduced exactly: an offset far out of bound (-34718us,
+    // the real captured value) whose ntp_age_s proves the reading is stale (99999s old). Before
+    // this fix the gate had no way to see this and graded a false DRIFT; after the fix it must
+    // refuse honestly as STALE/UNKNOWN, never DRIFT.
+    let now = now_epoch();
+    let stale = http_status_ntp(now, -34718, "99999", false);
+    let p = write_win_http_fixture("strih_1014_stale_age", &stale);
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--samples",
+            "1",
+            "--min-distinct",
+            "1",
+            "--window-s",
+            "0",
+        ],
+        &[("DANTESYNC_GATE_WIN_HTTP_STRIH", &p.display().to_string())],
+    );
+    assert_eq!(
+        code, 11,
+        "a stale NTP measurement must be GATE INCOMPLETE (11), NEVER GATE FAILED (20) -- the \
+         exact false-DRIFT this ticket exists to fix. stdout={stdout} stderr={stderr}"
+    );
+    assert!(stderr.contains("INCOMPLETE"), "stderr: {stderr}");
+    assert!(
+        stdout.contains("NTP STALE"),
+        "stdout must name it stale, not drift: {stdout}"
+    );
+    assert!(
+        !stdout.contains("DRIFT"),
+        "stdout must never mention DRIFT for a stale measurement, regardless of how far out of \
+         bound the frozen value looks: {stdout}"
+    );
+}
+
+#[test]
+fn gate_win_http_ntp_failed_true_refuses_even_with_fresh_age_1014() {
+    // dantesync issue 68 widened ntp_failed to ALSO mean "no fresh measurement within window" --
+    // must refuse even when ntp_age_s itself looks fresh, proving the two signals are checked
+    // independently.
+    let now = now_epoch();
+    let failed = http_status_ntp(now, 100, "2", true);
+    let p = write_win_http_fixture("strih_1014_ntp_failed", &failed);
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--samples",
+            "1",
+            "--min-distinct",
+            "1",
+            "--window-s",
+            "0",
+        ],
+        &[("DANTESYNC_GATE_WIN_HTTP_STRIH", &p.display().to_string())],
+    );
+    assert_eq!(
+        code, 11,
+        "ntp_failed:true must refuse (11) even with a fresh ntp_age_s. stdout={stdout} stderr={stderr}"
+    );
+    assert!(stdout.contains("NTP STALE"), "stdout: {stdout}");
+}
+
+#[test]
+fn gate_win_http_ntp_age_s_null_is_unknown_never_measured_1014() {
+    let now = now_epoch();
+    let never = http_status_ntp(now, 999999, "null", false);
+    let p = write_win_http_fixture("strih_1014_never_measured", &never);
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--samples",
+            "1",
+            "--min-distinct",
+            "1",
+            "--window-s",
+            "0",
+        ],
+        &[("DANTESYNC_GATE_WIN_HTTP_STRIH", &p.display().to_string())],
+    );
+    assert_eq!(
+        code, 11,
+        "ntp_age_s:null (never measured) must be GATE INCOMPLETE (11), never DRIFT. \
+         stdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        stdout.contains("NTP UNKNOWN") && stdout.to_lowercase().contains("never"),
+        "stdout must say never-measured, not just generically stale: {stdout}"
+    );
+}
+
+// --- Fixture class 3: ABSENT (pre-1.8.30 payload, no ntp_age_s field) -- frozen-sample fallback
+
+#[test]
+fn gate_win_http_pre_1_8_30_frozen_offset_is_stale_not_drift_1014() {
+    // Same #1014 incident shape, but as it would have looked BEFORE dantesync v1.8.30 shipped
+    // ntp_age_s at all: several distinct-by-updated_ts reads that all report the SAME
+    // ntp_offset_us -- the frozen-sample heuristic this ticket's own comments endorsed as the
+    // interim fix for payloads lacking the new fields.
+    let base = now_epoch();
+    let responses = vec![
+        http_status(base, -34718),
+        http_status(base + 10, -34718),
+        http_status(base + 20, -34718),
+    ];
+    let p = write_multi_read_fixture("strih_1014_frozen_legacy", &responses);
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--samples",
+            "3",
+            "--min-distinct",
+            "3",
+            "--window-s",
+            "0",
+        ],
+        &[("DANTESYNC_GATE_WIN_HTTP_STRIH", &p.display().to_string())],
+    );
+    assert_eq!(
+        code, 11,
+        "a frozen ntp_offset_us across all distinct samples, on a pre-1.8.30 payload with no \
+         ntp_age_s, must be INCOMPLETE (11), never DRIFT (20). stdout={stdout} stderr={stderr}"
+    );
+    assert!(stderr.contains("INCOMPLETE"), "stderr: {stderr}");
+    assert!(stdout.contains("NTP STALE"), "stdout: {stdout}");
+    assert!(
+        !stdout.contains("DRIFT"),
+        "must never report DRIFT for a frozen legacy reading: {stdout}"
+    );
+}
+
+#[test]
+fn gate_win_http_pre_1_8_30_non_frozen_still_grades_and_can_still_drift_1014() {
+    // A pre-1.8.30 payload (no ntp_age_s) whose samples genuinely VARY must fall through to the
+    // unchanged legacy grading -- including still catching a REAL drift, proving the backward-
+    // compat fallback is not a blanket pass.
+    let base = now_epoch();
+    let responses = vec![
+        http_status(base, 8000),
+        http_status(base + 10, 8200),
+        http_status(base + 20, 8100),
+    ];
+    let p = write_multi_read_fixture("strih_1014_legacy_drift", &responses);
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--samples",
+            "3",
+            "--min-distinct",
+            "3",
+            "--window-s",
+            "0",
+        ],
+        &[("DANTESYNC_GATE_WIN_HTTP_STRIH", &p.display().to_string())],
+    );
+    assert_eq!(
+        code, 20,
+        "a genuinely varying (non-frozen) pre-1.8.30 reading whose median is out of bound must \
+         still DRIFT (20) -- the fallback never masks a real problem. stdout={stdout} stderr={stderr}"
+    );
+    assert!(stdout.contains("DRIFT"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("pre-1.8.30") && stdout.contains("legacy"),
+        "the line should note it graded via the legacy path (documented WARN, #1014): {stdout}"
+    );
+}
+
+// --- Fixture class 4: MASTER-SAWTOOTH -- median+freshness only, spread never gates ------------
+
+#[test]
+fn gate_win_http_ntp_master_ignores_spread_but_still_grades_median_1014() {
+    // The live dantesync issue 71 shape: strih's median is perfect (0) but its samples sawtooth
+    // across a wide spread purely from correction lag -- must PASS, never UNSTABLE.
+    let base = now_epoch();
+    let responses = vec![
+        http_status_ntp(base, 0, "2", false),
+        http_status_ntp(base + 5, 2500, "3", false),
+        http_status_ntp(base + 10, 900, "2", false),
+        http_status_ntp(base + 15, 0, "4", false),
+        http_status_ntp(base + 20, 1800, "2", false),
+        http_status_ntp(base + 25, 0, "3", false),
+    ];
+    let p = write_multi_read_fixture("strih_1014_master_sawtooth", &responses);
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--samples",
+            "6",
+            "--min-distinct",
+            "3",
+            "--window-s",
+            "0",
+        ],
+        &[("DANTESYNC_GATE_WIN_HTTP_STRIH", &p.display().to_string())],
+    );
+    assert_eq!(
+        code, 0,
+        "the NTP master's by-design correction-lag sawtooth must PASS -- median in-bound, \
+         spread never gated. stdout={stdout} stderr={stderr}"
+    );
+    assert!(stdout.contains("GATE PASS"), "stdout: {stdout}");
+    assert!(
+        !stdout.contains("UNSTABLE"),
+        "the master must never be reported UNSTABLE for its own by-design sawtooth: {stdout}"
+    );
+    assert!(
+        stdout.contains("NTP MASTER"),
+        "the OK line should note this node was graded as the NTP master: {stdout}"
+    );
+}
+
+#[test]
+fn gate_win_http_ntp_master_still_fails_on_genuine_drift_1014() {
+    // median-only mode is not "the master can never fail" -- a genuinely drifted master (tight
+    // samples, but all clearly out of bound) must still DRIFT.
+    let base = now_epoch();
+    let responses = vec![
+        http_status_ntp(base, 25000, "2", false),
+        http_status_ntp(base + 5, 25100, "3", false),
+        http_status_ntp(base + 10, 24900, "2", false),
+    ];
+    let p = write_multi_read_fixture("strih_1014_master_genuine_drift", &responses);
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--samples",
+            "3",
+            "--min-distinct",
+            "3",
+            "--window-s",
+            "0",
+        ],
+        &[("DANTESYNC_GATE_WIN_HTTP_STRIH", &p.display().to_string())],
+    );
+    assert_eq!(
+        code, 20,
+        "the master must still fail on a genuine median drift, median-only mode only skips the \
+         spread/stability check. stdout={stdout} stderr={stderr}"
+    );
+    assert!(stdout.contains("DRIFT"), "stdout: {stdout}");
+}
+
+#[test]
+fn gate_ntp_master_name_is_configurable_via_ntp_master_flag_1014() {
+    // Prove the master designation is genuinely NAME-based and caller-configurable, not
+    // hardcoded to the literal "strih": with --ntp-master stream, a "stream" node showing the
+    // same scattered-but-in-bound-median shape that fails as UNSTABLE for an ordinary client
+    // must now PASS.
+    let base = now_epoch();
+    let responses = vec![
+        http_status_ntp(base, 0, "2", false),
+        http_status_ntp(base + 5, 2500, "3", false),
+        http_status_ntp(base + 10, 900, "2", false),
+    ];
+    let p = write_multi_read_fixture("stream_1014_as_configured_master", &responses);
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "stream=10.77.9.204",
+            "--ntp-master",
+            "stream",
+            "--samples",
+            "3",
+            "--min-distinct",
+            "3",
+            "--window-s",
+            "0",
+        ],
+        &[("DANTESYNC_GATE_WIN_HTTP_STREAM", &p.display().to_string())],
+    );
+    assert_eq!(
+        code, 0,
+        "--ntp-master stream must make \"stream\" grade as the master (median-only). \
+         stdout={stdout} stderr={stderr}"
+    );
+    assert!(stdout.contains("GATE PASS"), "stdout: {stdout}");
+    assert!(!stdout.contains("UNSTABLE"), "stdout: {stdout}");
+}
+
+// --- #1014 review follow-up: --ntp-master must match a CONFIGURED node, or refuse loudly -------
+
+#[test]
+fn gate_refuses_when_ntp_master_name_matches_no_configured_node_1014() {
+    // A typo'd --win-http NAME= for the box meant to be the master (e.g. "strhi" instead of
+    // "strih") must NEVER silently fall back to grading the intended master with the full
+    // spread/stability bar -- that is #1014's exact false-DRIFT bug, reachable again through a
+    // misspelling instead of an old payload shape. Default --ntp-master is "strih"; configuring
+    // only a differently-named win-http node must refuse at usage-check time (1), never proceed.
+    let now = now_epoch();
+    let fresh = http_status_ntp(now, 100, "4", false);
+    let p = write_win_http_fixture("strhi_typo_1014", &fresh);
+    let (code, _stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "strhi=10.77.9.202", // typo'd node name -- never matches the default "strih" master
+            "--samples",
+            "1",
+            "--min-distinct",
+            "1",
+            "--window-s",
+            "0",
+        ],
+        &[("DANTESYNC_GATE_WIN_HTTP_STRHI", &p.display().to_string())],
+    );
+    assert_eq!(
+        code, 1,
+        "a --ntp-master name matching no configured node must be a usage error (1), never a \
+         silent full-grading fallback: stderr={stderr}"
+    );
+    assert!(
+        stderr.contains("--ntp-master") && stderr.contains("strih"),
+        "stderr must name the mismatch clearly: {stderr}"
+    );
+}
+
+#[test]
+fn gate_ntp_master_empty_string_opts_out_of_master_validation_1014() {
+    // --ntp-master "" explicitly disables the master concept for this invocation -- a node set
+    // with no "strih" at all must proceed normally (no usage-error refusal), grading every node
+    // with the full spread/stability bar.
+    let now = now_epoch();
+    let fresh = http_status_ntp(now, 100, "4", false);
+    let p = write_win_http_fixture("stream_no_master_opt_out_1014", &fresh);
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "stream=10.77.9.204",
+            "--ntp-master",
+            "",
+            "--samples",
+            "1",
+            "--min-distinct",
+            "1",
+            "--window-s",
+            "0",
+        ],
+        &[("DANTESYNC_GATE_WIN_HTTP_STREAM", &p.display().to_string())],
+    );
+    assert_eq!(
+        code, 0,
+        "--ntp-master \"\" must opt out of the validation and proceed normally. \
+         stdout={stdout} stderr={stderr}"
+    );
+    assert!(stdout.contains("GATE PASS"), "stdout: {stdout}");
+}
+
+#[test]
+fn gate_ntp_master_validation_skipped_for_linux_only_invocations_1014() {
+    // A pure --linux invocation (--win-http omitted entirely, so the win_http array stays
+    // EMPTY -- unlike --linux "", a bare --win-http "" would append ONE empty-name element, not
+    // zero) has no master concept in play -- the default "strih" master name matching nothing
+    // among cam1/cam2 must NOT refuse.
+    let j = write_dante_journal(
+        "cam1_1014_linux_only_no_master",
+        "2026-08-11T10:00:00+02:00 cam1 dantesync[1]: [NTP] offset:+100us (threshold:520us, adaptive)\n\
+2026-08-11T10:00:05+02:00 cam1 dantesync[1]: [PTP] NANO  Drift:   +12ns/s  Adj: +6.10ppm\n",
+    );
+    let (code, stdout, stderr) = run_gate_env(
+        &["--linux", "cam1=10.77.9.61"],
+        &[
+            (
+                "DANTESYNC_GATE_LINUX_JOURNAL_CAM1",
+                &j.display().to_string(),
+            ),
+            ("DANTESYNC_GATE_LINUX_HTTP_CAM1", NO_HTTP), // #686: force journal fallback, no live curl
+        ],
+    );
+    assert_eq!(
+        code, 0,
+        "a Linux-only invocation must never be blocked by the master-name validation (no \
+         --win-http node is configured at all). stdout={stdout} stderr={stderr}"
     );
 }
