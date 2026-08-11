@@ -17,7 +17,7 @@ Reproduce with the commands below, or extend `run_ab.sh`'s existing matrix with 
 | 5 | 4.1667 | 0.0000 |
 | 8 | 8.3333 | 0.0000 |
 | 50 | 50.0000 (exact) | 41.6667 |
-| 300 | 291.6667 (unchanged -- 300ppm was already above the OLD floor too) | 291.6667 |
+| 300 | 300.0000 (exact -- 144/480000 has no rounding error) | 291.6667 |
 
 The new zero-effect floor is `~1.0417 ppm` (down from `~10.4167 ppm`), covering essentially all
 of issue 929's own "typically single-digit ppm" characterization. `achieved_ppm` matches the
