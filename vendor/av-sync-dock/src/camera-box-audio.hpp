@@ -549,7 +549,13 @@ static const int32_t CB_DOCK_LOCK_MAX_STEP_MS = 5;
 static const double CB_DOCK_LOCK_MIN_REAPPLY_S = 30.0;
 static const int32_t CB_DOCK_LOCK_LATENCY_MIN_MS = 3;
 static const int32_t CB_DOCK_LOCK_LATENCY_MAX_MS = 2000;
-/* #926 fix-up review finding 3 -- mirror of av_sync_dock::DOCK_LOCK_MIN_MARGIN_MS. */
+/* #926 fix-up review finding 3 -- mirror of av_sync_dock::DOCK_LOCK_MIN_MARGIN_MS.
+ *
+ * #999 note: this clamp's UPPER bound intentionally stays at CB_CLUSTER_MAX_MAD_MS (the strict
+ * entry ceiling), never CB_CLUSTER_HOLD_MULTIPLIER's wider hold ceiling -- even though an
+ * already-locked cluster's mad_ms can now legitimately reach up to that wider value. The clamp
+ * already saturates safely there; it just means the correction margin pins at 25ms more often
+ * post-#999 than it did before -- expected, not a bug. */
 static const double CB_DOCK_LOCK_MIN_MARGIN_MS = 1.0;
 
 /* #942 -- BUILD DEFAULT, not a runtime toggle: the E2E gate (scripts/av_sync_calibrate.py

@@ -424,9 +424,10 @@ impl RollingOffsetCluster {
 /// can genuinely go negative early in a session before the rolling offset estimate has converged
 /// (e.g. right after OBS start). The fix: DROP the event entirely (never call `signal_sync_found`)
 /// when this returns `false`, instead of emitting a clamped garbage measurement. Preserves the
-/// OLD clamp's own boundary exactly — `> 0` was always the "keep as-is" side of that ternary, so
-/// `<= 0` (this ticket's own wording) is invalid here too; only the DISPOSITION of the invalid
-/// side changed (drop, not clamp-to-zero-and-emit-anyway).
+/// OLD clamp's own boundary exactly: `> 0` was always the "keep as-is" side of that ternary, and
+/// this ticket's own wording ("when `corrected_video_ts <= 0`") is the same boundary from the
+/// invalid side. Only the DISPOSITION of the invalid side changed — drop, not
+/// clamp-to-zero-and-emit-anyway.
 pub fn corrected_video_ts_is_valid(corrected_video_ts: i64) -> bool {
     corrected_video_ts > 0
 }
@@ -460,6 +461,13 @@ pub const DOCK_LOCK_LATENCY_MAX_MS: i32 = 2000;
 /// `mad_ms.clamp(DOCK_LOCK_MIN_MARGIN_MS, DOCK_CLUSTER_MAX_MAD_MS)`: scaled to the cluster's own
 /// observed dispersion (a wide/noisy lock gets a bigger, honest margin), but never below this
 /// floor even when a cluster reports a suspiciously tiny/zero MAD (few samples, or a lucky run).
+///
+/// #999 note: this clamp's UPPER bound intentionally stays at [`DOCK_CLUSTER_MAX_MAD_MS`] (the
+/// strict entry ceiling), never [`DOCK_CLUSTER_HOLD_MULTIPLIER`]'s wider hold ceiling — even
+/// though an already-locked cluster's `mad_ms` can now legitimately reach up to that wider value.
+/// The clamp already saturates safely there (tested by
+/// `corrector_margin_clamps_to_the_max_mad_when_mad_is_huge`), it just means the correction
+/// margin will pin at 25ms more often post-#999 than it did before — expected, not a bug.
 pub const DOCK_LOCK_MIN_MARGIN_MS: f64 = 1.0;
 
 /// #942 — BUILD DEFAULT, not a runtime toggle: the E2E gate (`scripts/av_sync_calibrate.py
