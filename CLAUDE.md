@@ -44,6 +44,7 @@ Rust app for embedded NDI cameras (CAM1-4): multi-camera NDI streaming with soft
 - ssh vs win-* MCP on strih/stream — the HARD two-context rule (agent session = MCP ONLY, never ssh; headless CI/watchdog = ssh allowed but ONLY session-agnostic signals — session-0 `EnumWindows` blindness makes `MainWindowTitle` empty on a HEALTHY box, issue 958) → `.claude/rules/win-ssh-vs-mcp.md` (auto-loads on its `paths:`)
 - Genlock FIFO limit-cycle diagnosis from a failed E2E verdict (frozen_leg = per-window aggregate, copies≈gaps uniform = FIFO signature, stream 2ME PGM audit deltas, frac(latency/33.3)<0.5 discriminator, date-less OBS logs, #998) → `.claude/rules/genlock-fifo-limit-cycle-diagnosis.md` (auto-loads on its `paths:`)
 - Genlock hold-collapse diagnosis (A/V offset ≈ −latency_ms signature, the once-per-event backward-step latch that makes log silence lie, ceil-stamp hair-trigger, OBS-relaunch-only repair, 15-min offline arbiter recipe, Windows remote-grep traps, #1007/#1009) → `.claude/rules/genlock-hold-collapse-diagnosis.md` (auto-loads on its `paths:`)
+- Offline audio-quality (THD+N) measurement (coherent-sampling window-leakage trap, the CI-only-vendor-code standalone-harness pattern, CPU-timing noise on a shared box, #929) → `.claude/rules/audio-quality-measurement.md` (auto-loads on its `paths:`)
 
 ## DO NOT DELETE These Files
 
