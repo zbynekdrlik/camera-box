@@ -74,7 +74,7 @@ jobs:
           # ms of sender-ahead stamp skew and permanently collapsed the deep hold overnight).
           if ($src -notmatch [regex]::Escape('max_ts > wall_now + backward_margin')) { Write-Error "re-qualified backward-clock-step detection gone (#147/#269/#1009) — either the guard is gone (freeze on an NTP/PTP step) or it reverted to the issue-1007 hair-trigger"; exit 1 }
           if ($src -notmatch [regex]::Escape('#define GENLOCK_BACKWARD_STEP_MIN_MARGIN_NS 250000000ULL')) { Write-Error "backward-step margin floor gone (#1009) — the guard would hair-trigger on sender-ahead stamp skew again"; exit 1 }
-          if ($src -notmatch [regex]::Escape('#define GENLOCK_BACKWARD_STEP_SUSTAIN_TICKS 3')) { Write-Error "backward-step sustained qualification gone (#1009) — single-tick hair-trigger again"; exit 1 }
+          if ($src -notmatch [regex]::Escape('#define GENLOCK_BACKWARD_STEP_SUSTAIN_TICKS 3 ')) { Write-Error "backward-step sustained qualification gone (#1009) — single-tick hair-trigger again"; exit 1 }
           if ($src -notmatch [regex]::Escape('source->genlock_backward_steps++')) { Write-Error "backward-step re-anchor counter gone (#147)"; exit 1 }
           # #269 [2]: per-event latch — counter fires once per step, not per recovery tick.
           if ($src -notmatch [regex]::Escape('source->genlock_in_backward_step = true')) { Write-Error "backward-step per-event latch gone (#269 [2]) — counter would over-report"; exit 1 }

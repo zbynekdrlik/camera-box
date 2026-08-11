@@ -195,7 +195,7 @@ fn backward_step_recovery_survives_the_cadence() {
         "max_ts > wall_now + backward_margin",
         "genlock_backward_step_margin_ns(",
         "#define GENLOCK_BACKWARD_STEP_MIN_MARGIN_NS 250000000ULL",
-        "#define GENLOCK_BACKWARD_STEP_SUSTAIN_TICKS 3",
+        "#define GENLOCK_BACKWARD_STEP_SUSTAIN_TICKS 3 ",
         "static void genlock_backward_regime_end(",
         "source->genlock_locked_next_boundary_ns = 0;",
         "genlock_backward_regime_end(source, reserve_ms);",

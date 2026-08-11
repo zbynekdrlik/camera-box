@@ -322,17 +322,22 @@ pub enum BackwardStepAction {
     /// No over-margin condition and no regime active — a normal tick, fall through to the
     /// cadence untouched.
     None,
-    /// The over-margin condition is present but not yet sustained — fall through to the
-    /// cadence (NO re-anchor); the cadence's locked boundary keeps presenting/holding.
+    /// A qualification run is in progress — fall through to the cadence (NO re-anchor,
+    /// NO self-heal this tick; the cadence's locked boundary keeps presenting/holding).
+    /// Out of a regime this is the ENTRY qualification (over-margin ticks not yet
+    /// sustained); inside a regime it is the EXIT qualification (clear ticks not yet
+    /// sustained — a single clear tick inside a flap must not end the regime, because
+    /// every exit costs a bounded ~latency_ms re-ACQUIRE hold; review hardening).
     Pending,
     /// A qualified, sustained backward step — re-anchor THIS tick: present the oldest queued
     /// frame and re-lock the cadence boundary to it (+interval). `entry` = first tick of this
     /// event (count it + entry WARN); `warn` = the bounded-cadence persistent-regime WARN is
     /// due this tick.
     Reanchor { entry: bool, warn: bool },
-    /// The regime just ENDED — self-heal: the caller must ZERO the locked cadence boundary so
-    /// the release re-ACQUIREs the configured hold from the wall deadline (queue rebuilds to
-    /// latency depth; bounded transient), then fall through to the cadence.
+    /// The regime just ENDED — self-heal: the caller must ZERO the locked cadence boundary
+    /// (and clear the sticky-N latch, like every other source-timeline seam) so the release
+    /// re-ACQUIREs the configured hold from the wall deadline (queue rebuilds to latency
+    /// depth; bounded transient), then fall through to the cadence.
     SelfHeal,
 }
 
@@ -384,6 +389,9 @@ impl BackwardStepGuard {
             max_queued_ts_ns > wall_now_ns.saturating_add(backward_step_margin_ns(interval_ns));
         if head_future {
             if self.in_step {
+                // An over-margin tick breaks any exit-clear run (pending_ticks doubles as
+                // the consecutive-CLEAR counter while the regime is active).
+                self.pending_ticks = 0;
                 // Regime continues: re-anchor, and re-warn on a bounded cadence once the
                 // regime is abnormal-old (> BACKWARD_REGIME_WARN_AFTER_NS), at most one warn
                 // per BACKWARD_REGIME_WARN_INTERVAL_NS — never per-tick, never
@@ -406,6 +414,9 @@ impl BackwardStepGuard {
             self.pending_ticks = self.pending_ticks.saturating_add(1);
             if self.pending_ticks >= BACKWARD_STEP_SUSTAIN_TICKS {
                 self.in_step = true;
+                // From here pending_ticks counts consecutive CLEAR ticks (exit
+                // qualification) — start the run empty.
+                self.pending_ticks = 0;
                 self.regime_start_ns = log_now_ns;
                 self.last_warn_ns = 0;
                 self.reanchor_ticks += 1;
@@ -416,20 +427,32 @@ impl BackwardStepGuard {
             }
             return BackwardStepAction::Pending;
         }
-        self.pending_ticks = 0;
         if self.in_step {
-            // #1009 SELF-HEAL: the qualified regime ended — the caller must zero the locked
-            // cadence boundary so the release re-ACQUIREs the configured hold from the wall
-            // deadline (the collapse must never be an absorbing state).
-            self.in_step = false;
-            return BackwardStepAction::SelfHeal;
+            // Review hardening: the EXIT is qualified like the entry — the condition must
+            // stay clear for BACKWARD_STEP_SUSTAIN_TICKS consecutive due==0 ticks before
+            // the regime ends. A condition flapping around the margin (head_future
+            // sawtooths in interval quanta at a crossing) must not exit-and-re-enter per
+            // flap: every exit costs a bounded ~latency_ms re-ACQUIRE hold.
+            self.pending_ticks = self.pending_ticks.saturating_add(1);
+            if self.pending_ticks >= BACKWARD_STEP_SUSTAIN_TICKS {
+                self.pending_ticks = 0;
+                // #1009 SELF-HEAL: the qualified regime ended — the caller must zero the
+                // locked cadence boundary so the release re-ACQUIREs the configured hold
+                // from the wall deadline (the collapse must never be an absorbing state).
+                self.in_step = false;
+                return BackwardStepAction::SelfHeal;
+            }
+            return BackwardStepAction::Pending;
         }
+        self.pending_ticks = 0;
         BackwardStepAction::None
     }
 
     /// A due>0 tick (frames matured against the wall deadline) — the condition is structurally
-    /// absent this tick. Ends any active regime with the same SELF-HEAL contract as
-    /// [`Self::tick_due0`]'s clear path.
+    /// absent this tick, and the exit is IMMEDIATE (no sustain needed): frames aged past the
+    /// reserve against the wall deadline is structural proof the receiver clock genuinely
+    /// caught up — a marginal flap at the live edge only ever produces young frames. Ends any
+    /// active regime with the same SELF-HEAL contract as [`Self::tick_due0`]'s clear path.
     pub fn tick_due_positive(&mut self) -> BackwardStepAction {
         self.pending_ticks = 0;
         if self.in_step {
@@ -1013,6 +1036,10 @@ mod tests {
         backward_events: u64,
         regime_warns: u64,
         selfheals: u64,
+        /// The tick index of the FIRST re-anchor ever fired (None = guard never fired) —
+        /// the honest sustained-qualification signal (review finding on issue 1009: an
+        /// age-threshold filter here was tautological, it could never fail).
+        first_reanchor_tick: Option<u64>,
         /// (tick index, wall - presented stamp) per presentation.
         presented: Vec<(u64, i64)>,
     }
@@ -1028,6 +1055,7 @@ mod tests {
                 backward_events: 0,
                 regime_warns: 0,
                 selfheals: 0,
+                first_reanchor_tick: None,
                 presented: Vec::new(),
             }
         }
@@ -1055,6 +1083,9 @@ mod tests {
                 let max_ts = *self.queue.iter().max().unwrap();
                 match self.guard.tick_due0(max_ts, wall, I30, log_now) {
                     BackwardStepAction::Reanchor { entry, warn } => {
+                        if self.first_reanchor_tick.is_none() {
+                            self.first_reanchor_tick = Some(k);
+                        }
                         if entry {
                             self.backward_events += 1;
                         }
@@ -1400,6 +1431,77 @@ mod tests {
             "the {BACKWARD_STEP_SUSTAIN_TICKS}th consecutive over-margin tick fires the \
              qualified re-anchor (entry edge)"
         );
+    }
+
+    /// #1009 review hardening: the regime EXIT must be qualified like the entry. A
+    /// condition FLAPPING around the margin (a slewing clock crossing it — max_ts advances
+    /// in whole-interval quanta while the wall advances continuously, so head_future
+    /// sawtooths at the crossing) must NOT exit-and-re-enter per flap cycle: every exit
+    /// runs the SELF-HEAL re-ACQUIRE, which costs a bounded ~latency_ms hold while the
+    /// queue rebuilds — an unhysteretic exit turns a marginal condition into a repeated
+    /// freeze loop. Exit therefore requires BACKWARD_STEP_SUSTAIN_TICKS CONSECUTIVE clear
+    /// due==0 ticks (a due>0 tick still exits immediately — frames aged past the reserve
+    /// against the wall deadline is structural proof the condition is really over).
+    #[test]
+    fn regime_exit_requires_sustained_clear_not_a_single_tick_1009() {
+        let wall = BASE_1009;
+        let mut g = BackwardStepGuard::new();
+        // Enter the regime: SUSTAIN consecutive over-margin ticks.
+        for t in 0..BACKWARD_STEP_SUSTAIN_TICKS {
+            g.tick_due0(wall + 400_000_000, wall, I30, wall + t as u64);
+        }
+        assert!(g.in_step(), "setup: the regime must be active");
+        let events_after_entry = 1u64; // one entry so far
+
+        // FLAP: alternating clear / over-margin due==0 ticks — the regime must PERSIST
+        // (no SelfHeal, no new entry events), because no clear run reaches the sustain
+        // requirement.
+        let mut entries = events_after_entry;
+        for t in 0..10u64 {
+            let over = t % 2 == 1;
+            let m = if over { 400_000_000 } else { 10_000_000 };
+            let a = g.tick_due0(wall + m, wall, I30, wall + 100 + t);
+            assert_ne!(
+                a,
+                BackwardStepAction::SelfHeal,
+                "flap tick {t}: a single clear tick inside a flap must NOT end the regime \
+                 (each exit costs a ~latency_ms re-ACQUIRE hold)"
+            );
+            if let BackwardStepAction::Reanchor { entry, .. } = a {
+                if entry {
+                    entries += 1;
+                }
+            }
+            assert!(
+                g.in_step(),
+                "flap tick {t}: the regime must persist through the flap"
+            );
+        }
+        assert_eq!(
+            entries, 1,
+            "a flap must not mint new backward-step EVENTS (entry re-fired)"
+        );
+
+        // SUSTAINED clear: exactly BACKWARD_STEP_SUSTAIN_TICKS consecutive clear due==0
+        // ticks end the regime, once, via SELF-HEAL.
+        for t in 0..(BACKWARD_STEP_SUSTAIN_TICKS - 1) {
+            let a = g.tick_due0(wall + 10_000_000, wall, I30, wall + 200 + t as u64);
+            assert_ne!(
+                a,
+                BackwardStepAction::SelfHeal,
+                "clear tick {t}: the exit must not fire before the clear run sustains"
+            );
+            assert!(g.in_step());
+        }
+        let a = g.tick_due0(wall + 10_000_000, wall, I30, wall + 300);
+        assert_eq!(
+            a,
+            BackwardStepAction::SelfHeal,
+            "the {BACKWARD_STEP_SUSTAIN_TICKS}th consecutive clear due==0 tick must \
+             SELF-HEAL (this is also the ONLY test of tick_due0's SelfHeal branch — the \
+             sender-side-correction regime end, review finding on issue 1009)"
+        );
+        assert!(!g.in_step(), "the regime must be over after the self-heal");
     }
 
     /// #1009: a 1-2 tick over-margin TRANSIENT (a stamp outlier, a correction seam) must

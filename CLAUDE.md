@@ -129,6 +129,13 @@ incident (2026-07-28, `#855`): a GREEN commit's body referenced `(#836: never wi
 tolerance...)` — a completely different, already-resolved ticket, cited only for context — and
 the hook blocked the commit demanding a design comment on `#836` too.
 
+**The scan covers the WHOLE Bash call, not just the `-m` message — a `cat >> file <<EOF`
+heredoc in the SAME call as a `git commit` trips the gate on `#N` refs the heredoc merely
+writes into a FILE** (live: appending a docs/autopilot-log.md entry naming other tickets +
+committing it in one call, 2026-08-07; and per the rig-state-inspection rule, the BLOCKED call
+runs nothing — the append never happened either). Split file-writing and `git commit` into
+separate Bash calls when the written content names other tickets.
+
 **Fix: never write a bare `#N` for an issue OTHER than the one(s) this commit's own design
 comment already covers.** Reference the RULE, not the ticket number, in commit-message prose
 ("the standing gate-strictness rule: never widen the tolerance" instead of "the `#836` rule") —

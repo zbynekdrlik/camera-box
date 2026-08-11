@@ -81,6 +81,14 @@ static int64_t genlock_floor_boundary_100ns(int64_t now_100ns, int64_t fps)
 	int64_t offset_in_second = now_100ns - current_second;
 	// Which frame slot the instant falls in (0..fps-1); its own boundary is at-or-before.
 	int64_t frame_in_second = (offset_in_second * fps) / GENLOCK_UNITS_PER_SECOND;
+	// camera-box #1009 review fix: a boundary b_k = floor(k*UNITS/fps) can sit up to one
+	// unit BELOW the exact rational, so the slot recovery above under-counts by one for an
+	// instant exactly ON such a boundary — promote when the NEXT slot's boundary is still
+	// at-or-before the instant (the under-count is at most one slot). Keep in lock-step
+	// with camera-box floor_boundary_100ns (src/ndi.rs).
+	int64_t next_slot_boundary = ((frame_in_second + 1) * GENLOCK_UNITS_PER_SECOND) / fps;
+	if (next_slot_boundary <= offset_in_second)
+		frame_in_second += 1;
 	// Multiply before divide to maintain precision (same as the camera-box mirror).
 	return current_second + (frame_in_second * GENLOCK_UNITS_PER_SECOND / fps);
 }

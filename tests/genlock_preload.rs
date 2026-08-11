@@ -1337,7 +1337,7 @@ mod vendored_source {
         // #1009: the trigger must be SUSTAINED across consecutive due==0 ticks, never
         // single-tick.
         for marker in [
-            "#define GENLOCK_BACKWARD_STEP_SUSTAIN_TICKS 3",
+            "#define GENLOCK_BACKWARD_STEP_SUSTAIN_TICKS 3 ",
             "source->genlock_backward_pending_ticks++",
             "source->genlock_backward_pending_ticks >=",
         ] {

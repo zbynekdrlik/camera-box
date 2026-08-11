@@ -1083,19 +1083,32 @@ fixed (a boundary impossibly far in the future re-latches).
     rising edge, cleared on a benign/normal tick). Mirror: `genlock_backward_step_latch` /
     `GenlockBackwardStepLatch`.
 - **A large per-source latency (up to 2000 ms) is SAFE** — it buffers PAST-stamped frames (aging,
-  `ts <= wall_now`), whose max is never `> wall_now + interval`, so the guard never triggers on it.
-- **Audit signal:** the `genlock-fifo audit` line prints `backward_steps=%llu`
-  (`source->genlock_backward_steps`) — read it on the rig deploy-verify to confirm recoveries (now
-  one increment per real step event, not per tick).
+  `ts <= wall_now`), whose max never exceeds the #1009 margin, so the guard never triggers on it.
+- **#1009 re-qualified the guard end-to-end** (the 2026-08-07 overnight −900 ms collapse): trigger
+  margin `max(3×interval, 250 ms)` + SUSTAINED 3 consecutive due==0 ticks (entry AND exit — a
+  flap around the margin neither enters nor exits), SELF-HEAL on regime end
+  (`genlock_backward_regime_end` zeroes the locked boundary → re-ACQUIRE the configured hold),
+  bounded-cadence regime WARNs, and senders stamp the FLOOR boundary (never future-dated).
+  Tier-0 authority: `src/genlock_backlog.rs BackwardStepGuard`; diagnosis rule:
+  `.claude/rules/genlock-hold-collapse-diagnosis.md`.
+- **Audit signal:** the `genlock-fifo audit` line prints `backward_steps=%llu` (one per real step
+  EVENT) and, since #1009, `backward_regime_ticks=%llu` (one per re-anchored TICK — a healthy
+  window's delta is 0; `genlock-jitter-report` prints it as `d_regimetick`). Read both on the rig
+  deploy-verify.
 - **GOTCHA — the `ts_align_hold_counts_as_hold_not_underrun` guard pins `genlock_holds++` within a
   HARDCODED window** of the `genlock_present_ts_reserve(wall_now, reserve_ms)` anchor
   (`tests/genlock_preload.rs`). Adding comment/code in the `due==0` block can push `genlock_holds++`
   out of that window and fail the guard — #269's max-ts scan + comments grew the block, so the window
   was widened 2500→4000 chars. Keep that block reasonable; bump the window if you add more.
-- **Pinned source tokens** (in `tests/genlock_preload.rs` + BOTH windows-genlock*.yml per the #269
-  lock-step): `max_ts > wall_now + interval`, `source->genlock_backward_steps++`,
-  `source->genlock_in_backward_step = true`/`= false`. (The pre-#269 token was
-  `source->async_frames.array[0]->timestamp > wall_now + interval` — replaced by the max-ts trigger.)
+- **Pinned source tokens** (in `tests/genlock_preload.rs` + `tests/genlock_release_cadence.rs` +
+  BOTH windows-genlock*.yml per the #269 lock-step): `max_ts > wall_now + backward_margin`, the
+  `GENLOCK_BACKWARD_STEP_*` / `GENLOCK_BACKWARD_REGIME_WARN_*` defines,
+  `genlock_backward_regime_end(source, reserve_ms);`, `backward_regime_ticks=%llu`,
+  `source->genlock_backward_steps++`, `source->genlock_in_backward_step = true`/`= false`.
+  (History: the pre-#269 token was `source->async_frames.array[0]->timestamp > wall_now +
+  interval` — replaced by the max-ts trigger; the pre-#1009 token was `max_ts > wall_now +
+  interval` — replaced by the margin+sustain re-qualification. Never "re-apply" those old
+  shapes.)
 
 ## Per-source latency WebSocket API + delivery gate (#358)
 

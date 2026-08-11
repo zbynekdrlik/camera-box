@@ -273,6 +273,8 @@ pub fn summaries_to_json(summaries: &[AuditSummary]) -> serde_json::Value {
                 "mean_head_skew_ms": s.mean_head_skew_ms,
                 "mean_abs_head_skew_ms": s.mean_abs_head_skew_ms,
                 "max_abs_head_skew_ms": s.max_abs_head_skew_ms,
+                // #1009: the gate-facing hold-bypass signal (0 on a healthy window).
+                "delta_backward_regime_ticks": s.delta_backward_regime_ticks,
             }),
         );
     }
@@ -331,6 +333,18 @@ mod tests {
         assert_eq!(s.ts_head_skew_ms, -2);
         // #1009: the re-anchor tick counter parses from its audit token.
         assert_eq!(s.backward_regime_ticks, 4);
+    }
+
+    #[test]
+    fn summarize_deltas_the_backward_regime_tick_counter_1009() {
+        // The gate-facing signal is the WINDOW DELTA of the cumulative counter — any
+        // movement means the configured hold was bypassed during the window.
+        let mut first = parse_audit_line(SAMPLE_LINE_CAM1).unwrap();
+        let mut last = first.clone();
+        first.backward_regime_ticks = 4;
+        last.backward_regime_ticks = 9;
+        let s = summarize(&[first, last]).unwrap();
+        assert_eq!(s.delta_backward_regime_ticks, 5);
     }
 
     #[test]

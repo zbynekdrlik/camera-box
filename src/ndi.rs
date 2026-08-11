@@ -82,7 +82,16 @@ pub(crate) fn floor_boundary_100ns(now_100ns: i64, fps: i64) -> i64 {
     let current_second_100ns = (now_100ns / UNITS_PER_SECOND) * UNITS_PER_SECOND;
     let offset_in_second = now_100ns - current_second_100ns;
     // Which frame slot the instant falls in (0..fps-1); its own boundary is at-or-before.
-    let frame_in_second = (offset_in_second * fps) / UNITS_PER_SECOND;
+    let mut frame_in_second = (offset_in_second * fps) / UNITS_PER_SECOND;
+    // #1009 review fix: a boundary b_k = floor(k*UNITS/fps) can sit up to one unit BELOW
+    // the exact rational k*UNITS/fps (b_1 @30fps = 333_333, not 333_333.33), so the slot
+    // recovery above under-counts by one for an instant exactly ON such a boundary —
+    // promote when the NEXT slot's boundary is still at-or-before the instant (the
+    // under-count is provably at most one slot, so a single promotion suffices).
+    let next_slot_boundary = ((frame_in_second + 1) * UNITS_PER_SECOND) / fps;
+    if next_slot_boundary <= offset_in_second {
+        frame_in_second += 1;
+    }
     // Multiply before divide to maintain precision (same as the ceil twin).
     current_second_100ns + (frame_in_second * UNITS_PER_SECOND / fps)
 }
@@ -1665,6 +1674,45 @@ mod tests {
     fn boundary_30fps_still_correct() {
         // 60fps must not break the legacy 30fps pacing.
         assert_eq!(next_boundary_100ns(0, 30), UNITS_PER_SECOND / 30); // 333_333
+    }
+
+    /// #1009 — the floor twin, unit-tested directly (review finding: coverage was only
+    /// indirect through genlock_stamp). The exact-boundary case is the subtle one:
+    /// b_1 @30fps = 333_333 (the integer floor of 10^7/30 sits just UNDER the exact
+    /// rational), so a naive slot recovery (off*fps/UNITS) under-counts by one for an
+    /// instant exactly ON such a boundary and wrongly returns the PREVIOUS boundary.
+    #[test]
+    fn floor_boundary_is_identity_on_an_exact_boundary_1009() {
+        assert_eq!(floor_boundary_100ns(0, 30), 0);
+        assert_eq!(floor_boundary_100ns(333_333, 30), 333_333); // exactly ON b_1
+        assert_eq!(floor_boundary_100ns(333_332, 30), 0); // just under b_1
+        assert_eq!(floor_boundary_100ns(333_334, 30), 333_333); // just over b_1
+        assert_eq!(floor_boundary_100ns(UNITS_PER_SECOND, 30), UNITS_PER_SECOND);
+        // Last slot of the second floors to b_29, never wraps forward.
+        assert_eq!(
+            floor_boundary_100ns(9_999_999, 30),
+            (29 * UNITS_PER_SECOND) / 30
+        );
+    }
+
+    /// #1009 — floor guards degenerate fps and never stamps the future or falls a full
+    /// interval behind, at both rig rates.
+    #[test]
+    fn floor_boundary_bounds_and_degenerate_fps_1009() {
+        assert_eq!(floor_boundary_100ns(12_345, 0), 12_345);
+        assert_eq!(floor_boundary_100ns(12_345, -5), 12_345);
+        for fps in [30i64, 60] {
+            let step = UNITS_PER_SECOND / fps;
+            let mut off = 0i64;
+            while off < UNITS_PER_SECOND {
+                let b = floor_boundary_100ns(off, fps);
+                assert!(
+                    b <= off && off - b <= step,
+                    "fps {fps} off {off}: floor boundary {b} out of [off-interval, off]"
+                );
+                off += 97_531;
+            }
+        }
     }
 
     #[test]

@@ -50,7 +50,11 @@ fn reports_delta_counters_and_header_for_a_real_log_window() {
         .find(|l| l.contains("NDI cam1"))
         .expect("data line for NDI cam1");
     let fields: Vec<&str> = data_line.split_whitespace().collect();
-    // source samples latency_ms d_underrun d_hold d_dropped_due d_relock d_latehold max_abs_skew_ms mean_abs_skew_ms peak_depth
+    // source samples latency_ms d_underrun d_hold d_dropped_due d_relock d_latehold
+    // d_regimetick max_abs_skew_ms mean_abs_skew_ms peak_depth
+    // (issue-1009 added the d_regimetick column — the hold-bypass gate signal; the
+    // fixture lines predate the counter, so the parser's 0-default proves the
+    // pre-1009-log compatibility path right here too.)
     assert_eq!(fields[0], "NDI");
     assert_eq!(fields[1], "cam1");
     assert_eq!(fields[2], "2", "2 samples in the window");
@@ -60,7 +64,15 @@ fn reports_delta_counters_and_header_for_a_real_log_window() {
     assert_eq!(fields[6], "1", "delta_dropped_due = 1-0");
     assert_eq!(fields[7], "0", "delta_relocks = 0-0");
     assert_eq!(fields[8], "1", "delta_late_holds = 1-0");
-    assert_eq!(fields[9], "7", "max_abs_head_skew_ms = max(|-2|,|7|)");
+    assert_eq!(
+        fields[9], "0",
+        "delta_backward_regime_ticks = 0 (no token on a pre-1009 log line)"
+    );
+    assert_eq!(fields[10], "7", "max_abs_head_skew_ms = max(|-2|,|7|)");
+    assert!(
+        stdout.contains("d_regimetick"),
+        "the header must carry the issue-1009 hold-bypass delta column"
+    );
 }
 
 /// A log with no `genlock-fifo audit` lines at all fails closed (exit 2), never a
