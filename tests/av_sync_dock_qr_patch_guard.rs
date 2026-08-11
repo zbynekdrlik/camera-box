@@ -118,3 +118,27 @@ fn on_sync_found_display_path_gate_conversion_is_wired_999() {
          #999 display sign-convention fix was reverted from the UI handler"
     );
 }
+
+/// #1005 — the garbage-clamp fix WIRING (not the pure fn, which
+/// tests/av_sync_dock_video_ts_valid_1005.rs twin-tests): both camera-box emit sites must guard
+/// their `sync_index` construction+emission with `cb_corrected_video_ts_is_valid`, and the OLD
+/// clamp-to-zero-and-emit-anyway ternary must be gone entirely — a subtree pull (or careless
+/// revert) dropping the guard still COMPILES and every pure-fn test stays green, exactly the
+/// class of gap issue 999's own display-path fix taught this repo to guard against structurally.
+#[test]
+fn corrected_video_ts_garbage_clamp_fix_is_wired_1005() {
+    let out = squish(&vendor_file(DOCK_OUTPUT));
+    assert_eq!(
+        out.matches("camerabox::cb_corrected_video_ts_is_valid(corrected_video_ts)").count(),
+        2,
+        "{DOCK_OUTPUT}: exactly TWO camera-box emit sites (the smoothed-ring one and the \
+         direct-ring one) must guard their sync_index emission with \
+         cb_corrected_video_ts_is_valid(corrected_video_ts) — a count drift means half the #1005 \
+         garbage-clamp fix was dropped or a new emit site forgot the guard"
+    );
+    assert!(
+        !out.contains("corrected_video_ts > 0 ? (uint64_t)corrected_video_ts : 0"),
+        "{DOCK_OUTPUT}: the OLD clamp-to-zero-and-emit-anyway ternary is still present — #1005 \
+         (a clamped video_ts=0 manufactures a garbage whole-timeline-scale offset) was reverted"
+    );
+}
