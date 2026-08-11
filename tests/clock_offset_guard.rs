@@ -1412,3 +1412,410 @@ fn sampled_offset_verdict_on_the_live_836_stream_box_trail_fails_on_both_axes() 
          pass ~10% of the time must now fail every time: {verdict:?}"
     );
 }
+
+// --- NTP-measurement freshness (#1014, dantesync v1.8.30 / dantesync issue 68 and issue 71) ---
+//
+// updated_ts (above) is PTP-driven and stays fresh even when the NTP measurement itself is dead
+// or (dantesync issue 68) intentionally free-running after a one-time startup sync. dantesync
+// v1.8.30 added "ntp_age_s" (an integer, or JSON null = never measured) and "ntp_updated_ts" so
+// the NTP measurement's OWN freshness can be graded independently. These fixtures are the LIVE
+// shape curled from strih (10.77.9.202) and stream (10.77.9.204) on 2026-08-11, trimmed to the
+// fields these parsers read.
+
+/// A live-shaped payload with the v1.8.30 NTP-freshness fields present.
+fn pipe_json_ntp(ts: i64, offset_us: i64, ntp_age_s_raw: &str, ntp_failed: bool) -> String {
+    format!(
+        "{{\"updated_ts\":{ts},\"ntp_offset_us\":{offset_us},\"is_locked\":true,\"mode\":\"NANO\",\
+         \"ntp_failed\":{ntp_failed},\"ntp_updated_ts\":{ts},\"ntp_age_s\":{ntp_age_s_raw}}}"
+    )
+}
+
+#[test]
+fn ntp_age_s_raw_from_pipe_json_reads_numeric_null_and_absent() {
+    let numeric = pipe_json_ntp(1000, 100, "4", false);
+    let out = run_sourced(
+        "ntp_age_s_raw_from_pipe_json \"$JSON\"",
+        &[("JSON", numeric.as_str())],
+    );
+    assert_eq!(out.trim(), "4", "must read a numeric ntp_age_s: {out:?}");
+
+    let never = pipe_json_ntp(1000, 100, "null", false);
+    let out = run_sourced(
+        "ntp_age_s_raw_from_pipe_json \"$JSON\"",
+        &[("JSON", never.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "null",
+        "must read the literal null, never coerce it to empty or 0: {out:?}"
+    );
+
+    let old_shape =
+        "{\"updated_ts\":1000,\"ntp_offset_us\":100,\"is_locked\":true,\"mode\":\"NANO\"}";
+    let out = run_sourced(
+        "ntp_age_s_raw_from_pipe_json \"$JSON\"",
+        &[("JSON", old_shape)],
+    );
+    assert_eq!(
+        out.trim(),
+        "",
+        "a pre-1.8.30 payload with no ntp_age_s field at all -> empty (absent): {out:?}"
+    );
+}
+
+#[test]
+fn ntp_updated_ts_and_ntp_failed_from_pipe_json() {
+    let text = pipe_json_ntp(1786449281, 1170, "4", false);
+    let out = run_sourced(
+        "ntp_updated_ts_from_pipe_json \"$JSON\"",
+        &[("JSON", text.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "1786449281",
+        "must read ntp_updated_ts: {out:?}"
+    );
+    let out = run_sourced(
+        "ntp_failed_from_pipe_json \"$JSON\"",
+        &[("JSON", text.as_str())],
+    );
+    assert_eq!(out.trim(), "false", "must read ntp_failed=false: {out:?}");
+
+    let failed = pipe_json_ntp(1786449281, 1170, "4", true);
+    let out = run_sourced(
+        "ntp_failed_from_pipe_json \"$JSON\"",
+        &[("JSON", failed.as_str())],
+    );
+    assert_eq!(out.trim(), "true", "must read ntp_failed=true: {out:?}");
+
+    let old_shape = "{\"ntp_offset_us\":10,\"is_locked\":true}";
+    let out = run_sourced(
+        "ntp_updated_ts_from_pipe_json \"$JSON\"",
+        &[("JSON", old_shape)],
+    );
+    assert_eq!(out.trim(), "", "no ntp_updated_ts field -> empty: {out:?}");
+    let out = run_sourced(
+        "ntp_failed_from_pipe_json \"$JSON\"",
+        &[("JSON", old_shape)],
+    );
+    assert_eq!(out.trim(), "", "no ntp_failed field -> empty: {out:?}");
+}
+
+#[test]
+fn ntp_freshness_verdict_fresh_when_age_within_window() {
+    // The live strih capture: ntp_age_s=4, well within a 300s window.
+    let text = pipe_json_ntp(1786449281, 1170, "4", false);
+    let out = run_sourced(
+        "ntp_freshness_verdict \"$JSON\" 300",
+        &[("JSON", text.as_str())],
+    );
+    assert_eq!(out.trim(), "fresh", "age 4s, 300s window -> fresh: {out:?}");
+}
+
+#[test]
+fn ntp_freshness_verdict_stale_when_age_exceeds_window() {
+    // #1014's ORIGINAL incident shape: a large stale age (the NTP measurement froze while the
+    // general updated_ts kept advancing).
+    let text = pipe_json_ntp(1786449281, -34718, "99999", false);
+    let out = run_sourced(
+        "ntp_freshness_verdict \"$JSON\" 300",
+        &[("JSON", text.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "stale",
+        "age 99999s, 300s window -> stale, regardless of how large the offset value looks: {out:?}"
+    );
+}
+
+#[test]
+fn ntp_freshness_verdict_stale_at_exactly_one_second_past_the_bound() {
+    let at_bound = pipe_json_ntp(1000, 100, "300", false);
+    let out = run_sourced(
+        "ntp_freshness_verdict \"$JSON\" 300",
+        &[("JSON", at_bound.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "fresh",
+        "age exactly == window -> fresh: {out:?}"
+    );
+
+    let past_bound = pipe_json_ntp(1000, 100, "301", false);
+    let out = run_sourced(
+        "ntp_freshness_verdict \"$JSON\" 300",
+        &[("JSON", past_bound.as_str())],
+    );
+    assert_eq!(out.trim(), "stale", "age one past window -> stale: {out:?}");
+}
+
+#[test]
+fn ntp_freshness_verdict_ntp_failed_is_an_independent_stale_signal() {
+    // #1014: dantesync issue 68 widened ntp_failed to ALSO mean "no fresh measurement within
+    // window" -- a payload with a comfortably-fresh age but ntp_failed:true must still refuse,
+    // proving the two signals are checked independently, not merely OR'd into one age check.
+    let text = pipe_json_ntp(1000, 100, "2", true);
+    let out = run_sourced(
+        "ntp_freshness_verdict \"$JSON\" 300",
+        &[("JSON", text.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "stale",
+        "ntp_failed:true must refuse even with a fresh ntp_age_s: {out:?}"
+    );
+}
+
+#[test]
+fn ntp_freshness_verdict_never_when_age_is_null() {
+    let text = pipe_json_ntp(1000, 999999, "null", false);
+    let out = run_sourced(
+        "ntp_freshness_verdict \"$JSON\" 300",
+        &[("JSON", text.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "never",
+        "ntp_age_s:null means NEVER measured, distinct from a stale numeric age: {out:?}"
+    );
+}
+
+#[test]
+fn ntp_freshness_verdict_absent_when_field_is_missing_entirely() {
+    let old_shape =
+        "{\"updated_ts\":1000,\"ntp_offset_us\":100,\"is_locked\":true,\"mode\":\"NANO\"}";
+    let out = run_sourced(
+        "ntp_freshness_verdict \"$JSON\" 300",
+        &[("JSON", old_shape)],
+    );
+    assert_eq!(
+        out.trim(),
+        "absent",
+        "no ntp_age_s field at all (pre-1.8.30 payload) -> absent, caller falls back: {out:?}"
+    );
+}
+
+#[test]
+fn ntp_freshness_verdict_fails_closed_on_a_malformed_freshness_window() {
+    let text = pipe_json_ntp(1000, 100, "4", false);
+    for bad_fresh in ["abc", "", "-1"] {
+        let out = run_sourced(
+            &format!("ntp_freshness_verdict \"$JSON\" '{bad_fresh}'"),
+            &[("JSON", text.as_str())],
+        );
+        assert_eq!(
+            out.trim(),
+            "absent",
+            "malformed freshness={bad_fresh:?} must refuse to certify freshness, not silently \
+             pass: {out:?}"
+        );
+    }
+}
+
+// --- frozen_sample_verdict (#1014 pre-1.8.30 backward-compat fallback) -----------------------
+
+#[test]
+fn frozen_sample_verdict_frozen_when_every_distinct_sample_is_byte_identical() {
+    // #1014's ORIGINAL incident, reproduced exactly: several distinct-by-updated_ts reads that
+    // all report the SAME ntp_offset_us -- the signature a dead/free-running NTP measurement
+    // leaves in a payload with no ntp_age_s field to check directly.
+    let payloads = format!(
+        "{}\n{}\n{}\n",
+        pipe_json(1000, -34718),
+        pipe_json(1030, -34718),
+        pipe_json(1060, -34718),
+    );
+    let out = run_sourced(
+        "frozen_sample_verdict \"$P\" 3",
+        &[("P", payloads.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "frozen",
+        "identical offset across 3 distinct samples must be frozen: {out:?}"
+    );
+}
+
+#[test]
+fn frozen_sample_verdict_live_when_samples_vary() {
+    let payloads = format!(
+        "{}\n{}\n{}\n",
+        pipe_json(1000, 100),
+        pipe_json(1030, 150),
+        pipe_json(1060, 120),
+    );
+    let out = run_sourced(
+        "frozen_sample_verdict \"$P\" 3",
+        &[("P", payloads.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "live",
+        "varying samples must never be called frozen: {out:?}"
+    );
+}
+
+#[test]
+fn frozen_sample_verdict_insufficient_when_too_few_distinct_samples() {
+    let payloads = format!("{}\n{}\n", pipe_json(1000, 50), pipe_json(1000, 50));
+    let out = run_sourced(
+        "frozen_sample_verdict \"$P\" 3",
+        &[("P", payloads.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "insufficient",
+        "1 distinct sample of the required 3 must never be graded frozen or live: {out:?}"
+    );
+
+    let out = run_sourced(
+        "frozen_sample_verdict \"$P\" abc",
+        &[("P", payloads.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "insufficient",
+        "malformed min_distinct must refuse to grade: {out:?}"
+    );
+}
+
+// --- sampled_offset_verdict / sampled_offset_check "median-only" MODE (#1014 Part 2) ----------
+//
+// The NTP master's own spread is a by-design correction-lag sawtooth (dantesync issue 71), not a
+// fleet-coherence signal -- "median-only" mode must skip the spread/stability check entirely
+// while leaving the median (location) bound fully enforced.
+
+#[test]
+fn sampled_offset_verdict_median_only_ignores_wild_scatter_when_median_is_in_bound() {
+    // The EXACT scattered fixture that verdicts "unstable" in full mode (see
+    // sampled_offset_verdict_unstable_when_median_is_fine_but_samples_scatter_wildly above) must
+    // verdict "ok" in median-only mode.
+    let payloads = format!(
+        "{}\n{}\n{}\n{}\n{}\n",
+        pipe_json(1000, -19800),
+        pipe_json(1025, 20100),
+        pipe_json(1050, 200),
+        pipe_json(1075, -19500),
+        pipe_json(1100, 19900),
+    );
+    let out = run_sourced(
+        "sampled_offset_verdict \"$P\" 2000 2000 3 median-only",
+        &[("P", payloads.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "ok",
+        "median-only mode must never grade unstable, regardless of spread: {out:?}"
+    );
+}
+
+#[test]
+fn sampled_offset_verdict_median_only_still_fails_on_genuine_drift() {
+    let payloads = format!(
+        "{}\n{}\n{}\n",
+        pipe_json(1000, 8000),
+        pipe_json(1025, 8050),
+        pipe_json(1050, 8100),
+    );
+    let out = run_sourced(
+        "sampled_offset_verdict \"$P\" 2000 2000 3 median-only",
+        &[("P", payloads.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "drift",
+        "median-only mode still grades the LOCATION bound -- a genuinely drifted master must \
+         still fail: {out:?}"
+    );
+}
+
+#[test]
+fn sampled_offset_verdict_median_only_still_requires_min_distinct() {
+    let payloads = format!("{}\n{}\n", pipe_json(1000, 50), pipe_json(1000, 50));
+    let out = run_sourced(
+        "sampled_offset_verdict \"$P\" 2000 2000 3 median-only",
+        &[("P", payloads.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "insufficient",
+        "median-only mode does not relax the distinct-sample-count requirement: {out:?}"
+    );
+}
+
+#[test]
+fn sampled_offset_verdict_default_mode_is_unchanged_full_grading() {
+    // Every pre-#1014 4-arg call site must behave byte-for-byte the same -- proves MODE truly
+    // defaults to "full" when omitted, not silently to "median-only".
+    let payloads = format!(
+        "{}\n{}\n{}\n{}\n{}\n",
+        pipe_json(1000, -19800),
+        pipe_json(1025, 20100),
+        pipe_json(1050, 200),
+        pipe_json(1075, -19500),
+        pipe_json(1100, 19900),
+    );
+    let out = run_sourced(
+        "sampled_offset_verdict \"$P\" 2000 2000 3",
+        &[("P", payloads.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "unstable",
+        "omitting MODE must still grade the spread (full mode): {out:?}"
+    );
+}
+
+#[test]
+fn sampled_offset_check_median_only_reports_an_inline_master_note_never_a_second_line() {
+    let payloads = format!(
+        "{}\n{}\n{}\n{}\n{}\n",
+        pipe_json(1000, -19800),
+        pipe_json(1025, 20100),
+        pipe_json(1050, 200),
+        pipe_json(1075, -19500),
+        pipe_json(1100, 19900),
+    );
+    let out = run_sourced(
+        "set +e; sampled_offset_check strih \"$P\" 2000 2000 3 median-only; echo \"rc=$?\"",
+        &[("P", payloads.as_str())],
+    );
+    assert!(
+        out.contains("OK") && out.contains("rc=0"),
+        "median-only mode must report OK on a scattered-but-in-bound-median node: {out:?}"
+    );
+    assert!(
+        !out.contains("UNSTABLE"),
+        "median-only mode must never print UNSTABLE: {out:?}"
+    );
+    assert_eq!(
+        out.lines()
+            .filter(|l| l.trim_start().starts_with("strih"))
+            .count(),
+        1,
+        "exactly ONE line for this node -- callers locate 'the' report via \
+         .lines().find(starts_with(name)), so a second line would silently break them: {out:?}"
+    );
+    assert!(
+        out.contains("NTP MASTER") && out.contains("not gated"),
+        "the inline note must explain why no stability verdict was made: {out:?}"
+    );
+}
+
+#[test]
+fn sampled_offset_check_accepts_a_caller_supplied_extra_note() {
+    let payloads = format!(
+        "{}\n{}\n{}\n",
+        pipe_json(1000, 100),
+        pipe_json(1025, 150),
+        pipe_json(1050, 120),
+    );
+    let out = run_sourced(
+        "sampled_offset_check strih \"$P\" 2000 2000 3 full ' -- extra caller note'",
+        &[("P", payloads.as_str())],
+    );
+    assert!(
+        out.contains("extra caller note"),
+        "a 7th positional NOTE argument must be appended verbatim: {out:?}"
+    );
+}
