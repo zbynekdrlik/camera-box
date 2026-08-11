@@ -129,7 +129,8 @@ fn on_sync_found_display_path_gate_conversion_is_wired_999() {
 fn corrected_video_ts_garbage_clamp_fix_is_wired_1005() {
     let out = squish(&vendor_file(DOCK_OUTPUT));
     assert_eq!(
-        out.matches("camerabox::cb_corrected_video_ts_is_valid(corrected_video_ts)").count(),
+        out.matches("camerabox::cb_corrected_video_ts_is_valid(corrected_video_ts)")
+            .count(),
         2,
         "{DOCK_OUTPUT}: exactly TWO camera-box emit sites (the smoothed-ring one and the \
          direct-ring one) must guard their sync_index emission with \
