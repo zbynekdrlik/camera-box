@@ -415,6 +415,22 @@ impl RollingOffsetCluster {
     }
 }
 
+/// #1005 — whether a `sync-test-output.cpp` camera-box emit site's corrected video timestamp
+/// (`audio_ts - smoothed_ns` / `audio_ts - locked_ns`, computed as a SIGNED `i64`) is usable at
+/// all. Both camera-box emit sites used to CLAMP a negative result to `0` before this fix
+/// (`corrected_video_ts > 0 ? (uint64_t)corrected_video_ts : 0`) instead of dropping the event —
+/// a `video_ts` of exactly `0` is not a legitimate near-zero offset, it silently manufactures a
+/// GARBAGE, roughly-whole-timeline-scale `sync_found` value (`audio_ts - 0 == audio_ts`), which
+/// can genuinely go negative early in a session before the rolling offset estimate has converged
+/// (e.g. right after OBS start). The fix: DROP the event entirely (never call `signal_sync_found`)
+/// when this returns `false`, instead of emitting a clamped garbage measurement. Preserves the
+/// OLD clamp's own boundary exactly — `> 0` was always the "keep as-is" side of that ternary, so
+/// `<= 0` (this ticket's own wording) is invalid here too; only the DISPOSITION of the invalid
+/// side changed (drop, not clamp-to-zero-and-emit-anyway).
+pub fn corrected_video_ts_is_valid(corrected_video_ts: i64) -> bool {
+    corrected_video_ts > 0
+}
+
 /// #926 — max ms a single [`DockLockCorrector::decide`] call may move `genlock_latency_ms_src`
 /// away from its current value. Deliberately much smaller than the offline per-run
 /// `AV_SYNC_MAX_STEP_MS` (50, `av_sync_calibrate.py`/`qpsk_marker::required_delay_ms`): the LIVE
