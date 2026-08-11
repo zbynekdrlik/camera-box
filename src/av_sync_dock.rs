@@ -1484,6 +1484,22 @@ mod tests {
         );
     }
 
+    // ---- #1005: corrected_video_ts garbage-clamp fix ----
+
+    #[test]
+    fn corrected_video_ts_is_valid_accepts_only_strictly_positive_1005() {
+        // #1005: preserves the OLD clamp's own boundary exactly (`corrected_video_ts > 0 ? ... :
+        // 0` -- `> 0` was always the "keep as-is" side). A legitimate small positive offset (the
+        // common case) is valid; zero and any negative value (the garbage-clamp cases) are not.
+        assert!(corrected_video_ts_is_valid(1));
+        assert!(corrected_video_ts_is_valid(1_000_000));
+        assert!(corrected_video_ts_is_valid(i64::MAX));
+        assert!(!corrected_video_ts_is_valid(0));
+        assert!(!corrected_video_ts_is_valid(-1));
+        assert!(!corrected_video_ts_is_valid(-1_000_000));
+        assert!(!corrected_video_ts_is_valid(i64::MIN));
+    }
+
     // ---- #942 monitor-only hard lock ----
 
     #[test]
