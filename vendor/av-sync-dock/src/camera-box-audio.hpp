@@ -53,6 +53,14 @@ static const double CB_CLUSTER_TOL_MS = 60.0;
 static const size_t CB_CLUSTER_MIN_MATCHED = 8;
 static const double CB_CLUSTER_MAX_MAD_MS = 25.0;
 static const uint64_t CB_CLUSTER_WINDOW_NS = 180ull * 1000000000ull;
+/* #999 -- mirror of av_sync_dock::DOCK_CLUSTER_HOLD_MULTIPLIER. Live evidence showed every LOCKED
+ * entry landing mad_ms right against CB_CLUSTER_MAX_MAD_MS, so ordinary push-to-push recompute
+ * noise flipped the trust gate rapidly (912 LOCKED/UNLOCKED transitions in one session) with
+ * matched staying far above its own floor throughout. RollingOffsetCluster::push() now applies
+ * this WIDER ceiling only while ALREADY locked (never on a fresh acquisition) -- reuses the SAME
+ * doubling convention CbDockLockCorrector's own hold band already established in this file for the
+ * identical class of boundary-noise chatter. */
+static const double CB_CLUSTER_HOLD_MULTIPLIER = 2.0;
 
 /* signal_len: samples in a marker's 10-symbol signal = N_SYMBOLS * c * sr / f (mirror
  * qpsk_marker::signal_len; integer floor, u64 to avoid overflow). */
@@ -342,9 +350,13 @@ struct RollingOffsetCluster {
 	size_t min_matched;
 	double max_mad_ms;
 	std::deque<std::pair<uint64_t, double>> samples;
+	/* #999 -- mirror of av_sync_dock::RollingOffsetCluster::locked: whether the LAST push()
+	 * returned ok=true. Drives which mad ceiling the NEXT push() applies -- the strict
+	 * max_mad_ms while false, the wider max_mad_ms * CB_CLUSTER_HOLD_MULTIPLIER while true. */
+	bool locked;
 
 	RollingOffsetCluster(uint64_t win, double tol, size_t minm, double maxmad)
-		: window_ns(win), tol_ms(tol), min_matched(minm), max_mad_ms(maxmad)
+		: window_ns(win), tol_ms(tol), min_matched(minm), max_mad_ms(maxmad), locked(false)
 	{
 	}
 
@@ -354,6 +366,10 @@ struct RollingOffsetCluster {
 		                            CB_CLUSTER_MAX_MAD_MS);
 	}
 
+	/* #999: the MAD gate is HYSTERETIC, not a single boundary -- see
+	 * av_sync_dock::RollingOffsetCluster::push()'s own doc comment for the full rationale. The
+	 * ENTRY ceiling (acquiring a fresh lock) is unchanged; only the ceiling used to STAY locked
+	 * widens. min_matched is unchanged in both states. */
 	CbAvOffset push(uint64_t sample_ts_ns, double offset_ms)
 	{
 		samples.push_back(std::make_pair(sample_ts_ns, offset_ms));
@@ -370,9 +386,13 @@ struct RollingOffsetCluster {
 		for (std::deque<std::pair<uint64_t, double>>::iterator it = samples.begin(); it != samples.end();
 		     ++it)
 			offsets.push_back(it->second);
+		double mad_ceiling_ms = locked ? max_mad_ms * CB_CLUSTER_HOLD_MULTIPLIER : max_mad_ms;
 		CbAvOffset est = cb_cluster_offset_ms(offsets, min_matched, tol_ms);
-		if (est.ok && est.matched >= min_matched && est.mad_ms <= max_mad_ms)
+		if (est.ok && est.matched >= min_matched && est.mad_ms <= mad_ceiling_ms) {
+			locked = true;
 			return est;
+		}
+		locked = false;
 		CbAvOffset none;
 		none.ok = false;
 		none.offset_ms = 0.0;
