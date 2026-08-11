@@ -79,3 +79,25 @@ seconds, versus a full CI round-trip (the `CI` job alone took ~4 minutes to reac
 test; `Windows genlock FAST` circles back separately) to discover the same mismatch. Confirmed
 effective in the #955 fix-up: the script caught that all three redesigned anchors matched BEFORE
 the second push, which then went green on the first try.
+
+## A NEW guard added to a camera-box emit site needs its OWN pwsh mirror too — check for a sibling precedent first (#999/#1005, 2026-08-11)
+
+Adding a brand-new `if (camerabox::cb_<something>(...))` guard around a camera-box `sync_found`
+emit site (not a decision-chain refactor — a genuinely NEW check, e.g. #1005's
+`cb_corrected_video_ts_is_valid`) is easy to prove locally with a Rust structural text-anchor test
+(`tests/av_sync_dock_qr_patch_guard.rs`-style: assert the guard call text appears exactly N times,
+assert the OLD unguarded form is gone) — but that Rust test alone is NOT the double coverage this
+file's own existing pattern already establishes. `sync-test-output.cpp` compiles ONLY via the
+`windows-genlock*.yml` pwsh gate (no local compile path at all, not even syntax), so the FULL
+established convention for any guard added here is BOTH a Rust structural test AND a matching pwsh
+`[regex]::Matches(...).Count` anchor in **both** `windows-genlock.yml` and
+`windows-genlock-fast.yml` — see the existing `si.gate_convention = true;` count==2 check (#999)
+sitting right next to where a #1005-style new guard would go. A review caught this gap live: the
+#1005 wiring landed with its Rust-side proof but no pwsh-side one, an inconsistency with its own
+sibling in the exact same source region.
+
+**Before considering a new-guard change complete: grep the SAME source region's pwsh block in both
+workflow files for an existing sibling guard's anchor shape, and add the matching pair (a
+`Count -ne 2` presence check for the new guard text, plus a negative check that the OLD/replaced
+form is gone) to both files — verified with the throwaway-script technique above before trusting
+it.**

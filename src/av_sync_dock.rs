@@ -69,6 +69,21 @@ pub const DOCK_CLUSTER_MAX_MAD_MS: f64 = 25.0;
 /// re-converges within a few minutes.
 pub const DOCK_CLUSTER_WINDOW_NS: u64 = 180 * 1_000_000_000;
 
+/// #999 — hysteresis multiplier applied to [`DOCK_CLUSTER_MAX_MAD_MS`] while [`RollingOffsetCluster`]
+/// is ALREADY locked, so it does not immediately UNLOCK on ordinary push-to-push recompute noise
+/// that briefly nudges `mad_ms` back over the entry ceiling. Live evidence (issue 999): every
+/// LOCKED entry on the deployed dock lands `mad_ms` in 22-25ms — right against the single
+/// `DOCK_CLUSTER_MAX_MAD_MS=25.0` boundary used in BOTH directions — while `matched` stays far
+/// above its own floor throughout. Because [`RollingOffsetCluster::push`] recomputes the densest
+/// cluster from scratch on every candidate (real or CRC-4-false), ordinary noise straddles that one
+/// boundary and flips `est.ok` (hence the dock's Latency display and Locked/Searching status)
+/// rapidly, with no real change in signal quality behind it. The ENTRY ceiling (acquiring a fresh
+/// lock) is left completely unchanged — this multiplier only widens the ceiling used to STAY
+/// locked. `2.0` reuses the SAME doubling convention `DockLockCorrector`'s own hold band
+/// (`[margin, 2*margin)`, issue 942) already established in this file for the identical class of
+/// boundary-noise chatter, rather than an unrelated guessed magnitude.
+pub const DOCK_CLUSTER_HOLD_MULTIPLIER: f64 = 2.0;
+
 /// Fraction of the frame HEIGHT (from the top) the video-QR decode band covers. The camera-box
 /// dual-QR is TOP-anchored (`render_qr_dual_bgra` → `VAnchor::Top`): its top row sits ~24 px below
 /// the frame top and it is ≤ ~700 px tall in a 1080-native frame (≈ 0.67 h), the SAME fraction after
@@ -314,6 +329,11 @@ pub struct RollingOffsetCluster {
     min_matched: usize,
     max_mad_ms: f64,
     samples: std::collections::VecDeque<(u64, f64)>,
+    /// #999 — whether the LAST push() returned `Some` (a trusted estimate). Drives which MAD
+    /// ceiling `push()` applies next: the strict entry ceiling while `false`, the wider
+    /// [`DOCK_CLUSTER_HOLD_MULTIPLIER`]-scaled hold ceiling while `true`. See that constant's own
+    /// doc comment for why (issue 999 boundary-hugging chatter).
+    locked: bool,
 }
 
 impl RollingOffsetCluster {
@@ -324,6 +344,7 @@ impl RollingOffsetCluster {
             min_matched,
             max_mad_ms,
             samples: std::collections::VecDeque::new(),
+            locked: false,
         }
     }
 
@@ -340,6 +361,14 @@ impl RollingOffsetCluster {
     /// Add one `(sample_ts_ns, offset_ms)` candidate (offset already lap-resolved), prune samples
     /// older than the window, and return the TRUSTED cluster offset if the densest band now clears
     /// both the size and MAD gates — else `None` ("still measuring / no trustworthy lock").
+    ///
+    /// #999: the MAD gate is HYSTERETIC, not a single boundary. While NOT currently locked, a
+    /// fresh estimate must clear the strict `max_mad_ms` ceiling to acquire trust (unchanged — no
+    /// weakening of the entry bar). While ALREADY locked, the wider `max_mad_ms *
+    /// DOCK_CLUSTER_HOLD_MULTIPLIER` ceiling applies instead, so ordinary recompute noise that
+    /// briefly nudges `mad_ms` a few ms past the entry ceiling does not immediately flip the lock
+    /// off (see [`DOCK_CLUSTER_HOLD_MULTIPLIER`]'s own doc comment). `min_matched` is UNCHANGED in
+    /// both states — it is the independent safety net for genuine signal loss.
     pub fn push(&mut self, sample_ts_ns: u64, offset_ms: f64) -> Option<AvOffset> {
         self.samples.push_back((sample_ts_ns, offset_ms));
         while let Some(&(ts, _)) = self.samples.front() {
@@ -350,12 +379,19 @@ impl RollingOffsetCluster {
             }
         }
         let offsets: Vec<f64> = self.samples.iter().map(|&(_, o)| o).collect();
-        match cluster_offset_ms(&offsets, self.min_matched, self.tol_ms) {
-            Some(est) if est.matched >= self.min_matched && est.mad_ms <= self.max_mad_ms => {
+        let mad_ceiling_ms = if self.locked {
+            self.max_mad_ms * DOCK_CLUSTER_HOLD_MULTIPLIER
+        } else {
+            self.max_mad_ms
+        };
+        let result = match cluster_offset_ms(&offsets, self.min_matched, self.tol_ms) {
+            Some(est) if est.matched >= self.min_matched && est.mad_ms <= mad_ceiling_ms => {
                 Some(est)
             }
             _ => None,
-        }
+        };
+        self.locked = result.is_some();
+        result
     }
 
     /// #926 fix-up (review finding 1/7) — shift every RETAINED sample's offset by `-delta_ms`.
@@ -377,6 +413,23 @@ impl RollingOffsetCluster {
             *offset -= delta_ms;
         }
     }
+}
+
+/// #1005 — whether a `sync-test-output.cpp` camera-box emit site's corrected video timestamp
+/// (`audio_ts - smoothed_ns` / `audio_ts - locked_ns`, computed as a SIGNED `i64`) is usable at
+/// all. Both camera-box emit sites used to CLAMP a negative result to `0` before this fix
+/// (`corrected_video_ts > 0 ? (uint64_t)corrected_video_ts : 0`) instead of dropping the event —
+/// a `video_ts` of exactly `0` is not a legitimate near-zero offset, it silently manufactures a
+/// GARBAGE, roughly-whole-timeline-scale `sync_found` value (`audio_ts - 0 == audio_ts`), which
+/// can genuinely go negative early in a session before the rolling offset estimate has converged
+/// (e.g. right after OBS start). The fix: DROP the event entirely (never call `signal_sync_found`)
+/// when this returns `false`, instead of emitting a clamped garbage measurement. Preserves the
+/// OLD clamp's own boundary exactly: `> 0` was always the "keep as-is" side of that ternary, and
+/// this ticket's own wording ("when `corrected_video_ts <= 0`") is the same boundary from the
+/// invalid side. Only the DISPOSITION of the invalid side changed — drop, not
+/// clamp-to-zero-and-emit-anyway.
+pub fn corrected_video_ts_is_valid(corrected_video_ts: i64) -> bool {
+    corrected_video_ts > 0
 }
 
 /// #926 — max ms a single [`DockLockCorrector::decide`] call may move `genlock_latency_ms_src`
@@ -408,6 +461,13 @@ pub const DOCK_LOCK_LATENCY_MAX_MS: i32 = 2000;
 /// `mad_ms.clamp(DOCK_LOCK_MIN_MARGIN_MS, DOCK_CLUSTER_MAX_MAD_MS)`: scaled to the cluster's own
 /// observed dispersion (a wide/noisy lock gets a bigger, honest margin), but never below this
 /// floor even when a cluster reports a suspiciously tiny/zero MAD (few samples, or a lucky run).
+///
+/// #999 note: this clamp's UPPER bound intentionally stays at [`DOCK_CLUSTER_MAX_MAD_MS`] (the
+/// strict entry ceiling), never [`DOCK_CLUSTER_HOLD_MULTIPLIER`]'s wider hold ceiling — even
+/// though an already-locked cluster's `mad_ms` can now legitimately reach up to that wider value.
+/// The clamp already saturates safely there (tested by
+/// `corrector_margin_clamps_to_the_max_mad_when_mad_is_huge`), it just means the correction
+/// margin will pin at 25ms more often post-#999 than it did before — expected, not a bug.
 pub const DOCK_LOCK_MIN_MARGIN_MS: f64 = 1.0;
 
 /// #942 — BUILD DEFAULT, not a runtime toggle: the E2E gate (`scripts/av_sync_calibrate.py
@@ -1244,6 +1304,224 @@ mod tests {
             !locked,
             "a wide (high-MAD) band must be rejected by the MAD gate"
         );
+    }
+
+    // ---- #999: RollingOffsetCluster hysteresis (holds a lock through transient MAD noise) ----
+
+    #[test]
+    fn rolling_cluster_hysteresis_holds_a_locked_estimate_through_transient_mad_widening_999() {
+        // #999: once locked, ordinary push-to-push recompute noise that pushes mad_ms a few ms
+        // past the strict entry ceiling (25.0) must NOT immediately flip the lock off -- live
+        // evidence showed every LOCKED entry on the deployed dock landing mad_ms 22-25ms, right
+        // against that single boundary, causing rapid LOCKED/UNLOCKED churn (912 transitions in
+        // one session) with matched staying comfortably high throughout (never the constraint).
+        //
+        // Construct a batch with an EXACT, hand-verifiable mad: half the points at -35.0ms, half
+        // at +35.0ms -- sorted, the two middle values straddle 0 (median 0.0), every deviation
+        // from that median is exactly 35.0, so mad_ms == 35.0 exactly and matched == the full
+        // count (all fall inside one 2*tol_ms=120ms window). 35ms sits ABOVE the strict entry
+        // ceiling (25.0) but comfortably inside the hold ceiling
+        // (25.0 * DOCK_CLUSTER_HOLD_MULTIPLIER == 50.0).
+        let window_ns = 100 * 1_000_000_000u64; // 100s -- generous relative to the timings below
+        let min_matched = DOCK_CLUSTER_MIN_MATCHED as u64;
+        let mut c = RollingOffsetCluster::new(
+            window_ns,
+            DOCK_CLUSTER_TOL_MS,
+            DOCK_CLUSTER_MIN_MATCHED,
+            DOCK_CLUSTER_MAX_MAD_MS,
+        );
+
+        // Phase 1: lock TIGHT (mad ~0) with a batch well above min_matched, 1s apart.
+        let mut t_ns: u64 = 0;
+        let mut last = None;
+        for _ in 0..(min_matched * 3) {
+            t_ns += 1_000_000_000;
+            last = c.push(t_ns, 0.0);
+        }
+        let tight = last.expect("must lock the tight batch first");
+        assert!(tight.mad_ms < 1.0, "{tight:?}");
+        let tight_last_ns = t_ns;
+
+        // Phase 2: after a gap still well inside window_ns, add a bimodal +-35ms batch (one short
+        // of an even split) ON TOP of the still-fresh tight batch -- total retained only GROWS
+        // here (nothing evicted yet), so matched never dips below min_matched, and the dominant
+        // zeros keep the densest-window's own mad near 0 throughout (both ceilings are trivially
+        // satisfied, so this phase's outcome doesn't depend on which ceiling is "active" -- it
+        // only sets up phase 3's precondition of already being locked).
+        let mut wide_ns = tight_last_ns + 50 * 1_000_000_000; // +50s, still << window_ns away
+        let half = min_matched; // min_matched points at -35.0
+        let other_half_minus_one = min_matched - 1; // min_matched-1 at +35.0 -- phase 3 completes it
+        for k in 0..(half + other_half_minus_one) {
+            wide_ns += 10_000_000; // 0.01s apart
+            let off = if k < half { -35.0 } else { 35.0 };
+            last = c.push(wide_ns, off);
+        }
+        assert!(
+            last.is_some(),
+            "must still be locked heading into the eviction step: {last:?}"
+        );
+
+        // Phase 3: ONE jump that evicts the tight batch (> window_ns past its END) while keeping
+        // the wide batch (pushed only ~50s+150ms after it -- still << window_ns old at the jump),
+        // landing exactly on an evenly-balanced min_matched-vs-min_matched bimodal +-35ms cluster.
+        let jump_ns = tight_last_ns + window_ns + 20 * 1_000_000_000; // 20s past the eviction line
+        assert!(
+            jump_ns - tight_last_ns > window_ns,
+            "sanity: jump must evict the tight batch"
+        );
+        assert!(
+            jump_ns - wide_ns <= window_ns,
+            "sanity: jump must keep the wide batch"
+        );
+        let est = c.push(jump_ns, 35.0).expect(
+            "#999: a hysteretic hold ceiling must keep an ALREADY-locked cluster locked through a \
+             mad_ms excursion that exceeds the strict entry ceiling but stays within the hold \
+             ceiling",
+        );
+        assert!(
+            (est.mad_ms - 35.0).abs() < 1e-9,
+            "sanity: the bimodal +-35ms batch must give an exact mad_ms of 35.0: {est:?}"
+        );
+        assert!(
+            est.mad_ms > DOCK_CLUSTER_MAX_MAD_MS,
+            "sanity: must actually exceed the entry ceiling to test hysteresis: {est:?}"
+        );
+        assert!(
+            est.mad_ms <= DOCK_CLUSTER_MAX_MAD_MS * DOCK_CLUSTER_HOLD_MULTIPLIER,
+            "sanity: must stay within the hold ceiling: {est:?}"
+        );
+    }
+
+    #[test]
+    fn rolling_cluster_hysteresis_never_lowers_the_entry_bar_999() {
+        // #999: entry and hold use TWO DIFFERENT ceilings, never one ceiling relaxed everywhere.
+        // Build EXACTLY min_matched samples, split evenly half at -35.0ms / half at +35.0ms, so
+        // `matched` never reaches min_matched (self.locked stays false -- i.e. the strict ENTRY
+        // ceiling governs) until the FINAL push, which lands already perfectly balanced (median
+        // 0.0, mad_ms == 35.0 exactly -- same hand-verified math as the hold-ceiling test above).
+        // That must NOT lock, since 35.0 exceeds the entry ceiling (25.0) -- proving the wider
+        // hold ceiling never leaks into a cold acquisition. (A batch built the OTHER way --
+        // pushing one whole side first -- transiently locks onto a degenerate same-sign
+        // sub-cluster of >= min_matched identical values, mad=0; that's real, unrelated algorithm
+        // behavior, not what this test is isolating, hence the exactly-min_matched construction.)
+        let min_matched = DOCK_CLUSTER_MIN_MATCHED as u64;
+        assert_eq!(min_matched % 2, 0, "test assumes an even min_matched");
+        let half = min_matched / 2;
+        let mut c = RollingOffsetCluster::dock();
+        let mut t_ns: u64 = 0;
+        let mut last = None;
+        for k in 0..min_matched {
+            t_ns += 10_000_000;
+            let off = if k < half { -35.0 } else { 35.0 };
+            last = c.push(t_ns, off);
+        }
+        if let Some(est) = last {
+            panic!(
+                "#999: a fresh, never-before-locked cluster must not acquire a lock from a \
+                 35ms-mad batch -- only the strict entry ceiling (25.0) governs acquisition: \
+                 {est:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rolling_cluster_hysteresis_still_unlocks_beyond_the_hold_ceiling_999() {
+        // #999: the hysteresis proven above is BOUNDED, not infinite -- a mad_ms excursion beyond
+        // the hold ceiling (25.0 * DOCK_CLUSTER_HOLD_MULTIPLIER == 50.0) must still unlock, even
+        // from an already-locked state. Same bimodal construction, split at +-tol_ms (60.0)
+        // instead of +-35.0 -- exact mad_ms == 60.0 (> 50.0 hold ceiling).
+        let window_ns = 100 * 1_000_000_000u64;
+        let min_matched = DOCK_CLUSTER_MIN_MATCHED as u64;
+        let mut c = RollingOffsetCluster::new(
+            window_ns,
+            DOCK_CLUSTER_TOL_MS,
+            DOCK_CLUSTER_MIN_MATCHED,
+            DOCK_CLUSTER_MAX_MAD_MS,
+        );
+
+        let mut t_ns: u64 = 0;
+        let mut last = None;
+        for _ in 0..(min_matched * 3) {
+            t_ns += 1_000_000_000;
+            last = c.push(t_ns, 0.0);
+        }
+        let tight = last.expect("must lock the tight batch first");
+        assert!(tight.mad_ms < 1.0, "{tight:?}");
+        let tight_last_ns = t_ns;
+
+        let mut wide_ns = tight_last_ns + 50 * 1_000_000_000;
+        let half = min_matched;
+        let other_half_minus_one = min_matched - 1;
+        for k in 0..(half + other_half_minus_one) {
+            wide_ns += 10_000_000;
+            let off = if k < half {
+                -DOCK_CLUSTER_TOL_MS
+            } else {
+                DOCK_CLUSTER_TOL_MS
+            };
+            last = c.push(wide_ns, off);
+        }
+        assert!(
+            last.is_some(),
+            "must still be locked heading into the eviction step"
+        );
+
+        let jump_ns = tight_last_ns + window_ns + 20 * 1_000_000_000;
+        assert!(jump_ns - tight_last_ns > window_ns);
+        assert!(jump_ns - wide_ns <= window_ns);
+        let result = c.push(jump_ns, DOCK_CLUSTER_TOL_MS);
+        assert!(
+            result.is_none(),
+            "#999: an excursion beyond the hold ceiling must still unlock, even from a locked \
+             state: {result:?}"
+        );
+    }
+
+    #[test]
+    fn rolling_cluster_hysteresis_never_overrides_the_matched_floor_999() {
+        // #999: the hold-ceiling hysteresis widens the MAD gate only -- it must never let a
+        // locked cluster survive on TOO FEW samples. Lock tight, age everything out, then push
+        // exactly ONE fresh tight sample (matched=1, mad=0 trivially): must unlock regardless of
+        // how loose the mad ceiling is, because matched < min_matched independently fails.
+        let window_ns = 10 * 1_000_000_000u64;
+        let min_matched = DOCK_CLUSTER_MIN_MATCHED as u64;
+        let mut c = RollingOffsetCluster::new(
+            window_ns,
+            DOCK_CLUSTER_TOL_MS,
+            DOCK_CLUSTER_MIN_MATCHED,
+            DOCK_CLUSTER_MAX_MAD_MS,
+        );
+        let mut t_ns: u64 = 0;
+        let mut last = None;
+        for _ in 0..min_matched {
+            t_ns += 100_000_000;
+            last = c.push(t_ns, 0.0);
+        }
+        assert!(last.is_some(), "must lock before the age-out step");
+
+        let jump_ns = t_ns + window_ns + 1_000_000_000;
+        let result = c.push(jump_ns, 0.0); // a single fresh, perfectly tight sample
+        assert!(
+            result.is_none(),
+            "#999: matched dropping below min_matched must unlock even with mad_ms == 0.0 (the \
+             hold-ceiling hysteresis is MAD-only, never a matched override): {result:?}"
+        );
+    }
+
+    // ---- #1005: corrected_video_ts garbage-clamp fix ----
+
+    #[test]
+    fn corrected_video_ts_is_valid_accepts_only_strictly_positive_1005() {
+        // #1005: preserves the OLD clamp's own boundary exactly (`corrected_video_ts > 0 ? ... :
+        // 0` -- `> 0` was always the "keep as-is" side). A legitimate small positive offset (the
+        // common case) is valid; zero and any negative value (the garbage-clamp cases) are not.
+        assert!(corrected_video_ts_is_valid(1));
+        assert!(corrected_video_ts_is_valid(1_000_000));
+        assert!(corrected_video_ts_is_valid(i64::MAX));
+        assert!(!corrected_video_ts_is_valid(0));
+        assert!(!corrected_video_ts_is_valid(-1));
+        assert!(!corrected_video_ts_is_valid(-1_000_000));
+        assert!(!corrected_video_ts_is_valid(i64::MIN));
     }
 
     // ---- #942 monitor-only hard lock ----
