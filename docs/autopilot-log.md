@@ -7322,3 +7322,32 @@ does the live rig verification of the new whole-chain checks and closes it.
 - Commits: 15d826ac3 (bump 1.7.0-dev.437) → 4d37abe06 RED (Tier-0 port of deployed guard + FIFO-sim acceptance tests, 5 failing) → bfbf97bd1 (sim startup-underrun fix, still RED) → 6b9b80c02 GREEN (`BackwardStepGuard`: margin max(3I,250ms) + 3-tick sustain + SelfHeal + bounded regime warns) → 5e24f3b61 (C side + obs-internal.h fields + anchors/gates lockstep) → 1c611d2b4 RED-B (floor-stamp test) → b258f11c8 (grid-inverse test fix) → 828d506bc GREEN-B (floor_boundary_100ns both senders) → 97ad1153b (probe scenario rescale >margin) → dde25a474 review-RED (exit-hysteresis flap, first_reanchor_tick, floor identity) → 4bc50a4f9 review-GREEN (qualified regime EXIT, exact-boundary floor promotion, d_regimetick surfaced) → 68c7a61a9 docs de-stale.
 - Key RED→GREEN tests: `sender_ahead_skew_5_to_50ms_never_fires_the_guard_or_collapses_the_hold_1009`, `real_backward_step_recovers_and_the_hold_returns_after_the_episode_1009`, `regime_exit_requires_sustained_clear_not_a_single_tick_1009`, `stamp_is_at_or_before_the_capture_instant_never_future_1009`, `floor_boundary_is_identity_on_an_exact_boundary_1009`.
 - Decisions: self-heal = zero the locked boundary (reuse ACQUIRE, never a second rebuild mechanism); exit qualified like entry (flap → repeated ~latency_ms re-ACQUIRE holds); floor is a DETERMINISTIC one-interval stamp shift — deploy must re-baseline A/V with the offline arbiter, no knob recalibration before that. Deploy handoff = supervisor (obs.dll+distroav.dll all-3-box parity); #1009 stays open until live verification.
+
+## 2026-08-11 — #1014 dantesync-gate win-http NTP staleness + master-vs-client grading
+- Issue 1014 (--win-http path had NO staleness check on the NTP measurement itself, only the
+  general PTP-driven updated_ts -- a frozen/stale/never-measured ntp_offset_us graded as a live
+  DRIFT; separately, the NTP master's own by-design correction-lag sawtooth spread, since
+  dantesync v1.8.30, was graded against the same stability bound as a client node, producing a
+  false UNSTABLE/DRIFT). Branch autopilot-1014-dantesync-staleness (worktree dispatch, no PR yet
+  -- supervisor integrates).
+- Commits: a501748ab (bump 1.7.0-dev.439) -> 47780fd6e RED (22 new failures across
+  tests/clock_offset_guard.rs + tests/dantesync_gate.rs) -> 6d6a3037d GREEN (shared-lib
+  ntp_freshness_verdict/frozen_sample_verdict/ntp_age_s_raw_from_pipe_json/etc + the
+  sampled_offset_verdict/check MODE param + dantesync-gate.sh's GATE_NTP_MASTER_NAME/--ntp-master)
+  -> da87df118 (review follow-up: refuse when --ntp-master matches no configured node, 3 more
+  tests).
+- Key RED->GREEN tests: `gate_win_http_stale_ntp_age_s_is_never_graded_as_drift_1014` (the
+  ticket's original -34718us/stale-age reproduction), `gate_win_http_pre_1_8_30_frozen_offset_
+  is_stale_not_drift_1014` (the pre-1.8.30 frozen-sample fallback), `gate_win_http_ntp_master_
+  ignores_spread_but_still_grades_median_1014` (the sawtooth false-UNSTABLE reproduction),
+  `gate_refuses_when_ntp_master_name_matches_no_configured_node_1014` (review follow-up).
+- Decisions: ntp_age_s graded directly (never epoch-diffed against the gate's own "now") to
+  avoid clock-skew dependency; ntp_failed:true is an INDEPENDENT stale signal, not OR'd into age;
+  pre-1.8.30 backward compat via a frozen-sample heuristic reusing the gate's own already-
+  gathered multi-sample data, never a second gather; master-vs-client is a MODE param threaded
+  through the shared lib (not a per-caller `if name == strih` special case), so it stays
+  unit-testable and the master name is genuinely configurable (--ntp-master flag, proven with a
+  non-"strih" node in tests). One pre-existing test's node renamed strih->stream (it exercised
+  the GENERIC full-grading stability check, not master-specific behavior).
+- Full local suite green (198/198 binaries) after the review follow-up; fmt/clippy clean;
+  deep-review dispatch verdict 0 red 0 yellow 3 blue (1 must-fix landed, 2 accepted as-is).
