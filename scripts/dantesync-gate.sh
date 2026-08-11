@@ -82,6 +82,14 @@ GATE_SAMPLE_COUNT="${DANTESYNC_SAMPLE_COUNT:-6}"
 GATE_SAMPLE_WINDOW_S="${DANTESYNC_SAMPLE_WINDOW_S:-30}"
 GATE_SAMPLE_MIN_DISTINCT="${DANTESYNC_SAMPLE_MIN_DISTINCT:-3}"
 GATE_STABILITY_US="${DANTESYNC_STABILITY_US:-2000}"
+# #1014: the NTP master's own ntp_offset_us is a by-design UTC-residual correction-lag SAWTOOTH
+# since dantesync v1.8.30 (dantesync issue 71) -- its SPREAD says nothing about fleet coherence,
+# unlike a client node's, so the node whose --win-http/--linux NAME matches this is graded on
+# median+freshness ONLY (clock-offset-guard.sh's sampled_offset_verdict "median-only" MODE),
+# never the spread/stability bound every other node keeps. This is name-based (matches the
+# --win-http/--linux NAME= label), not path-based -- see the gate's own banner text below, which
+# used to hardcode "strih" as decoration only and is now the SAME value this config drives.
+GATE_NTP_MASTER_NAME="${DANTESYNC_NTP_MASTER_NAME:-strih}"
 
 # read_linux_node_journal NAME IP -> that Linux node's latest DanteSync journald lines over SSH,
 # or "" if unreachable. Overridable for tests/offline via DANTESYNC_GATE_LINUX_JOURNAL_<NAME>
@@ -236,7 +244,7 @@ gather_http_samples() {
 # unchanged sampling/grading LOGIC -- only where it is invoked from changed.
 grade_http_node() {
   local read_fn="$1" name="$2" arg="$3" kind="$4" bound="$5" stability="$6" min_distinct="$7"
-  local samples="$8" window="$9" freshness="${10}" verdictfile="${11}"
+  local samples="$8" window="$9" freshness="${10}" verdictfile="${11}" mode="${12:-full}"
   local status samples_raw now rc_off rc_ptp ptp
 
   samples_raw="$(gather_http_samples "$read_fn" "$name" "$arg" "$samples" "$window")"
@@ -293,8 +301,41 @@ grade_http_node() {
         "$name" "$issue_ref"
       rc_off=3 ;;
     *)
-      sampled_offset_check "$name" "$samples_raw" "$bound" "$stability" "$min_distinct" \
-        || rc_off=$? ;;
+      # #1014: the STATUS payload as a whole is fresh (the box's HTTP server is alive and
+      # self-reporting) -- but that "updated_ts" is PTP-driven and stays fresh even when the NTP
+      # MEASUREMENT itself is dead or (dantesync issue 68) intentionally free-running after a
+      # one-time startup sync. Grade the NTP measurement's OWN freshness separately, BEFORE
+      # trusting its ntp_offset_us as a live value.
+      case "$(ntp_freshness_verdict "$status" "$freshness")" in
+        fresh)
+          sampled_offset_check "$name" "$samples_raw" "$bound" "$stability" "$min_distinct" \
+            "$mode" || rc_off=$? ;;
+        stale)
+          printf '  %-14s NTP STALE    (NTP measurement age exceeds %ss, or ntp_failed -- status incomplete, dantesync issue 68/71, #1014)\n' \
+            "$name" "$freshness"
+          rc_off=3 ;;
+        never)
+          printf '  %-14s NTP UNKNOWN  (NTP never measured -- ntp_age_s null, dantesync issue 68, #1014)\n' \
+            "$name"
+          rc_off=3 ;;
+        absent)
+          # Pre-1.8.30 payload -- no ntp_age_s field to grade freshness directly. Fall back to
+          # the frozen-sample heuristic this ticket originally proposed: a byte-identical
+          # ntp_offset_us across every distinct sample this run already gathered is the frozen-
+          # measurement signature; anything else falls through to today's unchanged grading.
+          case "$(frozen_sample_verdict "$samples_raw" "$min_distinct")" in
+            frozen)
+              printf '  %-14s NTP STALE    (ntp_offset_us frozen across %s+ distinct samples -- pre-1.8.30 payload has no ntp_age_s, #1014 frozen-sample fallback)\n' \
+                "$name" "$min_distinct"
+              rc_off=3 ;;
+            *)
+              sampled_offset_check "$name" "$samples_raw" "$bound" "$stability" "$min_distinct" \
+                "$mode" " -- pre-1.8.30 payload, no ntp_age_s field, graded via legacy sampled-offset check (#1014)" \
+                || rc_off=$? ;;
+          esac
+          ;;
+      esac
+      ;;
   esac
   ptp="$(ptp_locked_from_pipe_json "$status")"
   rc_ptp=0; ptp_check "$name" "$ptp" || rc_ptp=$?
@@ -312,7 +353,8 @@ recording run must NOT proceed otherwise — cross-node latency/timestamps would
 Usage:
   dantesync-gate.sh [--bound-us N] [--linux "name=ip ..."] \
                      [--win-http NAME=HOST ...] [--win-http-port N] \
-                     [--samples N] [--window-s S] [--min-distinct N] [--stability-us N]
+                     [--samples N] [--window-s S] [--min-distinct N] [--stability-us N] \
+                     [--ntp-master NAME]
 
 Options:
   --bound-us N        max tolerated |NTP offset| in us (default ${GATE_BOUND_US}; see #8 rationale).
@@ -342,6 +384,19 @@ Options:
                        silent pass on one lucky read.
   --stability-us N     max tolerated SPREAD (max-min) of the distinct samples, in us (default
                        ${GATE_STABILITY_US}) -- see --samples above.
+  --ntp-master NAME    the --win-http/--linux NAME that is the NTP master (default
+                       ${GATE_NTP_MASTER_NAME}) -- #1014: graded on median+freshness ONLY, never
+                       --stability-us, because the master's own ntp_offset_us is a by-design
+                       UTC-residual correction-lag sawtooth (dantesync issue 71), not a fleet-
+                       coherence signal. Every OTHER node keeps the full median+spread/stability
+                       bar unchanged. A genuinely drifted master still fails on its median.
+
+A node's NTP MEASUREMENT itself must also be FRESH, independently of the payload's general
+"updated_ts" (#1014, dantesync v1.8.30 / dantesync issue 68): "ntp_age_s" must be a plain integer
+no older than the freshness window, and "ntp_failed" must not be true, or the reading is STALE ->
+UNKNOWN, never graded as a live offset. "ntp_age_s":null means NEVER measured -> UNKNOWN. A
+payload predating v1.8.30 (no ntp_age_s field at all) falls back to detecting a FROZEN
+ntp_offset_us across this run's own sampled reads.
 
 #836: net effect vs the old single-read gate is strictly MORE ways to fail, never fewer -- the
 location bound (--bound-us) itself never moves; sampling only ADDS the spread/stability check and
@@ -374,6 +429,7 @@ main() {
   local bound="$GATE_BOUND_US" linux="$GATE_LINUX" win_http_port="$GATE_WIN_HTTP_PORT"
   local samples="$GATE_SAMPLE_COUNT" window="$GATE_SAMPLE_WINDOW_S"
   local min_distinct="$GATE_SAMPLE_MIN_DISTINCT" stability="$GATE_STABILITY_US"
+  local ntp_master="$GATE_NTP_MASTER_NAME"
   local -a win_http=()
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -385,12 +441,14 @@ main() {
       --window-s)      shift; window="${1:-}" ;;
       --min-distinct)  shift; min_distinct="${1:-}" ;;
       --stability-us)  shift; stability="${1:-}" ;;
+      --ntp-master)    shift; ntp_master="${1:-}" ;;
       -h|--help)       usage; exit 0 ;;
       --*)             echo "unknown option: $1" >&2; usage >&2; exit 1 ;;
       *)               echo "unexpected argument: $1" >&2; usage >&2; exit 1 ;;
     esac
     shift || true
   done
+  GATE_NTP_MASTER_NAME="$ntp_master"
 
   if ! printf '%s' "$bound" | grep -qE '^[0-9]+$'; then
     echo "ERROR: --bound-us must be a positive integer (got '${bound}')." >&2
@@ -445,9 +503,11 @@ main() {
   fi
 
   echo "== dantesync-gate (#7): recording-E2E precondition — NTP within ${bound} us AND PTP LOCKED =="
-  echo "   GM = 10.77.9.184 (PTP grandmaster); NTP master = strih; degraded PTP => meaningless latency"
+  echo "   GM = 10.77.9.184 (PTP grandmaster); NTP master = ${GATE_NTP_MASTER_NAME}; degraded PTP => meaningless latency"
+  echo "   #1014: ${GATE_NTP_MASTER_NAME} is graded on median+freshness only (its spread is a by-design"
+  echo "   correction-lag sawtooth, dantesync issue 71); every other node keeps the full spread/stability bar."
 
-  local bad=0 unknown=0 ok=0 name ip
+  local bad=0 unknown=0 ok=0 name ip node_mode
 
   # #836 review follow-up: sampling a node now takes up to WINDOW seconds (was instant with the
   # old single read). Nodes are independent, so gather+grade every node CONCURRENTLY instead of
@@ -469,9 +529,11 @@ main() {
   for pair in "${linux_pairs[@]}"; do
     name="${pair%%=*}"; ip="${pair#*=}"
     outfile="$tmpdir/$idx.out"; vfile="$tmpdir/$idx.verdict"
+    node_mode="full"
+    [ "$name" = "$GATE_NTP_MASTER_NAME" ] && node_mode="median-only"
     grade_http_node read_linux_node_http_status "$name" "$ip" linux \
       "$bound" "$stability" "$min_distinct" "$samples" "$window" "$GATE_OFFSET_FRESHNESS_S" \
-      "$vfile" > "$outfile" &
+      "$vfile" "$node_mode" > "$outfile" &
     job_outfiles+=("$outfile"); job_verdictfiles+=("$vfile")
     idx=$((idx + 1))
   done
@@ -484,9 +546,11 @@ main() {
   for entry in "${win_http[@]}"; do
     name="${entry%%=*}"; ip="${entry#*=}"
     outfile="$tmpdir/$idx.out"; vfile="$tmpdir/$idx.verdict"
+    node_mode="full"
+    [ "$name" = "$GATE_NTP_MASTER_NAME" ] && node_mode="median-only"
     grade_http_node read_win_http_status "$name" "$ip" win \
       "$bound" "$stability" "$min_distinct" "$samples" "$window" "$GATE_OFFSET_FRESHNESS_S" \
-      "$vfile" > "$outfile" &
+      "$vfile" "$node_mode" > "$outfile" &
     job_outfiles+=("$outfile"); job_verdictfiles+=("$vfile")
     idx=$((idx + 1))
   done

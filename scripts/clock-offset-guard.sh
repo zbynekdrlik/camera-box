@@ -155,6 +155,92 @@ pipe_json_freshness_verdict() {
   fi
 }
 
+# --- NTP-measurement freshness (#1014, dantesync v1.8.30 / dantesync issue 68 and issue 71) ---
+#
+# updated_ts (above) is driven by the PTP loop and stays fresh even when the NTP subsystem itself
+# is dead, OR -- dantesync issue 68 -- intentionally free-running after a one-time sync at
+# startup (ntp_server_mode disables periodic upstream queries "by design" on the NTP master, so
+# its ntp_offset_us free-runs at the box's own oscillator error for as long as the service stays
+# up). #1014 found this live: strih's ntp_offset_us frozen at a ~30x-stale value while
+# updated_ts kept advancing every ~30s from the healthy PTP servo, and the gate graded the frozen
+# value as a live DRIFT. dantesync v1.8.30 added two fields specifically so the NTP MEASUREMENT's
+# own freshness can be proven independently of updated_ts:
+#   ntp_updated_ts -- unix epoch of the last successful NTP measurement (0 = never).
+#   ntp_age_s      -- seconds since that measurement (a plain integer), OR JSON null when the
+#                      daemon has NEVER completed one (deliberately NOT 0 -- 0 would mean "just
+#                      measured").
+# Grading via ntp_age_s directly (rather than epoch-diffing ntp_updated_ts against the gate's own
+# "now") avoids any dependency on clock skew between the gate host and the target box -- the box
+# has already computed its own age.
+
+# ntp_age_s_raw_from_pipe_json TEXT -> the RAW text of the "ntp_age_s" JSON value: a plain
+# non-negative integer string, the literal "null", or "" if the field is absent entirely (an
+# older, pre-1.8.30 payload). Kept as a raw/unparsed accessor (rather than folding null into "")
+# so callers can distinguish all THREE states -- collapsing null and absent into the same value
+# would lose the "never measured" signal ntp_freshness_verdict (below) depends on.
+ntp_age_s_raw_from_pipe_json() {
+  printf '%s\n' "$1" \
+    | grep -oE '"ntp_age_s"[[:space:]]*:[[:space:]]*(null|[0-9]+)' \
+    | sed -n 's/.*:[[:space:]]*\(null\|[0-9][0-9]*\).*/\1/p' \
+    | tail -1 || true
+}
+
+# ntp_updated_ts_from_pipe_json TEXT -> the unsigned integer value of "ntp_updated_ts" (unix
+# epoch of the daemon's last successful NTP measurement; 0 = never), "" if absent. Not itself
+# used for grading (ntp_age_s already gives an age with no clock-skew dependency) -- exposed for
+# parity with updated_ts_from_pipe_json and for any future caller that wants the raw timestamp.
+ntp_updated_ts_from_pipe_json() {
+  printf '%s\n' "$1" \
+    | grep -oE '"ntp_updated_ts"[[:space:]]*:[[:space:]]*[0-9]+' \
+    | sed -n 's/.*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
+    | tail -1 || true
+}
+
+# ntp_failed_from_pipe_json TEXT -> "true" | "false" | "" (absent/unparseable). #1014: v1.8.30
+# widened this field's meaning to ALSO cover "no fresh measurement within window", not only an
+# outright measurement error -- ntp_freshness_verdict treats true as an INDEPENDENT stale signal,
+# not merely OR'd into the age check, so a payload reporting one without the other still refuses.
+ntp_failed_from_pipe_json() {
+  printf '%s\n' "$1" | grep -oE '"ntp_failed"[[:space:]]*:[[:space:]]*(true|false)' \
+    | sed -n 's/.*:[[:space:]]*\(true\|false\).*/\1/p' | tail -1 || true
+}
+
+# ntp_freshness_verdict TEXT FRESHNESS_S -> "fresh" | "stale" | "never" | "absent".
+#   absent -- TEXT has no "ntp_age_s" field at all -- a pre-1.8.30 payload. The caller must fall
+#             back to the pre-#1014 heuristic (dantesync-gate.sh's frozen_sample_verdict, below);
+#             this function itself never guesses at a payload shape it cannot see.
+#   never  -- "ntp_age_s":null -- the daemon has NEVER completed an NTP measurement.
+#   stale  -- ntp_age_s is a valid integer > FRESHNESS_S, OR ntp_failed is true (dantesync issue
+#             68's widened meaning) -- either signal alone is sufficient, checked independently.
+#   fresh  -- ntp_age_s is a valid integer <= FRESHNESS_S AND ntp_failed is not true.
+# A malformed FRESHNESS_S is treated like "absent" -- never grade a value we cannot bound.
+ntp_freshness_verdict() {
+  local text="$1" fresh="$2" age failed
+  age="$(ntp_age_s_raw_from_pipe_json "$text")"
+  if [ -z "$age" ]; then
+    printf 'absent\n'
+    return 0
+  fi
+  if [ "$age" = "null" ]; then
+    printf 'never\n'
+    return 0
+  fi
+  if ! printf '%s' "$fresh" | grep -qE '^[0-9]+$'; then
+    printf 'absent\n'
+    return 0
+  fi
+  failed="$(ntp_failed_from_pipe_json "$text")"
+  if [ "$failed" = "true" ]; then
+    printf 'stale\n'
+    return 0
+  fi
+  if [ "$age" -gt "$fresh" ]; then
+    printf 'stale\n'
+  else
+    printf 'fresh\n'
+  fi
+}
+
 # --- FRESHNESS-aware offset reading (#550/#591/#595) ----------------------------------------
 #
 # offset_us_from_journal (above) is AGE-BLIND: it `tail -1`s the LAST "[NTP] offset:" line
@@ -559,7 +645,45 @@ spread_of_ints() {
   printf '%s' "$((max - min))"
 }
 
-# sampled_offset_verdict PAYLOADS_NEWLINE BOUND_US STABILITY_US MIN_DISTINCT ->
+# frozen_sample_verdict PAYLOADS_NEWLINE MIN_DISTINCT -> "frozen" | "live" | "insufficient".
+# #1014 backward-compat fallback for a PRE-1.8.30 payload (no "ntp_age_s" field to grade
+# freshness directly via ntp_freshness_verdict above): a byte-identical ntp_offset_us across
+# EVERY distinct-by-updated_ts sample in PAYLOADS_NEWLINE is the signature a dead/free-running
+# NTP measurement leaves in the OLD payload shape -- #1014's original strih incident was exactly
+# this: six polls, six identical readings, spread 0us, while the general updated_ts kept
+# advancing from the healthy PTP loop. Reuses distinct_offset_samples_us/spread_of_ints (the same
+# samples the gate already collects for sampled_offset_verdict), never a second, independently-
+# gathered sample set. Requires at least MIN_DISTINCT distinct samples before calling anything
+# "frozen" -- with fewer, the spread is undefined/unprovable and this must never guess.
+#   insufficient -- fewer than MIN_DISTINCT distinct samples, or MIN_DISTINCT is not a plain
+#                   non-negative integer.
+#   frozen       -- >= MIN_DISTINCT distinct samples, all reporting the SAME ntp_offset_us
+#                   (spread == 0).
+#   live         -- >= MIN_DISTINCT distinct samples with any variation (spread != 0) -- a
+#                   genuinely live (if possibly noisy) NTP measurement; the caller falls through
+#                   to the unchanged legacy sampled_offset_check grading.
+frozen_sample_verdict() {
+  local payloads="$1" min_distinct="$2" samples n spread
+  if ! printf '%s' "$min_distinct" | grep -qE '^[0-9]+$'; then
+    printf 'insufficient\n'
+    return 0
+  fi
+  samples="$(distinct_offset_samples_us "$payloads")"
+  n="$(printf '%s\n' "$samples" | grep -cE '^-?[0-9]+$' || true)"
+  n="${n:-0}"
+  if [ "$n" -lt "$min_distinct" ]; then
+    printf 'insufficient\n'
+    return 0
+  fi
+  spread="$(spread_of_ints "$samples")"
+  if [ "$spread" = "0" ]; then
+    printf 'frozen\n'
+  else
+    printf 'live\n'
+  fi
+}
+
+# sampled_offset_verdict PAYLOADS_NEWLINE BOUND_US STABILITY_US MIN_DISTINCT [MODE] ->
 #   "insufficient" | "drift" | "unstable" | "drift_unstable" | "ok"
 #   insufficient -- fewer than MIN_DISTINCT distinct samples were obtained (#836 point 5, second
 #                   half) OR BOUND_US/STABILITY_US/MIN_DISTINCT is not a plain non-negative
@@ -570,8 +694,16 @@ spread_of_ints() {
 #   drift_unstable -- both the median AND the spread fail.
 #   ok             -- median in-bound AND (fewer than 2 samples, so spread is undefined, OR
 #                     spread in-bound).
+#
+# MODE (#1014, default "full" when omitted -- every pre-existing 4-arg call site is therefore
+# byte-for-byte unchanged): "median-only" skips the spread/stability check ENTIRELY, so the
+# verdict can only ever be "insufficient" | "drift" | "ok" -- never "unstable"/"drift_unstable".
+# This is for the NTP MASTER node, whose spread is a by-design correction-lag sawtooth (dantesync
+# issue 71), not a fleet-coherence signal -- see dantesync-gate.sh's GATE_NTP_MASTER_NAME. The
+# location bound (BOUND_US) is never skipped in either mode; a genuinely drifted master still
+# fails on its median exactly like any other node.
 sampled_offset_verdict() {
-  local payloads="$1" bound="$2" stability="$3" min_distinct="$4"
+  local payloads="$1" bound="$2" stability="$3" min_distinct="$4" mode="${5:-full}"
   local samples n median spread drift=0 unstable=0
   if ! printf '%s' "$bound" | grep -qE '^[0-9]+$' \
      || ! printf '%s' "$stability" | grep -qE '^[0-9]+$' \
@@ -589,7 +721,7 @@ sampled_offset_verdict() {
   median="$(median_of_ints "$samples")"
   [ -n "$median" ] || { printf 'insufficient\n'; return 0; }
   [ "$(abs_int "$median")" -gt "$bound" ] && drift=1
-  if [ "$n" -ge 2 ]; then
+  if [ "$mode" != "median-only" ] && [ "$n" -ge 2 ]; then
     spread="$(spread_of_ints "$samples")"
     [ -n "$spread" ] && [ "$spread" -gt "$stability" ] && unstable=1
   fi
@@ -622,39 +754,53 @@ sampled_offset_report() {
   printf '%s %s %s\n' "$n" "${median:-NA}" "${spread:-NA}"
 }
 
-# sampled_offset_check LABEL PAYLOADS_NEWLINE BOUND_US STABILITY_US MIN_DISTINCT -> prints ONE
-# status line (median + spread + distinct count, always -- #836 point 4) and returns 0 OK /
-# 2 DRIFT-or-UNSTABLE / 3 UNKNOWN (insufficient distinct samples or malformed input). Same rc
-# contract as offset_check (0/2/3) so node_verdict's OK/BAD/UNKNOWN combiner (dantesync-gate.sh)
+# sampled_offset_check LABEL PAYLOADS_NEWLINE BOUND_US STABILITY_US MIN_DISTINCT [MODE] [NOTE] ->
+# prints ONE status line (median + spread + distinct count, always -- #836 point 4) and returns
+# 0 OK / 2 DRIFT-or-UNSTABLE / 3 UNKNOWN (insufficient distinct samples or malformed input). Same
+# rc contract as offset_check (0/2/3) so node_verdict's OK/BAD/UNKNOWN combiner (dantesync-gate.sh)
 # is unchanged -- a stability failure is exactly as hard a failure as a location (drift) failure.
+#
+# MODE (#1014, default "full") is passed straight through to sampled_offset_verdict -- see its
+# own doc comment. When MODE is "median-only" this function appends an inline note explaining WHY
+# no stability verdict is possible for this node, on the SAME line as the OK/DRIFT verdict rather
+# than a separate line -- several dantesync-gate.sh callers locate "the" node's own report via
+# `.lines().find(|l| l.starts_with(label))`, so printing a second line ahead of the real verdict
+# would silently break those. NOTE (optional, appended after any MODE note) lets a caller add its
+# own free-form annotation (e.g. dantesync-gate.sh's pre-1.8.30 backward-compat marker) without
+# this function needing to know about every possible reason.
 sampled_offset_check() {
   local label="$1" payloads="$2" bound="$3" stability="$4" min_distinct="$5"
-  local verdict report n median spread
-  verdict="$(sampled_offset_verdict "$payloads" "$bound" "$stability" "$min_distinct")"
+  local mode="${6:-full}" extra_note="${7:-}"
+  local verdict report n median spread note=""
+  verdict="$(sampled_offset_verdict "$payloads" "$bound" "$stability" "$min_distinct" "$mode")"
   report="$(sampled_offset_report "$payloads")"
   n="$(printf '%s' "$report" | awk '{print $1}')"
   median="$(printf '%s' "$report" | awk '{print $2}')"
   spread="$(printf '%s' "$report" | awk '{print $3}')"
+  if [ "$mode" = "median-only" ]; then
+    note=" -- NTP MASTER: spread reported for reference only, not gated (correction-lag sawtooth by design, dantesync issue 71, #1014)"
+  fi
+  note="${note}${extra_note}"
   case "$verdict" in
     ok)
-      printf '  %-14s OK       (median %sus <= %sus bound; spread %sus, stability %sus; %s distinct samples)\n' \
-        "$label" "$median" "$bound" "$spread" "$stability" "$n"
+      printf '  %-14s OK       (median %sus <= %sus bound; spread %sus, stability %sus; %s distinct samples)%s\n' \
+        "$label" "$median" "$bound" "$spread" "$stability" "$n" "$note"
       return 0 ;;
     drift)
-      printf '  %-14s DRIFT    (median %sus > %sus bound; spread %sus, stability %sus; %s distinct samples)\n' \
-        "$label" "$median" "$bound" "$spread" "$stability" "$n"
+      printf '  %-14s DRIFT    (median %sus > %sus bound; spread %sus, stability %sus; %s distinct samples)%s\n' \
+        "$label" "$median" "$bound" "$spread" "$stability" "$n" "$note"
       return 2 ;;
     unstable)
-      printf '  %-14s UNSTABLE (median %sus <= %sus bound; spread %sus > %sus stability -- #836 scattered/unusable; %s distinct samples)\n' \
-        "$label" "$median" "$bound" "$spread" "$stability" "$n"
+      printf '  %-14s UNSTABLE (median %sus <= %sus bound; spread %sus > %sus stability -- #836 scattered/unusable; %s distinct samples)%s\n' \
+        "$label" "$median" "$bound" "$spread" "$stability" "$n" "$note"
       return 2 ;;
     drift_unstable)
-      printf '  %-14s DRIFT+UNSTABLE (median %sus > %sus bound; spread %sus > %sus stability; %s distinct samples)\n' \
-        "$label" "$median" "$bound" "$spread" "$stability" "$n"
+      printf '  %-14s DRIFT+UNSTABLE (median %sus > %sus bound; spread %sus > %sus stability; %s distinct samples)%s\n' \
+        "$label" "$median" "$bound" "$spread" "$stability" "$n" "$note"
       return 2 ;;
     *)
-      printf '  %-14s UNKNOWN  (only %s distinct sample(s) [median %sus, spread %sus], need >= %s -- refresh-interval duplicates, #836)\n' \
-        "$label" "$n" "$median" "$spread" "$min_distinct"
+      printf '  %-14s UNKNOWN  (only %s distinct sample(s) [median %sus, spread %sus], need >= %s -- refresh-interval duplicates, #836)%s\n' \
+        "$label" "$n" "$median" "$spread" "$min_distinct" "$note"
       return 3 ;;
   esac
 }
