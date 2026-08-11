@@ -7339,3 +7339,32 @@ does the live rig verification of the new whole-chain checks and closes it.
 - #1005 root cause: both camera-box `sync_found` emit sites in `sync-test-output.cpp` clamped a negative `corrected_video_ts` to 0 instead of dropping the event, manufacturing a garbage whole-timeline-scale offset (can go negative early in a session before the rolling estimate converges). Fix: extracted `corrected_video_ts_is_valid`/`cb_corrected_video_ts_is_valid` pure predicate (preserves the OLD clamp's exact `>0` boundary), wired both call sites to drop the event when invalid; the sibling `audio_marker_found` emission (no `video_ts`) left untouched. Commits: `3a8b8ad35` RED → `07785652b` GREEN (Rust predicate) → `447881731` RED → `66b198fa4` GREEN (C++ predicate, `tests/av_sync_dock_video_ts_valid_1005.rs`) → `ccfad9471` RED → `5a7107674` GREEN (the actual `sync-test-output.cpp` wiring, proven via a new structural text-anchor test in `tests/av_sync_dock_qr_patch_guard.rs` since this file has no local compile path at all -- only CI's `windows-genlock-fast.yml` compiles it).
 - Review (one fresh-context `general-purpose` subagent, independently ran the full suite + re-derived the hand-verified bimodal median/MAD math): 0 Critical / 1 Warning / 2 Suggestions. Fixed in `2441d7b1a`: added the missing pwsh mirror anchors for the #1005 wiring to BOTH `windows-genlock*.yml` (matching the existing #999/#398 convention in the same source region), reworded a tangled doc-comment parenthetical, and added a cross-reference note (Rust + C++) that `DOCK_LOCK_MIN_MARGIN_MS`'s clamp intentionally keeps its upper bound at the strict entry ceiling, never the new wider hold ceiling.
 - Local suite: 200/200 test binaries green (`cargo test`, full run, twice — before and after the review fixes), fmt/check/clippy clean throughout. Design + validated comments posted on both issues before code; review comment posted on both after. Live rig deploy + post-deploy LOCKED/UNLOCKED verification is the supervisor's, per this worktree's local-only authority.
+
+## 2026-08-11 — #1014 dantesync-gate win-http NTP staleness + master-vs-client grading
+- Issue 1014 (--win-http path had NO staleness check on the NTP measurement itself, only the
+  general PTP-driven updated_ts -- a frozen/stale/never-measured ntp_offset_us graded as a live
+  DRIFT; separately, the NTP master's own by-design correction-lag sawtooth spread, since
+  dantesync v1.8.30, was graded against the same stability bound as a client node, producing a
+  false UNSTABLE/DRIFT). Branch autopilot-1014-dantesync-staleness (worktree dispatch, no PR yet
+  -- supervisor integrates).
+- Commits: a501748ab (bump 1.7.0-dev.439) -> 47780fd6e RED (22 new failures across
+  tests/clock_offset_guard.rs + tests/dantesync_gate.rs) -> 6d6a3037d GREEN (shared-lib
+  ntp_freshness_verdict/frozen_sample_verdict/ntp_age_s_raw_from_pipe_json/etc + the
+  sampled_offset_verdict/check MODE param + dantesync-gate.sh's GATE_NTP_MASTER_NAME/--ntp-master)
+  -> da87df118 (review follow-up: refuse when --ntp-master matches no configured node, 3 more
+  tests).
+- Key RED->GREEN tests: `gate_win_http_stale_ntp_age_s_is_never_graded_as_drift_1014` (the
+  ticket's original -34718us/stale-age reproduction), `gate_win_http_pre_1_8_30_frozen_offset_
+  is_stale_not_drift_1014` (the pre-1.8.30 frozen-sample fallback), `gate_win_http_ntp_master_
+  ignores_spread_but_still_grades_median_1014` (the sawtooth false-UNSTABLE reproduction),
+  `gate_refuses_when_ntp_master_name_matches_no_configured_node_1014` (review follow-up).
+- Decisions: ntp_age_s graded directly (never epoch-diffed against the gate's own "now") to
+  avoid clock-skew dependency; ntp_failed:true is an INDEPENDENT stale signal, not OR'd into age;
+  pre-1.8.30 backward compat via a frozen-sample heuristic reusing the gate's own already-
+  gathered multi-sample data, never a second gather; master-vs-client is a MODE param threaded
+  through the shared lib (not a per-caller `if name == strih` special case), so it stays
+  unit-testable and the master name is genuinely configurable (--ntp-master flag, proven with a
+  non-"strih" node in tests). One pre-existing test's node renamed strih->stream (it exercised
+  the GENERIC full-grading stability check, not master-specific behavior).
+- Full local suite green (198/198 binaries) after the review follow-up; fmt/clippy clean;
+  deep-review dispatch verdict 0 red 0 yellow 3 blue (1 must-fix landed, 2 accepted as-is).
