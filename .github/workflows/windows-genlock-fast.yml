@@ -182,7 +182,15 @@ jobs:
           $flt = (Get-Content "vendor/distroav/src/ndi-burn-filter.cpp" -Raw) -replace '\s+', ' '
           if ($flt -match [regex]::Escape('getenv("OBS_BURN')) { Write-Error "ndi-burn-filter.cpp: OBS_BURN_* env is BACK — #257 made the burn a per-source bool"; exit 1 }
           if ($flt -notmatch [regex]::Escape('obs_source_get_genlock_burn')) { Write-Error "ndi-burn-filter.cpp: burn no longer reads the parent genlock_burn flag — #257 reverted"; exit 1 }
-          Write-Output "per-source genlock latency (ms) override + #257 floor 3 + genlock default-ON + whitelist UI + runtime burn — OK"
+          # camera-box #1009: this FAST path ships distroav.dll for hot-swap, so the floor
+          # emit-stamp patch must be gated HERE too, not only in the slow production build —
+          # a subtree pull restoring the future-biased ceil stamp would otherwise hot-swap
+          # un-gated by pwsh (the Tier-0 Rust guard tests/distroav_timecode_patch.rs still
+          # gates the merge, this closes the direct-dispatch path).
+          $out = (Get-Content "vendor/distroav/src/ndi-output.cpp" -Raw) -replace '\s+', ' '
+          if ($out -notmatch [regex]::Escape('return genlock_floor_boundary_100ns(genlock_wall_now_100ns(), fps);')) { Write-Error "ndi-output.cpp: #1009 floor emit stamp (genlock_floor_boundary_100ns) gone — the sender future-bias (issue 1007 hair-trigger arming) is back"; exit 1 }
+          if ($out -match 'genlock_next_boundary_100ns') { Write-Error "ndi-output.cpp: #1009 — the pre-1009 ceil boundary helper name is back; emit stamps may be future-dated again"; exit 1 }
+          Write-Output "per-source genlock latency (ms) override + #257 floor 3 + genlock default-ON + whitelist UI + runtime burn + #1009 floor emit stamp — OK"
 
       # #912: ASRC (issue 803's per-source clock-drift servo) must be a BUILD DEFAULT, mirroring
       # the #257 render-tick/ts-align hard-lock. The FAST path COMPILES the real vendored C (a
