@@ -120,4 +120,35 @@ mod tests {
     fn zero_distance_ms_is_a_safe_no_op_not_a_panic_or_division_surprise() {
         assert_eq!(compensation_sample_delta(300.0, 0, REAL_OUTPUT_FREQ), 0);
     }
+
+    // issue 1016: pins the FIXED expectation -- the caller's REAL_DISTANCE_MS is being widened
+    // from 1000 to 10_000 to fix the quantization no-op this module's own top-of-file doc
+    // comment measured for "typical single-digit ppm" drift. RED until REAL_DISTANCE_MS's value
+    // below is actually updated (see issue 1016's design comment for why widening the window,
+    // not a cross-call accumulator, is the chosen fix).
+
+    #[test]
+    fn typical_single_digit_ppm_drift_now_reaches_the_resampler_1016() {
+        for ppm in [2.0, 5.0, 8.0, 9.9] {
+            assert_ne!(
+                compensation_sample_delta(ppm, REAL_DISTANCE_MS, REAL_OUTPUT_FREQ),
+                0,
+                "ppm={ppm} should reach the resampler post-#1016 (new floor ~1.04ppm) -- RED \
+                 until REAL_DISTANCE_MS is widened to 10_000"
+            );
+        }
+    }
+
+    #[test]
+    fn floor_boundary_matches_the_new_1_04_ppm_threshold_1016() {
+        // 1.0 ppm -> 0.48 samples at the post-#1016 distance_samples=480000 -> rounds to 0;
+        // 1.1 ppm -> 0.528 samples -> rounds to 1. At the pre-#1016 distance_samples=48000 both
+        // round to 0 (1.0ppm -> 0.048; 1.1ppm -> 0.0528) -- the assert_ne below fails until
+        // REAL_DISTANCE_MS is widened.
+        assert_ne!(
+            compensation_sample_delta(1.0, REAL_DISTANCE_MS, REAL_OUTPUT_FREQ),
+            compensation_sample_delta(1.1, REAL_DISTANCE_MS, REAL_OUTPUT_FREQ),
+            "1.0ppm and 1.1ppm must resolve to DIFFERENT sample_delta values post-#1016"
+        );
+    }
 }
