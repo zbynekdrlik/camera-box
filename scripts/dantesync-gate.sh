@@ -390,6 +390,13 @@ Options:
                        UTC-residual correction-lag sawtooth (dantesync issue 71), not a fleet-
                        coherence signal. Every OTHER node keeps the full median+spread/stability
                        bar unchanged. A genuinely drifted master still fails on its median.
+                       When at least one --win-http node is configured, NAME must match one of
+                       the configured --linux/--win-http node names, or the gate refuses (usage
+                       error, 1) -- a typo here (or in the master's own --win-http/--linux NAME=)
+                       would otherwise silently grade the INTENDED master with the full spread/
+                       stability bar, reintroducing #1014's false-DRIFT through a misspelling.
+                       Pass --ntp-master "" to explicitly opt out (no NTP master among this
+                       invocation's nodes at all).
 
 A node's NTP MEASUREMENT itself must also be FRESH, independently of the payload's general
 "updated_ts" (#1014, dantesync v1.8.30 / dantesync issue 68): "ntp_age_s" must be a plain integer
@@ -500,6 +507,34 @@ main() {
     echo "ERROR: no nodes to gate (--linux and --win-http are both empty)." >&2
     echo "The recording-E2E gate cannot certify the cluster with zero nodes — refusing to pass." >&2
     exit 1
+  fi
+
+  # #1014 review follow-up: a typo'd --ntp-master / DANTESYNC_NTP_MASTER_NAME (or a typo'd
+  # --win-http NAME=HOST for the box that WAS meant to be the master, e.g. "strhi" instead of
+  # "strih") must never silently fall back to grading the intended master with the full
+  # spread/stability bar -- that is the EXACT false-DRIFT this ticket exists to fix, now
+  # reachable again through a typo instead of an old payload shape. Only checked when at least
+  # one --win-http node is configured (the master, strih, is exclusively a Windows/--win-http
+  # node on this rig -- a pure --linux-only invocation has no master concept in play at all) AND
+  # GATE_NTP_MASTER_NAME is non-empty (an explicit --ntp-master "" opts OUT of the master concept
+  # entirely -- e.g. a test that only cares about generic client grading).
+  if [ -n "$GATE_NTP_MASTER_NAME" ] && [ "${#win_http[@]}" -gt 0 ]; then
+    local master_found=0 check_pair check_name
+    for check_pair in "${linux_pairs[@]}" "${win_http[@]}"; do
+      check_name="${check_pair%%=*}"
+      if [ "$check_name" = "$GATE_NTP_MASTER_NAME" ]; then
+        master_found=1
+        break
+      fi
+    done
+    if [ "$master_found" -eq 0 ]; then
+      echo "ERROR: --ntp-master '${GATE_NTP_MASTER_NAME}' matches NO configured --linux/--win-http node." >&2
+      echo "A typo here silently grades the INTENDED master with the full spread/stability bar --" >&2
+      echo "the exact false-DRIFT class #1014 fixed, reachable again through a misspelled name." >&2
+      echo "Fix the --ntp-master/--win-http/--linux spelling, or pass --ntp-master \"\" if this" >&2
+      echo "invocation genuinely has no NTP master among its nodes." >&2
+      exit 1
+    fi
   fi
 
   echo "== dantesync-gate (#7): recording-E2E precondition — NTP within ${bound} us AND PTP LOCKED =="

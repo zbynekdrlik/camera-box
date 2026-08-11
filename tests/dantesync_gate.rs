@@ -970,6 +970,10 @@ fn gate_fails_a_win_http_node_whose_median_is_fine_but_samples_scatter_beyond_st
             "",
             "--win-http",
             "stream=10.77.9.204",
+            // #1014 review follow-up: only "stream" is configured, no "strih" -- opt OUT of the
+            // master-name validation (this test cares about generic client grading only).
+            "--ntp-master",
+            "",
             "--samples",
             "5",
             "--min-distinct",
@@ -1576,4 +1580,103 @@ fn gate_ntp_master_name_is_configurable_via_ntp_master_flag_1014() {
     );
     assert!(stdout.contains("GATE PASS"), "stdout: {stdout}");
     assert!(!stdout.contains("UNSTABLE"), "stdout: {stdout}");
+}
+
+// --- #1014 review follow-up: --ntp-master must match a CONFIGURED node, or refuse loudly -------
+
+#[test]
+fn gate_refuses_when_ntp_master_name_matches_no_configured_node_1014() {
+    // A typo'd --win-http NAME= for the box meant to be the master (e.g. "strhi" instead of
+    // "strih") must NEVER silently fall back to grading the intended master with the full
+    // spread/stability bar -- that is #1014's exact false-DRIFT bug, reachable again through a
+    // misspelling instead of an old payload shape. Default --ntp-master is "strih"; configuring
+    // only a differently-named win-http node must refuse at usage-check time (1), never proceed.
+    let now = now_epoch();
+    let fresh = http_status_ntp(now, 100, "4", false);
+    let p = write_win_http_fixture("strhi_typo_1014", &fresh);
+    let (code, _stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "strhi=10.77.9.202", // typo'd node name -- never matches the default "strih" master
+            "--samples",
+            "1",
+            "--min-distinct",
+            "1",
+            "--window-s",
+            "0",
+        ],
+        &[("DANTESYNC_GATE_WIN_HTTP_STRHI", &p.display().to_string())],
+    );
+    assert_eq!(
+        code, 1,
+        "a --ntp-master name matching no configured node must be a usage error (1), never a \
+         silent full-grading fallback: stderr={stderr}"
+    );
+    assert!(
+        stderr.contains("--ntp-master") && stderr.contains("strih"),
+        "stderr must name the mismatch clearly: {stderr}"
+    );
+}
+
+#[test]
+fn gate_ntp_master_empty_string_opts_out_of_master_validation_1014() {
+    // --ntp-master "" explicitly disables the master concept for this invocation -- a node set
+    // with no "strih" at all must proceed normally (no usage-error refusal), grading every node
+    // with the full spread/stability bar.
+    let now = now_epoch();
+    let fresh = http_status_ntp(now, 100, "4", false);
+    let p = write_win_http_fixture("stream_no_master_opt_out_1014", &fresh);
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "stream=10.77.9.204",
+            "--ntp-master",
+            "",
+            "--samples",
+            "1",
+            "--min-distinct",
+            "1",
+            "--window-s",
+            "0",
+        ],
+        &[("DANTESYNC_GATE_WIN_HTTP_STREAM", &p.display().to_string())],
+    );
+    assert_eq!(
+        code, 0,
+        "--ntp-master \"\" must opt out of the validation and proceed normally. \
+         stdout={stdout} stderr={stderr}"
+    );
+    assert!(stdout.contains("GATE PASS"), "stdout: {stdout}");
+}
+
+#[test]
+fn gate_ntp_master_validation_skipped_for_linux_only_invocations_1014() {
+    // A pure --linux invocation (--win-http omitted entirely, so the win_http array stays
+    // EMPTY -- unlike --linux "", a bare --win-http "" would append ONE empty-name element, not
+    // zero) has no master concept in play -- the default "strih" master name matching nothing
+    // among cam1/cam2 must NOT refuse.
+    let j = write_dante_journal(
+        "cam1_1014_linux_only_no_master",
+        "2026-08-11T10:00:00+02:00 cam1 dantesync[1]: [NTP] offset:+100us (threshold:520us, adaptive)\n\
+2026-08-11T10:00:05+02:00 cam1 dantesync[1]: [PTP] NANO  Drift:   +12ns/s  Adj: +6.10ppm\n",
+    );
+    let (code, stdout, stderr) = run_gate_env(
+        &["--linux", "cam1=10.77.9.61"],
+        &[
+            (
+                "DANTESYNC_GATE_LINUX_JOURNAL_CAM1",
+                &j.display().to_string(),
+            ),
+            ("DANTESYNC_GATE_LINUX_HTTP_CAM1", NO_HTTP), // #686: force journal fallback, no live curl
+        ],
+    );
+    assert_eq!(
+        code, 0,
+        "a Linux-only invocation must never be blocked by the master-name validation (no \
+         --win-http node is configured at all). stdout={stdout} stderr={stderr}"
+    );
 }
