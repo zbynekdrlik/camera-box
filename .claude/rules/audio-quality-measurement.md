@@ -65,3 +65,50 @@ as an order-of-magnitude range from an INTERLEAVED comparison (alternate configs
 few seconds, so both see the same momentary contention) rather than a single decimal-precise
 figure from two runs taken minutes apart under different load -- the interleaving cancels most of
 the noise even though the absolute numbers still vary.
+
+## `swr_set_compensation()` REVERTS to 1:1 if not reissued before its own window elapses -- proven with `--max-reissues` (#1016)
+
+Don't assume "ramps toward a target, then holds" means the achieved correction persists forever
+once the ramp completes. It does NOT: issuing `swr_set_compensation(ctx, 14, 48000)` (a 300ppm-
+derived delta over a nominal 1s window) exactly ONCE and then running the resampler for a FULL
+20s with no further reissue measures `achieved_ppm=14.5833` over the WHOLE 20s -- i.e. the total
+correction achieved is exactly the ONE ramp's own delta (14 samples) and NOTHING further accrues
+after the window closes. Reproduce with `asrc_ab_harness.c`'s `--max-reissues N` flag (caps the
+TOTAL reissue count, independent of `--reissue-every`'s per-block cadence):
+
+```bash
+./asrc_ab_harness --mode compensation --config default --ppm 300 --duration 20 --max-reissues 1
+# achieved_ppm=14.5833, NOT ~292 -- proves the compensation reverts, doesn't hold
+```
+
+This rules out "only reissue when the target value changes" as a safe fix for the re-trigger-
+cadence THD+N problem (issue 929/#1019): continuous compensation genuinely REQUIRES reissuing
+before `distance_ms` elapses, so skipping a reissue because the value is unchanged would silently
+stop correcting a sustained drift. It is ALSO not sufficient by itself even ignoring safety:
+reissuing the exact SAME unchanged value every callback (a constant-ppm test, `sample_delta`
+identical call to call) still costs the full -18.19dB THD+N issue 929 measured -- distortion is
+not about the value CHANGING, it's inherent to calling `swr_set_compensation()` at all,
+repeatedly. Before proposing any "smarter reissue schedule" fix for this class of problem, run
+BOTH experiments (a single reissue over a long window; repeated reissue of an unchanging value)
+through the harness first -- both are one-line invocations and either one alone can invalidate an
+otherwise-plausible design.
+
+## Widening `distance_ms` is a pure, stateless fix for integer-rounding quantization floors (#1016)
+
+`swr_set_compensation()`'s integer sample-delta rounding (`round(ppm/1e6 * distance_samples)`,
+`distance_samples = output_freq*distance_ms/1000`) floors any `|ppm|` under half a quantum
+(`1e6/distance_samples` ppm) to a complete no-op. The achieved rate for values ABOVE that floor
+is `round(ppm/1e6*distance_samples)/distance_samples*1e6` -- this depends ONLY on
+`distance_samples`, not on how often the (unchanged) call is reissued, as long as reissue still
+happens well inside the window. So widening `distance_ms` (finer quantum = lower floor) is a
+correct, STATELESS fix requiring no cross-call accumulator state -- verified empirically at
+several `distance_ms` values via `--distance-ms` (achieved_ppm matched the predicted formula
+exactly every time, including an EXACT match with zero rounding error when `distance_samples` is
+an integer multiple of `1e6/ppm`, e.g. 300ppm at `distance_ms=10000` -> `distance_samples=480000`
+-> `delta=144` -> `achieved=300.0000` exactly). A cross-call fractional/delta-sigma accumulator
+was considered and rejected as unnecessary for exactly this reason -- see issue 1016's design
+comment for the full reasoning. **Gotcha it's easy to trip while writing this up:** don't
+copy-paste an achieved-ppm value from one `distance_ms` column into another in a results table --
+a review caught exactly this (the pre-fix 291.6667 value pasted into the post-fix column instead
+of the correctly-recomputed 300.0000); always regenerate EACH cell from the harness, never assume
+two columns share a value just because they're both "above the old floor".
