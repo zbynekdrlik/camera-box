@@ -6,8 +6,11 @@ directory. Reproduce with `./run_ab.sh`.
 
 ## 1. What the library actually defaults to (not what the issue assumed)
 
-`audio_resampler_create()` calls `swr_alloc_set_opts2(..., 0, NULL)` -- no extra options. Reading
-the resulting `SwrContext`'s AVOption values back (before AND after `swr_init()`):
+`audio_resampler_create()` calls `swr_alloc_set_opts2(..., 0, NULL)` -- no extra options, mono,
+`AV_SAMPLE_FMT_FLTP` (OBS's internal mix format is always `AUDIO_FORMAT_FLOAT_PLANAR`). Reading
+the resulting `SwrContext`'s AVOption values back (before AND after `swr_init()`) -- reproducible
+directly from the committed harness via `./asrc_ab_harness --mode dumpopts --config default`, not
+just an out-of-band probe:
 
 ```
 filter_size=32  phase_shift=10 (1024 phases)  linear_interp=1  exact_rational=1  cutoff=0(auto)  filter_type=2(kaiser)
@@ -58,19 +61,31 @@ rounding problem, filed separately as **#1016** (out of scope for issue 929's ow
 
 ## 4. CPU cost (ns per 1024-frame block; a block's own real-time budget is ~21,333,333 ns)
 
-| config | @ 0 ppm | @ 300 ppm |
-|---|---|---|
-| default | 760 ns (0.0036%) | 15,575 ns (0.073%) |
-| maxq_moderate | 725 ns (0.0034%) | 70,843 ns (0.33%), **4.6x default** |
-| maxq_extreme | 783 ns (0.0037%) | 7,974,658 ns (**37% of one block's real-time budget, per source**), **513x default** |
+`CLOCK_PROCESS_CPUTIME_ID` timing on a shared, loaded dev box is noisy run-to-run (this box was
+carrying multiple concurrent `cargo`/CI-style builds while measuring) -- absolute ns values below
+are ONE representative run; the table also gives a load-normalized multiplier from a SEPARATE
+interleaved measurement (default and maxq_extreme alternated within the same few seconds, so both
+see the same momentary system load, cancelling most of the noise):
+
+| config | @ 0 ppm | @ 300 ppm | interleaved multiplier vs default @ 300 ppm |
+|---|---|---|---|
+| default | 760 ns (0.0036%) | 15,575 ns (0.073%) | 1x (baseline) |
+| maxq_moderate | 725 ns (0.0034%) | 70,843 ns (0.33%) | ~4-5x |
+| maxq_extreme | 783 ns (0.0037%) | 7,974,658 ns (**~37% of one block's real-time budget, per source**) | **~500-900x** (3 interleaved pairs: 17.4-18.3 ms vs 18.6-21.5 us) |
+
+The exact multiplier moves with system load (interleaved runs under HIGHER contention measured
+CLOSER to 900x, not lower) -- the number to trust is the ORDER OF MAGNITUDE (hundreds to
+approaching a thousand times), not a single decimal-precise figure. That conclusion is robust
+regardless of load: `maxq_extreme` is never remotely close to free.
 
 ## 5. Decision
 
 **No change to `audio_resampler_create()`'s engine settings.** At rest, current defaults are
 already measurement-floor-transparent. While compensating, `maxq_moderate`/`maxq_extreme` buy
-ZERO measured THD+N improvement over `default` while costing 4.6x-513x more CPU per source. The
-real audible cost during compensation is the re-trigger cadence in
-`audio_resampler_set_compensation_ppm()`'s caller, a different function/subsystem -- see #1016.
+ZERO measured THD+N improvement over `default` while costing multiple-times to several-hundred-times
+more CPU per source (see caveat above). The real audible cost during compensation is the
+re-trigger cadence in `audio_resampler_set_compensation_ppm()`'s caller, a different
+function/subsystem -- see #1016.
 
 This satisfies issue 929's own acceptance criterion (3): "if NOT warranted: the measurement
 proving current settings are already transparent is the deliverable."

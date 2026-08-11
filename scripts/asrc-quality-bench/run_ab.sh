@@ -10,16 +10,21 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$HERE"
 
-echo "[1/4] building asrc_ab_harness..."
+echo "[1/5] building asrc_ab_harness..."
 gcc -O2 -Wall -Wextra -o asrc_ab_harness asrc_ab_harness.c \
-    "$(pkg-config --cflags libswresample libavutil)" \
-    $(pkg-config --libs libswresample libavutil) -lm
+    $(pkg-config --cflags --libs libswresample libavutil) -lm
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
 echo
-echo "[2/4] THD+N + CPU matrix: config x {0, 300} ppm"
+echo "[2/5] library defaults actually in effect (RESULTS.md section 1)"
+for cfg in default maxq_moderate maxq_extreme; do
+    ./asrc_ab_harness --mode dumpopts --config "$cfg"
+done
+
+echo
+echo "[3/5] THD+N + CPU matrix: config x {0, 300} ppm"
 for cfg in bypass default maxq_moderate maxq_extreme; do
     for ppm in 0 300; do
         out="$WORK/${cfg}_ppm${ppm}.f32"
@@ -29,7 +34,7 @@ for cfg in bypass default maxq_moderate maxq_extreme; do
 done
 
 echo
-echo "[3/4] reissue-cadence isolation sweep (config=default, ppm=300)"
+echo "[4/5] reissue-cadence isolation sweep (config=default, ppm=300)"
 for n in 1 4 47 469; do
     out="$WORK/reissue_${n}.f32"
     ./asrc_ab_harness --mode quality --config default --ppm 300 --duration 10 \
@@ -38,7 +43,7 @@ for n in 1 4 47 469; do
 done
 
 echo
-echo "[4/4] compensation-effectiveness sweep (requested vs achieved ppm, config=default)"
+echo "[5/5] compensation-effectiveness sweep (requested vs achieved ppm, config=default)"
 for ppm in 0 1 2 5 8 10 10.4 10.5 11 15 20 50 100 300; do
     ./asrc_ab_harness --mode compensation --config default --ppm "$ppm" --duration 5
 done

@@ -1,9 +1,12 @@
 /* camera-box #929 -- ASRC resampling quality A/B measurement harness.
  *
  * Exercises the REAL libswresample engine (system libswresample-dev, the same library family
- * OBS's vendored audio-resampler-ffmpeg.c links) using the EXACT call shape
- * `audio_resampler_create()` uses (vendor/obs-studio/libobs/media-io/audio-resampler-ffmpeg.c
- * ~L124-131: `swr_alloc_set_opts2(..., 0, NULL)`, mono, 48kHz -> 48kHz) and the EXACT formula
+ * OBS's vendored audio-resampler-ffmpeg.c links), calling the SAME
+ * `swr_alloc_set_opts2(..., 0, NULL)` shape `audio_resampler_create()` uses
+ * (vendor/obs-studio/libobs/media-io/audio-resampler-ffmpeg.c ~L124-131, mono, 48kHz -> 48kHz,
+ * AV_SAMPLE_FMT_FLTP -- OBS always resolves to AUDIO_FORMAT_FLOAT_PLANAR, obs.c:1626 -> flowed
+ * through obs-source.c:4043 -- planar and interleaved are byte-identical for a single channel, so
+ * this is a real replication, not just "close enough") and the EXACT formula
  * `audio_resampler_set_compensation_ppm()` uses (~L221-237) to drive `swr_set_compensation()`.
  *
  * The vendored OBS tree (vendor/obs-studio/libobs) has no local compile path on this box
@@ -14,13 +17,17 @@
  * no new runtime dep on the shipped binary) -- purely an offline measurement tool, run manually
  * or via run_ab.sh, with its numbers copied into the issue-929 review comment.
  *
- * Two modes:
+ * Three modes:
  *   --mode quality       measure resampled-signal fidelity (THD+N via analyze_thdn.py) + CPU
  *                         cost, for a given engine-options config, at a given compensation ppm.
  *   --mode compensation  measure the ACTUAL achieved ppm (from real input/output sample counts)
  *                         vs the REQUESTED ppm, replicating obs-source.c's per-callback re-issue
  *                         cadence -- proves/disproves whether small requested ppm values actually
  *                         reach the resampler once integer sample-delta rounding is applied.
+ *   --mode dumpopts       print the ACTUAL AVOption values a freshly-built context holds (before
+ *                         and after swr_init) for a given --config -- makes RESULTS.md's "what
+ *                         the library actually defaults to" claim independently reproducible
+ *                         from the committed harness, not just an out-of-band probe.
  *
  * Build: gcc -O2 -o asrc_ab_harness asrc_ab_harness.c $(pkg-config --cflags --libs libswresample libavutil) -lm
  */
@@ -36,10 +43,6 @@
 #define SAMPLE_RATE 48000
 #define BLOCK_FRAMES 1024 /* AUDIO_OUTPUT_FRAMES, vendor/obs-studio/libobs/media-io/audio-io.h */
 #define COMPENSATION_DISTANCE_MS 1000 /* the ONE caller's hardcoded distance_ms, obs-source.c L4194 */
-
-typedef struct {
-    double t_ns;
-} timer_t_ns;
 
 static double now_ns(void)
 {
@@ -65,10 +68,12 @@ static struct SwrContext *make_resampler(const char *config)
     av_channel_layout_default(&in_ch, 1);
     av_channel_layout_default(&out_ch, 1);
 
-    /* Exactly matches audio_resampler_create()'s swr_alloc_set_opts2 call: 0 extra opts. Any
-     * "maxq" tuning is then layered on via av_opt_set BEFORE swr_init, which is exactly what a
-     * vendor-code change to audio_resampler_create() would do if this measurement warrants it. */
-    int rc = swr_alloc_set_opts2(&ctx, &out_ch, AV_SAMPLE_FMT_FLT, SAMPLE_RATE, &in_ch, AV_SAMPLE_FMT_FLT,
+    /* Exactly matches audio_resampler_create()'s swr_alloc_set_opts2 call: 0 extra opts, and
+     * AV_SAMPLE_FMT_FLTP -- OBS's internal mix format is always AUDIO_FORMAT_FLOAT_PLANAR (see
+     * this file's header comment), not interleaved. Any "maxq" tuning is then layered on via
+     * av_opt_set BEFORE swr_init, which is exactly what a vendor-code change to
+     * audio_resampler_create() would do if this measurement warrants it. */
+    int rc = swr_alloc_set_opts2(&ctx, &out_ch, AV_SAMPLE_FMT_FLTP, SAMPLE_RATE, &in_ch, AV_SAMPLE_FMT_FLTP,
                                   SAMPLE_RATE, 0, NULL);
     if (rc < 0 || !ctx) {
         fprintf(stderr, "swr_alloc_set_opts2 failed rc=%d\n", rc);
@@ -159,7 +164,11 @@ static int mode_quality(int argc, char **argv)
     long fed = 0;
     double phase = 0.0;
     float inbuf[BLOCK_FRAMES];
-    float outbuf[BLOCK_FRAMES * 4]; /* headroom: compensation can grow a block slightly */
+    /* swr_convert()'s out_count is a hard cap the API itself enforces -- excess output is
+     * buffered internally by libswresample and drained on a later call/flush, so this size is
+     * generous for readability, not a required safety margin (even BLOCK_FRAMES*1 would be
+     * memory-safe, just lower throughput per call). */
+    float outbuf[BLOCK_FRAMES * 4];
     double cpu_ns_total = 0.0;
     long blocks = 0;
     double since_last_comp_ms = 0.0;
@@ -269,10 +278,75 @@ static int mode_compensation(int argc, char **argv)
     return 0;
 }
 
+/* Deliberately does NOT call make_resampler() -- it needs to read AVOption values BEFORE
+ * swr_init() runs too, and make_resampler() folds alloc+config+init into one call. Small,
+ * intentional duplication of make_resampler()'s alloc+config-selection logic (config validation
+ * itself is skipped here; an unknown --config still allocates the plain default context, since
+ * this mode's only job is reading back whatever options ARE set). */
+static void print_opts(const char *label, struct SwrContext *ctx)
+{
+    int64_t filter_size = -1, phase_shift = -1, linear_interp = -1, exact_rational = -1, filter_type = -1;
+    double cutoff = -1;
+    av_opt_get_int(ctx, "filter_size", 0, &filter_size);
+    av_opt_get_int(ctx, "phase_shift", 0, &phase_shift);
+    av_opt_get_int(ctx, "linear_interp", 0, &linear_interp);
+    av_opt_get_int(ctx, "exact_rational", 0, &exact_rational);
+    av_opt_get_int(ctx, "filter_type", 0, &filter_type);
+    av_opt_get_double(ctx, "cutoff", 0, &cutoff);
+    fprintf(stdout,
+            "%s: filter_size=%lld phase_shift=%lld (phases=%lld) linear_interp=%lld exact_rational=%lld "
+            "cutoff=%g filter_type=%lld\n",
+            label, (long long)filter_size, (long long)phase_shift, (long long)1LL << phase_shift,
+            (long long)linear_interp, (long long)exact_rational, cutoff, (long long)filter_type);
+}
+
+static int mode_dumpopts(int argc, char **argv)
+{
+    const char *config = "default";
+    for (int i = 2; i < argc; i++) {
+        if (!strcmp(argv[i], "--config") && i + 1 < argc)
+            config = argv[++i];
+    }
+
+    struct SwrContext *ctx = NULL;
+    AVChannelLayout in_ch, out_ch;
+    av_channel_layout_default(&in_ch, 1);
+    av_channel_layout_default(&out_ch, 1);
+    int rc = swr_alloc_set_opts2(&ctx, &out_ch, AV_SAMPLE_FMT_FLTP, SAMPLE_RATE, &in_ch, AV_SAMPLE_FMT_FLTP,
+                                  SAMPLE_RATE, 0, NULL);
+    if (rc < 0 || !ctx) {
+        fprintf(stderr, "swr_alloc_set_opts2 failed rc=%d\n", rc);
+        return 1;
+    }
+
+    if (!strcmp(config, "maxq_moderate")) {
+        av_opt_set_int(ctx, "linear_interp", 1, 0);
+        av_opt_set_int(ctx, "exact_rational", 1, 0);
+        av_opt_set_int(ctx, "filter_size", 128, 0);
+        av_opt_set_int(ctx, "phase_shift", 12, 0);
+        av_opt_set_double(ctx, "cutoff", 0.95, 0);
+    } else if (!strcmp(config, "maxq_extreme")) {
+        av_opt_set_int(ctx, "linear_interp", 1, 0);
+        av_opt_set_int(ctx, "exact_rational", 1, 0);
+        av_opt_set_int(ctx, "filter_size", 512, 0);
+        av_opt_set_int(ctx, "phase_shift", 18, 0);
+        av_opt_set_double(ctx, "cutoff", 0.99, 0);
+    }
+    /* "default" (or anything else): no overrides -- exactly audio_resampler_create()'s own call. */
+
+    print_opts("BEFORE swr_init", ctx);
+    int errcode = swr_init(ctx);
+    fprintf(stdout, "swr_init rc=%d (0=ok)\n", errcode);
+    print_opts("AFTER swr_init ", ctx);
+
+    swr_free(&ctx);
+    return errcode == 0 ? 0 : 1;
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2) {
-        fprintf(stderr, "usage: %s --mode quality|compensation [options]\n", argv[0]);
+        fprintf(stderr, "usage: %s --mode quality|compensation|dumpopts [options]\n", argv[0]);
         return 1;
     }
     if (!strcmp(argv[1], "--mode") && argc >= 3) {
@@ -280,6 +354,8 @@ int main(int argc, char **argv)
             return mode_quality(argc, argv);
         if (!strcmp(argv[2], "compensation"))
             return mode_compensation(argc, argv);
+        if (!strcmp(argv[2], "dumpopts"))
+            return mode_dumpopts(argc, argv);
     }
     fprintf(stderr, "unknown mode\n");
     return 1;

@@ -34,6 +34,11 @@
 /// given the fixed `distance_ms=1000` cadence the real caller always uses.
 ///
 /// Returns `0` whenever `distance_samples <= 0` (mirrors the vendor function's own early return).
+///
+/// Returns `i64` where the vendor C casts to a 32-bit `int` -- immaterial at the servo's real
+/// range (`ASRC_MAX_PPM=300`, `distance_samples` fixed at 48000, so `sample_delta` never exceeds
+/// the low tens; see `src/asrc_bench.rs`'s `RealtimeAsrcCompensator`), but this mirror is not
+/// bit-exact for a `ppm`/`distance_ms`/`output_freq` combination large enough to overflow `i32`.
 pub fn compensation_sample_delta(ppm: f64, distance_ms: u32, output_freq: u32) -> i64 {
     let distance_samples = (output_freq as i64 * distance_ms as i64) / 1000;
     if distance_samples <= 0 {

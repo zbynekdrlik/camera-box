@@ -21,7 +21,12 @@ def load_f32(path):
 
 
 def thdn(samples, sample_rate, test_freq, skip_s=1.0, analyze_s=4.0, guard_bins=3, window_name="rect"):
-    """Returns (thdn_db, thdn_pct, fundamental_dbfs, rms_full, freqs, power, fbin).
+    """Returns (thdn_db, thdn_pct, fundamental_rms_dbfs, rms_full, freqs, power, fbin).
+
+    fundamental_rms_dbfs is the RMS level of the fundamental bin (NOT peak dBFS -- for the
+    harness's -1 dBFS *peak* test tone this reads ~-4.0 dBFS, i.e. peak - 3.01 dB, the expected
+    RMS-of-a-sinusoid relationship). It is a diagnostic-only field, not used in any RESULTS.md
+    table.
 
     Uses COHERENT sampling: since test_freq=997 Hz is an exact integer and sample_rate=48000 Hz,
     any window length that is a WHOLE NUMBER OF SECONDS contains an exact integer number of tone
@@ -71,9 +76,9 @@ def thdn(samples, sample_rate, test_freq, skip_s=1.0, analyze_s=4.0, guard_bins=
     thdn_pct = thdn_ratio * 100.0
 
     rms_full = np.sqrt(np.mean(x.astype(np.float64) ** 2))
-    fundamental_dbfs = 20.0 * np.log10(np.sqrt(fundamental_power) / (n * cg) * np.sqrt(2)) if fundamental_power > 0 else float("-inf")
+    fundamental_rms_dbfs = 20.0 * np.log10(np.sqrt(fundamental_power) / (n * cg) * np.sqrt(2)) if fundamental_power > 0 else float("-inf")
 
-    return thdn_db, thdn_pct, fundamental_dbfs, rms_full, freqs, power, fbin
+    return thdn_db, thdn_pct, fundamental_rms_dbfs, rms_full, freqs, power, fbin
 
 
 def main():
@@ -88,10 +93,10 @@ def main():
     args = ap.parse_args()
 
     samples = load_f32(args.path)
-    thdn_db, thdn_pct, fund_dbfs, rms_full, freqs, power, fbin = thdn(
+    thdn_db, thdn_pct, fund_rms_dbfs, rms_full, freqs, power, fbin = thdn(
         samples, args.rate, args.freq, skip_s=args.skip_s, analyze_s=args.analyze_s, window_name=args.window)
 
-    print(f"{args.label:40s} THD+N={thdn_db:7.2f} dB ({thdn_pct:10.6f} %)  fundamental~{fund_dbfs:6.1f} dBFS  "
+    print(f"{args.label:40s} THD+N={thdn_db:7.2f} dB ({thdn_pct:10.6f} %)  fundamental_rms~{fund_rms_dbfs:6.1f} dBFS  "
           f"n_samples={len(samples)}")
 
 
