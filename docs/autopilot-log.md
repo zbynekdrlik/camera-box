@@ -7368,3 +7368,45 @@ does the live rig verification of the new whole-chain checks and closes it.
   the GENERIC full-grading stability check, not master-specific behavior).
 - Full local suite green (198/198 binaries) after the review follow-up; fmt/clippy clean;
   deep-review dispatch verdict 0 red 0 yellow 3 blue (1 must-fix landed, 2 accepted as-is).
+
+## 2026-08-11 — #1016 ASRC compensation quantization no-op (split cadence half into #1019)
+- Issue 1016 (ASRC servo's `swr_set_compensation()` wrapper rounds any |ppm|<~10.42 to a
+  zero-effect no-op at the caller's original distance_ms=1000, squarely inside "typical
+  single-digit ppm" real drift; a SEPARATE re-trigger-cadence THD+N problem was also in the
+  ticket). Worktree branch worktree-agent-ad32605ec3b7d0e03 (isolation dispatch, no PR yet --
+  supervisor integrates).
+- Commits: 8b238dc98 RED (2 new failing tests pinning the fixed expectation) -> f36cb5516 GREEN
+  (widened obs-source.c's ONE call site from distance_ms=1000 to a new named
+  ASRC_COMPENSATION_DISTANCE_MS=10000; stateless, no new struct fields; updated the pure-Rust
+  mirror src/asrc_compensation_quantization.rs, added --distance-ms/--max-reissues flags to
+  scripts/asrc-quality-bench/asrc_ab_harness.c, new scripts/asrc-quality-bench/RESULTS-1016.md)
+  -> a5f7d98b3 (review follow-up: fixed a copy-paste error in RESULTS-1016.md's 300ppm table
+  cell -- achieved_ppm is 300.0000 exact at the wider window, not the old 291.6667; also
+  committed a small pending RESULTS.md cross-link).
+- Root cause: the formula was always correct; the bug was the caller's choice of distance_ms
+  (fixes the achievable quantum, 1e6/distance_samples ppm). Widening to 10000ms lowers the floor
+  from ~10.42ppm to ~1.04ppm -- verified via the extended harness against real libswresample
+  (achieved_ppm matches the predicted formula exactly at 2/5/8/50/300ppm).
+- Rejected alternatives (both empirically disproven, not assumed): (1) a cross-call fractional/
+  delta-sigma accumulator -- mathematically redundant given the constant-widening approach
+  already reaches the same asymptotic accuracy with zero new state/risk; (2) "only reissue
+  swr_set_compensation when the target changes" as a way to ALSO fix the cadence half in this
+  same PR -- proven UNSAFE: a single reissue's effect REVERTS to 1:1 once its own distance_ms
+  window elapses with no further call (measured: achieved_ppm=14.5833 over 20s from ONE reissue
+  of a 300ppm-derived delta, not a sustained ~292ppm rate), and reissuing the SAME unchanged
+  value every callback still costs the full -18.19dB THD+N issue 929 originally measured -- so
+  neither "skip" nor "the value never changes anyway" helps. Split into issue **1019** with this
+  evidence (Scope-gate: cross-cutting, same architectural boundary the original ticket named).
+- Trade-off disclosed on the ticket: this fix makes small-ppm compensation newly AUDIBLE
+  (previously silent because it never engaged) at ~-38.8dB THD+N -- milder than the pre-existing
+  high-ppm case (~-18.2dB, unchanged either way) but a real, measured cost, accepted so the
+  servo's stated purpose (always-on, correcting exactly this drift range) isn't silently
+  defeated by an integer-rounding accident.
+- Review (fresh-context general-purpose subagent, verdict 1 yellow / 1 blue / 0 red): caught a
+  copy-paste error in the new RESULTS-1016.md table (300ppm achieved value at the new window was
+  wrongly listed as the OLD value) -- fixed in a5f7d98b3. Formula/C correctness, Rust/C mirror
+  consistency, test quality, and scope discipline (zero diff in audio-resampler-ffmpeg.c/.h,
+  obs-internal.h, obs.h -- confirmed no cross-call state) all verified clean.
+- Local suite: targeted `cargo test --lib asrc_compensation_quantization` 10/10 green throughout;
+  fmt/check/clippy clean. No PR yet -- this worktree's local-only authority; supervisor
+  integrates + drives the CI/mergeable/deploy cycle.
