@@ -67,7 +67,10 @@ DEFAULT_FLEET_FILE="$HERE/../rig-fleet.txt"
 # alongside the deploy, so the gate never silently drifts to "whatever happens to be out".
 # Bumped 2026-08-11: fleet rolled to v1.8.30 (dantesync NTP server-mode self-discipline fix —
 # the master no longer free-runs at oscillator error; verified 8/8 boxes on the rollout day).
-DANTESYNC_VERSION_PIN="${DANTESYNC_VERSION_PIN:-1.8.30}"
+# Bumped 2026-08-11 (same day, evening): fleet rolled to v1.8.32 (master sawtooth collapse,
+# dantesync issue 71 — ramp-aware agreement + 10s cadence + small-offset fast lane; strih canary
+# read residual 0us on 13/13 consecutive samples, PTP LOCK held; verified 8/8 boxes).
+DANTESYNC_VERSION_PIN="${DANTESYNC_VERSION_PIN:-1.8.32}"
 
 # --- PURE functions (no network, no SSH — unit-tested by sourcing this file) ------------------
 
