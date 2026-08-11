@@ -4160,6 +4160,29 @@ static void process_audio_balancing(struct obs_source *source, uint32_t frames, 
  * extern, C4013 -> C2220 as an error). */
 static inline uint64_t genlock_wall_now_ns(void);
 
+/* camera-box #1016: the ASRC servo's compensation-application window, in OUTPUT milliseconds --
+ * passed to audio_resampler_set_compensation_ppm() below as its distance_ms argument. This sets
+ * the achievable resolution ("quantum") of the whole mechanism: swr_set_compensation() only takes
+ * an INTEGER sample count, so distance_samples = output_freq*distance_ms/1000, and any |ppm|
+ * under HALF a quantum (1e6/distance_samples) rounds to a complete no-op. At the ORIGINAL 1000ms
+ * (1s) window and the fleet's 48kHz mix rate, that floor was ~10.42ppm -- squarely inside issue
+ * 929's own characterization of real observed drift as "typically single-digit ppm" (measured
+ * live: requested 5ppm -> achieved 0.0000ppm, i.e. the servo was doing nothing for the common
+ * case). Widening to 10000ms (10s) lowers the floor to ~1.04ppm, covering essentially all of that
+ * range -- a purely stateless change (no new per-resampler state; the achieved rate depends only
+ * on distance_samples, verified empirically at several distance_ms values against real
+ * libswresample, see scripts/asrc-quality-bench/RESULTS-1016.md). Does NOT touch the re-issue
+ * cadence below (still every audio callback, unchanged) -- the re-trigger-cadence THD+N cost
+ * (reissuing swr_set_compensation on ANY cadence measurably distorts the resampled audio, even
+ * when the value never changes call to call) is a SEPARATE, harder problem, tracked as issue
+ * 1019 (split from issue 1016's own "Scope-gate: cross-cutting" framing). See issue 1016's design
+ * comment for the rejected alternatives and the disclosed trade-off: this fix makes small-ppm
+ * compensation newly audible (previously silent because it was simply never engaging) at a
+ * milder distortion level (~-38dB) than the pre-existing high-ppm case (~-18dB, unchanged either
+ * way) -- accepted so the servo's stated purpose (#803/#912: always-on, correcting exactly this
+ * drift range) is not silently defeated by an integer-rounding accident. */
+#define ASRC_COMPENSATION_DISTANCE_MS 10000
+
 /* camera-box #803: run this source's ASRC servo for one audio callback (only when
  * obs_source_set_asrc_enabled() has turned it on for this source) and push the resulting ppm
  * into the swresample context via the soft compensation wrapper. `frames`/`samples_per_sec` are
@@ -4187,11 +4210,13 @@ static inline void asrc_process_audio(obs_source_t *source, uint32_t frames, uin
 	double applied_ppm = 0.0;
 	asrc_compensator_compensate(&source->asrc, raw_advance_s, master_block_s, &applied_ppm);
 
-	/* Refresh the compensation over a 1s window every callback -- swr_set_compensation()
-	 * replaces any still-pending ramp, so re-issuing it each callback keeps the correction
-	 * continuously tracking the servo's current estimate (audio-resampler-ffmpeg.c's own doc
-	 * comment on this wrapper). */
-	audio_resampler_set_compensation_ppm(source->resampler, applied_ppm, 1000);
+	/* Refresh the compensation over an ASRC_COMPENSATION_DISTANCE_MS window every callback --
+	 * swr_set_compensation() replaces any still-pending ramp, so re-issuing it each callback
+	 * keeps the correction continuously tracking the servo's current estimate
+	 * (audio-resampler-ffmpeg.c's own doc comment on this wrapper). camera-box #1016: widened
+	 * from the original 1000ms to lower the integer-rounding no-op floor for typical
+	 * single-digit-ppm drift -- see ASRC_COMPENSATION_DISTANCE_MS's own doc comment above. */
+	audio_resampler_set_compensation_ppm(source->resampler, applied_ppm, ASRC_COMPENSATION_DISTANCE_MS);
 
 	double cumulative_correction_ms = 0.0;
 	uint32_t starved_block_count = 0;
