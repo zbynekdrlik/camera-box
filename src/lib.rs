@@ -381,6 +381,12 @@ pub mod asrc_bench;
 // the asrc_bench.rs pattern; see the module's own doc comment for the root cause + design.
 pub mod asrc_outer_loop;
 
+// #929 — pure-Rust mirror of audio_resampler_set_compensation_ppm()'s ppm->sample_delta integer
+// rounding, pinning the compensation-quantization threshold discovered while measuring #929's
+// ASRC resampling-quality A/B (scripts/asrc-quality-bench/). Pure/Tier-0, no probe deps; see the
+// module's own doc comment for what it documents and why (also feeds the #1016 follow-up).
+pub mod asrc_compensation_quantization;
+
 // #945 — capture/emit-thread WEDGE self-watchdog: the pure decision for whether the capture
 // loop's blocking V4L2 dequeue has gone stale long enough to treat the loop as provably dead.
 // No probe deps, so it unit-tests Tier-0; `src/main.rs`'s capture loop + a dedicated watchdog
