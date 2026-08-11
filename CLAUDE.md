@@ -221,6 +221,18 @@ wrong PR with no review of it.
   auto-closed an issue that wasn't yours, explain it via `gh issue comment <N>` for traceability.
   The supervisor should prefer serial dispatch or per-worker `git worktree` isolation for this
   repo going forward.
+- **Worktree FLEET rounds (the #317 default) — proven 2026-08-11, with two hard constraints.**
+  The `EnterWorktree` TOOL refuses inside a worker here (`worktree.bgIsolation: "none"`), but
+  plain git CLI worktrees work: `git -C <repo> worktree add <repo>/.claude/worktrees/<name> -b
+  <branch> dev`, then the worker does ALL file edits by ABSOLUTE path under the worktree and all
+  git via `git -C <worktree>` — its process cwd never changes, and it must NEVER `git checkout`/
+  `switch` in the shared root. Constraints learned the hard way: (1) **workers run TARGETED tests
+  only; the supervisor runs the ONE full `cargo test` suite on merged dev at integration** — three
+  workers each running the full 200-binary suite concurrently built 3× ~4.5 GB worktree `target/`
+  dirs, filled the disk to 100% and oversubscribed the 4-core box; (2) at integration, DELETE each
+  worktree's `target/` immediately and `git worktree remove` + branch-delete once the round PR
+  merges. Expect trivially-resolvable append-append conflicts in `docs/autopilot-log.md` (keep
+  both entries) and identical version-bump commits across workers (merge clean).
 - **A red "CI" run on the OTHER worker's push can be YOUR OWN not-yet-fixed RED commit riding
   along, not a real regression in their code.** Confirmed live (2026-07-30, #854/#881 vs #878):
   worker A committed a TDD RED commit (failing-on-purpose, per `regression-test-first.md`) while

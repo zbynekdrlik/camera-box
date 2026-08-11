@@ -50,7 +50,7 @@ All nodes sync to strih: stream, cam2 (`--ntp-server strih.lan`), dev1.
 **PTP (primary):** grandmaster 10.77.9.184 — all nodes LOCK to µs-grade parity.
 **NTP fallback** (when GM absent): ±0.3-1 ms stepping sawtooth — genlock must degrade gracefully.
 
-**Verified node status (2026-06-15 — do NOT re-doubt):**
+**Verified node status (2026-06-15 — do NOT re-doubt; VERSIONS in this table are historical):**
 
 | Node | IP | Version | Mode | Measured offset to strih |
 |---|---|---|---|---|
@@ -61,6 +61,14 @@ All nodes sync to strih: stream, cam2 (`--ntp-server strih.lan`), dev1.
 | dev1 | — | v1.8.16 | LOCK | 0.16 ms |
 
 `systemctl is-active dantesync` = active+enabled on all.
+
+**Fleet version = whatever `scripts/dantesync-version-gate.sh`'s `DANTESYNC_VERSION_PIN` says
+(1.8.30 since 2026-08-11 — NTP server-mode self-discipline fix), and a fleet ROLLOUT MUST bump
+that pin in the SAME cycle.** The pin's own comment mandates it, but the rollout happens in the
+dantesync repo / on the boxes where nothing re-reads that comment — 2026-08-11 the 1.8.30 rollout
+skipped the bump and EVERY E2E run refused with all 6 nodes "DRIFT" against the stale 1.8.25 pin
+until it was bumped. Rollout checklist: canary → fleet → verify 8/8 → bump `DANTESYNC_VERSION_PIN`
+→ push.
 
 **HARD RULE:** DanteSync OWNS the clock on cam boxes AND dev1. NEVER install/enable
 chrony / ptp4l / systemd-timesyncd / any other NTP/PTP tool, and NEVER run
