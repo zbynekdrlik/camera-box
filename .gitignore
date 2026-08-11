@@ -90,3 +90,7 @@ assets/lipsync/*.ogv
 assets/lipsync/*.mp4
 assets/lipsync/*.jsonl
 assets/lipsync/*.jpg
+
+# issue 929 -- ASRC quality A/B bench compiled binary (built fresh by run_ab.sh, never committed;
+# the .c source + RESULTS.md are the committed artifacts)
+/scripts/asrc-quality-bench/asrc_ab_harness

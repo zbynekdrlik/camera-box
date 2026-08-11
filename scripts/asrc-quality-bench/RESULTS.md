@@ -1,0 +1,85 @@
+# ASRC resampling quality -- measured A/B results (issue 929)
+
+Measured 2026-08-11 on dev1 (Ubuntu, system `libswresample4`/`libavutil58` 7:6.1.1-3ubuntu5,
+`libswresample` API 4.12.100). Harness + analyzer: `asrc_ab_harness.c` / `analyze_thdn.py` in this
+directory. Reproduce with `./run_ab.sh`.
+
+## 1. What the library actually defaults to (not what the issue assumed)
+
+`audio_resampler_create()` calls `swr_alloc_set_opts2(..., 0, NULL)` -- no extra options. Reading
+the resulting `SwrContext`'s AVOption values back (before AND after `swr_init()`):
+
+```
+filter_size=32  phase_shift=10 (1024 phases)  linear_interp=1  exact_rational=1  cutoff=0(auto)  filter_type=2(kaiser)
+```
+
+**`linear_interp` and `exact_rational` are ALREADY ON.** The issue's Context section claimed
+`linear_interp=0`; that is incorrect for the FFmpeg/libswresample version family this vendored OBS
+build links against (verified directly against the AVOption table, not assumed from memory).
+
+`swr_set_compensation()` on a `resampler=soxr` context returns `-22` (rejected) -- confirmed
+directly: soxr genuinely cannot back this servo's dynamic-compensation use case, exactly as the
+issue said.
+
+## 2. THD+N matrix (AES17-style 997 Hz tone, -1 dBFS, coherent whole-second FFT windows)
+
+| config | filter_size | phase_shift | cutoff | THD+N @ 0 ppm (at rest) | THD+N @ 300 ppm (actively compensating, real reissue cadence) |
+|---|---|---|---|---|---|
+| bypass (no resampler at all) | -- | -- | -- | -154.08 dB | -154.08 dB |
+| default (current vendor code) | 32 | 10 (1024 phases) | auto | -154.08 dB | -18.19 dB |
+| maxq_moderate | 128 | 12 (4096 phases) | 0.95 | -154.08 dB | -18.19 dB |
+| maxq_extreme | 512 | 18 (262144 phases) | 0.99 | -154.08 dB | -18.19 dB |
+
+`-154 dB` is the harness's own measurement floor (double-precision FFT power sum on a coherently
+windowed, whole-cycle-count segment) -- i.e. **the resampler is indistinguishable from a bit-exact
+bypass at rest**, regardless of engine config. This is dramatically better than the issue's own
+speculative "-85...-95 dB" estimate.
+
+**All three engine configs measure IDENTICAL THD+N while compensating** (to 2 decimal places),
+despite `maxq_extreme` having 16x the filter taps and 256x the polyphase resolution of `default`.
+Engine quality is not the bottleneck once compensation is active.
+
+## 3. Isolating the real cause of the -18 dB figure: reissue cadence, not engine quality
+
+`config=default`, `ppm=300`, sweeping how often `swr_set_compensation()` is re-issued
+(`--reissue-every N` blocks, 1 block = 1024 frames = ~21.3 ms):
+
+| reissue every | THD+N |
+|---|---|
+| 1 block (real `obs-source.c` cadence -- every audio callback) | -18.19 dB |
+| 4 blocks (~85 ms) | -18.19 dB |
+| 47 blocks (~1 s, matches the `distance_ms=1000` window itself) | -18.32 dB |
+| 469 blocks (once for the whole 10 s run -- a single clean ramp) | **-144.54 dB** (transparent) |
+
+Re-issuing before an in-flight ramp completes (`swr_set_compensation` "replaces any still-pending
+compensation on each call", per the OBS wrapper's own doc comment) is what produces the audible
+distortion -- not the resampler's static filter quality. This is a servo re-trigger-cadence /
+rounding problem, filed separately as **#1016** (out of scope for issue 929's own ask).
+
+## 4. CPU cost (ns per 1024-frame block; a block's own real-time budget is ~21,333,333 ns)
+
+| config | @ 0 ppm | @ 300 ppm |
+|---|---|---|
+| default | 760 ns (0.0036%) | 15,575 ns (0.073%) |
+| maxq_moderate | 725 ns (0.0034%) | 70,843 ns (0.33%), **4.6x default** |
+| maxq_extreme | 783 ns (0.0037%) | 7,974,658 ns (**37% of one block's real-time budget, per source**), **513x default** |
+
+## 5. Decision
+
+**No change to `audio_resampler_create()`'s engine settings.** At rest, current defaults are
+already measurement-floor-transparent. While compensating, `maxq_moderate`/`maxq_extreme` buy
+ZERO measured THD+N improvement over `default` while costing 4.6x-513x more CPU per source. The
+real audible cost during compensation is the re-trigger cadence in
+`audio_resampler_set_compensation_ppm()`'s caller, a different function/subsystem -- see #1016.
+
+This satisfies issue 929's own acceptance criterion (3): "if NOT warranted: the measurement
+proving current settings are already transparent is the deliverable."
+
+## Reproduce
+
+```bash
+cd scripts/asrc-quality-bench
+gcc -O2 -Wall -Wextra -o asrc_ab_harness asrc_ab_harness.c \
+    $(pkg-config --cflags --libs libswresample libavutil) -lm
+./run_ab.sh
+```
