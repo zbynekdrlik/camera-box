@@ -90,6 +90,11 @@ GATE_STABILITY_US="${DANTESYNC_STABILITY_US:-2000}"
 # --win-http/--linux NAME= label), not path-based -- see the gate's own banner text below, which
 # used to hardcode "strih" as decoration only and is now the SAME value this config drives.
 GATE_NTP_MASTER_NAME="${DANTESYNC_NTP_MASTER_NAME:-strih}"
+# #1021 (dantesync PR #84/#86, closes dantesync issue 83): the NTP master's own median bound
+# widens to max(GATE_BOUND_US, ntp_deadband_us + this margin) when its /status reports a numeric
+# "ntp_deadband_us" -- see clock-offset-guard.sh's ntp_master_effective_bound_us for the full
+# derivation. Absent/null field (older dantesync, or any client node) -> unchanged fixed bound.
+GATE_DEADBAND_MARGIN_US="${DANTESYNC_DEADBAND_MARGIN_US:-1000}"
 
 # read_linux_node_journal NAME IP -> that Linux node's latest DanteSync journald lines over SSH,
 # or "" if unreachable. Overridable for tests/offline via DANTESYNC_GATE_LINUX_JOURNAL_<NAME>
@@ -224,7 +229,7 @@ gather_http_samples() {
 }
 
 # grade_http_node READ_FN NAME ARG KIND BOUND STABILITY MIN_DISTINCT SAMPLES WINDOW FRESHNESS_S
-#   VERDICTFILE
+#   VERDICTFILE [MODE] [DEADBAND_MARGIN_US]
 # -> samples + grades ONE node (the shared body for both the Linux-HTTP-first loop and the
 # Windows --win-http loop -- extracted so the two loops don't carry two independently-editable
 # copies of the same freshness -> sampled_offset_check -> ptp_check -> node_verdict sequence).
@@ -245,7 +250,8 @@ gather_http_samples() {
 grade_http_node() {
   local read_fn="$1" name="$2" arg="$3" kind="$4" bound="$5" stability="$6" min_distinct="$7"
   local samples="$8" window="$9" freshness="${10}" verdictfile="${11}" mode="${12:-full}"
-  local status samples_raw now rc_off rc_ptp ptp
+  local deadband_margin="${13:-0}"
+  local status samples_raw now rc_off rc_ptp ptp deadband_note=""
 
   samples_raw="$(gather_http_samples "$read_fn" "$name" "$arg" "$samples" "$window")"
   if [ -z "$samples_raw" ]; then
@@ -285,6 +291,18 @@ grade_http_node() {
   fi
 
   status="$(printf '%s\n' "$samples_raw" | tail -1)"   # most recent payload -> freshness/PTP
+  # #1021: ONLY the median-only (NTP master) node's own median bound ever widens, and only when
+  # its freshest payload carries a numeric ntp_deadband_us -- see clock-offset-guard.sh's
+  # ntp_master_effective_bound_us doc comment for the full derivation. Absent/null/non-numeric
+  # falls back to the unmodified $bound (exact pre-#1021 behavior); a client node (mode "full")
+  # never reaches this branch at all, so its own bound is untouched regardless of its payload.
+  if [ "$mode" = "median-only" ]; then
+    local orig_bound="$bound"
+    bound="$(ntp_master_effective_bound_us "$status" "$bound" "$deadband_margin")"
+    if [ "$bound" != "$orig_bound" ]; then
+      deadband_note=" -- NTP MASTER: bound widened to ${bound}us (dantesync ntp_deadband_us + ${deadband_margin}us margin, #1021; base bound ${orig_bound}us)"
+    fi
+  fi
   now="$(date +%s)"   # #836: recompute per node -- sampling itself takes real wall-clock time
   local issue_ref="648"
   if [ "$kind" = "linux" ]; then
@@ -309,7 +327,7 @@ grade_http_node() {
       case "$(ntp_freshness_verdict "$status" "$freshness")" in
         fresh)
           sampled_offset_check "$name" "$samples_raw" "$bound" "$stability" "$min_distinct" \
-            "$mode" || rc_off=$? ;;
+            "$mode" "$deadband_note" || rc_off=$? ;;
         stale)
           printf '  %-14s NTP STALE    (NTP measurement age exceeds %ss, or ntp_failed -- status incomplete, dantesync issue 68/71, #1014)\n' \
             "$name" "$freshness"
@@ -330,7 +348,7 @@ grade_http_node() {
               rc_off=3 ;;
             *)
               sampled_offset_check "$name" "$samples_raw" "$bound" "$stability" "$min_distinct" \
-                "$mode" " -- pre-1.8.30 payload, no ntp_age_s field, graded via legacy sampled-offset check (#1014)" \
+                "$mode" "${deadband_note} -- pre-1.8.30 payload, no ntp_age_s field, graded via legacy sampled-offset check (#1014)" \
                 || rc_off=$? ;;
           esac
           ;;
@@ -397,6 +415,17 @@ Options:
                        stability bar, reintroducing #1014's false-DRIFT through a misspelling.
                        Pass --ntp-master "" to explicitly opt out (no NTP master among this
                        invocation's nodes at all).
+  --deadband-margin-us N  #1021 (dantesync PR #84/#86, closes dantesync issue 83): when the NTP
+                       master's own /status reports a numeric "ntp_deadband_us" (its currently
+                       active PTP-locked step-deferral threshold), the master's median bound
+                       widens to max(--bound-us, ntp_deadband_us + N) instead of the bare fixed
+                       --bound-us -- a genuinely PTP-locked master deliberately ramps its own
+                       ntp_offset_us up toward roughly the deadband between corrections, and the
+                       fixed bound alone would false-DRIFT on that by-design behavior. Default
+                       ${GATE_DEADBAND_MARGIN_US} (covers the live-observed step overshoot past
+                       the deadband before the next correction lands). Absent/null
+                       ntp_deadband_us (older dantesync, or any client node) -> unmodified
+                       --bound-us, exactly as before #1021.
 
 A node's NTP MEASUREMENT itself must also be FRESH, independently of the payload's general
 "updated_ts" (#1014, dantesync v1.8.30 / dantesync issue 68): "ntp_age_s" must be a plain integer
@@ -436,7 +465,7 @@ main() {
   local bound="$GATE_BOUND_US" linux="$GATE_LINUX" win_http_port="$GATE_WIN_HTTP_PORT"
   local samples="$GATE_SAMPLE_COUNT" window="$GATE_SAMPLE_WINDOW_S"
   local min_distinct="$GATE_SAMPLE_MIN_DISTINCT" stability="$GATE_STABILITY_US"
-  local ntp_master="$GATE_NTP_MASTER_NAME"
+  local ntp_master="$GATE_NTP_MASTER_NAME" deadband_margin="$GATE_DEADBAND_MARGIN_US"
   local -a win_http=()
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -449,6 +478,7 @@ main() {
       --min-distinct)  shift; min_distinct="${1:-}" ;;
       --stability-us)  shift; stability="${1:-}" ;;
       --ntp-master)    shift; ntp_master="${1:-}" ;;
+      --deadband-margin-us) shift; deadband_margin="${1:-}" ;;
       -h|--help)       usage; exit 0 ;;
       --*)             echo "unknown option: $1" >&2; usage >&2; exit 1 ;;
       *)               echo "unexpected argument: $1" >&2; usage >&2; exit 1 ;;
@@ -480,6 +510,10 @@ main() {
   fi
   if ! printf '%s' "$stability" | grep -qE '^[0-9]+$'; then
     echo "ERROR: --stability-us must be a non-negative integer (got '${stability}')." >&2
+    exit 1
+  fi
+  if ! printf '%s' "$deadband_margin" | grep -qE '^[0-9]+$'; then
+    echo "ERROR: --deadband-margin-us must be a non-negative integer (got '${deadband_margin}')." >&2
     exit 1
   fi
   if [ "$min_distinct" -gt "$samples" ]; then
@@ -568,7 +602,7 @@ main() {
     [ "$name" = "$GATE_NTP_MASTER_NAME" ] && node_mode="median-only"
     grade_http_node read_linux_node_http_status "$name" "$ip" linux \
       "$bound" "$stability" "$min_distinct" "$samples" "$window" "$GATE_OFFSET_FRESHNESS_S" \
-      "$vfile" "$node_mode" > "$outfile" &
+      "$vfile" "$node_mode" "$deadband_margin" > "$outfile" &
     job_outfiles+=("$outfile"); job_verdictfiles+=("$vfile")
     idx=$((idx + 1))
   done
@@ -585,7 +619,7 @@ main() {
     [ "$name" = "$GATE_NTP_MASTER_NAME" ] && node_mode="median-only"
     grade_http_node read_win_http_status "$name" "$ip" win \
       "$bound" "$stability" "$min_distinct" "$samples" "$window" "$GATE_OFFSET_FRESHNESS_S" \
-      "$vfile" "$node_mode" > "$outfile" &
+      "$vfile" "$node_mode" "$deadband_margin" > "$outfile" &
     job_outfiles+=("$outfile"); job_verdictfiles+=("$vfile")
     idx=$((idx + 1))
   done
