@@ -2067,3 +2067,92 @@ fn client_chase_bound_us_fails_closed_on_malformed_bound_margin_or_ceiling_1022(
         );
     }
 }
+
+// --- #1022 review hardening: leading-zero numeric input must never crash the arithmetic --------
+//
+// Both client_chase_bound_us and its master-row sibling validate BOUND_US/MARGIN_US/CEILING_US/
+// the parsed deadband with `grep -qE '^[0-9]+$'` (or `^-?[0-9]+$'` for the possibly-negative
+// deadband) -- a regex that happily ACCEPTS a leading-zero digit string like "0900". Bash's
+// `$((...))` arithmetic expansion (unlike its `[ -gt/-lt ]` test comparisons, which stay decimal)
+// treats a leading "0" as an OCTAL prefix -- "0900" contains the digit 9, which is not valid
+// octal, so `$((capped + margin))` aborts the WHOLE sourcing shell under `set -e` with "value too
+// great for base" instead of reaching the documented graceful fallback. A live repro (found in
+// review): `client_chase_bound_us '{"ntp_deadband_us":2500}' 2000 0900 5000` crashes the calling
+// shell outright. Reachable via an operator's zero-padded --deadband-margin-us (or a client
+// mistakenly configured with --client-chase-ceiling-us zero-padded), and in principle via a
+// deadband value extracted from a malformed/adversarial status payload (well-formed JSON itself
+// disallows a leading-zero numeric literal, but the grep-based extractor here does not enforce
+// that). The fix normalizes every validated numeric operand to canonical base-10 (`10#$var`)
+// immediately before the ONE arithmetic expression each function contains -- never changing the
+// MEANING of a valid decimal string (leading zeros are conventionally decimal, never octal, to a
+// human reading a CLI flag), only how bash's arithmetic evaluator parses it.
+
+#[test]
+fn client_chase_bound_us_normalizes_leading_zero_margin_and_deadband_never_crashes_1022() {
+    // margin="0900" must mean decimal 900, not trip bash's octal-prefix parsing (which would
+    // abort on the digit 9) and not silently mean something else either.
+    let master_status = pipe_json_deadband("2500");
+    let out = run_sourced(
+        "client_chase_bound_us \"$JSON\" 2000 0900 5000",
+        &[("JSON", master_status.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "3400",
+        "max(2000, min(2500,5000)+900) = 3400 -- a leading-zero margin must be read as decimal \
+         900, and must never crash the calling shell: {out:?}"
+    );
+
+    // A leading-zero DEADBAND (the value this function caps and adds the margin to) is the same
+    // hazard from the OTHER operand -- exercised via the ceiling path too (capped can end up
+    // holding either the deadband's or the ceiling's raw text).
+    let deadband_leading_zero = pipe_json_deadband("0900");
+    let out = run_sourced(
+        "client_chase_bound_us \"$JSON\" 2000 1000 5000",
+        &[("JSON", deadband_leading_zero.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "2000",
+        "max(2000, min(900,5000)+1000=1900) = 2000 -- a leading-zero deadband must be read as \
+         decimal 900, never crash: {out:?}"
+    );
+
+    let out = run_sourced(
+        "client_chase_bound_us \"$JSON\" 2000 0100 05000",
+        &[("JSON", master_status.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "2600",
+        "max(2000, min(2500,5000)+100) = 2600 -- a leading-zero margin AND ceiling together must \
+         still compute the correct decimal result: {out:?}"
+    );
+}
+
+#[test]
+fn ntp_master_effective_bound_us_normalizes_leading_zero_margin_and_deadband_never_crashes_1022() {
+    let status_deadband = pipe_json_deadband("2500");
+    let out = run_sourced(
+        "ntp_master_effective_bound_us \"$JSON\" 2000 0900",
+        &[("JSON", status_deadband.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "3400",
+        "max(2000, 2500+900) = 3400 -- a leading-zero margin must be read as decimal 900, and \
+         must never crash the calling shell: {out:?}"
+    );
+
+    let status_leading_zero_deadband = pipe_json_deadband("0900");
+    let out = run_sourced(
+        "ntp_master_effective_bound_us \"$JSON\" 2000 1000",
+        &[("JSON", status_leading_zero_deadband.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "2000",
+        "max(2000, 900+1000=1900) = 2000 -- a leading-zero deadband must be read as decimal 900, \
+         never crash: {out:?}"
+    );
+}
