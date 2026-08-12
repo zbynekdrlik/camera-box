@@ -116,6 +116,17 @@ GATE_CLIENT_CHASE_CEILING_US="${DANTESYNC_CLIENT_CHASE_CEILING_US:-5000}"
 # failed/timed-out priming read, exactly like an absent/null deadband). A short, dedicated timeout
 # bounds that worst case tightly without touching the concurrency model.
 GATE_MASTER_CHASE_TIMEOUT_S="${DANTESYNC_MASTER_CHASE_TIMEOUT_S:-3}"
+# #1022 spread-side completion: a live E2E rerun showed the SAME master step-chase that the
+# median fix (client_chase_bound_us, above) handles can ALSO inflate a CLIENT row's SPREAD past
+# GATE_STABILITY_US, even though the median stays correctly in-bound -- and because the step is
+# on ONE clock shared by the whole fleet, the SAME step tripped multiple clients (cam1, cam2,
+# stream) simultaneously in one real run. When a client's verdict is "unstable" (median in bound,
+# spread not) AND its worst sample still fits inside the SAME bound (clock-offset-guard.sh's
+# should_resample_for_chase), grade_http_node takes ONE fresh resample round after this delay
+# before failing -- never a retry loop; a resample that is ALSO unstable still fails. Default 15s
+# gives the transient a good chance to have cleared (the original #1022 filing described the
+# per-client catch-up/chase window itself as lasting "~10-30s").
+GATE_CHASE_RESAMPLE_DELAY_S="${DANTESYNC_CHASE_RESAMPLE_DELAY_S:-15}"
 
 # read_linux_node_journal NAME IP -> that Linux node's latest DanteSync journald lines over SSH,
 # or "" if unreachable. Overridable for tests/offline via DANTESYNC_GATE_LINUX_JOURNAL_<NAME>
@@ -289,7 +300,7 @@ gather_http_samples() {
 }
 
 # grade_http_node READ_FN NAME ARG KIND BOUND STABILITY MIN_DISTINCT SAMPLES WINDOW FRESHNESS_S
-#   VERDICTFILE [MODE] [DEADBAND_MARGIN_US] [CLIENT_NOTE]
+#   VERDICTFILE [MODE] [DEADBAND_MARGIN_US] [CLIENT_NOTE] [RESAMPLE_DELAY_S]
 # -> samples + grades ONE node (the shared body for both the Linux-HTTP-first loop and the
 # Windows --win-http loop -- extracted so the two loops don't carry two independently-editable
 # copies of the same freshness -> sampled_offset_check -> ptp_check -> node_verdict sequence).
@@ -310,7 +321,7 @@ gather_http_samples() {
 grade_http_node() {
   local read_fn="$1" name="$2" arg="$3" kind="$4" bound="$5" stability="$6" min_distinct="$7"
   local samples="$8" window="$9" freshness="${10}" verdictfile="${11}" mode="${12:-full}"
-  local deadband_margin="${13:-0}" client_note="${14:-}"
+  local deadband_margin="${13:-0}" client_note="${14:-}" resample_delay="${15:-0}"
   local status samples_raw now rc_off rc_ptp ptp deadband_note=""
 
   samples_raw="$(gather_http_samples "$read_fn" "$name" "$arg" "$samples" "$window")"
@@ -397,6 +408,20 @@ grade_http_node() {
       # trusting its ntp_offset_us as a live value.
       case "$(ntp_freshness_verdict "$status" "$freshness")" in
         fresh)
+          # #1022 spread-side completion: a CLIENT row (never the master -- see
+          # should_resample_for_chase's own MODE gate) whose verdict is EXACTLY "unstable" (median
+          # already in bound, spread not) AND whose worst sample still fits the SAME bound gets
+          # ONE fresh resample round before the final grade -- never re-verifies freshness on the
+          # resampled data (it is gathered moments after the already-proven-fresh original round,
+          # and this path only ever runs for client rows, which have no separate freshness concern
+          # of their own beyond what already passed above). A resample that is ALSO unstable still
+          # fails, graded on ITS OWN (fresh) numbers.
+          if [ "$(should_resample_for_chase "$samples_raw" "$bound" "$stability" "$min_distinct" "$mode")" = "yes" ]; then
+            sleep "$resample_delay"
+            samples_raw="$(gather_http_samples "$read_fn" "$name" "$arg" "$samples" "$window")"
+            status="$(printf '%s\n' "$samples_raw" | tail -1)"
+            deadband_note="${deadband_note} -- resampled once after a ${resample_delay}s delay (spread looked like a transient master step-chase excursion, #1022; grading the fresh round)"
+          fi
           sampled_offset_check "$name" "$samples_raw" "$bound" "$stability" "$min_distinct" \
             "$mode" "$deadband_note" || rc_off=$? ;;
         stale)
@@ -537,6 +562,22 @@ Options:
                        pays the priming read); an unreachable/unreadable priming read falls back
                        to the unmodified --bound-us, same "cannot prove it -> do not widen"
                        discipline as an absent/null deadband.
+  --chase-resample-delay-s N  #1022 spread-side completion: the SAME master step-chase can ALSO
+                       inflate a CLIENT row's SPREAD past --stability-us even though its median
+                       stays correctly in-bound -- and because the step is on ONE clock shared by
+                       the fleet, the SAME step can trip MULTIPLE clients simultaneously in one
+                       run. A client row whose verdict is EXACTLY "unstable" (median in bound,
+                       spread not) AND whose worst sample still fits inside --bound-us (the same
+                       bound the median check already uses) gets ONE fresh resample round after
+                       this delay before the final grade -- never a retry loop; a resample that
+                       is ALSO unstable still fails, graded on its own fresh numbers. The
+                       master's own median-only row, a genuine "drift" (median out of bound), and
+                       a worst sample that already exceeds --bound-us (the #836 genuine-scatter
+                       class, or a real clock fault) are NEVER resampled -- see
+                       clock-offset-guard.sh's should_resample_for_chase for the exact decision.
+                       Default ${GATE_CHASE_RESAMPLE_DELAY_S} (gives the transient a good chance
+                       to have cleared -- the original filing described the per-client catch-up
+                       window as lasting "~10-30s").
 
 A node's NTP MEASUREMENT itself must also be FRESH, independently of the payload's general
 "updated_ts" (#1014, dantesync v1.8.30 / dantesync issue 68): "ntp_age_s" must be a plain integer
@@ -578,6 +619,7 @@ main() {
   local min_distinct="$GATE_SAMPLE_MIN_DISTINCT" stability="$GATE_STABILITY_US"
   local ntp_master="$GATE_NTP_MASTER_NAME" deadband_margin="$GATE_DEADBAND_MARGIN_US"
   local client_chase_ceiling="$GATE_CLIENT_CHASE_CEILING_US"
+  local chase_resample_delay="$GATE_CHASE_RESAMPLE_DELAY_S"
   local -a win_http=()
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -592,6 +634,7 @@ main() {
       --ntp-master)         shift; ntp_master="${1:-}" ;;
       --deadband-margin-us) shift; deadband_margin="${1:-}" ;;
       --client-chase-ceiling-us) shift; client_chase_ceiling="${1:-}" ;;
+      --chase-resample-delay-s) shift; chase_resample_delay="${1:-}" ;;
       -h|--help)            usage; exit 0 ;;
       --*)             echo "unknown option: $1" >&2; usage >&2; exit 1 ;;
       *)               echo "unexpected argument: $1" >&2; usage >&2; exit 1 ;;
@@ -631,6 +674,10 @@ main() {
   fi
   if ! printf '%s' "$client_chase_ceiling" | grep -qE '^[0-9]+$'; then
     echo "ERROR: --client-chase-ceiling-us must be a non-negative integer (got '${client_chase_ceiling}')." >&2
+    exit 1
+  fi
+  if ! printf '%s' "$chase_resample_delay" | grep -qE '^[0-9]+$'; then
+    echo "ERROR: --chase-resample-delay-s must be a non-negative integer (got '${chase_resample_delay}')." >&2
     exit 1
   fi
   if [ "$min_distinct" -gt "$samples" ]; then
@@ -747,7 +794,7 @@ main() {
     resolve_node_grading "$name"
     grade_http_node read_linux_node_http_status "$name" "$ip" linux \
       "$node_bound" "$stability" "$min_distinct" "$samples" "$window" "$GATE_OFFSET_FRESHNESS_S" \
-      "$vfile" "$node_mode" "$deadband_margin" "$node_note" > "$outfile" &
+      "$vfile" "$node_mode" "$deadband_margin" "$node_note" "$chase_resample_delay" > "$outfile" &
     job_outfiles+=("$outfile"); job_verdictfiles+=("$vfile")
     idx=$((idx + 1))
   done
@@ -763,7 +810,7 @@ main() {
     resolve_node_grading "$name"
     grade_http_node read_win_http_status "$name" "$ip" win \
       "$node_bound" "$stability" "$min_distinct" "$samples" "$window" "$GATE_OFFSET_FRESHNESS_S" \
-      "$vfile" "$node_mode" "$deadband_margin" "$node_note" > "$outfile" &
+      "$vfile" "$node_mode" "$deadband_margin" "$node_note" "$chase_resample_delay" > "$outfile" &
     job_outfiles+=("$outfile"); job_verdictfiles+=("$vfile")
     idx=$((idx + 1))
   done
