@@ -112,3 +112,50 @@ copy-paste an achieved-ppm value from one `distance_ms` column into another in a
 a review caught exactly this (the pre-fix 291.6667 value pasted into the post-fix column instead
 of the correctly-recomputed 300.0000); always regenerate EACH cell from the harness, never assume
 two columns share a value just because they're both "above the old floor".
+
+## ACTIVE compensation shifts the true output-domain tone frequency -- thdn()'s coherent window
+## silently stops being coherent once that happens (#1019)
+
+`thdn()` assumes the resampled OUTPUT tone sits at exactly `--freq` (997 Hz). That is true ONLY
+when the resampler is NOT actively compensating. Once `swr_set_compensation()` holds a nonzero
+ppm for the whole analysis window, the output is genuinely time-warped by that ppm -- for a
+resampler producing `out_frames` output samples from `in_frames_nominal` input samples of a
+`test_freq`-Hz tone, the tone's OWN frequency in output-sample-index space is EXACTLY
+`test_freq * in_frames_nominal / out_frames`, not `test_freq`. A shift of even a fraction of an
+FFT bin breaks `thdn()`'s rectangular-window coherent-sampling assumption, and a rectangular
+window's sidelobes decay slowly (~6 dB/octave) -- this alone produced tens of dB of pure
+measurement-artifact "distortion" that issues 929/1016 mismeasured as a real reissue-cadence
+defect. **Before trusting ANY `thdn()` number on a file generated with nonzero `--ppm`, use
+`analyze_thdn.py`'s `--corrected` (constant ppm) or `--segmented` (walking ppm) modes instead** --
+both compute/estimate the TRUE output-domain frequency first. Cheap sanity check that costs zero
+new code: re-run the SAME samples through `thdn()`'s own pre-existing `--window blackman` --
+Blackman's leakage floor does not depend on coherence, so if switching windows alone recovers
+tens of dB with no change to the signal, you are looking at this exact trap, not real distortion.
+Full derivation, tables, and the byte-for-byte reissue-cadence-is-harmless proof:
+`scripts/asrc-quality-bench/RESULTS-1019.md`.
+
+**Reusable diagnostic: prove a reissue mechanism harmless by comparing raw bytes, not just
+THD+N numbers.** `cmp`-ing the raw `.f32` output of "reissue an unchanged target every callback"
+against "reissue it exactly once with a `--distance-ms` wide enough to cover the whole test"
+gives `cmp` exit 0 (byte-for-byte identical) -- this is strictly stronger evidence than comparing
+two THD+N numbers (which could coincidentally match while the underlying signal differs). Use
+this pattern whenever isolating "does re-triggering X change anything" from "is X's steady-state
+behavior itself lossy" -- they are separable questions and byte-diffing settles the first one
+with zero measurement-methodology risk at all.
+
+**Sub-bin frequency estimation for an UNKNOWN (walking) ppm needs parabolic interpolation, not
+just zero-padding.** A realistic single-digit-to-tens ppm shifts a 997 Hz tone by well under one
+FFT bin even at 8x zero-padding (e.g. 30 ppm -> ~0.03 Hz, vs an 8x-padded 1s window's own
+0.125 Hz bin spacing) -- a bare `argmax` cannot resolve that; it returns the same discrete bin
+regardless of how much you zero-pad. Fix: standard 3-point parabolic (quadratic) interpolation on
+the LOG-magnitude around the discrete peak (Jacobsen & Kay), applied on top of the zero-padded
+spectrum -- see `analyze_thdn._estimate_peak_freq()`. Verified empirically down to ppm=5
+(0.005 Hz shift) on a clean synthetic tone: recovers the true frequency to ~1e-5 Hz.
+
+**A per-segment coherent-window search MUST be hard-capped at the segment's own boundary.** An
+unclamped `_find_coherent_n` search (the same helper `thdn_corrected()` uses safely for a
+WHOLE-FILE constant-ppm window) can overshoot into the NEXT segment when analyzing a WALKING
+target split into short segments -- the next segment can hold a genuinely different frequency
+once the ppm target has moved on, and reading into it mid-window costs real (not measurement-
+artifact) dB from cross-contamination. Pass `max_n=<this segment's own sample count>` -- see
+`thdn_segmented()`'s call site and `_find_coherent_n`'s own `max_n` parameter.
