@@ -875,7 +875,89 @@ ntp_master_effective_bound_us() {
     printf '%s' "$bound"
     return 0
   fi
-  floor=$((deadband + margin))
+  # #1022 review hardening: `$((...))` arithmetic expansion (unlike the `[ -gt/-lt ]` test
+  # comparisons above/below, which stay decimal) treats a leading "0" as an OCTAL prefix -- a
+  # validated-but-zero-padded deadband/margin like "0900" contains a digit (9) that is not valid
+  # octal and aborts the WHOLE calling shell under set -e ("value too great for base") instead of
+  # reaching the graceful fallback this function exists to provide. `10#` forces base-10 on both
+  # operands (deadband is already proven non-negative by the check above, so this never needs to
+  # handle a sign) -- a leading zero always means decimal to a human reading a CLI flag/JSON
+  # number, never octal.
+  floor=$((10#$deadband + 10#$margin))
+  if [ "$floor" -gt "$bound" ]; then
+    printf '%s' "$floor"
+  else
+    printf '%s' "$bound"
+  fi
+}
+
+# --- CLIENT-row deadband step-chase widening (#1022) ------------------------------------------
+#
+# #1021 (above) widens ONLY the NTP-MASTER row's own median bound. Live evidence filed on #1022
+# (camera-box PR #1020, dantesync v1.8.41 fleet-wide) showed a CLIENT node can ALSO false-DRIFT
+# during the SAME master step-chase window, via a DIFFERENT mechanism: a client always reports
+# its OWN "ntp_deadband_us":null (the field only exists on the box acting as NTP master), yet a
+# client's own ntp_offset_us legitimately mirrors the master's sawtooth via the LAN NTP
+# measurement -- "when the master finally steps, every fleet client steps by the same amount
+# within its next NTP measurement cycle" (issue 1022, supervisor comment). A 30s sample window
+# landing during that per-client catch-up window can show a TIGHT (non-noise) but ELEVATED
+# median that exceeds the fixed GATE_BOUND_US -- a false DRIFT, not a real desync (live: stream
+# median 2589us, spread only 82us across 6 samples).
+#
+# client_chase_bound_us is the sibling of ntp_master_effective_bound_us, but it DELIBERATELY
+# reads a DIFFERENT node's status (the caller passes in the MASTER's own /status, not the client
+# being graded) and CAPS the deadband component at CEILING_US before adding MARGIN_US:
+#
+#   effective_client_bound = max(BOUND_US, min(ntp_deadband_us, CEILING_US) + MARGIN_US)
+#
+# The cap is the one deliberate difference from #1021's own (uncapped) master formula: #1021
+# only ever widens ONE row (the master's), so an unbounded floor has a small blast radius even
+# if ntp_deadband_us were ever misreported. #1022 can widen MANY client rows from the SAME live
+# read, so a hard ceiling (default 5000us -- the ticket's own cited "upstream hard per-step
+# ceiling", the documented maximum size of any single master step) keeps that blast radius
+# bounded no matter what the master happens to report.
+
+# client_chase_bound_us MASTER_STATUS_JSON BOUND_US MARGIN_US CEILING_US -> the bound to grade a
+# CLIENT node's median against (#1022). MASTER_STATUS_JSON is the CONFIGURED NTP master's own
+# freshly-read /status (dantesync-gate.sh's read_master_chase_status, a priming read SEPARATE
+# from the master's own gather_http_samples calls -- see that function's doc comment for why).
+# "null" / absent / non-numeric / negative ntp_deadband_us in MASTER_STATUS_JSON, OR a malformed
+# BOUND_US/MARGIN_US/CEILING_US (validated with `grep -qE '^[0-9]+$'` BEFORE any arithmetic, same
+# #595 bash-gotcha discipline as ntp_master_effective_bound_us), falls back to the UNMODIFIED
+# BOUND_US -- exactly like a pre-dantesync-#84 master, an unreachable master, or any caller that
+# simply never derived a live envelope. Never a blind widen: without a live, numeric, non-
+# negative master deadband to derive from, the bound never moves.
+client_chase_bound_us() {
+  local status="$1" bound="$2" margin="$3" ceiling="$4" deadband capped floor
+  if ! printf '%s' "$bound" | grep -qE '^[0-9]+$'; then
+    printf '%s' "$bound"
+    return 0
+  fi
+  if ! printf '%s' "$margin" | grep -qE '^[0-9]+$'; then
+    printf '%s' "$bound"
+    return 0
+  fi
+  if ! printf '%s' "$ceiling" | grep -qE '^[0-9]+$'; then
+    printf '%s' "$bound"
+    return 0
+  fi
+  deadband="$(ntp_deadband_us_from_pipe_json "$status")"
+  if [ -z "$deadband" ] || [ "$deadband" = "null" ] \
+     || ! printf '%s' "$deadband" | grep -qE '^-?[0-9]+$'; then
+    printf '%s' "$bound"
+    return 0
+  fi
+  if [ "$deadband" -lt 0 ]; then
+    printf '%s' "$bound"
+    return 0
+  fi
+  capped="$deadband"
+  [ "$capped" -gt "$ceiling" ] && capped="$ceiling"
+  # #1022 review hardening -- same octal-prefix hazard as ntp_master_effective_bound_us above:
+  # `10#` forces base-10 on both operands (capped is already proven non-negative -- it is either
+  # deadband, already checked >= 0, or ceiling, already validated `^[0-9]+$` -- so no sign to
+  # handle) before the ONE arithmetic expression this function contains.
+  floor=$((10#$capped + 10#$margin))
   if [ "$floor" -gt "$bound" ]; then
     printf '%s' "$floor"
   else

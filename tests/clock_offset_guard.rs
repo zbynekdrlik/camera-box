@@ -1951,3 +1951,208 @@ fn ntp_master_effective_bound_us_fails_closed_on_malformed_bound_or_margin_1021(
         );
     }
 }
+
+// --- client_chase_bound_us (#1022) --------------------------------------------------------------
+//
+// #1021 (above) widens ONLY the NTP-master row's own median bound against ITS OWN
+// self-reported ntp_deadband_us. #1022 (dantesync-gate: client rows false-DRIFT during the
+// master's deadband step-chase window) found live that a CLIENT node's own ntp_offset_us ALSO
+// legitimately ramps during that same window -- "when the master finally steps, every fleet
+// client steps by the same amount within its next NTP measurement cycle" -- because a client
+// measures its offset against the master over the LAN, and the master's own accumulated-but-
+// not-yet-corrected phase shows up there too. A client always reports its OWN
+// "ntp_deadband_us":null, so the widening must be derived from a DIFFERENT node's (the master's)
+// status. client_chase_bound_us is that sibling of ntp_master_effective_bound_us: same shape,
+// but (a) reads a caller-supplied MASTER status (not the node being graded), and (b) CAPS the
+// deadband component at a CEILING_US (the ticket's own cited "upstream hard per-step ceiling",
+// 5000us) before adding the margin -- since this can widen MANY client rows per gate run (not
+// just the one master row), an unbounded floor would be a far bigger blast radius than #1021's
+// single-row widening if ntp_deadband_us were ever misreported/misconfigured.
+
+#[test]
+fn client_chase_bound_us_widens_when_master_deadband_present_1022() {
+    let master_status = pipe_json_deadband("2500");
+    let out = run_sourced(
+        "client_chase_bound_us \"$JSON\" 2000 1000 5000",
+        &[("JSON", master_status.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "3500",
+        "max(2000, min(2500,5000)+1000) = 3500 -- the master's own deadband+margin floor wins \
+         over the fixed client bound: {out:?}"
+    );
+}
+
+#[test]
+fn client_chase_bound_us_never_lowers_below_the_fixed_bound_1022() {
+    let master_status = pipe_json_deadband("50");
+    let out = run_sourced(
+        "client_chase_bound_us \"$JSON\" 2000 100 5000",
+        &[("JSON", master_status.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "2000",
+        "max(2000, min(50,5000)+100=150) = 2000 -- the fixed client bound must never be lowered: \
+         {out:?}"
+    );
+}
+
+#[test]
+fn client_chase_bound_us_falls_back_on_null_absent_and_negative_master_deadband_1022() {
+    let cases = [
+        pipe_json_deadband("null"),
+        "{\"updated_ts\":1000,\"ntp_offset_us\":100}".to_string(),
+        pipe_json_deadband("-5"),
+    ];
+    for status in cases {
+        let out = run_sourced(
+            "client_chase_bound_us \"$JSON\" 2000 1000 5000",
+            &[("JSON", status.as_str())],
+        );
+        assert_eq!(
+            out.trim(),
+            "2000",
+            "null/absent/negative master ntp_deadband_us -- e.g. a pre-dantesync-#84 master, or \
+             the master's HTTP read simply failing -- must fall back to the unmodified fixed \
+             client bound, never a blind widen (status={status}): {out:?}"
+        );
+    }
+}
+
+#[test]
+fn client_chase_bound_us_caps_the_deadband_component_at_the_hard_ceiling_1022() {
+    // An (unrealistic, defensive-test) absurdly large master deadband must NOT blindly widen
+    // every client's bound to match it -- the ceiling caps the deadband component FIRST, so a
+    // client median that clears the capped envelope still DRIFTs even though it would have
+    // PASSED under an uncapped (blind) widen.
+    let master_status = pipe_json_deadband("50000");
+    let out = run_sourced(
+        "client_chase_bound_us \"$JSON\" 2000 1000 5000",
+        &[("JSON", master_status.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "6000",
+        "max(2000, min(50000,5000)+1000) = 6000 -- the 5000us ceiling caps the deadband \
+         component before the margin is added, never the raw 50000us: {out:?}"
+    );
+}
+
+#[test]
+fn client_chase_bound_us_fails_closed_on_malformed_bound_margin_or_ceiling_1022() {
+    // Same #595 bash-gotcha discipline as ntp_master_effective_bound_us above: BOUND_US,
+    // MARGIN_US, and CEILING_US are each validated with `grep -qE '^[0-9]+$'` BEFORE any
+    // arithmetic -- a malformed one falls back to the RAW (unmodified) bound text, never a crash
+    // and never a silently-invented number.
+    let master_status = pipe_json_deadband("2500");
+    let cases = [
+        ("abc", "1000", "5000"),
+        ("2000", "abc", "5000"),
+        ("2000", "1000", "abc"),
+        ("-5", "1000", "5000"),
+    ];
+    for (bound, margin, ceiling) in cases {
+        let out = run_sourced(
+            &format!("client_chase_bound_us \"$JSON\" '{bound}' '{margin}' '{ceiling}'"),
+            &[("JSON", master_status.as_str())],
+        );
+        assert_eq!(
+            out.trim(),
+            bound,
+            "a malformed BOUND_US/MARGIN_US/CEILING_US must fall back to the RAW (unmodified) \
+             bound text, never guess a number \
+             (bound={bound} margin={margin} ceiling={ceiling}): {out:?}"
+        );
+    }
+}
+
+// --- #1022 review hardening: leading-zero numeric input must never crash the arithmetic --------
+//
+// Both client_chase_bound_us and its master-row sibling validate BOUND_US/MARGIN_US/CEILING_US/
+// the parsed deadband with `grep -qE '^[0-9]+$'` (or `^-?[0-9]+$'` for the possibly-negative
+// deadband) -- a regex that happily ACCEPTS a leading-zero digit string like "0900". Bash's
+// `$((...))` arithmetic expansion (unlike its `[ -gt/-lt ]` test comparisons, which stay decimal)
+// treats a leading "0" as an OCTAL prefix -- "0900" contains the digit 9, which is not valid
+// octal, so `$((capped + margin))` aborts the WHOLE sourcing shell under `set -e` with "value too
+// great for base" instead of reaching the documented graceful fallback. A live repro (found in
+// review): `client_chase_bound_us '{"ntp_deadband_us":2500}' 2000 0900 5000` crashes the calling
+// shell outright. Reachable via an operator's zero-padded --deadband-margin-us (or a client
+// mistakenly configured with --client-chase-ceiling-us zero-padded), and in principle via a
+// deadband value extracted from a malformed/adversarial status payload (well-formed JSON itself
+// disallows a leading-zero numeric literal, but the grep-based extractor here does not enforce
+// that). The fix normalizes every validated numeric operand to canonical base-10 (`10#$var`)
+// immediately before the ONE arithmetic expression each function contains -- never changing the
+// MEANING of a valid decimal string (leading zeros are conventionally decimal, never octal, to a
+// human reading a CLI flag), only how bash's arithmetic evaluator parses it.
+
+#[test]
+fn client_chase_bound_us_normalizes_leading_zero_margin_and_deadband_never_crashes_1022() {
+    // margin="0900" must mean decimal 900, not trip bash's octal-prefix parsing (which would
+    // abort on the digit 9) and not silently mean something else either.
+    let master_status = pipe_json_deadband("2500");
+    let out = run_sourced(
+        "client_chase_bound_us \"$JSON\" 2000 0900 5000",
+        &[("JSON", master_status.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "3400",
+        "max(2000, min(2500,5000)+900) = 3400 -- a leading-zero margin must be read as decimal \
+         900, and must never crash the calling shell: {out:?}"
+    );
+
+    // A leading-zero DEADBAND (the value this function caps and adds the margin to) is the same
+    // hazard from the OTHER operand -- exercised via the ceiling path too (capped can end up
+    // holding either the deadband's or the ceiling's raw text).
+    let deadband_leading_zero = pipe_json_deadband("0900");
+    let out = run_sourced(
+        "client_chase_bound_us \"$JSON\" 2000 1000 5000",
+        &[("JSON", deadband_leading_zero.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "2000",
+        "max(2000, min(900,5000)+1000=1900) = 2000 -- a leading-zero deadband must be read as \
+         decimal 900, never crash: {out:?}"
+    );
+
+    let out = run_sourced(
+        "client_chase_bound_us \"$JSON\" 2000 0100 05000",
+        &[("JSON", master_status.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "2600",
+        "max(2000, min(2500,5000)+100) = 2600 -- a leading-zero margin AND ceiling together must \
+         still compute the correct decimal result: {out:?}"
+    );
+}
+
+#[test]
+fn ntp_master_effective_bound_us_normalizes_leading_zero_margin_and_deadband_never_crashes_1022() {
+    let status_deadband = pipe_json_deadband("2500");
+    let out = run_sourced(
+        "ntp_master_effective_bound_us \"$JSON\" 2000 0900",
+        &[("JSON", status_deadband.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "3400",
+        "max(2000, 2500+900) = 3400 -- a leading-zero margin must be read as decimal 900, and \
+         must never crash the calling shell: {out:?}"
+    );
+
+    let status_leading_zero_deadband = pipe_json_deadband("0900");
+    let out = run_sourced(
+        "ntp_master_effective_bound_us \"$JSON\" 2000 1000",
+        &[("JSON", status_leading_zero_deadband.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "2000",
+        "max(2000, 900+1000=1900) = 2000 -- a leading-zero deadband must be read as decimal 900, \
+         never crash: {out:?}"
+    );
+}
