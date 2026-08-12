@@ -322,7 +322,7 @@ grade_http_node() {
   local read_fn="$1" name="$2" arg="$3" kind="$4" bound="$5" stability="$6" min_distinct="$7"
   local samples="$8" window="$9" freshness="${10}" verdictfile="${11}" mode="${12:-full}"
   local deadband_margin="${13:-0}" client_note="${14:-}" resample_delay="${15:-0}"
-  local status samples_raw now rc_off rc_ptp ptp deadband_note=""
+  local status samples_raw now rc_off rc_ptp ptp deadband_note="" resampled=0
 
   samples_raw="$(gather_http_samples "$read_fn" "$name" "$arg" "$samples" "$window")"
   if [ -z "$samples_raw" ]; then
@@ -411,19 +411,31 @@ grade_http_node() {
           # #1022 spread-side completion: a CLIENT row (never the master -- see
           # should_resample_for_chase's own MODE gate) whose verdict is EXACTLY "unstable" (median
           # already in bound, spread not) AND whose worst sample still fits the SAME bound gets
-          # ONE fresh resample round before the final grade -- never re-verifies freshness on the
-          # resampled data (it is gathered moments after the already-proven-fresh original round,
-          # and this path only ever runs for client rows, which have no separate freshness concern
-          # of their own beyond what already passed above). A resample that is ALSO unstable still
-          # fails, graded on ITS OWN (fresh) numbers.
+          # ONE fresh resample round before the final grade. A resample that is ALSO unstable
+          # still fails, graded on ITS OWN (fresh) numbers.
           if [ "$(should_resample_for_chase "$samples_raw" "$bound" "$stability" "$min_distinct" "$mode")" = "yes" ]; then
             sleep "$resample_delay"
             samples_raw="$(gather_http_samples "$read_fn" "$name" "$arg" "$samples" "$window")"
             status="$(printf '%s\n' "$samples_raw" | tail -1)"
             deadband_note="${deadband_note} -- resampled once after a ${resample_delay}s delay (spread looked like a transient master step-chase excursion, #1022; grading the fresh round)"
+            resampled=1
           fi
-          sampled_offset_check "$name" "$samples_raw" "$bound" "$stability" "$min_distinct" \
-            "$mode" "$deadband_note" || rc_off=$? ;;
+          # #1022 review follow-up: the resample itself takes real wall-clock time (the delay +
+          # another full sampling window) -- long enough for a borderline-fresh NTP measurement to
+          # cross into staleness during that gap (the SAME #1014 "frozen/free-running measurement
+          # graded as live" class this whole freshness case-statement exists to catch). Re-verify
+          # the RESAMPLED data's own freshness before trusting its median/spread -- never grade a
+          # measurement that went stale during the wait, even though the ORIGINAL round was proven
+          # fresh a moment ago.
+          if [ "$resampled" = 1 ] && [ "$(ntp_freshness_verdict "$status" "$freshness")" != "fresh" ]; then
+            printf '  %-14s NTP STALE    (NTP measurement went stale during the #1022 resample delay -- status incomplete)\n' \
+              "$name"
+            rc_off=3
+          else
+            sampled_offset_check "$name" "$samples_raw" "$bound" "$stability" "$min_distinct" \
+              "$mode" "$deadband_note" || rc_off=$?
+          fi
+          ;;
         stale)
           printf '  %-14s NTP STALE    (NTP measurement age exceeds %ss, or ntp_failed -- status incomplete, dantesync issue 68/71, #1014)\n' \
             "$name" "$freshness"
@@ -567,13 +579,17 @@ Options:
                        stays correctly in-bound -- and because the step is on ONE clock shared by
                        the fleet, the SAME step can trip MULTIPLE clients simultaneously in one
                        run. A client row whose verdict is EXACTLY "unstable" (median in bound,
-                       spread not) AND whose worst sample still fits inside --bound-us (the same
-                       bound the median check already uses) gets ONE fresh resample round after
-                       this delay before the final grade -- never a retry loop; a resample that
-                       is ALSO unstable still fails, graded on its own fresh numbers. The
+                       spread not) AND whose worst sample still fits inside its OWN effective
+                       bound (the SAME per-node bound the median check already uses -- for a
+                       client row that may already be the #1022-widened
+                       --client-chase-ceiling-us envelope, not necessarily the bare --bound-us
+                       value) gets ONE fresh resample round after this delay before the final
+                       grade -- never a retry loop; a resample that is ALSO unstable still fails,
+                       graded on its own fresh numbers, and a resample whose NTP measurement goes
+                       stale during the wait reports STALE rather than trusting aged-out data. The
                        master's own median-only row, a genuine "drift" (median out of bound), and
-                       a worst sample that already exceeds --bound-us (the #836 genuine-scatter
-                       class, or a real clock fault) are NEVER resampled -- see
+                       a worst sample that already exceeds the effective bound (the #836 genuine-
+                       scatter class, or a real clock fault) are NEVER resampled -- see
                        clock-offset-guard.sh's should_resample_for_chase for the exact decision.
                        Default ${GATE_CHASE_RESAMPLE_DELAY_S} (gives the transient a good chance
                        to have cleared -- the original filing described the per-client catch-up
