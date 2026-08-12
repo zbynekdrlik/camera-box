@@ -805,6 +805,76 @@ sampled_offset_check() {
   esac
 }
 
+# --- Client-row spread-side chase completion (#1022 spread-side completion) ------------------
+#
+# client_chase_bound_us (below) only ever widens a CLIENT row's MEDIAN check -- its own doc
+# comment says so explicitly, and the spread/stability check stays fully active for client rows
+# by design (so genuine scatter, the #836 measurement-noise class, is never masked). Live
+# evidence (a merged round's real E2E rerun) showed the SAME master step that the median fix
+# already handles ALSO inflates a client's SPREAD: one master step lands inside an otherwise-
+# baseline sampling window as one (or a few) elevated samples, which can push spread past the
+# fixed 2000us stability bound even while the median stays correctly in-bound. Because the step
+# is on ONE clock shared by the whole fleet, the SAME step can trip MULTIPLE clients in the SAME
+# run (observed live: cam1, cam2, AND stream all UNSTABLE simultaneously).
+#
+# should_resample_for_chase is the DECISION only (pure, directly testable) -- whether a node's
+# "unstable" verdict is worth a one-time fresh resample before failing. It never re-samples
+# itself; the caller (dantesync-gate.sh's grade_http_node) does that impure step when this
+# function says "yes".
+
+# max_abs_of_ints LIST_NEWLINE -> the largest |value| among the integers in LIST_NEWLINE (one per
+# line; non-integer lines ignored), "" if none. Distinguishes "the worst sample in this window
+# still fits inside a plausible single master step-chase" (worth a resample) from "something in
+# here is far bigger than any legitimate step could produce" (fail immediately -- #836's genuine-
+# scatter class, or a real clock fault, is never given a second chance by a resample).
+max_abs_of_ints() {
+  local list="$1" v mag max=""
+  while IFS= read -r v; do
+    printf '%s' "$v" | grep -qE '^-?[0-9]+$' || continue
+    mag="$(abs_int "$v")"
+    if [ -z "$max" ] || [ "$mag" -gt "$max" ]; then
+      max="$mag"
+    fi
+  done <<< "$list"
+  printf '%s' "$max"
+}
+
+# should_resample_for_chase PAYLOADS_NEWLINE BOUND_US STABILITY_US MIN_DISTINCT MODE ->
+# "yes" | "no". "yes" ONLY when ALL of:
+#   * MODE is "full" (a CLIENT row) -- the master's own "median-only" mode never produces an
+#     "unstable" verdict at all (sampled_offset_verdict skips the spread check entirely in that
+#     mode), so this also excludes the master row structurally, not just via this explicit check.
+#   * sampled_offset_verdict(...) is EXACTLY "unstable" -- median already within BOUND_US (which
+#     may itself already be #1022-widened by client_chase_bound_us), spread over STABILITY_US.
+#     Neither "drift"/"drift_unstable" (the median itself is a real problem, no resample can fix
+#     that) nor "ok"/"insufficient" (nothing to resample for) ever resample.
+#   * the WORST (largest |offset|) DISTINCT sample in PAYLOADS_NEWLINE still fits inside BOUND_US
+#     -- nothing in this window looks bigger than what the SAME already-derived chase envelope
+#     considers plausible for a single step. An outlier beyond that is never given a second
+#     chance; it fails on THIS round.
+# A malformed BOUND_US, or no valid samples to measure a max from, is "no" (never resample on
+# data this function cannot prove is bounded -- the same "cannot prove it -> do not act" discipline
+# every other fallback in this file follows).
+should_resample_for_chase() {
+  local payloads="$1" bound="$2" stability="$3" min_distinct="$4" mode="$5"
+  local verdict samples max
+  [ "$mode" = "full" ] || { printf 'no\n'; return 0; }
+  verdict="$(sampled_offset_verdict "$payloads" "$bound" "$stability" "$min_distinct" "$mode")"
+  # A malformed BOUND_US/STABILITY_US/MIN_DISTINCT already makes sampled_offset_verdict return
+  # "insufficient" (never "unstable") -- so by the time this check passes, BOUND_US is guaranteed
+  # a valid non-negative integer, and the `[ "$max" -le "$bound" ]` comparison below is safe
+  # without a separate, unreachable validation of its own.
+  [ "$verdict" = "unstable" ] || { printf 'no\n'; return 0; }
+  samples="$(distinct_offset_samples_us "$payloads")"
+  max="$(max_abs_of_ints "$samples")"
+  [ -n "$max" ] || { printf 'no\n'; return 0; }
+  if [ "$max" -le "$bound" ]; then
+    printf 'yes\n'
+  else
+    printf 'no\n'
+  fi
+}
+
 # --- NTP-master PTP-locked deadband widening (#1021, dantesync PR #84/#86) ---------------------
 #
 # dantesync issue 83: a genuinely PTP-locked master now deliberately DEFERS its periodic UTC-phase
