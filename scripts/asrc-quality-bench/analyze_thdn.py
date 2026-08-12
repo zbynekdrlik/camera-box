@@ -128,9 +128,8 @@ def thdn_corrected(samples, sample_rate, test_freq, in_frames_nominal, skip_s=1.
 
     Returns (thdn_db, thdn_pct, true_freq_hz, window_n).
     """
-    # RED (issue 1019): stub -- pretend the output tone never shifts. Restored to the real
-    # `test_freq * in_frames_nominal / out_frames` derivation in the GREEN commit.
-    true_freq = test_freq
+    out_frames = len(samples)
+    true_freq = test_freq * in_frames_nominal / out_frames
     skip = int(round(skip_s * sample_rate))
     target_n = int(round(analyze_s * sample_rate))
     if len(samples) < skip + target_n:
@@ -170,10 +169,7 @@ def _estimate_peak_freq(x, sample_rate, nominal_freq, search_hz=20.0, zero_pad=8
     3-point parabolic (quadratic) interpolation on the log-magnitude around the discrete peak
     (the standard DSP estimator -- see e.g. Jacobsen & Kay) -- applied here on TOP of the
     zero-padded spectrum for extra headroom."""
-    # RED (issue 1019): stub -- pretend the local frequency never shifts from nominal. Restored
-    # to the real zero-padded-FFT + parabolic-interpolation estimate in the GREEN commit.
-    return float(nominal_freq)
-    n = len(x)  # noqa: unreachable in RED -- restored in GREEN
+    n = len(x)
     xw = x * np.blackman(n)
     nfft = n * zero_pad
     spec = np.fft.rfft(xw, n=nfft)

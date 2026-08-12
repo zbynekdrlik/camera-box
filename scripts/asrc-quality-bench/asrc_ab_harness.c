@@ -22,7 +22,16 @@
  *                         cost, for a given engine-options config, at a given compensation ppm.
  *                         --distance-ms overrides the compensation window (default: the
  *                         pre-#1016 1000ms); --reissue-every / --max-reissues (issue 1016) isolate
- *                         re-trigger-cadence effects -- see RESULTS-1016.md.
+ *                         re-trigger-cadence effects -- see RESULTS-1016.md. --ppm-start/--ppm-end
+ *                         (issue 1019) linearly ramp the REQUESTED ppm across the run instead of
+ *                         holding it constant -- simulates a live, slowly-walking servo estimate
+ *                         (each reissue recomputes its own target from the current elapsed
+ *                         fraction); overrides --ppm. analyze_thdn.py's naive coherent-window
+ *                         THD+N assumes the OUTPUT tone stays at exactly --freq, which is FALSE
+ *                         once compensation is active (the output is time-warped by the applied
+ *                         ppm) -- use analyze_thdn.py's --corrected/--segmented modes, not the
+ *                         plain default, to get a real number for a --ppm/--ppm-start/--ppm-end
+ *                         run -- see RESULTS-1019.md.
  *   --mode compensation  measure the ACTUAL achieved ppm (from real input/output sample counts)
  *                         vs the REQUESTED ppm, replicating obs-source.c's per-callback re-issue
  *                         cadence -- proves/disproves whether small requested ppm values actually
@@ -144,6 +153,13 @@ static int mode_quality(int argc, char **argv)
                               * "holds" indefinitely after a ramp completes, or REVERTS to 1:1 once
                               * distance_ms elapses with no further reissue -- see RESULTS-1016.md */
     uint32_t distance_ms = COMPENSATION_DISTANCE_MS;
+    double ppm_start = 0.0, ppm_end = 0.0;
+    int ppm_walk = 0; /* issue 1019: --ppm-start/--ppm-end given -> linearly ramp the REQUESTED
+                        * ppm target across the run (simulates a real, slowly-walking servo
+                        * estimate instead of a fixed constant) -- overrides --ppm. Each reissue
+                        * recomputes its OWN target from the CURRENT elapsed fraction, exactly
+                        * mirroring how a live per-callback caller would recompute from its own
+                        * live estimate every callback. */
 
     for (int i = 2; i < argc; i++) {
         if (!strcmp(argv[i], "--config") && i + 1 < argc)
@@ -162,6 +178,13 @@ static int mode_quality(int argc, char **argv)
             max_reissues = atol(argv[++i]);
         else if (!strcmp(argv[i], "--distance-ms") && i + 1 < argc)
             distance_ms = (uint32_t)atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--ppm-start") && i + 1 < argc) {
+            ppm_start = atof(argv[++i]);
+            ppm_walk = 1;
+        } else if (!strcmp(argv[i], "--ppm-end") && i + 1 < argc) {
+            ppm_end = atof(argv[++i]);
+            ppm_walk = 1;
+        }
     }
     if (reissue_every < 1)
         reissue_every = 1;
@@ -200,14 +223,21 @@ static int mode_quality(int argc, char **argv)
             /* bypass: no resampler at all */
             fwrite(inbuf, sizeof(float), this_block, fout);
         } else {
-            if (ppm != 0.0 && (blocks % reissue_every) == 0 && (max_reissues < 0 || reissues_done < max_reissues)) {
+            /* issue 1019: with --ppm-start/--ppm-end, the target is recomputed from the CURRENT
+             * elapsed fraction at every eligible reissue -- a live per-callback caller tracking a
+             * slowly-walking servo estimate would do exactly this (re-read its own current
+             * estimate each callback), never a value fixed at t=0. */
+            double effective_ppm = ppm_walk ? (ppm_start + (ppm_end - ppm_start) * ((double)fed / (double)total_in_frames))
+                                             : ppm;
+            if (effective_ppm != 0.0 && (blocks % reissue_every) == 0 &&
+                (max_reissues < 0 || reissues_done < max_reissues)) {
                 /* obs-source.c calls this on EVERY audio callback (reissue_every=1 is the real
                  * cadence) -- reissue_every>1 is a DIAGNOSTIC to isolate whether distortion comes
                  * from the re-trigger cadence itself vs the resampler engine settings.
                  * max_reissues>=0 (issue 1016) additionally CAPS the total count -- isolates
                  * whether compensation holds indefinitely or reverts once the ramp completes. */
                 double t0 = now_ns();
-                apply_compensation_ppm(ctx, ppm, distance_ms, SAMPLE_RATE);
+                apply_compensation_ppm(ctx, effective_ppm, distance_ms, SAMPLE_RATE);
                 cpu_ns_total += now_ns() - t0;
                 reissues_done++;
             }
@@ -238,8 +268,14 @@ static int mode_quality(int argc, char **argv)
     }
     fclose(fout);
 
-    fprintf(stdout, "config=%s ppm=%g in_frames=%ld blocks=%ld cpu_ns_total=%.0f cpu_ns_per_block=%.1f\n", config,
-            ppm, total_in_frames, blocks, cpu_ns_total, blocks ? cpu_ns_total / blocks : 0.0);
+    if (ppm_walk)
+        fprintf(stdout,
+                "config=%s ppm_walk=%g->%g in_frames=%ld blocks=%ld cpu_ns_total=%.0f cpu_ns_per_block=%.1f\n",
+                config, ppm_start, ppm_end, total_in_frames, blocks, cpu_ns_total,
+                blocks ? cpu_ns_total / blocks : 0.0);
+    else
+        fprintf(stdout, "config=%s ppm=%g in_frames=%ld blocks=%ld cpu_ns_total=%.0f cpu_ns_per_block=%.1f\n",
+                config, ppm, total_in_frames, blocks, cpu_ns_total, blocks ? cpu_ns_total / blocks : 0.0);
     return 0;
 }
 
