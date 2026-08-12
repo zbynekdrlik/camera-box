@@ -67,7 +67,14 @@ DEFAULT_FLEET_FILE="$HERE/../rig-fleet.txt"
 # alongside the deploy, so the gate never silently drifts to "whatever happens to be out".
 # Bumped 2026-08-11: fleet rolled to v1.8.30 (dantesync NTP server-mode self-discipline fix —
 # the master no longer free-runs at oscillator error; verified 8/8 boxes on the rollout day).
-DANTESYNC_VERSION_PIN="${DANTESYNC_VERSION_PIN:-1.8.30}"
+# Bumped 2026-08-11 (same day, evening): fleet rolled to v1.8.32 (master sawtooth collapse,
+# dantesync issue 71 — ramp-aware agreement + 10s cadence + small-offset fast lane; strih canary
+# read residual 0us on 13/13 consecutive samples, PTP LOCK held; verified 8/8 boxes).
+# Bumped 2026-08-12: fleet rolled to v1.8.41 (dantesync issue 83, PR 84/86 — PTP-locked master
+# defers its UTC-phase step to a 2500us deadband, additively reporting it via ntp_deadband_us;
+# camera-box's own gate change for this is issue 1021; verified 8/8 boxes -- strih, stream,
+# cam1-4, imag-nb, dev1).
+DANTESYNC_VERSION_PIN="${DANTESYNC_VERSION_PIN:-1.8.41}"
 
 # --- PURE functions (no network, no SSH — unit-tested by sourcing this file) ------------------
 

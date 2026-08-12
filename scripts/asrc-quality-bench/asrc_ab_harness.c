@@ -20,10 +20,14 @@
  * Three modes:
  *   --mode quality       measure resampled-signal fidelity (THD+N via analyze_thdn.py) + CPU
  *                         cost, for a given engine-options config, at a given compensation ppm.
+ *                         --distance-ms overrides the compensation window (default: the
+ *                         pre-#1016 1000ms); --reissue-every / --max-reissues (issue 1016) isolate
+ *                         re-trigger-cadence effects -- see RESULTS-1016.md.
  *   --mode compensation  measure the ACTUAL achieved ppm (from real input/output sample counts)
  *                         vs the REQUESTED ppm, replicating obs-source.c's per-callback re-issue
  *                         cadence -- proves/disproves whether small requested ppm values actually
  *                         reach the resampler once integer sample-delta rounding is applied.
+ *                         --distance-ms / --max-reissues as above (issue 1016).
  *   --mode dumpopts       print the ACTUAL AVOption values a freshly-built context holds (before
  *                         and after swr_init) for a given --config -- makes RESULTS.md's "what
  *                         the library actually defaults to" claim independently reproducible
@@ -42,7 +46,11 @@
 
 #define SAMPLE_RATE 48000
 #define BLOCK_FRAMES 1024 /* AUDIO_OUTPUT_FRAMES, vendor/obs-studio/libobs/media-io/audio-io.h */
-#define COMPENSATION_DISTANCE_MS 1000 /* the ONE caller's hardcoded distance_ms, obs-source.c L4194 */
+/* Default distance_ms when --distance-ms is not passed: the PRE-#1016 caller value (1000ms), kept
+ * as the harness's own default so every issue-929 measurement in RESULTS.md still reproduces
+ * byte-for-byte without adding a flag. issue 1016 fixed the REAL caller (obs-source.c's
+ * ASRC_COMPENSATION_DISTANCE_MS) to 10000ms -- pass --distance-ms 10000 to reproduce THAT. */
+#define COMPENSATION_DISTANCE_MS 1000
 
 static double now_ns(void)
 {
@@ -131,6 +139,11 @@ static int mode_quality(int argc, char **argv)
     const char *out_path = NULL;
     int reissue_every = 1; /* blocks between compensation re-issues; 1 = every callback, matches
                              * obs-source.c's real asrc_process_audio() cadence exactly */
+    long max_reissues = -1; /* issue 1016: -1 = unlimited (default, matches real cadence); a
+                              * positive cap isolates whether swr_set_compensation's effect
+                              * "holds" indefinitely after a ramp completes, or REVERTS to 1:1 once
+                              * distance_ms elapses with no further reissue -- see RESULTS-1016.md */
+    uint32_t distance_ms = COMPENSATION_DISTANCE_MS;
 
     for (int i = 2; i < argc; i++) {
         if (!strcmp(argv[i], "--config") && i + 1 < argc)
@@ -145,6 +158,10 @@ static int mode_quality(int argc, char **argv)
             out_path = argv[++i];
         else if (!strcmp(argv[i], "--reissue-every") && i + 1 < argc)
             reissue_every = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--max-reissues") && i + 1 < argc)
+            max_reissues = atol(argv[++i]);
+        else if (!strcmp(argv[i], "--distance-ms") && i + 1 < argc)
+            distance_ms = (uint32_t)atoi(argv[++i]);
     }
     if (reissue_every < 1)
         reissue_every = 1;
@@ -171,6 +188,7 @@ static int mode_quality(int argc, char **argv)
     float outbuf[BLOCK_FRAMES * 4];
     double cpu_ns_total = 0.0;
     long blocks = 0;
+    long reissues_done = 0;
     double since_last_comp_ms = 0.0;
     const double block_ms = 1000.0 * BLOCK_FRAMES / SAMPLE_RATE;
 
@@ -182,13 +200,16 @@ static int mode_quality(int argc, char **argv)
             /* bypass: no resampler at all */
             fwrite(inbuf, sizeof(float), this_block, fout);
         } else {
-            if (ppm != 0.0 && (blocks % reissue_every) == 0) {
+            if (ppm != 0.0 && (blocks % reissue_every) == 0 && (max_reissues < 0 || reissues_done < max_reissues)) {
                 /* obs-source.c calls this on EVERY audio callback (reissue_every=1 is the real
                  * cadence) -- reissue_every>1 is a DIAGNOSTIC to isolate whether distortion comes
-                 * from the re-trigger cadence itself vs the resampler engine settings. */
+                 * from the re-trigger cadence itself vs the resampler engine settings.
+                 * max_reissues>=0 (issue 1016) additionally CAPS the total count -- isolates
+                 * whether compensation holds indefinitely or reverts once the ramp completes. */
                 double t0 = now_ns();
-                apply_compensation_ppm(ctx, ppm, COMPENSATION_DISTANCE_MS, SAMPLE_RATE);
+                apply_compensation_ppm(ctx, ppm, distance_ms, SAMPLE_RATE);
                 cpu_ns_total += now_ns() - t0;
+                reissues_done++;
             }
             const uint8_t *in_planes[1] = {(const uint8_t *)inbuf};
             uint8_t *out_planes[1] = {(uint8_t *)outbuf};
@@ -227,6 +248,10 @@ static int mode_compensation(int argc, char **argv)
     const char *config = "default";
     double ppm = 5.0;
     double duration_s = 20.0;
+    int reissue_every = 1;
+    long max_reissues = -1; /* issue 1016: -1 = unlimited (real cadence); see mode_quality's own
+                              * doc comment on this flag -- same holds-vs-reverts diagnostic. */
+    uint32_t distance_ms = COMPENSATION_DISTANCE_MS;
 
     for (int i = 2; i < argc; i++) {
         if (!strcmp(argv[i], "--config") && i + 1 < argc)
@@ -235,7 +260,15 @@ static int mode_compensation(int argc, char **argv)
             ppm = atof(argv[++i]);
         else if (!strcmp(argv[i], "--duration") && i + 1 < argc)
             duration_s = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--reissue-every") && i + 1 < argc)
+            reissue_every = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--max-reissues") && i + 1 < argc)
+            max_reissues = atol(argv[++i]);
+        else if (!strcmp(argv[i], "--distance-ms") && i + 1 < argc)
+            distance_ms = (uint32_t)atoi(argv[++i]);
     }
+    if (reissue_every < 1)
+        reissue_every = 1;
 
     struct SwrContext *ctx = make_resampler(config);
     if (!ctx) {
@@ -248,13 +281,19 @@ static int mode_compensation(int argc, char **argv)
     double phase = 0.0;
     float inbuf[BLOCK_FRAMES];
     float outbuf[BLOCK_FRAMES * 4];
+    long blocks = 0, reissues_done = 0;
 
     while (fed < total_in_frames) {
         int this_block = (int)((total_in_frames - fed) < BLOCK_FRAMES ? (total_in_frames - fed) : BLOCK_FRAMES);
         gen_tone_block(inbuf, this_block, 997.0, 0.5, &phase);
 
-        /* Called every callback, exactly like asrc_process_audio() -> obs-source.c L4194. */
-        apply_compensation_ppm(ctx, ppm, COMPENSATION_DISTANCE_MS, SAMPLE_RATE);
+        /* Called every callback by default (reissue_every=1), exactly like asrc_process_audio()
+         * -> obs-source.c's ASRC_COMPENSATION_DISTANCE_MS call site. --reissue-every/
+         * --max-reissues (issue 1016) are diagnostics, same as in mode_quality above. */
+        if ((blocks % reissue_every) == 0 && (max_reissues < 0 || reissues_done < max_reissues)) {
+            apply_compensation_ppm(ctx, ppm, distance_ms, SAMPLE_RATE);
+            reissues_done++;
+        }
 
         const uint8_t *in_planes[1] = {(const uint8_t *)inbuf};
         uint8_t *out_planes[1] = {(uint8_t *)outbuf};
@@ -265,6 +304,7 @@ static int mode_compensation(int argc, char **argv)
         }
         produced += got;
         fed += this_block;
+        blocks++;
     }
     uint8_t *out_planes[1] = {(uint8_t *)outbuf};
     int got;
@@ -273,8 +313,10 @@ static int mode_compensation(int argc, char **argv)
     swr_free(&ctx);
 
     double achieved_ppm = ((double)produced - (double)fed) / (double)fed * 1000000.0;
-    fprintf(stdout, "config=%s requested_ppm=%g in_frames=%ld out_frames=%ld achieved_ppm=%.4f\n", config, ppm, fed,
-            produced, achieved_ppm);
+    fprintf(stdout,
+            "config=%s requested_ppm=%g distance_ms=%u reissues_done=%ld in_frames=%ld out_frames=%ld "
+            "achieved_ppm=%.4f\n",
+            config, ppm, distance_ms, reissues_done, fed, produced, achieved_ppm);
     return 0;
 }
 

@@ -1247,6 +1247,24 @@ fn http_status_ntp(ts: u64, offset_us: i64, ntp_age_s_raw: &str, ntp_failed: boo
     )
 }
 
+/// http_status_ntp (above) plus the dantesync PR #84/#86 "ntp_deadband_us" field (#1021): the
+/// NTP master's own currently-active PTP-locked step-deferral threshold. `deadband_raw` is a
+/// plain integer string or the literal "null" (a client node reports explicit null).
+fn http_status_ntp_deadband(
+    ts: u64,
+    offset_us: i64,
+    ntp_age_s_raw: &str,
+    ntp_failed: bool,
+    deadband_raw: &str,
+) -> String {
+    format!(
+        "{{\"gm_source_ip\":\"10.77.9.184\",\"settled\":true,\"updated_ts\":{ts},\
+         \"is_locked\":true,\"ntp_offset_us\":{offset_us},\"mode\":\"NANO\",\
+         \"ntp_failed\":{ntp_failed},\"ntp_updated_ts\":{ts},\"ntp_age_s\":{ntp_age_s_raw},\
+         \"ntp_deadband_us\":{deadband_raw}}}"
+    )
+}
+
 // --- Fixture class 1: FRESH (new fields present, in window) -- the happy path is unchanged ---
 
 #[test]
@@ -1678,5 +1696,279 @@ fn gate_ntp_master_validation_skipped_for_linux_only_invocations_1014() {
         code, 0,
         "a Linux-only invocation must never be blocked by the master-name validation (no \
          --win-http node is configured at all). stdout={stdout} stderr={stderr}"
+    );
+}
+
+// --- #1021: the master's fixed median bound must adapt to a live PTP-locked deadband -----------
+//
+// dantesync PR #84/#86 (closes dantesync issue 83): a genuinely PTP-locked master now DEFERS its
+// periodic UTC-phase step to a deadband (live-tuned to 2500us, the #1021 supervisor comment
+// 2026-08-12) instead of a tight ~200us threshold, and reports the currently-active threshold as
+// "ntp_deadband_us" in its own /status. The pre-#1021 gate grades the master's median against the
+// FIXED GATE_BOUND_US (2000us) regardless -- a healthy master's own ramp toward the deadband would
+// then false-DRIFT purely from where in its correction cycle a 30s sample window landed. Confirmed
+// live 2026-08-12: curl http://10.77.9.202:8898/status returned ntp_offset_us=2398,
+// ntp_deadband_us=2500 while genuinely PTP-locked (mode NANO, is_locked true) -- ALREADY above the
+// fixed 2000us bound.
+
+#[test]
+fn gate_win_http_ntp_master_with_deadband_widens_bound_past_false_drift_1021() {
+    // The live shape: a healthy master's median (~2850us) sits between the fixed 2000us bound and
+    // its own reported 2500us deadband. Before #1021 this false-DRIFTs; after, it must PASS.
+    let base = now_epoch();
+    let responses = vec![
+        http_status_ntp_deadband(base, 2800, "2", false, "2500"),
+        http_status_ntp_deadband(base + 5, 2900, "3", false, "2500"),
+        http_status_ntp_deadband(base + 10, 2850, "2", false, "2500"),
+    ];
+    let p = write_multi_read_fixture("strih_1021_deadband_widens_bound", &responses);
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--samples",
+            "3",
+            "--min-distinct",
+            "3",
+            "--window-s",
+            "0",
+        ],
+        &[("DANTESYNC_GATE_WIN_HTTP_STRIH", &p.display().to_string())],
+    );
+    assert_eq!(
+        code, 0,
+        "a master reporting ntp_deadband_us=2500 with a ~2850us median (a healthy by-design ramp) \
+         must PASS, not false-DRIFT against the fixed 2000us bound. stdout={stdout} stderr={stderr}"
+    );
+    assert!(stdout.contains("GATE PASS"), "stdout: {stdout}");
+    assert!(!stdout.contains("DRIFT"), "stdout: {stdout}");
+}
+
+#[test]
+fn gate_win_http_ntp_master_without_deadband_field_keeps_the_fixed_bound_unchanged_1021() {
+    // Backward compat: a pre-dantesync-#84 master payload (no ntp_deadband_us field at all) must
+    // grade EXACTLY as before -- the same ~2850us median that PASSES with the field present (see
+    // the sibling test above) must still DRIFT here, against the unmodified fixed GATE_BOUND_US.
+    let base = now_epoch();
+    let responses = vec![
+        http_status_ntp(base, 2800, "2", false),
+        http_status_ntp(base + 5, 2900, "3", false),
+        http_status_ntp(base + 10, 2850, "2", false),
+    ];
+    let p = write_multi_read_fixture("strih_1021_no_deadband_field", &responses);
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--samples",
+            "3",
+            "--min-distinct",
+            "3",
+            "--window-s",
+            "0",
+        ],
+        &[("DANTESYNC_GATE_WIN_HTTP_STRIH", &p.display().to_string())],
+    );
+    assert_eq!(
+        code, 20,
+        "no ntp_deadband_us field -> the unmodified fixed bound -> must still DRIFT exactly like \
+         before #1021 (rollout-window backward compat). stdout={stdout} stderr={stderr}"
+    );
+    assert!(stdout.contains("DRIFT"), "stdout: {stdout}");
+}
+
+#[test]
+fn gate_win_http_ntp_master_with_null_deadband_keeps_the_fixed_bound_unchanged_1021() {
+    // A client-shaped payload explicitly reports ntp_deadband_us:null (dantesync PR #84/#86) --
+    // must fall back to the unmodified fixed bound exactly like an absent field.
+    let base = now_epoch();
+    let responses = vec![
+        http_status_ntp_deadband(base, 2800, "2", false, "null"),
+        http_status_ntp_deadband(base + 5, 2900, "3", false, "null"),
+        http_status_ntp_deadband(base + 10, 2850, "2", false, "null"),
+    ];
+    let p = write_multi_read_fixture("strih_1021_null_deadband", &responses);
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--samples",
+            "3",
+            "--min-distinct",
+            "3",
+            "--window-s",
+            "0",
+        ],
+        &[("DANTESYNC_GATE_WIN_HTTP_STRIH", &p.display().to_string())],
+    );
+    assert_eq!(
+        code, 20,
+        "ntp_deadband_us:null must fall back to the unmodified fixed bound, same as absent. \
+         stdout={stdout} stderr={stderr}"
+    );
+    assert!(stdout.contains("DRIFT"), "stdout: {stdout}");
+}
+
+#[test]
+fn gate_win_http_ntp_master_still_drifts_beyond_deadband_plus_margin_1021() {
+    // #1021 is not "the master can never fail once it reports a deadband" -- a genuine drift far
+    // beyond deadband+margin must still DRIFT.
+    let base = now_epoch();
+    let responses = vec![
+        http_status_ntp_deadband(base, 10000, "2", false, "2500"),
+        http_status_ntp_deadband(base + 5, 10100, "3", false, "2500"),
+        http_status_ntp_deadband(base + 10, 9900, "2", false, "2500"),
+    ];
+    let p = write_multi_read_fixture("strih_1021_genuine_drift_with_deadband", &responses);
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--samples",
+            "3",
+            "--min-distinct",
+            "3",
+            "--window-s",
+            "0",
+        ],
+        &[("DANTESYNC_GATE_WIN_HTTP_STRIH", &p.display().to_string())],
+    );
+    assert_eq!(
+        code, 20,
+        "a genuine ~10ms drift far beyond deadband+margin (2500+1000=3500us default) must still \
+         DRIFT. stdout={stdout} stderr={stderr}"
+    );
+    assert!(stdout.contains("DRIFT"), "stdout: {stdout}");
+}
+
+#[test]
+fn gate_win_http_client_node_ignores_its_own_deadband_field_1021() {
+    // Client rows are byte-for-byte untouched by #1021 -- even if a non-master node's payload
+    // somehow carried a numeric ntp_deadband_us (never expected live -- clients report null), the
+    // deadband widening must ONLY ever apply to the GATE_NTP_MASTER_NAME/median-only node.
+    // "stream" here is graded as an ordinary client (--ntp-master "" opts out of the master
+    // concept entirely for this invocation, since "stream" is the only configured node).
+    let base = now_epoch();
+    let responses = vec![
+        http_status_ntp_deadband(base, 2800, "2", false, "2500"),
+        http_status_ntp_deadband(base + 5, 2900, "3", false, "2500"),
+        http_status_ntp_deadband(base + 10, 2850, "2", false, "2500"),
+    ];
+    let p = write_multi_read_fixture("stream_1021_client_ignores_deadband", &responses);
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "stream=10.77.9.204",
+            "--samples",
+            "3",
+            "--min-distinct",
+            "3",
+            "--window-s",
+            "0",
+            "--ntp-master",
+            "",
+        ],
+        &[("DANTESYNC_GATE_WIN_HTTP_STREAM", &p.display().to_string())],
+    );
+    assert_eq!(
+        code, 20,
+        "a client node's own ntp_deadband_us must never widen ITS bound -- must still DRIFT \
+         against the fixed 2000us bound. stdout={stdout} stderr={stderr}"
+    );
+    assert!(stdout.contains("DRIFT"), "stdout: {stdout}");
+}
+
+#[test]
+fn gate_deadband_margin_us_zero_still_drifts_1021() {
+    // --deadband-margin-us 0 -> effective bound == the bare deadband (2500us) -> the same
+    // ~2850-2900us median that PASSES with the default 1000us margin (see the sibling test below)
+    // must DRIFT here, proving the flag genuinely controls the margin rather than being ignored.
+    let base = now_epoch();
+    let responses = vec![
+        http_status_ntp_deadband(base, 2800, "2", false, "2500"),
+        http_status_ntp_deadband(base + 5, 2900, "3", false, "2500"),
+        http_status_ntp_deadband(base + 10, 2850, "2", false, "2500"),
+    ];
+    let p = write_multi_read_fixture("strih_1021_margin_zero", &responses);
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--samples",
+            "3",
+            "--min-distinct",
+            "3",
+            "--window-s",
+            "0",
+            "--deadband-margin-us",
+            "0",
+        ],
+        &[("DANTESYNC_GATE_WIN_HTTP_STRIH", &p.display().to_string())],
+    );
+    assert_eq!(
+        code, 20,
+        "--deadband-margin-us 0 -> effective bound == deadband (2500us) -> a ~2850-2900us median \
+         must still DRIFT. stdout={stdout} stderr={stderr}"
+    );
+    assert!(stdout.contains("DRIFT"), "stdout: {stdout}");
+}
+
+#[test]
+fn gate_deadband_margin_us_default_covers_observed_overshoot_1021() {
+    // The default margin (1000us) must be wide enough to cover the live-observed step overshoot
+    // (peak 2987us on a 2500us deadband, the #1021 supervisor comment) without any explicit flag.
+    let base = now_epoch();
+    let responses = vec![
+        http_status_ntp_deadband(base, 2950, "2", false, "2500"),
+        http_status_ntp_deadband(base + 5, 2987, "3", false, "2500"),
+        http_status_ntp_deadband(base + 10, 2900, "2", false, "2500"),
+    ];
+    let p = write_multi_read_fixture("strih_1021_margin_default_overshoot", &responses);
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--samples",
+            "3",
+            "--min-distinct",
+            "3",
+            "--window-s",
+            "0",
+        ],
+        &[("DANTESYNC_GATE_WIN_HTTP_STRIH", &p.display().to_string())],
+    );
+    assert_eq!(
+        code, 0,
+        "the default 1000us margin must cover the live-observed ~487us peak overshoot with room \
+         to spare. stdout={stdout} stderr={stderr}"
+    );
+    assert!(stdout.contains("GATE PASS"), "stdout: {stdout}");
+}
+
+#[test]
+fn help_describes_the_deadband_margin_flag_1021() {
+    let (code, stdout, _stderr) = run_gate(&["--help"]);
+    assert_eq!(code, 0, "--help must exit 0");
+    assert!(
+        stdout.contains("--deadband-margin-us"),
+        "usage text must document the new flag: {stdout}"
+    );
+    assert!(
+        stdout.contains("ntp_deadband_us"),
+        "usage text must explain what the flag widens the master's bound against: {stdout}"
     );
 }

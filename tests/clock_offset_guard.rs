@@ -1819,3 +1819,135 @@ fn sampled_offset_check_accepts_a_caller_supplied_extra_note() {
         "a 7th positional NOTE argument must be appended verbatim: {out:?}"
     );
 }
+
+// --- ntp_deadband_us_from_pipe_json / ntp_master_effective_bound_us (#1021) --------------------
+//
+// dantesync PR #84/#86 (closes dantesync issue 83): a genuinely PTP-locked NTP master now
+// deliberately DEFERS its periodic UTC-phase step to a "deadband" (live-tuned to 2500us, the
+// supervisor's 2026-08-12 comment on #1021 -- NOT the 25ms originally filed) instead of the old
+// tight ~200us threshold, and additively reports the currently-active threshold as
+// "ntp_deadband_us" in its own /status. A healthy master's own ntp_offset_us therefore legitimately
+// ramps up toward roughly that value between corrections -- the fixed GATE_BOUND_US (2000us, sized
+// for a client's tight NTP-vs-LAN-master offset) would false-DRIFT on this by-design behavior.
+// These tests pin the two new pure functions that let the NTP-master row's median bound adapt to
+// the live deadband while leaving every other node's bound (and the master's own bound when the
+// field is absent/null) exactly as before.
+
+/// A minimal DanteSync status-pipe JSON payload carrying only the fields these two new parsers
+/// care about (updated_ts/offset are irrelevant noise for this narrow test, included only so the
+/// payload still parses like a real capture).
+fn pipe_json_deadband(deadband_raw: &str) -> String {
+    format!(
+        "{{\"updated_ts\":1000,\"ntp_offset_us\":100,\"is_locked\":true,\"mode\":\"NANO\",\
+         \"ntp_deadband_us\":{deadband_raw}}}"
+    )
+}
+
+#[test]
+fn ntp_deadband_us_from_pipe_json_reads_numeric_null_and_absent_1021() {
+    let numeric = pipe_json_deadband("2500");
+    let out = run_sourced(
+        "ntp_deadband_us_from_pipe_json \"$JSON\"",
+        &[("JSON", numeric.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "2500",
+        "must read a numeric ntp_deadband_us: {out:?}"
+    );
+
+    let never = pipe_json_deadband("null");
+    let out = run_sourced(
+        "ntp_deadband_us_from_pipe_json \"$JSON\"",
+        &[("JSON", never.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "null",
+        "must read the literal null verbatim (a client node's own reported shape), never coerce \
+         it to empty or 0: {out:?}"
+    );
+
+    let absent = "{\"updated_ts\":1000,\"ntp_offset_us\":100,\"is_locked\":true,\"mode\":\"NANO\"}";
+    let out = run_sourced(
+        "ntp_deadband_us_from_pipe_json \"$JSON\"",
+        &[("JSON", absent)],
+    );
+    assert_eq!(
+        out.trim(),
+        "",
+        "a pre-dantesync-#84 payload with no ntp_deadband_us field at all -> empty (absent): {out:?}"
+    );
+}
+
+#[test]
+fn ntp_master_effective_bound_us_widens_the_bound_when_deadband_present_1021() {
+    let status = pipe_json_deadband("2500");
+    let out = run_sourced(
+        "ntp_master_effective_bound_us \"$JSON\" 2000 1000",
+        &[("JSON", status.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "3500",
+        "max(2000, 2500+1000) = 3500 -- the deadband+margin floor wins over the fixed bound: {out:?}"
+    );
+}
+
+#[test]
+fn ntp_master_effective_bound_us_never_lowers_below_the_fixed_bound_1021() {
+    // A tiny deadband+margin must never DROP the effective bound below the caller's own
+    // GATE_BOUND_US -- the widening is a FLOOR, never a ceiling override.
+    let status = pipe_json_deadband("50");
+    let out = run_sourced(
+        "ntp_master_effective_bound_us \"$JSON\" 2000 100",
+        &[("JSON", status.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "2000",
+        "max(2000, 50+100=150) = 2000 -- the fixed bound must never be lowered: {out:?}"
+    );
+}
+
+#[test]
+fn ntp_master_effective_bound_us_falls_back_on_null_absent_and_negative_deadband_1021() {
+    let cases = [
+        pipe_json_deadband("null"),
+        "{\"updated_ts\":1000,\"ntp_offset_us\":100}".to_string(),
+        pipe_json_deadband("-5"),
+    ];
+    for status in cases {
+        let out = run_sourced(
+            "ntp_master_effective_bound_us \"$JSON\" 2000 1000",
+            &[("JSON", status.as_str())],
+        );
+        assert_eq!(
+            out.trim(),
+            "2000",
+            "null/absent/negative ntp_deadband_us must fall back to the unmodified fixed bound, \
+             the exact pre-#1021 behavior (status={status}): {out:?}"
+        );
+    }
+}
+
+#[test]
+fn ntp_master_effective_bound_us_fails_closed_on_malformed_bound_or_margin_1021() {
+    // #595's bash gotcha: an unvalidated numeric input fed into a `[ N -gt M ]` comparison can
+    // silently misbehave rather than error. Both BOUND_US and MARGIN_US are validated with
+    // `grep -qE '^[0-9]+$'` BEFORE any arithmetic -- a malformed one must fall back to the raw
+    // (unmodified) bound text, never crash and never silently invent a number.
+    let status = pipe_json_deadband("2500");
+    for (bound, margin) in [("abc", "1000"), ("2000", "abc"), ("-5", "1000")] {
+        let out = run_sourced(
+            &format!("ntp_master_effective_bound_us \"$JSON\" '{bound}' '{margin}'"),
+            &[("JSON", status.as_str())],
+        );
+        assert_eq!(
+            out.trim(),
+            bound,
+            "a malformed BOUND_US/MARGIN_US must fall back to the RAW (unmodified) bound text, \
+             never guess a number (bound={bound} margin={margin}): {out:?}"
+        );
+    }
+}

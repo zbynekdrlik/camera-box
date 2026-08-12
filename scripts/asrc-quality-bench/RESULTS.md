@@ -58,6 +58,8 @@ Re-issuing before an in-flight ramp completes (`swr_set_compensation` "replaces 
 compensation on each call", per the OBS wrapper's own doc comment) is what produces the audible
 distortion -- not the resampler's static filter quality. This is a servo re-trigger-cadence /
 rounding problem, filed separately as **#1016** (out of scope for issue 929's own ask).
+**Update:** #1016's quantization-rounding half is fixed; its re-trigger-cadence half is now
+tracked as **#1019** with further empirical evidence -- see `RESULTS-1016.md` in this directory.
 
 ## 4. CPU cost (ns per 1024-frame block; a block's own real-time budget is ~21,333,333 ns)
 

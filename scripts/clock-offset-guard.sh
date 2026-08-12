@@ -805,6 +805,84 @@ sampled_offset_check() {
   esac
 }
 
+# --- NTP-master PTP-locked deadband widening (#1021, dantesync PR #84/#86) ---------------------
+#
+# dantesync issue 83: a genuinely PTP-locked master now deliberately DEFERS its periodic UTC-phase
+# step to a "deadband" (live-tuned to 2500us -- NOT the 25ms originally filed; see the #1021
+# supervisor comment 2026-08-12) instead of the old tight ~200us threshold, because chasing the
+# Dante grandmaster's own real oscillator error (measured live on strih: ~38-66ppm) in the
+# UTC-phase step every ~20-40s served no purpose and produced a visible staircase. Consequence: a
+# healthy master's OWN "ntp_offset_us" now legitimately ramps anywhere in roughly
+# [0, ntp_deadband_us) between corrections (a multi-minute cycle at that ppm range), rather than
+# staying within a couple hundred us like before. dantesync additively reports the CURRENTLY
+# active threshold as "ntp_deadband_us" in its own /status (null on a client node; absent on a
+# pre-dantesync-#84 payload).
+#
+# scripts/dantesync-gate.sh's GATE_NTP_MASTER_NAME/"median-only" mode (#1014, above) already skips
+# the spread/stability check for the master -- but its MEDIAN (location) bound is deliberately
+# NEVER skipped in either mode (this file's own #1014 doc comment). Without this widening, a 30s
+# sample window landing anywhere in the later portion of the master's healthy ramp would grade a
+# perfectly healthy master's median against the FIXED GATE_BOUND_US (2000us, sized for a client's
+# tight NTP-vs-LAN-master offset) and false-DRIFT.
+
+# ntp_deadband_us_from_pipe_json TEXT -> the RAW text of the "ntp_deadband_us" JSON value: a
+# plain (possibly-negative, though never expected live) integer string, the literal "null", or ""
+# if the field is absent entirely (a pre-dantesync-#84 payload, master or client). Mirrors
+# ntp_age_s_raw_from_pipe_json's raw-accessor shape above, kept unparsed so a caller can
+# distinguish "absent" from "present but null" if it ever needs to.
+ntp_deadband_us_from_pipe_json() {
+  printf '%s\n' "$1" \
+    | grep -oE '"ntp_deadband_us"[[:space:]]*:[[:space:]]*(null|-?[0-9]+)' \
+    | sed -n 's/.*:[[:space:]]*\(null\|-\{0,1\}[0-9][0-9]*\).*/\1/p' \
+    | tail -1 || true
+}
+
+# ntp_master_effective_bound_us STATUS_JSON BOUND_US MARGIN_US -> the bound to grade the NTP
+# master node's MEDIAN against (#1021). When STATUS_JSON carries a valid non-negative numeric
+# "ntp_deadband_us", the effective bound is max(BOUND_US, ntp_deadband_us + MARGIN_US) -- never
+# LOWER than the caller's own BOUND_US (a widening FLOOR, never a ceiling override), and widened
+# by MARGIN_US to cover a healthy step's OVERSHOOT past the deadband threshold before the next
+# correction actually lands (dantesync polls at roughly a 10s cadence; at strih's live measured
+# 38-66ppm oscillator error that is up to ~660us of extra ramp between polls -- a live capture
+# topped out at ~487us overshoot on a 2500us deadband, i.e. offset 2987us; see #1021's design
+# comment on the issue for the full derivation the default MARGIN_US=1000 is sized against).
+#
+# "null" / absent / non-numeric / negative ntp_deadband_us, OR a malformed BOUND_US/MARGIN_US
+# (validated with `grep -qE '^[0-9]+$'` BEFORE any arithmetic -- the #595 bash gotcha: an
+# unvalidated numeric fed into a `[ N -gt M ]` comparison can silently misbehave rather than
+# error), falls back to the UNMODIFIED BOUND_US -- exact pre-#1021 behavior, unchanged. This is
+# both the backward-compat path during a partial fleet rollout (a pre-dantesync-#84 master) AND
+# the normal path for every non-master node -- this function is only ever called by
+# dantesync-gate.sh's grade_http_node for the GATE_NTP_MASTER_NAME/"median-only" node; a client
+# row's own bound is never touched regardless of what its payload happens to contain.
+ntp_master_effective_bound_us() {
+  local status="$1" bound="$2" margin="$3" deadband floor
+  if ! printf '%s' "$bound" | grep -qE '^[0-9]+$'; then
+    printf '%s' "$bound"
+    return 0
+  fi
+  if ! printf '%s' "$margin" | grep -qE '^[0-9]+$'; then
+    printf '%s' "$bound"
+    return 0
+  fi
+  deadband="$(ntp_deadband_us_from_pipe_json "$status")"
+  if [ -z "$deadband" ] || [ "$deadband" = "null" ] \
+     || ! printf '%s' "$deadband" | grep -qE '^-?[0-9]+$'; then
+    printf '%s' "$bound"
+    return 0
+  fi
+  if [ "$deadband" -lt 0 ]; then
+    printf '%s' "$bound"
+    return 0
+  fi
+  floor=$((deadband + margin))
+  if [ "$floor" -gt "$bound" ]; then
+    printf '%s' "$floor"
+  else
+    printf '%s' "$bound"
+  fi
+}
+
 # offset_verdict_check LABEL JOURNAL FRESHNESS_S BOUND_US -> prints a status line; returns 0 OK /
 # 2 DRIFT / 3 UNKNOWN. The freshness-aware sibling of offset_check (#550/#591/#595/#607): it grades
 # dantesync_offset_verdict's "ok"/"drift"/"stale"/"absent" verdict instead of pairing the age-blind
