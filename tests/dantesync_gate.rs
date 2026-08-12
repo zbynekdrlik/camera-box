@@ -2436,3 +2436,397 @@ fn help_describes_the_client_chase_ceiling_flag_1022() {
         "usage text must document the new flag: {stdout}"
     );
 }
+
+// --- #1022 spread-side completion: a single master step can trip MULTIPLE clients' SPREAD -----
+//
+// The median fix (client_chase_bound_us) works correctly -- a live E2E rerun on the merged round
+// showed every client's MEDIAN graded against the widened envelope exactly as designed. But the
+// SAME master step also inflates a client's SPREAD, left at the fixed 2000us stability bound by
+// design (client_chase_bound_us only ever widens the median/location check). Because the step is
+// on ONE clock shared by the whole fleet, the SAME step can land inside MULTIPLE clients' sampling
+// windows in the SAME run -- the live rerun tripped cam1, cam2, AND stream simultaneously:
+//
+//   cam1   UNSTABLE (median 0us <= 3500us bound; spread 2682us > 2000us stability)
+//   cam2   UNSTABLE (median 0us <= 3500us bound; spread 2577us > 2000us stability)
+//   strih  OK       (median 1220us <= 3500us bound; spread 384us)
+//   stream UNSTABLE (median 2822us <= 3500us bound; spread 2837us > 2000us stability)
+//   !! GATE FAILED: 3 node(s) DRIFTED or PTP-DEGRADED.  (exit 20)
+//
+// The fix: a CLIENT row whose verdict is "unstable" (median in bound, spread not) AND whose
+// worst sample still fits the SAME bound gets ONE fresh resample round before failing --
+// dantesync-gate.sh's grade_http_node calls should_resample_for_chase, and on "yes" re-gathers
+// via gather_http_samples and grades THAT round instead. These tests reproduce the EXACT live
+// numbers above (each client's fixture serves 3 "chase" responses for the first round, then 3
+// "recovered" responses for the resample round -- the SAME write_multi_read_fixture counter
+// mechanism naturally serves them in that order across the two gather_http_samples calls).
+
+#[test]
+fn gate_reproduces_the_live_three_client_simultaneous_chase_shape_and_recovers_on_resample_1022() {
+    let base = now_epoch();
+    // strih (master): median 1220us, spread 384us (reference only, never gated) -- no resample,
+    // the master's own median-only row never has a spread verdict at all. Only 3 responses since
+    // the master is never resampled.
+    let strih_responses = vec![
+        http_status_ntp_deadband(base, 1200, "2", false, "2500"),
+        http_status_ntp_deadband(base + 5, 1220, "3", false, "2500"),
+        http_status_ntp_deadband(base + 10, 1584, "2", false, "2500"),
+    ];
+    let p_strih = write_multi_read_fixture("strih_1022_spread_live_shape", &strih_responses);
+    let p_priming = write_win_http_fixture(
+        "strih_1022_spread_live_priming",
+        &http_status_ntp_deadband(base, 1220, "2", false, "2500"),
+    );
+
+    // cam1: chase round reproduces "median 0us; spread 2682us" EXACTLY (0, 0, 2682 -> sorted
+    // median position 2 = 0, spread = 2682-0). Recovered round: tight, near-baseline.
+    let cam1_responses = vec![
+        http_status_ntp(base, 0, "2", false),
+        http_status_ntp(base + 5, 0, "3", false),
+        http_status_ntp(base + 10, 2682, "2", false),
+        http_status_ntp(base + 15, 10, "4", false),
+        http_status_ntp(base + 20, 20, "5", false),
+        http_status_ntp(base + 25, 15, "6", false),
+    ];
+    let p_cam1 = write_multi_read_fixture("cam1_1022_spread_live_shape", &cam1_responses);
+
+    // cam2: chase round reproduces "median 0us; spread 2577us" EXACTLY.
+    let cam2_responses = vec![
+        http_status_ntp(base, 0, "2", false),
+        http_status_ntp(base + 5, 0, "3", false),
+        http_status_ntp(base + 10, 2577, "2", false),
+        http_status_ntp(base + 15, 5, "4", false),
+        http_status_ntp(base + 20, 15, "5", false),
+        http_status_ntp(base + 25, 10, "6", false),
+    ];
+    let p_cam2 = write_multi_read_fixture("cam2_1022_spread_live_shape", &cam2_responses);
+
+    // stream: chase round reproduces "median 2822us; spread 2837us" EXACTLY (0, 2822, 2837 ->
+    // sorted median position 2 = 2822, spread = 2837-0).
+    let stream_responses = vec![
+        http_status_ntp(base, 0, "2", false),
+        http_status_ntp(base + 5, 2822, "3", false),
+        http_status_ntp(base + 10, 2837, "2", false),
+        http_status_ntp(base + 15, 40, "4", false),
+        http_status_ntp(base + 20, 55, "5", false),
+        http_status_ntp(base + 25, 50, "6", false),
+    ];
+    let p_stream = write_multi_read_fixture("stream_1022_spread_live_shape", &stream_responses);
+
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "cam1=10.77.9.61 cam2=10.77.9.62",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--win-http",
+            "stream=10.77.9.204",
+            "--samples",
+            "3",
+            "--min-distinct",
+            "3",
+            "--window-s",
+            "0",
+            "--chase-resample-delay-s",
+            "0",
+        ],
+        &[
+            (
+                "DANTESYNC_GATE_WIN_HTTP_STRIH",
+                &p_strih.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_WIN_HTTP_STREAM",
+                &p_stream.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_LINUX_HTTP_CAM1",
+                &p_cam1.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_LINUX_HTTP_CAM2",
+                &p_cam2.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_MASTER_DEADBAND_STATUS",
+                &p_priming.display().to_string(),
+            ),
+        ],
+    );
+    assert_eq!(
+        code, 0,
+        "the exact live 3-simultaneous-UNSTABLE shape must recover via a one-time resample and \
+         PASS. stdout={stdout} stderr={stderr}"
+    );
+    assert!(stdout.contains("GATE PASS"), "stdout: {stdout}");
+    assert!(!stdout.contains("UNSTABLE"), "stdout: {stdout}");
+    assert!(!stdout.contains("DRIFT"), "stdout: {stdout}");
+    for name in ["cam1", "cam2", "stream"] {
+        let line = stdout
+            .lines()
+            .find(|l| l.trim_start().starts_with(name))
+            .unwrap_or_else(|| panic!("no {name} report line in stdout: {stdout}"));
+        assert!(
+            line.contains("resampled once"),
+            "{name} must report that it was resampled: {line:?}"
+        );
+    }
+}
+
+#[test]
+fn gate_resample_with_no_further_distinct_data_reports_unknown_never_a_stale_or_false_pass_1022() {
+    // Real edge case: a resample-eligible node (exact live cam1 shape: median 0us, spread 2682us,
+    // worst sample within the envelope) whose fixture has NOTHING further to give -- only 3
+    // responses total, so write_multi_read_fixture CLAMPS every call past the 3rd to the LAST
+    // entry (2682) -- gets a resample round whose 3 reads are all BYTE-IDENTICAL, including the
+    // SAME updated_ts. distinct_offset_samples_us's own "the daemon re-serving its cached value"
+    // dedup (#836 point 5) then collapses those to a SINGLE distinct sample -- fewer than
+    // --min-distinct, so the FINAL grade is "insufficient" -> UNKNOWN, never a silent PASS
+    // (median 2682, spread 0 would otherwise look perfectly healthy) and never the STALE original
+    // "unstable" verdict either. The resample note must still appear -- the resample WAS
+    // attempted, it just could not produce enough independent data to grade.
+    let base = now_epoch();
+    let strih_responses = vec![
+        http_status_ntp_deadband(base, 1200, "2", false, "2500"),
+        http_status_ntp_deadband(base + 5, 1220, "3", false, "2500"),
+        http_status_ntp_deadband(base + 10, 1584, "2", false, "2500"),
+    ];
+    let p_strih = write_multi_read_fixture("strih_1022_spread_baseline", &strih_responses);
+    let p_priming = write_win_http_fixture(
+        "strih_1022_spread_baseline_priming",
+        &http_status_ntp_deadband(base, 1220, "2", false, "2500"),
+    );
+    let cam1_responses = vec![
+        http_status_ntp(base, 0, "2", false),
+        http_status_ntp(base + 5, 0, "3", false),
+        http_status_ntp(base + 10, 2682, "2", false),
+    ];
+    let p_cam1 = write_multi_read_fixture("cam1_1022_spread_baseline", &cam1_responses);
+
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "cam1=10.77.9.61",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--samples",
+            "3",
+            "--min-distinct",
+            "3",
+            "--window-s",
+            "0",
+            "--chase-resample-delay-s",
+            "0",
+        ],
+        &[
+            (
+                "DANTESYNC_GATE_WIN_HTTP_STRIH",
+                &p_strih.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_LINUX_HTTP_CAM1",
+                &p_cam1.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_MASTER_DEADBAND_STATUS",
+                &p_priming.display().to_string(),
+            ),
+        ],
+    );
+    assert_eq!(
+        code, 11,
+        "a resample that cannot gather enough independent data must be INCOMPLETE (11), never a \
+         silent pass. stdout={stdout} stderr={stderr}"
+    );
+    let cam1_line = stdout
+        .lines()
+        .find(|l| l.trim_start().starts_with("cam1"))
+        .unwrap_or_else(|| panic!("no cam1 report line in stdout: {stdout}"));
+    assert!(
+        cam1_line.contains("UNKNOWN") && cam1_line.contains("only 1 distinct sample"),
+        "the clamped-repeat resample must collapse to a single distinct sample -> UNKNOWN, never \
+         a false PASS (spread 0) or the stale original UNSTABLE verdict: {cam1_line:?}"
+    );
+    assert!(
+        cam1_line.contains("resampled once"),
+        "the resample must still be noted as attempted, even though it couldn't gather enough \
+         new data: {cam1_line:?}"
+    );
+}
+
+#[test]
+fn gate_client_row_persistent_scatter_still_fails_after_the_resample_1022() {
+    // resample-once is a literal ONE-SHOT, never a retry loop: a node whose resample round is
+    // ALSO unstable (even though every individual sample stays inside the envelope) must still
+    // FAIL, grading the RESAMPLED numbers -- "sustained ... must still fail" even under #1022.
+    let base = now_epoch();
+    let strih_responses = vec![
+        http_status_ntp_deadband(base, 2400, "2", false, "2500"),
+        http_status_ntp_deadband(base + 5, 2500, "3", false, "2500"),
+        http_status_ntp_deadband(base + 10, 2450, "2", false, "2500"),
+    ];
+    let p_strih = write_multi_read_fixture("strih_1022_persistent_master", &strih_responses);
+    let p_priming = write_win_http_fixture(
+        "strih_1022_persistent_priming",
+        &http_status_ntp_deadband(base, 2450, "2", false, "2500"),
+    );
+    // Chase round: median 0, spread 2600 (max 2600 <= 3500 bound) -> unstable, resample fires.
+    // Resample round: median 0, spread 2500 -- STILL unstable (both rounds' worst sample stays
+    // inside the envelope the whole time, proving this is NOT the "worst sample exceeds bound"
+    // skip path -- it genuinely resamples and STILL fails).
+    let stream_responses = vec![
+        http_status_ntp(base, 0, "2", false),
+        http_status_ntp(base + 5, 0, "3", false),
+        http_status_ntp(base + 10, 2600, "2", false),
+        http_status_ntp(base + 15, 0, "4", false),
+        http_status_ntp(base + 20, 0, "5", false),
+        http_status_ntp(base + 25, 2500, "6", false),
+    ];
+    let p_stream = write_multi_read_fixture("stream_1022_persistent_client", &stream_responses);
+
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--win-http",
+            "stream=10.77.9.204",
+            "--samples",
+            "3",
+            "--min-distinct",
+            "3",
+            "--window-s",
+            "0",
+            "--chase-resample-delay-s",
+            "0",
+        ],
+        &[
+            (
+                "DANTESYNC_GATE_WIN_HTTP_STRIH",
+                &p_strih.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_WIN_HTTP_STREAM",
+                &p_stream.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_MASTER_DEADBAND_STATUS",
+                &p_priming.display().to_string(),
+            ),
+        ],
+    );
+    assert_eq!(
+        code, 20,
+        "a resample that is ALSO unstable must still fail the gate. stdout={stdout} stderr={stderr}"
+    );
+    let stream_line = stdout
+        .lines()
+        .find(|l| l.trim_start().starts_with("stream"))
+        .unwrap_or_else(|| panic!("no stream report line in stdout: {stdout}"));
+    assert!(
+        stream_line.contains("UNSTABLE") && stream_line.contains("spread 2500us"),
+        "must report the RESAMPLED round's own numbers (spread 2500us), not the original chase \
+         round's (spread 2600us) -- proves the final verdict grades the fresh data: {stream_line:?}"
+    );
+    assert!(
+        stream_line.contains("resampled once"),
+        "must still note a resample was attempted, even though it did not rescue the node: \
+         {stream_line:?}"
+    );
+}
+
+#[test]
+fn gate_chase_resample_delay_flag_value_is_reflected_in_the_report_note_1022() {
+    let base = now_epoch();
+    let strih_responses = vec![
+        http_status_ntp_deadband(base, 2400, "2", false, "2500"),
+        http_status_ntp_deadband(base + 5, 2500, "3", false, "2500"),
+        http_status_ntp_deadband(base + 10, 2450, "2", false, "2500"),
+    ];
+    let p_strih = write_multi_read_fixture("strih_1022_delay_flag_master", &strih_responses);
+    let p_priming = write_win_http_fixture(
+        "strih_1022_delay_flag_priming",
+        &http_status_ntp_deadband(base, 2450, "2", false, "2500"),
+    );
+    let stream_responses = vec![
+        http_status_ntp(base, 0, "2", false),
+        http_status_ntp(base + 5, 0, "3", false),
+        http_status_ntp(base + 10, 2600, "2", false),
+        http_status_ntp(base + 15, 10, "4", false),
+        http_status_ntp(base + 20, 20, "5", false),
+        http_status_ntp(base + 25, 15, "6", false),
+    ];
+    let p_stream = write_multi_read_fixture("stream_1022_delay_flag_client", &stream_responses);
+
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--win-http",
+            "stream=10.77.9.204",
+            "--samples",
+            "3",
+            "--min-distinct",
+            "3",
+            "--window-s",
+            "0",
+            "--chase-resample-delay-s",
+            "0",
+        ],
+        &[
+            (
+                "DANTESYNC_GATE_WIN_HTTP_STRIH",
+                &p_strih.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_WIN_HTTP_STREAM",
+                &p_stream.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_MASTER_DEADBAND_STATUS",
+                &p_priming.display().to_string(),
+            ),
+        ],
+    );
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    let stream_line = stdout
+        .lines()
+        .find(|l| l.trim_start().starts_with("stream"))
+        .unwrap_or_else(|| panic!("no stream report line in stdout: {stdout}"));
+    assert!(
+        stream_line.contains("resampled once after a 0s delay"),
+        "the --chase-resample-delay-s value must be reflected verbatim in the note: {stream_line:?}"
+    );
+}
+
+#[test]
+fn gate_chase_resample_delay_s_malformed_is_a_usage_error_1022() {
+    let (code, _stdout, stderr) = run_gate(&[
+        "--linux",
+        "",
+        "--win-http",
+        "strih=10.77.9.202",
+        "--chase-resample-delay-s",
+        "abc",
+    ]);
+    assert_eq!(
+        code, 1,
+        "a non-numeric --chase-resample-delay-s must be a usage error (1). stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("--chase-resample-delay-s"),
+        "stderr must name the flag: {stderr}"
+    );
+}
+
+#[test]
+fn help_describes_the_chase_resample_delay_flag_1022() {
+    let (code, stdout, _stderr) = run_gate(&["--help"]);
+    assert_eq!(code, 0, "--help must exit 0");
+    assert!(
+        stdout.contains("--chase-resample-delay-s"),
+        "usage text must document the new flag: {stdout}"
+    );
+}
