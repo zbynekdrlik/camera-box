@@ -300,7 +300,10 @@ grade_http_node() {
     local orig_bound="$bound"
     bound="$(ntp_master_effective_bound_us "$status" "$bound" "$deadband_margin")"
     if [ "$bound" != "$orig_bound" ]; then
-      deadband_note=" -- NTP MASTER: bound widened to ${bound}us (dantesync ntp_deadband_us + ${deadband_margin}us margin, #1021; base bound ${orig_bound}us)"
+      # No "NTP MASTER:" prefix here -- sampled_offset_check's own median-only-mode note (#1014)
+      # already opens with "NTP MASTER:" on this SAME printed line, so repeating it would render
+      # as "NTP MASTER: ... -- NTP MASTER: ..." (review finding, #1021).
+      deadband_note=" -- bound widened to ${bound}us (dantesync ntp_deadband_us + ${deadband_margin}us margin, #1021; base bound ${orig_bound}us)"
     fi
   fi
   now="$(date +%s)"   # #836: recompute per node -- sampling itself takes real wall-clock time
@@ -469,17 +472,17 @@ main() {
   local -a win_http=()
   while [ $# -gt 0 ]; do
     case "$1" in
-      --bound-us)      shift; bound="${1:-}" ;;
-      --linux)         shift; linux="${1:-}" ;;
-      --win-http)      shift; win_http+=("${1:-}") ;;
-      --win-http-port) shift; win_http_port="${1:-}" ;;
-      --samples)       shift; samples="${1:-}" ;;
-      --window-s)      shift; window="${1:-}" ;;
-      --min-distinct)  shift; min_distinct="${1:-}" ;;
-      --stability-us)  shift; stability="${1:-}" ;;
-      --ntp-master)    shift; ntp_master="${1:-}" ;;
+      --bound-us)           shift; bound="${1:-}" ;;
+      --linux)              shift; linux="${1:-}" ;;
+      --win-http)           shift; win_http+=("${1:-}") ;;
+      --win-http-port)      shift; win_http_port="${1:-}" ;;
+      --samples)            shift; samples="${1:-}" ;;
+      --window-s)           shift; window="${1:-}" ;;
+      --min-distinct)       shift; min_distinct="${1:-}" ;;
+      --stability-us)       shift; stability="${1:-}" ;;
+      --ntp-master)         shift; ntp_master="${1:-}" ;;
       --deadband-margin-us) shift; deadband_margin="${1:-}" ;;
-      -h|--help)       usage; exit 0 ;;
+      -h|--help)            usage; exit 0 ;;
       --*)             echo "unknown option: $1" >&2; usage >&2; exit 1 ;;
       *)               echo "unexpected argument: $1" >&2; usage >&2; exit 1 ;;
     esac
