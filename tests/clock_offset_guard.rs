@@ -1850,7 +1850,11 @@ fn ntp_deadband_us_from_pipe_json_reads_numeric_null_and_absent_1021() {
         "ntp_deadband_us_from_pipe_json \"$JSON\"",
         &[("JSON", numeric.as_str())],
     );
-    assert_eq!(out.trim(), "2500", "must read a numeric ntp_deadband_us: {out:?}");
+    assert_eq!(
+        out.trim(),
+        "2500",
+        "must read a numeric ntp_deadband_us: {out:?}"
+    );
 
     let never = pipe_json_deadband("null");
     let out = run_sourced(
