@@ -68,7 +68,14 @@ that pin in the SAME cycle.** The pin's own comment mandates it, but the rollout
 dantesync repo / on the boxes where nothing re-reads that comment — 2026-08-11 the 1.8.30 rollout
 skipped the bump and EVERY E2E run refused with all 6 nodes "DRIFT" against the stale 1.8.25 pin
 until it was bumped. Rollout checklist: canary → fleet → verify 8/8 → bump `DANTESYNC_VERSION_PIN`
-→ push.
+→ push. **The fleet roll on the Windows boxes (strih+stream) covers TWO binaries: the
+`dantesync.exe` SERVICE and the `dantesync-tray.exe` TRAY** — every upgrade script until
+2026-08-12 swapped only the service, so the tray (the version the USER actually sees in the
+system-tray UI) silently sat months stale (strih's was ~22 releases behind; user-caught). Tray
+swap = stop `dantesync-tray` process, copy `dantesync-tray-windows-amd64.exe` over
+`C:\Program Files\DanteSync\dantesync-tray.exe` (backup `.pre-<ver>`), relaunch via the win-*
+MCP Shell (session 1 — an ssh-launched tray is invisible to the operator). Linux nodes have no
+tray.
 
 **HARD RULE:** DanteSync OWNS the clock on cam boxes AND dev1. NEVER install/enable
 chrony / ptp4l / systemd-timesyncd / any other NTP/PTP tool, and NEVER run
