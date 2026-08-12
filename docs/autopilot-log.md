@@ -7410,3 +7410,60 @@ does the live rig verification of the new whole-chain checks and closes it.
 - Local suite: targeted `cargo test --lib asrc_compensation_quantization` 10/10 green throughout;
   fmt/check/clippy clean. No PR yet -- this worktree's local-only authority; supervisor
   integrates + drives the CI/mergeable/deploy cycle.
+
+## 2026-08-12 -- issue 1019 (ASRC compensation re-trigger cadence "distortion") -- CLOSED, root cause was the measurement, not the servo
+
+- Worktree `autopilot-1019`, branch `autopilot-1019`, based on `dev` @ e8107fd1b.
+- Commits: `3007dc16a` (test, red -- regression test + deliberate stub in analyze_thdn.py,
+  following the repo's established stub-then-restore RED/GREEN pattern), `07dfc4945` (fix,
+  green -- real thdn_corrected()/thdn_segmented() implementation + asrc_ab_harness.c
+  --ppm-start/--ppm-end + RESULTS-1019.md), `154190ad1` (style -- review follow-up, 4 findings
+  fixed same-branch: a stale RESULTS-1019.md number corrected -56.63->-59.29dB, a latent
+  near-Nyquist crash in _estimate_peak_freq fixed, a --ppm-start/--ppm-end CLI footgun now
+  errors instead of silently ramping toward 0, and the duplicated spectral/dB core of the two
+  new functions extracted into _thdn_at_freq -- which itself caught a fresh NameError bug
+  before it shipped).
+- Root cause: issues 929/1016 measured -18.19dB THD+N while `swr_set_compensation()` is
+  reissued every audio callback, and this ticket was opened to redesign that mechanism. Reading
+  the real installed libswresample 6.1.1 source (`resample.c`'s `set_compensation()`) showed
+  `dst_incr` is a pure function of (sample_delta, compensation_distance) with no dependency on
+  call history -- and this was PROVEN empirically, not just read: reissuing an UNCHANGED
+  compensation target every callback produces a byte-for-byte identical output file to
+  reissuing it exactly once with a wide-enough window (`cmp` exit 0). The reissue cadence
+  itself changes nothing about the signal.
+- The actual -18dB (and every other double-digit-negative-dB figure while compensating in
+  RESULTS.md/RESULTS-1016.md) was traced to `analyze_thdn.py`'s existing `thdn()` assuming the
+  resampled output tone sits at exactly 997Hz, which is false once active compensation
+  time-warps the output by the applied ppm (derived + measured:
+  `true_freq = test_freq * in_frames_nominal / out_frames`, confirmed independently via a
+  high-resolution zero-padded-FFT peak search). Confirmed with ZERO new code: re-analyzing the
+  identical samples with `thdn()`'s own pre-existing `--window blackman` option alone recovers
+  -18.19 -> -59.29 dB.
+- Fix: added `thdn_corrected()` (constant-ppm, analytic true-frequency derivation) and
+  `thdn_segmented()` (walking-ppm, 3-point parabolic sub-bin FFT peak interpolation per segment)
+  to `analyze_thdn.py`, plus `--ppm-start`/`--ppm-end` to `asrc_ab_harness.c` (linearly-walking
+  compensation target, degenerates byte-identically to constant `--ppm` when start==end).
+  Tested: `tests/python/test_asrc_thdn_corrected_1019.py`, synthetic (no libswresample
+  dependency), 6/6 green; full `tests/python` suite 762/762 green.
+- Result: at the real production cadence (every callback, `distance_ms=10000`), across
+  realistic 5-300ppm AND a genuinely walking 30->60ppm target across THREE cadences (every
+  callback ~21ms, ~213ms, ~1s): corrected THD+N consistently -51 to -104dB. No redesign of the
+  reissue mechanism warranted; **zero changes to vendor/obs-studio**.
+- Rejected alternatives (all with fresh evidence, not assumed): (1) drive the resample ratio
+  directly bypassing swr_set_compensation -- would solve a problem proven not to exist; (2)
+  match distance_ms to the ~21ms reissue interval -- reopens the #1016 quantization floor to
+  ~488ppm, floors out the whole realistic drift range; (3) tune resampler engine quality --
+  already independently ruled out by issue 929's own maxq_moderate/maxq_extreme measurement;
+  (4) chase the residual -51..-104dB gap to the -154dB rest-state floor -- genuinely open-ended
+  DSP investigation, split off as low-priority follow-up **#1024**.
+- Review (fresh-context `general-purpose` subagent): 0 red / 1 yellow / 3 blue. Yellow: a stale
+  doc number. Blues: a latent near-Nyquist crash path, a CLI validation gap, and DRY
+  duplication (whose extraction itself caught a fresh bug before shipping). All fixed
+  same-branch in `154190ad1`; re-verified zero numeric drift from the refactor.
+- Closed #1019 with full evidence (soft-overcome verdict, per this repo's auto-close preference
+  -- the redesign premise was disproven, not confirmed-and-fixed). Follow-up #1024 filed for the
+  optional residual investigation.
+- Local suite: `tests/python` 762/762 green; `cargo fmt --all --check` / `cargo check` /
+  `cargo clippy --all-targets -- -D warnings` / `cargo test --no-run` all clean (no Rust files
+  touched by this ticket -- pure C-harness/Python/docs change). No PR yet -- this worktree's
+  local-only authority; supervisor integrates + drives the CI/mergeable/deploy cycle.
