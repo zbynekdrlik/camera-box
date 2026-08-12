@@ -101,7 +101,10 @@ jobs:
           # A single static tarball (GitHub-hosted, retried) is fast + self-contained and
           # ships ffmpeg+ffprobe with all codecs built in — exactly what the #106 recording
           # path needs.
-          url=https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz
+          # PINNED to a DATED (immutable) autobuild tag, NOT the rolling "latest" tag:
+          # "latest" is rebuilt daily and its assets 503 during the replacement window —
+          # two consecutive coverage-job failures on 2026-08-12 were exactly that window.
+          url=https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-11-13-11/ffmpeg-N-126060-g03dc244a69-linux64-gpl.tar.xz
           curl -fsSL --retry 3 --retry-delay 5 "$url" -o /tmp/ffmpeg.tar.xz
           mkdir -p /tmp/ff && tar xf /tmp/ffmpeg.tar.xz -C /tmp/ff --strip-components=1
           sudo install /tmp/ff/bin/ffmpeg /tmp/ff/bin/ffprobe /usr/local/bin/
@@ -150,7 +153,10 @@ jobs:
           # A single static tarball (GitHub-hosted, retried) is fast + self-contained and
           # ships ffmpeg+ffprobe with all codecs built in — exactly what the #106 recording
           # path needs.
-          url=https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz
+          # PINNED to a DATED (immutable) autobuild tag, NOT the rolling "latest" tag:
+          # "latest" is rebuilt daily and its assets 503 during the replacement window —
+          # two consecutive coverage-job failures on 2026-08-12 were exactly that window.
+          url=https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-11-13-11/ffmpeg-N-126060-g03dc244a69-linux64-gpl.tar.xz
           curl -fsSL --retry 3 --retry-delay 5 "$url" -o /tmp/ffmpeg.tar.xz
           mkdir -p /tmp/ff && tar xf /tmp/ffmpeg.tar.xz -C /tmp/ff --strip-components=1
           sudo install /tmp/ff/bin/ffmpeg /tmp/ff/bin/ffprobe /usr/local/bin/
