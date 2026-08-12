@@ -2156,3 +2156,209 @@ fn ntp_master_effective_bound_us_normalizes_leading_zero_margin_and_deadband_nev
          never crash: {out:?}"
     );
 }
+
+// --- #1022 spread-side completion: max_abs_of_ints / should_resample_for_chase -----------------
+//
+// client_chase_bound_us (above) only ever widens a CLIENT row's MEDIAN check -- the spread/
+// stability check stays fully active by design. Live evidence from a merged round's real E2E
+// rerun showed the SAME master step that the median fix already handles can ALSO inflate a
+// client's SPREAD past the fixed 2000us stability bound (one elevated sample inside an otherwise-
+// baseline window), and because the step is on ONE clock shared by the fleet, the SAME step can
+// trip MULTIPLE clients in the SAME run. should_resample_for_chase decides whether an "unstable"
+// verdict is worth ONE fresh resample before failing -- these tests pin the pure DECISION only;
+// the actual re-gather + delay is exercised end-to-end in tests/dantesync_gate.rs.
+
+#[test]
+fn max_abs_of_ints_returns_the_largest_magnitude_regardless_of_sign() {
+    let out = run_sourced("max_abs_of_ints \"$L\"", &[("L", "100\n-2682\n50\n")]);
+    assert_eq!(
+        out.trim(),
+        "2682",
+        "the negative value's magnitude must win: {out:?}"
+    );
+}
+
+#[test]
+fn max_abs_of_ints_empty_on_no_valid_values() {
+    let out = run_sourced("max_abs_of_ints \"$L\"", &[("L", "")]);
+    assert_eq!(
+        out.trim(),
+        "",
+        "no samples -> empty, never a guessed number: {out:?}"
+    );
+
+    let out = run_sourced(
+        "max_abs_of_ints \"$L\"",
+        &[("L", "not-a-number\nalso-bad\n")],
+    );
+    assert_eq!(
+        out.trim(),
+        "",
+        "non-integer lines must be ignored, not crash: {out:?}"
+    );
+}
+
+#[test]
+fn max_abs_of_ints_single_value() {
+    let out = run_sourced("max_abs_of_ints \"$L\"", &[("L", "-42\n")]);
+    assert_eq!(out.trim(), "42", "a single value's own magnitude: {out:?}");
+}
+
+#[test]
+fn should_resample_for_chase_yes_when_unstable_and_worst_sample_fits_the_bound() {
+    // The live cam1 shape: median 0us (two near-zero samples), one elevated sample (2682us) that
+    // pushes spread past the 2000us stability bound -- but 2682 <= the (already #1022-widened)
+    // 3500us bound, so this looks like a plausible single step-chase excursion, worth a resample.
+    let payloads = format!(
+        "{}\n{}\n{}\n",
+        pipe_json(1000, 0),
+        pipe_json(1025, 0),
+        pipe_json(1050, 2682),
+    );
+    let out = run_sourced(
+        "should_resample_for_chase \"$P\" 3500 2000 3 full",
+        &[("P", payloads.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "yes",
+        "unstable + worst sample within bound -> yes: {out:?}"
+    );
+}
+
+#[test]
+fn should_resample_for_chase_no_when_verdict_is_ok() {
+    let payloads = format!(
+        "{}\n{}\n{}\n",
+        pipe_json(1000, 10),
+        pipe_json(1025, 20),
+        pipe_json(1050, 15),
+    );
+    let out = run_sourced(
+        "should_resample_for_chase \"$P\" 3500 2000 3 full",
+        &[("P", payloads.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "no",
+        "a healthy ok verdict has nothing to resample for: {out:?}"
+    );
+}
+
+#[test]
+fn should_resample_for_chase_no_when_verdict_is_drift_or_drift_unstable() {
+    // drift: median itself exceeds the bound -- no resample can fix a real out-of-bound median.
+    let drift_payloads = format!(
+        "{}\n{}\n{}\n",
+        pipe_json(1000, 9000),
+        pipe_json(1025, 9100),
+        pipe_json(1050, 8900),
+    );
+    let out = run_sourced(
+        "should_resample_for_chase \"$P\" 3500 2000 3 full",
+        &[("P", drift_payloads.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "no",
+        "drift (median out of bound) must never resample: {out:?}"
+    );
+
+    // drift_unstable: both median AND spread fail.
+    let drift_unstable_payloads = format!(
+        "{}\n{}\n{}\n",
+        pipe_json(1000, 25000),
+        pipe_json(1025, -25000),
+        pipe_json(1050, 100),
+    );
+    let out = run_sourced(
+        "should_resample_for_chase \"$P\" 2000 2000 3 full",
+        &[("P", drift_unstable_payloads.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "no",
+        "drift_unstable (median ALSO out of bound) must never resample: {out:?}"
+    );
+}
+
+#[test]
+fn should_resample_for_chase_no_when_insufficient_distinct_samples() {
+    let payloads = format!("{}\n", pipe_json(1000, 0));
+    let out = run_sourced(
+        "should_resample_for_chase \"$P\" 3500 2000 3 full",
+        &[("P", payloads.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "no",
+        "too few distinct samples -> no resample: {out:?}"
+    );
+}
+
+#[test]
+fn should_resample_for_chase_no_for_the_master_median_only_mode() {
+    // The exact SAME sample shape that returns "yes" under "full" mode above must return "no"
+    // under "median-only" -- the master's own row never has a spread verdict to begin with
+    // (sampled_offset_verdict skips the spread check entirely in median-only mode), so this must
+    // be excluded both by the explicit mode check AND structurally (verdict can never be
+    // "unstable" in that mode).
+    let payloads = format!(
+        "{}\n{}\n{}\n",
+        pipe_json(1000, 0),
+        pipe_json(1025, 0),
+        pipe_json(1050, 2682),
+    );
+    let out = run_sourced(
+        "should_resample_for_chase \"$P\" 3500 2000 3 median-only",
+        &[("P", payloads.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "no",
+        "the master's median-only row must never resample: {out:?}"
+    );
+}
+
+#[test]
+fn should_resample_for_chase_no_when_the_worst_sample_exceeds_the_bound() {
+    // median 0us (in bound), spread 3600us (over stability) -- but the worst sample (3600) itself
+    // exceeds the 3500us bound: this looks bigger than any legitimate single step-chase excursion
+    // could produce, so it must fail immediately, never get a second chance via resample (the
+    // #836 genuine-scatter class, or a real clock fault, is never masked).
+    let payloads = format!(
+        "{}\n{}\n{}\n",
+        pipe_json(1000, 0),
+        pipe_json(1025, 0),
+        pipe_json(1050, 3600),
+    );
+    let out = run_sourced(
+        "should_resample_for_chase \"$P\" 3500 2000 3 full",
+        &[("P", payloads.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "no",
+        "a worst sample beyond the bound must never resample, even though median stays in bound: \
+         {out:?}"
+    );
+}
+
+#[test]
+fn should_resample_for_chase_no_on_malformed_bound() {
+    let payloads = format!(
+        "{}\n{}\n{}\n",
+        pipe_json(1000, 0),
+        pipe_json(1025, 0),
+        pipe_json(1050, 2682),
+    );
+    let out = run_sourced(
+        "should_resample_for_chase \"$P\" abc 2000 3 full",
+        &[("P", payloads.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "no",
+        "a malformed BOUND_US must never resample: {out:?}"
+    );
+}
