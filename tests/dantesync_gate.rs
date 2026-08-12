@@ -2830,3 +2830,82 @@ fn help_describes_the_chase_resample_delay_flag_1022() {
         "usage text must document the new flag: {stdout}"
     );
 }
+
+#[test]
+fn gate_resample_reports_stale_when_the_ntp_measurement_ages_out_during_the_delay_1022() {
+    // Review finding: the resample takes real wall-clock time (the delay + another full sampling
+    // window) -- long enough for a borderline-fresh NTP measurement to cross into staleness
+    // during that gap (the #1014 "frozen/free-running measurement graded as live" class). The
+    // resampled round's OWN freshness must be re-verified before its median/spread are trusted --
+    // never silently grade a now-stale measurement just because the ORIGINAL round was fresh.
+    let base = now_epoch();
+    let strih_responses = vec![
+        http_status_ntp_deadband(base, 2400, "2", false, "2500"),
+        http_status_ntp_deadband(base + 5, 2500, "3", false, "2500"),
+        http_status_ntp_deadband(base + 10, 2450, "2", false, "2500"),
+    ];
+    let p_strih = write_multi_read_fixture("strih_1022_resample_stale_master", &strih_responses);
+    let p_priming = write_win_http_fixture(
+        "strih_1022_resample_stale_priming",
+        &http_status_ntp_deadband(base, 2450, "2", false, "2500"),
+    );
+    // Chase round: fresh, unstable, worst sample within the envelope -> resample fires.
+    // Resample round: ntp_failed=true on every payload -> the resampled data is STALE.
+    let stream_responses = vec![
+        http_status_ntp(base, 0, "2", false),
+        http_status_ntp(base + 5, 0, "3", false),
+        http_status_ntp(base + 10, 2600, "2", false),
+        http_status_ntp(base + 15, 10, "2", true),
+        http_status_ntp(base + 20, 20, "3", true),
+        http_status_ntp(base + 25, 15, "2", true),
+    ];
+    let p_stream = write_multi_read_fixture("stream_1022_resample_stale_client", &stream_responses);
+
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--win-http",
+            "stream=10.77.9.204",
+            "--samples",
+            "3",
+            "--min-distinct",
+            "3",
+            "--window-s",
+            "0",
+            "--chase-resample-delay-s",
+            "0",
+        ],
+        &[
+            (
+                "DANTESYNC_GATE_WIN_HTTP_STRIH",
+                &p_strih.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_WIN_HTTP_STREAM",
+                &p_stream.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_MASTER_DEADBAND_STATUS",
+                &p_priming.display().to_string(),
+            ),
+        ],
+    );
+    assert_eq!(
+        code, 11,
+        "a resample whose NTP measurement went stale must be INCOMPLETE (11), never a silent \
+         grade of stale data. stdout={stdout} stderr={stderr}"
+    );
+    let stream_line = stdout
+        .lines()
+        .find(|l| l.trim_start().starts_with("stream"))
+        .unwrap_or_else(|| panic!("no stream report line in stdout: {stdout}"));
+    assert!(
+        stream_line.contains("STALE"),
+        "must report STALE for the now-aged-out resampled measurement, never grade its \
+         median/spread as if it were still live: {stream_line:?}"
+    );
+    let _ = stderr;
+}

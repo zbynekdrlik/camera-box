@@ -2264,15 +2264,20 @@ fn should_resample_for_chase_no_when_verdict_is_drift_or_drift_unstable() {
         "drift (median out of bound) must never resample: {out:?}"
     );
 
-    // drift_unstable: both median AND spread fail.
+    // drift_unstable: both median AND spread fail. median([5000,5100,9000])=5100 > bound(2000)
+    // -> drift; spread(9000-5000=4000) > stability(1000) -> unstable too. Verified directly by
+    // sourcing the script (sampled_offset_verdict returns "drift_unstable" for these exact
+    // inputs) -- a review finding caught an earlier version of this fixture that accidentally
+    // produced a plain "unstable" verdict instead, so this sub-case never exercised the
+    // drift_unstable branch of the verdict gate at all.
     let drift_unstable_payloads = format!(
         "{}\n{}\n{}\n",
-        pipe_json(1000, 25000),
-        pipe_json(1025, -25000),
-        pipe_json(1050, 100),
+        pipe_json(1000, 5000),
+        pipe_json(1025, 5100),
+        pipe_json(1050, 9000),
     );
     let out = run_sourced(
-        "should_resample_for_chase \"$P\" 2000 2000 3 full",
+        "should_resample_for_chase \"$P\" 2000 1000 3 full",
         &[("P", drift_unstable_payloads.as_str())],
     );
     assert_eq!(
