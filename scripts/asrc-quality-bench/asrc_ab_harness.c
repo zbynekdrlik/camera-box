@@ -154,12 +154,10 @@ static int mode_quality(int argc, char **argv)
                               * distance_ms elapses with no further reissue -- see RESULTS-1016.md */
     uint32_t distance_ms = COMPENSATION_DISTANCE_MS;
     double ppm_start = 0.0, ppm_end = 0.0;
-    int ppm_walk = 0; /* issue 1019: --ppm-start/--ppm-end given -> linearly ramp the REQUESTED
-                        * ppm target across the run (simulates a real, slowly-walking servo
-                        * estimate instead of a fixed constant) -- overrides --ppm. Each reissue
-                        * recomputes its OWN target from the CURRENT elapsed fraction, exactly
-                        * mirroring how a live per-callback caller would recompute from its own
-                        * live estimate every callback. */
+    int ppm_start_given = 0, ppm_end_given = 0; /* issue 1019 review: --ppm-start/--ppm-end MUST be
+                                                   * given TOGETHER -- track each independently so a
+                                                   * lone flag errors out instead of silently ramping
+                                                   * toward the OTHER's unset 0.0 default. */
 
     for (int i = 2; i < argc; i++) {
         if (!strcmp(argv[i], "--config") && i + 1 < argc)
@@ -180,12 +178,23 @@ static int mode_quality(int argc, char **argv)
             distance_ms = (uint32_t)atoi(argv[++i]);
         else if (!strcmp(argv[i], "--ppm-start") && i + 1 < argc) {
             ppm_start = atof(argv[++i]);
-            ppm_walk = 1;
+            ppm_start_given = 1;
         } else if (!strcmp(argv[i], "--ppm-end") && i + 1 < argc) {
             ppm_end = atof(argv[++i]);
-            ppm_walk = 1;
+            ppm_end_given = 1;
         }
     }
+    if (ppm_start_given != ppm_end_given) {
+        fprintf(stderr, "--ppm-start and --ppm-end must be given TOGETHER (got only %s)\n",
+                ppm_start_given ? "--ppm-start" : "--ppm-end");
+        return 1;
+    }
+    /* issue 1019: --ppm-start/--ppm-end given -> linearly ramp the REQUESTED ppm target across
+     * the run (simulates a real, slowly-walking servo estimate instead of a fixed constant) --
+     * overrides --ppm. Each reissue recomputes its OWN target from the CURRENT elapsed fraction,
+     * exactly mirroring how a live per-callback caller would recompute from its own live
+     * estimate every callback. */
+    const int ppm_walk = ppm_start_given && ppm_end_given;
     if (reissue_every < 1)
         reissue_every = 1;
     if (!out_path) {

@@ -104,7 +104,40 @@ def _find_coherent_n(true_freq, sample_rate, target_n, search_radius=4000, max_n
     return best_n, best_frac
 
 
-def thdn_corrected(samples, sample_rate, test_freq, in_frames_nominal, skip_s=1.0, analyze_s=4.0, guard_bins=5):
+def _thdn_at_freq(x, sample_rate, freq, guard_bins):
+    """Shared spectral/dB core for thdn_corrected() and thdn_segmented(): rectangular-window FFT
+    of `x`, THD+N against `freq`'s own bin +/- `guard_bins`. Callers are responsible for `x`
+    already being a COHERENT window at `freq` (via _find_coherent_n) -- this function does not
+    itself pick a window length. Returns (thdn_db, thdn_pct)."""
+    spec = np.fft.rfft(x)  # rectangular window -- valid as long as the caller's window IS coherent
+    power = np.abs(spec) ** 2
+    n = len(x)
+    bin_hz = sample_rate / n
+    fbin = int(round(freq / bin_hz))
+
+    lo = max(0, fbin - guard_bins)
+    hi = min(len(power), fbin + guard_bins + 1)
+    fundamental_power = float(np.sum(power[lo:hi]))
+    total_power = float(np.sum(power[1:]))
+    noise_and_harmonic_power = max(total_power - fundamental_power, 0.0)
+
+    thdn_ratio = np.sqrt(noise_and_harmonic_power / fundamental_power) if fundamental_power > 0 else float("inf")
+    thdn_db = 20.0 * np.log10(thdn_ratio) if thdn_ratio > 0 else float("-inf")
+    thdn_pct = thdn_ratio * 100.0
+    return thdn_db, thdn_pct
+
+
+# thdn()'s own guard_bins default is 3 (unchanged, matches every existing RESULTS.md/
+# RESULTS-1016.md table -- never touched here). The two issue-1019 functions below default to a
+# wider 5: their windows are picked by _find_coherent_n's SEARCH (a best-effort minimization, not
+# an exact whole-cycle guarantee the way thdn()'s fixed whole-second window is), so a slightly
+# wider guard band gives a bit more margin against the residual sub-bin misalignment that search
+# can leave -- not a behavior change to the pre-existing, already-published thdn().
+_CORRECTED_GUARD_BINS_DEFAULT = 5
+
+
+def thdn_corrected(samples, sample_rate, test_freq, in_frames_nominal, skip_s=1.0, analyze_s=4.0,
+                    guard_bins=_CORRECTED_GUARD_BINS_DEFAULT):
     """THD+N for a signal actively resampled by a CONSTANT ppm compensation -- corrects the
     window-leakage trap thdn() does not know about (issue 1019).
 
@@ -139,20 +172,7 @@ def thdn_corrected(samples, sample_rate, test_freq, in_frames_nominal, skip_s=1.
         n = target_n  # search overshot past EOF on a short file -- fall back to the nominal length
     x = samples[skip:skip + n].astype(np.float64)
 
-    spec = np.fft.rfft(x)  # rectangular window -- valid now that the window IS coherent
-    power = np.abs(spec) ** 2
-    bin_hz = sample_rate / n
-    fbin = int(round(true_freq / bin_hz))
-
-    lo = max(0, fbin - guard_bins)
-    hi = min(len(power), fbin + guard_bins + 1)
-    fundamental_power = float(np.sum(power[lo:hi]))
-    total_power = float(np.sum(power[1:]))
-    noise_and_harmonic_power = max(total_power - fundamental_power, 0.0)
-
-    thdn_ratio = np.sqrt(noise_and_harmonic_power / fundamental_power) if fundamental_power > 0 else float("inf")
-    thdn_db = 20.0 * np.log10(thdn_ratio) if thdn_ratio > 0 else float("-inf")
-    thdn_pct = thdn_ratio * 100.0
+    thdn_db, thdn_pct = _thdn_at_freq(x, sample_rate, true_freq, guard_bins)
     return thdn_db, thdn_pct, true_freq, n
 
 
@@ -178,8 +198,13 @@ def _estimate_peak_freq(x, sample_rate, nominal_freq, search_hz=20.0, zero_pad=8
     bin_hz = sample_rate / nfft
     half_span = int(round(search_hz / bin_hz))
     center = int(round(nominal_freq / bin_hz))
-    lo = max(1, center - half_span)
-    hi = min(len(mag) - 1, center + half_span + 1)
+    # Clamp BOTH ends inside [1, len(mag)-2] (room for a k-1/k+1 neighbour on either side) and
+    # guarantee hi > lo -- near Nyquist (nominal_freq close to sample_rate/2) `half_span` can
+    # round to 0 and a naive max(1,...)/min(len-1,...) pair can coincide, leaving mag[lo:hi]
+    # empty and crashing np.argmax on an empty array. Not reachable with this repo's 997 Hz test
+    # tone, but a real captured recording could carry content anywhere in-band.
+    lo = max(1, min(center - half_span, len(mag) - 3))
+    hi = max(lo + 1, min(len(mag) - 1, center + half_span + 1))
     k = lo + int(np.argmax(mag[lo:hi]))
     if k <= 0 or k >= len(mag) - 1 or mag[k] <= 0:
         return float(freqs[k])
@@ -190,8 +215,8 @@ def _estimate_peak_freq(x, sample_rate, nominal_freq, search_hz=20.0, zero_pad=8
     return float(freqs[k] + delta * bin_hz)
 
 
-def thdn_segmented(samples, sample_rate, test_freq, seg_s=1.0, skip_s=1.0, n_segments=None, guard_bins=5,
-                    search_hz=20.0):
+def thdn_segmented(samples, sample_rate, test_freq, seg_s=1.0, skip_s=1.0, n_segments=None,
+                    guard_bins=_CORRECTED_GUARD_BINS_DEFAULT, search_hz=20.0):
     """Per-segment THD+N for a WALKING ppm compensation target (issue 1019's realistic ppm-program
     acceptance case) -- there is no single global true_freq to correct for like thdn_corrected()
     uses (the servo's target genuinely changes over time), so this instead: (1) estimates the
@@ -226,24 +251,14 @@ def thdn_segmented(samples, sample_rate, test_freq, seg_s=1.0, skip_s=1.0, n_seg
                                          max_n=min(seg_n_nominal, len(samples) - seg_start))
         x = samples[seg_start:seg_start + n].astype(np.float64)
 
-        spec = np.fft.rfft(x)
-        power = np.abs(spec) ** 2
-        bin_hz = sample_rate / n
-        fbin = int(round(local_freq / bin_hz))
-        lo = max(0, fbin - guard_bins)
-        hi = min(len(power), fbin + guard_bins + 1)
-        fundamental_power = float(np.sum(power[lo:hi]))
-        total_power = float(np.sum(power[1:]))
-        noise_and_harmonic_power = max(total_power - fundamental_power, 0.0)
-        ratio = np.sqrt(noise_and_harmonic_power / fundamental_power) if fundamental_power > 0 else float("inf")
-        db = 20.0 * np.log10(ratio) if ratio > 0 else float("-inf")
+        db, pct = _thdn_at_freq(x, sample_rate, local_freq, guard_bins)
 
         results.append({
             "index": i,
             "start_s": seg_start / sample_rate,
             "freq_hz": local_freq,
             "thdn_db": db,
-            "thdn_pct": ratio * 100.0,
+            "thdn_pct": pct,
             "n": n,
         })
     return results

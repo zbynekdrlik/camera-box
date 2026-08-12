@@ -86,7 +86,7 @@ At the harness's 4-second analysis window, bin spacing is `48000/(4*48000) = 0.2
 window (sized for an exact `997.0 Hz` cycle count) expects it. A rectangular window's sidelobes
 decay slowly (~6 dB/octave) -- confirmed by re-analyzing the SAME `/tmp/orig929.f32` samples with
 `thdn()`'s OWN existing `--window blackman` option (unrelated to any new code this ticket adds):
-THD+N jumps from -18.19 dB (rect) to a **-56.63 dB** floor with zero change to the signal, purely
+THD+N jumps from -18.19 dB (rect) to a **-59.29 dB** floor with zero change to the signal, purely
 by switching the analysis window. Re-centering the guard band on the TRUE spectral peak (found via
 high-res search) instead of the nominal 997 Hz bin, with an EXACT analytically-coherent window
 length, recovers **-53 to -58 dB** on the exact same samples (`thdn_corrected()`, below).
