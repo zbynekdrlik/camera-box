@@ -1122,6 +1122,12 @@ fn gate_reports_and_tallies_multiple_concurrent_nodes_independently() {
                 "DANTESYNC_GATE_WIN_HTTP_STREAM",
                 &p_stream.display().to_string(),
             ),
+            // #1022: strih is the default NTP master with a "stream" client also configured, so
+            // main() now does a priming read of strih's own status to derive stream's chase
+            // envelope. Point it at the #686 NO_HTTP sentinel so the test never attempts a real
+            // curl to the live rig -- this test's own fixtures carry no ntp_deadband_us field at
+            // all, so the priming read (had it succeeded) would have been a no-op anyway.
+            ("DANTESYNC_GATE_MASTER_DEADBAND_STATUS", NO_HTTP),
         ],
     );
     assert_eq!(
@@ -1185,6 +1191,10 @@ fn gate_samples_multiple_nodes_concurrently_not_sequentially() {
         &[
             ("DANTESYNC_GATE_WIN_HTTP_STRIH", &p_a.display().to_string()),
             ("DANTESYNC_GATE_WIN_HTTP_STREAM", &p_b.display().to_string()),
+            // #1022: same NO_HTTP-sentinel reasoning as the sibling test above -- avoid a real
+            // curl to the live rig, and the instant `cat` failure adds no measurable delay to
+            // this test's own timing assertion.
+            ("DANTESYNC_GATE_MASTER_DEADBAND_STATUS", NO_HTTP),
         ],
     );
     let elapsed = start.elapsed();
@@ -1970,5 +1980,449 @@ fn help_describes_the_deadband_margin_flag_1021() {
     assert!(
         stdout.contains("ntp_deadband_us"),
         "usage text must explain what the flag widens the master's bound against: {stdout}"
+    );
+}
+
+// --- #1022: client rows ALSO false-DRIFT during the master's own deadband step-chase window ----
+//
+// #1021 (above) widens ONLY the GATE_NTP_MASTER_NAME/median-only row. Live evidence filed on
+// #1022 (camera-box PR #1020, run 31617253261, dantesync v1.8.41 fleet-wide) showed a CLIENT
+// node ALSO false-DRIFTs during the SAME master step-chase window, via a DIFFERENT mechanism (a
+// client always reports its own "ntp_deadband_us":null -- it mirrors the master's sawtooth via
+// the LAN NTP measurement instead): "stream" graded DRIFT with median 2589us > the fixed 2000us
+// bound while its spread was only 82us across 6 samples -- tight, not the #836 scatter/noise
+// class, i.e. a genuinely elevated-but-healthy chase window, not a real desync.
+//
+// These tests exercise `main()`'s new priming read of the CONFIGURED master's own /status (via
+// the NEW DANTESYNC_GATE_MASTER_DEADBAND_STATUS override -- deliberately SEPARATE from
+// DANTESYNC_GATE_WIN_HTTP_<NAME>/DANTESYNC_GATE_LINUX_HTTP_<NAME>, which the master's OWN
+// gather_http_samples calls already consume via the #836 executable-fixture counter; reusing
+// that same override for the priming read would silently shift the master's own sampled
+// sequence) and the new client_chase_bound_us-driven widening it feeds into every CLIENT row's
+// grading.
+
+#[test]
+fn gate_client_row_within_master_deadband_envelope_passes_instead_of_false_drift_1022() {
+    // The exact live shape from #1022's own filed evidence: master (strih) reports a healthy
+    // 2500us deadband; client (stream) shows a TIGHT (spread 80us) but elevated median (2589us)
+    // -- a healthy step-chase window, not a real desync. Before #1022 this false-DRIFTs on
+    // stream; after, the whole gate must PASS.
+    let base = now_epoch();
+    let master_responses = vec![
+        http_status_ntp_deadband(base, 2400, "2", false, "2500"),
+        http_status_ntp_deadband(base + 5, 2500, "3", false, "2500"),
+        http_status_ntp_deadband(base + 10, 2450, "2", false, "2500"),
+    ];
+    let p_master = write_multi_read_fixture("strih_1022_chase_master", &master_responses);
+    let client_responses = vec![
+        http_status_ntp_deadband(base, 2550, "2", false, "null"),
+        http_status_ntp_deadband(base + 5, 2589, "3", false, "null"),
+        http_status_ntp_deadband(base + 10, 2630, "2", false, "null"),
+    ];
+    let p_client = write_multi_read_fixture("stream_1022_chase_client", &client_responses);
+    // The priming read of the master's OWN status (used SOLELY to derive the client envelope) --
+    // a static single payload is enough, it needs no freshness/sample-count shape at all.
+    let p_priming = write_win_http_fixture(
+        "strih_1022_priming_deadband",
+        &http_status_ntp_deadband(base, 2450, "2", false, "2500"),
+    );
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--win-http",
+            "stream=10.77.9.204",
+            "--samples",
+            "3",
+            "--min-distinct",
+            "3",
+            "--window-s",
+            "0",
+        ],
+        &[
+            (
+                "DANTESYNC_GATE_WIN_HTTP_STRIH",
+                &p_master.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_WIN_HTTP_STREAM",
+                &p_client.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_MASTER_DEADBAND_STATUS",
+                &p_priming.display().to_string(),
+            ),
+        ],
+    );
+    assert_eq!(
+        code, 0,
+        "a client's tight, elevated median inside the master's own deadband+margin envelope \
+         (max(2000, 2500+1000)=3500us; median 2589us) must PASS, not false-DRIFT against the \
+         fixed 2000us bound. stdout={stdout} stderr={stderr}"
+    );
+    assert!(stdout.contains("GATE PASS"), "stdout: {stdout}");
+    assert!(!stdout.contains("DRIFT"), "stdout: {stdout}");
+}
+
+#[test]
+fn gate_client_row_still_drifts_beyond_the_widened_chase_envelope_1022() {
+    // #1022 is not "a client can never fail once a master deadband is present" -- a genuine
+    // ~8ms client drift far beyond the widened envelope (max(2000, 2500+1000)=3500us) must still
+    // DRIFT.
+    let base = now_epoch();
+    let master_responses = vec![
+        http_status_ntp_deadband(base, 2400, "2", false, "2500"),
+        http_status_ntp_deadband(base + 5, 2500, "3", false, "2500"),
+        http_status_ntp_deadband(base + 10, 2450, "2", false, "2500"),
+    ];
+    let p_master = write_multi_read_fixture("strih_1022_genuine_drift_master", &master_responses);
+    let client_responses = vec![
+        http_status_ntp_deadband(base, 8000, "2", false, "null"),
+        http_status_ntp_deadband(base + 5, 8100, "3", false, "null"),
+        http_status_ntp_deadband(base + 10, 7900, "2", false, "null"),
+    ];
+    let p_client = write_multi_read_fixture("stream_1022_genuine_drift_client", &client_responses);
+    let p_priming = write_win_http_fixture(
+        "strih_1022_genuine_drift_priming",
+        &http_status_ntp_deadband(base, 2450, "2", false, "2500"),
+    );
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--win-http",
+            "stream=10.77.9.204",
+            "--samples",
+            "3",
+            "--min-distinct",
+            "3",
+            "--window-s",
+            "0",
+        ],
+        &[
+            (
+                "DANTESYNC_GATE_WIN_HTTP_STRIH",
+                &p_master.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_WIN_HTTP_STREAM",
+                &p_client.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_MASTER_DEADBAND_STATUS",
+                &p_priming.display().to_string(),
+            ),
+        ],
+    );
+    assert_eq!(
+        code, 20,
+        "a genuine ~8ms client drift far beyond the widened 3500us envelope must still DRIFT. \
+         stdout={stdout} stderr={stderr}"
+    );
+    let stream_line = stdout
+        .lines()
+        .find(|l| l.trim_start().starts_with("stream"))
+        .unwrap_or_else(|| panic!("no stream report line in stdout: {stdout}"));
+    assert!(
+        stream_line.contains("DRIFT"),
+        "stream (genuine drift) must report DRIFT: {stream_line:?}"
+    );
+}
+
+#[test]
+fn gate_client_row_keeps_the_fixed_bound_unchanged_when_the_master_priming_read_fails_1022() {
+    // Same tight/elevated client sample as the PASS test above, but this time
+    // DANTESYNC_GATE_MASTER_DEADBAND_STATUS points nowhere (the #686 NO_HTTP sentinel) -- the
+    // priming read must fail closed (empty), never a real curl to the live rig from a test
+    // sandbox, and the client bound must fall back to the UNMODIFIED fixed bound -- exactly the
+    // "cannot prove it -> do not widen" discipline every other fallback in this file follows.
+    let base = now_epoch();
+    let master_responses = vec![
+        http_status_ntp(base, 2400, "2", false),
+        http_status_ntp(base + 5, 2500, "3", false),
+        http_status_ntp(base + 10, 2450, "2", false),
+    ];
+    let p_master = write_multi_read_fixture("strih_1022_no_priming_master", &master_responses);
+    let client_responses = vec![
+        http_status_ntp_deadband(base, 2550, "2", false, "null"),
+        http_status_ntp_deadband(base + 5, 2589, "3", false, "null"),
+        http_status_ntp_deadband(base + 10, 2630, "2", false, "null"),
+    ];
+    let p_client = write_multi_read_fixture("stream_1022_no_priming_client", &client_responses);
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--win-http",
+            "stream=10.77.9.204",
+            "--samples",
+            "3",
+            "--min-distinct",
+            "3",
+            "--window-s",
+            "0",
+        ],
+        &[
+            (
+                "DANTESYNC_GATE_WIN_HTTP_STRIH",
+                &p_master.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_WIN_HTTP_STREAM",
+                &p_client.display().to_string(),
+            ),
+            ("DANTESYNC_GATE_MASTER_DEADBAND_STATUS", NO_HTTP),
+        ],
+    );
+    assert_eq!(
+        code, 20,
+        "an unreadable master priming status must fall back to the unmodified 2000us bound, so \
+         the same 2589us median must still DRIFT (never a silent, unproven widen). \
+         stdout={stdout} stderr={stderr}"
+    );
+    let stream_line = stdout
+        .lines()
+        .find(|l| l.trim_start().starts_with("stream"))
+        .unwrap_or_else(|| panic!("no stream report line in stdout: {stdout}"));
+    assert!(stream_line.contains("DRIFT"), "stream_line: {stream_line:?}");
+}
+
+#[test]
+fn gate_client_row_scatter_still_fails_via_stability_despite_the_widened_median_bound_1022() {
+    // The widened bound only ever relaxes the MEDIAN (location) check -- the pre-existing #836
+    // spread/stability check stays fully active for client rows. A client whose median sits
+    // inside the widened envelope (2589us <= 3500us) but whose samples SCATTER beyond the
+    // stability bound must still fail, just via UNSTABLE instead of DRIFT.
+    let base = now_epoch();
+    let master_responses = vec![
+        http_status_ntp_deadband(base, 2400, "2", false, "2500"),
+        http_status_ntp_deadband(base + 5, 2500, "3", false, "2500"),
+        http_status_ntp_deadband(base + 10, 2450, "2", false, "2500"),
+    ];
+    let p_master = write_multi_read_fixture("strih_1022_scatter_master", &master_responses);
+    let client_responses = vec![
+        http_status_ntp_deadband(base, 1500, "2", false, "null"),
+        http_status_ntp_deadband(base + 5, 2589, "3", false, "null"),
+        http_status_ntp_deadband(base + 10, 3600, "2", false, "null"),
+    ];
+    let p_client = write_multi_read_fixture("stream_1022_scatter_client", &client_responses);
+    let p_priming = write_win_http_fixture(
+        "strih_1022_scatter_priming",
+        &http_status_ntp_deadband(base, 2450, "2", false, "2500"),
+    );
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--win-http",
+            "stream=10.77.9.204",
+            "--samples",
+            "3",
+            "--min-distinct",
+            "3",
+            "--window-s",
+            "0",
+        ],
+        &[
+            (
+                "DANTESYNC_GATE_WIN_HTTP_STRIH",
+                &p_master.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_WIN_HTTP_STREAM",
+                &p_client.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_MASTER_DEADBAND_STATUS",
+                &p_priming.display().to_string(),
+            ),
+        ],
+    );
+    assert_eq!(
+        code, 20,
+        "median in-envelope (2589us <= 3500us) but spread 2100us > the 2000us stability bound \
+         must still fail. stdout={stdout} stderr={stderr}"
+    );
+    let stream_line = stdout
+        .lines()
+        .find(|l| l.trim_start().starts_with("stream"))
+        .unwrap_or_else(|| panic!("no stream report line in stdout: {stdout}"));
+    assert!(
+        stream_line.contains("UNSTABLE") && !stream_line.contains("DRIFT"),
+        "the widened median bound must clear the DRIFT flag, leaving ONLY UNSTABLE (the \
+         pre-existing #836 scatter class, unaffected by #1022): {stream_line:?}"
+    );
+}
+
+#[test]
+fn gate_client_chase_ceiling_us_caps_an_absurd_master_deadband_1022() {
+    // #1021's own master-row widening is deliberately UNCAPPED (it only ever widens the ONE
+    // master row). #1022 widens potentially MANY client rows from the SAME live-read deadband --
+    // an absurdly large/misconfigured ntp_deadband_us must not blindly widen every client's
+    // bound to match it. The default --client-chase-ceiling-us (5000) caps the deadband
+    // component BEFORE the margin is added, so a client median that would PASS under an
+    // uncapped (blind) widen still DRIFTs here.
+    let base = now_epoch();
+    let master_responses = vec![
+        http_status_ntp_deadband(base, 100, "2", false, "50000"),
+        http_status_ntp_deadband(base + 5, 120, "3", false, "50000"),
+        http_status_ntp_deadband(base + 10, 110, "2", false, "50000"),
+    ];
+    let p_master = write_multi_read_fixture("strih_1022_absurd_deadband_master", &master_responses);
+    let client_responses = vec![
+        http_status_ntp_deadband(base, 6400, "2", false, "null"),
+        http_status_ntp_deadband(base + 5, 6500, "3", false, "null"),
+        http_status_ntp_deadband(base + 10, 6600, "2", false, "null"),
+    ];
+    let p_client = write_multi_read_fixture("stream_1022_absurd_deadband_client", &client_responses);
+    let p_priming = write_win_http_fixture(
+        "strih_1022_absurd_deadband_priming",
+        &http_status_ntp_deadband(base, 100, "2", false, "50000"),
+    );
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--win-http",
+            "stream=10.77.9.204",
+            "--samples",
+            "3",
+            "--min-distinct",
+            "3",
+            "--window-s",
+            "0",
+        ],
+        &[
+            (
+                "DANTESYNC_GATE_WIN_HTTP_STRIH",
+                &p_master.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_WIN_HTTP_STREAM",
+                &p_client.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_MASTER_DEADBAND_STATUS",
+                &p_priming.display().to_string(),
+            ),
+        ],
+    );
+    assert_eq!(
+        code, 20,
+        "max(2000, min(50000,5000)+1000)=6000us -- a 6500us client median must still DRIFT \
+         against the CAPPED envelope, even though it would PASS under an uncapped \
+         50000+1000=51000us blind widen. stdout={stdout} stderr={stderr}"
+    );
+    let stream_line = stdout
+        .lines()
+        .find(|l| l.trim_start().starts_with("stream"))
+        .unwrap_or_else(|| panic!("no stream report line in stdout: {stdout}"));
+    assert!(stream_line.contains("DRIFT"), "stream_line: {stream_line:?}");
+}
+
+#[test]
+fn gate_client_chase_ceiling_us_flag_is_configurable_1022() {
+    // Same fixtures as the PASS test above (master deadband 2500, client median 2589us, which
+    // PASSES under the default 5000us ceiling) -- an explicit lower --client-chase-ceiling-us
+    // narrows the envelope back down and must make the SAME client DRIFT again, proving the flag
+    // genuinely controls the cap rather than being ignored.
+    let base = now_epoch();
+    let master_responses = vec![
+        http_status_ntp_deadband(base, 2400, "2", false, "2500"),
+        http_status_ntp_deadband(base + 5, 2500, "3", false, "2500"),
+        http_status_ntp_deadband(base + 10, 2450, "2", false, "2500"),
+    ];
+    let p_master = write_multi_read_fixture("strih_1022_low_ceiling_master", &master_responses);
+    let client_responses = vec![
+        http_status_ntp_deadband(base, 2550, "2", false, "null"),
+        http_status_ntp_deadband(base + 5, 2589, "3", false, "null"),
+        http_status_ntp_deadband(base + 10, 2630, "2", false, "null"),
+    ];
+    let p_client = write_multi_read_fixture("stream_1022_low_ceiling_client", &client_responses);
+    let p_priming = write_win_http_fixture(
+        "strih_1022_low_ceiling_priming",
+        &http_status_ntp_deadband(base, 2450, "2", false, "2500"),
+    );
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--win-http",
+            "stream=10.77.9.204",
+            "--samples",
+            "3",
+            "--min-distinct",
+            "3",
+            "--window-s",
+            "0",
+            "--client-chase-ceiling-us",
+            "1000",
+        ],
+        &[
+            (
+                "DANTESYNC_GATE_WIN_HTTP_STRIH",
+                &p_master.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_WIN_HTTP_STREAM",
+                &p_client.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_MASTER_DEADBAND_STATUS",
+                &p_priming.display().to_string(),
+            ),
+        ],
+    );
+    assert_eq!(
+        code, 20,
+        "max(2000, min(2500,1000)+1000)=2000us -- --client-chase-ceiling-us 1000 must narrow the \
+         envelope enough that the same 2589us median DRIFTs again. stdout={stdout} stderr={stderr}"
+    );
+    let stream_line = stdout
+        .lines()
+        .find(|l| l.trim_start().starts_with("stream"))
+        .unwrap_or_else(|| panic!("no stream report line in stdout: {stdout}"));
+    assert!(stream_line.contains("DRIFT"), "stream_line: {stream_line:?}");
+}
+
+#[test]
+fn gate_client_chase_ceiling_us_malformed_is_a_usage_error_1022() {
+    let (code, _stdout, stderr) = run_gate(&[
+        "--linux",
+        "",
+        "--win-http",
+        "strih=10.77.9.202",
+        "--client-chase-ceiling-us",
+        "abc",
+    ]);
+    assert_eq!(
+        code, 1,
+        "a non-numeric --client-chase-ceiling-us must be a usage error (1). stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("--client-chase-ceiling-us"),
+        "stderr must name the flag: {stderr}"
+    );
+}
+
+#[test]
+fn help_describes_the_client_chase_ceiling_flag_1022() {
+    let (code, stdout, _stderr) = run_gate(&["--help"]);
+    assert_eq!(code, 0, "--help must exit 0");
+    assert!(
+        stdout.contains("--client-chase-ceiling-us"),
+        "usage text must document the new flag: {stdout}"
     );
 }
