@@ -106,6 +106,16 @@ GATE_DEADBAND_MARGIN_US="${DANTESYNC_DEADBAND_MARGIN_US:-1000}"
 # client row to match it (unlike #1021's own uncapped master-only formula, which only ever
 # widens ONE row).
 GATE_CLIENT_CHASE_CEILING_US="${DANTESYNC_CLIENT_CHASE_CEILING_US:-5000}"
+# #1022 review follow-up: read_master_chase_status's priming read runs SYNCHRONOUSLY in main(),
+# before any per-node grade_http_node job is dispatched (#836's concurrent-sampling design starts
+# only after this returns) -- so its own --max-time deliberately does NOT reuse the full
+# GATE_WIN_HTTP_TIMEOUT (10s default): worst case (master unreachable) that would add up to a
+# full extra 10s of pure serial delay ahead of the concurrent per-node phase, eroding #836's "total
+# gate time stays close to ONE window" property, for a read whose ONLY purpose is an optional
+# bound widening the gate runs correctly without (client rows simply keep the unwidened bound on a
+# failed/timed-out priming read, exactly like an absent/null deadband). A short, dedicated timeout
+# bounds that worst case tightly without touching the concurrency model.
+GATE_MASTER_CHASE_TIMEOUT_S="${DANTESYNC_MASTER_CHASE_TIMEOUT_S:-3}"
 
 # read_linux_node_journal NAME IP -> that Linux node's latest DanteSync journald lines over SSH,
 # or "" if unreachable. Overridable for tests/offline via DANTESYNC_GATE_LINUX_JOURNAL_<NAME>
@@ -223,6 +233,12 @@ read_win_http_status() {
 # client_chase_bound_us treats an empty/unparseable status exactly like a pre-dantesync-#84
 # payload and falls back to the UNMODIFIED bound (#1022, the same "cannot prove it -> do not
 # widen" discipline every other fallback in this file follows).
+#
+# Uses GATE_MASTER_CHASE_TIMEOUT_S (default 3s), NOT the full GATE_WIN_HTTP_TIMEOUT (10s) every
+# other read here uses -- this read runs SYNCHRONOUSLY before the concurrent per-node sampling
+# phase even starts (#1022 review follow-up), so a short, dedicated timeout bounds its worst-case
+# added latency tightly instead of costing up to a full extra GATE_WIN_HTTP_TIMEOUT on an
+# unreachable master.
 read_master_chase_status() {
   local ip="$1"
   if [ -n "${DANTESYNC_GATE_MASTER_DEADBAND_STATUS:-}" ]; then
@@ -233,7 +249,7 @@ read_master_chase_status() {
     fi
     return 0
   fi
-  curl -fsS --max-time "$GATE_WIN_HTTP_TIMEOUT" "http://${ip}:${GATE_WIN_HTTP_PORT}/status" 2>/dev/null || true
+  curl -fsS --max-time "$GATE_MASTER_CHASE_TIMEOUT_S" "http://${ip}:${GATE_WIN_HTTP_PORT}/status" 2>/dev/null || true
 }
 
 # gather_http_samples READ_FN NAME ARG N WINDOW_S -> newline-joined raw status-JSON payloads from
@@ -415,6 +431,26 @@ grade_http_node() {
   printf '%s' "$(node_verdict "$rc_off" "$rc_ptp")" > "$verdictfile"
 }
 
+# resolve_node_grading NAME -> sets node_mode/node_bound/node_note (bash's dynamic scoping means
+# these are the CALLER's own `local` variables -- this function never declares them itself, so an
+# assignment here resolves to main()'s already-`local` node_mode/node_bound/node_note, exactly
+# like any other bash function that mutates a caller's locals by convention) for the grade_http_node
+# call for node NAME. #1022 review follow-up: this bootstrap logic (master row = median-only mode
+# against the bare bound; every other row = full mode against the once-derived client chase-
+# envelope bound + its note) was previously duplicated verbatim between the --linux and --win-http
+# dispatch loops below -- extracted here so the master-vs-client decision lives in exactly ONE
+# place, the same "one source of truth" rationale the file's own #675/#309 pattern already
+# documents for scripts/lib/*.sh helpers.
+resolve_node_grading() {
+  local name="$1"
+  node_mode="full"; node_bound="$bound"; node_note=""
+  if [ "$name" = "$GATE_NTP_MASTER_NAME" ]; then
+    node_mode="median-only"
+  else
+    node_bound="$client_bound"; node_note="$client_note"
+  fi
+}
+
 usage() {
   cat <<EOF
 dantesync-gate.sh — recording-E2E NTP+PTP precondition gate (#7).
@@ -493,11 +529,14 @@ Options:
                        ntp_deadband_us can never blindly widen every client row to match it.
                        Default ${GATE_CLIENT_CHASE_CEILING_US} (the documented maximum size of
                        any single master step). Only applies when a master is CONFIGURED among
-                       this invocation's --linux/--win-http nodes AND at least one OTHER node is
-                       also configured (a master-only invocation never pays the priming read);
-                       an unreachable/unreadable priming read falls back to the unmodified
-                       --bound-us, same "cannot prove it -> do not widen" discipline as an
-                       absent/null deadband.
+                       this invocation's --linux/--win-http nodes (with a non-empty host/IP --
+                       --ntp-master "" opts out entirely, a name matching no configured node, OR
+                       a matching name whose OWN --win-http/--linux entry has an empty host/IP,
+                       e.g. "--win-http strih=", ALL skip the priming read the same way) AND at
+                       least one OTHER node is also configured (a master-only invocation never
+                       pays the priming read); an unreachable/unreadable priming read falls back
+                       to the unmodified --bound-us, same "cannot prove it -> do not widen"
+                       discipline as an absent/null deadband.
 
 A node's NTP MEASUREMENT itself must also be FRESH, independently of the payload's general
 "updated_ts" (#1014, dantesync v1.8.30 / dantesync issue 68): "ntp_age_s" must be a plain integer
@@ -652,10 +691,11 @@ main() {
   # #1022: derive the CLIENT chase-envelope bound ONCE, before dispatching any per-node job --
   # every client row in this gate run shares the SAME envelope (one live read of the master's
   # own /status). Only attempted when a master is genuinely CONFIGURED among this invocation's
-  # nodes (an opted-out `--ntp-master ""`, or a master name matching nothing, never triggers this
-  # -- client_bound/client_note simply stay the unmodified base values in that case) AND at least
-  # one OTHER (client) node is also configured -- a master-only invocation (every #1014/#1021
-  # test) never pays the extra priming read at all.
+  # nodes with a non-empty host/IP (an opted-out `--ntp-master ""`, a master name matching
+  # nothing, OR a matching name whose OWN entry has an empty host/IP e.g. "strih=" -- all leave
+  # master_arg empty -- never trigger this; client_bound/client_note simply stay the unmodified
+  # base values in every such case) AND at least one OTHER (client) node is also configured -- a
+  # master-only invocation (every #1014/#1021 test) never pays the extra priming read at all.
   local client_bound="$bound" client_note=""
   if [ -n "$GATE_NTP_MASTER_NAME" ]; then
     local master_arg="" other_node_count=0 lookup_pair lookup_name
@@ -704,13 +744,7 @@ main() {
   for pair in "${linux_pairs[@]}"; do
     name="${pair%%=*}"; ip="${pair#*=}"
     outfile="$tmpdir/$idx.out"; vfile="$tmpdir/$idx.verdict"
-    node_mode="full"; node_bound="$bound"; node_note=""
-    if [ "$name" = "$GATE_NTP_MASTER_NAME" ]; then
-      node_mode="median-only"
-    else
-      # #1022: every CLIENT row grades against the SAME once-derived chase-envelope bound.
-      node_bound="$client_bound"; node_note="$client_note"
-    fi
+    resolve_node_grading "$name"
     grade_http_node read_linux_node_http_status "$name" "$ip" linux \
       "$node_bound" "$stability" "$min_distinct" "$samples" "$window" "$GATE_OFFSET_FRESHNESS_S" \
       "$vfile" "$node_mode" "$deadband_margin" "$node_note" > "$outfile" &
@@ -726,13 +760,7 @@ main() {
   for entry in "${win_http[@]}"; do
     name="${entry%%=*}"; ip="${entry#*=}"
     outfile="$tmpdir/$idx.out"; vfile="$tmpdir/$idx.verdict"
-    node_mode="full"; node_bound="$bound"; node_note=""
-    if [ "$name" = "$GATE_NTP_MASTER_NAME" ]; then
-      node_mode="median-only"
-    else
-      # #1022: every CLIENT row grades against the SAME once-derived chase-envelope bound.
-      node_bound="$client_bound"; node_note="$client_note"
-    fi
+    resolve_node_grading "$name"
     grade_http_node read_win_http_status "$name" "$ip" win \
       "$node_bound" "$stability" "$min_distinct" "$samples" "$window" "$GATE_OFFSET_FRESHNESS_S" \
       "$vfile" "$node_mode" "$deadband_margin" "$node_note" > "$outfile" &

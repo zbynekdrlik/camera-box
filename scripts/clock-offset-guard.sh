@@ -875,7 +875,15 @@ ntp_master_effective_bound_us() {
     printf '%s' "$bound"
     return 0
   fi
-  floor=$((deadband + margin))
+  # #1022 review hardening: `$((...))` arithmetic expansion (unlike the `[ -gt/-lt ]` test
+  # comparisons above/below, which stay decimal) treats a leading "0" as an OCTAL prefix -- a
+  # validated-but-zero-padded deadband/margin like "0900" contains a digit (9) that is not valid
+  # octal and aborts the WHOLE calling shell under set -e ("value too great for base") instead of
+  # reaching the graceful fallback this function exists to provide. `10#` forces base-10 on both
+  # operands (deadband is already proven non-negative by the check above, so this never needs to
+  # handle a sign) -- a leading zero always means decimal to a human reading a CLI flag/JSON
+  # number, never octal.
+  floor=$((10#$deadband + 10#$margin))
   if [ "$floor" -gt "$bound" ]; then
     printf '%s' "$floor"
   else
@@ -945,7 +953,11 @@ client_chase_bound_us() {
   fi
   capped="$deadband"
   [ "$capped" -gt "$ceiling" ] && capped="$ceiling"
-  floor=$((capped + margin))
+  # #1022 review hardening -- same octal-prefix hazard as ntp_master_effective_bound_us above:
+  # `10#` forces base-10 on both operands (capped is already proven non-negative -- it is either
+  # deadband, already checked >= 0, or ceiling, already validated `^[0-9]+$` -- so no sign to
+  # handle) before the ONE arithmetic expression this function contains.
+  floor=$((10#$capped + 10#$margin))
   if [ "$floor" -gt "$bound" ]; then
     printf '%s' "$floor"
   else
