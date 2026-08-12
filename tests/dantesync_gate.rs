@@ -2190,7 +2190,10 @@ fn gate_client_row_keeps_the_fixed_bound_unchanged_when_the_master_priming_read_
         .lines()
         .find(|l| l.trim_start().starts_with("stream"))
         .unwrap_or_else(|| panic!("no stream report line in stdout: {stdout}"));
-    assert!(stream_line.contains("DRIFT"), "stream_line: {stream_line:?}");
+    assert!(
+        stream_line.contains("DRIFT"),
+        "stream_line: {stream_line:?}"
+    );
 }
 
 #[test]
@@ -2282,7 +2285,8 @@ fn gate_client_chase_ceiling_us_caps_an_absurd_master_deadband_1022() {
         http_status_ntp_deadband(base + 5, 6500, "3", false, "null"),
         http_status_ntp_deadband(base + 10, 6600, "2", false, "null"),
     ];
-    let p_client = write_multi_read_fixture("stream_1022_absurd_deadband_client", &client_responses);
+    let p_client =
+        write_multi_read_fixture("stream_1022_absurd_deadband_client", &client_responses);
     let p_priming = write_win_http_fixture(
         "strih_1022_absurd_deadband_priming",
         &http_status_ntp_deadband(base, 100, "2", false, "50000"),
@@ -2327,7 +2331,10 @@ fn gate_client_chase_ceiling_us_caps_an_absurd_master_deadband_1022() {
         .lines()
         .find(|l| l.trim_start().starts_with("stream"))
         .unwrap_or_else(|| panic!("no stream report line in stdout: {stdout}"));
-    assert!(stream_line.contains("DRIFT"), "stream_line: {stream_line:?}");
+    assert!(
+        stream_line.contains("DRIFT"),
+        "stream_line: {stream_line:?}"
+    );
 }
 
 #[test]
@@ -2394,7 +2401,10 @@ fn gate_client_chase_ceiling_us_flag_is_configurable_1022() {
         .lines()
         .find(|l| l.trim_start().starts_with("stream"))
         .unwrap_or_else(|| panic!("no stream report line in stdout: {stdout}"));
-    assert!(stream_line.contains("DRIFT"), "stream_line: {stream_line:?}");
+    assert!(
+        stream_line.contains("DRIFT"),
+        "stream_line: {stream_line:?}"
+    );
 }
 
 #[test]
