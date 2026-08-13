@@ -5641,8 +5641,12 @@ static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 				bool anchor_update = false;
 				if (source->genlock_locked_next_boundary_ns == 0) {
 					/* UNLOCKED — ACQUIRE: the first wall-due frame locks the
-					 * cadence. Jump to the newest due (a startup backlog is stale
-					 * by definition), counting the older ones dropped. */
+					 * cadence. #1003: the frame PRESENTED is the one nearest the
+					 * tracked phase anchor (on a genuine cold start the anchor is
+					 * unset, so the target is the configured latency and this
+					 * behaves as before); the older ones are counted dropped. It
+					 * is NOT the newest due any more -- that instant-sampled rule
+					 * re-minted a fresh release phase on every lock episode. */
 					/* #726 STICKY-N: a fresh acquire (cold start OR after a source
 					 * reset that zeroed the boundary) re-confirms the source
 					 * multiple from scratch -- clear the latch so a stale N from a
@@ -5678,8 +5682,9 @@ static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 					 * imbalance shows up as QUEUE DEPTH, which is immune to the
 					 * constant stamp->arrival skew that relock-stormed v1's
 					 * wall-based guard live (skew 59 ms, reserve 3 ms:
-					 * dropped_due 2918/4202, relocks 1076). Re-lock to the newest
-					 * due frame, counting every jumped frame — the catch-up keeps
+					 * dropped_due 2918/4202, relocks 1076). Re-lock (#1003: to the
+					 * frame nearest the tracked phase anchor, no longer the newest
+					 * due one), counting every jumped frame — the catch-up keeps
 					 * the IMAG latency contract and the drop is VISIBLE (the
 					 * pre-#401 release erased silently). A deep queue with
 					 * due == 0 (a just-landed burst of FRESH frames, nothing aged
@@ -5852,9 +5857,11 @@ static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 					genlock_audit_log(source, now_ns);
 					return false;
 				}
-				/* Present the newest frame of the released prefix — the newest
-				 * due at ACQUIRE / backlog re-lock (release = due), the queue
-				 * head on the STEADY / GAP paths (release = 1, nothing erased).
+				/* Present the LAST frame of the released prefix — #1003: the frame
+				 * nearest the tracked phase anchor at ACQUIRE / backlog re-lock
+				 * (release = selected index + 1, so this idiom is unchanged; it was
+				 * the newest DUE frame before #1003), the queue head on the STEADY /
+				 * GAP paths (release = 1, nothing erased).
 				 * The (release-1) stale older ones are erased via the same
 				 * da_erase(.,0)+remove_async_frame() idiom — COUNTING each into
 				 * genlock_dropped_due (#401: this erase used to be silent, which
