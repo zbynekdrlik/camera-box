@@ -433,6 +433,59 @@ fn gather_remote_snippet_selects_by_identity_and_globs_all_cards() {
 // README pin-present guard — the drift-guard authority for the strict PL1 gate
 // ---------------------------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------------------------
+// on-box scripts — the oneshot (imag-power-envelope.sh) + the guard (imag-power-envelope-guard.sh)
+// ---------------------------------------------------------------------------------------------
+
+fn read_script(rel: &str) -> String {
+    let p = manifest_dir().join(rel);
+    std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()))
+}
+
+#[test]
+fn oneshot_is_a_failloud_script_that_sets_the_envelope_by_identity() {
+    let body = read_script("scripts/imag-power-envelope.sh");
+    assert!(body.contains("set -euo pipefail"), "the oneshot must fail loud");
+    // slpc across ALL cards, PL1 by package-0/long_term NAME identity (never a hardcoded index).
+    assert!(
+        body.contains("slpc_ignore_eff_freq") && body.contains("card*"),
+        "the oneshot must set slpc across every card* (never a hardcoded cardN)"
+    );
+    assert!(
+        body.contains("intel-rapl-mmio:")
+            && body.contains("package-0")
+            && body.contains("long_term"),
+        "the oneshot must select the RAPL zone/constraint by package-0/long_term NAME identity"
+    );
+    // Hardware-agnostic (816): no zone -> exit 0; a box that HAS the zone must FATAL if the write
+    // did not take (a silently-unapplied envelope is the exact regression this closes).
+    assert!(
+        body.contains("hardware-agnostic") && body.contains("did not take"),
+        "the oneshot must be hardware-agnostic yet assert the write took on a box that has the zone"
+    );
+}
+
+#[test]
+fn guard_uses_the_shared_decision_never_a_second_copy() {
+    let body = read_script("scripts/imag-power-envelope-guard.sh");
+    assert!(body.contains("set -euo pipefail"), "the guard must fail loud");
+    // The DECISION must be the shared pure function, not re-implemented inline.
+    assert!(
+        body.contains("imag_power_guard_decision"),
+        "the guard must call the shared imag_power_guard_decision (one source of truth)"
+    );
+    // It must source the shared lib (installed path + repo fallback).
+    assert!(
+        body.contains("/usr/local/lib/imag-power-envelope.sh"),
+        "the guard must source the installed shared lib"
+    );
+    // Every transition is journald-tagged so a clamp episode is retrievable + alertable.
+    assert!(
+        body.contains("logger -t") && body.contains("STEP-DOWN") && body.contains("RE-ASSERT"),
+        "the guard must journald-tag its step-down / re-assert transitions (dev1-side alerting)"
+    );
+}
+
 #[test]
 fn readme_pins_power_pl1_w_imag_at_29() {
     let readme = std::fs::read_to_string(manifest_dir().join("vendor/README.md")).unwrap();
