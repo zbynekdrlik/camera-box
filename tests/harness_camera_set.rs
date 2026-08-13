@@ -201,7 +201,7 @@ fn camera_set_reject_message_still_lists_all_seven_cameras() {
 }
 
 #[test]
-fn camera_active_set_default_is_exactly_cam1_cam2_947() {
+fn camera_active_set_default_is_exactly_cam1_cam2_cam3_939() {
     // CAMERA_ACTIVE_SET is the ONE declared list of cameras physically installed TODAY. #898
     // (2026-07-31): cam3's grabber card was physically destroyed (moved into cam1 during the
     // #728/#688 recovery) -- retired from the active set exactly like cam5/cam6/cam7 (#827).
@@ -210,19 +210,17 @@ fn camera_active_set_default_is_exactly_cam1_cam2_947() {
     // membership-retired until the hardware call is made at the rig.
     let s = read("scripts/camera-set.sh");
     assert!(
-        s.contains("CAMERA_ACTIVE_SET=\"${CAMERA_ACTIVE_SET:-cam1 cam2}\""),
-        "issue 947: CAMERA_ACTIVE_SET default must be exactly the two active cameras (cam1, \
-         cam2) -- cam3 and cam4 retired."
+        s.contains("CAMERA_ACTIVE_SET=\"${CAMERA_ACTIVE_SET:-cam1 cam2 cam3}\""),
+        "issue 939: CAMERA_ACTIVE_SET default must be exactly the three active cameras (cam1, \
+         cam2, cam3 re-activated 2026-08-13) -- cam4/cam5/cam6/cam7 out."
     );
 }
 
 #[test]
-fn camera_set_cam3_retired_898_still_resolves_as_fact_but_not_active() {
-    // #898 (2026-07-31): cam3's grabber card was physically destroyed -- retired from
-    // CAMERA_ACTIVE_SET exactly like cam5/cam6/cam7 (#827): membership only, never a deleted
-    // case arm. camera_resolve()/camera_strih_route() must keep resolving cam3 fully (so
-    // reactivation is a one-line CAMERA_ACTIVE_SET edit once a replacement card is fitted),
-    // while camera_is_active("cam3", None) must be false by default.
+fn camera_set_cam3_reactivated_939_resolves_and_is_active_by_default() {
+    // #898 retired cam3 (grabber destroyed 2026-07-31); #939 re-activated it (Cam Link 4K
+    // fitted, 2026-08-13). The facts (IP, NDI source, strih route) were never deleted -- this
+    // test now pins the completed round trip: cam3 resolves fully AND is active by default.
     let (ok, ip, src) = resolve("cam3");
     assert!(
         ok,
@@ -250,8 +248,9 @@ fn camera_set_cam3_retired_898_still_resolves_as_fact_but_not_active() {
     );
 
     assert!(
-        !is_active("cam3", None),
-        "#898: cam3 must NOT be active by default (grabber card destroyed 2026-07-31)"
+        is_active("cam3", None),
+        "#939: cam3 IS active by default again (Cam Link 4K card fitted, re-activated \
+         2026-08-13) -- the reversible retirement design completing its round trip"
     );
     assert!(
         is_active("cam3", Some("cam1 cam2 cam3 cam4")),
@@ -297,9 +296,9 @@ fn camera_active_secondary_set_excludes_cam1_and_cam2_by_default() {
     // some literal camera list.
     assert_eq!(
         active_secondary_set(None),
-        "",
-        "issue 947: with only cam1=source and cam2=painter active, the secondary set must be \
-         empty (cam3 and cam4 retired)"
+        "cam3",
+        "issue 939: cam3 re-activated -- with cam1=source and cam2=painter, cam3 is the one \
+         secondary camera the ALL_CAMBOX sweep cuts in"
     );
 }
 
@@ -507,14 +506,14 @@ camera_active_excluding "$EXCLUDED"
 
 #[test]
 fn camera_active_excluding_never_includes_a_retired_camera_even_with_empty_exclusion() {
-    // #827/#898 follow-up: cam3/cam5/cam6/cam7 are NOT in the default CAMERA_ACTIVE_SET at all --
-    // they must never appear in the derived list, regardless of what (if anything) is passed as
-    // excluded.
+    // #827/#898 follow-up, #939 update: cam5/cam6/cam7 stay retired and cam4 stays out (issue
+    // 947), while cam3 is back in the default set since 2026-08-13 -- the derived list must
+    // reflect exactly that, regardless of what (if anything) is passed as excluded.
     assert_eq!(
         active_excluding(None, ""),
-        "cam1 cam2",
-        "issue 947: camera_active_excluding with no exclusion must return exactly the active set \
-         (cam3 and cam4 retired)"
+        "cam1 cam2 cam3",
+        "issue 939: camera_active_excluding with no exclusion must return exactly the active set \
+         (cam3 re-activated; cam4/cam5/cam6/cam7 out)"
     );
 }
 
@@ -524,7 +523,7 @@ fn camera_active_excluding_subtracts_the_acked_offline_list_within_the_active_se
     // active cameras stay, and no retired camera ever appears.
     assert_eq!(
         active_excluding(None, "cam4"),
-        "cam1 cam2",
+        "cam1 cam2 cam3",
         "camera_active_excluding must drop an acked-offline camera from the active set"
     );
 }
@@ -574,11 +573,12 @@ fn camera_active_ndi_sources_excluding_csv_never_includes_a_retired_camera() {
     // still sampled by the [1/8] frozen-camera preflight if the derivation leaks it.
     let csv = active_ndi_sources_excluding_csv(None, "");
     assert_eq!(
-        csv, "NDI cam1,NDI cam2",
-        "issue 947: a retired camera (cam3/cam4/cam5/cam6/cam7) must never appear in the derived \
-         NDI source CSV, regardless of whether its strih OBS input still exists"
+        csv, "NDI cam1,NDI cam2,NDI cam3",
+        "issue 939: cam3 re-activated -- the derived NDI source CSV carries exactly the active \
+         set; a retired camera (cam4/cam5/cam6/cam7) must never appear regardless of whether \
+         its strih OBS input still exists"
     );
-    for retired in ["NDI cam3", "NDI cam4", "NDI cam5", "NDI cam6", "NDI cam7"] {
+    for retired in ["NDI cam4", "NDI cam5", "NDI cam6", "NDI cam7"] {
         assert!(
             !csv.contains(retired),
             "{retired} must not appear in the derived source list -- it is retired from \
@@ -593,7 +593,7 @@ fn camera_active_ndi_sources_excluding_csv_also_drops_acked_offline_within_activ
     // PREFLIGHT_EXCLUDED_CAMS mechanism the three recording-e2e.sh call sites already pass
     // through unchanged.
     assert_eq!(
-        active_ndi_sources_excluding_csv(None, "cam4"),
+        active_ndi_sources_excluding_csv(None, "cam3"),
         "NDI cam1,NDI cam2",
         "an acked-offline camera within the active set must be excluded from the CSV"
     );

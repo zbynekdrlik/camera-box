@@ -1658,10 +1658,9 @@ fn resolve_cambox_sweep_default(active_set_override: Option<&str>) -> String {
 
 #[test]
 fn recording_e2e_default_sweep_covers_every_active_camera_including_cam2() {
-    // #898 (2026-07-31): cam3's grabber card was physically destroyed -- retired from the
-    // default active set exactly like cam5/cam6/cam7 (#827). issue 947 (2026-08-02): cam4 joined
-    // them (its grabber wedges the capture leg within minutes of every start). The default sweep
-    // now covers cam1/cam2 only.
+    // #898 retired cam3; #939 (2026-08-13) re-activated it (Cam Link 4K fitted). issue 947
+    // (2026-08-02): cam4 stays out (its grabber wedges the capture leg within minutes of every
+    // start). The default sweep covers cam1/cam2/cam3.
     let s = read("scripts/recording-e2e.sh");
     assert!(
         s.contains("CAMBOX_SWEEP=\"${CAMBOX_SWEEP:-$(camera_active_sweep_pairs)}\""),
@@ -1679,16 +1678,15 @@ fn recording_e2e_default_sweep_covers_every_active_camera_including_cam2() {
         resolved.contains("Cam 1:CAM1"),
         "#312/#753/#827: the default sweep must still cover CAM1 via 'Cam 1:CAM1': {resolved}"
     );
-    for retired in [
-        "Cam 3:CAM3",
-        "Cam 4:CAM4",
-        "Cam 5:CAM5",
-        "Cam 6:CAM6",
-        "Cam 7:CAM7",
-    ] {
+    assert!(
+        resolved.contains("Cam 3:CAM3"),
+        "issue 939: cam3 re-activated 2026-08-13 — the default sweep must cover CAM3 via \
+         'Cam 3:CAM3': {resolved}"
+    );
+    for retired in ["Cam 4:CAM4", "Cam 5:CAM5", "Cam 6:CAM6", "Cam 7:CAM7"] {
         assert!(
             !resolved.contains(retired),
-            "#827/#898/issue 947: the default sweep must NOT reference the retired {retired} — \
+            "#827/issue 947: the default sweep must NOT reference the retired {retired} — \
              that box is not part of the active fleet today: {resolved}"
         );
     }

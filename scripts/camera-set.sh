@@ -44,7 +44,7 @@
 # camera_resolve/camera_strih_route already know it fully, and every consumer that derives from
 # CAMERA_ACTIVE_SET (or camera_active_secondary_set below) picks it up automatically on its next
 # run. See tests/harness_camera_set.rs's `camera_active_set_env_override_reactivates_a_retired_camera`
-# / `camera_set_cam3_retired_898_still_resolves_as_fact_but_not_active` for the proof this
+# / `camera_set_cam3_reactivated_939_resolves_and_is_active_by_default` for the proof this
 # actually works.
 #
 # cam4 RETIRED 2026-08-02 (issue 947): its NZXT Signal HD60 grabber wedges the capture leg within
@@ -57,7 +57,14 @@
 # Re-activation is the one-line add-back below (cam1 holds the 3ms phase-sync floor either way, so
 # no re-anchor is needed to REMOVE cam4 — but re-ADDING it must run the calibrator, see
 # .claude/rules/phase-sync-calibrator-testing.md).
-CAMERA_ACTIVE_SET="${CAMERA_ACTIVE_SET:-cam1 cam2}"
+#
+# cam3 RE-ACTIVATED 2026-08-13 (issue 939, user order 2026-08-11): the destroyed Genki grabber was
+# replaced with an Elgato Cam Link 4K — 60.0fps captured/emitted, 0 corrupted, colour chroma
+# verified live; strih's `NDI cam3` is bound 1:1 to `CAM3 (usb)` and the `Cam 3` scene item is
+# enabled. Its per-source phase-sync hold sits at the 3 ms floor; recalibrate from the first green
+# E2E run's own verdict JSON if the measured delivery spread demands it (see
+# .claude/rules/phase-sync-calibrator-testing.md).
+CAMERA_ACTIVE_SET="${CAMERA_ACTIVE_SET:-cam1 cam2 cam3}"
 
 # This file is meant to be SOURCED, not executed — it defines functions and a default, and
 # performs no side effects on its own. Direct execution prints the resolved default set.

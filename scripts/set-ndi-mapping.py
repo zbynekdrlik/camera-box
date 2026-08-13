@@ -28,7 +28,7 @@ ACTIVE mapping, but REVERSIBLY.** The test rig shrank: cam5/cam6/cam7's USB grab
 returned to their owner and those boxes are powered off. The owner's binding requirement: this
 retirement MUST be a one-line reversal when the boxes come back — so `FULL_MAP` below keeps
 EVERY camera's pin as a FACT (never deleted), and `--active` (defaulting to the `CAMERA_ACTIVE_SET`
-env var camera-set.sh exports, or "cam1 cam2" if that's unset too) filters it down to
+env var camera-set.sh exports, or "cam1 cam2 cam3" if that's unset too) filters it down to
 the pins actually ENFORCED this run. Re-enable procedure: cam5 back? add "cam5" to
 CAMERA_ACTIVE_SET in scripts/camera-set.sh (scripts/rig-mode.sh passes it through automatically
 via `--active "$CAMERA_ACTIVE_SET"`), rerun the gate — nothing here needs to change. Whatever OBS
@@ -99,7 +99,7 @@ DEFAULT_MAP = FULL_MAP
 # exactly (this module is invoked as a standalone subprocess, so it reads the SAME env var rather
 # than re-declaring its own separate default; when unset, falls back to the identical literal
 # camera-set.sh itself defaults to, so the two can never silently disagree).
-DEFAULT_ACTIVE_SET = os.environ.get("CAMERA_ACTIVE_SET", "cam1 cam2")
+DEFAULT_ACTIVE_SET = os.environ.get("CAMERA_ACTIVE_SET", "cam1 cam2 cam3")
 
 
 def _camera_name_of(ndi_input):
@@ -215,7 +215,7 @@ def main():
         "--active",
         default=None,
         help="#827/#898: space/comma-separated camera names to enforce (default: "
-        "$CAMERA_ACTIVE_SET env, or 'cam1 cam2'). Ignored when --map is given explicitly.",
+        "$CAMERA_ACTIVE_SET env, or 'cam1 cam2 cam3'). Ignored when --map is given explicitly.",
     )
     ap.add_argument("--verify-only", action="store_true", help="check + report, do not set")
     args = ap.parse_args()

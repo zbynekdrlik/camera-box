@@ -831,9 +831,16 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
   done
   if [ -n "$PREFLIGHT_DANTESYNC_SECONDARY" ]; then
     echo "[0/8] dantesync freshest-offset sanity — ${PREFLIGHT_DANTESYNC_SECONDARY_NAMES} (#758/#827/#947)"
+    # issue 1022 follow-up (live run 31669664399): the gate's step-chase machinery (client bound
+    # widened by the master's own ntp_deadband_us envelope + the bimodal chase-signature
+    # exclusion) engages ONLY when the NTP master is among the call's configured nodes -- without
+    # strih here, a secondary camera is graded against the BARE bound and false-fails on the
+    # master's routine ~2.5ms step propagation. Passing strih also re-grades strih itself in this
+    # call (harmless, already proven clean by the main gate above).
     "$HERE/dantesync-gate.sh" \
       --bound-us "${CLOCK_GUARD_BOUND_US:-2000}" \
       --win-http-port "${WIN_DANTE_PORT:-8898}" \
+      --win-http "strih=$STRIH" \
       --linux "$PREFLIGHT_DANTESYNC_SECONDARY"
   else
     echo "[0/8] dantesync freshest-offset sanity — skipped: no secondary cameras in CAMERA_ACTIVE_SET, cam1+cam2 are already fully covered by the main DanteSync gate above (#947)"

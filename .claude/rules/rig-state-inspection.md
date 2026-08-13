@@ -191,6 +191,19 @@ timeout), and verify from a FRESH ssh: `ps -o pid,lstart -C obs` start time AFTE
 #912 stop-race), `render tick ENABLED` in the newest OBS log, and both Projector windows present
 (proof the start script's seed phase completed).
 
+**An imag "fast" deploy must ship the FULL matched bundle — libobs + EVERY `obs-plugins/*.so`
+built together — never `libobs.so.30` alone, and never even the hand-picked 4-file list above
+without the rest of `obs-plugins/` (issue 1026, 2026-08-13).** The Windows single-file `obs.dll`
+swap has NO safe Linux equivalent: on Linux the plugins (`obs-websocket.so`, `distroav.so`, …)
+link against libobs's INTERNAL struct layout, so an old plugin over a new `libobs.so.30` is a
+latent SIGSEGV, not a compatibility mode. Live cost: the 2026-08-12 deploy swapped ONLY
+libobs.so.30 on imag; the stale `obs-websocket.so` then segfaulted OBS in
+`get_const_root <- obs_enum` (twice, hours apart) whenever a WS client enumerated
+filters — killing OBS overnight and refusing two E2E runs at the dead-OBS preflight. Deploy =
+untar the whole CI bundle over `bin/ + lib/x86_64-linux-gnu/ (incl. ALL obs-plugins/*.so) +
+share/obs/`, refresh the `/opt/obs-genlock/` markers, and after restart deliberately exercise a
+WS filter-enum op (`obs_burn_filter.py check`) to prove the previously-crashing path survives.
+
 ## 6. A hook-BLOCKED Bash call runs NOTHING — including its own heredocs
 
 When a PreToolUse hook blocks a Bash call, the ENTIRE call is refused — a heredoc inside that call
