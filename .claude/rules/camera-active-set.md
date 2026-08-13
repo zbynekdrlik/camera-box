@@ -12,8 +12,8 @@ paths:
 # CAMERA_ACTIVE_SET — every fleet-enumeration consumer MUST derive from it, never a literal range
 
 `CAMERA_ACTIVE_SET` (`scripts/camera-set.sh`, #827) is the ONE declared list of cameras physically
-installed and active TODAY (default `cam1 cam2 cam4`; cam3/cam5/cam6/cam7 retired but fully
-resolvable — see the header comment in `camera-set.sh`). **Every place that needs "the list of
+installed and active TODAY (default `cam1 cam2 cam3` since #939, 2026-08-13; cam4/cam5/cam6/cam7
+retired but fully resolvable — see the header comment in `camera-set.sh`). **Every place that needs "the list of
 cameras to check/sample/sweep right now" must derive it from `CAMERA_ACTIVE_SET`, not from a
 literal range or its own hardcoded list.** A retired camera's facts (IP, NDI source name, genlock
 fps, strih scene/route) stay fully resolvable forever (`camera_resolve`/`camera_strih_route` never

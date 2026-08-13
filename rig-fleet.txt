@@ -11,12 +11,9 @@
 # healthy fails the run LOUDLY as a stale ack (#758/#827); remove the line the moment the box is
 # back in the fleet.
 #
-# Current physical state (2026-08-06 evening, post-event re-verification):
-# cam3: NEW Cam Link 4K grabber card installed 2026-08-11 (user replaced the destroyed Genki
-#   one, issue 939) -- box ON, camera-box active, 60fps colour capture verified. Acked for the
-#   SAME reason as cam4 below: healthy and streaming, but not yet in CAMERA_ACTIVE_SET, so the
-#   all-cambox A/V derivation has no delivery samples for it. Issue 939 tracks the full
-#   re-integration (strih wiring + active-set membership); drop this line when it lands.
+# Current physical state (2026-08-13, issue-939 cam3 re-integration):
+# cam3: RE-ACTIVATED 2026-08-13 (issue 939) -- in CAMERA_ACTIVE_SET, a measured preflight
+#   target again; its former ack line is GONE (a healthy acked box trips the stale-ack guard).
 # cam4: ON AIR but OUTSIDE the measured set -- ack RESTORED 2026-08-07 with this exact reason.
 #   The box is healthy (preflight contract passes on 10.77.9.64) and its feed genuinely renders
 #   on strih, so the 2026-08-06 "removed from rig" reason was stale. BUT cam4 is not in
@@ -30,7 +27,6 @@
 # Without the remaining acks the re-armed A/V-offset gate (issue 861) fails closed forever on
 # their UNKNOWN (0 samples) verdicts -- an unacked absent camera must fail the gate by design
 # (#855).
-cam3:new-camlink4k-card-outside-measured-set-2026-08-11
 cam4:on-air-but-outside-measured-set-2026-08-07
 cam5:powered-off-2026-07-27
 cam6:powered-off-2026-07-27
