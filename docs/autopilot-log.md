@@ -7522,3 +7522,37 @@ does the live rig verification of the new whole-chain checks and closes it.
 - Local: `cargo fmt --all --check`, `cargo check`, `cargo clippy --all-targets -- -D warnings`
   all clean; `--lib genlock_backlog` 36/36; `--test genlock_release_cadence` 13/13. No PR --
   worktree local-only authority; supervisor integrates and drives CI/merge/deploy.
+- REVIEW ROUND (fresh-context adversarial pass over the whole branch): 1 critical, 5 warnings,
+  5 suggestions -- all fixed in-branch except one, which is filed.
+  - CRITICAL, and worth reading twice: the fix as first written broke a latency DECREASE. The
+    anchor IS the conveyor's current age, so after a knob decrease it still described the OLD,
+    deeper hold; the selection then returned index 0, the relock shed NOTHING, and the lowered
+    threshold qualified the backlog branch on EVERY tick. And because the backlog branch
+    pre-empts STEADY, `drain_eligible` was never set, so the settle-back drain -- the only
+    other convergence path -- never ran either. 923->400 ms parked at the old 933 ms hold with
+    800 relocks in 800 ticks and zero frames shed. Two guards, in the Rust sim and the C: a
+    setpoint change clears the anchor, and a BACKLOG relock that would shed nothing treats the
+    anchor as stale and re-selects against the configured latency.
+  - GENERAL LESSON from that: when a fix adds REMEMBERED STATE, enumerate every event that
+    invalidates it BEFORE writing the tests, not after. All four of this ticket's own
+    acceptance tests passed while the knob-decrease path was broken, because none of them
+    changed the setpoint. The same omission produced two more findings (the overrun
+    force-drain and the async_texture_changed re-alloc also destroy the delay line and were
+    not clearing the anchor). The guard now COUNTS anchor-clears against `free_async_cache()`
+    call sites, so a future fourth seam cannot be missed the same way.
+  - GOTCHA, and the most valuable thing in this ticket: a parity/mutation gate can be a LIE.
+    The new tests/genlock_relock_selection_parity.rs compiles the vendored C helpers
+    standalone and diffs them against the Rust authority -- and on its first cut, mutating the
+    C tie-break from `<` to `<=` still PASSED all 129 vectors, because not one of them
+    produced an exact tie. Four exact-tie vectors were added (both rig sender grids are EVEN,
+    so `i*grid + grid/2` is an exact integer nanosecond a wall instant can land on) and the
+    same mutation now diverges on 4 of 133. Always mutate the thing under test and watch the
+    gate go red before believing it.
+  - The standalone-compile trick is now a committed, CI-runnable test rather than a session
+    artefact: it lifts the four #1003 helpers verbatim from obs-source.c, compiles them under
+    -Wall -Wextra -Werror against a minimal obs_source_t stub, and requires byte-identical
+    selections. It fails loudly (never skips) without a C compiler.
+  - Filed, not fixed here: #1038 -- ready_async_frame() is ~813 lines and this diff adds to
+    it. Extracting the cadence block from vendored C that compiles only in CI is its own
+    change, not a rider on a fix.
+- Final local: fmt/clippy clean; full `cargo test` 201 binaries / 3206 tests green (exit 0).
