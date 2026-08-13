@@ -89,9 +89,17 @@ fn lib_exists_is_source_only_and_reuses_the_generic_dpkg_helper() {
         body.starts_with("#!/usr/bin/env bash") || body.starts_with("#!/bin/bash"),
         "lib must be a bash script"
     );
+    // Source-only means it must not ENABLE errexit as a STATEMENT — a bare `body.contains("set -e")`
+    // is too broad (it also matches the header prose "must NOT impose `set -euo pipefail`"), so
+    // check for an actual errexit-enabling line instead.
+    let enables_errexit = body.lines().any(|l| {
+        let t = l.trim();
+        !t.starts_with('#')
+            && (t.starts_with("set -e") || t.starts_with("set -euo") || t == "set -o errexit")
+    });
     assert!(
-        !body.contains("set -e"),
-        "the shared lib must be SOURCE-ONLY (no `set -e`) — mirrors scripts/lib/timesync-authority.sh"
+        !enables_errexit,
+        "the shared lib must be SOURCE-ONLY (never enable errexit) — mirrors scripts/lib/timesync-authority.sh"
     );
     // Reuse, never re-implement, the generic package/enabled-state helpers.
     assert!(
@@ -399,10 +407,13 @@ fn guard_holds_when_temperature_unreadable_never_a_blind_step() {
 #[test]
 fn gather_remote_snippet_selects_by_identity_and_globs_all_cards() {
     let (_c, out, _e) = run_sourced("imag_power_envelope_gather_remote_snippet");
-    // RAPL: iterate the mmio zones, select by the `package-0` / `long_term` NAME identity.
+    // RAPL: the gather iterates the mmio zones and emits each constraint's NAME field so the
+    // verdict (imag_power_zone_select) can select package-0/long_term by IDENTITY downstream — the
+    // literal `package-0`/`long_term` values are RUNTIME, not in the snippet text (that identity
+    // selection is covered by pl1_zone_selected_by_package_name_never_a_hardcoded_index).
     assert!(
-        out.contains("intel-rapl-mmio:") && out.contains("package-0") && out.contains("long_term"),
-        "the gather must iterate intel-rapl-mmio:* and key on package-0/long_term by NAME: {out:?}"
+        out.contains("intel-rapl-mmio:") && out.contains("constraint_") && out.contains("_name"),
+        "the gather must iterate intel-rapl-mmio:* and emit each constraint's NAME field: {out:?}"
     );
     // slpc: glob across ALL drm cards (the presenter-drm cardN renumbering hazard).
     assert!(
