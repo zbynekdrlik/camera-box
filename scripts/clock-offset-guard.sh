@@ -893,7 +893,13 @@ should_resample_for_chase() {
 # #1041 finding (proven, not just observed): this function's own condition 2 (every ELEVATED
 # sample <= BOUND_US) makes a "drift"/"drift_unstable" raw verdict STRUCTURALLY UNREACHABLE here
 # in any sane config (STABILITY_US <= BOUND_US, true of every default and documented flag in this
-# file): sampled_offset_verdict's own "drift" flag is `abs(median) > BOUND_US`, and the MEDIAN is
+# file -- NOT independently enforced by dantesync-gate.sh's own CLI parsing, since the
+# comparison is against a per-node EFFECTIVE bound that only exists after widening at runtime;
+# an operator who deliberately sets --stability-us far above --bound-us, wider than any
+# widened envelope could ever reach, could theoretically defeat this argument, but that is a
+# self-inflicted misconfiguration far outside anything this file's own defaults or
+# documented flags would ever produce): sampled_offset_verdict's own "drift" flag is
+# `abs(median) > BOUND_US`, and the MEDIAN is
 # itself one of the very samples this function partitions -- a baseline sample has
 # abs<=STABILITY_US<=BOUND_US by definition (can't be the median if median>BOUND_US), and an
 # ELEVATED sample exceeding BOUND_US is EXACTLY what condition 2 already rejects. So a live chase
