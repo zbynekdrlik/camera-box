@@ -2621,3 +2621,318 @@ fn chase_bimodal_exclusion_check_prints_an_ok_line_with_the_exclusion_note_and_r
         "the extra_note must be appended alongside the exclusion explanation, not replace it: {out:?}"
     );
 }
+
+// --- #1041: client chase envelope under-derived -- omits the client's OWN adaptive step -------
+// --- threshold (cam3 false-DRIFT at 3680us vs a 3500us bound) ----------------------------------
+//
+// client_chase_bound_us (#1022, above) budgets for the master's own accumulated deadband
+// excursion, but a client's REAL chase excursion is master_deadband + the CLIENT's own adaptive
+// NTP step threshold + measurement noise -- dantesync's own controller.rs clamps that adaptive
+// threshold to [500,10000]us and logs it verbatim as "... (threshold:NNNus, adaptive)" / "...
+// step candidate ... (threshold:NNNus) ...", exactly the shape documented at the top of this
+// file (`threshold:520us, adaptive`). It is NOT exposed over the HTTP /status JSON payload
+// (dantesync's SyncStatus only carries ntp_deadband_us, the MASTER's own field, always null on a
+// client) -- so it can only be read from the client's OWN journal text. client_step_threshold_
+// us_from_journal below parses the LAST such match (mirrors offset_us_from_journal's own "freshest
+// = tail -1" convention); client_chase_bound_us gains two new TRAILING params (CLIENT_JOURNAL,
+// STEP_FALLBACK_US) so every pre-#1041 4-arg call site computes byte-identical to before (default
+// journal "" + fallback "0" -> the added term is always 0 unless a caller opts in).
+
+#[test]
+fn client_step_threshold_us_from_journal_parses_the_freshest_threshold_line_1041() {
+    // The exact literal both dantesync log-line shapes emit (controller.rs:1087/1459/1420).
+    let journal = "\
+11:16:58 [NTP] offset:+23us\n\
+11:16:58 [NTP] burst offset:+3680us spread:16us samples:3/5\n\
+11:16:58 [NTP] Stepped +3680us\n\
+11:17:29 [NTP] offset:+23us\n\
+11:18:59 [NTP] burst offset:+2701us step candidate +2701us (threshold:665us)\n";
+    let out = run_sourced(
+        "client_step_threshold_us_from_journal \"$J\"",
+        &[("J", journal)],
+    );
+    assert_eq!(
+        out.trim(),
+        "665",
+        "must parse the LAST threshold:NNNus match in the journal text: {out:?}"
+    );
+}
+
+#[test]
+fn client_step_threshold_us_from_journal_picks_the_freshest_of_multiple_threshold_lines_1041() {
+    let journal = "\
+Jun 15 09:11:53 CAM2 dantesync[3649]: [NTP] offset:+300us (threshold:520us, adaptive)\n\
+Jun 15 09:12:53 CAM2 dantesync[3649]: [NTP] offset:+310us (threshold:540us, adaptive)\n";
+    let out = run_sourced(
+        "client_step_threshold_us_from_journal \"$J\"",
+        &[("J", journal)],
+    );
+    assert_eq!(
+        out.trim(),
+        "540",
+        "must pick the LAST (freshest) threshold line: {out:?}"
+    );
+}
+
+#[test]
+fn client_step_threshold_us_from_journal_returns_empty_when_absent_1041() {
+    let journal = "11:16:58 [NTP] offset:+23us\n11:17:29 [NTP] offset:+23us\n";
+    let out = run_sourced(
+        "client_step_threshold_us_from_journal \"$J\"",
+        &[("J", journal)],
+    );
+    assert_eq!(
+        out.trim(),
+        "",
+        "no threshold: annotation anywhere -> empty, never a guess: {out:?}"
+    );
+
+    let out = run_sourced("client_step_threshold_us_from_journal \"\"", &[]);
+    assert_eq!(
+        out.trim(),
+        "",
+        "an entirely empty journal -> empty: {out:?}"
+    );
+}
+
+#[test]
+fn client_chase_bound_us_pre_1041_four_arg_call_is_byte_identical_1041() {
+    // Backward-compat proof: every existing #1022 call site passes exactly 4 args. The new
+    // CLIENT_JOURNAL/STEP_FALLBACK_US params must default to "" / "0" so the added term is
+    // always 0 and every #1022 test above keeps computing its EXACT pre-#1041 number.
+    let master_status = pipe_json_deadband("2500");
+    let out = run_sourced(
+        "client_chase_bound_us \"$JSON\" 2000 1000 5000",
+        &[("JSON", master_status.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "3500",
+        "an omitted CLIENT_JOURNAL/STEP_FALLBACK_US must compute the unchanged pre-#1041 formula: \
+         {out:?}"
+    );
+}
+
+#[test]
+fn client_chase_bound_us_includes_the_client_step_threshold_term_from_journal_1041() {
+    // The exact cam3 shape: master deadband 2500 (capped, unchanged), client's own journal
+    // carries threshold:665us, margin 1000 -> 2500 + 665 + 1000 = 4165.
+    let master_status = pipe_json_deadband("2500");
+    let client_journal =
+        "11:18:59 [NTP] burst offset:+2701us step candidate +2701us (threshold:665us)\n";
+    let out = run_sourced(
+        "client_chase_bound_us \"$JSON\" 2000 1000 5000 \"$J\" 700",
+        &[("JSON", master_status.as_str()), ("J", client_journal)],
+    );
+    assert_eq!(
+        out.trim(),
+        "4165",
+        "max(2000, min(2500,5000)+665+1000) = 4165 -- the client's own real adaptive step \
+         threshold, parsed from its journal, must widen the envelope: {out:?}"
+    );
+}
+
+#[test]
+fn client_chase_bound_us_falls_back_to_the_conservative_constant_when_journal_has_no_threshold_1041(
+) {
+    let master_status = pipe_json_deadband("2500");
+    let cases = ["", "11:17:29 [NTP] offset:+23us\n"];
+    for client_journal in cases {
+        let out = run_sourced(
+            "client_chase_bound_us \"$JSON\" 2000 1000 5000 \"$J\" 700",
+            &[("JSON", master_status.as_str()), ("J", client_journal)],
+        );
+        assert_eq!(
+            out.trim(),
+            "4200",
+            "max(2000, min(2500,5000)+700+1000) = 4200 -- an empty/no-match journal must fall \
+             back to the conservative STEP_FALLBACK_US constant, never silently drop the term \
+             (journal={client_journal:?}): {out:?}"
+        );
+    }
+}
+
+#[test]
+fn client_chase_bound_us_step_threshold_never_applies_without_a_valid_master_deadband_1041() {
+    // No chase envelope exists at all without a real master deadband -- the client threshold
+    // term must never apply on its own (matches the pre-existing "null/absent/negative deadband
+    // -> unmodified fixed bound" contract exactly, now proven WITH a real journal supplied too).
+    let cases = [
+        pipe_json_deadband("null"),
+        "{\"updated_ts\":1000,\"ntp_offset_us\":100}".to_string(),
+        pipe_json_deadband("-5"),
+    ];
+    for status in cases {
+        let out = run_sourced(
+            "client_chase_bound_us \"$JSON\" 2000 1000 5000 \"$J\" 700",
+            &[
+                ("JSON", status.as_str()),
+                (
+                    "J",
+                    "11:18:59 [NTP] burst offset:+2701us (threshold:665us)\n",
+                ),
+            ],
+        );
+        assert_eq!(
+            out.trim(),
+            "2000",
+            "no valid master deadband -> unmodified fixed bound, even with a real client \
+             threshold available (status={status}): {out:?}"
+        );
+    }
+}
+
+#[test]
+fn client_chase_bound_us_reproduces_the_live_cam3_envelope_1041() {
+    // The exact live incident (E2E run 31691870165): master deadband 2500, client's own journal
+    // threshold 665us, default margin 1000 -> envelope 4165us. The observed +3680us burst now
+    // fits comfortably inside it (it did NOT fit the old 3500us bound).
+    let master_status = pipe_json_deadband("2500");
+    let cam3_journal = "\
+11:16:58 [NTP] burst offset:+3680us spread:16us samples:3/5\n\
+11:16:58 [NTP] Stepped +3680us\n\
+11:17:29 [NTP] offset:+23us\n\
+11:18:59 [NTP] burst offset:+2701us step candidate +2701us (threshold:665us)\n";
+    let out = run_sourced(
+        "client_chase_bound_us \"$JSON\" 2000 1000 5000 \"$J\" 700",
+        &[("JSON", master_status.as_str()), ("J", cam3_journal)],
+    );
+    let bound: i64 = out.trim().parse().expect("integer bound");
+    assert_eq!(
+        bound, 4165,
+        "the derived cam3 envelope must be 4165us: {out:?}"
+    );
+    assert!(
+        bound > 3680,
+        "the derived envelope (4165us) must now exceed cam3's genuine +3680us chase excursion \
+         that false-DRIFTed under the old 3500us bound: {out:?}"
+    );
+}
+
+// --- #1041 part 2: a single chase excursion dominating the median must not false-DRIFT either --
+//
+// The ticket's own text frames this as needing EITHER a wider sample window OR extending
+// chase_bimodal_exclusion_verdict to also explain a "drift_unstable" verdict (median itself
+// pulled past the bound by a majority-elevated window, not just spread). Investigation proved
+// the SECOND option is structurally UNREACHABLE in this codebase as written: this function's own
+// condition 2 (every ELEVATED sample <= BOUND_US) makes a "drift"/"drift_unstable" raw verdict
+// impossible to also satisfy conditions 2-5 with, in any sane config (STABILITY_US <= BOUND_US,
+// true of every default in this file) -- the MEDIAN is itself one of the very samples this
+// function partitions: a baseline sample has abs<=STABILITY_US<=BOUND_US (can't be the drifted
+// median), and an elevated sample exceeding BOUND_US is EXACTLY what condition 2 already rejects.
+// So "part 2" turns out to be resolved ENTIRELY by "part 1" (client_chase_bound_us correctly
+// deriving a wide-enough envelope): once BOUND_US covers the excursion, sampled_offset_verdict
+// can only report "unstable" or "ok", never "drift"/"drift_unstable" -- and the EXISTING,
+// UNMODIFIED chase_bimodal_exclusion_verdict already explains "unstable" exactly as it did before
+// #1041. This test proves that TRANSFORMATION directly: the exact cam3 sample shape is
+// "drift_unstable" (false-DRIFT) against the OLD narrow bound, "unstable" (correctly explained)
+// against the NEW #1041-derived bound -- with ZERO changes needed to chase_bimodal_exclusion_verdict
+// itself.
+
+#[test]
+fn client_chase_bound_us_transforms_the_cam3_median_drift_into_an_already_explained_unstable_verdict_1041(
+) {
+    // 6 samples: 2 tight baseline (+23us) + 4 tight same-sign elevated (+3680us) -- the exact
+    // cam3 incident shape. Sorted: [23,23,3680,3680,3680,3680] -> lower median position 3 =
+    // 3680us.
+    let payloads = format!(
+        "{}\n{}\n{}\n{}\n{}\n{}\n",
+        pipe_json(1000, 23),
+        pipe_json(1005, 23),
+        pipe_json(1010, 3680),
+        pipe_json(1015, 3680),
+        pipe_json(1020, 3680),
+        pipe_json(1025, 3680),
+    );
+
+    let old_bound = "3500"; // pre-#1041: capped(2500,5000) + margin(1000), no threshold term
+    let verdict_old = run_sourced(
+        &format!("sampled_offset_verdict \"$P\" {old_bound} 2000 6 full"),
+        &[("P", payloads.as_str())],
+    );
+    assert_eq!(
+        verdict_old.trim(),
+        "drift_unstable",
+        "sanity: the OLD (pre-#1041) 3500us bound must reproduce the live false-DRIFT (median \
+         3680us > 3500us AND spread 3657us > 2000us): {verdict_old:?}"
+    );
+
+    let new_bound = "4165"; // #1041: capped(2500,5000) + client threshold(665) + margin(1000)
+    let verdict_new = run_sourced(
+        &format!("sampled_offset_verdict \"$P\" {new_bound} 2000 6 full"),
+        &[("P", payloads.as_str())],
+    );
+    assert_eq!(
+        verdict_new.trim(),
+        "unstable",
+        "the NEW #1041-derived 4165us bound must cover the excursion -- median 3680us now fits, \
+         only the spread stays flagged: {verdict_new:?}"
+    );
+
+    let excluded = run_sourced(
+        &format!("chase_bimodal_exclusion_verdict \"$P\" {new_bound} 2000 6 full"),
+        &[("P", payloads.as_str())],
+    );
+    assert_eq!(
+        excluded.trim(),
+        "yes",
+        "the EXISTING, UNMODIFIED chase_bimodal_exclusion_verdict (no code change needed here) \
+         must already explain the 'unstable' outcome via its own tight-baseline + tight-same-\
+         sign-elevated signature check: {excluded:?}"
+    );
+}
+
+#[test]
+fn chase_bimodal_exclusion_verdict_still_no_for_a_genuine_sustained_drift_with_no_baseline_1041() {
+    // NOT a bar weakening: a genuine sustained drift -- ALL samples tightly elevated, no
+    // baseline cluster to prove a return-to-normal -- must still fail, even against the WIDER
+    // #1041-derived envelope. Plain "drift" (spread stays in-bound, tight cluster) never even
+    // reaches this function's own leading verdict=="unstable" gate -- unchanged by #1041.
+    let payloads = format!(
+        "{}\n{}\n{}\n{}\n{}\n{}\n",
+        pipe_json(1000, 9000),
+        pipe_json(1005, 9100),
+        pipe_json(1010, 8900),
+        pipe_json(1015, 9050),
+        pipe_json(1020, 8950),
+        pipe_json(1025, 9000),
+    );
+    let out = run_sourced(
+        "chase_bimodal_exclusion_verdict \"$P\" 4165 2000 6 full",
+        &[("P", payloads.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "no",
+        "a genuine sustained drift with NO baseline cluster (nothing proving a return to normal) \
+         must never be explained away, even against the widened #1041 envelope: {out:?}"
+    );
+}
+
+#[test]
+fn chase_bimodal_exclusion_verdict_still_no_when_a_drift_unstable_elevated_sample_exceeds_the_envelope_1041(
+) {
+    // A window whose elevated cluster genuinely exceeds even the #1041-widened envelope reports
+    // "drift_unstable" (median itself elevated + over bound), which never reaches this function's
+    // own leading verdict=="unstable" gate -- unchanged, and provably CANNOT reach it: condition 2
+    // would reject it anyway (see the #1041 finding in this function's own doc comment above).
+    let payloads = format!(
+        "{}\n{}\n{}\n{}\n{}\n{}\n",
+        pipe_json(1000, 0),
+        pipe_json(1005, 0),
+        pipe_json(1010, 6000),
+        pipe_json(1015, 6000),
+        pipe_json(1020, 6000),
+        pipe_json(1025, 6000),
+    );
+    let out = run_sourced(
+        "chase_bimodal_exclusion_verdict \"$P\" 4165 2000 6 full",
+        &[("P", payloads.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "no",
+        "an elevated cluster (6000us) beyond even the widened 4165us envelope must still fail, \
+         drift_unstable or not: {out:?}"
+    );
+}
