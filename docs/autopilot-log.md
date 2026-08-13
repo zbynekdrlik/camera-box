@@ -7563,3 +7563,32 @@ does the live rig verification of the new whole-chain checks and closes it.
 - 1041 (client chase envelope second term): journal-parsed client step threshold + fallback; CLOSED by the PR.
 - Round E2E survived 4 real rig incidents en route: imag render-budget clamp (25 W PL1 -> 29 W envelope, ticket 1040), strih physical outage + reboot, stream NDI receivers never rebinding after the sender restart (ticket 767 evidence + stream OBS relaunch), bundle-state deaths (ticket 732 x3).
 - New tickets this round: 1040 (imag power envelope), 1042 (Zaloha kamera permanent backlog-relock).
+
+## 2026-08-13 — issue 1042 (Zaloha kamera permanent backlog-relock) — worktree autopilot-1042
+- Root cause (confirmed LIVE, stream box OBS log 22:54): `Zaloha kamera` is a genuine 60fps
+  source (audit `received` delta = 300 buffers / 5.000 s) held 1000 ms into a 30 fps canvas.
+  The STEADY N>=2 decimation runs correctly and latches the source multiple at 2, but
+  `genlock_backlog_relock_qdepth()`'s fresh per-tick `genlock_measure_source_multiple()` took
+  the FIRST strictly-increasing front-stamp pair, which intermittently straddled a dropped/
+  decimated frame (33.3 ms -> n=1), collapsing the threshold 72 -> 36 below the real ~59-deep
+  queue and firing the backlog branch spuriously ~1/sec (the issue-796 health-signal pollution).
+  The ticket's "detection reports 30" hypothesis was a SYMPTOM; the source is 60fps, not 30.
+- Fix: new pure Tier-0 seam `source_interval_from_stamps(&[u64])` in `src/genlock_backlog.rs`
+  returns the MINIMUM strictly-increasing adjacent delta (sources stamp on the monotonic
+  evenly-spaced DanteSync grid, so the true frame interval is the smallest gap; a duplicate/
+  dropped frame only enlarges a gap). `src/probe/genlock.rs::measure_source_multiple` routes
+  through it; the C `genlock_measure_source_multiple` mirrors the min-loop. Byte-identical to
+  first-pair on any clean grid-stamped window; generalises the issue-741/707-B2 "scan past a
+  degenerate front pair" intent. Margin/steady-depth arithmetic + drop-cap untouched.
+- RED->GREEN: `source_interval_is_the_min_grid_delta_not_the_first_1042` +
+  `a_60_into_30_source_with_a_front_gap_keeps_its_threshold_above_the_held_depth_1042`
+  (genlock_backlog.rs) fail on first-increasing (33333332 -> n=1), pass on min (16666666 -> n=2,
+  threshold 72 >= 64). Commit order bump.446 -> [red] -> [green].
+- Local (Tier-0): fmt --check clean; clippy --all-targets -D warnings clean;
+  genlock_backlog::tests 40/40; genlock_release_cadence 13/13 (C anchors intact); probe genlock
+  132/132 (incl. issue-741 measure tests via the min-seam); C `genlock_measure_source_multiple`
+  standalone-compiled (-Wall -Wextra -Wformat=2 -Wconversion) + parity-checked (n=2/n=1/n=0).
+- GOTCHA captured: `measure_source_multiple` reads the STAMP grid, but a 60fps source's queue
+  depth reflects BUFFER arrival (60/sec) confirmed via the audit `received` counter delta, NOT
+  the stamp deltas — read `received`/`ts_present` deltas across two 5s audit lines to prove a
+  source's true arrival rate when its stamps look coarse.
