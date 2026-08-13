@@ -1,0 +1,301 @@
+#!/usr/bin/env bash
+# airuleset:script-ok source-only pure-function library (no side effects at source time beyond the
+# documented `: "${VAR:=default}"` fallbacks) — mirrors scripts/lib/timesync-authority.sh; a
+# sourced lib must NOT impose `set -euo pipefail` on its caller.
+# scripts/lib/imag-power-envelope.sh — shared imag-nb power/thermal-envelope gather + verdict +
+# guard-decision core (#1040).
+#
+# Root cause (issues 799/880/1029/1030, live forcewake measurement 2026-08-13): the imag render
+# regression is a HARDWARE power clamp. thermald's adaptive DPTF policy programmed the MMIO RAPL
+# PL1 long-term constraint to 25 W (MMIO wins over the decorative MSR 200/80 W values), starving
+# the iGPU to gt_act_freq 600-850 MHz while every software freq knob sat at 1400. At a sustainable
+# 29 W the historic ~5 ms/60fps render class is restored (35 W overheats — TCPU 81->90 C in 8 s).
+#
+# The durable fix pins MMIO PL1 = 29 W + slpc_ignore_eff_freq = 1 at boot (imag-power-envelope.
+# service, a root oneshot), PURGES thermald (not masks — it is the actor that programmed 25 W; a
+# minimalist appliance purges a competing policy engine, same discipline scripts/lib/timesync-
+# authority.sh enforces for competing clock daemons), and supervises the envelope with a LOUD root
+# guard (imag-power-envelope-guard.timer): TCPU >= ceiling for 2 consecutive reads -> step PL1
+# down to 25 W; TCPU < restore threshold sustained -> restore; a foreign PL1 re-program -> re-
+# assert. PROCHOT stays as the hardware backstop; the guard replaces thermald's one useful
+# behavior with a version that alerts (dev1-side) instead of silently clamping.
+#
+# This lib holds the REMOTE gather snippet + the PURE verdicts, SHARED by scripts/drift-guard.sh's
+# --check-imag facet and scripts/verify-imag.sh's check (u) so the identity-based zone selection
+# and the OK/DRIFT/UNKNOWN verdict never exist as two driftable copies (the SAME extraction
+# discipline #596 applied to the timesync verdict). The thermald-absent verdict REUSES the generic
+# dpkg_status_installed() / timesync_enabled_state_neutral() from scripts/lib/timesync-authority.sh
+# (both callers already source it) rather than re-deriving "is this daemon installed / neutral".
+#
+# Source-only: this file defines pure functions and performs no side effects on its own beyond the
+# documented default-var fallbacks. It does NOT set `set -e` (a sourced lib must never impose
+# errexit on its caller).
+
+# The provisioned envelope defaults — ONE place the pin default + the guard thresholds live, so
+# setup-imag.sh (the writer), verify-imag.sh (the acceptance gate) and the guard script all agree.
+# The STRICT drift-guard gate reads its own authority (vendor/README.md `power_pl1_w_imag`); these
+# are the fallbacks a caller uses when it has no README pin in hand. Each is overridable by env.
+: "${IMAG_PL1_W:=29}"              # sustainable long-term MMIO RAPL PL1 (watts)
+: "${IMAG_PL1_STEPDOWN_W:=25}"     # the safe step-down the guard drops to on a thermal excursion
+: "${IMAG_TCPU_STEPDOWN_C:=93}"    # TCPU ceiling (Celsius) — 2 consecutive reads at/above -> step down
+: "${IMAG_TCPU_RESTORE_C:=85}"     # TCPU restore threshold — sustained below -> restore full envelope
+
+# The two systemd units the envelope is supervised by (root SYSTEM units — sysfs writes need root).
+IMAG_POWER_ENVELOPE_UNIT="imag-power-envelope.service"
+IMAG_POWER_GUARD_UNIT="imag-power-envelope-guard.timer"
+# The journald tag every guard transition is logged under (retrievable via `journalctl -t ...`).
+# shellcheck disable=SC2034  # consumed by scripts/imag-power-envelope-guard.sh which SOURCEs this lib
+IMAG_POWER_LOG_TAG="imag-power-envelope"
+
+# imag_pl1_watts_to_uw WATTS -> echoes WATTS * 1_000_000 (RAPL constraints are in micro-watts).
+# Exact integer arithmetic; a non-numeric/empty input echoes nothing and returns 1 (never a
+# silent 0 that a matcher could read as a real limit).
+imag_pl1_watts_to_uw() {
+  case "$1" in
+    '' | *[!0-9]*) return 1 ;;
+    *) printf '%s\n' "$(( $1 * 1000000 ))" ;;
+  esac
+}
+
+# imag_pl1_uw_matches_pin OBSERVED_UW PINNED_WATTS -> 0 iff OBSERVED_UW (micro-watts) equals
+# PINNED_WATTS converted to micro-watts. Empty/non-numeric either side -> 1 (never a false match).
+imag_pl1_uw_matches_pin() {
+  local observed="$1" pinned_uw
+  case "$observed" in '' | *[!0-9]*) return 1 ;; esac
+  pinned_uw="$(imag_pl1_watts_to_uw "$2")" || return 1
+  [ "$observed" = "$pinned_uw" ]
+}
+
+# imag_power_zone_select GATHER -> echoes the `long_term` constraint power_limit_uw of the zone
+# whose NAME is `package-0`, selected by name/constraint IDENTITY (never a hardcoded
+# intel-rapl-mmio index nor constraint index — the mmio zone ordering and the long_term slot both
+# vary across hardware, the RAPL analogue of the presenter-drm cardN renumbering hazard). Empty +
+# return 1 when the package-0 long_term constraint is not present in the gather.
+imag_power_zone_select() {
+  local gather="$1" tag zone idx cname uw
+  # `idx` is read only to reach the trailing name/uw fields — the identity match is on NAME.
+  # shellcheck disable=SC2034
+  while IFS='|' read -r tag zone idx cname uw; do
+    if [ "$tag" = "CONSTRAINT" ] && [ "$zone" = "package-0" ] && [ "$cname" = "long_term" ]; then
+      [ -n "$uw" ] || return 1
+      printf '%s\n' "$uw"
+      return 0
+    fi
+  done <<< "$gather"
+  return 1
+}
+
+# imag_power_pl1_enabled GATHER -> echoes the `enabled` value of the package-0 zone (the
+# ENABLED|package-0|<v> row), or empty + return 1.
+imag_power_pl1_enabled() {
+  local gather="$1" tag zone val
+  while IFS='|' read -r tag zone val; do
+    if [ "$tag" = "ENABLED" ] && [ "$zone" = "package-0" ]; then
+      printf '%s\n' "$val"
+      return 0
+    fi
+  done <<< "$gather"
+  return 1
+}
+
+# _imag_power_thermald_field GATHER FIELDNO -> echoes field FIELDNO (1..3 = dpkg|active|enabled) of
+# the THERMALD row, or empty + return 1 when there is no THERMALD row. Internal helper.
+_imag_power_thermald_field() {
+  local gather="$1" fno="$2" tag f1 f2 f3
+  while IFS='|' read -r tag f1 f2 f3; do
+    if [ "$tag" = "THERMALD" ]; then
+      case "$fno" in 1) printf '%s\n' "$f1" ;; 2) printf '%s\n' "$f2" ;; 3) printf '%s\n' "$f3" ;; esac
+      return 0
+    fi
+  done <<< "$gather"
+  return 1
+}
+
+# imag_power_envelope_verdict GATHER PINNED_WATTS -> echoes one `<facet>|<STATUS>|<detail>` line
+# per facet (facets: pl1, slpc, thermald, units; STATUS in OK / DRIFT / UNKNOWN). Both callers
+# iterate the lines and map each to their own report style + exit-code contract. An EMPTY gather,
+# an unread facet, or a missing pin is UNKNOWN — never a false DRIFT for a mere SSH hiccup.
+imag_power_envelope_verdict() {
+  local gather="$1" pinned_watts="$2"
+
+  # --- pl1: long_term uW must equal the pinned watts AND the constraint must be enabled ---------
+  local pl1_uw pl1_en
+  pl1_uw="$(imag_power_zone_select "$gather" || true)"
+  pl1_en="$(imag_power_pl1_enabled "$gather" || true)"
+  if [ -z "$pl1_uw" ]; then
+    printf 'pl1|UNKNOWN|package-0 long_term constraint not gathered\n'
+  elif [ -z "$pinned_watts" ]; then
+    printf 'pl1|UNKNOWN|no pinned power_pl1_w_imag\n'
+  elif imag_pl1_uw_matches_pin "$pl1_uw" "$pinned_watts" && [ "$pl1_en" = "1" ]; then
+    printf 'pl1|OK|long_term=%suW (=%sW) enabled=1\n' "$pl1_uw" "$pinned_watts"
+  else
+    printf 'pl1|DRIFT|long_term=%suW enabled=%s, expected %sW enabled=1\n' \
+      "$pl1_uw" "${pl1_en:-<none>}" "$pinned_watts"
+  fi
+
+  # --- slpc: every discovered slpc_ignore_eff_freq knob must read 1 -----------------------------
+  local tag val slpc_n=0 slpc_bad=0
+  while IFS='|' read -r tag val; do
+    if [ "$tag" = "SLPC" ]; then
+      slpc_n=$((slpc_n + 1))
+      [ "$val" = "1" ] || slpc_bad=$((slpc_bad + 1))
+    fi
+  done <<< "$gather"
+  if [ "$slpc_n" -eq 0 ]; then
+    printf 'slpc|UNKNOWN|no slpc_ignore_eff_freq knob discovered\n'
+  elif [ "$slpc_bad" -eq 0 ]; then
+    printf 'slpc|OK|%s knob(s) all read 1\n' "$slpc_n"
+  else
+    printf 'slpc|DRIFT|%s of %s slpc knob(s) not 1\n' "$slpc_bad" "$slpc_n"
+  fi
+
+  # --- thermald: PURGED — not installed (even masked), not active, enabled-state neutral --------
+  # Reuses the generic dpkg_status_installed / timesync_enabled_state_neutral (timesync-authority.sh).
+  local td_dpkg td_active td_enabled
+  if _imag_power_thermald_field "$gather" 1 >/dev/null; then
+    td_dpkg="$(_imag_power_thermald_field "$gather" 1)"
+    td_active="$(_imag_power_thermald_field "$gather" 2)"
+    td_enabled="$(_imag_power_thermald_field "$gather" 3)"
+    if dpkg_status_installed "$td_dpkg"; then
+      printf 'thermald|DRIFT|INSTALLED (even masked) — purge it, masking is not enough\n'
+    elif [ "$(printf '%s' "$td_active" | tr -d '[:space:]')" = "active" ]; then
+      printf 'thermald|DRIFT|ACTIVE — its DPTF policy is what programs the 25W clamp\n'
+    elif ! timesync_enabled_state_neutral "$td_enabled"; then
+      printf 'thermald|DRIFT|enabled (state=%s) — must be purged/absent\n' "${td_enabled:-<none>}"
+    else
+      printf 'thermald|OK|purged (not installed, inactive, neutral)\n'
+    fi
+  else
+    printf 'thermald|UNKNOWN|thermald state not gathered\n'
+  fi
+
+  # --- units: BOTH the oneshot AND the guard timer must be enabled+active ------------------------
+  # A correct PL1 with a DEAD guard is the "provisioned but unsupervised" shape (#1015 class).
+  local name uen uact seen_env=0 seen_guard=0 units_bad=0 units_seen=0
+  while IFS='|' read -r tag name uen uact; do
+    [ "$tag" = "UNIT" ] || continue
+    case "$name" in
+      "$IMAG_POWER_ENVELOPE_UNIT") seen_env=1 ;;
+      "$IMAG_POWER_GUARD_UNIT") seen_guard=1 ;;
+      *) continue ;;
+    esac
+    units_seen=$((units_seen + 1))
+    if [ "$(printf '%s' "$uen" | tr -d '[:space:]')" != "enabled" ] \
+      || [ "$(printf '%s' "$uact" | tr -d '[:space:]')" != "active" ]; then
+      units_bad=$((units_bad + 1))
+    fi
+  done <<< "$gather"
+  if [ "$seen_env" -ne 1 ] || [ "$seen_guard" -ne 1 ]; then
+    printf 'units|UNKNOWN|envelope unit + guard timer state not both gathered\n'
+  elif [ "$units_bad" -eq 0 ]; then
+    printf 'units|OK|%s + %s both enabled+active\n' "$IMAG_POWER_ENVELOPE_UNIT" "$IMAG_POWER_GUARD_UNIT"
+  else
+    printf 'units|DRIFT|%s of %s envelope units not enabled+active — provisioned but unsupervised\n' \
+      "$units_bad" "$units_seen"
+  fi
+}
+
+# imag_power_guard_decision CURRENT_UW EXPECTED_UW STEPDOWN_UW TCPU_C CEIL_C RESTORE_C \
+#                           HOT_STREAK COOL_STREAK STEPPED_DOWN
+#   -> echoes exactly one action: stepdown | restore | reassert | hold.
+# The PURE core of imag-power-envelope-guard.sh. State (HOT_STREAK/COOL_STREAK/STEPPED_DOWN) is
+# carried across runs by the guard script's own state file; this function only decides.
+#   - TCPU at/above the ceiling with >=1 PRIOR consecutive hot read (this makes 2) AND not already
+#     stepped down -> stepdown (never on the FIRST hot read — a single spike is not a trend).
+#   - already stepped down, TCPU below the restore threshold with >=1 PRIOR consecutive cool read
+#     (sustained) -> restore.
+#   - not stepped down, temperature nominal, but the live PL1 no longer equals the expected
+#     envelope (a foreign re-program) -> reassert.
+#   - anything else, or an unreadable temperature -> hold (a blind step on a missing sensor is
+#     forbidden — hold is the safe no-op). STEPDOWN_UW is unused by the decision itself (the guard
+#     script applies it) but kept in the signature so the call site reads as the full state.
+imag_power_guard_decision() {
+  local current_uw="$1" expected_uw="$2" stepdown_uw="$3"
+  local tcpu="$4" ceil="$5" restore="$6"
+  local hot_streak="$7" cool_streak="$8" stepped_down="$9"
+  local tcpu_numeric=0
+  case "$tcpu" in '' | *[!0-9-]*) tcpu_numeric=0 ;; *) tcpu_numeric=1 ;; esac
+  : "$stepdown_uw"  # documented as part of the guard's state; applied by the script, not here
+
+  # Thermal step-down: only when the temperature is readable, at/above the ceiling, this is the
+  # 2nd+ consecutive hot read, and we are not already stepped down.
+  if [ "$tcpu_numeric" -eq 1 ] && [ "$stepped_down" != "1" ] \
+    && [ "$tcpu" -ge "$ceil" ] && [ "$hot_streak" -ge 1 ]; then
+    printf 'stepdown\n'
+    return 0
+  fi
+  # Thermal restore: only when stepped down, the temperature is readably below the restore
+  # threshold, and the recovery is sustained (2nd+ consecutive cool read).
+  if [ "$stepped_down" = "1" ] && [ "$tcpu_numeric" -eq 1 ] \
+    && [ "$tcpu" -lt "$restore" ] && [ "$cool_streak" -ge 1 ]; then
+    printf 'restore\n'
+    return 0
+  fi
+  # Foreign re-program: at the nominal envelope (not stepped down) but the live PL1 drifted off
+  # the expected value — re-assert it (loudly, via the guard script's marker).
+  if [ "$stepped_down" != "1" ] && [ -n "$current_uw" ] && [ -n "$expected_uw" ] \
+    && [ "$current_uw" != "$expected_uw" ]; then
+    printf 'reassert\n'
+    return 0
+  fi
+  printf 'hold\n'
+}
+
+# imag_power_envelope_gather_remote_snippet -> the REMOTE shell command (a string) both callers run
+# over their own transport to collect the observed envelope state into the `|`-delimited block
+# imag_power_envelope_verdict parses. Hardware-agnostic (issue 816): a box with no mmio RAPL zone
+# emits no ZONE/CONSTRAINT lines (the verdict then reads pl1 UNKNOWN, never a false DRIFT); a box
+# that HAS the zone emits its real values. Selection is by NAME identity throughout (never a
+# hardcoded intel-rapl-mmio index / cardN — the presenter-drm renumbering hazard).
+imag_power_envelope_gather_remote_snippet() {
+  cat <<'REMOTE'
+# MMIO RAPL zones: emit each zone's name, each constraint's name+limit, and the enabled flag.
+for _z in /sys/class/powercap/intel-rapl-mmio:*/; do
+  [ -e "${_z}name" ] || continue
+  _zn="$(cat "${_z}name" 2>/dev/null || true)"
+  printf 'ZONE|%s\n' "$_zn"
+  for _cn in "${_z}"constraint_*_name; do
+    [ -e "$_cn" ] || continue
+    _idx="${_cn##*constraint_}"; _idx="${_idx%_name}"
+    _cname="$(cat "$_cn" 2>/dev/null || true)"
+    _cuw="$(cat "${_z}constraint_${_idx}_power_limit_uw" 2>/dev/null || true)"
+    printf 'CONSTRAINT|%s|%s|%s|%s\n' "$_zn" "$_idx" "$_cname" "$_cuw"
+  done
+  printf 'ENABLED|%s|%s\n' "$_zn" "$(cat "${_z}enabled" 2>/dev/null || true)"
+done
+# iGPU SLPC efficient-freq override knob — glob across ALL drm cards (cardN renumbers).
+for _s in /sys/class/drm/card*/gt/gt*/slpc_ignore_eff_freq; do
+  [ -e "$_s" ] || continue
+  printf 'SLPC|%s\n' "$(cat "$_s" 2>/dev/null || true)"
+done
+# thermald must be PURGED — gather dpkg/active/enabled so the verdict can reject even a masked one.
+printf 'THERMALD|%s|%s|%s\n' \
+  "$(dpkg -s thermald 2>/dev/null | sed -n 's/^Status: //p' || true)" \
+  "$(systemctl is-active thermald 2>/dev/null || true)" \
+  "$(systemctl is-enabled thermald 2>/dev/null || true)"
+# The two envelope units (enabled+active) — a correct PL1 with a dead guard is unsupervised.
+for _u in imag-power-envelope.service imag-power-envelope-guard.timer; do
+  printf 'UNIT|%s|%s|%s\n' "$_u" \
+    "$(systemctl is-enabled "$_u" 2>/dev/null || true)" \
+    "$(systemctl is-active "$_u" 2>/dev/null || true)"
+done
+# TCPU: the package temperature (x86_pkg_temp thermal zone), in whole Celsius. Selected by TYPE
+# identity, never a hardcoded thermal_zoneN. Diagnostic ACTFREQ gathered alongside.
+_tcpu=""
+for _tz in /sys/class/thermal/thermal_zone*; do
+  [ -e "${_tz}/type" ] || continue
+  if [ "$(cat "${_tz}/type" 2>/dev/null || true)" = "x86_pkg_temp" ]; then
+    _t="$(cat "${_tz}/temp" 2>/dev/null || true)"
+    [ -n "$_t" ] && _tcpu=$(( _t / 1000 ))
+    break
+  fi
+done
+printf 'TCPU|%s\n' "$_tcpu"
+_act=""
+for _f in /sys/class/drm/card*/gt/gt*/gt_act_freq_mhz /sys/class/drm/card*/gt_act_freq_mhz; do
+  [ -e "$_f" ] || continue
+  _act="$(cat "$_f" 2>/dev/null || true)"; [ -n "$_act" ] && break
+done
+printf 'ACTFREQ|%s\n' "$_act"
+REMOTE
+}
