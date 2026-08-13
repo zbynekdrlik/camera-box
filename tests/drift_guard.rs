@@ -3210,6 +3210,74 @@ fn check_imag_report_timesync_authority_unknown_when_not_read_596() {
     );
 }
 
+// #1040: power/thermal-envelope facet — the 13th (power gather block) + 14th (pinned watts)
+// optional args of check_imag_report. A clean gather at the pinned 29 W is OK; a 25 W clamp is
+// DRIFT (the whole regression signature); an unread block is UNKNOWN, never a false DRIFT.
+const POWER_GATHER_CLEAN_29W: &str = "\
+ZONE|package-0
+CONSTRAINT|package-0|1|long_term|29000000
+ENABLED|package-0|1
+SLPC|1
+THERMALD||inactive|not-found
+UNIT|imag-power-envelope.service|enabled|active
+UNIT|imag-power-envelope-guard.timer|enabled|active
+TCPU|84
+";
+
+#[test]
+fn check_imag_report_power_envelope_ok_when_pl1_matches_the_pin_1040() {
+    let body = r#"
+        rc=0
+        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "genlock: latency = 3 ms" "/plugin/path" "1" "" "" "" "$POWER" "29" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[("POWER", POWER_GATHER_CLEAN_29W)]);
+    assert!(out.contains("RC=0"), "clean 29 W envelope -> exit 0: {out:?}");
+    let line = out
+        .lines()
+        .find(|l| l.contains("power_envelope"))
+        .unwrap_or_else(|| panic!("no power_envelope row printed: {out:?}"));
+    assert!(line.contains("OK"), "clean envelope row must read OK: {line:?}");
+}
+
+#[test]
+fn check_imag_report_power_envelope_drift_when_pl1_clamped_to_25w_1040() {
+    // The exact regression signature: MMIO PL1 clamped to 25 W while the pin is 29 W.
+    let clamped = POWER_GATHER_CLEAN_29W.replace("long_term|29000000", "long_term|25000000");
+    let body = r#"
+        rc=0
+        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "genlock: latency = 3 ms" "/plugin/path" "1" "" "" "" "$POWER" "29" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[("POWER", &clamped)]);
+    assert!(out.contains("RC=20"), "a 25 W clamp vs pinned 29 W must DRIFT (exit 20): {out:?}");
+    let line = out
+        .lines()
+        .find(|l| l.contains("power_envelope") && l.contains("pl1"))
+        .unwrap_or_else(|| panic!("no power_envelope pl1 DRIFT row printed: {out:?}"));
+    assert!(line.contains("DRIFT"), "the pl1 row must read DRIFT: {line:?}");
+}
+
+#[test]
+fn check_imag_report_power_envelope_unknown_when_not_gathered_backward_compat_1040() {
+    // Old 12-arg call sites (no power gather block) must still get a graceful UNKNOWN power row,
+    // never an `unbound variable` crash under set -u nor a false DRIFT.
+    let body = r#"
+        rc=0
+        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "genlock: latency = 3 ms" "/plugin/path" "1" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[]);
+    let line = out
+        .lines()
+        .find(|l| l.contains("power_envelope"))
+        .unwrap_or_else(|| panic!("no power_envelope row printed on a 9-arg call: {out:?}"));
+    assert!(
+        line.contains("UNKNOWN"),
+        "an unread power-envelope block must report UNKNOWN, never a false DRIFT: {line:?}"
+    );
+}
+
 // #531: the old `check_imag_report_flags_a_wrong_deployed_build_sha_463` test lived here — it
 // exercised check_imag_report's static build-SHA compare (box GENLOCK_BUILD_SHA.txt == an empty
 // genlock_build_sha_imag README pin), which was inert (always UNKNOWN, never DRIFT). That static
