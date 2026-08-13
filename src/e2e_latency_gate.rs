@@ -70,7 +70,11 @@ pub const CAM_STRIH_P99_LATENCY_MAX_MS: f64 = 400.0;
 /// - `Some` bound, `Some` p99 ⇒ pass iff `p99 <= bound` (strict `>`: a p99 exactly at the bound
 ///   passes).
 pub fn cam_strih_latency_gate_pass(p99_ms: Option<f64>, max_p99_ms: Option<f64>) -> bool {
-    todo!("#1035 GREEN")
+    match (max_p99_ms, p99_ms) {
+        (None, _) => true,
+        (Some(_), None) => false,
+        (Some(bound), Some(p99)) => p99 <= bound,
+    }
 }
 
 /// #1035 report-only / restore seam — mirrors [`crate::optical_floor::gates_overall_pass`].
@@ -78,7 +82,7 @@ pub fn cam_strih_latency_gate_pass(p99_ms: Option<f64>, max_p99_ms: Option<f64>)
 /// `true` today (the bound is LIVE — it passes every green run with margin). Flip to `false` for a
 /// one-line revert to report-only if a future rig change ever trips it.
 pub fn gates_overall_pass() -> bool {
-    todo!("#1035 GREEN")
+    true
 }
 
 #[cfg(test)]
