@@ -230,6 +230,19 @@ struct Args {
     /// in the stream recording (#174).
     #[arg(long)]
     latency_csv: Option<PathBuf>,
+    /// #1035 — the HARD absolute cam→strih p99 latency bound (ms) for the MAIN E2E. The umbrella
+    /// issue 406 standing requirement is "zero-loss + BOUNDED-latency"; before this, the recording
+    /// verdict computed `latency.cam_strih` but never gated on it. Bounds the production
+    /// camera→strih ABSOLUTE latency (cam2 paint gen_ts → strih program) — NOT cam→stream, which
+    /// is ~1s BY DESIGN (the intentional genlock hold aligning program video to the late-mastered
+    /// audio; never bound that). DEFAULT-ON (hard-locked, not a forgettable flag) at the
+    /// calibrated `e2e_latency_gate::CAM_STRIH_P99_LATENCY_MAX_MS` (400 ms: 1.66x the worst of 20
+    /// green runs' p99). Fires only when a strih recording is present (cam1-only optical mode =
+    /// N/A). Whether it folds into `overall_pass` is the one-line-restorable
+    /// `e2e_latency_gate::gates_overall_pass()` seam (LIVE today). Set higher to relax / lower to
+    /// tighten.
+    #[arg(long, default_value_t = camera_box::e2e_latency_gate::CAM_STRIH_P99_LATENCY_MAX_MS)]
+    max_cam_strih_p99_latency_ms: f64,
     /// #208 PER-BOX decode-in-place. Decode the ONE LOCAL recording on THIS box (passed via
     /// `--strih` for `strih`, `--stream` for `stream`, `--imag` for `imag`, #461) and write a
     /// small PARTIAL JSON (`--out`) of what the cross-box merge needs — the box's burn-id
@@ -3024,6 +3037,30 @@ fn build_and_print_verdict(
         let cam_strih_lat = hop_latency("cam→strih", &cam_strih_samples(strih_frames, &strih_ids));
         report_hop_latency(&cam_strih_lat, "cam→strih", "cam2 paint gen_ts_ns");
         report["latency"]["cam_strih"] = hop_lat_json(&cam_strih_lat);
+
+        // #1035 — the absolute cam→strih p99 latency BOUND (umbrella issue 406 bounded-latency).
+        // The strih recording is present here, so the gate is APPLICABLE: a `None` p99 now means
+        // "strih present but zero paired cam→strih samples", which FAILS (test-strictness — a gate
+        // that could not measure must not report green). The bound is default-on (hard-locked);
+        // whether it folds into `overall_pass` is the one-line-restorable `gates_overall_pass()`
+        // seam (LIVE today). cam→stream's ~1s genlock hold is deliberately NOT bounded.
+        let cam_strih_p99 = cam_strih_lat.as_ref().map(|l| l.stats.p99_ms);
+        let bound = args.max_cam_strih_p99_latency_ms;
+        let gate_pass =
+            camera_box::e2e_latency_gate::cam_strih_latency_gate_pass(cam_strih_p99, Some(bound));
+        let gates_overall = camera_box::e2e_latency_gate::gates_overall_pass();
+        report["latency"]["cam_strih_gate"] = serde_json::json!({
+            "bound_p99_ms": bound,
+            "p99_ms": cam_strih_p99,
+            "pass": gate_pass,
+            "gates_overall_pass": gates_overall,
+            "note": "#1035 absolute cam->strih p99 latency bound (issue 406 bounded-latency). \
+                     cam->stream is ~1s by design (genlock hold) and is NOT bounded. Relax/tighten \
+                     via --max-cam-strih-p99-latency-ms; report-only via e2e_latency_gate::\
+                     gates_overall_pass.",
+        });
+        // Fold: a FAIL only fails the run while the seam gates overall_pass (LIVE today).
+        all_pass &= gate_pass || !gates_overall;
     }
 
     // cam2→cam1 OPTICAL+GRAB latency (#105 node 2) — REAL, no #111 burn needed.

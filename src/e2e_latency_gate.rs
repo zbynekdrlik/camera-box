@@ -99,7 +99,10 @@ mod tests {
     fn requested_bound_with_no_samples_fails() {
         // strih recording present but zero paired cam→strih samples: a gate that could not run
         // must not report green (test-strictness).
-        assert!(!cam_strih_latency_gate_pass(None, Some(CAM_STRIH_P99_LATENCY_MAX_MS)));
+        assert!(!cam_strih_latency_gate_pass(
+            None,
+            Some(CAM_STRIH_P99_LATENCY_MAX_MS)
+        ));
     }
 
     #[test]
@@ -124,13 +127,19 @@ mod tests {
             "the worst observed green p99 (240.7 ms) must pass the {CAM_STRIH_P99_LATENCY_MAX_MS} ms bound"
         );
         // ...and the worst single-frame max (259.6) is also comfortably under the p99 bound.
-        assert!(cam_strih_latency_gate_pass(Some(259.6), Some(CAM_STRIH_P99_LATENCY_MAX_MS)));
+        assert!(cam_strih_latency_gate_pass(
+            Some(259.6),
+            Some(CAM_STRIH_P99_LATENCY_MAX_MS)
+        ));
     }
 
     #[test]
     fn a_genuine_2x_regression_fails() {
         // ~2x the worst green p99 (a real cam→strih delivery regression) must FAIL.
-        assert!(!cam_strih_latency_gate_pass(Some(481.4), Some(CAM_STRIH_P99_LATENCY_MAX_MS)));
+        assert!(!cam_strih_latency_gate_pass(
+            Some(481.4),
+            Some(CAM_STRIH_P99_LATENCY_MAX_MS)
+        ));
     }
 
     #[test]
