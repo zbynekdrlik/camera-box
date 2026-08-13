@@ -148,13 +148,15 @@ fn message_for_process_absent_names_the_real_cause_and_the_restart_command() {
 #[test]
 fn message_for_process_absent_leads_with_the_supervised_restart_command_1015() {
     let msg = message_for("OBS_PROCESS_ABSENT");
-    let systemctl_pos = msg.find("systemctl --user start imag-obs").unwrap_or_else(|| {
-        panic!(
-            "message must point at the supervised systemctl restart command (issue 1015 -- a \
+    let systemctl_pos = msg
+        .find("systemctl --user start imag-obs")
+        .unwrap_or_else(|| {
+            panic!(
+                "message must point at the supervised systemctl restart command (issue 1015 -- a \
              direct imag-obs-start.sh recovery call bypasses Restart=on-failure supervision \
              entirely): {msg:?}"
-        )
-    });
+            )
+        });
     if let Some(script_pos) = msg.find("imag-obs-start.sh") {
         assert!(
             systemctl_pos < script_pos,
