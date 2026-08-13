@@ -1504,6 +1504,25 @@ impl ReleaseCadence {
     /// Tier-0 mirror first" instruction does not require taking. The production fix lives
     /// entirely in the C; `phase_pinned_deadline`/`phase_pinned_is_due` are independently
     /// Tier-0 unit-tested against the exact same numeric contract the C now uses.
+    ///
+    /// #1003 SCOPE NOTE — the SAME exclusion, for the same reason, extended to the
+    /// phase-continuity relock. The C ACQUIRE / BACKLOG branches now select the queued frame
+    /// NEAREST a tracked phase anchor (`genlock_relock_select_nearest` /
+    /// `genlock_phase_anchor_ns`) instead of the newest due one; this harness deliberately
+    /// keeps the newest-due selection below. The reason is stronger here than it was for
+    /// #940 piece 3: the selection rule is EXACTLY what this struct's ~27 cadence tests /
+    /// 17 sim call sites pin, as exact ACQUIRE/RELOCK frame-selection outcomes, and every
+    /// one of them is behind `#[cfg(feature = "probe")]` — which this repo's Tier-0 policy
+    /// forbids compiling locally, so a rewrite here has no local verification path at all,
+    /// not even a compile check (project CLAUDE.md). Rewiring dozens of pinned outcomes
+    /// blind, with CI as the first execution, is a correctness risk the fix does not
+    /// require taking: this struct has NO production caller (it is a reference simulation),
+    /// the deployed behaviour is the C, and the selection arithmetic is independently
+    /// Tier-0 unit-tested in `src/genlock_backlog.rs` (`relock_select_nearest` /
+    /// `relock_anchor_age_ns` / `phase_anchor_from_present`) against the exact numeric
+    /// contract the C uses — verified equal on shared vectors when the C was ported.
+    /// Bringing this harness onto the phase-anchored selection is tracked separately so it
+    /// can be done with the probe suite actually runnable, rather than smuggled in blind.
     pub fn tick(
         &mut self,
         wall_now_ns: u64,

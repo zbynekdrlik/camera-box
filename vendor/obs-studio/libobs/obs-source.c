@@ -3589,6 +3589,11 @@ static inline struct obs_source_frame *cache_video(struct obs_source *source, co
 		 * depth can be tuned. */
 		if (source->genlock_fifo)
 			source->genlock_overruns++;
+		/* camera-box #1003: the force-drain destroys the whole delay line, so the
+		 * remembered on-air age describes nothing -- a relock firing before the next
+		 * STEADY/GAP present would target a pre-drain phase. Same seam as the flush
+		 * clear below. */
+		source->genlock_phase_anchor_ns = 0;
 		free_async_cache(source);
 		source->last_frame_ts = 0;
 		/* camera-box #102: an overrun force-drained the FIFO to empty, so the
@@ -3605,6 +3610,9 @@ static inline struct obs_source_frame *cache_video(struct obs_source *source, co
 	}
 
 	if (async_texture_changed(source, frame)) {
+		/* camera-box #1003: a format/size change re-allocs the cache and drops the
+		 * delay line with it -- the remembered age no longer describes anything. */
+		source->genlock_phase_anchor_ns = 0;
 		free_async_cache(source);
 		source->async_cache_width = frame->width;
 		source->async_cache_height = frame->height;
@@ -3672,6 +3680,11 @@ static void obs_source_output_video_internal(obs_source_t *source, const struct 
 		 * re-confirms N from scratch instead of trusting a pre-flush latch. Mirror: a
 		 * fresh src/probe/genlock.rs ReleaseCadence starts with last_known_n = 0. */
 		source->genlock_last_known_n = 0;
+		/* camera-box #1003: the delay line is gone, so the remembered on-air age
+		 * describes nothing. Clear it here (the same reset site the #741/#707 B2
+		 * sticky-N clear covers) so a resumed source re-establishes the phase from
+		 * its configured latency instead of inheriting a pre-flush one. */
+		source->genlock_phase_anchor_ns = 0;
 		free_async_cache(source);
 		pthread_mutex_unlock(&source->async_mutex);
 		return;
@@ -4890,6 +4903,93 @@ static inline uint64_t genlock_phase_pin_deadline(uint64_t deadline_ns, uint64_t
  * this quantizes. Mirror: src/genlock_backlog.rs PHASE_PIN_HYSTERESIS_NS. */
 #define GENLOCK_PHASE_PIN_HYSTERESIS_NS 5000000ULL /* 5 ms */
 
+/* camera-box #1003: PHASE-CONTINUITY RELOCK (history-anchored selection).
+ *
+ * #940 piece 3 (the grid pin above) removed the deadline's dependence on the exact sub-ms
+ * instant a relock fired, but the release phase is minted by the SELECTION, and that
+ * selection stayed an instant-sampled, STATELESS comparison with two independently flippable
+ * edges: (1) the pin quantizes to the RECEIVER grid, and the floor's step point sits at
+ * tick-phase `latency_ms mod interval` (~23.0 ms at the live 923 ms knob), so ±2 ms of
+ * render-tick slew there moves the whole pinned cell by one interval; (2) the stamps being
+ * compared sit on the SENDER's own floor grid (33,333,300 ns in 100 ns units vs the receiver's
+ * 33,333,333 ns) -- a 33 ns/frame beat (~3.6 ms/h) plus DanteSync inter-box skew wander, so
+ * GENLOCK_PHASE_PIN_HYSTERESIS_NS is a FIXED edge inside a DRIFTING relative phase. Two edges
+ * = up to four outcomes spanning two frames, which is exactly the -64.5 / +56..63 ms
+ * per-episode steps measured live. No hysteresis SIZE fixes this; it only moves the coin.
+ *
+ * The fix is structural: track the steady conveyor's own on-air age and have a relock present
+ * the queued frame NEAREST that remembered age. Nearest-neighbour selection is CONTINUOUS --
+ * the selection point sits half a stamp interval from the operating point BY CONSTRUCTION --
+ * so there is no threshold for slew or beat to flip. DEPTH is still corrected by whole frames:
+ * the caller turns the returned index into `release = index + 1`, so the unchanged
+ * `to_drop = release - 1` erase loop retires exactly the older frames into genlock_dropped_due.
+ *
+ * Mirror of src/genlock_backlog.rs relock_select_nearest / relock_anchor_age_ns (Tier-0
+ * unit-tested) -- keep both in lock-step. */
+static inline uint64_t genlock_abs_diff_ns(uint64_t a, uint64_t b)
+{
+	return a > b ? a - b : b - a;
+}
+
+/* camera-box #1003: the AGE the relock selection targets -- the tracked phase anchor when it
+ * is SET, else the source's configured latency. Anchor 0 is the UNSET sentinel (bzalloc
+ * zero-init), so a source that has never presented a steady frame (cold start, post-flush,
+ * just after a backward-step regime ended) falls back to the phase the wall-deadline path
+ * would have produced anyway. Mirror of src/genlock_backlog.rs relock_anchor_age_ns. */
+static inline uint64_t genlock_relock_target_age_ns(const obs_source_t *source, uint32_t latency_ms)
+{
+	const uint64_t configured = (uint64_t)latency_ms * 1000000ULL;
+	const uint64_t anchor = source->genlock_phase_anchor_ns;
+	/* FLOORED at the configured latency. The conveyor always holds AT LEAST the
+	 * configured hold, so in the intended regime the anchor is at or above it and this
+	 * is inert. It matters as a bound: genlock_phase_anchor_from_present saturates, and
+	 * nothing in the types stops a degenerate/stale anchor coming back SMALLER than the
+	 * hold -- an anchor near 0 would target the live edge and erase the entire delay
+	 * line in a single relock. Mirror: src/genlock_backlog.rs relock_anchor_age_ns. */
+	return anchor > configured ? anchor : configured;
+}
+
+/* camera-box #1003: the relock selection itself -- the INDEX into async_frames (arrival order,
+ * OLDEST first) of the frame whose stamp is NEAREST `wall_now_ns - target_age`. Ties resolve
+ * toward the OLDER frame (strict <), which keeps the selection monotone as the target sweeps
+ * forward so a tie can never oscillate between neighbours on successive episodes. Callers are
+ * only ever reached with num >= 1 (ready_async_frame guards on it and both relock branches
+ * additionally require due > 0); the num == 0 early return is defensive, never a live path.
+ * Mirror of src/genlock_backlog.rs relock_select_nearest. */
+static inline size_t genlock_relock_select_nearest(const obs_source_t *source, uint64_t wall_now_ns,
+						   uint32_t latency_ms)
+{
+	const uint64_t age = genlock_relock_target_age_ns(source, latency_ms);
+	const uint64_t target = wall_now_ns > age ? wall_now_ns - age : 0;
+	size_t best = 0;
+	uint64_t best_d;
+
+	if (source->async_frames.num == 0)
+		return 0;
+
+	best_d = genlock_abs_diff_ns(source->async_frames.array[0]->timestamp, target);
+	for (size_t i = 1; i < source->async_frames.num; i++) {
+		const uint64_t d = genlock_abs_diff_ns(source->async_frames.array[i]->timestamp, target);
+		/* STRICT < -- an equal distance keeps the already-chosen OLDER frame. */
+		if (d < best_d) {
+			best = i;
+			best_d = d;
+		}
+	}
+	return best;
+}
+
+/* camera-box #1003: the anchor to remember after presenting `presented_ts_ns` at wall instant
+ * `wall_now_ns` -- the conveyor's own measured on-air age. Saturating: a frame stamped AHEAD of
+ * the receiver's wall clock (the sender's deliberate ceil-to-boundary future bias, issue 1009
+ * defect B) would otherwise underflow, and saturating to 0 makes such a degenerate sample read
+ * as UNSET, i.e. the next relock falls back to the configured latency rather than targeting a
+ * nonsense age. Mirror of src/genlock_backlog.rs phase_anchor_from_present. */
+static inline uint64_t genlock_phase_anchor_from_present(uint64_t wall_now_ns, uint64_t presented_ts_ns)
+{
+	return wall_now_ns > presented_ts_ns ? wall_now_ns - presented_ts_ns : 0;
+}
+
 /* camera-box #1009: the backward-step trigger margin -- must be >> the sender's deliberate
  * ceil-to-boundary future bias (<= one interval; ndi-output.cpp genlock_emit_timecode_100ns /
  * src/ndi.rs) plus any sane network delay + inter-box skew, so plain sender-ahead stamp skew
@@ -4932,6 +5032,12 @@ static void genlock_backward_regime_end(obs_source_t *source, uint32_t latency_m
 	/* #726 STICKY-N: leaving the regime is a source-timeline seam like the re-anchor
 	 * itself -- the fresh ACQUIRE re-confirms the multiple from scratch. */
 	source->genlock_last_known_n = 0;
+	/* camera-box #1003: CLEAR the phase anchor too. The receiver wall clock moved by the
+	 * step, so every `wall_now - stamp` age sampled before the correction is wrong by
+	 * exactly that much -- re-acquiring against it would re-establish the hold at a phase
+	 * off by the whole clock step. Unset falls back to the CONFIGURED latency, which is
+	 * exactly this function's own stated contract (re-acquire the configured hold). */
+	source->genlock_phase_anchor_ns = 0;
 	blog(LOG_WARNING,
 	     "genlock-fifo backward-step regime ENDED '%s': reanchor_ticks=%llu — re-acquiring the "
 	     "configured hold (latency %u ms) from the wall deadline (#1009)",
@@ -5541,10 +5647,21 @@ static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 				 * after a setpoint-change overshoot. Every other path already has
 				 * its own catch-up behaviour and is left untouched. */
 				bool drain_eligible = false;
+				/* camera-box #1003: true ONLY on the STEADY and GAP-RESYNC paths --
+				 * the conveyor presents. Those are the presents whose measured
+				 * on-air age IS the phase anchor. The relock paths (ACQUIRE /
+				 * BACKLOG) deliberately leave it false: a relock INHERITS the
+				 * phase, it must never redefine it, or every episode re-mints one
+				 * and the whole fix is undone. */
+				bool anchor_update = false;
 				if (source->genlock_locked_next_boundary_ns == 0) {
 					/* UNLOCKED — ACQUIRE: the first wall-due frame locks the
-					 * cadence. Jump to the newest due (a startup backlog is stale
-					 * by definition), counting the older ones dropped. */
+					 * cadence. #1003: the frame PRESENTED is the one nearest the
+					 * tracked phase anchor (on a genuine cold start the anchor is
+					 * unset, so the target is the configured latency and this
+					 * behaves as before); the older ones are counted dropped. It
+					 * is NOT the newest due any more -- that instant-sampled rule
+					 * re-minted a fresh release phase on every lock episode. */
 					/* #726 STICKY-N: a fresh acquire (cold start OR after a source
 					 * reset that zeroed the boundary) re-confirms the source
 					 * multiple from scratch -- clear the latch so a stale N from a
@@ -5561,7 +5678,16 @@ static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 						genlock_audit_log(source, now_ns);
 						return false;
 					}
-					release = due;
+					/* camera-box #1003: select by PHASE CONTINUITY, not
+					 * newest-due. The `due` scan above is UNCHANGED and still
+					 * QUALIFIES this branch (due > 0); it simply no longer
+					 * SELECTS. release = index + 1 so the unchanged
+					 * `to_drop = release - 1` erase loop below retires exactly
+					 * the older frames into genlock_dropped_due. On a cold
+					 * ACQUIRE the anchor is unset and the target is the
+					 * configured latency -- the phase the wall deadline would
+					 * have produced anyway. */
+					release = genlock_relock_select_nearest(source, wall_now, reserve_ms) + 1;
 				} else if (source->async_frames.num >
 						   genlock_backlog_relock_qdepth(source, reserve_ms,
 										 interval) &&
@@ -5571,8 +5697,9 @@ static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 					 * imbalance shows up as QUEUE DEPTH, which is immune to the
 					 * constant stamp->arrival skew that relock-stormed v1's
 					 * wall-based guard live (skew 59 ms, reserve 3 ms:
-					 * dropped_due 2918/4202, relocks 1076). Re-lock to the newest
-					 * due frame, counting every jumped frame — the catch-up keeps
+					 * dropped_due 2918/4202, relocks 1076). Re-lock (#1003: to the
+					 * frame nearest the tracked phase anchor, no longer the newest
+					 * due one), counting every jumped frame — the catch-up keeps
 					 * the IMAG latency contract and the drop is VISIBLE (the
 					 * pre-#401 release erased silently). A deep queue with
 					 * due == 0 (a just-landed burst of FRESH frames, nothing aged
@@ -5607,6 +5734,30 @@ static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 					 * site, nothing to port to Rust. Guarded in
 					 * tests/genlock_release_cadence.rs (Tier-0) + both
 					 * windows-genlock*.yml (the #912 lock-step-anchor lesson). */
+					/* camera-box #1003: same phase-continuity selection as the
+					 * ACQUIRE branch. A backlog relock must still SHED the
+					 * stall's burst -- it does, by erasing every frame OLDER
+					 * than the selected one (release - 1 of them) -- but it must
+					 * no longer re-mint the release PHASE while doing it. */
+					size_t sel_1003 =
+						genlock_relock_select_nearest(source, wall_now, reserve_ms);
+					/* camera-box #1003 (adversarial review finding): a BACKLOG relock
+					 * that would shed NOTHING is proof the anchor is STALE. This
+					 * branch only fires ABOVE the latency-implied depth, so an anchor
+					 * pointing at (or before) the queue head cannot describe a queue
+					 * this deep. Carrying it re-fires the branch every tick shedding
+					 * nothing -- and since the branch pre-empts STEADY, drain_eligible
+					 * is never set and the settle-back drain never runs either. Drop
+					 * the stale anchor and re-select against the CONFIGURED latency:
+					 * one relock sheds the overshoot, and the anchor rebuilds from the
+					 * next STEADY present. ACQUIRE is deliberately exempt -- index 0
+					 * there just means "present the head", and the fresh lock stops the
+					 * branch re-firing. Mirror: the Tier-0 sim's relock_present. */
+					if (sel_1003 == 0 && source->genlock_phase_anchor_ns != 0) {
+						source->genlock_phase_anchor_ns = 0;
+						sel_1003 = genlock_relock_select_nearest(source, wall_now,
+											reserve_ms);
+					}
 					{
 						/* #940 piece 1: re-derive n the SAME way genlock_backlog_relock_qdepth()
 						 * did internally (READ-ONLY, same tick -> same result) so the logged
@@ -5624,19 +5775,36 @@ static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 							(size_t)genlock_backlog_relock_qdepth(
 								source, reserve_ms, interval) -
 							(size_t)GENLOCK_QDEPTH_RELOCK_MARGIN * (size_t)n_for_log;
+						/* camera-box #1003: wall_grid_phase_ns was BLIND. It
+						 * logged present_ts %% interval, but #940 piece 3 floors
+						 * present_ts to that very interval, so a floored value
+						 * mod its own divisor is IDENTICALLY 0 on every run at
+						 * every latency -- the one field meant to prove phase
+						 * determinism could never report anything else. The
+						 * three fields that replace it are the live post-deploy
+						 * evidence for this ticket: tick_phase_ns (where in the
+						 * grid this relock actually fired -- the Edge 1 input,
+						 * and NOT floored), anchor_ns (the phase being
+						 * inherited; 0 = unset -> the configured-latency
+						 * fallback) and sel_vs_newest_due (how many frames the
+						 * phase-continuity selection differs from the old rule
+						 * -- non-zero is this fix actively preventing a step). */
 						blog(LOG_INFO,
 						     "genlock-relock '%s': depth=%zu steady_depth_frames=%zu "
 						     "due=%zu erased=%zu head_skew_ms=%lld "
-						     "wall_grid_phase_ns=%lld interval_ns=%llu latency_ms=%u",
+						     "tick_phase_ns=%llu anchor_ns=%llu sel_vs_newest_due=%lld "
+						     "interval_ns=%llu latency_ms=%u",
 						     source->context.name ? source->context.name : "?",
 						     source->async_frames.num, steady_depth_frames_for_log,
-						     due, due - 1,
+						     due, sel_1003,
 						     (long long)(source->genlock_last_head_skew_ns /
 								 1000000),
-						     (long long)(present_ts % interval),
+						     (unsigned long long)(interval != 0 ? wall_now % interval : 0),
+						     (unsigned long long)source->genlock_phase_anchor_ns,
+						     (long long)((long long)sel_1003 - (long long)(due - 1)),
 						     (unsigned long long)interval, reserve_ms);
 					}
-					release = due;
+					release = sel_1003 + 1;
 				} else if (source->async_frames.array[0]->timestamp <=
 					   source->genlock_locked_next_boundary_ns) {
 					/* STEADY (strict FIFO): the queue head matured by the LOCKED
@@ -5670,6 +5838,8 @@ static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 							       mature_deadline)
 							matured_n++;
 						release = matured_n > 0 ? matured_n : 1;
+						/* #1003: a STEADY present -- the conveyor. */
+						anchor_update = true;
 					} else {
 						/* present the OLDEST matured frame, exactly one in steady
 						 * state at any arrival skew. Presenting oldest (v1 presented
@@ -5684,6 +5854,8 @@ static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 						 * evidence identified as holding depth CONSTANT forever
 						 * — eligible for the bounded settle-back drain below. */
 						drain_eligible = true;
+						/* #1003: a STEADY present -- the conveyor. */
+						anchor_update = true;
 					}
 				} else if (present_ts >= source->async_frames.array[0]->timestamp) {
 					/* GAP RESYNC: nothing matured, but the oldest queued frame is
@@ -5697,6 +5869,13 @@ static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 					 * possibly its rate) changed; clear the latch so the post-gap
 					 * stream re-confirms its multiple. */
 					source->genlock_last_known_n = 0;
+					/* #1003: a GAP RESYNC RE-DERIVES the phase anchor from the
+					 * frame it puts on air. Upstream skipped stamps, so the
+					 * pre-gap age describes a timeline that no longer exists --
+					 * this present is both the "update on GAP" and the "do not
+					 * carry the pre-seam value forward" rule, in one assignment
+					 * (the same seam that clears STICKY-N above). */
+					anchor_update = true;
 					release = 1;
 				} else {
 					/* HOLD: the boundary's frame has not arrived. LATE only if
@@ -5710,9 +5889,11 @@ static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 					genlock_audit_log(source, now_ns);
 					return false;
 				}
-				/* Present the newest frame of the released prefix — the newest
-				 * due at ACQUIRE / backlog re-lock (release = due), the queue
-				 * head on the STEADY / GAP paths (release = 1, nothing erased).
+				/* Present the LAST frame of the released prefix — #1003: the frame
+				 * nearest the tracked phase anchor at ACQUIRE / backlog re-lock
+				 * (release = selected index + 1, so this idiom is unchanged; it was
+				 * the newest DUE frame before #1003), the queue head on the STEADY /
+				 * GAP paths (release = 1, nothing erased).
 				 * The (release-1) stale older ones are erased via the same
 				 * da_erase(.,0)+remove_async_frame() idiom — COUNTING each into
 				 * genlock_dropped_due (#401: this erase used to be silent, which
@@ -5760,6 +5941,15 @@ static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 					}
 				}
 				next_frame = source->async_frames.array[0];
+				/* camera-box #1003: remember the conveyor's own on-air age, but ONLY
+				 * on a STEADY / GAP present (anchor_update). A relock reads this
+				 * anchor to inherit the phase; letting a relock WRITE it would let
+				 * each lock episode re-mint a phase from whatever frame it happened
+				 * to select, which is precisely the defect. Mirror of
+				 * src/genlock_backlog.rs phase_anchor_from_present. */
+				if (anchor_update)
+					source->genlock_phase_anchor_ns = genlock_phase_anchor_from_present(
+						wall_now, next_frame->timestamp);
 				/* The lock advances exactly one interval past the presented stamp
 				 * (ACQUIRE, RE-LOCK and STEADY alike) — the next boundary the
 				 * cadence will mature. */
@@ -7505,6 +7695,17 @@ void obs_source_set_genlock_latency_ms(obs_source_t *source, uint32_t ms)
 	if (clamped != prev) {
 		source->genlock_filled = false;
 		source->genlock_empty_run = 0;
+		/* camera-box #1003: the remembered on-air age describes a hold that no longer
+		 * exists. Carried across a setpoint change it targets the OLD phase forever --
+		 * and on a DECREASE it is actively harmful: the relock selection would return
+		 * index 0 (shed NOTHING) while the lowered latency has already dropped
+		 * genlock_backlog_relock_qdepth() below the unchanged depth, so the backlog
+		 * branch qualifies EVERY tick, and because that branch pre-empts STEADY the
+		 * issue-859/998 settle-back drain never runs either -- a permanent per-tick
+		 * relock storm at the old hold. Clearing it re-targets the CONFIGURED latency,
+		 * which sheds the overshoot in one relock. Mirror of the Tier-0 sim's
+		 * set_reserve_ms (src/genlock_backlog.rs). */
+		source->genlock_phase_anchor_ns = 0;
 	}
 	pthread_mutex_unlock(&source->async_mutex);
 

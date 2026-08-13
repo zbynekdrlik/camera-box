@@ -7467,3 +7467,92 @@ does the live rig verification of the new whole-chain checks and closes it.
   `cargo clippy --all-targets -- -D warnings` / `cargo test --no-run` all clean (no Rust files
   touched by this ticket -- pure C-harness/Python/docs change). No PR yet -- this worktree's
   local-only authority; supervisor integrates + drives the CI/mergeable/deploy cycle.
+
+## 2026-08-13 -- issue 1003 (phase-continuity relock, acceptance item 1 only)
+
+- Worktree `.claude/worktrees/autopilot-1003`, branch `autopilot-1003`, v1.7.0-dev.444.
+- Root cause (confirmed against current code, not taken on trust): the release phase is minted
+  by ONE line -- the newest-due selection at ACQUIRE (obs-source.c) and BACKLOG STORM -- an
+  instant-sampled STATELESS comparison with two independently flippable edges. The issue-940
+  grid pin floors the deadline to the RECEIVER grid, so +/-2ms of render-tick slew near the
+  floor's step point moves the whole pinned cell; and the stamps compared against it sit on the
+  SENDER's 33,333,300ns grid, a 33ns/frame beat, so the fixed 5ms hysteresis is a FIXED edge
+  inside a DRIFTING phase. Two edges = up to 4 outcomes spanning 2 frames = the measured
+  -64.5 / +56..63ms episode steps.
+- Also verified before coding: the relock log's `wall_grid_phase_ns` was structurally BLIND --
+  it printed `present_ts %% interval` while the pin floors present_ts to that very interval, so
+  it was identically 0 on every run at every latency. The one field meant to prove phase
+  determinism could never report anything.
+- Fix (approach A of three considered; B round-to-nearest and C hysteresis-widening both only
+  MOVE the edge): track the steady conveyor's own on-air age per source and have a relock
+  present the frame NEAREST it. Nearest-neighbour selection is CONTINUOUS, so there is no
+  threshold for slew or beat to flip. Depth correction is untouched -- `release = index + 1`
+  feeds the unchanged `to_drop = release - 1` erase loop.
+- RED cafce926c..ec0307a6b (`test(#1003): [red]`, stub-then-restore per the asrc pattern):
+  3 acceptance tests fail, the defect lock passes. GREEN 2e2b11ea9 (Rust authority),
+  851fc84ab (C mirror + obs-internal.h field + the instrumentation swap to
+  tick_phase_ns/anchor_ns/sel_vs_newest_due), 8c9c1c451 (lock-step anchors).
+- Tests: forced_relock_preserves_release_phase_within_10ms_across_5_episodes_1003,
+  instant_sampled_selection_steps_a_whole_frame_at_the_grid_edges_1003 (the DEFECT LOCK -- shows
+  ONE NANOSECOND of render-tick slew moving the phase a whole frame),
+  relock_still_sheds_backlog_depth_while_preserving_phase_1003,
+  anchor_survives_selfheal_reacquire_and_clears_on_gap_and_backward_regime_end_1003.
+- GOTCHA worth keeping: the vendored C compiles on CI only, but that does NOT mean zero local
+  verification. The four new helpers AND the exact blog() format string with its exact argument
+  list were extracted verbatim into a standalone file with a minimal obs_source_t stub and
+  compiled under `gcc -std=gnu99 -Wall -Wextra -Wformat=2` (clean), and the C selector was then
+  run against 6 vectors and returned byte-identical indices to the Rust authority on the same
+  inputs. This is cheap and catches exactly the class the project CLAUDE.md warns about
+  (type/format/brace errors that otherwise surface first on CI). Reusable for any future
+  vendored-C change.
+- GOTCHA: two pre-existing anchors in tests/genlock_release_cadence.rs SLICE the relock branch
+  on the literal `release = due;`. Changing the selection silently breaks their `.expect()`
+  before any assertion runs -- the same static-anchor fragility the recording-e2e.sh rule
+  documents, here in the vendored-C guard suite. Both were re-anchored on the new terminator.
+- GOTCHA: the regime-end anchor check first used a fixed 600-byte window and failed because the
+  new comment pushed the statement past it -- the exact "a byte cap is a PROXY that rots" lesson
+  the issue-940 anchor already records. Rewritten to scope to the enclosing function.
+- Scoped out deliberately, with reasons on the ticket and in the code: `src/probe/genlock.rs`
+  `ReleaseCadence` stays on newest-due (no production caller, ~27 probe-gated pinned outcomes
+  with zero local verification path; same precedent that struct already carries for the
+  issue-940 pin) -- filed as #1037. And PRERECORD_PHASE_CALIBRATE stays as-is until the live
+  forced-relock evidence exists to decide retire-vs-enforce.
+- Issue 1003 stays OPEN: acceptance items 2 (tolerance 90->20) and 3 (3x2h green E2E) are a
+  separate follow-up PR gated on live validation.
+- Local: `cargo fmt --all --check`, `cargo check`, `cargo clippy --all-targets -- -D warnings`
+  all clean; `--lib genlock_backlog` 36/36; `--test genlock_release_cadence` 13/13. No PR --
+  worktree local-only authority; supervisor integrates and drives CI/merge/deploy.
+- REVIEW ROUND (fresh-context adversarial pass over the whole branch): 1 critical, 5 warnings,
+  5 suggestions -- all fixed in-branch except one, which is filed.
+  - CRITICAL, and worth reading twice: the fix as first written broke a latency DECREASE. The
+    anchor IS the conveyor's current age, so after a knob decrease it still described the OLD,
+    deeper hold; the selection then returned index 0, the relock shed NOTHING, and the lowered
+    threshold qualified the backlog branch on EVERY tick. And because the backlog branch
+    pre-empts STEADY, `drain_eligible` was never set, so the settle-back drain -- the only
+    other convergence path -- never ran either. 923->400 ms parked at the old 933 ms hold with
+    800 relocks in 800 ticks and zero frames shed. Two guards, in the Rust sim and the C: a
+    setpoint change clears the anchor, and a BACKLOG relock that would shed nothing treats the
+    anchor as stale and re-selects against the configured latency.
+  - GENERAL LESSON from that: when a fix adds REMEMBERED STATE, enumerate every event that
+    invalidates it BEFORE writing the tests, not after. All four of this ticket's own
+    acceptance tests passed while the knob-decrease path was broken, because none of them
+    changed the setpoint. The same omission produced two more findings (the overrun
+    force-drain and the async_texture_changed re-alloc also destroy the delay line and were
+    not clearing the anchor). The guard now COUNTS anchor-clears against `free_async_cache()`
+    call sites, so a future fourth seam cannot be missed the same way.
+  - GOTCHA, and the most valuable thing in this ticket: a parity/mutation gate can be a LIE.
+    The new tests/genlock_relock_selection_parity.rs compiles the vendored C helpers
+    standalone and diffs them against the Rust authority -- and on its first cut, mutating the
+    C tie-break from `<` to `<=` still PASSED all 129 vectors, because not one of them
+    produced an exact tie. Four exact-tie vectors were added (both rig sender grids are EVEN,
+    so `i*grid + grid/2` is an exact integer nanosecond a wall instant can land on) and the
+    same mutation now diverges on 4 of 133. Always mutate the thing under test and watch the
+    gate go red before believing it.
+  - The standalone-compile trick is now a committed, CI-runnable test rather than a session
+    artefact: it lifts the four #1003 helpers verbatim from obs-source.c, compiles them under
+    -Wall -Wextra -Werror against a minimal obs_source_t stub, and requires byte-identical
+    selections. It fails loudly (never skips) without a C compiler.
+  - Filed, not fixed here: #1038 -- ready_async_frame() is ~813 lines and this diff adds to
+    it. Extracting the cadence block from vendored C that compiles only in CI is its own
+    change, not a rider on a fix.
+- Final local: fmt/clippy clean; full `cargo test` 201 binaries / 3206 tests green (exit 0).
