@@ -408,32 +408,50 @@ grade_http_node() {
       # trusting its ntp_offset_us as a live value.
       case "$(ntp_freshness_verdict "$status" "$freshness")" in
         fresh)
-          # #1022 spread-side completion: a CLIENT row (never the master -- see
-          # should_resample_for_chase's own MODE gate) whose verdict is EXACTLY "unstable" (median
-          # already in bound, spread not) AND whose worst sample still fits the SAME bound gets
-          # ONE fresh resample round before the final grade. A resample that is ALSO unstable
-          # still fails, graded on ITS OWN (fresh) numbers.
-          if [ "$(should_resample_for_chase "$samples_raw" "$bound" "$stability" "$min_distinct" "$mode")" = "yes" ]; then
-            sleep "$resample_delay"
-            samples_raw="$(gather_http_samples "$read_fn" "$name" "$arg" "$samples" "$window")"
-            status="$(printf '%s\n' "$samples_raw" | tail -1)"
-            deadband_note="${deadband_note} -- resampled once after a ${resample_delay}s delay (spread looked like a transient master step-chase excursion, #1022; grading the fresh round)"
-            resampled=1
-          fi
-          # #1022 review follow-up: the resample itself takes real wall-clock time (the delay +
-          # another full sampling window) -- long enough for a borderline-fresh NTP measurement to
-          # cross into staleness during that gap (the SAME #1014 "frozen/free-running measurement
-          # graded as live" class this whole freshness case-statement exists to catch). Re-verify
-          # the RESAMPLED data's own freshness before trusting its median/spread -- never grade a
-          # measurement that went stale during the wait, even though the ORIGINAL round was proven
-          # fresh a moment ago.
-          if [ "$resampled" = 1 ] && [ "$(ntp_freshness_verdict "$status" "$freshness")" != "fresh" ]; then
-            printf '  %-14s NTP STALE    (NTP measurement went stale during the #1022 resample delay -- status incomplete)\n' \
-              "$name"
-            rc_off=3
+          # #1022 bimodal chase-signature exclusion (supersedes relying on resample-once alone --
+          # a live rerun proved a FIXED resample delay can land inside the SAME excursion,
+          # roughly as often as it doesn't: ~35% -> ~12% per-run failure, still far too red for
+          # #861's 3-consecutive-green acceptance). Try this FIRST on the ORIGINAL round: it is
+          # cheap (no wall-clock cost) and DETERMINISTIC (grades the window's samples directly
+          # for the signature a step-chase leaves), unlike the expensive/probabilistic resample
+          # fallback below.
+          if [ "$(chase_bimodal_exclusion_verdict "$samples_raw" "$bound" "$stability" "$min_distinct" "$mode")" = "yes" ]; then
+            chase_bimodal_exclusion_check "$name" "$samples_raw" "$bound" "$stability" "$deadband_note"
+            rc_off=0
           else
-            sampled_offset_check "$name" "$samples_raw" "$bound" "$stability" "$min_distinct" \
-              "$mode" "$deadband_note" || rc_off=$?
+            # A CLIENT row (never the master -- see should_resample_for_chase's own MODE gate)
+            # whose verdict is EXACTLY "unstable" (median already in bound, spread not) AND whose
+            # worst sample still fits the SAME bound gets ONE fresh resample round before the
+            # final grade -- a fallback for a window the exclusion signature could not explain
+            # (e.g. genuine scatter, or an incomplete/partial capture of the transition). A
+            # resample that is ALSO unstable still fails, graded on ITS OWN (fresh) numbers.
+            if [ "$(should_resample_for_chase "$samples_raw" "$bound" "$stability" "$min_distinct" "$mode")" = "yes" ]; then
+              sleep "$resample_delay"
+              samples_raw="$(gather_http_samples "$read_fn" "$name" "$arg" "$samples" "$window")"
+              status="$(printf '%s\n' "$samples_raw" | tail -1)"
+              deadband_note="${deadband_note} -- resampled once after a ${resample_delay}s delay (spread looked like a transient master step-chase excursion, #1022; grading the fresh round)"
+              resampled=1
+            fi
+            # #1022 review follow-up: the resample itself takes real wall-clock time (the delay +
+            # another full sampling window) -- long enough for a borderline-fresh NTP measurement
+            # to cross into staleness during that gap (the SAME #1014 "frozen/free-running
+            # measurement graded as live" class this whole freshness case-statement exists to
+            # catch). Re-verify the RESAMPLED data's own freshness BEFORE trying the exclusion
+            # signature again or trusting its median/spread -- never grade a measurement that went
+            # stale during the wait, even though the ORIGINAL round was proven fresh a moment ago.
+            if [ "$resampled" = 1 ] && [ "$(ntp_freshness_verdict "$status" "$freshness")" != "fresh" ]; then
+              printf '  %-14s NTP STALE    (NTP measurement went stale during the #1022 resample delay -- status incomplete)\n' \
+                "$name"
+              rc_off=3
+            elif [ "$resampled" = 1 ] && [ "$(chase_bimodal_exclusion_verdict "$samples_raw" "$bound" "$stability" "$min_distinct" "$mode")" = "yes" ]; then
+              # The resampled round happens to show a clean chase signature too -- excuse it the
+              # same way the original round would have been, rather than grading it raw.
+              chase_bimodal_exclusion_check "$name" "$samples_raw" "$bound" "$stability" "$deadband_note"
+              rc_off=0
+            else
+              sampled_offset_check "$name" "$samples_raw" "$bound" "$stability" "$min_distinct" \
+                "$mode" "$deadband_note" || rc_off=$?
+            fi
           fi
           ;;
         stale)
@@ -574,26 +592,45 @@ Options:
                        pays the priming read); an unreachable/unreadable priming read falls back
                        to the unmodified --bound-us, same "cannot prove it -> do not widen"
                        discipline as an absent/null deadband.
-  --chase-resample-delay-s N  #1022 spread-side completion: the SAME master step-chase can ALSO
-                       inflate a CLIENT row's SPREAD past --stability-us even though its median
-                       stays correctly in-bound -- and because the step is on ONE clock shared by
-                       the fleet, the SAME step can trip MULTIPLE clients simultaneously in one
-                       run. A client row whose verdict is EXACTLY "unstable" (median in bound,
-                       spread not) AND whose worst sample still fits inside its OWN effective
-                       bound (the SAME per-node bound the median check already uses -- for a
-                       client row that may already be the #1022-widened
+  #1022 spread-side completion: the SAME master step-chase can ALSO inflate a CLIENT row's
+                       SPREAD past --stability-us even though its median stays correctly in-bound
+                       -- and because the step is on ONE clock shared by the fleet, the SAME step
+                       can trip MULTIPLE clients simultaneously in one run. A client row whose
+                       verdict is EXACTLY "unstable" (median in bound, spread not) is now handled
+                       in TWO STAGES, tried in this order:
+                       (1) BIMODAL CHASE-SIGNATURE EXCLUSION (deterministic, no wall-clock cost):
+                       grades the window's samples DIRECTLY for the shape a step-chase leaves --
+                       a tight baseline cluster near zero plus a tight, same-sign elevated
+                       cluster all within the row's own effective bound -- and excuses the row
+                       immediately when found (no resample needed at all). This is tried FIRST
+                       and, on the live data that motivated it, explains the entire multi-client
+                       false-DRIFT incident deterministically. See clock-offset-guard.sh's
+                       chase_bimodal_exclusion_verdict for the exact 5 conditions.
+                       (2) RESAMPLE-ONCE FALLBACK (probabilistic, costs wall-clock time): ONLY
+                       when (1) declines (e.g. genuine multi-modal scatter, or an incomplete
+                       capture of the transition) AND the worst sample still fits inside the
+                       row's own effective bound (the SAME per-node bound the median check
+                       already uses -- for a client row that may already be the #1022-widened
                        --client-chase-ceiling-us envelope, not necessarily the bare --bound-us
-                       value) gets ONE fresh resample round after this delay before the final
-                       grade -- never a retry loop; a resample that is ALSO unstable still fails,
-                       graded on its own fresh numbers, and a resample whose NTP measurement goes
-                       stale during the wait reports STALE rather than trusting aged-out data. The
-                       master's own median-only row, a genuine "drift" (median out of bound), and
-                       a worst sample that already exceeds the effective bound (the #836 genuine-
-                       scatter class, or a real clock fault) are NEVER resampled -- see
+                       value), take ONE fresh resample round after --chase-resample-delay-s
+                       before the final grade -- never a retry loop. The resampled round is ALSO
+                       tried against (1) first; if that declines too, it is graded plainly and a
+                       resample that is ALSO unstable still fails, graded on its own fresh
+                       numbers. A resample whose NTP measurement goes stale during the wait
+                       reports STALE rather than trusting aged-out data.
+                       The master's own median-only row, a genuine "drift" (median out of bound),
+                       and a worst sample that already exceeds the effective bound (the #836
+                       genuine-scatter class, or a real clock fault) are NEVER resampled -- see
                        clock-offset-guard.sh's should_resample_for_chase for the exact decision.
-                       Default ${GATE_CHASE_RESAMPLE_DELAY_S} (gives the transient a good chance
-                       to have cleared -- the original filing described the per-client catch-up
-                       window as lasting "~10-30s").
+  --chase-resample-delay-s N  the stage-(2) fallback delay described above. Default
+                       ${GATE_CHASE_RESAMPLE_DELAY_S} (gives the transient a good chance to have
+                       cleared -- the original filing described the per-client catch-up window as
+                       lasting "~10-30s"). A live rerun proved this fixed delay alone is only a
+                       probabilistic mitigation (the client's own elevated-offset duty cycle is
+                       ~30-60s per ~130-150s master step period, ~25-45%, so a fixed delay
+                       collides with the SAME or the NEXT excursion roughly that often) -- stage
+                       (1) above is what makes the gate's overall verdict deterministic on the
+                       common case; this flag only tunes the residual fallback.
 
 A node's NTP MEASUREMENT itself must also be FRESH, independently of the payload's general
 "updated_ts" (#1014, dantesync v1.8.30 / dantesync issue 68): "ntp_age_s" must be a plain integer

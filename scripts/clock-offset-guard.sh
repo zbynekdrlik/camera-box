@@ -875,6 +875,164 @@ should_resample_for_chase() {
   fi
 }
 
+# --- Bimodal chase-signature exclusion (#1022, supersedes relying on resample-once alone) ------
+#
+# A live rerun proved resample-once (should_resample_for_chase, above) is a PROBABILISTIC
+# mitigation, not a deterministic fix: a client's own elevated-offset duty cycle is ~30-60s per
+# ~130-150s master step period (25-45%), so a FIXED resample delay collides with the SAME (or the
+# NEXT) excursion roughly that often -- observed live, a 15s-delayed resample landed inside the
+# same still-unresolved excursion and reported the SAME 2561us spread again. #861's 3-consecutive-
+# green acceptance needs deterministic, not a coin flip.
+#
+# chase_bimodal_exclusion_verdict grades a window's samples DIRECTLY for the SIGNATURE a step-
+# chase leaves, instead of hoping an independent resample lands outside the excursion: a tight
+# baseline cluster near zero PLUS a tight, SAME-SIGN elevated cluster at (or under) the step size,
+# all within the envelope. A CLIENT row (never the master) whose raw verdict would be EXACTLY
+# "unstable" is explained -- passes -- when ALL of:
+#   1. Partition distinct samples into baseline (|s| <= STABILITY_US) and elevated (|s| >
+#      STABILITY_US).
+#   2. Every elevated sample fits inside BOUND_US (the SAME bound the median check already uses
+#      -- possibly the #1022-widened chase envelope, not necessarily the bare fixed bound).
+#   3. The baseline subset is non-empty and its own spread <= STABILITY_US (a single-sample
+#      baseline has an UNDEFINED spread -- treated as vacuously fine, nothing to scatter from one
+#      point).
+#   4. The elevated subset's own spread <= STABILITY_US -- a chase is ONE tight mode at the
+#      master's step size (live: 2561/2574us); genuine multi-modal scatter fails this (the #836
+#      genuine-scatter class stays caught). A single-sample elevated subset is likewise vacuously
+#      fine.
+#   5. Elevated samples all share ONE sign -- a chase is a coherent phase offset, never noise
+#      split around zero. NOTE: given the elevated magnitude range is bounded to
+#      (STABILITY_US, BOUND_US], two opposite-sign elevated values v1>0>v2 always ALSO fail
+#      condition 4: their difference v1-v2 > 2*STABILITY_US >= STABILITY_US (the ">=", not ">",
+#      matters at the degenerate STABILITY_US=0 edge -- 2*0=0>=0 still holds even though 2*0 is
+#      not itself >0) -- this condition is kept explicit anyway because it documents the INTENT
+#      independently of condition 4's exact numeric form, not because any input can make it the
+#      sole deciding factor today.
+# A stuck/drifted node still fails on the MEDIAN check (verdict would be "drift"/"drift_unstable",
+# which never reaches this path -- the leading verdict=="unstable" gate excludes it). The
+# master's own median-only row (mode != "full") is never graded via this signature at all.
+chase_bimodal_exclusion_verdict() {
+  local payloads="$1" bound="$2" stability="$3" min_distinct="$4" mode="$5"
+  local verdict samples baseline elevated bspread espread emax
+  local n_elevated first_sign v sign mixed_sign=0
+  [ "$mode" = "full" ] || { printf 'no\n'; return 0; }
+  verdict="$(sampled_offset_verdict "$payloads" "$bound" "$stability" "$min_distinct" "$mode")"
+  [ "$verdict" = "unstable" ] || { printf 'no\n'; return 0; }
+  samples="$(distinct_offset_samples_us "$payloads")"
+  baseline="$(chase_bimodal_partition_us "$samples" "$stability" baseline)"
+  elevated="$(chase_bimodal_partition_us "$samples" "$stability" elevated)"
+  # Condition 3: baseline non-empty, spread (if defined) <= STABILITY_US.
+  [ -n "$baseline" ] || { printf 'no\n'; return 0; }
+  bspread="$(spread_of_ints "$baseline")"
+  if [ -n "$bspread" ] && [ "$bspread" -gt "$stability" ]; then
+    printf 'no\n'
+    return 0
+  fi
+  # Condition 2: every elevated sample fits inside BOUND_US (checking the WORST one covers all).
+  emax="$(max_abs_of_ints "$elevated")"
+  if [ -n "$emax" ] && [ "$emax" -gt "$bound" ]; then
+    printf 'no\n'
+    return 0
+  fi
+  # Condition 4: elevated subset's own spread (if defined) <= STABILITY_US.
+  espread="$(spread_of_ints "$elevated")"
+  if [ -n "$espread" ] && [ "$espread" -gt "$stability" ]; then
+    printf 'no\n'
+    return 0
+  fi
+  # Condition 5: elevated samples all share one sign. Also counts them, since an empty elevated
+  # subset here is structurally impossible (see the doc comment above: it would require the
+  # baseline -- which would then be ALL samples -- to already have spread > STABILITY_US, which
+  # condition 3 above already rejected), but this loop still counts defensively rather than assume.
+  n_elevated=0
+  first_sign=""
+  while IFS= read -r v; do
+    [ -n "$v" ] || continue
+    n_elevated=$((n_elevated + 1))
+    if [ "$v" -lt 0 ]; then sign="-"; else sign="+"; fi
+    if [ -z "$first_sign" ]; then
+      first_sign="$sign"
+    elif [ "$sign" != "$first_sign" ]; then
+      mixed_sign=1
+    fi
+  done <<< "$elevated"
+  if [ "$n_elevated" -eq 0 ] || [ "$mixed_sign" -eq 1 ]; then
+    printf 'no\n'
+    return 0
+  fi
+  printf 'yes\n'
+}
+
+# chase_bimodal_partition_us LIST_NEWLINE STABILITY_US WHICH -> the DISTINCT sample values from
+# LIST_NEWLINE (one per line) belonging to the "baseline" (|v| <= STABILITY_US) or "elevated"
+# (|v| > STABILITY_US) subset, selected via WHICH ("baseline"|"elevated"), one per output line.
+# Non-integer lines / a malformed STABILITY_US yield nothing (empty) -- never a guessed partition.
+chase_bimodal_partition_us() {
+  local list="$1" stability="$2" which="$3" v mag
+  if ! printf '%s' "$stability" | grep -qE '^[0-9]+$'; then
+    return 0
+  fi
+  while IFS= read -r v; do
+    printf '%s' "$v" | grep -qE '^-?[0-9]+$' || continue
+    mag="$(abs_int "$v")"
+    if [ "$which" = "baseline" ]; then
+      [ "$mag" -le "$stability" ] && printf '%s\n' "$v"
+    else
+      [ "$mag" -gt "$stability" ] && printf '%s\n' "$v"
+    fi
+  done <<< "$list"
+  # #1022 bash-gotcha: under this file's own `set -euo pipefail`, a `while` loop's own exit
+  # status is that of the LAST command it executed -- including a conditionally-skipped
+  # `[ cond ] && printf ...` whose LAST loop iteration's condition happened to be false (printf
+  # never ran, so the compound's status is the failing `[ ]`'s). With nothing after the loop,
+  # THAT non-zero would abort the calling shell the moment this function is invoked via command
+  # substitution (`x="$(chase_bimodal_partition_us ...)"`) -- e.g. exactly when the loop's final
+  # sample lands in the "else" branch (no match). This explicit `return 0` (matching
+  # spread_of_ints's own trailing statement, above) makes the function's real return status
+  # independent of which branch the last iteration happened to take.
+  return 0
+}
+
+# chase_bimodal_exclusion_report PAYLOADS_NEWLINE STABILITY_US -> "N_ELEVATED BASELINE_SPREAD"
+# (space-separated; BASELINE_SPREAD prints as "NA" when undefined -- a single-value baseline).
+# The numbers behind the operator-facing "explained by master step-chase" note -- used ONLY after
+# the caller already confirmed chase_bimodal_exclusion_verdict(...) == "yes" for the SAME inputs;
+# this function does not re-decide, it only reports (mirrors sampled_offset_report's own
+# compute-the-display-numbers-separately-from-the-decision shape).
+chase_bimodal_exclusion_report() {
+  local payloads="$1" stability="$2" samples baseline elevated n_elevated bspread
+  samples="$(distinct_offset_samples_us "$payloads")"
+  elevated="$(chase_bimodal_partition_us "$samples" "$stability" elevated)"
+  baseline="$(chase_bimodal_partition_us "$samples" "$stability" baseline)"
+  n_elevated="$(printf '%s\n' "$elevated" | grep -cE '^-?[0-9]+$' || true)"
+  n_elevated="${n_elevated:-0}"
+  bspread="$(spread_of_ints "$baseline")"
+  printf '%s %s\n' "$n_elevated" "${bspread:-NA}"
+}
+
+# chase_bimodal_exclusion_check LABEL PAYLOADS_NEWLINE BOUND_US STABILITY_US [EXTRA_NOTE] ->
+# prints ONE "OK" status line (median + spread + distinct count, SAME format as
+# sampled_offset_check's own "ok" case) with an appended bimodal chase-signature explanation, and
+# ALWAYS returns 0. The caller (dantesync-gate.sh's grade_http_node) must have already confirmed
+# chase_bimodal_exclusion_verdict(...) == "yes" for the SAME inputs -- this function does not
+# re-decide, it only formats + reports (mirrors sampled_offset_check's own compute-the-display-
+# numbers-separately-from-the-decision shape, and chase_bimodal_exclusion_report's own doc
+# comment above).
+chase_bimodal_exclusion_check() {
+  local label="$1" payloads="$2" bound="$3" stability="$4" extra_note="${5:-}"
+  local report n median spread excl_report excl_n excl_bspread
+  report="$(sampled_offset_report "$payloads")"
+  n="$(printf '%s' "$report" | awk '{print $1}')"
+  median="$(printf '%s' "$report" | awk '{print $2}')"
+  spread="$(printf '%s' "$report" | awk '{print $3}')"
+  excl_report="$(chase_bimodal_exclusion_report "$payloads" "$stability")"
+  excl_n="$(printf '%s' "$excl_report" | awk '{print $1}')"
+  excl_bspread="$(printf '%s' "$excl_report" | awk '{print $2}')"
+  printf '  %-14s OK       (median %sus <= %sus bound; spread %sus, stability %sus; %s distinct samples)%s -- spread excursion explained by master step-chase (%s elevated samples in one tight mode <= envelope, #1022); baseline spread %sus\n' \
+    "$label" "$median" "$bound" "$spread" "$stability" "$n" "$extra_note" "$excl_n" "$excl_bspread"
+  return 0
+}
+
 # --- NTP-master PTP-locked deadband widening (#1021, dantesync PR #84/#86) ---------------------
 #
 # dantesync issue 83: a genuinely PTP-locked master now deliberately DEFERS its periodic UTC-phase

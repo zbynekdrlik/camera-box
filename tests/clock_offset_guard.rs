@@ -2367,3 +2367,257 @@ fn should_resample_for_chase_no_on_malformed_bound() {
         "a malformed BOUND_US must never resample: {out:?}"
     );
 }
+
+// --- #1022 bimodal chase-signature exclusion (supersedes relying on resample-once alone) -------
+//
+// A live rerun proved resample-once is a COIN FLIP, not a deterministic fix: the client's own
+// elevated-offset duty cycle is ~30-60s per ~130-150s master step period (25-45%), so a fixed
+// resample delay collides with the SAME (or the NEXT) excursion roughly that often -- observed
+// live, cam1's 15s-delayed resample landed inside the same still-unresolved excursion and
+// reported UNSTABLE again with the identical 2561us spread. chase_bimodal_exclusion_verdict
+// grades the window's samples DIRECTLY for the signature a step-chase leaves (a tight baseline
+// cluster near zero PLUS a tight, same-sign elevated cluster at the step size) instead of hoping
+// an independent resample lands outside the excursion -- deterministic, not probabilistic.
+
+#[test]
+fn chase_bimodal_exclusion_verdict_yes_on_the_exact_live_cam1_shape_1022() {
+    // The EXACT live rerun shape (E2E run 31640853894): 6 distinct samples, 3 at baseline (0us),
+    // 3 in one tight elevated mode (2561us) -- median 0us, spread 2561us, bound 3500us
+    // (deadband 2500 + margin 1000), stability 2000us.
+    let payloads = format!(
+        "{}\n{}\n{}\n{}\n{}\n{}\n",
+        pipe_json(1000, 0),
+        pipe_json(1005, 0),
+        pipe_json(1010, 0),
+        pipe_json(1015, 2561),
+        pipe_json(1020, 2561),
+        pipe_json(1025, 2561),
+    );
+    let out = run_sourced(
+        "chase_bimodal_exclusion_verdict \"$P\" 3500 2000 6 full",
+        &[("P", payloads.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "yes",
+        "the exact live cam1 shape (tight baseline + one tight same-sign elevated mode, all \
+         within the envelope) must be explained by the chase signature: {out:?}"
+    );
+}
+
+#[test]
+fn chase_bimodal_exclusion_report_reflects_elevated_count_and_baseline_spread_1022() {
+    let payloads = format!(
+        "{}\n{}\n{}\n{}\n{}\n{}\n",
+        pipe_json(1000, 0),
+        pipe_json(1005, 0),
+        pipe_json(1010, 0),
+        pipe_json(1015, 2561),
+        pipe_json(1020, 2561),
+        pipe_json(1025, 2561),
+    );
+    let out = run_sourced(
+        "chase_bimodal_exclusion_report \"$P\" 2000",
+        &[("P", payloads.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "3 0",
+        "3 elevated samples, baseline spread 0us (all three baseline samples are 0): {out:?}"
+    );
+}
+
+#[test]
+fn chase_bimodal_exclusion_verdict_yes_with_a_single_baseline_sample_1022() {
+    // A single baseline sample has an undefined spread -- must be treated as vacuously within
+    // bound (nothing to scatter from one point), not as a failure.
+    let payloads = format!(
+        "{}\n{}\n{}\n",
+        pipe_json(1000, 0),
+        pipe_json(1005, 2561),
+        pipe_json(1010, 2564),
+    );
+    let out = run_sourced(
+        "chase_bimodal_exclusion_verdict \"$P\" 3500 2000 3 full",
+        &[("P", payloads.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "yes",
+        "a single baseline sample plus a tight same-sign elevated pair must still be explained: \
+         {out:?}"
+    );
+}
+
+#[test]
+fn chase_bimodal_exclusion_verdict_no_when_elevated_samples_scatter_1022() {
+    // Genuine multi-modal scatter: elevated samples do NOT cluster (spread among them exceeds
+    // stability) -- a wide bound (8000) is used here specifically so the elevated magnitude range
+    // has room for a same-sign pair to scatter beyond stability while both individually still fit
+    // the envelope (isolates condition 4 from condition 2).
+    let payloads = format!(
+        "{}\n{}\n{}\n",
+        pipe_json(1000, 0),
+        pipe_json(1005, 2500),
+        pipe_json(1010, 7500),
+    );
+    let out = run_sourced(
+        "chase_bimodal_exclusion_verdict \"$P\" 8000 2000 3 full",
+        &[("P", payloads.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "no",
+        "elevated samples that don't cluster (spread 5000us > stability 2000us) must NOT be \
+         explained -- this is the #836 genuine-scatter class: {out:?}"
+    );
+}
+
+#[test]
+fn chase_bimodal_exclusion_verdict_no_when_elevated_samples_have_mixed_sign_1022() {
+    // Mixed-sign elevated samples (a coherent phase offset is always one sign, never split
+    // around zero). Note: given the elevated magnitude range is bounded to (stability, bound],
+    // two opposite-sign elevated values always ALSO fail the clustering check (their difference
+    // exceeds 2*stability > stability) -- this test asserts the observable "no", not which
+    // specific condition caught it.
+    let payloads = format!(
+        "{}\n{}\n{}\n",
+        pipe_json(1000, 0),
+        pipe_json(1005, 2500),
+        pipe_json(1010, -2600),
+    );
+    let out = run_sourced(
+        "chase_bimodal_exclusion_verdict \"$P\" 8000 2000 3 full",
+        &[("P", payloads.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "no",
+        "mixed-sign elevated samples must NOT be explained as a coherent chase: {out:?}"
+    );
+}
+
+#[test]
+fn chase_bimodal_exclusion_verdict_no_when_an_elevated_sample_exceeds_the_bound_1022() {
+    let payloads = format!(
+        "{}\n{}\n{}\n",
+        pipe_json(1000, 0),
+        pipe_json(1005, 0),
+        pipe_json(1010, 4000),
+    );
+    let out = run_sourced(
+        "chase_bimodal_exclusion_verdict \"$P\" 3500 2000 3 full",
+        &[("P", payloads.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "no",
+        "an elevated sample beyond the envelope (4000us > 3500us bound) looks bigger than any \
+         legitimate step could produce -- must never be explained away: {out:?}"
+    );
+}
+
+#[test]
+fn chase_bimodal_exclusion_verdict_no_for_the_master_median_only_mode_1022() {
+    let payloads = format!(
+        "{}\n{}\n{}\n{}\n{}\n{}\n",
+        pipe_json(1000, 0),
+        pipe_json(1005, 0),
+        pipe_json(1010, 0),
+        pipe_json(1015, 2561),
+        pipe_json(1020, 2561),
+        pipe_json(1025, 2561),
+    );
+    let out = run_sourced(
+        "chase_bimodal_exclusion_verdict \"$P\" 3500 2000 6 median-only",
+        &[("P", payloads.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "no",
+        "the master's median-only row must never be graded via the client chase signature: {out:?}"
+    );
+}
+
+#[test]
+fn chase_bimodal_exclusion_verdict_no_when_verdict_is_not_unstable_1022() {
+    // A healthy "ok" verdict has nothing to explain.
+    let ok_payloads = format!(
+        "{}\n{}\n{}\n",
+        pipe_json(1000, 10),
+        pipe_json(1005, 20),
+        pipe_json(1010, 15),
+    );
+    let out = run_sourced(
+        "chase_bimodal_exclusion_verdict \"$P\" 3500 2000 3 full",
+        &[("P", ok_payloads.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "no",
+        "a healthy 'ok' verdict has nothing to explain: {out:?}"
+    );
+
+    // A genuine "drift" (median itself out of bound) is never rescued by this path either.
+    let drift_payloads = format!(
+        "{}\n{}\n{}\n",
+        pipe_json(1000, 9000),
+        pipe_json(1005, 9100),
+        pipe_json(1010, 8900),
+    );
+    let out = run_sourced(
+        "chase_bimodal_exclusion_verdict \"$P\" 3500 2000 3 full",
+        &[("P", drift_payloads.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "no",
+        "drift (median out of bound) must never be explained away by the chase signature: {out:?}"
+    );
+}
+
+#[test]
+fn chase_bimodal_exclusion_check_prints_an_ok_line_with_the_exclusion_note_and_returns_0() {
+    // Direct unit test for the print/format wrapper (review finding: it had no dedicated test,
+    // unlike its sibling sampled_offset_check). The caller is required to have already confirmed
+    // chase_bimodal_exclusion_verdict == "yes" for the SAME inputs -- this test uses the exact
+    // live cam1 shape, which does.
+    let payloads = format!(
+        "{}\n{}\n{}\n{}\n{}\n{}\n",
+        pipe_json(1000, 0),
+        pipe_json(1005, 0),
+        pipe_json(1010, 0),
+        pipe_json(1015, 2561),
+        pipe_json(1020, 2561),
+        pipe_json(1025, 2561),
+    );
+    let out = run_sourced(
+        "set +e; chase_bimodal_exclusion_check cam1 \"$P\" 3500 2000; echo \"rc=$?\"",
+        &[("P", payloads.as_str())],
+    );
+    assert!(
+        out.contains("cam1") && out.contains("OK") && out.contains("rc=0"),
+        "must print an OK line for the label and return 0: {out:?}"
+    );
+    assert!(
+        out.contains("median 0us") && out.contains("spread 2561us"),
+        "must carry the SAME median/spread numbers sampled_offset_check would report: {out:?}"
+    );
+    assert!(
+        out.contains("explained by master step-chase")
+            && out.contains("3 elevated samples")
+            && out.contains("baseline spread 0us"),
+        "must carry the bimodal-exclusion explanation with the correct elevated count and \
+         baseline spread: {out:?}"
+    );
+
+    // EXTRA_NOTE (5th arg) is appended, mirroring sampled_offset_check's own extra_note param.
+    let out = run_sourced(
+        "set +e; chase_bimodal_exclusion_check cam1 \"$P\" 3500 2000 ' -- widened to 3500us'; echo \"rc=$?\"",
+        &[("P", payloads.as_str())],
+    );
+    assert!(
+        out.contains("widened to 3500us") && out.contains("explained by master step-chase"),
+        "the extra_note must be appended alongside the exclusion explanation, not replace it: {out:?}"
+    );
+}
