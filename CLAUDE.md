@@ -48,6 +48,7 @@ Rust app for embedded NDI cameras (CAM1-4): multi-camera NDI streaming with soft
 - Changing the genlock C in libobs (CI is its first compile: the lift-and-compile-standalone recipe, the committed C-vs-Rust parity gate + why it was initially blind to a tie-break mutation, the remembered-state seam list, wrap-independent anchors, #1003) → `.claude/rules/vendored-libobs-change-safety.md` (auto-loads on its `paths:`)
 - Genlock hold-collapse diagnosis (A/V offset ≈ −latency_ms signature, the once-per-event backward-step latch that makes log silence lie, ceil-stamp hair-trigger, OBS-relaunch-only repair, 15-min offline arbiter recipe, Windows remote-grep traps, #1007/#1009) → `.claude/rules/genlock-hold-collapse-diagnosis.md` (auto-loads on its `paths:`)
 - Offline audio-quality (THD+N) measurement (coherent-sampling window-leakage trap, the CI-only-vendor-code standalone-harness pattern, CPU-timing noise on a shared box, #929; the swr_set_compensation revert-vs-reissue proof + the stateless distance_ms-widening quantization fix, #1016) → `.claude/rules/audio-quality-measurement.md` (auto-loads on its `paths:`)
+- imag-nb power/thermal envelope (the MMIO RAPL PL1 25W clamp diagnosis, identity-based zone selection, the source-only shared gather+verdict+guard-decision lib, the check_imag_report optional-arg convention, step-at-the-END TOTAL_STEPS rule, #1040) → `.claude/rules/imag-power-envelope.md` (auto-loads on its `paths:`)
 
 ## DO NOT DELETE These Files
 
