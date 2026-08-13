@@ -62,18 +62,32 @@ pub const CAM_STRIH_P99_LATENCY_MAX_MS: f64 = 400.0;
 /// Does the measured absolute cam→strih p99 latency satisfy the bound?
 ///
 /// Semantics mirror the established [`crate::probe`] loopback convention
-/// (`differ::absolute_latency_gate_pass`):
+/// (`differ::absolute_latency_gate_pass`) — ALL FOUR arms, including its negative-latency
+/// backstop:
 /// - `None` bound ⇒ report-only, always passes.
 /// - `Some` bound but `None` measured p99 ⇒ **FAIL** — a requested gate that could not measure
 ///   (strih recording present but zero paired cam→strih samples) must never report green
 ///   (test-strictness).
-/// - `Some` bound, `Some` p99 ⇒ pass iff `p99 <= bound` (strict `>`: a p99 exactly at the bound
-///   passes).
-pub fn cam_strih_latency_gate_pass(p99_ms: Option<f64>, max_p99_ms: Option<f64>) -> bool {
+/// - `Some` bound, `Some` p99, but `min_ms < 0` ⇒ **FAIL**. cam→strih is `strih_program_ts −
+///   cam2_gen_ts`, both on the shared DanteSync wall clock; a NEGATIVE measured latency (recv
+///   before gen) is physically impossible and can only mean the cluster clocks desynced past the
+///   transit time — the whole measurement is untrustworthy, so a small/negative p99 must NOT sail
+///   under the bound and report green on a corrupted measurement. `min_ms` is `None` (unknown) ⇒
+///   not treated as negative. The e2e harness's DanteSync servo pre-flight is the first line of
+///   defence; this is the backstop for a verdict run without it.
+/// - `Some` bound, `Some` p99, `min_ms >= 0` (or unknown) ⇒ pass iff `p99 <= bound` (strict `>`: a
+///   p99 exactly at the bound passes).
+pub fn cam_strih_latency_gate_pass(
+    p99_ms: Option<f64>,
+    min_ms: Option<f64>,
+    max_p99_ms: Option<f64>,
+) -> bool {
     match (max_p99_ms, p99_ms) {
         (None, _) => true,
         (Some(_), None) => false,
-        (Some(bound), Some(p99)) => p99 <= bound,
+        // A negative measured min = wall-clock desync = untrustworthy measurement ⇒ FAIL, never
+        // let a small/negative p99 sail under the bound. `min_ms` unknown (None) ⇒ not negative.
+        (Some(bound), Some(p99)) => min_ms.is_none_or(|m| m >= 0.0) && p99 <= bound,
     }
 }
 
@@ -91,8 +105,8 @@ mod tests {
 
     #[test]
     fn none_bound_is_report_only_always_passes() {
-        assert!(cam_strih_latency_gate_pass(Some(9_999.0), None));
-        assert!(cam_strih_latency_gate_pass(None, None));
+        assert!(cam_strih_latency_gate_pass(Some(9_999.0), Some(60.0), None));
+        assert!(cam_strih_latency_gate_pass(None, None, None));
     }
 
     #[test]
@@ -101,6 +115,7 @@ mod tests {
         // must not report green (test-strictness).
         assert!(!cam_strih_latency_gate_pass(
             None,
+            None,
             Some(CAM_STRIH_P99_LATENCY_MAX_MS)
         ));
     }
@@ -108,11 +123,11 @@ mod tests {
     #[test]
     fn boundary_at_bound_passes_just_over_fails() {
         assert!(
-            cam_strih_latency_gate_pass(Some(400.0), Some(400.0)),
+            cam_strih_latency_gate_pass(Some(400.0), Some(60.0), Some(400.0)),
             "exactly at the bound passes (strict >)"
         );
         assert!(
-            !cam_strih_latency_gate_pass(Some(400.1), Some(400.0)),
+            !cam_strih_latency_gate_pass(Some(400.1), Some(60.0), Some(400.0)),
             "just over the bound fails"
         );
     }
@@ -123,12 +138,13 @@ mod tests {
         // recording-e2e runs (240.7 ms) MUST pass the default bound — a bound that would fail a
         // recent green run is not a valid bound.
         assert!(
-            cam_strih_latency_gate_pass(Some(240.7), Some(CAM_STRIH_P99_LATENCY_MAX_MS)),
+            cam_strih_latency_gate_pass(Some(240.7), Some(65.0), Some(CAM_STRIH_P99_LATENCY_MAX_MS)),
             "the worst observed green p99 (240.7 ms) must pass the {CAM_STRIH_P99_LATENCY_MAX_MS} ms bound"
         );
         // ...and the worst single-frame max (259.6) is also comfortably under the p99 bound.
         assert!(cam_strih_latency_gate_pass(
             Some(259.6),
+            Some(65.0),
             Some(CAM_STRIH_P99_LATENCY_MAX_MS)
         ));
     }
@@ -138,8 +154,31 @@ mod tests {
         // ~2x the worst green p99 (a real cam→strih delivery regression) must FAIL.
         assert!(!cam_strih_latency_gate_pass(
             Some(481.4),
+            Some(65.0),
             Some(CAM_STRIH_P99_LATENCY_MAX_MS)
         ));
+    }
+
+    #[test]
+    fn negative_measured_latency_fails_even_under_bound() {
+        // A negative measured min latency (recv before gen) is physically impossible: the cluster
+        // wall clocks desynced past the transit time, so the whole measurement is untrustworthy —
+        // a small p99 (here 50 ms, well UNDER the 400 ms bound) must NOT report green on a
+        // corrupted measurement. Mirrors differ::absolute_latency_gate_pass's min_ms<0 backstop.
+        assert!(!cam_strih_latency_gate_pass(
+            Some(50.0),
+            Some(-5.0),
+            Some(CAM_STRIH_P99_LATENCY_MAX_MS)
+        ));
+        // Exactly 0 is the physical floor (paint and receive at the same instant) — allowed.
+        assert!(cam_strih_latency_gate_pass(
+            Some(50.0),
+            Some(0.0),
+            Some(CAM_STRIH_P99_LATENCY_MAX_MS)
+        ));
+        // A negative min is untrusted only when a bound is actually requested; report-only stays
+        // report-only.
+        assert!(cam_strih_latency_gate_pass(Some(50.0), Some(-5.0), None));
     }
 
     #[test]

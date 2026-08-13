@@ -3045,13 +3045,21 @@ fn build_and_print_verdict(
         // whether it folds into `overall_pass` is the one-line-restorable `gates_overall_pass()`
         // seam (LIVE today). cam→stream's ~1s genlock hold is deliberately NOT bounded.
         let cam_strih_p99 = cam_strih_lat.as_ref().map(|l| l.stats.p99_ms);
+        // Pass the measured MIN too: a negative min (recv before gen) is a DanteSync desync, so
+        // the whole measurement is untrustworthy and the gate FAILS rather than passing on a
+        // small/negative p99 (mirrors differ::absolute_latency_gate_pass's backstop).
+        let cam_strih_min = cam_strih_lat.as_ref().map(|l| l.stats.min_ms);
         let bound = args.max_cam_strih_p99_latency_ms;
-        let gate_pass =
-            camera_box::e2e_latency_gate::cam_strih_latency_gate_pass(cam_strih_p99, Some(bound));
+        let gate_pass = camera_box::e2e_latency_gate::cam_strih_latency_gate_pass(
+            cam_strih_p99,
+            cam_strih_min,
+            Some(bound),
+        );
         let gates_overall = camera_box::e2e_latency_gate::gates_overall_pass();
         report["latency"]["cam_strih_gate"] = serde_json::json!({
             "bound_p99_ms": bound,
             "p99_ms": cam_strih_p99,
+            "min_ms": cam_strih_min,
             "pass": gate_pass,
             "gates_overall_pass": gates_overall,
             "note": "#1035 absolute cam->strih p99 latency bound (issue 406 bounded-latency). \
