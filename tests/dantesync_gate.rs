@@ -2461,11 +2461,15 @@ fn help_describes_the_client_chase_ceiling_flag_1022() {
 // mechanism naturally serves them in that order across the two gather_http_samples calls).
 
 #[test]
-fn gate_reproduces_the_live_three_client_simultaneous_chase_shape_and_recovers_on_resample_1022() {
+fn gate_reproduces_the_live_three_client_simultaneous_chase_shape_and_passes_via_exclusion_1022() {
+    // Supersedes the OLD resample-based recovery: a live rerun proved resample-once is a coin
+    // flip (the fixed delay can land inside the SAME excursion). The bimodal chase-signature
+    // exclusion instead grades the ORIGINAL window directly -- these are the EXACT live numbers
+    // (E2E run 31640853894/31633417530), and NONE of the three clients need a resample at all;
+    // every one is explained on its FIRST round.
     let base = now_epoch();
-    // strih (master): median 1220us, spread 384us (reference only, never gated) -- no resample,
-    // the master's own median-only row never has a spread verdict at all. Only 3 responses since
-    // the master is never resampled.
+    // strih (master): median 1220us, spread 384us (reference only, never gated) -- the master's
+    // own median-only row never has a spread verdict or a chase-signature check at all.
     let strih_responses = vec![
         http_status_ntp_deadband(base, 1200, "2", false, "2500"),
         http_status_ntp_deadband(base + 5, 1220, "3", false, "2500"),
@@ -2477,38 +2481,29 @@ fn gate_reproduces_the_live_three_client_simultaneous_chase_shape_and_recovers_o
         &http_status_ntp_deadband(base, 1220, "2", false, "2500"),
     );
 
-    // cam1: chase round reproduces "median 0us; spread 2682us" EXACTLY (0, 0, 2682 -> sorted
-    // median position 2 = 0, spread = 2682-0). Recovered round: tight, near-baseline.
+    // cam1: reproduces "median 0us; spread 2682us" EXACTLY (0, 0, 2682 -> sorted median
+    // position 2 = 0, spread = 2682-0) -- a tight baseline pair + one tight elevated sample.
     let cam1_responses = vec![
         http_status_ntp(base, 0, "2", false),
         http_status_ntp(base + 5, 0, "3", false),
         http_status_ntp(base + 10, 2682, "2", false),
-        http_status_ntp(base + 15, 10, "4", false),
-        http_status_ntp(base + 20, 20, "5", false),
-        http_status_ntp(base + 25, 15, "6", false),
     ];
     let p_cam1 = write_multi_read_fixture("cam1_1022_spread_live_shape", &cam1_responses);
 
-    // cam2: chase round reproduces "median 0us; spread 2577us" EXACTLY.
+    // cam2: reproduces "median 0us; spread 2577us" EXACTLY.
     let cam2_responses = vec![
         http_status_ntp(base, 0, "2", false),
         http_status_ntp(base + 5, 0, "3", false),
         http_status_ntp(base + 10, 2577, "2", false),
-        http_status_ntp(base + 15, 5, "4", false),
-        http_status_ntp(base + 20, 15, "5", false),
-        http_status_ntp(base + 25, 10, "6", false),
     ];
     let p_cam2 = write_multi_read_fixture("cam2_1022_spread_live_shape", &cam2_responses);
 
-    // stream: chase round reproduces "median 2822us; spread 2837us" EXACTLY (0, 2822, 2837 ->
-    // sorted median position 2 = 2822, spread = 2837-0).
+    // stream: reproduces "median 2822us; spread 2837us" EXACTLY (0, 2822, 2837 -> sorted median
+    // position 2 = 2822, spread = 2837-0) -- a single baseline sample + a tight elevated pair.
     let stream_responses = vec![
         http_status_ntp(base, 0, "2", false),
         http_status_ntp(base + 5, 2822, "3", false),
         http_status_ntp(base + 10, 2837, "2", false),
-        http_status_ntp(base + 15, 40, "4", false),
-        http_status_ntp(base + 20, 55, "5", false),
-        http_status_ntp(base + 25, 50, "6", false),
     ];
     let p_stream = write_multi_read_fixture("stream_1022_spread_live_shape", &stream_responses);
 
@@ -2554,36 +2549,41 @@ fn gate_reproduces_the_live_three_client_simultaneous_chase_shape_and_recovers_o
     );
     assert_eq!(
         code, 0,
-        "the exact live 3-simultaneous-UNSTABLE shape must recover via a one-time resample and \
-         PASS. stdout={stdout} stderr={stderr}"
+        "the exact live 3-simultaneous-UNSTABLE shape must be explained by the chase signature \
+         and PASS -- deterministically, on the first round. stdout={stdout} stderr={stderr}"
     );
     assert!(stdout.contains("GATE PASS"), "stdout: {stdout}");
     assert!(!stdout.contains("UNSTABLE"), "stdout: {stdout}");
     assert!(!stdout.contains("DRIFT"), "stdout: {stdout}");
+    assert!(
+        !stdout.contains("resampled once"),
+        "none of the three clients should need a resample -- exclusion explains the FIRST \
+         round directly: stdout={stdout}"
+    );
     for name in ["cam1", "cam2", "stream"] {
         let line = stdout
             .lines()
             .find(|l| l.trim_start().starts_with(name))
             .unwrap_or_else(|| panic!("no {name} report line in stdout: {stdout}"));
         assert!(
-            line.contains("resampled once"),
-            "{name} must report that it was resampled: {line:?}"
+            line.contains("explained by master step-chase"),
+            "{name} must report the chase-signature exclusion, not a raw pass: {line:?}"
         );
     }
 }
 
 #[test]
 fn gate_resample_with_no_further_distinct_data_reports_unknown_never_a_stale_or_false_pass_1022() {
-    // Real edge case: a resample-eligible node (exact live cam1 shape: median 0us, spread 2682us,
-    // worst sample within the envelope) whose fixture has NOTHING further to give -- only 3
-    // responses total, so write_multi_read_fixture CLAMPS every call past the 3rd to the LAST
-    // entry (2682) -- gets a resample round whose 3 reads are all BYTE-IDENTICAL, including the
-    // SAME updated_ts. distinct_offset_samples_us's own "the daemon re-serving its cached value"
-    // dedup (#836 point 5) then collapses those to a SINGLE distinct sample -- fewer than
-    // --min-distinct, so the FINAL grade is "insufficient" -> UNKNOWN, never a silent PASS
-    // (median 2682, spread 0 would otherwise look perfectly healthy) and never the STALE original
-    // "unstable" verdict either. The resample note must still appear -- the resample WAS
-    // attempted, it just could not produce enough independent data to grade.
+    // Real edge case: a resample-eligible node whose EXCLUSION declines (mixed-sign elevated
+    // samples -- not a clean chase signature, so genuinely needs the resample fallback) but
+    // whose fixture has NOTHING further to give -- only 3 responses total, so
+    // write_multi_read_fixture CLAMPS every call past the 3rd to the LAST entry -- gets a
+    // resample round whose 3 reads are all BYTE-IDENTICAL, including the SAME updated_ts.
+    // distinct_offset_samples_us's own "the daemon re-serving its cached value" dedup (#836
+    // point 5) then collapses those to a SINGLE distinct sample -- fewer than --min-distinct, so
+    // the FINAL grade is "insufficient" -> UNKNOWN, never a silent PASS and never the stale
+    // original "unstable" verdict either. The resample note must still appear -- the resample
+    // WAS attempted, it just could not produce enough independent data to grade.
     let base = now_epoch();
     let strih_responses = vec![
         http_status_ntp_deadband(base, 1200, "2", false, "2500"),
@@ -2595,10 +2595,12 @@ fn gate_resample_with_no_further_distinct_data_reports_unknown_never_a_stale_or_
         "strih_1022_spread_baseline_priming",
         &http_status_ntp_deadband(base, 1220, "2", false, "2500"),
     );
+    // Mixed-sign elevated (2600, -2200): median in bound (unstable), worst sample (2600) within
+    // the envelope (resample-eligible), but NOT a coherent chase signature (exclusion declines).
     let cam1_responses = vec![
         http_status_ntp(base, 0, "2", false),
-        http_status_ntp(base + 5, 0, "3", false),
-        http_status_ntp(base + 10, 2682, "2", false),
+        http_status_ntp(base + 5, 2600, "3", false),
+        http_status_ntp(base + 10, -2200, "2", false),
     ];
     let p_cam1 = write_multi_read_fixture("cam1_1022_spread_baseline", &cam1_responses);
 
@@ -2655,9 +2657,10 @@ fn gate_resample_with_no_further_distinct_data_reports_unknown_never_a_stale_or_
 
 #[test]
 fn gate_client_row_persistent_scatter_still_fails_after_the_resample_1022() {
-    // resample-once is a literal ONE-SHOT, never a retry loop: a node whose resample round is
-    // ALSO unstable (even though every individual sample stays inside the envelope) must still
-    // FAIL, grading the RESAMPLED numbers -- "sustained ... must still fail" even under #1022.
+    // resample-once is a literal ONE-SHOT, never a retry loop: a node whose CHASE round declines
+    // exclusion (mixed-sign elevated -- genuine scatter, not a coherent phase offset) resamples,
+    // and whose RESAMPLE round is ALSO mixed-sign/unstable must still FAIL, grading the
+    // RESAMPLED numbers -- "sustained ... must still fail" even under #1022's exclusion.
     let base = now_epoch();
     let strih_responses = vec![
         http_status_ntp_deadband(base, 2400, "2", false, "2500"),
@@ -2669,17 +2672,19 @@ fn gate_client_row_persistent_scatter_still_fails_after_the_resample_1022() {
         "strih_1022_persistent_priming",
         &http_status_ntp_deadband(base, 2450, "2", false, "2500"),
     );
-    // Chase round: median 0, spread 2600 (max 2600 <= 3500 bound) -> unstable, resample fires.
-    // Resample round: median 0, spread 2500 -- STILL unstable (both rounds' worst sample stays
-    // inside the envelope the whole time, proving this is NOT the "worst sample exceeds bound"
-    // skip path -- it genuinely resamples and STILL fails).
+    // Chase round: median 0, spread 4800, mixed-sign elevated (2600, -2200) -> unstable,
+    // exclusion declines (not a coherent chase), resample fires (worst sample 2600 <= 3500
+    // bound). Resample round: median 100, spread 4900, ALSO mixed-sign elevated (2600, -2300) --
+    // STILL unstable, STILL declines exclusion. The two rounds' spread numbers (4800 vs 4900)
+    // are deliberately different so the assertion can prove the FINAL report reflects round 2's
+    // own fresh numbers, not round 1's stale ones.
     let stream_responses = vec![
         http_status_ntp(base, 0, "2", false),
-        http_status_ntp(base + 5, 0, "3", false),
-        http_status_ntp(base + 10, 2600, "2", false),
-        http_status_ntp(base + 15, 0, "4", false),
-        http_status_ntp(base + 20, 0, "5", false),
-        http_status_ntp(base + 25, 2500, "6", false),
+        http_status_ntp(base + 5, 2600, "3", false),
+        http_status_ntp(base + 10, -2200, "2", false),
+        http_status_ntp(base + 15, 100, "4", false),
+        http_status_ntp(base + 20, 2600, "5", false),
+        http_status_ntp(base + 25, -2300, "6", false),
     ];
     let p_stream = write_multi_read_fixture("stream_1022_persistent_client", &stream_responses);
 
@@ -2724,9 +2729,9 @@ fn gate_client_row_persistent_scatter_still_fails_after_the_resample_1022() {
         .find(|l| l.trim_start().starts_with("stream"))
         .unwrap_or_else(|| panic!("no stream report line in stdout: {stdout}"));
     assert!(
-        stream_line.contains("UNSTABLE") && stream_line.contains("spread 2500us"),
-        "must report the RESAMPLED round's own numbers (spread 2500us), not the original chase \
-         round's (spread 2600us) -- proves the final verdict grades the fresh data: {stream_line:?}"
+        stream_line.contains("UNSTABLE") && stream_line.contains("spread 4900us"),
+        "must report the RESAMPLED round's own numbers (spread 4900us), not the original chase \
+         round's (spread 4800us) -- proves the final verdict grades the fresh data: {stream_line:?}"
     );
     assert!(
         stream_line.contains("resampled once"),
@@ -2748,10 +2753,13 @@ fn gate_chase_resample_delay_flag_value_is_reflected_in_the_report_note_1022() {
         "strih_1022_delay_flag_priming",
         &http_status_ntp_deadband(base, 2450, "2", false, "2500"),
     );
+    // Chase round: mixed-sign elevated (2600, -2200) -> unstable, exclusion declines (genuinely
+    // needs the resample fallback, so the delay flag's own note is actually exercised).
+    // Resample round: clean/healthy -> OK, carrying the resample note.
     let stream_responses = vec![
         http_status_ntp(base, 0, "2", false),
-        http_status_ntp(base + 5, 0, "3", false),
-        http_status_ntp(base + 10, 2600, "2", false),
+        http_status_ntp(base + 5, 2600, "3", false),
+        http_status_ntp(base + 10, -2200, "2", false),
         http_status_ntp(base + 15, 10, "4", false),
         http_status_ntp(base + 20, 20, "5", false),
         http_status_ntp(base + 25, 15, "6", false),
@@ -2849,12 +2857,13 @@ fn gate_resample_reports_stale_when_the_ntp_measurement_ages_out_during_the_dela
         "strih_1022_resample_stale_priming",
         &http_status_ntp_deadband(base, 2450, "2", false, "2500"),
     );
-    // Chase round: fresh, unstable, worst sample within the envelope -> resample fires.
-    // Resample round: ntp_failed=true on every payload -> the resampled data is STALE.
+    // Chase round: fresh, unstable, mixed-sign elevated (2600, -2200) -> exclusion declines
+    // (genuinely needs the resample fallback), worst sample within the envelope -> resample
+    // fires. Resample round: ntp_failed=true on every payload -> the resampled data is STALE.
     let stream_responses = vec![
         http_status_ntp(base, 0, "2", false),
-        http_status_ntp(base + 5, 0, "3", false),
-        http_status_ntp(base + 10, 2600, "2", false),
+        http_status_ntp(base + 5, 2600, "3", false),
+        http_status_ntp(base + 10, -2200, "2", false),
         http_status_ntp(base + 15, 10, "2", true),
         http_status_ntp(base + 20, 20, "3", true),
         http_status_ntp(base + 25, 15, "2", true),
