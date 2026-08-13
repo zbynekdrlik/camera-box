@@ -7602,3 +7602,33 @@ does the live rig verification of the new whole-chain checks and closes it.
   depth reflects BUFFER arrival (60/sec) confirmed via the audit `received` counter delta, NOT
   the stamp deltas — read `received`/`ts_present` deltas across two 5s audit lines to prove a
   source's true arrival rate when its stamps look coarse.
+
+## 2026-08-14 — issue 1038: extract issue-401 release cadence into genlock_release_tick (worktree autopilot-1038)
+- Version 1.7.0-dev.446 -> 447. Commits: bfa47005e (bump), 051be0809 [red] test, 4c92412da [green] extract.
+- Pure structural refactor of `vendor/obs-studio/libobs/obs-source.c`: `ready_async_frame()` (~832
+  lines) shed the whole issue-401 cadence into `static bool genlock_release_tick(source, wall_now,
+  present_ts, due, interval, reserve_ms, now_ns)`, placed after `genlock_should_drain_one` and
+  before `ready_async_frame`, which now tail-returns it. Byte-for-byte move (uniform 3-tab dedent);
+  ONLY added token = `struct obs_source_frame *` before the block's own `next_frame =` assignment
+  (it was declared in the caller's top scope before; assigned-before-read in the block, so a fresh
+  local is exact). Bool return matches ready_async_frame's present/hold contract → no out-param.
+- RED test: `tests/genlock_release_cadence.rs::release_cadence_extracted_into_genlock_release_tick_1038`
+  pins the function exists, ready_async_frame tail-calls it, it precedes ready_async_frame, and the
+  relock branch (genlock_relocks++ … release = sel_1003 + 1;) stays contained in it.
+- GOTCHA (cost me a redo): `ready_async_frame` has BOTH a forward declaration (~line 2945) and the
+  definition (~5325); a naive "insert before the line startswith(`static bool ready_async_frame(...
+  sys_time)`)" matches the FORWARD DECL first and places the new fn ahead of its callees →
+  implicit-declaration on CI. Match the DEFINITION line EXACTLY (no trailing `;`) when inserting a
+  helper before a function that is also forward-declared.
+- GOTCHA: extracting a block that only ASSIGNS a variable declared in the enclosing scope
+  (`next_frame`) leaves it undeclared in the new function. The standalone gcc harness caught it
+  instantly (`next_frame undeclared`); a text-only "verbatim move" review would have missed it and
+  burned a CI cycle. Always run the lift-and-compile harness for a vendored-C move, not just a
+  brace-balance check.
+- Verification bought back (all local, CI is the vendored C's first real compile): brace/paren/
+  bracket delta vs HEAD net-zero; standalone `gcc -Wall -Wextra -Wformat=2` harness (stubbed struct
+  + callees) compiles the lifted fn clean; re-indent-and-diff proves byte-for-byte identity vs the
+  HEAD block; full `genlock_release_cadence` suite 14/14; fmt/check/clippy -D warnings/test --no-run
+  all green. NO windows-genlock*.yml or parity-test edit needed — every pwsh/Rust anchor is a
+  whole-file or statement-level substring, and the enclosing-function slices resolve inside the new
+  fn because it precedes ready_async_frame.
