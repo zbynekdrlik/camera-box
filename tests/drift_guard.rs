@@ -3082,12 +3082,18 @@ fn check_imag_report_clean_when_every_value_matches_the_pinned_set_463() {
     let log = format!("genlock: latency = 3 ms\n{GENLOCK_RT_PIN_OK_LINE}");
     let body = r#"
         rc=0
-        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "$LOG" "/usr/lib/x86_64-linux-gnu/obs-plugins/distroav.so" "1" "locked" "Jul 05 10:15:22 imag-nb dantesync[1234]: [PTP] LOCK Drift 12 ns/s offset -340ns" "$TS_STATES" || rc=$?
+        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "$LOG" "/usr/lib/x86_64-linux-gnu/obs-plugins/distroav.so" "1" "locked" "Jul 05 10:15:22 imag-nb dantesync[1234]: [PTP] LOCK Drift 12 ns/s offset -340ns" "$TS_STATES" "$POWER" "29" || rc=$?
         echo "RC=$rc"
     "#;
+    // #1040: the 13th/14th args are a clean power-envelope block + the pinned 29 W — must ALSO read
+    // clean, or this "everything matches" case regresses to UNKNOWN on the new power_envelope check.
     let out = run_sourced(
         body,
-        &[("LOG", &log), ("TS_STATES", TIMESYNC_STATES_CLEAN_FIXTURE)],
+        &[
+            ("LOG", &log),
+            ("TS_STATES", TIMESYNC_STATES_CLEAN_FIXTURE),
+            ("POWER", POWER_GATHER_CLEAN_29W),
+        ],
     );
     assert!(
         out.contains("RC=0"),
@@ -3232,12 +3238,20 @@ fn check_imag_report_power_envelope_ok_when_pl1_matches_the_pin_1040() {
         echo "RC=$rc"
     "#;
     let out = run_sourced(body, &[("POWER", POWER_GATHER_CLEAN_29W)]);
-    assert!(out.contains("RC=0"), "clean 29 W envelope -> exit 0: {out:?}");
-    let line = out
-        .lines()
-        .find(|l| l.contains("power_envelope"))
-        .unwrap_or_else(|| panic!("no power_envelope row printed: {out:?}"));
-    assert!(line.contains("OK"), "clean envelope row must read OK: {line:?}");
+    // Scope this to the POWER facet: every power_envelope row must be OK, and the clean envelope
+    // must contribute NO DRIFT (the sibling dantesync/timesync rows read UNKNOWN here only because
+    // this test deliberately leaves their args empty — that is unrelated to the power facet).
+    let power_rows: Vec<&str> = out.lines().filter(|l| l.contains("power_envelope")).collect();
+    assert!(
+        power_rows.len() >= 4,
+        "expected pl1/slpc/thermald/units power rows: {out:?}"
+    );
+    for l in &power_rows {
+        assert!(
+            l.contains("OK"),
+            "every power_envelope row must read OK on a clean 29 W gather: {l:?}"
+        );
+    }
 }
 
 #[test]
@@ -3489,15 +3503,17 @@ fn check_imag_report_end_to_end_from_a_realistic_imag_log_463() {
         fps="$(fps_from_log "$LOG")"
         latency="$(genlock_latency_ms_from_log "$LOG")"
         rc=0
-        check_imag_report "DSHA_A" "DSHA_A" "60" "$fps" "3" "$latency" "$LOG" "/plugin/path" "1" "locked" "$DANTESYNC_LOG" "$TS_STATES" || rc=$?
+        check_imag_report "DSHA_A" "DSHA_A" "60" "$fps" "3" "$latency" "$LOG" "/plugin/path" "1" "locked" "$DANTESYNC_LOG" "$TS_STATES" "$POWER" "29" || rc=$?
         echo "RC=$rc"
     "#;
+    // #1040: a clean power-envelope block + pinned 29 W keeps this end-to-end case fully clean.
     let out = run_sourced(
         body,
         &[
             ("LOG", IMAG_LOG_60FPS_3MS),
             ("DANTESYNC_LOG", DANTESYNC_LOG_LOCKED_FIXTURE),
             ("TS_STATES", TIMESYNC_STATES_CLEAN_FIXTURE),
+            ("POWER", POWER_GATHER_CLEAN_29W),
         ],
     );
     assert!(
@@ -3595,15 +3611,17 @@ fn check_imag_report_dantesync_lock_ok_when_locked_and_pinned_489() {
     let log = format!("genlock: latency = 3 ms\n{GENLOCK_RT_PIN_OK_LINE}");
     let body = r#"
         rc=0
-        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "$LOG" "/plugin/path" "1" "locked" "$DANTESYNC_LOG" "$TS_STATES" || rc=$?
+        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "$LOG" "/plugin/path" "1" "locked" "$DANTESYNC_LOG" "$TS_STATES" "$POWER" "29" || rc=$?
         echo "RC=$rc"
     "#;
+    // #1040: a clean power-envelope block + pinned 29 W keeps this "everything else clean" case clean.
     let out = run_sourced(
         body,
         &[
             ("LOG", log.as_str()),
             ("DANTESYNC_LOG", DANTESYNC_LOG_LOCKED_FIXTURE),
             ("TS_STATES", TIMESYNC_STATES_CLEAN_FIXTURE),
+            ("POWER", POWER_GATHER_CLEAN_29W),
         ],
     );
     assert!(out.contains("RC=0"), "locked matches pin -> clean: {out:?}");
