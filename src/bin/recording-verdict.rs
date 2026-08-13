@@ -510,7 +510,7 @@ const OPTICAL_UNDECODABLE_RATE_MAX: f64 = 0.005;
 /// artifact class — only the silent DEFAULT moved back to strict. NEVER raise this constant
 /// again without a fresh measured incident and its own re-tighten ticket, same discipline as
 /// [`OPTICAL_UNDECODABLE_RATE_MAX`].
-const REAL_DROPS_ALLOWANCE_DEFAULT: u32 = 2; // TEMP: flipped to 0 in the next [green] commit
+const REAL_DROPS_ALLOWANCE_DEFAULT: u32 = 0;
 
 /// #904 — env-overridable read of the per-node `real_drops` allowance (mirrors the
 /// `CAMERA_BOX_DECODE_WORKERS` idiom in `src/probe/recording.rs`: a non-numeric or absent value
