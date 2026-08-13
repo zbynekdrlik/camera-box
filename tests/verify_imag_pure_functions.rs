@@ -957,6 +957,44 @@ fn imag_obs_core_dumps_enabled_requires_unlimited_both_columns() {
     );
 }
 
+// ---------------------------------------------------------------------------------------------
+// (t) cont'd — the running obs PID must genuinely live INSIDE imag-obs.service's cgroup, not just
+// systemd's own is-enabled/is-active bookkeeping (#1015, the #840 claim-vs-reality class). Live
+// finding (2026-08-13): setup-imag.sh step 21 genuinely installs+enables the unit, but every
+// actual recovery this ticket investigated launched OBS via a direct imag-obs-start.sh call
+// instead — outside the unit's cgroup entirely — so Restart=on-failure supervised nothing even
+// while the unit itself sat correctly enabled. A per-PID cgroup read is the independent,
+// can't-be-faked-by-stale-bookkeeping proof that the LIVE process is the supervised one.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn imag_obs_cgroup_shows_service_unit_requires_the_real_unit_component() {
+    let (code, out, err) = run_sourced(
+        r#"
+        # cgroup v2 unified hierarchy -- the real shape on this box's systemd --user session
+        if imag_obs_cgroup_shows_service_unit "0::/user.slice/user-1000.slice/user@1000.service/app.slice/imag-obs.service"; then echo YES; else echo NO; fi
+        # cgroup v1 hybrid -- multiple controller lines, unit component on one of them
+        if imag_obs_cgroup_shows_service_unit "$(printf '12:pids:/user.slice/user-1000.slice/user@1000.service/app.slice/imag-obs.service\n1:name=systemd:/user.slice/user-1000.slice/user@1000.service/app.slice/imag-obs.service\n')"; then echo YES; else echo NO; fi
+        # the #1015 live-observed BAD state -- launched directly, outside any unit's cgroup
+        if imag_obs_cgroup_shows_service_unit "0::/user.slice/user-1000.slice/session-2.scope"; then echo YES; else echo NO; fi
+        # a DIFFERENT unit must not false-match a bare substring/prefix of the real name
+        if imag_obs_cgroup_shows_service_unit "0::/user.slice/user-1000.slice/user@1000.service/app.slice/imag-obs.service-old"; then echo YES; else echo NO; fi
+        if imag_obs_cgroup_shows_service_unit "0::/user.slice/user-1000.slice/user@1000.service/app.slice/not-imag-obs.service"; then echo YES; else echo NO; fi
+        if imag_obs_cgroup_shows_service_unit ""; then echo YES; else echo NO; fi
+        "#,
+    );
+    assert_eq!(code, 0, "stderr: {err}");
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec!["YES", "YES", "NO", "NO", "NO", "NO"],
+        "the live obs PID's /proc/<pid>/cgroup must show a genuine imag-obs.service path \
+         component (component-boundary matched, never a bare substring/prefix) — the #1015 proof \
+         that the RUNNING process is actually supervised, not merely that systemd's own \
+         is-enabled/is-active bookkeeping claims it is: {out:?}"
+    );
+}
+
 /// Live-caught on 10.77.9.182 (#884): check (o)'s restart-proof (#840) calls
 /// imag-obs-stop.sh/imag-obs-start.sh DIRECTLY over SSH, bypassing systemctl entirely -- which
 /// leaves imag-obs.service `inactive (dead)` (systemd loses track of the main process once the
@@ -999,6 +1037,38 @@ fn verify_imag_wires_the_new_884_checks_into_the_live_flow() {
              coverage"
         );
     }
+}
+
+#[test]
+fn verify_imag_wires_the_1015_cgroup_check_into_the_live_flow() {
+    let body = std::fs::read_to_string(script()).unwrap();
+    assert!(
+        body.matches("imag_obs_cgroup_shows_service_unit").count() >= 2,
+        "verify-imag.sh must both DEFINE and CALL imag_obs_cgroup_shows_service_unit in its live \
+         flow (#1015) — a pure function that is only ever defined and never invoked provides \
+         zero acceptance coverage"
+    );
+}
+
+/// Same ordering constraint #884 already established for the enabled/active/Restart checks —
+/// this new per-PID cgroup read must ALSO run BEFORE check (o)'s direct restart-proof call, or it
+/// would observe the fresh, untracked post-restart process instead of the box's normal boot-time
+/// one (#1015, same reasoning as verify_imag_reads_884_service_state_before_the_840_restart_wipes_it).
+#[test]
+fn verify_imag_reads_1015_cgroup_before_the_840_restart_wipes_it() {
+    let body = std::fs::read_to_string(script()).unwrap();
+    let cgroup_check = body
+        .find("imag_obs_cgroup_shows_service_unit \"")
+        .expect("the #1015 cgroup check must actually be CALLED (not just defined)");
+    let restart_call = body
+        .find(r#"/usr/local/bin/imag-obs-stop.sh && /usr/local/bin/imag-obs-start.sh"#)
+        .expect("check (o)'s restart-proof call must exist (#840)");
+    assert!(
+        cgroup_check < restart_call,
+        "the #1015 cgroup check must run BEFORE check (o)'s restart-proof (#840) -- reading it \
+         afterward would observe the fresh, untracked post-restart process instead of the box's \
+         normal boot-time state"
+    );
 }
 
 #[test]

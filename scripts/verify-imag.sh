@@ -104,7 +104,11 @@ set -euo pipefail
 #       than calling the operator script directly; core dumps are ACTUALLY enabled -- kernel
 #       core_pattern is a piped collector AND the live obs process's own /proc/<pid>/limits shows
 #       an unlimited core-file size (proves LimitCORE=infinity is applied to the real process, not
-#       just configured in the unit file)
+#       just configured in the unit file); AND (#1015, claim-vs-reality) the live obs PID's own
+#       /proc/<pid>/cgroup genuinely contains an imag-obs.service path component -- systemd's own
+#       is-enabled/is-active bookkeeping can read correctly even while the ACTUAL running process
+#       was launched directly (bypassing systemctl), leaving Restart=on-failure supervising
+#       nothing; this per-PID cgroup read is the independent proof that cannot be spoofed that way
 #
 # Every remote helper this gate shells out to (wmctrl, python3) is preflighted BY NAME before use
 # (#822 pattern) -- a missing tool is reported as a missing tool, never folded into a failed
@@ -520,6 +524,21 @@ imag_autostart_launches_via_service_not_script() {
 # crash inspectable.
 imag_core_pattern_captures_dumps() {
   case "$1" in '|'*) return 0 ;; *) return 1 ;; esac
+}
+
+# imag_obs_cgroup_shows_service_unit CGROUP_TEXT -> 0 iff CGROUP_TEXT (a live `/proc/<pid>/cgroup`
+# dump -- either the cgroup-v2 unified single line "0::/...path", or one-or-more cgroup-v1 hybrid
+# "hierarchy-id:controller-list:/...path" lines) shows AT LEAST ONE line whose path ends in the
+# exact component "/imag-obs.service". This is the #1015 claim-vs-reality proof: (t)'s own
+# is-enabled/is-active/Restart= checks above are all systemd BOOKKEEPING -- they can read
+# correctly even when the box's live incident (a manual `imag-obs-start.sh` recovery, bypassing
+# systemctl entirely) leaves the ACTUAL running obs process outside any unit's cgroup. Reading the
+# LIVE process's own cgroup membership cannot be spoofed by stale/inconsistent systemd state the
+# way a second is-active read could. Component-boundary matched (never a bare substring) so a
+# hypothetical differently-named unit sharing a prefix/suffix (e.g. "imag-obs.service-old") never
+# false-matches.
+imag_obs_cgroup_shows_service_unit() {
+  printf '%s\n' "$1" | grep -qE '(^|/)imag-obs\.service($|/)'
 }
 
 # imag_obs_core_dumps_enabled LIMITS_LINE -> 0 iff LIMITS_LINE (a `grep -i "Max core file size"
@@ -994,6 +1013,22 @@ elif imag_obs_core_dumps_enabled "$OBS_CORE_LIMIT"; then
   ok "obs process core dumps enabled (Max core file size = unlimited, #882)"
 else
   fail "obs process core dumps NOT enabled ('${OBS_CORE_LIMIT}') -- a future segfault would again leave nothing debuggable (#882)"
+fi
+
+# claim-vs-reality: the LIVE obs PID must genuinely run INSIDE imag-obs.service's cgroup, not just
+# systemd's is-enabled/is-active bookkeeping above (#1015). Reuses the SAME OBS_PID already
+# resolved for the core-dump check -- MUST also run before check (o)'s restart below.
+rc=0
+OBS_CGROUP=""
+if [ -n "$OBS_PID" ]; then
+  OBS_CGROUP="$(ssh_box "cat /proc/${OBS_PID}/cgroup 2>/dev/null")" || rc=$?
+fi
+if [ -z "$OBS_PID" ] || [ -z "$OBS_CGROUP" ]; then
+  fail "could not read the live obs process's cgroup (pid='${OBS_PID:-<none>}', ssh rc=$rc) -- cannot verify it runs inside imag-obs.service (#1015)"
+elif imag_obs_cgroup_shows_service_unit "$OBS_CGROUP"; then
+  ok "live obs process (pid ${OBS_PID}) runs INSIDE imag-obs.service's cgroup -- genuinely supervised, not a bypass launch (#1015)"
+else
+  fail "live obs process (pid ${OBS_PID}) is OUTSIDE imag-obs.service's cgroup ($(printf '%s' "$OBS_CGROUP" | tr '\n' ' ')) -- systemd may report the unit enabled+active while the RUNNING obs was launched directly (e.g. via imag-obs-start.sh over ssh, bypassing systemctl) -- Restart=on-failure supervises NOTHING (#1015, the #840 claim-vs-reality class)"
 fi
 
 # (o) both projectors PRESENT (never self-established) + PERSIST across a real restart (#756/#840)

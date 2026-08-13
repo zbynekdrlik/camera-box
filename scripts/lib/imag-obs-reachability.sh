@@ -60,7 +60,7 @@ imag_obs_reachability_message() {
   local out="$1"
   case "$out" in
     *OBS_PROCESS_ABSENT*)
-      printf 'imag-nb OBS process is NOT RUNNING (pgrep -x obs found nothing) -- restart it: ssh into imag-nb and run /usr/local/bin/imag-obs-start.sh (or, once supervised, "systemctl --user start imag-obs.service")'
+      printf 'imag-nb OBS process is NOT RUNNING (pgrep -x obs found nothing) -- restart it via the supervised unit: ssh into imag-nb and run `export XDG_RUNTIME_DIR=/run/user/$(id -u); systemctl --user start imag-obs` -- NEVER call /usr/local/bin/imag-obs-start.sh directly, that bypasses Restart=on-failure supervision entirely (issue 1015)'
       ;;
     *OBS_PORT_NOT_LISTENING*)
       printf 'imag-nb OBS process is running but WebSocket port 4455 is NOT listening -- OBS may still be starting, or obs-websocket failed to bind (check ~/.config/obs-studio/logs on imag-nb)'
