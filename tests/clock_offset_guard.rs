@@ -2667,7 +2667,11 @@ Jun 15 09:12:53 CAM2 dantesync[3649]: [NTP] offset:+310us (threshold:540us, adap
         "client_step_threshold_us_from_journal \"$J\"",
         &[("J", journal)],
     );
-    assert_eq!(out.trim(), "540", "must pick the LAST (freshest) threshold line: {out:?}");
+    assert_eq!(
+        out.trim(),
+        "540",
+        "must pick the LAST (freshest) threshold line: {out:?}"
+    );
 }
 
 #[test]
@@ -2677,10 +2681,18 @@ fn client_step_threshold_us_from_journal_returns_empty_when_absent_1041() {
         "client_step_threshold_us_from_journal \"$J\"",
         &[("J", journal)],
     );
-    assert_eq!(out.trim(), "", "no threshold: annotation anywhere -> empty, never a guess: {out:?}");
+    assert_eq!(
+        out.trim(),
+        "",
+        "no threshold: annotation anywhere -> empty, never a guess: {out:?}"
+    );
 
     let out = run_sourced("client_step_threshold_us_from_journal \"\"", &[]);
-    assert_eq!(out.trim(), "", "an entirely empty journal -> empty: {out:?}");
+    assert_eq!(
+        out.trim(),
+        "",
+        "an entirely empty journal -> empty: {out:?}"
+    );
 }
 
 #[test]
@@ -2706,7 +2718,8 @@ fn client_chase_bound_us_includes_the_client_step_threshold_term_from_journal_10
     // The exact cam3 shape: master deadband 2500 (capped, unchanged), client's own journal
     // carries threshold:665us, margin 1000 -> 2500 + 665 + 1000 = 4165.
     let master_status = pipe_json_deadband("2500");
-    let client_journal = "11:18:59 [NTP] burst offset:+2701us step candidate +2701us (threshold:665us)\n";
+    let client_journal =
+        "11:18:59 [NTP] burst offset:+2701us step candidate +2701us (threshold:665us)\n";
     let out = run_sourced(
         "client_chase_bound_us \"$JSON\" 2000 1000 5000 \"$J\" 700",
         &[("JSON", master_status.as_str()), ("J", client_journal)],
@@ -2754,7 +2767,10 @@ fn client_chase_bound_us_step_threshold_never_applies_without_a_valid_master_dea
             "client_chase_bound_us \"$JSON\" 2000 1000 5000 \"$J\" 700",
             &[
                 ("JSON", status.as_str()),
-                ("J", "11:18:59 [NTP] burst offset:+2701us (threshold:665us)\n"),
+                (
+                    "J",
+                    "11:18:59 [NTP] burst offset:+2701us (threshold:665us)\n",
+                ),
             ],
         );
         assert_eq!(
@@ -2782,7 +2798,10 @@ fn client_chase_bound_us_reproduces_the_live_cam3_envelope_1041() {
         &[("JSON", master_status.as_str()), ("J", cam3_journal)],
     );
     let bound: i64 = out.trim().parse().expect("integer bound");
-    assert_eq!(bound, 4165, "the derived cam3 envelope must be 4165us: {out:?}");
+    assert_eq!(
+        bound, 4165,
+        "the derived cam3 envelope must be 4165us: {out:?}"
+    );
     assert!(
         bound > 3680,
         "the derived envelope (4165us) must now exceed cam3's genuine +3680us chase excursion \
@@ -2792,22 +2811,30 @@ fn client_chase_bound_us_reproduces_the_live_cam3_envelope_1041() {
 
 // --- #1041 part 2: a single chase excursion dominating the median must not false-DRIFT either --
 //
-// chase_bimodal_exclusion_verdict (#1022, above) only ever inspected an "unstable" verdict
-// (median already in-bound, only spread over). When a chase excursion owns the MAJORITY of a
-// sample window (as it did live for cam3: 6 samples, most elevated), the median itself lands in
-// the elevated cluster too, producing "drift_unstable" -- a verdict this function structurally
-// never reached. The SAME 5 conditions already correctly reject a genuine sustained drift (no
-// baseline cluster present at all -> condition 3 fails), so widening the leading gate to also
-// accept "drift_unstable" is a correctness completion, not new leniency.
+// The ticket's own text frames this as needing EITHER a wider sample window OR extending
+// chase_bimodal_exclusion_verdict to also explain a "drift_unstable" verdict (median itself
+// pulled past the bound by a majority-elevated window, not just spread). Investigation proved
+// the SECOND option is structurally UNREACHABLE in this codebase as written: this function's own
+// condition 2 (every ELEVATED sample <= BOUND_US) makes a "drift"/"drift_unstable" raw verdict
+// impossible to also satisfy conditions 2-5 with, in any sane config (STABILITY_US <= BOUND_US,
+// true of every default in this file) -- the MEDIAN is itself one of the very samples this
+// function partitions: a baseline sample has abs<=STABILITY_US<=BOUND_US (can't be the drifted
+// median), and an elevated sample exceeding BOUND_US is EXACTLY what condition 2 already rejects.
+// So "part 2" turns out to be resolved ENTIRELY by "part 1" (client_chase_bound_us correctly
+// deriving a wide-enough envelope): once BOUND_US covers the excursion, sampled_offset_verdict
+// can only report "unstable" or "ok", never "drift"/"drift_unstable" -- and the EXISTING,
+// UNMODIFIED chase_bimodal_exclusion_verdict already explains "unstable" exactly as it did before
+// #1041. This test proves that TRANSFORMATION directly: the exact cam3 sample shape is
+// "drift_unstable" (false-DRIFT) against the OLD narrow bound, "unstable" (correctly explained)
+// against the NEW #1041-derived bound -- with ZERO changes needed to chase_bimodal_exclusion_verdict
+// itself.
 
 #[test]
-fn chase_bimodal_exclusion_verdict_yes_on_a_drift_unstable_cam3_shaped_chase_1041() {
-    // 6 samples: 2 tight baseline (+23us) + 4 tight same-sign elevated (+3680us). Sorted:
-    // [23,23,3680,3680,3680,3680] -> lower median position 3 = 3680us -- ITSELF exceeds a
-    // 3500us bound (median/"drift") AND spread (3680-23=3657) exceeds 2000us stability
-    // ("unstable") -> sampled_offset_verdict must report "drift_unstable" for this shape, and
-    // the exclusion must still explain it against the #1041-widened 4165us envelope (every
-    // elevated sample, 3680us, fits inside it).
+fn client_chase_bound_us_transforms_the_cam3_median_drift_into_an_already_explained_unstable_verdict_1041(
+) {
+    // 6 samples: 2 tight baseline (+23us) + 4 tight same-sign elevated (+3680us) -- the exact
+    // cam3 incident shape. Sorted: [23,23,3680,3680,3680,3680] -> lower median position 3 =
+    // 3680us.
     let payloads = format!(
         "{}\n{}\n{}\n{}\n{}\n{}\n",
         pipe_json(1000, 23),
@@ -2817,35 +2844,50 @@ fn chase_bimodal_exclusion_verdict_yes_on_a_drift_unstable_cam3_shaped_chase_104
         pipe_json(1020, 3680),
         pipe_json(1025, 3680),
     );
-    let verdict = run_sourced(
-        "sampled_offset_verdict \"$P\" 4165 2000 6 full",
+
+    let old_bound = "3500"; // pre-#1041: capped(2500,5000) + margin(1000), no threshold term
+    let verdict_old = run_sourced(
+        &format!("sampled_offset_verdict \"$P\" {old_bound} 2000 6 full"),
         &[("P", payloads.as_str())],
     );
     assert_eq!(
-        verdict.trim(),
+        verdict_old.trim(),
         "drift_unstable",
-        "sanity: this shape must be drift_unstable against the #1041 envelope, or the test \
-         fixture doesn't reproduce the incident: {verdict:?}"
+        "sanity: the OLD (pre-#1041) 3500us bound must reproduce the live false-DRIFT (median \
+         3680us > 3500us AND spread 3657us > 2000us): {verdict_old:?}"
     );
-    let out = run_sourced(
-        "chase_bimodal_exclusion_verdict \"$P\" 4165 2000 6 full",
+
+    let new_bound = "4165"; // #1041: capped(2500,5000) + client threshold(665) + margin(1000)
+    let verdict_new = run_sourced(
+        &format!("sampled_offset_verdict \"$P\" {new_bound} 2000 6 full"),
         &[("P", payloads.as_str())],
     );
     assert_eq!(
-        out.trim(),
+        verdict_new.trim(),
+        "unstable",
+        "the NEW #1041-derived 4165us bound must cover the excursion -- median 3680us now fits, \
+         only the spread stays flagged: {verdict_new:?}"
+    );
+
+    let excluded = run_sourced(
+        &format!("chase_bimodal_exclusion_verdict \"$P\" {new_bound} 2000 6 full"),
+        &[("P", payloads.as_str())],
+    );
+    assert_eq!(
+        excluded.trim(),
         "yes",
-        "the exact cam3 drift_unstable shape (tight baseline + tight same-sign elevated cluster, \
-         all inside the envelope) must now be explained by the chase signature, even though the \
-         majority-elevated median pulled the raw verdict to drift_unstable: {out:?}"
+        "the EXISTING, UNMODIFIED chase_bimodal_exclusion_verdict (no code change needed here) \
+         must already explain the 'unstable' outcome via its own tight-baseline + tight-same-\
+         sign-elevated signature check: {excluded:?}"
     );
 }
 
 #[test]
 fn chase_bimodal_exclusion_verdict_still_no_for_a_genuine_sustained_drift_with_no_baseline_1041() {
     // NOT a bar weakening: a genuine sustained drift -- ALL samples tightly elevated, no
-    // baseline cluster to prove a return-to-normal -- must still fail. Same shape as the
-    // pre-existing "drift" rejection test above, but ALL 6 samples now sit beyond even the
-    // #1041-widened 4165us envelope, and there is no baseline sample at all (condition 3).
+    // baseline cluster to prove a return-to-normal -- must still fail, even against the WIDER
+    // #1041-derived envelope. Plain "drift" (spread stays in-bound, tight cluster) never even
+    // reaches this function's own leading verdict=="unstable" gate -- unchanged by #1041.
     let payloads = format!(
         "{}\n{}\n{}\n{}\n{}\n{}\n",
         pipe_json(1000, 9000),
@@ -2870,9 +2912,10 @@ fn chase_bimodal_exclusion_verdict_still_no_for_a_genuine_sustained_drift_with_n
 #[test]
 fn chase_bimodal_exclusion_verdict_still_no_when_a_drift_unstable_elevated_sample_exceeds_the_envelope_1041(
 ) {
-    // A drift_unstable window whose elevated cluster genuinely exceeds the (possibly #1041-
-    // widened) envelope must still fail -- condition 2 (every elevated sample fits inside
-    // BOUND_US) is unchanged and still the deciding factor for a real over-envelope excursion.
+    // A window whose elevated cluster genuinely exceeds even the #1041-widened envelope reports
+    // "drift_unstable" (median itself elevated + over bound), which never reaches this function's
+    // own leading verdict=="unstable" gate -- unchanged, and provably CANNOT reach it: condition 2
+    // would reject it anyway (see the #1041 finding in this function's own doc comment above).
     let payloads = format!(
         "{}\n{}\n{}\n{}\n{}\n{}\n",
         pipe_json(1000, 0),
