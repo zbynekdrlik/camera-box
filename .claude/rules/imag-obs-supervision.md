@@ -112,3 +112,27 @@ one-time hand-switch to `systemctl --user start imag-obs.service` (in place of c
 kernel's own `core_pattern` on a fresh box is a bare, non-piped `core` (writes to CWD, which a
 systemd unit usually can't write to), not the piped `|/usr/lib/systemd/systemd-coredump ...` form;
 installing the package rewrites `core_pattern` to the piped form automatically.
+
+## A CORRECT unit can still sit unsupervised — the RECOVERY INSTRUCTIONS themselves must never offer the direct-launch bypass as the primary path (#1015, 2026-08-13)
+
+The unit above genuinely works when actually invoked through systemctl — that was never the
+defect. What went wrong live: `scripts/lib/imag-obs-reachability.sh`'s `imag_obs_reachability_message()`
+(what `recording-e2e.sh`'s preflight prints on a dead-OBS failure) told the operator/agent to run
+`/usr/local/bin/imag-obs-start.sh` DIRECTLY as its PRIMARY instruction, with the supervised
+`systemctl --user start imag-obs` form mentioned only as a parenthetical "once supervised" aside.
+Every actual recovery followed the primary instruction, which launches OBS entirely outside the
+unit's cgroup — so `Restart=on-failure` had nothing to supervise, for weeks, on a box whose
+provisioning had installed the unit correctly the whole time. Fixed by leading with the systemctl
+command and explicitly warning against the direct call.
+
+**The general lesson: correctly provisioning something (installing+enabling a supervision unit)
+and correctly DOCUMENTING how to recover it are two separate claims — verify both.** A "this box's
+supervision is broken" report is worth checking the unit's OWN state first (`systemctl --user
+is-enabled`/`is-active`, per the section above), but is equally worth checking every recovery path
+a human or an automated preflight would actually be told to follow — an accurate unit with an
+inaccurate (or merely de-prioritized) recovery instruction produces the identical unsupervised
+symptom on the ground. `scripts/verify-imag.sh`'s acceptance gate now additionally reads the LIVE
+obs PID's own `/proc/<pid>/cgroup` and requires an `imag-obs.service` path component — proof the
+RUNNING process is the supervised one, independent of what systemd's own is-enabled/is-active
+bookkeeping claims (that bookkeeping can be entirely correct while the actual running process,
+launched by a bypassed recovery instruction, sits outside the unit).
