@@ -7602,3 +7602,44 @@ does the live rig verification of the new whole-chain checks and closes it.
   depth reflects BUFFER arrival (60/sec) confirmed via the audit `received` counter delta, NOT
   the stamp deltas — read `received`/`ts_present` deltas across two 5s audit lines to prove a
   source's true arrival rate when its stamps look coarse.
+
+## issue 1035 — wire the absolute cam→strih latency BOUND into the main E2E (v1.7.0-dev.447)
+- Problem: the main E2E (recording-e2e.sh → recording-verdict) computed per-hop latency
+  (`latency.cam_strih` etc.) but NO absolute-latency bound folded into `overall_pass` — latency
+  was report-only-always-pass. Umbrella issue 406's bounded-latency requirement was unenforced in
+  the recorded-file verdict. (The differ/analyzer/frame-probe None-bounds the ticket cited are the
+  separate LOOPBACK path (loopback-e2e.sh), structurally not part of recording-e2e.sh — there
+  frame-probe runs only as the cam2 --paint-only painter.)
+- Fix: new Tier-0 crate-root module `src/e2e_latency_gate.rs` (mirrors optical_floor.rs):
+  `CAM_STRIH_P99_LATENCY_MAX_MS = 400.0`, pure `cam_strih_latency_gate_pass(Option<p99>,
+  Option<bound>)` (None bound⇒report-only; Some+no-samples⇒FAIL per test-strictness; else
+  p99<=bound strict), and a one-line-restorable `gates_overall_pass()->true` (LIVE) seam.
+  recording-verdict gains `--max-cam-strih-p99-latency-ms` (default-ON at the constant, hard-locked
+  per the necessary-feature-default-on discipline), folds `all_pass &= pass || !gates_overall`
+  inside the strih-present block, and emits `latency.cam_strih_gate` JSON. Fires only when a strih
+  recording is present (cam1-only optical mode = N/A). cam→stream's ~1s genlock hold is deliberately
+  NOT bounded (operator A/V-align domain).
+- Bound derivation: calibrated from 20 green recording-e2e verdict JSONs
+  (/tmp/recording-e2e-*/verdict-*.json) — `latency.cam_strih.p99_ms` measured min 210.9 / max 240.7
+  / mean 227.9 ms, worst single-frame max 259.6 ms. 400 ms = 1.66x the worst green p99, passes every
+  green run, catches a ~2x regression. Tightening path: toward ~300 ms as the tail is characterized.
+- Freeze bound: the recording-path freeze concept is `frozen_leg`, ALREADY a report-only seam
+  (gates_overall_pass=false, issue 914 / restore issue 905). Green runs exist with frozen>0 so a
+  hard freeze gate can't be live now and must not be duplicated — freeze is already wired; this
+  ticket wired the missing LATENCY bound only.
+- Split out to a follow-up (filed separately, Scope-gate: api-break): the dead documented-bound
+  loss mode removal (differ.rs max_loss_pct, issue 8 closed) — a 34-reference blind refactor of a
+  probe-gated safety-critical pure module (no local compile path) with ~6 dedicated test deletions;
+  bundling it risked a CI-red uncatchable locally that would block the verified latency gate.
+- RED→GREEN: e2e_latency_gate::tests (7) — todo!() RED on the 6 behaviour tests, GREEN on the pure
+  impl. Commit order: bump 446→447 → [red] → [green] → wiring.
+- Local (Tier-0): fmt --all --check clean; cargo check clean; clippy --all-targets -D warnings
+  clean; test --no-run clean; e2e_latency_gate::tests 7/7 GREEN. recording-verdict.rs is
+  probe-gated (no local compile path) — wiring type/signature-reviewed by hand + fresh-context
+  review pass; CI is the first compile.
+- GOTCHA: the "main E2E" (recording-e2e.sh/recording-verdict) and the "loopback E2E"
+  (loopback-e2e.sh/frame-probe/differ) are DIFFERENT latency subsystems with SEPARATE gate
+  mechanisms. A ticket framed against differ/analyzer None-bounds but asking for recording-e2e.sh
+  bounds means the RECORDING verdict needs its own bound (differ's absolute_latency_gate_pass is
+  never called from recording-verdict). Don't wire the loopback gate expecting it to affect the
+  main E2E.
