@@ -592,26 +592,45 @@ Options:
                        pays the priming read); an unreachable/unreadable priming read falls back
                        to the unmodified --bound-us, same "cannot prove it -> do not widen"
                        discipline as an absent/null deadband.
-  --chase-resample-delay-s N  #1022 spread-side completion: the SAME master step-chase can ALSO
-                       inflate a CLIENT row's SPREAD past --stability-us even though its median
-                       stays correctly in-bound -- and because the step is on ONE clock shared by
-                       the fleet, the SAME step can trip MULTIPLE clients simultaneously in one
-                       run. A client row whose verdict is EXACTLY "unstable" (median in bound,
-                       spread not) AND whose worst sample still fits inside its OWN effective
-                       bound (the SAME per-node bound the median check already uses -- for a
-                       client row that may already be the #1022-widened
+  #1022 spread-side completion: the SAME master step-chase can ALSO inflate a CLIENT row's
+                       SPREAD past --stability-us even though its median stays correctly in-bound
+                       -- and because the step is on ONE clock shared by the fleet, the SAME step
+                       can trip MULTIPLE clients simultaneously in one run. A client row whose
+                       verdict is EXACTLY "unstable" (median in bound, spread not) is now handled
+                       in TWO STAGES, tried in this order:
+                       (1) BIMODAL CHASE-SIGNATURE EXCLUSION (deterministic, no wall-clock cost):
+                       grades the window's samples DIRECTLY for the shape a step-chase leaves --
+                       a tight baseline cluster near zero plus a tight, same-sign elevated
+                       cluster all within the row's own effective bound -- and excuses the row
+                       immediately when found (no resample needed at all). This is tried FIRST
+                       and, on the live data that motivated it, explains the entire multi-client
+                       false-DRIFT incident deterministically. See clock-offset-guard.sh's
+                       chase_bimodal_exclusion_verdict for the exact 5 conditions.
+                       (2) RESAMPLE-ONCE FALLBACK (probabilistic, costs wall-clock time): ONLY
+                       when (1) declines (e.g. genuine multi-modal scatter, or an incomplete
+                       capture of the transition) AND the worst sample still fits inside the
+                       row's own effective bound (the SAME per-node bound the median check
+                       already uses -- for a client row that may already be the #1022-widened
                        --client-chase-ceiling-us envelope, not necessarily the bare --bound-us
-                       value) gets ONE fresh resample round after this delay before the final
-                       grade -- never a retry loop; a resample that is ALSO unstable still fails,
-                       graded on its own fresh numbers, and a resample whose NTP measurement goes
-                       stale during the wait reports STALE rather than trusting aged-out data. The
-                       master's own median-only row, a genuine "drift" (median out of bound), and
-                       a worst sample that already exceeds the effective bound (the #836 genuine-
-                       scatter class, or a real clock fault) are NEVER resampled -- see
+                       value), take ONE fresh resample round after --chase-resample-delay-s
+                       before the final grade -- never a retry loop. The resampled round is ALSO
+                       tried against (1) first; if that declines too, it is graded plainly and a
+                       resample that is ALSO unstable still fails, graded on its own fresh
+                       numbers. A resample whose NTP measurement goes stale during the wait
+                       reports STALE rather than trusting aged-out data.
+                       The master's own median-only row, a genuine "drift" (median out of bound),
+                       and a worst sample that already exceeds the effective bound (the #836
+                       genuine-scatter class, or a real clock fault) are NEVER resampled -- see
                        clock-offset-guard.sh's should_resample_for_chase for the exact decision.
-                       Default ${GATE_CHASE_RESAMPLE_DELAY_S} (gives the transient a good chance
-                       to have cleared -- the original filing described the per-client catch-up
-                       window as lasting "~10-30s").
+  --chase-resample-delay-s N  the stage-(2) fallback delay described above. Default
+                       ${GATE_CHASE_RESAMPLE_DELAY_S} (gives the transient a good chance to have
+                       cleared -- the original filing described the per-client catch-up window as
+                       lasting "~10-30s"). A live rerun proved this fixed delay alone is only a
+                       probabilistic mitigation (the client's own elevated-offset duty cycle is
+                       ~30-60s per ~130-150s master step period, ~25-45%, so a fixed delay
+                       collides with the SAME or the NEXT excursion roughly that often) -- stage
+                       (1) above is what makes the gate's overall verdict deterministic on the
+                       common case; this flag only tunes the residual fallback.
 
 A node's NTP MEASUREMENT itself must also be FRESH, independently of the payload's general
 "updated_ts" (#1014, dantesync v1.8.30 / dantesync issue 68): "ntp_age_s" must be a plain integer

@@ -2575,3 +2575,49 @@ fn chase_bimodal_exclusion_verdict_no_when_verdict_is_not_unstable_1022() {
         "drift (median out of bound) must never be explained away by the chase signature: {out:?}"
     );
 }
+
+#[test]
+fn chase_bimodal_exclusion_check_prints_an_ok_line_with_the_exclusion_note_and_returns_0() {
+    // Direct unit test for the print/format wrapper (review finding: it had no dedicated test,
+    // unlike its sibling sampled_offset_check). The caller is required to have already confirmed
+    // chase_bimodal_exclusion_verdict == "yes" for the SAME inputs -- this test uses the exact
+    // live cam1 shape, which does.
+    let payloads = format!(
+        "{}\n{}\n{}\n{}\n{}\n{}\n",
+        pipe_json(1000, 0),
+        pipe_json(1005, 0),
+        pipe_json(1010, 0),
+        pipe_json(1015, 2561),
+        pipe_json(1020, 2561),
+        pipe_json(1025, 2561),
+    );
+    let out = run_sourced(
+        "set +e; chase_bimodal_exclusion_check cam1 \"$P\" 3500 2000; echo \"rc=$?\"",
+        &[("P", payloads.as_str())],
+    );
+    assert!(
+        out.contains("cam1") && out.contains("OK") && out.contains("rc=0"),
+        "must print an OK line for the label and return 0: {out:?}"
+    );
+    assert!(
+        out.contains("median 0us") && out.contains("spread 2561us"),
+        "must carry the SAME median/spread numbers sampled_offset_check would report: {out:?}"
+    );
+    assert!(
+        out.contains("explained by master step-chase")
+            && out.contains("3 elevated samples")
+            && out.contains("baseline spread 0us"),
+        "must carry the bimodal-exclusion explanation with the correct elevated count and \
+         baseline spread: {out:?}"
+    );
+
+    // EXTRA_NOTE (5th arg) is appended, mirroring sampled_offset_check's own extra_note param.
+    let out = run_sourced(
+        "set +e; chase_bimodal_exclusion_check cam1 \"$P\" 3500 2000 ' -- widened to 3500us'; echo \"rc=$?\"",
+        &[("P", payloads.as_str())],
+    );
+    assert!(
+        out.contains("widened to 3500us") && out.contains("explained by master step-chase"),
+        "the extra_note must be appended alongside the exclusion explanation, not replace it: {out:?}"
+    );
+}

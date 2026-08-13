@@ -902,10 +902,12 @@ should_resample_for_chase() {
 #      fine.
 #   5. Elevated samples all share ONE sign -- a chase is a coherent phase offset, never noise
 #      split around zero. NOTE: given the elevated magnitude range is bounded to
-#      (STABILITY_US, BOUND_US], two opposite-sign elevated values always ALSO fail condition 4
-#      (their difference exceeds 2*STABILITY_US > STABILITY_US) -- this condition is kept
-#      explicit anyway because it documents the INTENT independently of condition 4's exact
-#      numeric form, not because any input can make it the sole deciding factor today.
+#      (STABILITY_US, BOUND_US], two opposite-sign elevated values v1>0>v2 always ALSO fail
+#      condition 4: their difference v1-v2 > 2*STABILITY_US >= STABILITY_US (the ">=", not ">",
+#      matters at the degenerate STABILITY_US=0 edge -- 2*0=0>=0 still holds even though 2*0 is
+#      not itself >0) -- this condition is kept explicit anyway because it documents the INTENT
+#      independently of condition 4's exact numeric form, not because any input can make it the
+#      sole deciding factor today.
 # A stuck/drifted node still fails on the MEDIAN check (verdict would be "drift"/"drift_unstable",
 # which never reaches this path -- the leading verdict=="unstable" gate excludes it). The
 # master's own median-only row (mode != "full") is never graded via this signature at all.

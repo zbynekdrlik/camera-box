@@ -2918,3 +2918,90 @@ fn gate_resample_reports_stale_when_the_ntp_measurement_ages_out_during_the_dela
     );
     let _ = stderr;
 }
+
+#[test]
+fn gate_resampled_round_that_shows_a_clean_chase_signature_is_also_excused_1022() {
+    // Review finding: the "excused-after-resample" composition (grade_http_node retries
+    // chase_bimodal_exclusion_verdict on the FRESH round, not just the original one) had zero
+    // test coverage. Chase round: mixed-sign elevated (declines exclusion, but resample-eligible,
+    // same shape as the sibling resample tests). Resample round: a CLEAN bimodal signature (tight
+    // baseline pair + one tight same-sign elevated sample, all within the envelope) -- must be
+    // excused via exclusion on the SECOND round, not graded raw as "unstable".
+    let base = now_epoch();
+    let strih_responses = vec![
+        http_status_ntp_deadband(base, 2400, "2", false, "2500"),
+        http_status_ntp_deadband(base + 5, 2500, "3", false, "2500"),
+        http_status_ntp_deadband(base + 10, 2450, "2", false, "2500"),
+    ];
+    let p_strih = write_multi_read_fixture("strih_1022_resample_excused_master", &strih_responses);
+    let p_priming = write_win_http_fixture(
+        "strih_1022_resample_excused_priming",
+        &http_status_ntp_deadband(base, 2450, "2", false, "2500"),
+    );
+    let stream_responses = vec![
+        // Chase round: mixed-sign elevated -- declines exclusion, resample-eligible (worst
+        // sample 2600 <= 3500 bound).
+        http_status_ntp(base, 0, "2", false),
+        http_status_ntp(base + 5, 2600, "3", false),
+        http_status_ntp(base + 10, -2200, "2", false),
+        // Resample round: clean bimodal signature (0, 0, 2600) -- must be excused.
+        http_status_ntp(base + 15, 0, "4", false),
+        http_status_ntp(base + 20, 0, "5", false),
+        http_status_ntp(base + 25, 2600, "6", false),
+    ];
+    let p_stream =
+        write_multi_read_fixture("stream_1022_resample_excused_client", &stream_responses);
+
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--win-http",
+            "stream=10.77.9.204",
+            "--samples",
+            "3",
+            "--min-distinct",
+            "3",
+            "--window-s",
+            "0",
+            "--chase-resample-delay-s",
+            "0",
+        ],
+        &[
+            (
+                "DANTESYNC_GATE_WIN_HTTP_STRIH",
+                &p_strih.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_WIN_HTTP_STREAM",
+                &p_stream.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_MASTER_DEADBAND_STATUS",
+                &p_priming.display().to_string(),
+            ),
+        ],
+    );
+    assert_eq!(
+        code, 0,
+        "a resampled round that shows a clean chase signature must be excused, not graded raw. \
+         stdout={stdout} stderr={stderr}"
+    );
+    let stream_line = stdout
+        .lines()
+        .find(|l| l.trim_start().starts_with("stream"))
+        .unwrap_or_else(|| panic!("no stream report line in stdout: {stdout}"));
+    assert!(
+        stream_line.contains("resampled once")
+            && stream_line.contains("explained by master step-chase"),
+        "must show BOTH the resample note (round 1 declined exclusion) AND the exclusion note \
+         (round 2 -- the resampled data -- was excused): {stream_line:?}"
+    );
+    assert!(
+        !stream_line.contains("UNSTABLE"),
+        "stream_line: {stream_line:?}"
+    );
+    let _ = stderr;
+}
