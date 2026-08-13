@@ -3241,7 +3241,10 @@ fn check_imag_report_power_envelope_ok_when_pl1_matches_the_pin_1040() {
     // Scope this to the POWER facet: every power_envelope row must be OK, and the clean envelope
     // must contribute NO DRIFT (the sibling dantesync/timesync rows read UNKNOWN here only because
     // this test deliberately leaves their args empty — that is unrelated to the power facet).
-    let power_rows: Vec<&str> = out.lines().filter(|l| l.contains("power_envelope")).collect();
+    let power_rows: Vec<&str> = out
+        .lines()
+        .filter(|l| l.contains("power_envelope"))
+        .collect();
     assert!(
         power_rows.len() >= 4,
         "expected pl1/slpc/thermald/units power rows: {out:?}"
@@ -3264,12 +3267,18 @@ fn check_imag_report_power_envelope_drift_when_pl1_clamped_to_25w_1040() {
         echo "RC=$rc"
     "#;
     let out = run_sourced(body, &[("POWER", &clamped)]);
-    assert!(out.contains("RC=20"), "a 25 W clamp vs pinned 29 W must DRIFT (exit 20): {out:?}");
+    assert!(
+        out.contains("RC=20"),
+        "a 25 W clamp vs pinned 29 W must DRIFT (exit 20): {out:?}"
+    );
     let line = out
         .lines()
         .find(|l| l.contains("power_envelope") && l.contains("pl1"))
         .unwrap_or_else(|| panic!("no power_envelope pl1 DRIFT row printed: {out:?}"));
-    assert!(line.contains("DRIFT"), "the pl1 row must read DRIFT: {line:?}");
+    assert!(
+        line.contains("DRIFT"),
+        "the pl1 row must read DRIFT: {line:?}"
+    );
 }
 
 #[test]

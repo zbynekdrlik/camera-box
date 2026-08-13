@@ -124,8 +124,7 @@ fn pl1_watts_to_microwatts_conversion_is_exact() {
 
 #[test]
 fn pl1_uw_matches_pin_true_only_on_exact_watt_equivalence() {
-    let (c_ok, _o, _e) =
-        run_sourced("imag_pl1_uw_matches_pin 29000000 29 && echo Y || echo N");
+    let (c_ok, _o, _e) = run_sourced("imag_pl1_uw_matches_pin 29000000 29 && echo Y || echo N");
     assert!(c_ok == 0);
     let (_c, out, _e) = run_sourced(
         "imag_pl1_uw_matches_pin 29000000 29 && echo Y || echo N\n\
@@ -159,8 +158,10 @@ fn pl1_zone_selected_by_package_name_never_a_hardcoded_index() {
 
 #[test]
 fn pl1_zone_select_empty_when_no_package_zone() {
-    let (_c, out, _e) =
-        run_sourced_with_gather("imag_power_zone_select \"$G\" || echo MISSING", "ZONE|core\nCONSTRAINT|core|0|long_term|15000000\n");
+    let (_c, out, _e) = run_sourced_with_gather(
+        "imag_power_zone_select \"$G\" || echo MISSING",
+        "ZONE|core\nCONSTRAINT|core|0|long_term|15000000\n",
+    );
     assert!(
         out.contains("MISSING") && !out.contains("15000000"),
         "no package-0 zone -> empty + nonzero, never the wrong zone's value: {out:?}"
@@ -218,7 +219,11 @@ fn facet_status(out: &str, facet: &str) -> String {
 fn verdict_ok_when_pl1_matches_slpc_one_thermald_purged_units_up() {
     let out = verdict(CLEAN_GATHER, "29");
     for f in ["pl1", "slpc", "thermald", "units"] {
-        assert_eq!(facet_status(&out, f), "OK", "facet {f} must be OK on the clean gather: {out:?}");
+        assert_eq!(
+            facet_status(&out, f),
+            "OK",
+            "facet {f} must be OK on the clean gather: {out:?}"
+        );
     }
 }
 
@@ -232,7 +237,10 @@ fn verdict_unknown_when_gather_block_is_empty_never_a_false_drift() {
             "empty gather -> {f} UNKNOWN (an SSH hiccup), NEVER a false DRIFT: {out:?}"
         );
     }
-    assert!(!out.contains("DRIFT"), "no DRIFT on an empty gather: {out:?}");
+    assert!(
+        !out.contains("DRIFT"),
+        "no DRIFT on an empty gather: {out:?}"
+    );
 }
 
 #[test]
@@ -240,7 +248,11 @@ fn verdict_drift_when_pl1_differs_from_the_pinned_watts() {
     // Live 25 W clamp, pin 29 W -> pl1 DRIFT (this IS the whole regression signature).
     let g = CLEAN_GATHER.replace("long_term|29000000", "long_term|25000000");
     let out = verdict(&g, "29");
-    assert_eq!(facet_status(&out, "pl1"), "DRIFT", "25 W vs pinned 29 W is DRIFT: {out:?}");
+    assert_eq!(
+        facet_status(&out, "pl1"),
+        "DRIFT",
+        "25 W vs pinned 29 W is DRIFT: {out:?}"
+    );
 }
 
 #[test]
@@ -248,27 +260,43 @@ fn verdict_drift_when_pl1_enabled_is_zero() {
     // Correct watts but the constraint is DISABLED -> the limit is not actually enforced -> DRIFT.
     let g = CLEAN_GATHER.replace("ENABLED|package-0|1", "ENABLED|package-0|0");
     let out = verdict(&g, "29");
-    assert_eq!(facet_status(&out, "pl1"), "DRIFT", "PL1 enabled=0 is DRIFT even at the right watts: {out:?}");
+    assert_eq!(
+        facet_status(&out, "pl1"),
+        "DRIFT",
+        "PL1 enabled=0 is DRIFT even at the right watts: {out:?}"
+    );
 }
 
 #[test]
 fn verdict_unknown_when_no_pin_supplied_never_a_false_drift() {
     let out = verdict(CLEAN_GATHER, "\"\"");
-    assert_eq!(facet_status(&out, "pl1"), "UNKNOWN", "no pinned watts -> pl1 UNKNOWN: {out:?}");
+    assert_eq!(
+        facet_status(&out, "pl1"),
+        "UNKNOWN",
+        "no pinned watts -> pl1 UNKNOWN: {out:?}"
+    );
 }
 
 #[test]
 fn verdict_drift_when_any_slpc_knob_reads_zero() {
     let g = CLEAN_GATHER.replacen("SLPC|1\nSLPC|1", "SLPC|1\nSLPC|0", 1);
     let out = verdict(&g, "29");
-    assert_eq!(facet_status(&out, "slpc"), "DRIFT", "any slpc knob at 0 is DRIFT: {out:?}");
+    assert_eq!(
+        facet_status(&out, "slpc"),
+        "DRIFT",
+        "any slpc knob at 0 is DRIFT: {out:?}"
+    );
 }
 
 #[test]
 fn verdict_unknown_slpc_when_no_knob_discovered() {
     let g = CLEAN_GATHER.replace("SLPC|1\nSLPC|1\n", "");
     let out = verdict(&g, "29");
-    assert_eq!(facet_status(&out, "slpc"), "UNKNOWN", "no slpc knob discovered -> UNKNOWN: {out:?}");
+    assert_eq!(
+        facet_status(&out, "slpc"),
+        "UNKNOWN",
+        "no slpc knob discovered -> UNKNOWN: {out:?}"
+    );
 }
 
 #[test]
@@ -288,12 +316,13 @@ fn thermald_installed_even_masked_is_a_fail() {
 
 #[test]
 fn thermald_active_is_a_fail() {
-    let g = CLEAN_GATHER.replace(
-        "THERMALD||inactive|not-found",
-        "THERMALD||active|not-found",
-    );
+    let g = CLEAN_GATHER.replace("THERMALD||inactive|not-found", "THERMALD||active|not-found");
     let out = verdict(&g, "29");
-    assert_eq!(facet_status(&out, "thermald"), "DRIFT", "thermald active is DRIFT: {out:?}");
+    assert_eq!(
+        facet_status(&out, "thermald"),
+        "DRIFT",
+        "thermald active is DRIFT: {out:?}"
+    );
 }
 
 #[test]
@@ -304,7 +333,11 @@ fn units_drift_when_the_guard_timer_is_dead() {
         "UNIT|imag-power-envelope-guard.timer|enabled|inactive",
     );
     let out = verdict(&g, "29");
-    assert_eq!(facet_status(&out, "units"), "DRIFT", "a dead guard timer is DRIFT: {out:?}");
+    assert_eq!(
+        facet_status(&out, "units"),
+        "DRIFT",
+        "a dead guard timer is DRIFT: {out:?}"
+    );
 }
 
 #[test]
@@ -313,7 +346,11 @@ fn units_unknown_when_states_not_gathered() {
         .replace("UNIT|imag-power-envelope.service|enabled|active\n", "")
         .replace("UNIT|imag-power-envelope-guard.timer|enabled|active\n", "");
     let out = verdict(&g, "29");
-    assert_eq!(facet_status(&out, "units"), "UNKNOWN", "no unit rows -> UNKNOWN: {out:?}");
+    assert_eq!(
+        facet_status(&out, "units"),
+        "UNKNOWN",
+        "no unit rows -> UNKNOWN: {out:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -443,13 +480,19 @@ fn alert_condition_fires_on_stepdown_and_reassert_but_not_restore_or_hold() {
     let (_c, out, _e) = run_sourced(
         "imag_power_alert_condition 'Aug 13 imag-nb imag-power-envelope[1]: STEP-DOWN: TCPU=94C ...'",
     );
-    assert!(out.contains("STEP-DOWN"), "STEP-DOWN must be an alert condition: {out:?}");
+    assert!(
+        out.contains("STEP-DOWN"),
+        "STEP-DOWN must be an alert condition: {out:?}"
+    );
 
     // A RE-ASSERT line -> alertable.
     let (_c, out2, _e) = run_sourced(
         "imag_power_alert_condition 'Aug 13 imag-nb imag-power-envelope[1]: RE-ASSERT: live PL1=... foreign ...'",
     );
-    assert!(out2.contains("RE-ASSERT"), "RE-ASSERT must be an alert condition: {out2:?}");
+    assert!(
+        out2.contains("RE-ASSERT"),
+        "RE-ASSERT must be an alert condition: {out2:?}"
+    );
 
     // A RESTORE-only window (recovery) -> NOT alertable (informational).
     let (_c, out3, _e) = run_sourced(
@@ -477,7 +520,10 @@ fn read_script(rel: &str) -> String {
 #[test]
 fn oneshot_is_a_failloud_script_that_sets_the_envelope_by_identity() {
     let body = read_script("scripts/imag-power-envelope.sh");
-    assert!(body.contains("set -euo pipefail"), "the oneshot must fail loud");
+    assert!(
+        body.contains("set -euo pipefail"),
+        "the oneshot must fail loud"
+    );
     // slpc across ALL cards, PL1 by package-0/long_term NAME identity (never a hardcoded index).
     assert!(
         body.contains("slpc_ignore_eff_freq") && body.contains("card*"),
@@ -500,7 +546,10 @@ fn oneshot_is_a_failloud_script_that_sets_the_envelope_by_identity() {
 #[test]
 fn guard_uses_the_shared_decision_never_a_second_copy() {
     let body = read_script("scripts/imag-power-envelope-guard.sh");
-    assert!(body.contains("set -euo pipefail"), "the guard must fail loud");
+    assert!(
+        body.contains("set -euo pipefail"),
+        "the guard must fail loud"
+    );
     // The DECISION must be the shared pure function, not re-implemented inline.
     assert!(
         body.contains("imag_power_guard_decision"),
@@ -521,7 +570,10 @@ fn guard_uses_the_shared_decision_never_a_second_copy() {
 #[test]
 fn dev1_alert_watchdog_reuses_the_shared_condition_and_throttle() {
     let body = read_script("scripts/imag-power-envelope-alert-watchdog.sh");
-    assert!(body.contains("set -uo pipefail"), "a watchdog must survive per-pass failures (not set -e)");
+    assert!(
+        body.contains("set -uo pipefail"),
+        "a watchdog must survive per-pass failures (not set -e)"
+    );
     // Reuses the SHARED alert-condition + the SHARED throttle — no second alert mechanism.
     assert!(
         body.contains("imag_power_alert_condition"),

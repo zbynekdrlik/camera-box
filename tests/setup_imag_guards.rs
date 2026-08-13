@@ -3354,7 +3354,7 @@ fn setup_imag_bakes_the_envelope_env_knobs_into_the_units_1040() {
         "IMAG_TCPU_RESTORE_C",
     ] {
         assert!(
-            body.contains(&format!("Environment=IMAG")) && body.contains(knob),
+            body.contains(&format!("Environment={knob}=")),
             "{SETUP} must bake {knob} into the envelope units' Environment= (#1040)"
         );
     }
