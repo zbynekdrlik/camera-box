@@ -1238,6 +1238,13 @@ mod tests {
             }
         }
 
+        /// Change the configured hold at runtime — the sim's mirror of the C
+        /// `obs_source_set_genlock_latency_ms()` (a knob hot-apply, which is one of the
+        /// routine relock triggers the ticket's live evidence lists).
+        fn set_reserve_ms(&mut self, ms: u32) {
+            self.reserve_ns = ms as u64 * 1_000_000;
+        }
+
         /// The backlog-storm threshold this sim's own configured hold implies (issue 859 —
         /// UNCHANGED by #1003; it still decides WHEN a relock fires, only the SELECTION
         /// inside the branch changes).
@@ -2143,6 +2150,75 @@ mod tests {
              The receiver wall clock moved by the step, so every `wall - ts` age sampled \
              before the correction is wrong by exactly that much — re-acquiring against it \
              would re-establish the hold at a phase off by the whole clock step."
+        );
+    }
+
+    /// #1003 REGRESSION (adversarial review finding) — a latency SETPOINT DECREASE must still
+    /// converge, and must not turn the backlog branch into a per-tick relock storm.
+    ///
+    /// The phase anchor IS the conveyor's current age, so after a knob decrease it still
+    /// describes the OLD, deeper hold. `relock_select_nearest` then returns index 0 (the
+    /// target sits at or before the queue head), `release` is 1, and the relock sheds
+    /// NOTHING — while the lowered latency has already dropped
+    /// [`backlog_relock_threshold`] below the unchanged depth, so the branch qualifies on
+    /// EVERY tick. Worse, the backlog branch pre-empts STEADY, so `drain_eligible` is never
+    /// set and the issue-859/998 settle-back drain — the only other convergence path — never
+    /// runs either. Measured before the fix: the hold stayed at the OLD 933 ms forever with
+    /// 800 relocks in 800 ticks and zero frames shed, which is exactly the
+    /// `relocks`-as-a-useless-health-signal state issue 859 removed.
+    ///
+    /// Two guards make it structurally impossible, and both are mirrored in the C:
+    /// the setpoint change CLEARS the anchor (the remembered age describes a hold that no
+    /// longer exists), and a relock that would shed nothing treats the anchor as STALE,
+    /// clears it and re-selects against the configured latency.
+    #[test]
+    fn latency_setpoint_decrease_converges_without_a_relock_storm_1003() {
+        const SETTLE: u64 = 300;
+        const AFTER: u64 = 800;
+        const NEW_MS: u32 = 400;
+        let base = step_aligned_base_1003();
+        let mut fifo = SimFifo1009::with(SelectionStrategy::PhaseAnchored, RESERVE_NS_1003);
+        let mut next_emit = 0u64;
+        for k in 0..SETTLE + AFTER {
+            let true_now = base + k * I30;
+            loop {
+                let e = base + next_emit * SENDER_GRID_1003;
+                if e + NET_NS_1003 > true_now {
+                    break;
+                }
+                fifo.queue.push_back(e);
+                next_emit += 1;
+            }
+            if k == SETTLE {
+                fifo.set_reserve_ms(NEW_MS);
+            }
+            fifo.tick(k, true_now, true_now);
+        }
+        let tail: Vec<i64> = fifo
+            .presented
+            .iter()
+            .filter(|(k, _)| *k >= SETTLE + AFTER - 30)
+            .map(|(_, age)| *age)
+            .collect();
+        assert!(!tail.is_empty(), "nothing presented in the settled tail");
+        let target = NEW_MS as i64 * 1_000_000;
+        let tol = 2 * I30 as i64;
+        for age in &tail {
+            assert!(
+                (age - target).abs() <= tol,
+                "after lowering the hold {RESERVE_MS_1003} ms -> {NEW_MS} ms the FIFO still \
+                 presents frames {age} ns old (target {target} ns +/- 2 intervals) — the \
+                 setpoint decrease never converged. The stale anchor makes every relock shed \
+                 ZERO frames, and because the backlog branch pre-empts STEADY the \
+                 settle-back drain never runs either."
+            );
+        }
+        assert!(
+            fifo.relocks <= 30,
+            "the backlog branch fired {} times in {AFTER} ticks after the setpoint change — \
+             a per-tick relock storm. Each firing shed nothing and logged a per-event line, \
+             which is precisely the useless-`relocks`-counter state issue 859 removed.",
+            fifo.relocks
         );
     }
 }
