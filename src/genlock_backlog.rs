@@ -111,6 +111,28 @@ pub fn backlog_relock_threshold(
     steady_depth_frames(latency_ms, fps_num, fps_den).saturating_add(margin)
 }
 
+/// The source frame interval (ns) implied by a window of the front queued frame stamps: the
+/// delta of the FIRST strictly-increasing consecutive pair.
+///
+/// The measured interval feeds the source-rate multiple `n = round(canvas_interval / interval)`
+/// that [`backlog_relock_threshold`] (and the settle-back drain / release cadence) budget the
+/// FIFO depth at, so mis-reading it directly mis-derives the threshold.
+///
+/// `None` when there is no strictly-increasing pair in the window (fewer than two usable stamps,
+/// or an all-duplicate/non-monotonic window) — the caller then bridges with its sticky latch and
+/// never fabricates a multiple.
+///
+/// Mirror of the loop in the C `genlock_measure_source_multiple` (obs-source.c) and
+/// `src/probe/genlock.rs` `ReleaseCadence::measure_source_multiple` — keep all three in lock-step.
+pub fn source_interval_from_stamps(stamps: &[u64]) -> Option<u64> {
+    for w in stamps.windows(2) {
+        if w[1] > w[0] {
+            return Some(w[1] - w[0]);
+        }
+    }
+    None
+}
+
 /// #859 follow-up — the SLEW-LIMITED SETTLE-BACK DRAIN.
 ///
 /// The `backlog_relock_threshold` fix above stopped the backlog-relock branch firing on
@@ -792,6 +814,66 @@ mod tests {
         assert_eq!(
             backlog_relock_threshold(4, 60, 1, 0),
             backlog_relock_threshold(4, 60, 1, 1)
+        );
+    }
+
+    /// #1042 — the source interval is the MINIMUM adjacent grid delta over the scan window, not
+    /// the FIRST strictly-increasing pair. Every source stamps on the monotonic, evenly-spaced
+    /// DanteSync grid, so the true frame interval is the SMALLEST gap between adjacent stamps — a
+    /// duplicate or a dropped/decimated frame only ever ENLARGES a gap, never shrinks it below the
+    /// true period. Live #1042: on the stream box's 60fps `Zaloha kamera` the FIRST increasing
+    /// front pair intermittently straddled a dropped frame (33.3ms → read as 30fps, n=1), which
+    /// collapsed the backlog-relock threshold below the source's real ~59-deep queue and fired the
+    /// branch spuriously (~1/sec — the #796 relock-log-as-health-signal pollution).
+    #[test]
+    fn source_interval_is_the_min_grid_delta_not_the_first_1042() {
+        let g = 16_666_666u64; // 60fps grid interval
+        let t = 4_000_000_000u64;
+        // A front-scan window whose FIRST strictly-increasing pair straddles a dropped frame
+        // (2 source intervals), followed by true 1-interval pairs: first pair = 2g, min = g.
+        let with_leading_gap = [t, t + 2 * g, t + 3 * g, t + 4 * g, t + 5 * g, t + 6 * g];
+        assert_eq!(
+            source_interval_from_stamps(&with_leading_gap),
+            Some(g),
+            "the true source interval is the MINIMUM adjacent grid delta, not the first \
+             increasing pair (which straddles the leading gap)"
+        );
+
+        // A clean 60fps window is unchanged (first pair already IS the minimum).
+        let clean = [t, t + g, t + 2 * g, t + 3 * g];
+        assert_eq!(source_interval_from_stamps(&clean), Some(g));
+
+        // A genuine 30fps (30-into-30) window still reads its own interval — never fabricates a
+        // smaller one. All deltas are the canvas interval; min == that interval.
+        let canvas = 33_333_333u64;
+        let one_to_one = [t, t + canvas, t + 2 * canvas];
+        assert_eq!(source_interval_from_stamps(&one_to_one), Some(canvas));
+
+        // No strictly-increasing pair anywhere → inconclusive (the caller bridges with its latch).
+        assert_eq!(source_interval_from_stamps(&[t, t, t]), None);
+        assert_eq!(source_interval_from_stamps(&[t]), None);
+    }
+
+    /// #1042 — the observable consequence: a 60-into-30 source held 1000ms whose front scan window
+    /// has a dropped-frame gap must still derive `n = 2` and a threshold ABOVE its ~59-63 held
+    /// depth, so the backlog-relock branch stays quiet in steady state (the ticket's acceptance).
+    #[test]
+    fn a_60_into_30_source_with_a_front_gap_keeps_its_threshold_above_the_held_depth_1042() {
+        let g = 16_666_666u64; // 60fps grid
+        let canvas = 33_333_333u64; // 30fps canvas interval
+        let t = 4_000_000_000u64;
+        let with_leading_gap = [t, t + 2 * g, t + 3 * g, t + 4 * g, t + 5 * g, t + 6 * g];
+        let si = source_interval_from_stamps(&with_leading_gap).expect("a monotonic window");
+        // The source-rate multiple the caller derives from that interval (round-to-nearest).
+        let n = ((canvas + si / 2) / si).max(1) as u32;
+        assert_eq!(n, 2, "60-into-30 → 2 source frames per canvas interval");
+        let src_num = u32::try_from(1_000_000_000u64 * n as u64).unwrap();
+        let src_den = u32::try_from(canvas).unwrap();
+        let threshold = backlog_relock_threshold(1000, src_num, src_den, n);
+        assert!(
+            threshold >= 64,
+            "a 1000ms 60-into-30 source holds ~60 buffers (live peak 63); threshold {threshold} \
+             must sit above it so the backlog branch does not fire spuriously"
         );
     }
 
