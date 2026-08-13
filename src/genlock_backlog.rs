@@ -355,12 +355,21 @@ pub fn relock_select_nearest(queue_ts: &[u64], wall_now_ns: u64, anchor_age_ns: 
     if queue_ts.is_empty() {
         return 0;
     }
-    // TEMPORARY [red] STUB — the history-anchored selection is NOT implemented yet. This
-    // returns the NEWEST queued frame, i.e. the instant-sampled flavour the deployed rule
-    // has, so the #1003 acceptance tests below fail against it and the fix that replaces
-    // this body is provably what makes them pass.
-    let _ = (wall_now_ns, anchor_age_ns);
-    queue_ts.len() - 1
+    let target = wall_now_ns.saturating_sub(anchor_age_ns);
+    // `abs_diff` is exactly the C mirror's `a > b ? a - b : b - a`; spelled this way
+    // because clippy::manual_abs_diff rejects the explicit ternary form here.
+    let dist = |ts: u64| ts.abs_diff(target);
+    let mut best = 0usize;
+    let mut best_d = dist(queue_ts[0]);
+    for (i, &ts) in queue_ts.iter().enumerate().skip(1) {
+        let d = dist(ts);
+        // STRICT `<` — an equal distance keeps the already-chosen OLDER frame.
+        if d < best_d {
+            best = i;
+            best_d = d;
+        }
+    }
+    best
 }
 
 // ---------------------------------------------------------------------------------------------
