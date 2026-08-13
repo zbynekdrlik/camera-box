@@ -1122,6 +1122,12 @@ fn gate_reports_and_tallies_multiple_concurrent_nodes_independently() {
                 "DANTESYNC_GATE_WIN_HTTP_STREAM",
                 &p_stream.display().to_string(),
             ),
+            // #1022: strih is the default NTP master with a "stream" client also configured, so
+            // main() now does a priming read of strih's own status to derive stream's chase
+            // envelope. Point it at the #686 NO_HTTP sentinel so the test never attempts a real
+            // curl to the live rig -- this test's own fixtures carry no ntp_deadband_us field at
+            // all, so the priming read (had it succeeded) would have been a no-op anyway.
+            ("DANTESYNC_GATE_MASTER_DEADBAND_STATUS", NO_HTTP),
         ],
     );
     assert_eq!(
@@ -1185,6 +1191,10 @@ fn gate_samples_multiple_nodes_concurrently_not_sequentially() {
         &[
             ("DANTESYNC_GATE_WIN_HTTP_STRIH", &p_a.display().to_string()),
             ("DANTESYNC_GATE_WIN_HTTP_STREAM", &p_b.display().to_string()),
+            // #1022: same NO_HTTP-sentinel reasoning as the sibling test above -- avoid a real
+            // curl to the live rig, and the instant `cat` failure adds no measurable delay to
+            // this test's own timing assertion.
+            ("DANTESYNC_GATE_MASTER_DEADBAND_STATUS", NO_HTTP),
         ],
     );
     let elapsed = start.elapsed();
@@ -1971,4 +1981,1027 @@ fn help_describes_the_deadband_margin_flag_1021() {
         stdout.contains("ntp_deadband_us"),
         "usage text must explain what the flag widens the master's bound against: {stdout}"
     );
+}
+
+// --- #1022: client rows ALSO false-DRIFT during the master's own deadband step-chase window ----
+//
+// #1021 (above) widens ONLY the GATE_NTP_MASTER_NAME/median-only row. Live evidence filed on
+// #1022 (camera-box PR #1020, run 31617253261, dantesync v1.8.41 fleet-wide) showed a CLIENT
+// node ALSO false-DRIFTs during the SAME master step-chase window, via a DIFFERENT mechanism (a
+// client always reports its own "ntp_deadband_us":null -- it mirrors the master's sawtooth via
+// the LAN NTP measurement instead): "stream" graded DRIFT with median 2589us > the fixed 2000us
+// bound while its spread was only 82us across 6 samples -- tight, not the #836 scatter/noise
+// class, i.e. a genuinely elevated-but-healthy chase window, not a real desync.
+//
+// These tests exercise `main()`'s new priming read of the CONFIGURED master's own /status (via
+// the NEW DANTESYNC_GATE_MASTER_DEADBAND_STATUS override -- deliberately SEPARATE from
+// DANTESYNC_GATE_WIN_HTTP_<NAME>/DANTESYNC_GATE_LINUX_HTTP_<NAME>, which the master's OWN
+// gather_http_samples calls already consume via the #836 executable-fixture counter; reusing
+// that same override for the priming read would silently shift the master's own sampled
+// sequence) and the new client_chase_bound_us-driven widening it feeds into every CLIENT row's
+// grading.
+
+#[test]
+fn gate_client_row_within_master_deadband_envelope_passes_instead_of_false_drift_1022() {
+    // The exact live shape from #1022's own filed evidence: master (strih) reports a healthy
+    // 2500us deadband; client (stream) shows a TIGHT (spread 80us) but elevated median (2589us)
+    // -- a healthy step-chase window, not a real desync. Before #1022 this false-DRIFTs on
+    // stream; after, the whole gate must PASS.
+    let base = now_epoch();
+    let master_responses = vec![
+        http_status_ntp_deadband(base, 2400, "2", false, "2500"),
+        http_status_ntp_deadband(base + 5, 2500, "3", false, "2500"),
+        http_status_ntp_deadband(base + 10, 2450, "2", false, "2500"),
+    ];
+    let p_master = write_multi_read_fixture("strih_1022_chase_master", &master_responses);
+    let client_responses = vec![
+        http_status_ntp_deadband(base, 2550, "2", false, "null"),
+        http_status_ntp_deadband(base + 5, 2589, "3", false, "null"),
+        http_status_ntp_deadband(base + 10, 2630, "2", false, "null"),
+    ];
+    let p_client = write_multi_read_fixture("stream_1022_chase_client", &client_responses);
+    // The priming read of the master's OWN status (used SOLELY to derive the client envelope) --
+    // a static single payload is enough, it needs no freshness/sample-count shape at all.
+    let p_priming = write_win_http_fixture(
+        "strih_1022_priming_deadband",
+        &http_status_ntp_deadband(base, 2450, "2", false, "2500"),
+    );
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--win-http",
+            "stream=10.77.9.204",
+            "--samples",
+            "3",
+            "--min-distinct",
+            "3",
+            "--window-s",
+            "0",
+        ],
+        &[
+            (
+                "DANTESYNC_GATE_WIN_HTTP_STRIH",
+                &p_master.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_WIN_HTTP_STREAM",
+                &p_client.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_MASTER_DEADBAND_STATUS",
+                &p_priming.display().to_string(),
+            ),
+        ],
+    );
+    assert_eq!(
+        code, 0,
+        "a client's tight, elevated median inside the master's own deadband+margin envelope \
+         (max(2000, 2500+1000)=3500us; median 2589us) must PASS, not false-DRIFT against the \
+         fixed 2000us bound. stdout={stdout} stderr={stderr}"
+    );
+    assert!(stdout.contains("GATE PASS"), "stdout: {stdout}");
+    assert!(!stdout.contains("DRIFT"), "stdout: {stdout}");
+}
+
+#[test]
+fn gate_client_row_still_drifts_beyond_the_widened_chase_envelope_1022() {
+    // #1022 is not "a client can never fail once a master deadband is present" -- a genuine
+    // ~8ms client drift far beyond the widened envelope (max(2000, 2500+1000)=3500us) must still
+    // DRIFT.
+    let base = now_epoch();
+    let master_responses = vec![
+        http_status_ntp_deadband(base, 2400, "2", false, "2500"),
+        http_status_ntp_deadband(base + 5, 2500, "3", false, "2500"),
+        http_status_ntp_deadband(base + 10, 2450, "2", false, "2500"),
+    ];
+    let p_master = write_multi_read_fixture("strih_1022_genuine_drift_master", &master_responses);
+    let client_responses = vec![
+        http_status_ntp_deadband(base, 8000, "2", false, "null"),
+        http_status_ntp_deadband(base + 5, 8100, "3", false, "null"),
+        http_status_ntp_deadband(base + 10, 7900, "2", false, "null"),
+    ];
+    let p_client = write_multi_read_fixture("stream_1022_genuine_drift_client", &client_responses);
+    let p_priming = write_win_http_fixture(
+        "strih_1022_genuine_drift_priming",
+        &http_status_ntp_deadband(base, 2450, "2", false, "2500"),
+    );
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--win-http",
+            "stream=10.77.9.204",
+            "--samples",
+            "3",
+            "--min-distinct",
+            "3",
+            "--window-s",
+            "0",
+        ],
+        &[
+            (
+                "DANTESYNC_GATE_WIN_HTTP_STRIH",
+                &p_master.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_WIN_HTTP_STREAM",
+                &p_client.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_MASTER_DEADBAND_STATUS",
+                &p_priming.display().to_string(),
+            ),
+        ],
+    );
+    assert_eq!(
+        code, 20,
+        "a genuine ~8ms client drift far beyond the widened 3500us envelope must still DRIFT. \
+         stdout={stdout} stderr={stderr}"
+    );
+    let stream_line = stdout
+        .lines()
+        .find(|l| l.trim_start().starts_with("stream"))
+        .unwrap_or_else(|| panic!("no stream report line in stdout: {stdout}"));
+    assert!(
+        stream_line.contains("DRIFT"),
+        "stream (genuine drift) must report DRIFT: {stream_line:?}"
+    );
+}
+
+#[test]
+fn gate_client_row_keeps_the_fixed_bound_unchanged_when_the_master_priming_read_fails_1022() {
+    // Same tight/elevated client sample as the PASS test above, but this time
+    // DANTESYNC_GATE_MASTER_DEADBAND_STATUS points nowhere (the #686 NO_HTTP sentinel) -- the
+    // priming read must fail closed (empty), never a real curl to the live rig from a test
+    // sandbox, and the client bound must fall back to the UNMODIFIED fixed bound -- exactly the
+    // "cannot prove it -> do not widen" discipline every other fallback in this file follows.
+    let base = now_epoch();
+    let master_responses = vec![
+        http_status_ntp(base, 2400, "2", false),
+        http_status_ntp(base + 5, 2500, "3", false),
+        http_status_ntp(base + 10, 2450, "2", false),
+    ];
+    let p_master = write_multi_read_fixture("strih_1022_no_priming_master", &master_responses);
+    let client_responses = vec![
+        http_status_ntp_deadband(base, 2550, "2", false, "null"),
+        http_status_ntp_deadband(base + 5, 2589, "3", false, "null"),
+        http_status_ntp_deadband(base + 10, 2630, "2", false, "null"),
+    ];
+    let p_client = write_multi_read_fixture("stream_1022_no_priming_client", &client_responses);
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--win-http",
+            "stream=10.77.9.204",
+            "--samples",
+            "3",
+            "--min-distinct",
+            "3",
+            "--window-s",
+            "0",
+        ],
+        &[
+            (
+                "DANTESYNC_GATE_WIN_HTTP_STRIH",
+                &p_master.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_WIN_HTTP_STREAM",
+                &p_client.display().to_string(),
+            ),
+            ("DANTESYNC_GATE_MASTER_DEADBAND_STATUS", NO_HTTP),
+        ],
+    );
+    assert_eq!(
+        code, 20,
+        "an unreadable master priming status must fall back to the unmodified 2000us bound, so \
+         the same 2589us median must still DRIFT (never a silent, unproven widen). \
+         stdout={stdout} stderr={stderr}"
+    );
+    let stream_line = stdout
+        .lines()
+        .find(|l| l.trim_start().starts_with("stream"))
+        .unwrap_or_else(|| panic!("no stream report line in stdout: {stdout}"));
+    assert!(
+        stream_line.contains("DRIFT"),
+        "stream_line: {stream_line:?}"
+    );
+}
+
+#[test]
+fn gate_client_row_scatter_still_fails_via_stability_despite_the_widened_median_bound_1022() {
+    // The widened bound only ever relaxes the MEDIAN (location) check -- the pre-existing #836
+    // spread/stability check stays fully active for client rows. A client whose median sits
+    // inside the widened envelope (2589us <= 3500us) but whose samples SCATTER beyond the
+    // stability bound must still fail, just via UNSTABLE instead of DRIFT.
+    let base = now_epoch();
+    let master_responses = vec![
+        http_status_ntp_deadband(base, 2400, "2", false, "2500"),
+        http_status_ntp_deadband(base + 5, 2500, "3", false, "2500"),
+        http_status_ntp_deadband(base + 10, 2450, "2", false, "2500"),
+    ];
+    let p_master = write_multi_read_fixture("strih_1022_scatter_master", &master_responses);
+    let client_responses = vec![
+        http_status_ntp_deadband(base, 1500, "2", false, "null"),
+        http_status_ntp_deadband(base + 5, 2589, "3", false, "null"),
+        http_status_ntp_deadband(base + 10, 3600, "2", false, "null"),
+    ];
+    let p_client = write_multi_read_fixture("stream_1022_scatter_client", &client_responses);
+    let p_priming = write_win_http_fixture(
+        "strih_1022_scatter_priming",
+        &http_status_ntp_deadband(base, 2450, "2", false, "2500"),
+    );
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--win-http",
+            "stream=10.77.9.204",
+            "--samples",
+            "3",
+            "--min-distinct",
+            "3",
+            "--window-s",
+            "0",
+        ],
+        &[
+            (
+                "DANTESYNC_GATE_WIN_HTTP_STRIH",
+                &p_master.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_WIN_HTTP_STREAM",
+                &p_client.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_MASTER_DEADBAND_STATUS",
+                &p_priming.display().to_string(),
+            ),
+        ],
+    );
+    assert_eq!(
+        code, 20,
+        "median in-envelope (2589us <= 3500us) but spread 2100us > the 2000us stability bound \
+         must still fail. stdout={stdout} stderr={stderr}"
+    );
+    let stream_line = stdout
+        .lines()
+        .find(|l| l.trim_start().starts_with("stream"))
+        .unwrap_or_else(|| panic!("no stream report line in stdout: {stdout}"));
+    assert!(
+        stream_line.contains("UNSTABLE") && !stream_line.contains("DRIFT"),
+        "the widened median bound must clear the DRIFT flag, leaving ONLY UNSTABLE (the \
+         pre-existing #836 scatter class, unaffected by #1022): {stream_line:?}"
+    );
+}
+
+#[test]
+fn gate_client_chase_ceiling_us_caps_an_absurd_master_deadband_1022() {
+    // #1021's own master-row widening is deliberately UNCAPPED (it only ever widens the ONE
+    // master row). #1022 widens potentially MANY client rows from the SAME live-read deadband --
+    // an absurdly large/misconfigured ntp_deadband_us must not blindly widen every client's
+    // bound to match it. The default --client-chase-ceiling-us (5000) caps the deadband
+    // component BEFORE the margin is added, so a client median that would PASS under an
+    // uncapped (blind) widen still DRIFTs here.
+    let base = now_epoch();
+    let master_responses = vec![
+        http_status_ntp_deadband(base, 100, "2", false, "50000"),
+        http_status_ntp_deadband(base + 5, 120, "3", false, "50000"),
+        http_status_ntp_deadband(base + 10, 110, "2", false, "50000"),
+    ];
+    let p_master = write_multi_read_fixture("strih_1022_absurd_deadband_master", &master_responses);
+    let client_responses = vec![
+        http_status_ntp_deadband(base, 6400, "2", false, "null"),
+        http_status_ntp_deadband(base + 5, 6500, "3", false, "null"),
+        http_status_ntp_deadband(base + 10, 6600, "2", false, "null"),
+    ];
+    let p_client =
+        write_multi_read_fixture("stream_1022_absurd_deadband_client", &client_responses);
+    let p_priming = write_win_http_fixture(
+        "strih_1022_absurd_deadband_priming",
+        &http_status_ntp_deadband(base, 100, "2", false, "50000"),
+    );
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--win-http",
+            "stream=10.77.9.204",
+            "--samples",
+            "3",
+            "--min-distinct",
+            "3",
+            "--window-s",
+            "0",
+        ],
+        &[
+            (
+                "DANTESYNC_GATE_WIN_HTTP_STRIH",
+                &p_master.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_WIN_HTTP_STREAM",
+                &p_client.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_MASTER_DEADBAND_STATUS",
+                &p_priming.display().to_string(),
+            ),
+        ],
+    );
+    assert_eq!(
+        code, 20,
+        "max(2000, min(50000,5000)+1000)=6000us -- a 6500us client median must still DRIFT \
+         against the CAPPED envelope, even though it would PASS under an uncapped \
+         50000+1000=51000us blind widen. stdout={stdout} stderr={stderr}"
+    );
+    let stream_line = stdout
+        .lines()
+        .find(|l| l.trim_start().starts_with("stream"))
+        .unwrap_or_else(|| panic!("no stream report line in stdout: {stdout}"));
+    assert!(
+        stream_line.contains("DRIFT"),
+        "stream_line: {stream_line:?}"
+    );
+}
+
+#[test]
+fn gate_client_chase_ceiling_us_flag_is_configurable_1022() {
+    // Same fixtures as the PASS test above (master deadband 2500, client median 2589us, which
+    // PASSES under the default 5000us ceiling) -- an explicit lower --client-chase-ceiling-us
+    // narrows the envelope back down and must make the SAME client DRIFT again, proving the flag
+    // genuinely controls the cap rather than being ignored.
+    let base = now_epoch();
+    let master_responses = vec![
+        http_status_ntp_deadband(base, 2400, "2", false, "2500"),
+        http_status_ntp_deadband(base + 5, 2500, "3", false, "2500"),
+        http_status_ntp_deadband(base + 10, 2450, "2", false, "2500"),
+    ];
+    let p_master = write_multi_read_fixture("strih_1022_low_ceiling_master", &master_responses);
+    let client_responses = vec![
+        http_status_ntp_deadband(base, 2550, "2", false, "null"),
+        http_status_ntp_deadband(base + 5, 2589, "3", false, "null"),
+        http_status_ntp_deadband(base + 10, 2630, "2", false, "null"),
+    ];
+    let p_client = write_multi_read_fixture("stream_1022_low_ceiling_client", &client_responses);
+    let p_priming = write_win_http_fixture(
+        "strih_1022_low_ceiling_priming",
+        &http_status_ntp_deadband(base, 2450, "2", false, "2500"),
+    );
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--win-http",
+            "stream=10.77.9.204",
+            "--samples",
+            "3",
+            "--min-distinct",
+            "3",
+            "--window-s",
+            "0",
+            "--client-chase-ceiling-us",
+            "1000",
+        ],
+        &[
+            (
+                "DANTESYNC_GATE_WIN_HTTP_STRIH",
+                &p_master.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_WIN_HTTP_STREAM",
+                &p_client.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_MASTER_DEADBAND_STATUS",
+                &p_priming.display().to_string(),
+            ),
+        ],
+    );
+    assert_eq!(
+        code, 20,
+        "max(2000, min(2500,1000)+1000)=2000us -- --client-chase-ceiling-us 1000 must narrow the \
+         envelope enough that the same 2589us median DRIFTs again. stdout={stdout} stderr={stderr}"
+    );
+    let stream_line = stdout
+        .lines()
+        .find(|l| l.trim_start().starts_with("stream"))
+        .unwrap_or_else(|| panic!("no stream report line in stdout: {stdout}"));
+    assert!(
+        stream_line.contains("DRIFT"),
+        "stream_line: {stream_line:?}"
+    );
+}
+
+#[test]
+fn gate_client_chase_ceiling_us_malformed_is_a_usage_error_1022() {
+    let (code, _stdout, stderr) = run_gate(&[
+        "--linux",
+        "",
+        "--win-http",
+        "strih=10.77.9.202",
+        "--client-chase-ceiling-us",
+        "abc",
+    ]);
+    assert_eq!(
+        code, 1,
+        "a non-numeric --client-chase-ceiling-us must be a usage error (1). stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("--client-chase-ceiling-us"),
+        "stderr must name the flag: {stderr}"
+    );
+}
+
+#[test]
+fn help_describes_the_client_chase_ceiling_flag_1022() {
+    let (code, stdout, _stderr) = run_gate(&["--help"]);
+    assert_eq!(code, 0, "--help must exit 0");
+    assert!(
+        stdout.contains("--client-chase-ceiling-us"),
+        "usage text must document the new flag: {stdout}"
+    );
+}
+
+// --- #1022 spread-side completion: a single master step can trip MULTIPLE clients' SPREAD -----
+//
+// The median fix (client_chase_bound_us) works correctly -- a live E2E rerun on the merged round
+// showed every client's MEDIAN graded against the widened envelope exactly as designed. But the
+// SAME master step also inflates a client's SPREAD, left at the fixed 2000us stability bound by
+// design (client_chase_bound_us only ever widens the median/location check). Because the step is
+// on ONE clock shared by the whole fleet, the SAME step can land inside MULTIPLE clients' sampling
+// windows in the SAME run -- the live rerun tripped cam1, cam2, AND stream simultaneously:
+//
+//   cam1   UNSTABLE (median 0us <= 3500us bound; spread 2682us > 2000us stability)
+//   cam2   UNSTABLE (median 0us <= 3500us bound; spread 2577us > 2000us stability)
+//   strih  OK       (median 1220us <= 3500us bound; spread 384us)
+//   stream UNSTABLE (median 2822us <= 3500us bound; spread 2837us > 2000us stability)
+//   !! GATE FAILED: 3 node(s) DRIFTED or PTP-DEGRADED.  (exit 20)
+//
+// The fix: a CLIENT row whose verdict is "unstable" (median in bound, spread not) AND whose
+// worst sample still fits the SAME bound gets ONE fresh resample round before failing --
+// dantesync-gate.sh's grade_http_node calls should_resample_for_chase, and on "yes" re-gathers
+// via gather_http_samples and grades THAT round instead. These tests reproduce the EXACT live
+// numbers above (each client's fixture serves 3 "chase" responses for the first round, then 3
+// "recovered" responses for the resample round -- the SAME write_multi_read_fixture counter
+// mechanism naturally serves them in that order across the two gather_http_samples calls).
+
+#[test]
+fn gate_reproduces_the_live_three_client_simultaneous_chase_shape_and_passes_via_exclusion_1022() {
+    // Supersedes the OLD resample-based recovery: a live rerun proved resample-once is a coin
+    // flip (the fixed delay can land inside the SAME excursion). The bimodal chase-signature
+    // exclusion instead grades the ORIGINAL window directly -- these are the EXACT live numbers
+    // (E2E run 31640853894/31633417530), and NONE of the three clients need a resample at all;
+    // every one is explained on its FIRST round.
+    let base = now_epoch();
+    // strih (master): median 1220us, spread 384us (reference only, never gated) -- the master's
+    // own median-only row never has a spread verdict or a chase-signature check at all.
+    let strih_responses = vec![
+        http_status_ntp_deadband(base, 1200, "2", false, "2500"),
+        http_status_ntp_deadband(base + 5, 1220, "3", false, "2500"),
+        http_status_ntp_deadband(base + 10, 1584, "2", false, "2500"),
+    ];
+    let p_strih = write_multi_read_fixture("strih_1022_spread_live_shape", &strih_responses);
+    let p_priming = write_win_http_fixture(
+        "strih_1022_spread_live_priming",
+        &http_status_ntp_deadband(base, 1220, "2", false, "2500"),
+    );
+
+    // cam1: reproduces "median 0us; spread 2682us" EXACTLY (0, 0, 2682 -> sorted median
+    // position 2 = 0, spread = 2682-0) -- a tight baseline pair + one tight elevated sample.
+    let cam1_responses = vec![
+        http_status_ntp(base, 0, "2", false),
+        http_status_ntp(base + 5, 0, "3", false),
+        http_status_ntp(base + 10, 2682, "2", false),
+    ];
+    let p_cam1 = write_multi_read_fixture("cam1_1022_spread_live_shape", &cam1_responses);
+
+    // cam2: reproduces "median 0us; spread 2577us" EXACTLY.
+    let cam2_responses = vec![
+        http_status_ntp(base, 0, "2", false),
+        http_status_ntp(base + 5, 0, "3", false),
+        http_status_ntp(base + 10, 2577, "2", false),
+    ];
+    let p_cam2 = write_multi_read_fixture("cam2_1022_spread_live_shape", &cam2_responses);
+
+    // stream: reproduces "median 2822us; spread 2837us" EXACTLY (0, 2822, 2837 -> sorted median
+    // position 2 = 2822, spread = 2837-0) -- a single baseline sample + a tight elevated pair.
+    let stream_responses = vec![
+        http_status_ntp(base, 0, "2", false),
+        http_status_ntp(base + 5, 2822, "3", false),
+        http_status_ntp(base + 10, 2837, "2", false),
+    ];
+    let p_stream = write_multi_read_fixture("stream_1022_spread_live_shape", &stream_responses);
+
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "cam1=10.77.9.61 cam2=10.77.9.62",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--win-http",
+            "stream=10.77.9.204",
+            "--samples",
+            "3",
+            "--min-distinct",
+            "3",
+            "--window-s",
+            "0",
+            "--chase-resample-delay-s",
+            "0",
+        ],
+        &[
+            (
+                "DANTESYNC_GATE_WIN_HTTP_STRIH",
+                &p_strih.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_WIN_HTTP_STREAM",
+                &p_stream.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_LINUX_HTTP_CAM1",
+                &p_cam1.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_LINUX_HTTP_CAM2",
+                &p_cam2.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_MASTER_DEADBAND_STATUS",
+                &p_priming.display().to_string(),
+            ),
+        ],
+    );
+    assert_eq!(
+        code, 0,
+        "the exact live 3-simultaneous-UNSTABLE shape must be explained by the chase signature \
+         and PASS -- deterministically, on the first round. stdout={stdout} stderr={stderr}"
+    );
+    assert!(stdout.contains("GATE PASS"), "stdout: {stdout}");
+    assert!(!stdout.contains("UNSTABLE"), "stdout: {stdout}");
+    assert!(!stdout.contains("DRIFT"), "stdout: {stdout}");
+    assert!(
+        !stdout.contains("resampled once"),
+        "none of the three clients should need a resample -- exclusion explains the FIRST \
+         round directly: stdout={stdout}"
+    );
+    for name in ["cam1", "cam2", "stream"] {
+        let line = stdout
+            .lines()
+            .find(|l| l.trim_start().starts_with(name))
+            .unwrap_or_else(|| panic!("no {name} report line in stdout: {stdout}"));
+        assert!(
+            line.contains("explained by master step-chase"),
+            "{name} must report the chase-signature exclusion, not a raw pass: {line:?}"
+        );
+    }
+}
+
+#[test]
+fn gate_resample_with_no_further_distinct_data_reports_unknown_never_a_stale_or_false_pass_1022() {
+    // Real edge case: a resample-eligible node whose EXCLUSION declines (mixed-sign elevated
+    // samples -- not a clean chase signature, so genuinely needs the resample fallback) but
+    // whose fixture has NOTHING further to give -- only 3 responses total, so
+    // write_multi_read_fixture CLAMPS every call past the 3rd to the LAST entry -- gets a
+    // resample round whose 3 reads are all BYTE-IDENTICAL, including the SAME updated_ts.
+    // distinct_offset_samples_us's own "the daemon re-serving its cached value" dedup (#836
+    // point 5) then collapses those to a SINGLE distinct sample -- fewer than --min-distinct, so
+    // the FINAL grade is "insufficient" -> UNKNOWN, never a silent PASS and never the stale
+    // original "unstable" verdict either. The resample note must still appear -- the resample
+    // WAS attempted, it just could not produce enough independent data to grade.
+    let base = now_epoch();
+    let strih_responses = vec![
+        http_status_ntp_deadband(base, 1200, "2", false, "2500"),
+        http_status_ntp_deadband(base + 5, 1220, "3", false, "2500"),
+        http_status_ntp_deadband(base + 10, 1584, "2", false, "2500"),
+    ];
+    let p_strih = write_multi_read_fixture("strih_1022_spread_baseline", &strih_responses);
+    let p_priming = write_win_http_fixture(
+        "strih_1022_spread_baseline_priming",
+        &http_status_ntp_deadband(base, 1220, "2", false, "2500"),
+    );
+    // Mixed-sign elevated (2600, -2200): median in bound (unstable), worst sample (2600) within
+    // the envelope (resample-eligible), but NOT a coherent chase signature (exclusion declines).
+    let cam1_responses = vec![
+        http_status_ntp(base, 0, "2", false),
+        http_status_ntp(base + 5, 2600, "3", false),
+        http_status_ntp(base + 10, -2200, "2", false),
+    ];
+    let p_cam1 = write_multi_read_fixture("cam1_1022_spread_baseline", &cam1_responses);
+
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "cam1=10.77.9.61",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--samples",
+            "3",
+            "--min-distinct",
+            "3",
+            "--window-s",
+            "0",
+            "--chase-resample-delay-s",
+            "0",
+        ],
+        &[
+            (
+                "DANTESYNC_GATE_WIN_HTTP_STRIH",
+                &p_strih.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_LINUX_HTTP_CAM1",
+                &p_cam1.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_MASTER_DEADBAND_STATUS",
+                &p_priming.display().to_string(),
+            ),
+        ],
+    );
+    assert_eq!(
+        code, 11,
+        "a resample that cannot gather enough independent data must be INCOMPLETE (11), never a \
+         silent pass. stdout={stdout} stderr={stderr}"
+    );
+    let cam1_line = stdout
+        .lines()
+        .find(|l| l.trim_start().starts_with("cam1"))
+        .unwrap_or_else(|| panic!("no cam1 report line in stdout: {stdout}"));
+    assert!(
+        cam1_line.contains("UNKNOWN") && cam1_line.contains("only 1 distinct sample"),
+        "the clamped-repeat resample must collapse to a single distinct sample -> UNKNOWN, never \
+         a false PASS (spread 0) or the stale original UNSTABLE verdict: {cam1_line:?}"
+    );
+    assert!(
+        cam1_line.contains("resampled once"),
+        "the resample must still be noted as attempted, even though it couldn't gather enough \
+         new data: {cam1_line:?}"
+    );
+}
+
+#[test]
+fn gate_client_row_persistent_scatter_still_fails_after_the_resample_1022() {
+    // resample-once is a literal ONE-SHOT, never a retry loop: a node whose CHASE round declines
+    // exclusion (mixed-sign elevated -- genuine scatter, not a coherent phase offset) resamples,
+    // and whose RESAMPLE round is ALSO mixed-sign/unstable must still FAIL, grading the
+    // RESAMPLED numbers -- "sustained ... must still fail" even under #1022's exclusion.
+    let base = now_epoch();
+    let strih_responses = vec![
+        http_status_ntp_deadband(base, 2400, "2", false, "2500"),
+        http_status_ntp_deadband(base + 5, 2500, "3", false, "2500"),
+        http_status_ntp_deadband(base + 10, 2450, "2", false, "2500"),
+    ];
+    let p_strih = write_multi_read_fixture("strih_1022_persistent_master", &strih_responses);
+    let p_priming = write_win_http_fixture(
+        "strih_1022_persistent_priming",
+        &http_status_ntp_deadband(base, 2450, "2", false, "2500"),
+    );
+    // Chase round: median 0, spread 4800, mixed-sign elevated (2600, -2200) -> unstable,
+    // exclusion declines (not a coherent chase), resample fires (worst sample 2600 <= 3500
+    // bound). Resample round: median 100, spread 4900, ALSO mixed-sign elevated (2600, -2300) --
+    // STILL unstable, STILL declines exclusion. The two rounds' spread numbers (4800 vs 4900)
+    // are deliberately different so the assertion can prove the FINAL report reflects round 2's
+    // own fresh numbers, not round 1's stale ones.
+    let stream_responses = vec![
+        http_status_ntp(base, 0, "2", false),
+        http_status_ntp(base + 5, 2600, "3", false),
+        http_status_ntp(base + 10, -2200, "2", false),
+        http_status_ntp(base + 15, 100, "4", false),
+        http_status_ntp(base + 20, 2600, "5", false),
+        http_status_ntp(base + 25, -2300, "6", false),
+    ];
+    let p_stream = write_multi_read_fixture("stream_1022_persistent_client", &stream_responses);
+
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--win-http",
+            "stream=10.77.9.204",
+            "--samples",
+            "3",
+            "--min-distinct",
+            "3",
+            "--window-s",
+            "0",
+            "--chase-resample-delay-s",
+            "0",
+        ],
+        &[
+            (
+                "DANTESYNC_GATE_WIN_HTTP_STRIH",
+                &p_strih.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_WIN_HTTP_STREAM",
+                &p_stream.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_MASTER_DEADBAND_STATUS",
+                &p_priming.display().to_string(),
+            ),
+        ],
+    );
+    assert_eq!(
+        code, 20,
+        "a resample that is ALSO unstable must still fail the gate. stdout={stdout} stderr={stderr}"
+    );
+    let stream_line = stdout
+        .lines()
+        .find(|l| l.trim_start().starts_with("stream"))
+        .unwrap_or_else(|| panic!("no stream report line in stdout: {stdout}"));
+    assert!(
+        stream_line.contains("UNSTABLE") && stream_line.contains("spread 4900us"),
+        "must report the RESAMPLED round's own numbers (spread 4900us), not the original chase \
+         round's (spread 4800us) -- proves the final verdict grades the fresh data: {stream_line:?}"
+    );
+    assert!(
+        stream_line.contains("resampled once"),
+        "must still note a resample was attempted, even though it did not rescue the node: \
+         {stream_line:?}"
+    );
+}
+
+#[test]
+fn gate_chase_resample_delay_flag_value_is_reflected_in_the_report_note_1022() {
+    let base = now_epoch();
+    let strih_responses = vec![
+        http_status_ntp_deadband(base, 2400, "2", false, "2500"),
+        http_status_ntp_deadband(base + 5, 2500, "3", false, "2500"),
+        http_status_ntp_deadband(base + 10, 2450, "2", false, "2500"),
+    ];
+    let p_strih = write_multi_read_fixture("strih_1022_delay_flag_master", &strih_responses);
+    let p_priming = write_win_http_fixture(
+        "strih_1022_delay_flag_priming",
+        &http_status_ntp_deadband(base, 2450, "2", false, "2500"),
+    );
+    // Chase round: mixed-sign elevated (2600, -2200) -> unstable, exclusion declines (genuinely
+    // needs the resample fallback, so the delay flag's own note is actually exercised).
+    // Resample round: clean/healthy -> OK, carrying the resample note.
+    let stream_responses = vec![
+        http_status_ntp(base, 0, "2", false),
+        http_status_ntp(base + 5, 2600, "3", false),
+        http_status_ntp(base + 10, -2200, "2", false),
+        http_status_ntp(base + 15, 10, "4", false),
+        http_status_ntp(base + 20, 20, "5", false),
+        http_status_ntp(base + 25, 15, "6", false),
+    ];
+    let p_stream = write_multi_read_fixture("stream_1022_delay_flag_client", &stream_responses);
+
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--win-http",
+            "stream=10.77.9.204",
+            "--samples",
+            "3",
+            "--min-distinct",
+            "3",
+            "--window-s",
+            "0",
+            "--chase-resample-delay-s",
+            "0",
+        ],
+        &[
+            (
+                "DANTESYNC_GATE_WIN_HTTP_STRIH",
+                &p_strih.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_WIN_HTTP_STREAM",
+                &p_stream.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_MASTER_DEADBAND_STATUS",
+                &p_priming.display().to_string(),
+            ),
+        ],
+    );
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    let stream_line = stdout
+        .lines()
+        .find(|l| l.trim_start().starts_with("stream"))
+        .unwrap_or_else(|| panic!("no stream report line in stdout: {stdout}"));
+    assert!(
+        stream_line.contains("resampled once after a 0s delay"),
+        "the --chase-resample-delay-s value must be reflected verbatim in the note: {stream_line:?}"
+    );
+}
+
+#[test]
+fn gate_chase_resample_delay_s_malformed_is_a_usage_error_1022() {
+    let (code, _stdout, stderr) = run_gate(&[
+        "--linux",
+        "",
+        "--win-http",
+        "strih=10.77.9.202",
+        "--chase-resample-delay-s",
+        "abc",
+    ]);
+    assert_eq!(
+        code, 1,
+        "a non-numeric --chase-resample-delay-s must be a usage error (1). stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("--chase-resample-delay-s"),
+        "stderr must name the flag: {stderr}"
+    );
+}
+
+#[test]
+fn help_describes_the_chase_resample_delay_flag_1022() {
+    let (code, stdout, _stderr) = run_gate(&["--help"]);
+    assert_eq!(code, 0, "--help must exit 0");
+    assert!(
+        stdout.contains("--chase-resample-delay-s"),
+        "usage text must document the new flag: {stdout}"
+    );
+}
+
+#[test]
+fn gate_resample_reports_stale_when_the_ntp_measurement_ages_out_during_the_delay_1022() {
+    // Review finding: the resample takes real wall-clock time (the delay + another full sampling
+    // window) -- long enough for a borderline-fresh NTP measurement to cross into staleness
+    // during that gap (the #1014 "frozen/free-running measurement graded as live" class). The
+    // resampled round's OWN freshness must be re-verified before its median/spread are trusted --
+    // never silently grade a now-stale measurement just because the ORIGINAL round was fresh.
+    let base = now_epoch();
+    let strih_responses = vec![
+        http_status_ntp_deadband(base, 2400, "2", false, "2500"),
+        http_status_ntp_deadband(base + 5, 2500, "3", false, "2500"),
+        http_status_ntp_deadband(base + 10, 2450, "2", false, "2500"),
+    ];
+    let p_strih = write_multi_read_fixture("strih_1022_resample_stale_master", &strih_responses);
+    let p_priming = write_win_http_fixture(
+        "strih_1022_resample_stale_priming",
+        &http_status_ntp_deadband(base, 2450, "2", false, "2500"),
+    );
+    // Chase round: fresh, unstable, mixed-sign elevated (2600, -2200) -> exclusion declines
+    // (genuinely needs the resample fallback), worst sample within the envelope -> resample
+    // fires. Resample round: ntp_failed=true on every payload -> the resampled data is STALE.
+    let stream_responses = vec![
+        http_status_ntp(base, 0, "2", false),
+        http_status_ntp(base + 5, 2600, "3", false),
+        http_status_ntp(base + 10, -2200, "2", false),
+        http_status_ntp(base + 15, 10, "2", true),
+        http_status_ntp(base + 20, 20, "3", true),
+        http_status_ntp(base + 25, 15, "2", true),
+    ];
+    let p_stream = write_multi_read_fixture("stream_1022_resample_stale_client", &stream_responses);
+
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--win-http",
+            "stream=10.77.9.204",
+            "--samples",
+            "3",
+            "--min-distinct",
+            "3",
+            "--window-s",
+            "0",
+            "--chase-resample-delay-s",
+            "0",
+        ],
+        &[
+            (
+                "DANTESYNC_GATE_WIN_HTTP_STRIH",
+                &p_strih.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_WIN_HTTP_STREAM",
+                &p_stream.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_MASTER_DEADBAND_STATUS",
+                &p_priming.display().to_string(),
+            ),
+        ],
+    );
+    assert_eq!(
+        code, 11,
+        "a resample whose NTP measurement went stale must be INCOMPLETE (11), never a silent \
+         grade of stale data. stdout={stdout} stderr={stderr}"
+    );
+    let stream_line = stdout
+        .lines()
+        .find(|l| l.trim_start().starts_with("stream"))
+        .unwrap_or_else(|| panic!("no stream report line in stdout: {stdout}"));
+    assert!(
+        stream_line.contains("STALE"),
+        "must report STALE for the now-aged-out resampled measurement, never grade its \
+         median/spread as if it were still live: {stream_line:?}"
+    );
+    let _ = stderr;
+}
+
+#[test]
+fn gate_resampled_round_that_shows_a_clean_chase_signature_is_also_excused_1022() {
+    // Review finding: the "excused-after-resample" composition (grade_http_node retries
+    // chase_bimodal_exclusion_verdict on the FRESH round, not just the original one) had zero
+    // test coverage. Chase round: mixed-sign elevated (declines exclusion, but resample-eligible,
+    // same shape as the sibling resample tests). Resample round: a CLEAN bimodal signature (tight
+    // baseline pair + one tight same-sign elevated sample, all within the envelope) -- must be
+    // excused via exclusion on the SECOND round, not graded raw as "unstable".
+    let base = now_epoch();
+    let strih_responses = vec![
+        http_status_ntp_deadband(base, 2400, "2", false, "2500"),
+        http_status_ntp_deadband(base + 5, 2500, "3", false, "2500"),
+        http_status_ntp_deadband(base + 10, 2450, "2", false, "2500"),
+    ];
+    let p_strih = write_multi_read_fixture("strih_1022_resample_excused_master", &strih_responses);
+    let p_priming = write_win_http_fixture(
+        "strih_1022_resample_excused_priming",
+        &http_status_ntp_deadband(base, 2450, "2", false, "2500"),
+    );
+    let stream_responses = vec![
+        // Chase round: mixed-sign elevated -- declines exclusion, resample-eligible (worst
+        // sample 2600 <= 3500 bound).
+        http_status_ntp(base, 0, "2", false),
+        http_status_ntp(base + 5, 2600, "3", false),
+        http_status_ntp(base + 10, -2200, "2", false),
+        // Resample round: clean bimodal signature (0, 0, 2600) -- must be excused.
+        http_status_ntp(base + 15, 0, "4", false),
+        http_status_ntp(base + 20, 0, "5", false),
+        http_status_ntp(base + 25, 2600, "6", false),
+    ];
+    let p_stream =
+        write_multi_read_fixture("stream_1022_resample_excused_client", &stream_responses);
+
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--win-http",
+            "stream=10.77.9.204",
+            "--samples",
+            "3",
+            "--min-distinct",
+            "3",
+            "--window-s",
+            "0",
+            "--chase-resample-delay-s",
+            "0",
+        ],
+        &[
+            (
+                "DANTESYNC_GATE_WIN_HTTP_STRIH",
+                &p_strih.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_WIN_HTTP_STREAM",
+                &p_stream.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_MASTER_DEADBAND_STATUS",
+                &p_priming.display().to_string(),
+            ),
+        ],
+    );
+    assert_eq!(
+        code, 0,
+        "a resampled round that shows a clean chase signature must be excused, not graded raw. \
+         stdout={stdout} stderr={stderr}"
+    );
+    let stream_line = stdout
+        .lines()
+        .find(|l| l.trim_start().starts_with("stream"))
+        .unwrap_or_else(|| panic!("no stream report line in stdout: {stdout}"));
+    assert!(
+        stream_line.contains("resampled once")
+            && stream_line.contains("explained by master step-chase"),
+        "must show BOTH the resample note (round 1 declined exclusion) AND the exclusion note \
+         (round 2 -- the resampled data -- was excused): {stream_line:?}"
+    );
+    assert!(
+        !stream_line.contains("UNSTABLE"),
+        "stream_line: {stream_line:?}"
+    );
+    let _ = stderr;
 }

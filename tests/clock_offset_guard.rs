@@ -1951,3 +1951,673 @@ fn ntp_master_effective_bound_us_fails_closed_on_malformed_bound_or_margin_1021(
         );
     }
 }
+
+// --- client_chase_bound_us (#1022) --------------------------------------------------------------
+//
+// #1021 (above) widens ONLY the NTP-master row's own median bound against ITS OWN
+// self-reported ntp_deadband_us. #1022 (dantesync-gate: client rows false-DRIFT during the
+// master's deadband step-chase window) found live that a CLIENT node's own ntp_offset_us ALSO
+// legitimately ramps during that same window -- "when the master finally steps, every fleet
+// client steps by the same amount within its next NTP measurement cycle" -- because a client
+// measures its offset against the master over the LAN, and the master's own accumulated-but-
+// not-yet-corrected phase shows up there too. A client always reports its OWN
+// "ntp_deadband_us":null, so the widening must be derived from a DIFFERENT node's (the master's)
+// status. client_chase_bound_us is that sibling of ntp_master_effective_bound_us: same shape,
+// but (a) reads a caller-supplied MASTER status (not the node being graded), and (b) CAPS the
+// deadband component at a CEILING_US (the ticket's own cited "upstream hard per-step ceiling",
+// 5000us) before adding the margin -- since this can widen MANY client rows per gate run (not
+// just the one master row), an unbounded floor would be a far bigger blast radius than #1021's
+// single-row widening if ntp_deadband_us were ever misreported/misconfigured.
+
+#[test]
+fn client_chase_bound_us_widens_when_master_deadband_present_1022() {
+    let master_status = pipe_json_deadband("2500");
+    let out = run_sourced(
+        "client_chase_bound_us \"$JSON\" 2000 1000 5000",
+        &[("JSON", master_status.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "3500",
+        "max(2000, min(2500,5000)+1000) = 3500 -- the master's own deadband+margin floor wins \
+         over the fixed client bound: {out:?}"
+    );
+}
+
+#[test]
+fn client_chase_bound_us_never_lowers_below_the_fixed_bound_1022() {
+    let master_status = pipe_json_deadband("50");
+    let out = run_sourced(
+        "client_chase_bound_us \"$JSON\" 2000 100 5000",
+        &[("JSON", master_status.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "2000",
+        "max(2000, min(50,5000)+100=150) = 2000 -- the fixed client bound must never be lowered: \
+         {out:?}"
+    );
+}
+
+#[test]
+fn client_chase_bound_us_falls_back_on_null_absent_and_negative_master_deadband_1022() {
+    let cases = [
+        pipe_json_deadband("null"),
+        "{\"updated_ts\":1000,\"ntp_offset_us\":100}".to_string(),
+        pipe_json_deadband("-5"),
+    ];
+    for status in cases {
+        let out = run_sourced(
+            "client_chase_bound_us \"$JSON\" 2000 1000 5000",
+            &[("JSON", status.as_str())],
+        );
+        assert_eq!(
+            out.trim(),
+            "2000",
+            "null/absent/negative master ntp_deadband_us -- e.g. a pre-dantesync-#84 master, or \
+             the master's HTTP read simply failing -- must fall back to the unmodified fixed \
+             client bound, never a blind widen (status={status}): {out:?}"
+        );
+    }
+}
+
+#[test]
+fn client_chase_bound_us_caps_the_deadband_component_at_the_hard_ceiling_1022() {
+    // An (unrealistic, defensive-test) absurdly large master deadband must NOT blindly widen
+    // every client's bound to match it -- the ceiling caps the deadband component FIRST, so a
+    // client median that clears the capped envelope still DRIFTs even though it would have
+    // PASSED under an uncapped (blind) widen.
+    let master_status = pipe_json_deadband("50000");
+    let out = run_sourced(
+        "client_chase_bound_us \"$JSON\" 2000 1000 5000",
+        &[("JSON", master_status.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "6000",
+        "max(2000, min(50000,5000)+1000) = 6000 -- the 5000us ceiling caps the deadband \
+         component before the margin is added, never the raw 50000us: {out:?}"
+    );
+}
+
+#[test]
+fn client_chase_bound_us_fails_closed_on_malformed_bound_margin_or_ceiling_1022() {
+    // Same #595 bash-gotcha discipline as ntp_master_effective_bound_us above: BOUND_US,
+    // MARGIN_US, and CEILING_US are each validated with `grep -qE '^[0-9]+$'` BEFORE any
+    // arithmetic -- a malformed one falls back to the RAW (unmodified) bound text, never a crash
+    // and never a silently-invented number.
+    let master_status = pipe_json_deadband("2500");
+    let cases = [
+        ("abc", "1000", "5000"),
+        ("2000", "abc", "5000"),
+        ("2000", "1000", "abc"),
+        ("-5", "1000", "5000"),
+    ];
+    for (bound, margin, ceiling) in cases {
+        let out = run_sourced(
+            &format!("client_chase_bound_us \"$JSON\" '{bound}' '{margin}' '{ceiling}'"),
+            &[("JSON", master_status.as_str())],
+        );
+        assert_eq!(
+            out.trim(),
+            bound,
+            "a malformed BOUND_US/MARGIN_US/CEILING_US must fall back to the RAW (unmodified) \
+             bound text, never guess a number \
+             (bound={bound} margin={margin} ceiling={ceiling}): {out:?}"
+        );
+    }
+}
+
+// --- #1022 review hardening: leading-zero numeric input must never crash the arithmetic --------
+//
+// Both client_chase_bound_us and its master-row sibling validate BOUND_US/MARGIN_US/CEILING_US/
+// the parsed deadband with `grep -qE '^[0-9]+$'` (or `^-?[0-9]+$'` for the possibly-negative
+// deadband) -- a regex that happily ACCEPTS a leading-zero digit string like "0900". Bash's
+// `$((...))` arithmetic expansion (unlike its `[ -gt/-lt ]` test comparisons, which stay decimal)
+// treats a leading "0" as an OCTAL prefix -- "0900" contains the digit 9, which is not valid
+// octal, so `$((capped + margin))` aborts the WHOLE sourcing shell under `set -e` with "value too
+// great for base" instead of reaching the documented graceful fallback. A live repro (found in
+// review): `client_chase_bound_us '{"ntp_deadband_us":2500}' 2000 0900 5000` crashes the calling
+// shell outright. Reachable via an operator's zero-padded --deadband-margin-us (or a client
+// mistakenly configured with --client-chase-ceiling-us zero-padded), and in principle via a
+// deadband value extracted from a malformed/adversarial status payload (well-formed JSON itself
+// disallows a leading-zero numeric literal, but the grep-based extractor here does not enforce
+// that). The fix normalizes every validated numeric operand to canonical base-10 (`10#$var`)
+// immediately before the ONE arithmetic expression each function contains -- never changing the
+// MEANING of a valid decimal string (leading zeros are conventionally decimal, never octal, to a
+// human reading a CLI flag), only how bash's arithmetic evaluator parses it.
+
+#[test]
+fn client_chase_bound_us_normalizes_leading_zero_margin_and_deadband_never_crashes_1022() {
+    // margin="0900" must mean decimal 900, not trip bash's octal-prefix parsing (which would
+    // abort on the digit 9) and not silently mean something else either.
+    let master_status = pipe_json_deadband("2500");
+    let out = run_sourced(
+        "client_chase_bound_us \"$JSON\" 2000 0900 5000",
+        &[("JSON", master_status.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "3400",
+        "max(2000, min(2500,5000)+900) = 3400 -- a leading-zero margin must be read as decimal \
+         900, and must never crash the calling shell: {out:?}"
+    );
+
+    // A leading-zero DEADBAND (the value this function caps and adds the margin to) is the same
+    // hazard from the OTHER operand -- exercised via the ceiling path too (capped can end up
+    // holding either the deadband's or the ceiling's raw text).
+    let deadband_leading_zero = pipe_json_deadband("0900");
+    let out = run_sourced(
+        "client_chase_bound_us \"$JSON\" 2000 1000 5000",
+        &[("JSON", deadband_leading_zero.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "2000",
+        "max(2000, min(900,5000)+1000=1900) = 2000 -- a leading-zero deadband must be read as \
+         decimal 900, never crash: {out:?}"
+    );
+
+    let out = run_sourced(
+        "client_chase_bound_us \"$JSON\" 2000 0100 05000",
+        &[("JSON", master_status.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "2600",
+        "max(2000, min(2500,5000)+100) = 2600 -- a leading-zero margin AND ceiling together must \
+         still compute the correct decimal result: {out:?}"
+    );
+}
+
+#[test]
+fn ntp_master_effective_bound_us_normalizes_leading_zero_margin_and_deadband_never_crashes_1022() {
+    let status_deadband = pipe_json_deadband("2500");
+    let out = run_sourced(
+        "ntp_master_effective_bound_us \"$JSON\" 2000 0900",
+        &[("JSON", status_deadband.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "3400",
+        "max(2000, 2500+900) = 3400 -- a leading-zero margin must be read as decimal 900, and \
+         must never crash the calling shell: {out:?}"
+    );
+
+    let status_leading_zero_deadband = pipe_json_deadband("0900");
+    let out = run_sourced(
+        "ntp_master_effective_bound_us \"$JSON\" 2000 1000",
+        &[("JSON", status_leading_zero_deadband.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "2000",
+        "max(2000, 900+1000=1900) = 2000 -- a leading-zero deadband must be read as decimal 900, \
+         never crash: {out:?}"
+    );
+}
+
+// --- #1022 spread-side completion: max_abs_of_ints / should_resample_for_chase -----------------
+//
+// client_chase_bound_us (above) only ever widens a CLIENT row's MEDIAN check -- the spread/
+// stability check stays fully active by design. Live evidence from a merged round's real E2E
+// rerun showed the SAME master step that the median fix already handles can ALSO inflate a
+// client's SPREAD past the fixed 2000us stability bound (one elevated sample inside an otherwise-
+// baseline window), and because the step is on ONE clock shared by the fleet, the SAME step can
+// trip MULTIPLE clients in the SAME run. should_resample_for_chase decides whether an "unstable"
+// verdict is worth ONE fresh resample before failing -- these tests pin the pure DECISION only;
+// the actual re-gather + delay is exercised end-to-end in tests/dantesync_gate.rs.
+
+#[test]
+fn max_abs_of_ints_returns_the_largest_magnitude_regardless_of_sign() {
+    let out = run_sourced("max_abs_of_ints \"$L\"", &[("L", "100\n-2682\n50\n")]);
+    assert_eq!(
+        out.trim(),
+        "2682",
+        "the negative value's magnitude must win: {out:?}"
+    );
+}
+
+#[test]
+fn max_abs_of_ints_empty_on_no_valid_values() {
+    let out = run_sourced("max_abs_of_ints \"$L\"", &[("L", "")]);
+    assert_eq!(
+        out.trim(),
+        "",
+        "no samples -> empty, never a guessed number: {out:?}"
+    );
+
+    let out = run_sourced(
+        "max_abs_of_ints \"$L\"",
+        &[("L", "not-a-number\nalso-bad\n")],
+    );
+    assert_eq!(
+        out.trim(),
+        "",
+        "non-integer lines must be ignored, not crash: {out:?}"
+    );
+}
+
+#[test]
+fn max_abs_of_ints_single_value() {
+    let out = run_sourced("max_abs_of_ints \"$L\"", &[("L", "-42\n")]);
+    assert_eq!(out.trim(), "42", "a single value's own magnitude: {out:?}");
+}
+
+#[test]
+fn should_resample_for_chase_yes_when_unstable_and_worst_sample_fits_the_bound() {
+    // The live cam1 shape: median 0us (two near-zero samples), one elevated sample (2682us) that
+    // pushes spread past the 2000us stability bound -- but 2682 <= the (already #1022-widened)
+    // 3500us bound, so this looks like a plausible single step-chase excursion, worth a resample.
+    let payloads = format!(
+        "{}\n{}\n{}\n",
+        pipe_json(1000, 0),
+        pipe_json(1025, 0),
+        pipe_json(1050, 2682),
+    );
+    let out = run_sourced(
+        "should_resample_for_chase \"$P\" 3500 2000 3 full",
+        &[("P", payloads.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "yes",
+        "unstable + worst sample within bound -> yes: {out:?}"
+    );
+}
+
+#[test]
+fn should_resample_for_chase_no_when_verdict_is_ok() {
+    let payloads = format!(
+        "{}\n{}\n{}\n",
+        pipe_json(1000, 10),
+        pipe_json(1025, 20),
+        pipe_json(1050, 15),
+    );
+    let out = run_sourced(
+        "should_resample_for_chase \"$P\" 3500 2000 3 full",
+        &[("P", payloads.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "no",
+        "a healthy ok verdict has nothing to resample for: {out:?}"
+    );
+}
+
+#[test]
+fn should_resample_for_chase_no_when_verdict_is_drift_or_drift_unstable() {
+    // drift: median itself exceeds the bound -- no resample can fix a real out-of-bound median.
+    let drift_payloads = format!(
+        "{}\n{}\n{}\n",
+        pipe_json(1000, 9000),
+        pipe_json(1025, 9100),
+        pipe_json(1050, 8900),
+    );
+    let out = run_sourced(
+        "should_resample_for_chase \"$P\" 3500 2000 3 full",
+        &[("P", drift_payloads.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "no",
+        "drift (median out of bound) must never resample: {out:?}"
+    );
+
+    // drift_unstable: both median AND spread fail. median([5000,5100,9000])=5100 > bound(2000)
+    // -> drift; spread(9000-5000=4000) > stability(1000) -> unstable too. Verified directly by
+    // sourcing the script (sampled_offset_verdict returns "drift_unstable" for these exact
+    // inputs) -- a review finding caught an earlier version of this fixture that accidentally
+    // produced a plain "unstable" verdict instead, so this sub-case never exercised the
+    // drift_unstable branch of the verdict gate at all.
+    let drift_unstable_payloads = format!(
+        "{}\n{}\n{}\n",
+        pipe_json(1000, 5000),
+        pipe_json(1025, 5100),
+        pipe_json(1050, 9000),
+    );
+    let out = run_sourced(
+        "should_resample_for_chase \"$P\" 2000 1000 3 full",
+        &[("P", drift_unstable_payloads.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "no",
+        "drift_unstable (median ALSO out of bound) must never resample: {out:?}"
+    );
+}
+
+#[test]
+fn should_resample_for_chase_no_when_insufficient_distinct_samples() {
+    let payloads = format!("{}\n", pipe_json(1000, 0));
+    let out = run_sourced(
+        "should_resample_for_chase \"$P\" 3500 2000 3 full",
+        &[("P", payloads.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "no",
+        "too few distinct samples -> no resample: {out:?}"
+    );
+}
+
+#[test]
+fn should_resample_for_chase_no_for_the_master_median_only_mode() {
+    // The exact SAME sample shape that returns "yes" under "full" mode above must return "no"
+    // under "median-only" -- the master's own row never has a spread verdict to begin with
+    // (sampled_offset_verdict skips the spread check entirely in median-only mode), so this must
+    // be excluded both by the explicit mode check AND structurally (verdict can never be
+    // "unstable" in that mode).
+    let payloads = format!(
+        "{}\n{}\n{}\n",
+        pipe_json(1000, 0),
+        pipe_json(1025, 0),
+        pipe_json(1050, 2682),
+    );
+    let out = run_sourced(
+        "should_resample_for_chase \"$P\" 3500 2000 3 median-only",
+        &[("P", payloads.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "no",
+        "the master's median-only row must never resample: {out:?}"
+    );
+}
+
+#[test]
+fn should_resample_for_chase_no_when_the_worst_sample_exceeds_the_bound() {
+    // median 0us (in bound), spread 3600us (over stability) -- but the worst sample (3600) itself
+    // exceeds the 3500us bound: this looks bigger than any legitimate single step-chase excursion
+    // could produce, so it must fail immediately, never get a second chance via resample (the
+    // #836 genuine-scatter class, or a real clock fault, is never masked).
+    let payloads = format!(
+        "{}\n{}\n{}\n",
+        pipe_json(1000, 0),
+        pipe_json(1025, 0),
+        pipe_json(1050, 3600),
+    );
+    let out = run_sourced(
+        "should_resample_for_chase \"$P\" 3500 2000 3 full",
+        &[("P", payloads.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "no",
+        "a worst sample beyond the bound must never resample, even though median stays in bound: \
+         {out:?}"
+    );
+}
+
+#[test]
+fn should_resample_for_chase_no_on_malformed_bound() {
+    let payloads = format!(
+        "{}\n{}\n{}\n",
+        pipe_json(1000, 0),
+        pipe_json(1025, 0),
+        pipe_json(1050, 2682),
+    );
+    let out = run_sourced(
+        "should_resample_for_chase \"$P\" abc 2000 3 full",
+        &[("P", payloads.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "no",
+        "a malformed BOUND_US must never resample: {out:?}"
+    );
+}
+
+// --- #1022 bimodal chase-signature exclusion (supersedes relying on resample-once alone) -------
+//
+// A live rerun proved resample-once is a COIN FLIP, not a deterministic fix: the client's own
+// elevated-offset duty cycle is ~30-60s per ~130-150s master step period (25-45%), so a fixed
+// resample delay collides with the SAME (or the NEXT) excursion roughly that often -- observed
+// live, cam1's 15s-delayed resample landed inside the same still-unresolved excursion and
+// reported UNSTABLE again with the identical 2561us spread. chase_bimodal_exclusion_verdict
+// grades the window's samples DIRECTLY for the signature a step-chase leaves (a tight baseline
+// cluster near zero PLUS a tight, same-sign elevated cluster at the step size) instead of hoping
+// an independent resample lands outside the excursion -- deterministic, not probabilistic.
+
+#[test]
+fn chase_bimodal_exclusion_verdict_yes_on_the_exact_live_cam1_shape_1022() {
+    // The EXACT live rerun shape (E2E run 31640853894): 6 distinct samples, 3 at baseline (0us),
+    // 3 in one tight elevated mode (2561us) -- median 0us, spread 2561us, bound 3500us
+    // (deadband 2500 + margin 1000), stability 2000us.
+    let payloads = format!(
+        "{}\n{}\n{}\n{}\n{}\n{}\n",
+        pipe_json(1000, 0),
+        pipe_json(1005, 0),
+        pipe_json(1010, 0),
+        pipe_json(1015, 2561),
+        pipe_json(1020, 2561),
+        pipe_json(1025, 2561),
+    );
+    let out = run_sourced(
+        "chase_bimodal_exclusion_verdict \"$P\" 3500 2000 6 full",
+        &[("P", payloads.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "yes",
+        "the exact live cam1 shape (tight baseline + one tight same-sign elevated mode, all \
+         within the envelope) must be explained by the chase signature: {out:?}"
+    );
+}
+
+#[test]
+fn chase_bimodal_exclusion_report_reflects_elevated_count_and_baseline_spread_1022() {
+    let payloads = format!(
+        "{}\n{}\n{}\n{}\n{}\n{}\n",
+        pipe_json(1000, 0),
+        pipe_json(1005, 0),
+        pipe_json(1010, 0),
+        pipe_json(1015, 2561),
+        pipe_json(1020, 2561),
+        pipe_json(1025, 2561),
+    );
+    let out = run_sourced(
+        "chase_bimodal_exclusion_report \"$P\" 2000",
+        &[("P", payloads.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "3 0",
+        "3 elevated samples, baseline spread 0us (all three baseline samples are 0): {out:?}"
+    );
+}
+
+#[test]
+fn chase_bimodal_exclusion_verdict_yes_with_a_single_baseline_sample_1022() {
+    // A single baseline sample has an undefined spread -- must be treated as vacuously within
+    // bound (nothing to scatter from one point), not as a failure.
+    let payloads = format!(
+        "{}\n{}\n{}\n",
+        pipe_json(1000, 0),
+        pipe_json(1005, 2561),
+        pipe_json(1010, 2564),
+    );
+    let out = run_sourced(
+        "chase_bimodal_exclusion_verdict \"$P\" 3500 2000 3 full",
+        &[("P", payloads.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "yes",
+        "a single baseline sample plus a tight same-sign elevated pair must still be explained: \
+         {out:?}"
+    );
+}
+
+#[test]
+fn chase_bimodal_exclusion_verdict_no_when_elevated_samples_scatter_1022() {
+    // Genuine multi-modal scatter: elevated samples do NOT cluster (spread among them exceeds
+    // stability) -- a wide bound (8000) is used here specifically so the elevated magnitude range
+    // has room for a same-sign pair to scatter beyond stability while both individually still fit
+    // the envelope (isolates condition 4 from condition 2).
+    let payloads = format!(
+        "{}\n{}\n{}\n",
+        pipe_json(1000, 0),
+        pipe_json(1005, 2500),
+        pipe_json(1010, 7500),
+    );
+    let out = run_sourced(
+        "chase_bimodal_exclusion_verdict \"$P\" 8000 2000 3 full",
+        &[("P", payloads.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "no",
+        "elevated samples that don't cluster (spread 5000us > stability 2000us) must NOT be \
+         explained -- this is the #836 genuine-scatter class: {out:?}"
+    );
+}
+
+#[test]
+fn chase_bimodal_exclusion_verdict_no_when_elevated_samples_have_mixed_sign_1022() {
+    // Mixed-sign elevated samples (a coherent phase offset is always one sign, never split
+    // around zero). Note: given the elevated magnitude range is bounded to (stability, bound],
+    // two opposite-sign elevated values always ALSO fail the clustering check (their difference
+    // exceeds 2*stability > stability) -- this test asserts the observable "no", not which
+    // specific condition caught it.
+    let payloads = format!(
+        "{}\n{}\n{}\n",
+        pipe_json(1000, 0),
+        pipe_json(1005, 2500),
+        pipe_json(1010, -2600),
+    );
+    let out = run_sourced(
+        "chase_bimodal_exclusion_verdict \"$P\" 8000 2000 3 full",
+        &[("P", payloads.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "no",
+        "mixed-sign elevated samples must NOT be explained as a coherent chase: {out:?}"
+    );
+}
+
+#[test]
+fn chase_bimodal_exclusion_verdict_no_when_an_elevated_sample_exceeds_the_bound_1022() {
+    let payloads = format!(
+        "{}\n{}\n{}\n",
+        pipe_json(1000, 0),
+        pipe_json(1005, 0),
+        pipe_json(1010, 4000),
+    );
+    let out = run_sourced(
+        "chase_bimodal_exclusion_verdict \"$P\" 3500 2000 3 full",
+        &[("P", payloads.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "no",
+        "an elevated sample beyond the envelope (4000us > 3500us bound) looks bigger than any \
+         legitimate step could produce -- must never be explained away: {out:?}"
+    );
+}
+
+#[test]
+fn chase_bimodal_exclusion_verdict_no_for_the_master_median_only_mode_1022() {
+    let payloads = format!(
+        "{}\n{}\n{}\n{}\n{}\n{}\n",
+        pipe_json(1000, 0),
+        pipe_json(1005, 0),
+        pipe_json(1010, 0),
+        pipe_json(1015, 2561),
+        pipe_json(1020, 2561),
+        pipe_json(1025, 2561),
+    );
+    let out = run_sourced(
+        "chase_bimodal_exclusion_verdict \"$P\" 3500 2000 6 median-only",
+        &[("P", payloads.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "no",
+        "the master's median-only row must never be graded via the client chase signature: {out:?}"
+    );
+}
+
+#[test]
+fn chase_bimodal_exclusion_verdict_no_when_verdict_is_not_unstable_1022() {
+    // A healthy "ok" verdict has nothing to explain.
+    let ok_payloads = format!(
+        "{}\n{}\n{}\n",
+        pipe_json(1000, 10),
+        pipe_json(1005, 20),
+        pipe_json(1010, 15),
+    );
+    let out = run_sourced(
+        "chase_bimodal_exclusion_verdict \"$P\" 3500 2000 3 full",
+        &[("P", ok_payloads.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "no",
+        "a healthy 'ok' verdict has nothing to explain: {out:?}"
+    );
+
+    // A genuine "drift" (median itself out of bound) is never rescued by this path either.
+    let drift_payloads = format!(
+        "{}\n{}\n{}\n",
+        pipe_json(1000, 9000),
+        pipe_json(1005, 9100),
+        pipe_json(1010, 8900),
+    );
+    let out = run_sourced(
+        "chase_bimodal_exclusion_verdict \"$P\" 3500 2000 3 full",
+        &[("P", drift_payloads.as_str())],
+    );
+    assert_eq!(
+        out.trim(),
+        "no",
+        "drift (median out of bound) must never be explained away by the chase signature: {out:?}"
+    );
+}
+
+#[test]
+fn chase_bimodal_exclusion_check_prints_an_ok_line_with_the_exclusion_note_and_returns_0() {
+    // Direct unit test for the print/format wrapper (review finding: it had no dedicated test,
+    // unlike its sibling sampled_offset_check). The caller is required to have already confirmed
+    // chase_bimodal_exclusion_verdict == "yes" for the SAME inputs -- this test uses the exact
+    // live cam1 shape, which does.
+    let payloads = format!(
+        "{}\n{}\n{}\n{}\n{}\n{}\n",
+        pipe_json(1000, 0),
+        pipe_json(1005, 0),
+        pipe_json(1010, 0),
+        pipe_json(1015, 2561),
+        pipe_json(1020, 2561),
+        pipe_json(1025, 2561),
+    );
+    let out = run_sourced(
+        "set +e; chase_bimodal_exclusion_check cam1 \"$P\" 3500 2000; echo \"rc=$?\"",
+        &[("P", payloads.as_str())],
+    );
+    assert!(
+        out.contains("cam1") && out.contains("OK") && out.contains("rc=0"),
+        "must print an OK line for the label and return 0: {out:?}"
+    );
+    assert!(
+        out.contains("median 0us") && out.contains("spread 2561us"),
+        "must carry the SAME median/spread numbers sampled_offset_check would report: {out:?}"
+    );
+    assert!(
+        out.contains("explained by master step-chase")
+            && out.contains("3 elevated samples")
+            && out.contains("baseline spread 0us"),
+        "must carry the bimodal-exclusion explanation with the correct elevated count and \
+         baseline spread: {out:?}"
+    );
+
+    // EXTRA_NOTE (5th arg) is appended, mirroring sampled_offset_check's own extra_note param.
+    let out = run_sourced(
+        "set +e; chase_bimodal_exclusion_check cam1 \"$P\" 3500 2000 ' -- widened to 3500us'; echo \"rc=$?\"",
+        &[("P", payloads.as_str())],
+    );
+    assert!(
+        out.contains("widened to 3500us") && out.contains("explained by master step-chase"),
+        "the extra_note must be appended alongside the exclusion explanation, not replace it: {out:?}"
+    );
+}
