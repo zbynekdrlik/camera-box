@@ -3082,12 +3082,18 @@ fn check_imag_report_clean_when_every_value_matches_the_pinned_set_463() {
     let log = format!("genlock: latency = 3 ms\n{GENLOCK_RT_PIN_OK_LINE}");
     let body = r#"
         rc=0
-        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "$LOG" "/usr/lib/x86_64-linux-gnu/obs-plugins/distroav.so" "1" "locked" "Jul 05 10:15:22 imag-nb dantesync[1234]: [PTP] LOCK Drift 12 ns/s offset -340ns" "$TS_STATES" || rc=$?
+        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "$LOG" "/usr/lib/x86_64-linux-gnu/obs-plugins/distroav.so" "1" "locked" "Jul 05 10:15:22 imag-nb dantesync[1234]: [PTP] LOCK Drift 12 ns/s offset -340ns" "$TS_STATES" "$POWER" "29" || rc=$?
         echo "RC=$rc"
     "#;
+    // #1040: the 13th/14th args are a clean power-envelope block + the pinned 29 W — must ALSO read
+    // clean, or this "everything matches" case regresses to UNKNOWN on the new power_envelope check.
     let out = run_sourced(
         body,
-        &[("LOG", &log), ("TS_STATES", TIMESYNC_STATES_CLEAN_FIXTURE)],
+        &[
+            ("LOG", &log),
+            ("TS_STATES", TIMESYNC_STATES_CLEAN_FIXTURE),
+            ("POWER", POWER_GATHER_CLEAN_29W),
+        ],
     );
     assert!(
         out.contains("RC=0"),
@@ -3207,6 +3213,91 @@ fn check_imag_report_timesync_authority_unknown_when_not_read_596() {
     assert!(
         line.contains("UNKNOWN"),
         "an unread timesync-daemon block must report UNKNOWN, never a false OK/DRIFT: {line:?}"
+    );
+}
+
+// #1040: power/thermal-envelope facet — the 13th (power gather block) + 14th (pinned watts)
+// optional args of check_imag_report. A clean gather at the pinned 29 W is OK; a 25 W clamp is
+// DRIFT (the whole regression signature); an unread block is UNKNOWN, never a false DRIFT.
+const POWER_GATHER_CLEAN_29W: &str = "\
+ZONE|package-0
+CONSTRAINT|package-0|1|long_term|29000000
+ENABLED|package-0|1
+SLPC|1
+THERMALD||inactive|not-found
+UNIT|imag-power-envelope.service|enabled|active
+UNIT|imag-power-envelope-guard.timer|enabled|active
+TCPU|84
+";
+
+#[test]
+fn check_imag_report_power_envelope_ok_when_pl1_matches_the_pin_1040() {
+    let body = r#"
+        rc=0
+        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "genlock: latency = 3 ms" "/plugin/path" "1" "" "" "" "$POWER" "29" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[("POWER", POWER_GATHER_CLEAN_29W)]);
+    // Scope this to the POWER facet: every power_envelope row must be OK, and the clean envelope
+    // must contribute NO DRIFT (the sibling dantesync/timesync rows read UNKNOWN here only because
+    // this test deliberately leaves their args empty — that is unrelated to the power facet).
+    let power_rows: Vec<&str> = out
+        .lines()
+        .filter(|l| l.contains("power_envelope"))
+        .collect();
+    assert!(
+        power_rows.len() >= 4,
+        "expected pl1/slpc/thermald/units power rows: {out:?}"
+    );
+    for l in &power_rows {
+        assert!(
+            l.contains("OK"),
+            "every power_envelope row must read OK on a clean 29 W gather: {l:?}"
+        );
+    }
+}
+
+#[test]
+fn check_imag_report_power_envelope_drift_when_pl1_clamped_to_25w_1040() {
+    // The exact regression signature: MMIO PL1 clamped to 25 W while the pin is 29 W.
+    let clamped = POWER_GATHER_CLEAN_29W.replace("long_term|29000000", "long_term|25000000");
+    let body = r#"
+        rc=0
+        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "genlock: latency = 3 ms" "/plugin/path" "1" "" "" "" "$POWER" "29" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[("POWER", &clamped)]);
+    assert!(
+        out.contains("RC=20"),
+        "a 25 W clamp vs pinned 29 W must DRIFT (exit 20): {out:?}"
+    );
+    let line = out
+        .lines()
+        .find(|l| l.contains("power_envelope") && l.contains("pl1"))
+        .unwrap_or_else(|| panic!("no power_envelope pl1 DRIFT row printed: {out:?}"));
+    assert!(
+        line.contains("DRIFT"),
+        "the pl1 row must read DRIFT: {line:?}"
+    );
+}
+
+#[test]
+fn check_imag_report_power_envelope_unknown_when_not_gathered_backward_compat_1040() {
+    // Old 12-arg call sites (no power gather block) must still get a graceful UNKNOWN power row,
+    // never an `unbound variable` crash under set -u nor a false DRIFT.
+    let body = r#"
+        rc=0
+        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "genlock: latency = 3 ms" "/plugin/path" "1" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[]);
+    let line = out
+        .lines()
+        .find(|l| l.contains("power_envelope"))
+        .unwrap_or_else(|| panic!("no power_envelope row printed on a 9-arg call: {out:?}"));
+    assert!(
+        line.contains("UNKNOWN"),
+        "an unread power-envelope block must report UNKNOWN, never a false DRIFT: {line:?}"
     );
 }
 
@@ -3421,15 +3512,17 @@ fn check_imag_report_end_to_end_from_a_realistic_imag_log_463() {
         fps="$(fps_from_log "$LOG")"
         latency="$(genlock_latency_ms_from_log "$LOG")"
         rc=0
-        check_imag_report "DSHA_A" "DSHA_A" "60" "$fps" "3" "$latency" "$LOG" "/plugin/path" "1" "locked" "$DANTESYNC_LOG" "$TS_STATES" || rc=$?
+        check_imag_report "DSHA_A" "DSHA_A" "60" "$fps" "3" "$latency" "$LOG" "/plugin/path" "1" "locked" "$DANTESYNC_LOG" "$TS_STATES" "$POWER" "29" || rc=$?
         echo "RC=$rc"
     "#;
+    // #1040: a clean power-envelope block + pinned 29 W keeps this end-to-end case fully clean.
     let out = run_sourced(
         body,
         &[
             ("LOG", IMAG_LOG_60FPS_3MS),
             ("DANTESYNC_LOG", DANTESYNC_LOG_LOCKED_FIXTURE),
             ("TS_STATES", TIMESYNC_STATES_CLEAN_FIXTURE),
+            ("POWER", POWER_GATHER_CLEAN_29W),
         ],
     );
     assert!(
@@ -3527,15 +3620,17 @@ fn check_imag_report_dantesync_lock_ok_when_locked_and_pinned_489() {
     let log = format!("genlock: latency = 3 ms\n{GENLOCK_RT_PIN_OK_LINE}");
     let body = r#"
         rc=0
-        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "$LOG" "/plugin/path" "1" "locked" "$DANTESYNC_LOG" "$TS_STATES" || rc=$?
+        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "$LOG" "/plugin/path" "1" "locked" "$DANTESYNC_LOG" "$TS_STATES" "$POWER" "29" || rc=$?
         echo "RC=$rc"
     "#;
+    // #1040: a clean power-envelope block + pinned 29 W keeps this "everything else clean" case clean.
     let out = run_sourced(
         body,
         &[
             ("LOG", log.as_str()),
             ("DANTESYNC_LOG", DANTESYNC_LOG_LOCKED_FIXTURE),
             ("TS_STATES", TIMESYNC_STATES_CLEAN_FIXTURE),
+            ("POWER", POWER_GATHER_CLEAN_29W),
         ],
     );
     assert!(out.contains("RC=0"), "locked matches pin -> clean: {out:?}");

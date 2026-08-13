@@ -1,0 +1,13 @@
+[Unit]
+# imag-nb power/thermal-envelope alert (#1040), DEV1-SIDE. ONE measure -> decide -> alert pass.
+# The on-box guard journald-tags every STEP-DOWN/RE-ASSERT but imag-nb has no airuleset checkout /
+# Discord credentials -- same topology as imag-obs-alert-watchdog.service (#882).
+Description=camera-box imag-nb power-envelope alert (#1040) — one measure/decide/alert pass
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Service]
+Type=oneshot
+# %h = the installing user's home on dev1. Adjust if the checkout lives elsewhere.
+ExecStart=%h/devel/camera-box/scripts/imag-power-envelope-alert-watchdog.sh
+# One ssh round-trip to imag-nb; give it room but never hang the timer.
+TimeoutStartSec=30

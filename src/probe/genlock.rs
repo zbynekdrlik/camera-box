@@ -1845,25 +1845,17 @@ impl ReleaseCadence {
         if canvas_interval_ns == 0 {
             return None;
         }
-        // #741/#707 B2 ROBUST: scan the first K entries for the FIRST strictly-increasing
-        // consecutive pair (skip a degenerate front pair — a DUPLICATE stamp or an arrival
-        // non-monotonic seam). That delta is one real source interval past a leading duplicate;
-        // reading only the front pair used to read INCONCLUSIVE there and (sustained) crawl. Still
-        // None when NO increasing pair exists in the window — the fix widens the search, never
-        // fabricates a measurement (the sticky latch bridges the None).
+        // #741/#707 B2 ROBUST: scan the first K entries for a strictly-increasing consecutive
+        // pair (skip a degenerate front pair — a DUPLICATE stamp or an arrival non-monotonic
+        // seam). #1042: take the MINIMUM adjacent grid delta over that window, not the first —
+        // every source stamps on the monotonic DanteSync grid, so the true frame interval is the
+        // SMALLEST gap; a duplicate/dropped frame only ENLARGES a gap. The pure crate-root seam
+        // `genlock_backlog::source_interval_from_stamps` is the Tier-0-tested authority (the C
+        // `genlock_measure_source_multiple` mirrors the same min-loop). Still None when NO
+        // increasing pair exists in the window — the sticky latch bridges the None.
         let scan = queue.len().min(Self::MEASURE_SCAN_DEPTH);
-        let mut src_interval = 0u64;
-        for i in 0..scan.saturating_sub(1) {
-            let a = queue[i];
-            let b = queue[i + 1];
-            if b > a {
-                src_interval = b - a;
-                break;
-            }
-        }
-        if src_interval == 0 {
-            return None; // inconclusive: no strictly-increasing pair in the first K entries
-        }
+        let window: Vec<u64> = queue.iter().take(scan).copied().collect();
+        let src_interval = crate::genlock_backlog::source_interval_from_stamps(&window)?;
         // Round-to-nearest N = canvas / src; clamp to >=1 (a slower-than-canvas source reads 1).
         let n = (canvas_interval_ns + src_interval / 2) / src_interval;
         Some(n.max(1) as u32)

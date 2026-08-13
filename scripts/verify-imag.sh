@@ -109,6 +109,13 @@ set -euo pipefail
 #       is-enabled/is-active bookkeeping can read correctly even while the ACTUAL running process
 #       was launched directly (bypassing systemctl), leaving Restart=on-failure supervising
 #       nothing; this per-PID cgroup read is the independent proof that cannot be spoofed that way
+#   (u) power/thermal envelope (#1040): the MMIO RAPL PL1 long_term pin matches the provisioned
+#       IMAG_PL1_W (default 29 W) and is enabled; every iGPU slpc_ignore_eff_freq knob reads 1;
+#       thermald is PURGED (not installed/active/enabled); BOTH imag-power-envelope.service and
+#       imag-power-envelope-guard.timer are enabled+active; TCPU is below the guard's step-down
+#       ceiling (a reading at/above it means a clamp episode is live); and the guard's journald tag
+#       is readable. Shares imag_power_envelope_verdict with drift-guard's --check-imag facet. MUST
+#       run BEFORE check (o) below (its restart replaces the tracked obs process, #884 ordering).
 #
 # Every remote helper this gate shells out to (wmctrl, python3) is preflighted BY NAME before use
 # (#822 pattern) -- a missing tool is reported as a missing tool, never folded into a failed
@@ -123,6 +130,10 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/timesync-authority.sh
 . "$HERE/lib/timesync-authority.sh" # dpkg_status_installed/timesync_daemon_verdict/
                                      # timesync_authority_verdict/timesync_gather_remote_snippet
+# shellcheck source=scripts/lib/imag-power-envelope.sh
+. "$HERE/lib/imag-power-envelope.sh" # imag_power_envelope_verdict/imag_power_envelope_gather_
+                                     # remote_snippet (#1040) -- SHARED with drift-guard.sh's
+                                     # --check-imag power-envelope facet, never a driftable copy
 # shellcheck source=scripts/clock-offset-guard.sh
 . "$HERE/clock-offset-guard.sh"      # offset_check/ptp_locked_from_pipe_json/_journal/
                                      # dantesync_offset_verdict/gm_source_ip_from_pipe_json/
@@ -1029,6 +1040,54 @@ elif imag_obs_cgroup_shows_service_unit "$OBS_CGROUP"; then
   ok "live obs process (pid ${OBS_PID}) runs INSIDE imag-obs.service's cgroup -- genuinely supervised, not a bypass launch (#1015)"
 else
   fail "live obs process (pid ${OBS_PID}) is OUTSIDE imag-obs.service's cgroup ($(printf '%s' "$OBS_CGROUP" | tr '\n' ' ')) -- systemd may report the unit enabled+active while the RUNNING obs was launched directly (e.g. via imag-obs-start.sh over ssh, bypassing systemctl) -- Restart=on-failure supervises NOTHING (#1015, the #840 claim-vs-reality class)"
+fi
+
+# (u) power/thermal envelope (#1040) -- MUST run BEFORE check (o) below (its restart replaces the
+# tracked obs process, #884 ordering). Gathers the envelope state over SSH via the SHARED
+# imag_power_envelope_gather_remote_snippet and runs the SHARED imag_power_envelope_verdict --
+# IDENTICAL to drift-guard.sh's --check-imag facet, never a driftable copy. On this gate a DRIFT
+# OR an UNKNOWN facet both FAIL (unreadable = hard FAIL, never silent) -- a healthy imag-nb always
+# gathers every facet (it has the RAPL zone, the iGPU slpc knob, and both enabled+active units).
+rc=0
+PE_GATHER="$(ssh_box "$(imag_power_envelope_gather_remote_snippet)")" || rc=$?
+if [ "$rc" -ne 0 ] || [ -z "$PE_GATHER" ]; then
+  fail "could not read the power/thermal-envelope state over SSH (rc=$rc) -- cannot verify PL1/slpc/thermald/units (#1040)"
+else
+  # Read the SAME README pin drift-guard.sh's --check-imag facet reads (its pinned_setting), so the
+  # acceptance gate and the strict gate never check DIFFERENT wattages after a deliberate re-pin.
+  # Fall back to the lib/env default only when the README is unreadable.
+  PE_PIN="$(imag_power_pl1_pin_from_readme_text "$(cat "$HERE/../vendor/README.md" 2>/dev/null || true)")"
+  [ -n "$PE_PIN" ] || PE_PIN="${IMAG_PL1_W:-29}"
+  while IFS='|' read -r pe_facet pe_status pe_detail; do
+    [ -n "$pe_facet" ] || continue
+    if [ "$pe_status" = "OK" ]; then
+      ok "power envelope (${pe_facet}): ${pe_detail}"
+    else
+      fail "power envelope (${pe_facet}) ${pe_status}: ${pe_detail}"
+    fi
+  done <<< "$(imag_power_envelope_verdict "$PE_GATHER" "$PE_PIN")"
+
+  # TCPU must be BELOW the guard's step-down ceiling -- a reading at/above it means a clamp episode
+  # is live right now (the envelope is thermally degraded, not merely mis-provisioned).
+  PE_TCPU="$(printf '%s\n' "$PE_GATHER" | sed -n 's/^TCPU|//p' | head -1)"
+  PE_CEIL="${IMAG_TCPU_STEPDOWN_C:-93}"
+  if [ -z "$PE_TCPU" ]; then
+    fail "TCPU (x86_pkg_temp) unreadable in the envelope gather -- cannot confirm the box is below the ${PE_CEIL}C step-down ceiling (#1040)"
+  elif [ "$PE_TCPU" -lt "$PE_CEIL" ]; then
+    ok "TCPU=${PE_TCPU}C is below the ${PE_CEIL}C guard step-down ceiling (#1040)"
+  else
+    fail "TCPU=${PE_TCPU}C is AT/ABOVE the ${PE_CEIL}C step-down ceiling -- a thermal clamp episode is live (#1040)"
+  fi
+
+  # The guard's journald tag must be readable -- proves its step-down/re-assert transitions are
+  # retrievable for the dev1-side alert watchdog (the never-silent-degradation rule).
+  rc=0
+  ssh_box "journalctl -t imag-power-envelope --no-pager -n 1 >/dev/null 2>&1; true" >/dev/null 2>&1 || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    fail "could not read the imag-power-envelope journald tag over SSH (rc=$rc) -- the guard's transitions would be invisible to the dev1-side alert watchdog (#1040)"
+  else
+    ok "imag-power-envelope journald tag is readable (guard transitions retrievable for dev1-side alerting, #1040)"
+  fi
 fi
 
 # (o) both projectors PRESENT (never self-established) + PERSIST across a real restart (#756/#840)

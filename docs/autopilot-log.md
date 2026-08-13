@@ -7556,3 +7556,49 @@ does the live rig verification of the new whole-chain checks and closes it.
     it. Extracting the cadence block from vendored C that compiles only in CI is its own
     change, not a rider on a fix.
 - Final local: fmt/clippy clean; full `cargo test` 201 binaries / 3206 tests green (exit 0).
+
+## 2026-08-13 — round: PR #1039 (gate re-tighten round 1) merged e5e37e7bf13
+- 1003 (phase-continuity relock, item 1): vendored libobs anchor selection + Tier-0 sim + parity gate; DEPLOYED fast-DLL strih+stream + full bundle imag; live fields verified (anchor_ns tracks hold, sel_vs_newest_due 0/1). Ticket OPEN (items 2+3).
+- 905 (real_drops bar item 1): REAL_DROPS_ALLOWANCE_DEFAULT 2 -> 0, tests strict. Ticket OPEN (items 2+3).
+- 1041 (client chase envelope second term): journal-parsed client step threshold + fallback; CLOSED by the PR.
+- Round E2E survived 4 real rig incidents en route: imag render-budget clamp (25 W PL1 -> 29 W envelope, ticket 1040), strih physical outage + reboot, stream NDI receivers never rebinding after the sender restart (ticket 767 evidence + stream OBS relaunch), bundle-state deaths (ticket 732 x3).
+- New tickets this round: 1040 (imag power envelope), 1042 (Zaloha kamera permanent backlog-relock).
+
+## 2026-08-14 — ticket 1040 (imag power/thermal envelope) — worktree autopilot-1040, code half
+- Root cause: the imag 60fps render regression (issues 799/880/1029/1030) was a HARDWARE power clamp — thermald's DPTF programmed MMIO RAPL PL1 long_term to 25 W (MMIO wins over the decorative MSR values), starving the iGPU to gt_act_freq 600-850 while software knobs sat at 1400. Sustainable envelope = 29 W (35 W overheats).
+- New shared lib `scripts/lib/imag-power-envelope.sh` (source-only, mirrors timesync-authority.sh): pure `imag_pl1_watts_to_uw`/`imag_pl1_uw_matches_pin`/`imag_power_zone_select` (package-0/long_term by NAME identity, never an index)/`imag_power_envelope_verdict` (per-facet pl1/slpc/thermald/units OK|DRIFT|UNKNOWN)/`imag_power_guard_decision` (stepdown|restore|reassert|hold)/`imag_power_guard_next_streaks`/`imag_power_alert_condition`/`imag_power_pl1_pin_from_readme_text`/`imag_power_envelope_gather_remote_snippet`. Reuses `dpkg_status_installed`/`timesync_enabled_state_neutral`.
+- On-box: `imag-power-envelope.service` (root boot oneshot, pins slpc + PL1 by identity, hardware-agnostic but FATAL if the write did not take), `imag-power-envelope-guard.timer` (root ~45s, thermal step-down after 2 consecutive hot / sustained-recovery restore / foreign re-assert, journald-tagged, /run streak state). thermald PURGED (not masked), PROCHOT stays as the backstop.
+- Gates: drift-guard `--check-imag` check #9 (13th/14th backward-compat args; empty gather -> UNKNOWN, an in-progress step-down reads as DRIFT by design); verify-imag check (u) inserted BEFORE check (o)'s restart; both read the SAME `power_pl1_w_imag=29` README pin.
+- Alerting: dev1-side `imag-power-envelope-alert-watchdog.timer` (SSH-polls the guard journal, fires airuleset.py notify on STEP-DOWN/RE-ASSERT via the shared throttle) — same topology as imag-obs-alert-watchdog (issue 882).
+- setup-imag.sh step 22 (TOTAL_STEPS 21->22): purge thermald, fetch scripts+lib, write+enable root units.
+- Anchor-collision watch: setup-imag.sh edit ran clean against all imag test binaries. RED->GREEN observed on the lib guard-decision + drift-guard facet rows. Local: fmt/clippy(default)/shellcheck clean; harness 31, drift_guard 122, verify_imag 46, setup_imag_guards 126.
+- Code review 0 red / 0 yellow / 4 blue, 3 fixed same-branch + 1 dropped (intended). LIVE half (thermald purge on the incumbent box, temp hand-guard removal, the 28/29/30 W bracket soak) is the supervisor's integration step; ticket 1040 CLOSES when the PR merges.
+
+## 2026-08-13 — issue 1042 (Zaloha kamera permanent backlog-relock) — worktree autopilot-1042
+- Root cause (confirmed LIVE, stream box OBS log 22:54): `Zaloha kamera` is a genuine 60fps
+  source (audit `received` delta = 300 buffers / 5.000 s) held 1000 ms into a 30 fps canvas.
+  The STEADY N>=2 decimation runs correctly and latches the source multiple at 2, but
+  `genlock_backlog_relock_qdepth()`'s fresh per-tick `genlock_measure_source_multiple()` took
+  the FIRST strictly-increasing front-stamp pair, which intermittently straddled a dropped/
+  decimated frame (33.3 ms -> n=1), collapsing the threshold 72 -> 36 below the real ~59-deep
+  queue and firing the backlog branch spuriously ~1/sec (the issue-796 health-signal pollution).
+  The ticket's "detection reports 30" hypothesis was a SYMPTOM; the source is 60fps, not 30.
+- Fix: new pure Tier-0 seam `source_interval_from_stamps(&[u64])` in `src/genlock_backlog.rs`
+  returns the MINIMUM strictly-increasing adjacent delta (sources stamp on the monotonic
+  evenly-spaced DanteSync grid, so the true frame interval is the smallest gap; a duplicate/
+  dropped frame only enlarges a gap). `src/probe/genlock.rs::measure_source_multiple` routes
+  through it; the C `genlock_measure_source_multiple` mirrors the min-loop. Byte-identical to
+  first-pair on any clean grid-stamped window; generalises the issue-741/707-B2 "scan past a
+  degenerate front pair" intent. Margin/steady-depth arithmetic + drop-cap untouched.
+- RED->GREEN: `source_interval_is_the_min_grid_delta_not_the_first_1042` +
+  `a_60_into_30_source_with_a_front_gap_keeps_its_threshold_above_the_held_depth_1042`
+  (genlock_backlog.rs) fail on first-increasing (33333332 -> n=1), pass on min (16666666 -> n=2,
+  threshold 72 >= 64). Commit order bump.446 -> [red] -> [green].
+- Local (Tier-0): fmt --check clean; clippy --all-targets -D warnings clean;
+  genlock_backlog::tests 40/40; genlock_release_cadence 13/13 (C anchors intact); probe genlock
+  132/132 (incl. issue-741 measure tests via the min-seam); C `genlock_measure_source_multiple`
+  standalone-compiled (-Wall -Wextra -Wformat=2 -Wconversion) + parity-checked (n=2/n=1/n=0).
+- GOTCHA captured: `measure_source_multiple` reads the STAMP grid, but a 60fps source's queue
+  depth reflects BUFFER arrival (60/sec) confirmed via the audit `received` counter delta, NOT
+  the stamp deltas — read `received`/`ts_present` deltas across two 5s audit lines to prove a
+  source's true arrival rate when its stamps look coarse.

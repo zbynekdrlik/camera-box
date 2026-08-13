@@ -55,6 +55,12 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # (imag-nb) runs the IDENTICAL sole-timesync-authority verdict instead of a driftable copy (#596).
 # shellcheck source=scripts/lib/timesync-authority.sh
 . "$HERE/lib/timesync-authority.sh"
+# scripts/lib/imag-power-envelope.sh is sourced ONLY for its pure functions
+# (imag_power_envelope_verdict + imag_power_envelope_gather_remote_snippet, #1040) — same
+# extraction discipline as timesync-authority.sh, SHARED with scripts/verify-imag.sh so the
+# --check-imag power-envelope facet below runs the IDENTICAL verdict instead of a driftable copy.
+# shellcheck source=scripts/lib/imag-power-envelope.sh
+. "$HERE/lib/imag-power-envelope.sh"
 
 DEFAULT_README="vendor/README.md"
 
@@ -758,6 +764,10 @@ check_imag_report() {
   # #596: optional 12th param (older call sites pass only 9-11 args) — default-empty, same
   # backward-compatible convention as the #489 pair above.
   local obs_timesync_states="${12:-}"
+  # #1040: optional 13th (power-envelope gather block) + 14th (pinned power_pl1_w_imag watts) —
+  # default-empty, SAME backward-compatible convention. An unread/unsupplied block reads UNKNOWN
+  # (never a false DRIFT for a mere SSH hiccup), exactly like every other two-tier check here.
+  local obs_power_envelope="${13:-}" exp_power_pl1_w="${14:-}"
   local drift=0 unknown=0
 
   # 1. distroav.so hash (the Linux plugin binary itself, not just the marker file).
@@ -913,6 +923,29 @@ check_imag_report() {
     fi
   fi
 
+  # 9. power/thermal envelope (#1040) — the MMIO RAPL PL1 pin (`power_pl1_w_imag`), the slpc knob,
+  # thermald being PURGED, and both envelope units alive. Runs the SHARED imag_power_envelope_
+  # verdict (scripts/lib/imag-power-envelope.sh) over the gathered block, mapping each per-facet
+  # OK/DRIFT/UNKNOWN into this function's own report rows + exit-code contract. Two-tier, same as
+  # every check above: an EMPTY gathered block (SSH hiccup / not read) is UNKNOWN per facet, never
+  # a false DRIFT. An in-progress LEGITIMATE guard step-down reads as DRIFT — CORRECT (a clamp IS a
+  # degradation; the [0/8] preflight refusing during a clamp episode is the desired behavior).
+  if [ -z "$obs_power_envelope" ]; then
+    printf '  %-22s UNKNOWN  (power-envelope state not read on imag-nb)\n' "power_envelope"
+    unknown=$((unknown + 1))
+  else
+    local pe_facet pe_status pe_detail pe_line
+    while IFS='|' read -r pe_facet pe_status pe_detail; do
+      [ -n "$pe_facet" ] || continue
+      pe_line="power_envelope/${pe_facet}"
+      case "$pe_status" in
+        OK)      printf '  %-22s OK       (%s)\n' "$pe_line" "$pe_detail" ;;
+        DRIFT)   printf '  %-22s DRIFT    (%s)\n' "$pe_line" "$pe_detail"; drift=$((drift + 1)) ;;
+        *)       printf '  %-22s UNKNOWN  (%s)\n' "$pe_line" "$pe_detail"; unknown=$((unknown + 1)) ;;
+      esac
+    done <<< "$(imag_power_envelope_verdict "$obs_power_envelope" "$exp_power_pl1_w")"
+  fi
+
   [ "$drift" -gt 0 ] && return 20
   [ "$unknown" -gt 0 ] && return 11
   return 0
@@ -972,14 +1005,17 @@ gather_and_check_imag() {
   # #531: the genlock build IDENTITY is no longer a static README pin — it is compared DYNAMICALLY
   # against origin/main's vendored-genlock HEAD below (imag_build_drift_report), so
   # genlock_build_sha_imag is no longer read here.
-  local exp_distroav_sha exp_fps exp_latency exp_dantesync_locked
+  local exp_distroav_sha exp_fps exp_latency exp_dantesync_locked exp_power_pl1_w
   exp_distroav_sha="$(pinned_setting "$readme" distroav_so_sha256_imag)"
   exp_fps="$(pinned_setting "$readme" output_fps_imag)"
   exp_latency="$(pinned_setting "$readme" genlock_latency_ms_imag)"
   exp_dantesync_locked="$(pinned_setting "$readme" dantesync_locked_imag)"
+  # #1040: the pinned MMIO RAPL PL1 watts (the strict envelope gate's authority — the README pin,
+  # never a hardcoded literal). A missing pin -> empty -> the power_envelope pl1 row reads UNKNOWN.
+  exp_power_pl1_w="$(pinned_setting "$readme" power_pl1_w_imag)"
 
   local obs_build_sha obs_distroav_sha obs_log obs_fps obs_latency plugin_present obs_dantesync_log
-  local obs_timesync_states
+  local obs_timesync_states obs_power_envelope
   obs_build_sha="$("${ssh_cmd[@]}" \
     'cat /opt/obs-genlock/GENLOCK_BUILD_SHA.txt 2>/dev/null' 2>/dev/null || true)"
   # #531: DYNAMIC genlock-build staleness — compare the box's deployed GENLOCK_BUILD_SHA.txt against
@@ -1066,6 +1102,12 @@ gather_and_check_imag() {
   # leaving this exact daemon-list for-loop duplicated would let a future daemon added to the
   # competing set silently diverge between verify-device.sh and drift-guard.sh).
   obs_timesync_states="$("${ssh_cmd[@]}" "$(timesync_gather_remote_snippet)" 2>/dev/null || true)"
+  # #1040: gather the power/thermal-envelope state in ONE SSH call via the SHARED
+  # imag_power_envelope_gather_remote_snippet (scripts/lib/imag-power-envelope.sh) — the SAME
+  # identity-based RAPL/slpc/thermald/units block scripts/verify-imag.sh's check (u) gathers. `|| true`
+  # (same convention as every gather above) keeps an SSH failure from aborting the script — an empty
+  # block reads as UNKNOWN per facet in check_imag_report's check #9, never a false DRIFT.
+  obs_power_envelope="$("${ssh_cmd[@]}" "$(imag_power_envelope_gather_remote_snippet)" 2>/dev/null || true)"
 
   echo "== drift-guard --check-imag  host=${host}  (SSH-gathered + git-compared; FAILS loudly on drift) =="
   # #531: the DYNAMIC genlock-build staleness check (box vs origin/main's vendored-genlock HEAD)
@@ -1078,9 +1120,12 @@ gather_and_check_imag() {
   # read, no marker" into the same false-DRIFT signal. #489: `$obs_dantesync_log` is passed RAW
   # for the identical reason. #596: `$obs_timesync_states` (the 12th arg) is likewise the RAW
   # gathered block — check_imag_report derives the ok/DRIFT/UNKNOWN verdict itself.
+  # #1040: `$obs_power_envelope` (13th) is the RAW gathered block + `$exp_power_pl1_w` (14th) the
+  # pinned watts — check_imag_report's check #9 derives the per-facet ok/DRIFT/UNKNOWN verdict itself.
   check_imag_report "$exp_distroav_sha" "$obs_distroav_sha" \
     "$exp_fps" "$obs_fps" "$exp_latency" "$obs_latency" "$obs_log" "$plugin_path" "$plugin_present" \
-    "$exp_dantesync_locked" "$obs_dantesync_log" "$obs_timesync_states" || rc_report=$?
+    "$exp_dantesync_locked" "$obs_dantesync_log" "$obs_timesync_states" \
+    "$obs_power_envelope" "$exp_power_pl1_w" || rc_report=$?
   # Combine the two facets' exit codes into the engine's single contract: DRIFT (20) dominates, then
   # UNKNOWN (11), else clean (0). A STALE build FAILS LOUD even when every live-state pin is clean.
   if [ "$rc_build" -eq 20 ] || [ "$rc_report" -eq 20 ]; then return 20; fi
