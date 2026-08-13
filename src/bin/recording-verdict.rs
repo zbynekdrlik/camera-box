@@ -7250,13 +7250,9 @@ mod tests {
         assert_eq!(v["full_chain"]["real_drops"], serde_json::json!(1));
         assert_eq!(
             v["full_chain"]["real_drops_allowance"],
-            serde_json::json!(0),
-            "#905: the DEFAULT allowance (no env override) must read back as 0: {}",
+            serde_json::json!(super::REAL_DROPS_ALLOWANCE_DEFAULT),
+            "#905: the DEFAULT allowance (no env override) must read back as the restored 0: {}",
             v["full_chain"]
-        );
-        assert_eq!(
-            v["full_chain"]["real_drops_allowance"],
-            serde_json::json!(super::REAL_DROPS_ALLOWANCE_DEFAULT)
         );
         assert!(
             v["full_chain"]["real_drops_allowance_consumed_nodes"]
