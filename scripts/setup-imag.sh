@@ -53,7 +53,7 @@ DEV1_DRIFTGUARD_PUBKEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB/akQWI95uekn0/CRfQ
 # commented instance of the SAME key already being present (e.g. installed by hand with the local
 # ~/.ssh/id_ed25519.pub file's own comment).
 DEV1_DRIFTGUARD_PUBKEY_TYPE_BLOB="${DEV1_DRIFTGUARD_PUBKEY% *}"
-TOTAL_STEPS=21
+TOTAL_STEPS=22
 # #731: Companion Satellite server this box connects the local Stream Deck to. .lan DNS is
 # usually fine on this LAN (companion.lan -> companion-snv.lan, verified live 2026-07-13) but can
 # be flaky like any other .lan name on this network -- COMPANION_HOST_IP is the documented
@@ -1809,6 +1809,98 @@ sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="/run/user/${UID_DESKTOP}" DBUS_SESSION_
     systemctl --user enable --now imag-obs.service \
     || fail "systemctl --user enable --now imag-obs.service failed"
 echo "  imag-obs.service enabled + started (OBS boot launch is now systemd-supervised, Restart=on-failure; issue 884)"
+
+# =============================================================================
+step 22 "Power/thermal envelope (#1040): purge thermald + pin MMIO RAPL PL1 + slpc, supervised by a loud guard"
+# =============================================================================
+# The imag render regression (issues 799/880/1029/1030) was a HARDWARE power clamp: thermald's
+# DPTF policy programmed the MMIO RAPL PL1 long-term constraint to 25 W, starving the iGPU to
+# gt_act_freq 600-850 MHz while every software freq knob sat at 1400. The durable fix pins PL1 to a
+# sustainable 29 W + slpc_ignore_eff_freq=1 at boot, PURGES thermald (the actor that programmed
+# 25 W -- a minimalist appliance purges a competing policy engine, same discipline the sole-
+# timesync-authority gate enforces; PROCHOT stays as the hardware backstop), and supervises the
+# envelope with a LOUD root guard that alerts dev1-side instead of silently degrading. Env knobs
+# below are baked into the units so a re-provision keeps the same envelope.
+
+# thermald PURGED (not masked) -- its adaptive DPTF surface is opaque and moves across upgrades.
+DEBIAN_FRONTEND=noninteractive apt-get purge -y thermald >/dev/null 2>&1 || true
+# Self-heal any leftover HAND-PLACED temporary guard from a prior live hotfix -- the source-script
+# fix here supersedes it (a hand-fix must never linger past its source-script fix). Best-effort by
+# the conventional temp names; the live removal on the incumbent box is done at integration.
+systemctl disable --now imag-power-envelope-temp-guard.timer imag-power-envelope-temp-guard.service >/dev/null 2>&1 || true
+rm -f /etc/systemd/system/imag-power-envelope-temp-guard.* /usr/local/bin/imag-power-envelope-temp-guard.sh 2>/dev/null || true
+
+# The shared verdict/decision lib (source-only) -- installed so the on-box scripts source it, the
+# SAME gh-api fetch path as imag-obs-start.sh above (a from-scratch reprovision is never missing it).
+mkdir -p /usr/local/lib
+gh api -H "Accept: application/vnd.github.raw" \
+    "repos/${GENLOCK_REPO}/contents/scripts/lib/imag-power-envelope.sh?ref=dev" \
+    > /usr/local/lib/imag-power-envelope.sh \
+    || fail "could not fetch scripts/lib/imag-power-envelope.sh from ${GENLOCK_REPO} (dev) via gh api"
+chmod 644 /usr/local/lib/imag-power-envelope.sh
+
+gh api -H "Accept: application/vnd.github.raw" \
+    "repos/${GENLOCK_REPO}/contents/scripts/imag-power-envelope.sh?ref=dev" \
+    > /usr/local/bin/imag-power-envelope.sh \
+    || fail "could not fetch scripts/imag-power-envelope.sh from ${GENLOCK_REPO} (dev) via gh api"
+chmod 755 /usr/local/bin/imag-power-envelope.sh
+
+gh api -H "Accept: application/vnd.github.raw" \
+    "repos/${GENLOCK_REPO}/contents/scripts/imag-power-envelope-guard.sh?ref=dev" \
+    > /usr/local/bin/imag-power-envelope-guard.sh \
+    || fail "could not fetch scripts/imag-power-envelope-guard.sh from ${GENLOCK_REPO} (dev) via gh api"
+chmod 755 /usr/local/bin/imag-power-envelope-guard.sh
+
+# ROOT system units (sysfs writes need root, unlike the user-level imag-obs.service). Env knobs
+# baked in at provisioning time (overridable: IMAG_PL1_W=30 sudo -E ./setup-imag.sh ...).
+cat > /etc/systemd/system/imag-power-envelope.service <<PE_SVC_EOF
+[Unit]
+Description=camera-box #1040: pin imag-nb MMIO RAPL PL1 + slpc power envelope (sustainable 60fps render)
+After=multi-user.target
+
+[Service]
+Type=oneshot
+Environment=IMAG_PL1_W=${IMAG_PL1_W:-29}
+ExecStart=/usr/local/bin/imag-power-envelope.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+PE_SVC_EOF
+
+cat > /etc/systemd/system/imag-power-envelope-guard.service <<PE_GUARD_EOF
+[Unit]
+Description=camera-box #1040: imag-nb power-envelope runtime guard (thermal step-down + foreign re-assert)
+After=imag-power-envelope.service
+
+[Service]
+Type=oneshot
+Environment=IMAG_PL1_W=${IMAG_PL1_W:-29}
+Environment=IMAG_PL1_STEPDOWN_W=${IMAG_PL1_STEPDOWN_W:-25}
+Environment=IMAG_TCPU_STEPDOWN_C=${IMAG_TCPU_STEPDOWN_C:-93}
+Environment=IMAG_TCPU_RESTORE_C=${IMAG_TCPU_RESTORE_C:-85}
+ExecStart=/usr/local/bin/imag-power-envelope-guard.sh
+PE_GUARD_EOF
+
+cat > /etc/systemd/system/imag-power-envelope-guard.timer <<'PE_TMR_EOF'
+[Unit]
+Description=camera-box #1040: run the imag-nb power-envelope guard every ~45s
+
+[Timer]
+OnBootSec=60
+OnUnitActiveSec=45
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target
+PE_TMR_EOF
+
+systemctl daemon-reload
+systemctl enable --now imag-power-envelope.service >/dev/null 2>&1 \
+    || fail "could not enable imag-power-envelope.service -- the boot power envelope would not be pinned"
+systemctl enable --now imag-power-envelope-guard.timer >/dev/null 2>&1 \
+    || fail "could not enable imag-power-envelope-guard.timer -- the envelope would be unsupervised"
+echo "  #1040: thermald purged, PL1=${IMAG_PL1_W:-29}W envelope pinned at boot + supervised by the ~45s guard timer"
 
 echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}imag-nb base provisioning DONE (genlock build: $(cat "$GENLOCK_MARKER_DIR/GENLOCK_BUILD_SHA.txt" 2>/dev/null || echo unknown))${NC}"

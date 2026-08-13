@@ -1079,3 +1079,58 @@ fn verify_imag_exits_nonzero_on_any_failed_check() {
         "verify-imag.sh must exit non-zero when any check fails (test-strictness)"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// (u) power/thermal envelope (#1040) — sources + wires the SHARED verdict, and runs BEFORE (o)
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn verify_imag_sources_the_shared_power_envelope_lib_1040() {
+    let body = std::fs::read_to_string(script()).unwrap();
+    assert!(
+        body.contains("lib/imag-power-envelope.sh"),
+        "verify-imag.sh must SOURCE the shared power-envelope lib (one verdict, never a copy)"
+    );
+}
+
+#[test]
+fn verify_imag_wires_the_1040_power_envelope_check_into_the_live_flow() {
+    let body = std::fs::read_to_string(script()).unwrap();
+    // The shared gather + verdict must both be CALLED in the live flow (a sourced-but-never-called
+    // function provides zero acceptance coverage — same discipline as the #884/#1015 wiring tests).
+    for needle in [
+        "imag_power_envelope_gather_remote_snippet",
+        "imag_power_envelope_verdict",
+    ] {
+        assert!(
+            body.matches(needle).count() >= 1,
+            "verify-imag.sh must CALL {needle} in its live flow (#1040)"
+        );
+    }
+    // It must also assert TCPU is below the step-down ceiling and the guard tag is readable.
+    assert!(
+        body.contains("step-down ceiling") && body.contains("imag-power-envelope journald tag"),
+        "verify-imag.sh check (u) must assert TCPU below the ceiling AND the guard tag is readable"
+    );
+}
+
+/// Same ordering constraint #884/#1015 already established: check (u)'s SSH reads must run BEFORE
+/// check (o)'s direct restart-proof call, or (u) would observe the fresh, untracked post-restart
+/// process/state instead of the box's normal boot-time envelope (#1040, same reasoning as
+/// verify_imag_reads_884_service_state_before_the_840_restart_wipes_it).
+#[test]
+fn verify_imag_reads_1040_power_envelope_before_the_840_restart_wipes_it() {
+    let body = std::fs::read_to_string(script()).unwrap();
+    let power_check = body
+        .find("imag_power_envelope_gather_remote_snippet")
+        .expect("the #1040 power-envelope gather must actually be CALLED in the live flow");
+    let restart_call = body
+        .find(r#"/usr/local/bin/imag-obs-stop.sh && /usr/local/bin/imag-obs-start.sh"#)
+        .expect("check (o)'s restart-proof call must exist (#840)");
+    assert!(
+        power_check < restart_call,
+        "the #1040 power-envelope check (u) must run BEFORE check (o)'s restart-proof (#840) -- \
+         reading it afterward would observe the fresh, untracked post-restart process/state \
+         instead of the box's normal boot-time envelope"
+    );
+}
