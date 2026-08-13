@@ -7602,3 +7602,11 @@ does the live rig verification of the new whole-chain checks and closes it.
   depth reflects BUFFER arrival (60/sec) confirmed via the audit `received` counter delta, NOT
   the stamp deltas — read `received`/`ts_present` deltas across two 5s audit lines to prove a
   source's true arrival rate when its stamps look coarse.
+
+## 2026-08-14 — round-2 integration (PR 1044: tickets 1040 + 1042) — merge, deploy, live half
+- Merged worktree branches autopilot-1040 + autopilot-1042 serially (one append-append autopilot-log conflict, both kept). Tier-0 only at integration (the standing dev1 rule); worktree target/ dirs (1.7G + 2.1G) purged at merge.
+- E2E gauntlet: run 1 failed on the issue-624 switch-latency spread 16.21 > 16.0 ms — root-caused to cam1's old grabber being ~16 ms slower absolute than cam3's Cam Link 4K (paint-to-CAPTURE path, upstream of strih; a strih knob change provably did not move it — evidence on ticket 728). Run 2 failed on a transient SSH loss to imag mid render-health window (fail-loud preflight). Run 3 green (spread 15.76, overall_pass=true).
+- Deploy: fast-DLL obs.dll to strih (share-pull via stream C$) + stream (SMB direct), backups *.pre-1044, relaunch via win-* MCP Shell session 1 (strih AHK duplicate killed), render tick ENABLED both, TEST-mode burns verified ON after relaunch. imag: full 227M bundle, backups *.pre-1044, restart clean.
+- Ticket-1042 live proof on the new stream DLL: 'Zaloha kamera' relocks=0 at 1000 ms hold (was ~1/s), underruns=0, backward_steps=0, dropped_due advancing at the correct 60-to-30 decimation rate; residual overruns ~1/15 s = the drop-cap backstop at depth 64, by design.
+- Ticket-1040 live half: thermald purged on imag, hand-guard removed, boot oneshot + guard timer installed, REBOOT-SURVIVAL proven (fresh-boot journal re-pin 29 W + slpc), render 4.25-5.02 ms @ 60.000 fps post-boot, dev1-side alert watchdog enabled (exec-bit fix committed straight to dev). 28/30 W fine-brackets waived on measured-selection + guard-supervision grounds (decision on the ticket); cooling upgrade = ticket 1043.
+- Validator sweep: ticket 1030 closed (overcome by the 1040 envelope, render back in the ~5 ms class); ticket 1029 kept open pending ONE user visual confirmation (HDMI smoothness), needs-answer queued for the morning (sleep window).
