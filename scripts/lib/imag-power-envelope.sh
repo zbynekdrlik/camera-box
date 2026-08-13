@@ -241,6 +241,16 @@ imag_power_guard_decision() {
   printf 'hold\n'
 }
 
+# imag_power_alert_condition JOURNAL -> echoes the concerning-transition marker line(s)
+# (STEP-DOWN | RE-ASSERT) found in a `journalctl -t imag-power-envelope` window, or empty if none.
+# The dev1-side alert watchdog pages on these — a thermal step-down (the box is being clamped) or a
+# foreign re-program (something fought the envelope). RESTORE (recovery) is deliberately NOT paged;
+# a clamp that self-heals is informational, not an incident. Used by
+# scripts/imag-power-envelope-alert-watchdog.sh with the shared alert throttle.
+imag_power_alert_condition() {
+  printf '%s\n' "$1" | grep -aE 'STEP-DOWN|RE-ASSERT' || true
+}
+
 # imag_power_envelope_gather_remote_snippet -> the REMOTE shell command (a string) both callers run
 # over their own transport to collect the observed envelope state into the `|`-delimited block
 # imag_power_envelope_verdict parses. Hardware-agnostic (issue 816): a box with no mmio RAPL zone

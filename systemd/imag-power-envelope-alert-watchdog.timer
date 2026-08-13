@@ -1,0 +1,16 @@
+[Unit]
+# Fires the #1040 imag-nb power-envelope alert every 5 min (dev1-side), matching the
+# imag-obs-alert-watchdog cadence so the fleet's dev1 alert timers stay in lockstep. A clamp
+# episode (STEP-DOWN) or a foreign re-program (RE-ASSERT) pages within ~5 minutes of onset --
+# PROCHOT-only silent degradation is exactly what the standing rig-alert rule forbids.
+Description=Run the camera-box imag-nb power-envelope alert every 5 min (#1040)
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=20s
+Persistent=false
+
+[Install]
+WantedBy=timers.target

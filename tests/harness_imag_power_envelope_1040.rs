@@ -434,6 +434,38 @@ fn gather_remote_snippet_selects_by_identity_and_globs_all_cards() {
 // ---------------------------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------------------------
+// imag_power_alert_condition — the dev1-side watchdog pages on STEP-DOWN / RE-ASSERT, never RESTORE
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn alert_condition_fires_on_stepdown_and_reassert_but_not_restore_or_hold() {
+    // A journal window with a STEP-DOWN line -> alertable.
+    let (_c, out, _e) = run_sourced(
+        "imag_power_alert_condition 'Aug 13 imag-nb imag-power-envelope[1]: STEP-DOWN: TCPU=94C ...'",
+    );
+    assert!(out.contains("STEP-DOWN"), "STEP-DOWN must be an alert condition: {out:?}");
+
+    // A RE-ASSERT line -> alertable.
+    let (_c, out2, _e) = run_sourced(
+        "imag_power_alert_condition 'Aug 13 imag-nb imag-power-envelope[1]: RE-ASSERT: live PL1=... foreign ...'",
+    );
+    assert!(out2.contains("RE-ASSERT"), "RE-ASSERT must be an alert condition: {out2:?}");
+
+    // A RESTORE-only window (recovery) -> NOT alertable (informational).
+    let (_c, out3, _e) = run_sourced(
+        "imag_power_alert_condition 'Aug 13 imag-nb imag-power-envelope[1]: RESTORE: TCPU=80C sustained ...'",
+    );
+    assert!(
+        out3.trim().is_empty(),
+        "RESTORE (recovery) must NOT page — only degradations do: {out3:?}"
+    );
+
+    // An empty window -> nothing.
+    let (_c, out4, _e) = run_sourced("imag_power_alert_condition ''");
+    assert!(out4.trim().is_empty(), "no markers -> no alert: {out4:?}");
+}
+
+// ---------------------------------------------------------------------------------------------
 // on-box scripts — the oneshot (imag-power-envelope.sh) + the guard (imag-power-envelope-guard.sh)
 // ---------------------------------------------------------------------------------------------
 
@@ -483,6 +515,46 @@ fn guard_uses_the_shared_decision_never_a_second_copy() {
     assert!(
         body.contains("logger -t") && body.contains("STEP-DOWN") && body.contains("RE-ASSERT"),
         "the guard must journald-tag its step-down / re-assert transitions (dev1-side alerting)"
+    );
+}
+
+#[test]
+fn dev1_alert_watchdog_reuses_the_shared_condition_and_throttle() {
+    let body = read_script("scripts/imag-power-envelope-alert-watchdog.sh");
+    assert!(body.contains("set -uo pipefail"), "a watchdog must survive per-pass failures (not set -e)");
+    // Reuses the SHARED alert-condition + the SHARED throttle — no second alert mechanism.
+    assert!(
+        body.contains("imag_power_alert_condition"),
+        "the watchdog must decide via the shared imag_power_alert_condition"
+    );
+    assert!(
+        body.contains("obs_watchdog_alert_throttle"),
+        "the watchdog must reuse the shared alert throttle (#391/#882), not a second one"
+    );
+    // Fires the alert from dev1 (imag-nb has no airuleset checkout / Discord creds).
+    assert!(
+        body.contains("airuleset.py") || body.contains("$NOTIFY"),
+        "the watchdog fires airuleset.py notify from dev1"
+    );
+}
+
+#[test]
+fn dev1_alert_watchdog_dry_run_never_fires() {
+    // --dry-run must measure+decide+log only and exit 0 without any airuleset call. With no reachable
+    // imag-nb the measure step yields an empty journal -> "nothing to decide" -> clean exit 0.
+    let p = manifest_dir().join("scripts/imag-power-envelope-alert-watchdog.sh");
+    let out = Command::new("bash")
+        .arg(&p)
+        .arg("--dry-run")
+        .env("IMAG_IP", "203.0.113.1") // TEST-NET-3, unreachable -> empty measure
+        .env("IMAG_POWER_ALERT_STATE_DIR", std::env::temp_dir())
+        .current_dir(manifest_dir())
+        .output()
+        .expect("failed to run watchdog --dry-run");
+    assert!(
+        out.status.success(),
+        "watchdog --dry-run must exit 0 even with no reachable box: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
     );
 }
 
