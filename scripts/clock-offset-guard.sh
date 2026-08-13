@@ -1008,6 +1008,29 @@ chase_bimodal_exclusion_report() {
   printf '%s %s\n' "$n_elevated" "${bspread:-NA}"
 }
 
+# chase_bimodal_exclusion_check LABEL PAYLOADS_NEWLINE BOUND_US STABILITY_US [EXTRA_NOTE] ->
+# prints ONE "OK" status line (median + spread + distinct count, SAME format as
+# sampled_offset_check's own "ok" case) with an appended bimodal chase-signature explanation, and
+# ALWAYS returns 0. The caller (dantesync-gate.sh's grade_http_node) must have already confirmed
+# chase_bimodal_exclusion_verdict(...) == "yes" for the SAME inputs -- this function does not
+# re-decide, it only formats + reports (mirrors sampled_offset_check's own compute-the-display-
+# numbers-separately-from-the-decision shape, and chase_bimodal_exclusion_report's own doc
+# comment above).
+chase_bimodal_exclusion_check() {
+  local label="$1" payloads="$2" bound="$3" stability="$4" extra_note="${5:-}"
+  local report n median spread excl_report excl_n excl_bspread
+  report="$(sampled_offset_report "$payloads")"
+  n="$(printf '%s' "$report" | awk '{print $1}')"
+  median="$(printf '%s' "$report" | awk '{print $2}')"
+  spread="$(printf '%s' "$report" | awk '{print $3}')"
+  excl_report="$(chase_bimodal_exclusion_report "$payloads" "$stability")"
+  excl_n="$(printf '%s' "$excl_report" | awk '{print $1}')"
+  excl_bspread="$(printf '%s' "$excl_report" | awk '{print $2}')"
+  printf '  %-14s OK       (median %sus <= %sus bound; spread %sus, stability %sus; %s distinct samples)%s -- spread excursion explained by master step-chase (%s elevated samples in one tight mode <= envelope, #1022); baseline spread %sus\n' \
+    "$label" "$median" "$bound" "$spread" "$stability" "$n" "$extra_note" "$excl_n" "$excl_bspread"
+  return 0
+}
+
 # --- NTP-master PTP-locked deadband widening (#1021, dantesync PR #84/#86) ---------------------
 #
 # dantesync issue 83: a genuinely PTP-locked master now deliberately DEFERS its periodic UTC-phase
