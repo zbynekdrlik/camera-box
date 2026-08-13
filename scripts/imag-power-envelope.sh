@@ -75,7 +75,17 @@ for z in /sys/class/powercap/intel-rapl-mmio:*/; do
     exit 1
   fi
   echo "$PL1_UW" > "$ct_path" 2>/dev/null || { log "FATAL: write of ${PL1_UW}uW to $ct_path failed"; exit 1; }
-  echo 1 > "${z}enabled" 2>/dev/null || true
+  # Enable the constraint AND assert it took -- the drift-guard/verify-imag verdict requires
+  # enabled==1 for pl1|OK, so a silently-failed enable would leave a "success" oneshot yet a DRIFT
+  # gate. Assert it the same way the limit write is asserted (never best-effort).
+  if [ -w "${z}enabled" ]; then
+    echo 1 > "${z}enabled" 2>/dev/null || { log "FATAL: could not enable the PL1 constraint at ${z}enabled"; exit 1; }
+    en="$(cat "${z}enabled" 2>/dev/null || true)"
+    [ "$en" = "1" ] || { log "FATAL: PL1 enable did not take (read '${en}') at ${z}enabled"; exit 1; }
+  else
+    log "FATAL: ${z}enabled not writable -- cannot enforce the power envelope"
+    exit 1
+  fi
   got="$(cat "$ct_path" 2>/dev/null || true)"
   if [ "$got" = "$PL1_UW" ]; then
     log "MMIO RAPL PL1 long_term=${PL1_UW}uW (=${PL1_W}W) enabled ($ct_path)"

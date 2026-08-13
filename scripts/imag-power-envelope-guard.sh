@@ -113,21 +113,15 @@ case "$ACTION" in
   *) log "WARN: unexpected guard decision '${ACTION}' — holding" ;;
 esac
 
-# --- next state -------------------------------------------------------------------------------
+# --- next state (the shared pure streak-bookkeeping function, unit-tested) ---------------------
 this_hot=0; this_cool=0
 if [ -n "$TCPU" ]; then
   if [ "$TCPU" -ge "$CEIL_C" ]; then this_hot=1
   elif [ "$TCPU" -lt "$RESTORE_C" ]; then this_cool=1
   fi
 fi
-case "$ACTION" in
-  stepdown) NEW_HOT=0;            NEW_COOL=0;             NEW_STEPPED=1 ;;
-  restore)  NEW_HOT=0;            NEW_COOL=0;             NEW_STEPPED=0 ;;
-  *)        NEW_STEPPED="$STEPPED"
-            if [ "$this_hot" -eq 1 ];  then NEW_HOT=$((HOT + 1));   else NEW_HOT=0;  fi
-            if [ "$this_cool" -eq 1 ]; then NEW_COOL=$((COOL + 1)); else NEW_COOL=0; fi
-            ;;
-esac
+read -r NEW_HOT NEW_COOL NEW_STEPPED <<< "$(imag_power_guard_next_streaks \
+  "$ACTION" "$this_hot" "$this_cool" "$HOT" "$COOL" "$STEPPED")"
 
 _tmp="$(mktemp "${STATE}.XXXXXX" 2>/dev/null || echo "${STATE}.tmp")"
 {

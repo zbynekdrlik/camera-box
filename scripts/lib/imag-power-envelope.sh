@@ -241,6 +241,41 @@ imag_power_guard_decision() {
   printf 'hold\n'
 }
 
+# imag_power_pl1_pin_from_readme_text README_TEXT -> echoes the pinned `power_pl1_w_imag` watts from
+# the vendor/README.md pinned-settings table row `| `power_pl1_w_imag` | `N` | ... |`, or empty. Lets
+# verify-imag.sh read the SAME authority drift-guard.sh reads (its `pinned_setting`), so the strict
+# gate and the acceptance gate never check DIFFERENT wattages after a deliberate re-pin. Pure (takes
+# the README text, not a path) so it is testable against a fixture.
+imag_power_pl1_pin_from_readme_text() {
+  # The backticks below are LITERAL markdown delimiters in the grep/sed patterns, not command
+  # substitution -- they sit inside single-quoted patterns (same convention + disable as
+  # drift-guard.sh's pinned_setting).
+  # shellcheck disable=SC2016
+  printf '%s\n' "$1" \
+    | grep -aE '\| *`power_pl1_w_imag` *\|' \
+    | sed -n 's/^[^|]*|[^|]*|[[:space:]]*`\([^`]*\)`.*/\1/p' | head -1 || true
+}
+
+# imag_power_guard_next_streaks ACTION THIS_HOT THIS_COOL HOT COOL STEPPED -> echoes the next
+# `HOT COOL STEPPED` guard state (space-separated) after applying ACTION to the prior state. Kept
+# PURE + separate from imag_power_guard_decision so the guard script's own streak bookkeeping (the
+# "2 consecutive" accounting) is unit-tested, not merely correct-by-inspection: a stepdown/restore
+# resets both streaks and flips the stepped flag; a hold/reassert advances the matching streak
+# (this read hot -> HOT+1, cool -> COOL+1, neither -> reset that streak) and keeps the flag.
+imag_power_guard_next_streaks() {
+  local action="$1" this_hot="$2" this_cool="$3" hot="$4" cool="$5" stepped="$6"
+  case "$action" in
+    stepdown) printf '0 0 1\n' ;;
+    restore)  printf '0 0 0\n' ;;
+    *)
+      local nhot=0 ncool=0
+      [ "$this_hot" = "1" ] && nhot=$((hot + 1))
+      [ "$this_cool" = "1" ] && ncool=$((cool + 1))
+      printf '%s %s %s\n' "$nhot" "$ncool" "${stepped:-0}"
+      ;;
+  esac
+}
+
 # imag_power_alert_condition JOURNAL -> echoes the concerning-transition marker line(s)
 # (STEP-DOWN | RE-ASSERT) found in a `journalctl -t imag-power-envelope` window, or empty if none.
 # The dev1-side alert watchdog pages on these — a thermal step-down (the box is being clamped) or a

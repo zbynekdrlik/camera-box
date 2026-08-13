@@ -29,6 +29,11 @@ fn lib() -> PathBuf {
     s
 }
 
+/// Wrap an arbitrary string as a single bash-safe single-quoted argument.
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
 /// Source the REAL lib (plus `timesync-authority.sh`, whose generic `dpkg_status_installed` /
 /// `timesync_enabled_state_neutral` the thermald verdict reuses) and run `body` against its pure
 /// functions. Returns (exit_code, stdout, stderr).
@@ -469,6 +474,84 @@ fn gather_remote_snippet_selects_by_identity_and_globs_all_cards() {
 // ---------------------------------------------------------------------------------------------
 // README pin-present guard — the drift-guard authority for the strict PL1 gate
 // ---------------------------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------------------------
+// imag_power_pl1_pin_from_readme_text — verify-imag reads the SAME authority drift-guard reads
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn pin_reader_extracts_power_pl1_w_imag_from_the_readme_row() {
+    let readme = "| setting | pinned value | live source |\n\
+                  |---|---|---|\n\
+                  | `output_fps_imag` | `60` | log |\n\
+                  | `power_pl1_w_imag` | `29` | MMIO RAPL PL1 ... |\n";
+    let (_c, out, _e) = run_sourced(&format!(
+        "imag_power_pl1_pin_from_readme_text {}",
+        shell_quote(readme)
+    ));
+    assert_eq!(
+        out.trim(),
+        "29",
+        "must extract the pinned 29 W from the README row: {out:?}"
+    );
+}
+
+#[test]
+fn pin_reader_empty_when_pin_absent() {
+    let (_c, out, _e) = run_sourced("imag_power_pl1_pin_from_readme_text 'no pin here'");
+    assert!(
+        out.trim().is_empty(),
+        "no pin row -> empty (caller falls back to the env default): {out:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// imag_power_guard_next_streaks — the guard's own streak bookkeeping (the "2 consecutive" ledger)
+// ---------------------------------------------------------------------------------------------
+
+fn next_streaks(args: &str) -> String {
+    let (_c, out, _e) = run_sourced(&format!("imag_power_guard_next_streaks {args}"));
+    out.trim().to_string()
+}
+
+#[test]
+fn guard_next_streaks_matches_the_two_consecutive_ledger() {
+    // stepdown/restore reset both streaks and set the stepped flag.
+    assert_eq!(
+        next_streaks("stepdown 1 0 1 0 0"),
+        "0 0 1",
+        "stepdown -> reset + stepped=1"
+    );
+    assert_eq!(
+        next_streaks("restore 0 1 0 3 1"),
+        "0 0 0",
+        "restore -> reset + stepped=0"
+    );
+    // hold on a hot read advances HOT (so the NEXT hot read is the 2nd -> stepdown).
+    assert_eq!(
+        next_streaks("hold 1 0 0 0 0"),
+        "1 0 0",
+        "first hot read -> HOT 0->1, not stepped"
+    );
+    // hold on a cool read advances COOL while stepped (so the NEXT cool read restores).
+    assert_eq!(
+        next_streaks("hold 0 1 0 0 1"),
+        "0 1 1",
+        "first cool read while stepped -> COOL 0->1"
+    );
+    // a band read (neither hot nor cool) resets both streaks.
+    assert_eq!(
+        next_streaks("hold 0 0 3 0 1"),
+        "0 0 1",
+        "hysteresis-band read -> both streaks reset"
+    );
+    // reassert keeps the (not-stepped) flag and advances per this read.
+    assert_eq!(
+        next_streaks("reassert 0 0 0 0 0"),
+        "0 0 0",
+        "reassert at nominal -> streaks reset, stepped unchanged"
+    );
+}
 
 // ---------------------------------------------------------------------------------------------
 // imag_power_alert_condition — the dev1-side watchdog pages on STEP-DOWN / RE-ASSERT, never RESTORE

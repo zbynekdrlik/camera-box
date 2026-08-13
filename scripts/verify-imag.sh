@@ -1053,6 +1053,11 @@ PE_GATHER="$(ssh_box "$(imag_power_envelope_gather_remote_snippet)")" || rc=$?
 if [ "$rc" -ne 0 ] || [ -z "$PE_GATHER" ]; then
   fail "could not read the power/thermal-envelope state over SSH (rc=$rc) -- cannot verify PL1/slpc/thermald/units (#1040)"
 else
+  # Read the SAME README pin drift-guard.sh's --check-imag facet reads (its pinned_setting), so the
+  # acceptance gate and the strict gate never check DIFFERENT wattages after a deliberate re-pin.
+  # Fall back to the lib/env default only when the README is unreadable.
+  PE_PIN="$(imag_power_pl1_pin_from_readme_text "$(cat "$HERE/../vendor/README.md" 2>/dev/null || true)")"
+  [ -n "$PE_PIN" ] || PE_PIN="${IMAG_PL1_W:-29}"
   while IFS='|' read -r pe_facet pe_status pe_detail; do
     [ -n "$pe_facet" ] || continue
     if [ "$pe_status" = "OK" ]; then
@@ -1060,7 +1065,7 @@ else
     else
       fail "power envelope (${pe_facet}) ${pe_status}: ${pe_detail}"
     fi
-  done <<< "$(imag_power_envelope_verdict "$PE_GATHER" "${IMAG_PL1_W:-29}")"
+  done <<< "$(imag_power_envelope_verdict "$PE_GATHER" "$PE_PIN")"
 
   # TCPU must be BELOW the guard's step-down ceiling -- a reading at/above it means a clamp episode
   # is live right now (the envelope is thermally degraded, not merely mis-provisioned).
