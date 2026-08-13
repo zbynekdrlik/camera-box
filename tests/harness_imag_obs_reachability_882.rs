@@ -139,6 +139,38 @@ fn message_for_process_absent_names_the_real_cause_and_the_restart_command() {
     );
 }
 
+/// #1015: the LIVE 2026-08-13 finding was that imag-obs.service exists+works (installed by
+/// setup-imag.sh step 21 as a systemd USER unit) but sat unsupervised because every ACTUAL
+/// recovery this ticket's own preflight message drove followed its PRIMARY instruction — a
+/// direct `/usr/local/bin/imag-obs-start.sh` call — which launches OBS entirely outside the
+/// unit's cgroup, so `Restart=on-failure` had nothing to supervise. The supervised systemctl form
+/// must be the PRIMARY instruction (named first), never a parenthetical "once supervised" aside.
+#[test]
+fn message_for_process_absent_leads_with_the_supervised_restart_command_1015() {
+    let msg = message_for("OBS_PROCESS_ABSENT");
+    let systemctl_pos = msg.find("systemctl --user start imag-obs").unwrap_or_else(|| {
+        panic!(
+            "message must point at the supervised systemctl restart command (issue 1015 -- a \
+             direct imag-obs-start.sh recovery call bypasses Restart=on-failure supervision \
+             entirely): {msg:?}"
+        )
+    });
+    if let Some(script_pos) = msg.find("imag-obs-start.sh") {
+        assert!(
+            systemctl_pos < script_pos,
+            "the supervised systemctl command must be the PRIMARY instruction, named BEFORE any \
+             mention of the raw script -- a parenthetical \"once supervised\" aside (the old \
+             wording) is exactly what led every real recovery to bypass the unit (issue 1015): {msg:?}"
+        );
+    }
+    let lower = msg.to_lowercase();
+    assert!(
+        lower.contains("never") || lower.contains("bypass"),
+        "the message should explicitly warn that calling imag-obs-start.sh directly bypasses \
+         supervision, not merely mention it as an interchangeable alternative: {msg:?}"
+    );
+}
+
 #[test]
 fn message_for_port_not_listening_names_that_distinct_cause() {
     let msg = message_for("OBS_PORT_NOT_LISTENING");
