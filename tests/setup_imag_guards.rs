@@ -1672,9 +1672,9 @@ fn setup_imag_total_steps_matches_actual_step_calls() {
         })
         .count();
     assert_eq!(
-        declared, 21,
-        "TOTAL_STEPS must be 21 after #882 added the OBS-supervision/wallpaper-alert/core-dump \
-         provisioning step to the prior 20"
+        declared, 22,
+        "TOTAL_STEPS must be 22 after #1040 added the power/thermal-envelope provisioning step to \
+         the prior 21"
     );
     assert_eq!(
         actual, declared,
@@ -3284,4 +3284,78 @@ fn setup_imag_dockstate_seed_applies_to_both_ini_files_before_obs_launch() {
         "{SETUP}: the DockState seed must complete BEFORE step 17 launches OBS for the first \
          time (#791)."
     );
+}
+
+// ============================================================================================
+// #1040 — step 22: the power/thermal envelope (purge thermald + pin MMIO RAPL PL1 + slpc,
+// supervised by a loud root guard). Codifies the durable fix for the imag render power clamp
+// (issues 799/880/1029/1030): a from-scratch reprovision must always land the whole envelope.
+// ============================================================================================
+
+/// thermald is PURGED (not masked) — it is the actor that programmed the harmful 25 W MMIO PL1.
+#[test]
+fn setup_imag_purges_thermald_1040() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("apt-get purge -y thermald"),
+        "{SETUP} must PURGE thermald (not mask) — it programs the 25 W MMIO PL1 clamp (#1040)"
+    );
+}
+
+/// Both on-box scripts AND the shared lib are fetched to the box (same gh-api path as
+/// imag-obs-start.sh) — a reprovision is never missing them.
+#[test]
+fn setup_imag_installs_the_power_envelope_scripts_and_lib_1040() {
+    let body = read(SETUP);
+    for needle in [
+        "contents/scripts/lib/imag-power-envelope.sh?ref=dev",
+        "contents/scripts/imag-power-envelope.sh?ref=dev",
+        "contents/scripts/imag-power-envelope-guard.sh?ref=dev",
+    ] {
+        assert!(
+            body.contains(needle),
+            "{SETUP} must fetch {needle} to the box via gh api (#1040)"
+        );
+    }
+}
+
+/// The oneshot + the guard timer are ROOT system units (sysfs writes need root) and both are
+/// enabled+active — a correct PL1 with a dead guard is the "provisioned but unsupervised" shape.
+#[test]
+fn setup_imag_enables_the_root_envelope_units_1040() {
+    let body = read(SETUP);
+    assert!(
+        body.contains("/etc/systemd/system/imag-power-envelope.service"),
+        "{SETUP} must write the oneshot as a ROOT system unit (#1040)"
+    );
+    assert!(
+        body.contains("/etc/systemd/system/imag-power-envelope-guard.timer"),
+        "{SETUP} must write the guard TIMER as a ROOT system unit (#1040)"
+    );
+    assert!(
+        body.contains("systemctl enable --now imag-power-envelope.service"),
+        "{SETUP} must enable+start the envelope oneshot (#1040)"
+    );
+    assert!(
+        body.contains("systemctl enable --now imag-power-envelope-guard.timer"),
+        "{SETUP} must enable+start the guard timer -- else the envelope is unsupervised (#1040)"
+    );
+}
+
+/// The provisioned envelope values (PL1 + guard thresholds) are baked into the units as env knobs
+/// so a re-provision keeps the same envelope and they stay overridable at provisioning time.
+#[test]
+fn setup_imag_bakes_the_envelope_env_knobs_into_the_units_1040() {
+    let body = read(SETUP);
+    for knob in [
+        "IMAG_PL1_W",
+        "IMAG_PL1_STEPDOWN_W",
+        "IMAG_TCPU_STEPDOWN_C",
+        "IMAG_TCPU_RESTORE_C",
+    ] {
+        assert!(
+            body.contains(&format!("Environment=IMAG")) && body.contains(knob),
+            "{SETUP} must bake {knob} into the envelope units' Environment= (#1040)"
+        );
+    }
 }
