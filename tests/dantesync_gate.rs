@@ -2233,6 +2233,8 @@ fn gate_client_row_scatter_still_fails_via_stability_despite_the_widened_median_
             "3",
             "--window-s",
             "0",
+            "--client-step-threshold-fallback-us",
+            "0",
         ],
         &[
             (
@@ -2305,6 +2307,8 @@ fn gate_client_chase_ceiling_us_caps_an_absurd_master_deadband_1022() {
             "3",
             "--window-s",
             "0",
+            "--client-step-threshold-fallback-us",
+            "0",
         ],
         &[
             (
@@ -2376,6 +2380,8 @@ fn gate_client_chase_ceiling_us_flag_is_configurable_1022() {
             "0",
             "--client-chase-ceiling-us",
             "1000",
+            "--client-step-threshold-fallback-us",
+            "0",
         ],
         &[
             (
@@ -2434,6 +2440,208 @@ fn help_describes_the_client_chase_ceiling_flag_1022() {
     assert!(
         stdout.contains("--client-chase-ceiling-us"),
         "usage text must document the new flag: {stdout}"
+    );
+}
+
+// --- #1041: client chase envelope under-derived -- the gate must fetch EACH client's OWN -------
+// --- journal to include its real adaptive step threshold, falling back to a conservative -------
+// --- constant for a Windows client (no journald) or an unreadable journal ----------------------
+
+#[test]
+fn gate_client_step_threshold_fallback_us_malformed_is_a_usage_error_1041() {
+    let (code, _stdout, stderr) = run_gate(&[
+        "--linux",
+        "",
+        "--win-http",
+        "strih=10.77.9.202",
+        "--client-step-threshold-fallback-us",
+        "abc",
+    ]);
+    assert_eq!(
+        code, 1,
+        "a non-numeric --client-step-threshold-fallback-us must be a usage error (1). \
+         stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("--client-step-threshold-fallback-us"),
+        "stderr must name the flag: {stderr}"
+    );
+}
+
+#[test]
+fn help_describes_the_client_step_threshold_fallback_flag_1041() {
+    let (code, stdout, _stderr) = run_gate(&["--help"]);
+    assert_eq!(code, 0, "--help must exit 0");
+    assert!(
+        stdout.contains("--client-step-threshold-fallback-us"),
+        "usage text must document the new flag: {stdout}"
+    );
+}
+
+#[test]
+fn gate_client_row_prefers_its_own_journal_threshold_over_the_fallback_1041() {
+    // The exact live cam3 incident (E2E run 31691870165): master deadband 2500, cam3's own
+    // journal carries threshold:665us. 6 samples: 2 baseline (+23us) + 4 elevated (+3680us) --
+    // the OLD 3500us bound (2500+1000 margin, no threshold term) false-DRIFTs this; the NEW
+    // envelope (2500+665+1000=4165us), derived from cam3's OWN journal (never the fallback
+    // constant), must PASS via the (unchanged) bimodal chase-signature exclusion.
+    let base = now_epoch();
+    let master_responses = vec![
+        http_status_ntp_deadband(base, 2450, "2", false, "2500"),
+        http_status_ntp_deadband(base + 5, 2460, "3", false, "2500"),
+        http_status_ntp_deadband(base + 10, 2470, "2", false, "2500"),
+        http_status_ntp_deadband(base + 15, 2480, "2", false, "2500"),
+        http_status_ntp_deadband(base + 20, 2490, "2", false, "2500"),
+        http_status_ntp_deadband(base + 25, 2500, "2", false, "2500"),
+    ];
+    let p_master = write_multi_read_fixture("strih_1041_cam3_master", &master_responses);
+    let p_priming = write_win_http_fixture(
+        "strih_1041_cam3_priming",
+        &http_status_ntp_deadband(base, 2500, "2", false, "2500"),
+    );
+    let cam3_responses = vec![
+        http_status_ntp(base, 23, "2", false),
+        http_status_ntp(base + 5, 23, "3", false),
+        http_status_ntp(base + 10, 3680, "2", false),
+        http_status_ntp(base + 15, 3680, "2", false),
+        http_status_ntp(base + 20, 3680, "2", false),
+        http_status_ntp(base + 25, 3680, "2", false),
+    ];
+    let p_cam3 = write_multi_read_fixture("cam3_1041_incident", &cam3_responses);
+    let j_cam3 = write_dante_journal(
+        "cam3_1041_incident_journal",
+        "11:16:58 [NTP] burst offset:+3680us spread:16us samples:3/5\n\
+11:16:58 [NTP] Stepped +3680us\n\
+11:17:29 [NTP] offset:+23us\n\
+11:18:59 [NTP] burst offset:+2701us step candidate +2701us (threshold:665us)\n",
+    );
+
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "cam3=10.77.9.63",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--samples",
+            "6",
+            "--min-distinct",
+            "6",
+            "--window-s",
+            "0",
+            // A deliberately WRONG (way too small) fallback proves the gate used cam3's OWN
+            // journal, NOT the fallback -- if it silently fell back, this would still DRIFT.
+            "--client-step-threshold-fallback-us",
+            "1",
+        ],
+        &[
+            (
+                "DANTESYNC_GATE_WIN_HTTP_STRIH",
+                &p_master.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_LINUX_HTTP_CAM3",
+                &p_cam3.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_MASTER_DEADBAND_STATUS",
+                &p_priming.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_LINUX_JOURNAL_CAM3",
+                &j_cam3.display().to_string(),
+            ),
+        ],
+    );
+    assert_eq!(
+        code, 0,
+        "cam3's real 665us journal threshold must widen the envelope to 4165us and PASS the \
+         genuine +3680us chase excursion -- even with a deliberately tiny fallback (1us) that \
+         would still DRIFT if the fallback were used instead of the real journal value. \
+         stdout={stdout} stderr={stderr}"
+    );
+    assert!(stdout.contains("GATE PASS"), "stdout: {stdout}");
+    let cam3_line = stdout
+        .lines()
+        .find(|l| l.trim_start().starts_with("cam3"))
+        .unwrap_or_else(|| panic!("no cam3 report line in stdout: {stdout}"));
+    assert!(
+        cam3_line.contains("its own journal (665us)"),
+        "the report line must show cam3's threshold came from ITS OWN journal, not the \
+         fallback: {cam3_line:?}"
+    );
+}
+
+#[test]
+fn gate_win_http_client_never_fetches_a_journal_uses_the_fallback_1041() {
+    // A Windows client (no journald at all) must use CLIENT_STEP_FALLBACK_US directly -- never
+    // attempt a journal read (there is nothing to read via SSH for a --win-http node).
+    let base = now_epoch();
+    let master_responses = vec![
+        http_status_ntp_deadband(base, 2450, "2", false, "2500"),
+        http_status_ntp_deadband(base + 5, 2480, "3", false, "2500"),
+        http_status_ntp_deadband(base + 10, 2500, "2", false, "2500"),
+    ];
+    let p_master = write_multi_read_fixture("strih_1041_win_fallback_master", &master_responses);
+    let p_priming = write_win_http_fixture(
+        "strih_1041_win_fallback_priming",
+        &http_status_ntp_deadband(base, 2500, "2", false, "2500"),
+    );
+    // median 2900us, worst-case pre-#1041 envelope (2500+1000=3500us) already covers it, so the
+    // interesting assertion is the REPORT LINE's own attribution: it must name the fallback
+    // (never a journal -- a Windows box has no journald at all).
+    let stream_responses = vec![
+        http_status_ntp(base, 2900, "2", false),
+        http_status_ntp(base + 5, 2900, "3", false),
+        http_status_ntp(base + 10, 2900, "2", false),
+    ];
+    let p_stream = write_multi_read_fixture("stream_1041_win_fallback", &stream_responses);
+
+    // Low fallback (100us): max(2000, 2500+100+1000)=3600us -> 2900 <= 3600 PASSES.
+    let (code_low, stdout_low, _stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--win-http",
+            "stream=10.77.9.204",
+            "--samples",
+            "3",
+            "--min-distinct",
+            "3",
+            "--window-s",
+            "0",
+            "--client-step-threshold-fallback-us",
+            "100",
+        ],
+        &[
+            (
+                "DANTESYNC_GATE_WIN_HTTP_STRIH",
+                &p_master.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_WIN_HTTP_STREAM",
+                &p_stream.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_MASTER_DEADBAND_STATUS",
+                &p_priming.display().to_string(),
+            ),
+        ],
+    );
+    assert_eq!(
+        code_low, 0,
+        "median 2900us must fit inside max(2000, 2500+100+1000)=3600us via the fallback term: \
+         stdout={stdout_low}"
+    );
+    let stream_line_low = stdout_low
+        .lines()
+        .find(|l| l.trim_start().starts_with("stream"))
+        .unwrap_or_else(|| panic!("no stream report line: {stdout_low}"));
+    assert!(
+        stream_line_low.contains("fallback(100us)"),
+        "a Windows client must report its threshold source as the FALLBACK, never a journal \
+         (it has no journald): {stream_line_low:?}"
     );
 }
 
@@ -2507,6 +2715,15 @@ fn gate_reproduces_the_live_three_client_simultaneous_chase_shape_and_passes_via
     ];
     let p_stream = write_multi_read_fixture("stream_1022_spread_live_shape", &stream_responses);
 
+    // #1041 network safety: this environment can reach the real rig (cam1/cam2 IPs below are
+    // genuine, reachable boxes) -- WITHOUT an explicit journal override, grade_http_node's new
+    // per-client threshold read (client_step_threshold_us_from_journal, #1041) would attempt a
+    // REAL live SSH read here, making this test non-deterministic. An empty journal (no
+    // "threshold:" match) makes the term fall back to the flag's own default, unaffected by
+    // whatever the LIVE rig's journal happens to contain right now.
+    let j_cam1 = write_dante_journal("cam1_1022_spread_live_shape_journal", "");
+    let j_cam2 = write_dante_journal("cam2_1022_spread_live_shape_journal", "");
+
     let (code, stdout, stderr) = run_gate_env(
         &[
             "--linux",
@@ -2544,6 +2761,14 @@ fn gate_reproduces_the_live_three_client_simultaneous_chase_shape_and_passes_via
             (
                 "DANTESYNC_GATE_MASTER_DEADBAND_STATUS",
                 &p_priming.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_LINUX_JOURNAL_CAM1",
+                &j_cam1.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_LINUX_JOURNAL_CAM2",
+                &j_cam2.display().to_string(),
             ),
         ],
     );
@@ -2604,6 +2829,10 @@ fn gate_resample_with_no_further_distinct_data_reports_unknown_never_a_stale_or_
     ];
     let p_cam1 = write_multi_read_fixture("cam1_1022_spread_baseline", &cam1_responses);
 
+    // #1041 network safety: see the sibling 3-client test's own comment above -- an explicit
+    // empty journal override avoids a real live SSH read against the reachable cam1 IP below.
+    let j_cam1 = write_dante_journal("cam1_1022_spread_baseline_journal", "");
+
     let (code, stdout, stderr) = run_gate_env(
         &[
             "--linux",
@@ -2631,6 +2860,10 @@ fn gate_resample_with_no_further_distinct_data_reports_unknown_never_a_stale_or_
             (
                 "DANTESYNC_GATE_MASTER_DEADBAND_STATUS",
                 &p_priming.display().to_string(),
+            ),
+            (
+                "DANTESYNC_GATE_LINUX_JOURNAL_CAM1",
+                &j_cam1.display().to_string(),
             ),
         ],
     );

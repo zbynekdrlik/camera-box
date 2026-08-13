@@ -305,9 +305,12 @@ fn sticky_n_latch_lifecycle_and_robust_measure_741() {
         .map(|rel| relock_pos + rel)
         .unwrap_or(raw.len());
     let after_relock = &raw[relock_pos..window_end];
+    // #1003: the branch's terminating statement is now `release = sel_1003 + 1;` — the
+    // phase-continuity selection replaced the newest-due one. The window this slices is
+    // otherwise unchanged.
     let release_off = after_relock
-        .find("release = due;")
-        .expect("#741: the relock branch must release the due frame (release = due;)");
+        .find("release = sel_1003 + 1;")
+        .expect("#741/#1003: the relock branch must end in the phase-continuity release (release = sel_1003 + 1;)");
     let relock_branch = &after_relock[..release_off];
     assert!(
         !relock_branch.contains("genlock_last_known_n = 0"),
@@ -455,8 +458,8 @@ fn relock_events_log_phase_evidence_940() {
         .find("source->genlock_relocks++;")
         .expect("#940: the backlog-storm relock branch (genlock_relocks++) must be present");
     let release_off = raw[relock_pos..]
-        .find("release = due;")
-        .expect("#940: the relock branch must still release the due frame (release = due;)");
+        .find("release = sel_1003 + 1;")
+        .expect("#940/#1003: the relock branch must end in the phase-continuity release (release = sel_1003 + 1;)");
     let relock_branch = &raw[relock_pos..relock_pos + release_off];
     assert!(
         relock_branch.contains("genlock-relock"),
@@ -470,13 +473,20 @@ fn relock_events_log_phase_evidence_940() {
         "due=%zu",
         "erased=%zu",
         "head_skew_ms=%lld",
-        "wall_grid_phase_ns=%lld",
+        // #1003: wall_grid_phase_ns was structurally BLIND — it logged `present_ts %%
+        // interval` while #940 piece 3 floors present_ts to that very interval, so a
+        // floored value mod its own divisor is IDENTICALLY 0 on every run at every
+        // latency. These three replace it and are the live post-deploy evidence fields.
+        "tick_phase_ns=%llu",
+        "anchor_ns=%llu",
+        "sel_vs_newest_due=%lld",
     ] {
         assert!(
             squished.contains(field),
             "{OBS_SOURCE}: #940 piece 1 — the relock phase-evidence log line is missing \
              field `{field}`; re-apply the full instrumentation (depth / \
-             steady_depth_frames / due / erased / head_skew_ms / wall_grid_phase_ns)."
+             steady_depth_frames / due / erased / head_skew_ms / tick_phase_ns / \
+             anchor_ns / sel_vs_newest_due)."
         );
     }
     // #940 piece 1 correctness fix: the logged steady_depth_frames must subtract the FULL
@@ -550,6 +560,188 @@ fn ts_align_deadline_is_phase_pinned_to_the_wall_grid_940() {
         "{OBS_SOURCE}: #940 piece 3 — the grid hysteresis is no longer gated to the \
          reserve_ms>0 (ms-granular deep-latency) path; the frame-count preload path must \
          stay byte-identical to its pre-#940 behaviour."
+    );
+}
+
+#[test]
+fn relock_selection_is_phase_anchored_not_newest_due_1003() {
+    // #1003 — the structural fix #940 piece 3 could not deliver on its own. The grid pin
+    // removed the deadline's dependence on the exact instant a relock fired, but the
+    // release PHASE is minted by the SELECTION, and that stayed an instant-sampled,
+    // STATELESS newest-due comparison carrying two independently flippable edges: the
+    // deadline floors to the RECEIVER grid (±2 ms of render-tick slew near the floor's step
+    // point moves the whole pinned cell), while the stamps compared against it sit on the
+    // SENDER's 33,333,300 ns grid (a 33 ns/frame beat, so the fixed 5 ms hysteresis is a
+    // FIXED edge inside a DRIFTING relative phase). Two edges = up to four outcomes
+    // spanning two frames = the measured −64.5 / +56..63 ms per-episode steps.
+    //
+    // The selection arithmetic itself is Tier-0 unit-tested in src/genlock_backlog.rs
+    // (relock_select_nearest / relock_anchor_age_ns / phase_anchor_from_present, incl. the
+    // whole-frame-step defect lock); this guards the C WIRING, which compiles on CI only.
+    let src = squish(&vendor_file(OBS_SOURCE));
+    let internal = squish(&vendor_file(OBS_INTERNAL));
+
+    // (a) the per-source anchor state exists.
+    assert!(
+        internal.contains("uint64_t genlock_phase_anchor_ns;"),
+        "{OBS_INTERNAL}: #1003 — the per-source phase anchor (genlock_phase_anchor_ns) is \
+         gone; without remembered state the relock has nothing to inherit a phase FROM and \
+         necessarily re-samples one. Mirror: src/genlock_backlog.rs relock_anchor_age_ns."
+    );
+
+    // (b) the selection helper exists AND its nearest-neighbour body is intact — a
+    // "simplify this" edit could keep the helper and neuter it back into an edge.
+    assert!(
+        src.contains("static inline size_t genlock_relock_select_nearest("),
+        "{OBS_SOURCE}: #1003 — the phase-continuity selection helper \
+         (genlock_relock_select_nearest) is gone; the relock reverted to instant-sampled \
+         selection. Mirror: src/genlock_backlog.rs relock_select_nearest."
+    );
+    assert!(
+        // SHORT + wrap-independent on purpose: a clang-format bump or a loop-variable
+        // rename must not fail this gate with a misleading message (the anchor-fragility
+        // lesson #940 records for byte windows applies to long literals too).
+        src.contains("best_d = genlock_abs_diff_ns("),
+        "{OBS_SOURCE}: #1003 — genlock_relock_select_nearest no longer measures each queued \
+         stamp's DISTANCE from the anchor target; a selection that is not \
+         nearest-neighbour is not continuous, and a non-continuous rule has an edge for \
+         slew or the sender-grid beat to flip."
+    );
+    assert!(
+        src.contains("if (d < best_d)"),
+        "{OBS_SOURCE}: #1003 — the nearest scan's STRICT `<` is gone. A non-strict compare \
+         resolves ties toward the NEWER frame, which lets an exactly-equidistant target \
+         oscillate between neighbours on successive episodes — the very failure this \
+         function exists to remove. Mirror: src/genlock_backlog.rs relock_select_nearest."
+    );
+    assert!(
+        src.contains("return anchor > configured ? anchor : configured;"),
+        "{OBS_SOURCE}: #1003 — genlock_relock_target_age_ns no longer returns the tracked \
+         anchor FLOORED at the configured latency. Without the anchor it targets a fixed \
+         latency instead of the conveyor's real on-air age; without the floor a degenerate \
+         or stale anchor below the hold targets the live edge and one relock erases the \
+         entire delay line. Mirror: src/genlock_backlog.rs relock_anchor_age_ns."
+    );
+
+    // (c) BOTH relock branches are wired in — ACQUIRE and BACKLOG STORM. Defining the
+    // helper without calling it from both is dead code (the same "assert the call site,
+    // not just the helper" discipline #859/#940 already apply here).
+    assert!(
+        src.contains("release = genlock_relock_select_nearest(source, wall_now, reserve_ms) + 1;"),
+        "{OBS_SOURCE}: #1003 — the ACQUIRE branch no longer selects by phase continuity; a \
+         cold/self-heal re-acquire would re-mint an edge-ridden phase."
+    );
+    assert!(
+        src.contains("release = sel_1003 + 1;"),
+        "{OBS_SOURCE}: #1003 — the BACKLOG-STORM branch no longer selects by phase \
+         continuity. This is the branch the live evidence traced the episode steps to \
+         (relocks=13 in ~3.8 h on the deployed build)."
+    );
+    assert!(
+        !src.contains("release = due;"),
+        "{OBS_SOURCE}: #1003 — a relock branch still uses the newest-due selection \
+         (`release = due;`). That rule is instant-sampled and stateless: it re-mints the \
+         release phase on every lock episode, which is the whole defect. The Tier-0 lock \
+         `instant_sampled_selection_steps_a_whole_frame_at_the_grid_edges_1003` shows ONE \
+         NANOSECOND of render-tick slew moving it a whole frame."
+    );
+
+    // (d) the `release - 1` erase idiom is untouched, so a relock still sheds DEPTH.
+    assert!(
+        src.contains("size_t to_drop = release - 1;"),
+        "{OBS_SOURCE}: #1003 — the erase-into-dropped_due idiom (to_drop = release - 1) is \
+         gone; the relock would stop shedding the queue depth a stall's burst built up, \
+         leaving the FIFO parked overshot (the issue-859 branch would become decorative)."
+    );
+
+    // (e) the anchor is updated on the conveyor's presents ONLY. A relock that WRITES the
+    // anchor re-mints a phase from whatever frame it happened to select — the defect,
+    // reintroduced through the back door.
+    assert!(
+        src.contains("if (anchor_update) source->genlock_phase_anchor_ns ="),
+        "{OBS_SOURCE}: #1003 — the phase anchor is no longer updated (gated by \
+         anchor_update) on the shared present tail. Ungated, the ACQUIRE/BACKLOG relock \
+         presents would redefine the anchor they are supposed to INHERIT."
+    );
+    assert!(
+        src.contains("genlock_phase_anchor_from_present("),
+        "{OBS_SOURCE}: #1003 — the anchor is no longer derived via \
+         genlock_phase_anchor_from_present (the saturating wall_now - presented_ts)."
+    );
+
+    // (f) the seams. A stepped wall clock invalidates every sampled age by exactly the
+    // step, and a flush destroys the delay line the age described.
+    let regime_end_all = src
+        .split("static void genlock_backward_regime_end(")
+        .nth(1)
+        .expect("#1003: genlock_backward_regime_end must exist (issue 1009 self-heal)");
+    // Scope to the ENCLOSING FUNCTION (up to the next top-level definition), never a fixed
+    // byte window — the exact lesson #940 piece 1 already records above: a byte cap is a
+    // PROXY for "the same function" and rots the moment the body grows.
+    let regime_end = regime_end_all
+        .find("static ")
+        .map_or(regime_end_all, |i| &regime_end_all[..i]);
+    assert!(
+        regime_end.contains("source->genlock_phase_anchor_ns = 0;"),
+        "{OBS_SOURCE}: #1003 — a backward-step regime end no longer CLEARS the phase \
+         anchor. The receiver wall clock moved by the step, so re-acquiring against a \
+         pre-step age re-establishes the hold at a phase off by the whole clock step — \
+         while that function's own contract is to re-acquire the CONFIGURED hold."
+    );
+    // EVERY site that destroys the delay line must clear the anchor — the explicit flush,
+    // the overrun force-drain, AND the async_texture_changed re-alloc. Counting them
+    // against the call sites is what stops the seam list silently drifting when a future
+    // edit adds a fourth (only the flush was covered on the first cut of #1003).
+    let seams = src
+        .matches("source->genlock_phase_anchor_ns = 0; free_async_cache(source);")
+        .count();
+    let frees = src.matches("free_async_cache(source);").count();
+    assert_eq!(
+        seams, frees,
+        "{OBS_SOURCE}: #1003 — {frees} site(s) call free_async_cache() but only {seams} \
+         clear the phase anchor first. Each one destroys the whole delay line, so a relock \
+         firing before the next STEADY/GAP present would target an age describing a delay \
+         line that no longer exists."
+    );
+
+    // A latency SETPOINT change also invalidates the remembered age. Without this the
+    // relock sheds NOTHING after a decrease while the lowered threshold qualifies the
+    // backlog branch every tick — a permanent relock storm that ALSO starves the
+    // settle-back drain, which only runs on the STEADY path that branch pre-empts.
+    // Scoped to the setter function, never a byte window.
+    let setter_all = src
+        .split("void obs_source_set_genlock_latency_ms(")
+        .nth(1)
+        .expect("#1003: obs_source_set_genlock_latency_ms must exist");
+    let setter = setter_all
+        .find("uint32_t obs_source_get_genlock_latency_ms(")
+        .map_or(setter_all, |i| &setter_all[..i]);
+    assert!(
+        setter.contains("source->genlock_phase_anchor_ns = 0;"),
+        "{OBS_SOURCE}: #1003 — a latency setpoint change no longer clears the phase anchor. \
+         The remembered age describes a hold that no longer exists; on a DECREASE the relock \
+         then sheds nothing forever while the backlog branch fires every tick. Tier-0 lock: \
+         latency_setpoint_decrease_converges_without_a_relock_storm_1003."
+    );
+
+    // The stale-anchor self-heal: a BACKLOG relock that would shed nothing is proof the
+    // anchor cannot describe a queue this deep.
+    assert!(
+        src.contains("if (sel_1003 == 0 && source->genlock_phase_anchor_ns != 0)"),
+        "{OBS_SOURCE}: #1003 — the BACKLOG branch's stale-anchor self-heal is gone. Without \
+         it a relock that sheds zero frames re-fires every tick (the branch pre-empts \
+         STEADY, so the settle-back drain never runs either) — the useless-`relocks`-counter \
+         state issue 859 removed, reintroduced."
+    );
+
+    // (g) the `due` scan and its hysteresis stay BYTE-IDENTICAL — they still QUALIFY
+    // due-ness (and still gate the backlog branch + the audit), they simply no longer
+    // SELECT. #1003 deliberately changes selection only.
+    assert!(
+        src.contains("array[due]->timestamp <= present_ts + due_hysteresis_ns"),
+        "{OBS_SOURCE}: #1003 — the due prefix scan changed. #1003 must leave due-ness \
+         qualification (and therefore the backlog trigger and the audit sample) exactly as \
+         #940 piece 3 left it; only the SELECTION moves."
     );
 }
 

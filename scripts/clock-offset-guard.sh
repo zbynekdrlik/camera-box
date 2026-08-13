@@ -889,6 +889,27 @@ should_resample_for_chase() {
 # baseline cluster near zero PLUS a tight, SAME-SIGN elevated cluster at (or under) the step size,
 # all within the envelope. A CLIENT row (never the master) whose raw verdict would be EXACTLY
 # "unstable" is explained -- passes -- when ALL of:
+#
+# #1041 finding (proven, not just observed): this function's own condition 2 (every ELEVATED
+# sample <= BOUND_US) makes a "drift"/"drift_unstable" raw verdict STRUCTURALLY UNREACHABLE here
+# in any sane config (STABILITY_US <= BOUND_US, true of every default and documented flag in this
+# file -- NOT independently enforced by dantesync-gate.sh's own CLI parsing, since the
+# comparison is against a per-node EFFECTIVE bound that only exists after widening at runtime;
+# an operator who deliberately sets --stability-us far above --bound-us, wider than any
+# widened envelope could ever reach, could theoretically defeat this argument, but that is a
+# self-inflicted misconfiguration far outside anything this file's own defaults or
+# documented flags would ever produce): sampled_offset_verdict's own "drift" flag is
+# `abs(median) > BOUND_US`, and the MEDIAN is
+# itself one of the very samples this function partitions -- a baseline sample has
+# abs<=STABILITY_US<=BOUND_US by definition (can't be the median if median>BOUND_US), and an
+# ELEVATED sample exceeding BOUND_US is EXACTLY what condition 2 already rejects. So a live chase
+# excursion that would have false-DRIFTed the MEDIAN check (cam3's own incident: majority-
+# elevated samples pull the median itself past the bound) is resolved ENTIRELY by
+# client_chase_bound_us (above) correctly deriving a bound wide enough to cover the excursion --
+# once BOUND_US covers it, sampled_offset_verdict can only report "unstable" (spread still over)
+# or "ok", never "drift"/"drift_unstable", and this UNCHANGED function already explains "unstable"
+# exactly as it did before #1041. See client_chase_bound_us_reproduces_the_live_cam3_envelope_1041
+# and the transformation test right after it in tests/clock_offset_guard.rs for the proof.
 #   1. Partition distinct samples into baseline (|s| <= STABILITY_US) and elevated (|s| >
 #      STABILITY_US).
 #   2. Every elevated sample fits inside BOUND_US (the SAME bound the median check already uses
@@ -909,8 +930,9 @@ should_resample_for_chase() {
 #      independently of condition 4's exact numeric form, not because any input can make it the
 #      sole deciding factor today.
 # A stuck/drifted node still fails on the MEDIAN check (verdict would be "drift"/"drift_unstable",
-# which never reaches this path -- the leading verdict=="unstable" gate excludes it). The
-# master's own median-only row (mode != "full") is never graded via this signature at all.
+# which never reaches this path -- the leading verdict=="unstable" gate excludes it, and per the
+# #1041 finding above, a "drift"/"drift_unstable" median could never pass conditions 2-5 anyway).
+# The master's own median-only row (mode != "full") is never graded via this signature at all.
 chase_bimodal_exclusion_verdict() {
   local payloads="$1" bound="$2" stability="$3" min_distinct="$4" mode="$5"
   local verdict samples baseline elevated bspread espread emax
@@ -1136,7 +1158,8 @@ ntp_master_effective_bound_us() {
 # reads a DIFFERENT node's status (the caller passes in the MASTER's own /status, not the client
 # being graded) and CAPS the deadband component at CEILING_US before adding MARGIN_US:
 #
-#   effective_client_bound = max(BOUND_US, min(ntp_deadband_us, CEILING_US) + MARGIN_US)
+#   effective_client_bound = max(BOUND_US,
+#                                 min(ntp_deadband_us, CEILING_US) + client_step_threshold_us + MARGIN_US)
 #
 # The cap is the one deliberate difference from #1021's own (uncapped) master formula: #1021
 # only ever widens ONE row (the master's), so an unbounded floor has a small blast radius even
@@ -1144,19 +1167,60 @@ ntp_master_effective_bound_us() {
 # read, so a hard ceiling (default 5000us -- the ticket's own cited "upstream hard per-step
 # ceiling", the documented maximum size of any single master step) keeps that blast radius
 # bounded no matter what the master happens to report.
+#
+# #1041: the ORIGINAL #1022 formula above omitted a SECOND, independent contributor -- what a
+# client observes during a chase is the master's own deadband excursion PLUS the CLIENT's OWN
+# adaptive NTP step threshold (the size of offset ITS OWN daemon tolerates before correcting).
+# dantesync's controller.rs clamps that threshold to [500,10000]us and logs it verbatim as
+# "... (threshold:NNNus, adaptive)" / "... step candidate ... (threshold:NNNus) ..." -- the exact
+# shape documented at the top of this file -- and it is NOT exposed over the HTTP /status JSON
+# (dantesync's SyncStatus only ever carries ntp_deadband_us, the MASTER's own field, always null
+# on a client), so it can only be read from the CLIENT's own journal text via
+# client_step_threshold_us_from_journal (below). client_chase_bound_us now takes two new
+# TRAILING, backward-compatible params: CLIENT_JOURNAL (the specific client's own freshest
+# journal text, default "" -- a pre-#1041 4-arg call site computes byte-identical to before) and
+# STEP_FALLBACK_US (a conservative constant used when the journal has no threshold: match --
+# unreachable node, pre-dantesync-#84 client, or a caller that simply never fetched one; default
+# "0", so an OMITTED fallback also reproduces the exact pre-#1041 formula -- a REAL caller, e.g.
+# dantesync-gate.sh, always passes a genuinely conservative non-zero value, see
+# GATE_CLIENT_STEP_THRESHOLD_FALLBACK_US).
 
-# client_chase_bound_us MASTER_STATUS_JSON BOUND_US MARGIN_US CEILING_US -> the bound to grade a
-# CLIENT node's median against (#1022). MASTER_STATUS_JSON is the CONFIGURED NTP master's own
-# freshly-read /status (dantesync-gate.sh's read_master_chase_status, a priming read SEPARATE
-# from the master's own gather_http_samples calls -- see that function's doc comment for why).
+# client_chase_bound_us MASTER_STATUS_JSON BOUND_US MARGIN_US CEILING_US [CLIENT_JOURNAL]
+#   [STEP_FALLBACK_US] -> the bound to grade a CLIENT node's median against (#1022/#1041).
+# MASTER_STATUS_JSON is the CONFIGURED NTP master's own freshly-read /status
+# (dantesync-gate.sh's read_master_chase_status, a priming read SEPARATE from the master's own
+# gather_http_samples calls -- see that function's doc comment for why). CLIENT_JOURNAL is THIS
+# SPECIFIC client's own freshest journal text (default ""); its LAST "threshold:NNNus" match
+# (client_step_threshold_us_from_journal) is added as a THIRD term, falling back to
+# STEP_FALLBACK_US (default "0") when the journal is empty or carries no match.
+#
 # "null" / absent / non-numeric / negative ntp_deadband_us in MASTER_STATUS_JSON, OR a malformed
 # BOUND_US/MARGIN_US/CEILING_US (validated with `grep -qE '^[0-9]+$'` BEFORE any arithmetic, same
 # #595 bash-gotcha discipline as ntp_master_effective_bound_us), falls back to the UNMODIFIED
 # BOUND_US -- exactly like a pre-dantesync-#84 master, an unreachable master, or any caller that
 # simply never derived a live envelope. Never a blind widen: without a live, numeric, non-
-# negative master deadband to derive from, the bound never moves.
+# negative master deadband to derive from, the bound never moves -- and the client step-threshold
+# term NEVER applies on its own either (there is no "chase" concept at all without a real master
+# deadband to chase).
+
+# client_step_threshold_us_from_journal TEXT -> the client's own CURRENTLY-active adaptive NTP
+# step threshold: the integer value of the LAST "threshold:[0-9]+us" match anywhere in TEXT ("" if
+# none). Matches BOTH literal shapes dantesync's controller.rs emits ("[NTP] offset:+300us
+# (threshold:520us, adaptive)" and "[NTP] step candidate +2701us (threshold:665us)") -- the same
+# "freshest = last match wins" convention offset_us_from_journal already uses above. This is a
+# per-daemon CONFIG value (the currently-active adaptive threshold), not a drifting live
+# measurement, so no separate freshness/age check is needed -- reading it from whatever journal
+# window the caller already fetched is enough. `|| true` survives a no-match under set -e.
+client_step_threshold_us_from_journal() {
+  printf '%s\n' "$1" \
+    | grep -oE 'threshold:[0-9]+us' \
+    | sed -n 's/.*threshold:\([0-9][0-9]*\)us/\1/p' \
+    | tail -1 || true
+}
 client_chase_bound_us() {
-  local status="$1" bound="$2" margin="$3" ceiling="$4" deadband capped floor
+  local status="$1" bound="$2" margin="$3" ceiling="$4"
+  local client_journal="${5:-}" step_fallback="${6:-0}"
+  local deadband capped step floor
   if ! printf '%s' "$bound" | grep -qE '^[0-9]+$'; then
     printf '%s' "$bound"
     return 0
@@ -1181,11 +1245,25 @@ client_chase_bound_us() {
   fi
   capped="$deadband"
   [ "$capped" -gt "$ceiling" ] && capped="$ceiling"
+  # #1041: the client's own real adaptive step threshold, parsed from ITS OWN journal text; an
+  # empty/no-match journal (or a malformed STEP_FALLBACK_US) falls back to "0" -- never a guess,
+  # and never a crash. A pre-#1041 4-arg caller passes neither param, so client_journal="" and
+  # step_fallback="0" here reproduce the exact pre-#1041 formula byte-for-byte.
+  step="$(client_step_threshold_us_from_journal "$client_journal")"
+  if [ -z "$step" ] || ! printf '%s' "$step" | grep -qE '^[0-9]+$'; then
+    if printf '%s' "$step_fallback" | grep -qE '^[0-9]+$'; then
+      step="$step_fallback"
+    else
+      step=0
+    fi
+  fi
   # #1022 review hardening -- same octal-prefix hazard as ntp_master_effective_bound_us above:
-  # `10#` forces base-10 on both operands (capped is already proven non-negative -- it is either
-  # deadband, already checked >= 0, or ceiling, already validated `^[0-9]+$` -- so no sign to
-  # handle) before the ONE arithmetic expression this function contains.
-  floor=$((10#$capped + 10#$margin))
+  # `10#` forces base-10 on all three operands (capped is already proven non-negative -- it is
+  # either deadband, already checked >= 0, or ceiling, already validated `^[0-9]+$`; step is
+  # either the parsed threshold, already validated `^[0-9]+$`, or the validated step_fallback, or
+  # the literal "0" -- so none of the three ever needs sign handling) before the ONE arithmetic
+  # expression this function contains.
+  floor=$((10#$capped + 10#$step + 10#$margin))
   if [ "$floor" -gt "$bound" ]; then
     printf '%s' "$floor"
   else
