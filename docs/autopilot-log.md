@@ -7556,3 +7556,10 @@ does the live rig verification of the new whole-chain checks and closes it.
     it. Extracting the cadence block from vendored C that compiles only in CI is its own
     change, not a rider on a fix.
 - Final local: fmt/clippy clean; full `cargo test` 201 binaries / 3206 tests green (exit 0).
+
+## 2026-08-13 — round: PR #1039 (gate re-tighten round 1) merged e5e37e7bf13
+- 1003 (phase-continuity relock, item 1): vendored libobs anchor selection + Tier-0 sim + parity gate; DEPLOYED fast-DLL strih+stream + full bundle imag; live fields verified (anchor_ns tracks hold, sel_vs_newest_due 0/1). Ticket OPEN (items 2+3).
+- 905 (real_drops bar item 1): REAL_DROPS_ALLOWANCE_DEFAULT 2 -> 0, tests strict. Ticket OPEN (items 2+3).
+- 1041 (client chase envelope second term): journal-parsed client step threshold + fallback; CLOSED by the PR.
+- Round E2E survived 4 real rig incidents en route: imag render-budget clamp (25 W PL1 -> 29 W envelope, ticket 1040), strih physical outage + reboot, stream NDI receivers never rebinding after the sender restart (ticket 767 evidence + stream OBS relaunch), bundle-state deaths (ticket 732 x3).
+- New tickets this round: 1040 (imag power envelope), 1042 (Zaloha kamera permanent backlog-relock).
