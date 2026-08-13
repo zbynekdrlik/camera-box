@@ -495,16 +495,22 @@ fn frame_is_delivered_optical(
 /// discipline) — it tolerates the rig's proven moiré floor, never a genuine read failure.
 const OPTICAL_UNDECODABLE_RATE_MAX: f64 = 0.005;
 
-/// #904 — owner-directed, deliberate relaxation of the absolute-zero `real_drops` bar on the
-/// camera-under-test ("endpoint") nodes ONLY. `burn_unreadable`, colour, the optical span floor,
-/// frozen-camera and delivery-latency terms are ALL untouched — see
-/// [`NodeVerdict::is_zero_within_allowance`]. Small enough to absorb the one-off single-frame
-/// artifacts we keep seeing (e.g. #903's 30us program-switch boundary case), far too small to
-/// hide a genuine transport regression (the ticket's own text: a real failure produces drops in
-/// the hundreds, not single digits). #905 tracks putting the bar back down once the backlog of
-/// individual artifacts is cleared — NEVER raise this further without a fresh measured incident
-/// and its own re-tighten ticket, same discipline as [`OPTICAL_UNDECODABLE_RATE_MAX`].
-const REAL_DROPS_ALLOWANCE_DEFAULT: u32 = 2;
+/// #904 introduced an owner-directed, deliberate relaxation of the absolute-zero `real_drops`
+/// bar on the camera-under-test ("endpoint") nodes ONLY (`burn_unreadable`, colour, the optical
+/// span floor, frozen-camera and delivery-latency terms were ALL untouched — see
+/// [`NodeVerdict::is_zero_within_allowance`]), to absorb one-off single-frame artifacts (e.g.
+/// #903's 30us program-switch boundary case) while the fix for that root cause was still
+/// outstanding.
+///
+/// **#905 item 1 reverted this DEFAULT back to 0** (2026-08-13): #903's fix merged and 6/6
+/// sampled recent full-cycle runs showed `real_drops=0` on every node with the allowance NEVER
+/// consumed — the tolerance was no longer buying anything, so the strict zero bar is restored.
+/// The allowance MECHANISM itself is untouched and still available via
+/// `CAMERA_BOX_REAL_DROPS_ALLOWANCE` (see [`real_drops_allowance`]) for a future genuinely new
+/// artifact class — only the silent DEFAULT moved back to strict. NEVER raise this constant
+/// again without a fresh measured incident and its own re-tighten ticket, same discipline as
+/// [`OPTICAL_UNDECODABLE_RATE_MAX`].
+const REAL_DROPS_ALLOWANCE_DEFAULT: u32 = 2; // TEMP: flipped to 0 in the next [green] commit
 
 /// #904 — env-overridable read of the per-node `real_drops` allowance (mirrors the
 /// `CAMERA_BOX_DECODE_WORKERS` idiom in `src/probe/recording.rs`: a non-numeric or absent value
@@ -7154,16 +7160,12 @@ mod tests {
         // (b) 1:1 hop (--capture-fps 60 ⇒ step 1): the SAME gap stays a REAL DROP — the #356
         // SAFETY never-mask invariant, unchanged where the forward-gap signal is valid.
         //
-        // #904 reconciliation: `build_and_print_verdict` now tolerates up to
-        // `REAL_DROPS_ALLOWANCE_DEFAULT` (2) genuine real_drops on a camera-under-test node
-        // before failing the headline (the owner-directed small allowance issue 904 adds) — a
-        // SINGLE injected gap (this test's original fixture) now falls WITHIN that allowance and
-        // legitimately passes, which is issue 904's own intended behavior, not a regression. This
-        // SAFETY test's actual invariant — a genuine real drop is never silently reclassified as
-        // zero-loss — still needs proving BEYOND the allowance, so the fixture now injects
-        // REAL_DROPS_ALLOWANCE_DEFAULT + 1 (3) well-separated gaps, matching the same "one past
-        // the allowance" fixture shape issue 904's own
-        // `real_drops_one_beyond_the_904_default_allowance_still_fails_904` test already uses.
+        // #904 had briefly widened this to require 3 well-separated gaps (one past its default
+        // allowance of 2) so this SAFETY test kept proving loss BEYOND that allowance. #905 item
+        // 1 reverted `REAL_DROPS_ALLOWANCE_DEFAULT` back to 0 (the allowance mechanism itself
+        // stays available via `CAMERA_BOX_REAL_DROPS_ALLOWANCE`, just dormant by default), so a
+        // SINGLE injected gap is once again enough to prove the invariant — restoring this
+        // fixture to its pre-#904 shape (the same `window(...)` helper part (a) above uses).
         let args_1to1 = super::Args::parse_from([
             "recording-verdict",
             "--min-secs",
@@ -7171,15 +7173,14 @@ mod tests {
             "--capture-fps",
             "60",
         ]);
-        let gaps_beyond_allowance = [100, 250, 400]; // 3 gaps > REAL_DROPS_ALLOWANCE_DEFAULT (2)
         let (v2, pass2) = build_and_print_verdict(
             &args_1to1,
             Some(DecodedRec {
-                frames: window_multi_gap(N, false, &gaps_beyond_allowance),
+                frames: window(N, false, Some(5)),
                 rec_path: None,
             }),
             Some(DecodedRec {
-                frames: window_multi_gap(N, true, &gaps_beyond_allowance),
+                frames: window(N, true, Some(5)),
                 rec_path: None,
             }),
             Cam1Source::Absent,
@@ -7191,94 +7192,32 @@ mod tests {
         .expect("verdict");
         assert!(
             !pass2,
-            "#356: a genuine 1:1-hop cam1 loss beyond the issue-904 allowance ⇒ overall FAIL"
+            "#356/#905: a genuine 1:1-hop cam1 loss ⇒ overall FAIL at the restored zero-drop bar"
         );
         assert_eq!(v2["full_chain"]["zero_loss"], serde_json::json!(false));
-        assert!(
-            v2["full_chain"]["real_drops"].as_u64().unwrap() > super::REAL_DROPS_ALLOWANCE_DEFAULT as u64,
-            "#356 SAFETY: on the 1:1 hop cam1 ids absent from BOTH recordings, beyond the issue-904 \
-             allowance, MUST stay REAL DROP — never masked: {}",
+        assert_eq!(
+            v2["full_chain"]["real_drops"],
+            serde_json::json!(1),
+            "#356/#905 SAFETY: on the 1:1 hop, a single cam1 id absent from BOTH recordings MUST \
+             stay REAL DROP — never masked: {}",
             v2["full_chain"]
         );
     }
 
-    // ---- #904 — the small, explicit, LOUD real_drops allowance ----
+    // ---- #904/#905 — the small, explicit, LOUD real_drops allowance MECHANISM, and the
+    // #905-restored STRICT (zero) default ----
 
-    /// #904 — exactly `REAL_DROPS_ALLOWANCE_DEFAULT` (2) genuine 1:1-hop cam1 real drops MUST
-    /// still PASS the headline (the small, explicit allowance this ticket adds), and the pass
-    /// MUST be visibly distinguishable from a genuine zero-loss pass: `real_drops_allowance` +
-    /// `consumed_real_drops_allowance` are carried on the per-node JSON, the run-level
-    /// `real_drops_allowance_consumed_nodes` names cam1, and the printed lines say so LOUDLY
-    /// (never silent — the ticket's core requirement).
+    /// #905 item 1 — restores the ZERO real_drops bar: with the DEFAULT allowance reverted to 0
+    /// (no env override), a SINGLE genuine 1:1-hop cam1 real drop MUST fail the headline exactly
+    /// like the pre-#904 strict behavior — the ticket's whole point. This is the end-to-end
+    /// integration-level proof the restored bar actually takes effect (the narrower pure-method
+    /// proof lives in `allowance_zero_matches_pre_904_is_zero_exactly_904` below).
     #[test]
-    fn real_drops_within_the_904_default_allowance_passes_and_is_reported_loudly_904() {
+    fn single_real_drop_fails_at_the_905_restored_zero_allowance() {
         use super::{build_and_print_verdict, Cam1Source, DecodedRec};
         use clap::Parser;
         const N: u32 = 600;
-        // Two well-separated genuine gaps ⇒ exactly 2 REAL DROP ids on the 1:1 hop.
-        let gaps = [100, 300];
-        let args = super::Args::parse_from([
-            "recording-verdict",
-            "--min-secs",
-            "1",
-            "--capture-fps",
-            "60",
-        ]);
-        let (v, pass) = build_and_print_verdict(
-            &args,
-            Some(DecodedRec {
-                frames: window_multi_gap(N, false, &gaps),
-                rec_path: None,
-            }),
-            Some(DecodedRec {
-                frames: window_multi_gap(N, true, &gaps),
-                rec_path: None,
-            }),
-            Cam1Source::Absent,
-            None,
-            None,
-            None, // #461: no imag frames in this test
-            None, // #312 item 2 (PR A): no carried A/V-sync inputs in this test
-        )
-        .expect("verdict");
-        assert!(
-            pass,
-            "#904: 2 real drops is exactly the default allowance ⇒ must still PASS: {v}"
-        );
-        assert_eq!(v["full_chain"]["zero_loss"], serde_json::json!(true));
-        assert_eq!(v["full_chain"]["real_drops"], serde_json::json!(2));
-        assert_eq!(v["full_chain"]["burn_unreadable"], serde_json::json!(0));
-        assert_eq!(
-            v["full_chain"]["real_drops_allowance"],
-            serde_json::json!(super::REAL_DROPS_ALLOWANCE_DEFAULT)
-        );
-        assert_eq!(
-            v["full_chain"]["real_drops_allowance_consumed_nodes"],
-            serde_json::json!(["cam1"]),
-            "#904: the run-level LOUD signal must name cam1 as having consumed the allowance: {}",
-            v["full_chain"]
-        );
-        let cam1_loss = &v["full_chain"]["loss"]["cam1"];
-        assert_eq!(
-            cam1_loss["real_drops_allowance"],
-            serde_json::json!(super::REAL_DROPS_ALLOWANCE_DEFAULT)
-        );
-        assert_eq!(
-            cam1_loss["consumed_real_drops_allowance"],
-            serde_json::json!(true),
-            "#904: the per-node JSON must ALSO carry the loud consumed signal: {cam1_loss}"
-        );
-        assert_eq!(cam1_loss["zero_loss"], serde_json::json!(true));
-    }
-
-    /// #904 — ONE real drop beyond the default allowance (3 > 2) MUST still FAIL — the allowance
-    /// is small and explicit, never open-ended; a genuine regression is never masked by it.
-    #[test]
-    fn real_drops_one_beyond_the_904_default_allowance_still_fails_904() {
-        use super::{build_and_print_verdict, Cam1Source, DecodedRec};
-        use clap::Parser;
-        const N: u32 = 600;
-        let gaps = [100, 250, 400];
+        let gaps = [100]; // exactly ONE genuine 1:1-hop cam1 real drop
         let args = super::Args::parse_from([
             "recording-verdict",
             "--min-secs",
@@ -7305,18 +7244,95 @@ mod tests {
         .expect("verdict");
         assert!(
             !pass,
-            "#904: 3 real drops is ONE past the default allowance of 2 ⇒ must still FAIL: {v}"
+            "#905: a single real drop must FAIL at the restored zero-drop default: {v}"
         );
         assert_eq!(v["full_chain"]["zero_loss"], serde_json::json!(false));
-        assert_eq!(v["full_chain"]["real_drops"], serde_json::json!(3));
+        assert_eq!(v["full_chain"]["real_drops"], serde_json::json!(1));
+        assert_eq!(
+            v["full_chain"]["real_drops_allowance"],
+            serde_json::json!(0),
+            "#905: the DEFAULT allowance (no env override) must read back as 0: {}",
+            v["full_chain"]
+        );
+        assert_eq!(
+            v["full_chain"]["real_drops_allowance"],
+            serde_json::json!(super::REAL_DROPS_ALLOWANCE_DEFAULT)
+        );
         assert!(
             v["full_chain"]["real_drops_allowance_consumed_nodes"]
                 .as_array()
                 .expect("real_drops_allowance_consumed_nodes must be a JSON array")
                 .is_empty(),
-            "#904: a node that FAILED never counts as having 'consumed' the allowance: {}",
+            "#905: a node that FAILED never counts as having 'consumed' the allowance: {}",
             v["full_chain"]
         );
+        let cam1_loss = &v["full_chain"]["loss"]["cam1"];
+        assert_eq!(cam1_loss["zero_loss"], serde_json::json!(false));
+        assert_eq!(
+            cam1_loss["consumed_real_drops_allowance"],
+            serde_json::json!(false),
+            "#905: a failed node cannot have consumed the allowance: {cam1_loss}"
+        );
+    }
+
+    /// #905 — the #904 allowance MECHANISM itself is untouched by item 1's revert (only the
+    /// DEFAULT moved back to 0). An EXPLICIT nonzero allowance (e.g. a future incident
+    /// re-widening it via `CAMERA_BOX_REAL_DROPS_ALLOWANCE`) must still tolerate real drops
+    /// within it, and the pass MUST still be visibly distinguishable from a genuine zero-loss
+    /// pass: `real_drops_allowance` + `consumed_real_drops_allowance` on the per-node JSON, LOUD
+    /// as #904 originally required. Proven at the `NodeVerdict`/`node_verdict_json` level (both
+    /// take `allowance` as an explicit parameter, independent of process env) so this test never
+    /// needs to mutate global env state.
+    #[test]
+    fn real_drops_within_an_explicit_nonzero_allowance_still_passes_and_is_reported_loudly_905() {
+        const EXPLICIT_ALLOWANCE: u32 = 2;
+        // Two well-separated genuine gaps ⇒ exactly 2 REAL DROP ids on the 1:1 hop.
+        let two_drops = window_multi_gap(600, false, &[100, 300]);
+        let tmp = tempfile::tempdir().unwrap();
+        let v = node_verdict(
+            &super::NodeSpec {
+                node: "cam1",
+                burn_run_id: CAM1B,
+                rate: BurnRate::PerEmittedFrame,
+                source: &two_drops,
+                rec_path: None,
+                cam2_run_id: None,
+                step: 1,
+            },
+            &[CAM1B, STRIH, STREAM],
+            tmp.path(),
+            0,
+        )
+        .unwrap();
+        assert_eq!(v.real_drops(), 2);
+        assert!(
+            v.is_zero_within_allowance(EXPLICIT_ALLOWANCE),
+            "#905: an explicit nonzero allowance must still tolerate drops within it: {v:?}"
+        );
+        assert!(
+            v.consumed_real_drops_allowance(EXPLICIT_ALLOWANCE),
+            "#905: and the pass must be marked as having consumed slack: {v:?}"
+        );
+        let json = super::node_verdict_json(&v, 20.0, true, 1.0, EXPLICIT_ALLOWANCE);
+        assert_eq!(json["zero_loss"], serde_json::json!(true));
+        assert_eq!(json["real_drops"], serde_json::json!(2));
+        assert_eq!(
+            json["real_drops_allowance"],
+            serde_json::json!(EXPLICIT_ALLOWANCE)
+        );
+        assert_eq!(
+            json["consumed_real_drops_allowance"],
+            serde_json::json!(true),
+            "#905: the per-node JSON must LOUDLY carry the consumed signal even though the \
+             DEFAULT is now strict: {json}"
+        );
+
+        // At the #905-restored DEFAULT (0), the SAME two drops must FAIL.
+        assert!(
+            !v.is_zero_within_allowance(0),
+            "#905: with the default reverted to 0, the same 2 drops must FAIL: {v:?}"
+        );
+        assert!(!v.consumed_real_drops_allowance(0));
     }
 
     /// #904 — `is_zero_within_allowance(0)` must be BYTE-IDENTICAL to the pre-#904 `is_zero()` on
