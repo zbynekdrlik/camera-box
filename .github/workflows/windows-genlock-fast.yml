@@ -92,7 +92,7 @@ jobs:
         run: |
           $src = (Get-Content "vendor/obs-studio/libobs/obs-source.c" -Raw) -replace '\s+', ' '
           if ($src -notmatch [regex]::Escape('genlock-relock')) { Write-Error "the per-event relock log line (genlock-relock) is gone — #940 piece 1 phase-evidence instrumentation reverted"; exit 1 }
-          foreach ($field in @('depth=%zu', 'steady_depth_frames=%zu', 'due=%zu', 'erased=%zu', 'head_skew_ms=%lld', 'wall_grid_phase_ns=%lld')) {
+          foreach ($field in @('depth=%zu', 'steady_depth_frames=%zu', 'due=%zu', 'erased=%zu', 'head_skew_ms=%lld', 'tick_phase_ns=%llu', 'anchor_ns=%llu', 'sel_vs_newest_due=%lld')) {
             if ($src -notmatch [regex]::Escape($field)) { Write-Error "the relock phase-evidence log line is missing field '$field' — #940 piece 1 reverted"; exit 1 }
           }
           # #940 piece 1 correctness fix: steady_depth_frames_for_log must subtract the FULL
@@ -116,6 +116,37 @@ jobs:
           if ($src -notmatch [regex]::Escape('array[due]->timestamp <= present_ts + due_hysteresis_ns')) { Write-Error "the due loop no longer applies the grid-comparison hysteresis — #940 piece 3 reverted"; exit 1 }
           if ($src -notmatch [regex]::Escape('reserve_ms > 0 ? GENLOCK_PHASE_PIN_HYSTERESIS_NS : 0')) { Write-Error "the grid hysteresis is no longer gated to the reserve_ms>0 path — #940 piece 3 reverted"; exit 1 }
           Write-Output "#940 piece 3 phase-pinned deadline + grid hysteresis present — OK"
+
+      # #1003: fail fast if the relock selection is no longer phase-anchored — mirrors the
+      # Linux-CI guard
+      # tests/genlock_release_cadence.rs::relock_selection_is_phase_anchored_not_newest_due_1003.
+      # The selection arithmetic itself is Tier-0 unit-tested in src/genlock_backlog.rs; this
+      # guards the C wiring, which compiles on CI only.
+      - name: Assert relock selection is phase-anchored (#1003)
+        shell: pwsh
+        run: |
+          $src = (Get-Content "vendor/obs-studio/libobs/obs-source.c" -Raw) -replace '\s+', ' '
+          $hdr = (Get-Content "vendor/obs-studio/libobs/obs-internal.h" -Raw) -replace '\s+', ' '
+          if ($hdr -notmatch [regex]::Escape('uint64_t genlock_phase_anchor_ns;')) { Write-Error "the per-source phase anchor (genlock_phase_anchor_ns) is gone from obs-internal.h — the relock has no remembered phase to inherit (#1003)"; exit 1 }
+          if ($src -notmatch [regex]::Escape('static inline size_t genlock_relock_select_nearest(')) { Write-Error "the phase-continuity selection helper genlock_relock_select_nearest is gone — #1003 reverted to instant-sampled selection"; exit 1 }
+          if ($src -notmatch [regex]::Escape('genlock_abs_diff_ns(source->async_frames.array[i]->timestamp, target)')) { Write-Error "genlock_relock_select_nearest no longer measures each stamp's DISTANCE from the anchor target — a non-nearest rule is not continuous and has an edge to flip (#1003)"; exit 1 }
+          if ($src -notmatch [regex]::Escape('if (d < best_d)')) { Write-Error "the nearest scan's STRICT < is gone; a non-strict compare lets an equidistant target oscillate between neighbours across episodes (#1003)"; exit 1 }
+          if ($src -notmatch [regex]::Escape('source->genlock_phase_anchor_ns != 0 ? source->genlock_phase_anchor_ns')) { Write-Error "genlock_relock_target_age_ns no longer prefers the tracked anchor over the configured latency (#1003)"; exit 1 }
+          if ($src -notmatch [regex]::Escape('release = genlock_relock_select_nearest(source, wall_now, reserve_ms) + 1;')) { Write-Error "the ACQUIRE branch no longer selects by phase continuity — a cold/self-heal re-acquire would re-mint an edge-ridden phase (#1003)"; exit 1 }
+          if ($src -notmatch [regex]::Escape('release = sel_1003 + 1;')) { Write-Error "the BACKLOG-STORM branch no longer selects by phase continuity — this is the branch the live episode steps were traced to (#1003)"; exit 1 }
+          if ($src -notmatch [regex]::Escape('size_t to_drop = release - 1;')) { Write-Error "the erase-into-dropped_due idiom (to_drop = release - 1) is gone; a relock would stop shedding backlog depth (#1003)"; exit 1 }
+          if ($src -notmatch [regex]::Escape('if (anchor_update) source->genlock_phase_anchor_ns = genlock_phase_anchor_from_present( wall_now, next_frame->timestamp);')) { Write-Error "the phase anchor is no longer updated (gated by anchor_update) on the present tail; ungated, a relock would redefine the phase it must inherit (#1003)"; exit 1 }
+          if ($src -notmatch [regex]::Escape('source->genlock_phase_anchor_ns = 0; free_async_cache(source);')) { Write-Error "an async flush no longer clears the phase anchor (#1003)"; exit 1 }
+          if ($src -match [regex]::Escape('release = due;')) { Write-Error "a relock branch still uses the newest-due selection (release = due;) — instant-sampled and stateless, it re-mints the release phase every lock episode (#1003)"; exit 1 }
+          # The backward-step regime end must CLEAR the anchor: the wall clock moved, so every
+          # sampled age is wrong by exactly the step. Scoped to the ENCLOSING FUNCTION, never a
+          # fixed byte window (the #940 piece 1 lesson: a byte cap rots as the body grows).
+          $re = $src -split [regex]::Escape('static void genlock_backward_regime_end(')
+          if ($re.Count -lt 2) { Write-Error "genlock_backward_regime_end is gone (the issue-1009 self-heal)"; exit 1 }
+          $body = $re[1]; $nx = $body.IndexOf('static ')
+          if ($nx -ge 0) { $body = $body.Substring(0, $nx) }
+          if ($body -notmatch [regex]::Escape('source->genlock_phase_anchor_ns = 0;')) { Write-Error "a backward-step regime end no longer CLEARS the phase anchor; re-acquiring against a pre-step age re-establishes the hold off by the whole clock step (#1003)"; exit 1 }
+          Write-Output "#1003 phase-anchored relock selection present — OK"
 
       # #940 piece 2: fail fast if the backlog-relock margin no longer scales by the source's
       # own measured rate multiple — mirrors the Linux-CI guard
