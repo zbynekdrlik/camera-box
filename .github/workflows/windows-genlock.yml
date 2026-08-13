@@ -496,14 +496,14 @@ jobs:
           if ($src -notmatch [regex]::Escape('static inline size_t genlock_relock_select_nearest(')) {
             Write-Error "obs-source.c: the phase-continuity selection helper genlock_relock_select_nearest is gone — #1003 reverted to instant-sampled selection"; exit 1
           }
-          if ($src -notmatch [regex]::Escape('genlock_abs_diff_ns(source->async_frames.array[i]->timestamp, target)')) {
+          if ($src -notmatch [regex]::Escape('best_d = genlock_abs_diff_ns(')) {
             Write-Error "obs-source.c: genlock_relock_select_nearest no longer measures each stamp's DISTANCE from the anchor target — a non-nearest rule is not continuous and has an edge to flip (#1003)"; exit 1
           }
           if ($src -notmatch [regex]::Escape('if (d < best_d)')) {
             Write-Error "obs-source.c: the nearest scan's STRICT < is gone; a non-strict compare lets an equidistant target oscillate between neighbours across episodes (#1003)"; exit 1
           }
-          if ($src -notmatch [regex]::Escape('source->genlock_phase_anchor_ns != 0 ? source->genlock_phase_anchor_ns')) {
-            Write-Error "obs-source.c: genlock_relock_target_age_ns no longer prefers the tracked anchor over the configured latency (#1003)"; exit 1
+          if ($src -notmatch [regex]::Escape('return anchor > configured ? anchor : configured;')) {
+            Write-Error "obs-source.c: genlock_relock_target_age_ns no longer returns the anchor FLOORED at the configured latency; an anchor below the hold targets the live edge and one relock erases the whole delay line (#1003)"; exit 1
           }
           if ($src -notmatch [regex]::Escape('release = genlock_relock_select_nearest(source, wall_now, reserve_ms) + 1;')) {
             Write-Error "obs-source.c: the ACQUIRE branch no longer selects by phase continuity — a cold/self-heal re-acquire would re-mint an edge-ridden phase (#1003)"; exit 1
@@ -511,21 +511,42 @@ jobs:
           if ($src -notmatch [regex]::Escape('release = sel_1003 + 1;')) {
             Write-Error "obs-source.c: the BACKLOG-STORM branch no longer selects by phase continuity — this is the branch the live episode steps were traced to (#1003)"; exit 1
           }
+          if ($src -notmatch [regex]::Escape('if (sel_1003 == 0 && source->genlock_phase_anchor_ns != 0)')) {
+            Write-Error "obs-source.c: the BACKLOG stale-anchor self-heal is gone; a relock shedding zero frames would re-fire every tick and starve the settle-back drain (#1003)"; exit 1
+          }
           if ($src -notmatch [regex]::Escape('size_t to_drop = release - 1;')) {
             Write-Error "obs-source.c: the erase-into-dropped_due idiom (to_drop = release - 1) is gone; a relock would stop shedding backlog depth (#1003)"; exit 1
           }
-          if ($src -notmatch [regex]::Escape('if (anchor_update) source->genlock_phase_anchor_ns = genlock_phase_anchor_from_present( wall_now, next_frame->timestamp);')) {
+          if ($src -notmatch [regex]::Escape('if (anchor_update) source->genlock_phase_anchor_ns =')) {
             Write-Error "obs-source.c: the phase anchor is no longer updated (gated by anchor_update) on the present tail; ungated, a relock would redefine the phase it must inherit (#1003)"; exit 1
           }
-          if ($src -notmatch [regex]::Escape('source->genlock_phase_anchor_ns = 0; free_async_cache(source);')) {
-            Write-Error "obs-source.c: an async flush no longer clears the phase anchor (#1003)"; exit 1
+          if ($src -notmatch [regex]::Escape('genlock_phase_anchor_from_present(')) {
+            Write-Error "obs-source.c: the anchor is no longer derived via genlock_phase_anchor_from_present (the saturating wall_now - presented_ts) (#1003)"; exit 1
           }
           if ($src -match [regex]::Escape('release = due;')) {
             Write-Error "obs-source.c: a relock branch still uses the newest-due selection (release = due;) — instant-sampled and stateless, it re-mints the release phase every lock episode (#1003)"; exit 1
           }
+          # EVERY site that destroys the delay line must clear the anchor first — the explicit
+          # flush, the overrun force-drain, and the async_texture_changed re-alloc. Counting
+          # them against the call sites stops the seam list drifting when a 4th is added.
+          $seams = ([regex]::Matches($src, [regex]::Escape('source->genlock_phase_anchor_ns = 0; free_async_cache(source);'))).Count
+          $frees = ([regex]::Matches($src, [regex]::Escape('free_async_cache(source);'))).Count
+          if ($seams -ne $frees) {
+            Write-Error "obs-source.c: $frees site(s) call free_async_cache() but only $seams clear the phase anchor first; each destroys the whole delay line (#1003)"; exit 1
+          }
+          # A latency SETPOINT change invalidates the remembered age too. Scoped to the setter
+          # function, never a fixed byte window (the #940 piece 1 lesson).
+          $st = $src -split [regex]::Escape('void obs_source_set_genlock_latency_ms(')
+          if ($st.Count -lt 2) {
+            Write-Error "obs-source.c: obs_source_set_genlock_latency_ms is gone (#1003)"; exit 1
+          }
+          $sb = $st[1]; $sx = $sb.IndexOf('uint32_t obs_source_get_genlock_latency_ms(')
+          if ($sx -ge 0) { $sb = $sb.Substring(0, $sx) }
+          if ($sb -notmatch [regex]::Escape('source->genlock_phase_anchor_ns = 0;')) {
+            Write-Error "obs-source.c: a latency setpoint change no longer clears the phase anchor; on a DECREASE the relock then sheds nothing forever while the backlog branch fires every tick (#1003)"; exit 1
+          }
           # The backward-step regime end must CLEAR the anchor: the wall clock moved, so every
-          # sampled age is wrong by exactly the step. Scoped to the ENCLOSING FUNCTION, never a
-          # fixed byte window (the #940 piece 1 lesson: a byte cap rots as the body grows).
+          # sampled age is wrong by exactly the step. Function-scoped for the same reason.
           $re = $src -split [regex]::Escape('static void genlock_backward_regime_end(')
           if ($re.Count -lt 2) {
             Write-Error "obs-source.c: genlock_backward_regime_end is gone (the issue-1009 self-heal)"; exit 1

@@ -1269,9 +1269,17 @@ the `#401` phase-locked cadence). Runs ONCE PER RENDER TICK PER SOURCE. In STEAD
 exactly ONE matured frame and advances the locked boundary by exactly ONE SOURCE interval
 (`next_frame->timestamp + interval`). If the source arrives FASTER than the canvas ticks (a 60fps
 source into a 30fps-tick render loop), the per-source queue depth grows until it crosses
-`GENLOCK_QDEPTH_RELOCK`, at which point the BACKLOG STORM branch fires (`release = due`) —
-presenting the newest due frame and DROPPING (counted in `genlock_dropped_due`) the
-matured-but-superseded ones. **Signature: periodic multi-frame content JUMPS (skips), never a
+`GENLOCK_QDEPTH_RELOCK`, at which point the BACKLOG STORM branch fires — presenting one frame
+and DROPPING (counted in `genlock_dropped_due`) the matured-but-superseded ones OLDER than it.
+**Which frame it presents changed in `#1003`:** it used to be the newest DUE one
+(`release = due`), an instant-sampled selection that re-minted the release PHASE on every lock
+episode (measured live as −64.5 / +56..63 ms A/V steps between episodes). It is now the frame
+NEAREST the source's tracked phase anchor (`genlock_relock_select_nearest` /
+`genlock_phase_anchor_ns`, `release = sel_1003 + 1`), so a relock corrects DEPTH while
+INHERITING the phase. Two guards keep that convergent: a latency setpoint change clears the
+anchor, and a relock that would shed nothing treats the anchor as stale and re-selects against
+the configured latency (without them a knob DECREASE storms the branch every tick shedding
+nothing, which also starves the settle-back drain since the branch pre-empts STEADY). **Signature: periodic multi-frame content JUMPS (skips), never a
 repeated/duplicate frame.** Diagnostic: `genlock_dropped_due`/`genlock_relocks` counters (the
 periodic `genlock-fifo audit` log line), or (new, #726) `src/presentation_cadence.rs`'s
 `other_steps`/irregular-jump buckets on a REAL (jitter-tolerant, see the recording-decode skill's

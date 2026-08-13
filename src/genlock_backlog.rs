@@ -298,22 +298,36 @@ pub fn phase_pinned_is_due(frame_ts_ns: u64, deadline_ns: u64) -> bool {
 // (issue 998) and [`BackwardStepGuard`] (issue 1009).
 // ---------------------------------------------------------------------------------------------
 
-/// The age (ns) the relock selection should target: the tracked phase anchor when it is SET,
-/// otherwise the source's configured latency.
+/// The age (ns) the relock selection should target: the tracked phase anchor, FLOORED at the
+/// source's configured latency.
 ///
 /// `anchor_ns == 0` is the UNSET sentinel — it matches the C field's `bzalloc` zero-init, so a
 /// source that has never presented a steady frame (cold start, post-flush, just after a
 /// backward-step regime ended) falls back to the configured latency, which is the phase the
-/// wall-deadline path would have produced anyway. A degenerate measured age of exactly 0 ns
-/// reads as unset and takes the same safe fallback — at any real rig latency the steady age is
-/// hundreds of ms, so this can only ever be the defensive case.
+/// wall-deadline path would have produced anyway.
+///
+/// The FLOOR is a bound, not a preference: the conveyor always holds AT LEAST the configured
+/// latency, so in the intended (deep-source) regime the anchor sits at or above it and the
+/// floor is inert. It matters because [`phase_anchor_from_present`] SATURATES and nothing in
+/// the types stops a degenerate or stale anchor coming back SMALLER than the hold — an anchor
+/// near 0 would target the live edge and erase the whole delay line in a single relock.
+///
+/// SCOPE, stated honestly: the anchor is only MEANINGFUL for a deep source. This module's own
+/// header records that most of the fleet runs a 3–55 ms hold (the imag contract is 3 ms), and
+/// the sender's ceil-to-boundary bias is up to a full interval (33.3 ms) AHEAD of the receiver
+/// wall clock — so at those latencies `phase_anchor_from_present` routinely saturates to 0, the
+/// anchor reads UNSET, and the source keeps its pre-#1003 behaviour by design. That is
+/// harmless (at a sub-frame hold both targets sit far inside half a frame, so the selection is
+/// the same frame either way) but it is NOT "the defensive case only": it is the normal case
+/// for a shallow source. #1003 is a deep-latency fix; it does not claim to change shallow ones.
 ///
 /// Mirror of the C `genlock_relock_target_age_ns()` (obs-source.c) — keep both in lock-step.
 pub fn relock_anchor_age_ns(anchor_ns: u64, latency_ms: u32) -> u64 {
-    if anchor_ns != 0 {
+    let configured = latency_ms as u64 * 1_000_000;
+    if anchor_ns > configured {
         anchor_ns
     } else {
-        latency_ms as u64 * 1_000_000
+        configured
     }
 }
 
@@ -1134,8 +1148,10 @@ mod tests {
     // The FIFO sim below models the C ts-align release exactly as obs-source.c structures
     // it for a 1:1 (N==1) source: phase-pinned wall deadline -> due prefix scan -> the
     // due==0 guard -> the issue-401 locked-boundary cadence (ACQUIRE / STEADY / GAP / HOLD).
-    // The backlog-storm and settle-drain branches are omitted — none of these scenarios
-    // exceeds the backlog threshold or holds a parked overshoot.
+    // The settle-drain branch is omitted (no #1009 scenario holds a parked overshoot). The
+    // BACKLOG-STORM branch IS modelled since #1003 — but no #1009 scenario reaches it, so
+    // every pre-existing #1009 result is unchanged (verified: relocks/dropped stay 0 in all
+    // four of them).
     // ------------------------------------------------------------------------------------
 
     const BASE_1009: u64 = 10_000_000_000_000;
@@ -1242,6 +1258,13 @@ mod tests {
         /// `obs_source_set_genlock_latency_ms()` (a knob hot-apply, which is one of the
         /// routine relock triggers the ticket's live evidence lists).
         fn set_reserve_ms(&mut self, ms: u32) {
+            if self.reserve_ns != ms as u64 * 1_000_000 {
+                // #1003: the remembered on-air age describes a hold that no longer
+                // exists. Carrying it across a setpoint change targets the OLD phase
+                // forever — and, on a DECREASE, sheds nothing while the lowered
+                // threshold qualifies the backlog branch every tick.
+                self.phase_anchor_ns = 0;
+            }
             self.reserve_ns = ms as u64 * 1_000_000;
         }
 
@@ -1259,19 +1282,32 @@ mod tests {
         ///
         /// The anchor is deliberately NOT updated here: a relock INHERITS the phase, it does
         /// not redefine it (#1003). Only STEADY / GAP presents move the anchor.
-        fn relock_present(&mut self, k: u64, wall: u64, due: usize) -> u64 {
+        fn relock_present(&mut self, k: u64, wall: u64, backlog: bool, due: usize) -> u64 {
             let idx = match self.strategy {
                 SelectionStrategy::NewestDue => due - 1,
                 SelectionStrategy::PhaseAnchored => {
                     let q: Vec<u64> = self.queue.iter().copied().collect();
-                    relock_select_nearest(
+                    let ms = (self.reserve_ns / 1_000_000) as u32;
+                    let mut i = relock_select_nearest(
                         &q,
                         wall,
-                        relock_anchor_age_ns(
-                            self.phase_anchor_ns,
-                            (self.reserve_ns / 1_000_000) as u32,
-                        ),
-                    )
+                        relock_anchor_age_ns(self.phase_anchor_ns, ms),
+                    );
+                    // #1003 review finding: a BACKLOG relock that would shed NOTHING is
+                    // proof the anchor is STALE — the branch only fires above the
+                    // latency-implied depth, so an anchor pointing at (or before) the
+                    // queue head cannot describe a queue this deep. Carrying it re-fires
+                    // the branch every tick shedding nothing, and because the branch
+                    // pre-empts STEADY the settle-back drain never runs either. Drop the
+                    // stale anchor and re-select against the CONFIGURED latency: one
+                    // relock sheds the overshoot and the anchor rebuilds from the next
+                    // STEADY present. (ACQUIRE is exempt: idx 0 there just means "present
+                    // the head", and the fresh lock stops the branch re-firing.)
+                    if backlog && i == 0 && self.phase_anchor_ns != 0 {
+                        self.phase_anchor_ns = 0;
+                        i = relock_select_nearest(&q, wall, relock_anchor_age_ns(0, ms));
+                    }
+                    i
                 }
             };
             for _ in 0..idx {
@@ -1350,7 +1386,7 @@ mod tests {
             if self.boundary == 0 {
                 if due > 0 {
                     // ACQUIRE (a relock branch — see relock_present).
-                    let ts = self.relock_present(k, wall, due);
+                    let ts = self.relock_present(k, wall, false, due);
                     self.boundary = ts + I30;
                 } else {
                     self.holds += 1;
@@ -1358,7 +1394,7 @@ mod tests {
             } else if self.queue.len() as u64 > self.backlog_threshold() && due > 0 {
                 // BACKLOG STORM (issue 859 threshold, unchanged) — the OTHER relock branch.
                 self.relocks += 1;
-                let ts = self.relock_present(k, wall, due);
+                let ts = self.relock_present(k, wall, true, due);
                 self.boundary = ts + I30;
             } else if *self.queue.front().unwrap() <= self.boundary {
                 // STEADY: the head matured by the locked boundary.
@@ -1790,7 +1826,9 @@ mod tests {
     /// Render-tick slews (ns) the relock episode fires at. All within the ±2 ms the deployed
     /// FIFO actually sees — and, thanks to [`step_aligned_base_1003`], STRADDLING the #940
     /// floor-pin step point, with a one-NANOSECOND pair (`-1`, `0`) either side of it.
+    /// (>=5 of them — the ticket's own acceptance bar for the number of episodes.)
     const SLEW_SWEEP_1003: [i64; 5] = [-2_000_000, -1_000_000, -1, 0, 1_000_000];
+    const _: () = assert!(SLEW_SWEEP_1003.len() >= 5);
 
     /// The episode base that puts the #940 floor-pin STEP POINT at exactly zero render-tick
     /// slew on tick [`RELOCK_TICK_1003`].
@@ -1922,7 +1960,6 @@ mod tests {
             );
             deltas.push(delta);
         }
-        assert_eq!(deltas.len(), 5, "the ticket asks for >=5 episodes");
         let spread =
             deltas.iter().max().expect("5 episodes") - deltas.iter().min().expect("5 episodes");
         assert!(
@@ -2064,7 +2101,7 @@ mod tests {
     ///   configured-latency fallback is the only honest target (this is exactly #1009's own
     ///   self-heal contract: re-acquire the CONFIGURED hold).
     #[test]
-    fn anchor_survives_selfheal_reacquire_and_clears_on_gap_and_backward_regime_end_1003() {
+    fn anchor_survives_relock_rederives_on_gap_and_clears_on_backward_regime_end_1003() {
         // --- the target-selection contract itself -----------------------------------
         assert_eq!(
             relock_anchor_age_ns(948_000_000, RESERVE_MS_1003),
@@ -2076,6 +2113,15 @@ mod tests {
             RESERVE_NS_1003,
             "an UNSET anchor (0, the C bzalloc zero-init) falls back to the CONFIGURED \
              latency — the phase the wall-deadline path would have produced anyway"
+        );
+        // The FLOOR (review finding): an anchor SMALLER than the configured hold would
+        // target the live edge and erase the whole delay line in one relock. Nothing in
+        // the types prevents one (phase_anchor_from_present saturates), so bound it.
+        assert_eq!(
+            relock_anchor_age_ns(1_000_000, RESERVE_MS_1003),
+            RESERVE_NS_1003,
+            "an anchor BELOW the configured hold must be floored at it — an anchor near 0 \
+             targets the live edge, and the relock would erase the entire delay line"
         );
 
         // --- the relock path must PRESERVE the anchor -------------------------------
@@ -2219,6 +2265,46 @@ mod tests {
              a per-tick relock storm. Each firing shed nothing and logged a per-event line, \
              which is precisely the useless-`relocks`-counter state issue 859 removed.",
             fifo.relocks
+        );
+    }
+
+    /// #1003 — the TIE contract, pinned directly. `relock_select_nearest` resolves an exactly
+    /// equidistant target toward the OLDER frame (the lower index, a strict `<`).
+    ///
+    /// This is not cosmetic. A `<=` would prefer the NEWER frame, and since the target sweeps
+    /// forward continuously, a target sitting near the midpoint would flip between the two
+    /// neighbours from episode to episode — reintroducing exactly the kind of edge this whole
+    /// ticket exists to remove, in the one place a nearest-neighbour rule can still have one.
+    ///
+    /// Worth keeping because a tie is genuinely reachable on this rig, not a contrivance: both
+    /// sender grids (33,333,300 ns and 16,666,600 ns) are EVEN, so `i*grid + grid/2` is an
+    /// exact integer nanosecond that a wall instant can land on.
+    #[test]
+    fn relock_selection_resolves_an_exact_tie_toward_the_older_frame_1003() {
+        const G: u64 = SENDER_GRID_1003;
+        let q: Vec<u64> = (0..6).map(|i| BASE_1009 + i * G).collect();
+        // Target EXACTLY midway between stamp 2 and stamp 3.
+        let target = BASE_1009 + 2 * G + G / 2;
+        let age = 900_000_000u64;
+        let sel = relock_select_nearest(&q, target + age, age);
+        assert_eq!(
+            sel, 2,
+            "an exactly equidistant target must select the OLDER neighbour (index 2), not the \
+             newer one (index 3). A non-strict compare here lets the choice oscillate between \
+             neighbours as the target sweeps, which is an edge — the exact class of defect \
+             #1003 removes everywhere else."
+        );
+        // And the contract holds one nanosecond either side of the midpoint, so the tie is a
+        // genuine boundary rather than a wide flat region.
+        assert_eq!(
+            relock_select_nearest(&q, target - 1 + age, age),
+            2,
+            "one ns BEFORE the midpoint is unambiguously nearer the older frame"
+        );
+        assert_eq!(
+            relock_select_nearest(&q, target + 1 + age, age),
+            3,
+            "one ns AFTER the midpoint is unambiguously nearer the newer frame"
         );
     }
 }

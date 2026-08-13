@@ -598,7 +598,10 @@ fn relock_selection_is_phase_anchored_not_newest_due_1003() {
          selection. Mirror: src/genlock_backlog.rs relock_select_nearest."
     );
     assert!(
-        src.contains("genlock_abs_diff_ns(source->async_frames.array[i]->timestamp, target)"),
+        // SHORT + wrap-independent on purpose: a clang-format bump or a loop-variable
+        // rename must not fail this gate with a misleading message (the anchor-fragility
+        // lesson #940 records for byte windows applies to long literals too).
+        src.contains("best_d = genlock_abs_diff_ns("),
         "{OBS_SOURCE}: #1003 — genlock_relock_select_nearest no longer measures each queued \
          stamp's DISTANCE from the anchor target; a selection that is not \
          nearest-neighbour is not continuous, and a non-continuous rule has an edge for \
@@ -612,10 +615,12 @@ fn relock_selection_is_phase_anchored_not_newest_due_1003() {
          function exists to remove. Mirror: src/genlock_backlog.rs relock_select_nearest."
     );
     assert!(
-        src.contains("source->genlock_phase_anchor_ns != 0 ? source->genlock_phase_anchor_ns"),
-        "{OBS_SOURCE}: #1003 — genlock_relock_target_age_ns no longer prefers the tracked \
-         anchor over the configured latency (0 = UNSET sentinel); the relock would target a \
-         fixed latency instead of the conveyor's real on-air age."
+        src.contains("return anchor > configured ? anchor : configured;"),
+        "{OBS_SOURCE}: #1003 — genlock_relock_target_age_ns no longer returns the tracked \
+         anchor FLOORED at the configured latency. Without the anchor it targets a fixed \
+         latency instead of the conveyor's real on-air age; without the floor a degenerate \
+         or stale anchor below the hold targets the live edge and one relock erases the \
+         entire delay line. Mirror: src/genlock_backlog.rs relock_anchor_age_ns."
     );
 
     // (c) BOTH relock branches are wired in — ACQUIRE and BACKLOG STORM. Defining the
@@ -653,10 +658,15 @@ fn relock_selection_is_phase_anchored_not_newest_due_1003() {
     // anchor re-mints a phase from whatever frame it happened to select — the defect,
     // reintroduced through the back door.
     assert!(
-        src.contains("if (anchor_update) source->genlock_phase_anchor_ns = genlock_phase_anchor_from_present( wall_now, next_frame->timestamp);"),
+        src.contains("if (anchor_update) source->genlock_phase_anchor_ns ="),
         "{OBS_SOURCE}: #1003 — the phase anchor is no longer updated (gated by \
          anchor_update) on the shared present tail. Ungated, the ACQUIRE/BACKLOG relock \
          presents would redefine the anchor they are supposed to INHERIT."
+    );
+    assert!(
+        src.contains("genlock_phase_anchor_from_present("),
+        "{OBS_SOURCE}: #1003 — the anchor is no longer derived via \
+         genlock_phase_anchor_from_present (the saturating wall_now - presented_ts)."
     );
 
     // (f) the seams. A stepped wall clock invalidates every sampled age by exactly the
@@ -678,10 +688,50 @@ fn relock_selection_is_phase_anchored_not_newest_due_1003() {
          pre-step age re-establishes the hold at a phase off by the whole clock step — \
          while that function's own contract is to re-acquire the CONFIGURED hold."
     );
+    // EVERY site that destroys the delay line must clear the anchor — the explicit flush,
+    // the overrun force-drain, AND the async_texture_changed re-alloc. Counting them
+    // against the call sites is what stops the seam list silently drifting when a future
+    // edit adds a fourth (only the flush was covered on the first cut of #1003).
+    let seams = src
+        .matches("source->genlock_phase_anchor_ns = 0; free_async_cache(source);")
+        .count();
+    let frees = src.matches("free_async_cache(source);").count();
+    assert_eq!(
+        seams, frees,
+        "{OBS_SOURCE}: #1003 — {frees} site(s) call free_async_cache() but only {seams} \
+         clear the phase anchor first. Each one destroys the whole delay line, so a relock \
+         firing before the next STEADY/GAP present would target an age describing a delay \
+         line that no longer exists."
+    );
+
+    // A latency SETPOINT change also invalidates the remembered age. Without this the
+    // relock sheds NOTHING after a decrease while the lowered threshold qualifies the
+    // backlog branch every tick — a permanent relock storm that ALSO starves the
+    // settle-back drain, which only runs on the STEADY path that branch pre-empts.
+    // Scoped to the setter function, never a byte window.
+    let setter_all = src
+        .split("void obs_source_set_genlock_latency_ms(")
+        .nth(1)
+        .expect("#1003: obs_source_set_genlock_latency_ms must exist");
+    let setter = setter_all
+        .find("uint32_t obs_source_get_genlock_latency_ms(")
+        .map_or(setter_all, |i| &setter_all[..i]);
     assert!(
-        src.contains("source->genlock_phase_anchor_ns = 0; free_async_cache(source);"),
-        "{OBS_SOURCE}: #1003 — an async flush no longer clears the phase anchor; a resumed \
-         source would inherit an on-air age describing a delay line that no longer exists."
+        setter.contains("source->genlock_phase_anchor_ns = 0;"),
+        "{OBS_SOURCE}: #1003 — a latency setpoint change no longer clears the phase anchor. \
+         The remembered age describes a hold that no longer exists; on a DECREASE the relock \
+         then sheds nothing forever while the backlog branch fires every tick. Tier-0 lock: \
+         latency_setpoint_decrease_converges_without_a_relock_storm_1003."
+    );
+
+    // The stale-anchor self-heal: a BACKLOG relock that would shed nothing is proof the
+    // anchor cannot describe a queue this deep.
+    assert!(
+        src.contains("if (sel_1003 == 0 && source->genlock_phase_anchor_ns != 0)"),
+        "{OBS_SOURCE}: #1003 — the BACKLOG branch's stale-anchor self-heal is gone. Without \
+         it a relock that sheds zero frames re-fires every tick (the branch pre-empts \
+         STEADY, so the settle-back drain never runs either) — the useless-`relocks`-counter \
+         state issue 859 removed, reintroduced."
     );
 
     // (g) the `due` scan and its hysteresis stay BYTE-IDENTICAL — they still QUALIFY

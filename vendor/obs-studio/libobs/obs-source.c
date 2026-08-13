@@ -3589,6 +3589,11 @@ static inline struct obs_source_frame *cache_video(struct obs_source *source, co
 		 * depth can be tuned. */
 		if (source->genlock_fifo)
 			source->genlock_overruns++;
+		/* camera-box #1003: the force-drain destroys the whole delay line, so the
+		 * remembered on-air age describes nothing -- a relock firing before the next
+		 * STEADY/GAP present would target a pre-drain phase. Same seam as the flush
+		 * clear below. */
+		source->genlock_phase_anchor_ns = 0;
 		free_async_cache(source);
 		source->last_frame_ts = 0;
 		/* camera-box #102: an overrun force-drained the FIFO to empty, so the
@@ -3605,6 +3610,9 @@ static inline struct obs_source_frame *cache_video(struct obs_source *source, co
 	}
 
 	if (async_texture_changed(source, frame)) {
+		/* camera-box #1003: a format/size change re-allocs the cache and drops the
+		 * delay line with it -- the remembered age no longer describes anything. */
+		source->genlock_phase_anchor_ns = 0;
 		free_async_cache(source);
 		source->async_cache_width = frame->width;
 		source->async_cache_height = frame->height;
@@ -4930,8 +4938,15 @@ static inline uint64_t genlock_abs_diff_ns(uint64_t a, uint64_t b)
  * would have produced anyway. Mirror of src/genlock_backlog.rs relock_anchor_age_ns. */
 static inline uint64_t genlock_relock_target_age_ns(const obs_source_t *source, uint32_t latency_ms)
 {
-	return source->genlock_phase_anchor_ns != 0 ? source->genlock_phase_anchor_ns
-						    : (uint64_t)latency_ms * 1000000ULL;
+	const uint64_t configured = (uint64_t)latency_ms * 1000000ULL;
+	const uint64_t anchor = source->genlock_phase_anchor_ns;
+	/* FLOORED at the configured latency. The conveyor always holds AT LEAST the
+	 * configured hold, so in the intended regime the anchor is at or above it and this
+	 * is inert. It matters as a bound: genlock_phase_anchor_from_present saturates, and
+	 * nothing in the types stops a degenerate/stale anchor coming back SMALLER than the
+	 * hold -- an anchor near 0 would target the live edge and erase the entire delay
+	 * line in a single relock. Mirror: src/genlock_backlog.rs relock_anchor_age_ns. */
+	return anchor > configured ? anchor : configured;
 }
 
 /* camera-box #1003: the relock selection itself -- the INDEX into async_frames (arrival order,
@@ -5724,8 +5739,25 @@ static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 					 * stall's burst -- it does, by erasing every frame OLDER
 					 * than the selected one (release - 1 of them) -- but it must
 					 * no longer re-mint the release PHASE while doing it. */
-					const size_t sel_1003 =
+					size_t sel_1003 =
 						genlock_relock_select_nearest(source, wall_now, reserve_ms);
+					/* camera-box #1003 (adversarial review finding): a BACKLOG relock
+					 * that would shed NOTHING is proof the anchor is STALE. This
+					 * branch only fires ABOVE the latency-implied depth, so an anchor
+					 * pointing at (or before) the queue head cannot describe a queue
+					 * this deep. Carrying it re-fires the branch every tick shedding
+					 * nothing -- and since the branch pre-empts STEADY, drain_eligible
+					 * is never set and the settle-back drain never runs either. Drop
+					 * the stale anchor and re-select against the CONFIGURED latency:
+					 * one relock sheds the overshoot, and the anchor rebuilds from the
+					 * next STEADY present. ACQUIRE is deliberately exempt -- index 0
+					 * there just means "present the head", and the fresh lock stops the
+					 * branch re-firing. Mirror: the Tier-0 sim's relock_present. */
+					if (sel_1003 == 0 && source->genlock_phase_anchor_ns != 0) {
+						source->genlock_phase_anchor_ns = 0;
+						sel_1003 = genlock_relock_select_nearest(source, wall_now,
+											reserve_ms);
+					}
 					{
 						/* #940 piece 1: re-derive n the SAME way genlock_backlog_relock_qdepth()
 						 * did internally (READ-ONLY, same tick -> same result) so the logged
@@ -7663,6 +7695,17 @@ void obs_source_set_genlock_latency_ms(obs_source_t *source, uint32_t ms)
 	if (clamped != prev) {
 		source->genlock_filled = false;
 		source->genlock_empty_run = 0;
+		/* camera-box #1003: the remembered on-air age describes a hold that no longer
+		 * exists. Carried across a setpoint change it targets the OLD phase forever --
+		 * and on a DECREASE it is actively harmful: the relock selection would return
+		 * index 0 (shed NOTHING) while the lowered latency has already dropped
+		 * genlock_backlog_relock_qdepth() below the unchanged depth, so the backlog
+		 * branch qualifies EVERY tick, and because that branch pre-empts STEADY the
+		 * issue-859/998 settle-back drain never runs either -- a permanent per-tick
+		 * relock storm at the old hold. Clearing it re-targets the CONFIGURED latency,
+		 * which sheds the overshoot in one relock. Mirror of the Tier-0 sim's
+		 * set_reserve_ms (src/genlock_backlog.rs). */
+		source->genlock_phase_anchor_ns = 0;
 	}
 	pthread_mutex_unlock(&source->async_mutex);
 
