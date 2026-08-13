@@ -258,6 +258,112 @@ pub fn phase_pinned_is_due(frame_ts_ns: u64, deadline_ns: u64) -> bool {
 }
 
 // ---------------------------------------------------------------------------------------------
+// #1003 — PHASE-CONTINUITY RELOCK (history-anchored selection). The Tier-0 authority; the C
+// `genlock_relock_select_nearest()` / `genlock_phase_anchor_ns` (obs-source.c, obs-internal.h)
+// mirror this in lock-step.
+//
+// WHY the #940 grid pin was not enough. The release phase of a lock episode is minted in ONE
+// place — the newest-due selection at ACQUIRE / BACKLOG relock — and that selection is a
+// cross-grid comparison SAMPLED AT ONE INSTANT, carrying two independent binary edges that
+// ordinary slew flips between episodes:
+//
+//   * Edge 1 — the pin quantizes to the RECEIVER grid. [`phase_pinned_deadline`] floors to the
+//     33,333,333 ns canvas interval, and the floor's step point sits at tick-phase
+//     `latency_ms mod interval` (~23.0 ms at the live 923 ms knob). A relock fires on a render
+//     tick; ±2 ms of tick slew near that step point moves the whole pinned cell by one interval.
+//   * Edge 2 — the stamps being compared live on the SENDER's grid (33,333,300 ns in 100 ns
+//     units), a 33 ns/frame beat (~3.6 ms/h) against the receiver grid, plus DanteSync inter-box
+//     skew wander. [`PHASE_PIN_HYSTERESIS_NS`] is a FIXED offset edge inside that DRIFTING
+//     relative phase — whether the newest stamp lands just inside or just outside it changes
+//     episode to episode. No hysteresis SIZE removes this; it only moves where the coin lands.
+//
+// Two independent edges = up to four outcomes spanning two frames, which is exactly the measured
+// −64.5 / +56..63 ms per-episode steps (issue 1003). Once locked, the cadence is a stamp-anchored
+// conveyor that never re-consults the wall deadline, so whatever the relock latches, the whole
+// episode holds.
+//
+// STRUCTURAL STATEMENT: any instant-sampled, STATELESS selection rule has an edge somewhere.
+// Determinism requires the relock to INHERIT the phase from HISTORY rather than re-sample it.
+// So the source tracks the steady conveyor's own on-air age (`wall_now − presented_ts`, updated
+// on every STEADY / GAP-RESYNC present) and a relock presents the queued frame NEAREST that
+// remembered age instead of the newest due one. Nearest-neighbour selection is CONTINUOUS: the
+// selection point sits half a stamp interval from the operating point BY CONSTRUCTION, so there
+// is no edge for slew or beat to flip. Depth is still corrected by whole frames (the frames
+// older than the selected one are erased into `dropped_due` exactly as before) — only the PHASE
+// is inherited.
+//
+// Deliberately NOT changed by this ticket: the `due` prefix scan and its hysteresis (they still
+// QUALIFY due-ness and still trigger the backlog branch — they simply no longer SELECT), the
+// reserve computation, [`backlog_relock_threshold`] (issue 859), [`drain_target_frames`]
+// (issue 998) and [`BackwardStepGuard`] (issue 1009).
+// ---------------------------------------------------------------------------------------------
+
+/// The age (ns) the relock selection should target: the tracked phase anchor when it is SET,
+/// otherwise the source's configured latency.
+///
+/// `anchor_ns == 0` is the UNSET sentinel — it matches the C field's `bzalloc` zero-init, so a
+/// source that has never presented a steady frame (cold start, post-flush, just after a
+/// backward-step regime ended) falls back to the configured latency, which is the phase the
+/// wall-deadline path would have produced anyway. A degenerate measured age of exactly 0 ns
+/// reads as unset and takes the same safe fallback — at any real rig latency the steady age is
+/// hundreds of ms, so this can only ever be the defensive case.
+///
+/// Mirror of the C `genlock_relock_target_age_ns()` (obs-source.c) — keep both in lock-step.
+pub fn relock_anchor_age_ns(anchor_ns: u64, latency_ms: u32) -> u64 {
+    if anchor_ns != 0 {
+        anchor_ns
+    } else {
+        latency_ms as u64 * 1_000_000
+    }
+}
+
+/// The phase anchor to remember after presenting `presented_ts_ns` at wall instant
+/// `wall_now_ns` — the conveyor's own measured on-air age.
+///
+/// Saturating: a frame stamped AHEAD of the receiver's wall clock (the sender's deliberate
+/// ceil-to-boundary future bias, issue 1009 defect B) would otherwise underflow. Saturating to
+/// 0 makes such a degenerate sample read as UNSET via [`relock_anchor_age_ns`], i.e. the next
+/// relock falls back to the configured latency rather than targeting a nonsense age.
+///
+/// Mirror of the C anchor update in `ready_async_frame()`'s STEADY / GAP present tail.
+pub fn phase_anchor_from_present(wall_now_ns: u64, presented_ts_ns: u64) -> u64 {
+    wall_now_ns.saturating_sub(presented_ts_ns)
+}
+
+/// #1003 — the relock selection itself. Returns the INDEX into `queue_ts` (arrival order,
+/// OLDEST first) of the frame whose capture stamp is NEAREST the anchor-implied target
+/// `wall_now_ns − anchor_age_ns`.
+///
+/// Ties resolve toward the OLDER frame (the lower index) — a strict `<` comparison. Two stamps
+/// exactly equidistant from the target means the target sits precisely between them; taking the
+/// older one keeps the selection monotone as the target sweeps forward, so a tie can never make
+/// the choice oscillate between neighbours on successive episodes (the very failure mode this
+/// function exists to remove).
+///
+/// The caller converts the index into the existing release shape: `release = index + 1`, so the
+/// unchanged `to_drop = release - 1` erase loop retires exactly the `index` older frames into
+/// `dropped_due` and presents the selected one — the same `da_erase(.,0)` + `remove_async_frame()`
+/// idiom the ACQUIRE / relock / N>=2 paths already use. That is what keeps a relock's DEPTH
+/// correction intact while the PHASE is inherited.
+///
+/// An empty slice returns 0: the C call sites are only ever reached with `async_frames.num >= 1`
+/// (`ready_async_frame` guards on it and both relock branches additionally require `due > 0`),
+/// so this is a defensive convention, never a live path — it can never index out of bounds.
+///
+/// Mirror of the C `genlock_relock_select_nearest()` (obs-source.c) — keep both in lock-step.
+pub fn relock_select_nearest(queue_ts: &[u64], wall_now_ns: u64, anchor_age_ns: u64) -> usize {
+    if queue_ts.is_empty() {
+        return 0;
+    }
+    // TEMPORARY [red] STUB — the history-anchored selection is NOT implemented yet. This
+    // returns the NEWEST queued frame, i.e. the instant-sampled flavour the deployed rule
+    // has, so the #1003 acceptance tests below fail against it and the fix that replaces
+    // this body is provably what makes them pass.
+    let _ = (wall_now_ns, anchor_age_ns);
+    queue_ts.len() - 1
+}
+
+// ---------------------------------------------------------------------------------------------
 // #1009 — the backward-clock-step guard, RE-QUALIFIED (Tier-0 mirror of the C guard in
 // obs-source.c's ts-align release, the issue-147 branch).
 //
@@ -1027,6 +1133,36 @@ mod tests {
     const RESERVE_MS_1009: u32 = 894; // the live knob the overnight collapse bypassed
     const RESERVE_NS_1009: u64 = RESERVE_MS_1009 as u64 * 1_000_000;
 
+    // ------------------------------------------------------------------------------------
+    // #1003 — the sim is PARAMETERISED BY SELECTION STRATEGY so the defect and the fix are
+    // observable side by side in Tier-0. Everything else about it is the #1009 model.
+    // ------------------------------------------------------------------------------------
+
+    /// The sender's own floor-boundary stamp grid, in 100 ns units (NDI stamps in 100 ns
+    /// ticks, so a 30 fps period truncates to 333,333 ticks = 33,333,300 ns) — 33 ns per
+    /// frame BELOW the receiver's 33,333,333 ns canvas interval. That 33 ns/frame beat
+    /// (~3.6 ms/h) is Edge 2: the fixed 5 ms comparison hysteresis is a FIXED edge inside a
+    /// DRIFTING relative phase.
+    const SENDER_GRID_1003: u64 = 33_333_300;
+    /// The live stream-box knob at the measurements in issue 1003.
+    const RESERVE_MS_1003: u32 = 923;
+    const RESERVE_NS_1003: u64 = RESERVE_MS_1003 as u64 * 1_000_000;
+    /// Transport delay cam -> receiver.
+    const NET_NS_1003: u64 = 1_000_000;
+
+    /// Which rule the relock branches (ACQUIRE / BACKLOG STORM) use to SELECT the frame to
+    /// present. The whole point of #1003 is that the first is edge-ridden and the second is
+    /// not, so both live here and the tests drive each explicitly.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum SelectionStrategy {
+        /// The DEPLOYED rule: present the NEWEST frame the wall deadline calls due.
+        /// Instant-sampled and stateless — carries both edges.
+        NewestDue,
+        /// #1003: present the frame NEAREST the tracked phase anchor
+        /// ([`relock_select_nearest`]). Continuous — inherits the phase from history.
+        PhaseAnchored,
+    }
+
     struct SimFifo1009 {
         queue: std::collections::VecDeque<u64>,
         boundary: u64,
@@ -1042,10 +1178,36 @@ mod tests {
         first_reanchor_tick: Option<u64>,
         /// (tick index, wall - presented stamp) per presentation.
         presented: Vec<(u64, i64)>,
+        /// #1003: which selection rule the relock branches use.
+        strategy: SelectionStrategy,
+        /// #1003: the tracked conveyor phase anchor (0 = UNSET), mirroring the C
+        /// `genlock_phase_anchor_ns`.
+        phase_anchor_ns: u64,
+        /// #1003: the configured hold, so the #1009 (894 ms) and #1003 (923 ms) scenarios
+        /// can share one sim.
+        reserve_ns: u64,
+        /// #1003: frames erased by a relock selection (the C `genlock_dropped_due`).
+        dropped: u64,
+        /// #1003: BACKLOG-STORM relock events (the C `genlock_relocks`).
+        relocks: u64,
+        /// #1003: (tick index, presented age) recorded ONLY for RELOCK presents
+        /// (ACQUIRE / BACKLOG) — the release phase each lock episode mints.
+        relock_presents: Vec<(u64, i64)>,
+        /// #1003: how many times a SELF-HEAL cleared an anchor that was actually SET. The
+        /// honest signal that the seam clears — a test asserting only "the anchor is 0"
+        /// would also pass on a run that never established one.
+        selfheal_anchor_clears: u64,
     }
 
     impl SimFifo1009 {
+        /// The #1009 default: the DEPLOYED selection rule at the #1009 knob, so every
+        /// pre-existing #1009 acceptance test is byte-identical to before #1003.
         fn new() -> Self {
+            Self::with(SelectionStrategy::NewestDue, RESERVE_NS_1009)
+        }
+
+        /// #1003: a sim with an explicit selection strategy and configured hold.
+        fn with(strategy: SelectionStrategy, reserve_ns: u64) -> Self {
             Self {
                 queue: std::collections::VecDeque::new(),
                 boundary: 0,
@@ -1057,7 +1219,54 @@ mod tests {
                 selfheals: 0,
                 first_reanchor_tick: None,
                 presented: Vec::new(),
+                strategy,
+                phase_anchor_ns: 0,
+                reserve_ns,
+                dropped: 0,
+                relocks: 0,
+                relock_presents: Vec::new(),
+                selfheal_anchor_clears: 0,
             }
+        }
+
+        /// The backlog-storm threshold this sim's own configured hold implies (issue 859 —
+        /// UNCHANGED by #1003; it still decides WHEN a relock fires, only the SELECTION
+        /// inside the branch changes).
+        fn backlog_threshold(&self) -> u64 {
+            backlog_relock_threshold((self.reserve_ns / 1_000_000) as u32, 30, 1, 1)
+        }
+
+        /// The ACQUIRE / BACKLOG-STORM relock present. Selects per [`SelectionStrategy`],
+        /// erases the older frames into `dropped` (the C `da_erase(.,0)` +
+        /// `remove_async_frame()` + `genlock_dropped_due` idiom, unchanged — this is how a
+        /// relock still corrects DEPTH), presents the selected frame and returns its stamp.
+        ///
+        /// The anchor is deliberately NOT updated here: a relock INHERITS the phase, it does
+        /// not redefine it (#1003). Only STEADY / GAP presents move the anchor.
+        fn relock_present(&mut self, k: u64, wall: u64, due: usize) -> u64 {
+            let idx = match self.strategy {
+                SelectionStrategy::NewestDue => due - 1,
+                SelectionStrategy::PhaseAnchored => {
+                    let q: Vec<u64> = self.queue.iter().copied().collect();
+                    relock_select_nearest(
+                        &q,
+                        wall,
+                        relock_anchor_age_ns(
+                            self.phase_anchor_ns,
+                            (self.reserve_ns / 1_000_000) as u32,
+                        ),
+                    )
+                }
+            };
+            for _ in 0..idx {
+                self.queue.pop_front().expect("selected index is in range");
+                self.dropped += 1;
+            }
+            let ts = self.queue.pop_front().expect("selected frame");
+            let age = wall as i64 - ts as i64;
+            self.presented.push((k, age));
+            self.relock_presents.push((k, age));
+            ts
         }
 
         /// One render tick at receiver wall time `wall` (also the warn-cadence clock — the
@@ -1072,7 +1281,7 @@ mod tests {
                 }
                 return;
             }
-            let present_ts = phase_pinned_deadline(wall.saturating_sub(RESERVE_NS_1009), I30);
+            let present_ts = phase_pinned_deadline(wall.saturating_sub(self.reserve_ns), I30);
             // The C due scan is a PREFIX scan in arrival order.
             let due = self
                 .queue
@@ -1100,35 +1309,57 @@ mod tests {
                     BackwardStepAction::SelfHeal => {
                         self.selfheals += 1;
                         self.boundary = 0;
+                        // #1003: the receiver wall clock stepped, so every `wall - ts` age
+                        // sampled before the correction is off by the step. CLEAR the
+                        // anchor — the re-ACQUIRE then falls back to the CONFIGURED
+                        // latency, which is exactly #1009's own self-heal contract.
+                        if self.phase_anchor_ns != 0 {
+                            self.selfheal_anchor_clears += 1;
+                        }
+                        self.phase_anchor_ns = 0;
                     }
                     BackwardStepAction::Pending | BackwardStepAction::None => {}
                 }
             } else if matches!(self.guard.tick_due_positive(), BackwardStepAction::SelfHeal) {
                 self.selfheals += 1;
                 self.boundary = 0;
+                // #1003: same seam as the due==0 self-heal above — a stepped clock
+                // invalidates every sampled age, so the anchor is cleared, not carried.
+                if self.phase_anchor_ns != 0 {
+                    self.selfheal_anchor_clears += 1;
+                }
+                self.phase_anchor_ns = 0;
             }
             // The issue-401 cadence, N==1 paths.
             if self.boundary == 0 {
                 if due > 0 {
-                    // ACQUIRE: jump to the newest due frame.
-                    let mut ts = 0;
-                    for _ in 0..due {
-                        ts = self.queue.pop_front().unwrap();
-                    }
+                    // ACQUIRE (a relock branch — see relock_present).
+                    let ts = self.relock_present(k, wall, due);
                     self.boundary = ts + I30;
-                    self.presented.push((k, wall as i64 - ts as i64));
                 } else {
                     self.holds += 1;
                 }
+            } else if self.queue.len() as u64 > self.backlog_threshold() && due > 0 {
+                // BACKLOG STORM (issue 859 threshold, unchanged) — the OTHER relock branch.
+                self.relocks += 1;
+                let ts = self.relock_present(k, wall, due);
+                self.boundary = ts + I30;
             } else if *self.queue.front().unwrap() <= self.boundary {
                 // STEADY: the head matured by the locked boundary.
                 let ts = self.queue.pop_front().unwrap();
                 self.boundary = ts + I30;
+                // #1003: the steady conveyor's own on-air age IS the phase anchor.
+                self.phase_anchor_ns = phase_anchor_from_present(wall, ts);
                 self.presented.push((k, wall as i64 - ts as i64));
             } else if present_ts >= *self.queue.front().unwrap() {
                 // GAP RESYNC: aged past the reserve, beyond the boundary.
                 let ts = self.queue.pop_front().unwrap();
                 self.boundary = ts + I30;
+                // #1003: upstream skipped stamps, so any pre-gap anchor is stale — this
+                // present RE-DERIVES it from the frame actually put on air (the same one
+                // line serves both "update on GAP present" and "do not carry the pre-seam
+                // value forward").
+                self.phase_anchor_ns = phase_anchor_from_present(wall, ts);
                 self.presented.push((k, wall as i64 - ts as i64));
             } else {
                 self.holds += 1;
@@ -1526,5 +1757,383 @@ mod tests {
         );
         assert_eq!(g.reanchor_ticks(), 0, "a transient must never re-anchor");
         assert!(!g.in_step(), "a transient must never latch the regime");
+    }
+
+    // ------------------------------------------------------------------------------------
+    // #1003 — phase-continuity relock acceptance tests.
+    //
+    // The scenario is the live stream-box one: a 923 ms hold, a sender stamping on its own
+    // 33,333,300 ns floor grid, a receiver rendering on the 33,333,333 ns canvas grid, and a
+    // FORCED re-lock episode (what a knob hot-apply / program switch / recording start does).
+    // ------------------------------------------------------------------------------------
+
+    /// The tick a forced re-lock episode fires on, comfortably past the ~28-frame build-up
+    /// the 923 ms hold implies.
+    const RELOCK_TICK_1003: u64 = 300;
+
+    /// Render-tick slews (ns) the relock episode fires at. All within the ±2 ms the deployed
+    /// FIFO actually sees — and, thanks to [`step_aligned_base_1003`], STRADDLING the #940
+    /// floor-pin step point, with a one-NANOSECOND pair (`-1`, `0`) either side of it.
+    const SLEW_SWEEP_1003: [i64; 5] = [-2_000_000, -1_000_000, -1, 0, 1_000_000];
+
+    /// The episode base that puts the #940 floor-pin STEP POINT at exactly zero render-tick
+    /// slew on tick [`RELOCK_TICK_1003`].
+    ///
+    /// `(wall − reserve) mod interval` is CONSTANT in the tick index — wall advances by
+    /// exactly one interval per tick — so the step point cannot be reached by choosing a
+    /// different tick; it moves only with the base. Shifting the base is precisely what
+    /// distinguishes one real deployment (or one lock episode hours later, after the grids
+    /// have beaten past each other) from another, which is why the live evidence sees the
+    /// step across episodes rather than within one run.
+    fn step_aligned_base_1003() -> u64 {
+        let w = BASE_1009 + RELOCK_TICK_1003 * I30 - RESERVE_NS_1003;
+        BASE_1009 + (I30 - (w % I30)) % I30
+    }
+
+    struct Episode1003 {
+        /// The conveyor's own age on the tick BEFORE the forced relock.
+        steady_before: i64,
+        /// The age the forced relock minted — the episode's release phase.
+        relock_age: i64,
+        /// The tracked anchor immediately before the relock tick.
+        anchor_before: u64,
+        /// The tracked anchor immediately after it.
+        anchor_after: u64,
+    }
+
+    /// Warm the conveyor to steady state at the nominal grid phase, then force ONE re-lock
+    /// episode and hold a render-tick slew of `slew_ns` from that tick onward — modelling a
+    /// lock episode that fires at a different point of the grid than the one that
+    /// established the conveyor. Reports the phase either side of the episode.
+    ///
+    /// The relock may legitimately HOLD for a tick or two before it presents: below the
+    /// floor-pin step point nothing is due yet, so the ACQUIRE branch holds and acquires on
+    /// the next tick. That hold is part of the episode, so the phase is read from the FIRST
+    /// relock present after the forced reset, whenever it lands.
+    fn episode_1003(strategy: SelectionStrategy, slew_ns: i64) -> Episode1003 {
+        /// How many ticks the forced relock is given to actually present.
+        const SETTLE_TICKS: u64 = 4;
+        let base = step_aligned_base_1003();
+        let mut fifo = SimFifo1009::with(strategy, RESERVE_NS_1003);
+        let mut next_emit = 0u64;
+        for k in 0..RELOCK_TICK_1003 {
+            let true_now = base + k * I30;
+            // The sender emits on ITS OWN grid; the receiver renders on the canvas grid.
+            loop {
+                let e = base + next_emit * SENDER_GRID_1003;
+                if e + NET_NS_1003 > true_now {
+                    break;
+                }
+                fifo.queue.push_back(e);
+                next_emit += 1;
+            }
+            fifo.tick(k, true_now, true_now);
+        }
+        let relocks_before_episode = fifo.relock_presents.len();
+        let steady_before = fifo.presented.last().copied();
+        let anchor_before = fifo.phase_anchor_ns;
+        // THE FORCED RE-LOCK: the cadence loses its lock exactly as a knob hot-apply /
+        // source reset does, so the relock branch re-selects from here.
+        fifo.boundary = 0;
+        for k in RELOCK_TICK_1003..RELOCK_TICK_1003 + SETTLE_TICKS {
+            let true_now = base + k * I30;
+            loop {
+                let e = base + next_emit * SENDER_GRID_1003;
+                if e + NET_NS_1003 > true_now {
+                    break;
+                }
+                fifo.queue.push_back(e);
+                next_emit += 1;
+            }
+            let wall = (true_now as i64 + slew_ns) as u64;
+            fifo.tick(k, wall, true_now);
+            if fifo.relock_presents.len() > relocks_before_episode {
+                // The relock presented — stop here so `phase_anchor_ns` is read exactly
+                // as the relock left it, before any later STEADY tick moves it again.
+                break;
+            }
+        }
+        let (sb_tick, sb_age) =
+            steady_before.expect("the conveyor must have presented before the relock");
+        assert_eq!(
+            sb_tick,
+            RELOCK_TICK_1003 - 1,
+            "setup: the conveyor must present on the tick immediately before the relock \
+             (got a present at tick {sb_tick}) — otherwise `steady_before` is not the phase \
+             the relock is supposed to inherit"
+        );
+        assert!(
+            fifo.relock_presents.len() > relocks_before_episode,
+            "the forced relock never presented within {SETTLE_TICKS} ticks, so the episode \
+             measured nothing. A working nearest-anchor selection presents immediately, or \
+             after a single hold when the grid step leaves nothing due yet; a selection that \
+             jumps to the newest QUEUED frame drains the delay line and starves the FIFO \
+             instead."
+        );
+        let (_relock_tick, relock_age) = *fifo
+            .relock_presents
+            .last()
+            .expect("the forced relock must have presented a frame");
+        Episode1003 {
+            steady_before: sb_age,
+            relock_age,
+            anchor_before,
+            anchor_after: fifo.phase_anchor_ns,
+        }
+    }
+
+    /// #1003 ACCEPTANCE 1 — the fix. Five forced re-lock episodes, fired at render-tick
+    /// slews that STRADDLE the #940 floor-pin step point (including a one-nanosecond pair
+    /// either side of it), must all land the SAME release phase as the conveyor they
+    /// interrupted, within well under half a frame.
+    ///
+    /// This is the Tier-0 form of the ticket's acceptance item 1 ("relock lands the SAME
+    /// release phase (±<10 ms) across >=5 forced re-lock episodes at latency >=900 ms").
+    #[test]
+    fn forced_relock_preserves_release_phase_within_10ms_across_5_episodes_1003() {
+        const TOL_NS: i64 = 10_000_000; // the ticket's own ±10 ms bar
+        let mut deltas = Vec::new();
+        for slew in SLEW_SWEEP_1003 {
+            let ep = episode_1003(SelectionStrategy::PhaseAnchored, slew);
+            let delta = ep.relock_age - ep.steady_before;
+            assert!(
+                delta.abs() < TOL_NS,
+                "slew {slew} ns: the forced relock minted a release phase {delta} ns away \
+                 from the conveyor it interrupted (steady {} ns -> relock {} ns). The whole \
+                 point of the phase anchor is that a relock corrects DEPTH, never PHASE.",
+                ep.steady_before,
+                ep.relock_age
+            );
+            deltas.push(delta);
+        }
+        assert_eq!(deltas.len(), 5, "the ticket asks for >=5 episodes");
+        let spread =
+            deltas.iter().max().expect("5 episodes") - deltas.iter().min().expect("5 episodes");
+        assert!(
+            spread < TOL_NS,
+            "the five episodes minted release phases spanning {spread} ns ({deltas:?}) — \
+             they must agree to within {TOL_NS} ns, or the A/V offset still steps between \
+             lock episodes and the ±20 ms gate stays a lottery"
+        );
+    }
+
+    /// #1003 DEFECT LOCK — the same five episodes under the DEPLOYED instant-sampled rule
+    /// step a WHOLE FRAME. This is the mechanism the ticket measured in the field
+    /// (−64.5 / +56..63 ms episode steps), reproduced deterministically in Tier-0.
+    ///
+    /// Kept permanently, pinned explicitly to [`SelectionStrategy::NewestDue`]: it documents
+    /// exactly WHY the selection rule may never go back to newest-due, and it is the control
+    /// that proves the acceptance test above is measuring something real rather than a
+    /// scenario too gentle to expose either rule.
+    #[test]
+    fn instant_sampled_selection_steps_a_whole_frame_at_the_grid_edges_1003() {
+        let deltas: Vec<i64> = SLEW_SWEEP_1003
+            .iter()
+            .map(|&slew| {
+                let ep = episode_1003(SelectionStrategy::NewestDue, slew);
+                ep.relock_age - ep.steady_before
+            })
+            .collect();
+        let spread =
+            deltas.iter().max().expect("5 episodes") - deltas.iter().min().expect("5 episodes");
+        // A "whole frame" with generous slack for the 33 ns/frame sender-grid beat.
+        let whole_frame = (I30 * 4 / 5) as i64;
+        assert!(
+            spread >= whole_frame,
+            "the deployed newest-due rule was expected to step ~a whole frame across the \
+             grid edge, but the episodes only spread {spread} ns ({deltas:?}). Either the \
+             scenario no longer straddles the #940 floor-pin step point (so the acceptance \
+             test above proves nothing), or the selection rule already changed."
+        );
+        // The damning pair: SLEW_SWEEP_1003[2] and [3] differ by ONE NANOSECOND of render-
+        // tick slew, and the floor-pin step point sits exactly between them.
+        let one_ns_step = (deltas[2] - deltas[3]).abs();
+        assert!(
+            one_ns_step >= whole_frame,
+            "one NANOSECOND of render-tick slew ({} ns vs {} ns) moved the release phase by \
+             {one_ns_step} ns — this is Edge 1, and it is what makes every lock episode a \
+             fresh ±1-frame dice roll. Expected >= {whole_frame} ns.",
+            SLEW_SWEEP_1003[2],
+            SLEW_SWEEP_1003[3]
+        );
+    }
+
+    /// #1003 — a relock must still do its JOB. The phase anchor changes WHICH frame a relock
+    /// selects; it must not stop the relock shedding the queue depth a stall's burst built
+    /// up, or the issue-859 backlog branch becomes decorative and the FIFO parks overshot.
+    #[test]
+    fn relock_still_sheds_backlog_depth_while_preserving_phase_1003() {
+        const STALL_AT: u64 = 300;
+        const STALL_TICKS: u64 = 14; // >= the issue-859 margin, so the branch really fires
+        const N_TICKS: u64 = 360;
+        let base = step_aligned_base_1003();
+        let mut fifo = SimFifo1009::with(SelectionStrategy::PhaseAnchored, RESERVE_NS_1003);
+        let mut next_emit = 0u64;
+        let mut steady_before = 0i64;
+        let mut depth_at_resume = 0usize;
+        let mut relock_age = None;
+        let mut depth_after_relock = None;
+        for k in 0..N_TICKS {
+            let true_now = base + k * I30;
+            loop {
+                let e = base + next_emit * SENDER_GRID_1003;
+                if e + NET_NS_1003 > true_now {
+                    break;
+                }
+                fifo.queue.push_back(e);
+                next_emit += 1;
+            }
+            if (STALL_AT..STALL_AT + STALL_TICKS).contains(&k) {
+                // RENDER STALL: frames keep arriving, the compositor never ticks. On resume
+                // the queue is STALL_TICKS deep above its steady depth — the "stall's burst"
+                // the backlog branch exists for.
+                if k == STALL_AT {
+                    steady_before = fifo.presented.last().map(|(_, a)| *a).unwrap_or(0);
+                }
+                continue;
+            }
+            if k == STALL_AT + STALL_TICKS {
+                depth_at_resume = fifo.queue.len();
+            }
+            let relocks_before = fifo.relocks;
+            fifo.tick(k, true_now, true_now);
+            if fifo.relocks > relocks_before && depth_after_relock.is_none() {
+                depth_after_relock = Some(fifo.queue.len());
+                relock_age = fifo.relock_presents.last().map(|(_, a)| *a);
+            }
+        }
+        let threshold = backlog_relock_threshold(RESERVE_MS_1003, 30, 1, 1);
+        assert!(
+            depth_at_resume as u64 > threshold,
+            "the stall left a queue of only {depth_at_resume} frames, not deeper than the \
+             issue-859 backlog threshold ({threshold}), so the backlog branch is never \
+             exercised. Either the stall no longer builds a real burst, or the relock \
+             selection is draining the delay line it is supposed to preserve."
+        );
+        assert!(
+            fifo.relocks >= 1,
+            "the backlog branch never fired — the issue-859 trigger must be UNCHANGED by \
+             #1003 (the anchor changes WHICH frame is selected, never WHEN a relock happens)"
+        );
+        let depth_after = depth_after_relock.expect("a relock fired, so a depth was recorded");
+        assert!(
+            (depth_after as u64) <= threshold,
+            "the relock left the queue at {depth_after} frames, still above the backlog \
+             threshold {threshold} — nearest-anchor selection must still SHED depth by whole \
+             frames (it erases every frame older than the one it selects)"
+        );
+        assert!(
+            fifo.dropped > 0,
+            "depth was shed without dropping anything — the erase-into-dropped_due \
+             accounting is what makes the shed VISIBLE (the pre-#401 silent-erase defect)"
+        );
+        let relock_age = relock_age.expect("a relock fired, so an age was recorded");
+        let delta = relock_age - steady_before;
+        assert!(
+            delta.abs() < 10_000_000,
+            "the backlog relock shed depth but moved the release phase by {delta} ns \
+             (steady {steady_before} ns -> relock {relock_age} ns) — depth correction must \
+             not cost phase"
+        );
+    }
+
+    /// #1003 — the anchor's LIFECYCLE, the part that is easy to get subtly wrong.
+    ///
+    /// * the relock path (ACQUIRE / BACKLOG) neither clears nor redefines it — that is what
+    ///   lets a re-ACQUIRE, including the one a self-heal triggers, inherit a phase at all;
+    /// * a GAP RESYNC RE-DERIVES it from the frame actually put on air (upstream skipped
+    ///   stamps, so the pre-gap value must not be carried forward);
+    /// * a backward-step regime end CLEARS it — the receiver wall clock moved, so every
+    ///   `wall − ts` age sampled before the correction is wrong by the step, and the
+    ///   configured-latency fallback is the only honest target (this is exactly #1009's own
+    ///   self-heal contract: re-acquire the CONFIGURED hold).
+    #[test]
+    fn anchor_survives_selfheal_reacquire_and_clears_on_gap_and_backward_regime_end_1003() {
+        // --- the target-selection contract itself -----------------------------------
+        assert_eq!(
+            relock_anchor_age_ns(948_000_000, RESERVE_MS_1003),
+            948_000_000,
+            "a SET anchor is the selection target"
+        );
+        assert_eq!(
+            relock_anchor_age_ns(0, RESERVE_MS_1003),
+            RESERVE_NS_1003,
+            "an UNSET anchor (0, the C bzalloc zero-init) falls back to the CONFIGURED \
+             latency — the phase the wall-deadline path would have produced anyway"
+        );
+
+        // --- the relock path must PRESERVE the anchor -------------------------------
+        let ep = episode_1003(SelectionStrategy::PhaseAnchored, 0);
+        assert_ne!(
+            ep.anchor_before, 0,
+            "setup: the conveyor must have established an anchor before the forced relock"
+        );
+        assert_eq!(
+            ep.anchor_after, ep.anchor_before,
+            "the ACQUIRE / relock path must neither CLEAR nor REDEFINE the anchor — a relock \
+             INHERITS the phase. Redefining it here would let each episode re-mint a phase, \
+             which is the whole defect; clearing it would drop every re-ACQUIRE (including \
+             the one after a self-heal) back to the edge-ridden fallback."
+        );
+
+        // --- a GAP RESYNC RE-DERIVES it ---------------------------------------------
+        let mut fifo = SimFifo1009::with(SelectionStrategy::PhaseAnchored, RESERVE_NS_1003);
+        let wall = BASE_1009 + 1_000 * I30;
+        let stale_anchor = 700_000_000; // a deliberately WRONG pre-gap value
+        fifo.phase_anchor_ns = stale_anchor;
+        // Upstream skipped stamps: the head sits BEYOND the locked boundary, but has aged
+        // well past the reserve — the GAP RESYNC branch, not STEADY and not a relock.
+        let head = wall - RESERVE_NS_1003 - 2 * I30;
+        fifo.queue.push_back(head);
+        fifo.boundary = head - 5 * I30;
+        fifo.tick(0, wall, wall);
+        assert_eq!(
+            fifo.presented.len(),
+            1,
+            "setup: the GAP RESYNC branch must have presented the aged head"
+        );
+        assert_eq!(
+            fifo.relock_presents.len(),
+            0,
+            "setup: this must be a GAP present, not a relock"
+        );
+        assert_eq!(
+            fifo.phase_anchor_ns,
+            wall - head,
+            "a GAP RESYNC must RE-DERIVE the anchor from the frame it actually put on air"
+        );
+        assert_ne!(
+            fifo.phase_anchor_ns, stale_anchor,
+            "a GAP RESYNC must never carry the pre-gap anchor forward — upstream skipped \
+             stamps, so that age describes a timeline that no longer exists"
+        );
+
+        // --- a backward-step regime end CLEARS it -----------------------------------
+        let mut fifo = SimFifo1009::with(SelectionStrategy::PhaseAnchored, RESERVE_NS_1009);
+        run_sim_1009(
+            &mut fifo,
+            900,
+            I30, // exact-rate sender: the step itself makes every tick due==0
+            1_000_000,
+            |_| 0,
+            |k| {
+                if (400..550).contains(&k) {
+                    -500_000_000
+                } else {
+                    0
+                }
+            },
+        );
+        assert!(
+            fifo.selfheals >= 1,
+            "setup: the 500 ms backward step must end in a SELF-HEAL (#1009)"
+        );
+        assert!(
+            fifo.selfheal_anchor_clears >= 1,
+            "the self-heal ended a backward-step regime without clearing a SET phase anchor. \
+             The receiver wall clock moved by the step, so every `wall - ts` age sampled \
+             before the correction is wrong by exactly that much — re-acquiring against it \
+             would re-establish the hold at a phase off by the whole clock step."
+        );
     }
 }
