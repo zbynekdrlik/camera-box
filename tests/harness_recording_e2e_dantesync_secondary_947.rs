@@ -91,6 +91,7 @@ fn run_secondary_gate(
         .env("CAMERA_ACTIVE_SET", camera_active_set)
         .env("CAMERA_SET_SH", &camera_set_sh)
         .env("PF_LINUX", preflight_dantesync_linux)
+        .env("STRIH", "10.9.9.202")
         .output()
         .expect("run #947 secondary-gate region");
     assert!(
@@ -167,5 +168,26 @@ fn never_mistakes_cam1_cam2_for_secondary_cameras_even_with_a_wider_active_set_9
         "#947: cam4 is in CAMERA_ACTIVE_SET but did NOT come back healthy (absent from \
          PREFLIGHT_DANTESYNC_LINUX, e.g. acked-offline) -- the gate must not be invoked on cam1/ \
          cam2 alone. Got calls={calls:?}"
+    );
+}
+
+/// issue 1022 follow-up (live run 31669664399, cam3's first day back): dantesync-gate.sh's
+/// step-chase machinery (the client bound widened by the master's own ntp_deadband_us envelope +
+/// the bimodal chase-signature exclusion) only engages when the NTP MASTER (strih) is among the
+/// call's configured nodes -- the secondary-camera invocation passed ONLY `--linux camN=...`, so
+/// cam3 was graded against the BARE 2000us bound with no chase handling at all and false-failed
+/// on the master's routine ~2.5ms step propagation (median -424us in bound, spread 2483us).
+/// The secondary invocation must carry the SAME master reference the main gate call does.
+#[test]
+fn secondary_gate_carries_the_ntp_master_reference_for_chase_grading_1022() {
+    let (_, calls) = run_secondary_gate(
+        "cam1 cam2 cam3",
+        "cam1=10.77.9.61 cam2=10.77.9.62 cam3=10.77.9.63",
+    );
+    assert!(
+        calls.contains("--win-http") && calls.contains("strih=10.9.9.202"),
+        "issue 1022: the secondary dantesync-gate invocation must pass the NTP master's \
+         --win-http reference (strih) so the step-chase envelope + bimodal exclusion engage for \
+         secondary client rows exactly as they do in the main gate call. Got calls={calls:?}"
     );
 }
