@@ -112,11 +112,22 @@ pub fn backlog_relock_threshold(
 }
 
 /// The source frame interval (ns) implied by a window of the front queued frame stamps: the
-/// delta of the FIRST strictly-increasing consecutive pair.
+/// **MINIMUM** strictly-increasing consecutive delta.
 ///
 /// The measured interval feeds the source-rate multiple `n = round(canvas_interval / interval)`
 /// that [`backlog_relock_threshold`] (and the settle-back drain / release cadence) budget the
 /// FIFO depth at, so mis-reading it directly mis-derives the threshold.
+///
+/// #1042 — every source stamps on the monotonic, evenly-spaced DanteSync grid, so the TRUE frame
+/// interval is the SMALLEST gap between adjacent stamps: a duplicate or a dropped/decimated frame
+/// only ever ENLARGES a gap, never shrinks it below the true period. Taking the FIRST increasing
+/// pair (pre-#1042) over-stated the interval whenever that first pair straddled a dropped frame
+/// (two source intervals), under-stating the multiple and collapsing the backlog-relock threshold
+/// on a genuine 60-into-30 source (stream box's `Zaloha kamera`, ~1/sec spurious relocks — the
+/// issue-796 health-signal complaint). The minimum is byte-identical to the first pair on any
+/// clean grid-stamped window and only differs — strictly more correctly — when the window carries
+/// a leading/embedded gap. This generalises the issue-741/issue-707 B2 "scan past a degenerate
+/// front pair" intent from "skip a leading duplicate" to "take the true minimum period".
 ///
 /// `None` when there is no strictly-increasing pair in the window (fewer than two usable stamps,
 /// or an all-duplicate/non-monotonic window) — the caller then bridges with its sticky latch and
@@ -125,12 +136,14 @@ pub fn backlog_relock_threshold(
 /// Mirror of the loop in the C `genlock_measure_source_multiple` (obs-source.c) and
 /// `src/probe/genlock.rs` `ReleaseCadence::measure_source_multiple` — keep all three in lock-step.
 pub fn source_interval_from_stamps(stamps: &[u64]) -> Option<u64> {
+    let mut min_delta: Option<u64> = None;
     for w in stamps.windows(2) {
         if w[1] > w[0] {
-            return Some(w[1] - w[0]);
+            let d = w[1] - w[0];
+            min_delta = Some(min_delta.map_or(d, |m| m.min(d)));
         }
     }
-    None
+    min_delta
 }
 
 /// #859 follow-up — the SLEW-LIMITED SETTLE-BACK DRAIN.
