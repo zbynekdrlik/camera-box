@@ -118,3 +118,35 @@ And whatever you anchor in `tests/genlock_release_cadence.rs`, mirror it into **
 whitespace the same way (`-replace '\s+', ' '` vs Rust's `split_whitespace().join(" ")`), so the
 same literal works in both — verify each one against the real squished C before committing,
 since `pwsh` is not installed on dev1 and a wrong literal fails only on a Windows runner.
+
+## The source-rate multiple is measured from the STAMP GRID — and that can lie about arrival rate (#1042)
+
+`genlock_measure_source_multiple()` derives `n = round(canvas_interval / source_interval)` where
+`source_interval` comes from the front queued frame STAMPS. Since #1042 it is the **MINIMUM**
+strictly-increasing adjacent delta over the first `GENLOCK_MEASURE_SCAN_DEPTH` entries, not the
+FIRST — every rig source stamps on the monotonic, evenly-spaced DanteSync grid, so the true frame
+interval is the SMALLEST gap; a duplicate or a dropped/decimated frame only ever ENLARGES a gap.
+Taking the first increasing pair let a pair that straddled a dropped frame read 2 source intervals
+(33.3 ms → n=1 on a 60fps source), collapsing `genlock_backlog_relock_qdepth()`'s threshold below
+the source's real held depth and firing the backlog branch spuriously (~1/sec — the #796
+health-signal complaint). The min-delta authority is the pure Tier-0 seam
+`src/genlock_backlog.rs::source_interval_from_stamps`; the probe `measure_source_multiple` calls
+it and the C `genlock_measure_source_multiple` mirrors the same min-loop. **If you touch this
+derivation: min-delta is byte-identical to first-pair on any clean grid-stamped window, so a
+change that "simplifies" it back to `break`-on-first silently reintroduces #1042 on any source
+whose front window carries a gap.** It also feeds `effective_source_multiple` (the LIVE release
+cadence), so a wrong `n` here is not just a threshold bug.
+
+**Diagnosing a source's TRUE buffer-arrival rate when its stamps look coarse (the #1042 method):**
+the stamp grid the measure reads can DIVERGE from how fast buffers actually arrive. Read the
+`genlock-fifo audit '<src>'` line's COUNTER deltas across two consecutive lines instead — they are
+emitted ~every 5 s and each carries a real `ts_present=<epoch_ns>`, so
+`received_delta / (ts_present_delta / 1e9)` is the real buffer-arrival rate, and `consumed_delta`
+/ `dropped_due_delta` are the presented / decimated rates. Live #1042: `Zaloha kamera` showed
+`received` +300 / 5.000 s = **60 buffers/sec** (a genuine 60fps source) while `consumed` +150 =
+30/sec and `dropped_due` +150 = 30/sec (correct 60→30 decimation) — that `received` delta is what
+proved the source was 60fps and the n=1 threshold was the bug, not the source. (Same "never divide
+a counter delta by a wall-clock sleep" caution as the #797 phantom-50fps post-mortem in the
+genlock skill — use the audit line's OWN `ts_present` delta, not a `sleep`.) The audit line prints
+this read-only over the win-* MCP `Shell` on the stream/strih box (session-agnostic file read of
+the newest `%APPDATA%\obs-studio\logs\*.txt`).

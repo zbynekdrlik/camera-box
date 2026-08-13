@@ -5168,10 +5168,18 @@ static inline uint32_t genlock_measure_source_multiple(const obs_source_t *sourc
 	 * seam (t1<t0). Reading ONLY array[0..1] then returned INCONCLUSIVE, and a SUSTAINED
 	 * inconclusive run on a jittery 60-into-30 input dropped the release to the present-oldest
 	 * CRAWL (#707 B2: a window uniform=0.481, histogram {1:295,2:407,3:102,7:39}). Scan the
-	 * first K queued entries for the FIRST strictly-increasing CONSECUTIVE pair — that delta is
-	 * one real source frame interval regardless of a leading duplicate. Still 0 (inconclusive)
-	 * when NO increasing pair exists in the window: the fix WIDENS the search, it never
-	 * fabricates a measurement (the sticky latch bridges the 0). */
+	 * first K queued entries and take the MINIMUM strictly-increasing CONSECUTIVE delta as the
+	 * source frame interval. #1042: every source stamps on the monotonic, evenly-spaced
+	 * DanteSync grid, so the TRUE frame interval is the SMALLEST adjacent gap — a duplicate or a
+	 * dropped/decimated frame only ever ENLARGES a gap, never shrinks it below the true period.
+	 * Taking the FIRST increasing pair (pre-#1042) over-stated the interval whenever that pair
+	 * straddled a dropped frame (two source intervals), under-stating the multiple and
+	 * collapsing the backlog-relock threshold on a genuine 60-into-30 source (stream box's
+	 * 'Zaloha kamera', ~1/sec spurious relocks — the #796 health-signal complaint). The minimum
+	 * is byte-identical to the first pair on any clean grid-stamped window. Still 0
+	 * (inconclusive) when NO increasing pair exists in the window: the sticky latch bridges the
+	 * 0. Mirror of src/genlock_backlog.rs source_interval_from_stamps (Tier-0 unit-tested) and
+	 * src/probe/genlock.rs ReleaseCadence::measure_source_multiple. */
 	const size_t scan = source->async_frames.num < (size_t)GENLOCK_MEASURE_SCAN_DEPTH
 				    ? source->async_frames.num
 				    : (size_t)GENLOCK_MEASURE_SCAN_DEPTH;
@@ -5180,8 +5188,9 @@ static inline uint32_t genlock_measure_source_multiple(const obs_source_t *sourc
 		const uint64_t a = source->async_frames.array[i]->timestamp;
 		const uint64_t b = source->async_frames.array[i + 1]->timestamp;
 		if (b > a) {
-			src_interval = b - a;
-			break;
+			const uint64_t d = b - a;
+			if (src_interval == 0 || d < src_interval)
+				src_interval = d; /* #1042: MIN adjacent grid delta, not the first */
 		}
 	}
 	if (src_interval == 0)
