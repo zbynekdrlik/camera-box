@@ -891,9 +891,9 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
   # inputs — an out-of-set / non-cam input left genlock_burn ON (strih 'NDI cam4'/'NDI cam3',
   # stream 'phase2-probe-src') stays ON into this run. Follow it with the shared EXHAUSTIVE sweep
   # (obs_burn_filter.py sweep-off — GetInputList over WS) on strih AND stream so no leaked burn
-  # survives regardless of which input carries it (guard class issue 246/844).
-  for _nsip in "$STRIH" "$STREAM"; do
-    python3 "$HERE/obs_burn_filter.py" sweep-off --host "$_nsip" 2>&1 \
+  # survives regardless of which input carries it, on strih/stream/imag (guard class issue 246/844).
+  for _nsip in "$STRIH" "$STREAM" "$IMAG_IP"; do
+    timeout "$OBS_CLEANUP_TIMEOUT" python3 "$HERE/obs_burn_filter.py" sweep-off --host "$_nsip" 2>&1 \
       | sed "s/^/    [normalize sweep] /" || true
   done
   for _pfhs in "strih=$STRIH" "stream=$STREAM"; do

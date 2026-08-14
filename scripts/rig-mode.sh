@@ -1194,13 +1194,24 @@ event_mode_assert() {
   # class issue 246/844). Merge in the EXHAUSTIVE reality-derived sweep (obs_burn_filter.py
   # sweep-check — GetInputList over WS) so the EVENT contract fails on a burn ANYWHERE, not just on
   # the pinned inputs. Same "box:input" labels — a pinned input already present just re-confirms.
-  local _asbip _asbbox sweep_arr
+  # FAIL CLOSED: the sweep-check exits SWEEP_ENUM_FAILED(2) when GetInputList itself failed (an
+  # un-enumerable OBS) — distinct from finding a burn (1) or clean (0). On enum-failure (or empty/
+  # malformed output) inject a FAILING sentinel so the EVENT contract cannot pass on the pinned 3
+  # inputs while an un-enumerable box hides an out-of-set burn (the #1011 fail-open the review
+  # caught). A successful sweep re-emits the pinned "box:NDI cam1" key too; its raw reading
+  # deliberately SUPERSEDES the pinned check's fail-closed value — the sweep genuinely re-read the
+  # input, and a real burn still reads true in both, so nothing is masked.
+  local _asbip _asbbox sweep_arr sweep_rc
   while IFS='|' read -r _asbip _ _asbbox; do
     [ -n "$_asbip" ] || continue
-    sweep_arr="$(python3 "$here/obs_burn_filter.py" sweep-check --host "$_asbip" --password "$OBS_WS_PASSWORD" 2>/dev/null || true)"
-    [ -n "$sweep_arr" ] || sweep_arr="[]"
+    if sweep_arr="$(python3 "$here/obs_burn_filter.py" sweep-check --host "$_asbip" --password "$OBS_WS_PASSWORD" 2>/dev/null)"; then sweep_rc=0; else sweep_rc=$?; fi
+    if [ "$sweep_rc" -eq 2 ] || [ -z "$sweep_arr" ]; then
+      burn_json="$(jq --argjson j "$burn_json" --arg k "${_asbbox}:__sweep_unreachable__" -n '$j + {($k): true}')"
+      continue
+    fi
     burn_json="$(printf '%s' "$sweep_arr" | jq --argjson j "$burn_json" --arg box "$_asbbox" \
-      'reduce .[] as $i ($j; . + {("\($box):\($i.input)"): ($i.burn_on)})' 2>/dev/null || printf '%s' "$burn_json")"
+      'reduce .[] as $i ($j; . + {("\($box):\($i.input)"): ($i.burn_on)})' 2>/dev/null \
+      || jq --argjson j "$burn_json" --arg k "${_asbbox}:__sweep_parse_error__" -n '$j + {($k): true}')"
   done < <(obs_burn_targets)
   echo "    [burns] $burn_json"
 

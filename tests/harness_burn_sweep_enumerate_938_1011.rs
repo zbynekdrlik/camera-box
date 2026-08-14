@@ -39,13 +39,21 @@ fn obs_burn_filter_exposes_the_exhaustive_sweep_enumerator() {
 #[test]
 fn rig_mode_event_routes_burn_off_and_check_through_the_sweep() {
     let s = read("scripts/rig-mode.sh");
+    // Anchor on the INVOCATION form (a real `obs_burn_filter.py" sweep-*` call), not the bare
+    // token — the words "sweep-off"/"sweep-check" also appear in this PR's own comments, so a
+    // deleted invocation must still fail the guard.
     assert!(
-        s.contains("sweep-off"),
-        "#938: rig-mode event OFF path must run the exhaustive sweep-off (not only obs_burn_targets)"
+        s.contains("obs_burn_filter.py\" sweep-off"),
+        "#938: rig-mode event OFF path must INVOKE obs_burn_filter.py sweep-off (not only obs_burn_targets)"
     );
     assert!(
-        s.contains("sweep-check"),
-        "#938: event_mode_assert item-3 must merge the exhaustive sweep-check into burn_states"
+        s.contains("obs_burn_filter.py\" sweep-check"),
+        "#938: event_mode_assert item-3 must INVOKE obs_burn_filter.py sweep-check into burn_states"
+    );
+    assert!(
+        s.contains("__sweep_unreachable__"),
+        "#1011: the item-3 sweep-check merge must FAIL CLOSED (inject a failing sentinel) when the \
+         enumeration itself fails — never silently add nothing"
     );
     // ON stays pinned-only by design: the sweep-off must be guarded to the event (OFF) path.
     assert!(
@@ -57,9 +65,11 @@ fn rig_mode_event_routes_burn_off_and_check_through_the_sweep() {
 #[test]
 fn recording_e2e_cleanup_and_normalize_route_through_the_sweep() {
     let s = read("scripts/recording-e2e.sh");
-    let n = s.matches("sweep-off").count();
+    // Count real INVOCATIONS, not the token (which also appears in this PR's comments).
+    let n = s.matches("obs_burn_filter.py\" sweep-off").count();
     assert!(
         n >= 2,
-        "#1011: recording-e2e must sweep-off in BOTH cleanup restore AND [0/8] normalize (got {n})"
+        "#1011: recording-e2e must INVOKE obs_burn_filter.py sweep-off in BOTH cleanup restore AND \
+         [0/8] normalize (got {n})"
     );
 }

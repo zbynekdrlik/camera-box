@@ -150,7 +150,8 @@ class FakeFleetObs:
     + per-input GetInputSettings/GetSourceFilterList and applies SetInputSettings, recording calls,
     so cmd_sweep_check/cmd_sweep_off are exercised with NO live OBS."""
 
-    def __init__(self, inputs, kind_registered=True):
+    def __init__(self, inputs, kind_registered=True, enum_fails=False):
+        self.enum_fails = enum_fails
         self.inputs = {}
         self.order = []
         for i in inputs:
@@ -168,6 +169,8 @@ class FakeFleetObs:
         params = params or {}
         self.calls.append((method, params))
         if method == "GetInputList":
+            if self.enum_fails:
+                return {}  # ignore_err suppressed a request-level error -> no 'inputs' key
             return {"inputs": [{"inputName": n, "inputKind": self.inputs[n]["kind"]}
                                for n in self.order]}
         if method == "GetSourceFilterKindList":
@@ -242,3 +245,24 @@ def test_sweep_off_noop_when_all_clear(monkeypatch, capsys):
     rc = obs_burn_filter.cmd_sweep_off(object(), "10.77.9.202")
     assert rc == 0
     assert "no ndi input" in capsys.readouterr().out.lower()
+
+
+def test_sweep_check_fails_closed_when_enumeration_fails(monkeypatch, capsys):
+    # #1011 review: a FAILED GetInputList (WS/RPC error) must NOT read as "clean" — an out-of-set
+    # burn would be invisible. sweep-check returns SWEEP_ENUM_FAILED and prints valid empty JSON.
+    fake = FakeFleetObs(_LEAKY_FLEET, enum_fails=True)
+    monkeypatch.setattr(obs_burn_filter, "_rpc", fake.rpc)
+    rc = obs_burn_filter.cmd_sweep_check(object(), "10.77.9.202")
+    cap = capsys.readouterr()
+    assert rc == obs_burn_filter.SWEEP_ENUM_FAILED
+    assert cap.out.strip() == "[]", "stdout must stay valid JSON for the shell consumer"
+    assert "FAILED" in cap.err, "enumeration failure must be loud on stderr"
+
+
+def test_sweep_off_fails_closed_when_enumeration_fails(monkeypatch, capsys):
+    fake = FakeFleetObs(_LEAKY_FLEET, enum_fails=True)
+    monkeypatch.setattr(obs_burn_filter, "_rpc", fake.rpc)
+    rc = obs_burn_filter.cmd_sweep_off(object(), "10.77.9.202")
+    assert rc == obs_burn_filter.SWEEP_ENUM_FAILED
+    # nothing was cleared — we could not even enumerate the inputs
+    assert fake.inputs["NDI cam3"]["genlock_burn"] is True

@@ -167,10 +167,24 @@ def ndi_source_input_names(input_list):
             if i.get("inputKind") == "ndi_source" and i.get("inputName")]
 
 
+# Distinct exit code for the sweep actions: the ENUMERATION itself failed (WS error / timeout /
+# malformed reply) — NOT "enumerated, found no burn". A caller (rig-mode's EVENT contract) MUST
+# treat this as fail-CLOSED (a burn on an un-enumerable box is invisible), never as "clean" (#1011).
+SWEEP_ENUM_FAILED = 2
+
+
 def _all_ndi_inputs(ws):
-    """Every ndi_source input name currently on this OBS (GetInputList over WS)."""
-    data = _rpc(ws, "GetInputList", ignore_err=True)
-    return ndi_source_input_names(data.get("inputs", []))
+    """Every ndi_source input name currently on this OBS (GetInputList over WS), or None if the
+    enumeration itself FAILED. A live rig OBS always has ndi inputs, so None (WS request error, a
+    #328 timeout raise, or a reply with no `inputs` key) means "could not enumerate" — the caller
+    must fail CLOSED on it, never read it as "no burns" (the #1011 fail-open hole)."""
+    try:
+        data = _rpc(ws, "GetInputList", ignore_err=True)
+    except Exception:  # noqa: BLE001 — a #328 timeout (or any WS error) is an enumeration failure
+        return None
+    if not isinstance(data, dict) or "inputs" not in data:
+        return None
+    return ndi_source_input_names(data["inputs"])
 
 
 def _input_burn_state(ws, input_name):
@@ -190,6 +204,12 @@ def cmd_sweep_check(ws, host):
     STDERR, and returns non-zero if ANY input has a live burn (burn_on=True) so a caller can gate
     on it exactly like the single-input `check`."""
     inputs = _all_ndi_inputs(ws)
+    if inputs is None:
+        print("[]")  # valid JSON for the shell consumer; the non-zero rc is the real signal
+        sys.stderr.write(
+            f"[sweep] host={host} ERROR: GetInputList FAILED — cannot enumerate ndi inputs; "
+            f"reporting UNVERIFIED (fail-closed, #1011). An out-of-set burn would be invisible.\n")
+        return SWEEP_ENUM_FAILED
     registered = BURN_FILTER_KIND in _filter_kinds(ws)
     results = []
     for name in inputs:
@@ -216,6 +236,11 @@ def cmd_sweep_off(ws, host):
     state (a latent config leak, not only a currently-rendering one). Verifies afterwards and
     returns non-zero if any input still renders a burn."""
     inputs = _all_ndi_inputs(ws)
+    if inputs is None:
+        sys.stderr.write(
+            f"[sweep] host={host} ERROR: GetInputList FAILED — cannot enumerate ndi inputs to "
+            f"clear; a leaked burn may remain (fail-closed, #1011). Re-run before broadcast.\n")
+        return SWEEP_ENUM_FAILED
     cleared = []
     for name in inputs:
         if _genlock_burn(ws, name) is True:
