@@ -409,11 +409,14 @@ resources; only the pure-compare SHAPE is shared).
 
 **After landing a fix like this, grep the WHOLE repo for the same literal** (`grep -rn "nvidia"
 scripts/ scripts/lib/`) before closing out — #845's sweep found one more sibling,
-`scripts/imag-gpu-contention-sampler.sh` (#674), with the identical unconditional
+`scripts/imag-gpu-contention-sampler.sh` (#674 — since RETIRED via #846), with the identical unconditional
 `command -v nvidia-smi || FATAL` shape. It was NOT wired into any automated gate (a standalone
 manual diagnostic, zero callers anywhere else in the repo), so it was out of #845's own scope —
-filed as its own follow-up issue (#846) rather than fixed in the same PR, per the bundling gate
-(a genuinely separate script, not "the same preflight"). **#847's own sweep found ONE more**:
+filed as its own follow-up issue (#846), which RESOLVED it by RETIREMENT (the tool was a one-shot
+diagnostic for a hypothesis already disproven live, sampling NVENC/dGPU-VRAM state that has no
+iGPU equivalent; the real cause of imag render degradation was later found + is continuously
+monitored — #1040 power-envelope guard). So a repo-wide `nvidia` sweep after a fix like this may
+find a sibling that is best DELETED rather than ported — decide from what the script is FOR. **#847's own sweep found ONE more**:
 `scripts/imag-obs-watchdog.py`'s wedge-forensic `snapshot()` unconditionally shells `nvidia-smi`
 (x3) and hardcodes PCI address `01:00.0` — filed as #849 (different subsystem, needs its own
 hardware-equivalent-forensics design, not fixed in the same PR).

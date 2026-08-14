@@ -630,36 +630,27 @@ investigated — a fresh gate-run's cleanup log is the way to check: grep for `W
 failed/timed out` immediately after `#328 FREE cam1/cam2 capture devices FIRST`; its absence, or a
 much smaller fraction of boxes hitting it, is the signal a fix landed).
 
-## GPU/encode-contention correlation technique (#674, 2026-07-12) — epoch-join a nvidia-smi sampler against the harness's OWN real window boundaries
+## GPU/encode-contention correlation technique (#674, 2026-07-12) — RETIRED (#846), finding preserved
 
-To test whether imag-nb's GPU/NVENC state correlates with a per-window judder-density metric
-(`all_cambox_continuity.imag.segments[].optical_stuck_density`) WITHOUT touching any rig config:
+**The `imag-gpu-contention-sampler.sh` tool was RETIRED (#846) — deleted, not ported.** It was a
+one-shot diagnostic that tested ONE hypothesis and that hypothesis was REJECTED, so the tool was
+spent. Retained here only as the recorded FINDING (do not re-litigate, do not resurrect the tool):
 
-1. **Sampler**: `scripts/imag-gpu-contention-sampler.sh` (committed) — a bounded-duration loop of
-   `nvidia-smi --query-gpu=utilization.gpu,memory.used,encoder.stats.sessionCount
-   --format=csv,noheader,nounits`, one CSV row per sample with a `date +%s.%3N` epoch timestamp.
-   Arm it (`nohup ... &`, `IMAG_GPU_SAMPLE_DURATION_SECS=900` is a safe default) BEFORE triggering
-   the gate run — you don't know exactly how long preflight/setup will take before `StartRecord`
-   actually fires, so budget generously; a duration too short truncates the TAIL of the recording
-   (confirmed live: a 900s window armed ~620s before `StartRecord` actually fired left the LAST
-   ~29s of a ~306s recording uncovered — always check via the exact math below and disclose any
-   gap honestly rather than silently extrapolating).
-2. **Real epoch window boundaries — read `switch-schedule.json`, not the printed log lines.**
-   `/tmp/recording-e2e-<RUN_ID>/switch-schedule.json` (still on dev1 after a self-hosted-runner
-   gate run — check there BEFORE spending rig time on a fresh repro, mirrors the `#708` lesson)
-   has each window's REAL `start_ns`/`end_ns` on dev1's own epoch clock (`n / 1e9` for seconds).
-   Since dev1 and imag-nb are both DanteSync-synced sub-ms, a straight epoch-second join between
-   the GPU CSV and these window bounds is valid at any sampling cadence coarser than ~10ms — no
-   manual clock-offset correction needed, unlike the painter-vs-dev1 `#326` gate's own correction
-   (that gate compares two DIFFERENT clocks' RAW offsets; this join compares two ALREADY-
-   DanteSync-disciplined epoch clocks directly).
-3. **Join**: for each window, filter GPU-CSV rows to `[start_ns/1e9, end_ns/1e9]`, average. Print
-   samples-covered vs window-duration per row so a gap (see point 1) is visible in the output, not
-   silently averaged over a partial window.
-4. Result this run (2026-07-12): GPU util/VRAM/encoder-sessions were COMPLETELY FLAT throughout —
-   REJECTS "GPU/encode contention builds up during the recording" as `#674`'s judder mechanism (no
-   growth to correlate against a judder density that was ALSO flat, just already-elevated). Full
-   writeup on `#674`'s own thread.
+- **Hypothesis (imag-nb's GPU/NVENC state correlates with the per-window judder-density metric
+  `all_cambox_continuity.imag.segments[].optical_stuck_density`) was REJECTED live (2026-07-12).**
+  A bounded nvidia-smi sampler was epoch-joined against the run's OWN real window boundaries
+  (`/tmp/recording-e2e-<RUN_ID>/switch-schedule.json`'s `start_ns`/`end_ns`; dev1 and imag-nb are
+  both DanteSync-synced sub-ms, so a straight epoch-second join needs no clock-offset correction).
+  Result: GPU util / VRAM / encoder-sessions were COMPLETELY FLAT throughout — no growth to
+  correlate against a judder density that was also flat (just already-elevated). Full writeup on
+  the #674 thread.
+- **Why retired, not ported to i915:** the tool sampled NVENC encoder-session-count + dGPU VRAM —
+  concepts with no equivalent on the box's current Intel iGPU (#816, software x264 recording,
+  UMA). The REAL cause of imag render degradation was later found and is now continuously
+  monitored: #1040 (a hardware MMIO RAPL PL1 power clamp) — thermald purged, the envelope pinned
+  + supervised, and `gt_act_freq_mhz` sampled continuously with dev1-side alerting. That guard is
+  the current source of iGPU-freq history; a separate one-shot sampler would only duplicate it for
+  a hypothesis already disproven. See `.claude/rules/imag-power-envelope.md`.
 
 ## Emit-rate-deficit / freeze-jump discriminator (#707 B1, 2026-07-14) — 3-layer read: LINK vs BOX-EMIT vs SDK
 
