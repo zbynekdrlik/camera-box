@@ -651,6 +651,21 @@ toggle_burn() {
     python3 "$here/obs_burn_filter.py" "$action" --host "$ip" --input "$src" --password "$OBS_WS_PASSWORD" \
       2>&1 | sed "s/^/    [${box} burn] /" || rc=$?
   done < <(obs_burn_targets)
+  # #938/#1011: the pinned obs_burn_targets loop above touches ONLY each box's fixed PROGRAM
+  # input. The OFF path (EVENT) must additionally clear EVERY ndi_source input a prior TEST /
+  # all-cambox / probe run left genlock_burn ON -- an out-of-set input (strih 'NDI cam2'/'NDI cam4'
+  # /'NDI cam3', stream 'phase2-probe-src') is invisible to the pinned list and leaks past the
+  # switch (the 2026-08-07 pre-broadcast incident; guard class issue 246/844). Route it through the
+  # shared exhaustive enumerator (obs_burn_filter.py sweep-off — GetInputList over WS, never a
+  # static/CAMERA_ACTIVE_SET-derived list). ON (TEST) stays pinned-only by design.
+  if [ "$mode" = "event" ]; then
+    local _sbip _sbbox
+    while IFS='|' read -r _sbip _ _sbbox; do
+      [ -n "$_sbip" ] || continue
+      python3 "$here/obs_burn_filter.py" sweep-off --host "$_sbip" --password "$OBS_WS_PASSWORD" \
+        2>&1 | sed "s/^/    [${_sbbox} burn-sweep] /" || rc=$?
+    done < <(obs_burn_targets)
+  fi
   return $rc
 }
 
@@ -1172,6 +1187,20 @@ event_mode_assert() {
     bv="$(_bool_or_failclosed "$burn_on")"
     label="${box}:${src}"
     burn_json="$(jq --argjson j "$burn_json" --arg k "$label" --argjson v "$bv" -n '$j + {($k): $v}')"
+  done < <(obs_burn_targets)
+  # #938/#1011: the pinned loop above checks only the 3 program inputs. An out-of-set input
+  # (strih 'NDI cam2'/'NDI cam4'/'NDI cam3', stream 'phase2-probe-src') that a prior run left
+  # genlock_burn ON passes the pinned check invisibly (the 2026-08-07 pre-broadcast leak; guard
+  # class issue 246/844). Merge in the EXHAUSTIVE reality-derived sweep (obs_burn_filter.py
+  # sweep-check — GetInputList over WS) so the EVENT contract fails on a burn ANYWHERE, not just on
+  # the pinned inputs. Same "box:input" labels — a pinned input already present just re-confirms.
+  local _asbip _asbbox sweep_arr
+  while IFS='|' read -r _asbip _ _asbbox; do
+    [ -n "$_asbip" ] || continue
+    sweep_arr="$(python3 "$here/obs_burn_filter.py" sweep-check --host "$_asbip" --password "$OBS_WS_PASSWORD" 2>/dev/null || true)"
+    [ -n "$sweep_arr" ] || sweep_arr="[]"
+    burn_json="$(printf '%s' "$sweep_arr" | jq --argjson j "$burn_json" --arg box "$_asbbox" \
+      'reduce .[] as $i ($j; . + {("\($box):\($i.input)"): ($i.burn_on)})' 2>/dev/null || printf '%s' "$burn_json")"
   done < <(obs_burn_targets)
   echo "    [burns] $burn_json"
 
