@@ -89,7 +89,9 @@ fn holder_summary_is_atomic_under_a_concurrent_delete() {
         .expect("run rig_lease_holder_summary");
     let summary = String::from_utf8_lossy(&out.stdout).trim().to_string();
 
-    let full = format!("zbynekdrlik/restreamer#{RUN_ID} run_url={RUN_URL} job={JOB} expected_release_at={EXP}");
+    let full = format!(
+        "zbynekdrlik/restreamer#{RUN_ID} run_url={RUN_URL} job={JOB} expected_release_at={EXP}"
+    );
     assert!(
         summary == full
             || summary == "unknown (no holder.json present)"
