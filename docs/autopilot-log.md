@@ -8306,3 +8306,47 @@ bundle-state-server deployed to both boxes.
 - The PR's green gate measured A/V +6.4/-0.6/-9.5 ms — the FIRST run inside the target ±20 band, with copies/gaps tolerance 2, zero windows over.
 - The slew-aware gate sampling (ticket 1055) removes the day's dominant false-refusal source; the burn enumeration (938+1011) closes the live-QR-on-air hole; forensics (946+910) complete the restart attribution; painter EXONERATED on the shared-duplicate residual (859 instrument, ticket open for the downstream walk).
 - frozen-input watchdog installed+running on dev1 (first pass clean). Worktrees pruned to zero.
+
+## 866 + 902 — burn-persistence / TEST-parking preflight family (worktree autopilot-866)
+
+- **902 (Parking the rig in TEST arms a [0/8] preflight abort) — OVERCOME, closed with evidence, no
+  code.** Validated against post-938/1011 dev: the old `[0/8]` hard-abort on burns-ON
+  (`genlock_burn is still ON from a prior run` + `exit 1`) is GONE — issue 924 made `[0/8]`
+  NORMALIZE a leaked burn (`obs_burn_filter.py remove`) instead of aborting, and issue 1011 added
+  the exhaustive `sweep-off` on strih/stream/imag. The two remaining `[0/8]` `exit 1`s are the
+  stray-recording/streaming checks (which 902 explicitly said must stay). The interim manual-clear
+  protocol is now automated. Leak-detection responsibility correctly moved to rig-mode's EVENT
+  burns-off contract (fail-closed), not `[0/8]`. Regression lock already exists
+  (`recording_e2e_burn_off_preflight_normalizes_instead_of_aborting_924`).
+
+- **866 (imag genlock_burn resurrects ON after any OBS restart) — imag half FIXED.** Root cause: the
+  per-source `genlock_burn` bool persists into OBS's saved scene collection; a runtime OFF (gate
+  cleanup / WS remove) is never written to disk, so an OBS crash/reboot/manual restart reloads
+  `true` and renders the QR burn onto the LIVE IMAG projection. The `[0/8]` exhaustive sweep only
+  runs during a dev1 gate run, never on the box's OWN restart. Fix: force measurement burns OFF at
+  imag OBS start in `imag_scenes.py --bootstrap` (the seam `imag-obs-start.sh` runs on every fresh
+  instance — boot autostart, operator start, systemd Restart=on-failure). New pure
+  `ndi_source_names()` (enumerate ndi_source inputs from GetInputList — NEVER a static/CAMS list,
+  burn-target-enumeration rule) + `clear_measurement_burns()` (clear genlock_burn=false on every ON
+  ndi input, read-back verify). Bootstrap-gated (like the 785 self-heal) so a bare reseed never
+  nukes a burn a gate run set mid-measurement.
+- **Standalone-seam decision:** `imag_scenes.py` is fetched standalone to `/usr/local/bin` and
+  cannot import `obs_burn_filter.py` (not deployed to the box), so the tiny enumerate+clear is
+  reimplemented locally — the SAME established imag precedent as `imag_latency_enforce.py`'s own
+  `list_ndi_inputs`. The "route through ONE seam" rule is `paths:`-scoped to the shell consumers
+  (rig-mode, recording-e2e), not this box script.
+- **TDD:** RED `7c7951163` (functions absent → AttributeError) → GREEN `17ed4ce9c` → review-fix
+  `57c43157a`. 9 pytest cases (pure enumerator + fake-WS clear: clears only ON, overlay merge,
+  no-op when none ON, warn-not-abort on enum-failure / WS-raise-during-enum / WS-raise-mid-sweep /
+  stuck-clear). No `.sh` touched → no static-anchor risk, no full-suite requirement; Python-only.
+- **Review round (fresh-context general-purpose, 0🔴 1🟡 2🔵):** the 🟡 was real and fixed — an
+  uncaught WS exception (the 328 timeout-raise class) from `GetInputList` would propagate out and
+  crash `imag-obs-start.sh` under `set -euo pipefail` (the exact "take OBS down on a transient
+  hiccup" outcome the code prevents). Hardened the WHOLE sweep body in try/except → warn-and-return,
+  and made the stuck-clear path also warn-not-`sys.exit` (a `sys.exit` under systemd
+  Restart=on-failure = OBS restart loop). `clear_measurement_burns` now can NEVER abort OBS start;
+  the gate `[0/8]` sweep-off stays the authoritative fail-closed backstop.
+- **Scope split (filed 1057):** the strih (Windows OBS) restart-resurrection + the "verify whole
+  runtime state at start and report drift LOUD" design (burns OFF + latency pins on both boxes) are
+  genuinely separate (different box/OS, no imag_scenes equivalent on strih) — filed as a tracked
+  follow-up, not bundled. Version 1.7.0-dev.455.
