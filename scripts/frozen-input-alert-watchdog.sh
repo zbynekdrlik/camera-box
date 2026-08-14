@@ -52,7 +52,7 @@ DRY_RUN=0
 case "${1:-}" in
   --dry-run) DRY_RUN=1 ;;
   --help | -h)
-    sed -n '5,49p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '5,42p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
     exit 0
     ;;
   "") : ;;
@@ -81,6 +81,13 @@ OBS_LOG_TAIL="${FROZEN_INPUT_OBS_LOG_TAIL:-800}"
 # never page. A genuinely frozen input stays frozen across the 5-min cadence.
 CONFIRM_THRESHOLD="${FROZEN_INPUT_ALERT_CONFIRM_THRESHOLD:-2}"
 ALERT_THROTTLE_PASSES="${FROZEN_INPUT_ALERT_THROTTLE_PASSES:-12}"   # ~1h at the 5-min cadence
+# A source whose audit line is ABSENT every pass (a broken tap: a config label drift, a renamed /
+# re-created DistroAV source, a source that stopped ticking) stays UNKNOWN forever and never pages,
+# while the watchdog itself looks green -- exactly the "silent unknown" the standing rig-degradation
+# rule forbids. After this many CONSECUTIVE UNKNOWN passes, fire ONE "tap broken" WARN ping so a
+# permanently-blind tap becomes visible. Default ~2h at the 5-min cadence (well past a legitimate
+# transient / OBS-restart reseed).
+TAP_BROKEN_THRESHOLD="${FROZEN_INPUT_TAP_BROKEN_THRESHOLD:-24}"
 
 NOTIFY="${AIRULESET_NOTIFY:-$HOME/devel/airuleset/airuleset.py}"
 REPO_SLUG="${FROZEN_INPUT_ALERT_REPO:-zbynekdrlik/camera-box}"
@@ -152,8 +159,15 @@ write_state_field() {
   mv -f "$tmp" "$STATE_FILE" 2>/dev/null || true
 }
 
-# A source key safe for state-field names (source names carry spaces / punctuation).
-source_key() { printf '%s' "$1" | tr -c 'A-Za-z0-9' '_'; }
+# A source key safe for state-field names (source names carry spaces / punctuation). A short cksum of
+# the RAW name is appended so two distinct names that sanitize identically (e.g. "NDI 2ME PGM" vs
+# "NDI-2ME-PGM") never silently share `recv_/confirm_/alerted_` state.
+source_key() {
+  local san sum
+  san="$(printf '%s' "$1" | tr -c 'A-Za-z0-9' '_')"
+  sum="$(printf '%s' "$1" | cksum | cut -d' ' -f1)"
+  printf '%s_%s' "$san" "$sum"
+}
 
 # An ADVANCING source is not an incident: clear its confirm counter + throttle sig so a genuinely NEW
 # freeze later pages fresh. Does NOT clear the `alerted` latch (the recovery-ping latch).
@@ -167,10 +181,17 @@ clear_source_throttle() {
 # -- per-source decision ------------------------------------------------------------------------
 handle_source() {
   local source="$1" sender_reachable="$2"
-  local k prev curr verdict
+  local k prev curr verdict unk tap_alerted
   k="$(source_key "$source")"
   prev="$(read_state_field "recv_${k}" "")"
-  curr="$(probe_received "$RECEIVER_IP" "$source")"
+  # Skip the ssh probe entirely when the no-double-page guard already forces SKIP (a box is down per
+  # issue-1001): the verdict is predetermined, and probing a down receiver would block up to
+  # SSH_TIMEOUT per source for nothing.
+  if [ "$sender_reachable" = "1" ]; then
+    curr="$(probe_received "$RECEIVER_IP" "$source")"
+  else
+    curr=""
+  fi
 
   verdict="$(frozen_input_classify "$prev" "$curr" "$EXPECTED_LIVE" "$sender_reachable")"
   log "'$source' on $RECEIVER_NAME: prev=${prev:-<none>} curr=${curr:-<none>} live=$EXPECTED_LIVE sender_reachable=$sender_reachable -> $verdict"
@@ -178,6 +199,40 @@ handle_source() {
   # Persist the new baseline ONLY when the current sample is a real integer (a failed/absent read
   # must not clobber the last good baseline -- next pass then still has a value to compare against).
   case "$curr" in '' | *[!0-9]*) : ;; *) write_state_field "recv_${k}" "$curr" ;; esac
+
+  # Tap-liveness -- only meaningful when we actually PROBED (sender_reachable=1). A probe that returns
+  # NO usable value (no `genlock-fifo audit '<src>'` line found) is a BLIND tap: it stays UNKNOWN
+  # forever and never pages while the watchdog looks green -- the "silent unknown" the standing
+  # rig-degradation rule forbids. Track consecutive blind passes and fire ONE "tap broken" WARN past
+  # the threshold. A probe that returns a REAL integer proves the tap works (even when the verdict is
+  # UNKNOWN from a first-sample / counter-reset) -> reset. A SKIP pass (box down per issue-1001, no
+  # probe) leaves the counter untouched -- that is not a tap fault.
+  if [ "$sender_reachable" = "1" ]; then
+    case "$curr" in
+      '' | *[!0-9]*)
+        unk="$(read_state_field "unknown_${k}" 0)"
+        case "$unk" in '' | *[!0-9]*) unk=0 ;; esac
+        unk=$((unk + 1))
+        write_state_field "unknown_${k}" "$unk"
+        tap_alerted="$(read_state_field "tap_broken_${k}" 0)"
+        if [ "$unk" -ge "$TAP_BROKEN_THRESHOLD" ] && [ "$tap_alerted" != "1" ]; then
+          if [ "$DRY_RUN" -eq 1 ]; then
+            log "[dry-run] WOULD alert: '$source' tap BROKEN (no audit line for $unk consecutive passes)"
+          else
+            log "ALERT: firing Discord notification for '$source' tap broken"
+            python3 "$NOTIFY" notify --body \
+              "⚠️ #1052 frozen-input: no \`genlock-fifo audit '$source'\` line on $RECEIVER_NAME for $unk consecutive passes ($REPO_SLUG). The freeze TAP for this source is BLIND (source renamed / re-created / dropped from the scene, or FROZEN_INPUT_SOURCES drifted from the live label) -- frozen-input coverage for '$source' is OFF until fixed." \
+              >/dev/null 2>&1 || log "tap-broken: airuleset.py notify failed (non-fatal)"
+          fi
+          write_state_field "tap_broken_${k}" 1
+        fi
+        ;;
+      *)
+        write_state_field "unknown_${k}" 0
+        write_state_field "tap_broken_${k}" 0
+        ;;
+    esac
+  fi
 
   if [ "$verdict" = "ADVANCING" ]; then
     local was_alerted recover
@@ -263,7 +318,9 @@ main() {
   fi
 
   # Iterate ';'-separated source names (they contain spaces, so split on ';' not whitespace).
+  # `set -f` disables globbing so a `*`/`?`/`[` metachar in a future source name never pathname-expands.
   local old_ifs="$IFS" source
+  set -f
   IFS=';'
   for source in $SOURCES; do
     IFS="$old_ifs"
@@ -273,6 +330,7 @@ main() {
     IFS=';'
   done
   IFS="$old_ifs"
+  set +f
   log "pass end"
 }
 
