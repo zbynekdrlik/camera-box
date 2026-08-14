@@ -7681,3 +7681,30 @@ does the live rig verification of the new whole-chain checks and closes it.
   all green. NO windows-genlock*.yml or parity-test edit needed — every pwsh/Rust anchor is a
   whole-file or statement-level substring, and the enclosing-function slices resolve inside the new
   fn because it precedes ready_async_frame.
+
+## 2026-08-14 — issue 1045: remove the dead documented-bound loss mode (worktree autopilot-1045)
+
+Split out of issue 1035. Removed the two-armed loss gate in `src/probe/differ.rs` — deleted
+`HopInput.max_loss_pct` + `FullSpanBounds.max_loss_pct`, the derived `single_copy_loss_pct`, and the
+`loss_ok` match's `Some(bound) => single_copy_loss_pct <= bound` arm, collapsing to
+`let loss_ok = dropped_ids.is_empty();`. Strict zero-loss is now the ONLY loss mode. The `Some(pct)`
+budget existed solely for strih→stream's OBS render-clock drop pending genlock (the clock-sync
+prerequisite, closed 2026-06-15); the rig is genlocked so it was dead code.
+
+- Version bump 1.7.0-dev.447 → .448 (26bf91528).
+- Removal + dead-test deletion in ONE commit (43023349f) — the field removal breaks the removed
+  mode's own tests' compilation, so they must go in the same commit to keep every commit buildable.
+- Review 🔵 (stale `None` in a doc comment) fixed same-branch (4384f4532).
+- Deleted exactly 6 tests that covered ONLY the removed mode (5 in differ.rs +
+  `full_span_honours_the_documented_loss_bound_not_strict_zero` in tests/full_span_endpoint.rs).
+  KEPT `single_copy_total`/`single_copy_dropped` (the issue-29 min_single_copy INCONCL guard needs
+  them) and every strict-zero-loss + issue-29 guard test with assertions intact — only the forced
+  `hop_single_copy(...)` 4→3-arg signature shrink + one reworded stale comment.
+- Validation before touching: `grep -rn max_loss_pct src/ tests/ scripts/ .github/` hit ONLY
+  differ.rs + full_span_endpoint.rs; no `src/bin/*.rs` constructs `HopInput`/`FullSpanBounds`; no
+  `--max-loss-pct` CLI flag exists. So the removal is contained to those two files.
+- KEY REUSABLE INSIGHT (added to CLAUDE.md Local Build Policy): `cargo fmt --all --check` DOES
+  parse + format-check `#[cfg(feature="probe")]` files — rustfmt ignores cfg — so it is a real
+  partial local net (parse + brace/format balance) on probe code that `check`/`clippy`/`test
+  --no-run` on default features never compile. fmt-clean + hand-audit was the whole local proof
+  here; CI is the first TYPE check.
