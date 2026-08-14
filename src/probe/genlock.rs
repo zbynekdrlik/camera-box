@@ -1470,6 +1470,22 @@ pub struct ReleaseCadence {
     /// other plain-N==1-steady tick. Mirror of the C field
     /// `obs_source_t::genlock_ticks_since_drain` (obs-internal.h).
     ticks_since_last_drain: u64,
+    /// camera-box #1003: the steady conveyor's own measured ON-AIR AGE (`wall_now − presented
+    /// stamp`), updated on every STEADY / GAP-RESYNC present; `0` = UNSET (matches the C field's
+    /// `bzalloc` zero-init), in which case the relock selection falls back to the source's
+    /// configured latency. This is what makes an ACQUIRE / BACKLOG relock INHERIT the release
+    /// PHASE (present the queued frame nearest this remembered age) instead of re-minting it from
+    /// the instant-sampled newest-due comparison. PRESERVED across relocks (a relock corrects
+    /// DEPTH, never phase); RE-DERIVED by a GAP RESYNC present (upstream skipped stamps, so the
+    /// pre-gap age describes a timeline that no longer exists); CLEARED by the BACKLOG stale-anchor
+    /// self-heal (a relock that would shed nothing proves the anchor cannot describe a queue this
+    /// deep). The C's other clear sites (backward-step regime end, async flush, latency setpoint
+    /// change) have no counterpart inside this reference sim, which models neither the backward-step
+    /// guard nor flush/realloc. Mirror of the C field `obs_source_t::genlock_phase_anchor_ns`
+    /// (obs-internal.h); the selection arithmetic is the Tier-0 authority
+    /// [`crate::genlock_backlog::relock_select_nearest`] / [`relock_anchor_age_ns`] /
+    /// [`phase_anchor_from_present`](crate::genlock_backlog::phase_anchor_from_present).
+    phase_anchor_ns: u64,
 }
 
 impl ReleaseCadence {
@@ -1505,24 +1521,24 @@ impl ReleaseCadence {
     /// entirely in the C; `phase_pinned_deadline`/`phase_pinned_is_due` are independently
     /// Tier-0 unit-tested against the exact same numeric contract the C now uses.
     ///
-    /// #1003 SCOPE NOTE — the SAME exclusion, for the same reason, extended to the
-    /// phase-continuity relock. The C ACQUIRE / BACKLOG branches now select the queued frame
-    /// NEAREST a tracked phase anchor (`genlock_relock_select_nearest` /
-    /// `genlock_phase_anchor_ns`) instead of the newest due one; this harness deliberately
-    /// keeps the newest-due selection below. The reason is stronger here than it was for
-    /// #940 piece 3: the selection rule is EXACTLY what this struct's ~27 cadence tests /
-    /// 17 sim call sites pin, as exact ACQUIRE/RELOCK frame-selection outcomes, and every
-    /// one of them is behind `#[cfg(feature = "probe")]` — which this repo's Tier-0 policy
-    /// forbids compiling locally, so a rewrite here has no local verification path at all,
-    /// not even a compile check (project CLAUDE.md). Rewiring dozens of pinned outcomes
-    /// blind, with CI as the first execution, is a correctness risk the fix does not
-    /// require taking: this struct has NO production caller (it is a reference simulation),
-    /// the deployed behaviour is the C, and the selection arithmetic is independently
-    /// Tier-0 unit-tested in `src/genlock_backlog.rs` (`relock_select_nearest` /
-    /// `relock_anchor_age_ns` / `phase_anchor_from_present`) against the exact numeric
-    /// contract the C uses — verified equal on shared vectors when the C was ported.
-    /// Bringing this harness onto the phase-anchored selection is tracked separately so it
-    /// can be done with the probe suite actually runnable, rather than smuggled in blind.
+    /// #1003 — the phase-continuity relock selection is now ADOPTED here (issue 1037): the
+    /// ACQUIRE and BACKLOG branches below select the queued frame NEAREST the tracked phase
+    /// anchor ([`Self::relock_select`] → [`crate::genlock_backlog::relock_select_nearest`] /
+    /// [`relock_anchor_age_ns`](crate::genlock_backlog::relock_anchor_age_ns)) instead of the
+    /// newest due one, [`Self::phase_anchor_ns`] tracks the conveyor's on-air age (updated on
+    /// STEADY / GAP presents, preserved across relocks, cleared by the BACKLOG stale-anchor
+    /// self-heal), and the harness routes the arithmetic through the same Tier-0 authority the C
+    /// mirrors — so the reference sim documents the deployed C's SELECTION faithfully again. This
+    /// was done with the probe suite runnable rather than smuggled in blind: the re-pinned
+    /// outcomes were derived from a default-feature replica that imports the real authority (see
+    /// the issue-1037 design comment), and the demonstrative tests below prove the new wiring.
+    ///
+    /// The ONE remaining harness↔C divergence is the SEPARATE #940 piece 3 axis in the note
+    /// above: this sim keeps the RAW `genlock_present_ts_reserve()` deadline where the C
+    /// grid-quantizes it (`genlock_phase_pin_deadline` + `GENLOCK_PHASE_PIN_HYSTERESIS_NS`). That
+    /// deadline change is a distinct question (it re-pins a different set of `due`-scan outcomes)
+    /// and stays out of scope here; `phase_pinned_deadline`/`phase_pinned_is_due` are already
+    /// independently Tier-0 unit-tested against the exact contract the C uses.
     pub fn tick(
         &mut self,
         wall_now_ns: u64,
@@ -1552,11 +1568,19 @@ impl ReleaseCadence {
             if due == 0 {
                 return hold(false);
             }
-            let mut dropped = Vec::with_capacity(due - 1);
-            for _ in 0..due - 1 {
-                dropped.push(queue.pop_front().expect("due prefix"));
+            // #1003: select by PHASE CONTINUITY, not newest-due. The `due` scan above is
+            // UNCHANGED and still QUALIFIES this branch (due > 0); it simply no longer SELECTS.
+            // `sel` older frames are erased into `dropped` exactly as `due - 1` were before, so
+            // the DEPTH correction is unchanged; only the PHASE is now inherited. On a cold
+            // ACQUIRE the anchor is unset, so the target is the configured latency — the phase
+            // the wall deadline would have produced anyway. Mirror of the C ACQUIRE branch
+            // `release = genlock_relock_select_nearest(source, wall_now, reserve_ms) + 1`.
+            let sel = self.relock_select(queue, wall_now_ns, reserve_ms);
+            let mut dropped = Vec::with_capacity(sel);
+            for _ in 0..sel {
+                dropped.push(queue.pop_front().expect("relock prefix"));
             }
-            let presented = queue.pop_front().expect("due frame");
+            let presented = queue.pop_front().expect("selected frame");
             self.locked_next_boundary_ns = Some(presented + interval_ns);
             return CadenceOutcome {
                 presented: Some(presented),
@@ -1577,11 +1601,31 @@ impl ReleaseCadence {
         if queue.len() > self.backlog_relock_qdepth(queue, reserve_ms, interval_ns) {
             let due = queue.iter().take_while(|&&ts| ts <= deadline).count();
             if due > 0 {
-                let mut dropped = Vec::with_capacity(due - 1);
-                for _ in 0..due - 1 {
-                    dropped.push(queue.pop_front().expect("due prefix"));
+                // #1003: same phase-continuity selection as the ACQUIRE branch. A backlog relock
+                // must still SHED the stall's burst — it does, by erasing every frame OLDER than
+                // the selected one (`sel` of them) — but it must no longer re-mint the release
+                // PHASE while doing it. Mirror of the C `sel_1003 = genlock_relock_select_nearest(...)`.
+                let mut sel = self.relock_select(queue, wall_now_ns, reserve_ms);
+                // #1003 stale-anchor self-heal (adversarial-review finding): a backlog relock that
+                // would shed NOTHING (sel == 0) is proof the anchor is STALE — this branch only
+                // fires ABOVE the latency-implied depth, so an anchor pointing at (or before) the
+                // queue head cannot describe a queue this deep. Carrying it would re-fire the
+                // branch every tick shedding nothing (and, since the branch pre-empts STEADY, the
+                // settle-back drain would never run either). Drop the stale anchor and re-select
+                // against the CONFIGURED latency: one relock sheds the overshoot, and the anchor
+                // rebuilds from the next STEADY present. ACQUIRE is deliberately exempt — index 0
+                // there just means "present the head", and the fresh lock stops the branch
+                // re-firing. Mirror of the C
+                // `if (sel_1003 == 0 && source->genlock_phase_anchor_ns != 0) { ... }`.
+                if sel == 0 && self.phase_anchor_ns != 0 {
+                    self.phase_anchor_ns = 0;
+                    sel = self.relock_select(queue, wall_now_ns, reserve_ms);
                 }
-                let presented = queue.pop_front().expect("due frame");
+                let mut dropped = Vec::with_capacity(sel);
+                for _ in 0..sel {
+                    dropped.push(queue.pop_front().expect("relock prefix"));
+                }
+                let presented = queue.pop_front().expect("selected frame");
                 self.locked_next_boundary_ns = Some(presented + interval_ns);
                 // #741/#707 B2: do NOT clear last_known_n here. A backlog re-lock is a QUEUE-DEPTH
                 // event, NOT evidence the source RATE changed — the #726 clear made the next
@@ -1641,6 +1685,11 @@ impl ReleaseCadence {
                 }
                 let presented = queue.pop_front().expect("newest matured");
                 self.locked_next_boundary_ns = Some(presented + interval_ns);
+                // #1003: a STEADY present — the conveyor. Remember its own on-air age so the
+                // next relock inherits this phase. Mirror of the C present tail's
+                // `if (anchor_update) genlock_phase_anchor_ns = genlock_phase_anchor_from_present(...)`.
+                self.phase_anchor_ns =
+                    crate::genlock_backlog::phase_anchor_from_present(wall_now_ns, presented);
                 return CadenceOutcome {
                     presented: Some(presented),
                     dropped,
@@ -1679,6 +1728,10 @@ impl ReleaseCadence {
             }
             let presented = queue.pop_front().expect("matured frame");
             self.locked_next_boundary_ns = Some(presented + interval_ns);
+            // #1003: a STEADY present — the conveyor. Update the phase anchor from the frame put
+            // on air (after any settle-back drain, so it reflects the actually-presented frame).
+            self.phase_anchor_ns =
+                crate::genlock_backlog::phase_anchor_from_present(wall_now_ns, presented);
             return CadenceOutcome {
                 presented: Some(presented),
                 dropped,
@@ -1699,6 +1752,13 @@ impl ReleaseCadence {
                 // upstream loss) — the source timeline (and possibly its rate) changed. Clear the
                 // latch so the post-gap stream re-confirms its multiple.
                 self.last_known_n = 0;
+                // #1003: a GAP RESYNC RE-DERIVES the phase anchor from the frame it puts on air.
+                // Upstream skipped stamps, so the pre-gap age describes a timeline that no longer
+                // exists — this present is both the "update on GAP" and the "do not carry the
+                // pre-seam value forward" rule, in one assignment (the same seam that clears
+                // STICKY-N above). Mirror of the C GAP-RESYNC `anchor_update = true` tail.
+                self.phase_anchor_ns =
+                    crate::genlock_backlog::phase_anchor_from_present(wall_now_ns, presented);
                 return CadenceOutcome {
                     presented: Some(presented),
                     dropped: Vec::new(),
@@ -1883,6 +1943,30 @@ impl ReleaseCadence {
             }
             None => self.last_known_n.max(1), // bridge with the latch; never invent (0 -> 1)
         }
+    }
+
+    /// camera-box #1003 — the phase-continuity relock SELECTION index into `queue` (arrival
+    /// order, OLDEST first): the frame whose capture stamp is NEAREST the anchor-implied target
+    /// `wall_now_ns − relock_anchor_age_ns(phase_anchor_ns, reserve_ms)`.
+    ///
+    /// This is a thin adapter over the Tier-0-tested crate-root authority — it re-implements
+    /// NOTHING. [`crate::genlock_backlog::relock_anchor_age_ns`] floors the tracked anchor at the
+    /// configured latency (unset ⇒ the configured latency, the cold-ACQUIRE fallback), and
+    /// [`crate::genlock_backlog::relock_select_nearest`] does the nearest-neighbour scan (ties
+    /// toward the OLDER frame). The C `genlock_relock_select_nearest` (obs-source.c) mirrors the
+    /// same authority in lock-step, and the two are held byte-identical by the executable parity
+    /// gate `tests/genlock_relock_selection_parity.rs` — so this harness joins NO new selection
+    /// surface, it just calls the one already covered.
+    fn relock_select(
+        &self,
+        queue: &std::collections::VecDeque<u64>,
+        wall_now_ns: u64,
+        reserve_ms: u32,
+    ) -> usize {
+        let anchor_age =
+            crate::genlock_backlog::relock_anchor_age_ns(self.phase_anchor_ns, reserve_ms);
+        let queue_ts: Vec<u64> = queue.iter().copied().collect();
+        crate::genlock_backlog::relock_select_nearest(&queue_ts, wall_now_ns, anchor_age)
     }
 }
 
@@ -2409,6 +2493,166 @@ mod tests {
             "#741 B2: a backlog-storm relock is a queue-depth event, NOT a rate change — it must \
              PRESERVE the confirmed N (2); clearing it re-crawls on the next inconclusive tick and \
              re-triggers the relock (the self-sustaining crawl the fix removes)"
+        );
+    }
+
+    /// #1003 (issue 1037) RED→GREEN — a BACKLOG relock INHERITS the tracked phase anchor
+    /// instead of jumping to the newest due frame.
+    ///
+    /// This is the demonstrative lock for the whole ticket: the pre-1037 harness presented the
+    /// NEWEST due frame at a backlog relock (the live edge), re-minting the release phase on every
+    /// lock episode — the instant-sampled defect #1003 removes. With a deep phase anchor tracked
+    /// (a ~900 ms conveyor, floored above the shallow 3 ms configured latency), the relock must
+    /// present the frame NEAREST `wall_now − anchor` — well BEHIND the live edge — keeping the
+    /// deep delay-line depth, and must PRESERVE the anchor (a relock corrects DEPTH, never phase).
+    ///
+    /// The pinned indices were OBSERVED from a default-feature replica that imports the real
+    /// Tier-0 authority (`relock_select_nearest` / `relock_anchor_age_ns`), not guessed. Trace:
+    /// interval 33.333 ms, anchor 900 ms ≈ 27 intervals; target = `wall − 900 ms` ≈ frame 12.15,
+    /// so the nearest stamp is index 12 (`|12−12.15| < |13−12.15|`). Newest-due would be index 39.
+    #[test]
+    fn backlog_relock_inherits_the_phase_anchor_not_newest_due_1037() {
+        use std::collections::VecDeque;
+        const I: u64 = 33_333_333;
+        let base = 1_000_000_000_000u64;
+        let mut cadence = ReleaseCadence::new();
+        cadence.locked_next_boundary_ns = Some(base); // past ACQUIRE
+        cadence.last_known_n = 1; // 1:1 source, small backlog qdepth
+        cadence.phase_anchor_ns = 900_000_000; // a deep ~900 ms conveyor, tracked from steady
+        let n = 40u64;
+        let mut queue: VecDeque<u64> = (0..n).map(|i| base + i * I).collect();
+        let wall_now = base + (n - 1) * I + 5_000_000; // every queued frame is due
+
+        // The newest-due rule (pre-1037) WOULD have presented the live edge.
+        let deadline = genlock_present_ts_reserve(wall_now, 3);
+        let newest_due_idx = queue.iter().take_while(|&&ts| ts <= deadline).count() - 1;
+        assert_eq!(
+            newest_due_idx, 39,
+            "setup: newest-due is the live edge (index 39)"
+        );
+
+        let out = cadence.tick(wall_now, 3, I, &mut queue);
+
+        assert!(
+            out.relocked,
+            "#1037: the deep backlog must hit the relock branch"
+        );
+        assert_eq!(
+            out.presented,
+            Some(base + 12 * I),
+            "#1037: the relock must present the frame NEAREST the 900 ms phase anchor (index 12), \
+             NOT the newest due one (index 39 — the live edge). Presenting newest-due re-mints the \
+             release phase every episode, the #1003 defect."
+        );
+        assert_eq!(
+            out.dropped.len(),
+            12,
+            "#1037: exactly the 12 frames OLDER than the selected one are shed (DEPTH correction \
+             intact); the ~27-frame conveyor behind index 12 is KEPT"
+        );
+        assert_eq!(
+            queue.len(),
+            27,
+            "#1037: the ~900 ms/33 ms ≈ 27-frame delay line is preserved"
+        );
+        assert_eq!(
+            cadence.phase_anchor_ns, 900_000_000,
+            "#1037: a relock corrects DEPTH, never PHASE — the anchor must be PRESERVED, never \
+             re-minted from the frame the relock happened to select (the C anchor_update gate: \
+             relocks never write the anchor)"
+        );
+    }
+
+    /// #1003 (issue 1037) — the phase anchor is UPDATED on STEADY and GAP-RESYNC presents (the
+    /// conveyor), and is NEVER written by an ACQUIRE (a lock inherits phase, it does not mint it).
+    /// Values observed from the same authority-importing replica.
+    #[test]
+    fn steady_and_gap_presents_update_the_phase_anchor_acquire_does_not_1037() {
+        use std::collections::VecDeque;
+        const I: u64 = 33_333_333;
+        let base = 1_000_000_000_000u64;
+        let mut cadence = ReleaseCadence::new();
+
+        // ACQUIRE presents the head; the anchor stays UNSET (acquire never updates it).
+        let mut q: VecDeque<u64> = [base].into_iter().collect();
+        let a = cadence.tick(base + 10_000_000, 3, I, &mut q);
+        assert_eq!(a.presented, Some(base), "acquire presents the head");
+        assert_eq!(
+            cadence.phase_anchor_ns, 0,
+            "#1037: ACQUIRE must NOT write the phase anchor — a cold lock inherits the \
+             configured-latency fallback, it does not define a phase"
+        );
+
+        // STEADY present: anchor = wall_now − presented stamp (the conveyor's on-air age).
+        q.push_back(base + I);
+        let s = cadence.tick(base + I + 10_000_000, 3, I, &mut q);
+        assert_eq!(
+            s.presented,
+            Some(base + I),
+            "steady presents the matured frame"
+        );
+        assert_eq!(
+            cadence.phase_anchor_ns, 10_000_000,
+            "#1037: a STEADY present updates the anchor to wall_now − presented (10 ms here)"
+        );
+
+        // GAP RESYNC (oldest queued frame is beyond the boundary and aged past the reserve):
+        // re-derives the anchor from the frame it puts on air, and clears STICKY-N.
+        q.push_back(base + 5 * I);
+        let g = cadence.tick(base + 5 * I + 15_000_000, 3, I, &mut q);
+        assert_eq!(
+            g.presented,
+            Some(base + 5 * I),
+            "gap resync presents the far-ahead frame"
+        );
+        assert_eq!(
+            cadence.phase_anchor_ns, 15_000_000,
+            "#1037: a GAP RESYNC RE-DERIVES the anchor from the presented frame (distinct 15 ms \
+             value proves it is recomputed, not carried forward from the pre-gap 10 ms)"
+        );
+        assert_eq!(
+            cadence.last_known_n, 0,
+            "#726: a gap also clears the STICKY-N latch"
+        );
+    }
+
+    /// #1003 (issue 1037) — the BACKLOG stale-anchor self-heal: a relock that would shed NOTHING
+    /// (selected index 0) with an anchor set is proof the anchor is stale (it cannot describe a
+    /// queue THIS deep). The branch clears the anchor and re-selects against the configured
+    /// latency, so one relock still sheds the overshoot instead of re-firing every tick forever.
+    #[test]
+    fn backlog_stale_anchor_self_heals_to_configured_latency_1037() {
+        use std::collections::VecDeque;
+        const I: u64 = 33_333_333;
+        let base = 1_000_000_000_000u64;
+        let mut cadence = ReleaseCadence::new();
+        cadence.locked_next_boundary_ns = Some(base);
+        cadence.last_known_n = 1;
+        // An absurd 10 s anchor points BEFORE the whole queue → nearest = index 0 → sheds nothing.
+        cadence.phase_anchor_ns = 10_000_000_000;
+        let n = 40u64;
+        let mut queue: VecDeque<u64> = (0..n).map(|i| base + i * I).collect();
+        let wall_now = base + (n - 1) * I + 5_000_000;
+
+        let out = cadence.tick(wall_now, 3, I, &mut queue);
+
+        assert!(out.relocked, "#1037: still a backlog relock");
+        assert_eq!(
+            out.presented,
+            Some(base + 39 * I),
+            "#1037: after clearing the stale anchor, the re-selection targets the configured 3 ms \
+             latency → the newest due frame (index 39), so the overshoot IS shed this tick"
+        );
+        assert_eq!(
+            out.dropped.len(),
+            39,
+            "#1037: the whole overshoot is shed in one relock"
+        );
+        assert_eq!(
+            cadence.phase_anchor_ns, 0,
+            "#1037: the stale-anchor self-heal CLEARS the anchor (mirror of the C \
+             `if (sel_1003 == 0 && genlock_phase_anchor_ns != 0) { genlock_phase_anchor_ns = 0; ...}`) \
+             so it rebuilds from the next STEADY present rather than re-firing this branch every tick"
         );
     }
 
