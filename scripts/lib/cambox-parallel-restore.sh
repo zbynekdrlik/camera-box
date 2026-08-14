@@ -58,11 +58,17 @@ cambox_parallel_wait_and_report() {
   local _i=0
   local _rc=0
   local _pid
+  # #860: reset the failed-label ledger at the START of every wait (never at the end -- the caller
+  # reads it AFTER this returns to surface a cam2/painter failure loudly, see
+  # cambox_parallel_surface_painter_failure below). Additive to the existing per-box WARNING #712 +
+  # non-zero return; never a signature change.
+  CAMBOX_PARALLEL_FAILED_LABELS=()
   for _pid in "${CAMBOX_PARALLEL_PIDS[@]}"; do
     if wait "$_pid"; then
       echo "    [cleanup] ${CAMBOX_PARALLEL_LABELS[$_i]} restore ok"
     else
       echo "    WARNING #712: ${CAMBOX_PARALLEL_LABELS[$_i]} restore failed/timed out in parallel cleanup — check it manually" >&2
+      CAMBOX_PARALLEL_FAILED_LABELS+=("${CAMBOX_PARALLEL_LABELS[$_i]}")
       _rc=1
     fi
     _i=$((_i + 1))
@@ -70,4 +76,27 @@ cambox_parallel_wait_and_report() {
   CAMBOX_PARALLEL_PIDS=()
   CAMBOX_PARALLEL_LABELS=()
   return "$_rc"
+}
+
+# cambox_parallel_surface_painter_failure -> surface the MOST RECENT cambox_parallel_wait_and_report's
+# failed labels (CAMBOX_PARALLEL_FAILED_LABELS) as GitHub Actions annotations, so a restore failure
+# is VISIBLE in the run summary instead of buried in stderr (#860). The cam2/painter box -- a dead
+# painter leaves cam2's monitor BLACK and silently poisons the next gate run's optical hop (the
+# 2026-08-14 incident) -- escalates to `::error::`; any OTHER box stays a milder `::warning::`. NEVER
+# `exit`s (cleanup()'s trap must always run to completion, the #649/#675/#712 warn-only discipline);
+# the standing optical-chain watchdog (#860) owns the throttled Discord paging.
+cambox_parallel_surface_painter_failure() {
+  local _lbl
+  for _lbl in "${CAMBOX_PARALLEL_FAILED_LABELS[@]:-}"; do
+    [ -n "$_lbl" ] || continue
+    case "$_lbl" in
+      *cam2/painter*)
+        echo "::error title=cam2 painter restore FAILED (issue 860 / WARNING 712)::${_lbl} restore failed/timed out in cleanup — cam2's monitor may be left BLACK, silently poisoning the next gate run's cam2->cam1 optical hop. Restore with scripts/rig-mode.sh test; the standing optical-chain watchdog also pages this." >&2
+        ;;
+      *)
+        echo "::warning title=cambox restore FAILED (WARNING 712)::${_lbl} restore failed/timed out in cleanup — check it manually." >&2
+        ;;
+    esac
+  done
+  return 0
 }

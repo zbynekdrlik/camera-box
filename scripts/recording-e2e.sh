@@ -112,6 +112,12 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # killed run self-heals there, with no dev1 involvement.
 # shellcheck source=scripts/lib/cam2-painter-deadman.sh
 . "$HERE/lib/cam2-painter-deadman.sh"
+# #860: the SHARED pure optical-chain decision core + its [0/8] preflight fail-fast (the #675
+# sourced-lib pattern -- the preflight is invoked with ONE line below, no anchored line edited).
+# shellcheck source=scripts/lib/optical-chain-health.sh
+. "$HERE/lib/optical-chain-health.sh"
+# shellcheck source=scripts/lib/optical-chain-preflight.sh
+. "$HERE/lib/optical-chain-preflight.sh"
 # #878 (same family as #844/#869/#872): the PURE decision for the STARTUP self-heal below -- a
 # dead harness only ever restores rig state inside cleanup() (the bash EXIT trap), which SIGKILL
 # never reaches, so the leftover camera-box.service/painter/burn state strands until a human
@@ -486,6 +492,16 @@ for hp in "$CAMERA_NAME=$CAM1_IP" "cam2(painter)=$PAINTER_IP" "strih=$STRIH" "st
   if ping -c1 -W2 "$_ip" >/dev/null 2>&1; then echo "    ok: $_name ($_ip)"; else
     echo "ERROR: $_name ($_ip) UNREACHABLE from dev1 — fix route/host, then re-run." >&2; exit 1; fi
 done
+
+# #860: optical-injection-leg fail-fast. A STANDING cam2 painter (rig-mode.sh test's
+# /run/rig-painter.pid, or the permanent cam2-painter.service) that a previous run's cleanup left
+# DEAD poisons this run's cam2->cam1 hop (the 2026-08-14 incident: painter dead, next gate wasted a
+# ~40-min recording before its verdict reported the optical hop UNAVAILABLE). Abort LOUD now.
+# Narrow abort policy (painter EXPECTED-but-DEAD only, no OBS dependency) so a CI gate is never
+# false-aborted; a strih-BLACK read is a WARN (the standing optical-chain watchdog owns paging).
+# Plain statement (never $()/pipeline) so its `exit 1` propagates to the harness.
+echo "[0/8] optical injection leg preflight — a standing dead cam2 painter must fail-fast, not waste a run (#860)"
+optical_chain_preflight_assert "$PAINTER_IP" root "$CAM_PW" "$STRIH" "${OBS_PASSWORD:-}" "$HERE"
 
 # #977/#958: obs64/AHK Windows-session-visibility gate. A session-0 obs64 (launched via
 # ssh+Invoke-CimMethod) answers OBS WebSocket, serves NDI, and writes a normal log -- so it sails
@@ -1194,6 +1210,11 @@ $(cam2_painter_deadman_disarm_cmds)"
   # device-restore phase's wall-clock is now bounded by the SLOWEST single box, not the sum of
   # up to 6 sequential ssh round trips.
   cambox_parallel_wait_and_report
+  # #860: surface a cam2/painter (or any box) restore failure LOUDLY as a GitHub annotation instead
+  # of leaving it a buried stderr WARNING #712 — a chain of failed cleanups left the painter dead +
+  # silently poisoned consecutive gate runs (2026-08-14). Reads CAMBOX_PARALLEL_FAILED_LABELS the
+  # wait above populated; never exits (set +e region), never changes always-runs semantics.
+  cambox_parallel_surface_painter_failure
   # The cam devices are now freed regardless of what the OBS restore does. #328: bound every OBS
   # call by `timeout` so a hung obs-websocket op (#328) can't block the trap even if it runs.
   # #649: StopRecord itself already ran, FIRST, at the top of this function (harness-started boxes
