@@ -548,43 +548,61 @@ def clear_measurement_burns(obs: Obs) -> None:
 
     Enumerates from OBS reality (GetInputList), clears genlock_burn=false only on the inputs that
     currently have it ON (SetInputSettings overlay-merge -- never clobber the source's other
-    settings), read-back verifies each, and FAILS LOUD (SystemExit) if any stays ON. A measurement
-    burn is never legitimate operator state (unlike the #785 bindings/transforms this module
-    protects), so forcing it OFF here never fights the operator. Called on the --bootstrap
-    (fresh-instance) path only, so a plain reseed from dev1 never nukes a burn a gate run
-    deliberately set mid-measurement."""
-    resp = obs.req("GetInputList", ignore_err=True)
-    if not isinstance(resp, dict) or "inputs" not in resp:
-        # The enumeration itself FAILED (WS error / malformed reply). A live imag OBS always has
-        # ndi inputs, so a missing `inputs` means "could not enumerate", never "no burns" (#1011
-        # fail-closed lesson). But at OBS START we must NOT abort -- imag-obs-start.sh runs this
-        # under `set -euo pipefail`, so a SystemExit here would take OBS DOWN on the live
-        # projection box on a transient WS hiccup, which is worse than the burn. Warn LOUD and
-        # return; the next gate run's [0/8] exhaustive sweep-off is the fail-closed backstop.
-        print("burns: WARNING #866/#1011 -- GetInputList FAILED at start; could NOT verify/clear "
-              "measurement burns (a leaked burn may still be rendering). Investigate OBS WS.")
+    settings) and read-back verifies each. A measurement burn is never legitimate operator state
+    (unlike the #785 bindings/transforms this module protects), so forcing it OFF here never fights
+    the operator. Called on the --bootstrap (fresh-instance) path only, so a plain reseed from dev1
+    never nukes a burn a gate run deliberately set mid-measurement.
+
+    This is a best-effort START-TIME sweep and NEVER aborts: imag-obs-start.sh runs it under
+    `set -euo pipefail`, so a SystemExit / an uncaught WS exception (a #328 timeout raise, a closed
+    socket) here would take OBS DOWN on the live projection box -- and, under systemd
+    Restart=on-failure, LOOP it while the same transient keeps failing -- which is worse than a
+    visible+logged burn. So every failure mode (enumeration failure, a mid-sweep WS error, OR a
+    clear that will not land) is warned LOUD (captured to /tmp/imag-obs-start.log) and returns,
+    leaving OBS up. The next gate run's [0/8] exhaustive sweep-off is the AUTHORITATIVE fail-closed
+    backstop that refuses to certify a leak; this start-time pass just closes the common
+    restart-resurrection window without ever being able to break OBS startup."""
+    try:
+        resp = obs.req("GetInputList", ignore_err=True)
+        if not isinstance(resp, dict) or "inputs" not in resp:
+            # A live imag OBS always has ndi inputs, so a missing `inputs` means "could not
+            # enumerate", never "no burns" (#1011 fail-closed lesson) -- warn, never read as clean.
+            print("burns: WARNING #866/#1011 -- GetInputList FAILED at start; could NOT "
+                  "verify/clear measurement burns. The next gate's [0/8] sweep-off is the backstop.")
+            return
+        names = ndi_source_names(resp["inputs"])
+        cleared, still_on = [], []
+        for name in names:
+            # cur is None both for a read hiccup AND for the (common) case of an input that never
+            # carried a burn -- indistinguishable, so a None is correctly SKIPPED, never counted as
+            # a leak (counting it would false-warn on every ordinary non-burn ndi input). Only a
+            # read-back that is still True after the clear is a real still-on.
+            cur = (obs.req("GetInputSettings", {"inputName": name}, ignore_err=True)
+                   .get("inputSettings", {}).get(BURN_SETTING))
+            if cur is True:
+                obs.req("SetInputSettings", {
+                    "inputName": name,
+                    "inputSettings": {BURN_SETTING: False},
+                    "overlay": True,  # merge -- never clobber the source's other (forced) settings
+                }, ignore_err=True)
+                rb = (obs.req("GetInputSettings", {"inputName": name}, ignore_err=True)
+                      .get("inputSettings", {}).get(BURN_SETTING))
+                (cleared if rb in (False, None) else still_on).append(name)
+    except Exception as exc:  # noqa: BLE001 -- ANY WS error (a #328 timeout raise) must NOT crash
+        # the OBS start path; mirrors obs_burn_filter._all_ndi_inputs' try/except -> fail-safe.
+        print(f"burns: WARNING #866/#1011 -- OBS WS error during start-time burn clear ({exc!r}); "
+              f"could NOT fully verify/clear measurement burns. [0/8] sweep-off is the backstop.")
         return
-    names = ndi_source_names(resp["inputs"])
-    cleared, still_on = [], []
-    for name in names:
-        cur = (obs.req("GetInputSettings", {"inputName": name}, ignore_err=True)
-               .get("inputSettings", {}).get(BURN_SETTING))
-        if cur is True:
-            obs.req("SetInputSettings", {
-                "inputName": name,
-                "inputSettings": {BURN_SETTING: False},
-                "overlay": True,  # merge -- never clobber the source's other (forced) settings
-            }, ignore_err=True)
-            rb = (obs.req("GetInputSettings", {"inputName": name}, ignore_err=True)
-                  .get("inputSettings", {}).get(BURN_SETTING))
-            (cleared if rb in (False, None) else still_on).append(name)
     if cleared:
         print(f"burns: forced OFF at start on {len(cleared)} ndi input(s) (#866): {cleared}")
     else:
         print(f"burns: none ON at start ({len(names)} ndi input(s) scanned) (#866)")
     if still_on:
-        sys.exit(f"FAIL: genlock_burn STILL ON after clear on {still_on} (#866) -- a burn would "
-                 f"leak onto the live IMAG projection; investigate OBS WS SetInputSettings")
+        # A clear that did not land IS a real leak, but do NOT SystemExit (restart-loop hazard
+        # above) -- warn LOUD and leave OBS up; the [0/8] sweep-off is the authoritative backstop.
+        print(f"burns: WARNING #866/#1011 -- genlock_burn STILL ON after clear on {still_on} -- a "
+              f"burn may be rendering on the live IMAG projection; investigate OBS WS. The next "
+              f"gate run's [0/8] sweep-off is the authoritative backstop.")
 
 
 def main() -> None:

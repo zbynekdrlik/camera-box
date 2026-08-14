@@ -20,8 +20,6 @@ import importlib.util
 import pathlib
 import sys
 
-import pytest
-
 REPO = pathlib.Path(__file__).resolve().parents[2]
 
 
@@ -133,11 +131,53 @@ def test_set_input_settings_uses_overlay_merge_false():
     assert setcall["inputSettings"]["genlock_burn"] is False
 
 
-def test_fails_loud_when_a_clear_does_not_land():
+def test_stuck_clear_warns_loud_but_never_aborts_obs_start(capsys):
+    """A clear that does not land IS a real leak, but must NEVER SystemExit: imag-obs-start.sh runs
+    this under set -euo pipefail, so aborting would take OBS down / restart-loop the live projection
+    while the same stuck write keeps failing. Warn LOUD (the [0/8] sweep-off is the backstop),
+    attempt the write, and leave OBS up."""
     mod = _scenes_module()
     obs = FakeObs({"NDI CAM1": {"inputKind": "ndi_source", "genlock_burn": True}}, stuck=True)
-    with pytest.raises(SystemExit):
-        mod.clear_measurement_burns(obs)
+    mod.clear_measurement_burns(obs)  # must NOT raise
+    # it DID attempt the clear
+    assert [p["inputName"] for r, p in obs.calls if r == "SetInputSettings"] == ["NDI CAM1"]
+    # and warned loud about the input that stayed on
+    out = capsys.readouterr().out
+    assert "STILL ON" in out and "NDI CAM1" in out
+
+
+def test_ws_exception_during_enumeration_warns_but_never_aborts_obs_start(capsys):
+    """The #328 timeout-raise class: GetInputList (or any WS call) RAISES rather than returning an
+    error result. This must be caught and warned, never propagate out to crash imag-obs-start.sh
+    under set -euo pipefail (mirrors obs_burn_filter._all_ndi_inputs' try/except)."""
+    mod = _scenes_module()
+
+    class RaisingObs(FakeObs):
+        def req(self, rtype, payload=None, ignore_err=False):
+            if rtype == "GetInputList":
+                raise TimeoutError("obs-websocket recv timed out (#328 class)")
+            return super().req(rtype, payload, ignore_err)
+
+    obs = RaisingObs({"NDI CAM1": {"inputKind": "ndi_source", "genlock_burn": True}})
+    mod.clear_measurement_burns(obs)  # must NOT raise
+    assert [r for r, _ in obs.calls if r == "SetInputSettings"] == []
+    assert "WS error" in capsys.readouterr().out
+
+
+def test_ws_exception_MID_sweep_warns_but_never_aborts_obs_start(capsys):
+    """A WS error raised AFTER a successful GetInputList (e.g. during a per-input SetInputSettings)
+    must also be caught — the whole sweep body is guarded, so no failure mode can crash OBS start."""
+    mod = _scenes_module()
+
+    class RaisingSetObs(FakeObs):
+        def req(self, rtype, payload=None, ignore_err=False):
+            if rtype == "SetInputSettings":
+                raise ConnectionResetError("socket closed mid-sweep")
+            return super().req(rtype, payload, ignore_err)
+
+    obs = RaisingSetObs({"NDI CAM1": {"inputKind": "ndi_source", "genlock_burn": True}})
+    mod.clear_measurement_burns(obs)  # must NOT raise
+    assert "WS error" in capsys.readouterr().out
 
 
 def test_enumeration_failure_warns_but_never_aborts_obs_start():
