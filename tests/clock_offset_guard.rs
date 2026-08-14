@@ -452,7 +452,6 @@ fn dantesync_offset_verdict_fails_closed_on_a_malformed_freshness_window() {
     assert_eq!(out.trim(), "stale");
 }
 
-
 // --- #837: SPREAD/STABILITY check on the JOURNAL-fallback path (the twin of #836's HTTP path) ---
 // dantesync_offset_verdict graded the MEDIAN alone (ok|drift|stale|absent) -- a scattered-but-in-
 // bound-median journal passed silently, the exact gap #836 closed for the HTTP path's
@@ -528,7 +527,10 @@ fn dantesync_offset_verdict_drift_unstable_when_both_median_and_spread_fail_837(
 #[test]
 fn dantesync_offset_verdict_plain_drift_when_median_out_but_spread_in_bound_837() {
     // Median out of bound, spread tight -> still just "drift", NOT drift_unstable.
-    assert_eq!(offset_verdict_stab(DS_FRESH_DRIFT_BUT_TIGHT, "2000"), "drift");
+    assert_eq!(
+        offset_verdict_stab(DS_FRESH_DRIFT_BUT_TIGHT, "2000"),
+        "drift"
+    );
 }
 
 #[test]
@@ -590,13 +592,19 @@ fn offset_verdict_check_returns_rc2_and_reports_spread_on_unstable_837() {
     // and print the spread value so a red says WHICH kind of bad it is (#836 point 4).
     let out = run_sourced(
         &format!(
-            "TEXT='{}'\noffset_verdict_check node \"$TEXT\" 300 2000 2000; echo \"rc=$?\"",
+            "TEXT='{}'\nrc=0; offset_verdict_check node \"$TEXT\" 300 2000 2000 || rc=$?; echo \"rc=$rc\"",
             DS_FRESH_SCATTERED_IN_BOUND_MEDIAN.replace('\'', "'\\''")
         ),
         &[],
     );
-    assert!(out.contains("rc=2"), "unstable must be rc 2 (hard fail): {out}");
-    assert!(out.contains("UNSTABLE"), "must print the UNSTABLE verdict: {out}");
+    assert!(
+        out.contains("rc=2"),
+        "unstable must be rc 2 (hard fail): {out}"
+    );
+    assert!(
+        out.contains("UNSTABLE"),
+        "must print the UNSTABLE verdict: {out}"
+    );
     assert!(out.contains("2540"), "must report the spread value: {out}");
 }
 

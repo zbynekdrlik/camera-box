@@ -27,10 +27,11 @@
 # (the offset_us_from_pipe_json parser here is the shared, unit-tested comparator for that path).
 #
 # Usage:
-#   scripts/clock-offset-guard.sh [--bound-us N] [--targets "cam1=10.77.9.61 ..."]
+#   scripts/clock-offset-guard.sh [--bound-us N] [--stability-us N] [--targets "cam1=10.77.9.61 ..."]
 #   scripts/clock-offset-guard.sh --help
 #
-# Exit codes: 0 = all reachable nodes within bound, 20 = DRIFT (a node exceeds the bound),
+# Exit codes: 0 = all reachable nodes within bound + stable, 20 = DRIFT or UNSTABLE (a node
+# exceeds the bound or its samples scatter past --stability-us),
 # 11 = at least one node UNREACHABLE / offset UNKNOWN (status incomplete — NOT clean),
 # 1 = usage/IO error (e.g. no targets configured).
 
@@ -52,6 +53,12 @@ set -euo pipefail
 #     offset, so the guard does NOT false-positive on the healthy cluster while still catching the
 #     tens-of-ms unsynced failure mode. Documented in SETUP.md alongside the baseline.
 DEFAULT_BOUND_US="${CLOCK_GUARD_BOUND_US:-2000}"
+
+# #837: max tolerated SPREAD (max-min) of the FRESH journal offset samples, in us. The
+# journal-fallback twin of dantesync-gate.sh's GATE_STABILITY_US -- same 2000us default and
+# same DANTESYNC_STABILITY_US env knob, so one var tunes the stability bound across every
+# caller of dantesync_offset_verdict. A scattered-but-in-bound-median node grades UNSTABLE.
+DEFAULT_STABILITY_US="${DANTESYNC_STABILITY_US:-2000}"
 
 # CLOCK_GUARD_TARGETS — space-separated "name=ip" pairs of the LINUX nodes to query over SSH.
 # Defaults to the four cameras (targets.md / CLAUDE.md IP table). strih + stream are Windows and
@@ -319,30 +326,23 @@ freshest_offset_us() {
   printf '%s' "$off_us"
 }
 
-# _fresh_offset_median_us JOURNAL FRESHNESS_S [K] -> the lower MEDIAN of the individually-FRESH
-# samples among the K (default 5) most recent "[NTP] offset:" lines; "" when none is fresh and
-# parseable. #767-era measurement-noise rejection (live, 2026-07-15): under E2E network load a
-# SINGLE [NTP] offset sample spikes to ~2-3ms (cam5 -2787us, cam7 -2316us) while PTP stays
-# NANO-locked and the surrounding samples read tens of us -- the CLOCK is fine, the one
-# measurement is noisy, and a verdict graded on the single freshest sample flakes exactly when
-# an E2E run loads the LAN. The median across the recent fresh samples rejects a lone spike
-# while a SUSTAINED out-of-bound offset (the real cam5/6 5.28s class) still lands every sample
-# out of bound -> median out of bound -> drift. Freshness is checked PER SAMPLE against the
-# newest journal line, same knob + same fail-closed non-numeric handling as freshest_offset_us.
-# (freshest_offset_us itself is left single-sample: its #326 painter-gate caller compares two
-# boxes' raw values relatively and owns its own tolerance.)
-_fresh_offset_median_us() {
+# _fresh_offset_samples_us JOURNAL FRESHNESS_S [K] -> the signed us VALUES of the individually-FRESH
+# "[NTP] offset:" samples among the K (default 5) most recent such lines, one per line; NOTHING when
+# none is fresh and parseable. This is the single source that BOTH the median (_fresh_offset_median_us)
+# and the spread (_fresh_offset_spread_us, #837) grade, so the "[NTP] offset:" parse + per-sample
+# freshness lives in ONE place (the #595 "three copies drift apart" discipline -- the same reason
+# _freshest_ntp_offset_line exists). Freshness is checked PER SAMPLE against the newest journal line;
+# a non-numeric FRESHNESS_S yields NOTHING (fail-closed, the #595 numeric-guard gotcha: an unvalidated
+# value in the `-le` arithmetic below would throw "integer expression expected" and could silently
+# defeat the staleness check). JOURNAL must be gathered with `-o short-iso`.
+_fresh_offset_samples_us() {
   local journal="$1" fresh="$2" k="${3:-5}"
   local iso_re='[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[+-][0-9]{2}:[0-9]{2}'
   local now_iso now_e lines line off_iso off_e off_us
-  local -a vals=()
-  if ! printf '%s' "$fresh" | grep -qE '^[0-9]+$'; then
-    printf ''
-    return 0
-  fi
+  printf '%s' "$fresh" | grep -qE '^[0-9]+$' || return 0
   now_iso="$(printf '%s\n' "$journal" | grep -oE "^$iso_re" | tail -1 || true)"
   now_e="$(_short_iso_epoch "$now_iso")"
-  [ -n "$now_e" ] || { printf ''; return 0; }
+  [ -n "$now_e" ] || return 0
   lines="$(printf '%s\n' "$journal" | grep -E '\[NTP\] offset:' | tail -n "$k" || true)"
   while IFS= read -r line; do
     [ -n "$line" ] || continue
@@ -352,13 +352,40 @@ _fresh_offset_median_us() {
     [ "$((now_e - off_e))" -le "$fresh" ] || continue
     off_us="$(printf '%s' "$line" | sed -n 's/.*\[NTP\] offset:+\{0,1\}\(-\{0,1\}[0-9][0-9]*\)us.*/\1/p' | head -1 || true)"
     printf '%s' "$off_us" | grep -qE '^-?[0-9]+$' || continue
-    vals+=("$off_us")
+    printf '%s\n' "$off_us"
   done <<< "$lines"
-  [ "${#vals[@]}" -gt 0 ] || { printf ''; return 0; }
-  printf '%s\n' "${vals[@]}" | sort -n | awk -v n="${#vals[@]}" 'NR == int((n+1)/2) { print; exit }'
+  # A conditionally-skipped `printf` as the loop's last statement can leave a non-zero exit under
+  # set -e when the final iteration was `continue`d -- mirror slew_excluded_survivors_us's own
+  # explicit terminator so command-substitution callers never abort on it.
+  return 0
 }
 
-# dantesync_offset_verdict JOURNAL FRESHNESS_S BOUND_US -> "ok" | "drift" | "stale" | "absent".
+# _fresh_offset_median_us JOURNAL FRESHNESS_S [K] -> the lower MEDIAN of the individually-FRESH
+# samples among the K (default 5) most recent "[NTP] offset:" lines; "" when none is fresh and
+# parseable. #767-era measurement-noise rejection (live, 2026-07-15): under E2E network load a
+# SINGLE [NTP] offset sample spikes to ~2-3ms (cam5 -2787us, cam7 -2316us) while PTP stays
+# NANO-locked and the surrounding samples read tens of us -- the CLOCK is fine, the one
+# measurement is noisy, and a verdict graded on the single freshest sample flakes exactly when
+# an E2E run loads the LAN. The median across the recent fresh samples rejects a lone spike
+# while a SUSTAINED out-of-bound offset (the real cam5/6 5.28s class) still lands every sample
+# out of bound -> median out of bound -> drift. Now a thin wrapper over _fresh_offset_samples_us
+# (which owns the parse + freshness) + median_of_ints (the #836 estimator the HTTP path shares) --
+# same result as before, one parse. (freshest_offset_us is left single-sample: its #326
+# painter-gate caller compares two boxes' raw values relatively and owns its own tolerance.)
+_fresh_offset_median_us() {
+  median_of_ints "$(_fresh_offset_samples_us "$1" "$2" "${3:-5}")"
+}
+
+# _fresh_offset_spread_us JOURNAL FRESHNESS_S [K] -> the SPREAD (max-min) of the SAME individually-
+# FRESH sample set _fresh_offset_median_us grades, via the #836 spread_of_ints; "" for fewer than 2
+# fresh samples (scatter is undefined from a single point). The journal-path sibling of
+# sampled_offset_report's spread column (#837).
+_fresh_offset_spread_us() {
+  spread_of_ints "$(_fresh_offset_samples_us "$1" "$2" "${3:-5}")"
+}
+
+# dantesync_offset_verdict JOURNAL FRESHNESS_S BOUND_US [STABILITY_US] ->
+#   "ok" | "drift" | "unstable" | "drift_unstable" | "stale" | "absent".
 # Supersedes the age-blind dantesync_offset_ok (which read the LAST "[NTP] offset:" line via tail -1
 # regardless of age -- on cam5/6 that graded on a STALE boot-STEP line, the #550 bug). It finds the
 # FRESHEST "[NTP] offset:" line (via freshest_offset_us, above) and only then grades |offset|
@@ -369,11 +396,23 @@ _fresh_offset_median_us() {
 #             prove a FRESH in-bound reading -- never a silent pass on a possibly-stale value).
 #   drift  -- a FRESH offset line whose |offset| exceeds BOUND_US (a real desync -- the cam5/6 5.28s
 #             case; a bare "[NTP] offset:-5280959us" fallback line lands here by magnitude).
-#   ok     -- a FRESH offset line within BOUND_US.
+#   ok     -- a FRESH in-bound median AND (STABILITY_US omitted, fewer than 2 fresh samples, or
+#             spread in-bound).
+# STABILITY_US (#837, the journal-fallback twin of #836's HTTP spread check): OPTIONAL 4th arg.
+# OMITTED/empty keeps the pre-#837 median-only contract byte-for-byte (every 3-arg caller
+# unchanged). Present -> the SPREAD (max-min, spread_of_ints) of the SAME K=11 fresh sample set the
+# median grades is checked against STABILITY_US, adding two verdicts (same words the HTTP path's
+# sampled_offset_verdict uses):
+#   unstable       -- median in-bound but spread exceeds STABILITY_US (>=2 samples) -- scattered/
+#                     unusable, a NEW failure the median-only path could never detect.
+#   drift_unstable -- both the median AND the spread fail.
+# A NON-numeric STABILITY_US fails closed to unstable (the #595 numeric-guard gotcha: an unvalidated
+# value in `-gt` would throw and silently defeat the check -- a broken knob must fail loud). The
+# location bound (BOUND_US) is never relaxed; the spread check only ever ADDS a failure.
 # JOURNAL must be gathered with `-o short-iso` (ISO-timestamped lines).
 dantesync_offset_verdict() {
-  local journal="$1" fresh="$2" bound="$3"
-  local off_line off_us mag
+  local journal="$1" fresh="$2" bound="$3" stability="${4:-}"
+  local off_line off_us mag spread drift=0 unstable=0
   off_line="$(_freshest_ntp_offset_line "$journal")"
   if [ -z "$off_line" ]; then
     printf 'absent\n'
@@ -391,10 +430,27 @@ dantesync_offset_verdict() {
     return 0
   fi
   mag="$(abs_int "$off_us")"
-  if [ "$mag" -le "$bound" ]; then
-    printf 'ok\n'
-  else
+  [ "$mag" -gt "$bound" ] && drift=1
+  # #837: spread/stability over the SAME K=11 fresh set (mirrors the HTTP sampled_offset_verdict).
+  # Only when the caller passes STABILITY_US; omitted/empty keeps the median-only contract. A
+  # present-but-non-numeric bound fails closed to unstable (never a silent pass on a broken knob,
+  # the #595 numeric-guard gotcha). >=2 samples required, since spread_of_ints returns "" for one.
+  if [ -n "$stability" ]; then
+    if ! printf '%s' "$stability" | grep -qE '^[0-9]+$'; then
+      unstable=1
+    else
+      spread="$(_fresh_offset_spread_us "$journal" "$fresh" 11)"
+      [ -n "$spread" ] && [ "$spread" -gt "$stability" ] && unstable=1
+    fi
+  fi
+  if [ "$drift" = 1 ] && [ "$unstable" = 1 ]; then
+    printf 'drift_unstable\n'
+  elif [ "$drift" = 1 ]; then
     printf 'drift\n'
+  elif [ "$unstable" = 1 ]; then
+    printf 'unstable\n'
+  else
+    printf 'ok\n'
   fi
 }
 
@@ -1349,22 +1405,38 @@ client_chase_bound_us() {
   fi
 }
 
-# offset_verdict_check LABEL JOURNAL FRESHNESS_S BOUND_US -> prints a status line; returns 0 OK /
+# offset_verdict_check LABEL JOURNAL FRESHNESS_S BOUND_US [STABILITY_US] -> prints a status line; returns 0 OK /
 # 2 DRIFT / 3 UNKNOWN. The freshness-aware sibling of offset_check (#550/#591/#595/#607): it grades
 # dantesync_offset_verdict's "ok"/"drift"/"stale"/"absent" verdict instead of pairing the age-blind
 # offset_us_from_journal (tail -1) with offset_check the way this CLI's own main() loop did before
 # #607 -- dantesync-gate.sh (#7) already made this same switch for its own Linux-node loop. A
 # "stale" or "absent" verdict maps to UNKNOWN (3), NEVER a silent OK/DRIFT — a reading we could not
 # prove fresh must never be graded at all (test-strictness: no silent pass on a possibly-stale
-# value). JOURNAL must be gathered with `-o short-iso` (see query_node_journal).
+# value). STABILITY_US (#837, optional) is passed straight through to dantesync_offset_verdict --
+# when present, a scattered-but-in-bound-median node grades "unstable"/"drift_unstable", both
+# returning 2 (the same hard-fail class as drift). The spread value is reported on the line so a
+# red says WHICH kind of bad it is (#836 point 4). JOURNAL must be gathered with `-o short-iso`
+# (see query_node_journal).
 offset_verdict_check() {
-  local label="$1" journal="$2" fresh="$3" bound="$4"
-  case "$(dantesync_offset_verdict "$journal" "$fresh" "$bound")" in
+  local label="$1" journal="$2" fresh="$3" bound="$4" stability="${5:-}"
+  local spread
+  spread="$(_fresh_offset_spread_us "$journal" "$fresh" 11)"
+  case "$(dantesync_offset_verdict "$journal" "$fresh" "$bound" "$stability")" in
     ok)
-      printf '  %-14s OK       (fresh offset within %s us bound)\n' "$label" "$bound"
+      printf '  %-14s OK       (fresh offset within %s us bound; spread %s us <= %s us stability)\n' \
+        "$label" "$bound" "${spread:-NA}" "${stability:-NA}"
       return 0 ;;
     drift)
-      printf '  %-14s DRIFT    (fresh offset exceeds %s us bound)\n' "$label" "$bound"
+      printf '  %-14s DRIFT    (fresh offset exceeds %s us bound; spread %s us)\n' \
+        "$label" "$bound" "${spread:-NA}"
+      return 2 ;;
+    unstable)
+      printf '  %-14s UNSTABLE (fresh offset within %s us bound but spread %s us > %s us stability -- #837 scattered/unusable)\n' \
+        "$label" "$bound" "${spread:-NA}" "${stability:-NA}"
+      return 2 ;;
+    drift_unstable)
+      printf '  %-14s DRIFT+UNSTABLE (fresh offset exceeds %s us bound; spread %s us > %s us stability -- #837)\n' \
+        "$label" "$bound" "${spread:-NA}" "${stability:-NA}"
       return 2 ;;
     stale)
       printf '  %-14s UNKNOWN  (no FRESH [NTP] offset within %ss -- status incomplete, #550/#595/#607)\n' \
@@ -1605,12 +1677,16 @@ Queries each REACHABLE Linux node's DanteSync-reported absolute clock offset (th
 so clock drift cannot silently re-break the wall-clock genlock in src/ndi.rs.
 
 Usage:
-  scripts/clock-offset-guard.sh [--bound-us N] [--targets "name=ip name=ip ..."]
+  scripts/clock-offset-guard.sh [--bound-us N] [--stability-us N] [--targets "name=ip name=ip ..."]
   scripts/clock-offset-guard.sh --help
 
 Default bound: ${DEFAULT_BOUND_US} us (2 ms) — ~8x under the 16.7 ms 60 fps frame period yet
 above the observed steady-state offsets (cam ~300 us, strih master ~1249 us). See SETUP.md
 "Cluster clock synchronization" for the baseline + rationale.
+
+Default stability (spread) bound: ${DEFAULT_STABILITY_US} us (--stability-us / DANTESYNC_STABILITY_US).
+A node whose FRESH offset samples scatter by more than this (max-min) grades UNSTABLE even
+when the median is in-bound (#837, the journal twin of the #836 HTTP spread check).
 
 Default targets (Linux cameras, over SSH): ${CLOCK_GUARD_TARGETS}
 The Windows OBS boxes (strih/stream) are checked read-only via the win-* MCP tools using this
@@ -1621,7 +1697,8 @@ must be no older than DANTESYNC_OFFSET_FRESHNESS_S (default ${CLOCK_GUARD_OFFSET
 seconds behind that node's own newest journal line, or the reading is STALE -> UNKNOWN (never a
 silent pass, #550/#591/#595/#607).
 
-Exit codes: 0 = all reachable nodes within bound, 20 = DRIFT (a node exceeds the bound),
+Exit codes: 0 = all reachable nodes within bound + stable, 20 = DRIFT or UNSTABLE (a node exceeds
+the bound or its samples scatter past --stability-us),
 11 = a node UNREACHABLE / offset UNKNOWN (incomplete, NOT clean), 1 = usage/IO error.
 EOF
 }
@@ -1656,10 +1733,11 @@ query_node_journal() {
 }
 
 main() {
-  local bound="$DEFAULT_BOUND_US" targets="$CLOCK_GUARD_TARGETS"
+  local bound="$DEFAULT_BOUND_US" targets="$CLOCK_GUARD_TARGETS" stability="$DEFAULT_STABILITY_US"
   while [ $# -gt 0 ]; do
     case "$1" in
       --bound-us) shift; bound="${1:-}" ;;
+      --stability-us) shift; stability="${1:-}" ;;
       --targets)  shift; targets="${1:-}" ;;
       -h|--help)  usage; exit 0 ;;
       --*)        echo "unknown option: $1" >&2; usage >&2; exit 1 ;;
@@ -1670,6 +1748,10 @@ main() {
 
   if ! printf '%s' "$bound" | grep -qE '^[0-9]+$'; then
     echo "ERROR: --bound-us must be a positive integer (got '${bound}')." >&2
+    exit 1
+  fi
+  if ! printf '%s' "$stability" | grep -qE '^[0-9]+$'; then
+    echo "ERROR: --stability-us must be a non-negative integer (got '${stability}')." >&2
     exit 1
   fi
 
@@ -1713,7 +1795,7 @@ main() {
     # whose journal simply stopped advancing -- can never be certified as the node's current
     # offset (the #550/#595 false-pass this CLI's own flow was still exposed to).
     rc=0
-    offset_verdict_check "$name" "$journal" "$freshness" "$bound" || rc=$?
+    offset_verdict_check "$name" "$journal" "$freshness" "$bound" "$stability" || rc=$?
     case "$rc" in
       0) ok=$((ok + 1)) ;;
       2) drift=$((drift + 1)) ;;
@@ -1723,8 +1805,8 @@ main() {
 
   echo
   if [ "$drift" -gt 0 ]; then
-    echo "!! CLOCK DRIFT: ${drift} node(s) exceed the ${bound} us offset bound." >&2
-    echo "!! Genlock boundaries diverge by that offset — investigate DanteSync on the drifted node(s)." >&2
+    echo "!! CLOCK DRIFT/UNSTABLE: ${drift} node(s) exceed the ${bound} us offset bound or scatter past ${stability} us." >&2
+    echo "!! Genlock boundaries diverge — investigate DanteSync on the affected node(s)." >&2
     [ "$unknown" -gt 0 ] && echo "!! (${unknown} further node(s) UNREACHABLE/UNKNOWN — status also incomplete.)" >&2
     exit 20
   fi

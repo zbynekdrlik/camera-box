@@ -356,7 +356,6 @@ fn gate_linux_journal_override_is_keyed_per_node_name_not_a_single_shared_var() 
     );
 }
 
-
 #[test]
 fn gate_fails_on_a_linux_journal_node_with_scattered_but_in_bound_median_837() {
     // #837 -- the journal-fallback twin of #836's HTTP spread check. Three FRESH offset samples

@@ -379,11 +379,23 @@ grade_http_node() {
       fi
       ptp="$(ptp_locked_from_journal "$status")"
       rc_off=0
-      case "$(dantesync_offset_verdict "$status" "$freshness" "$bound")" in
+      # #837: pass the gate's spread/stability bound so the journal FALLBACK grades scatter too
+      # (the twin of the HTTP path's sampled_offset_check). A scattered-but-in-bound-median node
+      # now grades UNSTABLE/DRIFT+UNSTABLE (rc 2, the drift class) instead of a silent NTP OK.
+      case "$(dantesync_offset_verdict "$status" "$freshness" "$bound" "$GATE_STABILITY_US")" in
         ok)
-          printf '  %-14s NTP OK       (fresh offset within %s us bound)\n' "$name" "$bound" ;;
+          printf '  %-14s NTP OK       (fresh offset within %s us bound; spread within %s us)\n' \
+            "$name" "$bound" "$GATE_STABILITY_US" ;;
         drift)
           printf '  %-14s NTP DRIFT    (fresh offset exceeds %s us bound)\n' "$name" "$bound"
+          rc_off=2 ;;
+        unstable)
+          printf '  %-14s NTP UNSTABLE (median within %s us bound but samples scatter past %s us stability -- #837)\n' \
+            "$name" "$bound" "$GATE_STABILITY_US"
+          rc_off=2 ;;
+        drift_unstable)
+          printf '  %-14s NTP DRIFT+UNSTABLE (offset exceeds %s us bound AND samples scatter past %s us stability -- #837)\n' \
+            "$name" "$bound" "$GATE_STABILITY_US"
           rc_off=2 ;;
         stale)
           printf '  %-14s NTP STALE    (no FRESH [NTP] offset within %ss -- status incomplete, #550/#595)\n' \
