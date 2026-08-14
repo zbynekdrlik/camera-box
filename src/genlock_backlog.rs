@@ -292,8 +292,10 @@ pub fn phase_pinned_is_due(frame_ts_ns: u64, deadline_ns: u64) -> bool {
     frame_ts_ns <= deadline_ns.saturating_add(PHASE_PIN_HYSTERESIS_NS)
 }
 
-/// #1049 — the STEADY-conveyor PHASE-CONVERGENCE shed decision. Should this tick shed exactly
-/// ONE EXTRA frame to slew the conveyor's presentation PHASE back toward the configured latency?
+/// #1049 — the STEADY-conveyor PHASE-CONVERGENCE shed decision, N>=2 ONLY. Should this N>=2 tick
+/// shed exactly ONE EXTRA frame to slew the conveyor's presentation PHASE back toward the
+/// configured latency? (N==1 is gated off — see the `source_multiple < 2` early return: an N==1
+/// shed does not stick and limit-cycles, and only N>=2 sources carry the ladder pathology.)
 ///
 /// The phase-locked conveyor (`genlock_locked_next_boundary_ns`) is a pure FOLLOWER: it
 /// re-anchors to the presented stamp every STEADY present and has no restoring force toward the
@@ -358,6 +360,19 @@ pub fn should_converge_phase(
     if interval_ns == 0 || locked_boundary_ns == 0 {
         return false;
     }
+    // #1049 (coordinator's live finding) — convergence is N>=2 ONLY. An N==1 source (30-into-30)
+    // delivers exactly ONE frame per render tick, so a phase shed (present one frame fresher) is
+    // NOT SUSTAINABLE: the queue cannot refill fast enough, the source HOLDS the very next tick and
+    // regains the shed frame within the throttle window — a shed->hold->shed limit cycle (the #998
+    // dup+skip signature), measured live on the stream box's deep `NDI 2ME PGM` (n=1, 990 ms, whose
+    // natural grid-quantized hold ~1033 ms sits one frame above configured at frac 0.7, above the
+    // reserve-based threshold). An N>=2 source delivers >=2 frames per tick, so a shed STICKS —
+    // which is both why the strih 60-into-30 ladder converges and why the pathology is N>=2-only: a
+    // per-camera acquire-phase ladder exists only ACROSS the multi-camera N>=2 ingests, while a
+    // single N==1 source has no cross-source spread and its A/V offset is corrected by the
+    // ±50 ms 2ME PGM controller. A hysteresis band cannot separate the natural hold from a real
+    // error here — the natural overshoot is frac-dependent (up to ceil+2 frames) and differs by n.
+    // [red] the N>=2 gate is removed here to prove the deep-n1 oscillation test goes RED first.
     let n = source_multiple.max(1) as u64;
     let reserve_ns = (latency_ms as u64).saturating_mul(1_000_000);
     // The achievable floor: the freshest queued frame's on-air age (a frame cannot present before
@@ -2640,15 +2655,15 @@ mod tests {
             !should_converge_phase(wall, just_under, newest, 20, I30, 2, 100),
             "one ns below the n=2 threshold is inert"
         );
-        // n=1: quantum = I30. Same held age that fired at n=2 is BELOW the n=1 threshold
-        // (reserve + I30 + hysteresis), so a 1:1 source only sheds a genuinely larger error.
+        // n=1 is gated off entirely (#1049 coordinator finding — the shed does not stick), so the
+        // same held age that fired at n=2 is INERT on a 1:1 source regardless of the threshold.
         assert!(
             !should_converge_phase(wall, just_over, newest, 20, I30, 1, 100),
-            "n=1 threshold is a full canvas interval above the target — the same held age is inert"
+            "n=1 is below the N>=2 gate — inert regardless of the held age"
         );
     }
 
-    /// No regression on the #1003 deep hold: a source correctly held at 1000 ms has
+    /// No regression on the #1003 deep hold: a deep N>=2 source correctly held at 1000 ms has
     /// `S ≈ configured`, far below the threshold, so the shed is inert — by the SAME comparison
     /// that drives it, not a special case.
     #[test]
@@ -2656,15 +2671,15 @@ mod tests {
         let wall = 1_000_000_000_000u64;
         let newest = wall - 8_000_000; // an 8 ms floor, far below the 1000 ms hold
         for jitter in [-2_000_000i64, 0, 2_000_000, 8_000_000] {
-            // A deep source held at 1000 ms ± ordinary sub-frame jitter.
+            // A deep N>=2 source held at 1000 ms ± ordinary sub-frame jitter.
             let age = (1000i64 * 1_000_000 + jitter) as u64;
             assert!(
-                !should_converge_phase(wall, wall - age, newest, 1000, I30, 1, 1_000_000),
-                "a deep source held at ~configured (jitter {jitter} ns) must never converge"
+                !should_converge_phase(wall, wall - age, newest, 1000, I30, 2, 1_000_000),
+                "a deep N>=2 source held at ~configured (jitter {jitter} ns) must never converge"
             );
         }
-        // Only a genuine >=1-frame walk over configured on a deep source converges (the ticket's
-        // "self-correcting even without storms" — strictly an improvement over latch-forever).
+        // Only a genuine >=1-frame walk over configured on a deep N>=2 source converges (the
+        // shed sticks there — the multi-frame arrival sustains the fresher phase).
         assert!(
             should_converge_phase(
                 wall,
@@ -2672,10 +2687,43 @@ mod tests {
                 newest,
                 1000,
                 I30,
-                1,
+                2,
                 100
             ),
-            "a deep source that walked a full frame over configured self-corrects"
+            "a deep N>=2 source that walked a full frame over configured self-corrects"
+        );
+    }
+
+    /// #1049 (coordinator's live finding) — convergence is N>=2 ONLY. The deep n=1 stream source
+    /// `NDI 2ME PGM` (30-into-30, configured 990 ms) sits at its natural grid-quantized hold
+    /// ~1033 ms — one frame above configured at frac 0.7, ABOVE the reserve-based threshold — so a
+    /// naive decision would shed it; but an n=1 shed does not stick (1 frame/tick can't sustain a
+    /// fresher phase → shed-hold-shed limit cycle, the #998 signature). The decision MUST go INERT
+    /// for n<2 while the SAME held age on an n>=2 source still converges (the shed sticks).
+    #[test]
+    fn convergence_is_n2_only_the_deep_n1_source_is_inert_1049() {
+        // wall large enough that a 1033 ms subtraction never underflows.
+        let wall = 2_000_000_000_000u64;
+        let s = 1033 * 1_000_000; // the live natural hold at reserve 990, frac 0.7
+        let boundary = wall - s;
+        let newest = wall - 33_000_000; // freshest frame ~1 canvas frame old -> small floor
+                                        // n=1: INERT (gated — the shed would oscillate). This is the RED→GREEN of the fix.
+        assert!(
+            !should_converge_phase(wall, boundary, newest, 990, I30, 1, 100),
+            "a deep n=1 source at its natural grid-quantized hold must NOT shed — the n=1 shed \
+             does not stick and limit-cycles (the live stream-box `NDI 2ME PGM` oscillation)"
+        );
+        // n=0 degenerate also gated (0 < 2), no divide-by-zero.
+        assert!(
+            !should_converge_phase(wall, boundary, newest, 990, I30, 0, 100),
+            "n=0 (degenerate) is below the N>=2 gate -> inert"
+        );
+        // The SAME held age on an n>=2 source STILL converges — the gate is n-specific, not a
+        // blanket disable, so the strih 60-into-30 convergence is untouched.
+        assert!(
+            should_converge_phase(wall, boundary, newest, 990, I30, 2, 100),
+            "the same held age on an N>=2 source still converges (the shed sticks there) — the \
+             strih ladder fix must stay intact"
         );
     }
 
@@ -2710,9 +2758,9 @@ mod tests {
             ),
             "a newest stamp ahead of wall floors to 0 -> target = reserve, no panic"
         );
-        // source_multiple 0 floors to 1 (never divides by zero on the quantum).
+        // source_multiple 0 (degenerate) is BELOW the N>=2 gate -> inert; no divide-by-zero.
         assert!(
-            should_converge_phase(
+            !should_converge_phase(
                 wall,
                 wall - (20 * 1_000_000 + 2 * I30),
                 newest,
@@ -2721,7 +2769,7 @@ mod tests {
                 0,
                 100
             ),
-            "source_multiple 0 floors to 1 (quantum = interval) and still evaluates"
+            "source_multiple 0 (degenerate) is below the N>=2 gate -> inert"
         );
     }
 
