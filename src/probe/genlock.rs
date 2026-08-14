@@ -2667,7 +2667,7 @@ mod tests {
         assert_eq!(
             cadence.phase_anchor_ns, 0,
             "#1037: the stale-anchor self-heal CLEARS the anchor (mirror of the C \
-             `if (sel_1003 == 0 && genlock_phase_anchor_ns != 0) { genlock_phase_anchor_ns = 0; ...}`) \
+             `if (sel_1003 == 0 && genlock_phase_anchor_ns != 0) {{ genlock_phase_anchor_ns = 0; ...}}`) \
              so it rebuilds from the next STEADY present rather than re-firing this branch every tick"
         );
     }
