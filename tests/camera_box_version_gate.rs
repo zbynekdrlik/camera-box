@@ -192,7 +192,10 @@ fn fleet_report_one_drifted_box_fails_the_whole_fleet() {
         r#"camera_box_fleet_report "cam1=1.7.0-dev.452" "cam2=1.7.0-dev.452" "cam3=1.7.0-dev.403" 2>&1; echo "RC=$?""#,
         &[],
     );
-    assert!(out.contains("DRIFT"), "the drifted box must be flagged: {out:?}");
+    assert!(
+        out.contains("DRIFT"),
+        "the drifted box must be flagged: {out:?}"
+    );
     assert!(out.contains("GATE FAILED"));
     assert!(out.contains("RC=20"));
 }
@@ -233,7 +236,10 @@ fn fleet_report_drift_takes_precedence_over_unknown() {
         r#"camera_box_fleet_report "cam1=1.7.0-dev.452" "cam2=1.7.0-dev.403" "cam3=" 2>&1; echo "RC=$?""#,
         &[],
     );
-    assert!(out.contains("RC=20"), "drift must take precedence over unknown: {out:?}");
+    assert!(
+        out.contains("RC=20"),
+        "drift must take precedence over unknown: {out:?}"
+    );
 }
 
 #[test]
@@ -245,7 +251,10 @@ fn fleet_report_acked_offline_box_is_excluded_not_judged() {
         r#"camera_box_fleet_report "cam1=1.7.0-dev.452" "cam2=1.7.0-dev.452" "cam3="; echo "RC=$?""#,
         &[("CAMBOX_OFFLINE_ACK", "cam3:powered-off-2026-08-14")],
     );
-    assert!(out.contains("RC=0"), "an acked-offline box must not fail the gate: {out:?}");
+    assert!(
+        out.contains("RC=0"),
+        "an acked-offline box must not fail the gate: {out:?}"
+    );
     assert!(
         out.contains("cam3") && out.to_uppercase().contains("EXCLUDED"),
         "the acked box must be visibly EXCLUDED in the table: {out:?}"
@@ -275,12 +284,24 @@ fn cli_fleet_that_disagrees_refuses_with_a_table() {
         ],
         &[
             ("CAMBOX_OFFLINE_ACK", ""),
-            ("CAMERA_BOX_VERSION_GATE_VERSION_CAM1", &cam1.display().to_string()),
-            ("CAMERA_BOX_VERSION_GATE_VERSION_CAM2", &cam2.display().to_string()),
-            ("CAMERA_BOX_VERSION_GATE_VERSION_CAM3", &cam3.display().to_string()),
+            (
+                "CAMERA_BOX_VERSION_GATE_VERSION_CAM1",
+                &cam1.display().to_string(),
+            ),
+            (
+                "CAMERA_BOX_VERSION_GATE_VERSION_CAM2",
+                &cam2.display().to_string(),
+            ),
+            (
+                "CAMERA_BOX_VERSION_GATE_VERSION_CAM3",
+                &cam3.display().to_string(),
+            ),
         ],
     );
-    assert_eq!(code, 20, "a disagreeing fleet must exit 20.\nstdout={stdout}\nstderr={stderr}");
+    assert_eq!(
+        code, 20,
+        "a disagreeing fleet must exit 20.\nstdout={stdout}\nstderr={stderr}"
+    );
     assert!(stdout.contains("cam3") && stdout.contains("DRIFT"));
 }
 
@@ -298,18 +319,33 @@ fn cli_fleet_that_agrees_passes() {
         ],
         &[
             ("CAMBOX_OFFLINE_ACK", ""),
-            ("CAMERA_BOX_VERSION_GATE_VERSION_CAM1", &cam1.display().to_string()),
-            ("CAMERA_BOX_VERSION_GATE_VERSION_CAM2", &cam2.display().to_string()),
-            ("CAMERA_BOX_VERSION_GATE_VERSION_CAM3", &cam3.display().to_string()),
+            (
+                "CAMERA_BOX_VERSION_GATE_VERSION_CAM1",
+                &cam1.display().to_string(),
+            ),
+            (
+                "CAMERA_BOX_VERSION_GATE_VERSION_CAM2",
+                &cam2.display().to_string(),
+            ),
+            (
+                "CAMERA_BOX_VERSION_GATE_VERSION_CAM3",
+                &cam3.display().to_string(),
+            ),
         ],
     );
-    assert_eq!(code, 0, "an agreeing fleet must exit 0.\nstdout={stdout}\nstderr={stderr}");
+    assert_eq!(
+        code, 0,
+        "an agreeing fleet must exit 0.\nstdout={stdout}\nstderr={stderr}"
+    );
     assert!(stdout.contains("GATE PASS"));
 }
 
 #[test]
 fn cli_refuses_when_no_node_is_given() {
     let (code, _stdout, stderr) = run_gate_env(&["--fleet-file", "/dev/null"], &[]);
-    assert_eq!(code, 1, "zero nodes must be a usage error, never a silent pass");
+    assert_eq!(
+        code, 1,
+        "zero nodes must be a usage error, never a silent pass"
+    );
     assert!(stderr.to_lowercase().contains("no node"));
 }
