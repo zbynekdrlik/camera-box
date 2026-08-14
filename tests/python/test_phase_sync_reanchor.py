@@ -109,3 +109,115 @@ class TestPlanReanchor:
         is_noop, changes = phase_sync_reanchor.plan_reanchor(desired, current)
         assert is_noop is False
         assert any(s == "NDI cam2" for s, _, _ in changes)
+
+
+# --------------------------------------------------------------------------- (d) #900 review 🔵1
+class TestRecoverUniformMargin:
+    def test_margin_free_calibration_yields_zero(self):
+        # the standing default: offset_ms == kernel offset (slowest at floor 3)
+        assert phase_sync_reanchor.recover_uniform_margin(
+            {"NDI cam1": 3, "NDI cam2": 6, "NDI cam3": 20}
+        ) == 0
+
+    def test_uniform_margin_is_recovered_from_the_min_offset(self):
+        # a +10ms headroom shifts every pin up uniformly: 3/6/20 -> 13/16/30
+        assert phase_sync_reanchor.recover_uniform_margin(
+            {"NDI cam1": 13, "NDI cam2": 16, "NDI cam3": 30}
+        ) == 10
+
+    def test_empty_offsets_yield_zero(self):
+        assert phase_sync_reanchor.recover_uniform_margin({}) == 0
+
+    def test_never_negative(self):
+        # a floor-pinned min can never sit below the floor, but guard anyway
+        assert phase_sync_reanchor.recover_uniform_margin({"NDI cam1": 3}) == 0
+
+
+class TestLoadPersistedOffsets:
+    def test_reads_offset_ms(self, tmp_path):
+        p = _write(tmp_path / "last.json", [
+            {"source": "NDI cam1", "latency_ms": 80.9, "offset_ms": 3},
+            {"source": "NDI cam2", "latency_ms": 78.0, "offset_ms": 6},
+        ])
+        assert phase_sync_reanchor.load_persisted_offsets(p) == {"NDI cam1": 3, "NDI cam2": 6}
+
+    def test_skips_entries_without_numeric_offset(self, tmp_path):
+        p = _write(tmp_path / "last.json", [
+            {"source": "NDI cam1", "latency_ms": 80.9, "offset_ms": 3},
+            {"source": "NDI cam2", "latency_ms": 78.0},  # no offset yet
+        ])
+        assert phase_sync_reanchor.load_persisted_offsets(p) == {"NDI cam1": 3}
+
+
+# --------------------------------------------------------------------------- (e) #900 review 🔵4
+class _FakeWs:
+    def close(self):
+        pass
+
+
+def _persisted(tmp_path):
+    return _write(tmp_path / "last.json", [
+        {"source": "NDI cam1", "latency_ms": 80.913, "offset_ms": 3, "applied_latency_ms": 3},
+        {"source": "NDI cam2", "latency_ms": 78.057, "offset_ms": 6, "applied_latency_ms": 6},
+        {"source": "NDI cam3", "latency_ms": 64.048, "offset_ms": 20, "applied_latency_ms": 20},
+    ])
+
+
+def _patch_ws(monkeypatch, live_pins, applied, wrote):
+    """Mock the WS layer so main() runs with NO OBS. `live_pins` = what read_pin returns per
+    source; `applied`/`wrote` are lists the mocks append to so a test can assert what was written."""
+    monkeypatch.setattr(phase_sync_reanchor, "_conn", lambda h, p: _FakeWs())
+    monkeypatch.setattr(phase_sync_reanchor, "read_pin", lambda ws, s: live_pins.get(s))
+    monkeypatch.setattr(phase_sync_reanchor, "read_current_latency", lambda ws, s: live_pins.get(s) or 0)
+    # margin-free kernel: slowest (cam1) at floor 3, others held back
+    kernel = {"NDI cam1": 3, "NDI cam2": 6, "NDI cam3": 20}
+    monkeypatch.setattr(phase_sync_reanchor, "compute_phase_sync_offsets",
+                        lambda measured, gate_bin=None: {s: kernel[s] for s in measured})
+    monkeypatch.setattr(phase_sync_reanchor, "apply_latency",
+                        lambda ws, s, cur, new: applied.append((s, cur, new)) or new)
+    monkeypatch.setattr(phase_sync_reanchor, "write_last_json",
+                        lambda path, cams: wrote.append((str(path), cams)) or {})
+
+
+class TestMainRequirements:
+    def test_noop_writes_nothing_and_never_touches_the_durable_basis(self, tmp_path, monkeypatch):
+        persisted = _persisted(tmp_path)
+        before = open(persisted).read()
+        out = str(tmp_path / "reanchor-out.json")
+        applied, wrote = [], []
+        _patch_ws(monkeypatch, {"NDI cam1": 3, "NDI cam2": 6, "NDI cam3": 20}, applied, wrote)
+        rc = phase_sync_reanchor.main([
+            "--host", "x", "--active-set", "cam1 cam2 cam3",
+            "--persisted-json", persisted, "--out-json", out, "--gate-bin", "x", "--apply",
+        ])
+        assert rc == 0
+        assert applied == []                      # req 2: a healthy rig is NOT churned
+        assert wrote == []                        # nothing persisted on a no-op
+        assert not pathlib.Path(out).exists()     # no run-scoped write either
+        assert open(persisted).read() == before   # req 4: durable basis untouched
+
+    def test_apply_writes_only_the_run_scoped_out_json_never_the_basis(self, tmp_path, monkeypatch):
+        persisted = _persisted(tmp_path)
+        before = open(persisted).read()
+        out = str(tmp_path / "reanchor-out.json")
+        applied, wrote = [], []
+        # live pins drifted up (a camera left/joined shape) -> apply
+        _patch_ws(monkeypatch, {"NDI cam1": 21, "NDI cam2": 22, "NDI cam3": 22}, applied, wrote)
+        rc = phase_sync_reanchor.main([
+            "--host", "x", "--active-set", "cam1 cam2 cam3",
+            "--persisted-json", persisted, "--out-json", out, "--gate-bin", "x", "--apply",
+        ])
+        assert rc == 0
+        assert {s for s, _, _ in applied} == {"NDI cam1", "NDI cam2", "NDI cam3"}
+        assert len(wrote) == 1 and wrote[0][0] == out   # only the run-scoped file
+        assert open(persisted).read() == before          # req 4: durable basis untouched
+
+    def test_out_json_equal_to_the_basis_is_rejected(self, tmp_path, monkeypatch):
+        persisted = _persisted(tmp_path)
+        applied, wrote = [], []
+        _patch_ws(monkeypatch, {"NDI cam1": 3, "NDI cam2": 6, "NDI cam3": 20}, applied, wrote)
+        with pytest.raises(SystemExit):
+            phase_sync_reanchor.main([
+                "--host", "x", "--active-set", "cam1 cam2 cam3",
+                "--persisted-json", persisted, "--out-json", persisted, "--apply",
+            ])

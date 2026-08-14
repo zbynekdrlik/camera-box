@@ -60,6 +60,7 @@ if _HERE not in sys.path:
 
 # Reuse the EXISTING phase-sync helpers verbatim -- no new kernel, no duplicated apply/persist.
 from phase_sync_calibrate import (  # noqa: E402
+    PHASE_SYNC_FLOOR_MS,
     apply_latency,
     compute_phase_sync_offsets,
     default_last_json_path,
@@ -71,12 +72,9 @@ from obs_phase2 import _conn  # noqa: E402
 from latency_pins_snapshot import read_pin  # honest-None live read  # noqa: E402
 
 
-def load_persisted_transits(path: str) -> dict:
-    """Load {source_name: latency_ms} from the persisted phase-sync-last.json. `latency_ms` is the
-    pin-INDEPENDENT cam->strih transit (the calibration basis), NOT the applied offset.
-
-    FAIL LOUD (SystemExit) on any "no usable basis" condition -- missing file, unparseable JSON,
-    no cameras, or a camera missing/with a non-numeric latency_ms. Never guesses a transit."""
+def _read_cameras(path: str) -> list:
+    """Read + validate the phase-sync-last.json `cameras` list. FAIL LOUD (SystemExit) on any "no
+    usable basis" condition -- missing file, unparseable JSON, or no cameras."""
     p = Path(path)
     if not p.is_file():
         raise SystemExit(
@@ -94,8 +92,17 @@ def load_persisted_transits(path: str) -> dict:
             f"ERROR: #900 persisted calibration basis {path} has no cameras -- unusable as a "
             f"re-anchor basis"
         )
+    return cameras
+
+
+def load_persisted_transits(path: str) -> dict:
+    """Load {source_name: latency_ms} from the persisted phase-sync-last.json. `latency_ms` is the
+    pin-INDEPENDENT cam->strih transit (the calibration basis), NOT the applied offset.
+
+    FAIL LOUD (SystemExit) on any "no usable basis" condition -- missing file, unparseable JSON,
+    no cameras, or a camera missing/with a non-numeric latency_ms. Never guesses a transit."""
     transits: dict = {}
-    for cam in cameras:
+    for cam in _read_cameras(path):
         if not isinstance(cam, dict):
             raise SystemExit(f"ERROR: #900 persisted basis {path}: malformed camera entry {cam!r}")
         source = cam.get("source")
@@ -109,6 +116,39 @@ def load_persisted_transits(path: str) -> dict:
             )
         transits[source] = float(latency)
     return transits
+
+
+def load_persisted_offsets(path: str) -> dict:
+    """Load {source_name: offset_ms} (the APPLIED pin) from the persisted phase-sync-last.json --
+    the input to recover_uniform_margin(). Best-effort: only entries carrying a numeric integer
+    offset_ms are returned (an older/partial file simply yields fewer, and recover_uniform_margin
+    then treats it as margin-free); never fails on a missing offset_ms (latency_ms is the required
+    basis, validated separately by load_persisted_transits)."""
+    offsets: dict = {}
+    for cam in _read_cameras(path):
+        if not isinstance(cam, dict):
+            continue
+        source = cam.get("source")
+        off = cam.get("offset_ms")
+        if isinstance(source, str) and source and isinstance(off, (int, float)) and not isinstance(off, bool):
+            offsets[source] = int(off)
+    return offsets
+
+
+def recover_uniform_margin(persisted_offsets: dict) -> int:
+    """Recover the UNIFORM #757 jitter-headroom margin the persisted calibration applied, so a
+    re-anchor PRESERVES it instead of silently stripping it.
+
+    `phase_sync_calibrate.apply_margin` adds the SAME margin to every camera's kernel offset, and
+    the kernel pins the slowest camera at PHASE_SYNC_FLOOR_MS -- so the slowest camera's applied
+    pin is floor+margin and is the GLOBAL MINIMUM offset. margin = min(offset_ms) - floor.
+    Because round(int + margin_float) == int + round(margin_float) for the integer kernel offsets,
+    this integer margin reproduces every persisted offset exactly (a true no-op when the active
+    set is unchanged). Returns 0 for a margin-free calibration (the standing default) or an empty
+    set. Clamped >= 0 (a persisted pin can never sit below the floor)."""
+    if not persisted_offsets:
+        return 0
+    return max(0, min(persisted_offsets.values()) - PHASE_SYNC_FLOOR_MS)
 
 
 def restrict_to_active(transits: dict, active_sources: list) -> dict:
@@ -133,7 +173,13 @@ def plan_reanchor(desired: dict, current: dict) -> tuple:
     `current` = {source: live_pin_ms_or_None}. Returns (is_noop, changes) where changes is
     [(source, current_val, desired_val), ...] for every source whose live pin differs from desired
     (an unreadable None counts as a difference -- it must be established). is_noop == (changes==[]);
-    a no-op means the live pins already satisfy the convention and NOTHING is written."""
+    a no-op means the live pins already satisfy the convention and NOTHING is written.
+
+    Caveat: OBS's GetInputSettings OMITS a setting still at its registered default, so a source
+    genuinely at the floor but never explicitly Set reads None here and is (idempotently) re-applied
+    on the FIRST run -- after which it reads its explicit value and every later run is a true
+    zero-write no-op. The re-anchor is idempotent, so this is harmless; it just isn't literally
+    zero-write on that first defaulted run."""
     changes = []
     for source in sorted(desired):
         want = desired[source]
@@ -179,16 +225,28 @@ def main(argv=None) -> int:
     active_sources = _active_sources(args.active_set)
     persisted_path = args.persisted_json or str(default_last_json_path())
 
+    # Requirement 4 hardening: NEVER write the applied set back over the durable transit basis --
+    # that would drop every currently-inactive camera's basis. A run-scoped --out-json only.
+    if args.out_json and os.path.abspath(args.out_json) == os.path.abspath(persisted_path):
+        raise SystemExit(
+            f"ERROR: #900 --out-json must NOT be the durable persisted basis ({persisted_path}) -- "
+            f"the applied set records to a run-scoped file, never clobbering the transit basis"
+        )
+
     # 1. read the persisted transits + restrict to the active set (both FAIL LOUD -> exit 1)
     transits = load_persisted_transits(persisted_path)
     active_transits = restrict_to_active(transits, active_sources)
 
-    # 2. re-derive the pin set via the UNCHANGED kernel (no new measurement, no new kernel)
+    # 2. re-derive the pin set via the UNCHANGED kernel (no new measurement, no new kernel), then
+    # add back the UNIFORM jitter-headroom margin the persisted calibration already applied -- so a
+    # re-anchor PRESERVES any #757 headroom rather than silently stripping it (margin 0 = the
+    # standing margin-free default -> exact no-op).
     offsets = compute_phase_sync_offsets(active_transits, gate_bin=args.gate_bin)
-    desired = {s: enforce_jitter_floor_ms(offsets[s]) for s in active_transits}
+    margin = recover_uniform_margin(load_persisted_offsets(persisted_path))
+    desired = {s: enforce_jitter_floor_ms(offsets[s] + margin) for s in active_transits}
     print(
         f"[reanchor] #900 basis={persisted_path} active={sorted(active_sources)} "
-        f"desired_pins={desired}"
+        f"margin={margin}ms desired_pins={desired}"
     )
 
     # 3. read the CURRENT live pins and decide no-op vs apply
