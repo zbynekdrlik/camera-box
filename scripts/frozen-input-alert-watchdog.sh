@@ -1,0 +1,282 @@
+#!/usr/bin/env bash
+# airuleset:script-ok watchdog must survive every per-pass failure and keep polling on the next
+# timer tick -- same convention as scripts/network-reach-alert-watchdog.sh /
+# scripts/optical-chain-alert-watchdog.sh (set -uo pipefail, not -e).
+#
+# scripts/frozen-input-alert-watchdog.sh -- #1052: STREAM FROZEN-INPUT alert, DEV1-SIDE
+# (network-reach watchdog PHASE 2).
+#
+# WHY (#1052, phase-2 of #1001): reachability (#1001) only classifies a box REACHABLE/UNREACHABLE --
+# it is blind to a box that is fully REACHABLE while its NDI input is silently frozen on the last
+# frame (the #767 receiver-rebind class: the cambox is fine but stream's DistroAV receiver froze).
+# Emit-freeze (#944) is CAMBOX-side and never fires for a receiver-side freeze. So a stream input
+# frozen-on-last-frame while the box stays up is undetected during a live event.
+#
+# TAP: the stream OBS log prints `genlock-fifo audit '<src>': received=N ...` ~every 5 s
+# (GENLOCK_AUDIT_LOG_INTERVAL_NS, obs-source.c). `received=` is the cumulative count of frames the
+# FIFO RECEIVED from the source, so a frozen input STOPS advancing it -- immune to the static-content
+# false-positive a screenshot-hash tap suffers, and it works in BOTH test and event mode (no burns,
+# no scene warm-up). This watchdog samples the newest `received=` per watched source once per pass,
+# PERSISTS it, and compares to the prior pass via the PURE scripts/lib/frozen-input-health.sh seam.
+# The confirm-counter + alert throttle are the SAME shared obs_watchdog_confirm /
+# obs_watchdog_alert_throttle (scripts/lib/obs-watchdog-decision.sh) #391/#1001 already use -- no
+# second alert mechanism. A recovery ("advancing again") ping fires once when a source we paged for
+# resumes.
+#
+# NO-DOUBLE-PAGE GUARD: before deciding, read issue-1001's OWN on-disk state (never re-probe) -- if
+# either the SENDER box (strih, which sends `NDI 2ME PGM`) or the RECEIVER box (stream) is CONFIRMED
+# unreachable there, #1001 already owns the page and a frozen input is a downstream symptom -> SKIP.
+# Only "both boxes reachable BUT the input frozen" pages, which is exactly this ticket's class.
+#
+# BEST-EFFORT PROBE: the received counter is read with one flat `ssh ... powershell` OBS-log tail (a
+# session-agnostic file read, allowed for a headless dev1 watchdog per win-ssh-vs-mcp; NEVER nested
+# PowerShell). A failed read yields an empty sample -> the pure seam returns UNKNOWN -> never a false
+# page (verified in tests/harness_frozen_input_health_1052.rs). Override the whole read with
+# FROZEN_INPUT_PROBE_CMD (a command run with <receiver_ip> <source>, stdout = the RAW log text, same
+# shape the ssh tail returns -- the `genlock-fifo audit '<src>': received=N` extraction is always
+# applied on top) for a --dry-run smoke test or an alternate tap (e.g. a future :8899 field).
+#
+# Usage:
+#   scripts/frozen-input-alert-watchdog.sh            # one pass: measure -> decide -> alert
+#   scripts/frozen-input-alert-watchdog.sh --dry-run  # measure + decide + LOG only; never alert
+#   scripts/frozen-input-alert-watchdog.sh --help
+set -uo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/obs-watchdog-decision.sh
+. "$HERE/lib/obs-watchdog-decision.sh"
+# shellcheck source=scripts/lib/frozen-input-health.sh
+. "$HERE/lib/frozen-input-health.sh"
+
+DRY_RUN=0
+case "${1:-}" in
+  --dry-run) DRY_RUN=1 ;;
+  --help | -h)
+    sed -n '5,49p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    exit 0
+    ;;
+  "") : ;;
+  *) echo "frozen-input-alert-watchdog: unknown arg '$1' (try --help)" >&2; exit 2 ;;
+esac
+
+# -- config (all env-overridable) ---------------------------------------------------------------
+# The RECEIVER box whose OBS log carries the `received=` counters, as "name|ip".
+RECEIVER="${FROZEN_INPUT_RECEIVER:-stream|10.77.9.204}"
+RECEIVER_NAME="${RECEIVER%%|*}"; RECEIVER_IP="${RECEIVER##*|}"
+# The SENDER box whose #1001 reachability gates the no-double-page guard (the `NDI 2ME PGM` program
+# feed is produced by strih). Just the box NAME as #1001 keys it in its state file.
+SENDER_NAME="${FROZEN_INPUT_SENDER:-strih}"
+# Watched source names on the receiver, ';'-separated (names contain spaces). Default: the program
+# feed only -- the always-live input whose #767 receiver freeze this ticket targets. Listing a source
+# here IS the "expected live" scope (an idle input that may legitimately stop is simply not listed).
+SOURCES="${FROZEN_INPUT_SOURCES:-NDI 2ME PGM}"
+
+SSH_USER="${FROZEN_INPUT_SSH_USER:-newlevel}"
+SSH_PW="${FROZEN_INPUT_SSH_PW:-newlevel}"
+SSH_TIMEOUT="${FROZEN_INPUT_SSH_TIMEOUT:-20}"
+SSH_OPTS="${FROZEN_INPUT_SSH_OPTS:--o BatchMode=no -o StrictHostKeyChecking=no -o ConnectTimeout=8}"
+OBS_LOG_TAIL="${FROZEN_INPUT_OBS_LOG_TAIL:-800}"
+
+# 2-pass confirm before paging (matches the sibling watchdogs): one missed log read / transient must
+# never page. A genuinely frozen input stays frozen across the 5-min cadence.
+CONFIRM_THRESHOLD="${FROZEN_INPUT_ALERT_CONFIRM_THRESHOLD:-2}"
+ALERT_THROTTLE_PASSES="${FROZEN_INPUT_ALERT_THROTTLE_PASSES:-12}"   # ~1h at the 5-min cadence
+
+NOTIFY="${AIRULESET_NOTIFY:-$HOME/devel/airuleset/airuleset.py}"
+REPO_SLUG="${FROZEN_INPUT_ALERT_REPO:-zbynekdrlik/camera-box}"
+
+STATE_DIR="${FROZEN_INPUT_ALERT_STATE_DIR:-${XDG_RUNTIME_DIR:-/tmp}}"
+_state_default="$STATE_DIR/camera-box-frozen-input-alert.state"
+[ "$DRY_RUN" -eq 1 ] && _state_default="$STATE_DIR/camera-box-frozen-input-alert-dryrun.state"
+STATE_FILE="${FROZEN_INPUT_ALERT_STATE_FILE:-$_state_default}"
+# Issue-1001's OWN state file -- read (never written) for the no-double-page guard.
+NETREACH_STATE_FILE="${FROZEN_INPUT_NETREACH_STATE_FILE:-$STATE_DIR/camera-box-network-reach-alert.state}"
+
+# EXPECTED_LIVE is 1 for every configured source (the list is the scope). Kept as a seam input so a
+# future caller can gate a source on live "is it in program" state without touching the decision core.
+EXPECTED_LIVE=1
+
+log() { printf '%s [frozen-input-alert-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >&2; }
+
+# -- I/O probe (dev1-local; NOT pure -- kept out of the lib) -------------------------------------
+# probe_received <receiver_ip> <source> -> stdout: the newest cumulative `received=` value for the
+# source (a bare integer), or EMPTY when the read failed / the source's audit line was absent this
+# pass (the seam then returns UNKNOWN -- never a false page). Overridable via FROZEN_INPUT_PROBE_CMD.
+probe_received() {
+  local ip="$1" source="$2" raw
+  if [ -n "${FROZEN_INPUT_PROBE_CMD:-}" ]; then
+    raw="$($FROZEN_INPUT_PROBE_CMD "$ip" "$source" 2>/dev/null || true)"
+  else
+    # One flat ssh + single (non-nested) powershell: tail the newest OBS log. `$env:APPDATA` has no
+    # spaces (C:\Users\<u>\AppData\Roaming), so no inner double-quotes are needed -> no nesting trap
+    # (win-ssh-vs-mcp / rig-state-inspection). Sourcing the whole tail; grep for the line on dev1.
+    # shellcheck disable=SC2086
+    raw="$(timeout "$SSH_TIMEOUT" sshpass -p "$SSH_PW" ssh $SSH_OPTS "$SSH_USER@$ip" \
+      "powershell -NoProfile -Command \"gc (gci \$env:APPDATA\\obs-studio\\logs\\*.txt | sort LastWriteTime | select -last 1).FullName -Tail $OBS_LOG_TAIL\"" \
+      2>/dev/null || true)"
+  fi
+  # Newest audit line for THIS source -> the received= integer. Empty if none found.
+  printf '%s\n' "$raw" \
+    | grep -F "genlock-fifo audit '$source':" \
+    | tail -1 \
+    | sed -n 's/.*received=\([0-9][0-9]*\).*/\1/p' \
+    | tail -1
+}
+
+# -- issue-1001 reachability read (never re-probed) ---------------------------------------------
+# netreach_box_alerted <box> -> "1" iff #1001 has that box CONFIRMED unreachable (paged). Absent
+# state file / field -> "0" (either #1001 has not run yet, or the box is reachable) -- the probe
+# itself still fails-safe to UNKNOWN if the box is genuinely down.
+netreach_box_alerted() {
+  local box="$1"
+  [ -f "$NETREACH_STATE_FILE" ] || { printf '0'; return 0; }
+  local v
+  v="$(sed -n "s/^alerted_${box}=//p" "$NETREACH_STATE_FILE" 2>/dev/null | tail -1)"
+  printf '%s' "${v:-0}"
+}
+
+# -- persisted per-source state (key=value lines) -----------------------------------------------
+read_state_field() {
+  local key="$1" default="$2"
+  [ -f "$STATE_FILE" ] || { printf '%s' "$default"; return 0; }
+  local v
+  v="$(sed -n "s/^${key}=//p" "$STATE_FILE" 2>/dev/null | tail -1)"
+  printf '%s' "${v:-$default}"
+}
+write_state_field() {
+  local key="$1" val="$2" tmp
+  mkdir -p "$(dirname "$STATE_FILE")" 2>/dev/null || true
+  tmp="$(mktemp "${STATE_FILE}.XXXXXX" 2>/dev/null || echo "$STATE_FILE")"
+  { [ -f "$STATE_FILE" ] && grep -v "^${key}=" "$STATE_FILE"; printf '%s=%s\n' "$key" "$val"; } \
+    > "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$STATE_FILE" 2>/dev/null || true
+}
+
+# A source key safe for state-field names (source names carry spaces / punctuation).
+source_key() { printf '%s' "$1" | tr -c 'A-Za-z0-9' '_'; }
+
+# An ADVANCING source is not an incident: clear its confirm counter + throttle sig so a genuinely NEW
+# freeze later pages fresh. Does NOT clear the `alerted` latch (the recovery-ping latch).
+clear_source_throttle() {
+  local k="$1"
+  write_state_field "confirm_${k}" 0
+  write_state_field "alert_sig_${k}" ""
+  write_state_field "alert_passes_${k}" 0
+}
+
+# -- per-source decision ------------------------------------------------------------------------
+handle_source() {
+  local source="$1" sender_reachable="$2"
+  local k prev curr verdict
+  k="$(source_key "$source")"
+  prev="$(read_state_field "recv_${k}" "")"
+  curr="$(probe_received "$RECEIVER_IP" "$source")"
+
+  verdict="$(frozen_input_classify "$prev" "$curr" "$EXPECTED_LIVE" "$sender_reachable")"
+  log "'$source' on $RECEIVER_NAME: prev=${prev:-<none>} curr=${curr:-<none>} live=$EXPECTED_LIVE sender_reachable=$sender_reachable -> $verdict"
+
+  # Persist the new baseline ONLY when the current sample is a real integer (a failed/absent read
+  # must not clobber the last good baseline -- next pass then still has a value to compare against).
+  case "$curr" in '' | *[!0-9]*) : ;; *) write_state_field "recv_${k}" "$curr" ;; esac
+
+  if [ "$verdict" = "ADVANCING" ]; then
+    local was_alerted recover
+    was_alerted="$(read_state_field "alerted_${k}" 0)"
+    recover="$(frozen_input_recovery_decision "$was_alerted" 1 | sed -n 's/^recover=//p')"
+    if [ "$recover" = "1" ]; then
+      if [ "$DRY_RUN" -eq 1 ]; then
+        log "[dry-run] WOULD send recovery: '$source' advancing again"
+      else
+        log "RECOVERY: '$source' advancing again -- firing recovery notification"
+        python3 "$NOTIFY" notify --body \
+          "✅ #1052 frozen-input: **$source** on $RECEIVER_NAME is advancing again ($REPO_SLUG)." \
+          >/dev/null 2>&1 || log "RECOVERY: airuleset.py notify failed (non-fatal)"
+      fi
+      write_state_field "alerted_${k}" 0
+    fi
+    clear_source_throttle "$k"
+    return 0
+  fi
+
+  # Only FROZEN feeds the confirm counter; UNKNOWN / SKIP reset it (a broken streak must restart).
+  local is_frozen=0
+  [ "$verdict" = "FROZEN" ] && is_frozen=1
+  local prev_confirm decision confirm act
+  prev_confirm="$(read_state_field "confirm_${k}" 0)"
+  decision="$(obs_watchdog_confirm "$prev_confirm" "$is_frozen" "$CONFIRM_THRESHOLD")"
+  confirm="$(printf '%s\n' "$decision" | sed -n 's/^confirm=//p')"
+  act="$(printf '%s\n' "$decision" | sed -n 's/^act=//p')"
+  write_state_field "confirm_${k}" "${confirm:-0}"
+
+  if [ "$verdict" != "FROZEN" ]; then
+    log "'$source' $verdict this pass -- not frozen, holding"
+    return 0
+  fi
+  log "'$source' confirm=$prev_confirm -> $confirm act=$act (threshold=$CONFIRM_THRESHOLD)"
+  if [ "${act:-0}" != "1" ]; then
+    log "'$source' FROZEN this pass but not yet CONFIRMED across $CONFIRM_THRESHOLD passes -- holding"
+    return 0
+  fi
+
+  # CONFIRMED frozen -> latch the recovery flag, then throttle-dedup on the source signature.
+  write_state_field "alerted_${k}" 1
+  local current_sig prior_sig prior_passes throttle_out alert_now new_sig new_passes detail
+  current_sig="frozen:${k}:${curr}"
+  prior_sig="$(read_state_field "alert_sig_${k}" "")"
+  prior_passes="$(read_state_field "alert_passes_${k}" 0)"
+  throttle_out="$(obs_watchdog_alert_throttle "$current_sig" "$prior_sig" "$prior_passes" "$ALERT_THROTTLE_PASSES")"
+  alert_now="$(printf '%s\n' "$throttle_out" | sed -n 's/^alert_now=//p')"
+  new_sig="$(printf '%s\n' "$throttle_out" | sed -n 's/^new_sig=//p')"
+  new_passes="$(printf '%s\n' "$throttle_out" | sed -n 's/^new_passes=//p')"
+  write_state_field "alert_sig_${k}" "$new_sig"
+  write_state_field "alert_passes_${k}" "$new_passes"
+
+  detail="$(frozen_input_alert_detail "$source" "$curr")"
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "[dry-run] WOULD alert: '$source' CONFIRMED frozen ($detail) alert_now=$alert_now"
+    return 0
+  fi
+  if [ "${alert_now:-0}" = "1" ]; then
+    log "ALERT: firing Discord notification for '$source' frozen"
+    python3 "$NOTIFY" notify --body \
+      "🚨 #1052 frozen-input: **$detail** ($REPO_SLUG). Confirmed over ${CONFIRM_THRESHOLD} consecutive passes while both $SENDER_NAME and $RECEIVER_NAME are reachable -- the input is silently frozen on its last frame (a DistroAV receiver-rebind / upstream freeze). Restart the frozen source's OBS receiver on $RECEIVER_NAME." \
+      >/dev/null 2>&1 || log "ALERT: airuleset.py notify failed (non-fatal)"
+  else
+    log "ALERT: suppressed by throttle (pass ${prior_passes}/${ALERT_THROTTLE_PASSES})"
+  fi
+}
+
+main() {
+  log "pass start (dry_run=$DRY_RUN, receiver='$RECEIVER', sender='$SENDER_NAME', sources='$SOURCES')"
+
+  # No-double-page guard: both the sender and the receiver box must be reachable per #1001's OWN
+  # on-disk state, else #1001 already owns the page -> sender_reachable=0 -> every source SKIPs.
+  local sender_down receiver_down sender_reachable
+  sender_down="$(netreach_box_alerted "$SENDER_NAME")"
+  receiver_down="$(netreach_box_alerted "$RECEIVER_NAME")"
+  if [ "$sender_down" = "1" ] || [ "$receiver_down" = "1" ]; then
+    sender_reachable=0
+    log "issue-1001 state: $SENDER_NAME down=$sender_down $RECEIVER_NAME down=$receiver_down -> #1001 owns the page, SKIP all sources this pass"
+  else
+    sender_reachable=1
+  fi
+
+  # Iterate ';'-separated source names (they contain spaces, so split on ';' not whitespace).
+  local old_ifs="$IFS" source
+  IFS=';'
+  for source in $SOURCES; do
+    IFS="$old_ifs"
+    source="${source#"${source%%[![:space:]]*}"}"   # ltrim
+    source="${source%"${source##*[![:space:]]}"}"    # rtrim
+    [ -n "$source" ] && handle_source "$source" "$sender_reachable"
+    IFS=';'
+  done
+  IFS="$old_ifs"
+  log "pass end"
+}
+
+# Run only when EXECUTED (systemd/CLI). Sourcing (tests) only defines the functions above.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main
+fi
