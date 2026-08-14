@@ -343,8 +343,7 @@ impl SendAuditSample {
     /// derived identically either way, so it is computed rather than stored (the
     /// emitted `dropped=` token is skipped like any other unrecognized token).
     pub fn dropped(&self) -> u64 {
-        // #874 RED stub — replaced by the real derivation in the GREEN commit.
-        0
+        self.offered.saturating_sub(self.sent)
     }
 }
 
@@ -354,17 +353,88 @@ impl SendAuditSample {
 /// ignored — the input and send parsers can run over the SAME log independently).
 /// Whitespace-token `key=value` scan, exactly like [`parse_audit_line`].
 pub fn parse_send_audit_line(line: &str) -> Option<SendAuditSample> {
-    // #874 RED stub — replaced by the real parser in the GREEN commit.
-    let _ = line;
-    None
+    const OUT_MARK: &str = "genlock-ndi-output audit '";
+    const FIL_MARK: &str = "genlock-ndi-filter audit '";
+    let (kind, mark_at, mark_len) = if let Some(i) = line.find(OUT_MARK) {
+        (SendAuditKind::Output, i, OUT_MARK.len())
+    } else if let Some(i) = line.find(FIL_MARK) {
+        (SendAuditKind::Filter, i, FIL_MARK.len())
+    } else {
+        return None;
+    };
+    let after_mark = &line[mark_at + mark_len..];
+    let quote_end = after_mark.find('\'')?;
+    let name = after_mark[..quote_end].to_string();
+
+    let mut s = SendAuditSample {
+        kind,
+        name,
+        offered: 0,
+        sent: 0,
+        send_wait_ms: 0.0,
+        max_send_wait_ms: 0.0,
+        mutex_wait_ms: None,
+        max_mutex_wait_ms: None,
+    };
+    let mut saw_any_field = false;
+
+    // Same whitespace-token `key=value` scan as `parse_audit_line`: unrecognized
+    // tokens (the `'%s':` name-quote fragment, the derived `dropped=` on the output
+    // line, the `(#874)` decoration) are simply skipped.
+    for tok in line[mark_at..].split_whitespace() {
+        let Some(eq) = tok.find('=') else {
+            continue;
+        };
+        let key = &tok[..eq];
+        let val = &tok[eq + 1..];
+        match key {
+            "offered" => {
+                if let Ok(v) = val.parse() {
+                    s.offered = v;
+                    saw_any_field = true;
+                }
+            }
+            "sent" => {
+                if let Ok(v) = val.parse() {
+                    s.sent = v;
+                    saw_any_field = true;
+                }
+            }
+            "send_wait_ms" => {
+                if let Ok(v) = val.parse() {
+                    s.send_wait_ms = v;
+                    saw_any_field = true;
+                }
+            }
+            "max_send_wait_ms" => {
+                if let Ok(v) = val.parse() {
+                    s.max_send_wait_ms = v;
+                    saw_any_field = true;
+                }
+            }
+            "mutex_wait_ms" => {
+                if let Ok(v) = val.parse() {
+                    s.mutex_wait_ms = Some(v);
+                    saw_any_field = true;
+                }
+            }
+            "max_mutex_wait_ms" => {
+                if let Ok(v) = val.parse() {
+                    s.max_mutex_wait_ms = Some(v);
+                    saw_any_field = true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    saw_any_field.then_some(s)
 }
 
 /// Parse every send-path audit line found in `text`, in order. Non-send lines
 /// (input audit lines, noise) are silently skipped.
 pub fn parse_send_audit_lines(text: &str) -> Vec<SendAuditSample> {
-    // #874 RED stub — replaced in the GREEN commit.
-    let _ = text;
-    Vec::new()
+    text.lines().filter_map(parse_send_audit_line).collect()
 }
 
 /// The per-run answer for one sender's captured window. The load-bearing outputs
@@ -402,19 +472,55 @@ pub struct SendAuditSummary {
 /// Summarize one sender's chronologically-ordered window into a
 /// [`SendAuditSummary`]. Returns `None` for an empty slice.
 pub fn summarize_send(samples: &[SendAuditSample]) -> Option<SendAuditSummary> {
-    // #874 RED stub — replaced in the GREEN commit.
-    let _ = samples;
-    None
+    let first = samples.first()?;
+    let last = samples.last()?;
+
+    let delta_offered = last.offered.saturating_sub(first.offered);
+    let delta_sent = last.sent.saturating_sub(first.sent);
+    // Cumulative timings only ever increase in practice; `.max(0.0)` keeps a
+    // truncated/rewound log from producing a negative in-window figure.
+    let delta_send_wait_ms = (last.send_wait_ms - first.send_wait_ms).max(0.0);
+    // Filter-only: `None` on an output window; on a filter window the delta of the
+    // cumulative mutex-acquire wait (first sample may predate the field only on a
+    // mixed capture, so treat a missing first as 0).
+    let delta_mutex_wait_ms = last
+        .mutex_wait_ms
+        .map(|l| (l - first.mutex_wait_ms.unwrap_or(0.0)).max(0.0));
+
+    Some(SendAuditSummary {
+        kind: last.kind,
+        name: last.name.clone(),
+        samples: samples.len(),
+        delta_offered,
+        delta_sent,
+        delta_dropped: delta_offered.saturating_sub(delta_sent),
+        delta_send_wait_ms,
+        max_send_wait_ms: last.max_send_wait_ms,
+        delta_mutex_wait_ms,
+        max_mutex_wait_ms: last.max_mutex_wait_ms,
+    })
 }
 
 /// Group `samples` by `(kind, name)`, then [`summarize_send`] each group. One
 /// summary per distinct sender, in first-seen order.
 pub fn summarize_send_all(samples: &[SendAuditSample]) -> Vec<SendAuditSummary> {
-    // #874 RED stub — replaced in the GREEN commit.
-    let _ = samples;
-    Vec::new()
+    let mut order: Vec<(SendAuditKind, String)> = Vec::new();
+    let mut groups: HashMap<(SendAuditKind, String), Vec<SendAuditSample>> = HashMap::new();
+    for sample in samples {
+        let key = (sample.kind, sample.name.clone());
+        if !groups.contains_key(&key) {
+            order.push(key.clone());
+        }
+        groups.entry(key).or_default().push(sample.clone());
+    }
+    order
+        .into_iter()
+        .filter_map(|key| {
+            let group = groups.remove(&key).unwrap_or_default();
+            summarize_send(&group)
+        })
+        .collect()
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -755,28 +861,42 @@ mod tests {
         // The whole point: same drop, two causes, separated by delta_send_wait_ms.
         // (a) BLOCKING send — dropped>0 AND a large in-window block time.
         let mut a0 = parse_send_audit_line(OUT_LINE).unwrap();
-        a0.offered = 0; a0.sent = 0; a0.send_wait_ms = 0.0;
+        a0.offered = 0;
+        a0.sent = 0;
+        a0.send_wait_ms = 0.0;
         let mut a1 = a0.clone();
-        a1.offered = 9000; a1.sent = 3000; a1.send_wait_ms = 100000.0;
+        a1.offered = 9000;
+        a1.sent = 3000;
+        a1.send_wait_ms = 100000.0;
         let blocking = summarize_send(&[a0, a1]).unwrap();
         assert_eq!(blocking.delta_dropped, 6000);
-        assert!(blocking.delta_send_wait_ms > 1000.0, "large block time => backpressure");
+        assert!(
+            blocking.delta_send_wait_ms > 1000.0,
+            "large block time => backpressure"
+        );
 
         // (b) UPSTREAM — same drop, but the send call barely blocked.
         let mut b0 = parse_send_audit_line(OUT_LINE).unwrap();
-        b0.offered = 0; b0.sent = 0; b0.send_wait_ms = 0.0;
+        b0.offered = 0;
+        b0.sent = 0;
+        b0.send_wait_ms = 0.0;
         let mut b1 = b0.clone();
-        b1.offered = 9000; b1.sent = 3000; b1.send_wait_ms = 2.5;
+        b1.offered = 9000;
+        b1.sent = 3000;
+        b1.send_wait_ms = 2.5;
         let upstream = summarize_send(&[b0, b1]).unwrap();
         assert_eq!(upstream.delta_dropped, 6000);
-        assert!(upstream.delta_send_wait_ms < 10.0, "near-zero block time => fault upstream");
+        assert!(
+            upstream.delta_send_wait_ms < 10.0,
+            "near-zero block time => fault upstream"
+        );
     }
 
     #[test]
     fn summarize_send_carries_filter_mutex_deltas_874() {
         let first = parse_send_audit_line(FIL_LINE).unwrap();
         let mut last = first.clone();
-        last.mutex_wait_ms = Some(9.400);      // +4.000 in-window
+        last.mutex_wait_ms = Some(9.400); // +4.000 in-window
         last.max_mutex_wait_ms = Some(2.000);
         let s = summarize_send(&[first, last]).unwrap();
         assert!((s.delta_mutex_wait_ms.expect("filter carries mutex delta") - 4.000).abs() < 1e-6);
@@ -789,12 +909,25 @@ mod tests {
         let text = format!("{OUT_LINE}\n{FIL_LINE}\n{fil2}\n{OUT_LINE}\n{FIL_LINE}");
         let send = parse_send_audit_lines(&text);
         let sums = summarize_send_all(&send);
-        assert_eq!(sums.len(), 3, "2ME PGM output + interkom + MULTIVIEW filters");
-        assert_eq!((sums[0].kind, sums[0].name.as_str()), (SendAuditKind::Output, "2ME PGM"));
+        assert_eq!(
+            sums.len(),
+            3,
+            "2ME PGM output + interkom + MULTIVIEW filters"
+        );
+        assert_eq!(
+            (sums[0].kind, sums[0].name.as_str()),
+            (SendAuditKind::Output, "2ME PGM")
+        );
         assert_eq!(sums[0].samples, 2);
-        assert_eq!((sums[1].kind, sums[1].name.as_str()), (SendAuditKind::Filter, "interkom"));
+        assert_eq!(
+            (sums[1].kind, sums[1].name.as_str()),
+            (SendAuditKind::Filter, "interkom")
+        );
         assert_eq!(sums[1].samples, 2);
-        assert_eq!((sums[2].kind, sums[2].name.as_str()), (SendAuditKind::Filter, "MULTIVIEW"));
+        assert_eq!(
+            (sums[2].kind, sums[2].name.as_str()),
+            (SendAuditKind::Filter, "MULTIVIEW")
+        );
         assert_eq!(sums[2].samples, 1);
     }
 
@@ -815,13 +948,14 @@ mod tests {
         // Defensive: a counter that appears to go backward (impossible in practice,
         // but a truncated/rewound log must not panic) saturates to 0.
         let mut first = parse_send_audit_line(OUT_LINE).unwrap();
-        first.offered = 100; first.sent = 100;
+        first.offered = 100;
+        first.sent = 100;
         let mut last = first.clone();
-        last.offered = 90; last.sent = 95; // both "decreased"
+        last.offered = 90;
+        last.sent = 95; // both "decreased"
         let s = summarize_send(&[first, last]).unwrap();
         assert_eq!(s.delta_offered, 0);
         assert_eq!(s.delta_sent, 0);
         assert_eq!(s.delta_dropped, 0);
     }
-
 }
