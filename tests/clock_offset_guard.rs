@@ -795,6 +795,74 @@ fn cli_still_passes_on_a_fresh_in_bound_offset() {
     assert!(stdout.contains("ALL CLEAR"), "stdout: {stdout}");
 }
 
+/// Write a MULTI-SAMPLE fresh ISO journal whose median is in-bound (+50us) but whose SPREAD
+/// (2540us) exceeds the default 2000us stability bound. The three [NTP] offset lines are seconds
+/// apart and lead the newest [PTP] line, so all are fresh. Used to prove the CLI's --stability-us
+/// path fails a scattered node (#837).
+fn write_journal_scattered(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("clock-offset-guard-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{name}.log"));
+    let mut f = std::fs::File::create(&path).unwrap();
+    f.write_all(
+        b"2026-07-08T10:00:00+02:00 NODE dantesync[1]: [NTP] offset:+50us (threshold:520us, adaptive)\n\
+2026-07-08T10:00:10+02:00 NODE dantesync[1]: [NTP] offset:+2500us (threshold:520us, adaptive)\n\
+2026-07-08T10:00:20+02:00 NODE dantesync[1]: [NTP] offset:-40us (threshold:520us, adaptive)\n\
+2026-07-08T10:00:25+02:00 NODE dantesync[1]: [PTP] NANO  Drift:   +12ns/s  Adj: +6.10ppm\n",
+    )
+    .unwrap();
+    path
+}
+
+#[test]
+fn cli_fails_drift_on_a_scattered_in_bound_median_node_837() {
+    // #837 at the CLI surface: a scattered-but-in-bound-median journal must now FAIL (exit 20,
+    // the DRIFT/UNSTABLE class) instead of the silent ALL CLEAR the median-only path gave. The
+    // default stability bound (2000us via DANTESYNC_STABILITY_US) is applied without a flag.
+    let journal = write_journal_scattered("cam1_cli_scattered_837");
+    let (code, stdout, stderr) = run_script_env(
+        &["--targets", "cam1=10.77.9.61"],
+        &[(
+            "CLOCK_GUARD_JOURNAL_OVERRIDE",
+            journal.to_str().expect("utf8 temp path"),
+        )],
+    );
+    assert_eq!(
+        code, 20,
+        "a scattered in-bound-median node must FAIL (20), never a silent ALL CLEAR. stdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        stdout.contains("UNSTABLE"),
+        "stdout must name UNSTABLE: {stdout}"
+    );
+    assert!(
+        stderr.to_uppercase().contains("UNSTABLE"),
+        "stderr summary must name the UNSTABLE failure: {stderr}"
+    );
+}
+
+#[test]
+fn cli_rejects_a_non_numeric_stability_us_837() {
+    // The new --stability-us flag is validated like --bound-us: a non-numeric value is a usage
+    // error (exit 1), never silently ignored (which would drop the spread check entirely).
+    let journal = write_journal_fresh("cam1_cli_badstab_837", "+300");
+    let (code, _stdout, stderr) = run_script_env(
+        &["--stability-us", "abc", "--targets", "cam1=10.77.9.61"],
+        &[(
+            "CLOCK_GUARD_JOURNAL_OVERRIDE",
+            journal.to_str().expect("utf8 temp path"),
+        )],
+    );
+    assert_eq!(
+        code, 1,
+        "non-numeric --stability-us must be a usage error (1). stderr={stderr}"
+    );
+    assert!(
+        stderr.contains("--stability-us"),
+        "the error must name the offending flag: {stderr}"
+    );
+}
+
 #[test]
 fn help_describes_the_offset_check_and_bound() {
     let (code, stdout, _stderr) = run_script(&["--help"]);

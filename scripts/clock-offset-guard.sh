@@ -1423,7 +1423,7 @@ offset_verdict_check() {
   spread="$(_fresh_offset_spread_us "$journal" "$fresh" 11)"
   case "$(dantesync_offset_verdict "$journal" "$fresh" "$bound" "$stability")" in
     ok)
-      printf '  %-14s OK       (fresh offset within %s us bound; spread %s us <= %s us stability)\n' \
+      printf '  %-14s OK       (fresh offset within %s us bound; spread %s us, stability %s us)\n' \
         "$label" "$bound" "${spread:-NA}" "${stability:-NA}"
       return 0 ;;
     drift)

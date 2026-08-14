@@ -393,6 +393,39 @@ fn gate_fails_on_a_linux_journal_node_with_scattered_but_in_bound_median_837() {
 }
 
 #[test]
+fn gate_fails_drift_unstable_on_a_linux_journal_node_837() {
+    // #837: median OUT of bound (+2600us) AND spread (2600us) past the 2000us stability bound ->
+    // "drift_unstable" -> BAD -> GATE FAIL (20), reported as NTP DRIFT+UNSTABLE. Pins that the
+    // both-fail verdict reaches the same hard-fail exit as plain drift/unstable at the gate level.
+    let j = write_dante_journal(
+        "cam1_drift_unstable_837",
+        "2026-07-08T10:00:00+02:00 cam1 dantesync[1]: [NTP] offset:+2600us (threshold:520us, adaptive)\n\
+2026-07-08T10:00:10+02:00 cam1 dantesync[1]: [NTP] offset:+5000us (threshold:520us, adaptive)\n\
+2026-07-08T10:00:20+02:00 cam1 dantesync[1]: [NTP] offset:+2400us (threshold:520us, adaptive)\n\
+2026-07-08T10:00:25+02:00 cam1 dantesync[1]: [PTP] NANO  Drift:   +12ns/s  Adj: +6.10ppm\n",
+    );
+    let (code, stdout, stderr) = run_gate_env(
+        &["--linux", "cam1=10.77.9.61"],
+        &[
+            (
+                "DANTESYNC_GATE_LINUX_JOURNAL_CAM1",
+                &j.display().to_string(),
+            ),
+            ("DANTESYNC_GATE_LINUX_HTTP_CAM1", NO_HTTP),
+        ],
+    );
+    assert_eq!(
+        code, 20,
+        "a drift+unstable journal node must FAIL the gate (20). stdout={stdout} stderr={stderr}"
+    );
+    assert!(stderr.contains("GATE FAILED"), "stderr: {stderr}");
+    assert!(
+        stdout.contains("DRIFT+UNSTABLE"),
+        "the journal-fallback report must name the DRIFT+UNSTABLE verdict: {stdout}"
+    );
+}
+
+#[test]
 fn gate_still_passes_a_linux_journal_node_with_a_tight_in_bound_spread_837() {
     // Non-regression companion: a healthy node whose fresh samples are tight (spread 130us) and
     // in-bound (median +50us) must STILL pass the journal fallback -- the spread check must not
