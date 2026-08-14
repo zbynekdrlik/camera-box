@@ -246,6 +246,18 @@ impl Fixture {
     }
 }
 
+/// #850 — reap the spawned child on the PANIC path too, not only the happy path. Every test's
+/// explicit `force_kill()` is its LAST statement, so an earlier `assert!` failure unwinds past it
+/// and (before this impl) leaked the child — a SIGTERM-immune fixture then reparented to init and
+/// survived everything but `kill -9`. `Drop` runs during unwind, so the child dies whether the
+/// test passes or panics. `force_kill()` is idempotent (`Child::kill`/`wait` tolerate an
+/// already-dead child), so the existing explicit `force_kill()` calls stay a harmless no-op.
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        self.force_kill();
+    }
+}
+
 /// Spawn `bash -c 'exec -a NAME sleep 9999'` (a cooperative long-lived process under an
 /// arbitrary renamed argv[0]), promptly-reaped (see `Fixture`).
 fn spawn_renamed_cooperative(name: &str) -> Fixture {
