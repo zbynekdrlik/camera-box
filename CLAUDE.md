@@ -50,6 +50,7 @@ Rust app for embedded NDI cameras (CAM1-4): multi-camera NDI streaming with soft
 - Offline audio-quality (THD+N) measurement (coherent-sampling window-leakage trap, the CI-only-vendor-code standalone-harness pattern, CPU-timing noise on a shared box, #929; the swr_set_compensation revert-vs-reissue proof + the stateless distance_ms-widening quantization fix, #1016) → `.claude/rules/audio-quality-measurement.md` (auto-loads on its `paths:`)
 - Absolute e2e latency + freeze bounds — the MAIN E2E (recording-verdict) vs LOOPBACK E2E (frame-probe/differ) are SEPARATE gate subsystems; calibrate bounds from `/tmp/recording-e2e-*/verdict-*.json`; crate-root `gates_overall_pass()` seam; cam→stream ~1s hold is by design, freeze=frozen_leg already report-only (#1035) → `.claude/rules/e2e-latency-gate.md` (auto-loads on its `paths:`)
 - imag-nb power/thermal envelope (the MMIO RAPL PL1 25W clamp diagnosis, identity-based zone selection, the source-only shared gather+verdict+guard-decision lib, the check_imag_report optional-arg convention, step-at-the-END TOTAL_STEPS rule, #1040) → `.claude/rules/imag-power-envelope.md` (auto-loads on its `paths:`)
+- Re-pinning a probe-gated `ReleaseCadence` mirror against OBSERVED output (the authority-importing default-feature replica — Rust analogue of the vendored-C lift-and-compile; the phase-anchored-selection==newest-due-when-anchor-unset finding; fmt-check parses probe code; demonstrative set-anchor tests, #1037) → `.claude/rules/probe-mirror-replica-testing.md` (auto-loads on its `paths:`)
 
 ## DO NOT DELETE These Files
 
@@ -540,7 +541,15 @@ bypass only helps a PURE module already extracted to the crate root (above); a c
 entirely to `recording-verdict.rs`/`src/probe/` has **zero local verification path** — not even a
 compile check — until CI runs. Treat every such change with extra manual review rigor (type/
 signature checks, `cargo fmt --all -- --check`, diffing brace/paren balance against `origin/main`)
-before pushing, and expect CI to be the FIRST place a mistake surfaces.
+before pushing, and expect CI to be the FIRST place a TYPE mistake surfaces. One partial local net
+IS worth running deliberately: `cargo fmt --all --check` DOES parse and format-check the
+probe-gated files — rustfmt is a purely syntactic tool and ignores `cfg`, so it follows `#[cfg(...)]
+mod` paths and formats `#![cfg(feature = "probe")]` test files like any other. A fmt-clean result
+therefore PROVES the probe code parses and is brace/format-balanced (it catches a stray brace,
+a broken literal, a mis-indented block) even though nothing TYPE-checks it locally. Confirmed live
+#1045 (a ~180-line mechanical removal from `src/probe/differ.rs` + a probe-gated `tests/*.rs`): the
+whole edit was validated locally by fmt + hand-audit before CI, and fmt would have flagged any
+structural slip from the multi-edit removal.
 
 **Gotcha within that extra-review-rigor pass — adding an `f64` field to a probe-gated struct that
 derives `Eq` breaks the build (#726).** `f64`/`f32` have no `Eq` impl (NaN has no total order), so

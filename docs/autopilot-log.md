@@ -7681,3 +7681,65 @@ does the live rig verification of the new whole-chain checks and closes it.
   all green. NO windows-genlock*.yml or parity-test edit needed — every pwsh/Rust anchor is a
   whole-file or statement-level substring, and the enclosing-function slices resolve inside the new
   fn because it precedes ready_async_frame.
+
+## 2026-08-14 — round-3 integration (PR 1046: tickets 1035 + 1038) — merge, first live latency-gated E2E, deploy
+- Merged autopilot-1035 + autopilot-1038 serially (two append-append autopilot-log conflicts, all entries kept). Tier-0 only at integration; worktree target/ dirs purged.
+- All 4 CI runs green FIRST TRY — including the full-path E2E running for the first time under the new absolute cam-to-strih 400 ms latency gate (healthy rig ~210-240 ms; bound calibrated from 20 green verdicts).
+- Deploy: obs.dll (with the extracted genlock_release_tick) to strih + stream (backups *.pre-1046, session-1 relaunches, render tick ENABLED, TEST burns verified ON), full bundle to imag (render 4.15-4.35 ms @ 60.000 fps post-restart, 29 W envelope holding).
+- Round 4 dispatched in parallel during the CI wait: probe ReleaseCadence phase-anchor mirror + the differ dead-mode removal split from the 1035 work.
+
+## issue 1037 — probe ReleaseCadence adopts the phase-anchored relock selection (2026-08-14, autopilot-1037 worktree)
+
+- Commit `ab4c608ff` (on version bump `1f2d69796` → 1.7.0-dev.448). ONE file: `src/probe/genlock.rs`.
+  No vendored C, no other test file, no workflow touched — the C + Tier-0 authority already had the
+  issue-1003 phase-continuity selection; this brought the last mirror (the probe reference sim) onto it.
+- Change: added `ReleaseCadence::phase_anchor_ns` (mirror of the C `genlock_phase_anchor_ns`), a thin
+  `relock_select` adapter over the crate-root authority (`relock_select_nearest`/`relock_anchor_age_ns`
+  — NOT re-implemented), ACQUIRE+BACKLOG select-nearest, the BACKLOG `sel==0 && anchor!=0` stale-anchor
+  self-heal, anchor update on STEADY (N==1 and N>=2) + GAP presents via `phase_anchor_from_present`,
+  and a narrowed SCOPE NOTE (only the issue-940-piece-3 raw-vs-grid-pinned deadline divergence remains).
+- KEY FINDING: NONE of the ~dozen existing tick-driven cadence tests changed. On a cold ACQUIRE the
+  anchor is UNSET, so `relock_anchor_age_ns(0, reserve)` = configured latency → target == the raw
+  deadline → nearest == newest-due (identical). The relock tests assert invariants (relocked /
+  dropped>0 / ordered / mean-delta), not exact acquire/relock stamps, so they hold too. The phase
+  difference only manifests at a relock with a SET deep anchor — which the existing suite never
+  exercises. Three NEW demonstrative tests added for exactly that (inherit-not-newest-due,
+  anchor-lifecycle, stale-anchor self-heal).
+- DE-RISK METHOD (probe is CI-only, no local compile): built a default-feature scratch replica that
+  `use camera_box::genlock_backlog::*` (the REAL authority, zero arithmetic copy-drift) + a byte-faithful
+  copy of the new tick + the sim harnesses, and RAN it to OBSERVE every re-pin and every new-test value
+  (backlog inherit: presents index 12 not the newest-due 39, keeps the 27-frame ~900 ms conveyor; steady
+  anchor 10 ms; gap anchor recomputed to 15 ms; self-heal clears to 0 → presents index 39). This is the
+  Rust analogue of the vendored-libobs-change-safety "lift-and-compile-standalone" recipe.
+- Local rigor: `cargo fmt --all --check` PASSES and is a real syntax gate here (rustfmt parses cfg'd
+  code); `cargo check` + `clippy --all-targets -D warnings` + `test --no-run` green on default features;
+  brace/paren/bracket delta vs origin/dev net-zero (the ±1 paren/bracket is pre-existing prose, same on
+  base). The parity gate `tests/genlock_relock_selection_parity.rs` needs NO new vectors — the mirror
+  routes through the authority it already covers, joining no new selection surface.
+
+## 2026-08-14 — issue 1045: remove the dead documented-bound loss mode (worktree autopilot-1045)
+
+Split out of issue 1035. Removed the two-armed loss gate in `src/probe/differ.rs` — deleted
+`HopInput.max_loss_pct` + `FullSpanBounds.max_loss_pct`, the derived `single_copy_loss_pct`, and the
+`loss_ok` match's `Some(bound) => single_copy_loss_pct <= bound` arm, collapsing to
+`let loss_ok = dropped_ids.is_empty();`. Strict zero-loss is now the ONLY loss mode. The `Some(pct)`
+budget existed solely for strih→stream's OBS render-clock drop pending genlock (the clock-sync
+prerequisite, closed 2026-06-15); the rig is genlocked so it was dead code.
+
+- Version bump 1.7.0-dev.447 → .448 (26bf91528).
+- Removal + dead-test deletion in ONE commit (43023349f) — the field removal breaks the removed
+  mode's own tests' compilation, so they must go in the same commit to keep every commit buildable.
+- Review 🔵 (stale `None` in a doc comment) fixed same-branch (4384f4532).
+- Deleted exactly 6 tests that covered ONLY the removed mode (5 in differ.rs +
+  `full_span_honours_the_documented_loss_bound_not_strict_zero` in tests/full_span_endpoint.rs).
+  KEPT `single_copy_total`/`single_copy_dropped` (the issue-29 min_single_copy INCONCL guard needs
+  them) and every strict-zero-loss + issue-29 guard test with assertions intact — only the forced
+  `hop_single_copy(...)` 4→3-arg signature shrink + one reworded stale comment.
+- Validation before touching: `grep -rn max_loss_pct src/ tests/ scripts/ .github/` hit ONLY
+  differ.rs + full_span_endpoint.rs; no `src/bin/*.rs` constructs `HopInput`/`FullSpanBounds`; no
+  `--max-loss-pct` CLI flag exists. So the removal is contained to those two files.
+- KEY REUSABLE INSIGHT (added to CLAUDE.md Local Build Policy): `cargo fmt --all --check` DOES
+  parse + format-check `#[cfg(feature="probe")]` files — rustfmt ignores cfg — so it is a real
+  partial local net (parse + brace/format balance) on probe code that `check`/`clippy`/`test
+  --no-run` on default features never compile. fmt-clean + hand-audit was the whole local proof
+  here; CI is the first TYPE check.

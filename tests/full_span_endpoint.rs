@@ -5,9 +5,8 @@
 //!   * `full_span_diff` — a SINGLE source-tap vs endpoint-tap aggregate (the
 //!     headline "every source frame reached the last endpoint" number), not a sum
 //!     of adjacent-pair diffs. It delegates to `diff_hop`, so it obeys the SAME
-//!     contract as the per-hop gates: strict zero-loss by default, the documented
-//!     single-copy bound (`max_loss_pct`), the `min_frames` non-vacuous floor, and
-//!     the #29 single-copy INCONCL guard.
+//!     contract as the per-hop gates: strict zero-loss, the `min_frames`
+//!     non-vacuous floor, and the #29 single-copy INCONCL guard.
 //!   * `absolute_latency_stats` — `recv_ts(endpoint) − gen_ts(source)` paired by
 //!     frame_id. Sound ONLY when both timestamps share one synced wall clock
 //!     (DanteSync CLOCK_REALTIME, strih = master); the arithmetic itself is pure.
@@ -48,12 +47,11 @@ fn ep(frame_id: u32, gen_ms: i64, recv_ms: i64) -> Observed {
     }
 }
 
-/// Strict zero-loss bounds (the default): no documented loss budget, a low
-/// `min_frames` floor so small fixtures are not vacuous, no INCONCL guard.
+/// Strict zero-loss bounds (the default): a low `min_frames` floor so small
+/// fixtures are not vacuous, no INCONCL guard.
 fn strict() -> FullSpanBounds {
     FullSpanBounds {
         min_frames: 1,
-        max_loss_pct: None,
         min_single_copy: 0,
     }
 }
@@ -160,7 +158,6 @@ fn full_span_min_frames_floor_rejects_a_one_frame_endpoint() {
     let endpoint = vec![ep(7, 231, 351)]; // one frame, span [7,7], no in-span drop
     let bounds = FullSpanBounds {
         min_frames: 100,
-        max_loss_pct: None,
         min_single_copy: 0,
     };
     let r = full_span_diff(&source, &endpoint, &bounds);
@@ -176,39 +173,6 @@ fn full_span_min_frames_floor_rejects_a_one_frame_endpoint() {
 }
 
 #[test]
-fn full_span_honours_the_documented_loss_bound_not_strict_zero() {
-    // The #1 review finding (verdict regression): with a documented per-hop loss
-    // budget set on the endpoint, a small loss within the budget must PASS the
-    // full span — a strict full-span gate must NOT override the deliberately
-    // relaxed budget. 100 single-copy source ids, the endpoint drops 3 (3%) ->
-    // under a 10% documented bound -> PASS; strict (None) would FAIL.
-    let source: Vec<Observed> = (0..100).map(|i| src(i, i as i64 * 33)).collect();
-    // Endpoint carries every id EXCEPT 10, 20, 30 (3 drops), spanning [0,99].
-    let endpoint: Vec<Observed> = (0..100)
-        .filter(|i| ![10u32, 20, 30].contains(i))
-        .map(|i| ep(i, i as i64 * 33, i as i64 * 33 + 120))
-        .collect();
-
-    let bounded = FullSpanBounds {
-        min_frames: 1,
-        max_loss_pct: Some(10.0),
-        min_single_copy: 0,
-    };
-    let r = full_span_diff(&source, &endpoint, &bounded);
-    assert_eq!(r.single_copy_total, 100);
-    assert_eq!(r.single_copy_dropped, 3);
-    assert_eq!(
-        r.verdict,
-        HopVerdict::Pass,
-        "3% loss under a 10% documented bound must PASS (no strict override)"
-    );
-
-    // Same data, strict (no documented bound) -> the 3 drops FAIL the run.
-    let r_strict = full_span_diff(&source, &endpoint, &strict());
-    assert_eq!(r_strict.verdict, HopVerdict::Fail);
-}
-
-#[test]
 fn full_span_inconclusive_when_too_few_single_copy_frames() {
     // The #29 oversample guard applies end-to-end too: a clean run with fewer
     // single-copy source→endpoint frames than the guard cannot be CERTIFIED.
@@ -218,7 +182,6 @@ fn full_span_inconclusive_when_too_few_single_copy_frames() {
     let endpoint = vec![ep(0, 0, 120), ep(1, 33, 153), ep(2, 66, 186)];
     let bounds = FullSpanBounds {
         min_frames: 1,
-        max_loss_pct: None,
         min_single_copy: 10,
     };
     let r = full_span_diff(&source, &endpoint, &bounds);
@@ -239,15 +202,11 @@ fn full_span_inconclusive_when_too_few_single_copy_frames() {
 /// but below the single-copy guard → Inconclusive.
 fn hop(verdict: HopVerdict) -> HopReport {
     let up = vec![src(0, 0), src(1, 33), src(2, 66)];
-    let (down, max_loss_pct, min_single_copy) = match verdict {
-        HopVerdict::Pass => (
-            vec![ep(0, 0, 10), ep(1, 33, 43), ep(2, 66, 76)],
-            None,
-            0usize,
-        ),
-        HopVerdict::Fail => (vec![ep(0, 0, 10), ep(2, 66, 76)], None, 0), // id 1 dropped in span
+    let (down, min_single_copy) = match verdict {
+        HopVerdict::Pass => (vec![ep(0, 0, 10), ep(1, 33, 43), ep(2, 66, 76)], 0usize),
+        HopVerdict::Fail => (vec![ep(0, 0, 10), ep(2, 66, 76)], 0), // id 1 dropped in span
         HopVerdict::Inconclusive => {
-            (vec![ep(0, 0, 10), ep(1, 33, 43), ep(2, 66, 76)], None, 10) // clean but < guard
+            (vec![ep(0, 0, 10), ep(1, 33, 43), ep(2, 66, 76)], 10) // clean but < guard
         }
     };
     let r = diff_hop(HopInput {
@@ -259,7 +218,6 @@ fn hop(verdict: HopVerdict) -> HopReport {
         min_frames: 1,
         max_p99_latency_ms: None,
         max_freeze_periods_gate: None,
-        max_loss_pct,
         min_single_copy,
     });
     assert_eq!(
@@ -279,7 +237,6 @@ fn span(verdict: HopVerdict) -> camera_box::probe::differ::FullSpanReport {
             vec![ep(0, 0, 10), ep(1, 33, 43), ep(2, 66, 76)],
             FullSpanBounds {
                 min_frames: 1,
-                max_loss_pct: None,
                 min_single_copy: 10,
             },
         ),
