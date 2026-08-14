@@ -1,9 +1,11 @@
 ---
 paths:
   - "scripts/phase_sync_calibrate.py"
+  - "scripts/phase_sync_reanchor.py"
   - "scripts/latency_pins_snapshot.py"
   - "scripts/phase_sync_active_floor_check.py"
   - "tests/python/test_phase_sync_calibrate.py"
+  - "tests/python/test_phase_sync_reanchor.py"
   - "tests/python/test_latency_pins_snapshot.py"
   - "tests/python/test_phase_sync_active_floor_check.py"
 ---
@@ -105,3 +107,46 @@ the calibrator in the same breath. Note that `phase-sync-active-floor-gate` is N
 `probe-tools-linux-amd64` artifact (the harness builds these gate bins itself at
 `recording-e2e.sh`'s own build step); to run the independent check by hand, build just that one
 small default-feature bin: `cargo build --release --bin phase-sync-active-floor-gate  # airuleset:build-ok`.
+
+# The `[4h/8]` floor gate now HAS an automatic establisher — `phase_sync_reanchor.py` (#900)
+
+`scripts/recording-e2e.sh` runs a `[4h/8pre]` phase-sync RE-ANCHOR immediately before the
+`[4h/8]` active-floor gate, ON by default (opt-out `PHASE_REANCHOR=0`), gated on `ALL_CAMBOX=1`,
+FAIL-LOUD. It re-derives the ACTIVE pin set from the persisted `phase-sync-last.json` transits and
+applies it, so the gate always has an establisher — closing the "gate always on, its establisher
+(`[4g/8]` #757 auto-pin) always off" landmine (issue 898: retiring the floor camera red-lit a
+healthy rig with no remedy).
+
+**RE-ANCHOR ≠ RE-MEASURE — this is why it is safe where the `[4g/8]` #757 auto-pin was not.** It
+introduces NO new measurement: it reads each camera's pin-INDEPENDENT `latency_ms` (the transit
+basis, already persisted), restricts to `CAMERA_ACTIVE_SET`, and re-runs the UNCHANGED
+`compute_phase_sync_offsets` kernel. Active-set unchanged ⇒ provable no-op (same transits → same
+pins → live pins already match → zero writes); a camera leaving/joining ⇒ a pure CONSTANT shift of
+every surviving pin (mutual differences preserved). Keep `PRERECORD_PHASE_CALIBRATE` off — the
+re-anchor does NOT re-open the #757 measurement question.
+
+**It PRESERVES the uniform jitter-headroom margin, it does not strip it.** `apply_margin` (issue
+757) adds the SAME margin to every camera's kernel offset, and the kernel pins the slowest camera
+at `PHASE_SYNC_FLOOR_MS` — so the slowest camera's applied pin is `floor+margin` and is the GLOBAL
+MINIMUM offset. Therefore `recover_uniform_margin()` = `min(persisted offset_ms) - floor`, and the
+re-anchor re-adds it. This reproduces a margined calibration EXACTLY (not a 1ms churn) because
+`round(int + margin_float) == int + round(margin_float)` for the integer kernel offsets — the
+recovered integer margin is consistent across all cameras. A margin-free calibration (the standing
+default) yields margin 0 → exact no-op. If you recompute pins from `latency_ms` WITHOUT re-adding
+this margin you silently STRIP the #757 headroom and churn every run — re-introducing the
+copies≈gaps jitter-boundary regression on the very run that gates zero-loss.
+
+**It reads `phase-sync-last.json` but NEVER clobbers it.** The durable file is the read-only
+transit basis for ALL cameras; the applied set records only to a RUN-SCOPED `--out-json`
+(the harness passes `$OUTDIR/reanchor-strih-pins-${RUN_ID}.json`). Writing the active-only subset
+back over the durable file would drop every currently-inactive camera's transit basis. There is a
+defensive guard rejecting `--out-json == --persisted-json`.
+
+**FAIL-LOUD is the whole point (unlike `[4g/8]`'s best-effort `set +e`):** a missing/malformed
+persisted file, or one that does not cover every active camera, is a genuine "no calibration basis"
+state — `phase_sync_reanchor.py` exits nonzero so `[4h/8]` is never reached behind pins nobody set.
+The pure decision layer (`load_persisted_transits` / `restrict_to_active` coverage-fail /
+`plan_reanchor` no-op-vs-apply / `recover_uniform_margin`) is Tier-0 unit-tested; the harness
+wiring/ordering/on-by-default/fail-loud is guarded by `tests/harness_phase_sync_reanchor_900.rs`.
+The `main()`/`--apply` tests mock the WS layer and MUST still pin `--persisted-json`/`--out-json` to
+`tmp_path` (the real-home-clobber hazard above applies to `main()` regardless of what it is testing).
