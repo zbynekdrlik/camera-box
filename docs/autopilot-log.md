@@ -8300,3 +8300,9 @@ bundle-state-server deployed to both boxes.
   still fails). Version 1.7.0-dev.454.
 - Gotcha logged to `.claude/rules/dantesync-clock-offset-gate.md`: journal fixture env is a FILE
   PATH (not content); distinct `updated_ts` per HTTP sample; awk-rewrite drops the script +x bit.
+
+## 2026-08-14 — round-9 integration (PR 1056: 8 lanes, 10 tickets closed) — the ±20 milestone run
+- Merged 8 worktree branches serially (857+850, 859-instrument, 916-docs, 938+1011, 946+910, 1004, 1052, 1055); full suite 210 binaries green on the merged state; one GitHub-infra 429 setup transient rerun.
+- The PR's green gate measured A/V +6.4/-0.6/-9.5 ms — the FIRST run inside the target ±20 band, with copies/gaps tolerance 2, zero windows over.
+- The slew-aware gate sampling (ticket 1055) removes the day's dominant false-refusal source; the burn enumeration (938+1011) closes the live-QR-on-air hole; forensics (946+910) complete the restart attribution; painter EXONERATED on the shared-duplicate residual (859 instrument, ticket open for the downstream walk).
+- frozen-input watchdog installed+running on dev1 (first pass clean). Worktrees pruned to zero.
