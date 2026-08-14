@@ -156,15 +156,16 @@ struct RunResult {
 /// The artifact's version is fixed to `9.9.9-test`; pass a different `remote_version` to force a
 /// post-deploy mismatch.
 fn run_fleet(remote_version: &str, journal_line: &str, sha_match: bool) -> RunResult {
-    let tmp = std::env::temp_dir().join(format!(
-        "deployfleet_test_{}_{}",
-        std::process::id(),
-        // unique per call so concurrent test threads don't collide
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    // #975: a kernel-atomic unique tempdir, auto-removed when `tmp_guard` drops at end of scope.
+    // The prior hand-rolled `temp_dir()/deployfleet_test_{pid}_{nanos}` name keyed uniqueness
+    // SOLELY on the nanosecond timestamp (the pid is constant across every test thread in one
+    // binary), so two concurrent `run_fleet` calls that read the same clock tick shared one `bin/`
+    // dir and their PATH-injected `sha256sum` stubs collided — a `sha_match:false` call's stub
+    // (returns "bbbb") contaminating a `sha_match:true` call, the intermittent "local aaaa !=
+    // remote bbbb" coverage-runner flake. `tempfile::tempdir()` cannot collide, by construction,
+    // and its Drop-based cleanup removes the manual `remove_dir_all` race too.
+    let tmp_guard = tempfile::tempdir().expect("tempdir");
+    let tmp = tmp_guard.path();
     let bin = tmp.join("bin");
     fs::create_dir_all(&bin).unwrap();
 
@@ -245,7 +246,7 @@ bash -c "$cmd"
         .output()
         .expect("failed to run deploy-fleet.sh under stubs");
 
-    let _ = fs::remove_dir_all(&tmp);
+    // tmp_guard drops at end of scope and removes the tree (no manual remove_dir_all race).
     RunResult {
         success: out.status.success(),
         output: format!(

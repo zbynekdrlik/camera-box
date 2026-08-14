@@ -109,23 +109,55 @@ except Exception:
 
 # rig_lease_holder_summary -> echo "<repo>#<run_id> run_url=<url> job=<job> expected_release_at=<ts>"
 # read from the CURRENT holder.json, or a clearly-marked placeholder if it is missing/corrupt.
+#
+# #970/#980: read holder.json ATOMICALLY -- ONE open()+json.load() that formats the whole line in a
+# single python invocation, NEVER five separate rig_lease_read_holder_field reads. The five-read
+# form could TEAR when a releasing foreign holder rm's the lockdir mid-summary (repo read succeeds,
+# then the file vanishes and the rest read empty), leaking a garbled partial line
+# ("<repo># run_url= job= expected_release_at=") that the "$repo$run_id" corrupt-guard did not even
+# catch. With one read, a concurrent unlink after open() cannot truncate the already-open FD
+# (Linux), so the result is all-or-nothing: a fully-consistent summary, or a clean placeholder.
 rig_lease_holder_summary() {
   local path; path="$(rig_lease_holder_path)"
-  if [ ! -f "$path" ]; then
-    printf 'unknown (no holder.json present)\n'
-    return 0
-  fi
-  local repo run_id run_url job expected
-  repo="$(rig_lease_read_holder_field repo)"
-  run_id="$(rig_lease_read_holder_field run_id)"
-  run_url="$(rig_lease_read_holder_field run_url)"
-  job="$(rig_lease_read_holder_field job)"
-  expected="$(rig_lease_read_holder_field expected_release_at)"
-  if [ -z "$repo$run_id" ]; then
-    printf 'unknown (corrupt holder.json)\n'
-    return 0
-  fi
-  printf '%s#%s run_url=%s job=%s expected_release_at=%s\n' "$repo" "$run_id" "$run_url" "$job" "$expected"
+  python3 -c '
+import json, sys
+path = sys.argv[1]
+try:
+    with open(path) as f:
+        data = json.load(f)
+except FileNotFoundError:
+    print("unknown (no holder.json present)")
+    sys.exit(0)
+except Exception:
+    print("unknown (corrupt holder.json)")
+    sys.exit(0)
+repo = str(data.get("repo", "") or "")
+run_id = str(data.get("run_id", "") or "")
+if not (repo or run_id):
+    print("unknown (corrupt holder.json)")
+    sys.exit(0)
+run_url = str(data.get("run_url", "") or "")
+job = str(data.get("job", "") or "")
+expected = str(data.get("expected_release_at", "") or "")
+print(f"{repo}#{run_id} run_url={run_url} job={job} expected_release_at={expected}")
+' "$path" 2>/dev/null || printf 'unknown (corrupt holder.json)\n'
+}
+
+# rig_lease_read_holder_repo_run_id -> print "<repo>\t<run_id>" from ONE atomic read of holder.json
+# (both fields from a single open()+json.load(), so a concurrent lockdir removal BETWEEN them cannot
+# tear the pair -- #970/#980, the same atomicity rig_lease_holder_summary needs). "\t" on absent /
+# corrupt. Callers split on the tab.
+rig_lease_read_holder_repo_run_id() {
+  local path; path="$(rig_lease_holder_path)"
+  python3 -c '
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        d = json.load(f)
+    print(str(d.get("repo", "") or "") + "\t" + str(d.get("run_id", "") or ""))
+except Exception:
+    print("\t")
+' "$path" 2>/dev/null || printf '\t\n'
 }
 
 # rig_lease_holder_run_status <repo> <run_id> -> echo "in_progress" or "not_in_progress".
@@ -155,9 +187,10 @@ rig_lease_is_stale() {
     return 0
   fi
 
-  local repo run_id status
-  repo="$(rig_lease_read_holder_field repo)"
-  run_id="$(rig_lease_read_holder_field run_id)"
+  local pair repo run_id status
+  pair="$(rig_lease_read_holder_repo_run_id)"
+  repo="${pair%%$'\t'*}"
+  run_id="${pair#*$'\t'}"
   status="$(rig_lease_holder_run_status "$repo" "$run_id")"
   [ "$status" = "not_in_progress" ] && return 0
 

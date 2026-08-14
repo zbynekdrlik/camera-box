@@ -7939,3 +7939,37 @@ RED `ca9c40492` (stub always Publishing) → GREEN `e0f84f065` → review 🔵 f
 (stamp on confirmed dispatch, catching a persistently-failing send too). Test:
 `emit_freeze::tests::stale_emit_while_capture_returning_is_frozen` (RED on stub → GREEN), 9/9.
 Tier-0: fmt clean, clippy --all-targets -D warnings clean.
+
+## 2026-08-14 — flaky-test hardening bundle #970 + #980 + #975 (worktree autopilot-970, v1.7.0-dev.452)
+
+#970 + #980 (SAME root cause, two facets): `rig_lease_holder_summary()` (scripts/lib/rig-lease.sh)
+read holder.json via FIVE separate python3 field-reads; a releasing foreign holder rm-ing the
+lockdir mid-summary TORE the read — `repo` succeeded then the file vanished and the rest read empty,
+logging `RIG_LEASE_HELD_BY=zbynekdrlik/restreamer# run_url= job=` (#970) or `unknown (corrupt
+holder.json)` (#980), flaking `foreign_lease_released_within_wait_budget_lets_us_proceed` in
+tests/harness_rig_busy_gate_lease_830.rs. Reproduced 250/250 FAIL under 10x parallel load (0/60 at
+low load). #980's "shared lockdir across sibling tests" hypothesis was wrong — tests already isolate
+RIG_LEASE_DIR per-test; the race is intra-test (releaser thread vs summary), widened by load.
+Fix (two structural-immunity parts): (1) rig_lease_holder_summary now reads holder.json in ONE
+python3 open()+json.load() that formats the whole line — a concurrent unlink after open() cannot
+truncate an already-open FD on Linux, so the result is all-or-nothing; output format byte-identical
+(harness_rig_lease.rs + rig-busy-gate.sh sed parsing unchanged). (2) the flaky integration test now
+releases the foreign holder DETERMINISTICALLY via a RIG_LEASE_RUN_STATUS_CMD stub that removes the
+lockdir on the gate's 2nd poll (after poll 0 has observed+logged the live holder), replacing a
+600ms wall-clock sleep that raced the gate's load-dependent first read. New deterministic RED test
+tests/harness_rig_lease_holder_summary_atomicity_980.rs (python3 shim deletes holder.json after the
+first read → RED on 5-read, GREEN on atomic). Post-fix: 376 whole-binary runs under 8x load + 40/40
+no-load, 0 failures. Commits: RED test 06a0f3968, GREEN fix 1cf252db2, fmt 319c0d650.
+
+#975: tests/harness_deploy_fleet.rs `run_fleet` keyed its per-call temp dir on pid(constant across
+all test threads in one binary) + nanos, so two concurrent calls that read the same clock tick
+shared a bin/ dir and their PATH-injected sha256sum stubs collided (a sha_match:false call's "bbbb"
+stub contaminating a sha_match:true call — the `local aaaa != remote bbbb` coverage-runner flake).
+Rare timing collision (SystemTime has true-ns resolution here — not reproducible on demand);
+structural fix = tempfile::tempdir() (kernel-atomic O_EXCL, cannot collide; Drop cleanup removes the
+manual remove_dir_all race too). 185 whole-binary runs under 8x load, 0 failures; 16/16 suite green.
+Commit d3b875c13. GOTCHA for future workers: any test-harness helper that hand-rolls a temp path
+from pid+timestamp is a latent collision — pid is constant within a binary, so timestamp is the only
+key; use tempfile::tempdir() instead.
+
+Worktree round; supervisor integrates (merge → CI → deploy). One PR closes #970 #975 #980.

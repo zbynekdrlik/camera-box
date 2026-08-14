@@ -10,6 +10,7 @@ paths:
   - "scripts/*_calibrate.py"
   - "scripts/recording-e2e.sh"
   - "scripts/rig-mode.sh"
+  - "scripts/lib/rig-lease.sh"
 ---
 
 # CI + bash-test-harness gotchas (#826)
@@ -581,3 +582,40 @@ workflow pwsh/bash assertions. Distinguish readers of the MEASURED value (`gate_
 by a re-arm, since the measurement itself never changed) from readers of the GATING flag/behavior
 (`gates_overall_pass`, an unconditional `overall_pass`/exit-code assertion on a fixture that fails
 the term) — only the latter class needs updating.
+
+## A test-harness temp dir hand-rolled from pid+timestamp is a latent collision (#975)
+
+`std::process::id()` is CONSTANT across every test thread in one test binary, so a per-call temp
+dir named `temp_dir()/foo_{pid}_{nanos}` keys its uniqueness SOLELY on the timestamp. Two
+concurrent calls that read the same clock tick share one dir — and if that dir holds PATH-injected
+stubs (a `sshpass`/`sha256sum`/`camera-box` mock), one call's stub silently contaminates the other
+(live: harness_deploy_fleet.rs's `run_fleet`, `local aaaa != remote bbbb` under the coverage
+runner's heavier `--all-features` parallel schedule). SystemTime has true-ns resolution here so the
+collision is RARE, but it is real and undeterministic. Fix: `tempfile::tempdir()` (already a
+dev-dep) — a kernel-atomic O_EXCL random name that CANNOT collide, whose Drop cleanup also removes
+the trailing manual `remove_dir_all` race. Rule: never hand-roll a unique temp path from
+pid+timestamp in a test; use `tempfile::tempdir()`.
+
+## A shared JSON/state file read FIELD-BY-FIELD (N separate parses) tears when a peer deletes it mid-read; read it ATOMICALLY (#970/#980)
+
+`scripts/lib/rig-lease.sh`'s `rig_lease_holder_summary` read holder.json via FIVE separate
+`python3 open()+json.load()` calls (one per field). When a releasing foreign holder `rm`s the
+lockdir mid-summary, the reads TORE — the first field succeeded, then the file vanished and the
+rest read empty, logging a garbled `restreamer# run_url= job=` (and a `[ -z "$repo$run_id" ]`
+corrupt-guard did not catch it because the first field was non-empty). Fix: read the file in ONE
+`open()+json.load()` that formats the whole line — a concurrent `unlink` after `open()` cannot
+truncate an already-open FD on Linux, so the result is all-or-nothing (full consistent line, or a
+clean placeholder). Any "read several fields separately from a file another party can delete" is
+this bug; collapse it to a single parse.
+
+## A flaky gate test that races a wall-clock releaser: tie the trigger to the gate's OWN cadence, not a sleep (#970/#980)
+
+`foreign_lease_released_within_wait_budget_lets_us_proceed` released the seeded foreign holder from
+a background thread after a fixed `sleep(600ms)`. Under CPU load the gate's first poll could land
+after the 600ms release (or mid-delete), so it never observed the holder and the assertion
+("logged held by #888") flaked — a TEST-timing race, not a production bug. Fix: drive the release
+from the gate's OWN poll cadence via a pluggable seam — here `RIG_LEASE_RUN_STATUS_CMD` (invoked
+once per lease poll) removes the lockdir on the gate's 2nd poll, AFTER poll 0 has observed+logged
+the live holder. Deterministic, load-independent, and no assertion weakened. General pattern: when
+a test needs "state X changes AFTER the code-under-test has observed it once", hook the change to a
+seam the code invokes, never to a wall-clock sleep.
