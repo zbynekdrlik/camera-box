@@ -699,14 +699,27 @@ inline CbDockLockOutcome cb_dock_lock_outcome(const CbDockLockAction &act, bool 
 	return CbDockLockOutcome::Quiet;
 }
 
+/* #1004 -- the MEASURED additive term applied to cb_dock_lock_display_offset_ms(), deliberately
+ * 0.0. #952 fit dock ~= -gate - 55; #953 fixed the SIGN. Issue 1004 quantified the residual
+ * additive half LIVE (2026-08-14, 5 healthy post-phase-fix windows): dock - offline optical
+ * --av-sync truth ranged +9..+53ms (central ~+32, sigma ~13-15ms, run-to-run spread 33..41ms),
+ * and the dock's own within-window swing (24..75ms, cluster mad ~25..35ms, with lock glitches to
+ * -805ms / +207ms spikes) exceeds that spread -- #952's ~55ms is NOT a stable constant. No single additive value reconciles the two DIFFERENT taps (digital
+ * NDI-internal burn vs optical camera+mic off the cam2 monitor) to the +-20ms the tightened gate
+ * needs. DECISION (from data): NO compensation -- offline optical --av-sync is authoritative, the
+ * dock is a coarse monitor. Mirror of src/av_sync_dock.rs::DOCK_LOCK_DISPLAY_ADDITIVE_MS. */
+constexpr double CB_DOCK_LOCK_DISPLAY_ADDITIVE_MS = 0.0;
+static_assert(CB_DOCK_LOCK_DISPLAY_ADDITIVE_MS == 0.0,
+	      "dock-vs-gate residual measured UNSTABLE (#1004) -- no additive constant is "
+	      "defensible; changing this needs a NEW live re-measurement proving a stable value");
+
 /* #953 -- converts the dock's OWN native offset convention (ts = audio_ts - video_ts) into the
  * gate's authoritative convention (offset_ms = video_time - audio_time,
  * scripts/av_sync_calibrate.py::required_delay_ms) -- a pure sign negation. #952 (closed)
  * established empirically that the two instruments disagree by dock ~= -gate - 55: this fixes the
- * SIGN half of that relation; the residual ~55ms additive bias is UNQUANTIFIED (attributable to
- * the different measurement taps -- digital NDI-internal burn vs optical camera+mic off the cam2
- * monitor) and is intentionally NOT compensated here -- it needs a live re-measurement after this
- * fix is deployed (tracked on its own follow-up issue), never a guessed constant in shipped code.
+ * SIGN half of that relation. The residual additive half was quantified live and found UNSTABLE --
+ * see CB_DOCK_LOCK_DISPLAY_ADDITIVE_MS (issue 1004): it is deliberately NOT compensated (additive
+ * term = 0.0), never a guessed constant.
  * Mirror of src/av_sync_dock.rs::dock_lock_display_offset_ms(). */
 inline double cb_dock_lock_display_offset_ms(double dock_offset_ms)
 {

@@ -8204,3 +8204,31 @@ Worktree round; supervisor integrates (merge → CI → deploy). One PR closes #
 - **Review**: one fresh general-purpose pass (/review + requesting-code-review standards) — 0 🔴
   0 🟡; 1 🔵 fixed in-branch (softened the sort -u dedup comment); GNU-coreutils note no-action
   (parse runs on dev1).
+
+## 2026-08-14 — issue 1004: dock-vs-gate residual quantified UNSTABLE → no compensation (v1.7.0-dev.453)
+- **Quantify**: paired the dock's own sign-corrected `av-sync-dock LOCKED/UPDATED offset=` lines
+  (from the STREAM box OBS log — the dock locks on STREAM, not strih: `mbc` marker source lives
+  there; strih logs `source 'mbc' not found` and never locks) against the offline optical
+  `recording-verdict --av-sync` truth (`all_cambox_av_sync.av_offset_ms`) in the SAME recording
+  window, across 5 healthy post-phase-fix E2E runs today. No fresh rig run (supervisor gate runs
+  in flight; passive log/verdict reading only, per dispatch).
+- **Finding**: dock − offline central ~+32ms but run-to-run spread +9..+53ms (σ ~13–15), AND the
+  dock's OWN within-window swing (24–75ms, cluster mad 25–35ms, lock glitches to −805/+207ms)
+  EXCEEDS that spread while offline is stable. Issue 952's ~55ms is NOT reproduced as a stable
+  constant. No additive value reconciles the two different taps to the ±20ms the tightened gate
+  needs → compensating would inject false precision.
+- **Decision (from data, not a user fork)**: UNSTABLE → NO compensation. Kept
+  `dock_lock_display_offset_ms` a pure sign negation (value byte-identical → parity gate
+  untouched). Added the MEASURED, LOCKED additive term `DOCK_LOCK_DISPLAY_ADDITIVE_MS = 0.0`
+  (Rust const + C++ `constexpr` + `static_assert`), guarded by
+  `dock_lock_display_applies_zero_additive_1004` so no future edit can silently reintroduce a
+  guessed constant. Offline optical `--av-sync` stays the sole authoritative gate; the dock is a
+  coarse monitor. Unblocks the ±90→±20 gate tightening (the discrepancy is an expected monitor
+  taps-bias, not evidence the offline gate is wrong).
+- **Rejected**: (a) compensate with a measured constant (~+32) — residual not stable to ±20ms, a
+  "measured" constant here is a guessed one wearing a measurement's clothes; (b) derive
+  gate-equivalent from dock via a stable mapping — requires a stable relation that does not exist.
+- **RED** `baeadee8f` / **GREEN** `3fe553b60` / review-polish `ce950e5df`, version bump
+  `03e15b1c6`. Tests: guard `dock_lock_display_applies_zero_additive_1004` + `av_sync_dock_cpp_mirror_gate`
+  (parity) + `av_sync_dock_latency_display_999` + `av_sync_dock_suggested_target_953` all green;
+  fmt + clippy `-D warnings` clean. Review: 0🔴 0🟡 3🔵 (2 fixed, 1 kept-by-design).
