@@ -30,22 +30,13 @@ pub struct HopInput<'a> {
     /// Hard gate: fail this hop if any detected freeze's `repeat_count` exceeds
     /// this. `None` ⇒ report-only. Strict `>`.
     pub max_freeze_periods_gate: Option<f64>,
-    /// Loss-gate mode. `None` ⇒ STRICT zero-loss: the hop fails on ANY in-span
-    /// dropped id (the Phase-2 default, correct for genlocked / local hops).
-    /// `Some(pct)` ⇒ DOCUMENTED-BOUND mode: the hop is judged by its
-    /// oversample-independent single-copy frame-loss percentage and passes while
-    /// that stays `<= pct`. This is for hops with a known, quantified, currently
-    /// irreducible loss (e.g. strih→stream's OBS render-clock drop pending
-    /// genlock, #8) — it accepts the documented floor yet still catches a
-    /// regression past it. `dropped_ids` is always reported either way.
-    pub max_loss_pct: Option<f64>,
     /// Oversample-masking guard (#29): the minimum number of single-copy
     /// (oversample-independent) frames the run must contain before a passed loss
     /// gate may be CERTIFIED. The painter runs sub-fps, so each unique id is
     /// oversampled and a dropped id only counts when ALL its copies are lost —
-    /// a high-oversample run can show `dropped_ids` empty (or single-copy loss
-    /// under bound) while the pipeline is really dropping frames. When the loss
-    /// gate passes but `single_copy_total < min_single_copy`, there is too little
+    /// a high-oversample run can show `dropped_ids` empty while the pipeline is
+    /// really dropping frames. When the loss gate passes but
+    /// `single_copy_total < min_single_copy`, there is too little
     /// oversample-independent evidence to trust the green, so the verdict is
     /// `Inconclusive`, not `Pass`. `0` disables the guard (the default — a hop
     /// that did not opt in keeps its prior pass/fail behaviour).
@@ -300,11 +291,6 @@ pub fn diff_hop(input: HopInput) -> HopReport {
             }
             _ => (0, 0),
         };
-    let single_copy_loss_pct = if single_copy_total > 0 {
-        100.0 * single_copy_dropped as f64 / single_copy_total as f64
-    } else {
-        0.0
-    };
 
     let reorders = detect_reorders(input.downstream);
     let freezes = detect_freezes(input.downstream, input.capture_fps, input.freeze_periods);
@@ -324,15 +310,10 @@ pub fn diff_hop(input: HopInput) -> HopReport {
     // shared DanteSync clock (None when the sources don't stamp a timecode).
     let emit_latency = per_hop_emit_latency(input.upstream, input.downstream);
 
-    // Loss gate: STRICT zero (any in-span drop fails) by default; or, when a
-    // documented per-hop bound is set, judged by the oversample-independent
-    // single-copy loss percentage staying `<= max_loss_pct` (strict `<=`).
+    // Loss gate: STRICT zero-loss — the hop fails on ANY in-span dropped id.
     // Reorder is always hard; latency-p99 and freeze are gated only when a
     // per-hop bound is set (None ⇒ report-only).
-    let loss_ok = match input.max_loss_pct {
-        None => dropped_ids.is_empty(),
-        Some(bound) => single_copy_loss_pct <= bound,
-    };
+    let loss_ok = dropped_ids.is_empty();
     let gates_ok = up_unique.len() >= input.min_frames
         && down_unique.len() >= input.min_frames
         && loss_ok
@@ -381,13 +362,9 @@ pub fn diff_hop(input: HopInput) -> HopReport {
 /// masked by oversample on the next hop but is genuinely absent end-to-end).
 ///
 /// The full span is itself just a hop (source = upstream, endpoint = downstream),
-/// so its verdict obeys the SAME contract as every other hop: strict zero-loss by
-/// default, the documented single-copy bound when `max_loss_pct` is set, the
-/// `min_frames` non-vacuous floor, and the `min_single_copy` INCONCL guard (#29).
-/// This keeps the headline consistent with the per-hop diffs and, critically,
-/// makes the documented-loss escape hatch (`--max-loss-pct`) apply end-to-end
-/// instead of a strict full-span gate silently overriding a deliberately-relaxed
-/// per-hop budget.
+/// so its verdict obeys the SAME contract as every other hop: strict zero-loss,
+/// the `min_frames` non-vacuous floor, and the `min_single_copy` INCONCL guard
+/// (#29). This keeps the headline consistent with the per-hop diffs.
 #[derive(Debug, Clone, Serialize)]
 pub struct FullSpanReport {
     /// Unique source-emitted ids decoded at the source tap.
@@ -416,11 +393,6 @@ pub struct FullSpanBounds {
     /// Non-vacuous floor: a source or endpoint tap with fewer than this many
     /// run-id frames FAILS rather than certifying off near-zero data.
     pub min_frames: usize,
-    /// `None` ⇒ STRICT zero-loss. `Some(pct)` ⇒ documented-bound: judged by the
-    /// oversample-independent single-copy loss percentage staying `<= pct` — the
-    /// same escape hatch the per-hop endpoint gate uses for the OBS render-clock
-    /// drop pending genlock (#8).
-    pub max_loss_pct: Option<f64>,
     /// `#29` oversample-masking guard: certify (Pass) only with at least this many
     /// single-copy source→endpoint frames; below it the verdict is Inconclusive.
     pub min_single_copy: usize,
@@ -428,7 +400,7 @@ pub struct FullSpanBounds {
 
 /// Difference the source tap against the final endpoint tap (the full span),
 /// delegating to `diff_hop` (source = upstream, endpoint = downstream) so the
-/// span-clip, single-copy, documented-bound and INCONCL semantics are IDENTICAL
+/// span-clip, single-copy strict-zero-loss and INCONCL semantics are IDENTICAL
 /// to the per-hop diffs by construction — not a hand-kept parallel copy.
 /// Latency/freeze are report-only here (`None` bounds): the full span's meaningful
 /// latency is the ABSOLUTE one (`absolute_latency_stats`), not a relative recv−recv
@@ -450,7 +422,6 @@ pub fn full_span_diff(
         min_frames: bounds.min_frames,
         max_p99_latency_ms: None,
         max_freeze_periods_gate: None,
-        max_loss_pct: bounds.max_loss_pct,
         min_single_copy: bounds.min_single_copy,
     });
     FullSpanReport {
@@ -946,7 +917,6 @@ mod tests {
             min_frames: 2,
             max_p99_latency_ms: None,
             max_freeze_periods_gate: None,
-            max_loss_pct: None,
             min_single_copy: 0,
         }
     }
@@ -1024,7 +994,6 @@ mod tests {
             min_frames: 2,
             max_p99_latency_ms: None,
             max_freeze_periods_gate: None,
-            max_loss_pct: None,
             min_single_copy: 0,
         });
         let e = r.emit_latency.expect("emit latency present");
@@ -1047,7 +1016,6 @@ mod tests {
             min_frames: 2,
             max_p99_latency_ms: max_p99,
             max_freeze_periods_gate: None,
-            max_loss_pct: None,
             min_single_copy: 0,
         })
     }
@@ -1071,7 +1039,6 @@ mod tests {
             min_frames: 2,
             max_p99_latency_ms: None,
             max_freeze_periods_gate: max_freeze,
-            max_loss_pct: None,
             min_single_copy: 0,
         })
     }
@@ -1148,12 +1115,7 @@ mod tests {
     /// are absent downstream (their sole frame dropped). Models the real pipeline:
     /// per-frame loss is only exposed on frames that lack oversample redundancy,
     /// so the masking-aware metric must count exactly those.
-    fn hop_single_copy(
-        n: usize,
-        drop_k: usize,
-        max_loss_pct: Option<f64>,
-        min_single_copy: usize,
-    ) -> HopReport {
+    fn hop_single_copy(n: usize, drop_k: usize, min_single_copy: usize) -> HopReport {
         let mut up = vec![o(0, 0), o(0, 1), o(0, 2)]; // oversampled anchor, never lost
         for k in 1..=n {
             up.push(o(k as u32, (2 + k) as i64));
@@ -1173,7 +1135,6 @@ mod tests {
             min_frames: 2,
             max_p99_latency_ms: None,
             max_freeze_periods_gate: None,
-            max_loss_pct,
             min_single_copy,
         })
     }
@@ -1182,83 +1143,19 @@ mod tests {
     fn single_copy_loss_is_counted_unmasked() {
         // 10 single-copy ids, 2 dropped. The 3-copy anchor id 0 survives and must
         // NOT inflate the single-copy denominator.
-        let r = hop_single_copy(10, 2, None, 0);
+        let r = hop_single_copy(10, 2, 0);
         assert_eq!(r.single_copy_total, 10);
         assert_eq!(r.single_copy_dropped, 2);
     }
 
     #[test]
-    fn loss_pct_bound_accepts_documented_irreducible_loss() {
-        // 2/100 single-copy frames dropped = 2%; bound 5% → PASS even though
-        // dropped_ids is non-empty. This is the documented-bound gate mode (#21):
-        // strih→stream's genlock-bound per-frame loss is accepted up to the bound.
-        let r = hop_single_copy(100, 2, Some(5.0), 0);
-        assert!(!r.dropped_ids.is_empty());
-        assert_eq!(r.single_copy_total, 100);
-        assert_eq!(r.single_copy_dropped, 2);
-        assert!(
-            r.verdict.is_pass(),
-            "2% single-copy loss under a 5% bound must PASS"
-        );
-    }
-
-    #[test]
-    fn loss_pct_bound_fails_on_regression_above_bound() {
-        // 8/100 = 8% > 5% bound → FAIL (catches regression past the documented bound).
-        let r = hop_single_copy(100, 8, Some(5.0), 0);
-        assert!(
-            !r.verdict.is_pass(),
-            "8% single-copy loss over a 5% bound must FAIL"
-        );
-    }
-
-    #[test]
     fn none_loss_bound_keeps_strict_zero_loss() {
-        // Default (None) keeps the strict dropped_ids-empty gate: ANY drop FAILs,
-        // preserving the Phase-2 zero-loss default for hops without a bound.
-        let r = hop_single_copy(10, 1, None, 0);
+        // Strict zero-loss is the only loss mode: ANY in-span drop FAILs
+        // (dropped_ids non-empty), preserving the Phase-2 zero-loss contract.
+        let r = hop_single_copy(10, 1, 0);
         assert!(
             !r.verdict.is_pass(),
-            "None bound must stay strict zero-loss"
-        );
-    }
-
-    #[test]
-    fn loss_pct_bound_passes_when_no_single_copy_frames() {
-        // Every upstream id is oversampled (×2) and delivered → single_copy_total=0.
-        // The documented-bound gate must PASS on 0 loss, NOT divide 0/0 into a NaN
-        // that fails the comparison. Pins `single_copy_total > 0` (not `>= 0`).
-        let up = vec![o(0, 0), o(0, 1), o(1, 2), o(1, 3), o(2, 4), o(2, 5)];
-        let down = vec![o(0, 10), o(1, 12), o(2, 14)];
-        let r = diff_hop(HopInput {
-            name: "strih→stream".to_string(),
-            upstream: &up,
-            downstream: &down,
-            capture_fps: 30.0,
-            freeze_periods: 3.0,
-            min_frames: 2,
-            max_p99_latency_ms: None,
-            max_freeze_periods_gate: None,
-            max_loss_pct: Some(5.0),
-            min_single_copy: 0,
-        });
-        assert_eq!(r.single_copy_total, 0);
-        assert!(
-            r.verdict.is_pass(),
-            "no single-copy frames + zero loss under bound must PASS, not NaN-fail"
-        );
-    }
-
-    #[test]
-    fn loss_pct_bound_at_exact_bound_passes() {
-        // 5/100 single-copy frames dropped = exactly 5.0%; bound 5.0 → PASS
-        // (strict `<=`, not `<`). Pins the bound comparison boundary.
-        let r = hop_single_copy(100, 5, Some(5.0), 0);
-        assert_eq!(r.single_copy_dropped, 5);
-        assert_eq!(r.single_copy_total, 100);
-        assert!(
-            r.verdict.is_pass(),
-            "single-copy loss exactly at the bound must PASS (<=)"
+            "any in-span drop must FAIL the strict zero-loss gate"
         );
     }
 
@@ -1270,7 +1167,7 @@ mod tests {
         // guard of 100 → the green is oversample-masking-suspect. Verdict must be
         // INCONCLUSIVE — neither a clean Pass (untrustworthy) nor a Fail (no
         // regression was proven).
-        let r = hop_single_copy(5, 0, None, 100);
+        let r = hop_single_copy(5, 0, 100);
         assert!(r.dropped_ids.is_empty());
         assert_eq!(r.single_copy_total, 5);
         assert_eq!(r.verdict, HopVerdict::Inconclusive);
@@ -1281,7 +1178,7 @@ mod tests {
     fn enough_single_copy_certifies_pass() {
         // 200 single-copy frames, 0 dropped, guard 100 satisfied → trustworthy
         // zero-loss → PASS.
-        let r = hop_single_copy(200, 0, None, 100);
+        let r = hop_single_copy(200, 0, 100);
         assert_eq!(r.single_copy_total, 200);
         assert_eq!(r.verdict, HopVerdict::Pass);
     }
@@ -1291,7 +1188,7 @@ mod tests {
         // single_copy_total == min_single_copy (100 == 100) → PASS. Pins the guard
         // boundary as `single_copy_total < min` (strict `<`), so a run with exactly
         // the required samples certifies; kills a `<`→`<=` mutant.
-        let r = hop_single_copy(100, 0, None, 100);
+        let r = hop_single_copy(100, 0, 100);
         assert_eq!(r.single_copy_total, 100);
         assert_eq!(r.verdict, HopVerdict::Pass);
     }
@@ -1301,7 +1198,7 @@ mod tests {
         // single_copy_total == min_single_copy - 1 (99 < 100) → INCONCLUSIVE. The
         // other half of the boundary; together with the exact-min test, pins the
         // comparison so neither `<`→`<=` nor `<`→`>` mutants survive.
-        let r = hop_single_copy(99, 0, None, 100);
+        let r = hop_single_copy(99, 0, 100);
         assert_eq!(r.single_copy_total, 99);
         assert_eq!(r.verdict, HopVerdict::Inconclusive);
     }
@@ -1311,7 +1208,7 @@ mod tests {
         // min_single_copy == 0 (default) → guard off → a clean hop with very few
         // single-copy frames still PASSes, preserving pre-#29 behaviour for hops
         // that did not opt in.
-        let r = hop_single_copy(3, 0, None, 0);
+        let r = hop_single_copy(3, 0, 0);
         assert_eq!(r.verdict, HopVerdict::Pass);
     }
 
@@ -1321,19 +1218,9 @@ mod tests {
         // below the guard must read as FAIL, not INCONCLUSIVE — a proven
         // regression outranks the sample-sufficiency check. Pins that the guard
         // only ever downgrades a would-be Pass, never a Fail.
-        let r = hop_single_copy(5, 2, None, 100);
+        let r = hop_single_copy(5, 2, 100);
         assert_eq!(r.single_copy_dropped, 2);
         assert_eq!(r.verdict, HopVerdict::Fail);
-    }
-
-    #[test]
-    fn guard_applies_in_documented_bound_mode_too() {
-        // Documented-bound mode: single-copy loss 0% is under the 5% bound (loss
-        // gate passes), but only 10 single-copy frames against a guard of 100 →
-        // INCONCLUSIVE. The guard protects the bound-mode green as well as strict.
-        let r = hop_single_copy(10, 0, Some(5.0), 100);
-        assert_eq!(r.single_copy_total, 10);
-        assert_eq!(r.verdict, HopVerdict::Inconclusive);
     }
 
     #[test]
