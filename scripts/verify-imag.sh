@@ -1140,8 +1140,10 @@ WMCTRL_PATH="$(ssh_box "command -v wmctrl 2>/dev/null")" || rc=$?
 if [ "$rc" -ne 0 ] || [ -z "$WMCTRL_PATH" ]; then
   missing_tool "wmctrl (apt-get install wmctrl) -- cannot count projector windows"
 else
-  MV_COUNT="$(ssh_box "DISPLAY=:0 wmctrl -l 2>/dev/null | grep -c 'Projector - Multiview' || true")"
-  PGM_COUNT="$(ssh_box "DISPLAY=:0 wmctrl -l 2>/dev/null | grep -c 'Projector - Program' || true")"
+  # #890: the wmctrl reads touch X, so bound them too (a wedged X server could otherwise hang the
+  # read) -- symmetric with the post-restart poll below, so check (o) can genuinely NEVER hang.
+  MV_COUNT="$(ssh_box_timeout "$SSH_TIMEOUT" "DISPLAY=:0 wmctrl -l 2>/dev/null | grep -c 'Projector - Multiview' || true" 2>/dev/null || echo 0)"
+  PGM_COUNT="$(ssh_box_timeout "$SSH_TIMEOUT" "DISPLAY=:0 wmctrl -l 2>/dev/null | grep -c 'Projector - Program' || true" 2>/dev/null || echo 0)"
   if imag_projector_counts_ok "${MV_COUNT:-0}" "${PGM_COUNT:-0}"; then
     ok "exactly 1 Multiview + 1 Program projector window BEFORE restart (measured from the box's OWN current state, never opened by this gate, #840)"
   else
