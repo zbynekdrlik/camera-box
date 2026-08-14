@@ -93,17 +93,22 @@ pub fn evaluate_emit_freeze(
     emit_threshold_s: f64,
     capture_fresh_bound_s: f64,
 ) -> EmitFreezeVerdict {
-    // RED STUB (#944): the real two-input discriminator is not implemented yet — always claims
-    // the output is Publishing, so the watchdog can never fire. The tests below encode the
-    // required behavior and MUST fail against this stub (proving they catch the missing detection)
-    // before the GREEN commit implements it.
-    let _ = (
-        seconds_since_last_emit,
-        seconds_since_last_capture_return,
-        emit_threshold_s,
-        capture_fresh_bound_s,
-    );
-    EmitFreezeVerdict::Publishing
+    if !seconds_since_last_emit.is_finite()
+        || seconds_since_last_emit < 0.0
+        || !seconds_since_last_capture_return.is_finite()
+        || seconds_since_last_capture_return < 0.0
+        || emit_threshold_s <= 0.0
+        || capture_fresh_bound_s <= 0.0
+    {
+        return EmitFreezeVerdict::Publishing;
+    }
+    if seconds_since_last_emit >= emit_threshold_s
+        && seconds_since_last_capture_return < capture_fresh_bound_s
+    {
+        EmitFreezeVerdict::Frozen
+    } else {
+        EmitFreezeVerdict::Publishing
+    }
 }
 
 /// Build the CRITICAL, uniquely grep-able message the watchdog logs right before it exits the
@@ -222,7 +227,12 @@ mod tests {
     #[test]
     fn non_finite_or_negative_inputs_never_freeze() {
         assert_eq!(
-            evaluate_emit_freeze(f64::NAN, 0.0, EMIT_FREEZE_THRESHOLD_S, CAPTURE_FRESH_BOUND_S),
+            evaluate_emit_freeze(
+                f64::NAN,
+                0.0,
+                EMIT_FREEZE_THRESHOLD_S,
+                CAPTURE_FRESH_BOUND_S
+            ),
             EmitFreezeVerdict::Publishing
         );
         assert_eq!(
@@ -239,7 +249,12 @@ mod tests {
             EmitFreezeVerdict::Publishing
         );
         assert_eq!(
-            evaluate_emit_freeze(100.0, f64::NAN, EMIT_FREEZE_THRESHOLD_S, CAPTURE_FRESH_BOUND_S),
+            evaluate_emit_freeze(
+                100.0,
+                f64::NAN,
+                EMIT_FREEZE_THRESHOLD_S,
+                CAPTURE_FRESH_BOUND_S
+            ),
             EmitFreezeVerdict::Publishing
         );
         assert_eq!(
@@ -281,17 +296,17 @@ mod tests {
             "must name the exit code: {m}"
         );
         assert!(m.contains("18.3"), "must report the emit staleness: {m}");
-        assert!(
-            m.contains("FROZEN"),
-            "must state the output is frozen: {m}"
-        );
+        assert!(m.contains("FROZEN"), "must state the output is frozen: {m}");
         // Must distinguish itself from a #945 wedge so forensics never confuse the two.
         assert!(m.contains("#945"), "must contrast with the #945 wedge: {m}");
     }
 
     #[test]
     fn exit_code_is_distinct_from_the_other_liveness_codes() {
-        assert_ne!(EMIT_FREEZE_EXIT_CODE, crate::capture_wedge::CAPTURE_WEDGE_EXIT_CODE);
+        assert_ne!(
+            EMIT_FREEZE_EXIT_CODE,
+            crate::capture_wedge::CAPTURE_WEDGE_EXIT_CODE
+        );
         assert_ne!(
             EMIT_FREEZE_EXIT_CODE,
             crate::capture_rate_selfheal::SELF_HEAL_EXIT_CODE
