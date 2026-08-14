@@ -77,3 +77,34 @@ exposed 19-22 spurious drops. **Rule: any no-limit-cycle test for a genlock targ
 the reserve AND the transport-skew axes — a single skew value is exactly the hole that hides this.**
 The natural-phase no-shed test (`convergence_never_sheds_at_the_natural_steady_phase_1049`) now
 sweeps both.
+
+## The THIRD axis: a phase shed only STICKS on an N>=2 source — gate convergence to N>=2 (#1049, 2026-08-14, live)
+
+After the floor fix above shipped, the convergence still limit-cycled — on a completely different
+source: the stream box's DEEP N==1 `NDI 2ME PGM` (30-into-30, 990 ms). The floor fix did NOT cover
+it (`floor = wall - newest_stamp` reads the FRESHEST frame ~33 ms old for a deep source, so
+`target = max(reserve, floor) = reserve`; the natural grid-quantized hold ~1033 ms — one frame above
+configured at frac 0.7 — still sat above the reserve-based threshold and sheds fired ~0.7/s forever).
+
+**The root cause is structural, not a threshold-tuning miss: an N==1 phase shed cannot STICK.** An
+N==1 source delivers exactly ONE frame per render tick, so presenting one frame fresher leaves the
+queue unable to refill — the very next tick HOLDS and regains the shed frame within the throttle
+window (`converge_sheds` and `holds` climbed in LOCKSTEP in the live audit, one pair per ~1.4 s —
+the #998 dup+skip signature again). An N>=2 source delivers >=2 frames/tick, so the shed IS
+sustainable and sticks — which is BOTH why the strih 60-into-30 ladder converges AND why only N>=2
+sources exhibit the pathology (a per-camera acquire ladder exists only ACROSS the multi-camera N>=2
+ingests; a single N==1 source has no cross-source spread, and its A/V offset is corrected by the
+±50 ms 2ME PGM controller).
+
+**Fix: gate convergence to N>=2** (`should_converge_phase` early-returns for `source_multiple < 2`,
+mirrored in `genlock_phase_converge_due`). A hysteresis band was REJECTED: the natural hold overshoot
+is frac-dependent (up to ceil+2 frames) and differs by n, so no fixed frame-multiple band separates
+"natural hold" from "real error" across both n=1 and n=2 — whereas "does the shed stick" is exactly
+n>=2 vs n==1. The lesson generalises: **a convergence/drain shed is only valid on a source that can
+SUSTAIN the shallower state it produces; if presenting-fresher just triggers a hold+regain, the shed
+is futile and gating it off is the fix, not widening its threshold.**
+
+**Diagnostic tell (from the live audit, recognisable in one 3-line read):** `converge_sheds` AND
+`holds` climbing in lockstep (one pair per ~throttle interval) with `dropped_due` pairing them,
+`relocks=0`, `depth` stable, and `ts_head_skew_ms` CONSTANT and ABOVE `latency_ms` — the shed is
+fighting a stable natural hold it cannot move.
