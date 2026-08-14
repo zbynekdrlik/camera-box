@@ -7743,3 +7743,21 @@ prerequisite, closed 2026-06-15); the rig is genlocked so it was dead code.
   partial local net (parse + brace/format balance) on probe code that `check`/`clippy`/`test
   --no-run` on default features never compile. fmt-clean + hand-audit was the whole local proof
   here; CI is the first TYPE check.
+
+### 1047 — setup-imag NDI peer resolution: SIGPIPE (141) under pipefail (v1.7.0-dev.449)
+- Root cause: `imag_resolve_ndi_peer` fed `imag_pick_ndi_peer` (early-exit consumer, returns on the
+  first "up" line) through a `printf '%s' "$probe" | imag_pick_ndi_peer` pipe. The prior "buffer
+  first" fix removed the loop-into-early-close form but left a concurrent writer PROCESS feeding an
+  early-exit consumer — safe only while `$probe` fits one atomic write into the 64 KiB pipe buffer
+  (7 candidates ~98 B). Over-capacity buffer → printf blocks, picker closes early, blocked write
+  gets EPIPE → 141 → pipefail aborts provisioning. CI 31757820465 flaked it once.
+- Fix (scripts/setup-imag.sh:187): `imag_pick_ndi_peer <<<"$probe"` — a here-string has no
+  concurrent writer process, structurally SIGPIPE-immune at any buffer size. Commit e510a38dd.
+- Repro: current 7-candidate buffer survived 1300 stress iterations (800 under 4x CPU load) → 0
+  fails (statistical at prod size). DETERMINISTIC against real `imag_resolve_ndi_peer` with 130+
+  over-capacity candidates → 141, 10/10; here-string fix → 0 + correct host, 12/12.
+- RED→GREEN: `ndi_peer_resolution_survives_pipefail_with_an_over_pipe_capacity_candidate_buffer`
+  (tests/setup_imag_hardware_agnostic.rs) — RED commit c87165880 (141 on pipe form), GREEN e510a38dd.
+  Test-writing gotcha captured in .claude/rules/imag-nb-provisioning.md: build the over-capacity
+  candidate list INSIDE the bash harness, never as a giant argv (MAX_ARG_STRLEN 128 KiB → E2BIG).
+- Review: fresh-context general-purpose pass, 0 findings. shellcheck -S warning clean. Tier-0 green.
