@@ -1,6 +1,7 @@
 ---
 paths:
   - "src/capture_wedge.rs"
+  - "src/emit_freeze.rs"
   - "src/painter_wedge.rs"
   - "src/main.rs"
   - "src/probe/run.rs"
@@ -82,3 +83,43 @@ updating EVERY call site — check `run_painter`'s two callers (`run()` the Phas
 `run_paint_only()` the rig path) both got the SAME watchdog wiring for symmetry, not just the one
 site the live incident happened to hit; an asymmetric fix (only the affected path gets protected)
 leaves the other call site silently exposed to the identical bug.
+
+## A SIBLING watchdog that OVERLAPS an existing one — discriminate it, don't let two fire on one event (#944)
+
+The 4-piece recipe above watches ONE signal: "did the blocking call RETURN?" (`#945` stamps its
+heartbeat after every `process_frame()` return, Ok OR Err). But a "dead output" can happen while
+that call keeps returning — `VideoCapture::process_frame` returns `Ok(())` on a
+`V4L2_BUF_FLAG_ERROR` buffer BEFORE the emit callback (`src/capture.rs`), so on a corrupted-but-
+returning stream the `#945` heartbeat advances forever while NO good frame is emitted and the NDI
+sender publishes a frozen frame — every health signal green. `#945`'s return-based heartbeat
+structurally cannot see this; `#944` (`src/emit_freeze.rs`) adds the EMIT-side sibling.
+
+**When a second liveness watchdog SHARES a failure mode with an existing one, two rules keep them
+from fighting over one event:**
+
+1. **Discriminate the new verdict against the OTHER watchdog's own signal — a TWO-input decision,
+   not a lone threshold.** In a true dequeue wedge BOTH heartbeats freeze together, so a naive
+   emit-only threshold would fire the emit-freeze FIRST with the wrong (emit) diagnosis for what is
+   really a thread wedge. `evaluate_emit_freeze(secs_since_emit, secs_since_capture_return,
+   EMIT_FREEZE_THRESHOLD_S=15, CAPTURE_FRESH_BOUND_S=5)` fires `Frozen` iff emit is stale ≥15 s AND
+   the capture-return heartbeat is YOUNGER than 5 s (the capture thread is provably alive). In a
+   wedge, `secs_since_capture_return` grows in lockstep with `secs_since_emit`, so by the time emit
+   staleness hits 15 s the capture-return staleness is also ~15 s > 5 s → emit-freeze SUPPRESSES
+   itself and `#945` owns the wedge at 25 s. The freshness bound MUST be strictly below the new
+   threshold (`const _: () = assert!(CAPTURE_FRESH_BOUND_S > 0.0)` + `assert!(EMIT_FREEZE_THRESHOLD_S
+   > CAPTURE_FRESH_BOUND_S)`), or the discrimination collapses.
+
+2. **Fold the new poll into the EXISTING watchdog thread, AFTER the existing check** (which
+   `std::process::exit`s first on its own condition) — no new thread, and the ordering guarantees
+   the more specific diagnosis wins. Still give the new event its OWN distinct exit code (81, vs
+   `#945`'s 79 / `#936`'s 80 / self-heal's 77/78) and its own CRITICAL wording, per
+   `self-heal-frozen-leg-attribution.md`.
+
+**Stamp the new heartbeat on the RIGHT liveness signal, never a rate counter that advances on
+failure.** `emit_count` increments even on a production `send_frame_zero_copy` `Err` (rate-stat
+semantics), so keying the emit heartbeat on `emit_count` would miss a persistently-FAILING send —
+itself a silent-frozen mode. Use a per-iteration `frame_dispatched` flag set only on a CONFIRMED
+dispatch (a production send `Ok`, or a queued burn job `ring.submit` `Ok`). Arm the watchdog only
+after the first dispatch (0-sentinel heartbeat) so boot/NDI warmup never false-fires — the inverse
+of `#945`'s 0-seed (which treats "capture never started" as fireable, correct for a thread wedge
+but wrong for an output that legitimately has not warmed up yet).
