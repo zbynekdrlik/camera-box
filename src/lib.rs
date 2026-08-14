@@ -394,6 +394,13 @@ pub mod asrc_compensation_quantization;
 // thread call into it.
 pub mod capture_wedge;
 
+// #944 — emit/output-liveness self-watchdog: the pure decision + message for whether the NDI
+// output has gone frozen (the capture thread's blocking dequeue is still returning, but no good
+// frame has been emitted for the threshold). The emit-side sibling of `capture_wedge` (#945); no
+// probe deps, so it unit-tests Tier-0. `src/main.rs`'s capture loop stamps the emit heartbeat and
+// the #945 watchdog thread polls this decision.
+pub mod emit_freeze;
+
 // #936 — painter WEDGE self-watchdog: the pure decision + message for whether the KMS/DRM painter
 // loop's blocking present() call has gone stale long enough to treat it as provably wedged (a
 // SIGTERM/SIGKILL-immune kernel-level D-state hang, the same failure class #945 root-caused on
