@@ -65,6 +65,13 @@ pub enum GrabberModel {
     /// Elgato 4K S (CAM5-CAM6, live fleet). No live evidence of rate instability — keeps the
     /// strict default tolerance.
     Elgato4kS,
+    /// #1034 — Elgato Cam Link 4K, the replacement card the fleet is being swapped ONTO to retire
+    /// the ShadowCast 2's characteristic capture-rate wobble (cam3 is the first swapped box, live
+    /// 2026-08-14: a genuinely stable device, 0.33% measured spread over 6h). A DISTINCT device
+    /// from the `Elgato4kS` above (different product), so it gets its own variant + honest Display
+    /// label rather than being folded into it. Keeps the STRICT default tolerance — the whole
+    /// point of the swap is that this card does NOT need ShadowCast's wide allowance.
+    CamLink4k,
     /// Hostname didn't match a known cambox (unprovisioned box, renamed host, test harness) —
     /// falls back to the STRICT default tolerance rather than guessing the wide ShadowCast-
     /// specific one; an unknown grabber deserves the tighter floor, not the benefit of the doubt.
@@ -77,6 +84,7 @@ impl std::fmt::Display for GrabberModel {
             GrabberModel::ShadowCast2 => "ShadowCast 2",
             GrabberModel::NzxtSignalHd60 => "NZXT Signal HD60",
             GrabberModel::Elgato4kS => "Elgato 4K S",
+            GrabberModel::CamLink4k => "Cam Link 4K",
             GrabberModel::Unknown => "unknown grabber model",
         })
     }
@@ -110,7 +118,14 @@ pub fn grabber_model_for_hostname(hostname: &str) -> GrabberModel {
 /// contract as the hostname mapping.
 pub fn grabber_model_from_card_name(card: &str) -> GrabberModel {
     let lower = card.to_ascii_lowercase();
-    if lower.contains("shadowcast") {
+    // #1034 — whitespace-collapsed so cam3's live DOUBLE-spaced `CAM  LINK 4K` still matches
+    // `cam link` (a bare `contains("cam link")` would miss the double space). Checked FIRST: a
+    // Cam Link 4K string never contains any other model's marker, so order is not load-bearing,
+    // but keeping it first documents that this is the intended fleet-replacement card.
+    let collapsed = lower.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.contains("cam link") {
+        GrabberModel::CamLink4k
+    } else if lower.contains("shadowcast") {
         GrabberModel::ShadowCast2
     } else if lower.contains("elgato") {
         GrabberModel::Elgato4kS
@@ -161,9 +176,10 @@ pub const SHADOWCAST2_CAPTURE_RATE_TOLERANCE_PCT: f64 = 10.0;
 pub fn tolerance_pct_for_model(model: GrabberModel) -> f64 {
     match model {
         GrabberModel::ShadowCast2 => SHADOWCAST2_CAPTURE_RATE_TOLERANCE_PCT,
-        GrabberModel::NzxtSignalHd60 | GrabberModel::Elgato4kS | GrabberModel::Unknown => {
-            CAPTURE_RATE_TOLERANCE_PCT
-        }
+        GrabberModel::NzxtSignalHd60
+        | GrabberModel::Elgato4kS
+        | GrabberModel::CamLink4k
+        | GrabberModel::Unknown => CAPTURE_RATE_TOLERANCE_PCT,
     }
 }
 
@@ -203,9 +219,10 @@ pub const SUSTAINED_WARN_WINDOWS: u32 = 12;
 pub fn sustained_tolerance_pct_for_model(model: GrabberModel) -> f64 {
     match model {
         GrabberModel::ShadowCast2 => SHADOWCAST2_SUSTAINED_TOLERANCE_PCT,
-        GrabberModel::NzxtSignalHd60 | GrabberModel::Elgato4kS | GrabberModel::Unknown => {
-            tolerance_pct_for_model(model)
-        }
+        GrabberModel::NzxtSignalHd60
+        | GrabberModel::Elgato4kS
+        | GrabberModel::CamLink4k
+        | GrabberModel::Unknown => tolerance_pct_for_model(model),
     }
 }
 
