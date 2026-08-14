@@ -6,7 +6,7 @@ Wants=camera-box.service
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/frame-probe --paint-only --dual-qr --qr-size 700 --paint-fps 60 --duration-secs 31536000
+ExecStart=/usr/local/bin/frame-probe --paint-only --dual-qr --qr-size 700 --paint-fps 60 --duration-secs 31536000 --marker-log /run/rig-qpsk-markers.csv
 Restart=always
 RestartSec=2
 

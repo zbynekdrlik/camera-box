@@ -7901,3 +7901,130 @@ Three named "relaxations"; live fleet re-measure reshaped two of them (ssh journ
 
 Live measurement table (2026-08-14): CAM1 ShadowCast max 4.67% · CAM2 ShadowCast max 2.83% ·
 CAM3 Cam Link 4K 0.33% (was mislabelled ShadowCast2). Worktree; supervisor integrates the round.
+
+---
+
+## issue 944 — emit-liveness watchdog (a dead capture loop keeps publishing a frozen NDI frame)
+
+Version 1.7.0-dev.452. Worktree `autopilot-944`; supervisor integrates the round.
+
+**Validated STILL real (not the stale 2 h incident).** The merged issue-945 capture-wedge
+watchdog stamps its heartbeat after every `process_frame()` return (Ok OR Err), and
+`VideoCapture::process_frame` returns `Ok(())` on a `V4L2_BUF_FLAG_ERROR` buffer BEFORE the emit
+callback (`src/capture.rs:1116-1125`). So on a corrupted-but-returning stream the issue-945
+heartbeat keeps advancing while `emit_count` never moves → issue-945 reads Alive forever. Nothing
+watched EMITTED-frame liveness. The cam4 2 h incident was itself a TRUE wedge (now caught by
+issue-945), but the failure CLASS (takes error buffers, stops advancing) has this
+capture-alive-but-emit-dead sub-case still uncovered. Scope decision (was needs-user-decision)
+already resolved by the maintainer: stop the NDI sender + log at ERROR (source goes gone, not
+frozen); the re-open/USB-rebind ladder was withdrawn (harness concern, out of scope here).
+
+**Fix.** New pure Tier-0 `src/emit_freeze.rs` (emit-side sibling of `capture_wedge`), reusing the
+issue-945 watchdog framework verbatim:
+- `evaluate_emit_freeze(secs_since_emit, secs_since_capture_return, EMIT_FREEZE_THRESHOLD_S=15,
+  CAPTURE_FRESH_BOUND_S=5)` → `Frozen` iff emit stale ≥15 s AND the capture-return heartbeat is
+  younger than 5 s. Two-input discriminator: in a TRUE wedge both heartbeats freeze together, so
+  the capture-return staleness passes the 5 s bound and emit-freeze SUPPRESSES itself → issue-945
+  owns the wedge at 25 s. Compile-time `const _` guard `15 > 5 > 0` (clippy-safe).
+- A second `Arc<AtomicU64>` emit heartbeat, stamped in the capture loop's `Ok` arm on a per-iteration
+  `frame_dispatched` flag — set ONLY on a confirmed production send (`Ok`) or a queued burn job
+  (`ring.submit` `Ok`), NOT on `emit_count` (which increments even on a send Err). Armed after the
+  first dispatch (0-sentinel) so boot/NDI warmup never false-fires.
+- The poll folds into the EXISTING issue-945 watchdog thread, AFTER the wedge check; on `Frozen`
+  → `tracing::error!` a uniquely grep-able CRITICAL line + `std::process::exit(81)` (distinct from
+  77/78/79/80) → systemd `Restart=always` tears the NDI sender down + re-opens the device.
+- Adjacent (ticket ask): a periodic `#944 last-emit-age` info line on the 5 s stats cadence.
+
+RED `ca9c40492` (stub always Publishing) → GREEN `e0f84f065` → review 🔵 fix `024270487`
+(stamp on confirmed dispatch, catching a persistently-failing send too). Test:
+`emit_freeze::tests::stale_emit_while_capture_returning_is_frozen` (RED on stub → GREEN), 9/9.
+Tier-0: fmt clean, clippy --all-targets -D warnings clean.
+
+## 2026-08-14 — flaky-test hardening bundle #970 + #980 + #975 (worktree autopilot-970, v1.7.0-dev.452)
+
+#970 + #980 (SAME root cause, two facets): `rig_lease_holder_summary()` (scripts/lib/rig-lease.sh)
+read holder.json via FIVE separate python3 field-reads; a releasing foreign holder rm-ing the
+lockdir mid-summary TORE the read — `repo` succeeded then the file vanished and the rest read empty,
+logging `RIG_LEASE_HELD_BY=zbynekdrlik/restreamer# run_url= job=` (#970) or `unknown (corrupt
+holder.json)` (#980), flaking `foreign_lease_released_within_wait_budget_lets_us_proceed` in
+tests/harness_rig_busy_gate_lease_830.rs. Reproduced 250/250 FAIL under 10x parallel load (0/60 at
+low load). #980's "shared lockdir across sibling tests" hypothesis was wrong — tests already isolate
+RIG_LEASE_DIR per-test; the race is intra-test (releaser thread vs summary), widened by load.
+Fix (two structural-immunity parts): (1) rig_lease_holder_summary now reads holder.json in ONE
+python3 open()+json.load() that formats the whole line — a concurrent unlink after open() cannot
+truncate an already-open FD on Linux, so the result is all-or-nothing; output format byte-identical
+(harness_rig_lease.rs + rig-busy-gate.sh sed parsing unchanged). (2) the flaky integration test now
+releases the foreign holder DETERMINISTICALLY via a RIG_LEASE_RUN_STATUS_CMD stub that removes the
+lockdir on the gate's 2nd poll (after poll 0 has observed+logged the live holder), replacing a
+600ms wall-clock sleep that raced the gate's load-dependent first read. New deterministic RED test
+tests/harness_rig_lease_holder_summary_atomicity_980.rs (python3 shim deletes holder.json after the
+first read → RED on 5-read, GREEN on atomic). Post-fix: 376 whole-binary runs under 8x load + 40/40
+no-load, 0 failures. Commits: RED test 06a0f3968, GREEN fix 1cf252db2, fmt 319c0d650.
+
+#975: tests/harness_deploy_fleet.rs `run_fleet` keyed its per-call temp dir on pid(constant across
+all test threads in one binary) + nanos, so two concurrent calls that read the same clock tick
+shared a bin/ dir and their PATH-injected sha256sum stubs collided (a sha_match:false call's "bbbb"
+stub contaminating a sha_match:true call — the `local aaaa != remote bbbb` coverage-runner flake).
+Rare timing collision (SystemTime has true-ns resolution here — not reproducible on demand);
+structural fix = tempfile::tempdir() (kernel-atomic O_EXCL, cannot collide; Drop cleanup removes the
+manual remove_dir_all race too). 185 whole-binary runs under 8x load, 0 failures; 16/16 suite green.
+Commit d3b875c13. GOTCHA for future workers: any test-harness helper that hand-rolls a temp path
+from pid+timestamp is a latent collision — pid is constant within a binary, so timestamp is the only
+key; use tempfile::tempdir() instead.
+
+Worktree round; supervisor integrates (merge → CI → deploy). One PR closes #970 #975 #980.
+
+## issue 1001 — strih/stream network-UNREACHABLE dev1-side alert watchdog (autopilot, worktree)
+
+Closed the silent-outage gap: strih's NIC died 2026-08-06 (~50 min off the wire, no alert),
+recurred 2026-08-13. Every existing watchdog probes a box it assumes is UP (OBS-WS GetStats / ssh
+INTO the box) and treats a total outage as "no probe output = nothing to decide". Built a NEW
+dev1-side systemd-timer watchdog that probes both boxes FROM dev1 with a MULTI-SIGNAL check
+(ping OR TCP :4455 OBS-WS OR TCP :8899 bundle-state) — REACHABLE iff ANY, UNREACHABLE only when all
+three fail (so an ICMP-firewalled-but-TCP-up Windows box is never a false page). Mirrors the
+dev1-side topology + shared confirm/throttle framework of the imag-obs (882) / imag-power-envelope
+(1040) / optical-chain (860) siblings; the intentional difference is probing FROM dev1 without
+ssh-ing IN (impossible against an off-network box).
+
+- Files: `scripts/lib/network-reach-health.sh` (pure seam), `scripts/network-reach-alert-watchdog.sh`,
+  `systemd/network-reach-alert-watchdog.{service,timer}`, `tests/harness_network_reach_health_1001.rs`,
+  `.claude/rules/network-reach-watchdog.md` (+ CLAUDE.md router).
+- Per-box state (confirm/alert_sig/alert_passes/alerted) so strih+stream page independently;
+  2-pass confirm; ~1h throttle; a one-shot recovery ("reachable again") ping.
+- dev1-side-outage guard: any REACHABLE watched box OR any reference-node ping proves connectivity;
+  only when NOTHING is reachable is the pass "nothing to decide" (never a false "both boxes down").
+  Event-safe (generous timeouts for the tailscale-over-mobile venue link).
+- RED `f177becce` → GREEN lib `fb7221b3f` (net_reach_classify_box / any_reachable / recovery_decision
+  / alert_detail); watchdog+units `a0fe99f5c`; fmt `1b5df6c4e`; review-hardening `4d36c07e9`
+  (anchor counts box-reachability, dry-run state isolation, injection-shape removed, single-probe,
+  +ping-up test). Tests 11/11; shellcheck -x / fmt / clippy / cargo test --no-run all green.
+- Review: SHIP, 0 red/yellow; 5 of 6 blue folded in, 1 dropped with reasoning (controlled alnum
+  box names in sed keys). WoL BIOS enablement floated on the ticket = separate hardware follow-up,
+  not bundled. Worktree; supervisor integrates the round.
+
+## 2026-08-14 — #1008 + #937 (bundled, worktree autopilot-1008) — durable TEST-mode painter
+
+- **Same defect, one fix.** `rig-mode.sh test` made the STEADY-STATE painter a transient `nohup
+  frame-probe --duration-secs 7200` (2h) and first stopped the permanent supervised
+  cam2-painter.service (issue 440) with no re-enable → 2h later (or after an event→test cycle,
+  which issue 892 disables the unit) cam2 goes black + marker silent + CSV frozen, silently. A
+  nohup is unsupervised. Validate-first confirmed LIVE: cam2-painter.service disabled+inactive,
+  no frame-probe running, stale pidfile.
+- **Fix**: the permanent cam2-painter.service (issue 863: Restart=always, enabled, marker
+  default-ON since 984) becomes the durable steady-state painter. New sourced lib
+  `scripts/lib/cam2-painter-handoff.sh::cam2_painter_steady_state_handoff_cmds` (issue-675 pattern
+  — pure builder, one `cam_ssh "$(...)"` line in do_test, zero rig-mode.sh anchor touched): stop
+  transient via pidfile → `systemctl enable --now cam2-painter.service` → FAIL LOUD unless active
+  + genuinely painting (presenter-aware issue 464) + marker CSV growing (reuses
+  audio_marker_emission_check_cmds, issue 431). Base unit ExecStart gained `--marker-log
+  /run/rig-qpsk-markers.csv` in BOTH systemd/cam2-painter.service and setup-device.sh's generator
+  (promotes the live 2026-08-06 drop-in). RED `263f54229` / GREEN `fb0752847`, version bump
+  `af47ce8bf` (1.7.0-dev.452).
+- **Rejected**: (a) just make the nohup duration forever — fixes 2h expiry, not crash/reboot
+  durability; (b) replace the transient painter entirely — invalidates ~10 anchor-pinned tests
+  for zero durability gain. Dock stale-lock reporting (issue 1008 direction 3) is a separate dock
+  C++ fix, tracked under issue 986.
+- **Tests**: `tests/harness_cam2_painter_steady_state_handoff.rs` (7, new) + a marker-log assert
+  in `harness_cam2_painter_provisioning_863.rs`. FULL `cargo test` suite green: 205 binaries, 0
+  FAILED (mandatory after a rig-mode.sh edit — no anchor collisions). shellcheck -x clean on all
+  touched scripts. Playbook: new `.claude/rules/cam2-painter-lifecycle.md` + router entry.

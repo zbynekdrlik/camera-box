@@ -87,6 +87,16 @@
 //! measured 14/window) is the convergence transient, not steady state. See issue 1031 for the
 //! full per-run distribution table.
 //!
+//! ## 2026-08-14 STEP-BACK (1 -> 2) — issue 1031, same day
+//!
+//! Tolerance 1 failed its own consecutive-greens evidence test immediately: the next two
+//! full-cycle runs after the 3 -> 1 step measured healthy per-window sums of 2-3 (run 900430067:
+//! CAM1 2+0, CAM2 1+2, CAM3 1+1) — the issue-859 shared-duplicate residual still produces
+//! 2-per-window bursts, so 1 was calibrated on an unluckily-clean n=1 sample. Stepped back to 2
+//! (still tighter than the previous 3): every observed healthy window sums <= 2 across the
+//! post-fix sample. The 2 -> 1 -> 0 walk stays gated on the issue-859 root cause + N>=2
+//! consecutive greens at each step, tracked on issue 1031.
+//!
 //! ## Why this lives at the crate root (default features), not in `probe`
 //!
 //! Same reasoning as `optical_floor.rs` / `av_window.rs`'s `#861` relaxation: the whole `probe`
@@ -145,7 +155,7 @@
 /// that remaining 1 -> 0 step). The pre-fix relock storms (14-28 copies/gaps/window) and the
 /// OBS-restart convergence transient (14/window, run 1074024850, excluded as it started 2 min
 /// after the restart) are all still 10x+ over this threshold, so a real regression fails loudly.
-pub const WINDOW_COPIES_GAPS_TOLERANCE: u32 = 1;
+pub const WINDOW_COPIES_GAPS_TOLERANCE: u32 = 2;
 
 /// The strict-vs-relaxed decision for one cambox window, given its already-computed counts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -279,37 +289,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tolerance_is_calibrated_at_one_1031() {
+    fn tolerance_is_calibrated_at_two_1031() {
         // Pins the calibrated NUMBER itself, not just its use through the const. Issue 1031
-        // (2026-08-14): re-tightened 3 -> 1 after the issue-1042 (min-delta source rate) +
-        // issue-1049 (N>=2 phase convergence) genlock fixes deployed to the rig (imag-nb + strih,
-        // 09:17 CEST). The one steady-state post-fix full-cycle run (1780620060, started +27 min
-        // after the OBS restart, fully converged) measured a healthy per-window max of {copies 1,
-        // gaps 1}, windows_over_copies_gaps_tolerance = 0, overall_pass = true -- the chronic
-        // residual that forced tolerance 3 collapsed to a single stale_replay dup+gap pair. 0
-        // stays blocked on issue 859's shared-duplicate root cause (see the ticket's gating plan);
-        // this ticket carries the remaining 1 -> 0 step. See the const's own doc.
-        assert_eq!(WINDOW_COPIES_GAPS_TOLERANCE, 1);
+        // walk-down history: 3 -> 1 (2026-08-14 morning, calibrated on ONE steady post-fix run
+        // measuring {copies 1, gaps 1}) -> stepped BACK to 2 the same day: the very next two
+        // full-cycle runs measured per-window sums of 2-3 (CAM1 2+0, CAM2 1+2, CAM3 1+1 in run
+        // 900430067) -- the issue-859 shared-duplicate residual still produces 2-per-window
+        // bursts, so 1 failed its consecutive-greens evidence test. 2 is the tightest value the
+        // broader post-fix sample supports (every observed healthy window sums <= 2; the run's
+        // one 3-sum window rode an undecodable burst). The 2 -> 1 -> 0 steps stay gated on the
+        // issue-859 root cause + consecutive greens, tracked on the ticket.
+        assert_eq!(WINDOW_COPIES_GAPS_TOLERANCE, 2);
     }
 
     #[test]
-    fn two_copies_or_gaps_now_gate_after_1031() {
-        // Issue 1031: the behavioral heart of the 3 -> 1 re-tightening -- a window carrying TWO
-        // copies (or two gaps) must now FAIL the relaxed verdict, where tolerance=3 absorbed it.
-        // A single copy+gap (the post-fix stale_replay residual) must still pass. Literal fixtures
-        // on purpose: this locks the concrete new boundary, complementing the const-tracking
-        // boundary tests above.
+    fn three_copies_or_gaps_gate_two_absorbed_after_1031() {
+        // Issue 1031 walk-down boundary at the stepped-back tolerance=2: THREE copies (or gaps)
+        // must FAIL the relaxed verdict (tolerance=3 absorbed them), while TWO -- the measured
+        // issue-859 residual burst size -- stays absorbed. Literal fixtures on purpose: this
+        // locks the concrete boundary, complementing the const-tracking boundary tests above.
         assert!(
-            !decide(100, 0, 2, 0).relaxed_pass,
-            "1031: two copies must gate the relaxed verdict at tolerance=1"
+            !decide(100, 0, 3, 0).relaxed_pass,
+            "1031: three copies must gate the relaxed verdict at tolerance=2"
         );
         assert!(
-            !decide(100, 0, 0, 2).relaxed_pass,
-            "1031: two gaps must gate the relaxed verdict at tolerance=1"
+            !decide(100, 0, 0, 3).relaxed_pass,
+            "1031: three gaps must gate the relaxed verdict at tolerance=2"
         );
         assert!(
-            decide(100, 0, 1, 1).relaxed_pass,
-            "1031: the single stale_replay residual (1 copy + 1 gap) stays absorbed at tolerance=1"
+            decide(100, 0, 2, 2).relaxed_pass,
+            "1031: the measured residual burst (2 copies + 2 gaps) stays absorbed at tolerance=2"
         );
     }
 

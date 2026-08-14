@@ -1,0 +1,17 @@
+[Unit]
+# strih/stream network-UNREACHABLE alert (#1001), DEV1-SIDE. ONE measure -> decide -> alert pass.
+# The two OBS boxes are Windows appliances with no airuleset checkout / Discord credentials, and a
+# box that is off the network cannot fire anything anyway -- so the alert MUST come from dev1, which
+# sits on the same rig LAN and probes the boxes from OUTSIDE. SAME topology as
+# imag-obs-alert-watchdog.service (#882) / imag-power-envelope-alert-watchdog.service (#1040) /
+# optical-chain-alert-watchdog.service (#860).
+Description=camera-box strih/stream network-reachability alert (#1001) — one measure/decide/alert pass
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Service]
+Type=oneshot
+# %h = the installing user's home on dev1. Adjust if the checkout lives elsewhere.
+ExecStart=%h/devel/camera-box/scripts/network-reach-alert-watchdog.sh
+# A few local ping + /dev/tcp probes to the reference nodes + the two boxes; generous timeouts for
+# an event-day tailscale-over-mobile link, but never hang the timer.
+TimeoutStartSec=90
