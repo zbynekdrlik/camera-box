@@ -1,0 +1,17 @@
+[Unit]
+# Fires the #1001 strih/stream network-reachability alert every 5 min (dev1-side), matching the
+# imag-obs-alert-watchdog / imag-power-envelope-alert-watchdog / optical-chain-alert-watchdog cadence
+# so the fleet's dev1 alert timers stay in lockstep. A box that falls fully off the network (dead NIC
+# / powered-off / unplugged cable) pages within ~10 minutes of onset (2-pass confirm) -- a silent
+# 50-minute strih outage is exactly what the standing rig-degradation-alert rule forbids.
+Description=Run the camera-box strih/stream network-reachability alert every 5 min (#1001)
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=20s
+Persistent=false
+
+[Install]
+WantedBy=timers.target
