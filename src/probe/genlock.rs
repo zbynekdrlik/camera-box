@@ -1911,8 +1911,11 @@ impl ReleaseCadence {
     /// source-multiple derivation lives here (same measure-with-sticky-fallback as
     /// [`Self::should_drain_one`] / [`Self::backlog_relock_qdepth`], never `effective_source_multiple`
     /// which would latch as a side effect of a getter). The comparator is the LOCKED boundary's
-    /// implied age (`wall_now - locked_next_boundary_ns`), so it is read before the caller updates
-    /// the boundary — matching the C `genlock_should_converge_phase`. Mirror of that C helper.
+    /// implied age (`wall_now - locked_next_boundary_ns`), read before the caller updates the
+    /// boundary; the achievable floor is the freshest queued frame (`queue.back()`, the C
+    /// `array[num-1]`) — a frame cannot present before it arrives, so the target is
+    /// `max(reserve, floor)` (issue-1049 review finding). Mirror of the C
+    /// `genlock_should_converge_phase`.
     fn should_converge_phase(
         &self,
         queue: &std::collections::VecDeque<u64>,
@@ -1921,6 +1924,9 @@ impl ReleaseCadence {
         wall_now_ns: u64,
     ) -> bool {
         let Some(boundary) = self.locked_next_boundary_ns else {
+            return false;
+        };
+        let Some(&newest_stamp) = queue.back() else {
             return false;
         };
         if interval_ns == 0 {
@@ -1932,6 +1938,7 @@ impl ReleaseCadence {
         crate::genlock_backlog::should_converge_phase(
             wall_now_ns,
             boundary,
+            newest_stamp,
             reserve_ms,
             interval_ns,
             n,

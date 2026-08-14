@@ -5112,7 +5112,13 @@ static void genlock_audit_log(obs_source_t *source, uint64_t now_ns)
 	      * gates assert the delta stays 0 across a run. Appended AFTER the existing
 	      * fields (scripts parse by field name; #401 anchor pins the earlier run). */
 	     "backward_regime_ticks=%llu "
-	     "(#70/#97/#126/#147/#148/#184/#235/#245/#401)",
+	     /* camera-box #1049: cumulative SETTLE-BACK PHASE-CONVERGENCE sheds — a converge shed
+	      * counts into genlock_dropped_due like every other drop, so this distinguishes it (the
+	      * genlock-hold-collapse playbook lesson: log silence lies). A climbing rate = the shed
+	      * is actively pulling a per-camera acquire-phase back toward configured; it must go
+	      * QUIET once the phase converged. Post-deploy verification of this ticket reads it. */
+	     "converge_sheds=%u "
+	     "(#70/#97/#126/#147/#148/#184/#235/#245/#401/#1049)",
 	     source->context.name ? source->context.name : "?",
 	     (unsigned long long)source->genlock_frames_received,
 	     (unsigned long long)source->genlock_frames_consumed,
@@ -5142,7 +5148,8 @@ static void genlock_audit_log(obs_source_t *source, uint64_t now_ns)
 	     (unsigned long long)source->genlock_last_present_ts,
 	     source->genlock_last_due,
 	     (long long)(source->genlock_last_head_skew_ns / 1000000),
-	     (unsigned long long)source->genlock_backward_regime_ticks);
+	     (unsigned long long)source->genlock_backward_regime_ticks,
+	     source->genlock_converge_sheds);
 }
 /* ---- end genlock FIFO preload + audit ------------------------------------ */
 
@@ -5338,41 +5345,51 @@ static bool genlock_should_drain_one(const obs_source_t *source, uint32_t reserv
  *
  * The comparator is the conveyor's own on-air age S = wall_now - boundary (at decision time
  * boundary == last_presented_ts + interval and render ticks are one interval apart, so this ==
- * the last tick's on-air age exactly -- the boundary is always live, unlike the saturating phase
- * anchor). Fires when S has drifted a shed-quantum (one SOURCE interval interval/n) + the 5 ms
- * phase-pin hysteresis ABOVE configured, throttled by the SHARED #859 drain counter. interval/n +
- * hysteresis mirrors the #998 lesson applied to PHASE: post-shed S' = S - interval/n is always
- * > reserve (never below configured), so it cannot rebuild the #998 drop/regain limit cycle. A
- * correctly-held DEEP source (#1003, Zaloha 1000 ms) has S ~= configured, far below the threshold
- * -> inert by the SAME comparison, not a special case. Mirror of src/genlock_backlog.rs
- * should_converge_phase (Tier-0 unit-tested) -- keep both in lock-step. */
+ * the last tick's on-air age but for the +-2 ms slew the hysteresis absorbs -- the boundary is
+ * always live, unlike the saturating phase anchor). The TARGET it converges toward is
+ * max(reserve, floor), floor = wall_now - newest_stamp_ns, the age of the FRESHEST queued frame
+ * (the smallest on-air age physically presentable -- a frame cannot go on air before it ARRIVES).
+ * #1049 review finding: a reserve-only target ignored the transport-skew floor, so when
+ * skew > reserve + interval/n + hysteresis (the rig's ~20 ms skew at the 3 ms prod floor) the shed
+ * fired forever at the natural phase -- the #998 drop/regain limit cycle. Fires when S has drifted
+ * a shed-quantum (one SOURCE interval interval/n) + the 5 ms hysteresis ABOVE that target,
+ * throttled by the SHARED #859 drain counter. post-shed S' = S - interval/n is always
+ * > target >= floor, so it cannot rebuild the #998 limit cycle. A DEEP source (#1003, Zaloha
+ * 1000 ms) has S ~= configured, and a shallow high-skew source has S ~= floor, both far below the
+ * threshold -> inert by the SAME comparison, not a special case. Mirror of
+ * src/genlock_backlog.rs should_converge_phase (Tier-0 unit-tested) -- keep both in lock-step. */
 static inline bool genlock_phase_converge_due(uint64_t wall_now_ns, uint64_t boundary_ns,
-					      uint32_t latency_ms, uint64_t interval_ns, uint32_t n,
-					      uint64_t ticks_since_drain)
+					      uint64_t newest_stamp_ns, uint32_t latency_ms,
+					      uint64_t interval_ns, uint32_t n, uint64_t ticks_since_drain)
 {
 	if (interval_ns == 0 || boundary_ns == 0)
 		return false;
 	const uint64_t nn = n >= 1 ? (uint64_t)n : 1;
 	const uint64_t reserve_ns = (uint64_t)latency_ms * 1000000ULL;
+	const uint64_t floor_ns = wall_now_ns > newest_stamp_ns ? wall_now_ns - newest_stamp_ns : 0;
+	const uint64_t target = reserve_ns > floor_ns ? reserve_ns : floor_ns;
 	const uint64_t quantum = interval_ns / nn;
-	const uint64_t threshold = reserve_ns + quantum + GENLOCK_PHASE_PIN_HYSTERESIS_NS;
+	const uint64_t threshold = target + quantum + GENLOCK_PHASE_PIN_HYSTERESIS_NS;
 	const uint64_t age = wall_now_ns > boundary_ns ? wall_now_ns - boundary_ns : 0;
 	return age > threshold && ticks_since_drain >= GENLOCK_DRAIN_MIN_TICK_INTERVAL;
 }
 
 /* camera-box #1049: the source-bound wrapper -- reads the live n (READ-ONLY, same as
- * genlock_should_drain_one) and the locked boundary + shared throttle, delegates the arithmetic to
+ * genlock_should_drain_one), the locked boundary + shared throttle, and the FRESHEST queued frame
+ * (async_frames.array[num-1], the achievable-floor reference), delegates the arithmetic to
  * genlock_phase_converge_due above. */
 static bool genlock_should_converge_phase(const obs_source_t *source, uint32_t reserve_ms,
 					  uint64_t interval, uint64_t wall_now)
 {
-	if (interval == 0)
+	if (interval == 0 || source->async_frames.num == 0)
 		return false;
 	const uint32_t measured = genlock_measure_source_multiple(source, interval);
 	const uint32_t n = measured >= 1 ? measured
 					 : (source->genlock_last_known_n >= 1 ? source->genlock_last_known_n : 1);
-	return genlock_phase_converge_due(wall_now, source->genlock_locked_next_boundary_ns, reserve_ms,
-					  interval, n, source->genlock_ticks_since_drain);
+	const uint64_t newest_stamp =
+		source->async_frames.array[source->async_frames.num - 1]->timestamp;
+	return genlock_phase_converge_due(wall_now, source->genlock_locked_next_boundary_ns, newest_stamp,
+					  reserve_ms, interval, n, source->genlock_ticks_since_drain);
 }
 
 static bool genlock_release_tick(obs_source_t *source, uint64_t wall_now, uint64_t present_ts,
@@ -5747,6 +5764,7 @@ static bool genlock_release_tick(obs_source_t *source, uint64_t wall_now, uint64
 			da_erase(source->async_frames, 0);
 			remove_async_frame(source, shed);
 			source->genlock_dropped_due++;
+			source->genlock_converge_sheds++; /* #1049: distinct observability */
 			source->genlock_ticks_since_drain = 0;
 		} else if (!drain_eligible) {
 			source->genlock_ticks_since_drain++;

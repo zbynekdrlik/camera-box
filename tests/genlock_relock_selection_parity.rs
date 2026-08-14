@@ -258,19 +258,37 @@ fn lift_converge_helper() -> String {
     src[start..end].to_string()
 }
 
-/// `(wall_now, boundary, latency_ms, interval, n, ticks_since_drain)`.
-fn converge_vectors() -> Vec<(u64, u64, u32, u64, u32, u64)> {
+/// Lift a `#define NAME <value>` line VERBATIM from the vendored C so the parity harness compiles
+/// against the SHIPPED constant, never a hard-coded copy that could silently drift (issue-1049
+/// review finding 🟡2). Returns the whole `#define …` line.
+fn lift_define(name: &str) -> String {
+    let src = fs::read_to_string(repo(OBS_SOURCE)).expect("read obs-source.c");
+    for line in src.lines() {
+        let t = line.trim_start();
+        if t.starts_with(&format!("#define {name} ")) {
+            return t.to_string();
+        }
+    }
+    panic!("#1049: {OBS_SOURCE} no longer defines {name} — parity harness cannot lift it");
+}
+
+/// `(wall_now, boundary, newest_stamp, latency_ms, interval, n, ticks_since_drain)`. `newest_stamp`
+/// is the freshest queued frame's capture stamp — its age `wall - newest` is the achievable floor.
+fn converge_vectors() -> Vec<(u64, u64, u64, u32, u64, u32, u64)> {
     let i30 = 33_333_333u64;
     let i60 = 16_666_667u64;
     let w = 1_000_000_000_000u64;
-    let mut v: Vec<(u64, u64, u32, u64, u32, u64)> = vec![
-        (w, w - (20 * 1_000_000 + 2 * i30), 20, i30, 2, 100), // over threshold, throttle met
-        (w, w - 20_000_000, 20, i30, 2, 100),                 // held AT configured -> inert
-        (w, w - (20 * 1_000_000 + 2 * i30), 20, i30, 2, 29),  // throttle NOT met
-        (w, w - (20 * 1_000_000 + 2 * i30), 20, i30, 2, 30),  // throttle exactly met
+    // Most vectors use newest == wall (floor 0 -> target = reserve); the floor-path vectors set a
+    // large skew so `floor > reserve` and the target becomes the floor.
+    let mut v: Vec<(u64, u64, u64, u32, u64, u32, u64)> = vec![
+        (w, w - (20 * 1_000_000 + 2 * i30), w, 20, i30, 2, 100), // over threshold, throttle met
+        (w, w - 20_000_000, w, 20, i30, 2, 100),                 // held AT configured -> inert
+        (w, w - (20 * 1_000_000 + 2 * i30), w, 20, i30, 2, 29),  // throttle NOT met
+        (w, w - (20 * 1_000_000 + 2 * i30), w, 20, i30, 2, 30),  // throttle exactly met
         (
             w,
             w - (20 * 1_000_000 + i30 / 2 + 5_000_000 + 1),
+            w,
             20,
             i30,
             2,
@@ -279,6 +297,7 @@ fn converge_vectors() -> Vec<(u64, u64, u32, u64, u32, u64)> {
         (
             w,
             w - (20 * 1_000_000 + i30 / 2 + 5_000_000),
+            w,
             20,
             i30,
             2,
@@ -287,6 +306,7 @@ fn converge_vectors() -> Vec<(u64, u64, u32, u64, u32, u64)> {
         (
             w,
             w - (20 * 1_000_000 + i30 / 2 + 5_000_000 + 1),
+            w,
             20,
             i30,
             1,
@@ -295,19 +315,49 @@ fn converge_vectors() -> Vec<(u64, u64, u32, u64, u32, u64)> {
         (
             w,
             w - (1000 * 1_000_000 + 8_000_000),
+            w - 8_000_000,
             1000,
             i30,
             1,
             1_000_000,
-        ), // deep hold + jitter -> inert
-        (w, w - (1000 * 1_000_000 + 2 * i30), 1000, i30, 1, 100), // deep walked a frame -> fires
-        (w, 0, 20, i30, 2, 100),                              // unlocked boundary -> false
-        (w, w - 500_000_000, 20, 0, 2, 100),                  // degenerate interval -> false
-        (w, w + i30, 20, i30, 2, 100), // boundary ahead of wall (saturate) -> false
-        (w, w - (20 * 1_000_000 + 2 * i60), 20, i60, 2, 100), // a 60fps canvas source grid
-        (w, w - (20 * 1_000_000 + 3 * i30), 20, i30, 0, 100), // source_multiple 0 floors to 1
+        ), // deep hold -> inert
+        (
+            w,
+            w - (1000 * 1_000_000 + 2 * i30),
+            w - 8_000_000,
+            1000,
+            i30,
+            1,
+            100,
+        ), // deep walked a frame -> fires
+        (w, 0, w, 20, i30, 2, 100),                              // unlocked boundary -> false
+        (w, w - 500_000_000, w, 20, 0, 2, 100),                  // degenerate interval -> false
+        (w, w + i30, w, 20, i30, 2, 100),                        // boundary ahead of wall -> false
+        (w, w - (20 * 1_000_000 + 2 * i60), w, 20, i60, 2, 100), // a 60fps canvas source grid
+        (w, w - (20 * 1_000_000 + 3 * i30), w, 20, i30, 0, 100), // source_multiple 0 floors to 1
+        // FLOOR-PATH vectors (#1049 review): a large skew floors the achievable phase above reserve.
+        (
+            w,
+            w - (40_000_000 + i30 / 2),
+            w - 40_000_000,
+            3,
+            i30,
+            2,
+            100,
+        ), // natural phase at floor+quantum -> inert
+        (
+            w,
+            w - (40_000_000 + 2 * i30),
+            w - 40_000_000,
+            3,
+            i30,
+            2,
+            100,
+        ), // 2 frames over floor -> fires
+        (w, w - (40_000_000 + i30), w - 40_000_000, 3, i30, 1, 100), // n=1: floor + 1 canvas frame -> inert
+        (w, w + i30, w + i30, 20, i30, 2, 100), // newest ahead of wall (floor saturates to 0) -> target=reserve
     ];
-    // A deterministic LCG spread over the argument space.
+    // A deterministic LCG spread over the argument space, now including the floor axis.
     let mut x: u64 = 0x1234_5678_9abc_def1;
     for _ in 0..120 {
         x = x
@@ -319,7 +369,9 @@ fn converge_vectors() -> Vec<(u64, u64, u32, u64, u32, u64)> {
         let ticks = (x >> 7) % 60;
         let over = (x >> 40) % 3 * interval; // 0, 1 or 2 quanta over configured
         let boundary = w.saturating_sub(latency as u64 * 1_000_000 + over + (x >> 50) % 4_000_000);
-        v.push((w, boundary, latency, interval, n, ticks));
+        let skew = (x >> 45) % 60_000_000; // 0..60ms transport floor
+        let newest = w.saturating_sub(skew);
+        v.push((w, boundary, newest, latency, interval, n, ticks));
     }
     v
 }
@@ -329,17 +381,18 @@ fn c_phase_convergence_matches_the_rust_authority_1049() {
     let helper = lift_converge_helper();
     let vs = converge_vectors();
 
-    let mut c = String::from(
-        "#include <stdint.h>\n#include <stddef.h>\n#include <stdbool.h>\n#include <stdio.h>\n\
-         #define GENLOCK_PHASE_PIN_HYSTERESIS_NS 5000000ULL\n\
-         #define GENLOCK_DRAIN_MIN_TICK_INTERVAL 30\n",
+    // Lift the two constants from the SHIPPED C, never hard-code them (review 🟡2).
+    let mut c = format!(
+        "#include <stdint.h>\n#include <stddef.h>\n#include <stdbool.h>\n#include <stdio.h>\n{}\n{}\n",
+        lift_define("GENLOCK_PHASE_PIN_HYSTERESIS_NS"),
+        lift_define("GENLOCK_DRAIN_MIN_TICK_INTERVAL"),
     );
     c.push_str(&helper);
     c.push_str("int main(void){\n");
-    for (wall, boundary, latency, interval, n, ticks) in &vs {
+    for (wall, boundary, newest, latency, interval, n, ticks) in &vs {
         c.push_str(&format!(
-            "    printf(\"%d\\n\", genlock_phase_converge_due({wall}ULL, {boundary}ULL, {latency}, \
-             {interval}ULL, {n}, {ticks}ULL));\n"
+            "    printf(\"%d\\n\", genlock_phase_converge_due({wall}ULL, {boundary}ULL, {newest}ULL, \
+             {latency}, {interval}ULL, {n}, {ticks}ULL));\n"
         ));
     }
     c.push_str("    return 0;\n}\n");
@@ -384,14 +437,15 @@ fn c_phase_convergence_matches_the_rust_authority_1049() {
     );
 
     let mut diffs = Vec::new();
-    for (i, ((wall, boundary, latency, interval, n, ticks), got_c)) in
+    for (i, ((wall, boundary, newest, latency, interval, n, ticks), got_c)) in
         vs.iter().zip(&c_out).enumerate()
     {
-        let got_rs = should_converge_phase(*wall, *boundary, *latency, *interval, *n, *ticks);
+        let got_rs =
+            should_converge_phase(*wall, *boundary, *newest, *latency, *interval, *n, *ticks);
         if got_rs != *got_c {
             diffs.push(format!(
-                "  vector {i}: wall={wall} boundary={boundary} latency={latency} interval={interval} \
-                 n={n} ticks={ticks} -> C {got_c}, Rust {got_rs}"
+                "  vector {i}: wall={wall} boundary={boundary} newest={newest} latency={latency} \
+                 interval={interval} n={n} ticks={ticks} -> C {got_c}, Rust {got_rs}"
             ));
         }
     }

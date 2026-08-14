@@ -468,6 +468,18 @@ fn phase_convergence_present_and_wired_in_1049() {
         "{OBS_SOURCE}: #1049 — the shed quantum must be the SOURCE interval (interval_ns / n); a \
          bare canvas interval would leave the n=2 threshold a full frame too high."
     );
+    // The target is max(reserve, FLOOR) — the floor being the freshest queued frame's age. A
+    // reserve-only target ignores the transport skew and limit-cycles at the rig's ~20 ms skew on
+    // shallow reserves (the #998 class, review finding).
+    assert!(
+        src.contains("const uint64_t floor_ns = wall_now_ns > newest_stamp_ns ? wall_now_ns - newest_stamp_ns : 0;"),
+        "{OBS_SOURCE}: #1049 — the achievable floor (wall - newest_stamp) is gone; a reserve-only \
+         threshold re-creates the #998 drop/regain limit cycle at the rig's transport skew."
+    );
+    assert!(
+        src.contains("const uint64_t target = reserve_ns > floor_ns ? reserve_ns : floor_ns;"),
+        "{OBS_SOURCE}: #1049 — the converge target must be max(reserve, floor), never reserve alone."
+    );
     // The shed is CALLED from the release tail, gated on converge_eligible.
     assert!(
         src.contains("bool converge_eligible = false;"),
@@ -493,6 +505,27 @@ fn phase_convergence_present_and_wired_in_1049() {
         "{OBS_SOURCE}: #1049 — the converge shed must erase array[0] (the would-be-presented \
          frame) and present the next; dropping the one BEHIND the presented frame is the \
          self-cancelling no-op the drain call-site comment documents."
+    );
+    // On the N>=2 path the drain block did NOT run, so the converge block MUST maintain the shared
+    // throttle counter itself — without this increment the feature is silently DEAD on its primary
+    // target (the 60-into-30 ingests): the counter never reaches the interval and the shed never
+    // fires (review finding 🟡3).
+    assert!(
+        src.contains("} else if (!drain_eligible) { source->genlock_ticks_since_drain++;"),
+        "{OBS_SOURCE}: #1049 — the N>=2 converge branch no longer maintains the shared throttle \
+         counter (else if (!drain_eligible) ...++); the shed would never fire on a 60-into-30 \
+         source — the feature dead in exactly its primary target."
+    );
+    // A converge shed increments a DISTINCT counter for the audit line — a converge shed is
+    // otherwise indistinguishable from any other drop (the genlock-hold-collapse playbook lesson).
+    assert!(
+        src.contains("source->genlock_converge_sheds++;"),
+        "{OBS_SOURCE}: #1049 — the distinct converge-shed observability counter is gone."
+    );
+    assert!(
+        src.contains("converge_sheds=%u"),
+        "{OBS_SOURCE}: #1049 — the audit line no longer reports converge_sheds= (post-deploy \
+         verification of this ticket reads it: the shed must fire, then go quiet)."
     );
 }
 

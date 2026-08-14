@@ -312,11 +312,22 @@ pub fn phase_pinned_is_due(frame_ts_ns: u64, deadline_ns: u64) -> bool {
 /// The COMPARATOR is the conveyor's own on-air age `S = wall_now_ns - locked_boundary_ns`, NOT
 /// the phase anchor: at decision time `locked_boundary_ns == last_presented_ts + interval` and
 /// render ticks are one interval apart, so `wall_now - boundary` == the last tick's on-air age S
-/// exactly. The anchor is the wrong quantity here — it saturates to 0 by contract on some sources
+/// (exact but for the ±2 ms render slew, which [`PHASE_PIN_HYSTERESIS_NS`] absorbs). The anchor is
+/// the wrong quantity here — it saturates to 0 by contract on some sources
 /// (`phase_anchor_from_present`) and is one tick stale — whereas the boundary is always live.
 ///
+/// The TARGET the shed converges toward is `max(configured latency, ACHIEVABLE FLOOR)`, where the
+/// floor is `wall_now_ns - newest_stamp_ns` — the age of the FRESHEST queued frame, i.e. the
+/// smallest on-air age the conveyor could physically present (a frame cannot go on air before it
+/// ARRIVES). This is the review-found correction (issue 1049): a reserve-only target ignored the
+/// transport skew floor, so when `skew > reserve + interval/n + hysteresis` (the rig's ~20 ms skew
+/// at the 3 ms prod floor) the shed fired forever at the natural phase — a shed pushed the boundary
+/// below what had arrived, the next tick(s) regained it, and 30 ticks later it shed again: exactly
+/// the #998 drop/regain limit cycle this design claims to be incapable of. Flooring the target at
+/// the achievable phase restores the #998 invariant on the SKEW axis too.
+///
 /// Fires when `S` has drifted a full shed-quantum (one SOURCE interval `interval_ns / n`) plus
-/// [`PHASE_PIN_HYSTERESIS_NS`] ABOVE the configured latency, throttled to at most once every
+/// [`PHASE_PIN_HYSTERESIS_NS`] ABOVE that target, throttled to at most once every
 /// [`DRAIN_MIN_TICK_INTERVAL`] ticks (the counter is SHARED with the #859 drain — reset on a shed
 /// OR a drain — so no new per-source field is needed and the ≤1-extra-drop-per-30-ticks bound is
 /// preserved). The caller sheds one frame with the same drop-older/present-fresher idiom the #859
@@ -326,17 +337,19 @@ pub fn phase_pinned_is_due(frame_ts_ns: u64, deadline_ns: u64) -> bool {
 /// `interval_ns / n` (the shed quantum) + the 5 ms hysteresis mirrors the #998 lesson applied to
 /// PHASE instead of DEPTH: the threshold sits strictly above the natural steady S, so a shed's own
 /// effect lands strictly inside the no-shed band (post-shed `S' = S - interval/n`, always
-/// `> reserve` — never below configured), which is what makes it structurally incapable of the
-/// #998 drop/regain limit cycle. A correctly-held DEEP source (issue 1003, Zaloha 1000 ms) has
-/// `S ≈ configured`, far below the threshold, so the shed is inert by the SAME comparison that
-/// drives it — no regression, not a special case. A degenerate `interval_ns` (0, unknown video
-/// info) or an UNLOCKED boundary (0, ACQUIRE) returns `false` — nothing to converge.
+/// `> target >= floor` — never below the achievable phase), which is what makes it structurally
+/// incapable of the #998 drop/regain limit cycle. A correctly-held DEEP source (issue 1003, Zaloha
+/// 1000 ms) has `S ≈ configured` far below the threshold, and a shallow source with a large skew
+/// has `S ≈ floor` far below `floor + quantum + hysteresis`, so BOTH are inert by the SAME
+/// comparison that drives it — no regression, not a special case. A degenerate `interval_ns`
+/// (0, unknown video info) or an UNLOCKED boundary (0, ACQUIRE) returns `false`.
 ///
 /// Mirror of the C `genlock_phase_converge_due()` (obs-source.c) and the probe
 /// `ReleaseCadence::should_converge_phase` delegator — keep all three in lock-step.
 pub fn should_converge_phase(
     wall_now_ns: u64,
     locked_boundary_ns: u64,
+    newest_stamp_ns: u64,
     latency_ms: u32,
     interval_ns: u64,
     source_multiple: u32,
@@ -347,8 +360,12 @@ pub fn should_converge_phase(
     }
     let n = source_multiple.max(1) as u64;
     let reserve_ns = (latency_ms as u64).saturating_mul(1_000_000);
+    // The achievable floor: the freshest queued frame's on-air age (a frame cannot present before
+    // it arrives). saturating_sub -> a stamp AHEAD of wall reads floor 0 (falls back to reserve).
+    let floor_ns = wall_now_ns.saturating_sub(newest_stamp_ns);
+    let target = reserve_ns.max(floor_ns);
     let quantum = interval_ns / n;
-    let threshold = reserve_ns
+    let threshold = target
         .saturating_add(quantum)
         .saturating_add(PHASE_PIN_HYSTERESIS_NS);
     let age = wall_now_ns.saturating_sub(locked_boundary_ns);
@@ -2489,27 +2506,92 @@ mod tests {
         let quantum = I30 / n as u64; // one SOURCE interval
         let threshold = reserve + quantum + PHASE_PIN_HYSTERESIS_NS;
         let wall = 1_000_000_000_000u64;
+        // A fresh arrival (floor 0) so the target is the configured latency — this test is about
+        // the reserve-based threshold; the floor path has its own test below.
+        let newest = wall;
         // age == threshold -> NOT due (strict `>`).
         let boundary_at_threshold = wall - threshold;
         assert!(
-            !should_converge_phase(wall, boundary_at_threshold, latency_ms, I30, n, 100),
+            !should_converge_phase(wall, boundary_at_threshold, newest, latency_ms, I30, n, 100),
             "at exactly the threshold the shed must NOT fire (strict >, mirrors #998's own \
              boundary discipline)"
         );
         // age == threshold + 1 -> due (throttle satisfied).
         assert!(
-            should_converge_phase(wall, boundary_at_threshold - 1, latency_ms, I30, n, 100),
+            should_converge_phase(
+                wall,
+                boundary_at_threshold - 1,
+                newest,
+                latency_ms,
+                I30,
+                n,
+                100
+            ),
             "one ns above the threshold with the throttle elapsed must fire"
         );
         // A held age at the configured latency (no phase error) is far below the threshold.
         assert!(
-            !should_converge_phase(wall, wall - reserve, latency_ms, I30, n, 100),
+            !should_converge_phase(wall, wall - reserve, newest, latency_ms, I30, n, 100),
             "a conveyor held AT the configured latency has nothing to converge"
         );
         // A held age one canvas frame over configured (the observed 1-frame rung) fires.
         assert!(
-            should_converge_phase(wall, wall - (reserve + I30), latency_ms, I30, n, 100),
+            should_converge_phase(
+                wall,
+                wall - (reserve + I30),
+                newest,
+                latency_ms,
+                I30,
+                n,
+                100
+            ),
             "a held age one full canvas frame over configured must converge"
+        );
+    }
+
+    /// #1049 (review finding) — the target is `max(reserve, floor)`, floor = the freshest queued
+    /// frame's on-air age. When the transport skew floors the achievable phase ABOVE the reserve,
+    /// a reserve-only threshold would shed forever at the natural phase (a #998-class limit cycle);
+    /// flooring the target keeps it inert until the phase exceeds the ACHIEVABLE floor by a quantum.
+    #[test]
+    fn converge_targets_max_reserve_floor_1049() {
+        let wall = 1_000_000_000_000u64;
+        let reserve_ms = 3u32; // the prod floor
+        let n = 2u32;
+        let quantum = I30 / n as u64;
+        // A large transport skew: the freshest frame is 40 ms old, far above the 3 ms reserve.
+        let skew = 40_000_000u64;
+        let newest = wall - skew;
+        // The conveyor naturally holds ~floor + quantum (the maturation window). With a
+        // reserve-only target that is WAY over reserve + quantum + hysteresis -> would shed
+        // forever. With the floor-aware target it is at/below floor + quantum + hysteresis -> inert.
+        let natural = wall - (skew + quantum); // one quantum above the floor — the natural phase
+        assert!(
+            !should_converge_phase(wall, natural, newest, reserve_ms, I30, n, 100),
+            "at the natural phase (~floor + one quantum) with a large skew the shed must be INERT \
+             — a reserve-only threshold would limit-cycle here (#998 class)"
+        );
+        // A genuine error ABOVE the achievable floor by more than a quantum + hysteresis DOES fire.
+        let errored = wall - (skew + 2 * I30);
+        assert!(
+            should_converge_phase(wall, errored, newest, reserve_ms, I30, n, 100),
+            "a phase two full canvas frames above the achievable floor still converges"
+        );
+        // The floor never drives the target BELOW reserve: a deep reserve with a tiny skew still
+        // targets the reserve (floor < reserve -> target = reserve).
+        let deep_ms = 200u32;
+        let tiny_skew_newest = wall - 5_000_000; // 5 ms floor, well below the 200 ms reserve
+        assert!(
+            !should_converge_phase(
+                wall,
+                wall - deep_ms as u64 * 1_000_000,
+                tiny_skew_newest,
+                deep_ms,
+                I30,
+                n,
+                100
+            ),
+            "floor below reserve -> target stays at reserve; a source held AT reserve is inert"
         );
     }
 
@@ -2518,41 +2600,51 @@ mod tests {
     #[test]
     fn converge_is_throttled_by_the_shared_drain_counter_1049() {
         let wall = 1_000_000_000_000u64;
-        // A gross 3-frame overshoot — unambiguously over the threshold.
+        let newest = wall; // floor 0 -> target = reserve
+                           // A gross 3-frame overshoot — unambiguously over the threshold.
         let boundary = wall - (20 * 1_000_000 + 3 * I30);
         assert!(
-            !should_converge_phase(wall, boundary, 20, I30, 2, DRAIN_MIN_TICK_INTERVAL - 1),
+            !should_converge_phase(
+                wall,
+                boundary,
+                newest,
+                20,
+                I30,
+                2,
+                DRAIN_MIN_TICK_INTERVAL - 1
+            ),
             "below the shared throttle interval the shed must wait, even for a large error"
         );
         assert!(
-            should_converge_phase(wall, boundary, 20, I30, 2, DRAIN_MIN_TICK_INTERVAL),
+            should_converge_phase(wall, boundary, newest, 20, I30, 2, DRAIN_MIN_TICK_INTERVAL),
             "at the throttle interval the shed fires"
         );
     }
 
     /// The shed quantum is the SOURCE interval `interval/n`, so a 60-into-30 source's threshold
-    /// sits one 60 Hz interval (not one canvas interval) above configured — the tightest bound
+    /// sits one 60 Hz interval (not one canvas interval) above the target — the tightest bound
     /// that still clears the natural steady phase (the #998 lesson applied to phase).
     #[test]
     fn converge_quantum_is_the_source_interval_1049() {
         let wall = 1_000_000_000_000u64;
+        let newest = wall; // floor 0 -> target = reserve
         let reserve = 20u64 * 1_000_000;
         // n=2: quantum = I30/2 = I60. An age of reserve + I60 + hysteresis is the boundary.
         let just_over = wall - (reserve + I30 / 2 + PHASE_PIN_HYSTERESIS_NS + 1);
         assert!(
-            should_converge_phase(wall, just_over, 20, I30, 2, 100),
+            should_converge_phase(wall, just_over, newest, 20, I30, 2, 100),
             "n=2 threshold is reserve + I30/2 + hysteresis"
         );
         let just_under = wall - (reserve + I30 / 2 + PHASE_PIN_HYSTERESIS_NS);
         assert!(
-            !should_converge_phase(wall, just_under, 20, I30, 2, 100),
+            !should_converge_phase(wall, just_under, newest, 20, I30, 2, 100),
             "one ns below the n=2 threshold is inert"
         );
         // n=1: quantum = I30. Same held age that fired at n=2 is BELOW the n=1 threshold
         // (reserve + I30 + hysteresis), so a 1:1 source only sheds a genuinely larger error.
         assert!(
-            !should_converge_phase(wall, just_over, 20, I30, 1, 100),
-            "n=1 threshold is a full canvas interval above configured — the same held age is inert"
+            !should_converge_phase(wall, just_over, newest, 20, I30, 1, 100),
+            "n=1 threshold is a full canvas interval above the target — the same held age is inert"
         );
     }
 
@@ -2562,11 +2654,12 @@ mod tests {
     #[test]
     fn converge_is_inert_at_a_correctly_held_deep_source_1049() {
         let wall = 1_000_000_000_000u64;
+        let newest = wall - 8_000_000; // an 8 ms floor, far below the 1000 ms hold
         for jitter in [-2_000_000i64, 0, 2_000_000, 8_000_000] {
             // A deep source held at 1000 ms ± ordinary sub-frame jitter.
             let age = (1000i64 * 1_000_000 + jitter) as u64;
             assert!(
-                !should_converge_phase(wall, wall - age, 1000, I30, 1, 1_000_000),
+                !should_converge_phase(wall, wall - age, newest, 1000, I30, 1, 1_000_000),
                 "a deep source held at ~configured (jitter {jitter} ns) must never converge"
             );
         }
@@ -2576,6 +2669,7 @@ mod tests {
             should_converge_phase(
                 wall,
                 wall - (1000 * 1_000_000 + I30 + I30),
+                newest,
                 1000,
                 I30,
                 1,
@@ -2589,22 +2683,44 @@ mod tests {
     #[test]
     fn converge_degenerate_interval_or_unlocked_boundary_is_false_1049() {
         let wall = 1_000_000_000_000u64;
+        let newest = wall;
         assert!(
-            !should_converge_phase(wall, wall - 500_000_000, 20, 0, 2, 100),
+            !should_converge_phase(wall, wall - 500_000_000, newest, 20, 0, 2, 100),
             "interval 0 (unknown video info) -> no convergence, no divide-by-zero"
         );
         assert!(
-            !should_converge_phase(wall, 0, 20, I30, 2, 100),
+            !should_converge_phase(wall, 0, newest, 20, I30, 2, 100),
             "an UNLOCKED boundary (0, ACQUIRE) -> nothing to converge"
         );
         // A boundary AHEAD of wall (sender future-bias residue) saturates the age to 0 -> inert.
         assert!(
-            !should_converge_phase(wall, wall + I30, 20, I30, 2, 100),
+            !should_converge_phase(wall, wall + I30, newest, 20, I30, 2, 100),
             "a boundary ahead of wall saturates to age 0 -> inert"
+        );
+        // A newest_stamp AHEAD of wall (floor saturates to 0) -> target = reserve, still evaluates.
+        assert!(
+            should_converge_phase(
+                wall,
+                wall - (20 * 1_000_000 + 2 * I30),
+                wall + I30,
+                20,
+                I30,
+                2,
+                100
+            ),
+            "a newest stamp ahead of wall floors to 0 -> target = reserve, no panic"
         );
         // source_multiple 0 floors to 1 (never divides by zero on the quantum).
         assert!(
-            should_converge_phase(wall, wall - (20 * 1_000_000 + 2 * I30), 20, I30, 0, 100),
+            should_converge_phase(
+                wall,
+                wall - (20 * 1_000_000 + 2 * I30),
+                newest,
+                20,
+                I30,
+                0,
+                100
+            ),
             "source_multiple 0 floors to 1 (quantum = interval) and still evaluates"
         );
     }
@@ -2745,11 +2861,17 @@ mod tests {
             // `self.converge` stands in for "the #1049 block is present"; when it is, both STEADY
             // paths are converge_eligible (the C `if (converge_eligible)`), and the block also
             // maintains the shared counter on the N>=2 path (`!drain_eligible`, where the drain
-            // block did not run).
+            // block did not run). The floor (freshest queued stamp) is `q.back()` — erasing OLDER
+            // matured frames never touches it, so it is the same freshest arrival the C reads as
+            // `array[num-1]`.
             if self.converge {
+                let newest = *q
+                    .back()
+                    .expect("STEADY branch is entered with a non-empty queue");
                 if should_converge_phase(
                     wall,
                     old_boundary,
+                    newest,
                     reserve_ms,
                     I30,
                     n,
