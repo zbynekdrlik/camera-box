@@ -136,7 +136,10 @@ pub fn analyze(rows: &[PainterRow]) -> PainterPacing {
             intervals.push(b - a);
         }
     }
-    let have_flip_stamps = rows.iter().filter(|r| r.flip_ts_ns.is_some()).count() >= 2;
+    // "have flip cadence data" = at least one measurable inter-flip interval (two CONSECUTIVE
+    // flip-stamped rows). This is exactly when `nominal_flip_interval_ns` is `Some`, keeping the
+    // two fields consistent (≥2 NON-consecutive flip stamps would yield no interval at all).
+    let have_flip_stamps = !intervals.is_empty();
 
     let (nominal_flip_interval_ns, max_flip_interval_ns, missed_deadlines, duplicate_class_stalls) =
         if intervals.is_empty() {
@@ -265,13 +268,12 @@ mod tests {
     fn real_rig_jitter_up_to_20ms_is_not_a_missed_deadline() {
         // Real 1399731812 finding: intervals 14..20ms at a 16.67ms nominal, none flagged.
         let mut rows = clean_run(200);
-        // bump a handful of intervals to 20ms (< 1.5x nominal = 25ms) — must NOT flag.
+        // Shift ONE row's flip forward by 3.33ms at a few indices: the interval BEFORE that row
+        // grows to ~20ms (< 1.5x nominal = 25ms), the interval after it shrinks — neither is a
+        // missed deadline. A direct index (not a skip+break loop, which trips clippy::never_loop).
         for i in [50usize, 90, 130] {
-            for r in rows.iter_mut().skip(i) {
-                if let Some(f) = r.flip_ts_ns.as_mut() {
-                    *f += 3_330_000; // shift the tail forward by 3.33ms => that one interval ~20ms
-                }
-                break;
+            if let Some(f) = rows[i].flip_ts_ns.as_mut() {
+                *f += 3_330_000;
             }
         }
         let p = analyze(&rows);
