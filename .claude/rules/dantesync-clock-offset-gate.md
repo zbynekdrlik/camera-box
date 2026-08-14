@@ -93,3 +93,31 @@ are just `run_sourced` wrappers around bash — SOURCE `clock-offset-guard.sh` i
 and call the function on the fixture directly (that is exactly what the test does). This gives a
 genuine local RED (against the pre-fix script) → GREEN proof with zero compilation, and is the
 verification path to use for any pure bash function in this repo's sourced gates.
+
+## Journal path grades MEDIAN + SPREAD too (#837, the twin of the #836 HTTP check)
+`dantesync_offset_verdict JOURNAL FRESHNESS_S BOUND_US [STABILITY_US]` — the OPTIONAL 4th arg is the
+journal-path mirror of `sampled_offset_verdict`'s spread/stability check. Omitted/empty = median-only,
+byte-for-byte the pre-#837 contract (every 3-arg caller — `verify-device.sh` (d), painter gate — that
+does NOT want the spread check stays unchanged). Present = grade the SPREAD (`_fresh_offset_spread_us`
+→ `spread_of_ints`) of the SAME K=11 fresh set the median grades, adding `unstable`/`drift_unstable`
+(same words the HTTP path uses). The raw fresh samples come from `_fresh_offset_samples_us` (ONE parse;
+`_fresh_offset_median_us`/`_fresh_offset_spread_us` are thin wrappers — the #595 single-source rule).
+Stability bound is `DANTESYNC_STABILITY_US` (default 2000), plumbed as `GATE_STABILITY_US` /
+`DEVICE_CLOCK_STABILITY_US` / `IMAG_CLOCK_STABILITY_US` / the CLI `--stability-us`.
+
+**The #1055 slew rescue is deliberately NOT on the journal path.** `slew_transient_exclusion_verdict`
+rescues a would-be median-`drift`, so wiring it here would turn a node that `drift`s TODAY into `ok` =
+FEWER failures than today = violates #837's "strictly more failures, never fewer" invariant. The HTTP
+path landed the strict #836 check first and added the 1022/1041/1055 rescues LATER after live
+false-fails; the journal path mirrors that sequencing — a journal slew rescue is a future ticket IF a
+live false-`unstable` is ever observed on it, not a speculative add now.
+
+## `run_sourced` test bodies run under `set -e` — guard any rc-returning call
+`run_sourced` starts with `set -uo pipefail` and then `. clock-offset-guard.sh`, whose top-level
+`set -euo pipefail` (line ~38) RE-ENABLES `-e` in the harness. So a test body that calls a function
+returning non-zero (e.g. `offset_verdict_check`, which returns 2 on drift/unstable) aborts the whole
+harness → `run_sourced`'s `out.status.success()` assert fails, masking the real assertion. Guard it the
+way the existing `offset_check` tests do: `rc=0; the_fn … || rc=$?; echo "rc=$rc"`, then assert on the
+captured `rc`. The pure verdict functions (`dantesync_offset_verdict`, `_fresh_offset_*`) all `printf`
+a word and `return 0`, so `$(…)` captures of THEM need no guard — only the rc-signalling `*_check`
+wrappers do.
