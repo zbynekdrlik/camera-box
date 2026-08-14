@@ -8425,3 +8425,27 @@ Review: 0 🔴 2 🟡 3 🔵, all fixed same-branch. Gotcha logged: cargo tests 
 - Sourced-lib/anchor discipline: the [4h/8pre] block is a NEW insertion — no anchored line edited; verified no test .find()/.split()s on `[4h/8]`/`[4g/8]` literals or on `phase_sync_calibrate.py` occurrence order (the banner `[4h/8pre]` contains `[4h/8]` but nothing anchors on it). clippy --all-targets clean; 20 python + 5 Rust harness guards pass; the merged-state full-suite anchor check runs on CI.
 - Review (fresh-context general-purpose, Opus 4.8, /review + requesting-code-review): 0R 0Y 4B, all fixed same-branch. Key 🔵: the re-anchor originally recomputed margin-free, which would silently STRIP any uniform jitter-headroom margin (issue 757) a persisted calibration carried and churn every run -> recover_uniform_margin() now preserves it exactly (min(offset)-floor); + out-json==basis guard; + mocked-WS main() tests locking the never-clobber-the-basis + no-op-writes-nothing contracts.
 - GOTCHA reused: any TestCLI/main() --apply test MUST pin --persisted-json/--out-json to tmp_path (calibrator-testing rule, real ~/.camera-box/phase-sync-last.json clobber hazard) — all new main() tests do; real file verified untouched.
+
+## issue 879 — strih aux NDI senders under the render budget, program absolute (v1.7.0-dev.457)
+- Root cause: the aux senders (interkom/MULTIVIEW/Grading) are `ndi_filter` republishes;
+  `ndi_filter_render_video` did a full texrender+readback+send every tick gated only by
+  `if (rendered) return;`, and never entered `render_display()` where the adaptive budget lives.
+  Program is `ndi_output` (separate path, rendered first in `output_frames()`).
+- Fix: reuse the pure decision. Additive `obs_effective_render_divisor()` in obs-display-budget.h;
+  one EXPORTed libobs seam `obs_aux_sender_should_skip()` (obs.c) reads the tick globals + delegates
+  to `obs_display_should_skip()`; `ndi-filter.cpp` gates its render+send with per-filter EWMA/counters.
+  Program priority is STRUCTURAL (different source type, never routed through the gate; runs first).
+  Audio path (`ndi_filter_asyncaudio`) untouched. Per-sender cadence via optional
+  `ndi_filter_render_divisor` settings key (default 2; effective 1 on 30fps strih = pure budget gate).
+- Commits: 696cd4b31 (bump) · 5f819cfaf [red]/1dd38b798 [green] effective_render_divisor Tier-0 seam ·
+  9bcfeaa7c C enforcement · 3e98d5b33 parity+invariant harness (tests/aux_sender_budget_879.rs) +
+  lock-step anchors (genlock_preload.rs + both windows-genlock*.yml) · 5a88cead8 review fixes.
+- Verify: Tier-0 RED→GREEN on effective_render_divisor; C-parity (header vs Rust authority) +
+  seam invariants lifted+compiled under -Werror (both pass in /tmp; run on CI — no local heavy builds).
+- Adversarial review (Fable): program-priority CLEAN; findings fixed in 5a88cead8; robustness
+  follow-up filed as #1063 (order-independent budget term when an aux filter renders early in the tick).
+- GOTCHA (GCC-14): a C stub with TWO distinct anonymous struct types (`static struct {..} _obs;
+  static struct {..} *obs = &_obs;`) is an incompatible-pointer-types constraint violation — a WARNING
+  on GCC 13 but a hard ERROR on GCC 14. Name the struct once. Lift-and-compile caught it under -Werror.
+- GOTCHA (deploy): the DistroAV plugin now imports a NEW libobs export — a partial deploy of only the
+  plugin DLL against an old obs64.dll fails plugin LOAD (unresolved symbol). Use the FULL-BUNDLE deploy.

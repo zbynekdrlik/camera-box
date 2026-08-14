@@ -4,6 +4,11 @@ paths:
   - "vendor/obs-studio/libobs/obs-internal.h"
   - "tests/genlock_release_cadence.rs"
   - "tests/genlock_relock_selection_parity.rs"
+  - "vendor/obs-studio/libobs/obs.c"
+  - "vendor/obs-studio/libobs/obs.h"
+  - "vendor/obs-studio/libobs/obs-display-budget.h"
+  - "vendor/distroav/src/ndi-filter.cpp"
+  - "tests/aux_sender_budget_879.rs"
   - ".github/workflows/windows-genlock.yml"
   - ".github/workflows/windows-genlock-fast.yml"
 ---
@@ -182,3 +187,52 @@ function (not per-branch helpers) is what keeps those slices intact — a split 
 between `genlock_relocks++` and its terminal `release =`. Prove the move byte-for-byte: re-indent
 the new body back to the original depth and `diff` it against `git show HEAD:<file>` over the old
 line range; the ONLY intended delta is the added declaration token.
+
+
+## Bringing an AUX ndi_filter path under a libobs decision, and lift-compiling a NEW EXPORT (#879)
+
+The strih aux NDI senders (interkom / MULTIVIEW / Grading) are `ndi_filter` republishes in the
+DistroAV plugin, NOT the program (the program is `ndi_output`, a separate source type rendered in
+`output_frames()` BEFORE `render_displays()` each graphics tick). `ndi_filter_render_video()` did a
+full texrender + stagesurface readback + send every tick with no budget/cadence term — it never
+entered `render_display()`, so the adaptive render budget (`obs_display_should_skip`,
+`obs-display-budget.h`) could not see it. Pattern to bring such a path under the SAME budget without
+inventing a second mechanism: add ONE EXPORTed libobs seam (`obs_aux_sender_should_skip()` in
+`obs.c`, declared in `obs.h`) that reads `obs->video.graphics_frame_start_ns` +
+`video_frame_interval_ns` (the two globals `render_display()` already budgets against) and delegates
+to the pure `obs_display_should_skip()`; keep per-instance EWMA + counters on the plugin struct.
+Program priority stays STRUCTURAL (different source type, never routed through the gate).
+
+- **Budget-model render-order caveat:** `elapsed = now - graphics_frame_start_ns` only reflects the
+  program cost if the aux decision falls AFTER `output_frames()`. Aux scenes shown via their own
+  surfaces render in `render_displays()` (after the program) so it holds on strih; an aux scene
+  embedded in the PROGRAM scene would decide early and see false headroom (robustness follow-up
+  #1063: an order-independent `last_tick_total` budget term).
+- **Audio is a separate filter callback:** gate ONLY `ndi_filter_render_video`; leave
+  `ndi_filter_asyncaudio` untouched so interkom talkback audio stays full-rate.
+
+**Lift-and-compile a NEW libobs EXPORT seam, not just a `static inline` helper.** A seam that reads
+the `obs` global is still liftable: stub the global (`struct obs_stub { struct video_stub video; };
+static struct obs_stub _obs; static struct obs_stub *obs = &_obs;`) + `static uint64_t
+os_gettime_ns(void)`, `#include` the REAL header for the pure helpers, and splice the seam VERBATIM
+from `obs.c`. `tests/aux_sender_budget_879.rs` does this (parity vs the Rust authority + the
+never-freeze/program-priority invariants) — the same "compile the shipped bytes" evidence the
+genlock parity gate gives.
+
+- **GCC-14 TRAP in such a stub:** `static struct { .. } _obs; static struct { .. } *obs = &_obs;`
+  declares TWO distinct anonymous struct types — an incompatible-pointer-types *warning* on GCC 13
+  but a hard *error* on GCC 14 (a `compile()` that only checks exit status passes today, breaks the
+  day a runner moves to GCC 14). Name the struct ONCE (`struct obs_stub`). Compile the stub under
+  `-Werror` to catch it now.
+
+**Deploy coupling:** adding a NEW libobs EXPORT means the DistroAV plugin DLL now imports a symbol
+that only the rebuilt `obs64.dll` provides — a partial deploy of just the plugin against an old
+`obs64.dll` fails plugin LOAD (unresolved symbol). Always FULL-BUNDLE deploy after a libobs export
+change (see `rig-state-inspection.md`).
+
+**Additive header helpers keep existing anchors safe.** `obs_effective_render_divisor()` was APPENDED
+to `obs-display-budget.h` rather than refactoring `render_display()`'s inline #776 derivation, because
+both windows-genlock ymls + `genlock_preload.rs` pin `uint32_t effective_divisor =
+display->render_divisor;`. When you leave a second inline copy of a derivation, ANCHOR it too
+(`genlock_preload.rs` now pins the obs-display.c `derived = ...` line) so the two cannot silently
+diverge.
