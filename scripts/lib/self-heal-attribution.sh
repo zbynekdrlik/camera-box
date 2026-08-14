@@ -61,25 +61,12 @@ self_heal_reset_window_journalctl_cmd() {
   fi
 }
 
-# self_heal_reset_events_from_output SSH_OUTPUT_TEXT -> zero or more epoch-NANOSECOND timestamps,
-# one per line, parsed from each matched line's leading `-o short-unix` "SEC.USEC " field. Pure
-# parse (no I/O). short-unix's fractional part is exactly 6 digits (microseconds); ns = sec*1e9 +
-# usec*1000, built via string concatenation (not arithmetic) so it never overflows awk's
-# double-precision float mantissa the way a direct multiply of two large numbers could.
-self_heal_reset_events_from_output() {
-  printf '%s\n' "$1" \
-    | { grep -E "$(self_heal_reset_grep_pattern)" || true; } \
-    | awk -F'[ .]' '{ printf "%d%06d000\n", $1, $2 }'
-}
-
-# self_heal_reset_scan_message CAMBOX AT_NS -> the operator-facing line printed the moment a reset
-# is discovered (pure formatting, no I/O) -- distinctly labeled so a human/CI reader never mistakes
-# this for a frozen-camera accusation.
-self_heal_reset_scan_message() {
-  local cambox="${1:-?}" at_ns="${2:-?}"
-  printf '%s self-heal RESET detected at %s ns (epoch) during this recording -- capture_rate_selfheal (#663) USB-reset the capture device; recording-verdict.rs will attribute any resulting stale/duplicate frames to self_heal_reset, NOT frozen_leg\n' \
-    "$cambox" "$at_ns"
-}
+# NOTE (issue 946 / issue 910): the self-heal-ONLY parser (self_heal_reset_events_from_output) and
+# operator message (self_heal_reset_scan_message) were superseded by the UNIFIED recognised-event
+# table below (restart_events_from_journal_output / restart_events_from_burn_log_output /
+# restart_event_scan_message), which tags each event with its KIND and also reads the burn-instance
+# log. self_heal_reset_grep_pattern (above) and self_heal_reset_window_journalctl_cmd (below) are
+# still used verbatim by that table + the harness journal-window read.
 
 # ---------------------------------------------------------------------------------------------
 # issue 946 + issue 910 -- the UNIFIED recognised-event table (one table, never three parallel

@@ -3168,43 +3168,56 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
   done
 fi
 
-# [7b/8] #895: self-heal-RESET scan. Keys on the RESET event itself
-# ("#663 self-heal: USB reset attempt #N succeeded") rather than either upstream detection band's
-# WARN text, so a reset triggered via EITHER the #656 jitter band OR the #717 sustained band is
-# caught by ONE check (scripts/lib/self-heal-attribution.sh's own header explains why the
-# capture-rate-guard.sh mid-recording recheck further below -- cam1/jitter-only -- does not already
-# cover this). Swept across EVERY active camera (not just the source camera), scoped to the EXACT
-# recording window via each box's own CURRENT camera-box.service InvocationID (the [2/8] redeploy
-# earlier in this run restarts camera-box, so the invocation id must be re-resolved here, never
-# reused from an earlier preflight -- same #693/#705 discipline the capture-rate-guard check uses).
-# Detected events are printed loudly NOW (never only in post-hoc forensics) and threaded into
-# recording-verdict.rs below via --self-heal-reset so the pure self_heal_attribution module can
-# re-attribute any correlating frozen_leg window -- ALLOWED to fire (never suppressed), and never
-# silently swallowed: an event with no correlating window still gates the run (#895).
-echo "[7b/8] self-heal reset scan (#895) — did capture_rate_selfheal (#663) USB-reset any active camera's capture device during the recording window?"
-SELF_HEAL_RESET_EVENTS=()
-_self_heal_reset_scan() {  # camname ip
-  local _scn="$1" _sip="$2" _sinv _sout _sns _sfound=0
+# [7b/8] #895 + issue 946 + issue 910: run-integrity RESTART-event scan. ONE recognised-event
+# table (scripts/lib/self-heal-attribution.sh's restart_event_* functions) keys on the RESET/
+# CRITICAL EVENT lines themselves -- the shared "#663 self-heal: USB reset attempt #N succeeded"
+# (fired via EITHER the #656 jitter band OR the #717 sustained band), PLUS the issue-945
+# capture-wedge (exit 79) and issue-944 emit-freeze (exit 81) watchdog CRITICAL lines -- so all
+# three are caught by ONE scan rather than three parallel greps. Read from BOTH sources: (a) the
+# box's journald window, scoped to the EXACT recording window via its CURRENT camera-box.service
+# InvocationID (re-resolved here -- the [2/8] redeploy restarts camera-box, same #693/#705
+# discipline), AND (b) the burn instance's OWN log (issue 910: during an E2E burn the harness
+# stops camera-box.service and runs the source/secondary capture as a transient systemd-run unit
+# logging to /tmp/cbox-burn*.log, so journald is STRUCTURALLY blind to the recording window --
+# mirroring the issue-992 capture-rate burn-log read). Swept across EVERY active camera. Detected
+# events are printed loudly NOW (never only in post-hoc forensics) and threaded into
+# recording-verdict.rs below via --restart-event KIND:CAMBOX:EPOCH_NS so the pure
+# self_heal_attribution module can re-attribute any correlating frozen_leg window -- ALLOWED to
+# fire (never suppressed), and never silently swallowed: an event with no correlating window still
+# gates the run (#895).
+echo "[7b/8] restart-event scan (#895 self-heal reset + issue 945 capture-wedge + issue 944 emit-freeze) — did any active camera restart during the recording window? (checked via BOTH journald AND each camera's burn-instance log, issue 910)"
+RESTART_EVENTS=()
+_restart_event_scan() {  # camname ip burnlog
+  local _scn="$1" _sip="$2" _sblog="$3" _sinv _sjournal _sburn _scombined _sline _skind _sns _sfound=0
   _sinv="$(sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$_sip" \
     "systemctl show -p InvocationID --value camera-box 2>/dev/null" 2>/dev/null || true)"
-  _sout="$(sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$_sip" \
+  _sjournal="$(sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$_sip" \
     "$(self_heal_reset_window_journalctl_cmd "$_sinv" "$CAPTURE_RATE_WINDOW_START_EPOCH" "$CAPTURE_RATE_WINDOW_END_EPOCH")" \
     2>/dev/null || true)"
-  while IFS= read -r _sns; do
-    [ -z "$_sns" ] && continue
+  _sburn="$(sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$_sip" \
+    "$(restart_event_burn_log_grep_cmd "$_sblog")" \
+    2>/dev/null || true)"
+  # KIND:EPOCH_NS from journald AND the burn-instance log (issue 910). During a real E2E burn the
+  # two sources are effectively mutually exclusive (camera-box.service is stopped, so journald is
+  # blind and only the burn log yields events); the `sort -u` is a defensive dedup for the edge
+  # case where the unit genuinely runs and both sources happen to observe the same event.
+  _scombined="$( { restart_events_from_journal_output "$_sjournal"; restart_events_from_burn_log_output "$_sburn"; } | sort -u )"
+  while IFS= read -r _sline; do
+    [ -z "$_sline" ] && continue
+    _skind="${_sline%%:*}"; _sns="${_sline#*:}"
     _sfound=1
-    echo "    $(self_heal_reset_scan_message "$_scn" "$_sns")"
-    SELF_HEAL_RESET_EVENTS+=("${_scn}:${_sns}")
-  done <<< "$(self_heal_reset_events_from_output "$_sout")"
+    echo "    $(restart_event_scan_message "$_skind" "$_scn" "$_sns")"
+    RESTART_EVENTS+=("${_skind}:${_scn}:${_sns}")
+  done <<< "$_scombined"
   if [ "$_sfound" -eq 0 ]; then
-    echo "    $_scn: no self-heal reset in this recording window — OK"
+    echo "    $_scn: no restart event in this recording window — OK"
   fi
 }
-_self_heal_reset_scan "$CAMERA_NAME" "$CAM1_IP"
+_restart_event_scan "$CAMERA_NAME" "$CAM1_IP" "/tmp/cbox-burn.log"
 if [ "${ALL_CAMBOX:-0}" = "1" ]; then
   for _cn_ip_sh in "${CAMBOX_SECONDARY_DEPLOY[@]}"; do
     _cn="${_cn_ip_sh%%=*}"; _crest="${_cn_ip_sh#*=}"; _cip="${_crest%%=*}"
-    _self_heal_reset_scan "$_cn" "$_cip"
+    _restart_event_scan "$_cn" "$_cip" "/tmp/cbox-burn-${_cn}.log"
   done
 fi
 
@@ -3749,15 +3762,17 @@ continuing WITHOUT the imag partial; the merge below will omit --merge-partials 
     MERGE_ARGS+=(--switch-schedule "$SWITCH_SCHEDULE_JSON")
     echo "    #332 all-cambox: --switch-schedule $SWITCH_SCHEDULE_JSON (per-cambox continuity in the merge, ON the stream box)"
   fi
-  # #895: thread every self-heal-RESET event detected during the recording (the [7b/8] scan above)
-  # into the merge/verdict call, so the pure self_heal_attribution module can re-attribute any
-  # correlating frozen_leg window instead of misreporting it as a camera fault. An empty array
-  # (the common case — no self-heal fired) adds nothing.
-  if [ "${#SELF_HEAL_RESET_EVENTS[@]}" -gt 0 ]; then
-    for _sh_event in "${SELF_HEAL_RESET_EVENTS[@]}"; do
-      MERGE_ARGS+=(--self-heal-reset "$_sh_event")
+  # #895 + issue 946 + issue 910: thread every run-integrity RESTART event detected during the
+  # recording (the [7b/8] scan above -- self-heal reset, capture-wedge, emit-freeze; from journald
+  # AND each camera's burn-instance log) into the merge/verdict call, so the pure
+  # self_heal_attribution module can re-attribute any correlating frozen_leg window instead of
+  # misreporting it as a camera fault. Tokens are KIND:CAMBOX:EPOCH_NS. An empty array (the common
+  # case — nothing restarted) adds nothing.
+  if [ "${#RESTART_EVENTS[@]}" -gt 0 ]; then
+    for _re_event in "${RESTART_EVENTS[@]}"; do
+      MERGE_ARGS+=(--restart-event "$_re_event")
     done
-    echo "    #895: --self-heal-reset x${#SELF_HEAL_RESET_EVENTS[@]} (${SELF_HEAL_RESET_EVENTS[*]})"
+    echo "    restart events: --restart-event x${#RESTART_EVENTS[@]} (${RESTART_EVENTS[*]})"
   fi
   printf '      %q ' "$VERDICT_BIN" "${MERGE_ARGS[@]}"; echo
 

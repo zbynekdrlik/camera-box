@@ -386,6 +386,17 @@ struct Args {
     /// never abort an otherwise-valid verdict run.
     #[arg(long, value_name = "CAMBOX:EPOCH_NS")]
     self_heal_reset: Vec<String>,
+    /// issue 946 / issue 910: a kind-tagged run-integrity RESTART event detected by the harness
+    /// during THIS recording window (`scripts/lib/self-heal-attribution.sh`'s unified
+    /// recognised-event scan, `[7b/8]`, read from BOTH journald AND each camera's burn-instance
+    /// log). Repeat per event: `--restart-event KIND:CAMBOX:EPOCH_NS` where KIND is
+    /// `self_heal_reset` | `capture_wedge` (issue 945, exit 79) | `emit_freeze` (issue 944, exit
+    /// 81). Threaded through the SAME `attribute_self_heal` correlation as `--self-heal-reset`
+    /// (which stays as the untagged self-heal-only alias), so a wedge/emit-freeze restart mid-
+    /// recording is re-attributed away from `frozen_leg` too. A malformed token is silently
+    /// dropped (`SelfHealResetEvent::parse`) — never aborts an otherwise-valid verdict run.
+    #[arg(long, value_name = "KIND:CAMBOX:EPOCH_NS")]
+    restart_event: Vec<String>,
 }
 
 impl Args {
@@ -4485,9 +4496,14 @@ fn build_and_print_verdict(
                 // USB-reset firing during the recording is attributed to self_heal_reset, never
                 // misreported as a camera fault. A malformed token is silently dropped — the
                 // harness's own scan is the only producer.
+                // issue 946 / issue 910: merge the legacy untagged `--self-heal-reset` tokens
+                // (default to the self_heal_reset kind) with the kind-tagged `--restart-event`
+                // tokens (capture-wedge / emit-freeze too) into ONE event list. `parse` accepts
+                // both shapes, so a mixed invocation just works.
                 let self_heal_events: Vec<SelfHealResetEvent> = args
                     .self_heal_reset
                     .iter()
+                    .chain(args.restart_event.iter())
                     .filter_map(|t| SelfHealResetEvent::parse(t))
                     .collect();
                 let leg_report = attribute_self_heal(&leg_segments, &self_heal_events);
@@ -4502,8 +4518,10 @@ fn build_and_print_verdict(
                 }
                 for ev in &leg_report.unattributed_events {
                     println!(
-                        "  self_heal_reset: {} at {} (epoch ns) -- no correlating classified window, still counts as a run-integrity event (#895)",
-                        ev.cambox, ev.at_ns
+                        "  {}: {} at {} (epoch ns) -- no correlating classified window, still counts as a run-integrity event (#895/#946)",
+                        ev.kind.label(),
+                        ev.cambox,
+                        ev.at_ns
                     );
                 }
                 // #914 (2026-08-01, user decision -- mirrors issue 889's report-only pattern and
@@ -4534,8 +4552,13 @@ fn build_and_print_verdict(
                         "message": s.message(),
                     })).collect::<Vec<_>>(),
                 });
+                // The JSON key `self_heal_reset` is kept for back-compat (issue-895/914 consumers +
+                // tests key on it); as of issue 946 each entry ALSO carries a `kind`
+                // (self_heal_reset | capture_wedge | emit_freeze) so a reader can tell which
+                // run-integrity restart explained the window.
                 report["self_heal_reset"] = serde_json::json!({
                     "attributed": leg_report.self_heal.iter().map(|sh| serde_json::json!({
+                        "kind": sh.kind.label(),
                         "cambox": sh.cambox,
                         "since_ns": sh.since_ns,
                         "reset_at_ns": sh.reset_at_ns,
@@ -4545,6 +4568,7 @@ fn build_and_print_verdict(
                         "message": sh.message(),
                     })).collect::<Vec<_>>(),
                     "unattributed_events": leg_report.unattributed_events.iter().map(|ev| serde_json::json!({
+                        "kind": ev.kind.label(),
                         "cambox": ev.cambox,
                         "at_ns": ev.at_ns,
                     })).collect::<Vec<_>>(),

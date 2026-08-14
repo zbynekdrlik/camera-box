@@ -106,77 +106,9 @@ fn journalctl_cmd_falls_back_to_unscoped_unit_query_when_invocation_id_empty() {
 }
 
 // -------------------------------------------------------------------------------------------
-// events_from_output -- the -o short-unix timestamp parser
-// -------------------------------------------------------------------------------------------
-
-#[test]
-fn events_from_output_extracts_epoch_ns_from_short_unix_lines() {
-    let harness = "SCRIPT_OUT=$(cat <<'JOURNAL'\n\
-1785439475.449374 cam1 camera-box[1234]: WARN #663 self-heal: USB reset attempt #3 succeeded -- will exit (code 77)\n\
-JOURNAL\n\
-)\nself_heal_reset_events_from_output \"$SCRIPT_OUT\"";
-    let out = run_sourced(harness);
-    let lines: Vec<&str> = out.trim().lines().collect();
-    assert_eq!(lines, vec!["1785439475449374000"], "raw output: {out:?}");
-}
-
-#[test]
-fn events_from_output_ignores_non_matching_lines() {
-    let harness = "SCRIPT_OUT=$(cat <<'JOURNAL'\n\
-1785439470.000000 cam1 camera-box[1234]: INFO capture loop started\n\
-1785439471.111111 cam1 camera-box[1234]: WARN #656 capture-delivery-rate DEFECTIVE: 64.0 fps\n\
-1785439475.449374 cam1 camera-box[1234]: WARN #663 self-heal: USB reset attempt #1 succeeded -- ok\n\
-1785439480.222222 cam1 camera-box[1234]: INFO capture loop resumed\n\
-JOURNAL\n\
-)\nself_heal_reset_events_from_output \"$SCRIPT_OUT\"";
-    let out = run_sourced(harness);
-    let lines: Vec<&str> = out.trim().lines().collect();
-    assert_eq!(lines, vec!["1785439475449374000"], "raw output: {out:?}");
-}
-
-#[test]
-fn events_from_output_extracts_multiple_resets_in_order() {
-    let harness = "SCRIPT_OUT=$(cat <<'JOURNAL'\n\
-1785439475.449374 cam1 camera-box[1234]: WARN #663 self-heal: USB reset attempt #1 succeeded -- ok\n\
-1785439600.100000 cam1 camera-box[1235]: WARN #663 self-heal: USB reset attempt #2 succeeded -- ok\n\
-JOURNAL\n\
-)\nself_heal_reset_events_from_output \"$SCRIPT_OUT\"";
-    let out = run_sourced(harness);
-    let lines: Vec<&str> = out.trim().lines().collect();
-    assert_eq!(
-        lines,
-        vec!["1785439475449374000", "1785439600100000000"],
-        "raw output: {out:?}"
-    );
-}
-
-#[test]
-fn events_from_output_empty_input_yields_nothing() {
-    let out = run_sourced("self_heal_reset_events_from_output ''");
-    assert!(out.trim().is_empty(), "raw output: {out:?}");
-}
-
-// -------------------------------------------------------------------------------------------
-// scan message -- distinctly labeled, never reads as a camera fault
-// -------------------------------------------------------------------------------------------
-
-#[test]
-fn scan_message_is_loud_and_distinctly_labeled() {
-    let out = run_sourced("self_heal_reset_scan_message CAM1 1785439475449374588");
-    assert!(out.contains("CAM1"), "{out}");
-    assert!(out.contains("1785439475449374588"), "{out}");
-    assert!(out.contains("self-heal RESET detected"), "{out}");
-    assert!(out.contains("self_heal_reset"), "{out}");
-    assert!(
-        out.contains("NOT frozen_leg"),
-        "must explicitly disclaim a camera-fault accusation, mirroring the #894 burn-unit \
-         integrity message's own 'NOT a frozen camera' reassurance: {out}"
-    );
-}
-
-// -------------------------------------------------------------------------------------------
-// Wiring -- recording-e2e.sh actually sources the lib, scans every active camera, and threads
-// the result into recording-verdict.rs's --self-heal-reset flag.
+// Wiring -- recording-e2e.sh actually sources the lib, scans every active camera (journald AND
+// each camera's burn-instance log), and threads the result into recording-verdict.rs's
+// --restart-event flag.
 // -------------------------------------------------------------------------------------------
 
 #[test]
@@ -184,19 +116,28 @@ fn recording_e2e_sources_the_lib_and_wires_the_scan_into_merge_args() {
     let s = read("scripts/recording-e2e.sh");
     assert!(
         s.contains("lib/self-heal-attribution.sh"),
-        "recording-e2e.sh must source the new lib"
+        "recording-e2e.sh must source the lib"
     );
     assert!(
         s.contains("self_heal_reset_window_journalctl_cmd"),
         "recording-e2e.sh must call the window-scoped journalctl builder"
     );
     assert!(
-        s.contains("self_heal_reset_events_from_output"),
-        "recording-e2e.sh must parse the scan output for epoch-ns events"
+        s.contains("restart_events_from_journal_output"),
+        "recording-e2e.sh must parse the journald scan output for KIND:EPOCH_NS events"
     );
     assert!(
-        s.contains("--self-heal-reset"),
-        "recording-e2e.sh must thread detected events into recording-verdict.rs via --self-heal-reset"
+        s.contains("restart_events_from_burn_log_output")
+            && s.contains("restart_event_burn_log_grep_cmd"),
+        "recording-e2e.sh must ALSO read + parse each camera's burn-instance log (issue 910)"
+    );
+    assert!(
+        s.contains("/tmp/cbox-burn.log") && s.contains("/tmp/cbox-burn-${_cn}.log"),
+        "the restart-event scan must pass the source AND per-secondary burn-log paths (issue 910)"
+    );
+    assert!(
+        s.contains("--restart-event"),
+        "recording-e2e.sh must thread detected events into recording-verdict.rs via --restart-event"
     );
 }
 
@@ -228,7 +169,10 @@ fn restart_event_grep_pattern_alternates_all_three_kinds() {
     let pat = run_sourced("restart_event_grep_pattern");
     let pat = pat.trim();
     assert!(pat.contains("#663 self-heal: USB reset attempt"), "{pat}");
-    assert!(pat.contains("CRITICAL #945: capture/emit thread WEDGED"), "{pat}");
+    assert!(
+        pat.contains("CRITICAL #945: capture/emit thread WEDGED"),
+        "{pat}"
+    );
     assert!(pat.contains("CRITICAL #944: NDI output FROZEN"), "{pat}");
     assert!(pat.contains('|'), "must be a grep -E alternation: {pat}");
 }
@@ -311,7 +255,10 @@ fn restart_event_burn_log_grep_cmd_greps_the_log_for_all_kinds() {
     let cmd = run_sourced("restart_event_burn_log_grep_cmd /tmp/cbox-burn.log");
     assert!(cmd.contains("/tmp/cbox-burn.log"), "{cmd}");
     assert!(cmd.contains("grep -E"), "{cmd}");
-    assert!(cmd.contains("CRITICAL #945: capture/emit thread WEDGED"), "{cmd}");
+    assert!(
+        cmd.contains("CRITICAL #945: capture/emit thread WEDGED"),
+        "{cmd}"
+    );
     assert!(cmd.contains("CRITICAL #944: NDI output FROZEN"), "{cmd}");
     assert!(cmd.contains("#663 self-heal: USB reset attempt"), "{cmd}");
 }
@@ -322,5 +269,8 @@ fn restart_event_scan_message_is_loud_and_kind_labeled() {
     assert!(out.contains("CAM4"), "{out}");
     assert!(out.contains("1786702677000000000"), "{out}");
     assert!(out.contains("capture_wedge"), "{out}");
-    assert!(out.contains("NOT frozen_leg"), "must disclaim a camera-fault accusation: {out}");
+    assert!(
+        out.contains("NOT frozen_leg"),
+        "must disclaim a camera-fault accusation: {out}"
+    );
 }
