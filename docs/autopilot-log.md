@@ -7681,3 +7681,9 @@ does the live rig verification of the new whole-chain checks and closes it.
   all green. NO windows-genlock*.yml or parity-test edit needed — every pwsh/Rust anchor is a
   whole-file or statement-level substring, and the enclosing-function slices resolve inside the new
   fn because it precedes ready_async_frame.
+
+## 2026-08-14 — round-3 integration (PR 1046: tickets 1035 + 1038) — merge, first live latency-gated E2E, deploy
+- Merged autopilot-1035 + autopilot-1038 serially (two append-append autopilot-log conflicts, all entries kept). Tier-0 only at integration; worktree target/ dirs purged.
+- All 4 CI runs green FIRST TRY — including the full-path E2E running for the first time under the new absolute cam-to-strih 400 ms latency gate (healthy rig ~210-240 ms; bound calibrated from 20 green verdicts).
+- Deploy: obs.dll (with the extracted genlock_release_tick) to strih + stream (backups *.pre-1046, session-1 relaunches, render tick ENABLED, TEST burns verified ON), full bundle to imag (render 4.15-4.35 ms @ 60.000 fps post-restart, 29 W envelope holding).
+- Round 4 dispatched in parallel during the CI wait: probe ReleaseCadence phase-anchor mirror + the differ dead-mode removal split from the 1035 work.
