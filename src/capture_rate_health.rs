@@ -689,6 +689,38 @@ mod tests {
         );
     }
 
+    /// #1034 — the ShadowCast jitter/reset floor is tightened 10% -> 9% off a fresh live
+    /// re-measure (2026-08-14: cam1 max 4.67% / cam2 max 2.83% over ~8h; the ShadowCast CLASS's
+    /// historical characteristic envelope tops at ~8.33%, the 55.0 fps low-side). 9% stays above
+    /// that class envelope so no existing rig-forensic reading trips and no issue-909 reset-spam
+    /// regresses, while catching a genuinely-severe sustained deviation JUST beyond the envelope
+    /// that the old 10% floor let slip. (The REAL shrink to base 1% is delivered per-box by the
+    /// Cam Link 4K swap — cam3 already there.)
+    #[test]
+    fn shadowcast2_jitter_floor_tightened_to_9pct_catches_beyond_class_envelope_1034() {
+        let tol = tolerance_pct_for_model(GrabberModel::ShadowCast2);
+        // 65.7 fps vs 60.0 = 9.5% — beyond the ~8.33% class envelope. NOT deviant under the old
+        // 10% floor (RED), deviant under 9% (GREEN).
+        assert!(
+            is_rate_deviant(65.7, 60.0, tol),
+            "a 9.5% sustained deviation must trip the tightened 9% ShadowCast floor"
+        );
+        assert!(
+            is_rate_deviant(54.3, 60.0, tol),
+            "the symmetric 9.5% low-side deviation must trip too"
+        );
+        // Over-tightening guard: cam1's live measured max (62.80 fps = 4.67%) and the class's
+        // historical characteristic readings (55.0 / 64.02 fps, up to 8.33%) must STAY within the
+        // floor so E2E gates stay green and no reset-spam regresses (issue-909).
+        for captured in [62.80, 64.02, 55.0] {
+            assert!(
+                !is_rate_deviant(captured, 60.0, tol),
+                "captured={captured} is within the ShadowCast characteristic envelope — must not \
+                 trip the reset floor (would re-introduce issue-909 reset-spam)"
+            );
+        }
+    }
+
     #[test]
     fn nzxt_and_elgato_still_flag_the_same_deviation_shadowcast2_now_tolerates() {
         // The whole point of a PER-MODEL tolerance: only ShadowCast 2 gets the wider floor. A
