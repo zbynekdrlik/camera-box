@@ -2891,6 +2891,33 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
   set -e
 fi
 
+# [4h/8pre] #900 — phase-sync RE-ANCHOR: the establisher the [4h/8] floor gate never had. Re-derive
+# the ACTIVE pin set from the ALREADY-persisted per-camera transits (phase-sync-last.json) and apply
+# it, so the gate below always has an automatic establisher. This is a RE-ANCHOR, NOT the #757
+# RE-MEASUREMENT (which stays off by default): no new measurement, no new kernel -- it reads the
+# transits that produced the currently-working pins, restricts them to CAMERA_ACTIVE_SET, and
+# re-runs the UNCHANGED compute_phase_sync_offsets kernel. A provable NO-OP when the active set is
+# unchanged (same transits -> same pins -> live pins already satisfy the convention -> zero writes);
+# a pure constant shift of every surviving pin when a camera leaves/joins. ON by default (opt-out
+# PHASE_REANCHOR=0), gated on ALL_CAMBOX like the gate itself, and FAIL-LOUD (never best-effort like
+# [4g/8]): a missing/malformed persisted basis, or one that does not cover the active set, is a
+# genuine "no calibration basis" state -- exit before StartRecord rather than reach [4h/8] behind
+# pins nobody established. It reads phase-sync-last.json but NEVER clobbers it (the applied set is
+# recorded only to a run-scoped file).
+PHASE_REANCHOR="${PHASE_REANCHOR:-1}"
+if [ "$PHASE_REANCHOR" = "1" ] && [ "${ALL_CAMBOX:-0}" = "1" ]; then
+  echo "[4h/8pre] #900 phase-sync re-anchor — establish the ACTIVE floor pin set from persisted transits (no new measurement) before the [4h/8] floor gate"
+  python3 "$HERE/phase_sync_reanchor.py" --host "$STRIH" --password "$STRIH_PW" \
+    --active-set "$CAMERA_ACTIVE_SET" \
+    --gate-bin "$PROBE_BIN_DIR/phase-sync-gate" \
+    --out-json "$OUTDIR/reanchor-strih-pins-${RUN_ID}.json" \
+    --apply \
+    || {
+      echo "ERROR: [preflight] FAIL: #900 phase-sync re-anchor could not establish the active pin set from the persisted transits (missing/malformed calibration basis, does not cover the active set, or an apply failure) -- a genuine 'no calibration basis' state. Recalibrate: python3 scripts/phase_sync_calibrate.py --host \$STRIH --measured-json <path> --apply" >&2
+      exit 1
+    }
+fi
+
 # [4h/8] #893 — machine-checked gate: at least one camera in CAMERA_ACTIVE_SET must sit at the
 # strih phase-sync floor (min(pin[c] for c in CAMERA_ACTIVE_SET) == 3ms -- the "slowest active
 # camera pinned at the floor" convention phase_sync_calibrate.py implements). Reads the LIVE
