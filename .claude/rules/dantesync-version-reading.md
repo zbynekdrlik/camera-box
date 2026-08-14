@@ -1,6 +1,8 @@
 ---
 paths:
   - "scripts/dantesync-version-gate.sh"
+  - "scripts/camera-box-version-gate.sh"
+  - "tests/camera_box_version_gate.rs"
 ---
 
 # Reading dantesync's own VERSION (not its offset/lock state) — #862
@@ -65,8 +67,16 @@ wrong one silently weakens the gate:
   has no fixed value to pin against; the only checkable invariant is that every box agrees.
 
 The camera-box BINARY's own version (`1.7.0-dev.NNN`, continuously deployed) is the SECOND
-shape — filed as `#875`, a deliberate follow-up split from `#862` (dantesync) specifically
-because the two signals need different comparison models, not just a different data source.
+shape — IMPLEMENTED in `scripts/camera-box-version-gate.sh` (#875), a deliberate follow-up split
+from `#862` (dantesync) because the two signals need different comparison models, not just a
+different data source. That gate mirrors this file's STRUCTURE (a pure parse fn + per-box verdict +
+fleet-report, source-guarded for `run_sourced` tests) but with the RELATIVE model: it computes the
+fleet's modal version from the READ boxes and fails on ANY disagreement (`camera_box_fleet_report`
+→ 0 all-agree / 20 disagree / 11 unknown), so a uniformly-NEWER fleet PASSES — the opposite of this
+pin gate, where a uniformly-STALE fleet must FAIL. camera-box runs only on the cam boxes, so its
+node list is the active cam fleet alone (`camera_active_excluding`, never a literal range); acked-
+offline exclusion is the SAME `cambox-offline-ack.sh` mechanism. Wired as a `[0/8]` recording-e2e
+precondition beside this gate.
 
 ## The lesson: a design comment's factual premise still needs LIVE verification before shipping
 

@@ -664,6 +664,26 @@ DANTESYNC_VERSION_LINUX="$DANTESYNC_VERSION_LINUX imag-nb=${IMAG_USER:-newlevel}
   --local dev1 \
   --win "strih=${WIN_SSH_USER:-newlevel}@$STRIH stream=${WIN_SSH_USER:-newlevel}@$STREAM"
 
+# camera-box binary CROSS-BOX version-parity gate (issue 875) — the follow-up split from the
+# dantesync version-parity gate above. Where that gate checks the dantesync DAEMON against a fixed
+# PIN, this checks the continuously-deployed camera-box BINARY across the active cam fleet with a
+# RELATIVE cross-box parity model (NO pin — a dev build `1.7.0-dev.NNN` has no canonical value to
+# pin against; the only checkable invariant is that every active box AGREES, mirroring
+# drift-guard.sh's genlock_build_sha parity engine). A single box on a stale build silently runs
+# objectively different behaviour than the rest (issue 875: cam4 once lacked the publish-30p fix,
+# unnoticed because dantesync happened to be uniform so a daemon-only gate stayed green). camera-box
+# runs ONLY on the cam boxes, so the node list is JUST the active cam fleet (camera_active_excluding
+# — never a literal range, .claude/rules/camera-active-set.md). An unreachable box is either read or
+# explicitly excluded via the SAME CAMBOX_OFFLINE_ACK/rig-fleet.txt mechanism the fleet preflight and
+# the version-parity gate above already use, never a silent skip.
+echo "[0/8] camera-box version-parity gate — every active cam box must run the SAME camera-box build (issue 875)"
+CAMBOX_VERSION_LINUX="$CAMERA_NAME=root@$CAM1_IP cam2=root@$PAINTER_IP"
+for _cb_cn in $(camera_active_excluding "$CAMERA_NAME cam2"); do
+  CAMBOX_VERSION_LINUX="$CAMBOX_VERSION_LINUX ${_cb_cn}=root@$(camera_secondary_ip "$_cb_cn")"
+done
+"$HERE/camera-box-version-gate.sh" \
+  --linux "$CAMBOX_VERSION_LINUX"
+
 # dev1<->painter clock-offset gate — ALL_CAMBOX sweep ONLY (#326, #312 Phase-2 robustness). The
 # all-cambox sweep ([6/8] below) stamps each program-switch WINDOW boundary on dev1's
 # CLOCK_REALTIME, while the painted ticks (and the burns recording-verdict --switch-schedule keys

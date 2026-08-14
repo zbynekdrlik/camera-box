@@ -1965,3 +1965,40 @@ fn dantesync_version_gate_runs_before_any_recording() {
          version-drifted fleet)"
     );
 }
+
+/// #875: recording-e2e.sh must invoke the camera-box cross-box version-parity gate, reading the
+/// active cam fleet over SSH via --linux. Mirrors the #862 wiring guard above so a future refactor
+/// cannot silently drop or unwire this precondition. Scoped to a window AFTER this gate's OWN
+/// invocation (the dantesync gate above legitimately also uses --linux, and must not be confused).
+#[test]
+fn recording_e2e_runs_the_camera_box_version_gate() {
+    let s = read("scripts/recording-e2e.sh");
+    let gate_idx = s
+        .find("camera-box-version-gate.sh")
+        .expect("#875: recording-e2e.sh must invoke camera-box-version-gate.sh");
+    let window = &s[gate_idx..(gate_idx + 200).min(s.len())];
+    assert!(
+        window.contains("--linux"),
+        "#875: the camera-box version-parity gate must read the active cam fleet via --linux. \
+         window={window:?}"
+    );
+}
+
+/// #875: the camera-box version-parity gate must run BEFORE StartRecord — fail fast on a
+/// binary-drifted cam fleet before any measurement, exactly like the DanteSync NTP+PTP gate, the
+/// version-integrity gate, and the dantesync version-parity gate above it.
+#[test]
+fn camera_box_version_gate_runs_before_any_recording() {
+    let s = read("scripts/recording-e2e.sh");
+    let gate = s
+        .find("camera-box-version-gate.sh")
+        .expect("recording-e2e.sh must invoke camera-box-version-gate.sh");
+    let start_record = s
+        .find("StartRecord on strih")
+        .expect("recording-e2e.sh must start OBS recording");
+    assert!(
+        gate < start_record,
+        "#875: the camera-box version-parity gate must run BEFORE StartRecord (fail fast on a \
+         binary-drifted cam fleet)"
+    );
+}
