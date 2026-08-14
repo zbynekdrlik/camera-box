@@ -2766,14 +2766,20 @@ mod tests {
         }
     }
 
-    /// Drive the conveyor: exact 2-per-tick 60 Hz arrivals (no over-rate), 8 ms transport skew +
-    /// deterministic jitter + ±2 ms render slew (the probe's `run_cadence_sim_ratio` model). At
-    /// `inject_tick` shove the locked boundary back `inject_frames` canvas frames — the phase a
-    /// walk event (GAP RESYNC / sticky-N crawl / connect-burst ACQUIRE) mints. Returns
+    /// Drive the conveyor: exact 2-per-tick 60 Hz arrivals (no over-rate), a `skew_ns` transport
+    /// skew + deterministic jitter + ±2 ms render slew (the probe's `run_cadence_sim_ratio`
+    /// model). At `inject_tick` shove the locked boundary back `inject_frames` canvas frames — the
+    /// phase a walk event (GAP RESYNC / sticky-N crawl / connect-burst ACQUIRE) mints. Returns
     /// (per-tick presented ages, total extra drops).
+    ///
+    /// #1049 (review finding): the transport skew is a PARAMETER, not fixed at 8 ms — the natural
+    /// steady on-air age is FLOORED by it (a frame cannot be presented before it arrives), so the
+    /// convergence threshold must clear `max(reserve, floor)`, and a too-narrow skew envelope
+    /// hides a spurious-shed limit cycle at the rig's real ~20 ms skew on shallow reserves.
     fn run_conveyor_1049(
         reserve_ms: u32,
         src_interval: u64,
+        skew_ns: u64,
         converge: bool,
         inject_frames: i64,
         inject_tick: u64,
@@ -2783,7 +2789,7 @@ mod tests {
         let mut c = SimConveyor1049::new(converge);
         let mut q: std::collections::VecDeque<u64> = std::collections::VecDeque::new();
         let mut next = 0u64;
-        let skew = 8_000_000u64;
+        let skew = skew_ns;
         let mut ages = Vec::new();
         for k in 0..n_ticks {
             let slew: i64 = if k % 2 == 0 { 2_000_000 } else { -2_000_000 };
@@ -2828,8 +2834,9 @@ mod tests {
     fn steady_conveyor_persists_an_injected_phase_without_convergence_and_sheds_it_with_1049() {
         let reserve = 20u32;
         let inject = 2i64;
+        let skew = 8_000_000u64;
         // RED (no convergence): the injected phase stays elevated above the natural hold.
-        let (red, red_drops) = run_conveyor_1049(reserve, I60, false, inject, 200, 900);
+        let (red, red_drops) = run_conveyor_1049(reserve, I60, skew, false, inject, 200, 900);
         let red_pre = tail_mean_1049(&red, 170, 200);
         let red_final = tail_mean_1049(&red, 800, 900);
         assert_eq!(
@@ -2843,7 +2850,7 @@ mod tests {
         );
 
         // GREEN (convergence): the phase sheds back to within one canvas frame of configured.
-        let (green, green_drops) = run_conveyor_1049(reserve, I60, true, inject, 200, 900);
+        let (green, green_drops) = run_conveyor_1049(reserve, I60, skew, true, inject, 200, 900);
         let green_final = tail_mean_1049(&green, 800, 900);
         let excess_frames = (green_final - reserve as f64 * 1_000_000.0) / I30 as f64;
         assert!(
@@ -2864,18 +2871,29 @@ mod tests {
     }
 
     /// No limit cycle: a conveyor with convergence ON but NO injected error never sheds a single
-    /// frame in steady state, across every rig latency and both source multiples — the threshold
-    /// sits above the natural steady phase everywhere (the #998 lesson honoured).
+    /// frame in steady state, across every rig latency AND every rig transport skew and both
+    /// source multiples — the threshold sits above the natural steady phase everywhere (the #998
+    /// lesson honoured on BOTH axes).
+    ///
+    /// #1049 (review finding): the SKEW sweep is load-bearing. The natural on-air age is floored
+    /// by the transport skew, so a reserve-only threshold spuriously sheds forever when
+    /// `skew > reserve + interval/n + hysteresis` (measured live: 20 ms skew at the 3 ms prod
+    /// floor, up to 59 ms on strih `NDI cam5`). This sweep is exactly the envelope that exposes
+    /// it — an earlier revision with only an 8 ms skew passed while limit-cycling at 15-30 ms.
     #[test]
     fn convergence_never_sheds_at_the_natural_steady_phase_1049() {
-        for reserve in [3u32, 8, 20, 26, 36] {
-            for (src, label) in [(I60, "60-into-30"), (I30, "30-into-30")] {
-                let (_ages, drops) = run_conveyor_1049(reserve, src, true, 0, 100_000, 900);
-                assert_eq!(
-                    drops, 0,
-                    "reserve {reserve} ms {label}: convergence sheds NOTHING at the natural \
-                     steady phase — a spurious shed here is a #998-style limit cycle"
-                );
+        for skew_ms in [8u64, 15, 20, 30, 59] {
+            for reserve in [3u32, 8, 20, 26, 36] {
+                for (src, label) in [(I60, "60-into-30"), (I30, "30-into-30")] {
+                    let (_ages, drops) =
+                        run_conveyor_1049(reserve, src, skew_ms * 1_000_000, true, 0, 100_000, 900);
+                    assert_eq!(
+                        drops, 0,
+                        "skew {skew_ms} ms / reserve {reserve} ms {label}: convergence sheds \
+                         NOTHING at the natural steady phase — a spurious shed here is a #998-style \
+                         limit cycle (the target must clear max(reserve, floor), not reserve alone)"
+                    );
+                }
             }
         }
     }
@@ -2883,7 +2901,7 @@ mod tests {
     /// The deep #1003 hold is untouched: a 1000 ms 1:1 source with no injected error never sheds.
     #[test]
     fn deep_1003_hold_is_untouched_by_convergence_1049() {
-        let (_ages, drops) = run_conveyor_1049(1000, I30, true, 0, 200, 1200);
+        let (_ages, drops) = run_conveyor_1049(1000, I30, 8_000_000, true, 0, 200, 1200);
         assert_eq!(
             drops, 0,
             "the deep 1000 ms hold must never converge (S == configured) — no #1003 regression"
