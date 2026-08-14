@@ -8028,3 +8028,9 @@ ssh-ing IN (impossible against an off-network box).
   in `harness_cam2_painter_provisioning_863.rs`. FULL `cargo test` suite green: 205 binaries, 0
   FAILED (mandatory after a rig-mode.sh edit — no anchor collisions). shellcheck -x clean on all
   touched scripts. Playbook: new `.claude/rules/cam2-painter-lifecycle.md` + router entry.
+
+## 2026-08-14 — round-8 integration (PR 1054) + deploy: painter permanence live, cambox fleet on dev.452
+- PR 1054 merged after a gauntlet of rig-condition retries (repeat dantesync slew false-fails -> ticket 1055 filed + worker dispatched; two dead-painter fail-fasts caught in 5 s each by the new issue-860 preflight; one gate loss self-inflicted by supervisor WS probes during a live run — lesson recorded; the tolerance walk-down stepped back 1 -> 2 on honest evidence mid-PR).
+- The FINAL green run measured the best A/V yet: +17/+14/+8 ms (spread 8 ms) with tolerance 2, zero windows over, zero undecodable.
+- Deploy: rig-mode test from the merged tree performed the durable painter HANDOFF — cam2-painter.service now enabled+active (Restart=always, reboot-survival); the day-long painter restore-loop is over. Cambox fleet aligned to dev.452 via scripts/deploy-fleet.sh (emit-freeze watchdog + capture-rate tolerances live on cam1-3; the script's own stop -> remount,rw -> copy -> start -> remount,ro cycle — a hand-rolled scp had silently failed on the DELIBERATE read-only roots, caught and redone properly). network-reach-alert-watchdog installed+running on dev1 (first pass: both boxes REACHABLE).
+- Round 10 in flight: shared-duplicate attribution (painter EXONERATED by data — instrument landed), rig-lease atomic release + fixture Drop, slew-aware gate sampling.
