@@ -243,15 +243,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tolerance_is_calibrated_at_three_889_recalibration() {
-        // Pins the calibrated NUMBER itself, not just its use through the const (second same-day
-        // 2026-08-06 recalibration, ticket 889 comment 5200533407): a post-#998-fix hardware run
-        // (95843090) measured a healthy per-window max of {1, 1, 2, 3} copies/gaps (n=4 runs) with
-        // run-total burden identical to clean runs, so tolerance=2 (calibrated on only 3 of those
-        // runs) was flaky by construction the same way tolerance=1 was before it. See the const's
-        // own doc and the module doc's second 2026-08-06 RECALIBRATION section for the full
-        // evidence.
-        assert_eq!(WINDOW_COPIES_GAPS_TOLERANCE, 3);
+    fn tolerance_is_calibrated_at_one_1031() {
+        // Pins the calibrated NUMBER itself, not just its use through the const. Issue 1031
+        // (2026-08-14): re-tightened 3 -> 1 after the issue-1042 (min-delta source rate) +
+        // issue-1049 (N>=2 phase convergence) genlock fixes deployed to the rig (imag-nb + strih,
+        // 09:17 CEST). The one steady-state post-fix full-cycle run (1780620060, started +27 min
+        // after the OBS restart, fully converged) measured a healthy per-window max of {copies 1,
+        // gaps 1}, windows_over_copies_gaps_tolerance = 0, overall_pass = true -- the chronic
+        // residual that forced tolerance 3 collapsed to a single stale_replay dup+gap pair. 0
+        // stays blocked on issue 859's shared-duplicate root cause (see the ticket's gating plan);
+        // this ticket carries the remaining 1 -> 0 step. See the const's own doc.
+        assert_eq!(WINDOW_COPIES_GAPS_TOLERANCE, 1);
+    }
+
+    #[test]
+    fn two_copies_or_gaps_now_gate_after_1031() {
+        // Issue 1031: the behavioral heart of the 3 -> 1 re-tightening -- a window carrying TWO
+        // copies (or two gaps) must now FAIL the relaxed verdict, where tolerance=3 absorbed it.
+        // A single copy+gap (the post-fix stale_replay residual) must still pass. Literal fixtures
+        // on purpose: this locks the concrete new boundary, complementing the const-tracking
+        // boundary tests above.
+        assert!(
+            !decide(100, 0, 2, 0).relaxed_pass,
+            "1031: two copies must gate the relaxed verdict at tolerance=1"
+        );
+        assert!(
+            !decide(100, 0, 0, 2).relaxed_pass,
+            "1031: two gaps must gate the relaxed verdict at tolerance=1"
+        );
+        assert!(
+            decide(100, 0, 1, 1).relaxed_pass,
+            "1031: the single stale_replay residual (1 copy + 1 gap) stays absorbed at tolerance=1"
+        );
     }
 
     #[test]
