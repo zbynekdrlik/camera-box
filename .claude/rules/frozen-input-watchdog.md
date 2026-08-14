@@ -70,6 +70,15 @@ unit-tested only via the seam, exactly like #1001's `probe_ping`/`probe_tcp`). O
 with `FROZEN_INPUT_PROBE_CMD` (run with `<receiver_ip> <source>`, stdout = raw log text) for a
 `--dry-run` smoke test or a future alternate tap.
 
+- **Blind-tap visibility (never a silent UNKNOWN):** fail-safe-to-UNKNOWN alone would let a source
+  whose audit label never matches (a rename / re-create / drop-from-scene, or a `FROZEN_INPUT_SOURCES`
+  drift) stay UNKNOWN forever and never page while the watchdog looks green — the "silent unknown" the
+  standing rig-degradation-alert rule forbids. So the watchdog counts CONSECUTIVE BLIND probes (keyed
+  on the PROBE returning no usable value, NOT on the verdict — a first-sample / counter-reset UNKNOWN
+  with a real reading proves the tap works and resets it) and fires ONE "tap broken" WARN past
+  `TAP_BROKEN_THRESHOLD` (~2 h). A SKIP pass (a box down per #1001, no probe) leaves the counter
+  untouched.
+
 - **Future enhancement (recorded, not built here):** extend the `:8899` bundle-state server to
   surface per-source `received=` so dev1 reads it via a clean HTTP GET (the mechanism #1001 already
   TCP-probes), retiring the ssh read. Deferred: it needs an updated `bundle-state-server.py` deployed
