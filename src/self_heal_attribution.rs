@@ -38,31 +38,110 @@
 
 use crate::frozen_leg::{classify_leg, FrozenLeg, LegHealth, SegmentLeg, StaleReplayLeg};
 
-/// One `#663` self-heal USB reset event, as surfaced in the box's own journal
-/// (`"#663 self-heal: USB reset attempt #N succeeded"`) and captured by the harness right after
-/// `StopRecord` (`recording-e2e.sh`), the same timing as the sibling `#894` burn-unit-health
-/// check. `at_ns` is Unix-epoch nanoseconds — the SAME clock domain `SegmentLeg::start_ns`/
-/// `end_ns` already use (both derive from wall-clock epoch time, never a monotonic/boot clock), so
-/// no cross-domain conversion is needed to test for window overlap.
+/// The KIND of run-integrity restart event correlated against a recording window (issue 946 /
+/// issue 910). All three explain a window's staleness as a run-integrity event, NOT a camera
+/// fault, and correlate through the SAME engine — only the label/message/JSON `kind` differs.
+///
+/// - [`SelfHealReset`](RestartEventKind::SelfHealReset): `capture_rate_selfheal` (#663) USB-reset
+///   the capture device (the original #895 event).
+/// - [`CaptureWedge`](RestartEventKind::CaptureWedge): the out-of-band capture-wedge watchdog
+///   (issue 945, `CAPTURE_WEDGE_EXIT_CODE` 79) forced a restart because the blocking V4L2 dequeue
+///   never returned; its CRITICAL line lands in the box's journal / burn-instance log.
+/// - [`EmitFreeze`](RestartEventKind::EmitFreeze): the out-of-band emit-freeze watchdog (issue 944,
+///   `EMIT_FREEZE_EXIT_CODE` 81) forced a restart because no good frame reached NDI while the
+///   capture thread stayed alive (a silent-frozen output).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RestartEventKind {
+    /// `capture_rate_selfheal` (#663) USB reset — the original #895 event, the default kind for a
+    /// legacy untagged `cambox:epoch_ns` token.
+    #[default]
+    SelfHealReset,
+    /// issue-945 capture-wedge watchdog restart (exit code 79).
+    CaptureWedge,
+    /// issue-944 emit-freeze watchdog restart (exit code 81).
+    EmitFreeze,
+}
+
+impl RestartEventKind {
+    /// The stable, machine-readable label used in the CLI token, the report JSON, and the operator
+    /// message prefix — the SAME strings `scripts/lib/self-heal-attribution.sh`'s recognised-event
+    /// table keys on, so the two sides can never drift.
+    pub fn label(&self) -> &'static str {
+        match self {
+            RestartEventKind::SelfHealReset => "self_heal_reset",
+            RestartEventKind::CaptureWedge => "capture_wedge",
+            RestartEventKind::EmitFreeze => "emit_freeze",
+        }
+    }
+
+    /// Inverse of [`label`](RestartEventKind::label). `None` for any unrecognised label — a
+    /// malformed harness token is dropped, never panics.
+    pub fn from_label(s: &str) -> Option<Self> {
+        match s {
+            "self_heal_reset" => Some(RestartEventKind::SelfHealReset),
+            "capture_wedge" => Some(RestartEventKind::CaptureWedge),
+            "emit_freeze" => Some(RestartEventKind::EmitFreeze),
+            _ => None,
+        }
+    }
+
+    /// The distinctly-worded reason phrase for the operator message — every kind ends with
+    /// "NOT a frozen camera" so a human/CI reader can never mistake a re-attributed window for a
+    /// camera fault (the #895 acceptance-criteria requirement, extended to all restart kinds).
+    pub fn detail(&self) -> &'static str {
+        match self {
+            RestartEventKind::SelfHealReset => {
+                "capture_rate_selfheal USB-reset fired inside this window, NOT a frozen camera"
+            }
+            RestartEventKind::CaptureWedge => {
+                "the capture/emit thread WEDGED (issue 945, exit 79) and the process restarted \
+                 inside this window, NOT a frozen camera"
+            }
+            RestartEventKind::EmitFreeze => {
+                "the NDI output FROZE (issue 944, exit 81) and the process restarted inside this \
+                 window, NOT a frozen camera"
+            }
+        }
+    }
+}
+
+/// One run-integrity restart event, correlated against a recording window. Originally #895's
+/// `#663` self-heal reset (hence the name and the `--self-heal-reset` flag); as of issue 946 it
+/// also carries `kind` so the issue-945 capture-wedge and issue-944 emit-freeze restarts flow
+/// through the SAME correlation engine. Surfaced in the box's own journal AND — during an E2E burn
+/// — its `/tmp/cbox-burn*.log` (issue 910), captured by the harness right after `StopRecord`
+/// (`recording-e2e.sh`). `at_ns` is Unix-epoch nanoseconds — the SAME clock domain
+/// `SegmentLeg::start_ns`/`end_ns` already use, so no cross-domain conversion is needed to test
+/// for window overlap.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SelfHealResetEvent {
+    pub kind: RestartEventKind,
     pub cambox: String,
     pub at_ns: i64,
 }
 
 impl SelfHealResetEvent {
-    /// Parse ONE `"<cambox>:<epoch_ns>"` CLI token (`recording-verdict.rs`'s `--self-heal-reset`,
-    /// `value_name = "CAMBOX:EPOCH_NS"`) — mirrors this crate's other compact CLI encodings (e.g.
-    /// `offline_ack`'s `"box:reason,..."`). Returns `None` on any malformed token (empty cambox,
+    /// Parse ONE CLI token. Accepts BOTH the new kind-tagged `"<kind>:<cambox>:<epoch_ns>"`
+    /// (`recording-verdict.rs`'s `--restart-event`, issue 946) AND the legacy
+    /// `"<cambox>:<epoch_ns>"` (`--self-heal-reset`, #895 — defaults to
+    /// [`RestartEventKind::SelfHealReset`], keeping every existing wiring intact). Camboxes never
+    /// contain `:` and the epoch is numeric, so the field count is an unambiguous discriminator.
+    /// Returns `None` on any malformed token (unknown kind label, empty cambox,
     /// non-numeric/unparseable ns) — the caller decides whether to warn/ignore; this never panics
     /// on bad harness input.
     pub fn parse(token: &str) -> Option<Self> {
-        let (cambox, ns_str) = token.split_once(':')?;
+        let parts: Vec<&str> = token.splitn(3, ':').collect();
+        let (kind, cambox, ns_str) = match parts.as_slice() {
+            [cambox, ns] => (RestartEventKind::SelfHealReset, *cambox, *ns),
+            [k, cambox, ns] => (RestartEventKind::from_label(k)?, *cambox, *ns),
+            _ => return None,
+        };
         if cambox.is_empty() {
             return None;
         }
         let at_ns: i64 = ns_str.trim().parse().ok()?;
         Some(SelfHealResetEvent {
+            kind,
             cambox: cambox.to_string(),
             at_ns,
         })
@@ -82,6 +161,7 @@ pub const SELF_HEAL_CORRELATION_MARGIN_NS: i64 = 5_000_000_000;
 /// never the camera.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SelfHealAttributedLeg {
+    pub kind: RestartEventKind,
     pub cambox: String,
     pub since_ns: i64,
     pub reset_at_ns: i64,
@@ -91,12 +171,20 @@ pub struct SelfHealAttributedLeg {
 }
 
 impl SelfHealAttributedLeg {
-    /// The #895 acceptance-criteria operator message shape: distinctly labeled, never reading as
-    /// a camera fault.
+    /// The #895 acceptance-criteria operator message shape: distinctly labeled by its restart
+    /// KIND (`self_heal_reset` / `capture_wedge` / `emit_freeze`), never reading as a camera
+    /// fault. The `event_at` timestamp is the correlated restart event's own epoch-ns.
     pub fn message(&self) -> String {
         format!(
-            "self_heal_reset: {} since {} (reset_at={}, copies={}, approx_stale_secs={:.1}, density={:.2}) -- capture_rate_selfheal USB-reset fired inside this window, NOT a frozen camera",
-            self.cambox, self.since_ns, self.reset_at_ns, self.copies, self.approx_stale_secs, self.density
+            "{}: {} since {} (event_at={}, copies={}, approx_stale_secs={:.1}, density={:.2}) -- {}",
+            self.kind.label(),
+            self.cambox,
+            self.since_ns,
+            self.reset_at_ns,
+            self.copies,
+            self.approx_stale_secs,
+            self.density,
+            self.kind.detail()
         )
     }
 }
@@ -192,6 +280,7 @@ pub fn attribute_self_heal(
                 if let Some((idx, ev)) = matched {
                     consumed[idx] = true;
                     self_heal.push(SelfHealAttributedLeg {
+                        kind: ev.kind,
                         cambox: s.cambox.to_string(),
                         since_ns: s.start_ns,
                         reset_at_ns: ev.at_ns,
@@ -287,6 +376,7 @@ mod tests {
             end_ns: 1_785_439_500_000_000_000, // 30s window
         }];
         let events = vec![SelfHealResetEvent {
+            kind: RestartEventKind::SelfHealReset,
             cambox: "cam1".to_string(),
             at_ns: 1_785_439_475_449_374_588, // ~5.4s into the window
         }];
@@ -312,6 +402,7 @@ mod tests {
             end_ns: 30_000_000_000,
         }];
         let events = vec![SelfHealResetEvent {
+            kind: RestartEventKind::SelfHealReset,
             cambox: "cam3".to_string(),
             at_ns: 15_000_000_000,
         }];
@@ -338,6 +429,7 @@ mod tests {
         }];
         // 2s before start_ns -- inside SELF_HEAL_CORRELATION_MARGIN_NS (5s).
         let events = vec![SelfHealResetEvent {
+            kind: RestartEventKind::SelfHealReset,
             cambox: "cam1".to_string(),
             at_ns: 8_000_000_000,
         }];
@@ -360,6 +452,7 @@ mod tests {
         }];
         // 10s before start_ns -- beyond the 5s margin.
         let events = vec![SelfHealResetEvent {
+            kind: RestartEventKind::SelfHealReset,
             cambox: "cam1".to_string(),
             at_ns: 0,
         }];
@@ -383,6 +476,7 @@ mod tests {
             end_ns: 30_000_000_000,
         }];
         let events = vec![SelfHealResetEvent {
+            kind: RestartEventKind::SelfHealReset,
             cambox: "cam2".to_string(),
             at_ns: 15_000_000_000,
         }];
@@ -432,10 +526,12 @@ mod tests {
         ];
         let events = vec![
             SelfHealResetEvent {
+                kind: RestartEventKind::SelfHealReset,
                 cambox: "cam1".to_string(),
                 at_ns: 15_000_000_000,
             },
             SelfHealResetEvent {
+                kind: RestartEventKind::SelfHealReset,
                 cambox: "cam1".to_string(),
                 at_ns: 45_000_000_000,
             },
@@ -482,6 +578,7 @@ mod tests {
             end_ns: 30_000_000_000,
         }];
         let events = vec![SelfHealResetEvent {
+            kind: RestartEventKind::SelfHealReset,
             cambox: "cam2".to_string(),
             at_ns: 15_000_000_000,
         }];
@@ -510,6 +607,7 @@ mod tests {
     #[test]
     fn message_shape_is_distinct_and_never_reads_as_a_camera_fault() {
         let leg = SelfHealAttributedLeg {
+            kind: RestartEventKind::SelfHealReset,
             cambox: "cam1".to_string(),
             since_ns: 100,
             reset_at_ns: 103,
@@ -520,5 +618,111 @@ mod tests {
         let msg = leg.message();
         assert!(msg.starts_with("self_heal_reset: cam1 since 100"));
         assert!(msg.contains("NOT a frozen camera"));
+    }
+
+    // ---- issue 946 + issue 910: kind-tagged run-integrity restart events -----------------------
+    // The capture-wedge (issue 945, exit 79) and emit-freeze (issue 944, exit 81) watchdogs each
+    // force a restart whose gap produces exactly the stale/frozen frames a #663 USB reset does.
+    // They correlate through the SAME engine, tagged with a distinct kind so the report reads
+    // honestly ("capture_wedge restart", never "frozen camera").
+
+    #[test]
+    fn kind_label_round_trips() {
+        for k in [
+            RestartEventKind::SelfHealReset,
+            RestartEventKind::CaptureWedge,
+            RestartEventKind::EmitFreeze,
+        ] {
+            assert_eq!(RestartEventKind::from_label(k.label()), Some(k));
+        }
+        assert_eq!(RestartEventKind::from_label("nope"), None);
+    }
+
+    #[test]
+    fn parse_legacy_untagged_token_defaults_to_self_heal_reset() {
+        // The original #895 `--self-heal-reset cambox:epoch_ns` shape must keep working verbatim.
+        let ev = SelfHealResetEvent::parse("cam1:1785439475449374588").unwrap();
+        assert_eq!(ev.kind, RestartEventKind::SelfHealReset);
+        assert_eq!(ev.cambox, "cam1");
+        assert_eq!(ev.at_ns, 1785439475449374588);
+    }
+
+    #[test]
+    fn parse_kind_tagged_capture_wedge_token() {
+        let ev = SelfHealResetEvent::parse("capture_wedge:cam4:1785439475449374588").unwrap();
+        assert_eq!(ev.kind, RestartEventKind::CaptureWedge);
+        assert_eq!(ev.cambox, "cam4");
+        assert_eq!(ev.at_ns, 1785439475449374588);
+    }
+
+    #[test]
+    fn parse_kind_tagged_emit_freeze_token() {
+        let ev = SelfHealResetEvent::parse("emit_freeze:cam2:100").unwrap();
+        assert_eq!(ev.kind, RestartEventKind::EmitFreeze);
+        assert_eq!(ev.cambox, "cam2");
+        assert_eq!(ev.at_ns, 100);
+    }
+
+    #[test]
+    fn parse_rejects_unknown_kind_label() {
+        assert!(SelfHealResetEvent::parse("bogus_kind:cam1:100").is_none());
+    }
+
+    #[test]
+    fn a_capture_wedge_event_reattributes_a_frozen_window_and_labels_it_distinctly() {
+        let segments = vec![SegmentLeg {
+            cambox: "cam4",
+            copies: 149,
+            frames: 9000,
+            start_ns: 1_785_439_470_000_000_000,
+            end_ns: 1_785_439_500_000_000_000, // 30s window
+        }];
+        let events = vec![SelfHealResetEvent {
+            kind: RestartEventKind::CaptureWedge,
+            cambox: "cam4".to_string(),
+            at_ns: 1_785_439_475_449_374_588,
+        }];
+        let report = attribute_self_heal(&segments, &events);
+        assert!(
+            !report.any_frozen(),
+            "a capture-wedge restart must reattribute the window away from frozen_leg: {report:?}"
+        );
+        assert!(report.any_self_heal());
+        assert_eq!(report.self_heal.len(), 1);
+        assert_eq!(report.self_heal[0].kind, RestartEventKind::CaptureWedge);
+        let msg = report.self_heal[0].message();
+        assert!(msg.starts_with("capture_wedge: cam4 since"), "{msg}");
+        assert!(msg.contains("NOT a frozen camera"), "{msg}");
+        assert!(
+            msg.contains("945"),
+            "must name the wedge watchdog issue: {msg}"
+        );
+    }
+
+    #[test]
+    fn an_emit_freeze_event_gates_even_with_no_correlating_window() {
+        let segments = vec![SegmentLeg {
+            cambox: "cam2",
+            copies: 0,
+            frames: 9000,
+            start_ns: 0,
+            end_ns: 30_000_000_000,
+        }];
+        let events = vec![SelfHealResetEvent {
+            kind: RestartEventKind::EmitFreeze,
+            cambox: "cam2".to_string(),
+            at_ns: 15_000_000_000,
+        }];
+        let report = attribute_self_heal(&segments, &events);
+        assert!(!report.any_frozen());
+        assert_eq!(report.unattributed_events.len(), 1);
+        assert_eq!(
+            report.unattributed_events[0].kind,
+            RestartEventKind::EmitFreeze
+        );
+        assert!(
+            report.any_self_heal(),
+            "an emit-freeze restart must still gate the run even with no correlating window"
+        );
     }
 }

@@ -2936,3 +2936,235 @@ fn chase_bimodal_exclusion_verdict_still_no_when_a_drift_unstable_elevated_sampl
          drift_unstable or not: {out:?}"
     );
 }
+
+// --- Slew-transient CLIENT exclusion via journal step-correlation (#1055) --------------------
+//
+// The gate samples a CLIENT via 6 HTTP `/status` reads and grades the MEDIAN. When the NTP master
+// (strih) exits its ~2.5 ms deadband and steps, every client observes a +2.7-3.3 ms slew
+// TRANSIENT lasting ~30-60 s (captured LIVE 2026-08-14 on cam1/cam2, below). If the sampling
+// window lands in that plateau, >=4 of 6 samples are elevated -> the median IS a spike -> a false
+// DRIFT of a us-healthy fleet. The #1022/#1041 CLIENT widening covers this ONLY when the MASTER's
+// own /status is readable (it derives the widened bound from the master's ntp_deadband_us); when
+// that Windows-box HTTP read momentarily fails during a live E2E gate (the ~50% intermittency),
+// the client is graded against the bare bound and false-DRIFTs, and chase_bimodal_exclusion_verdict
+// structurally cannot rescue a median-out-of-bound verdict (its own #1041 finding).
+//
+// slew_transient_exclusion_verdict is the EVIDENCE-based, master-independent rescue: the client's
+// OWN journal co-timestamps every slew-transient offset sample with a `[NTP] step candidate`/
+// `[NTP] Stepped` correction marker. Excluding fresh `[NTP] offset:` samples within STEP_WINDOW_S
+// of any correction marker, requiring >= MIN_SURVIVING survivors AND >= 1 marker (evidence), it
+// says "yes" ONLY when the surviving (baseline) median is within the bound. A genuine sustained
+// desync fails (its step-excluded baseline stays elevated, or nothing survives) -- proven below.
+//
+// The fixtures are VERBATIM live captures (journalctl -o short-iso), 2026-08-14 12:49-12:54 UTC.
+
+// cam1 (10.77.9.61): baseline -29..-114us; two master-slew bursts (+2740/+2776 @12:49-50,
+// +3229/+3331 @12:52), each spike sample co-timestamped with a step candidate / Stepped marker.
+const DS_SLEW_CAM1: &str = "\
+2026-08-14T12:49:30+00:00 CAM1 dantesync[703]: [NTP] offset:+2740us (threshold:585us, adaptive)
+2026-08-14T12:49:30+00:00 CAM1 dantesync[703]: [NTP] step candidate +2740us (threshold:585us) — awaiting 1 agreeing sample(s)
+2026-08-14T12:49:58+00:00 CAM1 dantesync[703]: [PTP] NANO  Drift:   +183ns/s  Adj:-14.42ppm
+2026-08-14T12:50:00+00:00 CAM1 dantesync[703]: [NTP] offset:+2776us (threshold:585us, adaptive)
+2026-08-14T12:50:00+00:00 CAM1 dantesync[703]: [NTP] Stepped +2776us
+2026-08-14T12:50:30+00:00 CAM1 dantesync[703]: [NTP] offset:-29us
+2026-08-14T12:51:00+00:00 CAM1 dantesync[703]: [NTP] offset:-32us
+2026-08-14T12:51:30+00:00 CAM1 dantesync[703]: [NTP] offset:-36us (threshold:515us, adaptive)
+2026-08-14T12:52:00+00:00 CAM1 dantesync[703]: [NTP] offset:+3229us (threshold:535us, adaptive)
+2026-08-14T12:52:00+00:00 CAM1 dantesync[703]: [NTP] step candidate +3229us (threshold:535us) — awaiting 1 agreeing sample(s)
+2026-08-14T12:52:31+00:00 CAM1 dantesync[703]: [NTP] offset:+3331us (threshold:535us, adaptive)
+2026-08-14T12:52:31+00:00 CAM1 dantesync[703]: [NTP] Stepped +3331us
+2026-08-14T12:53:01+00:00 CAM1 dantesync[703]: [NTP] offset:-114us
+2026-08-14T12:53:31+00:00 CAM1 dantesync[703]: [NTP] offset:-111us
+2026-08-14T12:54:01+00:00 CAM1 dantesync[703]: [NTP] offset:-113us (threshold:505us, adaptive)
+2026-08-14T12:54:07+00:00 CAM1 dantesync[703]: [PTP] LOCK  Drift:  -0.5us/s  Adj: -14.4ppm
+";
+
+// cam2 (10.77.9.62): the SAME master-slew shape at the same wall-clock times, independently
+// captured -- both clients chase the one master's step. Baseline +2..+30us; bursts +2759/+2752,
+// +3260/+3254, each spike marked.
+const DS_SLEW_CAM2: &str = "\
+2026-08-14T12:48:39+00:00 CAM2 dantesync[415]: [NTP] offset:+14us (threshold:515us, adaptive)
+2026-08-14T12:48:55+00:00 CAM2 dantesync[415]: [NTP] offset:+30us (threshold:510us, adaptive)
+2026-08-14T12:49:10+00:00 CAM2 dantesync[415]: [NTP] offset:+26us (threshold:515us, adaptive)
+2026-08-14T12:49:25+00:00 CAM2 dantesync[415]: [NTP] offset:+2759us (threshold:525us, adaptive)
+2026-08-14T12:49:25+00:00 CAM2 dantesync[415]: [NTP] step candidate +2759us (threshold:525us) — awaiting 1 agreeing sample(s)
+2026-08-14T12:49:40+00:00 CAM2 dantesync[415]: [NTP] offset:+2752us (threshold:560us, adaptive)
+2026-08-14T12:49:40+00:00 CAM2 dantesync[415]: [NTP] Stepped +2752us
+2026-08-14T12:50:10+00:00 CAM2 dantesync[415]: [NTP] offset:+2us
+2026-08-14T12:50:41+00:00 CAM2 dantesync[415]: [NTP] offset:+7us
+2026-08-14T12:51:11+00:00 CAM2 dantesync[415]: [NTP] offset:+6us (threshold:505us, adaptive)
+2026-08-14T12:51:41+00:00 CAM2 dantesync[415]: [NTP] offset:-7us (threshold:520us, adaptive)
+2026-08-14T12:52:11+00:00 CAM2 dantesync[415]: [NTP] offset:+3260us (threshold:520us, adaptive)
+2026-08-14T12:52:11+00:00 CAM2 dantesync[415]: [NTP] step candidate +3260us (threshold:520us) — awaiting 1 agreeing sample(s)
+2026-08-14T12:52:41+00:00 CAM2 dantesync[415]: [NTP] offset:+3254us (threshold:570us, adaptive)
+2026-08-14T12:52:41+00:00 CAM2 dantesync[415]: [NTP] Stepped +3254us
+2026-08-14T12:53:12+00:00 CAM2 dantesync[415]: [NTP] offset:+13us
+2026-08-14T12:53:42+00:00 CAM2 dantesync[415]: [NTP] offset:+7us
+2026-08-14T12:54:12+00:00 CAM2 dantesync[415]: [PTP] LOCK  Drift:  +0.1us/s  Adj: -14.3ppm
+";
+
+// GENUINE sustained desync: +3000-ish EVERY cycle, the daemon step-candidating/stepping every
+// cycle but never converging -- so EVERY offset sample is within STEP_WINDOW_S of a marker and
+// NOTHING survives exclusion. Must FAIL (the rescue must never mask a real drift).
+const DS_SLEW_SUSTAINED_DRIFT: &str = "\
+2026-08-14T13:00:00+00:00 CAM9 dantesync[1]: [NTP] offset:+3000us (threshold:520us, adaptive)
+2026-08-14T13:00:00+00:00 CAM9 dantesync[1]: [NTP] step candidate +3000us (threshold:520us) — awaiting 1 agreeing sample(s)
+2026-08-14T13:00:30+00:00 CAM9 dantesync[1]: [NTP] offset:+3005us (threshold:520us, adaptive)
+2026-08-14T13:00:30+00:00 CAM9 dantesync[1]: [NTP] Stepped +3005us
+2026-08-14T13:01:00+00:00 CAM9 dantesync[1]: [NTP] offset:+3010us (threshold:520us, adaptive)
+2026-08-14T13:01:00+00:00 CAM9 dantesync[1]: [NTP] step candidate +3010us (threshold:520us) — awaiting 1 agreeing sample(s)
+2026-08-14T13:01:30+00:00 CAM9 dantesync[1]: [NTP] offset:+3015us (threshold:520us, adaptive)
+2026-08-14T13:01:30+00:00 CAM9 dantesync[1]: [NTP] Stepped +3015us
+2026-08-14T13:02:00+00:00 CAM9 dantesync[1]: [NTP] offset:+3020us (threshold:520us, adaptive)
+2026-08-14T13:02:00+00:00 CAM9 dantesync[1]: [NTP] step candidate +3020us (threshold:520us) — awaiting 1 agreeing sample(s)
+";
+
+// GENUINE drift with NO correction markers at all -- no evidence of a slew to excuse. Must FAIL.
+const DS_SLEW_DRIFT_NO_STEPS: &str = "\
+2026-08-14T13:00:00+00:00 CAM9 dantesync[1]: [NTP] offset:+3000us (threshold:520us, adaptive)
+2026-08-14T13:00:30+00:00 CAM9 dantesync[1]: [NTP] offset:+3005us (threshold:520us, adaptive)
+2026-08-14T13:01:00+00:00 CAM9 dantesync[1]: [NTP] offset:+3010us (threshold:520us, adaptive)
+2026-08-14T13:01:30+00:00 CAM9 dantesync[1]: [NTP] offset:+3015us (threshold:520us, adaptive)
+2026-08-14T13:02:00+00:00 CAM9 dantesync[1]: [NTP] offset:+3020us (threshold:520us, adaptive)
+";
+
+// A drift where the BASELINE itself is elevated (+2500us) with occasional bigger spikes+steps: the
+// step-excluded survivors' own median is still out of bound -> must FAIL (the discriminator is the
+// SURVIVOR median, not merely "are there steps").
+const DS_SLEW_ELEVATED_BASELINE: &str = "\
+2026-08-14T13:00:00+00:00 CAM9 dantesync[1]: [NTP] offset:+2500us (threshold:520us, adaptive)
+2026-08-14T13:00:30+00:00 CAM9 dantesync[1]: [NTP] offset:+2503us (threshold:520us, adaptive)
+2026-08-14T13:01:00+00:00 CAM9 dantesync[1]: [NTP] offset:+3300us (threshold:520us, adaptive)
+2026-08-14T13:01:00+00:00 CAM9 dantesync[1]: [NTP] Stepped +3300us
+2026-08-14T13:01:30+00:00 CAM9 dantesync[1]: [NTP] offset:+2506us (threshold:520us, adaptive)
+2026-08-14T13:02:00+00:00 CAM9 dantesync[1]: [NTP] offset:+2509us (threshold:520us, adaptive)
+2026-08-14T13:02:30+00:00 CAM9 dantesync[1]: [NTP] offset:+2512us (threshold:520us, adaptive)
+";
+
+fn slew_verdict(journal: &str, bound: &str) -> String {
+    run_sourced(
+        &format!(
+            "TEXT='{}'\nslew_transient_exclusion_verdict \"$TEXT\" 300 {bound} 5 3",
+            journal.replace('\'', "'\\''"),
+        ),
+        &[],
+    )
+    .trim()
+    .to_string()
+}
+
+#[test]
+fn slew_transient_exclusion_verdict_yes_on_real_cam1_master_slew_1055() {
+    // The bare 2000us bound (master unreadable -> no #1022 widening): the HTTP median would DRIFT,
+    // but the journal proves every spike is a step-correlated transient and the step-excluded
+    // baseline (-29..-114us) is us-grade -> "yes".
+    assert_eq!(slew_verdict(DS_SLEW_CAM1, "2000"), "yes");
+}
+
+#[test]
+fn slew_transient_exclusion_verdict_yes_on_real_cam2_master_slew_1055() {
+    assert_eq!(slew_verdict(DS_SLEW_CAM2, "2000"), "yes");
+}
+
+#[test]
+fn slew_transient_exclusion_verdict_no_on_sustained_drift_stepping_every_cycle_1055() {
+    // Every sample is step-adjacent -> 0 survive -> below MIN_SURVIVING -> "no". A real desync
+    // that the daemon is fighting every cycle is NEVER excused.
+    assert_eq!(slew_verdict(DS_SLEW_SUSTAINED_DRIFT, "2000"), "no");
+}
+
+#[test]
+fn slew_transient_exclusion_verdict_no_when_no_correction_markers_1055() {
+    // No step/Stepped evidence at all -> nothing to excuse -> "no" (the review demand:
+    // a real ~3ms drift with no step events must still FAIL).
+    assert_eq!(slew_verdict(DS_SLEW_DRIFT_NO_STEPS, "2000"), "no");
+}
+
+#[test]
+fn slew_transient_exclusion_verdict_no_on_elevated_baseline_1055() {
+    // Steps exist, but the step-EXCLUDED survivors' median (~2500us) is itself out of bound ->
+    // "no". The discriminator is the survivor median, never merely the presence of steps.
+    assert_eq!(slew_verdict(DS_SLEW_ELEVATED_BASELINE, "2000"), "no");
+}
+
+#[test]
+fn slew_transient_exclusion_verdict_fails_closed_on_malformed_inputs_1055() {
+    for bad in &[
+        "slew_transient_exclusion_verdict \"$T\" abc 2000 5 3", // freshness
+        "slew_transient_exclusion_verdict \"$T\" 300 xx 5 3",   // bound
+        "slew_transient_exclusion_verdict \"$T\" 300 2000 zz 3", // window
+        "slew_transient_exclusion_verdict \"$T\" 300 2000 5 qq", // min-surviving
+    ] {
+        let out = run_sourced(bad, &[("T", DS_SLEW_CAM1)]);
+        assert_eq!(out.trim(), "no", "malformed input must fail closed: {bad}");
+    }
+}
+
+#[test]
+fn slew_excluded_survivors_us_lists_only_the_baseline_samples_1055() {
+    // The exclusion primitive returns exactly the step-excluded baseline values (order = journal
+    // order), never a spike sample.
+    let out = run_sourced(
+        "slew_excluded_survivors_us \"$T\" 300 5 11 | tr '\\n' ' '",
+        &[("T", DS_SLEW_CAM1)],
+    );
+    assert_eq!(out.trim(), "-29 -32 -36 -114 -111 -113");
+}
+
+#[test]
+fn slew_transient_exclusion_check_prints_ok_line_with_surviving_median_1055() {
+    let out = run_sourced(
+        "slew_transient_exclusion_check cam1 \"$T\" 2000 5 3 300 \" -- note\"",
+        &[("T", DS_SLEW_CAM1)],
+    );
+    assert!(out.contains("cam1"), "label present: {out:?}");
+    assert!(out.contains("OK"), "OK verdict line: {out:?}");
+    assert!(
+        out.contains("step-correlated") || out.contains("slew"),
+        "explains the slew-transient exclusion: {out:?}"
+    );
+}
+
+// #1055 review (onset-drift hole): a genuine desync that ONSETS within the window, stepping every
+// cycle so its drift samples are all step-excluded, must NOT be masked by PRE-onset healthy
+// baseline still in the ~K-sample window. OLD baseline (-30ish) then RECENT elevated+stepped
+// (+3000ish, non-converging). Condition 2 alone (median of ALL step-excluded survivors) reads the
+// old baseline and would false-PASS; condition 3 (only survivors NEWER than the newest correction
+// marker) sees ZERO post-correction survivors -> "no". This fixture reproduces the exact shape the
+// adversarial review flagged and proves the guard closes it.
+const DS_SLEW_ONSET_DRIFT: &str = "\
+2026-08-14T13:00:00+00:00 CAM9 dantesync[1]: [NTP] offset:-30us (threshold:520us, adaptive)
+2026-08-14T13:00:30+00:00 CAM9 dantesync[1]: [NTP] offset:-28us (threshold:520us, adaptive)
+2026-08-14T13:01:00+00:00 CAM9 dantesync[1]: [NTP] offset:-31us (threshold:520us, adaptive)
+2026-08-14T13:01:30+00:00 CAM9 dantesync[1]: [NTP] offset:-29us (threshold:520us, adaptive)
+2026-08-14T13:02:00+00:00 CAM9 dantesync[1]: [NTP] offset:+3000us (threshold:520us, adaptive)
+2026-08-14T13:02:00+00:00 CAM9 dantesync[1]: [NTP] step candidate +3000us (threshold:520us) — awaiting 1 agreeing sample(s)
+2026-08-14T13:02:30+00:00 CAM9 dantesync[1]: [NTP] offset:+3005us (threshold:520us, adaptive)
+2026-08-14T13:02:30+00:00 CAM9 dantesync[1]: [NTP] Stepped +3005us
+2026-08-14T13:03:00+00:00 CAM9 dantesync[1]: [NTP] offset:+3010us (threshold:520us, adaptive)
+2026-08-14T13:03:00+00:00 CAM9 dantesync[1]: [NTP] step candidate +3010us (threshold:520us) — awaiting 1 agreeing sample(s)
+2026-08-14T13:03:05+00:00 CAM9 dantesync[1]: [PTP] LOCK  Drift:  +0.2us/s  Adj: -14.3ppm
+";
+
+#[test]
+fn slew_transient_exclusion_verdict_no_on_onset_drift_masked_by_pre_onset_baseline_1055() {
+    // The onset-drift hole: OLD healthy baseline survives step-exclusion and would pass the
+    // all-survivors median check, but the clock has NOT returned to baseline after its most recent
+    // correction (zero post-correction survivors) -> "no". A real ongoing desync is never masked.
+    assert_eq!(slew_verdict(DS_SLEW_ONSET_DRIFT, "2000"), "no");
+}
+
+#[test]
+fn slew_excluded_survivors_us_recency_floor_keeps_only_post_epoch_samples_1055() {
+    // The optional MIN_EPOCH arg restricts to samples strictly newer than the given epoch (the
+    // #1055 onset-drift guard). cam1's newest correction marker is 2026-08-14T12:52:31Z; only the
+    // three baseline samples after it survive the floor.
+    let epoch_5231 = run_sourced("_short_iso_epoch 2026-08-14T12:52:31+00:00", &[])
+        .trim()
+        .to_string();
+    let out = run_sourced(
+        &format!("slew_excluded_survivors_us \"$T\" 300 5 11 {epoch_5231} | tr '\\n' ' '"),
+        &[("T", DS_SLEW_CAM1)],
+    );
+    assert_eq!(out.trim(), "-114 -111 -113");
+}

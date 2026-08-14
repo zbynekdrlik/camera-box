@@ -240,9 +240,26 @@ impl Fixture {
     }
 
     fn force_kill(&self) {
-        let mut c = self.child.lock().expect("child mutex poisoned");
+        // Recover from a poisoned lock rather than `.expect()`-panicking: force_kill runs from
+        // Drop during unwind, and a panic there would abort the whole test binary (#850 review).
+        let mut c = self
+            .child
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _ = c.kill();
         let _ = c.wait();
+    }
+}
+
+/// #850 — reap the spawned child on the PANIC path too, not only the happy path. Every test's
+/// explicit `force_kill()` is its LAST statement, so an earlier `assert!` failure unwinds past it
+/// and (before this impl) leaked the child — a SIGTERM-immune fixture then reparented to init and
+/// survived everything but `kill -9`. `Drop` runs during unwind, so the child dies whether the
+/// test passes or panics. `force_kill()` is idempotent (`Child::kill`/`wait` tolerate an
+/// already-dead child), so the existing explicit `force_kill()` calls stay a harmless no-op.
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        self.force_kill();
     }
 }
 
@@ -393,5 +410,60 @@ fn recording_e2e_sources_and_uses_the_ledger() {
         text.contains("rig_test_ledger_register_remote_cmds"),
         "recording-e2e.sh's own painter launch must register into the ledger too -- any \
          harness/worker-started painter must be ledger-tracked, not just rig-mode.sh's"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #850 — Fixture must reap its child on the PANIC path, not only the happy path.
+// ---------------------------------------------------------------------------
+
+/// True iff `pid` still exists (a `kill -0` succeeds). A reaped/nonexistent pid returns ESRCH
+/// (non-zero); a live process returns 0.
+fn pid_alive(pid: u32) -> bool {
+    Command::new("kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// A test that panics on an `assert!` BEFORE reaching its explicit `fixture.force_kill()` must
+/// still have its child reaped — that is the exact path (#850) that leaked five SIGTERM-immune
+/// `cam2-painter-stubborn` orphans (`ppid=1`, oldest 15 days). `Fixture` must reap its child from
+/// an `impl Drop` (which runs during unwind), not only from the happy-path `force_kill()` call.
+/// The SIGTERM-ignoring fixture is the discriminator: only the SIGKILL inside `force_kill()` can
+/// kill it, so it survives iff `Drop` never ran.
+#[test]
+fn fixture_drop_reaps_child_when_a_test_panics_before_explicit_force_kill_850() {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    let leaked_pid = AtomicU32::new(0);
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let fixture = spawn_renamed_sigterm_ignoring("cam2-painter-drop-850");
+        leaked_pid.store(fixture.pid, Ordering::SeqCst);
+        sleep(Duration::from_millis(300));
+        assert!(
+            fixture.is_alive(),
+            "fixture must be alive before the simulated failure"
+        );
+        // Simulate an assertion failing BEFORE the test's explicit force_kill() — the panic
+        // unwinds past every remaining statement (no force_kill() is reached). Fixture::drop must
+        // reap the child regardless.
+        panic!("simulated assertion failure before force_kill()");
+    }));
+
+    assert!(result.is_err(), "the inner block must have panicked");
+    let pid = leaked_pid.load(Ordering::SeqCst);
+    assert_ne!(pid, 0, "the fixture must have been spawned");
+    // Give Drop's SIGKILL + reap a moment to settle.
+    sleep(Duration::from_millis(300));
+    eprintln!("[850] fixture pid {pid} — checking it was reaped by Drop after the panic unwind");
+    assert!(
+        !pid_alive(pid),
+        "#850: Fixture::drop must reap its SIGTERM-immune child during the panic unwind — without \
+         an impl Drop the child survives, reparents to init, ignores SIGTERM, and leaks (pid {pid} \
+         still alive)"
     );
 }

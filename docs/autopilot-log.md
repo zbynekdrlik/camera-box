@@ -8028,3 +8028,275 @@ ssh-ing IN (impossible against an off-network box).
   in `harness_cam2_painter_provisioning_863.rs`. FULL `cargo test` suite green: 205 binaries, 0
   FAILED (mandatory after a rig-mode.sh edit — no anchor collisions). shellcheck -x clean on all
   touched scripts. Playbook: new `.claude/rules/cam2-painter-lifecycle.md` + router entry.
+
+## 2026-08-14 — round-8 integration (PR 1054) + deploy: painter permanence live, cambox fleet on dev.452
+- PR 1054 merged after a gauntlet of rig-condition retries (repeat dantesync slew false-fails -> ticket 1055 filed + worker dispatched; two dead-painter fail-fasts caught in 5 s each by the new issue-860 preflight; one gate loss self-inflicted by supervisor WS probes during a live run — lesson recorded; the tolerance walk-down stepped back 1 -> 2 on honest evidence mid-PR).
+- The FINAL green run measured the best A/V yet: +17/+14/+8 ms (spread 8 ms) with tolerance 2, zero windows over, zero undecodable.
+- Deploy: rig-mode test from the merged tree performed the durable painter HANDOFF — cam2-painter.service now enabled+active (Restart=always, reboot-survival); the day-long painter restore-loop is over. Cambox fleet aligned to dev.452 via scripts/deploy-fleet.sh (emit-freeze watchdog + capture-rate tolerances live on cam1-3; the script's own stop -> remount,rw -> copy -> start -> remount,ro cycle — a hand-rolled scp had silently failed on the DELIBERATE read-only roots, caught and redone properly). network-reach-alert-watchdog installed+running on dev1 (first pass: both boxes REACHABLE).
+- Round 10 in flight: shared-duplicate attribution (painter EXONERATED by data — instrument landed), rig-lease atomic release + fixture Drop, slew-aware gate sampling.
+
+## 2026-08-14 — harness-robustness bundle #857 + #850 (worktree autopilot-857, v1.7.0-dev.454)
+
+#857: `rig_lease_release()` (scripts/lib/rig-lease.sh) tore the shared cross-repo rig lockdir down
+with a non-atomic `rm -rf "$d"`. A recursive delete removes the dir CONTENTS (holder.json,
+heartbeat) BEFORE the inode, exposing a "dir present, holder.json gone" window. The read side was
+already made atomic by #970/#980; this is the WRITE side. In the window: (a) a reader logs an
+unnamed holder; worse (b) a concurrent `rig_lease_acquire`'s `mkdir "$d"` fails EEXIST against a
+holder-less dir, reclaims into `$d`, and has that fresh lease deleted by the departing release
+(two runs momentarily both believing they hold the rig — proven by the RED test's acquire-race).
+Fix: `mv "$d" "$d.releasing.$$"` (one atomic syscall: $d goes complete→absent) then `rm -rf` the
+detached copy; new `rig_lease_sweep_releasing()` (called from acquire-entry + release) GCs any
+`.releasing.*` copy leaked by a crash between the rename and the rm. NO `rm -rf "$d"` fallback on
+mv-failure — the stale-reclaim heartbeat backstop self-heals a rare fs-error leftover, and a
+fallback would reintroduce the exact window. RED test tests/harness_rig_lease_release_atomicity_857.rs
+uses a PATH `rm` shim faithfully reproducing rm -rf's contents-first order + probes the torn window
+AND drives a concurrent acquirer during the window (deterministic, no timing). RED `9de522651` /
+GREEN `b74afe4a6` / fmt `0aa94385a`. shellcheck clean; 150/150 serial after 800 parallel shim runs.
+GOTCHA discovered: the RED run (pre-fix) LEAKS a SIGTERM-immune orphan that INHERITS and holds the
+test's stdout pipe open, so a `cargo test ... | tail` pipeline blocks forever until you `kill -9`
+the orphan — kill it to flush the FAILED line.
+
+#850: `struct Fixture` (tests/harness_rig_test_ledger_723.rs) had no `impl Drop`; every test's
+explicit `fixture.force_kill()` is its LAST statement, so an earlier assert failure unwinds past it
+and leaks the child. The SIGTERM-immune fixture (`trap "" TERM`, deliberate for the #721/#723
+escalation proof) then reparents to init and only `kill -9` removes it — the five audited
+`cam2-painter-stubborn` orphans. Fix: `impl Drop for Fixture { fn drop(&mut self){ self.force_kill(); } }`
+(runs during unwind; force_kill idempotent so existing explicit calls stay a no-op — the fixture's
+SIGTERM-immunity is untouched). RED test panics in a `catch_unwind` block before force_kill, then
+asserts the pid is reaped. RED `83f54f66c` / GREEN `ce0390553`. 17/17 ledger tests green; 60/60
+stress runs, zero orphan accumulation.
+
+Worktree round; supervisor integrates (merge → CI → deploy). One PR closes #857 #850.
+
+## 2026-08-14 — issue 859: painter-pacing attribution instrument (last-red-term duplicate residual)
+
+- **Commits**: version bump `132315a72` (1.7.0-dev.454), RED `944f31901`, GREEN `7c9386c76`.
+- **Validate-first (signature CHANGED since filing)**: the ticket's "48 pure duplicates, zero
+  gaps, uniform fleet-wide" was measured PRE the issue-1042 min-delta + issue-1049 phase-convergence
+  genlock fixes. Re-mined every retained `/tmp/recording-e2e-*/verdict-*.json` (Aug 13-14): copies
+  now track gaps 1:1 (187≈187, 27≈27, 1≈1) = the genlock FIFO limit-cycle signature (not pure
+  duplicates); big-count runs are post-OBS-restart convergence transients (walk-down rule §2:
+  exclude); a genuinely clean 0/0/0 converged run (669473697) exists.
+- **Decisive attribution (real data)**: the painter emits its own ground truth
+  `painter-*.csv` (`tick,gen_ts_ns,flip_ts_ns`, ~32.4k rows/run). Across 6 runs INCLUDING the worst
+  187-copy transient: 0 painted-tick duplicates, 0 skips, 0 non-monotonic, 0 inter-flip intervals
+  >25ms (all 14-20ms at a 16.67ms/60fps nominal). The painter is metronomic even while the recorded
+  output carried 187 copies → the residual duplicate is DOWNSTREAM of the page-flip (monitor panel
+  refresh vs 30fps capture optical beat, or strih/stream genlock FIFO), never the painter/DRM. This
+  answers the ticket's own painted-vs-captured discriminator directly from existing data.
+- **Deliverable (class b: decisive instrumentation + attribution)**: new crate-root pure module
+  `src/painter_pacing.rs` (Tier-0 tested, mirrors the painted_tick_gaps.rs / residual_events.rs
+  seam) computes painted-tick faults + missed DRM-vsync deadlines (inter-flip >= 1.5x the run's own
+  median nominal; >= 2x = duplicate-class stall) and a downstream-vs-painter `duplicate_attribution`.
+  recording-verdict surfaces it REPORT-ONLY under `all_cambox_continuity.painter_pacing`
+  (+`total_copies`/`attribution`) when --painter is given — never gates, changes no threshold, and a
+  read error emits an `unavailable` block so it can NEVER newly fail a passing verdict.
+- **Rejected forks**: (a) rig-side instrument the source-camera cadence — the data already
+  exonerates the painter and bars a non-problem measurement; (b) reconcile
+  unplaceable/discarded-guard frame accounting — orthogonal to the duplicate-attribution question,
+  left as a noted open item. Ticket STAYS OPEN: the walk-down to TOL=0 is not yet reachable (steady
+  runs still show 0-1 optical duplicates/window + genlock convergence transients); this instrument
+  settles the shared-fault question, it does not by itself reach zero.
+- **Tests**: `src/painter_pacing.rs` 9 tests (RED against a stubbed analyze → GREEN). fmt --all
+  --check clean (validates the probe-gated recording-verdict.rs parses), clippy --lib clean.
+
+## 2026-08-14 — issue 916: rig→dev1 silent-drop VALIDATED CLOSED (no longer reproduces) + docs sync (docs-only)
+- **Validate-first**: reproduced LIVE from CAM1 (10.77.9.61) → dev1's CURRENT rig IP (drifted to
+  10.77.9.103 on enp2s0). Ping 3/3 0% loss; dev1 tcpdump shows an ICMP echo REPLY for every
+  request; a full TCP 3-way handshake to a fresh `nc -l 0.0.0.0 9916` listener completes
+  (S/S./ack/clean FIN). The 2026-08-01 symptom (ICMP arrives, kernel silently drops, no reply) is
+  GONE. → closed with evidence (validator obsolete path; user's auto-close-overcome preference).
+- **Root cause (inferred, consistent)**: dev1 multi-homed on the rig L2 via two NICs — enp1s0
+  (MAC …c0, the incident NIC at .100) + enp2s0 (MAC …c1). Packet arrived on the ARP'd NIC while
+  the kernel reply path resolved to the other → asymmetric-path silent drop (classic rp_filter /
+  ARP-flux multi-homing failure). Resolved by the environment: enp1s0 is now DOWN/NO-CARRIER (rig
+  on a single clean enp2s0), and rp_filter is persistently LOOSE (=2, /etc/sysctl.d/10-network-
+  security.conf), which cannot silent-drop a source reachable via any iface.
+- **No kernel/sysctl change applied** — rp_filter already loose+persistent and the incident NIC
+  already down; a redundant nft/sysctl rule would be a patch on a non-problem (rejected — would
+  change host-wide policy the tailscale/wg/zerotier ifaces rely on, for a bug that no longer
+  exists). Belt-and-braces dev1-initiated deploys retained at zero blast radius.
+- **Docs synced**: `.claude/skills/genlock/SKILL.md` (deploy-transfer bullet) + two notes in
+  `.claude/rules/rig-state-inspection.md` now record box-pull works, keep dev1-initiated as the
+  default, and correct the drifted IP/NIC (enp2s0/.103). Docs-only PR; self-review (no repo code).
+  Version bump 1.7.0-dev.453. Observation (not this bug, out of scope): a uvicorn service binds
+  :8791 on the tailscale IP only, not the rig IP — a service-binding matter, distinct from the
+  kernel drop.
+
+## 2026-08-14 — #938 + #1011 (bundled, worktree autopilot-938) — exhaustive genlock_burn sweep
+
+- **Same defect family, one fix.** Every burn OFF/CHECK/RESTORE site derived its OBS-input target
+  set from a list NARROWER than "the inputs a burn can be ON": rig-mode `obs_burn_targets` was a
+  FIXED 3-input list (strih:NDI cam1, stream:NDI 2ME PGM, imag:NDI CAM1) — issue 938: TEST mode
+  also burns the rendered input (issue 901) + all-cambox cam2/cam4, so the OFF/CHECK passes left
+  those ON invisibly; recording-e2e cleanup restore + [0/8] normalize derived from
+  CAMERA_ACTIVE_SET / the fixed BURN_TARGETS — issue 1011: an on-air input OUTSIDE the active set
+  (strih:NDI cam3 = cam4's feed, stream:phase2-probe-src) leaked genlock_burn=true past cleanup AND
+  the event contract (live 2026-08-07 pre-broadcast; only the pixel proof caught it). Validate-first
+  confirmed both lists still present on base.
+- **Fix**: ONE shared exhaustive enumerator seam in `scripts/obs_burn_filter.py` — new
+  `sweep-check`/`sweep-off` subcommands enumerate EVERY ndi_source input over WS (GetInputList),
+  read/clear the per-source genlock_burn bool. Pure `ndi_source_input_names(input_list)` at module
+  scope (Tier-0-testable); reuses the existing `_conn`/`_rpc`/`_genlock_burn`/`compute_burn_on`
+  (issue 334) helpers. Both consumers routed through it ADDITIVELY (pinned loops byte-for-byte
+  unchanged — anchor-safe): rig-mode `toggle_burn` EVENT path sweeps every box after the pinned
+  loop (ON/TEST stays pinned-only); `event_mode_assert` item-3 merges a per-box sweep-check into
+  burn_states; recording-e2e cleanup burn-clear + [0/8] normalize sweep every box (strih/stream/imag).
+- **Fail-CLOSED (review)**: a failed GetInputList must never read as "clean". `_all_ndi_inputs`
+  returns None on enumeration failure → `sweep-check`/`sweep-off` return SWEEP_ENUM_FAILED(2) →
+  `event_mode_assert` injects a `<box>:__sweep_unreachable__`=true sentinel so `burns_off_ok()`
+  fails the contract. The OFF path already failed loud (`|| rc=$?`); the CHECK is now symmetric.
+- **Rejected**: (a) widen the static lists — re-encodes a new drifting list, the exact bug shape
+  `camera-active-set.md` warns against; (b) derive from CAMERA_ACTIVE_SET more carefully — that IS
+  the issue-1011 hole (an on-air input outside the set); (c) a new sourced bash lib — adds a source
+  line to both heavy anchored scripts for no gain, the python subcommand is the single seam.
+- **Anchor collision found+fixed**: the cleanup sweep first reused `for _hbs in "${BURN_TARGETS[@]}"`,
+  tripping the issue-252 "exactly 2 loop headers" count (harness_recording_e2e_paths) → rewrote it
+  to iterate labeled box=ip pairs directly. Lesson: a NEW consumer of a shared array must not reuse
+  the exact anchored loop-header literal a `.matches().count()` test pins.
+- **Tests**: RED `122726b51` / GREEN `a13a6ec65`+`f49a359d2`, review-fix `36a7cc819`, bump
+  `5508d45ea` (1.7.0-dev.453). `tests/python/test_obs_burn_filter.py` (+6, incl. 2 fail-closed) 12/12;
+  `tests/harness_burn_sweep_enumerate_938_1011.rs` (new, invocation-form anchors + sentinel assert).
+  All adjacent at-risk anchor binaries green (rig_mode 33, event_assert_wired 11, recording_e2e_paths
+  56, cleanup_final_verify_684 3, startup_self_heal_878 16, + 9 more). shellcheck -S warning clean.
+  NOTE: the full `cargo test` suite (195 integration binaries + lib) was run under 3 concurrent
+  worktree workers saturating 4 cores; two WALL-CLOCK timing tests flaked
+  (`ndi::tests::wait_for_next_boundary_returns_real_recent_boundary` ~26ms tolerance after a sleep;
+  `dantesync_gate::gate_samples_multiple_nodes_concurrently_not_sequentially` elapsed-time
+  parallelism) — both structurally load-sensitive, both untouched by this diff (zero Rust source
+  changed). Supervisor's quiet-box integration run is authoritative for those.
+
+## issues #946 + #910 — unified run-integrity restart-event attribution (capture-wedge/emit-freeze + burn-log source) — 2026-08-14 (worktree autopilot-946, v1.7.0-dev.453)
+
+- **Problem**: recording-verdict's per-window forensics had two blind spots in the restart-event
+  attribution scan. (910) The self-heal-reset scan only grepped journald, but during an E2E burn
+  each camera runs as a transient systemd-run unit logging to `/tmp/cbox-burn.log` (source) /
+  `/tmp/cbox-burn-<cam>.log` (secondary) — journald is structurally blind to the recording window,
+  so a `#663` reset there came back empty and its stale frames misclassified as `frozen_leg`.
+  (946) The issue-945 capture-wedge (exit 79, `CRITICAL #945: capture/emit thread WEDGED`) and
+  issue-944 emit-freeze (exit 81, `CRITICAL #944: NDI output FROZEN`) watchdog restarts were not
+  correlated at all, surfacing as anonymous frozen_leg.
+- **Fix**: ONE recognised-event table (`scripts/lib/self-heal-attribution.sh`'s `restart_event_*`
+  functions) replacing three parallel greps — the shared #663 reset line + both watchdog CRITICAL
+  lines. Read from BOTH journald AND each camera's burn-instance log (the burn log is
+  tracing-subscriber stdout: ANSI-colour-wrapped, microsecond RFC3339-Z timestamps — ANSI-strip +
+  `date -u -d "$ts" +%s%N`, mirroring the issue-992 capture-rate burn-log read). The pure Rust seam
+  (`src/self_heal_attribution.rs`) gained `RestartEventKind` (SelfHealReset|CaptureWedge|EmitFreeze)
+  carried by the event + attributed leg; `parse` accepts tagged `kind:cambox:ns` AND legacy
+  `cambox:ns` (→ SelfHealReset). The harness threads `--restart-event KIND:CAMBOX:EPOCH_NS`;
+  recording-verdict merges it with the legacy `--self-heal-reset` and tags each JSON entry + line
+  with its kind. ALLOW-not-SUPPRESS preserved: a wedge/emit-freeze event still gates via
+  `any_self_heal()`; `overall_pass_contribution()` untouched (report-only, #914).
+- **Design decision**: extended the existing attribution seam in place (kind-tagged) rather than a
+  sibling module — the correlation engine + gating + report shape are identical for all three, and
+  a sibling parser is exactly the "competing attribution parser" the governing rule + the
+  capture_wedge/emit_freeze module docs warn against. JSON key `self_heal_reset` + `--self-heal-reset`
+  flag kept for back-compat (recording-verdict.rs is probe-gated, zero local test path).
+- **Commits**: add57e237 (version) · 1cee31c8a/46690c477 (RED/GREEN Rust kind seam) ·
+  8136a897b/6854accc8 (RED/GREEN bash table + burn-log parser) · d14c9ba18 (wiring: e2e scan +
+  verdict flag + lib-helper removal).
+- **Tests**: `src/self_heal_attribution.rs` 23/23 (`cargo test --lib self_heal_attribution`),
+  `tests/harness_self_heal_attribution_895.rs` 14/14 (unified table + burn-log RFC3339 parse +
+  wiring asserts; removed 5 superseded self-heal-only helper tests). fmt + clippy -D warnings +
+  shellcheck -x + bash -n clean. FULL `cargo test` suite run (mandatory after a recording-e2e.sh
+  edit — anchor-collision guard); review-confirmed no `.find()`/region-slice collision from the
+  new pre-capture-rate `/tmp/cbox-burn.log` reference.
+- **Review**: one fresh general-purpose pass (/review + requesting-code-review standards) — 0 🔴
+  0 🟡; 1 🔵 fixed in-branch (softened the sort -u dedup comment); GNU-coreutils note no-action
+  (parse runs on dev1).
+
+## 2026-08-14 — issue 1004: dock-vs-gate residual quantified UNSTABLE → no compensation (v1.7.0-dev.453)
+- **Quantify**: paired the dock's own sign-corrected `av-sync-dock LOCKED/UPDATED offset=` lines
+  (from the STREAM box OBS log — the dock locks on STREAM, not strih: `mbc` marker source lives
+  there; strih logs `source 'mbc' not found` and never locks) against the offline optical
+  `recording-verdict --av-sync` truth (`all_cambox_av_sync.av_offset_ms`) in the SAME recording
+  window, across 5 healthy post-phase-fix E2E runs today. No fresh rig run (supervisor gate runs
+  in flight; passive log/verdict reading only, per dispatch).
+- **Finding**: dock − offline central ~+32ms but run-to-run spread +9..+53ms (σ ~13–15), AND the
+  dock's OWN within-window swing (24–75ms, cluster mad 25–35ms, lock glitches to −805/+207ms)
+  EXCEEDS that spread while offline is stable. Issue 952's ~55ms is NOT reproduced as a stable
+  constant. No additive value reconciles the two different taps to the ±20ms the tightened gate
+  needs → compensating would inject false precision.
+- **Decision (from data, not a user fork)**: UNSTABLE → NO compensation. Kept
+  `dock_lock_display_offset_ms` a pure sign negation (value byte-identical → parity gate
+  untouched). Added the MEASURED, LOCKED additive term `DOCK_LOCK_DISPLAY_ADDITIVE_MS = 0.0`
+  (Rust const + C++ `constexpr` + `static_assert`), guarded by
+  `dock_lock_display_applies_zero_additive_1004` so no future edit can silently reintroduce a
+  guessed constant. Offline optical `--av-sync` stays the sole authoritative gate; the dock is a
+  coarse monitor. Unblocks the ±90→±20 gate tightening (the discrepancy is an expected monitor
+  taps-bias, not evidence the offline gate is wrong).
+- **Rejected**: (a) compensate with a measured constant (~+32) — residual not stable to ±20ms, a
+  "measured" constant here is a guessed one wearing a measurement's clothes; (b) derive
+  gate-equivalent from dock via a stable mapping — requires a stable relation that does not exist.
+- **RED** `baeadee8f` / **GREEN** `3fe553b60` / review-polish `ce950e5df`, version bump
+  `03e15b1c6`. Tests: guard `dock_lock_display_applies_zero_additive_1004` + `av_sync_dock_cpp_mirror_gate`
+  (parity) + `av_sync_dock_latency_display_999` + `av_sync_dock_suggested_target_953` all green;
+  fmt + clippy `-D warnings` clean. Review: 0🔴 0🟡 3🔵 (2 fixed, 1 kept-by-design).
+
+## issue 1052 — stream FROZEN-INPUT dev1-side alert watchdog (network-reach phase 2, worktree)
+
+Version 1.7.0-dev.453. Worktree `autopilot-1052`; supervisor integrates the round.
+
+**Validated STILL real.** Reachability (#1001) only classifies a box REACHABLE/UNREACHABLE, blind
+to a REACHABLE box whose NDI input is frozen on the last frame (the #767 receiver-rebind class).
+Emit-freeze (#944) is CAMBOX-side and never fires for a receiver-side freeze. The closest existing
+check, `scripts/frozen-camera-gate.py` (#365), is STRIH-side, screenshot-hash, and E2E-gate-scoped
+(TEST mode, needs OBS-WS + scene warm-up) — zero coverage of the stream `NDI 2ME PGM` program feed
+during a live event. So the class is genuinely uncovered.
+
+**Tap decision (design comment on the issue): genlock-fifo `received=` per-source counter.** The
+stream OBS log prints `genlock-fifo audit '<src>': received=N …` ~every 5 s
+(`GENLOCK_AUDIT_LOG_INTERVAL_NS`); `received=` counts frames the FIFO RECEIVED, so a frozen input
+stops advancing it. Chosen over (b) `GetSourceScreenshot` hash-delta — false-frozen on a live-but-
+static source (a held slide), needs OBS-WS + scene activation each pass — and (c) QR/burn decode —
+heaviest, TEST-mode only. `received=` works in BOTH test and event mode and is immune to static
+content. Per-pass state-delta model (sample newest `received=`, persist, compare to prior pass)
+sidesteps the audit's ~5 s intra-log cadence trap.
+
+**Files.**
+- Pure Tier-0 seam `scripts/lib/frozen-input-health.sh` (mirrors `network-reach-health.sh`):
+  `frozen_input_classify <prev> <curr> <expected_live> <sender_reachable>` →
+  FROZEN | ADVANCING | UNKNOWN | SKIP (SKIP first when not expected-live or the sender/receiver box
+  is unreachable; UNKNOWN on no-prior / unreadable-current / counter-reset — never a false page),
+  `frozen_input_recovery_decision`, `frozen_input_alert_detail`. Confirm/throttle stay the shared
+  `obs-watchdog-decision.sh`.
+- Impure watchdog `scripts/frozen-input-alert-watchdog.sh` (mirrors `network-reach-alert-watchdog.sh`):
+  best-effort ONE flat `ssh … powershell` OBS-log tail (session-agnostic read, NEVER nested
+  PowerShell — win-ssh-vs-mcp / rig-state-inspection), `FROZEN_INPUT_PROBE_CMD`-overridable. Reads
+  #1001's OWN on-disk state (`alerted_<box>`) for the no-double-page guard — never re-probes.
+- `systemd/frozen-input-alert-watchdog.{service,timer}` (dev1, 5-min cadence, ~10-15 min to page).
+- `tests/harness_frozen_input_health_1052.rs`; `.claude/rules/frozen-input-watchdog.md` + CLAUDE.md
+  router.
+
+**TDD.** RED `54168a814` (harness sources the absent lib → `command not found`, rc=127) → GREEN lib
+`760d4cf55` → watchdog+units. Rust harness 11/11 GREEN; the full watchdog flow (seed→UNKNOWN, 2-pass
+confirm→alert, advancing→recovery, sender-unreachable→SKIP) smoke-tested via `--dry-run` with a stub
+probe. shellcheck -x clean on both scripts.
+
+**Future enhancement (recorded, not built):** surface `received=` from the `:8899` bundle-state
+server so dev1 reads it via HTTP GET (retiring the ssh read) — deferred, needs an updated
+bundle-state-server deployed to both boxes.
+
+## 1055 — dantesync-gate client rows slew-aware (master-independent journal step-correlation)
+
+- Root cause: a CLIENT's 6-sample HTTP median lands in a master deadband-slew plateau (+2.7–3.3 ms
+  transient, ~30–60 s) → drift_unstable. The #1022/#1041 client widening only covers this when the
+  Windows master's `/status` is readable at gate-prime time (~50 % flaky live); when empty, the
+  client is graded on the bare 2000 µs bound and false-DRIFTs. chase_bimodal only rescues an
+  `unstable` (median-in-bound) verdict, never median-out-of-bound.
+- Fix: `slew_transient_exclusion_verdict` / `slew_excluded_survivors_us` /
+  `_newest_correction_epoch` / `slew_transient_exclusion_check` in `scripts/clock-offset-guard.sh`.
+  The client's OWN journal co-timestamps each slew-transient `[NTP] offset:` sample with a
+  `[NTP] (Stepped|step candidate)` marker; exclude samples within `--slew-step-window-s` (5 s) of a
+  marker and pass only when the POST-most-recent-correction survivors (≥1, `--slew-min-surviving`=3
+  window-sanity total) have a median in bound. Wired into `grade_http_node` as a linux-client rescue
+  consulted only when the raw verdict is drift/drift_unstable and chase_bimodal said no.
+- Adversarial review (fresh-context, 0🔴 1🟡 1🔵) found + I fixed the onset-drift masking hole:
+  grade only survivors NEWER than the newest correction marker (proof the clock returned to µs-grade
+  AFTER its last correction), so pre-onset baseline can't dilute an ongoing drift's median.
+- Calibrated from today's live cam1/cam2 journals (spikes each bracketed by step markers, baseline
+  µs; window insensitive at 5/10/20 s). RED→GREEN: tests/clock_offset_guard.rs (10 slew tests incl.
+  onset-drift + recency-floor) + tests/dantesync_gate.rs (2 e2e: transient rescued, sustained desync
+  still fails). Version 1.7.0-dev.454.
+- Gotcha logged to `.claude/rules/dantesync-clock-offset-gate.md`: journal fixture env is a FILE
+  PATH (not content); distinct `updated_ts` per HTTP sample; awk-rewrite drops the script +x bit.

@@ -651,6 +651,21 @@ toggle_burn() {
     python3 "$here/obs_burn_filter.py" "$action" --host "$ip" --input "$src" --password "$OBS_WS_PASSWORD" \
       2>&1 | sed "s/^/    [${box} burn] /" || rc=$?
   done < <(obs_burn_targets)
+  # #938/#1011: the pinned obs_burn_targets loop above touches ONLY each box's fixed PROGRAM
+  # input. The OFF path (EVENT) must additionally clear EVERY ndi_source input a prior TEST /
+  # all-cambox / probe run left genlock_burn ON -- an out-of-set input (strih 'NDI cam2'/'NDI cam4'
+  # /'NDI cam3', stream 'phase2-probe-src') is invisible to the pinned list and leaks past the
+  # switch (the 2026-08-07 pre-broadcast incident; guard class issue 246/844). Route it through the
+  # shared exhaustive enumerator (obs_burn_filter.py sweep-off — GetInputList over WS, never a
+  # static/CAMERA_ACTIVE_SET-derived list). ON (TEST) stays pinned-only by design.
+  if [ "$mode" = "event" ]; then
+    local _sbip _sbbox
+    while IFS='|' read -r _sbip _ _sbbox; do
+      [ -n "$_sbip" ] || continue
+      python3 "$here/obs_burn_filter.py" sweep-off --host "$_sbip" --password "$OBS_WS_PASSWORD" \
+        2>&1 | sed "s/^/    [${_sbbox} burn-sweep] /" || rc=$?
+    done < <(obs_burn_targets)
+  fi
   return $rc
 }
 
@@ -1172,6 +1187,31 @@ event_mode_assert() {
     bv="$(_bool_or_failclosed "$burn_on")"
     label="${box}:${src}"
     burn_json="$(jq --argjson j "$burn_json" --arg k "$label" --argjson v "$bv" -n '$j + {($k): $v}')"
+  done < <(obs_burn_targets)
+  # #938/#1011: the pinned loop above checks only the 3 program inputs. An out-of-set input
+  # (strih 'NDI cam2'/'NDI cam4'/'NDI cam3', stream 'phase2-probe-src') that a prior run left
+  # genlock_burn ON passes the pinned check invisibly (the 2026-08-07 pre-broadcast leak; guard
+  # class issue 246/844). Merge in the EXHAUSTIVE reality-derived sweep (obs_burn_filter.py
+  # sweep-check — GetInputList over WS) so the EVENT contract fails on a burn ANYWHERE, not just on
+  # the pinned inputs. Same "box:input" labels — a pinned input already present just re-confirms.
+  # FAIL CLOSED: the sweep-check exits SWEEP_ENUM_FAILED(2) when GetInputList itself failed (an
+  # un-enumerable OBS) — distinct from finding a burn (1) or clean (0). On enum-failure (or empty/
+  # malformed output) inject a FAILING sentinel so the EVENT contract cannot pass on the pinned 3
+  # inputs while an un-enumerable box hides an out-of-set burn (the #1011 fail-open the review
+  # caught). A successful sweep re-emits the pinned "box:NDI cam1" key too; its raw reading
+  # deliberately SUPERSEDES the pinned check's fail-closed value — the sweep genuinely re-read the
+  # input, and a real burn still reads true in both, so nothing is masked.
+  local _asbip _asbbox sweep_arr sweep_rc
+  while IFS='|' read -r _asbip _ _asbbox; do
+    [ -n "$_asbip" ] || continue
+    if sweep_arr="$(python3 "$here/obs_burn_filter.py" sweep-check --host "$_asbip" --password "$OBS_WS_PASSWORD" 2>/dev/null)"; then sweep_rc=0; else sweep_rc=$?; fi
+    if [ "$sweep_rc" -eq 2 ] || [ -z "$sweep_arr" ]; then
+      burn_json="$(jq --argjson j "$burn_json" --arg k "${_asbbox}:__sweep_unreachable__" -n '$j + {($k): true}')"
+      continue
+    fi
+    burn_json="$(printf '%s' "$sweep_arr" | jq --argjson j "$burn_json" --arg box "$_asbbox" \
+      'reduce .[] as $i ($j; . + {("\($box):\($i.input)"): ($i.burn_on)})' 2>/dev/null \
+      || jq --argjson j "$burn_json" --arg k "${_asbbox}:__sweep_parse_error__" -n '$j + {($k): true}')"
   done < <(obs_burn_targets)
   echo "    [burns] $burn_json"
 

@@ -61,22 +61,119 @@ self_heal_reset_window_journalctl_cmd() {
   fi
 }
 
-# self_heal_reset_events_from_output SSH_OUTPUT_TEXT -> zero or more epoch-NANOSECOND timestamps,
-# one per line, parsed from each matched line's leading `-o short-unix` "SEC.USEC " field. Pure
-# parse (no I/O). short-unix's fractional part is exactly 6 digits (microseconds); ns = sec*1e9 +
-# usec*1000, built via string concatenation (not arithmetic) so it never overflows awk's
-# double-precision float mantissa the way a direct multiply of two large numbers could.
-self_heal_reset_events_from_output() {
-  printf '%s\n' "$1" \
-    | { grep -E "$(self_heal_reset_grep_pattern)" || true; } \
-    | awk -F'[ .]' '{ printf "%d%06d000\n", $1, $2 }'
+# NOTE (issue 946 / issue 910): the self-heal-ONLY parser (self_heal_reset_events_from_output) and
+# operator message (self_heal_reset_scan_message) were superseded by the UNIFIED recognised-event
+# table below (restart_events_from_journal_output / restart_events_from_burn_log_output /
+# restart_event_scan_message), which tags each event with its KIND and also reads the burn-instance
+# log. self_heal_reset_grep_pattern (above) and self_heal_reset_window_journalctl_cmd (below) are
+# still used verbatim by that table + the harness journal-window read.
+
+# ---------------------------------------------------------------------------------------------
+# issue 946 + issue 910 -- the UNIFIED recognised-event table (one table, never three parallel
+# greps). The #663 self-heal reset joins the issue-945 capture-wedge (exit 79) and issue-944
+# emit-freeze (exit 81) watchdog CRITICAL lines as attributable run-integrity restart events. All
+# three are read from BOTH journald AND -- during an E2E burn, when camera-box.service is stopped
+# and each camera runs as a transient systemd-run burn unit logging to /tmp/cbox-burn*.log
+# (issue 910, mirroring the issue-992 capture-rate burn-log read) -- the burn instance's own log.
+# ---------------------------------------------------------------------------------------------
+
+# restart_event_kind_patterns -> the recognised-event TABLE, one `LABEL<TAB>GREP_PATTERN` row per
+# kind. The label is the SAME string src/self_heal_attribution.rs's RestartEventKind::label()
+# emits (the tagged CLI token `--restart-event LABEL:CAMBOX:EPOCH_NS`), so the bash scan and the
+# Rust correlator can never drift. Each pattern keys on the ONE distinct line that kind logs (the
+# shared #663 reset line, or each watchdog's uniquely-worded CRITICAL line) -- never an upstream
+# detection band's WARN wording (the generalisable lesson in
+# .claude/rules/self-heal-frozen-leg-attribution.md).
+restart_event_kind_patterns() {
+  printf '%s\t%s\n' 'self_heal_reset' "$(self_heal_reset_grep_pattern)"
+  printf '%s\t%s\n' 'capture_wedge' 'CRITICAL #945: capture/emit thread WEDGED'
+  printf '%s\t%s\n' 'emit_freeze' 'CRITICAL #944: NDI output FROZEN'
 }
 
-# self_heal_reset_scan_message CAMBOX AT_NS -> the operator-facing line printed the moment a reset
-# is discovered (pure formatting, no I/O) -- distinctly labeled so a human/CI reader never mistakes
-# this for a frozen-camera accusation.
-self_heal_reset_scan_message() {
-  local cambox="${1:-?}" at_ns="${2:-?}"
-  printf '%s self-heal RESET detected at %s ns (epoch) during this recording -- capture_rate_selfheal (#663) USB-reset the capture device; recording-verdict.rs will attribute any resulting stale/duplicate frames to self_heal_reset, NOT frozen_leg\n' \
-    "$cambox" "$at_ns"
+# restart_event_grep_pattern -> the combined `grep -E` alternation of every recognised kind's
+# pattern (one grep pass finds any recognised event). Pure string builder.
+restart_event_grep_pattern() {
+  restart_event_kind_patterns | awk -F'\t' 'NR>1{printf "|"} {printf "%s", $2}'
+  printf '\n'
+}
+
+# restart_event_kind_for_line LINE -> the kind LABEL for a single matched log line (empty if the
+# line matches no recognised pattern). Tests the table rows in order (self-heal first) and returns
+# the first match -- pure classification, no I/O beyond the grep it runs on the passed-in text.
+restart_event_kind_for_line() {
+  local _line="$1" _label _pat
+  while IFS="$(printf '\t')" read -r _label _pat; do
+    [ -z "$_label" ] && continue
+    if printf '%s' "$_line" | grep -qE "$_pat"; then
+      printf '%s\n' "$_label"
+      return 0
+    fi
+  done <<EOF
+$(restart_event_kind_patterns)
+EOF
+}
+
+# restart_events_from_journal_output SSH_OUTPUT_TEXT -> zero or more `LABEL:EPOCH_NS` lines, one
+# per recognised event, parsed from a `-o short-unix` journalctl dump (each matched line's leading
+# "SEC.USEC " field). Pure parse. Same ns-from-short-unix string-concat math as the #895 self-heal
+# path (never a large multiply that could overflow awk's double mantissa), now tagged with the
+# event KIND from the recognised-event table. The grep stage is `|| true`-guarded so a ZERO-match
+# input (the common case) never trips `set -o pipefail` (the gotcha in the governing rule).
+restart_events_from_journal_output() {
+  printf '%s\n' "$1" \
+    | { grep -E "$(restart_event_grep_pattern)" || true; } \
+    | while IFS= read -r _line; do
+        [ -z "$_line" ] && continue
+        _kind="$(restart_event_kind_for_line "$_line")"
+        [ -z "$_kind" ] && continue
+        _ns="$(printf '%s\n' "$_line" | awk -F'[ .]' '{ printf "%d%06d000", $1, $2 }')"
+        case "$_ns" in '' | *[!0-9]*) continue ;; esac
+        printf '%s:%s\n' "$_kind" "$_ns"
+      done
+}
+
+# restart_events_from_burn_log_output BURN_LOG_TEXT -> zero or more `LABEL:EPOCH_NS` lines parsed
+# from a camera-box BURN-instance log (issue 910). Unlike journald `-o short-unix`, the burn log is
+# camera-box's own tracing_subscriber stdout: each line is ANSI-colour-wrapped and carries a
+# microsecond RFC3339-Z timestamp as its first field (live-verified 2026-08-14: e.g.
+# `\x1b[2m2026-08-14T10:17:56.523683Z\x1b[0m \x1b[33m WARN\x1b[0m ... message`). So: strip the
+# ANSI escapes, take the first field, and convert the RFC3339-Z timestamp to epoch-ns with
+# `date -u -d ... +%s%N` (deterministic; runs locally on dev1 where the harness parses, never on
+# the remote). A line whose timestamp will not parse is skipped, never emitted malformed. Pure
+# parse (the grep stage is `|| true`-guarded, same pipefail-safe contract as the journal sibling).
+restart_events_from_burn_log_output() {
+  printf '%s\n' "$1" \
+    | { grep -E "$(restart_event_grep_pattern)" || true; } \
+    | while IFS= read -r _line; do
+        [ -z "$_line" ] && continue
+        _stripped="$(printf '%s' "$_line" | sed -E 's/\x1b\[[0-9;]*m//g')"
+        _kind="$(restart_event_kind_for_line "$_stripped")"
+        [ -z "$_kind" ] && continue
+        _ts="$(printf '%s' "$_stripped" | awk '{print $1}')"
+        _ns="$(date -u -d "$_ts" +%s%N 2>/dev/null)"
+        case "$_ns" in '' | *[!0-9]*) continue ;; esac
+        printf '%s:%s\n' "$_kind" "$_ns"
+      done
+}
+
+# restart_event_burn_log_grep_cmd LOG_PATH -> the REMOTE command text that greps a burn instance's
+# OWN log FILE for ANY recognised restart-event line (the journald-blind sibling of
+# self_heal_reset_window_journalctl_cmd; mirrors capture_rate_burn_log_grep_cmd, issue 992). No
+# epoch window needed: the deploy step `rm -f`s the log immediately before systemd-run launches
+# THIS run's burn, so the file's whole content is already scoped to this recording. NO `tail -1`
+# here (unlike the capture-rate check) -- every event in the window must be threaded through, so
+# the Rust correlator can attribute each to its own window. Pure string builder (no ssh, no I/O).
+restart_event_burn_log_grep_cmd() {
+  local _log="$1"
+  printf 'grep -E '\''%s'\'' "%s" 2>/dev/null' "$(restart_event_grep_pattern)" "$_log"
+}
+
+# restart_event_scan_message KIND CAMBOX AT_NS -> the operator-facing line printed the moment a
+# restart event is discovered (pure formatting, no I/O). Distinctly KIND-labelled and explicitly
+# disclaiming a frozen-camera accusation, so a human/CI reader never mistakes a run-integrity
+# restart for a camera fault -- the same reassurance shape as the #895 self_heal_reset_scan_message.
+restart_event_scan_message() {
+  local _kind="${1:-?}" _cambox="${2:-?}" _at_ns="${3:-?}"
+  printf '%s %s event detected at %s ns (epoch) during this recording -- a run-integrity restart (%s); recording-verdict.rs will attribute any resulting stale/duplicate frames to this event, NOT frozen_leg\n' \
+    "$_cambox" "$_kind" "$_at_ns" "$_kind"
 }
