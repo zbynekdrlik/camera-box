@@ -355,24 +355,31 @@ jobs:
           RIG_LEASE_RUN_ID: ${{ github.run_id }}
         run: bash scripts/rig-lease-release.sh
 
-      - name: Discord alert on frame-loss regression (bot API → #notifications)
+      - name: Discord alert on E2E gate failure — report the stage that actually failed (#844)
         if: failure()
+        # #844: this step fires on EVERY non-zero job exit, so it must NOT hardcode a frame-loss
+        # verdict — a [0/8] preflight abort never records a frame. scripts/lib/e2e-failure-stage.sh
+        # DERIVES the failed stage from this run's durable on-runner artifacts (the same
+        # verdict-<RUN_ID>.json the #703 fail-closed guard trusts, plus the downloaded recordings)
+        # and only ever claims a frame-loss/latency breach for a genuinely FAILING verdict.
         env:
           BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
           CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_ID }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           SHA: ${{ github.sha }}
+          RUN_ID: ${{ env.RECORDING_E2E_RUN_ID }}
         run: |
           set -euo pipefail
           if [ -z "${BOT_TOKEN:-}" ] || [ -z "${CHANNEL_ID:-}" ]; then
             echo "DISCORD_BOT_TOKEN/DISCORD_CHANNEL_ID not set — skipping alert."
             exit 0
           fi
-          content="🔴 **camera-box recording-based full-path E2E FAILED** (${SHA:0:7}) — cam2→cam1→strih→stream frame-loss/latency gate breached — ${RUN_URL}"
+          . scripts/lib/e2e-failure-stage.sh
+          content="$(e2e_failure_stage_content "/tmp/recording-e2e-${RUN_ID:-}" "${RUN_ID:-}" "${SHA:0:7}" "$RUN_URL")"
           payload=$(jq -n --arg c "$content" '{content:$c}')
           curl -fsS --max-time 10 -X POST \
             -H "Authorization: Bot ${BOT_TOKEN}" \
             -H "Content-Type: application/json" \
             -d "$payload" \
             "https://discord.com/api/v10/channels/${CHANNEL_ID}/messages" >/dev/null
-          echo "Frame-loss regression alert posted to #notifications."
+          echo "E2E gate-failure alert (stage-aware, #844) posted to #notifications."

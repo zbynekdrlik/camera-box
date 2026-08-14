@@ -8376,3 +8376,17 @@ bundle-state-server deployed to both boxes.
 - Validator sweep closed 4 painter-lifecycle tickets as overcome by the durable-painter work (dead-man switch, sweep service-stop, event verify branch, projector relaunch); 2 follow-ups filed by workers (strih start-path 1057, verify-imag ssh budgets 1058).
 - Live proofs during integration: the dead-man switch FIRED for real (painter self-restored, first firing) — though a later abort-path arming used a 90-min window (noted on the closed ticket); the imag burn-off-at-start verified live (restart -> burns OFF; TEST burn re-asserted after).
 - One gate loss to a single-window CAM3 22+22 balanced burst attributed NOT-the-FIFO (counters quiet) — evidence appended to the shared-duplicate ticket's downstream trail.
+
+## #844 — stage-aware failed E2E gate Discord alert (worktree autopilot-844, v1.7.0-dev.456)
+Rescoped ticket (primary leaked-burn defect already resolved by issue 878 + issue 924 normalize).
+Remaining: the `if: failure()` Discord step in `.github/workflows/full-path-e2e.yml` hardcoded
+"cam2→cam1→strih→stream frame-loss/latency gate breached" on EVERY failure — including a `[0/8]`
+preflight abort that recorded no frame. Fix: new pure helper `scripts/lib/e2e-failure-stage.sh`
+(`e2e_failure_stage_content OUTDIR RUN_ID SHA URL`) derives the stage from durable per-run
+artifacts (RUN_ID-scoped `verdict-<RUN_ID>.json` + downloaded recordings), claiming a breach ONLY
+for `overall_pass=false`; step now sources+calls it. RED `test(#844)` 3a6323117 →
+GREEN fix fc20deff0 → review-fix b5eac21f8. Test: `tests/harness_e2e_failure_stage_844.rs`
+(bucket-driven via `bash -c`, incl. malformed-verdict + strict-shell never-swallowed paths + a
+yml-text assertion). No `recording-e2e.sh` edit (deliberate — avoided its 88-anchor minefield).
+Review: 0 🔴 2 🟡 3 🔵, all fixed same-branch. Gotcha logged: cargo tests don't run locally here
+(build-ok disabled, airuleset #477) → verify shell helpers by running bash directly.
