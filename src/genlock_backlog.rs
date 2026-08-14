@@ -372,7 +372,9 @@ pub fn should_converge_phase(
     // single N==1 source has no cross-source spread and its A/V offset is corrected by the
     // ±50 ms 2ME PGM controller. A hysteresis band cannot separate the natural hold from a real
     // error here — the natural overshoot is frac-dependent (up to ceil+2 frames) and differs by n.
-    // [red] the N>=2 gate is removed here to prove the deep-n1 oscillation test goes RED first.
+    if source_multiple < 2 {
+        return false;
+    }
     let n = source_multiple.max(1) as u64;
     let reserve_ns = (latency_ms as u64).saturating_mul(1_000_000);
     // The achievable floor: the freshest queued frame's on-air age (a frame cannot present before

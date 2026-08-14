@@ -354,8 +354,13 @@ fn converge_vectors() -> Vec<(u64, u64, u64, u32, u64, u32, u64)> {
             2,
             100,
         ), // 2 frames over floor -> fires
-        (w, w - (40_000_000 + i30), w - 40_000_000, 3, i30, 1, 100), // n=1: floor + 1 canvas frame -> inert
+        (w, w - (40_000_000 + i30), w - 40_000_000, 3, i30, 1, 100), // n=1: gated -> inert
         (w, w + i30, w + i30, 20, i30, 2, 100), // newest ahead of wall (floor saturates to 0) -> target=reserve
+        // N>=2-ONLY GATE (#1049 coordinator finding): the deep n=1 stream source at its natural
+        // grid-quantized hold (~1033 ms at reserve 990, frac 0.7) is INERT, while the SAME held age
+        // on an n>=2 source still fires — proves the gate is n-specific, C and Rust in lock-step.
+        (w, w - 1_033_000_000, w - 33_000_000, 990, i30, 1, 100), // deep n=1 -> INERT (gated)
+        (w, w - 1_033_000_000, w - 33_000_000, 990, i30, 2, 100), // same age, n=2 -> fires
     ];
     // A deterministic LCG spread over the argument space, now including the floor axis.
     let mut x: u64 = 0x1234_5678_9abc_def1;
