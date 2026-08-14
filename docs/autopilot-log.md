@@ -8028,3 +8028,46 @@ ssh-ing IN (impossible against an off-network box).
   in `harness_cam2_painter_provisioning_863.rs`. FULL `cargo test` suite green: 205 binaries, 0
   FAILED (mandatory after a rig-mode.sh edit — no anchor collisions). shellcheck -x clean on all
   touched scripts. Playbook: new `.claude/rules/cam2-painter-lifecycle.md` + router entry.
+
+## 2026-08-14 — #938 + #1011 (bundled, worktree autopilot-938) — exhaustive genlock_burn sweep
+
+- **Same defect family, one fix.** Every burn OFF/CHECK/RESTORE site derived its OBS-input target
+  set from a list NARROWER than "the inputs a burn can be ON": rig-mode `obs_burn_targets` was a
+  FIXED 3-input list (strih:NDI cam1, stream:NDI 2ME PGM, imag:NDI CAM1) — issue 938: TEST mode
+  also burns the rendered input (issue 901) + all-cambox cam2/cam4, so the OFF/CHECK passes left
+  those ON invisibly; recording-e2e cleanup restore + [0/8] normalize derived from
+  CAMERA_ACTIVE_SET / the fixed BURN_TARGETS — issue 1011: an on-air input OUTSIDE the active set
+  (strih:NDI cam3 = cam4's feed, stream:phase2-probe-src) leaked genlock_burn=true past cleanup AND
+  the event contract (live 2026-08-07 pre-broadcast; only the pixel proof caught it). Validate-first
+  confirmed both lists still present on base.
+- **Fix**: ONE shared exhaustive enumerator seam in `scripts/obs_burn_filter.py` — new
+  `sweep-check`/`sweep-off` subcommands enumerate EVERY ndi_source input over WS (GetInputList),
+  read/clear the per-source genlock_burn bool. Pure `ndi_source_input_names(input_list)` at module
+  scope (Tier-0-testable); reuses the existing `_conn`/`_rpc`/`_genlock_burn`/`compute_burn_on`
+  (issue 334) helpers. Both consumers routed through it ADDITIVELY (pinned loops byte-for-byte
+  unchanged — anchor-safe): rig-mode `toggle_burn` EVENT path sweeps every box after the pinned
+  loop (ON/TEST stays pinned-only); `event_mode_assert` item-3 merges a per-box sweep-check into
+  burn_states; recording-e2e cleanup burn-clear + [0/8] normalize sweep every box (strih/stream/imag).
+- **Fail-CLOSED (review)**: a failed GetInputList must never read as "clean". `_all_ndi_inputs`
+  returns None on enumeration failure → `sweep-check`/`sweep-off` return SWEEP_ENUM_FAILED(2) →
+  `event_mode_assert` injects a `<box>:__sweep_unreachable__`=true sentinel so `burns_off_ok()`
+  fails the contract. The OFF path already failed loud (`|| rc=$?`); the CHECK is now symmetric.
+- **Rejected**: (a) widen the static lists — re-encodes a new drifting list, the exact bug shape
+  `camera-active-set.md` warns against; (b) derive from CAMERA_ACTIVE_SET more carefully — that IS
+  the issue-1011 hole (an on-air input outside the set); (c) a new sourced bash lib — adds a source
+  line to both heavy anchored scripts for no gain, the python subcommand is the single seam.
+- **Anchor collision found+fixed**: the cleanup sweep first reused `for _hbs in "${BURN_TARGETS[@]}"`,
+  tripping the issue-252 "exactly 2 loop headers" count (harness_recording_e2e_paths) → rewrote it
+  to iterate labeled box=ip pairs directly. Lesson: a NEW consumer of a shared array must not reuse
+  the exact anchored loop-header literal a `.matches().count()` test pins.
+- **Tests**: RED `122726b51` / GREEN `a13a6ec65`+`f49a359d2`, review-fix `36a7cc819`, bump
+  `5508d45ea` (1.7.0-dev.453). `tests/python/test_obs_burn_filter.py` (+6, incl. 2 fail-closed) 12/12;
+  `tests/harness_burn_sweep_enumerate_938_1011.rs` (new, invocation-form anchors + sentinel assert).
+  All adjacent at-risk anchor binaries green (rig_mode 33, event_assert_wired 11, recording_e2e_paths
+  56, cleanup_final_verify_684 3, startup_self_heal_878 16, + 9 more). shellcheck -S warning clean.
+  NOTE: the full `cargo test` suite (195 integration binaries + lib) was run under 3 concurrent
+  worktree workers saturating 4 cores; two WALL-CLOCK timing tests flaked
+  (`ndi::tests::wait_for_next_boundary_returns_real_recent_boundary` ~26ms tolerance after a sleep;
+  `dantesync_gate::gate_samples_multiple_nodes_concurrently_not_sequentially` elapsed-time
+  parallelism) — both structurally load-sensitive, both untouched by this diff (zero Rust source
+  changed). Supervisor's quiet-box integration run is authoritative for those.
