@@ -162,13 +162,28 @@ pub fn resolve_grabber_model(hostname: &str, detected_card: Option<&str>) -> Gra
     grabber_model_for_hostname(hostname)
 }
 
-/// #685 — ShadowCast 2's per-model capture-rate tolerance (percent). Set to cover the FULL live-
-/// observed characteristic-wobble range with margin (~55fps-64.02fps against a 60.000fps
-/// negotiated rate = up to ~8.3% deviation — #656, #663, #665) while still catching a genuinely
-/// severe deviation well outside that envelope. Deliberately a SEPARATE named constant (not a
-/// widening of the shared `CAPTURE_RATE_TOLERANCE_PCT`) so a future `GrabberModel` variant added
-/// later doesn't silently inherit ShadowCast's allowance.
-pub const SHADOWCAST2_CAPTURE_RATE_TOLERANCE_PCT: f64 = 10.0;
+/// #685/#1034 — ShadowCast 2's per-model capture-rate JITTER/reset floor (percent). This is the
+/// deviation beyond which a sustained streak escalates to an actual USB reset, so it must sit
+/// ABOVE the model's genuine characteristic wobble or it re-introduces issue-909 reset-spam (each
+/// spurious reset an ~8.3s `frozen_leg` misclassification).
+///
+/// #1034 tightened this 10.0 -> 9.0 off a fresh live re-measure (2026-08-14, the two real
+/// ShadowCasts): cam1 mean 61.10 / max 62.80 fps (4.67% dev) and cam2 mean 61.28 / max 61.70 fps
+/// (2.83%) over ~8h. 9.0 still clears the ShadowCast CLASS's historical characteristic envelope
+/// (~55fps-64.02fps against 60.000fps = up to ~8.33% — #656/#663/#665), so no genuinely-healthy
+/// wobble regresses into a reset, while catching a genuinely-severe sustained deviation JUST
+/// beyond that envelope that the old 10.0 let slip.
+///
+/// This stays an INTERIM value for un-swapped ShadowCast units. The real shrink to the strict base
+/// `CAPTURE_RATE_TOLERANCE_PCT` (1%) happens per-box as each ShadowCast is physically swapped to a
+/// Cam Link 4K (`GrabberModel::CamLink4k`) — cam3 is already swapped and gates at 1% (0.33% live
+/// spread). Do NOT tighten this below the class's ~8.33% envelope on the shared reset floor until
+/// the hardware is actually replaced.
+///
+/// Deliberately a SEPARATE named constant (not a widening of the shared
+/// `CAPTURE_RATE_TOLERANCE_PCT`) so a future `GrabberModel` variant added later doesn't silently
+/// inherit ShadowCast's allowance.
+pub const SHADOWCAST2_CAPTURE_RATE_TOLERANCE_PCT: f64 = 9.0;
 
 /// The capture-rate deviation tolerance (percent) to use with `is_rate_deviant`, given this box's
 /// grabber model. `CAPTURE_RATE_TOLERANCE_PCT` (1%, unchanged) for every model except
