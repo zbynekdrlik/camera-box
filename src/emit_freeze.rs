@@ -14,8 +14,9 @@
 //! frame has reached NDI in N seconds", and nothing watched it.
 //!
 //! This watchdog adds that missing signal: a SECOND monotonic heartbeat, stamped by the capture
-//! loop only when a frame is actually EMITTED (`emitted_this > 0`), polled by the SAME separate
-//! watchdog thread `#945` already runs (which the capture loop can never block). The verdict is
+//! loop only when a frame is actually DISPATCHED to NDI (a CONFIRMED production send, or a queued
+//! burn job — never a send that errored, which is itself a silent-frozen mode), polled by the SAME
+//! separate watchdog thread `#945` already runs (which the capture loop can never block). The verdict is
 //! DISCRIMINATED against a true wedge so the two watchdogs never fight over one event: emit-freeze
 //! fires only when the emit heartbeat is stale AND the *capture-return* heartbeat is still FRESH
 //! (the capture thread is alive, just producing no usable output). In a true wedge both heartbeats

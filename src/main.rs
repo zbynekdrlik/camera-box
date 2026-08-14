@@ -967,6 +967,13 @@ async fn run_capture_loop(
             // #707 B1 — snapshot the emit counter before the frame closure so the per-second ring
             // can attribute exactly this frame's emit (0 or 1) after it returns.
             let emit_before = emit_count;
+            // #944 — did THIS iteration actually DISPATCH a good frame to NDI (a confirmed
+            // production send, or a queued burn job)? This is the emit-liveness signal, distinct
+            // from `emit_count` (which increments even on a production send Err, for rate stats):
+            // a persistently-failing send is itself a silent-frozen mode, so it must NOT advance
+            // the heartbeat. Reset per iteration; set inside the closure only on a confirmed
+            // dispatch.
+            let mut frame_dispatched = false;
             // ZERO-COPY: Process frame directly from mmap buffer without copying
             let result = capture.process_frame(|data, info| {
                 // #286 — periodically re-sample the monotonic->realtime clock offset. Counts
@@ -1144,7 +1151,12 @@ async fn run_capture_loop(
                     // — both are TERMINAL paths (shutdown signalled, or the burn thread is gone),
                     // never steady state, so not returning the buffer to the pool cannot leak.
                     match ring.submit(job) {
-                        Ok(()) => emit_count += 1,
+                        // #944 — a queued burn job is the strongest emit-liveness signal available
+                        // on this thread (the burn thread performs the actual NDI send asynchronously).
+                        Ok(()) => {
+                            emit_count += 1;
+                            frame_dispatched = true;
+                        }
                         Err(SubmitError::ShutdownInterrupted(_)) => tracing::info!(
                             "#275b cam1-burn submit interrupted by shutdown — frame_id={} not sent",
                             frame_id
@@ -1175,8 +1187,12 @@ async fn run_capture_loop(
                     emit_wall_ns / 100,
                     send_fps as i64,
                 );
-                if let Err(e) = sender.send_frame_zero_copy(data, info, capture_timecode_100ns) {
-                    tracing::error!("Failed to send frame: {}", e);
+                match sender.send_frame_zero_copy(data, info, capture_timecode_100ns) {
+                    // #944 — only a CONFIRMED send proves the NDI output is live; a send that errors
+                    // is itself a silent-frozen mode (nothing reaches NDI while every health signal
+                    // stays green), so it must NOT advance the emit-liveness heartbeat.
+                    Ok(()) => frame_dispatched = true,
+                    Err(e) => tracing::error!("Failed to send frame: {}", e),
                 }
                 emit_count += 1; // reached only when the frame passed the gate
                 tee_grab(data);
@@ -1211,12 +1227,14 @@ async fn run_capture_loop(
                     // while strih freezes, the loss is downstream (link / NDI SDK), read off the
                     // transport sampler instead.
                     let emitted_this = (emit_count - emit_before) as u32;
-                    // #944 — stamp the emit-liveness heartbeat when a good frame was ACTUALLY
-                    // emitted this iteration (arms + advances the emit-freeze watchdog). A
-                    // corrupted buffer returns Ok with emitted_this == 0, so this never advances on
-                    // a frozen-output stream — exactly the signal #945's return-based heartbeat
+                    // #944 — stamp the emit-liveness heartbeat when a good frame was actually
+                    // DISPATCHED to NDI this iteration (`frame_dispatched`: a confirmed production
+                    // send, or a queued burn job — NOT merely a gate-passed frame whose send
+                    // errored). A corrupted buffer returns Ok without dispatching, and a
+                    // persistently-failing send never dispatches either, so this never advances on
+                    // any frozen-output stream — exactly the signal #945's return-based heartbeat
                     // cannot see. Shared #945 watchdog epoch so the poll can subtract it.
-                    if emitted_this > 0 {
+                    if frame_dispatched {
                         emit_heartbeat_capture.store(
                             wedge_watchdog_epoch.elapsed().as_nanos() as u64,
                             Ordering::Relaxed,
