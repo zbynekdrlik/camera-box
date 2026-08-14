@@ -150,3 +150,35 @@ a counter delta by a wall-clock sleep" caution as the #797 phantom-50fps post-mo
 genlock skill — use the audit line's OWN `ts_present` delta, not a `sleep`.) The audit line prints
 this read-only over the win-* MCP `Shell` on the stream/strih box (session-agnostic file read of
 the newest `%APPDATA%\obs-studio\logs\*.txt`).
+
+## Extracting a large inline block into its own static function (#1038)
+
+`ready_async_frame()` grew to ~832 lines; the issue-401 cadence was lifted into
+`static bool genlock_release_tick(...)`. A pure "cut, dedent, wrap, call" move, but two traps cost
+real time — both invisible to local Tier-0 (the file compiles only on CI):
+
+- **A function that is ALSO forward-declared has TWO matching lines.** `ready_async_frame` has a
+  forward declaration (`...sys_time);`) near the top of the file AND its definition (`...sys_time)`
+  + `{`) far below. Inserting the new helper "before the line that startswith the signature"
+  matches the FORWARD DECLARATION first and drops the helper ahead of every function it calls →
+  implicit-declaration `-Werror` on CI. Match the DEFINITION line EXACTLY (no trailing `;`, or the
+  `)\n{` pair) when placing a helper before such a function.
+- **A moved block that only ASSIGNS an enclosing-scope local leaves it undeclared.** The cadence
+  did `next_frame = source->async_frames.array[0];` — `next_frame` was DECLARED at the top of
+  `ready_async_frame`. In the extracted function that assignment has no declaration → `next_frame
+  undeclared`. The lift-and-compile harness (above) caught it in one second; a text-only "verbatim
+  move looks right" review would not, and CI would be the first to know. Add the type at the first
+  assignment site (`struct obs_source_frame *next_frame = ...`) — it is assigned-before-read in the
+  block, so a fresh local is exact.
+
+**Anchor safety for a whole-block move here was FREE:** every gate in
+`tests/genlock_release_cadence.rs` and both `windows-genlock*.yml` is either a whole-file
+`contains`/`-match` substring or a statement-level `.find` with no leading indentation (immune to a
+uniform dedent), and the two enclosing-function slices (the `genlock_relocks++` → next `\nstatic `
+window in the #741 / #940 tests) still resolve *inside* the new function BECAUSE it is placed
+before `ready_async_frame` — so its relock branch's next `\nstatic ` is `ready_async_frame` itself,
+and `release = sel_1003 + 1;` stays within the window. Moving the whole cadence as ONE contiguous
+function (not per-branch helpers) is what keeps those slices intact — a split would put a `\nstatic`
+between `genlock_relocks++` and its terminal `release =`. Prove the move byte-for-byte: re-indent
+the new body back to the original depth and `diff` it against `git show HEAD:<file>` over the old
+line range; the ONLY intended delta is the added declaration token.

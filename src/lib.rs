@@ -344,6 +344,7 @@ pub mod offline_ack;
 // monitor, not chain loss). No probe deps, so it unit-tests Tier-0;
 // `probe::recording_segments::window_segment`/`segment_continuity` only CALL it. Deleted
 // together with #881 (connect cam2's 120Hz monitor, restore the term to absolute zero).
+pub mod e2e_latency_gate;
 pub mod optical_floor;
 
 // #889 (user decision on #883, 2026-07-30) — the per-cambox-window `copies`/`gaps` terms become

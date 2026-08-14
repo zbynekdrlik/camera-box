@@ -779,3 +779,61 @@ fn backlog_relock_margin_scales_with_the_source_multiple_940() {
          constant itself."
     );
 }
+
+#[test]
+fn release_cadence_extracted_into_genlock_release_tick_1038() {
+    // #1038: ready_async_frame() had grown to ~832 lines with the whole #401 phase-locked
+    // release cadence inlined. The cadence (ACQUIRE / BACKLOG-STORM / STEADY / GAP-RESYNC /
+    // HOLD chain, the to_drop erase loop, the #859 settle-back drain, the present tail) was
+    // extracted VERBATIM into its own `static bool genlock_release_tick(...)` so the next
+    // cadence ticket does not add to an already-oversized function again. Pure structural
+    // move, zero behaviour change. This gate pins the boundary so a subtree pull or a
+    // "re-inline it" edit can't silently undo the extraction (and so every OTHER anchor in
+    // this file that slices on the enclosing function keeps resolving inside the new one).
+    let raw = vendor_file(OBS_SOURCE);
+
+    // (a) The extracted function must EXIST.
+    assert!(
+        raw.contains("static bool genlock_release_tick("),
+        "{OBS_SOURCE}: #1038 — the extracted `static bool genlock_release_tick(` is gone; \
+         the #401 cadence was re-inlined into ready_async_frame(). Re-extract it."
+    );
+
+    // (b) ready_async_frame must CALL it (a tail return), not carry the cadence inline. The
+    //     call passes the six cadence inputs + now_ns; anchor on the stable head of the call.
+    assert!(
+        squish(&raw).contains("return genlock_release_tick(source, wall_now, present_ts, due,"),
+        "{OBS_SOURCE}: #1038 — ready_async_frame no longer tail-calls genlock_release_tick \
+         with the cadence inputs; the extraction was reverted or the call site changed shape."
+    );
+
+    // (c) genlock_release_tick must be defined BEFORE ready_async_frame — both so C sees it
+    //     without a forward declaration AND so the enclosing-function slice anchors in this
+    //     file (e.g. the #741 `genlock_relocks++` → next `\nstatic ` window) resolve INSIDE
+    //     genlock_release_tick rather than spilling past ready_async_frame.
+    let tick_pos = raw
+        .find("static bool genlock_release_tick(")
+        .expect("#1038: genlock_release_tick must be present");
+    let ready_pos = raw
+        .find("static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)\n{")
+        .expect("#1038: ready_async_frame definition must be present");
+    assert!(
+        tick_pos < ready_pos,
+        "{OBS_SOURCE}: #1038 — genlock_release_tick must be DEFINED before ready_async_frame \
+         (it is only called from there and several static-boundary anchors depend on its \
+         relock branch preceding ready_async_frame's own `static ` line)."
+    );
+
+    // (d) The relock branch's terminal statement (`release = sel_1003 + 1;`) must now live
+    //     inside genlock_release_tick — i.e. between its definition and ready_async_frame's.
+    //     This is the exact window the #741 anchor slices; pin it here too so the invariant
+    //     is explicit at the extraction boundary.
+    let between = &raw[tick_pos..ready_pos];
+    assert!(
+        between.contains("release = sel_1003 + 1;")
+            && between.contains("source->genlock_relocks++;"),
+        "{OBS_SOURCE}: #1038 — the BACKLOG-STORM relock branch (genlock_relocks++ … \
+         release = sel_1003 + 1;) is no longer contained within genlock_release_tick; the \
+         #741/#940 enclosing-function slice anchors would resolve past ready_async_frame."
+    );
+}

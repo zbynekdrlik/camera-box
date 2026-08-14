@@ -7602,3 +7602,82 @@ does the live rig verification of the new whole-chain checks and closes it.
   depth reflects BUFFER arrival (60/sec) confirmed via the audit `received` counter delta, NOT
   the stamp deltas — read `received`/`ts_present` deltas across two 5s audit lines to prove a
   source's true arrival rate when its stamps look coarse.
+
+## 2026-08-14 — round-2 integration (PR 1044: tickets 1040 + 1042) — merge, deploy, live half
+- Merged worktree branches autopilot-1040 + autopilot-1042 serially (one append-append autopilot-log conflict, both kept). Tier-0 only at integration (the standing dev1 rule); worktree target/ dirs (1.7G + 2.1G) purged at merge.
+- E2E gauntlet: run 1 failed on the issue-624 switch-latency spread 16.21 > 16.0 ms — root-caused to cam1's old grabber being ~16 ms slower absolute than cam3's Cam Link 4K (paint-to-CAPTURE path, upstream of strih; a strih knob change provably did not move it — evidence on ticket 728). Run 2 failed on a transient SSH loss to imag mid render-health window (fail-loud preflight). Run 3 green (spread 15.76, overall_pass=true).
+- Deploy: fast-DLL obs.dll to strih (share-pull via stream C$) + stream (SMB direct), backups *.pre-1044, relaunch via win-* MCP Shell session 1 (strih AHK duplicate killed), render tick ENABLED both, TEST-mode burns verified ON after relaunch. imag: full 227M bundle, backups *.pre-1044, restart clean.
+- Ticket-1042 live proof on the new stream DLL: 'Zaloha kamera' relocks=0 at 1000 ms hold (was ~1/s), underruns=0, backward_steps=0, dropped_due advancing at the correct 60-to-30 decimation rate; residual overruns ~1/15 s = the drop-cap backstop at depth 64, by design.
+- Ticket-1040 live half: thermald purged on imag, hand-guard removed, boot oneshot + guard timer installed, REBOOT-SURVIVAL proven (fresh-boot journal re-pin 29 W + slpc), render 4.25-5.02 ms @ 60.000 fps post-boot, dev1-side alert watchdog enabled (exec-bit fix committed straight to dev). 28/30 W fine-brackets waived on measured-selection + guard-supervision grounds (decision on the ticket); cooling upgrade = ticket 1043.
+- Validator sweep: ticket 1030 closed (overcome by the 1040 envelope, render back in the ~5 ms class); ticket 1029 kept open pending ONE user visual confirmation (HDMI smoothness), needs-answer queued for the morning (sleep window).
+
+## issue 1035 — wire the absolute cam→strih latency BOUND into the main E2E (v1.7.0-dev.447)
+- Problem: the main E2E (recording-e2e.sh → recording-verdict) computed per-hop latency
+  (`latency.cam_strih` etc.) but NO absolute-latency bound folded into `overall_pass` — latency
+  was report-only-always-pass. Umbrella issue 406's bounded-latency requirement was unenforced in
+  the recorded-file verdict. (The differ/analyzer/frame-probe None-bounds the ticket cited are the
+  separate LOOPBACK path (loopback-e2e.sh), structurally not part of recording-e2e.sh — there
+  frame-probe runs only as the cam2 --paint-only painter.)
+- Fix: new Tier-0 crate-root module `src/e2e_latency_gate.rs` (mirrors optical_floor.rs):
+  `CAM_STRIH_P99_LATENCY_MAX_MS = 400.0`, pure `cam_strih_latency_gate_pass(Option<p99>,
+  Option<bound>)` (None bound⇒report-only; Some+no-samples⇒FAIL per test-strictness; else
+  p99<=bound strict), and a one-line-restorable `gates_overall_pass()->true` (LIVE) seam.
+  recording-verdict gains `--max-cam-strih-p99-latency-ms` (default-ON at the constant, hard-locked
+  per the necessary-feature-default-on discipline), folds `all_pass &= pass || !gates_overall`
+  inside the strih-present block, and emits `latency.cam_strih_gate` JSON. Fires only when a strih
+  recording is present (cam1-only optical mode = N/A). cam→stream's ~1s genlock hold is deliberately
+  NOT bounded (operator A/V-align domain).
+- Bound derivation: calibrated from 20 green recording-e2e verdict JSONs
+  (/tmp/recording-e2e-*/verdict-*.json) — `latency.cam_strih.p99_ms` measured min 210.9 / max 240.7
+  / mean 227.9 ms, worst single-frame max 259.6 ms. 400 ms = 1.66x the worst green p99, passes every
+  green run, catches a ~2x regression. Tightening path: toward ~300 ms as the tail is characterized.
+- Freeze bound: the recording-path freeze concept is `frozen_leg`, ALREADY a report-only seam
+  (gates_overall_pass=false, issue 914 / restore issue 905). Green runs exist with frozen>0 so a
+  hard freeze gate can't be live now and must not be duplicated — freeze is already wired; this
+  ticket wired the missing LATENCY bound only.
+- Split out to a follow-up (filed separately, Scope-gate: api-break): the dead documented-bound
+  loss mode removal (differ.rs max_loss_pct, issue 8 closed) — a 34-reference blind refactor of a
+  probe-gated safety-critical pure module (no local compile path) with ~6 dedicated test deletions;
+  bundling it risked a CI-red uncatchable locally that would block the verified latency gate.
+- RED→GREEN: e2e_latency_gate::tests (7) — todo!() RED on the 6 behaviour tests, GREEN on the pure
+  impl. Commit order: bump 446→447 → [red] → [green] → wiring.
+- Local (Tier-0): fmt --all --check clean; cargo check clean; clippy --all-targets -D warnings
+  clean; test --no-run clean; e2e_latency_gate::tests 7/7 GREEN. recording-verdict.rs is
+  probe-gated (no local compile path) — wiring type/signature-reviewed by hand + fresh-context
+  review pass; CI is the first compile.
+- GOTCHA: the "main E2E" (recording-e2e.sh/recording-verdict) and the "loopback E2E"
+  (loopback-e2e.sh/frame-probe/differ) are DIFFERENT latency subsystems with SEPARATE gate
+  mechanisms. A ticket framed against differ/analyzer None-bounds but asking for recording-e2e.sh
+  bounds means the RECORDING verdict needs its own bound (differ's absolute_latency_gate_pass is
+  never called from recording-verdict). Don't wire the loopback gate expecting it to affect the
+  main E2E.
+
+## 2026-08-14 — issue 1038: extract issue-401 release cadence into genlock_release_tick (worktree autopilot-1038)
+- Version 1.7.0-dev.446 -> 447. Commits: bfa47005e (bump), 051be0809 [red] test, 4c92412da [green] extract.
+- Pure structural refactor of `vendor/obs-studio/libobs/obs-source.c`: `ready_async_frame()` (~832
+  lines) shed the whole issue-401 cadence into `static bool genlock_release_tick(source, wall_now,
+  present_ts, due, interval, reserve_ms, now_ns)`, placed after `genlock_should_drain_one` and
+  before `ready_async_frame`, which now tail-returns it. Byte-for-byte move (uniform 3-tab dedent);
+  ONLY added token = `struct obs_source_frame *` before the block's own `next_frame =` assignment
+  (it was declared in the caller's top scope before; assigned-before-read in the block, so a fresh
+  local is exact). Bool return matches ready_async_frame's present/hold contract → no out-param.
+- RED test: `tests/genlock_release_cadence.rs::release_cadence_extracted_into_genlock_release_tick_1038`
+  pins the function exists, ready_async_frame tail-calls it, it precedes ready_async_frame, and the
+  relock branch (genlock_relocks++ … release = sel_1003 + 1;) stays contained in it.
+- GOTCHA (cost me a redo): `ready_async_frame` has BOTH a forward declaration (~line 2945) and the
+  definition (~5325); a naive "insert before the line startswith(`static bool ready_async_frame(...
+  sys_time)`)" matches the FORWARD DECL first and places the new fn ahead of its callees →
+  implicit-declaration on CI. Match the DEFINITION line EXACTLY (no trailing `;`) when inserting a
+  helper before a function that is also forward-declared.
+- GOTCHA: extracting a block that only ASSIGNS a variable declared in the enclosing scope
+  (`next_frame`) leaves it undeclared in the new function. The standalone gcc harness caught it
+  instantly (`next_frame undeclared`); a text-only "verbatim move" review would have missed it and
+  burned a CI cycle. Always run the lift-and-compile harness for a vendored-C move, not just a
+  brace-balance check.
+- Verification bought back (all local, CI is the vendored C's first real compile): brace/paren/
+  bracket delta vs HEAD net-zero; standalone `gcc -Wall -Wextra -Wformat=2` harness (stubbed struct
+  + callees) compiles the lifted fn clean; re-indent-and-diff proves byte-for-byte identity vs the
+  HEAD block; full `genlock_release_cadence` suite 14/14; fmt/check/clippy -D warnings/test --no-run
+  all green. NO windows-genlock*.yml or parity-test edit needed — every pwsh/Rust anchor is a
+  whole-file or statement-level substring, and the enclosing-function slices resolve inside the new
+  fn because it precedes ready_async_frame.
