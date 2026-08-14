@@ -409,4 +409,116 @@ mod tests {
         assert_eq!(v.duplicate_steps, 0);
         assert_eq!(v.catchup_steps, 0);
     }
+
+    // ---- #1036 — the CALIBRATED paired-judder gate (both directions) --------------------
+    //
+    // Calibration source: 210 cadence windows across 21 GREEN `recording-e2e` runs on dev1
+    // (all `expected_step = 2`, the only populated class). Worst observed `paired_fraction`
+    // over ALL 310 windows (green + red) is 0.00473; the 15fps-judder pathology (see
+    // `fifteen_fps_like_judder_is_paired_spacing` above) sits at ~0.966 — a ~200x separation.
+    // The bound is per-window worst `paired_fraction <= PAIRED_FRACTION_JUDDER_MAX` (0.05):
+    // 10.6x the worst green window, ~19x below the pathology. See issue #1036 for the full
+    // baseline table.
+
+    #[test]
+    fn default_bound_constant_is_the_calibrated_value() {
+        assert_eq!(PAIRED_FRACTION_JUDDER_MAX, 0.05);
+    }
+
+    #[test]
+    fn none_bound_is_report_only_always_passes() {
+        // A `None` bound = the gate is disabled (report-only) and always passes, even a
+        // pathological worst value.
+        assert!(cadence_judder_gate_pass(Some(0.966), None));
+        assert!(cadence_judder_gate_pass(None, None));
+    }
+
+    #[test]
+    fn no_cadence_windows_is_not_applicable_pass() {
+        // `worst = None` = the run produced no cadence-bearing window at all. Per the metric's
+        // own `None` contract this is "not applicable", never a failure — and any condition that
+        // zeroes out every cadence window (mass optical-decode failure) is already HARD-failed by
+        // the copies/gaps/undecodable gates, so this is not a test-strictness hole.
+        assert!(cadence_judder_gate_pass(None, Some(PAIRED_FRACTION_JUDDER_MAX)));
+    }
+
+    #[test]
+    fn worst_observed_green_window_passes_the_default_bound() {
+        // The load-bearing calibration test: the worst `paired_fraction` measured across the 21
+        // green runs (0.00473, run 77863612) MUST pass the default bound — a bound that would
+        // fail a recent green run is not a valid bound.
+        assert!(
+            cadence_judder_gate_pass(Some(0.00473), Some(PAIRED_FRACTION_JUDDER_MAX)),
+            "the worst observed green paired_fraction (0.00473) must pass the {PAIRED_FRACTION_JUDDER_MAX} bound"
+        );
+        // The next-worst cluster (0.00237) and the clean majority (0.0) also pass.
+        assert!(cadence_judder_gate_pass(Some(0.00237), Some(PAIRED_FRACTION_JUDDER_MAX)));
+        assert!(cadence_judder_gate_pass(Some(0.0), Some(PAIRED_FRACTION_JUDDER_MAX)));
+    }
+
+    #[test]
+    fn fifteen_fps_judder_pathology_fails_the_bound() {
+        // End-to-end: build the metric's OWN 15fps-judder reference pattern, measure its real
+        // `paired_fraction`, and prove the gate FAILS on it — the degraded direction, wired to the
+        // actual metric output rather than a hand-picked number.
+        let mut ticks = Vec::new();
+        for k in 0..15u32 {
+            let t = k * 4;
+            ticks.push(t);
+            ticks.push(t); // held (duplicate content) -> duplicate+catchup pairs
+        }
+        let v = measure_cadence_evenness(&ticks, 2).expect("30 samples is plenty");
+        assert!(
+            v.paired_fraction > 0.9,
+            "sanity: the judder reference saturates paired_fraction, got {}",
+            v.paired_fraction
+        );
+        assert!(
+            !cadence_judder_gate_pass(Some(v.paired_fraction), Some(PAIRED_FRACTION_JUDDER_MAX)),
+            "the 15fps-judder pathology (paired_fraction={}) must FAIL the bound",
+            v.paired_fraction
+        );
+    }
+
+    #[test]
+    fn a_smooth_window_passes_end_to_end() {
+        // The healthy direction wired to the metric: a perfectly smooth 60-in-30 downsample has
+        // zero paired events, so its measured paired_fraction passes the gate.
+        let ticks: Vec<u32> = (0..60).step_by(2).collect();
+        let v = measure_cadence_evenness(&ticks, 2).expect("30 samples is plenty");
+        assert_eq!(v.paired_fraction, 0.0);
+        assert!(cadence_judder_gate_pass(Some(v.paired_fraction), Some(PAIRED_FRACTION_JUDDER_MAX)));
+    }
+
+    #[test]
+    fn boundary_at_bound_passes_just_over_fails() {
+        assert!(
+            cadence_judder_gate_pass(Some(0.05), Some(0.05)),
+            "exactly at the bound passes (strict >)"
+        );
+        assert!(
+            !cadence_judder_gate_pass(Some(0.0501), Some(0.05)),
+            "just over the bound fails"
+        );
+    }
+
+    #[test]
+    fn a_partial_window_judder_well_above_green_noise_fails() {
+        // A window where even ~1-in-10 delta-pairs are duplicate+catchup (paired_fraction 0.2) —
+        // ~40x the worst green window and far below the full pathology — must still FAIL, proving
+        // the bound catches a PARTIAL judder, not only the saturated reference.
+        assert!(!cadence_judder_gate_pass(Some(0.2), Some(PAIRED_FRACTION_JUDDER_MAX)));
+    }
+
+    #[test]
+    fn gate_is_live_today() {
+        // #1036: the paired-judder bound folds into overall_pass (LIVE) — it passes every green
+        // run with margin and is immune to the cam1 grabber defect (issue 909), which drops frames
+        // rather than manufacturing duplicate+catchup pairs. Flip `gates_overall_pass` to false
+        // for a one-line revert to report-only if a future rig change ever trips it.
+        assert!(
+            gates_overall_pass(),
+            "#1036: the calibrated paired-judder bound must gate overall_pass (LIVE)"
+        );
+    }
 }
