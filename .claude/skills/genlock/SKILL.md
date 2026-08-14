@@ -411,14 +411,22 @@ Confirmed nuances when the deploy is driven from a `mcp__win-strih__Shell` / `mc
 
 ### Deploy-transfer + imag-restart gotchas from the #912 ASRC rollout (2026-08-01)
 
-- **A box CANNOT pull from a dev1 HTTP server — push dev1→box instead.** During the #912
-  obs.dll rollout, `python3 -m http.server` bound on dev1's rig IP was unreachable from strih
-  (100% ping loss strih→dev1; tcpdump on dev1 showed the ICMP echo requests ARRIVING with no
-  reply sent — dev1-initiated flows to the boxes worked fine the whole time). NOT root-caused
-  (tracked as a filed issue); until it is, deploy transfers must be DEV1-INITIATED: `sshpass
-  scp -O` to strih/stream (#701 creds in targets.md) and to imag. Also: dev1's rig-subnet
-  DHCP IP drifts (was .165, then .100) — read it fresh from `hostname -I`, never from an old
-  transcript.
+- **Deploy transfers are DEV1-INITIATED by default (belt-and-braces) — but rig→dev1 box-pull
+  now WORKS.** During the #912 obs.dll rollout (2026-08-01) `python3 -m http.server` bound on
+  dev1's rig IP was unreachable from strih (100% ping loss strih→dev1; tcpdump on dev1 showed
+  the ICMP echo requests ARRIVING with no reply sent — dev1-initiated flows to the boxes worked
+  fine the whole time). That silent kernel drop was VALIDATED CLOSED 2026-08-14 (issue 916): it
+  no longer reproduces — live CAM1→dev1 ping is 3/3 and a full TCP handshake completes. Root
+  cause (consistent, inferred): dev1 was multi-homed on the rig L2 via two NICs (enp1s0 MAC
+  `…c0` + enp2s0 MAC `…c1`); the packet arrived on the ARP'd NIC while the kernel's reply path
+  resolved to the other → asymmetric-path silent drop. Resolved by the environment: the incident
+  NIC `enp1s0` is now DOWN/NO-CARRIER (rig is on a single clean `enp2s0`, MAC `…c1`) and
+  `rp_filter` is persistently LOOSE (`=2`, `/etc/sysctl.d/10-network-security.conf`), which
+  cannot silent-drop a source reachable via any iface. Keep DEV1-INITIATED transfers as the
+  default anyway — zero blast radius, and it guards a future re-cabling of the second NIC:
+  `sshpass scp -O` to strih/stream (#701 creds in targets.md) and to imag. Also: dev1's
+  rig-subnet DHCP IP AND its NIC drift (was enp1s0 .165 → .100, now enp2s0 .103) — read both
+  fresh from `ip -4 addr show`, never from an old transcript.
 - **After the imag libobs hot-swap, VERIFY the obs process start time — the stop can race.**
   A one-shot swap script (stop → install → start over one ssh call) left the ORIGINAL obs
   process (old libobs still mapped) running while all bytes + markers reported success.
