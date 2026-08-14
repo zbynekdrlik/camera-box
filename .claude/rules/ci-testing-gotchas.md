@@ -11,6 +11,7 @@ paths:
   - "scripts/recording-e2e.sh"
   - "scripts/rig-mode.sh"
   - "scripts/lib/rig-lease.sh"
+  - "scripts/lib/rig-lease.sh"
 ---
 
 # CI + bash-test-harness gotchas (#826)
@@ -619,3 +620,43 @@ once per lease poll) removes the lockdir on the gate's 2nd poll, AFTER poll 0 ha
 the live holder. Deterministic, load-independent, and no assertion weakened. General pattern: when
 a test needs "state X changes AFTER the code-under-test has observed it once", hook the change to a
 seam the code invokes, never to a wall-clock sleep.
+
+## Make a shared lockdir's TEARDOWN atomic too, not just the read — rename-then-delete (#857)
+
+The #970/#980 entry above made the rig-lease READER atomic (one `open()+json.load()`). The
+RELEASE side (`rig_lease_release` in `scripts/lib/rig-lease.sh`) was still `rm -rf "$d"`, whose
+recursive delete removes the lockdir CONTENTS (holder.json, heartbeat) BEFORE the inode — so a
+concurrent observer can still see `$d` present but holder.json gone. That window is not just a
+cosmetic "unnamed holder" log: a concurrent `rig_lease_acquire`'s `mkdir "$d"` guard fails EEXIST
+against the holder-less dir, falls to `rig_lease_is_stale` (which treats no-holder.json as
+reclaimable), reclaims into `$d`, and has that fresh lease DELETED by the departing release's
+still-running `rm -rf "$d"` — two runs momentarily both believing they hold the rig.
+
+**Fix pattern for ANY teardown of a shared lockdir/state-dir a peer may be reading:** rename the
+whole dir aside in ONE atomic syscall, THEN delete the renamed copy — `mv "$d" "$d.releasing.$$"
+&& rm -rf "$d.releasing.$$"`. `$d` goes complete→absent in one step; a reader/acquirer only ever
+sees a COMPLETE lease or none. Pair it with a `*.releasing.*` sweep (call it from acquire-entry —
+the guaranteed GC point — and from release) so a crash between the rename and the rm cannot leak a
+dir; the sweep only ever touches already-detached `.releasing.*` copies, never the live `$d`, so
+it is safe against a concurrent release rm-ing the same copy (double-delete is a `rm -f` no-op).
+Do NOT add an `rm -rf "$d"` fallback when the `mv` fails — it reintroduces the exact window; a
+failed rename means `$d` already vanished (a peer released/reclaimed), and the stale-reclaim
+heartbeat backstop self-heals any pathological fs-error leftover. Test it deterministically with a
+PATH `rm` shim that reproduces `rm -rf`'s contents-first order and probes whether the active path
+is ever `[ -d "$d" ] && [ ! -f "$d/holder.json" ]` (see
+`tests/harness_rig_lease_release_atomicity_857.rs`).
+
+## A RED test that intentionally leaks a SIGTERM-immune child will HANG a `cargo test ... | tail` pipeline (#850)
+
+When you write a RED test that deliberately leaks a child process (proving a `Drop`/cleanup gap —
+e.g. `tests/harness_rig_test_ledger_723.rs`'s `Fixture` without its `impl Drop`, or any
+process-reaping fixture), the leaked child INHERITS the test binary's stdout file descriptor — the
+WRITE end of the pipe when you run `cargo test ... 2>&1 | tail`. Even after the test binary itself
+exits and the child reparents to init (`ppid=1`), that child keeps the pipe's write end open, so
+`tail` never sees EOF and the whole pipeline BLOCKS FOREVER (the wrapper shell stays alive, the
+output file reads 0 bytes, no `test result:` line ever flushes). It looks like a stuck/blocked
+build; it is actually the leak holding the pipe. **Fix: `kill -9` the leaked orphan** (a
+SIGTERM-immune `trap "" TERM` fixture needs `-9`) — the pipe then closes, `tail` flushes the
+`FAILED` line, and the wrapper exits. Better: for a test that may leak on the RED path, run it
+WITHOUT a `| tail` pipe (redirect to a file: `cargo test ... > run.log 2>&1`), so a leaked child
+holding stdout can't wedge the reader. Clean up the orphan before observing the next state.

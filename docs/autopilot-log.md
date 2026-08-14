@@ -8034,3 +8034,36 @@ ssh-ing IN (impossible against an off-network box).
 - The FINAL green run measured the best A/V yet: +17/+14/+8 ms (spread 8 ms) with tolerance 2, zero windows over, zero undecodable.
 - Deploy: rig-mode test from the merged tree performed the durable painter HANDOFF — cam2-painter.service now enabled+active (Restart=always, reboot-survival); the day-long painter restore-loop is over. Cambox fleet aligned to dev.452 via scripts/deploy-fleet.sh (emit-freeze watchdog + capture-rate tolerances live on cam1-3; the script's own stop -> remount,rw -> copy -> start -> remount,ro cycle — a hand-rolled scp had silently failed on the DELIBERATE read-only roots, caught and redone properly). network-reach-alert-watchdog installed+running on dev1 (first pass: both boxes REACHABLE).
 - Round 10 in flight: shared-duplicate attribution (painter EXONERATED by data — instrument landed), rig-lease atomic release + fixture Drop, slew-aware gate sampling.
+
+## 2026-08-14 — harness-robustness bundle #857 + #850 (worktree autopilot-857, v1.7.0-dev.454)
+
+#857: `rig_lease_release()` (scripts/lib/rig-lease.sh) tore the shared cross-repo rig lockdir down
+with a non-atomic `rm -rf "$d"`. A recursive delete removes the dir CONTENTS (holder.json,
+heartbeat) BEFORE the inode, exposing a "dir present, holder.json gone" window. The read side was
+already made atomic by #970/#980; this is the WRITE side. In the window: (a) a reader logs an
+unnamed holder; worse (b) a concurrent `rig_lease_acquire`'s `mkdir "$d"` fails EEXIST against a
+holder-less dir, reclaims into `$d`, and has that fresh lease deleted by the departing release
+(two runs momentarily both believing they hold the rig — proven by the RED test's acquire-race).
+Fix: `mv "$d" "$d.releasing.$$"` (one atomic syscall: $d goes complete→absent) then `rm -rf` the
+detached copy; new `rig_lease_sweep_releasing()` (called from acquire-entry + release) GCs any
+`.releasing.*` copy leaked by a crash between the rename and the rm. NO `rm -rf "$d"` fallback on
+mv-failure — the stale-reclaim heartbeat backstop self-heals a rare fs-error leftover, and a
+fallback would reintroduce the exact window. RED test tests/harness_rig_lease_release_atomicity_857.rs
+uses a PATH `rm` shim faithfully reproducing rm -rf's contents-first order + probes the torn window
+AND drives a concurrent acquirer during the window (deterministic, no timing). RED `9de522651` /
+GREEN `b74afe4a6` / fmt `0aa94385a`. shellcheck clean; 150/150 serial after 800 parallel shim runs.
+GOTCHA discovered: the RED run (pre-fix) LEAKS a SIGTERM-immune orphan that INHERITS and holds the
+test's stdout pipe open, so a `cargo test ... | tail` pipeline blocks forever until you `kill -9`
+the orphan — kill it to flush the FAILED line.
+
+#850: `struct Fixture` (tests/harness_rig_test_ledger_723.rs) had no `impl Drop`; every test's
+explicit `fixture.force_kill()` is its LAST statement, so an earlier assert failure unwinds past it
+and leaks the child. The SIGTERM-immune fixture (`trap "" TERM`, deliberate for the #721/#723
+escalation proof) then reparents to init and only `kill -9` removes it — the five audited
+`cam2-painter-stubborn` orphans. Fix: `impl Drop for Fixture { fn drop(&mut self){ self.force_kill(); } }`
+(runs during unwind; force_kill idempotent so existing explicit calls stay a no-op — the fixture's
+SIGTERM-immunity is untouched). RED test panics in a `catch_unwind` block before force_kill, then
+asserts the pid is reaped. RED `83f54f66c` / GREEN `ce0390553`. 17/17 ledger tests green; 60/60
+stress runs, zero orphan accumulation.
+
+Worktree round; supervisor integrates (merge → CI → deploy). One PR closes #857 #850.
