@@ -52,6 +52,8 @@ set -euo pipefail
 #   SSH_TIMEOUT                  SSH connect timeout in seconds (default: 10)
 #   IMAG_OBS_RESTART_TIMEOUT     hard wall-clock cap on check (o)'s OBS restart (default: 60, #890)
 #   IMAG_OBS_PROJECTOR_POLL_S    budget for projectors to reappear after the restart (default: 120, #890)
+#   IMAG_READ_TIMEOUT            general per-read execution budget in seconds (default: 20, #1058)
+#   IMAG_SLOW_READ_TIMEOUT       slow-read (dpkg/apt/journal/gather) execution budget (default: 60, #1058)
 #   CLOCK_GUARD_BOUND_US         dantesync clock-offset bound in microseconds (default: 2000, #8)
 #   RIG_GRANDMASTER_IP           the rig's PTP grandmaster every node must agree on (default:
 #                                10.77.9.184 -- see #834)
@@ -175,6 +177,14 @@ SSH_TIMEOUT="${SSH_TIMEOUT:-10}"
 # #890: hard bounds for check (o)'s OBS restart-proof so this gate can NEVER hang again.
 IMAG_OBS_RESTART_TIMEOUT="${IMAG_OBS_RESTART_TIMEOUT:-60}"       # wall-clock cap on the ssh restart
 IMAG_OBS_PROJECTOR_POLL_S="${IMAG_OBS_PROJECTOR_POLL_S:-120}"    # budget for projectors to reappear
+# #1058: per-CLASS execution budgets for every OTHER ssh read (issue 890 bounded only check (o)).
+# ssh_box delegates to the bounded ssh_box_timeout with IMAG_READ_TIMEOUT (a general read budget --
+# generous for fast sysfs/cat/systemctl/ls/pgrep reads); the genuinely-slow reads (dpkg/apt under a
+# held lock, the dantesync journal, the timesync/power-envelope gathers) get IMAG_SLOW_READ_TIMEOUT.
+# A blanket SSH_TIMEOUT execution cap would false-FAIL a healthy box on the slow reads (per-class,
+# never a single flat cap).
+IMAG_READ_TIMEOUT="${IMAG_READ_TIMEOUT:-20}"                    # general remote-read execution budget
+IMAG_SLOW_READ_TIMEOUT="${IMAG_SLOW_READ_TIMEOUT:-60}"          # slow reads (dpkg/apt/journal/gather)
 IMAG_CLOCK_BOUND_US="${CLOCK_GUARD_BOUND_US:-2000}"
 DANTESYNC_OFFSET_FRESHNESS_S="${DANTESYNC_OFFSET_FRESHNESS_S:-300}"
 DANTESYNC_JOURNAL_MAX_AGE_S="${DANTESYNC_JOURNAL_MAX_AGE_S:-60}"
@@ -619,18 +629,22 @@ fail() { printf "  ${RED}[FAIL]${NC} %s\n" "$1"; FAILS=$((FAILS + 1)); }
 warn() { printf "  ${YELLOW}[WARN]${NC} %s\n" "$1"; }
 missing_tool() { printf "  ${RED}[FAIL]${NC} MISSING TOOL: %s -- refusing to run a check that cannot execute (#822/#833)\n" "$1"; FAILS=$((FAILS + 1)); }
 
-ssh_box() {
-  sshpass -p "$IMAG_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout="$SSH_TIMEOUT" \
-    "${IMAG_USER}@${IMAG_IP}" "$1"
-}
-
-# ssh_box_timeout SECONDS CMD -- like ssh_box but with a HARD execution timeout (#890). ssh's own
-# ConnectTimeout bounds only the connect phase, never remote command runtime, so a remote command
-# that never returns hangs forever (exactly the check (o) bug). `timeout` bounds the whole ssh
-# invocation; a timed-out call exits 124, which the caller treats as a loud FAIL, never a hang.
+# ssh_box_timeout SECONDS CMD -- the SOLE raw-ssh primitive, with a HARD execution timeout (#890).
+# ssh's own ConnectTimeout bounds only the connect phase, never remote command runtime, so a remote
+# command that never returns hangs forever (the check (o) bug, and #1058 for every other read).
+# `timeout` bounds the whole ssh invocation; a timed-out call exits 124, which the caller treats as
+# a loud FAIL, never a hang. Every read goes through here -- ssh_box below just picks the default
+# read budget, so "every remote read is bounded" is an invariant, not per-call diligence.
 ssh_box_timeout() {
   timeout "$1" sshpass -p "$IMAG_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout="$SSH_TIMEOUT" \
     "${IMAG_USER}@${IMAG_IP}" "$2"
+}
+
+# ssh_box CMD -- a bounded remote read at the general read budget (#1058). Delegates to the single
+# ssh_box_timeout primitive so it can never be an UNbounded raw ssh; a slow-class read overrides the
+# budget by calling ssh_box_timeout "$IMAG_SLOW_READ_TIMEOUT" directly.
+ssh_box() {
+  ssh_box_timeout "$IMAG_READ_TIMEOUT" "$1"
 }
 
 # (a) hostname + static IP -------------------------------------------------------------------
@@ -668,7 +682,7 @@ fi
 
 # (c) kernel on the HWE line (#819) -------------------------------------------------------------
 rc=0
-HWE_STATUS="$(ssh_box "dpkg -s linux-image-generic-hwe-24.04 2>/dev/null | sed -n 's/^Status: //p' || true")" || rc=$?
+HWE_STATUS="$(ssh_box_timeout "$IMAG_SLOW_READ_TIMEOUT" "dpkg -s linux-image-generic-hwe-24.04 2>/dev/null | sed -n 's/^Status: //p' || true")" || rc=$?
 if [ "$rc" -ne 0 ]; then
   fail "HWE kernel dpkg status unreadable (ssh rc=$rc)"
 elif imag_hwe_kernel_installed "$HWE_STATUS"; then
@@ -757,7 +771,7 @@ else
 fi
 
 rc=0
-GDM3_STATUS="$(ssh_box "dpkg -s gdm3 2>/dev/null | sed -n 's/^Status: //p' || true")" || rc=$?
+GDM3_STATUS="$(ssh_box_timeout "$IMAG_SLOW_READ_TIMEOUT" "dpkg -s gdm3 2>/dev/null | sed -n 's/^Status: //p' || true")" || rc=$?
 if [ "$rc" -ne 0 ]; then
   fail "gdm3 dpkg status unreadable (ssh rc=$rc)"
 elif imag_pkg_absent "$GDM3_STATUS"; then
@@ -855,7 +869,7 @@ fi
 
 # (j) OBS base package version matches the pinned genlock build AND is apt-mark held (#824) -----
 rc=0
-OBS_PKG_VERSION="$(ssh_box "dpkg-query -W -f='\${Version}' obs-studio 2>/dev/null")" || rc=$?
+OBS_PKG_VERSION="$(ssh_box_timeout "$IMAG_SLOW_READ_TIMEOUT" "dpkg-query -W -f='\${Version}' obs-studio 2>/dev/null")" || rc=$?
 if [ "$rc" -ne 0 ] || [ -z "$OBS_PKG_VERSION" ]; then
   fail "obs-studio package version unreadable (ssh rc=$rc)"
 elif imag_obs_base_version_matches "$OBS_PKG_VERSION" "$IMAG_OBS_BASE_VERSION"; then
@@ -865,7 +879,7 @@ else
 fi
 
 rc=0
-HOLD_LIST="$(ssh_box "apt-mark showhold 2>/dev/null")" || rc=$?
+HOLD_LIST="$(ssh_box_timeout "$IMAG_SLOW_READ_TIMEOUT" "apt-mark showhold 2>/dev/null")" || rc=$?
 if [ "$rc" -ne 0 ]; then
   fail "apt-mark showhold unreadable (ssh rc=$rc)"
 elif imag_pkg_is_held "$HOLD_LIST" "obs-studio"; then
@@ -902,7 +916,7 @@ else
   HAS_DGPU=no
   if printf '%s\n' "$LSPCI_OUT" | imag_has_discrete_nvidia; then HAS_DGPU=yes; fi
   if [ "$HAS_DGPU" = "yes" ]; then
-    DRIVER_STATUS="$(ssh_box "dpkg -s nvidia-driver-595-open 2>/dev/null | sed -n 's/^Status: //p' || true")"
+    DRIVER_STATUS="$(ssh_box_timeout "$IMAG_SLOW_READ_TIMEOUT" "dpkg -s nvidia-driver-595-open 2>/dev/null | sed -n 's/^Status: //p' || true")"
     PRIME_OUT="$(ssh_box "prime-select query 2>/dev/null" || true)"
   else
     DRIVER_STATUS=""
@@ -917,7 +931,7 @@ fi
 
 # (l) dantesync PTP LOCKED + FRESH offset + SAME grandmaster (#8/#550/#591/#834) -----------------
 rc=0
-DS_JOURNAL="$(ssh_box "journalctl -u dantesync --no-pager -n 400 -o short-iso 2>/dev/null")" || rc=$?
+DS_JOURNAL="$(ssh_box_timeout "$IMAG_SLOW_READ_TIMEOUT" "journalctl -u dantesync --no-pager -n 400 -o short-iso 2>/dev/null")" || rc=$?
 DS_HTTP_STATUS="$(ssh_box "curl -fsS --max-time 8 http://127.0.0.1:8898/status 2>/dev/null" || true)"
 if [ -n "$DS_HTTP_STATUS" ]; then
   # #686 precedent: the network status endpoint is authoritative and immune to journal-cadence
@@ -960,7 +974,7 @@ fi
 
 # (m) dantesync is the SOLE timesync authority (#591) --------------------------------------------
 rc=0
-TS_STATES="$(ssh_box "$(timesync_gather_remote_snippet)")" || rc=$?
+TS_STATES="$(ssh_box_timeout "$IMAG_SLOW_READ_TIMEOUT" "$(timesync_gather_remote_snippet)")" || rc=$?
 if [ "$rc" -ne 0 ] || [ -z "$TS_STATES" ]; then
   fail "could not read timesync-daemon state over SSH (rc=$rc)"
 else
@@ -1077,7 +1091,7 @@ fi
 # OR an UNKNOWN facet both FAIL (unreadable = hard FAIL, never silent) -- a healthy imag-nb always
 # gathers every facet (it has the RAPL zone, the iGPU slpc knob, and both enabled+active units).
 rc=0
-PE_GATHER="$(ssh_box "$(imag_power_envelope_gather_remote_snippet)")" || rc=$?
+PE_GATHER="$(ssh_box_timeout "$IMAG_SLOW_READ_TIMEOUT" "$(imag_power_envelope_gather_remote_snippet)")" || rc=$?
 if [ "$rc" -ne 0 ] || [ -z "$PE_GATHER" ]; then
   fail "could not read the power/thermal-envelope state over SSH (rc=$rc) -- cannot verify PL1/slpc/thermald/units (#1040)"
 else
