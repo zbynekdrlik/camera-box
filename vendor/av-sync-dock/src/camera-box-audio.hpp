@@ -702,9 +702,9 @@ inline CbDockLockOutcome cb_dock_lock_outcome(const CbDockLockAction &act, bool 
 /* #1004 -- the MEASURED additive term applied to cb_dock_lock_display_offset_ms(), deliberately
  * 0.0. #952 fit dock ~= -gate - 55; #953 fixed the SIGN. Issue 1004 quantified the residual
  * additive half LIVE (2026-08-14, 5 healthy post-phase-fix windows): dock - offline optical
- * --av-sync truth ranged +9..+53ms (central ~+32, run-to-run spread 33..41ms), and the dock's own
- * within-window swing (24..75ms, cluster mad ~25..35ms) exceeds that spread -- #952's ~55ms is NOT
- * a stable constant. No single additive value reconciles the two DIFFERENT taps (digital
+ * --av-sync truth ranged +9..+53ms (central ~+32, sigma ~13-15ms, run-to-run spread 33..41ms),
+ * and the dock's own within-window swing (24..75ms, cluster mad ~25..35ms, with lock glitches to
+ * -805ms / +207ms spikes) exceeds that spread -- #952's ~55ms is NOT a stable constant. No single additive value reconciles the two DIFFERENT taps (digital
  * NDI-internal burn vs optical camera+mic off the cam2 monitor) to the +-20ms the tightened gate
  * needs. DECISION (from data): NO compensation -- offline optical --av-sync is authoritative, the
  * dock is a coarse monitor. Mirror of src/av_sync_dock.rs::DOCK_LOCK_DISPLAY_ADDITIVE_MS. */

@@ -1028,7 +1028,8 @@ mod tests {
             "the dock-vs-gate residual measured UNSTABLE (#1004) -- no additive constant is \
              defensible; changing this needs a NEW live re-measurement proving a stable value"
         );
-        // The measured operating points (offline means/cam2 from the 5 windows) + boundary values:
+        // Measured operating points (offline means/cam2 from the 5 windows) + 0.0 + the #952
+        // +-55 boundary probes:
         for g in [
             -186.3, -22.1, -19.5, -3.8, 0.0, 20.6, 22.5, 39.9, 56.2, 59.3, 55.0, -55.0,
         ] {
