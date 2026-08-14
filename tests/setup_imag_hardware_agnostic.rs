@@ -311,6 +311,72 @@ fn ndi_peer_resolution_survives_pipefail_when_the_first_candidate_is_up() {
     );
 }
 
+/// #1047 (CI run 31757820465 flaked 141 ONCE): the #816 "buffer first, pipe once" fix removed the
+/// loop-into-an-early-closing-pipe form but left the fundamental hazard — a concurrent writer
+/// process (`printf`) feeding an EARLY-EXIT consumer (`imag_pick_ndi_peer` returns on the first
+/// "up" line) through a real pipe. At the current 7-candidate size the ~98-byte `$probe` fits one
+/// atomic `write(2)` into the 64 KiB pipe buffer, so it is safe *by accident of size* (1300 stress
+/// iterations → 0 fails). The moment the buffer exceeds the pipe capacity, `printf`'s single
+/// `write(2)` blocks with the tail unwritten, the consumer reads line 1 and closes the read-end,
+/// and the blocked write gets EPIPE → SIGPIPE (141) → `pipefail` aborts the whole substitution.
+/// `imag_resolve_ndi_peer` EXPLICITLY supports an overridden/large candidate list (`"$@"` and
+/// `$NDI_PEER_CANDIDATES`), so this is a live footgun — provisioning would die exactly the same way
+/// on a larger fleet. This test forces an over-pipe-capacity buffer with the FIRST candidate up:
+/// it is exit 141 on the `printf … | imag_pick_ndi_peer` form and exit 0 once the picker is fed
+/// from the buffer without a concurrent writer (here-string). See tests/.../:303 for the
+/// small-buffer sibling.
+#[test]
+fn ndi_peer_resolution_survives_pipefail_with_an_over_pipe_capacity_candidate_buffer() {
+    let dir = std::env::temp_dir().join(format!("imag-ndi-peer-big-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("mkdir stub dir");
+    let ping = dir.join("ping");
+    // Only the FIRST candidate answers — the worst case: the picker returns on line 1 while the
+    // producer is still blocked mid-write on the >64 KiB tail.
+    fs::write(
+        &ping,
+        "#!/bin/bash\nfor a in \"$@\"; do [ \"$a\" = 10.77.9.61 ] && exit 0; done\nexit 1\n",
+    )
+    .expect("write stub ping");
+    let mut perms = fs::metadata(&ping).expect("stat stub").permissions();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        perms.set_mode(0o755);
+    }
+    fs::set_permissions(&ping, perms).expect("chmod stub");
+
+    // `set -euo pipefail` — the real script's mode; the SIGPIPE only aborts under -e + pipefail.
+    // Build the over-capacity candidate list INSIDE bash (a huge argv string would blow
+    // MAX_ARG_STRLEN at execve; built in-shell it costs nothing and never crosses a syscall
+    // boundary). 256 hosts × ~1 KiB ≈ 262 KiB probe, ~4× over the 64 KiB default pipe capacity;
+    // the first is up, the rest are down.
+    let harness = format!(
+        "set -euo pipefail\n         export PATH={}:$PATH\n         . \"$SCRIPT\"\n         filler=$(printf 'x%.0s' $(seq 1 1024))\n         cands=(10.77.9.61)\n         for i in $(seq 1 256); do cands+=(\"h$i-$filler\"); done\n         imag_resolve_ndi_peer \"${{cands[@]}}\"\n",
+        shell_quote(dir.to_str().expect("utf8 dir")),
+    );
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(&harness)
+        .env("SCRIPT", script())
+        .output()
+        .expect("failed to run bash harness");
+    let _ = fs::remove_dir_all(&dir);
+
+    let code = out.status.code().unwrap_or(-1);
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert_eq!(
+        code, 0,
+        "resolving the peer must not die on SIGPIPE (141) with an over-pipe-capacity buffer under \
+         `set -euo pipefail`. code={code} stderr: {stderr}"
+    );
+    assert_eq!(
+        stdout.trim(),
+        "10.77.9.61",
+        "the first reachable candidate must still be returned"
+    );
+}
+
 /// The call site must use that function — not an inline pipeline that can re-introduce the bug —
 /// and a peer that cannot be resolved must say WHY (the live failure printed nothing at all).
 #[test]

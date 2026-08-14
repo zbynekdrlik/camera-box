@@ -576,6 +576,50 @@ jobs:
           }
           Write-Output "#940 piece 2 arrival-surplus-aware relock margin present — OK"
 
+      # #1049: fail fast if the bounded phase convergence on the steady conveyor is gone or
+      # unwired — mirrors the Linux-CI guard
+      # tests/genlock_release_cadence.rs::phase_convergence_present_and_wired_in_1049 and the
+      # C-vs-Rust parity gate tests/genlock_relock_selection_parity.rs.
+      - name: Assert genlock steady-conveyor phase convergence present (#1049)
+        shell: pwsh
+        run: |
+          $src = (Get-Content "vendor/obs-studio/libobs/obs-source.c" -Raw) -replace '\s+', ' '
+          if ($src -notmatch [regex]::Escape('static inline bool genlock_phase_converge_due(')) {
+            Write-Error "obs-source.c: the pure phase-converge decision genlock_phase_converge_due is gone — the strih 60-into-30 acquire-phase would never converge again (#1049)"; exit 1
+          }
+          if ($src -notmatch [regex]::Escape('const uint64_t quantum = interval_ns / nn;')) {
+            Write-Error "obs-source.c: the shed quantum is no longer the SOURCE interval (interval_ns / n) — the n=2 threshold would sit a full canvas frame too high (#1049)"; exit 1
+          }
+          if ($src -notmatch [regex]::Escape('const uint64_t floor_ns = wall_now_ns > newest_stamp_ns ? wall_now_ns - newest_stamp_ns : 0;')) {
+            Write-Error "obs-source.c: the achievable floor (wall - newest_stamp) is gone — a reserve-only threshold re-creates the #998 drop/regain limit cycle at the rig's transport skew (#1049)"; exit 1
+          }
+          if ($src -notmatch [regex]::Escape('const uint64_t target = reserve_ns > floor_ns ? reserve_ns : floor_ns;')) {
+            Write-Error "obs-source.c: the converge target is no longer max(reserve, floor) (#1049)"; exit 1
+          }
+          if ($src -notmatch [regex]::Escape('if (n < 2) return false;')) {
+            Write-Error "obs-source.c: the N>=2-only gate (if (n < 2) return false;) is gone — convergence would limit-cycle on a deep N==1 source (stream NDI 2ME PGM) (#1049)"; exit 1
+          }
+          if ($src -notmatch [regex]::Escape('static bool genlock_should_converge_phase(')) {
+            Write-Error "obs-source.c: the source wrapper genlock_should_converge_phase is gone (#1049)"; exit 1
+          }
+          if ($src -notmatch [regex]::Escape('genlock_should_converge_phase(source, reserve_ms, interval, wall_now)')) {
+            Write-Error "obs-source.c: genlock_should_converge_phase is defined but no longer CALLED from the release tail — the shed is dead code and the phase never converges (#1049)"; exit 1
+          }
+          if ($src -notmatch [regex]::Escape('bool converge_eligible = false;')) {
+            Write-Error "obs-source.c: the converge_eligible gate is gone from genlock_release_tick (#1049)"; exit 1
+          }
+          $elig = ([regex]::Matches($src, [regex]::Escape('converge_eligible = true;'))).Count
+          if ($elig -ne 2) {
+            Write-Error "obs-source.c: expected BOTH STEADY branches (N==1 and N>=2) to set converge_eligible, found $elig (#1049)"; exit 1
+          }
+          if ($src -notmatch [regex]::Escape('} else if (!drain_eligible) { source->genlock_ticks_since_drain++;')) {
+            Write-Error "obs-source.c: the N>=2 converge branch no longer maintains the shared throttle counter — the shed would never fire on a 60-into-30 source, the feature dead in its primary target (#1049)"; exit 1
+          }
+          if ($src -notmatch [regex]::Escape('source->genlock_converge_sheds++;') -or $src -notmatch [regex]::Escape('converge_sheds=%u')) {
+            Write-Error "obs-source.c: the distinct converge-shed observability counter / audit field is gone (#1049)"; exit 1
+          }
+          Write-Output "#1049 steady-conveyor phase convergence present — OK"
+
       # #278/#275: assert the multiview ADAPTIVE budget-based decouple (libobs render path +
       # the frontend Multiview projector marker) AND the cheaper bulk-fill measurement burn
       # are present BEFORE the 150-min build. The PRODUCTION build builds the FRONTEND

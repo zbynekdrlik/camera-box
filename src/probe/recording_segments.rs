@@ -171,8 +171,10 @@ pub struct CamboxSegment {
     /// #726: the presentation-cadence EVENNESS of this window's painted-tick sequence (RECORDED
     /// order) — `None` when this window carries no painted tick at all (any non-cam2 window in a
     /// CAMBOX_SWEEP: `tick` is `None` on every frame, so there is nothing to classify). REPORTED
-    /// only — this does NOT feed into `pass` (the threshold is not yet calibrated against a
-    /// known-healthy run; see `crate::presentation_cadence`).
+    /// per-window only — this does NOT feed the per-window `pass` field. #1036 CALIBRATED the
+    /// "15fps-judder" `paired_fraction` signature and now folds the WORST `paired_fraction` across
+    /// all cadence-bearing windows into the RUN-level `overall_pass` (see
+    /// `crate::presentation_cadence::cadence_judder_gate_pass`); this per-window field is unchanged.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub presentation_cadence: Option<crate::presentation_cadence::CadenceEvenness>,
     /// #707 EVENT-FORENSICS — the locatable per-event breakdown of THIS window's `copies`/`gaps`:

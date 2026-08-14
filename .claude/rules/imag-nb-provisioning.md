@@ -146,6 +146,46 @@ future edit must keep them derived:
   REACHABLE cam of the fleet list (cam boxes carry the identical runtime) and fails loud only when
   none answers. cam1 being down (grabber card lent out) used to abort the whole provisioning run.
 
+## `printf … | consumer` where the consumer EXITS EARLY is a latent SIGPIPE-under-pipefail footgun — feed from a here-string instead (#1047)
+
+`imag_resolve_ndi_peer` fed `imag_pick_ndi_peer` (returns on the FIRST "up" line — an early-exit
+consumer) through `printf '%s' "$probe" | imag_pick_ndi_peer`. The #816 "buffer first" fix removed
+the loop-into-an-early-closing-pipe form but LEFT this hazard: a concurrent writer PROCESS feeding
+an early-exit consumer through a real pipe. It is safe ONLY while the buffer fits one atomic
+`write(2)` into the 64 KiB kernel pipe buffer (7 candidates ≈ 98 B → verified 1300 stress
+iterations, 0 fails). The moment `$probe` exceeds ~64 KiB (fleet growth, or the function's own
+supported override candidate args), `printf`'s single write BLOCKS with the tail unwritten, the
+consumer reads line 1 and closes the read-end, and the blocked write gets EPIPE → SIGPIPE → exit
+141 → `pipefail` aborts provisioning. CI run 31757820465 flaked exactly this once at the small size.
+
+- **Fix: `imag_pick_ndi_peer <<<"$probe"`** — a here-string has NO concurrent writer process, so the
+  consumer's early exit can never SIGPIPE anything, at ANY buffer size. Structurally immune, minimal.
+  This is stronger than the sibling ldconfig-site fix (`ldconfig -p | grep libndi >/dev/null`, which
+  makes the CONSUMER drain fully): removing the writer beats forcing the reader to over-read.
+- **General rule for these scripts:** any `producer | consumer` under `set -euo pipefail` where the
+  consumer can return/exit before draining stdin is a SIGPIPE risk. If the producer's output is
+  already in a variable, feed the consumer with `cmd <<<"$var"` (no writer process). Reserve
+  `| grep -q`/early-`head` pipes for cases where you genuinely stream and the producer is
+  SIGPIPE-tolerant.
+
+### Deterministically testing a SIGPIPE-under-pipefail race against these sourced scripts
+
+The race is only STATISTICAL at the production buffer size (rare timing). To get a DETERMINISTIC
+RED→GREEN test, force the buffer OVER the pipe capacity (~64 KiB default) with the first candidate
+up: old pipe form → 141 every run, here-string → 0. Two gotchas learned building it:
+
+- **Do NOT pass the huge candidate list as one big argv string** to `bash -c "<harness>"` — a single
+  argv/env string over `MAX_ARG_STRLEN` (128 KiB) fails execve with `E2BIG`
+  (`ArgumentListTooLong`), which looks like a test bug, not a repro. BUILD the list INSIDE the bash
+  harness (`for i in $(seq 1 256); do cands+=("h$i-$filler"); done`) — an in-process function call
+  never crosses execve, so no size limit. The per-candidate `ping` exec still gets one ~1 KiB arg,
+  well under the limit.
+- **256 hosts × ~1 KiB ≈ 262 KiB (~4× the 64 KiB default capacity)** is robust, not brittle: Linux
+  default pipe capacity is a stable 65536 B; `/proc/sys/fs/pipe-max-size` only caps unprivileged
+  RESIZE, never the default. First-candidate-up is the canonical worst case (reader closes after
+  ~15 B while the producer still has 262 KiB queued). ~256 sequential stub-ping forks ≈ 1–2 s.
+  See `ndi_peer_resolution_survives_pipefail_with_an_over_pipe_capacity_candidate_buffer`.
+
 ## Editing these scripts: the anchor-collision rule applies here too
 
 `tests/setup_imag_guards.rs` pins ~113 literal strings and adjacencies in `setup-imag.sh`. After ANY

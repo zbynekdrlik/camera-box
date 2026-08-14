@@ -7743,3 +7743,65 @@ prerequisite, closed 2026-06-15); the rig is genlocked so it was dead code.
   partial local net (parse + brace/format balance) on probe code that `check`/`clippy`/`test
   --no-run` on default features never compile. fmt-clean + hand-audit was the whole local proof
   here; CI is the first TYPE check.
+
+## issue 1036 — calibrate + gate presentation_cadence evenness (autopilot-1036, worktree fleet, 2026-08-14)
+- Metric computed but NEVER gated (src/presentation_cadence.rs:35). Chose paired_fraction (the specific 15fps-judder signature) over evenness_score (0.655–0.994, noisy) / duplicate_fraction (spikes to 0.053). Calibrated from 210 cadence windows across 21 GREEN local verdict JSONs: worst paired_fraction over ALL 310 windows (green+red) = 0.00473; pathology ~0.966. Threshold PAIRED_FRACTION_JUDDER_MAX = 0.05 (10.6x worst green, ~19x below pathology).
+- Pure seam added to src/presentation_cadence.rs (co-located with the metric): cadence_judder_gate_pass + gates_overall_pass (LIVE), mirroring e2e_latency_gate/optical_floor. Single per-window-max term (RATE metric saturates → no run-wide second term). Wired into recording-verdict.rs fold + --max-cadence-paired-fraction arg + cadence_judder_gate JSON term.
+- Commits: c8c8b36d6 (version 1.7.0-dev.449), a9da8ee58 [red] tests, 198e283bc [green] pure impl, c7af5f7d8 wiring, cb357a14b review fixes. RED→GREEN test names: fifteen_fps_judder_pathology_fails_the_bound / worst_observed_green_window_passes_the_default_bound / boundary_at_bound_passes_just_over_fails (21 Tier-0 tests, all green).
+- Review (fresh general-purpose subagent): 0 🔴 0 🟡 3 🔵, all doc/cosmetic, fixed in cb357a14b. Key review catch: the issue-909 immunity is EMPIRICAL (margin, incl. CAM1 windows) not mechanical (a drop next to a duplicate CAN complete a paired event).
+- Playbook: new .claude/rules/verdict-gate-seam-calibration.md (the reusable gate-seam calibration method) + router line.
+
+### 1047 — setup-imag NDI peer resolution: SIGPIPE (141) under pipefail (v1.7.0-dev.449)
+- Root cause: `imag_resolve_ndi_peer` fed `imag_pick_ndi_peer` (early-exit consumer, returns on the
+  first "up" line) through a `printf '%s' "$probe" | imag_pick_ndi_peer` pipe. The prior "buffer
+  first" fix removed the loop-into-early-close form but left a concurrent writer PROCESS feeding an
+  early-exit consumer — safe only while `$probe` fits one atomic write into the 64 KiB pipe buffer
+  (7 candidates ~98 B). Over-capacity buffer → printf blocks, picker closes early, blocked write
+  gets EPIPE → 141 → pipefail aborts provisioning. CI 31757820465 flaked it once.
+- Fix (scripts/setup-imag.sh:187): `imag_pick_ndi_peer <<<"$probe"` — a here-string has no
+  concurrent writer process, structurally SIGPIPE-immune at any buffer size. Commit e510a38dd.
+- Repro: current 7-candidate buffer survived 1300 stress iterations (800 under 4x CPU load) → 0
+  fails (statistical at prod size). DETERMINISTIC against real `imag_resolve_ndi_peer` with 130+
+  over-capacity candidates → 141, 10/10; here-string fix → 0 + correct host, 12/12.
+- RED→GREEN: `ndi_peer_resolution_survives_pipefail_with_an_over_pipe_capacity_candidate_buffer`
+  (tests/setup_imag_hardware_agnostic.rs) — RED commit c87165880 (141 on pipe form), GREEN e510a38dd.
+  Test-writing gotcha captured in .claude/rules/imag-nb-provisioning.md: build the over-capacity
+  candidate list INSIDE the bash harness, never as a giant argv (MAX_ARG_STRLEN 128 KiB → E2BIG).
+- Review: fresh-context general-purpose pass, 0 findings. shellcheck -S warning clean. Tier-0 green.
+
+## 2026-08-14 — issue 1049: bounded phase convergence on the steady genlock conveyor (v1.7.0-dev.450, autopilot-1049)
+
+- ROOT CAUSE: the phase-locked conveyor (`genlock_locked_next_boundary_ns`) is a pure FOLLOWER
+  with no restoring force toward the configured latency; the 1003 anchor-nearest relock PRESERVES
+  the phase and the 859 depth drain (2-frame hysteresis, N==1-only) can't catch a 1-2 frame phase
+  error. Result on strih 60-into-30 ingests: a stable per-camera frame-quantized A/V-offset ladder
+  that never converged. The 1003 doc's "shallow anchor saturates to unset" claim was STALE
+  (predates the 1009 flip to floor-boundary stamping; the anchor IS set post-1009). Confirmed via a
+  Fable design consult + a default-feature replica importing the real authority.
+- FIX: new Tier-0 `should_converge_phase` — shed one frame on BOTH STEADY paths when the boundary-
+  implied age `wall-boundary` exceeds `max(reserve, floor) + interval/n + hysteresis`, floor =
+  `wall-newest_queued_stamp`; throttled by the SHARED 859 drain counter (no new field). Mirrored in
+  `obs-source.c` (`genlock_phase_converge_due`/`genlock_should_converge_phase`) + `src/probe/genlock.rs`.
+- ADVERSARIAL REVIEW caught a real 998-class defect: a reserve-only threshold ignores the transport
+  skew FLOOR (a frame can't present before it arrives), limit-cycling forever at the rig's ~20 ms
+  skew on shallow reserves. FIXED by flooring the target at the achievable phase; the no-shed test
+  now sweeps skew 8/15/20/30/59 ms. Playbook: `.claude/rules/genlock-fifo-limit-cycle-diagnosis.md`
+  new SKEW-AXIS section.
+- Commits: chore bump (bc522ab7), RED contract+sim (101428da), GREEN convergence (5f1b93cc), C+probe
+  mirror+parity+anchors (ca2bc0ff), RED skew-sweep (c068fc6d), GREEN floor-aware (8a6c321e). RED→GREEN
+  test `steady_conveyor_persists_an_injected_phase_without_convergence_and_sheds_it_with_1049` +
+  `convergence_never_sheds_at_the_natural_steady_phase_1049`. Executable C-vs-Rust parity gate
+  extended (`c_phase_convergence_matches_the_rust_authority_1049`), mutation-proven. WORKTREE MODE:
+  stopped at green local (supervisor integrates).
+
+## 2026-08-14 — issue 1049 follow-up (coordinator live finding): deep n=1 oscillation → N>=2-only gate
+
+- After the floor-aware fix DEPLOYED and worked on strih n>=2 (skews converged 66/66/66 ms), it
+  LIMIT-CYCLED on the stream box's deep n=1 NDI 2ME PGM (990 ms, frac 0.7): converge_sheds + holds
+  climbing in lockstep, the #998 dup+skip signature. Root cause: an n=1 phase shed cannot STICK (1
+  frame/tick can't sustain a fresher phase → hold+regain). n>=2 delivers ≥2 frames/tick so the shed
+  sticks — and only n>=2 carries the per-camera ladder pathology.
+- FIX: gate should_converge_phase / genlock_phase_converge_due to source_multiple >= 2 (RED
+  73ab458b, GREEN 1d35d2cb). Strih n>=2 byte-identical. Parity vectors + static + pwsh anchors +
+  mutation-proof. A hysteresis band was rejected (frac-dependent overshoot, differs by n). Playbook:
+  the "THIRD axis" section in genlock-fifo-limit-cycle-diagnosis.md.

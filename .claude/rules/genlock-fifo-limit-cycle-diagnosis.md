@@ -43,3 +43,68 @@ verdict investigation is the diagnostic toolkit that found it:
 Tolerance history context: `WINDOW_COPIES_GAPS_TOLERANCE` was recalibrated 2→3 (2026-08-06)
 against the chronic ~5-8 copies + ~5-8 gaps residual burden of the 62.15 fps over-rate decimation
 lane; commitment on #889 — when that lane shrinks the burden, the tolerance comes back DOWN.
+
+## The SKEW-AXIS variant: a "converge toward configured latency" target must floor at the ACHIEVABLE phase (#1049, 2026-08-14)
+
+The #998 limit cycle above is on the DEPTH/LATENCY axis (round-vs-ceil target undershoots the
+natural hold). #1049 added a bounded PHASE-convergence shed (`should_converge_phase` in
+`src/genlock_backlog.rs`, mirrored in `obs-source.c genlock_phase_converge_due`) that pulls a
+persistent per-camera acquire-phase back toward the configured latency — and its first cut hit the
+EXACT same drop/regain limit cycle on a NEW axis, the transport SKEW.
+
+The trap: the natural steady on-air age `S = wall - locked_boundary` is FLOORED by the stamp→arrival
+skew — a frame physically cannot present before it ARRIVES. A target of `reserve + interval/n +
+hysteresis` ignores that floor, so on a SHALLOW-reserve source whose skew exceeds it (the rig runs
+~20 ms cam→strih skew at the 3 ms prod floor; up to 59 ms live on `NDI cam5`), the shed fires
+forever at the natural phase: shed pushes the boundary below what arrived → next tick(s) HOLD/regain
+→ 30 ticks later shed again. One dup + one skip per ~second, on air, indefinitely — indistinguishable
+from the #998 symptom, via a different mechanism.
+
+**The invariant, reusable for ANY genlock target that converges toward a configured value: floor the
+target at the ACHIEVABLE phase.** #1049's fix: `target = max(reserve, floor)`, `floor = wall -
+newest_queued_stamp` (`array[num-1]` in C, `queue.back()` in the probe — the freshest presentable
+frame's age). Then post-shed `S' = S - quantum > target >= floor` can never go below what arrived, so
+the cycle is structurally impossible on the skew axis too (the #998 "upper-bound the natural steady
+state" lesson, applied to skew instead of frac).
+
+**How it was caught — and how it was ALMOST missed: the test skew ENVELOPE was too narrow.** The
+committed Tier-0 conveyor sim (`SimConveyor1049`) used a single 8 ms skew and passed while
+limit-cycling at 15-30 ms; the existing probe cadence sims that WOULD have caught it
+(`cadence_survives_deep_arrival_skew` at skew 20, `cadence_releases_every_frame_once_at_grid_aligned_reserve`)
+are CI-only. An adversarial review + a default-feature replica (per
+`probe-mirror-replica-testing.md`) SWEEPING skew 8/15/20/30/59 ms across reserves 3/8/20/26/36
+exposed 19-22 spurious drops. **Rule: any no-limit-cycle test for a genlock target MUST sweep BOTH
+the reserve AND the transport-skew axes — a single skew value is exactly the hole that hides this.**
+The natural-phase no-shed test (`convergence_never_sheds_at_the_natural_steady_phase_1049`) now
+sweeps both.
+
+## The THIRD axis: a phase shed only STICKS on an N>=2 source — gate convergence to N>=2 (#1049, 2026-08-14, live)
+
+After the floor fix above shipped, the convergence still limit-cycled — on a completely different
+source: the stream box's DEEP N==1 `NDI 2ME PGM` (30-into-30, 990 ms). The floor fix did NOT cover
+it (`floor = wall - newest_stamp` reads the FRESHEST frame ~33 ms old for a deep source, so
+`target = max(reserve, floor) = reserve`; the natural grid-quantized hold ~1033 ms — one frame above
+configured at frac 0.7 — still sat above the reserve-based threshold and sheds fired ~0.7/s forever).
+
+**The root cause is structural, not a threshold-tuning miss: an N==1 phase shed cannot STICK.** An
+N==1 source delivers exactly ONE frame per render tick, so presenting one frame fresher leaves the
+queue unable to refill — the very next tick HOLDS and regains the shed frame within the throttle
+window (`converge_sheds` and `holds` climbed in LOCKSTEP in the live audit, one pair per ~1.4 s —
+the #998 dup+skip signature again). An N>=2 source delivers >=2 frames/tick, so the shed IS
+sustainable and sticks — which is BOTH why the strih 60-into-30 ladder converges AND why only N>=2
+sources exhibit the pathology (a per-camera acquire ladder exists only ACROSS the multi-camera N>=2
+ingests; a single N==1 source has no cross-source spread, and its A/V offset is corrected by the
+±50 ms 2ME PGM controller).
+
+**Fix: gate convergence to N>=2** (`should_converge_phase` early-returns for `source_multiple < 2`,
+mirrored in `genlock_phase_converge_due`). A hysteresis band was REJECTED: the natural hold overshoot
+is frac-dependent (up to ceil+2 frames) and differs by n, so no fixed frame-multiple band separates
+"natural hold" from "real error" across both n=1 and n=2 — whereas "does the shed stick" is exactly
+n>=2 vs n==1. The lesson generalises: **a convergence/drain shed is only valid on a source that can
+SUSTAIN the shallower state it produces; if presenting-fresher just triggers a hold+regain, the shed
+is futile and gating it off is the fix, not widening its threshold.**
+
+**Diagnostic tell (from the live audit, recognisable in one 3-line read):** `converge_sheds` AND
+`holds` climbing in lockstep (one pair per ~throttle interval) with `dropped_due` pairing them,
+`relocks=0`, `depth` stable, and `ts_head_skew_ms` CONSTANT and ABOVE `latency_ms` — the shed is
+fighting a stable natural hold it cannot move.

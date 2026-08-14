@@ -292,6 +292,103 @@ pub fn phase_pinned_is_due(frame_ts_ns: u64, deadline_ns: u64) -> bool {
     frame_ts_ns <= deadline_ns.saturating_add(PHASE_PIN_HYSTERESIS_NS)
 }
 
+/// #1049 — the STEADY-conveyor PHASE-CONVERGENCE shed decision, N>=2 ONLY. Should this N>=2 tick
+/// shed exactly ONE EXTRA frame to slew the conveyor's presentation PHASE back toward the
+/// configured latency? (N==1 is gated off — see the `source_multiple < 2` early return: an N==1
+/// shed does not stick and limit-cycles, and only N>=2 sources carry the ladder pathology.)
+///
+/// The phase-locked conveyor (`genlock_locked_next_boundary_ns`) is a pure FOLLOWER: it
+/// re-anchors to the presented stamp every STEADY present and has no restoring force toward the
+/// configured latency, so whatever phase it locks at ACQUIRE (or after a walk event — a GAP
+/// RESYNC adopting the oldest frame's age, a sticky-N present-oldest crawl, an ACQUIRE against a
+/// connect-burst queue) is carried forward INDEFINITELY. The #1003 anchor-nearest relock does not
+/// fix it — it PRESERVES the phase by design (deep-source flap prevention), so each backlog storm
+/// re-selects the very frame the conveyor already holds. The #859 settle-back drain cannot fix it
+/// either: it bounds DEPTH with a fixed 2-frame hysteresis ([`DRAIN_HYSTERESIS_FRAMES`]), so a
+/// 1-2 canvas-frame phase error sits INSIDE that hysteresis by construction — and it is eligible
+/// only on the N==1 path; the N>=2 conveyor has no drain at all. Live evidence (issue 1049,
+/// 2026-08-14): a stable per-camera frame-quantized A/V-offset ladder across 5 E2E runs on the
+/// strih 60-into-30 ingests, each rung a 1-2 canvas-frame presentation offset locked at the last
+/// OBS relaunch that never converged.
+///
+/// The COMPARATOR is the conveyor's own on-air age `S = wall_now_ns - locked_boundary_ns`, NOT
+/// the phase anchor: at decision time `locked_boundary_ns == last_presented_ts + interval` and
+/// render ticks are one interval apart, so `wall_now - boundary` == the last tick's on-air age S
+/// (exact but for the ±2 ms render slew, which [`PHASE_PIN_HYSTERESIS_NS`] absorbs). The anchor is
+/// the wrong quantity here — it saturates to 0 by contract on some sources
+/// (`phase_anchor_from_present`) and is one tick stale — whereas the boundary is always live.
+///
+/// The TARGET the shed converges toward is `max(configured latency, ACHIEVABLE FLOOR)`, where the
+/// floor is `wall_now_ns - newest_stamp_ns` — the age of the FRESHEST queued frame, i.e. the
+/// smallest on-air age the conveyor could physically present (a frame cannot go on air before it
+/// ARRIVES). This is the review-found correction (issue 1049): a reserve-only target ignored the
+/// transport skew floor, so when `skew > reserve + interval/n + hysteresis` (the rig's ~20 ms skew
+/// at the 3 ms prod floor) the shed fired forever at the natural phase — a shed pushed the boundary
+/// below what had arrived, the next tick(s) regained it, and 30 ticks later it shed again: exactly
+/// the #998 drop/regain limit cycle this design claims to be incapable of. Flooring the target at
+/// the achievable phase restores the #998 invariant on the SKEW axis too.
+///
+/// Fires when `S` has drifted a full shed-quantum (one SOURCE interval `interval_ns / n`) plus
+/// [`PHASE_PIN_HYSTERESIS_NS`] ABOVE that target, throttled to at most once every
+/// [`DRAIN_MIN_TICK_INTERVAL`] ticks (the counter is SHARED with the #859 drain — reset on a shed
+/// OR a drain — so no new per-source field is needed and the ≤1-extra-drop-per-30-ticks bound is
+/// preserved). The caller sheds one frame with the same drop-older/present-fresher idiom the #859
+/// drain uses, which re-anchors the boundary to the fresher stamp: the reduced phase STICKS (the
+/// boundary is the conveyor's only phase memory), one SOURCE interval (~16.7 ms) shed per second.
+///
+/// `interval_ns / n` (the shed quantum) + the 5 ms hysteresis mirrors the #998 lesson applied to
+/// PHASE instead of DEPTH: the threshold sits strictly above the natural steady S, so a shed's own
+/// effect lands strictly inside the no-shed band (post-shed `S' = S - interval/n`, always
+/// `> target >= floor` — never below the achievable phase), which is what makes it structurally
+/// incapable of the #998 drop/regain limit cycle. A correctly-held DEEP source (issue 1003, Zaloha
+/// 1000 ms) has `S ≈ configured` far below the threshold, and a shallow source with a large skew
+/// has `S ≈ floor` far below `floor + quantum + hysteresis`, so BOTH are inert by the SAME
+/// comparison that drives it — no regression, not a special case. A degenerate `interval_ns`
+/// (0, unknown video info) or an UNLOCKED boundary (0, ACQUIRE) returns `false`.
+///
+/// Mirror of the C `genlock_phase_converge_due()` (obs-source.c) and the probe
+/// `ReleaseCadence::should_converge_phase` delegator — keep all three in lock-step.
+pub fn should_converge_phase(
+    wall_now_ns: u64,
+    locked_boundary_ns: u64,
+    newest_stamp_ns: u64,
+    latency_ms: u32,
+    interval_ns: u64,
+    source_multiple: u32,
+    ticks_since_last_drain: u64,
+) -> bool {
+    if interval_ns == 0 || locked_boundary_ns == 0 {
+        return false;
+    }
+    // #1049 (coordinator's live finding) — convergence is N>=2 ONLY. An N==1 source (30-into-30)
+    // delivers exactly ONE frame per render tick, so a phase shed (present one frame fresher) is
+    // NOT SUSTAINABLE: the queue cannot refill fast enough, the source HOLDS the very next tick and
+    // regains the shed frame within the throttle window — a shed->hold->shed limit cycle (the #998
+    // dup+skip signature), measured live on the stream box's deep `NDI 2ME PGM` (n=1, 990 ms, whose
+    // natural grid-quantized hold ~1033 ms sits one frame above configured at frac 0.7, above the
+    // reserve-based threshold). An N>=2 source delivers >=2 frames per tick, so a shed STICKS —
+    // which is both why the strih 60-into-30 ladder converges and why the pathology is N>=2-only: a
+    // per-camera acquire-phase ladder exists only ACROSS the multi-camera N>=2 ingests, while a
+    // single N==1 source has no cross-source spread and its A/V offset is corrected by the
+    // ±50 ms 2ME PGM controller. A hysteresis band cannot separate the natural hold from a real
+    // error here — the natural overshoot is frac-dependent (up to ceil+2 frames) and differs by n.
+    if source_multiple < 2 {
+        return false;
+    }
+    let n = source_multiple.max(1) as u64;
+    let reserve_ns = (latency_ms as u64).saturating_mul(1_000_000);
+    // The achievable floor: the freshest queued frame's on-air age (a frame cannot present before
+    // it arrives). saturating_sub -> a stamp AHEAD of wall reads floor 0 (falls back to reserve).
+    let floor_ns = wall_now_ns.saturating_sub(newest_stamp_ns);
+    let target = reserve_ns.max(floor_ns);
+    let quantum = interval_ns / n;
+    let threshold = target
+        .saturating_add(quantum)
+        .saturating_add(PHASE_PIN_HYSTERESIS_NS);
+    let age = wall_now_ns.saturating_sub(locked_boundary_ns);
+    age > threshold && ticks_since_last_drain >= DRAIN_MIN_TICK_INTERVAL
+}
+
 // ---------------------------------------------------------------------------------------------
 // #1003 — PHASE-CONTINUITY RELOCK (history-anchored selection). The Tier-0 authority; the C
 // `genlock_relock_select_nearest()` / `genlock_phase_anchor_ns` (obs-source.c, obs-internal.h)
@@ -347,14 +444,22 @@ pub fn phase_pinned_is_due(frame_ts_ns: u64, deadline_ns: u64) -> bool {
 /// the types stops a degenerate or stale anchor coming back SMALLER than the hold — an anchor
 /// near 0 would target the live edge and erase the whole delay line in a single relock.
 ///
-/// SCOPE, stated honestly: the anchor is only MEANINGFUL for a deep source. This module's own
-/// header records that most of the fleet runs a 3–55 ms hold (the imag contract is 3 ms), and
-/// the sender's ceil-to-boundary bias is up to a full interval (33.3 ms) AHEAD of the receiver
-/// wall clock — so at those latencies `phase_anchor_from_present` routinely saturates to 0, the
-/// anchor reads UNSET, and the source keeps its pre-#1003 behaviour by design. That is
-/// harmless (at a sub-frame hold both targets sit far inside half a frame, so the selection is
-/// the same frame either way) but it is NOT "the defensive case only": it is the normal case
-/// for a shallow source. #1003 is a deep-latency fix; it does not claim to change shallow ones.
+/// SCOPE: #1003 was framed as a deep-latency fix, but the anchor is SET and meaningful on the
+/// shallow (3–55 ms) fleet sources too — issue 1049 corrected an earlier claim here.
+///
+/// The earlier revision of this paragraph reasoned that at a shallow hold
+/// `phase_anchor_from_present` "routinely saturates to 0" (the anchor reads UNSET) because the
+/// sender's ceil-to-boundary bias is up to a full interval AHEAD of the receiver wall clock. That
+/// was true of the pre-issue-1009 senders, but issue 1009 flipped emit stamping to the FLOOR
+/// boundary (at-or-before the emit instant, never future-dated — `.claude/rules/
+/// genlock-hold-collapse-diagnosis.md`), shifting every stamp ~one interval EARLIER. Post-1009 a
+/// presented stamp sits in the PAST, so `wall_now - presented_ts` is comfortably positive
+/// (≈ configured + phase_error) even at a 20–36 ms hold, and the anchor is SET. Consequence,
+/// confirmed live (issue 1049): the #1003 anchor-nearest relock then PRESERVES whatever phase the
+/// conveyor holds across every backlog storm, so a 1–2-frame acquire-phase error persists forever
+/// on the strih 60-into-30 ingests — which is exactly why [`should_converge_phase`] adds a bounded
+/// restoring force toward the configured latency (this module, issue 1049). The FLOOR below is
+/// still a correctness bound, not a "shallow sources are unaffected" statement.
 ///
 /// Mirror of the C `genlock_relock_target_age_ns()` (obs-source.c) — keep both in lock-step.
 pub fn relock_anchor_age_ns(anchor_ns: u64, latency_ms: u32) -> u64 {
@@ -2400,6 +2505,578 @@ mod tests {
             relock_select_nearest(&q, target + 1 + age, age),
             3,
             "one ns AFTER the midpoint is unambiguously nearer the newer frame"
+        );
+    }
+
+    // ------------------------------------------------------------------------------------
+    // #1049 — bounded PHASE CONVERGENCE on the steady conveyor.
+    // ------------------------------------------------------------------------------------
+
+    /// The comparator is `wall_now - locked_boundary` against `reserve + interval/n + hysteresis`
+    /// AND the shared drain throttle. Below the threshold: inert. Above it, once the throttle has
+    /// elapsed: fires.
+    #[test]
+    fn converge_fires_only_above_reserve_plus_quantum_plus_hysteresis_1049() {
+        let latency_ms = 20u32;
+        let reserve = latency_ms as u64 * 1_000_000;
+        let n = 2u32;
+        let quantum = I30 / n as u64; // one SOURCE interval
+        let threshold = reserve + quantum + PHASE_PIN_HYSTERESIS_NS;
+        let wall = 1_000_000_000_000u64;
+        // A fresh arrival (floor 0) so the target is the configured latency — this test is about
+        // the reserve-based threshold; the floor path has its own test below.
+        let newest = wall;
+        // age == threshold -> NOT due (strict `>`).
+        let boundary_at_threshold = wall - threshold;
+        assert!(
+            !should_converge_phase(wall, boundary_at_threshold, newest, latency_ms, I30, n, 100),
+            "at exactly the threshold the shed must NOT fire (strict >, mirrors #998's own \
+             boundary discipline)"
+        );
+        // age == threshold + 1 -> due (throttle satisfied).
+        assert!(
+            should_converge_phase(
+                wall,
+                boundary_at_threshold - 1,
+                newest,
+                latency_ms,
+                I30,
+                n,
+                100
+            ),
+            "one ns above the threshold with the throttle elapsed must fire"
+        );
+        // A held age at the configured latency (no phase error) is far below the threshold.
+        assert!(
+            !should_converge_phase(wall, wall - reserve, newest, latency_ms, I30, n, 100),
+            "a conveyor held AT the configured latency has nothing to converge"
+        );
+        // A held age one canvas frame over configured (the observed 1-frame rung) fires.
+        assert!(
+            should_converge_phase(
+                wall,
+                wall - (reserve + I30),
+                newest,
+                latency_ms,
+                I30,
+                n,
+                100
+            ),
+            "a held age one full canvas frame over configured must converge"
+        );
+    }
+
+    /// #1049 (review finding) — the target is `max(reserve, floor)`, floor = the freshest queued
+    /// frame's on-air age. When the transport skew floors the achievable phase ABOVE the reserve,
+    /// a reserve-only threshold would shed forever at the natural phase (a #998-class limit cycle);
+    /// flooring the target keeps it inert until the phase exceeds the ACHIEVABLE floor by a quantum.
+    #[test]
+    fn converge_targets_max_reserve_floor_1049() {
+        let wall = 1_000_000_000_000u64;
+        let reserve_ms = 3u32; // the prod floor
+        let n = 2u32;
+        let quantum = I30 / n as u64;
+        // A large transport skew: the freshest frame is 40 ms old, far above the 3 ms reserve.
+        let skew = 40_000_000u64;
+        let newest = wall - skew;
+        // The conveyor naturally holds ~floor + quantum (the maturation window). With a
+        // reserve-only target that is WAY over reserve + quantum + hysteresis -> would shed
+        // forever. With the floor-aware target it is at/below floor + quantum + hysteresis -> inert.
+        let natural = wall - (skew + quantum); // one quantum above the floor — the natural phase
+        assert!(
+            !should_converge_phase(wall, natural, newest, reserve_ms, I30, n, 100),
+            "at the natural phase (~floor + one quantum) with a large skew the shed must be INERT \
+             — a reserve-only threshold would limit-cycle here (#998 class)"
+        );
+        // A genuine error ABOVE the achievable floor by more than a quantum + hysteresis DOES fire.
+        let errored = wall - (skew + 2 * I30);
+        assert!(
+            should_converge_phase(wall, errored, newest, reserve_ms, I30, n, 100),
+            "a phase two full canvas frames above the achievable floor still converges"
+        );
+        // The floor never drives the target BELOW reserve: a deep reserve with a tiny skew still
+        // targets the reserve (floor < reserve -> target = reserve).
+        let deep_ms = 200u32;
+        let tiny_skew_newest = wall - 5_000_000; // 5 ms floor, well below the 200 ms reserve
+        assert!(
+            !should_converge_phase(
+                wall,
+                wall - deep_ms as u64 * 1_000_000,
+                tiny_skew_newest,
+                deep_ms,
+                I30,
+                n,
+                100
+            ),
+            "floor below reserve -> target stays at reserve; a source held AT reserve is inert"
+        );
+    }
+
+    /// The throttle is SHARED with the #859 drain (`DRAIN_MIN_TICK_INTERVAL`): a big phase error
+    /// still sheds at most once per that many ticks.
+    #[test]
+    fn converge_is_throttled_by_the_shared_drain_counter_1049() {
+        let wall = 1_000_000_000_000u64;
+        let newest = wall; // floor 0 -> target = reserve
+                           // A gross 3-frame overshoot — unambiguously over the threshold.
+        let boundary = wall - (20 * 1_000_000 + 3 * I30);
+        assert!(
+            !should_converge_phase(
+                wall,
+                boundary,
+                newest,
+                20,
+                I30,
+                2,
+                DRAIN_MIN_TICK_INTERVAL - 1
+            ),
+            "below the shared throttle interval the shed must wait, even for a large error"
+        );
+        assert!(
+            should_converge_phase(wall, boundary, newest, 20, I30, 2, DRAIN_MIN_TICK_INTERVAL),
+            "at the throttle interval the shed fires"
+        );
+    }
+
+    /// The shed quantum is the SOURCE interval `interval/n`, so a 60-into-30 source's threshold
+    /// sits one 60 Hz interval (not one canvas interval) above the target — the tightest bound
+    /// that still clears the natural steady phase (the #998 lesson applied to phase).
+    #[test]
+    fn converge_quantum_is_the_source_interval_1049() {
+        let wall = 1_000_000_000_000u64;
+        let newest = wall; // floor 0 -> target = reserve
+        let reserve = 20u64 * 1_000_000;
+        // n=2: quantum = I30/2 = I60. An age of reserve + I60 + hysteresis is the boundary.
+        let just_over = wall - (reserve + I30 / 2 + PHASE_PIN_HYSTERESIS_NS + 1);
+        assert!(
+            should_converge_phase(wall, just_over, newest, 20, I30, 2, 100),
+            "n=2 threshold is reserve + I30/2 + hysteresis"
+        );
+        let just_under = wall - (reserve + I30 / 2 + PHASE_PIN_HYSTERESIS_NS);
+        assert!(
+            !should_converge_phase(wall, just_under, newest, 20, I30, 2, 100),
+            "one ns below the n=2 threshold is inert"
+        );
+        // n=1 is gated off entirely (#1049 coordinator finding — the shed does not stick), so the
+        // same held age that fired at n=2 is INERT on a 1:1 source regardless of the threshold.
+        assert!(
+            !should_converge_phase(wall, just_over, newest, 20, I30, 1, 100),
+            "n=1 is below the N>=2 gate — inert regardless of the held age"
+        );
+    }
+
+    /// No regression on the #1003 deep hold: a deep N>=2 source correctly held at 1000 ms has
+    /// `S ≈ configured`, far below the threshold, so the shed is inert — by the SAME comparison
+    /// that drives it, not a special case.
+    #[test]
+    fn converge_is_inert_at_a_correctly_held_deep_source_1049() {
+        let wall = 1_000_000_000_000u64;
+        let newest = wall - 8_000_000; // an 8 ms floor, far below the 1000 ms hold
+        for jitter in [-2_000_000i64, 0, 2_000_000, 8_000_000] {
+            // A deep N>=2 source held at 1000 ms ± ordinary sub-frame jitter.
+            let age = (1000i64 * 1_000_000 + jitter) as u64;
+            assert!(
+                !should_converge_phase(wall, wall - age, newest, 1000, I30, 2, 1_000_000),
+                "a deep N>=2 source held at ~configured (jitter {jitter} ns) must never converge"
+            );
+        }
+        // Only a genuine >=1-frame walk over configured on a deep N>=2 source converges (the
+        // shed sticks there — the multi-frame arrival sustains the fresher phase).
+        assert!(
+            should_converge_phase(
+                wall,
+                wall - (1000 * 1_000_000 + I30 + I30),
+                newest,
+                1000,
+                I30,
+                2,
+                100
+            ),
+            "a deep N>=2 source that walked a full frame over configured self-corrects"
+        );
+    }
+
+    /// #1049 (coordinator's live finding) — convergence is N>=2 ONLY. The deep n=1 stream source
+    /// `NDI 2ME PGM` (30-into-30, configured 990 ms) sits at its natural grid-quantized hold
+    /// ~1033 ms — one frame above configured at frac 0.7, ABOVE the reserve-based threshold — so a
+    /// naive decision would shed it; but an n=1 shed does not stick (1 frame/tick can't sustain a
+    /// fresher phase → shed-hold-shed limit cycle, the #998 signature). The decision MUST go INERT
+    /// for n<2 while the SAME held age on an n>=2 source still converges (the shed sticks).
+    #[test]
+    fn convergence_is_n2_only_the_deep_n1_source_is_inert_1049() {
+        // wall large enough that a 1033 ms subtraction never underflows.
+        let wall = 2_000_000_000_000u64;
+        let s = 1033 * 1_000_000; // the live natural hold at reserve 990, frac 0.7
+        let boundary = wall - s;
+        let newest = wall - 33_000_000; // freshest frame ~1 canvas frame old -> small floor
+                                        // n=1: INERT (gated — the shed would oscillate). This is the RED→GREEN of the fix.
+        assert!(
+            !should_converge_phase(wall, boundary, newest, 990, I30, 1, 100),
+            "a deep n=1 source at its natural grid-quantized hold must NOT shed — the n=1 shed \
+             does not stick and limit-cycles (the live stream-box `NDI 2ME PGM` oscillation)"
+        );
+        // n=0 degenerate also gated (0 < 2), no divide-by-zero.
+        assert!(
+            !should_converge_phase(wall, boundary, newest, 990, I30, 0, 100),
+            "n=0 (degenerate) is below the N>=2 gate -> inert"
+        );
+        // The SAME held age on an n>=2 source STILL converges — the gate is n-specific, not a
+        // blanket disable, so the strih 60-into-30 convergence is untouched.
+        assert!(
+            should_converge_phase(wall, boundary, newest, 990, I30, 2, 100),
+            "the same held age on an N>=2 source still converges (the shed sticks there) — the \
+             strih ladder fix must stay intact"
+        );
+    }
+
+    /// Degenerate inputs never fire and never panic.
+    #[test]
+    fn converge_degenerate_interval_or_unlocked_boundary_is_false_1049() {
+        let wall = 1_000_000_000_000u64;
+        let newest = wall;
+        assert!(
+            !should_converge_phase(wall, wall - 500_000_000, newest, 20, 0, 2, 100),
+            "interval 0 (unknown video info) -> no convergence, no divide-by-zero"
+        );
+        assert!(
+            !should_converge_phase(wall, 0, newest, 20, I30, 2, 100),
+            "an UNLOCKED boundary (0, ACQUIRE) -> nothing to converge"
+        );
+        // A boundary AHEAD of wall (sender future-bias residue) saturates the age to 0 -> inert.
+        assert!(
+            !should_converge_phase(wall, wall + I30, newest, 20, I30, 2, 100),
+            "a boundary ahead of wall saturates to age 0 -> inert"
+        );
+        // A newest_stamp AHEAD of wall (floor saturates to 0) -> target = reserve, still evaluates.
+        assert!(
+            should_converge_phase(
+                wall,
+                wall - (20 * 1_000_000 + 2 * I30),
+                wall + I30,
+                20,
+                I30,
+                2,
+                100
+            ),
+            "a newest stamp ahead of wall floors to 0 -> target = reserve, no panic"
+        );
+        // source_multiple 0 (degenerate) is BELOW the N>=2 gate -> inert; no divide-by-zero.
+        assert!(
+            !should_converge_phase(
+                wall,
+                wall - (20 * 1_000_000 + 2 * I30),
+                newest,
+                20,
+                I30,
+                0,
+                100
+            ),
+            "source_multiple 0 (degenerate) is below the N>=2 gate -> inert"
+        );
+    }
+
+    // ---- The behavioural RED->GREEN: a faithful N>=2 conveyor (mirrors the C
+    // `genlock_release_tick` N>=2 STEADY branch and the probe `ReleaseCadence::tick`), driven with
+    // the probe's own arrival model. WITHOUT the shed an injected phase persists forever; WITH it
+    // the phase converges to within one canvas frame of configured within seconds. ----
+
+    struct SimConveyor1049 {
+        boundary: u64,
+        last_known_n: u32,
+        ticks_since_drain: u64,
+        converge: bool,
+        drops: u64,
+    }
+
+    impl SimConveyor1049 {
+        fn new(converge: bool) -> Self {
+            Self {
+                boundary: 0,
+                last_known_n: 0,
+                ticks_since_drain: 0,
+                converge,
+                drops: 0,
+            }
+        }
+
+        /// Structural source multiple from the front stamp grid (mirrors
+        /// `effective_source_multiple` with the sticky-N latch).
+        fn eff_n(&mut self, q: &std::collections::VecDeque<u64>) -> u32 {
+            let s: Vec<u64> = q.iter().take(8).copied().collect();
+            let measured = match source_interval_from_stamps(&s) {
+                Some(iv) if iv > 0 => Some(((I30 as f64 / iv as f64).round() as u32).max(1)),
+                _ => None,
+            };
+            match measured {
+                Some(m) => {
+                    self.last_known_n = m;
+                    m
+                }
+                None => self.last_known_n.max(1),
+            }
+        }
+
+        /// One render tick; returns the presented on-air age (`wall - stamp`) if any.
+        fn tick(
+            &mut self,
+            wall: u64,
+            reserve_ms: u32,
+            q: &mut std::collections::VecDeque<u64>,
+        ) -> Option<i64> {
+            if q.is_empty() {
+                return None;
+            }
+            let deadline =
+                phase_pinned_deadline(wall.saturating_sub(reserve_ms as u64 * 1_000_000), I30);
+            let due = q
+                .iter()
+                .take_while(|&&ts| phase_pinned_is_due(ts, deadline))
+                .count();
+            if self.boundary == 0 {
+                self.last_known_n = 0;
+                self.ticks_since_drain = 0;
+                if due == 0 {
+                    return None;
+                }
+                let qv: Vec<u64> = q.iter().copied().collect();
+                let sel = relock_select_nearest(&qv, wall, relock_anchor_age_ns(0, reserve_ms));
+                for _ in 0..sel {
+                    q.pop_front();
+                }
+                let ts = q.pop_front().unwrap();
+                self.boundary = ts + I30;
+                return Some(wall as i64 - ts as i64);
+            }
+            if *q.front().unwrap() <= self.boundary {
+                let n = self.eff_n(q);
+                let old_boundary = self.boundary;
+                if n >= 2 {
+                    let mature_deadline = self.boundary + I30 / 2;
+                    let matured_n = q
+                        .iter()
+                        .take_while(|&&ts| ts <= mature_deadline)
+                        .count()
+                        .max(1);
+                    for _ in 0..matured_n - 1 {
+                        q.pop_front();
+                    }
+                    // The #1049 phase shed (converge_eligible on the N>=2 path; the depth drain is
+                    // N==1-only). q.front() is now the would-be-presented newest matured; a shed
+                    // drops it and presents the next (one SOURCE interval fresher).
+                    self.maybe_shed(wall, old_boundary, reserve_ms, n, false, q);
+                    let ts = q.pop_front().unwrap();
+                    self.boundary = ts + I30;
+                    return Some(wall as i64 - ts as i64);
+                }
+                // N==1: the #859 depth drain AND the #1049 phase shed both eligible.
+                self.maybe_shed(wall, old_boundary, reserve_ms, 1, true, q);
+                let ts = q.pop_front().unwrap();
+                self.boundary = ts + I30;
+                return Some(wall as i64 - ts as i64);
+            }
+            if deadline >= *q.front().unwrap() {
+                let ts = q.pop_front().unwrap();
+                self.boundary = ts + I30;
+                return Some(wall as i64 - ts as i64);
+            }
+            None
+        }
+
+        /// Shed at most ONE extra frame: the #859 depth drain (N==1) OR the #1049 phase converge
+        /// (both paths), sharing `ticks_since_drain`. Mirror of the C tail's shed block.
+        fn maybe_shed(
+            &mut self,
+            wall: u64,
+            old_boundary: u64,
+            reserve_ms: u32,
+            n: u32,
+            drain_eligible: bool,
+            q: &mut std::collections::VecDeque<u64>,
+        ) {
+            // Mirror of the C tail: the #859 depth drain (byte-identical) then the #1049 phase
+            // converge, sharing `ticks_since_drain`. No explicit "already shed" flag is needed —
+            // after a drain resets the counter to 0, should_converge_phase reads ticks < the
+            // throttle interval and returns false, so the two can never both fire this tick.
+            if drain_eligible {
+                if should_drain_one(q.len() as u64, reserve_ms, 60, 1, self.ticks_since_drain)
+                    && q.len() > 1
+                {
+                    q.pop_front();
+                    self.drops += 1;
+                    self.ticks_since_drain = 0;
+                } else {
+                    self.ticks_since_drain += 1;
+                }
+            }
+            // `self.converge` stands in for "the #1049 block is present"; when it is, both STEADY
+            // paths are converge_eligible (the C `if (converge_eligible)`), and the block also
+            // maintains the shared counter on the N>=2 path (`!drain_eligible`, where the drain
+            // block did not run). The floor (freshest queued stamp) is `q.back()` — erasing OLDER
+            // matured frames never touches it, so it is the same freshest arrival the C reads as
+            // `array[num-1]`.
+            if self.converge {
+                let newest = *q
+                    .back()
+                    .expect("STEADY branch is entered with a non-empty queue");
+                if should_converge_phase(
+                    wall,
+                    old_boundary,
+                    newest,
+                    reserve_ms,
+                    I30,
+                    n,
+                    self.ticks_since_drain,
+                ) && q.len() > 1
+                {
+                    q.pop_front();
+                    self.drops += 1;
+                    self.ticks_since_drain = 0;
+                } else if !drain_eligible {
+                    self.ticks_since_drain += 1;
+                }
+            }
+        }
+    }
+
+    /// Drive the conveyor: exact 2-per-tick 60 Hz arrivals (no over-rate), a `skew_ns` transport
+    /// skew + deterministic jitter + ±2 ms render slew (the probe's `run_cadence_sim_ratio`
+    /// model). At `inject_tick` shove the locked boundary back `inject_frames` canvas frames — the
+    /// phase a walk event (GAP RESYNC / sticky-N crawl / connect-burst ACQUIRE) mints. Returns
+    /// (per-tick presented ages, total extra drops).
+    ///
+    /// #1049 (review finding): the transport skew is a PARAMETER, not fixed at 8 ms — the natural
+    /// steady on-air age is FLOORED by it (a frame cannot be presented before it arrives), so the
+    /// convergence threshold must clear `max(reserve, floor)`, and a too-narrow skew envelope
+    /// hides a spurious-shed limit cycle at the rig's real ~20 ms skew on shallow reserves.
+    fn run_conveyor_1049(
+        reserve_ms: u32,
+        src_interval: u64,
+        skew_ns: u64,
+        converge: bool,
+        inject_frames: i64,
+        inject_tick: u64,
+        n_ticks: u64,
+    ) -> (Vec<(u64, i64)>, u64) {
+        const BASE: u64 = 1_000_000_000_000;
+        let mut c = SimConveyor1049::new(converge);
+        let mut q: std::collections::VecDeque<u64> = std::collections::VecDeque::new();
+        let mut next = 0u64;
+        let skew = skew_ns;
+        let mut ages = Vec::new();
+        for k in 0..n_ticks {
+            let slew: i64 = if k % 2 == 0 { 2_000_000 } else { -2_000_000 };
+            let wall = (BASE + k * I30).saturating_add_signed(slew);
+            loop {
+                let arr = BASE + next * src_interval + skew + ((next * 2_654_435_761) % 8_000_001)
+                    - 4_000_000;
+                if arr > wall {
+                    break;
+                }
+                q.push_back(BASE + next * src_interval);
+                next += 1;
+            }
+            if let Some(age) = c.tick(wall, reserve_ms, &mut q) {
+                ages.push((k, age));
+            }
+            if k == inject_tick && c.boundary != 0 {
+                c.boundary = (c.boundary as i64 - inject_frames * I30 as i64) as u64;
+            }
+        }
+        (ages, c.drops)
+    }
+
+    fn tail_mean_1049(ages: &[(u64, i64)], from: u64, to: u64) -> f64 {
+        let v: Vec<i64> = ages
+            .iter()
+            .filter(|(k, _)| *k >= from && *k < to)
+            .map(|(_, a)| *a)
+            .collect();
+        if v.is_empty() {
+            0.0
+        } else {
+            v.iter().sum::<i64>() as f64 / v.len() as f64
+        }
+    }
+
+    /// The behavioural proof: on a 60-into-30 conveyor, an injected 2-canvas-frame presentation
+    /// phase PERSISTS forever WITHOUT the shed, and CONVERGES to within one canvas frame of
+    /// configured (with only a handful of bounded drops) WITH it — while a run with no injection
+    /// never sheds (no limit cycle), and the deep #1003 hold is untouched.
+    #[test]
+    fn steady_conveyor_persists_an_injected_phase_without_convergence_and_sheds_it_with_1049() {
+        let reserve = 20u32;
+        let inject = 2i64;
+        let skew = 8_000_000u64;
+        // RED (no convergence): the injected phase stays elevated above the natural hold.
+        let (red, red_drops) = run_conveyor_1049(reserve, I60, skew, false, inject, 200, 900);
+        let red_pre = tail_mean_1049(&red, 170, 200);
+        let red_final = tail_mean_1049(&red, 800, 900);
+        assert_eq!(
+            red_drops, 0,
+            "without convergence there is no extra shed at all"
+        );
+        assert!(
+            red_final > red_pre + I30 as f64 * 0.8,
+            "RED: the injected phase must PERSIST — final {red_final} not meaningfully above the \
+             pre-inject hold {red_pre} (expected ~+{inject} canvas frames)"
+        );
+
+        // GREEN (convergence): the phase sheds back to within one canvas frame of configured.
+        let (green, green_drops) = run_conveyor_1049(reserve, I60, skew, true, inject, 200, 900);
+        let green_final = tail_mean_1049(&green, 800, 900);
+        let excess_frames = (green_final - reserve as f64 * 1_000_000.0) / I30 as f64;
+        assert!(
+            excess_frames < 1.0,
+            "GREEN: convergence must bring the held age to within one canvas frame of configured, \
+             got {excess_frames:.2} frames excess (final {green_final} ns)"
+        );
+        assert!(
+            green_final < red_final - I30 as f64 * 0.8,
+            "GREEN: convergence must drop the held age well below the un-converged RED value \
+             (green {green_final} vs red {red_final})"
+        );
+        assert!(
+            (1..=6).contains(&green_drops),
+            "GREEN: the shed is bounded — a couple of drops to close a 2-frame error, never a \
+             storm (got {green_drops})"
+        );
+    }
+
+    /// No limit cycle: a conveyor with convergence ON but NO injected error never sheds a single
+    /// frame in steady state, across every rig latency AND every rig transport skew and both
+    /// source multiples — the threshold sits above the natural steady phase everywhere (the #998
+    /// lesson honoured on BOTH axes).
+    ///
+    /// #1049 (review finding): the SKEW sweep is load-bearing. The natural on-air age is floored
+    /// by the transport skew, so a reserve-only threshold spuriously sheds forever when
+    /// `skew > reserve + interval/n + hysteresis` (measured live: 20 ms skew at the 3 ms prod
+    /// floor, up to 59 ms on strih `NDI cam5`). This sweep is exactly the envelope that exposes
+    /// it — an earlier revision with only an 8 ms skew passed while limit-cycling at 15-30 ms.
+    #[test]
+    fn convergence_never_sheds_at_the_natural_steady_phase_1049() {
+        for skew_ms in [8u64, 15, 20, 30, 59] {
+            for reserve in [3u32, 8, 20, 26, 36] {
+                for (src, label) in [(I60, "60-into-30"), (I30, "30-into-30")] {
+                    let (_ages, drops) =
+                        run_conveyor_1049(reserve, src, skew_ms * 1_000_000, true, 0, 100_000, 900);
+                    assert_eq!(
+                        drops, 0,
+                        "skew {skew_ms} ms / reserve {reserve} ms {label}: convergence sheds \
+                         NOTHING at the natural steady phase — a spurious shed here is a #998-style \
+                         limit cycle (the target must clear max(reserve, floor), not reserve alone)"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The deep #1003 hold is untouched: a 1000 ms 1:1 source with no injected error never sheds.
+    #[test]
+    fn deep_1003_hold_is_untouched_by_convergence_1049() {
+        let (_ages, drops) = run_conveyor_1049(1000, I30, 8_000_000, true, 0, 200, 1200);
+        assert_eq!(
+            drops, 0,
+            "the deep 1000 ms hold must never converge (S == configured) — no #1003 regression"
         );
     }
 }
