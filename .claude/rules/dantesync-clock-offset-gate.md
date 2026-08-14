@@ -71,3 +71,25 @@ window (found by adversarial review, #1055).
 - `shellcheck -x dantesync-gate.sh` emits ~490 SC2317 (info) "unreachable" false-positives on the
   top-level assignments (the `BASH_SOURCE != $0` source-guard confuses its reachability analysis) —
   pre-existing, not real; filter them (`grep -v SC2317`) and there must be zero warning/error/style.
+
+## PTP-lock parser is timestamp-grace-aware, not line-position (#864)
+`ptp_locked_from_journal` no longer grades DEGRADED purely by LINE POSITION (last `[NTP] offset:`
+newer than the last `[PTP] (NANO|LOCK) Drift:` servo line). That was a false-DEGRADED on a healthy
+servo: NTP lines emit ~15 s, the servo ~30 s (live cam2 2026-08-14), so a LOCKED steady state
+routinely has an NTP line as the window's last line with the next servo tick simply not due yet.
+Now, when NTP is positionally newer, it grades by the `-o short-iso` TIMESTAMPS (both callers —
+`verify-device.sh` (d) and `dantesync-gate.sh`'s journal fallback — gather them): DEGRADED only when
+the NTP line trails the last servo line by MORE than grace = `max(measured_servo_cadence × 2, 75 s)`.
+Cadence is self-calibrated (`_servo_cadence_s` = median inter-servo interval, robust to a dropped
+tick; `_dante_line_iso_ts` extracts the ISO stamp) because the report cadence has changed once
+already (issue 679). A journal with NO ISO timestamps (the older `Jun 22`-format unit fixtures) falls
+back to the old position verdict — so every pre-existing test AND genuine servo-stopped detection
+(lines cease while NTP continues → gap grows past grace → DEGRADED) are preserved. Env-tunable via
+`PTP_LOCK_SERVO_GRACE_FACTOR`/`PTP_LOCK_SERVO_GRACE_FLOOR_S`.
+
+**Local RED→GREEN for a bash change here does NOT need cargo.** `# airuleset:build-ok` is DISABLED
+for camera-box (heavy builds are CI-only), so `cargo test` cannot run locally. But the Rust tests
+are just `run_sourced` wrappers around bash — SOURCE `clock-offset-guard.sh` in a plain `bash -c`
+and call the function on the fixture directly (that is exactly what the test does). This gives a
+genuine local RED (against the pre-fix script) → GREEN proof with zero compilation, and is the
+verification path to use for any pure bash function in this repo's sourced gates.

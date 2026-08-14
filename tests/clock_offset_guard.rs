@@ -729,6 +729,57 @@ fn ptp_locked_from_journal_ignores_mode_transition_banner() {
     );
 }
 
+// --- #864: PTP-lock false-DEGRADED on a healthy servo (timestamp-grace fix) ------------------
+// The `-o short-iso` timestamped fixtures below are REAL cam2 (10.77.9.62) journald output
+// captured live 2026-08-14 while the box was genuinely healthy (NANO-locked, ns/s drift, tens-of-
+// µs offsets). See the #864 validation comment.
+
+#[test]
+fn ptp_locked_from_journal_healthy_servo_with_ntp_trailing_within_one_interval_is_locked_864() {
+    // Live cam2 shape: a genuinely LOCKED NANO servo (steady ~30s cadence) whose window's LAST
+    // clock event is an `[NTP] offset:` line only ~15s after the last `[PTP] NANO` servo line —
+    // the next servo tick simply isn't due yet. The OLD line-POSITION comparison graded this
+    // DEGRADED (NTP positionally newest). With `-o short-iso` timestamps the parser must see the
+    // NTP line trails the last servo line by LESS than one servo interval → still LOCKED (#864).
+    let healthy = "\
+2026-08-14T16:58:31+00:00 CAM2 dantesync[415]: [PTP] NANO  Drift:  -1416ns/s  Adj: +7.30ppm\n\
+2026-08-14T16:58:47+00:00 CAM2 dantesync[415]: [NTP] offset:-49us (threshold:505us, adaptive)\n\
+2026-08-14T16:59:01+00:00 CAM2 dantesync[415]: [PTP] NANO  Drift:   +108ns/s  Adj: +7.28ppm\n\
+2026-08-14T16:59:17+00:00 CAM2 dantesync[415]: [NTP] offset:-58us (threshold:530us, adaptive)\n\
+2026-08-14T16:59:31+00:00 CAM2 dantesync[415]: [PTP] NANO  Drift:   +513ns/s  Adj: +7.26ppm\n\
+2026-08-14T16:59:47+00:00 CAM2 dantesync[415]: [NTP] offset:-70us (threshold:535us, adaptive)\n\
+2026-08-14T17:00:02+00:00 CAM2 dantesync[415]: [PTP] NANO  Drift:   -407ns/s  Adj: +7.27ppm\n\
+2026-08-14T17:00:17+00:00 CAM2 dantesync[415]: [NTP] offset:-61us (threshold:605us, adaptive)\n";
+    let out = run_sourced("ptp_locked_from_journal \"$J\"", &[("J", healthy)]);
+    assert_eq!(
+        out.trim(),
+        "LOCKED",
+        "a healthy ~30s-cadence servo whose last NTP line trails the last servo line by only ~15s \
+         must be LOCKED, not DEGRADED (#864 false-DEGRADED): {out:?}"
+    );
+}
+
+#[test]
+fn ptp_locked_from_journal_genuine_servo_stop_beyond_grace_is_degraded_864() {
+    // The other side of the #864 fix: the grace must NOT mask a genuinely stopped servo. Here the
+    // `[PTP] NANO` servo lines CEASE at 17:00:32 and only `[NTP] offset:` lines continue for
+    // MINUTES afterward (last NTP 17:05:02 — 4m30s after the last servo). That far exceeds one
+    // servo interval → DEGRADED, exactly as before. Proves the timestamp-grace does not weaken the
+    // real servo-stopped detection (short-iso path).
+    let degraded = "\
+2026-08-14T17:00:02+00:00 CAM2 dantesync[415]: [PTP] NANO  Drift:   -407ns/s  Adj: +7.27ppm\n\
+2026-08-14T17:00:32+00:00 CAM2 dantesync[415]: [PTP] NANO  Drift:   +100ns/s  Adj: +7.27ppm\n\
+2026-08-14T17:01:02+00:00 CAM2 dantesync[415]: [NTP] offset:+402us (threshold:530us, adaptive)\n\
+2026-08-14T17:02:02+00:00 CAM2 dantesync[415]: [NTP] offset:+880us (threshold:530us, adaptive)\n\
+2026-08-14T17:05:02+00:00 CAM2 dantesync[415]: [NTP] offset:+1200us (threshold:530us, adaptive)\n";
+    let out = run_sourced("ptp_locked_from_journal \"$J\"", &[("J", degraded)]);
+    assert_eq!(
+        out.trim(),
+        "DEGRADED",
+        "a servo that stopped ticking minutes ago while NTP continues must stay DEGRADED (#864): {out:?}"
+    );
+}
+
 #[test]
 fn ptp_locked_from_pipe_json_real_strih_status() {
     // Real strih status-pipe JSON (2026-06-22): is_locked=true + mode=NANO -> LOCKED.

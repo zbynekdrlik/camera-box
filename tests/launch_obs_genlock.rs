@@ -462,3 +462,42 @@ fn script_is_source_safe() {
         "sourcing must stop at the source-guard, not print the plan. out=\n{out}"
     );
 }
+
+/// (#1057) The launch PLAN must include a MANDATORY dev1-side verify-at-start burn sweep-off step.
+///
+/// strih/stream have no on-box python/OBS-WebSocket client and `obs_burn_filter.py` is not deployed
+/// there, so a saved `genlock_burn=true` reloaded at OBS start renders the QR burn onto the LIVE
+/// program until the next gate run's `[0/8]` sweep. The burn toggle/sweep is a dev1-side WS
+/// operation (`obs_burn_filter.py ... --host <ip>`, session-agnostic, per win-ssh-vs-mcp), so the
+/// plan (printed by dev1) must direct a post-launch `sweep-off --host <box_ip>` that forces every
+/// ndi_source input's burn OFF and reports LOUDLY -- positioned AFTER the on-box launch verify.
+#[test]
+fn plan_emits_verify_at_start_burn_sweep_off_1057() {
+    for (box_arg, ip) in [("strih", "10.77.9.202"), ("stream", "10.77.9.204")] {
+        let (code, out, _err) = run_script(&["--box", box_arg]);
+        assert_eq!(code, 0, "--box {box_arg} must print the plan (exit 0)");
+        assert!(
+            out.contains("obs_burn_filter.py sweep-off"),
+            "#1057: the {box_arg} plan must direct a dev1-side `obs_burn_filter.py sweep-off` \
+             verify-at-start (force burns OFF at OBS start). plan=\n{out}"
+        );
+        let sweep_line = out
+            .lines()
+            .find(|l| l.contains("obs_burn_filter.py sweep-off"))
+            .unwrap_or("");
+        assert!(
+            sweep_line.contains(&format!("--host {ip}")),
+            "#1057: the {box_arg} sweep-off step must target --host {ip}. line=\n{sweep_line}"
+        );
+        // The verify-at-start burn sweep runs AFTER the on-box launch-verify STEP (never before OBS
+        // is up) -- anchor on the STEP 2 marker, not the in-program "render tick ENABLED" text.
+        let verify_step_pos = out
+            .find("STEP 2")
+            .expect("plan has the STEP 2 launch-verify marker");
+        let sweep_pos = out.find("obs_burn_filter.py sweep-off").unwrap();
+        assert!(
+            verify_step_pos < sweep_pos,
+            "#1057: the burn sweep-off verify-at-start must come AFTER the STEP 2 launch verify. plan=\n{out}"
+        );
+    }
+}

@@ -411,6 +411,57 @@ dantesync_offset_verdict() {
 #  * Windows OBS boxes (status pipe JSON): `"is_locked":true` AND `"mode":"NANO"|"LOCK"` =
 #    PTP servo locked; `"is_locked":false` (or a non-NANO/LOCK mode) = degraded/NTP-only.
 
+# --- #864: false-DEGRADED grace (timestamp-aware servo-liveness) ------------------------------
+# When an `[NTP] offset:` line is POSITIONALLY newer than the last servo line, the pre-#864 parser
+# reported DEGRADED unconditionally. But `[NTP] offset:` lines emit on a FASTER cadence (~15s live)
+# than the `[PTP] (NANO|LOCK) Drift:` servo (~30s live, cam2 2026-08-14), so in a genuinely LOCKED
+# steady state the window's last line is routinely an NTP line that arrived after the last servo
+# tick with the next tick not yet due -> a false DEGRADED. The grace below requires the NTP line to
+# trail the last servo line by MORE than one servo interval before DEGRADED is reported.
+# PTP_LOCK_SERVO_GRACE_FACTOR: how many servo intervals of trailing gap are tolerated (2 means
+# the servo missed at least one full extra due tick). PTP_LOCK_SERVO_GRACE_FLOOR_S: absolute minimum
+# grace in seconds, used when the cadence can't be measured (fewer than two ISO-timestamped servo
+# lines) and as a lower bound against a degenerate tiny measured cadence (75s = ~2.5x the observed
+# ~30s cadence, comfortably above any healthy inter-tick gap). Both env-overridable for a future
+# recalibration without a code change.
+PTP_LOCK_SERVO_GRACE_FACTOR="${PTP_LOCK_SERVO_GRACE_FACTOR:-2}"
+PTP_LOCK_SERVO_GRACE_FLOOR_S="${PTP_LOCK_SERVO_GRACE_FLOOR_S:-75}"
+
+# _dante_line_iso_ts LINE -> the `-o short-iso` timestamp (first whitespace-delimited field) of a
+# dantesync journal LINE, but ONLY when it is a genuine ISO timestamp (YYYY-MM-DDThh:mm:ss...); ""
+# for a non-ISO line (the older `Jun 22 ...` journalctl default the unit fixtures use, or an empty
+# line). Lets the grace path degrade gracefully to the position verdict on any non-`-o short-iso`
+# journal. `|| true` keeps a no-match from tripping the caller's set -e/pipefail.
+_dante_line_iso_ts() {
+  printf '%s\n' "$1" | awk '{print $1}' \
+    | { grep -E '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}' || true; }
+}
+
+# _servo_cadence_s JOURNAL -> the MEDIAN gap in SECONDS between consecutive `[PTP] (NANO|LOCK)
+# Drift:` servo-line timestamps in JOURNAL (median rejects a single dropped tick), "" when fewer
+# than two ISO-timestamped servo lines exist. JOURNAL must be `-o short-iso`. Sizes the #864 grace
+# to the node's OWN observed cadence so a future dantesync report-cadence change (already happened
+# once, #679) can't rot a hard-coded value. Reuses median_of_ints (defined below; bash resolves it
+# at call time) and _short_iso_epoch (above).
+_servo_cadence_s() {
+  local text="$1" epochs ts e prev="" diffs="" d
+  epochs="$(printf '%s\n' "$text" \
+    | { grep -E '\[PTP\] +(NANO|LOCK) +Drift:' || true; } | { grep -v 'MODE ===' || true; } \
+    | awk '{print $1}' | { grep -E '^[0-9]{4}-[0-9]{2}-[0-9]{2}T' || true; })"
+  [ -n "$epochs" ] || { printf ''; return 0; }
+  while IFS= read -r ts; do
+    [ -n "$ts" ] || continue
+    e="$(_short_iso_epoch "$ts")"
+    [ -n "$e" ] || continue
+    if [ -n "$prev" ]; then
+      d=$(( e - prev ))
+      [ "$d" -gt 0 ] && diffs="${diffs}${d}"$'\n'
+    fi
+    prev="$e"
+  done <<< "$epochs"
+  median_of_ints "$diffs"
+}
+
 # ptp_locked_from_journal TEXT -> "LOCKED" if the journal's MOST RECENT DanteSync clock event
 # is a `[PTP] (NANO|LOCK)  Drift:` servo line (servo CURRENTLY running); "DEGRADED" if servo
 # line(s) exist in the buffer but the LATEST clock event is an `[NTP] offset:` (the servo has
@@ -440,12 +491,39 @@ ptp_locked_from_journal() {
   # 1-based line number of the LAST `[NTP] offset:` line, 0 if none.
   last_ntp_n="$(printf '%s\n' "$text" | { grep -nE '\[NTP\] offset:' || true; } | tail -1 | cut -d: -f1)"
   last_ntp_n="${last_ntp_n:-0}"
-  # Servo line is the more-recent of the two -> servo currently ticking -> LOCKED. Otherwise an
-  # NTP line is newer than the last servo line -> the servo has stopped -> DEGRADED.
+  # Servo line is the more-recent of the two -> servo currently ticking -> LOCKED.
   if [ "$last_servo_n" -ge "$last_ntp_n" ]; then
     printf 'LOCKED'
+    return 0
+  fi
+  # An `[NTP] offset:` line is POSITIONALLY newer than the last servo line. Do NOT declare DEGRADED
+  # on that alone (#864): in a genuinely LOCKED steady state this is NORMAL, because NTP lines emit
+  # faster than the servo cadence. Grade by the `-o short-iso` TIMESTAMPS instead — DEGRADED only
+  # when the NTP line trails the last servo line by MORE than one servo interval (a stopped servo
+  # misses every subsequent tick, so the gap grows without bound; a healthy inter-tick gap is at
+  # most ~one interval). Self-calibrate the interval from the servo lines' own timestamps.
+  local last_servo_line last_ntp_line servo_epoch ntp_epoch cadence grace gap
+  last_servo_line="$(printf '%s\n' "$text" \
+    | { grep -E '\[PTP\] +(NANO|LOCK) +Drift:' || true; } | { grep -v 'MODE ===' || true; } | tail -1)"
+  last_ntp_line="$(printf '%s\n' "$text" | { grep -E '\[NTP\] offset:' || true; } | tail -1)"
+  servo_epoch="$(_short_iso_epoch "$(_dante_line_iso_ts "$last_servo_line")")"
+  ntp_epoch="$(_short_iso_epoch "$(_dante_line_iso_ts "$last_ntp_line")")"
+  if [ -z "$servo_epoch" ] || [ -z "$ntp_epoch" ]; then
+    printf 'DEGRADED'   # no ISO timestamps to grade -> fall back to the position verdict
+    return 0
+  fi
+  cadence="$(_servo_cadence_s "$text")"
+  if [ -n "$cadence" ] && [ "$cadence" -gt 0 ]; then
+    grace=$(( cadence * PTP_LOCK_SERVO_GRACE_FACTOR ))
+    [ "$grace" -lt "$PTP_LOCK_SERVO_GRACE_FLOOR_S" ] && grace="$PTP_LOCK_SERVO_GRACE_FLOOR_S"
   else
+    grace="$PTP_LOCK_SERVO_GRACE_FLOOR_S"   # <2 servo lines -> cadence unmeasurable
+  fi
+  gap=$(( ntp_epoch - servo_epoch ))
+  if [ "$gap" -gt "$grace" ]; then
     printf 'DEGRADED'
+  else
+    printf 'LOCKED'
   fi
 }
 

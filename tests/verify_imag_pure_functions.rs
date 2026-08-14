@@ -1181,3 +1181,70 @@ fn verify_imag_reads_1040_power_envelope_before_the_840_restart_wipes_it() {
          instead of the box's normal boot-time envelope"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// (#1058) EVERY ssh read is bounded by a per-class execution timeout, not just check (o).
+//
+// Issue 890 added the `ssh_box_timeout SECONDS CMD` primitive but scoped it to check (o); every
+// other `ssh_box "…"` read stayed unbounded (only `-o ConnectTimeout`, which bounds the connect
+// phase, never remote command runtime). A wedged X / stuck remote read would hang that check
+// forever. The fix bounds every read BY CONSTRUCTION: `ssh_box` delegates to `ssh_box_timeout`
+// with the general read budget, the genuinely-slow reads get an explicit longer budget, and the
+// raw `sshpass … ssh` primitive exists in exactly ONE place (the bounded helper). These are
+// text-scan guards over the script itself, the same model as the #890 / #884 / #1040 checks above.
+// ---------------------------------------------------------------------------------------------
+
+/// The single read helper must be bounded by construction: `ssh_box` delegates to the
+/// execution-timeout-wrapped `ssh_box_timeout` with the general read budget (never a raw ssh).
+#[test]
+fn verify_imag_ssh_box_delegates_to_bounded_helper_1058() {
+    let body = std::fs::read_to_string(script()).unwrap();
+    assert!(
+        body.contains(r#"ssh_box_timeout "$IMAG_READ_TIMEOUT" "$1""#),
+        "verify-imag.sh ssh_box() must delegate to `ssh_box_timeout \"$IMAG_READ_TIMEOUT\" \"$1\"` \
+         (#1058) so every ssh_box read is bounded by an execution timeout, not just the connect phase"
+    );
+}
+
+/// The raw `sshpass … ssh` primitive must appear EXACTLY ONCE — inside the bounded
+/// `ssh_box_timeout` helper — so no unbounded raw-ssh read can exist anywhere in the script.
+#[test]
+fn verify_imag_raw_ssh_primitive_is_bounded_and_singular_1058() {
+    let body = std::fs::read_to_string(script()).unwrap();
+    let n = body.matches(r#"sshpass -p "$IMAG_PW" ssh"#).count();
+    assert_eq!(
+        n, 1,
+        "verify-imag.sh must have EXACTLY ONE raw `sshpass -p \"$IMAG_PW\" ssh` primitive (inside \
+         the execution-timeout-wrapped ssh_box_timeout, #1058) -- found {n}. More than one means a \
+         second, UNBOUNDED ssh read path exists (the exact hazard #1058 closes)."
+    );
+}
+
+/// Both per-class read-budget knobs must be defined with the module's `${VAR:-default}` idiom —
+/// a general read budget and a longer slow-read budget (a blanket connect-cap would false-FAIL a
+/// healthy box on the legitimately-slower dpkg/apt/journal/gather reads, which the ticket forbids).
+#[test]
+fn verify_imag_defines_per_class_read_budgets_1058() {
+    let body = std::fs::read_to_string(script()).unwrap();
+    assert!(
+        body.contains(r#"IMAG_READ_TIMEOUT="${IMAG_READ_TIMEOUT:-"#),
+        "verify-imag.sh must define IMAG_READ_TIMEOUT (general read budget, #1058)"
+    );
+    assert!(
+        body.contains(r#"IMAG_SLOW_READ_TIMEOUT="${IMAG_SLOW_READ_TIMEOUT:-"#),
+        "verify-imag.sh must define IMAG_SLOW_READ_TIMEOUT (slow-read budget, #1058)"
+    );
+}
+
+/// The slow-read budget must actually be USED — the genuinely-slow reads (dpkg/apt under a held
+/// lock, the dantesync journal, the timesync/power-envelope gathers) are wrapped with the longer
+/// explicit budget, proving the design is per-class (not a single blanket cap).
+#[test]
+fn verify_imag_uses_slow_read_budget_for_slow_reads_1058() {
+    let body = std::fs::read_to_string(script()).unwrap();
+    assert!(
+        body.contains(r#"ssh_box_timeout "$IMAG_SLOW_READ_TIMEOUT""#),
+        "verify-imag.sh must wrap its genuinely-slow reads (dpkg/apt/journal/gather) with \
+         `ssh_box_timeout \"$IMAG_SLOW_READ_TIMEOUT\"` (#1058) -- per-class budgets, not a blanket cap"
+    );
+}
