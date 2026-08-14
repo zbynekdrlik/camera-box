@@ -1301,10 +1301,10 @@ $(cam2_painter_deadman_disarm_cmds)"
   # GetInputList over WS, never a CAMERA_ACTIVE_SET-derived list). timeout-bounded like every other
   # cleanup OBS call so a hung WS op can never block the trap (#328).
   echo "[cleanup] #938/#1011 exhaustive genlock_burn sweep-off on EVERY ndi input (strih/stream/imag)"
-  for _hbs in "${BURN_TARGETS[@]}"; do
-    _bn="${_hbs%%=*}"; _brest="${_hbs#*=}"; _bip="${_brest%%=*}"
-    timeout "$OBS_CLEANUP_TIMEOUT" python3 "$HERE/obs_burn_filter.py" sweep-off --host "$_bip" 2>&1 \
-      | sed "s/^/    [$_bn burn-sweep] /" || true
+  for _swpair in "strih=$STRIH" "stream=$STREAM" "imag=$IMAG_IP"; do
+    _swbn="${_swpair%%=*}"; _swbip="${_swpair#*=}"
+    timeout "$OBS_CLEANUP_TIMEOUT" python3 "$HERE/obs_burn_filter.py" sweep-off --host "$_swbip" 2>&1 \
+      | sed "s/^/    [$_swbn burn-sweep] /" || true
   done
   # #684: FINAL, INDEPENDENT camera-box.service verify -- the LAST thing cleanup() does, for
   # EVERY box this run touched (source cam always; cam2/painter always; cam3-4 when
