@@ -7973,3 +7973,31 @@ from pid+timestamp is a latent collision — pid is constant within a binary, so
 key; use tempfile::tempdir() instead.
 
 Worktree round; supervisor integrates (merge → CI → deploy). One PR closes #970 #975 #980.
+
+## issue 1001 — strih/stream network-UNREACHABLE dev1-side alert watchdog (autopilot, worktree)
+
+Closed the silent-outage gap: strih's NIC died 2026-08-06 (~50 min off the wire, no alert),
+recurred 2026-08-13. Every existing watchdog probes a box it assumes is UP (OBS-WS GetStats / ssh
+INTO the box) and treats a total outage as "no probe output = nothing to decide". Built a NEW
+dev1-side systemd-timer watchdog that probes both boxes FROM dev1 with a MULTI-SIGNAL check
+(ping OR TCP :4455 OBS-WS OR TCP :8899 bundle-state) — REACHABLE iff ANY, UNREACHABLE only when all
+three fail (so an ICMP-firewalled-but-TCP-up Windows box is never a false page). Mirrors the
+dev1-side topology + shared confirm/throttle framework of the imag-obs (882) / imag-power-envelope
+(1040) / optical-chain (860) siblings; the intentional difference is probing FROM dev1 without
+ssh-ing IN (impossible against an off-network box).
+
+- Files: `scripts/lib/network-reach-health.sh` (pure seam), `scripts/network-reach-alert-watchdog.sh`,
+  `systemd/network-reach-alert-watchdog.{service,timer}`, `tests/harness_network_reach_health_1001.rs`,
+  `.claude/rules/network-reach-watchdog.md` (+ CLAUDE.md router).
+- Per-box state (confirm/alert_sig/alert_passes/alerted) so strih+stream page independently;
+  2-pass confirm; ~1h throttle; a one-shot recovery ("reachable again") ping.
+- dev1-side-outage guard: any REACHABLE watched box OR any reference-node ping proves connectivity;
+  only when NOTHING is reachable is the pass "nothing to decide" (never a false "both boxes down").
+  Event-safe (generous timeouts for the tailscale-over-mobile venue link).
+- RED `f177becce` → GREEN lib `fb7221b3f` (net_reach_classify_box / any_reachable / recovery_decision
+  / alert_detail); watchdog+units `a0fe99f5c`; fmt `1b5df6c4e`; review-hardening `4d36c07e9`
+  (anchor counts box-reachability, dry-run state isolation, injection-shape removed, single-probe,
+  +ping-up test). Tests 11/11; shellcheck -x / fmt / clippy / cargo test --no-run all green.
+- Review: SHIP, 0 red/yellow; 5 of 6 blue folded in, 1 dropped with reasoning (controlled alnum
+  box names in sed keys). WoL BIOS enablement floated on the ticket = separate hardware follow-up,
+  not bundled. Worktree; supervisor integrates the round.
