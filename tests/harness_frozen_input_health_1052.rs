@@ -70,7 +70,9 @@ fn lib_defines_the_pure_functions() {
 //   -> FROZEN | ADVANCING | UNKNOWN | SKIP
 // ---------------------------------------------------------------------------------------------
 fn classify(prev: &str, curr: &str, live: &str, reach: &str) -> String {
-    stdout_of(&format!("frozen_input_classify {prev} {curr} {live} {reach}"))
+    stdout_of(&format!(
+        "frozen_input_classify {prev} {curr} {live} {reach}"
+    ))
 }
 
 #[test]
@@ -156,8 +158,14 @@ fn recovery_only_when_previously_alerted_and_now_advancing() {
 #[test]
 fn alert_detail_names_source_and_stuck_counter() {
     let d = stdout_of("frozen_input_alert_detail \"NDI 2ME PGM\" 123456");
-    assert!(d.contains("NDI 2ME PGM"), "detail must name the source: {d}");
-    assert!(d.contains("123456"), "detail must show the stuck received counter: {d}");
+    assert!(
+        d.contains("NDI 2ME PGM"),
+        "detail must name the source: {d}"
+    );
+    assert!(
+        d.contains("123456"),
+        "detail must show the stuck received counter: {d}"
+    );
     assert!(
         d.to_lowercase().contains("frozen") || d.to_lowercase().contains("not advancing"),
         "detail must state the input is frozen: {d}"
