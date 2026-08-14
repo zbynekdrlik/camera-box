@@ -55,7 +55,17 @@ optical_chain_preflight_assert() {
   fi
 
   if [ "$alive" != "1" ]; then
-    echo "ERROR: [0/8] optical injection leg DEAD — a standing cam2 painter is EXPECTED ($pidfile present or $service enabled) but it is NOT alive." >&2
+    # Grace re-probe before aborting a CI gate (the user's hardest constraint: never a FALSE abort).
+    # cam2-painter.service is Restart=always/RestartSec=2, so this first read could have landed
+    # inside a transient ~2s restart window. Re-probe ONCE after a short sleep; abort only if the
+    # painter is STILL dead (a crashed frame-probe / disabled service stays dead across the sleep).
+    sleep 4
+    snapshot="$(timeout 15 sshpass -p "$cam_pw" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 \
+      "${cam_user}@${painter_ip}" "$(optical_chain_painter_probe_remote_snippet "$pidfile" "$service")" 2>/dev/null || true)"
+    alive="$(optical_chain_painter_alive_from_snapshot "$snapshot")"
+  fi
+  if [ "$alive" != "1" ]; then
+    echo "ERROR: [0/8] optical injection leg DEAD — a standing cam2 painter is EXPECTED ($pidfile present or $service enabled) but it is NOT alive (re-probed after a grace window)." >&2
     echo "       cam2's monitor is dark, so the cam2→cam1 optical leg cannot be read; a previous run's cleanup likely left it dead (issue 860 / WARNING #712 class)." >&2
     echo "       Recovery: scripts/rig-mode.sh test   # relaunch the painter + re-verify the chain non-black, then re-run." >&2
     exit 1

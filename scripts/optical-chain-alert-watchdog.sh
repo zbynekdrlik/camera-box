@@ -60,7 +60,13 @@ STRIH="${STRIH:-10.77.9.202}"                            # the box whose program
 OBS_PW="${OBS_PASSWORD:-}"
 OPTICAL_SCENE="${OPTICAL_CHAIN_SCENE:-}"                  # "" -> the CURRENT program scene (#901)
 OPTICAL_PROBE_TIMEOUT="${OPTICAL_CHAIN_PROBE_TIMEOUT:-40}"
+CAM_SSH_TIMEOUT="${OPTICAL_CHAIN_CAM_SSH_TIMEOUT:-15}"              # bound the cam2 painter probe ssh
 ALERT_THROTTLE_PASSES="${OPTICAL_CHAIN_ALERT_THROTTLE_PASSES:-12}"  # ~1h at the 5-min cadence
+# 2-pass confirm before paging (same obs_watchdog_confirm the obs-liveness / imag-obs siblings use):
+# cam2-painter.service is Restart=always/RestartSec=2, so a single pass landing inside a ~2s restart
+# window would read the painter momentarily inactive -- a transient, not a real dead painter. A
+# genuinely dead painter (crashed frame-probe / disabled service) stays down across the 5-min cadence.
+CONFIRM_THRESHOLD="${OPTICAL_CHAIN_ALERT_CONFIRM_THRESHOLD:-2}"
 
 NOTIFY="${AIRULESET_NOTIFY:-$HOME/devel/airuleset/airuleset.py}"
 REPO_SLUG="${OPTICAL_CHAIN_ALERT_REPO:-zbynekdrlik/camera-box}"
@@ -74,7 +80,7 @@ log() { printf '%s [optical-chain-alert-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M
 # An empty SNAPSHOT means an ssh/connectivity failure to cam2 (the fleet's own preflight owns THAT
 # condition) -- treated as "nothing to decide" this pass, never a false alert.
 measure() {
-  SNAPSHOT="$(sshpass -p "$CAM_PW_SSH" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 \
+  SNAPSHOT="$(timeout "$CAM_SSH_TIMEOUT" sshpass -p "$CAM_PW_SSH" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 \
     "${CAM_USER_SSH}@${PAINTER_IP}" "$(optical_chain_painter_probe_remote_snippet "$PAINTER_PIDFILE" "$PAINTER_SERVICE")" 2>/dev/null || true)"
   # The #901 optical proof off strih. Bounded by `timeout`; rc+output classified purely below. A
   # WS/connectivity failure classifies as UNKNOWN (nothing to decide about the optical read).
@@ -102,8 +108,10 @@ write_state_field() {
 }
 
 clear_throttle() {
-  # A healthy / skip / unverified window is NOT an incident: clear the throttle sig so a genuinely
-  # NEW episode later pages fresh instead of being dedup'd against a stale signature.
+  # A healthy / skip / unverified window is NOT an incident: clear the confirm counter AND the
+  # throttle sig so a genuinely NEW episode later pages fresh instead of being dedup'd against a
+  # stale signature (mirrors the imag-obs-alert-watchdog reset discipline).
+  write_state_field confirm 0
   write_state_field alert_sig ""
   write_state_field alert_passes 0
 }
@@ -126,7 +134,7 @@ main() {
   log "painter_expected=$painter_expected painter_alive=$painter_alive optical=$optical -> verdict=$verdict"
 
   case "$verdict" in
-    alert:*) : ;;   # fall through to the throttle+alert path below
+    alert:*) : ;;   # an incident this pass -- confirm across passes below before paging
     *)
       # skip (EVENT mode / not-expected), healthy, or healthy-unverified -- no incident.
       log "no optical-chain incident this pass ($verdict)"
@@ -136,7 +144,24 @@ main() {
       ;;
   esac
 
-  # An incident is confirmed -> throttle-dedup on the verdict signature.
+  # CONFIRM across consecutive passes before paging (the SAME obs_watchdog_confirm the obs-liveness
+  # / imag-obs siblings use): cam2-painter.service is Restart=always/RestartSec=2, so one pass
+  # landing inside a ~2s restart window would read the painter momentarily inactive -- a transient,
+  # not a real dead painter. A genuinely dead painter stays down across the 5-min cadence.
+  local prev_confirm decision confirm act
+  prev_confirm="$(read_state_field confirm 0)"
+  decision="$(obs_watchdog_confirm "$prev_confirm" 1 "$CONFIRM_THRESHOLD")"
+  confirm="$(printf '%s\n' "$decision" | sed -n 's/^confirm=//p')"
+  act="$(printf '%s\n' "$decision" | sed -n 's/^act=//p')"
+  write_state_field confirm "${confirm:-0}"
+  log "confirm=$prev_confirm -> $confirm act=$act (threshold=$CONFIRM_THRESHOLD)"
+  if [ "${act:-0}" != "1" ]; then
+    log "incident seen ($verdict) but not yet CONFIRMED across $CONFIRM_THRESHOLD passes -- holding"
+    log "pass end"
+    return 0
+  fi
+
+  # An incident is CONFIRMED -> throttle-dedup on the verdict signature.
   local current_sig prior_sig prior_passes throttle_out alert_now new_sig new_passes detail
   current_sig="optical-chain:${verdict}"
   prior_sig="$(read_state_field alert_sig "")"

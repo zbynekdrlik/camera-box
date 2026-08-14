@@ -14,3 +14,11 @@ ExecStart=%h/devel/camera-box/scripts/optical-chain-alert-watchdog.sh
 # One ssh round-trip to cam2 + one bounded OBS-WS optical probe to strih (poll up to
 # OBS_BLACKCHECK_TIMEOUT_S); give it room but never hang the timer.
 TimeoutStartSec=90
+# The strih OBS WebSocket password (for the #901 assert-program-nonblack OPTICAL-BLACK probe) comes
+# from the user environment, NOT this unit -- set it in ~/.config/environment.d/ or an
+# EnvironmentFile, NEVER committed (same convention as obs-liveness-watchdog.service):
+#   Environment=OBS_PASSWORD=...            (NOT committed)
+# WITHOUT it the OPTICAL-BLACK probe reads UNKNOWN (never a false alert) and only the PAINTER-DEAD
+# path -- which needs no OBS creds, just the cam2 ssh -- pages. Wire it to enable the #901/#754
+# process-alive-but-black detection too.
+EnvironmentFile=-%h/.config/camera-box/optical-chain-watchdog.env
