@@ -69,6 +69,24 @@
 //! a follow-up issue. See ticket 889 comment 5200533407 for the full evidence (the run id, the
 //! per-window breakdown, and the burden comparison against clean runs).
 //!
+//! ## 2026-08-14 RE-TIGHTENING (3 -> 1) — issue 1031
+//!
+//! The over-rate lane's residual burden the 2 -> 3 section flagged as "the real fix" got two
+//! genlock fixes: issue 1042 (source interval from the MIN grid delta, killing the spurious
+//! backlog-relock erase) and issue 1049 (bounded phase convergence gated to N>=2, killing the
+//! strih-ingest relock storm + the deep n=1 limit cycle). Both deployed to the rig (imag-nb +
+//! strih genlock replaced 09:17 CEST, OBS restarted 09:18). The one steady-state post-fix
+//! full-cycle run (1780620060, started +27 min after the OBS restart, fully converged) measured a
+//! healthy per-window max of {copies 1, gaps 1}, windows_over_copies_gaps_tolerance = 0,
+//! overall_pass = true — the chronic burden collapsed to a single stale_replay dup+gap pair, so
+//! the honest floor is now 1, not 3. Made good on the 2 -> 3 section's standing commitment: the
+//! tolerance is pulled back down as the burden falls. NOT yet 0 — that single stale_replay is the
+//! issue-859 shared-duplicate residual (root cause not landed); 0 stays gated on issue 859 AND
+//! N>=2 consecutive green post-fix runs at tolerance=1 measuring per-window 0/0. Issue 1031 owns
+//! that remaining 1 -> 0 step. The excluded run 1074024850 (started 2 min after the OBS restart,
+//! measured 14/window) is the convergence transient, not steady state. See issue 1031 for the
+//! full per-run distribution table.
+//!
 //! ## Why this lives at the crate root (default features), not in `probe`
 //!
 //! Same reasoning as `optical_floor.rs` / `av_window.rs`'s `#861` relaxation: the whole `probe`
@@ -91,8 +109,9 @@
 /// The per-window tolerance applied to `copies`/`gaps` when folding them back into
 /// `relaxed_pass`/`overall_pass` (2026-08-05 re-gate, ticket 889 comment 5196190653; recalibrated
 /// 1 → 2 on 2026-08-06, ticket 889 comment 5198131539; recalibrated again 2 → 3 later the same
-/// day, ticket 889 comment 5200533407; RE-TIGHTENED 3 -> 1 on 2026-08-14, issue 1031,
-/// after the issue-1042 + issue-1049 genlock fixes landed on the rig). Hardcoded, no env knob — a silent env default is exactly
+/// day, ticket 889 comment 5200533407; RE-TIGHTENED 3 -> 1 on 2026-08-14, issue 1031, after the
+/// issue-1042 + issue-1049 genlock fixes landed on the rig). Hardcoded, no env knob — a silent
+/// env default is exactly
 /// how "temporary" becomes permanent (the original issue-889 requirement 4), and this repo's
 /// standing rule is that a needed capability is always ON by default, never a forgettable toggle
 /// (`features-default-on-never-forgettable-toggle` in the project memory). A window with `copies >
