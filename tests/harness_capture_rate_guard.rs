@@ -576,7 +576,7 @@ fn defect_grep_pattern_hard_matches_hard_bands_only() {
     let sustained_line = "#717 capture-delivery-rate SUSTAINED band confirmed (informational at THIS tier -- a USB reset AUTO-ESCALATES \
          once this sustained deviation becomes chronic, see #971): 63.90 fps captured vs \
          60.00 fps configured/negotiated (>2.0% deviation sustained for 12 consecutive report \
-         windows, ~60s) -- inside the ShadowCast 2 wide 10.0% jitter-tolerant envelope; the genlock \
+         windows, ~60s) -- inside the ShadowCast 2 wide 9.0% jitter-tolerant envelope; the genlock \
          decimation gate absorbs this over-rate into exact NDI output by design, so NO USB \
          reset is triggered yet";
     let healthy_line =
@@ -630,7 +630,7 @@ fn sustained_band_grep_pattern_matches_only_717() {
     let sustained_line = "#717 capture-delivery-rate SUSTAINED band confirmed (informational at THIS tier -- a USB reset AUTO-ESCALATES \
          once this sustained deviation becomes chronic, see #971): 63.90 fps captured vs \
          60.00 fps configured/negotiated (>2.0% deviation sustained for 12 consecutive report \
-         windows, ~60s) -- inside the ShadowCast 2 wide 10.0% jitter-tolerant envelope; the genlock \
+         windows, ~60s) -- inside the ShadowCast 2 wide 9.0% jitter-tolerant envelope; the genlock \
          decimation gate absorbs this over-rate into exact NDI output by design, so NO USB \
          reset is triggered yet";
     let chronic_line = "#971 capture-delivery-rate CHRONIC sustained-band DEFECTIVE: 64.00 fps \

@@ -199,7 +199,7 @@ pub fn tolerance_pct_for_model(model: GrabberModel) -> f64 {
 }
 
 /// #717 — SUSTAINED-band capture-rate deviation tolerance (percent) for ShadowCast 2. #685's wide
-/// `SHADOWCAST2_CAPTURE_RATE_TOLERANCE_PCT` (10%) correctly tolerates ShadowCast 2's characteristic
+/// `SHADOWCAST2_CAPTURE_RATE_TOLERANCE_PCT` (9%) correctly tolerates ShadowCast 2's characteristic
 /// SHORT-LIVED quantization jitter (band (a): deviation bursts that self-recover within ~60s) —
 /// but it ALSO swallowed a genuinely SUSTAINED, reset-fixable defect (band (b): the #674 closure
 /// evidence — cam1 held a rock-steady 63.9-64.0fps, a 6.5-6.67% deviation, for an ENTIRE 10-window
@@ -209,7 +209,7 @@ pub fn tolerance_pct_for_model(model: GrabberModel) -> f64 {
 /// characteristic to tolerate" (see the project's calibrate-artifact-vs-fix-robustness playbook
 /// note). This SEPARATE, narrower floor is what the SUSTAINED check (`SUSTAINED_WARN_WINDOWS`,
 /// 60s) uses instead of the wide jitter floor, so a deviation this size that actually PERSISTS
-/// still trips self-heal even though it never reaches the wide 10% jitter floor.
+/// still trips self-heal even though it never reaches the wide 9% jitter floor.
 pub const SHADOWCAST2_SUSTAINED_TOLERANCE_PCT: f64 = 2.0;
 
 /// #717 — number of consecutive 5s report windows a SUSTAINED-band deviation must hold before it
@@ -224,7 +224,7 @@ pub const SUSTAINED_WARN_WINDOWS: u32 = 12;
 /// The SUSTAINED-band capture-rate deviation tolerance (percent) to use for a self-heal decision,
 /// given this box's grabber model. `GrabberModel::ShadowCast2` gets the narrow
 /// `SHADOWCAST2_SUSTAINED_TOLERANCE_PCT` (2%) — a SEPARATE, TIGHTER floor than its own
-/// (jitter-band) `tolerance_pct_for_model` (10%) — so a sustained-but-under-10%-deviation defect
+/// (jitter-band) `tolerance_pct_for_model` (9%) — so a sustained-but-under-9%-deviation defect
 /// (#674's chronic 64fps) still trips self-heal even though it never reaches the wide jitter
 /// floor. Every other model returns the SAME value as `tolerance_pct_for_model` — their
 /// single-band strict tolerance already IS the sustained tolerance, so pairing it with
@@ -519,7 +519,7 @@ mod tests {
     /// live `card` string is `CAM  LINK 4K: CAM  LINK 4K` (note the DOUBLE space between CAM and
     /// LINK — the match must be whitespace-robust). It must be recognized as its own model so
     /// `resolve_grabber_model` hands it the STRICT base tolerance, instead of falling through to
-    /// the hostname table's `CAM3 → ShadowCast2` (wide 10%) mapping that wrongly gave a
+    /// the hostname table's `CAM3 → ShadowCast2` (wide 9%) mapping that wrongly gave a
     /// rock-steady 0.33%-spread device the ShadowCast grabber allowance.
     #[test]
     fn grabber_model_from_card_name_recognizes_cam_link_4k_1034() {
@@ -540,7 +540,7 @@ mod tests {
 
     /// #1034 — cam3's decisive scenario: hostname still says `CAM3` (→ ShadowCast2 in the static
     /// table) but the box physically has a Cam Link 4K now. Detection must win and hand it the
-    /// strict base tolerance (1%), NOT the wide ShadowCast 10% floor.
+    /// strict base tolerance (1%), NOT the wide ShadowCast 9% floor.
     #[test]
     fn resolve_grabber_model_cam_link_4k_wins_over_shadowcast_hostname_1034() {
         assert_eq!(
@@ -750,14 +750,14 @@ mod tests {
     // -----------------------------------------------------------------------------------------
     // #717 — two-band ShadowCast 2 envelope: a SEPARATE, narrower SUSTAINED-band tolerance
     // (2%, `SUSTAINED_WARN_WINDOWS`=60s) catches a genuinely chronic defect that #685's wide
-    // 10%/30s jitter band correctly tolerates as short-lived characteristic wobble.
+    // 9%/30s jitter band correctly tolerates as short-lived characteristic wobble.
     // -----------------------------------------------------------------------------------------
 
     #[test]
     fn real_674_chronic_64fps_is_sustained_deviant_under_shadowcast2() {
         // #674 closure evidence: cam1 held 63.9-64.0fps rock-steady for an entire recording —
         // 6.5-6.67% deviation from the 60.0 negotiated rate. Must trip the SUSTAINED band even
-        // though it stays comfortably inside ShadowCast 2's wide 10% jitter floor.
+        // though it stays comfortably inside ShadowCast 2's wide 9% jitter floor.
         let sustained_tol = sustained_tolerance_pct_for_model(GrabberModel::ShadowCast2);
         assert!(is_rate_deviant(63.9, 60.0, sustained_tol));
         assert!(is_rate_deviant(64.0, 60.0, sustained_tol));
