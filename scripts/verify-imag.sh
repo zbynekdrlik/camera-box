@@ -50,6 +50,8 @@ set -euo pipefail
 #   IMAG_PW                      box password (default: newlevel -- same fleet default recording-
 #                                e2e.sh/setup-imag.sh already use)
 #   SSH_TIMEOUT                  SSH connect timeout in seconds (default: 10)
+#   IMAG_OBS_RESTART_TIMEOUT     hard wall-clock cap on check (o)'s OBS restart (default: 60, #890)
+#   IMAG_OBS_PROJECTOR_POLL_S    budget for projectors to reappear after the restart (default: 120, #890)
 #   CLOCK_GUARD_BOUND_US         dantesync clock-offset bound in microseconds (default: 2000, #8)
 #   RIG_GRANDMASTER_IP           the rig's PTP grandmaster every node must agree on (default:
 #                                10.77.9.184 -- see #834)
@@ -170,6 +172,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 IMAG_USER="${IMAG_USER:-newlevel}"
 IMAG_PW="${IMAG_PW:-newlevel}"
 SSH_TIMEOUT="${SSH_TIMEOUT:-10}"
+# #890: hard bounds for check (o)'s OBS restart-proof so this gate can NEVER hang again.
+IMAG_OBS_RESTART_TIMEOUT="${IMAG_OBS_RESTART_TIMEOUT:-60}"       # wall-clock cap on the ssh restart
+IMAG_OBS_PROJECTOR_POLL_S="${IMAG_OBS_PROJECTOR_POLL_S:-120}"    # budget for projectors to reappear
 IMAG_CLOCK_BOUND_US="${CLOCK_GUARD_BOUND_US:-2000}"
 DANTESYNC_OFFSET_FRESHNESS_S="${DANTESYNC_OFFSET_FRESHNESS_S:-300}"
 DANTESYNC_JOURNAL_MAX_AGE_S="${DANTESYNC_JOURNAL_MAX_AGE_S:-60}"
@@ -460,6 +465,20 @@ imag_projector_counts_ok() {
   [ "$1" = "1" ] && [ "$2" = "1" ]
 }
 
+# imag_obs_service_restart_cmd -> prints the REMOTE command check (o) runs to restart OBS (#890).
+# It restarts through imag-obs.service, NEVER a direct imag-obs-start.sh call: since #882 that
+# wrapper ends in `wait "$OBS_PID"` (correct for the Type=simple unit -- systemd needs obs to be
+# the tracked main process), so invoking it DIRECTLY over ssh never returns and hangs the whole
+# gate forever. `systemctl --user restart` returns as soon as the unit re-forks obs (systemd owns
+# the blocking wait) AND keeps the new obs INSIDE the unit's cgroup (supervised, LimitCORE applied
+# -- unlike the old bare invocation, the #1015 untracked-process class). Since #884 the box's OWN
+# boot path IS this unit, so the service is also the operator-faithful "real restart" #840 wanted.
+# XDG_RUNTIME_DIR is exported so a non-graphical ssh session can reach the --user bus
+# (imag-obs-supervision.md); $(id -u) stays single-quoted so it evaluates ON the box.
+imag_obs_service_restart_cmd() {
+  printf '%s' 'export XDG_RUNTIME_DIR="/run/user/$(id -u)"; systemctl --user restart imag-obs.service'
+}
+
 # --- (p) operator scaffolding present (#791) ---------------------------------------------------
 
 # imag_openbox_menu_looks_valid TEXT -> 0 iff TEXT (the ~/.config/openbox/menu.xml contents) is
@@ -603,6 +622,15 @@ missing_tool() { printf "  ${RED}[FAIL]${NC} MISSING TOOL: %s -- refusing to run
 ssh_box() {
   sshpass -p "$IMAG_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout="$SSH_TIMEOUT" \
     "${IMAG_USER}@${IMAG_IP}" "$1"
+}
+
+# ssh_box_timeout SECONDS CMD -- like ssh_box but with a HARD execution timeout (#890). ssh's own
+# ConnectTimeout bounds only the connect phase, never remote command runtime, so a remote command
+# that never returns hangs forever (exactly the check (o) bug). `timeout` bounds the whole ssh
+# invocation; a timed-out call exits 124, which the caller treats as a loud FAIL, never a hang.
+ssh_box_timeout() {
+  timeout "$1" sshpass -p "$IMAG_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout="$SSH_TIMEOUT" \
+    "${IMAG_USER}@${IMAG_IP}" "$2"
 }
 
 # (a) hostname + static IP -------------------------------------------------------------------
@@ -1096,10 +1124,17 @@ fi
 # establishing the very condition it then asserted, so it would pass even on a box that comes up
 # with ZERO projectors every single boot (the exact live symptom this ticket fixes). It now (1)
 # reads the CURRENT state with no side effect and FAILS if it isn't already exactly 1+1, and (2)
-# restarts OBS through the box's OWN operator scripts (imag-obs-stop.sh + imag-obs-start.sh -- the
-# SAME path a real reboot / the operator's manual "Spustit OBS" menu uses) and re-counts, to
-# actually prove the projectors PERSIST across a real restart rather than merely CAN be opened
-# once from dev1.
+# restarts OBS and re-counts, to actually prove the projectors PERSIST across a real restart rather
+# than merely CAN be opened once from dev1.
+# #890: the restart goes through imag-obs.service (imag_obs_service_restart_cmd) wrapped in a HARD
+# execution timeout -- NOT a direct imag-obs-stop.sh/imag-obs-start.sh ssh call. Since #882 that
+# wrapper blocks on `wait "$OBS_PID"` (correct for the Type=simple unit systemd owns), so invoking
+# it DIRECTLY over ssh never returned and hung this whole gate forever. Since #884 the box's OWN
+# boot path IS the unit (check (t) above asserts it), so the service restart is both the
+# operator-faithful "real restart" #840 wants AND non-hanging -- and it keeps the new obs supervised
+# inside the unit's cgroup. `systemctl --user restart` returns as soon as the unit re-forks obs, so
+# the projectors reappear only afterward (obs launch + WS + seed + projector-open, ~90s budget); a
+# BOUNDED poll waits for the 1+1 to come back and FAILs loud on expiry, never an unbounded wait.
 rc=0
 WMCTRL_PATH="$(ssh_box "command -v wmctrl 2>/dev/null")" || rc=$?
 if [ "$rc" -ne 0 ] || [ -z "$WMCTRL_PATH" ]; then
@@ -1114,16 +1149,34 @@ else
   fi
 
   rc=0
-  RESTART_OUT="$(ssh_box "/usr/local/bin/imag-obs-stop.sh && /usr/local/bin/imag-obs-start.sh" 2>&1)" || rc=$?
-  if [ "$rc" -ne 0 ]; then
-    fail "OBS restart via imag-obs-stop.sh + imag-obs-start.sh failed (rc=$rc): $(printf '%s' "$RESTART_OUT" | tr '\n' ' ')"
+  RESTART_OUT="$(ssh_box_timeout "$IMAG_OBS_RESTART_TIMEOUT" "$(imag_obs_service_restart_cmd)" 2>&1)" || rc=$?
+  if [ "$rc" -eq 124 ]; then
+    fail "OBS restart via 'systemctl --user restart imag-obs.service' TIMED OUT after ${IMAG_OBS_RESTART_TIMEOUT}s -- the unit did not re-activate (#890): $(printf '%s' "$RESTART_OUT" | tr '\n' ' ')"
+  elif [ "$rc" -ne 0 ]; then
+    fail "OBS restart via 'systemctl --user restart imag-obs.service' failed (rc=$rc): $(printf '%s' "$RESTART_OUT" | tr '\n' ' ') (#890)"
   else
-    MV_COUNT2="$(ssh_box "DISPLAY=:0 wmctrl -l 2>/dev/null | grep -c 'Projector - Multiview' || true")"
-    PGM_COUNT2="$(ssh_box "DISPLAY=:0 wmctrl -l 2>/dev/null | grep -c 'Projector - Program' || true")"
-    if imag_projector_counts_ok "${MV_COUNT2:-0}" "${PGM_COUNT2:-0}"; then
-      ok "projectors PERSIST across a real OBS restart: exactly 1 Multiview + 1 Program after imag-obs-stop.sh + imag-obs-start.sh (#840)"
+    # systemctl restart returns once the Type=simple unit re-forks obs; the projectors come back
+    # only after obs launches + seeds. Poll BOUNDED for the 1+1 to reappear; FAIL loud on expiry.
+    persist_ok=0
+    MV_COUNT2=0
+    PGM_COUNT2=0
+    poll_deadline=$((SECONDS + IMAG_OBS_PROJECTOR_POLL_S))
+    while :; do
+      MV_COUNT2="$(ssh_box_timeout "$SSH_TIMEOUT" "DISPLAY=:0 wmctrl -l 2>/dev/null | grep -c 'Projector - Multiview' || true" 2>/dev/null || echo 0)"
+      PGM_COUNT2="$(ssh_box_timeout "$SSH_TIMEOUT" "DISPLAY=:0 wmctrl -l 2>/dev/null | grep -c 'Projector - Program' || true" 2>/dev/null || echo 0)"
+      if imag_projector_counts_ok "${MV_COUNT2:-0}" "${PGM_COUNT2:-0}"; then
+        persist_ok=1
+        break
+      fi
+      if [ "$SECONDS" -ge "$poll_deadline" ]; then
+        break
+      fi
+      sleep 5
+    done
+    if [ "$persist_ok" -eq 1 ]; then
+      ok "projectors PERSIST across a real OBS restart: exactly 1 Multiview + 1 Program after 'systemctl --user restart imag-obs.service' (#840/#890)"
     else
-      fail "projectors did NOT persist across a real OBS restart -- Multiview=${MV_COUNT2:-0} Program=${PGM_COUNT2:-0} after restart (#840)"
+      fail "projectors did NOT persist across a real OBS restart within ${IMAG_OBS_PROJECTOR_POLL_S}s -- Multiview=${MV_COUNT2:-0} Program=${PGM_COUNT2:-0} after 'systemctl --user restart imag-obs.service' (#840/#890)"
     fi
   fi
 fi
