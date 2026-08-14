@@ -2,6 +2,7 @@
 paths:
   - "scripts/imag-obs-start.sh"
   - "scripts/imag-obs-stop.sh"
+  - "scripts/imag_scenes.py"
   - "scripts/imag-wallpaper-refresh.sh"
   - "scripts/imag-obs-alert-watchdog.sh"
   - "scripts/lib/imag-obs-reachability.sh"
@@ -136,3 +137,36 @@ obs PID's own `/proc/<pid>/cgroup` and requires an `imag-obs.service` path compo
 RUNNING process is the supervised one, independent of what systemd's own is-enabled/is-active
 bookkeeping claims (that bookkeeping can be entirely correct while the actual running process,
 launched by a bypassed recovery instruction, sits outside the unit).
+
+## Anything run on the imag OBS START path (`imag_scenes.py --bootstrap`) must NEVER be able to abort — a SystemExit / uncaught exception there restart-LOOPS OBS on the live projection (#866)
+
+`imag-obs-start.sh` is `imag-obs.service`'s `ExecStart`, runs under `set -euo pipefail`, and calls
+`python3 /usr/local/bin/imag_scenes.py --bootstrap` on every fresh OBS instance (boot autostart,
+operator "Spustit OBS", and the systemd `Restart=on-failure` relaunch). So a bootstrap step that
+`sys.exit()`s or lets a WebSocket error (a #328 socket-timeout/closed-connection RAISE, not just an
+error-result) propagate uncaught → `imag_scenes.py` exits non-zero → `set -e` aborts the start
+script → systemd sees ExecStart fail → `Restart=on-failure` relaunches → the SAME transient fails
+again → **OBS flaps up/down forever on the LIVE IMAG projection**, the worst possible outcome (worse
+than the thing the step was trying to fix). Any WS-touching bootstrap addition must be **best-effort:
+wrap the whole WS body in `try/except Exception` → print a LOUD warning (captured to
+`/tmp/imag-obs-start.log`) → return**, leaving OBS up. Mirror `obs_burn_filter.py::_all_ndi_inputs`'
+own try/except. This is the imag-start counterpart of the #788 "watchdog fought the operator" lesson
+already in this rule: never let a self-heal/enforcement step take the live box down.
+
+## A measurement burn (`genlock_burn`) PERSISTS to disk in the saved scene collection — it resurrects ON after ANY OBS restart, so force it OFF at OBS START, not just at gate cleanup (#866)
+
+The per-source `genlock_burn` bool is written into OBS's saved scene collection
+(`~/.config/obs-studio/basic/scenes/*.json`); turning it OFF is only ever a RUNTIME WebSocket change
+(the gate cleanup / `obs_burn_filter.py remove`), and OBS writes the collection to disk only on a
+clean exit. So an OBS crash/reboot/manual restart reloads `genlock_burn=true` and RENDERS the QR
+measurement burn onto the live IMAG projection. The `[0/8]` exhaustive `sweep-off` only runs during a
+dev1 gate run — NOT on the box's own restart — so it does not cover the unattended-restart window.
+`imag_scenes.py`'s `clear_measurement_burns()` (called on the `--bootstrap` path) forces every
+`ndi_source` input's burn OFF at every fresh instance (enumerated from `GetInputList`, never a
+static/CAMS list — the burn-target-enumeration rule). A burn is never legitimate operator state, so
+clearing it at bootstrap never fights the operator (unlike the #785/#783 bindings/transforms, which
+this same file's `seed()` deliberately preserves). The general reflex: any state that OBS PERSISTS
+and that a measurement/gate turns on at runtime must be reset at OBS START, or it survives the next
+restart. **Follow-up (#1057):** strih (Windows OBS) has the identical resurrection on a different
+start path, and the broader "verify whole runtime state at start + report drift LOUD" (burns OFF +
+latency pins) is filed separately — not solved here.

@@ -4,6 +4,8 @@ paths:
   - "scripts/imag-power-envelope.sh"
   - "scripts/imag-power-envelope-guard.sh"
   - "scripts/imag-power-envelope-alert-watchdog.sh"
+  - "scripts/imag-obs-watchdog.py"
+  - "tests/python/test_imag_obs_watchdog_snapshot_849.py"
   - "tests/harness_imag_power_envelope_1040.rs"
   - "systemd/imag-power-envelope-alert-watchdog.service"
   - "systemd/imag-power-envelope-alert-watchdog.timer"
@@ -87,3 +89,23 @@ assertion — do NOT insert into the middle (renumbering 17 steps would collide 
 units via unquoted heredocs (`Environment=IMAG_PL1_W=${IMAG_PL1_W:-29}`); the timer heredoc is
 single-quoted (no expansion). Root SYSTEM units (`/etc/systemd/system/`), not user units — sysfs
 writes need root, unlike the user-level `imag-obs.service`.
+
+## The i915 wedge-forensic surface (#849) — same sysfs, and what NOT to use
+
+`imag-obs-watchdog.py`'s tier-b wedge `snapshot()` is now hardware-aware (#849): it reads local
+`lspci -nn` once and branches (discrete NVIDIA → nvidia-smi forensics with a DERIVED PCI address,
+never the old hardcoded `0000:01:00.0`; no-dGPU → the i915 surface). The i915 forensic surface is
+the SAME sysfs this rule already documents — GLOB the card path (`/sys/class/drm/card*/gt/gt*/`,
+never `card1`; the presenter-drm cardN-renumbering hazard): `rps_act_freq_mhz` (act << max = the
+clamp signature), the `throttle_reason_*` set (`pl1`/`thermal`/`prochot`/`status`, `1`=active — the
+same PL1-clamp discriminator this rule's guard keys on), RAPL-mmio `package-0`, `fuser /dev/dri`.
+
+**`intel_gpu_top` is DELIBERATELY NOT used as a forensic surface on this box** — it is installed
+(`/usr/bin/intel_gpu_top`, intel-gpu-tools **1.28**) but **core-dumps** in EVERY output mode
+(`-c`/`-l`/`-J`, with or without `-o -`): `get_num_gts: Assertion '!errno || errno == ENOENT'
+failed` (`../tools/intel_gpu_top.c:557`, exit 134). A `command -v intel_gpu_top` guard passes and it
+STILL core-dumps, so only a live-works test justifies inclusion (the never-invent-by-analogy rule).
+The working sysfs freq+throttle read gives the clamp/starvation signal instead; a genuine i915 hang
+shows in the render-thread kernel stacks + `dmesg` (both generic, kept). The hardware detector is the
+SAME `imag_has_discrete_nvidia` regex `setup-imag.sh` + `imag_scenes.py` share (a THIRD mirrored
+copy in the watchdog, parity-tested — the deploy dirs differ so it can't be imported).

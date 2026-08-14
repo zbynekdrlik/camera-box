@@ -8300,3 +8300,73 @@ bundle-state-server deployed to both boxes.
   still fails). Version 1.7.0-dev.454.
 - Gotcha logged to `.claude/rules/dantesync-clock-offset-gate.md`: journal fixture env is a FILE
   PATH (not content); distinct `updated_ts` per HTTP sample; awk-rewrite drops the script +x bit.
+
+## 2026-08-14 — round-9 integration (PR 1056: 8 lanes, 10 tickets closed) — the ±20 milestone run
+- Merged 8 worktree branches serially (857+850, 859-instrument, 916-docs, 938+1011, 946+910, 1004, 1052, 1055); full suite 210 binaries green on the merged state; one GitHub-infra 429 setup transient rerun.
+- The PR's green gate measured A/V +6.4/-0.6/-9.5 ms — the FIRST run inside the target ±20 band, with copies/gaps tolerance 2, zero windows over.
+- The slew-aware gate sampling (ticket 1055) removes the day's dominant false-refusal source; the burn enumeration (938+1011) closes the live-QR-on-air hole; forensics (946+910) complete the restart attribution; painter EXONERATED on the shared-duplicate residual (859 instrument, ticket open for the downstream walk).
+- frozen-input watchdog installed+running on dev1 (first pass clean). Worktrees pruned to zero.
+
+## 2026-08-14 — #849 + #846 (worktree autopilot-849): imag NVIDIA-hardcode bundle (iGPU-only box)
+- Class: incumbent-NVIDIA-box assumptions left over after the notebook swap (#816), same family as #845 (headroom preflight) / #847 (RecEncoder). Live-confirmed the active imag box is Intel iGPU-only (i915 card1, no nvidia-smi, `throttle_reason_*`+`rps_act_freq_mhz` readable, `intel_gpu_top` installed but core-dumps on intel-gpu-tools 1.28, RAPL-mmio package-0 present).
+- **#849** — `scripts/imag-obs-watchdog.py` `snapshot()` unconditionally shelled `nvidia-smi` x3 + `fuser /dev/nvidia*` + hardcoded PCI `0000:01:00.0`. Fix: hardware-aware branch. New pure helpers mirror the SAME `imag_has_discrete_nvidia` regex setup-imag.sh + imag_scenes.py share (parity-tested), derive PCI addr from lspci (never hardcode), and build box-appropriate forensics. no-dGPU branch = live-verified i915 surface (globbed `card*/gt/gt*` rps_*_freq_mhz + throttle_reason_* [the power-clamp discriminator] + RAPL-mmio package-0 + fuser /dev/dri). `intel_gpu_top` EXCLUDED — it core-dumps on this box (the never-invent-by-analogy discipline). Every forensic cmd now timed uniformly (the GSP-RPC/hang discriminator generalizes). RED→GREEN: tests/python/test_imag_obs_watchdog_snapshot_849.py (13). Full tests/python green (781), pyflakes clean.
+- **#846** — `scripts/imag-gpu-contention-sampler.sh` (#674) hard-required nvidia-smi. Resolution: RETIRED (deleted), not ported — a one-shot diagnostic for a hypothesis already REJECTED live (GPU util/VRAM/encoder-sessions flat, no correlation with judder), sampling NVENC/dGPU-VRAM concepts with no iGPU equivalent; the real cause was later found + is continuously monitored (the #1040 power-envelope guard). Zero callers. Updated the two live doc pointers (e2e SKILL.md technique section → retired+finding preserved; imag-nb-provisioning sweep note → resolved-by-retirement); historical log entries left intact. RED→GREEN: tests/harness_imag_gpu_contention_sampler_retired_846.rs (4 guards).
+- Bundle: one dev branch, version 1.7.0-dev.455. Tier-0 green (fmt/check/clippy --all-targets/test --no-run). Fresh-context review 0🔴 0🟡 0🔵. GOTCHA re-confirmed: intel_gpu_top 1.28 core-dumps (get_num_gts assertion) → don't use it as a forensic surface on this box.
+
+## 866 + 902 — burn-persistence / TEST-parking preflight family (worktree autopilot-866)
+
+- **902 (Parking the rig in TEST arms a [0/8] preflight abort) — OVERCOME, closed with evidence, no
+  code.** Validated against post-938/1011 dev: the old `[0/8]` hard-abort on burns-ON
+  (`genlock_burn is still ON from a prior run` + `exit 1`) is GONE — issue 924 made `[0/8]`
+  NORMALIZE a leaked burn (`obs_burn_filter.py remove`) instead of aborting, and issue 1011 added
+  the exhaustive `sweep-off` on strih/stream/imag. The two remaining `[0/8]` `exit 1`s are the
+  stray-recording/streaming checks (which 902 explicitly said must stay). The interim manual-clear
+  protocol is now automated. Leak-detection responsibility correctly moved to rig-mode's EVENT
+  burns-off contract (fail-closed), not `[0/8]`. Regression lock already exists
+  (`recording_e2e_burn_off_preflight_normalizes_instead_of_aborting_924`).
+
+- **866 (imag genlock_burn resurrects ON after any OBS restart) — imag half FIXED.** Root cause: the
+  per-source `genlock_burn` bool persists into OBS's saved scene collection; a runtime OFF (gate
+  cleanup / WS remove) is never written to disk, so an OBS crash/reboot/manual restart reloads
+  `true` and renders the QR burn onto the LIVE IMAG projection. The `[0/8]` exhaustive sweep only
+  runs during a dev1 gate run, never on the box's OWN restart. Fix: force measurement burns OFF at
+  imag OBS start in `imag_scenes.py --bootstrap` (the seam `imag-obs-start.sh` runs on every fresh
+  instance — boot autostart, operator start, systemd Restart=on-failure). New pure
+  `ndi_source_names()` (enumerate ndi_source inputs from GetInputList — NEVER a static/CAMS list,
+  burn-target-enumeration rule) + `clear_measurement_burns()` (clear genlock_burn=false on every ON
+  ndi input, read-back verify). Bootstrap-gated (like the 785 self-heal) so a bare reseed never
+  nukes a burn a gate run set mid-measurement.
+- **Standalone-seam decision:** `imag_scenes.py` is fetched standalone to `/usr/local/bin` and
+  cannot import `obs_burn_filter.py` (not deployed to the box), so the tiny enumerate+clear is
+  reimplemented locally — the SAME established imag precedent as `imag_latency_enforce.py`'s own
+  `list_ndi_inputs`. The "route through ONE seam" rule is `paths:`-scoped to the shell consumers
+  (rig-mode, recording-e2e), not this box script.
+- **TDD:** RED `7c7951163` (functions absent → AttributeError) → GREEN `17ed4ce9c` → review-fix
+  `57c43157a`. 9 pytest cases (pure enumerator + fake-WS clear: clears only ON, overlay merge,
+  no-op when none ON, warn-not-abort on enum-failure / WS-raise-during-enum / WS-raise-mid-sweep /
+  stuck-clear). No `.sh` touched → no static-anchor risk, no full-suite requirement; Python-only.
+- **Review round (fresh-context general-purpose, 0🔴 1🟡 2🔵):** the 🟡 was real and fixed — an
+  uncaught WS exception (the 328 timeout-raise class) from `GetInputList` would propagate out and
+  crash `imag-obs-start.sh` under `set -euo pipefail` (the exact "take OBS down on a transient
+  hiccup" outcome the code prevents). Hardened the WHOLE sweep body in try/except → warn-and-return,
+  and made the stuck-clear path also warn-not-`sys.exit` (a `sys.exit` under systemd
+  Restart=on-failure = OBS restart loop). `clear_measurement_burns` now can NEVER abort OBS start;
+  the gate `[0/8]` sweep-off stays the authoritative fail-closed backstop.
+- **Scope split (filed 1057):** the strih (Windows OBS) restart-resurrection + the "verify whole
+  runtime state at start and report drift LOUD" design (burns OFF + latency pins on both boxes) are
+  genuinely separate (different box/OS, no imag_scenes equivalent on strih) — filed as a tracked
+  follow-up, not bundled. Version 1.7.0-dev.455.
+
+## 2026-08-14 — #874 send-side NDI audit PARSER seam (worktree autopilot-874)
+- Validation: the #874 emit-side C++ ALREADY LANDED on dev (feat commits 337136174 ndi-output.cpp + f718cf919 ndi-filter.cpp, both ancestors of base 408279d49). The still-valid remaining leg of the ticket's `cross-cutting` scope-gate was the third one — "the rig-side tooling that parses these audit lines" — absent in src/jitter_audit.rs + src/bin/genlock-jitter-report.rs. Emitting C++ left untouched.
+- Added the send-side parser twin in src/jitter_audit.rs: SendAuditKind/SendAuditSample/SendAuditSummary + parse_send_audit_line/parse_send_audit_lines/summarize_send/summarize_send_all, mirroring the input-side parse_audit_line/summarize. Window deltas delta_dropped (offered-minus-sent) vs delta_send_wait_ms are the issue-707 discriminator (blocking send vs frames-never-offered); filter-only mutex-wait pair carried through.
+- Surfaced additively in genlock-jitter-report (text-mode send-side table); the --json #757 calibrator contract stays input-side only, byte-for-byte; no-lines error now accepts either kind.
+- RED→GREEN: 10 new Tier-0 tests in tests module of src/jitter_audit.rs (both line kinds, name-with-space, cross-parse rejection both directions, window-delta math, blocking-vs-upstream discriminator, mutex deltas, first-seen grouping, empty/single/underflow). RED commit 5690908cb (10 failed on stubs), GREEN 53e4a0675. Full lib suite 1068 passed; clippy -D warnings clean; fmt clean. Version 1.7.0-dev.455.
+- Review (fresh general-purpose, Opus 4.8): 0 red 0 yellow, 4 blue; 3 in-diff blue fixed in db502f1a4 (single-parse json path, clearer json error, derived-dropped note); 2 left with reasoning (pre-existing apostrophe-in-name limitation shared with input parser; CLI integration test matches existing posture).
+- Playbook: new .claude/rules/jitter-audit-parser.md (two coexisting parser families; new-line-kind recipe; the --json contract landmine) + router line.
+
+## 2026-08-14 — #890 verify-imag.sh hang fixed (worktree autopilot-890)
+- Root cause: check (o)'s persistence-proof restarted OBS with a DIRECT ssh call `imag-obs-stop.sh && imag-obs-start.sh`; since issue 882 that wrapper ends in `wait "$OBS_PID"` (correct for the Type=simple imag-obs.service), so the direct ssh call never returned (ssh_box has no execution timeout) and hung the whole acceptance gate forever.
+- Fix (RED eb61d544e / GREEN bf11ee2e5 / review-fix 6796e14d4): new pure `imag_obs_service_restart_cmd` (systemctl --user restart imag-obs.service + XDG_RUNTIME_DIR) + new `ssh_box_timeout` execution-timeout wrapper; check (o) restarts via the service (systemd owns the wait → returns promptly + keeps obs supervised) wrapped in IMAG_OBS_RESTART_TIMEOUT (60), then a BOUNDED poll (IMAG_OBS_PROJECTOR_POLL_S, 120) for the projectors, FAIL-loud on expiry. Before/after wmctrl reads bounded too.
+- Tests: re-anchored the 3 issue-884/1015/1040 ordering tests + inverted the check-(o) restart tests + a new pure-fn test in verify_imag_pure_functions.rs (47/47 green); sibling imag harnesses green, no anchor collisions; shellcheck clean.
+- Review 0🔴0🟡1🔵 (the 🔵 fixed same-branch). Whole-file ssh-read hardening filed as a cross-cutting follow-up (issue 1058). Playbook (imag-nb-provisioning.md) updated: hang RESOLVED + bounded-probe/ssh_box_timeout lesson.
