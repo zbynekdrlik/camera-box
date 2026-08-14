@@ -3238,3 +3238,145 @@ fn gate_resampled_round_that_shows_a_clean_chase_signature_is_also_excused_1022(
     );
     let _ = stderr;
 }
+
+// --- #1055: slew-aware CLIENT rescue via journal step-correlation (end-to-end) ----------------
+//
+// A CLIENT sampled by HTTP whose 30 s window lands in a master deadband-slew plateau reads a
+// majority-elevated set -> the median DRIFTs. When the master's own /status is unreadable at
+// gate-prime time (the ~50% intermittency), the #1022 widening never applies and the client
+// false-DRIFTs. The client's OWN journal proves the spikes are step-correlated transients and its
+// step-excluded baseline is us-grade -> the gate must PASS. A genuine sustained desync (the
+// step-excluded baseline is itself elevated, or nothing survives) must still FAIL. Journals are
+// injected via DANTESYNC_GATE_LINUX_JOURNAL_CAM1 (the pre-captured live 2026-08-14 shape).
+
+const GATE_JOURNAL_SLEW_TRANSIENT_CAM1: &str = "\
+2026-08-14T12:49:30+00:00 CAM1 dantesync[703]: [NTP] offset:+2740us (threshold:585us, adaptive)
+2026-08-14T12:49:30+00:00 CAM1 dantesync[703]: [NTP] step candidate +2740us (threshold:585us) — awaiting 1 agreeing sample(s)
+2026-08-14T12:50:00+00:00 CAM1 dantesync[703]: [NTP] offset:+2776us (threshold:585us, adaptive)
+2026-08-14T12:50:00+00:00 CAM1 dantesync[703]: [NTP] Stepped +2776us
+2026-08-14T12:50:30+00:00 CAM1 dantesync[703]: [NTP] offset:-29us
+2026-08-14T12:51:00+00:00 CAM1 dantesync[703]: [NTP] offset:-32us
+2026-08-14T12:51:30+00:00 CAM1 dantesync[703]: [NTP] offset:-36us (threshold:515us, adaptive)
+2026-08-14T12:52:00+00:00 CAM1 dantesync[703]: [NTP] offset:+3229us (threshold:535us, adaptive)
+2026-08-14T12:52:00+00:00 CAM1 dantesync[703]: [NTP] step candidate +3229us (threshold:535us) — awaiting 1 agreeing sample(s)
+2026-08-14T12:52:31+00:00 CAM1 dantesync[703]: [NTP] offset:+3331us (threshold:535us, adaptive)
+2026-08-14T12:52:31+00:00 CAM1 dantesync[703]: [NTP] Stepped +3331us
+2026-08-14T12:53:01+00:00 CAM1 dantesync[703]: [NTP] offset:-114us
+2026-08-14T12:53:31+00:00 CAM1 dantesync[703]: [NTP] offset:-111us
+2026-08-14T12:54:01+00:00 CAM1 dantesync[703]: [NTP] offset:-113us (threshold:505us, adaptive)
+2026-08-14T12:54:07+00:00 CAM1 dantesync[703]: [PTP] LOCK  Drift:  -0.5us/s  Adj: -14.4ppm
+";
+
+// Genuine sustained desync: every offset ~+3000us, the daemon step-candidating/Stepping every
+// cycle -- so every sample is step-adjacent and NOTHING survives exclusion.
+const GATE_JOURNAL_SUSTAINED_DRIFT_CAM1: &str = "\
+2026-08-14T13:00:00+00:00 CAM1 dantesync[703]: [NTP] offset:+3200us (threshold:520us, adaptive)
+2026-08-14T13:00:00+00:00 CAM1 dantesync[703]: [NTP] step candidate +3200us (threshold:520us) — awaiting 1 agreeing sample(s)
+2026-08-14T13:00:30+00:00 CAM1 dantesync[703]: [NTP] offset:+3205us (threshold:520us, adaptive)
+2026-08-14T13:00:30+00:00 CAM1 dantesync[703]: [NTP] Stepped +3205us
+2026-08-14T13:01:00+00:00 CAM1 dantesync[703]: [NTP] offset:+3210us (threshold:520us, adaptive)
+2026-08-14T13:01:00+00:00 CAM1 dantesync[703]: [NTP] step candidate +3210us (threshold:520us) — awaiting 1 agreeing sample(s)
+2026-08-14T13:01:30+00:00 CAM1 dantesync[703]: [NTP] offset:+3215us (threshold:520us, adaptive)
+2026-08-14T13:01:30+00:00 CAM1 dantesync[703]: [NTP] Stepped +3215us
+2026-08-14T13:02:00+00:00 CAM1 dantesync[703]: [NTP] offset:+3220us (threshold:520us, adaptive)
+2026-08-14T13:02:00+00:00 CAM1 dantesync[703]: [NTP] step candidate +3220us (threshold:520us) — awaiting 1 agreeing sample(s)
+";
+
+#[test]
+fn gate_rescues_a_client_master_slew_transient_via_journal_step_correlation_1055() {
+    // 6 HTTP samples land in the slew plateau: 1 baseline (+14) + 5 spike -> median +2759us ->
+    // drift_unstable at the bare 2000us bound. --ntp-master "" opts OUT of the master concept
+    // (equivalent to the master's /status being unreadable -> no #1022 widening). WITHOUT the fix
+    // this DRIFTs (code 20); WITH the journal step-correlation rescue the gate PASSES (0), because
+    // cam1's own journal proves the spikes are step-transients and the baseline is us-grade.
+    let base = now_epoch();
+    let responses = vec![
+        http_status_ntp(base, 14, "25", false),
+        http_status_ntp(base + 1, 2740, "25", false),
+        http_status_ntp(base + 2, 2776, "25", false),
+        http_status_ntp(base + 3, 3229, "25", false),
+        http_status_ntp(base + 4, 3254, "25", false),
+        http_status_ntp(base + 5, 2759, "25", false),
+    ];
+    let p = write_multi_read_fixture("cam1_slew_transient_1055", &responses);
+    let j = write_dante_journal("cam1_slew_transient_1055", GATE_JOURNAL_SLEW_TRANSIENT_CAM1);
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "cam1=10.77.9.61",
+            "--ntp-master",
+            "",
+            "--samples",
+            "6",
+            "--min-distinct",
+            "3",
+            "--window-s",
+            "0",
+        ],
+        &[
+            ("DANTESYNC_GATE_LINUX_HTTP_CAM1", &p.display().to_string()),
+            (
+                "DANTESYNC_GATE_LINUX_JOURNAL_CAM1",
+                &j.display().to_string(),
+            ),
+        ],
+    );
+    assert_eq!(
+        code, 0,
+        "#1055: a client whose HTTP median lands in a master step-chase plateau, whose own \
+         journal proves the spikes are step-correlated transients over a us-grade baseline, must \
+         PASS. stdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        stdout.contains("cam1") && stdout.contains("OK"),
+        "cam1 must report OK: {stdout}"
+    );
+}
+
+#[test]
+fn gate_still_fails_a_genuine_sustained_client_desync_with_the_slew_rescue_1055() {
+    // Adversarial: 6 HTTP samples ALL elevated (~+3200us) -> median drifts, AND cam1's journal is
+    // a sustained desync (stepping every cycle, nothing survives exclusion). The rescue must NOT
+    // mask it -> the gate still FAILS (20).
+    let base = now_epoch();
+    let responses = vec![
+        http_status_ntp(base, 3200, "25", false),
+        http_status_ntp(base + 1, 3205, "25", false),
+        http_status_ntp(base + 2, 3210, "25", false),
+        http_status_ntp(base + 3, 3215, "25", false),
+        http_status_ntp(base + 4, 3220, "25", false),
+        http_status_ntp(base + 5, 3225, "25", false),
+    ];
+    let p = write_multi_read_fixture("cam1_sustained_drift_1055", &responses);
+    let j = write_dante_journal(
+        "cam1_sustained_drift_1055",
+        GATE_JOURNAL_SUSTAINED_DRIFT_CAM1,
+    );
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "cam1=10.77.9.61",
+            "--ntp-master",
+            "",
+            "--samples",
+            "6",
+            "--min-distinct",
+            "3",
+            "--window-s",
+            "0",
+        ],
+        &[
+            ("DANTESYNC_GATE_LINUX_HTTP_CAM1", &p.display().to_string()),
+            (
+                "DANTESYNC_GATE_LINUX_JOURNAL_CAM1",
+                &j.display().to_string(),
+            ),
+        ],
+    );
+    assert_eq!(
+        code, 20,
+        "#1055: a genuine sustained desync (no step-excluded baseline survives) must still FAIL, \
+         never be masked by the slew rescue. stdout={stdout} stderr={stderr}"
+    );
+    assert!(stderr.contains("GATE FAILED"), "stderr: {stderr}");
+}

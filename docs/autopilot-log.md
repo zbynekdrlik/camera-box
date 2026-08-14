@@ -8276,3 +8276,27 @@ probe. shellcheck -x clean on both scripts.
 **Future enhancement (recorded, not built):** surface `received=` from the `:8899` bundle-state
 server so dev1 reads it via HTTP GET (retiring the ssh read) — deferred, needs an updated
 bundle-state-server deployed to both boxes.
+
+## 1055 — dantesync-gate client rows slew-aware (master-independent journal step-correlation)
+
+- Root cause: a CLIENT's 6-sample HTTP median lands in a master deadband-slew plateau (+2.7–3.3 ms
+  transient, ~30–60 s) → drift_unstable. The #1022/#1041 client widening only covers this when the
+  Windows master's `/status` is readable at gate-prime time (~50 % flaky live); when empty, the
+  client is graded on the bare 2000 µs bound and false-DRIFTs. chase_bimodal only rescues an
+  `unstable` (median-in-bound) verdict, never median-out-of-bound.
+- Fix: `slew_transient_exclusion_verdict` / `slew_excluded_survivors_us` /
+  `_newest_correction_epoch` / `slew_transient_exclusion_check` in `scripts/clock-offset-guard.sh`.
+  The client's OWN journal co-timestamps each slew-transient `[NTP] offset:` sample with a
+  `[NTP] (Stepped|step candidate)` marker; exclude samples within `--slew-step-window-s` (5 s) of a
+  marker and pass only when the POST-most-recent-correction survivors (≥1, `--slew-min-surviving`=3
+  window-sanity total) have a median in bound. Wired into `grade_http_node` as a linux-client rescue
+  consulted only when the raw verdict is drift/drift_unstable and chase_bimodal said no.
+- Adversarial review (fresh-context, 0🔴 1🟡 1🔵) found + I fixed the onset-drift masking hole:
+  grade only survivors NEWER than the newest correction marker (proof the clock returned to µs-grade
+  AFTER its last correction), so pre-onset baseline can't dilute an ongoing drift's median.
+- Calibrated from today's live cam1/cam2 journals (spikes each bracketed by step markers, baseline
+  µs; window insensitive at 5/10/20 s). RED→GREEN: tests/clock_offset_guard.rs (10 slew tests incl.
+  onset-drift + recency-floor) + tests/dantesync_gate.rs (2 e2e: transient rescued, sustained desync
+  still fails). Version 1.7.0-dev.454.
+- Gotcha logged to `.claude/rules/dantesync-clock-offset-gate.md`: journal fixture env is a FILE
+  PATH (not content); distinct `updated_ts` per HTTP sample; awk-rewrite drops the script +x bit.
