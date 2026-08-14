@@ -8028,3 +8028,26 @@ ssh-ing IN (impossible against an off-network box).
   in `harness_cam2_painter_provisioning_863.rs`. FULL `cargo test` suite green: 205 binaries, 0
   FAILED (mandatory after a rig-mode.sh edit — no anchor collisions). shellcheck -x clean on all
   touched scripts. Playbook: new `.claude/rules/cam2-painter-lifecycle.md` + router entry.
+
+## 2026-08-14 — issue 916: rig→dev1 silent-drop VALIDATED CLOSED (no longer reproduces) + docs sync (docs-only)
+- **Validate-first**: reproduced LIVE from CAM1 (10.77.9.61) → dev1's CURRENT rig IP (drifted to
+  10.77.9.103 on enp2s0). Ping 3/3 0% loss; dev1 tcpdump shows an ICMP echo REPLY for every
+  request; a full TCP 3-way handshake to a fresh `nc -l 0.0.0.0 9916` listener completes
+  (S/S./ack/clean FIN). The 2026-08-01 symptom (ICMP arrives, kernel silently drops, no reply) is
+  GONE. → closed with evidence (validator obsolete path; user's auto-close-overcome preference).
+- **Root cause (inferred, consistent)**: dev1 multi-homed on the rig L2 via two NICs — enp1s0
+  (MAC …c0, the incident NIC at .100) + enp2s0 (MAC …c1). Packet arrived on the ARP'd NIC while
+  the kernel reply path resolved to the other → asymmetric-path silent drop (classic rp_filter /
+  ARP-flux multi-homing failure). Resolved by the environment: enp1s0 is now DOWN/NO-CARRIER (rig
+  on a single clean enp2s0), and rp_filter is persistently LOOSE (=2, /etc/sysctl.d/10-network-
+  security.conf), which cannot silent-drop a source reachable via any iface.
+- **No kernel/sysctl change applied** — rp_filter already loose+persistent and the incident NIC
+  already down; a redundant nft/sysctl rule would be a patch on a non-problem (rejected — would
+  change host-wide policy the tailscale/wg/zerotier ifaces rely on, for a bug that no longer
+  exists). Belt-and-braces dev1-initiated deploys retained at zero blast radius.
+- **Docs synced**: `.claude/skills/genlock/SKILL.md` (deploy-transfer bullet) + two notes in
+  `.claude/rules/rig-state-inspection.md` now record box-pull works, keep dev1-initiated as the
+  default, and correct the drifted IP/NIC (enp2s0/.103). Docs-only PR; self-review (no repo code).
+  Version bump 1.7.0-dev.453. Observation (not this bug, out of scope): a uvicorn service binds
+  :8791 on the tailscale IP only, not the rig IP — a service-binding matter, distinct from the
+  kernel drop.

@@ -94,15 +94,18 @@ Trap 1 above says a merged `vendor/<plugin>/**` change is not live. This is the 
 DEPLOYS it, run end-to-end over plain ssh (no MCP, no dev1 HTTP server) against both strih
 (10.77.9.202) and stream (10.77.9.204) — confirmed working cleanly on both boxes. See
 `.claude/skills/genlock/SKILL.md`'s FULL-BUNDLE runbook for the win-* MCP variant and its own
-note that a box cannot pull FROM dev1 over HTTP (dev1-initiated push only, #912 session); this is
-the plain-ssh counterpart of that same runbook.
+note on the dev1-initiated push default (#912 session). NOTE: the rig→dev1 silent-drop that
+originally forced dev1-initiated-only was VALIDATED CLOSED 2026-08-14 (issue 916 — it no longer
+reproduces; the incident NIC enp1s0 is down and rp_filter is loose), so box-pull FROM dev1 now
+works; dev1-initiated push is kept here as the belt-and-braces default, not a hard necessity.
 
 1. `gh run download <windows-genlock-run-id> -n obs-genlock-windows-x64 -D <dir>` (~2 min, ~718 MB
    unpacked incl. PDBs).
 2. `zip -qrX bundle.zip . -x '*.pdb'` from inside that dir (~165 MB, ~30 s — PDBs are never
    deployed).
 3. `sshpass -p "$PW" scp -O bundle.zip newlevel@<box>:C:/stage-<ticket>.zip` — DEV1-INITIATED push
-   (3-5 s per box; a box cannot pull FROM dev1 — see the genlock skill's note above).
+   (3-5 s per box; belt-and-braces default — box-pull FROM dev1 now works too, issue 916 validated
+   closed 2026-08-14, see the genlock skill's note above).
 4. **Verify the transfer BEFORE expanding it.** A one-off `.ps1` prints `(Get-Item ...).Length` +
    `Get-FileHash -Algorithm SHA256` on the box; compare against `stat -c%s` + `sha256sum` on dev1.
    Both must match byte-for-byte — a truncated zip expanded over a live OBS install is a
