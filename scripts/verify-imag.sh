@@ -642,7 +642,8 @@ ssh_box_timeout() {
 
 # ssh_box CMD -- a bounded remote read at the general read budget (#1058). Delegates to the single
 # ssh_box_timeout primitive so it can never be an UNbounded raw ssh; a slow-class read overrides the
-# budget by calling ssh_box_timeout "$IMAG_SLOW_READ_TIMEOUT" directly.
+# budget by calling ssh_box_timeout with the IMAG_SLOW_READ_TIMEOUT budget directly (dpkg/apt/journal/
+# gather sites below).
 ssh_box() {
   ssh_box_timeout "$IMAG_READ_TIMEOUT" "$1"
 }
@@ -916,7 +917,7 @@ else
   HAS_DGPU=no
   if printf '%s\n' "$LSPCI_OUT" | imag_has_discrete_nvidia; then HAS_DGPU=yes; fi
   if [ "$HAS_DGPU" = "yes" ]; then
-    DRIVER_STATUS="$(ssh_box_timeout "$IMAG_SLOW_READ_TIMEOUT" "dpkg -s nvidia-driver-595-open 2>/dev/null | sed -n 's/^Status: //p' || true")"
+    DRIVER_STATUS="$(ssh_box_timeout "$IMAG_SLOW_READ_TIMEOUT" "dpkg -s nvidia-driver-595-open 2>/dev/null | sed -n 's/^Status: //p' || true")" || true
     PRIME_OUT="$(ssh_box "prime-select query 2>/dev/null" || true)"
   else
     DRIVER_STATUS=""
@@ -1124,7 +1125,7 @@ else
   # The guard's journald tag must be readable -- proves its step-down/re-assert transitions are
   # retrievable for the dev1-side alert watchdog (the never-silent-degradation rule).
   rc=0
-  ssh_box "journalctl -t imag-power-envelope --no-pager -n 1 >/dev/null 2>&1; true" >/dev/null 2>&1 || rc=$?
+  ssh_box_timeout "$IMAG_SLOW_READ_TIMEOUT" "journalctl -t imag-power-envelope --no-pager -n 1 >/dev/null 2>&1; true" >/dev/null 2>&1 || rc=$?
   if [ "$rc" -ne 0 ]; then
     fail "could not read the imag-power-envelope journald tag over SSH (rc=$rc) -- the guard's transitions would be invisible to the dev1-side alert watchdog (#1040)"
   else
