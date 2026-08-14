@@ -8356,3 +8356,11 @@ bundle-state-server deployed to both boxes.
   runtime state at start and report drift LOUD" design (burns OFF + latency pins on both boxes) are
   genuinely separate (different box/OS, no imag_scenes equivalent on strih) — filed as a tracked
   follow-up, not bundled. Version 1.7.0-dev.455.
+
+## 2026-08-14 — #874 send-side NDI audit PARSER seam (worktree autopilot-874)
+- Validation: the #874 emit-side C++ ALREADY LANDED on dev (feat commits 337136174 ndi-output.cpp + f718cf919 ndi-filter.cpp, both ancestors of base 408279d49). The still-valid remaining leg of the ticket's `cross-cutting` scope-gate was the third one — "the rig-side tooling that parses these audit lines" — absent in src/jitter_audit.rs + src/bin/genlock-jitter-report.rs. Emitting C++ left untouched.
+- Added the send-side parser twin in src/jitter_audit.rs: SendAuditKind/SendAuditSample/SendAuditSummary + parse_send_audit_line/parse_send_audit_lines/summarize_send/summarize_send_all, mirroring the input-side parse_audit_line/summarize. Window deltas delta_dropped (offered-minus-sent) vs delta_send_wait_ms are the issue-707 discriminator (blocking send vs frames-never-offered); filter-only mutex-wait pair carried through.
+- Surfaced additively in genlock-jitter-report (text-mode send-side table); the --json #757 calibrator contract stays input-side only, byte-for-byte; no-lines error now accepts either kind.
+- RED→GREEN: 10 new Tier-0 tests in tests module of src/jitter_audit.rs (both line kinds, name-with-space, cross-parse rejection both directions, window-delta math, blocking-vs-upstream discriminator, mutex deltas, first-seen grouping, empty/single/underflow). RED commit 5690908cb (10 failed on stubs), GREEN 53e4a0675. Full lib suite 1068 passed; clippy -D warnings clean; fmt clean. Version 1.7.0-dev.455.
+- Review (fresh general-purpose, Opus 4.8): 0 red 0 yellow, 4 blue; 3 in-diff blue fixed in db502f1a4 (single-parse json path, clearer json error, derived-dropped note); 2 left with reasoning (pre-existing apostrophe-in-name limitation shared with input parser; CLI integration test matches existing posture).
+- Playbook: new .claude/rules/jitter-audit-parser.md (two coexisting parser families; new-line-kind recipe; the --json contract landmine) + router line.

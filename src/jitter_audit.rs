@@ -290,6 +290,241 @@ pub fn summarize_all(samples: &[AuditSample]) -> Vec<AuditSummary> {
         .collect()
 }
 
+// ============================================================================
+// #874 — send-side (NDI OUTPUT / FILTER) audit parser.
+//
+// The genlock build now emits, every ~5s per NDI sender, a send-path audit line
+// mirroring the input-side `genlock-fifo audit` above:
+//
+//   genlock-ndi-output audit '<name>': offered=N sent=N dropped=N \
+//       send_wait_ms=X.XXX max_send_wait_ms=X.XXX (#874)
+//   genlock-ndi-filter audit '<ndi name>': offered=N sent=N \
+//       send_wait_ms=X.XXX max_send_wait_ms=X.XXX mutex_wait_ms=X.XXX \
+//       max_mutex_wait_ms=X.XXX (#874)
+//
+// (`vendor/distroav/src/ndi-output.cpp` `ndi_output_rawvideo` and
+// `vendor/distroav/src/ndi-filter.cpp` `ndi_filter_raw_video`). This is the pure
+// Tier-0 parser that turns those lines into the WINDOW-DELTA answer the issue-707
+// fork needs: were frames never offered (fault upstream in libobs), offered but
+// dropped, or offered and blocked inside the send call (receiver backpressure)?
+// It is the symmetric twin of `parse_audit_line`/`summarize` for the send side.
+
+/// Which send path emitted the line: the single main `ndi_output` sender
+/// (`genlock-ndi-output`) or one of the aux `ndi_filter` senders
+/// (`genlock-ndi-filter`: interkom / MULTIVIEW / Grading).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SendAuditKind {
+    Output,
+    Filter,
+}
+
+/// One parsed send-path audit sample. Mirrors [`AuditSample`] for the send side.
+/// `offered`/`sent` are CUMULATIVE frame counters since the sender was created;
+/// `send_wait_ms` is the CUMULATIVE ms spent inside the send call (lifetime
+/// total), `max_send_wait_ms` the lifetime PEAK single-call wait. The mutex pair
+/// is present only on the filter line (the aux senders time acquiring the shared
+/// send mutex separately from the send itself) — `None` on an output line.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SendAuditSample {
+    pub kind: SendAuditKind,
+    /// The NDI sender name (the quoted `'%s'` in the log line), e.g. `"2ME PGM"`.
+    pub name: String,
+    pub offered: u64,
+    pub sent: u64,
+    pub send_wait_ms: f64,
+    pub max_send_wait_ms: f64,
+    pub mutex_wait_ms: Option<f64>,
+    pub max_mutex_wait_ms: Option<f64>,
+}
+
+impl SendAuditSample {
+    /// Frames offered but not sent = `offered - sent` (saturating). The output
+    /// line emits this verbatim as `dropped=`; the filter line does not — it is
+    /// derived identically either way, so it is computed rather than stored (the
+    /// emitted `dropped=` token is skipped like any other unrecognized token).
+    /// The derivation is intentionally authoritative — the C++ emits `dropped=`
+    /// the same way — and the parser test asserts the emitted `dropped=6000`
+    /// equals this derived value, so the two can never silently diverge.
+    pub fn dropped(&self) -> u64 {
+        self.offered.saturating_sub(self.sent)
+    }
+}
+
+/// Parse ONE send-path audit line (`genlock-ndi-output` / `genlock-ndi-filter`)
+/// into a [`SendAuditSample`]. Returns `None` if the line carries neither send
+/// marker (so input `genlock-fifo audit` lines and any other log noise are safely
+/// ignored — the input and send parsers can run over the SAME log independently).
+/// Whitespace-token `key=value` scan, exactly like [`parse_audit_line`].
+pub fn parse_send_audit_line(line: &str) -> Option<SendAuditSample> {
+    const OUT_MARK: &str = "genlock-ndi-output audit '";
+    const FIL_MARK: &str = "genlock-ndi-filter audit '";
+    let (kind, mark_at, mark_len) = if let Some(i) = line.find(OUT_MARK) {
+        (SendAuditKind::Output, i, OUT_MARK.len())
+    } else if let Some(i) = line.find(FIL_MARK) {
+        (SendAuditKind::Filter, i, FIL_MARK.len())
+    } else {
+        return None;
+    };
+    let after_mark = &line[mark_at + mark_len..];
+    let quote_end = after_mark.find('\'')?;
+    let name = after_mark[..quote_end].to_string();
+
+    let mut s = SendAuditSample {
+        kind,
+        name,
+        offered: 0,
+        sent: 0,
+        send_wait_ms: 0.0,
+        max_send_wait_ms: 0.0,
+        mutex_wait_ms: None,
+        max_mutex_wait_ms: None,
+    };
+    let mut saw_any_field = false;
+
+    // Same whitespace-token `key=value` scan as `parse_audit_line`: unrecognized
+    // tokens (the `'%s':` name-quote fragment, the derived `dropped=` on the output
+    // line, the `(#874)` decoration) are simply skipped.
+    for tok in line[mark_at..].split_whitespace() {
+        let Some(eq) = tok.find('=') else {
+            continue;
+        };
+        let key = &tok[..eq];
+        let val = &tok[eq + 1..];
+        match key {
+            "offered" => {
+                if let Ok(v) = val.parse() {
+                    s.offered = v;
+                    saw_any_field = true;
+                }
+            }
+            "sent" => {
+                if let Ok(v) = val.parse() {
+                    s.sent = v;
+                    saw_any_field = true;
+                }
+            }
+            "send_wait_ms" => {
+                if let Ok(v) = val.parse() {
+                    s.send_wait_ms = v;
+                    saw_any_field = true;
+                }
+            }
+            "max_send_wait_ms" => {
+                if let Ok(v) = val.parse() {
+                    s.max_send_wait_ms = v;
+                    saw_any_field = true;
+                }
+            }
+            "mutex_wait_ms" => {
+                if let Ok(v) = val.parse() {
+                    s.mutex_wait_ms = Some(v);
+                    saw_any_field = true;
+                }
+            }
+            "max_mutex_wait_ms" => {
+                if let Ok(v) = val.parse() {
+                    s.max_mutex_wait_ms = Some(v);
+                    saw_any_field = true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    saw_any_field.then_some(s)
+}
+
+/// Parse every send-path audit line found in `text`, in order. Non-send lines
+/// (input audit lines, noise) are silently skipped.
+pub fn parse_send_audit_lines(text: &str) -> Vec<SendAuditSample> {
+    text.lines().filter_map(parse_send_audit_line).collect()
+}
+
+/// The per-run answer for one sender's captured window. The load-bearing outputs
+/// are the WINDOW DELTAS (last-minus-first of the cumulative counters):
+/// `delta_offered`/`delta_sent`/`delta_dropped` and `delta_send_wait_ms` — the
+/// issue-707 discriminator. `max_send_wait_ms` (and the filter-only mutex pair)
+/// are carried through from the last sample.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SendAuditSummary {
+    pub kind: SendAuditKind,
+    pub name: String,
+    /// Number of audit samples in this window (each is one ~5s tick).
+    pub samples: usize,
+    pub delta_offered: u64,
+    pub delta_sent: u64,
+    /// Window-scoped honest drop = `delta_offered - delta_sent` (saturating) —
+    /// the #707 discriminator numerator: frames offered DURING the window that
+    /// were never sent DURING the window.
+    pub delta_dropped: u64,
+    /// Cumulative send-call block time (ms) accrued DURING the window. Large with
+    /// `delta_dropped > 0` => the send is blocking (receiver/transport
+    /// backpressure); near-zero with `delta_dropped > 0` => frames never reached
+    /// the send call (fault upstream in libobs's output path).
+    pub delta_send_wait_ms: f64,
+    /// Lifetime peak single-call send wait (ms) at window end (last sample).
+    pub max_send_wait_ms: f64,
+    /// Filter-only: window delta of the cumulative mutex-acquire wait (ms). `None`
+    /// for an output summary. A high value with a low `delta_send_wait_ms` means
+    /// this sender is queued behind another lock holder, not slow on its own send.
+    pub delta_mutex_wait_ms: Option<f64>,
+    /// Filter-only: lifetime peak mutex-acquire wait (ms) at window end.
+    pub max_mutex_wait_ms: Option<f64>,
+}
+
+/// Summarize one sender's chronologically-ordered window into a
+/// [`SendAuditSummary`]. Returns `None` for an empty slice.
+pub fn summarize_send(samples: &[SendAuditSample]) -> Option<SendAuditSummary> {
+    let first = samples.first()?;
+    let last = samples.last()?;
+
+    let delta_offered = last.offered.saturating_sub(first.offered);
+    let delta_sent = last.sent.saturating_sub(first.sent);
+    // Cumulative timings only ever increase in practice; `.max(0.0)` keeps a
+    // truncated/rewound log from producing a negative in-window figure.
+    let delta_send_wait_ms = (last.send_wait_ms - first.send_wait_ms).max(0.0);
+    // Filter-only: `None` on an output window; on a filter window the delta of the
+    // cumulative mutex-acquire wait (first sample may predate the field only on a
+    // mixed capture, so treat a missing first as 0).
+    let delta_mutex_wait_ms = last
+        .mutex_wait_ms
+        .map(|l| (l - first.mutex_wait_ms.unwrap_or(0.0)).max(0.0));
+
+    Some(SendAuditSummary {
+        kind: last.kind,
+        name: last.name.clone(),
+        samples: samples.len(),
+        delta_offered,
+        delta_sent,
+        delta_dropped: delta_offered.saturating_sub(delta_sent),
+        delta_send_wait_ms,
+        max_send_wait_ms: last.max_send_wait_ms,
+        delta_mutex_wait_ms,
+        max_mutex_wait_ms: last.max_mutex_wait_ms,
+    })
+}
+
+/// Group `samples` by `(kind, name)`, then [`summarize_send`] each group. One
+/// summary per distinct sender, in first-seen order.
+pub fn summarize_send_all(samples: &[SendAuditSample]) -> Vec<SendAuditSummary> {
+    let mut order: Vec<(SendAuditKind, String)> = Vec::new();
+    let mut groups: HashMap<(SendAuditKind, String), Vec<SendAuditSample>> = HashMap::new();
+    for sample in samples {
+        let key = (sample.kind, sample.name.clone());
+        if !groups.contains_key(&key) {
+            order.push(key.clone());
+        }
+        groups.entry(key).or_default().push(sample.clone());
+    }
+    order
+        .into_iter()
+        .filter_map(|key| {
+            let group = groups.remove(&key).unwrap_or_default();
+            summarize_send(&group)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -531,5 +766,199 @@ mod tests {
             "some banner\n{SAMPLE_LINE_CAM1}\nanother unrelated line\n{SAMPLE_LINE_CAM1}\n"
         );
         assert_eq!(parse_audit_lines(&text).len(), 2);
+    }
+
+    // ===================== #874 send-side audit parser =====================
+
+    // Real captured-style send-path lines (exact format from
+    // vendor/distroav/src/ndi-output.cpp / ndi-filter.cpp, incl. an OBS timestamp
+    // prefix the parser must skip and the trailing `(#874)` decoration).
+    const OUT_LINE: &str = "03:00:00.001: genlock-ndi-output audit '2ME PGM': \
+        offered=9000 sent=3000 dropped=6000 send_wait_ms=120000.500 \
+        max_send_wait_ms=33.200 (#874)";
+    const FIL_LINE: &str = "03:00:00.002: genlock-ndi-filter audit 'interkom': \
+        offered=9000 sent=8990 send_wait_ms=45.100 max_send_wait_ms=12.300 \
+        mutex_wait_ms=5.400 max_mutex_wait_ms=1.200 (#874)";
+
+    #[test]
+    fn parses_an_output_send_audit_line_874() {
+        let s = parse_send_audit_line(OUT_LINE).expect("must parse an output audit line");
+        assert_eq!(s.kind, SendAuditKind::Output);
+        assert_eq!(s.name, "2ME PGM");
+        assert_eq!(s.offered, 9000);
+        assert_eq!(s.sent, 3000);
+        assert!((s.send_wait_ms - 120000.500).abs() < 1e-6);
+        assert!((s.max_send_wait_ms - 33.200).abs() < 1e-6);
+        assert_eq!(s.mutex_wait_ms, None, "output line has no mutex fields");
+        assert_eq!(s.max_mutex_wait_ms, None);
+        assert_eq!(s.dropped(), 6000, "dropped = offered - sent");
+    }
+
+    #[test]
+    fn parses_a_filter_send_audit_line_874() {
+        let s = parse_send_audit_line(FIL_LINE).expect("must parse a filter audit line");
+        assert_eq!(s.kind, SendAuditKind::Filter);
+        assert_eq!(s.name, "interkom");
+        assert_eq!(s.offered, 9000);
+        assert_eq!(s.sent, 8990);
+        assert!((s.send_wait_ms - 45.100).abs() < 1e-6);
+        assert!((s.max_send_wait_ms - 12.300).abs() < 1e-6);
+        assert!((s.mutex_wait_ms.expect("filter has mutex_wait_ms") - 5.400).abs() < 1e-6);
+        assert!((s.max_mutex_wait_ms.expect("filter has max_mutex_wait_ms") - 1.200).abs() < 1e-6);
+        assert_eq!(s.dropped(), 10);
+    }
+
+    #[test]
+    fn a_send_name_with_a_space_parses_874() {
+        // "2ME PGM" carries a space — the quote-delimited scan must not be confused
+        // by it when the surrounding text is split on whitespace.
+        let s = parse_send_audit_line(OUT_LINE).unwrap();
+        assert_eq!(s.name, "2ME PGM");
+    }
+
+    #[test]
+    fn send_parser_rejects_the_input_audit_line_and_noise_874() {
+        // The INPUT-side genlock-fifo line must NOT parse as a send line, and vice
+        // versa — the two parsers coexist over the same log.
+        assert!(parse_send_audit_line(SAMPLE_LINE_CAM1).is_none());
+        assert!(parse_send_audit_line("03:00:00: some unrelated OBS log line").is_none());
+        assert!(parse_send_audit_line("").is_none());
+        // And the input parser must ignore the send lines.
+        assert!(parse_audit_line(OUT_LINE).is_none());
+        assert!(parse_audit_line(FIL_LINE).is_none());
+    }
+
+    #[test]
+    fn parse_send_audit_lines_picks_only_send_lines_from_a_mixed_log_874() {
+        let text = format!("banner\n{SAMPLE_LINE_CAM1}\n{OUT_LINE}\nnoise\n{FIL_LINE}\n");
+        let send = parse_send_audit_lines(&text);
+        assert_eq!(send.len(), 2, "only the 2 send lines");
+        assert_eq!(send[0].kind, SendAuditKind::Output);
+        assert_eq!(send[1].kind, SendAuditKind::Filter);
+        // The input parser over the SAME text still gets only the input line.
+        assert_eq!(parse_audit_lines(&text).len(), 1);
+    }
+
+    #[test]
+    fn summarize_send_computes_window_deltas_874() {
+        let first = parse_send_audit_line(OUT_LINE).unwrap();
+        let mut last = first.clone();
+        last.offered = 18000;
+        last.sent = 6000;
+        last.send_wait_ms = 240000.500; // +120000.000 accrued in-window
+        last.max_send_wait_ms = 40.000;
+        let s = summarize_send(&[first, last]).expect("2 samples summarize");
+        assert_eq!(s.kind, SendAuditKind::Output);
+        assert_eq!(s.name, "2ME PGM");
+        assert_eq!(s.samples, 2);
+        assert_eq!(s.delta_offered, 9000);
+        assert_eq!(s.delta_sent, 3000);
+        assert_eq!(s.delta_dropped, 6000, "9000 offered - 3000 sent in-window");
+        assert!((s.delta_send_wait_ms - 120000.000).abs() < 1e-3);
+        assert!((s.max_send_wait_ms - 40.000).abs() < 1e-6);
+        assert_eq!(s.delta_mutex_wait_ms, None);
+    }
+
+    #[test]
+    fn summarize_send_distinguishes_blocking_from_upstream_707() {
+        // The whole point: same drop, two causes, separated by delta_send_wait_ms.
+        // (a) BLOCKING send — dropped>0 AND a large in-window block time.
+        let mut a0 = parse_send_audit_line(OUT_LINE).unwrap();
+        a0.offered = 0;
+        a0.sent = 0;
+        a0.send_wait_ms = 0.0;
+        let mut a1 = a0.clone();
+        a1.offered = 9000;
+        a1.sent = 3000;
+        a1.send_wait_ms = 100000.0;
+        let blocking = summarize_send(&[a0, a1]).unwrap();
+        assert_eq!(blocking.delta_dropped, 6000);
+        assert!(
+            blocking.delta_send_wait_ms > 1000.0,
+            "large block time => backpressure"
+        );
+
+        // (b) UPSTREAM — same drop, but the send call barely blocked.
+        let mut b0 = parse_send_audit_line(OUT_LINE).unwrap();
+        b0.offered = 0;
+        b0.sent = 0;
+        b0.send_wait_ms = 0.0;
+        let mut b1 = b0.clone();
+        b1.offered = 9000;
+        b1.sent = 3000;
+        b1.send_wait_ms = 2.5;
+        let upstream = summarize_send(&[b0, b1]).unwrap();
+        assert_eq!(upstream.delta_dropped, 6000);
+        assert!(
+            upstream.delta_send_wait_ms < 10.0,
+            "near-zero block time => fault upstream"
+        );
+    }
+
+    #[test]
+    fn summarize_send_carries_filter_mutex_deltas_874() {
+        let first = parse_send_audit_line(FIL_LINE).unwrap();
+        let mut last = first.clone();
+        last.mutex_wait_ms = Some(9.400); // +4.000 in-window
+        last.max_mutex_wait_ms = Some(2.000);
+        let s = summarize_send(&[first, last]).unwrap();
+        assert!((s.delta_mutex_wait_ms.expect("filter carries mutex delta") - 4.000).abs() < 1e-6);
+        assert!((s.max_mutex_wait_ms.expect("filter carries max mutex") - 2.000).abs() < 1e-6);
+    }
+
+    #[test]
+    fn summarize_send_all_groups_by_kind_and_name_first_seen_874() {
+        let fil2 = FIL_LINE.replace("interkom", "MULTIVIEW");
+        let text = format!("{OUT_LINE}\n{FIL_LINE}\n{fil2}\n{OUT_LINE}\n{FIL_LINE}");
+        let send = parse_send_audit_lines(&text);
+        let sums = summarize_send_all(&send);
+        assert_eq!(
+            sums.len(),
+            3,
+            "2ME PGM output + interkom + MULTIVIEW filters"
+        );
+        assert_eq!(
+            (sums[0].kind, sums[0].name.as_str()),
+            (SendAuditKind::Output, "2ME PGM")
+        );
+        assert_eq!(sums[0].samples, 2);
+        assert_eq!(
+            (sums[1].kind, sums[1].name.as_str()),
+            (SendAuditKind::Filter, "interkom")
+        );
+        assert_eq!(sums[1].samples, 2);
+        assert_eq!(
+            (sums[2].kind, sums[2].name.as_str()),
+            (SendAuditKind::Filter, "MULTIVIEW")
+        );
+        assert_eq!(sums[2].samples, 1);
+    }
+
+    #[test]
+    fn summarize_send_empty_window_is_none_and_single_sample_zero_deltas_874() {
+        assert!(summarize_send(&[]).is_none());
+        let s = parse_send_audit_line(OUT_LINE).unwrap();
+        let sum = summarize_send(std::slice::from_ref(&s)).unwrap();
+        assert_eq!(sum.samples, 1);
+        assert_eq!(sum.delta_offered, 0);
+        assert_eq!(sum.delta_sent, 0);
+        assert_eq!(sum.delta_dropped, 0);
+        assert!((sum.delta_send_wait_ms - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn send_delta_dropped_never_underflows_874() {
+        // Defensive: a counter that appears to go backward (impossible in practice,
+        // but a truncated/rewound log must not panic) saturates to 0.
+        let mut first = parse_send_audit_line(OUT_LINE).unwrap();
+        first.offered = 100;
+        first.sent = 100;
+        let mut last = first.clone();
+        last.offered = 90;
+        last.sent = 95; // both "decreased"
+        let s = summarize_send(&[first, last]).unwrap();
+        assert_eq!(s.delta_offered, 0);
+        assert_eq!(s.delta_sent, 0);
+        assert_eq!(s.delta_dropped, 0);
     }
 }

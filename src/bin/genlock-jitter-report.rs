@@ -22,16 +22,30 @@
 //! genlock-jitter-report --file /path/to/obs.log --json
 //! ```
 //!
+//! #874: the same log also carries the SEND-side audit lines the genlock build emits
+//! (`genlock-ndi-output audit '<name>':` / `genlock-ndi-filter audit '<ndi name>':`, from
+//! `vendor/distroav/src/ndi-output.cpp` / `ndi-filter.cpp`). In text mode this binary now
+//! ALSO prints a per-sender send-side table below the source table when those lines are
+//! present: the window DELTAS `d_offered`/`d_sent`/`d_dropped` plus `d_send_wait_ms` — the
+//! issue-707 discriminator (large send-wait + drops = the async send is blocking on the
+//! receiver; near-zero send-wait + drops = frames never reached the send, fault is upstream
+//! in libobs). A log may carry input lines, send lines, or both.
+//!
 //! `--json` (#757): prints [`camera_box::jitter_audit::summaries_to_json`]'s per-source
 //! object instead of the text table — the machine-readable shape a pre-record phase
 //! calibrator (`scripts/prerecord_phase_calibrate.py`) consumes to reconstruct each source's
 //! absolute cam→strih transit latency (`latency_ms + mean_head_skew_ms`) without a full
 //! recording. The text table stays the default (unchanged) for a human reading it directly.
+//! `--json` is deliberately INPUT-side only — its shape must not gain keys — so it still
+//! requires at least one input audit line.
 //!
-//! **Exit codes:** `0` — at least one source's audit lines were found and reported;
-//! `2` — no `genlock-fifo audit` lines found in the input, or an I/O error reading it.
+//! **Exit codes:** `0` — at least one input OR #874 send-side audit line was found and
+//! reported; `2` — no audit lines of either kind found in the input, or an I/O error.
 
-use camera_box::jitter_audit::{parse_audit_lines, summaries_to_json, summarize_all};
+use camera_box::jitter_audit::{
+    parse_audit_lines, parse_send_audit_lines, summaries_to_json, summarize_all,
+    summarize_send_all, SendAuditKind, SendAuditSummary,
+};
 use std::io::Read;
 
 fn main() {
@@ -47,53 +61,125 @@ fn main() {
     };
 
     let samples = parse_audit_lines(&text);
-    if samples.is_empty() {
+
+    // --json (#757) is INPUT-side only, deliberately unchanged: the per-source object
+    // scripts/prerecord_phase_calibrate.py consumes must not gain keys. Parse + return
+    // here BEFORE any send-side work, so the json path never double-parses the log.
+    if json_mode {
+        if samples.is_empty() {
+            eprintln!(
+                "ERROR: no 'genlock-fifo audit' lines found in the input \
+                 (wrong log file, or this OBS build isn't genlocked/logging yet; \
+                 note --json is input-side only -- the #874 send-side lines are reported \
+                 in text mode)"
+            );
+            std::process::exit(2);
+        }
+        println!("{}", summaries_to_json(&summarize_all(&samples)));
+        return;
+    }
+
+    // #874: the genlock build also emits send-side audit lines (genlock-ndi-output /
+    // genlock-ndi-filter), surfaced in text mode only. Parse them independently over the
+    // same log. Text mode reports whichever kinds are present: input FIFO lines, send-side
+    // lines, or both.
+    let send_samples = parse_send_audit_lines(&text);
+    if samples.is_empty() && send_samples.is_empty() {
         eprintln!(
-            "ERROR: no 'genlock-fifo audit' lines found in the input \
-             (wrong log file, or this OBS build isn't genlocked/logging yet)"
+            "ERROR: no 'genlock-fifo audit' or 'genlock-ndi-output/filter audit' lines found \
+             in the input (wrong log file, or this OBS build isn't genlocked/logging yet)"
         );
         std::process::exit(2);
     }
 
-    let summaries = summarize_all(&samples);
-
-    if json_mode {
-        println!("{}", summaries_to_json(&summaries));
-        return;
+    if !samples.is_empty() {
+        let summaries = summarize_all(&samples);
+        println!(
+            "{:<20} {:>8} {:>11} {:>11} {:>7} {:>14} {:>8} {:>9} {:>13} {:>16} {:>17} {:>11}",
+            "source",
+            "samples",
+            "latency_ms",
+            "d_underrun",
+            "d_hold",
+            "d_dropped_due",
+            "d_relock",
+            "d_latehold",
+            // #1009: window delta of the backward-step re-anchor TICK counter — any movement
+            // means the configured hold was bypassed during the window (healthy runs: 0).
+            "d_regimetick",
+            "max_abs_skew_ms",
+            "mean_abs_skew_ms",
+            "peak_depth"
+        );
+        for s in &summaries {
+            println!(
+                "{:<20} {:>8} {:>11} {:>11} {:>7} {:>14} {:>8} {:>9} {:>13} {:>16} {:>17.2} {:>11}",
+                s.source,
+                s.samples,
+                s.latency_ms,
+                s.delta_underruns,
+                s.delta_holds,
+                s.delta_dropped_due,
+                s.delta_relocks,
+                s.delta_late_holds,
+                s.delta_backward_regime_ticks,
+                s.max_abs_head_skew_ms,
+                s.mean_abs_head_skew_ms,
+                s.peak_depth
+            );
+        }
     }
 
+    if !send_samples.is_empty() {
+        // Blank line separates the two tables when both are present.
+        if !samples.is_empty() {
+            println!();
+        }
+        print_send_table(&summarize_send_all(&send_samples));
+    }
+}
+
+/// #874 — print the per-sender send-side report. The load-bearing columns are the window
+/// DELTAS: `d_dropped` (frames offered-but-not-sent during the window) alongside
+/// `d_send_wait_ms` (send-call block time accrued during the window) — a large `d_send_wait_ms`
+/// with `d_dropped > 0` means the send is blocking (receiver/transport backpressure); a
+/// near-zero `d_send_wait_ms` with `d_dropped > 0` moves the fault upstream into libobs's
+/// output path. The mutex columns are filter-only (`-` for an output row).
+fn print_send_table(summaries: &[SendAuditSummary]) {
     println!(
-        "{:<20} {:>8} {:>11} {:>11} {:>7} {:>14} {:>8} {:>9} {:>13} {:>16} {:>17} {:>11}",
-        "source",
+        "{:<7} {:<16} {:>8} {:>10} {:>8} {:>10} {:>15} {:>17} {:>15} {:>17}",
+        "kind",
+        "name",
         "samples",
-        "latency_ms",
-        "d_underrun",
-        "d_hold",
-        "d_dropped_due",
-        "d_relock",
-        "d_latehold",
-        // #1009: window delta of the backward-step re-anchor TICK counter — any movement
-        // means the configured hold was bypassed during the window (healthy runs: 0).
-        "d_regimetick",
-        "max_abs_skew_ms",
-        "mean_abs_skew_ms",
-        "peak_depth"
+        "d_offered",
+        "d_sent",
+        "d_dropped",
+        "d_send_wait_ms",
+        "max_send_wait_ms",
+        "d_mutex_wait_ms",
+        "max_mutex_wait_ms"
     );
-    for s in &summaries {
+    let fmt_opt = |v: Option<f64>| {
+        v.map(|x| format!("{x:.3}"))
+            .unwrap_or_else(|| "-".to_string())
+    };
+    for s in summaries {
+        let kind = match s.kind {
+            SendAuditKind::Output => "output",
+            SendAuditKind::Filter => "filter",
+        };
         println!(
-            "{:<20} {:>8} {:>11} {:>11} {:>7} {:>14} {:>8} {:>9} {:>13} {:>16} {:>17.2} {:>11}",
-            s.source,
+            "{:<7} {:<16} {:>8} {:>10} {:>8} {:>10} {:>15.3} {:>17.3} {:>15} {:>17}",
+            kind,
+            s.name,
             s.samples,
-            s.latency_ms,
-            s.delta_underruns,
-            s.delta_holds,
-            s.delta_dropped_due,
-            s.delta_relocks,
-            s.delta_late_holds,
-            s.delta_backward_regime_ticks,
-            s.max_abs_head_skew_ms,
-            s.mean_abs_head_skew_ms,
-            s.peak_depth
+            s.delta_offered,
+            s.delta_sent,
+            s.delta_dropped,
+            s.delta_send_wait_ms,
+            s.max_send_wait_ms,
+            fmt_opt(s.delta_mutex_wait_ms),
+            fmt_opt(s.max_mutex_wait_ms)
         );
     }
 }
