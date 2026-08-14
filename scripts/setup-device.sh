@@ -152,6 +152,11 @@ EOF
 # painting) instead of crashing the unit. duration-secs is a large-but-finite bound (~1 year)
 # because frame-probe has no "run forever" mode; Restart=always self-heals both that eventual
 # natural exit and any crash, so the monitor practically never goes dark on its own.
+# #1008/#937: --marker-log /run/rig-qpsk-markers.csv -- TEST mode now hands STEADY STATE to this
+# permanent unit (rig-mode.sh test, via cam2_painter_steady_state_handoff_cmds) instead of a
+# disposable 2h nohup, so the unit itself must write the growing QPSK marker CSV the offline
+# verdict pairs audio->frame from AND the "must-stay-alive" liveness check reads. Promotes the
+# live 2026-08-06 10-marker-log.conf drop-in into the base unit (single source of truth).
 cam2_painter_service_unit_content() {
     cat <<'EOF'
 [Unit]
@@ -162,7 +167,7 @@ Wants=camera-box.service
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/frame-probe --paint-only --dual-qr --qr-size 700 --paint-fps 60 --duration-secs 31536000
+ExecStart=/usr/local/bin/frame-probe --paint-only --dual-qr --qr-size 700 --paint-fps 60 --duration-secs 31536000 --marker-log /run/rig-qpsk-markers.csv
 Restart=always
 RestartSec=2
 
