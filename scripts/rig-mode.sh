@@ -137,6 +137,11 @@ RIG_MODE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # src/presenter_kind.rs::resolve_presenter_kind's "will this run ever touch /dev/fb0?" answer.
 # shellcheck source=scripts/lib/presenter-liveness-check.sh
 . "$RIG_MODE_DIR/lib/presenter-liveness-check.sh"
+# #1008/#937: the durable steady-state handoff -- TEST mode ends by handing the painter to the
+# PERMANENT supervised cam2-painter.service instead of leaving a disposable 2h nohup. Reuses
+# audio_marker_emission_check_cmds (sourced above) for the marker-growth assert.
+# shellcheck source=scripts/lib/cam2-painter-handoff.sh
+. "$RIG_MODE_DIR/lib/cam2-painter-handoff.sh"
 # #281 Fix#3: the rig-active heartbeat. TEST mode SETS it (deliberate "rig is in a test state"
 # marker); EVENT mode CLEARS it. Unlike recording-e2e.sh this is a one-shot write (rig-mode exits),
 # so the marker goes STALE after RIG_HEARTBEAT_STALE_SEC (default 10 min) — an idle TEST rig with a
@@ -1023,11 +1028,14 @@ do_test() {
   echo "[obs] #985: PARK stream's PROGRAM back on the production scene (never leave it on the measurement-only probe scene):"
   restore_stream_program_pro
   echo
+  echo "[cam2 ${PAINTER_IP}] #1008/#937 hand STEADY STATE to the PERMANENT supervised cam2-painter.service (durable -- Restart=always, survives crash + reboot -- NOT a disposable 2h nohup):"
+  cam_ssh "$(cam2_painter_steady_state_handoff_cmds "$PAINTER_PIDFILE" "$AUDIO_MARKER_LOG")"
+  echo
   print_genlock_relaunch_note test
   echo
-  echo "ACHIEVED (cam side): cam2 painting dual-QR ${QR_SIZE}px on /dev/fb0 (pidfile ${PAINTER_PIDFILE})."
+  echo "ACHIEVED (cam side): cam2 STEADY-STATE painter is now the PERMANENT cam2-painter.service (#1008/#937: durable dual-QR ${QR_SIZE}px + QPSK marker, Restart=always, enabled — survives crash + reboot; the disposable 2h nohup is gone, so TEST mode no longer dies silently)."
   echo "                     cam2 camera-box still ACTIVE in no-display mode (#291: NOT stopped — capture+emit keep running)."
-  echo "                     cam2 QPSK audio marker RUNNING+VERIFIED on ${resolved_marker_device} (#420/#725: live-resolved device, cadence ${AUDIO_MARKER_CADENCE_TICKS} ticks, log ${AUDIO_MARKER_LOG})."
+  echo "                     cam2 QPSK audio marker RUNNING+VERIFIED, and the permanent unit's own marker log keeps GROWING (#420/#725/#431: live-resolved device, log ${AUDIO_MARKER_LOG})."
   echo "                     cam1 (${CAM1_IP}) left on its DEPLOYED service (already at the 30 fps test rate)."
   echo "ACHIEVED (obs side): genlock_burn=true on strih + stream + imag program inputs (WebSocket, no relaunch)."
   echo "                     imag-nb (${IMAG_IP}) PROGRAM routed to '${IMAG_PROG_SCENE}' (cam1, #462)."

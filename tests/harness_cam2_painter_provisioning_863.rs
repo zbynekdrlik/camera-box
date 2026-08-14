@@ -134,6 +134,16 @@ fn painter_service_unit_content_pins_the_expected_flags() {
         "the permanent devel-mode painter's unit text must stay flag-free for the audio marker \
          (default-ON under --paint-only covers it): {out}"
     );
+    // #1008/#937: TEST mode hands STEADY STATE to this permanent unit (no more 2h nohup), so the
+    // unit itself must write the QPSK marker CSV -- the same growing liveness log the offline
+    // verdict pairs audio->frame from AND the "must-stay-alive" rig check reads. Promotes the live
+    // 2026-08-06 `10-marker-log.conf` drop-in into the base unit (single source of truth).
+    assert!(
+        out.contains("--marker-log /run/rig-qpsk-markers.csv"),
+        "#1008: the permanent painter unit must write the QPSK marker CSV \
+         (--marker-log /run/rig-qpsk-markers.csv) so the durable steady-state painter produces \
+         the same growing marker log the offline verdict + the must-stay-alive check read: {out}"
+    );
 }
 
 #[test]

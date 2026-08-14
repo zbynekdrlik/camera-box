@@ -8001,3 +8001,30 @@ ssh-ing IN (impossible against an off-network box).
 - Review: SHIP, 0 red/yellow; 5 of 6 blue folded in, 1 dropped with reasoning (controlled alnum
   box names in sed keys). WoL BIOS enablement floated on the ticket = separate hardware follow-up,
   not bundled. Worktree; supervisor integrates the round.
+
+## 2026-08-14 — #1008 + #937 (bundled, worktree autopilot-1008) — durable TEST-mode painter
+
+- **Same defect, one fix.** `rig-mode.sh test` made the STEADY-STATE painter a transient `nohup
+  frame-probe --duration-secs 7200` (2h) and first stopped the permanent supervised
+  cam2-painter.service (issue 440) with no re-enable → 2h later (or after an event→test cycle,
+  which issue 892 disables the unit) cam2 goes black + marker silent + CSV frozen, silently. A
+  nohup is unsupervised. Validate-first confirmed LIVE: cam2-painter.service disabled+inactive,
+  no frame-probe running, stale pidfile.
+- **Fix**: the permanent cam2-painter.service (issue 863: Restart=always, enabled, marker
+  default-ON since 984) becomes the durable steady-state painter. New sourced lib
+  `scripts/lib/cam2-painter-handoff.sh::cam2_painter_steady_state_handoff_cmds` (issue-675 pattern
+  — pure builder, one `cam_ssh "$(...)"` line in do_test, zero rig-mode.sh anchor touched): stop
+  transient via pidfile → `systemctl enable --now cam2-painter.service` → FAIL LOUD unless active
+  + genuinely painting (presenter-aware issue 464) + marker CSV growing (reuses
+  audio_marker_emission_check_cmds, issue 431). Base unit ExecStart gained `--marker-log
+  /run/rig-qpsk-markers.csv` in BOTH systemd/cam2-painter.service and setup-device.sh's generator
+  (promotes the live 2026-08-06 drop-in). RED `263f54229` / GREEN `fb0752847`, version bump
+  `af47ce8bf` (1.7.0-dev.452).
+- **Rejected**: (a) just make the nohup duration forever — fixes 2h expiry, not crash/reboot
+  durability; (b) replace the transient painter entirely — invalidates ~10 anchor-pinned tests
+  for zero durability gain. Dock stale-lock reporting (issue 1008 direction 3) is a separate dock
+  C++ fix, tracked under issue 986.
+- **Tests**: `tests/harness_cam2_painter_steady_state_handoff.rs` (7, new) + a marker-log assert
+  in `harness_cam2_painter_provisioning_863.rs`. FULL `cargo test` suite green: 205 binaries, 0
+  FAILED (mandatory after a rig-mode.sh edit — no anchor collisions). shellcheck -x clean on all
+  touched scripts. Playbook: new `.claude/rules/cam2-painter-lifecycle.md` + router entry.
