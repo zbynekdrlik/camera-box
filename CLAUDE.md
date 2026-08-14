@@ -50,6 +50,7 @@ Rust app for embedded NDI cameras (CAM1-4): multi-camera NDI streaming with soft
 - Offline audio-quality (THD+N) measurement (coherent-sampling window-leakage trap, the CI-only-vendor-code standalone-harness pattern, CPU-timing noise on a shared box, #929; the swr_set_compensation revert-vs-reissue proof + the stateless distance_ms-widening quantization fix, #1016) → `.claude/rules/audio-quality-measurement.md` (auto-loads on its `paths:`)
 - Absolute e2e latency + freeze bounds — the MAIN E2E (recording-verdict) vs LOOPBACK E2E (frame-probe/differ) are SEPARATE gate subsystems; calibrate bounds from `/tmp/recording-e2e-*/verdict-*.json`; crate-root `gates_overall_pass()` seam; cam→stream ~1s hold is by design, freeze=frozen_leg already report-only (#1035) → `.claude/rules/e2e-latency-gate.md` (auto-loads on its `paths:`)
 - imag-nb power/thermal envelope (the MMIO RAPL PL1 25W clamp diagnosis, identity-based zone selection, the source-only shared gather+verdict+guard-decision lib, the check_imag_report optional-arg convention, step-at-the-END TOTAL_STEPS rule, #1040) → `.claude/rules/imag-power-envelope.md` (auto-loads on its `paths:`)
+- Re-pinning a probe-gated `ReleaseCadence` mirror against OBSERVED output (the authority-importing default-feature replica — Rust analogue of the vendored-C lift-and-compile; the phase-anchored-selection==newest-due-when-anchor-unset finding; fmt-check parses probe code; demonstrative set-anchor tests, #1037) → `.claude/rules/probe-mirror-replica-testing.md` (auto-loads on its `paths:`)
 
 ## DO NOT DELETE These Files
 
