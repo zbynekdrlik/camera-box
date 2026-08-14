@@ -7805,3 +7805,34 @@ prerequisite, closed 2026-06-15); the rig is genlocked so it was dead code.
   73ab458b, GREEN 1d35d2cb). Strih n>=2 byte-identical. Parity vectors + static + pwsh anchors +
   mutation-proof. A hysteresis band was rejected (frac-dependent overshoot, differs by n). Playbook:
   the "THIRD axis" section in genlock-fifo-limit-cycle-diagnosis.md.
+
+## 2026-08-14 — #1034 (capture-rate lane re-tighten) — worktree autopilot-1034, v1.7.0-dev.451
+
+Three named "relaxations"; live fleet re-measure reshaped two of them (ssh journals CAM1/2/3):
+
+- **item 1 (main.rs `#717` "informational only FOR NOW")** — ALREADY escalated by issue-971
+  (sustained band → USB reset once chronic @900s) and it FIRED LIVE on cam1 today
+  `2026-08-14T05:36:32Z` (900s sustained ~62.2fps → `#971 … CHRONIC … USB-reset`). No new
+  escalation added (would duplicate issue-971 / risk reset-spam). Only sharpened the misleading
+  "FOR NOW" wording → "informational at THIS tier — a USB reset AUTO-ESCALATES once … chronic".
+  Grep anchor `#717 … SUSTAINED band confirmed` preserved; 2 harness fixtures updated. Commit
+  `3c738493e`.
+- **item 2 (fold `#717` into the offline hard-fail alternation)** — the chronic case (`#971`) is
+  ALREADY in `capture_rate_defect_grep_pattern_hard`; folding the PLAIN sustained band would
+  permanently RED cam1's E2E gate (chronically 61-62.8fps, absorbed into exact NDI by the genlock
+  decimation gate) = the issue-909 mistake, ruled out by the rig-validated issue-992 decision. NO
+  gate-script change — documented as already-correctly-tiered.
+- **item 3 (ShadowCast 10% tolerance re-measure)** — the real code work:
+  - **3a**: cam3 already swapped to a Cam Link 4K (live card `CAM  LINK 4K`, DOUBLE space) but
+    `resolve_grabber_model` fell back to `CAM3→ShadowCast2` (wide 10%). Added
+    `GrabberModel::CamLink4k` (whitespace-collapsed `"cam link"` match → strict base 1%). cam3
+    is a rock-steady 0.33% device → now correctly gates at 1%. RED `c36399004` / GREEN `b5546b602`.
+  - **3b**: `SHADOWCAST2_CAPTURE_RATE_TOLERANCE_PCT` 10.0 → **9.0** (the JITTER/reset floor). Live
+    measured spread (~8h): cam1 mean 61.10 / max 62.80 (4.67%), cam2 mean 61.28 / max 61.70
+    (2.83%). 9% clears the class historical characteristic envelope (~8.33%, 55fps) so no
+    reset-spam regresses, catches a >9% severe deviation the old 10% let slip. INTERIM for
+    un-swapped units; the real base-1% shrink lands per-box via the Cam Link swap. RED `541f2f574`
+    / GREEN `3135186b0`. Full evidence table pinned on the ticket.
+
+Live measurement table (2026-08-14): CAM1 ShadowCast max 4.67% · CAM2 ShadowCast max 2.83% ·
+CAM3 Cam Link 4K 0.33% (was mislabelled ShadowCast2). Worktree; supervisor integrates the round.

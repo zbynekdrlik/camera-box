@@ -146,3 +146,37 @@ grep stage explicitly: `{ grep -E "$pattern" || true; }` — never rely on the C
 the whole `$(...)` substitution in `|| true` (this repo does that at some call sites, e.g.
 `capture-rate-guard.sh`'s existing check, but a pure lib function meant to be called directly, not
 only embedded in a larger remote command string, should be safe on its own).
+
+## #1034 (2026-08-14) — re-tightening a per-model RESET floor + recognizing a card swap
+
+Two reusable findings from the capture-rate lane re-tighten:
+
+**1. `SHADOWCAST2_CAPTURE_RATE_TOLERANCE_PCT` is a RESET floor — keep it above the CLASS
+characteristic envelope, never just the current measured spread.** This constant gates
+`jitter_confirmed` → a USB reset, and reset-spam is a real harm (issue-909: each spurious reset is
+an ~8.3s `frozen_leg` misclassification). So when "re-measure and shrink" a per-model tolerance:
+the shrink is bounded BELOW by the model CLASS's historical characteristic envelope (ShadowCast 2:
+~55-64fps against 60.000 = up to ~8.33%, pinned in
+`live_shadowcast2_characteristic_readings_are_not_deviant_under_its_model_tolerance`), NOT by the
+current live spread (2026-08-14: cam1 max 4.67%, cam2 max 2.83%). #1034 tightened 10%→**9%** (above
+8.33%) as an INTERIM — a 4-5% floor would sit at/below cam1's own measured max and re-introduce
+reset-spam. The REAL shrink to base 1% is delivered per-box by the card SWAP (finding 2), not by
+squeezing the shared reset floor. Verify no existing characteristic-reading test breaks at the new
+value before shipping.
+
+**2. `grabber_model_from_card_name` needs WHITESPACE-COLLAPSED matching.** cam3's live V4L2 `card`
+string after its Cam Link 4K swap is `CAM  LINK 4K: CAM  LINK 4K` — a DOUBLE space between CAM and
+LINK. A bare `lower.contains("cam link")` MISSES it; match on
+`lower.split_whitespace().collect::<Vec<_>>().join(" ").contains("cam link")`. When you add a new
+`GrabberModel` variant, the compiler forces you through all four exhaustive matches (Display,
+`tolerance_pct_for_model`, `sustained_tolerance_pct_for_model`,
+`capture.rs::documented_controls_for_model`) — a genuinely stable replacement card (Cam Link 4K:
+0.33% spread) gets the STRICT base `CAPTURE_RATE_TOLERANCE_PCT`, not a wide per-model allowance.
+
+**3. Read the CODE + the LIVE fleet before trusting a ticket's "relaxation" claims.** #1034 named
+three relaxations; live journals showed two were already resolved: the `#717` sustained band
+already escalates to a USB reset via issue-971 (it FIRED on cam1 at 05:36Z that day), and the
+offline gate already hard-fails on the `#971` chronic line — folding the plain sustained band in
+would recreate the issue-909 mistake (see the issue-992 section above). targets.md also lied
+(claimed cam1 = Elgato post-#728); live truth was a ShadowCast. Always re-measure via
+`journalctl -u camera-box` on the boxes (`ssh root@10.77.9.6N`, pw newlevel) before pinning a bound.
