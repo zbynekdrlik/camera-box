@@ -96,6 +96,26 @@ pub fn classify(sample: RenderSample, target_fps: f64) -> RenderVerdict {
     }
 }
 
+/// #879 — canvas-rate EFFECTIVE render divisor for a throttleable monitoring/aux surface.
+///
+/// The frontend's configured divisor (2, calibrated for 60fps-class canvases → 30fps cells) is
+/// treated as a throttleable MARKER plus an UPPER BOUND. The effective cadence divisor is derived
+/// from the canvas frame interval targeting ~30fps cells: `round(33.3ms / interval)`, clamped to
+/// `[1, configured]`. A 60fps canvas → 2 (unchanged); a 30fps canvas → 1 (aux renders every tick,
+/// so it is PURELY budget-gated — degrades only under real pressure, never unconditionally).
+///
+/// This is the Tier-0 authority mirrored byte-for-byte by `obs_effective_render_divisor()` in
+/// `vendor/obs-studio/libobs/obs-display-budget.h` (the exact derivation `render_display()` in
+/// `obs-display.c` computes inline for the projector path, #776). `interval_ns == 0` (video not
+/// running) leaves the configured value untouched, matching `render_display()`.
+pub fn effective_render_divisor(configured_divisor: u32, frame_interval_ns: u64) -> u32 {
+    // #879 [red]: faithful pre-fix stub — no canvas-rate derivation (ignores the interval),
+    // which is exactly the un-throttled behaviour before this ticket. Replaced by the real
+    // derivation in the [green] commit.
+    let _ = frame_interval_ns;
+    configured_divisor
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,5 +218,57 @@ mod tests {
             60.0,
         );
         assert!(under.is_pass(), "4% skip (< 5% tolerance) must pass");
+    }
+}
+
+#[cfg(test)]
+mod effective_divisor_879 {
+    use super::effective_render_divisor;
+
+    /// The #776 target: ~30fps cells. A 30fps canvas (33.33ms interval) with the frontend's
+    /// configured divisor 2 must resolve to an EFFECTIVE divisor of 1 — no unconditional cadence
+    /// skip, so the aux surface is purely budget-gated on strih. (RED with the stub: returns 2.)
+    #[test]
+    fn thirty_fps_canvas_configured_2_resolves_to_1() {
+        assert_eq!(effective_render_divisor(2, 33_333_333), 1);
+    }
+
+    /// A 60fps canvas (16.667ms) keeps the configured divisor 2 (→ 30fps cells).
+    #[test]
+    fn sixty_fps_canvas_configured_2_stays_2() {
+        assert_eq!(effective_render_divisor(2, 16_666_666), 2);
+    }
+
+    /// The effective divisor never EXCEEDS the configured upper bound even on a very slow canvas.
+    #[test]
+    fn slow_canvas_is_clamped_to_configured_upper_bound() {
+        // 10fps canvas (100ms): round(33.3/100)=0 → clamped up to 1, and 1 <= configured 3.
+        assert_eq!(effective_render_divisor(3, 100_000_000), 1);
+    }
+
+    /// A configured divisor of 3 on a 90fps canvas: round(33.3/11.11)=3 → min(3,3)=3.
+    #[test]
+    fn ninety_fps_canvas_configured_3_stays_3() {
+        assert_eq!(effective_render_divisor(3, 11_111_111), 3);
+    }
+
+    /// interval 0 (video not running) leaves the configured value untouched.
+    #[test]
+    fn zero_interval_returns_configured() {
+        assert_eq!(effective_render_divisor(2, 0), 2);
+    }
+
+    /// The program marker (divisor 0) is never changed — min(0, derived) == 0.
+    #[test]
+    fn program_divisor_zero_unchanged() {
+        assert_eq!(effective_render_divisor(0, 33_333_333), 0);
+        assert_eq!(effective_render_divisor(0, 16_666_666), 0);
+    }
+
+    /// A configured divisor of 1 stays 1 on any canvas (min(1, derived>=1) == 1).
+    #[test]
+    fn configured_one_stays_one() {
+        assert_eq!(effective_render_divisor(1, 33_333_333), 1);
+        assert_eq!(effective_render_divisor(1, 16_666_666), 1);
     }
 }
