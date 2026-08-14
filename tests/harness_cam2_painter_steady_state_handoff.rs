@@ -42,7 +42,9 @@ fn run_sourced(body: &str) -> String {
 
 /// The steady-state handoff remote bash (transient pidfile + the marker CSV the permanent unit writes).
 fn handoff() -> String {
-    run_sourced("cam2_painter_steady_state_handoff_cmds /run/rig-painter.pid /run/rig-qpsk-markers.csv")
+    run_sourced(
+        "cam2_painter_steady_state_handoff_cmds /run/rig-painter.pid /run/rig-qpsk-markers.csv",
+    )
 }
 
 fn script_text() -> String {
@@ -63,9 +65,9 @@ fn handoff_enables_and_starts_the_permanent_unit() {
 #[test]
 fn handoff_stops_transient_painter_before_enabling_permanent_unit() {
     let h = handoff();
-    let stop_pos = h
-        .find("cat \"/run/rig-painter.pid\"")
-        .expect("#440: handoff must stop the TRANSIENT painter via its pidfile before starting the unit");
+    let stop_pos = h.find("cat \"/run/rig-painter.pid\"").expect(
+        "#440: handoff must stop the TRANSIENT painter via its pidfile before starting the unit",
+    );
     let enable_pos = h
         .find("systemctl enable --now cam2-painter.service")
         .expect("#1008: handoff must enable+start the permanent unit");

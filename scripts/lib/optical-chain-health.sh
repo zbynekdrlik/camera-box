@@ -20,8 +20,11 @@
 #
 # TEST/EVENT-mode discriminator: `painter_expected` = the cam2 painter pidfile is present OR the
 # permanent cam2-painter.service is enabled. This is the DURABLE, NON-staling state rig-mode.sh
-# already maintains -- TEST mode writes /run/rig-painter.pid (and may enable the service); EVENT
-# mode REMOVES the pidfile (painter_stop_remote) AND disables the service (#892). So a black
+# already maintains -- since #1008/#937 TEST mode's STEADY STATE is the ENABLED permanent
+# cam2-painter.service (the transient pidfile /run/rig-painter.pid exists only during the
+# at-mode-set verification window and is REMOVED at handoff), so the service-enabled arm is the
+# durable TEST signal; EVENT mode REMOVES the pidfile (painter_stop_remote) AND disables the
+# service (#892). So a black
 # monitor in EVENT mode -> painter_expected=0 -> SKIP (never a false alert); a dead painter in
 # TEST mode -> alert. Deliberately reuses the pidfile/service lifecycle instead of a second,
 # drift-prone marker file, and instead of the #281 rig-heartbeat (which is stale-after-10-min by
