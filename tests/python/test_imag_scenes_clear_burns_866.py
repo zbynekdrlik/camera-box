@@ -138,3 +138,21 @@ def test_fails_loud_when_a_clear_does_not_land():
     obs = FakeObs({"NDI CAM1": {"inputKind": "ndi_source", "genlock_burn": True}}, stuck=True)
     with pytest.raises(SystemExit):
         mod.clear_measurement_burns(obs)
+
+
+def test_enumeration_failure_warns_but_never_aborts_obs_start():
+    """#1011 fail-closed: a GetInputList that FAILED (no `inputs` key) is 'could not enumerate',
+    never 'no burns' — but at OBS start (imag-obs-start.sh, set -euo pipefail) this must NOT
+    SystemExit (that would take OBS down on the live box); it warns and returns, never clearing."""
+    mod = _scenes_module()
+
+    class FailingEnumObs(FakeObs):
+        def req(self, rtype, payload=None, ignore_err=False):
+            self.calls.append((rtype, payload or {}))
+            if rtype == "GetInputList":
+                return {}  # WS error under ignore_err -> no `inputs` key
+            return super().req(rtype, payload, ignore_err)
+
+    obs = FailingEnumObs({"NDI CAM1": {"inputKind": "ndi_source", "genlock_burn": True}})
+    mod.clear_measurement_burns(obs)  # must NOT raise
+    assert [r for r, _ in obs.calls if r == "SetInputSettings"] == []

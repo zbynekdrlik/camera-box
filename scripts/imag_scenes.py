@@ -513,6 +513,80 @@ def verify_parity(obs: Obs) -> None:
         sys.exit(1)
 
 
+# #866 -- force the measurement burn OFF at OBS start so a saved genlock_burn=true can never
+# survive a restart onto the live IMAG projection.
+#
+# The per-source measurement-burn bool (genlock_burn -- obs_burn_filter.py's BURN_SETTING, #257)
+# is persisted INTO OBS's saved scene collection; turning it OFF is only ever a RUNTIME WebSocket
+# change (the gate cleanup / obs_burn_filter.py remove -- never written to disk unless OBS exits
+# cleanly). So an OBS crash/reboot/manual restart reloads the disk copy = true and RENDERS the QR
+# burn onto the live projection (ticket's live evidence: Untitled.json NDI CAM1 burn=True surviving
+# a segfault-restart). imag-obs-start.sh (the box's own start path -- boot autostart, operator
+# "Spustit OBS", imag-obs.service Restart=on-failure) runs `imag_scenes.py --bootstrap` on every
+# fresh instance, so clearing burns there closes the restart-resurrection window.
+#
+# imag_scenes.py is fetched STANDALONE to /usr/local/bin (setup-imag.sh) and cannot import the
+# obs_burn_filter.py shared seam (not deployed on the box), so this reimplements the tiny
+# enumerate-ndi + clear logic locally -- the SAME established imag precedent as imag_latency_enforce
+# .py's own list_ndi_inputs/enforce loop (#757). The "route through ONE seam" rule (burn-target-
+# enumeration.md) governs the SHELL consumers (rig-mode, recording-e2e) that CAN import the seam.
+BURN_SETTING = "genlock_burn"  # obs_burn_filter.BURN_SETTING (#257) -- the per-source burn bool
+
+
+def ndi_source_names(inputs: list) -> list:
+    """Pure: inputName of every `ndi_source` input in a GetInputList `inputs` array, in order.
+
+    The measurement burn only applies to ndi_source inputs, so those are exactly the inputs a burn
+    can leak onto -- enumerate them from OBS reality, never a static/CAMS list (burn-target-
+    enumeration rule). Skips malformed entries (no/empty name) and non-ndi kinds."""
+    return [i.get("inputName") for i in (inputs or [])
+            if i.get("inputKind") == "ndi_source" and i.get("inputName")]
+
+
+def clear_measurement_burns(obs: Obs) -> None:
+    """#866: force the measurement burn OFF on EVERY ndi_source input at OBS start.
+
+    Enumerates from OBS reality (GetInputList), clears genlock_burn=false only on the inputs that
+    currently have it ON (SetInputSettings overlay-merge -- never clobber the source's other
+    settings), read-back verifies each, and FAILS LOUD (SystemExit) if any stays ON. A measurement
+    burn is never legitimate operator state (unlike the #785 bindings/transforms this module
+    protects), so forcing it OFF here never fights the operator. Called on the --bootstrap
+    (fresh-instance) path only, so a plain reseed from dev1 never nukes a burn a gate run
+    deliberately set mid-measurement."""
+    resp = obs.req("GetInputList", ignore_err=True)
+    if not isinstance(resp, dict) or "inputs" not in resp:
+        # The enumeration itself FAILED (WS error / malformed reply). A live imag OBS always has
+        # ndi inputs, so a missing `inputs` means "could not enumerate", never "no burns" (#1011
+        # fail-closed lesson). But at OBS START we must NOT abort -- imag-obs-start.sh runs this
+        # under `set -euo pipefail`, so a SystemExit here would take OBS DOWN on the live
+        # projection box on a transient WS hiccup, which is worse than the burn. Warn LOUD and
+        # return; the next gate run's [0/8] exhaustive sweep-off is the fail-closed backstop.
+        print("burns: WARNING #866/#1011 -- GetInputList FAILED at start; could NOT verify/clear "
+              "measurement burns (a leaked burn may still be rendering). Investigate OBS WS.")
+        return
+    names = ndi_source_names(resp["inputs"])
+    cleared, still_on = [], []
+    for name in names:
+        cur = (obs.req("GetInputSettings", {"inputName": name}, ignore_err=True)
+               .get("inputSettings", {}).get(BURN_SETTING))
+        if cur is True:
+            obs.req("SetInputSettings", {
+                "inputName": name,
+                "inputSettings": {BURN_SETTING: False},
+                "overlay": True,  # merge -- never clobber the source's other (forced) settings
+            }, ignore_err=True)
+            rb = (obs.req("GetInputSettings", {"inputName": name}, ignore_err=True)
+                  .get("inputSettings", {}).get(BURN_SETTING))
+            (cleared if rb in (False, None) else still_on).append(name)
+    if cleared:
+        print(f"burns: forced OFF at start on {len(cleared)} ndi input(s) (#866): {cleared}")
+    else:
+        print(f"burns: none ON at start ({len(names)} ndi input(s) scanned) (#866)")
+    if still_on:
+        sys.exit(f"FAIL: genlock_burn STILL ON after clear on {still_on} (#866) -- a burn would "
+                 f"leak onto the live IMAG projection; investigate OBS WS SetInputSettings")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--host", required=True)
@@ -538,6 +612,11 @@ def main() -> None:
         has_dgpu = detect_has_discrete_nvidia(args.host)
         seed_profile(obs, has_dgpu)  # #502/#847: Advanced profile BEFORE the video/scene seed
         seed(obs)
+        if BOOTSTRAP:
+            # #866: fresh OBS instance -- force measurement burns OFF so a saved genlock_burn=true
+            # can never survive a restart onto the live IMAG projection. Bootstrap-only (like the
+            # #785 self-heal): a bare reseed must not clear a burn a gate run set mid-measurement.
+            clear_measurement_burns(obs)
 
 
 if __name__ == "__main__":
