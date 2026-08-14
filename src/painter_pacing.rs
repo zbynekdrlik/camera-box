@@ -115,18 +115,63 @@ impl PainterPacing {
 
 /// Compute painter pacing over an ordered slice of painted frames.
 pub fn analyze(rows: &[PainterRow]) -> PainterPacing {
-    // [red] not yet implemented — no pacing computed.
+    let mut painted_duplicates = 0u32;
+    let mut painted_skips = 0u32;
+    let mut nonmonotonic = 0u32;
+    for w in rows.windows(2) {
+        let delta = i64::from(w[1].tick) - i64::from(w[0].tick);
+        if delta == 0 {
+            painted_duplicates += 1;
+        } else if delta < 0 {
+            nonmonotonic += 1;
+        } else if delta > 1 {
+            painted_skips += 1;
+        }
+    }
+
+    // Inter-flip intervals between CONSECUTIVE rows that BOTH carry a flip stamp.
+    let mut intervals: Vec<i64> = Vec::new();
+    for w in rows.windows(2) {
+        if let (Some(a), Some(b)) = (w[0].flip_ts_ns, w[1].flip_ts_ns) {
+            intervals.push(b - a);
+        }
+    }
+    let have_flip_stamps = rows.iter().filter(|r| r.flip_ts_ns.is_some()).count() >= 2;
+
+    let (nominal_flip_interval_ns, max_flip_interval_ns, missed_deadlines, duplicate_class_stalls) =
+        if intervals.is_empty() {
+            (None, None, 0, 0)
+        } else {
+            let mut sorted = intervals.clone();
+            sorted.sort_unstable();
+            let nominal = sorted[sorted.len() / 2]; // median = robust nominal refresh period
+            let maxiv = *sorted.last().expect("non-empty");
+            let (mut missed, mut dup_stalls) = (0u32, 0u32);
+            if nominal > 0 {
+                for &iv in &intervals {
+                    // >= 1.5x nominal, integer-safe: iv*2 >= nominal*3
+                    if iv * 2 >= nominal * 3 {
+                        missed += 1;
+                    }
+                    if iv >= nominal * 2 {
+                        dup_stalls += 1;
+                    }
+                }
+            }
+            (Some(nominal), Some(maxiv), missed, dup_stalls)
+        };
+
     PainterPacing {
         rows: rows.len(),
         malformed_rows: 0,
-        painted_duplicates: 0,
-        painted_skips: 0,
-        nonmonotonic: 0,
-        have_flip_stamps: false,
-        nominal_flip_interval_ns: None,
-        max_flip_interval_ns: None,
-        missed_deadlines: 0,
-        duplicate_class_stalls: 0,
+        painted_duplicates,
+        painted_skips,
+        nonmonotonic,
+        have_flip_stamps,
+        nominal_flip_interval_ns,
+        max_flip_interval_ns,
+        missed_deadlines,
+        duplicate_class_stalls,
     }
 }
 

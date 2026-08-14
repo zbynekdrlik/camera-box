@@ -4419,6 +4419,43 @@ fn build_and_print_verdict(
                 report["all_cambox_continuity"] = seg_json;
                 all_pass &= seg.overall_pass;
 
+                // #859 — REPORT-ONLY painter-pacing attribution. From the cam2 painter's own
+                // `tick,gen_ts_ns,flip_ts_ns` ground truth (already supplied via `--painter`),
+                // decide whether the residual DUPLICATE (`copies`) is the painter's OWN stall (a
+                // missed DRM-vsync deadline / a repeated painted tick) or DOWNSTREAM of the
+                // page-flip (monitor/camera/splitter optical beat, or the strih/stream genlock
+                // FIFO limit cycle). The pure logic lives in `camera_box::painter_pacing` (Tier-0
+                // tested); this is the thin probe-side surface. NEVER gates, changes NO threshold,
+                // and can NEVER newly fail a passing verdict — a read error emits an `unavailable`
+                // block, and absent `--painter` emits nothing at all.
+                if let Some(painter_path) = &args.painter {
+                    match std::fs::read_to_string(painter_path) {
+                        Ok(text) => {
+                            let pacing = camera_box::painter_pacing::analyze_csv(&text);
+                            let total_copies: u32 = seg.segments.iter().map(|s| s.copies).sum();
+                            let mut pv =
+                                serde_json::to_value(&pacing).unwrap_or(serde_json::Value::Null);
+                            if let Some(obj) = pv.as_object_mut() {
+                                obj.insert(
+                                    "total_copies".to_string(),
+                                    serde_json::json!(total_copies),
+                                );
+                                obj.insert(
+                                    "attribution".to_string(),
+                                    serde_json::json!(pacing.duplicate_attribution(total_copies)),
+                                );
+                            }
+                            report["all_cambox_continuity"]["painter_pacing"] = pv;
+                        }
+                        Err(e) => {
+                            report["all_cambox_continuity"]["painter_pacing"] = serde_json::json!({
+                                "unavailable": true,
+                                "reason": format!("read painter CSV {}: {e}", painter_path.display()),
+                            });
+                        }
+                    }
+                }
+
                 // #1036 — the calibrated paired-JUDDER gate (issue 406 zero-loss; the "15fps-like"
                 // cadence class issue 726 measures but that never gated). Bound the WORST
                 // per-window `paired_fraction` across every cadence-bearing cambox window (a single
