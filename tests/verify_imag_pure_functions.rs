@@ -725,8 +725,13 @@ fn imag_projector_counts_ok_requires_exactly_one_each() {
 // wmctrl -- self-establishing the very condition it then asserted, so it would pass even on a
 // box that comes up blank every single boot (the #840 root cause). The gate must instead (1)
 // read the CURRENT projector counts with no side effect and FAIL if they're not already 1+1, and
-// (2) restart OBS through the box's OWN operator scripts (imag-obs-stop.sh + imag-obs-start.sh --
-// the SAME path a real reboot/manual restart uses) and re-count, to actually prove PERSISTENCE.
+// (2) restart OBS and re-count, to actually prove PERSISTENCE.
+// #890: the restart must go through the SERVICE (systemctl --user restart imag-obs.service),
+// NEVER a direct `imag-obs-stop.sh && imag-obs-start.sh` ssh call -- since #882 imag-obs-start.sh
+// blocks on `wait "$OBS_PID"`, so a DIRECT ssh invocation never returns and hangs the whole gate
+// forever. systemd (Type=simple) owns that blocking wait, so a service restart returns promptly;
+// it must be wrapped in a hard execution timeout and followed by a BOUNDED poll (fail loud on
+// expiry), never an unbounded wait.
 
 #[test]
 fn verify_imag_no_longer_self_establishes_projectors_before_counting_840() {
@@ -740,45 +745,88 @@ fn verify_imag_no_longer_self_establishes_projectors_before_counting_840() {
 }
 
 #[test]
-fn verify_imag_restarts_obs_via_its_own_scripts_to_prove_persistence_840() {
+fn verify_imag_restarts_obs_via_the_service_never_a_blocking_direct_script_call_890() {
     let body = std::fs::read_to_string(script()).unwrap();
+    // #890: a DIRECT `imag-obs-stop.sh && imag-obs-start.sh` ssh call hangs forever on #882's
+    // blocking `wait "$OBS_PID"`. It must be gone.
     assert!(
-        body.contains("/usr/local/bin/imag-obs-stop.sh")
-            && body.contains("/usr/local/bin/imag-obs-start.sh"),
-        "verify-imag.sh check (o) must restart OBS via imag-obs-stop.sh + imag-obs-start.sh (the \
-         box's OWN operator scripts, the same path a real reboot/manual restart uses) to prove \
-         the projectors PERSIST across a real restart (#840), not just that they can be opened \
-         once from dev1"
+        !body.contains(r#"/usr/local/bin/imag-obs-stop.sh && /usr/local/bin/imag-obs-start.sh"#),
+        "verify-imag.sh check (o) must NOT restart OBS via a DIRECT `imag-obs-stop.sh && \
+         imag-obs-start.sh` ssh call -- that hangs the gate forever on #882's blocking wait (#890)"
+    );
+    // It must restart through the service (systemd owns the wait -> returns promptly + keeps the
+    // new obs supervised) via the pure `imag_obs_service_restart_cmd` helper, both DEFINED and
+    // CALLED, and wrap the ssh call in a hard execution timeout.
+    assert!(
+        body.matches("imag_obs_service_restart_cmd").count() >= 2,
+        "verify-imag.sh must both DEFINE and CALL imag_obs_service_restart_cmd (#890) -- a pure \
+         function only ever defined and never invoked provides zero acceptance coverage"
+    );
+    assert!(
+        body.contains(r#"ssh_box_timeout "$IMAG_OBS_RESTART_TIMEOUT""#),
+        "verify-imag.sh check (o) must wrap the service restart in a bounded execution timeout \
+         (ssh_box_timeout \"$IMAG_OBS_RESTART_TIMEOUT\") so the gate can NEVER hang again (#890)"
     );
 }
 
 #[test]
-fn verify_imag_counts_projectors_before_and_after_the_restart_840() {
+fn verify_imag_counts_projectors_before_and_after_a_bounded_service_restart_890() {
     let body = std::fs::read_to_string(script()).unwrap();
     let restart = body
-        .find("/usr/local/bin/imag-obs-stop.sh")
-        .expect("the restart invocation must be present");
+        .find(r#"ssh_box_timeout "$IMAG_OBS_RESTART_TIMEOUT""#)
+        .expect("the bounded service-restart call must be present (#890)");
     // The wmctrl projector-count read (grep -c 'Projector - Multiview') must appear on BOTH
     // sides of the restart call -- once to prove the box's OWN startup path already established
-    // them (no self-establish), and again afterward to prove they came back.
-    let counts_before: Vec<_> = body
+    // them (no self-establish, #840), and again afterward to prove they came back.
+    let counts: Vec<_> = body
         .match_indices("grep -c 'Projector - Multiview'")
         .map(|(i, _)| i)
         .collect();
     assert!(
-        counts_before.len() >= 2,
+        counts.len() >= 2,
         "verify-imag.sh must count the Multiview projector window BOTH before and after the \
          restart (#840) -- found {} occurrence(s)",
-        counts_before.len()
+        counts.len()
     );
     assert!(
-        counts_before[0] < restart,
+        counts[0] < restart,
         "the FIRST projector count must happen BEFORE the restart (proving the box's own \
-         startup path already had them, never self-established by this gate)"
+         startup path already had them, never self-established by this gate, #840)"
     );
     assert!(
-        counts_before.iter().any(|&i| i > restart),
+        counts.iter().any(|&i| i > restart),
         "a projector count must ALSO happen AFTER the restart (proving persistence, #840)"
+    );
+    // #890: the post-restart re-count must be a BOUNDED poll that FAILs loud on expiry, never an
+    // unbounded wait -- keyed on the IMAG_OBS_PROJECTOR_POLL_S deadline knob.
+    assert!(
+        body.contains("IMAG_OBS_PROJECTOR_POLL_S"),
+        "the post-restart projector re-count must be a bounded poll (IMAG_OBS_PROJECTOR_POLL_S \
+         deadline), never an unbounded wait (#890)"
+    );
+}
+
+// #890: the pure command-builder for check (o)'s restart. It must target the SERVICE (systemd
+// owns #882's blocking wait, so the ssh call returns promptly + the new obs stays supervised),
+// export XDG_RUNTIME_DIR so a non-graphical ssh session can reach the user bus, and NEVER invoke
+// imag-obs-start.sh directly (that hangs forever on `wait "$OBS_PID"`).
+#[test]
+fn imag_obs_service_restart_cmd_targets_the_service_never_the_blocking_start_script_890() {
+    let (code, out, err) = run_sourced(r#"imag_obs_service_restart_cmd"#);
+    assert_eq!(code, 0, "stderr: {err}");
+    assert!(
+        out.contains("systemctl --user restart imag-obs.service"),
+        "imag_obs_service_restart_cmd must restart OBS through imag-obs.service (#890): {out:?}"
+    );
+    assert!(
+        !out.contains("imag-obs-start.sh"),
+        "imag_obs_service_restart_cmd must NOT invoke imag-obs-start.sh directly -- that script \
+         blocks on `wait \"$OBS_PID\"` (#882) and hangs the gate forever over ssh (#890): {out:?}"
+    );
+    assert!(
+        out.contains("XDG_RUNTIME_DIR"),
+        "the restart command must export XDG_RUNTIME_DIR so a non-graphical ssh session can reach \
+         the user bus (imag-obs-supervision.md): {out:?}"
     );
 }
 
@@ -995,14 +1043,13 @@ fn imag_obs_cgroup_shows_service_unit_requires_the_real_unit_component() {
     );
 }
 
-/// Live-caught on 10.77.9.182 (#884): check (o)'s restart-proof (#840) calls
-/// imag-obs-stop.sh/imag-obs-start.sh DIRECTLY over SSH, bypassing systemctl entirely -- which
-/// leaves imag-obs.service `inactive (dead)` (systemd loses track of the main process once the
-/// wrapper's own blocking `wait` returns) and starts a fresh, UNTRACKED obs process with NO
-/// LimitCORE applied (confirmed live: the post-restart process showed `Max core file size = 0`,
-/// not unlimited -- LimitCORE is a systemd-applied cgroup property, never inherited by a bare SSH
-/// invocation). The #884 checks MUST read the box's state BEFORE this restart runs, or they
-/// falsely FAIL a genuinely healthy, correctly-provisioned box every single time this gate runs.
+/// Live-caught on 10.77.9.182 (#884): check (o)'s restart-proof (#840) RESTARTS obs, which
+/// REPLACES the tracked obs process with a fresh one. The #884 checks (unit enabled+active,
+/// Restart=, autostart wiring, core-dump enablement) must read the box's BOOT-TIME state BEFORE
+/// that restart runs, or they observe the post-restart process instead and can falsely FAIL a
+/// genuinely healthy, correctly-provisioned box. (#890 changed the restart from a direct
+/// imag-obs-start.sh ssh call -- which hung forever on #882's blocking wait -- to a bounded
+/// `systemctl --user restart imag-obs.service`; the ordering constraint is unchanged.)
 #[test]
 fn verify_imag_reads_884_service_state_before_the_840_restart_wipes_it() {
     let body = std::fs::read_to_string(script()).unwrap();
@@ -1010,8 +1057,8 @@ fn verify_imag_reads_884_service_state_before_the_840_restart_wipes_it() {
         .find("systemctl --user is-enabled imag-obs.service")
         .expect("the imag-obs.service enabled/active check must exist (#884)");
     let restart_call = body
-        .find(r#"/usr/local/bin/imag-obs-stop.sh && /usr/local/bin/imag-obs-start.sh"#)
-        .expect("check (o)'s restart-proof call must exist (#840)");
+        .find(r#"ssh_box_timeout "$IMAG_OBS_RESTART_TIMEOUT""#)
+        .expect("check (o)'s bounded service-restart call must exist (#890)");
     assert!(
         service_check < restart_call,
         "the #884 imag-obs.service checks must run BEFORE check (o)'s restart-proof (#840) -- \
@@ -1061,8 +1108,8 @@ fn verify_imag_reads_1015_cgroup_before_the_840_restart_wipes_it() {
         .find("imag_obs_cgroup_shows_service_unit \"")
         .expect("the #1015 cgroup check must actually be CALLED (not just defined)");
     let restart_call = body
-        .find(r#"/usr/local/bin/imag-obs-stop.sh && /usr/local/bin/imag-obs-start.sh"#)
-        .expect("check (o)'s restart-proof call must exist (#840)");
+        .find(r#"ssh_box_timeout "$IMAG_OBS_RESTART_TIMEOUT""#)
+        .expect("check (o)'s bounded service-restart call must exist (#890)");
     assert!(
         cgroup_check < restart_call,
         "the #1015 cgroup check must run BEFORE check (o)'s restart-proof (#840) -- reading it \
@@ -1125,8 +1172,8 @@ fn verify_imag_reads_1040_power_envelope_before_the_840_restart_wipes_it() {
         .find("imag_power_envelope_gather_remote_snippet")
         .expect("the #1040 power-envelope gather must actually be CALLED in the live flow");
     let restart_call = body
-        .find(r#"/usr/local/bin/imag-obs-stop.sh && /usr/local/bin/imag-obs-start.sh"#)
-        .expect("check (o)'s restart-proof call must exist (#840)");
+        .find(r#"ssh_box_timeout "$IMAG_OBS_RESTART_TIMEOUT""#)
+        .expect("check (o)'s bounded service-restart call must exist (#890)");
     assert!(
         power_check < restart_call,
         "the #1040 power-envelope check (u) must run BEFORE check (o)'s restart-proof (#840) -- \
