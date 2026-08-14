@@ -716,15 +716,29 @@ pub fn dock_lock_outcome(
     }
 }
 
+/// #1004 — the MEASURED additive term applied to [`dock_lock_display_offset_ms`], deliberately
+/// **0.0**. #952 fit `dock ~= -gate - 55`; #953 fixed the SIGN. This ticket quantified the residual
+/// additive half LIVE (2026-08-14, 5 healthy post-phase-fix windows: dock median vs the offline
+/// optical `--av-sync` truth in the same recording window): dock − offline ranged **+9..+53ms**
+/// (central ~+32, σ ~13–15ms, run-to-run spread 33–41ms), and the dock's OWN within-window swing
+/// (**24..75ms**, cluster mad ~25–35ms, with lock glitches to −805ms / +207ms spikes) exceeds that
+/// spread. #952's ~55ms is **not** reproduced as a stable constant. No single additive value —
+/// measured or guessed — reconciles the two DIFFERENT taps (digital NDI-internal burn pairing in
+/// the dock's ring vs the optical camera+mic chain off the cam2 monitor) to the ±20ms the tightened
+/// gate needs, so compensating would inject false precision. DECISION (from data, issue 1004): NO
+/// compensation — the offline optical `--av-sync` chain stays the sole authoritative gate, the dock
+/// stays a coarse live monitor. Changing this away from 0.0 requires a NEW live re-measurement
+/// proving a STABLE constant, never a guessed one (the standing rule this doc has always carried).
+/// C++ mirror: `cb_dock_lock_display_offset_ms` / `CB_DOCK_LOCK_DISPLAY_ADDITIVE_MS`.
+pub const DOCK_LOCK_DISPLAY_ADDITIVE_MS: f64 = 0.0;
+
 /// #953 — converts the dock's OWN native offset convention (`ts = audio_ts - video_ts`) into the
 /// gate's authoritative convention (`offset_ms = video_time - audio_time`,
 /// `scripts/av_sync_calibrate.py::required_delay_ms` / [`crate::qpsk_marker::required_delay_ms`]) —
 /// a pure sign negation. #952 (closed) established empirically that the two instruments disagree
-/// by `dock ~= -gate - 55`: this fixes the SIGN half of that relation; the residual ~55ms additive
-/// bias is UNQUANTIFIED (attributable to the different measurement taps — digital NDI-internal
-/// burn vs optical camera+mic off the cam2 monitor) and is intentionally NOT compensated here — it
-/// needs a live re-measurement after this fix is deployed (tracked on issue #1004), never a
-/// guessed constant in shipped code.
+/// by `dock ~= -gate - 55`: this fixes the SIGN half of that relation. The residual additive half
+/// was quantified live and found UNSTABLE — see [`DOCK_LOCK_DISPLAY_ADDITIVE_MS`] (issue 1004):
+/// it is deliberately NOT compensated (additive term = 0.0), never a guessed constant.
 pub fn dock_lock_display_offset_ms(dock_offset_ms: f64) -> f64 {
     -dock_offset_ms
 }
@@ -1015,7 +1029,9 @@ mod tests {
              defensible; changing this needs a NEW live re-measurement proving a stable value"
         );
         // The measured operating points (offline means/cam2 from the 5 windows) + boundary values:
-        for g in [-186.3, -22.1, -19.5, -3.8, 0.0, 20.6, 22.5, 39.9, 56.2, 59.3, 55.0, -55.0] {
+        for g in [
+            -186.3, -22.1, -19.5, -3.8, 0.0, 20.6, 22.5, 39.9, 56.2, 59.3, 55.0, -55.0,
+        ] {
             assert_eq!(
                 dock_lock_display_offset_ms(g),
                 -g + DOCK_LOCK_DISPLAY_ADDITIVE_MS,
