@@ -626,6 +626,7 @@ fn documented_controls_for_model(model: GrabberModel) -> Vec<CaptureControl> {
     match model {
         GrabberModel::ShadowCast2
         | GrabberModel::Elgato4kS
+        | GrabberModel::CamLink4k
         | GrabberModel::NzxtSignalHd60
         | GrabberModel::Unknown => color_production_controls(),
     }
