@@ -7687,3 +7687,32 @@ does the live rig verification of the new whole-chain checks and closes it.
 - All 4 CI runs green FIRST TRY — including the full-path E2E running for the first time under the new absolute cam-to-strih 400 ms latency gate (healthy rig ~210-240 ms; bound calibrated from 20 green verdicts).
 - Deploy: obs.dll (with the extracted genlock_release_tick) to strih + stream (backups *.pre-1046, session-1 relaunches, render tick ENABLED, TEST burns verified ON), full bundle to imag (render 4.15-4.35 ms @ 60.000 fps post-restart, 29 W envelope holding).
 - Round 4 dispatched in parallel during the CI wait: probe ReleaseCadence phase-anchor mirror + the differ dead-mode removal split from the 1035 work.
+
+## issue 1037 — probe ReleaseCadence adopts the phase-anchored relock selection (2026-08-14, autopilot-1037 worktree)
+
+- Commit `ab4c608ff` (on version bump `1f2d69796` → 1.7.0-dev.448). ONE file: `src/probe/genlock.rs`.
+  No vendored C, no other test file, no workflow touched — the C + Tier-0 authority already had the
+  issue-1003 phase-continuity selection; this brought the last mirror (the probe reference sim) onto it.
+- Change: added `ReleaseCadence::phase_anchor_ns` (mirror of the C `genlock_phase_anchor_ns`), a thin
+  `relock_select` adapter over the crate-root authority (`relock_select_nearest`/`relock_anchor_age_ns`
+  — NOT re-implemented), ACQUIRE+BACKLOG select-nearest, the BACKLOG `sel==0 && anchor!=0` stale-anchor
+  self-heal, anchor update on STEADY (N==1 and N>=2) + GAP presents via `phase_anchor_from_present`,
+  and a narrowed SCOPE NOTE (only the issue-940-piece-3 raw-vs-grid-pinned deadline divergence remains).
+- KEY FINDING: NONE of the ~dozen existing tick-driven cadence tests changed. On a cold ACQUIRE the
+  anchor is UNSET, so `relock_anchor_age_ns(0, reserve)` = configured latency → target == the raw
+  deadline → nearest == newest-due (identical). The relock tests assert invariants (relocked /
+  dropped>0 / ordered / mean-delta), not exact acquire/relock stamps, so they hold too. The phase
+  difference only manifests at a relock with a SET deep anchor — which the existing suite never
+  exercises. Three NEW demonstrative tests added for exactly that (inherit-not-newest-due,
+  anchor-lifecycle, stale-anchor self-heal).
+- DE-RISK METHOD (probe is CI-only, no local compile): built a default-feature scratch replica that
+  `use camera_box::genlock_backlog::*` (the REAL authority, zero arithmetic copy-drift) + a byte-faithful
+  copy of the new tick + the sim harnesses, and RAN it to OBSERVE every re-pin and every new-test value
+  (backlog inherit: presents index 12 not the newest-due 39, keeps the 27-frame ~900 ms conveyor; steady
+  anchor 10 ms; gap anchor recomputed to 15 ms; self-heal clears to 0 → presents index 39). This is the
+  Rust analogue of the vendored-libobs-change-safety "lift-and-compile-standalone" recipe.
+- Local rigor: `cargo fmt --all --check` PASSES and is a real syntax gate here (rustfmt parses cfg'd
+  code); `cargo check` + `clippy --all-targets -D warnings` + `test --no-run` green on default features;
+  brace/paren/bracket delta vs origin/dev net-zero (the ±1 paren/bracket is pre-existing prose, same on
+  base). The parity gate `tests/genlock_relock_selection_parity.rs` needs NO new vectors — the mirror
+  routes through the authority it already covers, joining no new selection surface.
