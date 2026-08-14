@@ -99,7 +99,6 @@ struct ReleaseSetup {
     lease_dir: PathBuf,
     probe: PathBuf,
     acq_out: PathBuf,
-    shim_dir: PathBuf,
     path_env: String,
 }
 
@@ -127,7 +126,6 @@ fn setup() -> ReleaseSetup {
         lease_dir,
         probe,
         acq_out,
-        shim_dir,
         path_env,
     }
 }
@@ -153,7 +151,6 @@ fn run_release(s: &ReleaseSetup, run_id: &str, acquire_during: bool) {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    let _ = &s.shim_dir; // keep the shim dir referenced
 }
 
 fn read_holder_run_id(lease_dir: &Path) -> Option<String> {

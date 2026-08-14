@@ -302,6 +302,10 @@ rig_lease_release() {
   if mv "$d" "$releasing" 2>/dev/null; then
     rm -rf "$releasing" 2>/dev/null || true
     echo "[rig-lease] released."
+  elif [ -d "$d" ]; then
+    # mv failed but "$d" is still present -- a genuine fs error, NOT the common "already vanished"
+    # case. Do NOT claim it was released; leave it for the stale-reclaim heartbeat backstop.
+    echo "[rig-lease] WARNING: could not rename lease dir aside; leaving it for the stale-reclaim backstop." >&2
   else
     echo "[rig-lease] released (lease already gone)."
   fi

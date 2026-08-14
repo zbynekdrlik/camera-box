@@ -240,7 +240,12 @@ impl Fixture {
     }
 
     fn force_kill(&self) {
-        let mut c = self.child.lock().expect("child mutex poisoned");
+        // Recover from a poisoned lock rather than `.expect()`-panicking: force_kill runs from
+        // Drop during unwind, and a panic there would abort the whole test binary (#850 review).
+        let mut c = self
+            .child
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _ = c.kill();
         let _ = c.wait();
     }
