@@ -32,7 +32,11 @@ fn workdir(tag: &str) -> PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let d = std::env::temp_dir().join(format!("aux_budget_879_{tag}_{}_{}", std::process::id(), stamp));
+    let d = std::env::temp_dir().join(format!(
+        "aux_budget_879_{tag}_{}_{}",
+        std::process::id(),
+        stamp
+    ));
     std::fs::create_dir_all(&d).expect("create temp workdir");
     d
 }
@@ -91,7 +95,7 @@ fn c_effective_divisor_matches_rust_authority_879() {
     // plus interval 0 (video not running).
     let cfgs: [u32; 4] = [0, 1, 2, 3];
     let intervals_ns: [u64; 7] = [
-        0,          // video not running
+        0,           // video not running
         100_000_000, // 10 fps
         33_333_333,  // 30 fps
         20_000_000,  // 50 fps
@@ -117,7 +121,10 @@ fn c_effective_divisor_matches_rust_authority_879() {
         args.push(c.to_string());
         args.push(iv.to_string());
     }
-    let run = Command::new(&bin).args(&args).output().expect("run div harness");
+    let run = Command::new(&bin)
+        .args(&args)
+        .output()
+        .expect("run div harness");
     let _ = std::fs::remove_dir_all(&work);
     assert!(run.status.success(), "#879: div harness exited nonzero");
 
@@ -151,16 +158,15 @@ fn c_aux_sender_should_skip_holds_invariants_879() {
     // tiny obs-global stub + os_gettime_ns stub + the REAL header, then drive the invariants.
     let obs_c = std::fs::read_to_string(libobs().join("obs.c")).expect("read obs.c");
     let sig = "bool obs_aux_sender_should_skip(";
-    let start = obs_c
-        .find(sig)
-        .unwrap_or_else(|| panic!("#879: obs.c no longer defines {sig} — the aux budget seam is gone."));
+    let start = obs_c.find(sig).unwrap_or_else(|| {
+        panic!("#879: obs.c no longer defines {sig} — the aux budget seam is gone.")
+    });
     // The function body has no nested braces (all ifs are single-statement), so the first
     // "\n}" after the signature is its closing brace.
     let rest = &obs_c[start..];
-    let end = rest
-        .find("\n}")
-        .unwrap_or_else(|| panic!("#879: could not find the end of obs_aux_sender_should_skip in obs.c"))
-        + 2;
+    let end = rest.find("\n}").unwrap_or_else(|| {
+        panic!("#879: could not find the end of obs_aux_sender_should_skip in obs.c")
+    }) + 2;
     let lifted = &rest[..end];
 
     let harness = format!(
