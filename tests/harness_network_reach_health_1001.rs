@@ -157,7 +157,10 @@ fn alert_detail_names_box_and_marks_each_failed_signal() {
         d.contains("4455 DOWN") || d.contains("OBS-WS:4455 DOWN"),
         "detail must mark the OBS-WS port down: {d}"
     );
-    assert!(d.contains("8899 DOWN"), "detail must mark the bundle-state port down: {d}");
+    assert!(
+        d.contains("8899 DOWN"),
+        "detail must mark the bundle-state port down: {d}"
+    );
 }
 
 #[test]
@@ -167,6 +170,9 @@ fn alert_detail_distinguishes_up_from_down_signals() {
     let d = stdout_of("net_reach_alert_detail stream 0 1 0");
     assert!(d.contains("stream"), "detail must name the box: {d}");
     assert!(d.contains("ping DOWN"), "ping should read DOWN: {d}");
-    assert!(d.contains("4455 up") || d.contains("OBS-WS:4455 up"), "ws should read up: {d}");
+    assert!(
+        d.contains("4455 up") || d.contains("OBS-WS:4455 up"),
+        "ws should read up: {d}"
+    );
     assert!(d.contains("8899 DOWN"), "bundle should read DOWN: {d}");
 }
