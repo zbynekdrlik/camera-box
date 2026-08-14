@@ -79,7 +79,12 @@ NOTIFY="${AIRULESET_NOTIFY:-$HOME/devel/airuleset/airuleset.py}"
 REPO_SLUG="${NETWORK_REACH_ALERT_REPO:-zbynekdrlik/camera-box}"
 
 STATE_DIR="${NETWORK_REACH_ALERT_STATE_DIR:-${XDG_RUNTIME_DIR:-/tmp}}"
-STATE_FILE="${NETWORK_REACH_ALERT_STATE_FILE:-$STATE_DIR/camera-box-network-reach-alert.state}"
+# A manual --dry-run defaults to a SEPARATE state file so it never consumes a pending recovery latch
+# or advances the live throttle counters of the real timer (an explicit STATE_FILE override still
+# wins, for a test that deliberately wants to inspect a specific state).
+_state_default="$STATE_DIR/camera-box-network-reach-alert.state"
+[ "$DRY_RUN" -eq 1 ] && _state_default="$STATE_DIR/camera-box-network-reach-alert-dryrun.state"
+STATE_FILE="${NETWORK_REACH_ALERT_STATE_FILE:-$_state_default}"
 
 log() { printf '%s [network-reach-alert-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >&2; }
 
@@ -97,7 +102,11 @@ probe_ping() {
 # netstat/nc dependency; `timeout` bounds a filtered/no-route port that would otherwise hang.
 probe_tcp() {
   local ip="$1" port="$2"
-  if timeout "$TCP_TIMEOUT" bash -c "exec 3<>/dev/tcp/$ip/$port" >/dev/null 2>&1; then
+  # $ip/$port passed as positional args ($0/$1), never interpolated into the -c string, so a
+  # config value can never be shell-injected into the probe. The single quotes are DELIBERATE:
+  # $0/$1 must expand in the INNER bash, not here.
+  # shellcheck disable=SC2016
+  if timeout "$TCP_TIMEOUT" bash -c 'exec 3<>/dev/tcp/"$0"/"$1"' "$ip" "$port" >/dev/null 2>&1; then
     printf '1'
   else
     printf '0'
@@ -133,12 +142,11 @@ clear_box_throttle() {
 }
 
 # -- per-box decision --------------------------------------------------------------------------
+# handle_box <box> <ip> <ping_ok> <ws_ok> <bundle_ok> — the probe results are gathered ONCE in main()
+# (so they can also feed the dev1-side-outage anchor) and passed in, never re-probed here.
 handle_box() {
-  local box="$1" ip="$2"
-  local ping_ok ws_ok bundle_ok verdict
-  ping_ok="$(probe_ping "$ip")"
-  ws_ok="$(probe_tcp "$ip" "$OBS_WS_PORT")"
-  bundle_ok="$(probe_tcp "$ip" "$BUNDLE_PORT")"
+  local box="$1" ip="$2" ping_ok="$3" ws_ok="$4" bundle_ok="$5"
+  local verdict
   verdict="$(net_reach_classify_box "$ping_ok" "$ws_ok" "$bundle_ok")"
   log "$box ($ip): ping=$ping_ok ws:$OBS_WS_PORT=$ws_ok bundle:$BUNDLE_PORT=$bundle_ok -> $verdict"
 
@@ -206,23 +214,40 @@ handle_box() {
 main() {
   log "pass start (dry_run=$DRY_RUN, boxes='$BOXES')"
 
-  # -- dev1-side-outage guard: is ANY reference rig node reachable? --
-  local ref flags=() anchor
-  for ref in $REFERENCE_HOSTS; do
-    flags+=("$(probe_ping "$ref")")
+  # -- gather each box's multi-signal probe ONCE (feeds both the anchor and the per-box decision) --
+  local pair box ip names=() ips=() pings=() wss=() bundles=()
+  local reach_flags=()
+  for pair in $BOXES; do
+    box="${pair%%|*}"; ip="${pair##*|}"
+    names+=("$box"); ips+=("$ip")
+    local p w b
+    p="$(probe_ping "$ip")"; w="$(probe_tcp "$ip" "$OBS_WS_PORT")"; b="$(probe_tcp "$ip" "$BUNDLE_PORT")"
+    pings+=("$p"); wss+=("$w"); bundles+=("$b")
+    reach_flags+=("$([ "$(net_reach_classify_box "$p" "$w" "$b")" = REACHABLE ] && echo 1 || echo 0)")
   done
-  anchor="$(net_reach_any_reachable "${flags[@]}")"
+
+  # -- dev1-side-outage guard --------------------------------------------------------------------
+  # dev1's path to the rig subnet is PROVEN up if ANY reference rig node answers ping OR any watched
+  # box is itself reachable (a reachable box is direct proof of connectivity). Only when NOTHING is
+  # reachable — no reference node AND neither box — is the pass "nothing to decide" (per-box state
+  # left untouched), so a dev1-side uplink flap never false-pages both boxes. An EMPTY reference set
+  # disables the guard (the box-reachability proof still applies), never silently muting the whole
+  # watchdog.
+  local ref anchor_flags=() anchor
+  for ref in $REFERENCE_HOSTS; do
+    anchor_flags+=("$(probe_ping "$ref")")
+  done
+  anchor_flags+=("${reach_flags[@]}")
+  anchor="$(net_reach_any_reachable "${anchor_flags[@]}")"
   if [ "$anchor" != "1" ]; then
-    log "no reference rig node reachable (${REFERENCE_HOSTS// /, }) -- dev1-side path to the rig subnet is down -- nothing to decide this pass"
+    log "no reference rig node AND no watched box reachable -- dev1-side path to the rig subnet is down -- nothing to decide this pass"
     log "pass end"
     return 0
   fi
 
-  local pair box ip
-  for pair in $BOXES; do
-    box="${pair%%|*}"
-    ip="${pair##*|}"
-    handle_box "$box" "$ip"
+  local i
+  for i in "${!names[@]}"; do
+    handle_box "${names[$i]}" "${ips[$i]}" "${pings[$i]}" "${wss[$i]}" "${bundles[$i]}"
   done
   log "pass end"
 }

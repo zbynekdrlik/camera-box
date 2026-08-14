@@ -164,6 +164,14 @@ fn alert_detail_names_box_and_marks_each_failed_signal() {
 }
 
 #[test]
+fn alert_detail_renders_ping_up_branch() {
+    // Directly pin the `ping up` branch (the other detail tests all use ping=0).
+    let d = stdout_of("net_reach_alert_detail strih 1 0 0");
+    assert!(d.contains("ping up"), "ping should read up: {d}");
+    assert!(d.contains("4455 DOWN"), "ws should read DOWN: {d}");
+}
+
+#[test]
 fn alert_detail_distinguishes_up_from_down_signals() {
     // A partial-signal outage (ICMP firewalled but a port up) is REACHABLE and never alerts, but the
     // detail builder must still render mixed state honestly when called.
