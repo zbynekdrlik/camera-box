@@ -887,6 +887,15 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
         ;;
     esac
   done
+  # #938/#1011: the CAMERA_ACTIVE_SET-derived loop above normalizes ONLY strih's active-fleet cam
+  # inputs — an out-of-set / non-cam input left genlock_burn ON (strih 'NDI cam4'/'NDI cam3',
+  # stream 'phase2-probe-src') stays ON into this run. Follow it with the shared EXHAUSTIVE sweep
+  # (obs_burn_filter.py sweep-off — GetInputList over WS) on strih AND stream so no leaked burn
+  # survives regardless of which input carries it, on strih/stream/imag (guard class issue 246/844).
+  for _nsip in "$STRIH" "$STREAM" "$IMAG_IP"; do
+    timeout "$OBS_CLEANUP_TIMEOUT" python3 "$HERE/obs_burn_filter.py" sweep-off --host "$_nsip" 2>&1 \
+      | sed "s/^/    [normalize sweep] /" || true
+  done
   for _pfhs in "strih=$STRIH" "stream=$STREAM"; do
     _pfhbox="${_pfhs%%=*}"
     _pfhip="${_pfhs#*=}"
@@ -1283,6 +1292,19 @@ $(cam2_painter_deadman_disarm_cmds)"
       echo "    [$_bn burn-verify] WARNING #246: genlock_burn still ON after clear — re-clear via" >&2
       echo "        scripts/rig-mode.sh event (or obs_burn_filter.py remove) before any live broadcast." >&2
     fi
+  done
+  # #938/#1011: the pinned BURN_TARGETS loop above clears only each box's PROGRAM input. An
+  # out-of-set input a prior all-cambox/probe run left genlock_burn ON (strih 'NDI cam3'/'NDI cam2',
+  # stream 'phase2-probe-src') survives the pinned clear and leaks onto the live broadcast past
+  # cleanup (the 2026-08-07 pre-broadcast leak; guard class issue 246/844). Sweep EVERY ndi_source
+  # input on each box through the shared exhaustive enumerator (obs_burn_filter.py sweep-off —
+  # GetInputList over WS, never a CAMERA_ACTIVE_SET-derived list). timeout-bounded like every other
+  # cleanup OBS call so a hung WS op can never block the trap (#328).
+  echo "[cleanup] #938/#1011 exhaustive genlock_burn sweep-off on EVERY ndi input (strih/stream/imag)"
+  for _swpair in "strih=$STRIH" "stream=$STREAM" "imag=$IMAG_IP"; do
+    _swbn="${_swpair%%=*}"; _swbip="${_swpair#*=}"
+    timeout "$OBS_CLEANUP_TIMEOUT" python3 "$HERE/obs_burn_filter.py" sweep-off --host "$_swbip" 2>&1 \
+      | sed "s/^/    [$_swbn burn-sweep] /" || true
   done
   # #684: FINAL, INDEPENDENT camera-box.service verify -- the LAST thing cleanup() does, for
   # EVERY box this run touched (source cam always; cam2/painter always; cam3-4 when
