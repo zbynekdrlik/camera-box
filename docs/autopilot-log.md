@@ -7743,3 +7743,28 @@ prerequisite, closed 2026-06-15); the rig is genlocked so it was dead code.
   partial local net (parse + brace/format balance) on probe code that `check`/`clippy`/`test
   --no-run` on default features never compile. fmt-clean + hand-audit was the whole local proof
   here; CI is the first TYPE check.
+
+## 2026-08-14 — issue 1049: bounded phase convergence on the steady genlock conveyor (v1.7.0-dev.450, autopilot-1049)
+
+- ROOT CAUSE: the phase-locked conveyor (`genlock_locked_next_boundary_ns`) is a pure FOLLOWER
+  with no restoring force toward the configured latency; the 1003 anchor-nearest relock PRESERVES
+  the phase and the 859 depth drain (2-frame hysteresis, N==1-only) can't catch a 1-2 frame phase
+  error. Result on strih 60-into-30 ingests: a stable per-camera frame-quantized A/V-offset ladder
+  that never converged. The 1003 doc's "shallow anchor saturates to unset" claim was STALE
+  (predates the 1009 flip to floor-boundary stamping; the anchor IS set post-1009). Confirmed via a
+  Fable design consult + a default-feature replica importing the real authority.
+- FIX: new Tier-0 `should_converge_phase` — shed one frame on BOTH STEADY paths when the boundary-
+  implied age `wall-boundary` exceeds `max(reserve, floor) + interval/n + hysteresis`, floor =
+  `wall-newest_queued_stamp`; throttled by the SHARED 859 drain counter (no new field). Mirrored in
+  `obs-source.c` (`genlock_phase_converge_due`/`genlock_should_converge_phase`) + `src/probe/genlock.rs`.
+- ADVERSARIAL REVIEW caught a real 998-class defect: a reserve-only threshold ignores the transport
+  skew FLOOR (a frame can't present before it arrives), limit-cycling forever at the rig's ~20 ms
+  skew on shallow reserves. FIXED by flooring the target at the achievable phase; the no-shed test
+  now sweeps skew 8/15/20/30/59 ms. Playbook: `.claude/rules/genlock-fifo-limit-cycle-diagnosis.md`
+  new SKEW-AXIS section.
+- Commits: chore bump (bc522ab7), RED contract+sim (101428da), GREEN convergence (5f1b93cc), C+probe
+  mirror+parity+anchors (ca2bc0ff), RED skew-sweep (c068fc6d), GREEN floor-aware (8a6c321e). RED→GREEN
+  test `steady_conveyor_persists_an_injected_phase_without_convergence_and_sheds_it_with_1049` +
+  `convergence_never_sheds_at_the_natural_steady_phase_1049`. Executable C-vs-Rust parity gate
+  extended (`c_phase_convergence_matches_the_rust_authority_1049`), mutation-proven. WORKTREE MODE:
+  stopped at green local (supervisor integrates).
