@@ -81,6 +81,19 @@ typedef struct {
 	uint64_t audit_mutex_wait_ns;
 	uint64_t audit_max_mutex_wait_ns;
 	std::chrono::time_point<std::chrono::steady_clock> audit_last_log;
+
+	// camera-box #879: aux-sender ADAPTIVE render-budget gate. An ndi_filter is a
+	// throttleable monitoring/aux NDI republish (interkom / MULTIVIEW / Grading on strih) --
+	// NEVER the program output (that is ndi_output, a separate path). Under graphics-thread
+	// budget pressure this sender skips its VIDEO render + send this tick so the program
+	// render (which runs first, in output_frames()) always has ABSOLUTE priority; the audio
+	// path (ndi_filter_asyncaudio, interkom talkback) is never throttled. Counters mirror
+	// obs-display.c's per-display fields exactly; the decision is the pure
+	// obs_aux_sender_should_skip() (obs.c -> obs_display_should_skip, #278/#293/#756/#776).
+	uint32_t render_divisor;           // throttleable marker + cadence upper bound (default 2)
+	uint32_t render_frame_counter;     // per-instance tick counter (#756 cadence-floor input)
+	uint64_t render_ewma_ns;           // EWMA (alpha=1/4) of this filter's graphics-thread render cost
+	uint32_t render_consecutive_skips; // #293 anti-starvation: renders at least every K+1 ticks
 } ndi_filter_t;
 
 const char *ndi_filter_getname(void *)
@@ -310,6 +323,25 @@ void ndi_filter_render_video(void *data, gs_effect_t *)
 		return;
 	}
 
+	// camera-box #879: adaptive render-budget gate. Count this candidate tick, then ask the
+	// pure libobs decision whether this THROTTLEABLE aux sender must yield to the program
+	// this tick. Skipping produces no new staged frame -> ndi_filter_raw_video sends nothing
+	// this tick (a genuine cadence reduction), so the program (ndi_output, rendered first in
+	// output_frames()) keeps its full budget. #293 caps consecutive skips so it never freezes;
+	// render_ewma_ns == 0 (not yet warmed) always renders once to measure. Program priority is
+	// STRUCTURAL: the program is a different source type never routed through this gate.
+	f->render_frame_counter++;
+	if (obs_aux_sender_should_skip(f->render_divisor, f->render_frame_counter, f->render_ewma_ns,
+				       f->render_consecutive_skips)) {
+		f->render_consecutive_skips++;
+		f->rendered = true; // do not retry this tick; ndi_filter_tick resets it next tick
+		return;
+	}
+
+	// Time this filter's graphics-thread render cost so the budget gate above can predict
+	// the next tick (#278 EWMA, alpha=1/4). A real render clears the #293 skip run.
+	const uint64_t render_begin_879 = os_gettime_ns();
+
 	uint32_t width = obs_source_get_width(f->obs_source);
 	uint32_t height = obs_source_get_height(f->obs_source);
 
@@ -374,6 +406,11 @@ void ndi_filter_render_video(void *data, gs_effect_t *)
 			gs_stagesurface_unmap(f->stagesurface);
 		}
 	}
+
+	// camera-box #879: update this sender's render-cost EWMA and clear the #293 skip run.
+	const uint64_t render_dur_879 = os_gettime_ns() - render_begin_879;
+	f->render_ewma_ns = f->render_ewma_ns ? (f->render_ewma_ns * 3 + render_dur_879) / 4 : render_dur_879;
+	f->render_consecutive_skips = 0;
 
 	f->rendered = true;
 }
@@ -501,6 +538,14 @@ void ndi_filter_update(void *data, obs_data_t *settings)
 	auto name = obs_source_get_name(obs_source);
 	obs_log(LOG_DEBUG, "+ndi_filter_update(name='%s')", name);
 
+	// camera-box #879: optional per-sender cadence override (interkom vs MULTIVIEW tolerate
+	// different reductions). Unset -> obs_data_get_int returns 0 -> keep the default 2. No
+	// operator UI (that is an operator-visible decision + genuine scope); this is the config
+	// seam only.
+	long long ndi_filter_render_div = obs_data_get_int(settings, "ndi_filter_render_divisor");
+	if (ndi_filter_render_div >= 1)
+		f->render_divisor = (uint32_t)ndi_filter_render_div;
+
 	ndi_sender_create(f, settings);
 
 	auto groups = obs_data_get_string(settings, FLT_PROP_GROUPS);
@@ -534,6 +579,14 @@ void *ndi_filter_create(obs_data_t *settings, obs_source_t *obs_source)
 	f->audit_mutex_wait_ns = 0;
 	f->audit_max_mutex_wait_ns = 0;
 	f->audit_last_log = std::chrono::steady_clock::time_point();
+
+	// camera-box #879: throttleable aux sender -- default divisor 2 (canvas-rate derived to
+	// ~30fps cells at gate time; effective 1 on a 30fps strih canvas = pure budget gate).
+	// Counters start clean; ndi_filter_update() below applies any per-sender override.
+	f->render_divisor = 2;
+	f->render_frame_counter = 0;
+	f->render_ewma_ns = 0;
+	f->render_consecutive_skips = 0;
 
 	ndi_filter_update(f, settings);
 

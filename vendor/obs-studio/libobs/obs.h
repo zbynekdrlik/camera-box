@@ -1033,6 +1033,21 @@ EXPORT void obs_display_set_background_color(obs_display_t *display, uint32_t co
  */
 EXPORT void obs_display_set_render_divisor(obs_display_t *display, uint32_t divisor);
 
+/*
+ * camera-box #879: aux NDI sender budget gate. Returns true iff a throttleable aux
+ * monitoring sender (an ndi_filter republish -- interkom / MULTIVIEW / Grading on strih,
+ * render_divisor > 1) should SKIP its render + send this tick because its measured cost
+ * (ewma_ns) would not fit the frame budget remaining after the program already rendered.
+ * Reuses obs_display_should_skip() (obs-display-budget.h) with the LIVE graphics-tick
+ * elapsed + frame interval and the canvas-rate effective divisor, so the program sender
+ * (ndi_output, a separate path this never touches) always has absolute priority and an
+ * over-budget aux sender still renders within K+1 ticks (#293, never freezes). Graphics
+ * thread only. frame_counter is this sender's own per-instance tick counter (incremented
+ * before the call); consecutive_skips is how many ticks in a row it has already skipped.
+ */
+EXPORT bool obs_aux_sender_should_skip(uint32_t render_divisor, uint32_t frame_counter,
+				       uint64_t ewma_ns, uint32_t consecutive_skips);
+
 EXPORT void obs_display_size(obs_display_t *display, uint32_t *width, uint32_t *height);
 
 /* ------------------------------------------------------------------------- */

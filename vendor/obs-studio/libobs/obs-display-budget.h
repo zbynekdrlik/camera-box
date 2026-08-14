@@ -120,3 +120,32 @@ static inline bool obs_display_should_skip(uint32_t render_divisor, uint32_t fra
 	 * Multiview keeps updating at >= 1/(K+1) of the tick rate and can never freeze solid. */
 	return consecutive_skips < OBS_DISPLAY_MAX_CONSECUTIVE_SKIPS;
 }
+
+/*
+ * camera-box #879 — canvas-rate EFFECTIVE render divisor for a throttleable surface.
+ *
+ * The frontend's configured divisor (2, OBSProjector.cpp; or the aux-sender default) is a
+ * throttleable MARKER plus an UPPER BOUND. The effective cadence divisor is derived from the
+ * canvas frame interval targeting ~30fps cells: round(33.3ms / interval), clamped to
+ * [1, configured_divisor]. 60fps canvas -> 2 (unchanged); 30fps canvas -> 1 (the surface renders
+ * every tick, so it is PURELY budget-gated -- degrades only under real pressure, never
+ * unconditionally). This is the EXACT derivation render_display() computes inline for the
+ * projector path (#776); extracted here (additive -- the existing header is untouched) so the
+ * aux NDI sender path (ndi_filter, #879) reuses it verbatim instead of duplicating it.
+ *
+ * frame_interval_ns == 0 (video not running) leaves the configured value untouched, matching
+ * render_display() which only derives when interval != 0.
+ *
+ * Tier-0 authority: src/render_budget.rs::effective_render_divisor (byte-identical results,
+ * proven by the C-parity harness in tests/obs_display_budget.rs).
+ */
+static inline uint32_t obs_effective_render_divisor(uint32_t configured_divisor,
+						    uint64_t frame_interval_ns)
+{
+	if (frame_interval_ns == 0)
+		return configured_divisor;
+	uint32_t derived = (uint32_t)((33333333ULL + frame_interval_ns / 2) / frame_interval_ns);
+	if (derived < 1)
+		derived = 1;
+	return derived < configured_divisor ? derived : configured_divisor;
+}
