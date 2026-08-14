@@ -8028,3 +8028,42 @@ ssh-ing IN (impossible against an off-network box).
   in `harness_cam2_painter_provisioning_863.rs`. FULL `cargo test` suite green: 205 binaries, 0
   FAILED (mandatory after a rig-mode.sh edit — no anchor collisions). shellcheck -x clean on all
   touched scripts. Playbook: new `.claude/rules/cam2-painter-lifecycle.md` + router entry.
+
+## issues #946 + #910 — unified run-integrity restart-event attribution (capture-wedge/emit-freeze + burn-log source) — 2026-08-14 (worktree autopilot-946, v1.7.0-dev.453)
+
+- **Problem**: recording-verdict's per-window forensics had two blind spots in the restart-event
+  attribution scan. (910) The self-heal-reset scan only grepped journald, but during an E2E burn
+  each camera runs as a transient systemd-run unit logging to `/tmp/cbox-burn.log` (source) /
+  `/tmp/cbox-burn-<cam>.log` (secondary) — journald is structurally blind to the recording window,
+  so a `#663` reset there came back empty and its stale frames misclassified as `frozen_leg`.
+  (946) The issue-945 capture-wedge (exit 79, `CRITICAL #945: capture/emit thread WEDGED`) and
+  issue-944 emit-freeze (exit 81, `CRITICAL #944: NDI output FROZEN`) watchdog restarts were not
+  correlated at all, surfacing as anonymous frozen_leg.
+- **Fix**: ONE recognised-event table (`scripts/lib/self-heal-attribution.sh`'s `restart_event_*`
+  functions) replacing three parallel greps — the shared #663 reset line + both watchdog CRITICAL
+  lines. Read from BOTH journald AND each camera's burn-instance log (the burn log is
+  tracing-subscriber stdout: ANSI-colour-wrapped, microsecond RFC3339-Z timestamps — ANSI-strip +
+  `date -u -d "$ts" +%s%N`, mirroring the issue-992 capture-rate burn-log read). The pure Rust seam
+  (`src/self_heal_attribution.rs`) gained `RestartEventKind` (SelfHealReset|CaptureWedge|EmitFreeze)
+  carried by the event + attributed leg; `parse` accepts tagged `kind:cambox:ns` AND legacy
+  `cambox:ns` (→ SelfHealReset). The harness threads `--restart-event KIND:CAMBOX:EPOCH_NS`;
+  recording-verdict merges it with the legacy `--self-heal-reset` and tags each JSON entry + line
+  with its kind. ALLOW-not-SUPPRESS preserved: a wedge/emit-freeze event still gates via
+  `any_self_heal()`; `overall_pass_contribution()` untouched (report-only, #914).
+- **Design decision**: extended the existing attribution seam in place (kind-tagged) rather than a
+  sibling module — the correlation engine + gating + report shape are identical for all three, and
+  a sibling parser is exactly the "competing attribution parser" the governing rule + the
+  capture_wedge/emit_freeze module docs warn against. JSON key `self_heal_reset` + `--self-heal-reset`
+  flag kept for back-compat (recording-verdict.rs is probe-gated, zero local test path).
+- **Commits**: add57e237 (version) · 1cee31c8a/46690c477 (RED/GREEN Rust kind seam) ·
+  8136a897b/6854accc8 (RED/GREEN bash table + burn-log parser) · d14c9ba18 (wiring: e2e scan +
+  verdict flag + lib-helper removal).
+- **Tests**: `src/self_heal_attribution.rs` 23/23 (`cargo test --lib self_heal_attribution`),
+  `tests/harness_self_heal_attribution_895.rs` 14/14 (unified table + burn-log RFC3339 parse +
+  wiring asserts; removed 5 superseded self-heal-only helper tests). fmt + clippy -D warnings +
+  shellcheck -x + bash -n clean. FULL `cargo test` suite run (mandatory after a recording-e2e.sh
+  edit — anchor-collision guard); review-confirmed no `.find()`/region-slice collision from the
+  new pre-capture-rate `/tmp/cbox-burn.log` reference.
+- **Review**: one fresh general-purpose pass (/review + requesting-code-review standards) — 0 🔴
+  0 🟡; 1 🔵 fixed in-branch (softened the sort -u dedup comment); GNU-coreutils note no-action
+  (parse runs on dev1).
