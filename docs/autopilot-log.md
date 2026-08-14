@@ -7805,3 +7805,11 @@ prerequisite, closed 2026-06-15); the rig is genlocked so it was dead code.
   73ab458b, GREEN 1d35d2cb). Strih n>=2 byte-identical. Parity vectors + static + pwsh anchors +
   mutation-proof. A hysteresis band was rejected (frac-dependent overshoot, differs by n). Playbook:
   the "THIRD axis" section in genlock-fifo-limit-cycle-diagnosis.md.
+
+## 2026-08-14 — round-5 integration (PR 1050: tickets 1036 + 1047 + 1049) — the A/V lottery killed
+- The round folded the ticket-1049 phase-convergence fix mid-flight: the E2E gate itself was a per-run dice roll (each strih ingest could lock a random ±1..4-frame phase; five consecutive gate runs failed on different rolls), so the fix HAD to deploy before any gate could stabilize.
+- Fix-forward round trip inside the round: the first deployed convergence build limit-cycled on the stream deep n=1 source (converge_sheds+holds lockstep, one dup+skip pair per ~1.4 s) — root cause structural (an n=1 shed cannot stick; the queue regains it next tick), fixed by gating convergence to N>=2, parity-locked, redeployed.
+- Post-deploy field proof: strih ingest skews converged 66/66/66 ms (converge_sheds brief climb then quiet, relocks 0 — the old storm sawtooth gone too); final gate run GREEN with A/V +48/+42/+30 and ZERO manual rig intervention (previous runs needed setpoint nudges every time).
+- Two dead-painter incidents mid-gauntlet (the cleanup restore-timeout leaves the painter dead, optical leg black, undecodable floor breach) — evidence on ticket 860; its watchdog+fail-fast branch is built and awaits next round's integration.
+- Operational lesson recorded on ticket 1049: pre-fix, a setpoint INCREASE re-rolled the phase (relock) while a DECREASE converged ~1:1 via drain — manual corrections had to approach from above. Moot post-fix.
+- Ticket 1021 closed as already-solved (merged 2026-08-12 via PR 1020; stayed open only because paren-form commits never auto-close).
