@@ -86,7 +86,7 @@ camera_box_version_verdict() {
     return 11
   fi
   if [ "$version" != "$modal" ]; then
-    printf '  %-14s %-16s DRIFT    (fleet majority runs %s)\n' "$name" "$version" "$modal"
+    printf '  %-14s %-16s DRIFT    (peers run %s)\n' "$name" "$version" "$modal"
     return 20
   fi
   printf '  %-14s %-16s OK\n' "$name" "$version"
@@ -137,7 +137,7 @@ camera_box_fleet_report() {
   # Name BOTH the DRIFT and UNKNOWN counts in the SAME banner (the issue-862 follow-up lesson): a
   # fleet that is mostly UNREADABLE must never read as a single minor drift.
   if [ "$bad" -gt 0 ]; then
-    echo "!! GATE FAILED: active boxes run DIFFERENT camera-box versions — seen: ${distinct}(majority ${modal}); ${unknown} box(es) UNKNOWN — rig test REFUSED." >&2
+    echo "!! GATE FAILED: active boxes run DIFFERENT camera-box versions — seen: ${distinct}(peer reference ${modal}); ${unknown} box(es) UNKNOWN — rig test REFUSED." >&2
     echo "!! A box on a different camera-box build runs objectively different behaviour than the rest of the fleet (issue 875 — cam4 once silently lacked the publish-30p fix)." >&2
     echo "!! Redeploy every active box to the SAME camera-box version (scripts/deploy-fleet.sh); fix SSH reachability for any UNKNOWN box; then re-run." >&2
     return 20
@@ -147,7 +147,13 @@ camera_box_fleet_report() {
     echo "!! Every active box must report its camera-box version before this parity gate is trusted. (${ok} on ${modal}.)" >&2
     return 11
   fi
-  echo "GATE PASS — ${ok} active box(es) agree on camera-box ${modal:-<none>} (any acked-offline box excluded above)."
+  if [ "$ok" -eq 0 ]; then
+    # No box was actually checked (bad==0 && unknown==0 here), so every listed box was acked-offline
+    # -> a vacuous pass. Say so plainly rather than "agree on <none>", which reads like a real result.
+    echo "GATE PASS (vacuous) — every listed box is acked-offline; no active box remained to compare."
+    return 0
+  fi
+  echo "GATE PASS — ${ok} active box(es) agree on camera-box ${modal} (any acked-offline box excluded above)."
   return 0
 }
 
