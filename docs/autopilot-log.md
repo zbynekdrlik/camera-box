@@ -7793,3 +7793,33 @@ prerequisite, closed 2026-06-15); the rig is genlocked so it was dead code.
   `convergence_never_sheds_at_the_natural_steady_phase_1049`. Executable C-vs-Rust parity gate
   extended (`c_phase_convergence_matches_the_rust_authority_1049`), mutation-proven. WORKTREE MODE:
   stopped at green local (supervisor integrates).
+
+## issue 860 — optical injection leg: dead-painter / optical-black detection, alert, fail-fast (2026-08-14, worktree autopilot-860)
+- SCOPE re-derived from the fresh 2026-08-14 incident (not the stale camera-shutter body the user
+  already refuted): a chain of FAILED E2E runs whose cleanups each logged the buried
+  `WARNING 712 cam2/painter restore failed/timed out` left the painter DEAD (cam2 monitor black),
+  the next gate reported the optical hop UNAVAILABLE + breached the undecodable floor, and NO alert
+  fired anywhere. Three gaps closed: (1) no standing detector/alerter, (2) no harness fail-fast,
+  (3) the cleanup restore-failure stayed a buried stderr WARNING.
+- ARCH: one SHARED pure decision core `scripts/lib/optical-chain-health.sh` (I/O-free, Tier-0
+  tested) feeds TWO dev1-side surfaces — the standing `scripts/optical-chain-alert-watchdog.sh`
+  (systemd timer, mirrors imag-power-envelope-alert-watchdog) and the recording-e2e.sh [0/8]
+  preflight (via `scripts/lib/optical-chain-preflight.sh`, the sourced-lib pattern — no anchored
+  line edited). TEST/EVENT discriminator = painter_expected (pidfile present OR cam2-painter.service
+  enabled) — the DURABLE state rig-mode.sh already maintains; EVENT mode -> expected=0 -> no false
+  alert. Optical proof reuses the EXISTING assert-program-nonblack (no new black-check); throttle
+  reuses obs_watchdog_alert_throttle + obs_watchdog_confirm (no new alert mechanism).
+- FAIL-FAST aborts LOUD only on painter-EXPECTED-but-DEAD (no OBS dependency, zero false-abort
+  risk), with a grace re-probe for a transient service restart; strih-BLACK is a WARN.
+- 712 SURFACE: cambox_parallel_wait_and_report records CAMBOX_PARALLEL_FAILED_LABELS;
+  cambox_parallel_surface_painter_failure emits a GitHub ::error:: annotation for a dead painter
+  (::warning:: for other boxes), never exiting — cleanup always-runs intact.
+- REVIEW (fresh general-purpose subagent, /review + requesting-code-review): 0 red, 2 yellow, 2 blue,
+  ALL fixed in-branch — OBS_PASSWORD EnvironmentFile wiring, preflight grace re-probe, watchdog
+  2-pass confirm, watchdog ssh timeout wrap.
+- Commits: chore bump (88b0d4ab), RED core (e90a462e), GREEN core (089fe8c9), watchdog+units
+  (c8826954), RED surface (29f0e2aa), GREEN fail-fast+surface (9f8bfc71), fmt (df568ed7), review
+  fixes (a56e6d14). Tests: harness_optical_chain_health_860 (12) + harness_optical_chain_cleanup_surface_860 (4).
+  FULL suite green after the recording-e2e.sh anchor-touching edit (204 ok, 3310 tests, 0 failed).
+  Playbook: `.claude/rules/optical-chain-health-watchdog.md`. WORKTREE MODE: stopped at green local
+  (supervisor integrates + installs the timer + deploys).
