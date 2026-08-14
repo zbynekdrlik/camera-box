@@ -262,6 +262,13 @@ pub mod capture_rate_selfheal;
 // instead of its own inline recorded-order walk.
 pub mod painted_tick_gaps;
 
+// #859 — PAINTER-PACING attribution: from the cam2 painter's own `tick,gen_ts_ns,flip_ts_ns`
+// ground-truth CSV, decide whether a residual captured duplicate is the painter's own stall
+// (missed DRM-vsync deadline / repeated tick) or downstream (monitor/camera/splitter optical beat
+// or strih/stream genlock FIFO). Crate-root pure seam (Tier-0 testable); surfaced report-only under
+// `all_cambox_continuity.painter_pacing` by recording-verdict. Never gates.
+pub mod painter_pacing;
+
 // #859 — the genlock FIFO's BACKLOG-STORM threshold, made latency-relative. `obs-source.c`'s bare
 // `GENLOCK_QDEPTH_RELOCK 6` was calibrated on "steady depth is ~1-2 at any skew" (its own comment),
 // which is false for a source configured DEEP: the stream box's `NDI 2ME PGM` sits at depth 29 on
