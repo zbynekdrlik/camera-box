@@ -75,8 +75,9 @@ fn one_cambox_dropping_of_four_exceeds_tolerance_fails_overall_889_regate() {
     // `overall_pass` now correctly FAILS again, exactly like the STRICT per-cambox verdict already
     // did. Renamed from `one_cambox_dropping_of_three_exceeds_tolerance_..._889_regate` (itself
     // renamed from `..._of_two_exceeds_singleton_tolerance_..._889_regate`, which was renamed
-    // from `..._889_relaxes_overall`) — the fixture now sits at tolerance+1 (4, not 3) so this
-    // test tracks whatever the tolerance is calibrated to.
+    // from `..._889_relaxes_overall`) — the literal gap of 4 sits comfortably over the
+    // tolerance across every recalibration incl. issue 1031's 3 -> 1 re-tightening
+    // (2026-08-14) -- 4 is well over 1.
     let schedule = parse_switch_schedule(two_window_schedule_json()).expect("schedule parses");
     let mut frames = clean_window_frames(0, 0, 1000); // cam1 clean
 

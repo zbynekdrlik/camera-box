@@ -91,7 +91,8 @@
 /// The per-window tolerance applied to `copies`/`gaps` when folding them back into
 /// `relaxed_pass`/`overall_pass` (2026-08-05 re-gate, ticket 889 comment 5196190653; recalibrated
 /// 1 → 2 on 2026-08-06, ticket 889 comment 5198131539; recalibrated again 2 → 3 later the same
-/// day, ticket 889 comment 5200533407). Hardcoded, no env knob — a silent env default is exactly
+/// day, ticket 889 comment 5200533407; RE-TIGHTENED 3 -> 1 on 2026-08-14, issue 1031,
+/// after the issue-1042 + issue-1049 genlock fixes landed on the rig). Hardcoded, no env knob — a silent env default is exactly
 /// how "temporary" becomes permanent (the original issue-889 requirement 4), and this repo's
 /// standing rule is that a needed capability is always ON by default, never a forgettable toggle
 /// (`features-default-on-never-forgettable-toggle` in the project memory). A window with `copies >
@@ -109,7 +110,23 @@
 /// 9-15/8-17 copies/gaps on EVERY window, still 3x+ over this threshold, so discrimination against
 /// a real regression is unaffected. See the module doc's second 2026-08-06 RECALIBRATION section
 /// above for the full rationale.
-pub const WINDOW_COPIES_GAPS_TOLERANCE: u32 = 3;
+///
+/// **Re-tightening basis (issue 1031, 2026-08-14):** the two genlock fixes that attacked the
+/// chronic residual above deployed to the rig (imag-nb + strih genlock replaced 09:17 CEST, OBS
+/// restarted 09:18) -- issue 1042 (source interval from the MIN grid delta, killing the spurious
+/// backlog-relock erase) and issue 1049 (bounded phase convergence gated to N>=2, killing the
+/// strih-ingest relock storm + the deep n=1 limit cycle). The one steady-state post-fix
+/// full-cycle E2E run (1780620060, started 09:45 -- +27 min after the OBS restart, fully
+/// converged) measured a healthy per-window max of `{copies 1, gaps 1}`, `windows_over_copies_
+/// gaps_tolerance = 0`, `overall_pass = true`: the chronic burden collapsed to a single
+/// `stale_replay` dup+gap pair (CAM2 x1, CAM3 x1) at a couple of switch seams, the rest 0/0. So
+/// the honest floor is now 1, not 3. It is NOT yet 0 -- that single stale_replay is the issue-859
+/// shared-duplicate residual, whose root cause has not landed; 0 stays gated on issue 859 AND
+/// N>=2 consecutive green post-fix runs at tolerance=1 measuring per-window 0/0 (issue 1031 owns
+/// that remaining 1 -> 0 step). The pre-fix relock storms (14-28 copies/gaps/window) and the
+/// OBS-restart convergence transient (14/window, run 1074024850, excluded as it started 2 min
+/// after the restart) are all still 10x+ over this threshold, so a real regression fails loudly.
+pub const WINDOW_COPIES_GAPS_TOLERANCE: u32 = 1;
 
 /// The strict-vs-relaxed decision for one cambox window, given its already-computed counts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
