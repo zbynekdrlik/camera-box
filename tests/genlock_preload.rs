@@ -1102,6 +1102,10 @@ mod vendored_source {
     pub const BURN_QR: &str = "vendor/distroav/src/burn-qr.hpp";
     pub const NDI_SOURCE: &str = "vendor/distroav/src/ndi-source.cpp";
     pub const NDI_BURN_FILTER: &str = "vendor/distroav/src/ndi-burn-filter.cpp";
+    // #879: the aux-NDI-sender render-budget gate — the DistroAV filter send path + the
+    // libobs core seam it delegates to.
+    pub const NDI_FILTER: &str = "vendor/distroav/src/ndi-filter.cpp";
+    pub const OBS_CORE_C: &str = "vendor/obs-studio/libobs/obs.c";
     pub const WINDOWS_GENLOCK_WF: &str = ".github/workflows/windows-genlock.yml";
     pub const WINDOWS_GENLOCK_FAST_WF: &str = ".github/workflows/windows-genlock-fast.yml";
     // #942: the LIVE dock's pure decision header + its OBS glue caller.
@@ -2409,6 +2413,60 @@ mod vendored_source {
             "{OBS_INTERNAL}: #756 — obs_display.render_frame_counter field missing; the hard \
              cadence floor has nowhere to count ticks and a cheap monitoring display would \
              render every tick again (the imag-nb live regression)."
+        );
+    }
+
+    #[test]
+    fn aux_ndi_sender_budget_gate_present_879() {
+        // #879: the strih aux NDI senders (interkom/MULTIVIEW/Grading) are ndi_filter
+        // republishes whose render+send must yield to the program (ndi_output) under
+        // graphics-thread budget pressure — reusing the SAME pure decision the projector path
+        // uses. A subtree pull dropping any of these re-opens the unconditional-aux-render
+        // bypass (three full-scene renders every tick, ~13ms of the 33.3ms budget at idle).
+        //
+        // Executable parity + never-freeze invariants: tests/aux_sender_budget_879.rs (compiles
+        // and runs the shipped C). These anchors additionally fail the Windows genlock build
+        // loudly if the mechanism is reverted, mirrored into BOTH windows-genlock*.yml.
+        let bud = squish(&vendor_file(OBS_DISPLAY_BUDGET));
+        assert!(
+            bud.contains(
+                "static inline uint32_t obs_effective_render_divisor(uint32_t configured_divisor, uint64_t frame_interval_ns)"
+            ),
+            "{OBS_DISPLAY_BUDGET}: #879 — the pure canvas-rate effective-divisor helper the aux              path reuses is gone; the aux senders would lose their budget derivation."
+        );
+        assert!(
+            bud.contains("return derived < configured_divisor ? derived : configured_divisor;"),
+            "{OBS_DISPLAY_BUDGET}: #879 — obs_effective_render_divisor no longer clamps to the              configured upper bound (min(derived, configured))."
+        );
+
+        let api = squish(&vendor_file(OBS_API));
+        assert!(
+            api.contains(
+                "EXPORT bool obs_aux_sender_should_skip(uint32_t render_divisor, uint32_t frame_counter,"
+            ),
+            "{OBS_API}: #879 — obs_aux_sender_should_skip() is not EXPORTed; the DistroAV filter              cannot link the aux budget gate."
+        );
+
+        let core = squish(&vendor_file(OBS_CORE_C));
+        assert!(
+            core.contains(
+                "const uint32_t effective_divisor = obs_effective_render_divisor(render_divisor, interval);"
+            ),
+            "{OBS_CORE_C}: #879 — obs_aux_sender_should_skip() no longer derives the canvas-rate              effective divisor before delegating to obs_display_should_skip()."
+        );
+
+        let flt = squish(&vendor_file(NDI_FILTER));
+        assert!(
+            flt.contains(
+                "if (obs_aux_sender_should_skip(f->render_divisor, f->render_frame_counter, f->render_ewma_ns,"
+            ),
+            "{NDI_FILTER}: #879 — ndi_filter_render_video() no longer gates its render+send on              the budget decision; the aux senders bypass the render budget again and can steal              the program's 30fps budget."
+        );
+        assert!(
+            flt.contains(
+                "f->render_ewma_ns = f->render_ewma_ns ? (f->render_ewma_ns * 3 + render_dur_879) / 4 : render_dur_879;"
+            ),
+            "{NDI_FILTER}: #879 — the per-filter render-cost EWMA update is gone; the budget gate              can no longer learn an aux sender is heavy."
         );
     }
 

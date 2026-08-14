@@ -657,6 +657,21 @@ jobs:
           if ($bqr -notmatch [regex]::Escape('std::memset(row, 0xFF,')) { Write-Error "burn-qr.hpp: #275 bulk-fill (per-row white memset) gone — burn render reverted to the slow per-pixel path that overran the 60fps budget"; exit 1 }
           Write-Output "#278 multiview adaptive budget-skip decouple + #756 cadence floor + #275 bulk-fill burn render present — OK"
 
+      - name: Assert #879 aux NDI sender render-budget gate present
+        shell: pwsh
+        run: |
+          $bud = (Get-Content "vendor/obs-studio/libobs/obs-display-budget.h" -Raw) -replace '\s+', ' '
+          if ($bud -notmatch [regex]::Escape('static inline uint32_t obs_effective_render_divisor(uint32_t configured_divisor, uint64_t frame_interval_ns)')) { Write-Error "obs-display-budget.h: #879 pure effective-divisor helper gone -- the aux senders lose their budget derivation"; exit 1 }
+          if ($bud -notmatch [regex]::Escape('return derived < configured_divisor ? derived : configured_divisor;')) { Write-Error "obs-display-budget.h: #879 effective-divisor clamp to the configured upper bound gone"; exit 1 }
+          $api = (Get-Content "vendor/obs-studio/libobs/obs.h" -Raw) -replace '\s+', ' '
+          if ($api -notmatch [regex]::Escape('EXPORT bool obs_aux_sender_should_skip(uint32_t render_divisor, uint32_t frame_counter,')) { Write-Error "obs.h: #879 obs_aux_sender_should_skip not EXPORTed -- the DistroAV filter cannot link the aux budget gate"; exit 1 }
+          $core = (Get-Content "vendor/obs-studio/libobs/obs.c" -Raw) -replace '\s+', ' '
+          if ($core -notmatch [regex]::Escape('const uint32_t effective_divisor = obs_effective_render_divisor(render_divisor, interval);')) { Write-Error "obs.c: #879 aux seam no longer derives the canvas-rate effective divisor before obs_display_should_skip"; exit 1 }
+          $flt = (Get-Content "vendor/distroav/src/ndi-filter.cpp" -Raw) -replace '\s+', ' '
+          if ($flt -notmatch [regex]::Escape('if (obs_aux_sender_should_skip(f->render_divisor, f->render_frame_counter, f->render_ewma_ns,')) { Write-Error "ndi-filter.cpp: #879 aux render+send no longer gated on the budget -- the aux senders bypass the render budget again and can steal the program 30fps budget"; exit 1 }
+          if ($flt -notmatch [regex]::Escape('f->render_ewma_ns = f->render_ewma_ns ? (f->render_ewma_ns * 3 + render_dur_879) / 4 : render_dur_879;')) { Write-Error "ndi-filter.cpp: #879 per-filter render-cost EWMA update gone -- the budget gate cannot learn an aux sender is heavy"; exit 1 }
+          Write-Output "#879 aux NDI sender render-budget gate (program absolute) present -- OK"
+
       # #85: assert the #78 "B′" real-wall-clock emit-timecode patch is present in the
       # vendored DistroAV OUTPUT source BEFORE the 150-min build, so a future `git
       # subtree pull` (#44) that restores `NDIlib_send_timecode_synthesize` fails HERE
