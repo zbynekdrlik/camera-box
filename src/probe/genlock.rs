@@ -1532,6 +1532,14 @@ impl ReleaseCadence {
     /// was done with the probe suite runnable rather than smuggled in blind: the re-pinned
     /// outcomes were derived from a default-feature replica that imports the real authority (see
     /// the issue-1037 design comment), and the demonstrative tests below prove the new wiring.
+    /// Every EXISTING pinned cadence test verifies IDENTICAL under the new selection — but that is
+    /// an EMPIRICAL result over this corpus, not a general theorem: [`relock_select_nearest`]
+    /// scans the WHOLE queue, so a not-yet-due frame nearer `wall_now − anchor_age` than the
+    /// newest-due one WOULD be selected (dropping the newest-due frame) — exactly as the C does.
+    /// The existing sims never construct that case (a cold ACQUIRE holds an arrival-gated queue
+    /// whose frames all sit at/under the deadline, and the anchor is unset ⇒ target == the raw
+    /// deadline), so nearest == newest-due there; a SET deep anchor is where the phase differs,
+    /// which the demonstrative tests below add. CI is the final arbiter of the probe-test pins.
     ///
     /// The ONE remaining harness↔C divergence is the SEPARATE #940 piece 3 axis in the note
     /// above: this sim keeps the RAW `genlock_present_ts_reserve()` deadline where the C
@@ -1686,10 +1694,8 @@ impl ReleaseCadence {
                 let presented = queue.pop_front().expect("newest matured");
                 self.locked_next_boundary_ns = Some(presented + interval_ns);
                 // #1003: a STEADY present — the conveyor. Remember its own on-air age so the
-                // next relock inherits this phase. Mirror of the C present tail's
-                // `if (anchor_update) genlock_phase_anchor_ns = genlock_phase_anchor_from_present(...)`.
-                self.phase_anchor_ns =
-                    crate::genlock_backlog::phase_anchor_from_present(wall_now_ns, presented);
+                // next relock inherits this phase (the C present tail's shared `if (anchor_update)`).
+                self.set_phase_anchor(wall_now_ns, presented);
                 return CadenceOutcome {
                     presented: Some(presented),
                     dropped,
@@ -1730,8 +1736,7 @@ impl ReleaseCadence {
             self.locked_next_boundary_ns = Some(presented + interval_ns);
             // #1003: a STEADY present — the conveyor. Update the phase anchor from the frame put
             // on air (after any settle-back drain, so it reflects the actually-presented frame).
-            self.phase_anchor_ns =
-                crate::genlock_backlog::phase_anchor_from_present(wall_now_ns, presented);
+            self.set_phase_anchor(wall_now_ns, presented);
             return CadenceOutcome {
                 presented: Some(presented),
                 dropped,
@@ -1757,8 +1762,7 @@ impl ReleaseCadence {
                 // exists — this present is both the "update on GAP" and the "do not carry the
                 // pre-seam value forward" rule, in one assignment (the same seam that clears
                 // STICKY-N above). Mirror of the C GAP-RESYNC `anchor_update = true` tail.
-                self.phase_anchor_ns =
-                    crate::genlock_backlog::phase_anchor_from_present(wall_now_ns, presented);
+                self.set_phase_anchor(wall_now_ns, presented);
                 return CadenceOutcome {
                     presented: Some(presented),
                     dropped: Vec::new(),
@@ -1967,6 +1971,18 @@ impl ReleaseCadence {
             crate::genlock_backlog::relock_anchor_age_ns(self.phase_anchor_ns, reserve_ms);
         let queue_ts: Vec<u64> = queue.iter().copied().collect();
         crate::genlock_backlog::relock_select_nearest(&queue_ts, wall_now_ns, anchor_age)
+    }
+
+    /// camera-box #1003 — record the conveyor's own on-air age after a STEADY / GAP-RESYNC
+    /// present, so the next relock INHERITS this phase. This is the reference-sim form of the C
+    /// present tail's single shared `if (anchor_update) genlock_phase_anchor_ns =
+    /// genlock_phase_anchor_from_present(wall_now, next_frame->timestamp)` — the harness's
+    /// per-branch early returns make a literal shared tail awkward, so the three conveyor arms
+    /// call this instead. The relock arms (ACQUIRE / BACKLOG) deliberately do NOT call it: a
+    /// relock inherits the phase, it must never mint one, or every lock episode re-rolls a phase.
+    fn set_phase_anchor(&mut self, wall_now_ns: u64, presented_ts_ns: u64) {
+        self.phase_anchor_ns =
+            crate::genlock_backlog::phase_anchor_from_present(wall_now_ns, presented_ts_ns);
     }
 }
 
