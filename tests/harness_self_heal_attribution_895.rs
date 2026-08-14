@@ -214,3 +214,113 @@ fn recording_e2e_scans_all_active_cameras_not_just_cam1() {
         "the self-heal-reset scan must sweep every active camera (ALL_CAMBOX), not just CAM1: {region}"
     );
 }
+
+// ===========================================================================================
+// issue 946 + issue 910 — the unified recognised-event table + burn-log (RFC3339) parser
+// ===========================================================================================
+// One table maps each run-integrity restart KIND to its grep substring; the wedge (issue 945,
+// exit 79) and emit-freeze (issue 944, exit 81) CRITICAL lines join the #663 self-heal reset in
+// ONE recognised-event table, read from BOTH journald AND — during an E2E burn — the burn
+// instance's own `/tmp/cbox-burn*.log` (whose lines are ANSI-wrapped, microsecond RFC3339-Z).
+
+#[test]
+fn restart_event_grep_pattern_alternates_all_three_kinds() {
+    let pat = run_sourced("restart_event_grep_pattern");
+    let pat = pat.trim();
+    assert!(pat.contains("#663 self-heal: USB reset attempt"), "{pat}");
+    assert!(pat.contains("CRITICAL #945: capture/emit thread WEDGED"), "{pat}");
+    assert!(pat.contains("CRITICAL #944: NDI output FROZEN"), "{pat}");
+    assert!(pat.contains('|'), "must be a grep -E alternation: {pat}");
+}
+
+#[test]
+fn restart_event_kind_for_line_classifies_each_kind() {
+    for (line, want) in [
+        (
+            "2026-08-14T10:17:56.523683Z  WARN camera_box: #663 self-heal: USB reset attempt #6 succeeded -- ok",
+            "self_heal_reset",
+        ),
+        (
+            "2026-08-14T10:17:57.000000Z ERROR camera_box: CRITICAL #945: capture/emit thread WEDGED -- exiting (code 79)",
+            "capture_wedge",
+        ),
+        (
+            "2026-08-14T10:17:58.000000Z ERROR camera_box: CRITICAL #944: NDI output FROZEN -- exiting (code 81)",
+            "emit_freeze",
+        ),
+    ] {
+        let out = run_sourced(&format!("restart_event_kind_for_line {line:?}"));
+        assert_eq!(out.trim(), want, "line: {line}");
+    }
+}
+
+#[test]
+fn restart_event_kind_for_line_ignores_unrelated_lines() {
+    let out = run_sourced(
+        "restart_event_kind_for_line '2026-08-14T10:17:56Z INFO camera_box: capture loop started'",
+    );
+    assert!(out.trim().is_empty(), "raw output: {out:?}");
+}
+
+#[test]
+fn restart_events_from_journal_output_tags_kind_and_epoch_ns() {
+    // -o short-unix journald lines: SEC.USEC leading field.
+    let harness = "SCRIPT_OUT=$(cat <<'JOURNAL'\n\
+1785439475.449374 cam1 camera-box[1234]: WARN #663 self-heal: USB reset attempt #3 succeeded -- ok\n\
+1785439480.000000 cam1 camera-box[1234]: INFO capture loop resumed\n\
+1785439600.100000 cam1 camera-box[1235]: ERROR CRITICAL #945: capture/emit thread WEDGED -- exiting (code 79)\n\
+JOURNAL\n\
+)\nrestart_events_from_journal_output \"$SCRIPT_OUT\"";
+    let out = run_sourced(harness);
+    let lines: Vec<&str> = out.trim().lines().collect();
+    assert_eq!(
+        lines,
+        vec![
+            "self_heal_reset:1785439475449374000",
+            "capture_wedge:1785439600100000000"
+        ],
+        "raw output: {out:?}"
+    );
+}
+
+#[test]
+fn restart_events_from_burn_log_output_strips_ansi_and_parses_rfc3339() {
+    // The REAL burn-log line shape: ESC[2m<RFC3339-Z>ESC[0m ESC[33m LEVEL ESC[0m ... message.
+    // date -u -d "2026-08-14T10:17:56.523683Z" +%s%N == 1786702676523683000.
+    let harness = "SCRIPT_OUT=$(printf '\\033[2m2026-08-14T10:17:56.523683Z\\033[0m \\033[33m WARN\\033[0m \\033[2mcamera_box\\033[0m\\033[2m:\\033[0m #663 self-heal: USB reset attempt #6 succeeded -- ok\\n\\033[2m2026-08-14T10:17:57.000000Z\\033[0m \\033[31mERROR\\033[0m CRITICAL #944: NDI output FROZEN -- exiting (code 81)\\n')\nrestart_events_from_burn_log_output \"$SCRIPT_OUT\"";
+    let out = run_sourced(harness);
+    let lines: Vec<&str> = out.trim().lines().collect();
+    assert_eq!(
+        lines,
+        vec![
+            "self_heal_reset:1786702676523683000",
+            "emit_freeze:1786702677000000000"
+        ],
+        "raw output: {out:?}"
+    );
+}
+
+#[test]
+fn restart_events_from_burn_log_output_empty_input_yields_nothing() {
+    let out = run_sourced("restart_events_from_burn_log_output ''");
+    assert!(out.trim().is_empty(), "raw output: {out:?}");
+}
+
+#[test]
+fn restart_event_burn_log_grep_cmd_greps_the_log_for_all_kinds() {
+    let cmd = run_sourced("restart_event_burn_log_grep_cmd /tmp/cbox-burn.log");
+    assert!(cmd.contains("/tmp/cbox-burn.log"), "{cmd}");
+    assert!(cmd.contains("grep -E"), "{cmd}");
+    assert!(cmd.contains("CRITICAL #945: capture/emit thread WEDGED"), "{cmd}");
+    assert!(cmd.contains("CRITICAL #944: NDI output FROZEN"), "{cmd}");
+    assert!(cmd.contains("#663 self-heal: USB reset attempt"), "{cmd}");
+}
+
+#[test]
+fn restart_event_scan_message_is_loud_and_kind_labeled() {
+    let out = run_sourced("restart_event_scan_message capture_wedge CAM4 1786702677000000000");
+    assert!(out.contains("CAM4"), "{out}");
+    assert!(out.contains("1786702677000000000"), "{out}");
+    assert!(out.contains("capture_wedge"), "{out}");
+    assert!(out.contains("NOT frozen_leg"), "must disclaim a camera-fault accusation: {out}");
+}
