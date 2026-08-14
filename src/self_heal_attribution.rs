@@ -521,4 +521,107 @@ mod tests {
         assert!(msg.starts_with("self_heal_reset: cam1 since 100"));
         assert!(msg.contains("NOT a frozen camera"));
     }
+
+    // ---- issue 946 + issue 910: kind-tagged run-integrity restart events -----------------------
+    // The capture-wedge (issue 945, exit 79) and emit-freeze (issue 944, exit 81) watchdogs each
+    // force a restart whose gap produces exactly the stale/frozen frames a #663 USB reset does.
+    // They correlate through the SAME engine, tagged with a distinct kind so the report reads
+    // honestly ("capture_wedge restart", never "frozen camera").
+
+    #[test]
+    fn kind_label_round_trips() {
+        for k in [
+            RestartEventKind::SelfHealReset,
+            RestartEventKind::CaptureWedge,
+            RestartEventKind::EmitFreeze,
+        ] {
+            assert_eq!(RestartEventKind::from_label(k.label()), Some(k));
+        }
+        assert_eq!(RestartEventKind::from_label("nope"), None);
+    }
+
+    #[test]
+    fn parse_legacy_untagged_token_defaults_to_self_heal_reset() {
+        // The original #895 `--self-heal-reset cambox:epoch_ns` shape must keep working verbatim.
+        let ev = SelfHealResetEvent::parse("cam1:1785439475449374588").unwrap();
+        assert_eq!(ev.kind, RestartEventKind::SelfHealReset);
+        assert_eq!(ev.cambox, "cam1");
+        assert_eq!(ev.at_ns, 1785439475449374588);
+    }
+
+    #[test]
+    fn parse_kind_tagged_capture_wedge_token() {
+        let ev = SelfHealResetEvent::parse("capture_wedge:cam4:1785439475449374588").unwrap();
+        assert_eq!(ev.kind, RestartEventKind::CaptureWedge);
+        assert_eq!(ev.cambox, "cam4");
+        assert_eq!(ev.at_ns, 1785439475449374588);
+    }
+
+    #[test]
+    fn parse_kind_tagged_emit_freeze_token() {
+        let ev = SelfHealResetEvent::parse("emit_freeze:cam2:100").unwrap();
+        assert_eq!(ev.kind, RestartEventKind::EmitFreeze);
+        assert_eq!(ev.cambox, "cam2");
+        assert_eq!(ev.at_ns, 100);
+    }
+
+    #[test]
+    fn parse_rejects_unknown_kind_label() {
+        assert!(SelfHealResetEvent::parse("bogus_kind:cam1:100").is_none());
+    }
+
+    #[test]
+    fn a_capture_wedge_event_reattributes_a_frozen_window_and_labels_it_distinctly() {
+        let segments = vec![SegmentLeg {
+            cambox: "cam4",
+            copies: 149,
+            frames: 9000,
+            start_ns: 1_785_439_470_000_000_000,
+            end_ns: 1_785_439_500_000_000_000, // 30s window
+        }];
+        let events = vec![SelfHealResetEvent {
+            kind: RestartEventKind::CaptureWedge,
+            cambox: "cam4".to_string(),
+            at_ns: 1_785_439_475_449_374_588,
+        }];
+        let report = attribute_self_heal(&segments, &events);
+        assert!(
+            !report.any_frozen(),
+            "a capture-wedge restart must reattribute the window away from frozen_leg: {report:?}"
+        );
+        assert!(report.any_self_heal());
+        assert_eq!(report.self_heal.len(), 1);
+        assert_eq!(report.self_heal[0].kind, RestartEventKind::CaptureWedge);
+        let msg = report.self_heal[0].message();
+        assert!(msg.starts_with("capture_wedge: cam4 since"), "{msg}");
+        assert!(msg.contains("NOT a frozen camera"), "{msg}");
+        assert!(msg.contains("945"), "must name the wedge watchdog issue: {msg}");
+    }
+
+    #[test]
+    fn an_emit_freeze_event_gates_even_with_no_correlating_window() {
+        let segments = vec![SegmentLeg {
+            cambox: "cam2",
+            copies: 0,
+            frames: 9000,
+            start_ns: 0,
+            end_ns: 30_000_000_000,
+        }];
+        let events = vec![SelfHealResetEvent {
+            kind: RestartEventKind::EmitFreeze,
+            cambox: "cam2".to_string(),
+            at_ns: 15_000_000_000,
+        }];
+        let report = attribute_self_heal(&segments, &events);
+        assert!(!report.any_frozen());
+        assert_eq!(report.unattributed_events.len(), 1);
+        assert_eq!(
+            report.unattributed_events[0].kind,
+            RestartEventKind::EmitFreeze
+        );
+        assert!(
+            report.any_self_heal(),
+            "an emit-freeze restart must still gate the run even with no correlating window"
+        );
+    }
 }
