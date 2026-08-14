@@ -342,19 +342,17 @@ pub fn should_converge_phase(
     source_multiple: u32,
     ticks_since_last_drain: u64,
 ) -> bool {
-    // [red] #1049 STUB — the convergence decision is not implemented yet, so the conveyor keeps
-    // its pure-follower behaviour: an injected acquire-phase error is never shed and PERSISTS
-    // (the behavioural test reproduces exactly that). The [green] commit replaces this body with
-    // the real boundary-vs-threshold decision.
-    let _ = (
-        wall_now_ns,
-        locked_boundary_ns,
-        latency_ms,
-        interval_ns,
-        source_multiple,
-        ticks_since_last_drain,
-    );
-    false
+    if interval_ns == 0 || locked_boundary_ns == 0 {
+        return false;
+    }
+    let n = source_multiple.max(1) as u64;
+    let reserve_ns = (latency_ms as u64).saturating_mul(1_000_000);
+    let quantum = interval_ns / n;
+    let threshold = reserve_ns
+        .saturating_add(quantum)
+        .saturating_add(PHASE_PIN_HYSTERESIS_NS);
+    let age = wall_now_ns.saturating_sub(locked_boundary_ns);
+    age > threshold && ticks_since_last_drain >= DRAIN_MIN_TICK_INTERVAL
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2854,7 +2852,7 @@ mod tests {
              (green {green_final} vs red {red_final})"
         );
         assert!(
-            green_drops >= 1 && green_drops <= 6,
+            (1..=6).contains(&green_drops),
             "GREEN: the shed is bounded — a couple of drops to close a 2-frame error, never a \
              storm (got {green_drops})"
         );
