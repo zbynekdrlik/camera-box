@@ -61,18 +61,17 @@ fn main() {
     };
 
     let samples = parse_audit_lines(&text);
-    // #874: the genlock build also emits send-side audit lines (genlock-ndi-output /
-    // genlock-ndi-filter). Parse them independently over the same log.
-    let send_samples = parse_send_audit_lines(&text);
 
     // --json (#757) is INPUT-side only, deliberately unchanged: the per-source object
-    // scripts/prerecord_phase_calibrate.py consumes must not gain keys. It still requires
-    // at least one input audit line.
+    // scripts/prerecord_phase_calibrate.py consumes must not gain keys. Parse + return
+    // here BEFORE any send-side work, so the json path never double-parses the log.
     if json_mode {
         if samples.is_empty() {
             eprintln!(
                 "ERROR: no 'genlock-fifo audit' lines found in the input \
-                 (wrong log file, or this OBS build isn't genlocked/logging yet)"
+                 (wrong log file, or this OBS build isn't genlocked/logging yet; \
+                 note --json is input-side only -- the #874 send-side lines are reported \
+                 in text mode)"
             );
             std::process::exit(2);
         }
@@ -80,8 +79,11 @@ fn main() {
         return;
     }
 
-    // Text mode reports whichever kinds are present: input FIFO lines, #874 send-side
+    // #874: the genlock build also emits send-side audit lines (genlock-ndi-output /
+    // genlock-ndi-filter), surfaced in text mode only. Parse them independently over the
+    // same log. Text mode reports whichever kinds are present: input FIFO lines, send-side
     // lines, or both.
+    let send_samples = parse_send_audit_lines(&text);
     if samples.is_empty() && send_samples.is_empty() {
         eprintln!(
             "ERROR: no 'genlock-fifo audit' or 'genlock-ndi-output/filter audit' lines found \

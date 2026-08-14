@@ -342,6 +342,9 @@ impl SendAuditSample {
     /// line emits this verbatim as `dropped=`; the filter line does not — it is
     /// derived identically either way, so it is computed rather than stored (the
     /// emitted `dropped=` token is skipped like any other unrecognized token).
+    /// The derivation is intentionally authoritative — the C++ emits `dropped=`
+    /// the same way — and the parser test asserts the emitted `dropped=6000`
+    /// equals this derived value, so the two can never silently diverge.
     pub fn dropped(&self) -> u64 {
         self.offered.saturating_sub(self.sent)
     }
