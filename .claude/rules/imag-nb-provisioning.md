@@ -506,48 +506,54 @@ explicit per-thread pinning) — this is still the bar.
 
 ## New `verify-imag.sh` checks MUST run BEFORE any check that restarts/replaces OBS (#884)
 
-`verify-imag.sh`'s check (o) (#840) restarts OBS via a DIRECT SSH invocation —
-`ssh_box "/usr/local/bin/imag-obs-stop.sh && /usr/local/bin/imag-obs-start.sh"` — deliberately
-bypassing systemctl, to prove the box's OWN operator restart path re-establishes the projectors.
-**Any check added AFTER this point in the file observes a DIFFERENT obs process than the one the
-box booted with** — one launched by a bare script invocation, not by `imag-obs.service`. Confirmed
-live (#884, 2026-07-30): `systemctl --user is-active imag-obs.service` reads `inactive` right after
-check (o) runs (systemd loses track of the main process once the wrapper's own blocking `wait`
-returns for THAT invocation), and the fresh obs process it spawned shows `Max core file size = 0`
-in `/proc/<pid>/limits`, not `unlimited` — `LimitCORE=infinity` is a systemd cgroup property, never
-inherited by a bare SSH-invoked script. The #884 supervision checks (unit enabled+active,
-`Restart=` value, autostart wiring, core-dump enablement) were first appended at the very end of
-the file (after check (r)) and ALL four false-FAILED on an otherwise perfectly healthy,
-correctly-provisioned box for exactly this reason. Fixed by moving the whole block to run
-immediately BEFORE check (o) instead — pinned by
-`verify_imag_reads_884_service_state_before_the_840_restart_wipes_it` in
-`tests/verify_imag_pure_functions.rs`. **The general rule: before appending a new acceptance check
-to this file, check whether check (o)'s restart call sits ABOVE your intended insertion point —
-if so, your check reads post-restart state, which is a DIFFERENT (and usually untracked, degraded)
-process than the box's normal boot-time state.**
+`verify-imag.sh`'s check (o) (#840) RESTARTS OBS, which REPLACES the tracked obs process with a
+fresh one. **Any check added AFTER check (o) in the file observes that post-restart process, not
+the one the box booted with.** Confirmed live (#884, 2026-07-30): the #884 supervision checks
+(unit enabled+active, `Restart=` value, autostart wiring, core-dump enablement) were first appended
+at the very end of the file (after check (r)) and ALL four false-FAILED on an otherwise perfectly
+healthy, correctly-provisioned box for exactly this reason. Fixed by moving the whole block to run
+immediately BEFORE check (o) — pinned by `verify_imag_reads_884_service_state_before_the_840_restart_wipes_it`
+in `tests/verify_imag_pure_functions.rs` (and the sibling #1015/#1040 ordering tests). **The general
+rule: before appending a new acceptance check to this file, check whether check (o)'s restart call
+sits ABOVE your intended insertion point — if so, your check reads post-restart state, a DIFFERENT
+process than the box's normal boot-time state.** (Pre-#890 the restart was a DIRECT
+`imag-obs-stop.sh && imag-obs-start.sh` ssh call, which additionally left the post-restart obs
+UNTRACKED — outside the unit's cgroup, `Max core file size = 0`; #890 changed it to a bounded
+`systemctl --user restart imag-obs.service`, so the new obs is now supervised, but the
+reads-before-restart ordering rule is unchanged.)
 
-## `verify-imag.sh` currently HANGS FOREVER on every run — filed as #890, not fixed by #884
+## `verify-imag.sh` used to HANG FOREVER on every run — FIXED by #890 (bounded service restart)
 
-Live-caught while verifying #884: the interaction above isn't just an ordering bug — check (o)'s
-direct-invocation restart doesn't just start an untracked obs, it **never returns control to the
-calling SSH session at all**, so the WHOLE `verify-imag.sh` run hangs indefinitely and never
-reaches ALL CLEAR / VERIFY FAILED. Root cause: #882's `83900d990` added a blocking tail to
-`imag-obs-start.sh` — `wait "$OBS_PID"; exit "$OBS_EXIT"` — so that when launched THROUGH
-`imag-obs.service` (`ExecStart=imag-obs-start.sh`), systemd's Type=simple tracking sees OBS's own
-exit code (needed for `Restart=on-failure` to tell a segfault from a deliberate quit — the correct
-design for the systemd path). But check (o) (#840, written BEFORE #882) invokes this SAME script
-DIRECTLY over SSH with no systemd involved — and `ssh_box` has no timeout wrapper — so the same
-blocking `wait` now hangs the SSH command for as long as OBS keeps running, which is indefinitely.
-Confirmed live: a stuck run's process tree showed the SSH command (`sshpass ... ssh ... newlevel@
-10.77.9.182 /usr/local/bin/imag-obs-stop.sh && /usr/local/bin/imag-obs-start.sh`) still alive with
-a perfectly healthy `obs` underneath it 20+ minutes later. **This means EVERY invocation of
-`scripts/verify-imag.sh` right now hangs forever** — not fixed here (a genuinely different
-subsystem/root-cause than #884's own scope; needs its own design decision on how to reconcile the
-two — background the SSH call, wrap it in a bounded `timeout` + separate poll, or make
-`imag-obs-start.sh` skip the blocking tail when it detects a non-systemd invocation). Filed as #890
-with full evidence. If you need `verify-imag.sh`'s ALL CLEAR verdict before #890 lands, expect to
-have to kill the hung run and verify the individual checks you care about directly over SSH
-instead (as #884's own live verification did).
+**RESOLVED (#890, commits `eb61d544e` RED / `bf11ee2e5` GREEN / `6796e14d4` review-fix).** For the
+record: check (o)'s persistence-proof used to restart OBS with a DIRECT ssh call
+`ssh_box "/usr/local/bin/imag-obs-stop.sh && /usr/local/bin/imag-obs-start.sh"`. Since #882
+(`83900d990`) `imag-obs-start.sh` ends in `wait "$OBS_PID"; exit "$OBS_EXIT"` — correct for the
+Type=simple `imag-obs.service` (systemd needs obs to be the tracked main process), but when the
+SAME script is invoked DIRECTLY over ssh (and `ssh_box` bounds only the SSH *connect* phase, never
+remote *runtime*) that blocking `wait` never returns, so the whole gate hung indefinitely and never
+reached ALL CLEAR / VERIFY FAILED.
+
+**The fix + the reusable lesson (a REPEATABLE pattern for any verify/probe script):**
+
+- **A verify/probe CHECK must be BOUNDED — never a blocking process supervisor.** #890's engineering
+  fork (Scope-gate `needs-user-decision`) resolved to the obvious default: a gate CHECK gets a hard
+  timeout + fail-loud, never an indefinite wait. Restart via the SERVICE
+  (`imag_obs_service_restart_cmd` → `systemctl --user restart imag-obs.service`, `XDG_RUNTIME_DIR`
+  exported for the non-graphical ssh `--user` bus), NOT a direct `imag-obs-start.sh` call: systemd
+  (Type=simple) OWNS the blocking wait, so the ssh restart returns promptly AND the new obs stays
+  supervised. Since #884 the box's OWN boot path IS the unit, so the service restart is also the
+  operator-faithful "real restart" the persistence-proof wants.
+- **`ssh_box` bounds only CONNECT, not remote command RUNTIME.** A remote command that blocks after
+  connect (a `wait`, a wedged-X `wmctrl -l`, a stuck `journalctl`) hangs `ssh_box` forever. #890
+  added `ssh_box_timeout SECONDS CMD` (a `timeout`-wrapped `ssh_box`); a 124 timeout is a loud FAIL,
+  never a hang. Check (o)'s restart AND its before/after wmctrl reads now all go through it, with a
+  bounded poll (`IMAG_OBS_PROJECTOR_POLL_S`, default 120) waiting for the projectors to reappear.
+  The wider "bound EVERY ssh read in the file" hardening (needs per-call budgets, not a blanket
+  10s wrap that would false-FAIL slow-but-healthy dantesync/apt reads) is filed as #1058.
+- **When you make a script's tail systemd-blocking (`wait $PID`), audit every OTHER caller of it.**
+  #882 made `imag-obs-start.sh` correct for the unit's `ExecStart=` but broke the pre-existing #840
+  caller in verify-imag.sh that invoked it directly — a "correct for one caller, fatal for another"
+  interaction. Grep for direct callers before adding a blocking tail.
 
 ## A reading taken RIGHT AFTER rapid consecutive OBS restarts can be transiently wrong — reread once settled before trusting it or filing it
 
