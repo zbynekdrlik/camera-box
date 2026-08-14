@@ -139,6 +139,20 @@ GATE_MASTER_CHASE_TIMEOUT_S="${DANTESYNC_MASTER_CHASE_TIMEOUT_S:-3}"
 # per-client catch-up/chase window itself as lasting "~10-30s").
 GATE_CHASE_RESAMPLE_DELAY_S="${DANTESYNC_CHASE_RESAMPLE_DELAY_S:-15}"
 
+# #1055: the EVIDENCE-based, master-INDEPENDENT slew-transient rescue for a LINUX client whose
+# HTTP median lands OUT of bound (drift/drift_unstable -- the case chase_bimodal_exclusion_verdict
+# structurally cannot explain, #1041) because a 30s window fell in a master deadband-slew plateau.
+# clock-offset-guard.sh's slew_transient_exclusion_verdict reads the client's OWN journal: it
+# excludes "[NTP] offset:" samples within GATE_SLEW_STEP_WINDOW_S seconds of a "[NTP] (Stepped|
+# step candidate)" correction marker and passes ONLY when >= GATE_SLEW_MIN_SURVIVING baseline
+# samples survive AND their median is in-bound. STEP_WINDOW default 5s: the spike offset line and
+# its step marker land at the SAME second live (0-1s apart), while the nearest baseline sample is
+# >=28s away (the ~30s NTP cadence) -- calibrated on today's real cam1/cam2 journals, W in {5,10,20}
+# all leave the identical baseline survivors. MIN_SURVIVING default 3 (matches
+# GATE_SAMPLE_MIN_DISTINCT): a slew-storm leaving fewer correctly fails rather than silently passes.
+GATE_SLEW_STEP_WINDOW_S="${DANTESYNC_SLEW_STEP_WINDOW_S:-5}"
+GATE_SLEW_MIN_SURVIVING="${DANTESYNC_SLEW_MIN_SURVIVING:-3}"
+
 # read_linux_node_journal NAME IP -> that Linux node's latest DanteSync journald lines over SSH,
 # or "" if unreachable. Overridable for tests/offline via DANTESYNC_GATE_LINUX_JOURNAL_<NAME>
 # (file path; NAME uppercased AND any "-" mapped to "_" so a hyphenated node name like "imag-nb"
@@ -347,6 +361,10 @@ grade_http_node() {
   local deadband_margin="${13:-0}" master_chase_status="${14:-}" resample_delay="${15:-0}"
   local client_chase_ceiling="${16:-0}" client_step_fallback="${17:-0}"
   local status samples_raw now rc_off rc_ptp ptp deadband_note="" resampled=0
+  # #1055: hoisted so the slew-transient rescue below can REUSE the journal the widening branch
+  # already fetched (a master-configured linux client), and lazily fetch it otherwise -- see the
+  # rescue in the "fresh" case. "" until a linux client actually reads it.
+  local client_journal="" raw_verdict=""
 
   samples_raw="$(gather_http_samples "$read_fn" "$name" "$arg" "$samples" "$window")"
   if [ -z "$samples_raw" ]; then
@@ -408,7 +426,8 @@ grade_http_node() {
       deadband_note=" -- bound widened to ${bound}us (dantesync ntp_deadband_us + ${deadband_margin}us margin, #1021; base bound ${orig_bound}us)"
     fi
   elif [ -n "$master_chase_status" ]; then
-    local orig_bound="$bound" client_journal="" step_source="fallback(${client_step_fallback}us)"
+    local orig_bound="$bound" step_source="fallback(${client_step_fallback}us)"
+    client_journal=""  # #1055: assign the function-level local (not a new shadow), so the rescue reuses it
     local parsed_step
     if [ "$kind" = "linux" ]; then
       client_journal="$(read_linux_node_journal "$name" "$arg")"
@@ -455,6 +474,22 @@ grade_http_node() {
           # fallback below.
           if [ "$(chase_bimodal_exclusion_verdict "$samples_raw" "$bound" "$stability" "$min_distinct" "$mode")" = "yes" ]; then
             chase_bimodal_exclusion_check "$name" "$samples_raw" "$bound" "$stability" "$deadband_note"
+            rc_off=0
+          elif [ "$kind" = "linux" ] \
+               && { raw_verdict="$(sampled_offset_verdict "$samples_raw" "$bound" "$stability" "$min_distinct" "$mode")"; \
+                    [ "$raw_verdict" = "drift" ] || [ "$raw_verdict" = "drift_unstable" ]; } \
+               && { [ -n "$client_journal" ] || { client_journal="$(read_linux_node_journal "$name" "$arg")"; true; }; } \
+               && [ "$(slew_transient_exclusion_verdict "$client_journal" "$freshness" "$bound" "$GATE_SLEW_STEP_WINDOW_S" "$GATE_SLEW_MIN_SURVIVING")" = "yes" ]; then
+            # #1055: a LINUX client whose MEDIAN is out of bound (drift/drift_unstable -- the case
+            # chase_bimodal cannot explain, #1041) because the HTTP window fell in a master
+            # deadband-slew plateau. Its OWN journal proves the elevated samples are step-correlated
+            # transients over a us-grade baseline -> excuse. Master-INDEPENDENT: this rescues the
+            # exact case where the #1022 master-status read came back empty (no widening), the
+            # ~50% intermittency. The journal SSH is paid ONLY here (a would-be-DRIFT linux client),
+            # never on a healthy/OK node. A genuine sustained desync still fails the verdict (its
+            # step-excluded baseline stays elevated, or nothing survives) -- see clock-offset-guard.sh.
+            slew_transient_exclusion_check "$name" "$client_journal" "$bound" \
+              "$GATE_SLEW_STEP_WINDOW_S" "$GATE_SLEW_MIN_SURVIVING" "$freshness" "$deadband_note"
             rc_off=0
           else
             # A CLIENT row (never the master -- see should_resample_for_chase's own MODE gate)
@@ -687,6 +722,21 @@ Options:
                        collides with the SAME or the NEXT excursion roughly that often) -- stage
                        (1) above is what makes the gate's overall verdict deterministic on the
                        common case; this flag only tunes the residual fallback.
+  --slew-step-window-s N  #1055: for a LINUX client whose HTTP median lands OUT of bound
+                       (drift/drift_unstable -- the case stage (1) above cannot explain) because
+                       the sampling window fell in a master deadband-slew plateau, consult the
+                       client's OWN journal: exclude "[NTP] offset:" samples within N seconds of a
+                       "[NTP] (Stepped|step candidate)" correction marker, and pass ONLY if the
+                       surviving BASELINE median is in-bound. This is master-INDEPENDENT -- it
+                       rescues exactly the case where the #1022 master-status read came back empty
+                       (no widening). Default ${GATE_SLEW_STEP_WINDOW_S} (the spike offset line and
+                       its step marker land at the same second live; the nearest baseline sample is
+                       >=28s away at the ~30s NTP cadence). A genuine sustained desync still FAILS
+                       (its step-excluded baseline stays elevated, or nothing survives).
+  --slew-min-surviving N  #1055: the minimum step-excluded baseline samples required before the
+                       slew rescue above may pass -- too few can't prove health, so it FAILS
+                       rather than silently passing. Default ${GATE_SLEW_MIN_SURVIVING} (matches
+                       --min-distinct).
 
 A node's NTP MEASUREMENT itself must also be FRESH, independently of the payload's general
 "updated_ts" (#1014, dantesync v1.8.30 / dantesync issue 68): "ntp_age_s" must be a plain integer
@@ -730,6 +780,7 @@ main() {
   local client_chase_ceiling="$GATE_CLIENT_CHASE_CEILING_US"
   local client_step_fallback="$GATE_CLIENT_STEP_THRESHOLD_FALLBACK_US"
   local chase_resample_delay="$GATE_CHASE_RESAMPLE_DELAY_S"
+  local slew_step_window="$GATE_SLEW_STEP_WINDOW_S" slew_min_surviving="$GATE_SLEW_MIN_SURVIVING"
   local -a win_http=()
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -746,6 +797,8 @@ main() {
       --client-chase-ceiling-us) shift; client_chase_ceiling="${1:-}" ;;
       --client-step-threshold-fallback-us) shift; client_step_fallback="${1:-}" ;;
       --chase-resample-delay-s) shift; chase_resample_delay="${1:-}" ;;
+      --slew-step-window-s) shift; slew_step_window="${1:-}" ;;
+      --slew-min-surviving) shift; slew_min_surviving="${1:-}" ;;
       -h|--help)            usage; exit 0 ;;
       --*)             echo "unknown option: $1" >&2; usage >&2; exit 1 ;;
       *)               echo "unexpected argument: $1" >&2; usage >&2; exit 1 ;;
@@ -795,6 +848,18 @@ main() {
     echo "ERROR: --chase-resample-delay-s must be a non-negative integer (got '${chase_resample_delay}')." >&2
     exit 1
   fi
+  if ! printf '%s' "$slew_step_window" | grep -qE '^[0-9]+$'; then
+    echo "ERROR: --slew-step-window-s must be a non-negative integer (got '${slew_step_window}')." >&2
+    exit 1
+  fi
+  if ! printf '%s' "$slew_min_surviving" | grep -qE '^[0-9]+$' || [ "$slew_min_surviving" -lt 1 ]; then
+    echo "ERROR: --slew-min-surviving must be a positive integer (got '${slew_min_surviving}')." >&2
+    exit 1
+  fi
+  # #1055: grade_http_node reads these as globals (like GATE_NTP_MASTER_NAME), so publish the
+  # validated CLI/env values before dispatching the per-node jobs.
+  GATE_SLEW_STEP_WINDOW_S="$slew_step_window"
+  GATE_SLEW_MIN_SURVIVING="$slew_min_surviving"
   if [ "$min_distinct" -gt "$samples" ]; then
     echo "ERROR: --min-distinct (${min_distinct}) cannot exceed --samples (${samples}) --" \
       "no node could ever gather that many distinct reads (#836)." >&2

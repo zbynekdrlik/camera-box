@@ -3299,6 +3299,7 @@ fn gate_rescues_a_client_master_slew_transient_via_journal_step_correlation_1055
         http_status_ntp(base + 5, 2759, "25", false),
     ];
     let p = write_multi_read_fixture("cam1_slew_transient_1055", &responses);
+    let j = write_dante_journal("cam1_slew_transient_1055", GATE_JOURNAL_SLEW_TRANSIENT_CAM1);
     let (code, stdout, stderr) = run_gate_env(
         &[
             "--linux",
@@ -3316,7 +3317,7 @@ fn gate_rescues_a_client_master_slew_transient_via_journal_step_correlation_1055
             ("DANTESYNC_GATE_LINUX_HTTP_CAM1", &p.display().to_string()),
             (
                 "DANTESYNC_GATE_LINUX_JOURNAL_CAM1",
-                GATE_JOURNAL_SLEW_TRANSIENT_CAM1,
+                &j.display().to_string(),
             ),
         ],
     );
@@ -3347,6 +3348,10 @@ fn gate_still_fails_a_genuine_sustained_client_desync_with_the_slew_rescue_1055(
         http_status_ntp(base + 5, 3225, "25", false),
     ];
     let p = write_multi_read_fixture("cam1_sustained_drift_1055", &responses);
+    let j = write_dante_journal(
+        "cam1_sustained_drift_1055",
+        GATE_JOURNAL_SUSTAINED_DRIFT_CAM1,
+    );
     let (code, stdout, stderr) = run_gate_env(
         &[
             "--linux",
@@ -3364,7 +3369,7 @@ fn gate_still_fails_a_genuine_sustained_client_desync_with_the_slew_rescue_1055(
             ("DANTESYNC_GATE_LINUX_HTTP_CAM1", &p.display().to_string()),
             (
                 "DANTESYNC_GATE_LINUX_JOURNAL_CAM1",
-                GATE_JOURNAL_SUSTAINED_DRIFT_CAM1,
+                &j.display().to_string(),
             ),
         ],
     );
