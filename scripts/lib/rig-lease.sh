@@ -143,6 +143,23 @@ print(f"{repo}#{run_id} run_url={run_url} job={job} expected_release_at={expecte
 ' "$path" 2>/dev/null || printf 'unknown (corrupt holder.json)\n'
 }
 
+# rig_lease_read_holder_repo_run_id -> print "<repo>\t<run_id>" from ONE atomic read of holder.json
+# (both fields from a single open()+json.load(), so a concurrent lockdir removal BETWEEN them cannot
+# tear the pair -- #970/#980, the same atomicity rig_lease_holder_summary needs). "\t" on absent /
+# corrupt. Callers split on the tab.
+rig_lease_read_holder_repo_run_id() {
+  local path; path="$(rig_lease_holder_path)"
+  python3 -c '
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        d = json.load(f)
+    print(str(d.get("repo", "") or "") + "\t" + str(d.get("run_id", "") or ""))
+except Exception:
+    print("\t")
+' "$path" 2>/dev/null || printf '\t\n'
+}
+
 # rig_lease_holder_run_status <repo> <run_id> -> echo "in_progress" or "not_in_progress".
 # Pluggable via RIG_LEASE_RUN_STATUS_CMD (see header); defaults to "in_progress" (assume alive --
 # an unknown/unreachable status checker must never itself cause a reclaim; only a confirmed-dead
@@ -170,9 +187,10 @@ rig_lease_is_stale() {
     return 0
   fi
 
-  local repo run_id status
-  repo="$(rig_lease_read_holder_field repo)"
-  run_id="$(rig_lease_read_holder_field run_id)"
+  local pair repo run_id status
+  pair="$(rig_lease_read_holder_repo_run_id)"
+  repo="${pair%%$'\t'*}"
+  run_id="${pair#*$'\t'}"
   status="$(rig_lease_holder_run_status "$repo" "$run_id")"
   [ "$status" = "not_in_progress" ] && return 0
 

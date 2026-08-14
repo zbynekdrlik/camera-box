@@ -92,13 +92,16 @@ fn holder_summary_is_atomic_under_a_concurrent_delete() {
     let full = format!(
         "zbynekdrlik/restreamer#{RUN_ID} run_url={RUN_URL} job={JOB} expected_release_at={EXP}"
     );
-    assert!(
-        summary == full
-            || summary == "unknown (no holder.json present)"
-            || summary == "unknown (corrupt holder.json)",
-        "#970/#980: rig_lease_holder_summary tore under a concurrent holder.json delete — it must \
-         read the file atomically so the result is EITHER the complete summary OR a clean \
-         placeholder, never a partial line with empty fields. got: {summary:?}"
+    // The shim deletes holder.json strictly AFTER the (atomic) read returns, so correct code reads
+    // the file while fully present and must produce the COMPLETE summary — never a placeholder and
+    // never a torn partial. The pre-fix five-read code instead tears (repo present, rest empty) and
+    // fails this exact-match. (A placeholder here would mean the read raced the delete — impossible
+    // with a single atomic read, and itself a regression worth catching.)
+    assert_eq!(
+        summary, full,
+        "#970/#980: rig_lease_holder_summary must read holder.json atomically — with the delete \
+         landing only after the read, the summary must be the complete line, never a torn partial \
+         (`restreamer# run_url= ...`) or a placeholder. got: {summary:?}"
     );
 }
 
