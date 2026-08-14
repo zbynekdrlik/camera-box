@@ -480,6 +480,13 @@ fn phase_convergence_present_and_wired_in_1049() {
         src.contains("const uint64_t target = reserve_ns > floor_ns ? reserve_ns : floor_ns;"),
         "{OBS_SOURCE}: #1049 — the converge target must be max(reserve, floor), never reserve alone."
     );
+    // N>=2-ONLY gate (coordinator's live finding): an N==1 phase shed does not stick and
+    // limit-cycles on a deep source; convergence must early-return for n<2.
+    assert!(
+        src.contains("if (n < 2) return false;"),
+        "{OBS_SOURCE}: #1049 — the N>=2-only gate (if (n < 2) return false;) is gone; convergence \
+         would limit-cycle on a deep N==1 source (the stream NDI 2ME PGM oscillation)."
+    );
     // The shed is CALLED from the release tail, gated on converge_eligible.
     assert!(
         src.contains("bool converge_eligible = false;"),

@@ -5364,6 +5364,15 @@ static inline bool genlock_phase_converge_due(uint64_t wall_now_ns, uint64_t bou
 {
 	if (interval_ns == 0 || boundary_ns == 0)
 		return false;
+	/* camera-box #1049 (coordinator's live finding): N>=2 ONLY. An N==1 source (30-into-30)
+	 * delivers one frame per tick, so a phase shed cannot stick -- the queue holds and regains
+	 * within the throttle window (shed->hold->shed, the #998 dup+skip signature; measured live on
+	 * the stream box's deep NDI 2ME PGM, 990 ms, natural grid-quantized hold ~1033 ms one frame
+	 * above configured at frac 0.7). N>=2 delivers >=2 frames/tick so the shed sticks -- and only
+	 * N>=2 carries the per-camera ladder pathology. Mirror: src/genlock_backlog.rs
+	 * should_converge_phase source_multiple < 2 early return. */
+	if (n < 2)
+		return false;
 	const uint64_t nn = n >= 1 ? (uint64_t)n : 1;
 	const uint64_t reserve_ns = (uint64_t)latency_ms * 1000000ULL;
 	const uint64_t floor_ns = wall_now_ns > newest_stamp_ns ? wall_now_ns - newest_stamp_ns : 0;

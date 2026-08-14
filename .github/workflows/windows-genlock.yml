@@ -596,6 +596,9 @@ jobs:
           if ($src -notmatch [regex]::Escape('const uint64_t target = reserve_ns > floor_ns ? reserve_ns : floor_ns;')) {
             Write-Error "obs-source.c: the converge target is no longer max(reserve, floor) (#1049)"; exit 1
           }
+          if ($src -notmatch [regex]::Escape('if (n < 2) return false;')) {
+            Write-Error "obs-source.c: the N>=2-only gate (if (n < 2) return false;) is gone — convergence would limit-cycle on a deep N==1 source (stream NDI 2ME PGM) (#1049)"; exit 1
+          }
           if ($src -notmatch [regex]::Escape('static bool genlock_should_converge_phase(')) {
             Write-Error "obs-source.c: the source wrapper genlock_should_converge_phase is gone (#1049)"; exit 1
           }

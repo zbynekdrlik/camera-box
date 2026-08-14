@@ -7793,3 +7793,15 @@ prerequisite, closed 2026-06-15); the rig is genlocked so it was dead code.
   `convergence_never_sheds_at_the_natural_steady_phase_1049`. Executable C-vs-Rust parity gate
   extended (`c_phase_convergence_matches_the_rust_authority_1049`), mutation-proven. WORKTREE MODE:
   stopped at green local (supervisor integrates).
+
+## 2026-08-14 — issue 1049 follow-up (coordinator live finding): deep n=1 oscillation → N>=2-only gate
+
+- After the floor-aware fix DEPLOYED and worked on strih n>=2 (skews converged 66/66/66 ms), it
+  LIMIT-CYCLED on the stream box's deep n=1 NDI 2ME PGM (990 ms, frac 0.7): converge_sheds + holds
+  climbing in lockstep, the #998 dup+skip signature. Root cause: an n=1 phase shed cannot STICK (1
+  frame/tick can't sustain a fresher phase → hold+regain). n>=2 delivers ≥2 frames/tick so the shed
+  sticks — and only n>=2 carries the per-camera ladder pathology.
+- FIX: gate should_converge_phase / genlock_phase_converge_due to source_multiple >= 2 (RED
+  73ab458b, GREEN 1d35d2cb). Strih n>=2 byte-identical. Parity vectors + static + pwsh anchors +
+  mutation-proof. A hysteresis band was rejected (frac-dependent overshoot, differs by n). Playbook:
+  the "THIRD axis" section in genlock-fifo-limit-cycle-diagnosis.md.
