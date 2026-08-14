@@ -97,7 +97,10 @@ fn classify_probe_other_error_is_unknown() {
         stdout_of("optical_chain_classify_nonblack_probe 1 \"ConnectionRefusedError: could not reach OBS WebSocket\""),
         "UNKNOWN"
     );
-    assert_eq!(stdout_of("optical_chain_classify_nonblack_probe 1 \"\""), "UNKNOWN");
+    assert_eq!(
+        stdout_of("optical_chain_classify_nonblack_probe 1 \"\""),
+        "UNKNOWN"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -193,10 +196,21 @@ fn condition_unverified_when_alive_but_optical_unreadable() {
 // ---------------------------------------------------------------------------------------------
 #[test]
 fn remote_snippet_emits_the_four_markers_and_reads_the_right_sources() {
-    let snip = stdout_of("optical_chain_painter_probe_remote_snippet /run/rig-painter.pid cam2-painter.service");
+    let snip = stdout_of(
+        "optical_chain_painter_probe_remote_snippet /run/rig-painter.pid cam2-painter.service",
+    );
     for marker in ["PID_PRESENT|", "PID_ALIVE|", "SVC_ENABLED|", "SVC_ACTIVE|"] {
-        assert!(snip.contains(marker), "snippet missing marker {marker}:\n{snip}");
+        assert!(
+            snip.contains(marker),
+            "snippet missing marker {marker}:\n{snip}"
+        );
     }
-    assert!(snip.contains("/run/rig-painter.pid"), "snippet must read the painter pidfile:\n{snip}");
-    assert!(snip.contains("cam2-painter.service"), "snippet must read the permanent service:\n{snip}");
+    assert!(
+        snip.contains("/run/rig-painter.pid"),
+        "snippet must read the painter pidfile:\n{snip}"
+    );
+    assert!(
+        snip.contains("cam2-painter.service"),
+        "snippet must read the permanent service:\n{snip}"
+    );
 }

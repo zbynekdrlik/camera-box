@@ -126,7 +126,10 @@ fn non_painter_failure_is_a_warning_not_an_error() {
 fn lib_never_exits() {
     let s = std::fs::read_to_string(lib_path()).expect("read lib");
     assert!(
-        !s.contains("\nexit ") && !s.contains(" exit ") && !s.contains(";exit ") && !s.contains("; exit "),
+        !s.contains("\nexit ")
+            && !s.contains(" exit ")
+            && !s.contains(";exit ")
+            && !s.contains("; exit "),
         "cambox-parallel-restore.sh must never `exit` (cleanup trap must always complete)"
     );
 }
