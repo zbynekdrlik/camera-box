@@ -137,7 +137,7 @@ static inline bool obs_display_should_skip(uint32_t render_divisor, uint32_t fra
  * render_display() which only derives when interval != 0.
  *
  * Tier-0 authority: src/render_budget.rs::effective_render_divisor (byte-identical results,
- * proven by the C-parity harness in tests/obs_display_budget.rs).
+ * proven by the C-parity harness in tests/aux_sender_budget_879.rs).
  */
 static inline uint32_t obs_effective_render_divisor(uint32_t configured_divisor,
 						    uint64_t frame_interval_ns)

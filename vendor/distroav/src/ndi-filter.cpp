@@ -405,12 +405,15 @@ void ndi_filter_render_video(void *data, gs_effect_t *)
 
 			gs_stagesurface_unmap(f->stagesurface);
 		}
-	}
 
-	// camera-box #879: update this sender's render-cost EWMA and clear the #293 skip run.
-	const uint64_t render_dur_879 = os_gettime_ns() - render_begin_879;
-	f->render_ewma_ns = f->render_ewma_ns ? (f->render_ewma_ns * 3 + render_dur_879) / 4 : render_dur_879;
-	f->render_consecutive_skips = 0;
+		// camera-box #879: update this sender's render-cost EWMA and clear the #293 skip
+		// run -- only when a render actually ran (gs_texrender_begin succeeded), mirroring
+		// render_display()'s `if (render_display_begin(...))` timing so a begin failure does
+		// not drag the EWMA down or reset the skip run without a produced frame.
+		const uint64_t render_dur_879 = os_gettime_ns() - render_begin_879;
+		f->render_ewma_ns = f->render_ewma_ns ? (f->render_ewma_ns * 3 + render_dur_879) / 4 : render_dur_879;
+		f->render_consecutive_skips = 0;
+	}
 
 	f->rendered = true;
 }

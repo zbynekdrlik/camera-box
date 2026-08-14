@@ -179,8 +179,9 @@ fn c_aux_sender_should_skip_holds_invariants_879() {
 static uint64_t g_now;
 static uint64_t os_gettime_ns(void) {{ return g_now; }}
 struct video_stub {{ uint64_t video_frame_interval_ns; uint64_t graphics_frame_start_ns; }};
-static struct {{ struct video_stub video; }} _obs = {{{{0, 0}}}};
-static struct {{ struct video_stub video; }} *obs = &_obs;
+struct obs_stub {{ struct video_stub video; }};
+static struct obs_stub _obs = {{{{0, 0}}}};
+static struct obs_stub *obs = &_obs;
 
 /* ---- lifted VERBATIM from obs.c ---- */
 {lifted}

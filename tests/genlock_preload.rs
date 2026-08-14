@@ -2432,11 +2432,11 @@ mod vendored_source {
             bud.contains(
                 "static inline uint32_t obs_effective_render_divisor(uint32_t configured_divisor, uint64_t frame_interval_ns)"
             ),
-            "{OBS_DISPLAY_BUDGET}: #879 — the pure canvas-rate effective-divisor helper the aux              path reuses is gone; the aux senders would lose their budget derivation."
+            "{OBS_DISPLAY_BUDGET}: #879 — the pure canvas-rate effective-divisor helper the aux path reuses is gone; the aux senders would lose their budget derivation."
         );
         assert!(
             bud.contains("return derived < configured_divisor ? derived : configured_divisor;"),
-            "{OBS_DISPLAY_BUDGET}: #879 — obs_effective_render_divisor no longer clamps to the              configured upper bound (min(derived, configured))."
+            "{OBS_DISPLAY_BUDGET}: #879 — obs_effective_render_divisor no longer clamps to the configured upper bound (min(derived, configured))."
         );
 
         let api = squish(&vendor_file(OBS_API));
@@ -2444,7 +2444,7 @@ mod vendored_source {
             api.contains(
                 "EXPORT bool obs_aux_sender_should_skip(uint32_t render_divisor, uint32_t frame_counter,"
             ),
-            "{OBS_API}: #879 — obs_aux_sender_should_skip() is not EXPORTed; the DistroAV filter              cannot link the aux budget gate."
+            "{OBS_API}: #879 — obs_aux_sender_should_skip() is not EXPORTed; the DistroAV filter cannot link the aux budget gate."
         );
 
         let core = squish(&vendor_file(OBS_CORE_C));
@@ -2452,7 +2452,7 @@ mod vendored_source {
             core.contains(
                 "const uint32_t effective_divisor = obs_effective_render_divisor(render_divisor, interval);"
             ),
-            "{OBS_CORE_C}: #879 — obs_aux_sender_should_skip() no longer derives the canvas-rate              effective divisor before delegating to obs_display_should_skip()."
+            "{OBS_CORE_C}: #879 — obs_aux_sender_should_skip() no longer derives the canvas-rate effective divisor before delegating to obs_display_should_skip()."
         );
 
         let flt = squish(&vendor_file(NDI_FILTER));
@@ -2460,13 +2460,40 @@ mod vendored_source {
             flt.contains(
                 "if (obs_aux_sender_should_skip(f->render_divisor, f->render_frame_counter, f->render_ewma_ns,"
             ),
-            "{NDI_FILTER}: #879 — ndi_filter_render_video() no longer gates its render+send on              the budget decision; the aux senders bypass the render budget again and can steal              the program's 30fps budget."
+            "{NDI_FILTER}: #879 — ndi_filter_render_video() no longer gates its render+send on the budget decision; the aux senders bypass the render budget again and can steal the program's 30fps budget."
         );
         assert!(
             flt.contains(
                 "f->render_ewma_ns = f->render_ewma_ns ? (f->render_ewma_ns * 3 + render_dur_879) / 4 : render_dur_879;"
             ),
-            "{NDI_FILTER}: #879 — the per-filter render-cost EWMA update is gone; the budget gate              can no longer learn an aux sender is heavy."
+            "{NDI_FILTER}: #879 — the per-filter render-cost EWMA update is gone; the budget gate can no longer learn an aux sender is heavy."
+        );
+
+        // #879 lock-step: BOTH windows-genlock workflows must still carry the assert step, or
+        // the 150-min Windows genlock build silently loses the vendored-C guard (issue-912 rule).
+        let wf = squish(&vendor_file(WINDOWS_GENLOCK_WF));
+        assert!(
+            wf.contains("Assert #879 aux NDI sender render-budget gate present"),
+            "{WINDOWS_GENLOCK_WF}: #879 aux-sender budget-gate assert step gone — a vendored-C \
+             revert would no longer fail the Windows build."
+        );
+        let wff = squish(&vendor_file(WINDOWS_GENLOCK_FAST_WF));
+        assert!(
+            wff.contains("Assert #879 aux NDI sender render-budget gate present"),
+            "{WINDOWS_GENLOCK_FAST_WF}: #879 aux-sender budget-gate assert step gone — a \
+             vendored-C revert would no longer fail the fast Windows build."
+        );
+
+        // #879: the inline #776 derivation in render_display() (obs-display.c) is a SECOND copy
+        // of obs_effective_render_divisor()'s math; anchor it so projector vs aux cannot silently
+        // diverge (the helper itself is parity-locked to the Rust authority separately).
+        let disp = squish(&vendor_file(OBS_DISPLAY));
+        assert!(
+            disp.contains(
+                "uint32_t derived = (uint32_t)((target_cell_interval_ns + interval / 2) / interval);"
+            ),
+            "{OBS_DISPLAY}: #879/#776 — render_display()'s inline effective-divisor derivation \
+             changed; it must stay equivalent to obs_effective_render_divisor()."
         );
     }
 
