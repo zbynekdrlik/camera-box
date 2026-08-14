@@ -7743,3 +7743,10 @@ prerequisite, closed 2026-06-15); the rig is genlocked so it was dead code.
   partial local net (parse + brace/format balance) on probe code that `check`/`clippy`/`test
   --no-run` on default features never compile. fmt-clean + hand-audit was the whole local proof
   here; CI is the first TYPE check.
+
+## issue 1036 — calibrate + gate presentation_cadence evenness (autopilot-1036, worktree fleet, 2026-08-14)
+- Metric computed but NEVER gated (src/presentation_cadence.rs:35). Chose paired_fraction (the specific 15fps-judder signature) over evenness_score (0.655–0.994, noisy) / duplicate_fraction (spikes to 0.053). Calibrated from 210 cadence windows across 21 GREEN local verdict JSONs: worst paired_fraction over ALL 310 windows (green+red) = 0.00473; pathology ~0.966. Threshold PAIRED_FRACTION_JUDDER_MAX = 0.05 (10.6x worst green, ~19x below pathology).
+- Pure seam added to src/presentation_cadence.rs (co-located with the metric): cadence_judder_gate_pass + gates_overall_pass (LIVE), mirroring e2e_latency_gate/optical_floor. Single per-window-max term (RATE metric saturates → no run-wide second term). Wired into recording-verdict.rs fold + --max-cadence-paired-fraction arg + cadence_judder_gate JSON term.
+- Commits: c8c8b36d6 (version 1.7.0-dev.449), a9da8ee58 [red] tests, 198e283bc [green] pure impl, c7af5f7d8 wiring, cb357a14b review fixes. RED→GREEN test names: fifteen_fps_judder_pathology_fails_the_bound / worst_observed_green_window_passes_the_default_bound / boundary_at_bound_passes_just_over_fails (21 Tier-0 tests, all green).
+- Review (fresh general-purpose subagent): 0 🔴 0 🟡 3 🔵, all doc/cosmetic, fixed in cb357a14b. Key review catch: the issue-909 immunity is EMPIRICAL (margin, incl. CAM1 windows) not mechanical (a drop next to a duplicate CAN complete a paired event).
+- Playbook: new .claude/rules/verdict-gate-seam-calibration.md (the reusable gate-seam calibration method) + router line.

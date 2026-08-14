@@ -32,9 +32,11 @@
 //! perceived motion rate — exactly the "paired spacing" the issue names.
 //!
 //! [`measure_cadence_evenness`] classifies every consecutive-frame delta and reports the
-//! fractions — this module NEVER gates on its own (the threshold is not yet calibrated against a
-//! known-healthy run); callers report the numbers first (issue #726 deliverable 1) and add a gate
-//! threshold once a healthy baseline is measured on the rig.
+//! fractions. #1036 CALIBRATED the "15fps-judder" signature (`paired_fraction`) against 210
+//! cadence windows from 21 green rig runs and added [`cadence_judder_gate_pass`] +
+//! [`PAIRED_FRACTION_JUDDER_MAX`] (0.05) + the one-line-restorable [`gates_overall_pass`] seam, so
+//! a cadence regression now BLOCKS the fused E2E verdict (LIVE). The raw per-window numbers are
+//! still reported first (issue #726 deliverable 1); the gate folds on top.
 
 /// Per-recording (or per-window) presentation-cadence classification, built from a sequence of
 /// painted-tick values in RECORDED (delivery) order — NOT sorted, unlike
@@ -178,6 +180,62 @@ pub fn measure_cadence_evenness(ticks: &[u32], expected_step: i64) -> Option<Cad
         derived_uniform_steps: derived_uniform,
         derived_uniform_fraction: derived_uniform as f64 / nf,
     })
+}
+
+/// #1036 — the CALIBRATED per-window bound on the "15fps-like" presentation-judder signature.
+///
+/// The judder class this whole module measures (a source frame held for one extra canvas tick
+/// then a compensating double-step jump — mechanically 30 fps, visually ~15 fps) shows up
+/// SPECIFICALLY as [`CadenceEvenness::paired_fraction`] (an adjacent duplicate delta `0` followed
+/// by a `2 * expected_step` catch-up). That fraction is order-dependent and immune to the ordinary
+/// multi-hop jitter that makes `evenness_score`/`duplicate_fraction` too noisy to gate on.
+///
+/// Calibrated against 210 cadence windows from 21 GREEN `recording-e2e` runs (all
+/// `expected_step = 2`, the only populated class): the worst observed `paired_fraction` over ALL
+/// 310 windows (green + red) is `0.00473`, while the pathology (`fifteen_fps_like_judder_is_
+/// paired_spacing`) sits at `~0.966`. `0.05` is 10.6x the worst observed green window and ~19x
+/// below the pathology — it passes every green run with honest margin while catching even a
+/// partial (~1-in-10) judder. Tighten toward `~0.02` as the jitter tail is better characterized.
+/// See issue #1036 for the full per-run baseline table.
+pub const PAIRED_FRACTION_JUDDER_MAX: f64 = 0.05;
+
+/// Does the run's WORST per-window paired-judder fraction satisfy the [`PAIRED_FRACTION_JUDDER_MAX`]
+/// bound? `worst_paired_fraction` is the max [`CadenceEvenness::paired_fraction`] across every
+/// cadence-bearing window in the recording (a single per-window RATE, not a count — the judder
+/// pathology saturates every affected window, so a per-window-max term has no "spread the budget"
+/// loophole and needs no run-wide second term, unlike the count-based [`crate::optical_floor`]).
+///
+/// Arms mirror the [`crate::e2e_latency_gate::cam_strih_latency_gate_pass`] convention, with ONE
+/// deliberate divergence on the "no measurement" arm:
+/// - `None` bound ⇒ report-only, always passes.
+/// - `None` worst (the run produced NO cadence-bearing window at all) ⇒ **PASS** — per the
+///   [`measure_cadence_evenness`] `None` contract this is "not applicable", and any condition that
+///   zeroes out every cadence window (mass optical-decode failure) is ALREADY hard-failed by the
+///   copies/gaps/undecodable gates, so passing here is not a test-strictness hole (no
+///   double-jeopardy). This is why it does NOT FAIL-on-no-samples the way the latency gate does:
+///   there, a missing sample is genuinely anomalous and unguarded elsewhere; here it is not.
+/// - `Some` bound, `Some` worst ⇒ pass iff `worst <= bound` (strict `>`: a worst exactly at the
+///   bound passes).
+pub fn cadence_judder_gate_pass(worst_paired_fraction: Option<f64>, max: Option<f64>) -> bool {
+    match (max, worst_paired_fraction) {
+        (None, _) => true,
+        (Some(_), None) => true,
+        (Some(bound), Some(worst)) => worst <= bound,
+    }
+}
+
+/// #1036 report-only / restore seam — mirrors [`crate::e2e_latency_gate::gates_overall_pass`] /
+/// [`crate::optical_floor::gates_overall_pass`]. Whether [`cadence_judder_gate_pass`]'s result
+/// folds into the fused verdict's `overall_pass`. `true` today (the bound is LIVE — it passes
+/// every green run with honest margin — the worst `paired_fraction` across the 21 green runs is
+/// 0.00473 (10.6x under the bound), and that INCLUDES CAM1 windows which ARE subject to the cam1
+/// ShadowCast grabber defect (issue 909). A capture-side drop can in principle complete a paired
+/// event next to a duplicate (a `2 * expected_step` catch-up delta), but empirically it never
+/// lifts `paired_fraction` anywhere near the bound — this is an optical presentation-cadence
+/// signal largely independent of that grabber). Flip to `false` for a one-line revert to
+/// report-only if a future rig change ever trips it.
+pub fn gates_overall_pass() -> bool {
+    true
 }
 
 #[cfg(test)]
@@ -408,5 +466,133 @@ mod tests {
         assert_eq!(v.other_steps, 1);
         assert_eq!(v.duplicate_steps, 0);
         assert_eq!(v.catchup_steps, 0);
+    }
+
+    // ---- #1036 — the CALIBRATED paired-judder gate (both directions) --------------------
+    //
+    // Calibration source: 210 cadence windows across 21 GREEN `recording-e2e` runs on dev1
+    // (all `expected_step = 2`, the only populated class). Worst observed `paired_fraction`
+    // over ALL 310 windows (green + red) is 0.00473; the 15fps-judder pathology (see
+    // `fifteen_fps_like_judder_is_paired_spacing` above) sits at ~0.966 — a ~200x separation.
+    // The bound is per-window worst `paired_fraction <= PAIRED_FRACTION_JUDDER_MAX` (0.05):
+    // 10.6x the worst green window, ~19x below the pathology. See issue #1036 for the full
+    // baseline table.
+
+    #[test]
+    fn default_bound_constant_is_the_calibrated_value() {
+        assert_eq!(PAIRED_FRACTION_JUDDER_MAX, 0.05);
+    }
+
+    #[test]
+    fn none_bound_is_report_only_always_passes() {
+        // A `None` bound = the gate is disabled (report-only) and always passes, even a
+        // pathological worst value.
+        assert!(cadence_judder_gate_pass(Some(0.966), None));
+        assert!(cadence_judder_gate_pass(None, None));
+    }
+
+    #[test]
+    fn no_cadence_windows_is_not_applicable_pass() {
+        // `worst = None` = the run produced no cadence-bearing window at all. Per the metric's
+        // own `None` contract this is "not applicable", never a failure — and any condition that
+        // zeroes out every cadence window (mass optical-decode failure) is already HARD-failed by
+        // the copies/gaps/undecodable gates, so this is not a test-strictness hole.
+        assert!(cadence_judder_gate_pass(
+            None,
+            Some(PAIRED_FRACTION_JUDDER_MAX)
+        ));
+    }
+
+    #[test]
+    fn worst_observed_green_window_passes_the_default_bound() {
+        // The load-bearing calibration test: the worst `paired_fraction` measured across the 21
+        // green runs (0.00473, run 77863612) MUST pass the default bound — a bound that would
+        // fail a recent green run is not a valid bound.
+        assert!(
+            cadence_judder_gate_pass(Some(0.00473), Some(PAIRED_FRACTION_JUDDER_MAX)),
+            "the worst observed green paired_fraction (0.00473) must pass the {PAIRED_FRACTION_JUDDER_MAX} bound"
+        );
+        // The next-worst cluster (0.00237) and the clean majority (0.0) also pass.
+        assert!(cadence_judder_gate_pass(
+            Some(0.00237),
+            Some(PAIRED_FRACTION_JUDDER_MAX)
+        ));
+        assert!(cadence_judder_gate_pass(
+            Some(0.0),
+            Some(PAIRED_FRACTION_JUDDER_MAX)
+        ));
+    }
+
+    #[test]
+    fn fifteen_fps_judder_pathology_fails_the_bound() {
+        // End-to-end: build the metric's OWN 15fps-judder reference pattern, measure its real
+        // `paired_fraction`, and prove the gate FAILS on it — the degraded direction, wired to the
+        // actual metric output rather than a hand-picked number.
+        let mut ticks = Vec::new();
+        for k in 0..15u32 {
+            let t = k * 4;
+            ticks.push(t);
+            ticks.push(t); // held (duplicate content) -> duplicate+catchup pairs
+        }
+        let v = measure_cadence_evenness(&ticks, 2).expect("30 samples is plenty");
+        assert!(
+            v.paired_fraction > 0.9,
+            "sanity: the judder reference saturates paired_fraction, got {}",
+            v.paired_fraction
+        );
+        assert!(
+            !cadence_judder_gate_pass(Some(v.paired_fraction), Some(PAIRED_FRACTION_JUDDER_MAX)),
+            "the 15fps-judder pathology (paired_fraction={}) must FAIL the bound",
+            v.paired_fraction
+        );
+    }
+
+    #[test]
+    fn a_smooth_window_passes_end_to_end() {
+        // The healthy direction wired to the metric: a perfectly smooth 60-in-30 downsample has
+        // zero paired events, so its measured paired_fraction passes the gate.
+        let ticks: Vec<u32> = (0..60).step_by(2).collect();
+        let v = measure_cadence_evenness(&ticks, 2).expect("30 samples is plenty");
+        assert_eq!(v.paired_fraction, 0.0);
+        assert!(cadence_judder_gate_pass(
+            Some(v.paired_fraction),
+            Some(PAIRED_FRACTION_JUDDER_MAX)
+        ));
+    }
+
+    #[test]
+    fn boundary_at_bound_passes_just_over_fails() {
+        assert!(
+            cadence_judder_gate_pass(Some(0.05), Some(0.05)),
+            "exactly at the bound passes (strict >)"
+        );
+        assert!(
+            !cadence_judder_gate_pass(Some(0.0501), Some(0.05)),
+            "just over the bound fails"
+        );
+    }
+
+    #[test]
+    fn a_partial_window_judder_well_above_green_noise_fails() {
+        // A window where even ~1-in-10 delta-pairs are duplicate+catchup (paired_fraction 0.2) —
+        // ~40x the worst green window and far below the full pathology — must still FAIL, proving
+        // the bound catches a PARTIAL judder, not only the saturated reference.
+        assert!(!cadence_judder_gate_pass(
+            Some(0.2),
+            Some(PAIRED_FRACTION_JUDDER_MAX)
+        ));
+    }
+
+    #[test]
+    fn gate_is_live_today() {
+        // #1036: the paired-judder bound folds into overall_pass (LIVE) — it passes every green
+        // run with honest margin (worst green paired_fraction 0.00473, 10.6x under the bound,
+        // including CAM1 windows subject to the issue-909 grabber defect: a capture-side drop can
+        // in principle complete a paired event, but empirically never approaches the bound). Flip
+        // `gates_overall_pass` to false for a one-line revert to report-only if a rig change trips it.
+        assert!(
+            gates_overall_pass(),
+            "#1036: the calibrated paired-judder bound must gate overall_pass (LIVE)"
+        );
     }
 }

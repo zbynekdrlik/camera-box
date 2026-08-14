@@ -243,6 +243,17 @@ struct Args {
     /// tighten.
     #[arg(long, default_value_t = camera_box::e2e_latency_gate::CAM_STRIH_P99_LATENCY_MAX_MS)]
     max_cam_strih_p99_latency_ms: f64,
+    /// #1036 — the calibrated per-window bound on the "15fps-like" presentation-judder
+    /// signature (`presentation_cadence::paired_fraction`: a held frame immediately followed by a
+    /// compensating double-step jump — the class issue 726 measures but that never gated). Bounds
+    /// the WORST `paired_fraction` across every cadence-bearing cambox window. DEFAULT-ON
+    /// (hard-locked, not a forgettable flag) at the calibrated
+    /// `presentation_cadence::PAIRED_FRACTION_JUDDER_MAX` (0.05: 10.6x the worst of 210 windows
+    /// from 21 green runs, ~19x below the pathology). Whether it folds into `overall_pass` is the
+    /// one-line-restorable `presentation_cadence::gates_overall_pass()` seam (LIVE today). Set
+    /// higher to relax / lower to tighten.
+    #[arg(long, default_value_t = camera_box::presentation_cadence::PAIRED_FRACTION_JUDDER_MAX)]
+    max_cadence_paired_fraction: f64,
     /// #208 PER-BOX decode-in-place. Decode the ONE LOCAL recording on THIS box (passed via
     /// `--strih` for `strih`, `--stream` for `stream`, `--imag` for `imag`, #461) and write a
     /// small PARTIAL JSON (`--out`) of what the cross-box merge needs — the box's burn-id
@@ -4274,9 +4285,10 @@ fn build_and_print_verdict(
                             }
                         }
                     }
-                    // #726: presentation-cadence EVENNESS — REPORTED only (not yet gate-enforced;
-                    // see src/presentation_cadence.rs). `None` on any window with no painted tick
-                    // (every non-cam2 window in a sweep).
+                    // #726: presentation-cadence EVENNESS — this per-window PRINT is report-only;
+                    // #1036 gates the RUN-level worst `paired_fraction` (the cadence_judder_gate
+                    // term below; see src/presentation_cadence.rs). `None` on any window with no
+                    // painted tick (every non-cam2 window in a sweep).
                     if let Some(pc) = &s.presentation_cadence {
                         println!(
                             "      cadence: evenness={:.3} uniform={}/{} duplicate={} catchup={} paired_events={} other={}",
@@ -4406,6 +4418,48 @@ fn build_and_print_verdict(
                 }
                 report["all_cambox_continuity"] = seg_json;
                 all_pass &= seg.overall_pass;
+
+                // #1036 — the calibrated paired-JUDDER gate (issue 406 zero-loss; the "15fps-like"
+                // cadence class issue 726 measures but that never gated). Bound the WORST
+                // per-window `paired_fraction` across every cadence-bearing cambox window (a single
+                // per-window RATE — the pathology saturates every affected window, so no run-wide
+                // second term is needed, unlike the count-based optical floor). `None` worst = no
+                // cadence window at all (mass optical-decode failure, already hard-failed by
+                // copies/gaps/undecodable) = not applicable, passes. Whether it folds into
+                // `overall_pass` is the one-line-restorable `gates_overall_pass()` seam (LIVE).
+                let worst_cadence_paired_fraction: Option<f64> = seg
+                    .segments
+                    .iter()
+                    .filter_map(|s| s.presentation_cadence.as_ref().map(|pc| pc.paired_fraction))
+                    .fold(None::<f64>, |acc, pf| Some(acc.map_or(pf, |m| m.max(pf))));
+                let cadence_bound = args.max_cadence_paired_fraction;
+                let cadence_gate_pass = camera_box::presentation_cadence::cadence_judder_gate_pass(
+                    worst_cadence_paired_fraction,
+                    Some(cadence_bound),
+                );
+                let cadence_gates_overall = camera_box::presentation_cadence::gates_overall_pass();
+                report["all_cambox_continuity"]["cadence_judder_gate"] = serde_json::json!({
+                    "bound_paired_fraction": cadence_bound,
+                    "worst_paired_fraction": worst_cadence_paired_fraction,
+                    "pass": cadence_gate_pass,
+                    "gates_overall_pass": cadence_gates_overall,
+                    "note": "#1036 calibrated 15fps-judder bound (issue 726 metric, issue 406 \
+                             zero-loss). Worst per-window presentation_cadence.paired_fraction \
+                             across cambox windows; None = no cadence window (not applicable, \
+                             passes). Relax/tighten via --max-cadence-paired-fraction; report-only \
+                             via presentation_cadence::gates_overall_pass.",
+                });
+                println!(
+ "  #1036 CADENCE-JUDDER gate: worst paired_fraction={} (bound {}, pass={}, gates_overall_pass={})",
+                    worst_cadence_paired_fraction
+                        .map(|p| format!("{p:.5}"))
+                        .unwrap_or_else(|| "n/a".to_string()),
+                    cadence_bound,
+                    cadence_gate_pass,
+                    cadence_gates_overall,
+                );
+                // Fold: a FAIL only fails the run while the seam gates overall_pass (LIVE today).
+                all_pass &= cadence_gate_pass || !cadence_gates_overall;
 
                 // #758 item 4 — the frozen-leg classifier: distinguishes a SUSTAINED camera
                 // freeze (hard-fail) from isolated stale-replay frames (informational-only,
