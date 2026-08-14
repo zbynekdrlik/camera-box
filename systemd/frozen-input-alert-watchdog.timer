@@ -1,0 +1,17 @@
+[Unit]
+# Fires the #1052 stream frozen-input alert every 5 min (dev1-side), matching the network-reach /
+# imag-obs / optical-chain alert cadence so the fleet's dev1 alert timers stay in lockstep. An input
+# that silently freezes on its last frame while the box stays fully reachable (the #767
+# receiver-rebind class) pages within ~10-15 minutes of onset (2-pass confirm) -- the deeper
+# second-phase check reachability alone (#1001) structurally cannot see.
+Description=Run the camera-box stream frozen-input alert every 5 min (#1052)
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=5min
+AccuracySec=20s
+Persistent=false
+
+[Install]
+WantedBy=timers.target
