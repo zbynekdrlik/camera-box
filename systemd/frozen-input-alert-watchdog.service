@@ -1,0 +1,17 @@
+[Unit]
+# stream FROZEN-INPUT alert (#1052, network-reach watchdog PHASE 2), DEV1-SIDE. ONE
+# measure -> decide -> alert pass. The two OBS boxes are Windows appliances with no airuleset
+# checkout / Discord credentials, and a box whose input is silently frozen still looks healthy to
+# every on-box check -- so the alert MUST come from dev1, which sits on the same rig LAN, already
+# hosts every dev1-side alert timer, and can read the stream OBS log's `genlock-fifo audit received=`
+# counters. SAME topology as network-reach-alert-watchdog.service (#1001) /
+# imag-obs-alert-watchdog.service (#882) / optical-chain-alert-watchdog.service (#860).
+Description=camera-box stream frozen-input alert (#1052) — one measure/decide/alert pass
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Service]
+Type=oneshot
+# %h = the installing user's home on dev1. Adjust if the checkout lives elsewhere.
+ExecStart=%h/devel/camera-box/scripts/frozen-input-alert-watchdog.sh
+# One ssh OBS-log tail to the (reachable) stream box + a local state read; generous but never a hang.
+TimeoutStartSec=90

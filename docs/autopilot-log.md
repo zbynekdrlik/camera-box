@@ -8028,3 +8028,47 @@ ssh-ing IN (impossible against an off-network box).
   in `harness_cam2_painter_provisioning_863.rs`. FULL `cargo test` suite green: 205 binaries, 0
   FAILED (mandatory after a rig-mode.sh edit — no anchor collisions). shellcheck -x clean on all
   touched scripts. Playbook: new `.claude/rules/cam2-painter-lifecycle.md` + router entry.
+
+## issue 1052 — stream FROZEN-INPUT dev1-side alert watchdog (network-reach phase 2, worktree)
+
+Version 1.7.0-dev.453. Worktree `autopilot-1052`; supervisor integrates the round.
+
+**Validated STILL real.** Reachability (#1001) only classifies a box REACHABLE/UNREACHABLE, blind
+to a REACHABLE box whose NDI input is frozen on the last frame (the #767 receiver-rebind class).
+Emit-freeze (#944) is CAMBOX-side and never fires for a receiver-side freeze. The closest existing
+check, `scripts/frozen-camera-gate.py` (#365), is STRIH-side, screenshot-hash, and E2E-gate-scoped
+(TEST mode, needs OBS-WS + scene warm-up) — zero coverage of the stream `NDI 2ME PGM` program feed
+during a live event. So the class is genuinely uncovered.
+
+**Tap decision (design comment on the issue): genlock-fifo `received=` per-source counter.** The
+stream OBS log prints `genlock-fifo audit '<src>': received=N …` ~every 5 s
+(`GENLOCK_AUDIT_LOG_INTERVAL_NS`); `received=` counts frames the FIFO RECEIVED, so a frozen input
+stops advancing it. Chosen over (b) `GetSourceScreenshot` hash-delta — false-frozen on a live-but-
+static source (a held slide), needs OBS-WS + scene activation each pass — and (c) QR/burn decode —
+heaviest, TEST-mode only. `received=` works in BOTH test and event mode and is immune to static
+content. Per-pass state-delta model (sample newest `received=`, persist, compare to prior pass)
+sidesteps the audit's ~5 s intra-log cadence trap.
+
+**Files.**
+- Pure Tier-0 seam `scripts/lib/frozen-input-health.sh` (mirrors `network-reach-health.sh`):
+  `frozen_input_classify <prev> <curr> <expected_live> <sender_reachable>` →
+  FROZEN | ADVANCING | UNKNOWN | SKIP (SKIP first when not expected-live or the sender/receiver box
+  is unreachable; UNKNOWN on no-prior / unreadable-current / counter-reset — never a false page),
+  `frozen_input_recovery_decision`, `frozen_input_alert_detail`. Confirm/throttle stay the shared
+  `obs-watchdog-decision.sh`.
+- Impure watchdog `scripts/frozen-input-alert-watchdog.sh` (mirrors `network-reach-alert-watchdog.sh`):
+  best-effort ONE flat `ssh … powershell` OBS-log tail (session-agnostic read, NEVER nested
+  PowerShell — win-ssh-vs-mcp / rig-state-inspection), `FROZEN_INPUT_PROBE_CMD`-overridable. Reads
+  #1001's OWN on-disk state (`alerted_<box>`) for the no-double-page guard — never re-probes.
+- `systemd/frozen-input-alert-watchdog.{service,timer}` (dev1, 5-min cadence, ~10-15 min to page).
+- `tests/harness_frozen_input_health_1052.rs`; `.claude/rules/frozen-input-watchdog.md` + CLAUDE.md
+  router.
+
+**TDD.** RED `54168a814` (harness sources the absent lib → `command not found`, rc=127) → GREEN lib
+`760d4cf55` → watchdog+units. Rust harness 11/11 GREEN; the full watchdog flow (seed→UNKNOWN, 2-pass
+confirm→alert, advancing→recovery, sender-unreachable→SKIP) smoke-tested via `--dry-run` with a stub
+probe. shellcheck -x clean on both scripts.
+
+**Future enhancement (recorded, not built):** surface `received=` from the `:8899` bundle-state
+server so dev1 reads it via HTTP GET (retiring the ssh read) — deferred, needs an updated
+bundle-state-server deployed to both boxes.
