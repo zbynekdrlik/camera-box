@@ -3124,3 +3124,47 @@ fn slew_transient_exclusion_check_prints_ok_line_with_surviving_median_1055() {
         "explains the slew-transient exclusion: {out:?}"
     );
 }
+
+// #1055 review (onset-drift hole): a genuine desync that ONSETS within the window, stepping every
+// cycle so its drift samples are all step-excluded, must NOT be masked by PRE-onset healthy
+// baseline still in the ~K-sample window. OLD baseline (-30ish) then RECENT elevated+stepped
+// (+3000ish, non-converging). Condition 2 alone (median of ALL step-excluded survivors) reads the
+// old baseline and would false-PASS; condition 3 (only survivors NEWER than the newest correction
+// marker) sees ZERO post-correction survivors -> "no". This fixture reproduces the exact shape the
+// adversarial review flagged and proves the guard closes it.
+const DS_SLEW_ONSET_DRIFT: &str = "\
+2026-08-14T13:00:00+00:00 CAM9 dantesync[1]: [NTP] offset:-30us (threshold:520us, adaptive)
+2026-08-14T13:00:30+00:00 CAM9 dantesync[1]: [NTP] offset:-28us (threshold:520us, adaptive)
+2026-08-14T13:01:00+00:00 CAM9 dantesync[1]: [NTP] offset:-31us (threshold:520us, adaptive)
+2026-08-14T13:01:30+00:00 CAM9 dantesync[1]: [NTP] offset:-29us (threshold:520us, adaptive)
+2026-08-14T13:02:00+00:00 CAM9 dantesync[1]: [NTP] offset:+3000us (threshold:520us, adaptive)
+2026-08-14T13:02:00+00:00 CAM9 dantesync[1]: [NTP] step candidate +3000us (threshold:520us) — awaiting 1 agreeing sample(s)
+2026-08-14T13:02:30+00:00 CAM9 dantesync[1]: [NTP] offset:+3005us (threshold:520us, adaptive)
+2026-08-14T13:02:30+00:00 CAM9 dantesync[1]: [NTP] Stepped +3005us
+2026-08-14T13:03:00+00:00 CAM9 dantesync[1]: [NTP] offset:+3010us (threshold:520us, adaptive)
+2026-08-14T13:03:00+00:00 CAM9 dantesync[1]: [NTP] step candidate +3010us (threshold:520us) — awaiting 1 agreeing sample(s)
+2026-08-14T13:03:05+00:00 CAM9 dantesync[1]: [PTP] LOCK  Drift:  +0.2us/s  Adj: -14.3ppm
+";
+
+#[test]
+fn slew_transient_exclusion_verdict_no_on_onset_drift_masked_by_pre_onset_baseline_1055() {
+    // The onset-drift hole: OLD healthy baseline survives step-exclusion and would pass the
+    // all-survivors median check, but the clock has NOT returned to baseline after its most recent
+    // correction (zero post-correction survivors) -> "no". A real ongoing desync is never masked.
+    assert_eq!(slew_verdict(DS_SLEW_ONSET_DRIFT, "2000"), "no");
+}
+
+#[test]
+fn slew_excluded_survivors_us_recency_floor_keeps_only_post_epoch_samples_1055() {
+    // The optional MIN_EPOCH arg restricts to samples strictly newer than the given epoch (the
+    // #1055 onset-drift guard). cam1's newest correction marker is 2026-08-14T12:52:31Z; only the
+    // three baseline samples after it survive the floor.
+    let epoch_5231 = run_sourced("_short_iso_epoch 2026-08-14T12:52:31+00:00", &[])
+        .trim()
+        .to_string();
+    let out = run_sourced(
+        &format!("slew_excluded_survivors_us \"$T\" 300 5 11 {epoch_5231} | tr '\\n' ' '"),
+        &[("T", DS_SLEW_CAM1)],
+    );
+    assert_eq!(out.trim(), "-114 -111 -113");
+}

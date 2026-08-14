@@ -1367,8 +1367,13 @@ painter_offset_check() {
 # daemon's stale line is never graded as current. The burst-summary "[NTP] burst offset:" lines are
 # NOT matched by "\[NTP\] offset:" (they read "[NTP] burst offset:") and are correctly ignored,
 # exactly as _fresh_offset_median_us ignores them. JOURNAL must be gathered with `-o short-iso`.
+# The optional 5th arg MIN_EPOCH (#1055 review, the onset-drift hole below) restricts the output to
+# samples strictly NEWER than MIN_EPOCH -- used by the verdict to grade ONLY the post-most-recent-
+# correction samples, so stale pre-onset baseline cannot dilute an ongoing desync's median. Omitted
+# / "" -> no recency floor (every step-excluded fresh sample, the count the reporter + window-sanity
+# check use). A malformed MIN_EPOCH yields NOTHING (fail-closed), never an unfiltered pass.
 slew_excluded_survivors_us() {
-  local journal="$1" fresh="$2" win="$3" k="${4:-11}"
+  local journal="$1" fresh="$2" win="$3" k="${4:-11}" min_epoch="${5:-}"
   local iso_re='[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[+-][0-9]{2}:[0-9]{2}'
   local now_iso now_e lines line off_iso off_e off_us se d near
   local -a steps=()
@@ -1378,6 +1383,9 @@ slew_excluded_survivors_us() {
   printf '%s' "$fresh" | grep -qE '^[0-9]+$' || return 0
   printf '%s' "$win" | grep -qE '^[0-9]+$' || return 0
   printf '%s' "$k" | grep -qE '^[0-9]+$' || return 0
+  if [ -n "$min_epoch" ]; then
+    printf '%s' "$min_epoch" | grep -qE '^-?[0-9]+$' || return 0
+  fi
   now_iso="$(printf '%s\n' "$journal" | grep -oE "^$iso_re" | tail -1 || true)"
   now_e="$(_short_iso_epoch "$now_iso")"
   [ -n "$now_e" ] || return 0
@@ -1397,6 +1405,7 @@ slew_excluded_survivors_us() {
     off_e="$(_short_iso_epoch "$off_iso")"
     [ -n "$off_e" ] || continue
     [ "$((now_e - off_e))" -le "$fresh" ] || continue
+    [ -z "$min_epoch" ] || [ "$off_e" -gt "$min_epoch" ] || continue
     off_us="$(printf '%s' "$line" | sed -n 's/.*\[NTP\] offset:+\{0,1\}\(-\{0,1\}[0-9][0-9]*\)us.*/\1/p' | head -1 || true)"
     printf '%s' "$off_us" | grep -qE '^-?[0-9]+$' || continue
     near=0
@@ -1413,31 +1422,67 @@ slew_excluded_survivors_us() {
   return 0
 }
 
+# _newest_correction_epoch JOURNAL -> the epoch (seconds) of the NEWEST "[NTP] (Stepped|step
+# candidate)" correction marker line in JOURNAL, "" if there is none or none carries a parseable
+# `-o short-iso` timestamp. This is the recency anchor for the verdict's onset-drift guard below.
+_newest_correction_epoch() {
+  local journal="$1"
+  local iso_re='[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[+-][0-9]{2}:[0-9]{2}'
+  local line off_iso off_e newest=""
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    off_iso="$(printf '%s' "$line" | grep -oE "^$iso_re" | head -1 || true)"
+    off_e="$(_short_iso_epoch "$off_iso")"
+    [ -n "$off_e" ] || continue
+    if [ -z "$newest" ] || [ "$off_e" -gt "$newest" ]; then
+      newest="$off_e"
+    fi
+  done <<< "$(printf '%s\n' "$journal" | grep -E '\[NTP\] (Stepped|step candidate)' || true)"
+  printf '%s' "$newest"
+}
+
 # slew_transient_exclusion_verdict JOURNAL FRESHNESS_S BOUND_US STEP_WINDOW_S MIN_SURVIVING [K] ->
 # "yes" | "no". "yes" ONLY when ALL hold:
 #   1. JOURNAL carries >= 1 "[NTP] (Stepped|step candidate)" correction marker (EVIDENCE a slew is
 #      actively being corrected -- without it, elevated samples are unexplained, never excused).
 #   2. Excluding fresh "[NTP] offset:" samples within STEP_WINDOW_S of any marker leaves
-#      >= MIN_SURVIVING fresh samples (too few can't prove health -> "no", never a silent pass).
-#   3. The median of those surviving (baseline) samples has |median| <= BOUND_US.
-# Any malformed input, or any condition unmet, is "no". A genuine sustained desync fails: either
-# every sample is step-adjacent (0 survive, cond 2) OR the step-excluded baseline stays elevated
-# (cond 3). Mirrors chase_bimodal_exclusion_verdict's yes/no contract; that function explains the
-# SPREAD-side "unstable" (median-in-bound) verdict, this one the MEDIAN-out-of-bound
-# "drift"/"drift_unstable" case it structurally cannot (#1041). JOURNAL must be `-o short-iso`.
+#      >= MIN_SURVIVING fresh samples overall (window sanity: too few baseline anywhere in the
+#      window can't prove health -> "no", never a silent pass).
+#   3. RECENCY (the #1055 review onset-drift guard): among the step-excluded survivors, restrict
+#      to those NEWER than the newest correction marker -- the samples that testify to the clock's
+#      state AFTER its most recent correction. At least ONE must exist (proof the clock returned to
+#      and held a reading post-correction), and the MEDIAN of that post-correction set must be
+#      within BOUND_US.
+# Condition 3 is what makes the discriminator honest at drift ONSET: a transient slew RETURNS to a
+# us-grade baseline after its step (post-correction survivors are baseline -> "yes"); a genuine
+# desync that just onset (drift samples all step-adjacent -> excluded) leaves ZERO post-correction
+# survivors (or post-correction survivors that are themselves still elevated) -> "no", so
+# pre-onset healthy history in the ~K-sample window can no longer dilute an ongoing drift's median
+# (the live-reproduced hole condition 2 alone missed). A sustained desync stepping every cycle
+# still fails on 0 survivors; one with no markers fails cond 1. Mirrors
+# chase_bimodal_exclusion_verdict's yes/no contract; that function explains the SPREAD-side
+# "unstable" (median-in-bound) verdict, this one the MEDIAN-out-of-bound "drift"/"drift_unstable"
+# case it structurally cannot (#1041). JOURNAL must be `-o short-iso`.
 slew_transient_exclusion_verdict() {
   local journal="$1" fresh="$2" bound="$3" win="$4" min_surv="$5" k="${6:-11}"
-  local survivors n median
+  local survivors n newest_step recent n_recent median
   printf '%s' "$bound" | grep -qE '^[0-9]+$' || { printf 'no\n'; return 0; }
   printf '%s' "$min_surv" | grep -qE '^[0-9]+$' || { printf 'no\n'; return 0; }
   # Condition 1: evidence of an active correction (fresh/win/k are validated inside
-  # slew_excluded_survivors_us, where a bad one simply yields no survivors -> cond 2 "no").
+  # slew_excluded_survivors_us, where a bad one simply yields no survivors -> "no").
   printf '%s\n' "$journal" | grep -qE '\[NTP\] (Stepped|step candidate)' \
     || { printf 'no\n'; return 0; }
+  # Condition 2: window sanity -- enough step-excluded baseline SOMEWHERE in the window.
   survivors="$(slew_excluded_survivors_us "$journal" "$fresh" "$win" "$k")"
   n="$(printf '%s\n' "$survivors" | grep -cE '^-?[0-9]+$' || true)"
   [ "${n:-0}" -ge "$min_surv" ] || { printf 'no\n'; return 0; }
-  median="$(median_of_ints "$survivors")"
+  # Condition 3: recency -- grade ONLY the survivors newer than the newest correction marker.
+  newest_step="$(_newest_correction_epoch "$journal")"
+  [ -n "$newest_step" ] || { printf 'no\n'; return 0; }
+  recent="$(slew_excluded_survivors_us "$journal" "$fresh" "$win" "$k" "$newest_step")"
+  n_recent="$(printf '%s\n' "$recent" | grep -cE '^-?[0-9]+$' || true)"
+  [ "${n_recent:-0}" -ge 1 ] || { printf 'no\n'; return 0; }
+  median="$(median_of_ints "$recent")"
   [ -n "$median" ] || { printf 'no\n'; return 0; }
   if [ "$(abs_int "$median")" -le "$bound" ]; then
     printf 'yes\n'
@@ -1454,12 +1499,15 @@ slew_transient_exclusion_verdict() {
 # compute-the-display-numbers-separately-from-the-decision shape).
 slew_transient_exclusion_check() {
   local label="$1" journal="$2" bound="$3" win="$4" min_surv="$5" fresh="$6" extra_note="${7:-}"
-  local survivors n median
-  survivors="$(slew_excluded_survivors_us "$journal" "$fresh" "$win" 11)"
-  n="$(printf '%s\n' "$survivors" | grep -cE '^-?[0-9]+$' || true)"
+  local newest_step recent n median
+  # Report the SAME post-correction survivor set the verdict graded (its condition 3), so the
+  # printed count/median match the decision -- never a wider set that could read differently.
+  newest_step="$(_newest_correction_epoch "$journal")"
+  recent="$(slew_excluded_survivors_us "$journal" "$fresh" "$win" 11 "$newest_step")"
+  n="$(printf '%s\n' "$recent" | grep -cE '^-?[0-9]+$' || true)"
   n="${n:-0}"
-  median="$(median_of_ints "$survivors")"
-  printf '  %-14s OK       (step-correlated master-slew transients excluded; %s surviving baseline samples, median %sus <= %sus bound; samples within %ss of a step ignored, #1055)%s\n' \
+  median="$(median_of_ints "$recent")"
+  printf '  %-14s OK       (step-correlated master-slew transients excluded; clock returned to us-grade AFTER its last correction -- %s post-correction baseline samples, median %sus <= %sus bound; samples within %ss of a step ignored, #1055)%s\n' \
     "$label" "$n" "${median:-NA}" "$bound" "$win" "$extra_note"
   return 0
 }
