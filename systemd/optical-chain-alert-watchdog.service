@@ -1,0 +1,16 @@
+[Unit]
+# cam2 optical-injection-leg alert (#860), DEV1-SIDE. ONE measure -> decide -> alert pass.
+# cam2 has no airuleset checkout / Discord credentials, so the alert fires from dev1 -- the SAME
+# topology as imag-obs-alert-watchdog.service (#882) / imag-power-envelope-alert-watchdog.service
+# (#1040). TEST-mode-aware: only pages when a painter is EXPECTED (pidfile present or
+# cam2-painter.service enabled); EVENT mode's deliberately-dark broadcast monitor never pages.
+Description=camera-box cam2 optical-chain alert (#860) — one measure/decide/alert pass
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Service]
+Type=oneshot
+# %h = the installing user's home on dev1. Adjust if the checkout lives elsewhere.
+ExecStart=%h/devel/camera-box/scripts/optical-chain-alert-watchdog.sh
+# One ssh round-trip to cam2 + one bounded OBS-WS optical probe to strih (poll up to
+# OBS_BLACKCHECK_TIMEOUT_S); give it room but never hang the timer.
+TimeoutStartSec=90
