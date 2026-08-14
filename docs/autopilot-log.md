@@ -8409,3 +8409,27 @@ Review: 0 🔴 2 🟡 3 🔵, all fixed same-branch. Gotcha logged: cargo tests 
 - Merged 3 lanes: PTP-lock timestamp-grace (false-DEGRADED killed, live-reproduced first) + the NEW cross-box camera-box version parity gate (cam4 caught 3 builds behind during construction); stage-aware failure alerts (no more phantom frame-loss claims on preflight aborts); strih relaunch burn sweep-at-start + verify-imag ssh bounds (follow-ups 1060/1061 filed).
 - The local build-ok bypass got hard-disabled repo-wide mid-round (airuleset 477) — workers adapted to grep-proven RED/GREEN + bash-sourcing verification with the CI run as first execution; the merged-state anchor suite now runs on the PR CI itself.
 - Gate rolls cost by cam1's ShadowCast evening degradation (gap-burst windows + phase wobble; capture restart stabilized it) — all documented on the hardware-swap ticket lane.
+
+## issue 879 — strih aux NDI senders under the render budget, program absolute (v1.7.0-dev.457)
+- Root cause: the aux senders (interkom/MULTIVIEW/Grading) are `ndi_filter` republishes;
+  `ndi_filter_render_video` did a full texrender+readback+send every tick gated only by
+  `if (rendered) return;`, and never entered `render_display()` where the adaptive budget lives.
+  Program is `ndi_output` (separate path, rendered first in `output_frames()`).
+- Fix: reuse the pure decision. Additive `obs_effective_render_divisor()` in obs-display-budget.h;
+  one EXPORTed libobs seam `obs_aux_sender_should_skip()` (obs.c) reads the tick globals + delegates
+  to `obs_display_should_skip()`; `ndi-filter.cpp` gates its render+send with per-filter EWMA/counters.
+  Program priority is STRUCTURAL (different source type, never routed through the gate; runs first).
+  Audio path (`ndi_filter_asyncaudio`) untouched. Per-sender cadence via optional
+  `ndi_filter_render_divisor` settings key (default 2; effective 1 on 30fps strih = pure budget gate).
+- Commits: 696cd4b31 (bump) · 5f819cfaf [red]/1dd38b798 [green] effective_render_divisor Tier-0 seam ·
+  9bcfeaa7c C enforcement · 3e98d5b33 parity+invariant harness (tests/aux_sender_budget_879.rs) +
+  lock-step anchors (genlock_preload.rs + both windows-genlock*.yml) · 5a88cead8 review fixes.
+- Verify: Tier-0 RED→GREEN on effective_render_divisor; C-parity (header vs Rust authority) +
+  seam invariants lifted+compiled under -Werror (both pass in /tmp; run on CI — no local heavy builds).
+- Adversarial review (Fable): program-priority CLEAN; findings fixed in 5a88cead8; robustness
+  follow-up filed as #1063 (order-independent budget term when an aux filter renders early in the tick).
+- GOTCHA (GCC-14): a C stub with TWO distinct anonymous struct types (`static struct {..} _obs;
+  static struct {..} *obs = &_obs;`) is an incompatible-pointer-types constraint violation — a WARNING
+  on GCC 13 but a hard ERROR on GCC 14. Name the struct once. Lift-and-compile caught it under -Werror.
+- GOTCHA (deploy): the DistroAV plugin now imports a NEW libobs export — a partial deploy of only the
+  plugin DLL against an old obs64.dll fails plugin LOAD (unresolved symbol). Use the FULL-BUNDLE deploy.
