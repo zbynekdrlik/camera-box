@@ -161,7 +161,15 @@ imag_pick_ndi_peer() {
 # pipe, so a still-running writer loop dies on SIGPIPE and `set -euo pipefail` fails the WHOLE
 # substitution: the live .187 provisioning run aborted with a bare `exit 1` and zero output while
 # cam1 was up and answering. Same trap this script already documents at its `ldconfig | grep -q`
-# site — buffer first, pipe once. The optional CANDIDATE args exist so a caller (or a future
+# site — buffer first. #1047: the buffer is then fed to the picker via a HERE-STRING, not a
+# `printf … | picker` PIPE. `imag_pick_ndi_peer` still returns on the first "up" line (an early-exit
+# consumer), so any concurrent writer PROCESS feeding it through a pipe can take SIGPIPE the moment
+# the picker closes the read-end — and the `printf` write only completes atomically while `$probe`
+# fits the 64 KiB pipe buffer (7 candidates ≈ 98 B today). A larger/overridden candidate list makes
+# `printf`'s write block with the tail unwritten, the picker closes early, and the blocked write
+# gets EPIPE → 141 → pipefail aborts provisioning (CI run 31757820465 flaked this once). A
+# here-string has NO concurrent writer process, so the early exit can never SIGPIPE anything,
+# regardless of buffer size. The optional CANDIDATE args exist so a caller (or a future
 # test) can override the fleet default without touching NDI_PEER_CANDIDATES; no site does today,
 # which is exactly what trips shellcheck's "references arguments, but none are ever passed"
 # check (SC2120) -- it cannot see that the zero-arg call path is the intended, exercised
@@ -177,7 +185,7 @@ imag_resolve_ndi_peer() {
             probe="${probe}${h} down"$'\n'
         fi
     done
-    printf '%s' "$probe" | imag_pick_ndi_peer
+    imag_pick_ndi_peer <<<"$probe"
 }
 
 # imag_require_tools TOOL... -> fail loud, NAMING the missing tool(s). #822: step 12 verifies the
