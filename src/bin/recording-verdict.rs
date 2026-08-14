@@ -4285,9 +4285,10 @@ fn build_and_print_verdict(
                             }
                         }
                     }
-                    // #726: presentation-cadence EVENNESS — REPORTED only (not yet gate-enforced;
-                    // see src/presentation_cadence.rs). `None` on any window with no painted tick
-                    // (every non-cam2 window in a sweep).
+                    // #726: presentation-cadence EVENNESS — this per-window PRINT is report-only;
+                    // #1036 gates the RUN-level worst `paired_fraction` (the cadence_judder_gate
+                    // term below; see src/presentation_cadence.rs). `None` on any window with no
+                    // painted tick (every non-cam2 window in a sweep).
                     if let Some(pc) = &s.presentation_cadence {
                         println!(
                             "      cadence: evenness={:.3} uniform={}/{} duplicate={} catchup={} paired_events={} other={}",
@@ -4438,12 +4439,16 @@ fn build_and_print_verdict(
                 );
                 let cadence_gates_overall = camera_box::presentation_cadence::gates_overall_pass();
                 report["all_cambox_continuity"]["cadence_judder_gate"] = serde_json::json!({
-                                   "bound_paired_fraction": cadence_bound,
-                                   "worst_paired_fraction": worst_cadence_paired_fraction,
-                                   "pass": cadence_gate_pass,
-                                   "gates_overall_pass": cadence_gates_overall,
-                "note": "#1036 calibrated 15fps-judder bound (issue 726 metric, issue 406 zero-loss). Worst per-window presentation_cadence.paired_fraction across cambox windows; None = no cadence window (not applicable, passes). Relax/tighten via --max-cadence-paired-fraction; report-only via presentation_cadence::gates_overall_pass.",
-                               });
+                    "bound_paired_fraction": cadence_bound,
+                    "worst_paired_fraction": worst_cadence_paired_fraction,
+                    "pass": cadence_gate_pass,
+                    "gates_overall_pass": cadence_gates_overall,
+                    "note": "#1036 calibrated 15fps-judder bound (issue 726 metric, issue 406 \
+                             zero-loss). Worst per-window presentation_cadence.paired_fraction \
+                             across cambox windows; None = no cadence window (not applicable, \
+                             passes). Relax/tighten via --max-cadence-paired-fraction; report-only \
+                             via presentation_cadence::gates_overall_pass.",
+                });
                 println!(
  "  #1036 CADENCE-JUDDER gate: worst paired_fraction={} (bound {}, pass={}, gates_overall_pass={})",
                     worst_cadence_paired_fraction

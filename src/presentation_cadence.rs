@@ -227,9 +227,13 @@ pub fn cadence_judder_gate_pass(worst_paired_fraction: Option<f64>, max: Option<
 /// #1036 report-only / restore seam — mirrors [`crate::e2e_latency_gate::gates_overall_pass`] /
 /// [`crate::optical_floor::gates_overall_pass`]. Whether [`cadence_judder_gate_pass`]'s result
 /// folds into the fused verdict's `overall_pass`. `true` today (the bound is LIVE — it passes
-/// every green run with margin, and it is immune to the cam1 ShadowCast grabber defect (issue
-/// 909), which DROPS frames rather than manufacturing duplicate+catchup pairs). Flip to `false`
-/// for a one-line revert to report-only if a future rig change ever trips it.
+/// every green run with honest margin — the worst `paired_fraction` across the 21 green runs is
+/// 0.00473 (10.6x under the bound), and that INCLUDES CAM1 windows which ARE subject to the cam1
+/// ShadowCast grabber defect (issue 909). A capture-side drop can in principle complete a paired
+/// event next to a duplicate (a `2 * expected_step` catch-up delta), but empirically it never
+/// lifts `paired_fraction` anywhere near the bound — this is an optical presentation-cadence
+/// signal largely independent of that grabber). Flip to `false` for a one-line revert to
+/// report-only if a future rig change ever trips it.
 pub fn gates_overall_pass() -> bool {
     true
 }
@@ -582,9 +586,10 @@ mod tests {
     #[test]
     fn gate_is_live_today() {
         // #1036: the paired-judder bound folds into overall_pass (LIVE) — it passes every green
-        // run with margin and is immune to the cam1 grabber defect (issue 909), which drops frames
-        // rather than manufacturing duplicate+catchup pairs. Flip `gates_overall_pass` to false
-        // for a one-line revert to report-only if a future rig change ever trips it.
+        // run with honest margin (worst green paired_fraction 0.00473, 10.6x under the bound,
+        // including CAM1 windows subject to the issue-909 grabber defect: a capture-side drop can
+        // in principle complete a paired event, but empirically never approaches the bound). Flip
+        // `gates_overall_pass` to false for a one-line revert to report-only if a rig change trips it.
         assert!(
             gates_overall_pass(),
             "#1036: the calibrated paired-judder bound must gate overall_pass (LIVE)"
