@@ -356,6 +356,73 @@ fn gate_linux_journal_override_is_keyed_per_node_name_not_a_single_shared_var() 
     );
 }
 
+
+#[test]
+fn gate_fails_on_a_linux_journal_node_with_scattered_but_in_bound_median_837() {
+    // #837 -- the journal-fallback twin of #836's HTTP spread check. Three FRESH offset samples
+    // whose MEDIAN (+50us) sits inside the 2000us bound but whose SPREAD (2540us) exceeds the
+    // 2000us stability bound. Pre-#837 the journal fallback graded the median alone and rated this
+    // node NTP OK -> GATE PASS, silently. It must now grade the spread too -> UNSTABLE -> BAD ->
+    // GATE FAIL (20). PTP is LOCKED (NANO the newest line) so only the NTP spread verdict decides.
+    let j = write_dante_journal(
+        "cam1_scattered_837",
+        "2026-07-08T10:00:00+02:00 cam1 dantesync[1]: [NTP] offset:+50us (threshold:520us, adaptive)\n\
+2026-07-08T10:00:10+02:00 cam1 dantesync[1]: [NTP] offset:+2500us (threshold:520us, adaptive)\n\
+2026-07-08T10:00:20+02:00 cam1 dantesync[1]: [NTP] offset:-40us (threshold:520us, adaptive)\n\
+2026-07-08T10:00:25+02:00 cam1 dantesync[1]: [PTP] NANO  Drift:   +12ns/s  Adj: +6.10ppm\n",
+    );
+    let (code, stdout, stderr) = run_gate_env(
+        &["--linux", "cam1=10.77.9.61"],
+        &[
+            (
+                "DANTESYNC_GATE_LINUX_JOURNAL_CAM1",
+                &j.display().to_string(),
+            ),
+            ("DANTESYNC_GATE_LINUX_HTTP_CAM1", NO_HTTP), // force journal fallback, no live curl
+        ],
+    );
+    assert_eq!(
+        code, 20,
+        "a scattered-but-in-bound-median journal node must now FAIL the gate (20), not pass \
+         silently. stdout={stdout} stderr={stderr}"
+    );
+    assert!(stderr.contains("GATE FAILED"), "stderr: {stderr}");
+    assert!(
+        stdout.contains("UNSTABLE"),
+        "the journal-fallback report must name the UNSTABLE verdict: {stdout}"
+    );
+}
+
+#[test]
+fn gate_still_passes_a_linux_journal_node_with_a_tight_in_bound_spread_837() {
+    // Non-regression companion: a healthy node whose fresh samples are tight (spread 130us) and
+    // in-bound (median +50us) must STILL pass the journal fallback -- the spread check must not
+    // false-fail a genuinely healthy multi-sample journal.
+    let j = write_dante_journal(
+        "cam1_tight_837",
+        "2026-07-08T10:00:00+02:00 cam1 dantesync[1]: [NTP] offset:+50us (threshold:520us, adaptive)\n\
+2026-07-08T10:00:10+02:00 cam1 dantesync[1]: [NTP] offset:+100us (threshold:520us, adaptive)\n\
+2026-07-08T10:00:20+02:00 cam1 dantesync[1]: [NTP] offset:-30us (threshold:520us, adaptive)\n\
+2026-07-08T10:00:25+02:00 cam1 dantesync[1]: [PTP] NANO  Drift:   +12ns/s  Adj: +6.10ppm\n",
+    );
+    let (code, stdout, stderr) = run_gate_env(
+        &["--linux", "cam1=10.77.9.61"],
+        &[
+            (
+                "DANTESYNC_GATE_LINUX_JOURNAL_CAM1",
+                &j.display().to_string(),
+            ),
+            ("DANTESYNC_GATE_LINUX_HTTP_CAM1", NO_HTTP),
+        ],
+    );
+    assert_eq!(
+        code, 0,
+        "a tight in-bound multi-sample journal node must still PASS (0). stdout={stdout} stderr={stderr}"
+    );
+    assert!(stdout.contains("GATE PASS"), "stdout: {stdout}");
+    assert!(stdout.contains("NTP OK"), "stdout: {stdout}");
+}
+
 // ---------------------------------------------------------------------------------------------
 // #648 — the --win-http path: strih/stream queried LIVE over HTTP from dantesync#47's own
 // network status endpoint (http://<box>:8898/status), instead of a human/agent pre-fetching the
