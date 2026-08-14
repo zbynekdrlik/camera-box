@@ -24,8 +24,14 @@ fn obs_burn_filter_exposes_the_exhaustive_sweep_enumerator() {
         s.contains("def ndi_source_input_names("),
         "the pure GetInputList->ndi-source-names filter must exist"
     );
-    assert!(s.contains("def cmd_sweep_off("), "the sweep-off enumerator must exist");
-    assert!(s.contains("def cmd_sweep_check("), "the sweep-check enumerator must exist");
+    assert!(
+        s.contains("def cmd_sweep_off("),
+        "the sweep-off enumerator must exist"
+    );
+    assert!(
+        s.contains("def cmd_sweep_check("),
+        "the sweep-check enumerator must exist"
+    );
     assert!(
         s.contains("GetInputList"),
         "the sweep must enumerate reality via GetInputList, never a static list"
