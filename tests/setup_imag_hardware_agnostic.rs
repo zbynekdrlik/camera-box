@@ -235,18 +235,12 @@ fn static_ip_is_overridable_and_defaults_to_the_incumbent() {
 fn ndi_peer_falls_back_to_any_reachable_cam() {
     // "host status" lines, in preference order; the first OK one wins.
     let probe = "10.77.9.61 down\n10.77.9.62 down\n10.77.9.63 up\n10.77.9.65 up\n";
-    let (code, out, err) = run_sourced(&format!(
-        "printf '%s' {} | imag_pick_ndi_peer",
-        shell_quote(probe)
-    ));
+    let (code, out, err) = run_sourced(&format!("imag_pick_ndi_peer <<<{}", shell_quote(probe)));
     assert_eq!(code, 0, "a reachable peer must be picked. stderr: {err}");
     assert_eq!(out.trim(), "10.77.9.63", "first REACHABLE candidate wins");
 
     let none = "10.77.9.61 down\n10.77.9.62 down\n";
-    let (code, _out, err) = run_sourced(&format!(
-        "printf '%s' {} | imag_pick_ndi_peer",
-        shell_quote(none)
-    ));
+    let (code, _out, err) = run_sourced(&format!("imag_pick_ndi_peer <<<{}", shell_quote(none)));
     assert_ne!(code, 0, "no reachable cam must fail loud, not return empty");
     assert!(
         err.to_lowercase().contains("ndi"),
