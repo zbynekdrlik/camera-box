@@ -22,8 +22,11 @@ e2e_failure_stage_content() {
   local outdir="$1" run_id="$2" sha="$3" url="$4"
   local head="🔴 **camera-box recording-based full-path E2E FAILED** (${sha})"
 
-  # No run id / no OUTDIR: the harness died before it produced any run artifacts.
-  if [ -z "$run_id" ] || [ -z "$outdir" ] || [ ! -d "$outdir" ]; then
+  # No run id / no OUTDIR name at all: the harness died before it even had a run identity.
+  # (A run_id that IS set but whose OUTDIR is absent falls THROUGH to the artifact checks below,
+  # which correctly land it in the "aborted before a recording was captured" stage — a missing dir
+  # matches no glob and holds no verdict, so it is honestly a pre-recording abort, not "startup".)
+  if [ -z "$run_id" ] || [ -z "$outdir" ]; then
     printf '%s — aborted at startup: no run artifacts were produced; no frame-loss measurement was taken — %s\n' \
       "$head" "$url"
     return 0

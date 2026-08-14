@@ -40,6 +40,24 @@ fn run(body: &str) -> (i32, String, String) {
     )
 }
 
+/// Same, but reproduces PRODUCTION exactly: `set -euo pipefail` BEFORE sourcing+calling — the
+/// workflow step (`.github/workflows/full-path-e2e.yml`) runs the helper under that strict shell.
+/// This is the only way to catch a regression that would abort the step (an unbound var / a
+/// nonzero mid-function) and SWALLOW the alert entirely in CI — a `set +e` harness cannot.
+fn run_strict(body: &str) -> (i32, String, String) {
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(format!("set -euo pipefail\n. \"$LIB\"\n{body}"))
+        .env("LIB", lib_script())
+        .output()
+        .expect("run bash harness (strict)");
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
 /// Every message, whatever the bucket, must be a clear FAILED alert carrying the short SHA and the
 /// run URL — the operator-facing invariants that never change.
 fn assert_common(msg: &str) {
@@ -91,7 +109,7 @@ fn preflight_abort_no_recording_no_verdict_reports_no_measurement() {
 #[test]
 fn recordings_present_but_no_verdict_reports_decode_stage_never_a_breach() {
     let (code, out, err) = run(
-        r#"d=$(mktemp -d); : > "$d/strih-999.mkv"; echo x > "$d/strih-999.mkv"; e2e_failure_stage_content "$d" 999 abc1234 https://x/run; rm -rf "$d""#,
+        r#"d=$(mktemp -d); echo x > "$d/strih-999.mkv"; e2e_failure_stage_content "$d" 999 abc1234 https://x/run; rm -rf "$d""#,
     );
     assert_eq!(code, 0, "stderr={err}");
     assert_common(&out);
@@ -141,6 +159,63 @@ fn passing_verdict_with_a_later_step_failure_never_claims_a_breach() {
         out.to_lowercase().contains("passed"),
         "must say the verdict itself passed: {out}"
     );
+}
+
+#[test]
+fn malformed_or_empty_verdict_json_is_flagged_untrustworthy_never_a_breach() {
+    // The `*)` case — the ticket's CENTRAL safety property: a verdict file that exists but is
+    // unreadable (jq missing, malformed JSON) or missing the overall_pass key must NEVER be read
+    // as a benign pass NOR falsely announced as a breach — it is "no trustworthy verdict".
+    for fixture in ["not json{", "{}"] {
+        let (code, out, err) = run(&format!(
+            r#"d=$(mktemp -d); printf '%s' '{fixture}' > "$d/verdict-999.json"; e2e_failure_stage_content "$d" 999 abc1234 https://x/run; rm -rf "$d""#
+        ));
+        assert_eq!(code, 0, "fixture={fixture:?} stderr={err}");
+        assert_common(&out);
+        assert!(
+            !out.to_lowercase().contains("breach"),
+            "an unreadable verdict must NOT claim a breach (fixture={fixture:?}): {out}"
+        );
+        assert!(
+            out.to_lowercase().contains("unreadable")
+                || out.to_lowercase().contains("no trustworthy"),
+            "must flag the verdict untrustworthy (fixture={fixture:?}): {out}"
+        );
+    }
+}
+
+#[test]
+fn helper_never_swallows_the_alert_under_production_strict_shell() {
+    // #844 review-focus: production sources+calls the helper under `set -euo pipefail`. A future
+    // regression (a dropped `|| printf` guard, an unbound var) would ABORT the step and post NO
+    // alert at all — invisible to a `set +e` harness. Lock it: under the strict shell every bucket
+    // must still exit 0 and emit its line. Cover the two riskiest paths (failing + malformed
+    // verdict) plus the no-artifact path.
+    let cases = [
+        (
+            r#"d=$(mktemp -d); echo '{"overall_pass":false}' > "$d/verdict-999.json"; e2e_failure_stage_content "$d" 999 abc1234 https://x/run; rm -rf "$d""#,
+            "breach",
+        ),
+        (
+            r#"d=$(mktemp -d); printf '%s' 'not json{' > "$d/verdict-999.json"; e2e_failure_stage_content "$d" 999 abc1234 https://x/run; rm -rf "$d""#,
+            "no trustworthy",
+        ),
+        (
+            r#"e2e_failure_stage_content "" "" abc1234 https://x/run"#,
+            "no frame-loss measurement",
+        ),
+    ];
+    for (body, needle) in cases {
+        let (code, out, err) = run_strict(body);
+        assert_eq!(
+            code, 0,
+            "strict shell must not swallow the alert (body={body}): stderr={err}"
+        );
+        assert!(
+            out.to_lowercase().contains(needle),
+            "strict-shell output must still carry '{needle}': {out}"
+        );
+    }
 }
 
 #[test]
