@@ -1,0 +1,45 @@
+---
+paths:
+  - "src/av_sync_dock.rs"
+  - "vendor/av-sync-dock/src/camera-box-audio.hpp"
+  - "tests/av_sync_dock_latency_display_*.rs"
+  - "tests/av_sync_dock_cpp_mirror_gate.rs"
+---
+
+# A/V-sync dock display: Rust↔C++ parity seam, which box it locks on, residual pairing
+
+## The dock's display math is a Rust↔C++ PARITY-MIRRORED VALUE seam — never change the value one-sided
+`dock_lock_display_offset_ms` / `dock_latency_display_ms` in `src/av_sync_dock.rs` are byte-for-byte
+mirrored by `cb_dock_lock_display_offset_ms` / `cb_dock_latency_display_ms` in
+`vendor/av-sync-dock/src/camera-box-audio.hpp` (the deployed dock is C++; it can't be rig-verified in
+CI). `tests/av_sync_dock_cpp_mirror_gate.rs` compiles the header standalone with
+`g++ -std=c++11 -Wall -Wextra -Werror` and runs `vendor/av-sync-dock/test/camera-box-selftest.cpp`,
+which cross-checks the C++ VALUES against the Rust results.
+- Changing a computed VALUE (e.g. adding an additive term to the negation) requires updating BOTH
+  files in lockstep AND keeping the self-test green — plus it can trip the vendored-libobs
+  build (`.claude/rules/vendored-libobs-change-safety.md`). High-risk.
+- **Doc-comment / new-`const` / `constexpr` + `static_assert` changes are SAFE** — the self-test
+  compares values only (a comment can't break `-Werror`; an unused `pub const` / `static_assert`-
+  referenced `constexpr` won't be flagged unused). Locally: `cargo test --test
+  av_sync_dock_cpp_mirror_gate # airuleset:build-ok` (needs g++; ~12–80s depending on box load).
+- Gotcha: making the additive constant load-bearing (`-x + ADDITIVE_MS`) is NOT free — for `x==0`
+  it flips the result from IEEE `-0.0` to `+0.0`, interacting with `dock_latency_display_ms`'s own
+  `-0.0→0.0` normalization. Keep such a constant DECORATIVE + guarded by a test unless a
+  measurement genuinely needs it applied.
+
+## The dock locks on the STREAM box, NOT strih (#1004)
+The `av-sync-dock` cluster estimator needs the `mbc` marker source, which lives on the **stream**
+OBS (cam2 QPSK marker audio). Read its live values from the stream box OBS log:
+`Select-String '$env:APPDATA\obs-studio\logs\<latest>.txt' -Pattern 'av-sync-dock: (LOCKED|UPDATED) offset='`.
+The **strih** box logs `av-sync-dock: ASRC section unavailable -- source 'mbc' not found on this box`
+and `locked=no` — it never locks in normal operation, so don't hunt for dock LOCKED lines there.
+Use the win-stream-snv / win-strih MCP (agent session), not ssh, for these logs.
+
+## Quantifying dock-vs-gate residual (#952/#1004)
+The `LOCKED/UPDATED offset=` value is ALREADY #953 sign-corrected (gate convention). Pair it against
+the offline OPTICAL truth `all_cambox_av_sync.<camN>.av_offset_ms` in the verdict JSON
+(`/tmp/recording-e2e-*/verdict-*.json`) for the SAME recording window (segments' `start_ns` →
+wallclock). #1004 result: residual is UNSTABLE (dock's own within-window swing 24–75ms, cluster mad
+25–35ms, exceeds the +9..+53ms run-to-run residual spread) — #952's ~55ms is NOT a stable constant.
+Decision locked in `DOCK_LOCK_DISPLAY_ADDITIVE_MS = 0.0`: the dock is a coarse MONITOR, the offline
+optical `--av-sync` chain is the sole authoritative gate. Never compensate with a guessed constant.
