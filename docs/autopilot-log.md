@@ -8312,3 +8312,47 @@ bundle-state-server deployed to both boxes.
 - **#849** — `scripts/imag-obs-watchdog.py` `snapshot()` unconditionally shelled `nvidia-smi` x3 + `fuser /dev/nvidia*` + hardcoded PCI `0000:01:00.0`. Fix: hardware-aware branch. New pure helpers mirror the SAME `imag_has_discrete_nvidia` regex setup-imag.sh + imag_scenes.py share (parity-tested), derive PCI addr from lspci (never hardcode), and build box-appropriate forensics. no-dGPU branch = live-verified i915 surface (globbed `card*/gt/gt*` rps_*_freq_mhz + throttle_reason_* [the power-clamp discriminator] + RAPL-mmio package-0 + fuser /dev/dri). `intel_gpu_top` EXCLUDED — it core-dumps on this box (the never-invent-by-analogy discipline). Every forensic cmd now timed uniformly (the GSP-RPC/hang discriminator generalizes). RED→GREEN: tests/python/test_imag_obs_watchdog_snapshot_849.py (13). Full tests/python green (781), pyflakes clean.
 - **#846** — `scripts/imag-gpu-contention-sampler.sh` (#674) hard-required nvidia-smi. Resolution: RETIRED (deleted), not ported — a one-shot diagnostic for a hypothesis already REJECTED live (GPU util/VRAM/encoder-sessions flat, no correlation with judder), sampling NVENC/dGPU-VRAM concepts with no iGPU equivalent; the real cause was later found + is continuously monitored (the #1040 power-envelope guard). Zero callers. Updated the two live doc pointers (e2e SKILL.md technique section → retired+finding preserved; imag-nb-provisioning sweep note → resolved-by-retirement); historical log entries left intact. RED→GREEN: tests/harness_imag_gpu_contention_sampler_retired_846.rs (4 guards).
 - Bundle: one dev branch, version 1.7.0-dev.455. Tier-0 green (fmt/check/clippy --all-targets/test --no-run). Fresh-context review 0🔴 0🟡 0🔵. GOTCHA re-confirmed: intel_gpu_top 1.28 core-dumps (get_num_gts assertion) → don't use it as a forensic surface on this box.
+
+## 866 + 902 — burn-persistence / TEST-parking preflight family (worktree autopilot-866)
+
+- **902 (Parking the rig in TEST arms a [0/8] preflight abort) — OVERCOME, closed with evidence, no
+  code.** Validated against post-938/1011 dev: the old `[0/8]` hard-abort on burns-ON
+  (`genlock_burn is still ON from a prior run` + `exit 1`) is GONE — issue 924 made `[0/8]`
+  NORMALIZE a leaked burn (`obs_burn_filter.py remove`) instead of aborting, and issue 1011 added
+  the exhaustive `sweep-off` on strih/stream/imag. The two remaining `[0/8]` `exit 1`s are the
+  stray-recording/streaming checks (which 902 explicitly said must stay). The interim manual-clear
+  protocol is now automated. Leak-detection responsibility correctly moved to rig-mode's EVENT
+  burns-off contract (fail-closed), not `[0/8]`. Regression lock already exists
+  (`recording_e2e_burn_off_preflight_normalizes_instead_of_aborting_924`).
+
+- **866 (imag genlock_burn resurrects ON after any OBS restart) — imag half FIXED.** Root cause: the
+  per-source `genlock_burn` bool persists into OBS's saved scene collection; a runtime OFF (gate
+  cleanup / WS remove) is never written to disk, so an OBS crash/reboot/manual restart reloads
+  `true` and renders the QR burn onto the LIVE IMAG projection. The `[0/8]` exhaustive sweep only
+  runs during a dev1 gate run, never on the box's OWN restart. Fix: force measurement burns OFF at
+  imag OBS start in `imag_scenes.py --bootstrap` (the seam `imag-obs-start.sh` runs on every fresh
+  instance — boot autostart, operator start, systemd Restart=on-failure). New pure
+  `ndi_source_names()` (enumerate ndi_source inputs from GetInputList — NEVER a static/CAMS list,
+  burn-target-enumeration rule) + `clear_measurement_burns()` (clear genlock_burn=false on every ON
+  ndi input, read-back verify). Bootstrap-gated (like the 785 self-heal) so a bare reseed never
+  nukes a burn a gate run set mid-measurement.
+- **Standalone-seam decision:** `imag_scenes.py` is fetched standalone to `/usr/local/bin` and
+  cannot import `obs_burn_filter.py` (not deployed to the box), so the tiny enumerate+clear is
+  reimplemented locally — the SAME established imag precedent as `imag_latency_enforce.py`'s own
+  `list_ndi_inputs`. The "route through ONE seam" rule is `paths:`-scoped to the shell consumers
+  (rig-mode, recording-e2e), not this box script.
+- **TDD:** RED `7c7951163` (functions absent → AttributeError) → GREEN `17ed4ce9c` → review-fix
+  `57c43157a`. 9 pytest cases (pure enumerator + fake-WS clear: clears only ON, overlay merge,
+  no-op when none ON, warn-not-abort on enum-failure / WS-raise-during-enum / WS-raise-mid-sweep /
+  stuck-clear). No `.sh` touched → no static-anchor risk, no full-suite requirement; Python-only.
+- **Review round (fresh-context general-purpose, 0🔴 1🟡 2🔵):** the 🟡 was real and fixed — an
+  uncaught WS exception (the 328 timeout-raise class) from `GetInputList` would propagate out and
+  crash `imag-obs-start.sh` under `set -euo pipefail` (the exact "take OBS down on a transient
+  hiccup" outcome the code prevents). Hardened the WHOLE sweep body in try/except → warn-and-return,
+  and made the stuck-clear path also warn-not-`sys.exit` (a `sys.exit` under systemd
+  Restart=on-failure = OBS restart loop). `clear_measurement_burns` now can NEVER abort OBS start;
+  the gate `[0/8]` sweep-off stays the authoritative fail-closed backstop.
+- **Scope split (filed 1057):** the strih (Windows OBS) restart-resurrection + the "verify whole
+  runtime state at start and report drift LOUD" design (burns OFF + latency pins on both boxes) are
+  genuinely separate (different box/OS, no imag_scenes equivalent on strih) — filed as a tracked
+  follow-up, not bundled. Version 1.7.0-dev.455.
