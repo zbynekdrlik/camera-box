@@ -7901,3 +7901,41 @@ Three named "relaxations"; live fleet re-measure reshaped two of them (ssh journ
 
 Live measurement table (2026-08-14): CAM1 ShadowCast max 4.67% · CAM2 ShadowCast max 2.83% ·
 CAM3 Cam Link 4K 0.33% (was mislabelled ShadowCast2). Worktree; supervisor integrates the round.
+
+---
+
+## issue 944 — emit-liveness watchdog (a dead capture loop keeps publishing a frozen NDI frame)
+
+Version 1.7.0-dev.452. Worktree `autopilot-944`; supervisor integrates the round.
+
+**Validated STILL real (not the stale 2 h incident).** The merged issue-945 capture-wedge
+watchdog stamps its heartbeat after every `process_frame()` return (Ok OR Err), and
+`VideoCapture::process_frame` returns `Ok(())` on a `V4L2_BUF_FLAG_ERROR` buffer BEFORE the emit
+callback (`src/capture.rs:1116-1125`). So on a corrupted-but-returning stream the issue-945
+heartbeat keeps advancing while `emit_count` never moves → issue-945 reads Alive forever. Nothing
+watched EMITTED-frame liveness. The cam4 2 h incident was itself a TRUE wedge (now caught by
+issue-945), but the failure CLASS (takes error buffers, stops advancing) has this
+capture-alive-but-emit-dead sub-case still uncovered. Scope decision (was needs-user-decision)
+already resolved by the maintainer: stop the NDI sender + log at ERROR (source goes gone, not
+frozen); the re-open/USB-rebind ladder was withdrawn (harness concern, out of scope here).
+
+**Fix.** New pure Tier-0 `src/emit_freeze.rs` (emit-side sibling of `capture_wedge`), reusing the
+issue-945 watchdog framework verbatim:
+- `evaluate_emit_freeze(secs_since_emit, secs_since_capture_return, EMIT_FREEZE_THRESHOLD_S=15,
+  CAPTURE_FRESH_BOUND_S=5)` → `Frozen` iff emit stale ≥15 s AND the capture-return heartbeat is
+  younger than 5 s. Two-input discriminator: in a TRUE wedge both heartbeats freeze together, so
+  the capture-return staleness passes the 5 s bound and emit-freeze SUPPRESSES itself → issue-945
+  owns the wedge at 25 s. Compile-time `const _` guard `15 > 5 > 0` (clippy-safe).
+- A second `Arc<AtomicU64>` emit heartbeat, stamped in the capture loop's `Ok` arm on a per-iteration
+  `frame_dispatched` flag — set ONLY on a confirmed production send (`Ok`) or a queued burn job
+  (`ring.submit` `Ok`), NOT on `emit_count` (which increments even on a send Err). Armed after the
+  first dispatch (0-sentinel) so boot/NDI warmup never false-fires.
+- The poll folds into the EXISTING issue-945 watchdog thread, AFTER the wedge check; on `Frozen`
+  → `tracing::error!` a uniquely grep-able CRITICAL line + `std::process::exit(81)` (distinct from
+  77/78/79/80) → systemd `Restart=always` tears the NDI sender down + re-opens the device.
+- Adjacent (ticket ask): a periodic `#944 last-emit-age` info line on the 5 s stats cadence.
+
+RED `ca9c40492` (stub always Publishing) → GREEN `e0f84f065` → review 🔵 fix `024270487`
+(stamp on confirmed dispatch, catching a persistently-failing send too). Test:
+`emit_freeze::tests::stale_emit_while_capture_returning_is_frozen` (RED on stub → GREEN), 9/9.
+Tier-0: fmt clean, clippy --all-targets -D warnings clean.

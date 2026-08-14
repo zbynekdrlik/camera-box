@@ -666,8 +666,16 @@ async fn run_capture_loop(
     // `capture_wedge::CAPTURE_WEDGE_THRESHOLD_S`.
     let wedge_heartbeat_ns = Arc::new(AtomicU64::new(0));
     let wedge_watchdog_epoch = std::time::Instant::now();
+    // #944 — emit-liveness heartbeat, stamped by the capture loop ONLY when a good frame is
+    // actually emitted (below). 0 = "no frame emitted yet" (disarmed): the emit-freeze check is
+    // skipped until the first emit, so boot/NDI warmup never false-fires (a never-emits-from-boot
+    // box is #945's + the #747 frozen-camera preflight's domain, not this watchdog's). Polled by
+    // the SAME watchdog thread, AFTER the #945 wedge check, so a true dequeue wedge is diagnosed
+    // by #945 and only a capture-alive-but-emit-dead freeze trips this. See `emit_freeze`.
+    let emit_heartbeat_ns = Arc::new(AtomicU64::new(0));
     {
         let heartbeat = Arc::clone(&wedge_heartbeat_ns);
+        let emit_heartbeat = Arc::clone(&emit_heartbeat_ns);
         let running_watchdog = Arc::clone(&running);
         std::thread::Builder::new()
             .name("capture-wedge-watchdog".into())
@@ -703,6 +711,40 @@ async fn run_capture_loop(
                         // fresh device open.
                         std::process::exit(camera_box::capture_wedge::CAPTURE_WEDGE_EXIT_CODE);
                     }
+
+                    // #944 — emit-freeze check. Reached only when #945 said the capture thread is
+                    // NOT wedged (its dequeue is returning). `seconds_since_last_progress` above is
+                    // the capture-return staleness; combined with the emit heartbeat's staleness it
+                    // discriminates a frozen OUTPUT (dequeue returning, no good frame emitted — e.g.
+                    // a corrupted-buffer stream) from a thread wedge (#945's domain). Disarmed until
+                    // the first emit (heartbeat == 0).
+                    let last_emit_ns = emit_heartbeat.load(Ordering::Relaxed);
+                    if last_emit_ns != 0 {
+                        let seconds_since_last_emit =
+                            now_ns.saturating_sub(last_emit_ns) as f64 / 1_000_000_000.0;
+                        if camera_box::emit_freeze::evaluate_emit_freeze(
+                            seconds_since_last_emit,
+                            seconds_since_last_progress,
+                            camera_box::emit_freeze::EMIT_FREEZE_THRESHOLD_S,
+                            camera_box::emit_freeze::CAPTURE_FRESH_BOUND_S,
+                        ) == camera_box::emit_freeze::EmitFreezeVerdict::Frozen
+                        {
+                            tracing::error!(
+                                "{}",
+                                camera_box::emit_freeze::emit_freeze_message(
+                                    seconds_since_last_emit,
+                                    seconds_since_last_progress,
+                                    camera_box::emit_freeze::EMIT_FREEZE_THRESHOLD_S,
+                                )
+                            );
+                            // The capture thread is alive but the NDI output is frozen — a graceful
+                            // in-process teardown of the sender is not cleanly reachable from here
+                            // (it may be owned by the burn thread), so exit immediately. systemd's
+                            // Restart=always tears the sender down (source goes gone, not frozen)
+                            // and re-opens the device — the same recovery shape as #945.
+                            std::process::exit(camera_box::emit_freeze::EMIT_FREEZE_EXIT_CODE);
+                        }
+                    }
                 }
             })
             .expect("failed to spawn #945 capture-wedge watchdog thread");
@@ -710,6 +752,9 @@ async fn run_capture_loop(
 
     // Spawn capture loop in blocking task - minimal overhead for lowest latency
     let running_capture = Arc::clone(&running);
+    // #944 — the capture loop stamps this on every actual emit; `wedge_watchdog_epoch` (Copy)
+    // moves into the closure so both the stamp here and the watchdog poll share one epoch.
+    let emit_heartbeat_capture = Arc::clone(&emit_heartbeat_ns);
     let capture_handle = tokio::task::spawn_blocking(move || {
         // Apply real-time optimizations BEFORE entering the capture loop
         apply_realtime_optimizations();
@@ -922,6 +967,13 @@ async fn run_capture_loop(
             // #707 B1 — snapshot the emit counter before the frame closure so the per-second ring
             // can attribute exactly this frame's emit (0 or 1) after it returns.
             let emit_before = emit_count;
+            // #944 — did THIS iteration actually DISPATCH a good frame to NDI (a confirmed
+            // production send, or a queued burn job)? This is the emit-liveness signal, distinct
+            // from `emit_count` (which increments even on a production send Err, for rate stats):
+            // a persistently-failing send is itself a silent-frozen mode, so it must NOT advance
+            // the heartbeat. Reset per iteration; set inside the closure only on a confirmed
+            // dispatch.
+            let mut frame_dispatched = false;
             // ZERO-COPY: Process frame directly from mmap buffer without copying
             let result = capture.process_frame(|data, info| {
                 // #286 — periodically re-sample the monotonic->realtime clock offset. Counts
@@ -1099,7 +1151,12 @@ async fn run_capture_loop(
                     // — both are TERMINAL paths (shutdown signalled, or the burn thread is gone),
                     // never steady state, so not returning the buffer to the pool cannot leak.
                     match ring.submit(job) {
-                        Ok(()) => emit_count += 1,
+                        // #944 — a queued burn job is the strongest emit-liveness signal available
+                        // on this thread (the burn thread performs the actual NDI send asynchronously).
+                        Ok(()) => {
+                            emit_count += 1;
+                            frame_dispatched = true;
+                        }
                         Err(SubmitError::ShutdownInterrupted(_)) => tracing::info!(
                             "#275b cam1-burn submit interrupted by shutdown — frame_id={} not sent",
                             frame_id
@@ -1130,8 +1187,12 @@ async fn run_capture_loop(
                     emit_wall_ns / 100,
                     send_fps as i64,
                 );
-                if let Err(e) = sender.send_frame_zero_copy(data, info, capture_timecode_100ns) {
-                    tracing::error!("Failed to send frame: {}", e);
+                match sender.send_frame_zero_copy(data, info, capture_timecode_100ns) {
+                    // #944 — only a CONFIRMED send proves the NDI output is live; a send that errors
+                    // is itself a silent-frozen mode (nothing reaches NDI while every health signal
+                    // stays green), so it must NOT advance the emit-liveness heartbeat.
+                    Ok(()) => frame_dispatched = true,
+                    Err(e) => tracing::error!("Failed to send frame: {}", e),
                 }
                 emit_count += 1; // reached only when the frame passed the gate
                 tee_grab(data);
@@ -1166,6 +1227,19 @@ async fn run_capture_loop(
                     // while strih freezes, the loss is downstream (link / NDI SDK), read off the
                     // transport sampler instead.
                     let emitted_this = (emit_count - emit_before) as u32;
+                    // #944 — stamp the emit-liveness heartbeat when a good frame was actually
+                    // DISPATCHED to NDI this iteration (`frame_dispatched`: a confirmed production
+                    // send, or a queued burn job — NOT merely a gate-passed frame whose send
+                    // errored). A corrupted buffer returns Ok without dispatching, and a
+                    // persistently-failing send never dispatches either, so this never advances on
+                    // any frozen-output stream — exactly the signal #945's return-based heartbeat
+                    // cannot see. Shared #945 watchdog epoch so the poll can subtract it.
+                    if frame_dispatched {
+                        emit_heartbeat_capture.store(
+                            wedge_watchdog_epoch.elapsed().as_nanos() as u64,
+                            Ordering::Relaxed,
+                        );
+                    }
                     let now_mono_ns = ring_epoch.elapsed().as_nanos() as u64;
                     for bucket in emit_ring.observe(now_mono_ns, emitted_this, 1) {
                         if camera_box::emit_rate_ring::emit_bucket_below_floor(
@@ -1280,6 +1354,24 @@ async fn run_capture_loop(
                             emit_ring.emit_buckets(),
                             emit_ring.capture_buckets(),
                         );
+
+                        // #944 — surface the age of the last EMITTED good frame on this same 5s
+                        // cadence so a frozen output is visible in journald directly, without
+                        // diffing successive `Streaming:` timestamps. Computed from the same u64
+                        // heartbeat + shared #945 watchdog epoch the emit-freeze watchdog polls.
+                        let last_emit_hb_ns = emit_heartbeat_capture.load(Ordering::Relaxed);
+                        if last_emit_hb_ns == 0 {
+                            tracing::info!("#944 last-emit-age: n/a (no frame emitted yet)");
+                        } else {
+                            let now_hb_ns = wedge_watchdog_epoch.elapsed().as_nanos() as u64;
+                            let last_emit_age_s =
+                                now_hb_ns.saturating_sub(last_emit_hb_ns) as f64 / 1_000_000_000.0;
+                            tracing::info!(
+                                "#944 last-emit-age: {:.1}s (emit-freeze watchdog restarts at {:.0}s of no emit while capture stays alive)",
+                                last_emit_age_s,
+                                camera_box::emit_freeze::EMIT_FREEZE_THRESHOLD_S,
+                            );
+                        }
 
                         // #752 — ONE aggregated emit-gate-skip WARN per report window (drains +
                         // resets the accumulator). A clean window logs nothing; a skipping window
