@@ -240,6 +240,10 @@ rig_lease_acquire() {
   local repo="$1" run_id="$2" run_url="$3" job="$4" expected_release_at="$5"
   local stale_secs="${6:-5400}"
 
+  # GC any lockdir aside-copies leaked by a release that crashed between its atomic rename and the
+  # rm of the renamed copy (#857) -- acquire is the guaranteed GC point (every gate acquires).
+  rig_lease_sweep_releasing
+
   if rig_lease_try_acquire; then
     rig_lease_write_holder "$repo" "$run_id" "$run_url" "$job" "$expected_release_at"
     printf 'RIG_LEASE_ACQUIRED\n'
@@ -258,6 +262,20 @@ rig_lease_acquire() {
   return 1
 }
 
+# rig_lease_sweep_releasing -> remove any leaked "<leasedir>.releasing.*" teardown copies left by
+# a release that crashed BETWEEN its atomic rename-aside and the rm of the renamed copy (#857).
+# Each such copy is already detached from the live lease path, so deleting it can never harm an
+# active lease, and a concurrent release rm-ing the same copy just double-deletes harmlessly. A
+# no-glob-match yields the literal pattern, which the `[ -e ]` guard skips. Never touches "$d".
+rig_lease_sweep_releasing() {
+  local d; d="$(rig_lease_dir)"
+  local leftover
+  for leftover in "${d}".releasing.*; do
+    [ -e "$leftover" ] || continue
+    rm -rf "$leftover" 2>/dev/null || true
+  done
+}
+
 # rig_lease_release <run_id> -> release the lease -- ONLY if RUN_ID is still its current holder
 # (never destroys a DIFFERENT, later holder's lease out from under it -- e.g. a run that lost the
 # acquire race, or one whose lease was already reclaimed as stale by someone else). Idempotent /
@@ -265,12 +283,26 @@ rig_lease_acquire() {
 rig_lease_release() {
   local run_id="$1"
   local d; d="$(rig_lease_dir)"
+  rig_lease_sweep_releasing
   [ -d "$d" ] || return 0
   local holder_run_id; holder_run_id="$(rig_lease_read_holder_field run_id)"
   if [ "$holder_run_id" != "$run_id" ]; then
     echo "[rig-lease] NOT releasing -- current holder (run_id=${holder_run_id:-unknown}) is not us (run_id=${run_id}); it must have been reclaimed already." >&2
     return 0
   fi
-  rm -rf "$d"
-  echo "[rig-lease] released."
+  # ATOMIC teardown (#857): rename the whole lockdir aside in ONE syscall, THEN delete the renamed
+  # copy. A concurrent reader/acquirer therefore sees "$d" as either a COMPLETE lease or entirely
+  # absent -- never the dir-present-but-holder.json-gone intermediate that a recursive `rm -rf "$d"`
+  # exposes (which lets a concurrent `mkdir "$d"` guard fail EEXIST against a holder-less dir, reclaim
+  # into "$d", and have that fresh lease deleted by this release's still-running recursive delete).
+  # If the rename fails, "$d" has already vanished (a concurrent release/reclaim) -- nothing to tear
+  # down; the stale-reclaim heartbeat backstop self-heals any pathological fs-error leftover, so NO
+  # `rm -rf "$d"` fallback (which would reintroduce the exact window) is added.
+  local releasing="${d}.releasing.$$"
+  if mv "$d" "$releasing" 2>/dev/null; then
+    rm -rf "$releasing" 2>/dev/null || true
+    echo "[rig-lease] released."
+  else
+    echo "[rig-lease] released (lease already gone)."
+  fi
 }
