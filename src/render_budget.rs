@@ -109,11 +109,20 @@ pub fn classify(sample: RenderSample, target_fps: f64) -> RenderVerdict {
 /// `obs-display.c` computes inline for the projector path, #776). `interval_ns == 0` (video not
 /// running) leaves the configured value untouched, matching `render_display()`.
 pub fn effective_render_divisor(configured_divisor: u32, frame_interval_ns: u64) -> u32 {
-    // #879 [red]: faithful pre-fix stub — no canvas-rate derivation (ignores the interval),
-    // which is exactly the un-throttled behaviour before this ticket. Replaced by the real
-    // derivation in the [green] commit.
-    let _ = frame_interval_ns;
-    configured_divisor
+    // #879 [green]: derive the ~30fps-cell cadence from the canvas rate, clamped to the
+    // configured upper bound. interval 0 (video not running) leaves the configured value
+    // untouched, matching render_display() which skips the derivation when interval == 0.
+    if frame_interval_ns == 0 {
+        return configured_divisor;
+    }
+    const TARGET_CELL_INTERVAL_NS: u64 = 33_333_333; // ~30fps cells
+    let derived = ((TARGET_CELL_INTERVAL_NS + frame_interval_ns / 2) / frame_interval_ns) as u32;
+    let derived = if derived < 1 { 1 } else { derived };
+    if derived < configured_divisor {
+        derived
+    } else {
+        configured_divisor
+    }
 }
 
 #[cfg(test)]
