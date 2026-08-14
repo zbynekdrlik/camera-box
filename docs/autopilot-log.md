@@ -8067,3 +8067,35 @@ asserts the pid is reaped. RED `83f54f66c` / GREEN `ce0390553`. 17/17 ledger tes
 stress runs, zero orphan accumulation.
 
 Worktree round; supervisor integrates (merge → CI → deploy). One PR closes #857 #850.
+
+## 2026-08-14 — issue 859: painter-pacing attribution instrument (last-red-term duplicate residual)
+
+- **Commits**: version bump `132315a72` (1.7.0-dev.454), RED `944f31901`, GREEN `7c9386c76`.
+- **Validate-first (signature CHANGED since filing)**: the ticket's "48 pure duplicates, zero
+  gaps, uniform fleet-wide" was measured PRE the issue-1042 min-delta + issue-1049 phase-convergence
+  genlock fixes. Re-mined every retained `/tmp/recording-e2e-*/verdict-*.json` (Aug 13-14): copies
+  now track gaps 1:1 (187≈187, 27≈27, 1≈1) = the genlock FIFO limit-cycle signature (not pure
+  duplicates); big-count runs are post-OBS-restart convergence transients (walk-down rule §2:
+  exclude); a genuinely clean 0/0/0 converged run (669473697) exists.
+- **Decisive attribution (real data)**: the painter emits its own ground truth
+  `painter-*.csv` (`tick,gen_ts_ns,flip_ts_ns`, ~32.4k rows/run). Across 6 runs INCLUDING the worst
+  187-copy transient: 0 painted-tick duplicates, 0 skips, 0 non-monotonic, 0 inter-flip intervals
+  >25ms (all 14-20ms at a 16.67ms/60fps nominal). The painter is metronomic even while the recorded
+  output carried 187 copies → the residual duplicate is DOWNSTREAM of the page-flip (monitor panel
+  refresh vs 30fps capture optical beat, or strih/stream genlock FIFO), never the painter/DRM. This
+  answers the ticket's own painted-vs-captured discriminator directly from existing data.
+- **Deliverable (class b: decisive instrumentation + attribution)**: new crate-root pure module
+  `src/painter_pacing.rs` (Tier-0 tested, mirrors the painted_tick_gaps.rs / residual_events.rs
+  seam) computes painted-tick faults + missed DRM-vsync deadlines (inter-flip >= 1.5x the run's own
+  median nominal; >= 2x = duplicate-class stall) and a downstream-vs-painter `duplicate_attribution`.
+  recording-verdict surfaces it REPORT-ONLY under `all_cambox_continuity.painter_pacing`
+  (+`total_copies`/`attribution`) when --painter is given — never gates, changes no threshold, and a
+  read error emits an `unavailable` block so it can NEVER newly fail a passing verdict.
+- **Rejected forks**: (a) rig-side instrument the source-camera cadence — the data already
+  exonerates the painter and bars a non-problem measurement; (b) reconcile
+  unplaceable/discarded-guard frame accounting — orthogonal to the duplicate-attribution question,
+  left as a noted open item. Ticket STAYS OPEN: the walk-down to TOL=0 is not yet reachable (steady
+  runs still show 0-1 optical duplicates/window + genlock convergence transients); this instrument
+  settles the shared-fault question, it does not by itself reach zero.
+- **Tests**: `src/painter_pacing.rs` 9 tests (RED against a stubbed analyze → GREEN). fmt --all
+  --check clean (validates the probe-gated recording-verdict.rs parses), clippy --lib clean.
