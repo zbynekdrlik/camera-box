@@ -358,13 +358,13 @@ impl SendAuditSample {
 pub fn parse_send_audit_line(line: &str) -> Option<SendAuditSample> {
     const OUT_MARK: &str = "genlock-ndi-output audit '";
     const FIL_MARK: &str = "genlock-ndi-filter audit '";
-    let (kind, mark_at, mark_len) = if let Some(i) = line.find(OUT_MARK) {
-        (SendAuditKind::Output, i, OUT_MARK.len())
-    } else if let Some(i) = line.find(FIL_MARK) {
-        (SendAuditKind::Filter, i, FIL_MARK.len())
-    } else {
-        return None;
-    };
+    let (kind, mark_at, mark_len) = line
+        .find(OUT_MARK)
+        .map(|i| (SendAuditKind::Output, i, OUT_MARK.len()))
+        .or_else(|| {
+            line.find(FIL_MARK)
+                .map(|i| (SendAuditKind::Filter, i, FIL_MARK.len()))
+        })?;
     let after_mark = &line[mark_at + mark_len..];
     let quote_end = after_mark.find('\'')?;
     let name = after_mark[..quote_end].to_string();
