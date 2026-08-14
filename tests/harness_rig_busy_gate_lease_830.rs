@@ -88,6 +88,40 @@ fn seed_foreign_holder(lease_dir: &Path, run_id: &str, expected_release_at: &str
     fs::write(lease_dir.join("heartbeat"), "").expect("write heartbeat");
 }
 
+/// Write an executable `RIG_LEASE_RUN_STATUS_CMD` stub that always reports the foreign holder's run
+/// as `in_progress` (so the gate WAITS for it rather than reclaiming it as stale), and removes
+/// `lease_dir` on the gate's SECOND (and any later) poll — i.e. only AFTER the gate's first poll has
+/// already observed and logged the live holder. This ties the foreign holder's "release" to the
+/// gate's own poll cadence instead of a wall-clock sleep, so under CPU load the gate can never
+/// race the release (miss the holder entirely, or read it mid-delete) — a deterministic
+/// reproduction of "the holder was live when we looked, then released before our next poll"
+/// (#970/#980).
+fn write_release_on_second_poll_status_cmd(dir: &Path, lease_dir: &Path, counter: &Path) -> String {
+    let path = dir.join("release_status_cmd.sh");
+    let body = format!(
+        "#!/usr/bin/env bash\n\
+         n=\"$(cat {counter:?} 2>/dev/null || echo 0)\"\n\
+         echo $((n+1)) > {counter:?}\n\
+         [ \"$n\" -ge 1 ] && rm -rf {lease_dir:?}\n\
+         printf 'in_progress\\n'\n",
+        counter = counter,
+        lease_dir = lease_dir,
+    );
+    fs::write(&path, body).expect("write status cmd");
+    set_exec(&path);
+    path.to_string_lossy().to_string()
+}
+
+#[cfg(unix)]
+fn set_exec(p: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let mut perm = fs::metadata(p).unwrap().permissions();
+    perm.set_mode(0o755);
+    fs::set_permissions(p, perm).unwrap();
+}
+#[cfg(not(unix))]
+fn set_exec(_p: &Path) {}
+
 /// When the rig is free AND nobody else holds the lease, the gate must ACQUIRE it, exit 0, and
 /// leave it HELD (not release it) — the recording step that follows in the SAME job needs it.
 #[test]
@@ -261,12 +295,10 @@ fn foreign_lease_released_within_wait_budget_lets_us_proceed() {
     let soon = chrono_like_plus_seconds(30);
     seed_foreign_holder(&lease_dir, "888", &soon);
 
-    // Simulate the foreign holder releasing shortly after we start waiting.
-    let lease_dir_clone = lease_dir.clone();
-    let releaser = std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(600));
-        let _ = fs::remove_dir_all(&lease_dir_clone);
-    });
+    // Release the foreign holder DETERMINISTICALLY, tied to the gate's own poll cadence (see the
+    // helper) — never a wall-clock sleep that can race the gate's (load-dependent) first read.
+    let counter = dir.path().join("status_calls");
+    let status_cmd = write_release_on_second_poll_status_cmd(dir.path(), &lease_dir, &counter);
 
     let r = run_gate(
         &lease_dir,
@@ -274,9 +306,11 @@ fn foreign_lease_released_within_wait_budget_lets_us_proceed() {
         "5",
         "1",
         "run-waiter",
-        &[("RIG_LEASE_MAX_WAIT_SECS", "30")],
+        &[
+            ("RIG_LEASE_MAX_WAIT_SECS", "30"),
+            ("RIG_LEASE_RUN_STATUS_CMD", status_cmd.as_str()),
+        ],
     );
-    releaser.join().expect("releaser thread");
 
     assert_eq!(
         r.status, 0,
