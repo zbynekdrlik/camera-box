@@ -491,7 +491,9 @@ fn plan_emits_verify_at_start_burn_sweep_off_1057() {
         );
         // The verify-at-start burn sweep runs AFTER the on-box launch-verify STEP (never before OBS
         // is up) -- anchor on the STEP 2 marker, not the in-program "render tick ENABLED" text.
-        let verify_step_pos = out.find("STEP 2").expect("plan has the STEP 2 launch-verify marker");
+        let verify_step_pos = out
+            .find("STEP 2")
+            .expect("plan has the STEP 2 launch-verify marker");
         let sweep_pos = out.find("obs_burn_filter.py sweep-off").unwrap();
         assert!(
             verify_step_pos < sweep_pos,
