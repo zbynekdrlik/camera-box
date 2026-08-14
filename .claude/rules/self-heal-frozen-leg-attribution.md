@@ -180,3 +180,42 @@ offline gate already hard-fails on the `#971` chronic line — folding the plain
 would recreate the issue-909 mistake (see the issue-992 section above). targets.md also lied
 (claimed cam1 = Elgato post-#728); live truth was a ShadowCast. Always re-measure via
 `journalctl -u camera-box` on the boxes (`ssh root@10.77.9.6N`, pw newlevel) before pinning a bound.
+
+## #946 + #910 (2026-08-14) — one recognised-event table, and the burn-instance-log restart source
+
+Two reusable findings from bundling capture-wedge/emit-freeze attribution (#946) with the burn-log
+source blind spot (#910):
+
+**1. The burn-instance log is journald-BLIND tracing stdout — ANSI-wrapped, microsecond RFC3339-Z.**
+During an E2E burn the harness stops `camera-box.service` and runs each camera's capture as a
+transient `systemd-run` unit with `StandardOutput=append:/tmp/cbox-burn.log` (source) /
+`/tmp/cbox-burn-<cam>.log` (secondary), so journald sees NOTHING in the recording window (the exact
+issue-910 blind spot; issue-992 already hit it for capture-rate). A restart event (`#663` reset,
+`CRITICAL #945` wedge, `CRITICAL #944` emit-freeze) during the burn lands ONLY in that file. Its
+lines are `tracing_subscriber::fmt()` stdout: **ANSI-colour-wrapped, with a microsecond RFC3339-Z
+timestamp as the first field** — live-verified shape
+`\x1b[2m2026-08-14T10:17:56.523683Z\x1b[0m \x1b[33m WARN\x1b[0m … message` (the message body itself
+is ANSI-free, so a substring grep on the event text still matches the raw line). Parse it by
+ANSI-stripping (`sed -E 's/\x1b\[[0-9;]*m//g'`), taking the first field, and converting with
+`date -u -d "$ts" +%s%N` (TZ-unambiguous via `-u`+`Z`, locale-independent). This parse runs LOCALLY
+on dev1 (where the harness parses), never on the remote camera box — only a plain `grep` runs
+remotely (`restart_event_burn_log_grep_cmd`). Read BOTH journald AND the burn log for every camera
+and `sort -u` (defensive — the two are effectively mutually exclusive during a real burn). See
+`restart_events_from_burn_log_output` in `scripts/lib/self-heal-attribution.sh`; the exact-ns
+parse is pinned in `tests/harness_self_heal_attribution_895.rs`.
+
+**2. ONE recognised-event table, never N parallel greps — and how to add a FOURTH kind.**
+The self-heal reset joined the two watchdog restarts in ONE table (`restart_event_kind_patterns`:
+`LABEL<TAB>GREP_PATTERN` rows), keyed on each kind's ONE distinct line (the shared #663 reset line;
+each watchdog's uniquely-worded `CRITICAL #NNN` line — NOT an upstream detection band's WARN
+wording, the generalisable lesson above). To add a future FOURTH restart kind: add a row to
+`restart_event_kind_patterns` (bash) and a variant to `RestartEventKind` (`src/self_heal_attribution.rs`,
+with `label`/`from_label`/`detail` arms — the compiler forces you through the matches). The event
+correlates through the SAME `attribute_self_heal` engine + ALLOW-not-SUPPRESS gating; only the
+`kind` label/message differs. **Design decision (extend, don't fork):** all restart kinds share the
+correlation engine, gating, and report shape, so a sibling attribution module would duplicate all
+of it — exactly the "competing attribution parser" this rule + the `capture_wedge`/`emit_freeze`
+module docs warn against. The CLI token carries an optional kind prefix: `SelfHealResetEvent::parse`
+accepts BOTH legacy 2-field `cambox:ns` (→ SelfHealReset, the `--self-heal-reset` back-compat) and
+3-field `kind:cambox:ns` (`--restart-event`); the field count is an unambiguous discriminator
+because camboxes never contain `:` and the epoch is numeric.
