@@ -7843,3 +7843,30 @@ prerequisite, closed 2026-06-15); the rig is genlocked so it was dead code.
   FULL suite green after the recording-e2e.sh anchor-touching edit (204 ok, 3310 tests, 0 failed).
   Playbook: `.claude/rules/optical-chain-health-watchdog.md`. WORKTREE MODE: stopped at green local
   (supervisor integrates + installs the timer + deploys).
+
+## 2026-08-14 — issue 1031 (autopilot-1031): re-tighten WINDOW_COPIES_GAPS_TOLERANCE 3 -> 1
+- Version 1.7.0-dev.451. Commits: chore 5d3f590f, test [red] 35027fdb, fix [green] 33c18118, docs 0d76ccaa.
+- CONTEXT: the walk-down ticket for the core zero-loss claim's heaviest relaxation. Two genlock
+  fixes deployed to the rig at 09:17-09:18 CEST (verified LIVE: imag-nb libobs.so.30/distroav.so +
+  strih obs.dll replaced 09:17, OBS restarted 09:18) -- issue 1042 (min-delta source rate) + issue
+  1049 (N>=2 phase convergence) -- collapsed the chronic per-window copies/gaps burden.
+- DATA: pre-fix healthy runs carried gaps up to 3 (why tolerance was 3); relock storms hit 14-28.
+  The one steady-state post-fix full-cycle run (1780620060, started 09:45, +27 min after the OBS
+  restart, fully converged) measured per-window max copies=1/gaps=1, windows_over_tol=0,
+  overall_pass=true. Run 1074024850 (started 09:20, 2 min after the OBS restart) EXCLUDED as a
+  convergence transient (14/window). All-zero-frames run 2116513284 excluded (dead/no-signal).
+- STEP: 3 -> 1, the tightest value the steady post-fix data supports. NOT 0 (a single stale_replay
+  dup+gap residual remains = the issue-859 shared-duplicate fault, root cause not landed; and 0
+  structurally breaks the "at-tolerance fails strict" tests) and NOT 2 (data supports tighter).
+  Ticket STAYS OPEN for the 1 -> 0 step, gated on issue 859 + N>=2 consecutive green post-fix runs
+  at tolerance=1 measuring per-window 0/0.
+- TESTS: window_gate.rs boundary tests track the const (self-adjust); only the literal pin + the one
+  at-boundary integration fixture (recording_segments cam2, 3 -> 1 copies) move. New behavioral RED
+  (two_copies_or_gaps_now_gate_after_1031) locks that 2 now gates. Over-tolerance fixtures (literal
+  4/9) stay over at T=1; their stale "tolerance+1" comments corrected.
+- GOTCHA: deploy-time segregation is load-bearing. Verdict mtime = run END; a run that STARTS within
+  ~10 min of a genlock OBS restart records the convergence transient, not steady state -- exclude
+  it. Verify the deploy time from the RIG (OBS process start + libobs/obs.dll mtime), never from the
+  verdict (verdicts record NO version). The relevant deploy is the OBS genlock (imag-nb + strih),
+  NOT the cam-box binary (cam1 was still dev.432 -- irrelevant to genlock fixes).
+- Playbook: .claude/rules/window-gate-tolerance-walkdown.md (new).
