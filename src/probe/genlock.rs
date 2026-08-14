@@ -1691,6 +1691,21 @@ impl ReleaseCadence {
                 for _ in 0..matured_n - 1 {
                     dropped.push(queue.pop_front().expect("older matured"));
                 }
+                // #1049 PHASE CONVERGENCE: the N>=2 conveyor has NO depth-drain path and locks a
+                // persistent phase, so shed one extra frame (present one SOURCE interval fresher,
+                // re-anchoring the boundary to it below) when the boundary-implied age has drifted
+                // a shed quantum over configured. `should_converge_phase` reads the OLD boundary
+                // (not yet updated) and the shared throttle. On the N>=2 path the depth drain did
+                // not run, so this also maintains `ticks_since_last_drain`. Mirror of the C tail's
+                // converge block / the SimConveyor1049 shed.
+                if self.should_converge_phase(queue, reserve_ms, interval_ns, wall_now_ns)
+                    && queue.len() > 1
+                {
+                    dropped.push(queue.pop_front().expect("phase-converge shed"));
+                    self.ticks_since_last_drain = 0;
+                } else {
+                    self.ticks_since_last_drain = self.ticks_since_last_drain.saturating_add(1);
+                }
                 let presented = queue.pop_front().expect("newest matured");
                 self.locked_next_boundary_ns = Some(presented + interval_ns);
                 // #1003: a STEADY present — the conveyor. Remember its own on-air age so the
@@ -1731,6 +1746,17 @@ impl ReleaseCadence {
                 self.ticks_since_last_drain = 0;
             } else {
                 self.ticks_since_last_drain = self.ticks_since_last_drain.saturating_add(1);
+            }
+            // #1049 PHASE CONVERGENCE (N==1): a residual phase below the #859 depth drain's
+            // 2-frame hysteresis is shed here. The shared throttle prevents both firing this tick
+            // (a drain just reset the counter to 0, so should_converge_phase reads ticks < the
+            // interval and returns false) — the drain block above already maintained the counter,
+            // so this block only sheds-or-nothing (never a second increment). Mirror of the C tail.
+            if self.should_converge_phase(queue, reserve_ms, interval_ns, wall_now_ns)
+                && queue.len() > 1
+            {
+                dropped.push(queue.pop_front().expect("phase-converge shed"));
+                self.ticks_since_last_drain = 0;
             }
             let presented = queue.pop_front().expect("matured frame");
             self.locked_next_boundary_ns = Some(presented + interval_ns);
@@ -1876,6 +1902,46 @@ impl ReleaseCadence {
             reserve_ms,
             src_num,
             src_den,
+            self.ticks_since_last_drain,
+        )
+    }
+
+    /// #1049 — the STEADY-conveyor PHASE-CONVERGENCE shed decision. Delegates the whole decision
+    /// to the Tier-0-tested [`crate::genlock_backlog::should_converge_phase`]; only the READ-ONLY
+    /// source-multiple derivation lives here (same measure-with-sticky-fallback as
+    /// [`Self::should_drain_one`] / [`Self::backlog_relock_qdepth`], never `effective_source_multiple`
+    /// which would latch as a side effect of a getter). The comparator is the LOCKED boundary's
+    /// implied age (`wall_now - locked_next_boundary_ns`), read before the caller updates the
+    /// boundary; the achievable floor is the freshest queued frame (`queue.back()`, the C
+    /// `array[num-1]`) — a frame cannot present before it arrives, so the target is
+    /// `max(reserve, floor)` (issue-1049 review finding). Mirror of the C
+    /// `genlock_should_converge_phase`.
+    fn should_converge_phase(
+        &self,
+        queue: &std::collections::VecDeque<u64>,
+        reserve_ms: u32,
+        interval_ns: u64,
+        wall_now_ns: u64,
+    ) -> bool {
+        let Some(boundary) = self.locked_next_boundary_ns else {
+            return false;
+        };
+        let Some(&newest_stamp) = queue.back() else {
+            return false;
+        };
+        if interval_ns == 0 {
+            return false;
+        }
+        let n = Self::measure_source_multiple(queue, interval_ns)
+            .unwrap_or(self.last_known_n)
+            .max(1);
+        crate::genlock_backlog::should_converge_phase(
+            wall_now_ns,
+            boundary,
+            newest_stamp,
+            reserve_ms,
+            interval_ns,
+            n,
             self.ticks_since_last_drain,
         )
     }

@@ -20,7 +20,9 @@
 //! rule this FAILS LOUDLY rather than skipping if the toolchain is missing — a parity test
 //! that silently passes when it never ran is worse than no test.
 
-use camera_box::genlock_backlog::{relock_anchor_age_ns, relock_select_nearest};
+use camera_box::genlock_backlog::{
+    relock_anchor_age_ns, relock_select_nearest, should_converge_phase,
+};
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
@@ -226,6 +228,231 @@ fn c_relock_selection_matches_the_rust_authority_1003() {
          {} of {} vectors. These two are required to be numerically identical — the Rust one \
          is unit-tested and the C one is what actually ships to the rig, so a divergence \
          means the deployed behaviour is not the behaviour any test covers:\n{}",
+        diffs.len(),
+        vs.len(),
+        diffs.join("\n")
+    );
+}
+
+/// #1049 — the SAME executable-parity discipline for the phase-convergence decision. Lifts the
+/// self-contained `genlock_phase_converge_due` helper VERBATIM from obs-source.c, compiles it
+/// standalone under `-Werror`, and requires byte-identical booleans from
+/// [`camera_box::genlock_backlog::should_converge_phase`] over a spread of vectors — a flipped
+/// comparison, a lost saturation guard, or a wrong `interval/n` quantum fails here in seconds
+/// rather than surviving to the rig.
+fn lift_converge_helper() -> String {
+    let path = repo(OBS_SOURCE);
+    let src = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let start = src
+        .find("static inline bool genlock_phase_converge_due(")
+        .unwrap_or_else(|| {
+            panic!(
+                "#1049: {OBS_SOURCE} no longer defines genlock_phase_converge_due — the phase \
+                 convergence helper is gone, so there is nothing to check parity against."
+            )
+        });
+    let end = src[start..]
+        .find("\n}\n")
+        .map(|i| start + i + 3)
+        .expect("#1049: genlock_phase_converge_due has no closing brace");
+    src[start..end].to_string()
+}
+
+/// Lift a `#define NAME <value>` line VERBATIM from the vendored C so the parity harness compiles
+/// against the SHIPPED constant, never a hard-coded copy that could silently drift (issue-1049
+/// review finding 🟡2). Returns the whole `#define …` line.
+fn lift_define(name: &str) -> String {
+    let src = fs::read_to_string(repo(OBS_SOURCE)).expect("read obs-source.c");
+    for line in src.lines() {
+        let t = line.trim_start();
+        if t.starts_with(&format!("#define {name} ")) {
+            return t.to_string();
+        }
+    }
+    panic!("#1049: {OBS_SOURCE} no longer defines {name} — parity harness cannot lift it");
+}
+
+/// `(wall_now, boundary, newest_stamp, latency_ms, interval, n, ticks_since_drain)`. `newest_stamp`
+/// is the freshest queued frame's capture stamp — its age `wall - newest` is the achievable floor.
+fn converge_vectors() -> Vec<(u64, u64, u64, u32, u64, u32, u64)> {
+    let i30 = 33_333_333u64;
+    let i60 = 16_666_667u64;
+    let w = 1_000_000_000_000u64;
+    // Most vectors use newest == wall (floor 0 -> target = reserve); the floor-path vectors set a
+    // large skew so `floor > reserve` and the target becomes the floor.
+    let mut v: Vec<(u64, u64, u64, u32, u64, u32, u64)> = vec![
+        (w, w - (20 * 1_000_000 + 2 * i30), w, 20, i30, 2, 100), // over threshold, throttle met
+        (w, w - 20_000_000, w, 20, i30, 2, 100),                 // held AT configured -> inert
+        (w, w - (20 * 1_000_000 + 2 * i30), w, 20, i30, 2, 29),  // throttle NOT met
+        (w, w - (20 * 1_000_000 + 2 * i30), w, 20, i30, 2, 30),  // throttle exactly met
+        (
+            w,
+            w - (20 * 1_000_000 + i30 / 2 + 5_000_000 + 1),
+            w,
+            20,
+            i30,
+            2,
+            100,
+        ), // n=2 quantum edge, over
+        (
+            w,
+            w - (20 * 1_000_000 + i30 / 2 + 5_000_000),
+            w,
+            20,
+            i30,
+            2,
+            100,
+        ), // n=2 quantum edge, at (inert)
+        (
+            w,
+            w - (20 * 1_000_000 + i30 / 2 + 5_000_000 + 1),
+            w,
+            20,
+            i30,
+            1,
+            100,
+        ), // same age, n=1 -> inert
+        (
+            w,
+            w - (1000 * 1_000_000 + 8_000_000),
+            w - 8_000_000,
+            1000,
+            i30,
+            1,
+            1_000_000,
+        ), // deep hold -> inert
+        (
+            w,
+            w - (1000 * 1_000_000 + 2 * i30),
+            w - 8_000_000,
+            1000,
+            i30,
+            1,
+            100,
+        ), // deep walked a frame -> fires
+        (w, 0, w, 20, i30, 2, 100),                              // unlocked boundary -> false
+        (w, w - 500_000_000, w, 20, 0, 2, 100),                  // degenerate interval -> false
+        (w, w + i30, w, 20, i30, 2, 100),                        // boundary ahead of wall -> false
+        (w, w - (20 * 1_000_000 + 2 * i60), w, 20, i60, 2, 100), // a 60fps canvas source grid
+        (w, w - (20 * 1_000_000 + 3 * i30), w, 20, i30, 0, 100), // source_multiple 0 floors to 1
+        // FLOOR-PATH vectors (#1049 review): a large skew floors the achievable phase above reserve.
+        (
+            w,
+            w - (40_000_000 + i30 / 2),
+            w - 40_000_000,
+            3,
+            i30,
+            2,
+            100,
+        ), // natural phase at floor+quantum -> inert
+        (
+            w,
+            w - (40_000_000 + 2 * i30),
+            w - 40_000_000,
+            3,
+            i30,
+            2,
+            100,
+        ), // 2 frames over floor -> fires
+        (w, w - (40_000_000 + i30), w - 40_000_000, 3, i30, 1, 100), // n=1: floor + 1 canvas frame -> inert
+        (w, w + i30, w + i30, 20, i30, 2, 100), // newest ahead of wall (floor saturates to 0) -> target=reserve
+    ];
+    // A deterministic LCG spread over the argument space, now including the floor axis.
+    let mut x: u64 = 0x1234_5678_9abc_def1;
+    for _ in 0..120 {
+        x = x
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let latency = ((x >> 20) % 1200) as u32;
+        let interval = if x & 1 == 0 { i30 } else { i60 };
+        let n = ((x >> 3) % 3) as u32; // 0..2 (0 exercises the floor)
+        let ticks = (x >> 7) % 60;
+        let over = (x >> 40) % 3 * interval; // 0, 1 or 2 quanta over configured
+        let boundary = w.saturating_sub(latency as u64 * 1_000_000 + over + (x >> 50) % 4_000_000);
+        let skew = (x >> 45) % 60_000_000; // 0..60ms transport floor
+        let newest = w.saturating_sub(skew);
+        v.push((w, boundary, newest, latency, interval, n, ticks));
+    }
+    v
+}
+
+#[test]
+fn c_phase_convergence_matches_the_rust_authority_1049() {
+    let helper = lift_converge_helper();
+    let vs = converge_vectors();
+
+    // Lift the two constants from the SHIPPED C, never hard-code them (review 🟡2).
+    let mut c = format!(
+        "#include <stdint.h>\n#include <stddef.h>\n#include <stdbool.h>\n#include <stdio.h>\n{}\n{}\n",
+        lift_define("GENLOCK_PHASE_PIN_HYSTERESIS_NS"),
+        lift_define("GENLOCK_DRAIN_MIN_TICK_INTERVAL"),
+    );
+    c.push_str(&helper);
+    c.push_str("int main(void){\n");
+    for (wall, boundary, newest, latency, interval, n, ticks) in &vs {
+        c.push_str(&format!(
+            "    printf(\"%d\\n\", genlock_phase_converge_due({wall}ULL, {boundary}ULL, {newest}ULL, \
+             {latency}, {interval}ULL, {n}, {ticks}ULL));\n"
+        ));
+    }
+    c.push_str("    return 0;\n}\n");
+
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("genlock_converge_parity_1049");
+    fs::create_dir_all(&dir).expect("create the parity scratch dir");
+    let cfile = dir.join("converge.c");
+    let bin = dir.join("converge.bin");
+    fs::write(&cfile, &c).expect("write the parity harness");
+
+    let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
+    let out = Command::new(&cc)
+        .args(["-std=gnu99", "-Wall", "-Wextra", "-Werror", "-O1"])
+        .arg(&cfile)
+        .arg("-o")
+        .arg(&bin)
+        .output()
+        .unwrap_or_else(|e| {
+            panic!(
+                "#1049: could not run the C compiler `{cc}` ({e}). This gate compiles the \
+                 vendored genlock_phase_converge_due to prove the C and the Rust authority agree; \
+                 it must FAIL rather than skip when the toolchain is absent. Install a C compiler \
+                 or set CC."
+            )
+        });
+    assert!(
+        out.status.success(),
+        "#1049: genlock_phase_converge_due lifted from {OBS_SOURCE} does NOT COMPILE standalone \
+         under -Wall -Wextra -Werror:\n--- cc stderr ---\n{}\n--- harness ---\n{c}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let run = Command::new(&bin)
+        .output()
+        .expect("#1049: the compiled parity harness failed to execute");
+    let stdout = String::from_utf8(run.stdout).expect("harness stdout is utf-8");
+    let c_out: Vec<bool> = stdout.lines().map(|l| l.trim() == "1").collect();
+    assert_eq!(
+        c_out.len(),
+        vs.len(),
+        "#1049: harness printed the wrong count"
+    );
+
+    let mut diffs = Vec::new();
+    for (i, ((wall, boundary, newest, latency, interval, n, ticks), got_c)) in
+        vs.iter().zip(&c_out).enumerate()
+    {
+        let got_rs =
+            should_converge_phase(*wall, *boundary, *newest, *latency, *interval, *n, *ticks);
+        if got_rs != *got_c {
+            diffs.push(format!(
+                "  vector {i}: wall={wall} boundary={boundary} newest={newest} latency={latency} \
+                 interval={interval} n={n} ticks={ticks} -> C {got_c}, Rust {got_rs}"
+            ));
+        }
+    }
+    assert!(
+        diffs.is_empty(),
+        "#1049: the vendored C phase-convergence decision DIVERGED from the Tier-0 Rust authority \
+         on {} of {} vectors — the deployed shed is not the behaviour the unit tests cover:\n{}",
         diffs.len(),
         vs.len(),
         diffs.join("\n")

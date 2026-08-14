@@ -43,3 +43,37 @@ verdict investigation is the diagnostic toolkit that found it:
 Tolerance history context: `WINDOW_COPIES_GAPS_TOLERANCE` was recalibrated 2→3 (2026-08-06)
 against the chronic ~5-8 copies + ~5-8 gaps residual burden of the 62.15 fps over-rate decimation
 lane; commitment on #889 — when that lane shrinks the burden, the tolerance comes back DOWN.
+
+## The SKEW-AXIS variant: a "converge toward configured latency" target must floor at the ACHIEVABLE phase (#1049, 2026-08-14)
+
+The #998 limit cycle above is on the DEPTH/LATENCY axis (round-vs-ceil target undershoots the
+natural hold). #1049 added a bounded PHASE-convergence shed (`should_converge_phase` in
+`src/genlock_backlog.rs`, mirrored in `obs-source.c genlock_phase_converge_due`) that pulls a
+persistent per-camera acquire-phase back toward the configured latency — and its first cut hit the
+EXACT same drop/regain limit cycle on a NEW axis, the transport SKEW.
+
+The trap: the natural steady on-air age `S = wall - locked_boundary` is FLOORED by the stamp→arrival
+skew — a frame physically cannot present before it ARRIVES. A target of `reserve + interval/n +
+hysteresis` ignores that floor, so on a SHALLOW-reserve source whose skew exceeds it (the rig runs
+~20 ms cam→strih skew at the 3 ms prod floor; up to 59 ms live on `NDI cam5`), the shed fires
+forever at the natural phase: shed pushes the boundary below what arrived → next tick(s) HOLD/regain
+→ 30 ticks later shed again. One dup + one skip per ~second, on air, indefinitely — indistinguishable
+from the #998 symptom, via a different mechanism.
+
+**The invariant, reusable for ANY genlock target that converges toward a configured value: floor the
+target at the ACHIEVABLE phase.** #1049's fix: `target = max(reserve, floor)`, `floor = wall -
+newest_queued_stamp` (`array[num-1]` in C, `queue.back()` in the probe — the freshest presentable
+frame's age). Then post-shed `S' = S - quantum > target >= floor` can never go below what arrived, so
+the cycle is structurally impossible on the skew axis too (the #998 "upper-bound the natural steady
+state" lesson, applied to skew instead of frac).
+
+**How it was caught — and how it was ALMOST missed: the test skew ENVELOPE was too narrow.** The
+committed Tier-0 conveyor sim (`SimConveyor1049`) used a single 8 ms skew and passed while
+limit-cycling at 15-30 ms; the existing probe cadence sims that WOULD have caught it
+(`cadence_survives_deep_arrival_skew` at skew 20, `cadence_releases_every_frame_once_at_grid_aligned_reserve`)
+are CI-only. An adversarial review + a default-feature replica (per
+`probe-mirror-replica-testing.md`) SWEEPING skew 8/15/20/30/59 ms across reserves 3/8/20/26/36
+exposed 19-22 spurious drops. **Rule: any no-limit-cycle test for a genlock target MUST sweep BOTH
+the reserve AND the transport-skew axes — a single skew value is exactly the hole that hides this.**
+The natural-phase no-shed test (`convergence_never_sheds_at_the_natural_steady_phase_1049`) now
+sweeps both.
