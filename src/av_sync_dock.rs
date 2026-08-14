@@ -997,6 +997,33 @@ mod tests {
         assert_eq!(dock_lock_display_offset_ms(0.0), 0.0);
     }
 
+    // ---- #1004 dock-vs-gate residual: measured UNSTABLE -> ZERO additive compensation ----
+
+    #[test]
+    fn dock_lock_display_applies_zero_additive_1004() {
+        // #1004 quantified the dock-vs-gate residual live (2026-08-14, 5 healthy windows): dock -
+        // offline ranged +9..+53ms (central ~+32) and the dock's OWN within-window swing
+        // (24..75ms, cluster mad ~25..35ms) exceeds that run-to-run spread. #952's ~55ms is NOT
+        // reproduced as a stable constant post-phase-fix, so NO additive constant reconciles the
+        // two taps to the +-20ms the tightened gate needs. Decision: no compensation, dock is a
+        // coarse monitor, offline optical --av-sync is authoritative. This guard PINS that: the
+        // additive term is a MEASURED, LOCKED 0.0 and the display path is EXACTLY -offset for
+        // every operating point, so a future edit cannot silently reintroduce a guessed constant.
+        assert_eq!(
+            DOCK_LOCK_DISPLAY_ADDITIVE_MS, 0.0,
+            "the dock-vs-gate residual measured UNSTABLE (#1004) -- no additive constant is \
+             defensible; changing this needs a NEW live re-measurement proving a stable value"
+        );
+        // The measured operating points (offline means/cam2 from the 5 windows) + boundary values:
+        for g in [-186.3, -22.1, -19.5, -3.8, 0.0, 20.6, 22.5, 39.9, 56.2, 59.3, 55.0, -55.0] {
+            assert_eq!(
+                dock_lock_display_offset_ms(g),
+                -g + DOCK_LOCK_DISPLAY_ADDITIVE_MS,
+                "display path must be a pure sign negation with zero additive term for g={g}"
+            );
+        }
+    }
+
     // ---- #953 dock_lock_suggested_target ----
 
     #[test]
