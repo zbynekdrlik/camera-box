@@ -150,7 +150,7 @@ pub struct CamboxSegment {
     /// `overall_pass` — `frame_count > 0`, originally WITHOUT `copies`/`gaps` at all. **2026-08-05
     /// RE-GATE (ticket 889 comment 5196190653): `copies`/`gaps` re-joined this field, gated by a
     /// per-window tolerance** (`crate::window_gate::WINDOW_COPIES_GAPS_TOLERANCE`, recalibrated
-    /// 1 → 2 → 3 on 2026-08-06) — a window with `copies` or `gaps` at or under the tolerance still
+    /// 1 → 2 → 3 on 2026-08-06; 3 → 1 on 2026-08-14 (issue 1031)) — a window with `copies` or `gaps` at or under the tolerance still
     /// passes here; over it, this field fails again (see
     /// `SegmentedContinuity::windows_over_copies_gaps_tolerance`). Issue
     /// 915 (2026-08-01 user decision): the `<undecodable within the #881 floor>` term ALSO stopped
@@ -198,7 +198,7 @@ pub struct SegmentedContinuity {
     /// `windows_failed_report_only` below and `crate::window_gate` for the full decision record).
     /// **2026-08-05 RE-GATE: `relaxed_pass` itself now requires `copies`/`gaps` to stay within the
     /// per-window tolerance** (`crate::window_gate::WINDOW_COPIES_GAPS_TOLERANCE`, recalibrated
-    /// 1 → 2 → 3 on 2026-08-06) — the terms are no longer FULLY report-only, see
+    /// 1 → 2 → 3 on 2026-08-06; 3 → 1 on 2026-08-14 (issue 1031)) — the terms are no longer FULLY report-only, see
     /// `windows_over_copies_gaps_tolerance` below.
     /// **Issue 915 (2026-08-01 user decision): the run-wide undecodable floor ALSO stopped gating
     /// this field — see `run_wide_undecodable_within_floor` and
@@ -695,8 +695,9 @@ mod tests {
         // therefore the run) now correctly FAILS `overall_pass` again. Renamed from
         // `gap_of_three_exceeds_tolerance_..._889_regate` (itself renamed from
         // `gap_of_two_exceeds_singleton_tolerance_..._889_regate`, which was renamed from
-        // `..._889_relaxes_overall_pass`) — the fixture now sits at tolerance+1 (4, not 3) so this
-        // test tracks whatever the tolerance is calibrated to; the STRICT per-window `pass` still
+        // `..._889_relaxes_overall_pass`) — the literal gaps=4 sits comfortably over the tolerance
+        // (issue 1031 re-tightened it 3 -> 1 on 2026-08-14, so 4 is now well over, still gating);
+        // the STRICT per-window `pass` still
         // catches it exactly as before (unchanged).
         let schedule = vec![win("cam1", 0, 1000), win("cam2", 1000, 2000)];
         let mut frames = clean_frames(0, 100, 6, 1, 100);
@@ -1878,8 +1879,8 @@ mod tests {
     fn windows_over_copies_gaps_tolerance_889_regate() {
         // 3 windows: cam1 clean, cam2 has 4 copies (OVER the tolerance, recalibrated 1 -> 2 -> 3
         // on 2026-08-06, ticket 889 comments 5198131539 / 5200533407 -- must gate overall_pass
-        // again), cam3 clean. Renamed the fixture's copy count from 3 to 4 (tolerance+1) so it
-        // stays genuinely over-tolerance after the second same-day recalibration.
+        // again), cam3 clean. The literal copies=4 stays genuinely over-tolerance across every
+        // recalibration incl. issue 1031's 3 -> 1 re-tightening (2026-08-14) -- 4 is well over 1.
         let schedule = vec![
             win("cam1", 0, 1000),
             win("cam2", 1000, 3000),
@@ -1957,10 +1958,11 @@ mod tests {
     #[test]
     fn windows_at_copies_gaps_tolerance_still_pass_overall_889_regate() {
         // Same shape as `windows_failed_report_only_counts_strict_failures_across_a_mixed_run_889`
-        // -- proves the tolerance value itself, not just its absence. 2026-08-06 second
-        // recalibration (ticket 889 comment 5200533407): cam2 now carries 3 copies (the
-        // recalibrated tolerance value, was 2 before this recalibration) so this stays AT the
-        // boundary rather than under it.
+        // -- proves the tolerance value itself, not just its absence. Issue 1031 (2026-08-14):
+        // re-tightened 3 -> 1, so cam2 now carries exactly 1 copy (the recalibrated tolerance
+        // value) to stay AT the boundary rather than under it. Same "at-boundary fixture moves
+        // with the const" recalibration the 1 -> 2 -> 3 walk-up already did to it -- not a
+        // weakening: the window still sits exactly AT the tolerance and still must pass.
         let schedule = vec![
             win("cam1", 0, 1000),
             win("cam2", 1000, 2000),
@@ -1977,26 +1979,16 @@ mod tests {
                 frame_index: 101,
                 gen_ts_ns: 1200,
                 tick: Some(500),
-            }, // cam2 copy #1 -- AT the tolerance
+            }, // cam2 copy #1 -- AT the tolerance (1)
             SegmentFrame {
                 frame_index: 102,
                 gen_ts_ns: 1300,
-                tick: Some(500),
-            }, // cam2 copy #2 -- AT the tolerance
-            SegmentFrame {
-                frame_index: 103,
-                gen_ts_ns: 1400,
-                tick: Some(500),
-            }, // cam2 copy #3 -- AT the tolerance
-            SegmentFrame {
-                frame_index: 104,
-                gen_ts_ns: 1500,
                 tick: Some(501),
             },
         ]);
         frames.extend(clean_frames(2000, 100, 4, 1, 900));
         let v = segment_continuity(&frames, &schedule, 0, 1);
-        assert_eq!(v.segments[1].copies, 3, "{:?}", v.segments[1]);
+        assert_eq!(v.segments[1].copies, 1, "{:?}", v.segments[1]);
         assert!(
             v.segments[1].relaxed_pass,
             "889 re-gate: copies AT the tolerance stay within it: {:?}",

@@ -65,6 +65,13 @@ pub enum GrabberModel {
     /// Elgato 4K S (CAM5-CAM6, live fleet). No live evidence of rate instability — keeps the
     /// strict default tolerance.
     Elgato4kS,
+    /// #1034 — Elgato Cam Link 4K, the replacement card the fleet is being swapped ONTO to retire
+    /// the ShadowCast 2's characteristic capture-rate wobble (cam3 is the first swapped box, live
+    /// 2026-08-14: a genuinely stable device, 0.33% measured spread over 6h). A DISTINCT device
+    /// from the `Elgato4kS` above (different product), so it gets its own variant + honest Display
+    /// label rather than being folded into it. Keeps the STRICT default tolerance — the whole
+    /// point of the swap is that this card does NOT need ShadowCast's wide allowance.
+    CamLink4k,
     /// Hostname didn't match a known cambox (unprovisioned box, renamed host, test harness) —
     /// falls back to the STRICT default tolerance rather than guessing the wide ShadowCast-
     /// specific one; an unknown grabber deserves the tighter floor, not the benefit of the doubt.
@@ -77,6 +84,7 @@ impl std::fmt::Display for GrabberModel {
             GrabberModel::ShadowCast2 => "ShadowCast 2",
             GrabberModel::NzxtSignalHd60 => "NZXT Signal HD60",
             GrabberModel::Elgato4kS => "Elgato 4K S",
+            GrabberModel::CamLink4k => "Cam Link 4K",
             GrabberModel::Unknown => "unknown grabber model",
         })
     }
@@ -110,7 +118,14 @@ pub fn grabber_model_for_hostname(hostname: &str) -> GrabberModel {
 /// contract as the hostname mapping.
 pub fn grabber_model_from_card_name(card: &str) -> GrabberModel {
     let lower = card.to_ascii_lowercase();
-    if lower.contains("shadowcast") {
+    // #1034 — whitespace-collapsed so cam3's live DOUBLE-spaced `CAM  LINK 4K` still matches
+    // `cam link` (a bare `contains("cam link")` would miss the double space). Checked FIRST: a
+    // Cam Link 4K string never contains any other model's marker, so order is not load-bearing,
+    // but keeping it first documents that this is the intended fleet-replacement card.
+    let collapsed = lower.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.contains("cam link") {
+        GrabberModel::CamLink4k
+    } else if lower.contains("shadowcast") {
         GrabberModel::ShadowCast2
     } else if lower.contains("elgato") {
         GrabberModel::Elgato4kS
@@ -147,13 +162,28 @@ pub fn resolve_grabber_model(hostname: &str, detected_card: Option<&str>) -> Gra
     grabber_model_for_hostname(hostname)
 }
 
-/// #685 — ShadowCast 2's per-model capture-rate tolerance (percent). Set to cover the FULL live-
-/// observed characteristic-wobble range with margin (~55fps-64.02fps against a 60.000fps
-/// negotiated rate = up to ~8.3% deviation — #656, #663, #665) while still catching a genuinely
-/// severe deviation well outside that envelope. Deliberately a SEPARATE named constant (not a
-/// widening of the shared `CAPTURE_RATE_TOLERANCE_PCT`) so a future `GrabberModel` variant added
-/// later doesn't silently inherit ShadowCast's allowance.
-pub const SHADOWCAST2_CAPTURE_RATE_TOLERANCE_PCT: f64 = 10.0;
+/// #685/#1034 — ShadowCast 2's per-model capture-rate JITTER/reset floor (percent). This is the
+/// deviation beyond which a sustained streak escalates to an actual USB reset, so it must sit
+/// ABOVE the model's genuine characteristic wobble or it re-introduces issue-909 reset-spam (each
+/// spurious reset an ~8.3s `frozen_leg` misclassification).
+///
+/// #1034 tightened this 10.0 -> 9.0 off a fresh live re-measure (2026-08-14, the two real
+/// ShadowCasts): cam1 mean 61.10 / max 62.80 fps (4.67% dev) and cam2 mean 61.28 / max 61.70 fps
+/// (2.83%) over ~8h. 9.0 still clears the ShadowCast CLASS's historical characteristic envelope
+/// (~55fps-64.02fps against 60.000fps = up to ~8.33% — #656/#663/#665), so no genuinely-healthy
+/// wobble regresses into a reset, while catching a genuinely-severe sustained deviation JUST
+/// beyond that envelope that the old 10.0 let slip.
+///
+/// This stays an INTERIM value for un-swapped ShadowCast units. The real shrink to the strict base
+/// `CAPTURE_RATE_TOLERANCE_PCT` (1%) happens per-box as each ShadowCast is physically swapped to a
+/// Cam Link 4K (`GrabberModel::CamLink4k`) — cam3 is already swapped and gates at 1% (0.33% live
+/// spread). Do NOT tighten this below the class's ~8.33% envelope on the shared reset floor until
+/// the hardware is actually replaced.
+///
+/// Deliberately a SEPARATE named constant (not a widening of the shared
+/// `CAPTURE_RATE_TOLERANCE_PCT`) so a future `GrabberModel` variant added later doesn't silently
+/// inherit ShadowCast's allowance.
+pub const SHADOWCAST2_CAPTURE_RATE_TOLERANCE_PCT: f64 = 9.0;
 
 /// The capture-rate deviation tolerance (percent) to use with `is_rate_deviant`, given this box's
 /// grabber model. `CAPTURE_RATE_TOLERANCE_PCT` (1%, unchanged) for every model except
@@ -161,14 +191,15 @@ pub const SHADOWCAST2_CAPTURE_RATE_TOLERANCE_PCT: f64 = 10.0;
 pub fn tolerance_pct_for_model(model: GrabberModel) -> f64 {
     match model {
         GrabberModel::ShadowCast2 => SHADOWCAST2_CAPTURE_RATE_TOLERANCE_PCT,
-        GrabberModel::NzxtSignalHd60 | GrabberModel::Elgato4kS | GrabberModel::Unknown => {
-            CAPTURE_RATE_TOLERANCE_PCT
-        }
+        GrabberModel::NzxtSignalHd60
+        | GrabberModel::Elgato4kS
+        | GrabberModel::CamLink4k
+        | GrabberModel::Unknown => CAPTURE_RATE_TOLERANCE_PCT,
     }
 }
 
 /// #717 — SUSTAINED-band capture-rate deviation tolerance (percent) for ShadowCast 2. #685's wide
-/// `SHADOWCAST2_CAPTURE_RATE_TOLERANCE_PCT` (10%) correctly tolerates ShadowCast 2's characteristic
+/// `SHADOWCAST2_CAPTURE_RATE_TOLERANCE_PCT` (9%) correctly tolerates ShadowCast 2's characteristic
 /// SHORT-LIVED quantization jitter (band (a): deviation bursts that self-recover within ~60s) —
 /// but it ALSO swallowed a genuinely SUSTAINED, reset-fixable defect (band (b): the #674 closure
 /// evidence — cam1 held a rock-steady 63.9-64.0fps, a 6.5-6.67% deviation, for an ENTIRE 10-window
@@ -178,7 +209,7 @@ pub fn tolerance_pct_for_model(model: GrabberModel) -> f64 {
 /// characteristic to tolerate" (see the project's calibrate-artifact-vs-fix-robustness playbook
 /// note). This SEPARATE, narrower floor is what the SUSTAINED check (`SUSTAINED_WARN_WINDOWS`,
 /// 60s) uses instead of the wide jitter floor, so a deviation this size that actually PERSISTS
-/// still trips self-heal even though it never reaches the wide 10% jitter floor.
+/// still trips self-heal even though it never reaches the wide 9% jitter floor.
 pub const SHADOWCAST2_SUSTAINED_TOLERANCE_PCT: f64 = 2.0;
 
 /// #717 — number of consecutive 5s report windows a SUSTAINED-band deviation must hold before it
@@ -193,7 +224,7 @@ pub const SUSTAINED_WARN_WINDOWS: u32 = 12;
 /// The SUSTAINED-band capture-rate deviation tolerance (percent) to use for a self-heal decision,
 /// given this box's grabber model. `GrabberModel::ShadowCast2` gets the narrow
 /// `SHADOWCAST2_SUSTAINED_TOLERANCE_PCT` (2%) — a SEPARATE, TIGHTER floor than its own
-/// (jitter-band) `tolerance_pct_for_model` (10%) — so a sustained-but-under-10%-deviation defect
+/// (jitter-band) `tolerance_pct_for_model` (9%) — so a sustained-but-under-9%-deviation defect
 /// (#674's chronic 64fps) still trips self-heal even though it never reaches the wide jitter
 /// floor. Every other model returns the SAME value as `tolerance_pct_for_model` — their
 /// single-band strict tolerance already IS the sustained tolerance, so pairing it with
@@ -203,9 +234,10 @@ pub const SUSTAINED_WARN_WINDOWS: u32 = 12;
 pub fn sustained_tolerance_pct_for_model(model: GrabberModel) -> f64 {
     match model {
         GrabberModel::ShadowCast2 => SHADOWCAST2_SUSTAINED_TOLERANCE_PCT,
-        GrabberModel::NzxtSignalHd60 | GrabberModel::Elgato4kS | GrabberModel::Unknown => {
-            tolerance_pct_for_model(model)
-        }
+        GrabberModel::NzxtSignalHd60
+        | GrabberModel::Elgato4kS
+        | GrabberModel::CamLink4k
+        | GrabberModel::Unknown => tolerance_pct_for_model(model),
     }
 }
 
@@ -483,6 +515,51 @@ mod tests {
         );
     }
 
+    /// #1034 — the Cam Link 4K card swap (issue-728 lineage) has already landed on cam3, whose
+    /// live `card` string is `CAM  LINK 4K: CAM  LINK 4K` (note the DOUBLE space between CAM and
+    /// LINK — the match must be whitespace-robust). It must be recognized as its own model so
+    /// `resolve_grabber_model` hands it the STRICT base tolerance, instead of falling through to
+    /// the hostname table's `CAM3 → ShadowCast2` (wide 9%) mapping that wrongly gave a
+    /// rock-steady 0.33%-spread device the ShadowCast grabber allowance.
+    #[test]
+    fn grabber_model_from_card_name_recognizes_cam_link_4k_1034() {
+        assert_eq!(
+            grabber_model_from_card_name("CAM  LINK 4K: CAM  LINK 4K"),
+            GrabberModel::CamLink4k,
+            "cam3's live double-spaced Cam Link 4K card string must be recognized"
+        );
+        assert_eq!(
+            grabber_model_from_card_name("Cam Link 4K"),
+            GrabberModel::CamLink4k
+        );
+        assert_eq!(
+            grabber_model_from_card_name("CAM LINK 4K"),
+            GrabberModel::CamLink4k
+        );
+    }
+
+    /// #1034 — cam3's decisive scenario: hostname still says `CAM3` (→ ShadowCast2 in the static
+    /// table) but the box physically has a Cam Link 4K now. Detection must win and hand it the
+    /// strict base tolerance (1%), NOT the wide ShadowCast 9% floor.
+    #[test]
+    fn resolve_grabber_model_cam_link_4k_wins_over_shadowcast_hostname_1034() {
+        assert_eq!(
+            resolve_grabber_model("CAM3", Some("CAM  LINK 4K: CAM  LINK 4K")),
+            GrabberModel::CamLink4k
+        );
+        assert_eq!(
+            tolerance_pct_for_model(GrabberModel::CamLink4k),
+            CAPTURE_RATE_TOLERANCE_PCT,
+            "a Cam Link 4K is a genuinely stable device — strict base tolerance, not ShadowCast's \
+             wide floor"
+        );
+        assert_eq!(
+            sustained_tolerance_pct_for_model(GrabberModel::CamLink4k),
+            CAPTURE_RATE_TOLERANCE_PCT
+        );
+        assert_eq!(GrabberModel::CamLink4k.to_string(), "Cam Link 4K");
+    }
+
     #[test]
     fn grabber_model_from_card_name_is_case_insensitive() {
         assert_eq!(
@@ -627,6 +704,38 @@ mod tests {
         );
     }
 
+    /// #1034 — the ShadowCast jitter/reset floor is tightened 10% -> 9% off a fresh live
+    /// re-measure (2026-08-14: cam1 max 4.67% / cam2 max 2.83% over ~8h; the ShadowCast CLASS's
+    /// historical characteristic envelope tops at ~8.33%, the 55.0 fps low-side). 9% stays above
+    /// that class envelope so no existing rig-forensic reading trips and no issue-909 reset-spam
+    /// regresses, while catching a genuinely-severe sustained deviation JUST beyond the envelope
+    /// that the old 10% floor let slip. (The REAL shrink to base 1% is delivered per-box by the
+    /// Cam Link 4K swap — cam3 already there.)
+    #[test]
+    fn shadowcast2_jitter_floor_tightened_to_9pct_catches_beyond_class_envelope_1034() {
+        let tol = tolerance_pct_for_model(GrabberModel::ShadowCast2);
+        // 65.7 fps vs 60.0 = 9.5% — beyond the ~8.33% class envelope. NOT deviant under the old
+        // 10% floor (RED), deviant under 9% (GREEN).
+        assert!(
+            is_rate_deviant(65.7, 60.0, tol),
+            "a 9.5% sustained deviation must trip the tightened 9% ShadowCast floor"
+        );
+        assert!(
+            is_rate_deviant(54.3, 60.0, tol),
+            "the symmetric 9.5% low-side deviation must trip too"
+        );
+        // Over-tightening guard: cam1's live measured max (62.80 fps = 4.67%) and the class's
+        // historical characteristic readings (55.0 / 64.02 fps, up to 8.33%) must STAY within the
+        // floor so E2E gates stay green and no reset-spam regresses (issue-909).
+        for captured in [62.80, 64.02, 55.0] {
+            assert!(
+                !is_rate_deviant(captured, 60.0, tol),
+                "captured={captured} is within the ShadowCast characteristic envelope — must not \
+                 trip the reset floor (would re-introduce issue-909 reset-spam)"
+            );
+        }
+    }
+
     #[test]
     fn nzxt_and_elgato_still_flag_the_same_deviation_shadowcast2_now_tolerates() {
         // The whole point of a PER-MODEL tolerance: only ShadowCast 2 gets the wider floor. A
@@ -641,14 +750,14 @@ mod tests {
     // -----------------------------------------------------------------------------------------
     // #717 — two-band ShadowCast 2 envelope: a SEPARATE, narrower SUSTAINED-band tolerance
     // (2%, `SUSTAINED_WARN_WINDOWS`=60s) catches a genuinely chronic defect that #685's wide
-    // 10%/30s jitter band correctly tolerates as short-lived characteristic wobble.
+    // 9%/30s jitter band correctly tolerates as short-lived characteristic wobble.
     // -----------------------------------------------------------------------------------------
 
     #[test]
     fn real_674_chronic_64fps_is_sustained_deviant_under_shadowcast2() {
         // #674 closure evidence: cam1 held 63.9-64.0fps rock-steady for an entire recording —
         // 6.5-6.67% deviation from the 60.0 negotiated rate. Must trip the SUSTAINED band even
-        // though it stays comfortably inside ShadowCast 2's wide 10% jitter floor.
+        // though it stays comfortably inside ShadowCast 2's wide 9% jitter floor.
         let sustained_tol = sustained_tolerance_pct_for_model(GrabberModel::ShadowCast2);
         assert!(is_rate_deviant(63.9, 60.0, sustained_tol));
         assert!(is_rate_deviant(64.0, 60.0, sustained_tol));

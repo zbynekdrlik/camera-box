@@ -1363,7 +1363,7 @@ async fn run_capture_loop(
                         // become genuinely CHRONIC, does self-heal actually act.
                         if sustained_confirmed && !jitter_confirmed && !sustained_chronic {
                             tracing::info!(
-                                "#717 capture-delivery-rate SUSTAINED band confirmed (informational only FOR NOW, see #909/#971 — this escalates once chronic): {:.2} fps captured vs {:.2} fps configured/negotiated (>{:.1}% deviation sustained for {} consecutive report windows, ~{}s) — inside {}'s wide {:.1}% jitter-tolerant envelope; the genlock decimation gate absorbs this over-rate into exact NDI output by design, so NO USB reset is triggered yet (see #971: escalates to a reset if this persists to {}s)",
+                                "#717 capture-delivery-rate SUSTAINED band confirmed (informational at THIS tier — a USB reset AUTO-ESCALATES once this sustained deviation becomes chronic, see #971): {:.2} fps captured vs {:.2} fps configured/negotiated (>{:.1}% deviation sustained for {} consecutive report windows, ~{}s) — inside {}'s wide {:.1}% jitter-tolerant envelope; the genlock decimation gate absorbs this over-rate into exact NDI output by design, so NO USB reset is triggered yet (see #971: escalates to a reset if this persists to {}s)",
                                 cap_fps,
                                 configured_capture_fps,
                                 sustained_rate_tolerance_pct,

@@ -7,7 +7,7 @@
 #
 # The appliance's OWN capture loop (src/capture_rate_health.rs + its src/main.rs call site)
 # already logs a WARN naming #656 once a camera's captured fps has sustained a deviation from
-# its negotiated capture rate (>1% for most grabber models; #685 widens this to >10% for
+# its negotiated capture rate (>1% for most grabber models; #685 widens this to >9% for
 # ShadowCast 2 specifically, since that model's own USB output clock free-runs even against its
 # own HDMI input, producing a characteristic quantized-rate wobble that isn't a real defect) for
 # CAPTURE_RATE_WARN_WINDOWS (6) consecutive 5s report windows — the exact #656 root cause (cam1's

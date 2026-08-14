@@ -7892,9 +7892,9 @@ mod tests {
         );
         assert_eq!(
             seg["copies_gaps_tolerance"],
-            serde_json::json!(3),
-            "889 re-gate: the tolerance value must be echoed in the JSON (recalibrated 1 -> 2 -> 3 \
-             on 2026-08-06, ticket 889 comments 5198131539 / 5200533407): {seg}"
+            serde_json::json!(camera_box::window_gate::WINDOW_COPIES_GAPS_TOLERANCE),
+            "889 re-gate: the tolerance value must be echoed in the JSON (tracks the \
+             window_gate constant so the walk-down never breaks this echo check): {seg}"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

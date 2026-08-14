@@ -7805,3 +7805,99 @@ prerequisite, closed 2026-06-15); the rig is genlocked so it was dead code.
   73ab458b, GREEN 1d35d2cb). Strih n>=2 byte-identical. Parity vectors + static + pwsh anchors +
   mutation-proof. A hysteresis band was rejected (frac-dependent overshoot, differs by n). Playbook:
   the "THIRD axis" section in genlock-fifo-limit-cycle-diagnosis.md.
+
+## 2026-08-14 — round-5 integration (PR 1050: tickets 1036 + 1047 + 1049) — the A/V lottery killed
+- The round folded the ticket-1049 phase-convergence fix mid-flight: the E2E gate itself was a per-run dice roll (each strih ingest could lock a random ±1..4-frame phase; five consecutive gate runs failed on different rolls), so the fix HAD to deploy before any gate could stabilize.
+- Fix-forward round trip inside the round: the first deployed convergence build limit-cycled on the stream deep n=1 source (converge_sheds+holds lockstep, one dup+skip pair per ~1.4 s) — root cause structural (an n=1 shed cannot stick; the queue regains it next tick), fixed by gating convergence to N>=2, parity-locked, redeployed.
+- Post-deploy field proof: strih ingest skews converged 66/66/66 ms (converge_sheds brief climb then quiet, relocks 0 — the old storm sawtooth gone too); final gate run GREEN with A/V +48/+42/+30 and ZERO manual rig intervention (previous runs needed setpoint nudges every time).
+- Two dead-painter incidents mid-gauntlet (the cleanup restore-timeout leaves the painter dead, optical leg black, undecodable floor breach) — evidence on ticket 860; its watchdog+fail-fast branch is built and awaits next round's integration.
+- Operational lesson recorded on ticket 1049: pre-fix, a setpoint INCREASE re-rolled the phase (relock) while a DECREASE converged ~1:1 via drain — manual corrections had to approach from above. Moot post-fix.
+- Ticket 1021 closed as already-solved (merged 2026-08-12 via PR 1020; stayed open only because paren-form commits never auto-close).
+
+## issue 860 — optical injection leg: dead-painter / optical-black detection, alert, fail-fast (2026-08-14, worktree autopilot-860)
+- SCOPE re-derived from the fresh 2026-08-14 incident (not the stale camera-shutter body the user
+  already refuted): a chain of FAILED E2E runs whose cleanups each logged the buried
+  `WARNING 712 cam2/painter restore failed/timed out` left the painter DEAD (cam2 monitor black),
+  the next gate reported the optical hop UNAVAILABLE + breached the undecodable floor, and NO alert
+  fired anywhere. Three gaps closed: (1) no standing detector/alerter, (2) no harness fail-fast,
+  (3) the cleanup restore-failure stayed a buried stderr WARNING.
+- ARCH: one SHARED pure decision core `scripts/lib/optical-chain-health.sh` (I/O-free, Tier-0
+  tested) feeds TWO dev1-side surfaces — the standing `scripts/optical-chain-alert-watchdog.sh`
+  (systemd timer, mirrors imag-power-envelope-alert-watchdog) and the recording-e2e.sh [0/8]
+  preflight (via `scripts/lib/optical-chain-preflight.sh`, the sourced-lib pattern — no anchored
+  line edited). TEST/EVENT discriminator = painter_expected (pidfile present OR cam2-painter.service
+  enabled) — the DURABLE state rig-mode.sh already maintains; EVENT mode -> expected=0 -> no false
+  alert. Optical proof reuses the EXISTING assert-program-nonblack (no new black-check); throttle
+  reuses obs_watchdog_alert_throttle + obs_watchdog_confirm (no new alert mechanism).
+- FAIL-FAST aborts LOUD only on painter-EXPECTED-but-DEAD (no OBS dependency, zero false-abort
+  risk), with a grace re-probe for a transient service restart; strih-BLACK is a WARN.
+- 712 SURFACE: cambox_parallel_wait_and_report records CAMBOX_PARALLEL_FAILED_LABELS;
+  cambox_parallel_surface_painter_failure emits a GitHub ::error:: annotation for a dead painter
+  (::warning:: for other boxes), never exiting — cleanup always-runs intact.
+- REVIEW (fresh general-purpose subagent, /review + requesting-code-review): 0 red, 2 yellow, 2 blue,
+  ALL fixed in-branch — OBS_PASSWORD EnvironmentFile wiring, preflight grace re-probe, watchdog
+  2-pass confirm, watchdog ssh timeout wrap.
+- Commits: chore bump (88b0d4ab), RED core (e90a462e), GREEN core (089fe8c9), watchdog+units
+  (c8826954), RED surface (29f0e2aa), GREEN fail-fast+surface (9f8bfc71), fmt (df568ed7), review
+  fixes (a56e6d14). Tests: harness_optical_chain_health_860 (12) + harness_optical_chain_cleanup_surface_860 (4).
+  FULL suite green after the recording-e2e.sh anchor-touching edit (204 ok, 3310 tests, 0 failed).
+  Playbook: `.claude/rules/optical-chain-health-watchdog.md`. WORKTREE MODE: stopped at green local
+  (supervisor integrates + installs the timer + deploys).
+
+## 2026-08-14 — issue 1031 (autopilot-1031): re-tighten WINDOW_COPIES_GAPS_TOLERANCE 3 -> 1
+- Version 1.7.0-dev.451. Commits: chore 5d3f590f, test [red] 35027fdb, fix [green] 33c18118, docs 0d76ccaa.
+- CONTEXT: the walk-down ticket for the core zero-loss claim's heaviest relaxation. Two genlock
+  fixes deployed to the rig at 09:17-09:18 CEST (verified LIVE: imag-nb libobs.so.30/distroav.so +
+  strih obs.dll replaced 09:17, OBS restarted 09:18) -- issue 1042 (min-delta source rate) + issue
+  1049 (N>=2 phase convergence) -- collapsed the chronic per-window copies/gaps burden.
+- DATA: pre-fix healthy runs carried gaps up to 3 (why tolerance was 3); relock storms hit 14-28.
+  The one steady-state post-fix full-cycle run (1780620060, started 09:45, +27 min after the OBS
+  restart, fully converged) measured per-window max copies=1/gaps=1, windows_over_tol=0,
+  overall_pass=true. Run 1074024850 (started 09:20, 2 min after the OBS restart) EXCLUDED as a
+  convergence transient (14/window). All-zero-frames run 2116513284 excluded (dead/no-signal).
+- STEP: 3 -> 1, the tightest value the steady post-fix data supports. NOT 0 (a single stale_replay
+  dup+gap residual remains = the issue-859 shared-duplicate fault, root cause not landed; and 0
+  structurally breaks the "at-tolerance fails strict" tests) and NOT 2 (data supports tighter).
+  Ticket STAYS OPEN for the 1 -> 0 step, gated on issue 859 + N>=2 consecutive green post-fix runs
+  at tolerance=1 measuring per-window 0/0.
+- TESTS: window_gate.rs boundary tests track the const (self-adjust); only the literal pin + the one
+  at-boundary integration fixture (recording_segments cam2, 3 -> 1 copies) move. New behavioral RED
+  (two_copies_or_gaps_now_gate_after_1031) locks that 2 now gates. Over-tolerance fixtures (literal
+  4/9) stay over at T=1; their stale "tolerance+1" comments corrected.
+- GOTCHA: deploy-time segregation is load-bearing. Verdict mtime = run END; a run that STARTS within
+  ~10 min of a genlock OBS restart records the convergence transient, not steady state -- exclude
+  it. Verify the deploy time from the RIG (OBS process start + libobs/obs.dll mtime), never from the
+  verdict (verdicts record NO version). The relevant deploy is the OBS genlock (imag-nb + strih),
+  NOT the cam-box binary (cam1 was still dev.432 -- irrelevant to genlock fixes).
+- Playbook: .claude/rules/window-gate-tolerance-walkdown.md (new).
+
+## 2026-08-14 — #1034 (capture-rate lane re-tighten) — worktree autopilot-1034, v1.7.0-dev.451
+
+Three named "relaxations"; live fleet re-measure reshaped two of them (ssh journals CAM1/2/3):
+
+- **item 1 (main.rs `#717` "informational only FOR NOW")** — ALREADY escalated by issue-971
+  (sustained band → USB reset once chronic @900s) and it FIRED LIVE on cam1 today
+  `2026-08-14T05:36:32Z` (900s sustained ~62.2fps → `#971 … CHRONIC … USB-reset`). No new
+  escalation added (would duplicate issue-971 / risk reset-spam). Only sharpened the misleading
+  "FOR NOW" wording → "informational at THIS tier — a USB reset AUTO-ESCALATES once … chronic".
+  Grep anchor `#717 … SUSTAINED band confirmed` preserved; 2 harness fixtures updated. Commit
+  `3c738493e`.
+- **item 2 (fold `#717` into the offline hard-fail alternation)** — the chronic case (`#971`) is
+  ALREADY in `capture_rate_defect_grep_pattern_hard`; folding the PLAIN sustained band would
+  permanently RED cam1's E2E gate (chronically 61-62.8fps, absorbed into exact NDI by the genlock
+  decimation gate) = the issue-909 mistake, ruled out by the rig-validated issue-992 decision. NO
+  gate-script change — documented as already-correctly-tiered.
+- **item 3 (ShadowCast 10% tolerance re-measure)** — the real code work:
+  - **3a**: cam3 already swapped to a Cam Link 4K (live card `CAM  LINK 4K`, DOUBLE space) but
+    `resolve_grabber_model` fell back to `CAM3→ShadowCast2` (wide 10%). Added
+    `GrabberModel::CamLink4k` (whitespace-collapsed `"cam link"` match → strict base 1%). cam3
+    is a rock-steady 0.33% device → now correctly gates at 1%. RED `c36399004` / GREEN `b5546b602`.
+  - **3b**: `SHADOWCAST2_CAPTURE_RATE_TOLERANCE_PCT` 10.0 → **9.0** (the JITTER/reset floor). Live
+    measured spread (~8h): cam1 mean 61.10 / max 62.80 (4.67%), cam2 mean 61.28 / max 61.70
+    (2.83%). 9% clears the class historical characteristic envelope (~8.33%, 55fps) so no
+    reset-spam regresses, catches a >9% severe deviation the old 10% let slip. INTERIM for
+    un-swapped units; the real base-1% shrink lands per-box via the Cam Link swap. RED `541f2f574`
+    / GREEN `3135186b0`. Full evidence table pinned on the ticket.
+
+Live measurement table (2026-08-14): CAM1 ShadowCast max 4.67% · CAM2 ShadowCast max 2.83% ·
+CAM3 Cam Link 4K 0.33% (was mislabelled ShadowCast2). Worktree; supervisor integrates the round.

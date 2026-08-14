@@ -1,0 +1,24 @@
+[Unit]
+# cam2 optical-injection-leg alert (#860), DEV1-SIDE. ONE measure -> decide -> alert pass.
+# cam2 has no airuleset checkout / Discord credentials, so the alert fires from dev1 -- the SAME
+# topology as imag-obs-alert-watchdog.service (#882) / imag-power-envelope-alert-watchdog.service
+# (#1040). TEST-mode-aware: only pages when a painter is EXPECTED (pidfile present or
+# cam2-painter.service enabled); EVENT mode's deliberately-dark broadcast monitor never pages.
+Description=camera-box cam2 optical-chain alert (#860) — one measure/decide/alert pass
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Service]
+Type=oneshot
+# %h = the installing user's home on dev1. Adjust if the checkout lives elsewhere.
+ExecStart=%h/devel/camera-box/scripts/optical-chain-alert-watchdog.sh
+# One ssh round-trip to cam2 + one bounded OBS-WS optical probe to strih (poll up to
+# OBS_BLACKCHECK_TIMEOUT_S); give it room but never hang the timer.
+TimeoutStartSec=90
+# The strih OBS WebSocket password (for the #901 assert-program-nonblack OPTICAL-BLACK probe) comes
+# from the user environment, NOT this unit -- set it in ~/.config/environment.d/ or an
+# EnvironmentFile, NEVER committed (same convention as obs-liveness-watchdog.service):
+#   Environment=OBS_PASSWORD=...            (NOT committed)
+# WITHOUT it the OPTICAL-BLACK probe reads UNKNOWN (never a false alert) and only the PAINTER-DEAD
+# path -- which needs no OBS creds, just the cam2 ssh -- pages. Wire it to enable the #901/#754
+# process-alive-but-black detection too.
+EnvironmentFile=-%h/.config/camera-box/optical-chain-watchdog.env

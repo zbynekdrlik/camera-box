@@ -1,0 +1,17 @@
+[Unit]
+# Fires the #860 cam2 optical-injection-leg alert every 5 min (dev1-side), matching the
+# imag-obs-alert-watchdog / imag-power-envelope-alert-watchdog cadence so the fleet's dev1 alert
+# timers stay in lockstep. A dead painter (dark cam2 monitor) or a black-rendered optical leg pages
+# within ~5 minutes of onset while a painter is EXPECTED (TEST mode) -- a silently-dark monitor
+# poisoning consecutive gate runs is exactly what the standing rig-alert rule forbids.
+Description=Run the camera-box cam2 optical-chain alert every 5 min (#860)
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=20s
+Persistent=false
+
+[Install]
+WantedBy=timers.target
