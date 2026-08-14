@@ -63,7 +63,14 @@ fn set_exec(p: &Path) {
 /// let a concurrent acquirer run at that exact instant, then delete the directory. A `probe` file
 /// records whether the ACTIVE lease path (`$RIG_LEASE_DIR`) is ever observable as "dir present,
 /// holder.json absent". Any other `rm` passes straight through to the real binary.
-fn write_rm_shim(shim: &Path, probe: &Path, acq_out: &Path, real_rm: &str, clean_path: &str, script: &Path) {
+fn write_rm_shim(
+    shim: &Path,
+    probe: &Path,
+    acq_out: &Path,
+    real_rm: &str,
+    clean_path: &str,
+    script: &Path,
+) {
     let body = format!(
         "#!/usr/bin/env bash\n\
          target=\"${{@: -1}}\"\n\
