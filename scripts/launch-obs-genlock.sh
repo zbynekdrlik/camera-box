@@ -10,6 +10,13 @@
 # log shows the genlock render tick ENABLED (the build-default proof) AND DistroAV loaded, failing
 # LOUD otherwise (never a silent stock-OBS / wrong-build / broken-locale launch).
 #
+# #1057 VERIFY-AT-START: the emitted PLAN also directs a MANDATORY dev1-side post-launch burn
+# sweep-off (scripts/obs_burn_filter.py sweep-off --host <box_ip>) — a saved genlock_burn=true
+# reloads at OBS start and renders the QR burn onto the LIVE program, and the box has no on-box WS
+# client to clear it, so it is forced OFF + loud-reported from dev1 (session-agnostic WS op, per
+# win-ssh-vs-mcp) the moment the launch verifies. The emitted PowerShell PROGRAM still never touches
+# the burn (no python/WS on the box); the sweep is a dev1-side PLAN step, not an on-box one.
+#
 # HOW THE PIECES FIT (same model as scripts/recording-verdict-on-stream.sh — historically "scp/ssh
 # to Windows is DENIED on this rig, so the agent drives the win-* MCP"; #701 proved plain
 # OpenSSH+password scp/ssh actually WORKS against strih (10.77.9.202) and stream (10.77.9.204)
@@ -419,10 +426,23 @@ ${PROGRAM}
 # ----------------------------------------------------------------------------------------------------
 # STEP 2: the program EXITS 0 only when the OBS log shows 'render tick ENABLED' (the #257 build proof).
 #         A non-zero exit means it is NOT the genlock build — do NOT trust the box; check the deploy.
-# STEP 3: to toggle the measurement burn (TEST mode), DON'T relaunch — flip the per-source bool over
+# STEP 3 (#1057) — VERIFY-AT-START (MANDATORY): a saved genlock_burn=true is reloaded at every OBS
+#         start and RENDERS the QR measurement burn onto the LIVE program output (the gate's [0/8]
+#         sweep only clears it DURING a gate run, never on a restart outside one). The Windows box
+#         has no on-box python/OBS-WebSocket client and obs_burn_filter.py is not deployed there, so
+#         force burns OFF from DEV1 (a session-agnostic WS op, per win-ssh-vs-mcp) the moment STEP 2
+#         confirms OBS is up — run ON DEV1, NOT in the ${mcp} MCP Shell:
+#           python3 scripts/obs_burn_filter.py sweep-off --host ${box_ip}
+#         It enumerates EVERY ndi_source input from OBS reality (never a static list), forces any
+#         genlock_burn OFF, read-back verifies, and reports LOUDLY — exit 0 = clean; non-zero (a
+#         still-ON input or an enumeration failure = fail-closed) means a burn LEAKED: do NOT trust
+#         this box on live program until it clears. (A measurement burn is NEVER legitimate operator
+#         state, so forcing it OFF at start never fights the operator — unlike the per-source
+#         latency pins, whose verify-at-start is tracked separately.)
+# STEP 4: to toggle the measurement burn (TEST mode), DON'T relaunch — flip the per-source bool over
 #         WebSocket:  scripts/obs_burn_filter.py add|remove --host ${box_ip} --input "<NDI input>"
 #         (or use scripts/rig-mode.sh test|event, which does it for both boxes).
-# STEP 4 (#674): once STEP 2 confirms the relaunch succeeded, mark it on imag-nb's own journald so
+# STEP 5 (#674): once STEP 2 confirms the relaunch succeeded, mark it on imag-nb's own journald so
 #         a future imag judder report can be time-correlated against this restart:
 #         scripts/mark-imag-restart.sh --box ${box} --reason "<why you relaunched>"
 PLAN
