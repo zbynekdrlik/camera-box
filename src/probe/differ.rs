@@ -387,8 +387,8 @@ pub struct FullSpanReport {
 }
 
 /// Bounds for the full-span (source→endpoint) gate. Mirrors the relevant
-/// `diff_hop` knobs so the headline obeys the same contract; defaults (`None` /
-/// `0`) reproduce strict zero-loss with no INCONCL guard.
+/// `diff_hop` knobs so the headline obeys the same contract; a `min_single_copy`
+/// of `0` reproduces strict zero-loss with no INCONCL guard.
 pub struct FullSpanBounds {
     /// Non-vacuous floor: a source or endpoint tap with fewer than this many
     /// run-id frames FAILS rather than certifying off near-zero data.
