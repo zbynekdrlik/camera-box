@@ -2727,7 +2727,10 @@ mod tests {
             drain_eligible: bool,
             q: &mut std::collections::VecDeque<u64>,
         ) {
-            let mut shed = false;
+            // Mirror of the C tail: the #859 depth drain (byte-identical) then the #1049 phase
+            // converge, sharing `ticks_since_drain`. No explicit "already shed" flag is needed —
+            // after a drain resets the counter to 0, should_converge_phase reads ticks < the
+            // throttle interval and returns false, so the two can never both fire this tick.
             if drain_eligible {
                 if should_drain_one(q.len() as u64, reserve_ms, 60, 1, self.ticks_since_drain)
                     && q.len() > 1
@@ -2735,28 +2738,30 @@ mod tests {
                     q.pop_front();
                     self.drops += 1;
                     self.ticks_since_drain = 0;
-                    shed = true;
                 } else {
                     self.ticks_since_drain += 1;
                 }
             }
-            if !shed
-                && self.converge
-                && should_converge_phase(
+            // `self.converge` stands in for "the #1049 block is present"; when it is, both STEADY
+            // paths are converge_eligible (the C `if (converge_eligible)`), and the block also
+            // maintains the shared counter on the N>=2 path (`!drain_eligible`, where the drain
+            // block did not run).
+            if self.converge {
+                if should_converge_phase(
                     wall,
                     old_boundary,
                     reserve_ms,
                     I30,
                     n,
                     self.ticks_since_drain,
-                )
-                && q.len() > 1
-            {
-                q.pop_front();
-                self.drops += 1;
-                self.ticks_since_drain = 0;
-            } else if !drain_eligible {
-                self.ticks_since_drain += 1;
+                ) && q.len() > 1
+                {
+                    q.pop_front();
+                    self.drops += 1;
+                    self.ticks_since_drain = 0;
+                } else if !drain_eligible {
+                    self.ticks_since_drain += 1;
+                }
             }
         }
     }

@@ -441,6 +441,73 @@ fn raw_drain_erases_index_zero(raw: &str) -> bool {
     window.contains("da_erase(source->async_frames, 0);") && !window.contains("array[1]")
 }
 
+/// #1049 — the bounded PHASE CONVERGENCE on the steady conveyor must be present and WIRED. The
+/// N>=2 conveyor has no depth drain, so without this a per-camera acquire-phase error persisted
+/// forever (the strih 60-into-30 A/V-offset ladder). Mirror of src/genlock_backlog.rs
+/// should_converge_phase (Tier-0 tested) + the C-vs-Rust parity gate
+/// tests/genlock_relock_selection_parity.rs.
+#[test]
+fn phase_convergence_present_and_wired_in_1049() {
+    let src = squish(&vendor_file(OBS_SOURCE));
+
+    // The PURE liftable decision (the parity gate compiles this standalone) and its source wrapper.
+    assert!(
+        src.contains("static inline bool genlock_phase_converge_due("),
+        "{OBS_SOURCE}: #1049 — the pure phase-converge decision genlock_phase_converge_due is \
+         gone; the per-camera acquire-phase would never converge again. Mirror: \
+         src/genlock_backlog.rs should_converge_phase."
+    );
+    assert!(
+        src.contains("static bool genlock_should_converge_phase("),
+        "{OBS_SOURCE}: #1049 — the source wrapper genlock_should_converge_phase is gone."
+    );
+    // The quantum is the SOURCE interval (interval/n), not a bare canvas interval — the tightest
+    // threshold that still clears the natural steady phase (the #998 lesson applied to phase).
+    assert!(
+        src.contains("const uint64_t quantum = interval_ns / nn;"),
+        "{OBS_SOURCE}: #1049 — the shed quantum must be the SOURCE interval (interval_ns / n); a \
+         bare canvas interval would leave the n=2 threshold a full frame too high."
+    );
+    // The shed is CALLED from the release tail, gated on converge_eligible.
+    assert!(
+        src.contains("bool converge_eligible = false;"),
+        "{OBS_SOURCE}: #1049 — the converge_eligible gate is gone from genlock_release_tick."
+    );
+    assert!(
+        src.contains("genlock_should_converge_phase(source, reserve_ms, interval, wall_now)"),
+        "{OBS_SOURCE}: #1049 — genlock_should_converge_phase is defined but no longer CALLED from \
+         the release tail; the shed would be dead code and the phase would never converge."
+    );
+    // Both STEADY presents (N==1 and N>=2) mark themselves converge_eligible — the N>=2 path is
+    // the one with no depth drain at all.
+    assert_eq!(
+        src.matches("converge_eligible = true;").count(),
+        2,
+        "{OBS_SOURCE}: #1049 — both STEADY branches (N==1 and N>=2) must set converge_eligible; \
+         the N>=2 conveyor has no other restoring force toward configured."
+    );
+    // The shed drops the CURRENT would-be-presented frame (index 0) and presents the next — the
+    // same drop-older/present-fresher idiom the #859 drain uses (never a snap-back no-op).
+    assert!(
+        raw_converge_erases_index_zero(&vendor_file(OBS_SOURCE)),
+        "{OBS_SOURCE}: #1049 — the converge shed must erase array[0] (the would-be-presented \
+         frame) and present the next; dropping the one BEHIND the presented frame is the \
+         self-cancelling no-op the drain call-site comment documents."
+    );
+}
+
+/// Structural check: within the #1049 converge block, the FIRST `da_erase` erases index 0.
+fn raw_converge_erases_index_zero(raw: &str) -> bool {
+    let Some(pos) =
+        raw.find("genlock_should_converge_phase(source, reserve_ms, interval, wall_now) &&")
+    else {
+        return false;
+    };
+    let window_end = (pos + 600).min(raw.len());
+    let window = &raw[pos..window_end];
+    window.contains("da_erase(source->async_frames, 0);") && !window.contains("array[1]")
+}
+
 #[test]
 fn relock_events_log_phase_evidence_940() {
     // #940 piece 1 — INSTRUMENT each backlog-relock event with the phase evidence needed

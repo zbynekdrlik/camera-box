@@ -5322,6 +5322,59 @@ static bool genlock_should_drain_one(const obs_source_t *source, uint32_t reserv
 	       source->genlock_ticks_since_drain >= GENLOCK_DRAIN_MIN_TICK_INTERVAL;
 }
 
+/* camera-box #1049: the STEADY-conveyor PHASE-CONVERGENCE shed decision, PURE part.
+ * Self-contained (only stdint + the scalars) so tests/genlock_relock_selection_parity.rs can
+ * lift it standalone and prove it byte-identical to the Rust authority
+ * src/genlock_backlog.rs should_converge_phase.
+ *
+ * The phase-locked conveyor (genlock_locked_next_boundary_ns) is a pure FOLLOWER: it re-anchors
+ * to the presented stamp every STEADY present and has no restoring force toward the configured
+ * latency, so whatever phase it locks at ACQUIRE (or after a walk event -- a GAP RESYNC adopting
+ * the oldest frame's age, a sticky-N present-oldest crawl, a connect-burst ACQUIRE) is carried
+ * forward forever. The #1003 anchor-nearest relock PRESERVES that phase by design, and the #859
+ * depth drain cannot catch a 1-2 canvas-frame phase error (2-frame hysteresis) -- so the strih
+ * 60-into-30 ingests locked a per-camera frame-quantized A/V-offset ladder that never converged
+ * (issue 1049, 5 E2E runs 2026-08-14).
+ *
+ * The comparator is the conveyor's own on-air age S = wall_now - boundary (at decision time
+ * boundary == last_presented_ts + interval and render ticks are one interval apart, so this ==
+ * the last tick's on-air age exactly -- the boundary is always live, unlike the saturating phase
+ * anchor). Fires when S has drifted a shed-quantum (one SOURCE interval interval/n) + the 5 ms
+ * phase-pin hysteresis ABOVE configured, throttled by the SHARED #859 drain counter. interval/n +
+ * hysteresis mirrors the #998 lesson applied to PHASE: post-shed S' = S - interval/n is always
+ * > reserve (never below configured), so it cannot rebuild the #998 drop/regain limit cycle. A
+ * correctly-held DEEP source (#1003, Zaloha 1000 ms) has S ~= configured, far below the threshold
+ * -> inert by the SAME comparison, not a special case. Mirror of src/genlock_backlog.rs
+ * should_converge_phase (Tier-0 unit-tested) -- keep both in lock-step. */
+static inline bool genlock_phase_converge_due(uint64_t wall_now_ns, uint64_t boundary_ns,
+					      uint32_t latency_ms, uint64_t interval_ns, uint32_t n,
+					      uint64_t ticks_since_drain)
+{
+	if (interval_ns == 0 || boundary_ns == 0)
+		return false;
+	const uint64_t nn = n >= 1 ? (uint64_t)n : 1;
+	const uint64_t reserve_ns = (uint64_t)latency_ms * 1000000ULL;
+	const uint64_t quantum = interval_ns / nn;
+	const uint64_t threshold = reserve_ns + quantum + GENLOCK_PHASE_PIN_HYSTERESIS_NS;
+	const uint64_t age = wall_now_ns > boundary_ns ? wall_now_ns - boundary_ns : 0;
+	return age > threshold && ticks_since_drain >= GENLOCK_DRAIN_MIN_TICK_INTERVAL;
+}
+
+/* camera-box #1049: the source-bound wrapper -- reads the live n (READ-ONLY, same as
+ * genlock_should_drain_one) and the locked boundary + shared throttle, delegates the arithmetic to
+ * genlock_phase_converge_due above. */
+static bool genlock_should_converge_phase(const obs_source_t *source, uint32_t reserve_ms,
+					  uint64_t interval, uint64_t wall_now)
+{
+	if (interval == 0)
+		return false;
+	const uint32_t measured = genlock_measure_source_multiple(source, interval);
+	const uint32_t n = measured >= 1 ? measured
+					 : (source->genlock_last_known_n >= 1 ? source->genlock_last_known_n : 1);
+	return genlock_phase_converge_due(wall_now, source->genlock_locked_next_boundary_ns, reserve_ms,
+					  interval, n, source->genlock_ticks_since_drain);
+}
+
 static bool genlock_release_tick(obs_source_t *source, uint64_t wall_now, uint64_t present_ts,
 				 size_t due, uint64_t interval, uint32_t reserve_ms, uint64_t now_ns)
 {
@@ -5374,6 +5427,13 @@ static bool genlock_release_tick(obs_source_t *source, uint64_t wall_now, uint64
 	 * phase, it must never redefine it, or every episode re-mints one
 	 * and the whole fix is undone. */
 	bool anchor_update = false;
+	/* camera-box #1049: true ONLY on the two STEADY presents (N==1 and N>=2) -- the conveyor
+	 * paths that carry a persistent presentation phase and can shed one extra frame to converge
+	 * it toward the configured latency. NOT the GAP-RESYNC (it RE-DERIVES the phase from the
+	 * frame it puts on air, so there is nothing to converge) nor the relock paths. Sheds via the
+	 * genlock_should_converge_phase decision in the present tail, sharing the #859 drain throttle
+	 * (genlock_ticks_since_drain). */
+	bool converge_eligible = false;
 	if (source->genlock_locked_next_boundary_ns == 0) {
 		/* UNLOCKED — ACQUIRE: the first wall-due frame locks the
 		 * cadence. #1003: the frame PRESENTED is the one nearest the
@@ -5560,6 +5620,9 @@ static bool genlock_release_tick(obs_source_t *source, uint64_t wall_now, uint64
 			release = matured_n > 0 ? matured_n : 1;
 			/* #1003: a STEADY present -- the conveyor. */
 			anchor_update = true;
+			/* #1049: the N>=2 conveyor has NO drain path and locks a
+			 * persistent phase -- eligible for the bounded phase shed. */
+			converge_eligible = true;
 		} else {
 			/* present the OLDEST matured frame, exactly one in steady
 			 * state at any arrival skew. Presenting oldest (v1 presented
@@ -5576,6 +5639,9 @@ static bool genlock_release_tick(obs_source_t *source, uint64_t wall_now, uint64
 			drain_eligible = true;
 			/* #1003: a STEADY present -- the conveyor. */
 			anchor_update = true;
+			/* #1049: a residual N==1 phase (below the #859 depth
+			 * drain's 2-frame hysteresis) is eligible for the shed too. */
+			converge_eligible = true;
 		}
 	} else if (present_ts >= source->async_frames.array[0]->timestamp) {
 		/* GAP RESYNC: nothing matured, but the oldest queued frame is
@@ -5657,6 +5723,32 @@ static bool genlock_release_tick(obs_source_t *source, uint64_t wall_now, uint64
 			source->genlock_dropped_due++;
 			source->genlock_ticks_since_drain = 0;
 		} else {
+			source->genlock_ticks_since_drain++;
+		}
+	}
+	/* camera-box #1049: SLEW-LIMITED PHASE CONVERGENCE. On the two STEADY presents
+	 * (converge_eligible) the conveyor has a persistent presentation phase (the N>=2 path has NO
+	 * depth drain at all; the N==1 depth drain's 2-frame hysteresis swallows a 1-2 canvas-frame
+	 * phase error). Shed one extra frame with the SAME drop-older/present-fresher idiom the #859
+	 * drain uses -- drop the would-be-presented array[0] and present the next (on N>=2 that is one
+	 * SOURCE interval fresher; on N==1 byte-identical to the drain shed) -- re-anchoring the
+	 * boundary below to the fresher stamp, so the reduced phase STICKS. The throttle counter is
+	 * SHARED with the #859 drain: after a drain reset it to 0, genlock_should_converge_phase reads
+	 * ticks < GENLOCK_DRAIN_MIN_TICK_INTERVAL and returns false, so at most ONE extra frame ever
+	 * leaves the queue per tick (the drain and the converge can never both fire) and the drain's
+	 * own block above is left byte-identical. On the N>=2 path (!drain_eligible) this block also
+	 * maintains the shared counter (the drain block did not run). Mirror of
+	 * src/genlock_backlog.rs should_converge_phase / the SimConveyor1049 shed. */
+	if (converge_eligible) {
+		if (genlock_should_converge_phase(source, reserve_ms, interval, wall_now) &&
+		    source->async_frames.num > 1) {
+			struct obs_source_frame *shed =
+				source->async_frames.array[0];
+			da_erase(source->async_frames, 0);
+			remove_async_frame(source, shed);
+			source->genlock_dropped_due++;
+			source->genlock_ticks_since_drain = 0;
+		} else if (!drain_eligible) {
 			source->genlock_ticks_since_drain++;
 		}
 	}
