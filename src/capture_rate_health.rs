@@ -483,6 +483,51 @@ mod tests {
         );
     }
 
+    /// #1034 — the Cam Link 4K card swap (issue-728 lineage) has already landed on cam3, whose
+    /// live `card` string is `CAM  LINK 4K: CAM  LINK 4K` (note the DOUBLE space between CAM and
+    /// LINK — the match must be whitespace-robust). It must be recognized as its own model so
+    /// `resolve_grabber_model` hands it the STRICT base tolerance, instead of falling through to
+    /// the hostname table's `CAM3 → ShadowCast2` (wide 10%) mapping that wrongly gave a
+    /// rock-steady 0.33%-spread device the ShadowCast grabber allowance.
+    #[test]
+    fn grabber_model_from_card_name_recognizes_cam_link_4k_1034() {
+        assert_eq!(
+            grabber_model_from_card_name("CAM  LINK 4K: CAM  LINK 4K"),
+            GrabberModel::CamLink4k,
+            "cam3's live double-spaced Cam Link 4K card string must be recognized"
+        );
+        assert_eq!(
+            grabber_model_from_card_name("Cam Link 4K"),
+            GrabberModel::CamLink4k
+        );
+        assert_eq!(
+            grabber_model_from_card_name("CAM LINK 4K"),
+            GrabberModel::CamLink4k
+        );
+    }
+
+    /// #1034 — cam3's decisive scenario: hostname still says `CAM3` (→ ShadowCast2 in the static
+    /// table) but the box physically has a Cam Link 4K now. Detection must win and hand it the
+    /// strict base tolerance (1%), NOT the wide ShadowCast 10% floor.
+    #[test]
+    fn resolve_grabber_model_cam_link_4k_wins_over_shadowcast_hostname_1034() {
+        assert_eq!(
+            resolve_grabber_model("CAM3", Some("CAM  LINK 4K: CAM  LINK 4K")),
+            GrabberModel::CamLink4k
+        );
+        assert_eq!(
+            tolerance_pct_for_model(GrabberModel::CamLink4k),
+            CAPTURE_RATE_TOLERANCE_PCT,
+            "a Cam Link 4K is a genuinely stable device — strict base tolerance, not ShadowCast's \
+             wide floor"
+        );
+        assert_eq!(
+            sustained_tolerance_pct_for_model(GrabberModel::CamLink4k),
+            CAPTURE_RATE_TOLERANCE_PCT
+        );
+        assert_eq!(GrabberModel::CamLink4k.to_string(), "Cam Link 4K");
+    }
+
     #[test]
     fn grabber_model_from_card_name_is_case_insensitive() {
         assert_eq!(
