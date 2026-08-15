@@ -65,6 +65,10 @@ measure() {
     "journalctl -t imag-power-envelope --no-pager --since \"$WINDOW\" 2>/dev/null" 2>/dev/null || true)"
   SNAPSHOT="$(sshpass -p "$IMAG_PW_SSH" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 \
     "${IMAG_USER_SSH}@${IMAG_IP}" "$(imag_power_envelope_gather_remote_snippet)" 2>/dev/null || true)"
+  # #880: a short throttle+freq BURST (~6 s) for the throttle-under-floor path. Separate ssh so the
+  # instantaneous SNAPSHOT gather above (also used by drift-guard/verify-imag) is never slowed.
+  BURST="$(sshpass -p "$IMAG_PW_SSH" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 \
+    "${IMAG_USER_SSH}@${IMAG_IP}" "$(imag_power_throttle_burst_remote_snippet)" 2>/dev/null || true)"
 }
 
 read_state_field() {
@@ -83,16 +87,15 @@ write_state_field() {
   mv -f "$tmp" "$STATE_FILE" 2>/dev/null || true
 }
 
-main() {
-  log "pass start (dry_run=$DRY_RUN, window=$WINDOW)"
-  measure
+# Path 1 — the guard's STEP-DOWN / RE-ASSERT journal transitions (a thermal step-down or a foreign
+# PL1 re-program). Own dedup signature (alert_sig / alert_passes).
+alert_from_journal() {
   if [ -z "${JOURNAL:-}" ]; then
     log "no guard journal from imag-nb (ssh/connectivity failure, or the guard has logged nothing in $WINDOW) -- nothing to decide this pass"
-    # A quiet window is NOT an incident: clear the throttle sig so a genuinely NEW episode later
-    # pages fresh instead of being dedup'd against a stale signature.
+    # A quiet window is NOT an incident: clear the sig so a genuinely NEW episode later pages fresh
+    # instead of being dedup'd against a stale signature.
     write_state_field alert_sig ""
     write_state_field alert_passes 0
-    log "pass end"
     return 0
   fi
 
@@ -102,7 +105,6 @@ main() {
     log "imag-nb power envelope: no STEP-DOWN/RE-ASSERT in $WINDOW (healthy)"
     write_state_field alert_sig ""
     write_state_field alert_passes 0
-    log "pass end"
     return 0
   fi
 
@@ -125,7 +127,6 @@ main() {
 
   if [ "$DRY_RUN" -eq 1 ]; then
     log "[dry-run] WOULD alert: imag-nb power-envelope transition ($detail) alert_now=$alert_now"
-    log "pass end"
     return 0
   fi
 
@@ -137,6 +138,58 @@ main() {
   else
     log "ALERT: suppressed by throttle (pass ${prior_passes}/${ALERT_THROTTLE_PASSES})"
   fi
+}
+
+# Path 2 (#880) — a SUSTAINED iGPU clock clamp holding actual freq below the pinned floor while OBS
+# renders. INDEPENDENT of the guard journal: this clamp is the punit steering below the #841 floor
+# at the MMIO RAPL PL1 power budget, which fires NO guard STEP-DOWN (the guard steps down only on a
+# TCPU excursion), so it would otherwise be silent judder. Own dedup signature (throttle_sig /
+# throttle_passes) so it never clobbers the journal path's dedup.
+alert_from_throttle() {
+  local markers
+  markers="$(imag_power_throttle_alert_condition "${BURST:-}")"
+  if [ -z "$markers" ]; then
+    log "imag-nb iGPU freq: no sustained throttle-under-floor in this burst (or nothing measured) -- healthy"
+    write_state_field throttle_sig ""
+    write_state_field throttle_passes 0
+    return 0
+  fi
+
+  local current_sig prior_sig prior_passes throttle_out alert_now new_sig new_passes detail
+  current_sig="imag-throttle:$(printf '%s' "$markers" | tail -1)"
+  prior_sig="$(read_state_field throttle_sig "")"
+  prior_passes="$(read_state_field throttle_passes 0)"
+  throttle_out="$(obs_watchdog_alert_throttle "$current_sig" "$prior_sig" "$prior_passes" "$ALERT_THROTTLE_PASSES")"
+  alert_now="$(printf '%s\n' "$throttle_out" | sed -n 's/^alert_now=//p')"
+  new_sig="$(printf '%s\n' "$throttle_out" | sed -n 's/^new_sig=//p')"
+  new_passes="$(printf '%s\n' "$throttle_out" | sed -n 's/^new_passes=//p')"
+  write_state_field throttle_sig "$new_sig"
+  write_state_field throttle_passes "$new_passes"
+
+  detail="$(printf '%s' "$markers" | tail -1)"
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "[dry-run] WOULD alert: imag-nb iGPU throttle-under-floor ($detail) alert_now=$alert_now"
+    return 0
+  fi
+
+  if [ "${alert_now:-0}" = "1" ]; then
+    log "ALERT: firing Discord notification for imag-nb throttle-under-floor"
+    python3 "$NOTIFY" notify --body \
+      "🚨 #880 imag iGPU clock floor not holding under load ($REPO_SLUG): ${detail}. Pinned floor is a software request the punit overrides at the power/thermal envelope; cooling headroom (issue 1043) is the residual fix." \
+      >/dev/null 2>&1 || log "ALERT: airuleset.py notify failed (non-fatal)"
+  else
+    log "ALERT: suppressed by throttle (pass ${prior_passes}/${ALERT_THROTTLE_PASSES})"
+  fi
+}
+
+main() {
+  log "pass start (dry_run=$DRY_RUN, window=$WINDOW)"
+  measure
+  # Two INDEPENDENT alert paths — a quiet guard journal must NOT short-circuit the throttle path
+  # (the throttle-under-floor clamp fires no guard step-down, so it lives only in the burst).
+  alert_from_journal
+  alert_from_throttle
   log "pass end"
 }
 
