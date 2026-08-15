@@ -8478,3 +8478,34 @@ Review: 0 🔴 2 🟡 3 🔵, all fixed same-branch. Gotcha logged: cargo tests 
 - GOTCHA (seam brace-freedom): `tests/aux_sender_budget_879.rs` finds the seam's closing brace via
   the FIRST `"\n}"` after the signature, so the seam must stay brace-free — the new max-term uses a
   `? :` ternary precisely to avoid a nested `{}` block.
+## issue 1060 — dev1 fresh-OBS-start burn-reconcile watchdog for unattended starts (worktree autopilot-1060, v1.7.0-dev.459)
+- Follow-up to issue 1057. 1057 closed the DELIBERATE dev1-driven relaunch burn-resurrection window
+  (launch-obs-genlock.sh's PLAN directs a post-launch obs_burn_filter.py sweep-off). Still open: the
+  UNATTENDED strih/stream OBS starts (boot autostart, NL_STARTUP.ahk obs64 respawn, the issue-411
+  self-heal Task-Scheduler relaunch) — all reuse launch-obs-genlock.sh's emitted PowerShell which
+  never touches the burn, and the Windows box has no on-box python/WS client, so a saved
+  genlock_burn=true reloads onto the LIVE program until the next gate run.
+- Design (chosen candidate 1, dev1-side; on-box WS client rejected — issue 866 deployed-dep cost):
+  ONE dev1 systemd --user timer keying on the OBS RESTART (not the cause), covering all three paths.
+  Load-bearing discriminator = a FRESH OBS START, never "a burn is present": a persistent TEST-mode
+  burn is legitimate operator state whose #281 rig heartbeat goes stale after ~10 min while the burn
+  should remain. Fresh-start signal = GetStats.renderTotalFrames (monotone since OBS start, resets on
+  restart) over the SAME WS obs_burn_filter speaks. Coordination = defer while a fresh #281 heartbeat
+  OR a held #830 rig lease exists (never clear a burn a live gate/TEST set). Burn clear reuses the
+  #938/#1011 enumerator; fail-CLOSED on an un-enumerable box.
+- Files: scripts/lib/obs-burn-reconcile-decision.sh (pure NOOP/DEFER/SWEEP/CLEAN + fresh-start),
+  obs_burn_filter.py (+session-probe action + render_total_frames pure helper),
+  obs-burn-reconcile-watchdog.sh (per-box probe→decide→reconcile), systemd .service/.timer/.README
+  (SHIPS DISABLED), tests/python/test_obs_burn_reconcile_decision.py + test_obs_burn_filter.py
+  additions + tests/harness_obs_burn_reconcile_watchdog_1060.rs.
+- Commits: 3775ce42c (bump) · eec20c702 [red] · bdf98f926 [green] · 706dfb9b2 (review fixes).
+- REVIEW-DRIVEN HARDENING (the important lesson): the fresh-start baseline first lived in tmpfs
+  (XDG_RUNTIME_DIR/tmp), wiped on every dev1 reboot. With "unknown baseline = fresh" that would
+  false-clear a persistent TEST burn on the first post-reboot pass even though OBS never restarted.
+  Fix: unknown/corrupt prev is NOT a restart (seed only) — ONLY an OBSERVED counter drop reconciles;
+  baseline persisted in durable ~/.camera-box. Plus a self-healing `unresolved` retry (a
+  partially-failed sweep-off retries until read-back clean, set only off an observed restart).
+- Verify: no local cargo-test path (Tier-0, build-ok disabled) — decision truth table proven via the
+  runnable python twin; watchdog wiring proven via an offline smoke with a stubbed obs_burn_filter +
+  notify (seed/NOOP never sweeps unknown baseline; SWEEP on observed drop; retry self-heals; DEFER
+  while coordinated; fail-closed enum). Tier-0: fmt/clippy -D warnings/test --no-run clean; 24 py.
