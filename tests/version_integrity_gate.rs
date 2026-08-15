@@ -743,14 +743,38 @@ fn with_obs_identity(base: &str, extra_pairs: &[(&str, &str)]) -> String {
     out
 }
 
+/// Healthy #826 obs-identity keys for a box that PASSES the ENFORCED (#829) gate: the generic
+/// per-box facets (`obs_installs` = only the pinned exe, `obs_process_count` = 1) on every box,
+/// plus — on strih only — the NL_STARTUP.ahk startup-chain resolving to the pinned install
+/// (`startup_chain` is strih-scoped + unconditional after #829). `port4455_owner_path` is
+/// deliberately OMITTED: the redeployed non-elevated bundle-state-server task cannot read the
+/// :4455 owner's exe path (#829 validation), so that ONE facet stays opt-in (its own guard)
+/// pending a gather-context follow-up — a healthy fixture simply does not carry it and the gate
+/// skips it.
+fn with_obs_identity_ok(base: &str, strih: bool) -> String {
+    let mut pairs: Vec<(&str, &str)> =
+        vec![("obs_installs", PINNED_OBS_EXE), ("obs_process_count", "1")];
+    if strih {
+        pairs.extend_from_slice(&[
+            ("ahk_app1_shortcut_path", PINNED_SHORTCUT),
+            ("ahk_app1_run", "1"),
+            ("ahk_dead_config_present", "0"),
+            ("shortcut_target_path", PINNED_OBS_EXE),
+            ("shortcut_workdir", PINNED_OBS_WORKDIR),
+        ]);
+    }
+    with_obs_identity(base, &pairs)
+}
+
 #[test]
-fn gate_still_passes_when_a_box_reports_none_of_the_826_obs_identity_keys() {
-    // Rollout is opt-in (mirrors #756's original landing): a box whose bundle-state-server has
-    // not yet been redeployed with the #826 facet must gate EXACTLY as before -- this is the
-    // backward-compatibility proof for the entire existing fleet/fixture set.
+fn gate_refuses_when_a_reporting_box_omits_the_enforced_826_keys() {
+    // #829 ENFORCED flip (the backward-INCOMPATIBLE half of the 756->758 two-step): `obs_installs`
+    // + `obs_process_count` are now unconditional on EVERY box, so a box that omits them is a real
+    // gate-blocking UNKNOWN (11), never the old silent skip. This replaces the former
+    // opt-in-rollout backward-compatibility test (a box reporting NONE of the keys used to pass).
     const SHA: &str = "26de1c3c23980488a110dbf02e5e472f15cb001d";
-    let s = write_state("strih_no826", &with_sha(STRIH_PINNED, SHA));
-    let t = write_state("stream_no826", &with_sha(STREAM_PINNED, SHA));
+    let s = write_state("strih_omit826", &with_sha(STRIH_PINNED, SHA));
+    let t = write_state("stream_omit826", &with_sha(STREAM_PINNED, SHA));
     let (code, stdout, stderr) = run_gate(&[
         "--win-state",
         &format!("strih={}", s.display()),
@@ -759,22 +783,102 @@ fn gate_still_passes_when_a_box_reports_none_of_the_826_obs_identity_keys() {
         "--genlock-sha",
         &format!("imag={SHA}"),
     ]);
-    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
-    assert!(
-        !stdout.contains("obs_installs"),
-        "must not engage when unreported: {stdout}"
+    assert_eq!(
+        code, 11,
+        "a box omitting the enforced obs-identity keys must be UNKNOWN (11), not a silent pass. \
+         stdout={stdout} stderr={stderr}"
     );
+    assert!(!stdout.contains("GATE PASS"), "must not pass: {stdout}");
+    assert!(
+        stdout.contains("obs_installs") && stdout.contains("UNKNOWN"),
+        "obs_installs must engage unconditionally and report UNKNOWN: {stdout}"
+    );
+    assert!(
+        stdout.contains("obs_process_count") && stdout.contains("UNKNOWN"),
+        "obs_process_count must engage unconditionally and report UNKNOWN: {stdout}"
+    );
+    let _ = std::fs::remove_file(&s);
+    let _ = std::fs::remove_file(&t);
+}
+
+#[test]
+fn gate_enforces_startup_chain_on_strih_even_without_ahk_826() {
+    // #829: startup_chain is now strih-scoped + UNCONDITIONAL (re-keyed off the box identity, not
+    // ahk-presence). A strih box healthy on every OTHER facet but omitting the NL_STARTUP.ahk
+    // startup-chain keys is a gate-blocking UNKNOWN -- strih MUST run NL_STARTUP.ahk, so an
+    // unreported chain is "unread", never "not applicable". (A healthy port4455 is included here
+    // so the ONLY signal is the missing startup chain: clean 0-under-old -> 11-under-#829.)
+    const SHA: &str = "26de1c3c23980488a110dbf02e5e472f15cb001d";
+    let s = write_state(
+        "strih_no_ahk_enforced_829",
+        &with_obs_identity(
+            &with_sha(STRIH_PINNED, SHA),
+            &[
+                ("obs_installs", PINNED_OBS_EXE),
+                ("port4455_owner_path", PINNED_OBS_EXE),
+                ("port4455_owner_version", "32.1.2"),
+                ("obs_process_count", "1"),
+            ],
+        ),
+    );
+    let t = write_state(
+        "stream_ok_for_strih_ahk_829",
+        &with_obs_identity_ok(&with_sha(STREAM_PINNED, SHA), false),
+    );
+    let (code, stdout, stderr) = run_gate(&[
+        "--win-state",
+        &format!("strih={}", s.display()),
+        "--win-state",
+        &format!("stream={}", t.display()),
+        "--genlock-sha",
+        &format!("imag={SHA}"),
+    ]);
+    assert_eq!(
+        code, 11,
+        "strih omitting the startup-chain keys must be UNKNOWN (11) under strih-scoped \
+         enforcement. stdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        stderr.contains("strih:startup_chain") || stdout.contains("startup_chain"),
+        "strih's startup_chain must engage + report UNKNOWN: stdout={stdout} stderr={stderr}"
+    );
+    let _ = std::fs::remove_file(&s);
+    let _ = std::fs::remove_file(&t);
+}
+
+#[test]
+fn gate_keeps_port4455_identity_opt_in_when_unreported_826() {
+    // #829: port4455_identity stays OPT-IN (its own guard) because the redeployed non-elevated
+    // bundle-state-server cannot gather the :4455 owner path (#829 validation). A healthy box that
+    // reports the enforced facets but omits port4455 must PASS -- port4455 is skipped, not a false
+    // UNKNOWN. Under the OLD shared OR-guard, reporting obs_installs alone forced port_identity to
+    // run with an empty owner -> UNKNOWN(11); this isolation removes exactly that false block.
+    const SHA: &str = "26de1c3c23980488a110dbf02e5e472f15cb001d";
+    let s = write_state(
+        "strih_no_port_829",
+        &with_obs_identity_ok(&with_sha(STRIH_PINNED, SHA), true),
+    );
+    let t = write_state(
+        "stream_no_port_829",
+        &with_obs_identity_ok(&with_sha(STREAM_PINNED, SHA), false),
+    );
+    let (code, stdout, stderr) = run_gate(&[
+        "--win-state",
+        &format!("strih={}", s.display()),
+        "--win-state",
+        &format!("stream={}", t.display()),
+        "--genlock-sha",
+        &format!("imag={SHA}"),
+    ]);
+    assert_eq!(
+        code, 0,
+        "a healthy box omitting only port4455 must PASS (opt-in facet skipped). \
+         stdout={stdout} stderr={stderr}"
+    );
+    assert!(stdout.contains("GATE PASS"), "{stdout}");
     assert!(
         !stdout.contains("port4455_identity"),
-        "must not engage when unreported: {stdout}"
-    );
-    assert!(
-        !stdout.contains("obs_process_count"),
-        "must not engage when unreported: {stdout}"
-    );
-    assert!(
-        !stdout.contains("startup_chain"),
-        "must not engage when unreported: {stdout}"
+        "port4455 must NOT engage when unreported: {stdout}"
     );
     let _ = std::fs::remove_file(&s);
     let _ = std::fs::remove_file(&t);
