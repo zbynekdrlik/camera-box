@@ -968,3 +968,178 @@ fn recording_e2e_post_check_sustained_band_is_report_only_never_aborts() {
          the wider check block). Region:\n{journald_sustained_region}"
     );
 }
+
+// -------------------------------------------------------------------------------------------
+// (#994) Extend the [7b/8] capture-delivery-rate POST-recording check to the SECONDARY cameras.
+//
+// The source-camera check (above) only ever read $CAMERA_NAME / $CAM1_IP / /tmp/cbox-burn.log.
+// Under ALL_CAMBOX=1 every active secondary camera runs its OWN capture burn ([2b/8], logging to
+// /tmp/cbox-burn-<camname>.log) and is cut into strih program, so a capture-rate defect on a
+// secondary during the recording (issue 889: cam1 AND cam2 over-rate at once -- cam2 is a
+// secondary) was invisible. Option 2 of the ticket -- the reset-EVENT sweep across secondaries --
+// is already done by the #910 unified restart-event scan; this closes option 1 for the capture-
+// rate defect-DECLARATION signal.
+//
+// SEVERITY: REPORT-ONLY for a secondary (a loud "WARNING #994:", never exit 1). Hard-failing on a
+// secondary would recreate the issue-909/914 permanently-red-gate mistake (frozen_leg/
+// self_heal_reset are report-only precisely so a chronic secondary quirk doesn't abort every run),
+// and conflicts with the owner's "green gate first, tighten via tickets" directive. The source-
+// camera check keeps its HARD (exit 1) behavior unchanged.
+// -------------------------------------------------------------------------------------------
+
+#[test]
+fn secondary_recurrence_warn_message_is_loud_report_only_and_names_the_journal() {
+    let out = run_sourced(
+        "capture_rate_secondary_recurrence_warn_message cam4 'WARN #971 capture-delivery-rate \
+         CHRONIC sustained-band DEFECTIVE: 64.00 fps captured vs 60.00 fps configured/negotiated'",
+    );
+    let msg = out.trim();
+    assert!(
+        msg.starts_with("WARNING #994:"),
+        "#994: a secondary-camera capture-rate match must be a loud report-only WARNING tagged \
+         #994 (never an ERROR/exit-1 line). Got: {msg}"
+    );
+    assert!(
+        msg.contains("cam4") && msg.contains("64.00") && msg.contains("60.00"),
+        "#994: must name the camera and extract the captured/configured fps. Got: {msg}"
+    );
+    assert!(
+        msg.contains("journal"),
+        "#994: the journald-sourced formatter must identify the journal as the source. Got: {msg}"
+    );
+    assert!(
+        msg.contains("#994"),
+        "#994: the message must point at this ticket for context. Got: {msg}"
+    );
+}
+
+#[test]
+fn secondary_recurrence_warn_message_falls_back_gracefully_on_an_unparseable_line() {
+    let out = run_sourced(
+        "capture_rate_secondary_recurrence_warn_message cam5 'a #656 capture-delivery-rate \
+         DEFECTIVE line in an unexpected shape'",
+    );
+    let msg = out.trim();
+    assert!(
+        msg.starts_with("WARNING #994:") && msg.contains("cam5"),
+        "#994: fallback must still be a loud WARNING naming the camera. Got: {msg}"
+    );
+    assert!(
+        msg.contains("a #656 capture-delivery-rate DEFECTIVE line in an unexpected shape"),
+        "#994: fallback must echo the raw matched line, never silently swallow it. Got: {msg}"
+    );
+}
+
+#[test]
+fn secondary_burn_log_recurrence_warn_message_is_report_only_and_names_the_burn_log() {
+    let out = run_sourced(
+        "capture_rate_secondary_burn_log_recurrence_warn_message cam4 'WARN #656 \
+         capture-delivery-rate DEFECTIVE: 63.20 fps captured vs 60.00 fps configured/negotiated'",
+    );
+    let msg = out.trim();
+    assert!(
+        msg.starts_with("WARNING #994:"),
+        "#994: must be a loud report-only WARNING tagged #994. Got: {msg}"
+    );
+    assert!(
+        msg.contains("cam4") && msg.contains("burn-instance log"),
+        "#994: must name the camera and identify the burn-instance LOG as the source. Got: {msg}"
+    );
+    assert!(
+        !msg.contains("in cam4's journal"),
+        "#994: must never misattribute the source as the journal (same journal/burn-log \
+         discriminator as the #992 formatters). Got: {msg}"
+    );
+}
+
+#[test]
+fn recording_e2e_sweeps_every_secondary_camera_for_capture_rate_after_the_source_check() {
+    let s = read("scripts/recording-e2e.sh");
+
+    // The source-camera check block must be untouched: its success line still exists, and the new
+    // secondary sweep must come STRICTLY AFTER it (so the new grep calls never land inside the
+    // region the source block's hard==2 / sustained==2 anchor counts measure).
+    let source_ok_pos = s
+        .find("no capture-rate defect recurrence in $CAMERA_NAME's journal during the recording")
+        .expect("#705/#992: the source-camera post-recording check success line must still exist");
+    let sweep_pos = s
+        .find("secondary-camera capture-delivery-rate POST-recording sweep (#994)")
+        .expect("#994: the secondary-camera capture-rate sweep step must exist");
+    assert!(
+        sweep_pos > source_ok_pos,
+        "#994: the secondary sweep must come AFTER the source-camera check block, so it never \
+         disturbs that block's own hard/sustained ==2 anchor counts"
+    );
+
+    let sweep_end_pos = s
+        .find("secondary-camera capture-rate sweep complete (#994")
+        .expect("#994: the secondary sweep must print a completion line");
+    let sweep_block = &s[sweep_pos..sweep_end_pos];
+
+    // Gated on ALL_CAMBOX=1 (the plain single-camera path has no secondary cameras).
+    assert!(
+        sweep_block.contains("if [ \"${ALL_CAMBOX:-0}\" = \"1\" ]"),
+        "#994: the secondary sweep loop must be gated behind ALL_CAMBOX=1. Block:\n{sweep_block}"
+    );
+
+    // Loops over every secondary (cam2 + camera_active_secondary_set()) via the SAME deploy list
+    // #910's restart-event scan already sweeps -- never a literal cam-number range.
+    assert!(
+        sweep_block.contains("CAMBOX_SECONDARY_DEPLOY"),
+        "#994: must sweep every active secondary via CAMBOX_SECONDARY_DEPLOY (never a literal \
+         cam range). Block:\n{sweep_block}"
+    );
+    // Reads each secondary box's OWN burn log (the journald-blind sibling, issue 992/910).
+    assert!(
+        sweep_block.contains("/tmp/cbox-burn-${_cn}.log"),
+        "#994: must read each secondary's own burn-instance log path. Block:\n{sweep_block}"
+    );
+    // Both sources (journald window + burn log) and both bands (HARD + SUSTAINED), mirroring the
+    // source-camera check.
+    assert!(
+        sweep_block.contains("capture_rate_window_journalctl_cmd"),
+        "#994: must read the secondary's journald window. Block:\n{sweep_block}"
+    );
+    assert!(
+        sweep_block.contains("capture_rate_burn_log_grep_cmd"),
+        "#994: must read the secondary's burn-instance log. Block:\n{sweep_block}"
+    );
+    assert!(
+        sweep_block.contains("capture_rate_defect_grep_pattern_hard"),
+        "#994: must grep the HARD defect band on secondaries. Block:\n{sweep_block}"
+    );
+    assert!(
+        sweep_block.contains("capture_rate_sustained_band_grep_pattern"),
+        "#994: must grep the SUSTAINED band on secondaries too. Block:\n{sweep_block}"
+    );
+    // The report-only #717 SUSTAINED path reuses the existing #992 sustained WARN formatters (both
+    // sources) -- assert they are actually invoked in the sweep, not just that the band is grepped.
+    assert!(
+        sweep_block.contains("capture_rate_sustained_band_warn_message"),
+        "#994: a journald-side SUSTAINED match on a secondary must be reported via the #992 \
+         sustained WARN formatter. Block:\n{sweep_block}"
+    );
+    assert!(
+        sweep_block.contains("capture_rate_burn_log_sustained_band_warn_message"),
+        "#994: a burn-log-side SUSTAINED match on a secondary must be reported via the #992 \
+         burn-log sustained WARN formatter. Block:\n{sweep_block}"
+    );
+    // Report-only via the dedicated #994 formatters (never the source's exit-1 ERROR formatters).
+    assert!(
+        sweep_block.contains("capture_rate_secondary_recurrence_warn_message"),
+        "#994: a journald-side HARD match on a secondary must be reported via the dedicated \
+         report-only #994 formatter. Block:\n{sweep_block}"
+    );
+    assert!(
+        sweep_block.contains("capture_rate_secondary_burn_log_recurrence_warn_message"),
+        "#994: a burn-log-side HARD match on a secondary must be reported via its own dedicated \
+         report-only #994 formatter. Block:\n{sweep_block}"
+    );
+    // The whole point: a secondary defect is REPORT-ONLY -- it must NEVER abort the run.
+    assert!(
+        !sweep_block.contains("exit 1"),
+        "#994: a secondary-camera capture-rate match must NEVER exit 1 (report-only -- \
+         hard-failing recreates the issue-909/914 permanently-red-gate mistake; cam2 is a \
+         secondary). Block:\n{sweep_block}"
+    );
+}
