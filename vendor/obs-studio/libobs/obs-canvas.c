@@ -294,7 +294,14 @@ void obs_canvas_clear_mix(obs_canvas_t *canvas)
 	 * borrowed video_t, so clear it here under outputs_mutex FIRST — before the
 	 * mixes_mutex section below, so the two locks never nest — and the NULL-safe
 	 * video-io getters then return 0 instead of dereferencing freed memory.
-	 * Extends the #793 detach-before-free to the output copies it did not reach. */
+	 * Extends the #793 detach-before-free to the output copies it did not reach.
+	 * Scoped here (not in obs_free_video_mix, the shared bfree choke point) on
+	 * purpose: a create-path output only ever borrows obs_get_video() = the main
+	 * canvas mix video, which is a VIEWED mix freed only through this function —
+	 * the other obs_free_video_mix callers (obs-video.c output_frames' view-less
+	 * reap, obs_free_video teardown, obs-encoder.c) free mixes no output borrows.
+	 * Moving the detach into obs_free_video_mix would nest outputs_mutex inside
+	 * the mixes_mutex those callers already hold, which this placement avoids. */
 	video_t *freed_video = old_mix->video;
 	if (freed_video) {
 		pthread_mutex_lock(&obs->data.outputs_mutex);

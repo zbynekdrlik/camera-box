@@ -32,21 +32,22 @@ fn read_obs_canvas() -> String {
     fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
-/// Slice `obs_canvas_clear_mix`'s body: from its signature to the next top-level function
-/// (a line starting with `void ` / `bool ` / `obs_` at column 0). Scoping to the enclosing
-/// function — never a fixed byte window — is the anchor-safety rule from
-/// `vendored-libobs-change-safety.md`.
+/// Slice `obs_canvas_clear_mix`'s body: from its signature to the start of the next top-level
+/// function (`obs_free_canvas_mixes`, which immediately follows it in the file). Scoping to the
+/// enclosing function — never a fixed byte window — is the anchor-safety rule from
+/// `vendored-libobs-change-safety.md`. The terminator is `.expect()`ed, never a fall-back to
+/// EOF: if it is ever renamed/reordered the slice must fail LOUD, not silently widen to the rest
+/// of the file where the anchors below could match a later function (a false pass).
 fn clear_mix_body(src: &str) -> &str {
     let start = src
         .find("void obs_canvas_clear_mix(obs_canvas_t *canvas)")
         .expect("obs_canvas_clear_mix definition not found — did the signature change?");
     let after = &src[start..];
-    // First top-level function that follows (deindented `void ` at line start after a `\n`).
     let end_rel = after
         .match_indices("\nvoid obs_free_canvas_mixes")
         .next()
         .map(|(i, _)| i)
-        .unwrap_or(after.len());
+        .expect("obs_free_canvas_mixes (the function after obs_canvas_clear_mix) not found — the slice terminator moved; re-scope this test");
     &after[..end_rel]
 }
 
