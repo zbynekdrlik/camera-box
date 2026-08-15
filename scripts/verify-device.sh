@@ -134,6 +134,10 @@ SSH_USER="${SSH_USER:-root}"
 CAM_PW="${CAM_PW:-newlevel}"
 SSH_TIMEOUT="${SSH_TIMEOUT:-10}"
 DEVICE_CLOCK_BOUND_US="${CLOCK_GUARD_BOUND_US:-2000}"
+# #837: max tolerated SPREAD (max-min) of the FRESH offset samples, in us -- the journal twin of
+# the #836 HTTP spread check. Same 2000us default + DANTESYNC_STABILITY_US knob as the gate's
+# GATE_STABILITY_US. A scattered-but-in-bound-median clock now FAILS instead of passing silently.
+DEVICE_CLOCK_STABILITY_US="${DANTESYNC_STABILITY_US:-2000}"
 # #550/#591: the freshest dantesync "[NTP] offset:" line must be no older than this many seconds
 # behind the newest journal line, or the check treats it as STALE (never grading on an aged
 # boot-step line -- the #550 bug). dantesync emits a [PTP] servo line every second and an
@@ -687,14 +691,22 @@ else
     else
       fail "dantesync PTP servo not LOCKED (degraded or unknown)"
     fi
-    case "$(dantesync_offset_verdict "$DS_JOURNAL" "$DANTESYNC_OFFSET_FRESHNESS_S" "$DEVICE_CLOCK_BOUND_US")" in
+    case "$(dantesync_offset_verdict "$DS_JOURNAL" "$DANTESYNC_OFFSET_FRESHNESS_S" "$DEVICE_CLOCK_BOUND_US" "$DEVICE_CLOCK_STABILITY_US")" in
       ok)
-        ok "dantesync clock offset within ${DEVICE_CLOCK_BOUND_US}us bound (fresh)"
+        ok "dantesync clock offset within ${DEVICE_CLOCK_BOUND_US}us bound + samples within ${DEVICE_CLOCK_STABILITY_US}us spread (fresh)"
         ;;
       drift)
         # A FRESH out-of-bound offset = a real clock desync happening NOW -- the cam5/6 5.28s case
         # (a 2nd timesync daemon stepping the clock). Always a hard FAIL, regardless of PTP state.
         fail "dantesync clock offset OUTSIDE the ${DEVICE_CLOCK_BOUND_US}us bound -- a REAL clock desync (#591: e.g. a 2nd timesync daemon stepping the clock, cam5/6 -> 5.28s)"
+        ;;
+      unstable)
+        # #837: median in-bound but the FRESH samples scatter past the stability bound -- a
+        # scattered/unusable clock. As hard a FAIL as drift (the #836 spread class, journal twin).
+        fail "dantesync clock offset median within the ${DEVICE_CLOCK_BOUND_US}us bound but the FRESH samples scatter past the ${DEVICE_CLOCK_STABILITY_US}us stability bound -- scattered/unusable clock (#837)"
+        ;;
+      drift_unstable)
+        fail "dantesync clock offset OUTSIDE the ${DEVICE_CLOCK_BOUND_US}us bound AND the FRESH samples scatter past the ${DEVICE_CLOCK_STABILITY_US}us stability bound -- a real desync with scattered samples (#837)"
         ;;
       stale | absent)
         # No FRESH [NTP] offset reading. dantesync emits the [NTP] offset line only intermittently

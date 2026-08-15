@@ -452,6 +452,162 @@ fn dantesync_offset_verdict_fails_closed_on_a_malformed_freshness_window() {
     assert_eq!(out.trim(), "stale");
 }
 
+// --- #837: SPREAD/STABILITY check on the JOURNAL-fallback path (the twin of #836's HTTP path) ---
+// dantesync_offset_verdict graded the MEDIAN alone (ok|drift|stale|absent) -- a scattered-but-in-
+// bound-median journal passed silently, the exact gap #836 closed for the HTTP path's
+// sampled_offset_verdict. The verdict gains an OPTIONAL 4th arg STABILITY_US (omitted => the pre-
+// #837 median-only contract, byte-for-byte) and, when present, grades the SPREAD of the SAME K=11
+// fresh sample set via the existing spread_of_ints, adding "unstable"/"drift_unstable" (same words
+// as the HTTP path). Net effect: strictly MORE failures than before, never fewer -- the location
+// bound never moves.
+
+/// Grade a journal with the 4-arg (stability-aware) form: freshness 300, bound 2000, given stability.
+fn offset_verdict_stab(journal: &str, stability: &str) -> String {
+    run_sourced(
+        &format!(
+            "TEXT='{}'\ndantesync_offset_verdict \"$TEXT\" 300 2000 \"$STAB\"",
+            journal.replace('\'', "'\\''")
+        ),
+        &[("STAB", stability)],
+    )
+    .trim()
+    .to_string()
+}
+
+// Fresh samples: median in-bound (+50us) but SPREAD 2540us > 2000us stability -> scattered/unusable.
+const DS_FRESH_SCATTERED_IN_BOUND_MEDIAN: &str = "\
+2026-07-08T10:00:00+02:00 CAM1 dantesync[1]: [NTP] offset:+50us (threshold:520us, adaptive)
+2026-07-08T10:00:10+02:00 CAM1 dantesync[1]: [NTP] offset:+2500us (threshold:520us, adaptive)
+2026-07-08T10:00:20+02:00 CAM1 dantesync[1]: [NTP] offset:-40us (threshold:520us, adaptive)
+2026-07-08T10:00:25+02:00 CAM1 dantesync[1]: [PTP] NANO  Drift:   +12ns/s  Adj: +6.10ppm
+";
+
+// Fresh samples: median OUT of bound (+2600us) AND spread 2600us > 2000us -> both fail.
+const DS_FRESH_DRIFT_AND_SCATTERED: &str = "\
+2026-07-08T10:00:00+02:00 CAM1 dantesync[1]: [NTP] offset:+2600us
+2026-07-08T10:00:10+02:00 CAM1 dantesync[1]: [NTP] offset:+5000us
+2026-07-08T10:00:20+02:00 CAM1 dantesync[1]: [NTP] offset:+2400us
+2026-07-08T10:00:25+02:00 CAM1 dantesync[1]: [PTP] NANO  Drift:   +12ns/s  Adj: +6.10ppm
+";
+
+// Fresh samples: median OUT of bound (+2600us) but spread only 200us <= 2000us -> plain drift.
+const DS_FRESH_DRIFT_BUT_TIGHT: &str = "\
+2026-07-08T10:00:00+02:00 CAM1 dantesync[1]: [NTP] offset:+2600us
+2026-07-08T10:00:10+02:00 CAM1 dantesync[1]: [NTP] offset:+2700us
+2026-07-08T10:00:20+02:00 CAM1 dantesync[1]: [NTP] offset:+2500us
+2026-07-08T10:00:25+02:00 CAM1 dantesync[1]: [PTP] NANO  Drift:   +12ns/s  Adj: +6.10ppm
+";
+
+// Fresh samples: median in-bound (+50us) AND spread only 130us <= 2000us -> healthy, still ok.
+const DS_FRESH_TIGHT_IN_BOUND: &str = "\
+2026-07-08T10:00:00+02:00 CAM1 dantesync[1]: [NTP] offset:+50us (threshold:520us, adaptive)
+2026-07-08T10:00:10+02:00 CAM1 dantesync[1]: [NTP] offset:+100us (threshold:520us, adaptive)
+2026-07-08T10:00:20+02:00 CAM1 dantesync[1]: [NTP] offset:-30us (threshold:520us, adaptive)
+2026-07-08T10:00:25+02:00 CAM1 dantesync[1]: [PTP] NANO  Drift:   +12ns/s  Adj: +6.10ppm
+";
+
+#[test]
+fn dantesync_offset_verdict_unstable_on_scattered_in_bound_median_837() {
+    // The #837 gap made concrete: median +50us (in the 2000us bound) but spread 2540us (> 2000us
+    // stability) -> "unstable". Pre-#837 the journal path had no spread concept and returned "ok".
+    assert_eq!(
+        offset_verdict_stab(DS_FRESH_SCATTERED_IN_BOUND_MEDIAN, "2000"),
+        "unstable"
+    );
+}
+
+#[test]
+fn dantesync_offset_verdict_drift_unstable_when_both_median_and_spread_fail_837() {
+    assert_eq!(
+        offset_verdict_stab(DS_FRESH_DRIFT_AND_SCATTERED, "2000"),
+        "drift_unstable"
+    );
+}
+
+#[test]
+fn dantesync_offset_verdict_plain_drift_when_median_out_but_spread_in_bound_837() {
+    // Median out of bound, spread tight -> still just "drift", NOT drift_unstable.
+    assert_eq!(
+        offset_verdict_stab(DS_FRESH_DRIFT_BUT_TIGHT, "2000"),
+        "drift"
+    );
+}
+
+#[test]
+fn dantesync_offset_verdict_stays_ok_on_a_tight_in_bound_set_with_stability_837() {
+    // Non-regression: the spread check must NOT false-fail a genuinely healthy node.
+    assert_eq!(offset_verdict_stab(DS_FRESH_TIGHT_IN_BOUND, "2000"), "ok");
+}
+
+#[test]
+fn dantesync_offset_verdict_stability_omitted_is_median_only_back_compat_837() {
+    // The SAME scattered journal that is "unstable" with a stability bound must stay "ok" with the
+    // 3-arg (pre-#837) call -- proving every existing 3-arg caller is byte-for-byte unchanged.
+    assert_eq!(offset_verdict(DS_FRESH_SCATTERED_IN_BOUND_MEDIAN), "ok");
+}
+
+#[test]
+fn dantesync_offset_verdict_single_fresh_sample_is_ok_not_unstable_837() {
+    // Scatter is undefined from ONE point (spread_of_ints needs >=2). A single fresh in-bound
+    // sample with a stability bound passed must be "ok", never "unstable".
+    assert_eq!(offset_verdict_stab(DS_FRESH_OK, "2000"), "ok");
+}
+
+#[test]
+fn dantesync_offset_verdict_fails_closed_on_malformed_stability_837() {
+    // #595 numeric-guard discipline: a NON-numeric stability bound cannot be graded, and an
+    // unvalidated value in `-gt` would throw and silently defeat the check -> fail loud to
+    // "unstable" (an in-bound-median journal), never a silent "ok".
+    assert_eq!(
+        offset_verdict_stab(DS_FRESH_SCATTERED_IN_BOUND_MEDIAN, "abc"),
+        "unstable"
+    );
+}
+
+#[test]
+fn fresh_offset_samples_and_spread_expose_the_raw_set_837() {
+    // The raw fresh values are exposed one-per-line (newest-first order not required), and the
+    // spread helper is max-min over them. Proves the median and spread grade the SAME set.
+    let samples = run_sourced(
+        &format!(
+            "TEXT='{}'\n_fresh_offset_samples_us \"$TEXT\" 300 11 | sort -n | tr '\\n' ' '",
+            DS_FRESH_SCATTERED_IN_BOUND_MEDIAN.replace('\'', "'\\''")
+        ),
+        &[],
+    );
+    assert_eq!(samples.trim(), "-40 50 2500");
+    let spread = run_sourced(
+        &format!(
+            "TEXT='{}'\n_fresh_offset_spread_us \"$TEXT\" 300 11",
+            DS_FRESH_SCATTERED_IN_BOUND_MEDIAN.replace('\'', "'\\''")
+        ),
+        &[],
+    );
+    assert_eq!(spread.trim(), "2540");
+}
+
+#[test]
+fn offset_verdict_check_returns_rc2_and_reports_spread_on_unstable_837() {
+    // offset_verdict_check (5-arg, stability-aware) must return rc 2 (hard fail, the drift class)
+    // and print the spread value so a red says WHICH kind of bad it is (#836 point 4).
+    let out = run_sourced(
+        &format!(
+            "TEXT='{}'\nrc=0; offset_verdict_check node \"$TEXT\" 300 2000 2000 || rc=$?; echo \"rc=$rc\"",
+            DS_FRESH_SCATTERED_IN_BOUND_MEDIAN.replace('\'', "'\\''")
+        ),
+        &[],
+    );
+    assert!(
+        out.contains("rc=2"),
+        "unstable must be rc 2 (hard fail): {out}"
+    );
+    assert!(
+        out.contains("UNSTABLE"),
+        "must print the UNSTABLE verdict: {out}"
+    );
+    assert!(out.contains("2540"), "must report the spread value: {out}");
+}
+
 fn freshest_offset(journal: &str, freshness_s: &str) -> String {
     run_sourced(
         &format!(
@@ -637,6 +793,74 @@ fn cli_still_passes_on_a_fresh_in_bound_offset() {
         "a fresh in-bound offset must still PASS (0). stdout: {stdout} stderr: {stderr}"
     );
     assert!(stdout.contains("ALL CLEAR"), "stdout: {stdout}");
+}
+
+/// Write a MULTI-SAMPLE fresh ISO journal whose median is in-bound (+50us) but whose SPREAD
+/// (2540us) exceeds the default 2000us stability bound. The three [NTP] offset lines are seconds
+/// apart and lead the newest [PTP] line, so all are fresh. Used to prove the CLI's --stability-us
+/// path fails a scattered node (#837).
+fn write_journal_scattered(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("clock-offset-guard-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{name}.log"));
+    let mut f = std::fs::File::create(&path).unwrap();
+    f.write_all(
+        b"2026-07-08T10:00:00+02:00 NODE dantesync[1]: [NTP] offset:+50us (threshold:520us, adaptive)\n\
+2026-07-08T10:00:10+02:00 NODE dantesync[1]: [NTP] offset:+2500us (threshold:520us, adaptive)\n\
+2026-07-08T10:00:20+02:00 NODE dantesync[1]: [NTP] offset:-40us (threshold:520us, adaptive)\n\
+2026-07-08T10:00:25+02:00 NODE dantesync[1]: [PTP] NANO  Drift:   +12ns/s  Adj: +6.10ppm\n",
+    )
+    .unwrap();
+    path
+}
+
+#[test]
+fn cli_fails_drift_on_a_scattered_in_bound_median_node_837() {
+    // #837 at the CLI surface: a scattered-but-in-bound-median journal must now FAIL (exit 20,
+    // the DRIFT/UNSTABLE class) instead of the silent ALL CLEAR the median-only path gave. The
+    // default stability bound (2000us via DANTESYNC_STABILITY_US) is applied without a flag.
+    let journal = write_journal_scattered("cam1_cli_scattered_837");
+    let (code, stdout, stderr) = run_script_env(
+        &["--targets", "cam1=10.77.9.61"],
+        &[(
+            "CLOCK_GUARD_JOURNAL_OVERRIDE",
+            journal.to_str().expect("utf8 temp path"),
+        )],
+    );
+    assert_eq!(
+        code, 20,
+        "a scattered in-bound-median node must FAIL (20), never a silent ALL CLEAR. stdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        stdout.contains("UNSTABLE"),
+        "stdout must name UNSTABLE: {stdout}"
+    );
+    assert!(
+        stderr.to_uppercase().contains("UNSTABLE"),
+        "stderr summary must name the UNSTABLE failure: {stderr}"
+    );
+}
+
+#[test]
+fn cli_rejects_a_non_numeric_stability_us_837() {
+    // The new --stability-us flag is validated like --bound-us: a non-numeric value is a usage
+    // error (exit 1), never silently ignored (which would drop the spread check entirely).
+    let journal = write_journal_fresh("cam1_cli_badstab_837", "+300");
+    let (code, _stdout, stderr) = run_script_env(
+        &["--stability-us", "abc", "--targets", "cam1=10.77.9.61"],
+        &[(
+            "CLOCK_GUARD_JOURNAL_OVERRIDE",
+            journal.to_str().expect("utf8 temp path"),
+        )],
+    );
+    assert_eq!(
+        code, 1,
+        "non-numeric --stability-us must be a usage error (1). stderr={stderr}"
+    );
+    assert!(
+        stderr.contains("--stability-us"),
+        "the error must name the offending flag: {stderr}"
+    );
 }
 
 #[test]

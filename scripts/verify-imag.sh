@@ -186,6 +186,9 @@ IMAG_OBS_PROJECTOR_POLL_S="${IMAG_OBS_PROJECTOR_POLL_S:-120}"    # budget for pr
 IMAG_READ_TIMEOUT="${IMAG_READ_TIMEOUT:-20}"                    # general remote-read execution budget
 IMAG_SLOW_READ_TIMEOUT="${IMAG_SLOW_READ_TIMEOUT:-60}"          # slow reads (dpkg/apt/journal/gather)
 IMAG_CLOCK_BOUND_US="${CLOCK_GUARD_BOUND_US:-2000}"
+# #837: max tolerated SPREAD (max-min) of the FRESH offset samples, in us -- the journal twin of
+# the #836 HTTP spread check; same 2000us default + DANTESYNC_STABILITY_US knob as the gate.
+IMAG_CLOCK_STABILITY_US="${DANTESYNC_STABILITY_US:-2000}"
 DANTESYNC_OFFSET_FRESHNESS_S="${DANTESYNC_OFFSET_FRESHNESS_S:-300}"
 DANTESYNC_JOURNAL_MAX_AGE_S="${DANTESYNC_JOURNAL_MAX_AGE_S:-60}"
 # #834: the rig's PTP grandmaster every node must agree on. Every DanteSync status-pipe/HTTP
@@ -964,9 +967,11 @@ else
     else
       fail "dantesync PTP servo not LOCKED"
     fi
-    case "$(dantesync_offset_verdict "$DS_JOURNAL" "$DANTESYNC_OFFSET_FRESHNESS_S" "$IMAG_CLOCK_BOUND_US")" in
-      ok) ok "dantesync clock offset within ${IMAG_CLOCK_BOUND_US}us bound (fresh)" ;;
+    case "$(dantesync_offset_verdict "$DS_JOURNAL" "$DANTESYNC_OFFSET_FRESHNESS_S" "$IMAG_CLOCK_BOUND_US" "$IMAG_CLOCK_STABILITY_US")" in
+      ok) ok "dantesync clock offset within ${IMAG_CLOCK_BOUND_US}us bound + samples within ${IMAG_CLOCK_STABILITY_US}us spread (fresh)" ;;
       drift) fail "dantesync clock offset OUTSIDE the ${IMAG_CLOCK_BOUND_US}us bound -- a real clock desync" ;;
+      unstable) fail "dantesync clock offset median within the ${IMAG_CLOCK_BOUND_US}us bound but the FRESH samples scatter past the ${IMAG_CLOCK_STABILITY_US}us stability bound -- scattered/unusable clock (#837)" ;;
+      drift_unstable) fail "dantesync clock offset OUTSIDE the ${IMAG_CLOCK_BOUND_US}us bound AND samples scatter past the ${IMAG_CLOCK_STABILITY_US}us stability bound (#837)" ;;
       *) fail "dantesync clock offset has no FRESH reading -- status incomplete" ;;
     esac
     fail "grandmaster identity unreadable via the journal path (no gm_source_ip in journald text) -- the :8898/status endpoint is required to certify #834; it was unreachable above"

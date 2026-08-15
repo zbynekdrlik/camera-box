@@ -22,6 +22,7 @@
 
 #include "obs.h"
 #include "obs-internal.h"
+#include "obs-display-budget.h" /* camera-box #879: aux sender budget gate */
 
 struct obs_core *obs = NULL;
 
@@ -2903,6 +2904,28 @@ uint64_t obs_get_average_frame_time_ns(void)
 uint64_t obs_get_frame_interval_ns(void)
 {
 	return obs->video.video_frame_interval_ns;
+}
+
+/*
+ * camera-box #879: see obs.h. Reads this tick's start + the frame interval (the same two
+ * globals render_display() budgets the projector path against), derives the canvas-rate
+ * effective divisor, and delegates the skip decision to the pure obs_display_should_skip()
+ * -- no duplicated logic. Never-warmed / not-ticking -> never skip (render once to measure).
+ */
+bool obs_aux_sender_should_skip(uint32_t render_divisor, uint32_t frame_counter, uint64_t ewma_ns,
+			       uint32_t consecutive_skips)
+{
+	const uint64_t interval = obs->video.video_frame_interval_ns;
+	const uint64_t tick_start = obs->video.graphics_frame_start_ns;
+	if (ewma_ns == 0 || interval == 0 || tick_start == 0)
+		return false;
+
+	const uint32_t effective_divisor = obs_effective_render_divisor(render_divisor, interval);
+	const uint64_t now = os_gettime_ns();
+	const uint64_t elapsed = (now > tick_start) ? (now - tick_start) : 0;
+	const uint64_t budget = interval - interval / 10; /* 90% safety margin */
+	return obs_display_should_skip(effective_divisor, frame_counter, ewma_ns, elapsed, budget,
+				       consecutive_skips);
 }
 
 enum obs_obj_type obs_obj_get_type(void *obj)
