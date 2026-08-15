@@ -3714,14 +3714,19 @@ fn build_and_print_verdict(
                 // rendered image delivered on many consecutive recorded frames) leaves it clean.
                 // Measured on the STREAM recording — the single surface carrying every node burn,
                 // and where a freeze/repeat manifests to the viewer — from the SAME recorded-order
-                // extractor contiguity uses (no new decode). The pure decision core is
-                // `camera_box::burn_hold`; it is REPORT-ONLY today
+                // `(frame_index, id)` extractor contiguity uses (no new decode); the frame index
+                // lets a recorded gap (an undecodable burn in between) break a hold rather than
+                // inflate it. NOTE the source recording differs from the loss source for a
+                // camera-under-test node: cam1/cam3/… loss is read from the CLEAN strih recording
+                // (`cam1_source`), but `hold` is deliberately the stream recording (the delivered,
+                // viewer-facing surface) even under the same `full_chain.loss.<node>.hold` key.
+                // The pure decision core is `camera_box::burn_hold`; it is REPORT-ONLY today
                 // (`burn_hold::gates_overall_pass() == false`) — the metric now accumulates in the
                 // verdict JSON, and the fold below is a one-line LIVE flip once #870's follow-up
                 // confirms the bound against accumulated green runs.
                 let hold = camera_box::burn_hold::burn_hold_distribution(
                     spec.node,
-                    &burn_ids_in(stream_frames, spec.burn_run_id),
+                    &burn_ids_with_frame_index_in(stream_frames, spec.burn_run_id),
                 );
                 let hold_within = hold.within_bound(camera_box::burn_hold::MAX_HOLD_FRAMES);
                 report["full_chain"]["loss"][spec.node]["hold"] = serde_json::json!({

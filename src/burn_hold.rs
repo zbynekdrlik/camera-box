@@ -43,8 +43,11 @@
 //!
 //! This is the PURE decision core; it compiles + unit-tests on DEFAULT features (the whole `probe`
 //! module is CI-only per CLAUDE.md's Local Build Policy). The probe-gated consumer
-//! (`src/bin/recording-verdict.rs`) feeds it `recording_latency::burn_ids_in(stream_frames,
-//! run_id)` — the recorded-ORDER extractor already used for contiguity, so no new decode.
+//! (`src/bin/recording-verdict.rs`) feeds it
+//! `recording_latency::burn_ids_with_frame_index_in(stream_frames, run_id)` — the recorded-ORDER
+//! `(frame_index, id)` extractor already used for boundary-trimmed contiguity, so no new decode; the
+//! `frame_index` lets a recorded gap (an undecodable burn in between) break a run instead of merging
+//! two separate holds.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -56,10 +59,12 @@ use std::collections::{BTreeMap, BTreeSet};
 pub const MAX_HOLD_FRAMES: u32 = 4;
 
 /// The consecutive-duplicate run-length distribution of one node's burn-id sequence in a recording
-/// (#870). Built from the recorded-ORDER ids by [`burn_hold_distribution`]. All counts are `u32`;
-/// the duplicate FRACTION is a derived method so the struct carries no float (keeps `PartialEq`
-/// exact and avoids the `Eq`-on-float trap).
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+/// (#870). Built from the recorded-ORDER `(frame_index, id)` pairs by [`burn_hold_distribution`].
+/// All counts are `u32`; the duplicate FRACTION is a derived method so the struct carries no float
+/// (keeps `PartialEq` exact and avoids the `Eq`-on-float trap). Not `Serialize`d — the probe
+/// consumer hand-builds its verdict JSON so it can add the derived fraction/bound/report-only
+/// fields the struct itself does not carry.
+#[derive(Debug, Clone, PartialEq)]
 pub struct HoldDistribution {
     /// Node label, e.g. `"strih"`, `"stream"`, `"cam2"`.
     pub node: String,
@@ -67,16 +72,20 @@ pub struct HoldDistribution {
     pub total_burn_frames: u32,
     /// Distinct burn ids seen.
     pub distinct_ids: u32,
-    /// The longest run of consecutive frames sharing one burn id, in FRAMES. `0` for an empty
-    /// sequence, `1` for a clean sequence where every id is distinct (the legit decimated case).
+    /// The longest run of RECORDING-ADJACENT frames sharing one burn id, in FRAMES. `0` for an
+    /// empty sequence, `1` for a clean sequence where every id is distinct (the legit decimated
+    /// case).
     pub max_hold_frames: u32,
-    /// The burn id that held longest (first one on a tie). `None` for an empty sequence.
+    /// The burn id that held longest (first one on a tie — strict `>`). `None` for an empty
+    /// sequence.
     pub max_hold_id: Option<u32>,
-    /// Adjacent identical pairs (`ids[i] == ids[i-1]`) — the "byte-identical consecutive frames"
-    /// numerator. For a run of length L this contributes L-1.
+    /// Recording-adjacent identical pairs (same id on frames `i` and `i+1`) — the "byte-identical
+    /// consecutive recorded frames" numerator. For a run of length L this contributes L-1.
     pub duplicate_pairs: u32,
-    /// Total adjacent pairs walked (`total_burn_frames - 1`, `0` for a 0/1-frame sequence) — the
-    /// [`duplicate_pair_fraction`](Self::duplicate_pair_fraction) denominator.
+    /// Recording-adjacent pairs walked (consecutive recorded frames, both carrying this node's
+    /// burn) — the [`duplicate_pair_fraction`](Self::duplicate_pair_fraction) denominator. A
+    /// recorded gap between two decoded burns (an undecodable frame in between) is NOT a
+    /// consecutive-recorded-frame pair and is excluded from BOTH this and `duplicate_pairs`.
     pub adjacent_pairs: u32,
     /// The full run-length histogram, `(hold_frames, count)` ascending by `hold_frames` — the
     /// distribution the ticket asks to REPORT so a degradation is visible before it crosses the
@@ -109,32 +118,45 @@ impl HoldDistribution {
     }
 }
 
-/// Build the consecutive-duplicate run-length distribution for one node's recorded-ORDER burn ids.
+/// Build the run-length distribution for one node's recorded-ORDER `(frame_index, id)` burn pairs
+/// (the [`crate::probe::recording_latency::burn_ids_with_frame_index_in`] output — ascending
+/// `frame_index`, one entry per recorded frame whose burn decoded).
 ///
-/// ONE walk over the sequence groups it into maximal runs of an identical id; each run of length L
-/// contributes one histogram entry at `L`, `L-1` duplicate pairs, and updates the running max hold.
-/// The longest run wins `max_hold_frames` / `max_hold_id` (first one on a tie — strict `>`).
-/// Program-switch segmentation is inherent: a switch changes the filter instance so the `frame_id`
-/// jumps/resets ⇒ a different id ⇒ the run breaks; the only over-count risk (two segments' counters
-/// coincidentally EQUAL across the boundary) is bounded to +1 per switch and is harmless while the
-/// term is report-only ([`gates_overall_pass`]).
+/// ONE walk groups the pairs into maximal runs where BOTH the id is identical AND the frames are
+/// RECORDING-ADJACENT (`frame_index` steps by exactly 1). A "hold" is the identical rendered image
+/// delivered on consecutive RECORDED frames, so a recorded gap — an undecodable/absent burn on the
+/// frame in between (`frame_index` jumps by >1) — breaks the run rather than silently merging two
+/// separate holds into one longer (inflated) one. Each run of length L contributes one histogram
+/// entry at `L` and `L-1` duplicate pairs; the longest run wins `max_hold_frames` / `max_hold_id`
+/// (first one on a tie — strict `>`). `adjacent_pairs` counts only recording-adjacent pairs, so
+/// `duplicate_pair_fraction` is exactly "fraction of consecutive recorded frames byte-identical"
+/// (the ticket's headline metric), never diluted by decode gaps.
+///
+/// Program-switch segmentation is inherent on top of this: a switch changes the filter instance so
+/// the `frame_id` jumps/resets ⇒ a different id ⇒ the run breaks. The only residual over-count risk
+/// (two segments' counters coincidentally EQUAL on two recording-adjacent frames across the
+/// boundary) is bounded to +1 per switch and is harmless while the term is report-only
+/// ([`gates_overall_pass`]).
 ///
 /// An empty input ⇒ an all-zero distribution (`max_hold_frames == 0`, [`HoldDistribution::
 /// measured_max_hold`] `== None`) — nothing was proven, and the gate PASSES it (see
 /// [`hold_gate_pass`]).
-pub fn burn_hold_distribution(node: &str, ids_in_recorded_order: &[u32]) -> HoldDistribution {
-    let total_burn_frames = ids_in_recorded_order.len() as u32;
-    let distinct_ids = ids_in_recorded_order
+pub fn burn_hold_distribution(
+    node: &str,
+    frames_in_recorded_order: &[(u64, u32)],
+) -> HoldDistribution {
+    let total_burn_frames = frames_in_recorded_order.len() as u32;
+    let distinct_ids = frames_in_recorded_order
         .iter()
-        .copied()
+        .map(|&(_, id)| id)
         .collect::<BTreeSet<u32>>()
         .len() as u32;
-    let adjacent_pairs = total_burn_frames.saturating_sub(1);
 
     let mut histogram_map: BTreeMap<u32, u32> = BTreeMap::new();
     let mut max_hold_frames = 0u32;
     let mut max_hold_id: Option<u32> = None;
     let mut duplicate_pairs = 0u32;
+    let mut adjacent_pairs = 0u32;
 
     // Close a finished run of `run_len` frames all carrying `run_id`: record it in the histogram
     // and promote it if it is the longest hold seen so far.
@@ -150,12 +172,17 @@ pub fn burn_hold_distribution(node: &str, ids_in_recorded_order: &[u32]) -> Hold
         }
     };
 
-    let mut iter = ids_in_recorded_order.iter().copied();
-    if let Some(first) = iter.next() {
-        let mut run_id = first;
+    let mut iter = frames_in_recorded_order.iter().copied();
+    if let Some((first_idx, first_id)) = iter.next() {
+        let mut run_id = first_id;
         let mut run_len = 1u32;
-        for id in iter {
-            if id == run_id {
+        let mut prev_idx = first_idx;
+        for (idx, id) in iter {
+            let recording_adjacent = idx == prev_idx.saturating_add(1);
+            if recording_adjacent {
+                adjacent_pairs += 1;
+            }
+            if id == run_id && recording_adjacent {
                 run_len += 1;
                 duplicate_pairs += 1;
             } else {
@@ -169,6 +196,7 @@ pub fn burn_hold_distribution(node: &str, ids_in_recorded_order: &[u32]) -> Hold
                 run_id = id;
                 run_len = 1;
             }
+            prev_idx = idx;
         }
         close_run(
             run_id,
@@ -223,16 +251,26 @@ pub fn gates_overall_pass() -> bool {
 mod tests {
     use super::*;
 
+    /// Pair a plain id list with contiguous recorded frame indices `0,1,2,…` — the common case
+    /// (every recorded frame in the span carried a readable burn). The gap tests build explicit
+    /// `(frame_index, id)` pairs instead.
+    fn contig(ids: &[u32]) -> Vec<(u64, u32)> {
+        ids.iter()
+            .enumerate()
+            .map(|(i, &id)| (i as u64, id))
+            .collect()
+    }
+
     /// A clean decimated stream sequence — consecutive kept ids STEP by 2, every id distinct ⇒
     /// hold = 1, within bound, zero duplicate pairs. The legit topology-v2 baseline.
     #[test]
     fn clean_stepping_sequence_is_hold_one_within_bound() {
-        let ids = [1000u32, 1002, 1004, 1006, 1008];
-        let d = burn_hold_distribution("strih", &ids);
+        let d = burn_hold_distribution("strih", &contig(&[1000, 1002, 1004, 1006, 1008]));
         assert_eq!(d.max_hold_frames, 1, "distinct stepping ids ⇒ max hold 1");
         assert_eq!(d.duplicate_pairs, 0);
         assert_eq!(d.distinct_ids, 5);
         assert_eq!(d.total_burn_frames, 5);
+        assert_eq!(d.adjacent_pairs, 4);
         assert!(d.within_bound(MAX_HOLD_FRAMES));
         assert_eq!(d.duplicate_pair_fraction(), 0.0);
         assert_eq!(d.histogram, vec![(1, 5)]);
@@ -242,8 +280,7 @@ mod tests {
     /// within bound — the gate must not fire on the legitimate render:source ratio.
     #[test]
     fn legit_transient_hold_two_is_within_bound() {
-        let ids = [1000u32, 1000, 1002, 1004];
-        let d = burn_hold_distribution("stream", &ids);
+        let d = burn_hold_distribution("stream", &contig(&[1000, 1000, 1002, 1004]));
         assert_eq!(d.max_hold_frames, 2);
         assert_eq!(d.max_hold_id, Some(1000));
         assert_eq!(d.duplicate_pairs, 1);
@@ -255,8 +292,7 @@ mod tests {
     #[test]
     fn pathology_max_hold_five_exceeds_bound_396782734() {
         // strih id 100 re-delivered on 5 consecutive stream frames (a frozen/repeated render).
-        let ids = [98u32, 100, 100, 100, 100, 100, 102, 104];
-        let d = burn_hold_distribution("strih", &ids);
+        let d = burn_hold_distribution("strih", &contig(&[98, 100, 100, 100, 100, 100, 102, 104]));
         assert_eq!(d.max_hold_frames, 5, "the 5-frame freeze must be measured");
         assert_eq!(d.max_hold_id, Some(100));
         assert!(
@@ -282,7 +318,7 @@ mod tests {
             }
             next += 2;
         }
-        let d = burn_hold_distribution("strih", &ids);
+        let d = burn_hold_distribution("strih", &contig(&ids));
         assert!(
             d.duplicate_pair_fraction() > 0.5,
             "reference shape is majority-duplicate: {}",
@@ -300,11 +336,46 @@ mod tests {
     #[test]
     fn histogram_records_full_run_length_distribution() {
         // runs: 100x1, 102x3, 104x1, 106x2  ⇒ hold lengths {1:2, 2:1, 3:1}
-        let ids = [100u32, 102, 102, 102, 104, 106, 106];
-        let d = burn_hold_distribution("stream", &ids);
+        let d = burn_hold_distribution("stream", &contig(&[100, 102, 102, 102, 104, 106, 106]));
         assert_eq!(d.histogram, vec![(1, 2), (2, 1), (3, 1)]);
         assert_eq!(d.max_hold_frames, 3);
         assert_eq!(d.max_hold_id, Some(102));
+    }
+
+    /// A recorded GAP (an undecodable burn on the frame in between) must BREAK a run, never merge
+    /// two separate deliveries of the same id into one inflated hold. `[100@0, 100@1, 100@3]`:
+    /// frames 0-1 are recording-adjacent (a real hold of 2), then frame 2 is undecodable so 3 is
+    /// NOT adjacent to 1 ⇒ the third 100 starts a fresh run ⇒ max hold 2, not 3.
+    #[test]
+    fn recorded_gap_breaks_a_run_never_merges_it() {
+        let d = burn_hold_distribution("strih", &[(0, 100), (1, 100), (3, 100)]);
+        assert_eq!(d.max_hold_frames, 2, "the gap at frame 2 breaks the run");
+        assert_eq!(
+            d.duplicate_pairs, 1,
+            "only the 0→1 pair is recording-adjacent"
+        );
+        assert_eq!(
+            d.adjacent_pairs, 1,
+            "1→3 is not a consecutive-recorded-frame pair"
+        );
+        assert_eq!(d.histogram, vec![(1, 1), (2, 1)]);
+        // Fraction denominator excludes the decode gap: 1 identical / 1 adjacent = 1.0, never
+        // diluted to 1/2 by counting the non-adjacent 1→3 pair.
+        assert_eq!(d.duplicate_pair_fraction(), 1.0);
+    }
+
+    /// `max_hold_id` is the FIRST id to reach the maximal run length on a tie (strict `>`), pinning
+    /// the tie-break against a future `>=` mutation. `[1@0, 1@1, 2@2, 3@3, 3@4]`: two runs of
+    /// length 2 (ids 1 and 3); the FIRST (id 1) wins.
+    #[test]
+    fn max_hold_id_is_first_on_a_tie() {
+        let d = burn_hold_distribution("stream", &contig(&[1, 1, 2, 3, 3]));
+        assert_eq!(d.max_hold_frames, 2);
+        assert_eq!(
+            d.max_hold_id,
+            Some(1),
+            "first run to reach the max wins the tie"
+        );
     }
 
     /// An empty burn sequence proves nothing and must PASS (report-only, no double-jeopardy).
@@ -321,7 +392,7 @@ mod tests {
     /// A single burn frame is trivially hold-1.
     #[test]
     fn single_frame_is_hold_one() {
-        let d = burn_hold_distribution("strih", &[7]);
+        let d = burn_hold_distribution("strih", &[(0, 7)]);
         assert_eq!(d.max_hold_frames, 1);
         assert_eq!(d.measured_max_hold(), Some(1));
         assert_eq!(d.adjacent_pairs, 0);
