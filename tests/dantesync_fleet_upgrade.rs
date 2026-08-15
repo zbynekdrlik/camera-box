@@ -104,7 +104,10 @@ fn help_exits_zero_and_documents_canary_and_pin() {
     let (code, stdout, _stderr) = run_script(&["--help"]);
     assert_eq!(code, 0, "#876: --help must exit 0");
     let h = stdout.to_lowercase();
-    assert!(h.contains("canary"), "#876: --help must document the canary discipline");
+    assert!(
+        h.contains("canary"),
+        "#876: --help must document the canary discipline"
+    );
     assert!(
         h.contains("pin") || h.contains("target"),
         "#876: --help must document the pinned target version"
@@ -317,7 +320,8 @@ fn windows_upgrade_cmd_backs_up_current_exe_before_replace() {
 fn windows_rollback_cmd_restores_backup_and_starts() {
     let cmd = run_sourced("dantesync_windows_rollback_cmd");
     assert!(
-        cmd.contains("dantesync.exe.bak") && cmd.contains(r"C:\Program Files\DanteSync\dantesync.exe"),
+        cmd.contains("dantesync.exe.bak")
+            && cmd.contains(r"C:\Program Files\DanteSync\dantesync.exe"),
         "#876: Windows rollback must restore the .bak over the live exe. Got:\n{cmd}"
     );
     assert!(
@@ -329,10 +333,22 @@ fn windows_rollback_cmd_restores_backup_and_starts() {
 #[test]
 fn purge_dead_task_cmd_is_a_forced_idempotent_delete() {
     let cmd = run_sourced("dantesync_windows_purge_dead_task_cmd");
-    assert!(cmd.contains("schtasks"), "#876: purge uses schtasks. Got:\n{cmd}");
-    assert!(cmd.contains("/Delete"), "#876: purge deletes the task. Got:\n{cmd}");
-    assert!(cmd.contains("/TN") && cmd.contains("DanteSyncUpdate"), "#876: names the task. Got:\n{cmd}");
-    assert!(cmd.contains("/F"), "#876: forced delete (idempotent, no prompt). Got:\n{cmd}");
+    assert!(
+        cmd.contains("schtasks"),
+        "#876: purge uses schtasks. Got:\n{cmd}"
+    );
+    assert!(
+        cmd.contains("/Delete"),
+        "#876: purge deletes the task. Got:\n{cmd}"
+    );
+    assert!(
+        cmd.contains("/TN") && cmd.contains("DanteSyncUpdate"),
+        "#876: names the task. Got:\n{cmd}"
+    );
+    assert!(
+        cmd.contains("/F"),
+        "#876: forced delete (idempotent, no prompt). Got:\n{cmd}"
+    );
 }
 
 // --- canary selection (one representative per OS class present) ------------------------------
@@ -377,7 +393,10 @@ fn resolve_canary_honors_override_when_all_members_present() {
 fn resolve_canary_rejects_override_member_not_in_set() {
     let (code, _stdout, stderr) =
         run_sourced_status("dantesync_resolve_canary 'cam1' 'strih' 'cam9'");
-    assert_ne!(code, 0, "#876: an override naming a node not in the fleet must fail");
+    assert_ne!(
+        code, 0,
+        "#876: an override naming a node not in the fleet must fail"
+    );
     assert!(
         stderr.contains("cam9"),
         "#876: the error must name the offending override node. Got stderr:\n{stderr}"
@@ -389,8 +408,10 @@ fn resolve_canary_rejects_override_member_not_in_set() {
 #[test]
 fn remaining_after_canary_excludes_canaries_preserves_order() {
     assert_eq!(
-        run_sourced("dantesync_remaining_after_canary 'cam1 cam2 imag-nb strih stream' 'cam1 strih'")
-            .trim(),
+        run_sourced(
+            "dantesync_remaining_after_canary 'cam1 cam2 imag-nb strih stream' 'cam1 strih'"
+        )
+        .trim(),
         "cam2 imag-nb stream",
         "#876: remaining = full set minus the canary set, order preserved"
     );
