@@ -8478,3 +8478,35 @@ Review: 0 🔴 2 🟡 3 🔵, all fixed same-branch. Gotcha logged: cargo tests 
 - GOTCHA (seam brace-freedom): `tests/aux_sender_budget_879.rs` finds the seam's closing brace via
   the FIRST `"\n}"` after the signature, so the seam must stay brace-free — the new max-term uses a
   `? :` ternary precisely to avoid a nested `{}` block.
+
+## 2026-08-15 — #829 ENFORCE the #826 strih OBS-identity facet fleet-wide (round 15)
+- Flipped the #826 obs-identity facet in `scripts/version-integrity-gate.sh` main() from #756-style
+  opt-in to #758-style ENFORCED — but PER-FACET, not the literal "remove both guards", because live
+  reality contradicted the ticket's "all four facets present + healthy" premise:
+  - `obs_installs` + `obs_process_count`: now UNCONDITIONAL on every box (absent box → gate-blocking
+    UNKNOWN). Both served fleet-wide; verdict-neutral on the current fleet.
+  - `startup_chain`: re-keyed from ahk-presence to `[ "$name" = "strih" ]` (strih runs it always;
+    stream, no NL_STARTUP.ahk, never engages).
+  - `port4455_identity`: KEPT opt-in (its own `[ -n "$port4455_owner_path" ]` guard). Root cause
+    (live probe): the redeployed non-elevated BundleStateServer task cannot read the elevated OBS's
+    exe path (:4455 IS owned by pinned obs64, confirmed via elevated MCP), so the key is omitted on
+    BOTH boxes — enforcing it would false-UNKNOWN-block the healthy gate. Follow-up #1067 fixes the
+    gather context then does the #758-style enforce.
+- Second, related fix (same file family): `scripts/bundle-state-server.py` `log()` now swallows an
+  OSError from a dead stdout pipe (hidden-task context crash) so a broken stdout can never take the
+  server down. Bypass-marked (the swallow cannot itself log — stdout is the broken resource).
+- Findings surfaced (already-active DRIFT, NOT caused by #829): strih serves 9 obs_installs (8
+  `_RETIRED_*` leftovers → obs_installs DRIFT) and `ahk_dead_config_present=1` (→ startup_chain
+  DRIFT). Both are #826's incomplete PHYSICAL cleanup (delete the retired installs + strip the dead
+  NL_STARTUP.ahk block); commented on #826. Since strih already serves obs_installs, these DRIFTs are
+  already live under the pre-#829 opt-in code — the standing gate reds on strih until #826's cleanup.
+- Commits: e92f7476f (bump .460) · e0fdfa112 [red] gate tests · 5e5e86794 [green] gate flip +
+  fixtures · 7f0623ffd [red] log test · c162e56c9 [green] log() hardening.
+- RED→GREEN test names: gate_refuses_when_a_reporting_box_omits_the_enforced_826_keys,
+  gate_enforces_startup_chain_on_strih_even_without_ahk_826,
+  gate_keeps_port4455_identity_opt_in_when_unreported_826 (all 0-under-opt-in → correct-under-enforced);
+  test_log_survives_a_dead_stdout_pipe (raises pre-fix → passes post-fix).
+- GOTCHA: the `# airuleset:build-ok` Tier-0 bypass is DISABLED for camera-box, so gate tests cannot
+  run locally at all — RED→GREEN for the .rs is reasoned, not observed; the Python log test DID run
+  RED→GREEN locally. Cold-worktree `cargo test --no-run` exceeds the foreground cap; full cargo suite
+  runs at the supervisor's integration.
