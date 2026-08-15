@@ -364,29 +364,35 @@ main() {
       *)  echo "    !! drift-guard exited ${rc} for ${name} (engine/usage error)" >&2; bad=$((bad + 1)) ;;
     esac
 
-    # #826 — strih OBS-identity machine-check facet, OPT-IN per box (mirrors #756's original
-    # landing): engage the generic install/port/process-count trio ONLY when this box's state
-    # reports at least one of the three keys -- an un-upgraded bundle-state-server (the entire
-    # fleet, until the supervisor redeploys it) is silently skipped here, never a false DRIFT/
-    # UNKNOWN, exactly like genlock_build_sha before #758 enforced it fleet-wide.
+    # #826 OBS-identity machine-check facet, ENFORCED fleet-wide (#829, the 758-style second step
+    # after the 756-style opt-in landing): the generic install + process-count checks now run on
+    # EVERY box UNCONDITIONALLY -- an un-upgraded / absent box is a real gate-blocking UNKNOWN, no
+    # longer a silent skip. EXCEPTION: port4455_identity stays OPT-IN (its own guard below) because
+    # the redeployed non-elevated bundle-state-server task cannot read the :4455 owner's exe path
+    # (a non-elevated Get-Process on the elevated OBS is access-denied -> the key is omitted on the
+    # whole live fleet); enforcing it now would UNKNOWN-block the healthy fleet on every run, the
+    # exact outcome this gate's precondition forbids. It flips to enforced in the #829 gather-
+    # context follow-up once the server can report the key -- the same 756 -> 758 two-step.
     local obs_installs_csv port4455_owner_path port4455_owner_ver obs_proc_count
     obs_installs_csv="$(state_json_value "$file" obs_installs)"
     port4455_owner_path="$(state_json_value "$file" port4455_owner_path)"
     port4455_owner_ver="$(state_json_value "$file" port4455_owner_version)"
     obs_proc_count="$(state_json_value "$file" obs_process_count)"
-    if [ -n "$obs_installs_csv" ] || [ -n "$port4455_owner_path" ] || [ -n "$obs_proc_count" ]; then
+    local frc=0
+
+    engine_out="$(obs_installs_verdict "$DEFAULT_OBS_INSTALL_EXE" "$obs_installs_csv")" || frc=$?
+    printf '%s\n' "$engine_out" | sed 's/^/    /'
+    case "$frc" in
+      0)  ok=$((ok + 1)) ;;
+      20) bad=$((bad + 1)) ;;
+      11) unknown=$((unknown + 1)); unknown_boxes+=("${name}:obs_installs") ;;
+    esac
+
+    # port4455_identity: OPT-IN until the #829 gather-context follow-up lands -- run only for a box
+    # that actually reports the :4455 owner path (no live box does yet, so it is skipped fleet-wide).
+    if [ -n "$port4455_owner_path" ]; then
       local pinned_obs_ver=""
       pinned_obs_ver="$(pinned_obs_version "$readme" 2>/dev/null)" || pinned_obs_ver=""
-      local frc=0
-
-      engine_out="$(obs_installs_verdict "$DEFAULT_OBS_INSTALL_EXE" "$obs_installs_csv")" || frc=$?
-      printf '%s\n' "$engine_out" | sed 's/^/    /'
-      case "$frc" in
-        0)  ok=$((ok + 1)) ;;
-        20) bad=$((bad + 1)) ;;
-        11) unknown=$((unknown + 1)); unknown_boxes+=("${name}:obs_installs") ;;
-      esac
-
       frc=0
       engine_out="$(port_identity_verdict "$DEFAULT_OBS_INSTALL_EXE" "$pinned_obs_ver" "$port4455_owner_path" "$port4455_owner_ver")" || frc=$?
       printf '%s\n' "$engine_out" | sed 's/^/    /'
@@ -395,25 +401,26 @@ main() {
         20) bad=$((bad + 1)) ;;
         11) unknown=$((unknown + 1)); unknown_boxes+=("${name}:port4455_identity") ;;
       esac
-
-      frc=0
-      engine_out="$(obs_process_count_verdict "$obs_proc_count")" || frc=$?
-      printf '%s\n' "$engine_out" | sed 's/^/    /'
-      case "$frc" in
-        0)  ok=$((ok + 1)) ;;
-        20) bad=$((bad + 1)) ;;
-        11) unknown=$((unknown + 1)); unknown_boxes+=("${name}:obs_process_count") ;;
-      esac
     fi
 
-    # #826 — startup-chain facet, scoped to boxes that actually run NL_STARTUP.ahk (only strih --
-    # stream has none, per .claude/skills/obs-ops). A box with no ahk_app1_shortcut_path key at
-    # all never engages this check; one that DOES report it is held fail-closed on every other
-    # startup-chain fact (startup_chain_verdict's own UNKNOWN branch).
-    local ahk_shortcut
-    ahk_shortcut="$(state_json_value "$file" ahk_app1_shortcut_path)"
-    if [ -n "$ahk_shortcut" ]; then
-      local ahk_run ahk_dead shortcut_target shortcut_workdir
+    frc=0
+    engine_out="$(obs_process_count_verdict "$obs_proc_count")" || frc=$?
+    printf '%s\n' "$engine_out" | sed 's/^/    /'
+    case "$frc" in
+      0)  ok=$((ok + 1)) ;;
+      20) bad=$((bad + 1)) ;;
+      11) unknown=$((unknown + 1)); unknown_boxes+=("${name}:obs_process_count") ;;
+    esac
+
+    # #826 — startup-chain facet, ENFORCED but strih-scoped (#829): strih MUST run NL_STARTUP.ahk,
+    # so it now runs UNCONDITIONALLY on strih -- an unreported chain is a gate-blocking UNKNOWN
+    # (unread), never a silent skip. Re-keyed from ahk-presence to the box identity so a strih box
+    # that stops reporting the ahk keys can no longer silently drop the check. stream runs no
+    # NL_STARTUP.ahk (per .claude/skills/obs-ops), so it NEVER engages here -- absent ahk on stream
+    # stays OK, not UNKNOWN.
+    if [ "$name" = "strih" ]; then
+      local ahk_shortcut ahk_run ahk_dead shortcut_target shortcut_workdir
+      ahk_shortcut="$(state_json_value "$file" ahk_app1_shortcut_path)"
       ahk_run="$(state_json_value "$file" ahk_app1_run)"
       ahk_dead="$(state_json_value "$file" ahk_dead_config_present)"
       shortcut_target="$(state_json_value "$file" shortcut_target_path)"
