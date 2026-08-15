@@ -8509,3 +8509,29 @@ Review: 0 🔴 2 🟡 3 🔵, all fixed same-branch. Gotcha logged: cargo tests 
   runnable python twin; watchdog wiring proven via an offline smoke with a stubbed obs_burn_filter +
   notify (seed/NOOP never sweeps unknown baseline; SWEEP on observed drop; retry self-heals; DEFER
   while coordinated; fail-closed enum). Tier-0: fmt/clippy -D warnings/test --no-run clean; 24 py.
+
+## #870 — per-hop burn-id uniqueness / max-hold assertion (zero-loss gate blind to a REPEATING hop)
+
+- Root cause: `src/probe/burn_contiguity.rs:80 burn_contiguity()` collapses decoded ids into a
+  `BTreeSet` before the `first..=last` span check → presence-only, order-independent. A hop that
+  REPEATS frames (identical rendered image delivered on consecutive frames) adds no missing id, so
+  `full_chain.loss.<node>` reads clean (`real_drops==0`). Hid a real defect 3 days (issue 707: run
+  396782734 carried the same strih burn id on 61% of consecutive stream frames).
+- Fix: NEW pure crate-root module `src/burn_hold.rs` (default features, Tier-0) — one walk over the
+  recorded-order `(frame_index, id)` pairs → run-length distribution (histogram + max_hold_frames +
+  duplicate_pairs/fraction + distinct). Per-hop assertion `max_hold_frames <= MAX_HOLD_FRAMES=4`
+  (topology v2: strih+stream record 30fps, node burns decimated 60->30 ⇒ legit hold=1; bound=4
+  mirrors imag_tick_gate IMAG_OPTICAL_MAX_STUCK_RUN=3 pairs = 4 frames; matches the ticket's "never
+  5"). REPORT-ONLY via the one-line `burn_hold::gates_overall_pass()->false` seam (mirrors
+  presentation_cadence/optical_floor); flip-to-LIVE tracked on the ticket once green-run max_hold
+  distributions accumulate + survive the issue-909 cam1 grabber defect. Probe glue in
+  recording-verdict.rs emits `full_chain.loss.<node>.hold.*` (scoped flag) from the stream recording.
+- Frame-index-aware (review): a run extends only when frames are recording-ADJACENT, so a recorded
+  gap (undecodable burn in between) breaks a hold instead of merging two — `duplicate_pair_fraction`
+  is exactly "% consecutive recorded frames byte-identical", never diluted by decode gaps.
+- Commits: 922c0aef1 (bump) · e543cd897 [red] (blind stub fails the repeat fixtures) · 035e354fc
+  [green] run-length walk · b18477409 [green] recording-verdict glue · fcff290e6 [green] clippy doc ·
+  ddea28bd2 [green] frame-index run breaking + gap/tie-break tests, drop dead derive (review).
+- Tier-0 verify: fmt/clippy --all-targets -D warnings/test --no-run --lib all clean (unit tests run
+  in CI; build-ok bypass disabled for camera-box, issue 477). recording-verdict.rs is
+  required-features=probe (CI-first-compile) — glue hand-type-checked + fmt-parsed.
