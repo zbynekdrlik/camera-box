@@ -53,7 +53,7 @@ DEV1_DRIFTGUARD_PUBKEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB/akQWI95uekn0/CRfQ
 # commented instance of the SAME key already being present (e.g. installed by hand with the local
 # ~/.ssh/id_ed25519.pub file's own comment).
 DEV1_DRIFTGUARD_PUBKEY_TYPE_BLOB="${DEV1_DRIFTGUARD_PUBKEY% *}"
-TOTAL_STEPS=22
+TOTAL_STEPS=23
 # #731: Companion Satellite server this box connects the local Stream Deck to. .lan DNS is
 # usually fine on this LAN (companion.lan -> companion-snv.lan, verified live 2026-07-13) but can
 # be flaky like any other .lan name on this network -- COMPANION_HOST_IP is the documented
@@ -1909,6 +1909,55 @@ systemctl enable --now imag-power-envelope.service >/dev/null 2>&1 \
 systemctl enable --now imag-power-envelope-guard.timer >/dev/null 2>&1 \
     || fail "could not enable imag-power-envelope-guard.timer -- the envelope would be unsupervised"
 echo "  #1040: thermald purged, PL1=${IMAG_PL1_W:-29}W envelope pinned at boot + supervised by the ~45s guard timer"
+
+step 23 "RemoteOS MCP control-channel agent (#858): provision via the canonical zbynekdrlik/remoteos-mcp installer"
+# The linux-imag-nb MCP surface (:8092) is served by the SEPARATE zbynekdrlik/remoteos-mcp project
+# (ops skill #555). camera-box does NOT re-implement or re-pin the agent -- it INVOKES that project's
+# own canonical install-linux.sh (pip-git install + config.json + systemd unit + enable/start),
+# matching the standing "use the installer, never a bare pip command" discipline.
+#
+# Auth-key handling (security-boundary): the --auth-key is a full-shell-RCE bearer token bound to
+# 0.0.0.0:8092, so it NEVER lands in this repo. Two paths, mirroring this script's env-secret
+# convention (CAM_PW/GH_TOKEN):
+#   - REMOTEOS_MCP_AUTH_KEY set  -> pre-seed /etc/remoteos-mcp/config.json (chmod 600) so the
+#     installer REUSES that known key and dev1's gitignored .mcp.json keeps matching a freshly
+#     hardware'd box (fully closes #858: a working MCP surface, not just a running agent).
+#   - unset                      -> the installer generates a fresh key ON the box; we print that
+#     dev1's .mcp.json linux-imag-nb entry must be updated to match (fail-safe fallback).
+REMOTEOS_MCP_INSTALLER_URL="${REMOTEOS_MCP_INSTALLER_URL:-https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/master/install-linux.sh}"
+REMOTEOS_MCP_CONFIG="/etc/remoteos-mcp/config.json"
+# curl+ca-certificates are already ensured fail-loud up-front (the cam5/#450 preflight above).
+if [ -n "${REMOTEOS_MCP_AUTH_KEY:-}" ]; then
+    # Reject any shell/JSON-special char: the installer generates [A-Za-z0-9]{32} keys, and a
+    # non-alphanumeric value in the unquoted heredoc below would break the JSON (the installer
+    # then silently discards it and generates a DIFFERENT key -- dev1's .mcp.json breaks while
+    # the is-active gate still passes) or run command substitution. Fail loud instead.
+    case "$REMOTEOS_MCP_AUTH_KEY" in
+        *[!A-Za-z0-9]*) fail "#858: REMOTEOS_MCP_AUTH_KEY must be alphanumeric [A-Za-z0-9] (installer key charset); refusing to write it unsafely" ;;
+    esac
+    install -d -m 700 /etc/remoteos-mcp
+    ( umask 077; cat > "$REMOTEOS_MCP_CONFIG" <<CFG
+{
+  "port": 8092,
+  "auth_key": "${REMOTEOS_MCP_AUTH_KEY}",
+  "host": "0.0.0.0"
+}
+CFG
+    )
+    chmod 600 "$REMOTEOS_MCP_CONFIG"
+    echo "  #858: pre-seeded $REMOTEOS_MCP_CONFIG from REMOTEOS_MCP_AUTH_KEY (installer reuses it; dev1 .mcp.json stays valid)"
+else
+    echo "  #858: REMOTEOS_MCP_AUTH_KEY unset -- the installer will generate a fresh on-box key; update dev1's .mcp.json linux-imag-nb entry to match"
+fi
+REMOTEOS_MCP_INSTALLER_TMP="$(mktemp /tmp/remoteos-mcp-install-linux.XXXXXX.sh)"
+curl -fsSL "$REMOTEOS_MCP_INSTALLER_URL" -o "$REMOTEOS_MCP_INSTALLER_TMP" \
+    || fail "#858: cannot fetch remoteos-mcp installer from $REMOTEOS_MCP_INSTALLER_URL"
+bash "$REMOTEOS_MCP_INSTALLER_TMP" \
+    || fail "#858: canonical remoteos-mcp install-linux.sh failed"
+rm -f "$REMOTEOS_MCP_INSTALLER_TMP"
+systemctl is-active --quiet remoteos-mcp \
+    || fail "#858: remoteos-mcp.service not active after install -- the linux-imag-nb MCP surface would be dead"
+echo "  #858: remoteos-mcp agent active on :8092 (linux-imag-nb MCP surface provisioned)"
 
 echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}imag-nb base provisioning DONE (genlock build: $(cat "$GENLOCK_MARKER_DIR/GENLOCK_BUILD_SHA.txt" 2>/dev/null || echo unknown))${NC}"

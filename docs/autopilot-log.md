@@ -8478,3 +8478,169 @@ Review: 0 🔴 2 🟡 3 🔵, all fixed same-branch. Gotcha logged: cargo tests 
 - GOTCHA (seam brace-freedom): `tests/aux_sender_budget_879.rs` finds the seam's closing brace via
   the FIRST `"\n}"` after the signature, so the seam must stay brace-free — the new max-term uses a
   `? :` ternary precisely to avoid a nested `{}` block.
+## issue 1060 — dev1 fresh-OBS-start burn-reconcile watchdog for unattended starts (worktree autopilot-1060, v1.7.0-dev.459)
+- Follow-up to issue 1057. 1057 closed the DELIBERATE dev1-driven relaunch burn-resurrection window
+  (launch-obs-genlock.sh's PLAN directs a post-launch obs_burn_filter.py sweep-off). Still open: the
+  UNATTENDED strih/stream OBS starts (boot autostart, NL_STARTUP.ahk obs64 respawn, the issue-411
+  self-heal Task-Scheduler relaunch) — all reuse launch-obs-genlock.sh's emitted PowerShell which
+  never touches the burn, and the Windows box has no on-box python/WS client, so a saved
+  genlock_burn=true reloads onto the LIVE program until the next gate run.
+- Design (chosen candidate 1, dev1-side; on-box WS client rejected — issue 866 deployed-dep cost):
+  ONE dev1 systemd --user timer keying on the OBS RESTART (not the cause), covering all three paths.
+  Load-bearing discriminator = a FRESH OBS START, never "a burn is present": a persistent TEST-mode
+  burn is legitimate operator state whose #281 rig heartbeat goes stale after ~10 min while the burn
+  should remain. Fresh-start signal = GetStats.renderTotalFrames (monotone since OBS start, resets on
+  restart) over the SAME WS obs_burn_filter speaks. Coordination = defer while a fresh #281 heartbeat
+  OR a held #830 rig lease exists (never clear a burn a live gate/TEST set). Burn clear reuses the
+  #938/#1011 enumerator; fail-CLOSED on an un-enumerable box.
+- Files: scripts/lib/obs-burn-reconcile-decision.sh (pure NOOP/DEFER/SWEEP/CLEAN + fresh-start),
+  obs_burn_filter.py (+session-probe action + render_total_frames pure helper),
+  obs-burn-reconcile-watchdog.sh (per-box probe→decide→reconcile), systemd .service/.timer/.README
+  (SHIPS DISABLED), tests/python/test_obs_burn_reconcile_decision.py + test_obs_burn_filter.py
+  additions + tests/harness_obs_burn_reconcile_watchdog_1060.rs.
+- Commits: 3775ce42c (bump) · eec20c702 [red] · bdf98f926 [green] · 706dfb9b2 (review fixes).
+- REVIEW-DRIVEN HARDENING (the important lesson): the fresh-start baseline first lived in tmpfs
+  (XDG_RUNTIME_DIR/tmp), wiped on every dev1 reboot. With "unknown baseline = fresh" that would
+  false-clear a persistent TEST burn on the first post-reboot pass even though OBS never restarted.
+  Fix: unknown/corrupt prev is NOT a restart (seed only) — ONLY an OBSERVED counter drop reconciles;
+  baseline persisted in durable ~/.camera-box. Plus a self-healing `unresolved` retry (a
+  partially-failed sweep-off retries until read-back clean, set only off an observed restart).
+- Verify: no local cargo-test path (Tier-0, build-ok disabled) — decision truth table proven via the
+  runnable python twin; watchdog wiring proven via an offline smoke with a stubbed obs_burn_filter +
+  notify (seed/NOOP never sweeps unknown baseline; SWEEP on observed drop; retry self-heals; DEFER
+  while coordinated; fail-closed enum). Tier-0: fmt/clippy -D warnings/test --no-run clean; 24 py.
+
+## #870 — per-hop burn-id uniqueness / max-hold assertion (zero-loss gate blind to a REPEATING hop)
+
+- Root cause: `src/probe/burn_contiguity.rs:80 burn_contiguity()` collapses decoded ids into a
+  `BTreeSet` before the `first..=last` span check → presence-only, order-independent. A hop that
+  REPEATS frames (identical rendered image delivered on consecutive frames) adds no missing id, so
+  `full_chain.loss.<node>` reads clean (`real_drops==0`). Hid a real defect 3 days (issue 707: run
+  396782734 carried the same strih burn id on 61% of consecutive stream frames).
+- Fix: NEW pure crate-root module `src/burn_hold.rs` (default features, Tier-0) — one walk over the
+  recorded-order `(frame_index, id)` pairs → run-length distribution (histogram + max_hold_frames +
+  duplicate_pairs/fraction + distinct). Per-hop assertion `max_hold_frames <= MAX_HOLD_FRAMES=4`
+  (topology v2: strih+stream record 30fps, node burns decimated 60->30 ⇒ legit hold=1; bound=4
+  mirrors imag_tick_gate IMAG_OPTICAL_MAX_STUCK_RUN=3 pairs = 4 frames; matches the ticket's "never
+  5"). REPORT-ONLY via the one-line `burn_hold::gates_overall_pass()->false` seam (mirrors
+  presentation_cadence/optical_floor); flip-to-LIVE tracked on the ticket once green-run max_hold
+  distributions accumulate + survive the issue-909 cam1 grabber defect. Probe glue in
+  recording-verdict.rs emits `full_chain.loss.<node>.hold.*` (scoped flag) from the stream recording.
+- Frame-index-aware (review): a run extends only when frames are recording-ADJACENT, so a recorded
+  gap (undecodable burn in between) breaks a hold instead of merging two — `duplicate_pair_fraction`
+  is exactly "% consecutive recorded frames byte-identical", never diluted by decode gaps.
+- Commits: 922c0aef1 (bump) · e543cd897 [red] (blind stub fails the repeat fixtures) · 035e354fc
+  [green] run-length walk · b18477409 [green] recording-verdict glue · fcff290e6 [green] clippy doc ·
+  ddea28bd2 [green] frame-index run breaking + gap/tie-break tests, drop dead derive (review).
+- Tier-0 verify: fmt/clippy --all-targets -D warnings/test --no-run --lib all clean (unit tests run
+  in CI; build-ok bypass disabled for camera-box, issue 477). recording-verdict.rs is
+  required-features=probe (CI-first-compile) — glue hand-type-checked + fmt-parsed.
+
+## #994 — capture-rate POST-recording check swept over ALL_CAMBOX secondary cameras (report-only) — 2026-08-15
+
+Version 1.7.0-dev.460. Branch autopilot-994 (worktree). Commits:
+3fdb091fc (version bump), 2e9672a12 test(#994) [red], ccb5662ba fix(#994) [green], + this docs commit.
+
+STEP-0 finding: the ticket's option 2 (extend the self-heal-RESET scan to read each secondary's
+burn log) was ALREADY delivered by issue 910's unified restart-event scan (loops
+CAMBOX_SECONDARY_DEPLOY, reads journald + each /tmp/cbox-burn-<camname>.log). Only option 1 was a
+real gap: the [7b/8] capture-delivery-rate POST-recording check read only the SOURCE camera. So
+#994 closes option 1 (= the ticket's "both").
+
+Change: new report-only sweep over CAMBOX_SECONDARY_DEPLOY in recording-e2e.sh (after the
+source-camera success line, gated on ALL_CAMBOX=1), reading each secondary's journald window + its
+own burn log, HARD + #717 SUSTAINED bands, via two new pure formatters in
+scripts/lib/capture-rate-guard.sh (capture_rate_secondary_recurrence_warn_message /
+..._burn_log_recurrence_warn_message, WARNING #994 prefix). REPORT-ONLY, NEVER exit 1 — a hard
+secondary gate would recreate the issue-909/914 permanently-red-gate mistake (cam2 is a secondary);
+green-gate-first. Source-camera check keeps its HARD (exit 1) behavior unchanged.
+
+RED->GREEN test names (tests/harness_capture_rate_guard.rs):
+secondary_recurrence_warn_message_is_loud_report_only_and_names_the_journal,
+secondary_recurrence_warn_message_falls_back_gracefully_on_an_unparseable_line,
+secondary_burn_log_recurrence_warn_message_is_report_only_and_names_the_burn_log,
+recording_e2e_sweeps_every_secondary_camera_for_capture_rate_after_the_source_check.
+
+Local verification (build-ok disabled for camera-box #477, cargo tests run in CI):
+cargo test --no-run ok, cargo fmt --check ok, cargo clippy -D warnings ok, bash -n both scripts ok,
+and a Python mirror of every test assertion passed (source block hard/sustained still ==2, sweep
+block report-only with no exit 1, BURN_TARGETS loop-header count still 2). FULL cargo test suite
+must run at integration (I touched recording-e2e.sh) — supervisor runs it; I ran only --no-run.
+No push/PR/rig touch (worktree worker).
+- 2026-08-15 #1018 OBS titlebar "build unknown" (autopilot-1018, worktree fleet, v1.7.0-dev.460):
+  ROOT CAUSE (traced + reproduced live via win-strih MCP, title read `newlevel.media build unknown`):
+  the titlebar reformatted the compiler `__DATE__`, but OBS builds the frontend with `/Brepro`
+  (reproducible builds, vendor/obs-studio/cmake/windows/compilerconfig.cmake) which blanks `__DATE__`
+  to a short placeholder, so `newlevel_iso_date()` returned its #313 "unknown" fallback on EVERY
+  build. The issue's "reads GENLOCK_BUILD_SHA.txt via a relative path" suspect was WRONG -- that read
+  never existed. Also live-confirmed the SHA-file/exe divergence: GENLOCK_BUILD_SHA.txt=6e679ad (both
+  install root + bin\64bit, current) but obs64.exe dated 08-11 while obs.dll rebuilt 08-15 -- the FAST
+  `obs-genlock-fast-dll` artifact ships obs.dll + a fresh SHA file but NOT obs64.exe, so a compile
+  date is stale after any fast swap. FIX: UpdateTitleBar() now reads the deployed commit SHA from
+  GENLOCK_BUILD_SHA.txt, resolved from obs64.exe's own dir via libobs `os_get_executable_path_ptr`
+  (install root `../../` then bin\64bit; never process cwd), shows the 9-char short SHA. Pure
+  formatter `newlevel_short_sha()` in the new NewlevelBuildSha.hpp (OBS/Qt-free, off-rig testable);
+  never throws (runs during OBSBasic construction, #313). Removed the dead `__DATE__` mechanism
+  (NewlevelBuildDate.hpp + its parse test) and re-pinned the lock-step guards
+  (tests/obs_titlebar_newlevel.rs + BOTH windows-genlock{,-fast}.yml pwsh source-anchor gates) to the
+  new call site + `GENLOCK_BUILD_SHA.txt`/`os_get_executable_path_ptr` tokens.
+  RED->GREEN: tests/obs_titlebar_newlevel_sha_parse.rs (C++ harness compiling the real header; RED =
+  header absent -> harness won't compile; GREEN = 11/11 cases pass). Frontend/vendored code has NO
+  local cargo verification path in camera-box (the run-tests bypass is disabled here, #477), so
+  RED->GREEN was proven off-rig by compiling the standalone harness with plain `c++` directly (not a
+  cargo compile, so not hook-blocked). Tier-0 green: fmt + clippy --all-targets -D warnings +
+  test-no-run. Review 0 red / 0 yellow / 1 blue (leading-BOM fragility) -> fixed in-branch
+  (86cb36552, skip a UTF-8 BOM + a test case).
+  DEPLOY (supervisor): FRONTEND change => needs an obs64.exe swap; the FAST artifact will NOT carry
+  the fix -- the full windows-genlock.yml bundle (builds + uploads obs64.exe) is required to deploy.
+
+## issue 858 — setup-imag.sh provisions the RemoteOS MCP agent (worktree autopilot-858, v1.7.0-dev.460)
+
+- Gap: a fresh imag box came up with no `linux-imag-nb` MCP surface — `remoteos-mcp.service` (:8092)
+  was only ever a hand-install. Root-caused: setup-imag.sh had zero install step (only #504
+  purge-protection comments); setup-device.sh had none either; the agent's real home is the separate
+  `zbynekdrlik/remoteos-mcp` repo + its own `install-linux.sh` (ops-skill #555).
+- Fix: new `step 23` in setup-imag.sh INVOKES the canonical installer (never re-pins — #555
+  discipline); auth-key via optional `REMOTEOS_MCP_AUTH_KEY` env (pre-seed `/etc/remoteos-mcp/
+  config.json` chmod 600 so the installer reuses it and dev1's `.mcp.json` keeps matching), else the
+  installer generates on-box. Charset-guarded before the JSON write. `TOTAL_STEPS` 22→23.
+- RED test(#858) `tests/setup_imag_remoteos_mcp_858.rs` (source-guard, 5 tests) → GREEN; drift test
+  in `tests/setup_imag_guards.rs` updated 22→23.
+- Review (fresh-context general-purpose, /review + /requesting-code-review): 0 crit / 1 warn / 4 sug,
+  all fixed in-branch — charset guard, pre-seed-order test, removed redundant curl guard, ops #555
+  playbook note corrected.
+- Tier-0: fmt / clippy -D warnings / `cargo test --no-run` / `bash -n setup-imag.sh` all clean
+  (tests run in CI, not locally). Out of scope (noted): pinning remoteos-mcp's transitive deps in
+  ITS pyproject.toml; extending the same step to setup-device.sh (cam1-4).
+
+## 2026-08-15 — #829 ENFORCE the #826 strih OBS-identity facet fleet-wide (round 15)
+- Flipped the #826 obs-identity facet in `scripts/version-integrity-gate.sh` main() from #756-style
+  opt-in to #758-style ENFORCED — but PER-FACET, not the literal "remove both guards", because live
+  reality contradicted the ticket's "all four facets present + healthy" premise:
+  - `obs_installs` + `obs_process_count`: now UNCONDITIONAL on every box (absent box → gate-blocking
+    UNKNOWN). Both served fleet-wide; verdict-neutral on the current fleet.
+  - `startup_chain`: re-keyed from ahk-presence to `[ "$name" = "strih" ]` (strih runs it always;
+    stream, no NL_STARTUP.ahk, never engages).
+  - `port4455_identity`: KEPT opt-in (its own `[ -n "$port4455_owner_path" ]` guard). Root cause
+    (live probe): the redeployed non-elevated BundleStateServer task cannot read the elevated OBS's
+    exe path (:4455 IS owned by pinned obs64, confirmed via elevated MCP), so the key is omitted on
+    BOTH boxes — enforcing it would false-UNKNOWN-block the healthy gate. Follow-up #1067 fixes the
+    gather context then does the #758-style enforce.
+- Second, related fix (same file family): `scripts/bundle-state-server.py` `log()` now swallows an
+  OSError from a dead stdout pipe (hidden-task context crash) so a broken stdout can never take the
+  server down. Bypass-marked (the swallow cannot itself log — stdout is the broken resource).
+- Findings surfaced (already-active DRIFT, NOT caused by #829): strih serves 9 obs_installs (8
+  `_RETIRED_*` leftovers → obs_installs DRIFT) and `ahk_dead_config_present=1` (→ startup_chain
+  DRIFT). Both are #826's incomplete PHYSICAL cleanup (delete the retired installs + strip the dead
+  NL_STARTUP.ahk block); commented on #826. Since strih already serves obs_installs, these DRIFTs are
+  already live under the pre-#829 opt-in code — the standing gate reds on strih until #826's cleanup.
+- Commits: e92f7476f (bump .460) · e0fdfa112 [red] gate tests · 5e5e86794 [green] gate flip +
+  fixtures · 7f0623ffd [red] log test · c162e56c9 [green] log() hardening.
+- RED→GREEN test names: gate_refuses_when_a_reporting_box_omits_the_enforced_826_keys,
+  gate_enforces_startup_chain_on_strih_even_without_ahk_826,
+  gate_keeps_port4455_identity_opt_in_when_unreported_826 (all 0-under-opt-in → correct-under-enforced);
+  test_log_survives_a_dead_stdout_pipe (raises pre-fix → passes post-fix).
+- GOTCHA: the `# airuleset:build-ok` Tier-0 bypass is DISABLED for camera-box, so gate tests cannot
+  run locally at all — RED→GREEN for the .rs is reasoned, not observed; the Python log test DID run
+  RED→GREEN locally. Cold-worktree `cargo test --no-run` exceeds the foreground cap; full cargo suite
+  runs at the supervisor's integration.

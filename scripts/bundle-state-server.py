@@ -89,7 +89,17 @@ DEFAULT_AHK_PATH = r"D:\_APPS\NL_STARTUP.ahk"
 
 
 def log(msg):
-    print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}", flush=True)
+    # A hidden Scheduled-Task context can hand this process a DEAD stdout pipe (the #650 supervisor's
+    # `python | Out-File` reader dying, or a console-less Start-Process without -RedirectStandardOutput):
+    # print(flush=True) then raises OSError [Errno 22] INSIDE the request handler, killing every
+    # request before it serves ("connection closed unexpectedly" with zero log lines -- live stream-box
+    # incident 2026-08-15). Logging must never take the server down: swallow a broken-stdout write and
+    # keep serving. The swallow is intentional and cannot itself log (stdout is what is broken). (#829)
+    # airuleset:script-ok the dead-stdout OSError is exactly what must be swallowed; logging it is impossible (stdout is the broken resource)
+    try:
+        print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}", flush=True)
+    except OSError:
+        pass
 
 
 def newest_obs_log_text(log_dir):
