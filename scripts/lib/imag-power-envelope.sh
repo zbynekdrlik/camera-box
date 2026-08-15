@@ -286,6 +286,72 @@ imag_power_alert_condition() {
   printf '%s\n' "$1" | grep -aE 'STEP-DOWN|RE-ASSERT' || true
 }
 
+# imag_power_throttle_alert_condition GATHER -> echoes a THROTTLE-UNDER-FLOOR marker line when a
+# MAJORITY (>= IMAG_POWER_THROTTLE_ALERT_PCT %, default 50) of the burst samples show a genuine
+# power/thermal clamp holding the ACTUAL iGPU freq BELOW the pinned floor. This is the SECOND #880
+# alert path (independent of the guard's STEP-DOWN/RE-ASSERT journal markers): the #841 floor pin
+# (gt_min_freq_mhz=1400) is a software REQUEST the punit legally overrides at the MMIO RAPL PL1
+# power budget, so under load `Actual` drops below the floor with throttle_reason_pl1=1 and NO guard
+# step-down (the guard only steps down on a TCPU excursion) -- silent judder. It keys on
+# throttle_reason, NOT raw act_freq: a benign RC6-idle burst (act low/0 but every throttle_reason 0)
+# must NEVER page (the exact false positive the ticket body warns of). Input (from
+# imag_power_throttle_burst_remote_snippet): one `FLOOR|<mhz>` line + N
+# `THROTSAMPLE|<pl1>|<thermal>|<status>|<act>` lines. A "clamp sample" = (pl1=1 OR thermal=1) AND a
+# numeric act STRICTLY below the floor. Empty gather / no numeric FLOOR / no THROTSAMPLE lines ->
+# empty output (never a false alert on an ssh hiccup). Two-pass so the FLOOR line's position in the
+# block does not matter.
+imag_power_throttle_alert_condition() {
+  local gather="$1" pct="${IMAG_POWER_THROTTLE_ALERT_PCT:-50}" min="${IMAG_POWER_THROTTLE_MIN_SAMPLES:-6}"
+  # Validate the tunables the same way floor/act are validated below -- a non-numeric override must
+  # not collapse the threshold (a bare $((pct*total)) with pct non-numeric evaluates to 0, firing on
+  # a single sample) or the min-sample floor.
+  case "$pct" in '' | *[!0-9]*) pct=50 ;; esac
+  case "$min" in '' | *[!0-9]*) min=6 ;; esac
+  local floor="" total=0 clamped=0 tag a b d
+  # pass 1: the numeric floor (a non-numeric/empty FLOOR is treated as "no floor" -> no decision).
+  while IFS='|' read -r tag a; do
+    if [ "$tag" = "FLOOR" ]; then
+      case "$a" in '' | *[!0-9]*) : ;; *) floor="$a" ;; esac
+    fi
+  done <<< "$gather"
+  [ -n "$floor" ] || return 0
+  # pass 2: count burst samples and how many are genuinely clamped below the floor.
+  while IFS='|' read -r tag a b _ d; do
+    [ "$tag" = "THROTSAMPLE" ] || continue
+    total=$((total + 1))
+    # a=pl1 b=thermal (status is read into _ and intentionally unused -- pl1/thermal is the precise
+    # power/thermal-envelope clamp signal; status can also be prochot/ratl/vr which are not this).
+    if [ "$a" = "1" ] || [ "$b" = "1" ]; then
+      case "$d" in
+        '' | *[!0-9]*) : ;;
+        *) [ "$d" -lt "$floor" ] && clamped=$((clamped + 1)) ;;
+      esac
+    fi
+  done <<< "$gather"
+  # A partial burst (ssh dropped mid-sample) must not read e.g. a 2/2 capture as "sustained" -- the
+  # burst emits ~12 samples, so require a minimum before deciding (fewer = "nothing to decide").
+  [ "$total" -ge "$min" ] || return 0
+  if [ "$clamped" -gt 0 ] && [ "$((clamped * 100))" -ge "$((pct * total))" ]; then
+    printf 'THROTTLE-UNDER-FLOOR: %s/%s burst samples held act<%sMHz while PL1/thermal-clamped (threshold %s%%)\n' \
+      "$clamped" "$total" "$floor" "$pct"
+  fi
+}
+
+# imag_power_throttle_alert_sig MARKER -> echoes a STABLE dedup signature for a throttle-under-floor
+# episode. The MARKER line carries a fluctuating <clamped>/<total> count that changes burst-to-burst
+# during ONE ongoing clamp (the GPU is pinned busy under render, so nearly every 5-min pass yields a
+# different count); embedding that count in the dedup signature would make obs_watchdog_alert_throttle
+# see a "new" signature every pass and re-page constantly instead of once-then-suppress. So the sig is
+# the STABLE episode identity "under-floor", independent of the count -- the count stays in the alert
+# body/detail, never the signature. Pure + separately testable so the stability is proven, not merely
+# correct-by-inspection.
+imag_power_throttle_alert_sig() {
+  # $1 (the marker) is intentionally not interpolated -- the signature is the condition identity, not
+  # the fluctuating measurement. Kept in the signature so a future bucketed variant has a seam.
+  : "${1:-}"
+  printf 'imag-throttle:under-floor\n'
+}
+
 # imag_power_envelope_gather_remote_snippet -> the REMOTE shell command (a string) both callers run
 # over their own transport to collect the observed envelope state into the `|`-delimited block
 # imag_power_envelope_verdict parses. Hardware-agnostic (issue 816): a box with no mmio RAPL zone
@@ -342,5 +408,45 @@ for _f in /sys/class/drm/card*/gt/gt*/gt_act_freq_mhz /sys/class/drm/card*/gt_ac
   _act="$(cat "$_f" 2>/dev/null || true)"; [ -n "$_act" ] && break
 done
 printf 'ACTFREQ|%s\n' "$_act"
+REMOTE
+}
+
+# imag_power_throttle_burst_remote_snippet -> the REMOTE shell command (a string) the dev1 watchdog
+# runs over ssh to sample the throttle+freq state OVER TIME (~6 s), for the #880
+# imag_power_throttle_alert_condition. Kept SEPARATE from imag_power_envelope_gather_remote_snippet
+# (an instantaneous snapshot) so drift-guard.sh / verify-imag.sh are never slowed by a multi-second
+# burst -- only the alert watchdog pays it. Emits one `FLOOR|<rps_min_freq_mhz>` line, then 12
+# `THROTSAMPLE|<pl1>|<thermal>|<status>|<act>` lines at 0.5 s spacing. Identity-based throughout:
+# glob card* (never a hardcoded cardN -- the presenter-drm renumbering hazard); a box with no i915
+# freq surface emits an empty FLOOR + empty samples, which the pure condition reads as "nothing to
+# decide" (never a false alert). Hardware-agnostic like the snapshot gather (issue 816).
+imag_power_throttle_burst_remote_snippet() {
+  cat <<'REMOTE'
+# #880 throttle burst: the pinned min-freq FLOOR once, then 12 throttle+act samples over ~6 s.
+_floor=""
+for _m in /sys/class/drm/card*/gt/gt*/rps_min_freq_mhz /sys/class/drm/card*/gt_min_freq_mhz; do
+  [ -e "$_m" ] || continue
+  _floor="$(cat "$_m" 2>/dev/null || true)"; [ -n "$_floor" ] && break
+done
+printf 'FLOOR|%s\n' "$_floor"
+_i=0
+while [ "$_i" -lt 12 ]; do
+  _pl1=""; _th=""; _st=""; _act=""
+  for _f in /sys/class/drm/card*/gt/gt*/throttle_reason_pl1; do
+    [ -e "$_f" ] && { _pl1="$(cat "$_f" 2>/dev/null || true)"; break; }
+  done
+  for _f in /sys/class/drm/card*/gt/gt*/throttle_reason_thermal; do
+    [ -e "$_f" ] && { _th="$(cat "$_f" 2>/dev/null || true)"; break; }
+  done
+  for _f in /sys/class/drm/card*/gt/gt*/throttle_reason_status; do
+    [ -e "$_f" ] && { _st="$(cat "$_f" 2>/dev/null || true)"; break; }
+  done
+  for _f in /sys/class/drm/card*/gt/gt*/rps_act_freq_mhz /sys/class/drm/card*/gt_act_freq_mhz; do
+    [ -e "$_f" ] && { _act="$(cat "$_f" 2>/dev/null || true)"; break; }
+  done
+  printf 'THROTSAMPLE|%s|%s|%s|%s\n' "$_pl1" "$_th" "$_st" "$_act"
+  _i=$((_i + 1))
+  sleep 0.5
+done
 REMOTE
 }
