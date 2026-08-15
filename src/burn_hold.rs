@@ -46,7 +46,7 @@
 //! (`src/bin/recording-verdict.rs`) feeds it `recording_latency::burn_ids_in(stream_frames,
 //! run_id)` — the recorded-ORDER extractor already used for contiguity, so no new decode.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// The maximum number of consecutive recorded frames a single burn id may legitimately occupy
 /// before it is a REPEAT (a frozen / re-delivered rendered image). See the module doc for the
@@ -111,10 +111,17 @@ impl HoldDistribution {
 
 /// Build the consecutive-duplicate run-length distribution for one node's recorded-ORDER burn ids.
 ///
-/// STUB (RED, #870): the pre-fix blind behaviour — it counts distinct ids and total frames but
-/// assumes NO id ever repeats (`max_hold_frames = 1`, `duplicate_pairs = 0`, empty histogram),
-/// exactly the presence-only blindness [`crate::probe::burn_contiguity::burn_contiguity`] has. The
-/// GREEN commit replaces this body with the real run-length walk.
+/// ONE walk over the sequence groups it into maximal runs of an identical id; each run of length L
+/// contributes one histogram entry at `L`, `L-1` duplicate pairs, and updates the running max hold.
+/// The longest run wins `max_hold_frames` / `max_hold_id` (first one on a tie — strict `>`).
+/// Program-switch segmentation is inherent: a switch changes the filter instance so the `frame_id`
+/// jumps/resets ⇒ a different id ⇒ the run breaks; the only over-count risk (two segments' counters
+/// coincidentally EQUAL across the boundary) is bounded to +1 per switch and is harmless while the
+/// term is report-only ([`gates_overall_pass`]).
+///
+/// An empty input ⇒ an all-zero distribution (`max_hold_frames == 0`, [`HoldDistribution::
+/// measured_max_hold`] `== None`) — nothing was proven, and the gate PASSES it (see
+/// [`hold_gate_pass`]).
 pub fn burn_hold_distribution(node: &str, ids_in_recorded_order: &[u32]) -> HoldDistribution {
     let total_burn_frames = ids_in_recorded_order.len() as u32;
     let distinct_ids = ids_in_recorded_order
@@ -122,15 +129,65 @@ pub fn burn_hold_distribution(node: &str, ids_in_recorded_order: &[u32]) -> Hold
         .copied()
         .collect::<BTreeSet<u32>>()
         .len() as u32;
+    let adjacent_pairs = total_burn_frames.saturating_sub(1);
+
+    let mut histogram_map: BTreeMap<u32, u32> = BTreeMap::new();
+    let mut max_hold_frames = 0u32;
+    let mut max_hold_id: Option<u32> = None;
+    let mut duplicate_pairs = 0u32;
+
+    // Close a finished run of `run_len` frames all carrying `run_id`: record it in the histogram
+    // and promote it if it is the longest hold seen so far.
+    let close_run = |run_id: u32,
+                     run_len: u32,
+                     histogram_map: &mut BTreeMap<u32, u32>,
+                     max_hold_frames: &mut u32,
+                     max_hold_id: &mut Option<u32>| {
+        *histogram_map.entry(run_len).or_insert(0) += 1;
+        if run_len > *max_hold_frames {
+            *max_hold_frames = run_len;
+            *max_hold_id = Some(run_id);
+        }
+    };
+
+    let mut iter = ids_in_recorded_order.iter().copied();
+    if let Some(first) = iter.next() {
+        let mut run_id = first;
+        let mut run_len = 1u32;
+        for id in iter {
+            if id == run_id {
+                run_len += 1;
+                duplicate_pairs += 1;
+            } else {
+                close_run(
+                    run_id,
+                    run_len,
+                    &mut histogram_map,
+                    &mut max_hold_frames,
+                    &mut max_hold_id,
+                );
+                run_id = id;
+                run_len = 1;
+            }
+        }
+        close_run(
+            run_id,
+            run_len,
+            &mut histogram_map,
+            &mut max_hold_frames,
+            &mut max_hold_id,
+        );
+    }
+
     HoldDistribution {
         node: node.to_string(),
         total_burn_frames,
         distinct_ids,
-        max_hold_frames: if total_burn_frames == 0 { 0 } else { 1 },
-        max_hold_id: ids_in_recorded_order.first().copied(),
-        duplicate_pairs: 0,
-        adjacent_pairs: total_burn_frames.saturating_sub(1),
-        histogram: Vec::new(),
+        max_hold_frames,
+        max_hold_id,
+        duplicate_pairs,
+        adjacent_pairs,
+        histogram: histogram_map.into_iter().collect(),
     }
 }
 
@@ -214,11 +271,12 @@ mod tests {
     /// headline; the assertion is on max hold.
     #[test]
     fn reference_396782734_shape_is_over_half_duplicate_and_fires() {
-        // 20 runs: half of them held for 3-6 frames (repeats), half single — >50% dup pairs.
+        // 20 runs: half of them held for 5 frames (repeats over the bound), half single — the
+        // >50%-duplicate character of run 396782734 plus a max hold that exceeds MAX_HOLD_FRAMES.
         let mut ids = Vec::new();
         let mut next = 1000u32;
         for i in 0..20u32 {
-            let run_len = if i % 2 == 0 { 4 } else { 1 };
+            let run_len = if i % 2 == 0 { 5 } else { 1 };
             for _ in 0..run_len {
                 ids.push(next);
             }
@@ -230,8 +288,11 @@ mod tests {
             "reference shape is majority-duplicate: {}",
             d.duplicate_pair_fraction()
         );
-        assert!(d.max_hold_frames >= 4);
-        assert!(!d.within_bound(MAX_HOLD_FRAMES));
+        assert_eq!(d.max_hold_frames, 5);
+        assert!(
+            !d.within_bound(MAX_HOLD_FRAMES),
+            "max hold 5 > bound 4 ⇒ the assertion fires on the reference shape"
+        );
         assert_eq!(d.distinct_ids, 20);
     }
 
