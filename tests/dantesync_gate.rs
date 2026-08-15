@@ -3657,3 +3657,67 @@ fn help_documents_the_grandmaster_identity_check_834() {
         "help must document the report-first enforce flag: {stdout}"
     );
 }
+
+#[test]
+fn gate_reports_gm_unknown_report_only_still_passes_834() {
+    // #834 review 🔵: absent gm_source_ip with enforce OFF (default) -- the GM is unreadable and
+    // reported UNKNOWN, but report-only must NOT change the verdict; the node still passes on
+    // offset+PTP. Complements the absent+enforce case (which is INCOMPLETE/11).
+    let p = write_gm_fixture("stream_gm_absent_reportonly", "");
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "stream=10.77.9.204",
+            // only "stream" is configured, no "strih" -> opt OUT of the master-name validation.
+            "--ntp-master",
+            "",
+            "--samples",
+            "1",
+            "--min-distinct",
+            "1",
+            "--window-s",
+            "0",
+        ],
+        &[("DANTESYNC_GATE_WIN_HTTP_STREAM", &p.display().to_string())],
+    );
+    assert_eq!(
+        code, 0,
+        "report-only: an unreadable GM must NOT block the gate. stdout={stdout} stderr={stderr}"
+    );
+    assert!(stdout.contains("GM UNKNOWN"), "stdout={stdout}");
+    assert!(stdout.contains("GATE PASS"), "stdout={stdout}");
+}
+
+#[test]
+fn gate_passes_a_node_on_the_rig_grandmaster_under_enforce_834() {
+    // #834 review 🔵: the enforce HAPPY path -- a node on the rig GM passes even with
+    // DANTESYNC_GATE_GM_ENFORCE=1, locking the pass side of the enforce path (complements the
+    // enforce-FAIL cases: foreign=>20, unknown=>11).
+    let p = write_gm_fixture("strih_gm_ok_enforced", "\"gm_source_ip\":\"10.77.9.184\",");
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--samples",
+            "1",
+            "--min-distinct",
+            "1",
+            "--window-s",
+            "0",
+        ],
+        &[
+            ("DANTESYNC_GATE_WIN_HTTP_STRIH", &p.display().to_string()),
+            ("DANTESYNC_GATE_GM_ENFORCE", "1"),
+        ],
+    );
+    assert_eq!(
+        code, 0,
+        "enforce + rig GM must PASS. stdout={stdout} stderr={stderr}"
+    );
+    assert!(stdout.contains("GM OK"), "stdout={stdout}");
+    assert!(stdout.contains("GATE PASS"), "stdout={stdout}");
+}

@@ -590,6 +590,10 @@ grade_http_node() {
   # FALLBACK path (empty samples_raw, above) returns before here, so it is never GM-checked -- journald
   # carries no gm_source_ip anyway (verify-imag.sh documents the same limitation), and strih/stream are
   # always on this HTTP path.
+  # NOTE for the enforce flip (issue 1073): every graded node here is a GM CLIENT (the grandmaster
+  # 10.77.9.184 is a separate PTP device, never itself a --linux/--win-http node), so each legitimately
+  # reports gm_source_ip=GATE_GRANDMASTER_IP. If a future config ever grades the grandmaster box
+  # itself, revisit whether it should be exempted before turning enforce on.
   local gm_actual rc_gm=0 gm_gate_rc=0
   gm_actual="$(gm_source_ip_from_pipe_json "$status")"
   gm_check "$name" "$gm_actual" "$GATE_GRANDMASTER_IP" || rc_gm=$?
