@@ -1324,6 +1324,12 @@ bool obs_graphics_thread_loop(struct obs_graphics_context *context)
 
 	frame_time_ns = os_gettime_ns() - frame_start;
 
+	/* camera-box #1063: publish this tick's COMPLETED total so the next tick's aux budget gate
+	 * (obs_aux_sender_should_skip) has an order-independent cost term. An aux ndi_filter that
+	 * decides early in the tick reads a small `elapsed`; max(elapsed, last_tick_total_ns) still
+	 * throttles a genuinely-heavy tick regardless of where in the tick the aux decision falls. */
+	obs->video.last_tick_total_ns = frame_time_ns;
+
 	source_profiler_frame_collect();
 	profile_end(context->video_thread_name);
 

@@ -645,9 +645,11 @@ jobs:
           if ($bud -notmatch [regex]::Escape('if (render_divisor > 1 && (frame_counter % render_divisor) != 0)')) { Write-Error "obs-display-budget.h: #756 hard cadence-floor term gone — a cheap multiview would never actually throttle to 1/divisor"; exit 1 }
           $vid = (Get-Content "vendor/obs-studio/libobs/obs-video.c" -Raw) -replace '\s+', ' '
           if ($vid -notmatch [regex]::Escape('obs->video.graphics_frame_start_ns = frame_start;')) { Write-Error "obs-video.c: #278 per-tick start no longer published — the adaptive skip loses its elapsed reference"; exit 1 }
+          if ($vid -notmatch [regex]::Escape('obs->video.last_tick_total_ns = frame_time_ns;')) { Write-Error "obs-video.c: #1063 completed tick total no longer published — the aux budget gate's order-independent term goes stale and it under-throttles"; exit 1 }
           $hdr = (Get-Content "vendor/obs-studio/libobs/obs-internal.h" -Raw) -replace '\s+', ' '
           if ($hdr -notmatch [regex]::Escape('uint64_t render_ewma_ns;')) { Write-Error "obs-internal.h: #278 obs_display.render_ewma_ns field gone"; exit 1 }
           if ($hdr -notmatch [regex]::Escape('uint64_t graphics_frame_start_ns;')) { Write-Error "obs-internal.h: #278 obs_core_video.graphics_frame_start_ns field gone"; exit 1 }
+          if ($hdr -notmatch [regex]::Escape('uint64_t last_tick_total_ns;')) { Write-Error "obs-internal.h: #1063 obs_core_video.last_tick_total_ns field gone — the aux budget gate loses its order-independent previous-tick term"; exit 1 }
           if ($hdr -notmatch [regex]::Escape('uint32_t render_frame_counter;')) { Write-Error "obs-internal.h: #756 obs_display.render_frame_counter field gone — the hard cadence floor has nowhere to count ticks"; exit 1 }
           $api = (Get-Content "vendor/obs-studio/libobs/obs.h" -Raw) -replace '\s+', ' '
           if ($api -notmatch [regex]::Escape('EXPORT void obs_display_set_render_divisor(obs_display_t *display, uint32_t divisor)')) { Write-Error "obs.h: #278 obs_display_set_render_divisor not EXPORTed — frontend cannot link it"; exit 1 }
@@ -667,6 +669,7 @@ jobs:
           if ($api -notmatch [regex]::Escape('EXPORT bool obs_aux_sender_should_skip(uint32_t render_divisor, uint32_t frame_counter,')) { Write-Error "obs.h: #879 obs_aux_sender_should_skip not EXPORTed -- the DistroAV filter cannot link the aux budget gate"; exit 1 }
           $core = (Get-Content "vendor/obs-studio/libobs/obs.c" -Raw) -replace '\s+', ' '
           if ($core -notmatch [regex]::Escape('const uint32_t effective_divisor = obs_effective_render_divisor(render_divisor, interval);')) { Write-Error "obs.c: #879 aux seam no longer derives the canvas-rate effective divisor before obs_display_should_skip"; exit 1 }
+          if ($core -notmatch [regex]::Escape('const uint64_t consumed = (elapsed > last_tick_total) ? elapsed : last_tick_total;')) { Write-Error "obs.c: #1063 aux seam no longer gates on max(elapsed, last_tick_total_ns) -- the budget term is render-order-dependent again and an early-deciding aux filter under-throttles"; exit 1 }
           $flt = (Get-Content "vendor/distroav/src/ndi-filter.cpp" -Raw) -replace '\s+', ' '
           if ($flt -notmatch [regex]::Escape('if (obs_aux_sender_should_skip(f->render_divisor, f->render_frame_counter, f->render_ewma_ns,')) { Write-Error "ndi-filter.cpp: #879 aux render+send no longer gated on the budget -- the aux senders bypass the render budget again and can steal the program 30fps budget"; exit 1 }
           if ($flt -notmatch [regex]::Escape('f->render_ewma_ns = f->render_ewma_ns ? (f->render_ewma_ns * 3 + render_dur_879) / 4 : render_dur_879;')) { Write-Error "ndi-filter.cpp: #879 per-filter render-cost EWMA update gone -- the budget gate cannot learn an aux sender is heavy"; exit 1 }

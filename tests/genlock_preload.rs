@@ -2409,6 +2409,12 @@ mod vendored_source {
              adaptive skip cannot measure how much budget the program already used."
         );
         assert!(
+            hdr.contains("uint64_t last_tick_total_ns;"),
+            "{OBS_INTERNAL}: #1063 — obs_core_video.last_tick_total_ns field missing; the aux \
+             budget gate loses its order-independent 'previous tick total' term, so an aux \
+             ndi_filter that decides early in the tick under-throttles."
+        );
+        assert!(
             hdr.contains("uint32_t render_frame_counter;"),
             "{OBS_INTERNAL}: #756 — obs_display.render_frame_counter field missing; the hard \
              cadence floor has nowhere to count ticks and a cheap monitoring display would \
@@ -2453,6 +2459,12 @@ mod vendored_source {
                 "const uint32_t effective_divisor = obs_effective_render_divisor(render_divisor, interval);"
             ),
             "{OBS_CORE_C}: #879 — obs_aux_sender_should_skip() no longer derives the canvas-rate effective divisor before delegating to obs_display_should_skip()."
+        );
+        assert!(
+            core.contains(
+                "const uint64_t consumed = (elapsed > last_tick_total) ? elapsed : last_tick_total;"
+            ),
+            "{OBS_CORE_C}: #1063 — obs_aux_sender_should_skip() no longer gates on max(elapsed, obs->video.last_tick_total_ns); the budget term is render-order-dependent again and an aux filter that decides early in the tick under-throttles."
         );
 
         let flt = squish(&vendor_file(NDI_FILTER));
@@ -2506,6 +2518,12 @@ mod vendored_source {
             src.contains("obs->video.graphics_frame_start_ns = frame_start;"),
             "{OBS_VIDEO}: #278 — the graphics loop no longer publishes the per-tick start; the \
              adaptive monitoring skip loses its 'elapsed this tick' reference."
+        );
+        assert!(
+            src.contains("obs->video.last_tick_total_ns = frame_time_ns;"),
+            "{OBS_VIDEO}: #1063 — the graphics loop no longer publishes the COMPLETED tick total; \
+             the aux budget gate's order-independent term goes stale and it under-throttles an aux \
+             filter that decides early in the tick."
         );
     }
 

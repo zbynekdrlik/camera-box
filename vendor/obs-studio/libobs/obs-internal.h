@@ -441,6 +441,13 @@ struct obs_core_video {
 	 * so a monitoring display only renders when slack remains. Written + read only on the
 	 * graphics thread. */
 	uint64_t graphics_frame_start_ns;
+	/* camera-box #1063: the PREVIOUS graphics tick's completed total frame_time_ns, published
+	 * at the END of obs_graphics_thread_loop(). obs_aux_sender_should_skip() gates on
+	 * max(elapsed, last_tick_total_ns) so an aux ndi_filter that decides EARLY in the tick
+	 * (before output_frames() has accrued into `elapsed`) still throttles on a genuinely-heavy
+	 * tick regardless of render order. 0 before the first completed tick (fail-open). Written +
+	 * read only on the graphics thread. */
+	uint64_t last_tick_total_ns;
 	uint64_t video_half_frame_interval_ns;
 	uint64_t video_avg_frame_time_ns;
 	double video_fps;
