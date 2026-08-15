@@ -219,3 +219,38 @@ module docs warn against. The CLI token carries an optional kind prefix: `SelfHe
 accepts BOTH legacy 2-field `cambox:ns` (→ SelfHealReset, the `--self-heal-reset` back-compat) and
 3-field `kind:cambox:ns` (`--restart-event`); the field count is an unambiguous discriminator
 because camboxes never contain `:` and the epoch is numeric.
+
+## #994 (2026-08-15) — the capture-rate POST-recording check now sweeps SECONDARY cameras too, REPORT-ONLY
+
+The `[7b/8]` capture-delivery-rate POST-recording check (#705 + its #992 burn-log read) only ever
+read the SOURCE camera (`$CAMERA_NAME` / `$CAM1_IP` / `/tmp/cbox-burn.log`). Under `ALL_CAMBOX=1`
+every active secondary camera also runs its OWN capture burn (`[2b/8]`, logging to
+`/tmp/cbox-burn-<camname>.log`) and is cut into strih program, so a capture-rate defect on a
+secondary during the recording (issue 889: cam1 AND cam2 both went over-rate at once — cam2 is a
+secondary) was invisible. #994 adds a secondary sweep right AFTER the source-camera check's success
+line, looping `CAMBOX_SECONDARY_DEPLOY` the same way the #910 restart-event scan does, reading each
+box's journald window + its own burn log, HARD band + #717 SUSTAINED band grepped separately.
+
+**It is REPORT-ONLY (`WARNING #994:`, never aborts) — this was a deliberate architectural decision,
+not laziness.** A secondary's reset events (`#663`) are already threaded report-only into the
+verdict by the #910 restart-event scan + the #914 `frozen_leg`/`self_heal_reset` decoupling.
+Hard-failing a secondary's capture-rate band here would re-introduce the exact permanently-red-gate
+mistake #909/#914 spent three tickets eliminating: cam2 IS a secondary, so a chronic secondary
+grabber quirk (the ShadowCast class) would abort every `ALL_CAMBOX` run before a verdict is ever
+computed. Per the owner's standing "green gate first, tighten via tickets" directive, the secondary
+sweep surfaces the defect loudly for diagnostics and leaves the pass/fail decision to the
+source-camera check (still HARD) + the already-report-only verdict terms. A future hard-gate
+tightening for secondaries, if ever wanted, is its own ticket. Option 2 of #994 (the reset-EVENT
+sweep across secondaries) was ALREADY delivered by #910; #994 closes option 1 for the capture-rate
+defect-declaration signal, i.e. the ticket's "both".
+
+**Anchor-safety note (the recurring `recording-e2e.sh` static-anchor gotcha):** the new sweep is
+placed AFTER the source-camera check's success line, OUTSIDE the `s[check_header_pos..check_ok_pos]`
+region that `harness_capture_rate_guard.rs` measures its `hard_calls == 2` / `sustained_calls == 2`
+counts against — so the source block's counts are untouched. The loop var is `_cn_ip_crs` (NOT
+`_cn_ip_burn`, which `harness_recording_e2e_paths.rs` slices on, and NOT the `for _hbs in
+"${BURN_TARGETS[@]}"` literal it counts == 2), and the new `if [ "${ALL_CAMBOX:-0}" = "1" ]; then`
+is followed by an `echo`, never `for _acn in`, so the `#286` ALL_CAMBOX-adjacency `.find()` anchor
+is unaffected. Two new pure report-only formatters
+(`capture_rate_secondary_recurrence_warn_message` / `..._burn_log_recurrence_warn_message`) mirror
+the #992 sustained-band warn formatters' shape.

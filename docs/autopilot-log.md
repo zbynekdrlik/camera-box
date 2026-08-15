@@ -8478,3 +8478,35 @@ Review: 0 🔴 2 🟡 3 🔵, all fixed same-branch. Gotcha logged: cargo tests 
 - GOTCHA (seam brace-freedom): `tests/aux_sender_budget_879.rs` finds the seam's closing brace via
   the FIRST `"\n}"` after the signature, so the seam must stay brace-free — the new max-term uses a
   `? :` ternary precisely to avoid a nested `{}` block.
+
+## #994 — capture-rate POST-recording check swept over ALL_CAMBOX secondary cameras (report-only) — 2026-08-15
+
+Version 1.7.0-dev.460. Branch autopilot-994 (worktree). Commits:
+3fdb091fc (version bump), 2e9672a12 test(#994) [red], ccb5662ba fix(#994) [green], + this docs commit.
+
+STEP-0 finding: the ticket's option 2 (extend the self-heal-RESET scan to read each secondary's
+burn log) was ALREADY delivered by issue 910's unified restart-event scan (loops
+CAMBOX_SECONDARY_DEPLOY, reads journald + each /tmp/cbox-burn-<camname>.log). Only option 1 was a
+real gap: the [7b/8] capture-delivery-rate POST-recording check read only the SOURCE camera. So
+#994 closes option 1 (= the ticket's "both").
+
+Change: new report-only sweep over CAMBOX_SECONDARY_DEPLOY in recording-e2e.sh (after the
+source-camera success line, gated on ALL_CAMBOX=1), reading each secondary's journald window + its
+own burn log, HARD + #717 SUSTAINED bands, via two new pure formatters in
+scripts/lib/capture-rate-guard.sh (capture_rate_secondary_recurrence_warn_message /
+..._burn_log_recurrence_warn_message, WARNING #994 prefix). REPORT-ONLY, NEVER exit 1 — a hard
+secondary gate would recreate the issue-909/914 permanently-red-gate mistake (cam2 is a secondary);
+green-gate-first. Source-camera check keeps its HARD (exit 1) behavior unchanged.
+
+RED->GREEN test names (tests/harness_capture_rate_guard.rs):
+secondary_recurrence_warn_message_is_loud_report_only_and_names_the_journal,
+secondary_recurrence_warn_message_falls_back_gracefully_on_an_unparseable_line,
+secondary_burn_log_recurrence_warn_message_is_report_only_and_names_the_burn_log,
+recording_e2e_sweeps_every_secondary_camera_for_capture_rate_after_the_source_check.
+
+Local verification (build-ok disabled for camera-box #477, cargo tests run in CI):
+cargo test --no-run ok, cargo fmt --check ok, cargo clippy -D warnings ok, bash -n both scripts ok,
+and a Python mirror of every test assertion passed (source block hard/sustained still ==2, sweep
+block report-only with no exit 1, BURN_TARGETS loop-header count still 2). FULL cargo test suite
+must run at integration (I touched recording-e2e.sh) — supervisor runs it; I ran only --no-run.
+No push/PR/rig touch (worktree worker).
