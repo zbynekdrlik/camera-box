@@ -3418,7 +3418,10 @@ _capture_rate_secondary_scan() {  # camname ip burnlog
   if [ -n "$_cline" ]; then
     echo "    $(capture_rate_secondary_recurrence_warn_message "$_cn" "$_cline")"
   fi
-  # journald window, #717 SUSTAINED band -> report-only WARN (existing #992 formatter)
+  # journald window, #717 SUSTAINED band -> report-only WARN. Reuses the source-camera #992
+  # sustained formatter as-is: its line reads "WARNING #992: <cam> ..." (a #992-labelled line even
+  # on a secondary is intentional -- the sustained band's meaning is band-#992, not camera-role;
+  # the cam name disambiguates), so no separate #994 sustained formatter is warranted.
   _cline="$(sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$_cip" \
     "$(capture_rate_window_journalctl_cmd "$_cinv" "$CAPTURE_RATE_WINDOW_START_EPOCH" "$CAPTURE_RATE_WINDOW_END_EPOCH") | grep -E '$(capture_rate_sustained_band_grep_pattern)' | tail -1" \
     2>/dev/null || true)"
@@ -3432,7 +3435,8 @@ _capture_rate_secondary_scan() {  # camname ip burnlog
   if [ -n "$_cline" ]; then
     echo "    $(capture_rate_secondary_burn_log_recurrence_warn_message "$_cn" "$_cline")"
   fi
-  # burn-instance log, #717 SUSTAINED band -> report-only WARN (existing #992 formatter)
+  # burn-instance log, #717 SUSTAINED band -> report-only WARN (existing #992 formatter, same
+  # intentional #992-labelled reuse as the journald sustained read above)
   _cline="$(sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$_cip" \
     "$(capture_rate_burn_log_grep_cmd "$_cblog" "$(capture_rate_sustained_band_grep_pattern)")" \
     2>/dev/null || true)"

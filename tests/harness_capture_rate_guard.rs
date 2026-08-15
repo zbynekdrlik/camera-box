@@ -1112,6 +1112,18 @@ fn recording_e2e_sweeps_every_secondary_camera_for_capture_rate_after_the_source
         sweep_block.contains("capture_rate_sustained_band_grep_pattern"),
         "#994: must grep the SUSTAINED band on secondaries too. Block:\n{sweep_block}"
     );
+    // The report-only #717 SUSTAINED path reuses the existing #992 sustained WARN formatters (both
+    // sources) -- assert they are actually invoked in the sweep, not just that the band is grepped.
+    assert!(
+        sweep_block.contains("capture_rate_sustained_band_warn_message"),
+        "#994: a journald-side SUSTAINED match on a secondary must be reported via the #992 \
+         sustained WARN formatter. Block:\n{sweep_block}"
+    );
+    assert!(
+        sweep_block.contains("capture_rate_burn_log_sustained_band_warn_message"),
+        "#994: a burn-log-side SUSTAINED match on a secondary must be reported via the #992 \
+         burn-log sustained WARN formatter. Block:\n{sweep_block}"
+    );
     // Report-only via the dedicated #994 formatters (never the source's exit-1 ERROR formatters).
     assert!(
         sweep_block.contains("capture_rate_secondary_recurrence_warn_message"),
