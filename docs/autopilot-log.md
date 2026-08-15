@@ -8449,3 +8449,10 @@ Review: 0 🔴 2 🟡 3 🔵, all fixed same-branch. Gotcha logged: cargo tests 
   on GCC 13 but a hard ERROR on GCC 14. Name the struct once. Lift-and-compile caught it under -Werror.
 - GOTCHA (deploy): the DistroAV plugin now imports a NEW libobs export — a partial deploy of only the
   plugin DLL against an old obs64.dll fails plugin LOAD (unresolved symbol). Use the FULL-BUNDLE deploy.
+
+## Round 13 (2026-08-15) — dantesync journal-fallback + aux-sender priorita + floor self-kalibrácia
+
+- Tickety: 837 (journal-fallback spread grading), 879 (aux ndi_filter deleguje na obs_display_should_skip cez nový libobs EXPORT; program štrukturálne negatovaný), 900 (min-surviving floor self-kalibrácia); 838 uzavretý ako overcome ešte pred PR.
+- PR 1064 merged 1b035991d; E2E zelené na 6. beh — lotéria: beh 1 dantesync drift (exit 20), beh 2 cam1 gap okno, beh 3 multi-cam burst okno, beh 4 cam1 A/V +125 po re-rolle (relock lotéria), beh 5 spready OK ale CAM2 4+4 FIFO burst okno, beh 6 GREEN (A/V −2/−53/−62).
+- Deploy vendored zmeny (nový EXPORT = full-bundle väzba): stream obs.dll+distroav.dll (distroav žije v C:\ProgramData\obs-studio\plugins\distroav — kópia do obs-plugins\64bit by spravila duplicitný load, opravené), strih obs.dll+distroav.dll (AHK NL_STARTUP.ahk reštart z D:\_APPS), imag 4-dielny hot-swap (libobs.so.30, libobs-opengl.so.30, distroav.so, /usr/bin/obs) + marker b140381d2.
+- Lekcia: ssh `echo pw | sudo -S bash -s` s heredocom NEfunguje (heredoc zožerie sudo pipe) — skript najprv scp na box, potom sudo bash /tmp/script.
