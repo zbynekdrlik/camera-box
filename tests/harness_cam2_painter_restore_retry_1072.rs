@@ -49,10 +49,16 @@ fn cleanup_calls_restore_retry_after_the_one_shot_start_1072() {
     let s = read("scripts/recording-e2e.sh");
     let start = s
         .find("systemctl start cam2-painter 2>/dev/null || true")
-        .expect("#1072: the existing one-shot start (attempt #1) must remain as the retry's first attempt");
+        .expect(
+        "#1072: the existing one-shot start (attempt #1) must remain as the retry's first attempt",
+    );
     let retry = s
         .find("$(cam2_painter_restore_retry_cmds)")
-        .unwrap_or_else(|| panic!("#1072: cleanup() must call the retry builder so the restore is more than one-shot"));
+        .unwrap_or_else(|| {
+            panic!(
+                "#1072: cleanup() must call the retry builder so the restore is more than one-shot"
+            )
+        });
     assert!(
         retry > start,
         "#1072: the retry (attempts 2..N) must follow the first start attempt (start {start}, retry {retry})"
@@ -134,9 +140,9 @@ fn preflight_attempts_one_self_heal_start_before_the_abort_1072() {
     let heal = s
         .find("systemctl start")
         .unwrap_or_else(|| panic!("#1072: the preflight must attempt ONE self-heal `systemctl start` of the painter before refusing the run"));
-    let abort = s
-        .find("exit 1")
-        .expect("#1072: the preflight must still fail-closed with exit 1 when the self-heal did not take");
+    let abort = s.find("exit 1").expect(
+        "#1072: the preflight must still fail-closed with exit 1 when the self-heal did not take",
+    );
     assert!(
         heal < abort,
         "#1072: the self-heal start must come BEFORE the fail-closed exit 1 (heal {heal}, abort {abort})"
