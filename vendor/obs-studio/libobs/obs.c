@@ -2907,10 +2907,13 @@ uint64_t obs_get_frame_interval_ns(void)
 }
 
 /*
- * camera-box #879: see obs.h. Reads this tick's start + the frame interval (the same two
- * globals render_display() budgets the projector path against), derives the canvas-rate
- * effective divisor, and delegates the skip decision to the pure obs_display_should_skip()
- * -- no duplicated logic. Never-warmed / not-ticking -> never skip (render once to measure).
+ * camera-box #879: see obs.h. Reads this tick's start + the frame interval (the two globals
+ * render_display() budgets the projector path against) plus, since #1063, the PREVIOUS tick's
+ * completed total (obs->video.last_tick_total_ns), derives the canvas-rate effective divisor,
+ * and delegates the skip decision to the pure obs_display_should_skip() -- no duplicated logic.
+ * The budget's "already consumed" term is max(elapsed, last_tick_total_ns) so an aux filter
+ * that decides EARLY in the tick still throttles a heavy tick regardless of render order (#1063).
+ * Never-warmed / not-ticking -> never skip (render once to measure).
  */
 bool obs_aux_sender_should_skip(uint32_t render_divisor, uint32_t frame_counter, uint64_t ewma_ns,
 			       uint32_t consecutive_skips)
