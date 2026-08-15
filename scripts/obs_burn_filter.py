@@ -55,6 +55,25 @@ def _filter_enabled(ws, input_name):
     return None
 
 
+def render_total_frames(stats):
+    """Pure: extract GetStats.renderTotalFrames as an int, or None if absent/unparseable.
+
+    #1060: renderTotalFrames is OBS's monotone-since-process-start frame counter that RESETS on an
+    OBS restart, so the dev1 burn-reconcile watchdog reads it as its fresh-OBS-start signal (a drop
+    vs a persisted baseline = a restart since the last pass). OBS reports it as a JSON number that
+    may arrive as float — normalise to int; a missing/None/non-numeric value is None (the watchdog
+    then treats the pass as "nothing to decide", never advancing its baseline off a bad read)."""
+    if not isinstance(stats, dict):
+        return None
+    raw = stats.get("renderTotalFrames")
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 def compute_burn_on(genlock_burn, filter_present, filter_enabled):
     """Pure gate for whether a measurement burn will actually RENDER into the program.
 
@@ -143,6 +162,31 @@ def cmd_check(ws, input_name):
     )
     if not registered:
         print("[burn]   NOTE: this OBS does not have the camera-box burn filter (stock OBS?)")
+
+
+def cmd_session_probe(ws, host):
+    """#1060 — print OBS's current GetStats.renderTotalFrames (the fresh-OBS-start signal) on
+    STDOUT for the dev1 burn-reconcile watchdog to compare against its persisted per-box baseline.
+
+    renderTotalFrames is monotone since OBS process start and RESETS on an OBS restart. Prints ONLY
+    the integer on stdout (nothing else, so the shell can read it directly); a diagnostic line on
+    stderr. Returns 0 on a clean read, non-zero when renderTotalFrames is unreadable (a WS/RPC
+    error or a reply with no such field) so the watchdog treats the pass as "nothing to decide"
+    and never advances its baseline off a bad read. Reuses the SAME WS connection obs_burn_filter
+    already speaks — no ssh, no on-box client (the Windows box has neither)."""
+    try:
+        stats = _rpc(ws, "GetStats", ignore_err=True)
+    except Exception:  # noqa: BLE001 — a #328 timeout (or any WS error) is an unreadable probe
+        stats = None
+    rtf = render_total_frames(stats)
+    if rtf is None:
+        sys.stderr.write(
+            f"[session-probe] host={host} ERROR: GetStats.renderTotalFrames unreadable "
+            f"(WS error or missing field) — nothing to decide this pass.\n")
+        return 1
+    print(rtf)
+    sys.stderr.write(f"[session-probe] host={host} renderTotalFrames={rtf}\n")
+    return 0
 
 
 # =============================================================================================
@@ -263,7 +307,8 @@ def main():
     ap = argparse.ArgumentParser(description="#111/#257 per-source measurement-burn toggle/check; "
                                              "#938/#1011 exhaustive sweep-check/sweep-off")
     ap.add_argument("action",
-                    choices=["add", "remove", "check", "sweep-check", "sweep-off"])
+                    choices=["add", "remove", "check", "sweep-check", "sweep-off",
+                             "session-probe"])
     ap.add_argument("--host", required=True)
     ap.add_argument("--input",
                     help="OBS NDI input/source name (required for add/remove/check; the "
@@ -279,6 +324,8 @@ def main():
             rc = cmd_sweep_check(ws, a.host)
         elif a.action == "sweep-off":
             rc = cmd_sweep_off(ws, a.host)
+        elif a.action == "session-probe":
+            rc = cmd_session_probe(ws, a.host)
         else:
             {"add": cmd_add, "remove": cmd_remove, "check": cmd_check}[a.action](ws, a.input)
     finally:

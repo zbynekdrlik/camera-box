@@ -1,0 +1,17 @@
+[Unit]
+# #1060 dev1-side fresh-OBS-start burn reconciliation for the UNATTENDED strih/stream OBS start
+# paths (boot autostart / NL_STARTUP.ahk respawn / issue-411 self-heal). ONE probe -> decide ->
+# reconcile pass over both broadcast boxes.
+# SHIPS DISABLED -- installed/enabled/live-verified by the supervisor only. See the README.
+Description=camera-box fresh-OBS-start burn-reconcile watchdog (#1060) -- one probe/decide/reconcile pass
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Service]
+Type=oneshot
+# %h = the installing user's home. Adjust if the checkout lives elsewhere on dev1.
+ExecStart=%h/devel/camera-box/scripts/obs-burn-reconcile-watchdog.sh
+# Two OBS-WebSocket round trips (session-probe + at most one sweep-check/off) per box; give it room
+# but never hang the timer.
+TimeoutStartSec=60
+# OBS WebSocket password for both boxes (default "" -- matches recording-e2e.sh / rig-busy-gate.sh):
+#   Environment=OBS_PASSWORD=...

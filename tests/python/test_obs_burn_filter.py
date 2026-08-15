@@ -266,3 +266,62 @@ def test_sweep_off_fails_closed_when_enumeration_fails(monkeypatch, capsys):
     assert rc == obs_burn_filter.SWEEP_ENUM_FAILED
     # nothing was cleared — we could not even enumerate the inputs
     assert fake.inputs["NDI cam3"]["genlock_burn"] is True
+
+
+# =============================================================================================
+# #1060 — the fresh-OBS-start SESSION PROBE. The unattended strih/stream OBS start paths (boot
+# autostart / NL_STARTUP.ahk respawn / issue-411 self-heal Task-Scheduler) reload a saved
+# genlock_burn=true onto the LIVE program, and there is no on-box python/WS client to clear it.
+# A dev1-side reconcile watchdog needs a fresh-start signal readable over the SAME OBS WebSocket
+# obs_burn_filter already speaks: GetStats.renderTotalFrames is monotone since OBS process start
+# and RESETS on restart, so a drop vs a persisted baseline = a restart since the last pass.
+# `render_total_frames` is the pure extractor; `cmd_session_probe` prints it for the shell watchdog.
+
+
+def test_render_total_frames_extracts_int():
+    assert obs_burn_filter.render_total_frames({"renderTotalFrames": 12345}) == 12345
+    # OBS reports it as a JSON number that may arrive as float — normalise to int.
+    assert obs_burn_filter.render_total_frames({"renderTotalFrames": 12345.0}) == 12345
+
+
+def test_render_total_frames_none_when_absent_or_unparseable():
+    assert obs_burn_filter.render_total_frames({}) is None
+    assert obs_burn_filter.render_total_frames({"renderTotalFrames": None}) is None
+    assert obs_burn_filter.render_total_frames({"renderTotalFrames": "nope"}) is None
+    assert obs_burn_filter.render_total_frames(None) is None
+
+
+class _FakeStatsObs:
+    """Serves a single GetStats reply (the only RPC session-probe issues)."""
+
+    def __init__(self, stats):
+        self._stats = stats
+        self.calls = []
+
+    def rpc(self, ws, method, params=None, ignore_err=False):
+        self.calls.append((method, params or {}))
+        if method == "GetStats":
+            return dict(self._stats)
+        return {}
+
+
+def test_cmd_session_probe_prints_render_total_frames(monkeypatch, capsys):
+    fake = _FakeStatsObs({"renderTotalFrames": 987654, "activeFps": 30.0})
+    monkeypatch.setattr(obs_burn_filter, "_rpc", fake.rpc)
+    rc = obs_burn_filter.cmd_session_probe(object(), "10.77.9.202")
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert out.strip() == "987654", "session-probe must print ONLY the integer on stdout"
+    assert any(m == "GetStats" for (m, _) in fake.calls), "must read GetStats"
+
+
+def test_cmd_session_probe_nonzero_when_stats_unreadable(monkeypatch, capsys):
+    # A GetStats with no renderTotalFrames (or an error reply) => cannot determine the session
+    # baseline this pass: return non-zero and print nothing parseable, so the watchdog treats it
+    # as "nothing to decide this pass" (never advances the baseline off a bad read).
+    fake = _FakeStatsObs({"activeFps": 0.0})
+    monkeypatch.setattr(obs_burn_filter, "_rpc", fake.rpc)
+    rc = obs_burn_filter.cmd_session_probe(object(), "10.77.9.202")
+    out = capsys.readouterr().out
+    assert rc != 0
+    assert out.strip() == "", "no integer must be printed when renderTotalFrames is unreadable"

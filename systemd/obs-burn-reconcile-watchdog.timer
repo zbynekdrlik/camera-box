@@ -1,0 +1,18 @@
+[Unit]
+# Fires the #1060 fresh-OBS-start burn-reconcile watchdog every ~3 min -- an unattended OBS restart
+# (boot autostart / NL_STARTUP.ahk respawn / issue-411 self-heal) resurrects a saved measurement
+# burn onto the LIVE program, and nothing else clears it until the next dev1 gate run. A tighter
+# cadence than the #391/#979 alert watchdogs on purpose: this one bounds how long a resurrected
+# burn can render before it is swept.
+# SHIPS DISABLED -- enabled/live-verified by the supervisor only. See the README.
+Description=Run the camera-box fresh-OBS-start burn-reconcile watchdog every ~3 min (#1060)
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=3min
+AccuracySec=20s
+Persistent=false
+
+[Install]
+WantedBy=timers.target
