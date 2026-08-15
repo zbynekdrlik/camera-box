@@ -3391,6 +3391,64 @@ if [ -n "$CAPTURE_RATE_BURN_LOG_SUSTAINED_LINE" ]; then
 fi
 echo "    ok: no capture-rate defect recurrence in $CAMERA_NAME's journal during the recording window (${CAPTURE_RATE_WINDOW_START_EPOCH}..${CAPTURE_RATE_WINDOW_END_EPOCH}) -- also checked its burn-instance log (/tmp/cbox-burn.log, #992); #717 SUSTAINED band (if any) was report-only and did not fail this gate (issue 909)"
 
+# [7b/8] secondary-camera capture-delivery-rate POST-recording sweep (#994). The source-camera
+# step above is the HARD gate that aborts the run. Under ALL_CAMBOX=1 every active secondary
+# camera also runs its OWN capture burn ([2b/8], logging to /tmp/cbox-burn-<camname>.log) and is
+# cut into strih program, so a capture-rate defect on a SECONDARY during the recording (issue 889:
+# cam1 AND cam2 both went over-rate at once -- cam2 is a secondary) is just as real, but was
+# invisible: the source-camera step above only ever read $CAMERA_NAME. Sweep every secondary the
+# SAME way the issue-910 restart-event scan already does (CAMBOX_SECONDARY_DEPLOY, journald window
+# + each box's own burn log, HARD band + #717 SUSTAINED band grepped separately). REPORT-ONLY (a
+# loud WARNING #994:, never aborts): a secondary's reset events are already threaded report-only to
+# the verdict by the issue-910 scan + issue-914 frozen_leg/self_heal_reset decoupling, and
+# hard-failing here on a chronic secondary quirk (cam2 is a secondary) would recreate the exact
+# permanently-red-gate mistake issue-909/914 fixed -- a hard secondary gate, if ever wanted, is its
+# own ticket (green-gate-first). Option 2 of #994 (the reset-EVENT sweep across secondaries) is
+# already delivered by issue 910; this closes option 1 for the capture-rate defect-declaration
+# signal. Mirrors the source-camera check's two-source (journald + burn log) / two-band (HARD +
+# SUSTAINED) reads, all report-only, reusing the existing camera-parameterized helpers.
+_capture_rate_secondary_scan() {  # camname ip burnlog
+  local _cn="$1" _cip="$2" _cblog="$3" _cinv _cline
+  _cinv="$(sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$_cip" \
+    "systemctl show -p InvocationID --value camera-box 2>/dev/null" 2>/dev/null || true)"
+  # journald window, HARD band -> report-only WARN
+  _cline="$(sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$_cip" \
+    "$(capture_rate_window_journalctl_cmd "$_cinv" "$CAPTURE_RATE_WINDOW_START_EPOCH" "$CAPTURE_RATE_WINDOW_END_EPOCH") | grep -E '$(capture_rate_defect_grep_pattern_hard)' | tail -1" \
+    2>/dev/null || true)"
+  if [ -n "$_cline" ]; then
+    echo "    $(capture_rate_secondary_recurrence_warn_message "$_cn" "$_cline")"
+  fi
+  # journald window, #717 SUSTAINED band -> report-only WARN (existing #992 formatter)
+  _cline="$(sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$_cip" \
+    "$(capture_rate_window_journalctl_cmd "$_cinv" "$CAPTURE_RATE_WINDOW_START_EPOCH" "$CAPTURE_RATE_WINDOW_END_EPOCH") | grep -E '$(capture_rate_sustained_band_grep_pattern)' | tail -1" \
+    2>/dev/null || true)"
+  if [ -n "$_cline" ]; then
+    echo "    $(capture_rate_sustained_band_warn_message "$_cn" "$_cline")"
+  fi
+  # burn-instance log, HARD band -> report-only WARN (journald-blind sibling, issue 992/910)
+  _cline="$(sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$_cip" \
+    "$(capture_rate_burn_log_grep_cmd "$_cblog" "$(capture_rate_defect_grep_pattern_hard)")" \
+    2>/dev/null || true)"
+  if [ -n "$_cline" ]; then
+    echo "    $(capture_rate_secondary_burn_log_recurrence_warn_message "$_cn" "$_cline")"
+  fi
+  # burn-instance log, #717 SUSTAINED band -> report-only WARN (existing #992 formatter)
+  _cline="$(sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$_cip" \
+    "$(capture_rate_burn_log_grep_cmd "$_cblog" "$(capture_rate_sustained_band_grep_pattern)")" \
+    2>/dev/null || true)"
+  if [ -n "$_cline" ]; then
+    echo "    $(capture_rate_burn_log_sustained_band_warn_message "$_cn" "$_cline")"
+  fi
+}
+if [ "${ALL_CAMBOX:-0}" = "1" ]; then
+  echo "[7b/8] secondary-camera capture-rate report-only sweep (#994) — every active secondary camera; the source-camera step above is the hard gate"
+  for _cn_ip_crs in "${CAMBOX_SECONDARY_DEPLOY[@]}"; do
+    _cn="${_cn_ip_crs%%=*}"; _crest="${_cn_ip_crs#*=}"; _cip="${_crest%%=*}"
+    _capture_rate_secondary_scan "$_cn" "$_cip" "/tmp/cbox-burn-${_cn}.log"
+  done
+  echo "    ok: secondary-camera capture-rate sweep complete (#994, report-only) — any WARNING #994 / WARNING #992 lines above are informational and did not fail this gate"
+fi
+
 # #359: do NOT kill the painter early. frame-probe writes the ground-truth CSV ONLY on its clean
 # --duration-secs self-exit (src/probe/run.rs) — the old unconditional `pkill -x frame-probe` here
 # fired at ~DURATION, BEFORE the painter's DURATION+PAINTER_PRE_RECORD_SLACK_SECS self-exit, so it never wrote a fresh CSV and

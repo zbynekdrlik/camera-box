@@ -225,3 +225,43 @@ capture_rate_burn_log_sustained_band_warn_message() {
   local cam="$1" line="$2"
   echo "WARNING #992: ${cam} capture-delivery-rate SUSTAINED band confirmed in its burn-instance log during this recording -- informational by design (issue 909: absorbed by the genlock decimation gate), does NOT fail this gate: ${line}"
 }
+
+# (#994) capture_rate_secondary_recurrence_warn_message CAMERA_NAME MATCHED_LINE -> the REPORT-ONLY
+# diagnostic for a HARD capture-rate defect band (#656 jitter / #971 chronic / #663 self-heal
+# reset) that matched on a SECONDARY camera's journald window during an ALL_CAMBOX recording.
+# Unlike capture_rate_recurrence_message (the SOURCE-camera HARD-fail sibling, which precedes an
+# abort), this NEVER aborts the run: a secondary's reset events are already threaded report-only
+# into the verdict by the issue-910 restart-event scan + the issue-914 frozen_leg/self_heal_reset
+# decoupling, and hard-failing on a chronic secondary quirk (cam2 IS a secondary) would recreate
+# the issue-909 permanently-red-gate mistake -- so a secondary defect is surfaced loudly for
+# diagnostics, never gated. "WARNING #994:" prefix makes it greppable without being mistaken for an
+# ERROR line. Reuses the same captured/configured-fps extraction as the source-camera messages.
+capture_rate_secondary_recurrence_warn_message() {
+  local cam="$1" line="$2" captured configured
+  captured="$(printf '%s' "$line" | grep -oE '[0-9]+\.[0-9]+ fps captured' | head -1 | grep -oE '[0-9]+\.[0-9]+')"
+  configured="$(printf '%s' "$line" | grep -oE '[0-9]+\.[0-9]+ fps configured' | head -1 | grep -oE '[0-9]+\.[0-9]+')"
+  if [ -n "$captured" ] && [ -n "$configured" ]; then
+    echo "WARNING #994: ${cam} (secondary camera) capture-rate HARD defect during this recording, per its journal (~${captured}fps, expected ${configured}fps) -- see #656/#663/#971/#994; report-only for a SECONDARY camera (the source camera above is the hard gate; a secondary's reset events are also threaded report-only by the issue-910 restart-event scan + issue 914), does NOT fail this gate"
+  else
+    echo "WARNING #994: ${cam} (secondary camera) capture-rate HARD defect during this recording, per its journal (see #656/#663/#971/#994); report-only for a SECONDARY camera, does NOT fail this gate: ${line}"
+  fi
+}
+
+# (#994) capture_rate_secondary_burn_log_recurrence_warn_message CAMERA_NAME MATCHED_LINE -> the
+# burn-instance-log sibling of capture_rate_secondary_recurrence_warn_message above -- same
+# report-only contract, but names the burn-instance LOG as the source (never "journal"), mirroring
+# the journal/burn-log discriminator capture_rate_recurrence_message /
+# capture_rate_burn_log_recurrence_message already keep distinct. During an ALL_CAMBOX burn each
+# secondary logs to its OWN /tmp/cbox-burn-<camname>.log (journald is blind to it -- the burn runs
+# as a transient systemd-run unit redirecting straight to that file), so this is the journald-blind
+# sibling read, same as the source camera's #992 burn-log read.
+capture_rate_secondary_burn_log_recurrence_warn_message() {
+  local cam="$1" line="$2" captured configured
+  captured="$(printf '%s' "$line" | grep -oE '[0-9]+\.[0-9]+ fps captured' | head -1 | grep -oE '[0-9]+\.[0-9]+')"
+  configured="$(printf '%s' "$line" | grep -oE '[0-9]+\.[0-9]+ fps configured' | head -1 | grep -oE '[0-9]+\.[0-9]+')"
+  if [ -n "$captured" ] && [ -n "$configured" ]; then
+    echo "WARNING #994: ${cam} (secondary camera) capture-rate HARD defect during this recording, per its OWN burn-instance log (~${captured}fps, expected ${configured}fps) -- see #656/#663/#971/#992/#994; journald was blind to this (the burn instance logs to a file, not the journal); report-only for a SECONDARY camera, does NOT fail this gate"
+  else
+    echo "WARNING #994: ${cam} (secondary camera) capture-rate HARD defect during this recording, per its OWN burn-instance log (see #656/#663/#971/#992/#994); report-only for a SECONDARY camera, does NOT fail this gate: ${line}"
+  fi
+}
