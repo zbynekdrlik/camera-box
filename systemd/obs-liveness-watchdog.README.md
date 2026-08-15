@@ -115,3 +115,16 @@ telemetry (OBS WebSocket `GetStats` + `Responding`/CPU) caught it. If this recur
 diagnosable step is capturing obs64's log tail + full process/thread state via the win-* MCP
 **before** force-killing during the agent-driven recovery — see `.claude/skills/obs-ops` "Wedged
 OBS" recovery section.
+
+## #935 — render-loop stall detection now works on a WS-only pass (`render_advanced`)
+
+The 2026-08-02 strih incident (issue 935) exposed a hole: a full graphics render-loop stall
+(`renderTotalFrames` delta 0 over 3 s) while `GetStats activeFps` still reported the configured
+30.0 and the WS thread answered. The WS-only probe used to fill `active_fps` from the lying
+`activeFps` gauge and computed `render_skipped_frac = 0.0` on a frozen loop, so `classify()`
+returned HEALTHY — enabling this watchdog as-is would NOT have paged. Fixed: the probe now also
+emits `render_advanced` (did `renderTotalFrames` advance over the window), and `classify()` returns
+FPS-ZERO when it is `Some(false)`, on the plain dev1 WS-only pass with no process/MCP signals. This
+watchdog still SHIPS DISABLED — the fix makes it CAPABLE of catching that class; the supervisor must
+still install + live-verify + enable it per the procedure above. (It does NOT cover a frozen strih
+cambox INPUT while strih keeps compositing — that is a separate watchdog scope, tracked separately.)
