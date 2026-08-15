@@ -17,11 +17,21 @@ fn service_text() -> String {
 }
 
 /// Return the body of the named INI section (e.g. "Unit"), up to the next `[Section]` header.
+///
+/// Headers are matched LINE-ANCHORED (start of file or after a newline) — a bare
+/// `text.find("[Service]")` would land on the token inside the [Unit] section's own
+/// explanatory comment ("placing them in [Service] silently no-ops"), slicing a comment
+/// fragment instead of the real section (the anchor-uniqueness trap; caught live on CI).
 fn section<'a>(text: &'a str, name: &str) -> &'a str {
     let header = format!("[{name}]");
-    let start = text
-        .find(&header)
-        .unwrap_or_else(|| panic!("no [{name}] section"));
+    let start = if text.starts_with(&header) {
+        0
+    } else {
+        let nl_header = format!("\n{header}");
+        text.find(&nl_header)
+            .map(|i| i + 1)
+            .unwrap_or_else(|| panic!("no line-anchored [{name}] section"))
+    };
     let after = &text[start + header.len()..];
     match after.find("\n[") {
         Some(end) => &after[..end],
