@@ -281,6 +281,32 @@ void obs_canvas_clear_mix(obs_canvas_t *canvas)
 
 	canvas->mix = NULL;
 
+	/* camera-box #1026: also DETACH any output that borrowed this mix's
+	 * video_t before obs_free_video_mix() bfree()s it below. output->video is
+	 * set to obs_get_video() at obs_output_create (raw outputs) and is never
+	 * cleared on stop, so an output left over from before a video-settings
+	 * reset (e.g. the inactive virtualcam_output) keeps pointing at the freed
+	 * mix video. On the next obs-websocket GetOutputList, the callback's
+	 * obs_output_get_width -> video_output_get_width -> get_const_root walks
+	 * that freed+reused video_t on a Qt WS worker thread and SIGSEGVs (imag-nb:
+	 * 7 crashes in ~32h; the freed video->parent field read back as NDI string
+	 * data). obs_enum_outputs holds outputs_mutex over the list but NOT over the
+	 * borrowed video_t, so clear it here under outputs_mutex FIRST — before the
+	 * mixes_mutex section below, so the two locks never nest — and the NULL-safe
+	 * video-io getters then return 0 instead of dereferencing freed memory.
+	 * Extends the #793 detach-before-free to the output copies it did not reach. */
+	video_t *freed_video = old_mix->video;
+	if (freed_video) {
+		pthread_mutex_lock(&obs->data.outputs_mutex);
+		struct obs_output *output = obs->data.first_output;
+		while (output) {
+			if (output->video == freed_video)
+				output->video = NULL;
+			output = (struct obs_output *)output->context.next;
+		}
+		pthread_mutex_unlock(&obs->data.outputs_mutex);
+	}
+
 	pthread_mutex_lock(&obs->video.mixes_mutex);
 	for (size_t i = 0; i < obs->video.mixes.num; i++) {
 		struct obs_core_video_mix *mix = obs->video.mixes.array[i];
