@@ -229,7 +229,8 @@ pub fn classify(sample: ObsHealthSample, target_fps: f64) -> ObsHealthVerdict {
         return ObsHealthVerdict::WedgedRenderLag(wedge_reasons);
     }
 
-    // 5. Render loop advancement — the TRUE liveness signal, checked FIRST (#935). GetStats
+    // 5. Render loop advancement — the TRUE liveness signal, checked before the legacy
+    //    activeFps fallback in step 6 (#935). GetStats
     //    `activeFps` is the CONFIGURED canvas fps and keeps reporting the target (30.0 was
     //    read live at #935's 00:35 strih stall) even when the graphics render thread has
     //    fully stalled, so it cannot detect this on its own; and a frozen loop makes
