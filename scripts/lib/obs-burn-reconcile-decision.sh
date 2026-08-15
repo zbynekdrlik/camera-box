@@ -31,26 +31,33 @@
 # nothing.
 
 # obs_burn_reconcile_is_fresh_start <prev_render_total_frames> <cur_render_total_frames>
-#   -> exit 0 (a fresh OBS start since the last pass) / 1 (same OBS session, or undetermined).
+#   -> exit 0 (an OBSERVED OBS restart since the last pass) / 1 (same OBS session, or undetermined).
 #
 #   GetStats.renderTotalFrames is monotone since OBS process start and RESETS on restart, so a DROP
 #   vs the persisted baseline = a restart since the last pass. Rules:
-#     - prev unknown / non-numeric (first pass, or a lost state file) -> FRESH (reconcile once; the
-#       full decision below still only SWEEPs when uncoordinated AND a burn renders, so this is
-#       safe -- it also catches a box that already leaked a burn before the watchdog first ran).
+#     - prev unknown / non-numeric (first pass ever, or a lost/wiped state file) -> NOT fresh (SEED
+#       the baseline only; NEVER treat an unknown baseline as a restart). This is the invariant-#1
+#       safety fix (#1060 review): the baseline used to live in tmpfs and a dev1 reboot wiped it, so
+#       "unknown prev = fresh" would false-clear a deliberately-persistent TEST-mode burn (whose
+#       #281 heartbeat is stale by design after ~10 min) even though the Windows OBS never
+#       restarted. Only an OBSERVED counter drop reconciles; a box that leaked a burn BEFORE this
+#       watchdog first ran is covered by the 1057 launch sweep + the gate's own [0/8] normalize.
 #     - cur non-numeric / empty (an unreadable probe this pass) -> NOT fresh (a bad read can never
 #       PROVE a restart; the watchdog treats an unreadable probe as "nothing to decide this pass"
 #       separately, and must not advance its baseline off it).
 #     - both numeric: cur < prev -> FRESH (counter reset); cur >= prev -> NOT fresh (same session).
+#   The baseline is ALSO persisted in a durable dir (not tmpfs) by the watchdog, so a real OBS
+#   restart that happens to coincide with a dev1 reboot is still caught (prev survives the reboot).
 obs_burn_reconcile_is_fresh_start() {
   local prev="${1:-}" cur="${2:-}"
   # A bad/empty CURRENT read cannot prove a restart.
   case "$cur" in
     "" | *[!0-9]*) return 1 ;;
   esac
-  # An unknown/corrupt PREVIOUS baseline -> reconcile once (treat as fresh).
+  # An unknown/corrupt PREVIOUS baseline is NOT a restart -- seed it (via the caller's write) and
+  # wait for a genuine OBSERVED drop. Never sweep off an unknown baseline (invariant-#1 safety).
   case "$prev" in
-    "" | *[!0-9]*) return 0 ;;
+    "" | *[!0-9]*) return 1 ;;
   esac
   [ "$cur" -lt "$prev" ]
 }

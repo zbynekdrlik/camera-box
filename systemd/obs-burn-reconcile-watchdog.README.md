@@ -23,8 +23,11 @@ it — polling both boxes over the SAME OBS WebSocket `obs_burn_filter.py` alrea
 A persistent TEST-mode burn on strih/stream is a **legitimate, deliberately-persistent operator
 state** whose rig-active heartbeat (#281) goes stale after ~10 min while the burn should remain —
 so "burn present + stale heartbeat" is idle TEST mode, **not** a leak. The watchdog therefore acts
-only on a **fresh OBS start** (a drop in `GetStats.renderTotalFrames` vs its persisted per-box
-baseline = a restart since the last pass), and even then:
+only on an **observed fresh OBS start** — a *drop* in `GetStats.renderTotalFrames` vs its persisted
+per-box baseline (a restart since the last pass). An unknown/first/wiped baseline is only **seeded**,
+never treated as a restart (so a dev1 reboot that wipes state can never false-clear a persistent
+burn), and the baseline lives in the durable `~/.camera-box` (not tmpfs) so a real restart that
+coincides with a dev1 reboot is still caught. When acting, even then:
 
 - **DEFER** while a live gate/TEST harness is coordinating the rig — a fresh #281 rig-active
   heartbeat (`recording-e2e.sh` / `rig-mode.sh test`) OR a held #830 rig lease (a CI gate). This
@@ -34,6 +37,12 @@ baseline = a restart since the last pass), and even then:
   OFF at a fresh start is unconditionally safe (it is never legitimate operator state, per 1057).
 - **CLEAN** — fresh start, nothing to clear (log only).
 - **NOOP** — no restart: persistent state (incl. a legitimate TEST-mode burn) untouched.
+
+If a reconcile after an observed restart cannot confirm the box clean (a `sweep-off` that leaves a
+burn, a failed enumeration, or a reconcile deferred to a live gate), the box is marked `unresolved`
+and **retried on later passes** until read-back confirms clean — so a transient WS hiccup can't
+leave a resurrected burn on the live program behind a single one-time alert. `unresolved` is only
+ever set off an OBSERVED restart, so a retry can never sweep a burn not already tied to a restart.
 
 All "should I sweep?" logic is the PURE `scripts/lib/obs-burn-reconcile-decision.sh` (unit-tested
 offline). Burn presence/clearing route through the shared #938/#1011 enumerator
@@ -93,5 +102,5 @@ systemctl --user disable --now obs-burn-reconcile-watchdog.timer
 | `STRIH_HOST` / `STREAM_HOST` | `10.77.9.202` / `10.77.9.204` | broadcast box OBS-WS addresses |
 | `OBS_PASSWORD` | `""` | OBS WebSocket password for both boxes |
 | `RIG_LEASE_STALE_SECS` | `5400` | age beyond which a held rig lease is treated as dead (so a genuinely-running gate is never mistaken for stale and its deliberate burn wrongly swept) |
-| `OBS_BURN_RECONCILE_WATCHDOG_STATE_FILE` | `$XDG_RUNTIME_DIR/camera-box-obs-burn-reconcile-watchdog.state` | per-box `renderTotalFrames` baseline — deliberately DIFFERENT from #391's and #979's state files |
+| `OBS_BURN_RECONCILE_WATCHDOG_STATE_FILE` | `$HOME/.camera-box/camera-box-obs-burn-reconcile-watchdog.state` | per-box `renderTotalFrames` baseline + `unresolved`-burn flag — in a DURABLE dir (not tmpfs), so a dev1 reboot doesn't wipe the baseline; deliberately DIFFERENT from #391's and #979's state files |
 | `OBS_BURN_FILTER_PY` | sibling `scripts/obs_burn_filter.py` | the shared WS/enumerator tool (session-probe / sweep-check / sweep-off) |

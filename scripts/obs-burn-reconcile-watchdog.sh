@@ -84,9 +84,16 @@ REPO_SLUG="${OBS_BURN_RECONCILE_WATCHDOG_REPO:-zbynekdrlik/camera-box}"
 # for a stale one and its deliberate burn wrongly swept.
 RIG_LEASE_STALE_SECS="${RIG_LEASE_STALE_SECS:-5400}"
 
-STATE_DIR="${OBS_BURN_RECONCILE_WATCHDOG_STATE_DIR:-${XDG_RUNTIME_DIR:-/tmp}}"
-# Its OWN state file (persists the per-box renderTotalFrames baseline), distinct from #391's
-# camera-box-obs-watchdog.state and #979's camera-box-obs-session-watchdog.state.
+# DURABLE state dir (NOT tmpfs, #1060 review): the per-box renderTotalFrames baseline must survive
+# a dev1 reboot. A tmpfs baseline (XDG_RUNTIME_DIR / /tmp) is wiped on reboot -> the first post-
+# reboot pass would read prev="" which, combined with a fresh-start=fresh reading, could false-clear
+# a deliberately-persistent TEST-mode burn (its #281 heartbeat is stale by design). ~/.camera-box is
+# the durable, repo-owned dir (same as phase-sync-last.json). Paired with the decision lib's
+# "unknown prev is NOT a restart" rule, this makes an OBS restart detectable across a dev1 reboot
+# (prev survives) while a wiped/first baseline never sweeps.
+STATE_DIR="${OBS_BURN_RECONCILE_WATCHDOG_STATE_DIR:-$HOME/.camera-box}"
+# Its OWN state file (persists the per-box renderTotalFrames baseline + unresolved-burn flag),
+# distinct from #391's camera-box-obs-watchdog.state and #979's camera-box-obs-session-watchdog.state.
 STATE_FILE="${OBS_BURN_RECONCILE_WATCHDOG_STATE_FILE:-$STATE_DIR/camera-box-obs-burn-reconcile-watchdog.state}"
 
 # Exit code obs_burn_filter.py's sweep-* actions return when the ndi-input ENUMERATION itself
@@ -106,10 +113,17 @@ read_state_field() {
 write_state_field() {
   local key="$1" val="$2" tmp
   mkdir -p "$(dirname "$STATE_FILE")" 2>/dev/null || true
-  tmp="$(mktemp "${STATE_FILE}.XXXXXX" 2>/dev/null || echo "$STATE_FILE")"
-  { [ -f "$STATE_FILE" ] && grep -v "^${key}=" "$STATE_FILE"; printf '%s=%s\n' "$key" "$val"; } \
-    > "$tmp" 2>/dev/null || true
-  mv -f "$tmp" "$STATE_FILE" 2>/dev/null || true
+  # A FIXED temp path (never a fallback to STATE_FILE itself, #1060 review 🔵): the old
+  # `mktemp ... || echo "$STATE_FILE"` fallback truncated the real file via the `>` redirect before
+  # grep read it, dropping the SIBLING box's baseline whenever mktemp failed. On any write failure
+  # we leave the existing state untouched rather than corrupt it.
+  tmp="${STATE_FILE}.tmp.$$"
+  if { [ -f "$STATE_FILE" ] && grep -v "^${key}=" "$STATE_FILE"; printf '%s=%s\n' "$key" "$val"; } \
+       > "$tmp" 2>/dev/null; then
+    mv -f "$tmp" "$STATE_FILE" 2>/dev/null || rm -f "$tmp" 2>/dev/null || true
+  else
+    rm -f "$tmp" 2>/dev/null || true
+  fi
 }
 
 # ── coordination: is a live gate/TEST harness driving the rig right now? ──────
@@ -131,7 +145,24 @@ burn_filter() {
   python3 "$BURN_FILTER_PY" "$@" --password "$OBS_PASSWORD"
 }
 
+# alert <body> -> fire ONE Discord notification via the same airuleset.py notify path #391/#979 use
+# (a no-op LOG in --dry-run). Never fatal.
+alert() {
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "[dry-run] WOULD alert: $1"
+    return 0
+  fi
+  python3 "$NOTIFY" notify --body "$1" >/dev/null 2>&1 || log "alert: airuleset.py notify failed (non-fatal)"
+}
+
 # ── process ONE box: probe -> decide -> reconcile ────────────────────────────
+# Reconciles a box on an OBSERVED OBS restart (a renderTotalFrames drop) OR a still-`unresolved`
+# burn carried over from a prior pass (self-healing retry). A wiped/first baseline is NEVER treated
+# as a restart (it seeds + NOOPs) -- so a dev1 reboot can never false-clear a persistent TEST burn.
+# `${box}_unresolved=1` is set ONLY after an observed restart whose reconcile could not confirm the
+# box clean (sweep-off left a burn, enumeration failed, or the reconcile was deferred to a live
+# gate), and is cleared once a later pass confirms clean -- so a retry can never sweep a burn that
+# was not already tied to an observed restart.
 process_box() {
   local box="$1" host="$2"
 
@@ -146,62 +177,70 @@ process_box() {
   local prev fresh=0
   prev="$(read_state_field "${box}_rtf" "")"
   if obs_burn_reconcile_is_fresh_start "$prev" "$cur"; then fresh=1; fi
-  # Advance the baseline EVERY readable pass, so each restart triggers exactly one reconcile.
+  # Advance the (durable) baseline EVERY readable pass, so each restart triggers exactly one
+  # fresh-driven reconcile; a lost/first baseline is seeded here without ever counting as a restart.
   write_state_field "${box}_rtf" "$cur"
-  log "$box: renderTotalFrames prev=${prev:-<none>} cur=$cur fresh_start=$fresh"
 
-  if [ "$fresh" -ne 1 ]; then
-    return 0   # NOOP fast path — same OBS session, persistent state untouched
+  local unresolved
+  unresolved="$(read_state_field "${box}_unresolved" 0)"
+  [ "$unresolved" = "1" ] || unresolved=0
+  log "$box: renderTotalFrames prev=${prev:-<none>} cur=$cur fresh_start=$fresh unresolved=$unresolved"
+
+  # NOOP fast path — same OBS session AND nothing pending. A persistent TEST-mode burn (no restart)
+  # is untouched here: this is THE invariant-#1 guard.
+  if [ "$fresh" -ne 1 ] && [ "$unresolved" -ne 1 ]; then
+    return 0
   fi
 
-  # 2) coordination — never disturb a live gate/TEST harness (skip the WS sweep-check entirely).
-  local coordinated=0
-  if rig_is_coordinating; then coordinated=1; fi
+  # 2) coordination — never disturb a live gate/TEST harness. Remember we owe a reconcile (persist
+  #    unresolved=1) so we retry once the coordination releases and its own cleanup has run.
+  if rig_is_coordinating; then
+    write_state_field "${box}_unresolved" 1
+    log "$box: decision=$(obs_burn_reconcile_decide "$fresh" 1 0) — a live gate/TEST harness is coordinating the rig; deferring (never clear its burn; will retry after it releases)"
+    return 0
+  fi
 
+  # 3) burn presence — enumerate every ndi_source input (never a static list); fail CLOSED.
+  burn_filter sweep-check --host "$host" >/dev/null 2>&1; rc=$?
+  if [ "$rc" -eq "$SWEEP_ENUM_FAILED" ]; then
+    log "$box: sweep-check FAILED to enumerate after an OBS restart — fail-closed (a burn may be invisible); marked unresolved (will retry)"
+    [ "$unresolved" -ne 1 ] && alert \
+      "⚠️ #1060 obs-burn-reconcile-watchdog: **$box** OBS restarted (unattended) but its burn state could NOT be verified ($REPO_SLUG) — GetInputList enumeration failed (fail-closed, guard #246/#844). A resurrected measurement burn may be rendering on the LIVE program. Check + clear from dev1: \`python3 scripts/obs_burn_filter.py sweep-off --host $host\`"
+    write_state_field "${box}_unresolved" 1
+    return 0
+  fi
   local burn_present=0
-  if [ "$coordinated" -ne 1 ]; then
-    # 3) burn presence — enumerate every ndi_source input (never a static list); fail CLOSED.
-    burn_filter sweep-check --host "$host" >/dev/null 2>&1; rc=$?
-    if [ "$rc" -eq "$SWEEP_ENUM_FAILED" ]; then
-      log "$box: sweep-check FAILED to enumerate after a fresh OBS restart — fail-closed (a burn may be invisible)"
-      if [ "$DRY_RUN" -eq 1 ]; then
-        log "[dry-run] WOULD alert: $box burn-state UNVERIFIED after restart (enumeration failed)"
-      else
-        python3 "$NOTIFY" notify --body \
-          "⚠️ #1060 obs-burn-reconcile-watchdog: **$box** OBS restarted (unattended) but its burn state could NOT be verified ($REPO_SLUG) — GetInputList enumeration failed (fail-closed, guard #246/#844). A resurrected measurement burn may be rendering on the LIVE program. Check + clear from dev1: \`python3 scripts/obs_burn_filter.py sweep-off --host $host\`" \
-          >/dev/null 2>&1 || log "alert: airuleset.py notify failed (non-fatal)"
-      fi
-      return 0
-    fi
-    [ "$rc" -eq 1 ] && burn_present=1
-  fi
+  [ "$rc" -eq 1 ] && burn_present=1
 
+  # fresh OR unresolved got us here, and we are uncoordinated -> decide on burn presence alone.
   local decision
-  decision="$(obs_burn_reconcile_decide "$fresh" "$coordinated" "$burn_present")"
-  log "$box: decision=$decision (fresh=$fresh coordinated=$coordinated burn_present=$burn_present)"
+  decision="$(obs_burn_reconcile_decide 1 0 "$burn_present")"
+  log "$box: decision=$decision (fresh=$fresh unresolved=$unresolved burn_present=$burn_present)"
 
   case "$decision" in
-    DEFER)
-      log "$box: fresh OBS start but a live gate/TEST harness is coordinating the rig — deferring (never clear a burn it set)"
-      ;;
     CLEAN)
-      log "$box: fresh OBS start, no burn rendered — nothing to clear"
+      if [ "$unresolved" -eq 1 ]; then
+        write_state_field "${box}_unresolved" 0
+        log "$box: previously-unresolved burn is no longer present — resolved"
+      else
+        log "$box: OBS restart, no burn rendered — nothing to clear"
+      fi
       ;;
     SWEEP)
+      log "$box: an unattended OBS restart resurrected a measurement burn — forcing it OFF (dev1-side WS sweep)"
       if [ "$DRY_RUN" -eq 1 ]; then
-        log "[dry-run] WOULD sweep-off + alert: $box resurrected a measurement burn on a fresh unattended restart"
+        log "[dry-run] WOULD sweep-off + alert: $box resurrected a measurement burn"
         return 0
       fi
-      log "$box: fresh unattended OBS restart resurrected a measurement burn — forcing it OFF (dev1-side WS sweep)"
       if burn_filter sweep-off --host "$host" >/dev/null 2>&1; then
-        python3 "$NOTIFY" notify --body \
-          "🧹 #1060 obs-burn-reconcile-watchdog: auto-cleared a resurrected QR measurement burn on **$box** after an UNATTENDED OBS restart ($REPO_SLUG) — a saved genlock_burn=true had reloaded onto the LIVE program. Burn(s) forced OFF from dev1 and read-back verified." \
-          >/dev/null 2>&1 || log "alert: airuleset.py notify failed (non-fatal)"
+        write_state_field "${box}_unresolved" 0
+        alert \
+          "🧹 #1060 obs-burn-reconcile-watchdog: auto-cleared a resurrected QR measurement burn on **$box** after an UNATTENDED OBS restart ($REPO_SLUG) — a saved genlock_burn=true had reloaded onto the LIVE program. Burn(s) forced OFF from dev1 and read-back verified."
       else
-        log "$box: sweep-off did NOT fully clear (still rendering / enum failed) — alerting for manual follow-up"
-        python3 "$NOTIFY" notify --body \
-          "🚨 #1060 obs-burn-reconcile-watchdog: **$box** OBS restarted (unattended) with a resurrected measurement burn and the automatic sweep-off did NOT fully clear it ($REPO_SLUG). Clear it manually before broadcast: \`python3 scripts/obs_burn_filter.py sweep-off --host $host\`" \
-          >/dev/null 2>&1 || log "alert: airuleset.py notify failed (non-fatal)"
+        log "$box: sweep-off did NOT fully clear (still rendering / enum failed) — marked unresolved (will retry)"
+        [ "$unresolved" -ne 1 ] && alert \
+          "🚨 #1060 obs-burn-reconcile-watchdog: **$box** OBS restarted (unattended) with a resurrected measurement burn and the automatic sweep-off did NOT fully clear it ($REPO_SLUG). It will keep retrying; clear it manually before broadcast if it persists: \`python3 scripts/obs_burn_filter.py sweep-off --host $host\`"
+        write_state_field "${box}_unresolved" 1
       fi
       ;;
     *)

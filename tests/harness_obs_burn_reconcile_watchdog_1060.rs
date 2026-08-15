@@ -102,8 +102,13 @@ fn fresh_start_uncoordinated_no_burn_is_clean() {
 fn fresh_start_detection_tracks_render_total_frames_reset() {
     assert_eq!(
         is_fresh_start("", "5000"),
-        0,
-        "unknown baseline => reconcile once"
+        1,
+        "unknown baseline => seed only, NEVER a restart (invariant-#1 safety)"
+    );
+    assert_eq!(
+        is_fresh_start("notanumber", "5000"),
+        1,
+        "corrupt baseline => seed only, never a restart"
     );
     assert_eq!(
         is_fresh_start("500000", "1200"),
@@ -208,6 +213,36 @@ fn watchdog_state_file_default_is_its_own() {
         body.contains("camera-box-obs-burn-reconcile-watchdog.state"),
         "must use its OWN default state file, distinct from #391/#979's — it persists the \
          per-box renderTotalFrames baseline, not their confirm/throttle counters"
+    );
+}
+
+#[test]
+fn watchdog_baseline_is_durable_not_tmpfs() {
+    let body = read(WATCHDOG);
+    // #1060 review 🟡: the baseline must survive a dev1 reboot. A tmpfs baseline
+    // (XDG_RUNTIME_DIR / /tmp) is wiped on reboot -> the first post-reboot pass reads prev="",
+    // which combined with "unknown => fresh" would false-clear a persistent TEST burn. It lives in
+    // the durable ~/.camera-box, never a runtime/tmp dir.
+    assert!(
+        body.contains("$HOME/.camera-box"),
+        "the renderTotalFrames baseline must persist in the durable ~/.camera-box, not tmpfs"
+    );
+    assert!(
+        !body.contains("XDG_RUNTIME_DIR") && !body.contains("STATE_DIR:-/tmp"),
+        "must NOT default the state dir to tmpfs (a dev1 reboot would wipe the baseline)"
+    );
+}
+
+#[test]
+fn watchdog_retries_an_unresolved_burn() {
+    let body = read(WATCHDOG);
+    // #1060 review 🔵: a sweep-off that does not fully clear (or a fresh reconcile deferred to a
+    // live gate, or an enum failure) must self-heal — it marks the box `unresolved` and retries on
+    // later passes until read-back confirms clean, rather than leaving a burn on the LIVE program
+    // with only a one-time alert.
+    assert!(
+        body.contains("_unresolved"),
+        "must persist a per-box unresolved-burn flag so a partially-failed sweep self-heals"
     );
 }
 

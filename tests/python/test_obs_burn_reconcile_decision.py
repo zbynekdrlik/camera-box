@@ -69,11 +69,13 @@ def test_fresh_start_uncoordinated_no_burn_is_clean():
 
 # ---- obs_burn_reconcile_is_fresh_start: renderTotalFrames restart detection -------------------
 
-def test_fresh_start_when_baseline_unknown():
-    # First pass (or a lost state file): no prior baseline => reconcile once (safe — SWEEP only
-    # fires when uncoordinated AND a burn renders).
-    assert _is_fresh_start("", "5000") == 0
-    assert _is_fresh_start("notanumber", "5000") == 0
+def test_unknown_baseline_is_never_a_restart():
+    # #1060 review (invariant-#1 safety): a first pass / lost-or-wiped state file (prev unknown)
+    # must NOT be treated as a restart — it only SEEDS the baseline. Otherwise a dev1 reboot (tmpfs
+    # baseline wiped) would false-clear a deliberately-persistent TEST-mode burn whose #281
+    # heartbeat is stale by design. Only an OBSERVED counter drop reconciles.
+    assert _is_fresh_start("", "5000") == 1
+    assert _is_fresh_start("notanumber", "5000") == 1
 
 
 def test_fresh_start_when_counter_dropped():
