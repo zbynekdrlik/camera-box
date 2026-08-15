@@ -1926,9 +1926,15 @@ step 23 "RemoteOS MCP control-channel agent (#858): provision via the canonical 
 #     dev1's .mcp.json linux-imag-nb entry must be updated to match (fail-safe fallback).
 REMOTEOS_MCP_INSTALLER_URL="${REMOTEOS_MCP_INSTALLER_URL:-https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/master/install-linux.sh}"
 REMOTEOS_MCP_CONFIG="/etc/remoteos-mcp/config.json"
-command -v curl >/dev/null 2>&1 || apt-get install -y -qq curl \
-    || fail "#858: curl is required to fetch the remoteos-mcp installer"
+# curl+ca-certificates are already ensured fail-loud up-front (the cam5/#450 preflight above).
 if [ -n "${REMOTEOS_MCP_AUTH_KEY:-}" ]; then
+    # Reject any shell/JSON-special char: the installer generates [A-Za-z0-9]{32} keys, and a
+    # non-alphanumeric value in the unquoted heredoc below would break the JSON (the installer
+    # then silently discards it and generates a DIFFERENT key -- dev1's .mcp.json breaks while
+    # the is-active gate still passes) or run command substitution. Fail loud instead.
+    case "$REMOTEOS_MCP_AUTH_KEY" in
+        *[!A-Za-z0-9]*) fail "#858: REMOTEOS_MCP_AUTH_KEY must be alphanumeric [A-Za-z0-9] (installer key charset); refusing to write it unsafely" ;;
+    esac
     install -d -m 700 /etc/remoteos-mcp
     ( umask 077; cat > "$REMOTEOS_MCP_CONFIG" <<CFG
 {

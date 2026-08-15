@@ -91,3 +91,22 @@ fn setup_imag_asserts_remoteos_service_active_after_install_858() {
          service is not up — provisioning must not report success with a dead :8092 MCP surface (#858)"
     );
 }
+
+/// The config pre-seed MUST come BEFORE the installer runs — `install-linux.sh` only REUSES an
+/// existing key, so a reversed order would silently generate a FRESH key and break dev1's pinned
+/// `.mcp.json` while the `systemctl is-active` gate still passes (#858, review 🔵).
+#[test]
+fn setup_imag_seeds_remoteos_config_before_running_installer_858() {
+    let body = body();
+    let seed = body.find("\"auth_key\"").expect(
+        "must pre-seed /etc/remoteos-mcp/config.json with an auth_key field before install",
+    );
+    let run = body
+        .find("bash \"$REMOTEOS_MCP_INSTALLER_TMP\"")
+        .expect("must run the fetched canonical installer via bash");
+    assert!(
+        seed < run,
+        "{SETUP}: the config pre-seed (idx {seed}) must precede the installer invocation (idx {run}) \
+         so the installer reuses the known key instead of generating a fresh one (#858)"
+    );
+}
