@@ -153,6 +153,21 @@ GATE_CHASE_RESAMPLE_DELAY_S="${DANTESYNC_CHASE_RESAMPLE_DELAY_S:-15}"
 GATE_SLEW_STEP_WINDOW_S="${DANTESYNC_SLEW_STEP_WINDOW_S:-5}"
 GATE_SLEW_MIN_SURVIVING="${DANTESYNC_SLEW_MIN_SURVIVING:-3}"
 
+# #834: the rig's SINGLE PTP grandmaster every node must agree on. A node PTP-locked to a DIFFERENT
+# gm_source_ip reads every LOCAL health indicator green (is_locked/settled true) while being ~15 ms
+# out -- the stream box, 2026-07-28 and still live 2026-08-15, sat on gm_source_ip 10.77.7.109 while
+# the rest of the fleet held 10.77.9.184. offset+PTP-lock alone cannot catch that: if its
+# instantaneous offset happens to be small, it PASSES. gm_check (clock-offset-guard.sh) compares each
+# HTTP-graded node's gm_source_ip against this value. Overridable via RIG_GRANDMASTER_IP, mirroring
+# verify-imag.sh's own RIG_GRANDMASTER_IP env seam.
+GATE_GRANDMASTER_IP="${RIG_GRANDMASTER_IP:-10.77.9.184}"
+# #834 REPORT-FIRST: the grandmaster-identity check ALWAYS prints a loud GM OK/FOREIGN/UNKNOWN line
+# per node, but only feeds the node's OK/BAD verdict (i.e. can FAIL the gate) when this is 1. Default
+# 0 -- so wiring the check cannot brick the standing E2E gate while the stream box still elects a
+# foreign grandmaster (a rig/dantesync BMCA/subnet fix tracked separately, out of #834's scope). Flip
+# to 1 once every node holds the rig grandmaster. Overridable via DANTESYNC_GATE_GM_ENFORCE.
+GATE_GM_ENFORCE="${DANTESYNC_GATE_GM_ENFORCE:-0}"
+
 # read_linux_node_journal NAME IP -> that Linux node's latest DanteSync journald lines over SSH,
 # or "" if unreachable. Overridable for tests/offline via DANTESYNC_GATE_LINUX_JOURNAL_<NAME>
 # (file path; NAME uppercased AND any "-" mapped to "_" so a hyphenated node name like "imag-nb"
@@ -568,7 +583,22 @@ grade_http_node() {
   esac
   ptp="$(ptp_locked_from_pipe_json "$status")"
   rc_ptp=0; ptp_check "$name" "$ptp" || rc_ptp=$?
-  printf '%s' "$(node_verdict "$rc_off" "$rc_ptp")" > "$verdictfile"
+  # #834: grandmaster IDENTITY -- gm_check ALWAYS prints its GM OK/FOREIGN/UNKNOWN line (report), but
+  # its rc only feeds the node verdict when GATE_GM_ENFORCE=1 (report-first: gm_gate_rc stays 0 in the
+  # default report-only mode, so the verdict is byte-for-byte the pre-#834 offset+PTP grade). gm_actual
+  # is parsed from the SAME freshest HTTP payload $status the offset/PTP checks graded; the journal
+  # FALLBACK path (empty samples_raw, above) returns before here, so it is never GM-checked -- journald
+  # carries no gm_source_ip anyway (verify-imag.sh documents the same limitation), and strih/stream are
+  # always on this HTTP path.
+  # NOTE for the enforce flip (issue 1073): every graded node here is a GM CLIENT (the grandmaster
+  # 10.77.9.184 is a separate PTP device, never itself a --linux/--win-http node), so each legitimately
+  # reports gm_source_ip=GATE_GRANDMASTER_IP. If a future config ever grades the grandmaster box
+  # itself, revisit whether it should be exempted before turning enforce on.
+  local gm_actual rc_gm=0 gm_gate_rc=0
+  gm_actual="$(gm_source_ip_from_pipe_json "$status")"
+  gm_check "$name" "$gm_actual" "$GATE_GRANDMASTER_IP" || rc_gm=$?
+  [ "$GATE_GM_ENFORCE" = 1 ] && gm_gate_rc="$rc_gm"
+  printf '%s' "$(node_verdict "$rc_off" "$rc_ptp" "$gm_gate_rc")" > "$verdictfile"
 }
 
 # resolve_node_grading NAME -> sets node_mode (bash's dynamic scoping means this is the CALLER's
@@ -647,6 +677,19 @@ Options:
                        stability bar, reintroducing #1014's false-DRIFT through a misspelling.
                        Pass --ntp-master "" to explicitly opt out (no NTP master among this
                        invocation's nodes at all).
+
+  Grandmaster identity (#834, env-controlled -- no CLI flag):
+    RIG_GRANDMASTER_IP          the SINGLE PTP grandmaster every node must agree on (default
+                       ${GATE_GRANDMASTER_IP}). Each HTTP-graded node's gm_source_ip is compared
+                       against it; a node PTP-locked to a DIFFERENT grandmaster reads is_locked=true
+                       while sitting ~15 ms out (the stream box locked to 10.77.7.109, #834), which
+                       offset+PTP-lock alone cannot catch.
+    DANTESYNC_GATE_GM_ENFORCE   0 (default) = REPORT-FIRST: a GM OK/FOREIGN/UNKNOWN line is printed
+                       loudly per node but does NOT affect the verdict. 1 = a foreign/unreadable
+                       grandmaster is a hard node failure (FOREIGN => 20, UNKNOWN => 11), exactly
+                       like a DRIFT/PTP-degraded node. Kept report-first so wiring the check does not
+                       brick the standing E2E gate while a rig-side grandmaster mis-election is still
+                       being fixed; flip to 1 once every node holds RIG_GRANDMASTER_IP.
   --deadband-margin-us N  #1021 (dantesync PR #84/#86, closes dantesync issue 83): when the NTP
                        master's own /status reports a numeric "ntp_deadband_us" (its currently
                        active PTP-locked step-deferral threshold), the master's median bound
@@ -872,6 +915,16 @@ main() {
   # validated CLI/env values before dispatching the per-node jobs.
   GATE_SLEW_STEP_WINDOW_S="$slew_step_window"
   GATE_SLEW_MIN_SURVIVING="$slew_min_surviving"
+  # #834: fail loud on a mis-set enforce flag rather than silently treating anything != "1" as OFF --
+  # a typo'd DANTESYNC_GATE_GM_ENFORCE=true would otherwise quietly leave the check report-only.
+  if [ "$GATE_GM_ENFORCE" != 0 ] && [ "$GATE_GM_ENFORCE" != 1 ]; then
+    echo "ERROR: DANTESYNC_GATE_GM_ENFORCE must be 0 or 1 (got '${GATE_GM_ENFORCE}')." >&2
+    exit 1
+  fi
+  if [ -z "$GATE_GRANDMASTER_IP" ]; then
+    echo "ERROR: RIG_GRANDMASTER_IP must be non-empty (the rig grandmaster #834 gates every node against)." >&2
+    exit 1
+  fi
   if [ "$min_distinct" -gt "$samples" ]; then
     echo "ERROR: --min-distinct (${min_distinct}) cannot exceed --samples (${samples}) --" \
       "no node could ever gather that many distinct reads (#836)." >&2
@@ -956,7 +1009,8 @@ main() {
   fi
 
   echo "== dantesync-gate (#7): recording-E2E precondition — NTP within ${bound} us AND PTP LOCKED =="
-  echo "   GM = 10.77.9.184 (PTP grandmaster); NTP master = ${GATE_NTP_MASTER_NAME}; degraded PTP => meaningless latency"
+  echo "   GM = ${GATE_GRANDMASTER_IP} (PTP grandmaster); NTP master = ${GATE_NTP_MASTER_NAME}; degraded PTP => meaningless latency"
+  echo "   #834: every node's gm_source_ip is checked against the rig grandmaster ($([ "$GATE_GM_ENFORCE" = 1 ] && echo ENFORCED || echo 'report-only, DANTESYNC_GATE_GM_ENFORCE=1 to gate'))"
   echo "   #1014: ${GATE_NTP_MASTER_NAME} is graded on median+freshness only (its spread is a by-design"
   echo "   correction-lag sawtooth, dantesync issue 71); every other node keeps the full spread/stability bar."
 
@@ -1041,14 +1095,17 @@ main() {
   exit 0
 }
 
-# node_verdict OFFSET_RC PTP_RC -> OK | BAD | UNKNOWN. A node passes ONLY when BOTH the offset
-# check (rc 0) AND the PTP-lock check (rc 0) pass. A DRIFT/DEGRADED (rc 2) on either => BAD. Any
-# UNKNOWN (rc 3) with no hard failure => UNKNOWN. (Hard failure dominates UNKNOWN so a degraded
-# node is reported as the actionable failure, not masked as merely "unknown".)
+# node_verdict OFFSET_RC PTP_RC [GM_RC] -> OK | BAD | UNKNOWN. A node passes ONLY when the offset
+# check (rc 0) AND the PTP-lock check (rc 0) AND the OPTIONAL grandmaster-identity check (rc 0) all
+# pass. A DRIFT/DEGRADED/FOREIGN-GM (rc 2) on any => BAD. Any UNKNOWN (rc 3) with no hard failure =>
+# UNKNOWN. (Hard failure dominates UNKNOWN so a degraded node is reported as the actionable failure,
+# not masked as merely "unknown".) GM_RC is optional and defaults to 0 (#834): every pre-#834 caller
+# passing only two args is unchanged, and the report-only default passes 0 here so the GM check never
+# affects the verdict unless GATE_GM_ENFORCE=1.
 node_verdict() {
-  local off="$1" ptp="$2"
-  if [ "$off" = 2 ] || [ "$ptp" = 2 ]; then printf 'BAD'; return 0; fi
-  if [ "$off" = 3 ] || [ "$ptp" = 3 ]; then printf 'UNKNOWN'; return 0; fi
+  local off="$1" ptp="$2" gm="${3:-0}"
+  if [ "$off" = 2 ] || [ "$ptp" = 2 ] || [ "$gm" = 2 ]; then printf 'BAD'; return 0; fi
+  if [ "$off" = 3 ] || [ "$ptp" = 3 ] || [ "$gm" = 3 ]; then printf 'UNKNOWN'; return 0; fi
   printf 'OK'
 }
 

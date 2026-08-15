@@ -121,3 +121,25 @@ way the existing `offset_check` tests do: `rc=0; the_fn … || rc=$?; echo "rc=$
 captured `rc`. The pure verdict functions (`dantesync_offset_verdict`, `_fresh_offset_*`) all `printf`
 a word and `return 0`, so `$(…)` captures of THEM need no guard — only the rc-signalling `*_check`
 wrappers do.
+
+## Grandmaster IDENTITY check is REPORT-FIRST and HTTP-path only (#834)
+`grade_http_node` now parses `gm_source_ip` from the freshest `/status` payload and calls
+`gm_check` (clock-offset-guard.sh) against `GATE_GRANDMASTER_IP` (`RIG_GRANDMASTER_IP`, default
+10.77.9.184) — a node PTP-locked to a FOREIGN grandmaster reads `is_locked=true` while ~15 ms out,
+which offset+PTP-lock alone cannot catch (the stream box on 10.77.7.109, live 2026-08-15). Two hard
+constraints baked in:
+- **REPORT-FIRST by default.** The `GM OK/FOREIGN/UNKNOWN` line ALWAYS prints, but only feeds the
+  node verdict when `DANTESYNC_GATE_GM_ENFORCE=1` (default 0). In report-only mode `gm_gate_rc`
+  stays 0, so `node_verdict` is byte-for-byte the pre-#834 offset+PTP grade. This is deliberate:
+  enforcing while the stream box is genuinely on a foreign GM would fail `[0/8]` and brick every E2E
+  run. Flipping to enforce is a SEPARATE ticket gated on the rig-side election fix (#1073), NOT a
+  code cleanup — never enable enforce until every fleet node holds the rig GM. `node_verdict` gained
+  an OPTIONAL 3rd rc arg (default 0) so every 2-arg caller is unchanged.
+- **HTTP path only.** The check lives after the offset/PTP grade in `grade_http_node`, using the
+  same `$status`. The linux **journal FALLBACK** path (empty `samples_raw`) returns BEFORE it and is
+  never GM-checked — journald carries no `gm_source_ip` (verify-imag.sh:~977 documents the same),
+  and strih/stream are always on the HTTP path anyway.
+- **Offline test seam:** the existing `DANTESYNC_GATE_WIN_HTTP_<NAME>`/`..._LINUX_HTTP_<NAME>`
+  fixtures already carry `gm_source_ip`; a foreign-GM test just sets it to a non-rig IP, and
+  `DANTESYNC_GATE_GM_ENFORCE=1` (env) exercises the blocking path. A stream-only invocation still
+  needs `--ntp-master ""` to pass the master-name guard (unrelated to GM).

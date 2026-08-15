@@ -3479,3 +3479,245 @@ fn gate_still_fails_a_genuine_sustained_client_desync_with_the_slew_rescue_1055(
     );
     assert!(stderr.contains("GATE FAILED"), "stderr: {stderr}");
 }
+
+// ---------------------------------------------------------------------------------------------
+// #834 — grandmaster IDENTITY. A node PTP-locked to a FOREIGN grandmaster (stream box, 2026-07-28
+// and still live 2026-08-15: gm_source_ip=10.77.7.109, is_locked=true) reads every LOCAL health
+// indicator green and, when its instantaneous offset is small, PASSES the offset+PTP-only grade.
+// gm_check now compares each HTTP-graded node's gm_source_ip against the rig grandmaster
+// (10.77.9.184). REPORT-FIRST: the GM status line is ALWAYS printed loudly, but only feeds the
+// node's OK/BAD verdict when DANTESYNC_GATE_GM_ENFORCE=1 (default off) -- so wiring it cannot brick
+// the standing E2E gate while the stream box still elects a foreign GM (a rig/dantesync fix tracked
+// separately). Mirrors verify-imag.sh:948's gm_check call for the imag path.
+// ---------------------------------------------------------------------------------------------
+
+/// A single-read HTTP fixture for the GM tests: fresh (updated_ts = now), locked, in-bound offset,
+/// so offset+PTP both PASS -- isolating the grandmaster-identity behavior. `gm_prefix` is spliced
+/// in verbatim at the front of the JSON object, so pass either e.g.
+/// `"\"gm_source_ip\":\"10.77.7.109\","` or `""` (field entirely absent).
+fn write_gm_fixture(name: &str, gm_prefix: &str) -> PathBuf {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let json = format!(
+        "{{{gm_prefix}\"settled\":true,\"updated_ts\":{now},\"is_locked\":true,\
+         \"ntp_offset_us\":0,\"mode\":\"NANO\",\"ntp_failed\":false}}"
+    );
+    write_win_http_fixture(name, &json)
+}
+
+#[test]
+fn gate_reports_foreign_grandmaster_but_stays_report_only_by_default_834() {
+    // The stream box's real 2026-07-28/2026-08-15 fault: gm_source_ip=10.77.7.109 while locked +
+    // in-bound. Report-only default -> the gate PASSES (does not brick E2E) but names the fault.
+    let p = write_gm_fixture("stream_foreign_gm", "\"gm_source_ip\":\"10.77.7.109\",");
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "stream=10.77.9.204",
+            // only "stream" is configured, no "strih" -> opt OUT of the master-name validation.
+            "--ntp-master",
+            "",
+            "--samples",
+            "1",
+            "--min-distinct",
+            "1",
+            "--window-s",
+            "0",
+        ],
+        &[("DANTESYNC_GATE_WIN_HTTP_STREAM", &p.display().to_string())],
+    );
+    assert_eq!(
+        code, 0,
+        "report-only default: a foreign GM must NOT block the gate. stdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        stdout.contains("GM FOREIGN"),
+        "the foreign grandmaster must be reported loudly. stdout={stdout}"
+    );
+    assert!(
+        stdout.contains("10.77.7.109"),
+        "the foreign GM ip must be named. stdout={stdout}"
+    );
+    assert!(stdout.contains("GATE PASS"), "stdout={stdout}");
+}
+
+#[test]
+fn gate_fails_a_foreign_grandmaster_node_when_gm_enforce_is_set_834() {
+    // DANTESYNC_GATE_GM_ENFORCE=1 flips the report-only check to a hard gate: a foreign GM is BAD
+    // (exit 20), exactly like a DRIFT/PTP-degraded node -- the future state once the rig is fixed.
+    let p = write_gm_fixture(
+        "stream_foreign_gm_enforced",
+        "\"gm_source_ip\":\"10.77.7.109\",",
+    );
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "stream=10.77.9.204",
+            // only "stream" is configured, no "strih" -> opt OUT of the master-name validation.
+            "--ntp-master",
+            "",
+            "--samples",
+            "1",
+            "--min-distinct",
+            "1",
+            "--window-s",
+            "0",
+        ],
+        &[
+            ("DANTESYNC_GATE_WIN_HTTP_STREAM", &p.display().to_string()),
+            ("DANTESYNC_GATE_GM_ENFORCE", "1"),
+        ],
+    );
+    assert_eq!(
+        code, 20,
+        "enforce: a foreign GM must be a hard failure (20). stdout={stdout} stderr={stderr}"
+    );
+    assert!(stdout.contains("GM FOREIGN"), "stdout={stdout}");
+    assert!(stderr.contains("FAILED"), "stderr={stderr}");
+}
+
+#[test]
+fn gate_reports_gm_ok_for_a_node_on_the_rig_grandmaster_834() {
+    // A node on the rig grandmaster (10.77.9.184) is confirmed OK by name, and passes.
+    let p = write_gm_fixture("strih_gm_ok", "\"gm_source_ip\":\"10.77.9.184\",");
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--samples",
+            "1",
+            "--min-distinct",
+            "1",
+            "--window-s",
+            "0",
+        ],
+        &[("DANTESYNC_GATE_WIN_HTTP_STRIH", &p.display().to_string())],
+    );
+    assert_eq!(
+        code, 0,
+        "a node on the rig GM passes. stdout={stdout} stderr={stderr}"
+    );
+    assert!(stdout.contains("GM OK"), "stdout={stdout}");
+    assert!(stdout.contains("GATE PASS"), "stdout={stdout}");
+}
+
+#[test]
+fn gate_reports_gm_unknown_when_gm_source_ip_absent_and_enforce_set_834() {
+    // A payload with NO gm_source_ip field: the grandmaster is UNREADABLE, which must never look
+    // correct (test-strictness: unreachable = fail). Under enforce that is INCOMPLETE (11), never
+    // a silent pass -- the same "unreadable is not OK" contract offset/PTP already follow.
+    let p = write_gm_fixture("stream_gm_absent", "");
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "stream=10.77.9.204",
+            // only "stream" is configured, no "strih" -> opt OUT of the master-name validation.
+            "--ntp-master",
+            "",
+            "--samples",
+            "1",
+            "--min-distinct",
+            "1",
+            "--window-s",
+            "0",
+        ],
+        &[
+            ("DANTESYNC_GATE_WIN_HTTP_STREAM", &p.display().to_string()),
+            ("DANTESYNC_GATE_GM_ENFORCE", "1"),
+        ],
+    );
+    assert_eq!(
+        code, 11,
+        "enforce: an unreadable GM must be INCOMPLETE (11), never a silent pass. stdout={stdout} stderr={stderr}"
+    );
+    assert!(stdout.contains("GM UNKNOWN"), "stdout={stdout}");
+    assert!(stderr.contains("INCOMPLETE"), "stderr={stderr}");
+}
+
+#[test]
+fn help_documents_the_grandmaster_identity_check_834() {
+    let (code, stdout, _e) = run_gate(&["--help"]);
+    assert_eq!(code, 0, "--help must exit 0");
+    assert!(
+        stdout.to_lowercase().contains("grandmaster"),
+        "help must document the #834 grandmaster-identity check: {stdout}"
+    );
+    assert!(
+        stdout.contains("DANTESYNC_GATE_GM_ENFORCE"),
+        "help must document the report-first enforce flag: {stdout}"
+    );
+}
+
+#[test]
+fn gate_reports_gm_unknown_report_only_still_passes_834() {
+    // #834 review 🔵: absent gm_source_ip with enforce OFF (default) -- the GM is unreadable and
+    // reported UNKNOWN, but report-only must NOT change the verdict; the node still passes on
+    // offset+PTP. Complements the absent+enforce case (which is INCOMPLETE/11).
+    let p = write_gm_fixture("stream_gm_absent_reportonly", "");
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "stream=10.77.9.204",
+            // only "stream" is configured, no "strih" -> opt OUT of the master-name validation.
+            "--ntp-master",
+            "",
+            "--samples",
+            "1",
+            "--min-distinct",
+            "1",
+            "--window-s",
+            "0",
+        ],
+        &[("DANTESYNC_GATE_WIN_HTTP_STREAM", &p.display().to_string())],
+    );
+    assert_eq!(
+        code, 0,
+        "report-only: an unreadable GM must NOT block the gate. stdout={stdout} stderr={stderr}"
+    );
+    assert!(stdout.contains("GM UNKNOWN"), "stdout={stdout}");
+    assert!(stdout.contains("GATE PASS"), "stdout={stdout}");
+}
+
+#[test]
+fn gate_passes_a_node_on_the_rig_grandmaster_under_enforce_834() {
+    // #834 review 🔵: the enforce HAPPY path -- a node on the rig GM passes even with
+    // DANTESYNC_GATE_GM_ENFORCE=1, locking the pass side of the enforce path (complements the
+    // enforce-FAIL cases: foreign=>20, unknown=>11).
+    let p = write_gm_fixture("strih_gm_ok_enforced", "\"gm_source_ip\":\"10.77.9.184\",");
+    let (code, stdout, stderr) = run_gate_env(
+        &[
+            "--linux",
+            "",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--samples",
+            "1",
+            "--min-distinct",
+            "1",
+            "--window-s",
+            "0",
+        ],
+        &[
+            ("DANTESYNC_GATE_WIN_HTTP_STRIH", &p.display().to_string()),
+            ("DANTESYNC_GATE_GM_ENFORCE", "1"),
+        ],
+    );
+    assert_eq!(
+        code, 0,
+        "enforce + rig GM must PASS. stdout={stdout} stderr={stderr}"
+    );
+    assert!(stdout.contains("GM OK"), "stdout={stdout}");
+    assert!(stdout.contains("GATE PASS"), "stdout={stdout}");
+}
