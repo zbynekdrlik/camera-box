@@ -2907,10 +2907,13 @@ uint64_t obs_get_frame_interval_ns(void)
 }
 
 /*
- * camera-box #879: see obs.h. Reads this tick's start + the frame interval (the same two
- * globals render_display() budgets the projector path against), derives the canvas-rate
- * effective divisor, and delegates the skip decision to the pure obs_display_should_skip()
- * -- no duplicated logic. Never-warmed / not-ticking -> never skip (render once to measure).
+ * camera-box #879: see obs.h. Reads this tick's start + the frame interval (the two globals
+ * render_display() budgets the projector path against) plus, since #1063, the PREVIOUS tick's
+ * completed total (obs->video.last_tick_total_ns), derives the canvas-rate effective divisor,
+ * and delegates the skip decision to the pure obs_display_should_skip() -- no duplicated logic.
+ * The budget's "already consumed" term is max(elapsed, last_tick_total_ns) so an aux filter
+ * that decides EARLY in the tick still throttles a heavy tick regardless of render order (#1063).
+ * Never-warmed / not-ticking -> never skip (render once to measure).
  */
 bool obs_aux_sender_should_skip(uint32_t render_divisor, uint32_t frame_counter, uint64_t ewma_ns,
 			       uint32_t consecutive_skips)
@@ -2923,8 +2926,16 @@ bool obs_aux_sender_should_skip(uint32_t render_divisor, uint32_t frame_counter,
 	const uint32_t effective_divisor = obs_effective_render_divisor(render_divisor, interval);
 	const uint64_t now = os_gettime_ns();
 	const uint64_t elapsed = (now > tick_start) ? (now - tick_start) : 0;
+	/* camera-box #1063: an aux ndi_filter can decide EARLY in the tick (before output_frames()
+	 * has accrued into `elapsed`), reading false budget headroom and under-throttling. Take the
+	 * larger of `elapsed` and the PREVIOUS tick's completed total so the "already consumed" term
+	 * is order-independent: a genuinely-heavy tick throttles regardless of where in the tick the
+	 * aux decision falls. last_tick_total_ns is 0 before the first completed tick, so this is
+	 * byte-identical to `elapsed` at startup (fail-open). */
+	const uint64_t last_tick_total = obs->video.last_tick_total_ns;
+	const uint64_t consumed = (elapsed > last_tick_total) ? elapsed : last_tick_total;
 	const uint64_t budget = interval - interval / 10; /* 90% safety margin */
-	return obs_display_should_skip(effective_divisor, frame_counter, ewma_ns, elapsed, budget,
+	return obs_display_should_skip(effective_divisor, frame_counter, ewma_ns, consumed, budget,
 				       consecutive_skips);
 }
 

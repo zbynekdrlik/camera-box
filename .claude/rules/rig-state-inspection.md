@@ -285,3 +285,20 @@ rig looked half-alive):
    `/interface bridge host print`, and the box's switch port (`/interface ethernet monitor <port>
    once`) showing `no-link` = power/cable/NIC, not software. strih = MAC 5C:6A:80:F6:6C:F7 on
    foh2_video (10.77.9.5) `sfp-sfpplus2::basic`.
+
+3. **Windows DistroAV lives in `C:\ProgramData\obs-studio\plugins\distroav\bin\64bit\distroav.dll`
+   on strih AND stream — NOT in `C:\Program Files\obs-studio\obs-plugins\64bit`.** A DLL deploy
+   that copies distroav.dll into obs-plugins\64bit does NOT update the loaded plugin — it CREATES
+   a SECOND install that OBS would load alongside the real one (duplicate plugin load). Live
+   caught during the round-13 deploy (2026-08-15): the backup Copy-Item errored "does not exist"
+   at obs-plugins\64bit — that error IS the tell the path is wrong; the fresh copy then landed
+   there anyway and had to be removed before relaunch. Deploy target for a distroav.dll swap is
+   the ProgramData path (backup alongside as `*.pre-<PR>`); obs.dll stays `bin\64bit\obs.dll`.
+   strih AHK relauncher = `D:\_APPS\NL_STARTUP.ahk` (Startup-folder shortcut) — after a
+   force-kill relaunch, `Start-Process 'D:\_APPS\NL_STARTUP.ahk'` brings it back in session 1.
+
+4. **`ssh box 'echo pw | sudo -S bash -s' <<'EOF'` silently runs NOTHING of the heredoc.** The
+   remote pipeline's stdin chain: bash -s reads from sudo's stdin = the exhausted `echo pw` pipe,
+   never ssh's own stdin carrying the heredoc — the command "succeeds" printing only the sudo
+   prompt, zero script lines executed (round-13 imag install, verified: marker unchanged). Fix:
+   scp the script to the box first, then `ssh box 'echo pw | sudo -S bash /tmp/script.sh'`.

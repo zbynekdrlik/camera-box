@@ -8449,3 +8449,32 @@ Review: 0 🔴 2 🟡 3 🔵, all fixed same-branch. Gotcha logged: cargo tests 
   on GCC 13 but a hard ERROR on GCC 14. Name the struct once. Lift-and-compile caught it under -Werror.
 - GOTCHA (deploy): the DistroAV plugin now imports a NEW libobs export — a partial deploy of only the
   plugin DLL against an old obs64.dll fails plugin LOAD (unresolved symbol). Use the FULL-BUNDLE deploy.
+
+## Round 13 (2026-08-15) — dantesync journal-fallback + aux-sender priorita + floor self-kalibrácia
+
+- Tickety: 837 (journal-fallback spread grading), 879 (aux ndi_filter deleguje na obs_display_should_skip cez nový libobs EXPORT; program štrukturálne negatovaný), 900 (min-surviving floor self-kalibrácia); 838 uzavretý ako overcome ešte pred PR.
+- PR 1064 merged 1b035991d; E2E zelené na 6. beh — lotéria: beh 1 dantesync drift (exit 20), beh 2 cam1 gap okno, beh 3 multi-cam burst okno, beh 4 cam1 A/V +125 po re-rolle (relock lotéria), beh 5 spready OK ale CAM2 4+4 FIFO burst okno, beh 6 GREEN (A/V −2/−53/−62).
+- Deploy vendored zmeny (nový EXPORT = full-bundle väzba): stream obs.dll+distroav.dll (distroav žije v C:\ProgramData\obs-studio\plugins\distroav — kópia do obs-plugins\64bit by spravila duplicitný load, opravené), strih obs.dll+distroav.dll (AHK NL_STARTUP.ahk reštart z D:\_APPS), imag 4-dielny hot-swap (libobs.so.30, libobs-opengl.so.30, distroav.so, /usr/bin/obs) + marker b140381d2.
+- Lekcia: ssh `echo pw | sudo -S bash -s` s heredocom NEfunguje (heredoc zožerie sudo pipe) — skript najprv scp na box, potom sudo bash /tmp/script.
+## issue 1063 — order-independent aux-sender budget term (worktree autopilot-1063, v1.7.0-dev.458)
+- Follow-up hardening of the issue-879 aux-NDI-sender render-budget gate. Root cause: the 879 seam
+  `obs_aux_sender_should_skip()` fed `obs_display_should_skip()` a term `elapsed = now -
+  graphics_frame_start_ns`, which reflects the program's cost ONLY if the aux ndi_filter decides
+  AFTER `output_frames()` in the tick. An aux filter deciding EARLY reads a small `elapsed`, sees
+  false budget headroom, and never throttles (render-order-dependent effectiveness; not a
+  program-priority violation — the program is a separate ndi_output path).
+- Fix (cross-cutting, one new graphics-thread global): `obs_graphics_thread_loop()` (obs-video.c)
+  publishes the PREVIOUS tick's completed `frame_time_ns` into new `obs->video.last_tick_total_ns`
+  (obs-internal.h); the seam gates on `max(elapsed, last_tick_total_ns)` via a ternary `consumed`
+  (obs.c). Order-independent; fail-open (field 0 before the first completed tick = byte-identical to
+  `elapsed` at startup). No signature/EXPORT change; no new deploy-coupling beyond 879's obs64 rebuild.
+- Commits: 7bda63231 (bump) · ca2cd105c [red] (tests/aux_sender_budget_879.rs new test
+  c_aux_sender_order_independent_budget_1063) · 12d1335c4 [green] (obs-internal.h/obs-video.c/obs.c +
+  existing-stub field update + genlock_preload.rs anchors + both windows-genlock*.yml pwsh mirrors).
+- Verify: standalone `cc` lift of the seam under -Werror — RED (current seam: early-decide + 28ms
+  prior tick renders instead of skipping) → GREEN (fixed seam skips; startup/warmup/program-priority/
+  late-decide invariants all hold). Anchors verified against the real squished C via a Python replica
+  of both squish algorithms (pwsh not on dev1). Tier-0: fmt/clippy/`test --no-run` all clean.
+- GOTCHA (seam brace-freedom): `tests/aux_sender_budget_879.rs` finds the seam's closing brace via
+  the FIRST `"\n}"` after the signature, so the seam must stay brace-free — the new max-term uses a
+  `? :` ternary precisely to avoid a nested `{}` block.
