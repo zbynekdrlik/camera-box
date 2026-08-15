@@ -8567,3 +8567,29 @@ and a Python mirror of every test assertion passed (source block hard/sustained 
 block report-only with no exit 1, BURN_TARGETS loop-header count still 2). FULL cargo test suite
 must run at integration (I touched recording-e2e.sh) — supervisor runs it; I ran only --no-run.
 No push/PR/rig touch (worktree worker).
+- 2026-08-15 #1018 OBS titlebar "build unknown" (autopilot-1018, worktree fleet, v1.7.0-dev.460):
+  ROOT CAUSE (traced + reproduced live via win-strih MCP, title read `newlevel.media build unknown`):
+  the titlebar reformatted the compiler `__DATE__`, but OBS builds the frontend with `/Brepro`
+  (reproducible builds, vendor/obs-studio/cmake/windows/compilerconfig.cmake) which blanks `__DATE__`
+  to a short placeholder, so `newlevel_iso_date()` returned its #313 "unknown" fallback on EVERY
+  build. The issue's "reads GENLOCK_BUILD_SHA.txt via a relative path" suspect was WRONG -- that read
+  never existed. Also live-confirmed the SHA-file/exe divergence: GENLOCK_BUILD_SHA.txt=6e679ad (both
+  install root + bin\64bit, current) but obs64.exe dated 08-11 while obs.dll rebuilt 08-15 -- the FAST
+  `obs-genlock-fast-dll` artifact ships obs.dll + a fresh SHA file but NOT obs64.exe, so a compile
+  date is stale after any fast swap. FIX: UpdateTitleBar() now reads the deployed commit SHA from
+  GENLOCK_BUILD_SHA.txt, resolved from obs64.exe's own dir via libobs `os_get_executable_path_ptr`
+  (install root `../../` then bin\64bit; never process cwd), shows the 9-char short SHA. Pure
+  formatter `newlevel_short_sha()` in the new NewlevelBuildSha.hpp (OBS/Qt-free, off-rig testable);
+  never throws (runs during OBSBasic construction, #313). Removed the dead `__DATE__` mechanism
+  (NewlevelBuildDate.hpp + its parse test) and re-pinned the lock-step guards
+  (tests/obs_titlebar_newlevel.rs + BOTH windows-genlock{,-fast}.yml pwsh source-anchor gates) to the
+  new call site + `GENLOCK_BUILD_SHA.txt`/`os_get_executable_path_ptr` tokens.
+  RED->GREEN: tests/obs_titlebar_newlevel_sha_parse.rs (C++ harness compiling the real header; RED =
+  header absent -> harness won't compile; GREEN = 11/11 cases pass). Frontend/vendored code has NO
+  local cargo verification path in camera-box (the run-tests bypass is disabled here, #477), so
+  RED->GREEN was proven off-rig by compiling the standalone harness with plain `c++` directly (not a
+  cargo compile, so not hook-blocked). Tier-0 green: fmt + clippy --all-targets -D warnings +
+  test-no-run. Review 0 red / 0 yellow / 1 blue (leading-BOM fragility) -> fixed in-branch
+  (86cb36552, skip a UTF-8 BOM + a test case).
+  DEPLOY (supervisor): FRONTEND change => needs an obs64.exe swap; the FAST artifact will NOT carry
+  the fix -- the full windows-genlock.yml bundle (builds + uploads obs64.exe) is required to deploy.
