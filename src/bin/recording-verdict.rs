@@ -3709,6 +3709,55 @@ fn build_and_print_verdict(
                 all_pass &= nv.is_zero_within_allowance(real_drops_allowance) && span_ok;
                 report["full_chain"]["loss"][spec.node] =
                     node_verdict_json(&nv, span_secs, span_ok, cfg.min_secs, real_drops_allowance);
+                // #870 — per-hop burn-id UNIQUENESS / MAX-HOLD assertion. `burn_contiguity` is
+                // presence-only (a `BTreeSet`), so a hop that REPEATS frames (the identical
+                // rendered image delivered on many consecutive recorded frames) leaves it clean.
+                // Measured on the STREAM recording — the single surface carrying every node burn,
+                // and where a freeze/repeat manifests to the viewer — from the SAME recorded-order
+                // extractor contiguity uses (no new decode). The pure decision core is
+                // `camera_box::burn_hold`; it is REPORT-ONLY today
+                // (`burn_hold::gates_overall_pass() == false`) — the metric now accumulates in the
+                // verdict JSON, and the fold below is a one-line LIVE flip once #870's follow-up
+                // confirms the bound against accumulated green runs.
+                let hold = camera_box::burn_hold::burn_hold_distribution(
+                    spec.node,
+                    &burn_ids_in(stream_frames, spec.burn_run_id),
+                );
+                let hold_within = hold.within_bound(camera_box::burn_hold::MAX_HOLD_FRAMES);
+                report["full_chain"]["loss"][spec.node]["hold"] = serde_json::json!({
+                    "max_hold_frames": hold.max_hold_frames,
+                    "max_hold_id": hold.max_hold_id,
+                    "bound": camera_box::burn_hold::MAX_HOLD_FRAMES,
+                    "within_bound": hold_within,
+                    "duplicate_pairs": hold.duplicate_pairs,
+                    "adjacent_pairs": hold.adjacent_pairs,
+                    "duplicate_pair_fraction": hold.duplicate_pair_fraction(),
+                    "total_burn_frames": hold.total_burn_frames,
+                    "distinct_ids": hold.distinct_ids,
+                    "histogram": hold.histogram,
+                    // Scoped report-only flag (#870) — name the flag after the specific term, not
+                    // the whole object (optical-undecodable-floor-report-only.md).
+                    "gates_overall_pass": camera_box::burn_hold::gates_overall_pass(),
+                });
+                if !hold_within {
+                    println!(
+                        "  [{}] #870 REPEAT/max-hold: burn id {} held for {} consecutive recorded \
+                         frames (> bound {}); {:.1}% of adjacent pairs byte-identical ({}/{}). \
+                         REPORT-ONLY — does not fail the run yet.",
+                        spec.node,
+                        hold.max_hold_id
+                            .map(|id| id.to_string())
+                            .unwrap_or_else(|| "<none>".to_string()),
+                        hold.max_hold_frames,
+                        camera_box::burn_hold::MAX_HOLD_FRAMES,
+                        hold.duplicate_pair_fraction() * 100.0,
+                        hold.duplicate_pairs,
+                        hold.adjacent_pairs,
+                    );
+                }
+                // Report-only fold — a no-op while `gates_overall_pass()` is `false`; the ONE line
+                // that promotes the term to LIVE (#870 follow-up).
+                all_pass &= hold_within || !camera_box::burn_hold::gates_overall_pass();
                 node_verdicts.push(nv);
             }
             // The single binary headline, in plain words.
