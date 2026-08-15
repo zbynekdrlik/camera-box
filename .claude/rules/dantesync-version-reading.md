@@ -86,3 +86,15 @@ first. A one-line live check (`ssh ... dantesync --version`) would have caught b
 before any code was written. When a gate's read path depends on "X can only be read this way",
 verify that claim against the real target BEFORE designing around it — especially when the
 gate is fail-closed and will hard-block real work the moment it's wrong.
+
+## Sourcing this gate exposes only the PURE parser + the PIN — not the SSH reader (#876)
+
+`read_dantesync_version_output` (the function that actually does the ssh / local read) lives BELOW
+this file's `[ "${BASH_SOURCE[0]}" != "${0}" ]` source-guard, so another script that sources
+`dantesync-version-gate.sh` to reuse its logic gets ONLY the pure functions defined above the guard
+— `dantesync_version_from_version_output` (the parser) and `DANTESYNC_VERSION_PIN`. If you need to
+READ a node's version from a sourcing script (as `dantesync-fleet-upgrade.sh` does, #876), write
+your OWN thin ssh/local transport and pipe its raw output through the reused `dantesync_version_
+from_version_output` parser — do NOT try to call `read_dantesync_version_output`, it is undefined
+in a sourced context. This is the intended split (pure/reusable above the guard, network/mutating
+below it), the same shape `upgrade-fleet-ndi.sh` uses.
