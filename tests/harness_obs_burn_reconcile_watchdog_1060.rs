@@ -100,11 +100,31 @@ fn fresh_start_uncoordinated_no_burn_is_clean() {
 
 #[test]
 fn fresh_start_detection_tracks_render_total_frames_reset() {
-    assert_eq!(is_fresh_start("", "5000"), 0, "unknown baseline => reconcile once");
-    assert_eq!(is_fresh_start("500000", "1200"), 0, "counter reset => restart");
-    assert_eq!(is_fresh_start("1200", "500000"), 1, "monotone climb => same session");
-    assert_eq!(is_fresh_start("500000", "500000"), 1, "steady => same session");
-    assert_eq!(is_fresh_start("500000", ""), 1, "unreadable current => not provably fresh");
+    assert_eq!(
+        is_fresh_start("", "5000"),
+        0,
+        "unknown baseline => reconcile once"
+    );
+    assert_eq!(
+        is_fresh_start("500000", "1200"),
+        0,
+        "counter reset => restart"
+    );
+    assert_eq!(
+        is_fresh_start("1200", "500000"),
+        1,
+        "monotone climb => same session"
+    );
+    assert_eq!(
+        is_fresh_start("500000", "500000"),
+        1,
+        "steady => same session"
+    );
+    assert_eq!(
+        is_fresh_start("500000", ""),
+        1,
+        "unreadable current => not provably fresh"
+    );
 }
 
 // ================================================================================================
@@ -143,10 +163,22 @@ fn watchdog_routes_all_burn_and_ws_interaction_through_obs_burn_filter() {
     let body = read(WATCHDOG);
     // The fresh-start signal, the burn presence check, and the clear ALL go through the ONE
     // existing WS/enumerator tool — never a hand-rolled on-box WS client (issue 866 rejected that).
-    assert!(body.contains("obs_burn_filter.py"), "must use obs_burn_filter.py");
-    assert!(body.contains("session-probe"), "fresh-start signal via obs_burn_filter session-probe");
-    assert!(body.contains("sweep-check"), "burn presence via obs_burn_filter sweep-check");
-    assert!(body.contains("sweep-off"), "the clear via obs_burn_filter sweep-off (#938/#1011)");
+    assert!(
+        body.contains("obs_burn_filter.py"),
+        "must use obs_burn_filter.py"
+    );
+    assert!(
+        body.contains("session-probe"),
+        "fresh-start signal via obs_burn_filter session-probe"
+    );
+    assert!(
+        body.contains("sweep-check"),
+        "burn presence via obs_burn_filter sweep-check"
+    );
+    assert!(
+        body.contains("sweep-off"),
+        "the clear via obs_burn_filter sweep-off (#938/#1011)"
+    );
 }
 
 #[test]
@@ -205,8 +237,14 @@ fn watchdog_supports_dry_run() {
 #[test]
 fn service_unit_execs_the_watchdog_script() {
     let svc = read(SERVICE_UNIT);
-    assert!(svc.contains("obs-burn-reconcile-watchdog.sh"), "ExecStart must run the watchdog");
-    assert!(svc.contains("Type=oneshot"), "one measure/decide/reconcile pass per timer tick");
+    assert!(
+        svc.contains("obs-burn-reconcile-watchdog.sh"),
+        "ExecStart must run the watchdog"
+    );
+    assert!(
+        svc.contains("Type=oneshot"),
+        "one measure/decide/reconcile pass per timer tick"
+    );
 }
 
 #[test]
@@ -222,7 +260,10 @@ fn timer_unit_is_installable_and_periodic() {
 #[test]
 fn readme_documents_ships_disabled_and_supervisor_verify() {
     let doc = read(README).to_lowercase();
-    assert!(doc.contains("disabled"), "README must state it ships DISABLED");
+    assert!(
+        doc.contains("disabled"),
+        "README must state it ships DISABLED"
+    );
     assert!(
         doc.contains("supervisor") && doc.contains("live-verif"),
         "README must state the supervisor installs + live-verifies before enabling"
