@@ -8478,3 +8478,33 @@ Review: 0 🔴 2 🟡 3 🔵, all fixed same-branch. Gotcha logged: cargo tests 
 - GOTCHA (seam brace-freedom): `tests/aux_sender_budget_879.rs` finds the seam's closing brace via
   the FIRST `"\n}"` after the signature, so the seam must stay brace-free — the new max-term uses a
   `? :` ternary precisely to avoid a nested `{}` block.
+
+## #877 — aux-sender teardown wedge: re-characterised + teardown-ordering regression gate (2026-08-15)
+
+- Ticket (predates the issue 879/1063 aux render-budget work) hypothesised a destroy-race: disabling
+  all three aux NDI senders at once wedged strih PROGRAM to 0 fps, blamed on `send_destroy` racing an
+  in-flight send. STEP-0 validation from CURRENT code REFUTES the trigger→destroy mapping and finds
+  the mandated ordering already correct — so re-characterised (not obsolete), stays OPEN on a
+  forward-looking coverage decision.
+- Findings (code-grounded): (a) obs-source.c `render_video()` skips a DISABLED filter before
+  `ndi_filter_render_video` (`ndi_filter` is OBS_SOURCE_TYPE_FILTER/OBS_SOURCE_VIDEO), so a mere
+  disable calls NO destroy path — sender stays alive+idle; the "three senders destroyed at once"
+  premise doesn't hold on disable. (b) The teardown ordering the ticket demands is upstream-original
+  and correct: `ndi_filter_destroy` does `video_output_close()` (stop+join the raw_video send worker)
+  BEFORE `ndi_sender_destroy`, which locks both sender mutexes before `send_destroy`. (c) No
+  cross-sender lock; destroy/recreate not used as flow-control. (d) issue 879/1063 touched only the
+  render-budget path, not teardown. (e) The observed 0-fps symptom's true root cause is NDI-SDK
+  internal (program uses async `send_send_video_async_v2`; shared per-process transmit/connection
+  threads churn when 3 senders go silent at once) — not in readable code, not reproducible without a
+  rig write (forbidden to the worker).
+- Ship: `tests/aux_sender_teardown_ordering_877.rs` — Tier-0 static gate locking the two ordering
+  invariants (join-before-destroy; mutex-before-send_destroy), with a baked-in mutation proof
+  (reordered + missing-lock fixtures must be rejected). Same static-anchor idiom as
+  genlock_release_cadence / aux_sender_budget_879; sig anchors match the DEFINITION line `...)\n{`
+  to dodge the forward-decl trap. No vendored code changed.
+- Commits: bump to 1.7.0-dev.461 · test(#877) [green] teardown-ordering gate.
+- Verify: checker logic replica-verified in python3 vs the real ndi-filter.cpp (both orderings PASS;
+  both mutation fixtures REJECTED); `cargo fmt --all --check` clean. Local `cargo test --no-run` still
+  compiling after ~58 min under extreme fleet load (~35 on 4 cores) — compile confirmation deferred to
+  the supervisor's integration full-suite. Ticket left OPEN with a forward-looking `needs-decision`
+  question (accept residual + close, vs supervised live repro). Do NOT let the merge auto-close #877.
