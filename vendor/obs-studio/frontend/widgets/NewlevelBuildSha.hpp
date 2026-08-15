@@ -40,6 +40,12 @@ static inline std::string newlevel_short_sha(const std::string &contents)
 	/* First whitespace-delimited token. All index math below is bounds-safe:
 	 * substr(start, len) with start <= size() never throws. */
 	std::string::size_type start = 0;
+	/* Skip a leading UTF-8 BOM if a BOM-emitting editor ever wrote the marker — its
+	 * bytes are non-hex and would otherwise make the whole read fall back to "unknown". */
+	if (contents.size() >= 3 && static_cast<unsigned char>(contents[0]) == 0xEF &&
+	    static_cast<unsigned char>(contents[1]) == 0xBB &&
+	    static_cast<unsigned char>(contents[2]) == 0xBF)
+		start = 3;
 	while (start < contents.size() &&
 	       std::isspace(static_cast<unsigned char>(contents[start])))
 		++start;

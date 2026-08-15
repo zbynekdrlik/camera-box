@@ -82,6 +82,10 @@ int main()
     /* (10) A too-short token (< 7 chars) -> "unknown". */
     if ((r = check(10, "tooshort", newlevel_short_sha("abc\n"), "unknown"))) return r;
 
+    /* (11) A leading UTF-8 BOM is skipped (string-concat so the \xBF escape does not
+     *      greedily swallow the following hex digit). */
+    if ((r = check(11, "bom", newlevel_short_sha("\xEF\xBB\xBF" "6e679ad8790f191f039c04f615c020959d038183\n"), "6e679ad87"))) return r;
+
     std::printf("OK newlevel_short_sha: valid -> 9-char lowercase, malformed -> unknown\n");
     return 0;
 }
