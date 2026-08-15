@@ -238,3 +238,110 @@ int main(void)
         String::from_utf8_lossy(&run.stderr),
     );
 }
+
+#[test]
+fn c_aux_sender_order_independent_budget_1063() {
+    // #1063 — the 879 budget term `elapsed = now - graphics_frame_start_ns` is only a faithful
+    // proxy for the program's cost when the aux filter decides AFTER output_frames(). If the aux
+    // `video_render` fires EARLY in the tick (small elapsed), the gate sees false headroom and
+    // never throttles. The fix publishes the PREVIOUS tick's completed total into
+    // obs->video.last_tick_total_ns and gates on max(elapsed, last_tick_total) -- order-independent.
+    //
+    // Lift the seam VERBATIM from the shipped obs.c and drive the order-independence invariant.
+    // Fail-open (last_tick_total 0 before the first completed tick) is byte-identical to today.
+    let obs_c = std::fs::read_to_string(libobs().join("obs.c")).expect("read obs.c");
+    let sig = "bool obs_aux_sender_should_skip(";
+    let start = obs_c.find(sig).unwrap_or_else(|| {
+        panic!("#1063: obs.c no longer defines {sig} — the aux budget seam is gone.")
+    });
+    // Single-statement ifs -> the first "\n}" after the signature is its closing brace.
+    let rest = &obs_c[start..];
+    let end = rest.find("\n}").unwrap_or_else(|| {
+        panic!("#1063: could not find the end of obs_aux_sender_should_skip in obs.c")
+    }) + 2;
+    let lifted = &rest[..end];
+
+    let harness = format!(
+        r#"
+#include "obs-display-budget.h"
+#include <stdint.h>
+#include <stdbool.h>
+#include <stdio.h>
+
+static uint64_t g_now;
+static uint64_t os_gettime_ns(void) {{ return g_now; }}
+struct video_stub {{ uint64_t video_frame_interval_ns; uint64_t graphics_frame_start_ns; uint64_t last_tick_total_ns; }};
+struct obs_stub {{ struct video_stub video; }};
+static struct obs_stub _obs = {{{{0, 0, 0}}}};
+static struct obs_stub *obs = &_obs;
+
+/* ---- lifted VERBATIM from obs.c ---- */
+{lifted}
+/* ---- end lifted ---- */
+
+int main(void)
+{{
+    int fail = 0;
+    const uint64_t IV30 = 33333333ULL; /* 30fps -> effective divisor 1 (pure budget), 30ms budget */
+    obs->video.video_frame_interval_ns = IV30;
+
+    /* CORE #1063: aux decides EARLY (only 3ms elapsed so far this tick) but the PREVIOUS tick
+       was heavy (28ms total). Order-DEPENDENT term: 3ms + 5ms ewma = 8ms <= 30ms -> false
+       headroom -> renders (the bug). Order-INDEPENDENT term: max(3ms, 28ms) + 5ms = 33ms >
+       30ms -> MUST skip regardless of where in the tick the aux decision falls. */
+    obs->video.graphics_frame_start_ns = 1000;
+    obs->video.last_tick_total_ns = 28000000ULL;
+    g_now = 1000 + 3000000ULL;
+    if (!obs_aux_sender_should_skip(2, 1, 5000000, 0)) {{
+        printf("FAIL(#1063): early-decide + heavy previous tick did NOT skip (order-dependent under-throttle)\n");
+        fail = 1;
+    }}
+
+    /* Fail-open: no completed tick yet (last_tick_total 0) + a decision that fits -> render.
+       max(3ms, 0) + 5ms = 8ms <= 30ms. The new term must never over-throttle at startup. */
+    obs->video.last_tick_total_ns = 0;
+    if (obs_aux_sender_should_skip(2, 1, 5000000, 0)) {{
+        printf("FAIL(#1063): fail-open startup (no prior tick) wrongly skipped\n");
+        fail = 1;
+    }}
+
+    /* Program priority survives the new term: not warmed (ewma 0) -> render once to measure,
+       even with a heavy prior tick. */
+    obs->video.last_tick_total_ns = 28000000ULL;
+    if (obs_aux_sender_should_skip(2, 1, 0, 0)) {{
+        printf("FAIL(#1063): warmup (ewma 0) skipped despite heavy prior tick\n");
+        fail = 1;
+    }}
+
+    /* Program marker (divisor 0): never skip, even with a heavy prior tick. */
+    if (obs_aux_sender_should_skip(0, 1, 5000000, 0)) {{
+        printf("FAIL(#1063): program (divisor 0) skipped\n");
+        fail = 1;
+    }}
+
+    if (!fail) printf("aux-sender order-independent budget holds\n");
+    return fail;
+}}
+"#
+    );
+
+    let work = workdir("order1063");
+    let src = work.join("order1063.c");
+    let bin = work.join("order1063");
+    std::fs::write(&src, harness).expect("write order-independence harness");
+    compile(&src, &bin);
+    let run = Command::new(&bin)
+        .output()
+        .expect("run order-independence harness");
+    let _ = std::fs::remove_dir_all(&work);
+    assert!(
+        run.status.success(),
+        "#1063: aux-sender budget is render-ORDER-DEPENDENT (exit {:?}). An aux filter that \
+         decides early in the tick reads a small `elapsed` and under-throttles; the gate must use \
+         max(elapsed, obs->video.last_tick_total_ns) so a heavy tick throttles regardless of \
+         render order.\nstdout: {}\nstderr: {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr),
+    );
+}
