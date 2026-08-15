@@ -33,11 +33,19 @@ pub const NO_DEVICE_RETRY_SECS: u64 = 30;
 ///
 /// - `detect`: probes for a capture device, `Some(path)` when one is present, `None` otherwise.
 /// - `sleep`: called with the backoff `Duration` on each no-device cycle (real: `thread::sleep`).
-pub fn wait_for_capture_device<D, S>(mut detect: D, mut _sleep: S) -> String
+pub fn wait_for_capture_device<D, S>(mut detect: D, mut sleep: S) -> String
 where
     D: FnMut() -> Option<String>,
     S: FnMut(Duration),
 {
-    // RED stub (#828) — does NOT loop/sleep yet; returns the first probe result verbatim.
-    detect().unwrap_or_default()
+    loop {
+        if let Some(path) = detect() {
+            return path;
+        }
+        // One clear, operator-actionable line per cycle — this is the cause a
+        // `journalctl -u camera-box` glance must show, instead of it being buried in the
+        // multi-line startup logs of a ~3 s restart storm.
+        tracing::warn!("{}", NO_CAPTURE_DEVICE_MSG);
+        sleep(Duration::from_secs(NO_DEVICE_RETRY_SECS));
+    }
 }

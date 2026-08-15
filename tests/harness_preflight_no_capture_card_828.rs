@@ -111,11 +111,7 @@ fn verdict_stays_generic_when_service_down_but_video_nodes_present() {
     );
     assert_eq!(r.exit_code, 0);
     assert!(r.stdout.contains("not active"), "stdout={}", r.stdout);
-    assert!(
-        !r.stdout.contains("no capture card"),
-        "stdout={}",
-        r.stdout
-    );
+    assert!(!r.stdout.contains("no capture card"), "stdout={}", r.stdout);
 }
 
 #[test]
@@ -126,7 +122,10 @@ fn verdict_passes_a_healthy_box_that_reports_video_nodes() {
          VIDEO_NODES=/dev/video1,/dev/video2'",
     );
     assert_eq!(r.exit_code, 0);
-    assert_eq!(r.stdout, "", "a healthy box with a grabber must PASS (empty verdict)");
+    assert_eq!(
+        r.stdout, "",
+        "a healthy box with a grabber must PASS (empty verdict)"
+    );
 }
 
 #[test]

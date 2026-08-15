@@ -22,10 +22,8 @@ fn retries_until_a_device_appears_then_returns_it() {
     // No device on the first two probes, then a grabber appears (e.g. USB (re-)plugged).
     let mut seq = vec![None, None, Some("/dev/video1".to_string())].into_iter();
     let mut sleeps = 0usize;
-    let got = camera_box::no_device::wait_for_capture_device(
-        || seq.next().flatten(),
-        |_d| sleeps += 1,
-    );
+    let got =
+        camera_box::no_device::wait_for_capture_device(|| seq.next().flatten(), |_d| sleeps += 1);
     assert_eq!(got, "/dev/video1");
     assert_eq!(
         sleeps, 2,
