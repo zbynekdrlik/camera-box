@@ -56,20 +56,23 @@ jobs:
       # version-integrity gap epic #125). Mirrors the canonical Linux-CI guard
       # tests/obs_titlebar_newlevel.rs (that crate is Linux-only and cannot compile on this
       # Windows runner). Keep both — and the FAST workflow's copy — in lock-step.
-      - name: Assert newlevel.media build identity + date in OBS title (#152)
+      - name: Assert newlevel.media build identity + deployed SHA in OBS title (#152/#1018)
         shell: pwsh
         run: |
           $b = (Get-Content "vendor/obs-studio/frontend/widgets/OBSBasic.cpp" -Raw) -replace '\s+', ' '
-          if ($b -notmatch [regex]::Escape('name << " - newlevel.media build " << NewlevelBuildDate();')) {
-            Write-Error "OBSBasic.cpp: the #152 newlevel.media build marker is missing from the OBS window title — upstream merge likely restored the stock title; re-apply the genlock #152 patch"; exit 1
+          if ($b -notmatch [regex]::Escape('name << " - newlevel.media build " << NewlevelBuildSha();')) {
+            Write-Error "OBSBasic.cpp: the #152/#1018 newlevel.media build marker is missing from the OBS window title — upstream merge likely restored the stock title; re-apply the genlock title patch"; exit 1
           }
-          if ($b -notmatch [regex]::Escape('static std::string NewlevelBuildDate()')) {
-            Write-Error "OBSBasic.cpp: the #152 NewlevelBuildDate() helper is gone — the title would lose its build date; re-apply"; exit 1
+          if ($b -notmatch [regex]::Escape('static std::string NewlevelBuildSha()')) {
+            Write-Error "OBSBasic.cpp: the #1018 NewlevelBuildSha() helper is gone — the title would lose its build identity; re-apply"; exit 1
           }
-          if ($b -notmatch [regex]::Escape('const std::string d = __DATE__;')) {
-            Write-Error "OBSBasic.cpp: the #152 build-date no longer reads the compiler __DATE__ — must be injected at build time, never hardcoded; re-apply"; exit 1
+          if ($b -notmatch [regex]::Escape('GENLOCK_BUILD_SHA.txt')) {
+            Write-Error "OBSBasic.cpp: the #1018 title no longer reads GENLOCK_BUILD_SHA.txt — the deployed build id would be lost; re-apply"; exit 1
           }
-          Write-Output "#152 newlevel.media build identity + date in OBS title — OK"
+          if ($b -notmatch [regex]::Escape('os_get_executable_path_ptr(')) {
+            Write-Error "OBSBasic.cpp: the #1018 title no longer resolves GENLOCK_BUILD_SHA.txt relative to the executable (os_get_executable_path_ptr) — a cwd-relative read regresses to the #1018 'unknown' bug; re-apply"; exit 1
+          }
+          Write-Output "#152/#1018 newlevel.media build identity + deployed SHA in OBS title — OK"
 
       # #70/#102: assert the genlock FIFO patch is present in the vendored OBS source
       # BEFORE the 150-min build, so a future `git subtree pull` (#44) that reverts the

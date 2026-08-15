@@ -1,13 +1,19 @@
-//! Patch-presence guard for #152 — the genlocked OBS build stamps its **newlevel.media
-//! build identity + compile date** into the main-window title bar.
+//! Patch-presence guard for #152 / #1018 — the genlocked OBS build stamps its
+//! **newlevel.media build identity + deployed commit SHA** into the main-window title bar.
 //!
 //! Background: the production boxes (strih/stream) run a custom vendored OBS. Operators
 //! must be able to tell at a glance, from the running window itself, that the box is on
 //! the newlevel.media build and WHICH build it is (version-integrity epic #125). The
 //! title is composed in `OBSBasic::UpdateTitleBar()` (vendor/obs-studio); the patch
-//! appends ` - newlevel.media build <YYYY-MM-DD>` after the OBS version string. The date
-//! is the compiler's `__DATE__` reformatted to ISO by the file-local `NewlevelBuildDate()`
-//! helper — injected at build time, NEVER hardcoded.
+//! appends ` - newlevel.media build <short-sha>` after the OBS version string.
+//!
+//! #1018: the identity used to be the compiler `__DATE__` reformatted to ISO — but OBS
+//! builds the frontend with `/Brepro` (reproducible builds), which blanks `__DATE__` to a
+//! short placeholder, so the title read "newlevel.media build unknown" on every production
+//! build. It now reads the deployed commit SHA from `GENLOCK_BUILD_SHA.txt` (the marker
+//! every deploy writes at the install root) — resolved from obs64.exe's own directory via
+//! `os_get_executable_path_ptr`, never the process cwd — and shows the short SHA. The pure
+//! formatting is in NewlevelBuildSha.hpp (unit-tested by tests/obs_titlebar_newlevel_sha_parse.rs).
 //!
 //! This is a SOURCE-level guard, not a runtime test: the genlock patches live in the
 //! vendored C++ (`git log -- vendor/` is the patch series, per vendor/README.md). The
@@ -37,29 +43,44 @@ const WINDOWS_GENLOCK_WF: &str = ".github/workflows/windows-genlock.yml";
 const WINDOWS_GENLOCK_FAST_WF: &str = ".github/workflows/windows-genlock-fast.yml";
 
 #[test]
-fn titlebar_carries_newlevel_media_build_marker_and_date() {
+fn titlebar_carries_newlevel_media_build_marker_and_sha() {
     let src = squish(&vendor_file(OBS_BASIC));
 
     // The call-site marker: UpdateTitleBar() appends the newlevel.media build identity +
-    // the (compile-time) build date to the window title.
+    // the deployed commit SHA to the window title.
     assert!(
-        src.contains(r#"name << " - newlevel.media build " << NewlevelBuildDate();"#),
-        "{OBS_BASIC}: the #152 newlevel.media build marker is missing from the OBS window \
-         title (UpdateTitleBar). A `git subtree pull` upstream bump likely restored the \
-         stock title and dropped it; re-apply the genlock #152 title patch."
+        src.contains(r#"name << " - newlevel.media build " << NewlevelBuildSha();"#),
+        "{OBS_BASIC}: the #152/#1018 newlevel.media build marker is missing from the OBS \
+         window title (UpdateTitleBar). A `git subtree pull` upstream bump likely restored \
+         the stock title and dropped it; re-apply the genlock title patch."
     );
 
-    // The build-date helper exists and derives the date from the compiler at build time —
-    // `__DATE__`, never a hardcoded literal.
+    // The build-id helper exists.
     assert!(
-        src.contains("static std::string NewlevelBuildDate()"),
-        "{OBS_BASIC}: the #152 NewlevelBuildDate() helper is gone — the title would lose \
-         its build date. Re-apply the genlock #152 title patch."
+        src.contains("static std::string NewlevelBuildSha()"),
+        "{OBS_BASIC}: the #1018 NewlevelBuildSha() helper is gone — the title would lose \
+         its build identity. Re-apply the genlock title patch."
+    );
+
+    // #1018: the identity is READ from the deployed GENLOCK_BUILD_SHA.txt marker, resolved
+    // relative to the executable (never the process cwd), NOT derived from the compiler
+    // `__DATE__` (which /Brepro blanks).
+    assert!(
+        src.contains("GENLOCK_BUILD_SHA.txt"),
+        "{OBS_BASIC}: the #1018 title no longer reads GENLOCK_BUILD_SHA.txt — the deployed \
+         build id would be lost. Re-apply the patch."
     );
     assert!(
-        src.contains("const std::string d = __DATE__;"),
-        "{OBS_BASIC}: the #152 build-date injection no longer reads the compiler `__DATE__` \
-         — the date must be injected at build time, never hardcoded. Re-apply the patch."
+        src.contains("os_get_executable_path_ptr("),
+        "{OBS_BASIC}: the #1018 title no longer resolves GENLOCK_BUILD_SHA.txt relative to \
+         the executable (os_get_executable_path_ptr) — a cwd-relative read regresses to the \
+         #1018 'unknown' bug on a shortcut launch. Re-apply the patch."
+    );
+    assert!(
+        !src.contains("const std::string d = __DATE__;"),
+        "{OBS_BASIC}: the compiler __DATE__ build-date mechanism is back — it is blanked by \
+         OBS's /Brepro reproducible build and always renders 'unknown' (#1018). The title \
+         must read the deployed SHA from GENLOCK_BUILD_SHA.txt instead."
     );
 }
 
@@ -76,15 +97,15 @@ fn windows_genlock_workflows_gate_on_the_titlebar_marker() {
     for wf in [WINDOWS_GENLOCK_WF, WINDOWS_GENLOCK_FAST_WF] {
         let src = squish(&vendor_file(wf));
         assert!(
-            src.contains(r#"name << " - newlevel.media build " << NewlevelBuildDate();"#),
-            "{wf}: the production build no longer asserts the #152 newlevel.media title \
-             marker — a future subtree bump could ship a stock title with no build identity \
-             while the build still passes. Re-add the pwsh source gate (lock-step)."
+            src.contains(r#"name << " - newlevel.media build " << NewlevelBuildSha();"#),
+            "{wf}: the production build no longer asserts the #152/#1018 newlevel.media \
+             title marker — a future subtree bump could ship a stock title with no build \
+             identity while the build still passes. Re-add the pwsh source gate (lock-step)."
         );
         assert!(
-            src.contains("const std::string d = __DATE__;"),
-            "{wf}: the production build no longer asserts the #152 `__DATE__` build-date \
-             injection. Re-add the pwsh source gate (lock-step)."
+            src.contains("GENLOCK_BUILD_SHA.txt"),
+            "{wf}: the production build no longer asserts the #1018 GENLOCK_BUILD_SHA.txt \
+             read in the OBS title. Re-add the pwsh source gate (lock-step)."
         );
     }
 }

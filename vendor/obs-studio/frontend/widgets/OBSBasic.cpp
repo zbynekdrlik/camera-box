@@ -21,7 +21,7 @@
 #include "ui-config.h"
 
 #include "ColorSelect.hpp"
-#include "NewlevelBuildDate.hpp"
+#include "NewlevelBuildSha.hpp"
 #include "OBSBasicControls.hpp"
 #include "OBSBasicStats.hpp"
 #include "plugin-manager/PluginManager.hpp"
@@ -64,6 +64,8 @@
 #ifdef _WIN32
 #include <sstream>
 #endif
+#include <fstream>
+#include <iterator>
 #include <string>
 #include <unordered_set>
 
@@ -2081,19 +2083,43 @@ void OBSBasic::UpdateEditMenu()
 	ui->actionHorizontalCenter->setEnabled(canTransformMultiple);
 }
 
-/* genlock (#152 / #313): the compiler build date, reformatted from `__DATE__` ("Mmm DD
- * YYYY", day space-padded for <10) to ISO "YYYY-MM-DD". The value comes from the compiler
- * at build time — never hardcoded — so the production OBS title always shows the date the
- * running build was compiled (version-integrity epic #125). The actual parse lives in the
- * pure, OBS/Qt-free `newlevel_iso_date()` (NewlevelBuildDate.hpp) so its behaviour is
- * unit-testable off-rig (tests/obs_titlebar_newlevel_parse.rs) — #313: a short/malformed
- * `__DATE__` must never throw, or it crashes OBS at startup via UpdateTitleBar. Guarded by
+/* genlock (#152 / #313 / #1018): the deployed-build commit SHA, read from the
+ * GENLOCK_BUILD_SHA.txt marker that every deploy writes at the OBS install root, so the
+ * production OBS title always shows WHICH build is actually running (version-integrity epic
+ * #125). #1018: this replaced the compiler `__DATE__` — OBS builds the frontend with
+ * `/Brepro` (reproducible builds, cmake/windows/compilerconfig.cmake), which blanks
+ * `__DATE__` to a short placeholder, so the old parse returned "unknown" on EVERY build;
+ * and a compile date goes stale vs the deployed obs.dll after a FAST hot-swap that never
+ * reswaps obs64.exe. The path is resolved from obs64.exe's OWN directory via
+ * os_get_executable_path_ptr (never the process cwd — the shortcut launches with
+ * cwd=bin\64bit but a relaunch may differ): the install root (../../) then bin\64bit, both
+ * deploy targets. The pure, OBS/Qt-free short-SHA formatter lives in NewlevelBuildSha.hpp
+ * so its behaviour is unit-testable off-rig (tests/obs_titlebar_newlevel_sha_parse.rs) — a
+ * malformed/absent marker returns the safe "unknown" fallback and NEVER throws (#313: a
+ * title helper must not crash OBS at startup via UpdateTitleBar). Guarded by
  * tests/obs_titlebar_newlevel.rs + the windows-genlock{,-fast}.yml source-anchor gates
- * (which pin the `const std::string d = __DATE__;` injection below); keep all in lock-step. */
-static std::string NewlevelBuildDate()
+ * (which pin the GENLOCK_BUILD_SHA.txt read below); keep all in lock-step. */
+static std::string NewlevelBuildSha()
 {
-	const std::string d = __DATE__;
-	return newlevel_iso_date(d);
+	static const char *const candidates[] = {
+		"../../GENLOCK_BUILD_SHA.txt", /* install root (canonical deploy location) */
+		"GENLOCK_BUILD_SHA.txt",       /* bin\64bit (also written by the deploy) */
+	};
+	for (const char *rel : candidates) {
+		char *path = os_get_executable_path_ptr(rel);
+		if (!path)
+			continue;
+		std::ifstream f(path);
+		bfree(path);
+		if (!f)
+			continue;
+		const std::string contents((std::istreambuf_iterator<char>(f)),
+					   std::istreambuf_iterator<char>());
+		const std::string sha = newlevel_short_sha(contents);
+		if (sha != "unknown")
+			return sha;
+	}
+	return "unknown";
 }
 
 void OBSBasic::UpdateTitleBar()
@@ -2113,12 +2139,12 @@ void OBSBasic::UpdateTitleBar()
 	if (App()->IsPortableMode())
 		name << " - " << Str("TitleBar.PortableMode");
 
-	/* genlock (#152): stamp the newlevel.media build identity + compile date into the
-	 * window title so the running build is unambiguous on the box (version-integrity epic
-	 * #125). The date is injected at build time via NewlevelBuildDate() (above) — never
-	 * hardcoded. Guarded by tests/obs_titlebar_newlevel.rs + the
-	 * windows-genlock{,-fast}.yml source-anchor gates; keep all three in lock-step. */
-	name << " - newlevel.media build " << NewlevelBuildDate();
+	/* genlock (#152 / #1018): stamp the newlevel.media build identity + the deployed commit
+	 * SHA into the window title so the running build is unambiguous on the box (version-
+	 * integrity epic #125). The SHA is read at runtime from GENLOCK_BUILD_SHA.txt via
+	 * NewlevelBuildSha() (above) — never hardcoded. Guarded by tests/obs_titlebar_newlevel.rs
+	 * + the windows-genlock{,-fast}.yml source-anchor gates; keep all three in lock-step. */
+	name << " - newlevel.media build " << NewlevelBuildSha();
 
 	name << " - " << Str("TitleBar.Profile") << ": " << profile;
 	name << " - " << Str("TitleBar.Scenes") << ": " << sceneCollection;
