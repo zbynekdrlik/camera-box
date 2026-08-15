@@ -129,15 +129,23 @@ def _render_sample(s0: dict, s1: dict, target_fps: float) -> dict:
 
     activeFps + averageFrameRenderTime are instantaneous gauges -> take from s1.
     renderSkipped/renderTotal are cumulative -> take the delta over the window
-    (same 'GetStats deltas' recipe as render-budget-gate.py's _render_sample)."""
+    (same 'GetStats deltas' recipe as render-budget-gate.py's _render_sample).
+
+    render_advanced (#935): did renderTotalFrames advance AT ALL over the window. This is
+    the TRUE render-loop liveness signal on a WS-only pass -- `activeFps` (above) is the
+    CONFIGURED canvas fps and stayed at 30.0 during the strih 00:35 full render stall, while
+    renderTotalFrames was frozen. r_tot > 0 -> True (advancing), r_tot == 0 -> False (stall),
+    r_tot < 0 -> None (counter reset, OBS restarted between snapshots -> never page)."""
     r_tot = float(s1.get("renderTotalFrames", 0)) - float(s0.get("renderTotalFrames", 0))
     r_skip = float(s1.get("renderSkippedFrames", 0)) - float(s0.get("renderSkippedFrames", 0))
     frac = (r_skip / r_tot) if r_tot > 0 else 0.0
+    render_advanced = (r_tot > 0) if r_tot >= 0 else None
     return {
         "ws_reachable": True,
         "active_fps": float(s1.get("activeFps", 0.0)),
         "avg_render_time_ms": float(s1.get("averageFrameRenderTime", 0.0)),
         "render_skipped_frac": frac,
+        "render_advanced": render_advanced,
         "target_fps": float(target_fps),
     }
 
@@ -289,6 +297,7 @@ def _measure_box(label: str, host: str, target_fps: float, window_s: float) -> d
         f"  [{label}] activeFps={sample['active_fps']:.2f} "
         f"avgRenderTime={sample['avg_render_time_ms']:.2f}ms "
         f"renderSkip={sample['render_skipped_frac'] * 100:.2f}% "
+        f"renderAdvanced={sample['render_advanced']} "
         f"(target {target_fps:.0f}fps)\n"
     )
     return sample

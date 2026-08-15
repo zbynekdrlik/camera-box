@@ -28,8 +28,12 @@ pub struct ObsHealthSample {
     /// Could the watchdog connect + authenticate to OBS WebSocket and get a `GetStats`
     /// reply at all this pass.
     pub ws_reachable: bool,
-    /// `activeFps` from `GetStats` — the composite/graphics loop rate (NOT the encoder
-    /// `outputFps`, which duplicates to target and stays green while render chokes).
+    /// `activeFps` from `GetStats`. NOTE (#935): this is the CONFIGURED canvas fps and
+    /// stays at the target (30.0 was read live during the 00:35 strih stall) even when the
+    /// graphics render loop is fully frozen — so it is NOT a reliable render-liveness signal
+    /// on its own; `render_advanced` below is the authoritative one. Kept as a secondary
+    /// check for a caller that carries a genuine measured rate here. (Still not the encoder
+    /// `outputFps`, which duplicates to target and stays green while render chokes.)
     pub active_fps: Option<f64>,
     /// `averageFrameRenderTime` in ms from `GetStats`.
     pub avg_render_time_ms: Option<f64>,
@@ -71,8 +75,10 @@ pub enum ObsHealthVerdict {
     /// OBS WebSocket did not respond to `GetStats` this pass — box unreachable/wedged
     /// hard enough that even the WS thread is gone, or the box/network is down.
     WsDead(String),
-    /// WS answered but `activeFps` is ~0 — the render loop has stalled while the
-    /// websocket thread is still alive (a distinct wedge mode from a slow-but-live render).
+    /// WS answered but the render loop has stalled while the websocket thread is still alive
+    /// (a distinct wedge mode from a slow-but-live render). Fired by `render_advanced ==
+    /// Some(false)` (renderTotalFrames not advancing — the #935 signal) or, secondarily, by
+    /// `activeFps` ~0.
     FpsZero(String),
     /// The exactly-one-obs64 invariant is broken (0 or >1 processes).
     ObsCountWrong(String),
@@ -223,8 +229,24 @@ pub fn classify(sample: ObsHealthSample, target_fps: f64) -> ObsHealthVerdict {
         return ObsHealthVerdict::WedgedRenderLag(wedge_reasons);
     }
 
-    // 5. FPS stalled while WS is still answering — a distinct wedge mode (the render
-    //    loop stopped producing frames but the websocket thread is alive).
+    // 5. Render loop advancement — the TRUE liveness signal, checked FIRST (#935). GetStats
+    //    `activeFps` is the CONFIGURED canvas fps and keeps reporting the target (30.0 was
+    //    read live at #935's 00:35 strih stall) even when the graphics render thread has
+    //    fully stalled, so it cannot detect this on its own; and a frozen loop makes
+    //    `render_skipped_frac` read a healthy 0.0. `render_advanced == Some(false)` (the
+    //    `renderTotalFrames` counter did not move over the window) is the authoritative stall
+    //    signal, obtainable on a plain dev1 WS-only pass with no process/MCP signals.
+    if sample.render_advanced == Some(false) {
+        return ObsHealthVerdict::FpsZero(
+            "renderTotalFrames did not advance over the GetStats window while WS reachable — \
+             graphics render loop stalled (activeFps may still report the configured fps; #935)"
+                .to_string(),
+        );
+    }
+
+    // 6. FPS stalled while WS is still answering — the legacy secondary check for a caller
+    //    that only carries the raw `activeFps` gauge (e.g. a source that reports a genuine
+    //    measured rate there); `render_advanced` above is preferred when present.
     if let Some(fps) = sample.active_fps {
         if fps.is_finite() && fps < FPS_ZERO_THRESHOLD {
             return ObsHealthVerdict::FpsZero(format!(
