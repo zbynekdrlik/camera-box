@@ -155,7 +155,16 @@
 /// that remaining 1 -> 0 step). The pre-fix relock storms (14-28 copies/gaps/window) and the
 /// OBS-restart convergence transient (14/window, run 1074024850, excluded as it started 2 min
 /// after the restart) are all still 10x+ over this threshold, so a real regression fails loudly.
-pub const WINDOW_COPIES_GAPS_TOLERANCE: u32 = 2;
+///
+/// **Stepped BACK to 3 (issue 1031 comment 5300948461, 2026-08-15):** the cam1 ShadowCast
+/// grabber's chronic degradation (issue 728 assessment; replacement Cam Link ordered, issue 1034
+/// re-measures after the swap) broke the tolerance=2 calibration's hardware assumptions: 14
+/// consecutive runs on 08-14/08-15 measured per-window max(copies,gaps) values above 2 in 8 of
+/// them, dominantly 3 (5x) and 4 (2x), almost always carried by CAM1 gap bursts; the 5/10 tail
+/// rode multi-cam bursts that fail at any tolerance. 3 is the ORIGINAL ship value of this gate
+/// and the tightest value the degraded-hardware sample supports; the 3 -> 2 -> 1 -> 0 walk-down
+/// resumes on issue 1031 after the cam1 card swap + consecutive greens.
+pub const WINDOW_COPIES_GAPS_TOLERANCE: u32 = 3;
 
 /// The strict-vs-relaxed decision for one cambox window, given its already-computed counts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -289,36 +298,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tolerance_is_calibrated_at_two_1031() {
+    fn tolerance_is_calibrated_at_three_1031() {
         // Pins the calibrated NUMBER itself, not just its use through the const. Issue 1031
-        // walk-down history: 3 -> 1 (2026-08-14 morning, calibrated on ONE steady post-fix run
-        // measuring {copies 1, gaps 1}) -> stepped BACK to 2 the same day: the very next two
-        // full-cycle runs measured per-window sums of 2-3 (CAM1 2+0, CAM2 1+2, CAM3 1+1 in run
-        // 900430067) -- the issue-859 shared-duplicate residual still produces 2-per-window
-        // bursts, so 1 failed its consecutive-greens evidence test. 2 is the tightest value the
-        // broader post-fix sample supports (every observed healthy window sums <= 2; the run's
-        // one 3-sum window rode an undecodable burst). The 2 -> 1 -> 0 steps stay gated on the
-        // issue-859 root cause + consecutive greens, tracked on the ticket.
-        assert_eq!(WINDOW_COPIES_GAPS_TOLERANCE, 2);
+        // walk-down history: 3 -> 1 (2026-08-14 morning, one steady post-fix run) -> back to 2
+        // the same day (issue-859 residual produces 2-per-window bursts) -> back to 3
+        // (2026-08-15, issue 1031 comment 5300948461): the cam1 ShadowCast grabber degraded
+        // below the tolerance=2 calibration's assumptions -- 8 of 14 consecutive runs measured
+        // per-window max(copies,gaps) of 3-4, carried by CAM1 gap bursts (replacement card
+        // ordered, issue 728 / issue 1034). 3 is the original ship value and the tightest the
+        // degraded-hardware sample supports; the walk-down resumes after the card swap.
+        assert_eq!(WINDOW_COPIES_GAPS_TOLERANCE, 3);
     }
 
     #[test]
-    fn three_copies_or_gaps_gate_two_absorbed_after_1031() {
-        // Issue 1031 walk-down boundary at the stepped-back tolerance=2: THREE copies (or gaps)
-        // must FAIL the relaxed verdict (tolerance=3 absorbed them), while TWO -- the measured
-        // issue-859 residual burst size -- stays absorbed. Literal fixtures on purpose: this
-        // locks the concrete boundary, complementing the const-tracking boundary tests above.
+    fn four_copies_or_gaps_gate_three_absorbed_after_1031() {
+        // Issue 1031 boundary at the stepped-back tolerance=3: FOUR copies (or gaps) must FAIL
+        // the relaxed verdict, while THREE -- the degraded-cam1 burst size dominating the
+        // 2026-08-15 sample -- stays absorbed until the card swap re-tightens the walk. Literal
+        // fixtures on purpose: this locks the concrete boundary, complementing the
+        // const-tracking boundary tests above.
         assert!(
-            !decide(100, 0, 3, 0).relaxed_pass,
-            "1031: three copies must gate the relaxed verdict at tolerance=2"
+            !decide(100, 0, 4, 0).relaxed_pass,
+            "1031: four copies must gate the relaxed verdict at tolerance=3"
         );
         assert!(
-            !decide(100, 0, 0, 3).relaxed_pass,
-            "1031: three gaps must gate the relaxed verdict at tolerance=2"
+            !decide(100, 0, 0, 4).relaxed_pass,
+            "1031: four gaps must gate the relaxed verdict at tolerance=3"
         );
         assert!(
-            decide(100, 0, 2, 2).relaxed_pass,
-            "1031: the measured residual burst (2 copies + 2 gaps) stays absorbed at tolerance=2"
+            decide(100, 0, 3, 3).relaxed_pass,
+            "1031: the degraded-cam1 burst (3 copies + 3 gaps) stays absorbed at tolerance=3"
         );
     }
 
