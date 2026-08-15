@@ -152,8 +152,16 @@ fn gate_passes_when_both_boxes_match_the_pinned_set() {
     // genlock_build_sha on every box (strih/stream via the state fixture, imag via --genlock-sha),
     // exactly like the real fleet does as of 2026-07-14 (~21:40, all three unified).
     const SHA: &str = "26de1c3c23980488a110dbf02e5e472f15cb001d";
-    let s = write_state("strih_pin", &with_sha(STRIH_PINNED, SHA));
-    let t = write_state("stream_pin", &with_sha(STREAM_PINNED, SHA));
+    // #829: the obs-identity facet is ENFORCED now, so a genuinely healthy fixture must also carry
+    // the enforced 826 keys on every box (like it carries genlock_build_sha since #758).
+    let s = write_state(
+        "strih_pin",
+        &with_obs_identity_ok(&with_sha(STRIH_PINNED, SHA), true),
+    );
+    let t = write_state(
+        "stream_pin",
+        &with_obs_identity_ok(&with_sha(STREAM_PINNED, SHA), false),
+    );
     let (code, stdout, stderr) = run_gate(&[
         "--win-state",
         &format!("strih={}", s.display()),
@@ -215,8 +223,14 @@ fn gate_passes_when_fleet_genlock_builds_are_in_parity_756() {
     // strih + stream states carry a matching genlock_build_sha AND imag's SHA (supplied via
     // --genlock-sha) matches -> the whole fleet is on ONE build -> cross-box parity OK, GATE PASS.
     const SHA: &str = "26de1c3c23980488a110dbf02e5e472f15cb001d";
-    let s = write_state("strih_parity_ok", &with_sha(STRIH_PINNED, SHA));
-    let t = write_state("stream_parity_ok", &with_sha(STREAM_PINNED, SHA));
+    let s = write_state(
+        "strih_parity_ok",
+        &with_obs_identity_ok(&with_sha(STRIH_PINNED, SHA), true),
+    );
+    let t = write_state(
+        "stream_parity_ok",
+        &with_obs_identity_ok(&with_sha(STREAM_PINNED, SHA), false),
+    );
     let (code, stdout, stderr) = run_gate(&[
         "--win-state",
         &format!("strih={}", s.display()),
@@ -317,11 +331,11 @@ fn gate_passes_when_a_windows_only_vendor_change_advances_strih_stream_past_imag
     // just the pure decision layer (see tests/drift_guard.rs for that half).
     let s = write_state(
         "strih_949_incident",
-        &with_sha(STRIH_PINNED, WIN_INCIDENT_SHA_949),
+        &with_obs_identity_ok(&with_sha(STRIH_PINNED, WIN_INCIDENT_SHA_949), true),
     );
     let t = write_state(
         "stream_949_incident",
-        &with_sha(STREAM_PINNED, WIN_INCIDENT_SHA_949),
+        &with_obs_identity_ok(&with_sha(STREAM_PINNED, WIN_INCIDENT_SHA_949), false),
     );
     let (code, stdout, stderr) = run_gate(&[
         "--win-state",
@@ -1007,10 +1021,14 @@ fn gate_refuses_when_strih_startup_chain_still_carries_the_dead_leftover_826() {
 
 #[test]
 fn gate_never_engages_startup_chain_for_a_box_with_no_ahk_826() {
-    // stream has NO NL_STARTUP.ahk at all -- reporting obs_installs/port4455/process_count
-    // (the generic per-box facets) must NOT also require the ahk-specific startup_chain facet.
+    // stream runs NO NL_STARTUP.ahk. After #829's strih-scoping, startup_chain is keyed off the box
+    // IDENTITY, so stream never engages it and its absent ahk keys stay OK, never UNKNOWN. (strih,
+    // which does run it, is healthy here so the whole gate still passes.)
     const SHA: &str = "26de1c3c23980488a110dbf02e5e472f15cb001d";
-    let s = write_state("strih_ok_826", &with_sha(STRIH_PINNED, SHA));
+    let s = write_state(
+        "strih_ok_826",
+        &with_obs_identity_ok(&with_sha(STRIH_PINNED, SHA), true),
+    );
     let t = write_state(
         "stream_no_ahk_826",
         &with_obs_identity(
@@ -1032,7 +1050,10 @@ fn gate_never_engages_startup_chain_for_a_box_with_no_ahk_826() {
         &format!("imag={SHA}"),
     ]);
     assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
-    assert!(!stdout.contains("startup_chain"), "{stdout}");
+    assert!(
+        !stderr.contains("stream:startup_chain"),
+        "stream (no NL_STARTUP.ahk) must never engage startup_chain: stderr={stderr}"
+    );
     let _ = std::fs::remove_file(&s);
     let _ = std::fs::remove_file(&t);
 }
