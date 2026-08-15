@@ -568,3 +568,27 @@ correctly matched. **Before filing a live acceptance-check failure as a genuine 
 SECOND reading after the box has been left alone for a minute or two** — a reading captured
 mid-flight of your OWN repeated manual restarts is not evidence of steady-state behavior, and
 filing it as a bug wastes a future session re-diagnosing noise.
+
+
+## #858 — the RemoteOS MCP control-channel agent is now PROVISIONED by setup-imag.sh (step 23)
+
+A fresh imag box used to come up with no `linux-imag-nb` MCP surface — the agent
+(`remoteos-mcp.service` on :8092) survived only as a hand-install on the one original box. Since
+#858, `setup-imag.sh` **step 23** provisions it by INVOKING the canonical installer of the SEPARATE
+`zbynekdrlik/remoteos-mcp` project (`install-linux.sh`, fetched from its `master` raw URL; override
+`REMOTEOS_MCP_INSTALLER_URL`). camera-box does NOT re-implement or re-pin the agent — the ops-skill
+#555 discipline (use the installer, never a bare pip command; the ~40 transitive deps stay pinned in
+remoteos-mcp's own `pyproject.toml`). The `!body.contains("remoteos-mcp.git")` guard in
+`tests/setup_imag_remoteos_mcp_858.rs` enforces "no inline pip-git URL here".
+
+Auth-key (a full-shell-RCE bearer token on `0.0.0.0:8092`) is NEVER committed: set
+`REMOTEOS_MCP_AUTH_KEY` (env-secret convention, exactly like `CAM_PW`/`GH_TOKEN`) and step 23
+pre-seeds `/etc/remoteos-mcp/config.json` (chmod 600, `install -d -m 700` + `umask 077`) BEFORE
+running the installer, so the installer REUSES that known key and dev1's gitignored `.mcp.json`
+keeps matching a freshly-hardware'd box (a fresh random key would leave the MCP surface dead at
+dev1's end — the gap #858 closes). Unset → the installer generates a fresh on-box key and you must
+update dev1's `.mcp.json` `linux-imag-nb` entry. The key is charset-guarded (`case … *[!A-Za-z0-9]*
+) fail`) before the unquoted-heredoc JSON write, so a special char can never break the JSON (which
+would make the installer silently discard the pre-seed and generate a DIFFERENT key while the
+`systemctl is-active` gate still passes) or run command substitution. cam1-4 remain hand-installed
+until `setup-device.sh` gains the same step (a candidate follow-up).
