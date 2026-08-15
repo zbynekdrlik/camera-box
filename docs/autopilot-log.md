@@ -2,6 +2,36 @@
 
 Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads context.
 
+## 2026-08-15 — #880 (imag iGPU clock floor visibility alert) — worktree autopilot-880, base b934c9e57
+
+- **Root cause (scope a) confirmed by live forcewake forensics** (`ssh newlevel@10.77.9.182`,
+  read-only): every software freq knob reads 1400 (`i915_frequency_info` Min/Max/Boost) while
+  `Actual=750` (RPNSWREQ steered to 950), `throttle_reason_pl1=1`/`status=1`, `thermal=0`, MMIO
+  RAPL PL1 `package-0 long_term = 29 W`, TCPU 85 °C. The pinned `gt_min_freq_mhz=1400` (issue 841)
+  is a software REQUEST the punit legally overrides at the shared package power budget; under
+  heavier load (issue 1029: load 8.9, OBS 216 %) `Actual` drops to 500 MHz. The floor is
+  unenforceable in software (issue 1040 already pinned PL1 to the thermal max); residual = physical
+  cooling (issue 1043). So 880's remaining software scope is VISIBILITY only.
+- **Fix (scope b):** extended the dev1-side `imag-power-envelope-alert-watchdog.sh` with a SECOND,
+  independent alert path (`alert_from_throttle`, own dedup keys) that pages on a SUSTAINED clamp
+  holding act below the floor while `throttle_reason` (pl1|thermal) is active — keyed on
+  `throttle_reason`, NOT raw act_freq, so benign RC6 idle never false-fires (the ticket's own
+  warning). New pure `imag_power_throttle_alert_condition` (majority-of-burst, min-sample guard,
+  numeric pct guard) + `imag_power_throttle_burst_remote_snippet` (~6 s, card* globbed, SEPARATE
+  from the instantaneous gather) + `imag_power_throttle_alert_sig` (STABLE episode token so a
+  wobbling count does not defeat the ~1h throttle) in `scripts/lib/imag-power-envelope.sh`.
+- Commits: version bump `73be03204`; RED `e0fe58620` (`tests/harness_imag_power_envelope_1040.rs`);
+  GREEN `4648651ed`; review-fix `62ea3e78d` (stable dedup sig + min-sample + pct guards, from a
+  fresh-context review that returned 1 🟡 3 🔵, all fixed same-branch → 0/0/0).
+- Tier-0 only (heavy builds CI-only + SIGKILLed under fleet load here): bash-harness all-green over
+  12 fixtures (RC6 false-positive, order-independence, truncation, bad-pct, sig-stability),
+  `shellcheck -x` clean ×2, fmt-check clean, watchdog `--dry-run` exit 0 (both paths).
+- Rule updated: `.claude/rules/imag-power-envelope.md` (the throttle-reason discriminator, the
+  stable-sig + min-sample gotchas, "the floor is unenforceable in software").
+- Note: origin/dev advanced past base b934c9e57 with sibling merges during the run; version bumped
+  to 1.7.0-dev.461 from the base's .458 per dispatch — supervisor resolves any bump collision at
+  integration. Issue 880 stays OPEN until the supervisor integrates this branch.
+
 ## 2026-07-14 — #745 (fixed+closed, deployed cam6) / #753 (wiring landed, stays open) / strih 1:1 mapping pivot -- bundled batch, PR #704 train
 
 - **#745** -- retired the #729 model-gated zero-touch policy: `documented_controls_for_model` now
