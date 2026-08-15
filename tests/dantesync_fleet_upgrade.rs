@@ -255,78 +255,118 @@ fn linux_rollback_cmd_restores_backup_and_restarts() {
     );
 }
 
-// --- Windows upgrade command text -----------------------------------------------------------
+// --- Windows upgrade .ps1 content + file invocation -----------------------------------------
+// The Windows path SENDS A .ps1 (scp -O) and runs it with `-File`, never a nested
+// `powershell -Command "..."` over ssh (which fails SILENTLY — .claude/rules/rig-state-inspection.md
+// §2). So `dantesync_windows_upgrade_ps` / `_rollback_ps` return the .ps1 CONTENT, and
+// `dantesync_windows_run_ps_file_cmd` is the `-File` invocation.
 
 #[test]
-fn windows_upgrade_cmd_downloads_pinned_verifies_stops_swaps_starts() {
-    let cmd = run_sourced("dantesync_windows_upgrade_cmd 1.8.41");
+fn windows_upgrade_ps_downloads_pinned_verifies_stops_swaps_starts() {
+    let ps = run_sourced("dantesync_windows_upgrade_ps 1.8.41");
+    assert!(
+        ps.contains("releases/download/v1.8.41/dantesync-windows-amd64.exe"),
+        "#876: Windows upgrade must download the PINNED asset. Got:\n{ps}"
+    );
+    assert!(
+        ps.contains("Get-FileHash") && ps.to_uppercase().contains("SHA256"),
+        "#876: Windows upgrade must verify the download's SHA256. Got:\n{ps}"
+    );
+    assert!(
+        ps.contains("Stop-Service"),
+        "#876: Windows upgrade must stop the service before replacing the exe. Got:\n{ps}"
+    );
+    assert!(
+        ps.contains(r"C:\Program Files\DanteSync\dantesync.exe"),
+        "#876: Windows upgrade must replace the installed exe path. Got:\n{ps}"
+    );
+    assert!(
+        ps.contains("Start-Service"),
+        "#876: Windows upgrade must start the service after the swap. Got:\n{ps}"
+    );
+    assert!(
+        ps.contains("--version"),
+        "#876: Windows upgrade must read the version back for verification. Got:\n{ps}"
+    );
+}
+
+/// The Windows path must run the uploaded .ps1 by FILE (the repo's rig-state-inspection.md §2
+/// rule), never a nested `powershell -Command "..."`.
+#[test]
+fn windows_run_ps_file_cmd_uses_file_invocation() {
+    let cmd = run_sourced(r#"dantesync_windows_run_ps_file_cmd 'C:\Windows\Temp\x.ps1'"#);
     assert!(
         cmd.contains("powershell") && cmd.contains("-NoProfile"),
-        "#876: Windows upgrade runs headless PowerShell (session-agnostic, ssh-legal). Got:\n{cmd}"
+        "#876: must run headless PowerShell. Got:\n{cmd}"
     );
     assert!(
-        cmd.contains("releases/download/v1.8.41/dantesync-windows-amd64.exe"),
-        "#876: Windows upgrade must download the PINNED asset. Got:\n{cmd}"
+        cmd.contains("-ExecutionPolicy Bypass"),
+        "#876: must bypass the execution policy for the .ps1. Got:\n{cmd}"
     );
     assert!(
-        cmd.contains("Get-FileHash") && cmd.to_uppercase().contains("SHA256"),
-        "#876: Windows upgrade must verify the download's SHA256. Got:\n{cmd}"
+        cmd.contains("-File"),
+        "#876: must run the .ps1 by -File, never a nested -Command (rig-state-inspection.md §2). Got:\n{cmd}"
     );
     assert!(
-        cmd.contains("Stop-Service"),
-        "#876: Windows upgrade must stop the service before replacing the exe. Got:\n{cmd}"
-    );
-    assert!(
-        cmd.contains(r"C:\Program Files\DanteSync\dantesync.exe"),
-        "#876: Windows upgrade must replace the installed exe path. Got:\n{cmd}"
-    );
-    assert!(
-        cmd.contains("Start-Service"),
-        "#876: Windows upgrade must start the service after the swap. Got:\n{cmd}"
-    );
-    assert!(
-        cmd.contains("--version"),
-        "#876: Windows upgrade must read the version back for verification. Got:\n{cmd}"
+        !cmd.contains("-Command"),
+        "#876: must NOT use a nested -Command (fails silently over ssh). Got:\n{cmd}"
     );
 }
 
 /// The Windows upgrade actively PURGES the dead `DanteSyncUpdate` relic task (retire, don't
 /// replace) — the direct answer to "a task that silently stops scheduling is as bad as no task".
 #[test]
-fn windows_upgrade_cmd_purges_the_dead_dantesyncupdate_task() {
-    let cmd = run_sourced("dantesync_windows_upgrade_cmd 1.8.41");
+fn windows_upgrade_ps_purges_the_dead_dantesyncupdate_task() {
+    let ps = run_sourced("dantesync_windows_upgrade_ps 1.8.41");
     assert!(
-        cmd.contains("DanteSyncUpdate") && cmd.contains("/Delete"),
-        "#876: the Windows path must purge the dead DanteSyncUpdate scheduled task. Got:\n{cmd}"
+        ps.contains("DanteSyncUpdate") && ps.contains("/Delete"),
+        "#876: the Windows path must purge the dead DanteSyncUpdate scheduled task. Got:\n{ps}"
+    );
+}
+
+/// SAFETY: the exe is backed up BEFORE the new exe overwrites it — asserted on the REAL
+/// statement order (backup `Copy-Item ... $exe $bak` precedes swap `Copy-Item ... $tmp $exe`).
+#[test]
+fn windows_upgrade_ps_backs_up_current_exe_before_replace() {
+    let ps = run_sourced("dantesync_windows_upgrade_ps 1.8.41");
+    let backup = ps
+        .find("Copy-Item -Force $exe $bak")
+        .expect("#876: expected the exe backup (Copy-Item -Force $exe $bak)");
+    let swap = ps
+        .find("Copy-Item -Force $tmp $exe")
+        .expect("#876: expected the exe swap (Copy-Item -Force $tmp $exe)");
+    assert!(
+        backup < swap,
+        "#876: the current exe must be backed up BEFORE the new exe overwrites it. Got:\n{ps}"
+    );
+}
+
+/// SAFETY: the swap is wrapped in a try/catch that restores the .bak and restarts on any failure
+/// past the point of no return, then rethrows — a failed swap never leaves the master down.
+#[test]
+fn windows_upgrade_ps_self_heals_on_swap_failure() {
+    let ps = run_sourced("dantesync_windows_upgrade_ps 1.8.41");
+    assert!(
+        ps.contains("try {") && ps.contains("catch {"),
+        "#876: the swap must be wrapped in try/catch self-heal. Got:\n{ps}"
+    );
+    assert!(
+        ps.contains("Copy-Item -Force $bak $exe") && ps.contains("throw"),
+        "#876: the catch must restore the .bak and rethrow. Got:\n{ps}"
     );
 }
 
 #[test]
-fn windows_upgrade_cmd_backs_up_current_exe_before_replace() {
-    let cmd = run_sourced("dantesync_windows_upgrade_cmd 1.8.41");
-    let bak = cmd
-        .find(r"dantesync.exe.bak")
-        .expect("#876: expected a backup of the current exe");
-    let copy = cmd
-        .find("Copy-Item")
-        .expect("#876: expected a Copy-Item swap");
+fn windows_rollback_ps_restores_backup_and_starts() {
+    let ps = run_sourced("dantesync_windows_rollback_ps");
     assert!(
-        bak < copy || cmd.matches("Copy-Item").count() >= 2,
-        "#876: the current exe must be backed up BEFORE the new exe overwrites it. Got:\n{cmd}"
-    );
-}
-
-#[test]
-fn windows_rollback_cmd_restores_backup_and_starts() {
-    let cmd = run_sourced("dantesync_windows_rollback_cmd");
-    assert!(
-        cmd.contains("dantesync.exe.bak")
-            && cmd.contains(r"C:\Program Files\DanteSync\dantesync.exe"),
-        "#876: Windows rollback must restore the .bak over the live exe. Got:\n{cmd}"
+        ps.contains("dantesync.exe.bak")
+            && ps.contains(r"C:\Program Files\DanteSync\dantesync.exe"),
+        "#876: Windows rollback must restore the .bak over the live exe. Got:\n{ps}"
     );
     assert!(
-        cmd.contains("Start-Service"),
-        "#876: Windows rollback must start the service. Got:\n{cmd}"
+        ps.contains("Start-Service"),
+        "#876: Windows rollback must start the service. Got:\n{ps}"
     );
 }
 
@@ -501,13 +541,68 @@ fn dry_run_is_wired_and_mutates_nothing() {
     );
 }
 
-/// A canary that fails verification must be rolled back to the previous binary — and, per the
-/// canary-first contract, the rest of the fleet must NOT be touched.
+/// A node that fails VERIFICATION (the swap provably completed) must be rolled back to the
+/// previous binary — both OSes.
 #[test]
 fn rolls_back_on_verification_failure() {
     let s = fs::read_to_string(script()).expect("read dantesync-fleet-upgrade.sh");
     assert!(
-        s.contains("dantesync_linux_rollback_cmd") && s.contains("dantesync_windows_rollback_cmd"),
+        s.contains("dantesync_linux_rollback_cmd") && s.contains("dantesync_windows_rollback_ps"),
         "#876: the main flow must roll a node back (both OSes) when verification fails"
+    );
+    // and the rollback must be gated on the verify-failure branch, not an upgrade-command failure
+    let verify_fail = s
+        .find("verification failed after upgrade")
+        .expect("#876: expected the verify-failure branch");
+    let rollback = s
+        .find("rollback_node \"$name\"")
+        .expect("#876: expected a rollback_node call");
+    assert!(
+        verify_fail < rollback,
+        "#876: rollback_node must be called from the verify-failure branch. Got context around it."
+    );
+}
+
+/// The remote upgrade scripts SELF-HEAL: a failure past the point of no return restores the
+/// previous binary ON THE BOX, so the orchestrator must NOT blind-rollback on an upgrade-command
+/// failure (which — with a pre-existing .bak — would stop a HEALTHY master and downgrade it).
+#[test]
+fn upgrade_command_failure_is_reported_not_blind_rolled_back() {
+    let s = fs::read_to_string(script()).expect("read dantesync-fleet-upgrade.sh");
+    // Linux self-heal: an ERR trap restoring the .bak, disarmed on success.
+    assert!(
+        s.contains("_dantesync_restore") && s.contains("trap '_dantesync_restore' ERR"),
+        "#876: the Linux upgrade must self-heal via an ERR trap that restores the .bak"
+    );
+    // The upgrade-command-failure branch reports self-heal and does NOT call rollback_node.
+    assert!(
+        s.contains("self-healed to its previous version (not rolled forward)"),
+        "#876: an upgrade-command failure must be reported as self-healed, never blind-rolled-back"
+    );
+}
+
+/// Single-node verification opts out of the NTP-master concept (`--ntp-master ""`), so verifying
+/// a non-strih Windows node (e.g. stream) never hits the gate's "master not among configured
+/// nodes" refusal.
+#[test]
+fn verify_opts_out_of_ntp_master_for_single_node() {
+    let s = fs::read_to_string(script()).expect("read dantesync-fleet-upgrade.sh");
+    assert!(
+        s.contains(r#"--ntp-master """#),
+        "#876: verify_node must pass --ntp-master \"\" so a single non-master node verifies"
+    );
+}
+
+/// The Windows path sends a .ps1 file (scp) and runs it by -File — never a nested -Command.
+#[test]
+fn windows_path_sends_a_ps1_file() {
+    let s = fs::read_to_string(script()).expect("read dantesync-fleet-upgrade.sh");
+    assert!(
+        s.contains("scp_node") && s.contains("dantesync_windows_upgrade_ps"),
+        "#876: the Windows path must scp the .ps1 content, not inline a nested -Command"
+    );
+    assert!(
+        s.contains("dantesync_windows_run_ps_file_cmd"),
+        "#876: the Windows path must run the uploaded .ps1 by -File"
     );
 }
