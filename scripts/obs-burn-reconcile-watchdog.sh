@@ -85,7 +85,7 @@ REPO_SLUG="${OBS_BURN_RECONCILE_WATCHDOG_REPO:-zbynekdrlik/camera-box}"
 RIG_LEASE_STALE_SECS="${RIG_LEASE_STALE_SECS:-5400}"
 
 # DURABLE state dir (NOT tmpfs, #1060 review): the per-box renderTotalFrames baseline must survive
-# a dev1 reboot. A tmpfs baseline (XDG_RUNTIME_DIR / /tmp) is wiped on reboot -> the first post-
+# a dev1 reboot. A tmpfs baseline (the per-boot runtime dir / /tmp) is wiped on reboot -> the first post-
 # reboot pass would read prev="" which, combined with a fresh-start=fresh reading, could false-clear
 # a deliberately-persistent TEST-mode burn (its #281 heartbeat is stale by design). ~/.camera-box is
 # the durable, repo-owned dir (same as phase-sync-last.json). Paired with the decision lib's
