@@ -4,6 +4,21 @@ Documentation=https://github.com/zbynekdrlik/camera-box
 After=network-online.target avahi-daemon.service
 Wants=network-online.target
 
+# #828 — bound ANY runaway restart storm. With Restart=always + RestartSec=3 and no limit, a
+# process that keeps exiting restarts every ~3 s forever (cam4 with a missing grabber:
+# NRestarts=27719). The no-capture-device case is now handled IN-PROCESS (the binary retries
+# slowly instead of exiting — src/no_device.rs), so it no longer feeds this counter at all; this
+# limit is a GENEROUS belt-and-braces cap on any OTHER cause (20 starts / 5 min is a genuine
+# pathology where restart-looping is not helping). RestartSec=3 (below) stays fast so a genuine
+# mid-stream transient still recovers in seconds; StartLimit* are UNIT-level directives (placing
+# them in [Service] silently no-ops). No StartLimitAction= is set, so tripping the cap leaves the
+# unit in `failed` (deliberate: stop the storm); recovery is manual (`systemctl reset-failed
+# camera-box` / reboot) — the dev1-side reachability watchdog alerts on a down box. The self-heal
+# restart path (SELF_HEAL_EXIT_CODE) is rate-limited to 1/10 min, far under this 20/5 min cap, so
+# it can never trip it.
+StartLimitIntervalSec=300
+StartLimitBurst=20
+
 [Service]
 Type=simple
 # #289 — route the USB capture-controller IRQ(s) onto the isolated core before the

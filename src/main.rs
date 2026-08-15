@@ -292,7 +292,20 @@ async fn main() -> Result<()> {
     // Determine device path
     let device_path = if let Some(ref device) = args.device {
         device.clone()
+    } else if config.device == "auto" {
+        // #828 — auto-detect with a slow, clearly-logged IN-PROCESS retry instead of bailing.
+        // A box whose USB grabber is absent (removed / dead / not yet fitted) settles into a
+        // quiet retry — one clear "no capture device — check the grabber" line per cycle — and
+        // auto-recovers within one interval when a grabber (re-)appears, rather than exiting into
+        // a ~3 s `Restart=always` storm (cam4 incident: NRestarts=27719). `RestartSec=3` stays
+        // fast for a genuine mid-stream transient crash; the systemd StartLimit is only a
+        // belt-and-braces cap on any OTHER runaway.
+        camera_box::no_device::wait_for_capture_device(
+            camera_box::config::find_capture_device_opt,
+            std::thread::sleep,
+        )
     } else {
+        // An explicitly-configured device path is used as-is (existing behaviour).
         config.device_path()?
     };
 

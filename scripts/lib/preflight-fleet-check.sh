@@ -46,6 +46,11 @@ PREFLIGHT_CPU_PCT_FAIL="${PREFLIGHT_CPU_PCT_FAIL:-20}"
 #   DISK_TMP_PCT=<n>         — `/tmp` tmpfs used% (#762)
 #   RSYSLOGD_CPU=<n>         — summed %cpu of any `rsyslogd` process (#762; 0 once purged)
 #   JOURNALD_CPU=<n>         — summed %cpu of any `systemd-journald` process (#762)
+#   VIDEO_NODES=<comma-list> — this box's `/dev/video*` capture nodes, empty when NONE are
+#                               present (#828). The physical, binary-independent signal for
+#                               "no capture card present" — the issue's own repro (`ls /dev/video*`
+#                               -> "No such file or directory"). Kept LAST so an empty value is an
+#                               unambiguous trailing `VIDEO_NODES=`.
 preflight_fleet_check_cmds() {
   cat <<'REMOTE'
 SERVICE_ACTIVE=$(systemctl is-active camera-box 2>/dev/null); SERVICE_ACTIVE="${SERVICE_ACTIVE:-unknown}"
@@ -56,7 +61,8 @@ DISK_TMP_PCT=$(df --output=pcent /tmp 2>/dev/null | tail -1 | tr -d '% '); DISK_
 _pscpu=$(ps -eo comm,pcpu --no-headers 2>/dev/null)
 RSYSLOGD_CPU=$(printf '%s\n' "$_pscpu" | awk '$1 ~ /^rsyslogd/ {s+=$2} END{printf "%d", s+0}')
 JOURNALD_CPU=$(printf '%s\n' "$_pscpu" | awk '$1 ~ /^systemd-journal/ {s+=$2} END{printf "%d", s+0}')
-echo "SERVICE_ACTIVE=$SERVICE_ACTIVE EMITTER_COUNT=$EMITTER_COUNT STRAY_UNITS=$STRAY_UNITS DISK_LOG_PCT=$DISK_LOG_PCT DISK_TMP_PCT=$DISK_TMP_PCT RSYSLOGD_CPU=$RSYSLOGD_CPU JOURNALD_CPU=$JOURNALD_CPU"
+VIDEO_NODES=$(ls -d /dev/video* 2>/dev/null | paste -sd, -)
+echo "SERVICE_ACTIVE=$SERVICE_ACTIVE EMITTER_COUNT=$EMITTER_COUNT STRAY_UNITS=$STRAY_UNITS DISK_LOG_PCT=$DISK_LOG_PCT DISK_TMP_PCT=$DISK_TMP_PCT RSYSLOGD_CPU=$RSYSLOGD_CPU JOURNALD_CPU=$JOURNALD_CPU VIDEO_NODES=$VIDEO_NODES"
 REMOTE
 }
 
@@ -67,7 +73,21 @@ REMOTE
 # disk/CPU reading is never mistaken for a storm, matching this function's existing "absent
 # STRAY_UNITS = clean" convention.
 preflight_fleet_check_verdict() {
-  local line="$1" service_active emitter_count stray_units disk_log_pct disk_tmp_pct rsyslogd_cpu journald_cpu
+  local line="$1" service_active emitter_count stray_units disk_log_pct disk_tmp_pct rsyslogd_cpu journald_cpu video_nodes
+  # #828 — the physical, operator-actionable cause "no capture card present" is the MOST specific
+  # reason and is checked FIRST (it wins over the generic "service is <state>, not active" when a
+  # device-less box also happens to be inactive/activating). An empty VIDEO_NODES field that IS
+  # reported = no /dev/video* capture nodes; a field that is entirely ABSENT (a fixture predating
+  # #828) is "not reported" and skipped, so nothing false-fails. Empty-list != absent for a string
+  # field, so presence is detected with `grep -q`, never by the value alone. When nodes DO exist
+  # but the service is down for some OTHER reason, this stays silent -> honest generic message.
+  if printf '%s' "$line" | grep -q 'VIDEO_NODES=' ; then
+    video_nodes="$(printf '%s' "$line" | grep -oP 'VIDEO_NODES=\K\S*' || true)"
+    if [ -z "${video_nodes:-}" ]; then
+      echo "no capture card present — fit/check the grabber (#828)"
+      return 0
+    fi
+  fi
   service_active="$(printf '%s' "$line" | grep -oP 'SERVICE_ACTIVE=\K\S+' || true)"
   emitter_count="$(printf '%s' "$line" | grep -oP 'EMITTER_COUNT=\K[0-9]+' || true)"
   stray_units="$(printf '%s' "$line" | grep -oP 'STRAY_UNITS=\K\S*' || true)"

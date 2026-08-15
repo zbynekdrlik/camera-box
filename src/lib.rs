@@ -419,3 +419,10 @@ pub mod painter_wedge;
 
 #[cfg(feature = "probe")]
 pub mod probe;
+
+// #828 — no-capture-device startup handling: the PURE slow-retry loop decision (probe + backoff
+// sleep) for a box whose USB grabber is absent, so it settles into a quiet, clearly-logged retry
+// instead of a ~3 s restart storm and auto-recovers on (re-)plug. No probe deps, so it unit-tests
+// Tier-0; `src/main.rs`'s auto-detect branch injects the real `config::find_capture_device_opt`
+// probe + `std::thread::sleep`.
+pub mod no_device;

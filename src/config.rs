@@ -165,7 +165,14 @@ impl Config {
         }
     }
 
-    /// Get the video device path, resolving "auto" to first available device
+    /// Get the video device path, resolving "auto" to first available device.
+    ///
+    /// #828: the "auto" arm here does a ONE-SHOT probe (bails when none present). `src/main.rs`'s
+    /// startup no longer routes the auto case through this method — it calls
+    /// `crate::no_device::wait_for_capture_device(find_capture_device_opt, ...)` so a device-less
+    /// box slow-retries instead of bailing. This method is retained for the explicit-device path
+    /// and for callers/tests that want the one-shot Result form; keep the "auto" branch in sync
+    /// with `find_capture_device_opt` if that probe ever changes.
     pub fn device_path(&self) -> Result<String> {
         if self.device == "auto" {
             find_capture_device()
@@ -177,23 +184,34 @@ impl Config {
 
 /// Find first available V4L2 capture device
 fn find_capture_device() -> Result<String> {
+    find_capture_device_opt().ok_or_else(|| anyhow::anyhow!("No video capture device found"))
+}
+
+/// Probe for the first available V4L2 capture device, returning `None` when none is present.
+///
+/// The `Option`-returning sibling of [`find_capture_device`] — used by the #828 no-device
+/// slow-retry loop (`crate::no_device::wait_for_capture_device`), which must distinguish
+/// "no device (yet) — retry" from an error to propagate. A device node that exists but whose
+/// caps cannot be read is skipped (treated as "not a usable capture device"), not fatal.
+pub fn find_capture_device_opt() -> Option<String> {
     use v4l::device::Device;
 
     for i in 0..10 {
         let path = format!("/dev/video{}", i);
         if let Ok(device) = Device::with_path(&path) {
             // Check if this device supports video capture
-            let caps = device.query_caps()?;
-            if caps
-                .capabilities
-                .contains(v4l::capability::Flags::VIDEO_CAPTURE)
-            {
-                tracing::info!("Auto-detected capture device: {}", path);
-                return Ok(path);
+            if let Ok(caps) = device.query_caps() {
+                if caps
+                    .capabilities
+                    .contains(v4l::capability::Flags::VIDEO_CAPTURE)
+                {
+                    tracing::info!("Auto-detected capture device: {}", path);
+                    return Some(path);
+                }
             }
         }
     }
-    anyhow::bail!("No video capture device found")
+    None
 }
 
 #[cfg(test)]
