@@ -8478,3 +8478,28 @@ Review: 0 🔴 2 🟡 3 🔵, all fixed same-branch. Gotcha logged: cargo tests 
 - GOTCHA (seam brace-freedom): `tests/aux_sender_budget_879.rs` finds the seam's closing brace via
   the FIRST `"\n}"` after the signature, so the seam must stay brace-free — the new max-term uses a
   `? :` ternary precisely to avoid a nested `{}` block.
+## issue 876 — dantesync fleet-upgrade mechanism (worktree autopilot-876, v1.7.0-dev.461)
+- The clock authority (dantesync, separate Claude-stewarded repo) had NO remediation mechanism:
+  Windows auto-updater (`DanteSyncUpdate` task) died at the DanteTimeSync->DanteSync rename
+  (dantesync f8dfd6c) and was never replaced; Linux never had any. Every convergence is a manual
+  8-box hand-roll (issue 862's version-gate is the DETECTION half; this is the REMEDIATION half).
+- STILL-VALID verified live (read-only): fleet at 1.8.41 (dev1/cam1/imag-nb/strih), matching the
+  gate pin — but by hand; the dead strih `DanteSyncUpdate` task still Enabled, Next=N/A, Result=0.
+- New `scripts/dantesync-fleet-upgrade.sh` mirrors the tested `upgrade-fleet-ndi.sh` framework:
+  pure fns above a source-guard (unit-tested by tests/dantesync_fleet_upgrade.rs), canary-first
+  (one per OS class), targets DANTESYNC_VERSION_PIN (never `releases/latest`), reuses the gate's
+  version parser + pin + dantesync-gate.sh (PTP-lock+offset verify) + cambox-offline-ack.sh.
+  Retires the dead task (schtasks /Delete), does NOT resurrect a silent cron — mechanism liveness
+  IS the gate's liveness. Decision: no dantesync-repo change (the dead task is a box relic; the
+  script purges it). NO rig writes this round — the actual fleet run is a separate supervised step.
+- Commits: e8abf55f5 (bump) · 104f7e9cb [red] (test guard) · 044cad42b [green] (script) ·
+  d6ff8ab47 (fix review findings).
+- Review (general-purpose, both passes): 2 crit + 2 warn + suggestions, all fixed in-branch —
+  verify_node `--ntp-master ""` (else non-strih Windows nodes always fail the gate); self-heal
+  swap (ERR trap / try-catch) so an upgrade failure never blind-rolls-back a healthy master into a
+  downgrade; `.ps1`-file Windows path via scp+`-File` (rig-state-inspection.md §2: nested
+  `-Command` over ssh fails silently); captured remote output; early `--dry-run` exit.
+- GOTCHA: the gate's SSH version reader (`read_dantesync_version_output`) lives BELOW its own
+  source-guard, so sourcing the gate exposes only the PURE parser + the pin — write your own ssh
+  transport, reuse only the parser. Tier-0 (heavy cargo test CI-only, issue 477): verified via
+  33/33 bash-harness checks + shellcheck + `bash -n` + `rustfmt --check`; Rust binary compiles on CI.
