@@ -31,6 +31,36 @@ Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads cont
 - Note: origin/dev advanced past base b934c9e57 with sibling merges during the run; version bumped
   to 1.7.0-dev.461 from the base's .458 per dispatch — supervisor resolves any bump collision at
   integration. Issue 880 stays OPEN until the supervisor integrates this branch.
+## 2026-08-15 — #1061 (latency-pin verify-at-start, REPORT-only) -- issue 866 latency half, 1057 follow-up
+
+- **#1061** -- delivered the LATENCY half of the issue-866 "verify OBS state at start" ask (the burn
+  half landed in 1057). Resolved the ticket's `needs-user-decision` fork with the safe,
+  rule-mandated default: authoritative source = a committed baseline file
+  (`scripts/latency-pins-baseline.json`), and the start path only REPORTS drift, never overwrites
+  (per-source latency is the operator's A/V-align domain -- forcing would fight the operator).
+- New `scripts/latency_pins_verify.py`: reads live `genlock_latency_ms_src` read-only over OBS WS,
+  diffs vs the committed baseline, reports drift LOUD (box+input+got+want), exit 0/1/2. Reuses
+  `obs_phase2._conn/_rpc`, `imag_latency_enforce.list_ndi_inputs`, and mirrors
+  `latency_pins_snapshot.read_pin`'s honest-None convention. Wired into the launch plan as STEP 3b
+  for strih+stream (`scripts/launch-obs-genlock.sh`); imag uses an `_all_ndi_inputs_ms` floor
+  sentinel (imag is always the 3ms floor everywhere).
+- GOTCHA re-confirmed: bundle-state's `ndi_input_latency` facet reads DistroAV's stock `latency`
+  (certified 0), NOT the genlock build's `genlock_latency_ms_src` -- so bundle-state is the WRONG
+  source for a pins baseline; the authoritative pins are WS-only via `GetInputSettings`.
+- Baseline seeded from the live 2026-08-15 read-only WS snapshot: strih cam1=3/cam2=6/cam3=20 (the
+  default CAMERA_ACTIVE_SET; retired-grabber cam4..7 excluded), stream `NDI 2ME PGM` want 915 +/-60.
+  Live discrepancy recorded (nothing changed): stream 2ME PGM live=915 vs the ~923 design (inside
+  the band); strih cam6=62/cam7=41 stale on retired grabbers (outside the active set).
+- Review caught + FIXED an in-diff fail-OPEN: the imag floor enumeration must FAIL CLOSED on a
+  failed/empty GetInputList (never a vacuous "0 inputs => OK"), per the burn-target-enumeration /
+  camera-active-set rule. `ignore_err=False` on the enumerate GetInputList + a floor-empty exit-2
+  guard, with `TestEnumerationFailsClosed` regressions.
+- TDD: python RED `ebc04d51e` / GREEN `ca315853d`; launch-plan RED `4ab96323b` / GREEN `611b360de`;
+  review fix `0e6ee1223`. Version bump `5fa29efea` -> 1.7.0-dev.461. Local: 30 python tests pass,
+  launch-plan test compiles clean, live read-only verify OK on strih/stream/imag.
+- Residual: wiring the verify into imag's OWN OBS-start (systemd supervision) is a separate
+  subsystem, out of the launch-plan (strih/stream) scope; the verify TOOL already supports
+  `--box imag`.
 
 ## 2026-07-14 — #745 (fixed+closed, deployed cam6) / #753 (wiring landed, stays open) / strih 1:1 mapping pivot -- bundled batch, PR #704 train
 
