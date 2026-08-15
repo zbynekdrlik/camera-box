@@ -133,24 +133,39 @@ fn deadman_refuses_to_start_the_painter_while_a_frame_probe_is_running_872() {
     );
 }
 
+/// SUPERSEDED BY #1072 (2026-08-15). This test previously asserted `mins >= 60`, because the
+/// dead-man was a ONE-SHOT `--on-active` timer whose ONLY protection against firing mid-run was a
+/// delay longer than the longest run. #1072 replaced that with a PERIODIC re-fire (`--on-unit-active`)
+/// on a SHORT (~5-min) window: mid-run safety now comes ENTIRELY from the `pgrep -x frame-probe`
+/// guard (verified by `deadman_refuses_to_start_the_painter_while_a_frame_probe_is_running_872`
+/// above — every periodic fire during a live run is a no-op because the harness's own frame-probe
+/// is running the whole run), and the short window is what lets a SIGKILLed run's standing painter
+/// recover within ~5 min instead of up to 90. So the invariant flips: the window must now be SHORT,
+/// and the periodic + guard combination is what keeps it safe. Kept in this file (renamed) so the
+/// old >=60 rule cannot silently return.
 #[test]
-fn deadman_delay_comfortably_exceeds_the_longest_run_872() {
+fn deadman_window_is_short_and_made_safe_by_the_periodic_guard_1072() {
     let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/lib/cam2-painter-deadman.sh");
     let s = fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()));
     let line = s
         .lines()
         .find(|l| l.starts_with("CAM2_PAINTER_DEADMAN_MINUTES="))
-        .expect("#872: expected the delay default");
+        .expect("#872/#1072: expected the window default");
     let mins: u32 = line
         .split(":-")
         .nth(1)
         .and_then(|t| t.trim_end_matches("}\"").trim_end_matches('}').parse().ok())
-        .unwrap_or_else(|| panic!("#872: could not parse the delay from {line:?}"));
+        .unwrap_or_else(|| panic!("#1072: could not parse the window from {line:?}"));
     assert!(
-        mins >= 60,
-        "#872: a live run holds the painter stopped for 25-35 min (stop -> recording -> per-box \
-         decode -> cleanup); a delay of {mins} min risks firing MID-RUN and starting a second \
-         painter. Keep it well clear of the longest run."
+        mins <= 5,
+        "#1072: the dead-man window is now a SHORT periodic re-fire ({mins} min) so a standing \
+         TEST painter is never dark longer than ~5 min; mid-run safety is the pgrep guard, not a \
+         long delay. The old #872 `>= 60` one-shot rule is superseded."
+    );
+    assert!(
+        s.contains("--on-unit-active"),
+        "#1072: a short window is ONLY safe as a PERIODIC re-fire (--on-unit-active) — a short \
+         one-shot would fire once and could not recover a run killed after it already fired"
     );
 }
 
