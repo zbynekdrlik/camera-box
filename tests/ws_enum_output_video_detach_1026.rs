@@ -86,9 +86,9 @@ fn detach_runs_before_mix_free_no_lock_nesting_1026() {
     let src = read_obs_canvas();
     let body = clear_mix_body(&src);
 
-    let outputs_lock = body
-        .find("obs->data.outputs_mutex")
-        .expect("#1026: outputs_mutex detach missing (see clear_mix_detaches_borrowed_output_video_1026)");
+    let outputs_lock = body.find("obs->data.outputs_mutex").expect(
+        "#1026: outputs_mutex detach missing (see clear_mix_detaches_borrowed_output_video_1026)",
+    );
     let mixes_lock = body
         .find("obs->video.mixes_mutex")
         .expect("#1026: obs_canvas_clear_mix must still lock mixes_mutex to free the mix");
