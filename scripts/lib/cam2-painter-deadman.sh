@@ -34,17 +34,26 @@
 # Transient unit name shared by the arm/disarm pair. `systemd-run --unit=NAME --on-active=...`
 # creates NAME.timer plus NAME.service; both are cleaned up by the disarm below.
 CAM2_PAINTER_DEADMAN_UNIT="${CAM2_PAINTER_DEADMAN_UNIT:-cam2-painter-deadman}"
-# How long the box waits before self-healing. This must comfortably exceed the LONGEST possible
-# run, because a live run holds the painter stopped for its whole duration: [2b/8] stops it, then
-# a 300s+ recording, then the per-box decode, then cleanup(). Measured runs sit at 25-35 min from
-# stop to restore, so 40 was too tight -- a slow decode would let the timer fire MID-RUN and start
-# the permanent painter alongside the harness's own frame-probe, which is verbatim the #440
-# two-painter artifact this stop exists to prevent. 90 minutes leaves the healthy path far clear.
-CAM2_PAINTER_DEADMAN_MINUTES="${CAM2_PAINTER_DEADMAN_MINUTES:-90}"
+# The self-heal window, as a PERIODIC re-fire (#1072, superseding the #872 one-shot 90-min delay).
+# #872 chose a 90-min ONE-SHOT `--on-active` timer precisely so it could not fire MID-RUN (a live
+# run holds the painter stopped for 25-35 min): with a one-shot, a long delay was the ONLY thing
+# keeping it clear of the run. But a one-shot fires exactly once -- so a run SIGKILLed after it
+# already fired (or before, then the run outlives... ) leaves the standing painter dark for up to
+# the full window. #1072's requirement: a standing TEST painter must never be dark longer than
+# ~5 min on ANY exit path. The fix is a PERIODIC re-fire on a SHORT window (below + --on-unit-active
+# in the arm): mid-run safety no longer comes from a long delay but from the `pgrep -x frame-probe`
+# guard in the action -- every fire during a live run is a no-op because the harness's OWN
+# frame-probe owns fb0 the whole run (armed + frame-probe launched within ~25s in one ssh command,
+# so the first fire at +5min always sees frame-probe running). Once a killed run's frame-probe is
+# gone, the next fire within ~5 min brings the painter back; thereafter the guard sees the painter's
+# OWN frame-probe and no-ops, and the unit's Restart=always keeps it up. This unifies the recovery
+# window to ~5 min for the clean-cleanup path and the SIGKILL path alike.
+CAM2_PAINTER_DEADMAN_MINUTES="${CAM2_PAINTER_DEADMAN_MINUTES:-5}"
 
 # cam2_painter_deadman_arm_cmds -> REMOTE bash (embed via `$(cam2_painter_deadman_arm_cmds)`
 # IMMEDIATELY BEFORE a `systemctl stop cam2-painter` in the same remote ssh command string).
-# Arms a transient timer that will `systemctl start cam2-painter` if nothing disarms it first.
+# Arms a transient PERIODIC timer (#1072) that re-fires every CAM2_PAINTER_DEADMAN_MINUTES and
+# `systemctl start cam2-painter` whenever no frame-probe is running, until cleanup() disarms it.
 # A box without the unit installed is a guarded no-op (#440's existing guard convention), never
 # a failure. Re-arming is idempotent: any previous transient unit is cleared first, so repeated
 # runs never collide on the unit name.
@@ -57,9 +66,9 @@ cam2_painter_deadman_arm_cmds() {
 if systemctl list-unit-files cam2-painter.service >/dev/null 2>&1; then
   systemctl stop ${CAM2_PAINTER_DEADMAN_UNIT}.timer 2>/dev/null || true
   systemctl reset-failed ${CAM2_PAINTER_DEADMAN_UNIT}.service 2>/dev/null || true
-  systemd-run --quiet --on-active=${CAM2_PAINTER_DEADMAN_MINUTES}min --unit=${CAM2_PAINTER_DEADMAN_UNIT} \\
+  systemd-run --quiet --on-active=${CAM2_PAINTER_DEADMAN_MINUTES}min --on-unit-active=${CAM2_PAINTER_DEADMAN_MINUTES}min --unit=${CAM2_PAINTER_DEADMAN_UNIT} \\
     /bin/bash -c 'pgrep -x frame-probe >/dev/null && exit 0; systemctl start cam2-painter' 2>/dev/null \\
-    && echo "[#872] cam2-painter dead-man armed (${CAM2_PAINTER_DEADMAN_MINUTES}min) -- a killed run self-heals on this box" \\
+    && echo "[#872/#1072] cam2-painter dead-man armed (periodic, every ${CAM2_PAINTER_DEADMAN_MINUTES}min) -- a killed run self-heals on this box within ~${CAM2_PAINTER_DEADMAN_MINUTES}min" \\
     || echo "WARNING #872: could not arm the cam2-painter dead-man -- a killed run WILL leave the monitor dark" >&2
 fi;
 ARM

@@ -65,7 +65,24 @@ optical_chain_preflight_assert() {
     alive="$(optical_chain_painter_alive_from_snapshot "$snapshot")"
   fi
   if [ "$alive" != "1" ]; then
-    echo "ERROR: [0/8] optical injection leg DEAD — a standing cam2 painter is EXPECTED ($pidfile present or $service enabled) but it is NOT alive (re-probed after a grace window)." >&2
+    # #1072: EXACTLY ONE self-heal attempt before refusing the run. A previous run's cleanup may
+    # have left the standing painter dead (the #872/#860 class); rather than waste this whole run
+    # at preflight, start the permanent unit ONCE over ssh and re-probe. Fail-closed: control falls
+    # through to the abort below if it is STILL not alive after this single attempt (no retry loop
+    # -- the on-box #872 dead-man is the periodic net; this is one fast recovery, bounded).
+    echo "    [0/8] optical-chain preflight self-heal (#1072): standing cam2 painter DEAD — ONE 'systemctl start $service' attempt + re-probe before refusing" >&2
+    timeout 15 sshpass -p "$cam_pw" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 \
+      "${cam_user}@${painter_ip}" "systemctl start $service 2>/dev/null || true" >/dev/null 2>&1 || true
+    sleep 4
+    snapshot="$(timeout 15 sshpass -p "$cam_pw" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 \
+      "${cam_user}@${painter_ip}" "$(optical_chain_painter_probe_remote_snippet "$pidfile" "$service")" 2>/dev/null || true)"
+    alive="$(optical_chain_painter_alive_from_snapshot "$snapshot")"
+    if [ "$alive" = "1" ]; then
+      echo "    ok: [0/8] optical-chain preflight self-heal (#1072) recovered the standing cam2 painter — proceeding"
+    fi
+  fi
+  if [ "$alive" != "1" ]; then
+    echo "ERROR: [0/8] optical injection leg DEAD — a standing cam2 painter is EXPECTED ($pidfile present or $service enabled) but it is NOT alive (re-probed after a grace window + one self-heal start)." >&2
     echo "       cam2's monitor is dark, so the cam2→cam1 optical leg cannot be read; a previous run's cleanup likely left it dead (issue 860 / WARNING #712 class)." >&2
     echo "       Recovery: scripts/rig-mode.sh test   # relaunch the painter + re-verify the chain non-black, then re-run." >&2
     exit 1

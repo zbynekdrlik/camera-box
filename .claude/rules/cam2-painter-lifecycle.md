@@ -3,6 +3,7 @@ paths:
   - "scripts/rig-mode.sh"
   - "scripts/lib/cam2-painter-handoff.sh"
   - "scripts/lib/cam2-painter-restore-verify.sh"
+  - "scripts/lib/cam2-painter-restore-retry.sh"
   - "scripts/lib/cam2-painter-deadman.sh"
   - "systemd/cam2-painter.service"
   - "tests/harness_cam2_painter_steady_state_handoff.rs"
@@ -56,3 +57,32 @@ since #984, emitting the QPSK marker default-ON.
 - `--marker-log` may be added to the base unit ExecStart WITHOUT tripping the provisioning test's
   `!out.contains("--audio-marker")` assertion (marker-log ≠ audio-marker; the marker stays
   default-ON, flag-free).
+
+## Recovering a dead standing painter after a run (#1072)
+
+Three composed recovery seams keep the standing painter from staying dark after an E2E run — the
+combination unifies worst-case recovery to ~5 min on BOTH the clean-cleanup and SIGKILL paths:
+
+- **cleanup restore is a bounded RETRY, not one-shot** (`scripts/lib/cam2-painter-restore-retry.sh`,
+  `cam2_painter_restore_retry_cmds`). It runs AFTER the anchored `systemctl start cam2-painter
+  2>/dev/null || true` + adjacent `$(cam2_painter_restore_verify_cmds)` (those two lines are pinned
+  by #863/#872/#312/#713/coordination — never edit them; the retry is a #675 sourced-lib appended
+  via ONE `$(...)` line). It sets the remote var `_cprr_ok`; cleanup wraps
+  `$(cam2_painter_deadman_disarm_cmds)` in `if [ -n "$_cprr_ok" ]` so a FAILED restore LEAVES the
+  dead-man armed. **Budget gotcha:** the whole cam2 cleanup ssh is wrapped in
+  `timeout "$CLEANUP_SSH_TIMEOUT"` (30s) — keep the retry bounded (CAM2_PAINTER_RESTORE_RETRIES=3,
+  ~3s poll each; the common already-active case adds ~0s). If a pure-failure retry does overrun the
+  timeout, the SIGKILL is a SAFE fail: the `if [ -n "$_cprr_ok" ]` never runs, so the dead-man stays
+  armed and self-heals — never "fix" this by extending CLEANUP_SSH_TIMEOUT.
+- **the #872 dead-man is now PERIODIC** (`--on-active` + `--on-unit-active`, window 5 min, not a
+  one-shot 90 min). Mid-run safety is the `pgrep -x frame-probe` guard (every fire during a live run
+  is a no-op — frame-probe is armed+launched within ~25s in the SAME `_cam2_prep` ssh command and
+  runs the whole run via `--duration-secs`), NOT a long delay. A short one-shot would be WRONG here
+  (fires once, cannot recover a run killed after it fired) — periodic is what makes the short window
+  safe. Residual: `--av-sync` mode's brief kill→relaunch frame-probe gap is a low-probability
+  measurement artifact only, never a dark rig.
+- **the [0/8] optical-chain preflight self-heals ONCE** (`scripts/lib/optical-chain-preflight.sh`):
+  when a standing painter is EXPECTED but DEAD after the grace re-probe, it does EXACTLY ONE
+  `systemctl start $service` over ssh + re-probe before the existing `exit 1` fail-closed backstop.
+  No retry loop — the periodic on-box dead-man is the net; this is one fast recovery so a
+  previous run's leftover-dead painter does not waste the whole gate run.

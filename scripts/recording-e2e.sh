@@ -112,6 +112,11 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # killed run self-heals there, with no dev1 involvement.
 # shellcheck source=scripts/lib/cam2-painter-deadman.sh
 . "$HERE/lib/cam2-painter-deadman.sh"
+# #1072: turn cleanup()'s one-shot painter restore into a bounded RETRY (fail-loud) that exposes a
+# success flag (_cprr_ok) so the dead-man is disarmed ONLY when the painter genuinely came back --
+# a failed restore leaves the (now periodic ~5-min) dead-man armed to self-heal.
+# shellcheck source=scripts/lib/cam2-painter-restore-retry.sh
+. "$HERE/lib/cam2-painter-restore-retry.sh"
 # #860: the SHARED pure optical-chain decision core + its [0/8] preflight fail-fast (the #675
 # sourced-lib pattern -- the preflight is invoked with ONE line below, no anchored line edited).
 # shellcheck source=scripts/lib/optical-chain-health.sh
@@ -1231,7 +1236,12 @@ systemctl restart camera-box 2>/dev/null || true
 $(camera_box_verify_active_cmds "cam2/painter, $PAINTER_IP")
 systemctl start cam2-painter 2>/dev/null || true
 $(cam2_painter_restore_verify_cmds)
-$(cam2_painter_deadman_disarm_cmds)"
+$(cam2_painter_restore_retry_cmds)
+if [ -n \"\$_cprr_ok\" ]; then
+$(cam2_painter_deadman_disarm_cmds)
+else
+  echo \"[cleanup] #1072: cam2-painter NOT confirmed active after retry — leaving the on-box dead-man ARMED for the ~5-min periodic self-heal\" >&2
+fi"
   ) &
   CAMBOX_PARALLEL_PIDS+=("$!")
   CAMBOX_PARALLEL_LABELS+=("cam2/painter, $PAINTER_IP")
