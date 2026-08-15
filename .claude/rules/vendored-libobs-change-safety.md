@@ -12,6 +12,7 @@ paths:
   - "vendor/obs-studio/libobs/obs-display-budget.h"
   - "vendor/distroav/src/ndi-filter.cpp"
   - "tests/aux_sender_budget_879.rs"
+  - "tests/aux_sender_teardown_ordering_877.rs"
   - ".github/workflows/windows-genlock.yml"
   - ".github/workflows/windows-genlock-fast.yml"
 ---
@@ -283,3 +284,30 @@ at. Fix invariant (both tickets): DETACH the borrowed pointer to NULL BEFORE the
 already-NULL-safe `media-io/video-io.c` getters return 0 instead of dereferencing freed memory. If
 a THIRD WS-enum reader crashes on some other borrowed pointer, look for the same "set once, never
 cleared on stop, freed by a reset the reader doesn't lock against" lifecycle before anything else.
+## Aux ndi_filter TEARDOWN ordering + why "disable" never destroys a sender (#877)
+
+Reasoning about an aux-sender wedge ("disabling all three aux NDI senders wedged PROGRAM to 0 fps")
+needs two non-obvious facts about the DistroAV `ndi_filter` (interkom / MULTIVIEW / Grading):
+
+- **A DISABLED filter's `video_render` is NEVER called, so disable triggers NO teardown.**
+  `ndi_filter` is `OBS_SOURCE_TYPE_FILTER` with `OBS_SOURCE_VIDEO` (see `create_ndi_filter_info`).
+  In `vendor/obs-studio/libobs/obs-source.c` `render_video()`: `if (!source->context.data ||
+  !source->enabled) { obs_source_skip_video_filter(source); return; }` — a disabled filter is
+  skipped BEFORE `ndi_filter_render_video`. So on disable the DistroAV code runs nothing for that
+  filter (no texrender, no send, no `send_destroy`); the sender stays alive+idle. The destroy paths
+  (`ndi_filter_destroy` / `ndi_filter_remove` / `ndi_sender_destroy`) hang on OBS remove/destroy
+  callbacks, NEVER on enable/disable. Any "three senders destroyed at once on disable" premise is
+  therefore wrong against current code — check `render_video()`'s enabled-gate before believing it.
+- **The teardown ORDERING is upstream-original and correct — and now locked.** `ndi_filter_destroy`
+  calls `video_output_close(f->video_output)` (stops + JOINs the raw_video send worker) BEFORE
+  `ndi_sender_destroy(f)`, which holds BOTH `ndi_sender_video_mutex` + `ndi_sender_audio_mutex`
+  before `send_destroy` — so no synchronous `send_send_video_v2` is in flight under the mutex when
+  the sender is destroyed. `tests/aux_sender_teardown_ordering_877.rs` is a Tier-0 static gate that
+  locks both orderings (with a baked-in mutation proof: reordered + missing-lock fixtures must be
+  rejected). Sig anchors match the DEFINITION line `...)\n{` to dodge the forward-decl trap
+  (`ndi_sender_destroy` has a `;`-terminated forward decl at the top of the file).
+- **The observed 0-fps root cause is NDI-SDK internal, not in readable code.** The PROGRAM output
+  (`ndi-output.cpp`) uses async `send_send_video_async_v2` (blocks the next call until the SDK frees
+  the previous async buffer); three aux senders going silent/renegotiating at once churns the shared
+  per-process NDI transmit/connection threads and can block the program's next async send. Not
+  fixable/confirmable from the vendored source; confirming it needs a live rig repro (a rig write).
