@@ -165,7 +165,14 @@ impl Config {
         }
     }
 
-    /// Get the video device path, resolving "auto" to first available device
+    /// Get the video device path, resolving "auto" to first available device.
+    ///
+    /// #828: the "auto" arm here does a ONE-SHOT probe (bails when none present). `src/main.rs`'s
+    /// startup no longer routes the auto case through this method — it calls
+    /// `crate::no_device::wait_for_capture_device(find_capture_device_opt, ...)` so a device-less
+    /// box slow-retries instead of bailing. This method is retained for the explicit-device path
+    /// and for callers/tests that want the one-shot Result form; keep the "auto" branch in sync
+    /// with `find_capture_device_opt` if that probe ever changes.
     pub fn device_path(&self) -> Result<String> {
         if self.device == "auto" {
             find_capture_device()
