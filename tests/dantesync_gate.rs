@@ -3514,10 +3514,19 @@ fn gate_reports_foreign_grandmaster_but_stays_report_only_by_default_834() {
     let p = write_gm_fixture("stream_foreign_gm", "\"gm_source_ip\":\"10.77.7.109\",");
     let (code, stdout, stderr) = run_gate_env(
         &[
-            "--linux", "", "--win-http", "stream=10.77.9.204",
+            "--linux",
+            "",
+            "--win-http",
+            "stream=10.77.9.204",
             // only "stream" is configured, no "strih" -> opt OUT of the master-name validation.
-            "--ntp-master", "",
-            "--samples", "1", "--min-distinct", "1", "--window-s", "0",
+            "--ntp-master",
+            "",
+            "--samples",
+            "1",
+            "--min-distinct",
+            "1",
+            "--window-s",
+            "0",
         ],
         &[("DANTESYNC_GATE_WIN_HTTP_STREAM", &p.display().to_string())],
     );
@@ -3540,13 +3549,25 @@ fn gate_reports_foreign_grandmaster_but_stays_report_only_by_default_834() {
 fn gate_fails_a_foreign_grandmaster_node_when_gm_enforce_is_set_834() {
     // DANTESYNC_GATE_GM_ENFORCE=1 flips the report-only check to a hard gate: a foreign GM is BAD
     // (exit 20), exactly like a DRIFT/PTP-degraded node -- the future state once the rig is fixed.
-    let p = write_gm_fixture("stream_foreign_gm_enforced", "\"gm_source_ip\":\"10.77.7.109\",");
+    let p = write_gm_fixture(
+        "stream_foreign_gm_enforced",
+        "\"gm_source_ip\":\"10.77.7.109\",",
+    );
     let (code, stdout, stderr) = run_gate_env(
         &[
-            "--linux", "", "--win-http", "stream=10.77.9.204",
+            "--linux",
+            "",
+            "--win-http",
+            "stream=10.77.9.204",
             // only "stream" is configured, no "strih" -> opt OUT of the master-name validation.
-            "--ntp-master", "",
-            "--samples", "1", "--min-distinct", "1", "--window-s", "0",
+            "--ntp-master",
+            "",
+            "--samples",
+            "1",
+            "--min-distinct",
+            "1",
+            "--window-s",
+            "0",
         ],
         &[
             ("DANTESYNC_GATE_WIN_HTTP_STREAM", &p.display().to_string()),
@@ -3567,8 +3588,16 @@ fn gate_reports_gm_ok_for_a_node_on_the_rig_grandmaster_834() {
     let p = write_gm_fixture("strih_gm_ok", "\"gm_source_ip\":\"10.77.9.184\",");
     let (code, stdout, stderr) = run_gate_env(
         &[
-            "--linux", "", "--win-http", "strih=10.77.9.202",
-            "--samples", "1", "--min-distinct", "1", "--window-s", "0",
+            "--linux",
+            "",
+            "--win-http",
+            "strih=10.77.9.202",
+            "--samples",
+            "1",
+            "--min-distinct",
+            "1",
+            "--window-s",
+            "0",
         ],
         &[("DANTESYNC_GATE_WIN_HTTP_STRIH", &p.display().to_string())],
     );
@@ -3588,10 +3617,19 @@ fn gate_reports_gm_unknown_when_gm_source_ip_absent_and_enforce_set_834() {
     let p = write_gm_fixture("stream_gm_absent", "");
     let (code, stdout, stderr) = run_gate_env(
         &[
-            "--linux", "", "--win-http", "stream=10.77.9.204",
+            "--linux",
+            "",
+            "--win-http",
+            "stream=10.77.9.204",
             // only "stream" is configured, no "strih" -> opt OUT of the master-name validation.
-            "--ntp-master", "",
-            "--samples", "1", "--min-distinct", "1", "--window-s", "0",
+            "--ntp-master",
+            "",
+            "--samples",
+            "1",
+            "--min-distinct",
+            "1",
+            "--window-s",
+            "0",
         ],
         &[
             ("DANTESYNC_GATE_WIN_HTTP_STREAM", &p.display().to_string()),
