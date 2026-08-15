@@ -204,3 +204,56 @@ class TestCommittedBaseline:
                 assert want >= 0 and tol >= 0
         # imag is the floor sentinel
         assert data["imag"].get("_all_ndi_inputs_ms") == 3
+
+
+# ---------------------------------------------------------------------------
+# FAIL-CLOSED enumeration (the floor path must never be a vacuous green)
+# ---------------------------------------------------------------------------
+class TestEnumerationFailsClosed:
+    def test_getinputlist_non_dict_raises(self, monkeypatch):
+        # A swallowed/errored GetInputList (returning None) must RAISE, not silently enumerate 0.
+        def _rpc_bad_list(ws, rtype, rdata=None, ignore_err=False, timeout_s=None):
+            if rtype == "GetInputList":
+                return None
+            raise AssertionError("must not reach per-input reads when the list is unusable")
+
+        monkeypatch.setattr(lpv, "_rpc", _rpc_bad_list)
+        with pytest.raises(ValueError):
+            lpv.read_pins_over_ws(_FakeWs({}), None)
+
+    def test_getinputlist_missing_inputs_key_raises(self, monkeypatch):
+        def _rpc_no_inputs(ws, rtype, rdata=None, ignore_err=False, timeout_s=None):
+            if rtype == "GetInputList":
+                return {"notinputs": []}
+            raise AssertionError("unreachable")
+
+        monkeypatch.setattr(lpv, "_rpc", _rpc_no_inputs)
+        with pytest.raises(ValueError):
+            lpv.read_pins_over_ws(_FakeWs({}), None)
+
+    def test_main_floor_box_empty_enumeration_exits_2(self, monkeypatch):
+        # imag (floor box) that reads ZERO inputs is FAIL-CLOSED (exit 2), never a green exit 0.
+        monkeypatch.setattr(lpv, "read_live_pins", lambda host, pw, names: {})
+        rc = lpv.main(["--box", "imag", "--host", "10.77.9.182"])
+        assert rc == 2
+
+    def test_main_connect_failure_exits_2(self, monkeypatch):
+        def _boom(host, pw, names):
+            raise ConnectionError("unreachable box")
+
+        monkeypatch.setattr(lpv, "read_live_pins", _boom)
+        rc = lpv.main(["--box", "strih", "--host", "10.77.9.202"])
+        assert rc == 2
+
+    def test_main_drift_exits_1_clean_exits_0(self, monkeypatch):
+        # strih baseline is cam1=3/cam2=6/cam3=20; a matching live read -> 0, a revert -> 1.
+        monkeypatch.setattr(
+            lpv, "read_live_pins",
+            lambda host, pw, names: {"NDI cam1": 3, "NDI cam2": 6, "NDI cam3": 20},
+        )
+        assert lpv.main(["--box", "strih", "--host", "x"]) == 0
+        monkeypatch.setattr(
+            lpv, "read_live_pins",
+            lambda host, pw, names: {"NDI cam1": 73, "NDI cam2": 6, "NDI cam3": 20},
+        )
+        assert lpv.main(["--box", "strih", "--host", "x"]) == 1

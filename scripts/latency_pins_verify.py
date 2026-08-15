@@ -43,7 +43,7 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
 from obs_phase2 import _conn, _rpc  # noqa: E402
-from imag_latency_enforce import is_ndi_kind  # noqa: E402
+from imag_latency_enforce import list_ndi_inputs  # noqa: E402
 
 GENLOCK_SRC_LATENCY_KEY = "genlock_latency_ms_src"
 FLOOR_KEY = "_all_ndi_inputs_ms"
@@ -136,14 +136,18 @@ def _read_one_pin(ws, name: str) -> "int | None":
 
 def read_pins_over_ws(ws, names) -> dict:
     """Read genlock pins over `ws`. `names` = an explicit list, OR None to enumerate every live
-    NDI-kind input. Returns {name: int|None}."""
+    NDI-kind input. Returns {name: int|None}.
+
+    Floor-box enumeration FAILS CLOSED: a failed or malformed `GetInputList` RAISES (never a
+    swallowed "0 inputs => vacuously OK" -- the exact fail-open class
+    .claude/rules/burn-target-enumeration.md / camera-active-set.md ban). So `ignore_err` is FALSE
+    here (an OBS request error -> RuntimeError, a hang -> TimeoutError, both propagate to `main`'s
+    fail-closed exit 2), UNLIKE the per-input read below where a missing pin is an honest N/A."""
     if names is None:
-        il = _rpc(ws, "GetInputList", {}, ignore_err=True) or {}
-        names = [
-            i.get("inputName")
-            for i in il.get("inputs", [])
-            if is_ndi_kind(i.get("inputKind", ""))
-        ]
+        il = _rpc(ws, "GetInputList", {})
+        if not isinstance(il, dict) or not isinstance(il.get("inputs"), list):
+            raise ValueError(f"GetInputList returned no usable inputs list: {il!r}")
+        names = list_ndi_inputs(il["inputs"])
     return {name: _read_one_pin(ws, name) for name in names}
 
 
@@ -185,6 +189,17 @@ def main(argv=None) -> int:
         print(
             f"ERROR: latency_pins_verify: could not read {args.box} pins over WS at {args.host}: {e}\n"
             f"       FAIL-CLOSED -- cannot confirm the agreed latency pins; do NOT trust this box's pins.",
+            file=sys.stderr,
+        )
+        return 2
+
+    if FLOOR_KEY in baseline_box and not live_pins:
+        # A floor box (imag) with ZERO NDI inputs read is NOT a clean pass -- it means the floor
+        # could not be confirmed on any input. Fail CLOSED (never the vacuous green the review
+        # flagged), same discipline as the enumeration raise above.
+        print(
+            f"ERROR: latency_pins_verify: enumerated ZERO NDI inputs on floor box '{args.box}' "
+            f"({args.host}) -- cannot confirm the {baseline_box[FLOOR_KEY]}ms floor. FAIL-CLOSED.",
             file=sys.stderr,
         )
         return 2
