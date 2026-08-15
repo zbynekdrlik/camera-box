@@ -1672,9 +1672,9 @@ fn setup_imag_total_steps_matches_actual_step_calls() {
         })
         .count();
     assert_eq!(
-        declared, 22,
-        "TOTAL_STEPS must be 22 after #1040 added the power/thermal-envelope provisioning step to \
-         the prior 21"
+        declared, 23,
+        "TOTAL_STEPS must be 23 after #858 added the remoteos-mcp control-channel agent provisioning \
+         step to the #1040 total of 22"
     );
     assert_eq!(
         actual, declared,

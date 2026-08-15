@@ -1047,8 +1047,11 @@ the sorted DISTINCT value set, never the raw delivery-order sequence.
 The `win-*`/`linux-*` MCP tools this session (and every session working this rig) uses are served
 by `remoteos-mcp` — its own repo (`~/devel/remoteos-mcp`, GitHub `zbynekdrlik/remoteos-mcp`), with
 its own CLAUDE.md, its own `.claude/skills/install` playbook, and its own versioning
-(`0.7.0.devN`). camera-box does NOT install, update, or pin this agent — do not look for it in
-this repo's scripts.
+(`0.7.0.devN`). camera-box does NOT re-implement, re-pin, or UPGRADE this agent — upgrades always
+use the agent's own installer (below). Since #858 the ONE exception is initial PROVISIONING of a
+fresh imag box: `scripts/setup-imag.sh` step 23 INVOKES the canonical `install-linux.sh` (it does
+not duplicate or re-pin it) so a freshly hardware'd imag notebook comes up with a working
+`linux-imag-nb` MCP surface instead of needing a hand-install.
 
 **How it runs on each box type** (all four rig Windows/Linux boxes, `--enable-all --port 8092`):
 - **Windows (strih/stream):** scheduled task `RemoteOSMCP` (`wscript.exe .remoteos-mcp\
@@ -1065,7 +1068,9 @@ this repo's scripts.
 - **Linux (imag-nb/cam1-4):** `systemd` unit `remoteos-mcp.service`, package installed globally
   via `pip install --break-system-packages --ignore-installed git+https://github.com/zbynekdrlik/
   remoteos-mcp.git` (its own `install-linux.sh`). Same upgrade discipline: use the installer, never
-  a bare pip command.
+  a bare pip command. On imag, that installer is now invoked automatically by `setup-imag.sh` step
+  23 at provisioning time (#858; `REMOTEOS_MCP_AUTH_KEY` env pre-seeds the key so dev1's `.mcp.json`
+  keeps matching a fresh box) — cam1-4 remain hand-installed until their provisioner gains the same.
 
 **Rollback point for a specific old version:** find the exact commit via
 `git log --oneline -- pyproject.toml` in the remoteos-mcp checkout + `git show <sha>:pyproject.toml`

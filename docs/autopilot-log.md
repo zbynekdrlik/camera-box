@@ -8593,3 +8593,22 @@ No push/PR/rig touch (worktree worker).
   (86cb36552, skip a UTF-8 BOM + a test case).
   DEPLOY (supervisor): FRONTEND change => needs an obs64.exe swap; the FAST artifact will NOT carry
   the fix -- the full windows-genlock.yml bundle (builds + uploads obs64.exe) is required to deploy.
+
+## issue 858 — setup-imag.sh provisions the RemoteOS MCP agent (worktree autopilot-858, v1.7.0-dev.460)
+
+- Gap: a fresh imag box came up with no `linux-imag-nb` MCP surface — `remoteos-mcp.service` (:8092)
+  was only ever a hand-install. Root-caused: setup-imag.sh had zero install step (only #504
+  purge-protection comments); setup-device.sh had none either; the agent's real home is the separate
+  `zbynekdrlik/remoteos-mcp` repo + its own `install-linux.sh` (ops-skill #555).
+- Fix: new `step 23` in setup-imag.sh INVOKES the canonical installer (never re-pins — #555
+  discipline); auth-key via optional `REMOTEOS_MCP_AUTH_KEY` env (pre-seed `/etc/remoteos-mcp/
+  config.json` chmod 600 so the installer reuses it and dev1's `.mcp.json` keeps matching), else the
+  installer generates on-box. Charset-guarded before the JSON write. `TOTAL_STEPS` 22→23.
+- RED test(#858) `tests/setup_imag_remoteos_mcp_858.rs` (source-guard, 5 tests) → GREEN; drift test
+  in `tests/setup_imag_guards.rs` updated 22→23.
+- Review (fresh-context general-purpose, /review + /requesting-code-review): 0 crit / 1 warn / 4 sug,
+  all fixed in-branch — charset guard, pre-seed-order test, removed redundant curl guard, ops #555
+  playbook note corrected.
+- Tier-0: fmt / clippy -D warnings / `cargo test --no-run` / `bash -n setup-imag.sh` all clean
+  (tests run in CI, not locally). Out of scope (noted): pinning remoteos-mcp's transitive deps in
+  ITS pyproject.toml; extending the same step to setup-device.sh (cam1-4).
