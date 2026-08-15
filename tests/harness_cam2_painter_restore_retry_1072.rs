@@ -140,12 +140,13 @@ fn preflight_attempts_one_self_heal_start_before_the_abort_1072() {
     let heal = s
         .find("systemctl start")
         .unwrap_or_else(|| panic!("#1072: the preflight must attempt ONE self-heal `systemctl start` of the painter before refusing the run"));
-    let abort = s.find("exit 1").expect(
-        "#1072: the preflight must still fail-closed with exit 1 when the self-heal did not take",
-    );
+    // The preflight file carries OTHER checks with their own `exit 1` lines BEFORE the painter
+    // block (the first `.find("exit 1")` landed on one of those on the merged tree — the
+    // anchor-uniqueness trap from the project CLAUDE.md). The intent is: a fail-closed abort
+    // exists AFTER the one self-heal attempt — so anchor the search FROM the heal site.
     assert!(
-        heal < abort,
-        "#1072: the self-heal start must come BEFORE the fail-closed exit 1 (heal {heal}, abort {abort})"
+        s[heal..].contains("exit 1"),
+        "#1072: the preflight must still fail-closed with exit 1 AFTER the self-heal attempt (heal at {heal})"
     );
 }
 
