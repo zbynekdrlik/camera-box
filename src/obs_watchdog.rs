@@ -36,6 +36,15 @@ pub struct ObsHealthSample {
     /// `renderSkipped / renderTotal` delta fraction (0.0..=1.0) over the measurement
     /// window (mirrors `render_budget::RenderSample::render_skipped_frac`).
     pub render_skipped_frac: Option<f64>,
+    /// Did `renderTotalFrames` advance AT ALL over the `GetStats` window (#935). This is
+    /// the TRUE render-loop liveness signal, gathered on a plain dev1 WS-only pass with no
+    /// process/MCP signals: `Some(true)` = the graphics loop rendered ≥1 frame in the
+    /// window, `Some(false)` = the counter did not move (a full render stall — the #935
+    /// 00:35 case), `None` = not sampled / counter reset (OBS restarted, delta < 0) / WS
+    /// unreachable. Needed because `active_fps` above (GetStats `activeFps`) is the
+    /// CONFIGURED canvas fps and keeps reporting the target (30.0 live at #935) even when
+    /// `renderTotalFrames` is frozen — so it cannot detect this stall on its own.
+    pub render_advanced: Option<bool>,
     /// Windows process count of `obs64.exe` on this box. Agent/MCP-only signal.
     pub obs64_count: Option<u32>,
     /// Win32 "IsHungAppWindow"-style Responding flag for the obs64 main window.
@@ -241,6 +250,7 @@ mod tests {
             active_fps: Some(active_fps),
             avg_render_time_ms: Some(avg_render_time_ms),
             render_skipped_frac: Some(render_skipped_frac),
+            render_advanced: None,
             obs64_count: None,
             responding: None,
             cpu_percent: None,
@@ -278,6 +288,7 @@ mod tests {
             active_fps: Some(29.5),
             avg_render_time_ms: Some(9.0),
             render_skipped_frac: Some(0.16),
+            render_advanced: Some(true),
             obs64_count: Some(1),
             responding: Some(false),
             cpu_percent: Some(168.0),
@@ -304,6 +315,7 @@ mod tests {
             active_fps: None,
             avg_render_time_ms: None,
             render_skipped_frac: None,
+            render_advanced: None,
             obs64_count: None,
             responding: None,
             cpu_percent: None,
@@ -344,6 +356,7 @@ mod tests {
             active_fps: Some(0.0),
             avg_render_time_ms: Some(0.0),
             render_skipped_frac: Some(0.0),
+            render_advanced: None,
             obs64_count: None,
             responding: None,
             cpu_percent: None,
@@ -351,6 +364,69 @@ mod tests {
         };
         let v = classify(sample, 60.0);
         assert_eq!(v.label(), "FPS-ZERO");
+    }
+
+    #[test]
+    fn render_not_advancing_while_active_fps_lies_fails_fps_zero_935() {
+        // The #935 00:35 strih render stall: renderTotalFrames delta 0 over the window while
+        // GetStats `activeFps` still reported the configured 30.0 and the WS thread answered.
+        // The dev1 WS-only timer has NO process/MCP signals (responding/cpu = None) and the
+        // frozen loop makes render_skipped_frac read a healthy 0.0 — so the ONLY signal that
+        // catches this is `render_advanced == Some(false)`. Without it this sample reads
+        // HEALTHY (the exact silent-dead-program the ticket reports).
+        let sample = ObsHealthSample {
+            ws_reachable: true,
+            active_fps: Some(30.0),
+            avg_render_time_ms: Some(11.0),
+            render_skipped_frac: Some(0.0),
+            render_advanced: Some(false),
+            obs64_count: None,
+            responding: None,
+            cpu_percent: None,
+            dxgi_device_lost: None,
+        };
+        let v = classify(sample, 30.0);
+        assert_eq!(
+            v.label(),
+            "FPS-ZERO",
+            "a render loop not advancing (renderTotalFrames delta 0) while activeFps lies at \
+             30.0 must classify FPS-ZERO, got {v:?}"
+        );
+    }
+
+    #[test]
+    fn render_advanced_true_stays_healthy_even_if_active_fps_absent() {
+        // A dev1 WS-only pass that proves the loop advanced must never false-page just because
+        // the raw activeFps gauge was not carried.
+        let sample = ObsHealthSample {
+            ws_reachable: true,
+            active_fps: None,
+            avg_render_time_ms: Some(11.0),
+            render_skipped_frac: Some(0.0),
+            render_advanced: Some(true),
+            obs64_count: None,
+            responding: None,
+            cpu_percent: None,
+            dxgi_device_lost: None,
+        };
+        assert!(
+            classify(sample, 30.0).is_healthy(),
+            "render_advanced == Some(true) with clean stats must stay HEALTHY"
+        );
+    }
+
+    #[test]
+    fn render_advanced_none_never_pages_935() {
+        // None = not sampled / counter reset (OBS restarted) / WS unreachable — must be
+        // fail-safe (never a page on its own), same discipline as the other Option signals.
+        let sample = ObsHealthSample {
+            render_advanced: None,
+            ..healthy_ws_only(30.0, 11.0, 0.0)
+        };
+        assert!(
+            classify(sample, 30.0).is_healthy(),
+            "render_advanced == None must never page on its own"
+        );
     }
 
     #[test]

@@ -105,6 +105,7 @@ fn sample_from_json(
             active_fps,
             avg_render_time_ms,
             render_skipped_frac,
+            render_advanced: None,
             obs64_count,
             responding,
             cpu_percent,
