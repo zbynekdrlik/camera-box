@@ -267,8 +267,8 @@ mod tests {
 
     /// Reference SHAPE of run 396782734 (9487 frames, 3703 distinct, 61% consecutive pairs
     /// identical): the recordings are purged, so a representative sequence with the same
-    /// >50%-duplicate character and a long max hold. The duplicate fraction is the ticket's
-    /// headline; the assertion is on max hold.
+    /// majority-duplicate character (over 50% of adjacent pairs) and a long max hold. The
+    /// duplicate fraction is the ticket's headline; the assertion is on max hold.
     #[test]
     fn reference_396782734_shape_is_over_half_duplicate_and_fires() {
         // 20 runs: half of them held for 5 frames (repeats over the bound), half single — the
