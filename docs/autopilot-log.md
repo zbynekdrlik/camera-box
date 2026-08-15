@@ -8644,3 +8644,40 @@ No push/PR/rig touch (worktree worker).
   run locally at all — RED→GREEN for the .rs is reasoned, not observed; the Python log test DID run
   RED→GREEN locally. Cold-worktree `cargo test --no-run` exceeds the foreground cap; full cargo suite
   runs at the supervisor's integration.
+
+## 2026-08-15 — #1026 imag OBS SIGSEGV in obs-websocket GetOutputList (get_const_root UAF)
+
+- Root cause (coredump forensics on imag-nb, dumps 140969 + 278175, identical signature
+  `get_const_root <- obs_enum <- GetOutputList <- RequestHandler::GetOutputList`, Qt WS worker):
+  a use-after-free of a borrowed `output->video`. `output->video` is set once at obs_output_create
+  (`= obs_get_video()`, raw outputs) and NEVER cleared on stop. When the main canvas mix video is
+  freed in `obs_canvas_clear_mix` (startup video-settings reset), an output left over from before it
+  — the inactive `virtualcam_output` (`active=0`, confirmed by walking obs->data.first_output in the
+  core) — keeps pointing at the freed video_t; GetOutputList's obs_output_get_width ->
+  video_output_get_width -> get_const_root then walks the freed+reused memory (video->parent read
+  back as NDI string "MV Cam 5" in one dump, 0x1000000 in another) -> SIGSEGV. Intermittent because
+  the freed block only sometimes holds a fault-triggering parent. NOT the earlier partial-bundle ABI
+  skew (7 crashes on the matched full bundle). The issue-793 fix detached canvas->mix but never the
+  output copies.
+- Fix (obs-canvas.c, obs_canvas_clear_mix): before the mixes_mutex free, walk obs->data.first_output
+  under obs->data.outputs_mutex (the exact list+lock obs_enum_outputs uses) and NULL any
+  output->video == old_mix->video. Runs BEFORE mixes_mutex so the two never nest; the NULL-safe
+  video-io getters (issue-793) then return 0. Extends issue-793's detach-before-free. Scoped to
+  obs_canvas_clear_mix on purpose (create-path outputs only borrow the main VIEWED canvas mix, freed
+  only here; moving it into obs_free_video_mix would nest outputs_mutex inside the mixes_mutex its
+  other callers hold).
+- Commits: 090059828 (bump .461) · 828e9272d [red] (tests/ws_enum_output_video_detach_1026.rs) ·
+  0ad3359e9 [green] (obs-canvas.c) · 861dc7f21 (rustfmt) · 638550930 (review 0/0/2: scoping comment
+  + fail-loud test terminator).
+- Verify: lift-and-compile gcc -Wall -Wextra -Wconversion clean; brace balance vs HEAD +2/+2;
+  source-anchor test RED->GREEN observed via standalone `rustc --test` binary (2 failed -> 2 passed);
+  rustfmt clean. Vendored C compiles only on CI (Tier-0 ban) -> linux-genlock + CI is the first real
+  type-check. Review clean 0 red / 0 yellow / 2 blue (both fixed).
+- GOTCHA: gh api .../comments does NOT trigger post-record-design-comment.sh (it prefilters on
+  `gh issue comment`), so a design/validated/review comment posted via `gh api` writes no marker and
+  block-commit-without-design.sh stays blocked — post the design comment via `gh issue comment` (not
+  `gh api`). Also the design-gate classifier needs literal phrasing: `Chosen approach:` /
+  `Rejected alternative:` / numbered `Approach 1/2/3` / `trade-off`, not `(CHOSEN)`/`REJECTED`/plural
+  "Approaches" (the `\bapproach\b` marker won't match "Approaches"). And `--host build-ok` bypass is
+  disabled for camera-box, but a pure std source-anchor test compiles+runs standalone via
+  `CARGO_MANIFEST_DIR=<worktree> rustc --test file.rs` — the way to observe RED->GREEN with no cargo.

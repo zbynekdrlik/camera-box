@@ -6,6 +6,9 @@ paths:
   - "tests/genlock_relock_selection_parity.rs"
   - "vendor/obs-studio/libobs/obs.c"
   - "vendor/obs-studio/libobs/obs.h"
+  - "vendor/obs-studio/libobs/obs-canvas.c"
+  - "vendor/obs-studio/libobs/obs-output.c"
+  - "vendor/obs-studio/libobs/media-io/video-io.c"
   - "vendor/obs-studio/libobs/obs-display-budget.h"
   - "vendor/distroav/src/ndi-filter.cpp"
   - "tests/aux_sender_budget_879.rs"
@@ -245,3 +248,38 @@ both windows-genlock ymls + `genlock_preload.rs` pin `uint32_t effective_divisor
 display->render_divisor;`. When you leave a second inline copy of a derivation, ANCHOR it too
 (`genlock_preload.rs` now pins the obs-display.c `derived = ...` line) so the two cannot silently
 diverge.
+
+## Observing RED→GREEN on a source-anchor test when the vendored change can't run cargo (#1026)
+
+The `# airuleset:build-ok` bypass is DISABLED for camera-box (CLAUDE.md Local Build Policy), so you
+CANNOT `cargo test` a source-anchor guard locally at all, and the vendored C compiles only on CI.
+But a `tests/*.rs` guard that only reads a vendored file's TEXT (`fs::read_to_string` +
+`.contains()`/`.find()` anchors — the whole class this rule's committed-gate section produces) uses
+NOTHING but `std`, so you can compile AND run it standalone with plain rustc, no cargo, no crate,
+no OOM contention with sibling workers' `cargo` builds on the shared box:
+
+```bash
+CARGO_MANIFEST_DIR=<worktree-abs-path> rustc --test --edition 2021 tests/<file>.rs -o /tmp/anchortest
+/tmp/anchortest        # runs the #[test] fns; exit 101 = RED, 0 = GREEN
+```
+
+`env!("CARGO_MANIFEST_DIR")` (used by the `repo()` path helper) must be set on the compile command;
+the test re-reads the vendored file at RUNTIME, so after applying the fix you re-run the SAME binary
+(or recompile) to watch RED→GREEN for real — a genuine observed transition, not just "committed a
+[red] then a [green]". This is the Rust-anchor-test counterpart to the C lift-and-compile harness
+above; use both on a vendored change (harness proves the C compiles, standalone rustc proves the
+guard bites). Confirmed live #1026 (obs-canvas.c UAF fix): 2 failed → 2 passed via `rustc --test`.
+
+## The obs-websocket enum crash class: a borrowed `output->video`/state pointer outliving its owner (#793, #1026)
+
+Two live imag-nb SIGSEGVs now trace to the SAME shape: an obs-websocket enum request (on a Qt WS
+worker thread) reads a libobs pointer that a video/mix reset freed underneath it. #793 was
+`GetStats` → `obs_get_video()` reading a freed `canvas->mix`; #1026 was `GetOutputList` →
+`obs_output_get_width` → `get_const_root` walking a freed `output->video` (the inactive
+`virtualcam_output` kept a create-time `obs_get_video()` copy across the startup video reset). The
+enum's `outputs_mutex`/list lock protects the LIST, never the borrowed `video_t` each node points
+at. Fix invariant (both tickets): DETACH the borrowed pointer to NULL BEFORE the owner is freed
+(`obs_canvas_clear_mix` clears `canvas->mix` for #793 and now `output->video` for #1026), so the
+already-NULL-safe `media-io/video-io.c` getters return 0 instead of dereferencing freed memory. If
+a THIRD WS-enum reader crashes on some other borrowed pointer, look for the same "set once, never
+cleared on stop, freed by a reset the reader doesn't lock against" lifecycle before anything else.
