@@ -301,7 +301,12 @@ imag_power_alert_condition() {
 # empty output (never a false alert on an ssh hiccup). Two-pass so the FLOOR line's position in the
 # block does not matter.
 imag_power_throttle_alert_condition() {
-  local gather="$1" pct="${IMAG_POWER_THROTTLE_ALERT_PCT:-50}"
+  local gather="$1" pct="${IMAG_POWER_THROTTLE_ALERT_PCT:-50}" min="${IMAG_POWER_THROTTLE_MIN_SAMPLES:-6}"
+  # Validate the tunables the same way floor/act are validated below -- a non-numeric override must
+  # not collapse the threshold (a bare $((pct*total)) with pct non-numeric evaluates to 0, firing on
+  # a single sample) or the min-sample floor.
+  case "$pct" in '' | *[!0-9]*) pct=50 ;; esac
+  case "$min" in '' | *[!0-9]*) min=6 ;; esac
   local floor="" total=0 clamped=0 tag a b d
   # pass 1: the numeric floor (a non-numeric/empty FLOOR is treated as "no floor" -> no decision).
   while IFS='|' read -r tag a; do
@@ -323,11 +328,28 @@ imag_power_throttle_alert_condition() {
       esac
     fi
   done <<< "$gather"
-  [ "$total" -gt 0 ] || return 0
+  # A partial burst (ssh dropped mid-sample) must not read e.g. a 2/2 capture as "sustained" -- the
+  # burst emits ~12 samples, so require a minimum before deciding (fewer = "nothing to decide").
+  [ "$total" -ge "$min" ] || return 0
   if [ "$clamped" -gt 0 ] && [ "$((clamped * 100))" -ge "$((pct * total))" ]; then
     printf 'THROTTLE-UNDER-FLOOR: %s/%s burst samples held act<%sMHz while PL1/thermal-clamped (threshold %s%%)\n' \
       "$clamped" "$total" "$floor" "$pct"
   fi
+}
+
+# imag_power_throttle_alert_sig MARKER -> echoes a STABLE dedup signature for a throttle-under-floor
+# episode. The MARKER line carries a fluctuating <clamped>/<total> count that changes burst-to-burst
+# during ONE ongoing clamp (the GPU is pinned busy under render, so nearly every 5-min pass yields a
+# different count); embedding that count in the dedup signature would make obs_watchdog_alert_throttle
+# see a "new" signature every pass and re-page constantly instead of once-then-suppress. So the sig is
+# the STABLE episode identity "under-floor", independent of the count -- the count stays in the alert
+# body/detail, never the signature. Pure + separately testable so the stability is proven, not merely
+# correct-by-inspection.
+imag_power_throttle_alert_sig() {
+  # $1 (the marker) is intentionally not interpolated -- the signature is the condition identity, not
+  # the fluctuating measurement. Kept in the signature so a future bucketed variant has a seam.
+  : "${1:-}"
+  printf 'imag-throttle:under-floor\n'
 }
 
 # imag_power_envelope_gather_remote_snippet -> the REMOTE shell command (a string) both callers run

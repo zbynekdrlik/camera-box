@@ -912,3 +912,42 @@ fn dev1_alert_watchdog_wires_in_the_throttle_under_floor_path() {
         "the watchdog must gather the throttle burst via the shared snippet"
     );
 }
+
+#[test]
+fn throttle_alert_does_not_fire_on_a_truncated_partial_burst() {
+    // ssh dropped mid-burst -> only 2 samples captured, both clamped. 2/2 = 100% >= 50%, but the
+    // burst emits ~12; a 2-sample capture is NOT evidence of a SUSTAINED clamp -> must not page
+    // (the min-sample floor, default 6).
+    let truncated = "\
+FLOOR|1400
+THROTSAMPLE|1|0|1|700
+THROTSAMPLE|1|0|1|750
+";
+    let out = throttle_cond(truncated);
+    assert!(
+        out.is_empty(),
+        "a truncated 2-sample burst must not read as sustained (min-sample guard): {out:?}"
+    );
+}
+
+#[test]
+fn throttle_alert_sig_is_stable_across_bursts_with_different_counts() {
+    // The dedup signature must NOT embed the fluctuating clamped/total count, or one ongoing clamp
+    // re-pages every pass instead of once-then-suppress. Two different marker lines from the SAME
+    // episode must yield the SAME signature.
+    let (_c, s1, _e) = run_sourced(
+        "imag_power_throttle_alert_sig 'THROTTLE-UNDER-FLOOR: 8/12 burst samples held act<1400MHz while PL1/thermal-clamped (threshold 50%)'",
+    );
+    let (_c, s2, _e) = run_sourced(
+        "imag_power_throttle_alert_sig 'THROTTLE-UNDER-FLOOR: 11/12 burst samples held act<1400MHz while PL1/thermal-clamped (threshold 50%)'",
+    );
+    assert_eq!(
+        s1.trim(),
+        s2.trim(),
+        "the dedup sig must be stable across differing clamp counts within one episode: {s1:?} vs {s2:?}"
+    );
+    assert!(
+        !s1.trim().is_empty(),
+        "the sig must be a non-empty stable token: {s1:?}"
+    );
+}

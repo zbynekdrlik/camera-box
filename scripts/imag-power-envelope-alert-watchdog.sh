@@ -156,7 +156,9 @@ alert_from_throttle() {
   fi
 
   local current_sig prior_sig prior_passes throttle_out alert_now new_sig new_passes detail
-  current_sig="imag-throttle:$(printf '%s' "$markers" | tail -1)"
+  # STABLE episode signature (NOT the fluctuating clamped/total count) so a sustained clamp pages
+  # once then suppresses for ~1h, instead of re-paging every pass as the count wobbles.
+  current_sig="$(imag_power_throttle_alert_sig "$(printf '%s' "$markers" | tail -1)")"
   prior_sig="$(read_state_field throttle_sig "")"
   prior_passes="$(read_state_field throttle_passes 0)"
   throttle_out="$(obs_watchdog_alert_throttle "$current_sig" "$prior_sig" "$prior_passes" "$ALERT_THROTTLE_PASSES")"
