@@ -148,6 +148,36 @@ def test_render_sample_real_incident_values():
     assert sample["render_skipped_frac"] == pytest.approx(0.16)
 
 
+def test_render_sample_frozen_loop_sets_render_advanced_false_935():
+    # The #935 00:35 strih stall: renderTotalFrames did not move over the window while
+    # GetStats activeFps still reported the configured 30.0. active_fps alone reads healthy;
+    # render_advanced must be False so classify() -> FPS-ZERO.
+    s0 = {"activeFps": 30.0, "averageFrameRenderTime": 11.0,
+          "renderTotalFrames": 500000, "renderSkippedFrames": 12}
+    s1 = {"activeFps": 30.0, "averageFrameRenderTime": 11.0,
+          "renderTotalFrames": 500000, "renderSkippedFrames": 12}
+    sample = _mod._render_sample(s0, s1, 30.0)
+    assert sample["render_advanced"] is False
+    assert sample["active_fps"] == 30.0            # the lying gauge is still reported for context
+    assert sample["render_skipped_frac"] == 0.0    # frozen loop reads a healthy skip fraction
+
+
+def test_render_sample_advancing_loop_sets_render_advanced_true():
+    s0 = {"renderTotalFrames": 1000, "renderSkippedFrames": 0}
+    s1 = {"renderTotalFrames": 1120, "renderSkippedFrames": 0}
+    sample = _mod._render_sample(s0, s1, 30.0)
+    assert sample["render_advanced"] is True
+
+
+def test_render_sample_counter_reset_sets_render_advanced_none():
+    # OBS restarted between snapshots -> renderTotalFrames counter reset -> delta < 0.
+    # Must be None (never a page), not False.
+    s0 = {"renderTotalFrames": 900000, "renderSkippedFrames": 5}
+    s1 = {"renderTotalFrames": 40, "renderSkippedFrames": 0}
+    sample = _mod._render_sample(s0, s1, 30.0)
+    assert sample["render_advanced"] is None
+
+
 def test_unreachable_sample_has_no_measured_fields():
     sample = _mod._unreachable_sample(30.0)
     assert sample == {

@@ -6,9 +6,13 @@ paths:
   - "tests/genlock_relock_selection_parity.rs"
   - "vendor/obs-studio/libobs/obs.c"
   - "vendor/obs-studio/libobs/obs.h"
+  - "vendor/obs-studio/libobs/obs-canvas.c"
+  - "vendor/obs-studio/libobs/obs-output.c"
+  - "vendor/obs-studio/libobs/media-io/video-io.c"
   - "vendor/obs-studio/libobs/obs-display-budget.h"
   - "vendor/distroav/src/ndi-filter.cpp"
   - "tests/aux_sender_budget_879.rs"
+  - "tests/aux_sender_teardown_ordering_877.rs"
   - ".github/workflows/windows-genlock.yml"
   - ".github/workflows/windows-genlock-fast.yml"
 ---
@@ -245,3 +249,65 @@ both windows-genlock ymls + `genlock_preload.rs` pin `uint32_t effective_divisor
 display->render_divisor;`. When you leave a second inline copy of a derivation, ANCHOR it too
 (`genlock_preload.rs` now pins the obs-display.c `derived = ...` line) so the two cannot silently
 diverge.
+
+## Observing RED→GREEN on a source-anchor test when the vendored change can't run cargo (#1026)
+
+The `# airuleset:build-ok` bypass is DISABLED for camera-box (CLAUDE.md Local Build Policy), so you
+CANNOT `cargo test` a source-anchor guard locally at all, and the vendored C compiles only on CI.
+But a `tests/*.rs` guard that only reads a vendored file's TEXT (`fs::read_to_string` +
+`.contains()`/`.find()` anchors — the whole class this rule's committed-gate section produces) uses
+NOTHING but `std`, so you can compile AND run it standalone with plain rustc, no cargo, no crate,
+no OOM contention with sibling workers' `cargo` builds on the shared box:
+
+```bash
+CARGO_MANIFEST_DIR=<worktree-abs-path> rustc --test --edition 2021 tests/<file>.rs -o /tmp/anchortest
+/tmp/anchortest        # runs the #[test] fns; exit 101 = RED, 0 = GREEN
+```
+
+`env!("CARGO_MANIFEST_DIR")` (used by the `repo()` path helper) must be set on the compile command;
+the test re-reads the vendored file at RUNTIME, so after applying the fix you re-run the SAME binary
+(or recompile) to watch RED→GREEN for real — a genuine observed transition, not just "committed a
+[red] then a [green]". This is the Rust-anchor-test counterpart to the C lift-and-compile harness
+above; use both on a vendored change (harness proves the C compiles, standalone rustc proves the
+guard bites). Confirmed live #1026 (obs-canvas.c UAF fix): 2 failed → 2 passed via `rustc --test`.
+
+## The obs-websocket enum crash class: a borrowed `output->video`/state pointer outliving its owner (#793, #1026)
+
+Two live imag-nb SIGSEGVs now trace to the SAME shape: an obs-websocket enum request (on a Qt WS
+worker thread) reads a libobs pointer that a video/mix reset freed underneath it. #793 was
+`GetStats` → `obs_get_video()` reading a freed `canvas->mix`; #1026 was `GetOutputList` →
+`obs_output_get_width` → `get_const_root` walking a freed `output->video` (the inactive
+`virtualcam_output` kept a create-time `obs_get_video()` copy across the startup video reset). The
+enum's `outputs_mutex`/list lock protects the LIST, never the borrowed `video_t` each node points
+at. Fix invariant (both tickets): DETACH the borrowed pointer to NULL BEFORE the owner is freed
+(`obs_canvas_clear_mix` clears `canvas->mix` for #793 and now `output->video` for #1026), so the
+already-NULL-safe `media-io/video-io.c` getters return 0 instead of dereferencing freed memory. If
+a THIRD WS-enum reader crashes on some other borrowed pointer, look for the same "set once, never
+cleared on stop, freed by a reset the reader doesn't lock against" lifecycle before anything else.
+## Aux ndi_filter TEARDOWN ordering + why "disable" never destroys a sender (#877)
+
+Reasoning about an aux-sender wedge ("disabling all three aux NDI senders wedged PROGRAM to 0 fps")
+needs two non-obvious facts about the DistroAV `ndi_filter` (interkom / MULTIVIEW / Grading):
+
+- **A DISABLED filter's `video_render` is NEVER called, so disable triggers NO teardown.**
+  `ndi_filter` is `OBS_SOURCE_TYPE_FILTER` with `OBS_SOURCE_VIDEO` (see `create_ndi_filter_info`).
+  In `vendor/obs-studio/libobs/obs-source.c` `render_video()`: `if (!source->context.data ||
+  !source->enabled) { obs_source_skip_video_filter(source); return; }` — a disabled filter is
+  skipped BEFORE `ndi_filter_render_video`. So on disable the DistroAV code runs nothing for that
+  filter (no texrender, no send, no `send_destroy`); the sender stays alive+idle. The destroy paths
+  (`ndi_filter_destroy` / `ndi_filter_remove` / `ndi_sender_destroy`) hang on OBS remove/destroy
+  callbacks, NEVER on enable/disable. Any "three senders destroyed at once on disable" premise is
+  therefore wrong against current code — check `render_video()`'s enabled-gate before believing it.
+- **The teardown ORDERING is upstream-original and correct — and now locked.** `ndi_filter_destroy`
+  calls `video_output_close(f->video_output)` (stops + JOINs the raw_video send worker) BEFORE
+  `ndi_sender_destroy(f)`, which holds BOTH `ndi_sender_video_mutex` + `ndi_sender_audio_mutex`
+  before `send_destroy` — so no synchronous `send_send_video_v2` is in flight under the mutex when
+  the sender is destroyed. `tests/aux_sender_teardown_ordering_877.rs` is a Tier-0 static gate that
+  locks both orderings (with a baked-in mutation proof: reordered + missing-lock fixtures must be
+  rejected). Sig anchors match the DEFINITION line `...)\n{` to dodge the forward-decl trap
+  (`ndi_sender_destroy` has a `;`-terminated forward decl at the top of the file).
+- **The observed 0-fps root cause is NDI-SDK internal, not in readable code.** The PROGRAM output
+  (`ndi-output.cpp`) uses async `send_send_video_async_v2` (blocks the next call until the SDK frees
+  the previous async buffer); three aux senders going silent/renegotiating at once churns the shared
+  per-process NDI transmit/connection threads and can block the program's next async send. Not
+  fixable/confirmable from the vendored source; confirming it needs a live rig repro (a rig write).

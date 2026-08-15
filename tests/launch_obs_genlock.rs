@@ -501,3 +501,52 @@ fn plan_emits_verify_at_start_burn_sweep_off_1057() {
         );
     }
 }
+
+/// (#1061) The launch PLAN must include a dev1-side latency-pin verify-at-start step.
+///
+/// Issue 866's latency half: per-source `genlock_latency_ms_src` persists to the scene collection
+/// and RELOADS at OBS start (the #866/#707 unjustified restart revert). Unlike the #1057 burn
+/// (forced OFF), per-source latency is the operator's A/V-align domain, so the start path may only
+/// REPORT drift against the committed agreed-pins baseline (scripts/latency-pins-baseline.json),
+/// NEVER overwrite. The plan (printed by dev1) must direct a post-launch
+/// `latency_pins_verify.py --box <box> --host <ip>` -- REPORT-ONLY, positioned AFTER the STEP 2
+/// launch verify.
+#[test]
+fn plan_emits_verify_at_start_latency_pins_1061() {
+    for (box_arg, ip) in [("strih", "10.77.9.202"), ("stream", "10.77.9.204")] {
+        let (code, out, _err) = run_script(&["--box", box_arg]);
+        assert_eq!(code, 0, "--box {box_arg} must print the plan (exit 0)");
+        assert!(
+            out.contains("latency_pins_verify.py"),
+            "#1061: the {box_arg} plan must direct a dev1-side `latency_pins_verify.py` \
+             latency-pin verify-at-start. plan=\n{out}"
+        );
+        let lat_line = out
+            .lines()
+            .find(|l| l.contains("latency_pins_verify.py"))
+            .unwrap_or("");
+        assert!(
+            lat_line.contains(&format!("--box {box_arg}")),
+            "#1061: the {box_arg} latency-verify step must pass --box {box_arg}. line=\n{lat_line}"
+        );
+        assert!(
+            lat_line.contains(&format!("--host {ip}")),
+            "#1061: the {box_arg} latency-verify step must target --host {ip}. line=\n{lat_line}"
+        );
+        // REPORT-ONLY: per-source latency is the operator's A/V-align domain -- the plan must make
+        // clear the step never overwrites (the opposite of the #1057 burn sweep-off).
+        assert!(
+            out.contains("REPORT-ONLY"),
+            "#1061: the latency verify-at-start step must be worded REPORT-ONLY (never overwrite). plan=\n{out}"
+        );
+        // Positioned AFTER the on-box STEP 2 launch verify (never before OBS is up).
+        let verify_step_pos = out
+            .find("STEP 2")
+            .expect("plan has the STEP 2 launch-verify marker");
+        let lat_pos = out.find("latency_pins_verify.py").unwrap();
+        assert!(
+            verify_step_pos < lat_pos,
+            "#1061: the latency verify-at-start must come AFTER the STEP 2 launch verify. plan=\n{out}"
+        );
+    }
+}

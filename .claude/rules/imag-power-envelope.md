@@ -109,3 +109,35 @@ The working sysfs freq+throttle read gives the clamp/starvation signal instead; 
 shows in the render-thread kernel stacks + `dmesg` (both generic, kept). The hardware detector is the
 SAME `imag_has_discrete_nvidia` regex `setup-imag.sh` + `imag_scenes.py` share (a THIRD mirrored
 copy in the watchdog, parity-tested — the deploy dirs differ so it can't be imported).
+
+## The #880 throttle-under-floor alert — a SECOND, independent path keyed on throttle_reason
+
+The guard's STEP-DOWN/RE-ASSERT journal alert only fires on a TCPU thermal excursion. But the
+DOMINANT clamp under production load is the punit steering the iGPU below the pinned floor at the
+MMIO RAPL PL1 **power** budget (act 500-750 MHz vs pinned 1400, `throttle_reason_pl1=1`) — which
+produces NO guard step-down, so it was silent judder. `imag-power-envelope-alert-watchdog.sh` now
+runs TWO independent alert paths (`alert_from_journal` + `alert_from_throttle`), each with its OWN
+dedup state keys (`alert_sig`/`alert_passes` vs `throttle_sig`/`throttle_passes`); a quiet journal
+must NOT short-circuit the throttle path (it lives only in the burst).
+
+**Key on `throttle_reason`, NEVER raw `act_freq`.** `act < floor` alone false-fires on benign RC6
+idle (the GPU parks low with no load — exactly the idle-sampling artifact issue 880's body flagged;
+those samples carry `throttle_reason_status=0`). The clamp discriminator is
+`(throttle_reason_pl1=1 OR throttle_reason_thermal=1) AND act < rps_min_freq_mhz`, over a MAJORITY
+(`imag_power_throttle_alert_condition`, default ≥50 % via `IMAG_POWER_THROTTLE_ALERT_PCT`) of a
+~6 s burst (`imag_power_throttle_burst_remote_snippet`, 12 samples @0.5 s) — majority-of-a-burst =
+"sustained, not a transient single-frame dip". The burst is a SEPARATE remote snippet from the
+instantaneous `imag_power_envelope_gather_remote_snippet` so drift-guard/verify-imag are never
+slowed by a multi-second sample. Two guards learned the hard way (both unit-tested): require a
+MIN sample count (`IMAG_POWER_THROTTLE_MIN_SAMPLES`, default 6) so a truncated ssh-dropped burst
+(a 2/2 capture = 100 %) is not read as sustained; and the dedup signature must be a STABLE episode
+token (`imag_power_throttle_alert_sig` → `imag-throttle:under-floor`), NEVER the fluctuating
+`clamped/total` count — embedding the count makes each pass a "new" signature and re-pages every
+5 min instead of once-then-suppress-for-~1h.
+
+**The floor is unenforceable in software — do NOT try to "fix" the pin.** A forcewake
+`i915_frequency_info` read proves every software knob (`Min/Max/Boost`) is ALREADY 1400 while
+`Actual` runs at ~half; the punit legally overrides the request at the power/thermal envelope,
+already pinned to the thermal max (29 W). The only remaining headroom is physical cooling (the
+technician ticket, issue 1043) — the alert makes the throttling VISIBLE; it does not (and cannot)
+raise the ceiling.

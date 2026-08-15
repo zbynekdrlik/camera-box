@@ -705,3 +705,249 @@ fn readme_pins_power_pl1_w_imag_at_29() {
          PL1 facet reads UNKNOWN forever and the strict gate is inert"
     );
 }
+
+// =================================================================================================
+// #880 — throttle-under-floor visibility alert (the SECOND, act_freq-based alert path).
+//
+// The #841 pinned iGPU floor (gt_min_freq_mhz=1400) is a software REQUEST floor the hardware punit
+// legally overrides at the MMIO RAPL PL1 power budget: under load `Actual freq` drops to ~750 MHz
+// (moderate) / 500 MHz (heavy) with `throttle_reason_pl1=1` while every software knob still reads
+// 1400 (live forcewake evidence 2026-08-15). That clamp produces NO guard STEP-DOWN journal marker
+// (the guard only steps down on a TCPU excursion), so the operator gets silent judder. This alert
+// path makes it VISIBLE. It keys on `throttle_reason` (NOT raw act_freq) so it does not false-fire
+// on benign RC6 idle — the exact false positive the ticket body warns against.
+// =================================================================================================
+
+fn throttle_cond(gather: &str) -> String {
+    let (_c, out, _e) =
+        run_sourced_with_gather("imag_power_throttle_alert_condition \"$G\"", gather);
+    out.trim().to_string()
+}
+
+// A burst where a MAJORITY of samples are genuinely power-clamped: act < floor AND pl1/thermal
+// throttle active. The idle samples (throttle_reason all 0, act 0 = RC6 render-duty gaps) do NOT
+// count. 8/12 clamped -> above the 50% default -> fires.
+const CLAMP_BURST: &str = "\
+FLOOR|1400
+THROTSAMPLE|1|0|1|750
+THROTSAMPLE|1|0|1|800
+THROTSAMPLE|1|0|1|700
+THROTSAMPLE|1|0|1|850
+THROTSAMPLE|1|0|1|750
+THROTSAMPLE|1|0|1|900
+THROTSAMPLE|1|0|1|500
+THROTSAMPLE|1|0|1|650
+THROTSAMPLE|0|0|0|0
+THROTSAMPLE|0|0|0|0
+THROTSAMPLE|0|0|0|850
+THROTSAMPLE|0|0|0|0
+";
+
+#[test]
+fn throttle_alert_fires_when_a_majority_of_the_burst_is_power_clamped_under_the_floor() {
+    let out = throttle_cond(CLAMP_BURST);
+    assert!(
+        out.contains("THROTTLE-UNDER-FLOOR"),
+        "a sustained (majority-of-burst) PL1 clamp below the pinned floor must page: {out:?}"
+    );
+}
+
+#[test]
+fn throttle_alert_does_not_fire_on_benign_rc6_idle_even_though_act_is_below_the_floor() {
+    // THE false-positive guard: every sample has act far below the floor (idle/RC6), but NO throttle
+    // reason is active (status=0). This is the exact idle-sampling artifact the ticket body flags —
+    // it must NOT page (that would page constantly on a resting box).
+    let idle = "\
+FLOOR|1400
+THROTSAMPLE|0|0|0|0
+THROTSAMPLE|0|0|0|350
+THROTSAMPLE|0|0|0|0
+THROTSAMPLE|0|0|0|300
+THROTSAMPLE|0|0|0|0
+THROTSAMPLE|0|0|0|450
+THROTSAMPLE|0|0|0|0
+THROTSAMPLE|0|0|0|550
+THROTSAMPLE|0|0|0|0
+THROTSAMPLE|0|0|0|400
+THROTSAMPLE|0|0|0|0
+THROTSAMPLE|0|0|0|350
+";
+    let out = throttle_cond(idle);
+    assert!(
+        out.is_empty(),
+        "benign RC6 idle (act<floor but throttle_reason all 0) must NEVER page: {out:?}"
+    );
+}
+
+#[test]
+fn throttle_alert_does_not_fire_on_a_transient_minority_dip() {
+    // Only 2/12 clamped -> below the 50% default -> a transient dip, not sustained -> no page.
+    let transient = "\
+FLOOR|1400
+THROTSAMPLE|1|0|1|700
+THROTSAMPLE|1|0|1|750
+THROTSAMPLE|0|0|0|0
+THROTSAMPLE|0|0|1|1400
+THROTSAMPLE|0|0|0|850
+THROTSAMPLE|0|0|1|1400
+THROTSAMPLE|0|0|0|0
+THROTSAMPLE|0|0|1|1400
+THROTSAMPLE|0|0|0|850
+THROTSAMPLE|0|0|1|1400
+THROTSAMPLE|0|0|0|0
+THROTSAMPLE|0|0|1|1400
+";
+    let out = throttle_cond(transient);
+    assert!(
+        out.is_empty(),
+        "a transient minority dip (2/12) must not page — only sustained clamps do: {out:?}"
+    );
+}
+
+#[test]
+fn throttle_alert_fires_on_a_thermal_clamp_too_not_only_pl1() {
+    // thermal=1 (pl1=0) with act below floor is equally a clamp — a majority of these pages.
+    let thermal = "\
+FLOOR|1400
+THROTSAMPLE|0|1|1|600
+THROTSAMPLE|0|1|1|650
+THROTSAMPLE|0|1|1|700
+THROTSAMPLE|0|1|1|600
+THROTSAMPLE|0|1|1|550
+THROTSAMPLE|0|1|1|650
+THROTSAMPLE|0|0|0|0
+THROTSAMPLE|0|0|0|0
+";
+    let out = throttle_cond(thermal);
+    assert!(
+        out.contains("THROTTLE-UNDER-FLOOR"),
+        "a sustained THERMAL clamp below the floor must page too: {out:?}"
+    );
+}
+
+#[test]
+fn throttle_alert_ignores_samples_at_or_above_the_floor_even_with_a_throttle_flag() {
+    // Every sample carries pl1=1 but act == floor (1400) -> the floor IS being met -> not a clamp
+    // sample -> no page. `act < floor` is the hard gate, not the throttle flag alone.
+    let atfloor = "\
+FLOOR|1400
+THROTSAMPLE|1|0|1|1400
+THROTSAMPLE|1|0|1|1400
+THROTSAMPLE|1|0|1|1400
+THROTSAMPLE|1|0|1|1400
+THROTSAMPLE|1|0|1|1400
+THROTSAMPLE|1|0|1|1400
+";
+    let out = throttle_cond(atfloor);
+    assert!(
+        out.is_empty(),
+        "act at/above the floor is not a clamp, even with a throttle flag: {out:?}"
+    );
+}
+
+#[test]
+fn throttle_alert_empty_or_missing_floor_never_pages_no_false_alert_on_ssh_hiccup() {
+    assert!(
+        throttle_cond("").is_empty(),
+        "empty burst (ssh failure) -> nothing to decide, never a false alert"
+    );
+    // Clamped-looking samples but NO floor line -> cannot judge -> no page.
+    let nofloor = "\
+THROTSAMPLE|1|0|1|750
+THROTSAMPLE|1|0|1|700
+THROTSAMPLE|1|0|1|800
+";
+    assert!(
+        throttle_cond(nofloor).is_empty(),
+        "no FLOOR line -> cannot compare -> never a false alert: {:?}",
+        throttle_cond(nofloor)
+    );
+}
+
+// -------------------------------------------------------------------------------------------------
+// imag_power_throttle_burst_remote_snippet — the burst gather, identity-based, separate from the
+// instantaneous shared gather so drift-guard/verify-imag are not slowed by a multi-second burst.
+// -------------------------------------------------------------------------------------------------
+
+#[test]
+fn throttle_burst_snippet_samples_throttle_reason_and_act_by_card_identity() {
+    let (_c, out, _e) = run_sourced("imag_power_throttle_burst_remote_snippet");
+    assert!(
+        out.contains("throttle_reason_pl1")
+            && out.contains("throttle_reason_thermal")
+            && out.contains("throttle_reason_status"),
+        "the burst must read the pl1/thermal/status throttle reasons: {out:?}"
+    );
+    assert!(
+        out.contains("rps_act_freq_mhz") && out.contains("rps_min_freq_mhz"),
+        "the burst must read act freq + the min-freq floor: {out:?}"
+    );
+    assert!(
+        out.contains("card*"),
+        "the burst must glob card* (never a hardcoded cardN — presenter-drm renumbering hazard): {out:?}"
+    );
+    assert!(
+        out.contains("THROTSAMPLE") && out.contains("FLOOR"),
+        "the burst must emit THROTSAMPLE lines + a FLOOR line the pure condition parses: {out:?}"
+    );
+    assert!(
+        out.contains("sleep"),
+        "the burst must sample repeatedly over time (a sleep loop), not once: {out:?}"
+    );
+}
+
+// -------------------------------------------------------------------------------------------------
+// the dev1 watchdog wires the SECOND alert path in (shared condition + shared throttle + burst)
+// -------------------------------------------------------------------------------------------------
+
+#[test]
+fn dev1_alert_watchdog_wires_in_the_throttle_under_floor_path() {
+    let body = read_script("scripts/imag-power-envelope-alert-watchdog.sh");
+    assert!(
+        body.contains("imag_power_throttle_alert_condition"),
+        "the watchdog must ALSO decide the throttle-under-floor condition via the shared pure fn"
+    );
+    assert!(
+        body.contains("imag_power_throttle_burst_remote_snippet"),
+        "the watchdog must gather the throttle burst via the shared snippet"
+    );
+}
+
+#[test]
+fn throttle_alert_does_not_fire_on_a_truncated_partial_burst() {
+    // ssh dropped mid-burst -> only 2 samples captured, both clamped. 2/2 = 100% >= 50%, but the
+    // burst emits ~12; a 2-sample capture is NOT evidence of a SUSTAINED clamp -> must not page
+    // (the min-sample floor, default 6).
+    let truncated = "\
+FLOOR|1400
+THROTSAMPLE|1|0|1|700
+THROTSAMPLE|1|0|1|750
+";
+    let out = throttle_cond(truncated);
+    assert!(
+        out.is_empty(),
+        "a truncated 2-sample burst must not read as sustained (min-sample guard): {out:?}"
+    );
+}
+
+#[test]
+fn throttle_alert_sig_is_stable_across_bursts_with_different_counts() {
+    // The dedup signature must NOT embed the fluctuating clamped/total count, or one ongoing clamp
+    // re-pages every pass instead of once-then-suppress. Two different marker lines from the SAME
+    // episode must yield the SAME signature.
+    let (_c, s1, _e) = run_sourced(
+        "imag_power_throttle_alert_sig 'THROTTLE-UNDER-FLOOR: 8/12 burst samples held act<1400MHz while PL1/thermal-clamped (threshold 50%)'",
+    );
+    let (_c, s2, _e) = run_sourced(
+        "imag_power_throttle_alert_sig 'THROTTLE-UNDER-FLOOR: 11/12 burst samples held act<1400MHz while PL1/thermal-clamped (threshold 50%)'",
+    );
+    assert_eq!(
+        s1.trim(),
+        s2.trim(),
+        "the dedup sig must be stable across differing clamp counts within one episode: {s1:?} vs {s2:?}"
+    );
+    assert!(
+        !s1.trim().is_empty(),
+        "the sig must be a non-empty stable token: {s1:?}"
+    );
+}

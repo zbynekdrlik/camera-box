@@ -438,7 +438,20 @@ ${PROGRAM}
 #         still-ON input or an enumeration failure = fail-closed) means a burn LEAKED: do NOT trust
 #         this box on live program until it clears. (A measurement burn is NEVER legitimate operator
 #         state, so forcing it OFF at start never fights the operator — unlike the per-source
-#         latency pins, whose verify-at-start is tracked separately.)
+#         latency pins, whose verify-at-start is REPORT-ONLY — see STEP 3b below.)
+# STEP 3b (#1061) — LATENCY-PIN VERIFY-AT-START (REPORT-ONLY): per-source genlock_latency_ms_src
+#         ALSO persists to the scene collection and RELOADS at OBS start, so an unjustified restart
+#         revert (#866/#707: strih came back at pins it had been reverted FROM as unjustified) can
+#         bring back per-source latencies the operator never agreed to. UNLIKE the burn, per-source
+#         latency IS the operator's A/V-align domain, so this step only REPORTS drift against the
+#         committed agreed-pins baseline (scripts/latency-pins-baseline.json) — it NEVER overwrites
+#         (forcing would fight the operator). Run ON DEV1 (read-only WS, session-agnostic, per
+#         win-ssh-vs-mcp), NOT in the ${mcp} MCP Shell:
+#           python3 scripts/latency_pins_verify.py --box ${box} --host ${box_ip}
+#         exit 0 = every agreed pin on baseline; exit 1 = drift (LOUD, names box+input+got+want — an
+#         ADVISORY signal, NOT a launch abort); exit 2 = a WS read failure (fail-closed). If the
+#         drift is a legitimate re-tune, record it by updating the baseline in a PR; if it is an
+#         unjustified restart revert, re-apply the agreed pins. (REPORT-ONLY — never overwrites.)
 # STEP 4: to toggle the measurement burn (TEST mode), DON'T relaunch — flip the per-source bool over
 #         WebSocket:  scripts/obs_burn_filter.py add|remove --host ${box_ip} --input "<NDI input>"
 #         (or use scripts/rig-mode.sh test|event, which does it for both boxes).

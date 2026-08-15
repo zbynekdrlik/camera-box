@@ -2,6 +2,66 @@
 
 Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads context.
 
+## 2026-08-15 — #880 (imag iGPU clock floor visibility alert) — worktree autopilot-880, base b934c9e57
+
+- **Root cause (scope a) confirmed by live forcewake forensics** (`ssh newlevel@10.77.9.182`,
+  read-only): every software freq knob reads 1400 (`i915_frequency_info` Min/Max/Boost) while
+  `Actual=750` (RPNSWREQ steered to 950), `throttle_reason_pl1=1`/`status=1`, `thermal=0`, MMIO
+  RAPL PL1 `package-0 long_term = 29 W`, TCPU 85 °C. The pinned `gt_min_freq_mhz=1400` (issue 841)
+  is a software REQUEST the punit legally overrides at the shared package power budget; under
+  heavier load (issue 1029: load 8.9, OBS 216 %) `Actual` drops to 500 MHz. The floor is
+  unenforceable in software (issue 1040 already pinned PL1 to the thermal max); residual = physical
+  cooling (issue 1043). So 880's remaining software scope is VISIBILITY only.
+- **Fix (scope b):** extended the dev1-side `imag-power-envelope-alert-watchdog.sh` with a SECOND,
+  independent alert path (`alert_from_throttle`, own dedup keys) that pages on a SUSTAINED clamp
+  holding act below the floor while `throttle_reason` (pl1|thermal) is active — keyed on
+  `throttle_reason`, NOT raw act_freq, so benign RC6 idle never false-fires (the ticket's own
+  warning). New pure `imag_power_throttle_alert_condition` (majority-of-burst, min-sample guard,
+  numeric pct guard) + `imag_power_throttle_burst_remote_snippet` (~6 s, card* globbed, SEPARATE
+  from the instantaneous gather) + `imag_power_throttle_alert_sig` (STABLE episode token so a
+  wobbling count does not defeat the ~1h throttle) in `scripts/lib/imag-power-envelope.sh`.
+- Commits: version bump `73be03204`; RED `e0fe58620` (`tests/harness_imag_power_envelope_1040.rs`);
+  GREEN `4648651ed`; review-fix `62ea3e78d` (stable dedup sig + min-sample + pct guards, from a
+  fresh-context review that returned 1 🟡 3 🔵, all fixed same-branch → 0/0/0).
+- Tier-0 only (heavy builds CI-only + SIGKILLed under fleet load here): bash-harness all-green over
+  12 fixtures (RC6 false-positive, order-independence, truncation, bad-pct, sig-stability),
+  `shellcheck -x` clean ×2, fmt-check clean, watchdog `--dry-run` exit 0 (both paths).
+- Rule updated: `.claude/rules/imag-power-envelope.md` (the throttle-reason discriminator, the
+  stable-sig + min-sample gotchas, "the floor is unenforceable in software").
+- Note: origin/dev advanced past base b934c9e57 with sibling merges during the run; version bumped
+  to 1.7.0-dev.461 from the base's .458 per dispatch — supervisor resolves any bump collision at
+  integration. Issue 880 stays OPEN until the supervisor integrates this branch.
+## 2026-08-15 — #1061 (latency-pin verify-at-start, REPORT-only) -- issue 866 latency half, 1057 follow-up
+
+- **#1061** -- delivered the LATENCY half of the issue-866 "verify OBS state at start" ask (the burn
+  half landed in 1057). Resolved the ticket's `needs-user-decision` fork with the safe,
+  rule-mandated default: authoritative source = a committed baseline file
+  (`scripts/latency-pins-baseline.json`), and the start path only REPORTS drift, never overwrites
+  (per-source latency is the operator's A/V-align domain -- forcing would fight the operator).
+- New `scripts/latency_pins_verify.py`: reads live `genlock_latency_ms_src` read-only over OBS WS,
+  diffs vs the committed baseline, reports drift LOUD (box+input+got+want), exit 0/1/2. Reuses
+  `obs_phase2._conn/_rpc`, `imag_latency_enforce.list_ndi_inputs`, and mirrors
+  `latency_pins_snapshot.read_pin`'s honest-None convention. Wired into the launch plan as STEP 3b
+  for strih+stream (`scripts/launch-obs-genlock.sh`); imag uses an `_all_ndi_inputs_ms` floor
+  sentinel (imag is always the 3ms floor everywhere).
+- GOTCHA re-confirmed: bundle-state's `ndi_input_latency` facet reads DistroAV's stock `latency`
+  (certified 0), NOT the genlock build's `genlock_latency_ms_src` -- so bundle-state is the WRONG
+  source for a pins baseline; the authoritative pins are WS-only via `GetInputSettings`.
+- Baseline seeded from the live 2026-08-15 read-only WS snapshot: strih cam1=3/cam2=6/cam3=20 (the
+  default CAMERA_ACTIVE_SET; retired-grabber cam4..7 excluded), stream `NDI 2ME PGM` want 915 +/-60.
+  Live discrepancy recorded (nothing changed): stream 2ME PGM live=915 vs the ~923 design (inside
+  the band); strih cam6=62/cam7=41 stale on retired grabbers (outside the active set).
+- Review caught + FIXED an in-diff fail-OPEN: the imag floor enumeration must FAIL CLOSED on a
+  failed/empty GetInputList (never a vacuous "0 inputs => OK"), per the burn-target-enumeration /
+  camera-active-set rule. `ignore_err=False` on the enumerate GetInputList + a floor-empty exit-2
+  guard, with `TestEnumerationFailsClosed` regressions.
+- TDD: python RED `ebc04d51e` / GREEN `ca315853d`; launch-plan RED `4ab96323b` / GREEN `611b360de`;
+  review fix `0e6ee1223`. Version bump `5fa29efea` -> 1.7.0-dev.461. Local: 30 python tests pass,
+  launch-plan test compiles clean, live read-only verify OK on strih/stream/imag.
+- Residual: wiring the verify into imag's OWN OBS-start (systemd supervision) is a separate
+  subsystem, out of the launch-plan (strih/stream) scope; the verify TOOL already supports
+  `--box imag`.
+
 ## 2026-07-14 — #745 (fixed+closed, deployed cam6) / #753 (wiring landed, stays open) / strih 1:1 mapping pivot -- bundled batch, PR #704 train
 
 - **#745** -- retired the #729 model-gated zero-touch policy: `documented_controls_for_model` now
@@ -8644,3 +8704,104 @@ No push/PR/rig touch (worktree worker).
   run locally at all — RED→GREEN for the .rs is reasoned, not observed; the Python log test DID run
   RED→GREEN locally. Cold-worktree `cargo test --no-run` exceeds the foreground cap; full cargo suite
   runs at the supervisor's integration.
+
+## 2026-08-15 — #1026 imag OBS SIGSEGV in obs-websocket GetOutputList (get_const_root UAF)
+
+- Root cause (coredump forensics on imag-nb, dumps 140969 + 278175, identical signature
+  `get_const_root <- obs_enum <- GetOutputList <- RequestHandler::GetOutputList`, Qt WS worker):
+  a use-after-free of a borrowed `output->video`. `output->video` is set once at obs_output_create
+  (`= obs_get_video()`, raw outputs) and NEVER cleared on stop. When the main canvas mix video is
+  freed in `obs_canvas_clear_mix` (startup video-settings reset), an output left over from before it
+  — the inactive `virtualcam_output` (`active=0`, confirmed by walking obs->data.first_output in the
+  core) — keeps pointing at the freed video_t; GetOutputList's obs_output_get_width ->
+  video_output_get_width -> get_const_root then walks the freed+reused memory (video->parent read
+  back as NDI string "MV Cam 5" in one dump, 0x1000000 in another) -> SIGSEGV. Intermittent because
+  the freed block only sometimes holds a fault-triggering parent. NOT the earlier partial-bundle ABI
+  skew (7 crashes on the matched full bundle). The issue-793 fix detached canvas->mix but never the
+  output copies.
+- Fix (obs-canvas.c, obs_canvas_clear_mix): before the mixes_mutex free, walk obs->data.first_output
+  under obs->data.outputs_mutex (the exact list+lock obs_enum_outputs uses) and NULL any
+  output->video == old_mix->video. Runs BEFORE mixes_mutex so the two never nest; the NULL-safe
+  video-io getters (issue-793) then return 0. Extends issue-793's detach-before-free. Scoped to
+  obs_canvas_clear_mix on purpose (create-path outputs only borrow the main VIEWED canvas mix, freed
+  only here; moving it into obs_free_video_mix would nest outputs_mutex inside the mixes_mutex its
+  other callers hold).
+- Commits: 090059828 (bump .461) · 828e9272d [red] (tests/ws_enum_output_video_detach_1026.rs) ·
+  0ad3359e9 [green] (obs-canvas.c) · 861dc7f21 (rustfmt) · 638550930 (review 0/0/2: scoping comment
+  + fail-loud test terminator).
+- Verify: lift-and-compile gcc -Wall -Wextra -Wconversion clean; brace balance vs HEAD +2/+2;
+  source-anchor test RED->GREEN observed via standalone `rustc --test` binary (2 failed -> 2 passed);
+  rustfmt clean. Vendored C compiles only on CI (Tier-0 ban) -> linux-genlock + CI is the first real
+  type-check. Review clean 0 red / 0 yellow / 2 blue (both fixed).
+- GOTCHA: gh api .../comments does NOT trigger post-record-design-comment.sh (it prefilters on
+  `gh issue comment`), so a design/validated/review comment posted via `gh api` writes no marker and
+  block-commit-without-design.sh stays blocked — post the design comment via `gh issue comment` (not
+  `gh api`). Also the design-gate classifier needs literal phrasing: `Chosen approach:` /
+  `Rejected alternative:` / numbered `Approach 1/2/3` / `trade-off`, not `(CHOSEN)`/`REJECTED`/plural
+  "Approaches" (the `\bapproach\b` marker won't match "Approaches"). And `--host build-ok` bypass is
+  disabled for camera-box, but a pure std source-anchor test compiles+runs standalone via
+  `CARGO_MANIFEST_DIR=<worktree> rustc --test file.rs` — the way to observe RED->GREEN with no cargo.
+## issue 876 — dantesync fleet-upgrade mechanism (worktree autopilot-876, v1.7.0-dev.461)
+- The clock authority (dantesync, separate Claude-stewarded repo) had NO remediation mechanism:
+  Windows auto-updater (`DanteSyncUpdate` task) died at the DanteTimeSync->DanteSync rename
+  (dantesync f8dfd6c) and was never replaced; Linux never had any. Every convergence is a manual
+  8-box hand-roll (issue 862's version-gate is the DETECTION half; this is the REMEDIATION half).
+- STILL-VALID verified live (read-only): fleet at 1.8.41 (dev1/cam1/imag-nb/strih), matching the
+  gate pin — but by hand; the dead strih `DanteSyncUpdate` task still Enabled, Next=N/A, Result=0.
+- New `scripts/dantesync-fleet-upgrade.sh` mirrors the tested `upgrade-fleet-ndi.sh` framework:
+  pure fns above a source-guard (unit-tested by tests/dantesync_fleet_upgrade.rs), canary-first
+  (one per OS class), targets DANTESYNC_VERSION_PIN (never `releases/latest`), reuses the gate's
+  version parser + pin + dantesync-gate.sh (PTP-lock+offset verify) + cambox-offline-ack.sh.
+  Retires the dead task (schtasks /Delete), does NOT resurrect a silent cron — mechanism liveness
+  IS the gate's liveness. Decision: no dantesync-repo change (the dead task is a box relic; the
+  script purges it). NO rig writes this round — the actual fleet run is a separate supervised step.
+- Commits: e8abf55f5 (bump) · 104f7e9cb [red] (test guard) · 044cad42b [green] (script) ·
+  d6ff8ab47 (fix review findings).
+- Review (general-purpose, both passes): 2 crit + 2 warn + suggestions, all fixed in-branch —
+  verify_node `--ntp-master ""` (else non-strih Windows nodes always fail the gate); self-heal
+  swap (ERR trap / try-catch) so an upgrade failure never blind-rolls-back a healthy master into a
+  downgrade; `.ps1`-file Windows path via scp+`-File` (rig-state-inspection.md §2: nested
+  `-Command` over ssh fails silently); captured remote output; early `--dry-run` exit.
+- GOTCHA: the gate's SSH version reader (`read_dantesync_version_output`) lives BELOW its own
+  source-guard, so sourcing the gate exposes only the PURE parser + the pin — write your own ssh
+  transport, reuse only the parser. Tier-0 (heavy cargo test CI-only, issue 477): verified via
+  33/33 bash-harness checks + shellcheck + `bash -n` + `rustfmt --check`; Rust binary compiles on CI.
+
+## #877 — aux-sender teardown wedge: re-characterised + teardown-ordering regression gate (2026-08-15)
+
+- Ticket (predates the issue 879/1063 aux render-budget work) hypothesised a destroy-race: disabling
+  all three aux NDI senders at once wedged strih PROGRAM to 0 fps, blamed on `send_destroy` racing an
+  in-flight send. STEP-0 validation from CURRENT code REFUTES the trigger→destroy mapping and finds
+  the mandated ordering already correct — so re-characterised (not obsolete), stays OPEN on a
+  forward-looking coverage decision.
+- Findings (code-grounded): (a) obs-source.c `render_video()` skips a DISABLED filter before
+  `ndi_filter_render_video` (`ndi_filter` is OBS_SOURCE_TYPE_FILTER/OBS_SOURCE_VIDEO), so a mere
+  disable calls NO destroy path — sender stays alive+idle; the "three senders destroyed at once"
+  premise doesn't hold on disable. (b) The teardown ordering the ticket demands is upstream-original
+  and correct: `ndi_filter_destroy` does `video_output_close()` (stop+join the raw_video send worker)
+  BEFORE `ndi_sender_destroy`, which locks both sender mutexes before `send_destroy`. (c) No
+  cross-sender lock; destroy/recreate not used as flow-control. (d) issue 879/1063 touched only the
+  render-budget path, not teardown. (e) The observed 0-fps symptom's true root cause is NDI-SDK
+  internal (program uses async `send_send_video_async_v2`; shared per-process transmit/connection
+  threads churn when 3 senders go silent at once) — not in readable code, not reproducible without a
+  rig write (forbidden to the worker).
+- Ship: `tests/aux_sender_teardown_ordering_877.rs` — Tier-0 static gate locking the two ordering
+  invariants (join-before-destroy; mutex-before-send_destroy), with a baked-in mutation proof
+  (reordered + missing-lock fixtures must be rejected). Same static-anchor idiom as
+  genlock_release_cadence / aux_sender_budget_879; sig anchors match the DEFINITION line `...)\n{`
+  to dodge the forward-decl trap. No vendored code changed.
+- Commits: bump to 1.7.0-dev.461 · test(#877) [green] teardown-ordering gate.
+- Verify: checker logic replica-verified in python3 vs the real ndi-filter.cpp (both orderings PASS;
+  both mutation fixtures REJECTED); `cargo fmt --all --check` clean. Local `cargo test --no-run` still
+  compiling after ~58 min under extreme fleet load (~35 on 4 cores) — compile confirmation deferred to
+  the supervisor's integration full-suite. Ticket left OPEN with a forward-looking `needs-decision`
+  question (accept residual + close, vs supervised live repro). Do NOT let the merge auto-close #877.
+
+## issue 935 — strih render-freeze forensics + WS-only render-stall detection (worktree autopilot-935, v1.7.0-dev.459)
+- Two-half ticket: (a) forensic root-cause writeup of the 2026-08-02 strih freeze; (b) close the silent-alarm hole. The night's OBS session logs had rotated out (nothing < 2026-08-13, no crash — a silent hang), so root-cause reasons from the ticket's live-captured signatures + the diagnostic rules.
+- Two fault classes: A = 23:55 frozen strih cambox INPUT (DistroAV receiver freeze while strih kept compositing — content froze, NOT the −latency hold-collapse class); B = 00:35 full graphics render-loop stall (renderTotalFrames delta 0, activeFps lied at 30.0, WS alive). Relationship = probably linked via the wedged DistroAV receiver but UNPROVEN (logs gone); next recurrence must capture OBS log tail + thread state before force-kill. Neither class is fixed by the deployed genlock work (#1009 floor-stamp + convergence/phase-pin address phase, not a freeze/wedge).
+- Root cause of the SILENT alarm: the #391 obs-liveness-watchdog dev1 WS-only probe filled active_fps from the GetStats activeFps gauge (the CONFIGURED canvas fps — read 30.0 during the stall) and computed render_skipped_frac=0.0 on a frozen loop, so classify() returned HEALTHY. Enabling #391 as-is (ticket item 3) would NOT have caught it.
+- Fix: added render_advanced: Option<bool> (did renderTotalFrames advance over the GetStats window) to ObsHealthSample; classify() returns FPS-ZERO on Some(false) BEFORE the legacy activeFps check; None (counter reset / WS unreachable) never pages. obs-liveness-probe.py computes it from the delta it already gathered; obs-watchdog-gate parses it (opt_bool, backward-compatible JSON). RED test src/obs_watchdog.rs::render_not_advancing_while_active_fps_lies_fails_fps_zero_935 (RED on the test-only commit, GREEN on the classify branch) + Python tests in tests/python/test_obs_liveness_probe.py.
+- #391 still SHIPS DISABLED — this fix makes it CAPABLE of catching class B; supervisor must still install + live-verify + enable per the README.
+- Class A (frozen strih cambox INPUT) is uncovered by every current watchdog (frozen-input WD taps STREAM's NDI 2ME PGM received=, which kept advancing) → filed follow-up #1069.
+- Tier-0: cargo fmt clean; cargo check --all-targets + clippy --all-targets -D warnings clean; pytest tests/python/test_obs_liveness_probe.py 31 passed. (camera-box Tier-0 forbids running cargo tests locally — RED→GREEN is proven on CI.)
