@@ -203,11 +203,20 @@ inventing a second mechanism: add ONE EXPORTed libobs seam (`obs_aux_sender_shou
 to the pure `obs_display_should_skip()`; keep per-instance EWMA + counters on the plugin struct.
 Program priority stays STRUCTURAL (different source type, never routed through the gate).
 
-- **Budget-model render-order caveat:** `elapsed = now - graphics_frame_start_ns` only reflects the
-  program cost if the aux decision falls AFTER `output_frames()`. Aux scenes shown via their own
-  surfaces render in `render_displays()` (after the program) so it holds on strih; an aux scene
-  embedded in the PROGRAM scene would decide early and see false headroom (robustness follow-up
-  #1063: an order-independent `last_tick_total` budget term).
+- **Budget-model render-order caveat — RESOLVED by issue 1063.** `elapsed = now -
+  graphics_frame_start_ns` only reflects the program cost if the aux decision falls AFTER
+  `output_frames()`. Aux scenes shown via their own surfaces render in `render_displays()` (after
+  the program) so it held on strih; an aux scene embedded in the PROGRAM scene would decide early
+  and see false headroom. Issue 1063 closed this: `obs_graphics_thread_loop()` now publishes the
+  PREVIOUS tick's completed `frame_time_ns` into `obs->video.last_tick_total_ns` (obs-internal.h),
+  and `obs_aux_sender_should_skip()` gates on `max(elapsed, last_tick_total_ns)` — order-independent,
+  fail-open (the field is 0 before the first completed tick, so it is byte-identical to `elapsed`
+  at startup). Two constraints when touching this seam again: (a) keep the seam BRACE-FREE
+  (single-statement `if`s + ternaries only) — `tests/aux_sender_budget_879.rs` finds its closing
+  brace via the first `"\n}"` after the signature, and the new max-term uses a `? :` ternary
+  precisely to avoid a nested block; (b) BOTH lift-compile stubs (the 879 invariant test AND the
+  1063 order-independence test) carry the `last_tick_total_ns` field in their `video_stub`, and the
+  field + publish line + max-term are anchored in `genlock_preload.rs` and BOTH windows-genlock ymls.
 - **Audio is a separate filter callback:** gate ONLY `ndi_filter_render_video`; leave
   `ndi_filter_asyncaudio` untouched so interkom talkback audio stays full-rate.
 
