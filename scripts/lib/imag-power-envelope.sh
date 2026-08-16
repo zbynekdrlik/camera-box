@@ -300,21 +300,22 @@ imag_power_alert_condition() {
 # numeric act STRICTLY below the floor. Empty gather / no numeric FLOOR / no THROTSAMPLE lines ->
 # empty output (never a false alert on an ssh hiccup). Two-pass so the FLOOR line's position in the
 # block does not matter.
-imag_power_throttle_alert_condition() {
-  local gather="$1" pct="${IMAG_POWER_THROTTLE_ALERT_PCT:-50}" min="${IMAG_POWER_THROTTLE_MIN_SAMPLES:-6}"
-  # Validate the tunables the same way floor/act are validated below -- a non-numeric override must
-  # not collapse the threshold (a bare $((pct*total)) with pct non-numeric evaluates to 0, firing on
-  # a single sample) or the min-sample floor.
-  case "$pct" in '' | *[!0-9]*) pct=50 ;; esac
-  case "$min" in '' | *[!0-9]*) min=6 ;; esac
-  local floor="" total=0 clamped=0 tag a b d
+# _imag_power_throttle_parse_burst GATHER -> echoes `<total>|<clamped>|<floor>`: total THROTSAMPLE
+# lines, how many were genuinely clamped ((pl1=1 OR thermal=1) AND a numeric act STRICTLY below the
+# floor), and the numeric FLOOR. Empty + return 1 when there is no numeric FLOOR line (an ssh hiccup
+# / a box with no i915 freq surface -> "nothing to decide"). The ONE burst-parse primitive shared by
+# imag_power_throttle_alert_condition (the 2-state #880 marker) and imag_power_throttle_state (the
+# 3-state #799 discriminator input) so the two can never disagree about what "clamped" means -- no
+# two driftable copies. Two-pass so the FLOOR line's position in the block does not matter.
+_imag_power_throttle_parse_burst() {
+  local gather="$1" floor="" total=0 clamped=0 tag a b d
   # pass 1: the numeric floor (a non-numeric/empty FLOOR is treated as "no floor" -> no decision).
   while IFS='|' read -r tag a; do
     if [ "$tag" = "FLOOR" ]; then
       case "$a" in '' | *[!0-9]*) : ;; *) floor="$a" ;; esac
     fi
   done <<< "$gather"
-  [ -n "$floor" ] || return 0
+  [ -n "$floor" ] || return 1
   # pass 2: count burst samples and how many are genuinely clamped below the floor.
   while IFS='|' read -r tag a b _ d; do
     [ "$tag" = "THROTSAMPLE" ] || continue
@@ -328,12 +329,47 @@ imag_power_throttle_alert_condition() {
       esac
     fi
   done <<< "$gather"
+  printf '%s|%s|%s\n' "$total" "$clamped" "$floor"
+}
+
+imag_power_throttle_alert_condition() {
+  local gather="$1" pct="${IMAG_POWER_THROTTLE_ALERT_PCT:-50}" min="${IMAG_POWER_THROTTLE_MIN_SAMPLES:-6}"
+  # Validate the tunables the same way floor/act are validated below -- a non-numeric override must
+  # not collapse the threshold (a bare $((pct*total)) with pct non-numeric evaluates to 0, firing on
+  # a single sample) or the min-sample floor.
+  case "$pct" in '' | *[!0-9]*) pct=50 ;; esac
+  case "$min" in '' | *[!0-9]*) min=6 ;; esac
+  local parsed total clamped floor
+  parsed="$(_imag_power_throttle_parse_burst "$gather")" || return 0
+  IFS='|' read -r total clamped floor <<< "$parsed"
   # A partial burst (ssh dropped mid-sample) must not read e.g. a 2/2 capture as "sustained" -- the
   # burst emits ~12 samples, so require a minimum before deciding (fewer = "nothing to decide").
   [ "$total" -ge "$min" ] || return 0
   if [ "$clamped" -gt 0 ] && [ "$((clamped * 100))" -ge "$((pct * total))" ]; then
     printf 'THROTTLE-UNDER-FLOOR: %s/%s burst samples held act<%sMHz while PL1/thermal-clamped (threshold %s%%)\n' \
       "$clamped" "$total" "$floor" "$pct"
+  fi
+}
+
+# imag_power_throttle_state GATHER -> echoes exactly one of `clamped | clean | unknown` -- the
+# 3-state refinement the #799 render-cause discriminator needs (the 2-state alert_condition above
+# collapses "clean" and "unknown" into one empty output, which cannot tell a healthy GPU apart from
+# an unread one). clamped = a MAJORITY of a valid burst is power/thermal-clamped under the floor (the
+# GPU is being starved); clean = a valid burst (>= min samples, FLOOR present) with NO clamped
+# majority = the GPU has HEADROOM; unknown = no FLOOR / too few samples (an ssh hiccup) -> cannot
+# judge (never a false clean/clamped). Same tunables + primitive as alert_condition.
+imag_power_throttle_state() {
+  local gather="$1" pct="${IMAG_POWER_THROTTLE_ALERT_PCT:-50}" min="${IMAG_POWER_THROTTLE_MIN_SAMPLES:-6}"
+  case "$pct" in '' | *[!0-9]*) pct=50 ;; esac
+  case "$min" in '' | *[!0-9]*) min=6 ;; esac
+  local parsed total clamped floor
+  parsed="$(_imag_power_throttle_parse_burst "$gather")" || { printf 'unknown\n'; return 0; }
+  IFS='|' read -r total clamped floor <<< "$parsed"
+  [ "$total" -ge "$min" ] || { printf 'unknown\n'; return 0; }
+  if [ "$clamped" -gt 0 ] && [ "$((clamped * 100))" -ge "$((pct * total))" ]; then
+    printf 'clamped\n'
+  else
+    printf 'clean\n'
   fi
 }
 
@@ -350,6 +386,85 @@ imag_power_throttle_alert_sig() {
   # the fluctuating measurement. Kept in the signature so a future bucketed variant has a seam.
   : "${1:-}"
   printf 'imag-throttle:under-floor\n'
+}
+
+# =============================================================================================
+# #799 -- the render-degradation CAUSE discriminator.
+#
+# Two DISTINCT causes produce the same "OBS render budget blown after hours, restart clears it"
+# symptom on imag-nb: (a) the issue-880/1043 power/thermal clamp (GPU steered below the pinned
+# floor -- imag_power_throttle_state == clamped) and (b) THIS ticket's connection-churn render
+# leak (render time creeps while the GPU has HEADROOM -- throttle clean). The salvaged plan:
+# read render stats + gt_act_freq + throttle_reason SIMULTANEOUSLY and NAME which cause is active,
+# instead of one ambiguous "render degraded" alert. All PURE (no I/O) so drift-guard/verify-imag
+# and the Tier-0 test harness exercise them directly.
+# =============================================================================================
+
+# imag_render_degraded_from_sample RENDER_LINE -> echoes exactly one of
+# `degraded | healthy | stalled | unknown`, classifying a
+# `RENDER|<active_fps>|<avg_ms>|<render_skipped_frac>|<render_advanced>` line (emitted by the dev1
+# reader scripts/imag-render-stats.py) against the imag 60fps render budget. The thresholds MIRROR
+# src/render_budget.rs (the single source of the physical 60fps deadline): budget 1000/60=16.67ms,
+# fps floor = target - 2 = 58, render-skip tolerance 5%.
+#   - render_advanced=false -> a FULL render-loop stall (activeFps LIES here, #935): that is the
+#     #391 obs-liveness FpsZero path's domain, NOT this partial-degrade discriminator -> `stalled`
+#     (so the two watchdogs never double-alert one stall).
+#   - avg_ms is the trustworthy primary signal (it does NOT lie like activeFps): avg over budget,
+#     OR render-skip over tolerance, OR (activeFps < 58 ONLY when advancement is CONFIRMED true --
+#     never trust a low activeFps otherwise, #935) -> `degraded`.
+#   - malformed / empty / non-numeric avg -> `unknown` (never a false signal on an ssh/WS hiccup).
+imag_render_degraded_from_sample() {
+  local line="$1" tag afps avg skip adv
+  IFS='|' read -r tag afps avg skip adv <<< "$line"
+  [ "$tag" = "RENDER" ] || { printf 'unknown\n'; return 0; }
+  # avg_ms is the primary trustworthy signal; without a numeric avg we cannot judge.
+  case "$avg" in '' | *[!0-9.]*) printf 'unknown\n'; return 0 ;; esac
+  # a full render stall is #391's FpsZero domain, not this partial-degrade discriminator.
+  [ "$adv" = "false" ] && { printf 'stalled\n'; return 0; }
+  # avg over the 60fps frame budget (1000/60 = 16.66666667 ms) -> degraded. awk for the float compare.
+  if awk -v a="$avg" 'BEGIN { exit !(a + 0 > 16.66666667) }'; then printf 'degraded\n'; return 0; fi
+  # render-skip fraction over the 5% tolerance -> degraded (non-numeric skip = signal absent).
+  case "$skip" in
+    '' | *[!0-9.]*) : ;;
+    *) awk -v s="$skip" 'BEGIN { exit !(s + 0 > 0.05) }' && { printf 'degraded\n'; return 0; } ;;
+  esac
+  # activeFps below the 58 floor is trustworthy ONLY when renderTotalFrames is confirmed advancing.
+  if [ "$adv" = "true" ]; then
+    case "$afps" in
+      '' | *[!0-9.]*) : ;;
+      *) awk -v f="$afps" 'BEGIN { exit !(f + 0 < 58) }' && { printf 'degraded\n'; return 0; } ;;
+    esac
+  fi
+  printf 'healthy\n'
+}
+
+# imag_render_cause_from_signals RENDER_LINE BURST -> echoes one `<cause>|<detail>` line naming
+# WHICH cause is active, fusing imag_render_degraded_from_sample (render stats) with
+# imag_power_throttle_state (the GPU throttle burst). Causes:
+#   healthy      -- render within the 60fps budget (no alert)
+#   stalled      -- render loop fully stalled (defer to the #391 obs-liveness FpsZero path)
+#   unknown      -- render sample unreadable, OR render degraded but the throttle burst is unreadable
+#                   (cannot attribute this pass -- never a false churn blame)
+#   power-clamp  -- render degraded WHILE the iGPU is power/thermal-clamped (issue 880/1043), NOT a
+#                   churn leak (the existing throttle alert already pages the clamp)
+#   churn-leak   -- render degraded while the iGPU has HEADROOM (throttle clean): the #799
+#                   connection-churn leak an OBS restart clears -- the genuinely new, previously
+#                   silent case
+imag_render_cause_from_signals() {
+  local render_line="$1" burst="$2" rstate tstate
+  rstate="$(imag_render_degraded_from_sample "$render_line")"
+  case "$rstate" in
+    degraded) : ;;
+    healthy) printf 'healthy|render within the 60fps budget\n'; return 0 ;;
+    stalled) printf 'stalled|render loop fully stalled -- defer to the #391 obs-liveness FpsZero path\n'; return 0 ;;
+    *) printf 'unknown|render sample not readable\n'; return 0 ;;
+  esac
+  tstate="$(imag_power_throttle_state "$burst")"
+  case "$tstate" in
+    clamped) printf 'power-clamp|render degraded WHILE the iGPU is power/thermal-clamped below the floor -- the issue 880/1043 power/cooling envelope, not a churn leak (see the throttle alert)\n' ;;
+    clean) printf 'churn-leak|render degraded while the iGPU has headroom (throttle clean) -- accumulated per-process NDI-receive->texture-upload state (#799); a graceful OBS restart clears it, NOT the power clamp\n' ;;
+    *) printf 'unknown|render degraded but the GPU throttle burst is unreadable -- cannot attribute the cause this pass\n' ;;
+  esac
 }
 
 # imag_power_envelope_gather_remote_snippet -> the REMOTE shell command (a string) both callers run
