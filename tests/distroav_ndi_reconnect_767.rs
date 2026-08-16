@@ -131,9 +131,11 @@ fn lift_decision_helper() -> String {
     src[start..end].to_string()
 }
 
-/// `(genlock_active, no_connections, now_ns, last_frame_ns, stale_ns) -> expected`.
-/// Each row asserts one guard/boundary of the spec.
-fn vectors() -> Vec<((bool, i32, u64, u64, u64), bool)> {
+/// `(genlock_active, no_connections, now_ns, last_frame_ns, stale_ns)` — the helper's arguments.
+type ReconnectArgs = (bool, i32, u64, u64, u64);
+
+/// `(args, expected)`. Each row asserts one guard/boundary of the spec.
+fn vectors() -> Vec<(ReconnectArgs, bool)> {
     let s = 10_000_000_000u64; // 10 s stale window, in ns
     vec![
         // genlock OFF → never fires, whatever else holds.
@@ -161,9 +163,7 @@ fn reconnect_decision_computes_the_spec_truth_table() {
     let helper = lift_decision_helper();
     let vs = vectors();
 
-    let mut c = String::from(
-        "#include <stdint.h>\n#include <stdbool.h>\n#include <stdio.h>\n",
-    );
+    let mut c = String::from("#include <stdint.h>\n#include <stdbool.h>\n#include <stdio.h>\n");
     c.push_str(&helper);
     c.push_str("\nint main(void){\n");
     for ((ga, nc, now, last, stale), _) in &vs {

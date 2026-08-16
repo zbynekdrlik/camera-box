@@ -117,6 +117,34 @@ static bool genlock_source_is_active(obs_source_t *source)
 	return false;
 }
 
+/* camera-box #767 (event-critical, 2026-08-13): a genlocked source that stays CONNECTED but
+ * silent this long has a stuck (half-open, post sender-reboot) NDI connection -- force a full
+ * receiver rebind. 10 s = 3x process_empty_frame's own 3 s blank timeout: past any
+ * genlock-FIFO/network transient, far below the 41-min live silent-black incident. */
+static const uint64_t GENLOCK_RECONNECT_STALE_NS = 10ULL * 1000ULL * 1000ULL * 1000ULL;
+
+/* camera-box #767: should this genlocked, CONNECTED source that has delivered no new frame for
+ * `stale_ns` force a full NDI receiver rebind? PURE decision (no OBS/NDI calls, only primitives)
+ * so it lift-compiles + truth-table-tests offline -- CI is otherwise the first compiler for this
+ * file (tests/distroav_ndi_reconnect_767.rs). Root cause it addresses: the receiver is recreated
+ * ONLY via the reset_ndi_receiver flag; the steady loop never rebinds a stuck connection when the
+ * sender instance restarts, and NDI's own name-based reconnect only re-resolves once
+ * no_connections drops to 0 (which a hard-reboot half-open connection never does). See
+ * ndi_source_thread's watchdog call. */
+static inline bool genlock_reconnect_decision(bool genlock_active, int no_connections, uint64_t now_ns,
+					      uint64_t last_frame_ns, uint64_t stale_ns)
+{
+	if (!genlock_active)
+		return false; /* scoped to genlocked sources only (mirrors the #764 keep-alive scope) */
+	if (no_connections <= 0)
+		return false; /* no sender connected -> NDI's finder rebinds; not the stuck-connection case */
+	if (last_frame_ns == 0)
+		return false; /* never received a frame yet -> don't judge a warming-up receiver */
+	if (now_ns <= last_frame_ns)
+		return false; /* clock has not advanced past the last frame -> no measurable age */
+	return (now_ns - last_frame_ns) >= stale_ns;
+}
+
 /* camera-box #257: per-source MEASUREMENT-BURN setter, runtime-resolved by name — same
  * rationale as the fifo/latency setters: the Windows DistroAV build fetches stock OBS SDK
  * headers (no genlock symbols), so a link-time call cannot build; resolve at runtime so
@@ -823,7 +851,8 @@ void *ndi_source_thread(void *data)
 		// check if there are any connections.
 		// If not then micro-pause and restart the loop.
 		//
-		if (ndiLib->recv_get_no_connections(ndi_receiver) == 0) {
+		int no_conn = ndiLib->recv_get_no_connections(ndi_receiver);
+		if (no_conn == 0) {
 #if 0
 			obs_log(LOG_DEBUG,
 				"'%s' ndi_source_thread: No connection; sleep and restart loop",
@@ -833,6 +862,34 @@ void *ndi_source_thread(void *data)
 
 			// This will also slow down the shutdown of OBS when no NDI feed is received.
 			std::this_thread::sleep_for(std::chrono::milliseconds(100));
+			continue;
+		}
+
+		//
+		// camera-box #767 (event-critical, 2026-08-13): reconnect-on-sender-restart watchdog.
+		// A genlocked, still-CONNECTED source that has delivered no new frame for
+		// GENLOCK_RECONNECT_STALE_NS has a stuck (half-open, post sender-reboot) NDI connection --
+		// NDI's own name-based reconnect only fires once no_connections drops to 0, which a
+		// hard-reboot half-open connection never does (a rebooted sender box gives no graceful TCP
+		// close). Force the SAME rebind the manual SetInputSettings recovery triggered live: set
+		// reset_ndi_receiver so the next loop iteration's reset block recv_destroy+recv_create_v3
+		// re-resolves the (restarted) sender by name. Scoped to genlocked sources
+		// (genlock_source_is_active) -- a non-genlock/aux input, or a stock/unpatched OBS where the
+		// getter resolves nullptr, is untouched. PURELY ADDITIVE: it never changes the frame-pull
+		// throttle, so a source delivering frames continuously never trips the window (the #797
+		// steady-state-fps concern is unaffected). Refresh last_frame_timestamp so the fresh
+		// receiver gets a full window before it can be judged stale again.
+		//
+		if (genlock_reconnect_decision(genlock_source_is_active(s->obs_source), no_conn,
+					       os_gettime_ns(), s->last_frame_timestamp,
+					       GENLOCK_RECONNECT_STALE_NS)) {
+			obs_log(LOG_INFO,
+				"genlock: NDI receiver stale while connected -- forcing rebind (sender restart?) '%s'",
+				obs_source_name);
+			pthread_mutex_lock(&s->config_mutex);
+			s->config.reset_ndi_receiver = true;
+			pthread_mutex_unlock(&s->config_mutex);
+			s->last_frame_timestamp = os_gettime_ns();
 			continue;
 		}
 
