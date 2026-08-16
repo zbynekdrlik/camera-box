@@ -606,3 +606,50 @@ fn windows_path_sends_a_ps1_file() {
         "#876: the Windows path must run the uploaded .ps1 by -File"
     );
 }
+
+/// The cam boxes run DELIBERATE read-only roots (the deploy-fleet.sh remount cycle exists for
+/// exactly this), and the FIRST live canary run failed on cam1 with
+/// `cp: cannot create regular file '/usr/local/bin/dantesync.bak': Read-only file system`
+/// (2026-08-16, v1.8.42 roll). The generated Linux upgrade script must therefore detect a
+/// non-writable binary dir, remount rw BEFORE the backup step, and restore ro via the EXIT
+/// trap so BOTH the success path and the self-heal ERR path end read-only again.
+#[test]
+fn linux_upgrade_cmd_remounts_ro_root_rw_before_backup_and_restores_ro_on_exit() {
+    let cmd = run_sourced("dantesync_linux_upgrade_cmd 1.8.42");
+    let rw = cmd
+        .find("mount -o remount,rw /")
+        .expect("upgrade cmd must remount a read-only root rw before touching the binary");
+    let bak = cmd
+        .find("/usr/local/bin/dantesync.bak")
+        .expect("#876: expected the backup of the current binary");
+    assert!(
+        rw < bak,
+        "the rw remount must come BEFORE the backup step (the exact 2026-08-16 canary failure). Got:\n{cmd}"
+    );
+    assert!(
+        cmd.contains("mount -o remount,ro /"),
+        "the upgrade cmd must restore the read-only root on exit. Got:\n{cmd}"
+    );
+    let ro_helper = cmd
+        .find("_dantesync_remount_ro")
+        .expect("expected the ro-restore helper wired into the EXIT trap");
+    assert!(
+        ro_helper < bak,
+        "the ro-restore helper must be armed before the point of no return. Got:\n{cmd}"
+    );
+}
+
+/// The orchestrator-invoked rollback (VERIFY-failure path) hits the same read-only root and
+/// must carry the same remount handling.
+#[test]
+fn linux_rollback_cmd_handles_read_only_root() {
+    let cmd = run_sourced("dantesync_linux_rollback_cmd");
+    assert!(
+        cmd.contains("mount -o remount,rw /"),
+        "rollback cmd must remount a read-only root rw before restoring the backup. Got:\n{cmd}"
+    );
+    assert!(
+        cmd.contains("mount -o remount,ro /"),
+        "rollback cmd must restore the read-only root afterwards. Got:\n{cmd}"
+    );
+}
