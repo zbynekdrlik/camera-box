@@ -81,18 +81,28 @@ fn lib_defines_the_pure_functions() {
 fn parse_ssh_failure_empty_output_is_not_reachable() {
     // ssh connect failed / box off the wire -> empty output -> NODATA, never a false signal.
     let out = stdout_of("splitter_health_parse_probe \"\"");
-    assert!(out.contains("reachable=0"), "empty probe must be unreachable: {out}");
-    assert!(out.contains("capturing=0"), "unreachable => not capturing: {out}");
+    assert!(
+        out.contains("reachable=0"),
+        "empty probe must be unreachable: {out}"
+    );
+    assert!(
+        out.contains("capturing=0"),
+        "unreachable => not capturing: {out}"
+    );
     assert!(out.contains("colour=0"), "unreachable => colour 0: {out}");
 }
 
 #[test]
 fn parse_reachable_and_capturing_colour() {
     // healthy: connected + a fresh colour chroma line (the #299 metric).
-    let out =
-        stdout_of("splitter_health_parse_probe $'PROBE_OK\\ncapture chroma: u_dev=7.2 v_dev=15.9 -> colour'");
+    let out = stdout_of(
+        "splitter_health_parse_probe $'PROBE_OK\\ncapture chroma: u_dev=7.2 v_dev=15.9 -> colour'",
+    );
     assert!(out.contains("reachable=1"), "PROBE_OK => reachable: {out}");
-    assert!(out.contains("capturing=1"), "fresh chroma line => capturing: {out}");
+    assert!(
+        out.contains("capturing=1"),
+        "fresh chroma line => capturing: {out}"
+    );
     assert!(out.contains("colour=1"), "'-> colour' => colour=1: {out}");
     assert!(out.contains("u_dev=7.2"), "must carry u_dev: {out}");
     assert!(out.contains("v_dev=15.9"), "must carry v_dev: {out}");
@@ -105,8 +115,14 @@ fn parse_reachable_capturing_but_grayscale() {
         "splitter_health_parse_probe $'PROBE_OK\\ncapture chroma: u_dev=0.5 v_dev=0.4 -> grayscale (source likely monochrome)'",
     );
     assert!(out.contains("reachable=1"), "PROBE_OK => reachable: {out}");
-    assert!(out.contains("capturing=1"), "fresh chroma line => capturing: {out}");
-    assert!(out.contains("colour=0"), "'-> grayscale' => colour=0: {out}");
+    assert!(
+        out.contains("capturing=1"),
+        "fresh chroma line => capturing: {out}"
+    );
+    assert!(
+        out.contains("colour=0"),
+        "'-> grayscale' => colour=0: {out}"
+    );
     assert!(out.contains("u_dev=0.5"), "must carry u_dev: {out}");
 }
 
@@ -115,7 +131,10 @@ fn parse_reachable_but_no_recent_capture_line() {
     // connected but no `capture chroma:` line in the window: capture stalled or camera-box down.
     let out = stdout_of("splitter_health_parse_probe $'PROBE_OK\\n'");
     assert!(out.contains("reachable=1"), "PROBE_OK => reachable: {out}");
-    assert!(out.contains("capturing=0"), "no chroma line => not capturing: {out}");
+    assert!(
+        out.contains("capturing=0"),
+        "no chroma line => not capturing: {out}"
+    );
     assert!(out.contains("colour=0"), "not capturing => colour=0: {out}");
 }
 
@@ -209,6 +228,12 @@ fn alert_detail_grayscale_names_box_port_and_chroma() {
         d.to_lowercase().contains("splitter port"),
         "must name the splitter port as suspect: {d}"
     );
-    assert!(d.to_lowercase().contains("grayscale"), "must state grayscale: {d}");
-    assert!(d.contains("0.5") && d.contains("0.4"), "must carry the chroma numbers: {d}");
+    assert!(
+        d.to_lowercase().contains("grayscale"),
+        "must state grayscale: {d}"
+    );
+    assert!(
+        d.contains("0.5") && d.contains("0.4"),
+        "must carry the chroma numbers: {d}"
+    );
 }
