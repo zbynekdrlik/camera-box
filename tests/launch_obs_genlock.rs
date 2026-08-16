@@ -550,3 +550,79 @@ fn plan_emits_verify_at_start_latency_pins_1061() {
         );
     }
 }
+
+/// #775 — OBS is (re)launched via the box's Start-Menu SHORTCUT (`OBS Studio.lnk`) as the PRIMARY
+/// path; the bare exe is ONLY the guarded fallback (behind `if (Test-Path $lnk)` … `else`, with a
+/// LOUD warning that the box-specific params are missing). The e496d4aab fix landed this behavior
+/// but NOTHING pinned it — `program_launches_with_bin64_cwd` above asserts only the bare-exe
+/// fallback, so a refactor back to a bare-exe-primary launch would pass CI silently and re-break
+/// strih's interkom (`--enable-media-stream` dropped → VDO.ninja "Permissions denied").
+#[test]
+fn program_launches_lnk_as_primary_bare_exe_only_as_fallback_775() {
+    let p = program_default();
+    // The shortcut variable points at the ProgramData "OBS Studio.lnk".
+    assert!(
+        p.contains("OBS Studio.lnk"),
+        "#775: the launch must reference the box's 'OBS Studio.lnk' shortcut. Program:\n{p}"
+    );
+    let lnk_pos = p
+        .find("Start-Process -FilePath $lnk")
+        .expect("#775: OBS must be launched via `Start-Process -FilePath $lnk` (the shortcut)");
+    let bare_pos = p
+        .find("Start-Process -FilePath $exe -WorkingDirectory")
+        .expect("#775: the bare-exe fallback launch must still exist");
+    // The shortcut launch is FIRST (primary); the bare exe comes later (fallback).
+    assert!(
+        lnk_pos < bare_pos,
+        "#775: the .lnk launch must be the PRIMARY path, BEFORE the bare-exe fallback — not the \
+         other way round. Program:\n{p}"
+    );
+    // The primary .lnk launch is gated on the shortcut existing.
+    let gate_pos = p
+        .find("if (Test-Path $lnk)")
+        .expect("#775: the .lnk launch must be gated on `if (Test-Path $lnk)`");
+    assert!(
+        gate_pos < lnk_pos,
+        "#775: the `if (Test-Path $lnk)` gate must precede the .lnk launch. Program:\n{p}"
+    );
+    // The bare-exe fallback carries a LOUD warning that the box-specific params are missing, and it
+    // sits between the .lnk launch and … well, it IS the fallback branch after the warning.
+    let warn_pos = p
+        .find("shortcut params will be MISSING")
+        .expect("#775: the bare-exe fallback must warn that box-specific params are MISSING");
+    assert!(
+        lnk_pos < warn_pos && warn_pos < bare_pos,
+        "#775: the 'params MISSING' warning must sit in the fallback branch, between the primary \
+         .lnk launch and the bare-exe launch. Program:\n{p}"
+    );
+}
+
+/// #775 — the #786 redraw/relaunch loop must ALSO prefer the .lnk (a bad-ASIO redraw that dropped
+/// back to a bare exe would re-break the interkom on every recovery). Both the initial launch and
+/// the redraw relaunch go `Start-Process -FilePath $lnk`.
+#[test]
+fn redraw_relaunch_also_prefers_lnk_775() {
+    let p = program_default();
+    let lnk_launches = p.matches("Start-Process -FilePath $lnk").count();
+    assert!(
+        lnk_launches >= 2,
+        "#775: both the initial launch AND the #786 redraw relaunch must use `Start-Process \
+         -FilePath $lnk` (found {lnk_launches}). Program:\n{p}"
+    );
+}
+
+/// #775 (item 2a) — the #411 self-heal recovery relaunch must inherit the SAME .lnk-primary launch
+/// program, never re-derive its own. It does so by reusing `launch-obs-genlock.sh`'s
+/// `build_launch_program` verbatim — pin that reuse so a self-heal refactor can't fork the launch
+/// path (and thereby a bare-exe respawn) behind the wrapper's back.
+#[test]
+fn self_heal_reuses_wrapper_launch_program_775() {
+    let self_heal =
+        std::fs::read_to_string(manifest_dir().join("scripts/obs-self-heal-install.sh"))
+            .expect("read obs-self-heal-install.sh");
+    assert!(
+        self_heal.contains("build_launch_program"),
+        "#775: obs-self-heal-install.sh must reuse launch-obs-genlock.sh's build_launch_program \
+         (so its recovery relaunch inherits the .lnk-primary contract), never re-derive its own launch."
+    );
+}
