@@ -48,6 +48,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 
 # #785: --bootstrap = boot/recovery invocation (autostart + watchdog) — ONLY that path may
 # enforce program scene / studio / input bindings; a bare run only creates what is missing.
@@ -406,7 +407,137 @@ def seed(obs: Obs) -> None:
         sys.exit(1)
 
 
-def projector(obs: Obs) -> None:
+# #769: projector count-first idempotence (windowed-stray dedup).
+#
+# obs-websocket's OpenVideoMixProjector ALWAYS opens a NEW window (the protocol has no "is a
+# projector open" query), and OBS's own CloseExistingProjectors replace-loop closes only projectors
+# whose internal GetMonitor()==the target monitor -- so a launch-restore stray (windowed, internal
+# monitor=-1) is invisible to it and every blind seed stacks one more (live "3x Multiview, gate
+# refuse", 2026-07-15). projector() below opens the projector, then closes the OLDER stray windows,
+# keeping the NEWEST X window id (== the one it just opened on the correct monitor). Done in the
+# SEEDER itself so the stack never forms on the LIVE box between gate runs -- the watchdog inherits
+# it for free (imag-obs-watchdog.py calls this same seed). Mirrors the already-merged gate heal
+# (scripts/lib/imag-projector-heal.sh); the pure decision is extracted here for an offline
+# wmctrl-fixture unit test (the #791 pure-seam pattern).
+
+
+def projector_window_ids(wmctrl_output, kind):
+    """Ids (in file order) of every `Projector - <kind>` window in a `wmctrl -l` dump. `kind` is
+    "Multiview" or "Program". A wmctrl line is `0xID  <desktop>  <host>  <title>`; we match on the
+    title marker `Projector - <kind>` (the only place that string ever appears -- same substring the
+    gate heal / count-check / verify-imag all key on) and take the leading 0x window id."""
+    marker = "Projector - %s" % kind
+    ids = []
+    for line in (wmctrl_output or "").splitlines():
+        if marker not in line:
+            continue
+        tok = line.split()[0] if line.split() else ""
+        if re.match(r"^0x[0-9a-fA-F]+$", tok):
+            ids.append(tok)
+    return ids
+
+
+def projector_strays_to_close(wmctrl_output, kind):
+    """The window ids to CLOSE so exactly one `Projector - <kind>` survives -- every id EXCEPT the
+    newest (highest NUMERIC X id == the projector just opened on the correct monitor). Returns []
+    when 0 or 1 windows exist (nothing to heal -> a repeated seed is a no-op, the idempotence
+    acceptance criterion). The survivor is chosen numerically, not lexicographically, so a
+    wmctrl/`sort` ordering of unequal-length ids can never pick the wrong one."""
+    ids = projector_window_ids(wmctrl_output, kind)
+    if len(ids) <= 1:
+        return []
+    newest = max(ids, key=lambda x: int(x, 16))
+    return [i for i in ids if i != newest]
+
+
+def _wmctrl_list_local():
+    """`wmctrl -l` from the LOCAL X display (the loopback --host boot/watchdog path, DISPLAY=:0).
+    Returns None when wmctrl is absent -- the caller warns LOUD by name and skips dedup, NEVER
+    silently reads a missing tool as "no windows" (imag-ssh-remote-tool-preflight rule). Never
+    raises (runs under imag-obs-start.sh's set -euo pipefail)."""
+    if shutil.which("wmctrl") is None:
+        return None
+    try:
+        env = dict(os.environ)
+        env.setdefault("DISPLAY", ":0")
+        r = subprocess.run(["wmctrl", "-l"], capture_output=True, text=True,
+                           timeout=10, check=False, env=env)
+        return r.stdout
+    except Exception as e:
+        print("WARN #769: local wmctrl -l failed: %s" % e)
+        return None
+
+
+def _wmctrl_close_local(win_id):
+    """Close one X window by id on the local display. Best-effort, never raises (a failed close is
+    warned, not fatal -- the gate [0/8] count check catches a stray that survives)."""
+    try:
+        subprocess.run(["wmctrl", "-i", "-c", win_id], timeout=10, check=False)
+    except Exception as e:
+        print("WARN #769: local wmctrl -c %s failed: %s" % (win_id, e))
+
+
+def _ssh_base(host):
+    user = os.environ.get("IMAG_USER", "newlevel")
+    pw = os.environ.get("IMAG_PW", "newlevel")
+    return ["sshpass", "-p", pw, "ssh",
+            "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=8",
+            "%s@%s" % (user, host)]
+
+
+def _wmctrl_list_remote(host):
+    """`wmctrl -l` over ssh (the rare dev1-invoked remote --host case). Mirrors _lspci_query_remote:
+    probe wmctrl exists first, fail loud by NAME (return None -> caller warns + skips) if it does
+    not, never silently "no windows". Never raises."""
+    ssh_base = _ssh_base(host)
+    try:
+        probe = subprocess.run(
+            ssh_base + ["command -v wmctrl >/dev/null 2>&1 && echo WMCTRL_OK || echo WMCTRL_MISSING"],
+            capture_output=True, text=True, timeout=15, check=False)
+        if "WMCTRL_OK" not in probe.stdout:
+            return None
+        r = subprocess.run(ssh_base + ["DISPLAY=:0 wmctrl -l"],
+                           capture_output=True, text=True, timeout=15, check=False)
+        return r.stdout
+    except Exception as e:
+        print("WARN #769: remote wmctrl -l on %s failed: %s" % (host, e))
+        return None
+
+
+def _wmctrl_close_remote(host, win_id):
+    """Close one X window by id over ssh. Best-effort, never raises."""
+    try:
+        subprocess.run(_ssh_base(host) + ["DISPLAY=:0 wmctrl -i -c %s" % win_id],
+                       capture_output=True, text=True, timeout=15, check=False)
+    except Exception as e:
+        print("WARN #769: remote wmctrl -c %s on %s failed: %s" % (win_id, host, e))
+
+
+def _heal_projector_strays(host, kinds):
+    """#769 count-first dedup: AFTER opening, close any OLDER stray windows per kind (keep the newest
+    == the one just opened on the correct monitor), so blind re-seeds/launch-restore can never stack.
+    Local wmctrl when HOST is loopback (boot/watchdog), else sshpass ssh (dev1 manual). A missing
+    wmctrl warns LOUD by name and SKIPS dedup (the projectors are already open; the gate [0/8] count
+    check is the backstop) -- never aborts OBS start, never reads a missing tool as "no windows"."""
+    local = _is_local_host(host)
+    time.sleep(1)  # let the freshly-opened window register in the WM before enumerating
+    out = _wmctrl_list_local() if local else _wmctrl_list_remote(host)
+    if out is None:
+        print("WARN #769: wmctrl not available (%s) -- cannot dedup projector windows this run; "
+              "projectors are open, the gate [0/8] count check remains the backstop"
+              % ("local" if local else host))
+        return
+    for kind in kinds:
+        for win_id in projector_strays_to_close(out, kind):
+            if local:
+                _wmctrl_close_local(win_id)
+            else:
+                _wmctrl_close_remote(host, win_id)
+            print("healed #769: closed stray %s projector %s (kept newest on the correct monitor)"
+                  % (kind, win_id))
+
+
+def projector(obs: Obs, host: str) -> None:
     mons = obs.req("GetMonitorList")["monitors"]
     # Robust monitor selection across BOTH known imag-nb GPU generations (#522/#488): the older
     # Intel iGPU enumerated the built-in panel as "eDP-1"; this dGPU (RTX 5050 Laptop, PRIME
@@ -426,6 +557,7 @@ def projector(obs: Obs) -> None:
     })
     print(f"PROGRAM projector -> monitor {hdmi[0]['monitorIndex']} "
           f"({hdmi[0].get('monitorName')}) [HDMI]")
+    opened_kinds = ["Program"]
 
     # #507/#522: the built-in MULTIVIEW projector belongs on the panel (same monitor that shows
     # the OBS UI) so the cutter can see it without the HDMI projector output ever showing UI
@@ -438,9 +570,15 @@ def projector(obs: Obs) -> None:
         })
         print(f"MULTIVIEW projector -> monitor {panel[0]['monitorIndex']} "
               f"({panel[0].get('monitorName')}) [panel]")
+        opened_kinds.append("Multiview")
     else:
         print("WARN: no panel monitor detected for the MULTIVIEW projector "
               f"(monitors: {[m.get('monitorName') for m in mons]})")
+
+    # #769: count-first dedup -- after opening, close any OLDER stray windows so a launch-restore
+    # stray + this seed can never accumulate (keep the newest = the one just opened). Only the kinds
+    # actually opened above are reconciled; a missing panel/wmctrl never aborts (see the helper).
+    _heal_projector_strays(host, opened_kinds)
 
 
 # #791: PURE comparison helpers (no OBS/network) -- unit-tested directly (tests/python), mirrors
@@ -622,7 +760,7 @@ def main() -> None:
     args = ap.parse_args()
     obs = Obs(args.host, args.port, args.password)
     if args.projector:
-        projector(obs)
+        projector(obs, args.host)
     elif args.verify_parity:
         verify_parity(obs)
     else:
