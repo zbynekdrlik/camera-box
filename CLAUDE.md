@@ -477,6 +477,23 @@ own `.body` (or re-`gh pr view --json body`) to confirm the write actually lande
 it, since a `gh pr edit` failure here is easy to miss (it prints an error to stderr but the exit
 code alone doesn't make the silent no-op obvious without a diff-back).
 
+## GOTCHA — post design/validated/review comments with `gh issue comment`, NEVER `gh api .../comments`
+
+`gh issue view <N> --comments` is GraphQL-broken on this repo (the SAME Projects-classic error as
+`gh pr edit`/`gh pr merge` above), which tempts a worker to post issue comments via
+`gh api repos/.../issues/<N>/comments -F body=@file` instead. That POST succeeds and the comment
+appears on GitHub — **but the airuleset design-before-code recorder (`post-record-design-comment.sh`)
+matches ONLY the literal `gh issue comment <N>` command shape**, so a `gh api` comment NEVER registers
+a design / validated / reviewed marker. The next `git commit` for that issue is then hard-blocked by
+`block-commit-without-design.sh` ("no design comment posted yet") even though the comment is right
+there on the ticket. **`gh issue comment <N> --body-file <file>` (the WRITE) works fine on this repo
+even though the `--comments` READ is broken** — always use it for the design (root cause + approach +
+rejected alt), the STEP-0 validation, and the CYCLE-step-6 review comments so the markers register.
+A NON-TRIVIAL design comment additionally needs 2-3 NUMBERED approaches (`Approach 1/2/3` — the
+`classify_triage_and_approaches` shape); one chosen + one rejected reads as trivial and is rejected.
+(Incident 2026-08-16, #1070/#1075 batch: 4 comments posted via `gh api` never registered — had to
+delete them and re-post via `gh issue comment`.)
+
 ## GOTCHA — a live-triggered E2E gate run can race ahead of a mid-cycle fleet redeploy
 
 If a PR's fix requires a fleet redeploy to actually take effect on the live rig BEFORE the gate
