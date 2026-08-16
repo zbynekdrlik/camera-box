@@ -4,6 +4,7 @@ unattended CI fetch). No live OBS / no live box needed — same "source parsers,
 separately" split as tests/drift_guard.rs (drift-guard.sh) and test_obs_burn_filter.py
 (obs_burn_filter.py's compute_burn_on).
 """
+import hashlib
 import pathlib
 import sys
 
@@ -467,3 +468,67 @@ def test_build_bundle_state_omits_826_keys_when_empty():
 # (scripts/dantesync-version-gate.sh's dantesync_version_from_version_output) -- no bundle-state
 # involvement at all. This module intentionally carries no dantesync_version code any more; do not
 # re-add it without a live, working consumer.
+
+
+# ── #770: byte-derived DistroAV/libobs parity — sha256 of the DEPLOYED plugin/core bytes ─────────
+#
+# The [0/8] version-integrity gate + drift-guard --compare engine already know how to compare the
+# deployed obs.dll/distroav.dll sha256 against the #120 BUNDLE_MANIFEST (obs_dll_sha256 /
+# distroav_dll_sha256 / bundle_hashes keys), but the box state NEVER carried the bytes — only the
+# GENLOCK_BUILD_SHA.txt MARKER. `component_sha256` hashes a deployed file so those keys can be
+# gathered; `build_bundle_state` gains obs_dll_sha256 / distroav_dll_sha256 (omit-when-empty, same
+# never-a-false-clean discipline as every other facet). This closes the wrong-direction #119/#767
+# hole (marker advanced, bytes stale) that the marker-only parity facet cannot catch.
+
+
+def test_component_sha256_matches_hashlib(tmp_path):
+    f = tmp_path / "distroav.dll"
+    payload = b"\x00genlock-distroav-bytes\xff" * 37
+    f.write_bytes(payload)
+    assert bsg.component_sha256(str(f)) == hashlib.sha256(payload).hexdigest()
+
+
+def test_component_sha256_of_empty_file(tmp_path):
+    # An empty (but present) file has the well-known empty-content sha256 — a REAL value, never "".
+    f = tmp_path / "obs.dll"
+    f.write_bytes(b"")
+    assert bsg.component_sha256(str(f)) == hashlib.sha256(b"").hexdigest()
+
+
+def test_component_sha256_missing_file_returns_empty(tmp_path):
+    # A file that is not there is UNKNOWN downstream (never a fabricated/zero SHA that would let a
+    # missing plugin read as "clean") — same never-a-false-clean discipline as every other facet.
+    assert bsg.component_sha256(str(tmp_path / "nope.dll")) == ""
+
+
+def test_component_sha256_empty_path_returns_empty():
+    assert bsg.component_sha256("") == ""
+    assert bsg.component_sha256(None) == ""
+
+
+def test_component_sha256_directory_returns_empty(tmp_path):
+    # A directory is not a hashable regular file -> "" (UNKNOWN), never a crash.
+    d = tmp_path / "bin"
+    d.mkdir()
+    assert bsg.component_sha256(str(d)) == ""
+
+
+def test_build_bundle_state_includes_byte_shas_when_present():
+    obs_sha = "a" * 64
+    distroav_sha = "b" * 64
+    state = bsg.build_bundle_state(
+        obs_version="32.1.2",
+        obs_dll_sha256=obs_sha,
+        distroav_dll_sha256=distroav_sha,
+    )
+    assert state["obs_dll_sha256"] == obs_sha
+    assert state["distroav_dll_sha256"] == distroav_sha
+
+
+def test_build_bundle_state_omits_empty_byte_shas():
+    # An unread deployed DLL (unreadable file, or a box whose server predates this facet) is
+    # OMITTED — the gate then sees the box's bytes as unread, never a fabricated SHA. Opt-in
+    # landing (#756-shape): a box not yet reporting the SHAs is silently skipped, not a false clean.
+    state = bsg.build_bundle_state(obs_version="32.1.2")
+    assert "obs_dll_sha256" not in state
+    assert "distroav_dll_sha256" not in state
