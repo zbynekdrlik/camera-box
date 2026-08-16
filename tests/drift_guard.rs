@@ -1916,12 +1916,24 @@ fn real_manifest_pins_genlock_source_latency_per_box() {
     let strih = setting("genlock_source_latency_strih");
     assert!(
         !strih.is_empty(),
-        "real manifest must pin genlock_source_latency_strih (strih cameras at 3ms global); got empty"
+        "real manifest must pin genlock_source_latency_strih (post-#753 1:1 active-set cameras); got empty"
     );
-    // strih cameras follow the global 3ms: NDI cam5, NDI cam1, NDI cam3
+    // #757: after #753's 1:1 mapping pivot + the issue-1061 per-source A/V-align calibration, the
+    // strih camera pins are the operator's re-tunable A/V-align domain (live-verified REPORT-ONLY
+    // against scripts/latency-pins-baseline.json), so the drift-guard row is a clamp-range backstop
+    // under the post-pivot 1:1 names (NDI cam1/cam2/cam3) — NOT the dead pre-pivot
+    // `NDI cam5=3,...` all-at-3ms-floor model, and NOT re-hardcoded fixed ms values that re-go-stale
+    // on the next recalibration (the same #390 lesson already applied to the stream pin below).
     assert!(
-        strih.contains("NDI cam5=3"),
-        "strih pin must include NDI cam5=3 (follows global 3ms): {strih:?}"
+        strih.contains("NDI cam1=range:")
+            && strih.contains("NDI cam2=range:")
+            && strih.contains("NDI cam3=range:"),
+        "strih pin must use the post-pivot 1:1 active-set names as range backstops \
+         (NDI cam1/cam2/cam3=range:...), not re-hardcoded ms values (#390): {strih:?}"
+    );
+    assert!(
+        !strih.contains("NDI cam5="),
+        "strih pin must not carry the retired pre-pivot slot name NDI cam5 (#753 mapping pivot): {strih:?}"
     );
 
     let stream = setting("genlock_source_latency_stream");
