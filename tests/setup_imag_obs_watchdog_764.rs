@@ -32,9 +32,7 @@ fn watchdog_region(body: &str) -> String {
         .find("step 24 \"")
         .expect("scripts/setup-imag.sh must have a `step 24 \"...\"` banner for the imag-obs-watchdog provisioning (#764)");
     let rest = &body[start..];
-    let end = rest
-        .find("base provisioning DONE")
-        .unwrap_or(rest.len());
+    let end = rest.find("base provisioning DONE").unwrap_or(rest.len());
     rest[..end].to_string()
 }
 
