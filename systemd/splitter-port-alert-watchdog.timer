@@ -1,0 +1,17 @@
+[Unit]
+# Fires the #739 per-cambox splitter-port no-signal alert every 5 min (dev1-side), matching the
+# network-reach / optical-chain / imag-obs / imag-power-envelope alert cadence so the fleet's dev1
+# alert timers stay in lockstep. A dead splitter port that starves one cambox pages within ~10 minutes
+# of onset (2-pass confirm) — a dead port pinging the phone as a SPLITTER-PORT suspicion is exactly
+# what stops the recurrence from masquerading as a per-camera colour bug (the two-day tint-hunt).
+Description=Run the camera-box per-cambox splitter-port no-signal alert every 5 min (#739)
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=5min
+AccuracySec=20s
+Persistent=false
+
+[Install]
+WantedBy=timers.target
