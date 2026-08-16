@@ -74,7 +74,10 @@ DEFAULT_FLEET_FILE="$HERE/../rig-fleet.txt"
 # defers its UTC-phase step to a 2500us deadband, additively reporting it via ntp_deadband_us;
 # camera-box's own gate change for this is issue 1021; verified 8/8 boxes -- strih, stream,
 # cam1-4, imag-nb, dev1).
-DANTESYNC_VERSION_PIN="${DANTESYNC_VERSION_PIN:-1.8.41}"
+# Bumped 2026-08-16: fleet rolled to v1.8.42 (dantesync PR 89 — GM-source allowlist drops a
+# foreign-subnet grandmaster before adoption; camera-box issue 1073. Empty allowlist = unchanged
+# last-writer-wins, so non-stream boxes are behaviorally identical; stream gets gm_allowlist).
+DANTESYNC_VERSION_PIN="${DANTESYNC_VERSION_PIN:-1.8.42}"
 
 # --- PURE functions (no network, no SSH — unit-tested by sourcing this file) ------------------
 
