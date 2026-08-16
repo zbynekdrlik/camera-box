@@ -440,8 +440,8 @@ pkill -x frame-probe 2>/dev/null || true
 #       unaffected.
 $(cam2_painter_service_disable_cmds)
 # (2.6) #1075: ALSO disarm the transient cam2-painter-deadman timer. A recording-e2e run that was
-#       SIGKILLed leaves that PERIODIC timer armed; it runs "systemctl start cam2-painter" every
-#       ~5 min -- and "disable" above does NOT stop a manual start -- so without this the QR painter
+#       SIGKILLed leaves that PERIODIC timer armed; it issues a start of the cam2 painter every
+#       ~5 min -- and "disable" above does NOT stop such a start -- so without this the QR painter
 #       is resurrected ON AIR within ~5 min of switching to EVENT (live 2026-08-15). Reuses the
 #       deadman lib's disarm (stop .timer + reset-failed .service). Guarded: a box without the
 #       cam2-painter unit is unaffected (same guard shape as the disable above).
