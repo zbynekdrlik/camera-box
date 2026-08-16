@@ -653,3 +653,28 @@ fn linux_rollback_cmd_handles_read_only_root() {
         "rollback cmd must restore the read-only root afterwards. Got:\n{cmd}"
     );
 }
+
+/// The dead-task purge inside the generated Windows upgrade .ps1 must be idempotent on an
+/// ALREADY-ABSENT task: the live 2026-08-16 v1.8.43 canary failed with
+/// `schtasks : ERROR: The system cannot find the file specified.` because the task had been
+/// purged by the previous roll and the bare `schtasks ... 2>$null` still surfaces the native
+/// stderr as a terminating NativeCommandError under `$ErrorActionPreference = "Stop"` — the
+/// upgrade aborted BEFORE the swap. The purge must be routed through `cmd /c` with full
+/// redirection so PowerShell never sees the stderr of an absent-task delete.
+#[test]
+fn windows_upgrade_ps_purges_dead_task_idempotently_via_cmd_wrapper() {
+    let ps = run_sourced("dantesync_windows_upgrade_ps 1.8.43");
+    let purge = ps
+        .lines()
+        .find(|l| l.contains("DanteSyncUpdate") && l.contains("/Delete"))
+        .expect("#876: the Windows upgrade must still purge the dead DanteSyncUpdate task");
+    assert!(
+        purge.contains("cmd /c"),
+        "the purge must run under cmd /c so an absent task's stderr never becomes a \
+         terminating NativeCommandError. Got: {purge}"
+    );
+    assert!(
+        purge.contains(">nul 2>&1") || purge.contains("2>&1"),
+        "the purge must swallow the absent-task stderr inside cmd. Got: {purge}"
+    );
+}
