@@ -21,6 +21,14 @@ fn lib() -> PathBuf {
     manifest_dir().join("scripts/lib/event-assert.sh")
 }
 
+/// Return the text from `marker` up to (not incl.) the next ')' -- the remaining call arg list.
+fn args_after(s: &str, marker: &str) -> Option<String> {
+    let start = s.find(marker)? + marker.len();
+    let rest = &s[start..];
+    let end = rest.find(')')?;
+    Some(rest[..end].trim().to_string())
+}
+
 struct Run {
     exit_code: i32,
     stdout: String,
@@ -134,5 +142,30 @@ fn do_event_purges_the_marker_csv_before_the_assert_phase() {
         purge_pos < assert_pos,
         "#721: the marker-CSV purge must run BEFORE the assert phase, so item 8 sees it gone. \
          Got:\n{body}"
+    );
+}
+
+/// #721 (review hardening): the cam2-side PURGE arg-list and the cam2-side item-8 CHECK arg-list
+/// must stay in LOCK-STEP. If item 8 ever checks a NEW cam2 artifact, the purge must delete it too
+/// -- otherwise the CONTRACT would fail on the new leftover exactly as it did on the marker CSV.
+/// Both call sites pass the same cam2 paths (after the shared "$PAINTER_PIDFILE" anchor); pin that
+/// equality so a future path added to one side forces the same change on the other.
+#[test]
+fn purge_and_item8_check_share_the_same_cam2_paths() {
+    let whole =
+        fs::read_to_string(manifest_dir().join("scripts/rig-mode.sh")).expect("read rig-mode.sh");
+    // The cam2-side item-8 check carries PAINTER_PIDFILE (the OTHER check call passes the dev1
+    // heartbeat path); the purge carries the same anchor. Compare the args that follow it.
+    let check_args = args_after(
+        &whole,
+        "event_assert_artifacts_check_cmds \"$PAINTER_PIDFILE\"",
+    )
+    .expect("#721: expected the cam2-side item-8 check call (PAINTER_PIDFILE)");
+    let purge_args = args_after(&whole, "event_artifact_purge_cmds \"$PAINTER_PIDFILE\"")
+        .expect("#721: expected the purge call (PAINTER_PIDFILE)");
+    assert_eq!(
+        check_args, purge_args,
+        "#721 lock-step: the purge must delete EXACTLY the cam2 paths item 8 checks. \
+         check-args={check_args:?} purge-args={purge_args:?}"
     );
 }
