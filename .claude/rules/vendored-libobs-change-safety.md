@@ -69,6 +69,32 @@ compiler is present (a parity test that silently passes without running is worse
 Two properties to preserve if you touch it: the helpers it lifts must stay **contiguous** in
 `obs-source.c`, and the lift is by function name.
 
+### When the lifted helper has NO Rust consumer — make the gate STD-ONLY so it runs offline (issue 767)
+
+`genlock_relock_selection_parity.rs` compares the C to a `use camera_box::...` Rust authority, so it
+needs the crate + `CARGO_TARGET_TMPDIR` and runs ONLY under `cargo test` (CI — camera-box's
+`# airuleset:build-ok` is disabled, so you can't `cargo test` it locally at all). A vendored-C
+DECISION helper that NOTHING in the Rust appliance calls (e.g. `genlock_reconnect_decision` in
+`vendor/distroav/src/ndi-source.cpp`, a DistroAV-receiver-loop-only choice) has no such authority to
+compare against — so DON'T invent a crate-root module just to have one. Instead make the whole gate
+**self-contained / std-only** (`tests/distroav_ndi_reconnect_767.rs`): it `fs::read_to_string`s the
+vendored file, lifts the `static inline` helper by signature → first `\n}\n`, compiles it with `cc`
+against a tiny `<stdint.h>`/`<stdbool.h>` stub + a `main()` driving a hand-written **truth table**,
+and asserts each hardcoded expected bool. The truth table IS the spec (no Rust reference needed), so
+this runs BOTH under `cargo test` AND standalone via the issue-1026 recipe
+(`CARGO_MANIFEST_DIR=<abs> rustc --test --edition 2021 tests/<file>.rs -o /tmp/x && /tmp/x`) — a real
+local RED→GREEN with no cargo/OOM contention, and the `cc` invocation still `-Werror -Wconversion
+-Wformat=2` compile-checks the shipped bytes and panics loud (never skips) when no compiler.
+
+Two gotchas proven live here: (1) put ONE hand-picked vector at EVERY guard boundary
+(exact-threshold, just-under, each early-return guard) AND at least one vector with a DIFFERENT
+value for any parameter the helper takes (else a helper that hardcodes the constant instead of using
+the parameter passes every vector) — then mutate the C on a scratch copy and watch the specific
+boundary vector go RED, per the section below. (2) a bare `s->config.reset_ndi_receiver = true;`-style
+source anchor is easily ALIASED (the same statement text recurs at other sites with `= false` /
+`= <var>`); anchor the UNIQUE multi-line squished adjacency (e.g. the mutex-lock + flag-set + unlock
++ timestamp-refresh trio) instead, and confirm `.count()==1` in the squished file before trusting it.
+
 ## A parity or mutation gate is a LIE until you watch it go red
 
 Live, in this ticket: the parity gate passed 129 vectors, then mutating the C tie-break from

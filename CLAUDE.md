@@ -477,6 +477,35 @@ own `.body` (or re-`gh pr view --json body`) to confirm the write actually lande
 it, since a `gh pr edit` failure here is easy to miss (it prints an error to stderr but the exit
 code alone doesn't make the silent no-op obvious without a diff-back).
 
+## GOTCHA — the design/validated/reviewed marker recorder needs `gh issue comment`, and its re-read intermittently times out on this repo
+
+The autopilot design-gate has THREE mandatory durable comments (validated at STEP 0, design before
+first code commit, reviewed at CYCLE step 6); a hook writes a `~/.claude/{design,validated,reviewed}
+-posted/camera-box#<N>` marker for each, and `block-commit-without-design.sh` blocks the first commit
+until the DESIGN marker exists. Three things bite on THIS repo specifically:
+
+- **The recorder (`post-record-design-comment.sh`) fires ONLY on a `gh issue comment` Bash call** — it
+  word-matches `gh issue comment`, then re-reads the issue and classifies the FRESHEST comment you
+  authored in the last 180s. Posting the comment via `gh api repos/.../issues/<N>/comments -F body=@…`
+  (the projectCards-safe path the sibling gotchas above recommend for PR bodies) posts the comment
+  fine but writes NO marker → the commit stays blocked. Post design/validation/review comments with
+  `gh issue comment <N> --body-file <abs>` so the recorder runs. (`gh issue comment` itself works here;
+  only `gh issue view`/`gh pr edit`'s GraphQL hits projectCards.)
+- **The recorder's own `gh issue view <N> --json comments` re-read INTERMITTENTLY times out at 10s on
+  this repo** (see `~/.claude/design-gate-errors.log` — many `gh-view #N … TimeoutExpired`), and a
+  returncode-nonzero read is a SILENT `continue` (no marker, no reject, no log). So a correctly-shaped
+  comment can still leave no marker. After each such post, `ls ~/.claude/<kind>-posted/camera-box#<N>`;
+  if missing (and not in `…-rejected/`), the read timed out — re-post the SAME comment (delete the
+  prior one via `gh api -X DELETE …/issues/comments/<id>` to avoid a dup) when the query is fast.
+- **A NON-TRIVIAL design comment must match the exact classifier shape or it lands in
+  `design-rejected/`:** a `Triage:` line naming non-trivial, ≥2 NUMBERED approaches spelled
+  `Prístup/Approach/Možnosť/Variant 1-3` (NOT `A)/B)`), a trade-off word (`Trade-off`/`výhod`/…), and
+  an `Architektúra:` section (colon or `###` heading) containing a structure word
+  (`štruktúra`/`topológia`/`structure`), ≥400 chars. VERIFY locally before posting:
+  `python3 -c "import sys; sys.path.insert(0,'/home/newlevel/devel/airuleset'); import design_gate as
+  dg; b=open('body.md').read(); print(dg.classify_design_comment(b), dg.classify_triage_and_approaches(b),
+  dg.classify_architecture_section(b))"` — all three must be `(True, …)`.
+
 ## GOTCHA — a live-triggered E2E gate run can race ahead of a mid-cycle fleet redeploy
 
 If a PR's fix requires a fleet redeploy to actually take effect on the live rig BEFORE the gate
