@@ -57,7 +57,7 @@ e2e_discord_report_send() {
 }
 
 _e2e_discord_report_send_inner() {
-  local verdict_json="$1" run_id="$2" gate_exit="$3" duration_secs="$4" pins_json="${5:-}"
+  local verdict_json="$1" run_id="$2" gate_exit="$3" duration_secs="$4" pins_json="${5:-}" mv_skew_json="${6:-}"
   local here
   here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -114,10 +114,17 @@ _e2e_discord_report_send_inner() {
     pins_arg=(--pins-json "$pins_json")
   fi
 
+  # #761: forward the MV-clone-vs-main skew snapshot the SAME fail-open way as pins -- only when
+  # the file is non-empty and exists, so the composer never points at a bogus/absent file.
+  local mv_skew_arg=()
+  if [ -n "$mv_skew_json" ] && [ -s "$mv_skew_json" ]; then
+    mv_skew_arg=(--mv-skew-json "$mv_skew_json")
+  fi
+
   local chunks_json
   chunks_json="$(python3 "$here/../e2e_discord_report.py" \
     --json "$verdict_json" --run-id "$run_id" --event "$event" \
-    --duration "$duration_secs" --gate-exit "$gate_exit" "${pins_arg[@]}" --json-chunks 2>&1)"
+    --duration "$duration_secs" --gate-exit "$gate_exit" "${pins_arg[@]}" "${mv_skew_arg[@]}" --json-chunks 2>&1)"
   if [ $? -ne 0 ]; then
     echo "WARNING: #711 e2e_discord_report_send: report composer failed — skipping Discord report (fail-open). Output:" >&2
     echo "$chunks_json" >&2
