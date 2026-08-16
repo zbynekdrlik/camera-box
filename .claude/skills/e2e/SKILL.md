@@ -520,6 +520,42 @@ asserts `genlock_burn=false` on the program inputs (`obs_burn_filter.py check`) 
 cleanup verifies it. The cam-box root pw is `$CAM_PW` (dev-rig LAN default, as in the sibling e2e
 scripts — override from your password store).
 
+**EVENT-mode CONTRACT — the machine-checkable assert phase `rig-mode.sh event` now runs
+AUTOMATICALLY (#721/#722/#723/#724 — no manual supervisor checklist to remember):**
+
+The 2026-07-12 near-broadcast incident (#721): a worker left a painter running under a RENAMED
+binary (a copy of `frame-probe` at `/usr/local/bin/cam2-painter`, `--duration-secs 86400`), and
+`rig-mode.sh event` + a manual supervisor checklist BOTH said "clean" while a QR was live on air —
+the user caught it by EYE. So EVENT mode no longer trusts a process/flag check or anyone's memory:
+after the burn-off + painter-stop above, `do_event` runs the rig-test LEDGER cleanup then the
+8-item `event_mode_assert` (→ `scripts/event_assert.py`, the pure decision), fails LOUD on any
+item, and posts a Slovak confirmation to the owner's Discord thread on BOTH pass AND fail (#724).
+The two decisive additions this ticket demanded, which a supervisor must expect to see run:
+
+- **Fleet paint-process sweep (item 1 — catches a RENAMED painter).** `event_mode_assert` runs a
+  `pgrep -f -- --paint-only` count on EVERY fleet box (cam1 + cam2 + every camera in
+  `camera_active_secondary_set`), via `scripts/lib/event-assert.sh::event_assert_fleet_check_cmds`.
+  It is a PATTERN match (any `--paint-only` process), never a bare `frame-probe` name match, so a
+  renamed binary CANNOT sail through; `event_assert.py::paint_processes_ok` fails the CONTRACT on
+  ANY box reporting >0. (The pattern is base64-encoded in the remote script so the checking shell's
+  own cmdline never self-matches — the `pkill -f` self-kill footgun this rig avoids everywhere.)
+  The rig-test LEDGER cleanup (`event_mode_ledger_cleanup`, #723) additionally terminates every
+  test-registered painter/burn/override — SIGTERM → bounded SIGKILL → the #660 clean-paint `/dev/fb0`
+  fallback when a KILL was needed (clears a SIGKILLed painter's frozen DRM frame) — so a renamed
+  binary can't hide from the KILL either.
+- **PIXEL proof (item 2 — the decisive check the eye caught).** `scripts/qr_screenshot_check.py`
+  screenshots strih's 4 canonical camera scenes ("Cam 1".."Cam 4") over OBS WS (`GetSourceScreenshot`)
+  and QR-decodes the ACTUAL rendered pixels (`cv2.QRCodeDetector.detectAndDecodeMulti`).
+  `event_assert.py::pixel_proof_ok` fails CLOSED — a screenshot/decode failure counts as FAIL, never
+  "checked nothing, found nothing". Only reading the real pixels catches a QR genuinely on air.
+
+The remaining 6 CONTRACT items: burns OFF on every measurement-burn target (the exhaustive
+`obs_burn_filter.py sweep-check` across strih+stream+imag, fail-closed on an un-enumerable box); no
+active recordings/streams on strih+stream; services healthy (all cameras active) + NO stray test
+units (incl. the transient `cam2-painter-deadman*` timer, #1075 — a stray deadman resurrects the
+painter on air within ~5 min); stream PGM latency == the calibrated value; NDI mapping correct
+(#399); and test artifacts cleared. All 8 aggregate to one PASS/FAIL in `event_assert.py`.
+
 ## Testing the E2E harness scripts (sourceability gotcha)
 
 `scripts/recording-e2e.sh` runs TOP-TO-BOTTOM under `set -euo pipefail` (NO `BASH_SOURCE != $0`
