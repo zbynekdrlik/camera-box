@@ -18,11 +18,9 @@ real numpy array is exercised only implicitly on the live box, never required fo
 """
 import pathlib
 import pickle
-import subprocess
 import sys
 import types
 
-import pytest
 
 _SCRIPTS = pathlib.Path(__file__).resolve().parents[2] / "scripts"
 if str(_SCRIPTS) not in sys.path:

@@ -289,7 +289,7 @@ class TestLatencySnapshotSetRestore:
 
         obs_phase2._restore_test_latency(None, "10.0.0.1", state)
 
-        warn_lines = [l for l in stderr_lines if "WARN" in l or "warn" in l.lower() or "mismatch" in l.lower() or "358" in l]
+        warn_lines = [line for line in stderr_lines if "WARN" in line or "warn" in line.lower() or "mismatch" in line.lower() or "358" in line]
         assert warn_lines, (
             "restore must emit a LOUD warning when read-back latency ≠ snapshot "
             f"(stderr: {stderr_lines!r})"
@@ -328,7 +328,7 @@ class TestLatencySnapshotSetRestore:
             None, "10.0.0.1", state, calibrated_latency_ms=925
         )
 
-        warn_lines = [l for l in stderr_lines if "691" in l and "calibrat" in l.lower()]
+        warn_lines = [line for line in stderr_lines if "691" in line and "calibrat" in line.lower()]
         assert warn_lines, (
             f"a calibrated-value mismatch must emit a LOUD #691 warning even when the "
             f"restore matched its own (already-wrong) snapshot (stderr: {stderr_lines!r})"
@@ -356,7 +356,7 @@ class TestLatencySnapshotSetRestore:
             None, "10.0.0.1", state, calibrated_latency_ms=925
         )
 
-        warn_lines = [l for l in stderr_lines if "691" in l and "calibrat" in l.lower()]
+        warn_lines = [line for line in stderr_lines if "691" in line and "calibrat" in line.lower()]
         assert warn_lines == [], (
             f"a matching calibrated value must NOT emit the #691 mismatch warning: "
             f"{stderr_lines!r}"
@@ -384,7 +384,7 @@ class TestLatencySnapshotSetRestore:
 
         obs_phase2._restore_test_latency(None, "10.0.0.1", state)  # no calibrated_latency_ms
 
-        warn_lines = [l for l in stderr_lines if "691" in l and "calibrat" in l.lower()]
+        warn_lines = [line for line in stderr_lines if "691" in line and "calibrat" in line.lower()]
         assert warn_lines == [], (
             f"the calibrated cross-check must be silently skipped when not supplied: "
             f"{stderr_lines!r}"
