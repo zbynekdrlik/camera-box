@@ -421,8 +421,8 @@ imag_render_degraded_from_sample() {
   case "$avg" in '' | *[!0-9.]*) printf 'unknown\n'; return 0 ;; esac
   # a full render stall is #391's FpsZero domain, not this partial-degrade discriminator.
   [ "$adv" = "false" ] && { printf 'stalled\n'; return 0; }
-  # avg over the 60fps frame budget (1000/60 = 16.6667 ms) -> degraded. awk for the float compare.
-  if awk -v a="$avg" 'BEGIN { exit !(a + 0 > 16.6667) }'; then printf 'degraded\n'; return 0; fi
+  # avg over the 60fps frame budget (1000/60 = 16.66666667 ms) -> degraded. awk for the float compare.
+  if awk -v a="$avg" 'BEGIN { exit !(a + 0 > 16.66666667) }'; then printf 'degraded\n'; return 0; fi
   # render-skip fraction over the 5% tolerance -> degraded (non-numeric skip = signal absent).
   case "$skip" in
     '' | *[!0-9.]*) : ;;

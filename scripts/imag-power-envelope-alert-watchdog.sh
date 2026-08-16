@@ -47,6 +47,7 @@ IMAG_USER_SSH="${IMAG_USER:-newlevel}"
 IMAG_PW_SSH="${IMAG_PW:-newlevel}"
 WINDOW="${IMAG_POWER_ALERT_WINDOW:--10min}"                       # journal look-back window
 ALERT_THROTTLE_PASSES="${IMAG_POWER_ALERT_THROTTLE_PASSES:-12}"   # ~1h at the 5-min cadence
+IMAG_RENDER_WINDOW_S="${IMAG_RENDER_WINDOW_S:-4}"                 # #799 OBS-WS render delta window (s)
 
 NOTIFY="${AIRULESET_NOTIFY:-$HOME/devel/airuleset/airuleset.py}"
 REPO_SLUG="${IMAG_POWER_ALERT_REPO:-zbynekdrlik/camera-box}"
@@ -78,8 +79,11 @@ measure() {
   if [ -n "${BURST:-}" ]; then
     # Hard-bound the WS read so a hung OBS WS can never blow the timer's TimeoutStartSec: a `timeout`
     # kill (or any reader failure) leaves RENDER empty -> discriminator `unknown` -> no alert.
-    RENDER="$(OBS_OP_TIMEOUT_S=8 timeout 15 python3 "$HERE/imag-render-stats.py" --host "$IMAG_IP" \
-      --window-s "${IMAG_RENDER_WINDOW_S:-4}" || true)"
+    # Forward the OBS WS password (imag OBS is AuthRequired=false today, so empty works, but this
+    # keeps the alert alive if a future setup enables auth -- parity with recording-e2e.sh:2272).
+    RENDER="$(OBS_PASSWORD_IMAG="${OBS_PASSWORD_IMAG:-${OBS_PASSWORD:-}}" OBS_OP_TIMEOUT_S=8 \
+      timeout 15 python3 "$HERE/imag-render-stats.py" --host "$IMAG_IP" \
+      --window-s "$IMAG_RENDER_WINDOW_S" || true)"
   fi
 }
 
