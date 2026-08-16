@@ -58,7 +58,7 @@ NOTIFY="${AIRULESET_NOTIFY:-$HOME/devel/airuleset/airuleset.py}"
 REPO_SLUG="${IMAG_OBS_ALERT_REPO:-zbynekdrlik/camera-box}"
 
 # #1070: the REPORT-ONLY latency-pin verify-at-start for imag -- the "outside a gate run" residual
-# of 1061 (during a gate run imag_latency_enforce.py self-heals the floor + e2e_discord_report.py
+# of 1061 (during a gate run the issue-1061 self-healer script restores the floor + e2e_discord_report.py
 # reports drift; between runs an OBS restart that reloads a reverted genlock_latency_ms_src is
 # reported by nothing). Run here on a HEALTHY pass, REPORT-ONLY -- NEVER overwritten. Own throttle
 # window, independent of the down-alert throttle above. imag's OBS WS password matches the ssh pw.
@@ -111,7 +111,12 @@ write_state_field() {
 # the 3ms floor, but a genuine re-tune is recorded by editing the baseline in a PR, never forced).
 latency_drift_check() {
   local out rc
-  out="$(python3 "$LATENCY_VERIFY" --box imag --host "$IMAG_IP" --password "$IMAG_OBS_WS_PASSWORD" 2>&1)"; rc=$?
+  # NB: the `|| rc=$?` capture is load-bearing under this script's `set -e` -- a bare
+  # `out="$(cmd)"; rc=$?` is itself a failing statement when cmd exits non-zero (drift = rc 1),
+  # which killed the whole pass with exit 1 before any report could fire (caught by CI's first
+  # execution of the issue-1070 harness; Tier-0 forbids running these tests locally).
+  rc=0
+  out="$(python3 "$LATENCY_VERIFY" --box imag --host "$IMAG_IP" --password "$IMAG_OBS_WS_PASSWORD" 2>&1)" || rc=$?
   if [ "$rc" -eq 0 ]; then
     write_state_field latency_alert_sig ""
     write_state_field latency_alert_passes 0
