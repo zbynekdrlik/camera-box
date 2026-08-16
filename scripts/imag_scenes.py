@@ -218,13 +218,7 @@ def _lspci_query_remote(host: str) -> str:
     post-provision step). Mirrors every other script's IMAG_USER/IMAG_PW sshpass convention
     (default newlevel/newlevel). A missing lspci (or sshpass/ssh) on the REMOTE box fails LOUD by
     name, never silently "no dGPU" (#833 class)."""
-    user = os.environ.get("IMAG_USER", "newlevel")
-    pw = os.environ.get("IMAG_PW", "newlevel")
-    ssh_base = [
-        "sshpass", "-p", pw, "ssh",
-        "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=8",
-        f"{user}@{host}",
-    ]
+    ssh_base = _ssh_base(host)  # #769: shared sshpass-ssh base (same IMAG_USER/IMAG_PW convention)
     probe = subprocess.run(
         ssh_base + ["command -v lspci >/dev/null 2>&1 && echo LSPCI_OK || echo LSPCI_MISSING"],
         capture_output=True, text=True, timeout=15, check=False,
@@ -431,7 +425,8 @@ def projector_window_ids(wmctrl_output, kind):
     for line in (wmctrl_output or "").splitlines():
         if marker not in line:
             continue
-        tok = line.split()[0] if line.split() else ""
+        parts = line.split()
+        tok = parts[0] if parts else ""
         if re.match(r"^0x[0-9a-fA-F]+$", tok):
             ids.append(tok)
     return ids
@@ -462,6 +457,12 @@ def _wmctrl_list_local():
         env.setdefault("DISPLAY", ":0")
         r = subprocess.run(["wmctrl", "-l"], capture_output=True, text=True,
                            timeout=10, check=False, env=env)
+        if r.returncode != 0:
+            # #833: a PRESENT-but-failing wmctrl (X unreachable, nonzero exit) must NOT be read as
+            # "0 windows" -- return None so the caller warns + skips dedup, same as a missing tool.
+            print("WARN #769: local wmctrl -l exited %d -- cannot enumerate projector windows"
+                  % r.returncode)
+            return None
         return r.stdout
     except Exception as e:
         print("WARN #769: local wmctrl -l failed: %s" % e)
@@ -498,6 +499,12 @@ def _wmctrl_list_remote(host):
             return None
         r = subprocess.run(ssh_base + ["DISPLAY=:0 wmctrl -l"],
                            capture_output=True, text=True, timeout=15, check=False)
+        if r.returncode != 0:
+            # #833: a nonzero rc (ssh drop OR a failing remote wmctrl) means the read is untrusted --
+            # return None (warn + skip dedup), never treat empty output as "0 windows".
+            print("WARN #769: remote wmctrl -l on %s exited %d -- cannot enumerate"
+                  % (host, r.returncode))
+            return None
         return r.stdout
     except Exception as e:
         print("WARN #769: remote wmctrl -l on %s failed: %s" % (host, e))

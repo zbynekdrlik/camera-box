@@ -196,3 +196,67 @@ def test_projector_opens_both_then_dedups(monkeypatch):
     assert ("OBS_WEBSOCKET_VIDEO_MIX_TYPE_MULTIVIEW", 0) in obs.opens
     # and healed the stray Multiviews afterward
     assert sorted(closed) == ["0x00c0c101", "0x00c0c202"]
+
+
+# ---------------------------------------------------------------------------
+# e. REMOTE (non-local) host branch -- the rare dev1-invoked `--host <ip>` case (#769 review #2)
+# ---------------------------------------------------------------------------
+
+def test_heal_remote_host_uses_remote_wmctrl(monkeypatch):
+    mod = _scenes_module()
+    closed = []
+    # a non-loopback host must route through the REMOTE (sshpass) wmctrl helpers, never the local ones
+    monkeypatch.setattr(mod, "_wmctrl_list_remote", lambda host: _STACKED)
+    monkeypatch.setattr(mod, "_wmctrl_close_remote", lambda host, win_id: closed.append((host, win_id)))
+    monkeypatch.setattr(mod, "_wmctrl_list_local", lambda: (_ for _ in ()).throw(AssertionError("must not use local wmctrl for a remote host")))
+    monkeypatch.setattr(mod.time, "sleep", lambda *_a, **_k: None)
+    mod._heal_projector_strays("10.77.9.182", ["Multiview", "Program"])
+    assert sorted(closed) == [("10.77.9.182", "0x00c0c101"), ("10.77.9.182", "0x00c0c202")]
+
+
+def test_heal_remote_missing_wmctrl_warns_by_name_and_never_raises(monkeypatch, capsys):
+    mod = _scenes_module()
+    closed = []
+    # the #833-critical dev1 case: remote probe reports wmctrl MISSING -> list returns None ->
+    # warn LOUD by name, skip dedup, never raise, never read as "no windows"
+    monkeypatch.setattr(mod, "_wmctrl_list_remote", lambda host: None)
+    monkeypatch.setattr(mod, "_wmctrl_close_remote", lambda host, win_id: closed.append((host, win_id)))
+    monkeypatch.setattr(mod.time, "sleep", lambda *_a, **_k: None)
+    mod._heal_projector_strays("10.77.9.182", ["Multiview", "Program"])  # must NOT raise
+    assert closed == []
+    out = capsys.readouterr().out
+    assert "wmctrl" in out and "#769" in out and "10.77.9.182" in out
+
+
+# ---------------------------------------------------------------------------
+# f. projector() with NO panel -- opens/reconciles ONLY Program, warns no panel (#769 review #2)
+# ---------------------------------------------------------------------------
+
+class HdmiOnlyObs:
+    """A box with ONLY an HDMI projector monitor (no panel) -- e.g. a headless/remote debug session.
+    projector() must open + reconcile ONLY the Program kind, and never try to heal a Multiview it
+    never opened."""
+
+    def __init__(self):
+        self.opens = []
+
+    def req(self, rtype, payload=None, ignore_err=False):
+        if rtype == "GetMonitorList":
+            return {"monitors": [{"monitorIndex": 1, "monitorName": "HDMI-0(1)"}]}
+        if rtype == "OpenVideoMixProjector":
+            self.opens.append((payload["videoMixType"], payload["monitorIndex"]))
+        return {}
+
+
+def test_projector_no_panel_opens_and_heals_program_only(monkeypatch, capsys):
+    mod = _scenes_module()
+    obs = HdmiOnlyObs()
+    healed_kinds = []
+    monkeypatch.setattr(mod, "_heal_projector_strays",
+                        lambda host, kinds: healed_kinds.extend(kinds))
+    mod.projector(obs, "127.0.0.1")
+    # only the PROGRAM projector opened; no MULTIVIEW open attempted
+    assert obs.opens == [("OBS_WEBSOCKET_VIDEO_MIX_TYPE_PROGRAM", 1)]
+    # only Program is reconciled -- a Multiview that was never opened must not be healed
+    assert healed_kinds == ["Program"]
+    assert "no panel monitor detected" in capsys.readouterr().out
