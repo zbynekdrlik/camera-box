@@ -27,7 +27,6 @@ import importlib.util
 import pathlib
 import sys
 
-import pytest
 
 _MOD_PATH = pathlib.Path(__file__).resolve().parents[2] / "scripts" / "obs_phase2.py"
 _spec = importlib.util.spec_from_file_location("obs_phase2_prewarm", _MOD_PATH)

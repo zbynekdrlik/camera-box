@@ -20,7 +20,6 @@ import pathlib
 import sys
 import types
 
-import pytest
 
 _SCRIPTS = pathlib.Path(__file__).resolve().parents[2] / "scripts"
 if str(_SCRIPTS) not in sys.path:

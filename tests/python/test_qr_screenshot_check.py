@@ -14,7 +14,6 @@ import io
 import pathlib
 import sys
 
-import numpy as np
 from PIL import Image
 
 _SCRIPTS = pathlib.Path(__file__).resolve().parents[2] / "scripts"

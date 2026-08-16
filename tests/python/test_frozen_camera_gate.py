@@ -4,13 +4,11 @@ Tests the OBS-independent logic: PNG extraction, SHA-1 hashing, and timeline
 JSON serialisation.  No OBS WebSocket is opened here.
 """
 import importlib.util
-import io
 import json
 import struct
 import zlib
 from pathlib import Path
 
-import pytest
 
 HERE = Path(__file__).parent
 SCRIPTS = HERE.parent.parent / "scripts"
