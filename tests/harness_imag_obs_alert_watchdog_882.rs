@@ -86,12 +86,15 @@ fn fake_bin_dir(ssh_reply: &str, notify_marker: &std::path::Path) -> tempfile::T
     std::os::unix::fs::PermissionsExt::set_mode(&mut perm, 0o755);
     fs::set_permissions(&sshpass, perm).unwrap();
 
-    // Fake `python3` — stands in for `python3 $NOTIFY notify --body ...`.
+    // Fake `python3` — stands in for `python3 $NOTIFY notify --body ...` AND (since #1070) for the
+    // healthy-pass `python3 latency_pins_verify.py --box imag ...` call. Only the notify call is
+    // recorded to the marker; the latency verify defaults to on-baseline (exit 0, silent) so these
+    // #882 down/up tests (which count notify calls) are unaffected by the new verify invocation.
     let python3 = dir.path().join("python3");
     fs::write(
         &python3,
         format!(
-            "#!/bin/sh\necho \"CALLED: $*\" >> {}\nexit 0\n",
+            "#!/bin/sh\ncase \"$*\" in\n  *latency_pins_verify*) exit 0 ;;\n  *) echo \"CALLED: $*\" >> {} ;;\nesac\nexit 0\n",
             notify_marker.display()
         ),
     )
