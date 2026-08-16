@@ -1323,6 +1323,16 @@ do_event() {
   echo
   event_mode_ledger_cleanup
   echo
+  # #721 (live 2026-08-16): the painter stop + the ledger sweep above leave every painter dead, but
+  # the marker CSV they wrote (/run/rig-qpsk-markers.csv, root-owned on tmpfs) SURVIVES -- and item 8
+  # (test artifacts cleared) then FAILED the whole EVENT-mode CONTRACT on that one leftover, rig
+  # otherwise clean. Purge the cam2-side item-8 artifacts NOW (both painters are already stopped +
+  # disabled, so nothing re-creates the CSV), via the sourced helper -- never editing an anchored
+  # line. Best-effort: a purge failure must never abort the EVENT flow; item 8 still flags anything
+  # that genuinely survives.
+  echo "[#721] purge leftover cam2 test artifacts (marker CSV + pidfile) so the item-8 assert can pass on a clean rig:"
+  cam_ssh "$(event_artifact_purge_cmds "$PAINTER_PIDFILE" "$AUDIO_MARKER_LOG")" 2>/dev/null || true
+  echo
   echo "[obs] #257 toggle per-source genlock_burn OFF over WebSocket (no relaunch — the #246 guard):"
   toggle_burn event
   echo
