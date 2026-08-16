@@ -44,8 +44,13 @@ fn run_sourced(body: &str) -> Run {
 /// The builder emits a `rm -f` that names every path it is given, and is best-effort (exits 0).
 #[test]
 fn purge_builder_emits_rm_f_for_every_path() {
-    let out = run_sourced("event_artifact_purge_cmds /run/rig-painter.pid /run/rig-qpsk-markers.csv");
-    assert_eq!(out.exit_code, 0, "the builder itself must exit 0. got=\n{}", out.stdout);
+    let out =
+        run_sourced("event_artifact_purge_cmds /run/rig-painter.pid /run/rig-qpsk-markers.csv");
+    assert_eq!(
+        out.exit_code, 0,
+        "the builder itself must exit 0. got=\n{}",
+        out.stdout
+    );
     assert!(
         out.stdout.contains("rm -f"),
         "#721: event_artifact_purge_cmds must emit a `rm -f`. got=\n{}",
@@ -79,10 +84,24 @@ fn purge_command_actually_deletes_the_files_and_is_idempotent() {
         f1, f2
     );
     let out = run_sourced(&body);
-    assert_eq!(out.exit_code, 0, "the purge must exit 0 even on a re-run. got=\n{}", out.stdout);
-    assert!(out.stdout.contains("PURGED_OK"), "harness did not complete. got=\n{}", out.stdout);
-    assert!(!f1.exists(), "#721: the marker CSV must be deleted by the purge");
-    assert!(!f2.exists(), "#721: the pidfile must be deleted by the purge");
+    assert_eq!(
+        out.exit_code, 0,
+        "the purge must exit 0 even on a re-run. got=\n{}",
+        out.stdout
+    );
+    assert!(
+        out.stdout.contains("PURGED_OK"),
+        "harness did not complete. got=\n{}",
+        out.stdout
+    );
+    assert!(
+        !f1.exists(),
+        "#721: the marker CSV must be deleted by the purge"
+    );
+    assert!(
+        !f2.exists(),
+        "#721: the pidfile must be deleted by the purge"
+    );
 }
 
 /// Static wiring: `do_event` must CALL the purge with the marker-CSV var, and it must run BEFORE
@@ -90,8 +109,8 @@ fn purge_command_actually_deletes_the_files_and_is_idempotent() {
 /// Bounded to do_event's own body (the #868 anchor pattern), never the whole file.
 #[test]
 fn do_event_purges_the_marker_csv_before_the_assert_phase() {
-    let whole = fs::read_to_string(manifest_dir().join("scripts/rig-mode.sh"))
-        .expect("read rig-mode.sh");
+    let whole =
+        fs::read_to_string(manifest_dir().join("scripts/rig-mode.sh")).expect("read rig-mode.sh");
     let body_start = whole
         .find("\ndo_event() {")
         .expect("#721: expected do_event to exist");
