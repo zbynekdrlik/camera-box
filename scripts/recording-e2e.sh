@@ -148,6 +148,12 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # E2E_EXECUTE_VERDICT=1 branch of [8/8] below.
 # shellcheck source=scripts/lib/e2e-discord-report.sh
 . "$HERE/lib/e2e-discord-report.sh"
+# #716: cam-box burn-run fps-log persistence to dev1 (the box overwrites its own
+# /tmp/cbox-burn*.log on the NEXT deploy, and journald never sees it) — pure path/name builders +
+# a best-effort scp-back runner, Tier-0 unit-tested (tests/harness_cbox_burn_log_persist.rs). The
+# actual persist call site is tagged with its own distinct marker below (after the run).
+# shellcheck source=scripts/lib/cbox-burn-log-persist.sh
+. "$HERE/lib/cbox-burn-log-persist.sh"
 # #887: imag's zero-loss proof used to stop at OBS's own self-reported compositor stats. A
 # REPORT-ONLY (never touches $GATE) independent check now compares the compositor's own
 # produced-frame count (imag_produced_frame_check.py, GetStats) against the i915 kernel's
@@ -3536,6 +3542,19 @@ CAM1_CAPTURE_STATS="$OUTDIR/cam1-capture-stats.txt"
 sshpass -p "$CAM_PW" scp -o StrictHostKeyChecking=no \
   root@"$CAM1_IP":/tmp/cam1-capture-stats.txt "$CAM1_CAPTURE_STATS" 2>/dev/null || \
   echo "WARNING: could not fetch $CAMERA_NAME capture-stats sidecar (cam2→$CAMERA_NAME loss omitted)" >&2
+# #716: persist each cam-box burn-run fps log to dev1, right beside the cam1-capture-stats sidecar
+# above. Each box's own /tmp/cbox-burn*.log (the fine-grained `Streaming: fps emitted/captured`
+# telemetry, written FILE-ONLY via StandardOutput=append: and invisible to journald) is `rm -f`'d
+# by the NEXT run's deploy, so without this only the LATEST run's fps log ever survives — blocking
+# capture-rate forensics against any specific past recording window. Best-effort (WARN, never
+# abort); the scp lives in the sourced lib so it never disturbs a static-anchor test's own region.
+cbox_burn_log_persist "$CAM_PW" "$CAM1_IP" cam1 "$RUN_ID" "$OUTDIR"
+if [ "${ALL_CAMBOX:-0}" = "1" ]; then
+  for _bl_entry in "${CAMBOX_SECONDARY_DEPLOY[@]}"; do
+    _bl_cn="${_bl_entry%%=*}"; _bl_rest="${_bl_entry#*=}"; _bl_ip="${_bl_rest%%=*}"
+    cbox_burn_log_persist "$CAM_PW" "$_bl_ip" "$_bl_cn" "$RUN_ID" "$OUTDIR"
+  done
+fi
 # #193: by DEFAULT decode ON stream.lan where the video lives — do NOT download the multi-GB
 # recordings to slow dev1 (the root of the download + #187 OOM + disk drain). When
 # VERDICT_ON_STREAM=1 (the default), the harness SKIPS the dev1 fetch entirely and the verdict
