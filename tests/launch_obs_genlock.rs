@@ -609,6 +609,20 @@ fn redraw_relaunch_also_prefers_lnk_775() {
         "#775: both the initial launch AND the #786 redraw relaunch must use `Start-Process \
          -FilePath $lnk` (found {lnk_launches}). Program:\n{p}"
     );
+    // Pin the redraw branch's OWN ordering too: its .lnk relaunch (the LAST $lnk launch) must
+    // precede its bare-exe fallback (the LAST bare-exe launch) — so a refactor that inverted ONLY
+    // the redraw branch to bare-exe-primary cannot slip through on the count alone.
+    let redraw_lnk = p
+        .rfind("Start-Process -FilePath $lnk")
+        .expect("#775: a redraw .lnk relaunch must exist");
+    let redraw_bare = p
+        .rfind("Start-Process -FilePath $exe -WorkingDirectory")
+        .expect("#775: a redraw bare-exe fallback must exist");
+    assert!(
+        redraw_lnk < redraw_bare,
+        "#775: in the redraw branch too, the .lnk relaunch must be PRIMARY (precede the bare-exe \
+         fallback). Program:\n{p}"
+    );
 }
 
 /// #775 (item 2a) — the #411 self-heal recovery relaunch must inherit the SAME .lnk-primary launch
