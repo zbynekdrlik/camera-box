@@ -984,7 +984,10 @@ fn throttle_state(gather: &str) -> String {
 
 fn cause(line: &str, gather: &str) -> String {
     let (_c, out, _e) = run_sourced_with_gather(
-        &format!("imag_render_cause_from_signals {} \"$G\"", shell_quote(line)),
+        &format!(
+            "imag_render_cause_from_signals {} \"$G\"",
+            shell_quote(line)
+        ),
         gather,
     );
     out.trim().to_string()
@@ -1067,7 +1070,7 @@ fn throttle_state_reports_clamped_clean_unknown_three_ways() {
     assert_eq!(throttle_state(CLAMP_BURST), "clamped"); // majority power-clamped under floor
     assert_eq!(throttle_state(CLEAN_BURST), "clean"); // valid burst, GPU has headroom
     assert_eq!(throttle_state(""), "unknown"); // empty (ssh hiccup)
-    // truncated (2 samples < min 6) -> cannot judge -> unknown, never a false clean/clamped.
+                                               // truncated (2 samples < min 6) -> cannot judge -> unknown, never a false clean/clamped.
     assert_eq!(
         throttle_state("FLOOR|1400\nTHROTSAMPLE|1|0|1|700\nTHROTSAMPLE|1|0|1|750\n"),
         "unknown"

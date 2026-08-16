@@ -9,5 +9,6 @@ Documentation=https://github.com/zbynekdrlik/camera-box
 Type=oneshot
 # %h = the installing user's home on dev1. Adjust if the checkout lives elsewhere.
 ExecStart=%h/devel/camera-box/scripts/imag-power-envelope-alert-watchdog.sh
-# One ssh round-trip to imag-nb; give it room but never hang the timer.
-TimeoutStartSec=30
+# ssh round-trips to imag-nb (journal + snapshot + ~6s throttle burst) PLUS the #799 OBS-WS render
+# read (dev1 -> imag OBS WS, hard-bounded to ~15s in the script). Give it room but never hang the timer.
+TimeoutStartSec=45
