@@ -142,6 +142,14 @@ RIG_MODE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # audio_marker_emission_check_cmds (sourced above) for the marker-growth assert.
 # shellcheck source=scripts/lib/cam2-painter-handoff.sh
 . "$RIG_MODE_DIR/lib/cam2-painter-handoff.sh"
+# #1075: SINGLE SOURCE OF TRUTH for the transient cam2-painter dead-man arm/disarm builders
+# (shared with recording-e2e.sh). EVENT mode must DISARM the timer (a SIGKILLed recording-e2e run
+# leaves it armed and it periodically restarts cam2-painter -- resurrecting the QR on air), and
+# TEST mode re-arms it as the standing "never dark" net; event_mode_assert catches a still-armed
+# one as a STRAY unit. Sourced here (before the source-guard) so both the executed flow and the
+# unit tests that source this script get the builders.
+# shellcheck source=scripts/lib/cam2-painter-deadman.sh
+. "$RIG_MODE_DIR/lib/cam2-painter-deadman.sh"
 # #281 Fix#3: the rig-active heartbeat. TEST mode SETS it (deliberate "rig is in a test state"
 # marker); EVENT mode CLEARS it. Unlike recording-e2e.sh this is a one-shot write (rig-mode exits),
 # so the marker goes STALE after RIG_HEARTBEAT_STALE_SEC (default 10 min) — an idle TEST rig with a
@@ -431,6 +439,13 @@ pkill -x frame-probe 2>/dev/null || true
 #       ticket fixes), and disabling closes the reboot path too. A box without the unit is
 #       unaffected.
 $(cam2_painter_service_disable_cmds)
+# (2.6) #1075: ALSO disarm the transient cam2-painter-deadman timer. A recording-e2e run that was
+#       SIGKILLed leaves that PERIODIC timer armed; it issues a start of the cam2 painter every
+#       ~5 min -- and "disable" above does NOT stop such a start -- so without this the QR painter
+#       is resurrected ON AIR within ~5 min of switching to EVENT (live 2026-08-15). Reuses the
+#       deadman lib's disarm (stop .timer + reset-failed .service). Guarded: a box without the
+#       cam2-painter unit is unaffected (same guard shape as the disable above).
+$(cam2_painter_deadman_disarm_cmds)
 # (3) wait until /dev/fb0 is released by the painter, then RESTORE the unconditional-preview
 #     camera-box (#291/#528): remove the transient CAMERA_BOX_NO_DISPLAY=1 drop-in TEST mode
 #     installed, reload, and RESTART so the unit's Environment drops the opt-out and camera-box
@@ -1045,6 +1060,9 @@ do_test() {
   echo
   echo "[cam2 ${PAINTER_IP}] #1008/#937 hand STEADY STATE to the PERMANENT supervised cam2-painter.service (durable -- Restart=always, survives crash + reboot -- NOT a disposable 2h nohup):"
   cam_ssh "$(cam2_painter_steady_state_handoff_cmds "$PAINTER_PIDFILE" "$AUDIO_MARKER_LOG")"
+  echo
+  echo "[cam2 ${PAINTER_IP}] #1075 arm the transient cam2-painter dead-man as a standing 'never dark' net for the handed-off permanent painter (symmetric with EVENT mode's disarm; no-ops on every fire while the painter's own frame-probe is alive):"
+  cam_ssh "$(cam2_painter_deadman_arm_cmds)"
   echo
   print_genlock_relaunch_note test
   echo

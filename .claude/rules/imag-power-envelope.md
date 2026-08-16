@@ -141,3 +141,44 @@ token (`imag_power_throttle_alert_sig` → `imag-throttle:under-floor`), NEVER t
 already pinned to the thermal max (29 W). The only remaining headroom is physical cooling (the
 technician ticket, issue 1043) — the alert makes the throttling VISIBLE; it does not (and cannot)
 raise the ceiling.
+
+## The #799 render-degradation CAUSE discriminator — a THIRD alert path that NAMES the cause
+
+The #880 throttle path above says "the iGPU is clamped". It does NOT say whether OBS render is
+actually degrading, and there is a SECOND, distinct cause of the same "render budget blown after
+hours, restart clears it" symptom: a **connection-churn render leak** (#799) where render time
+creeps while the GPU has HEADROOM (throttle CLEAN, GPU idle-ish) — accumulated per-process state in
+the NDI-receive→texture-upload path, cleared by an OBS restart. Without a discriminator a "render
+degraded" alert is ambiguous: it could be the known power clamp (issue 880/1043, cooling is the fix)
+or the churn leak (#799, a restart clears it). `alert_from_render_discriminator` (a third path in
+`imag-power-envelope-alert-watchdog.sh`, own `render_*` dedup keys) FUSES two signals and names it.
+
+- **The fusion table** (pure `imag_render_cause_from_signals RENDER_LINE BURST`, in the shared lib):
+  render degraded + throttle **clean** → `churn-leak` (#799, PAGES); render degraded + throttle
+  **clamped** → `power-clamp` (issue 880/1043, LOGGED not re-paged — `alert_from_throttle` already
+  owns the clamp alert, never double-page); render degraded + throttle **unknown** → `unknown`
+  (cannot attribute — never a false churn blame); render healthy/stalled/unknown → no page.
+- **Read render over the OBS WS, NOT sysfs** — render stats (`activeFps`/`averageFrameRenderTime`/
+  `renderSkipped`) have no sysfs equivalent. The dev1 front `scripts/imag-render-stats.py` (mirrors
+  `obs-liveness-probe.py::_render_sample`, the render-signal source) does GetStats×2 and emits one
+  `RENDER|<active_fps>|<avg_ms>|<render_skipped_frac>|<render_advanced>` line. It is BEST-EFFORT and
+  fail-safe: any WS failure → empty line → discriminator `unknown` → no alert; the watchdog only
+  attempts it when the box is reachable (BURST non-empty) and hard-bounds it (`timeout 15` +
+  `OBS_OP_TIMEOUT_S=8`) so a hung WS never blows the timer's `TimeoutStartSec` (bumped 30→45).
+- **`activeFps` LIES during a full stall (#935)** — trust it ONLY when `render_advanced=true`.
+  `imag_render_degraded_from_sample` treats `advanced=false` as `stalled` (defers to the #391
+  obs-liveness FpsZero path, no double-alert); `avg_ms`/`skip_frac` are trusted always; the fps<58
+  signal only fires when advancement is CONFIRMED. Thresholds MIRROR `src/render_budget.rs` (60fps:
+  budget 1000/60≈16.67ms, fps floor 58, skip 5%) — one source of the physical deadline.
+- **The 3-state `imag_power_throttle_state` (clamped/clean/unknown) shares ONE burst-parse primitive
+  (`_imag_power_throttle_parse_burst`) with the 2-state `imag_power_throttle_alert_condition`** — the
+  2-state marker's exact output contract is preserved; only its internals moved onto the primitive.
+  `clean` (GPU headroom) vs `unknown` (no FLOOR / < min samples) is the distinction the churn
+  discriminator needs and the 2-state function cannot make (it collapses both into empty output).
+- **A single WS window can catch a transient**, so the churn page is gated by `obs_watchdog_confirm`
+  (2 consecutive `churn-leak` reads) before the shared `obs_watchdog_alert_throttle` dedup applies.
+- **Live grounding (2026-08-16, 2d14h uptime):** the box read FLOOR=1400/ACT=750/pl1=1/TCPU=87C
+  (power-clamped) while OBS render was HEALTHY (`RENDER|60.00|9.34|0.0000|true`, avg<budget). The
+  discriminator correctly stayed quiet (render healthy → no churn page); the throttle path WOULD
+  page the clamp. This is exactly why the fusion matters: it prevents a false #799 churn alert when
+  the real cause is the known clamp.

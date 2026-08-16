@@ -120,6 +120,13 @@ set -euo pipefail
 #       ceiling (a reading at/above it means a clamp episode is live); and the guard's journald tag
 #       is readable. Shares imag_power_envelope_verdict with drift-guard's --check-imag facet. MUST
 #       run BEFORE check (o) below (its restart replaces the tracked obs process, #884 ordering).
+#   (v) power-button + lid + sleep protection (#727): imag-nb is a PRODUCTION box (a short
+#       accidental power-button press suspended it during the 2026-07-12 live event). The running
+#       logind reports HandlePowerKey/HandleSuspendKey/HandleHibernateKey/HandleLidSwitch = ignore
+#       (the EFFECTIVE reloaded policy, read via `loginctl show-seat`) AND sleep.target/
+#       suspend.target/hibernate.target/hybrid-sleep.target are all masked. setup-imag.sh step 5
+#       persists this; a re-provision that silently lost it must FAIL here, not pass. Side-effect
+#       free (pure systemd/logind reads), so it is appended at the END of the flow.
 #
 # Every remote helper this gate shells out to (wmctrl, python3) is preflighted BY NAME before use
 # (#822 pattern) -- a missing tool is reported as a missing tool, never folded into a failed
@@ -591,6 +598,25 @@ imag_obs_cgroup_shows_service_unit() {
 # segfault produced nothing debuggable.
 imag_obs_core_dumps_enabled() {
   printf '%s' "$1" | grep -qE '^Max core file size[[:space:]]+unlimited[[:space:]]+unlimited'
+}
+
+# imag_powerkey_protection_ok LOGINCTL MASKED -> 0 iff the running box is protected against an
+# accidental power-button / lid / suspend / hibernate action (#727 -- imag-nb is a PRODUCTION box;
+# a short power-button press suspended it during the 2026-07-12 live event). LOGINCTL is a
+# `loginctl show-seat` dump: its `Handle*=` lines carry the EFFECTIVE, reloaded logind policy on
+# this box (`systemctl show systemd-logind -p HandlePowerKey` reads EMPTY here, so it is NOT a
+# viable source). MASKED is one `<unit>=<state>` line per sleep target. Every key must read
+# EXACTLY `=ignore` (whole-line grep -qxF, so HandlePowerKey=ignore is never satisfied by the
+# DISTINCT HandlePowerKeyLongPress=ignore line), and every sleep target must be `masked`.
+imag_powerkey_protection_ok() {
+  local loginctl="$1" masked="$2" k t
+  for k in HandlePowerKey HandleSuspendKey HandleHibernateKey HandleLidSwitch; do
+    printf '%s\n' "$loginctl" | grep -qxF "${k}=ignore" || return 1
+  done
+  for t in sleep.target suspend.target hibernate.target hybrid-sleep.target; do
+    printf '%s\n' "$masked" | grep -qxF "${t}=masked" || return 1
+  done
+  return 0
 }
 
 # --- source-guard: when sourced (the unit tests), stop here -- never run the live SSH/WS flow.
@@ -1249,6 +1275,24 @@ elif imag_dockstate_present "$GLOBAL_INI"; then
   ok "OBS dock layout (incl. the Stats dock) persisted in global.ini -- survives a restart (#791)"
 else
   fail "global.ini has no DockState -- the Stats dock (and any other dock arrangement) will NOT survive an OBS restart (#791)"
+fi
+
+# (v) power-button + lid + sleep protection (#727) --------------------------------------------
+# imag-nb is a PRODUCTION box; a short accidental power-button press suspended it during the
+# 2026-07-12 live event. setup-imag.sh step 5 writes the logind drop-ins + masks the sleep
+# targets. Prove it is EFFECTIVE on the running box (not merely a file on disk): the running
+# logind reports every power/suspend/hibernate/lid key = ignore AND all four sleep targets are
+# masked. A re-provision that silently lost step 5 must FAIL here. Pure systemd/logind reads with
+# no side effects, so placement after check (o)'s restart is harmless.
+rc=0
+LOGIND_KEYS="$(ssh_box "loginctl show-seat 2>/dev/null | grep -E '^Handle'")" || rc=$?
+MASKED_TARGETS="$(ssh_box "for t in sleep.target suspend.target hibernate.target hybrid-sleep.target; do printf '%s=' \"\$t\"; systemctl is-enabled \"\$t\" 2>&1; done")" || true
+if [ "$rc" -ne 0 ] || [ -z "$LOGIND_KEYS" ]; then
+  fail "logind key-handling state unreadable (ssh rc=$rc) -- cannot verify the #727 power-button protection"
+elif imag_powerkey_protection_ok "$LOGIND_KEYS" "$MASKED_TARGETS"; then
+  ok "power-button/lid/suspend/hibernate keys all ignored + sleep/suspend/hibernate/hybrid-sleep targets masked (#727 -- production box can't be accidentally suspended)"
+else
+  fail "#727 power-button protection NOT effective -- need HandlePowerKey/HandleSuspendKey/HandleHibernateKey/HandleLidSwitch =ignore AND the four sleep targets masked. loginctl: $(printf '%s' "$LOGIND_KEYS" | tr '\n' ' ') || masked: $(printf '%s' "$MASKED_TARGETS" | tr '\n' ' ')"
 fi
 
 echo ""

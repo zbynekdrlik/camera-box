@@ -545,6 +545,10 @@ const PINNED_OBS_EXE: &str = r"C:\Program Files\obs-studio\bin\64bit\obs64.exe";
 const PINNED_OBS_WORKDIR: &str = r"C:\Program Files\obs-studio\bin\64bit";
 const PINNED_SHORTCUT: &str =
     r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs\OBS Studio.lnk";
+// #1067 — the pinned OBS version vendor/README.md carries for `vendor/obs-studio` (32.1.2). Used as
+// the healthy `port4455_owner_version` now that port4455_identity is ENFORCED (a matching owner
+// version passes port_identity_verdict; pinned_obs_version(readme) reads the same value).
+const PINNED_OBS_VERSION: &str = "32.1.2";
 
 #[test]
 fn state_json_value_is_the_generic_single_key_parser() {
@@ -757,17 +761,21 @@ fn with_obs_identity(base: &str, extra_pairs: &[(&str, &str)]) -> String {
     out
 }
 
-/// Healthy #826 obs-identity keys for a box that PASSES the ENFORCED (#829) gate: the generic
-/// per-box facets (`obs_installs` = only the pinned exe, `obs_process_count` = 1) on every box,
-/// plus — on strih only — the NL_STARTUP.ahk startup-chain resolving to the pinned install
-/// (`startup_chain` is strih-scoped + unconditional after #829). `port4455_owner_path` is
-/// deliberately OMITTED: the redeployed non-elevated bundle-state-server task cannot read the
-/// :4455 owner's exe path (#829 validation), so that ONE facet stays opt-in (its own guard)
-/// pending a gather-context follow-up — a healthy fixture simply does not carry it and the gate
-/// skips it.
-fn with_obs_identity_ok(base: &str, strih: bool) -> String {
+/// The enforced #826/#1067 obs-identity keys for a healthy box: the generic per-box facets
+/// (`obs_installs` = only the pinned exe, `obs_process_count` = 1) on every box, plus — on strih
+/// only — the NL_STARTUP.ahk startup-chain resolving to the pinned install (`startup_chain` is
+/// strih-scoped + unconditional after #829). When `port4455` is true (the default healthy set), a
+/// pinned `port4455_owner_path`/`_version` is included too: #1067 fixed the bundle-state-server
+/// gather context (WMI Win32_Process.ExecutablePath) and flipped `port4455_identity` from opt-in to
+/// ENFORCED, so a fully-healthy fixture must now carry it (before #1067 it was deliberately omitted
+/// — the deployed non-elevated task could not read the :4455 owner path).
+fn obs_identity_ok_pairs(strih: bool, port4455: bool) -> Vec<(&'static str, &'static str)> {
     let mut pairs: Vec<(&str, &str)> =
         vec![("obs_installs", PINNED_OBS_EXE), ("obs_process_count", "1")];
+    if port4455 {
+        pairs.push(("port4455_owner_path", PINNED_OBS_EXE));
+        pairs.push(("port4455_owner_version", PINNED_OBS_VERSION));
+    }
     if strih {
         pairs.extend_from_slice(&[
             ("ahk_app1_shortcut_path", PINNED_SHORTCUT),
@@ -777,7 +785,20 @@ fn with_obs_identity_ok(base: &str, strih: bool) -> String {
             ("shortcut_workdir", PINNED_OBS_WORKDIR),
         ]);
     }
-    with_obs_identity(base, &pairs)
+    pairs
+}
+
+/// A healthy fixture that PASSES the ENFORCED gate — including the now-enforced pinned port4455
+/// owner (#1067).
+fn with_obs_identity_ok(base: &str, strih: bool) -> String {
+    with_obs_identity(base, &obs_identity_ok_pairs(strih, true))
+}
+
+/// Like `with_obs_identity_ok` but OMITTING port4455 — used only by the #1067 enforcement test,
+/// which proves a box healthy on every OTHER facet but not reporting the :4455 owner is now a
+/// gate-blocking UNKNOWN (before #1067 this was the healthy shape; after, it must UNKNOWN-block).
+fn with_obs_identity_ok_no_port4455(base: &str, strih: bool) -> String {
+    with_obs_identity(base, &obs_identity_ok_pairs(strih, false))
 }
 
 #[test]
@@ -861,19 +882,24 @@ fn gate_enforces_startup_chain_on_strih_even_without_ahk_826() {
 }
 
 #[test]
-fn gate_keeps_port4455_identity_opt_in_when_unreported_826() {
-    // #829: port4455_identity stays OPT-IN (its own guard) because the redeployed non-elevated
-    // bundle-state-server cannot gather the :4455 owner path (#829 validation). A healthy box that
-    // reports the enforced facets but omits port4455 must PASS -- port4455 is skipped, not a false
-    // UNKNOWN. Under the OLD shared OR-guard, reporting obs_installs alone forced port_identity to
-    // run with an empty owner -> UNKNOWN(11); this isolation removes exactly that false block.
+fn gate_enforces_port4455_identity_when_unreported_1067() {
+    // #1067: port4455_identity is now ENFORCED (its opt-in guard removed) because the bundle-state-
+    // server gather context was fixed (WMI Win32_Process.ExecutablePath is readable from the
+    // non-elevated task where Get-Process.Path was access-denied). A box healthy on every OTHER
+    // facet but NOT reporting the :4455 owner path is now a gate-blocking UNKNOWN (11), never the
+    // old silent opt-in skip. This is the exact flip of the former
+    // gate_keeps_port4455_identity_opt_in_when_unreported_826 (the #829 opt-in landing) — the same
+    // 756->758 second step, applied to the last obs-identity facet.
     const SHA: &str = "26de1c3c23980488a110dbf02e5e472f15cb001d";
+    // strih healthy on obs_installs / obs_process_count / startup_chain but OMITTING port4455 -> the
+    // ONLY missing signal is the now-enforced :4455 owner.
     let s = write_state(
-        "strih_no_port_829",
-        &with_obs_identity_ok(&with_sha(STRIH_PINNED, SHA), true),
+        "strih_no_port_1067",
+        &with_obs_identity_ok_no_port4455(&with_sha(STRIH_PINNED, SHA), true),
     );
+    // stream fully healthy (incl. the enforced port4455) so it contributes no UNKNOWN of its own.
     let t = write_state(
-        "stream_no_port_829",
+        "stream_ok_1067",
         &with_obs_identity_ok(&with_sha(STREAM_PINNED, SHA), false),
     );
     let (code, stdout, stderr) = run_gate(&[
@@ -885,14 +911,14 @@ fn gate_keeps_port4455_identity_opt_in_when_unreported_826() {
         &format!("imag={SHA}"),
     ]);
     assert_eq!(
-        code, 0,
-        "a healthy box omitting only port4455 must PASS (opt-in facet skipped). \
+        code, 11,
+        "a box omitting the now-enforced port4455 owner must be UNKNOWN (11), not a silent pass. \
          stdout={stdout} stderr={stderr}"
     );
-    assert!(stdout.contains("GATE PASS"), "{stdout}");
+    assert!(!stdout.contains("GATE PASS"), "must not pass: {stdout}");
     assert!(
-        !stdout.contains("port4455_identity"),
-        "port4455 must NOT engage when unreported: {stdout}"
+        stdout.contains("port4455_identity") && stdout.contains("UNKNOWN"),
+        "port4455_identity must engage unconditionally + report UNKNOWN: {stdout}"
     );
     let _ = std::fs::remove_file(&s);
     let _ = std::fs::remove_file(&t);

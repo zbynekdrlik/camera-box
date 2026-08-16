@@ -85,7 +85,7 @@ cam2_painter_deadman_disarm_cmds() {
 if systemctl list-unit-files cam2-painter.service >/dev/null 2>&1; then
   systemctl stop ${CAM2_PAINTER_DEADMAN_UNIT}.timer 2>/dev/null || true
   systemctl reset-failed ${CAM2_PAINTER_DEADMAN_UNIT}.service 2>/dev/null || true
-  echo "[#872] cam2-painter dead-man disarmed (cleanup restored the painter itself)"
+  echo "[#872] cam2-painter dead-man disarmed"
 fi;
 DISARM
 }

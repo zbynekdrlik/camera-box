@@ -65,6 +65,7 @@ Rust app for embedded NDI cameras (CAM1-4): multi-camera NDI streaming with soft
 - Absolute e2e latency + freeze bounds — the MAIN E2E (recording-verdict) vs LOOPBACK E2E (frame-probe/differ) are SEPARATE gate subsystems; calibrate bounds from `/tmp/recording-e2e-*/verdict-*.json`; crate-root `gates_overall_pass()` seam; cam→stream ~1s hold is by design, freeze=frozen_leg already report-only (#1035) → `.claude/rules/e2e-latency-gate.md` (auto-loads on its `paths:`)
 - imag-nb power/thermal envelope (the MMIO RAPL PL1 25W clamp diagnosis, identity-based zone selection, the source-only shared gather+verdict+guard-decision lib, the check_imag_report optional-arg convention, step-at-the-END TOTAL_STEPS rule, #1040) → `.claude/rules/imag-power-envelope.md` (auto-loads on its `paths:`)
 - strih/stream network-UNREACHABLE alert (dev1-side watchdog that probes the two OBS boxes FROM dev1 — never ssh IN — with a multi-signal ping OR :4455 OR :8899 check; REACHABLE iff ANY; 2-pass confirm + shared obs_watchdog throttle; per-box state; reference-anchor guard against a dev1-side path outage; recovery ping; closes the 50-min silent-strih-outage gap, #1001) → `.claude/rules/network-reach-watchdog.md` (auto-loads on its `paths:`)
+- strih/stream :8899 BundleStateServer health-check + AUTO-RESTART (dev1-side watchdog: curl :8899/bundle-state.json FROM dev1 — not MCP Invoke-WebRequest which hangs; box-up=ping|:4455 EXCLUDES :8899; auto-restarts the task via session-agnostic `schtasks /run` over ssh — never `/it`; the auto-restart-vs-alert-only discriminator vs obs-liveness; require_tools fail-loud; defers a fully-dead box to #1001; ships DISABLED, #732) → `.claude/rules/bundle-state-watchdog.md` (auto-loads on its `paths:`)
 - Re-pinning a probe-gated `ReleaseCadence` mirror against OBSERVED output (the authority-importing default-feature replica — Rust analogue of the vendored-C lift-and-compile; the phase-anchored-selection==newest-due-when-anchor-unset finding; fmt-check parses probe code; demonstrative set-anchor tests, #1037) → `.claude/rules/probe-mirror-replica-testing.md` (auto-loads on its `paths:`)
 - Cam2 optical-injection-leg health (dead-painter/optical-black detection, alert, fail-fast: the dev1 alert-watchdog framework reuse, the pidfile-OR-service TEST/EVENT discriminator, reusing #901 assert-program-nonblack, the never-false-abort [0/8] preflight, the #712 CAMBOX_PARALLEL_FAILED_LABELS ::error:: surface, #860) → `.claude/rules/optical-chain-health-watchdog.md` (auto-loads on its `paths:`)
 - cam2 painter LIFECYCLE — who paints /dev/fb0 + emits the QPSK marker in each state (permanent supervised cam2-painter.service = durable steady state; the transient nohup = verification-only; rig-mode test HANDS OFF to the unit via cam2_painter_steady_state_handoff_cmds, event disables it #892, recording-e2e stops+restores it #872, the marker-log unit flag, #1008/#937) → `.claude/rules/cam2-painter-lifecycle.md` (auto-loads on its `paths:`)
@@ -476,6 +477,23 @@ specific repo; the equivalent raw REST call is the reliable fallback) — check 
 own `.body` (or re-`gh pr view --json body`) to confirm the write actually landed before trusting
 it, since a `gh pr edit` failure here is easy to miss (it prints an error to stderr but the exit
 code alone doesn't make the silent no-op obvious without a diff-back).
+
+## GOTCHA — post design/validated/review comments with `gh issue comment`, NEVER `gh api .../comments`
+
+`gh issue view <N> --comments` is GraphQL-broken on this repo (the SAME Projects-classic error as
+`gh pr edit`/`gh pr merge` above), which tempts a worker to post issue comments via
+`gh api repos/.../issues/<N>/comments -F body=@file` instead. That POST succeeds and the comment
+appears on GitHub — **but the airuleset design-before-code recorder (`post-record-design-comment.sh`)
+matches ONLY the literal `gh issue comment <N>` command shape**, so a `gh api` comment NEVER registers
+a design / validated / reviewed marker. The next `git commit` for that issue is then hard-blocked by
+`block-commit-without-design.sh` ("no design comment posted yet") even though the comment is right
+there on the ticket. **`gh issue comment <N> --body-file <file>` (the WRITE) works fine on this repo
+even though the `--comments` READ is broken** — always use it for the design (root cause + approach +
+rejected alt), the STEP-0 validation, and the CYCLE-step-6 review comments so the markers register.
+A NON-TRIVIAL design comment additionally needs 2-3 NUMBERED approaches (`Approach 1/2/3` — the
+`classify_triage_and_approaches` shape); one chosen + one rejected reads as trivial and is rejected.
+(Incident 2026-08-16, #1070/#1075 batch: 4 comments posted via `gh api` never registered — had to
+delete them and re-post via `gh issue comment`.)
 
 ## GOTCHA — a live-triggered E2E gate run can race ahead of a mid-cycle fleet redeploy
 

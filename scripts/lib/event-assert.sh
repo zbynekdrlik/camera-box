@@ -25,8 +25,13 @@
 #                                 pattern-based check survives a RENAMED binary, per #723's own
 #                                 -f -- --paint-only convention, never a bare process-name match)
 #   SERVICE_ACTIVE=<state>     — `systemctl is-active camera-box` (item 5)
-#   STRAY_UNITS=<comma-list>   — any camera-box-burn-* systemd unit still present (item 5; empty
-#                                 when clean)
+#   STRAY_UNITS=<comma-list>   — any camera-box-burn-* systemd unit OR the transient
+#                                 cam2-painter-deadman timer/service (#1075) still present (item 5;
+#                                 empty when clean). EVENT mode must leave neither: a stray burn
+#                                 paints a QR, and a stray deadman timer resurrects the cam2 painter
+#                                 on air within ~5 min. event_assert.py's services_healthy_ok fails
+#                                 on ANY non-empty entry, so widening this glob makes the EVENT
+#                                 contract catch a deadman the painter_stop_remote disarm missed.
 # Pure string (no dev1-side vars to interpolate) — safe to call identically for every box.
 #
 # SELF-MATCH GOTCHA (confirmed live, 2026-07-13): ssh invokes the WHOLE returned script as
@@ -52,7 +57,7 @@ PAINT_COUNT=\$(pgrep -c -f -- "\$PAINT_PATTERN" 2>/dev/null); PAINT_COUNT="\${PA
 # Same shape: \`systemctl is-active\` prints ITS OWN state word (inactive/failed/unknown/...) even
 # though it exits non-zero for anything other than "active" -- same double-print trap as above.
 SERVICE_ACTIVE=\$(systemctl is-active camera-box 2>/dev/null); SERVICE_ACTIVE="\${SERVICE_ACTIVE:-unknown}"
-STRAY_UNITS=\$(systemctl list-units --all --plain --no-legend 'camera-box-burn-*' 2>/dev/null | awk '{print \$1}' | paste -sd, -)
+STRAY_UNITS=\$(systemctl list-units --all --plain --no-legend 'camera-box-burn-*' 'cam2-painter-deadman*' 2>/dev/null | awk '{print \$1}' | paste -sd, -)
 echo "PAINT_COUNT=\$PAINT_COUNT SERVICE_ACTIVE=\$SERVICE_ACTIVE STRAY_UNITS=\$STRAY_UNITS"
 REMOTE
 }

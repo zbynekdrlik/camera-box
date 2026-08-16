@@ -47,6 +47,7 @@ IMAG_USER_SSH="${IMAG_USER:-newlevel}"
 IMAG_PW_SSH="${IMAG_PW:-newlevel}"
 WINDOW="${IMAG_POWER_ALERT_WINDOW:--10min}"                       # journal look-back window
 ALERT_THROTTLE_PASSES="${IMAG_POWER_ALERT_THROTTLE_PASSES:-12}"   # ~1h at the 5-min cadence
+IMAG_RENDER_WINDOW_S="${IMAG_RENDER_WINDOW_S:-4}"                 # #799 OBS-WS render delta window (s)
 
 NOTIFY="${AIRULESET_NOTIFY:-$HOME/devel/airuleset/airuleset.py}"
 REPO_SLUG="${IMAG_POWER_ALERT_REPO:-zbynekdrlik/camera-box}"
@@ -69,6 +70,21 @@ measure() {
   # instantaneous SNAPSHOT gather above (also used by drift-guard/verify-imag) is never slowed.
   BURST="$(sshpass -p "$IMAG_PW_SSH" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 \
     "${IMAG_USER_SSH}@${IMAG_IP}" "$(imag_power_throttle_burst_remote_snippet)" 2>/dev/null || true)"
+  # #799: the OBS render stats over the OBS WebSocket (dev1 -> imag OBS WS, NOT ssh), for the
+  # render-degradation CAUSE discriminator. Only attempt it when the box is REACHABLE (a non-empty
+  # BURST proves the ssh path works) -- an unreachable box (e.g. the dry-run TEST-NET IP) skips it,
+  # keeping the pass fast. Best-effort: the reader emits nothing on any WS failure, so RENDER stays
+  # empty -> imag_render_cause_from_signals returns `unknown` -> no false alert.
+  RENDER=""
+  if [ -n "${BURST:-}" ]; then
+    # Hard-bound the WS read so a hung OBS WS can never blow the timer's TimeoutStartSec: a `timeout`
+    # kill (or any reader failure) leaves RENDER empty -> discriminator `unknown` -> no alert.
+    # Forward the OBS WS password (imag OBS is AuthRequired=false today, so empty works, but this
+    # keeps the alert alive if a future setup enables auth -- parity with recording-e2e.sh:2272).
+    RENDER="$(OBS_PASSWORD_IMAG="${OBS_PASSWORD_IMAG:-${OBS_PASSWORD:-}}" OBS_OP_TIMEOUT_S=8 \
+      timeout 15 python3 "$HERE/imag-render-stats.py" --host "$IMAG_IP" \
+      --window-s "$IMAG_RENDER_WINDOW_S" || true)"
+  fi
 }
 
 read_state_field() {
@@ -185,13 +201,83 @@ alert_from_throttle() {
   fi
 }
 
+# Path 3 (#799) — the render-degradation CAUSE discriminator. Fuses the OBS render stats (RENDER,
+# read over WS) with the GPU throttle burst (BURST, already measured) via the shared pure
+# imag_render_cause_from_signals. NAMES which cause is active instead of an ambiguous "render
+# degraded": `churn-leak` (render degraded while the GPU has HEADROOM — throttle clean — the #799
+# connection-churn leak an OBS restart clears) PAGES here; `power-clamp` (render degraded WHILE
+# clamped) is left to alert_from_throttle above (NO duplicate page); healthy/stalled/unknown never
+# page. The churn signal is noisier than the throttle burst (one WS window can catch a transient),
+# so it is CONFIRMED across 2 consecutive passes (obs_watchdog_confirm) before the shared throttle
+# dedup (obs_watchdog_alert_throttle) applies. Own dedup + confirm state keys (render_*) so it never
+# clobbers the journal/throttle paths' dedup.
+alert_from_render_discriminator() {
+  local cause_out cause detail
+  cause_out="$(imag_render_cause_from_signals "${RENDER:-}" "${BURST:-}")"
+  cause="$(printf '%s\n' "$cause_out" | head -1 | cut -d'|' -f1)"
+  detail="$(printf '%s\n' "$cause_out" | head -1 | cut -d'|' -f2-)"
+
+  # Only churn-leak is the NEW, previously-silent, restart-clears alert. power-clamp is already paged
+  # by alert_from_throttle (no duplicate); healthy/stalled/unknown never page. All non-churn outcomes
+  # clear the confirm + dedup state so a genuinely NEW episode later pages fresh.
+  if [ "$cause" != "churn-leak" ]; then
+    log "imag render discriminator: cause=$cause ($detail)"
+    write_state_field render_confirm 0
+    write_state_field render_sig ""
+    write_state_field render_passes 0
+    return 0
+  fi
+
+  # churn-leak: require 2 consecutive confirmations (a single WS window can catch a transient GC
+  # pause / scene transition) before it is treated as a real episode.
+  local confirm_prev confirm_out confirm act
+  confirm_prev="$(read_state_field render_confirm 0)"
+  confirm_out="$(obs_watchdog_confirm "$confirm_prev" 1 2)"
+  confirm="$(printf '%s\n' "$confirm_out" | sed -n 's/^confirm=//p')"
+  act="$(printf '%s\n' "$confirm_out" | sed -n 's/^act=//p')"
+  write_state_field render_confirm "$confirm"
+  if [ "${act:-0}" != "1" ]; then
+    log "imag render discriminator: churn-leak candidate (confirm ${confirm}/2) — not yet confirmed"
+    return 0
+  fi
+
+  # Confirmed -> dedup on a STABLE churn signature (once-then-suppress-for-~1h), same shared throttle.
+  local current_sig prior_sig prior_passes throttle_out alert_now new_sig new_passes
+  current_sig="imag-render:churn-leak"
+  prior_sig="$(read_state_field render_sig "")"
+  prior_passes="$(read_state_field render_passes 0)"
+  throttle_out="$(obs_watchdog_alert_throttle "$current_sig" "$prior_sig" "$prior_passes" "$ALERT_THROTTLE_PASSES")"
+  alert_now="$(printf '%s\n' "$throttle_out" | sed -n 's/^alert_now=//p')"
+  new_sig="$(printf '%s\n' "$throttle_out" | sed -n 's/^new_sig=//p')"
+  new_passes="$(printf '%s\n' "$throttle_out" | sed -n 's/^new_passes=//p')"
+  write_state_field render_sig "$new_sig"
+  write_state_field render_passes "$new_passes"
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "[dry-run] WOULD alert: imag render churn-leak #799 ($detail) alert_now=$alert_now"
+    return 0
+  fi
+
+  if [ "${alert_now:-0}" = "1" ]; then
+    log "ALERT: firing Discord notification for imag render churn-leak #799"
+    python3 "$NOTIFY" notify --body \
+      "🚨 #799 imag OBS render degraded with GPU headroom normal (throttle CLEAN) on $REPO_SLUG: ${detail}. Distinct from the issue 880/1043 power clamp — a graceful OBS restart (systemctl --user restart imag-obs) clears it." \
+      >/dev/null 2>&1 || log "ALERT: airuleset.py notify failed (non-fatal)"
+  else
+    log "ALERT: suppressed by throttle (pass ${prior_passes}/${ALERT_THROTTLE_PASSES})"
+  fi
+}
+
 main() {
   log "pass start (dry_run=$DRY_RUN, window=$WINDOW)"
   measure
-  # Two INDEPENDENT alert paths — a quiet guard journal must NOT short-circuit the throttle path
-  # (the throttle-under-floor clamp fires no guard step-down, so it lives only in the burst).
+  # Three INDEPENDENT alert paths, each with its OWN dedup state keys — a quiet guard journal must
+  # NOT short-circuit the throttle path (the throttle-under-floor clamp fires no guard step-down, so
+  # it lives only in the burst), and the render-discriminator path (#799) names churn-leak vs the
+  # power clamp without double-paging a clamp the throttle path already owns.
   alert_from_journal
   alert_from_throttle
+  alert_from_render_discriminator
   log "pass end"
 }
 

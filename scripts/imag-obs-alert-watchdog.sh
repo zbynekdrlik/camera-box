@@ -57,6 +57,15 @@ ALERT_THROTTLE_PASSES="${IMAG_OBS_ALERT_THROTTLE_PASSES:-12}"   # ~1h at the 5-m
 NOTIFY="${AIRULESET_NOTIFY:-$HOME/devel/airuleset/airuleset.py}"
 REPO_SLUG="${IMAG_OBS_ALERT_REPO:-zbynekdrlik/camera-box}"
 
+# #1070: the REPORT-ONLY latency-pin verify-at-start for imag -- the "outside a gate run" residual
+# of 1061 (during a gate run the issue-1061 self-healer script restores the floor + e2e_discord_report.py
+# reports drift; between runs an OBS restart that reloads a reverted genlock_latency_ms_src is
+# reported by nothing). Run here on a HEALTHY pass, REPORT-ONLY -- NEVER overwritten. Own throttle
+# window, independent of the down-alert throttle above. imag's OBS WS password matches the ssh pw.
+LATENCY_VERIFY="${LATENCY_PINS_VERIFY:-$HERE/latency_pins_verify.py}"
+IMAG_OBS_WS_PASSWORD="${IMAG_OBS_WS_PASSWORD:-${IMAG_PW:-newlevel}}"
+LATENCY_ALERT_THROTTLE_PASSES="${IMAG_LATENCY_ALERT_THROTTLE_PASSES:-12}"   # ~1h at the 5-min cadence
+
 STATE_DIR="${IMAG_OBS_ALERT_STATE_DIR:-${XDG_RUNTIME_DIR:-/tmp}}"
 STATE_FILE="${IMAG_OBS_ALERT_STATE_FILE:-$STATE_DIR/camera-box-imag-obs-alert.state}"
 
@@ -92,6 +101,57 @@ write_state_field() {
   mv -f "$tmp" "$STATE_FILE" 2>/dev/null || true
 }
 
+# ── #1070 latency-pin verify-at-start (REPORT-ONLY) ─────────────────────────
+# Run ONLY on a HEALTHY (OBS-up) pass. Reads imag's live per-source genlock_latency_ms_src over WS
+# (read-only) and diffs against the committed baseline (scripts/latency-pins-baseline.json) via
+# scripts/latency_pins_verify.py --box imag. On drift (exit 1) fires a THROTTLED Discord report,
+# signature + state distinct from the OBS-down alert. exit 2 (WS not ready / read failure) is NOT a
+# drift -- the down-alert path owns a genuinely-down OBS, so a transient WS read failure just skips
+# this pass. NEVER overwrites: per-source latency is the operator's A/V-align domain (imag is always
+# the 3ms floor, but a genuine re-tune is recorded by editing the baseline in a PR, never forced).
+latency_drift_check() {
+  local out rc
+  # NB: the `|| rc=$?` capture is load-bearing under this script's `set -e` -- a bare
+  # `out="$(cmd)"; rc=$?` is itself a failing statement when cmd exits non-zero (drift = rc 1),
+  # which killed the whole pass with exit 1 before any report could fire (caught by CI's first
+  # execution of the issue-1070 harness; Tier-0 forbids running these tests locally).
+  rc=0
+  out="$(python3 "$LATENCY_VERIFY" --box imag --host "$IMAG_IP" --password "$IMAG_OBS_WS_PASSWORD" 2>&1)" || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    write_state_field latency_alert_sig ""
+    write_state_field latency_alert_passes 0
+    log "latency-pin verify: imag on the agreed baseline (report-only)"
+    return 0
+  fi
+  if [ "$rc" -ne 1 ]; then
+    log "latency-pin verify: could not read imag pins (rc=$rc) -- skipping this pass (not a drift)"
+    return 0
+  fi
+  local drift_lines sig prior_sig prior_passes throttle_out alert_now new_sig new_passes
+  drift_lines="$(printf '%s\n' "$out" | grep 'LATENCY-PIN DRIFT' | sort | tr '\n' ';')"
+  sig="imag-latency:${drift_lines}"
+  prior_sig="$(read_state_field latency_alert_sig "")"
+  prior_passes="$(read_state_field latency_alert_passes 0)"
+  throttle_out="$(obs_watchdog_alert_throttle "$sig" "$prior_sig" "$prior_passes" "$LATENCY_ALERT_THROTTLE_PASSES")"
+  alert_now="$(printf '%s\n' "$throttle_out" | sed -n 's/^alert_now=//p')"
+  new_sig="$(printf '%s\n' "$throttle_out" | sed -n 's/^new_sig=//p')"
+  new_passes="$(printf '%s\n' "$throttle_out" | sed -n 's/^new_passes=//p')"
+  write_state_field latency_alert_sig "$new_sig"
+  write_state_field latency_alert_passes "$new_passes"
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "[dry-run] WOULD report imag latency-pin drift (report-only): $out"
+    return 0
+  fi
+  if [ "${alert_now:-0}" = "1" ]; then
+    log "ALERT: firing Discord report for imag latency-pin DRIFT (REPORT-ONLY, not overwritten)"
+    python3 "$NOTIFY" notify --body \
+      "⚠️ #1070 imag latency-pin DRIFT ($REPO_SLUG) -- REPORT-ONLY, pins NOT overwritten (operator A/V-align domain): $out" \
+      >/dev/null 2>&1 || log "latency report: airuleset.py notify failed (non-fatal)"
+  else
+    log "latency drift report suppressed by throttle (pass ${prior_passes}/${LATENCY_ALERT_THROTTLE_PASSES})"
+  fi
+}
+
 # ── main pass ────────────────────────────────────────────────────────────────
 main() {
   log "pass start (dry_run=$DRY_RUN, threshold=$CONFIRM_THRESHOLD)"
@@ -121,6 +181,10 @@ main() {
   if [ "$wedged" -eq 0 ]; then
     write_state_field alert_sig ""
     write_state_field alert_passes 0
+    # #1070: OBS is up -> also run the REPORT-ONLY latency-pin verify-at-start for imag (the
+    # "outside a gate run" residual of 1061). Never overwrites; a drift fires its own throttled
+    # Discord report. Only meaningful when OBS is up (it reads pins over WS), hence here.
+    latency_drift_check
     log "pass end"
     return 0
   fi

@@ -289,6 +289,19 @@ FROM dev1 instead, or the server's own log, over an MCP-Shell-side `Invoke-WebRe
 last exit code — a passive Task-Scheduler restart-on-failure setting can never catch a
 "terminated but scheduler considers that fine" death, no matter how high `RestartCount` is set.
 
+**#732 IMPLEMENTED (dev1-side watchdog; pending supervisor install)**: `scripts/bundle-state-alert-watchdog.sh`
++ `scripts/lib/bundle-state-health.sh` + `systemd/bundle-state-alert-watchdog.{service,timer}` — a
+dev1 systemd `--user` timer (5-min cadence) that `curl`s each box's `:8899/bundle-state.json` FROM
+dev1 (200 + JSON body), and on a box that is UP (ping OR OBS-WS `:4455`) but whose `:8899` does NOT
+serve, after a 2-pass confirm: auto-restarts the task via `schtasks /run /tn BundleStateServer` over
+ssh (session-agnostic — starts the HIDDEN headless task, never `/it`) AND fires a throttled Discord
+alert. A fully-unreachable box is deferred to the `network-reach-alert-watchdog` (#1001) — no
+double-page. It ships DISABLED; the SUPERVISOR installs + live-verifies + enables it per
+`systemd/bundle-state-alert-watchdog.README.md`. This replaces the by-hand `Start-ScheduledTask`
+recovery above for the "task terminated / never cold-started" class; the by-hand command still works
+as the manual fallback. Not covered by the watchdog: recreating the task on re-provision, and the
+stale-deployed-code drift class below — both remain separate follow-ups.
+
 **A THIRD failure mode (found 2026-07-14, #756): the task can be UP and healthy, but running a
 STALE deployed copy of `bundle-state-server.py`/`bundle_state_gather.py` that predates a recent
 schema change to the payload — the running code is simply NOT what's currently committed in the

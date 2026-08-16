@@ -606,3 +606,75 @@ fn windows_path_sends_a_ps1_file() {
         "#876: the Windows path must run the uploaded .ps1 by -File"
     );
 }
+
+/// The cam boxes run DELIBERATE read-only roots (the deploy-fleet.sh remount cycle exists for
+/// exactly this), and the FIRST live canary run failed on cam1 with
+/// `cp: cannot create regular file '/usr/local/bin/dantesync.bak': Read-only file system`
+/// (2026-08-16, v1.8.42 roll). The generated Linux upgrade script must therefore detect a
+/// non-writable binary dir, remount rw BEFORE the backup step, and restore ro via the EXIT
+/// trap so BOTH the success path and the self-heal ERR path end read-only again.
+#[test]
+fn linux_upgrade_cmd_remounts_ro_root_rw_before_backup_and_restores_ro_on_exit() {
+    let cmd = run_sourced("dantesync_linux_upgrade_cmd 1.8.42");
+    let rw = cmd
+        .find("mount -o remount,rw /")
+        .expect("upgrade cmd must remount a read-only root rw before touching the binary");
+    let bak = cmd
+        .find("/usr/local/bin/dantesync.bak")
+        .expect("#876: expected the backup of the current binary");
+    assert!(
+        rw < bak,
+        "the rw remount must come BEFORE the backup step (the exact 2026-08-16 canary failure). Got:\n{cmd}"
+    );
+    assert!(
+        cmd.contains("mount -o remount,ro /"),
+        "the upgrade cmd must restore the read-only root on exit. Got:\n{cmd}"
+    );
+    let ro_helper = cmd
+        .find("_dantesync_remount_ro")
+        .expect("expected the ro-restore helper wired into the EXIT trap");
+    assert!(
+        ro_helper < bak,
+        "the ro-restore helper must be armed before the point of no return. Got:\n{cmd}"
+    );
+}
+
+/// The orchestrator-invoked rollback (VERIFY-failure path) hits the same read-only root and
+/// must carry the same remount handling.
+#[test]
+fn linux_rollback_cmd_handles_read_only_root() {
+    let cmd = run_sourced("dantesync_linux_rollback_cmd");
+    assert!(
+        cmd.contains("mount -o remount,rw /"),
+        "rollback cmd must remount a read-only root rw before restoring the backup. Got:\n{cmd}"
+    );
+    assert!(
+        cmd.contains("mount -o remount,ro /"),
+        "rollback cmd must restore the read-only root afterwards. Got:\n{cmd}"
+    );
+}
+
+/// The dead-task purge inside the generated Windows upgrade .ps1 must be idempotent on an
+/// ALREADY-ABSENT task: the live 2026-08-16 v1.8.43 canary failed with
+/// `schtasks : ERROR: The system cannot find the file specified.` because the task had been
+/// purged by the previous roll and the bare `schtasks ... 2>$null` still surfaces the native
+/// stderr as a terminating NativeCommandError under `$ErrorActionPreference = "Stop"` — the
+/// upgrade aborted BEFORE the swap. The purge must be routed through `cmd /c` with full
+/// redirection so PowerShell never sees the stderr of an absent-task delete.
+#[test]
+fn windows_upgrade_ps_purges_dead_task_idempotently_via_cmd_wrapper() {
+    let ps = run_sourced("dantesync_windows_upgrade_ps 1.8.43");
+    let purge = ps
+        .lines()
+        .find(|l| l.contains("DanteSyncUpdate") && l.contains("/Delete"))
+        .expect("#876: the Windows upgrade must still purge the dead DanteSyncUpdate task");
+    assert!(
+        purge.contains("cmd /c"),
+        "the purge must run under cmd /c so an absent task's stderr never becomes a \
+         terminating NativeCommandError. Got: {purge}"
+    );
+    assert!(
+        purge.contains(">nul 2>&1") || purge.contains("2>&1"),
+        "the purge must swallow the absent-task stderr inside cmd. Got: {purge}"
+    );
+}

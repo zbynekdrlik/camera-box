@@ -1248,3 +1248,75 @@ fn verify_imag_uses_slow_read_budget_for_slow_reads_1058() {
          `ssh_box_timeout \"$IMAG_SLOW_READ_TIMEOUT\"` (#1058) -- per-class budgets, not a blanket cap"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// (v) power-button + lid + sleep protection (#727)
+//
+// imag-nb is a PRODUCTION box; a short accidental power-button press suspended it during the
+// 2026-07-12 live event. setup-imag.sh step 5 persists the logind drop-ins + masks the sleep
+// targets; verify-imag.sh must PROVE that protection is EFFECTIVE on the running box, so a
+// re-provision that silently lost step 5 FAILS the acceptance gate instead of passing it.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn imag_powerkey_protection_ok_requires_all_keys_ignored_and_targets_masked_727() {
+    // A healthy production imag-nb, with the real distractor lines `loginctl show-seat` also
+    // prints (LongPress variants, reboot key) -- every power/suspend/hibernate/lid key ignored,
+    // every sleep target masked.
+    let good_login = "HandlePowerKey=ignore\nHandlePowerKeyLongPress=ignore\nHandleRebootKey=reboot\nHandleSuspendKey=ignore\nHandleSuspendKeyLongPress=hibernate\nHandleHibernateKey=ignore\nHandleLidSwitch=ignore\nHandleLidSwitchExternalPower=ignore\nHandleLidSwitchDocked=ignore";
+    let good_masked = "sleep.target=masked\nsuspend.target=masked\nhibernate.target=masked\nhybrid-sleep.target=masked";
+    // Bare HandlePowerKey NOT ignored (poweroff) -- must FAIL even though HandlePowerKeyLongPress
+    // IS =ignore (proves whole-line matching, never a HandlePowerKey substring hit).
+    let bad_key = "HandlePowerKey=poweroff\nHandlePowerKeyLongPress=ignore\nHandleSuspendKey=ignore\nHandleHibernateKey=ignore\nHandleLidSwitch=ignore";
+    // Only the LongPress variant present, no bare HandlePowerKey=ignore line -> FAIL.
+    let only_longpress = "HandlePowerKeyLongPress=ignore\nHandleSuspendKey=ignore\nHandleHibernateKey=ignore\nHandleLidSwitch=ignore";
+    // A sleep target left unmasked -> FAIL.
+    let bad_masked = "sleep.target=masked\nsuspend.target=disabled\nhibernate.target=masked\nhybrid-sleep.target=masked";
+    let (code, out, err) = run_sourced(&format!(
+        r#"
+        GOOD_LOGIN='{good_login}'
+        GOOD_MASK='{good_masked}'
+        BAD_KEY='{bad_key}'
+        ONLY_LP='{only_longpress}'
+        BAD_MASK='{bad_masked}'
+        if imag_powerkey_protection_ok "$GOOD_LOGIN" "$GOOD_MASK"; then echo YES; else echo NO; fi
+        if imag_powerkey_protection_ok "$BAD_KEY" "$GOOD_MASK"; then echo YES; else echo NO; fi
+        if imag_powerkey_protection_ok "$ONLY_LP" "$GOOD_MASK"; then echo YES; else echo NO; fi
+        if imag_powerkey_protection_ok "$GOOD_LOGIN" "$BAD_MASK"; then echo YES; else echo NO; fi
+        "#
+    ));
+    assert_eq!(code, 0, "stderr: {err}");
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec!["YES", "NO", "NO", "NO"],
+        "a healthy box PASSES; a non-ignore power key, an only-LongPress dump, or any unmasked \
+         sleep target each FAIL (#727): {out:?}"
+    );
+}
+
+/// The #727 pure check must be DEFINED and CALLED in the live flow (a sourced-but-never-called
+/// pure fn provides zero acceptance coverage -- same discipline as the #884/#1040 wiring tests),
+/// it must read the EFFECTIVE reloaded logind policy via `loginctl show-seat` (not merely a file
+/// on disk), and it must verify the four sleep targets are masked.
+#[test]
+fn verify_imag_wires_the_727_powerkey_check_into_the_live_flow() {
+    let body = std::fs::read_to_string(script()).unwrap();
+    // Anchor on the CALL form (function name + a quoted argument) -- true ONLY at the invocation
+    // site, never at the doc comment (`imag_powerkey_protection_ok LOGINCTL MASKED`) or the
+    // definition (`imag_powerkey_protection_ok() {`). A `.count() >= 2` on the bare name would
+    // still pass with the call DELETED (doc comment + definition already = 2), defeating this
+    // test's own "defined but never called" guard. Precedent: imag_obs_cgroup_shows_service_unit.
+    assert!(
+        body.contains("imag_powerkey_protection_ok \""),
+        "verify-imag.sh must CALL imag_powerkey_protection_ok (with its read args) in its live flow (#727)"
+    );
+    assert!(
+        body.contains("loginctl show-seat"),
+        "verify-imag.sh check (v) must read the EFFECTIVE logind key-handling via `loginctl show-seat` (#727)"
+    );
+    assert!(
+        body.contains("hybrid-sleep.target"),
+        "verify-imag.sh check (v) must verify sleep/suspend/hibernate/hybrid-sleep targets are masked (#727)"
+    );
+}

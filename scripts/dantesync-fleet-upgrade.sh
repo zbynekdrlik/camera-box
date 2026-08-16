@@ -144,6 +144,21 @@ if [ "\$expected" != "\$actual" ]; then
   exit 1
 fi
 chmod +x "\$tmp/dantesync"
+# 1.5 cam boxes run a DELIBERATE read-only root (the deploy-fleet.sh remount cycle exists for
+# exactly this; the 2026-08-16 canary failed here with 'cp: ... Read-only file system').
+# Detect a non-writable binary dir, remount rw for the swap, and restore ro via the EXIT trap —
+# so BOTH the success path and the self-heal ERR path end read-only again.
+ro_root=0
+if ! touch "\$(dirname "$DANTESYNC_LINUX_BIN")/.dantesync-write-test" 2>/dev/null; then
+  ro_root=1
+  mount -o remount,rw /
+else
+  rm -f "\$(dirname "$DANTESYNC_LINUX_BIN")/.dantesync-write-test"
+fi
+_dantesync_remount_ro() {
+  if [ "\$ro_root" = 1 ]; then mount -o remount,ro / 2>/dev/null || true; fi
+}
+trap 'rm -rf "\$tmp"; _dantesync_remount_ro' EXIT
 # 2. back up the current binary BEFORE overwriting it (rollback target)
 cp -a "$DANTESYNC_LINUX_BIN" "$DANTESYNC_LINUX_BAK"
 # 3. self-heal: from here (the point of no return), restore the .bak on ANY error
@@ -157,7 +172,7 @@ trap '_dantesync_restore' ERR
 systemctl stop dantesync
 install -m 0755 "\$tmp/dantesync" $DANTESYNC_LINUX_BIN
 systemctl restart dantesync
-trap 'rm -rf "\$tmp"' EXIT   # success — disarm the restore trap, keep tmp cleanup
+trap 'rm -rf "\$tmp"; _dantesync_remount_ro' EXIT   # success — disarm the restore trap, keep tmp cleanup + ro restore
 # 5. read the new version back
 dantesync --version
 EOF
@@ -172,6 +187,18 @@ if [ ! -f "$DANTESYNC_LINUX_BAK" ]; then
   echo "no $DANTESYNC_LINUX_BAK to roll back to" >&2
   exit 1
 fi
+# Same read-only-root handling as the upgrade cmd (cam boxes) — restore ro on ANY exit.
+ro_root=0
+if ! touch "\$(dirname "$DANTESYNC_LINUX_BIN")/.dantesync-write-test" 2>/dev/null; then
+  ro_root=1
+  mount -o remount,rw /
+else
+  rm -f "\$(dirname "$DANTESYNC_LINUX_BIN")/.dantesync-write-test"
+fi
+_dantesync_remount_ro() {
+  if [ "\$ro_root" = 1 ]; then mount -o remount,ro / 2>/dev/null || true; fi
+}
+trap '_dantesync_remount_ro' EXIT
 systemctl stop dantesync
 cp -a "$DANTESYNC_LINUX_BAK" $DANTESYNC_LINUX_BIN
 systemctl restart dantesync
@@ -217,8 +244,12 @@ try {
     Start-Service dantesync -ErrorAction SilentlyContinue
     throw
 }
-# 4. purge the dead DanteSyncUpdate relic task (idempotent)
-schtasks /Delete /TN '$DANTESYNC_DEAD_TASK' /F 2>\$null
+# 4. purge the dead DanteSyncUpdate relic task -- genuinely idempotent: routed through cmd /c
+# with full redirection, because a bare schtasks on an ALREADY-ABSENT task writes to stderr and
+# \$ErrorActionPreference=Stop turns that into a terminating NativeCommandError AFTER the swap
+# (live 2026-08-16 v1.8.43 canary: swap completed, ps1 exited non-zero, orchestrator misreported
+# a failed upgrade).
+cmd /c "schtasks /Delete /TN \"$DANTESYNC_DEAD_TASK\" /F >nul 2>&1"
 & \$exe --version
 EOF
 }
