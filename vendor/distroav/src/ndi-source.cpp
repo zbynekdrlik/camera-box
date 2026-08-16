@@ -634,6 +634,11 @@ void *ndi_source_thread(void *data)
 	int64_t timestamp_audio = 0;
 	int64_t timestamp_video = 0;
 
+	/* camera-box #767: tracks the disconnect->reconnect edge for the stale watchdog below. Starts
+	 * true so the FIRST connection (and every reconnect) gets a fresh stale window instead of being
+	 * judged against frames from the previous (or never-existent) connection epoch. */
+	bool was_disconnected = true;
+
 	/* camera-box #797 recv-timing instrumentation: locate the ~50-of-60fps pull-loop
 	 * throttle. Times recv_capture_v3 (wait for SDK) vs process_video2+free (our cost,
 	 * dominated by obs_source_output_video) per VIDEO frame; logs a 5s summary per
@@ -860,6 +865,10 @@ void *ndi_source_thread(void *data)
 #endif
 			process_empty_frame(s);
 
+			// camera-box #767: remember we saw a genuine disconnect, so the watchdog gives the
+			// next connection a fresh stale window (see the transition refresh below).
+			was_disconnected = true;
+
 			// This will also slow down the shutdown of OBS when no NDI feed is received.
 			std::this_thread::sleep_for(std::chrono::milliseconds(100));
 			continue;
@@ -880,6 +889,18 @@ void *ndi_source_thread(void *data)
 		// steady-state-fps concern is unaffected). Refresh last_frame_timestamp so the fresh
 		// receiver gets a full window before it can be judged stale again.
 		//
+		// Reconnect-epoch guard: while no_conn was 0 the loop took the early-continue above, so
+		// last_frame_timestamp froze at the moment the OLD connection went silent. On the FIRST
+		// iteration after NDI's own name-based reconnect flips no_conn back to a connection, that
+		// frozen timestamp is the WHOLE absence duration old -- evaluating the watchdog now would
+		// force a spurious rebind of a connection that just recovered on its own (extra ~1s black
+		// on an already-recovering feed). Give the freshly (re)connected receiver a full stale
+		// window first; the next real frame (or a genuinely stuck new connection after the full
+		// window) drives the decision from here on.
+		if (was_disconnected) {
+			s->last_frame_timestamp = os_gettime_ns();
+			was_disconnected = false;
+		}
 		if (genlock_reconnect_decision(genlock_source_is_active(s->obs_source), no_conn,
 					       os_gettime_ns(), s->last_frame_timestamp,
 					       GENLOCK_RECONNECT_STALE_NS)) {

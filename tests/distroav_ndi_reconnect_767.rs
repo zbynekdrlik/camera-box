@@ -92,11 +92,33 @@ fn receiver_loop_wires_the_reconnect_watchdog() {
          count, so a stale genlocked source is never force-rebound. Re-apply the watchdog call."
     );
 
-    // On a stale verdict it must force the EXISTING reset machinery (never a second reconnect path).
+    // On a stale verdict it must force the EXISTING reset machinery (never a second reconnect
+    // path). Anchor the UNIQUE mutex-guarded flag-set + timestamp-refresh trio, not the bare
+    // `reset_ndi_receiver = true;` (which is aliased: the reset block sets it FALSE and
+    // ndi_source_thread_start sets true elsewhere — a bare-substring anchor would pass even if
+    // the watchdog's own flag-set were deleted).
     assert!(
-        src.contains("s->config.reset_ndi_receiver = true;"),
-        "{NDI_SOURCE}: #767 patch missing — the watchdog must set reset_ndi_receiver so the \
-         existing reset block recv_destroy+recv_create_v3 rebinds the (restarted) sender."
+        src.contains(
+            "pthread_mutex_lock(&s->config_mutex); s->config.reset_ndi_receiver = true; \
+             pthread_mutex_unlock(&s->config_mutex); s->last_frame_timestamp = os_gettime_ns();"
+        ),
+        "{NDI_SOURCE}: #767 patch missing — the watchdog must set reset_ndi_receiver (under \
+         config_mutex) + refresh last_frame_timestamp so the existing reset block \
+         recv_destroy+recv_create_v3 rebinds the (restarted) sender."
+    );
+
+    // The reconnect-epoch guard must be present: on the first iteration after a disconnect, give
+    // the freshly (re)connected receiver a full stale window (otherwise the frozen absence-duration
+    // timestamp forces a spurious rebind of a connection NDI just recovered on its own).
+    assert!(
+        src.contains("bool was_disconnected = true;")
+            && src.contains(
+                "if (was_disconnected) { s->last_frame_timestamp = os_gettime_ns(); \
+                 was_disconnected = false; }"
+            ),
+        "{NDI_SOURCE}: #767 reconnect-epoch guard missing — without the `was_disconnected` \
+         transition refresh, a genlocked source that reconnects after a >=stale-window absence \
+         gets one spurious forced rebind. Re-apply the guard."
     );
 
     // The distinctive log line (unique substring — not the #764 keep-alive line).
@@ -155,6 +177,13 @@ fn vectors() -> Vec<(ReconnectArgs, bool)> {
         ((true, 1, 20_000_000_000, 10_000_000_000, s), true),  // age exactly 10 s (>=)
         ((true, 1, 25_000_000_000, 10_000_000_000, s), true),  // age 15 s
         ((true, 3, 100_000_000_000, 5_000_000_000, s), true),  // multi-connection, age 95 s
+        // A DIFFERENT stale window — proves the helper honours the `stale_ns` PARAMETER and did
+        // not hardcode 10 s: age 7 s over a 5 s window → true; age 4 s over a 5 s window → false.
+        ((true, 1, 8_000_000_000, 1_000_000_000, 5_000_000_000), true),
+        (
+            (true, 1, 5_000_000_000, 1_000_000_000, 5_000_000_000),
+            false,
+        ),
     ]
 }
 
