@@ -1302,9 +1302,14 @@ fn imag_powerkey_protection_ok_requires_all_keys_ignored_and_targets_masked_727(
 #[test]
 fn verify_imag_wires_the_727_powerkey_check_into_the_live_flow() {
     let body = std::fs::read_to_string(script()).unwrap();
+    // Anchor on the CALL form (function name + a quoted argument) -- true ONLY at the invocation
+    // site, never at the doc comment (`imag_powerkey_protection_ok LOGINCTL MASKED`) or the
+    // definition (`imag_powerkey_protection_ok() {`). A `.count() >= 2` on the bare name would
+    // still pass with the call DELETED (doc comment + definition already = 2), defeating this
+    // test's own "defined but never called" guard. Precedent: imag_obs_cgroup_shows_service_unit.
     assert!(
-        body.matches("imag_powerkey_protection_ok").count() >= 2,
-        "verify-imag.sh must DEFINE and CALL imag_powerkey_protection_ok in its live flow (#727)"
+        body.contains("imag_powerkey_protection_ok \""),
+        "verify-imag.sh must CALL imag_powerkey_protection_ok (with its read args) in its live flow (#727)"
     );
     assert!(
         body.contains("loginctl show-seat"),
