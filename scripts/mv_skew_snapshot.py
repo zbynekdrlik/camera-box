@@ -334,14 +334,19 @@ def snapshot(host: str, password: str, rounds: int, width: int, height: int) -> 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--host", default=os.environ.get("IMAG_IP", "10.77.9.182"))
-    ap.add_argument("--password", default=os.environ.get("IMAG_PW", os.environ.get("OBS_PASSWORD", "newlevel")))
+    ap.add_argument("--password", default="")
     ap.add_argument("--out", required=True)
     ap.add_argument("--rounds", type=int, default=8, help="capture rounds/camera (each => main+MV; #761 wants >=4)")
     ap.add_argument("--width", type=int, default=960)
     ap.add_argument("--height", type=int, default=540)
     args = ap.parse_args(argv)
 
-    result = snapshot(args.host, args.password, args.rounds, args.width, args.height)
+    # OBS-WebSocket password, OBS_PASSWORD-first — same convention as imag_latency_enforce.py and
+    # the #756 pins snapshot (NOT the SSH box password IMAG_PW; imag's OBS WS is auth-less today,
+    # so this only matters the day WS auth is enabled with OBS_PASSWORD — but aligning now avoids
+    # this becoming the ONE imag-WS consumer that silently goes dark then, #761 review).
+    password = os.environ.get("OBS_PASSWORD", args.password)
+    result = snapshot(args.host, password, args.rounds, args.width, args.height)
     with open(args.out, "w", encoding="utf-8") as f:
         json.dump(result, f, indent=2)
     print(f"mv_skew_snapshot: wrote {args.out}")

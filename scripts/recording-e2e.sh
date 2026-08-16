@@ -3997,7 +3997,7 @@ continuing WITHOUT the imag partial; the merge below will omit --merge-partials 
     MV_SKEW_JSON="/tmp/mv-skew-${RUN_ID}.json"
     echo "    [8/8f-mv] #761: MV-clone-vs-main skew snapshot (imag WS screenshots, report-only)"
     if ! python3 "$HERE/mv_skew_snapshot.py" \
-        --host "$IMAG_IP" --password "${IMAG_PW:-newlevel}" \
+        --host "$IMAG_IP" --password "${OBS_PASSWORD:-}" \
         --out "$MV_SKEW_JSON" 2>&1 | sed 's/^/    [mv-skew] /'; then
       echo "WARNING: #761 mv_skew_snapshot.py failed — Discord report will omit the MV-skew section (fail-open, gate unaffected)." >&2
       MV_SKEW_JSON=""
