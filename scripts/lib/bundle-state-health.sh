@@ -83,8 +83,10 @@ bundle_state_alert_detail() {
 #   action is `powershell ... -WindowStyle Hidden -File run-bundle-state-server.ps1`) -- session-
 #   agnostic per .claude/rules/win-ssh-vs-mcp.md. NEVER the `/it` interactive form (a desktop-session
 #   op the headless dev1 watchdog must never issue, and a documented DEAD END on these boxes). Runs
-#   over the boxes' default cmd.exe ssh shell, so no PowerShell wrapper is needed. Trailing `;` so it
-#   composes safely if a caller ever embeds it mid-string (the $()-newline-strip gotcha).
+#   over the boxes' default cmd.exe ssh shell, so no PowerShell wrapper is needed. NO trailing `;`:
+#   this string is passed as the FINAL ssh argument (never embedded mid-command), so the
+#   $()-newline-strip gotcha does not apply -- and `;` is NOT a cmd.exe statement terminator, so a
+#   trailing one could reach schtasks as a stray token.
 bundle_state_restart_remote_cmd() {
-  printf 'schtasks /run /tn "BundleStateServer";\n'
+  printf 'schtasks /run /tn "BundleStateServer"\n'
 }

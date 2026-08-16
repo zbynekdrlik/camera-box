@@ -138,6 +138,10 @@ probe_http_bundle() {
   local ip="$1" body
   body="$(curl -fsS --max-time "$CURL_TIMEOUT" "http://${ip}:${BUNDLE_PORT}${BUNDLE_PATH}" 2>/dev/null)" \
     || { printf '0'; return 0; }
+  # Strip any leading whitespace/newline/BOM, then require the body to START with `{` (a real JSON
+  # object) -- so a 200 with a leading blank line does not false-read as DOWN, while a wedged server
+  # answering non-JSON still reads DOWN.
+  body="${body#"${body%%[![:space:]]*}"}"
   case "$body" in
     \{*) printf '1' ;;
     *) printf '0' ;;
@@ -166,12 +170,22 @@ read_state_field() {
   printf '%s' "${v:-$default}"
 }
 write_state_field() {
-  local key="$1" val="$2" tmp
+  local key="$1" val="$2" tmp existing=""
   mkdir -p "$(dirname "$STATE_FILE")" 2>/dev/null || true
-  tmp="$(mktemp "${STATE_FILE}.XXXXXX" 2>/dev/null || echo "$STATE_FILE")"
-  { [ -f "$STATE_FILE" ] && grep -v "^${key}=" "$STATE_FILE"; printf '%s=%s\n' "$key" "$val"; } \
-    > "$tmp" 2>/dev/null || true
-  mv -f "$tmp" "$STATE_FILE" 2>/dev/null || true
+  # Read the OTHER keys into memory FIRST, before any file is opened for writing -- so even the
+  # mktemp-failure fallback (a direct rewrite of STATE_FILE) can never truncate-before-read and drop
+  # them (the sibling watchdogs' `tmp=$STATE_FILE` fallback has exactly that latent state-loss bug).
+  [ -f "$STATE_FILE" ] && existing="$(grep -v "^${key}=" "$STATE_FILE" 2>/dev/null)"
+  tmp="$(mktemp "${STATE_FILE}.XXXXXX" 2>/dev/null || true)"
+  if [ -n "$tmp" ]; then
+    { [ -n "$existing" ] && printf '%s\n' "$existing"; printf '%s=%s\n' "$key" "$val"; } \
+      > "$tmp" 2>/dev/null || true
+    mv -f "$tmp" "$STATE_FILE" 2>/dev/null || true
+  else
+    # mktemp unavailable: `existing` is already captured, so a direct (non-atomic) rewrite is safe.
+    { [ -n "$existing" ] && printf '%s\n' "$existing"; printf '%s=%s\n' "$key" "$val"; } \
+      > "$STATE_FILE" 2>/dev/null || true
+  fi
 }
 
 # A HEALTHY box is not an incident: clear its confirm counter AND its throttle sig so a genuinely NEW
@@ -274,8 +288,27 @@ handle_box() {
   fi
 }
 
+# require_tools -> exit non-zero (loud) if a REQUIRED external tool is missing. A missing `curl`
+# would otherwise make probe_http_bundle return 0 for EVERY box, so both boxes would false-classify
+# DOWN and get a real `schtasks /run` restart + a Discord page -- exactly the "a missing tool must
+# fail LOUD by name, never read as a measured zero" class .claude/rules/imag-ssh-remote-tool-preflight.md
+# (#833) exists to prevent. `sshpass` is deliberately NOT required: its absence degrades safely to
+# alert-only (the restart fails, the alert still fires).
+require_tools() {
+  local missing=() t
+  for t in curl ping timeout; do
+    command -v "$t" >/dev/null 2>&1 || missing+=("$t")
+  done
+  if [ "${#missing[@]}" -gt 0 ]; then
+    log "FATAL: required tool(s) not found on dev1: ${missing[*]} -- refusing to run (a missing curl would false-read :$BUNDLE_PORT as DOWN and trigger false restarts/alerts on every box)"
+    return 1
+  fi
+  return 0
+}
+
 main() {
   log "pass start (dry_run=$DRY_RUN, auto_restart=$AUTO_RESTART, boxes='$BOXES')"
+  require_tools || { log "pass end (aborted: missing required tools)"; return 3; }
 
   # -- gather each box's probes ONCE (feeds both the anchor and the per-box decision) --
   local pair box ip names=() ips=() pings=() wss=() bundles=()
