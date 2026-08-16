@@ -951,3 +951,221 @@ fn throttle_alert_sig_is_stable_across_bursts_with_different_counts() {
         "the sig must be a non-empty stable token: {s1:?}"
     );
 }
+
+// =================================================================================================
+// #799 — the render-degradation CAUSE discriminator.
+//
+// Two distinct causes produce the same "OBS render budget blown after hours, restart clears it"
+// symptom on imag-nb: (a) the issue-880/1043 power/thermal clamp (GPU steered below the pinned
+// floor, throttle_reason_pl1/thermal active) and (b) THIS ticket's connection-churn render leak
+// (render time creeps while the GPU has HEADROOM — throttle clean). The salvaged 2026-08-16 plan:
+// capture render stats + gt_act_freq + throttle_reason SIMULTANEOUSLY and NAME which cause is
+// active, instead of one ambiguous "render degraded" alert. These pin the pure classifiers:
+//   imag_render_degraded_from_sample  — RENDER|<afps>|<avg_ms>|<skip_frac>|<adv> -> degraded|healthy|stalled|unknown
+//   imag_power_throttle_state         — the burst -> clamped|clean|unknown (3-state; shares ONE parse
+//                                       with the existing 2-state imag_power_throttle_alert_condition)
+//   imag_render_cause_from_signals    — fuses them -> <cause>|<detail> (churn-leak|power-clamp|healthy|stalled|unknown)
+// Thresholds mirror src/render_budget.rs (60fps: budget 1000/60=16.67ms, fps floor 58, skip 5%),
+// and activeFps is only trusted when render_advanced=true (#935: activeFps LIES during a stall).
+// =================================================================================================
+
+fn render_class(line: &str) -> String {
+    let (_c, out, _e) = run_sourced(&format!(
+        "imag_render_degraded_from_sample {}",
+        shell_quote(line)
+    ));
+    out.trim().to_string()
+}
+
+fn throttle_state(gather: &str) -> String {
+    let (_c, out, _e) = run_sourced_with_gather("imag_power_throttle_state \"$G\"", gather);
+    out.trim().to_string()
+}
+
+fn cause(line: &str, gather: &str) -> String {
+    let (_c, out, _e) = run_sourced_with_gather(
+        &format!("imag_render_cause_from_signals {} \"$G\"", shell_quote(line)),
+        gather,
+    );
+    out.trim().to_string()
+}
+
+fn cause_token(line: &str, gather: &str) -> String {
+    cause(line, gather)
+        .lines()
+        .next()
+        .unwrap_or("")
+        .split('|')
+        .next()
+        .unwrap_or("")
+        .to_string()
+}
+
+// A CLEAN burst: valid FLOOR, >= min samples, NONE clamped (act at/above floor, throttle all 0) =
+// the GPU has headroom. This is the churn-discriminator's key "throttle clean" input.
+const CLEAN_BURST: &str = "\
+FLOOR|1400
+THROTSAMPLE|0|0|0|1400
+THROTSAMPLE|0|0|0|1400
+THROTSAMPLE|0|0|0|1350
+THROTSAMPLE|0|0|0|1400
+THROTSAMPLE|0|0|0|1400
+THROTSAMPLE|0|0|0|1400
+THROTSAMPLE|0|0|0|1350
+THROTSAMPLE|0|0|0|1400
+";
+
+#[test]
+fn render_sample_healthy_within_the_60fps_budget() {
+    // 60fps, 5.3ms (< 16.67 budget), 0% skip, advancing -> healthy.
+    assert_eq!(render_class("RENDER|60.00|5.30|0.000|true"), "healthy");
+}
+
+#[test]
+fn render_sample_degraded_by_avg_render_time_the_799_curve() {
+    // The ticket's own curve: 52.8fps / 17.2ms / 1.6% skip -> the avg exceeds the 16.67ms budget.
+    assert_eq!(render_class("RENDER|52.80|17.20|0.016|true"), "degraded");
+}
+
+#[test]
+fn render_sample_degraded_by_low_fps_only_when_advancing() {
+    // avg under budget, skip low, but activeFps sags below the 58 floor AND renderTotalFrames is
+    // confirmed advancing (=true) -> trust the fps signal -> degraded.
+    assert_eq!(render_class("RENDER|55.00|10.00|0.000|true"), "degraded");
+}
+
+#[test]
+fn render_sample_degraded_by_render_skip_over_tolerance() {
+    // 8% skip > the 5% tolerance -> degraded.
+    assert_eq!(render_class("RENDER|60.00|10.00|0.080|true"), "degraded");
+}
+
+#[test]
+fn render_sample_full_stall_is_stalled_not_degraded_defers_to_391() {
+    // render_advanced=false = a FULL render-loop stall (activeFps LIES here, #935). That is the
+    // #391 obs-liveness FpsZero path's domain, NOT this partial-degrade discriminator -> `stalled`
+    // (so the two watchdogs never double-alert the same stall).
+    assert_eq!(render_class("RENDER|30.00|0.00|0.000|false"), "stalled");
+}
+
+#[test]
+fn render_sample_low_fps_not_trusted_when_advancement_unknown_the_activefps_lie_guard() {
+    // renderTotalFrames advancement could NOT be confirmed (adv=unknown) and avg/skip are healthy:
+    // a low activeFps here may be the #935 lie, so it must NOT alone mark the box degraded.
+    assert_eq!(render_class("RENDER|30.00|5.00|0.000|unknown"), "healthy");
+}
+
+#[test]
+fn render_sample_unknown_on_empty_or_malformed_never_a_false_signal() {
+    assert_eq!(render_class(""), "unknown");
+    assert_eq!(render_class("RENDER|x|y|z|true"), "unknown"); // non-numeric avg
+    assert_eq!(render_class("GARBAGE|60|5|0|true"), "unknown"); // wrong tag
+}
+
+#[test]
+fn throttle_state_reports_clamped_clean_unknown_three_ways() {
+    assert_eq!(throttle_state(CLAMP_BURST), "clamped"); // majority power-clamped under floor
+    assert_eq!(throttle_state(CLEAN_BURST), "clean"); // valid burst, GPU has headroom
+    assert_eq!(throttle_state(""), "unknown"); // empty (ssh hiccup)
+    // truncated (2 samples < min 6) -> cannot judge -> unknown, never a false clean/clamped.
+    assert_eq!(
+        throttle_state("FLOOR|1400\nTHROTSAMPLE|1|0|1|700\nTHROTSAMPLE|1|0|1|750\n"),
+        "unknown"
+    );
+    // no FLOOR line -> unknown.
+    assert_eq!(
+        throttle_state("THROTSAMPLE|0|0|0|1400\nTHROTSAMPLE|0|0|0|1400\n"),
+        "unknown"
+    );
+}
+
+#[test]
+fn throttle_state_shares_one_parse_with_the_two_state_alert_condition() {
+    // The refactor must not regress the existing 2-state marker: clamped burst still yields the
+    // THROTTLE-UNDER-FLOOR marker, a clean burst yields none.
+    assert!(throttle_cond(CLAMP_BURST).contains("THROTTLE-UNDER-FLOOR"));
+    assert!(throttle_cond(CLEAN_BURST).is_empty());
+}
+
+#[test]
+fn cause_render_degraded_with_clean_throttle_is_churn_leak_799() {
+    // THE central case: render degraded (17.2ms) while the GPU has headroom (throttle clean) =
+    // the #799 connection-churn leak, which an OBS restart clears — NOT the power clamp.
+    let out = cause("RENDER|52.80|17.20|0.016|true", CLEAN_BURST);
+    assert_eq!(
+        cause_token("RENDER|52.80|17.20|0.016|true", CLEAN_BURST),
+        "churn-leak"
+    );
+    assert!(
+        out.contains("#799") && (out.contains("headroom") || out.contains("restart")),
+        "the churn-leak detail must name #799 and the restart-clears/headroom mechanism: {out:?}"
+    );
+}
+
+#[test]
+fn cause_render_degraded_with_clamped_throttle_is_power_clamp_not_churn() {
+    // render degraded WHILE the iGPU is power-clamped -> attribute to the power/cooling envelope
+    // (issue 880/1043), never cry churn (the throttle path already pages the clamp).
+    assert_eq!(
+        cause_token("RENDER|52.80|17.20|0.016|true", CLAMP_BURST),
+        "power-clamp"
+    );
+}
+
+#[test]
+fn cause_render_degraded_with_unknown_throttle_cannot_attribute() {
+    // render degraded but the burst is unreadable (ssh hiccup) -> cannot discriminate -> unknown,
+    // never a false churn blame.
+    assert_eq!(cause_token("RENDER|52.80|17.20|0.016|true", ""), "unknown");
+}
+
+#[test]
+fn cause_healthy_render_never_alerts_regardless_of_throttle() {
+    assert_eq!(
+        cause_token("RENDER|60.00|5.30|0.000|true", CLAMP_BURST),
+        "healthy"
+    );
+    assert_eq!(
+        cause_token("RENDER|60.00|5.30|0.000|true", CLEAN_BURST),
+        "healthy"
+    );
+}
+
+#[test]
+fn cause_full_stall_defers_regardless_of_throttle() {
+    assert_eq!(
+        cause_token("RENDER|30.00|0.00|0.000|false", CLEAN_BURST),
+        "stalled"
+    );
+}
+
+// -------------------------------------------------------------------------------------------------
+// The dev1 watchdog wires the render-discriminator path in (render read + fusion + confirm + dedup),
+// and the churn-leak alert names #799. Reuses obs_watchdog_confirm (2-pass) so a single transient
+// render window never pages; power-clamp is left to the existing throttle path (no duplicate page).
+// -------------------------------------------------------------------------------------------------
+
+#[test]
+fn dev1_alert_watchdog_wires_in_the_render_discriminator_799() {
+    let body = read_script("scripts/imag-power-envelope-alert-watchdog.sh");
+    assert!(
+        body.contains("imag_render_cause_from_signals"),
+        "the watchdog must decide the render CAUSE via the shared pure fusion fn"
+    );
+    assert!(
+        body.contains("imag-render-stats.py"),
+        "the watchdog must read imag OBS render stats over WS via the dev1-side reader front"
+    );
+    assert!(
+        body.contains("churn-leak"),
+        "the watchdog must page the NEW previously-silent churn-leak case"
+    );
+    assert!(
+        body.contains("#799"),
+        "the churn-leak alert must name #799 so the operator/next-investigator knows the cause"
+    );
+    assert!(
+        body.contains("obs_watchdog_confirm"),
+        "the render path must confirm across >=2 passes (a single 4s window can catch a transient)"
+    );
+}
