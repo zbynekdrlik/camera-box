@@ -6,6 +6,7 @@ paths:
   - "tests/version_integrity_gate.rs"
   - "tests/python/test_bundle_state_gather.py"
   - "tests/python/test_bundle_state_server_log.py"
+  - "tests/python/test_bundle_state_server_port4455.py"
 ---
 
 # version-integrity-gate.sh — the pre-rig-test Windows-stack drift gate (#123/#119)
@@ -37,19 +38,32 @@ silently reads the healthy value. DRIFT/unread tests that use bare pinned consta
 `bad>0→20` / `unknown>0→11` precedence even with extra unconditional UNKNOWNs — leave them unless you
 need a single clean signal.
 
-## GOTCHA — `port4455_owner_path` is UN-gatherable by the deployed non-elevated server (#829/#1067)
+## RESOLVED (#1067) — `port4455_owner_path` gather fixed via WMI ExecutablePath, then ENFORCED
 
-`bundle-state-server.py::port4455_owner()` resolves the :4455 listener's exe PATH via
-`Get-NetTCPConnection | Get-Process | .Path`. From the deployed **non-elevated, hidden**
-`BundleStateServer` scheduled-task context this is **access-denied** on the elevated OBS process →
-`.Path` is null → the key is OMITTED (omit-when-empty) on the WHOLE live fleet, even though OBS
-legitimately owns :4455 at the pinned path (confirm from an ELEVATED context: `win-strih` MCP
-`Get-NetTCPConnection -LocalPort 4455 | Get-Process` returns the path fine; a plain `curl
-http://<box>:8899/bundle-state.json` does NOT show `port4455_owner_path`). Therefore `port4455_identity`
-CANNOT be enforced yet — it stays opt-in behind its own `if [ -n "$port4455_owner_path" ]` guard, or
-it UNKNOWN-blocks the healthy gate on every run. #1067 fixes the gather context (run the task
-elevated, or use `Get-CimInstance Win32_Process` ExecutablePath which is often readable where
-`Get-Process.Path` is not) THEN does the #758-style enforce.
+**History (#829):** `bundle-state-server.py::port4455_owner()` resolved the :4455 listener's exe
+PATH via `Get-NetTCPConnection | Get-Process | .Path`. From the deployed **non-elevated, hidden**
+`BundleStateServer` scheduled-task context that was **access-denied** on the elevated OBS process →
+`.Path` null → the key OMITTED (omit-when-empty) on the WHOLE live fleet, even though OBS
+legitimately owns :4455 at the pinned path (an ELEVATED `win-strih` MCP `Get-NetTCPConnection
+-LocalPort 4455 | Get-Process` returned the path fine; a plain `curl :8899/bundle-state.json` did
+NOT show `port4455_owner_path`). So `port4455_identity` stayed opt-in behind its own
+`if [ -n "$port4455_owner_path" ]` guard — the last obs-identity facet not yet enforced.
+
+**Fix (#1067):** `port4455_owner()` now resolves the path via `Get-CimInstance Win32_Process -Filter
+"ProcessId=$id"`.ExecutablePath — the WMI/CIM provider returns ExecutablePath for an elevated
+process from a NON-elevated caller where the OpenProcess-based `Get-Process.Path` is denied — with
+`Get-Process.Path` kept as a fallback. Then the opt-in guard was REMOVED from
+`version-integrity-gate.sh` main(): `port_identity_verdict` now runs UNCONDITIONALLY like
+`obs_installs`/`obs_process_count` (empty owner → gate-blocking UNKNOWN). Same 756→758 two-step. The
+elevate-the-task alternative was REJECTED (security-boundary escalation of a LAN-facing HTTP task +
+a rig redeploy out of a code PR's scope); it stays the documented fallback if a box is ever found
+where even CIM ExecutablePath is denied.
+
+**Deploy/verify caveat (still true):** whether CIM ExecutablePath actually reads the elevated obs64
+path in the deployed task context is a LIVE-Windows-box property — no worktree worker can verify it.
+After deploying the new `bundle-state-server.py` to strih+stream, `curl :8899/bundle-state.json` on
+BOTH and CONFIRM `port4455_owner_path`/`_version` now appear BEFORE trusting the enforced gate on a
+rig E2E; if still absent, fall back to running the `BundleStateServer` task elevated.
 
 ## GOTCHA — strih obs_installs / startup_chain DRIFT is #826's PHYSICAL cleanup, not a code bug
 

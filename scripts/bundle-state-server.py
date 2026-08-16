@@ -141,19 +141,38 @@ def ndi_runtime_version(dll_path):
 
 def port4455_owner():
     """#826 — the exe PATH (never just a process name) + FileVersion of whatever process is
-    LISTENING on TCP :4455 right now, via one PowerShell round-trip (Get-NetTCPConnection ->
-    Get-Process -> Get-Item VersionInfo). This is the exact hole the 2026-07-27 incident exposed:
-    a same-NAMED `obs64.exe` process can be a totally different, stale install — matching by name
-    alone would have missed it. Returns (path, version), each "" on any failure/absence (no
-    listener, PowerShell error, process vanished between the two calls) — never a guessed value."""
+    LISTENING on TCP :4455 right now. Returns (path, version), each "" on any failure/absence (no
+    listener, PowerShell error, process vanished between calls) — never a guessed value. Matching by
+    PATH (never just the process name) is the exact hole the 2026-07-27 incident exposed: a
+    same-NAMED `obs64.exe` process can be a totally different, stale install.
+
+    #1067 — resolve the path via `Get-CimInstance Win32_Process`.ExecutablePath (the WMI/CIM
+    provider), NOT (only) `Get-Process -Id <pid>`.Path. The deployed BundleStateServer scheduled
+    task runs NON-elevated + hidden, and Get-Process.Path must OPEN the target process to read its
+    main-module path -> access-denied on the ELEVATED obs64 -> `.Path` is null -> BOTH keys were
+    OMITTED on the whole live fleet (2026-08-15), forcing port4455_identity to stay opt-in in
+    version-integrity-gate.sh. Win32_Process.ExecutablePath is readable for an elevated process from
+    a non-elevated caller where the OpenProcess-based Get-Process.Path is not; the version read
+    (Get-Item .VersionInfo.FileVersion) only needs read access to the on-disk exe, so it works once
+    the path resolves (which is why the version was ALSO missing before — downstream of the null
+    path, not a separate failure). Get-Process.Path is kept as a fallback for any box where CIM is
+    unavailable."""
     try:
         out = subprocess.run(
             [
                 "powershell", "-NoProfile", "-NonInteractive", "-Command",
-                "$c = Get-NetTCPConnection -LocalPort 4455 -State Listen "
-                "-ErrorAction SilentlyContinue | Select-Object -First 1; "
-                "if ($c) { $p = Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue; "
-                "if ($p -and $p.Path) { $p.Path; (Get-Item -LiteralPath $p.Path).VersionInfo.FileVersion } }",
+                # Single-quoted Python literals so the PowerShell double-quoted WQL filter embeds
+                # cleanly; $path = $null (not '') avoids a PS single quote colliding with Python's.
+                '$c = Get-NetTCPConnection -LocalPort 4455 -State Listen '
+                '-ErrorAction SilentlyContinue | Select-Object -First 1; '
+                'if ($c) { $procId = $c.OwningProcess; $path = $null; '
+                '$cim = Get-CimInstance Win32_Process -Filter "ProcessId=$procId" '
+                '-ErrorAction SilentlyContinue; '
+                'if ($cim -and $cim.ExecutablePath) { $path = $cim.ExecutablePath } '
+                'if (-not $path) { $gp = Get-Process -Id $procId -ErrorAction SilentlyContinue; '
+                'if ($gp -and $gp.Path) { $path = $gp.Path } } '
+                'if ($path) { $path; '
+                '(Get-Item -LiteralPath $path -ErrorAction SilentlyContinue).VersionInfo.FileVersion } }',
             ],
             capture_output=True, text=True, timeout=15, check=True,
         )

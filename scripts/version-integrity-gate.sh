@@ -365,14 +365,14 @@ main() {
     esac
 
     # #826 OBS-identity machine-check facet, ENFORCED fleet-wide (#829, the 758-style second step
-    # after the 756-style opt-in landing): the generic install + process-count checks now run on
-    # EVERY box UNCONDITIONALLY -- an un-upgraded / absent box is a real gate-blocking UNKNOWN, no
-    # longer a silent skip. EXCEPTION: port4455_identity stays OPT-IN (its own guard below) because
-    # the redeployed non-elevated bundle-state-server task cannot read the :4455 owner's exe path
-    # (a non-elevated Get-Process on the elevated OBS is access-denied -> the key is omitted on the
-    # whole live fleet); enforcing it now would UNKNOWN-block the healthy fleet on every run, the
-    # exact outcome this gate's precondition forbids. It flips to enforced in the #829 gather-
-    # context follow-up once the server can report the key -- the same 756 -> 758 two-step.
+    # after the 756-style opt-in landing): the generic install + process-count checks run on EVERY
+    # box UNCONDITIONALLY -- an un-upgraded / absent box is a real gate-blocking UNKNOWN, no longer
+    # a silent skip. #1067: port4455_identity is now ALSO enforced (its former opt-in guard is
+    # removed below) -- the bundle-state-server gather context was fixed (WMI
+    # Win32_Process.ExecutablePath, readable from the non-elevated task where the OpenProcess-based
+    # Get-Process.Path was access-denied on the elevated OBS), so every box reports the :4455 owner
+    # path now; an unreported owner is a REAL gate-blocking UNKNOWN. This completes the 756 -> 758
+    # two-step for the last obs-identity facet.
     local obs_installs_csv port4455_owner_path port4455_owner_ver obs_proc_count
     obs_installs_csv="$(state_json_value "$file" obs_installs)"
     port4455_owner_path="$(state_json_value "$file" port4455_owner_path)"
@@ -388,20 +388,21 @@ main() {
       11) unknown=$((unknown + 1)); unknown_boxes+=("${name}:obs_installs") ;;
     esac
 
-    # port4455_identity: OPT-IN until the #829 gather-context follow-up lands -- run only for a box
-    # that actually reports the :4455 owner path (no live box does yet, so it is skipped fleet-wide).
-    if [ -n "$port4455_owner_path" ]; then
-      local pinned_obs_ver=""
-      pinned_obs_ver="$(pinned_obs_version "$readme" 2>/dev/null)" || pinned_obs_ver=""
-      frc=0
-      engine_out="$(port_identity_verdict "$DEFAULT_OBS_INSTALL_EXE" "$pinned_obs_ver" "$port4455_owner_path" "$port4455_owner_ver")" || frc=$?
-      printf '%s\n' "$engine_out" | sed 's/^/    /'
-      case "$frc" in
-        0)  ok=$((ok + 1)) ;;
-        20) bad=$((bad + 1)) ;;
-        11) unknown=$((unknown + 1)); unknown_boxes+=("${name}:port4455_identity") ;;
-      esac
-    fi
+    # port4455_identity: ENFORCED fleet-wide (#1067, the 758-style second step) -- runs
+    # UNCONDITIONALLY on every box now, exactly like obs_installs / obs_process_count above. Its
+    # former opt-in `if [ -n "$port4455_owner_path" ]` guard is gone: the gather context was fixed
+    # (WMI Win32_Process.ExecutablePath), so an EMPTY owner path is now a real gate-blocking UNKNOWN
+    # (the verdict function returns 11 for an empty owner), never a silent skip.
+    local pinned_obs_ver=""
+    pinned_obs_ver="$(pinned_obs_version "$readme" 2>/dev/null)" || pinned_obs_ver=""
+    frc=0
+    engine_out="$(port_identity_verdict "$DEFAULT_OBS_INSTALL_EXE" "$pinned_obs_ver" "$port4455_owner_path" "$port4455_owner_ver")" || frc=$?
+    printf '%s\n' "$engine_out" | sed 's/^/    /'
+    case "$frc" in
+      0)  ok=$((ok + 1)) ;;
+      20) bad=$((bad + 1)) ;;
+      11) unknown=$((unknown + 1)); unknown_boxes+=("${name}:port4455_identity") ;;
+    esac
 
     frc=0
     engine_out="$(obs_process_count_verdict "$obs_proc_count")" || frc=$?
