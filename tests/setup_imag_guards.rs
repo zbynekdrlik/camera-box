@@ -1672,9 +1672,9 @@ fn setup_imag_total_steps_matches_actual_step_calls() {
         })
         .count();
     assert_eq!(
-        declared, 23,
-        "TOTAL_STEPS must be 23 after #858 added the remoteos-mcp control-channel agent provisioning \
-         step to the #1040 total of 22"
+        declared, 24,
+        "TOTAL_STEPS must be 24 after #764 added the imag-obs-watchdog provisioning step \
+         (the previous total of 23 counted #858's remoteos-mcp control-channel agent step)"
     );
     assert_eq!(
         actual, declared,
