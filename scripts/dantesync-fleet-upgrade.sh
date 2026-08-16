@@ -244,8 +244,12 @@ try {
     Start-Service dantesync -ErrorAction SilentlyContinue
     throw
 }
-# 4. purge the dead DanteSyncUpdate relic task (idempotent)
-schtasks /Delete /TN '$DANTESYNC_DEAD_TASK' /F 2>\$null
+# 4. purge the dead DanteSyncUpdate relic task -- genuinely idempotent: routed through cmd /c
+# with full redirection, because a bare schtasks on an ALREADY-ABSENT task writes to stderr and
+# \$ErrorActionPreference=Stop turns that into a terminating NativeCommandError AFTER the swap
+# (live 2026-08-16 v1.8.43 canary: swap completed, ps1 exited non-zero, orchestrator misreported
+# a failed upgrade).
+cmd /c "schtasks /Delete /TN \"$DANTESYNC_DEAD_TASK\" /F >nul 2>&1"
 & \$exe --version
 EOF
 }
