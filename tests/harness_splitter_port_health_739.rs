@@ -183,22 +183,27 @@ fn classify_grayscale_with_healthy_sibling_is_dead_port() {
 }
 
 #[test]
-fn classify_not_capturing_with_healthy_sibling_is_dead_port() {
-    // a grabber that stalls (no frames) on a dead input, while siblings capture fine.
-    assert_eq!(classify("1", "0", "0", "1"), "verdict=DEAD_PORT");
+fn classify_not_capturing_is_no_capture_report_only_regardless_of_siblings() {
+    // capturing=0 is an AMBIGUOUS class (camera-box down / device-busy / E2E-stop / grabber stall),
+    // ROUTINE on this rig — it must NEVER page as a splitter-port fault (that would be a
+    // mis-attribution). NO_CAPTURE regardless of how many siblings are healthy. The ORIGINAL dead-port
+    // failure kept the grabber PRODUCING frames (capturing=1) with bad content; that is DEAD_PORT below.
+    assert_eq!(classify("1", "0", "0", "2"), "verdict=NO_CAPTURE");
+    assert_eq!(classify("1", "0", "0", "1"), "verdict=NO_CAPTURE");
+    assert_eq!(classify("1", "0", "0", "0"), "verdict=NO_CAPTURE");
 }
 
 #[test]
-fn classify_degraded_without_healthy_sibling_is_source_wide() {
-    // every reachable box equally bad => shared camera/source (or idle rig), NOT a per-port fault.
+fn classify_grayscale_without_healthy_sibling_is_source_wide() {
+    // every reachable box capturing-but-grayscale => shared camera/source (AWB on a B&W pattern) or
+    // idle rig, NOT a per-port fault.
     assert_eq!(classify("1", "1", "0", "0"), "verdict=SOURCE_WIDE");
-    assert_eq!(classify("1", "0", "0", "0"), "verdict=SOURCE_WIDE");
 }
 
 #[test]
 fn classify_garbage_sibling_count_treated_as_zero() {
     // a non-numeric sibling count must never be read as "a healthy sibling exists" -> SOURCE_WIDE, not
-    // a false DEAD_PORT page.
+    // a false DEAD_PORT page. (grayscale + garbage sibling => SOURCE_WIDE, the report-only side.)
     assert_eq!(classify("1", "1", "0", "x"), "verdict=SOURCE_WIDE");
     assert_eq!(classify("1", "1", "0", "\"\""), "verdict=SOURCE_WIDE");
 }
@@ -207,16 +212,19 @@ fn classify_garbage_sibling_count_treated_as_zero() {
 // splitter_health_alert_detail <box> <capturing> <colour> <u_dev> <v_dev> -> one human line
 // ---------------------------------------------------------------------------------------------
 #[test]
-fn alert_detail_not_capturing_names_box_and_splitter_port() {
+fn alert_detail_not_capturing_names_box_and_ambiguous_cause_not_splitter_port() {
+    // the NOT-capturing line is the NO_CAPTURE (report-only) detail — it must describe the ambiguous
+    // cause honestly and must NOT attribute the fault to the splitter port (that is only the paged
+    // grayscale line's claim).
     let d = stdout_of("splitter_health_alert_detail cam3 0 0 - -");
     assert!(d.contains("cam3"), "must name the box: {d}");
     assert!(
-        d.to_lowercase().contains("splitter port"),
-        "must name the splitter port as suspect: {d}"
-    );
-    assert!(
         d.to_lowercase().contains("not capturing") || d.to_lowercase().contains("no fresh"),
         "must state the not-capturing reason: {d}"
+    );
+    assert!(
+        d.to_lowercase().contains("ambiguous") || d.to_lowercase().contains("not attributed"),
+        "not-capturing must NOT be attributed to the splitter port: {d}"
     );
 }
 

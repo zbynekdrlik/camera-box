@@ -29,15 +29,24 @@ records.
 ## The discriminator (the whole design) — self-anchoring, no reference-anchor guard needed
 
 `scripts/lib/splitter-health.sh` (pure, `splitter_health_classify`) fires a **SPLITTER-PORT
-suspicion iff a box is degraded (not capturing OR grayscale) AND ≥1 SIBLING is proven-good**
+suspicion (`DEAD_PORT`, PAGE) iff a box is capturing but GRAYSCALE AND ≥1 SIBLING is proven-good**
 (reachable + capturing + colour). A proven-good sibling proves the shared camera is delivering AND
 dev1's path to the rig is up, so the only element that can differ for the bad box is its own output
-port. If EVERY reachable box is equally degraded → `SOURCE_WIDE` (shared camera / AWB / idle rig, NOT
-a per-port fault) → **report-only, never paged** (paging here would false-fire every time the source
-camera is legitimately off between events). An unreadable box → `NODATA`, never a page. This differs
-structurally from the network-reach watchdog (#1001): that one needs an explicit reference-anchor
-guard because its per-box reachability has no fleet consensus; here the "≥1 proven-good sibling"
-condition IS the anchor.
+port. This differs structurally from the network-reach watchdog (#1001): that one needs an explicit
+reference-anchor guard because its per-box reachability has no fleet consensus; here the "≥1
+proven-good sibling" condition IS the anchor.
+
+**Why the PAGE keys on GRAYSCALE-while-capturing, not on liveness (learned from live verification).**
+The ORIGINAL 2026-07-13 dead-port failure kept the grabbers PRODUCING frames (Elgato purple noise /
+ShadowCast flat grey) — i.e. `capturing=1` with bad CONTENT. `capturing=0` (no fresh `capture chroma:`
+line) is a **different, ambiguous class** — camera-box crashed / device-busy / stopped by an E2E run /
+a genuine grabber stall — and on this rig it is ROUTINE (the camboxes cycle down constantly: an E2E
+run stops camera-box to take the devices; a fresh live check found all three boxes stopped one minute
+and all three OK the next). Attributing that to the splitter port would be a mis-attribution / false
+page, so `capturing=0` → `NO_CAPTURE` = **report-only, never paged** (a fully-stalled grabber on a
+dead port therefore lands in the log's NO_CAPTURE bucket for an operator, not a wrong page). The other
+report-only verdicts: `SOURCE_WIDE` (every reachable box grayscale, no proven-good sibling → shared
+camera / AWB / idle rig) and `NODATA` (unreadable box).
 
 ## Reuse the shared dev1-side alert framework — never invent a second mechanism
 

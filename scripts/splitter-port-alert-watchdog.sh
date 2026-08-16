@@ -54,7 +54,7 @@ DRY_RUN=0
 case "${1:-}" in
   --dry-run) DRY_RUN=1 ;;
   --help | -h)
-    sed -n '5,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '5,42p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
     exit 0
     ;;
   "") : ;;
@@ -161,12 +161,22 @@ handle_box() {
     return 0
   fi
 
+  if [ "$verdict" = "NO_CAPTURE" ]; then
+    # Reachable but no fresh capture -- an AMBIGUOUS class (camera-box crashed / device-busy / stopped
+    # by an E2E run / a genuine grabber stall) that is ROUTINE on this rig. Report-only: paging a
+    # splitter-port suspicion here would be a mis-attribution / false page. Surfaced in the log for an
+    # operator; reset the per-port confirm/throttle so a later attributable DEAD_PORT episode pages fresh.
+    log "$box reachable but NOT capturing -> NO_CAPTURE (camera-box down / device-busy / E2E-stop / grabber stall) -- report-only, not paging as a splitter-port fault"
+    clear_box_throttle "$box"
+    return 0
+  fi
+
   if [ "$verdict" = "SOURCE_WIDE" ]; then
-    # Every reachable box equally degraded => the shared camera/source (or an idle rig), NOT a per-port
-    # fault. Report-only: this watchdog deliberately does NOT page it (that would false-page every time
-    # the source camera is legitimately off between events). Reset the per-port confirm/throttle so a
-    # later attributable DEAD_PORT episode pages fresh.
-    log "$box degraded but NO proven-good sibling -> SOURCE_WIDE (shared camera/source or idle rig) -- report-only, not paging"
+    # Every reachable box capturing-but-GRAYSCALE => the shared camera/source (AWB desaturation on a
+    # B&W pattern, or an idle rig), NOT a per-port fault. Report-only: this watchdog deliberately does
+    # NOT page it (that would false-page every time the source content is legitimately monochrome).
+    # Reset the per-port confirm/throttle so a later attributable DEAD_PORT episode pages fresh.
+    log "$box grayscale but NO proven-good sibling -> SOURCE_WIDE (shared camera/source or idle rig) -- report-only, not paging"
     clear_box_throttle "$box"
     return 0
   fi
@@ -226,29 +236,28 @@ main() {
   log "pass start (dry_run=$DRY_RUN, active='$active', window=${JOURNAL_WINDOW}s)"
 
   # -- gather each active box's probe ONCE, parse, and count the proven-good fleet ----------------
-  local cam names=() ips=() verdicts=() caps=() cols=() us=() vs=() healths=()
+  local cam names=() ips=() reaches=() caps=() cols=() us=() vs=() healths=()
   local total_healthy=0
   for cam in $active; do
     if ! camera_resolve "$cam"; then
       log "$cam: camera_resolve failed -- skipping"
       continue
     fi
-    local ip raw parsed reachable capturing colour u_dev v_dev healthy
+    local ip raw parsed reachable=0 capturing=0 colour=0 u_dev="-" v_dev="-" healthy
     ip="$CAMERA_IP"
     raw="$(probe_box "$ip")"
     parsed="$(splitter_health_parse_probe "$raw")"
-    reachable="$(printf '%s' "$parsed" | sed -n 's/.*reachable=\([0-9]\).*/\1/p')"
-    capturing="$(printf '%s' "$parsed" | sed -n 's/.*capturing=\([0-9]\).*/\1/p')"
-    colour="$(printf '%s' "$parsed" | grep -o 'colour=[0-9]' | head -1 | cut -d= -f2)"
-    u_dev="$(printf '%s' "$parsed" | sed -n 's/.*u_dev=\([^ ]*\).*/\1/p')"
-    v_dev="$(printf '%s' "$parsed" | sed -n 's/.*v_dev=\([^ ]*\).*/\1/p')"
+    # `parsed` is the lib's own `key=value` record (5 fields, values constrained to 0/1/-/[0-9.]).
+    # Consume it in ONE pass -- strip the `key=` prefixes, read the 5 values in field order -- rather
+    # than re-parsing each field with a second, independent regex surface that would silently drift
+    # from the lib's format (the "a real dead port would not page" failure mode a reviewer flagged).
+    read -r reachable capturing colour u_dev v_dev \
+      <<< "$(printf '%s' "$parsed" | sed 's/[a-z_]*=//g')"
     healthy="$(splitter_health_is_healthy "${reachable:-0}" "${capturing:-0}" "${colour:-0}")"
-    names+=("$cam"); ips+=("$ip")
+    names+=("$cam"); ips+=("$ip"); reaches+=("${reachable:-0}")
     caps+=("${capturing:-0}"); cols+=("${colour:-0}"); us+=("${u_dev:--}"); vs+=("${v_dev:--}")
     healths+=("$healthy")
     [ "$healthy" = "1" ] && total_healthy=$(( total_healthy + 1 ))
-    # verdict is filled in the second loop, once total_healthy is known.
-    verdicts+=("reachable=${reachable:-0}")
   done
 
   log "fleet proven-good count = $total_healthy of ${#names[@]} active"
@@ -256,12 +265,12 @@ main() {
   # -- classify each box against the fleet consensus + act ---------------------------------------
   local i
   for i in "${!names[@]}"; do
-    local reachable healthy_siblings verdict
-    reachable="$(printf '%s' "${verdicts[$i]}" | sed -n 's/.*reachable=\([0-9]\).*/\1/p')"
-    # a box's proven-good SIBLINGS = fleet total minus itself (only if it was itself proven-good).
+    local healthy_siblings verdict
+    # a box's proven-good SIBLINGS = fleet total minus itself (only if it was itself proven-good --
+    # a degraded box contributes 0 to total_healthy, so it already excludes itself: no off-by-one).
     healthy_siblings="$total_healthy"
     [ "${healths[$i]}" = "1" ] && healthy_siblings=$(( total_healthy - 1 ))
-    verdict="$(splitter_health_classify "${reachable:-0}" "${caps[$i]}" "${cols[$i]}" "$healthy_siblings" | sed -n 's/^verdict=//p')"
+    verdict="$(splitter_health_classify "${reaches[$i]}" "${caps[$i]}" "${cols[$i]}" "$healthy_siblings" | sed -n 's/^verdict=//p')"
     handle_box "${names[$i]}" "${ips[$i]}" "$verdict" "${caps[$i]}" "${cols[$i]}" "${us[$i]}" "${vs[$i]}"
   done
   log "pass end"

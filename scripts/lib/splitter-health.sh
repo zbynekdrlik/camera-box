@@ -80,10 +80,20 @@ splitter_health_is_healthy() {
 
 # splitter_health_classify <reachable> <capturing> <colour> <healthy_siblings> -> stdout: verdict=<X>
 #   NODATA       : reachable != 1 (box unreadable -- never a per-port claim; box off / network).
+#   NO_CAPTURE   : reachable + NOT capturing (no fresh chroma line). Report-only, NEVER paged: a
+#                  DIFFERENT, ambiguous failure class (camera-box crashed / device-busy / stopped by
+#                  an E2E run / a genuine grabber stall) that is ROUTINE on this rig, so attributing it
+#                  to the HDMI splitter port would be an overstatement / false page. The ORIGINAL
+#                  dead-port failure (#739) kept the grabber PRODUCING frames (Elgato purple noise /
+#                  ShadowCast flat grey) = capturing=1 with bad CONTENT -- which is what DEAD_PORT keys
+#                  on. A fully-stalled grabber on a dead port therefore lands in this report bucket
+#                  (operator-visible in the log) rather than a mis-attributed splitter-port page.
 #   OK           : reachable + capturing + colour.
-#   DEAD_PORT    : reachable + degraded (not capturing OR grayscale) + >=1 proven-good sibling.
-#   SOURCE_WIDE  : reachable + degraded + NO proven-good sibling (every reachable box equally bad =>
-#                  shared camera/source or idle rig, NOT a per-port fault -> report-only, no page).
+#   DEAD_PORT    : reachable + capturing + GRAYSCALE + >=1 proven-good sibling. The tight splitter-port
+#                  signal: the box is alive and capturing, but its filmed content lost the signal a
+#                  sibling on the SAME camera+splitter still receives -> that box's own output leg.
+#   SOURCE_WIDE  : reachable + capturing + grayscale + NO proven-good sibling (every reachable box
+#                  equally grey => shared camera/source or idle rig, NOT a per-port fault -> report-only).
 #   A non-numeric healthy_siblings is treated as 0 (a garbage count must NEVER be read as "a healthy
 #   sibling exists" and produce a false DEAD_PORT page -- fail toward SOURCE_WIDE, the report-only side).
 splitter_health_classify() {
@@ -93,7 +103,11 @@ splitter_health_classify() {
     printf 'verdict=NODATA\n'
     return 0
   fi
-  if [ "$c" = "1" ] && [ "$k" = "1" ]; then
+  if [ "$c" != "1" ]; then
+    printf 'verdict=NO_CAPTURE\n'
+    return 0
+  fi
+  if [ "$k" = "1" ]; then
     printf 'verdict=OK\n'
     return 0
   fi
@@ -105,13 +119,15 @@ splitter_health_classify() {
 }
 
 # splitter_health_alert_detail <box> <capturing> <colour> <u_dev> <v_dev> -> stdout: one human line
-#   naming the box and WHY it is degraded, with the HDMI splitter port as the leading suspect (the
-#   ticket's whole point: a dead port must page as a SPLITTER-PORT suspicion, not masquerade as a
-#   per-camera colour bug). Cable/grabber are named as the alternatives.
+#   naming the box and WHY it is degraded. The GRAYSCALE branch is the PAGED (DEAD_PORT) line: it names
+#   the HDMI splitter port as the leading suspect (the ticket's whole point -- a dead port must page as
+#   a SPLITTER-PORT suspicion, not masquerade as a per-camera colour bug), with cable/grabber as the
+#   alternatives. The NOT-capturing branch describes the AMBIGUOUS NO_CAPTURE class honestly and does
+#   NOT attribute it to the splitter port (it is report-only, never a page -- see classify).
 splitter_health_alert_detail() {
   local box="${1:-?}" c="${2:-0}" k="${3:-0}" u="${4:--}" v="${5:--}"
   if [ "$c" != "1" ]; then
-    printf '%s: NOT capturing (no fresh "capture chroma:" line in the last 90s) -- the grabber is getting no signal; its HDMI splitter port is the leading suspect (also its cable/grabber, or camera-box down)\n' "$box"
+    printf '%s: NOT capturing (no fresh "capture chroma:" line recently) -- ambiguous: camera-box down / device-busy / E2E-stop / grabber stall; NOT attributed to the splitter port (report-only)\n' "$box"
   elif [ "$k" != "1" ]; then
     printf '%s: capturing but GRAYSCALE (u_dev=%s v_dev=%s) while the fleet is in colour -- its HDMI splitter port likely lost the signal siblings still receive (also its cable/grabber)\n' "$box" "$u" "$v"
   else
