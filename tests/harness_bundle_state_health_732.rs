@@ -120,7 +120,9 @@ fn box_reachable_non_one_values_treated_as_down_defensively() {
 //   BOX_UNREACHABLE: box itself down — defer to the network-reachability watchdog; nothing here.
 // ---------------------------------------------------------------------------------------------
 fn classify(box_reachable: &str, bundle_healthy: &str) -> String {
-    stdout_of(&format!("bundle_state_classify {box_reachable} {bundle_healthy}"))
+    stdout_of(&format!(
+        "bundle_state_classify {box_reachable} {bundle_healthy}"
+    ))
 }
 
 #[test]
@@ -159,7 +161,10 @@ fn alert_detail_names_box_ip_and_marks_the_bundle_port_down() {
     let d = stdout_of("bundle_state_alert_detail strih 10.77.9.202 1 1 0");
     assert!(d.contains("strih"), "detail must name the box: {d}");
     assert!(d.contains("10.77.9.202"), "detail must name the ip: {d}");
-    assert!(d.contains("8899 DOWN"), "detail must mark the bundle port down: {d}");
+    assert!(
+        d.contains("8899 DOWN"),
+        "detail must mark the bundle port down: {d}"
+    );
     assert!(d.contains("ping up"), "ping should read up: {d}");
     assert!(
         d.contains("4455 up") || d.contains("OBS-WS:4455 up"),
