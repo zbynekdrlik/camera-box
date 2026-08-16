@@ -1,0 +1,18 @@
+[Unit]
+# strih/stream :8899 BundleStateServer active health-check + auto-restart (#732), DEV1-SIDE. ONE
+# measure -> decide -> restart -> alert pass. The two OBS boxes are Windows appliances with no
+# airuleset checkout / Discord credentials, and Task Scheduler cannot restart the task after a
+# non-failure termination -- so an EXTERNAL prober must probe :8899 from dev1, restart the task via
+# ssh (schtasks /run, session-agnostic), and alert. SAME topology as
+# network-reach-alert-watchdog.service (#1001) / obs-liveness-watchdog.service (#391).
+Description=camera-box strih/stream :8899 BundleStateServer health-check + auto-restart (#732) — one measure/decide/restart/alert pass
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Service]
+Type=oneshot
+# %h = the installing user's home on dev1. Adjust if the checkout lives elsewhere.
+ExecStart=%h/devel/camera-box/scripts/bundle-state-alert-watchdog.sh
+# Per pass: 2 boxes × (ping + :4455 TCP + :8899 curl) + reference pings; on a CONFIRMED-down box an
+# extra bounded ssh `schtasks /run` restart (BUNDLE_STATE_SSH_TIMEOUT, default 25 s each). Generous
+# ceiling so a slow event-day link / a slow restart never hangs the timer.
+TimeoutStartSec=120

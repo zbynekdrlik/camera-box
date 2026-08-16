@@ -1,0 +1,17 @@
+[Unit]
+# Fires the #732 strih/stream :8899 BundleStateServer health-check every 5 min (dev1-side), matching
+# the network-reach / obs-liveness / imag-obs / optical-chain alert-timer cadence so the fleet's dev1
+# alert timers stay in lockstep. A :8899 that dies while the box stays up (SCHED_S_TASK_TERMINATED /
+# cold-start-never-happened / wedged-but-listening) is auto-restarted (schtasks /run) within ~10 min
+# of onset (2-pass confirm) and paged if it does not recover — no more silent multi-day outages.
+Description=Run the camera-box strih/stream :8899 BundleStateServer health-check every 5 min (#732)
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=20s
+Persistent=false
+
+[Install]
+WantedBy=timers.target
