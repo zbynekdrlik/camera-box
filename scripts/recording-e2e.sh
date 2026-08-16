@@ -4009,8 +4009,20 @@ continuing WITHOUT the imag partial; the merge below will omit --merge-partials 
       echo "WARNING: #756 latency_pins_snapshot.py failed — Discord report will omit the pins section (fail-open, gate unaffected)." >&2
       PINS_JSON=""
     fi
+    # #761: per-camera MV-clone-vs-main presentation skew (order-alternated screenshots on imag,
+    # painter-QR decode, t_send-compensated median). Best-effort + fail-open exactly like the pins
+    # snapshot above: any failure (imag unreachable, no decodable QR) omits the MV-skew section from
+    # the Discord report and NEVER touches the run's own verdict/exit code.
+    MV_SKEW_JSON="/tmp/mv-skew-${RUN_ID}.json"
+    echo "    [8/8f-mv] #761: MV-clone-vs-main skew snapshot (imag WS screenshots, report-only)"
+    if ! python3 "$HERE/mv_skew_snapshot.py" \
+        --host "$IMAG_IP" --password "${OBS_PASSWORD:-}" \
+        --out "$MV_SKEW_JSON" 2>&1 | sed 's/^/    [mv-skew] /'; then
+      echo "WARNING: #761 mv_skew_snapshot.py failed — Discord report will omit the MV-skew section (fail-open, gate unaffected)." >&2
+      MV_SKEW_JSON=""
+    fi
     echo "    [8/8f] #711: Discord full-report (fail-open — never affects \$GATE below)"
-    e2e_discord_report_send "$REPORT_JSON" "$RUN_ID" "$GATE" "$DURATION" "$PINS_JSON"
+    e2e_discord_report_send "$REPORT_JSON" "$RUN_ID" "$GATE" "$DURATION" "$PINS_JSON" "$MV_SKEW_JSON"
     echo "    --- [8/8e] cleanup plan (JSON secured at $REPORT_JSON) ---"
     if [ "${KEEP_RECORDINGS:-0}" = "1" ]; then
       echo "    KEEP_RECORDINGS=1 — skipping the recording-cleanup plan (debugging opt-out, #652)."
