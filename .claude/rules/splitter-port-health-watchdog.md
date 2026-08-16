@@ -86,6 +86,21 @@ The HDMI splitter is a single point of failure for the whole test harness and de
 (#739, 2026-07-13). A suspect-hardware / spare-unit note is posted on the #688 technician-session
 ticket; this watchdog is the recurrence guard.
 
+## Testing the driver offline (no rig, no ssh) — the sourced-main pattern
+
+`main()` is guarded by `[[ "${BASH_SOURCE[0]}" == "$0" ]]`, so a test can source the whole watchdog
+(which pulls in `camera-set.sh`/`obs-watchdog-decision.sh`/`splitter-health.sh`) and then override
+`probe_box` with a canned per-IP fleet + `sshpass` with a no-op stub (`sshpass() { :; }`) so the
+fail-loud tool preflight passes without a real binary. Run `main` N times in `--dry-run` against a
+per-test temp `SPLITTER_WATCH_STATE_FILE` and assert on stderr (the `log()` stream, incl. the
+`WOULD alert` line). `tests/harness_splitter_port_watchdog_739.rs` is the worked example — it pins
+the sibling arithmetic in BOTH directions (a lone colour sibling still pages the grey box; a lone
+grey box with no reachable sibling never pages) and the DEAD_PORT/SOURCE_WIDE/NO_CAPTURE/NODATA
+wiring, none of which the pure-lib test can reach. The pure lib is tested separately by
+`tests/harness_splitter_port_health_739.rs` (source-only, no `main`). Both run under Tier-0 (bash
+sources the scripts at test time; `cargo test --no-run` only compiles the Rust harness — the actual
+RED→GREEN is observed by running the equivalent bash directly, since Tier-0 forbids `cargo test`).
+
 ## Install + verify (dev1) — SHIPS DISABLED
 
 The units in `systemd/` are NOT enabled by the PR. Install on dev1 like the siblings:
