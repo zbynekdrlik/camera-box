@@ -89,6 +89,44 @@ pub const DUP_COVERAGE_MIN: f64 = 0.5;
 /// ~60-frame window); [`measure_dup_cadence`] returns `None` under it, never a spurious verdict.
 pub const MIN_SAMPLE_FRAMES: usize = 24;
 
+/// How many rows of each frame [`frame_content_hash`] samples — a FEW rows spread evenly across the
+/// height, not the whole frame. Mirrors `dupe_decimation::dupe_content_hash`'s (#889) row-sampling
+/// cost discipline: a real grabber duplicate reproduces the frame byte-for-byte (sampled rows
+/// included), and real content (sensor noise + motion) differs even within a small sampled subset,
+/// so byte-exact equality over these rows alone is a reliable "same vs different" test at a
+/// fraction of a full-frame hash's cost over a 54k-frame recording.
+pub const CONTENT_HASH_SAMPLE_ROWS: usize = 8;
+
+/// Row-sampled FNV-1a content fingerprint of a tightly-packed gray8 frame — the ENCODER half of
+/// this metric, kept beside the classifier so the whole thing is self-contained and Tier-0
+/// testable. `bytes` is `width * height` (gray8, tightly packed as ffmpeg's `-pix_fmt gray`
+/// emits). Mirrors the proven approach of `dupe_decimation::dupe_content_hash` (#889): a fast,
+/// deterministic fold for "same vs different" on real content, NOT a cryptographic hash —
+/// collision RESISTANCE is irrelevant here (never adversarial), only exact-duplicate
+/// discrimination. Two byte-identical frames hash equal; a degenerate (zero width/height) frame
+/// hashes to a stable sentinel `0`. A local FNV-1a (no crate dependency) rather than a `std` hasher
+/// so the value is stable across toolchain versions, the same reason #889 rolled its own.
+pub fn frame_content_hash(bytes: &[u8], width: usize, height: usize) -> u64 {
+    if width == 0 || height == 0 {
+        return 0;
+    }
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325; // FNV-1a 64-bit offset basis
+    let step = (height / CONTENT_HASH_SAMPLE_ROWS).max(1);
+    let mut y = 0usize;
+    while y < height {
+        let row_start = y * width;
+        let row_end = row_start + width;
+        if row_end <= bytes.len() {
+            for &b in &bytes[row_start..row_end] {
+                hash ^= u64::from(b);
+                hash = hash.wrapping_mul(0x0000_0100_0000_01b3); // FNV-1a prime
+            }
+        }
+        y += step;
+    }
+    hash
+}
+
 /// Per-window duplication-masked-cadence classification, built from a sequence of per-frame
 /// content HASHES in recorded (delivery) order.
 // #1088: carries `f64` fractions (no `Eq` impl — NaN) + a `Vec`, so this derives `PartialEq`/
@@ -270,6 +308,52 @@ mod tests {
             h[i] = h[i - 1];
         }
         h
+    }
+
+    // ---- frame_content_hash (the encoder half) -----------------------------------------
+
+    #[test]
+    fn identical_frames_hash_equal() {
+        // A grabber duplicate is byte-for-byte identical → its hash must match its predecessor's,
+        // which is exactly what makes it counted as a duplicate downstream.
+        let w = 64;
+        let h = 32;
+        let a: Vec<u8> = (0..(w * h)).map(|i| (i % 251) as u8).collect();
+        let b = a.clone();
+        assert_eq!(
+            frame_content_hash(&a, w, h),
+            frame_content_hash(&b, w, h),
+            "byte-identical frames must hash equal"
+        );
+    }
+
+    #[test]
+    fn a_difference_in_a_sampled_row_changes_the_hash() {
+        // Real content (sensor noise + motion) differs frame-to-frame; a change in a SAMPLED row
+        // must move the hash so a genuinely-different frame is not miscounted as a duplicate.
+        let w = 64;
+        let h = 32;
+        let a: Vec<u8> = vec![7u8; w * h];
+        let mut b = a.clone();
+        b[0] = 8; // row 0 is always sampled (y starts at 0)
+        assert_ne!(
+            frame_content_hash(&a, w, h),
+            frame_content_hash(&b, w, h),
+            "a sampled-row difference must change the hash"
+        );
+    }
+
+    #[test]
+    fn degenerate_dimensions_hash_to_a_stable_sentinel() {
+        assert_eq!(frame_content_hash(&[1, 2, 3], 0, 32), 0);
+        assert_eq!(frame_content_hash(&[1, 2, 3], 64, 0), 0);
+    }
+
+    #[test]
+    fn a_short_buffer_never_panics() {
+        // A truncated buffer (fewer bytes than width*height) must be handled, not panic — the
+        // row-bounds guard skips rows that would read past the end.
+        let _ = frame_content_hash(&[1, 2, 3, 4], 64, 32);
     }
 
     // ---- degenerate inputs -------------------------------------------------------------

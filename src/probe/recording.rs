@@ -642,6 +642,33 @@ pub fn analyze_recording(path: &Path) -> Result<Vec<RecordingFrame>> {
     analyze_recording_with_burns(path, &GENERIC_DIAGNOSTIC_BURN_IDS)
 }
 
+/// #1088 — stream every recorded frame's row-sampled CONTENT hash out of `path`, in recorded
+/// order, so index `i` of the returned vector is `RecordingFrame::frame_index` `i` (both `read_frames`
+/// and the parallel decode index frames sequentially from 0). A SEPARATE, luma-only ffmpeg pass:
+/// it computes ONLY [`crate::dup_cadence::frame_content_hash`] per frame and runs NO QR/burn
+/// decode, so it is far cheaper than [`analyze_recording`]'s robust decode — run ONCE per verdict
+/// on the offline worker for the duplication-masked 50→60 detector (issue 1088).
+///
+/// Deliberately its OWN pass, NOT a new return value threaded through `analyze_recording_*`:
+/// widening those functions' return type would churn all ~15 of their callers, every one
+/// CI-first-compile (`required-features = ["probe"]`, no local compile path), for a report-only
+/// metric — a poor risk trade. The extra offline luma decode is the cost of that isolation;
+/// folding the hash into the main decode pass to save it is a report-only follow-up optimization
+/// once the metric is calibrated.
+pub fn hash_recording_frames(path: &Path) -> Result<Vec<u64>> {
+    let (width, height) = probe_dimensions(path)?;
+    let mut hashes: Vec<u64> = Vec::new();
+    read_frames(path, width, height, |_idx, luma| {
+        hashes.push(crate::dup_cadence::frame_content_hash(
+            luma.as_raw(),
+            width as usize,
+            height as usize,
+        ));
+        true
+    })?;
+    Ok(hashes)
+}
+
 /// [`analyze_recording`] with the #207 fast gate keyed on `expected_node_burns` — the node
 /// burns THIS recording is known to carry. Passing the right set (e.g. `[cam1, strih]` for a
 /// strih recording) lets the fast path fire on the ~99 %+ of clean frames, dropping a 30-min
