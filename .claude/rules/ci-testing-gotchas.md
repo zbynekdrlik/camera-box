@@ -686,3 +686,17 @@ cam-box burn-run fps log to dev1):
   the slice ran to EOF — a silent wrong-anchor, not a failure). Fix: reword the source-block comment
   so ONLY the real call site carries the exact marker phrase; verify with
   `grep -c '<marker>' scripts/recording-e2e.sh` (must be 1).
+
+## NEVER update the shared rustup toolchain mid-round (live incident 2026-08-17)
+
+A worker lane ran a background `rustup update` on dev1 while (a) the self-hosted Full-path E2E
+was compiling its probe binaries and (b) sibling lanes had warm `target/` caches. The E2E died
+mid-compile with `failed to build archive from rlib .../libstd-<hash>.rlib: No such file or
+directory` (the std rlib was replaced under the running rustc) — a hardware-slot run wasted on a
+toolchain race — and sibling lanes hit phantom clippy/linker errors from artifacts compiled by
+the pre-update rustc. Rules: (1) NO session (worker or supervisor) updates rustup/rustc on dev1
+while any lane or CI run is active — a version-parity concern is NOTED in the evidence block for
+the supervisor, never self-fixed mid-round; (2) after any toolchain change, every warm `target/`
+(worktrees included) needs `cargo clean` — mixed-rustc artifacts produce misleading errors, not
+real code failures; (3) an E2E/CI failure whose log shows a missing-rlib / mixed-artifact shape
+is re-run after confirming `rustc --version` + the rlib exists — it is not a code regression.
