@@ -77,6 +77,44 @@ swap = stop `dantesync-tray` process, copy `dantesync-tray-windows-amd64.exe` ov
 MCP Shell (session 1 — an ssh-launched tray is invisible to the operator). Linux nodes have no
 tray.
 
+### resolume-snv (CG box) — DanteSync maintenance target (#811)
+
+`resolume-snv` (RESOLUME-SNV, the CG / graphics PC: Resolume Arena → strih via Spout/NDI, plus a
+`cg-obs`) is a **DanteSync maintenance target** — a **Windows** box (shares the OBS-WS password
+with strih/stream; `.claude/rules/rig-state-inspection.md` §2), so the SAME two-binary
+service+tray Windows path as strih/stream. #800 found its NDI feeds drifting **~+65 ms/h all day**
+because it carried no dantesync — this brings it under the fleet clock-discipline umbrella.
+
+- **IP is NOT pinned.** `resolume.lan` currently resolves to `10.77.9.201` — the SAME IP `bridge`
+  lists in `targets.md` (event-LAN DHCP drift/collision). Always `getent hosts resolume.lan` and
+  confirm the box identity (DHCP lease / OBS profile name, never "the shared OBS-WS password
+  worked") before deploying. It is a **traveling box**, often powered off/away between events.
+- **Deploy dantesync — canary-first, pin-not-latest** (`.claude/rules/dantesync-fleet-upgrade.md`).
+  Roll it with the standard mechanism, adding it to the Windows node list:
+  `scripts/dantesync-fleet-upgrade.sh --win "strih=newlevel@<strih> resolume=newlevel@<resolume>"`
+  (or solo). strih is the NTP master and its OWN canary, so a fleet roll converges it first; a
+  solo resolume roll verifies with `--ntp-master ""` (it is a slave). Bump `DANTESYNC_VERSION_PIN`
+  only as part of a fleet-wide version bump, never for a single-box add.
+- **Version-parity — STANDALONE, NOT the E2E `[0/8]` gate.** resolume is not a measured source in
+  the cam→strih→stream recording path, so its dantesync version cannot corrupt an E2E verdict, and
+  wiring it into `recording-e2e.sh`'s `[0/8]` roster would fail-CLOSE every E2E run whenever the
+  traveling box is away (the imag-nb #1013 pain). Check it on its own during maintenance:
+  `scripts/dantesync-version-gate.sh --win "resolume=newlevel@<resolume>"`. When away, exclude it
+  from any fleet-wide roll/check via the `rig-fleet.txt` ack mechanism under the box name
+  `resolume` (`cambox_offline_ack` is generic over any node name).
+- **Frame-loss-free playback verify (acceptance #4).** After the roll, confirm its feed plays
+  frame-loss-free by reading its genlock-FIFO audit on strih (and stream). Pull the box's OBS log,
+  then run the verdict mode (INPUT names are whatever the OBS config uses for the resolume feed —
+  e.g. `cg`, `NDI obs hudba`, `RESOLUME-SNV (cg-obs)`):
+  `genlock-jitter-report --file <strih-obs.log> --verdict-source 'cg' --verdict-source 'NDI obs hudba'`
+  → one `RESOLUME-VERDICT <name>: PASS/FAIL/ABSENT` line each (exits 3 on any FAIL/ABSENT, or 0
+  with `--verdict-report-only`). PASS = skew flat within `--skew-bound-ms` (default 20) **and**
+  zero drop/underrun/relock/late-hold/backward-regime deltas over the window. It is
+  cadence-agnostic (resolume is a **non-60** CG source, #787 — holds/overruns from cadence
+  adaptation are NOT gated; the frame-jump signal `backward_regime_ticks` IS). For the 24h
+  acceptance (skew flat ±20 ms), sample a long OBS-log window and raise `--min-samples`. The
+  supervisor owns the live deploy + the 24h run; this is a verify tool, not a hard E2E gate.
+
 **HARD RULE:** DanteSync OWNS the clock on cam boxes AND dev1. NEVER install/enable
 chrony / ptp4l / systemd-timesyncd / any other NTP/PTP tool, and NEVER run
 `timedatectl set-ntp true` (DanteSync's `install.sh` disables them).
