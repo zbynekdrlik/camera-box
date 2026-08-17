@@ -181,22 +181,14 @@ chmod +x "\$tmp/dantesync"
 # exactly this; the 2026-08-16 canary failed here with 'cp: ... Read-only file system').
 # Detect a read-only root, remount rw for the swap, and restore ro via the EXIT trap — so BOTH
 # the success path and the self-heal ERR path end read-only again. #1077 defect (3): read the
-# ACTUAL mount state (findmnt), not a 'touch' write probe — a write probe conflates a read-only
-# filesystem with a mere permission error (and now that the script always runs escalated, the
-# probe would read as writable everywhere a real move is possible). Match the 'ro' option as a
-# comma-delimited TOKEN so 'errors=remount-ro' never false-positives. The write probe survives
-# only as the findmnt-less fallback (a broken-apt cam3 may lack findmnt).
+# ACTUAL mount state (findmnt, with a /proc/mounts fallback for a findmnt-less box), never a
+# 'touch' write probe — a write probe conflates a read-only filesystem with a mere permission
+# error, and now that the script always runs escalated it would read as writable everywhere a
+# real move is possible. Mirrors setup-device.sh's ensure_root_writable()/root_mount_is_readonly()
+# (#599): match 'ro' as the FIRST comma-token so 'errors=remount-ro' never false-positives.
 ro_root=0
-bindir="\$(dirname "$DANTESYNC_LINUX_BIN")"
-if command -v findmnt >/dev/null 2>&1; then
-  case ",\$(findmnt -rno OPTIONS -T "\$bindir" 2>/dev/null)," in
-    *,ro,*) ro_root=1 ;;
-  esac
-elif ! touch "\$bindir/.dantesync-write-test" 2>/dev/null; then
-  ro_root=1
-else
-  rm -f "\$bindir/.dantesync-write-test"
-fi
+opts="\$(findmnt -no OPTIONS / 2>/dev/null || awk '\$2=="/"{print \$4; exit}' /proc/mounts 2>/dev/null)"
+case "\$opts" in ro | ro,*) ro_root=1 ;; esac
 if [ "\$ro_root" = 1 ]; then mount -o remount,rw /; fi
 _dantesync_remount_ro() {
   if [ "\$ro_root" = 1 ]; then mount -o remount,ro / 2>/dev/null || true; fi
@@ -231,18 +223,11 @@ if [ ! -f "$DANTESYNC_LINUX_BAK" ]; then
   exit 1
 fi
 # Same read-only-root handling as the upgrade cmd (cam boxes) — restore ro on ANY exit. #1077
-# defect (3): findmnt reads the real mount state (write probe only as the findmnt-less fallback).
+# defect (3): read the real mount state (findmnt, /proc/mounts fallback), never a write probe —
+# mirrors setup-device.sh's ensure_root_writable() (#599); 'ro' as the FIRST comma-token.
 ro_root=0
-bindir="\$(dirname "$DANTESYNC_LINUX_BIN")"
-if command -v findmnt >/dev/null 2>&1; then
-  case ",\$(findmnt -rno OPTIONS -T "\$bindir" 2>/dev/null)," in
-    *,ro,*) ro_root=1 ;;
-  esac
-elif ! touch "\$bindir/.dantesync-write-test" 2>/dev/null; then
-  ro_root=1
-else
-  rm -f "\$bindir/.dantesync-write-test"
-fi
+opts="\$(findmnt -no OPTIONS / 2>/dev/null || awk '\$2=="/"{print \$4; exit}' /proc/mounts 2>/dev/null)"
+case "\$opts" in ro | ro,*) ro_root=1 ;; esac
 if [ "\$ro_root" = 1 ]; then mount -o remount,rw /; fi
 _dantesync_remount_ro() {
   if [ "\$ro_root" = 1 ]; then mount -o remount,ro / 2>/dev/null || true; fi

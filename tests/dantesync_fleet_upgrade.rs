@@ -981,31 +981,32 @@ fn ensure_linux_binary_staged_publishes_memo_only_after_sha_verify() {
 
 // --- (3) real ro-mount detection: read the actual mount state (findmnt), not a write probe -----
 
-/// #1077 defect (3): the ro-root detection must read the ACTUAL mount state via `findmnt`, not a
-/// `touch` write probe (which conflates a read-only filesystem with a mere permission error). The
-/// `ro` option is matched as a comma-delimited TOKEN so `errors=remount-ro` never false-positives,
-/// and the write probe survives ONLY as the findmnt-less fallback (a broken-apt cam3 may lack it).
+/// #1077 defect (3): the ro-root detection must read the ACTUAL mount state — `findmnt`, with a
+/// `/proc/mounts` fallback for a findmnt-less box — never a `touch` write probe (which conflates a
+/// read-only filesystem with a mere permission error, doubly so now the script always runs
+/// escalated). Mirrors setup-device.sh's ensure_root_writable()/root_mount_is_readonly() (#599):
+/// `ro` is matched as the FIRST comma-token so `errors=remount-ro` never false-positives.
 #[test]
-fn linux_upgrade_cmd_detects_ro_root_via_findmnt_with_write_probe_fallback() {
+fn linux_upgrade_cmd_detects_ro_root_via_findmnt_with_proc_mounts_fallback() {
     let cmd = run_sourced("dantesync_linux_upgrade_cmd 1.8.43");
     assert!(
-        cmd.contains("findmnt -rno OPTIONS -T"),
-        "#1077: ro detection must read the real mount options via findmnt. Got:\n{cmd}"
+        cmd.contains("findmnt -no OPTIONS /"),
+        "#1077: ro detection must read the real mount options of / via findmnt. Got:\n{cmd}"
     );
     assert!(
-        cmd.contains(",ro,"),
-        "#1077: the ro option must be matched as a comma-delimited token (never a bare 'ro' \
-         substring that 'errors=remount-ro' would satisfy). Got:\n{cmd}"
+        cmd.contains("/proc/mounts"),
+        "#1077: the findmnt-less fallback must ALSO read the real mount state (/proc/mounts), \
+         never a write probe. Got:\n{cmd}"
     );
-    let guard = cmd
-        .find("command -v findmnt")
-        .expect("#1077: the findmnt read must be guarded for a findmnt-less box");
-    let probe = cmd
-        .find(".dantesync-write-test")
-        .expect("#1077: the write probe must remain as the findmnt-less fallback");
     assert!(
-        guard < probe,
-        "#1077: findmnt must be tried FIRST; the write probe is only the fallback branch. Got:\n{cmd}"
+        cmd.contains("ro | ro,*"),
+        "#1077: 'ro' must be matched as the FIRST comma-token (never a bare 'ro' substring that \
+         'errors=remount-ro' would satisfy). Got:\n{cmd}"
+    );
+    assert!(
+        !cmd.contains("dantesync-write-test"),
+        "#1077: the write-probe conflation must be fully removed — both detect paths read real \
+         mount state. Got:\n{cmd}"
     );
     // the detected ro root is still remounted rw before the swap (the action is unchanged).
     assert!(
@@ -1014,24 +1015,26 @@ fn linux_upgrade_cmd_detects_ro_root_via_findmnt_with_write_probe_fallback() {
     );
 }
 
-/// The orchestrator-invoked rollback hits the same ro root and must use the same findmnt-based
-/// detection (with the write-probe fallback), not a bare write probe.
+/// The orchestrator-invoked rollback hits the same ro root and must use the same real-mount-state
+/// detection (findmnt + `/proc/mounts` fallback), never a bare write probe.
 #[test]
-fn linux_rollback_cmd_detects_ro_root_via_findmnt_with_write_probe_fallback() {
+fn linux_rollback_cmd_detects_ro_root_via_findmnt_with_proc_mounts_fallback() {
     let cmd = run_sourced("dantesync_linux_rollback_cmd");
     assert!(
-        cmd.contains("findmnt -rno OPTIONS -T"),
+        cmd.contains("findmnt -no OPTIONS /"),
         "#1077: rollback ro detection must also read the real mount state via findmnt. Got:\n{cmd}"
     );
-    let guard = cmd
-        .find("command -v findmnt")
-        .expect("#1077: the rollback findmnt read must be guarded for a findmnt-less box");
-    let probe = cmd
-        .find(".dantesync-write-test")
-        .expect("#1077: the rollback write probe must remain as the findmnt-less fallback");
     assert!(
-        guard < probe,
-        "#1077: rollback must try findmnt FIRST, the write probe only as fallback. Got:\n{cmd}"
+        cmd.contains("/proc/mounts"),
+        "#1077: rollback's findmnt-less fallback must ALSO read /proc/mounts, never a write probe. Got:\n{cmd}"
+    );
+    assert!(
+        cmd.contains("ro | ro,*"),
+        "#1077: rollback must match 'ro' as the FIRST comma-token. Got:\n{cmd}"
+    );
+    assert!(
+        !cmd.contains("dantesync-write-test"),
+        "#1077: rollback must not fall back to a write probe. Got:\n{cmd}"
     );
     assert!(
         cmd.contains("mount -o remount,rw /"),
