@@ -3,7 +3,7 @@ paths:
   - "scripts/asio-starve-alert-watchdog.sh"
   - "scripts/lib/asio-starve-health.sh"
   - "systemd/asio-starve-alert-watchdog.*"
-  - "tests/harness_asio_starve_health_1023.rs"
+  - "tests/harness_asio_starve_*_1023.rs"
 ---
 
 # ASIO-source-starved alert watchdog (#1023)
@@ -67,6 +67,9 @@ are the reference. ⇒ **≥2 sources must be listed** (`ASIO_STARVE_SOURCES`, d
   (`alerted_stream` → box down = SKIP), a fail-loud `require_tools` preflight, one flat non-nested
   ssh+powershell OBS-log tail (`$env:APPDATA` has no spaces → no inner double-quotes), per-source
   state, a "tap broken" WARN after ~2 h of a listed source emitting no `asrc:` line, and a recovery
-  ping. Pure lib is Tier-0; `tests/harness_asio_starve_health_1023.rs` sources it + fixtures. cargo
+  ping. Pure lib is Tier-0 (`tests/harness_asio_starve_health_1023.rs` sources it + fixtures); the
+  CALLER's two-phase healthy-sibling composition + alert/recovery state machine has its own
+  end-to-end guard (`tests/harness_asio_starve_alert_watchdog_1023.rs` drives `main()` via the
+  `ASIO_STARVE_PROBE_CMD` seam + a temp state file — the sibling-watchdog glue-test convention). cargo
   does not run locally (build-ok DISABLED #477) — prove it via `--dry-run` with a `*_PROBE_CMD` stub,
   or `cargo test --no-run` + running the compiled binary directly.
