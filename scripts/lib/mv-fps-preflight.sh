@@ -89,7 +89,7 @@ mv_fps_preflight_assert() {
   local gate_bin="$1"; shift
   local tail_n="${MV_FPS_PREFLIGHT_LOG_TAIL:-2000}"
   local reprobe_sleep="${MV_FPS_PREFLIGHT_REPROBE_SLEEP:-6}"
-  local spec name ip os user pw lines out verdict gate_ec collapsed=""
+  local spec name ip os user pw lines out verdict gate_ec detail collapsed=""
 
   for spec in "$@"; do
     IFS='|' read -r name ip os user pw <<<"$spec" || true
@@ -127,7 +127,11 @@ mv_fps_preflight_assert() {
         out="$(printf '%s\n' "$lines" | "$gate_bin" 2>/dev/null)" || gate_ec=$?
         verdict="$(mv_fps_verdict "$gate_ec")"
         if [ "$verdict" = "BELOW" ]; then
-          collapsed="${collapsed}${name}: $(printf '%s\n' "$out" | grep '^FAIL' | sed 's/^FAIL //' | awk 'NR>1{printf "; "} {printf "%s", $0} END{if (NR>0) printf "\n"}')
+          # Reuse the health lib's FAIL-line formatter (mv_fps_alert_detail) rather than re-deriving
+          # the extraction here (structural reuse); `|| detail=…` keeps it `-e`-safe even if the gate
+          # ever exited 1 without a FAIL line (a contract violation the real gate never commits).
+          detail="$(mv_fps_alert_detail "$name" "$out")" || detail="$name MV render collapsed below floor"
+          collapsed="${collapsed}${detail}
 "
         else
           echo "    ok: [4d1/8] MV-fps preflight — $name recovered on grace re-read (transient), proceeding" >&2
