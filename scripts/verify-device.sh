@@ -96,6 +96,10 @@
 #   (y) camera-box.service has the ExecStartPre device-free bake-in (drop-in wired to the helper,
 #       helper stops the stray E2E burn UNIT + pkills the burn, never the painter) so every start
 #       frees /dev/video instead of crash-looping on "Device or resource busy" (#772).
+#   (z) publish-30p.conf drop-in present with CAMERA_BOX_PUBLISH_30P=1 (setup-device.sh STEP 7 bakes
+#       it) AND the box is ACTUALLY publishing the secondary "CAMn (30p)" 30fps blend stream right
+#       now (the issue-792 publisher's own journal output). A re-provisioned box that lost the
+#       drop-in, or an old binary predating issue 792, FAILs instead of regressing to 60p-only (#1087).
 #
 # Exit: 0 iff every check passes. Non-zero if ANY check FAILs or is UNREADABLE (test-strictness --
 # an unreachable/unreadable check is a FAIL, never a silent pass).
@@ -323,6 +327,28 @@ genlock_fps_matches() {
 # missing value).
 cpu_affinity_dropin_value() {
   printf '%s\n' "$1" | grep -oE 'CPUAffinity=[0-9]+' | tail -1 | cut -d= -f2 || true
+}
+
+# --- (y) publish-30p.conf drop-in + live "CAMn (30p)" blend stream (issue 792, baked into
+# provisioning by #1087) ---------------------------------------------------------------------------
+
+# publish_30p_dropin_value TEXT -> the numeric value of CAMERA_BOX_PUBLISH_30P in TEXT (the contents
+# of the camera-box.service.d/publish-30p.conf drop-in), "" if absent. `|| true` -- same #458
+# footgun as genlock_dropin_fps above (a bare-assignment caller must never abort on a merely-missing
+# value).
+publish_30p_dropin_value() {
+  printf '%s\n' "$1" | grep -oE 'CAMERA_BOX_PUBLISH_30P=[0-9]+' | tail -1 | cut -d= -f2 || true
+}
+
+# publish_30p_stream_live JOURNAL -> the COUNT of lines in JOURNAL showing the issue-792 publish-30p
+# publisher actually emitting the secondary "(30p)" blend stream: the one-shot startup
+# `publish-30p ACTIVE` line, or the recurring `camera_box::publish_30p:` output line. "0" iff none.
+# Proves the "(30p)" NDI source is genuinely being published, not merely that the drop-in enabling
+# it is on disk. `grep -c` (NEVER -q: -q's early pipe close can SIGPIPE the upstream printf and,
+# under pipefail, return non-zero even on a real match) + `|| true` (grep -c exits 1 with a printed
+# "0" on no match; the bare-substitution caller must never abort).
+publish_30p_stream_live() {
+  printf '%s\n' "$1" | grep -cE 'publish-30p ACTIVE|camera_box::publish_30p:' || true
 }
 
 # --- (g) libndi root-owned symlink chain --------------------------------------------------------
@@ -564,6 +590,8 @@ Checks:
       power/control currently reads "on" (drift check; N/A when no grabber is fitted, #894)
   (y) camera-box ExecStartPre device-free bake-in present (drop-in + helper) so every start frees
       /dev/video from a killed E2E run's stray capture burn (#772)
+  (z) publish-30p.conf drop-in present (CAMERA_BOX_PUBLISH_30P=1) AND the box is actually
+      publishing the secondary "CAMn (30p)" 30fps blend stream (issue 792 / #1087)
 
 Env: KERNEL_PIN (optional exact running-kernel pin), NDI_VERSION_PIN (default 6.3.2),
      DANTESYNC_OFFSET_FRESHNESS_S (max age of a fresh [NTP] offset line, default 300),
@@ -1063,6 +1091,28 @@ elif ! camera_box_free_device_script_is_burn_scoped "$FREE_DEV_HELPER"; then
   fail "/usr/local/bin/camera-box-free-capture-device.sh missing or not burn-scoped -- it must stop the stray burn UNIT + pkill the burn and never touch the painter (#772)"
 else
   ok "camera-box ExecStartPre frees /dev/video on every start (#772)"
+fi
+
+# (z) publish-30p.conf drop-in + live "CAMn (30p)" blend stream (issue 792 feature, baked into
+# provisioning by #1087) ------------------------------------------------------------------------
+# TWO facets: (1) the camera-box.service.d/publish-30p.conf drop-in is present with
+# CAMERA_BOX_PUBLISH_30P=1 -- setup-device.sh STEP 7 bakes it, so a re-provisioned box keeps the
+# secondary 30fps blend stream instead of silently regressing to 60p-only -- AND (2) the box is
+# ACTUALLY publishing the "(30p)" NDI source right now (the issue-792 publisher's own journal
+# output), reusing CB_JOURNAL already gathered in (c). A drop-in on disk without the live stream
+# (e.g. an old binary predating issue 792) still FAILs. Inserted BEFORE (q) -- see
+# .claude/rules/provisioning-scripts.md: (q) is the intentionally-LAST check.
+rc=0
+P30_CONF="$(ssh_box "cat /etc/systemd/system/camera-box.service.d/publish-30p.conf 2>/dev/null")" || rc=$?
+P30_VAL="$(publish_30p_dropin_value "$P30_CONF")"
+if [ "$P30_VAL" != "1" ]; then
+  fail "publish-30p.conf drop-in missing or CAMERA_BOX_PUBLISH_30P!=1 (got '${P30_VAL:-<none>}', ssh rc=$rc) -- the secondary 30fps '(30p)' blend stream will not come up (issue 792 / #1087)"
+elif [ -z "$CB_JOURNAL" ]; then
+  fail "publish-30p.conf enabled but the camera-box journal was unreadable -- cannot confirm the '(30p)' stream is actually being published (issue 792 / #1087)"
+elif [ "$(publish_30p_stream_live "$CB_JOURNAL")" != "0" ]; then
+  ok "publish-30p.conf CAMERA_BOX_PUBLISH_30P=1 and the '(30p)' blend stream is live (issue 792 / #1087)"
+else
+  fail "publish-30p.conf enabled but NO '(30p)' publisher activity in the last 300 journal lines -- the secondary blend stream is NOT being published (old binary predating issue 792? issue 792 / #1087)"
 fi
 
 # (q) .bak cruft drift -- WARNING only, never a FAIL (#453) -------------------------------------
