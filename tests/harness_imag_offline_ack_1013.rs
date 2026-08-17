@@ -1,13 +1,14 @@
 //! issue 1013 — imag-nb offline-ack path. When imag-nb is a KNOWN-ABSENT box (named in
 //! `CAMBOX_OFFLINE_ACK` / `rig-fleet.txt`, exactly like a cam box, #758/#827), the E2E harness
 //! must NOT abort at minute 0 — it must SKIP the whole imag leg with a loud, honest, report-only
-//! note, never a silent pass (the "ONE full test, no partials" doctrine, #798). These guards lock:
-//!   1. the new `scripts/lib/imag-offline-ack.sh` pure `imag_leg_skip_note` helper,
-//!   2. the extended `scripts/lib/imag-leg-marker.sh` acked-reason marker (its #798 twin),
-//!   3. the reachability preflight's imag ack branch (stale-if-reachable / skip-if-unreachable),
-//!   4. that every imag hard-abort site in recording-e2e.sh is guarded by `IMAG_OFFLINE_ACKED`.
-//! Tier-0: pure `fs::read_to_string` + source-and-call bash, no OBS/ssh/live rig — mirrors
-//! tests/harness_imag_topology.rs + tests/harness_imag_leg_marker_798.rs.
+//! note, never a silent pass (the "ONE full test, no partials" doctrine, #798).
+//!
+//! These guards lock: the new `scripts/lib/imag-offline-ack.sh` pure `imag_leg_skip_note` helper;
+//! the extended `scripts/lib/imag-leg-marker.sh` acked-reason marker (its #798 twin); the
+//! reachability preflight's imag ack branch (stale-if-reachable / skip-if-unreachable); and that
+//! every imag hard-abort site in recording-e2e.sh is guarded by `IMAG_OFFLINE_ACKED`. Tier-0:
+//! pure `fs::read_to_string` + source-and-call bash, no OBS/ssh/live rig — mirrors
+//! `tests/harness_imag_topology.rs` + `tests/harness_imag_leg_marker_798.rs`.
 
 use std::fs;
 use std::process::Command;
@@ -213,7 +214,11 @@ fn every_imag_hard_abort_site_is_guarded_by_the_gate_flag() {
     guarded_before(&s, "imag render-health preflight");
     // [4a/8] imag program-scene routing (bare `switch` under set -e).
     guarded_before(&s, "imag program-scene routing");
-    // [4d/8] imag render-budget gate call.
+    // [4d/8] imag render-budget gate call. NOTE (anchor disambiguation, issue 1013 review 🔵): the
+    // SAME `--box "imag=${IMAG_IP}:${RENDER_TARGET_FPS_IMAG:-60}"` string also appears in the [1/8]
+    // render-health call — the two are told apart ONLY by the indent of the FOLLOWING `--window-s`
+    // line (6 spaces here in [4d/8], 8 in [1/8]). Both calls ARE guarded, so a mis-target still
+    // catches a regression — but if a future edit re-indents either call, update this anchor.
     guarded_before(
         &s,
         "--box \"imag=${IMAG_IP}:${RENDER_TARGET_FPS_IMAG:-60}\" \\\n      --window-s",
@@ -222,6 +227,17 @@ fn every_imag_hard_abort_site_is_guarded_by_the_gate_flag() {
     guarded_before(&s, "imag-nb headroom preflight");
     // [5/8] imag StartRecord.
     guarded_before(&s, "record --host \"$IMAG_IP\" --action start");
+    // [0/8] dantesync version pin gate — hard-aborts (exit 11) on an UNREAD imag; it names imag
+    // "imag-nb" (not "imag"), so its own ack-exclusion never matches the "imag" ack — imag-nb must
+    // be dropped from DANTESYNC_VERSION_LINUX when acked, else the gate refuses the whole run.
+    guarded_before(&s, "imag-nb=${IMAG_USER:-newlevel}@$IMAG_IP");
+    // [4b/8] pre-record burn-ON gate — exit 1 when imag's burn can't be confirmed (impossible on an
+    // absent box). BURN_TARGETS keeps its imag entry (harness_imag_topology anchor), so the loop
+    // itself must skip the imag triple when acked.
+    guarded_before(
+        &s,
+        "burn would be absent from the recording and the run would be wasted",
+    );
 }
 
 /// The [8/8c] imag-leg marker must be told the acked reason so its run-log line names the true
