@@ -63,8 +63,8 @@ _ci_has() {
 # _ci_token_value CMDLINE TOKEN -> echoes the value of a whole-token `TOKEN=<value>` on the space-
 # padded cmdline (first occurrence), "" if absent. TOKEN is a fixed keyword (isolcpus/nohz_full/
 # rcu_nocbs) with no regex metacharacters, so interpolating it into the grep pattern is safe. The
-# trailing `|| head`/`|| true` chain keeps a no-match from aborting a caller running `set -euo
-# pipefail`.
+# trailing `| head -1 || true` keeps a no-match (or a SIGPIPE from head closing early) from aborting a
+# caller running `set -euo pipefail`.
 _ci_token_value() {
   printf '%s' " $1 " | grep -oE "[[:space:]]$2=[^[:space:]]*" 2>/dev/null \
     | sed -E "s/^[[:space:]]*$2=//" | head -1 || true

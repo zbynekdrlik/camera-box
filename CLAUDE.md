@@ -542,6 +542,21 @@ until the DESIGN marker exists. Three things bite on THIS repo specifically:
   `python3 -c "import sys; sys.path.insert(0,'/home/newlevel/devel/airuleset'); import design_gate as
   dg; b=open('body.md').read(); print(dg.classify_design_comment(b), dg.classify_triage_and_approaches(b),
   dg.classify_architecture_section(b))"` — all three must be `(True, …)`.
+- **Post each design/validated/review comment as a STANDALONE `gh issue comment` call — a COMPOUND
+  bash call silently registers NO marker (#784, 2026-08-17).** When the `gh issue comment` sits in a
+  compound command (`gh api -X DELETE …/comments/<id> ; gh issue comment <N> --body-file … ; sleep 6 ;
+  ls`), the recorder's issue-number extraction is confused and writes no marker at all (no
+  `*-posted`, no `*-rejected`, no `design-gate-errors.log` entry) — the comment lands on GitHub fine,
+  but the next `git commit` for that issue is blocked as "no design comment posted". Running the exact
+  same `gh issue comment <N> --body-file <abs>` as its OWN Bash call (nothing before/after it)
+  registered the marker every time. Do the delete of a prior comment, the sleep, and the `ls` marker
+  check in SEPARATE Bash calls.
+- **A `validated` comment needs an ACTION verb, not just "re-validation" (#784).**
+  `classify_validation_comment` requires BOTH an action word (`reproduc`/`verified`/`validated`/
+  `confirm`/`checked (the) live/current`/`tested live`/`overil`/`preveril`/`potvrd`) AND an evidence
+  word (`still valid`/`stále plat`/`already fixed`/`current code`/…). A comment that only says
+  "re-validation" / "Re-derived the current state" matches the evidence tier but NOT the action tier →
+  `missing: validation action` → no marker. Add an explicit "I verified … and confirmed …".
 
 ## GOTCHA — a live-triggered E2E gate run can race ahead of a mid-cycle fleet redeploy
 
