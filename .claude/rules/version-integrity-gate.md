@@ -101,6 +101,38 @@ until #1082**: the CI-authoritative `BUNDLE_MANIFEST.json` is not auto-fetched p
 ENFORCE flip (#758-shape) is deferred — all in #1082 (needs the live gather deployed + verified first,
 a LIVE-Windows property no worktree worker can verify, same class as #1067's port4455 caveat).
 
+## #1082 — imag `.so` byte facet + auto-source the CI manifest per box (parts 1+2; ENFORCE = #1100)
+
+Landed the two deferred #770 halves, still OPT-IN (the ENFORCE flip is #1100 — a follow-up, gated on
+the live gather being verified on the rig, which no worktree worker can check).
+
+- **imag byte facet is a TARGETED per-`.so` compare, NOT the whole-bundle walk.** imag is not a
+  `--win-state` bundle-state box (its bytes had no path into the gate), and `manifest_sha_for_component`
+  resolves only the Windows `obs.dll`/`distroav.dll` basenames. New gate flags `--imag-manifest` +
+  `--imag-bytes LABEL=path=sha,…` feed a new `imag_bytes_verdict` that resolves each gathered `.so`
+  path (`lib/x86_64-linux-gnu/libobs.so.30`, `.../obs-plugins/distroav.so`, `.../libobs-opengl.so.30`
+  — manifest-relative; deployed at `/usr/<path>`) via drift-guard's `manifest_sha_for_path`. Use the
+  per-path resolver, NEVER `bundle_hashes`+`drift_check_all_files` — that walks EVERY manifest path
+  (~1600) and flips a partial 3-file ssh gather to UNKNOWN. Verdict codes: 10=DORMANT (skip, uncounted),
+  20=DRIFT, 11=UNKNOWN, 0=OK.
+- **The Windows auto-source MUST be gated on the box ALREADY reporting `obs_dll_sha256`.** Supplying a
+  `--manifest` before the #770 on-box byte gather is live flips the not-yet-reported `obs_dll_sha256`
+  to UNKNOWN (drift-guard compares a manifest sha vs an empty observed) = a spurious gate-blocking
+  refuse. `recording-e2e.sh` gates the auto-source on `manifest_autosource_state_has_key strih obs_dll_sha256`.
+- **The Windows FAST manifest (`windows-genlock-fast.yml` / `obs-genlock-fast-dll`) is obs.dll-ONLY.**
+  Its stage carries only `obs.dll` (+ `BUNDLE_MANIFEST.json`), no distroav.dll. That is SAFE:
+  `compare_observed` labels an obs.dll-only manifest's distroav `SKIPPED` (drift-guard l.1877-1884),
+  NOT UNKNOWN — so the obs.dll libobs core is byte-verified while distroav stays verified against its
+  full bundle in a separate `/drift-guard` run. Do not "fix" the FAST manifest to add distroav; the
+  SKIPPED path is by design.
+- **`scripts/lib/manifest-autosource.sh`** owns the auto-source (`manifest_autosource_fetch` — resolve
+  the CI run at the box's marker SHA, `gh run download` the manifest artifact; jq reads the SHA via
+  `env.SHA`, and `find … -print -quit` not `find … | head -1` to dodge the #239 pipefail SIGPIPE) + the
+  imag ssh gather (`imag_so_gather_cmd` / `imag_so_bytes_csv`, `sha256sum` fail-loud `TOOL_MISSING`
+  #833). Everything best-effort → `""` on any failure → the arg is omitted → the facet DORMANT (never a
+  refuse). `gh`/`ssh` are behind the `MANIFEST_AUTOSOURCE_CMD` #836 executable-fixture seam, so the
+  whole path is offline-tested (`tests/harness_manifest_autosource_1082.rs`) — no gh/ssh/network.
+
 ## GOTCHA — a BUNDLE_MANIFEST test fixture MUST be one `files[]` entry per LINE (drift-guard's grep is line-based)
 
 `drift-guard.sh`'s manifest parsers (`manifest_sha_for_component`, `manifest_all_paths`,
