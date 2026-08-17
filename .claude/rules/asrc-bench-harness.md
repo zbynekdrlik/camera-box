@@ -223,3 +223,48 @@ UNEVENLY (10%/90%) between the two blocks in each pair — reproduces real burst
 blocks arrive almost back-to-back, the next "catches up") while the pair's aggregate wall time
 still correctly totals what `true_ppm` implies. Reusable for any future test needing a
 small-block, jittery-but-honest audio source at a controllable true ppm.
+
+## #1084's estimator SWAP — the inner loop is a sliding REGRESSION now, NOT the EMA the sections above describe
+
+Everything above about the inner estimator being a **TIME-based EMA** (`alpha = 1 - exp(-block/tau)`,
+`TIME_CONSTANT_S=20s`, `MIN_LOCK_S=5s`) is **PRE-#1084 HISTORY**. `RealtimeAsrcCompensator`'s inner
+estimator (and its C mirror) was **replaced** in #1084 by a **sliding least-squares RATE regression**.
+Read `gh issue view 1084 --comments` for the full root cause; the short version a fresh session needs:
+
+- **Why the EMA was wrong.** The 1s #962 window's master time telescopes to just its two endpoint
+  wall reads; the audio-thread scheduling jitter in those endpoints does NOT average down with more
+  callbacks per window. Live on `mbc` the EMA's `estimated` sd was **178 ppm** → `applied` became a
+  ±75–103 ms/h random walk (the global A/V wander). An EMA RETUNE is regime-fragile (the required
+  `τ` swings from ~1300s to ~80000s depending on the unmeasured window-noise color); the regression
+  is regime-robust because it fits the CUMULATIVE (`cum_master_s`, `cum_raw_s − cum_master_s`) points
+  where the endpoint jitter becomes iid per-point `y`-noise it averages over N points.
+- **The new state + constants** (Rust `src/asrc_bench.rs` ↔ C `asrc-compensator.{h,c}`, kept
+  numerically identical): `REGRESSION_SPAN_S=600`, `REGRESSION_MIN_POINTS=30`,
+  `REGRESSION_LOCK_SPAN_S=60`, `REGRESSION_CAP=640`. The old `TIME_CONSTANT_S`/`MIN_LOCK_S` /
+  `ASRC_TIME_CONSTANT_S`/`ASRC_MIN_LOCK_S` and the `elapsed_lock_s` field are **GONE**. The C mirror's
+  point buffer is a fixed ring (`reg_x[]`/`reg_y[]`/`reg_head`/`reg_count`); the Rust authority is a
+  `Vec` that evict-before-appends + age-evicts in the identical oldest→newest order (C↔Rust parity is
+  a NUMERICAL contract on the point sequence + LS iteration order, verified bit-identical over a
+  jittered sequence — memory layout need not match).
+- **FLUSH-on-level-shift** (new, no EMA analogue): a #960 rail trip OR a non-positive `master_block_s`
+  (NTP step) FLUSHES the buffer and DROPS the lock — a level shift would poison the slope for a full
+  span. Consequence to remember: after a flush `applied_ppm` is held on that call, then DECAYS to 0
+  over the ~60s re-lock window and re-converges (default-safe, bounded). The C keeps the
+  `window_rejected_this_call` flag pattern so the unconditional telemetry tail still runs on a
+  rejected window (the pre-existing #962 gotcha above).
+- **Lock semantics changed** (EMA locked at 5s of accrued time; regression locks at buffer SPAN ≥60s
+  AND ≥30 points). Every test that used to feed ~5–10s to "get past lock" now feeds ≥65s (see the
+  adapted `realtime_compensator_*`, `starved_*_960`, `rejected_window_holds_*_962` tests).
+- **The endpoint-jitter acceptance gate** the old EMA-era bench never had: `tests/asrc_endpoint_jitter_1084.rs`
+  drives the servo through a stationary per-read Gaussian endpoint jitter (`sigma_t`) and asserts the
+  drift is NULLED (steady applied sd < 2.8 ppm, 1h offset drift < 10 ms). The old
+  `simulate_offset_trace_ms` bench used an EXACT-per-window clock (no endpoint jitter), which is
+  exactly why it passed while the rig failed — any future estimator change here MUST re-satisfy the
+  #1084 gate, not just the #804 gate.
+- **#806 outer loop:** still present + inert (bias 0, no watchdog running on stream). With the
+  regression nulling the inner drift to <1 ppm it has ~nothing to correct; recommend it stays
+  OFF/report-only (a ±10ppm/7-min outer integrator on a now-slower inner loop could limit-cycle).
+- **Lock-step anchors** for a vendored-C revert: `tests/genlock_preload.rs::vendored_source::
+  asrc_uses_sliding_regression_estimator_1084` + byte-identical pwsh blocks in BOTH
+  `windows-genlock.yml` and `windows-genlock-fast.yml` (positive: the regression constants/fields/
+  slope/flush; negative: `exp(-window_master_s`/`ASRC_TIME_CONSTANT_S` must be ABSENT).

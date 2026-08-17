@@ -208,9 +208,11 @@ EXPORT void asrc_compensator_init(struct asrc_compensator *c);
  * each accepted window becomes one point in a sliding least-squares RATE
  * regression (ASRC_REGRESSION_SPAN_S) that produces the ppm estimate; a #960
  * rejection OR a non-positive master_block_s FLUSHES that buffer (a level shift
- * would corrupt the slope for a full span), holding applied_ppm meanwhile.
- * Mirror of RealtimeAsrcCompensator::compensate() in src/asrc_bench.rs -- keep
- * the two numerically identical. */
+ * would corrupt the slope for a full span). The flush drops the lock, so
+ * applied_ppm is held on the flushing call, then slews back to 0 over the
+ * ~ASRC_REGRESSION_LOCK_SPAN_S re-lock window before re-converging. Mirror of
+ * RealtimeAsrcCompensator::compensate() in src/asrc_bench.rs -- keep the two
+ * numerically identical. */
 EXPORT double asrc_compensator_compensate(struct asrc_compensator *c, double raw_advance_s, double master_block_s,
 					   double *applied_ppm_out);
 

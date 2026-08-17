@@ -22,10 +22,14 @@ static inline double asrc_clamp(double v, double lo, double hi)
  * master_block_s (a backward/duplicate wall read, e.g. an NTP step) -- because a step in the
  * cumulative would corrupt the slope for a full ASRC_REGRESSION_SPAN_S as it slides through the
  * buffer; re-converging from scratch is bounded (~a minute) and level shifts are rare on this
- * source. Deliberately does NOT reset estimated_ppm/applied_ppm: the last correction is HELD
- * (default-safe) until the buffer re-fills and re-locks. Mirror of the Rust
- * RealtimeAsrcCompensator::regression_flush(). reg_x/reg_y need no clearing -- reg_count == 0 means
- * no live points are ever read. */
+ * source. Deliberately does NOT reset estimated_ppm/applied_ppm directly -- so applied is HELD on
+ * the flushing call itself (no slew step runs that call). But because the flush DROPS the lock,
+ * every subsequent call sees !reg_locked -> target 0 -> applied SLEWS back to 0 (at
+ * ASRC_MAX_SLEW_PPM_PER_S) over the ~ASRC_REGRESSION_LOCK_SPAN_S re-lock window, then re-converges
+ * once the buffer re-fills. Decay-to-zero-then-reconverge is default-safe (a level shift invalidates
+ * the old correction) and bounded (one spurious 1 s starved window ~= a few ms of A/V step). Mirror
+ * of the Rust RealtimeAsrcCompensator::regression_flush(). reg_x/reg_y need no clearing -- reg_count
+ * == 0 means no live points are ever read. */
 static void asrc_regression_flush(struct asrc_compensator *c)
 {
 	c->reg_head = 0;
@@ -114,22 +118,26 @@ double asrc_compensator_compensate(struct asrc_compensator *c, double raw_advanc
 			/* camera-box #1084: push one regression point -- (cumulative accepted-window
 			 * master time, cumulative raw-minus-master) -- into the fixed-capacity ring, slide
 			 * it to the last ASRC_REGRESSION_SPAN_S, and re-fit the rate slope. The Rust authority
-			 * (src/asrc_bench.rs) uses a Vec that pushes+age-evicts in this identical
-			 * oldest->newest order. The count-cap loop is a defensive mirror of the Rust count
-			 * cap; age eviction already bounds a >=1 s-window buffer well below ASRC_REGRESSION_CAP,
-			 * so neither the ring's append nor the cap ever wraps in practice. */
+			 * (src/asrc_bench.rs) uses a Vec that evict-before-appends + age-evicts in this
+			 * identical oldest->newest order. The evict-before-append capacity guard is defensive;
+			 * age eviction already bounds a >=1 s-window buffer well below ASRC_REGRESSION_CAP, so
+			 * neither the guard nor a ring wrap ever fires in practice. */
 			c->cum_master_s += window_master_s;
 			c->cum_ymm_s += window_raw_s - window_master_s;
+			/* Defensive capacity guard (mirror of the Rust): evict the oldest point BEFORE
+			 * appending if the ring is already full, so the newest point never overwrites a live
+			 * slot. Age eviction (below) keeps a >=1 s-window buffer at ~601 points, well under
+			 * ASRC_REGRESSION_CAP, so this never fires in practice. */
+			if (c->reg_count == ASRC_REGRESSION_CAP) {
+				c->reg_head = (c->reg_head + 1) % ASRC_REGRESSION_CAP;
+				c->reg_count--;
+			}
 			const uint32_t tail = (c->reg_head + c->reg_count) % ASRC_REGRESSION_CAP;
 			c->reg_x[tail] = c->cum_master_s;
 			c->reg_y[tail] = c->cum_ymm_s;
 			c->reg_count++;
 			const double cutoff = c->cum_master_s - ASRC_REGRESSION_SPAN_S;
 			while (c->reg_count > 1 && c->reg_x[c->reg_head] < cutoff) {
-				c->reg_head = (c->reg_head + 1) % ASRC_REGRESSION_CAP;
-				c->reg_count--;
-			}
-			while (c->reg_count > ASRC_REGRESSION_CAP) {
 				c->reg_head = (c->reg_head + 1) % ASRC_REGRESSION_CAP;
 				c->reg_count--;
 			}
