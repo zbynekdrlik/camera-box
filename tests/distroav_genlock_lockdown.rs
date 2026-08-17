@@ -50,6 +50,7 @@ fn squish(s: &str) -> String {
 
 const NDI_SOURCE: &str = "vendor/distroav/src/ndi-source.cpp";
 const WINDOWS_GENLOCK_WF: &str = ".github/workflows/windows-genlock.yml";
+const WINDOWS_GENLOCK_FAST_WF: &str = ".github/workflows/windows-genlock-fast.yml";
 
 /// Extract the body of a free function `name(` up to the next top-level `\n<ret> <name>(`
 /// boundary. Good enough to scope an assertion to one function in this file.
@@ -316,4 +317,107 @@ fn windows_genlock_workflow_gates_on_the_lockdown_patch() {
         "{WINDOWS_GENLOCK_WF}: #257 — the production build no longer asserts the GENLOCK_WHITELIST_PROPS \
          hard-lock UI. Re-add the pwsh #257 gate."
     );
+}
+
+/// #795 — the genlock NDI source selector must be a NON-editable list (`OBS_COMBO_TYPE_LIST`), and
+/// the currently-saved source name must always be injected as a selectable list entry so an empty /
+/// partial NDI finder can never clobber it.
+///
+/// Root cause (live event 2026-07-17, stream OBS): `PROP_SOURCE` was an `OBS_COMBO_TYPE_EDITABLE`
+/// combo. With the NDI finder list EMPTY on a sick network the operator typed into the combo's line
+/// edit, mangling the stored source name character-by-character (`'NDI 2ME PGM' → … → '2ME-PGM'`),
+/// each a nonexistent source → black, recoverable only by a full OBS restart (the saved scene JSON
+/// still held the correct name). Making the combo list-only removes the free-text surface entirely.
+///
+/// The saved-name injection is REQUIRED, not optional: `OBSPropertiesView::AddList()`
+/// (`vendor/obs-studio/shared/properties-view/properties-view.cpp`) ends with
+/// `if (count && idx == -1) info->ControlChanged();` — i.e. for a non-editable LIST combo whose
+/// saved value is NOT among the (non-empty) list items, OBS writes the combo's index-0 default back
+/// into settings, silently clobbering the stored source name on properties-open. The NDI finder is
+/// asynchronous and can momentarily return only OTHER sources, so the saved name must always be a
+/// list entry (`idx != -1`) for this writeback never to fire.
+#[test]
+fn source_selector_is_list_only_with_saved_name_preserved_795() {
+    let src = vendor_file(NDI_SOURCE);
+    let squished = squish(&src);
+    let body = squish(fn_body(&src, "obs_properties_t *ndi_source_getproperties("));
+
+    // The source-selection combo must be LIST (non-editable), not EDITABLE — free text into the
+    // source name is exactly the 2026-07-17 black-screen trap.
+    assert!(
+        body.contains("OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING"),
+        "{NDI_SOURCE}: #795 — the PROP_SOURCE selector is not built as a LIST combo \
+         (OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING). An editable combo lets an operator type \
+         free text into the source name and black-screen the feed (the 2026-07-17 incident)."
+    );
+    assert!(
+        !squished.contains("OBS_COMBO_TYPE_EDITABLE"),
+        "{NDI_SOURCE}: #795 — OBS_COMBO_TYPE_EDITABLE is still present. The genlock NDI source \
+         selector must be list-only; a free-text combo is the exact trap that mangled the stored \
+         source name during a live event. Remove every editable-combo use here."
+    );
+
+    // The saved-name preservation helper must exist (defends against the properties-view.cpp
+    // `if (count && idx == -1) ControlChanged()` clobber described in the doc comment above).
+    assert!(
+        squished.contains("genlock_ensure_saved_source_listed"),
+        "{NDI_SOURCE}: #795 — the saved-source-name preservation helper \
+         `genlock_ensure_saved_source_listed` is missing. Under a LIST combo, a saved source name \
+         absent from a non-empty NDI finder list is silently overwritten on properties-open."
+    );
+    let helper = squish(fn_body(
+        &src,
+        "static void genlock_ensure_saved_source_listed(",
+    ));
+    assert!(
+        helper.contains("obs_source_get_settings(s->obs_source)"),
+        "{NDI_SOURCE}: #795 — genlock_ensure_saved_source_listed must read the source's own saved \
+         settings (obs_source_get_settings(s->obs_source)) to recover the configured source name."
+    );
+    assert!(
+        helper.contains("obs_property_list_add_string"),
+        "{NDI_SOURCE}: #795 — genlock_ensure_saved_source_listed must ADD the saved source name to \
+         the list (obs_property_list_add_string) so it is a selectable, current entry even when the \
+         NDI finder is empty."
+    );
+
+    // getproperties must actually CALL the helper (a helper never invoked preserves nothing).
+    assert!(
+        body.contains("genlock_ensure_saved_source_listed(source_list, s)"),
+        "{NDI_SOURCE}: #795 — ndi_source_getproperties never calls \
+         genlock_ensure_saved_source_listed(source_list, s); the saved source name would not be \
+         injected and a LIST combo could clobber it."
+    );
+}
+
+/// #795 lock-step gate: BOTH Windows genlock build workflows re-assert the list-only source-selector
+/// tokens in pwsh (the Linux Rust guard above can't compile on the windows-2022 runner; the FAST
+/// path also ships distroav.dll for hot-swap, so it must gate too — the same lock-step convention
+/// #245/#249 established). Drop either check and CI fails HERE.
+#[test]
+fn windows_genlock_workflows_gate_on_the_list_only_source_selector_795() {
+    for wf_path in [WINDOWS_GENLOCK_WF, WINDOWS_GENLOCK_FAST_WF] {
+        let wf = squish(&vendor_file(wf_path));
+        assert!(
+            wf.contains("OBS_COMBO_TYPE_LIST"),
+            "{wf_path}: #795 — the build no longer asserts the list-only source selector \
+             (OBS_COMBO_TYPE_LIST). A subtree bump could reship an editable source combo (the \
+             2026-07-17 black-screen trap). Re-add the pwsh #795 gate."
+        );
+        assert!(
+            wf.contains("genlock_ensure_saved_source_listed"),
+            "{wf_path}: #795 — the build no longer asserts the saved-source-name preservation helper \
+             (genlock_ensure_saved_source_listed). Re-add the pwsh #795 gate."
+        );
+        // The NEGATIVE anti-editable gate must stay too — the token only appears in the pwsh
+        // `-match OBS_COMBO_TYPE_EDITABLE → exit 1` guard, so its presence proves that gate is armed
+        // (without this, a future edit could drop the anti-editable pwsh check unnoticed by the
+        // workflow-parity guard, even though the source test still protects ndi-source.cpp itself).
+        assert!(
+            wf.contains("OBS_COMBO_TYPE_EDITABLE"),
+            "{wf_path}: #795 — the build no longer asserts the anti-editable gate (the pwsh \
+             `-match OBS_COMBO_TYPE_EDITABLE → exit 1` check is gone). A subtree bump could reship \
+             an editable source combo. Re-add the pwsh #795 anti-editable gate."
+        );
+    }
 }
