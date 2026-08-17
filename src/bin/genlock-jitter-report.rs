@@ -108,17 +108,30 @@ fn main() {
     // #811 — resolume playback verdict mode (distinct scriptable path; see the
     // flag doc in main's head). Uses only the INPUT-side FIFO summaries.
     if !verdict_sources.is_empty() {
+        let bail = |msg: String| -> ! {
+            eprintln!("ERROR: {msg}");
+            std::process::exit(2);
+        };
+        let skew_bound_ms = match parse_i64_flag(
+            &args,
+            "--skew-bound-ms",
+            PlaybackBounds::default().skew_bound_ms,
+        ) {
+            Ok(v) if v >= 0 => v,
+            Ok(v) => bail(format!("--skew-bound-ms must be >= 0 (got {v})")),
+            Err(e) => bail(e),
+        };
+        let min_samples = match parse_usize_flag(
+            &args,
+            "--min-samples",
+            PlaybackBounds::default().min_samples,
+        ) {
+            Ok(v) => v,
+            Err(e) => bail(e),
+        };
         let bounds = PlaybackBounds {
-            skew_bound_ms: parse_i64_flag(
-                &args,
-                "--skew-bound-ms",
-                PlaybackBounds::default().skew_bound_ms,
-            ),
-            min_samples: parse_usize_flag(
-                &args,
-                "--min-samples",
-                PlaybackBounds::default().min_samples,
-            ),
+            skew_bound_ms,
+            min_samples,
         };
         let summaries = summarize_all(&samples);
         let code =
@@ -203,20 +216,29 @@ fn collect_repeated_flag(args: &[String], flag: &str) -> Vec<String> {
     out
 }
 
-/// Parse an optional `--flag N` (i64), falling back to `default` when absent or unparseable.
-fn parse_i64_flag(args: &[String], flag: &str, default: i64) -> i64 {
-    collect_repeated_flag(args, flag)
-        .last()
-        .and_then(|v| v.parse::<i64>().ok())
-        .unwrap_or(default)
+/// Parse an optional `--flag N` (i64): `default` when absent, the parsed value
+/// when present + valid, or `Err(message)` when present-but-unparseable. A
+/// malformed bound on a verification gate is a HARD error, never a silent
+/// fallback to the default — a silent fallback would mask an operator typo
+/// (`--skew-bound-ms 2O`) behind a misleading PASS/FAIL verdict.
+fn parse_i64_flag(args: &[String], flag: &str, default: i64) -> Result<i64, String> {
+    match collect_repeated_flag(args, flag).last() {
+        None => Ok(default),
+        Some(v) => v
+            .parse::<i64>()
+            .map_err(|_| format!("{flag}: '{v}' is not an integer")),
+    }
 }
 
-/// Parse an optional `--flag N` (usize), falling back to `default` when absent or unparseable.
-fn parse_usize_flag(args: &[String], flag: &str, default: usize) -> usize {
-    collect_repeated_flag(args, flag)
-        .last()
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(default)
+/// Parse an optional `--flag N` (usize) with the same absent/valid/error
+/// contract as [`parse_i64_flag`].
+fn parse_usize_flag(args: &[String], flag: &str, default: usize) -> Result<usize, String> {
+    match collect_repeated_flag(args, flag).last() {
+        None => Ok(default),
+        Some(v) => v
+            .parse::<usize>()
+            .map_err(|_| format!("{flag}: '{v}' is not a non-negative integer")),
+    }
 }
 
 /// #811 — map one INPUT-side [`AuditSummary`] onto the frame-loss verdict's window view.
@@ -387,15 +409,54 @@ mod verdict_tests {
     }
 
     #[test]
-    fn parse_flags_fall_back_on_absent_or_garbage() {
+    fn parse_flags_default_when_absent_valid_when_present_error_on_garbage() {
         let args: Vec<String> = ["prog", "--skew-bound-ms", "35", "--min-samples", "nope"]
             .iter()
             .map(|s| s.to_string())
             .collect();
-        assert_eq!(parse_i64_flag(&args, "--skew-bound-ms", 20), 35);
-        assert_eq!(parse_i64_flag(&args, "--absent", 20), 20);
-        // "nope" is unparseable -> default.
-        assert_eq!(parse_usize_flag(&args, "--min-samples", 2), 2);
+        // present + valid -> the value.
+        assert_eq!(parse_i64_flag(&args, "--skew-bound-ms", 20), Ok(35));
+        // absent -> the default.
+        assert_eq!(parse_i64_flag(&args, "--absent", 20), Ok(20));
+        // present-but-garbage -> a hard error (never a silent fall-back to default).
+        assert!(parse_usize_flag(&args, "--min-samples", 2).is_err());
+    }
+
+    fn summary(source: &str, dropped: u64, skew: i64, samples: usize) -> AuditSummary {
+        AuditSummary {
+            source: source.to_string(),
+            samples,
+            latency_ms: 3,
+            delta_underruns: 0,
+            delta_holds: 4,
+            delta_overruns: 2,
+            delta_backward_steps: 0,
+            delta_backward_regime_ticks: 0,
+            delta_dropped_due: dropped,
+            delta_relocks: 0,
+            delta_late_holds: 0,
+            max_abs_head_skew_ms: skew,
+            mean_abs_head_skew_ms: 0.0,
+            mean_head_skew_ms: 0.0,
+            peak_depth: 5,
+        }
+    }
+
+    // #811 review 🔵-1: exercise window_from_summary + evaluate through the REAL
+    // bin path (print_resolume_verdicts) on a POPULATED AuditSummary, so a
+    // field-swap typo in window_from_summary can't slip through untested.
+    #[test]
+    fn present_source_pass_is_0_and_fail_is_3_through_the_bin_path() {
+        let want = vec!["cg".to_string()];
+        let bounds = PlaybackBounds::default();
+        // clean (holds/overruns move but are not gated) -> PASS -> 0
+        let clean = vec![summary("cg", 0, 8, 30)];
+        assert_eq!(print_resolume_verdicts(&want, &clean, &bounds, false), 0);
+        // drops + a skew excursion -> FAIL -> 3
+        let bad = vec![summary("cg", 3, 45, 30)];
+        assert_eq!(print_resolume_verdicts(&want, &bad, &bounds, false), 3);
+        // ...but report-only never gates.
+        assert_eq!(print_resolume_verdicts(&want, &bad, &bounds, true), 0);
     }
 
     #[test]
