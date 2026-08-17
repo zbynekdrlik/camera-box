@@ -9027,3 +9027,27 @@ No push/PR/rig touch (worktree worker).
 - Review: one fresh general-purpose subagent, 0🔴 1🟡 3🔵. 3🔵 fixed in `4ae44d3ed`; the 1🟡 (sibling `framesync_create` break, same class, UNREACHABLE — framesync forced OFF on the genlock rig) filed as issue 1097. Also recorded the issue-1096 finder-poison-wedge cure direction on issue 1096 (distinct from this break/silent-death class).
 - Commits: `bf627faea` bump 1.7.0-dev.468 · `a3282692f` RED (`backoff_helper_present`/`create_failure_retries_instead_of_breaking`/`backoff_computes_the_spec_truth_table`) · `e0370f10c` GREEN · `58aa893e7` rustfmt test · `4ae44d3ed` review fixes.
 - Fleet note: isolated `git worktree` (`worktree-1080-recv`), durability backup at `refs/autopilot-wip/worktree-1080-recv`; STOPPED at local-green (no dev push / PR / merge / deploy — supervisor integrates). No cross-worker interleaving.
+
+## 2026-08-17 — #1093 E2E preflight painter-order proof + receiver-wedge escalation (worktree worker)
+- Scope = the two OPEN items after the budget recalibration (4b5c2baf6, already on dev): (a) prove
+  cam2-painter is PAINTING before the cam1 pixel probe (ordering, not a longer blind window); (b) on
+  reverify budget-exhaust, distinguish a dead SOURCE from the issue-1096 strih receiver WEDGE via the
+  `received=` delta and, only for the wedge, restart strih OBS once + re-check once.
+- Design: all logic in NEW `scripts/lib/mv-reverify-escalate.sh` (#675 pattern); recording-e2e.sh
+  gained only a source line, one painter-up wait (before cam1 ONLY — the ALL_CAMBOX loop runs while
+  the painter is deliberately stopped), two call-site swaps (`preflight_mv_reverify` →
+  `mv_reverify_or_escalate`), and a `--warm-settle` env seam. Headless strih-OBS restart = kill+
+  sentinel over ssh + NL_STARTUP.ahk respawn (NO ssh GUI launch; AHK-presence guard so a missing
+  respawner never leaves strih down). Reuses the painting signal (cam2-painter-restore-verify.sh),
+  the `received=` reader (frozen-input-alert-watchdog.sh) + `frozen_input_classify` discipline, the
+  launch-obs-genlock.sh --force kill/sentinel semantics.
+- Fable adversarial review (gate OPEN): 1 red / 3 warn / 3 suggest, ALL fixed same-branch — the red
+  was the post-restart input-activation (fixed via projector-independent positive `--warm-settle`);
+  warns: AHK-presence guard, READ_FAIL≠no-recv, dead-sender accepted residual; suggests: sweep
+  timeout+seam, gap 8→12s, test stubs. Playbook: `.claude/rules/mv-reverify-escalate.md` + router.
+- Commits: `48eee5dd5` bump 1.7.0-dev.468 · `41a0f91f4` RED · `34cbfbb05` GREEN · `aa0a2b86d` review.
+- Filed follow-up (issue 1098): restore strih's operator Multiview projector after a force-kill
+  (separate rig-ops scope; needs live strih monitor-topology decision).
+- Fleet note: isolated `git worktree` (worktree-1093-preflight); Tier-0 targeted tests only (23/23
+  own + 19 recording-e2e.sh anchor-reader binaries green; fmt+clippy clean). The LIVE strih-OBS
+  restart is UNVERIFIED at Tier-0 — flagged for the supervisor's integration/E2E run.
