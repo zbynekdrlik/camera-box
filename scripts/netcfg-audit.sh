@@ -63,9 +63,11 @@ fi
 
 # -- read-only ssh to a switch (dev1-local I/O; NOT pure -- kept out of the lib) --------------------
 # _nc_ssh <ip> <routeros-command> -> stdout of the command (stderr silenced); rc mirrors ssh.
+# `timeout` bounds the WHOLE command, not just connect+auth (ConnectTimeout alone does not cover a
+# post-auth hang) -- same wrap as asio-starve/bundle-state/optical-chain-alert-watchdog.sh.
 _nc_ssh() {
   local ip="$1" cmd="$2"
-  sshpass -p "$NETCFG_SWITCH_PW" ssh \
+  timeout "$NETCFG_SSH_TIMEOUT" sshpass -p "$NETCFG_SWITCH_PW" ssh \
     -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
     -o ConnectTimeout="$NETCFG_SSH_TIMEOUT" -o PreferredAuthentications=password \
     "admin@$ip" "$cmd" 2>/dev/null
@@ -73,7 +75,18 @@ _nc_ssh() {
 
 # The clean per-port gather: RouterOS `:foreach` emits ONE pipe-delimited line per ethernet port.
 # `get` returns raw integer counters (no thousands-space); `monitor ... as-value` yields live rate.
-_NC_PORT_FOREACH=':foreach i in=[/interface ethernet find] do={:local n [/interface ethernet get $i name]; :local m [/interface ethernet monitor $n once as-value]; :put ("PORT|" . $n . "|comment=" . [/interface ethernet get $i comment] . "|running=" . [/interface ethernet get $i running] . "|rate=" . ($m->"rate") . "|fullduplex=" . ($m->"full-duplex") . "|status=" . ($m->"status") . "|dq1=" . [/interface ethernet get $i tx-drop-queue1-packet] . "|txdrop=" . [/interface ethernet get $i tx-drop-packet] . "|fcs=" . [/interface ethernet get $i rx-fcs-error])}'
+# Only the fields _nc_gather_node consumes are emitted (comment/running/rate/fullduplex/dq1/fcs) --
+# no dead gather.
+_NC_PORT_FOREACH=':foreach i in=[/interface ethernet find] do={:local n [/interface ethernet get $i name]; :local m [/interface ethernet monitor $n once as-value]; :put ("PORT|" . $n . "|comment=" . [/interface ethernet get $i comment] . "|running=" . [/interface ethernet get $i running] . "|rate=" . ($m->"rate") . "|fullduplex=" . ($m->"full-duplex") . "|dq1=" . [/interface ethernet get $i tx-drop-queue1-packet] . "|fcs=" . [/interface ethernet get $i rx-fcs-error])}'
+
+# _nc_bre <string> -> the string with BRE metacharacters escaped, for safe interpolation into a sed
+# pattern (used for both the full baseline key and a bare node name in the live lookups).
+_nc_bre() { printf '%s' "$1" | sed 's/[.[\*^$/]/\\&/g'; }
+
+# _nc_live_field <flat-live> <key> -> the value of `<key>=...` from the flat live lines, or empty.
+_nc_live_field() {
+  printf '%s\n' "$1" | sed -n "s/^$(_nc_bre "$2")=//p" | head -1
+}
 
 # _nc_kv <key> <pipe-line> -> value of key=... from a "PORT|name|k=v|k=v" line (trivial split).
 _nc_kv() {
@@ -199,11 +212,15 @@ PY
 case "$MODE" in
   capture)
     log "capturing live chain -> $NETCFG_BASELINE"
-    tmp="$(mktemp)"; trap 'rm -f "$tmp"' EXIT
+    tmp="$(mktemp)"; jtmp="$(mktemp)"; trap 'rm -f "$tmp" "$jtmp"' EXIT
     _nc_gather_all > "$tmp"
     [ -s "$tmp" ] || { log "capture gathered nothing (all switches unreachable?)"; exit 2; }
-    _nc_flat_to_json "$(date '+%Y-%m-%d')" "$tmp" > "$NETCFG_BASELINE" \
-      || { log "capture failed"; exit 2; }
+    # Build JSON into a temp FIRST, then atomically move it over the committed baseline -- a python
+    # failure must never leave the checked-in baseline truncated/corrupt (mirrors write_state_field).
+    _nc_flat_to_json "$(date '+%Y-%m-%d')" "$tmp" > "$jtmp" \
+      || { log "capture failed (json build)"; exit 2; }
+    [ -s "$jtmp" ] || { log "capture failed (empty json)"; exit 2; }
+    mv -f "$jtmp" "$NETCFG_BASELINE" || { log "capture failed (mv)"; exit 2; }
     log "wrote baseline for $(grep -c '\.reachable=true' "$tmp") reachable node(s) to $NETCFG_BASELINE"
     ;;
 
@@ -219,43 +236,59 @@ case "$MODE" in
     live="$(_nc_gather_all)"
     statuses=()
     report=()
-    # Iterate the baselined config fields we treat as STABLE: shared_buffers, ros, per-port rate +
-    # comment(role). `running`/counter fields live in the snapshot but are NOT baseline-diffed (a
+    # HARD-drift fields (a mismatch PAGES): per-switch shared_buffers (the KEPT microburst fix, a
+    # silent revert reopens the drops) and per-port link rate (DEGRADED) + full-duplex (a port that
+    # negotiated half-duplex = the "duplex errors" the ticket asked to catch). SOFT/report-only fields
+    # (surfaced, never page): ros version (expected to change on a planned upgrade -> re-capture) and
+    # port comment/role (a benign re-label / re-cable). `running`/counter fields are not diffed (a
     # device unplugged between events must not page). Drop-RATE is a separate live probe below.
     while IFS= read -r bline; do
       key="${bline%%=*}"; bval="${bline#*=}"
+      local_hard=0
       case "$key" in
-        *.shared_buffers|*.ros) : ;;
-        *.port.*.rate|*.port.*.comment) : ;;
+        *.shared_buffers)   local_hard=1 ;;
+        *.port.*.rate)      local_hard=1 ;;
+        *.port.*.fullduplex) local_hard=1 ;;
+        *.ros|*.port.*.comment) local_hard=0 ;;
         *) continue ;;
       esac
-      lval="$(printf '%s\n' "$live" | sed -n "s/^$(printf '%s' "$key" | sed 's/[.[\*^$/]/\\&/g')=//p" | head -1)"
+      lval="$(_nc_live_field "$live" "$key")"
       case "$key" in
-        *.port.*.rate)
-          v="$(netcfg_classify_rate "$lval" "$bval")" ;;
-        *)
-          v="$(netcfg_classify_match "$lval" "$bval")" ;;
+        *.port.*.rate) v="$(netcfg_classify_rate "$lval" "$bval")" ;;
+        *)             v="$(netcfg_classify_match "$lval" "$bval")" ;;
       esac
-      statuses+=("$v")
-      case "$v" in
-        DRIFT|DEGRADED) report+=("  [$v] $key: baseline='$bval' live='$lval'") ;;
-        ABSENT)         report+=("  [report-only $v] $key: baseline='$bval' live='(absent)'") ;;
-      esac
+      if [ "$local_hard" = "1" ]; then
+        statuses+=("$v")
+        case "$v" in
+          DRIFT|DEGRADED) report+=("  [$v] $key: baseline='$bval' live='$lval'") ;;
+          ABSENT)         report+=("  [report-only $v] $key: baseline='$bval' live='(absent)'") ;;
+        esac
+      else
+        # soft field: surface a change but NEVER page (statuses gets no hard verdict).
+        [ "$v" = "DRIFT" ] && report+=("  [report-only ${key##*.}-change] $key: baseline='$bval' live='$lval'")
+      fi
     done <<< "$base"
 
-    # Live drop-RATE probe: any switch port whose live cumulative dq1 is nonzero gets a rate re-probe.
+    # Live drop-RATE probe: a switch port whose live cumulative dq1 GREW since the baseline (drops
+    # accrued while it sat un-reconfigured) gets a two-read rate probe. Gating on GROWTH (not merely
+    # nonzero) bounds the probe cost -- a port that dropped once long ago and is now quiet is skipped,
+    # so the per-pass cost does not creep upward as cumulative counters age.
     while IFS= read -r lline; do
       case "$lline" in *.port.*.dq1=*) : ;; *) continue ;; esac
       key="${lline%%=*}"; dq1="${lline#*=}"
-      [ -n "$dq1" ] && [ "$dq1" != "0" ] || continue
+      printf '%s' "$dq1" | grep -Eq '^[0-9]+$' || continue
       node="${key%%.port.*}"; rest="${key#*.port.}"; port="${rest%%.*}"
-      ip="$(printf '%s\n' "$live" | sed -n "s/^${node}\.ip=//p" | head -1)"
+      bdq1="$(printf '%s\n' "$base" | sed -n "s/^$(_nc_bre "$key")=//p" | head -1)"
+      printf '%s' "$bdq1" | grep -Eq '^[0-9]+$' || bdq1=0
+      [ "$dq1" -gt "$bdq1" ] || continue   # only actively-growing ports are worth the live rate probe
+      ip="$(_nc_live_field "$live" "${node}.ip")"
       [ -n "$ip" ] || continue
       dv="$(_nc_drop_rate_verdict "$ip" "$port")"
       statuses+=("$dv")
       case "$dv" in
-        DROPPING) report+=("  [DROPPING] $node $port: tx-drop-queue1 climbing >${NETCFG_DROP_THRESHOLD}/s (cumulative dq1=$dq1) -- microburst tail-drop; check shared-buffers / uplink step-down") ;;
+        DROPPING) report+=("  [DROPPING] $node $port: tx-drop-queue1 climbing >${NETCFG_DROP_THRESHOLD}/s (dq1 $bdq1->$dq1 since baseline) -- microburst tail-drop; check shared-buffers / uplink step-down") ;;
         RESET)    report+=("  [report-only RESET] $node $port: drop counters went backwards (switch rebooted since read)") ;;
+        UNKNOWN)  report+=("  [report-only UNKNOWN] $node $port: drop-rate probe unreadable (dq1 grew $bdq1->$dq1 but a live re-read failed)") ;;
       esac
     done <<< "$live"
 

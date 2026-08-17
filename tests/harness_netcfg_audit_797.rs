@@ -260,6 +260,15 @@ fn classify_drop_rate_verdicts() {
     // a zero/garbage window never divides-by-zero -> UNKNOWN
     assert_eq!(stdout_of("netcfg_classify_drop_rate 300 0 1"), "UNKNOWN");
     assert_eq!(stdout_of("netcfg_classify_drop_rate x 6 1"), "UNKNOWN");
+    // a non-numeric THRESHOLD must fall back to the safe 1/s default (deterministic), NOT be passed
+    // raw to awk (where `rate > "bad"` is a fragile string comparison that silently MISSES real
+    // drops). 12/6=2/s EXCEEDS the default 1/s -> DROPPING; without the fallback awk string-compares
+    // "2" > "bad" -> false -> a missed drop storm. This case discriminates the fix.
+    assert_eq!(stdout_of("netcfg_classify_drop_rate 12 6 bad"), "DROPPING");
+    // and a genuinely low rate under the default is still OK
+    assert_eq!(stdout_of("netcfg_classify_drop_rate 3 6 bad"), "OK");
+    // a valid FLOAT threshold still works
+    assert_eq!(stdout_of("netcfg_classify_drop_rate 3 6 0.4"), "DROPPING");
 }
 
 // ------------------------------------------------------------------------------------------------

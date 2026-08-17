@@ -105,6 +105,10 @@ netcfg_classify_drop_rate() {
   local delta="${1:-}" window="${2:-}" thr="${3:-1}"
   printf '%s' "$delta"  | grep -Eq '^-?[0-9]+$' || { printf 'UNKNOWN\n'; return 0; }
   printf '%s' "$window" | grep -Eq '^[0-9]+$'   || { printf 'UNKNOWN\n'; return 0; }
+  # A non-numeric threshold passed raw to awk makes `rate > thr` a fragile STRING comparison (e.g.
+  # "2" > "bad" is false -> a real drop storm silently MISSED); fall back to a deterministic safe
+  # default of 1/s instead. (int or float accepted.)
+  printf '%s' "$thr"    | grep -Eq '^[0-9]+(\.[0-9]+)?$' || thr=1
   [ "$window" -gt 0 ] || { printf 'UNKNOWN\n'; return 0; }
   [ "$delta" -lt 0 ] && { printf 'RESET\n'; return 0; }
   awk -v d="$delta" -v w="$window" -v t="$thr" \
