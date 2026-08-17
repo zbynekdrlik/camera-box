@@ -50,6 +50,28 @@
 //! warm-only baseline cannot yet set a bound a real cold gap would breach. Same crate-root
 //! pure-seam pattern as `optical_floor.rs` / `presentation_cadence.rs` (default features, Tier-0
 //! unit-testable); the probe-gated `recording-verdict.rs` is only a thin consumer.
+//!
+//! ## The onset decodability signal is the SHARED cam2 Vernier tick — cross-cambox on THIS rig
+//!
+//! `decodable` is `SegmentFrame::tick.is_some()` (the cam2 optical Vernier tick). A reader of
+//! `recording_segments.rs`'s per-window-cadence doc might expect this to be `None` on every
+//! non-cam2 window ("any non-cam2 window in a CAMBOX_SWEEP: `tick` is `None`") and conclude the
+//! metric is cam2-only — but that doc line is STALE for the current rig. This rig is ONE physical
+//! camera through an HDMI splitter into every cambox
+//! (`.claude/skills/e2e` / the rig-one-camera-splitter model), and cam2 paints the dual-QR Vernier
+//! monitor that ALL boxes film — so every box's recorded program window decodes the SAME tick.
+//! Empirically (76 local all-cambox verdicts): CAM1 and CAM3 windows carry `undecodable` = 0-1 of
+//! ~847 frames, non-null `first_tick`/`last_tick`, and a populated `presentation_cadence` (which
+//! itself needs >= 2 decoded ticks) — i.e. the onset frames of a non-cam2 cold cut DO decode, so a
+//! healthy CAM1/CAM3 cold cut is `clean` and a genuinely black one is flagged. The metric is
+//! therefore cross-cambox actionable here.
+//!
+//! The LIVE-flip follow-up MUST still re-confirm per-cambox onset tick-decodability on the target
+//! rig before flipping `gates_overall_pass()` — a box that genuinely could not decode the Vernier
+//! at onset (a future rig where the splitter path is broken, or the stale doc's scenario returns)
+//! would read a healthy cold cut as a black one and false-red. If that ever holds, scope the health
+//! check (`clean` / [`cold_cut_gate_pass`] / the aggregate flags) to tick-bearing windows, or add a
+//! non-tick onset signal (brightness/black detection) for the affected boxes.
 
 /// A cambox program-hidden for at least this many seconds before a cut counts as a COLD cut
 /// (issue 768's `>= 60s` bar).
@@ -423,7 +445,10 @@ mod tests {
     #[test]
     fn cold_cut_with_wakeup_gap_is_flagged() {
         // CAM1@seg3 is a 60s-hidden cold cut whose onset is a WAKE-UP GAP: all onset frames
-        // undecodable (black/frozen), i.e. the exact issue-767 signature. It must be flagged.
+        // undecodable (black/frozen) with no decodable frame within the window -- the shape an
+        // issue-767 dead-receiver cold cut produces (a general onset decode failure has the same
+        // shape; the seam reports the measurement, the LIVE-flip follow-up disambiguates). Must
+        // be flagged as not clean.
         let bad = vec![
             frame(BASE + 3 * SEG_NS, false),
             frame(BASE + 3 * SEG_NS + FRAME_NS, false),
