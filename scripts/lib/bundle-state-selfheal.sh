@@ -28,7 +28,7 @@
 #   command substitution), so the wording is pinned by a Tier-0 test.
 bundle_state_down_message() {
   local box="${1:-?}" port="${2:-8899}"
-  printf 'bundle-state-server DOWN on %s (nothing on :%s) -- a self-heal restart (schtasks /run /tn "BundleStateServer") did not bring it up; the version-integrity gate will refuse (exit 11). Recover: run `schtasks /run /tn "BundleStateServer"` on %s (or check scripts/run-bundle-state-server.ps1).\n' "$box" "$port" "$box"
+  printf 'bundle-state-server DOWN on %s (nothing on :%s) -- automatic self-heal did not restore it; the version-integrity gate will refuse (exit 11). Recover: run `schtasks /run /tn "BundleStateServer"` on %s (or check scripts/run-bundle-state-server.ps1).\n' "$box" "$port" "$box"
 }
 
 # bundle_state_selfheal_fetch <host> <dest> <port> <ssh_user> <ssh_pw> -> exit 0 iff, after a
@@ -37,7 +37,9 @@ bundle_state_down_message() {
 #   so the ssh restart never runs on the healthy path (zero cost when :8899 is up). Retry bounds are
 #   env-overridable so the Tier-0 harness runs instantly:
 #     BUNDLE_STATE_SELFHEAL_TRIES       (default 6)   -- curl polls after the restart
-#     BUNDLE_STATE_SELFHEAL_SLEEP_S     (default 5)   -- sleep between polls (~30s total window)
+#     BUNDLE_STATE_SELFHEAL_SLEEP_S     (default 5)   -- sleep between polls (~30s of sleeps; up
+#                                                       to ~85s worst-case if a wedged-but-listening
+#                                                       server makes each curl burn its full --max-time)
 #     BUNDLE_STATE_SELFHEAL_SSH_TIMEOUT (default 15)  -- hard cap on the ssh restart call
 #   On failure prints bundle_state_down_message to stderr and returns 1. Never `set -e`-sensitive:
 #   a failed ssh/curl is an expected branch here, not a fatal.
