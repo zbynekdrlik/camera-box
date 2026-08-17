@@ -2057,6 +2057,32 @@ mod vendored_source {
     }
 
     #[test]
+    fn audit_log_emits_wall_qpc_drift_800() {
+        // #800: the 5s audit line must carry the wall(RTC)-vs-monotonic(QPC) clock-domain drift
+        // term (anchored at OBS start) so the leading remaining A/V-shift candidate — the two
+        // clock domains the WALL-slaved video deadline and the QPC-slaved audio live in —
+        // is answerable from the log alone. Mirror: src/jitter_audit.rs AuditSample.wall_qpc_drift_ms
+        // + the std-only tests/genlock_wall_qpc_emit.rs anchor. Lock-stepped into BOTH
+        // windows-genlock*.yml pwsh gates.
+        let src = squish(&vendor_file(OBS_SOURCE));
+        assert!(
+            src.contains("static long long genlock_wall_qpc_drift_ms(void)"),
+            "{OBS_SOURCE}: #800 — the genlock_wall_qpc_drift_ms() helper is gone; nothing \
+             computes the wall(RTC)-vs-monotonic(QPC) drift. Re-apply."
+        );
+        assert!(
+            src.contains("wall_qpc_drift_ms=%lld"),
+            "{OBS_SOURCE}: #800 — the genlock audit line no longer emits `wall_qpc_drift_ms=%lld`; \
+             the clock-domain drift is invisible in the 5s log. Re-apply."
+        );
+        assert!(
+            src.contains("genlock_wall_qpc_drift_ms());"),
+            "{OBS_SOURCE}: #800 — genlock_wall_qpc_drift_ms() is no longer passed to the audit \
+             blog(); the term would print stale/garbage. Re-apply."
+        );
+    }
+
+    #[test]
     fn fps_read_returns_cached_last_good_pair_on_a_tear() {
         // #269 [0]/[1]/[2]: genlock_video_fps must keep a LAST-GOOD cache and return it on
         // a persistent tear (not false/0), so genlock_source_drop_cap never collapses to the

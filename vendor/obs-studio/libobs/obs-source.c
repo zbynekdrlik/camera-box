@@ -4832,6 +4832,39 @@ static inline uint64_t genlock_wall_now_ns(void)
 #endif
 }
 
+/* camera-box #800: wall(RTC)-vs-monotonic(QPC) clock drift since the first audit tick, in ms.
+ * The video release deadline keys on the WALL clock (genlock_wall_now_ns() =
+ * GetSystemTimePreciseAsFileTime on Windows, disciplined by NTP/DanteSync), while the
+ * render tick and audio capture ride the MONOTONIC clock (os_gettime_ns() = QPC, free-
+ * running). If the two clock domains drift apart over a long event, the wall-slaved video
+ * and the QPC-slaved audio diverge — the leading remaining candidate for the #800 all-day
+ * A/V shift the instrumented FIFO already ruled out. Both clocks are read back-to-back
+ * (the #269 single-read discipline) and anchored ONCE at the first tick; drift =
+ * (wall_now - wall_anchor) - (mono_now - mono_anchor). Positive = wall ran FASTER than QPC
+ * (video deadline advancing ahead of audio). Process-global; called only from
+ * genlock_audit_log on the graphics thread, so the function-local static anchors need no
+ * lock (same single-thread assumption as the non-atomic genlock counters and
+ * genlock_ts_align_enabled's own static). Cheap (5s-gated, per source). */
+static long long genlock_wall_qpc_drift_ms(void)
+{
+	static uint64_t wall_anchor_ns = 0;
+	static uint64_t mono_anchor_ns = 0;
+	const uint64_t wall_now_ns = genlock_wall_now_ns();
+	const uint64_t mono_now_ns = os_gettime_ns();
+	if (wall_anchor_ns == 0) {
+		wall_anchor_ns = wall_now_ns;
+		mono_anchor_ns = mono_now_ns;
+		return 0;
+	}
+	/* The mono elapsed is non-negative (monotonic clock, anchor is earlier); the WALL elapsed
+	 * may go NEGATIVE if NTP/DanteSync steps the RTC back — the signed cast captures that
+	 * correctly (two's-complement), and such a step IS a wall-vs-QPC clock-domain divergence,
+	 * exactly what #800 wants to record. int64 holds a day of ns (8.6e13) with vast headroom. */
+	const long long wall_elapsed = (long long)(wall_now_ns - wall_anchor_ns);
+	const long long mono_elapsed = (long long)(mono_now_ns - mono_anchor_ns);
+	return (wall_elapsed - mono_elapsed) / 1000000;
+}
+
 /* One output frame interval in ns from the current video info (0 if unknown). */
 static inline uint64_t genlock_frame_interval_ns(void)
 {
@@ -5118,7 +5151,16 @@ static void genlock_audit_log(obs_source_t *source, uint64_t now_ns)
 	      * is actively pulling a per-camera acquire-phase back toward configured; it must go
 	      * QUIET once the phase converged. Post-deploy verification of this ticket reads it. */
 	     "converge_sheds=%u "
-	     "(#70/#97/#126/#147/#148/#184/#235/#245/#401/#1049)",
+	     /* camera-box #800: wall(RTC/GetSystemTimePreciseAsFileTime)-vs-monotonic
+	      * (QPC/os_gettime_ns) clock drift since the first audit tick, in ms. The video release deadline
+	      * is WALL-slaved; the render tick + audio capture are QPC-slaved. A day-long
+	      * divergence of the two clock domains is the leading remaining candidate for the #800
+	      * A/V shift the instrumented FIFO already ruled out — one grep of this field over a
+	      * captured log answers it. Process-global (identical on every source's line); positive
+	      * = wall ran faster than QPC (video deadline ahead of audio). Parsed by the input-side
+	      * AuditSample.wall_qpc_drift_ms in src/jitter_audit.rs. */
+	     "wall_qpc_drift_ms=%lld "
+	     "(#70/#97/#126/#147/#148/#184/#235/#245/#401/#1049/#800)",
 	     source->context.name ? source->context.name : "?",
 	     (unsigned long long)source->genlock_frames_received,
 	     (unsigned long long)source->genlock_frames_consumed,
@@ -5149,7 +5191,8 @@ static void genlock_audit_log(obs_source_t *source, uint64_t now_ns)
 	     source->genlock_last_due,
 	     (long long)(source->genlock_last_head_skew_ns / 1000000),
 	     (unsigned long long)source->genlock_backward_regime_ticks,
-	     source->genlock_converge_sheds);
+	     source->genlock_converge_sheds,
+	     genlock_wall_qpc_drift_ms());
 }
 /* ---- end genlock FIFO preload + audit ------------------------------------ */
 
