@@ -581,15 +581,30 @@ fn upgrade_command_failure_is_reported_not_blind_rolled_back() {
     );
 }
 
-/// Single-node verification opts out of the NTP-master concept (`--ntp-master ""`), so verifying
-/// a non-strih Windows node (e.g. stream) never hits the gate's "master not among configured
-/// nodes" refusal.
+/// Single-node verification of a SLAVE node opts out of the NTP-master concept
+/// (`master_arg=""` -> `--ntp-master ""`), so verifying a non-master node (e.g. stream, cam2)
+/// never hits the gate's "master not among configured nodes" refusal. The MASTER node instead
+/// gets its OWN name as `--ntp-master` (the #1014 master-aware median+freshness grade) so that
+/// verifying it right after its own restart tolerates the restart-induced fleet sawtooth
+/// (#1077, replacing the old blanket `--ntp-master ""` for every node).
 #[test]
-fn verify_opts_out_of_ntp_master_for_single_node() {
+fn verify_grades_master_master_aware_and_opts_out_for_slaves() {
     let s = fs::read_to_string(script()).expect("read dantesync-fleet-upgrade.sh");
     assert!(
-        s.contains(r#"--ntp-master """#),
-        "#876: verify_node must pass --ntp-master \"\" so a single non-master node verifies"
+        s.contains("dantesync_is_ntp_master"),
+        "#1077: verify_node must branch on whether the node is the NTP master"
+    );
+    assert!(
+        s.contains(r#"--ntp-master "$master_arg""#),
+        "#1077: verify must pass a COMPUTED --ntp-master arg (self for the master, empty for a slave)"
+    );
+    assert!(
+        s.contains(r#"master_arg="""#),
+        "#1077: a non-master (slave) node must opt out of the NTP master concept (empty master_arg)"
+    );
+    assert!(
+        s.contains(r#"master_arg="$name""#),
+        "#1077: the master node must be graded with its OWN name as --ntp-master (master-aware grade)"
     );
 }
 
@@ -676,5 +691,353 @@ fn windows_upgrade_ps_purges_dead_task_idempotently_via_cmd_wrapper() {
     assert!(
         purge.contains(">nul 2>&1") || purge.contains("2>&1"),
         "the purge must swallow the absent-task stderr inside cmd. Got: {purge}"
+    );
+}
+
+// =============================================================================================
+// #1077 — the v1.8.42/43 live-roll defects in the LINUX path.
+//
+// (c) Non-root Linux nodes (imag-nb ssh newlevel@, dev1 --local) had NO privilege escalation —
+//     the generated script does root-only ops (mount remount, install, systemctl) and silently
+//     assumed a root@ ssh session, so it died at `mount: /: must be superuser`. AND a box without
+//     curl (cam3: no curl, broken apt) could not fetch the binary at all.
+// (d) Verifying the NTP MASTER (strih) right after ITS OWN dantesync restart measured the
+//     restart-induced fleet-wide sawtooth (rc=20 rolled back a HEALTHY swap twice).
+//
+// These tests source the REAL script (its BASH_SOURCE!=$0 guard skips the network/ssh-mutating
+// main flow) and exercise the new pure functions + generated command text + structural wiring.
+// NO test here ever ssh's a real box (same PURE-PLANNER model as the rest of this file).
+// =============================================================================================
+
+// --- (c) privilege escalation: needs-sudo + the run-script-by-file escalation wrapper ---------
+
+/// A `root@` ssh node (the cam boxes) needs no escalation; a non-root user (newlevel — imag-nb,
+/// dev1 --local) does.
+#[test]
+fn needs_sudo_true_for_non_root_and_false_for_root() {
+    assert_eq!(
+        run_sourced("if dantesync_needs_sudo newlevel; then echo SUDO; else echo NOSUDO; fi")
+            .trim(),
+        "SUDO",
+        "#1077: a non-root ssh user must be escalated"
+    );
+    assert_eq!(
+        run_sourced("if dantesync_needs_sudo root; then echo SUDO; else echo NOSUDO; fi").trim(),
+        "NOSUDO",
+        "#1077: a root ssh user is already privileged — no sudo"
+    );
+}
+
+/// A root node runs the uploaded script by FILE with no sudo (the cam boxes are root@).
+#[test]
+fn linux_run_script_cmd_root_runs_by_file_without_sudo() {
+    let out = run_sourced(r#"dantesync_linux_run_script_cmd root /tmp/x.sh newlevel"#);
+    assert!(
+        out.contains(r#"bash "/tmp/x.sh""#),
+        "#1077: a root node must run the uploaded script by file. Got:\n{out}"
+    );
+    assert!(
+        !out.contains("sudo"),
+        "#1077: a root node must NOT escalate via sudo. Got:\n{out}"
+    );
+}
+
+/// A non-root node escalates: prefer passwordless `sudo -n` (dev1), else feed the password to
+/// `sudo -S` via stdin (imag-nb). The uploaded script is run by FILE (bash "$path"), never inline,
+/// and the password is fed to sudo only — never written into the on-disk script file.
+#[test]
+fn linux_run_script_cmd_non_root_escalates_prefer_passwordless_then_sudo_s() {
+    let out = run_sourced(r#"dantesync_linux_run_script_cmd newlevel /tmp/x.sh secretpw"#);
+    assert!(
+        out.contains("sudo -n true"),
+        "#1077: a non-root node must probe passwordless sudo first (sudo -n). Got:\n{out}"
+    );
+    assert!(
+        out.contains("sudo -S -p ''"),
+        "#1077: a non-root node must fall back to sudo -S reading the password. Got:\n{out}"
+    );
+    assert!(
+        out.contains(r#"bash "/tmp/x.sh""#),
+        "#1077: must run the uploaded script by file (never a nested inline -c). Got:\n{out}"
+    );
+    assert!(
+        out.contains("secretpw"),
+        "#1077: the password must be fed to sudo -S (via printf | sudo -S). Got:\n{out}"
+    );
+    let probe = out.find("sudo -n true").expect("sudo -n probe");
+    let fallback = out.find("sudo -S").expect("sudo -S fallback");
+    assert!(
+        probe < fallback,
+        "#1077: passwordless sudo -n must be tried BEFORE the sudo -S password fallback. Got:\n{out}"
+    );
+}
+
+/// The password given to the escalation wrapper is fed to sudo via stdin (printf | sudo -S), so it
+/// is never baked into the on-disk script FILE the orchestrator scp's to the box.
+#[test]
+fn escalation_feeds_password_via_stdin_not_the_uploaded_file() {
+    let out = run_sourced(r#"dantesync_linux_run_script_cmd newlevel /tmp/x.sh secretpw"#);
+    assert!(
+        out.contains("printf") && out.contains("| sudo -S"),
+        "#1077: the sudo password must be piped to sudo -S, not embedded in the uploaded script. Got:\n{out}"
+    );
+}
+
+// --- (c) curl-less fetch: staged binary (scp'd by dev1) -> curl -> wget -> fail loud -----------
+
+/// A box without curl (cam3, broken apt) must still upgrade: the orchestrator stages a verified
+/// binary via scp, so the generated script prefers that pre-placed binary; on-box curl then wget
+/// are only standalone fallbacks; and it fails LOUD when none is available.
+#[test]
+fn linux_upgrade_cmd_prefers_staged_binary_then_curl_then_wget() {
+    let cmd = run_sourced("dantesync_linux_upgrade_cmd 1.8.43");
+    assert!(
+        cmd.contains("/tmp/dantesync-staged"),
+        "#1077: the generated script must prefer a pre-staged binary (curl-less path for cam3). Got:\n{cmd}"
+    );
+    assert!(
+        cmd.contains("command -v curl") && cmd.contains("command -v wget"),
+        "#1077: on-box fetch must fall back to curl then wget when there is no staged binary. Got:\n{cmd}"
+    );
+    let staged = cmd
+        .find("dantesync-staged")
+        .expect("#1077: expected the pre-staged binary check");
+    let curl = cmd
+        .find("command -v curl")
+        .expect("#1077: expected the curl fallback branch");
+    let wget = cmd
+        .find("command -v wget")
+        .expect("#1077: expected the wget fallback branch");
+    assert!(
+        staged < curl && curl < wget,
+        "#1077: fetch order must be staged-binary -> curl -> wget. Got:\n{cmd}"
+    );
+    assert!(
+        cmd.to_lowercase().contains("neither curl nor wget"),
+        "#1077: must fail LOUD when no staged binary and no curl/wget is available. Got:\n{cmd}"
+    );
+}
+
+/// Whichever fetch path is taken (staged / curl / wget), the sha256 verification still runs before
+/// the service is touched — a corrupt scp OR download never reaches the clock master.
+#[test]
+fn linux_upgrade_cmd_sha_verifies_after_fetch_before_stop_for_every_path() {
+    let cmd = run_sourced("dantesync_linux_upgrade_cmd 1.8.43");
+    let sha = cmd
+        .find("sha256sum")
+        .expect("#1077: expected a sha256sum verification of the fetched binary");
+    let stop = cmd
+        .find("systemctl stop dantesync")
+        .expect("#1077: expected the service-stop line");
+    assert!(
+        sha < stop,
+        "#1077: the sha256 verify must still precede the service stop. Got:\n{cmd}"
+    );
+    // the staged branch copies both the binary and its .sha256 into the verify tmp dir
+    assert!(
+        cmd.contains("/tmp/dantesync-staged.sha256"),
+        "#1077: the staged path must carry its own .sha256 for the on-box re-verify. Got:\n{cmd}"
+    );
+}
+
+// --- (c) flow wiring: stage on dev1 once, upload the script as a FILE, run escalated -----------
+
+/// The Linux upgrade flow stages the binary ONCE on dev1 (download + sha256-verify), then runs the
+/// uploaded script as a FILE via the escalation wrapper — never the old inline
+/// `ssh_node "$addr" "$(dantesync_linux_upgrade_cmd ...)"` (which had no escalation and needed curl
+/// on every box).
+#[test]
+fn linux_upgrade_stages_on_dev1_and_runs_script_by_file_escalated() {
+    let s = fs::read_to_string(script()).expect("read dantesync-fleet-upgrade.sh");
+    assert!(
+        s.contains("ensure_linux_binary_staged"),
+        "#1077: the orchestrator must stage (download + verify once) the binary on dev1"
+    );
+    assert!(
+        s.contains("dantesync_linux_run_script_cmd"),
+        "#1077: the Linux path must run the uploaded script via the escalation wrapper"
+    );
+    assert!(
+        s.contains("DANTESYNC_LINUX_SH_REMOTE"),
+        "#1077: the Linux path must upload the generated script to a file and run it by path"
+    );
+    assert!(
+        !s.contains(r#"ssh_node "$addr" "$(dantesync_linux_upgrade_cmd"#),
+        "#1077: the Linux upgrade must no longer be run inline over ssh (escalation needs a file)"
+    );
+    assert!(
+        !s.contains(r#"bash -c "$(dantesync_linux_upgrade_cmd"#),
+        "#1077: the --local upgrade must no longer be run inline (dev1 is non-root — needs sudo)"
+    );
+}
+
+/// The dev1-side staging downloads the PINNED asset and sha256-verifies it on dev1 before it is
+/// scp'd to any node.
+#[test]
+fn ensure_linux_binary_staged_downloads_pinned_and_verifies_on_dev1() {
+    let s = fs::read_to_string(script()).expect("read dantesync-fleet-upgrade.sh");
+    let start = s
+        .find("ensure_linux_binary_staged()")
+        .expect("#1077: expected the ensure_linux_binary_staged function");
+    let region = &s[start..(start + 900).min(s.len())];
+    assert!(
+        region.contains("dantesync_release_url_linux") || region.contains("releases/download"),
+        "#1077: staging must fetch the PINNED release asset. Got:\n{region}"
+    );
+    assert!(
+        region.contains("sha256sum"),
+        "#1077: dev1-side staging must sha256-verify the downloaded binary. Got:\n{region}"
+    );
+}
+
+/// The orchestrator-invoked rollback (VERIFY-failure path) hits the same root-only remount, so it
+/// must ALSO run its script by file via the escalation wrapper, not the old inline path.
+#[test]
+fn linux_rollback_runs_by_file_escalated() {
+    let s = fs::read_to_string(script()).expect("read dantesync-fleet-upgrade.sh");
+    let start = s
+        .find("rollback_node()")
+        .expect("#1077: expected rollback_node");
+    let region = &s[start..(start + 1000).min(s.len())];
+    assert!(
+        region.contains("dantesync_linux_run_script_cmd"),
+        "#1077: rollback must also escalate via the run-script wrapper. Got:\n{region}"
+    );
+    assert!(
+        !region.contains(r#"bash -c "$(dantesync_linux_rollback_cmd"#),
+        "#1077: the --local rollback must no longer run inline (dev1 non-root -> needs sudo)"
+    );
+}
+
+// --- (d) master-node verify: master-aware grade + longer bounded settle window ----------------
+
+/// Only the configured NTP master matches; an empty master name means no node is the master.
+#[test]
+fn is_ntp_master_matches_only_the_configured_master() {
+    assert_eq!(
+        run_sourced("if dantesync_is_ntp_master strih strih; then echo YES; else echo NO; fi")
+            .trim(),
+        "YES",
+        "#1077: the configured master must be recognized"
+    );
+    assert_eq!(
+        run_sourced("if dantesync_is_ntp_master cam2 strih; then echo YES; else echo NO; fi")
+            .trim(),
+        "NO",
+        "#1077: a non-master node must not be treated as the master"
+    );
+    assert_eq!(
+        run_sourced("if dantesync_is_ntp_master strih ''; then echo YES; else echo NO; fi").trim(),
+        "NO",
+        "#1077: an empty master name means NO node is the master (never a false match)"
+    );
+}
+
+/// The master node gets a LONGER, bounded settle window (retry to steady state) — the restart-
+/// induced sawtooth converges minutes later, so the strict ~60s slave window rolled back a
+/// healthy swap. The window is bounded (seq/tries, clear PASS/FAIL), never a silent sleep-and-hope.
+#[test]
+fn master_verify_uses_a_longer_bounded_settle_window() {
+    let s = fs::read_to_string(script()).expect("read dantesync-fleet-upgrade.sh");
+    assert!(
+        s.contains("MASTER_GATE_WAIT_TRIES") && s.contains("MASTER_GATE_WAIT_SECS"),
+        "#1077: the master must get its own bounded settle window (tries x secs)"
+    );
+    assert!(
+        s.contains("NTP_MASTER"),
+        "#1077: the master node name must be resolvable (NTP_MASTER, default from the gate's own)"
+    );
+    // still a bounded retry loop -- the master path reuses the same seq/tries + gate_rc PASS/FAIL,
+    // never an unbounded wait.
+    assert!(
+        !s.contains("while true") && !s.contains("while :"),
+        "#1077: the settle loop must stay bounded (no unbounded while-true wait)"
+    );
+}
+
+/// #1077 review: `ensure_linux_binary_staged` must publish the memo (`STAGED_LOCAL_DIR`) only
+/// AFTER a fully-verified download — a failed dev1 fetch must NOT poison the memo (which would
+/// falsely short-circuit the next node's call). Assert the `STAGED_LOCAL_DIR="$dir"` publish comes
+/// AFTER the `sha256sum` verification inside the function.
+#[test]
+fn ensure_linux_binary_staged_publishes_memo_only_after_sha_verify() {
+    let s = fs::read_to_string(script()).expect("read dantesync-fleet-upgrade.sh");
+    let start = s
+        .find("ensure_linux_binary_staged()")
+        .expect("#1077: expected the ensure_linux_binary_staged function");
+    let region = &s[start..(start + 1200).min(s.len())];
+    let sha = region
+        .find("sha256sum")
+        .expect("#1077: expected the sha256 verification");
+    let publish = region
+        .find(r#"STAGED_LOCAL_DIR="$dir""#)
+        .expect("#1077: the memo must be published from a local $dir, not armed before the fetch");
+    assert!(
+        sha < publish,
+        "#1077: STAGED_LOCAL_DIR must be published only AFTER the sha256 verify, so a failed \
+         dev1 download never poisons the memo. Got region:\n{region}"
+    );
+}
+
+// --- (3) real ro-mount detection: read the actual mount state (findmnt), not a write probe -----
+
+/// #1077 defect (3): the ro-root detection must read the ACTUAL mount state — `findmnt`, with a
+/// `/proc/mounts` fallback for a findmnt-less box — never a `touch` write probe (which conflates a
+/// read-only filesystem with a mere permission error, doubly so now the script always runs
+/// escalated). Mirrors setup-device.sh's ensure_root_writable()/root_mount_is_readonly() (#599):
+/// `ro` is matched as the FIRST comma-token so `errors=remount-ro` never false-positives.
+#[test]
+fn linux_upgrade_cmd_detects_ro_root_via_findmnt_with_proc_mounts_fallback() {
+    let cmd = run_sourced("dantesync_linux_upgrade_cmd 1.8.43");
+    assert!(
+        cmd.contains("findmnt -no OPTIONS /"),
+        "#1077: ro detection must read the real mount options of / via findmnt. Got:\n{cmd}"
+    );
+    assert!(
+        cmd.contains("/proc/mounts"),
+        "#1077: the findmnt-less fallback must ALSO read the real mount state (/proc/mounts), \
+         never a write probe. Got:\n{cmd}"
+    );
+    assert!(
+        cmd.contains("ro | ro,*"),
+        "#1077: 'ro' must be matched as the FIRST comma-token (never a bare 'ro' substring that \
+         'errors=remount-ro' would satisfy). Got:\n{cmd}"
+    );
+    assert!(
+        !cmd.contains("dantesync-write-test"),
+        "#1077: the write-probe conflation must be fully removed — both detect paths read real \
+         mount state. Got:\n{cmd}"
+    );
+    // the detected ro root is still remounted rw before the swap (the action is unchanged).
+    assert!(
+        cmd.contains("mount -o remount,rw /"),
+        "#1077: a detected ro root must still be remounted rw for the swap. Got:\n{cmd}"
+    );
+}
+
+/// The orchestrator-invoked rollback hits the same ro root and must use the same real-mount-state
+/// detection (findmnt + `/proc/mounts` fallback), never a bare write probe.
+#[test]
+fn linux_rollback_cmd_detects_ro_root_via_findmnt_with_proc_mounts_fallback() {
+    let cmd = run_sourced("dantesync_linux_rollback_cmd");
+    assert!(
+        cmd.contains("findmnt -no OPTIONS /"),
+        "#1077: rollback ro detection must also read the real mount state via findmnt. Got:\n{cmd}"
+    );
+    assert!(
+        cmd.contains("/proc/mounts"),
+        "#1077: rollback's findmnt-less fallback must ALSO read /proc/mounts, never a write probe. Got:\n{cmd}"
+    );
+    assert!(
+        cmd.contains("ro | ro,*"),
+        "#1077: rollback must match 'ro' as the FIRST comma-token. Got:\n{cmd}"
+    );
+    assert!(
+        !cmd.contains("dantesync-write-test"),
+        "#1077: rollback must not fall back to a write probe. Got:\n{cmd}"
+    );
+    assert!(
+        cmd.contains("mount -o remount,rw /"),
+        "#1077: a detected ro root must still be remounted rw for the rollback. Got:\n{cmd}"
     );
 }

@@ -41,12 +41,59 @@ sourcing), network/mutating flow below.
   `powershell -Command "..."` over ssh, which fails SILENTLY (exit 0, no output) per
   `.claude/rules/rig-state-inspection.md` §2. `dantesync_windows_upgrade_ps`/`_rollback_ps` return
   the `.ps1` CONTENT; `dantesync_windows_run_ps_file_cmd` is the `-File` invocation.
-- **Single-node `dantesync-gate.sh` verification MUST pass `--ntp-master ""`.** The gate defaults
-  `GATE_NTP_MASTER_NAME=strih` and REFUSES (usage error) when `--win-http`/`--linux` is configured
-  but the master name isn't among the configured nodes — so verifying any non-strih node (e.g.
-  `stream`, the box the ticket exists to converge) always failed. `--ntp-master ""` is the
-  documented opt-out; it forgoes the #1041/#1055 master-step-chase widening (the post-restart
-  settle poll covers a transient re-lock).
+- **Single-node `dantesync-gate.sh` verification — a SLAVE opts out (`--ntp-master ""`), the MASTER
+  is graded master-aware (`--ntp-master <self>`) (#1077 refines the original blanket opt-out).** The
+  gate defaults `GATE_NTP_MASTER_NAME=strih` and REFUSES (usage error) when `--win-http`/`--linux`
+  is configured but the master name isn't among the configured nodes — so a non-master node MUST
+  pass `--ntp-master ""` (the documented opt-out; it forgoes the #1041/#1055 master-step-chase
+  widening — the settle poll covers a transient re-lock). But the MASTER node, verified alone, IS
+  among its own one configured node, so pass `--ntp-master "<name>"` (`verify_node`'s `master_arg`):
+  the gate then applies its #1014 master median+freshness grade (a master-only invocation is
+  explicitly supported and pays no priming read) instead of the strict slave offset bound — which
+  is what tolerates the master's OWN post-restart step-chase. Blanket `--ntp-master ""` on the
+  master measured the restart-induced sawtooth and rolled back a HEALTHY swap (rc=20 twice, live
+  v1.8.43).
+
+## #1077 additions — non-root escalation, curl-less staging, master settle window
+
+- **Non-root Linux nodes escalate; the script is run BY FILE, never inline.** The generated
+  upgrade/rollback script does root-only ops (`mount -o remount,rw`, `install`, `systemctl`). A
+  `root@` node (cam boxes) runs it directly (`dantesync_linux_run_script_cmd` → `bash "$path"`); a
+  non-root node (imag-nb `newlevel@`, dev1 `--local`) runs it escalated — `sudo -n` where
+  passwordless (dev1), else `printf '%s\n' '<pw>' | sudo -S -p '' bash "$path"`. The password is
+  embedded only in the RUN COMMAND (the ssh/`bash -c` arg), NEVER written into the scp'd on-disk
+  script FILE. This mirrors the `scripts/lib/imag-presented-frame-check.sh` `sudo -S` convention and
+  the Windows `-File` delivery (no nested-quoting hazard). `dantesync_needs_sudo USER` is the
+  root-vs-not decision (0 = needs sudo unless USER is `root`).
+- **Binary fetch is dev1-staged first, then on-box curl→wget→fail-loud (curl-less boxes: cam3).**
+  `ensure_linux_binary_staged` downloads + sha256-verifies the pinned binary ONCE on dev1 (memoized;
+  the memo `STAGED_LOCAL_DIR` is published ONLY after the sha passes, so a failed fetch never
+  poisons it), and `stage_linux_binary_to` scp's it to `DANTESYNC_LINUX_STAGED=/tmp/dantesync-staged`
+  on each node (cp for `--local`). The generated script's fetch resolver is `[ -f staged ]` →
+  `command -v curl` → `command -v wget` → `exit 1`, then re-sha-verifies whichever (guards a corrupt
+  scp) BEFORE `systemctl stop`. cam3 (no curl, broken apt) upgrades from the pre-placed binary; the
+  metered venue LAN pays ONE download, not eight.
+- **The master node's settle window is LONGER + bounded** — `MASTER_GATE_WAIT_TRIES`/`_SECS`
+  (default 20 × 15s ≈ 5 min) vs the slave `GATE_WAIT_TRIES`/`_SECS` (10 × 6s ≈ 60s). Still a bounded
+  `for i in $(seq 1 "$tries")` loop with a clear final PASS/FAIL (`gate_rc`), never a `while true`
+  sleep-and-hope. Because the master (strih) is the first Windows canary, waiting it to steady state
+  also gates the REST loop — slaves are verified only after the fleet has re-converged. `NTP_MASTER`
+  defaults from `DANTESYNC_NTP_MASTER_NAME` (strih), the gate's own single source of truth.
+- **Read the ACTUAL root mount state (findmnt), NEVER a `touch` write probe** — the generated
+  upgrade+rollback scripts detect a read-only root (cam boxes) with
+  `findmnt -no OPTIONS / 2>/dev/null || awk '$2=="/"{print $4; exit}' /proc/mounts 2>/dev/null`
+  matched `case "$opts" in ro | ro,*)`, adopted VERBATIM from `setup-device.sh`'s
+  `ensure_root_writable()`/`root_mount_is_readonly()` (#599, also mirrored in `verify-device.sh`).
+  A `touch` write probe conflates a read-only filesystem with a mere permission error — and once
+  the script runs escalated (see the escalation bullet) it reads writable everywhere a real move
+  is possible, so it can BOTH miss a genuine ro root AND misfire on a permission quirk. The
+  `ro | ro,*` FIRST-comma-token match is why `errors=remount-ro` (present in every ext4 rw mount)
+  never false-positives — a bare `contains("ro")`/`,ro,`-anywhere match would. Both the detection
+  and the remount action key on `/` (never `-T "$bindir"`), so they cannot diverge. The initial
+  #1077 cut used a findmnt-guarded read with a `touch`-probe FALLBACK — the review caught that the
+  fallback reintroduced the exact conflation; the #599 `|| /proc/mounts` fallback reads REAL state
+  on the findmnt-less path too. This is the FIRST place to reuse for any future generated-remote
+  or on-box ro-root read in this repo.
 
 ## Testing (Tier-0)
 
