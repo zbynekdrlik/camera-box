@@ -721,11 +721,18 @@ IMAG_GENLOCK_SHA="$(sshpass -p "${IMAG_PW:-newlevel}" ssh -o StrictHostKeyChecki
 . "$HERE/lib/manifest-autosource.sh"
 VERSION_GATE_REPO="${VERSION_GATE_REPO:-zbynekdrlik/camera-box}"
 # Windows FAST manifest (strih+stream share ONE build -> one manifest), keyed on strih's OWN reported
-# marker SHA. Gated on strih ALREADY reporting obs_dll_sha256: supplying a manifest before the #770
-# on-box byte gather is live would flip obs_dll_sha256 to UNKNOWN = a spurious refuse, so this stays
-# dormant until that gather is deployed fleet-wide. VERSION_GATE_MANIFEST (if pre-set) still wins.
+# marker SHA. The gate applies this GLOBAL --manifest to BOTH --win-state boxes (strih AND stream), and
+# a manifest activates the obs_dll_sha256 byte compare AND the genlock_capability check on each box. So
+# supplying it while EITHER box has not yet reported those keys flips that box to UNKNOWN = a spurious
+# gate-blocking refuse (exactly the partial-rollout split this opt-in exists to protect). Gate on BOTH
+# boxes ALREADY reporting BOTH keys, so the auto-source stays fully dormant until the #770 on-box byte
+# gather is live fleet-wide and can never introduce a UNKNOWN. VERSION_GATE_MANIFEST (if pre-set) wins.
 AUTO_WIN_MANIFEST="${VERSION_GATE_MANIFEST:-}"
-if [ -z "$AUTO_WIN_MANIFEST" ] && manifest_autosource_state_has_key "$VERSION_STRIH_STATE" obs_dll_sha256; then
+if [ -z "$AUTO_WIN_MANIFEST" ] \
+   && manifest_autosource_state_has_key "$VERSION_STRIH_STATE"  obs_dll_sha256 \
+   && manifest_autosource_state_has_key "$VERSION_STREAM_STATE" obs_dll_sha256 \
+   && manifest_autosource_state_has_key "$VERSION_STRIH_STATE"  genlock_capability \
+   && manifest_autosource_state_has_key "$VERSION_STREAM_STATE" genlock_capability; then
   AUTO_WIN_MANIFEST="$(manifest_autosource_fetch "$VERSION_GATE_REPO" windows-genlock-fast.yml obs-genlock-fast-dll \
     "$(genlock_build_sha_state_read "$VERSION_STRIH_STATE")" "$OUTDIR/win-fast-manifest.json")"
 fi
