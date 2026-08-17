@@ -318,8 +318,13 @@ void OBSBasicProperties::on_buttonBox_clicked(QAbstractButton *button)
 		obs_data_set_string(new_settings, "undo_uuid", obs_source_get_uuid(source));
 		obs_data_set_string(oldSettings, "undo_uuid", obs_source_get_uuid(source));
 
-		std::string undo_data(obs_data_get_json(oldSettings));
-		std::string redo_data(obs_data_get_json(new_settings));
+		/* camera-box #773: obs_data_get_json() can return NULL (json_dumps failure);
+		 * std::string(NULL) is undefined behaviour (crash), the same NULL-deref class
+		 * as CheckSettings above. NULL-coalesce before constructing the strings. */
+		const char *undo_json = obs_data_get_json(oldSettings);
+		const char *redo_json = obs_data_get_json(new_settings);
+		std::string undo_data(undo_json ? undo_json : "");
+		std::string redo_data(redo_json ? redo_json : "");
 
 		if (undo_data.compare(redo_data) != 0)
 			main->undo_s.add_action(QTStr("Undo.Properties").arg(obs_source_get_name(source)), undo_redo,
@@ -461,13 +466,28 @@ void OBSBasicProperties::Init()
 	show();
 }
 
+/* camera-box #773: NULL-safe settings-JSON comparison. obs_data_get_json() returns NULL when
+ * json_dumps() fails (libobs/obs-data.c) -- and obs_source_get_settings() returns NULL for a
+ * source that became invalid mid-dialog, which obs_data_get_json() then also maps to NULL. Stock
+ * CheckSettings passed those straight into strcmp(), crashing c0000005 in ucrtbase!strcmp on the
+ * dialog reject/close path (Crash 2026-07-15 18-46-03.txt on strih: NULL first arg into strcmp,
+ * reached via closeEvent -> reject -> CheckSettings). Treat an unreadable current/old JSON as
+ * "no detectable change" (0) so the dialog closes cleanly instead of dereferencing NULL -- and
+ * without popping a Save/Discard prompt on settings we cannot even serialise. */
+static int settings_json_diff(const char *currentJson, const char *oldJson)
+{
+	if (!currentJson || !oldJson)
+		return 0;
+	return strcmp(currentJson, oldJson);
+}
+
 int OBSBasicProperties::CheckSettings()
 {
 	OBSDataAutoRelease currentSettings = obs_source_get_settings(source);
 	const char *oldSettingsJson = obs_data_get_json(oldSettings);
 	const char *currentSettingsJson = obs_data_get_json(currentSettings);
 
-	return strcmp(currentSettingsJson, oldSettingsJson);
+	return settings_json_diff(currentSettingsJson, oldSettingsJson);
 }
 
 bool OBSBasicProperties::ConfirmQuit()

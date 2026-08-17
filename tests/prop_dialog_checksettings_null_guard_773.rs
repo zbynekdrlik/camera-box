@@ -143,7 +143,8 @@ fn accept_path_json_construction_is_null_safe_773() {
     );
     // The NULL-coalesced locals must be present.
     assert!(
-        squished.contains("undo_json ? undo_json :") && squished.contains("redo_json ? redo_json :"),
+        squished.contains("undo_json ? undo_json :")
+            && squished.contains("redo_json ? redo_json :"),
         "#773 regression: the AcceptRole undo/redo json must be NULL-coalesced \
          (`undo_json ? undo_json : \"\"`). Body:\n{body}"
     );
@@ -173,14 +174,14 @@ fn lift_helper() -> String {
 /// "no change" (0); two equal strings compare 0; two different strings compare non-zero.
 fn vectors() -> Vec<(Option<&'static str>, Option<&'static str>, bool)> {
     vec![
-        (None, Some("x"), true),          // current NULL (json_dumps failed / invalid source)
-        (Some("x"), None, true),          // old NULL
-        (None, None, true),               // both NULL
+        (None, Some("x"), true), // current NULL (json_dumps failed / invalid source)
+        (Some("x"), None, true), // old NULL
+        (None, None, true),      // both NULL
         (Some("abc"), Some("abc"), true), // equal -> no change
-        (Some("abc"), Some("abd"), false),// differ
-        (Some("abd"), Some("abc"), false),// differ (other direction)
-        (Some(""), Some(""), true),       // empty equal
-        (Some(""), Some("x"), false),     // empty vs non-empty differ
+        (Some("abc"), Some("abd"), false), // differ
+        (Some("abd"), Some("abc"), false), // differ (other direction)
+        (Some(""), Some(""), true), // empty equal
+        (Some(""), Some("x"), false), // empty vs non-empty differ
     ]
 }
 
@@ -255,7 +256,13 @@ fn settings_json_diff_computes_the_null_safe_truth_table_773() {
         .filter(|l| !l.trim().is_empty())
         .map(|l| l.trim().parse().expect("harness printed a non-integer"))
         .collect();
-    assert_eq!(got.len(), vs.len(), "#773: harness printed {} of {} results", got.len(), vs.len());
+    assert_eq!(
+        got.len(),
+        vs.len(),
+        "#773: harness printed {} of {} results",
+        got.len(),
+        vs.len()
+    );
 
     let mut diffs = Vec::new();
     for ((cur, old, expect_zero), g) in vs.iter().zip(&got) {
