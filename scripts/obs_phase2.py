@@ -1143,6 +1143,30 @@ def _blackcheck_verdict(luma_max, elapsed_s, timeout_s, luma_mean=None, min_mean
     return "WAIT" if elapsed_s < timeout_s else "BLACK"
 
 
+def _republish_black_verdict(ref_max, ref_mean, subj_max, subj_mean, min_mean=0):
+    """#1006 (pure, testable): the DIFFERENTIAL republish-black decision. A republish source
+    (`subject`, e.g. the `spout CG` Spout receiver fed by Resolume Arena's CG-bridge output) is a
+    FAULT only when its live upstream REFERENCE (`ref`, e.g. the direct NDI input `cg` /
+    `RESOLUME-SNV (cg-obs)` carrying the same content) is genuinely delivering content but the
+    republish shows black — the exact 2026-08-06 signature (cg peak=180 while spout CG peak=0).
+
+    Verdicts:
+      - "UNKNOWN"  either screenshot was unreadable (None) — never a silent OK.
+      - "IDLE"     the reference itself is black — the upstream is not feeding, so a black republish
+                   is EXPECTED (the 2026-08-17 healthy-idle state); never an alarm.
+      - "FAULT"    reference live, subject black — Arena is dropping a live feed.
+      - "OK"       reference live, subject live.
+
+    `min_mean` is passed through to `_luma_is_black` for BOTH readings (default 0 = peak-only, the
+    ticket's own peak-based semantics; a >0 floor rejects a high-peak/near-black-mean garbage frame
+    on the reference so it is not miscounted as a live upstream)."""
+    if ref_max is None or subj_max is None:
+        return "UNKNOWN"
+    if _luma_is_black(ref_max, ref_mean, min_mean):
+        return "IDLE"
+    return "FAULT" if _luma_is_black(subj_max, subj_mean, min_mean) else "OK"
+
+
 def _program_luma(ws, scene_name):
     """Read the RENDERED program frame of *scene_name* via GetSourceScreenshot and
     return (max_luma, mean_luma) over a small downscaled PNG. Best-effort: returns
@@ -2195,6 +2219,47 @@ def assert_program_nonblack(a):
     print(f"PASS: {a.host} program scene '{scene}' NON-BLACK")
 
 
+def republish_black_check(a):
+    """#1006: DIFFERENTIAL republish-black probe — READ-ONLY, never a control op (no scene switch,
+    Studio-Mode preview untouched). Screenshots the REFERENCE upstream NDI input and its SUBJECT
+    Spout republish over the WebSocket, applies `_republish_black_verdict`, and maps the verdict to
+    an exit code a dev1-side watchdog can classify:
+
+        OK / IDLE -> exit 0   (both live, or the upstream is itself idle — no alarm)
+        FAULT     -> exit 3   (upstream live but republished black — the #1006 fault)
+        UNKNOWN   -> exit 4   (a screenshot could not be read — never a silent pass)
+
+    Catches Arena publishing a black CG-bridge Spout WHILE its own upstream feed is live, without the
+    false alarms a blanket 'every scene non-black' check raises on a legitimately-idle overlay."""
+    min_mean = 0 if a.min_mean is None else a.min_mean
+    ws = _conn(a.host, a.password)
+    try:
+        ref_max, ref_mean = _program_luma(ws, a.reference)
+        subj_max, subj_mean = _program_luma(ws, a.subject)
+    finally:
+        ws.close()
+    verdict = _republish_black_verdict(ref_max, ref_mean, subj_max, subj_mean, min_mean)
+    tag = f"{a.label + ' ' if a.label else ''}republish-black-check"
+    detail = (f"reference '{a.reference}' (peak={ref_max} mean={ref_mean}), "
+              f"subject '{a.subject}' (peak={subj_max} mean={subj_mean})")
+    if verdict == "FAULT":
+        sys.stderr.write(
+            f"[obs] {a.host}: {tag} FAULT — upstream '{a.reference}' is LIVE but its Spout "
+            f"republish '{a.subject}' renders BLACK: {detail}. Resolume Arena is dropping the live "
+            f"CG-bridge feed (issue 1006) — the receiver/binding are fine, the Arena composition "
+            f"output is black.\n"
+        )
+        sys.exit(3)
+    if verdict == "UNKNOWN":
+        sys.stderr.write(
+            f"[obs] {a.host}: {tag} UNKNOWN — could not read a screenshot ({detail}); nothing to "
+            f"decide this pass.\n"
+        )
+        sys.exit(4)
+    # OK / IDLE -> exit 0.
+    print(f"{verdict}: {a.host} {detail}")
+
+
 DANTE_MBC_DEVICE_ID = "Dante Virtual Soundcard (x64)"  # issue 901 item 2: the expected device
 
 
@@ -2262,10 +2327,19 @@ def main():
         "setup", "teardown", "record", "prod-scene", "switch", "program-scene",
         "stream-status", "latency-check", "open-projectors", "ensure-studio-mode-on",
         "program-rendered-input", "assert-program-nonblack", "mbc-input-check",
+        "republish-black-check",
     ):
         p = sub.add_parser(name)
         p.add_argument("--host", required=True)
         p.add_argument("--password", default="")
+        if name == "republish-black-check":
+            # #1006: the DIFFERENTIAL republish-black probe. --reference is the upstream NDI input
+            # carrying the real content (e.g. `cg`); --subject is the Spout republish of it (e.g.
+            # `spout CG`). --min-mean overrides the peak-only default floor; --label tags the log.
+            p.add_argument("--reference", required=True)
+            p.add_argument("--subject", required=True)
+            p.add_argument("--min-mean", type=float, default=None)
+            p.add_argument("--label", default="")
         if name == "program-rendered-input":
             # #901 gap 3: which scene to inspect — omitted -> the CURRENT program scene.
             p.add_argument("--scene", default="")
@@ -2375,7 +2449,8 @@ def main():
      "ensure-studio-mode-on": ensure_studio_mode_on,
      "program-rendered-input": program_rendered_input,
      "assert-program-nonblack": assert_program_nonblack,
-     "mbc-input-check": mbc_input_check}[a.cmd](a)
+     "mbc-input-check": mbc_input_check,
+     "republish-black-check": republish_black_check}[a.cmd](a)
 
 
 if __name__ == "__main__":
