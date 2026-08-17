@@ -848,6 +848,53 @@ fn imag_openbox_menu_looks_valid_rejects_empty_or_non_xml() {
     assert_eq!(lines, vec!["YES", "NO", "NO"], "{out:?}");
 }
 
+// #1095: the #785 menu.xml (<menu id="root-menu">) is only REACHABLE if the openbox rc.xml binds
+// the desktop right-click (Root mouse context, Right button) to `ShowMenu root-menu`. On a fresh
+// box the stock /etc/xdg/openbox/rc.xml holds that binding; a box carrying a STALE hand-placed
+// ~/.config/openbox/rc.xml (the "hand-placed, not provisioned" class #785 exists to close) could
+// bind the desktop click elsewhere, silently orphaning the menu. verify-imag.sh must ASSERT the
+// binding (design decision (b): assert-only, never rewrite operator rc.xml).
+#[test]
+fn imag_openbox_root_menu_bound_requires_root_context_right_click_to_root_menu() {
+    let (code, out, err) = run_sourced(
+        r#"
+        # stock-style: Root context, Right button -> ShowMenu root-menu -> BOUND
+        GOOD='<mouse><context name="Root"><mousebind button="Middle" action="Press"><action name="ShowMenu"><menu>client-list-combined-menu</menu></action></mousebind><mousebind button="Right" action="Press"><action name="ShowMenu"><menu>root-menu</menu></action></mousebind></context></mouse>'
+        # stale operator rc.xml: Root right-click bound to a DIFFERENT menu -> NOT bound (the target failure)
+        STALE='<mouse><context name="Root"><mousebind button="Right" action="Press"><action name="ShowMenu"><menu>my-custom-menu</menu></action></mousebind></context></mouse>'
+        # decoy: root-menu referenced only in a KEYBIND; Root right-click bound elsewhere -> NOT bound (scoping matters)
+        DECOY='<keyboard><keybind key="A-space"><action name="ShowMenu"><menu>root-menu</menu></action></keybind></keyboard><mouse><context name="Root"><mousebind button="Right" action="Press"><action name="ShowMenu"><menu>apps-menu</menu></action></mousebind></context></mouse>'
+        # single-quoted attributes (valid XML, openbox/libxml2 accepts) -> BOUND
+        SQ="<mouse><context name='Root'><mousebind button='Right' action='Press'><action name='ShowMenu'><menu>root-menu</menu></action></mousebind></context></mouse>"
+        for name in GOOD STALE DECOY SQ; do
+          if imag_openbox_root_menu_bound "${!name}"; then echo BOUND; else echo NOTBOUND; fi
+        done
+        # empty / absent rc.xml text -> NOT bound
+        if imag_openbox_root_menu_bound ""; then echo BOUND; else echo NOTBOUND; fi
+        "#,
+    );
+    assert_eq!(code, 0, "stderr: {err}");
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec!["BOUND", "NOTBOUND", "NOTBOUND", "BOUND", "NOTBOUND"],
+        "rc.xml Root right-click binding must be scoped to the Root context + Right button + \
+         ShowMenu root-menu (a stale bind-elsewhere fails, a keybind-only root-menu does NOT \
+         count): {out:?}"
+    );
+}
+
+#[test]
+fn verify_imag_wires_the_rc_menu_binding_check_into_the_live_flow() {
+    let body = std::fs::read_to_string(script()).unwrap();
+    assert!(
+        body.matches("imag_openbox_root_menu_bound").count() >= 2,
+        "verify-imag.sh must both DEFINE and CALL imag_openbox_root_menu_bound in its live flow \
+         (#1095) -- a pure function that is only ever defined and never invoked provides zero \
+         acceptance coverage that the #785 menu is reachable"
+    );
+}
+
 #[test]
 fn imag_watchdog_installed_but_disabled_requires_all_three_facts() {
     let (code, out, err) = run_sourced(
