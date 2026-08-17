@@ -37,8 +37,7 @@ fn lib() -> PathBuf {
 }
 
 fn read(rel: &str) -> String {
-    fs::read_to_string(manifest_dir().join(rel))
-        .unwrap_or_else(|e| panic!("read {rel}: {e}"))
+    fs::read_to_string(manifest_dir().join(rel)).unwrap_or_else(|e| panic!("read {rel}: {e}"))
 }
 
 fn write_exec(path: &Path, body: &str) {
@@ -160,15 +159,21 @@ fn down_message_names_the_fault_and_retires_misleading_wording_817() {
 #[test]
 fn selfheal_recovers_when_the_server_comes_back_817() {
     let r = run_selfheal(2); // fail 2 polls, succeed on the 3rd (within TRIES=4)
-    assert!(r.ok, "#817: self-heal must return 0 once :8899 answers. out: {}", r.out);
+    assert!(
+        r.ok,
+        "#817: self-heal must return 0 once :8899 answers. out: {}",
+        r.out
+    );
     assert!(
         r.dest.contains("obs_version"),
         "#817: the re-fetched state file must be populated. dest: {:?}",
         r.dest
     );
     assert!(
-        r.sshpass_argv.contains("schtasks /run /tn \"BundleStateServer\"")
-            || r.sshpass_argv.contains("schtasks /run /tn BundleStateServer"),
+        r.sshpass_argv
+            .contains("schtasks /run /tn \"BundleStateServer\"")
+            || r.sshpass_argv
+                .contains("schtasks /run /tn BundleStateServer"),
         "#817: the self-heal must issue the schtasks /run restart. argv: {:?}",
         r.sshpass_argv
     );
@@ -199,9 +204,14 @@ fn selfheal_uses_session_agnostic_run_never_it_817() {
 #[test]
 fn selfheal_reports_honest_down_and_fails_when_still_down_817() {
     let r = run_selfheal(1000); // always down
-    assert!(!r.ok, "#817: self-heal must FAIL when :8899 never comes back. out: {}", r.out);
     assert!(
-        r.out.contains("bundle-state-server DOWN on strih (nothing on :8899)"),
+        !r.ok,
+        "#817: self-heal must FAIL when :8899 never comes back. out: {}",
+        r.out
+    );
+    assert!(
+        r.out
+            .contains("bundle-state-server DOWN on strih (nothing on :8899)"),
         "#817: it must print the honest one-line fault when it gives up. out: {}",
         r.out
     );
