@@ -216,8 +216,12 @@ main() {
       dd_reason="$(printf '%s\n' "$dd_verdict" | sed -n 's/^reason=//p')"
       if [ "${dd_deliberate:-0}" = "1" ]; then
         log "imag-nb OBS is down but this is a DELIBERATE operator quit ($dd_reason) -- NOT alerting (issue 788: never false-'crashed' on an operator quit)"
-        # a deliberate quit is not a wedge -- clear confirm so a LATER genuine crash alerts fresh
+        # A deliberate quit is a clean, intentional state -- treat it exactly like a HEALTHY pass
+        # for alert bookkeeping: clear the confirm counter AND the throttle signature, so a LATER
+        # genuine crash always alerts fresh (never masked by a stale signature from a prior episode).
         write_state_field confirm 0
+        write_state_field alert_sig ""
+        write_state_field alert_passes 0
         log "pass end"
         return 0
       fi
