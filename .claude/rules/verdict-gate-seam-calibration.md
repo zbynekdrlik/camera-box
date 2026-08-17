@@ -6,6 +6,7 @@ paths:
   - "src/av_window.rs"
   - "src/lipsync_cross_check.rs"
   - "src/self_heal_attribution.rs"
+  - "src/dup_cadence.rs"
 ---
 
 # Calibrating + wiring a NEW verdict gate seam (the one-line-restorable `gates_overall_pass()` pattern)
@@ -69,3 +70,38 @@ empirical margin.
   measured value is FAIL for latency (a missing sample is anomalous + unguarded elsewhere) but PASS
   for cadence (a zero-cadence run is already hard-failed by copies/gaps/undecodable — no
   double-jeopardy). State which you chose and why in the fn doc.
+
+## 7. A CONTENT/pixel-based metric belongs in the OFFLINE recording-verdict pass (#1088)
+
+A per-frame metric that needs PIXELS (a content hash, a luma stat, a colour read) has a THIRD home
+beyond the two obvious live taps — and it dominates both. cam-box-side hashing is a RIG WRITE
+(supervised deploy, out of scope for a dev1-side read-only measure); receiver-side (strih/stream)
+hashing PERTURBS a live broadcast render. But `probe::recording::read_frames` ALREADY streams every
+gray8 frame of the offline recording (dev1 CI, once per verdict) — so compute the pixel metric THERE.
+It is neither a rig write nor a live-box perturbation, and it matches "sample on the worker" exactly.
+`hash_recording_frames` (a SEPARATE luma-only ffmpeg pass) is the pattern; index the returned vec by
+`RecordingFrame::frame_index` and slice it per cambox window with `partition_frames_by_window` (the
+same attribution the sweep uses — no `recording_segments.rs` churn). Before writing a new pixel hash,
+check `dupe_decimation::dupe_content_hash` (#889) — a proven row-sampled FNV-1a already exists for the
+OPPOSITE (over-rate) phenomenon (investigate-existing-first).
+
+## 8. GATE on the DISCRIMINATED signal, never the raw metric (#1088 review)
+
+When the metric builds a multi-condition classification (e.g. #1088 `duplication_masked` = rate ∧
+regularity ∧ coverage), the GATE must key on the DISCRIMINATED result, not the raw underlying number.
+#1088's first cut bounded the raw worst `duplicate_fraction` across ALL windows — which would
+double-jeopardy a localized freeze (high raw fraction, coverage-vetoed → not the target defect,
+already `frozen_leg`'s domain) the moment `gates_overall_pass()` flips LIVE. Fix: a pure
+`worst_masked_duplicate_fraction` that folds only the windows the classifier flagged, and the gate fn
+doc STATES it must receive the discriminated value. Report BOTH (the discriminated gate signal + the
+raw value, informational) in the JSON. General rule: if you built a veto to exclude a sibling gate's
+domain, feed the gate the post-veto signal or the veto was pointless.
+
+## 9. The additive-separate-pass vs return-type-churn tradeoff for a CI-only probe fn (#1088)
+
+`recording-verdict.rs` + `src/probe/*` have NO local compile path (CI is first compile). When a new
+metric needs data from a widely-called probe fn (`analyze_recording_*` has ~15 callers), threading it
+through that fn's RETURN TYPE churns every caller — all CI-first-compile, high blind-change risk. An
+ADDITIVE separate pass (a new fn with zero existing-call-site edits) is the lower-risk trade even at
+the cost of an extra offline decode, for a report-only first cut. Note the fold-into-main-pass
+optimization as a follow-up (gated on the metric proving its value), don't do it blind.

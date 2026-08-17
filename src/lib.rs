@@ -317,6 +317,15 @@ pub mod capture_stall;
 // field on `CamboxSegment` (REPORTED metric first — not yet gate-enforced pending calibration).
 pub mod presentation_cadence;
 
+// #1088 — duplication-masked 50->60 source-cadence detector (pure decision). Given a sequence of
+// per-frame CONTENT hashes in recorded order, counts exact consecutive duplicates and classifies
+// whether the pattern is the sustained, regularly-spaced duplication of a 5:6 pulldown (a grabber
+// padding a 50fps source up to 60 — the #794 hard layer the receiver-side `received=` rate tap is
+// structurally blind to) versus the isolated free-running beat / over-rate baselines. No probe
+// deps, so it unit-tests Tier-0; the probe-gated `bin/recording-verdict.rs` computes the per-frame
+// hash from the offline recording and reports the result REPORT-ONLY (pending calibration).
+pub mod dup_cadence;
+
 // #707 EVENT-FORENSICS — per-event residual copy/gap detection (pure decision). Given the same
 // per-frame painted-tick data `presentation_cadence`/`painted_tick_gaps` already consume, locates
 // SPECIFIC recorded frames as Copy/Gap events (frame index, tick values, wall-clock second, switch-
