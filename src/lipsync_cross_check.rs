@@ -30,9 +30,11 @@
 //! term is born report-only: [`evaluate`] is still computed, still fully reported (both offsets,
 //! the delta, the tolerance, the verdict), but the CALLER never folds it into any pass/fail
 //! exit code yet — mirrors the exact seam shape issue 915/889/861 already established
-//! (`crate::optical_floor::gates_overall_pass`). Restore path: once a real paired-run evidence
-//! set (the SUPERVISOR's job, not this ticket's — see the ticket's own scope boundary) shows N
-//! consecutive clean agreements, flip this to `true`.
+//! (`crate::optical_floor::gates_overall_pass`). Restore path (issue 1032): [`gates_overall_pass`]
+//! is now DERIVED from an evidence counter — once a real paired-run evidence set (the SUPERVISOR's
+//! job, not this ticket's — see the ticket's own scope boundary) shows N consecutive clean
+//! agreements, bump [`RECORDED_CLEAN_PAIRED_RUNS`] to [`REQUIRED_CLEAN_PAIRED_RUNS`] (the one
+//! constant); you no longer edit this function to return `true`.
 
 /// The cross-check tolerance (ms), justified as the sum of THREE independently-documented
 /// terms — never invented, per issue 930's own acceptance criterion ("tolerance derived from
@@ -65,10 +67,13 @@ pub const REQUIRED_CLEAN_PAIRED_RUNS: u32 = 5;
 /// How many clean paired runs are ACTUALLY recorded so far. The honest current evidence count is
 /// ZERO (issue 1032 DATA-FIRST: 0/144 `/tmp/recording-e2e-*/verdict-*.json` carry cross-check
 /// data; the check runs only via the manual `scripts/lipsync-cross-check.sh` paired-run
-/// orchestration, which persists nothing). This is the ONE constant the SUPERVISOR/rig-ops bumps
-/// as it collects evidence via a live paired-run campaign; the moment it reaches
-/// [`REQUIRED_CLEAN_PAIRED_RUNS`], [`gates_overall_pass`] returns `true` with NO other code change
-/// (one-constant flip, mirrors `crate::imag_leg_gate` / the #905 relaxation-restore pattern).
+/// orchestration, which persists nothing). This is the ONE production constant the SUPERVISOR/rig-ops
+/// bumps as it collects evidence via a live paired-run campaign; the moment it reaches
+/// [`REQUIRED_CLEAN_PAIRED_RUNS`], [`gates_overall_pass`] returns `true` with NO consumer edit
+/// (one-constant flip, mirrors `crate::imag_leg_gate` / the #905 relaxation-restore pattern). The
+/// flip DOES intentionally re-baseline the day-zero evidence-state unit tests below (they pin
+/// `RECORDED == 0` / report-only-today) — that deliberate breakage is the evidence-acknowledgment
+/// guard, exactly like `optical_floor`'s own report-only test failing on its flip, not a regression.
 /// NEVER bump it on a guess — bump it only alongside the linked N-run evidence set on issue 1032.
 pub const RECORDED_CLEAN_PAIRED_RUNS: u32 = 0;
 
