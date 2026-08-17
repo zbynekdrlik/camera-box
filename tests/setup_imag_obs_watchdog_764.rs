@@ -24,26 +24,28 @@ fn body() -> String {
     std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()))
 }
 
-/// Slice the step-24 (watchdog provisioning) region: from its `step 24 "` banner to the final
-/// "base provisioning DONE" summary echo (step 24 is the last step). Every watchdog assertion is
-/// scoped to this region so it cannot accidentally match another unit's enable/fetch elsewhere.
+/// Slice the step-24 (watchdog provisioning) region: from its `step 24 "` banner to the NEXT step's
+/// `step 25 "` banner (step 25, touchpad usability #779, was appended after it — so this slice no
+/// longer runs to the "base provisioning DONE" echo). Every watchdog assertion is scoped to this
+/// region so it cannot accidentally match another step's (e.g. step 25's) content or another unit's
+/// enable/fetch elsewhere.
 fn watchdog_region(body: &str) -> String {
     let start = body
         .find("step 24 \"")
         .expect("scripts/setup-imag.sh must have a `step 24 \"...\"` banner for the imag-obs-watchdog provisioning (#764)");
     let rest = &body[start..];
-    let end = rest.find("base provisioning DONE").unwrap_or(rest.len());
+    let end = rest.find("step 25 \"").unwrap_or(rest.len());
     rest[..end].to_string()
 }
 
-/// TOTAL_STEPS must be bumped to 24 and a `step 24` banner must announce the watchdog provisioning,
-/// or the `[N/TOTAL]` progress display would be wrong and a dropped step would go unnoticed.
+/// TOTAL_STEPS must be 25 (after #779's step 25) and a `step 24` banner must announce the watchdog
+/// provisioning, or the `[N/TOTAL]` progress display would be wrong and a dropped step would go unnoticed.
 #[test]
 fn setup_imag_provisions_watchdog_step_24_764() {
     let body = body();
     assert!(
-        body.contains("TOTAL_STEPS=24"),
-        "{SETUP}: TOTAL_STEPS must be bumped to 24 to count the new imag-obs-watchdog provisioning step (#764)"
+        body.contains("TOTAL_STEPS=25"),
+        "{SETUP}: TOTAL_STEPS must be 25 (step 24 imag-obs-watchdog #764 + step 25 touchpad usability #779) — the watchdog step must still be counted"
     );
     assert!(
         body.contains("step 24 \""),

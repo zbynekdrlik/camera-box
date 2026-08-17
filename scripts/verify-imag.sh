@@ -127,6 +127,12 @@ set -euo pipefail
 #       suspend.target/hibernate.target/hybrid-sleep.target are all masked. setup-imag.sh step 5
 #       persists this; a re-provision that silently lost it must FAIL here, not pass. Side-effect
 #       free (pure systemd/logind reads), so it is appended at the END of the flow.
+#   (w) touchpad usability (#779): /etc/X11/xorg.conf.d/30-touchpad-tap.conf carries the four
+#       live-verified libinput options -- Tapping/TappingDrag/NaturalScrolling on + ScrollPixel
+#       Distance 50 (tap-to-click + natural scroll + a gentler scroll step, the operator's touchpad
+#       config, set live 2026-07-15). setup-imag.sh step 25 provisions it; a re-provision that
+#       silently dropped it (or regenerated a partial/wrong file) must FAIL here. Pure static file
+#       read (side-effect free), so it runs BEFORE check (o)'s restart (#884 ordering).
 #
 # Every remote helper this gate shells out to (wmctrl, python3) is preflighted BY NAME before use
 # (#822 pattern) -- a missing tool is reported as a missing tool, never folded into a failed
@@ -615,6 +621,24 @@ imag_powerkey_protection_ok() {
   done
   for t in sleep.target suspend.target hibernate.target hybrid-sleep.target; do
     printf '%s\n' "$masked" | grep -qxF "${t}=masked" || return 1
+  done
+  return 0
+}
+
+# imag_touchpad_conf_ok CONF_TEXT -> 0 iff the touchpad InputClass (#779) carries the four
+# live-verified libinput options at their EXACT values: Tapping/TappingDrag/NaturalScrolling "on"
+# and ScrollPixelDistance "50" (the user's final tuning; the libinput default 15 is far too
+# sensitive). A reprovision that regenerated a PARTIAL file (a missing option) or the WRONG value
+# must FAIL, not pass on mere presence -- the gate proves durability, not just existence. Purely
+# textual (unit-tested), whitespace-tolerant, here-string fed (no SIGPIPE-under-pipefail risk).
+imag_touchpad_conf_ok() {
+  local conf="$1" pat
+  for pat in \
+    'Option[[:space:]]+"Tapping"[[:space:]]+"on"' \
+    'Option[[:space:]]+"TappingDrag"[[:space:]]+"on"' \
+    'Option[[:space:]]+"NaturalScrolling"[[:space:]]+"on"' \
+    'Option[[:space:]]+"ScrollPixelDistance"[[:space:]]+"50"'; do
+    grep -qE "$pat" <<<"$conf" || return 1
   done
   return 0
 }
@@ -1162,6 +1186,20 @@ else
   else
     ok "imag-power-envelope journald tag is readable (guard transitions retrievable for dev1-side alerting, #1040)"
   fi
+fi
+
+# (w) touchpad usability config present + correct (#779) -- a pure static file read, side-effect
+# free, kept ABOVE check (o)'s OBS restart for #884-ordering hygiene. Reads the durable
+# 30-touchpad-tap.conf back over SSH and fails loud if a reprovision dropped it or wrote a
+# partial/wrong file (the issue-840 "verify the file the provisioner writes" pairing).
+rc=0
+TOUCHPAD_CONF="$(ssh_box "cat /etc/X11/xorg.conf.d/30-touchpad-tap.conf 2>/dev/null")" || rc=$?
+if [ "$rc" -ne 0 ] || [ -z "$TOUCHPAD_CONF" ]; then
+  fail "/etc/X11/xorg.conf.d/30-touchpad-tap.conf missing/unreadable over SSH (rc=$rc) -- the touchpad usability config (#779) is absent; a reprovision dropped tap-to-click/natural-scroll (setup-imag.sh step 25)"
+elif imag_touchpad_conf_ok "$TOUCHPAD_CONF"; then
+  ok "touchpad usability config present + correct (tap-to-click + natural scroll + ScrollPixelDistance 50, #779)"
+else
+  fail "30-touchpad-tap.conf present but INCOMPLETE/WRONG (#779) -- must carry Tapping/TappingDrag/NaturalScrolling \"on\" + ScrollPixelDistance \"50\"; a reprovision regenerated a partial/wrong file"
 fi
 
 # (o) both projectors PRESENT (never self-established) + PERSIST across a real restart (#756/#840)

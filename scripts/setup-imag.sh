@@ -53,7 +53,7 @@ DEV1_DRIFTGUARD_PUBKEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB/akQWI95uekn0/CRfQ
 # commented instance of the SAME key already being present (e.g. installed by hand with the local
 # ~/.ssh/id_ed25519.pub file's own comment).
 DEV1_DRIFTGUARD_PUBKEY_TYPE_BLOB="${DEV1_DRIFTGUARD_PUBKEY% *}"
-TOTAL_STEPS=24
+TOTAL_STEPS=25
 # #731: Companion Satellite server this box connects the local Stream Deck to. .lan DNS is
 # usually fine on this LAN (companion.lan -> companion-snv.lan, verified live 2026-07-13) but can
 # be flaky like any other .lan name on this network -- COMPANION_HOST_IP is the documented
@@ -1994,6 +1994,32 @@ systemctl daemon-reload
 # deterministic even if a prior box had it enabled from an old hand-deploy.
 systemctl disable imag-obs-watchdog >/dev/null 2>&1 || true
 echo "  #764: imag-obs-watchdog installed (script + unit) and LEFT DISABLED (alarm-only; enable only after issue 788 fix)"
+
+# =============================================================================
+step 25 "Touchpad usability (#779): tap-to-click + natural scroll + gentler scroll (reprovision-durable)"
+# =============================================================================
+# imag-nb is a NOTEBOOK; the operator drives its touchpad directly. tap-to-click + natural scrolling
+# + a gentler scroll step were set LIVE (2026-07-15) as /etc/X11/xorg.conf.d/30-touchpad-tap.conf but
+# NEVER provisioned here -- so a reimage silently dropped them (the same "provisioning gap hidden by a
+# hand patch" class issue 840 documented for imag-obs-start.sh). Bake the file in so a reprovision
+# reproduces the live-verified libinput InputClass byte-for-byte. The four Option values match what
+# is live on the box; ScrollPixelDistance 50 is the user's final tuning (the libinput default 15 is
+# far too sensitive). verify-imag.sh check (w) reads this file back and fails loud if it is dropped.
+mkdir -p /etc/X11/xorg.conf.d
+cat > /etc/X11/xorg.conf.d/30-touchpad-tap.conf <<'EOF'
+# imag touchpad usability (#779) -- tap-to-click + natural scroll + gentler scroll,
+# reprovision-durable (matches the live-verified 30-touchpad-tap.conf on the box).
+Section "InputClass"
+    Identifier "touchpad tap-to-click"
+    MatchIsTouchpad "on"
+    Driver "libinput"
+    Option "Tapping" "on"
+    Option "TappingDrag" "on"
+    Option "NaturalScrolling" "on"
+    Option "ScrollPixelDistance" "50"
+EndSection
+EOF
+echo "  #779: /etc/X11/xorg.conf.d/30-touchpad-tap.conf provisioned (tap-to-click + natural scroll + ScrollPixelDistance 50)"
 
 echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}imag-nb base provisioning DONE (genlock build: $(cat "$GENLOCK_MARKER_DIR/GENLOCK_BUILD_SHA.txt" 2>/dev/null || echo unknown))${NC}"
