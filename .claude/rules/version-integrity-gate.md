@@ -115,10 +115,14 @@ the live gather being verified on the rig, which no worktree worker can check).
   per-path resolver, NEVER `bundle_hashes`+`drift_check_all_files` — that walks EVERY manifest path
   (~1600) and flips a partial 3-file ssh gather to UNKNOWN. Verdict codes: 10=DORMANT (skip, uncounted),
   20=DRIFT, 11=UNKNOWN, 0=OK.
-- **The Windows auto-source MUST be gated on the box ALREADY reporting `obs_dll_sha256`.** Supplying a
-  `--manifest` before the #770 on-box byte gather is live flips the not-yet-reported `obs_dll_sha256`
-  to UNKNOWN (drift-guard compares a manifest sha vs an empty observed) = a spurious gate-blocking
-  refuse. `recording-e2e.sh` gates the auto-source on `manifest_autosource_state_has_key strih obs_dll_sha256`.
+- **The Windows auto-source MUST be gated on BOTH boxes ALREADY reporting the keys a manifest
+  activates.** The gate applies the GLOBAL `--manifest` to EVERY `--win-state` box (strih AND stream),
+  and a manifest activates BOTH the `obs_dll_sha256` byte compare AND the `genlock_capability` check on
+  each. Supplying it while EITHER box has not yet reported EITHER key flips that box to UNKNOWN
+  (drift-guard compares a manifest value vs an empty observed) = a spurious gate-blocking refuse — the
+  exact partial-rollout split this opt-in protects against (peer-review 🟡, a strih-only guard was the
+  first bug). `recording-e2e.sh` gates the auto-source on `manifest_autosource_state_has_key` for BOTH
+  strih AND stream × BOTH `obs_dll_sha256` AND `genlock_capability`.
 - **The Windows FAST manifest (`windows-genlock-fast.yml` / `obs-genlock-fast-dll`) is obs.dll-ONLY.**
   Its stage carries only `obs.dll` (+ `BUNDLE_MANIFEST.json`), no distroav.dll. That is SAFE:
   `compare_observed` labels an obs.dll-only manifest's distroav `SKIPPED` (drift-guard l.1877-1884),
