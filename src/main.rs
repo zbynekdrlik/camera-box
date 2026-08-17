@@ -795,6 +795,12 @@ async fn run_capture_loop(
         // `None` until the first sample lands, so a cold-start report never logs a
         // false "grayscale" reading from an uninitialised (0,0).
         let mut last_chroma: Option<(f32, f32)> = None;
+        // #1079 — the per-frame spatial-roughness metric sampled alongside `last_chroma`,
+        // so the `capture chroma:` line can carry a `rough=` term the dev1 splitter-port
+        // watchdog reads to catch the Elgato purple-noise no-signal mode (colourful but
+        // unstructured) that the colour/grayscale label alone misses. `None` until the
+        // first sample lands (in lockstep with `last_chroma`).
+        let mut last_roughness: Option<f32> = None;
         let mut chroma_frame_ctr: u32 = 0;
 
         // #656 — capture-delivery-rate health: consecutive-breach counter for the pure
@@ -1007,6 +1013,14 @@ async fn run_capture_loop(
                 chroma_frame_ctr = chroma_frame_ctr.wrapping_add(1);
                 if chroma_frame_ctr.is_multiple_of(camera_box::capture::CHROMA_SAMPLE_FRAMES) {
                     last_chroma = Some(camera_box::capture::mean_chroma(
+                        data,
+                        info.width as usize,
+                        info.height as usize,
+                        info.stride as usize,
+                    ));
+                    // #1079 — sample the spatial-roughness term on the SAME frame, so
+                    // `rough=` and `u_dev/v_dev` are always in lockstep on the log line.
+                    last_roughness = Some(camera_box::capture::luma_roughness(
                         data,
                         info.width as usize,
                         info.height as usize,
@@ -1632,10 +1646,17 @@ async fn run_capture_loop(
                             } else {
                                 "grayscale (source likely monochrome)"
                             };
+                            // #1079 — report-only spatial-roughness term BEFORE the `-> label`,
+                            // so both existing consumers (splitter-health.sh, verify-device.sh)
+                            // keep matching the `-> colour|grayscale` tail unchanged while the
+                            // dev1 watchdog can now read `rough=` to catch the Elgato purple-noise
+                            // no-signal mode (colourful, structureless) the label alone misses.
+                            let rough = last_roughness.unwrap_or(0.0);
                             tracing::info!(
-                                "capture chroma: u_dev={:.1} v_dev={:.1} -> {}",
+                                "capture chroma: u_dev={:.1} v_dev={:.1} rough={:.1} -> {}",
                                 u_dev,
                                 v_dev,
+                                rough,
                                 colour_label
                             );
                         }

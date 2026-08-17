@@ -70,15 +70,32 @@ signal. The active fleet is derived from `CAMERA_ACTIVE_SET` via `camera_resolve
 camera-active-set discipline — never a literal cam range). sshpass is fail-loud-preflighted (issue
 833: a missing tool must fail by NAME, never read as a measured "all boxes unreachable").
 
-## KNOWN RESIDUAL — the Elgato purple-noise no-signal mode is NOT caught
+## Elgato purple-noise no-signal mode — a `rough=` spatial-roughness term, REPORT-ONLY (#1079)
 
-The readable signals (liveness + colour/grayscale) catch the **flat-grey** no-signal mode (ShadowCast)
-and any **frame-stall** mode (grabber stops producing frames → no fresh chroma line). The **Elgato 4K
-S purple-noise** no-signal mode is colourful AND keeps producing frames, so it reads as `capturing=1,
-colour=1` = OK and is NOT caught. Catching it would need a NEW per-frame variance/entropy metric in
-`src/capture.rs` (production Rust on every cambox + a fleet redeploy) — a separate, larger change,
-deliberately out of scope here. If the active fleet uses Elgato grabbers on the shared-camera leg,
-file that follow-up.
+The liveness + colour/grayscale signals catch the **flat-grey** no-signal mode (ShadowCast) and any
+**frame-stall** mode (no fresh chroma line), but the **Elgato 4K S purple-noise** no-signal mode is
+colourful AND keeps producing frames, so `is_color_frame` reads it as `capturing=1, colour=1` = OK.
+The missing axis is **spatial structure**: a real picture has strongly correlated neighbouring pixels;
+random static does not.
+
+`camera-box` now logs a per-frame **spatial-roughness** term on the `capture chroma:` line
+(`src/capture.rs::luma_roughness` — the mean `|Y0 − Y1|` adjacent-pixel luma delta over the same #299
+subsample; low for structured content, high for noise):
+`capture chroma: u_dev=X.X v_dev=Y.Y rough=R.R -> colour|grayscale`. `splitter_health_parse_probe`
+parses `rough=` (6th field) and the watchdog **SURFACES it REPORT-ONLY** in each box's per-box log line.
+It is fleet-wide telemetry only — `splitter_health_classify` is UNCHANGED and nothing pages/gates on
+roughness yet. The calibratable classifier + threshold ship DORMANT
+(`is_likely_noise` / `NOISE_ROUGHNESS_THRESHOLD`, unit-tested, wired into no live path — the #905
+"keep the mechanism dormant, not deleted" pattern). A **data-first follow-up** walks
+`NOISE_ROUGHNESS_THRESHOLD` against accumulated fleet `rough=` data before flipping `is_likely_noise`
+into a live page/label (the window-gate-tolerance-walkdown / verdict-gate-seam-calibration discipline).
+
+**Backward-compat gotcha (rolling fleet redeploy):** an old cambox not yet carrying the metric logs
+the OLD line (no `rough=`); `splitter_health_parse_probe` emits `rough=-` for it (a placeholder, never
+a bogus number), keeping the 6-field record shape stable regardless of box version. Both existing
+consumers of the line (`splitter-health.sh`, `verify-device.sh::chroma_check`) key on the
+`-> colour|grayscale` tail with u_dev/v_dev at unchanged positions, so the `rough=` term sitting BEFORE
+the `->` is fully additive — no consumer needed a change beyond the watchdog that reads it.
 
 ## Suspect-hardware (technician list, #688)
 

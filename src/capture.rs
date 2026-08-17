@@ -303,6 +303,87 @@ pub fn is_color_frame(u_dev: f32, v_dev: f32) -> bool {
     u_dev > CHROMA_COLOR_THRESHOLD || v_dev > CHROMA_COLOR_THRESHOLD
 }
 
+// ── #1079 per-frame spatial-roughness metric (Elgato purple-noise no-signal) ───
+
+/// Mean adjacent-pixel luma difference ("spatial roughness") above which a *colour*
+/// frame is more likely UNSTRUCTURED noise (an Elgato-class no-signal purple-noise
+/// render) than a real picture.
+///
+/// UNCALIBRATED / REPORT-ONLY (#1079). This constant is the calibratable home for the
+/// dormant [`is_likely_noise`] classifier; nothing live pages or gates on it yet. A real
+/// picture (church scene, QR/Vernier test pattern) has strongly correlated neighbouring
+/// pixels → low roughness (typ. <15); uncorrelated coloured static → high roughness
+/// (typ. 40+ on the 16-235 video luma range). The provisional value is deliberately
+/// conservative and mid-band; a data-first follow-up walks it against fleet `rough=`
+/// telemetry before it is ever wired into a live page/gate (the #905 "keep the mechanism
+/// dormant, not deleted" discipline). `pub` for the same reason as [`CHROMA_SAMPLE_FRAMES`]
+/// — the `camera-box` binary is a SEPARATE crate that reads it.
+pub const NOISE_ROUGHNESS_THRESHOLD: f32 = 30.0;
+
+/// Compute the mean adjacent-pixel luma difference ("spatial roughness") over a
+/// subsampled YUYV422 frame — the per-frame STRUCTURE metric that separates a real
+/// picture from unstructured coloured noise (#1079).
+///
+/// [`mean_chroma`] answers "is there colour?"; it CANNOT tell a real colourful picture
+/// from an Elgato no-signal purple-noise render (both push U/V away from 128). This
+/// answers "does the colour have SPATIAL STRUCTURE?" using the cheapest possible signal:
+/// within each YUYV macropixel `Y0 U Y1 V`, `Y0` (offset +0) and `Y1` (offset +2) are two
+/// HORIZONTALLY ADJACENT luma pixels (1px apart). In any real image adjacent pixels are
+/// near-equal, so `|Y0 − Y1|` is small; in random static they are uncorrelated, so
+/// `|Y0 − Y1|` is large. This is a second, separate subsample pass over the frame (not
+/// folded into [`mean_chroma`], which reads the U/V bytes at +1/+3), but the Y0/Y1 bytes
+/// share the 4-byte macropixel's cache line already touched by the chroma sample on the
+/// same warm buffer, so it adds negligible cache pressure.
+///
+/// Same subsampling contract as [`mean_chroma`]: honours `stride` (bytes per row, so a
+/// row-padded device is sampled on REAL pixel data only), samples every
+/// [`CHROMA_SAMPLE_STRIDE`] macropixels, and skips any sample whose bytes fall outside the
+/// buffer. Returns the mean `|Y0 − Y1|` in `[0.0, 255.0]`; `0.0` when no in-bounds sample
+/// exists (empty/undersized buffer or zero dimensions).
+pub fn luma_roughness(frame: &[u8], width: usize, height: usize, stride: usize) -> f32 {
+    let macropixels_per_row = width / 2; // YUYV packs 2 pixels per 4-byte macropixel
+    if macropixels_per_row == 0 || height == 0 {
+        return 0.0;
+    }
+    let mut diff_sum: u64 = 0;
+    let mut count: u64 = 0;
+    for y in 0..height {
+        let row_start = y * stride;
+        let mut mp = 0usize;
+        while mp < macropixels_per_row {
+            // Macropixel `mp` of row `y`: Y0 U Y1 V — Y0 at +0, Y1 at +2 are two
+            // horizontally adjacent luma pixels (1px apart).
+            let idx = row_start + mp * 4;
+            if idx + 3 < frame.len() {
+                let y0 = frame[idx] as i16;
+                let y1 = frame[idx + 2] as i16;
+                diff_sum += (y0 - y1).unsigned_abs() as u64;
+                count += 1;
+            }
+            mp += CHROMA_SAMPLE_STRIDE;
+        }
+    }
+    if count == 0 {
+        return 0.0;
+    }
+    diff_sum as f32 / count as f32
+}
+
+/// Classify a captured frame as LIKELY unstructured noise (a no-signal render that reads
+/// as colour) — DORMANT / REPORT-ONLY (#1079).
+///
+/// True iff the frame reads as colour ([`is_color_frame`]) AND its spatial roughness (from
+/// [`luma_roughness`]) exceeds [`NOISE_ROUGHNESS_THRESHOLD`]. This is the calibratable
+/// classifier the dev1 splitter-port watchdog residual (#739) needs to catch the Elgato
+/// purple-noise no-signal mode; it is wired into NO live page/gate/label yet — the cambox
+/// logs the raw `rough=` metric and the watchdog surfaces it report-only, and a data-first
+/// follow-up calibrates the threshold + flips this into a live signal. A grayscale frame is
+/// never noise here: a flat-grey no-signal mode is already caught by the colour/grayscale
+/// label, so roughness only matters once a frame reads as colour.
+pub fn is_likely_noise(u_dev: f32, v_dev: f32, roughness: f32) -> bool {
+    is_color_frame(u_dev, v_dev) && roughness > NOISE_ROUGHNESS_THRESHOLD
+}
+
 /// V4L2 control id for picture CONTRAST (`V4L2_CID_CONTRAST`).
 pub const V4L2_CID_CONTRAST: u32 = 0x0098_0901;
 /// V4L2 control id for picture SATURATION (`V4L2_CID_SATURATION`).
@@ -2473,6 +2554,122 @@ mod tests {
         assert!(
             is_color_frame(0.0, CHROMA_COLOR_THRESHOLD + 0.01),
             "just above threshold (V) must be colour"
+        );
+    }
+
+    // ── #1079 spatial-roughness metric tests ─────────────────────────────────
+
+    #[test]
+    fn luma_roughness_flat_colour_content_is_near_zero_1079() {
+        // #1079 RED: a colourful but STRUCTURED frame — a saturated blue field where every
+        // adjacent luma pair is equal (Y0==Y1). mean |Y0-Y1| must be ~0 even though the
+        // chroma is high: this is exactly the real-picture case the purple-noise metric
+        // must NOT flag. Macropixel Y0 U Y1 V = [41, 240, 41, 110] (blue), Y0==Y1==41.
+        let macro_pixel: [u8; 4] = [41, 240, 41, 110];
+        let frame: Vec<u8> = macro_pixel.iter().copied().cycle().take(512).collect();
+        let rough = luma_roughness(&frame, 256, 1, 512);
+        assert!(
+            rough < 0.5,
+            "flat-luma colour field: mean |Y0-Y1| must be ~0, got {rough}"
+        );
+        // colourful, but structured -> NOT noise.
+        let (u_dev, v_dev) = mean_chroma(&frame, 256, 1, 512);
+        assert!(
+            is_color_frame(u_dev, v_dev),
+            "the blue field is genuinely colour: u={u_dev:.1} v={v_dev:.1}"
+        );
+        assert!(
+            !is_likely_noise(u_dev, v_dev, rough),
+            "a structured colour field (low roughness) must NOT read as noise: rough={rough}"
+        );
+    }
+
+    #[test]
+    fn luma_roughness_uncorrelated_luma_is_high_1079() {
+        // #1079 RED: adjacent luma pixels maximally different in every sampled macropixel —
+        // the pixel-scale signature of unstructured (Elgato purple-noise) static. Y0=16,
+        // Y1=235 → |Y0-Y1|=219 per sample. Wide enough to sample 2 macropixels (stride-64).
+        let macro_pixel: [u8; 4] = [16, 240, 235, 110]; // Y0=16 U=240 Y1=235 V=110
+        let frame: Vec<u8> = macro_pixel.iter().copied().cycle().take(512).collect();
+        let rough = luma_roughness(&frame, 256, 1, 512);
+        assert!(
+            (rough - 219.0).abs() < 0.01,
+            "uncorrelated adjacent luma: mean |Y0-Y1| must be 219, got {rough}"
+        );
+        assert!(
+            rough > NOISE_ROUGHNESS_THRESHOLD,
+            "noise-like roughness ({rough}) must exceed NOISE_ROUGHNESS_THRESHOLD ({NOISE_ROUGHNESS_THRESHOLD})"
+        );
+        // high chroma + high roughness = the purple-noise no-signal signature.
+        let (u_dev, v_dev) = mean_chroma(&frame, 256, 1, 512);
+        assert!(
+            is_likely_noise(u_dev, v_dev, rough),
+            "colour + high roughness must read as likely noise: u={u_dev:.1} v={v_dev:.1} rough={rough}"
+        );
+    }
+
+    #[test]
+    fn luma_roughness_honors_stride_padding_1079() {
+        // #1079: a row-padded device (stride > width*2) must sample REAL pixel data only.
+        // 2px × 2 rows, stride=6 (4 packed + 2 pad). Row 0 flat (Y0==Y1, |Δ|=0); row 1 has
+        // adjacent luma 20 apart (|Δ|=20). With stride honoured both rows' macropixel 0 is
+        // sampled → mean = (0 + 20)/2 = 10. Padding bytes are never read.
+        let row0 = [100u8, 128, 100u8, 128, 0, 0]; // Y0 U Y1 V pad pad — flat
+        let row1 = [100u8, 128, 120u8, 128, 0, 0]; // Y0 U Y1 V pad pad — |Δ|=20
+        let mut data = Vec::new();
+        data.extend_from_slice(&row0);
+        data.extend_from_slice(&row1);
+        let rough = luma_roughness(&data, 2, 2, 6);
+        assert!(
+            (rough - 10.0).abs() < 0.01,
+            "stride-padded: mean |Y0-Y1| must be 10 (rows 0+1 sampled, padding skipped), got {rough}"
+        );
+    }
+
+    #[test]
+    fn luma_roughness_empty_or_zero_dims_is_zero_1079() {
+        // #1079: defensive — empty buffer or zero dimensions yields 0.0, no panic.
+        assert_eq!(luma_roughness(&[], 0, 0, 0), 0.0);
+        assert_eq!(luma_roughness(&[1, 2, 3, 4], 0, 1, 0), 0.0);
+        assert_eq!(luma_roughness(&[1, 2], 2, 1, 4), 0.0);
+    }
+
+    #[test]
+    fn is_likely_noise_only_when_colour_and_rough_1079() {
+        // #1079 RED: the dormant classifier's truth table.
+        // colour + high roughness = the purple-noise no-signal signature -> TRUE.
+        assert!(
+            is_likely_noise(6.0, 9.0, 50.0),
+            "colour + high roughness must be likely-noise"
+        );
+        // colour + low roughness = a real structured picture -> FALSE.
+        assert!(
+            !is_likely_noise(6.0, 9.0, 5.0),
+            "colour + low roughness (structured content) must NOT be noise"
+        );
+        // grayscale + high roughness = not this classifier's job (grayscale label handles
+        // the flat-grey no-signal; a monochrome noisy source is out of scope here) -> FALSE.
+        assert!(
+            !is_likely_noise(0.5, 0.4, 50.0),
+            "grayscale frames are never classified noise here (colour gate)"
+        );
+        // grayscale + low roughness -> FALSE.
+        assert!(
+            !is_likely_noise(0.5, 0.4, 5.0),
+            "grayscale + low roughness is plainly not noise"
+        );
+    }
+
+    #[test]
+    fn is_likely_noise_roughness_threshold_boundary_1079() {
+        // #1079: the roughness bound is EXCLUSIVE (> threshold), mirroring is_color_frame.
+        assert!(
+            !is_likely_noise(6.0, 9.0, NOISE_ROUGHNESS_THRESHOLD),
+            "exactly at the roughness threshold must NOT be noise (exclusive bound)"
+        );
+        assert!(
+            is_likely_noise(6.0, 9.0, NOISE_ROUGHNESS_THRESHOLD + 0.01),
+            "just above the roughness threshold must be noise"
         );
     }
 }

@@ -27,22 +27,30 @@
 # = one shared fault; per-box divergence = that box's leg".
 #
 # The per-box READABLE signal is the #299 chroma metric camera-box already logs every ~5s to its
-# journal: `capture chroma: u_dev=X.X v_dev=Y.Y -> colour|grayscale (source likely monochrome)`. This
-# robustly catches the flat-grey no-signal mode (ShadowCast) and any frame-stall mode (no fresh line);
-# the Elgato purple-noise mode (colourful, frames flow) is a documented residual (see the rule doc).
+# journal: `capture chroma: u_dev=X.X v_dev=Y.Y rough=R.R -> colour|grayscale (source likely
+# monochrome)`. This robustly catches the flat-grey no-signal mode (ShadowCast) and any frame-stall
+# mode (no fresh line). The Elgato purple-noise mode (colourful, frames flow) reads as colour, so it
+# needs the #1079 `rough=` term (per-frame spatial-roughness): high roughness + colour = the structure-
+# less-noise signature. This lib PARSES + surfaces `rough=` REPORT-ONLY (fleet-wide telemetry); it does
+# NOT gate/classify on it yet — a data-first follow-up calibrates the threshold before it pages.
 #
 # Source-only: pure functions, no side effects at source time.
 
 # splitter_health_parse_probe <raw> -> stdout ONE line:
-#   reachable=<0|1> capturing=<0|1> colour=<0|1> u_dev=<val|-> v_dev=<val|->
+#   reachable=<0|1> capturing=<0|1> colour=<0|1> u_dev=<val|-> v_dev=<val|-> rough=<val|->
 #   Parses one cambox's raw ssh probe output. The remote command echoes the sentinel `PROBE_OK` on a
 #   successful ssh connection, then optionally the box's most recent `capture chroma:` journal line
 #   (already time-bounded by the caller's `--since` window, so its mere PRESENCE is the liveness
 #   signal). An empty/`PROBE_OK`-less raw (ssh failed / box off the wire) -> reachable=0 = NODATA,
 #   never a false signal.
+#   `rough=` is the #1079 per-frame spatial-roughness metric (mean adjacent-pixel luma delta),
+#   REPORT-ONLY here — surfaced fleet-wide by the watchdog so a data-first follow-up can calibrate a
+#   noise threshold; it does NOT feed splitter_health_classify yet. A cambox not yet redeployed with
+#   the metric logs the OLD line (no `rough=`) -> rough=- (a placeholder, never a bogus number), so a
+#   rolling fleet redeploy is safe and the 6-field record shape is stable regardless of box version.
 splitter_health_parse_probe() {
   local raw="${1:-}"
-  local reachable=0 capturing=0 colour=0 u_dev="-" v_dev="-"
+  local reachable=0 capturing=0 colour=0 u_dev="-" v_dev="-" rough="-"
   case "$raw" in
     *PROBE_OK*) reachable=1 ;;
   esac
@@ -55,15 +63,17 @@ splitter_health_parse_probe() {
         *"-> colour"*) colour=1 ;;
         *) colour=0 ;;
       esac
-      local u v
+      local u v r
       u="$(printf '%s\n' "$line" | sed -n 's/.*u_dev=\([0-9.]*\).*/\1/p')"
       v="$(printf '%s\n' "$line" | sed -n 's/.*v_dev=\([0-9.]*\).*/\1/p')"
+      r="$(printf '%s\n' "$line" | sed -n 's/.*rough=\([0-9.]*\).*/\1/p')"
       [ -n "$u" ] && u_dev="$u"
       [ -n "$v" ] && v_dev="$v"
+      [ -n "$r" ] && rough="$r"
     fi
   fi
-  printf 'reachable=%s capturing=%s colour=%s u_dev=%s v_dev=%s\n' \
-    "$reachable" "$capturing" "$colour" "$u_dev" "$v_dev"
+  printf 'reachable=%s capturing=%s colour=%s u_dev=%s v_dev=%s rough=%s\n' \
+    "$reachable" "$capturing" "$colour" "$u_dev" "$v_dev" "$rough"
 }
 
 # splitter_health_is_healthy <reachable 0|1> <capturing 0|1> <colour 0|1> -> stdout: 1 | 0

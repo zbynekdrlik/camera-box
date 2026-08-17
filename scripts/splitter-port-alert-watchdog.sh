@@ -31,9 +31,13 @@
 # mechanism. Per-box state, so each cambox pages independently. A recovery ("colour again") ping fires
 # once when a box we paged for returns to OK.
 #
-# RESIDUAL (documented, not hidden): the readable per-box signals are liveness (a fresh `capture
-# chroma:` line) + colour/grayscale. This catches the flat-grey no-signal mode (ShadowCast) and any
-# frame-stall mode; the Elgato purple-noise mode (colourful, frames flow) is NOT caught -- see
+# #1079 (Elgato purple-noise): the readable per-box signals liveness + colour/grayscale catch the
+# flat-grey no-signal mode (ShadowCast) and any frame-stall mode, but the Elgato purple-noise mode
+# (colourful, frames flow) reads as colour=1 = OK. camera-box now logs a per-frame spatial-roughness
+# term `rough=` on the `capture chroma:` line (high roughness + colour = the structureless-noise
+# signature); this watchdog PARSES + SURFACES it REPORT-ONLY in each box's per-box log line (fleet-wide
+# telemetry). It does NOT page/gate on roughness yet -- a data-first follow-up calibrates the threshold
+# against the accumulated fleet `rough=` data before flipping it into a live page. See
 # .claude/rules/splitter-port-health-watchdog.md.
 #
 # Usage:
@@ -131,11 +135,13 @@ clear_box_throttle() {
 }
 
 # -- per-box decision --------------------------------------------------------------------------
-# handle_box <box> <ip> <verdict> <capturing> <colour> <u_dev> <v_dev> -- the verdict + parsed fields
-# are computed ONCE in main() (so the fleet healthy-count can be aggregated first) and passed in.
+# handle_box <box> <ip> <verdict> <capturing> <colour> <u_dev> <v_dev> <rough> -- the verdict + parsed
+# fields are computed ONCE in main() (so the fleet healthy-count can be aggregated first) and passed
+# in. `rough` (#1079) is SURFACED in the per-box log line REPORT-ONLY (fleet-wide telemetry for a
+# data-first noise-threshold calibration follow-up); it does NOT influence the verdict this PR.
 handle_box() {
-  local box="$1" ip="$2" verdict="$3" capturing="$4" colour="$5" u_dev="$6" v_dev="$7"
-  log "$box ($ip): capturing=$capturing colour=$colour u_dev=$u_dev v_dev=$v_dev -> $verdict"
+  local box="$1" ip="$2" verdict="$3" capturing="$4" colour="$5" u_dev="$6" v_dev="$7" rough="${8:--}"
+  log "$box ($ip): capturing=$capturing colour=$colour u_dev=$u_dev v_dev=$v_dev rough=$rough -> $verdict"
 
   if [ "$verdict" = "OK" ]; then
     local was_alerted
@@ -236,26 +242,28 @@ main() {
   log "pass start (dry_run=$DRY_RUN, active='$active', window=${JOURNAL_WINDOW}s)"
 
   # -- gather each active box's probe ONCE, parse, and count the proven-good fleet ----------------
-  local cam names=() ips=() reaches=() caps=() cols=() us=() vs=() healths=()
+  local cam names=() ips=() reaches=() caps=() cols=() us=() vs=() roughs=() healths=()
   local total_healthy=0
   for cam in $active; do
     if ! camera_resolve "$cam"; then
       log "$cam: camera_resolve failed -- skipping"
       continue
     fi
-    local ip raw parsed reachable=0 capturing=0 colour=0 u_dev="-" v_dev="-" healthy
+    local ip raw parsed reachable=0 capturing=0 colour=0 u_dev="-" v_dev="-" rough="-" healthy
     ip="$CAMERA_IP"
     raw="$(probe_box "$ip")"
     parsed="$(splitter_health_parse_probe "$raw")"
-    # `parsed` is the lib's own `key=value` record (5 fields, values constrained to 0/1/-/[0-9.]).
-    # Consume it in ONE pass -- strip the `key=` prefixes, read the 5 values in field order -- rather
-    # than re-parsing each field with a second, independent regex surface that would silently drift
-    # from the lib's format (the "a real dead port would not page" failure mode a reviewer flagged).
-    read -r reachable capturing colour u_dev v_dev \
+    # `parsed` is the lib's own `key=value` record (6 fields since #1079, values constrained to
+    # 0/1/-/[0-9.]). Consume it in ONE pass -- strip the `key=` prefixes, read the 6 values in field
+    # order -- rather than re-parsing each field with a second, independent regex surface that would
+    # silently drift from the lib's format (the "a real dead port would not page" failure mode a
+    # reviewer flagged). `rough` is the #1079 report-only spatial-roughness telemetry.
+    read -r reachable capturing colour u_dev v_dev rough \
       <<< "$(printf '%s' "$parsed" | sed 's/[a-z_]*=//g')"
     healthy="$(splitter_health_is_healthy "${reachable:-0}" "${capturing:-0}" "${colour:-0}")"
     names+=("$cam"); ips+=("$ip"); reaches+=("${reachable:-0}")
     caps+=("${capturing:-0}"); cols+=("${colour:-0}"); us+=("${u_dev:--}"); vs+=("${v_dev:--}")
+    roughs+=("${rough:--}")
     healths+=("$healthy")
     [ "$healthy" = "1" ] && total_healthy=$(( total_healthy + 1 ))
   done
@@ -271,7 +279,7 @@ main() {
     healthy_siblings="$total_healthy"
     [ "${healths[$i]}" = "1" ] && healthy_siblings=$(( total_healthy - 1 ))
     verdict="$(splitter_health_classify "${reaches[$i]}" "${caps[$i]}" "${cols[$i]}" "$healthy_siblings" | sed -n 's/^verdict=//p')"
-    handle_box "${names[$i]}" "${ips[$i]}" "$verdict" "${caps[$i]}" "${cols[$i]}" "${us[$i]}" "${vs[$i]}"
+    handle_box "${names[$i]}" "${ips[$i]}" "$verdict" "${caps[$i]}" "${cols[$i]}" "${us[$i]}" "${vs[$i]}" "${roughs[$i]}"
   done
   log "pass end"
 }
