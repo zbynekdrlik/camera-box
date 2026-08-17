@@ -1751,6 +1751,49 @@ mod vendored_source {
     }
 
     #[test]
+    fn asrc_uses_sliding_regression_estimator_1084() {
+        // issue #1084: the inner rate estimator must be the sliding least-squares RATE regression
+        // (over the #962 window points), NOT the pre-#1084 fixed-gain time-EMA -- the EMA's variance
+        // under the 1 s window's endpoint wall-jitter was the global A/V-wander root cause. A
+        // `git subtree pull` (#44) or hand-edit reverting to the EMA would silently reintroduce it.
+        // Src authority + Tier-0 gate: tests/asrc_endpoint_jitter_1084.rs + src/asrc_bench.rs.
+        let h = squish(&vendor_file(ASRC_COMPENSATOR_H));
+        assert!(
+            h.contains("#define ASRC_REGRESSION_SPAN_S 600.0")
+                && h.contains("#define ASRC_REGRESSION_LOCK_SPAN_S 60.0")
+                && h.contains("#define ASRC_REGRESSION_MIN_POINTS 30"),
+            "{ASRC_COMPENSATOR_H}: #1084 — a regression constant (ASRC_REGRESSION_SPAN_S / \
+             LOCK_SPAN_S / MIN_POINTS) is missing or its value changed; re-apply/re-sync with \
+             src/asrc_bench.rs's REGRESSION_* constants."
+        );
+        assert!(
+            h.contains("double reg_x[ASRC_REGRESSION_CAP];") && h.contains("bool reg_locked;"),
+            "{ASRC_COMPENSATOR_H}: #1084 — the regression point-buffer fields (reg_x[]/reg_locked) \
+             are missing from struct asrc_compensator; the estimator would have no state to fit."
+        );
+        let c = squish(&vendor_file(ASRC_COMPENSATOR_C));
+        assert!(
+            c.contains("c->estimated_ppm = slope * 1000000.0;"),
+            "{ASRC_COMPENSATOR_C}: #1084 — asrc_compensator_compensate no longer sets estimated_ppm \
+             from the least-squares slope; the inner estimator was reverted (probably back to the \
+             EMA), which is the exact global A/V-wander defect #1084 fixed."
+        );
+        assert!(
+            c.contains("asrc_regression_flush(c);"),
+            "{ASRC_COMPENSATOR_C}: #1084 — the regression buffer is never FLUSHED on a level shift \
+             (a #960 starved window or a non-positive master_block_s); a level shift would then \
+             poison the slope for a full ASRC_REGRESSION_SPAN_S. Re-apply asrc_regression_flush()."
+        );
+        // The EMA is GONE -- a revert to the old fixed-gain smoothing must fail this test.
+        assert!(
+            !c.contains("exp(-window_master_s") && !c.contains("ASRC_TIME_CONSTANT_S"),
+            "{ASRC_COMPENSATOR_C}: #1084 — the pre-#1084 time-EMA smoothing \
+             (exp(-window_master_s / ASRC_TIME_CONSTANT_S)) is BACK; the endpoint-jitter variance \
+             it caused is the #1084 root cause. The estimator must be the sliding regression only."
+        );
+    }
+
+    #[test]
     fn build_latch_drains_burst_to_target_in_vendored_source() {
         // #116: the genlock_fifo branch of ready_async_frame must DRAIN the excess
         // oldest frames at the build latch (and after a preload-change re-arm) so every
