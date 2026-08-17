@@ -61,7 +61,10 @@ fn verdict(grab_rc: &str, size_bytes: &str, mtime_age_s: &str, duration_s: &str)
 #[test]
 fn healthy_fresh_clip_is_allowed() {
     let (code, out) = verdict("0", "500000", "5", "35");
-    assert_eq!(code, 0, "a fresh, big-enough, long-enough clip must be allowed: {out}");
+    assert_eq!(
+        code, 0,
+        "a fresh, big-enough, long-enough clip must be allowed: {out}"
+    );
     assert_eq!(out, "OK", "the allowed verdict is exactly 'OK': {out}");
 }
 
@@ -70,8 +73,14 @@ fn dead_relay_failed_grab_yields_no_signal_never_an_offset() {
     // THE incident: ffmpeg rc=-5, the clip was removed first so there is no file at all.
     let (code, out) = verdict("-5", "-1", "-1", "-1");
     assert_eq!(code, 10, "a failed grab must be NO-SIGNAL: {out}");
-    assert!(out.starts_with("NO-SIGNAL:"), "must be a NO-SIGNAL verdict: {out}");
-    assert!(out.contains("rc=-5"), "the reason must name the ffmpeg rc: {out}");
+    assert!(
+        out.starts_with("NO-SIGNAL:"),
+        "must be a NO-SIGNAL verdict: {out}"
+    );
+    assert!(
+        out.contains("rc=-5"),
+        "the reason must name the ffmpeg rc: {out}"
+    );
     assert!(
         out.to_lowercase().contains("relay") || out.to_lowercase().contains("stream down"),
         "the reason must point at the dead relay/stream: {out}"
@@ -84,36 +93,60 @@ fn stale_clip_left_on_disk_after_a_failed_grab_is_no_signal_rc_checked_first() {
     // big + long -- ONLY its mtime age is huge. rc must be checked FIRST so this can never slip
     // through as a stale verdict (this is the exact 2h09m frozen-input path).
     let (code, out) = verdict("-5", "500000", "7200", "35");
-    assert_eq!(code, 10, "rc!=0 must win regardless of a plausible-looking stale clip: {out}");
-    assert!(out.contains("rc=-5"), "the reason must name the failed grab, not the size/age: {out}");
+    assert_eq!(
+        code, 10,
+        "rc!=0 must win regardless of a plausible-looking stale clip: {out}"
+    );
+    assert!(
+        out.contains("rc=-5"),
+        "the reason must name the failed grab, not the size/age: {out}"
+    );
 }
 
 #[test]
 fn rc_zero_but_no_clip_is_no_signal() {
     let (code, out) = verdict("0", "-1", "-1", "-1");
-    assert_eq!(code, 10, "rc==0 but no clip produced must be NO-SIGNAL: {out}");
-    assert!(out.to_lowercase().contains("no clip"), "reason must say no clip: {out}");
+    assert_eq!(
+        code, 10,
+        "rc==0 but no clip produced must be NO-SIGNAL: {out}"
+    );
+    assert!(
+        out.to_lowercase().contains("no clip"),
+        "reason must say no clip: {out}"
+    );
 }
 
 #[test]
 fn clip_too_small_is_no_signal() {
     let (code, out) = verdict("0", "100000", "5", "35");
     assert_eq!(code, 10, "a <200kB clip must be NO-SIGNAL: {out}");
-    assert!(out.to_lowercase().contains("too small"), "reason must say too small: {out}");
+    assert!(
+        out.to_lowercase().contains("too small"),
+        "reason must say too small: {out}"
+    );
 }
 
 #[test]
 fn clip_stale_by_mtime_age_is_no_signal() {
     let (code, out) = verdict("0", "500000", "200", "35");
-    assert_eq!(code, 10, "a clip older than the age bound must be NO-SIGNAL: {out}");
-    assert!(out.to_uppercase().contains("STALE"), "reason must say STALE: {out}");
+    assert_eq!(
+        code, 10,
+        "a clip older than the age bound must be NO-SIGNAL: {out}"
+    );
+    assert!(
+        out.to_uppercase().contains("STALE"),
+        "reason must say STALE: {out}"
+    );
 }
 
 #[test]
 fn clip_too_short_is_no_signal() {
     let (code, out) = verdict("0", "500000", "5", "10");
     assert_eq!(code, 10, "a <20s clip must be NO-SIGNAL: {out}");
-    assert!(out.to_lowercase().contains("too short"), "reason must say too short: {out}");
+    assert!(
+        out.to_lowercase().contains("too short"),
+        "reason must say too short: {out}"
+    );
 }
 
 #[test]
@@ -121,7 +154,10 @@ fn unknown_duration_minus_one_does_not_penalize() {
     // ffprobe unavailable -> dur=-1. The live gate deliberately does NOT fail on an unknown
     // duration (`$dur -ge 0 -and $dur -lt 20`); only a POSITIVE-but-too-short duration fails.
     let (code, out) = verdict("0", "500000", "5", "-1");
-    assert_eq!(code, 0, "an unknown (negative) duration must not fail the gate: {out}");
+    assert_eq!(
+        code, 0,
+        "an unknown (negative) duration must not fail the gate: {out}"
+    );
     assert_eq!(out, "OK", "{out}");
 }
 
@@ -130,10 +166,26 @@ fn thresholds_are_inclusive_boundaries() {
     // The exact live thresholds (200000 B, 180 s, 20 s) live in the decider now, tested as the
     // single source of truth. size==min, age==max, dur==min are all still OK (the fails are
     // strictly `< min` / `> max`).
-    assert_eq!(verdict("0", "200000", "180", "20"), (0, "OK".into()), "boundaries are inclusive");
-    assert_eq!(verdict("0", "199999", "180", "20").0, 10, "one byte under the size floor fails");
-    assert_eq!(verdict("0", "200000", "181", "20").0, 10, "one second over the age ceiling fails");
-    assert_eq!(verdict("0", "200000", "180", "19").0, 10, "one second under the duration floor fails");
+    assert_eq!(
+        verdict("0", "200000", "180", "20"),
+        (0, "OK".into()),
+        "boundaries are inclusive"
+    );
+    assert_eq!(
+        verdict("0", "199999", "180", "20").0,
+        10,
+        "one byte under the size floor fails"
+    );
+    assert_eq!(
+        verdict("0", "200000", "181", "20").0,
+        10,
+        "one second over the age ceiling fails"
+    );
+    assert_eq!(
+        verdict("0", "200000", "180", "19").0,
+        10,
+        "one second under the duration floor fails"
+    );
 }
 
 #[test]
@@ -141,7 +193,10 @@ fn malformed_input_fails_closed_never_ok() {
     // A corrupt/absent value must be treated as NO-SIGNAL, never silently allowed (this repo's
     // standing fail-closed discipline -- cf. avsync_heartbeat_is_stale's "missing/corrupt = stale").
     let (code, out) = verdict("0", "not-a-number", "5", "35");
-    assert_eq!(code, 10, "a malformed size must fail closed to NO-SIGNAL, never OK: {out}");
+    assert_eq!(
+        code, 10,
+        "a malformed size must fail closed to NO-SIGNAL, never OK: {out}"
+    );
     assert!(out.starts_with("NO-SIGNAL:"), "{out}");
 }
 
@@ -157,8 +212,10 @@ fn watchdog_ps1_delegates_the_decision_to_the_pure_gate_no_inline_thresholds() {
         "the ps1 must DELEGATE the fresh/stale decision to the pure decider, not duplicate it"
     );
     assert!(
-        body.contains("--grab-rc") && body.contains("--size-bytes")
-            && body.contains("--mtime-age-s") && body.contains("--duration-s"),
+        body.contains("--grab-rc")
+            && body.contains("--size-bytes")
+            && body.contains("--mtime-age-s")
+            && body.contains("--duration-s"),
         "the ps1 must pass the four grab facts (rc, size, mtime-age, duration) to the decider"
     );
     // The magic numbers must be GONE from the ps1 -- they now live only in the decider.

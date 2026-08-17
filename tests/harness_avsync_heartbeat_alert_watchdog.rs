@@ -877,7 +877,11 @@ fn verdict_signature_strips_the_timestamp_814() {
         "avsync_heartbeat_verdict_signature \
          'measured: [2026-07-26 14:31:10] AV offset +2 fr (+80 ms) conf 3.6 :: ZNIZ latency o 80'",
     );
-    assert_eq!(out.trim(), out2.trim(), "only the timestamp differs -> identical signature");
+    assert_eq!(
+        out.trim(),
+        out2.trim(),
+        "only the timestamp differs -> identical signature"
+    );
 }
 
 #[test]
