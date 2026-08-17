@@ -92,6 +92,28 @@ fn avsync_watchdog_ps1_writes_a_heartbeat_every_pass_regardless_of_outcome() {
 }
 
 #[test]
+fn avsync_watchdog_ps1_enriches_the_heartbeat_with_the_audio_presence_db_813() {
+    // #813: the dev1-side liveness alarm (scripts/avsync_lineup.py) keys content-liveness on the
+    // program-audio LEVEL, not the SyncNet verdict text -- av_sync_measure.py prints "UNMEASURABLE
+    // window" for BOTH a SILENT chain (the 2026-08-17 incident) and a normal no-face band segment,
+    // so only the dB distinguishes them. The ps1 must compute max_volume via ffmpeg volumedetect on
+    // the grabbed clip and prefix it as db=<X> into the MEASURED heartbeat.
+    let body = read(WATCHDOG_PS1);
+    assert!(
+        body.contains("volumedetect") && body.contains("max_volume"),
+        "the ps1 must measure the audio level via ffmpeg volumedetect (max_volume) on the grabbed clip"
+    );
+    assert!(
+        body.contains("Get-MaxVolumeDb"),
+        "the volumedetect probe must be a named helper reused on the measured path"
+    );
+    assert!(
+        body.contains("Write-Heartbeat \"measured: db=$db"),
+        "the measured heartbeat must carry the db=<X> audio-presence reading the dev1 decider parses"
+    );
+}
+
+#[test]
 fn avsync_watchdog_ps1_bounds_the_measurement_call_never_wedges_on_a_hung_python() {
     let body = read(WATCHDOG_PS1);
     assert!(

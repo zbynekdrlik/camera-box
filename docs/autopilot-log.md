@@ -9173,3 +9173,20 @@ No push/PR/rig touch (worktree worker).
 - Impl: `vendor/obs-studio/libobs/obs-source.c` — new `static long long genlock_wall_qpc_drift_ms(void)` next to `genlock_wall_now_ns()`, reads both clocks back-to-back (#269 single-read), function-local static anchors (graphics-thread-only → no lock, same as the non-atomic genlock counters + `genlock_ts_align_enabled`); emitted as `wall_qpc_drift_ms=%lld` on the audit blog(). `src/jitter_audit.rs` input-side `AuditSample` gains `i64 wall_qpc_drift_ms` + one match arm (NOT AuditSummary/summaries_to_json — issue-757 `--json` contract untouched). Lock-step anchors: `tests/genlock_preload.rs` (probe-gated) + BOTH `windows-genlock*.yml` pwsh gates (mirrors issue 1009 / issue 1049 fields).
 - TDD RED→GREEN (both observed via standalone rustc, cargo can't run here #477): parser test (28 tests, the field parses signed, defaults to 0 on a pre-#800 line — serde_json rlib borrowed from a sibling worktree's target/deps via `--extern`); std-only `tests/genlock_wall_qpc_emit.rs` C-emit anchor (RED before C edit, GREEN after). C lift-and-compile harness `gcc -Wformat=2 -Wconversion -Werror` (%lld vs long long OK, drift math 0/+200/+400 ms). `cargo fmt --all --check` + `cargo clippy --all-targets -D warnings` clean. pwsh anchors verified offline against the python-squished source (pwsh not on dev1). Brace/paren balance vs HEAD: even.
 - RED 35b2312c9, GREEN 598c4bd75, version-bump 2295b3dd9. Worktree-mode: STOP at local-green; supervisor integrates + opens PR (Closes #800).
+- issue 813 (measurement A/V-sync line pre-event GO/NO-GO assert + stream-state-bound liveness alarm):
+  root cause = the existing dev1 avsync-heartbeat-alert-watchdog.sh alarms on heartbeat STALENESS
+  only + unconditionally, so it missed the 2026-08-17 silent-audio content-death (fresh heartbeat,
+  status "measured: unknown, candidates: 0") and can't tell an off-air box from a dead watchdog
+  during a live event. Added a PURE single-source decider scripts/avsync_lineup.py
+  (heartbeat_fresh + status_is_healthy_measured + stream_is_live -> preflight_verdict + liveness_alarm,
+  fail-CLOSED) mirroring avsync_freshness.py/event_assert.py; a thin dev1 caller
+  scripts/avsync-lineup-alert-watchdog.sh (default liveness pass BOUND to stream outputActive via
+  obs_phase2.py stream-status; --assert one-shot pre-event GO/NO-GO with forwarder-timer + real
+  Discord 200 test-ping) reusing obs-watchdog-decision.sh confirm/throttle + avsync-heartbeat.sh
+  probe/parse + airuleset.py notify (no fourth measurement path); systemd 5-min timer.
+  RED test_avsync_lineup.py b66cfdd50 -> GREEN avsync_lineup.py 5ff4f91c4 (29 pytest); feature +
+  harness e06150af0 (11 rust harness tests). Local Tier-0 green (fmt, clippy -D warnings, pytest).
+  GOTCHA: scripts/lib/avsync-heartbeat.sh's `set -euo pipefail` LEAKS -e into the caller and a
+  `set -uo pipefail` re-assert does NOT clear it; a `var="$(decider)"` where the decider exits 1
+  (a preflight NO-GO) then aborts at the ASSIGNMENT before the verdict prints -> needs explicit
+  `set +e` (ci-testing-gotchas.md leaked-set-e trap).

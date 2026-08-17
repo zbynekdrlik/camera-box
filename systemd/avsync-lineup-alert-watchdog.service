@@ -1,0 +1,22 @@
+[Unit]
+# measurement A/V-sync LINE liveness alarm (#813), DEV1-SIDE. ONE gather -> decide -> alert pass,
+# bound to the stream's outputActive (an off-air box never pages; a dead line during a live stream
+# does). Complements avsync-heartbeat-alert-watchdog.service (staleness-only) -- see
+# .claude/rules/avsync-monitoring.md.
+Description=camera-box avsync LINE liveness alarm (#813) -- one stream-state-bound gather/decide/alert pass
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Service]
+Type=oneshot
+# The stream-state read (obs_phase2.py stream-status) needs the stream box OBS-WS password. It is a
+# SECRET (never committed), so provide it at install via a drop-in / EnvironmentFile that sets
+# OBS_WS_PASSWORD (the repo-standard env). Without it the read comes back None and the run-time
+# alarm SUPPRESSES the ambiguous no-signal/stale cases (a fresh-measured silent-audio alarm still
+# fires -- it needs no WS read); `avsync-lineup-alert-watchdog.sh --assert` NO-GOs on a None read so
+# a missing password is caught before an event, not silently during it.
+#   EnvironmentFile=%h/.camera-box/avsync-lineup.env      # one line: OBS_WS_PASSWORD=...
+# %h = the installing user's home. Adjust if the checkout lives elsewhere on dev1.
+ExecStart=%h/devel/camera-box/scripts/avsync-lineup-alert-watchdog.sh
+# One ssh round-trip to the stream box + one obs_phase2.py stream-status OBS-WS read + (only on a
+# confirmed ALARM) an airuleset.py notify -- give it room but never hang the timer.
+TimeoutStartSec=45

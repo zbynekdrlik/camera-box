@@ -79,6 +79,20 @@ function Invoke-Measurement($clipPath, [string[]]$webhookArgs) {
   return $lastErr
 }
 
+# Get-MaxVolumeDb CLIP -> the ffmpeg volumedetect max_volume in dB (e.g. "-5.4"), or "unreadable"
+# when ffmpeg produced no max_volume line. #813: the dev1-side liveness alarm keys on THIS audio-
+# presence level, not the SyncNet verdict text -- av_sync_measure.py prints "UNMEASURABLE window"
+# for BOTH a SILENT chain and a normal no-face band segment, so only the LEVEL distinguishes them
+# (digital silence ~-91 dB, a live QPSK marker ~-5 dB). Runs on the SAME clip already grabbed this
+# pass (no second grab / no fourth measurement path), reusing scripts/lib/audio-presence-
+# preflight.sh's own volumedetect probe shape.
+function Get-MaxVolumeDb($clipPath) {
+  $vd = & ffmpeg -hide_banner -nostats -i $clipPath -af volumedetect -f null NUL 2>&1
+  $m = $vd | Select-String -Pattern 'max_volume:\s*(-?\d+(\.\d+)?)\s*dB' | Select-Object -Last 1
+  if ($m) { return $m.Matches[0].Groups[1].Value }
+  return 'unreadable'
+}
+
 "WATCHDOG START $(Get-Date -Format s)" | Out-File $log -Append
 while ($true) {
   $t0 = Get-Date
@@ -114,11 +128,16 @@ while ($true) {
     "LIVE :: NO-SIGNAL - no verdict ($reason)" | Out-File $log -Append
     Write-Heartbeat "no-signal: $reason"
   } else {
+    # #813: measure the program-audio LEVEL on the SAME grabbed clip so the dev1-side liveness alarm
+    # can tell a SILENT measurement chain (~-91 dB, the 2026-08-17 incident) from a normal no-face
+    # band segment (both read UNMEASURABLE in the SyncNet verdict text). Prefixed into the heartbeat
+    # as db=<X>; the LIVE log line keeps its existing prefix unchanged (a test anchors on it).
+    $db = Get-MaxVolumeDb $clip
     $webhookArgs = @()
     if ($webhook) { $webhookArgs = @('--webhook', $webhook) }
     $out = Invoke-Measurement $clip $webhookArgs
-    "LIVE :: $out" | Out-File $log -Append
-    Write-Heartbeat "measured: $out"
+    "LIVE :: $out (db=$db)" | Out-File $log -Append
+    Write-Heartbeat "measured: db=$db $out"
   }
   $elapsed = ((Get-Date) - $t0).TotalSeconds
   Start-Sleep -Seconds ([Math]::Max(30, 90 - $elapsed))
