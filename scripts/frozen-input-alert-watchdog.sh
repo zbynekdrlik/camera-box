@@ -173,8 +173,14 @@ probe_enumerate() {
   if [ -n "${FROZEN_INPUT_ENUMERATE_CMD:-}" ]; then
     raw="$($FROZEN_INPUT_ENUMERATE_CMD "$ip" 2>/dev/null || true)"
   else
-    # Reuse the #1093 strih OBS-log reader (source name unused for the raw read -> "").
-    raw="$(mv_reverify_probe_raw "$ip" "" 2>/dev/null || true)"
+    # Reuse the #1093 strih OBS-log reader (source name unused for the raw read -> ""). Thread the
+    # watchdog's OWN FROZEN_INPUT_SSH_* env into mv_reverify_probe_raw's STRIH_*/tail/timeout knobs so
+    # the enumeration read and the per-source probe_received read share ONE credential + tail namespace
+    # -- otherwise changing only FROZEN_INPUT_SSH_PW would fix per-source reads while the enumeration
+    # read (on STRIH_PW) starts failing -> a spurious enumeration-BLIND WARN (review #1069).
+    raw="$(STRIH_USER="$SSH_USER" STRIH_PW="$SSH_PW" \
+      MV_REVERIFY_RECEIVED_SSH_TIMEOUT="$SSH_TIMEOUT" MV_REVERIFY_RECEIVED_TAIL="$OBS_LOG_TAIL" \
+      mv_reverify_probe_raw "$ip" "" 2>/dev/null || true)"
   fi
   printf '%s\n' "$raw" | frozen_input_cambox_sources "$ENUM_INCLUDE" "$ENUM_EXCLUDE"
 }

@@ -82,16 +82,17 @@ const STRIH_LOG: &str = "\
 #[test]
 fn lib_defines_the_enumeration_filter() {
     let out = stdout_of("type frozen_input_cambox_sources >/dev/null 2>&1 && echo DEFINED");
-    assert_eq!(out, "DEFINED", "frozen_input_cambox_sources is not defined by the lib");
+    assert_eq!(
+        out, "DEFINED",
+        "frozen_input_cambox_sources is not defined by the lib"
+    );
 }
 
 /// Feed the realistic log on stdin; expect the 4 cambox camera inputs, deduped, in first-seen order,
 /// and NOT the program/preview feeds.
 fn enumerate(raw: &str) -> Vec<String> {
-    // shell-escape the raw text into a heredoc so newlines survive.
-    let body = format!(
-        "printf '%s' \"$RAW\" | frozen_input_cambox_sources"
-    );
+    // The raw text is passed via the RAW env var (below) so newlines survive; printf it on stdin.
+    let body = "printf '%s' \"$RAW\" | frozen_input_cambox_sources";
     let harness = format!("set -uo pipefail\n. \"$LIB\"\n{body}");
     let out = Command::new("bash")
         .arg("-c")
@@ -173,10 +174,8 @@ struct EnumRig {
 
 impl EnumRig {
     fn new(tag: &str, enumerate_body: &str) -> Self {
-        let base = std::env::temp_dir().join(format!(
-            "cbox-fi-enum-1069-{tag}-{}",
-            std::process::id()
-        ));
+        let base =
+            std::env::temp_dir().join(format!("cbox-fi-enum-1069-{tag}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
         fs::create_dir_all(&base).unwrap();
         let state_dir = base.join("state");
@@ -210,7 +209,14 @@ with open(os.environ["STUB_NOTIFY_LOG"], "a") as f:
 "#;
         let notify = write_stub(&base, "notify.py", notify_body);
 
-        EnumRig { dir: base, enumerate_cmd, probe_cmd, notify, state_dir, notify_log }
+        EnumRig {
+            dir: base,
+            enumerate_cmd,
+            probe_cmd,
+            notify,
+            state_dir,
+            notify_log,
+        }
     }
 
     fn run_pass(&self, confirm_threshold: &str, enum_blind_threshold: &str) {
@@ -226,7 +232,10 @@ with open(os.environ["STUB_NOTIFY_LOG"], "a") as f:
             .env("STUB_NOTIFY_LOG", &self.notify_log)
             .env("STUB_STATE", &self.state_dir)
             .env("FROZEN_INPUT_ALERT_STATE_DIR", &self.state_dir)
-            .env("FROZEN_INPUT_ALERT_STATE_FILE", self.state_dir.join("strih.state"))
+            .env(
+                "FROZEN_INPUT_ALERT_STATE_FILE",
+                self.state_dir.join("strih.state"),
+            )
             .env(
                 "FROZEN_INPUT_NETREACH_STATE_FILE",
                 self.state_dir.join("does-not-exist.state"),
@@ -258,10 +267,17 @@ impl Drop for EnumRig {
 
 #[test]
 fn enumeration_mode_pages_a_frozen_cambox_input_and_not_the_advancing_ones() {
-    let rig = EnumRig::new("frozen", &format!("#!/usr/bin/env bash\ncat <<'LOG'\n{STRIH_LOG}LOG\n"));
+    let rig = EnumRig::new(
+        "frozen",
+        &format!("#!/usr/bin/env bash\ncat <<'LOG'\n{STRIH_LOG}LOG\n"),
+    );
     // Pass 1 seeds every cambox source (no prior sample -> UNKNOWN, no page).
     rig.run_pass("1", "24");
-    assert_eq!(rig.notify_log().trim(), "", "pass 1 seeds only — nothing paged yet");
+    assert_eq!(
+        rig.notify_log().trim(),
+        "",
+        "pass 1 seeds only — nothing paged yet"
+    );
     // Pass 2: cam2 counter held (FROZEN), the others advanced. Confirm threshold 1 -> page cam2.
     rig.run_pass("1", "24");
     let log = rig.notify_log();
