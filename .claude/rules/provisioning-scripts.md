@@ -55,3 +55,34 @@ guarded` — that test scans EVERY line of `recording-e2e.sh` containing both su
 demands a `|| true`/`2>/dev/null` guard, comments included. Reword so the two literal substrings
 never land on the same line (e.g. "...came back active + painting after cleanup() restarts it
 below..." instead of quoting the actual command in the same sentence).
+
+## Adding a new `camera-box.service.d` drop-in + its `verify-device.sh` acceptance check (#1087)
+
+To bake a NEW env drop-in into provisioning AND prove it takes effect, follow the (e) genlock pattern
+(worked example: (z) publish-30p, `CAMERA_BOX_PUBLISH_30P=1`, the "CAMn (30p)" blend stream):
+
+- **`setup-device.sh` write**: put the `cat > .../<name>.conf` heredoc INSIDE STEP 7, right beside the
+  `genlock.conf` write — it shares STEP 7's existing `mkdir` + `daemon-reload` + `enable camera-box`,
+  keeping every `camera-box.service.d` drop-in write co-located. Do NOT add a separate late step: a step
+  after STEP 18 writes to a read-only root (STEP 18 flips root ro) and fails. Use `<< 'EOF'` (quoted) for
+  a literal env drop-in and confirm byte-faithfulness by hashing the live fleet file
+  (`sha256sum` on a box) against the heredoc body.
+- **Drop-in-value parser** (pure, sourced + unit-tested): mirror `genlock_dropin_fps` EXACTLY —
+  `printf '%s\n' "$1" | grep -oE 'ENV_VAR=[0-9]+' | tail -1 | cut -d= -f2 || true`. The trailing `|| true`
+  is mandatory (the #458 footgun: a no-match `grep|tail|cut` fails under `pipefail` even though
+  `tail`/`cut` succeed on empty input, and a bare `X="$(parser ...)"` caller must never abort).
+- **"Feature actually running" facet**: don't stop at the drop-in file — prove the feature is LIVE by
+  reusing the `CB_JOURNAL` already gathered in check (c) (the InvocationID-scoped last-300-lines read)
+  and grepping it for the feature's own recurring journal marker. Use `grep -cE 'markerA|markerB' || true`
+  (a COUNT; caller tests `!= "0"`) — **NEVER `grep -q`**: `-q` closes the pipe on first match, which can
+  SIGPIPE the upstream `printf` and, under `pipefail`, return non-zero even on a real match. `grep -c`
+  reads all input (no early close), so it is SIGPIPE-safe.
+- **Exec block**: insert it BEFORE the `# (q) .bak cruft drift` block (the (q)-last rule above), follow
+  the (e) shape (`rc=0; X="$(ssh_box "cat ...")" || rc=$?`), and FAIL on EVERY non-success path (missing
+  / wrong-value drop-in, unreadable journal, drop-in-present-but-not-publishing — e.g. an old binary that
+  predates the feature). Document the new letter in all THREE places (header Checks list, `usage()` Checks
+  block, executable block).
+- The next free check letter is whatever the header/usage/exec sequence has NOT used (they are NOT strictly
+  alphabetical in file order); grep the three lists rather than assume. A letter cited only in a
+  `setup-device.sh` comment ("verified by verify-device.sh's (N) check") is not proof the check exists —
+  confirm against `verify-device.sh` itself.
