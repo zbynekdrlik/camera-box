@@ -216,7 +216,9 @@ def test_liveness_ALARM_when_stream_live_and_content_silent_TODAY():
     f["heartbeat_status"] = 'measured: av_sync verdict: "unknown", candidates: 0'
     action, reason = al.liveness_alarm(f)
     assert action == "ALARM"
-    assert "treba zásah" in reason
+    # ASCII-transliterated Slovak, matching the repo's operator-string convention
+    # (cf. event_assert.py's ITEM_LABELS_SK) -- keeps logs/Discord encoding-safe across the pipeline.
+    assert "treba zasah" in reason
 
 
 def test_liveness_ALARM_when_stream_live_and_heartbeat_stale():
