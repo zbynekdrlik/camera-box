@@ -56,6 +56,15 @@ sudo ./scripts/create-usb-linux.sh /dev/sdX
 3. **Wait ~5 minutes for first boot** - the fresh install takes longer on first boot
 4. Device will get DHCP IP initially
 
+> **GPU-dependent (cam5-class Intel iGPU) boxes — do the FIRST physical boot WITH a monitor connected (#448).**
+> `create-usb-linux.sh` bakes `/etc/modules-load.d/i915.conf` so the `i915` DRM driver force-loads at
+> every boot (headless included), giving `/dev/dri` + `/dev/fb0` for the painter / cameraman monitor.
+> That pin covers the DRIVER, but on some firmware the DRM connector + framebuffer only bring up cleanly
+> when a display is present at boot. As belt-and-braces, the FIRST physical boot of a GPU-dependent box
+> should have a monitor connected so the connector/`fb0` initializes before any headless-boot automation
+> takes over — this is exactly the cam5 headless-boot pain (event finding #8) the modules-load.d pin +
+> this note together close. Boxes with no capture/display grabber (e.g. cam4) are unaffected.
+
 **SSH Connection Details (fresh install):**
 - Username: `root`
 - Password: `newlevel`
