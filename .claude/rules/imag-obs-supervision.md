@@ -170,3 +170,38 @@ and that a measurement/gate turns on at runtime must be reset at OBS START, or i
 restart. **Follow-up (#1057):** strih (Windows OBS) has the identical resurrection on a different
 start path, and the broader "verify whole runtime state at start + report drift LOUD" (burns OFF +
 latency pins) is filed separately — not solved here.
+
+## The dev1-side ALERT path must distinguish a DELIBERATE operator quit from a crash — read the UNIT STATE, not the OBS log (#788)
+
+The RELAUNCH half of #788 is solved by `imag-obs.service Restart=on-failure` above. The ALERT half
+(the dev1-side `scripts/imag-obs-alert-watchdog.sh`) had a residual: it fired "OBS is DOWN" on ANY
+`OBS_PROCESS_ABSENT` with no crash-vs-quit discrimination, so an operator quitting OBS on purpose
+(to test latency) still paged the crew. The AUTHORITATIVE discriminator is systemd's OWN
+`Restart=on-failure` verdict — **read the unit state, do NOT parse the OBS log** (the ticket's
+original log-marker idea predates the #882 systemd model and is fragile/redundant beside it):
+
+- A clean quit / operator `systemctl --user stop` → `LoadState=loaded ActiveState=inactive
+  Result=success`. A crash-loop that exhausted `Restart=` → `ActiveState=failed`. A restart in
+  progress → `activating`/`exit-code`. So `loaded + inactive + success` == deliberate → SUPPRESS;
+  everything else → ALARM (fail-safe: "bez clean markera = pád → alarm").
+- **LIVE-CONFIRMED systemd quirk — you MUST require `LoadState=loaded`:** `systemctl --user show
+  <not-found>.service --property=LoadState,ActiveState,Result` returns `LoadState=not-found
+  ActiveState=inactive Result=success` for a unit that does not exist. Without the `loaded` check, a
+  missing/uninstalled unit would be misread as a clean quit and a genuinely-down OBS would never
+  alarm.
+- **Reading the USER unit over a non-login ssh needs `export XDG_RUNTIME_DIR=/run/user/$(id -u)`**
+  first (issue 998), or `systemctl --user` can't reach the user bus.
+
+Implementation shape (reused, not a new mechanism): two PURE seams in
+`scripts/lib/imag-obs-reachability.sh` — `imag_obs_deliberate_down_probe_cmd [pause_file]
+[pause_window_s]` (a remote-snippet builder, same always-exit-0 pattern as
+`imag_obs_reachability_probe_cmd`) and `imag_obs_down_is_deliberate` (a pure token classifier;
+`while-read` over a herestring so it is safe under the sourced libs' `set -euo pipefail` — a `sed |
+head` would SIGPIPE-abort under pipefail). The watchdog does a SECOND ssh only on
+`OBS_PROCESS_ABSENT` (an `OBS_PORT_NOT_LISTENING` = process up, never a quit → still alarms); on
+deliberate it clears the full alert throttle (confirm/alert_sig/alert_passes, symmetric with the
+healthy-pass branch) and returns without paging. A time-bounded operator override file
+(`/tmp/imag-watchdog-pause`, default 60 min from its mtime, so a forgotten pause can never mask a
+real crash forever) is the explicit escape hatch. The `imag_obs_reachability_probe_cmd`/`_message`
+functions the [0/8] preflight uses are UNTOUCHED — the preflight legitimately fails on any
+OBS-absent, deliberate or not; the discriminator is ONLY for the alert path.
