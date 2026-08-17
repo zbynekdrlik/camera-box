@@ -434,7 +434,13 @@ void obs_display_set_render_divisor(obs_display_t *display, uint32_t divisor)
 		 * display becomes a throttleable monitoring surface, so its multiview-audit line
 		 * carries a stable monitor=N across the run. A SHARED monotonic counter (the
 		 * OPPOSITE of the per-instance cadence counters — an audit id MUST be distinct per
-		 * projector), set-once from the Qt create thread exactly like render_divisor. */
+		 * projector), set-once from the Qt create thread exactly like render_divisor.
+		 * CONCURRENCY (review): `++next_audit_id` is a shared read-modify-write, NOT
+		 * atomic. This is safe ONLY because projectors are created SERIALLY on the single
+		 * Qt UI thread (the same single-writer assumption render_divisor's own store relies
+		 * on). If OBS ever created displays from multiple threads concurrently, two could
+		 * race to the same id and log a duplicate monitor=N — it would never corrupt memory
+		 * or affect the program render, only make two audit lines ambiguous. */
 		if (divisor > 1 && display->render_audit_id == 0) {
 			static uint32_t next_audit_id;
 			display->render_audit_id = ++next_audit_id;

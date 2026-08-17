@@ -44,6 +44,13 @@ pub fn mv_floor_fps(canvas_fps: f64) -> f64 {
 }
 
 /// Measured render cadence = real renders / window seconds. `window_ns == 0` → 0.0 (no window).
+///
+/// SPEC ANCHOR (#771): this is the Rust mirror of the EXACT `rendered_fps` computation the C
+/// emit does inline in `render_display()` (obs-display.c):
+/// `(double)display->render_audit_render_count / ((double)audit_elapsed / 1e9)`. It is not called
+/// by the gate (which reads the already-emitted `rendered_fps=` off the line) — it exists, like
+/// `mv_floor_fps` mirrors the C floor, so the emit's fps math has a unit-tested Rust spec. The
+/// `measured_fps_is_renders_over_window_seconds` test is that spec assertion.
 pub fn measured_fps(render_count: u64, window_ns: u64) -> f64 {
     if window_ns == 0 {
         return 0.0;
@@ -108,6 +115,11 @@ pub fn classify(rendered_fps: f64, floor_fps: f64) -> MvVerdict {
 /// required numeric fields; every other line (including the `genlock-*` audit lines and plain
 /// noise) returns `None`. Unrecognized `key=value` tokens are ignored (the jitter_audit token-scan
 /// convention), so the emitter can add fields later without breaking this parser.
+///
+/// The float fields use Rust's `.`-decimal `f64::parse` (#771, review): the C emitter always writes
+/// `%.1f`/`%.0f` under OBS's C locale, so the decimal separator is always `.` — a match. A field
+/// that ever failed to parse degrades safely (the whole line → `None` → `NoSamples`, never a wrong
+/// number).
 pub fn parse_audit_line(line: &str) -> Option<MvAuditSample> {
     let mark_at = line.find(MARKER)?;
     let rest = &line[mark_at + MARKER.len()..];
@@ -179,6 +191,14 @@ pub enum GateOutcome {
 /// Gate a whole OBS log: take each projector's LATEST sample and alarm if any is below its own
 /// printed floor. This is the decision the `mv-fps-gate` bin (E2E preflight / drift-guard
 /// consumer) exposes.
+///
+/// FRESHNESS ASSUMPTION (#771, review): this gates the LATEST sample regardless of its age — the
+/// caller is expected to pass a CURRENT log (the E2E preflight / drift-guard read the newest OBS
+/// log at gate time). It carries no epoch, so a full graphics-thread STALL (OBS frozen, no new
+/// audit line emitted at all) leaves the last-good sample reading PASS here; that stall class is
+/// the render-liveness watchdog's job (`renderTotalFrames` advancement, `#391` /
+/// obs-liveness-render-signal.md), not this per-projector cadence floor. The LIVE always-on
+/// wiring + any freshness/heartbeat check is tracked in the #771 follow-up ticket.
 pub fn gate_log(log_text: &str) -> GateOutcome {
     let latest = latest_per_monitor(log_text);
     if latest.is_empty() {
