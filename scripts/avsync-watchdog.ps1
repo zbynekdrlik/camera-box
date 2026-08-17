@@ -100,8 +100,12 @@ while ($true) {
   $reason = $null
   $freshOut = & $pythonExe $freshnessScript --grab-rc $rc --size-bytes $size --mtime-age-s $ageSec --duration-s $dur 2>&1
   $freshRc = $LASTEXITCODE
-  if ($freshRc -ne 0) {
-    $freshText = "$($freshOut | Select-Object -Last 1)"
+  $freshText = "$($freshOut | Select-Object -Last 1)"
+  # Fail CLOSED: proceed to measure ONLY when the decider clearly says OK (exit 0 AND a literal
+  # "OK"). ANY other outcome -- a NO-SIGNAL verdict, a non-zero exit, or an unexpected output (e.g.
+  # a missing interpreter, which on Windows leaves $LASTEXITCODE unchanged at a stale prior value)
+  # -- is NO-SIGNAL, so a verdict is never emitted on unprovable freshness.
+  if ($freshRc -ne 0 -or $freshText -notmatch '^\s*OK\s*$') {
     if ($freshText -match 'NO-SIGNAL:\s*(.*)$') { $reason = $Matches[1] }
     else { $reason = "freshness gate unavailable (rc=$freshRc): $freshText" }
   }
