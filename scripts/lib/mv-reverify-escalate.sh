@@ -247,8 +247,15 @@ mv_reverify_or_escalate() {
   # sender right after its own deploy is a run-ending failure regardless), and the OUTCOME is still
   # correct (exit 1). A sender-side pre-check would need the box IP + burn-unit name threaded through
   # both call sites; deferred as not worth the coupling for a bounded, self-healing waste.
-  if [ "${MV_REVERIFY_OBS_RESTARTED:-0}" = "1" ]; then
-    echo "    [#1093 escalate] ${box}: still wedged AFTER a prior strih-OBS restart this run -- not restarting again (issue 1096: a fresh OBS can re-wedge on the next bounce). Failing loud." >&2
+  # Restart BUDGET (issue 1096 live rate, 2026-08-17): a COUNTER capped by
+  # MV_REVERIFY_OBS_RESTART_MAX (default 3) -- one restart per run could not carry a run whose
+  # deploy bounces 3+ senders when each bounce coin-flips a fresh wedge (run 32031076988: cam1
+  # cured by the single restart, cam2's next bounce re-wedged the fresh OBS and failed the run).
+  # Each restart costs ~60s of wait budget, so the cap is self-limiting; the legacy
+  # MV_REVERIFY_OBS_RESTARTED=1 kill-switch still blocks outright (kept for operators + tests).
+  if [ "${MV_REVERIFY_OBS_RESTARTED:-0}" = "1" ] \
+    || [ "${MV_REVERIFY_OBS_RESTARTS:-0}" -ge "${MV_REVERIFY_OBS_RESTART_MAX:-3}" ]; then
+    echo "    [#1093 escalate] ${box}: still wedged AFTER a prior strih-OBS restart this run and the restart budget (${MV_REVERIFY_OBS_RESTARTS:-0}/${MV_REVERIFY_OBS_RESTART_MAX:-3}) is spent -- not restarting again (issue 1096: a fresh OBS can re-wedge on the next bounce). Failing loud." >&2
     return 1
   fi
   echo "    [#1093 escalate] ${box}: receiver WEDGE confirmed (issue 1096) -- restarting strih OBS once (force-kill+sentinel-clear; AutoHotkey64 respawns one clean genlock obs64), then re-checking once." >&2
@@ -260,7 +267,7 @@ mv_reverify_or_escalate() {
     echo "    [#1093 escalate] ${box}: strih's AutoHotkey64 respawn watcher is ABSENT -- restart skipped (obs64 left running). Cannot recover this wedge safely from the harness; failing loud." >&2
     return 1
   fi
-  MV_REVERIFY_OBS_RESTARTED=1
+  MV_REVERIFY_OBS_RESTARTS=$((${MV_REVERIFY_OBS_RESTARTS:-0} + 1))
   mv_reverify_wait_obs_ws "$STRIH"
   # A force-kill reload can restore a SAVED genlock_burn=true (obs-ops) -- sweep it off before the
   # re-check + before the run proceeds. Best-effort dev1-side WS op (session-agnostic), timeout-bound
