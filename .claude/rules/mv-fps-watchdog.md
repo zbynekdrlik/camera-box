@@ -16,7 +16,8 @@ The Multiview render-cadence stack has THREE layers, don't conflate them:
 
 1. **EMIT (#771):** vendored libobs `render_display()` prints `multiview-audit: monitor=N divisor=D
    rendered_fps=X target=Z floor=F cx=.. cy=..` ~every 5 s per throttleable MV projector.
-   `floor = obs_multiview_floor_fps(canvas) = canvas/2 − MULTIVIEW_AUDIT_FLOOR_TOLERANCE_FPS` in
+   `floor = obs_multiview_floor_fps(target) = target − MULTIVIEW_AUDIT_FLOOR_TOLERANCE_FPS` (target =
+   `canvas/effective_divisor`, the ~30fps-cell rate the projector actually renders at — #776) in
    `obs-display-budget.h`, byte-mirrored in `src/mv_audit.rs::mv_floor_fps`. Changing the floor is a
    VENDORED-C change (CI-first-compile + lock-step anchors, per `vendored-libobs-change-safety.md`).
 2. **PARSE/GATE (#771):** `src/mv_audit.rs` (Tier-0, default features) parses the line + `gate_log`;
@@ -64,22 +65,28 @@ NO floor and re-parses NO audit line. Learnings for the next preflight that cons
 
 ## Floor calibration is DATA-FIRST — mine live `rendered_fps`, don't trust the placeholder
 
-The `canvas/2 − 2` floor was a #771 PLACEHOLDER; validate/adjust it from measured healthy state
-(the same data-first discipline as `window-gate-tolerance-walkdown.md`). Read the live distribution:
+The `target − 2` floor (originally the #771 `canvas/2 − 2` PLACEHOLDER, retargeted to the effective
+target in #776) should still be validated/adjusted from measured healthy state (the same data-first
+discipline as `window-gate-tolerance-walkdown.md`). Read the live distribution:
 - **imag (Linux):** `ssh newlevel@10.77.9.182 'grep multiview-audit: "$(ls -t ~/.config/obs-studio/logs/*.txt|head -1)"'`
 - **strih (Windows):** via win-strih MCP Shell — `Select-String -LiteralPath <newest .txt> -Pattern
   'multiview-audit:'` (a 3 MB OBS log makes `Get-Content|Select-String` time out; `Select-String
   -LiteralPath` streams, or `-Tail N`). From an AGENT session use MCP for the Windows read, NOT ssh
   (win-ssh-vs-mcp); the headless watchdog's ssh+powershell read is the sanctioned session-agnostic path.
 
-**The `canvas/2 − tol` model is TIGHT for a throttled (divisor≥2) projector, LOOSE for divisor=1.**
-A divisor-2 projector runs at canvas/2 = its target, so the floor sits `tol` below healthy (imag: canvas
-60, healthy ~30, floor 28 → ~1–2 fps margin). A divisor-1 projector runs at canvas, floor = canvas/2−tol
-(strih: canvas 30, healthy 30, floor 13 → 17 fps margin). Measured 2026-08-17 (#1083): both healthy
-states sit cleanly above floor and BOTH observed collapses fall below it, so `tol=2.0` was VALIDATED
-(imag healthy ≥29.0 vs floor 28; strih 30 vs floor 13; imag collapse ~12fps, strih 9–11fps — all caught;
-the 2-pass confirm covers the tight imag margin). Raising `tol` helps imag but lowers strih's floor under
-its own deep dips — do not change it without re-mining BOTH boxes. Full distribution: issue #1083 comment.
+**The floor is `target − tol`, tight for BOTH boxes (#776 fix).** Originally the floor was `canvas/2 − tol`
+— TIGHT for a divisor-2 projector (imag: canvas 60, target 30, floor 28 → ~2 fps margin) but LOOSE for a
+divisor-1 projector (strih: canvas 30, target 30, floor was `30/2−2 = 13` → a 17 fps margin, so a MODERATE
+strih MV collapse to ~14–27fps slipped under it UNALARMED even though the MV renders 30fps). #776 fixed
+that: the floor now tracks the effective TARGET (`canvas/effective_divisor`), so BOTH boxes floor at
+`target − tol = 28` and any divisor-1 collapse below 28 alarms. The 2026-08-17 (#1083) `tol=2.0`
+validation still holds under the new model — imag healthy ≥29.0 vs 28, strih healthy 30 vs 28 (both
+cleanly above), imag collapse ~12fps + strih 9–11fps (both below 28) — with the 2-pass confirm covering
+the now-uniform ~2 fps margin. Note: strih's floor rose 13→28, so a moderate contended dip (its 8–18fps
+band) now alarms too — that is the intended tightening, not a false page (never re-loosen strih's floor to
+accommodate a contended DEV box; production strih runs OBS alone and holds 30). Raising `tol` further now
+widens the alarm on BOTH boxes (no longer just imag); do not change it without re-mining BOTH boxes. Full
+distribution: issue #1083 comment.
 
 **strih's 4K MV is render-bound and collapses under CONTENTION, not by itself.** Its healthy 30fps
 holds only when strih runs OBS alone; a non-OBS app stealing GPU/CPU (observed: an `Arena` process at
