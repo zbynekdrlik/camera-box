@@ -1061,3 +1061,70 @@ fn builders_install_psmisc_743() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// #448 (2026-07-18 RESCOPE — event finding #8) — force the Intel iGPU DRM module (`i915`) at boot
+// so a HEADLESS first boot (no monitor attached) still brings up the DRM device + /dev/fb0 that
+// the painter / cameraman-monitor framebuffer chain needs. On cam5-class hardware `i915` is only
+// udev-probed when a display is present, so a monitor-less box came up with no fb0 (no cameraman
+// monitor). cam5 was recovered live by pinning `i915` in /etc/modules-load.d/ — the finding says
+// this belongs in provisioning, and it must be baked at image-build time (create-usb-linux.sh).
+// The operator half (first physical boot of a GPU box WITH a monitor) is documented in SETUP.md.
+// Style mirrors items 18/20 above: read the REAL script/doc and assert the REAL contract.
+
+/// 22. create-usb-linux.sh must bake /etc/modules-load.d/i915.conf (contents `i915`) into the
+///     target rootfs so systemd-modules-load force-loads the Intel iGPU DRM module every boot,
+///     headless or not — without it a monitor-less cam5-class box comes up with no /dev/fb0 (#448).
+#[test]
+fn create_usb_bakes_i915_modules_load_conf() {
+    let body = read(BASE_IMAGE_BUILDER);
+
+    // The conf is written INTO the target rootfs ($MOUNT_ROOT), on a real (non-comment) line.
+    let writes_conf = body.lines().any(|l| {
+        let t = l.trim_start();
+        !t.starts_with('#')
+            && l.contains("$MOUNT_ROOT")
+            && l.contains("/etc/modules-load.d/i915.conf")
+    });
+    assert!(
+        writes_conf,
+        "{BASE_IMAGE_BUILDER} must write /etc/modules-load.d/i915.conf into the target rootfs \
+         ($MOUNT_ROOT) so systemd-modules-load force-loads i915 at boot — a headless cam5-class \
+         box comes up with no /dev/fb0 otherwise (#448 rescope, event finding #8)"
+    );
+
+    // The module NAME must appear as a bare `i915` line (the modules-load.d content is one module
+    // per line). A `# ... i915 ...` comment line does NOT satisfy this (it never trims to "i915").
+    let has_module_line = body.lines().any(|l| l.trim() == "i915");
+    assert!(
+        has_module_line,
+        "{BASE_IMAGE_BUILDER} must write the bare module name `i915` on its own line inside the \
+         /etc/modules-load.d/i915.conf body so systemd-modules-load actually loads it (#448)"
+    );
+}
+
+/// 23. SETUP.md must document the operator half of the #448 rescope: the FIRST physical boot of a
+///     GPU-dependent (cam5-class Intel iGPU) box should be done WITH a monitor connected, so the
+///     DRM connector + framebuffer initialize cleanly. The modules-load.d pin force-loads the
+///     DRIVER; this belt-and-braces note keeps the connector/fb0 bring-up covered on first boot.
+#[test]
+fn setup_md_documents_first_boot_with_monitor_for_gpu_boxes() {
+    let raw = read("SETUP.md");
+    let doc = raw.to_lowercase();
+    assert!(
+        doc.contains("i915"),
+        "SETUP.md must document the i915 modules-load.d GPU pin for cam5-class boxes (#448)"
+    );
+    assert!(
+        doc.contains("monitor"),
+        "SETUP.md must document that a GPU-dependent box's first boot needs a monitor connected (#448)"
+    );
+    assert!(
+        doc.contains("first") && doc.contains("boot"),
+        "SETUP.md must tie the monitor requirement to the FIRST physical BOOT of a GPU box (#448)"
+    );
+    assert!(
+        raw.contains("#448"),
+        "SETUP.md must tie the GPU-first-boot section to #448 so the rationale is traceable"
+    );
+}
