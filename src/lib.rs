@@ -221,6 +221,13 @@ pub mod jitter_audit;
 // `src/bin/mv-fps-gate.rs`. The receive-side NDI cadence is separate (jitter_audit above).
 pub mod mv_audit;
 
+// #1029 — PROGRAM-render observability: parse the vendored libobs `program-render-audit:` log
+// line (the PROGRAM output's own render_fps + renderSkipped/lagged delta emitted every ~5s by
+// obs_graphics_thread_loop()) + the `is_render_path_jump` discriminator. Pure Tier-0 (no
+// probe/OBS/rig), report-only (the gate for this class is issue 798). Sibling of mv_audit (the
+// monitoring-surface render cadence) and jitter_audit (the receive-side NDI cadence).
+pub mod program_render_audit;
+
 // #624 — cross-camera cam2->camera switch-latency SPREAD gate (pure decision): given each
 // camera's measured cam2->camera median (p50) latency (the per-camera photon->dequeue latency
 // d_X baked in by the #286 root cause), computes the cross-camera spread and gates it against

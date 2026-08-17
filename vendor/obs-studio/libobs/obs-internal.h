@@ -646,6 +646,14 @@ struct obs_graphics_context {
 	uint64_t fps_total_ns;
 	uint32_t fps_total_frames;
 	const char *video_thread_name;
+	/* camera-box #1029: ~5s PROGRAM-render observability window. Distinct from the obs_display
+	 * render_audit_* fields (#771, the multiview monitoring surfaces) — these track the PROGRAM
+	 * output's own total_frames/lagged_frames deltas so a burn-square forward JUMP can be
+	 * attributed to the render path (lagged>0). Report-only; single-writer (this graphics
+	 * thread). */
+	uint64_t program_render_audit_window_start_ns;
+	uint32_t program_render_audit_total_at_start;
+	uint32_t program_render_audit_lagged_at_start;
 };
 
 extern void *obs_graphics_thread(void *param);
