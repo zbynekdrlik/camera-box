@@ -38,6 +38,12 @@ DANTE_BOUND_US = 2000          # clock-offset-guard verdict bound
 AUDIO_BUF_BOUND_MS = 100       # #786 launch-gate bound (box standard 64/85)
 AUDIT_RE = re.compile(r"^(\d+):(\d+):(\d+)\.(\d+): genlock-fifo audit '([^']+)': received=(\d+)")
 BUF_RE = re.compile(r"total audio buffering is now (\d+) milliseconds")
+# #794/#1089: the shared PURE cadence kernel (measure + classify), reused by shelling out so the
+# issue-797 phantom-50 divisor lives in ONE tested place -- never a second Python divisor here.
+CADENCE_LIB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib", "cadence-health.sh")
+# strih CAMERA source labels only (`NDI cam1..7`); excludes `NDI 2ME PGM (mv)` / `NDI 2ME PVW`,
+# which are 30 fps by design and must NOT be graded against 60 fps.
+CAMERA_SRC_RE = re.compile(r"^NDI\s+cam\d+$", re.I)
 
 results = []
 
@@ -112,6 +118,90 @@ def fmt_rates(rates: dict[str, float]) -> str:
     return ",".join(f"{src.replace('NDI ', '')}={fps:.0f}" for src, fps in sorted(rates.items()))
 
 
+def audit_samples(log_text: str) -> dict[str, list[tuple[str, int]]]:
+    """Per-source (raw_ts, received) samples from EVERY genlock-fifo audit line, in file
+    (chronological) order. raw_ts is the 'HH:MM:SS.mmm' clock prefix, passed VERBATIM to the
+    cadence-health.sh kernel -- no seconds math here (the kernel's cadence_ts_to_seconds owns it)."""
+    out: dict[str, list[tuple[str, int]]] = {}
+    for line in log_text.splitlines():
+        m = AUDIT_RE.match(line)
+        if not m:
+            continue
+        raw_ts = f"{m.group(1)}:{m.group(2)}:{m.group(3)}.{m.group(4)}"
+        out.setdefault(m.group(5), []).append((raw_ts, int(m.group(6))))
+    return out
+
+
+def cadence_verdict(prev_ts: str, prev_recv: int, curr_ts: str, curr_recv: int,
+                    expected: int = 60, tol: int = 3,
+                    min_window: int = 60) -> tuple[str, str]:
+    """REUSE the tested bash kernel scripts/lib/cadence-health.sh -- no second divisor lives here.
+    cadence_measure_fps derives the delivered fps from the two samples' OWN timestamps (the #797
+    phantom-50 avoidance -- NEVER a wall-clock divisor); cadence_classify grades it against the
+    expected +/- tol band. Returns (verdict, fps_str), verdict in OK|WRONG|UNKNOWN|SKIP; any failure
+    to run the kernel degrades to ('UNKNOWN', '') -- never a false page."""
+    script = (
+        'set -eu\n'
+        '. "$1"\n'
+        'm=$(cadence_measure_fps "$2" "$3" "$4" "$5")\n'
+        'fps=; win=; adv=\n'
+        'for tok in $m; do case "$tok" in\n'
+        '  fps=*) fps=${tok#fps=} ;; window_s=*) win=${tok#window_s=} ;;'
+        ' advanced=*) adv=${tok#advanced=} ;;\n'
+        'esac; done\n'
+        'v=$(cadence_classify "$fps" "$win" "$adv" "$6" "$7" "$8" 1 1)\n'
+        'printf "%s %s\\n" "$v" "$fps"\n'
+    )
+    try:
+        out = subprocess.run(
+            ["bash", "-c", script, "bash", CADENCE_LIB,
+             str(prev_ts), str(prev_recv), str(curr_ts), str(curr_recv),
+             str(expected), str(tol), str(min_window)],
+            capture_output=True, text=True, timeout=10)
+    except (subprocess.TimeoutExpired, OSError):
+        return "UNKNOWN", ""
+    if out.returncode != 0:
+        return "UNKNOWN", ""
+    parts = out.stdout.split()
+    return (parts[0] if parts else "UNKNOWN"), (parts[1] if len(parts) > 1 else "")
+
+
+def cadence_check(log_text: str, expected: int = 60, tol: int = 3,
+                  min_window: int = 60) -> tuple[dict[str, str], list[str]]:
+    """Grade the delivered cadence of every CAMERA source in the strih OBS log against
+    `expected` +/- `tol` fps, via the cadence-health.sh kernel (per source: its FIRST + LAST audit
+    sample = the widest trustable window; the kernel's own guards map a > CADENCE_MAX_WINDOW_S span,
+    a counter reset, a < min_window span, or a frozen source to UNKNOWN -- never a false page).
+    Returns (display, problems): `display` maps each OK/WRONG camera to its rounded fps; `problems`
+    carries a `warn:cadence <cam>=<fps>fps(!=<expected>)` SOFT entry per source measuring a sustained
+    non-60 cadence (WRONG). Non-camera sources (2ME PGM/PVW, 30 fps by design) are never graded;
+    UNKNOWN/SKIP never produce a row or a problem."""
+    display: dict[str, str] = {}
+    problems: list[str] = []
+    for src, pts in sorted(audit_samples(log_text).items()):
+        if not CAMERA_SRC_RE.match(src) or not pts:
+            continue
+        (p_ts, p_rc), (c_ts, c_rc) = pts[0], pts[-1]
+        verdict, fps = cadence_verdict(p_ts, p_rc, c_ts, c_rc, expected, tol, min_window)
+        if verdict not in ("OK", "WRONG"):
+            continue
+        label = src.replace("NDI ", "")
+        shown = f"{float(fps):.0f}" if fps else "?"
+        display[label] = shown
+        if verdict == "WRONG":
+            problems.append(f"warn:cadence {label}={shown}fps(!={expected})")
+    return display, problems
+
+
+def box_verdict(problems: list[str]) -> str:
+    """PASS when clean, WARN when only SOFT ('warn:'-prefixed) problems remain, FAIL on any HARD
+    problem. Shared by check_cam / check_imag / check_windows_box so the three-tier split lives once."""
+    hard = [p for p in problems if not p.startswith("warn:")]
+    if not problems:
+        return "PASS"
+    return "WARN" if not hard else "FAIL"
+
+
 def check_cam(name: str, ip: str) -> None:
     out = ssh(ip, "systemctl is-active camera-box; "
                   "journalctl -u camera-box -n 120 --no-pager | grep -E 'Streaming:|capture chroma' | tail -4; "
@@ -149,8 +239,7 @@ def check_cam(name: str, ip: str) -> None:
         problems.append(f"dante={off_us}us")
     if ro != "ro":
         problems.append("root=rw")
-    hard = [x for x in problems if not x.startswith("warn:")]
-    verdict = "PASS" if not problems else ("WARN" if not hard else "FAIL")
+    verdict = box_verdict(problems)
     detail = (f"svc={svc} fps={fps_s} chroma={chroma} dante={off_us:+d}us root={ro} load={load}"
               if off_us is not None else f"svc={svc} fps={fps_s} chroma={chroma} dante=? root={ro} load={load}")
     if problems:
@@ -201,7 +290,7 @@ def check_imag() -> None:
         problems.append("arrivals-low:" + ",".join(low))
     if len(cam_rates) < 7:
         problems.append(f"cam-arrivals-seen={len(cam_rates)}/7")
-    verdict = "PASS" if not problems else "FAIL"
+    verdict = box_verdict(problems)
     detail = f"render={render} arrivals[{fmt_rates(rates)}] isolcpus=none dante={off_us:+d}us" if off_us is not None else f"render={render} arrivals[{fmt_rates(rates)}]"
     if problems:
         detail += "  <<" + " ".join(problems) + ">>"
@@ -220,7 +309,7 @@ def windows_obs_log_tail(ip: str, tail: int = 500) -> str | None:
 
 
 def check_windows_box(name: str, ip: str, ws_password: str | None, program_fps: float,
-                      expect_latency: bool) -> None:
+                      expect_latency: bool, check_camera_cadence: bool = False) -> None:
     procs = ssh(ip, "powershell -NoProfile -Command \"(Get-Process obs64 -ErrorAction SilentlyContinue).Count\"",
                 user="newlevel", timeout=20)
     if procs is None:
@@ -261,8 +350,17 @@ def check_windows_box(name: str, ip: str, ws_password: str | None, program_fps: 
         # last-match would report another source's 3 ms default (live miss, 2026-07-16)
         lm = re.findall(r"audit 'NDI 2ME PGM'.*?latency_ms=(\d+)", log)
         lat = f" pgm_latency_ms={lm[-1]}" if lm else " pgm_latency_ms=?"
-    verdict = "PASS" if not problems else "FAIL"
-    detail = f"obs64={obs_count} render={render} audio_buf={buf_peak}ms arrivals[{fmt_rates(rates)}]{lat}"
+    # #1089: surface the per-camera DELIVERED cadence tier -- strih receives the raw camera NDI at
+    # its native rate, so a source mis-set to 50/43 fps (duplication-masked to a clean 60 in every
+    # canvas-fps counter) shows here as a WRONG-cadence WARN. stream sees only 2ME PGM (30 fps) +
+    # interkom, so it never runs this check.
+    cad = ""
+    if check_camera_cadence:
+        cad_display, cad_problems = cadence_check(log)
+        problems += cad_problems
+        cad = " cadence[" + ",".join(f"{s}={v}" for s, v in sorted(cad_display.items())) + "]"
+    verdict = box_verdict(problems)
+    detail = f"obs64={obs_count} render={render} audio_buf={buf_peak}ms arrivals[{fmt_rates(rates)}]{cad}{lat}"
     if problems:
         detail += "  <<" + " ".join(problems) + ">>"
     emit(verdict, name, detail)
@@ -274,7 +372,8 @@ def main() -> int:
     for name, ip in CAMS.items():
         check_cam(name, ip)
     check_imag()
-    check_windows_box("strih", STRIH, strih_pw, program_fps=30.0, expect_latency=False)
+    check_windows_box("strih", STRIH, strih_pw, program_fps=30.0, expect_latency=False,
+                      check_camera_cadence=True)
     check_windows_box("stream", STREAM, strih_pw, program_fps=30.0, expect_latency=True)
     fails = results.count("FAIL")
     warns = results.count("WARN")
