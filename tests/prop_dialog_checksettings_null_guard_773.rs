@@ -8,12 +8,17 @@
 //! ```text
 //! Fault address: 7FFC036AD0E0 (ucrtbase.dll)          <- strcmp lives in the UCRT
 //! Thread 1D94 (Crashed):
-//!   ucrtbase.dll!0x...  Arg0=0x0                       <- NULL first arg into strcmp
+//!   ucrtbase.dll!0x...  Params[0]=0x0                  <- AV inside strcmp; consistent with NULL
 //!   obs64.exe!OBSBasicProperties::CheckSettings+0x3b
 //!   obs64.exe!OBSBasicProperties::reject+0x14
 //!   obs64.exe!OBSBasicProperties::closeEvent+0x16
 //!   ... obs64.exe!OBSBasicProperties::on_buttonBox_clicked+0x51d   (Cancel/RejectRole)
 //! ```
+//! (The AV inside ucrtbase!strcmp reached from CheckSettings is proof; the printed Params[0]=0x0
+//! corroborates a NULL arg but the x64 crash handler dumps stack home slots, not the live strcmp
+//! register args, so it is corroborating, not conclusive. The only reachable NULL producer here is
+//! a json_dumps() failure -- the dialog holds a strong source ref, so obs_source_get_settings is
+//! non-NULL and its NULL leg is guarded defensively, not as the observed trigger.)
 //!
 //! Fix: a file-local `static int settings_json_diff(const char *current, const char *old)` that
 //! treats an unreadable (NULL) current/old JSON as "no detectable change" (0) — so the dialog
@@ -118,9 +123,16 @@ fn check_settings_routes_through_the_null_safe_helper_773() {
     );
     assert!(
         !squished.contains("strcmp("),
-        "#773 regression: CheckSettings must NOT call strcmp directly — a NULL json (json_dumps \
-         failure, or obs_source_get_settings on an invalid source) crashes c0000005 in \
+        "#773 regression: CheckSettings must NOT call strcmp directly — a NULL json (from a \
+         json_dumps failure, or a defensively-guarded NULL settings) crashes c0000005 in \
          ucrtbase!strcmp. Route through settings_json_diff. Body:\n{body}"
+    );
+    // #773 (review): the NULL branch must LOG the anomaly, not swallow it silently
+    // (comprehensive-logging: every error/decision branch logs).
+    assert!(
+        squished.contains("blog(LOG_WARNING") && squished.contains("settings JSON unavailable"),
+        "#773 regression: CheckSettings must blog(LOG_WARNING ...) when a settings JSON is NULL, \
+         so a recurrence of the json_dumps failure leaves a trace in the OBS log. Body:\n{body}"
     );
 }
 
@@ -208,7 +220,9 @@ fn settings_json_diff_computes_the_null_safe_truth_table_773() {
     }
     c.push_str("    return 0;\n}\n");
 
-    let dir = std::env::temp_dir().join("prop_dialog_checksettings_null_guard_773");
+    // Key the scratch dir on the pid so concurrent runs (worktree-fleet workers, nextest + a
+    // local run) never race on diff.bin (#975 class).
+    let dir = std::env::temp_dir().join(format!("prop_dialog_773_{}", std::process::id()));
     fs::create_dir_all(&dir).expect("create the scratch dir");
     let cfile = dir.join("diff.c");
     let bin = dir.join("diff.bin");
