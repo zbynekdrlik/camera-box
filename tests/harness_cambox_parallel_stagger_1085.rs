@@ -17,9 +17,12 @@
 //! in scripts/lib/cambox-parallel-restore.sh) which sleeps `launch_index * CAMBOX_PARALLEL_STAGGER_MS`
 //! before its ssh — where `launch_index` = `${#CAMBOX_PARALLEL_PIDS[@]}` read at fork time (the
 //! parent appends the PID only AFTER the `&`). So connection ESTABLISHMENT is spread out, while the
-//! parent never blocks (all subshells still backgrounded at ~t=0 → #712/#713's cancellation-window
-//! benefit is fully preserved — no box is ever "unreached"). The whole phase stays bounded by the
-//! slowest box + a tiny (N-1)*gap tail, NOT the sum.
+//! parent never blocks (all subshells backgrounded at ~t=0). The whole phase stays bounded by the
+//! slowest box + a tiny (N-1)*gap tail, NOT the sum. Cancellation tradeoff (honest): a box still in
+//! its pre-connect stagger sleep at cancellation time has not yet issued its restore, so the stranding
+//! window is a small bounded <=(N-1)*gap — far smaller than the original per-box-sequential loop's,
+//! and backstopped by the #715 retry / #684 FINAL nets; in-subshell is chosen for cleanliness, not a
+//! strictly-better cancellation property than a parent-side inter-launch sleep.
 //!
 //! Additionally the launch sites now record an EXPLICIT `CAMBOX_PARALLEL_IPS` array; the sequential
 //! retry (`cambox_parallel_retry_failed`) PREFERS that explicit IP over `cambox_parallel_label_ip`
@@ -184,8 +187,10 @@ fn lib_defines_cambox_parallel_stagger() {
         s.contains("CAMBOX_PARALLEL_STAGGER_MS"),
         "#1085: the stagger must be configurable via CAMBOX_PARALLEL_STAGGER_MS"
     );
+    // Anchor on STATEMENT forms only (never a bare " exit ") — a future explanatory comment
+    // containing the word " exit " ("never exit early") must not false-fail this guard.
     assert!(
-        !s.contains("\nexit ") && !s.contains(" exit "),
+        !s.contains("\nexit ") && !s.contains("; exit ") && !s.contains("|| exit "),
         "#1085: the lib must never itself `exit` — cleanup()'s trap must always run to completion."
     );
 }
@@ -311,6 +316,7 @@ fn write_phase_driver(driver_path: &std::path::Path, log_path: &std::path::Path,
         "#!/usr/bin/env bash\n\
          set -uo pipefail\n\
          export CAMBOX_PARALLEL_STAGGER_MS={stagger_ms}\n\
+         export CAMERA_ACTIVE_SET=\"cam1 cam2 cam3\"\n\
          source {camera_set_sh:?}\n\
          source {parallel_lib:?}\n\
          source {restart_verify_lib:?}\n\
@@ -341,7 +347,10 @@ fn connect_ms_for(log: &str, ip: &str) -> Option<u64> {
 
 #[test]
 fn real_phase_staggers_connections_yet_stays_concurrent() {
-    // Default active set today = cam1 + cam2/painter + cam3 (3 boxes; issue 939). Gap 150ms.
+    // Pin CAMERA_ACTIVE_SET="cam1 cam2 cam3" in the driver → cam1 (source) + cam3 (secondary) +
+    // cam2/painter = exactly 3 boxes, independent of the fleet's default active set (a future
+    // retirement of the default must not shrink this to 2 and silently break the spread bound).
+    // Gap 150ms.
     let dir = tempfile::tempdir().expect("tempdir");
     let log_path = dir.path().join("calls.log");
     let driver_path = dir.path().join("driver.sh");

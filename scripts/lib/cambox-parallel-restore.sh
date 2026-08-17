@@ -81,12 +81,18 @@ cambox_parallel_label_ip() {
 # ${#CAMBOX_PARALLEL_PIDS[@]} -- the count of restores ALREADY launched at fork time (the parent
 # appends THIS box's PID only AFTER the `&`), i.e. this box's 0-based launch index -- so box 0 sleeps
 # 0, box k sleeps k*gap. Because the delay lives INSIDE the subshell the PARENT never blocks: all N
-# subshells are still backgrounded at ~t=0, so a GH-Actions cancellation still kills every in-flight
-# restore (NO box is left "unreached") -- #712/#713's cancellation-window benefit is FULLY preserved --
-# while the whole phase stays bounded by the slowest box + a tiny (N-1)*gap tail, NEVER the sum. Gap =
-# CAMBOX_PARALLEL_STAGGER_MS (default 300; #715 recommended 200-400ms); 0 (or a non-integer) disables
-# it, which the unit tests + the #712/#713 wall-clock parallelism drivers use to isolate ssh-round-trip
-# timing. Integer-ms math only (no float, no bc): printf renders the fractional-second sleep argument.
+# subshells are backgrounded at ~t=0 and the whole phase stays bounded by the slowest box + a tiny
+# (N-1)*gap tail, NEVER the sum. Cancellation tradeoff (stated honestly, per the no-overstatement
+# rule): a box still in its PRE-CONNECT stagger sleep when a GH-Actions cancellation lands has NOT yet
+# issued its ssh restore, so it can still be stranded -- a small BOUNDED window (<= (N-1)*gap, ~1.5s at
+# defaults), far smaller than the original per-box-SEQUENTIAL loop's (up to N*CLEANUP_SSH_TIMEOUT), and
+# backstopped by the #715 retry / #684 FINAL / EVENT-purge / on-box dead-man nets. So this is NOT
+# strictly better than a parent-side inter-launch sleep for cancellation; it is chosen for cleanliness
+# (the parent never blocks; the whole delay is ONE self-contained lib call). Gap =
+# CAMBOX_PARALLEL_STAGGER_MS (default 300; #715 recommended 200-400ms); 0 or a non-integer value
+# disables it (an EMPTY value falls back to the 300ms default), which the unit tests + the #712/#713
+# wall-clock parallelism drivers use to isolate ssh-round-trip timing. Integer-ms math only (no float,
+# no bc): printf renders the fractional-second sleep argument.
 # Never `exit`s (the #649/#675/#712 warn-only discipline -- cleanup()'s trap must always complete);
 # always returns 0, and every internal step is guarded so a subshell under `set -e` can never abort here.
 cambox_parallel_stagger() {
