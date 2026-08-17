@@ -33,7 +33,10 @@ camera-box-style dead-man PERMANENTLY disarmed. So the pattern flips:
   SAFETY-CRITICAL invariant: the dead-man can then NEVER fire during a live measurement — worst case
   is a slower recovery (~run-length + overhead), never a corrupted verdict. Recovery timing is
   equivalent to cam2-painter's (which also only recovers at ~run-end, after frame-probe's
-  --duration-secs).
+  --duration-secs). **The overhead margin is the ONE knob the invariant hangs on — VALIDATE + FLOOR
+  it** (`CAMERA_BOX_DEADMAN_OVERHEAD_FLOOR_MIN=15`, the ~12-15 min worst-case pre-record overhead by
+  the script's own retry accounting): a non-integer / negative / too-small env override is CLAMPED up
+  to the floor, never trusted — a smaller margin silently moves the first fire INTO the recording.
 - **Re-fire periodically** (`--on-unit-active=5min`) so a run killed AFTER the first fire still
   recovers.
 - **SELF-DISARM once camera-box is confirmed active** (a FAILED start leaves it armed to retry) —
@@ -48,6 +51,21 @@ camera-box-style dead-man PERMANENTLY disarmed. So the pattern flips:
   ExecStartPre helper likewise must never reference frame-probe (verify-device's `(y)` parser
   rejects a helper that does). The rule of thumb: `camera-box`/`camera-box-burn` own /dev/video;
   `frame-probe` owns /dev/fb0 — a device-free for one must never touch the other's process.
+
+Two more review-hardening lessons (adversarial review, 2026-08-17):
+
+- **Do NOT add `camera-box-deadman*` to event-assert.sh's EVENT-mode stray-unit glob** (the way
+  cam2-painter-deadman was in #1075). The painter's timer, still armed in EVENT, could RESURRECT the
+  painter (harmful) — so it must be flagged/disarmed. The camera-box dead-man SELF-DISARMS when
+  camera-box is active (which it always is in EVENT mode), so a pending timer is harmless there; the
+  glob widening only manufactured a false EVENT-contract failure for ~20-50 min after every run,
+  with no disarm path. The self-disarm is the reason it needs neither the glob nor a rig-mode disarm.
+- **A time-delayed dead-man is at odds with an UNBOUNDED operator wait.** `AV_RESTART_GATE` /#109
+  restart-survival modes block on an operator confirm between the before/after measurements, while
+  cam1's timer keeps counting from its [2/8] arm and is the AV video source. RE-ARM cam1 at the top
+  of `av_restart_record_and_emit_plan` (idempotent, best-effort ssh to `$CAM1_IP`) so its first fire
+  resets past THIS call's record + the wait — otherwise a slow operator lets the timer fire
+  mid-"after" measurement and kill cam1's burn (fail-closed: a wasted opt-in run, never a false PASS).
 
 **Rule for a future on-box deadman: if the thing being stopped is replaced by something that
 SELF-TERMINATES, guard on its presence (cam2-painter). If the replacement runs FOREVER (a

@@ -82,28 +82,41 @@ fn deadman_action_starts_production_only_when_inactive_772() {
     );
 }
 
+/// Slice the systemd-run action body (between `/bin/bash -c '` and its closing `' 2>/dev/null`) out
+/// of the lib text -- anchoring WITHIN the action, never the whole lib, so the lib's header COMMENT
+/// (which also contains "systemctl start camera-box" and a `.timer` mention) can never satisfy an
+/// ordering assertion vacuously (the repo's documented bare-anchor footgun class).
+fn action_body(lib: &str) -> String {
+    const OPEN: &str = "/bin/bash -c '";
+    let a0 = lib
+        .find(OPEN)
+        .expect("#772: expected the systemd-run action")
+        + OPEN.len();
+    let rest = &lib[a0..];
+    let end = rest
+        .find("' 2>/dev/null")
+        .expect("#772: expected the action's closing quote");
+    rest[..end].to_string()
+}
+
 #[test]
-fn deadman_action_self_disarms_once_production_is_back_772() {
-    let s = read(LIB);
-    // No cleanup() disarm wiring exists; the action self-disarms once camera-box is confirmed
-    // active, so a normal run leaves no lingering timer.
-    assert!(
-        s.contains(".timer"),
-        "#772: the action must self-disarm (stop its own .timer) once production is confirmed back"
-    );
-    let start = s
+fn deadman_action_self_disarms_after_start_and_only_when_active_772() {
+    let action = action_body(&read(LIB));
+    let start = action
         .find("systemctl start camera-box")
-        .expect("#772: expected the guarded start");
-    let disarm = s
-        .rfind("systemctl stop ${CAMERA_BOX_DEADMAN_UNIT}.timer")
-        .or_else(|| s.rfind("systemctl stop camera-box-deadman.timer"))
-        .expect(
-            "#772: expected the self-disarm stop of the dead-man's own timer inside the action",
-        );
+        .expect("#772: expected the guarded start inside the action");
+    // The disarm must be GUARDED by an `is-active … &&` (never unconditional -- a failed start must
+    // leave the timer armed), and must come AFTER the start.
+    let guard = action
+        .find("is-active --quiet camera-box &&")
+        .expect("#772: the self-disarm must be GUARDED by an is-active check, never unconditional");
+    let disarm = action.find("stop ${CAMERA_BOX_DEADMAN_UNIT}.timer").expect(
+        "#772: expected the self-disarm stop of the dead-man's own timer inside the action",
+    );
     assert!(
-        disarm > start,
-        "#772: self-disarm must come AFTER the start (start {start}, disarm {disarm}) -- a failed \
-         start must leave the timer armed to retry on the next re-fire"
+        start < guard && guard < disarm,
+        "#772: within the action the order must be start ({start}) < is-active guard ({guard}) < \
+         self-disarm ({disarm}) -- a failed start must leave the timer armed to retry"
     );
 }
 
@@ -133,12 +146,14 @@ fn deadman_never_touches_frame_probe_772() {
 
 /// Sources the real lib, generates the arm (first=17), extracts the `/bin/bash -c '...'` action,
 /// and runs it under a PATH-restricted fake `systemctl`/`pkill`. Returns the fake bins' call log.
-/// Simulates a killed run: camera-box inactive on first check, active after `start` -- so the
-/// action must stop the stray burn unit, pkill the burn, start production, then self-disarm.
-fn run_action_call_log() -> String {
+/// Simulates a killed run: camera-box inactive on first check. `start_succeeds` decides whether the
+/// fake `systemctl start camera-box` actually makes it go active (so a subsequent is-active reads
+/// active) -- letting a caller prove BOTH the happy path (start works → self-disarm) and the
+/// failed-start path (start never takes → NO self-disarm, timer left armed to retry).
+fn run_action_call_log(start_succeeds: bool) -> String {
     // Raw string (no format! brace-escaping); the lib path is passed via $SCRIPT env. The fake
-    // `systemctl`/`pkill` heredocs are UNQUOTED so $LOG/$FAKE expand at write time while \$* stays
-    // literal for the fake's own runtime -- the proven scripts/lib fake-the-remote pattern.
+    // `systemctl`/`pkill` heredocs are UNQUOTED so $LOG/$FAKE expand at write time while \$* and
+    // \$START_OK stay literal for the fake's own runtime -- the proven fake-the-remote pattern.
     let script = r#"
 set -uo pipefail
 . "$SCRIPT"
@@ -152,7 +167,7 @@ case "\$1 \$2" in
 esac
 case "\$*" in
   "is-active --quiet camera-box") if [ -f "$FAKE/started" ]; then exit 0; else exit 3; fi ;;
-  "start camera-box") : > "$FAKE/started" ;;
+  "start camera-box") if [ "\$START_OK" = "1" ]; then : > "$FAKE/started"; fi ;;
 esac
 exit 0
 FAKESC
@@ -174,6 +189,7 @@ rm -rf "$FAKE"
         .arg("-c")
         .arg(script)
         .env("SCRIPT", manifest_dir().join(LIB))
+        .env("START_OK", if start_succeeds { "1" } else { "0" })
         .output()
         .expect("failed to run bash harness");
     assert!(
@@ -187,7 +203,7 @@ rm -rf "$FAKE"
 
 #[test]
 fn deadman_action_restores_a_killed_run_and_self_disarms_772() {
-    let log = run_action_call_log();
+    let log = run_action_call_log(true);
     assert!(
         log.contains("systemctl stop camera-box-burn-99001.service"),
         "#772: the action must STOP the stray burn unit. Got:\n{log}"
@@ -210,6 +226,23 @@ fn deadman_action_restores_a_killed_run_and_self_disarms_772() {
     );
 }
 
+#[test]
+fn deadman_action_leaves_timer_armed_when_the_start_fails_772() {
+    // The FAILED-start path: production never comes up (device still busy, a transient), so the
+    // action MUST NOT self-disarm -- the periodic re-fire has to get another chance. Proves the
+    // self-disarm is genuinely is-active-gated at RUNTIME, not merely ordered in the text.
+    let log = run_action_call_log(false);
+    assert!(
+        log.contains("systemctl start camera-box"),
+        "#772: the action must still ATTEMPT the start. Got:\n{log}"
+    );
+    assert!(
+        !log.contains("stop camera-box-deadman.timer"),
+        "#772: with a FAILED start the action must NOT self-disarm (leave the timer armed to retry \
+         on the next re-fire). Got:\n{log}"
+    );
+}
+
 // ---------------------------------------------------------------------------------------------- //
 // Wiring into recording-e2e.sh
 // ---------------------------------------------------------------------------------------------- //
@@ -217,10 +250,39 @@ fn deadman_action_restores_a_killed_run_and_self_disarms_772() {
 #[test]
 fn harness_sources_the_deadman_lib_772() {
     let s = read(HARNESS);
+    // Anchor on the SOURCE INVOCATION, not the bare path -- the `# shellcheck source=…` directive
+    // one line above ALSO contains the path and would satisfy a bare-token check even if the real
+    // `. "$HERE/lib/…"` line were deleted (the repo's documented bare-anchor footgun).
     assert!(
-        s.contains("lib/camera-box-deadman.sh"),
-        "#772: recording-e2e.sh must source scripts/lib/camera-box-deadman.sh -- the arm text is \
-         single-sourced there, never duplicated inline at the four stop sites"
+        s.contains(". \"$HERE/lib/camera-box-deadman.sh\""),
+        "#772: recording-e2e.sh must SOURCE scripts/lib/camera-box-deadman.sh (the invocation, not \
+         merely a shellcheck directive) -- the arm text is single-sourced there"
+    );
+}
+
+#[test]
+fn deadman_arm_embeds_without_gluing_the_following_command_772() {
+    // The #744/#746 class: `$(...)` strips the arm's trailing newline, so if the arm's last
+    // statement did not self-terminate (`fi;`), the caller's following `systemctl stop camera-box`
+    // would glue onto it. Reproduce the REAL embedding shape ($(...)-stripped arm + a following
+    // command on the same line) and prove it PARSES -- a dropped `fi;` yields a loud syntax error.
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(
+            r#"set -uo pipefail
+. "$SCRIPT"
+armtext="$(camera_box_deadman_arm_cmds 17)"
+glued="$armtext systemctl stop camera-box; pkill -x camera-box 2>/dev/null"
+printf '%s' "$glued" | bash -n"#,
+        )
+        .env("SCRIPT", manifest_dir().join(LIB))
+        .output()
+        .expect("failed to run bash harness");
+    assert!(
+        out.status.success(),
+        "#772: the arm output glued to a following command must PARSE (the `fi;` must terminate the \
+         embed). stderr={:?}",
+        String::from_utf8_lossy(&out.stderr)
     );
 }
 
@@ -242,13 +304,15 @@ fn harness_computes_first_fire_from_the_run_duration_772() {
 }
 
 #[test]
-fn harness_arms_the_deadman_at_exactly_the_four_production_stop_sites_772() {
+fn harness_arms_the_deadman_at_every_stop_site_and_the_av_restart_rearm_772() {
     let s = read(HARNESS);
     let n = s.matches("camera_box_deadman_arm_cmds").count();
     assert_eq!(
-        n, 4,
-        "#772: the dead-man must be armed at all FOUR camera-box-stop sites (cam1 [2/8], the [2b/8] \
-         ALL_CAMBOX loop, cam2 non-sweep [3/8], AV_RESTART) -- found {n}"
+        n, 5,
+        "#772: the dead-man arm must appear at the FOUR camera-box-stop sites (cam1 [2/8], the \
+         [2b/8] ALL_CAMBOX loop, cam2 non-sweep [3/8], AV_RESTART's own cam2 stop) PLUS the \
+         AV_RESTART cam1 RE-arm (the unbounded-operator-wait fix, resetting cam1's stale [2/8] \
+         timer) -- found {n}"
     );
 }
 
@@ -322,5 +386,57 @@ fn av_restart_arms_the_deadman_before_stopping_camera_box_772() {
         "av_restart_record_and_emit_plan()",
         "rm -f /tmp/av-restart-markers.csv;",
         "AV_RESTART",
+    );
+}
+
+#[test]
+fn av_restart_re_arms_cam1_deadman_for_the_unbounded_operator_wait_772() {
+    // #2 fix: this restart-survival mode has an UNBOUNDED operator wait, so cam1's stale [2/8]
+    // timer is re-armed here (an ssh to CAM1_IP) BEFORE the cam2 ssh -- otherwise cam1's timer
+    // could fire mid-"after" measurement and kill cam1's burn (cam1 films cam2's marker monitor).
+    let s = read(HARNESS);
+    let start = s
+        .find("av_restart_record_and_emit_plan()")
+        .expect("#772: expected the av_restart function");
+    let end = s[start..]
+        .find("rm -f /tmp/av-restart-markers.csv;")
+        .map(|i| start + i)
+        .expect("#772: expected the av_restart marker-clear that bounds this window");
+    let win = &s[start..end];
+    let cam1_ssh = win
+        .find("root@\"$CAM1_IP\"")
+        .expect("#772: av_restart must re-arm cam1 via an ssh to CAM1_IP");
+    let cam1_arm = win
+        .find("camera_box_deadman_arm_cmds")
+        .expect("#772: av_restart must re-arm the cam1 dead-man");
+    let cam2_ssh = win
+        .find("root@\"$PAINTER_IP\"")
+        .expect("#772: expected the cam2 painter ssh in av_restart");
+    assert!(
+        cam1_ssh < cam2_ssh && cam1_arm < cam2_ssh,
+        "#772: the cam1 dead-man re-arm (ssh {cam1_ssh}, arm {cam1_arm}) must precede the cam2 ssh \
+         ({cam2_ssh}) at the top of av_restart"
+    );
+}
+
+#[test]
+fn harness_floors_the_overhead_so_it_cannot_re_enable_a_midrun_fire_772() {
+    // #3: the safety invariant hangs on CAMERA_BOX_DEADMAN_OVERHEAD_MIN; a too-small / non-integer
+    // override must be CLAMPED to a hard floor, never silently allowed to move the first fire into
+    // the recording window.
+    let s = read(HARNESS);
+    assert!(
+        s.contains("CAMERA_BOX_DEADMAN_OVERHEAD_FLOOR_MIN="),
+        "#772: a floor constant must exist to bound the overhead margin"
+    );
+    assert!(
+        s.contains("-lt \"$CAMERA_BOX_DEADMAN_OVERHEAD_FLOOR_MIN\""),
+        "#772: a too-small positive override must be clamped UP to the floor (an -lt compare), \
+         never trusted"
+    );
+    assert!(
+        s.contains("''|*[!0-9]*)"),
+        "#772: a non-integer / negative / empty override must be caught and clamped, never fed to \
+         the first-fire arithmetic"
     );
 }

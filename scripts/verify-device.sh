@@ -1046,12 +1046,16 @@ fi
 # box actually has BOTH, and that the helper is burn-scoped (stops the burn UNIT, never the painter)
 # -- single-sourced in scripts/lib/camera-box-free-device.sh. Inserted BEFORE (q) -- see
 # .claude/rules/provisioning-scripts.md: (q) must remain the intentionally-LAST check.
+# A remote `[ -f ] && cat || echo <sentinel>` keeps the ssh command's own exit 0 on a MISSING file,
+# so a non-zero ssh rc means genuine UNREACHABILITY (transport), distinct from "file absent" (the
+# sentinel) -- otherwise a bare `cat <missing> 2>/dev/null` exit-1 conflates the two and the
+# dedicated "is missing" message is unreachable dead code.
 yrc=0
-FREE_DEV_DROPIN="$(ssh_box "cat /etc/systemd/system/camera-box.service.d/free-capture-device.conf 2>/dev/null")" || yrc=$?
+FREE_DEV_DROPIN="$(ssh_box "if [ -f /etc/systemd/system/camera-box.service.d/free-capture-device.conf ]; then cat /etc/systemd/system/camera-box.service.d/free-capture-device.conf; else echo __FREE_DEV_DROPIN_ABSENT__; fi")" || yrc=$?
 FREE_DEV_HELPER="$(ssh_box "cat /usr/local/bin/camera-box-free-capture-device.sh 2>/dev/null")" || true
 if [ "$yrc" -ne 0 ]; then
-  fail "could not read camera-box.service.d/free-capture-device.conf (ssh rc=$yrc)"
-elif [ -z "$FREE_DEV_DROPIN" ]; then
+  fail "could not reach the box to read camera-box.service.d/free-capture-device.conf (ssh rc=$yrc)"
+elif [ -z "$FREE_DEV_DROPIN" ] || [ "$FREE_DEV_DROPIN" = "__FREE_DEV_DROPIN_ABSENT__" ]; then
   fail "camera-box.service.d/free-capture-device.conf is missing -- a killed E2E run's stray capture burn will crash-loop camera-box on 'Device or resource busy' (#772)"
 elif ! camera_box_free_device_dropin_wired "$FREE_DEV_DROPIN"; then
   fail "camera-box.service.d/free-capture-device.conf is not wired to the ExecStartPre device-free helper (#772): $FREE_DEV_DROPIN"

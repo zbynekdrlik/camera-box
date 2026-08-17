@@ -352,9 +352,23 @@ fi
 # #772: the camera-box dead-man's FIRST fire must land only AFTER this run's ENTIRE window, so it
 # can never restore production DURING a live measurement (the safety-critical invariant -- worst
 # case is a slower recovery, never a corrupted verdict). = ceil(DURATION/60) + a generous overhead
-# margin covering deploy + decode + verify + cleanup. Env-tunable so the window can be tightened
-# later without a code change (the same way cam2-painter-deadman's window was tuned in #1072).
+# margin covering the worst-case PRE-record overhead (deploy + mv_reverify/frozen-gate bounded
+# retries, ~12-15 min absolute worst per the :359+ accounting) so the first fire is guaranteed to
+# land after StopRecord. The margin is env-tunable, but the invariant HANGS on it -- so a bad /
+# too-small override is CLAMPED up to a hard floor (never trusted to be sane), never allowed to
+# silently re-enable a mid-run fire. FLOOR = the worst-case pre-record overhead itself; below it the
+# first fire could precede StopRecord.
+CAMERA_BOX_DEADMAN_OVERHEAD_FLOOR_MIN=15
 CAMERA_BOX_DEADMAN_OVERHEAD_MIN="${CAMERA_BOX_DEADMAN_OVERHEAD_MIN:-20}"
+case "$CAMERA_BOX_DEADMAN_OVERHEAD_MIN" in
+  ''|*[!0-9]*)
+    echo "WARNING #772: CAMERA_BOX_DEADMAN_OVERHEAD_MIN='$CAMERA_BOX_DEADMAN_OVERHEAD_MIN' is not a non-negative integer -- clamping to the safe floor ${CAMERA_BOX_DEADMAN_OVERHEAD_FLOOR_MIN}min so the dead-man cannot fire mid-recording" >&2
+    CAMERA_BOX_DEADMAN_OVERHEAD_MIN="$CAMERA_BOX_DEADMAN_OVERHEAD_FLOOR_MIN" ;;
+esac
+if [ "$CAMERA_BOX_DEADMAN_OVERHEAD_MIN" -lt "$CAMERA_BOX_DEADMAN_OVERHEAD_FLOOR_MIN" ]; then
+  echo "WARNING #772: CAMERA_BOX_DEADMAN_OVERHEAD_MIN=${CAMERA_BOX_DEADMAN_OVERHEAD_MIN} below the safe floor -- raising to ${CAMERA_BOX_DEADMAN_OVERHEAD_FLOOR_MIN}min (a smaller margin could let the first fire precede StopRecord)" >&2
+  CAMERA_BOX_DEADMAN_OVERHEAD_MIN="$CAMERA_BOX_DEADMAN_OVERHEAD_FLOOR_MIN"
+fi
 CAMERA_BOX_DEADMAN_FIRST_FIRE_MIN=$(( (DURATION + 59) / 60 + CAMERA_BOX_DEADMAN_OVERHEAD_MIN ))
 # #747: the cam2 painter (launched below, before the recording) must stay ALIVE from its launch,
 # through the pre-record warm-up/gate budget AND the whole DURATION recording, self-exiting
@@ -2450,6 +2464,15 @@ if [ "${AV_RESTART_GATE:-0}" = "1" ]; then
   av_restart_record_and_emit_plan() {
     local label="$1"
     local marker_csv="$OUTDIR/av-restart-${label}-${RUN_ID}.csv"
+    # #772: cam1's camera-box dead-man was armed at [2/8], but THIS restart-survival mode has an
+    # UNBOUNDED operator wait between the before/after pair -- so cam1's stale [2/8] timer could
+    # fire mid-"after" measurement and kill cam1's burn (cam1's feed IS the AV video path, filming
+    # cam2's marker monitor). Re-arm cam1 here too (idempotent -- clears the old timer, resets its
+    # first fire past THIS call's own record + any operator delay), the same way the cam2 ssh below
+    # re-arms cam2's own dead-man. Best-effort: a re-arm failure only reverts to the stale [2/8]
+    # timer, never worse than before this fix.
+    sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$CAM1_IP" \
+      "$(camera_box_deadman_arm_cmds "$CAMERA_BOX_DEADMAN_FIRST_FIRE_MIN")" 2>/dev/null || true
     echo "    [av-restart-sync/$label] cam2 painter: dual-QR + QPSK audio marker on $AV_RESTART_MARKER_DEVICE"
     # Free /dev/fb0 the SAME way [3/8] does — stop cam2-painter AND camera-box (which can
     # also hold fb0 via its --display path), kill any leftover frame-probe, then WAIT (bounded)

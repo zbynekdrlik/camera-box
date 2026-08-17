@@ -75,6 +75,7 @@ camera_box_deadman_arm_cmds() {
   cat <<ARM
 if systemctl list-unit-files camera-box.service >/dev/null 2>&1; then
   systemctl stop ${CAMERA_BOX_DEADMAN_UNIT}.timer 2>/dev/null || true
+  systemctl stop ${CAMERA_BOX_DEADMAN_UNIT}.service 2>/dev/null || true
   systemctl reset-failed ${CAMERA_BOX_DEADMAN_UNIT}.service 2>/dev/null || true
   systemd-run --quiet --on-active=${first}min --on-unit-active=${CAMERA_BOX_DEADMAN_REFIRE_MIN}min --unit=${CAMERA_BOX_DEADMAN_UNIT} \\
     /bin/bash -c 'systemctl list-units --all --plain --no-legend "camera-box-burn-*" 2>/dev/null | while read -r u _; do [ -n "\$u" ] && { systemctl stop "\$u" 2>/dev/null; systemctl reset-failed "\$u" 2>/dev/null; }; done; pkill -9 -x camera-box-burn 2>/dev/null; systemctl is-active --quiet camera-box || systemctl start camera-box; systemctl is-active --quiet camera-box && { systemctl stop ${CAMERA_BOX_DEADMAN_UNIT}.timer 2>/dev/null; systemctl reset-failed ${CAMERA_BOX_DEADMAN_UNIT}.service 2>/dev/null; }; true' 2>/dev/null \\

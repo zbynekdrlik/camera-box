@@ -181,9 +181,11 @@ rm -rf "$FAKE"
 #[test]
 fn setup_device_sources_the_lib_and_writes_both_files_772() {
     let s = read("scripts/setup-device.sh");
+    // Anchor on the SOURCE INVOCATION, not the bare path (a `# shellcheck source=…` directive also
+    // contains the path -- the repo's bare-anchor footgun).
     assert!(
-        s.contains("lib/camera-box-free-device.sh"),
-        "#772: setup-device.sh must source scripts/lib/camera-box-free-device.sh"
+        s.contains(". \"$HERE/lib/camera-box-free-device.sh\""),
+        "#772: setup-device.sh must SOURCE scripts/lib/camera-box-free-device.sh (the invocation)"
     );
     assert!(
         s.contains("camera_box_free_capture_device_script_content > /usr/local/bin/camera-box-free-capture-device.sh"),
@@ -199,15 +201,20 @@ fn setup_device_sources_the_lib_and_writes_both_files_772() {
 fn verify_device_has_the_y_check_before_q_772() {
     let s = read("scripts/verify-device.sh");
     assert!(
-        s.contains("lib/camera-box-free-device.sh"),
-        "#772: verify-device.sh must source the lib for the (y) check's parsers"
+        s.contains(". \"$HERE/lib/camera-box-free-device.sh\""),
+        "#772: verify-device.sh must SOURCE the lib (the invocation) for the (y) check's parsers"
     );
+    // Anchor on the INVOCATION form WITH its argument -- the bare token also appears in the
+    // source-line comment, which would keep this test green even if the whole (y) block were deleted
+    // (the repo's documented bare-anchor footgun; burn-target-enumeration.md).
     let y = s
-        .find("camera_box_free_device_dropin_wired")
-        .expect("#772: verify-device.sh must gate on the drop-in being wired (y check)");
+        .find("camera_box_free_device_dropin_wired \"$FREE_DEV_DROPIN\"")
+        .expect("#772: verify-device.sh (y) must actually CALL dropin_wired on the read drop-in");
     let y2 = s
-        .find("camera_box_free_device_script_is_burn_scoped")
-        .expect("#772: verify-device.sh must gate on the helper being burn-scoped (y check)");
+        .find("camera_box_free_device_script_is_burn_scoped \"$FREE_DEV_HELPER\"")
+        .expect(
+            "#772: verify-device.sh (y) must actually CALL script_is_burn_scoped on the helper",
+        );
     // (q) is the intentionally-LAST check (per .claude/rules/provisioning-scripts.md); the new (y)
     // check must sit BEFORE it.
     let q = s

@@ -22,6 +22,14 @@
 # kills any stray burn process. It NEVER touches frame-probe -- that is the cam2 fb0 painter (a
 # DIFFERENT device, owned by cam2-painter.service / its own dead-man); killing it here would darken
 # the operator's cam2 QR monitor on every camera-box start.
+#
+# DELIBERATE TRADEOFF (#772): this makes a MID-RUN manual `systemctl start camera-box` (operator
+# error -- the only remaining mid-run start path after #894's burn-gated udev rule) KILL the
+# in-flight E2E burn and hand the device to production, where before it crash-looped harmlessly
+# while the burn kept /dev/video. It is fail-LOUD downstream, never a false PASS: the verdict fails
+# on the now-missing burns and the post-StopRecord run-integrity assertion surfaces a burn that
+# died mid-run -- a wasted run, not a corrupted one. Freeing the device on EVERY start (so an
+# operator can recover a frozen MV between runs) is worth that opt-in-mode operator-error window.
 
 # The absolute path both the helper script is installed to AND the drop-in's ExecStartPre points at.
 CAMERA_BOX_FREE_DEVICE_HELPER_PATH="${CAMERA_BOX_FREE_DEVICE_HELPER_PATH:-/usr/local/bin/camera-box-free-capture-device.sh}"
