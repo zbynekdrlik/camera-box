@@ -46,8 +46,20 @@ pub const DOCK_QPSK_THRESHOLD: f64 = 0.35;
 /// its own separate honesty gate [`DOCK_CLUSTER_MAX_MAD_MS`] already rejecting a diffuse/false-only
 /// band), and this constant is mirrored BYTE-FOR-BYTE into the vendored C++ dock — changing it
 /// safely needs the ~150min genlock vendored-OBS build cycle to verify, out of scope for #733's
-/// pure-Rust audit. Filed #735 to evaluate tightening this one too — do NOT assume the two
-/// values are in sync; check #735's status before relying on "matches the offline default" again.
+/// pure-Rust audit.
+///
+/// EVALUATED #735 (2026-08-17, kept at 60ms — do NOT tighten). Mined 1381 live LOCKED/UPDATED
+/// cluster estimates off the running STREAM-box dock: the real cluster runs `mad_ms` ~29ms
+/// (median; min 12.9, bulk 25–40), NOT the offline audit's tight 7–9ms. #733's "wide window
+/// blends a nearby sub-cluster" pattern does NOT reproduce live — there is no hidden tight 7–9ms
+/// core (a tighter window over 1381 samples never collapses onto one), and the offset CENTER
+/// wobbles >150ms ([`DOCK_CLUSTER_WINDOW_NS`]-window swing, #1004). Tightening 60→25 (window
+/// 120→50ms) would narrow the capture below the real cluster's natural width, dropping `matched`
+/// toward the [`DOCK_CLUSTER_MIN_MATCHED`] (8) floor and rarely clearing the 25ms ENTRY ceiling
+/// — the dock would lock LESS reliably, the OPPOSITE of #733's offline benefit. It gains nothing:
+/// the dock is a coarse MONITOR (#1004, `DOCK_LOCK_DISPLAY_ADDITIVE_MS = 0.0`), its precision
+/// gates nothing (the offline `--av-sync` chain is the sole authoritative gate). Kept at 60ms
+/// deliberately; keep the C++ `CB_CLUSTER_TOL_MS = 60.0` mirror in lockstep.
 pub const DOCK_CLUSTER_TOL_MS: f64 = 60.0;
 
 /// Minimum tightly-clustered offset candidates before the dock trusts (and displays) a Latency.
