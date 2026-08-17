@@ -592,3 +592,35 @@ update dev1's `.mcp.json` `linux-imag-nb` entry. The key is charset-guarded (`ca
 would make the installer silently discard the pre-seed and generate a DIFFERENT key while the
 `systemctl is-active` gate still passes) or run command substitution. cam1-4 remain hand-installed
 until `setup-device.sh` gains the same step (a candidate follow-up).
+
+## Projector openers must be COUNT-FIRST — the SEEDER dedups, not just the gate (#769)
+
+`OpenVideoMixProjector` (obs-websocket) ALWAYS opens a NEW window — the protocol has no "is a
+projector open" query. OBS's own `CloseExistingProjectors=true` replace-loop (seeded by
+`setup-imag.sh`, #756) only closes projectors whose INTERNAL `GetMonitor() == the target monitor`,
+so a launch-restore stray (recreated WINDOWED, internal monitor = -1) is invisible to it. So a BLIND
+opener stacks one more window every call while any stray survives → the live "3× Multiview, gate
+refuse" incident (2026-07-15).
+
+- **`imag_scenes.py::projector(obs, host)` is count-first (#769):** after opening each kind it
+  enumerates `Projector - <kind>` windows with `wmctrl -l` and closes the OLDER strays, KEEPING THE
+  NEWEST (highest numeric X window id == the one it just opened on the correct monitor). This runs on
+  every boot (`imag-obs-start.sh`) and every watchdog tier-a relaunch (`imag-obs-watchdog.py`), which
+  both call `--host 127.0.0.1` — so the stack never forms on the LIVE box between gate runs, and the
+  watchdog inherits the fix for free (it calls the same seed).
+- **KEEP NEWEST, never keep-oldest + re-fullscreen** (the ticket's original prescription was WRONG):
+  `wmctrl -b add,fullscreen` changes the X window state, NOT OBS's internal monitor index, so the
+  replace loop still can't see a windowed stray — see `scripts/lib/imag-projector-heal.sh`'s own
+  header. The fresh open always has the highest id, so keep-newest keeps the correctly-placed window.
+- **wmctrl local vs remote, mirroring `_lspci_query_local`/`_lspci_query_remote` + `_is_local_host`:**
+  local subprocess for the loopback boot/watchdog path, `sshpass` (`IMAG_USER`/`IMAG_PW`, via the
+  shared `_ssh_base()`) for a dev1-manual `--host <ip>`. A missing OR failing (`rc != 0`) wmctrl warns
+  LOUD BY NAME and SKIPS dedup — NEVER read as "0 windows" (imag-ssh-remote-tool-preflight), NEVER
+  raises (it runs under `imag-obs-start.sh`'s `set -euo pipefail`, same discipline as
+  `clear_measurement_burns`, imag-obs-supervision.md).
+- **The GATE keeps its OWN post-hoc heal:** `recording-e2e.sh` `[0/8]` still opens via
+  `obs_phase2.py open-projectors` (blind) then sources `imag-projector-heal.sh` (same keep-newest) +
+  the hard 1+1 count check. `verify-imag.sh` check (o) is count-ONLY (never opens, #840); its
+  restart-repopulate step now flows through the idempotent seeder. So no path stacks windows.
+- The pure decision (`projector_window_ids` / `projector_strays_to_close`) is extracted for an offline
+  `wmctrl`-fixture pytest (`tests/python/test_imag_scenes_projector_idempotent_769.py`).
