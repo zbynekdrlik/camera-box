@@ -365,7 +365,10 @@ fn source_selector_is_list_only_with_saved_name_preserved_795() {
          `genlock_ensure_saved_source_listed` is missing. Under a LIST combo, a saved source name \
          absent from a non-empty NDI finder list is silently overwritten on properties-open."
     );
-    let helper = squish(fn_body(&src, "static void genlock_ensure_saved_source_listed("));
+    let helper = squish(fn_body(
+        &src,
+        "static void genlock_ensure_saved_source_listed(",
+    ));
     assert!(
         helper.contains("obs_source_get_settings(s->obs_source)"),
         "{NDI_SOURCE}: #795 — genlock_ensure_saved_source_listed must read the source's own saved \

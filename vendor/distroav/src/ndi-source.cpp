@@ -444,6 +444,40 @@ static void force_genlock_certified_settings(obs_data_t *settings)
 		obs_data_set_int(settings, PROP_BANDWIDTH, PROP_BW_LOWEST);
 }
 
+/* camera-box #795: keep the currently-saved NDI source name selectable under the list-only source
+ * combo (ndi_source_getproperties below). OBS's OBSPropertiesView::AddList
+ * (vendor/obs-studio/shared/properties-view/properties-view.cpp) ends with
+ * `if (count && idx == -1) info->ControlChanged();` — for a non-editable LIST combo whose saved
+ * value is NOT among the (non-empty) list items, it writes the combo's index-0 default back into
+ * settings, silently CLOBBERING the stored source name on properties-open. The NDI finder is
+ * asynchronous and can momentarily return only OTHER sources (or nothing on a sick network), so we
+ * always inject the saved name as a list item → `idx != -1` → that writeback never fires and the
+ * configured source survives an empty/partial finder. Idempotent: skips an empty or already-listed
+ * name so a discovered source is never duplicated. */
+static void genlock_ensure_saved_source_listed(obs_property_t *source_list, ndi_source_t *s)
+{
+	if (!s || !s->obs_source)
+		return;
+	obs_data_t *settings = obs_source_get_settings(s->obs_source);
+	if (!settings)
+		return;
+	const char *saved = obs_data_get_string(settings, PROP_SOURCE);
+	if (saved && *saved) {
+		bool present = false;
+		size_t count = obs_property_list_item_count(source_list);
+		for (size_t i = 0; i < count; i++) {
+			const char *item = obs_property_list_item_string(source_list, i);
+			if (item && strcmp(item, saved) == 0) {
+				present = true;
+				break;
+			}
+		}
+		if (!present)
+			obs_property_list_add_string(source_list, saved, saved);
+	}
+	obs_data_release(settings);
+}
+
 obs_properties_t *ndi_source_getproperties(void *data)
 {
 	auto s = (ndi_source_t *)data;
@@ -459,10 +493,15 @@ obs_properties_t *ndi_source_getproperties(void *data)
 	 * GENLOCK_WHITELIST_PROPS. */
 	obs_properties_t *props = obs_properties_create();
 
-	/* (1) PROP_SOURCE — the NDI source selection (unchanged). */
+	/* (1) PROP_SOURCE — the NDI source selection. camera-box #795: LIST-only (non-editable) so free
+	 * text can NEVER replace the configured source name. An editable combo was the 2026-07-17
+	 * live-event black-screen trap: with the NDI finder EMPTY on a sick network, an operator's
+	 * keystrokes mangled 'NDI 2ME PGM' → nonexistent source → black, recoverable only by an OBS
+	 * restart. genlock_ensure_saved_source_listed() (above) keeps the saved name selectable so the
+	 * LIST combo can never clobber a saved-but-undiscovered source on properties-open. */
 	obs_property_t *source_list = obs_properties_add_list(props, PROP_SOURCE,
 							      obs_module_text("NDIPlugin.SourceProps.SourceName"),
-							      OBS_COMBO_TYPE_EDITABLE, OBS_COMBO_FORMAT_STRING);
+							      OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
 	NDIFinder finder;
 	// Create a callback that is called when the NDI source list is complete
 	auto finder_callback = [source_list, s](void *ndi_names) {
@@ -470,12 +509,14 @@ obs_properties_t *ndi_source_getproperties(void *data)
 		for (auto &source : *ndi_sources) {
 			obs_property_list_add_string(source_list, source.c_str(), source.c_str());
 		}
+		genlock_ensure_saved_source_listed(source_list, s); // #795: never clobber the saved source
 		obs_source_update_properties(s->obs_source);
 	};
 	auto ndi_sources = finder.getNDISourceList(finder_callback);
 	for (auto &source : ndi_sources) {
 		obs_property_list_add_string(source_list, source.c_str(), source.c_str());
 	}
+	genlock_ensure_saved_source_listed(source_list, s); // #795: never clobber the saved source
 
 	/* (2) PROP_GENLOCK_FIFO — the Genlock gate (bool, default ON via ndi_source_getdefaults). */
 	obs_properties_add_bool(props, PROP_GENLOCK_FIFO, "Genlock (FIFO frame consumption, camera-box #42)");

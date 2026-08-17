@@ -836,7 +836,19 @@ jobs:
           if ($ndi -notmatch [regex]::Escape('obs_source_set_genlock_burn')) {
             Write-Error "ndi-source.cpp: ndi_source_update no longer applies obs_source_set_genlock_burn — #257 runtime burn toggle inert"; exit 1
           }
-          Write-Output "Genlock NDI-source HARD-LOCK present (#257: GENLOCK_FORCED_SETTINGS table forces sync/behavior/bw/latency/hw_accel/audio/framesync/alpha/ptz; whitelist UI = source/Genlock/Latency/burn; burn applied at runtime) — OK"
+          # #795: the NDI source selector must be a NON-editable LIST combo (free text into the source
+          # name black-screened a live event 2026-07-17), and the currently-saved source name must be
+          # injected so a LIST combo can never clobber a saved-but-undiscovered source on open.
+          if ($ndi -match [regex]::Escape('OBS_COMBO_TYPE_EDITABLE')) {
+            Write-Error "ndi-source.cpp: OBS_COMBO_TYPE_EDITABLE is BACK — #795 the genlock NDI source selector must be list-only; a free-text combo let a keystroke mangle the stored source name black (2026-07-17)"; exit 1
+          }
+          if ($ndi -notmatch [regex]::Escape('OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING')) {
+            Write-Error "ndi-source.cpp: the PROP_SOURCE selector is no longer a LIST combo (OBS_COMBO_TYPE_LIST) — #795 reverted"; exit 1
+          }
+          if ($ndi -notmatch [regex]::Escape('genlock_ensure_saved_source_listed(source_list, s)')) {
+            Write-Error "ndi-source.cpp: ndi_source_getproperties no longer injects the saved source name (genlock_ensure_saved_source_listed) — #795 a LIST combo would clobber a saved-but-undiscovered source on properties-open"; exit 1
+          }
+          Write-Output "Genlock NDI-source HARD-LOCK present (#257: GENLOCK_FORCED_SETTINGS table forces sync/behavior/bw/latency/hw_accel/audio/framesync/alpha/ptz; whitelist UI = source/Genlock/Latency/burn; burn applied at runtime; #795 source selector is LIST-only + saved-name preserved) — OK"
 
       # cmake steps run under bash: pwsh tokenization splits -DNAME=32.1.2 at the
       # #111: assert the QR render-time burn filter (Path B) is present + build-wired in
