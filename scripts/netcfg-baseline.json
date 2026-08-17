@@ -1,0 +1,378 @@
+{
+  "_captured": "2026-08-17",
+  "_comment": "#797 venue MikroTik switch-chain config baseline. REPORT-ONLY source of truth: scripts/netcfg-audit.sh --check diffs the live chain vs this and reports drift LOUD; it NEVER overwrites (a legitimate re-config is recorded by updating this file in a PR, exactly like scripts/latency-pins-baseline.json). Seeded from a live read-only snapshot. See .claude/rules/netcfg-audit.md.",
+  "nodes": {
+    "foh1_audio": {
+      "board": "CRS310-8G+2S+",
+      "identity": "foh1_audio_switch",
+      "ip": "10.77.9.2",
+      "port": {
+        "ether1": {
+          "comment": "basic",
+          "dq1": "0",
+          "fcs": "0",
+          "fullduplex": "",
+          "rate": "",
+          "running": "false"
+        },
+        "ether2": {
+          "comment": "trunk",
+          "dq1": "21113",
+          "fcs": "0",
+          "fullduplex": "true",
+          "rate": "1Gbps",
+          "running": "true"
+        },
+        "ether3": {
+          "comment": "dante",
+          "dq1": "0",
+          "fcs": "0",
+          "fullduplex": "",
+          "rate": "",
+          "running": "false"
+        },
+        "ether4": {
+          "comment": "dante",
+          "dq1": "287",
+          "fcs": "0",
+          "fullduplex": "false",
+          "rate": "100Mbps",
+          "running": "true"
+        },
+        "ether5": {
+          "comment": "dante",
+          "dq1": "157",
+          "fcs": "0",
+          "fullduplex": "",
+          "rate": "",
+          "running": "false"
+        },
+        "ether6": {
+          "comment": "dante",
+          "dq1": "48",
+          "fcs": "0",
+          "fullduplex": "",
+          "rate": "",
+          "running": "false"
+        },
+        "ether7": {
+          "comment": "basic",
+          "dq1": "0",
+          "fcs": "0",
+          "fullduplex": "",
+          "rate": "",
+          "running": "false"
+        },
+        "ether8": {
+          "comment": "basic",
+          "dq1": "0",
+          "fcs": "0",
+          "fullduplex": "true",
+          "rate": "1Gbps",
+          "running": "true"
+        },
+        "sfp-sfpplus1": {
+          "comment": "stage",
+          "dq1": "0",
+          "fcs": "0",
+          "fullduplex": "true",
+          "rate": "10Gbps",
+          "running": "true"
+        },
+        "sfp-sfpplus2": {
+          "comment": "trunk::video",
+          "dq1": "0",
+          "fcs": "0",
+          "fullduplex": "true",
+          "rate": "10Gbps",
+          "running": "true"
+        }
+      },
+      "reachable": "true",
+      "role": "switch",
+      "ros": "7.23.3",
+      "shared_buffers": "80%"
+    },
+    "foh1_video": {
+      "board": "CRS310-8G+2S+",
+      "identity": "foh1_video_switch",
+      "ip": "10.77.9.4",
+      "port": {
+        "ether1": {
+          "comment": "basic",
+          "dq1": "4104191",
+          "fcs": "0",
+          "fullduplex": "true",
+          "rate": "1Gbps",
+          "running": "true"
+        },
+        "ether2": {
+          "comment": "dante",
+          "dq1": "79268",
+          "fcs": "0",
+          "fullduplex": "true",
+          "rate": "2.5Gbps",
+          "running": "true"
+        },
+        "ether3": {
+          "comment": "basic",
+          "dq1": "24",
+          "fcs": "0",
+          "fullduplex": "true",
+          "rate": "1Gbps",
+          "running": "true"
+        },
+        "ether4": {
+          "comment": "basic",
+          "dq1": "21",
+          "fcs": "0",
+          "fullduplex": "true",
+          "rate": "1Gbps",
+          "running": "true"
+        },
+        "ether5": {
+          "comment": "basic",
+          "dq1": "0",
+          "fcs": "0",
+          "fullduplex": "true",
+          "rate": "2.5Gbps",
+          "running": "true"
+        },
+        "ether6": {
+          "comment": "basic",
+          "dq1": "21497",
+          "fcs": "0",
+          "fullduplex": "true",
+          "rate": "2.5Gbps",
+          "running": "true"
+        },
+        "ether7": {
+          "comment": "basic",
+          "dq1": "11059",
+          "fcs": "0",
+          "fullduplex": "",
+          "rate": "",
+          "running": "false"
+        },
+        "ether8": {
+          "comment": "basic",
+          "dq1": "0",
+          "fcs": "0",
+          "fullduplex": "",
+          "rate": "",
+          "running": "false"
+        },
+        "sfp-sfpplus1": {
+          "comment": "trunk",
+          "dq1": "0",
+          "fcs": "0",
+          "fullduplex": "true",
+          "rate": "10Gbps",
+          "running": "true"
+        },
+        "sfp-sfpplus2": {
+          "comment": "trunk",
+          "dq1": "0",
+          "fcs": "0",
+          "fullduplex": "true",
+          "rate": "10Gbps",
+          "running": "true"
+        }
+      },
+      "reachable": "true",
+      "role": "switch",
+      "ros": "7.23.3",
+      "shared_buffers": "80%"
+    },
+    "foh2_video": {
+      "board": "CRS310-8G+2S+",
+      "identity": "foh2_video_switch",
+      "ip": "10.77.9.5",
+      "port": {
+        "ether1": {
+          "comment": "basic",
+          "dq1": "0",
+          "fcs": "0",
+          "fullduplex": "true",
+          "rate": "100Mbps",
+          "running": "true"
+        },
+        "ether2": {
+          "comment": "dante",
+          "dq1": "100054",
+          "fcs": "1",
+          "fullduplex": "true",
+          "rate": "1Gbps",
+          "running": "true"
+        },
+        "ether3": {
+          "comment": "dante",
+          "dq1": "0",
+          "fcs": "0",
+          "fullduplex": "",
+          "rate": "",
+          "running": "false"
+        },
+        "ether4": {
+          "comment": "basic",
+          "dq1": "0",
+          "fcs": "22",
+          "fullduplex": "true",
+          "rate": "1Gbps",
+          "running": "true"
+        },
+        "ether5": {
+          "comment": "basic",
+          "dq1": "125638",
+          "fcs": "0",
+          "fullduplex": "true",
+          "rate": "1Gbps",
+          "running": "true"
+        },
+        "ether6": {
+          "comment": "basic",
+          "dq1": "0",
+          "fcs": "5",
+          "fullduplex": "true",
+          "rate": "1Gbps",
+          "running": "true"
+        },
+        "ether7": {
+          "comment": "basic",
+          "dq1": "0",
+          "fcs": "0",
+          "fullduplex": "true",
+          "rate": "1Gbps",
+          "running": "true"
+        },
+        "ether8": {
+          "comment": "basic",
+          "dq1": "0",
+          "fcs": "0",
+          "fullduplex": "true",
+          "rate": "2.5Gbps",
+          "running": "true"
+        },
+        "sfp-sfpplus1": {
+          "comment": "trunk::foh1",
+          "dq1": "0",
+          "fcs": "0",
+          "fullduplex": "true",
+          "rate": "10Gbps",
+          "running": "true"
+        },
+        "sfp-sfpplus2": {
+          "comment": "basic",
+          "dq1": "0",
+          "fcs": "17",
+          "fullduplex": "true",
+          "rate": "10Gbps",
+          "running": "true"
+        }
+      },
+      "reachable": "true",
+      "role": "switch",
+      "ros": "7.23.3",
+      "shared_buffers": "80%"
+    },
+    "router_snv": {
+      "board": "RB4011iGS+",
+      "identity": "router_snv",
+      "ip": "10.77.8.1",
+      "reachable": "true",
+      "role": "router",
+      "ros": "7.22"
+    },
+    "stage_av": {
+      "board": "CRS310-8G+2S+",
+      "identity": "stage_av_switch",
+      "ip": "10.77.9.3",
+      "port": {
+        "ether1": {
+          "comment": "basic",
+          "dq1": "0",
+          "fcs": "0",
+          "fullduplex": "",
+          "rate": "",
+          "running": "false"
+        },
+        "ether2": {
+          "comment": "dante",
+          "dq1": "0",
+          "fcs": "0",
+          "fullduplex": "",
+          "rate": "",
+          "running": "false"
+        },
+        "ether3": {
+          "comment": "dante",
+          "dq1": "0",
+          "fcs": "0",
+          "fullduplex": "",
+          "rate": "",
+          "running": "false"
+        },
+        "ether4": {
+          "comment": "basic",
+          "dq1": "0",
+          "fcs": "0",
+          "fullduplex": "",
+          "rate": "",
+          "running": "false"
+        },
+        "ether5": {
+          "comment": "basic",
+          "dq1": "0",
+          "fcs": "0",
+          "fullduplex": "true",
+          "rate": "1Gbps",
+          "running": "true"
+        },
+        "ether6": {
+          "comment": "basic",
+          "dq1": "0",
+          "fcs": "0",
+          "fullduplex": "",
+          "rate": "",
+          "running": "false"
+        },
+        "ether7": {
+          "comment": "basic",
+          "dq1": "0",
+          "fcs": "0",
+          "fullduplex": "true",
+          "rate": "2.5Gbps",
+          "running": "true"
+        },
+        "ether8": {
+          "comment": "basic",
+          "dq1": "0",
+          "fcs": "0",
+          "fullduplex": "true",
+          "rate": "1Gbps",
+          "running": "true"
+        },
+        "sfp-sfpplus1": {
+          "comment": "trunk::foh1",
+          "dq1": "0",
+          "fcs": "0",
+          "fullduplex": "true",
+          "rate": "10Gbps",
+          "running": "true"
+        },
+        "sfp-sfpplus2": {
+          "comment": "basic",
+          "dq1": "0",
+          "fcs": "0",
+          "fullduplex": "",
+          "rate": "",
+          "running": "false"
+        }
+      },
+      "reachable": "true",
+      "role": "switch",
+      "ros": "7.23.3",
+      "shared_buffers": "80%"
+    }
+  }
+}
