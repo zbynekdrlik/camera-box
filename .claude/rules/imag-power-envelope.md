@@ -7,6 +7,7 @@ paths:
   - "scripts/imag-obs-watchdog.py"
   - "tests/python/test_imag_obs_watchdog_snapshot_849.py"
   - "tests/harness_imag_power_envelope_1040.rs"
+  - "tests/harness_imag_power_dedup_preserve_1076.rs"
   - "systemd/imag-power-envelope-alert-watchdog.service"
   - "systemd/imag-power-envelope-alert-watchdog.timer"
 ---
@@ -182,3 +183,35 @@ or the churn leak (#799, a restart clears it). `alert_from_render_discriminator`
   discriminator correctly stayed quiet (render healthy → no churn page); the throttle path WOULD
   page the clamp. This is exactly why the fusion matters: it prevents a false #799 churn alert when
   the real cause is the known clamp.
+
+## Dedup on an UNMEASURED pass — preserve the signature, never reset it (#1076)
+
+All three alert paths (`alert_from_journal`/`alert_from_throttle`/`alert_from_render_discriminator`)
+share ONE dedup contract for a NON-episode pass: **an UNMEASURED pass preserves the dedup signature +
+pass count (no new information advances nothing); only a genuinely MEASURED-healthy pass resets** (so
+a later new episode still pages fresh). The old code reset on EVERY non-episode pass, so a single
+transient measurement gap during one ongoing episode wiped the "already paged" memory and re-paged
+next pass, defeating the ~1h throttle. Per-path "unmeasured" signal (reuse the existing pure
+discriminators — do NOT invent a new one):
+- journal: `JOURNAL` EMPTY = unmeasured (an ssh hiccup OR a quiet window — the guard logs ONLY on
+  STEP-DOWN/RESTORE/RE-ASSERT transitions, never a heartbeat); a non-empty journal with no
+  STEP-DOWN/RE-ASSERT marker (e.g. a RESTORE line) = measured-healthy → reset. The journal sig embeds
+  the FULL timestamped `journalctl` line, so a stale preserved sig can never suppress a genuinely-new
+  later STEP-DOWN (new timestamp → new sig → pages fresh) — the preserve is bounded, not a missed-page.
+- throttle: `imag_power_throttle_state` == `unknown` (no FLOOR / < min samples) = unmeasured; `clean`
+  (valid burst, GPU headroom) = measured-healthy → reset. The 2-state `imag_power_throttle_alert_condition`
+  collapses clean+unknown, so you MUST call the 3-state `imag_power_throttle_state` in the empty-markers
+  branch to tell them apart.
+- render: the `imag_render_cause_from_signals` `unknown` cause (RENDER unreadable, OR degraded render
+  but an unreadable burst) = unmeasured → preserve sig+passes BUT still reset the confirm counter (a
+  churn candidate cannot carry its 2-pass confirmation across a measurement gap); `healthy`/`stalled`/
+  `power-clamp` = measured non-churn → reset all.
+
+**Testing the alert_from_* state machine offline (the sourcing pattern).** The pure lib functions are
+already covered by `harness_imag_power_envelope_1040.rs`, but to test a `alert_from_*` function's
+DEDUP/STATE behavior directly, SOURCE the watchdog script (`. "$WD"`) — it defines the functions but
+only runs `main` when EXECUTED (`[[ "${BASH_SOURCE[0]}" == "$0" ]]`), so sourcing gives you the
+functions with no side effects — set `IMAG_POWER_ALERT_STATE_FILE` to a per-test `tempfile::tempdir()`
+path, seed it, set the per-path input var (`JOURNAL`/`BURST`/`RENDER`) + `DRY_RUN=1`, call the
+function, and `cat` the state file back. See `tests/harness_imag_power_dedup_preserve_1076.rs`
+(`drive()` helper). The unmeasured branches return BEFORE any notify, so `DRY_RUN` is belt-and-braces.
