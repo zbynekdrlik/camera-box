@@ -713,13 +713,42 @@ check_recordings_budget stream "$STREAM"
 # boxes report a SHA (opt-in rollout), never a spurious refuse. Mirrors the [4d/8] imag ssh (l.1412).
 IMAG_GENLOCK_SHA="$(sshpass -p "${IMAG_PW:-newlevel}" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 \
   "${IMAG_USER:-newlevel}@$IMAG_IP" 'cat /opt/obs-genlock/GENLOCK_BUILD_SHA.txt 2>/dev/null | head -1' 2>/dev/null | tr -d '[:space:]' || true)"
+# #1082 -- best-effort BYTE-parity inputs for the version-integrity gate, so the [0/8] byte facet
+# compares each box's DEPLOYED bytes against CI truth, not just the hand-written marker. All
+# best-effort via scripts/lib/manifest-autosource.sh: any fetch/gather failure yields "" -> the arg
+# is OMITTED -> the facet stays DORMANT (opt-in), never a spurious refuse (the ENFORCE flip is
+# deferred, #1082). shellcheck source=scripts/lib/manifest-autosource.sh
+. "$HERE/lib/manifest-autosource.sh"
+VERSION_GATE_REPO="${VERSION_GATE_REPO:-zbynekdrlik/camera-box}"
+# Windows FAST manifest (strih+stream share ONE build -> one manifest), keyed on strih's OWN reported
+# marker SHA. Gated on strih ALREADY reporting obs_dll_sha256: supplying a manifest before the #770
+# on-box byte gather is live would flip obs_dll_sha256 to UNKNOWN = a spurious refuse, so this stays
+# dormant until that gather is deployed fleet-wide. VERSION_GATE_MANIFEST (if pre-set) still wins.
+AUTO_WIN_MANIFEST="${VERSION_GATE_MANIFEST:-}"
+if [ -z "$AUTO_WIN_MANIFEST" ] && manifest_autosource_state_has_key "$VERSION_STRIH_STATE" obs_dll_sha256; then
+  AUTO_WIN_MANIFEST="$(manifest_autosource_fetch "$VERSION_GATE_REPO" windows-genlock-fast.yml obs-genlock-fast-dll \
+    "$(genlock_build_sha_state_read "$VERSION_STRIH_STATE")" "$OUTDIR/win-fast-manifest.json")"
+fi
+# imag linux .so byte gather (ssh) + its own CI manifest, keyed on imag's marker SHA. The manifest is
+# fetched only when the .so gather actually returned SHAs, so a failed gather leaves the facet dormant.
+AUTO_IMAG_MANIFEST=""
+IMAG_SO_CSV=""
+if [ -n "$IMAG_GENLOCK_SHA" ]; then
+  IMAG_SO_PROBE="$(sshpass -p "${IMAG_PW:-newlevel}" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 \
+    "${IMAG_USER:-newlevel}@$IMAG_IP" "$(imag_so_gather_cmd)" 2>/dev/null || true)"
+  IMAG_SO_CSV="$(imag_so_bytes_csv "$IMAG_SO_PROBE")"
+  [ -n "$IMAG_SO_CSV" ] && AUTO_IMAG_MANIFEST="$(manifest_autosource_fetch "$VERSION_GATE_REPO" linux-genlock.yml obs-genlock-linux-x86_64 \
+    "$IMAG_GENLOCK_SHA" "$OUTDIR/imag-linux-manifest.json")"
+fi
 # ALWAYS pass --win-state for strih AND stream (NOT conditional on the file existing): an absent file
 # is UNKNOWN -> the gate REFUSES, never a silent pass with a box's build unverified.
 "$HERE/version-integrity-gate.sh" \
-  ${VERSION_GATE_MANIFEST:+--manifest "$VERSION_GATE_MANIFEST"} \
+  ${AUTO_WIN_MANIFEST:+--manifest "$AUTO_WIN_MANIFEST"} \
   --win-state "strih=$VERSION_STRIH_STATE" \
   --win-state "stream=$VERSION_STREAM_STATE" \
-  --genlock-sha "imag=$IMAG_GENLOCK_SHA"
+  --genlock-sha "imag=$IMAG_GENLOCK_SHA" \
+  ${AUTO_IMAG_MANIFEST:+--imag-manifest "$AUTO_IMAG_MANIFEST"} \
+  ${IMAG_SO_CSV:+--imag-bytes "imag=$IMAG_SO_CSV"}
 
 # dantesync fleet-wide VERSION-PARITY gate (#862) — alongside the DanteSync NTP+PTP gate (#7) and
 # the version-integrity gate (#123) above. Those two measure LIVE BEHAVIOUR (offset/lock, OBS/

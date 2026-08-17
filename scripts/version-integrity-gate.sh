@@ -260,6 +260,62 @@ fi
 # shellcheck source=/dev/null
 . "$DRIFT_GUARD"
 
+# imag_bytes_verdict LABEL MANIFEST CSV -> #1082 imag .so BYTE parity. For each `path=sha` in CSV (the
+# imag box's DEPLOYED libobs.so.30 / distroav.so / libobs-opengl.so.30 sha256s, gathered over ssh by
+# recording-e2e.sh via scripts/lib/manifest-autosource.sh), resolve the AUTHORITATIVE sha for that
+# EXACT manifest path via drift-guard's manifest_sha_for_path (the linux-.so resolver -- #122's
+# manifest_sha_for_component knows only the Windows obs.dll/distroav.dll basenames) and compare. A
+# TARGETED per-.so compare, NOT the whole-bundle drift_check_all_files walk, so a partial 3-file
+# gather never flips the gate UNKNOWN for the ~1600 files it did not hash.
+#
+# OPT-IN (#756-shape): DORMANT (returns 10, treated as SKIP by the caller -- neither ok/bad/unknown)
+# when CSV or MANIFEST is empty, so a live gather/auto-source failure never spuriously refuses while
+# the ENFORCE flip (#1082 part 3) is deferred to a follow-up (needs the live gather deployed+verified,
+# a property no worktree worker can check). Present + all match -> OK (0); any mismatch -> DRIFT (20)
+# naming the .so + box; a path absent from the manifest -> UNKNOWN (11, never a false clean). Defined
+# below the source-guard because it calls manifest_sha_for_path (drift-guard) -- tested end-to-end via
+# the gate subprocess (tests/version_integrity_gate.rs), the same path the #770 byte facet uses.
+imag_bytes_verdict() {
+  local label="$1" manifest="$2" csv="$3"
+  if [ -z "$csv" ] || [ -z "$manifest" ]; then
+    printf '  %-22s DORMANT  (%s byte gather/manifest not supplied -- opt-in, #1082 ENFORCE deferred)\n' "imag_so_bytes" "$label"
+    return 10
+  fi
+  if [ ! -f "$manifest" ]; then
+    printf '  %-22s UNKNOWN  (%s manifest %s not readable)\n' "imag_so_bytes" "$label" "$manifest"
+    return 11
+  fi
+  local OLDIFS="$IFS"; IFS=','
+  # shellcheck disable=SC2206
+  local -a entries=($csv)
+  IFS="$OLDIFS"
+  local entry path sha exp drift=0 unknown=0 ok=0 total=0
+  for entry in "${entries[@]}"; do
+    entry="${entry#"${entry%%[![:space:]]*}"}"; entry="${entry%"${entry##*[![:space:]]}"}"
+    [ -z "$entry" ] && continue
+    path="${entry%%=*}"; sha="${entry#*=}"
+    total=$((total + 1))
+    exp="$(manifest_sha_for_path "$manifest" "$path")"
+    if [ -z "$exp" ]; then
+      printf '  %-22s UNKNOWN  (%s: %s not listed in the manifest -- byte parity unverifiable)\n' "imag_so_bytes" "$label" "$path"
+      unknown=$((unknown + 1))
+    elif [ "$sha" = "$exp" ]; then
+      printf '  %-22s OK       (%s: %s matches the manifest)\n' "imag_so_bytes" "$label" "${path##*/}"
+      ok=$((ok + 1))
+    else
+      printf '  %-22s DRIFT    (%s: %s bytes differ -- expected %s, deployed %s)\n' "imag_so_bytes" "$label" "$path" "$exp" "$sha"
+      drift=$((drift + 1))
+    fi
+  done
+  if [ "$total" -eq 0 ]; then
+    printf '  %-22s DORMANT  (%s byte CSV empty)\n' "imag_so_bytes" "$label"
+    return 10
+  fi
+  [ "$drift" -gt 0 ] && return 20
+  [ "$unknown" -gt 0 ] && return 11
+  return 0
+}
+
 # --- flow (executed only when run directly) ------------------------------------------------
 
 usage() {
@@ -286,6 +342,11 @@ Options:
                     pre-fetches it -- #701 proved plain scp/ssh reaches strih/stream, not migrated
                     here). Repeatable. A box with no
                     file is UNKNOWN -> the gate refuses.
+  --imag-manifest PATH  #1082 -- the CI-authoritative linux BUNDLE_MANIFEST.json for imag's build,
+                    against which imag's DEPLOYED .so bytes are compared. OPT-IN.
+  --imag-bytes LABEL=path=sha,...  #1082 -- imag's DEPLOYED libobs.so.30 / distroav.so /
+                    libobs-opengl.so.30 sha256s (gathered over ssh; imag is not a --win-state box).
+                    OPT-IN: absent -> the imag byte facet is DORMANT (never a spurious refuse).
 
 Exit: 0 = every box matches the pinned set (proceed), 20 = a box DRIFTED (REFUSED),
 11 = a box UNKNOWN/unread (INCOMPLETE, not clean), 1 = usage error.
@@ -300,12 +361,18 @@ main() {
   # passes it here). Repeatable. Combined with the SHAs read out of each --win-state file for the
   # CROSS-BOX parity assert.
   local -a genlock_sha=()
+  # #1082 -- imag (Linux) .so BYTE parity: a linux BUNDLE_MANIFEST for imag's build + imag's DEPLOYED
+  # .so sha256s (LABEL=path=sha,...), gathered over ssh (imag is NOT a --win-state bundle-state box).
+  # Both OPT-IN: absent -> the facet is DORMANT (skipped), never a spurious refuse.
+  local imag_manifest="" imag_bytes=""
   while [ $# -gt 0 ]; do
     case "$1" in
-      --readme)      shift; readme="${1:-}" ;;
-      --manifest)    shift; manifest="${1:-}" ;;
-      --win-state)   shift; win_state+=("${1:-}") ;;
-      --genlock-sha) shift; genlock_sha+=("${1:-}") ;;
+      --readme)        shift; readme="${1:-}" ;;
+      --manifest)      shift; manifest="${1:-}" ;;
+      --win-state)     shift; win_state+=("${1:-}") ;;
+      --genlock-sha)   shift; genlock_sha+=("${1:-}") ;;
+      --imag-manifest) shift; imag_manifest="${1:-}" ;;
+      --imag-bytes)    shift; imag_bytes="${1:-}" ;;
       -h|--help)    usage; exit 0 ;;
       --*)          echo "unknown option: $1" >&2; usage >&2; exit 1 ;;
       *)            echo "unexpected argument: $1" >&2; usage >&2; exit 1 ;;
@@ -551,6 +618,31 @@ main() {
     11) unknown=$((unknown + 1)); unknown_boxes+=("genlock_parity") ;;
     *)  echo "    !! genlock_build_parity_report exited ${prc} (engine error)" >&2; bad=$((bad + 1)) ;;
   esac
+
+  # #1082 -- imag (Linux) .so BYTE parity facet: compare imag's DEPLOYED libobs.so.30 / distroav.so /
+  # libobs-opengl.so.30 sha256s (--imag-bytes, gathered over ssh) against the CI-authoritative linux
+  # BUNDLE_MANIFEST for imag's build (--imag-manifest, auto-sourced per box by recording-e2e.sh). This
+  # closes the byte-parity gap #770 left for imag (its bytes had NO path into the gate -- only its
+  # marker). OPT-IN (#756-shape): the facet engages only when --imag-bytes or --imag-manifest is
+  # supplied, and DORMANT (code 10 = SKIP, uncounted) when the gather/manifest is absent -- so a live
+  # ssh gather / CI-artifact fetch failure never spuriously refuses. The ENFORCE flip (#758-shape) is
+  # deferred to a follow-up (needs the live gather deployed+verified, a property no worktree worker can
+  # check -- the #1067 port4455 class).
+  if [ -n "$imag_bytes" ] || [ -n "$imag_manifest" ]; then
+    echo "  -- imag .so byte parity (#1082, opt-in) --"
+    local ib_label="imag" ib_csv=""
+    if [ -n "$imag_bytes" ]; then ib_label="${imag_bytes%%=*}"; ib_csv="${imag_bytes#*=}"; fi
+    local ib_out="" ibrc=0
+    ib_out="$(imag_bytes_verdict "${ib_label:-imag}" "$imag_manifest" "$ib_csv")" || ibrc=$?
+    printf '%s\n' "$ib_out" | sed 's/^/    /'
+    case "$ibrc" in
+      0)  ok=$((ok + 1)) ;;
+      20) bad=$((bad + 1)) ;;
+      11) unknown=$((unknown + 1)); unknown_boxes+=("imag:so_bytes") ;;
+      10) : ;;  # DORMANT -- opt-in skip, not counted (never refuses)
+      *)  echo "    !! imag_bytes_verdict exited ${ibrc} (unexpected)" >&2; bad=$((bad + 1)) ;;
+    esac
+  fi
 
   echo
   if [ "$bad" -gt 0 ]; then
