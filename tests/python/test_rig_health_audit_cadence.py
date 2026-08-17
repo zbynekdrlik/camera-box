@@ -145,3 +145,34 @@ def test_box_verdict_pass_warn_fail():
     # a hard problem alongside a soft one is still FAIL.
     assert _mod.box_verdict(["warn:cadence cam2=50fps(!=60)",
                              "render-fps-low"]) == "FAIL"
+
+
+# --------------------------------------------------------------------------
+# Integration composition: the exact fold check_windows_box(strih) performs --
+# cadence_check problems + box_verdict -- without needing ssh/WS (the glue
+# itself is `problems += cad_problems; verdict = box_verdict(problems)`).
+# --------------------------------------------------------------------------
+def test_strih_fold_a_50fps_camera_drives_the_node_to_warn():
+    _, cad_problems = _mod.cadence_check(_LOG)          # cam2 is the mis-set 50 fps
+    problems = []                                       # a strih box otherwise clean
+    problems += cad_problems
+    assert _mod.box_verdict(problems) == "WARN"
+
+
+def test_strih_fold_cadence_warn_plus_hard_problem_is_fail():
+    _, cad_problems = _mod.cadence_check(_LOG)
+    problems = ["render-fps-low"]                       # a real hard problem present too
+    problems += cad_problems
+    assert _mod.box_verdict(problems) == "FAIL"
+
+
+def test_strih_fold_all_60fps_stays_pass():
+    log = "\n".join([
+        _line("14:00:00.000", "NDI cam1", 1000),
+        _line("14:02:00.000", "NDI cam1", 8200),        # 60.0 fps -> OK
+        _line("14:00:00.000", "NDI cam2", 5000),
+        _line("14:02:00.000", "NDI cam2", 12200),       # 60.0 fps -> OK
+    ])
+    _, cad_problems = _mod.cadence_check(log)
+    assert cad_problems == []
+    assert _mod.box_verdict([] + cad_problems) == "PASS"
