@@ -1103,28 +1103,56 @@ fn create_usb_bakes_i915_modules_load_conf() {
     );
 }
 
+/// Slice the `#448` GPU-box operator note out of a doc: from the `GPU-dependent` marker to the
+/// first blank line after it. Scopes the doc assertions below to the NEW note so a pre-existing,
+/// unrelated mention of `first`/`boot`/`#448` elsewhere in the doc can never satisfy the test
+/// (the #888/#832 slice-region discipline: pin the contract WHERE it actually lives).
+fn gpu_note_region(doc: &str) -> &str {
+    let start = doc
+        .find("GPU-dependent")
+        .expect("doc must carry the GPU-dependent (cam5-class) first-boot note (#448)");
+    let region = &doc[start..];
+    region.find("\n\n").map(|e| &region[..e]).unwrap_or(region)
+}
+
+/// Assert a doc's `#448` GPU-box note names the i915 pin, the monitor-at-first-boot requirement,
+/// and ties back to #448 — all WITHIN the note region, never anywhere in the file.
+fn assert_gpu_first_boot_note(doc_rel: &str) {
+    let raw = read(doc_rel);
+    let region = gpu_note_region(&raw);
+    let low = region.to_lowercase();
+    assert!(
+        low.contains("i915"),
+        "{doc_rel}'s GPU-box note must name the i915 modules-load.d pin (#448)"
+    );
+    assert!(
+        low.contains("monitor"),
+        "{doc_rel}'s GPU-box note must require a monitor connected on the box's first boot (#448)"
+    );
+    assert!(
+        low.contains("first") && low.contains("boot"),
+        "{doc_rel}'s GPU-box note must tie the monitor requirement to the FIRST physical BOOT (#448)"
+    );
+    assert!(
+        region.contains("#448"),
+        "{doc_rel}'s GPU-box note must reference #448 so the rationale is traceable"
+    );
+}
+
 /// 23. SETUP.md must document the operator half of the #448 rescope: the FIRST physical boot of a
 ///     GPU-dependent (cam5-class Intel iGPU) box should be done WITH a monitor connected, so the
 ///     DRM connector + framebuffer initialize cleanly. The modules-load.d pin force-loads the
 ///     DRIVER; this belt-and-braces note keeps the connector/fb0 bring-up covered on first boot.
 #[test]
 fn setup_md_documents_first_boot_with_monitor_for_gpu_boxes() {
-    let raw = read("SETUP.md");
-    let doc = raw.to_lowercase();
-    assert!(
-        doc.contains("i915"),
-        "SETUP.md must document the i915 modules-load.d GPU pin for cam5-class boxes (#448)"
-    );
-    assert!(
-        doc.contains("monitor"),
-        "SETUP.md must document that a GPU-dependent box's first boot needs a monitor connected (#448)"
-    );
-    assert!(
-        doc.contains("first") && doc.contains("boot"),
-        "SETUP.md must tie the monitor requirement to the FIRST physical BOOT of a GPU box (#448)"
-    );
-    assert!(
-        raw.contains("#448"),
-        "SETUP.md must tie the GPU-first-boot section to #448 so the rationale is traceable"
-    );
+    assert_gpu_first_boot_note("SETUP.md");
+}
+
+/// 24. The provision runbook (`.claude/skills/provision/SKILL.md`) — the doc a provisioning session
+///     actually loads — must carry the SAME #448 GPU-box first-boot note as SETUP.md; the rescope
+///     named BOTH docs, and a runbook that omits it re-exposes the cam5 headless pain to the next
+///     new-box bring-up.
+#[test]
+fn provision_skill_documents_first_boot_with_monitor_for_gpu_boxes() {
+    assert_gpu_first_boot_note(".claude/skills/provision/SKILL.md");
 }
