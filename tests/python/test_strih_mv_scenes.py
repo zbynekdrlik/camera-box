@@ -198,6 +198,78 @@ def test_reattach_returns_none_when_the_input_has_no_ndi_source_name(monkeypatch
     assert fake.calls == [("GetInputSettings", {"inputName": "NDI cam3"})]
 
 
+# --- #795/#759: reattach() must GUARD the SetInputSettings against an EMPTY DistroAV finder list --
+
+
+class _FakeObsRpcWithFinder:
+    """#759/#795: a fake that ALSO answers GetInputPropertiesListPropertyItems — the DistroAV
+    finder-list read reattach() now consults before re-applying ndi_source_name (via
+    obs_phase2._ndi_source_list). Lets the empty-finder-list guard be exercised without a live OBS,
+    same spirit as _FakeObsRpc above."""
+
+    def __init__(self, get_settings_response, finder_items):
+        self.calls = []
+        self._get_settings_response = get_settings_response
+        self._finder_items = finder_items
+
+    def rpc(self, _obs, rtype, rdata=None, ignore_err=False):
+        self.calls.append((rtype, rdata))
+        if rtype == "GetInputSettings":
+            return self._get_settings_response
+        if rtype == "GetInputPropertiesListPropertyItems":
+            return {"propertyItems": self._finder_items}
+        if rtype == "SetInputSettings":
+            return {}
+        raise AssertionError(f"unexpected rpc call: {rtype}")
+
+
+def test_reattach_skips_the_set_when_the_finder_list_is_empty(monkeypatch):
+    # #795 (event review 2026-07-18): re-applying ndi_source_name via SetInputSettings against an
+    # EMPTY DistroAV finder list MANGLES the value (OBS drops a name absent from the combo's live
+    # item list). reattach() must therefore SKIP the SetInputSettings entirely when the finder list
+    # stays empty, leave the input bound as-is, and return the FINDER_LIST_EMPTY sentinel — so the
+    # caller (especially the WARN-only #759 cleanup path, which never fails the run loud) can never
+    # silently point a camera leg at garbage.
+    fake = _FakeObsRpcWithFinder(
+        {"inputSettings": {"ndi_source_name": "CAM3 (usb)"}}, finder_items=[]
+    )
+    monkeypatch.setattr(strih_mv_scenes.op, "_rpc", fake.rpc)
+
+    result = strih_mv_scenes.reattach(
+        object(), 3, finder_retries=3, finder_wait_s=0, sleep=lambda *_a, **_k: None
+    )
+
+    assert result is strih_mv_scenes.FINDER_LIST_EMPTY
+    set_calls = [c for c in fake.calls if c[0] == "SetInputSettings"]
+    assert set_calls == [], (
+        "#795: reattach must NOT SetInputSettings against an empty finder list (would mangle the "
+        f"name); got {set_calls}"
+    )
+
+
+def test_reattach_sets_once_the_finder_list_is_non_empty(monkeypatch):
+    # The happy path with a populated finder list still re-applies the input's own current name —
+    # the #795 guard must only skip the EMPTY case, never the normal reconnect nudge.
+    fake = _FakeObsRpcWithFinder(
+        {"inputSettings": {"ndi_source_name": "CAM3 (usb)"}},
+        finder_items=[{"itemValue": "CAM3 (usb)"}, {"itemValue": "CAM1 (usb)"}],
+    )
+    monkeypatch.setattr(strih_mv_scenes.op, "_rpc", fake.rpc)
+
+    result = strih_mv_scenes.reattach(
+        object(), 3, finder_retries=3, finder_wait_s=0, sleep=lambda *_a, **_k: None
+    )
+
+    assert result == "CAM3 (usb)"
+    set_calls = [c for c in fake.calls if c[0] == "SetInputSettings"]
+    assert set_calls == [
+        (
+            "SetInputSettings",
+            {"inputName": "NDI cam3", "inputSettings": {"ndi_source_name": "CAM3 (usb)"}},
+        )
+    ]
+
+
 # --- #753 (2026-07-14): cam7 physical box exists -- seed() must pick up its 'Cam 7' scene too --
 
 def test_cams_covers_all_seven_cameras():
