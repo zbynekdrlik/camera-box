@@ -1173,9 +1173,13 @@ fi
 # guarded (the (aa)/(e)/(z) shape) so an unreachable box FALLS to the first fail branch, never
 # aborts the gate. Inserted BEFORE (q) -- (q) stays the LAST check.
 mcpenr=0
-MCP_ENABLED="$(ssh_box "systemctl is-enabled remoteos-mcp 2>/dev/null" | tr -d '[:space:]')" || mcpenr=$?
+# tr runs on the REMOTE (inside ssh_box's command) so the local `|| mcpenr=$?` captures ssh's OWN
+# rc (255 on an unreachable box), not the always-0 exit of a local `| tr` pipe -- an accurate
+# `ssh rc=` in the fail message (review 🔵). The verdict itself is fail-closed either way (empty
+# state never equals "enabled").
+MCP_ENABLED="$(ssh_box "systemctl is-enabled remoteos-mcp 2>/dev/null | tr -d '[:space:]'")" || mcpenr=$?
 mcpacr=0
-MCP_ACTIVE="$(ssh_box "systemctl is-active remoteos-mcp 2>/dev/null" | tr -d '[:space:]')" || mcpacr=$?
+MCP_ACTIVE="$(ssh_box "systemctl is-active remoteos-mcp 2>/dev/null | tr -d '[:space:]'")" || mcpacr=$?
 mcplr=0
 MCP_LISTEN="$(ssh_box "ss -ltn 2>/dev/null | grep -cE ':8092([^0-9]|\$)' || true")" || mcplr=$?
 if [ "${MCP_ENABLED:-}" != "enabled" ]; then

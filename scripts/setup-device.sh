@@ -1220,8 +1220,13 @@ rm -f "$REMOTEOS_MCP_INSTALLER_TMP"
 # already did `enable --now`), then gate on is-enabled. verify-device.sh's (ab) check proves the
 # LIVE :8092 surface after the box reboots.
 systemctl enable remoteos-mcp 2>/dev/null || true
-systemctl is-enabled --quiet remoteos-mcp \
-    || fail "remoteos-mcp.service is not enabled after install -- the linux-camN MCP surface would be dead on next boot (#1066)"
+# Compare the LITERAL is-enabled state, not `--quiet`'s exit code: `is-enabled --quiet` returns 0
+# for a `static` unit (no [Install] section) too, which is NOT pulled in at boot -- the exact
+# reboot-survival property this gate claims to prove. A literal `= enabled` compare rejects that
+# (review 🔵); verify-device.sh's (ab) check makes the same strict compare post-reboot.
+REMOTEOS_MCP_ENABLED_STATE="$(systemctl is-enabled remoteos-mcp 2>/dev/null || true)"
+[ "$REMOTEOS_MCP_ENABLED_STATE" = "enabled" ] \
+    || fail "remoteos-mcp.service is not enabled (is-enabled='${REMOTEOS_MCP_ENABLED_STATE:-<none>}') after install -- the linux-camN MCP surface would be dead on next boot (#1066)"
 echo "  #1066: remoteos-mcp agent installed + enabled (linux-camN MCP surface :8092; proven live post-reboot by verify-device.sh (ab))"
 
 # =============================================================================

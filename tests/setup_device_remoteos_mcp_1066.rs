@@ -108,9 +108,15 @@ fn setup_device_remoteos_auth_key_is_env_sourced_and_never_committed_1066() {
 fn setup_device_asserts_remoteos_service_enabled_after_install_1066() {
     let body = setup();
     assert!(
-        body.contains("systemctl is-enabled --quiet remoteos-mcp"),
-        "{SETUP}: after install, must assert `systemctl is-enabled --quiet remoteos-mcp` and `fail` if \
-         the unit is not enabled — a fresh box must come up with the :8092 MCP surface on next reboot (#1066)"
+        body.contains("systemctl is-enabled remoteos-mcp"),
+        "{SETUP}: after install, must read `systemctl is-enabled remoteos-mcp` to gate on the unit's \
+         reboot-survival — a fresh box must come up with the :8092 MCP surface on next reboot (#1066)"
+    );
+    assert!(
+        body.contains("= \"enabled\""),
+        "{SETUP}: the enable gate must compare the LITERAL is-enabled state to `enabled` and `fail` \
+         otherwise — `is-enabled --quiet`'s exit code passes for a `static` unit that is NOT pulled in \
+         at boot, which is the exact reboot-survival property this gate claims to prove (review 🔵, #1066)"
     );
 }
 
