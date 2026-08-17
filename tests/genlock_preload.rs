@@ -2510,6 +2510,79 @@ mod vendored_source {
     }
 
     #[test]
+    fn multiview_fps_audit_line_present_771() {
+        // #771: MV fps observability. render_display() (obs-display.c) emits a per-projector
+        // `multiview-audit:` line every ~5s with the ACTUAL measured render cadence (renders /
+        // window), so the multiview fps is VISIBLE in the OBS log (drift-guard / rig-health-audit
+        // / E2E preflight facet) and can be alarmed on a collapse. A subtree pull dropping any of
+        // these silently loses the observability + the floor gate. Pure Tier-0 consumer:
+        // src/mv_audit.rs (parser + canvas/2 floor, byte-identical to obs_multiview_floor_fps()).
+        let disp = squish(&vendor_file(OBS_DISPLAY));
+        assert!(
+            disp.contains(
+                "\"multiview-audit: monitor=%u divisor=%u rendered_fps=%.1f target=%.0f floor=%.1f cx=%u cy=%u\""
+            ),
+            "{OBS_DISPLAY}: #771 — the multiview-audit blog line is gone; the multiview render fps \
+             is no longer visible in the OBS log."
+        );
+        assert!(
+            disp.contains("if (audit_elapsed >= MULTIVIEW_AUDIT_WINDOW_NS)"),
+            "{OBS_DISPLAY}: #771 — the ~5s audit-window gate is gone; the multiview-audit line no \
+             longer emits periodically."
+        );
+        assert!(
+            disp.contains("display->render_audit_render_count++;"),
+            "{OBS_DISPLAY}: #771 — the real-render counter is no longer bumped; rendered_fps would \
+             always read 0."
+        );
+        assert!(
+            disp.contains("display->render_audit_id = ++next_audit_id;"),
+            "{OBS_DISPLAY}: #771 — the stable per-projector audit id assignment is gone; monitor=N \
+             would be unstable."
+        );
+
+        let bud = squish(&vendor_file(OBS_DISPLAY_BUDGET));
+        assert!(
+            bud.contains("static inline double obs_multiview_floor_fps(double canvas_fps)"),
+            "{OBS_DISPLAY_BUDGET}: #771 — the pure canvas/2 floor helper is gone; the C log line \
+             and the Rust gate (src/mv_audit.rs) would diverge."
+        );
+        assert!(
+            bud.contains("#define MULTIVIEW_AUDIT_WINDOW_NS 5000000000ULL"),
+            "{OBS_DISPLAY_BUDGET}: #771 — the 5s audit-window constant is gone."
+        );
+
+        let hdr = squish(&vendor_file(OBS_INTERNAL));
+        assert!(
+            hdr.contains("uint32_t render_audit_id;"),
+            "{OBS_INTERNAL}: #771 — obs_display.render_audit_id is missing; monitor=N has nowhere to live."
+        );
+        assert!(
+            hdr.contains("uint64_t render_audit_window_start_ns;"),
+            "{OBS_INTERNAL}: #771 — obs_display.render_audit_window_start_ns is missing; the audit window cannot track its start."
+        );
+        assert!(
+            hdr.contains("uint32_t render_audit_render_count;"),
+            "{OBS_INTERNAL}: #771 — obs_display.render_audit_render_count is missing; rendered_fps cannot be measured."
+        );
+
+        // #771 lock-step: BOTH windows-genlock workflows must carry the assert step, or the
+        // Windows genlock build silently loses the vendored-C guard (issue-912 rule).
+        let wf = squish(&vendor_file(WINDOWS_GENLOCK_WF));
+        assert!(
+            wf.contains("Assert #771 multiview-audit fps observability line present"),
+            "{WINDOWS_GENLOCK_WF}: #771 multiview-audit assert step gone — a vendored-C revert \
+             would no longer fail the Windows build."
+        );
+        let wff = squish(&vendor_file(WINDOWS_GENLOCK_FAST_WF));
+        assert!(
+            wff.contains("Assert #771 multiview-audit fps observability line present"),
+            "{WINDOWS_GENLOCK_FAST_WF}: #771 multiview-audit assert step gone — a vendored-C \
+             revert would no longer fail the fast Windows build."
+        );
+    }
+
+    #[test]
     fn graphics_loop_publishes_per_tick_start() {
         // #278: render_display()'s budget math needs the tick start; the graphics loop must
         // publish os_gettime_ns() into obs->video.graphics_frame_start_ns each tick.

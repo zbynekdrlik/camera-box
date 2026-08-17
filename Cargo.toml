@@ -102,6 +102,10 @@ name = "render-budget-gate"
 path = "src/bin/render-budget-gate.rs"
 
 [[bin]]
+name = "mv-fps-gate"
+path = "src/bin/mv-fps-gate.rs"
+
+[[bin]]
 name = "obs-watchdog-gate"
 path = "src/bin/obs-watchdog-gate.rs"
 

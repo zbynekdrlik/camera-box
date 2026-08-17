@@ -331,6 +331,20 @@ struct obs_display {
 	uint32_t render_consecutive_skips;
 	uint32_t render_frame_counter;
 
+	/* camera-box #771: MV fps observability. A throttleable monitoring display (the
+	 * Multiview projector) emits a `multiview-audit:` line every ~5s carrying its ACTUAL
+	 * measured render cadence (real renders / window) so operators + drift-guard + the E2E
+	 * preflight can SEE the multiview fps and alarm on a collapse (render_display(),
+	 * obs-display.c; floor = obs_multiview_floor_fps(), obs-display-budget.h).
+	 * render_audit_id is a stable monitor=N assigned once when the display first becomes
+	 * throttleable; render_audit_window_start_ns marks the current audit window; and
+	 * render_audit_render_count counts the real renders within it. Per-instance,
+	 * graphics-thread-only (id set once on the Qt create thread, all read/written on the
+	 * graphics thread), exactly like the #278/#293/#756 fields above. */
+	uint32_t render_audit_id;
+	uint64_t render_audit_window_start_ns;
+	uint32_t render_audit_render_count;
+
 	struct obs_display *next;
 	struct obs_display **prev_next;
 };

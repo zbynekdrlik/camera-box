@@ -297,6 +297,42 @@ the test re-reads the vendored file at RUNTIME, so after applying the fix you re
 above; use both on a vendored change (harness proves the C compiles, standalone rustc proves the
 guard bites). Confirmed live #1026 (obs-canvas.c UAF fix): 2 failed → 2 passed via `rustc --test`.
 
+### The SAME standalone-rustc recipe runs a PURE-STD crate-root `src/<mod>.rs` too — the Tier-0 mirror's own RED→GREEN, no cargo (#771)
+
+The `# airuleset:build-ok` bypass is genuinely DISABLED for camera-box (the tier0 hook blocks
+`cargo test --lib <mod> # airuleset:build-ok` outright — do NOT trust any older rule note, e.g.
+`jitter-audit-parser.md`, that claims it works here; it does not). So a vendored change's Tier-0
+MIRROR (`src/render_budget.rs`, `src/mv_audit.rs`, `src/genlock_backlog.rs`, `src/jitter_audit.rs`
+…) can't be `cargo test`-run locally either. But if that module uses ONLY `std` (no `use
+camera_box::…`, no external crate), `rustc --test` compiles it AS ITS OWN crate and runs its
+`#[cfg(test)] mod tests` — the identical #1026 recipe, just pointed at a `src/` file instead of a
+`tests/` one:
+
+```bash
+rustc --test --edition 2021 src/<mod>.rs -o /tmp/modtest && /tmp/modtest   # exit 101 = RED, 0 = GREEN
+```
+
+No `CARGO_MANIFEST_DIR` is needed (a pure-std module doesn't call the `env!` path helper). Confirmed
+live #771: `src/mv_audit.rs`'s 7 unit tests (floor/parse/classify/gate) ran GREEN this way while
+`cargo test` was Tier-0-banned. Pair it with the `tests/<file>.rs` anchor recipe above: the anchor
+proves the vendored C still carries the change, the pure-std module proves the mirror LOGIC is
+right — both with plain rustc, zero cargo/OOM contention with sibling workers.
+
+### Adding a NEW observability audit line to the render loop (#771)
+
+The `multiview-audit:` line pattern is the reusable shape for surfacing a render-loop signal to the
+OBS log (the drift-guard / rig-health-audit / E2E-preflight facet — same three consumers as the
+`genlock-fifo audit` lines): (1) emit a `blog(LOG_INFO, "<marker>: k=v k=v …")` from the render
+loop with a MUTUALLY-NON-SUBSTRING marker (so the `jitter_audit`-family parsers stay independent);
+(2) any threshold/floor is a pure `static inline` helper in `obs-display-budget.h`, MIRRORED
+byte-identically in a pure-std `src/<mod>.rs` (Tier-0, run it via the recipe above); (3) a
+`key=value` token-scan parser + a `*-gate` bin as the consumer; (4) lock-step anchors in
+`tests/genlock_preload.rs` (probe-gated, CI-only) AND BOTH `windows-genlock*.yml` pwsh steps —
+verify every pwsh anchor OFFLINE against the real `re.sub(r'\s+',' ',text)`-squished file with a
+throwaway python script (pwsh is not on dev1), plus a std-only `tests/<mod>_emit.rs` anchor for
+local RED→GREEN. Lift-compile the new `blog()` format string into a `printf` harness under
+`-Wformat=2` before pushing.
+
 ## The obs-websocket enum crash class: a borrowed `output->video`/state pointer outliving its owner (#793, #1026)
 
 Two live imag-nb SIGSEGVs now trace to the SAME shape: an obs-websocket enum request (on a Qt WS

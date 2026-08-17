@@ -304,6 +304,34 @@ void render_display(struct obs_display *display)
 			if (derived < effective_divisor)
 				effective_divisor = derived;
 		}
+		/* camera-box #771: MV fps observability. Maintain a ~5s window counting the ACTUAL
+		 * renders of this throttleable projector and emit its measured cadence so operators +
+		 * drift-guard + the E2E preflight can SEE the multiview fps and alarm on a collapse
+		 * (the user's binding "multiview musí byť plynulé a merané" requirement). This runs
+		 * BEFORE the skip decision below, so the line still emits during a stall — exactly when
+		 * the fps has collapsed and must be visible. render_audit_render_count is bumped after a
+		 * real render further down; the floor here is the SAME pure obs_multiview_floor_fps()
+		 * the E2E gate + drift-guard apply. */
+		{
+			const uint64_t audit_now = os_gettime_ns();
+			if (display->render_audit_window_start_ns == 0)
+				display->render_audit_window_start_ns = audit_now;
+			const uint64_t audit_elapsed = audit_now - display->render_audit_window_start_ns;
+			if (audit_elapsed >= MULTIVIEW_AUDIT_WINDOW_NS) {
+				const double win_s = (double)audit_elapsed / 1000000000.0;
+				const double rendered_fps = (double)display->render_audit_render_count / win_s;
+				const double canvas_fps = (interval != 0) ? 1000000000.0 / (double)interval : 0.0;
+				const double target_fps =
+					(effective_divisor != 0) ? canvas_fps / (double)effective_divisor : canvas_fps;
+				const double floor_fps = obs_multiview_floor_fps(canvas_fps);
+				blog(LOG_INFO,
+				     "multiview-audit: monitor=%u divisor=%u rendered_fps=%.1f target=%.0f floor=%.1f cx=%u cy=%u",
+				     display->render_audit_id, effective_divisor, rendered_fps, target_fps, floor_fps,
+				     display->cx, display->cy);
+				display->render_audit_window_start_ns = audit_now;
+				display->render_audit_render_count = 0;
+			}
+		}
 		if (ewma != 0 && interval != 0 && tick_start != 0) {
 			const uint64_t now = os_gettime_ns();
 			const uint64_t elapsed = (now > tick_start) ? (now - tick_start) : 0;
@@ -365,6 +393,9 @@ void render_display(struct obs_display *display)
 			/* #293: a real render clears the skip run so the anti-starvation floor
 			 * counts only CONSECUTIVE skips. */
 			display->render_consecutive_skips = 0;
+			/* camera-box #771: count this real render toward the projector's audit window
+			 * (the multiview-audit line above divides this by the window seconds). */
+			display->render_audit_render_count++;
 		}
 	}
 }
@@ -397,8 +428,24 @@ void obs_display_set_background_color(obs_display_t *display, uint32_t color)
  * thread reads it. */
 void obs_display_set_render_divisor(obs_display_t *display, uint32_t divisor)
 {
-	if (display)
+	if (display) {
 		display->render_divisor = divisor;
+		/* camera-box #771: assign a stable per-projector audit id the first time this
+		 * display becomes a throttleable monitoring surface, so its multiview-audit line
+		 * carries a stable monitor=N across the run. A SHARED monotonic counter (the
+		 * OPPOSITE of the per-instance cadence counters — an audit id MUST be distinct per
+		 * projector), set-once from the Qt create thread exactly like render_divisor.
+		 * CONCURRENCY (review): `++next_audit_id` is a shared read-modify-write, NOT
+		 * atomic. This is safe ONLY because projectors are created SERIALLY on the single
+		 * Qt UI thread (the same single-writer assumption render_divisor's own store relies
+		 * on). If OBS ever created displays from multiple threads concurrently, two could
+		 * race to the same id and log a duplicate monitor=N — it would never corrupt memory
+		 * or affect the program render, only make two audit lines ambiguous. */
+		if (divisor > 1 && display->render_audit_id == 0) {
+			static uint32_t next_audit_id;
+			display->render_audit_id = ++next_audit_id;
+		}
+	}
 }
 
 void obs_display_size(obs_display_t *display, uint32_t *width, uint32_t *height)
