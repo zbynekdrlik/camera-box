@@ -364,6 +364,11 @@ pub mod burn_hold;
 // that let issue 767 through). Pure crate-root logic (Tier-0), consumed thinly by recording-verdict.
 pub mod cold_cut;
 pub mod e2e_latency_gate;
+// issue 798 (path A) — REPORT-ONLY seam for the imag-leg recording verdict: makes the imag verdict
+// flow into overall_pass as a report-only term first (the imag partial reaches the merge 0/76 runs
+// today), one-line-flippable to blocking by a follow-up. Pure crate-root logic (Tier-0), consumed
+// thinly by recording-verdict.
+pub mod imag_leg_gate;
 pub mod optical_floor;
 
 // #889 (user decision on #883, 2026-07-30) — the per-cambox-window `copies`/`gaps` terms become
