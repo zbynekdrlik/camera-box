@@ -85,4 +85,26 @@ To bake a NEW env drop-in into provisioning AND prove it takes effect, follow th
 - The next free check letter is whatever the header/usage/exec sequence has NOT used (they are NOT strictly
   alphabetical in file order); grep the three lists rather than assume. A letter cited only in a
   `setup-device.sh` comment ("verified by verify-device.sh's (N) check") is not proof the check exists —
-  confirm against `verify-device.sh` itself.
+  confirm against `verify-device.sh` itself. Once the single letters (a)-(z) are exhausted, the scheme is
+  TWO-CHAR: (aa) was the #782 interkom check, (ab) the #1066 remoteos-mcp check, and so on.
+
+## Mirroring an imag `setup-imag.sh` provisioning STEP into `setup-device.sh` (#1066)
+
+`setup-imag.sh` and `setup-device.sh` provision the SAME agents on different box classes, so a step
+added to one is often wanted on the other (#1066 mirrored setup-imag.sh's remoteos-mcp step 23 —
+issue 858 — into setup-device.sh). Two adaptations are NOT optional copy-paste:
+
+- **Use a lettered sub-step, not a renumber.** setup-imag.sh uses numbered `step N` + a bumped
+  `TOTAL_STEPS`; setup-device.sh's numbered backbone (STEP 1..19) is anchored by
+  `tests/setup_device_pure_functions.rs` / `setup_device_provisioner_hardening.rs` (`STEP 18:
+  Configure read-only`, the `[19/` summary, restore_root_mode-after-STEP-18). Add the mirror as a
+  lettered sub-step in the STEP 3b idiom (`# STEP Nb: …` + a `[Nb]` banner, NO `/${TOTAL_STEPS}`,
+  TOTAL_STEPS unchanged) so nothing renumbers. Place it in the rw window — after its natural
+  predecessor and BEFORE STEP 18's ro-root flip (an installer that writes /usr+/etc fails on a ro
+  root).
+- **Gate on `is-enabled`, not imag's `is-active`.** setup-device.sh is enable-only / defer-to-reboot
+  (never live-start); assert the durable reboot-survival property with a LITERAL
+  `is-enabled == enabled` compare (`--quiet`'s exit code passes for a `static` unit with no
+  `[Install]`). Prove the LIVE runtime state (`is-active` + a listening port) in the paired
+  verify-device.sh `(ab)`-style check, which runs post-reboot — that is where a cam-box install's
+  liveness belongs (see its own header: "the fourth and final phase").
