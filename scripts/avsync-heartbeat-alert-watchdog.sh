@@ -166,12 +166,23 @@ post_discord_verdict() {
 # convention: only the ACTUAL post is skipped, never the bookkeeping) so a real run afterward still
 # sees the SAME epoch as already handled.
 maybe_forward_verdict() {
-  local epoch="$1" status="$2" prev_epoch text
+  local epoch="$1" status="$2" prev_epoch prev_sig sig text
   [ -n "$epoch" ] || return 0
   avsync_heartbeat_is_forwardable_verdict "$status" || return 0
   prev_epoch="$(read_state_field "watchdog_verdict_forwarded_epoch" "")"
   [ "$epoch" != "$prev_epoch" ] || return 0
   write_state_field "watchdog_verdict_forwarded_epoch" "$epoch"
+  # #814 second net: the heartbeat epoch is UtcNow written every pass, so epoch-dedup alone
+  # re-forwards a FROZEN input's byte-identical (offset,conf) verdict every ~90 s. Suppress a POST
+  # whose stamp-stripped signature equals the last forwarded one; a genuine offset change updates
+  # the stored signature and re-posts. The signature is stored (like the epoch) even in --dry-run.
+  sig="$(avsync_heartbeat_verdict_signature "$status")"
+  prev_sig="$(read_state_field "watchdog_verdict_forwarded_sig" "")"
+  if [ -n "$sig" ] && [ "$sig" = "$prev_sig" ]; then
+    log "VERDICT-FORWARD: dup-suppressed (frozen input?) -- identical (offset,conf) signature to the last forwarded verdict: $sig"
+    return 0
+  fi
+  write_state_field "watchdog_verdict_forwarded_sig" "$sig"
   text="📐 A/V-sync meranie: ${status#measured: }"
   if [ "$DRY_RUN" -eq 1 ]; then
     log "[dry-run] WOULD forward verdict: $text"

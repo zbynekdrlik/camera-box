@@ -91,6 +91,17 @@ avsync_heartbeat_is_forwardable_verdict() {
   esac
 }
 
+# avsync_heartbeat_verdict_signature STATUS -> STATUS with only its "[YYYY-MM-DD HH:MM:SS]"
+# timestamp bracket removed. #814's forwarder second net compares this against the last-forwarded
+# signature to suppress a FROZEN input's re-forward: two passes measuring the SAME (frozen) clip
+# differ ONLY in the stamp -- the offset, conf and verdict text are all deterministic from the
+# measured offset -- so a byte-identical stamp-stripped signature is the frozen-input tell (mirrors
+# the incident's own "dup-suppressed (frozen input?)" net). A genuine offset change alters the
+# signature and re-posts. Pure: string transform only, no I/O.
+avsync_heartbeat_verdict_signature() {
+  printf '%s\n' "$1" | sed -E 's/\[[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}\] //'
+}
+
 # avsync_heartbeat_is_stale EPOCH NOW STALE_SEC -> exit 0 (STALE, including unparseable/missing) /
 # 1 (fresh). Inverted sense vs a plain "is_fresh" check ON PURPOSE -- this lib's caller wants
 # "wedged=1 means alert", so a missing/corrupt heartbeat must default to the ALERTING answer, never
