@@ -3395,6 +3395,23 @@ fn setup_imag_swap_kill_attempts_graceful_stop_before_sigkill_785() {
         "{SETUP}: the swap-time stop must fall back to the installed imag-obs-stop.sh helper when \
          the imag-obs.service unit is not active (#785)"
     );
+    // The graceful stop MUST run as the DESKTOP user against that user's /run/user/<uid> runtime
+    // bus. A bare `systemctl --user` from setup-imag.sh's ROOT context talks to root's own (empty)
+    // user manager, which reports the unit inactive even when it is genuinely active on the desktop
+    // session -- the swap would then fall through to a raw signal that refights Restart=on-failure
+    // (imag-obs-supervision.md). Pin the `sudo -u "$DESKTOP_USER"` + XDG_RUNTIME_DIR env shape so a
+    // future edit that reintroduces the is-active-from-root bug is caught by a static assertion,
+    // not only in a live regression.
+    assert!(
+        body.contains(r#"sudo -u "$DESKTOP_USER""#),
+        "{SETUP}: the swap-time graceful stop must run as the DESKTOP user (sudo -u \
+         \"$DESKTOP_USER\"), never from root's empty user manager (#785)"
+    );
+    assert!(
+        body.contains(r#"HS_RUN="/run/user/"#) && body.contains(r#"XDG_RUNTIME_DIR="$HS_RUN""#),
+        "{SETUP}: the graceful stop must export XDG_RUNTIME_DIR to the desktop user's \
+         /run/user/<uid> runtime bus so `systemctl --user` reaches the real (active) manager (#785)"
+    );
 }
 
 /// #785: setup-imag.sh must PROVISION the openbox root menu (`~/.config/openbox/menu.xml`) rather
