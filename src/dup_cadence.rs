@@ -12,9 +12,9 @@
 //! The ONLY signal that survives the duplication is per-frame CONTENT identity. This module is the
 //! PURE (Tier-0, default-features) classifier for that signal: given a sequence of per-frame
 //! content HASHES in recorded (delivery) order, it counts exact consecutive duplicates and
-//! decides whether the pattern is the sustained, REGULARLY-SPACED duplication of a pulldown (a
-//! real cadence defect) as opposed to the isolated, irregular content-duplication that healthy
-//! hardware already produces for unrelated reasons.
+//! decides whether the pattern is the sustained, REGULARLY-SPACED, window-SPANNING duplication of
+//! a pulldown (a real cadence defect) as opposed to the isolated, irregular, or LOCALIZED
+//! content-duplication that healthy hardware (or an unrelated freeze) already produces.
 //!
 //! ## Mirrors the crate-root verdict-gate seam pattern
 //!
@@ -34,28 +34,30 @@
 //! every recorded frame, so the hash is computed there — on the worker, once per verdict — which
 //! is neither a rig write nor a live-box perturbation.
 //!
-//! ## Distinguishing a pulldown from the baseline
+//! ## Distinguishing a pulldown from the non-pulldown patterns
 //!
-//! Two independent duplication phenomena already sit BELOW the pulldown and must not be confused
-//! with it:
-//! - the free-running-clock beat baseline (`#674` measured ~4.3% on a ShadowCast), and
-//! - the over-rate grabber's isolated dupes (`dupe_decimation.rs` #889: a ~64 fps grabber repeats
-//!   its buffer ~1-in-15 ≈ 6.7%, always ISOLATED pairs, and the cam-box decimation gate already
-//!   SHEDS them — so they never reach 60 fps padded).
+//! Several other duplication patterns must NOT be confused with a 50→60 pulldown:
+//! - the free-running-clock beat baseline (`#674` measured ~4.3% on a ShadowCast), and the
+//!   over-rate grabber's isolated dupes (`dupe_decimation.rs` #889: a ~64 fps grabber repeats its
+//!   buffer ~1-in-15 ≈ 6.7%, ISOLATED pairs, already SHED by the cam-box decimation gate) — both
+//!   sit BELOW the pulldown RATE and are rejected by [`DUP_RATE_PULLDOWN_MIN`];
+//! - a genuine content FREEZE / stall — a run of identical frames CONCENTRATED in one part of the
+//!   window (frozen_leg's job, #895) — which can carry a high local rate but does NOT span the
+//!   window, and is rejected by [`DUP_COVERAGE_MIN`];
+//! - an irregular decode-glitch burst — high rate but UNEVENLY spaced — rejected by
+//!   [`DUP_GAP_CV_MAX`].
 //!
-//! A 5:6 pulldown sits at ≈16.7% and — unlike either baseline — its duplicates are REGULARLY
-//! spaced (one every ~6 frames). [`measure_dup_cadence`] classifies `duplication_masked` on BOTH a
-//! rate floor ([`DUP_RATE_PULLDOWN_MIN`], above both baselines and below the pulldown) AND spacing
-//! regularity ([`DUP_GAP_CV_MAX`]), so an anomalous BURST of irregular dupes is not misread as a
-//! pulldown.
+//! A 5:6 pulldown alone is all three at once: rate ≈16.7%, duplicates evenly spaced (one every ~6
+//! frames), spread across the WHOLE window. [`measure_dup_cadence`] sets `duplication_masked` only
+//! when the rate floor AND the spacing-regularity AND the window-coverage checks all hold.
 //!
 //! ## Report-only (calibration-first)
 //!
-//! [`gates_overall_pass`] is `false`: the metric ships REPORT-ONLY. [`DUP_RATE_PULLDOWN_MIN`] is a
-//! PRINCIPLED first-cut (above the two measured baselines, below the pulldown), not yet calibrated
-//! against a real 50→60-grabber run (no such rig data exists) nor against the healthy-run offline
+//! [`gates_overall_pass`] is `false`: the metric ships REPORT-ONLY. The constants are PRINCIPLED
+//! first-cuts (above the two measured baselines, below the pulldown), not yet calibrated against a
+//! real 50→60-grabber run (no such rig data exists) nor against the healthy-run offline
 //! content-dup distribution (which needs this very surface to run first). The first real runs
-//! calibrate it before any thought of gating — the same discipline as #1036 / #915.
+//! calibrate them before any thought of gating — the same discipline as #1036 / #915.
 
 /// Target canvas rate the source is padded UP to. A duplication-masked source runs at
 /// `TARGET_FPS * (1 - duplicate_fraction)`; for a 5:6 pulldown that is `60 * (1 - 1/6) = 50`.
@@ -68,12 +70,19 @@ pub const TARGET_FPS: f64 = 60.0;
 /// healthy offline content-dup distribution is measured from real verdict runs.
 pub const DUP_RATE_PULLDOWN_MIN: f64 = 0.10;
 
-/// The maximum coefficient of variation (stddev/mean) of the inter-duplicate spacing for the
-/// pattern to count as a REGULAR pulldown. A perfect 5:6 pulldown places a duplicate every 6
-/// frames → cv = 0; real multi-hop jitter widens it. `0.35` is a generous first-cut regularity
+/// The maximum coefficient of variation (population stddev / mean) of the inter-duplicate spacing
+/// for the pattern to count as a REGULAR pulldown. A perfect 5:6 pulldown places a duplicate every
+/// 6 frames → cv = 0; real multi-hop jitter widens it. `0.35` is a generous first-cut regularity
 /// bound (report-only) that still separates the evenly-spaced pulldown from an irregular burst of
 /// dupes. Calibrate against real runs before gating.
 pub const DUP_GAP_CV_MAX: f64 = 0.35;
+
+/// The minimum fraction of the window the duplicates must SPAN (`(last_dup - first_dup) /
+/// (frames - 1)`) for the pattern to count as a pulldown. A pulldown spreads its dupes across the
+/// WHOLE window (≈1.0); a localized FREEZE or a clustered glitch — even one with a high local rate
+/// and evenly-spaced local dupes — covers only a slice and is rejected here. `0.5` is a first-cut
+/// bound (report-only): a genuine pulldown on even the smallest sampled window still clears it.
+pub const DUP_COVERAGE_MIN: f64 = 0.5;
 
 /// The minimum number of frames a window must carry before a dup-rate reading is meaningful. Below
 /// this there are too few consecutive pairs for a fraction to be trustworthy (the issue samples a
@@ -104,15 +113,20 @@ pub struct DupCadence {
     /// measure. `0` = perfectly evenly spaced (a true pulldown); large = irregular. `None` when
     /// there are fewer than two duplicates (no spacing to characterize).
     pub gap_cv: Option<f64>,
+    /// Fraction of the window the duplicates span: `(last_dup - first_dup) / (sample_frames - 1)`.
+    /// ≈1.0 for a window-wide pulldown; small for a localized freeze/glitch. `0.0` when there are
+    /// fewer than two duplicates.
+    pub coverage: f64,
     /// The source rate this duplicate fraction implies against a 60 fps target
     /// (`TARGET_FPS * (1 - duplicate_fraction)`) — the operator-facing "the camera is really at
     /// N fps" number. ≈50 for a 5:6 pulldown.
     pub inferred_source_fps: f64,
-    /// The classification: a SUSTAINED (`duplicate_fraction >= DUP_RATE_PULLDOWN_MIN`) AND
-    /// REGULARLY-SPACED (`gap_cv <= DUP_GAP_CV_MAX`, with at least two duplicates to measure
-    /// spacing) content-duplication pattern — the duplication-masked non-60 cadence this module
-    /// exists to catch. `false` for the healthy baselines (below the rate floor) and for an
-    /// irregular burst of dupes (over the cv bound).
+    /// The classification: a SUSTAINED (`duplicate_fraction >= DUP_RATE_PULLDOWN_MIN`),
+    /// REGULARLY-SPACED (`gap_cv <= DUP_GAP_CV_MAX`) AND window-SPANNING (`coverage >=
+    /// DUP_COVERAGE_MIN`) content-duplication pattern, with at least two duplicates to characterize
+    /// — the duplication-masked non-60 cadence this module exists to catch. `false` for the healthy
+    /// baselines (below the rate floor), a localized freeze (below coverage), and an irregular
+    /// burst (over the cv bound).
     pub duplication_masked: bool,
 }
 
@@ -123,9 +137,73 @@ pub struct DupCadence {
 /// MIN_SAMPLE_FRAMES`). A caller treats `None` as "not applicable to this window", never a
 /// failure — exactly like [`crate::presentation_cadence::measure_cadence_evenness`]'s `None`
 /// contract.
-pub fn measure_dup_cadence(_hashes: &[u64]) -> Option<DupCadence> {
-    // #1088 RED stub — the real classification is implemented in the GREEN commit.
-    None
+pub fn measure_dup_cadence(hashes: &[u64]) -> Option<DupCadence> {
+    let sample_frames = hashes.len();
+    if sample_frames < MIN_SAMPLE_FRAMES {
+        return None;
+    }
+    let compared_pairs = sample_frames - 1;
+
+    // Positions (index `i` in `1..n`) where frame `i` is byte-identical to its predecessor.
+    let dup_positions: Vec<usize> = (1..sample_frames)
+        .filter(|&i| hashes[i] == hashes[i - 1])
+        .collect();
+    let exact_duplicates = dup_positions.len();
+    let duplicate_fraction = exact_duplicates as f64 / compared_pairs as f64;
+
+    // Inter-duplicate spacing (regularity) — needs at least two duplicates to have any gap.
+    let duplicate_gaps: Vec<usize> = dup_positions.windows(2).map(|w| w[1] - w[0]).collect();
+    let (gap_mean, gap_cv) = if duplicate_gaps.is_empty() {
+        (None, None)
+    } else {
+        let n = duplicate_gaps.len() as f64;
+        let mean = duplicate_gaps.iter().map(|&g| g as f64).sum::<f64>() / n;
+        let variance = duplicate_gaps
+            .iter()
+            .map(|&g| {
+                let d = g as f64 - mean;
+                d * d
+            })
+            .sum::<f64>()
+            / n; // population variance (the whole gap set, not a sample of it)
+        let cv = if mean > 0.0 {
+            variance.sqrt() / mean
+        } else {
+            0.0
+        };
+        (Some(mean), Some(cv))
+    };
+
+    // Coverage — how much of the window the duplicates span. A pulldown spreads across the whole
+    // window; a localized freeze covers only a slice. `0.0` with fewer than two duplicates.
+    let coverage = match (dup_positions.first(), dup_positions.last()) {
+        (Some(&first), Some(&last)) if last > first => {
+            (last - first) as f64 / compared_pairs as f64
+        }
+        _ => 0.0,
+    };
+
+    let inferred_source_fps = TARGET_FPS * (1.0 - duplicate_fraction);
+
+    let regular = gap_cv.is_some_and(|cv| cv <= DUP_GAP_CV_MAX);
+    let spans_window = coverage >= DUP_COVERAGE_MIN;
+    let duplication_masked = exact_duplicates >= 2
+        && duplicate_fraction >= DUP_RATE_PULLDOWN_MIN
+        && regular
+        && spans_window;
+
+    Some(DupCadence {
+        sample_frames,
+        compared_pairs,
+        exact_duplicates,
+        duplicate_fraction,
+        duplicate_gaps,
+        gap_mean,
+        gap_cv,
+        coverage,
+        inferred_source_fps,
+        duplication_masked,
+    })
 }
 
 /// Does the run's WORST per-window duplicate fraction satisfy the `max` bound? Mirrors
@@ -183,6 +261,17 @@ mod tests {
         (0..n as u64).collect()
     }
 
+    /// `n` unique frames, then force each index in `dup_at` to duplicate its predecessor. Lets a
+    /// test place duplicates at arbitrary positions (for the irregular-spacing / freeze cases).
+    fn hashes_with_dups_at(n: usize, dup_at: &[usize]) -> Vec<u64> {
+        let mut h: Vec<u64> = (0..n as u64).map(|x| x + 1).collect();
+        for &i in dup_at {
+            assert!(i >= 1 && i < n, "dup index in range");
+            h[i] = h[i - 1];
+        }
+        h
+    }
+
     // ---- degenerate inputs -------------------------------------------------------------
 
     #[test]
@@ -212,17 +301,24 @@ mod tests {
         assert!(v.duplicate_gaps.is_empty());
         assert_eq!(v.gap_mean, None);
         assert_eq!(v.gap_cv, None);
+        assert_eq!(v.coverage, 0.0);
         assert!((v.inferred_source_fps - 60.0).abs() < 1e-9);
-        assert!(!v.duplication_masked, "a smooth 60 source is not masked: {v:?}");
+        assert!(
+            !v.duplication_masked,
+            "a smooth 60 source is not masked: {v:?}"
+        );
     }
 
     #[test]
     fn five_to_six_pulldown_is_detected_as_duplication_masked() {
         // 5:6 pulldown → a duplicate every 6th frame → ~1/6 ≈ 0.167 duplicate fraction, all gaps
-        // exactly 6 (perfectly regular) → the duplication-masked signature.
+        // exactly 6 (perfectly regular), spread across the whole window → the masked signature.
         let v = measure_dup_cadence(&pulldown_hashes(120, 6)).expect("120 frames is plenty");
         // duplicates land at indices 6,12,...,114 → 19 duplicates over 119 pairs.
-        assert_eq!(v.exact_duplicates, 19, "one dup every 6 frames over 120: {v:?}");
+        assert_eq!(
+            v.exact_duplicates, 19,
+            "one dup every 6 frames over 120: {v:?}"
+        );
         assert!(
             (v.duplicate_fraction - 19.0 / 119.0).abs() < 1e-9,
             "≈16% dup fraction: {v:?}"
@@ -236,7 +332,15 @@ mod tests {
             v.duplicate_gaps.iter().all(|&g| g == 6),
             "clean pulldown gaps are all 6: {v:?}"
         );
-        assert_eq!(v.gap_cv, Some(0.0), "perfectly regular spacing → cv 0: {v:?}");
+        assert_eq!(
+            v.gap_cv,
+            Some(0.0),
+            "perfectly regular spacing → cv 0: {v:?}"
+        );
+        assert!(
+            v.coverage >= DUP_COVERAGE_MIN,
+            "the pulldown spans the window: {v:?}"
+        );
         assert!(
             (v.inferred_source_fps - 60.0 * (1.0 - 19.0 / 119.0)).abs() < 1e-6,
             "inferred source fps ≈ 50: {v:?}"
@@ -247,7 +351,7 @@ mod tests {
         );
         assert!(
             v.duplication_masked,
-            "a regular 5:6 pulldown MUST classify as duplication-masked: {v:?}"
+            "a regular window-wide 5:6 pulldown MUST classify as duplication-masked: {v:?}"
         );
     }
 
@@ -255,7 +359,7 @@ mod tests {
     fn free_running_beat_baseline_below_the_floor_is_not_masked() {
         // #674 ~4.3% baseline: a duplicate roughly every ~23 frames (1/23 ≈ 0.043) — a real
         // free-running-clock beat, NOT a pulldown. Even though the synthetic spacing here is
-        // regular, the RATE alone sits below the floor, so it must NOT be flagged.
+        // regular and window-wide, the RATE alone sits below the floor, so it must NOT be flagged.
         let v = measure_dup_cadence(&pulldown_hashes(240, 23)).expect("plenty");
         assert!(
             v.duplicate_fraction < DUP_RATE_PULLDOWN_MIN,
@@ -282,52 +386,87 @@ mod tests {
     }
 
     #[test]
-    fn irregular_burst_above_the_floor_is_not_masked_by_the_regularity_gate() {
-        // A high-rate (>10%) but IRREGULARLY spaced clump of duplicates — e.g. a decode glitch or
-        // a genuine stall burst, NOT a steady pulldown. The rate floor alone would flag it; the
-        // regularity (cv) bound must veto it because the spacing is not that of a pulldown.
-        // Build: dense dupes clustered at the start, none later → wildly uneven gaps.
-        let mut h: Vec<u64> = Vec::new();
-        let mut next = 1u64;
-        // first 20 frames: alternate unique/dup → many dupes, tight spacing
-        for i in 0..20 {
-            if i > 0 && i % 2 == 0 {
-                h.push(*h.last().unwrap());
-            } else {
-                h.push(next);
-                next += 1;
-            }
-        }
-        // then 40 frames all unique → the late region has zero dupes → gaps blow out
-        for _ in 0..40 {
-            h.push(next);
-            next += 1;
-        }
-        let v = measure_dup_cadence(&h).expect("60 frames");
+    fn localized_freeze_run_above_the_floor_is_not_masked_by_coverage() {
+        // A genuine FREEZE: a RUN of ~12 consecutive identical frames concentrated in one region
+        // of a 60-frame window. Local rate clears the floor and the (all-1) inter-dup gaps are
+        // perfectly regular, but the dupes cover only a SLICE of the window — a freeze (frozen_leg's
+        // domain, #895), not a pulldown. The COVERAGE bound must veto it.
+        let dup_at: Vec<usize> = (25..=36).collect(); // 12 consecutive dups
+        let v = measure_dup_cadence(&hashes_with_dups_at(60, &dup_at)).expect("60 frames");
         assert!(
             v.duplicate_fraction > DUP_RATE_PULLDOWN_MIN,
-            "the clustered burst clears the rate floor: {v:?}"
+            "the freeze run clears the rate floor: {v:?}"
+        );
+        assert_eq!(
+            v.gap_cv,
+            Some(0.0),
+            "a consecutive run has perfectly regular (all-1) inter-dup gaps: {v:?}"
         );
         assert!(
-            v.gap_cv.map_or(true, |cv| cv > DUP_GAP_CV_MAX),
-            "clustered irregular dupes have a high cv: {v:?}"
+            v.coverage < DUP_COVERAGE_MIN,
+            "a localized freeze covers only a slice of the window: {v:?}"
         );
         assert!(
             !v.duplication_masked,
-            "an irregular high-rate burst must NOT be classified a pulldown: {v:?}"
+            "a localized freeze must NOT be classified a pulldown (coverage veto): {v:?}"
+        );
+    }
+
+    #[test]
+    fn irregular_burst_across_window_is_not_masked_by_the_regularity_gate() {
+        // High-rate dupes that DO span the window but are UNEVENLY spaced — a decode-glitch burst,
+        // not a steady pulldown. Coverage passes; the spacing regularity (cv) bound must veto it.
+        let dup_at = [6usize, 12, 30, 31, 40, 55, 56]; // spans 6..56, but gaps 6,18,1,9,15,1 vary
+        let v = measure_dup_cadence(&hashes_with_dups_at(60, &dup_at)).expect("60 frames");
+        assert!(
+            v.duplicate_fraction >= DUP_RATE_PULLDOWN_MIN,
+            "the burst clears the rate floor: {v:?}"
+        );
+        assert!(
+            v.coverage >= DUP_COVERAGE_MIN,
+            "the burst spans the window (coverage would pass): {v:?}"
+        );
+        assert!(
+            v.gap_cv.is_some_and(|cv| cv > DUP_GAP_CV_MAX),
+            "unevenly-spaced dupes have a high cv: {v:?}"
+        );
+        assert!(
+            !v.duplication_masked,
+            "an irregular high-rate burst must NOT be classified a pulldown (cv veto): {v:?}"
         );
     }
 
     #[test]
     fn single_isolated_duplicate_is_not_masked() {
         // Exactly one duplicate in a long clean run: below the rate floor AND there is no gap to
-        // measure regularity from (fewer than two dups → gap_cv None).
-        let mut h = smooth_hashes(60);
-        h[30] = h[29]; // one duplicate
-        let v = measure_dup_cadence(&h).expect("60 frames");
+        // measure regularity from (fewer than two dups → gap_cv None, coverage 0).
+        let v = measure_dup_cadence(&hashes_with_dups_at(60, &[30])).expect("60 frames");
         assert_eq!(v.exact_duplicates, 1);
         assert_eq!(v.gap_cv, None, "one dup has no inter-dup gap: {v:?}");
-        assert!(!v.duplication_masked, "a single dup is never a pulldown: {v:?}");
+        assert_eq!(v.coverage, 0.0, "one dup spans nothing: {v:?}");
+        assert!(
+            !v.duplication_masked,
+            "a single dup is never a pulldown: {v:?}"
+        );
+    }
+
+    #[test]
+    fn a_faster_pulldown_ratio_is_also_detected_and_infers_a_lower_fps() {
+        // A more aggressive pulldown (dup every 4th frame ≈ 25% → a 3:4 pulldown, ~45 fps source):
+        // still regular, window-wide, well over the floor → masked, with a lower inferred fps.
+        let v = measure_dup_cadence(&pulldown_hashes(120, 4)).expect("plenty");
+        assert!(
+            v.duplicate_fraction > 0.2,
+            "aggressive pulldown rate: {v:?}"
+        );
+        assert!(
+            v.duplication_masked,
+            "a regular 3:4 pulldown is masked: {v:?}"
+        );
+        assert!(
+            v.inferred_source_fps < 50.0,
+            "a faster dup rate infers a lower source fps: {v:?}"
+        );
     }
 
     // ---- the report-only gate seam (both directions) -----------------------------------
@@ -336,6 +475,7 @@ mod tests {
     fn default_constants_are_the_calibrated_values() {
         assert_eq!(DUP_RATE_PULLDOWN_MIN, 0.10);
         assert_eq!(DUP_GAP_CV_MAX, 0.35);
+        assert_eq!(DUP_COVERAGE_MIN, 0.5);
         assert_eq!(TARGET_FPS, 60.0);
     }
 
@@ -360,12 +500,18 @@ mod tests {
 
     #[test]
     fn worst_below_bound_passes_over_bound_fails() {
-        assert!(dup_cadence_gate_pass(Some(0.05), Some(DUP_RATE_PULLDOWN_MIN)));
+        assert!(dup_cadence_gate_pass(
+            Some(0.05),
+            Some(DUP_RATE_PULLDOWN_MIN)
+        ));
         assert!(
             dup_cadence_gate_pass(Some(0.10), Some(0.10)),
             "exactly at the bound passes (strict >)"
         );
-        assert!(!dup_cadence_gate_pass(Some(0.1667), Some(DUP_RATE_PULLDOWN_MIN)));
+        assert!(!dup_cadence_gate_pass(
+            Some(0.1667),
+            Some(DUP_RATE_PULLDOWN_MIN)
+        ));
     }
 
     #[test]
