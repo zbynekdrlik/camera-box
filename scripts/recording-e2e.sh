@@ -112,6 +112,13 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # killed run self-heals there, with no dev1 involvement.
 # shellcheck source=scripts/lib/cam2-painter-deadman.sh
 . "$HERE/lib/cam2-painter-deadman.sh"
+# #772: the SAME on-box dead-man idea for the PRODUCTION camera-box.service (not the fb0 painter).
+# recording-e2e.sh stops camera-box + launches a forever-running burn unit at four sites and
+# restarts production only in cleanup() -- unreachable on a cancel-in-progress SIGKILL, so a killed
+# run leaves camera-box stopped + a stray burn holding /dev/video (operator MV frozen between runs).
+# Armed on the box before each stop; a killed run restores production there with no dev1 involvement.
+# shellcheck source=scripts/lib/camera-box-deadman.sh
+. "$HERE/lib/camera-box-deadman.sh"
 # #1072: turn cleanup()'s one-shot painter restore into a bounded RETRY (fail-loud) that exposes a
 # success flag (_cprr_ok) so the dead-man is disarmed ONLY when the painter genuinely came back --
 # a failed restore leaves the (now periodic ~5-min) dead-man armed to self-heal.
@@ -348,6 +355,27 @@ if [ "$DURATION" -lt 300 ]; then
   echo "ERROR: DURATION=${DURATION} below the 300 s zero-loss floor (default 1800)." >&2
   exit 1
 fi
+# #772: the camera-box dead-man's FIRST fire must land only AFTER this run's ENTIRE window, so it
+# can never restore production DURING a live measurement (the safety-critical invariant -- worst
+# case is a slower recovery, never a corrupted verdict). = ceil(DURATION/60) + a generous overhead
+# margin covering the worst-case PRE-record overhead (deploy + mv_reverify/frozen-gate bounded
+# retries, ~12-15 min absolute worst per the :359+ accounting) so the first fire is guaranteed to
+# land after StopRecord. The margin is env-tunable, but the invariant HANGS on it -- so a bad /
+# too-small override is CLAMPED up to a hard floor (never trusted to be sane), never allowed to
+# silently re-enable a mid-run fire. FLOOR = the worst-case pre-record overhead itself; below it the
+# first fire could precede StopRecord.
+CAMERA_BOX_DEADMAN_OVERHEAD_FLOOR_MIN=15
+CAMERA_BOX_DEADMAN_OVERHEAD_MIN="${CAMERA_BOX_DEADMAN_OVERHEAD_MIN:-20}"
+case "$CAMERA_BOX_DEADMAN_OVERHEAD_MIN" in
+  ''|*[!0-9]*)
+    echo "WARNING #772: CAMERA_BOX_DEADMAN_OVERHEAD_MIN='$CAMERA_BOX_DEADMAN_OVERHEAD_MIN' is not a non-negative integer -- clamping to the safe floor ${CAMERA_BOX_DEADMAN_OVERHEAD_FLOOR_MIN}min so the dead-man cannot fire mid-recording" >&2
+    CAMERA_BOX_DEADMAN_OVERHEAD_MIN="$CAMERA_BOX_DEADMAN_OVERHEAD_FLOOR_MIN" ;;
+esac
+if [ "$CAMERA_BOX_DEADMAN_OVERHEAD_MIN" -lt "$CAMERA_BOX_DEADMAN_OVERHEAD_FLOOR_MIN" ]; then
+  echo "WARNING #772: CAMERA_BOX_DEADMAN_OVERHEAD_MIN=${CAMERA_BOX_DEADMAN_OVERHEAD_MIN} below the safe floor -- raising to ${CAMERA_BOX_DEADMAN_OVERHEAD_FLOOR_MIN}min (a smaller margin could let the first fire precede StopRecord)" >&2
+  CAMERA_BOX_DEADMAN_OVERHEAD_MIN="$CAMERA_BOX_DEADMAN_OVERHEAD_FLOOR_MIN"
+fi
+CAMERA_BOX_DEADMAN_FIRST_FIRE_MIN=$(( (DURATION + 59) / 60 + CAMERA_BOX_DEADMAN_OVERHEAD_MIN ))
 # #747: the cam2 painter (launched below, before the recording) must stay ALIVE from its launch,
 # through the pre-record warm-up/gate budget AND the whole DURATION recording, self-exiting
 # (writing its ground-truth CSV, #359) only AFTER the recording is stopped. The old fixed +60s
@@ -1776,7 +1804,8 @@ sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$
 sshpass -p "$CAM_PW" scp -o StrictHostKeyChecking=no \
   "$PROBE_BIN_DIR"/camera-box root@"$CAM1_IP":"$CAM1_BURN_BIN"
 sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$CAM1_IP" \
-  "systemctl stop camera-box; pkill -x camera-box 2>/dev/null; \
+  "$(camera_box_deadman_arm_cmds "$CAMERA_BOX_DEADMAN_FIRST_FIRE_MIN") \
+   systemctl stop camera-box; pkill -x camera-box 2>/dev/null; \
    chmod +x $CAM1_BURN_BIN; \
    $(v4l2_neutral_resolve_node_cmd) \
    i=0; while fuser -s \$V4L2_NEUTRAL_NODE 2>/dev/null && [ \$i -lt 30 ]; do sleep 0.5; i=\$((i+1)); done; \
@@ -1839,6 +1868,7 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
       "$PROBE_BIN_DIR"/camera-box root@"$_cip":"$_cbin"
     sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$_cip" \
       "systemctl stop cam2-painter 2>/dev/null || true; \
+       $(camera_box_deadman_arm_cmds "$CAMERA_BOX_DEADMAN_FIRST_FIRE_MIN") \
        systemctl stop camera-box; pkill -x camera-box 2>/dev/null; \
        chmod +x $_cbin; \
        $(v4l2_neutral_resolve_node_cmd) \
@@ -1914,8 +1944,10 @@ systemctl stop cam2-painter 2>/dev/null || true; rm -f /tmp/painter.csv /tmp/av-
     'all-cambox continuous marker, #312 item 2' '/tmp/av-markers.csv')"
 else
   # #872: same dead-man arm on the non-sweep arm -- it stops the permanent painter too.
+  # #772: this arm ALSO stops the production camera-box on cam2 (single-camera mode) -- so arm the
+  # camera-box dead-man here too, before that stop.
   _cam2_prep="$(cam2_painter_deadman_arm_cmds)
-systemctl stop cam2-painter 2>/dev/null || true; systemctl stop camera-box; pkill -x camera-box 2>/dev/null; rm -f /tmp/painter.csv;"
+systemctl stop cam2-painter 2>/dev/null || true; $(camera_box_deadman_arm_cmds "$CAMERA_BOX_DEADMAN_FIRST_FIRE_MIN") systemctl stop camera-box; pkill -x camera-box 2>/dev/null; rm -f /tmp/painter.csv;"
 fi
 # #734: unconditionally kill any PRE-EXISTING frame-probe on cam2 and VERIFY it is actually dead
 # (not merely "started a kill") BEFORE waiting for /dev/fb0 / launching this run's own painter. A
@@ -2438,6 +2470,15 @@ if [ "${AV_RESTART_GATE:-0}" = "1" ]; then
   av_restart_record_and_emit_plan() {
     local label="$1"
     local marker_csv="$OUTDIR/av-restart-${label}-${RUN_ID}.csv"
+    # #772: cam1's camera-box dead-man was armed at [2/8], but THIS restart-survival mode has an
+    # UNBOUNDED operator wait between the before/after pair -- so cam1's stale [2/8] timer could
+    # fire mid-"after" measurement and kill cam1's burn (cam1's feed IS the AV video path, filming
+    # cam2's marker monitor). Re-arm cam1 here too (idempotent -- clears the old timer, resets its
+    # first fire past THIS call's own record + any operator delay), the same way the cam2 ssh below
+    # re-arms cam2's own dead-man. Best-effort: a re-arm failure only reverts to the stale [2/8]
+    # timer, never worse than before this fix.
+    sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$CAM1_IP" \
+      "$(camera_box_deadman_arm_cmds "$CAMERA_BOX_DEADMAN_FIRST_FIRE_MIN")" 2>/dev/null || true
     echo "    [av-restart-sync/$label] cam2 painter: dual-QR + QPSK audio marker on $AV_RESTART_MARKER_DEVICE"
     # Free /dev/fb0 the SAME way [3/8] does — stop cam2-painter AND camera-box (which can
     # also hold fb0 via its --display path), kill any leftover frame-probe, then WAIT (bounded)
@@ -2447,6 +2488,7 @@ if [ "${AV_RESTART_GATE:-0}" = "1" ]; then
     sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$PAINTER_IP" \
       "$(cam2_painter_deadman_arm_cmds)
        systemctl stop cam2-painter 2>/dev/null || true; \
+       $(camera_box_deadman_arm_cmds "$CAMERA_BOX_DEADMAN_FIRST_FIRE_MIN") \
        systemctl stop camera-box; pkill -x camera-box 2>/dev/null; pkill -x frame-probe 2>/dev/null || true; \
        rm -f /tmp/av-restart-markers.csv; \
        i=0; while fuser -s /dev/fb0 2>/dev/null && [ \$i -lt 30 ]; do sleep 0.5; i=\$((i+1)); done; \
