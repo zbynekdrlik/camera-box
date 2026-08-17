@@ -66,10 +66,12 @@ interkom_pcm_pct() {
 }
 
 # interkom_amixer_pct AMIXER_OUTPUT -> the first "[NN%]" percent from an `amixer sget` block (e.g.
-# `Mono: Capture 384 [75%] [-8.00dB] [on]`), "" if none. Mirrors genlock_dropin_fps's parser shape
-# with the trailing `|| true` (the #458 footgun: a no-match grep|head|tr fails under pipefail even
-# though head/tr succeed on empty input, so a bare X="$(interkom_amixer_pct ...)" caller must never
-# abort). `head -1` (never `grep -m1 ... | head`): a plain grep reads all input, no SIGPIPE.
+# `Mono: Capture 384 [75%] [-8.00dB] [on]`), "" if none. Mirrors genlock_dropin_fps's parser shape.
+# The trailing `|| true` is what keeps it pipefail-safe on BOTH failure modes: (1) no match at all
+# (the #458 footgun -- grep exits non-zero while head/tr succeed on empty input) AND (2) a two-line
+# input where `head -1` closes the pipe after the first match and SIGPIPEs the upstream grep. Either
+# way `|| true` neutralizes the pipeline exit so a bare X="$(interkom_amixer_pct ...)" caller under
+# `set -euo pipefail` never aborts.
 interkom_amixer_pct() {
     printf '%s\n' "$1" | grep -oE '\[[0-9]+%\]' | head -1 | tr -d '[]%' || true
 }
