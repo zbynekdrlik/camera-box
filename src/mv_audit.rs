@@ -221,13 +221,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn floor_matches_the_canvas_over_two_minus_tolerance_model() {
-        // strih 30fps canvas -> 30/2 - 2 = 13
-        assert_eq!(mv_floor_fps(30.0), 13.0);
-        // imag 60fps canvas -> 60/2 - 2 = 28
-        assert_eq!(mv_floor_fps(60.0), 28.0);
-        // degenerate low canvas never yields a negative floor
-        assert_eq!(mv_floor_fps(1.0), 0.0);
+    fn floor_tracks_the_effective_target_not_canvas_over_two() {
+        // #776: after the canvas-rate divisor derivation, BOTH broadcast boxes render
+        // Multiview cells at 30fps -- strih (30fps canvas, effective divisor 1) and imag
+        // (60fps canvas, effective divisor 2). The alarm floor must track that ACTUAL target
+        // (30fps), NOT the pre-#776 `canvas/2` assumption -- which put strih's floor at
+        // 30/2 - 2 = 13 (half the real 30fps target), so a collapse of the 30fps strih MV to
+        // ~14-27fps slipped under the floor unalarmed. mv_floor_fps takes the TARGET fps.
+        use crate::render_budget::effective_render_divisor;
+
+        // strih: 30fps canvas (interval 33.3ms) -> effective divisor 1 -> target 30fps.
+        let strih_target = 30.0 / effective_render_divisor(2, 33_333_333) as f64;
+        // imag: 60fps canvas (interval 16.7ms) -> effective divisor 2 -> target 30fps.
+        let imag_target = 60.0 / effective_render_divisor(2, 16_666_667) as f64;
+        assert_eq!(strih_target, 30.0);
+        assert_eq!(imag_target, 30.0);
+
+        // Both boxes now floor at target - tolerance = 28 (the already-proven-healthy imag
+        // floor; strih was wrongly 13 while its MV renders 30fps).
+        assert_eq!(mv_floor_fps(strih_target), 28.0);
+        assert_eq!(mv_floor_fps(imag_target), 28.0);
+
+        // Degenerate: never a negative floor.
+        assert_eq!(mv_floor_fps(2.0), 0.0); // 2 - 2 = 0 exactly
+        assert_eq!(mv_floor_fps(1.0), 0.0); // clamped
         assert_eq!(mv_floor_fps(0.0), 0.0);
     }
 
