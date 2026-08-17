@@ -661,11 +661,21 @@ cat > /etc/systemd/system/camera-box.service.d/genlock.conf << EOF
 [Service]
 Environment=CAMERA_BOX_GENLOCK_FPS=${CAMERA_GENLOCK_FPS}
 EOF
+# issue 792 / #1087 — the secondary 30fps NDI blend stream ("CAMn (30p)", a 2-frame 60->30
+# temporal blend) is enabled by this env drop-in; the binary defaults the feature OFF. Every active
+# fleet box already runs it (hand-installed until now), so writing it here makes a re-provisioned
+# box keep the (30p) stream instead of silently regressing to 60p-only. Same enable-only convention
+# as the drop-ins above — effective on the box's next reboot. Byte-faithful to the live fleet file
+# (proven post-reboot by verify-device.sh's (y) acceptance check).
+cat > /etc/systemd/system/camera-box.service.d/publish-30p.conf << 'EOF'
+[Service]
+Environment=CAMERA_BOX_PUBLISH_30P=1
+EOF
 
 systemctl daemon-reload
 systemctl enable camera-box
 echo "  Service created and enabled"
-echo "  Drop-ins: cpu-affinity.conf (CPUAffinity=3, isolcpus core) + genlock.conf (CAMERA_BOX_GENLOCK_FPS=${CAMERA_GENLOCK_FPS})"
+echo "  Drop-ins: cpu-affinity.conf (CPUAffinity=3, isolcpus core) + genlock.conf (CAMERA_BOX_GENLOCK_FPS=${CAMERA_GENLOCK_FPS}) + publish-30p.conf (CAMERA_BOX_PUBLISH_30P=1)"
 
 # =============================================================================
 # STEP 8: Configure auto-login on tty1
