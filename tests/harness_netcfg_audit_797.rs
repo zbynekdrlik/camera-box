@@ -111,24 +111,53 @@ fn lib_defines_the_pure_functions() {
 // ------------------------------------------------------------------------------------------------
 #[test]
 fn parse_field_reads_monitor_rate_and_status() {
-    assert_eq!(stdout_of(&format!("{MONITOR_FIX}netcfg_parse_field rate \"$MON\"")), "2.5Gbps");
-    assert_eq!(stdout_of(&format!("{MONITOR_FIX}netcfg_parse_field status \"$MON\"")), "link-ok");
-    assert_eq!(stdout_of(&format!("{MONITOR_FIX}netcfg_parse_field full-duplex \"$MON\"")), "yes");
+    assert_eq!(
+        stdout_of(&format!("{MONITOR_FIX}netcfg_parse_field rate \"$MON\"")),
+        "2.5Gbps"
+    );
+    assert_eq!(
+        stdout_of(&format!("{MONITOR_FIX}netcfg_parse_field status \"$MON\"")),
+        "link-ok"
+    );
+    assert_eq!(
+        stdout_of(&format!(
+            "{MONITOR_FIX}netcfg_parse_field full-duplex \"$MON\""
+        )),
+        "yes"
+    );
     // the port name in the monitor block
-    assert_eq!(stdout_of(&format!("{MONITOR_FIX}netcfg_parse_field name \"$MON\"")), "ether3");
+    assert_eq!(
+        stdout_of(&format!("{MONITOR_FIX}netcfg_parse_field name \"$MON\"")),
+        "ether3"
+    );
 }
 
 #[test]
 fn parse_field_reads_shared_buffers_and_is_start_anchored() {
-    assert_eq!(stdout_of(&format!("{QOS_FIX}netcfg_parse_field shared-buffers \"$QOS\"")), "80%");
+    assert_eq!(
+        stdout_of(&format!(
+            "{QOS_FIX}netcfg_parse_field shared-buffers \"$QOS\""
+        )),
+        "80%"
+    );
     // `shared-buffers:` must NOT be matched by a request for the `buffers` label appearing mid-word,
     // and `mirror-buffers:` must NOT satisfy a `shared-buffers` query (start-anchored label).
-    assert_eq!(stdout_of(&format!("{QOS_FIX}netcfg_parse_field mirror-buffers \"$QOS\"")), "10%");
+    assert_eq!(
+        stdout_of(&format!(
+            "{QOS_FIX}netcfg_parse_field mirror-buffers \"$QOS\""
+        )),
+        "10%"
+    );
 }
 
 #[test]
 fn parse_field_empty_when_absent() {
-    assert_eq!(stdout_of(&format!("{MONITOR_FIX}netcfg_parse_field nonesuch \"$MON\"")), "");
+    assert_eq!(
+        stdout_of(&format!(
+            "{MONITOR_FIX}netcfg_parse_field nonesuch \"$MON\""
+        )),
+        ""
+    );
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -136,15 +165,33 @@ fn parse_field_empty_when_absent() {
 // ------------------------------------------------------------------------------------------------
 #[test]
 fn parse_stat_strips_thousands_space() {
-    assert_eq!(stdout_of(&format!("{STATS_FIX}netcfg_parse_stat tx-drop-queue1-packet \"$ST\"")), "100054");
-    assert_eq!(stdout_of(&format!("{STATS_FIX}netcfg_parse_stat rx-fcs-error \"$ST\"")), "1");
+    assert_eq!(
+        stdout_of(&format!(
+            "{STATS_FIX}netcfg_parse_stat tx-drop-queue1-packet \"$ST\""
+        )),
+        "100054"
+    );
+    assert_eq!(
+        stdout_of(&format!(
+            "{STATS_FIX}netcfg_parse_stat rx-fcs-error \"$ST\""
+        )),
+        "1"
+    );
     // queue2 is a genuine 0 (present); a distinct counter name never bleeds into a similarly-named one
-    assert_eq!(stdout_of(&format!("{STATS_FIX}netcfg_parse_stat tx-drop-queue2-packet \"$ST\"")), "0");
+    assert_eq!(
+        stdout_of(&format!(
+            "{STATS_FIX}netcfg_parse_stat tx-drop-queue2-packet \"$ST\""
+        )),
+        "0"
+    );
 }
 
 #[test]
 fn parse_stat_empty_when_absent() {
-    assert_eq!(stdout_of(&format!("{STATS_FIX}netcfg_parse_stat rx-jabber \"$ST\"")), "");
+    assert_eq!(
+        stdout_of(&format!("{STATS_FIX}netcfg_parse_stat rx-jabber \"$ST\"")),
+        ""
+    );
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -167,7 +214,10 @@ fn normalize_rate_empty_on_junk() {
 
 #[test]
 fn normalize_version_strips_channel() {
-    assert_eq!(stdout_of("netcfg_normalize_version '7.23.3 (stable)'"), "7.23.3");
+    assert_eq!(
+        stdout_of("netcfg_normalize_version '7.23.3 (stable)'"),
+        "7.23.3"
+    );
     assert_eq!(stdout_of("netcfg_normalize_version 7.22"), "7.22");
 }
 
@@ -189,8 +239,8 @@ fn classify_match_verdicts() {
 fn classify_rate_verdicts() {
     assert_eq!(stdout_of("netcfg_classify_rate 10Gbps 10Gbps"), "OK");
     assert_eq!(stdout_of("netcfg_classify_rate 1Gbps 10Gbps"), "DEGRADED"); // duplex/speed regression
-    assert_eq!(stdout_of("netcfg_classify_rate 2.5Gbps 1Gbps"), "FASTER");  // better than baseline, info
-    assert_eq!(stdout_of("netcfg_classify_rate '' 10Gbps"), "ABSENT");      // link down / not present
+    assert_eq!(stdout_of("netcfg_classify_rate 2.5Gbps 1Gbps"), "FASTER"); // better than baseline, info
+    assert_eq!(stdout_of("netcfg_classify_rate '' 10Gbps"), "ABSENT"); // link down / not present
     assert_eq!(stdout_of("netcfg_classify_rate 1Gbps ''"), "UNSET");
 }
 
@@ -217,9 +267,15 @@ fn classify_drop_rate_verdicts() {
 // ------------------------------------------------------------------------------------------------
 #[test]
 fn drift_verdict_aggregates() {
-    assert_eq!(stdout_of("netcfg_drift_verdict OK OK FASTER UNSET"), "CLEAN");
+    assert_eq!(
+        stdout_of("netcfg_drift_verdict OK OK FASTER UNSET"),
+        "CLEAN"
+    );
     // report-only statuses do not page
-    assert_eq!(stdout_of("netcfg_drift_verdict OK ABSENT RESET UNKNOWN"), "CLEAN");
+    assert_eq!(
+        stdout_of("netcfg_drift_verdict OK ABSENT RESET UNKNOWN"),
+        "CLEAN"
+    );
     // any hard-drift status pages
     assert_eq!(stdout_of("netcfg_drift_verdict OK DRIFT OK"), "DRIFT");
     assert_eq!(stdout_of("netcfg_drift_verdict OK OK DEGRADED"), "DRIFT");

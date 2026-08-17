@@ -79,7 +79,10 @@ impl Rig {
             .env("NC_STUB_SUMMARY", &self.summary_file)
             // point notify at a guaranteed-absent path so even a bug that reached the non-dry-run
             // branch could not actually post (belt-and-braces; --dry-run already never notifies)
-            .env("AIRULESET_NOTIFY", self._dir.path().join("no-such-notify.py"))
+            .env(
+                "AIRULESET_NOTIFY",
+                self._dir.path().join("no-such-notify.py"),
+            )
             .current_dir(manifest_dir())
             .output()
             .expect("failed to run watchdog");
@@ -90,12 +93,22 @@ impl Rig {
 // ------------------------------------------------------------------------------------------------
 #[test]
 fn help_and_bad_arg() {
-    let help = Command::new("bash").arg(watchdog()).arg("--help").output().unwrap();
+    let help = Command::new("bash")
+        .arg(watchdog())
+        .arg("--help")
+        .output()
+        .unwrap();
     assert!(help.status.success());
-    assert!(String::from_utf8_lossy(&help.stdout).contains("netcfg-drift-alert-watchdog"),
-        "--help should print the header");
+    assert!(
+        String::from_utf8_lossy(&help.stdout).contains("netcfg-drift-alert-watchdog"),
+        "--help should print the header"
+    );
 
-    let bad = Command::new("bash").arg(watchdog()).arg("--bogus").output().unwrap();
+    let bad = Command::new("bash")
+        .arg(watchdog())
+        .arg("--bogus")
+        .output()
+        .unwrap();
     assert_eq!(bad.status.code(), Some(2), "an unknown arg exits 2");
 }
 
@@ -105,38 +118,59 @@ fn clean_pass_does_not_alert() {
     rig.set_audit(0, "NETCFG-CLEAN: venue switch chain matches baseline");
     let log = rig.pass();
     assert!(log.contains("audit rc=0"), "log:\n{log}");
-    assert!(!log.contains("WOULD alert"), "a CLEAN pass must never alert:\n{log}");
+    assert!(
+        !log.contains("WOULD alert"),
+        "a CLEAN pass must never alert:\n{log}"
+    );
 }
 
 #[test]
 fn drift_confirms_across_two_passes_then_would_alert() {
     let rig = Rig::new();
-    rig.set_audit(3, "NETCFG-DRIFT: venue switch chain drifted from baseline (1 finding(s))");
+    rig.set_audit(
+        3,
+        "NETCFG-DRIFT: venue switch chain drifted from baseline (1 finding(s))",
+    );
 
     let p1 = rig.pass();
     assert!(p1.contains("audit rc=3"), "p1:\n{p1}");
-    assert!(p1.contains("holding"), "pass 1 must HOLD (not yet confirmed):\n{p1}");
+    assert!(
+        p1.contains("holding"),
+        "pass 1 must HOLD (not yet confirmed):\n{p1}"
+    );
     assert!(!p1.contains("WOULD alert"), "pass 1 must not alert:\n{p1}");
 
     let p2 = rig.pass();
-    assert!(p2.contains("WOULD alert"), "pass 2 must alert once confirmed:\n{p2}");
+    assert!(
+        p2.contains("WOULD alert"),
+        "pass 2 must alert once confirmed:\n{p2}"
+    );
 }
 
 #[test]
 fn drift_then_clean_fires_recovery() {
     let rig = Rig::new();
     // two DRIFT passes -> confirmed + alerted latch set
-    rig.set_audit(3, "NETCFG-DRIFT: venue switch chain drifted from baseline (1 finding(s))");
+    rig.set_audit(
+        3,
+        "NETCFG-DRIFT: venue switch chain drifted from baseline (1 finding(s))",
+    );
     rig.pass();
     let p2 = rig.pass();
     assert!(p2.contains("WOULD alert"), "p2:\n{p2}");
     // now CLEAN -> recovery ping (because we were alerted)
     rig.set_audit(0, "NETCFG-CLEAN: venue switch chain matches baseline");
     let p3 = rig.pass();
-    assert!(p3.contains("WOULD send recovery"), "a CLEAN after an alert must recover:\n{p3}");
+    assert!(
+        p3.contains("WOULD send recovery"),
+        "a CLEAN after an alert must recover:\n{p3}"
+    );
     // and a subsequent CLEAN is silent (latch cleared)
     let p4 = rig.pass();
-    assert!(!p4.contains("WOULD send recovery"), "recovery fires ONCE, not every clean pass:\n{p4}");
+    assert!(
+        !p4.contains("WOULD send recovery"),
+        "recovery fires ONCE, not every clean pass:\n{p4}"
+    );
 }
 
 #[test]
@@ -144,15 +178,27 @@ fn audit_error_is_nothing_to_decide() {
     let rig = Rig::new();
     rig.set_audit(2, ""); // usage/gather error
     let log = rig.pass();
-    assert!(log.contains("nothing to decide"), "an audit error must not page:\n{log}");
-    assert!(!log.contains("WOULD alert"), "an audit error must never alert:\n{log}");
+    assert!(
+        log.contains("nothing to decide"),
+        "an audit error must not page:\n{log}"
+    );
+    assert!(
+        !log.contains("WOULD alert"),
+        "an audit error must never alert:\n{log}"
+    );
 }
 
 #[test]
 fn single_drift_pass_is_not_enough_to_alert() {
     // a transient one-pass drift (e.g. a mid-reconfig read) must never page on its own
     let rig = Rig::new();
-    rig.set_audit(3, "NETCFG-DRIFT: venue switch chain drifted from baseline (1 finding(s))");
+    rig.set_audit(
+        3,
+        "NETCFG-DRIFT: venue switch chain drifted from baseline (1 finding(s))",
+    );
     let p1 = rig.pass();
-    assert!(!p1.contains("WOULD alert"), "one drift pass alone must not alert:\n{p1}");
+    assert!(
+        !p1.contains("WOULD alert"),
+        "one drift pass alone must not alert:\n{p1}"
+    );
 }
