@@ -271,3 +271,46 @@ fn gather_remote_snippet_is_nonempty_and_names_the_sources_780() {
         "snippet must emit a pgrep-presence marker"
     );
 }
+
+// ---- #780 item 6: the E2E [0/8] preflight is wired to the SAME shared lib -----------------------
+
+fn read_repo(rel: &str) -> String {
+    let p = manifest_dir().join(rel);
+    std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()))
+}
+
+#[test]
+fn recording_e2e_sources_the_display_path_lib_780() {
+    let body = read_repo("scripts/recording-e2e.sh");
+    assert!(
+        body.contains(r#". "$HERE/lib/imag-display-path.sh""#),
+        "recording-e2e.sh must source the shared display-path lib"
+    );
+}
+
+#[test]
+fn recording_e2e_calls_the_preflight_fail_fast_before_dantesync_780() {
+    let body = read_repo("scripts/recording-e2e.sh");
+    // The [0/8] preflight call must exist, target the imag host, and hard-exit on a proven drift.
+    let call = body
+        .find("imag_display_path_preflight_assert \"$IMAG_IP\"")
+        .expect("recording-e2e.sh must call imag_display_path_preflight_assert with the imag host");
+    let win = &body[call..(call + 120).min(body.len())];
+    assert!(
+        win.contains("|| exit 1"),
+        "the display-path preflight must fail-fast (|| exit 1): {win}"
+    );
+    // Early fail-fast: the display-path preflight banner must precede the DanteSync gate (mirrors
+    // the #977 session-visibility ordering guard — don't burn the DanteSync/40-min path on a
+    // known display-path config drift).
+    let banner = body
+        .find("imag display-path config preflight")
+        .expect("a [0/8] banner announcing the display-path preflight must exist");
+    let dantesync = body
+        .find("[0/8] DanteSync NTP+PTP gate")
+        .expect("the DanteSync banner must still exist");
+    assert!(
+        banner < dantesync,
+        "the display-path preflight must run before the DanteSync gate (early fail-fast)"
+    );
+}

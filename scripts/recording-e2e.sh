@@ -130,6 +130,11 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/optical-chain-health.sh"
 # shellcheck source=scripts/lib/optical-chain-preflight.sh
 . "$HERE/lib/optical-chain-preflight.sh"
+# #780: the SHARED imag display-path drift gather + verdict (picom off, iGPU max-freq pin, tap conf)
+# -- the SAME lib scripts/drift-guard.sh's --check-imag facet uses. Its [0/8] preflight fail-fast is
+# invoked with ONE line below (the #675 sourced-lib pattern -- no anchored line edited).
+# shellcheck source=scripts/lib/imag-display-path.sh
+. "$HERE/lib/imag-display-path.sh"
 # #878 (same family as #844/#869/#872): the PURE decision for the STARTUP self-heal below -- a
 # dead harness only ever restores rig state inside cleanup() (the bash EXIT trap), which SIGKILL
 # never reaches, so the leftover camera-box.service/painter/burn state strands until a human
@@ -541,6 +546,16 @@ done
 # Plain statement (never $()/pipeline) so its `exit 1` propagates to the harness.
 echo "[0/8] optical injection leg preflight — a standing dead cam2 painter must fail-fast, not waste a run (#860)"
 optical_chain_preflight_assert "$PAINTER_IP" root "$CAM_PW" "$STRIH" "${OBS_PASSWORD:-}" "$HERE"
+
+# #780: imag display-path config drift preflight — picom running (a compositor breaks the tear-free
+# direct scanout), the #841 iGPU max-freq pin down, or the #779 tap conf gone are DETERMINISTIC
+# config states that live BELOW every other measurement in this gate (OBS render / recording verdict
+# / screenshots all end before the display path). Fail-fast HERE, at minute 0, instead of projecting
+# a laggy/torn 40-min run. UNKNOWN facets (an SSH hiccup — the imag reachability check below owns
+# genuine unreachability) only WARN; a proven DRIFT aborts. Same shared verdict lib the
+# --check-imag facet runs, so the two can never diverge.
+echo "[0/8] imag display-path config preflight — a compositor / idle-GPU / lost-tap drift must fail-fast, not waste a run (#780)"
+imag_display_path_preflight_assert "$IMAG_IP" "${IMAG_USER:-newlevel}" || exit 1
 
 # #977/#958: obs64/AHK Windows-session-visibility gate. A session-0 obs64 (launched via
 # ssh+Invoke-CimMethod) answers OBS WebSocket, serves NDI, and writes a normal log -- so it sails
