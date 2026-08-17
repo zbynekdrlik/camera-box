@@ -22,6 +22,7 @@
 //!     `delta_relocks` (clock-discipline instability), `delta_late_holds`,
 //!     and `delta_backward_regime_ticks` (#1009 — the hold was BYPASSED, i.e.
 //!     a frame jump/duplicate, the true "duplikát" signal).
+//!
 //! Raw `delta_holds`/`delta_overruns` are NOT gated: on a non-60 source those
 //! reflect the FIFO's normal cadence adaptation, not loss — gating on them
 //! would false-fail a perfectly healthy CG feed. `delta_backward_regime_ticks`
@@ -88,11 +89,49 @@ pub struct PlaybackVerdict {
 /// are independent — every failing check contributes its own reason, so the
 /// operator sees the full picture in one pass, not just the first fault.
 pub fn evaluate(w: &PlaybackWindow, bounds: &PlaybackBounds) -> PlaybackVerdict {
-    // RED stub — real logic lands in the [green] commit.
+    let mut reasons = Vec::new();
+
+    if w.samples < bounds.min_samples {
+        reasons.push(format!(
+            "too few audit samples ({} < {}) — window too short to confirm flat skew",
+            w.samples, bounds.min_samples
+        ));
+    }
+    if w.max_abs_head_skew_ms > bounds.skew_bound_ms {
+        reasons.push(format!(
+            "skew excursion {} ms > bound {} ms — presentation not flat",
+            w.max_abs_head_skew_ms, bounds.skew_bound_ms
+        ));
+    }
+    if w.delta_dropped_due > 0 {
+        reasons.push(format!(
+            "{} dropped frame(s) in window",
+            w.delta_dropped_due
+        ));
+    }
+    if w.delta_underruns > 0 {
+        reasons.push(format!("{} FIFO underrun(s) in window", w.delta_underruns));
+    }
+    if w.delta_relocks > 0 {
+        reasons.push(format!(
+            "{} FIFO relock(s) — clock discipline unstable",
+            w.delta_relocks
+        ));
+    }
+    if w.delta_late_holds > 0 {
+        reasons.push(format!("{} late hold(s) in window", w.delta_late_holds));
+    }
+    if w.delta_backward_regime_ticks > 0 {
+        reasons.push(format!(
+            "{} backward-regime tick(s) — hold bypassed / frame jump (duplicate)",
+            w.delta_backward_regime_ticks
+        ));
+    }
+
     PlaybackVerdict {
         source: w.source.clone(),
-        pass: true,
-        reasons: Vec::new(),
+        pass: reasons.is_empty(),
+        reasons,
     }
 }
 
@@ -181,7 +220,9 @@ mod tests {
         let v = evaluate(&w, &PlaybackBounds::default());
         assert!(!v.pass);
         assert!(
-            v.reasons.iter().any(|r| r.contains("jump") || r.contains("backward")),
+            v.reasons
+                .iter()
+                .any(|r| r.contains("jump") || r.contains("backward")),
             "expected a frame-jump reason, got {:?}",
             v.reasons
         );
