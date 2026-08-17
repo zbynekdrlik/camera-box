@@ -161,6 +161,11 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # actual persist call site is tagged with its own distinct marker below (after the run).
 # shellcheck source=scripts/lib/cbox-burn-log-persist.sh
 . "$HERE/lib/cbox-burn-log-persist.sh"
+# issue 798: emit ONE loud, greppable IMAG-LEG-VERIFIED / IMAG-LEG-NOT-VERIFIED run-log marker at
+# the imag extract, naming WHY the leg was skipped when it is. Pure source-only lib (one function);
+# the real call site is tagged with its own distinct marker after the extract runs below.
+# shellcheck source=scripts/lib/imag-leg-marker.sh
+. "$HERE/lib/imag-leg-marker.sh"
 # #887: imag's zero-loss proof used to stop at OBS's own self-reported compositor stats. A
 # REPORT-ONLY (never touches $GATE) independent check now compares the compositor's own
 # produced-frame count (imag_produced_frame_check.py, GetStats) against the i915 kernel's
@@ -3893,6 +3898,11 @@ continuing WITHOUT the imag partial; the merge below will omit --merge-partials 
     echo "WARNING: #462 no imag recording path (StopRecord returned none) — imag partial NOT produced;" >&2
     echo "         the merge below will run WITHOUT --merge-partials imag=... (cam→imag proof skipped)." >&2
   fi
+  # issue 798: LOUD run-log twin of the verdict's full_chain.imag_leg_verified field — one distinct
+  # greppable line, emitted the moment the [8/8c] outcome is known, naming the skip REASON. A green
+  # run that silently skips the imag leg is a hidden partial (ONE full test, no partials). Report-
+  # only — gates nothing. NEW call line only; the imag extract lines above are byte-unchanged (#675).
+  echo "    $(imag_leg_run_marker "${IMAG_PARTIAL:-}" "${IMAG_HOST_PATH:-}")"
 
   # #703: EXECUTE mode — the strih [8/8a] + stream [8/8b] extracts were launched BACKGROUNDED
   # above (in parallel with each other AND with imag's own synchronous [8/8c] extract just

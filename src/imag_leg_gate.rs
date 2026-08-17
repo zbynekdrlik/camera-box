@@ -42,9 +42,10 @@
 /// The ONE line a follow-up flips to `true` to promote the imag leg to a LIVE blocking gate (and
 /// then fold in the issue-887 produced-vs-presented deficit) once healthy imag runs accumulate.
 pub fn gates_overall_pass() -> bool {
-    // #798 RED stub — deliberately BLOCKING (`true`). Path A ships this REPORT-ONLY (`false`);
-    // the GREEN commit flips it. `tests/imag_leg_gate.rs` pins the report-only contract.
-    true
+    // #798 path A — REPORT-ONLY today: the imag verdict flows + is surfaced but never reds a run.
+    // The ONE line a follow-up flips to `true` to promote the imag leg to a LIVE blocking gate
+    // (and fold in the issue-887 produced-vs-presented deficit) once healthy imag runs accumulate.
+    false
 }
 
 /// Pure fold: does an imag-leg outcome (`node_ok`) pass `overall_pass`, given whether the seam is
