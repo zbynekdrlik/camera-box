@@ -339,9 +339,32 @@ pub const NOISE_ROUGHNESS_THRESHOLD: f32 = 30.0;
 /// buffer. Returns the mean `|Y0 − Y1|` in `[0.0, 255.0]`; `0.0` when no in-bounds sample
 /// exists (empty/undersized buffer or zero dimensions).
 pub fn luma_roughness(frame: &[u8], width: usize, height: usize, stride: usize) -> f32 {
-    // #1079 STUB — real implementation lands in the GREEN commit (RED→GREEN evidence).
-    let _ = (frame, width, height, stride);
-    0.0
+    let macropixels_per_row = width / 2; // YUYV packs 2 pixels per 4-byte macropixel
+    if macropixels_per_row == 0 || height == 0 {
+        return 0.0;
+    }
+    let mut diff_sum: u64 = 0;
+    let mut count: u64 = 0;
+    for y in 0..height {
+        let row_start = y * stride;
+        let mut mp = 0usize;
+        while mp < macropixels_per_row {
+            // Macropixel `mp` of row `y`: Y0 U Y1 V — Y0 at +0, Y1 at +2 are two
+            // horizontally adjacent luma pixels (1px apart).
+            let idx = row_start + mp * 4;
+            if idx + 3 < frame.len() {
+                let y0 = frame[idx] as i16;
+                let y1 = frame[idx + 2] as i16;
+                diff_sum += (y0 - y1).unsigned_abs() as u64;
+                count += 1;
+            }
+            mp += CHROMA_SAMPLE_STRIDE;
+        }
+    }
+    if count == 0 {
+        return 0.0;
+    }
+    diff_sum as f32 / count as f32
 }
 
 /// Classify a captured frame as LIKELY unstructured noise (a no-signal render that reads
@@ -356,9 +379,7 @@ pub fn luma_roughness(frame: &[u8], width: usize, height: usize, stride: usize) 
 /// never noise here: a flat-grey no-signal mode is already caught by the colour/grayscale
 /// label, so roughness only matters once a frame reads as colour.
 pub fn is_likely_noise(u_dev: f32, v_dev: f32, roughness: f32) -> bool {
-    // #1079 STUB — real implementation lands in the GREEN commit (RED→GREEN evidence).
-    let _ = (u_dev, v_dev, roughness);
-    false
+    is_color_frame(u_dev, v_dev) && roughness > NOISE_ROUGHNESS_THRESHOLD
 }
 
 /// V4L2 control id for picture CONTRAST (`V4L2_CID_CONTRAST`).

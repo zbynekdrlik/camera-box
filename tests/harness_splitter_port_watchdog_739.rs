@@ -68,6 +68,7 @@ const COLOUR: &str = r"printf 'PROBE_OK\ncapture chroma: u_dev=6.1 v_dev=8.8 -> 
 const GREY: &str = r"printf 'PROBE_OK\ncapture chroma: u_dev=0.5 v_dev=0.4 -> grayscale (source likely monochrome)\n'";
 const NO_LINE: &str = r"printf 'PROBE_OK\n'"; // reachable, but no fresh capture line
 const SSH_FAIL: &str = r"printf ''"; // ssh connect failed -> empty
+
 // #1079: a colour box whose frame ALSO carries the new rough= spatial-roughness metric.
 const COLOUR_ROUGH: &str =
     r"printf 'PROBE_OK\ncapture chroma: u_dev=6.1 v_dev=8.8 rough=52.3 -> colour\n'";
