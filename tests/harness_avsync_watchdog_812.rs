@@ -27,6 +27,7 @@ fn read(rel: &str) -> String {
 const WATCHDOG_PS1: &str = "scripts/avsync-watchdog.ps1";
 const KEEPALIVE_PS1: &str = "scripts/avsync-keepalive.ps1";
 const INSTALL_SH: &str = "scripts/avsync-watchdog-install.sh";
+const FRESHNESS_PY: &str = "scripts/avsync_freshness.py";
 
 // ================================================================================================
 // scripts/avsync-watchdog.ps1 — defects 2 (webhook) and 3 (heartbeat) + the bounded-measurement
@@ -110,21 +111,32 @@ fn avsync_watchdog_ps1_bounds_the_measurement_call_never_wedges_on_a_hung_python
 }
 
 #[test]
-fn avsync_watchdog_ps1_keeps_the_814_grab_freshness_gate_unchanged() {
+fn avsync_watchdog_ps1_delegates_the_814_gate_to_the_pure_decider() {
+    // #814 (updated here): the grab-freshness gate is no longer INLINE magic numbers in this ps1 --
+    // it was productized into the pure, unit-tested single source of truth scripts/avsync_freshness.py
+    // (functionally exercised in tests/harness_avsync_freshness_814.rs). This ps1 now only GATHERS
+    // the grab facts and DELEGATES the decision. The exact thresholds are asserted here on the
+    // decider, so there is still one place they are pinned -- just the correct one.
     let body = read(WATCHDOG_PS1);
-    // These are the exact #814 grab-freshness thresholds confirmed live on the box -- this fix
-    // must NOT touch them (design decision: "same grab-freshness gate untouched").
     assert!(
-        body.contains("200000"),
-        "clip-too-small threshold (bytes) must be unchanged"
+        body.contains("avsync_freshness.py"),
+        "the ps1 must delegate the fresh/stale decision to the pure decider, not duplicate it"
     );
     assert!(
-        body.contains("180"),
-        "clip-stale age threshold (seconds) must be unchanged"
+        body.contains("--grab-rc") && body.contains("--duration-s"),
+        "the ps1 must pass the grab facts to the decider CLI"
     );
     assert!(
-        body.contains("< 20"),
-        "clip-too-short duration threshold (seconds) must be unchanged"
+        !body.contains("200000") && !body.contains("< 20"),
+        "the freshness thresholds must NOT be duplicated inline in the ps1 any more"
+    );
+    let gate = read(FRESHNESS_PY);
+    assert!(
+        gate.contains("MAX_AGE_S = 180")
+            && gate.contains("MIN_SIZE_BYTES = 200_000")
+            && gate.contains("MIN_DUR_S = 20"),
+        "the exact live thresholds (200000 B / 180 s / 20 s) now live in the pure decider as named \
+         constants -- their single source of truth"
     );
     assert!(
         body.contains("rtmp://127.0.0.1:1234/live/obs-e2e-test"),
