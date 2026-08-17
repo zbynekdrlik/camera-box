@@ -3,7 +3,7 @@
 //! `render_display()` (obs-display.c) is the ONLY place a Multiview projector renders, and
 //! before #771 nothing emitted its ACTUAL render cadence — so "at what fps is the multiview
 //! running" could not be answered from the OBS log. #771 adds a per-projector
-//! `multiview-audit:` line every ~5s (real renders / window) plus a pure `canvas/2 − tol`
+//! `multiview-audit:` line every ~5s (real renders / window) plus a pure `target − tol`
 //! floor the E2E gate + drift-guard apply.
 //!
 //! This guard is STD-ONLY (no `use camera_box`, not probe-gated) so it gives an observable
@@ -65,8 +65,8 @@ fn render_display_counts_real_renders_and_windows_at_5s() {
 fn budget_header_carries_the_pure_floor_and_window_constants() {
     let hdr = read(OBS_BUDGET);
     assert!(
-        hdr.contains("static inline double obs_multiview_floor_fps(double canvas_fps)"),
-        "{OBS_BUDGET}: #771 pure canvas/2 floor helper gone — the C log line and the Rust gate would diverge."
+        hdr.contains("static inline double obs_multiview_floor_fps(double target_fps)"),
+        "{OBS_BUDGET}: #771/#776 pure target floor helper gone — the C log line and the Rust gate would diverge."
     );
     assert!(
         hdr.contains("#define MULTIVIEW_AUDIT_WINDOW_NS 5000000000ULL"),

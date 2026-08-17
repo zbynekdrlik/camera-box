@@ -474,13 +474,13 @@ jobs:
           if ($disp -notmatch [regex]::Escape('display->render_audit_render_count++;')) { Write-Error "obs-display.c: #771 real-render counter not bumped -- rendered_fps would always read 0"; exit 1 }
           if ($disp -notmatch [regex]::Escape('display->render_audit_id = ++next_audit_id;')) { Write-Error "obs-display.c: #771 stable per-projector audit id assignment gone -- monitor=N would be unstable"; exit 1 }
           $bud = (Get-Content "vendor/obs-studio/libobs/obs-display-budget.h" -Raw) -replace '\s+', ' '
-          if ($bud -notmatch [regex]::Escape('static inline double obs_multiview_floor_fps(double canvas_fps)')) { Write-Error "obs-display-budget.h: #771 pure canvas/2 floor helper gone -- the C log line and the Rust gate would diverge"; exit 1 }
+          if ($bud -notmatch [regex]::Escape('static inline double obs_multiview_floor_fps(double target_fps)')) { Write-Error "obs-display-budget.h: #771/#776 pure target floor helper gone -- the C log line and the Rust gate would diverge"; exit 1 }
           if ($bud -notmatch [regex]::Escape('#define MULTIVIEW_AUDIT_WINDOW_NS 5000000000ULL')) { Write-Error "obs-display-budget.h: #771 5s audit-window constant gone"; exit 1 }
           $hdr = (Get-Content "vendor/obs-studio/libobs/obs-internal.h" -Raw) -replace '\s+', ' '
           if ($hdr -notmatch [regex]::Escape('uint32_t render_audit_id;')) { Write-Error "obs-internal.h: #771 obs_display.render_audit_id missing"; exit 1 }
           if ($hdr -notmatch [regex]::Escape('uint64_t render_audit_window_start_ns;')) { Write-Error "obs-internal.h: #771 obs_display.render_audit_window_start_ns missing"; exit 1 }
           if ($hdr -notmatch [regex]::Escape('uint32_t render_audit_render_count;')) { Write-Error "obs-internal.h: #771 obs_display.render_audit_render_count missing"; exit 1 }
-          Write-Output "#771 multiview-audit fps observability line + canvas/2 floor present -- OK"
+          Write-Output "#771 multiview-audit fps observability line + #776 target floor present -- OK"
 
       # #152 (the #269 YAML lock-step): OBSBasic.cpp (UpdateTitleBar) is frontend-only — the
       # FAST path does NOT build the frontend — but the source-text check still catches a

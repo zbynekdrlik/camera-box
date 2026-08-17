@@ -19,7 +19,7 @@
 # monitor-3 ~12fps for 5 min, strih 4K MV 9-11fps under contention) still ran. This is the SYNCHRONOUS
 # gate-time consumer of the SAME `mv-fps-gate` binary + `mv_audit::gate_log` the watchdog uses; it
 # reuses `mv_fps_verdict` (exit -> PASS/BELOW/UNKNOWN) from mv-fps-health.sh. The floor
-# (imag 28 / strih 13 = canvas/2 - tolerance) is EMITTED in each line's `floor=F` and applied by the
+# (imag 28 / strih 28 = target - tolerance; both boxes now render 30fps MV cells, #776) is EMITTED in each line's `floor=F` and applied by the
 # gate binary -- this preflight calibrates nothing.
 #
 # NEVER FALSE-ABORTS A CI GATE (the user's hardest constraint): only a CONFIRMED below-floor collapse
@@ -141,7 +141,7 @@ mv_fps_preflight_assert() {
   done
 
   if [ -n "$collapsed" ]; then
-    echo "ERROR: [4d1/8] MV-fps preflight — a Multiview projector's render cadence is CONFIRMED below its floor (canvas/2 − tolerance) on:" >&2
+    echo "ERROR: [4d1/8] MV-fps preflight — a Multiview projector's render cadence is CONFIRMED below its floor (target − tolerance) on:" >&2
     printf '%s' "$collapsed" | sed 's/^/         /' >&2
     echo "       A recording made now would capture a juddering Multiview; refusing to start the E2E run (issue 771/1091)." >&2
     echo "       Restart OBS on the named box, or find the process stealing its GPU/CPU render budget, then re-run. NEVER reboot the host." >&2

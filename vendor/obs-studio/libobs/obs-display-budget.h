@@ -160,20 +160,27 @@ static inline uint32_t obs_effective_render_divisor(uint32_t configured_divisor,
  * binding "multiview musí byť plynulé a merané" requirement.
  */
 #define MULTIVIEW_AUDIT_WINDOW_NS 5000000000ULL	     /* emit the audit line ~every 5s */
-#define MULTIVIEW_AUDIT_FLOOR_TOLERANCE_FPS 2.0	     /* fps jitter band below the canvas/2 floor */
+#define MULTIVIEW_AUDIT_FLOOR_TOLERANCE_FPS 2.0	     /* fps jitter band below the target floor */
 
 /*
- * The MV-fps alarm floor for a canvas rate: canvas_fps/2 − tolerance (#771 design). A
+ * The MV-fps alarm floor for a projector's TARGET rate: target_fps − tolerance (#776). A
  * throttleable projector rendering below this over a window has collapsed (freeze / budget
  * starvation) and must alarm. Pure + dependency-free so the C log line, the E2E gate, and
- * drift-guard all apply the SAME threshold. Clamped to >= 0 (a degenerate canvas_fps never
- * yields a negative floor). NOTE: the canvas/2 model is the design default; the exact floor
- * is calibrated against a measured-healthy rig (the ticket flags this explicitly).
+ * drift-guard all apply the SAME threshold. Clamped to >= 0 (a degenerate target_fps never
+ * yields a negative floor).
+ *
+ * target_fps = canvas_fps / effective_divisor -- the ~30fps-cell rate the projector actually
+ * renders at (both broadcast boxes: strih 30fps canvas / divisor 1, imag 60fps canvas / divisor 2,
+ * both -> target 30 -> floor 28). #776: the floor tracks the TARGET, not canvas/2. The pre-#776
+ * canvas/2 model assumed every throttleable projector used divisor 2 (MV = canvas/2); once
+ * obs_effective_render_divisor() derives the divisor from the canvas rate, a 30fps-canvas box
+ * renders MV at divisor 1 = 30fps, so canvas/2 (= 13) is half the real target and a genuine
+ * collapse to ~14-27fps would slip under it unalarmed.
  *
  * Tier-0 authority: src/mv_audit.rs::mv_floor_fps (byte-identical results).
  */
-static inline double obs_multiview_floor_fps(double canvas_fps)
+static inline double obs_multiview_floor_fps(double target_fps)
 {
-	double floor_fps = canvas_fps / 2.0 - MULTIVIEW_AUDIT_FLOOR_TOLERANCE_FPS;
+	double floor_fps = target_fps - MULTIVIEW_AUDIT_FLOOR_TOLERANCE_FPS;
 	return floor_fps < 0.0 ? 0.0 : floor_fps;
 }

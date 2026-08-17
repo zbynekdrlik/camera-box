@@ -124,14 +124,14 @@ fn recovery_only_when_was_alerted_and_now_pass() {
 // -------------------------------------------------------------------------------------------
 #[test]
 fn alert_detail_extracts_the_gate_fail_lines() {
-    let gate_out = "FAIL monitor=1 divisor=1 rendered_fps=9.0 < floor=13.0 (target 30, 3840x2160)";
+    let gate_out = "FAIL monitor=1 divisor=1 rendered_fps=9.0 < floor=28.0 (target 30, 3840x2160)";
     let out = health_stdout(&format!(
         "mv_fps_alert_detail imag {}",
         shell_single_quote(gate_out)
     ));
     assert!(out.contains("imag"), "detail must name the box: {out}");
     assert!(
-        out.contains("monitor=1") && out.contains("rendered_fps=9.0") && out.contains("floor=13.0"),
+        out.contains("monitor=1") && out.contains("rendered_fps=9.0") && out.contains("floor=28.0"),
         "detail must carry the failing monitor + fps + floor: {out}"
     );
 }
@@ -282,13 +282,13 @@ fn below_floor_needs_two_confirms_before_it_would_page() {
     let state = dir.join("state").to_string_lossy().into_owned();
     let gate_s = gate.to_string_lossy().into_owned();
     let probe_s = probe.to_string_lossy().into_owned();
-    let below_log = "MVFPS_LOGID:log-1\n00:00:00.000: multiview-audit: monitor=1 divisor=1 rendered_fps=9.0 target=30 floor=13.0 cx=3840 cy=2160";
+    let below_log = "MVFPS_LOGID:log-1\n00:00:00.000: multiview-audit: monitor=1 divisor=1 rendered_fps=9.0 target=30 floor=28.0 cx=3840 cy=2160";
 
     let mut env = base_env(&state, &gate_s, &probe_s);
     env.push(("FAKE_GATE_EXIT", "1"));
     env.push((
         "FAKE_GATE_OUT",
-        "FAIL monitor=1 rendered_fps=9.0 < floor=13.0",
+        "FAIL monitor=1 rendered_fps=9.0 < floor=28.0",
     ));
     env.push(("FAKE_PROBE_OUT", below_log));
 
@@ -317,7 +317,7 @@ fn healthy_pass_never_pages() {
     let state = dir.join("state").to_string_lossy().into_owned();
     let gate_s = gate.to_string_lossy().into_owned();
     let probe_s = probe.to_string_lossy().into_owned();
-    let ok_log = "MVFPS_LOGID:log-1\n00:00:00.000: multiview-audit: monitor=1 divisor=1 rendered_fps=30.0 target=30 floor=13.0 cx=3840 cy=2160";
+    let ok_log = "MVFPS_LOGID:log-1\n00:00:00.000: multiview-audit: monitor=1 divisor=1 rendered_fps=30.0 target=30 floor=28.0 cx=3840 cy=2160";
 
     let mut env = base_env(&state, &gate_s, &probe_s);
     env.push(("FAKE_GATE_EXIT", "0"));
@@ -349,18 +349,18 @@ fn an_obs_restart_between_passes_resets_the_confirm_streak() {
     env.push(("FAKE_GATE_EXIT", "1"));
     env.push((
         "FAKE_GATE_OUT",
-        "FAIL monitor=1 rendered_fps=9.0 < floor=13.0",
+        "FAIL monitor=1 rendered_fps=9.0 < floor=28.0",
     ));
 
     // Pass 1: below on log-1 (confirm -> 1).
     let mut env1 = env.clone();
-    env1.push(("FAKE_PROBE_OUT", "MVFPS_LOGID:log-1\n00: multiview-audit: monitor=1 divisor=1 rendered_fps=9.0 target=30 floor=13.0 cx=3840 cy=2160"));
+    env1.push(("FAKE_PROBE_OUT", "MVFPS_LOGID:log-1\n00: multiview-audit: monitor=1 divisor=1 rendered_fps=9.0 target=30 floor=28.0 cx=3840 cy=2160"));
     let (_r1, _o1, e1) = run_watchdog(&["--dry-run"], &env1, "main");
     assert!(!e1.contains("WOULD alert"), "pass1: {e1}");
 
     // Pass 2: below on log-2 (OBS restarted) -> restart-reset -> confirm restarts at 1 -> HOLD.
     let mut env2 = env.clone();
-    env2.push(("FAKE_PROBE_OUT", "MVFPS_LOGID:log-2\n00: multiview-audit: monitor=1 divisor=1 rendered_fps=9.0 target=30 floor=13.0 cx=3840 cy=2160"));
+    env2.push(("FAKE_PROBE_OUT", "MVFPS_LOGID:log-2\n00: multiview-audit: monitor=1 divisor=1 rendered_fps=9.0 target=30 floor=28.0 cx=3840 cy=2160"));
     let (_r2, _o2, e2) = run_watchdog(&["--dry-run"], &env2, "main");
     assert!(
         !e2.contains("WOULD alert"),
@@ -414,9 +414,9 @@ fn a_box_1001_marks_unreachable_is_skipped_never_double_paged() {
     env.push(("FAKE_GATE_EXIT", "1")); // below floor — would page if it were probed
     env.push((
         "FAKE_GATE_OUT",
-        "FAIL monitor=1 rendered_fps=9.0 < floor=13.0",
+        "FAIL monitor=1 rendered_fps=9.0 < floor=28.0",
     ));
-    env.push(("FAKE_PROBE_OUT", "MVFPS_LOGID:log-1\n00: multiview-audit: monitor=1 divisor=1 rendered_fps=9.0 target=30 floor=13.0 cx=3840 cy=2160"));
+    env.push(("FAKE_PROBE_OUT", "MVFPS_LOGID:log-1\n00: multiview-audit: monitor=1 divisor=1 rendered_fps=9.0 target=30 floor=28.0 cx=3840 cy=2160"));
 
     for _ in 0..3 {
         let (rc, _o, e) = run_watchdog(&["--dry-run"], &env, "main");
@@ -446,7 +446,7 @@ fn a_recovered_box_we_paged_for_sends_one_recovery_ping() {
 
     let mut env = base_env(&state, &gate_s, &probe_s);
     env.push(("FAKE_GATE_EXIT", "0")); // healthy -> PASS
-    env.push(("FAKE_PROBE_OUT", "MVFPS_LOGID:log-1\n00: multiview-audit: monitor=1 divisor=1 rendered_fps=30.0 target=30 floor=13.0 cx=3840 cy=2160"));
+    env.push(("FAKE_PROBE_OUT", "MVFPS_LOGID:log-1\n00: multiview-audit: monitor=1 divisor=1 rendered_fps=30.0 target=30 floor=28.0 cx=3840 cy=2160"));
 
     // Pass 1: recovered -> WOULD send recovery.
     let (_r1, _o1, e1) = run_watchdog(&["--dry-run"], &env, "main");
@@ -505,7 +505,7 @@ fn a_readable_box_whose_gate_cannot_classify_warns_tap_blind() {
     let mut env = base_env(&state, &gate_s, &probe_s);
     env.push(("MV_FPS_ALERT_TAP_BLIND_THRESHOLD", "2"));
     env.push(("FAKE_GATE_EXIT", "2")); // gate could not classify
-    env.push(("FAKE_PROBE_OUT", "MVFPS_LOGID:log-1\n00: multiview-audit: monitor=1 divisor=1 rendered_fps=30.0 target=30 floor=13.0 cx=3840 cy=2160"));
+    env.push(("FAKE_PROBE_OUT", "MVFPS_LOGID:log-1\n00: multiview-audit: monitor=1 divisor=1 rendered_fps=30.0 target=30 floor=28.0 cx=3840 cy=2160"));
 
     let (_r1, _o1, e1) = run_watchdog(&["--dry-run"], &env, "main");
     assert!(!e1.contains("tap BLIND"), "pass1 must not WARN yet:\n{e1}");
