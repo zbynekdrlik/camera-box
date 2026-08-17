@@ -195,7 +195,11 @@ fn probe_snippet_no_pause_file_reports_zero_and_exits_clean() {
     let pf = dir.path().join("absent-pause");
     let (code, out) = run_probe_snippet(pf.to_str().unwrap(), "3600");
     assert_eq!(code, 0, "probe must always exit 0; out:\n{out}");
-    assert_eq!(pause_line(&out), "0", "no pause file -> OPERATOR_PAUSE=0; out:\n{out}");
+    assert_eq!(
+        pause_line(&out),
+        "0",
+        "no pause file -> OPERATOR_PAUSE=0; out:\n{out}"
+    );
     assert!(
         out.contains("LoadState=") || out.contains("UNIT_QUERY=FAILED"),
         "must emit a unit-state or a UNIT_QUERY=FAILED line; out:\n{out}"
@@ -209,7 +213,11 @@ fn probe_snippet_fresh_pause_file_reports_one() {
     fs::write(&pf, "").expect("touch pause file"); // mtime = now
     let (code, out) = run_probe_snippet(pf.to_str().unwrap(), "3600");
     assert_eq!(code, 0, "probe must always exit 0; out:\n{out}");
-    assert_eq!(pause_line(&out), "1", "fresh pause file -> OPERATOR_PAUSE=1; out:\n{out}");
+    assert_eq!(
+        pause_line(&out),
+        "1",
+        "fresh pause file -> OPERATOR_PAUSE=1; out:\n{out}"
+    );
 }
 
 #[test]
@@ -225,7 +233,11 @@ fn probe_snippet_stale_pause_file_reports_zero() {
     assert!(touched.success(), "touch -d must succeed");
     let (code, out) = run_probe_snippet(pf.to_str().unwrap(), "60");
     assert_eq!(code, 0, "probe must always exit 0; out:\n{out}");
-    assert_eq!(pause_line(&out), "0", "stale pause file -> OPERATOR_PAUSE=0; out:\n{out}");
+    assert_eq!(
+        pause_line(&out),
+        "0",
+        "stale pause file -> OPERATOR_PAUSE=0; out:\n{out}"
+    );
 }
 
 // ================================================================================================
@@ -235,7 +247,11 @@ fn probe_snippet_stale_pause_file_reports_zero() {
 
 /// The reachability probe's remote text contains OBS_PROCESS_ABSENT + pgrep; the deliberate-down
 /// probe's remote text contains OPERATOR_PAUSE. The stub keys on that to return each reply.
-fn fake_bin_dir(reach_reply: &str, probe2_reply: &str, notify_marker: &std::path::Path) -> tempfile::TempDir {
+fn fake_bin_dir(
+    reach_reply: &str,
+    probe2_reply: &str,
+    notify_marker: &std::path::Path,
+) -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("tempdir");
 
     let sshpass = dir.path().join("sshpass");

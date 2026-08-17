@@ -70,3 +70,87 @@ imag_obs_reachability_message() {
       ;;
   esac
 }
+
+# ── #788: distinguish a DELIBERATE operator quit from a real crash (dev1-side alert path only) ──
+#
+# The RELAUNCH half of #788 is already solved by imag-obs.service (issue 882): Restart=on-failure
+# leaves a clean exit(0) alone; deliberate stops route through `systemctl --user stop`. The RESIDUAL
+# these two functions close is the dev1-side ALERT path (scripts/imag-obs-alert-watchdog.sh), which
+# used to fire "OBS is DOWN" on ANY OBS_PROCESS_ABSENT with no operator-quit discrimination -- so an
+# operator quitting OBS on purpose (to test latency) still paged the crew (the live 2026-07-16
+# incident: 4 false 'crashed' alarms). The AUTHORITATIVE discriminator is systemd's own
+# Restart=on-failure verdict on imag-obs.service: a clean quit / `systemctl stop` reads
+# `LoadState=loaded ActiveState=inactive Result=success`; a crash-loop ends `failed`. Plus a
+# time-bounded operator override file. These are used ONLY by the alert path -- NEVER by the [0/8]
+# preflight (which legitimately fails when OBS is absent for any reason, deliberate or not).
+
+# imag_obs_deliberate_down_probe_cmd [pause_file] [pause_window_s] -> prints a REMOTE bash snippet
+# (embedded via $(...) into a second ssh, same always-exit-0 command-builder shape as
+# imag_obs_reachability_probe_cmd). Run ONLY when the OBS process is ABSENT. Emits, one token per
+# line: OPERATOR_PAUSE=0|1 (the pause file exists AND its mtime is within pause_window_s), then the
+# user unit's `LoadState=`/`ActiveState=`/`Result=` (or UNIT_QUERY=FAILED if the user bus is
+# unreachable). `pause_file`/`pause_window_s` are substituted HERE at build time (unquoted heredoc);
+# every remote `$` is escaped so it survives to the box. A non-login ssh session needs
+# XDG_RUNTIME_DIR to reach the user bus (issue 998).
+imag_obs_deliberate_down_probe_cmd() {
+  local pause_file="${1:-/tmp/imag-watchdog-pause}"
+  local pause_window_s="${2:-3600}"
+  cat <<EOF
+export XDG_RUNTIME_DIR="/run/user/\$(id -u)" >/dev/null 2>&1 || true
+if [ -f "$pause_file" ]; then
+  __mt=\$(stat -c %Y "$pause_file" 2>/dev/null || echo 0)
+  __now=\$(date +%s 2>/dev/null || echo 0)
+  if [ "\$__now" -ge "\$__mt" ] && [ \$(( __now - __mt )) -le $pause_window_s ]; then
+    echo "OPERATOR_PAUSE=1"
+  else
+    echo "OPERATOR_PAUSE=0"
+  fi
+else
+  echo "OPERATOR_PAUSE=0"
+fi
+__st=\$(systemctl --user show imag-obs.service --property=LoadState,ActiveState,Result 2>/dev/null)
+if [ -n "\$__st" ]; then
+  printf '%s\n' "\$__st"
+else
+  echo "UNIT_QUERY=FAILED"
+fi
+EOF
+}
+
+# imag_obs_down_is_deliberate PROBE2_OUTPUT -> pure token classifier. Prints:
+#   deliberate=0|1
+#   reason=<short>
+# deliberate=1 (suppress the alert) iff:
+#   (a) OPERATOR_PAUSE=1 (a fresh operator override file), OR
+#   (b) LoadState=loaded AND ActiveState=inactive AND Result=success -- a clean exit(0) / operator
+#       `systemctl --user stop`, i.e. systemd's Restart=on-failure deliberately left it down.
+# Everything else -> deliberate=0 (fall through to the existing alarm): `failed`/`activating`/
+# exit-code/signal (a crash), LoadState=not-found (the live-confirmed systemd quirk: a not-found
+# unit ALSO reports inactive/success -- requiring LoadState=loaded is what stops it being misread as
+# a clean quit), UNIT_QUERY=FAILED, or empty. Fail-safe: "bez clean markera = pád -> alarm".
+# Pure: no I/O, no external command (a while-read over a herestring, so it is safe under the
+# caller's `set -euo pipefail` -- no pipe SIGPIPE, per ci-testing-gotchas.md).
+imag_obs_down_is_deliberate() {
+  local out="${1:-}"
+  case "$out" in
+    *OPERATOR_PAUSE=1*)
+      printf 'deliberate=1\nreason=operator-pause-file\n'
+      return 0
+      ;;
+  esac
+  local load="" active="" result="" __line
+  while IFS= read -r __line; do
+    case "$__line" in
+      LoadState=*)   load="${__line#LoadState=}" ;;
+      ActiveState=*) active="${__line#ActiveState=}" ;;
+      Result=*)      result="${__line#Result=}" ;;
+    esac
+  done <<<"$out"
+  if [ "$load" = "loaded" ] && [ "$active" = "inactive" ] && [ "$result" = "success" ]; then
+    printf 'deliberate=1\nreason=clean-exit imag-obs.service inactive/success (operator quit or systemctl stop)\n'
+    return 0
+  fi
+  printf 'deliberate=0\nreason=not-a-deliberate-quit (LoadState=%s ActiveState=%s Result=%s)\n' \
+    "${load:-?}" "${active:-?}" "${result:-?}"
+  return 0
+}
