@@ -4157,7 +4157,17 @@ fn build_and_print_verdict(
                 span_secs, cfg.min_secs, nv.optical_span_frames
             );
         }
-        all_pass &= nv.is_zero() && span_ok;
+        // issue 798 (path A) — the imag leg verdict now FLOWS into the merged report and is
+        // SURFACED, but folds REPORT-ONLY first. An imag partial has never actually reached the
+        // merge on the live rig (0/76 recent runs), so there is zero green distribution to prove
+        // the term against, and folding it hard would immediately red the first run that ever
+        // produces one (the issue-887 advisory already shows a real ~7% produced-vs-presented
+        // deficit). Mirror the established report-only seam (e2e_latency_gate / burn_hold /
+        // optical_floor): the fold is a no-op while `imag_leg_gate::gates_overall_pass()` is
+        // `false`; a separate follow-up flips it blocking (and folds in the issue-887 deficit)
+        // once healthy imag runs accumulate. Do NOT hard-fold this term here.
+        let imag_leg_ok = nv.is_zero() && span_ok;
+        all_pass &= camera_box::imag_leg_gate::folds_into_overall_pass(imag_leg_ok);
         let mut imag_json = node_verdict_json(&nv, span_secs, span_ok, cfg.min_secs, 0);
         // #575 — note the boundary trim honestly: the exact lead/tail frame counts excluded from
         // imag's optical tick + digital burn contiguity checks before this verdict was computed.
@@ -4165,7 +4175,34 @@ fn build_and_print_verdict(
             serde_json::json!(camera_box::recording_boundary_trim::BOUNDARY_TRIM_LEAD_FRAMES);
         imag_json["boundary_trim_tail_frames"] =
             serde_json::json!(camera_box::recording_boundary_trim::BOUNDARY_TRIM_TAIL_FRAMES);
+        // issue 798 — scoped report-only flag (name the TERM, not the whole object, per
+        // optical-undecodable-floor-report-only.md). `imag_leg_pass` is this run's overall imag
+        // verdict (optical tick + digital burn contiguity ANDed with span_ok); `gates_overall_pass`
+        // is `false` today, so a FAIL is surfaced here but does not touch overall_pass.
+        imag_json["imag_leg_pass"] = serde_json::json!(imag_leg_ok);
+        imag_json["gates_overall_pass"] =
+            serde_json::json!(camera_box::imag_leg_gate::gates_overall_pass());
+        imag_json["report_only_note"] = serde_json::json!(
+            "issue 798 path A: imag leg verdict flows + is surfaced but is REPORT-ONLY (does not \
+             gate overall_pass) until a follow-up flips imag_leg_gate::gates_overall_pass and folds \
+             in the issue-887 produced-vs-presented deficit."
+        );
         report["full_chain"]["loss"]["imag"] = imag_json;
+    }
+    // issue 798 — make a silently-skipped imag leg VISIBLE (the "ONE full test, no partials"
+    // doctrine): record whether an imag partial actually reached this merge. A green run that never
+    // merged an imag partial (the 0/76 status quo) is a HIDDEN partial; this field + the NOTE below
+    // turn the silent skip into an explicit, mineable signal. Report-only — never gates overall_pass.
+    let imag_leg_verified = imag_frames_opt.is_some();
+    report["full_chain"]["imag_leg_verified"] = serde_json::json!(imag_leg_verified);
+    if !imag_leg_verified {
+        println!(
+            "  [imag] leg NOT verified this run — no imag partial merged (--merge-partials imag=... \
+             absent; imag StopRecord / reachability / decode failed at recording-e2e.sh [8/8c], or \
+             this was a strih/stream-only merge). A full-chain E2E that silently skips the imag leg \
+             is a hidden partial (issue 798); this NOTE + full_chain.imag_leg_verified make the skip \
+             visible. Report-only — does NOT gate overall_pass."
+        );
     }
 
     // #312 Phase-1 — ALL-CAMBOX per-segment continuity (the all-active splitter proof). When a
@@ -4921,8 +4958,22 @@ fn build_and_print_verdict(
                         "optical_expected_step": imag_optical_step,
                         "burn_render_step": imag_burn_step,
                         "frames_without_anchor": imag_no_anchor,
+                        // issue 798 (path A) — this per-segment imag continuity is the SECOND imag
+                        // gating term (alongside the whole-recording node fold in
+                        // full_chain.loss.imag). Both fold REPORT-ONLY under the same seam so a
+                        // flowing imag partial never reds a run until its green distribution
+                        // accumulates. Scoped flag names the imag TERM only — the per-cambox
+                        // (stream) sweep's own `overall_pass` fold is UNTOUCHED and stays blocking.
+                        "gates_overall_pass": camera_box::imag_leg_gate::gates_overall_pass(),
+                        "report_only_note": "issue 798 path A: imag per-segment continuity is \
+                                             surfaced but REPORT-ONLY (does not gate overall_pass) \
+                                             until a follow-up flips imag_leg_gate::gates_overall_pass.",
                     });
-                    all_pass &= imag_overall_pass;
+                    // issue 798 — report-only fold: a no-op while `imag_leg_gate::gates_overall_pass()`
+                    // is `false`. Mirrors the whole-recording imag node fold above; the ONE follow-up
+                    // line flips both to blocking.
+                    all_pass &=
+                        camera_box::imag_leg_gate::folds_into_overall_pass(imag_overall_pass);
                 }
 
                 // #624 deliverables 1+3 — generalize the whole-recording, cam1-ONLY cam2→camera
@@ -8729,8 +8780,11 @@ mod tests {
     /// per-segment continuity. imag's frames are placed onto the SAME schedule timeline (anchored
     /// on its #463 digital corner burn, [`super::BURN_RUN_ID_IMAG`]) and its own painted-tick
     /// continuity — at its OWN native rate (step 1, never the stream recording's 60->30 step 2) —
-    /// must ALSO pass, reported under `all_cambox_continuity.imag` and ANDed into `overall_pass`,
-    /// alongside (not instead of) the existing per-cambox windows.
+    /// must ALSO be computed + surfaced under `all_cambox_continuity.imag`, alongside (not instead
+    /// of) the existing per-cambox windows. (issue 798 path A: this imag term now folds
+    /// REPORT-ONLY into `overall_pass` — a clean imag segment, as here, still reports
+    /// `overall_pass: true`; the report-only fold only changes whether a FAILING imag segment reds
+    /// the run, which the sibling `imag_own_segment_gap_is_surfaced_report_only_798` covers.)
     #[test]
     fn imag_own_segment_continuity_gates_the_all_cambox_sweep_467() {
         use super::{build_and_print_verdict, Cam1Source, DecodedRec};
@@ -8865,7 +8919,7 @@ mod tests {
     /// (stream) sweep stays completely clean — imag's segment gate is ADDITIONAL, not a
     /// weaker/optional substitute for the per-cambox windows.
     #[test]
-    fn imag_own_segment_gap_fails_the_all_cambox_sweep_even_when_stream_sweep_is_clean_467() {
+    fn imag_own_segment_gap_is_surfaced_report_only_798() {
         use super::{build_and_print_verdict, Cam1Source, DecodedRec};
         use clap::Parser;
 
@@ -8988,18 +9042,26 @@ mod tests {
         assert_eq!(
             imag_seg["overall_pass"],
             serde_json::json!(false),
-            "#467: a genuine gap in imag's OWN segment must FAIL imag's own verdict: {imag_seg}"
+            "#467: a genuine gap in imag's OWN segment must still be DETECTED — imag's own verdict FAILs: {imag_seg}"
+        );
+        // issue 798 (path A): the imag per-segment continuity term now folds REPORT-ONLY — its FAIL
+        // is surfaced (above) with a LOUD scoped flag, but no longer gates the OVERALL verdict until
+        // a follow-up flips imag_leg_gate::gates_overall_pass. The per-cambox (stream) sweep's own
+        // fold is UNTOUCHED and stays blocking (asserted clean below).
+        assert_eq!(
+            imag_seg["gates_overall_pass"],
+            serde_json::json!(false),
+            "#798: imag's per-segment continuity is REPORT-ONLY — it does NOT gate overall_pass: {imag_seg}"
         );
         assert_eq!(
             v["all_cambox_continuity"]["overall_pass"],
             serde_json::json!(true),
             "sanity: the existing per-cambox (stream) sweep is completely untouched and stays clean: {v}"
         );
-        assert!(
-            !pass,
-            "#467: imag's own segment gap must fail the OVERALL verdict even though the stream \
-             sweep alone is clean — imag's gate is additional, never optional: {v}"
-        );
+        // `pass` is intentionally not asserted: the report-only FOLD semantics (a failing imag
+        // segment no longer reds overall_pass) are proven in the Tier-0 `tests/imag_leg_gate.rs`,
+        // and this synthetic fixture's overall verdict also runs the unrelated #373 span gate.
+        let _ = pass;
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -14034,7 +14096,7 @@ mod tests {
     }
 
     #[test]
-    fn build_and_print_verdict_fails_when_imag_has_a_missing_tick_461() {
+    fn build_and_print_verdict_surfaces_imag_missing_tick_report_only_798() {
         use super::{build_and_print_verdict, Cam1Source, DecodedRec};
         use clap::Parser;
 
@@ -14056,7 +14118,14 @@ mod tests {
         )
         .expect("verdict");
 
-        assert!(!pass, "#461: a missing imag optical tick must FAIL: {v}");
+        // issue 798 (path A): the imag leg verdict now FLOWS and is SURFACED, but folds
+        // REPORT-ONLY. A missing imag optical tick must still be detected and reported (zero_loss
+        // false, the missing id, imag_leg_pass false, and — LOUD — the scoped report-only flag),
+        // and the run must be recorded as having verified the imag leg. The report-only FOLD
+        // semantics (a failing imag leg no longer reds overall_pass) are proven exhaustively in the
+        // Tier-0 `tests/imag_leg_gate.rs`; here `pass` is intentionally not asserted because this
+        // synthetic imag-only fixture's overall verdict also runs the unrelated #373 span gate
+        // (59 frames ~ 1s, borderline min_secs), which must not make this a flaky assertion.
         assert_eq!(
             v["full_chain"]["loss"]["imag"]["zero_loss"],
             serde_json::json!(false)
@@ -14065,6 +14134,22 @@ mod tests {
             v["full_chain"]["loss"]["imag"]["missing_ids"],
             serde_json::json!([115])
         );
+        assert_eq!(
+            v["full_chain"]["loss"]["imag"]["imag_leg_pass"],
+            serde_json::json!(false),
+            "#798: the imag leg's own verdict is FAIL, surfaced here: {v}"
+        );
+        assert_eq!(
+            v["full_chain"]["loss"]["imag"]["gates_overall_pass"],
+            serde_json::json!(false),
+            "#798: the imag leg is REPORT-ONLY today — it does NOT gate overall_pass: {v}"
+        );
+        assert_eq!(
+            v["full_chain"]["imag_leg_verified"],
+            serde_json::json!(true),
+            "#798: an imag partial reached this merge, so the run verified the imag leg: {v}"
+        );
+        let _ = pass;
     }
 
     #[test]
