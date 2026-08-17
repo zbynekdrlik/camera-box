@@ -225,7 +225,8 @@ pub mod resolume_playback;
 
 // #771 — MV fps observability: parse the vendored libobs `multiview-audit:` log line (the
 // per-projector real render cadence emitted every ~5s by render_display()) + apply the
-// canvas/2 alarm floor (byte-identical to obs_multiview_floor_fps() in obs-display-budget.h).
+// target − tol alarm floor (target = canvas/effective_divisor; byte-identical to
+// obs_multiview_floor_fps() in obs-display-budget.h, #776).
 // Pure Tier-0 (no probe/OBS/rig); the E2E-preflight / drift-guard consumer is the thin
 // `src/bin/mv-fps-gate.rs`. The receive-side NDI cadence is separate (jitter_audit above).
 pub mod mv_audit;

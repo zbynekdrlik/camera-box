@@ -41,10 +41,12 @@ of merging the PR.
 
 ## The floor — calibrated against live-measured healthy state (#1083)
 
-The floor emitted in each audit line and re-derived by the gate is `obs_multiview_floor_fps(canvas)
-= canvas/2 − MULTIVIEW_AUDIT_FLOOR_TOLERANCE_FPS` (tolerance **2.0**, `obs-display-budget.h` mirrored
-in `src/mv_audit.rs`). The #771 placeholder was **validated by measurement** (2026-08-17, ~45 min
-per box; full distribution in issue #1083's validation comment):
+The floor emitted in each audit line and read back by the gate is `obs_multiview_floor_fps(target)
+= target − MULTIVIEW_AUDIT_FLOOR_TOLERANCE_FPS` (target = canvas/effective_divisor — both boxes render
+30fps cells, so both floor at 28; tolerance **2.0**, `obs-display-budget.h` mirrored in
+`src/mv_audit.rs`; #776 retargeted it from the pre-divisor-derivation `canvas/2` model). The floor
+was **validated by measurement** (2026-08-17, ~45 min per box; full distribution in issue #1083's
+validation comment):
 
 | Box | Projector | Healthy rendered_fps | Floor | Observed collapse |
 |---|---|---|---|---|
@@ -83,7 +85,7 @@ systemctl --user daemon-reload
 #    a) both boxes healthy -> a manual pass must NOT page:
 systemctl --user start mv-fps-alert-watchdog.service ; journalctl --user -u mv-fps-alert-watchdog -n 50
 #    b) simulate a collapse: feed the gate a synthetic below-floor log for ONE box via
-#       MV_FPS_PROBE_CMD (a command printing `MVFPS_LOGID:x` + a `rendered_fps=9 … floor=13` line),
+#       MV_FPS_PROBE_CMD (a command printing `MVFPS_LOGID:x` + a `rendered_fps=9 … floor=28` line),
 #       run TWO passes -> the second must log "WOULD alert" (dry-run) with the right box + monitor.
 
 # 4. Only after both checks pass, enable the recurring timer:
@@ -99,7 +101,7 @@ systemctl --user disable --now mv-fps-alert-watchdog.timer
 - **imag** end-to-end: real ssh log read → `mv-fps-gate` → `gate exit=0 -> PASS` (no false-page on
   the healthy box). The ssh read returned the log identity + 211 `multiview-audit:` lines.
 - **strih** read shape: the `powershell -Command "$f=(gci …|last); if($f){ 'MVFPS_LOGID:'+$f.Name;
-  gc $f.FullName -Tail N }"` command returns the log id + audit lines (`rendered_fps=30.0 floor=13.0`).
+  gc $f.FullName -Tail N }"` command returns the log id + audit lines (`rendered_fps=30.0 floor=28.0`).
   The ssh transport is the same `sshpass … ssh` pattern `frozen-input-alert-watchdog` uses live.
 
 ## Tunables (env, override in the unit or environment.d)
