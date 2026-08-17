@@ -61,6 +61,12 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # --check-imag power-envelope facet below runs the IDENTICAL verdict instead of a driftable copy.
 # shellcheck source=scripts/lib/imag-power-envelope.sh
 . "$HERE/lib/imag-power-envelope.sh"
+# scripts/lib/imag-display-path.sh is sourced ONLY for its pure functions
+# (imag_display_path_verdict + imag_display_path_gather_remote_snippet, #780) — same extraction
+# discipline as timesync-authority.sh / imag-power-envelope.sh, SHARED with the E2E [0/8] preflight
+# so the --check-imag display-path facet below runs the IDENTICAL verdict instead of a driftable copy.
+# shellcheck source=scripts/lib/imag-display-path.sh
+. "$HERE/lib/imag-display-path.sh"
 
 DEFAULT_README="vendor/README.md"
 
@@ -768,6 +774,10 @@ check_imag_report() {
   # default-empty, SAME backward-compatible convention. An unread/unsupplied block reads UNKNOWN
   # (never a false DRIFT for a mere SSH hiccup), exactly like every other two-tier check here.
   local obs_power_envelope="${13:-}" exp_power_pl1_w="${14:-}"
+  # #780: optional 15th (display-path gather block) — default-empty, SAME backward-compatible
+  # convention. An unread/unsupplied block reads UNKNOWN per facet in check #10 (never a false
+  # DRIFT for a mere SSH hiccup), exactly like every two-tier check here.
+  local obs_display_path="${15:-}"
   local drift=0 unknown=0
 
   # 1. distroav.so hash (the Linux plugin binary itself, not just the marker file).
@@ -946,6 +956,31 @@ check_imag_report() {
     done <<< "$(imag_power_envelope_verdict "$obs_power_envelope" "$exp_power_pl1_w")"
   fi
 
+  # 10. display-path config (#780) — picom OFF, its autostart masked/absent, the #841 iGPU
+  # max-freq pin (imag-igpu-maxperf.service enabled+active + gt_min_freq pinned to gt_RP0 — the
+  # Intel GPUPowerMizerMode=1 counterpart), and the #779 touchpad tap conf. Runs the SHARED
+  # imag_display_path_verdict (scripts/lib/imag-display-path.sh) over the gathered block, mapping
+  # each per-facet OK/DRIFT/UNKNOWN into this function's own report rows + exit-code contract.
+  # Two-tier, same as every check above: an EMPTY gathered block (SSH hiccup / not read) is UNKNOWN
+  # per facet, never a false DRIFT; a MISSING pgrep on the box is UNKNOWN by name (#833), never a
+  # false "picom not running = OK". NVIDIA-era ForceFullCompositionPipeline is intentionally absent
+  # (obsolete-by-hardware: the box is Intel-only, no FFCP — #816/#841; see the #780 design comment).
+  if [ -z "$obs_display_path" ]; then
+    printf '  %-22s UNKNOWN  (display-path state not read on imag-nb)\n' "display_path"
+    unknown=$((unknown + 1))
+  else
+    local dp_facet dp_status dp_detail dp_line
+    while IFS='|' read -r dp_facet dp_status dp_detail; do
+      [ -n "$dp_facet" ] || continue
+      dp_line="display_path/${dp_facet}"
+      case "$dp_status" in
+        OK)      printf '  %-22s OK       (%s)\n' "$dp_line" "$dp_detail" ;;
+        DRIFT)   printf '  %-22s DRIFT    (%s)\n' "$dp_line" "$dp_detail"; drift=$((drift + 1)) ;;
+        *)       printf '  %-22s UNKNOWN  (%s)\n' "$dp_line" "$dp_detail"; unknown=$((unknown + 1)) ;;
+      esac
+    done <<< "$(imag_display_path_verdict "$obs_display_path")"
+  fi
+
   [ "$drift" -gt 0 ] && return 20
   [ "$unknown" -gt 0 ] && return 11
   return 0
@@ -1015,7 +1050,7 @@ gather_and_check_imag() {
   exp_power_pl1_w="$(pinned_setting "$readme" power_pl1_w_imag)"
 
   local obs_build_sha obs_distroav_sha obs_log obs_fps obs_latency plugin_present obs_dantesync_log
-  local obs_timesync_states obs_power_envelope
+  local obs_timesync_states obs_power_envelope obs_display_path
   obs_build_sha="$("${ssh_cmd[@]}" \
     'cat /opt/obs-genlock/GENLOCK_BUILD_SHA.txt 2>/dev/null' 2>/dev/null || true)"
   # #531: DYNAMIC genlock-build staleness — compare the box's deployed GENLOCK_BUILD_SHA.txt against
@@ -1108,6 +1143,11 @@ gather_and_check_imag() {
   # (same convention as every gather above) keeps an SSH failure from aborting the script — an empty
   # block reads as UNKNOWN per facet in check_imag_report's check #9, never a false DRIFT.
   obs_power_envelope="$("${ssh_cmd[@]}" "$(imag_power_envelope_gather_remote_snippet)" 2>/dev/null || true)"
+  # #780: gather the display-path state in ONE SSH call via the SHARED
+  # imag_display_path_gather_remote_snippet (scripts/lib/imag-display-path.sh) — the SAME block the
+  # E2E [0/8] preflight gathers. `|| true` (same convention as every gather above) keeps an SSH
+  # failure from aborting the script — an empty block reads as UNKNOWN per facet in check #10.
+  obs_display_path="$("${ssh_cmd[@]}" "$(imag_display_path_gather_remote_snippet)" 2>/dev/null || true)"
 
   echo "== drift-guard --check-imag  host=${host}  (SSH-gathered + git-compared; FAILS loudly on drift) =="
   # #531: the DYNAMIC genlock-build staleness check (box vs origin/main's vendored-genlock HEAD)
@@ -1122,10 +1162,12 @@ gather_and_check_imag() {
   # gathered block — check_imag_report derives the ok/DRIFT/UNKNOWN verdict itself.
   # #1040: `$obs_power_envelope` (13th) is the RAW gathered block + `$exp_power_pl1_w` (14th) the
   # pinned watts — check_imag_report's check #9 derives the per-facet ok/DRIFT/UNKNOWN verdict itself.
+  # #780: `$obs_display_path` (15th) is the RAW display-path gathered block — check_imag_report's
+  # check #10 derives the per-facet ok/DRIFT/UNKNOWN verdict itself.
   check_imag_report "$exp_distroav_sha" "$obs_distroav_sha" \
     "$exp_fps" "$obs_fps" "$exp_latency" "$obs_latency" "$obs_log" "$plugin_path" "$plugin_present" \
     "$exp_dantesync_locked" "$obs_dantesync_log" "$obs_timesync_states" \
-    "$obs_power_envelope" "$exp_power_pl1_w" || rc_report=$?
+    "$obs_power_envelope" "$exp_power_pl1_w" "$obs_display_path" || rc_report=$?
   # Combine the two facets' exit codes into the engine's single contract: DRIFT (20) dominates, then
   # UNKNOWN (11), else clean (0). A STALE build FAILS LOUD even when every live-state pin is clean.
   if [ "$rc_build" -eq 20 ] || [ "$rc_report" -eq 20 ]; then return 20; fi

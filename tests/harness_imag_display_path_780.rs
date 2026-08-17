@@ -91,8 +91,17 @@ fn verdict_emits_one_row_per_facet_780() {
              MAXPERF_ENABLED|enabled\nMAXPERF_ACTIVE|active\n\
              TAPCONF|present\nTAPCONF_TAPPING|on";
     let lines = verdict(g);
-    for f in ["picom_process", "picom_autostart", "igpu_maxperf", "tap_conf"] {
-        assert_eq!(status_of(&lines, f), "OK", "facet {f} on a clean gather: {lines:?}");
+    for f in [
+        "picom_process",
+        "picom_autostart",
+        "igpu_maxperf",
+        "tap_conf",
+    ] {
+        assert_eq!(
+            status_of(&lines, f),
+            "OK",
+            "facet {f} on a clean gather: {lines:?}"
+        );
     }
 }
 
@@ -117,8 +126,14 @@ fn picom_process_unknown_when_pgrep_missing_never_a_false_ok_780() {
     // #833: a missing tool must fail loud BY NAME, never read as a measured "not running = OK".
     let lines = verdict("PICOM_PGREP|missing");
     let l = facet_line(&lines, "picom_process");
-    assert!(l.contains("|UNKNOWN|"), "missing pgrep must be UNKNOWN, not OK: {l}");
-    assert!(l.to_lowercase().contains("pgrep"), "must name the missing tool: {l}");
+    assert!(
+        l.contains("|UNKNOWN|"),
+        "missing pgrep must be UNKNOWN, not OK: {l}"
+    );
+    assert!(
+        l.to_lowercase().contains("pgrep"),
+        "must name the missing tool: {l}"
+    );
 }
 
 #[test]
@@ -232,7 +247,10 @@ fn tap_conf_unknown_when_not_gathered_780() {
 fn gather_remote_snippet_is_nonempty_and_names_the_sources_780() {
     let (rc, out) = run_sourced("imag_display_path_gather_remote_snippet");
     assert_eq!(rc, 0, "gather snippet must exit 0");
-    assert!(out.contains("pgrep"), "snippet must probe picom via pgrep: {out}");
+    assert!(
+        out.contains("pgrep"),
+        "snippet must probe picom via pgrep: {out}"
+    );
     assert!(out.contains("picom"), "snippet must reference picom");
     assert!(
         out.contains("imag-igpu-maxperf.service"),
@@ -248,5 +266,8 @@ fn gather_remote_snippet_is_nonempty_and_names_the_sources_780() {
     );
     // #833 discipline: the snippet must emit a pgrep-presence marker, so a missing pgrep can be
     // told apart from a genuinely-idle picom.
-    assert!(out.contains("PICOM_PGREP"), "snippet must emit a pgrep-presence marker");
+    assert!(
+        out.contains("PICOM_PGREP"),
+        "snippet must emit a pgrep-presence marker"
+    );
 }

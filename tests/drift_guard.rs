@@ -3094,17 +3094,20 @@ fn check_imag_report_clean_when_every_value_matches_the_pinned_set_463() {
     let log = format!("genlock: latency = 3 ms\n{GENLOCK_RT_PIN_OK_LINE}");
     let body = r#"
         rc=0
-        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "$LOG" "/usr/lib/x86_64-linux-gnu/obs-plugins/distroav.so" "1" "locked" "Jul 05 10:15:22 imag-nb dantesync[1234]: [PTP] LOCK Drift 12 ns/s offset -340ns" "$TS_STATES" "$POWER" "29" || rc=$?
+        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "$LOG" "/usr/lib/x86_64-linux-gnu/obs-plugins/distroav.so" "1" "locked" "Jul 05 10:15:22 imag-nb dantesync[1234]: [PTP] LOCK Drift 12 ns/s offset -340ns" "$TS_STATES" "$POWER" "29" "$DP" || rc=$?
         echo "RC=$rc"
     "#;
     // #1040: the 13th/14th args are a clean power-envelope block + the pinned 29 W — must ALSO read
     // clean, or this "everything matches" case regresses to UNKNOWN on the new power_envelope check.
+    // #780: the 15th arg is a clean display-path block — same reason, or this case regresses to
+    // UNKNOWN on the new display_path check #10.
     let out = run_sourced(
         body,
         &[
             ("LOG", &log),
             ("TS_STATES", TIMESYNC_STATES_CLEAN_FIXTURE),
             ("POWER", POWER_GATHER_CLEAN_29W),
+            ("DP", DISPLAY_PATH_GATHER_CLEAN),
         ],
     );
     assert!(
@@ -3310,6 +3313,117 @@ fn check_imag_report_power_envelope_unknown_when_not_gathered_backward_compat_10
     assert!(
         line.contains("UNKNOWN"),
         "an unread power-envelope block must report UNKNOWN, never a false DRIFT: {line:?}"
+    );
+}
+
+// #780: check_imag_report's check #10 — the display-path facet (picom OFF, autostart masked/absent,
+// the #841 iGPU max-freq pin, the #779 tap conf) — passed as the 15th (optional) arg. A clean gather
+// is OK; picom running / a lost tap conf is DRIFT (exit 20); an unread block is UNKNOWN, never a
+// false DRIFT (backward-compat with 9..14-arg call sites).
+const DISPLAY_PATH_GATHER_CLEAN: &str = "\
+PICOM_PGREP|ok
+PICOM_PROC|
+PICOM_AUTOSTART|absent
+MAXPERF_APPLICABLE|1
+MAXPERF_MIN|1400
+MAXPERF_RP0|1400
+MAXPERF_ENABLED|enabled
+MAXPERF_ACTIVE|active
+TAPCONF|present
+TAPCONF_TAPPING|on
+";
+
+#[test]
+fn check_imag_report_display_path_ok_when_every_facet_clean_780() {
+    let body = r#"
+        rc=0
+        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "genlock: latency = 3 ms" "/plugin/path" "1" "" "" "" "" "" "$DP" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[("DP", DISPLAY_PATH_GATHER_CLEAN)]);
+    let dp_rows: Vec<&str> = out
+        .lines()
+        .filter(|l| l.contains("display_path/"))
+        .collect();
+    assert!(
+        dp_rows.len() == 4,
+        "expected picom_process/picom_autostart/igpu_maxperf/tap_conf rows: {out:?}"
+    );
+    for l in &dp_rows {
+        assert!(
+            l.contains("OK"),
+            "every display_path row must read OK on a clean gather: {l:?}"
+        );
+    }
+}
+
+#[test]
+fn check_imag_report_display_path_drift_when_picom_running_780() {
+    // A compositor breaks the tear-free direct scanout — a genuine display-path DRIFT (exit 20).
+    let running = DISPLAY_PATH_GATHER_CLEAN.replace("PICOM_PROC|", "PICOM_PROC|4711");
+    let body = r#"
+        rc=0
+        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "genlock: latency = 3 ms" "/plugin/path" "1" "" "" "" "" "" "$DP" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[("DP", &running)]);
+    assert!(
+        out.contains("RC=20"),
+        "picom running must DRIFT (exit 20): {out:?}"
+    );
+    let line = out
+        .lines()
+        .find(|l| l.contains("display_path/picom_process"))
+        .unwrap_or_else(|| panic!("no picom_process row printed: {out:?}"));
+    assert!(
+        line.contains("DRIFT") && line.contains("4711"),
+        "picom_process must DRIFT naming the pid: {line:?}"
+    );
+}
+
+#[test]
+fn check_imag_report_display_path_drift_when_tap_conf_gone_780() {
+    // #779 tap conf removed — a gathered-but-absent conf is a real DRIFT, not an SSH-hiccup UNKNOWN.
+    let gone = "PICOM_PGREP|ok\nPICOM_PROC|\nPICOM_AUTOSTART|absent\n\
+                MAXPERF_APPLICABLE|1\nMAXPERF_MIN|1400\nMAXPERF_RP0|1400\n\
+                MAXPERF_ENABLED|enabled\nMAXPERF_ACTIVE|active\nTAPCONF|absent";
+    let body = r#"
+        rc=0
+        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "genlock: latency = 3 ms" "/plugin/path" "1" "" "" "" "" "" "$DP" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[("DP", gone)]);
+    assert!(
+        out.contains("RC=20"),
+        "a lost tap conf must DRIFT (exit 20): {out:?}"
+    );
+    let line = out
+        .lines()
+        .find(|l| l.contains("display_path/tap_conf"))
+        .unwrap_or_else(|| panic!("no tap_conf row printed: {out:?}"));
+    assert!(
+        line.contains("DRIFT"),
+        "tap_conf must DRIFT when the conf is gone: {line:?}"
+    );
+}
+
+#[test]
+fn check_imag_report_display_path_unknown_when_not_gathered_backward_compat_780() {
+    // Old 9..14-arg call sites (no display-path gather block) must still get a graceful UNKNOWN
+    // display_path row — never an `unbound variable` crash under set -u nor a false DRIFT.
+    let body = r#"
+        rc=0
+        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "genlock: latency = 3 ms" "/plugin/path" "1" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[]);
+    let line = out
+        .lines()
+        .find(|l| l.contains("display_path"))
+        .unwrap_or_else(|| panic!("no display_path row printed on a 9-arg call: {out:?}"));
+    assert!(
+        line.contains("UNKNOWN"),
+        "an unread display-path block must report UNKNOWN, never a false DRIFT: {line:?}"
     );
 }
 
@@ -3524,10 +3638,11 @@ fn check_imag_report_end_to_end_from_a_realistic_imag_log_463() {
         fps="$(fps_from_log "$LOG")"
         latency="$(genlock_latency_ms_from_log "$LOG")"
         rc=0
-        check_imag_report "DSHA_A" "DSHA_A" "60" "$fps" "3" "$latency" "$LOG" "/plugin/path" "1" "locked" "$DANTESYNC_LOG" "$TS_STATES" "$POWER" "29" || rc=$?
+        check_imag_report "DSHA_A" "DSHA_A" "60" "$fps" "3" "$latency" "$LOG" "/plugin/path" "1" "locked" "$DANTESYNC_LOG" "$TS_STATES" "$POWER" "29" "$DP" || rc=$?
         echo "RC=$rc"
     "#;
     // #1040: a clean power-envelope block + pinned 29 W keeps this end-to-end case fully clean.
+    // #780: a clean display-path block (15th) keeps it clean on the new display_path check #10.
     let out = run_sourced(
         body,
         &[
@@ -3535,6 +3650,7 @@ fn check_imag_report_end_to_end_from_a_realistic_imag_log_463() {
             ("DANTESYNC_LOG", DANTESYNC_LOG_LOCKED_FIXTURE),
             ("TS_STATES", TIMESYNC_STATES_CLEAN_FIXTURE),
             ("POWER", POWER_GATHER_CLEAN_29W),
+            ("DP", DISPLAY_PATH_GATHER_CLEAN),
         ],
     );
     assert!(
@@ -3632,10 +3748,11 @@ fn check_imag_report_dantesync_lock_ok_when_locked_and_pinned_489() {
     let log = format!("genlock: latency = 3 ms\n{GENLOCK_RT_PIN_OK_LINE}");
     let body = r#"
         rc=0
-        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "$LOG" "/plugin/path" "1" "locked" "$DANTESYNC_LOG" "$TS_STATES" "$POWER" "29" || rc=$?
+        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "$LOG" "/plugin/path" "1" "locked" "$DANTESYNC_LOG" "$TS_STATES" "$POWER" "29" "$DP" || rc=$?
         echo "RC=$rc"
     "#;
     // #1040: a clean power-envelope block + pinned 29 W keeps this "everything else clean" case clean.
+    // #780: a clean display-path block (15th) keeps it clean on the new display_path check #10.
     let out = run_sourced(
         body,
         &[
@@ -3643,6 +3760,7 @@ fn check_imag_report_dantesync_lock_ok_when_locked_and_pinned_489() {
             ("DANTESYNC_LOG", DANTESYNC_LOG_LOCKED_FIXTURE),
             ("TS_STATES", TIMESYNC_STATES_CLEAN_FIXTURE),
             ("POWER", POWER_GATHER_CLEAN_29W),
+            ("DP", DISPLAY_PATH_GATHER_CLEAN),
         ],
     );
     assert!(out.contains("RC=0"), "locked matches pin -> clean: {out:?}");
