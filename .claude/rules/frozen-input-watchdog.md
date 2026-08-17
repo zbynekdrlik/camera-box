@@ -3,6 +3,7 @@ paths:
   - "scripts/frozen-input-alert-watchdog.sh"
   - "scripts/lib/frozen-input-health.sh"
   - "systemd/frozen-input-alert-watchdog.*"
+  - "systemd/frozen-strih-input-alert-watchdog.*"
 ---
 
 # stream FROZEN-INPUT alert watchdog (#1052 — network-reach watchdog PHASE 2)
@@ -90,3 +91,69 @@ Install on dev1 like the siblings: `systemctl --user enable --now frozen-input-a
 (units in `systemd/`). Runs entirely dev1-side (one ssh log read to the reachable stream box);
 nothing new is deployed to strih/stream. Smoke-test with
 `FROZEN_INPUT_PROBE_CMD=<stub> scripts/frozen-input-alert-watchdog.sh --dry-run`.
+
+## #1069 — the STRIH cambox-INPUT instance (SAME script, ENUMERATE mode)
+
+The #1052 watchdog above watches the STREAM box + only `NDI 2ME PGM`. A wedged strih DistroAV
+receiver (issue-1096: `genlock-fifo audit 'NDI camN': received=` FROZEN — the line KEEPS printing
+with a stuck value — while strih keeps compositing the frozen frame into program) is a DIFFERENT
+hop that #1052 / #1001 / #391 are all blind to. #1069 closes it with a SECOND INSTANCE of the SAME
+`frozen-input-alert-watchdog.sh` (`systemd/frozen-strih-input-alert-watchdog.{service,timer}`),
+NOT a duplicate script — set via env:
+
+- `FROZEN_INPUT_RECEIVER=strih|10.77.9.202` + `FROZEN_INPUT_SENDER=strih` — read strih's OBS log;
+  the no-double-page guard keys on strih (#1001 does not track the cambox senders).
+- `FROZEN_INPUT_ENUMERATE=1` — derive the watched cambox set from the live OBS log EACH PASS (never
+  a static cam-number list; the set moves with `CAMERA_ACTIVE_SET` / provisioning). The rig-verified
+  cambox labels are `NDI cam1`..`NDI camN`; `NDI 2ME PGM (mv)` / `NDI 2ME PVW` are the program /
+  preview feeds and are excluded. Enumeration self-filters to the EXPECTED-LIVE set: a source only
+  prints an audit line while OBS receives it, and a WEDGED receiver KEEPS printing the line with a
+  stuck `received=` (#1096) so a frozen input stays enumerated → the classify flags it FROZEN, while
+  a legitimately-removed source simply drops out (no false page).
+- `FROZEN_INPUT_ALERT_TAG=#1069` + a strih-OBS-restart `FROZEN_INPUT_CURE_HINT` — ALERT-ONLY (the
+  ticket asks for an alarm, not auto-restart): the cure is EMBEDDED in the alert text (obs-liveness
+  #391 convention). A wedged strih receiver only recovers via an OBS restart — reattach / recv-rebuild
+  are ineffective (#1096).
+- A distinct `FROZEN_INPUT_ALERT_STATE_FILE` (so the two instances' per-source + enum-blind state
+  never collide), while the #1001 no-double-page state file stays the SHARED default.
+
+### Reuse, never re-implement (the round-24 building blocks)
+
+- The received=-DELTA verdict = the SAME `frozen_input_classify` the #1052 stream instance uses (the
+  4-way FROZEN/ADVANCING/UNKNOWN/SKIP with the expected_live + sender_reachable gates). NOT a second
+  delta impl — `mv_reverify_wedge_verdict` (#1093, WEDGE/NO_WEDGE binary) is the E2E-harness sibling
+  of the SAME concept; the watchdog reuses the gated classify because the alert framework consumes it.
+- The strih OBS-log RAW read (for enumeration) reuses `mv_reverify_probe_raw`
+  (`scripts/lib/mv-reverify-escalate.sh`, #1093) — the flat session-agnostic `sshpass … powershell …
+  -Tail` tail — NOT a third ssh-tail. Per-source `received=` reads keep the #1052 `probe_received`
+  (already reads the RECEIVER box's log = strih here). Both overridable (`FROZEN_INPUT_ENUMERATE_CMD`
+  / `FROZEN_INPUT_PROBE_CMD`) for the Tier-0 stubbed end-to-end test.
+
+### The enumeration filter + the fail-loud blind guard
+
+- Pure `frozen_input_cambox_sources [include_regex] [exclude_regex]` in
+  `scripts/lib/frozen-input-health.sh` (defaults `cam` / `2me|pgm|pvw|multiview|preview|program`,
+  case-insensitive; `|| true` makes "no match" a normal exit-0, not a pipefail failure — callers key
+  on the empty OUTPUT). Tier-0 tested in `tests/harness_frozen_input_enum_1069.rs` (the pure filter +
+  the whole watchdog ENUMERATE pass end-to-end with stubbed I/O).
+- A failed/empty enumeration is NEVER a silent green (burn-target FAIL-CLOSED + rig-degradation
+  rule): `enumerate_and_guard` counts consecutive-ZERO-source passes (only when the receiver is
+  reachable) and fires ONE fail-loud "enumeration blind" WARN past `FROZEN_INPUT_ENUM_BLIND_THRESHOLD`
+  (~2h), latched, reset the moment a real enumeration returns. The per-source tap-broken WARN (#1052)
+  still covers a single source whose audit line vanishes while others enumerate.
+
+### Install
+
+`systemctl --user enable --now frozen-strih-input-alert-watchdog.timer` (units in `systemd/`; 5-min
+cadence, offset from the #1052 stream instance). Dev1-side only; nothing deployed to strih. Smoke-test:
+`FROZEN_INPUT_ENUMERATE=1 FROZEN_INPUT_RECEIVER='strih|10.77.9.202' FROZEN_INPUT_SENDER=strih FROZEN_INPUT_ALERT_TAG='#1069' FROZEN_INPUT_ENUMERATE_CMD=<stub-prints-raw-log> FROZEN_INPUT_PROBE_CMD=<stub> scripts/frozen-input-alert-watchdog.sh --dry-run`.
+
+### bash quoting traps hit while building this (both cost a live debug loop)
+
+- An apostrophe inside a `"${VAR:-default}"` default OPENS a single-quote context even within double
+  quotes (`"${X:-a source's b}"` → `unexpected EOF looking for matching '`) — the parser then drifts
+  and reports the syntax error at a much later `(`/line. Phrase env-default strings WITHOUT an
+  apostrophe (`"the OBS receiver for the frozen source"`, not `"the frozen source's OBS receiver"`).
+- A grep-filter pipeline exits 1 on "no match"; under `set -o pipefail` that fails the whole pipeline.
+  A pure text FILTER whose empty result is a NORMAL outcome must end `|| true` so callers under
+  pipefail (and the pure-fn test) do not read "nothing matched" as an error.

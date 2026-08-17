@@ -9051,3 +9051,29 @@ No push/PR/rig touch (worktree worker).
 - Fleet note: isolated `git worktree` (worktree-1093-preflight); Tier-0 targeted tests only (23/23
   own + 19 recording-e2e.sh anchor-reader binaries green; fmt+clippy clean). The LIVE strih-OBS
   restart is UNVERIFIED at Tier-0 — flagged for the supervisor's integration/E2E run.
+
+## 2026-08-17 — #1069: frozen strih cambox INPUT has no dev1 alarm
+
+- Root cause: a strih DistroAV receiver wedge freezes a cambox input's `genlock-fifo audit
+  'NDI camN': received=` (line keeps printing, counter stuck) while strih keeps compositing the
+  frozen frame (issue-1096 live class). No dev1 watchdog read strih's per-cambox counters — #1052
+  watches STREAM + only `NDI 2ME PGM`; #1001/#391 blind to a per-input receiver freeze.
+- Fix: a dynamic-enumeration MODE (`FROZEN_INPUT_ENUMERATE=1`) added to the SHARED
+  `frozen-input-alert-watchdog.sh` + a strih instance
+  (`systemd/frozen-strih-input-alert-watchdog.{service,timer}`), ALERT-ONLY (strih-OBS-restart cure
+  embedded in the alert text, obs-liveness #391 convention). Reuses `frozen_input_classify` (no 2nd
+  delta) + `mv_reverify_probe_raw` (no 3rd ssh-tail) + the shared confirm/throttle + #1001
+  no-double-page. New surface: pure `frozen_input_cambox_sources` filter (dynamic, program/preview
+  feeds excluded, `NDI cam1`..`NDI camN` rig-verified) + a fail-loud enumeration-blind WARN.
+- Commits: `6b1fc4a3d` bump dev.469 · `522eb1c9b` RED · `33ddc4d90` GREEN · `8b9725717` review-fix · + this docs commit.
+- Tests (Tier-0, --no-run + run binary directly): `harness_frozen_input_enum_1069` 6/6;
+  `harness_frozen_input_health_1052` 11/11 (unchanged); `harness_mv_reverify_escalate_1093` 24/24;
+  shellcheck clean; stream-instance dry-run byte-preserved; strih-instance dry-run enumerates
+  `NDI cam1..N`, excludes `NDI 2ME PGM (mv)`/`NDI 2ME PVW`.
+- bash traps that cost a debug loop: apostrophe inside `"${VAR:-default}"` opens a single-quote
+  context (syntax error reported far later); a grep-filter pipeline exits 1 on no-match → `|| true`
+  so pipefail callers don't read "no cambox sources" as an error. Both in the playbook rule now.
+- UNVERIFIED at Tier-0: the LIVE dev1→strih ssh OBS-log read + a REAL wedge page (no rig wedge to
+  reproduce) — the supervisor's integration/install can smoke-test with `--dry-run` against strih.
+- Fleet note: isolated `git worktree` (worktree-1069-frozeninput); ALERT-ONLY by design (auto-restart
+  of strih OBS deliberately NOT built — the ticket asks for an alarm; auto-restart is #1093/#1096 scope).
