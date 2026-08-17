@@ -124,6 +124,13 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # a failed restore leaves the (now periodic ~5-min) dead-man armed to self-heal.
 # shellcheck source=scripts/lib/cam2-painter-restore-retry.sh
 . "$HERE/lib/cam2-painter-restore-retry.sh"
+# #1093: ORDERING PROOF (cam2-painter must be PAINTING before the cam-pixel probe -- cam1's picture
+# IS the painter's HDMI) + RECEIVER-WEDGE ESCALATION (issue 1096: strih's DistroAV never re-locks
+# after a sender bounce -> restart strih OBS once, re-check once). All logic lives in the lib; this
+# script gains only the source line, one painter-up wait before cam1's probe, and two call-site
+# swaps (preflight_mv_reverify -> mv_reverify_or_escalate at the deploy sites; the #675 pattern).
+# shellcheck source=scripts/lib/mv-reverify-escalate.sh
+. "$HERE/lib/mv-reverify-escalate.sh"
 # #860: the SHARED pure optical-chain decision core + its [0/8] preflight fail-fast (the #675
 # sourced-lib pattern -- the preflight is invoked with ONE line below, no anchored line edited).
 # shellcheck source=scripts/lib/optical-chain-health.sh
@@ -1867,7 +1874,12 @@ sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no root@"$CAM1_IP" \
      --setenv=CAMERA_BOX_CAPTURE_STATS=/tmp/cam1-capture-stats.txt --setenv=NDI_RUNTIME_DIR_V6=/usr/lib/ndi \
      $CAM1_BURN_BIN"
 sleep 4  # let $CAMERA_NAME's NDI sender (with the burn) become discoverable
-preflight_mv_reverify "$CAMERA_NAME" "${CAMERA_NAME#cam}" || exit 1
+# #1093 (a): cam1's picture is cam2-painter's HDMI, so prove the painter is genuinely PAINTING
+# before the cam-pixel probe -- a mid-restart painter must not read as a false dead leg (ordering,
+# not a longer blind window). ONCE, here only: the ALL_CAMBOX loop below runs while the painter is
+# deliberately stopped ([2b/8] -> [3/8]), so it must not wait on it. WARN-only (never blocks).
+mv_reverify_painter_up_wait "$CAM_PW" "$PAINTER_IP"
+mv_reverify_or_escalate "$CAMERA_NAME" "${CAMERA_NAME#cam}" || exit 1
 
 # #624/#312: the ALL_CAMBOX sweep also cuts cam2/cam3/cam4 into strih program —
 # without their OWN capture-burn deployed the SAME way as cam1 above, recording-verdict's
@@ -1936,7 +1948,9 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
   # sleep above (a SEPARATE pass over the same box list, so the settle timing above is unchanged).
   for _cn_ip_burn in "${CAMBOX_SECONDARY_DEPLOY[@]}"; do
     _cn="${_cn_ip_burn%%=*}"
-    preflight_mv_reverify "$_cn" "${_cn#cam}" || exit 1
+    # #1093 (b): a wedged strih receiver here (issue 1096, cam2/cam3 legs too) escalates to the ONE
+    # per-run strih-OBS restart + a single re-check; no painter-up wait (the painter is stopped now).
+    mv_reverify_or_escalate "$_cn" "${_cn#cam}" || exit 1
   done
 fi
 
