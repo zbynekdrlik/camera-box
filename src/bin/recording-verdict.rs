@@ -3720,10 +3720,12 @@ fn build_and_print_verdict(
                 // camera-under-test node: cam1/cam3/… loss is read from the CLEAN strih recording
                 // (`cam1_source`), but `hold` is deliberately the stream recording (the delivered,
                 // viewer-facing surface) even under the same `full_chain.loss.<node>.hold` key.
-                // The pure decision core is `camera_box::burn_hold`; it is REPORT-ONLY today
-                // (`burn_hold::gates_overall_pass() == false`) — the metric now accumulates in the
-                // verdict JSON, and the fold below is a one-line LIVE flip once #870's follow-up
-                // confirms the bound against accumulated green runs.
+                // The pure decision core is `camera_box::burn_hold`; it is LIVE today
+                // (`burn_hold::gates_overall_pass() == true`) — the calibrated max-hold bound folds
+                // into `overall_pass`, so a hop that re-delivers one burn id past the bound FAILS
+                // the run. Flipped LIVE (#870) after its green-run distribution accumulated (worst
+                // green max_hold 2, bound 4, incl. cam1/issue-909); the fold below is a one-line
+                // revert to report-only if a future rig change ever trips it.
                 let hold = camera_box::burn_hold::burn_hold_distribution(
                     spec.node,
                     &burn_ids_with_frame_index_in(stream_frames, spec.burn_run_id),
@@ -3748,7 +3750,7 @@ fn build_and_print_verdict(
                     println!(
                         "  [{}] #870 REPEAT/max-hold: burn id {} held for {} consecutive recorded \
                          frames (> bound {}); {:.1}% of adjacent pairs byte-identical ({}/{}). \
-                         REPORT-ONLY — does not fail the run yet.",
+                         LIVE (#870) — this FAILS the run.",
                         spec.node,
                         hold.max_hold_id
                             .map(|id| id.to_string())
@@ -3760,8 +3762,9 @@ fn build_and_print_verdict(
                         hold.adjacent_pairs,
                     );
                 }
-                // Report-only fold — a no-op while `gates_overall_pass()` is `false`; the ONE line
-                // that promotes the term to LIVE (#870 follow-up).
+                // LIVE fold (#870) — `gates_overall_pass()` is `true`, so an over-bound hold clears
+                // `all_pass` and FAILS the run. Flip the seam back to `false` for a one-line revert
+                // to report-only.
                 all_pass &= hold_within || !camera_box::burn_hold::gates_overall_pass();
                 node_verdicts.push(nv);
             }

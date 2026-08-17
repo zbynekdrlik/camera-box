@@ -31,15 +31,17 @@
 //! [`crate::imag_tick_gate::IMAG_OPTICAL_MAX_STUCK_RUN`] (3 Δ0-pairs = 4 frames), the sibling
 //! run-length gate for the imag OPTICAL tick — this module is its per-hop NODE-BURN counterpart.
 //!
-//! ## Report-only today (issue 870)
+//! ## LIVE today (issue 870)
 //!
-//! [`gates_overall_pass`] returns `false`: the term is fully computed and serialized into the
-//! verdict JSON (`full_chain.loss.<node>.hold.*`) but does NOT fold into `overall_pass` yet. Per
-//! `verdict-gate-seam-calibration.md` §5 a LIVE flip needs the field's green-run distribution
-//! mined and proven to pass every recent green run with margin AND survive the cam1-grabber defect
-//! (issue 909); `max_hold_frames` is a brand-new field absent from every existing verdict JSON, so
-//! that proof cannot be assembled today. Flip to `true` (a one-line revert) once accumulated green
-//! runs confirm the bound — tracked on #870.
+//! [`gates_overall_pass`] returns `true`: the term is fully computed, serialized into the verdict
+//! JSON (`full_chain.loss.<node>.hold.*`), AND folds into `overall_pass` — a hop that re-delivers
+//! one burn id past [`MAX_HOLD_FRAMES`] now FAILS the run. Per `verdict-gate-seam-calibration.md`
+//! §5 the flip was held until the `max_hold_frames` field's green-run distribution accumulated and
+//! proved LIVE-safe: across the 6 green E2E runs carrying the field the worst `max_hold_frames` is
+//! 2 (bound 4 => a 2-frame headroom on every green run — gates-green-first), the pathology (run
+//! 396782734, hold >=5) fails, and cam1 windows subject to the issue-909 grabber defect are
+//! INCLUDED in that green set yet reach only hold 2 — so LIVE-safety is empirical. Flip back to
+//! `false` for a one-line revert to report-only if a future rig change ever trips it.
 //!
 //! This is the PURE decision core; it compiles + unit-tests on DEFAULT features (the whole `probe`
 //! module is CI-only per CLAUDE.md's Local Build Policy). The probe-gated consumer
@@ -237,14 +239,19 @@ pub fn hold_gate_pass(measured_max_hold: Option<u32>, bound: Option<u32>) -> boo
     }
 }
 
-/// #870 report-only / restore seam — mirrors [`crate::presentation_cadence::gates_overall_pass`] /
-/// [`crate::optical_floor::gates_overall_pass`]. Whether [`hold_gate_pass`]'s result folds into the
-/// fused verdict's `overall_pass`. `false` today (report-only): the metric is brand-new and has no
-/// green-run distribution to prove LIVE-safe against every recent green run + the cam1-grabber
-/// defect (issue 909). Flip to `true` for a one-line promotion once #870's follow-up confirms the
-/// bound holds with margin.
+/// #870 LIVE / restore seam — mirrors [`crate::presentation_cadence::gates_overall_pass`] /
+/// [`crate::e2e_latency_gate::gates_overall_pass`] (both `true`). Whether [`hold_gate_pass`]'s
+/// result folds into the fused verdict's `overall_pass`. `true` today (the bound is LIVE — it
+/// passes every recent green run with honest margin): across the 6 green E2E runs that carry the
+/// `full_chain.loss.<node>.hold.max_hold_frames` field the worst `max_hold_frames` is 2, so bound
+/// [`MAX_HOLD_FRAMES`] (4) clears every green run with a 2-frame headroom (gates-green-first — no
+/// green run would have been failed) while the pathology (run 396782734, hold >=5) fails. That
+/// green set INCLUDES cam1 windows subject to the issue-909 ShadowCast-grabber defect (cam1 reaches
+/// only hold 2 in green runs), so LIVE-safety is empirical, not a mechanical claim
+/// (verdict-gate-seam-calibration.md §5). Flip back to `false` for a one-line revert to report-only
+/// if a future rig change ever trips it.
 pub fn gates_overall_pass() -> bool {
-    false
+    true
 }
 
 #[cfg(test)]
@@ -439,7 +446,10 @@ mod tests {
         // A max-hold-5 pathology (run 396782734 shape): id 100 re-delivered on 5 consecutive frames.
         let d = burn_hold_distribution("strih", &contig(&[98, 100, 100, 100, 100, 100, 102, 104]));
         let hold_within = d.within_bound(MAX_HOLD_FRAMES);
-        assert!(!hold_within, "max hold 5 > bound 4 ⇒ the hop is out of bound");
+        assert!(
+            !hold_within,
+            "max hold 5 > bound 4 ⇒ the hop is out of bound"
+        );
         // The recording-verdict fold: this term's contribution to `all_pass`.
         let contributes_pass = hold_within || !gates_overall_pass();
         assert!(

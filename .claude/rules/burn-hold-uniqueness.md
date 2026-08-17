@@ -19,11 +19,15 @@ frames while `real_drops==0`).
 extensive tests (gap-metric-reconciliation.md: add a new narrowly-gated term, never change an
 existing metric's math). The repeat/freeze question lives in the SEPARATE pure module
 `src/burn_hold.rs` (`burn_hold_distribution` → run-length distribution + `max_hold_frames` +
-`duplicate_pair_fraction`, asserted `<= MAX_HOLD_FRAMES=4`). It is **REPORT-ONLY** today via the
-one-line `burn_hold::gates_overall_pass() -> false` seam (mirrors
-`optical_floor`/`presentation_cadence`); the flip-to-LIVE is tracked on #870 and needs the
-`full_chain.loss.<node>.hold.max_hold_frames` field's green-run distribution to accumulate first and
-survive the cam1-grabber issue-909 defect (verdict-gate-seam-calibration.md §5).
+`duplicate_pair_fraction`, asserted `<= MAX_HOLD_FRAMES=4`). It is **LIVE since #870** via the
+one-line `burn_hold::gates_overall_pass() -> true` seam (mirrors LIVE
+`presentation_cadence`/`e2e_latency_gate`): the flip was made once the
+`full_chain.loss.<node>.hold.max_hold_frames` field's green-run distribution accumulated — the worst
+`max_hold_frames` across the 6 green E2E runs carrying the field is **2** (bound 4, gates-green-first,
+2-frame headroom), and cam1 windows subject to the cam1-grabber issue-909 defect are INCLUDED in
+that green set yet reach only 2, so LIVE-safety is empirical, not a mechanical claim
+(verdict-gate-seam-calibration.md §5). Flip the seam back to `false` for a one-line revert to
+report-only if a future rig change ever trips it.
 
 ## GOTCHA — a run-length / repeat metric MUST use `burn_ids_with_frame_index_in`, not `burn_ids_in`, and break on non-adjacent `frame_index`
 
