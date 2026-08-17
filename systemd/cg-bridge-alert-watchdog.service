@@ -1,0 +1,24 @@
+[Unit]
+# strih CG-bridge republish-black alert (#1006), DEV1-SIDE. ONE measure -> decide -> alert pass.
+# The root cause is INTERNAL to Resolume Arena (its "CG_Bridge light" composition output goes black
+# while its upstream NDI feed is live); camera-box can only DETECT it, so the alert fires from dev1
+# -- the SAME topology as optical-chain-alert-watchdog.service (#860) /
+# imag-obs-alert-watchdog.service (#882). DIFFERENTIAL: pages ONLY when the upstream reference is
+# LIVE but its Spout republish is BLACK, never on a legitimately-idle CG-bridge (both-black).
+Description=camera-box strih CG-bridge republish-black alert (#1006) — one measure/decide/alert pass
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Service]
+Type=oneshot
+# %h = the installing user's home on dev1. Adjust if the checkout lives elsewhere.
+ExecStart=%h/devel/camera-box/scripts/cg-bridge-alert-watchdog.sh
+# One bounded OBS-WS differential probe to strih (two GetSourceScreenshot reads); give it room but
+# never hang the timer.
+TimeoutStartSec=90
+# The strih OBS WebSocket password comes from the user environment, NOT this unit -- set it in
+# ~/.config/environment.d/ or the optional EnvironmentFile below, NEVER committed (same convention
+# as obs-liveness-watchdog.service / optical-chain-alert-watchdog.service):
+#   Environment=OBS_PASSWORD=...            (NOT committed)
+# strih's OBS WebSocket is currently auth-less (an empty password works), so this is only needed if
+# WS auth is ever enabled on strih.
+EnvironmentFile=-%h/.config/camera-box/cg-bridge-watchdog.env

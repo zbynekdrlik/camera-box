@@ -1,0 +1,21 @@
+[Unit]
+# Fires the #1006 strih CG-bridge republish-black alert every 5 min (dev1-side), matching the
+# optical-chain / imag-obs / imag-power-envelope alert-watchdog cadence so the fleet's dev1 alert
+# timers stay in lockstep. A CG-bridge Spout republished BLACK while its upstream NDI is LIVE pages
+# within ~5 minutes of onset -- a silently-black production scene going on air with no alarm is
+# exactly what the standing rig-alert rule forbids.
+#
+# Ships DISABLED: this timer is NOT enabled by any installer. Enable it after review with
+#   systemctl --user enable --now cg-bridge-alert-watchdog.timer
+# (same DISABLED-by-default convention as #732/#794/#860).
+Description=Run the camera-box strih CG-bridge republish-black alert every 5 min (#1006)
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=20s
+Persistent=false
+
+[Install]
+WantedBy=timers.target
