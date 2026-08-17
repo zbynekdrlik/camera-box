@@ -330,8 +330,10 @@ pub const NOISE_ROUGHNESS_THRESHOLD: f32 = 30.0;
 /// within each YUYV macropixel `Y0 U Y1 V`, `Y0` (offset +0) and `Y1` (offset +2) are two
 /// HORIZONTALLY ADJACENT luma pixels (1px apart). In any real image adjacent pixels are
 /// near-equal, so `|Y0 − Y1|` is small; in random static they are uncorrelated, so
-/// `|Y0 − Y1|` is large. Both bytes are already fetched by the chroma sample loop, so this
-/// is a zero-extra-memory-access term.
+/// `|Y0 − Y1|` is large. This is a second, separate subsample pass over the frame (not
+/// folded into [`mean_chroma`], which reads the U/V bytes at +1/+3), but the Y0/Y1 bytes
+/// share the 4-byte macropixel's cache line already touched by the chroma sample on the
+/// same warm buffer, so it adds negligible cache pressure.
 ///
 /// Same subsampling contract as [`mean_chroma`]: honours `stride` (bytes per row, so a
 /// row-padded device is sampled on REAL pixel data only), samples every
