@@ -1580,3 +1580,143 @@ fn log_diet_rsyslog_purged_from_dpkg_matches_the_block_level_wrapper() {
     assert_eq!(code, 0, "harness crashed. stderr: {err}");
     assert_eq!(out.trim(), "YES");
 }
+
+// ---------------------------------------------------------------------------------------------
+// #782 -- the (aa) interkom-audio acceptance check: by-NAME /etc/asound.conf + per-box Mic/PCM
+// mixer gains + alsa-utils installed. Inserted BEFORE (q) (the intentionally-LAST check), sourcing
+// the shared scripts/lib/interkom-audio.sh so the writer (setup-device.sh) and the verifier can
+// never drift. Non-tautological: the pure functions are DEFINED above the source-guard, so any
+// occurrence in the live-flow slice is a genuine CALL site.
+// ---------------------------------------------------------------------------------------------
+
+/// verify-device.sh must SOURCE the interkom-audio lib -- the same single source of truth
+/// setup-device.sh writes from, so the acceptance gate checks exactly what provisioning bakes.
+#[test]
+fn verify_device_sources_interkom_audio_lib() {
+    let body = std::fs::read_to_string(script()).unwrap();
+    assert!(
+        body.contains(r#". "$HERE/lib/interkom-audio.sh""#),
+        "verify-device.sh must source scripts/lib/interkom-audio.sh"
+    );
+}
+
+/// The (aa) check must be WIRED into the live SSH flow: it reads /etc/asound.conf, the alsa-utils
+/// dpkg status, and the live `amixer -c HID sget Mic`/`PCM`, and composes them through the lib's
+/// parsers + per-box table -- not merely define anything.
+#[test]
+fn check_aa_is_wired_into_the_live_flow() {
+    let body = std::fs::read_to_string(script()).unwrap();
+    let guard_pos = body
+        .find("never run the live SSH flow below.")
+        .expect("source-guard comment must still be present");
+    let live_flow = &body[guard_pos..];
+    for needle in [
+        "cat /etc/asound.conf",
+        "dpkg -l alsa-utils",
+        "amixer -c HID sget Mic",
+        "amixer -c HID sget PCM",
+        "interkom_asound_by_name_count",
+        "interkom_amixer_pct",
+        r#"interkom_mic_pct "$NAME_UPPER""#,
+        r#"interkom_pcm_pct "$NAME_UPPER""#,
+    ] {
+        assert!(
+            live_flow.contains(needle),
+            "the (aa) live flow must call/read `{needle}` (#782) -- not just define it"
+        );
+    }
+}
+
+/// The (aa) block must be inserted BEFORE the (q) block so (q) stays the LAST check (the
+/// provisioning-scripts.md (q)-last invariant + the check_q_is_wired test that slices to EOF).
+#[test]
+fn check_aa_is_inserted_before_q() {
+    let body = std::fs::read_to_string(script()).unwrap();
+    let guard_pos = body
+        .find("never run the live SSH flow below.")
+        .expect("source-guard comment");
+    let live_flow = &body[guard_pos..];
+    let aa = live_flow
+        .find("# (aa) interkom audio bake-in")
+        .expect("(aa) implementation block");
+    let q = live_flow
+        .rfind("# (q) .bak cruft drift")
+        .expect("(q) implementation block");
+    assert!(
+        aa < q,
+        "the (aa) check block must precede the (q) block so (q) remains the last check (aa={aa} q={q})"
+    );
+}
+
+/// The (aa) check is a HARD gate on every drift facet: it must FAIL (not warn) on a non-by-NAME
+/// asound.conf, a missing alsa-utils, an unreadable gain, and a per-box gain mismatch.
+#[test]
+fn check_aa_fails_on_each_drift_facet() {
+    let body = std::fs::read_to_string(script()).unwrap();
+    let guard_pos = body
+        .find("never run the live SSH flow below.")
+        .expect("source-guard comment");
+    let live_flow = &body[guard_pos..];
+    let aa = live_flow
+        .find("# (aa) interkom audio bake-in")
+        .expect("(aa) block start");
+    let q = live_flow
+        .rfind("# (q) .bak cruft drift")
+        .expect("(q) block start");
+    let aa_block = &live_flow[aa..q];
+    assert!(
+        aa_block.contains("is not the by-NAME form"),
+        "(aa) must FAIL on a non-by-NAME asound.conf"
+    );
+    assert!(
+        aa_block.contains("alsa-utils not installed"),
+        "(aa) must FAIL when alsa-utils is missing"
+    );
+    assert!(
+        aa_block.contains("interkom mixer gain drift"),
+        "(aa) must FAIL on a per-box Mic/PCM gain mismatch"
+    );
+    // Every branch of (aa) that is not the OK branch is a fail(), never a warn().
+    assert!(
+        !aa_block.contains("warn \""),
+        "(aa) is a hard acceptance gate -- it must never merely warn() on a drift. block: {aa_block:?}"
+    );
+    assert!(
+        aa_block.contains("fail \""),
+        "(aa) must call fail() on a drift"
+    );
+}
+
+/// The (aa) check must be documented in BOTH the top-of-file header Checks list AND the usage()
+/// Checks block (the provisioning-scripts.md "document in all THREE places" rule; the third place
+/// is the executable block asserted above).
+#[test]
+fn aa_documented_in_header_and_usage() {
+    let body = std::fs::read_to_string(script()).unwrap();
+    let count = body.matches("(aa) interkom audio bake-in").count();
+    assert!(
+        count >= 3,
+        "the (aa) check must appear in the header Checks list, the usage() Checks block, AND the \
+         executable block (found {count} occurrences of the marker)"
+    );
+}
+
+/// COMPOSITION: sourcing the REAL verify-device.sh actually WIRES the lib in -- the per-box table
+/// resolves through the sourced function (proves the source line is live, not just a comment).
+#[test]
+fn verify_device_wires_per_box_gain_table() {
+    let (code, out, err) = run_sourced(
+        r#"printf '%s %s / %s %s\n' \
+             "$(interkom_mic_pct CAM4)" "$(interkom_pcm_pct CAM4)" \
+             "$(interkom_mic_pct CAM7)" "$(interkom_pcm_pct CAM7)""#,
+    );
+    assert_eq!(
+        code, 0,
+        "sourcing verify-device.sh must expose the lib functions. stderr: {err}"
+    );
+    assert_eq!(
+        out.trim(),
+        "75 79 / 80 94",
+        "cam1-4 = Mic 75/PCM 79, cam5-7 = Mic 80/PCM 94 (owner's per-box table)"
+    );
+}

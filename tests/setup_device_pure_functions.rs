@@ -520,3 +520,145 @@ fn restore_root_mode_fails_loud_when_remount_ro_fails() {
     assert!(!out.contains("UNREACHABLE"));
     assert!(err.contains("FAIL:"));
 }
+
+// ---------------------------------------------------------------------------------------------
+// #782 -- interkom audio provisioning bake-in: setup-device.sh sources scripts/lib/interkom-audio.sh
+// and (STEP 5) writes the by-NAME asound.conf + (STEP 16) applies the per-box Mic/PCM mixer gain.
+// ---------------------------------------------------------------------------------------------
+
+fn usb_script_body() -> String {
+    let p = manifest_dir().join("scripts/create-usb-linux.sh");
+    std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()))
+}
+
+/// True if `needle` appears on a line that is NOT a `#` comment (mirrors the helper of the same
+/// name in `setup_device_provisioner_hardening.rs`; each test binary is its own crate).
+fn on_noncomment_line(body: &str, needle: &str) -> bool {
+    body.lines()
+        .any(|l| l.contains(needle) && !l.trim_start().starts_with('#'))
+}
+
+/// setup-device.sh must SOURCE the interkom-audio lib (the single source of truth) -- not inline a
+/// second copy of the canonical asound.conf / per-box table (that duplication is the drift #782
+/// exists to kill).
+#[test]
+fn setup_device_sources_interkom_audio_lib() {
+    let body = std::fs::read_to_string(script()).unwrap();
+    assert!(
+        body.contains(r#". "$HERE/lib/interkom-audio.sh""#),
+        "setup-device.sh must source scripts/lib/interkom-audio.sh"
+    );
+}
+
+/// STEP 5 must write the asound.conf from the lib's canonical by-NAME generator, and must NOT bake
+/// the old enumeration-time card NUMBER (`hw:$USB_CARD,0`) that dangles on re-enumeration (#728).
+#[test]
+fn step5_writes_by_name_asound_conf_via_lib_never_a_card_number() {
+    let body = std::fs::read_to_string(script()).unwrap();
+    assert!(
+        body.contains("interkom_asound_conf_content > /etc/asound.conf"),
+        "STEP 5 must write /etc/asound.conf from interkom_asound_conf_content (the lib SoT)"
+    );
+    // Negative check on NON-comment lines only: an explanatory comment may name the old form in
+    // prose without it being a real WRITE (the #832 self-collision class).
+    for bad in ["hw:$USB_CARD,0", "card $USB_CARD"] {
+        assert!(
+            !on_noncomment_line(&body, bad),
+            "setup-device.sh must NOT write the old enumeration-time card-NUMBER asound.conf ('{bad}')"
+        );
+    }
+}
+
+/// STEP 5 must fail loud (never silently write a dangling config) if the HID card is not present --
+/// the #450 fail-loud posture, but keyed on the card NAME now.
+#[test]
+fn step5_fails_loud_when_hid_card_absent() {
+    let body = std::fs::read_to_string(script()).unwrap();
+    assert!(
+        body.contains(r"grep -qE '\[HID"),
+        "STEP 5 must confirm a card NAMED HID exists on /proc/asound/cards"
+    );
+    // The guard's failure path is a `fail` call mentioning the HID headset.
+    assert!(
+        on_noncomment_line(&body, "no ALSA card named 'HID'"),
+        "STEP 5 must `fail` with a clear message when the HID card is absent"
+    );
+}
+
+/// STEP 16 must apply the per-box Mic/PCM gain via `amixer -c HID sset` and persist it with
+/// `alsactl store`, reading the values from the lib's per-box table (never hard-coded literals).
+#[test]
+fn step16_applies_per_box_mixer_gain_and_persists() {
+    let body = std::fs::read_to_string(script()).unwrap();
+    for needle in [
+        r#"interkom_mic_pct "$DEVICE_NAME""#,
+        r#"interkom_pcm_pct "$DEVICE_NAME""#,
+        r#"amixer -c HID sset Mic "${MIC_PCT}%""#,
+        r#"amixer -c HID sset PCM "${PCM_PCT}%""#,
+        "alsactl store",
+    ] {
+        assert!(
+            body.contains(needle),
+            "STEP 16 must contain `{needle}` to bake the per-box interkom gain"
+        );
+    }
+}
+
+/// The mixer gain MUST be applied AFTER alsa-utils is installed (amixer/alsactl land in STEP 16's
+/// apt install) and BEFORE STEP 18 flips the root filesystem read-only (a late write to a ro root
+/// fails). This ordering is the whole reason the gain lives in STEP 16, not STEP 5.
+#[test]
+fn mixer_gain_applied_after_alsa_utils_install_and_before_ro_flip() {
+    let body = std::fs::read_to_string(script()).unwrap();
+    let apt = body
+        .find("apt-get install -y -qq avahi-daemon")
+        .expect("STEP 16 apt install line");
+    let amixer = body
+        .find("amixer -c HID sset Mic")
+        .expect("mixer-gain apply");
+    let ro_flip = body
+        .find("STEP 18: Configure read-only")
+        .expect("STEP 18 ro-flip banner");
+    assert!(
+        apt < amixer && amixer < ro_flip,
+        "the amixer gain apply must sit AFTER the alsa-utils apt install and BEFORE the STEP 18 \
+         ro-flip (apt={apt} amixer={amixer} ro_flip={ro_flip})"
+    );
+}
+
+/// alsa-utils must be installed by provisioning (setup-device.sh STEP 16 apt list) -- the cam1/cam3
+/// drift was that they predate alsa-utils being in the list at all.
+#[test]
+fn alsa_utils_is_installed_in_provisioning() {
+    let body = std::fs::read_to_string(script()).unwrap();
+    assert!(
+        on_noncomment_line(&body, "alsa-utils"),
+        "setup-device.sh STEP 16 must apt-install alsa-utils (provides amixer/alsactl)"
+    );
+    // ...and the base image (create-usb-linux.sh) carries it too, so a fresh clone is not bare.
+    let usb = usb_script_body();
+    assert!(
+        on_noncomment_line(&usb, "alsa-utils"),
+        "create-usb-linux.sh base image must also install alsa-utils (#782 dual-bake)"
+    );
+}
+
+/// COMPOSITION: sourcing the REAL setup-device.sh actually WIRES the lib in (not just a comment) --
+/// the per-box table resolves through the sourced function. Proves the source line is live.
+#[test]
+fn setup_device_wires_per_box_gain_table() {
+    let (code, out, err) = run_sourced(
+        r#"printf '%s %s / %s %s\n' \
+             "$(interkom_mic_pct CAM1)" "$(interkom_pcm_pct CAM1)" \
+             "$(interkom_mic_pct CAM5)" "$(interkom_pcm_pct CAM5)""#,
+    );
+    assert_eq!(
+        code, 0,
+        "sourcing setup-device.sh must expose the lib functions. stderr: {err}"
+    );
+    assert_eq!(
+        out.trim(),
+        "75 79 / 80 94",
+        "cam1-4 = Mic 75/PCM 79, cam5-7 = Mic 80/PCM 94 (owner's per-box table)"
+    );
+}

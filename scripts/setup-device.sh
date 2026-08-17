@@ -52,6 +52,11 @@ fail() {
                                           # camera_box_free_capture_device_dropin_content (#772) --
                                           # also sourced by verify-device.sh's (y) check; the
                                           # ExecStartPre device-free bake-in for camera-box.service
+# shellcheck source=scripts/lib/interkom-audio.sh
+. "$HERE/lib/interkom-audio.sh"  # interkom_asound_conf_content / interkom_mic_pct / interkom_pcm_pct
+                                  # (#782) -- also sourced by verify-device.sh's (aa) check, single
+                                  # source of truth for the by-NAME asound.conf + per-box interkom
+                                  # Mic/PCM mixer-gain table (STEP 5 write + STEP 16 amixer apply)
 
 # GitHub repo + CI dev-build channel for installing the fleet-matching binary (#457 -- the fleet
 # runs CI dev-builds, e.g. 1.7.0-dev.157, never a GitHub release; see STEP 3 below).
@@ -517,47 +522,19 @@ fi
 echo ""
 echo -e "${GREEN}[5/${TOTAL_STEPS}] Configuring ALSA audio...${NC}"
 
-# Auto-detect USB headset card (CSCTEK USB Audio and HID). `|| true` on each pipeline guards
-# against `set -o pipefail` aborting the whole script on a no-match `grep` (#458 footgun #1) --
-# `head`/`awk` succeed on empty input, but pipefail takes the RIGHTMOST *failing* command's exit
-# code, which is `grep`'s nonzero when nothing matched.
-USB_CARD=$(cat /proc/asound/cards 2>/dev/null | grep -E 'HID.*USB Audio|USB Audio.*HID' | head -1 | awk '{print $1}' || true)
-if [ -z "$USB_CARD" ]; then
-    # Fallback: try to find any USB audio device
-    USB_CARD=$(cat /proc/asound/cards 2>/dev/null | grep -i 'usb.*audio\|audio.*usb' | head -1 | awk '{print $1}' || true)
+# #782: write the canonical by-NAME /etc/asound.conf -- reference the CSCTEK "HID" card by NAME
+# (`sysdefault:CARD=HID`), never the enumeration-time card NUMBER. The old hw:<card-number>,0 form
+# baked whatever number the USB headset happened to enumerate as at provisioning time, which
+# DANGLES the moment the box re-enumerates the headset onto a different card (cam7 live proof:
+# provisioned as card 2, today card 1 -> a dead default; the #728 dangling-card class). The lib's
+# `interkom_asound_conf_content` is the single source of truth, byte-identical to the hand-unified
+# live fleet (sha256 d5db405c...). Confirm the HID card exists by NAME first (fail loud, #450
+# posture) -- the config itself needs no number. `grep -q` in an `if !` is fully handled by the if.
+if ! grep -qE '\[HID[[:space:]]*\]' /proc/asound/cards 2>/dev/null; then
+    fail "no ALSA card named 'HID' on /proc/asound/cards -- the CSCTEK USB Audio+HID intercom headset is not enumerated (refusing to write a dangling asound.conf, #782/#450)"
 fi
-# #450: fail loud instead of silently defaulting to card 1 -- a wrong hardcoded card would
-# silently misconfigure the intercom on hardware whose USB audio device enumerates differently.
-[ -n "$USB_CARD" ] || fail "could not auto-detect a USB headset on /proc/asound/cards -- refusing to silently default to card 1"
-echo "  Detected USB headset on card $USB_CARD"
-
-cat > /etc/asound.conf << ALSAEOF
-# Asymmetric config: stereo output, mono input
-# USB headset on card $USB_CARD (auto-detected)
-pcm.!default {
-    type asym
-    playback.pcm {
-        type plug
-        slave {
-            pcm "hw:$USB_CARD,0"
-            channels 2
-        }
-    }
-    capture.pcm {
-        type plug
-        slave {
-            pcm "hw:$USB_CARD,0"
-            channels 1
-        }
-    }
-}
-
-ctl.!default {
-    type hw
-    card $USB_CARD
-}
-ALSAEOF
-echo "  ALSA config: /etc/asound.conf (card $USB_CARD)"
+interkom_asound_conf_content > /etc/asound.conf
+echo "  ALSA config: /etc/asound.conf (by NAME -- sysdefault:CARD=HID, enumeration-proof, #782)"
 
 # =============================================================================
 # STEP 6: Create camera-box config
@@ -999,6 +976,26 @@ apt-get update -qq
 apt-get install -y -qq avahi-daemon libavahi-client3 libavahi-common3 avahi-utils libasound2t64 v4l-utils alsa-utils ethtool curl ca-certificates psmisc 2>/dev/null || true
 systemctl enable avahi-daemon
 echo "  Installed: avahi-daemon, libavahi-client3, libavahi-common3, avahi-utils, libasound2t64, v4l-utils, alsa-utils, ethtool, curl, ca-certificates, psmisc"
+
+# #782: bake the per-box interkom mixer gains. This MUST run AFTER alsa-utils is installed (amixer/
+# alsactl land above), and it belongs here in STEP 16 rather than STEP 5 for that reason. Previously
+# the mixer gain was never set in provisioning at all -- a fresh box kept the CSCTEK headset's
+# power-on default (Mic 91%/-3dB) while the hand-tuned older boxes ran quieter, so cam5-7 shipped
+# ~5dB louder mics in the intercom. Per-box compensation table (owner 2026-07-15, analog headset
+# differences): cam1-4 Mic 75%/PCM 79%, cam5-7 Mic 80%/PCM 94%. `alsactl store` persists it to
+# /var/lib/alsa/asound.state so it survives the box's next reboot (verify-device.sh's (aa) check
+# reads it back). Best-effort with a warning (never a hard fail): STEP 5 already asserted the HID
+# card is present, so a failure here means a transient amixer/HID glitch, not a wrong box -- and
+# verify-device.sh's post-reboot acceptance gate catches a silently-unset gain anyway.
+MIC_PCT="$(interkom_mic_pct "$DEVICE_NAME")"
+PCM_PCT="$(interkom_pcm_pct "$DEVICE_NAME")"
+if amixer -c HID sset Mic "${MIC_PCT}%" >/dev/null 2>&1 &&
+    amixer -c HID sset PCM "${PCM_PCT}%" >/dev/null 2>&1 &&
+    alsactl store >/dev/null 2>&1; then
+    echo "  Interkom mixer: Mic ${MIC_PCT}% / PCM ${PCM_PCT}% (per-box #782), persisted via alsactl store"
+else
+    warn "could not apply interkom mixer gains (Mic ${MIC_PCT}%/PCM ${PCM_PCT}%) -- amixer/alsactl or the HID card unavailable? verify-device.sh (aa) will catch a wrong/unset gain post-reboot (#782)"
+fi
 
 # #930: ffmpeg + EGL runtime for the lipsync cross-validation TEST-mode variant (any box may take
 # cam2's painter role -- unified provisioning, see the "Unified cam-box provisioning" playbook
