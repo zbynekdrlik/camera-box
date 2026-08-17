@@ -3094,13 +3094,15 @@ fn check_imag_report_clean_when_every_value_matches_the_pinned_set_463() {
     let log = format!("genlock: latency = 3 ms\n{GENLOCK_RT_PIN_OK_LINE}");
     let body = r#"
         rc=0
-        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "$LOG" "/usr/lib/x86_64-linux-gnu/obs-plugins/distroav.so" "1" "locked" "Jul 05 10:15:22 imag-nb dantesync[1234]: [PTP] LOCK Drift 12 ns/s offset -340ns" "$TS_STATES" "$POWER" "29" "$DP" || rc=$?
+        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "$LOG" "/usr/lib/x86_64-linux-gnu/obs-plugins/distroav.so" "1" "locked" "Jul 05 10:15:22 imag-nb dantesync[1234]: [PTP] LOCK Drift 12 ns/s offset -340ns" "$TS_STATES" "$POWER" "29" "$DP" "$CL" || rc=$?
         echo "RC=$rc"
     "#;
     // #1040: the 13th/14th args are a clean power-envelope block + the pinned 29 W — must ALSO read
     // clean, or this "everything matches" case regresses to UNKNOWN on the new power_envelope check.
     // #780: the 15th arg is a clean display-path block — same reason, or this case regresses to
     // UNKNOWN on the new display_path check #10.
+    // #784: the 16th arg is a clean /proc/cmdline block — same reason, or this case regresses to
+    // UNKNOWN on the new cmdline_isolation check #11.
     let out = run_sourced(
         body,
         &[
@@ -3108,6 +3110,7 @@ fn check_imag_report_clean_when_every_value_matches_the_pinned_set_463() {
             ("TS_STATES", TIMESYNC_STATES_CLEAN_FIXTURE),
             ("POWER", POWER_GATHER_CLEAN_29W),
             ("DP", DISPLAY_PATH_GATHER_CLEAN),
+            ("CL", CMDLINE_GATHER_CLEAN),
         ],
     );
     assert!(
@@ -3638,11 +3641,12 @@ fn check_imag_report_end_to_end_from_a_realistic_imag_log_463() {
         fps="$(fps_from_log "$LOG")"
         latency="$(genlock_latency_ms_from_log "$LOG")"
         rc=0
-        check_imag_report "DSHA_A" "DSHA_A" "60" "$fps" "3" "$latency" "$LOG" "/plugin/path" "1" "locked" "$DANTESYNC_LOG" "$TS_STATES" "$POWER" "29" "$DP" || rc=$?
+        check_imag_report "DSHA_A" "DSHA_A" "60" "$fps" "3" "$latency" "$LOG" "/plugin/path" "1" "locked" "$DANTESYNC_LOG" "$TS_STATES" "$POWER" "29" "$DP" "$CL" || rc=$?
         echo "RC=$rc"
     "#;
     // #1040: a clean power-envelope block + pinned 29 W keeps this end-to-end case fully clean.
     // #780: a clean display-path block (15th) keeps it clean on the new display_path check #10.
+    // #784: a clean /proc/cmdline block (16th) keeps it clean on the new cmdline_isolation check #11.
     let out = run_sourced(
         body,
         &[
@@ -3651,6 +3655,7 @@ fn check_imag_report_end_to_end_from_a_realistic_imag_log_463() {
             ("TS_STATES", TIMESYNC_STATES_CLEAN_FIXTURE),
             ("POWER", POWER_GATHER_CLEAN_29W),
             ("DP", DISPLAY_PATH_GATHER_CLEAN),
+            ("CL", CMDLINE_GATHER_CLEAN),
         ],
     );
     assert!(
@@ -3748,11 +3753,12 @@ fn check_imag_report_dantesync_lock_ok_when_locked_and_pinned_489() {
     let log = format!("genlock: latency = 3 ms\n{GENLOCK_RT_PIN_OK_LINE}");
     let body = r#"
         rc=0
-        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "$LOG" "/plugin/path" "1" "locked" "$DANTESYNC_LOG" "$TS_STATES" "$POWER" "29" "$DP" || rc=$?
+        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "$LOG" "/plugin/path" "1" "locked" "$DANTESYNC_LOG" "$TS_STATES" "$POWER" "29" "$DP" "$CL" || rc=$?
         echo "RC=$rc"
     "#;
     // #1040: a clean power-envelope block + pinned 29 W keeps this "everything else clean" case clean.
     // #780: a clean display-path block (15th) keeps it clean on the new display_path check #10.
+    // #784: a clean /proc/cmdline block (16th) keeps it clean on the new cmdline_isolation check #11.
     let out = run_sourced(
         body,
         &[
@@ -3761,6 +3767,7 @@ fn check_imag_report_dantesync_lock_ok_when_locked_and_pinned_489() {
             ("TS_STATES", TIMESYNC_STATES_CLEAN_FIXTURE),
             ("POWER", POWER_GATHER_CLEAN_29W),
             ("DP", DISPLAY_PATH_GATHER_CLEAN),
+            ("CL", CMDLINE_GATHER_CLEAN),
         ],
     );
     assert!(out.contains("RC=0"), "locked matches pin -> clean: {out:?}");
@@ -3919,5 +3926,173 @@ fn real_manifest_pins_dantesync_locked_imag_489() {
         pin, "locked",
         "real manifest must pin dantesync_locked_imag=locked (imag-nb's DanteSync clock must \
          stay PTP/NTP-locked -- genlock's wall-clock basis depends on it); got {pin:?}"
+    );
+}
+
+// #784: check_imag_report's check #11 — the kernel-cmdline ISOLATION facet, via a NEW shared
+// source-only lib scripts/lib/imag-cmdline-isolation.sh sourced by drift-guard.sh, passed as the
+// 16th (optional) arg. Root cause: the večerný kolaps + the issue-842 recurrence were both caused by
+// kernel isolcpus=/nohz_full= tokens on /proc/cmdline piling OBS's ~119 threads onto ONE core
+// (60fps -> ~53fps NDI receive). The current design (issue 842) is AFFINITY-ONLY (taskset), so the
+// cmdline must carry NO isolcpus=/nohz_full=; a SCOPED rcu_nocbs=<cpu-list> is the same footgun
+// family and is DRIFT — but rcu_nocbs=all is the LEGITIMATE issue-482 low-latency (preempt=full)
+// token and must NEVER be flagged (live-verified healthy cmdline on 10.77.9.182 carries it). A clean
+// gather is OK; isolcpus/nohz_full/scoped-rcu_nocbs is DRIFT (exit 20); an unread block is UNKNOWN,
+// never a false DRIFT (backward-compat with 9..15-arg call sites).
+const CMDLINE_GATHER_CLEAN: &str = "\
+CMDLINE|BOOT_IMAGE=/boot/vmlinuz-7.0.0-28-generic root=UUID=abc123 ro quiet splash preempt=full rcu_nocbs=all vt.handoff=7
+";
+
+#[test]
+fn imag_cmdline_isolation_verdict_ok_on_a_clean_live_cmdline_784() {
+    // The exact healthy cmdline shape read live from imag (rcu_nocbs=all present, no isolcpus/nohz).
+    let out = run_sourced(
+        "imag_cmdline_isolation_verdict \"$G\"",
+        &[("G", CMDLINE_GATHER_CLEAN)],
+    );
+    let line = out
+        .lines()
+        .find(|l| l.starts_with("cmdline_isolation|"))
+        .unwrap_or_else(|| panic!("no cmdline_isolation verdict line: {out:?}"));
+    assert!(
+        line.contains("|OK|"),
+        "a clean cmdline (rcu_nocbs=all is the legit issue-482 token, no isolcpus/nohz_full) must be OK: {line:?}"
+    );
+}
+
+#[test]
+fn imag_cmdline_isolation_verdict_accepts_rcu_nocbs_all_784() {
+    // The false-positive this facet is DESIGNED to avoid: rcu_nocbs=all is written by the issue-482
+    // low-latency-kernel config (preempt=full) on EVERY healthy box — a blanket "flag any rcu_nocbs"
+    // would false-fail the whole fleet. It must read OK.
+    let g = "CMDLINE|root=UUID=x ro preempt=full rcu_nocbs=all\n";
+    let out = run_sourced("imag_cmdline_isolation_verdict \"$G\"", &[("G", g)]);
+    let line = out
+        .lines()
+        .find(|l| l.starts_with("cmdline_isolation|"))
+        .unwrap_or_else(|| panic!("no cmdline_isolation line: {out:?}"));
+    assert!(
+        line.contains("|OK|"),
+        "rcu_nocbs=all is the legitimate issue-482 lowlatency token and must never be flagged: {line:?}"
+    );
+}
+
+#[test]
+fn imag_cmdline_isolation_verdict_drift_on_isolcpus_784() {
+    let g = "CMDLINE|root=UUID=x ro preempt=full isolcpus=2-11 nohz_full=10,11 rcu_nocbs=all\n";
+    let out = run_sourced("imag_cmdline_isolation_verdict \"$G\"", &[("G", g)]);
+    let line = out
+        .lines()
+        .find(|l| l.starts_with("cmdline_isolation|"))
+        .unwrap_or_else(|| panic!("no cmdline_isolation line: {out:?}"));
+    assert!(
+        line.contains("|DRIFT|") && line.contains("isolcpus"),
+        "isolcpus= must DRIFT naming the token (the #784/#842 footgun): {line:?}"
+    );
+}
+
+#[test]
+fn imag_cmdline_isolation_verdict_drift_on_nohz_full_beside_a_legit_rcu_nocbs_all_784() {
+    // nohz_full= alone must DRIFT even though rcu_nocbs=all sits right next to it — the legit token
+    // must not mask a genuine isolation-family drift.
+    let g = "CMDLINE|root=UUID=x ro preempt=full nohz_full=10,11 rcu_nocbs=all\n";
+    let out = run_sourced("imag_cmdline_isolation_verdict \"$G\"", &[("G", g)]);
+    let line = out
+        .lines()
+        .find(|l| l.starts_with("cmdline_isolation|"))
+        .unwrap_or_else(|| panic!("no cmdline_isolation line: {out:?}"));
+    assert!(
+        line.contains("|DRIFT|") && line.contains("nohz_full"),
+        "nohz_full= must DRIFT even beside a legit rcu_nocbs=all: {line:?}"
+    );
+}
+
+#[test]
+fn imag_cmdline_isolation_verdict_drift_on_scoped_rcu_nocbs_784() {
+    // A SCOPED per-core rcu_nocbs list (NOT =all) is the isolation family, not the issue-482 token.
+    let g = "CMDLINE|root=UUID=x ro preempt=full rcu_nocbs=2-11\n";
+    let out = run_sourced("imag_cmdline_isolation_verdict \"$G\"", &[("G", g)]);
+    let line = out
+        .lines()
+        .find(|l| l.starts_with("cmdline_isolation|"))
+        .unwrap_or_else(|| panic!("no cmdline_isolation line: {out:?}"));
+    assert!(
+        line.contains("|DRIFT|") && line.contains("rcu_nocbs=2-11"),
+        "a scoped rcu_nocbs=<cpu-list> must DRIFT (distinct from the =all lowlatency token): {line:?}"
+    );
+}
+
+#[test]
+fn imag_cmdline_isolation_verdict_unknown_when_not_gathered_784() {
+    // Empty gather (SSH hiccup / not read) → UNKNOWN, never a false OK/DRIFT.
+    let out = run_sourced("imag_cmdline_isolation_verdict \"$G\"", &[("G", "")]);
+    let line = out
+        .lines()
+        .find(|l| l.starts_with("cmdline_isolation|"))
+        .unwrap_or_else(|| panic!("no cmdline_isolation line: {out:?}"));
+    assert!(
+        line.contains("|UNKNOWN|"),
+        "an ungathered cmdline must be UNKNOWN (never a false OK/DRIFT on an SSH hiccup): {line:?}"
+    );
+}
+
+#[test]
+fn check_imag_report_cmdline_isolation_ok_when_clean_784() {
+    let body = r#"
+        rc=0
+        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "genlock: latency = 3 ms" "/plugin/path" "1" "" "" "" "" "" "" "$CL" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[("CL", CMDLINE_GATHER_CLEAN)]);
+    let line = out
+        .lines()
+        .find(|l| l.contains("cmdline_isolation"))
+        .unwrap_or_else(|| panic!("no cmdline_isolation row printed: {out:?}"));
+    assert!(
+        line.contains("OK"),
+        "a clean cmdline must read OK on the check #11 row: {line:?}"
+    );
+}
+
+#[test]
+fn check_imag_report_cmdline_isolation_drift_when_isolcpus_784() {
+    let g = "CMDLINE|root=UUID=x ro preempt=full isolcpus=2-11 nohz_full=10,11\n";
+    let body = r#"
+        rc=0
+        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "genlock: latency = 3 ms" "/plugin/path" "1" "" "" "" "" "" "" "$CL" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[("CL", g)]);
+    assert!(
+        out.contains("RC=20"),
+        "kernel isolation on the cmdline must DRIFT (exit 20): {out:?}"
+    );
+    let line = out
+        .lines()
+        .find(|l| l.contains("cmdline_isolation"))
+        .unwrap_or_else(|| panic!("no cmdline_isolation row printed: {out:?}"));
+    assert!(
+        line.contains("DRIFT") && line.contains("isolcpus"),
+        "must DRIFT naming isolcpus: {line:?}"
+    );
+}
+
+#[test]
+fn check_imag_report_cmdline_isolation_unknown_when_not_gathered_backward_compat_784() {
+    // Old 9..15-arg call sites (no cmdline gather block) must still get a graceful UNKNOWN
+    // cmdline_isolation row — never an `unbound variable` crash under set -u nor a false DRIFT.
+    let body = r#"
+        rc=0
+        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "genlock: latency = 3 ms" "/plugin/path" "1" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[]);
+    let line = out
+        .lines()
+        .find(|l| l.contains("cmdline_isolation"))
+        .unwrap_or_else(|| panic!("no cmdline_isolation row printed on a 9-arg call: {out:?}"));
+    assert!(
+        line.contains("UNKNOWN"),
+        "an unread cmdline block must report UNKNOWN, never a false DRIFT: {line:?}"
     );
 }
