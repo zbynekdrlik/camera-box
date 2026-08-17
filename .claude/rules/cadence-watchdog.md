@@ -56,6 +56,24 @@ per-frame content hashing (pixel access — cam-box-side is a rig write; receive
 categorically different mechanism. Filed as its own issue; this watchdog covers the genuinely-
 non-60-DELIVERED case only.
 
+## Two gotchas for the NEXT multi-source sibling watchdog (review-round, #794)
+
+- **Copying a SINGLE-source sibling (frozen-input) to a MULTI-source one: fetch the box log ONCE per
+  pass, not once per source.** The frozen-input probe does one `ssh + powershell "gc … -Tail 800"`
+  per watched source — invisible at its 1-source default, but a 7-camera cadence scope makes it 7
+  identical fetches of the SAME log per pass. Two consequences: pure waste (one tail carries every
+  source's audit line → one fetch + N local greps is identical), AND a real budget bug —
+  `N × SSH_TIMEOUT` can exceed the unit's `TimeoutStartSec`, so a reachable-but-slow box gets the
+  oneshot SIGTERM'd mid-pass. Pattern: a box-level `fetch_box_log <ip>` in `main()` + a pure
+  `extract_sample <raw_log> <source>` per source (`CADENCE_PROBE_CMD` is box-level: `<box_ip>`).
+- **A blind-tap / silent-UNKNOWN guard must key on ALL fields the measurement needs, not one.** The
+  cadence sample is a PAIR (`received=` + line timestamp); keying the tap-broken guard on `received=`
+  alone left a hole: a valid `received=` with an unparseable/empty timestamp reset the blind-tap
+  counter yet stayed permanently unmeasurable → the source could sit UNKNOWN forever with no page and
+  no WARN (the exact invariant the guard exists to uphold). Fix: persist + blind-tap key on a USABLE
+  PAIR (recv integer AND ts present). Any "never a silent UNKNOWN" guard: increment the blind counter
+  when the sample is missing ANY field it needs downstream, not just the first one you check.
+
 ## Tier-0 + ships DISABLED
 
 Pure lib is Tier-0 (`std`/bash, no probe/OBS/rig). `cargo` does NOT run locally here (build-ok
