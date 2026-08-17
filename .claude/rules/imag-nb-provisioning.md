@@ -642,3 +642,44 @@ refuse" incident (2026-07-15).
   restart-repopulate step now flows through the idempotent seeder. So no path stacks windows.
 - The pure decision (`projector_window_ids` / `projector_strays_to_close`) is extracted for an offline
   `wmctrl`-fixture pytest (`tests/python/test_imag_scenes_projector_idempotent_769.py`).
+## Stopping the SUPERVISED OBS gracefully FROM setup-imag.sh's ROOT context (step 12, #785)
+
+`imag-obs-supervision.md` already states the general rule: a deliberate stop of a supervised OBS
+MUST go through `systemctl --user stop imag-obs.service` (a raw `pkill`/`kill` of the tracked
+process looks like a crash and refights `Restart=on-failure`). The setup-imag.sh-specific wrinkle
+is that **step 12 (the genlock hot-swap) runs as ROOT, and `systemctl --user` from root talks to
+root's own (nonexistent) `newlevel` user bus — `systemctl --user is-active` from root returns
+FALSE even when the unit is genuinely active on the desktop user's session.** So step 12 cannot
+call `imag-obs-stop.sh` directly (from root it would misjudge the unit inactive and fall through to
+the raw signal ladder, refighting Restart). The correct graceful-first ladder from root:
+
+1. `sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR=/run/user/$(id -u "$DESKTOP_USER") DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/<uid>/bus systemctl --user is-active --quiet imag-obs.service` → if active, `... systemctl --user stop imag-obs.service` (same env). This is the ONE path that lets systemd own the stop and suppress Restart.
+2. else `sudo -u "$DESKTOP_USER" DISPLAY=:0 XDG_RUNTIME_DIR=... DBUS_SESSION_BUS_ADDRESS=... /usr/local/bin/imag-obs-stop.sh` (the installed helper — its wmctrl-c→SIGTERM ladder saves the collection).
+3. else inline `pkill -TERM -x obs` (OBS saves on its own signal handler).
+4. bounded wait (`for _ in $(seq 1 25); do ... sleep 1`), and ONLY THEN `pkill -9 -x obs` as the last resort on a wedged process, keeping the `would not die after SIGKILL` fail-loud.
+
+The mirror of the same `sudo -u … systemctl --user …` invoke already exists as the `u_systemctl`
+helper elsewhere in setup-imag.sh — reuse that env shape, don't reinvent it.
+
+## Anchor trick: adding a SECOND wait-for-death loop near the swap-kill loop (#785, #784/#842 anchor)
+
+The existing test `setup_imag_swap_kill_uses_sigkill_and_waits_for_death` (tests/setup_imag_guards.rs)
+anchors on `body.find("pkill -9 -x obs")` < `body.find("pgrep -x obs >/dev/null 2>&1 || break")` <
+`"would not die after SIGKILL"`. If you add a NEW wait loop (e.g. a graceful-stop wait BEFORE the
+SIGKILL last resort) using the SAME `pgrep -x obs >/dev/null 2>&1 || break` literal, that test's
+middle `.find()` latches onto YOUR new loop instead of the SIGKILL one and the ordering assertion
+breaks. **Write the new wait loop in a DIFFERENT form** — `if ! pgrep -x obs >/dev/null 2>&1; then
+break; fi` — so the `... || break` literal stays unique to the SIGKILL loop. Keep the SIGKILL
+last-resort block's `pkill -9 -x obs` → `pgrep … || break` → `would not die after SIGKILL` bytes
+exactly as they were.
+
+## `cat > "$USER_HOME/.config/openbox/menu.xml"` is NOT caught by the #841 xorg.conf.d ban (#785)
+
+Adding a `cat > …/menu.xml` (or any new `cat > …` heredoc write) to setup-imag.sh is safe against
+`setup_imag_does_not_ship_the_dead_tearfree_option_841` — that negative anchor filters lines that
+`starts_with("cat > /etc/X11/xorg.conf.d/")` specifically, so an openbox-config write under
+`$USER_HOME` never matches it. Still run the full NEGATIVE-anchor grep (`grep -rniE 'assert!\(!|
+must NOT|!.*contains' tests/`) for any OTHER token your addition introduces — the openbox menu adds
+`systemctl reboot`/`systemctl poweroff`, and the only bans on those live in
+`tests/imag_obs_watchdog_unit_778.rs`, which reads the `systemd/imag-obs-watchdog.service` FILE, not
+setup-imag.sh, so a menu.xml poweroff/reboot entry never trips them.

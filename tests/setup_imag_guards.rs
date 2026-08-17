@@ -3359,3 +3359,100 @@ fn setup_imag_bakes_the_envelope_env_knobs_into_the_units_1040() {
         );
     }
 }
+
+// =============================================================================
+// #785 — imag operator-state protection: every deliberate OBS stop is GRACEFUL, and the openbox
+// root menu (incl. a graceful "Zastav OBS" entry + clean shutdown) is PROVISIONED, not hand-placed.
+// =============================================================================
+
+/// #785: the swap-time OBS stop (step 12 genlock hot-swap) must ATTEMPT a graceful, state-
+/// persisting stop FIRST — route through `systemctl --user stop imag-obs.service` when the
+/// supervised unit (issue 882) is active, so OBS runs its own clean-shutdown save path (persisting
+/// the operator's unsaved Show-in-Multiview flags / source transforms) AND systemd's
+/// Restart=on-failure is not refought (an external kill of the tracked process looks like a crash —
+/// imag-obs-supervision.md). The pkill -9 SIGKILL must remain ONLY as the last resort on a wedged
+/// process. A bare immediate SIGKILL (the pre-#785 behavior) silently eats the operator's unsaved
+/// UI state — the whole point of this ticket.
+#[test]
+fn setup_imag_swap_kill_attempts_graceful_stop_before_sigkill_785() {
+    let body = read(SETUP);
+    let graceful = body.find("systemctl --user stop imag-obs.service").expect(
+        "{SETUP}: the swap-time stop must route through `systemctl --user stop imag-obs.service` \
+         (#785 graceful) so OBS persists operator UI state before any SIGKILL",
+    );
+    let sigkill = body
+        .find("pkill -9 -x obs")
+        .expect("pkill -9 -x obs must still exist as the last resort");
+    assert!(
+        graceful < sigkill,
+        "{SETUP}: the graceful `systemctl --user stop` must be ATTEMPTED before the pkill -9 \
+         SIGKILL last resort (#785)"
+    );
+    // Fallback when the unit is not active: the installed graceful helper (imag-obs-stop.sh),
+    // which itself does the wmctrl-c -> SIGTERM ladder that actually saves the collection.
+    assert!(
+        body.contains("/usr/local/bin/imag-obs-stop.sh || true"),
+        "{SETUP}: the swap-time stop must fall back to the installed imag-obs-stop.sh helper when \
+         the imag-obs.service unit is not active (#785)"
+    );
+    // The graceful stop MUST run as the DESKTOP user against that user's /run/user/<uid> runtime
+    // bus. A bare `systemctl --user` from setup-imag.sh's ROOT context talks to root's own (empty)
+    // user manager, which reports the unit inactive even when it is genuinely active on the desktop
+    // session -- the swap would then fall through to a raw signal that refights Restart=on-failure
+    // (imag-obs-supervision.md). Pin the `sudo -u "$DESKTOP_USER"` + XDG_RUNTIME_DIR env shape so a
+    // future edit that reintroduces the is-active-from-root bug is caught by a static assertion,
+    // not only in a live regression.
+    assert!(
+        body.contains(r#"sudo -u "$DESKTOP_USER""#),
+        "{SETUP}: the swap-time graceful stop must run as the DESKTOP user (sudo -u \
+         \"$DESKTOP_USER\"), never from root's empty user manager (#785)"
+    );
+    assert!(
+        body.contains(r#"HS_RUN="/run/user/"#) && body.contains(r#"XDG_RUNTIME_DIR="$HS_RUN""#),
+        "{SETUP}: the graceful stop must export XDG_RUNTIME_DIR to the desktop user's \
+         /run/user/<uid> runtime bus so `systemctl --user` reaches the real (active) manager (#785)"
+    );
+}
+
+/// #785: setup-imag.sh must PROVISION the openbox root menu (`~/.config/openbox/menu.xml`) rather
+/// than leaving it hand-placed on the live box — the same provisioning-parity gap #840 closed for
+/// the start/stop scripts. The menu must carry a GRACEFUL "Zastav OBS" entry that calls
+/// imag-obs-stop.sh (so the operator stops OBS from the desktop WITHOUT losing UI state) AND clean
+/// shutdown/restart entries (the operator powers the box off cleanly from the desktop — HandlePowerKey
+/// stays `ignore`, #727: an accidental power-button press once shut the box down mid-event).
+#[test]
+fn setup_imag_provisions_openbox_menu_with_graceful_stop_785() {
+    let body = read(SETUP);
+    assert!(
+        body.contains(r#"cat > "$USER_HOME/.config/openbox/menu.xml""#),
+        "{SETUP} must generate ~/.config/openbox/menu.xml (#785 provisioning parity — it was \
+         hand-placed only before)"
+    );
+    // Graceful stop entry — the operator's state-preserving quit routes through imag-obs-stop.sh.
+    assert!(
+        body.contains("<command>/usr/local/bin/imag-obs-stop.sh</command>"),
+        "{SETUP}: the openbox menu must have a graceful stop entry calling imag-obs-stop.sh (#785)"
+    );
+    assert!(
+        body.contains("Zastav OBS"),
+        "{SETUP}: the openbox menu must label the graceful stop entry 'Zastav OBS' (#785)"
+    );
+    // Clean shutdown/restart entries — operator powers the box off cleanly from the desktop.
+    assert!(
+        body.contains("systemctl poweroff") && body.contains("systemctl reboot"),
+        "{SETUP}: the openbox menu must provide clean shutdown/restart entries (#785 — operator \
+         shuts the box cleanly from the desktop instead of the ignored hardware power key)"
+    );
+    // The menu.xml (which references imag-obs-stop.sh) must be written AFTER the stop script install.
+    let stop_install = body
+        .find(r#"chmod 755 "$OBS_STOP_SH""#)
+        .expect("{SETUP}: imag-obs-stop.sh must be installed (#840)");
+    let menu_write = body
+        .find(r#"cat > "$USER_HOME/.config/openbox/menu.xml""#)
+        .expect("{SETUP}: menu.xml write must exist (#785)");
+    assert!(
+        stop_install < menu_write,
+        "{SETUP}: menu.xml (which references imag-obs-stop.sh) must be written AFTER the stop \
+         script is installed (#785/#840)"
+    );
+}

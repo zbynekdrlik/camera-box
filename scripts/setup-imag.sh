@@ -1153,20 +1153,55 @@ else
         echo "  WARNING: apt-mark hold obs-studio failed — an unattended apt upgrade could revert this deploy"
     fi
 
-    # A swap while OBS is already running (a later re-run onto a NEWER build) needs OBS to
-    # relaunch to pick up the new .so — mirrors the Windows force-kill-then-relaunch convention
-    # (launch-obs-genlock.sh's --force uses Stop-Process -Force = SIGKILL, never a bare SIGTERM).
-    # The "Launch OBS" step's own `if ! pgrep -x obs` relaunch guard would otherwise SKIP relaunching a
-    # still-exiting (SIGTERM'd but not yet dead) OBS, silently leaving the OLD build's process
-    # resident even though the NEW build's bytes + marker are already on disk — so SIGKILL and
-    # WAIT for actual death here, failing loud if it won't die within budget.
+    # #785: a swap while OBS is already running (a re-run onto a NEWER build) must relaunch OBS to
+    # pick up the new .so — but a bare SIGKILL here silently EATS the operator's unsaved UI state
+    # (Show-in-Multiview flags, source transforms, dock geometry): SIGKILL never runs OBS's own
+    # clean-shutdown save path (that is the whole class of bug #785 fixes). So stop OBS GRACEFULLY
+    # first. When the supervised unit (imag-obs.service, issue 882) is active, route the stop through
+    # `systemctl --user stop` — an external pkill/kill of the tracked process looks like a crash to
+    # systemd and refights the stood-down issue-788 watchdog via Restart=on-failure (see
+    # .claude/rules/imag-obs-supervision.md); the unit's ExecStop runs imag-obs-stop.sh's wmctrl-c ->
+    # SIGTERM ladder, which is what actually persists the collection. Fall back to the installed
+    # graceful helper, then an inline SIGTERM, for a box where the unit is not active. SIGKILL stays
+    # ONLY as the LAST resort on a wedged process — the "Launch OBS" step's `if ! pgrep -x obs`
+    # relaunch guard would otherwise SKIP relaunching a still-exiting OBS, silently leaving the OLD
+    # build's process resident — so we still WAIT for actual death and fail loud if it won't die.
     if pgrep -x obs >/dev/null 2>&1; then
-        pkill -9 -x obs || true
-        for _ in $(seq 1 10); do
-            pgrep -x obs >/dev/null 2>&1 || break
+        HS_UID="$(id -u "$DESKTOP_USER")"
+        HS_RUN="/run/user/${HS_UID}"
+        if sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="$HS_RUN" \
+                DBUS_SESSION_BUS_ADDRESS="unix:path=${HS_RUN}/bus" \
+                systemctl --user is-active --quiet imag-obs.service 2>/dev/null; then
+            echo "  #785: OBS bezi pod imag-obs.service — graceful stop cez systemctl --user stop (uklada operatorov UI stav, ziadny Restart=on-failure fight)"
+            sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="$HS_RUN" \
+                DBUS_SESSION_BUS_ADDRESS="unix:path=${HS_RUN}/bus" \
+                systemctl --user stop imag-obs.service || true
+        elif [ -x /usr/local/bin/imag-obs-stop.sh ]; then
+            echo "  #785: graceful stop cez imag-obs-stop.sh (imag-obs.service nie je aktivny)"
+            sudo -u "$DESKTOP_USER" DISPLAY=:0 XDG_RUNTIME_DIR="$HS_RUN" \
+                DBUS_SESSION_BUS_ADDRESS="unix:path=${HS_RUN}/bus" \
+                /usr/local/bin/imag-obs-stop.sh || true
+        else
+            echo "  #785: ziadny graceful helper — posielam SIGTERM (OBS uklada na svojom signal handleri)"
+            pkill -TERM -x obs || true
+        fi
+        # graceful wait: OBS zapisuje kolekciu az pri ciste exite. Distinct loop form from the
+        # SIGKILL-wait loop below, so the existing swap-kill test still anchors on that one.
+        for _ in $(seq 1 25); do
+            if ! pgrep -x obs >/dev/null 2>&1; then break; fi
             sleep 1
         done
-        pgrep -x obs >/dev/null 2>&1 && fail "old obs64 would not die after SIGKILL — cannot safely relaunch onto the new build"
+        # SIGKILL only as the LAST resort on a wedged process — relaunch onto the new .so is unsafe
+        # while the old obs is still resident.
+        if pgrep -x obs >/dev/null 2>&1; then
+            echo "  WARN: obs ignored the graceful stop for 25s — force-killing to load the new build (operator UI state may be lost this time)"
+            pkill -9 -x obs || true
+            for _ in $(seq 1 10); do
+                pgrep -x obs >/dev/null 2>&1 || break
+                sleep 1
+            done
+            pgrep -x obs >/dev/null 2>&1 && fail "old obs64 would not die after SIGKILL — cannot safely relaunch onto the new build"
+        fi
     fi
     echo "  genlock build $NEW_SHA deployed (was: ${DEPLOYED_SHA:-none, PPA stock})"
 fi
@@ -1594,6 +1629,51 @@ AUTOSTART_EOF
 sed -i "s#__ISOLCPUS__#${IMAG_ISOLATED_CPUS}#" "$USER_HOME/.config/openbox/autostart"
 chmod +x "$USER_HOME/.config/openbox/autostart"
 chown "$DESKTOP_USER:$DESKTOP_USER" "$USER_HOME/.config/openbox/autostart"
+
+# #785: PROVISION the openbox root menu (~/.config/openbox/menu.xml) instead of leaving it
+# hand-placed on the live box -- the same provisioning-parity gap #840 closed for the operator
+# start/stop scripts. openbox's stock rc.xml binds the desktop right-click to id="root-menu", so
+# that is the menu id here. The GRACEFUL "Zastav OBS (korektne)" entry routes the operator's stop
+# through imag-obs-stop.sh (installed above): that helper delegates to `systemctl --user stop
+# imag-obs.service` when the supervised unit is active and otherwise runs the wmctrl-c -> SIGTERM
+# ladder, either way giving OBS its clean-shutdown save path so the operator's UNSAVED UI state
+# (Show-in-Multiview flags, source transforms, dock geometry) is persisted -- the whole point of
+# this ticket. "Spustit OBS" launches via the UNIT (systemctl --user start), never a bare
+# imag-obs-start.sh, so OBS stays inside the unit cgroup and supervised (#1015). The clean
+# restart/shutdown entries let the operator power the box off cleanly FROM THE DESKTOP -- the
+# hardware power key deliberately stays HandlePowerKey=ignore (#727: an accidental short press once
+# shut the box down mid-event), so a desktop menu entry is the intended clean-poweroff path.
+# QUOTED heredoc: the whole menu.xml is literal (no shell expansion of the <command> lines).
+mkdir -p "$USER_HOME/.config/openbox"
+cat > "$USER_HOME/.config/openbox/menu.xml" <<'MENU_EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<openbox_menu xmlns="http://openbox.org/3.4/menu">
+  <menu id="root-menu" label="imag-nb">
+    <item label="Spustiť OBS">
+      <action name="Execute">
+        <command>systemctl --user start imag-obs.service</command>
+      </action>
+    </item>
+    <item label="Zastav OBS (korektne)">
+      <action name="Execute">
+        <command>/usr/local/bin/imag-obs-stop.sh</command>
+      </action>
+    </item>
+    <separator />
+    <item label="Reštartovať počítač">
+      <action name="Execute">
+        <command>systemctl reboot</command>
+      </action>
+    </item>
+    <item label="Vypnúť počítač">
+      <action name="Execute">
+        <command>systemctl poweroff</command>
+      </action>
+    </item>
+  </menu>
+</openbox_menu>
+MENU_EOF
+chown "$DESKTOP_USER:$DESKTOP_USER" "$USER_HOME/.config/openbox/menu.xml"
 
 # =============================================================================
 step 17 "Launch OBS on the desktop session (X11 :0)"
