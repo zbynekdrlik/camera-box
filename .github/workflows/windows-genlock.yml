@@ -274,6 +274,33 @@ jobs:
           }
           Write-Output "ASRC windowed measurement present (#962 window constant + accumulator fields + windowed gate) — OK"
 
+      # #1084: the inner rate estimator must be the sliding least-squares RATE regression (over the
+      # #962 window points), NOT the pre-#1084 fixed-gain time-EMA — the EMA's endpoint-jitter
+      # variance was the global A/V-wander root cause. Mirrors the canonical Linux-CI guard
+      # tests/genlock_preload.rs::vendored_source::asrc_uses_sliding_regression_estimator_1084
+      # (probe-gated, can't compile on this windows runner). Keep both in lock-step.
+      - name: Assert ASRC uses the sliding regression estimator (#1084)
+        shell: pwsh
+        run: |
+          $h = (Get-Content "vendor/obs-studio/libobs/media-io/asrc-compensator.h" -Raw) -replace '\s+', ' '
+          if ($h -notmatch [regex]::Escape('#define ASRC_REGRESSION_SPAN_S 600.0') -or $h -notmatch [regex]::Escape('#define ASRC_REGRESSION_LOCK_SPAN_S 60.0') -or $h -notmatch [regex]::Escape('#define ASRC_REGRESSION_MIN_POINTS 30')) {
+            Write-Error "asrc-compensator.h: #1084 regression constant (ASRC_REGRESSION_SPAN_S/LOCK_SPAN_S/MIN_POINTS) missing or changed"; exit 1
+          }
+          if ($h -notmatch [regex]::Escape('double reg_x[ASRC_REGRESSION_CAP];') -or $h -notmatch [regex]::Escape('bool reg_locked;')) {
+            Write-Error "asrc-compensator.h: #1084 regression point-buffer fields (reg_x[]/reg_locked) missing from struct asrc_compensator"; exit 1
+          }
+          $c = (Get-Content "vendor/obs-studio/libobs/media-io/asrc-compensator.c" -Raw) -replace '\s+', ' '
+          if ($c -notmatch [regex]::Escape('c->estimated_ppm = slope * 1000000.0;')) {
+            Write-Error "asrc-compensator.c: #1084 estimated_ppm no longer set from the least-squares slope (the inner estimator was reverted)"; exit 1
+          }
+          if ($c -notmatch [regex]::Escape('asrc_regression_flush(c);')) {
+            Write-Error "asrc-compensator.c: #1084 regression buffer never FLUSHED on a level shift (starved window / non-positive master)"; exit 1
+          }
+          if ($c -match [regex]::Escape('exp(-window_master_s') -or $c -match [regex]::Escape('ASRC_TIME_CONSTANT_S')) {
+            Write-Error "asrc-compensator.c: #1084 the pre-#1084 time-EMA smoothing is BACK — the estimator must be the sliding regression only"; exit 1
+          }
+          Write-Output "ASRC sliding-regression estimator present (#1084 constants + buffer fields + slope + flush; EMA gone) — OK"
+
       # #942: the A/V-sync dock's in-process lock corrector must be MONITOR-ONLY by build
       # default — the E2E gate (scripts/av_sync_calibrate.py --apply) is the only CONTINUOUS/
       # closed-loop writer of genlock_latency_ms_src (scripts/obs_phase2.py's own bounded
