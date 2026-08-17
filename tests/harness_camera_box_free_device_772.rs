@@ -47,7 +47,11 @@ fn generate(func: &str) -> String {
         .env("SCRIPT", manifest_dir().join(LIB))
         .output()
         .expect("failed to run bash");
-    assert!(out.status.success(), "generator {func} failed: {:?}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "generator {func} failed: {:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
@@ -80,7 +84,10 @@ fn generated_helper_is_recognised_as_burn_scoped_772() {
 #[test]
 fn dropin_wired_rejects_an_unwired_dropin_772() {
     assert!(
-        !predicate("camera_box_free_device_dropin_wired", "[Service]\nExecStart=/usr/local/bin/camera-box\n"),
+        !predicate(
+            "camera_box_free_device_dropin_wired",
+            "[Service]\nExecStart=/usr/local/bin/camera-box\n"
+        ),
         "#772: a drop-in with no ExecStartPre to the helper must NOT be accepted as wired"
     );
 }

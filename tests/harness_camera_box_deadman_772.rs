@@ -97,7 +97,9 @@ fn deadman_action_self_disarms_once_production_is_back_772() {
     let disarm = s
         .rfind("systemctl stop ${CAMERA_BOX_DEADMAN_UNIT}.timer")
         .or_else(|| s.rfind("systemctl stop camera-box-deadman.timer"))
-        .expect("#772: expected the self-disarm stop of the dead-man's own timer inside the action");
+        .expect(
+            "#772: expected the self-disarm stop of the dead-man's own timer inside the action",
+        );
     assert!(
         disarm > start,
         "#772: self-disarm must come AFTER the start (start {start}, disarm {disarm}) -- a failed \
@@ -227,7 +229,10 @@ fn harness_computes_first_fire_from_the_run_duration_772() {
     let s = read(HARNESS);
     let line = s
         .lines()
-        .find(|l| l.trim_start().starts_with("CAMERA_BOX_DEADMAN_FIRST_FIRE_MIN="))
+        .find(|l| {
+            l.trim_start()
+                .starts_with("CAMERA_BOX_DEADMAN_FIRST_FIRE_MIN=")
+        })
         .expect("#772: recording-e2e.sh must compute CAMERA_BOX_DEADMAN_FIRST_FIRE_MIN");
     assert!(
         line.contains("DURATION") && line.contains("OVERHEAD"),
@@ -255,13 +260,17 @@ fn assert_armed_before_stop(s: &str, start_anchor: &str, end_anchor: &str, label
     let end = s[start..]
         .find(end_anchor)
         .map(|i| start + i)
-        .unwrap_or_else(|| panic!("#772 [{label}]: end anchor {end_anchor:?} not found after start"));
+        .unwrap_or_else(|| {
+            panic!("#772 [{label}]: end anchor {end_anchor:?} not found after start")
+        });
     let win = &s[start..end];
     let armed = win.find("camera_box_deadman_arm_cmds").unwrap_or_else(|| {
         panic!("#772 [{label}]: the dead-man must be armed in this site. Window:\n{win}")
     });
     let stopped = win.find("systemctl stop camera-box").unwrap_or_else(|| {
-        panic!("#772 [{label}]: expected the production camera-box stop in this site. Window:\n{win}")
+        panic!(
+            "#772 [{label}]: expected the production camera-box stop in this site. Window:\n{win}"
+        )
     });
     assert!(
         armed < stopped,
