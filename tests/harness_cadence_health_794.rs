@@ -246,6 +246,7 @@ fn measure_no_prior_timestamp_is_unmeasurable() {
 // cadence_classify <fps> <window_s> <advanced> <expected_fps> <tolerance_fps> <min_window_s>
 //                  <expected_live> <box_reachable>  -> OK | WRONG | UNKNOWN | SKIP
 // ---------------------------------------------------------------------------------------------
+#[allow(clippy::too_many_arguments)] // mirrors cadence_classify's own 8-arg CLI contract 1:1
 fn classify(
     fps: &str,
     win: &str,
