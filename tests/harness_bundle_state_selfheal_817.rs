@@ -57,8 +57,8 @@ struct Run {
 /// Source the lib and call `bundle_state_selfheal_fetch strih <dest> 8899 newlevel secret` with a
 /// temp `bin/` (sshpass + curl shims) on PATH. `curl_fail_first`: the curl shim FAILS its first
 /// `curl_fail_first` invocations, then succeeds (writing a JSON body to its `-o` dest). A value
-/// >= the retry count means "always down". Returns exit-ok, combined stdout+stderr, the recorded
-/// sshpass argv, and the dest file contents.
+/// at or above the retry count means "always down". Returns exit-ok, combined stdout+stderr, the
+/// recorded sshpass argv, and the dest file contents.
 fn run_selfheal(curl_fail_first: i64) -> Run {
     let dir = tempfile::tempdir().unwrap();
     let bin = dir.path().join("bin");
