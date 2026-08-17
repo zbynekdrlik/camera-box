@@ -1,0 +1,21 @@
+[Unit]
+# MULTIVIEW-FPS alert (#1083, continuation of #771), DEV1-SIDE. ONE measure -> decide -> alert pass.
+# #771 made the Multiview render cadence VISIBLE (vendored libobs emits `multiview-audit: … rendered_fps=X
+# … floor=F …` ~every 5 s) and gate-able (`mv-fps-gate`), but nothing read it LIVE -- a MV render
+# collapse (measured 2026-08-17: imag to ~12fps for 5 min, strih 4K MV to 9-11fps under an app
+# stealing GPU/CPU) went unalarmed unless someone ran the gate by hand. This dev1 timer reads each
+# OBS box's newest log over ssh, runs `mv-fps-gate` over the latest samples, and pages Discord on a
+# sustained below-floor collapse. The OBS boxes are Windows/Linux appliances with no airuleset
+# checkout / Discord credentials, so the alert MUST come from dev1 (which sits on the rig LAN and
+# hosts every dev1-side alert timer). SAME topology as frozen-input-alert-watchdog.service (#1052) /
+# network-reach-alert-watchdog.service (#1001) / imag-obs-alert-watchdog.service (#882). NEVER
+# reboots (memory rule imag-no-reboot-root-cause): detect + alert only, agent-driven recovery.
+Description=camera-box Multiview-fps alert (#1083) — one measure/decide/alert pass
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Service]
+Type=oneshot
+# %h = the installing user's home on dev1. Adjust if the checkout lives elsewhere.
+ExecStart=%h/devel/camera-box/scripts/mv-fps-alert-watchdog.sh
+# Two ssh OBS-log tails (imag + strih) + local gate runs + a state read; generous but never a hang.
+TimeoutStartSec=120
