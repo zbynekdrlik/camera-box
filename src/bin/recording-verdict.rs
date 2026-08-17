@@ -5290,10 +5290,14 @@ fn build_and_print_verdict(
                 // delivery latency is measurable the SAME digital way as every other camera, no
                 // optical read required for THIS metric.
                 //
-                // Report-only for now: `spread_gate_pass` does NOT fold into `all_pass` — #286
-                // is not yet closed/proven, and this field's purpose right now is to let a
-                // manual re-verification run SEE whether the applied differentiated offsets
-                // collapsed the delivery-time spread, not to add a new standing CI requirement.
+                // #1033: `spread_gate_pass` FOLDS into `all_pass` through the
+                // `delivery_spread_gate` report-only seam (the fold line below) — but that seam
+                // ships `gates_overall_pass()==false` today, so the fold is a NO-OP and the field
+                // still never reds a run. It stays report-only until the fleet is tight-green
+                // (cam1's delivery lottery / issue-909 grabber; recent green runs ~66–81 ms
+                // spread); flipping it LIVE is a one-line follow-up. Its purpose today is still to
+                // let a re-verification run SEE whether the applied differentiated offsets
+                // collapsed the delivery-time spread — now via the standard flip-ready seam.
                 //
                 // #714: keyed by camera, populated below when a --strih recording is present —
                 // consumed further down by the A/V-sync block's `av_window::derive_camera_av_sync`
@@ -9734,11 +9738,13 @@ mod tests {
             "sanity: the field itself must still be present: {v}"
         );
 
-        // The fold `recording-verdict` now makes for this exact `sv.pass == false` outcome: with
-        // the seam report-only today it folds to PASS (a wide spread never reds a run). This is the
-        // one place the wiring reads the seam, so pinning it here catches an accidental
-        // hard-`all_pass &= sv.pass` (which would NOT go through the seam and would red today's
-        // green runs).
+        // Re-pin the seam's report-only contract at the call site, on the EXACT functions the
+        // wiring above invokes (`folds_into_overall_pass`): for this fixture's failing
+        // `sv.pass == false`, the report-only seam folds to PASS today (a wide spread never reds a
+        // run). This does not, and cannot, assert on the fixture's own `overall_pass` (the minimal
+        // 2-window recording reds for unrelated reasons, e.g. the #373 duration floor — the same
+        // reason the OLD test documented) — the pure seam contract is what is verified here, with
+        // `tests/delivery_spread_gate.rs` covering it Tier-0 as well.
         assert!(
             camera_box::delivery_spread_gate::folds_into_overall_pass(false),
             "#1033 report-only: a FAILING delivery spread must fold to pass while the seam is off"
