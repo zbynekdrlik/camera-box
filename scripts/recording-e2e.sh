@@ -234,6 +234,13 @@ CAMBOX_OFFLINE_ACK="$(cambox_offline_ack_effective "${CAMBOX_OFFLINE_ACK:-}" "$R
 # decision lives here so classify() itself (src/render_budget.rs) stays untouched/strict.
 # shellcheck source=scripts/lib/render-health-warmup.sh
 . "$HERE/lib/render-health-warmup.sh"
+# issue 1091 (issue 771 point 3): synchronous MV-fps floor preflight — read each OBS box's newest
+# log's latest `multiview-audit:` sample and fail loud (only on a CONFIRMED sustained collapse) before
+# the run, so the gate never wastes a ~40-min recording on a box whose Multiview render already
+# collapsed. Consumes the same mv-fps-gate binary + mv_audit::gate_log the issue-1083 live watchdog
+# uses; the #675 sourced-lib pattern (source + ONE call line below, no anchored line edited).
+# shellcheck source=scripts/lib/mv-fps-preflight.sh
+. "$HERE/lib/mv-fps-preflight.sh"
 # #833: a MISSING tool on imag-nb (wmctrl, nm) must never be read as a MEASURED zero/empty
 # result -- the #756 projector-count preflight and the [1/8] nm divisor-capability check both
 # shell a remote helper on imag-nb; an absent helper used to be silently misread as "0 projectors"
@@ -2345,6 +2352,11 @@ if [ "$frozen_ok" -ne 1 ]; then
   echo "    [frozen-camera-gate] FROZEN on every one of ${FROZEN_CAM_ATTEMPTS} attempts — a camera is GENUINELY stuck; aborting (#365)"
   exit 1
 fi
+
+echo "[4d1/8] #771 MV-fps floor preflight — strih + imag Multiview projectors must not already be rendering below floor (canvas/2 − tolerance) before we commit a ~40-min run; an unreadable box / a box not yet on the #771 genlock build is report-only, only a CONFIRMED sustained collapse aborts (never false-abort a CI gate)"
+mv_fps_preflight_assert "$PROBE_BIN_DIR/mv-fps-gate" \
+  "strih|$STRIH|win|$STRIH_USER|$STRIH_PW" \
+  "imag|$IMAG_IP|linux|${IMAG_USER:-newlevel}|${IMAG_PW:-newlevel}"
 
 echo "[4d/8] #405/#406/#462 render-budget gate — with burns ON + Multiview open, strih+stream MUST hold the render frame budget (strih 30fps, stream 30fps — Topology v2, #459: strih's 60fps IMAG role moved to imag-nb, which now carries its own render-budget floor too); imag is measured too (60fps) and is STRICT as well (issue 888) — the step aborts if any of the three boxes misses its budget"
 # The 2026-07-02 regression (found when strih was STILL the 60fps LED-wall IMAG box, pre-#459): a

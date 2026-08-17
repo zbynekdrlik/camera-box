@@ -2,9 +2,11 @@
 paths:
   - "scripts/mv-fps-alert-watchdog.sh"
   - "scripts/lib/mv-fps-health.sh"
+  - "scripts/lib/mv-fps-preflight.sh"
   - "src/mv_audit.rs"
   - "src/bin/mv-fps-gate.rs"
   - "systemd/mv-fps-alert-watchdog.*"
+  - "tests/harness_mv_fps_preflight_1091.rs"
   - "vendor/obs-studio/libobs/obs-display-budget.h"
 ---
 
@@ -28,6 +30,37 @@ The Multiview render-cadence stack has THREE layers, don't conflate them:
    `frozen-input-alert-watchdog` / `network-reach-alert-watchdog` (`obs_watchdog_confirm` 2-pass +
    `obs_watchdog_alert_throttle` from `obs-watchdog-decision.sh`, per-box state, no-double-page
    guard reading #1001's netreach state, recovery ping, tap-blind WARN). NEVER reboots.
+
+## The E2E-PREFLIGHT consumer (#1091) — a 4th consumer, SYNCHRONOUS gate-time, never false-aborts
+
+`scripts/lib/mv-fps-preflight.sh` (`mv_fps_preflight_assert`) is the E2E gate's synchronous consumer,
+wired into `scripts/recording-e2e.sh` via the #675 sourced-lib pattern (source + ONE call line, no
+anchored line edited). Reuses `mv_fps_verdict` (layer 2/3) + the `mv-fps-gate` binary — it re-derives
+NO floor and re-parses NO audit line. Learnings for the next preflight that consumes a probe-tools bin:
+
+- **Placement is forced by `PROBE_BIN_DIR`.** `PROBE_BIN_DIR` (the CI probe-tools artifact dir holding
+  `mv-fps-gate`/`frozen-camera-gate`/`render-budget-gate`) is resolved at ~l.1680 of recording-e2e.sh,
+  AFTER the `[0/8]` preflight. A preflight consuming `$PROBE_BIN_DIR/<bin>` must therefore be placed
+  AFTER that, not at `[0/8]`. This one sits at `[4d1/8]`, immediately BEFORE the `[4d/8]` render-budget
+  banner (both are render-health checks; Multiview is already open there).
+- **Anchor discipline near `[4d/8]`.** Insert BEFORE the `[4d/8]` banner (i.e. before `--box "strih=`).
+  The strih→`fi`→`[4e/8]` region is heavily anchored by `harness_render_budget_imag_report_only_888.rs`
+  (which FORBIDS the strings `REPORT-ONLY`/`NOT aborting`/`SKIP_IMAG_RENDER` there) and sliced by
+  `harness_imag_topology.rs` from `--box "strih=` — never add report-only WARN text inside it. Use a
+  unique banner (`[4d1/8]` — NOT a substring of `[4d/8]`) and keep the call's function name off the
+  source-block comment so `s.find("mv_fps_preflight_assert")` lands on the call, not the comment.
+- **`set -e`-SAFE gate call (recording-e2e.sh has `set -euo pipefail`, the watchdog does NOT).** A lib
+  sourced into recording-e2e.sh inherits `-e`, so a non-zero gate exit (BELOW=1/UNKNOWN=2) would ABORT
+  the function mid-flight. Capture the exit with `gate_ec=0; out="$(printf … | "$gate_bin")" || gate_ec=$?`
+  (the `||` list is `-e`-exempt and `$?` in its RHS is the substitution's exit) — never a bare
+  `out="$(… | gate_bin)"; ec=$?`. The watchdog (`set -uo pipefail`, no `-e`) can use the bare form; a
+  recording-e2e.sh consumer cannot.
+- **NEVER false-abort a CI gate (the hardest constraint).** PASS→proceed; UNKNOWN (unreadable log / no
+  audit line / a box not yet on the #771 genlock build / a missing gate binary)→report-only NOTE, never
+  abort; BELOW→a GRACE RE-READ (one short sleep, override `MV_FPS_PREFLIGHT_REPROBE_SLEEP=0` in tests)
+  and only a STILL-below-floor second read aborts (`exit 1`). A box lacking the emit must not block the
+  whole fleet. Tested offline with a fake probe (`MV_FPS_PREFLIGHT_PROBE_CMD`) + a counter-driven fake
+  gate under `set -euo pipefail` (proves the `-e`-safety), no ssh/rig.
 
 ## Floor calibration is DATA-FIRST — mine live `rendered_fps`, don't trust the placeholder
 
