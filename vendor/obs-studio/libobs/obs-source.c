@@ -4832,7 +4832,7 @@ static inline uint64_t genlock_wall_now_ns(void)
 #endif
 }
 
-/* camera-box #800: wall(RTC)-vs-monotonic(QPC) clock drift since OBS start, in ms.
+/* camera-box #800: wall(RTC)-vs-monotonic(QPC) clock drift since the first audit tick, in ms.
  * The video release deadline keys on the WALL clock (genlock_wall_now_ns() =
  * GetSystemTimePreciseAsFileTime on Windows, disciplined by NTP/DanteSync), while the
  * render tick and audio capture ride the MONOTONIC clock (os_gettime_ns() = QPC, free-
@@ -4856,8 +4856,10 @@ static long long genlock_wall_qpc_drift_ms(void)
 		mono_anchor_ns = mono_now_ns;
 		return 0;
 	}
-	/* Both elapseds are non-negative (both clocks move forward, anchor is earlier); their
-	 * signed difference is the drift. int64 holds a day of ns (8.6e13) with vast headroom. */
+	/* The mono elapsed is non-negative (monotonic clock, anchor is earlier); the WALL elapsed
+	 * may go NEGATIVE if NTP/DanteSync steps the RTC back — the signed cast captures that
+	 * correctly (two's-complement), and such a step IS a wall-vs-QPC clock-domain divergence,
+	 * exactly what #800 wants to record. int64 holds a day of ns (8.6e13) with vast headroom. */
 	const long long wall_elapsed = (long long)(wall_now_ns - wall_anchor_ns);
 	const long long mono_elapsed = (long long)(mono_now_ns - mono_anchor_ns);
 	return (wall_elapsed - mono_elapsed) / 1000000;
@@ -5150,7 +5152,7 @@ static void genlock_audit_log(obs_source_t *source, uint64_t now_ns)
 	      * QUIET once the phase converged. Post-deploy verification of this ticket reads it. */
 	     "converge_sheds=%u "
 	     /* camera-box #800: wall(RTC/GetSystemTimePreciseAsFileTime)-vs-monotonic
-	      * (QPC/os_gettime_ns) clock drift since OBS start, in ms. The video release deadline
+	      * (QPC/os_gettime_ns) clock drift since the first audit tick, in ms. The video release deadline
 	      * is WALL-slaved; the render tick + audio capture are QPC-slaved. A day-long
 	      * divergence of the two clock domains is the leading remaining candidate for the #800
 	      * A/V shift the instrumented FIFO already ruled out — one grep of this field over a
