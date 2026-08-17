@@ -1320,3 +1320,74 @@ fn verify_imag_wires_the_727_powerkey_check_into_the_live_flow() {
         "verify-imag.sh check (v) must verify sleep/suspend/hibernate/hybrid-sleep targets are masked (#727)"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// #779 — touchpad usability reprovision-durability gate (w). The pure `imag_touchpad_conf_ok`
+// classifies the live /etc/X11/xorg.conf.d/30-touchpad-tap.conf content read back over SSH: it
+// must ACCEPT the full live InputClass and REJECT a conf missing an option OR carrying the wrong
+// scroll-distance VALUE (a reprovision that regenerated a partial/wrong file must FAIL the gate,
+// not just an absent one — the issue-840 "check the file the provisioner writes" pairing).
+// ---------------------------------------------------------------------------------------------
+
+const GOOD_TOUCHPAD_CONF: &str = r#"Section "InputClass"
+    Identifier "touchpad tap-to-click"
+    MatchIsTouchpad "on"
+    Driver "libinput"
+    Option "Tapping" "on"
+    Option "TappingDrag" "on"
+    Option "NaturalScrolling" "on"
+    Option "ScrollPixelDistance" "50"
+EndSection"#;
+
+#[test]
+fn imag_touchpad_conf_ok_accepts_the_full_live_inputclass_779() {
+    let harness = format!(
+        "CONF={q}{good}{q}\nimag_touchpad_conf_ok \"$CONF\" && echo ACCEPT || echo REJECT",
+        q = "'",
+        good = GOOD_TOUCHPAD_CONF
+    );
+    let (code, out, err) = run_sourced(&harness);
+    assert_eq!(code, 0, "harness/source failed: out={out:?} err={err:?}");
+    assert!(
+        out.contains("ACCEPT"),
+        "imag_touchpad_conf_ok must ACCEPT the full live 30-touchpad-tap.conf (#779): out={out:?} err={err:?}"
+    );
+}
+
+#[test]
+fn imag_touchpad_conf_ok_rejects_a_conf_missing_tap_to_click_779() {
+    // Same conf with the Tapping option removed — a reprovision that dropped tap-to-click must FAIL.
+    let bad = GOOD_TOUCHPAD_CONF.replace("    Option \"Tapping\" \"on\"\n", "");
+    let harness = format!(
+        "CONF={q}{bad}{q}\nimag_touchpad_conf_ok \"$CONF\" && echo ACCEPT || echo REJECT",
+        q = "'",
+        bad = bad
+    );
+    let (code, out, err) = run_sourced(&harness);
+    assert_eq!(code, 0, "harness/source failed: out={out:?} err={err:?}");
+    assert!(
+        out.contains("REJECT"),
+        "imag_touchpad_conf_ok must REJECT a conf missing Option Tapping (#779): out={out:?} err={err:?}"
+    );
+}
+
+#[test]
+fn imag_touchpad_conf_ok_rejects_the_wrong_scroll_distance_value_779() {
+    // The sensitivity value MATTERS: the user tuned ScrollPixelDistance to 50; a reprovision that
+    // regenerated the libinput default (15) or any other value must FAIL, not pass on presence.
+    let bad = GOOD_TOUCHPAD_CONF.replace(
+        "\"ScrollPixelDistance\" \"50\"",
+        "\"ScrollPixelDistance\" \"15\"",
+    );
+    let harness = format!(
+        "CONF={q}{bad}{q}\nimag_touchpad_conf_ok \"$CONF\" && echo ACCEPT || echo REJECT",
+        q = "'",
+        bad = bad
+    );
+    let (code, out, err) = run_sourced(&harness);
+    assert_eq!(code, 0, "harness/source failed: out={out:?} err={err:?}");
+    assert!(
+        out.contains("REJECT"),
+        "imag_touchpad_conf_ok must REJECT the wrong ScrollPixelDistance value (#779): out={out:?} err={err:?}"
+    );
+}
