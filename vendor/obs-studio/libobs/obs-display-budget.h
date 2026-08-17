@@ -149,3 +149,31 @@ static inline uint32_t obs_effective_render_divisor(uint32_t configured_divisor,
 		derived = 1;
 	return derived < configured_divisor ? derived : configured_divisor;
 }
+
+/*
+ * camera-box #771 — MV fps observability: audit-window period + alarm floor.
+ *
+ * render_display() (obs-display.c) emits a `multiview-audit:` line every
+ * MULTIVIEW_AUDIT_WINDOW_NS carrying a throttleable projector's ACTUAL render cadence
+ * (real renders / window), so the multiview fps is VISIBLE in the OBS log (drift-guard /
+ * rig-health-audit / E2E preflight facet) and can be alarmed on a collapse — the user's
+ * binding "multiview musí byť plynulé a merané" requirement.
+ */
+#define MULTIVIEW_AUDIT_WINDOW_NS 5000000000ULL	     /* emit the audit line ~every 5s */
+#define MULTIVIEW_AUDIT_FLOOR_TOLERANCE_FPS 2.0	     /* fps jitter band below the canvas/2 floor */
+
+/*
+ * The MV-fps alarm floor for a canvas rate: canvas_fps/2 − tolerance (#771 design). A
+ * throttleable projector rendering below this over a window has collapsed (freeze / budget
+ * starvation) and must alarm. Pure + dependency-free so the C log line, the E2E gate, and
+ * drift-guard all apply the SAME threshold. Clamped to >= 0 (a degenerate canvas_fps never
+ * yields a negative floor). NOTE: the canvas/2 model is the design default; the exact floor
+ * is calibrated against a measured-healthy rig (the ticket flags this explicitly).
+ *
+ * Tier-0 authority: src/mv_audit.rs::mv_floor_fps (byte-identical results).
+ */
+static inline double obs_multiview_floor_fps(double canvas_fps)
+{
+	double floor_fps = canvas_fps / 2.0 - MULTIVIEW_AUDIT_FLOOR_TOLERANCE_FPS;
+	return floor_fps < 0.0 ? 0.0 : floor_fps;
+}
