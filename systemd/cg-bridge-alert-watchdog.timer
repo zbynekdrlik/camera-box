@@ -8,6 +8,12 @@
 # Ships DISABLED: this timer is NOT enabled by any installer. Enable it after review with
 #   systemctl --user enable --now cg-bridge-alert-watchdog.timer
 # (same DISABLED-by-default convention as #732/#794/#860).
+#
+# BEFORE enabling, run ONE dry-run to confirm the reference/subject source names match strih's
+# actual OBS inputs -- a wrong name reads UNKNOWN (never a page) forever, so a misconfig is silent:
+#   scripts/cg-bridge-alert-watchdog.sh --dry-run
+# It must log verdict=healthy (an idle CG-bridge reads OK/IDLE), NOT verdict=unknown. If it reads
+# unknown, fix CG_BRIDGE_REFERENCE / CG_BRIDGE_SUBJECT (defaults: cg / spout CG) before enabling.
 Description=Run the camera-box strih CG-bridge republish-black alert every 5 min (#1006)
 Documentation=https://github.com/zbynekdrlik/camera-box
 

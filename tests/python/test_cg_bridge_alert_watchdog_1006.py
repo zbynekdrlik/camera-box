@@ -60,6 +60,9 @@ def test_watchdog_help_exits_0_and_explains_the_differential():
     assert r.returncode == 0
     out = r.stdout.lower()
     assert "republish" in out and "differential" in out and "spout" in out
+    # --help must print ONLY the comment header, never leak a code line (the `set -uo pipefail`
+    # line that sits right after the Usage block) — a too-wide sed range is the bug this catches.
+    assert "set -uo pipefail" not in r.stdout
 
 
 def test_watchdog_rejects_an_unknown_arg():
