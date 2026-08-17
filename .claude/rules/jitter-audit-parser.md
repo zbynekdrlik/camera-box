@@ -31,10 +31,14 @@ families** over the SAME log — extend the matching one, never cross-wire them:
    `line[mark_at..].split_whitespace()`; unrecognized tokens (the `'%s':` fragment, an
    emitted-but-derivable field like `dropped=`, the `(#N)` decoration) contain no matching
    `=` and are skipped. Never hand-model the decoration syntax.
-3. **Tier-0 RED→GREEN in this module** — it compiles on default features (no probe/OBS/rig),
-   so `cargo test --lib jitter_audit # airuleset:build-ok` gives an observable red→green. The
-   emitting C++ under `vendor/distroav/**` is CI-only (windows-genlock*/linux-genlock) and is
-   NOT what you touch here — this module is read-only log tooling.
+3. **Tier-0 RED→GREEN in this module** — it compiles on default features (no probe/OBS/rig).
+   NOTE (#771): `# airuleset:build-ok` is DISABLED in camera-box, so `cargo test --lib jitter_audit
+   # airuleset:build-ok` is BLOCKED — it does NOT give a local run. Because this module is pure
+   `std` (no `use camera_box::…`), get the observable red→green with plain standalone rustc instead:
+   `rustc --test --edition 2021 src/jitter_audit.rs -o /tmp/t && /tmp/t` (the #1026 recipe, see
+   `.claude/rules/vendored-libobs-change-safety.md`). The emitting C++ under `vendor/distroav/**` is
+   CI-only (windows-genlock*/linux-genlock) and is NOT what you touch here — this module is
+   read-only log tooling.
 
 ## `genlock-jitter-report` CLI landmine — the `--json` #757 contract
 
