@@ -39,7 +39,7 @@ CADENCE_SOURCES='NDI cam1;NDI cam2;…' scripts/cadence-alert-watchdog.sh --dry-
 ```
 
 Offline smoke-test with a stub (no rig): set `CADENCE_PROBE_CMD` to a command that prints raw OBS
-log text for `<box_ip> <source>` (see the worktree's issue-794 scratchpad stub for the shape).
+log text for `<box_ip>` (all watched sources' audit lines in one output).
 
 ## Enable (dev1, user timer)
 
@@ -69,4 +69,4 @@ systemctl --user list-timers | grep cadence
 | `CADENCE_ALERT_CONFIRM_THRESHOLD` | `2` | consecutive WRONG passes before paging |
 | `CADENCE_ALERT_THROTTLE_PASSES` | `6` | re-alert cadence (~30 min at the 5-min timer) |
 | `CADENCE_TAP_BROKEN_THRESHOLD` | `24` | consecutive blind passes before a "tap broken" WARN (~2 h) |
-| `CADENCE_PROBE_CMD` | (unset) | override the ssh read (dry-run/stub); run with `<box_ip> <source>`, stdout = raw log text |
+| `CADENCE_PROBE_CMD` | (unset) | override the ssh read (dry-run/stub); run ONCE per pass with `<box_ip>`, stdout = raw OBS-log text (all sources' audit lines) |

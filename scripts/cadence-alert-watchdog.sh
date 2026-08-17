@@ -43,11 +43,14 @@
 # "a missing tool must fail LOUD by name, never read as a measured zero" class
 # (.claude/rules/imag-ssh-remote-tool-preflight.md, #833). require_tools aborts the pass loudly.
 #
-# BEST-EFFORT PROBE: one flat `ssh ... powershell` OBS-log tail (a session-agnostic file read,
-# allowed for a headless dev1 watchdog per win-ssh-vs-mcp; NEVER nested PowerShell). A failed/absent
-# read yields an empty sample -> the pure seam returns UNKNOWN -> never a false page. Override the
-# whole read with CADENCE_PROBE_CMD (run with <box_ip> <source>, stdout = the RAW log text) for a
-# --dry-run smoke test or an alternate tap.
+# BEST-EFFORT PROBE: ONE flat `ssh ... powershell` OBS-log tail per PASS -- NOT per source. The tail
+# carries every watched source's audit line, so one fetch + N local greps is identical to N fetches;
+# and N * SSH_TIMEOUT must stay under the unit's TimeoutStartSec (7 sources * 20 s would exceed a 90 s
+# oneshot on a reachable-but-slow box). A session-agnostic file read, allowed for a headless dev1
+# watchdog per win-ssh-vs-mcp; NEVER nested PowerShell. A failed/absent read yields an empty sample ->
+# the pure seam returns UNKNOWN -> never a false page. Override the whole read with CADENCE_PROBE_CMD
+# (run with <box_ip>, stdout = the RAW log text of the newest OBS log) for a --dry-run smoke test or
+# an alternate tap.
 #
 # Usage:
 #   scripts/cadence-alert-watchdog.sh            # one pass: measure -> decide -> alert
@@ -65,7 +68,7 @@ DRY_RUN=0
 case "${1:-}" in
   --dry-run) DRY_RUN=1 ;;
   --help | -h)
-    sed -n '5,56p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '5,58p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
     exit 0
     ;;
   "") : ;;
@@ -136,28 +139,35 @@ require_tools() {
 }
 
 # -- I/O probe (dev1-local; NOT pure -- kept out of the lib) -------------------------------------
-# probe_sample <box_ip> <source> -> stdout: `<received> <timestamp>` (the newest audit line's
-# cumulative received= AND that line's OWN log timestamp), or EMPTY when the read failed / the
-# source's audit line was absent this pass (the seam then returns UNKNOWN -- never a false page).
-# Overridable via CADENCE_PROBE_CMD (stdout = raw log text; the extraction below is applied on top).
-probe_sample() {
-  local ip="$1" source="$2" raw line recv ts
+# fetch_box_log <box_ip> -> stdout: the RAW newest-OBS-log tail (ALL sources' audit lines), or EMPTY
+# on a failed/absent read. Called ONCE per pass (not per source) -- the tail carries every watched
+# source's line, so extract_sample greps each locally. Overridable via CADENCE_PROBE_CMD (run with
+# <box_ip>, stdout = raw log text) for a --dry-run smoke test or an alternate tap.
+fetch_box_log() {
+  local ip="$1"
   if [ -n "${CADENCE_PROBE_CMD:-}" ]; then
-    raw="$($CADENCE_PROBE_CMD "$ip" "$source" 2>/dev/null || true)"
-  else
-    # One flat ssh + single (non-nested) powershell: tail the newest OBS log. `$env:APPDATA` has no
-    # spaces, so no inner double-quotes are needed -> no nested-PowerShell trap (win-ssh-vs-mcp /
-    # rig-state-inspection). Sourcing the whole tail; grep + extract on dev1.
-    # shellcheck disable=SC2086
-    raw="$(timeout "$SSH_TIMEOUT" sshpass -p "$SSH_PW" ssh $SSH_OPTS "$SSH_USER@$ip" \
-      "powershell -NoProfile -Command \"gc (gci \$env:APPDATA\\obs-studio\\logs\\*.txt | sort LastWriteTime | select -last 1).FullName -Tail $OBS_LOG_TAIL\"" \
-      2>/dev/null || true)"
+    $CADENCE_PROBE_CMD "$ip" 2>/dev/null || true
+    return 0
   fi
+  # One flat ssh + single (non-nested) powershell: tail the newest OBS log. `$env:APPDATA` has no
+  # spaces, so no inner double-quotes are needed -> no nested-PowerShell trap (win-ssh-vs-mcp /
+  # rig-state-inspection). Sourcing the whole tail; grep + extract on dev1.
+  # shellcheck disable=SC2086
+  timeout "$SSH_TIMEOUT" sshpass -p "$SSH_PW" ssh $SSH_OPTS "$SSH_USER@$ip" \
+    "powershell -NoProfile -Command \"gc (gci \$env:APPDATA\\obs-studio\\logs\\*.txt | sort LastWriteTime | select -last 1).FullName -Tail $OBS_LOG_TAIL\"" \
+    2>/dev/null || true
+}
+
+# extract_sample <raw_log> <source> -> stdout: `<received> <timestamp>` from the source's NEWEST
+# audit line, or EMPTY when the source's audit line is absent / the received= counter is unreadable
+# (the seam then returns UNKNOWN -- never a false page). Pure text (no I/O), fed the once-fetched log.
+extract_sample() {
+  local raw="$1" source="$2" line recv ts
   line="$(printf '%s\n' "$raw" | grep -F "genlock-fifo audit '$source':" | tail -1)"
   [ -n "$line" ] || return 0
   recv="$(printf '%s\n' "$line" | sed -n 's/.*received=\([0-9][0-9]*\).*/\1/p' | tail -1)"
   # The OBS log prefix: `HH:MM:SS.mmm: <message>`. Extract the leading clock time (its trailing colon
-  # is stripped by cadence_ts_to_seconds). An absent prefix -> empty ts -> the seam returns UNKNOWN.
+  # is stripped by cadence_ts_to_seconds). An absent prefix -> empty ts -> a NOT-usable sample below.
   ts="$(printf '%s\n' "$line" | sed -n 's/^\([0-9][0-9]:[0-9][0-9]:[0-9][0-9][.0-9]*\).*/\1/p' | tail -1)"
   [ -n "$recv" ] || return 0
   printf '%s %s\n' "$recv" "$ts"
@@ -217,19 +227,27 @@ clear_source_throttle() {
 
 # -- per-source decision ------------------------------------------------------------------------
 handle_source() {
-  local source="$1" box_reachable="$2"
-  local k prev_recv prev_ts sample curr_recv curr_ts measure fps window advanced verdict unk tap_alerted
+  local source="$1" box_reachable="$2" raw_log="$3"
+  local k prev_recv prev_ts sample curr_recv curr_ts usable measure fps window advanced verdict unk tap_alerted
   k="$(source_key "$source")"
   prev_recv="$(read_state_field "recv_${k}" "")"
   prev_ts="$(read_state_field "recv_ts_${k}" "")"
 
-  # Skip the ssh probe entirely when the no-double-page guard already forces SKIP (box down per
-  # issue-1001): the verdict is predetermined, and probing a down box would block up to SSH_TIMEOUT.
+  # Extract this source's newest sample from the ONCE-fetched box log. When the no-double-page guard
+  # forced SKIP (box down per issue-1001) the raw log is empty, so the sample is empty and the verdict
+  # is predetermined SKIP.
   curr_recv=""; curr_ts=""
   if [ "$box_reachable" = "1" ]; then
-    sample="$(probe_sample "$CADENCE_IP" "$source")"
+    sample="$(extract_sample "$raw_log" "$source")"
     [ -n "$sample" ] && read -r curr_recv curr_ts <<<"$sample"
   fi
+
+  # A USABLE sample needs BOTH a real received= integer AND a parsed line timestamp -- the rate is
+  # unmeasurable without either. Keying persist + tap-liveness on this PAIR (not just curr_recv)
+  # closes the invariant hole where a valid received= with an EMPTY timestamp would reset the
+  # blind-tap counter yet leave the source UNKNOWN forever (never a page, never a "tap broken" WARN).
+  usable=0
+  case "$curr_recv" in '' | *[!0-9]*) : ;; *) [ -n "$curr_ts" ] && usable=1 ;; esac
 
   measure="$(cadence_measure_fps "$prev_ts" "$prev_recv" "$curr_ts" "$curr_recv")"
   fps="$(measure_field "$measure" fps)"
@@ -239,40 +257,38 @@ handle_source() {
     "$CADENCE_EXPECTED_FPS" "$CADENCE_TOLERANCE_FPS" "$CADENCE_MIN_WINDOW_S" "$EXPECTED_LIVE" "$box_reachable")"
   log "'$source' on $CADENCE_NAME: prev=${prev_recv:-<none>}@${prev_ts:-<none>} curr=${curr_recv:-<none>}@${curr_ts:-<none>} fps=${fps:-<n/a>} win=${window:-<n/a>} adv=${advanced:-<n/a>} reachable=$box_reachable -> $verdict"
 
-  # Persist the new baseline ONLY when the current sample is a real integer (a failed/absent read
-  # must not clobber the last good baseline -- next pass then still has a value to compare against).
-  case "$curr_recv" in '' | *[!0-9]*) : ;; *) write_state_field "recv_${k}" "$curr_recv"; write_state_field "recv_ts_${k}" "$curr_ts" ;; esac
+  # Persist the new baseline ONLY when the sample is USABLE (recv integer + ts present) -- a
+  # failed/absent/timestampless read must not clobber the last good baseline (next pass then still
+  # has a value to compare against).
+  [ "$usable" = 1 ] && { write_state_field "recv_${k}" "$curr_recv"; write_state_field "recv_ts_${k}" "$curr_ts"; }
 
-  # Tap-liveness -- only meaningful when we actually PROBED (box_reachable=1). A probe returning NO
-  # usable received value is a BLIND tap: it stays UNKNOWN forever and never pages while the watchdog
-  # looks green. Track consecutive blind passes and fire ONE "tap broken" WARN past the threshold. A
-  # probe returning a REAL integer proves the tap works (even when the verdict is UNKNOWN from a
+  # Tap-liveness -- only meaningful when we actually PROBED (box_reachable=1). A probe that yields no
+  # USABLE (recv + ts) sample is a BLIND tap: it stays UNKNOWN forever and never pages while the
+  # watchdog looks green. Track consecutive blind passes and fire ONE "tap broken" WARN past the
+  # threshold. A usable sample proves the tap works (even when the verdict is UNKNOWN from a
   # first-sample / short-window / reset) -> reset. A SKIP pass (box down) leaves the counter untouched.
   if [ "$box_reachable" = "1" ]; then
-    case "$curr_recv" in
-      '' | *[!0-9]*)
-        unk="$(read_state_field "unknown_${k}" 0)"
-        case "$unk" in '' | *[!0-9]*) unk=0 ;; esac
-        unk=$((unk + 1))
-        write_state_field "unknown_${k}" "$unk"
-        tap_alerted="$(read_state_field "tap_broken_${k}" 0)"
-        if [ "$unk" -ge "$TAP_BROKEN_THRESHOLD" ] && [ "$tap_alerted" != "1" ]; then
-          if [ "$DRY_RUN" -eq 1 ]; then
-            log "[dry-run] WOULD alert: '$source' tap BROKEN (no audit line for $unk consecutive passes)"
-          else
-            log "ALERT: firing Discord notification for '$source' tap broken"
-            python3 "$NOTIFY" notify --body \
-              "⚠️ #794 cadence: no \`genlock-fifo audit '$source'\` line on $CADENCE_NAME for $unk consecutive passes ($REPO_SLUG). The cadence TAP for this source is BLIND (source renamed / dropped from the scene, camera absent, or CADENCE_SOURCES drifted from the live label) -- non-60 cadence coverage for '$source' is OFF until fixed." \
-              >/dev/null 2>&1 || log "tap-broken: airuleset.py notify failed (non-fatal)"
-          fi
-          write_state_field "tap_broken_${k}" 1
+    if [ "$usable" = 1 ]; then
+      write_state_field "unknown_${k}" 0
+      write_state_field "tap_broken_${k}" 0
+    else
+      unk="$(read_state_field "unknown_${k}" 0)"
+      case "$unk" in '' | *[!0-9]*) unk=0 ;; esac
+      unk=$((unk + 1))
+      write_state_field "unknown_${k}" "$unk"
+      tap_alerted="$(read_state_field "tap_broken_${k}" 0)"
+      if [ "$unk" -ge "$TAP_BROKEN_THRESHOLD" ] && [ "$tap_alerted" != "1" ]; then
+        if [ "$DRY_RUN" -eq 1 ]; then
+          log "[dry-run] WOULD alert: '$source' tap BROKEN (no usable audit sample for $unk consecutive passes)"
+        else
+          log "ALERT: firing Discord notification for '$source' tap broken"
+          python3 "$NOTIFY" notify --body \
+            "⚠️ #794 cadence: no usable \`genlock-fifo audit '$source'\` sample (received= + timestamp) on $CADENCE_NAME for $unk consecutive passes ($REPO_SLUG). The cadence TAP for this source is BLIND (source renamed / dropped from the scene, camera absent, CADENCE_SOURCES drifted, or the log prefix is unparseable) -- non-60 cadence coverage for '$source' is OFF until fixed." \
+            >/dev/null 2>&1 || log "tap-broken: airuleset.py notify failed (non-fatal)"
         fi
-        ;;
-      *)
-        write_state_field "unknown_${k}" 0
-        write_state_field "tap_broken_${k}" 0
-        ;;
-    esac
+        write_state_field "tap_broken_${k}" 1
+      fi
+    fi
   fi
 
   # OK cadence -> recovery path (fire one recovery ping if we had paged), clear throttle.
@@ -354,13 +370,16 @@ main() {
 
   # No-double-page guard: the box hosting the camera inputs must be reachable per issue-1001's OWN
   # on-disk state, else issue-1001 already owns the page -> box_reachable=0 -> every source SKIPs.
-  local box_down box_reachable
+  local box_down box_reachable raw_log=""
   box_down="$(netreach_box_alerted "$CADENCE_NAME")"
   if [ "$box_down" = "1" ]; then
     box_reachable=0
     log "issue-1001 state: $CADENCE_NAME down=$box_down -> #1001 owns the page, SKIP all sources this pass"
   else
     box_reachable=1
+    # Fetch the newest OBS-log tail ONCE for the whole pass -- it carries every watched source's
+    # audit line, so each handle_source greps its own from this one text (one ssh, not one per source).
+    raw_log="$(fetch_box_log "$CADENCE_IP")"
   fi
 
   # Iterate ';'-separated source names (they contain spaces, so split on ';' not whitespace).
@@ -372,7 +391,7 @@ main() {
     IFS="$old_ifs"
     source="${source#"${source%%[![:space:]]*}"}"   # ltrim
     source="${source%"${source##*[![:space:]]}"}"    # rtrim
-    [ -n "$source" ] && handle_source "$source" "$box_reachable"
+    [ -n "$source" ] && handle_source "$source" "$box_reachable" "$raw_log"
     IFS=';'
   done
   IFS="$old_ifs"
