@@ -17,7 +17,7 @@
 //! effects) and exercise the pure functions + the sourced watchdog directly. RED before the lib /
 //! watchdog exist (sourcing fails, every test fails); GREEN after.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn manifest_dir() -> PathBuf {
@@ -156,7 +156,10 @@ fn run_watchdog(args: &[&str], envs: &[(&str, &str)], extra_body: &str) -> (i32,
         extra = extra_body
     );
     let mut cmd = Command::new("bash");
-    cmd.arg("-c").arg(&harness).env("WD", watchdog()).current_dir(manifest_dir());
+    cmd.arg("-c")
+        .arg(&harness)
+        .env("WD", watchdog())
+        .current_dir(manifest_dir());
     for (k, v) in envs {
         cmd.env(k, v);
     }
@@ -179,13 +182,19 @@ fn watchdog_sourcing_defines_functions_and_runs_nothing() {
     assert_eq!(rc, 0, "sourcing failed: {err}");
     let (_rc2, out2, _e2) = run_watchdog(&[], &[], "echo READY");
     // The `DEFS` echo above and this READY prove main did not auto-run its own 'pass start' log.
-    assert!(out2.contains("READY"), "sourcing should be side-effect free");
+    assert!(
+        out2.contains("READY"),
+        "sourcing should be side-effect free"
+    );
     let (_rc3, out3, _e3) = run_watchdog(
         &[],
         &[],
         "type main >/dev/null 2>&1 && type handle_box >/dev/null 2>&1 && echo DEFS",
     );
-    assert!(out3.contains("DEFS"), "watchdog must define main + handle_box when sourced");
+    assert!(
+        out3.contains("DEFS"),
+        "watchdog must define main + handle_box when sourced"
+    );
 }
 
 #[test]
@@ -198,7 +207,10 @@ fn watchdog_help_exits_zero() {
         .expect("run --help");
     assert_eq!(out.status.code(), Some(0));
     let text = String::from_utf8_lossy(&out.stdout);
-    assert!(text.to_lowercase().contains("watchdog"), "help should describe the watchdog");
+    assert!(
+        text.to_lowercase().contains("watchdog"),
+        "help should describe the watchdog"
+    );
 }
 
 // -------------------------------------------------------------------------------------------
@@ -225,7 +237,7 @@ fn temp_dir(tag: &str) -> PathBuf {
 }
 
 /// A fake gate that ignores stdin, prints $FAKE_GATE_OUT, exits $FAKE_GATE_EXIT.
-fn write_fake_gate(dir: &PathBuf) -> PathBuf {
+fn write_fake_gate(dir: &Path) -> PathBuf {
     let p = dir.join("fake-gate.sh");
     std::fs::write(
         &p,
@@ -237,7 +249,7 @@ fn write_fake_gate(dir: &PathBuf) -> PathBuf {
 }
 
 /// A fake probe that ignores its <ip> <os> args and prints $FAKE_PROBE_OUT.
-fn write_fake_probe(dir: &PathBuf) -> PathBuf {
+fn write_fake_probe(dir: &Path) -> PathBuf {
     let p = dir.join("fake-probe.sh");
     std::fs::write(
         &p,
@@ -248,11 +260,7 @@ fn write_fake_probe(dir: &PathBuf) -> PathBuf {
     p
 }
 
-fn base_env<'a>(
-    state: &'a str,
-    gate: &'a str,
-    probe: &'a str,
-) -> Vec<(&'a str, &'a str)> {
+fn base_env<'a>(state: &'a str, gate: &'a str, probe: &'a str) -> Vec<(&'a str, &'a str)> {
     vec![
         // ONE box, so per-pass reasoning is unambiguous.
         ("MV_FPS_BOXES", "imag|10.0.0.1|linux"),
@@ -278,18 +286,27 @@ fn below_floor_needs_two_confirms_before_it_would_page() {
 
     let mut env = base_env(&state, &gate_s, &probe_s);
     env.push(("FAKE_GATE_EXIT", "1"));
-    env.push(("FAKE_GATE_OUT", "FAIL monitor=1 rendered_fps=9.0 < floor=13.0"));
+    env.push((
+        "FAKE_GATE_OUT",
+        "FAIL monitor=1 rendered_fps=9.0 < floor=13.0",
+    ));
     env.push(("FAKE_PROBE_OUT", below_log));
 
     // Pass 1: below floor, but only 1 confirm -> HOLD, never "WOULD alert".
     let (rc1, _o1, e1) = run_watchdog(&["--dry-run"], &env, "main");
     assert_eq!(rc1, 0, "pass1 failed: {e1}");
-    assert!(!e1.contains("WOULD alert"), "pass1 must not page on a single below-floor read:\n{e1}");
+    assert!(
+        !e1.contains("WOULD alert"),
+        "pass1 must not page on a single below-floor read:\n{e1}"
+    );
 
     // Pass 2: still below floor, same log id -> confirmed -> WOULD alert (dry-run only logs).
     let (rc2, _o2, e2) = run_watchdog(&["--dry-run"], &env, "main");
     assert_eq!(rc2, 0, "pass2 failed: {e2}");
-    assert!(e2.contains("WOULD alert"), "pass2 must page once confirmed across 2 passes:\n{e2}");
+    assert!(
+        e2.contains("WOULD alert"),
+        "pass2 must page once confirmed across 2 passes:\n{e2}"
+    );
 }
 
 #[test]
@@ -309,7 +326,10 @@ fn healthy_pass_never_pages() {
     for _ in 0..3 {
         let (rc, _o, e) = run_watchdog(&["--dry-run"], &env, "main");
         assert_eq!(rc, 0, "healthy pass failed: {e}");
-        assert!(!e.contains("WOULD alert"), "a healthy (PASS) pass must never page:\n{e}");
+        assert!(
+            !e.contains("WOULD alert"),
+            "a healthy (PASS) pass must never page:\n{e}"
+        );
     }
 }
 
@@ -327,7 +347,10 @@ fn an_obs_restart_between_passes_resets_the_confirm_streak() {
 
     let mut env = base_env(&state, &gate_s, &probe_s);
     env.push(("FAKE_GATE_EXIT", "1"));
-    env.push(("FAKE_GATE_OUT", "FAIL monitor=1 rendered_fps=9.0 < floor=13.0"));
+    env.push((
+        "FAKE_GATE_OUT",
+        "FAIL monitor=1 rendered_fps=9.0 < floor=13.0",
+    ));
 
     // Pass 1: below on log-1 (confirm -> 1).
     let mut env1 = env.clone();
@@ -362,6 +385,9 @@ fn an_unreadable_box_is_unknown_and_never_pages() {
     for _ in 0..3 {
         let (rc, _o, e) = run_watchdog(&["--dry-run"], &env, "main");
         assert_eq!(rc, 0, "unknown pass failed: {e}");
-        assert!(!e.contains("WOULD alert"), "an unreadable box must never page:\n{e}");
+        assert!(
+            !e.contains("WOULD alert"),
+            "an unreadable box must never page:\n{e}"
+        );
     }
 }
