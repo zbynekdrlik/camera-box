@@ -214,6 +214,13 @@ pub mod zero_loss_restart_survival;
 // `docs/genlock-latency-floor-rationale.md`.
 pub mod jitter_audit;
 
+// #771 — MV fps observability: parse the vendored libobs `multiview-audit:` log line (the
+// per-projector real render cadence emitted every ~5s by render_display()) + apply the
+// canvas/2 alarm floor (byte-identical to obs_multiview_floor_fps() in obs-display-budget.h).
+// Pure Tier-0 (no probe/OBS/rig); the E2E-preflight / drift-guard consumer is the thin
+// `src/bin/mv-fps-gate.rs`. The receive-side NDI cadence is separate (jitter_audit above).
+pub mod mv_audit;
+
 // #624 — cross-camera cam2->camera switch-latency SPREAD gate (pure decision): given each
 // camera's measured cam2->camera median (p50) latency (the per-camera photon->dequeue latency
 // d_X baked in by the #286 root cause), computes the cross-camera spread and gates it against
@@ -352,6 +359,10 @@ pub mod offline_ack;
 // `probe::recording_segments::window_segment`/`segment_continuity` only CALL it. Deleted
 // together with #881 (connect cam2's 120Hz monitor, restore the term to absolute zero).
 pub mod burn_hold;
+// #768 — REPORT-ONLY cold-cut onset seam: the first ~1s after a program switch to a cambox hidden
+// >= 60s (the transition the segmenter's guard discards, so nothing measured it — the blind spot
+// that let issue 767 through). Pure crate-root logic (Tier-0), consumed thinly by recording-verdict.
+pub mod cold_cut;
 pub mod e2e_latency_gate;
 pub mod optical_floor;
 

@@ -253,6 +253,23 @@ EOF
     udev_camera_box_helper_script_content > "$MOUNT_ROOT/usr/local/bin/camera-box-udev-video-add.sh"
     chmod +x "$MOUNT_ROOT/usr/local/bin/camera-box-udev-video-add.sh"
 
+    # #448 (2026-07-18 rescope, event finding #8): force-load the Intel iGPU DRM module at boot so a
+    # HEADLESS first boot (no monitor attached) still brings up /dev/dri + /dev/fb0 for the painter /
+    # cameraman-monitor framebuffer chain. On cam5-class hardware `i915` is only udev-probed when a
+    # display is present, so a monitor-less box came up with no framebuffer (no cameraman monitor);
+    # cam5 was recovered live by pinning `i915` in modules-load.d. systemd-modules-load.service (a
+    # static, always-run unit) reads /etc/modules-load.d/*.conf and force-loads each named module --
+    # no enable step needed. Plain host-side write (no chroot; nothing here calls apt/systemctl),
+    # mirroring the udev/log-bound bakes above. The OPERATOR half -- first PHYSICAL boot of a GPU box
+    # WITH a monitor connected so the connector/framebuffer initializes -- is documented in SETUP.md.
+    mkdir -p "$MOUNT_ROOT/etc/modules-load.d"
+    cat > "$MOUNT_ROOT/etc/modules-load.d/i915.conf" << 'MODLOAD_EOF'
+# camera-box (#448): force the Intel iGPU DRM module at boot so a headless first boot (no monitor)
+# still brings up /dev/dri + /dev/fb0 for the painter / cameraman monitor. A future non-Intel cam
+# box swaps in its platform's DRM module name here (one module name per line).
+i915
+MODLOAD_EOF
+
     # Create setup script to run inside chroot
     cat > "$MOUNT_ROOT/tmp/setup.sh" << 'SETUP_EOF'
 #!/bin/bash

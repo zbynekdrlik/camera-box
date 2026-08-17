@@ -1,0 +1,29 @@
+# imag OBS render watchdog systemd unit.
+# Captured into the repo (single source of truth) by issue 764's provisioning path; alarm-only
+# Description fixed by issue 778. The script (scripts/imag-obs-watchdog.py, installed to
+# /usr/local/sbin/) is ALARM-ONLY and NEVER reboots the box: it detects an OBS render wedge, writes
+# a forensic snapshot, and fires a Discord alarm (via the dev1-side relay), then WAITS for a human.
+# It only relaunches a genuinely DEAD OBS process (recovery, not a reboot).
+#
+# Provisioned INSTALLED-BUT-DISABLED (setup-imag.sh installs but does NOT enable it) per the
+# issue-791 agreed model: OBS keep-alive is handled by imag-obs.service (Restart=on-failure, issue
+# 882) + a dev1-side alert watchdog; this on-imag watchdog is a dormant, ready-to-enable-after-issue-788
+# artifact that verify-imag.sh check (p) requires present-but-disabled. The [Install] section below is
+# what lets `systemctl is-enabled` report exactly 'disabled' (not 'static') in that model.
+#
+# NEVER add reboot / StopStream / StopRecord behaviour here — the standing rule is alarm-only.
+[Unit]
+Description=imag OBS render watchdog: detect wedge -> snapshot + Discord alarm (ALARM-ONLY, NEVER reboots)
+After=multi-user.target
+
+[Service]
+Type=simple
+# Runs as root: the tracked script writes /home/newlevel/imag-watchdog-alarms.jsonl and drops to the
+# `newlevel` user itself when it relaunches a dead OBS. Restart=always keeps the WATCHDOG poll loop
+# alive if IT crashes (this restarts the watchdog process, NOT OBS — OBS supervision is imag-obs.service).
+ExecStart=/usr/bin/python3 /usr/local/sbin/imag-obs-watchdog.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

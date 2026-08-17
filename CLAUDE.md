@@ -13,6 +13,7 @@ Rust app for embedded NDI cameras (CAM1-4): multi-camera NDI streaming with soft
 - Genlock OBS (deployed state, monorepo direction, NDI input mapping, timecode lag) → load `.claude/skills/genlock`
   - Genlock latency is ONE user knob in MS (#235): `OBS_GENLOCK_LATENCY_MS=N` (canonical; `OBS_GENLOCK_RESERVE_MS` is the back-compat alias; prod=3ms). Setting it implies ts-align on; preload is internal/auto-derived. Display: `latency = N ms (≈ M frames)`.
 - OBS launch/recovery on strih/stream → load `.claude/skills/obs-ops`
+- OBS launch-path contract (.lnk primary + per-box params test-pinned; obs-guarded-launch.ps1 bare-no-args = correct for stream; strih AHK versioned at scripts/strih/NL_STARTUP.ahk, #774/#775) → `.claude/rules/obs-launch-paths.md` (auto-loads on its `paths:`)
 - `--display` HDMI path (connector/phantom-fb detect, upscale cap, capture-dropped counter) → load `.claude/skills/display`
 - CI artifacts, Discord notify, probe binary flow → load `.claude/skills/ci`
 - E2E zero-loss testing (acceptance criteria, QR harness, reporting scope, active fleet size / `CAMERA_ACTIVE_SET` reactivation) → load `.claude/skills/e2e`
@@ -27,6 +28,7 @@ Rust app for embedded NDI cameras (CAM1-4): multi-camera NDI streaming with soft
 - imag-nb SSH-remote tool preflight (a missing wmctrl/nm must fail loud by name, never read as a measured zero, #833) → `.claude/rules/imag-ssh-remote-tool-preflight.md` (auto-loads on its `paths:`)
 - Presenter DRM device selection + dual-QR Vernier payload stability (`/dev/dri/cardN` renumbering, #854) → `.claude/rules/presenter-drm-selection.md` (auto-loads on its `paths:`)
 - `recording-e2e.sh` cleanup()'s always-runs stream-latency restore composing with a late OBS write (#856) + the 703 byte-window test → `.claude/rules/recording-e2e-cleanup-composition.md` (auto-loads on its `paths:`)
+- On-box dead-man for PRODUCTION camera-box.service + the ExecStartPre device-free bake-in (#772): the KEY difference from cam2-painter-deadman — the burn never self-terminates, so DELAY the first fire past the run window instead of a presence-guard; + the systemd-run-action nested-quoting layering; + running compiled test binaries directly under #477 → `.claude/rules/camera-box-deadman.md` (auto-loads on its `paths:`)
 - `setup-device.sh`/`verify-device.sh` companion conventions (enable-only never live-start, the `(q)`-must-stay-last check ordering, cam2-painter display-ownership, #863) → `.claude/rules/provisioning-scripts.md` (auto-loads on its `paths:`)
 - DanteSync clock-offset gate (#8 precondition: HTTP-vs-journal grading paths, the #1021/#1022/#1041/#1055 master-slew false-DRIFT lineage + master-independent journal step-correlation rescue, the onset-drift recency anchor, `DANTESYNC_GATE_LINUX_{JOURNAL,HTTP}_<NAME>` fixture seams: journal env is a FILE PATH not content, distinct-`updated_ts` requirement) → `.claude/rules/dantesync-clock-offset-gate.md` (auto-loads on its `paths:`)
 - Reading dantesync's own VERSION (`dantesync --version` answers on every platform, no journal/bundle-state coupling, pin-vs-relative-parity comparison model, #862) → `.claude/rules/dantesync-version-reading.md` (auto-loads on its `paths:`)
@@ -44,6 +46,7 @@ Rust app for embedded NDI cameras (CAM1-4): multi-camera NDI streaming with soft
 - Walking `WINDOW_COPIES_GAPS_TOLERANCE` up/down = a DATA-FIRST step (mine the verdict per-window copies/gaps distribution, segregate pre/post-fix by the RIG-VERIFIED genlock-OBS deploy time — verdicts record no version — exclude convergence-transient + dead-painter runs, step to the tightest value the steady post-fix data supports, keep the walk-down on its own ticket; #1031) → `.claude/rules/window-gate-tolerance-walkdown.md` (auto-loads on its `paths:`)
 - Restoring a #904-style relaxed verdict-gate constant (RED→GREEN with no local compile path, keep the mechanism dormant not deleted, #905) → `.claude/rules/gate-allowance-restore-red-green.md` (auto-loads on its `paths:`)
 - Calibrating + wiring a NEW fused-verdict gate seam (mine local verdict JSONs for the distribution, pick the tight-green-ceiling signal, rate=one-term vs count=two-terms, LIVE-vs-report-only via the cam1-grabber issue-909 empirical test, the `gates_overall_pass()` one-line seam, #1036) → `.claude/rules/verdict-gate-seam-calibration.md` (auto-loads on its `paths:`)
+- The cam2 Vernier `tick` decodes on EVERY cambox window on the splitter rig (CAM1/CAM3 undecodable≈0, populated presentation_cadence) — the `recording_segments.rs` "non-cam2 → tick None" doc is STALE; verify tick-decodability from verdict data, not that doc; re-confirm per-cambox before flipping any tick-based gate LIVE (#768) → `.claude/rules/cambox-tick-decodability.md` (auto-loads on its `paths:`)
 - `DockLockCorrector` hold-band boundary tuning (verify what the test suite pins before closing/widening an interval — degenerate vs ordinary margin, #942) → `.claude/rules/dock-lock-hold-band.md` (auto-loads on its `paths:`)
 - Refactoring the dock-lock if/else-if/else decision chain in `sync-test-output.cpp` (stale text-anchor gates hide in a probe-gated Rust test AND both windows-genlock*.yml pwsh steps, all invisible to local Tier-0 checks, #955; a NEW emit-site guard needs its own pwsh mirror too, #999/#1005) → `.claude/rules/av-sync-dock-anchor-refactor-safety.md` (auto-loads on its `paths:`)
 - Writing a NEW `tests/av_sync_dock_*.rs` twin-harness test (the `r#"..."#` raw-string vs an embedded `"#<N>:` CHECK message collision; incremental bimodal test-batch construction can trigger a premature degenerate lock, #999/#1005) → `.claude/rules/av-sync-dock-twin-harness-testing.md` (auto-loads on its `paths:`)
@@ -72,6 +75,8 @@ Rust app for embedded NDI cameras (CAM1-4): multi-camera NDI streaming with soft
 - Measurement-burn OFF/CHECK/RESTORE target set — ENUMERATE ndi_source inputs over WS (obs_burn_filter.py sweep-check/sweep-off), never a static or CAMERA_ACTIVE_SET list; fail CLOSED on a failed GetInputList (#938/#1011 leak, guard class #246/#844) → `.claude/rules/burn-target-enumeration.md` (auto-loads on its `paths:`)
 - dev1 fresh-OBS-start burn reconciliation for UNATTENDED strih/stream starts (renderTotalFrames restart signal via obs_burn_filter session-probe; discriminator is a FRESH START not burn-presence — a persistent TEST burn is legit; durable ~/.camera-box baseline never tmpfs; defer while #281 heartbeat/#830 lease coordinate; unresolved-retry; fail-closed; #1060) → `.claude/rules/obs-burn-reconcile-watchdog.md` (auto-loads on its `paths:`)
 - Reading/verifying per-source genlock latency pins (authoritative key is `genlock_latency_ms_src` over WS, NOT bundle-state's DistroAV-stock `ndi_input_latency`=0; verify-at-start is REPORT-ONLY vs `scripts/latency-pins-baseline.json`; fail-closed enumeration vs honest-None per-input read, #1061/#866) → `.claude/rules/latency-pins-verify.md` (auto-loads on its `paths:`)
+- Per-cambox HDMI-splitter-port no-signal recurrence watch (dev1-side timer reads each ACTIVE cambox's last `capture chroma:` journal line; SELF-ANCHORING discriminator — PAGE (`DEAD_PORT`) only when a box is capturing-but-GRAYSCALE AND ≥1 sibling on the SAME camera+splitter is proven-good; `capturing=0` = `NO_CAPTURE` report-only, NOT a splitter-port page — it is the routine cambox-down/device-busy/E2E-stop class, a mis-attribution otherwise; all-grey = `SOURCE_WIDE` report-only; the FIRST check for "weird colours on some cameras" = per-box signal presence not card tuning; Elgato purple-noise residual; #739) → `.claude/rules/splitter-port-health-watchdog.md` (auto-loads on its `paths:`)
+- MV-clone-vs-main presentation SKEW via OBS-WS screenshots (the `t_send` latch-timing + local-wall-gap compensation — RPC-midpoint stamping is the noise source; universal-painter vs cam1-burn run_id; shared-source regression-guard reframing; imag WS uses OBS_PASSWORD not IMAG_PW, #761) → `.claude/rules/mv-skew-measurement.md` (auto-loads on its `paths:`)
 
 ## DO NOT DELETE These Files
 
@@ -324,9 +329,10 @@ verify your OWN anchor is unique too — you can self-collide, not just collide 
 existing test.**
 
 **Mitigation:** after ANY edit to `scripts/recording-e2e.sh` OR `scripts/rig-mode.sh`, run the FULL `cargo test` suite —
-not just your own new/targeted test file — before pushing (`cargo test # airuleset:build-ok`
-locally bypasses the Tier-0 build-block for this one-off check; Tier-0 policy is otherwise
-`cargo test --no-run` only, see below). A failure elsewhere in the suite right after touching this
+not just your own new/targeted test file — before pushing. Since the `# airuleset:build-ok` bypass
+is DISABLED here (#477, see Local Build Policy below), do this by `cargo test --no-run` (compiles
+every binary, allowed) then running each affected compiled binary DIRECTLY from
+`target/debug/deps/…`. A failure elsewhere in the suite right after touching this
 file is very likely a textual collision, not a real regression — grep the failing test's
 `.find(...)` argument (or the surrounding slice logic) to see which literal string or adjacency
 moved, then reword your new text (or relocate it) so it no longer matches/breaks that anchor.
@@ -494,6 +500,34 @@ A NON-TRIVIAL design comment additionally needs 2-3 NUMBERED approaches (`Approa
 `classify_triage_and_approaches` shape); one chosen + one rejected reads as trivial and is rejected.
 (Incident 2026-08-16, #1070/#1075 batch: 4 comments posted via `gh api` never registered — had to
 delete them and re-post via `gh issue comment`.)
+## GOTCHA — the design/validated/reviewed marker recorder needs `gh issue comment`, and its re-read intermittently times out on this repo
+
+The autopilot design-gate has THREE mandatory durable comments (validated at STEP 0, design before
+first code commit, reviewed at CYCLE step 6); a hook writes a `~/.claude/{design,validated,reviewed}
+-posted/camera-box#<N>` marker for each, and `block-commit-without-design.sh` blocks the first commit
+until the DESIGN marker exists. Three things bite on THIS repo specifically:
+
+- **The recorder (`post-record-design-comment.sh`) fires ONLY on a `gh issue comment` Bash call** — it
+  word-matches `gh issue comment`, then re-reads the issue and classifies the FRESHEST comment you
+  authored in the last 180s. Posting the comment via `gh api repos/.../issues/<N>/comments -F body=@…`
+  (the projectCards-safe path the sibling gotchas above recommend for PR bodies) posts the comment
+  fine but writes NO marker → the commit stays blocked. Post design/validation/review comments with
+  `gh issue comment <N> --body-file <abs>` so the recorder runs. (`gh issue comment` itself works here;
+  only `gh issue view`/`gh pr edit`'s GraphQL hits projectCards.)
+- **The recorder's own `gh issue view <N> --json comments` re-read INTERMITTENTLY times out at 10s on
+  this repo** (see `~/.claude/design-gate-errors.log` — many `gh-view #N … TimeoutExpired`), and a
+  returncode-nonzero read is a SILENT `continue` (no marker, no reject, no log). So a correctly-shaped
+  comment can still leave no marker. After each such post, `ls ~/.claude/<kind>-posted/camera-box#<N>`;
+  if missing (and not in `…-rejected/`), the read timed out — re-post the SAME comment (delete the
+  prior one via `gh api -X DELETE …/issues/comments/<id>` to avoid a dup) when the query is fast.
+- **A NON-TRIVIAL design comment must match the exact classifier shape or it lands in
+  `design-rejected/`:** a `Triage:` line naming non-trivial, ≥2 NUMBERED approaches spelled
+  `Prístup/Approach/Možnosť/Variant 1-3` (NOT `A)/B)`), a trade-off word (`Trade-off`/`výhod`/…), and
+  an `Architektúra:` section (colon or `###` heading) containing a structure word
+  (`štruktúra`/`topológia`/`structure`), ≥400 chars. VERIFY locally before posting:
+  `python3 -c "import sys; sys.path.insert(0,'/home/newlevel/devel/airuleset'); import design_gate as
+  dg; b=open('body.md').read(); print(dg.classify_design_comment(b), dg.classify_triage_and_approaches(b),
+  dg.classify_architecture_section(b))"` — all three must be `(True, …)`.
 
 ## GOTCHA — a live-triggered E2E gate run can race ahead of a mid-cycle fleet redeploy
 
@@ -567,15 +601,22 @@ on default features — the `src/reannounce.rs` / `src/colour_scale.rs` (#367) p
 the probe-gated code (`src/probe/…`) iterate/call it. The pure module's tests run on default
 features; the probe-gated glue (framebuffer blit, ioctl) gets a thin probe-gated test CI runs.
 To OBSERVE RED→GREEN on a cheap default-feature test (the Tier-0 hook blocks all `cargo test`
-that RUNS), append the one-off bypass: `cargo test --lib <module> # airuleset:build-ok` (or
-`--test <file>`).
+that RUNS): the `# airuleset:build-ok` bypass is **DISABLED for camera-box (airuleset #477)** — the
+marker is now a no-op here and `cargo test`/`--lib`/`--test` that RUNS is hard-blocked regardless.
+The working pattern is **compile with `--no-run`, then run the compiled binary DIRECTLY**:
+`cargo test --no-run --test <file>` (or `--lib <module>` — both allowed by Tier-0), then execute
+`./target/debug/deps/<file>-<hash>` (cargo prints the exact path on its `Executable …` line).
+Running an already-built binary is not a `cargo` build/test invocation, so the Tier-0 hook never
+sees it. The test harnesses read their shell/script fixtures at RUNTIME, so after editing a sourced
+lib you can re-run the SAME compiled binary without recompiling. (Confirmed live #715, 2026-08-17.)
 
 **No bypass exists for `src/bin/recording-verdict.rs` or any `src/probe/*.rs` file itself** — the
 bin has `required-features = ["probe"]` and every file under `src/probe/` is behind the SAME
 feature gate, so `cargo check`/`clippy`/`test` on DEFAULT features doesn't even attempt to compile
 them (confirmed live, #632/#638: `cargo test --lib probe::qr::` / `qr::tests::` / `grouped_gate`
-all silently match "0 tests" — NOT a passing run, just nothing to run). The `# airuleset:build-ok`
-bypass only helps a PURE module already extracted to the crate root (above); a change confined
+all silently match "0 tests" — NOT a passing run, just nothing to run). The compile-then-run-the-
+binary-directly pattern above only helps a PURE module already extracted to the crate root (the
+`# airuleset:build-ok` marker itself is a disabled no-op here, #477); a change confined
 entirely to `recording-verdict.rs`/`src/probe/` has **zero local verification path** — not even a
 compile check — until CI runs. Treat every such change with extra manual review rigor (type/
 signature checks, `cargo fmt --all -- --check`, diffing brace/paren balance against `origin/main`)

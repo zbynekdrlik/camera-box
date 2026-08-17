@@ -69,6 +69,32 @@ compiler is present (a parity test that silently passes without running is worse
 Two properties to preserve if you touch it: the helpers it lifts must stay **contiguous** in
 `obs-source.c`, and the lift is by function name.
 
+### When the lifted helper has NO Rust consumer — make the gate STD-ONLY so it runs offline (issue 767)
+
+`genlock_relock_selection_parity.rs` compares the C to a `use camera_box::...` Rust authority, so it
+needs the crate + `CARGO_TARGET_TMPDIR` and runs ONLY under `cargo test` (CI — camera-box's
+`# airuleset:build-ok` is disabled, so you can't `cargo test` it locally at all). A vendored-C
+DECISION helper that NOTHING in the Rust appliance calls (e.g. `genlock_reconnect_decision` in
+`vendor/distroav/src/ndi-source.cpp`, a DistroAV-receiver-loop-only choice) has no such authority to
+compare against — so DON'T invent a crate-root module just to have one. Instead make the whole gate
+**self-contained / std-only** (`tests/distroav_ndi_reconnect_767.rs`): it `fs::read_to_string`s the
+vendored file, lifts the `static inline` helper by signature → first `\n}\n`, compiles it with `cc`
+against a tiny `<stdint.h>`/`<stdbool.h>` stub + a `main()` driving a hand-written **truth table**,
+and asserts each hardcoded expected bool. The truth table IS the spec (no Rust reference needed), so
+this runs BOTH under `cargo test` AND standalone via the issue-1026 recipe
+(`CARGO_MANIFEST_DIR=<abs> rustc --test --edition 2021 tests/<file>.rs -o /tmp/x && /tmp/x`) — a real
+local RED→GREEN with no cargo/OOM contention, and the `cc` invocation still `-Werror -Wconversion
+-Wformat=2` compile-checks the shipped bytes and panics loud (never skips) when no compiler.
+
+Two gotchas proven live here: (1) put ONE hand-picked vector at EVERY guard boundary
+(exact-threshold, just-under, each early-return guard) AND at least one vector with a DIFFERENT
+value for any parameter the helper takes (else a helper that hardcodes the constant instead of using
+the parameter passes every vector) — then mutate the C on a scratch copy and watch the specific
+boundary vector go RED, per the section below. (2) a bare `s->config.reset_ndi_receiver = true;`-style
+source anchor is easily ALIASED (the same statement text recurs at other sites with `= false` /
+`= <var>`); anchor the UNIQUE multi-line squished adjacency (e.g. the mutex-lock + flag-set + unlock
++ timestamp-refresh trio) instead, and confirm `.count()==1` in the squished file before trusting it.
+
 ## A parity or mutation gate is a LIE until you watch it go red
 
 Live, in this ticket: the parity gate passed 129 vectors, then mutating the C tie-break from
@@ -270,6 +296,42 @@ the test re-reads the vendored file at RUNTIME, so after applying the fix you re
 [red] then a [green]". This is the Rust-anchor-test counterpart to the C lift-and-compile harness
 above; use both on a vendored change (harness proves the C compiles, standalone rustc proves the
 guard bites). Confirmed live #1026 (obs-canvas.c UAF fix): 2 failed → 2 passed via `rustc --test`.
+
+### The SAME standalone-rustc recipe runs a PURE-STD crate-root `src/<mod>.rs` too — the Tier-0 mirror's own RED→GREEN, no cargo (#771)
+
+The `# airuleset:build-ok` bypass is genuinely DISABLED for camera-box (the tier0 hook blocks
+`cargo test --lib <mod> # airuleset:build-ok` outright — do NOT trust any older rule note, e.g.
+`jitter-audit-parser.md`, that claims it works here; it does not). So a vendored change's Tier-0
+MIRROR (`src/render_budget.rs`, `src/mv_audit.rs`, `src/genlock_backlog.rs`, `src/jitter_audit.rs`
+…) can't be `cargo test`-run locally either. But if that module uses ONLY `std` (no `use
+camera_box::…`, no external crate), `rustc --test` compiles it AS ITS OWN crate and runs its
+`#[cfg(test)] mod tests` — the identical #1026 recipe, just pointed at a `src/` file instead of a
+`tests/` one:
+
+```bash
+rustc --test --edition 2021 src/<mod>.rs -o /tmp/modtest && /tmp/modtest   # exit 101 = RED, 0 = GREEN
+```
+
+No `CARGO_MANIFEST_DIR` is needed (a pure-std module doesn't call the `env!` path helper). Confirmed
+live #771: `src/mv_audit.rs`'s 7 unit tests (floor/parse/classify/gate) ran GREEN this way while
+`cargo test` was Tier-0-banned. Pair it with the `tests/<file>.rs` anchor recipe above: the anchor
+proves the vendored C still carries the change, the pure-std module proves the mirror LOGIC is
+right — both with plain rustc, zero cargo/OOM contention with sibling workers.
+
+### Adding a NEW observability audit line to the render loop (#771)
+
+The `multiview-audit:` line pattern is the reusable shape for surfacing a render-loop signal to the
+OBS log (the drift-guard / rig-health-audit / E2E-preflight facet — same three consumers as the
+`genlock-fifo audit` lines): (1) emit a `blog(LOG_INFO, "<marker>: k=v k=v …")` from the render
+loop with a MUTUALLY-NON-SUBSTRING marker (so the `jitter_audit`-family parsers stay independent);
+(2) any threshold/floor is a pure `static inline` helper in `obs-display-budget.h`, MIRRORED
+byte-identically in a pure-std `src/<mod>.rs` (Tier-0, run it via the recipe above); (3) a
+`key=value` token-scan parser + a `*-gate` bin as the consumer; (4) lock-step anchors in
+`tests/genlock_preload.rs` (probe-gated, CI-only) AND BOTH `windows-genlock*.yml` pwsh steps —
+verify every pwsh anchor OFFLINE against the real `re.sub(r'\s+',' ',text)`-squished file with a
+throwaway python script (pwsh is not on dev1), plus a std-only `tests/<mod>_emit.rs` anchor for
+local RED→GREEN. Lift-compile the new `blog()` format string into a `printf` harness under
+`-Wformat=2` before pushing.
 
 ## The obs-websocket enum crash class: a borrowed `output->video`/state pointer outliving its owner (#793, #1026)
 

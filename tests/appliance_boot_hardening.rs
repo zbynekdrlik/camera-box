@@ -1061,3 +1061,98 @@ fn builders_install_psmisc_743() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// #448 (2026-07-18 RESCOPE — event finding #8) — force the Intel iGPU DRM module (`i915`) at boot
+// so a HEADLESS first boot (no monitor attached) still brings up the DRM device + /dev/fb0 that
+// the painter / cameraman-monitor framebuffer chain needs. On cam5-class hardware `i915` is only
+// udev-probed when a display is present, so a monitor-less box came up with no fb0 (no cameraman
+// monitor). cam5 was recovered live by pinning `i915` in /etc/modules-load.d/ — the finding says
+// this belongs in provisioning, and it must be baked at image-build time (create-usb-linux.sh).
+// The operator half (first physical boot of a GPU box WITH a monitor) is documented in SETUP.md.
+// Style mirrors items 18/20 above: read the REAL script/doc and assert the REAL contract.
+
+/// 22. create-usb-linux.sh must bake /etc/modules-load.d/i915.conf (contents `i915`) into the
+///     target rootfs so systemd-modules-load force-loads the Intel iGPU DRM module every boot,
+///     headless or not — without it a monitor-less cam5-class box comes up with no /dev/fb0 (#448).
+#[test]
+fn create_usb_bakes_i915_modules_load_conf() {
+    let body = read(BASE_IMAGE_BUILDER);
+
+    // The conf is written INTO the target rootfs ($MOUNT_ROOT), on a real (non-comment) line.
+    let writes_conf = body.lines().any(|l| {
+        let t = l.trim_start();
+        !t.starts_with('#')
+            && l.contains("$MOUNT_ROOT")
+            && l.contains("/etc/modules-load.d/i915.conf")
+    });
+    assert!(
+        writes_conf,
+        "{BASE_IMAGE_BUILDER} must write /etc/modules-load.d/i915.conf into the target rootfs \
+         ($MOUNT_ROOT) so systemd-modules-load force-loads i915 at boot — a headless cam5-class \
+         box comes up with no /dev/fb0 otherwise (#448 rescope, event finding #8)"
+    );
+
+    // The module NAME must appear as a bare `i915` line (the modules-load.d content is one module
+    // per line). A `# ... i915 ...` comment line does NOT satisfy this (it never trims to "i915").
+    let has_module_line = body.lines().any(|l| l.trim() == "i915");
+    assert!(
+        has_module_line,
+        "{BASE_IMAGE_BUILDER} must write the bare module name `i915` on its own line inside the \
+         /etc/modules-load.d/i915.conf body so systemd-modules-load actually loads it (#448)"
+    );
+}
+
+/// Slice the `#448` GPU-box operator note out of a doc: from the `GPU-dependent` marker to the
+/// first blank line after it. Scopes the doc assertions below to the NEW note so a pre-existing,
+/// unrelated mention of `first`/`boot`/`#448` elsewhere in the doc can never satisfy the test
+/// (the #888/#832 slice-region discipline: pin the contract WHERE it actually lives).
+fn gpu_note_region(doc: &str) -> &str {
+    let start = doc
+        .find("GPU-dependent")
+        .expect("doc must carry the GPU-dependent (cam5-class) first-boot note (#448)");
+    let region = &doc[start..];
+    region.find("\n\n").map(|e| &region[..e]).unwrap_or(region)
+}
+
+/// Assert a doc's `#448` GPU-box note names the i915 pin, the monitor-at-first-boot requirement,
+/// and ties back to #448 — all WITHIN the note region, never anywhere in the file.
+fn assert_gpu_first_boot_note(doc_rel: &str) {
+    let raw = read(doc_rel);
+    let region = gpu_note_region(&raw);
+    let low = region.to_lowercase();
+    assert!(
+        low.contains("i915"),
+        "{doc_rel}'s GPU-box note must name the i915 modules-load.d pin (#448)"
+    );
+    assert!(
+        low.contains("monitor"),
+        "{doc_rel}'s GPU-box note must require a monitor connected on the box's first boot (#448)"
+    );
+    assert!(
+        low.contains("first") && low.contains("boot"),
+        "{doc_rel}'s GPU-box note must tie the monitor requirement to the FIRST physical BOOT (#448)"
+    );
+    assert!(
+        region.contains("#448"),
+        "{doc_rel}'s GPU-box note must reference #448 so the rationale is traceable"
+    );
+}
+
+/// 23. SETUP.md must document the operator half of the #448 rescope: the FIRST physical boot of a
+///     GPU-dependent (cam5-class Intel iGPU) box should be done WITH a monitor connected, so the
+///     DRM connector + framebuffer initialize cleanly. The modules-load.d pin force-loads the
+///     DRIVER; this belt-and-braces note keeps the connector/fb0 bring-up covered on first boot.
+#[test]
+fn setup_md_documents_first_boot_with_monitor_for_gpu_boxes() {
+    assert_gpu_first_boot_note("SETUP.md");
+}
+
+/// 24. The provision runbook (`.claude/skills/provision/SKILL.md`) — the doc a provisioning session
+///     actually loads — must carry the SAME #448 GPU-box first-boot note as SETUP.md; the rescope
+///     named BOTH docs, and a runbook that omits it re-exposes the cam5 headless pain to the next
+///     new-box bring-up.
+#[test]
+fn provision_skill_documents_first_boot_with_monitor_for_gpu_boxes() {
+    assert_gpu_first_boot_note(".claude/skills/provision/SKILL.md");
+}

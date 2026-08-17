@@ -4563,6 +4563,75 @@ fn build_and_print_verdict(
                 // Fold: a FAIL only fails the run while the seam gates overall_pass (LIVE today).
                 all_pass &= cadence_gate_pass || !cadence_gates_overall;
 
+                // #768 — REPORT-ONLY cold-cut onset seam. The all-cambox sweep cuts program to each
+                // cambox after it has sat program-hidden ~60s (the active 3-box CAM1/CAM2/CAM3 cycle
+                // at 30s segments hides each 2x30s between windows). The per-segment aggregate
+                // copies/gaps average a single wake-up gap over the whole ~30s window, and the 1s
+                // transition guard discards the onset entirely — so nothing measured the cut
+                // TRANSITION, the blind spot that let issue 767 (a genlocked receiver that never
+                // rebinds after its sender restarts) survive every gate. This reads the raw decoded
+                // frames in the first ONSET_WINDOW_NS after each switch (bypassing the guard via
+                // `seg_frames`) and reports, per cold cut (cambox hidden >= COLD_HIDDEN_SECS), the
+                // wake-up latency + onset (un)decodable counts. Report-only (calibration-first): the
+                // onset was never serialized before, so no bound is calibratable yet —
+                // `gates_overall_pass()` is false and this fold is a no-op. The pure logic lives in
+                // `camera_box::cold_cut` (Tier-0 tested); this is the thin probe-side consumer.
+                let cold_windows: Vec<camera_box::cold_cut::ColdCutWindow> = schedule
+                    .iter()
+                    .map(|w| {
+                        let onset_frames: Vec<camera_box::cold_cut::OnsetFrame> = seg_frames
+                            .iter()
+                            .filter(|f| {
+                                camera_box::cold_cut::in_onset_window(f.gen_ts_ns, w.start_ns)
+                            })
+                            .map(|f| camera_box::cold_cut::OnsetFrame {
+                                gen_ts_ns: f.gen_ts_ns,
+                                decodable: f.tick.is_some(),
+                            })
+                            .collect();
+                        camera_box::cold_cut::ColdCutWindow {
+                            cambox: w.cambox.clone(),
+                            start_ns: w.start_ns,
+                            end_ns: w.end_ns,
+                            onset_frames,
+                        }
+                    })
+                    .collect();
+                let cold_report = camera_box::cold_cut::build_report(&cold_windows);
+                let cold_gate_pass = camera_box::cold_cut::cold_cut_gate_pass(&cold_report);
+                let cold_gates_overall = camera_box::cold_cut::gates_overall_pass();
+                let mut cold_json =
+                    serde_json::to_value(&cold_report).unwrap_or(serde_json::Value::Null);
+                if let Some(obj) = cold_json.as_object_mut() {
+                    obj.insert("pass".to_string(), serde_json::json!(cold_gate_pass));
+                    obj.insert(
+                        "gates_overall_pass".to_string(),
+                        serde_json::json!(cold_gates_overall),
+                    );
+                    obj.insert(
+                        "gate".to_string(),
+                        serde_json::json!(
+                            "#768 report-only -- the cold-cut onset (first 1s after a switch to a \
+                             cambox hidden >= 60s) is NOT gated pending a warm baseline + a \
+                             deliberate keepalive-bypass cold cut (issue #768); measures wake-up \
+                             latency + onset undecodable so a future run can calibrate a LIVE bound"
+                        ),
+                    );
+                }
+                report["all_cambox_continuity"]["cold_cut_onset"] = cold_json;
+                println!(
+                    "  #768 COLD-CUT onset: {} cold transition(s) (hidden >= {}s), worst wakeup {} (report-only, gates_overall_pass={})",
+                    cold_report.cold_transitions_found,
+                    cold_report.cold_hidden_secs,
+                    cold_report
+                        .worst_wakeup_latency_ns
+                        .map(|w| format!("{w} ns"))
+                        .unwrap_or_else(|| "n/a".to_string()),
+                    cold_gates_overall,
+                );
+                // Fold: report-only, so this is a no-op while gates_overall_pass() is false.
+                all_pass &= cold_gate_pass || !cold_gates_overall;
+
                 // #758 item 4 — the frozen-leg classifier: distinguishes a SUSTAINED camera
                 // freeze (hard-fail) from isolated stale-replay frames (informational-only,
                 // never gates) using the SAME per-window copies/frames/duration `seg.segments`

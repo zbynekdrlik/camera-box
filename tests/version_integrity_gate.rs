@@ -1083,3 +1083,166 @@ fn gate_never_engages_startup_chain_for_a_box_with_no_ahk_826() {
     let _ = std::fs::remove_file(&s);
     let _ = std::fs::remove_file(&t);
 }
+
+// ── #770: byte-derived DistroAV/libobs parity — the [0/8] gate compares the DEPLOYED plugin/core
+// BYTES against the #120 BUNDLE_MANIFEST, not just the hand-written GENLOCK_BUILD_SHA marker ─────
+//
+// The wrong-direction #119/#767 hole: a box whose marker advanced to build X while its DLL bytes
+// are an OLDER build passes the marker-only cross-box parity (all markers agree on X) — the byte
+// compare that would catch it never ran because the box state carried no byte sha256. Now that
+// bundle_state_gather emits obs_dll_sha256 / distroav_dll_sha256 (via component_sha256), the gate
+// threads them to drift-guard --compare, which compares them against the authoritative manifest for
+// build X. These fixtures prove the whole state->gate->engine path end to end (the same --win-state
+// pattern as the #756 parity fixtures), with NO live rig.
+
+/// The genlock build-unique capability marker a real OBS log emits — makes drift_check_capability
+/// read OK (a manifest= supplied ALWAYS activates that check alongside the byte facet).
+const GENLOCK_CAP_770: &str = "genlock: wall-clock-slaved render tick ENABLED";
+
+/// Inject the #770 byte-derived facet keys (obs_dll_sha256, distroav_dll_sha256, genlock_capability)
+/// into a pinned state fixture — same insert-before-closing-brace shape as `with_sha`, so it chains
+/// with `with_sha` / `with_obs_identity_ok`.
+fn with_manifest_facet(base: &str, obs_sha: &str, distroav_sha: &str, capability: &str) -> String {
+    format!(
+        "{},\"obs_dll_sha256\":\"{obs_sha}\",\"distroav_dll_sha256\":\"{distroav_sha}\",\"genlock_capability\":\"{capability}\"}}",
+        &base[..base.len() - 1]
+    )
+}
+
+/// Write a minimal #120 BUNDLE_MANIFEST.json listing obs.dll + distroav.dll (the two genlock-bearing
+/// DLLs drift-guard's #122 by-basename component check reads). One-line files[] entries, exactly the
+/// shape genlock-manifest.sh emits + drift-guard's manifest_sha_for_component parses.
+fn write_manifest(name: &str, obs_sha: &str, distroav_sha: &str) -> PathBuf {
+    let json = format!(
+        "{{\n  \"schema\": \"camera-box/genlock-bundle-manifest@1\",\n  \"build_sha\": \"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\",\n  \"files\": [\n    {{ \"path\": \"bin/64bit/obs.dll\", \"sha256\": \"{obs_sha}\", \"size\": 100 }},\n    {{ \"path\": \"obs-plugins/64bit/distroav.dll\", \"sha256\": \"{distroav_sha}\", \"size\": 200 }}\n  ]\n}}\n"
+    );
+    write_state(name, &json)
+}
+
+#[test]
+fn gate_refuses_when_deployed_obs_bytes_mismatch_the_manifest_770() {
+    // The anti-#119 core: EVERYTHING else agrees — the marketing versions, the fps, the
+    // genlock_build_sha MARKER (parity OK across the fleet), the obs-identity, even the capability
+    // marker — but strih's DEPLOYED obs.dll BYTES do not match the authoritative manifest for that
+    // build. The marker-only parity facet cannot see this; the byte facet MUST, and REFUSE (exit 20)
+    // naming the drifted component (obs_dll_sha256) under strih's box section.
+    const SHA: &str = "26de1c3c23980488a110dbf02e5e472f15cb001d";
+    const OBS_MANIFEST_SHA: &str =
+        "1111111111111111111111111111111111111111111111111111111111111111";
+    const DISTROAV_MANIFEST_SHA: &str =
+        "2222222222222222222222222222222222222222222222222222222222222222";
+    const OBS_STALE_SHA: &str = "9999999999999999999999999999999999999999999999999999999999999999";
+    let manifest = write_manifest("bundle_770_drift", OBS_MANIFEST_SHA, DISTROAV_MANIFEST_SHA);
+    // strih: stale obs.dll bytes (the wrong-direction hole), distroav bytes correct.
+    let s = write_state(
+        "strih_bytes_drift_770",
+        &with_obs_identity_ok(
+            &with_manifest_facet(
+                &with_sha(STRIH_PINNED, SHA),
+                OBS_STALE_SHA,
+                DISTROAV_MANIFEST_SHA,
+                GENLOCK_CAP_770,
+            ),
+            true,
+        ),
+    );
+    // stream: bytes correct — isolates the DRIFT to strih's obs.dll.
+    let t = write_state(
+        "stream_bytes_ok_770",
+        &with_obs_identity_ok(
+            &with_manifest_facet(
+                &with_sha(STREAM_PINNED, SHA),
+                OBS_MANIFEST_SHA,
+                DISTROAV_MANIFEST_SHA,
+                GENLOCK_CAP_770,
+            ),
+            false,
+        ),
+    );
+    let (code, stdout, stderr) = run_gate(&[
+        "--manifest",
+        manifest.to_str().unwrap(),
+        "--win-state",
+        &format!("strih={}", s.display()),
+        "--win-state",
+        &format!("stream={}", t.display()),
+        "--genlock-sha",
+        &format!("imag={SHA}"),
+    ]);
+    assert_eq!(
+        code, 20,
+        "stale deployed obs.dll bytes (marker/version all agree) must REFUSE with DRIFT (20). \
+         stdout={stdout} stderr={stderr}"
+    );
+    let all = format!("{stdout}{stderr}");
+    assert!(
+        all.contains("obs_dll_sha256") && all.contains("DRIFT"),
+        "must name the drifted component (obs_dll_sha256) as DRIFT: {all}"
+    );
+    assert!(
+        all.contains("strih"),
+        "must attribute the byte drift to the strih box: {all}"
+    );
+    let _ = std::fs::remove_file(&s);
+    let _ = std::fs::remove_file(&t);
+    let _ = std::fs::remove_file(&manifest);
+}
+
+#[test]
+fn gate_passes_when_deployed_bytes_match_the_manifest_770() {
+    // Both boxes' deployed obs.dll + distroav.dll bytes match the authoritative manifest for the
+    // fleet's build -> the byte facet is OK on every box, and (with versions/fps/identity/parity all
+    // pinned) the whole gate PASSES. This is the marker-as-pointer end state: the truth is the bytes.
+    const SHA: &str = "26de1c3c23980488a110dbf02e5e472f15cb001d";
+    const OBS_MANIFEST_SHA: &str =
+        "1111111111111111111111111111111111111111111111111111111111111111";
+    const DISTROAV_MANIFEST_SHA: &str =
+        "2222222222222222222222222222222222222222222222222222222222222222";
+    let manifest = write_manifest("bundle_770_ok", OBS_MANIFEST_SHA, DISTROAV_MANIFEST_SHA);
+    let s = write_state(
+        "strih_bytes_ok_770",
+        &with_obs_identity_ok(
+            &with_manifest_facet(
+                &with_sha(STRIH_PINNED, SHA),
+                OBS_MANIFEST_SHA,
+                DISTROAV_MANIFEST_SHA,
+                GENLOCK_CAP_770,
+            ),
+            true,
+        ),
+    );
+    let t = write_state(
+        "stream_bytes_ok_770_pass",
+        &with_obs_identity_ok(
+            &with_manifest_facet(
+                &with_sha(STREAM_PINNED, SHA),
+                OBS_MANIFEST_SHA,
+                DISTROAV_MANIFEST_SHA,
+                GENLOCK_CAP_770,
+            ),
+            false,
+        ),
+    );
+    let (code, stdout, stderr) = run_gate(&[
+        "--manifest",
+        manifest.to_str().unwrap(),
+        "--win-state",
+        &format!("strih={}", s.display()),
+        "--win-state",
+        &format!("stream={}", t.display()),
+        "--genlock-sha",
+        &format!("imag={SHA}"),
+    ]);
+    assert_eq!(
+        code, 0,
+        "matching deployed bytes + pinned set must PASS. stdout={stdout} stderr={stderr}"
+    );
+    assert!(stdout.contains("GATE PASS"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("obs_dll_sha256") && stdout.contains("OK"),
+        "the byte facet must have engaged + reported OK: {stdout}"
+    );
+    let _ = std::fs::remove_file(&s);
+    let _ = std::fs::remove_file(&t);
+    let _ = std::fs::remove_file(&manifest);
+}

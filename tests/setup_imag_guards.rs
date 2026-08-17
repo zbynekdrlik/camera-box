@@ -1672,9 +1672,9 @@ fn setup_imag_total_steps_matches_actual_step_calls() {
         })
         .count();
     assert_eq!(
-        declared, 23,
-        "TOTAL_STEPS must be 23 after #858 added the remoteos-mcp control-channel agent provisioning \
-         step to the #1040 total of 22"
+        declared, 25,
+        "TOTAL_STEPS must be 25 after #779 added the touchpad-usability provisioning step \
+         (step 24 was #764's imag-obs-watchdog step)"
     );
     assert_eq!(
         actual, declared,

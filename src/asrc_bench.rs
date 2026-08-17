@@ -208,16 +208,39 @@ pub const MAX_PPM: f64 = 300.0;
 /// if the estimator's target jumps abruptly.
 pub const MAX_SLEW_PPM_PER_S: f64 = 5.0;
 
-/// EMA time constant, in seconds, of the real per-source rate estimator. Long enough to be
-/// robust to per-callback jitter (issue #803: "dlhý horizont, robustný na callback jitter") while
-/// still meeting the ticket's own convergence text (<5 ppm at ~2 min, ~1 ppm at ~10 min, at the
-/// #800 worst-case 50 ppm — see `estimator_converges_within_the_tickets_own_bounds` below).
-pub const TIME_CONSTANT_S: f64 = 20.0;
+/// issue #1084: span cap of the sliding least-squares RATE regression, in seconds of master-clock
+/// time. The pre-#1084 estimator was a fixed-gain time-EMA (`TIME_CONSTANT_S=20 s`) over 1 s
+/// windows; live on the `mbc` source its `estimated` sd was 178 ppm (→ `applied` sd 20–28 ppm ≈
+/// ±75–103 ms/h of global A/V wander) because the 1 s window master time TELESCOPES to two wall
+/// reads and the audio-thread scheduling jitter in those endpoints does NOT average down with more
+/// callbacks per window (see issue #1084's design comment). A regression over the cumulative
+/// (master-time, audio-minus-master) points uses that endpoint noise near-optimally — slope sd ≈
+/// σ_t·1e6·√(12/N)/L — and is robust to BOTH the white and the anti-correlated MA(1) window-noise
+/// colors an EMA retune could only cover one of. 600 s (~600 one-per-1 s-window points) drives the
+/// steady `applied` sd well under the 2.8 ppm (= 10 ms/h) acceptance while an EXPANDING-then-sliding
+/// window keeps convergence fast-early / precise-late (tracks a drift STEP within ~10 min in the
+/// bench). Mirror of asrc-compensator.h ASRC_REGRESSION_SPAN_S — keep numerically identical.
+pub const REGRESSION_SPAN_S: f64 = 600.0;
 
-/// Minimum wall-clock time the estimator must observe before ANY compensation is applied — the
-/// "default-safe: zero compensation when the servo has no lock" requirement from issue #803. Below
-/// this window the servo has not seen enough of the source's real clock to trust an estimate.
-pub const MIN_LOCK_S: f64 = 5.0;
+/// issue #1084: minimum number of accepted-window points before the regression computes a slope at
+/// all (a fit through fewer points is dominated by the endpoint noise). Mirror of
+/// asrc-compensator.h ASRC_REGRESSION_MIN_POINTS.
+pub const REGRESSION_MIN_POINTS: usize = 30;
+
+/// issue #1084: minimum buffer SPAN (seconds of master-clock time between the oldest and newest
+/// point) before ANY compensation is applied — the "default-safe: zero compensation when the servo
+/// has no lock" guarantee (replaces the pre-#1084 `MIN_LOCK_S=5 s`, which was calibrated to the
+/// EMA's fast convergence; the noise-limited regression needs a longer baseline before its slope is
+/// trustworthy). Mirror of asrc-compensator.h ASRC_REGRESSION_LOCK_SPAN_S.
+pub const REGRESSION_LOCK_SPAN_S: f64 = 60.0;
+
+/// issue #1084: capacity of the point ring buffer. A 600 s span of windows that each close at ≥1 s
+/// of master time holds ≤ ~601 points; 640 leaves headroom so age-based eviction, never a capacity
+/// overflow, bounds the buffer. The C mirror uses a fixed array of this size + a head/count ring;
+/// the Rust authority uses a `Vec` that pushes+evicts in the identical oldest→newest order, so both
+/// feed the LS sums the SAME point sequence in the SAME iteration order (the numerical contract —
+/// memory layout need not match). Mirror of asrc-compensator.h ASRC_REGRESSION_CAP.
+pub const REGRESSION_CAP: usize = 640;
 
 /// Hard bound on the OUTER-loop (issue #806) bias this servo will accept, in ppm — the ticket's
 /// own "max +/-10 ppm uprava od inner-loop odhadu" safety rail. Applied at BOTH the setter (here)
@@ -230,9 +253,10 @@ pub const OUTER_BIAS_MAX_PPM: f64 = 10.0;
 /// issue #960: sanity ceiling on the (issue #962: WINDOWED, duration-weighted-summed) measured
 /// ppm, in ppm — above this, the measurement carries no real timing information (a starved or
 /// bursting audio source, e.g. a muted/idle device path delivering near-zero samples) and must be
-/// REJECTED rather than folded into the EMA. Live incident: a starved source (~26.24% of the
-/// samples its elapsed wall-clock window implies) produced a measured ppm of ~-737,600, and with
-/// no gate the EMA converged toward it and the servo railed at `-MAX_PPM` permanently.
+/// REJECTED rather than folded into the estimate. Live incident (under the pre-#1084 EMA): a
+/// starved source (~26.24% of the samples its elapsed wall-clock window implies) produced a measured
+/// ppm of ~-737,600, and with no gate the estimator converged toward it and the servo railed at
+/// `-MAX_PPM` permanently.
 ///
 /// 100,000 ppm (10%) is chosen to clear three boundaries with margin: (1) ~333x (roughly 2.5
 /// orders of magnitude) above `MAX_PPM` (300, itself already "an order of magnitude above any
@@ -247,67 +271,61 @@ pub const MAX_SANE_INSTANTANEOUS_PPM: f64 = 100_000.0;
 
 /// issue #962: duration of the measurement WINDOW, in seconds of master-clock time, over which
 /// `raw_advance_s` and `master_block_s` are duration-weighted SUMMED before computing a single
-/// windowed ppm value to feed the EMA (and to gate against `MAX_SANE_INSTANTANEOUS_PPM`) — see the
-/// module's #962 design comment (`gh issue view 962 --comments`) for the full mechanism this
-/// fixes (per-block instantaneous ppm is unmeasurable noise for small, bursty-delivery blocks,
-/// e.g. mbc's 128-sample Dante VSC blocks, 2.667ms each).
+/// windowed ppm value (issue #1084: one point fed to the regression; pre-#1084: fed to the EMA) and
+/// to gate against `MAX_SANE_INSTANTANEOUS_PPM` — see the module's #962 design comment
+/// (`gh issue view 962 --comments`) for the full mechanism this fixes (per-block instantaneous ppm
+/// is unmeasurable noise for small, bursty-delivery blocks, e.g. mbc's 128-sample Dante VSC blocks,
+/// 2.667ms each).
 ///
 /// `1.0` second is chosen so that: (1) it spans ~375 of mbc's 2.667ms blocks — ample
-/// duration-weighted averaging for arrival-timing jitter to cancel completely (summing physical
+/// duration-weighted averaging for arrival-timing jitter within a window to cancel (summing physical
 /// durations first is EXACT regardless of how unevenly the underlying blocks are chunked, unlike
-/// dividing one block's own small, individually-noisy raw/master pair); (2) it is small relative
-/// to `TIME_CONSTANT_S` (20s), so it barely perturbs the EMA's own convergence — the time-based
-/// EMA discretization `alpha = 1 - exp(-dt/tau)` is mathematically EXACT for any `dt` as long as
-/// the driving ratio is CONSTANT over that `dt`: for that idealized (noise-free) comparison,
-/// windowed sampling produces an IDENTICAL estimator trajectory to continuous per-block sampling
-/// at the same wall-clock horizons (proven by the existing gate/convergence tests below, which
-/// feed exactly this kind of constant-ppm synthetic clock and pass bit-for-bit either way). The
-/// REAL small-block case (a genuinely constant true drift, sampled through noisy/bursty block
-/// deliveries) is a close approximation rather than a literal identity — but an extremely tight
-/// one here, since the window is only `WINDOW_S / TIME_CONSTANT_S = 0.05` of the EMA's own time
-/// constant; (3) it degenerates EXACTLY to the pre-#962 per-block behavior for any call whose OWN
-/// `master_block_s` already reaches 1.0s (the window closes on that single call, the windowed ppm
-/// reduces algebraically to that block's own instantaneous ratio) — every existing servo test in
-/// this file already calls `compensate()` with blocks that sum to exactly 1.0s per window, so none
-/// of them need their assertions changed.
+/// dividing one block's own small, individually-noisy raw/master pair); (2) it is small relative to
+/// the issue #1084 regression span (`REGRESSION_SPAN_S`, 600s), so a full span holds ~600 evenly
+/// spaced points — a fine-grained, near-optimal least-squares fit — while each window is still large
+/// enough that its own endpoint-jitter contribution is a single point's `y`-noise the regression
+/// averages over N points (see [`REGRESSION_SPAN_S`]); (3) it degenerates EXACTLY to the pre-#962
+/// per-block behavior for any call whose OWN `master_block_s` already reaches 1.0s (the window
+/// closes on that single call, the windowed ppm reduces algebraically to that block's own
+/// instantaneous ratio) — every existing servo test in this file already calls `compensate()` with
+/// blocks that sum to exactly 1.0s per window, so the window mechanism itself changed none of their
+/// per-window inputs.
 pub const WINDOW_S: f64 = 1.0;
 
 /// The REAL per-source ASRC servo issue #803 ports into vendored libobs
 /// (`vendor/obs-studio/libobs/media-io/asrc-compensator.c` — kept a line-by-line equivalent
 /// mirror of this struct's logic; see that file's own doc comment). Unlike [`EmaRateCompensator`]
 /// above (the bench's original teaching/proof-of-mechanism model, block-count-based), this is the
-/// actual production design:
+/// actual production design. issue #1084 replaced the inner rate ESTIMATOR (previously a fixed-gain
+/// time-EMA) with a sliding least-squares RATE REGRESSION — the EMA's variance under the 1 s
+/// window's endpoint wall-jitter was the global A/V-wander root cause (see [`REGRESSION_SPAN_S`] and
+/// issue #1084's design comment); everything AROUND the estimator (the #962 windowed data source,
+/// the #960 starvation rail, the `MAX_PPM` clamp, the `MAX_SLEW_PPM_PER_S` slew limiter, the #806
+/// outer bias) is unchanged:
 ///
-/// - a TIME-based (not block-count-based) EMA — real audio callbacks vary in frame count, so
-///   smoothing must key on elapsed wall time, not a fixed block count;
-/// - a hard ppm clamp (`MAX_PPM`) on the estimate used as the correction TARGET;
-/// - a slew limiter (`MAX_SLEW_PPM_PER_S`) on the APPLIED correction, independent of how fast the
-///   raw estimate itself moves, so a single noisy measurement can never produce an audible step;
-/// - a minimum-lock startup delay (`MIN_LOCK_S`) before any correction is applied at all;
-/// - a starvation/activity guard (`MAX_SANE_INSTANTANEOUS_PPM`, issue #960) rejecting a
-///   MEASUREMENT whose ppm is not a plausible clock-drift value at all (a starved/bursting
-///   source), holding state rather than folding garbage into the estimate;
-/// - issue #962: WINDOWED, duration-weighted measurement — `raw_advance_s`/`master_block_s` are
-///   summed across consecutive `compensate()` calls into a running window (see [`WINDOW_S`]) and
-///   ONE ppm value is computed from the sums (not a per-block ratio) each time the window closes,
-///   which is what the EMA and the #960 ceiling above actually see. This is what makes small,
-///   bursty-delivery blocks (e.g. mbc's 128-sample Dante VSC blocks) measurable at all — dividing
-///   one block's own tiny raw/master pair amplifies arrival-timing jitter into an implausible
-///   instantaneous ratio, but summing durations first cancels that jitter exactly.
+/// - a WINDOWED, duration-weighted measurement (issue #962, [`WINDOW_S`]) is the DATA SOURCE — one
+///   ppm-bearing point `(cum_master_s, cum_raw_s − cum_master_s)` is produced per accepted window
+///   close, exactly as before; only what CONSUMES those points changed;
+/// - the #960 starvation rail still REJECTS a window whose aggregate ppm clears
+///   `MAX_SANE_INSTANTANEOUS_PPM`, now ALSO flushing the regression buffer (a starved window is a
+///   level shift that would poison the slope for a full span — issue #1084);
+/// - a sliding least-squares regression over the last [`REGRESSION_SPAN_S`] of points estimates the
+///   rate slope directly; `estimated_ppm = 1e6·slope` once at least [`REGRESSION_MIN_POINTS`] points
+///   exist, and any compensation is applied only once the buffer SPAN reaches
+///   [`REGRESSION_LOCK_SPAN_S`] (the "default-safe: zero before lock" guarantee, replacing the
+///   pre-#1084 `MIN_LOCK_S`);
+/// - a hard ppm clamp (`MAX_PPM`) on the estimate+bias used as the correction TARGET, and a slew
+///   limiter (`MAX_SLEW_PPM_PER_S`) on the APPLIED correction — both unchanged.
 ///
-/// Validated against the SAME `simulate_offset_trace_ms` gate issue #804 built, per that module's
-/// own instruction not to invent a second, unrelated proof.
-#[derive(Debug, Clone, Copy)]
+/// Validated against the SAME `simulate_offset_trace_ms` gate issue #804 built PLUS a two-clock-
+/// domain endpoint-jitter bench (issue #1084) the old exact-per-window bench could not exercise.
+#[derive(Debug, Clone)]
 pub struct RealtimeAsrcCompensator {
-    /// Running EMA estimate of the source's true rate offset from master, in ppm.
+    /// Running rate estimate of the source's true offset from master, in ppm — issue #1084: the
+    /// least-squares slope of the point buffer times 1e6 (was the EMA estimate pre-#1084).
     estimated_ppm: f64,
     /// The correction actually being applied right now (post-clamp, post-slew), in ppm.
     applied_ppm: f64,
-    /// Cumulative master-clock time observed since construction — gates the `MIN_LOCK_S` startup
-    /// delay. issue #962: only accrues on an ACCEPTED window close (see [`Self::compensate`]),
-    /// exactly mirroring the pre-#962 "starved data grants no lock credit" invariant, now applied
-    /// at window instead of per-block granularity.
-    elapsed_lock_s: f64,
     /// The issue #806 OUTER-loop bias, in ppm — folded additively into `estimated_ppm` before the
     /// `MAX_PPM` clamp (see [`Self::compensate`]). Zero (no-op) until something calls
     /// [`Self::set_outer_bias_ppm`]; a fresh compensator behaves EXACTLY as before #806.
@@ -324,33 +342,72 @@ pub struct RealtimeAsrcCompensator {
     /// closed) measurement window.
     window_raw_s: f64,
     /// issue #962: duration-weighted sum of `master_block_s` observed in the CURRENT window —
-    /// once this reaches [`WINDOW_S`], the window closes: a single windowed ppm is computed from
-    /// `window_raw_s`/`window_master_s`, fed to the EMA (or rejected under the #960 ceiling), and
-    /// both sums reset to 0.0 for the next window.
+    /// once this reaches [`WINDOW_S`], the window closes: a single ppm-bearing point is produced
+    /// from `window_raw_s`/`window_master_s`, pushed to the regression (or rejected under the #960
+    /// ceiling), and both sums reset to 0.0 for the next window.
     window_master_s: f64,
     /// issue #962: count of individual audio blocks folded into the CURRENT (not yet closed)
     /// window — reset to 0 alongside the sums above whenever the window closes.
     window_block_count: u32,
+    /// issue #1084: the regression point buffer's x-axis — cumulative ACCEPTED-window master time,
+    /// oldest→newest. The C mirror is a fixed [`REGRESSION_CAP`] array + head/count ring; this `Vec`
+    /// pushes+age-evicts in the identical order, so both feed the LS sums the SAME sequence.
+    reg_x: Vec<f64>,
+    /// issue #1084: the regression point buffer's y-axis — cumulative (raw − master) at each
+    /// accepted window close (its slope vs `reg_x` is the rate ratio − 1 = ppm/1e6).
+    reg_y: Vec<f64>,
+    /// issue #1084: running cumulative accepted-window master time (the newest `reg_x` value).
+    cum_master_s: f64,
+    /// issue #1084: running cumulative (raw − master) (the newest `reg_y` value).
+    cum_ymm_s: f64,
+    /// issue #1084: whether the buffer span has reached [`REGRESSION_LOCK_SPAN_S`] and the servo may
+    /// apply compensation (replaces the pre-#1084 elapsed-lock gate). Cleared by a buffer flush.
+    reg_locked: bool,
 }
 
 impl RealtimeAsrcCompensator {
     /// Build a compensator with no prior observations — starts at 0 ppm (assume locked) and
-    /// applies no correction until `MIN_LOCK_S` of master-clock time has been observed.
+    /// applies no correction until the regression buffer span reaches `REGRESSION_LOCK_SPAN_S`.
     pub fn new() -> Self {
         Self {
             estimated_ppm: 0.0,
             applied_ppm: 0.0,
-            elapsed_lock_s: 0.0,
             outer_bias_ppm: 0.0,
             starved_block_count: 0,
             window_raw_s: 0.0,
             window_master_s: 0.0,
             window_block_count: 0,
+            reg_x: Vec::new(),
+            reg_y: Vec::new(),
+            cum_master_s: 0.0,
+            cum_ymm_s: 0.0,
+            reg_locked: false,
         }
     }
 
-    /// The current raw EMA rate estimate, in ppm — exposed for tests/telemetry (mirrors the C
-    /// side's periodic ~60s log line, issue #803's telemetry requirement).
+    /// issue #1084: discard the whole regression point buffer and its cumulative anchors, and drop
+    /// the lock. Called on any LEVEL SHIFT — a #960 starved-window rejection or a non-positive
+    /// `master_block_s` (a backward/duplicate wall read, e.g. an NTP step) — because a step in the
+    /// cumulative would corrupt the slope for a full `REGRESSION_SPAN_S` as it slides through the
+    /// window; re-converging from scratch is bounded (~a minute) and level shifts are rare on this
+    /// source. Deliberately does NOT reset `estimated_ppm`/`applied_ppm` directly — so applied is
+    /// HELD on the flushing call itself (no slew step runs that call). But because the flush DROPS
+    /// the lock, every subsequent call sees `!reg_locked` → target 0 → applied SLEWS back to 0 (at
+    /// `MAX_SLEW_PPM_PER_S`) over the ~`REGRESSION_LOCK_SPAN_S` re-lock window, then re-converges to
+    /// the new slope once the buffer re-fills. This decay-to-zero-then-reconverge is default-safe (a
+    /// level shift invalidates the old correction) and bounded (one spurious 1 s starved window ≈ a
+    /// few ms of A/V step). Mirror of the C `asrc_regression_flush()`.
+    fn regression_flush(&mut self) {
+        self.reg_x.clear();
+        self.reg_y.clear();
+        self.cum_master_s = 0.0;
+        self.cum_ymm_s = 0.0;
+        self.reg_locked = false;
+    }
+
+    /// The current rate estimate, in ppm (issue #1084: the least-squares regression slope times
+    /// 1e6) — exposed for tests/telemetry (mirrors the C side's periodic ~60s log line, issue
+    /// #803's telemetry requirement).
     pub fn estimated_ppm(&self) -> f64 {
         self.estimated_ppm
     }
@@ -364,7 +421,8 @@ impl RealtimeAsrcCompensator {
     /// Set the issue #806 outer-loop bias, in ppm — clamped to `+/-OUTER_BIAS_MAX_PPM`
     /// unconditionally (the caller's own clamping, e.g. [`crate::asrc_outer_loop::OuterLoopGuard`],
     /// is never trusted alone). Takes effect on the NEXT [`Self::compensate`] call; inert (folded
-    /// into a target that is forced to 0.0) until the inner loop's own `MIN_LOCK_S` has elapsed.
+    /// into a target that is forced to 0.0) until the inner loop's own regression lock
+    /// ([`REGRESSION_LOCK_SPAN_S`]) has been reached.
     pub fn set_outer_bias_ppm(&mut self, bias_ppm: f64) {
         self.outer_bias_ppm = bias_ppm.clamp(-OUTER_BIAS_MAX_PPM, OUTER_BIAS_MAX_PPM);
     }
@@ -400,8 +458,10 @@ impl AsrcCompensator for RealtimeAsrcCompensator {
     fn compensate(&mut self, raw_advance_s: f64, master_block_s: f64) -> f64 {
         if master_block_s <= 0.0 {
             // A non-positive block duration carries no timing information (e.g. a duplicate or
-            // backward wall-clock read) — pass through unchanged rather than divide by a
-            // non-positive number.
+            // backward wall-clock read — an NTP step) and, because the regression accumulates a
+            // CUMULATIVE master time, it is also a level shift that would corrupt the slope. Flush
+            // the buffer and pass through unchanged; applied_ppm is HELD (see regression_flush).
+            self.regression_flush();
             return raw_advance_s;
         }
 
@@ -411,57 +471,101 @@ impl AsrcCompensator for RealtimeAsrcCompensator {
         // (e.g. mbc's 128-sample Dante VSC blocks) delivers real samples at an uneven wall-clock
         // cadence, but the SUM of delivered-sample-duration over the SUM of elapsed wall time
         // still converges to the source's true clock ratio, regardless of how unevenly the
-        // underlying blocks were chunked. See the module's #962 design comment / WINDOW_S doc
-        // comment for the full mechanism.
+        // underlying blocks were chunked. This WINDOWED measurement is the unchanged DATA SOURCE
+        // the issue #1084 regression consumes; see the module's #962 / WINDOW_S doc comments.
         self.window_raw_s += raw_advance_s;
         self.window_master_s += master_block_s;
         self.window_block_count += 1;
 
         if self.window_master_s >= WINDOW_S {
             // This window closes -- compute ONE windowed ppm value from the duration-weighted
-            // sums (not this block's own instantaneous ratio) and feed THAT into the EMA/
-            // lock-credit logic below, exactly the shape the pre-#962 code applied per-block.
+            // sums (not this block's own instantaneous ratio); a valid window becomes ONE
+            // regression point below, exactly the shape the pre-#1084 code fed to the EMA.
             let window_ppm = (self.window_raw_s / self.window_master_s - 1.0) * 1_000_000.0;
+            let window_raw_s = self.window_raw_s;
             let window_master_s = self.window_master_s;
             let window_block_count = self.window_block_count;
             self.window_raw_s = 0.0;
             self.window_master_s = 0.0;
             self.window_block_count = 0;
 
-            // issue #960 (now applied to the WINDOW value, not a single block's instantaneous
-            // ratio -- issue #962): a window whose aggregate ppm magnitude clears the sanity
-            // ceiling carries no real timing information (the source was genuinely
-            // starved/bursting for MOST of this window, not just jittery in how it delivered
-            // otherwise-real samples) -- REJECT the whole window: no EMA update, no
-            // elapsed_lock_s credit, no target recompute, NO SLEW STEP -- HOLD applied_ppm at
-            // EXACTLY its pre-rejection value (even if it was still mid-transition toward an
-            // already-decided, legitimate target from an earlier accepted window; a garbage
-            // window must not be allowed to continue advancing that transition either).
-            // Mirrors the pre-#962 per-block early-return exactly, now at window granularity.
-            // Attribute every block that fed this window to starved_block_count, preserving the
-            // pre-#962 telemetry meaning ("how many audio blocks were part of an unusable
+            // issue #960 (applied to the WINDOW value, not a single block's instantaneous ratio --
+            // issue #962): a window whose aggregate ppm magnitude clears the sanity ceiling carries
+            // no real timing information (the source was genuinely starved/bursting for MOST of this
+            // window) -- REJECT the whole window: no regression point. issue #1084: a starved window
+            // is a LEVEL SHIFT (the source delivered a wrong sample count), so also FLUSH the
+            // regression buffer -- keeping the pre-starvation points would corrupt the slope for a
+            // full span as the shift slides through. applied_ppm is HELD at its pre-rejection value
+            // (the early return skips the slew step below), even mid-slew toward an already-decided
+            // target. Attribute every block that fed this window to starved_block_count, preserving
+            // the pre-#962 telemetry meaning ("how many audio blocks were part of an unusable
             // measurement") at window granularity.
             if window_ppm.abs() > MAX_SANE_INSTANTANEOUS_PPM {
                 self.starved_block_count =
                     self.starved_block_count.saturating_add(window_block_count);
+                self.regression_flush();
                 return self.corrected_advance(raw_advance_s);
             }
 
-            // TIME-based EMA smoothing factor over the WINDOW's real duration -- mathematically
-            // identical to updating per-block with the same total elapsed time (the
-            // discretization alpha = 1 - exp(-dt/tau) is exact for a piecewise-constant driving
-            // value; see WINDOW_S's own doc comment).
-            let alpha = 1.0 - (-window_master_s / TIME_CONSTANT_S).exp();
-            self.estimated_ppm = alpha * window_ppm + (1.0 - alpha) * self.estimated_ppm;
-            self.elapsed_lock_s += window_master_s;
+            // issue #1084: push one regression point -- (cumulative accepted-window master time,
+            // cumulative raw-minus-master) -- then slide the buffer to the last REGRESSION_SPAN_S
+            // and re-fit the rate slope. (The evict-before-append guard mirrors the C ring's fixed
+            // capacity; age eviction already bounds a >=1 s-window buffer well under it.)
+            self.cum_master_s += window_master_s;
+            self.cum_ymm_s += window_raw_s - window_master_s;
+            // Defensive capacity guard (mirror of the C ring's fixed capacity): evict the oldest
+            // point BEFORE appending if the buffer is already full, so the newest point never
+            // overwrites a live slot. Age eviction (below) keeps a >=1 s-window buffer at ~601
+            // points, well under REGRESSION_CAP, so this never fires in practice.
+            while self.reg_x.len() >= REGRESSION_CAP {
+                self.reg_x.remove(0);
+                self.reg_y.remove(0);
+            }
+            self.reg_x.push(self.cum_master_s);
+            self.reg_y.push(self.cum_ymm_s);
+            let cutoff = self.cum_master_s - REGRESSION_SPAN_S;
+            while self.reg_x.len() > 1 && self.reg_x[0] < cutoff {
+                self.reg_x.remove(0);
+                self.reg_y.remove(0);
+            }
+
+            let n = self.reg_x.len();
+            if n >= REGRESSION_MIN_POINTS {
+                // Re-anchor to the oldest point (bounded magnitudes -> no catastrophic cancellation
+                // over a long run) and recompute the five ordinary-least-squares sums in FULL, in a
+                // fixed oldest->newest iteration order -- deterministic and bit-identically
+                // mirrorable by the C ring (no incremental subtract-on-evict, whose FP rounding
+                // would drift the two apart). slope = (n*Sxy - Sx*Sy) / (n*Sxx - Sx*Sx); the rate
+                // offset in ppm is slope * 1e6.
+                let x0 = self.reg_x[0];
+                let y0 = self.reg_y[0];
+                let (mut sx, mut sy, mut sxx, mut sxy) = (0.0_f64, 0.0_f64, 0.0_f64, 0.0_f64);
+                for i in 0..n {
+                    let x = self.reg_x[i] - x0;
+                    let y = self.reg_y[i] - y0;
+                    sx += x;
+                    sy += y;
+                    sxx += x * x;
+                    sxy += x * y;
+                }
+                let nf = n as f64;
+                let denom = nf * sxx - sx * sx;
+                if denom.abs() > 1e-9 {
+                    let slope = (nf * sxy - sx * sy) / denom;
+                    self.estimated_ppm = slope * 1_000_000.0;
+                }
+                if self.reg_x[n - 1] - self.reg_x[0] >= REGRESSION_LOCK_SPAN_S {
+                    self.reg_locked = true;
+                }
+            }
         }
 
         // Default-safe: no lock yet -> target zero compensation, never guess from a
-        // still-converging estimate (issue #806: the outer-loop bias is folded in HERE, so it is
-        // just as inert as the inner estimate before lock — never applied on its own). Once
-        // locked, add the outer-loop bias to the inner estimate and clamp the SUM to the hard ppm
-        // bound before ever using it as a target.
-        let target_ppm = if self.elapsed_lock_s < MIN_LOCK_S {
+        // still-converging (short-baseline) slope (issue #806: the outer-loop bias is folded in
+        // HERE, so it is just as inert as the inner estimate before lock — never applied on its
+        // own). Once locked, add the outer-loop bias to the slope estimate and clamp the SUM to the
+        // hard ppm bound before ever using it as a target.
+        let target_ppm = if !self.reg_locked {
             0.0
         } else {
             (self.estimated_ppm + self.outer_bias_ppm).clamp(-MAX_PPM, MAX_PPM)
@@ -657,18 +761,18 @@ mod tests {
         );
     }
 
-    /// Default-safe requirement: before `MIN_LOCK_S` of master-clock time has been observed, the
-    /// servo must apply EXACTLY zero compensation — no lock yet means never guess.
+    /// Default-safe requirement: before the regression buffer span reaches `REGRESSION_LOCK_SPAN_S`
+    /// (issue #1084), the servo must apply EXACTLY zero compensation — no lock yet means never guess.
     #[test]
     fn realtime_compensator_applies_zero_compensation_before_lock() {
         let mut compensator = RealtimeAsrcCompensator::new();
-        // One block well inside the MIN_LOCK_S startup window.
+        // One block, well inside the startup window (a single point can never span the lock).
         let raw = DriftingAudioClock::new(WORST_CASE_PPM).raw_advance(1.0);
         let corrected = compensator.compensate(raw, 1.0);
         assert_eq!(
             compensator.applied_ppm(),
             0.0,
-            "expected zero applied compensation before the {MIN_LOCK_S}s lock window elapses"
+            "expected zero applied compensation before the {REGRESSION_LOCK_SPAN_S}s lock span is reached"
         );
         assert_eq!(
             corrected, raw,
@@ -683,11 +787,12 @@ mod tests {
     fn realtime_compensator_clamps_applied_ppm_to_the_hard_bound() {
         let mut compensator = RealtimeAsrcCompensator::new();
         // A synthetic, unrealistically large offset (10,000 ppm) fed for long enough that both
-        // the EMA estimate and the slew-limited applied value have every chance to converge.
+        // the regression slope estimate and the slew-limited applied value have every chance to
+        // converge.
         let extreme_clock = DriftingAudioClock::new(10_000.0);
         for _ in 0..7200 {
-            // 7200 * 1.0s = 2h of 1s blocks — ample time for the 20s time-constant EMA to
-            // converge AND for the slew limiter (5 ppm/s) to catch up to a clamped 300ppm target.
+            // 7200 * 1.0s = 2h of 1s blocks — ample time for the regression to lock+converge AND
+            // for the slew limiter (5 ppm/s) to catch up to a clamped 300ppm target.
             let raw = extreme_clock.raw_advance(1.0);
             let _ = compensator.compensate(raw, 1.0);
         }
@@ -704,14 +809,16 @@ mod tests {
     #[test]
     fn realtime_compensator_never_exceeds_the_slew_limit_per_call() {
         let mut compensator = RealtimeAsrcCompensator::new();
-        // Get past the lock window with a converged near-zero estimate first.
-        for _ in 0..10 {
+        // Get PAST the regression lock (>= REGRESSION_LOCK_SPAN_S = 60s span, >= 30 points) with a
+        // converged near-zero estimate first — 65 x 1s blocks of a perfectly-matched clock.
+        for _ in 0..65 {
             let _ = compensator.compensate(1.0, 1.0);
         }
         let applied_before = compensator.applied_ppm();
         // One abrupt 1-second block reporting an enormous instantaneous rate (a single outlier
-        // measurement, e.g. a scheduling hiccup) — the applied value must not jump further than
-        // the slew limit allows in that one second.
+        // window, e.g. a scheduling hiccup) — it is below the #960 ceiling so it enters the
+        // regression as a high-leverage newest point and yanks the slope target far up; the APPLIED
+        // value must still not jump further than the slew limit allows in that one second.
         let raw = DriftingAudioClock::new(50_000.0).raw_advance(1.0);
         let _ = compensator.compensate(raw, 1.0);
         let step = (compensator.applied_ppm() - applied_before).abs();
@@ -719,6 +826,13 @@ mod tests {
             step <= MAX_SLEW_PPM_PER_S + 1e-9,
             "expected the applied ppm to change by at most {MAX_SLEW_PPM_PER_S}ppm in a single \
              1s block, got a step of {step}ppm"
+        );
+        // ... and the slew limiter must genuinely BIND here (the outlier target far exceeds
+        // MAX_SLEW_PPM_PER_S), else the test would pass vacuously without exercising the clamp.
+        assert!(
+            step >= MAX_SLEW_PPM_PER_S - 1e-6,
+            "expected the outlier to drive the target past the slew limit so the clamp binds, got \
+             a step of only {step}ppm (the slew limiter was not exercised)"
         );
     }
 
@@ -766,8 +880,8 @@ mod tests {
         let mut compensator = RealtimeAsrcCompensator::new();
         compensator.set_outer_bias_ppm(7.0);
         let clock = DriftingAudioClock::new(0.0); // a perfectly-matched clock: estimated_ppm -> 0
-                                                  // Long enough for MIN_LOCK_S to elapse AND for the slew limiter (5 ppm/s) to fully catch
-                                                  // up to a 7ppm target (needs >=1.4s of slew headroom; give it ample margin).
+                                                  // 120 x 1s blocks: past REGRESSION_LOCK_SPAN_S (60s span) AND enough slew headroom
+                                                  // (5 ppm/s) to fully reach a 7ppm target (needs >=1.4s; ample margin).
         for _ in 0..120 {
             let raw = clock.raw_advance(1.0);
             let _ = compensator.compensate(raw, 1.0);
@@ -780,20 +894,21 @@ mod tests {
         );
     }
 
-    /// The outer bias is INERT before the inner loop's own `MIN_LOCK_S` — same default-safe
-    /// guarantee the inner estimate itself already has, now proven to also cover the bias term.
+    /// The outer bias is INERT before the inner loop's own regression lock (issue #1084:
+    /// `REGRESSION_LOCK_SPAN_S`) — same default-safe guarantee the inner estimate itself already
+    /// has, now proven to also cover the bias term.
     #[test]
     fn outer_bias_is_inert_before_lock() {
         let mut compensator = RealtimeAsrcCompensator::new();
         compensator.set_outer_bias_ppm(OUTER_BIAS_MAX_PPM);
-        // One block, well inside the MIN_LOCK_S startup window.
+        // One block, well inside the startup window (a single point can never span the lock).
         let raw = DriftingAudioClock::new(0.0).raw_advance(1.0);
         let _ = compensator.compensate(raw, 1.0);
         assert_eq!(
             compensator.applied_ppm(),
             0.0,
-            "expected zero applied compensation before the {MIN_LOCK_S}s lock window elapses, \
-             even with a nonzero outer bias set"
+            "expected zero applied compensation before the {REGRESSION_LOCK_SPAN_S}s lock span is \
+             reached, even with a nonzero outer bias set"
         );
     }
 
@@ -829,10 +944,11 @@ mod tests {
     #[test]
     fn starved_block_does_not_corrupt_the_estimate_960() {
         let mut compensator = RealtimeAsrcCompensator::new();
-        // Converge on a perfectly-matched (ppm=0) clock first, well past MIN_LOCK_S. With no
-        // drift, instantaneous_ppm is exactly 0.0 every block, so the EMA/applied stay exactly
-        // 0.0 (bit-for-bit) -- not merely "close to zero".
-        for _ in 0..10 {
+        // Converge + LOCK on a perfectly-matched (ppm=0) clock first, past the regression lock
+        // (REGRESSION_LOCK_SPAN_S = 60s span, >= 30 points): with no drift every window point is
+        // exactly (k, 0.0), so the least-squares slope is exactly 0.0 and estimated/applied stay
+        // exactly 0.0 (bit-for-bit) -- not merely "close to zero".
+        for _ in 0..65 {
             let _ = compensator.compensate(1.0, 1.0);
         }
         assert_eq!(compensator.estimated_ppm(), 0.0);
@@ -843,16 +959,16 @@ mod tests {
         let raw = starved.raw_advance(1.0);
         let _ = compensator.compensate(raw, 1.0);
 
-        // The guard's rejection path is an EARLY RETURN that never touches estimated_ppm/
-        // applied_ppm at all -- so both must stay EXACTLY at their pre-block value (not just
-        // "close"), which is what makes this assertion non-tautological: any regression that
-        // lets the garbage ppm leak even partially into the EMA (a weakened guard, an off-by-one
+        // The guard's rejection path is an EARLY RETURN that flushes the buffer but never touches
+        // estimated_ppm/applied_ppm -- so both must stay EXACTLY at their pre-block value (not just
+        // "close"), which is what makes this assertion non-tautological: any change that lets the
+        // garbage ppm leak even partially into the estimate (a weakened guard, an off-by-one
         // threshold, a partial slew step) would move these away from bit-exact 0.0.
         assert_eq!(
             compensator.estimated_ppm(),
             0.0,
             "expected a starved block to be REJECTED (estimate left at its pre-block value), got \
-             estimated_ppm={} — the -737,600ppm garbage was folded into the EMA, exactly the \
+             estimated_ppm={} — the -737,600ppm garbage was folded into the estimate, exactly the \
              #960 defect",
             compensator.estimated_ppm()
         );
@@ -900,21 +1016,23 @@ mod tests {
     }
 
     /// A starved block must grant NO lock credit — it carries no real information about the
-    /// source's true clock rate, so it must not count toward `MIN_LOCK_S` any more than it counts
-    /// toward the estimate. Feed far more than `MIN_LOCK_S` worth of STARVED blocks, then one
-    /// healthy block that is on its own well inside the lock window — if starved blocks wrongly
-    /// granted lock credit, the servo would already be "locked" and immediately apply a nonzero
-    /// correction; if they don't, applied_ppm must still be exactly 0 (pre-lock).
+    /// source's true clock rate, so it must not advance the regression toward its lock span
+    /// (issue #1084: a starved window FLUSHES the buffer, so no points ever accumulate from
+    /// starved data). Feed far more than `REGRESSION_LOCK_SPAN_S` worth of STARVED blocks, then
+    /// one healthy block — if starved blocks wrongly granted lock credit, the servo would already
+    /// be "locked" and immediately apply a nonzero correction; if they don't, applied_ppm must
+    /// still be exactly 0 (pre-lock).
     #[test]
     fn starved_blocks_grant_no_lock_credit_960() {
         let mut compensator = RealtimeAsrcCompensator::new();
         let starved = DriftingAudioClock::new(-737_600.0);
-        for _ in 0..20 {
-            // 20 x 1s = 20s of starved blocks — well past MIN_LOCK_S (5s) if wrongly credited.
+        for _ in 0..80 {
+            // 80 x 1s = 80s of starved blocks — well past REGRESSION_LOCK_SPAN_S (60s) if the
+            // flush-on-rejection wrongly let starved windows accumulate lock credit.
             let raw = starved.raw_advance(1.0);
             let _ = compensator.compensate(raw, 1.0);
         }
-        // One healthy block, 1s — well INSIDE MIN_LOCK_S on its own.
+        // One healthy block, 1s — a single point can never span the lock on its own.
         let raw = DriftingAudioClock::new(WORST_CASE_PPM).raw_advance(1.0);
         let _ = compensator.compensate(raw, 1.0);
         assert_eq!(
@@ -927,7 +1045,7 @@ mod tests {
     }
 
     /// Boundary check for the `>` comparison itself (`/review` finding on issue #960): a block
-    /// just BELOW the sanity ceiling is still treated as real (folded into the EMA, never
+    /// just BELOW the sanity ceiling is still treated as real (pushed to the regression, never
     /// flagged), and a block just ABOVE it is rejected. Pins the strict `>` (not `>=`) choice
     /// explicitly, on values comfortably clear of floating-point rounding noise (±1ppm at this
     /// magnitude), so a future edit can't silently flip which side of the ceiling is "sane"
@@ -1035,8 +1153,8 @@ mod tests {
     fn windowed_estimator_still_rejects_a_genuinely_starved_tiny_block_source_962() {
         let mut compensator = RealtimeAsrcCompensator::new();
         // Converge on a healthy small-block source first (reuses the #962 fixture at 0 true ppm).
-        // ~400 pairs * ~5.33ms/pair =~ 2.13s -- below MIN_LOCK_S (5s); this phase only needs to
-        // establish "no spurious starvation on healthy small blocks", not reach lock.
+        // ~400 pairs * ~5.33ms/pair =~ 2.13s -- below REGRESSION_LOCK_SPAN_S (60s); this phase only
+        // needs to establish "no spurious starvation on healthy small blocks", not reach lock.
         feed_bursty_small_blocks(&mut compensator, 0.0, 400);
         assert_eq!(
             compensator.starved_block_count(),
@@ -1072,20 +1190,19 @@ mod tests {
     #[test]
     fn rejected_window_holds_applied_ppm_even_mid_slew_962() {
         let mut compensator = RealtimeAsrcCompensator::new();
-        // 5 x 1.0s blocks of an extreme (10,000ppm) clock -- locks past MIN_LOCK_S on the 5th
-        // call (elapsed_lock_s reaches exactly 5.0 that same call) with an EMA estimate already
-        // far past MAX_PPM, so the target clamps to 300 immediately -- but the slew limiter
-        // (5ppm/s) only lets applied_ppm reach 5.0 in that one call, nowhere near the 300 target.
-        // Genuinely mid-slew.
+        // 70 x 1.0s blocks of an extreme (10,000ppm) clock -- past the regression lock
+        // (REGRESSION_LOCK_SPAN_S = 60s span, >= 30 points) with a slope estimate far past MAX_PPM,
+        // so the target clamps to 300 -- but the slew limiter (5ppm/s) has only had ~10 locked
+        // blocks to move applied a few tens of ppm, nowhere near the 300 target. Genuinely mid-slew.
         let extreme_clock = DriftingAudioClock::new(10_000.0);
-        for _ in 0..5 {
+        for _ in 0..70 {
             let raw = extreme_clock.raw_advance(1.0);
             let _ = compensator.compensate(raw, 1.0);
         }
         let applied_before = compensator.applied_ppm();
         assert!(
             applied_before > 0.0 && applied_before < 300.0,
-            "expected applied_ppm to be genuinely mid-slew (0 < applied < 300 target) after 5 \
+            "expected applied_ppm to be genuinely mid-slew (0 < applied < 300 target) after 70 \
              locked calls, got {applied_before} -- test setup assumption broken"
         );
 

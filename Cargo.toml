@@ -1,6 +1,6 @@
 [package]
 name = "camera-box"
-version = "1.7.0-dev.463"
+version = "1.7.0-dev.465"
 edition = "2021"
 authors = ["zbynekdrlik"]
 description = "Simple USB video capture to NDI streaming appliance"
@@ -100,6 +100,10 @@ path = "src/bin/frozen-camera-gate.rs"
 [[bin]]
 name = "render-budget-gate"
 path = "src/bin/render-budget-gate.rs"
+
+[[bin]]
+name = "mv-fps-gate"
+path = "src/bin/mv-fps-gate.rs"
 
 [[bin]]
 name = "obs-watchdog-gate"

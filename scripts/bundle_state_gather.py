@@ -28,6 +28,7 @@ change later.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import sys
@@ -291,6 +292,36 @@ def genlock_build_sha_from_file(path):
     return ""
 
 
+def component_sha256(path):
+    """#770 — the lowercase 64-hex sha256 of the DEPLOYED file at *path* (a plugin/core binary such
+    as the live `distroav.dll` / `obs.dll`), read in binary in bounded chunks. This is the BYTE
+    identity the `[0/8]` version-integrity gate compares against the #120 BUNDLE_MANIFEST — the
+    truth the hand-written `GENLOCK_BUILD_SHA.txt` MARKER only POINTS at. It closes the wrong
+    direction of the #119/#767 stale-bytes hole: a marker advanced to build X while the DLL bytes
+    are an older build passes the marker-only cross-box parity, but its real sha256 will not match
+    build X's manifest.
+
+    Returns "" when *path* is empty/None, is not a regular file (missing, or a directory), or
+    cannot be read — UNKNOWN downstream, NEVER a fabricated/zero SHA that would let a missing plugin
+    read as "clean" (the same never-a-false-clean discipline every other facet in this module
+    follows). The read never raises: a transient I/O error degrades to "" with a WARNING, exactly
+    like `genlock_build_sha_from_file` above."""
+    if not path or not os.path.isfile(path):
+        return ""
+    try:
+        h = hashlib.sha256()
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError as e:
+        print(
+            f"WARNING: component_sha256: could not read {path!r}: {e}",
+            file=sys.stderr,
+        )
+        return ""
+
+
 def build_bundle_state(
     *,
     obs_version="",
@@ -301,6 +332,8 @@ def build_bundle_state(
     ndi_input_latency="",
     distroav_dll_paths="",
     genlock_capability="",
+    obs_dll_sha256="",
+    distroav_dll_sha256="",
     genlock_build_sha="",
     obs_installs="",
     port4455_owner_path="",
@@ -322,6 +355,14 @@ def build_bundle_state(
     #756: `genlock_build_sha` is the box's deployed genlock build SHA — the version-integrity gate
     reads it out of every box's state and runs the CROSS-BOX parity assert (fleet must be on ONE
     build). Same omit-when-empty rule as every other facet.
+
+    #770: `obs_dll_sha256`/`distroav_dll_sha256` are the sha256 of the DEPLOYED core/plugin BYTES
+    (via `component_sha256`) — the byte identity the version-integrity gate compares against the
+    #120 BUNDLE_MANIFEST (drift-guard `--compare` already consumes these keys). They make the
+    GENLOCK_BUILD_SHA.txt marker just a POINTER: the truth is the bytes, closing the wrong-direction
+    #119/#767 hole (marker advanced, bytes stale) the marker-only cross-box parity cannot catch.
+    Same omit-when-empty rule; opt-in (#756-shape) — a box not yet reporting the SHAs is silently
+    skipped, never a false clean.
 
     #826: the strih OBS-identity machine-check facet — `obs_installs` (every launchable OBS-shaped
     exe found), `port4455_owner_path`/`port4455_owner_version` (the process actually owning TCP
@@ -345,6 +386,8 @@ def build_bundle_state(
         "ndi_input_latency": ndi_input_latency,
         "distroav_dll_paths": distroav_dll_paths,
         "genlock_capability": genlock_capability,
+        "obs_dll_sha256": obs_dll_sha256,
+        "distroav_dll_sha256": distroav_dll_sha256,
         "obs_installs": obs_installs,
         "port4455_owner_path": port4455_owner_path,
         "port4455_owner_version": port4455_owner_version,

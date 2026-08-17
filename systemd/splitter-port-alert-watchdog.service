@@ -1,0 +1,19 @@
+[Unit]
+# per-cambox HDMI-splitter-port no-signal alert (#739), DEV1-SIDE. ONE measure -> decide -> alert pass.
+# The camboxes have no airuleset checkout / Discord credentials, so the alert MUST come from dev1,
+# which already has the checkout + creds and sits on the same rig LAN. SAME topology as
+# network-reach-alert-watchdog.service (#1001) / optical-chain-alert-watchdog.service (#860) /
+# imag-obs-alert-watchdog.service (#882). Reads each ACTIVE cambox's last `capture chroma:` journal
+# line over ssh and pages a SPLITTER-PORT suspicion when one box is degraded while a sibling on the
+# SAME camera+splitter is fine (a per-box divergence can only be that box's own leg).
+Description=camera-box per-cambox splitter-port no-signal alert (#739) — one measure/decide/alert pass
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Service]
+Type=oneshot
+# %h = the installing user's home on dev1. Adjust if the checkout lives elsewhere.
+ExecStart=%h/devel/camera-box/scripts/splitter-port-alert-watchdog.sh
+# A few short ssh journal reads to the active cambox fleet; bounded per-box by SPLITTER_WATCH_SSH_TIMEOUT.
+# No EnvironmentFile: the cambox root credential defaults to the same value the sibling fleet scripts
+# use (override via CAM_PW in the environment for a rotated password).
+TimeoutStartSec=120

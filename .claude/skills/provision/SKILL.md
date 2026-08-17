@@ -78,6 +78,15 @@ If the box appears dark (no ping, no SSH): see "Known gotchas" below before assu
 failure — most "won't boot" incidents on this fleet were a masked/blocked boot stage, not a dead
 box.
 
+**GPU-dependent (cam5-class Intel iGPU) boxes — do the FIRST physical boot WITH a monitor
+connected (#448, event finding #8).** `create-usb-linux.sh` bakes `/etc/modules-load.d/i915.conf`
+so the `i915` DRM driver force-loads at every boot (headless included) — that gives `/dev/dri` +
+`/dev/fb0` for the painter / cameraman monitor without a display attached. The pin covers the
+DRIVER; on some firmware the DRM connector + framebuffer only bring up cleanly with a display
+present at boot, so as belt-and-braces the FIRST physical boot of such a box should have a monitor
+attached (this is exactly the cam5 headless no-fb0 pain the pin + this note together close). Boxes
+with no capture/display grabber (cam4) are unaffected.
+
 ### Phase 3 — provision (`setup-device.sh`)
 
 ```bash

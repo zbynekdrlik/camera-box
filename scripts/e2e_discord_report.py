@@ -513,6 +513,63 @@ def _section_latency_pins(verdict, meta):
     return "\n".join(lines)
 
 
+def _section_mv_skew(verdict, meta):
+    """#761 -- per-camera MV-clone-vs-main presentation skew (scene 'MV Cam N' vs 'Cam N'), from
+    scripts/mv_skew_snapshot.py's order-alternated, t_send-compensated painter-QR measurement.
+
+    `meta["mv_skew"]` (optional -- this whole section is skipped, never fabricated, when absent) is
+    that gatherer's JSON: {"cameras": {"camN": {"median_ms", "n_samples", "stdev_ms", "alarming",
+    ...}}, "frame_ms": 16.67, "error"?: "..."}. A camera with no decodable QR is an honest N/A
+    (never a fabricated 0). Both strih and imag are shared-source (scene 'MV Cam N' draws the SAME
+    input as 'Cam N') so the expected skew is ~0 -- this is a REGRESSION GUARD: |median| > 1 frame
+    means the multiview cell the operator sees presents at a different time than the program."""
+    mv = meta.get("mv_skew")
+    if not mv:
+        return None  # never fabricated -- this run didn't gather an MV-skew snapshot
+
+    frame_ms = mv.get("frame_ms") or (1000.0 / 60.0)
+    lines = ["**MV klon vs. program — prezentačný skew (#761, živé WS screenshoty)**"]
+    if mv.get("error"):
+        lines.append(f"  ⚠️ nemeralo sa: {mv['error']}")
+        return "\n".join(lines)
+
+    cams = mv.get("cameras") or {}
+    if not cams:
+        lines.append("  (žiadna aktívna kamera nemala scény 'Cam N' + 'MV Cam N' na meranie)")
+        return "\n".join(lines)
+
+    any_alarm = False
+    for cam in sorted(cams):
+        node = cams.get(cam) or {}
+        median = node.get("median_ms")
+        n = node.get("n_samples") or 0
+        stdev = node.get("stdev_ms")
+        if median is None:
+            reason = node.get("note") or "žiadny dekódovateľný QR"
+            lines.append(f"  • {cam}: N/A ({reason})")
+            continue
+        alarming = bool(node.get("alarming"))
+        any_alarm = any_alarm or alarming
+        spread = f", ±{stdev:.0f} ms" if isinstance(stdev, (int, float)) else ""
+        glyph = "⚠️" if alarming else "•"
+        line = f"  {glyph} {cam}: {median:+.1f} ms (n={n}{spread})"
+        if alarming:
+            direction = "neskôr" if median > 0 else "skôr"
+            line += f" — strihač vidí {cam} o {abs(median):.0f} ms {direction} než program"
+        lines.append(line)
+
+    lines.append(
+        f"  Prah poplachu: |skew| > 1 snímka ({frame_ms:.1f} ms @60fps). Shared-source usporiadanie "
+        "('MV Cam N' = ten istý vstup ako 'Cam N') => očakávaj ~0; toto je regresný strážca."
+    )
+    if any_alarm:
+        lines.append(
+            "  ⚠️ nenulový skew = multiview bunka NEsedí časovo s programom (možný samostatný "
+            "dekód klonu) — over usporiadanie scén na imag (#761)."
+        )
+    return "\n".join(lines)
+
+
 def _section_residual_events(verdict):
     """#707 EVENT-FORENSICS -- the per-event residual copy/gap breakdown (src/residual_events.rs),
     surfaced per the user's binding #707 decision ("every residual deviation must have its own
@@ -564,6 +621,9 @@ def compose_report(verdict: dict, meta: dict | None = None) -> str:
     pins_section = _section_latency_pins(verdict, meta)
     if pins_section is not None:
         sections.append(pins_section)
+    mv_skew_section = _section_mv_skew(verdict, meta)
+    if mv_skew_section is not None:
+        sections.append(mv_skew_section)
     residual_section = _section_residual_events(verdict)
     if residual_section is not None:
         sections.append(residual_section)
@@ -606,6 +666,13 @@ def main(argv=None):
         "skipped entirely when not supplied",
     )
     ap.add_argument(
+        "--mv-skew-json",
+        default=None,
+        help="#761: path to the JSON scripts/mv_skew_snapshot.py wrote (per-camera MV-clone-vs-main "
+        "presentation skew) -- optional; the MV-skew report section is skipped entirely when not "
+        "supplied",
+    )
+    ap.add_argument(
         "--json-chunks",
         action="store_true",
         help="print a JSON array of Discord-sized message chunks instead of the raw text",
@@ -620,12 +687,18 @@ def main(argv=None):
         with open(args.pins_json, encoding="utf-8") as f:
             pins = json.load(f)
 
+    mv_skew = None
+    if args.mv_skew_json:
+        with open(args.mv_skew_json, encoding="utf-8") as f:
+            mv_skew = json.load(f)
+
     meta = {
         "run_id": args.run_id,
         "event": args.event,
         "duration_secs": args.duration_secs,
         "gate_exit": args.gate_exit,
         "pins": pins,
+        "mv_skew": mv_skew,
     }
     text = compose_report(verdict, meta)
     if args.json_chunks:

@@ -660,3 +660,29 @@ SIGTERM-immune `trap "" TERM` fixture needs `-9`) — the pipe then closes, `tai
 `FAILED` line, and the wrapper exits. Better: for a test that may leak on the RED path, run it
 WITHOUT a `| tail` pipe (redirect to a file: `cargo test ... > run.log 2>&1`), so a leaked child
 holding stdout can't wedge the reader. Clean up the orphan before observing the next state.
+
+## GOTCHA — the #675 sourced-helper pattern also covers a LOCAL (dev1-side) command, and a NEW `.find()` marker must be unique across the WHOLE file (#716)
+
+Two extensions of the recording-e2e.sh anchor discipline, both confirmed on #716 (persist each
+cam-box burn-run fps log to dev1):
+
+- **#675 extends beyond `$(...)`-embedded REMOTE builders to a LOCAL runner function.** When the
+  new behaviour is a command that runs LOCALLY on dev1 (e.g. an `scp` PULLING an artifact BACK from
+  a box, mirroring the `cam1-capture-stats.txt` sidecar), put the whole runner in a NEW
+  `scripts/lib/*.sh` and call it as a plain function line — `cbox_burn_log_persist "$CAM_PW"
+  "$CAM1_IP" cam1 "$RUN_ID" "$OUTDIR"` — NOT `$(...)`-embedded (a local command must not be
+  command-substituted, and the trailing-newline-glue gotcha above never arises). The static anchor
+  tests read only recording-e2e.sh's own text, so the runner body is invisible; recording-e2e.sh
+  gains only a `. "$HERE/lib/..."` source line + the call line(s). Worked example:
+  `scripts/lib/cbox-burn-log-persist.sh` (pure remote-path/dest-name builders + a best-effort
+  `... 2>/dev/null || echo WARNING >&2; return 0` runner) with `tests/harness_cbox_burn_log_persist.rs`
+  exercising it via a fake `sshpass` stand-in on PATH.
+- **A NEW static-anchor test's `.find()` marker must be unique across the WHOLE file — including the
+  comment you add near the top-of-file `. "$HERE/lib/..."` source block.** The #832 self-collision
+  class bites even between two comments YOU add in the SAME PR: #716's persist-block marker
+  (`#716: persist each cam-box burn-run fps log`) initially also appeared verbatim in the
+  source-block comment ~3400 lines earlier, so the test's `s.find(marker)` would have latched onto
+  the top comment, not the real block (all block-content asserts still passed by accident, since
+  the slice ran to EOF — a silent wrong-anchor, not a failure). Fix: reword the source-block comment
+  so ONLY the real call site carries the exact marker phrase; verify with
+  `grep -c '<marker>' scripts/recording-e2e.sh` (must be 1).

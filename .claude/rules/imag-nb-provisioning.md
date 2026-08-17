@@ -193,6 +193,24 @@ edit run the **full** `cargo test` (`# airuleset:build-ok`), not just the file y
 elsewhere right after touching this script is far more likely a textual collision than a real
 regression. Same trap as `scripts/recording-e2e.sh` (see the project CLAUDE.md GOTCHA).
 
+**A NEGATIVE anchor (`!body.contains(...)` / "must NOT") is tripped by ADDING a matching string, not
+by duplicating one — and a Tier-0 worker who cannot run the full suite MUST grep for it explicitly
+(#779, 2026-08-17).** The usual anchor sweep (grep your new literal + the `.find()`/`.split()`
+anchors for a POSITIVE collision) does not catch this. Live incident: adding a new provisioning step
+that does `cat > /etc/X11/xorg.conf.d/30-touchpad-tap.conf` (the #779 touchpad-input config) flipped
+`setup_imag_does_not_ship_the_dead_tearfree_option_841` in `tests/harness_imag_intel_display_841.rs`
+to FAIL — it asserts `!body.contains("cat > /etc/X11/xorg.conf.d/")`, an over-broad ban of ANY
+xorg.conf.d WRITE whose real intent is only the dead `Option "TearFree"` DISPLAY snippet. It is
+**invisible to `cargo test --no-run`** (which only compiles; a `!contains` assertion fails at RUN
+time), so it surfaces only on CI's real `cargo test`. **Before adding ANY new `cat > <path>` /
+`install <path>` / new content block to `setup-imag.sh` or `verify-imag.sh`, ALSO grep the tests for
+a NEGATIVE assertion your addition would newly match** — e.g.
+`grep -rn 'contains\|must NOT\|assert!(!' tests/ | grep -iE '<the path or token you are adding>'`.
+A `!body.contains("<prefix your new write matches>")` is a coupled fixture: narrow it to its true
+intent (never weaken it) in the SAME PR, exactly like the `TOTAL_STEPS` bumps — the #779 fix scoped
+the ban to "any xorg.conf.d write OTHER than the touchpad input config" so a real display cargo-cult
+still trips it.
+
 The pure functions are unit-tested by SOURCING the real script — its `BASH_SOURCE[0] != $0` guard
 skips the destructive flow. Keep every new decision function pure (stdin/args in, text out, `fail`
 on the impossible case) so it stays testable without a box.

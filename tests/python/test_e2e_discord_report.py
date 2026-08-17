@@ -596,3 +596,50 @@ class TestLatencyPinsSection:
         pins = {"strih": {"cam7": {"main_ms": 36, "mv_ms": 36}}}
         report = edr.compose_report(verdict, {"run_id": "x", "pins": pins})
         assert "cam7: strih=36ms" in report
+
+
+# ---------------------------------------------------------------------------
+# #761 -- MV-clone-vs-main presentation skew section
+# ---------------------------------------------------------------------------
+
+class TestMvSkewSection:
+    def setup_method(self):
+        self.verdict = _load("verdict_clean_pass.json")
+
+    def test_section_absent_when_no_mv_skew_meta(self):
+        report = edr.compose_report(self.verdict, {"run_id": "x"})
+        assert "prezentačný skew" not in report  # never fabricated when not gathered
+
+    def test_shared_source_regression_guard_renders_ok_lines(self):
+        mv_skew = {
+            "frame_ms": 16.666666666666668,
+            "cameras": {
+                "cam1": {"median_ms": 1.3, "n_samples": 15, "stdev_ms": 12.0, "alarming": False},
+                "cam2": {"median_ms": None, "n_samples": 0, "note": "žiadny dekódovateľný QR"},
+                "cam3": {"median_ms": -1.5, "n_samples": 15, "stdev_ms": 7.0, "alarming": False},
+            },
+        }
+        report = edr.compose_report(self.verdict, {"run_id": "x", "mv_skew": mv_skew})
+        assert "MV klon vs. program — prezentačný skew" in report
+        assert "cam1: +1.3 ms (n=15, ±12 ms)" in report
+        assert "cam2: N/A (žiadny dekódovateľný QR)" in report  # honest N/A, never a fabricated 0
+        assert "cam3: -1.5 ms (n=15, ±7 ms)" in report
+        assert "Prah poplachu" in report
+        assert "strihač vidí" not in report  # nothing alarming => no loud per-camera warning
+
+    def test_alarming_skew_is_flagged_loudly(self):
+        mv_skew = {
+            "frame_ms": 16.666666666666668,
+            "cameras": {
+                "cam1": {"median_ms": 45.0, "n_samples": 15, "stdev_ms": 9.0, "alarming": True},
+            },
+        }
+        report = edr.compose_report(self.verdict, {"run_id": "x", "mv_skew": mv_skew})
+        assert "⚠️ cam1: +45.0 ms" in report
+        assert "strihač vidí cam1 o 45 ms neskôr než program" in report
+        assert "multiview bunka NEsedí časovo s programom" in report
+
+    def test_gatherer_error_is_reported_not_fabricated(self):
+        mv_skew = {"error": "connect failed: timeout", "cameras": {}}
+        report = edr.compose_report(self.verdict, {"run_id": "x", "mv_skew": mv_skew})
+        assert "nemeralo sa: connect failed: timeout" in report

@@ -79,3 +79,22 @@ event_assert_artifacts_check_cmds() {
   out="$out; do [ -e \"\$p\" ] && echo \"\$p\"; done; true"
   printf '%s\n' "$out"
 }
+
+# event_artifact_purge_cmds PATH... -> the REMOTE (or local) bash that `rm -f`s each given PATH --
+# the DELETE counterpart of event_assert_artifacts_check_cmds above (SAME argument shape, so the
+# two stay in lock-step). #721 (live 2026-08-16): EVENT mode's item-8 assert correctly FLAGS the
+# leftover marker CSV (/run/rig-qpsk-markers.csv, root-owned on tmpfs) that survives the painter
+# stop, but NOTHING on the EVENT path deleted it -- so the whole EVENT-mode CONTRACT failed on that
+# one leftover with the rig otherwise clean. rig-mode.sh's do_event calls this AFTER the painter +
+# ledger stop (both painters dead -- the transient AND the permanent cam2-painter.service, #892 --
+# so nothing re-writes the CSV) and before the assert phase. Best-effort: a REPORT/cleanup, never a
+# pass/fail test -- the trailing `true` makes it always exit 0 (a caller's own `set -e` must not
+# abort just because a path was already gone). NEVER call this in TEST mode, where the CSV must GROW.
+event_artifact_purge_cmds() {
+  local p out="rm -f"
+  for p in "$@"; do
+    out="$out '$p'"
+  done
+  out="$out 2>/dev/null; true"
+  printf '%s\n' "$out"
+}
