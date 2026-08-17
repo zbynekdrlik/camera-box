@@ -75,10 +75,7 @@ pub const RECORDED_CLEAN_PAIRED_RUNS: u32 = 0;
 /// Pure: is the fold EARNED at `recorded_clean_paired_runs` clean paired runs? `recorded >=
 /// REQUIRED`. Param-based so both directions unit-test Tier-0 without touching the module constant.
 pub fn fold_is_earned(recorded_clean_paired_runs: u32) -> bool {
-    // [red] stub — intentionally wrong (ignores the count); the GREEN commit implements the real
-    // `recorded_clean_paired_runs >= REQUIRED_CLEAN_PAIRED_RUNS`.
-    let _ = recorded_clean_paired_runs;
-    false
+    recorded_clean_paired_runs >= REQUIRED_CLEAN_PAIRED_RUNS
 }
 
 /// Report-only seam (issue 930, mirrors `crate::optical_floor::gates_overall_pass`): the pure
@@ -155,10 +152,7 @@ pub fn evaluate(
 /// disagreement — no double-jeopardy; and the real consumer path `lipsync_cross_check_for` always
 /// supplies both offsets, so Unknown never arises there anyway).
 pub fn lipsync_cross_check_gate_pass(verdict: LipsyncCrossCheckVerdict) -> bool {
-    // [red] stub — intentionally wrong (always passes); the GREEN commit implements the real
-    // "only Disagree fails" decision.
-    let _ = verdict;
-    true
+    !matches!(verdict, LipsyncCrossCheckVerdict::Disagree)
 }
 
 /// The single decision the CONSUMER folds on (issue 1032): does this `--av-sync` cross-check fold
