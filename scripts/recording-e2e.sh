@@ -1293,6 +1293,10 @@ cleanup() {
   # the SIGKILL. Backgrounding cam1 + cam2 too closes that remaining gap.
   CAMBOX_PARALLEL_PIDS=()
   CAMBOX_PARALLEL_LABELS=()
+  # #1085: record each backgrounded restore's EXPLICIT target IP in lockstep with PIDS/LABELS so the
+  # sequential retry (cambox_parallel_retry_failed) no longer has to parse the IP out of the display
+  # label -- the interim label->IP coupling #715's mitigation introduced is retired here.
+  CAMBOX_PARALLEL_IPS=()
   # cam1: FORCE-kill the manual #174 burn binary (pkill -9 -f, its own basename) AND any camera-box,
   # remove the deployed test binary, restore the clean deployed service — reliably frees /dev/video0.
   # #626: the pattern MUST be anchored ('camera-box-burn-[a-z0-9]') — a bare 'camera-box-burn-'
@@ -1317,6 +1321,7 @@ cleanup() {
   # #713: backgrounded ( ... ) & -- collected+waited in the shared group below, alongside
   # cam3/4 and cam2/painter.
   (
+    cambox_parallel_stagger
     timeout "$CLEANUP_SSH_TIMEOUT" sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$CAM1_IP" \
       "systemctl stop camera-box-burn-${RUN_ID} 2>/dev/null; systemctl reset-failed camera-box-burn-${RUN_ID} 2>/dev/null; \
        pkill -9 -f 'camera-box-burn-[a-z0-9]' 2>/dev/null; pkill -x camera-box 2>/dev/null; sleep 1; \
@@ -1325,6 +1330,7 @@ $(camera_box_verify_active_cmds "$CAMERA_NAME (source, $CAM1_IP)")"
   ) &
   CAMBOX_PARALLEL_PIDS+=("$!")
   CAMBOX_PARALLEL_LABELS+=("$CAMERA_NAME (source, $CAM1_IP)")
+  CAMBOX_PARALLEL_IPS+=("$CAM1_IP")
   # #624/#312: every ACTIVE secondary camera (camera_active_secondary_set(), #827) — same restore
   # as cam1, ONLY when the ALL_CAMBOX deploy above actually ran (gated the same way) so a plain
   # single-camera run never touches these boxes at all. #827 (binding owner directive): iterating
@@ -1341,6 +1347,7 @@ $(camera_box_verify_active_cmds "$CAMERA_NAME (source, $CAM1_IP)")"
       # #668: same stop-the-unit-first ordering as cam1 above — never let the pkill race a respawn.
       # #712: backgrounded ( ... ) & — every active secondary box restores IN PARALLEL, collected+waited below.
       (
+        cambox_parallel_stagger
         timeout "$CLEANUP_SSH_TIMEOUT" sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$_cip" \
           "systemctl stop camera-box-burn-${_ccn}-${RUN_ID} 2>/dev/null; systemctl reset-failed camera-box-burn-${_ccn}-${RUN_ID} 2>/dev/null; \
            pkill -9 -f 'camera-box-burn-[a-z0-9]' 2>/dev/null; pkill -x camera-box 2>/dev/null; sleep 1; \
@@ -1349,6 +1356,7 @@ $(camera_box_verify_active_cmds "$_ccn ($_cip)")"
       ) &
       CAMBOX_PARALLEL_PIDS+=("$!")
       CAMBOX_PARALLEL_LABELS+=("$_ccn ($_cip)")
+      CAMBOX_PARALLEL_IPS+=("$_cip")
     done
     # #713: no per-loop wait here any more -- the SHARED wait below (after cam2/painter is
     # armed) covers cam1 + this loop + cam2/painter in one pass.
@@ -1362,6 +1370,7 @@ $(camera_box_verify_active_cmds "$_ccn ($_cip)")"
   # path, where [2b/8] never ran.
   # #713: backgrounded ( ... ) & -- collected+waited in the shared group, same as cam1/cam3-4.
   (
+    cambox_parallel_stagger
     timeout "$CLEANUP_SSH_TIMEOUT" sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$PAINTER_IP" "pkill -x frame-probe 2>/dev/null || true
 systemctl stop camera-box-burn-cam2-${RUN_ID} 2>/dev/null || true
 systemctl reset-failed camera-box-burn-cam2-${RUN_ID} 2>/dev/null || true
@@ -1381,6 +1390,7 @@ fi"
   ) &
   CAMBOX_PARALLEL_PIDS+=("$!")
   CAMBOX_PARALLEL_LABELS+=("cam2/painter, $PAINTER_IP")
+  CAMBOX_PARALLEL_IPS+=("$PAINTER_IP")
   # #713: ONE shared wait for cam1 + (cam3/4 if ALL_CAMBOX) + cam2/painter -- the whole
   # device-restore phase's wall-clock is now bounded by the SLOWEST single box, not the sum of
   # up to 6 sequential ssh round trips.

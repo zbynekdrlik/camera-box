@@ -118,7 +118,10 @@ fn stagger_sleeps_proportional_to_launch_index() {
          t0=$(date +%s%3N); cambox_parallel_stagger; t1=$(date +%s%3N); echo \"IDX3=$((t1-t0))\"\n"
     );
     let (stdout, stderr, ok) = run(&script);
-    assert!(ok, "driver must exit 0. stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(
+        ok,
+        "driver must exit 0. stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
     let idx0 = grab_ms(&stdout, "IDX0=");
     let idx3 = grab_ms(&stdout, "IDX3=");
     assert!(
@@ -144,7 +147,10 @@ fn stagger_disabled_when_ms_zero() {
          t0=$(date +%s%3N); cambox_parallel_stagger; t1=$(date +%s%3N); echo \"OFF=$((t1-t0))\"\n"
     );
     let (stdout, stderr, ok) = run(&script);
-    assert!(ok, "driver must exit 0. stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(
+        ok,
+        "driver must exit 0. stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
     let off = grab_ms(&stdout, "OFF=");
     assert!(
         off < 60,
@@ -187,29 +193,28 @@ fn lib_defines_cambox_parallel_stagger() {
 #[test]
 fn every_restore_launch_subshell_calls_the_stagger() {
     let body = cleanup_body(&read("scripts/recording-e2e.sh"));
-    let loop_start = body
-        .find("for _ccn in $(camera_active_secondary_set)")
-        .expect("cleanup() must have the ALL_CAMBOX secondary restore loop");
-    let painter_start = body
-        .find("root@\"$PAINTER_IP\" \"pkill -x frame-probe")
-        .expect("cleanup() must have the cam2/painter restore block");
-    let wait_pos = body
-        .find("cambox_parallel_wait_and_report")
-        .expect("cleanup() must call cambox_parallel_wait_and_report");
-
-    let cam1_block = &body[..loop_start];
-    let loop_region = &body[loop_start..painter_start];
-    let painter_region = &body[painter_start..wait_pos];
-
-    for (name, region) in [
-        ("cam1", cam1_block),
-        ("secondary-loop", loop_region),
-        ("cam2/painter", painter_region),
+    let phase = device_restore_phase(&body);
+    // Each of the three restore subshells is `( cambox_parallel_stagger; timeout ... root@<IP> ... ) &`
+    // — so a `cambox_parallel_stagger` call must appear a short distance BEFORE each ssh target (the
+    // first statement inside that subshell). Region-boundary-free: the stagger sits ABOVE each ssh
+    // anchor, so slicing "from the anchor" would wrongly exclude it.
+    for (name, target) in [
+        ("cam1", "root@\"$CAM1_IP\""),
+        ("secondary-loop", "root@\"$_cip\""),
+        ("cam2/painter", "root@\"$PAINTER_IP\""),
     ] {
+        let tpos = phase
+            .find(target)
+            .unwrap_or_else(|| panic!("#1085: the device-restore phase must contain {target}"));
+        let stagger_pos = phase[..tpos]
+            .rfind("cambox_parallel_stagger")
+            .unwrap_or_else(|| panic!("#1085: no cambox_parallel_stagger before {target}"));
         assert!(
-            region.contains("cambox_parallel_stagger"),
-            "#1085: the {name} restore subshell must call cambox_parallel_stagger (spread the \
-             connection burst). Region:\n{region}"
+            tpos - stagger_pos < 220,
+            "#1085: the {name} restore subshell (ssh {target}) must call cambox_parallel_stagger as \
+             its first statement — found the nearest stagger {} bytes before it, too far to be the \
+             same subshell. Phase:\n{phase}",
+            tpos - stagger_pos
         );
     }
 }
@@ -294,7 +299,10 @@ fn write_phase_driver(driver_path: &std::path::Path, log_path: &std::path::Path,
         "{}/scripts/lib/camera-box-restart-verify.sh",
         env!("CARGO_MANIFEST_DIR")
     );
-    let dropin_lib = format!("{}/scripts/lib/rig-test-dropin.sh", env!("CARGO_MANIFEST_DIR"));
+    let dropin_lib = format!(
+        "{}/scripts/lib/rig-test-dropin.sh",
+        env!("CARGO_MANIFEST_DIR")
+    );
 
     // Fake `timeout` stamps the CONNECTION time (ms epoch) tagged by args, then simulates a ~400ms
     // ssh round-trip. The stamp lands AFTER cambox_parallel_stagger's own sleep, so it captures the

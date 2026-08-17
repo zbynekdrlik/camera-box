@@ -73,6 +73,32 @@ cambox_parallel_label_ip() {
   return 1
 }
 
+# cambox_parallel_stagger -> (#1085, ROOT-CAUSE fix for the #715 connection burst) delay THIS
+# backgrounded restore subshell's ssh CONNECTION by its own launch INDEX * a small fixed gap, so N
+# restores SPREAD their connection establishment in time instead of bursting in the same instant --
+# the dev1-side burst #715/#675 measured as ~100% rejected within ~1.93s (0/18 across 6 CI runs).
+# Call it as the FIRST statement INSIDE each ( ... ) & restore subshell, BEFORE its ssh. It reads
+# ${#CAMBOX_PARALLEL_PIDS[@]} -- the count of restores ALREADY launched at fork time (the parent
+# appends THIS box's PID only AFTER the `&`), i.e. this box's 0-based launch index -- so box 0 sleeps
+# 0, box k sleeps k*gap. Because the delay lives INSIDE the subshell the PARENT never blocks: all N
+# subshells are still backgrounded at ~t=0, so a GH-Actions cancellation still kills every in-flight
+# restore (NO box is left "unreached") -- #712/#713's cancellation-window benefit is FULLY preserved --
+# while the whole phase stays bounded by the slowest box + a tiny (N-1)*gap tail, NEVER the sum. Gap =
+# CAMBOX_PARALLEL_STAGGER_MS (default 300; #715 recommended 200-400ms); 0 (or a non-integer) disables
+# it, which the unit tests + the #712/#713 wall-clock parallelism drivers use to isolate ssh-round-trip
+# timing. Integer-ms math only (no float, no bc): printf renders the fractional-second sleep argument.
+# Never `exit`s (the #649/#675/#712 warn-only discipline -- cleanup()'s trap must always complete);
+# always returns 0, and every internal step is guarded so a subshell under `set -e` can never abort here.
+cambox_parallel_stagger() {
+  local _idx="${#CAMBOX_PARALLEL_PIDS[@]}"
+  local _gap_ms="${CAMBOX_PARALLEL_STAGGER_MS:-300}"
+  [ "$_idx" -gt 0 ] 2>/dev/null || return 0
+  [ "$_gap_ms" -gt 0 ] 2>/dev/null || return 0
+  local _delay_ms=$(( _idx * _gap_ms ))
+  sleep "$(printf '%d.%03d' "$(( _delay_ms / 1000 ))" "$(( _delay_ms % 1000 ))")" 2>/dev/null || true
+  return 0
+}
+
 # _cambox_retry_remote_cmd [painter] -> print the REMOTE bash text for a single sequential
 # recovery attempt (#715). Generic (source cam1/cam3): STOP any transient burn unit FIRST (the
 # #668 stop-before-pkill ordering -- otherwise a `Restart=on-failure` respawn races the pkill and
@@ -123,13 +149,21 @@ cambox_parallel_retry_failed() {
   # settle: let any sshd/dev1 burst-penalty state from the parallel group decay before the first
   # retry (the retries below are one-at-a-time, so this pass never bursts by construction).
   sleep "$_delay" 2>/dev/null || true
-  local _lbl _ip _remote
-  local _still=()
-  for _lbl in "${CAMBOX_PARALLEL_FAILED_LABELS[@]}"; do
-    _ip="$(cambox_parallel_label_ip "$_lbl")" || _ip=""
+  local _lbl _ip _remote _idx
+  local _still=() _still_ips=()
+  # #1085: iterate by INDEX so each failed label's EXPLICIT retry-target IP (recorded in lockstep by
+  # cambox_parallel_wait_and_report) is used directly. cambox_parallel_label_ip is now only a
+  # fail-open FALLBACK for a caller that did not populate the IP array (e.g. a unit test that builds
+  # CAMBOX_PARALLEL_PIDS/LABELS without CAMBOX_PARALLEL_IPS) -- the real launch-site path no longer
+  # parses presentation text. Both the label and IP `_still` sets are pruned in lockstep.
+  for _idx in "${!CAMBOX_PARALLEL_FAILED_LABELS[@]}"; do
+    _lbl="${CAMBOX_PARALLEL_FAILED_LABELS[$_idx]}"
+    _ip="${CAMBOX_PARALLEL_FAILED_IPS[$_idx]:-}"
+    [ -n "$_ip" ] || _ip="$(cambox_parallel_label_ip "$_lbl")" || _ip=""
     if [ -z "$_ip" ]; then
-      echo "    WARNING #715: cannot parse a single retry-target IP from \"$_lbl\" -- leaving it for the #684 FINAL pass" >&2
+      echo "    WARNING #715: cannot resolve a retry-target IP for \"$_lbl\" (no explicit IP + unparseable label) -- leaving it for the #684 FINAL pass" >&2
       _still+=("$_lbl")
+      _still_ips+=("$_ip")
       continue
     fi
     case "$_lbl" in
@@ -142,6 +176,7 @@ cambox_parallel_retry_failed() {
         fi
         # NEVER pruned -- see the function header: is-active can't tell a black monitor from a live one.
         _still+=("$_lbl")
+        _still_ips+=("$_ip")
         ;;
       *)
         _remote="$(_cambox_retry_remote_cmd generic)"
@@ -150,14 +185,17 @@ cambox_parallel_retry_failed() {
         else
           echo "    WARNING #715: $_lbl still down after a sequential retry -- leaving it for the #684 FINAL pass" >&2
           _still+=("$_lbl")
+          _still_ips+=("$_ip")
         fi
         ;;
     esac
   done
   if [ "${#_still[@]}" -gt 0 ]; then
     CAMBOX_PARALLEL_FAILED_LABELS=("${_still[@]}")
+    CAMBOX_PARALLEL_FAILED_IPS=("${_still_ips[@]}")
   else
     CAMBOX_PARALLEL_FAILED_LABELS=()
+    CAMBOX_PARALLEL_FAILED_IPS=()
   fi
   return 0
 }
@@ -171,12 +209,19 @@ cambox_parallel_wait_and_report() {
   # cambox_parallel_surface_painter_failure below). Additive to the existing per-box WARNING #712 +
   # non-zero return; never a signature change.
   CAMBOX_PARALLEL_FAILED_LABELS=()
+  # #1085: record the EXPLICIT retry-target IP alongside the label, indexed in lockstep with
+  # CAMBOX_PARALLEL_FAILED_LABELS, so cambox_parallel_retry_failed no longer has to parse the IP out
+  # of the box's display label. Populated from CAMBOX_PARALLEL_IPS (the launch sites now fill it);
+  # `:-` keeps it empty for a caller that did not populate CAMBOX_PARALLEL_IPS (e.g. a unit test),
+  # in which case the retry fails open to cambox_parallel_label_ip exactly as before.
+  CAMBOX_PARALLEL_FAILED_IPS=()
   for _pid in "${CAMBOX_PARALLEL_PIDS[@]}"; do
     if wait "$_pid"; then
       echo "    [cleanup] ${CAMBOX_PARALLEL_LABELS[$_i]} restore ok"
     else
       echo "    WARNING #712: ${CAMBOX_PARALLEL_LABELS[$_i]} restore failed/timed out in parallel cleanup — check it manually" >&2
       CAMBOX_PARALLEL_FAILED_LABELS+=("${CAMBOX_PARALLEL_LABELS[$_i]}")
+      CAMBOX_PARALLEL_FAILED_IPS+=("${CAMBOX_PARALLEL_IPS[$_i]:-}")
       # #715: _rc is (re)computed from the FINAL failed set after cambox_parallel_retry_failed
       # below prunes recovered boxes, so setting it here would be dead — the retry may clear it.
     fi
