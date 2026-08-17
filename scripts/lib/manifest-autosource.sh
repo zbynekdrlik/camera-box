@@ -88,9 +88,11 @@ manifest_autosource_fetch() {
   fi
   command -v gh >/dev/null 2>&1 || return 0
   local run_id=""
-  run_id="$(gh run list --repo "$repo" --workflow "$workflow" -L 100 \
+  # jq reads the marker SHA via env.SHA (never string-interpolated into the filter) so a box's
+  # reported marker can't break out of the jq program even if it carried a metacharacter.
+  run_id="$(SHA="$sha" gh run list --repo "$repo" --workflow "$workflow" -L 100 \
     --json databaseId,conclusion,headSha \
-    --jq "[.[] | select(.headSha==\"$sha\" and .conclusion==\"success\")][0].databaseId" 2>/dev/null)" || return 0
+    --jq '[.[] | select(.headSha==env.SHA and .conclusion=="success")][0].databaseId' 2>/dev/null)" || return 0
   [ -n "$run_id" ] && [ "$run_id" != "null" ] || return 0
   local tmp=""
   tmp="$(mktemp -d 2>/dev/null)" || return 0
@@ -98,8 +100,10 @@ manifest_autosource_fetch() {
     rm -rf "$tmp" 2>/dev/null
     return 0
   fi
+  # `find -print -quit` (first match, clean exit 0) — NOT `find | head -1`, whose SIGPIPE-on-a-large
+  # match set can trip `set -o pipefail` (the #239 class drift-guard's manifest_sha_for_path avoids).
   local found=""
-  found="$(find "$tmp" -name BUNDLE_MANIFEST.json -type f 2>/dev/null | head -1)"
+  found="$(find "$tmp" -name BUNDLE_MANIFEST.json -type f -print -quit 2>/dev/null)"
   if [ -n "$found" ] && [ -s "$found" ]; then
     mkdir -p "$(dirname "$dest")" 2>/dev/null
     cp -f "$found" "$dest" 2>/dev/null && printf '%s' "$dest"
