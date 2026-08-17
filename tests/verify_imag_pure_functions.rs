@@ -866,7 +866,13 @@ fn imag_openbox_root_menu_bound_requires_root_context_right_click_to_root_menu()
         DECOY='<keyboard><keybind key="A-space"><action name="ShowMenu"><menu>root-menu</menu></action></keybind></keyboard><mouse><context name="Root"><mousebind button="Right" action="Press"><action name="ShowMenu"><menu>apps-menu</menu></action></mousebind></context></mouse>'
         # single-quoted attributes (valid XML, openbox/libxml2 accepts) -> BOUND
         SQ="<mouse><context name='Root'><mousebind button='Right' action='Press'><action name='ShowMenu'><menu>root-menu</menu></action></mousebind></context></mouse>"
-        for name in GOOD STALE DECOY SQ; do
+        # [review #1095] the real root-menu bind is COMMENTED OUT and Right rebound to apps-menu ->
+        # NOT bound (a disabled <!-- --> binding must never false-PASS an actually-orphaned menu)
+        COMMENTED='<mouse><context name="Root"><!-- <mousebind button="Right" action="Press"><action name="ShowMenu"><menu>root-menu</menu></action></mousebind> --><mousebind button="Right" action="Press"><action name="ShowMenu"><menu>apps-menu</menu></action></mousebind></context></mouse>'
+        # [review #1095] XML attribute order is not significant: button not first, action name not
+        # first -> still BOUND (must not false-FAIL a legal reordered rc.xml)
+        REORDER='<mouse><context name="Root"><mousebind action="Press" button="Right"><action enabled="true" name="ShowMenu"><menu>root-menu</menu></action></mousebind></context></mouse>'
+        for name in GOOD STALE DECOY SQ COMMENTED REORDER; do
           if imag_openbox_root_menu_bound "${!name}"; then echo BOUND; else echo NOTBOUND; fi
         done
         # empty / absent rc.xml text -> NOT bound
@@ -877,10 +883,10 @@ fn imag_openbox_root_menu_bound_requires_root_context_right_click_to_root_menu()
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(
         lines,
-        vec!["BOUND", "NOTBOUND", "NOTBOUND", "BOUND", "NOTBOUND"],
+        vec!["BOUND", "NOTBOUND", "NOTBOUND", "BOUND", "NOTBOUND", "BOUND", "NOTBOUND"],
         "rc.xml Root right-click binding must be scoped to the Root context + Right button + \
          ShowMenu root-menu (a stale bind-elsewhere fails, a keybind-only root-menu does NOT \
-         count): {out:?}"
+         count, a COMMENTED-OUT binding does NOT count, and attribute ORDER is irrelevant): {out:?}"
     );
 }
 
