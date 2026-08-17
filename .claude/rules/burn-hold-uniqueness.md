@@ -41,6 +41,19 @@ only recording-adjacent pairs, so the fraction is exactly "% of consecutive RECO
 byte-identical", never diluted by decode gaps. See `burn_hold::burn_hold_distribution` +
 `recorded_gap_breaks_a_run_never_merges_it`.
 
+## GOTCHA — the hold input MUST be #575-boundary-trimmed before the walk (or a boundary freeze false-fires the LIVE gate)
+
+The recording START/STOP boundary artifact (the mux-finalization tail-drain holding the FINAL frame
+at StopRecord; the genlock pre-roll flush at the start — a KNOWN non-loss class, #575) shows up in
+the hold walk as a several-frame hold of the last/first id — and now that the gate is LIVE it would
+falsely FAIL the run. The imag leg already position-trims its contiguity input; the node-burn hold
+path must do the SAME. The probe glue (`recording-verdict.rs`) feeds the `(frame_index, id)` pairs
+through `recording_boundary_trim::trim_boundary_pairs` (the frame-index-preserving sibling of
+`trim_boundary_samples`, lead/tail = `BOUNDARY_TRIM_LEAD_FRAMES`/`TAIL_FRAMES` = 3/3, anchored on the
+STREAM recording's OWN first/last `frame_index`) BEFORE `burn_hold_distribution`. Verified live: the
+untrimmed distribution already carried boundary holds (green run 661270731 stream `max_hold_id ==
+last_id`, hold 2). See `burn_hold::recording_boundary_freeze_is_trimmed_below_the_hold_gate_575`.
+
 ## Topology fixes the legit bound (why 4)
 
 Topology v2 (#459/#466): both strih and stream RECORD at 30fps and every node burn is DECIMATED

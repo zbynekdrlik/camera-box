@@ -7,6 +7,7 @@ paths:
   - "src/lipsync_cross_check.rs"
   - "src/self_heal_attribution.rs"
   - "src/dup_cadence.rs"
+  - "src/burn_hold.rs"
 ---
 
 # Calibrating + wiring a NEW verdict gate seam (the one-line-restorable `gates_overall_pass()` pattern)

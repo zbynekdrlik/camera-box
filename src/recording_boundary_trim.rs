@@ -68,6 +68,41 @@ pub fn trim_boundary_samples(
     lead_frames: u64,
     tail_frames: u64,
 ) -> Vec<u32> {
+    // Same boundary-position trim as [`trim_boundary_pairs`], then drop the frame_index — a
+    // contiguity check consumes only the values. Delegating keeps the ONE filter definition so the
+    // value-only and pair-preserving variants can never diverge on the cutoff math.
+    trim_boundary_pairs(
+        samples,
+        first_frame_index,
+        last_frame_index,
+        lead_frames,
+        tail_frames,
+    )
+    .into_iter()
+    .map(|(_, v)| v)
+    .collect()
+}
+
+/// #870 — the same #575 boundary-position trim, but PRESERVING each surviving `(frame_index,
+/// value)` pair instead of dropping the index.
+///
+/// The per-hop max-hold walk ([`crate::burn_hold::burn_hold_distribution`]) needs the
+/// `frame_index` to tell a genuine consecutive-recorded-frame hold from two deliveries split
+/// across a recorded gap, so it consumes the pairs — it cannot use [`trim_boundary_samples`]'s
+/// value-only output. The recording boundary artifact (the mux-finalization tail-drain holding the
+/// final frame at StopRecord, and the genlock pre-roll flush at the start — a KNOWN non-loss class,
+/// #575) must be trimmed off the hold input the SAME way it is off the imag contiguity input, or a
+/// boundary freeze of a few frames falsely trips the LIVE max-hold gate ([`crate::burn_hold`]). All
+/// other semantics — frame-POSITION trim anchored on the RECORDING's own bounds (never the signal's
+/// own value range), saturating cutoffs, empty degenerate case — are identical to
+/// [`trim_boundary_samples`], which now delegates here.
+pub fn trim_boundary_pairs(
+    samples: &[(u64, u32)],
+    first_frame_index: u64,
+    last_frame_index: u64,
+    lead_frames: u64,
+    tail_frames: u64,
+) -> Vec<(u64, u32)> {
     // Samples with `frame_index < lead_cutoff` (the lead boundary window) or
     // `frame_index > tail_cutoff` (the tail boundary window) are excluded. Saturating math: a
     // recording shorter than `lead_frames + tail_frames` can make `lead_cutoff > tail_cutoff`,
@@ -77,8 +112,8 @@ pub fn trim_boundary_samples(
     let tail_cutoff = last_frame_index.saturating_sub(tail_frames);
     samples
         .iter()
-        .filter(|&&(idx, _)| idx >= lead_cutoff && idx <= tail_cutoff)
-        .map(|&(_, v)| v)
+        .copied()
+        .filter(|&(idx, _)| idx >= lead_cutoff && idx <= tail_cutoff)
         .collect()
 }
 
@@ -183,5 +218,28 @@ mod tests {
     #[test]
     fn empty_input_is_handled() {
         assert!(trim_boundary_samples(&[], 0, 0, 3, 3).is_empty());
+    }
+
+    /// #870 — [`trim_boundary_pairs`] applies the SAME boundary-position trim as
+    /// [`trim_boundary_samples`] but keeps each surviving `(frame_index, value)` pair (the max-hold
+    /// walk needs the index). Same cutoffs, same survivors, only the index is retained.
+    #[test]
+    fn trim_boundary_pairs_preserves_the_frame_index_and_drops_the_same_edges() {
+        // A lead rogue (idx 0) and a tail rogue (idx 9) around a clean 3..=8 run on a 0..=9
+        // recording. lead(3)+tail(3) keeps frame_index 3..=6 only.
+        let samples: Vec<(u64, u32)> = vec![(0, 1)]
+            .into_iter()
+            .chain((3..9u64).map(|i| (i, 1000 + i as u32)))
+            .chain(vec![(9, 5000)])
+            .collect();
+        let pairs = trim_boundary_pairs(&samples, 0, 9, 3, 3);
+        assert_eq!(
+            pairs,
+            (3u64..=6).map(|i| (i, 1000 + i as u32)).collect::<Vec<_>>(),
+            "pairs variant keeps frame_index and drops the same lead/tail edges: {pairs:?}"
+        );
+        // Exactly the value-only projection of `trim_boundary_samples` over the SAME input.
+        let values_only: Vec<u32> = pairs.iter().map(|&(_, v)| v).collect();
+        assert_eq!(values_only, trim_boundary_samples(&samples, 0, 9, 3, 3));
     }
 }

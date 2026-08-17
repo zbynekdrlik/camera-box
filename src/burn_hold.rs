@@ -39,8 +39,8 @@
 //! §5 the flip was held until the `max_hold_frames` field's green-run distribution accumulated and
 //! proved LIVE-safe: across the 6 green E2E runs carrying the field the worst `max_hold_frames` is
 //! 2 (bound 4 => a 2-frame headroom on every green run — gates-green-first), the pathology (run
-//! 396782734, hold >=5) fails, and cam1 windows subject to the issue-909 grabber defect are
-//! INCLUDED in that green set yet reach only hold 2 — so LIVE-safety is empirical. Flip back to
+//! 396782734, hold >=5) fails, and cam1's node burn — subject to the issue-909 grabber defect — is
+//! INCLUDED in that green set yet reaches only hold 2, so LIVE-safety is empirical. Flip back to
 //! `false` for a one-line revert to report-only if a future rig change ever trips it.
 //!
 //! This is the PURE decision core; it compiles + unit-tests on DEFAULT features (the whole `probe`
@@ -64,7 +64,7 @@ pub const MAX_HOLD_FRAMES: u32 = 4;
 /// (#870). Built from the recorded-ORDER `(frame_index, id)` pairs by [`burn_hold_distribution`].
 /// All counts are `u32`; the duplicate FRACTION is a derived method so the struct carries no float
 /// (keeps `PartialEq` exact and avoids the `Eq`-on-float trap). Not `Serialize`d — the probe
-/// consumer hand-builds its verdict JSON so it can add the derived fraction/bound/report-only
+/// consumer hand-builds its verdict JSON so it can add the derived fraction/bound/gate-flag
 /// fields the struct itself does not carry.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HoldDistribution {
@@ -137,8 +137,9 @@ impl HoldDistribution {
 /// Program-switch segmentation is inherent on top of this: a switch changes the filter instance so
 /// the `frame_id` jumps/resets ⇒ a different id ⇒ the run breaks. The only residual over-count risk
 /// (two segments' counters coincidentally EQUAL on two recording-adjacent frames across the
-/// boundary) is bounded to +1 per switch and is harmless while the term is report-only
-/// ([`gates_overall_pass`]).
+/// boundary) is bounded to +1 per switch — negligible against the bound of 4 (a +1 near a handful
+/// of program switches cannot lift a legit hold of 1–2 to the bound), so it does not threaten the
+/// LIVE gate ([`gates_overall_pass`]).
 ///
 /// An empty input ⇒ an all-zero distribution (`max_hold_frames == 0`, [`HoldDistribution::
 /// measured_max_hold`] `== None`) — nothing was proven, and the gate PASSES it (see
@@ -246,8 +247,8 @@ pub fn hold_gate_pass(measured_max_hold: Option<u32>, bound: Option<u32>) -> boo
 /// `full_chain.loss.<node>.hold.max_hold_frames` field the worst `max_hold_frames` is 2, so bound
 /// [`MAX_HOLD_FRAMES`] (4) clears every green run with a 2-frame headroom (gates-green-first — no
 /// green run would have been failed) while the pathology (run 396782734, hold >=5) fails. That
-/// green set INCLUDES cam1 windows subject to the issue-909 ShadowCast-grabber defect (cam1 reaches
-/// only hold 2 in green runs), so LIVE-safety is empirical, not a mechanical claim
+/// green set INCLUDES cam1's node burn, subject to the issue-909 ShadowCast-grabber defect (cam1
+/// reaches only hold 2 in green runs), so LIVE-safety is empirical, not a mechanical claim
 /// (verdict-gate-seam-calibration.md §5). Flip back to `false` for a one-line revert to report-only
 /// if a future rig change ever trips it.
 pub fn gates_overall_pass() -> bool {
@@ -425,8 +426,8 @@ mod tests {
     /// The seam is LIVE today (#870): the calibrated max-hold bound folds into `overall_pass`. It
     /// passes every recent green run with honest margin — the worst `max_hold_frames` across the 6
     /// green E2E runs carrying the field is 2 (bound 4 ⇒ a 2-frame headroom), and that INCLUDES
-    /// cam1 windows subject to the issue-909 ShadowCast-grabber defect (cam1 reaches only 2 in green
-    /// runs, so LIVE-safety is empirical, not a mechanical claim). Flip `gates_overall_pass` back to
+    /// cam1's node burn, subject to the issue-909 ShadowCast-grabber defect (cam1 reaches only 2 in
+    /// green runs, so LIVE-safety is empirical, not a mechanical claim). Flip `gates_overall_pass` to
     /// `false` for a one-line revert to report-only if a future rig change ever trips it.
     #[test]
     fn gate_is_live_today_870() {
@@ -456,5 +457,45 @@ mod tests {
             !contributes_pass,
             "#870 LIVE: an over-bound hold must FAIL the fused verdict (report-only would pass it)"
         );
+    }
+
+    /// A #575 recording-BOUNDARY artifact (the final frame held for several frames during mux
+    /// finalization at StopRecord — a KNOWN non-loss class) must NOT trip the LIVE max-hold gate.
+    /// The probe glue trims the recording boundary off the hold input
+    /// ([`crate::recording_boundary_trim::trim_boundary_pairs`], lead/tail 3) BEFORE this walk;
+    /// this pins that composition — the SAME boundary freeze reads as an over-bound hold UNtrimmed
+    /// but clears the bound once trimmed. Without the trim, a boundary freeze would falsely fail a
+    /// run now that the gate is LIVE (the review finding that gated the flip).
+    #[test]
+    fn recording_boundary_freeze_is_trimmed_below_the_hold_gate_575() {
+        use crate::recording_boundary_trim::{
+            trim_boundary_pairs, BOUNDARY_TRIM_LEAD_FRAMES, BOUNDARY_TRIM_TAIL_FRAMES,
+        };
+        // A clean stepping run on frames 0..=6, then the final id (108) held on the last 5 frames
+        // (7..=11): a mux-finalization tail freeze on a 0..=11 recording.
+        let mut pairs: Vec<(u64, u32)> = (0..7u64).map(|i| (i, 1000 + 2 * i as u32)).collect();
+        pairs.extend((7..12u64).map(|i| (i, 108)));
+        // UNtrimmed: the tail freeze is a 5-frame hold ⇒ over the bound (would FALSELY fail LIVE).
+        let untrimmed = burn_hold_distribution("stream", &pairs);
+        assert_eq!(untrimmed.max_hold_frames, 5);
+        assert!(
+            !untrimmed.within_bound(MAX_HOLD_FRAMES),
+            "untrimmed, the boundary freeze trips the bound (the false-fire the trim prevents)"
+        );
+        // Trimmed on the recording's OWN bounds (0..=11, lead/tail 3): frames 0..=2 and 9..=11 are
+        // dropped, so the tail freeze shrinks to 2 recorded frames (7,8) ⇒ within bound, PASS.
+        let trimmed = trim_boundary_pairs(
+            &pairs,
+            0,
+            11,
+            BOUNDARY_TRIM_LEAD_FRAMES,
+            BOUNDARY_TRIM_TAIL_FRAMES,
+        );
+        let d = burn_hold_distribution("stream", &trimmed);
+        assert_eq!(
+            d.max_hold_frames, 2,
+            "the tail freeze shrinks below the bound once the recording boundary is trimmed"
+        );
+        assert!(d.within_bound(MAX_HOLD_FRAMES));
     }
 }
