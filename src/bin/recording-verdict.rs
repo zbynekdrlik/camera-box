@@ -4624,9 +4624,11 @@ fn build_and_print_verdict(
                                     schedule,
                                     args.switch_guard_ns,
                                 );
-                                let mut dup_window_json = Vec::with_capacity(dup_windows.len());
-                                let mut worst_dup_fraction: Option<f64> = None;
-                                for (wi, win_frames) in dup_windows.iter().enumerate() {
+                                let mut dcs: Vec<Option<camera_box::dup_cadence::DupCadence>> =
+                                    Vec::with_capacity(dup_windows.len());
+                                let mut worst_raw_fraction: Option<f64> = None;
+                                let mut masked_windows: usize = 0;
+                                for win_frames in &dup_windows {
                                     let seq: Vec<u64> = win_frames
                                         .iter()
                                         .filter_map(|f| {
@@ -4635,27 +4637,46 @@ fn build_and_print_verdict(
                                         .collect();
                                     let dc = camera_box::dup_cadence::measure_dup_cadence(&seq);
                                     if let Some(ref d) = dc {
-                                        worst_dup_fraction = Some(
-                                            worst_dup_fraction.map_or(d.duplicate_fraction, |m| {
+                                        worst_raw_fraction = Some(
+                                            worst_raw_fraction.map_or(d.duplicate_fraction, |m| {
                                                 m.max(d.duplicate_fraction)
                                             }),
                                         );
+                                        if d.duplication_masked {
+                                            masked_windows += 1;
+                                        }
                                     }
-                                    dup_window_json.push(serde_json::json!({
-                                        "cambox": schedule[wi].cambox.clone(),
-                                        "dup_cadence": dc,
-                                    }));
+                                    dcs.push(dc);
                                 }
+                                // The GATE keys on the DISCRIMINATED signal (worst fraction among
+                                // windows classified `duplication_masked`), never the raw worst —
+                                // a freeze/glitch has a high raw fraction but is coverage/regularity
+                                // vetoed (frozen_leg's domain), so gating on raw would double-jeopardy
+                                // it (issue 1088 review finding).
+                                let worst_masked_fraction =
+                                    camera_box::dup_cadence::worst_masked_duplicate_fraction(&dcs);
+                                let dup_window_json: Vec<serde_json::Value> = dcs
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(wi, dc)| {
+                                        serde_json::json!({
+                                            "cambox": schedule[wi].cambox.clone(),
+                                            "dup_cadence": dc,
+                                        })
+                                    })
+                                    .collect();
                                 let dup_bound = camera_box::dup_cadence::DUP_RATE_PULLDOWN_MIN;
                                 let dup_gate_pass = camera_box::dup_cadence::dup_cadence_gate_pass(
-                                    worst_dup_fraction,
+                                    worst_masked_fraction,
                                     Some(dup_bound),
                                 );
                                 let dup_gates_overall =
                                     camera_box::dup_cadence::gates_overall_pass();
                                 report["all_cambox_continuity"]["duplication_masked_cadence"] = serde_json::json!({
                                     "windows": dup_window_json,
-                                    "worst_duplicate_fraction": worst_dup_fraction,
+                                    "masked_windows": masked_windows,
+                                    "worst_masked_duplicate_fraction": worst_masked_fraction,
+                                    "worst_raw_duplicate_fraction": worst_raw_fraction,
                                     "bound_duplicate_fraction": dup_bound,
                                     "pass": dup_gate_pass,
                                     "gates_overall_pass": dup_gates_overall,
@@ -4663,16 +4684,23 @@ fn build_and_print_verdict(
                                     "note": "#1088 duplication-masked 50->60 detector: \
                                              per-cambox-window row-sampled content-hash dup-rate \
                                              (the #794 hard layer the received= rate tap is blind \
-                                             to). worst_duplicate_fraction = max \
-                                             exact-consecutive-duplicate fraction across cambox \
-                                             windows; per-window duplication_masked flags a \
-                                             sustained + regular + window-spanning pulldown. \
-                                             REPORT-ONLY / calibration-first via \
-                                             dup_cadence::gates_overall_pass (false).",
+                                             to). Per-window duplication_masked flags a sustained + \
+                                             regular + window-spanning pulldown. The GATE keys on \
+                                             worst_masked_duplicate_fraction (worst raw fraction \
+                                             among MASKED windows), NOT worst_raw_duplicate_fraction \
+                                             (a freeze/glitch has a high raw fraction but is \
+                                             coverage/regularity vetoed → excluded, no \
+                                             double-jeopardy with frozen_leg). REPORT-ONLY / \
+                                             calibration-first via dup_cadence::gates_overall_pass \
+                                             (false).",
                                 });
                                 println!(
-"  #1088 DUP-CADENCE (report-only): worst dup_fraction={} (bound {}, pass={}, gates_overall_pass={})",
-                                    worst_dup_fraction
+"  #1088 DUP-CADENCE (report-only): masked_windows={} worst_masked={} worst_raw={} (bound {}, pass={}, gates_overall_pass={})",
+                                    masked_windows,
+                                    worst_masked_fraction
+                                        .map(|p| format!("{p:.5}"))
+                                        .unwrap_or_else(|| "n/a".to_string()),
+                                    worst_raw_fraction
                                         .map(|p| format!("{p:.5}"))
                                         .unwrap_or_else(|| "n/a".to_string()),
                                     dup_bound,

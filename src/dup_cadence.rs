@@ -244,18 +244,40 @@ pub fn measure_dup_cadence(hashes: &[u64]) -> Option<DupCadence> {
     })
 }
 
-/// Does the run's WORST per-window duplicate fraction satisfy the `max` bound? Mirrors
+/// The worst (max) `duplicate_fraction` among ONLY the windows the classifier flagged as
+/// `duplication_masked` — i.e. genuine pulldowns, NOT a localized freeze or an irregular burst
+/// (which carry a HIGH raw `duplicate_fraction` but are deliberately vetoed by the coverage /
+/// regularity checks). This is what [`dup_cadence_gate_pass`] must bound: gating on the raw worst
+/// `duplicate_fraction` across ALL windows would double-jeopardy a freeze (already `frozen_leg`'s
+/// domain) or a decode glitch, defeating the very discrimination the classifier builds. `None`
+/// when no window is masked (no pulldown detected) — "not applicable", passes the gate.
+pub fn worst_masked_duplicate_fraction(cadences: &[Option<DupCadence>]) -> Option<f64> {
+    cadences
+        .iter()
+        .filter_map(|c| c.as_ref())
+        .filter(|c| c.duplication_masked)
+        .map(|c| c.duplicate_fraction)
+        .fold(None::<f64>, |acc, f| Some(acc.map_or(f, |m| m.max(f))))
+}
+
+/// Does the run's worst DUPLICATION-MASKED duplicate fraction satisfy the `max` bound? Mirrors
 /// [`crate::presentation_cadence::cadence_judder_gate_pass`] arm-for-arm (a per-window RATE, so a
-/// single per-window-max term is honest — the pulldown saturates every affected window, no
-/// "spread the budget across windows" loophole):
+/// single per-window-max term is honest — a real pulldown saturates every affected window, no
+/// "spread the budget across windows" loophole). The `worst` argument MUST be
+/// [`worst_masked_duplicate_fraction`] (the worst among windows classified `duplication_masked`),
+/// NOT the raw worst across all windows — otherwise a freeze/glitch (high raw fraction, not a
+/// pulldown) would trip this gate, double-jeopardying `frozen_leg`. The arms:
 /// - `None` bound ⇒ report-only, always passes.
-/// - `None` worst (no window produced a dup-rate reading) ⇒ PASS — per [`measure_dup_cadence`]'s
-///   `None` contract this is "not applicable", and a run with no readable window is already
-///   hard-failed elsewhere (no double-jeopardy).
+/// - `None` worst (no MASKED window ⇒ no pulldown detected) ⇒ PASS — "not applicable"; any
+///   condition that would zero out every window is already hard-failed elsewhere (no
+///   double-jeopardy).
 /// - `Some` bound, `Some` worst ⇒ pass iff `worst <= bound` (strict `>`: a worst exactly at the
 ///   bound passes).
-pub fn dup_cadence_gate_pass(worst_duplicate_fraction: Option<f64>, max: Option<f64>) -> bool {
-    match (max, worst_duplicate_fraction) {
+pub fn dup_cadence_gate_pass(
+    worst_masked_duplicate_fraction: Option<f64>,
+    max: Option<f64>,
+) -> bool {
+    match (max, worst_masked_duplicate_fraction) {
         (None, _) => true,
         (Some(_), None) => true,
         (Some(bound), Some(worst)) => worst <= bound,
@@ -553,10 +575,73 @@ mod tests {
         );
     }
 
+    // ---- worst_masked_duplicate_fraction (the gate feeds on the DISCRIMINATED signal) ---
+
+    #[test]
+    fn worst_masked_fraction_ignores_a_higher_raw_fraction_from_an_unmasked_window() {
+        // A masked pulldown window sits BELOW a NON-masked freeze window in raw duplicate_fraction.
+        // The gate must key on the pulldown (the real defect), never the freeze's higher raw rate —
+        // otherwise it double-jeopardies frozen_leg. This is the whole point of the discrimination.
+        let pulldown = measure_dup_cadence(&pulldown_hashes(120, 6)).expect("plenty");
+        assert!(
+            pulldown.duplication_masked,
+            "pulldown is masked: {pulldown:?}"
+        );
+        let freeze_at: Vec<usize> = (25..=44).collect(); // 20 consecutive dups → localized freeze
+        let freeze = measure_dup_cadence(&hashes_with_dups_at(60, &freeze_at)).expect("60 frames");
+        assert!(
+            !freeze.duplication_masked,
+            "freeze is NOT masked: {freeze:?}"
+        );
+        assert!(
+            freeze.duplicate_fraction > pulldown.duplicate_fraction,
+            "the freeze has a HIGHER raw fraction than the pulldown: {} vs {}",
+            freeze.duplicate_fraction,
+            pulldown.duplicate_fraction
+        );
+        let clean = measure_dup_cadence(&smooth_hashes(60)).expect("60 frames");
+        let cadences = vec![Some(clean), Some(freeze), Some(pulldown.clone())];
+        assert_eq!(
+            worst_masked_duplicate_fraction(&cadences),
+            Some(pulldown.duplicate_fraction),
+            "the worst MASKED fraction is the pulldown's, NOT the freeze's higher raw fraction"
+        );
+    }
+
+    #[test]
+    fn worst_masked_fraction_is_none_when_no_window_is_masked() {
+        // No masked window (clean + a non-masked freeze + a None) ⇒ None ⇒ the gate passes.
+        let clean = measure_dup_cadence(&smooth_hashes(60)).expect("60 frames");
+        let freeze_at: Vec<usize> = (25..=44).collect();
+        let freeze = measure_dup_cadence(&hashes_with_dups_at(60, &freeze_at)).expect("60 frames");
+        let cadences = vec![Some(clean), Some(freeze), None];
+        assert_eq!(worst_masked_duplicate_fraction(&cadences), None);
+        assert!(
+            dup_cadence_gate_pass(worst_masked_duplicate_fraction(&cadences), Some(0.10)),
+            "no masked window ⇒ not applicable ⇒ passes"
+        );
+    }
+
+    #[test]
+    fn worst_masked_fraction_takes_the_max_across_multiple_masked_windows() {
+        let slow = measure_dup_cadence(&pulldown_hashes(120, 6)).expect("plenty"); // ~16.7%
+        let faster = measure_dup_cadence(&pulldown_hashes(120, 4)).expect("plenty"); // ~25%
+        assert!(slow.duplication_masked && faster.duplication_masked);
+        assert!(faster.duplicate_fraction > slow.duplicate_fraction);
+        assert_eq!(
+            worst_masked_duplicate_fraction(&[Some(slow), Some(faster.clone())]),
+            Some(faster.duplicate_fraction),
+            "the worst is the max across masked windows"
+        );
+    }
+
     // ---- the report-only gate seam (both directions) -----------------------------------
 
     #[test]
-    fn default_constants_are_the_calibrated_values() {
+    fn default_constants_are_the_documented_first_cut_values() {
+        // These are PRINCIPLED, UNCALIBRATED first cuts (see the module + const docs) — this test
+        // only pins the documented values so a change is deliberate, it does NOT claim they are
+        // calibrated against real runs.
         assert_eq!(DUP_RATE_PULLDOWN_MIN, 0.10);
         assert_eq!(DUP_GAP_CV_MAX, 0.35);
         assert_eq!(DUP_COVERAGE_MIN, 0.5);
