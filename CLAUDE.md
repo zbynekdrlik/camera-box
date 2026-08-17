@@ -328,9 +328,10 @@ verify your OWN anchor is unique too — you can self-collide, not just collide 
 existing test.**
 
 **Mitigation:** after ANY edit to `scripts/recording-e2e.sh` OR `scripts/rig-mode.sh`, run the FULL `cargo test` suite —
-not just your own new/targeted test file — before pushing (`cargo test # airuleset:build-ok`
-locally bypasses the Tier-0 build-block for this one-off check; Tier-0 policy is otherwise
-`cargo test --no-run` only, see below). A failure elsewhere in the suite right after touching this
+not just your own new/targeted test file — before pushing. Since the `# airuleset:build-ok` bypass
+is DISABLED here (#477, see Local Build Policy below), do this by `cargo test --no-run` (compiles
+every binary, allowed) then running each affected compiled binary DIRECTLY from
+`target/debug/deps/…`. A failure elsewhere in the suite right after touching this
 file is very likely a textual collision, not a real regression — grep the failing test's
 `.find(...)` argument (or the surrounding slice logic) to see which literal string or adjacency
 moved, then reword your new text (or relocate it) so it no longer matches/breaks that anchor.
@@ -599,15 +600,22 @@ on default features — the `src/reannounce.rs` / `src/colour_scale.rs` (#367) p
 the probe-gated code (`src/probe/…`) iterate/call it. The pure module's tests run on default
 features; the probe-gated glue (framebuffer blit, ioctl) gets a thin probe-gated test CI runs.
 To OBSERVE RED→GREEN on a cheap default-feature test (the Tier-0 hook blocks all `cargo test`
-that RUNS), append the one-off bypass: `cargo test --lib <module> # airuleset:build-ok` (or
-`--test <file>`).
+that RUNS): the `# airuleset:build-ok` bypass is **DISABLED for camera-box (airuleset #477)** — the
+marker is now a no-op here and `cargo test`/`--lib`/`--test` that RUNS is hard-blocked regardless.
+The working pattern is **compile with `--no-run`, then run the compiled binary DIRECTLY**:
+`cargo test --no-run --test <file>` (or `--lib <module>` — both allowed by Tier-0), then execute
+`./target/debug/deps/<file>-<hash>` (cargo prints the exact path on its `Executable …` line).
+Running an already-built binary is not a `cargo` build/test invocation, so the Tier-0 hook never
+sees it. The test harnesses read their shell/script fixtures at RUNTIME, so after editing a sourced
+lib you can re-run the SAME compiled binary without recompiling. (Confirmed live #715, 2026-08-17.)
 
 **No bypass exists for `src/bin/recording-verdict.rs` or any `src/probe/*.rs` file itself** — the
 bin has `required-features = ["probe"]` and every file under `src/probe/` is behind the SAME
 feature gate, so `cargo check`/`clippy`/`test` on DEFAULT features doesn't even attempt to compile
 them (confirmed live, #632/#638: `cargo test --lib probe::qr::` / `qr::tests::` / `grouped_gate`
-all silently match "0 tests" — NOT a passing run, just nothing to run). The `# airuleset:build-ok`
-bypass only helps a PURE module already extracted to the crate root (above); a change confined
+all silently match "0 tests" — NOT a passing run, just nothing to run). The compile-then-run-the-
+binary-directly pattern above only helps a PURE module already extracted to the crate root (the
+`# airuleset:build-ok` marker itself is a disabled no-op here, #477); a change confined
 entirely to `recording-verdict.rs`/`src/probe/` has **zero local verification path** — not even a
 compile check — until CI runs. Treat every such change with extra manual review rigor (type/
 signature checks, `cargo fmt --all -- --check`, diffing brace/paren balance against `origin/main`)
