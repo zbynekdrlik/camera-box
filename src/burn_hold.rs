@@ -415,9 +415,36 @@ mod tests {
         assert!(!hold_gate_pass(Some(5), Some(4)), "over bound ⇒ fail");
     }
 
-    /// The seam is REPORT-ONLY today (#870) — the metric never folds into overall_pass yet.
+    /// The seam is LIVE today (#870): the calibrated max-hold bound folds into `overall_pass`. It
+    /// passes every recent green run with honest margin — the worst `max_hold_frames` across the 6
+    /// green E2E runs carrying the field is 2 (bound 4 ⇒ a 2-frame headroom), and that INCLUDES
+    /// cam1 windows subject to the issue-909 ShadowCast-grabber defect (cam1 reaches only 2 in green
+    /// runs, so LIVE-safety is empirical, not a mechanical claim). Flip `gates_overall_pass` back to
+    /// `false` for a one-line revert to report-only if a future rig change ever trips it.
     #[test]
-    fn gates_overall_pass_is_report_only_870() {
-        assert!(!gates_overall_pass());
+    fn gate_is_live_today_870() {
+        assert!(
+            gates_overall_pass(),
+            "#870: the calibrated per-hop max-hold bound must gate overall_pass (LIVE)"
+        );
+    }
+
+    /// The LIVE flip actually GATES: an over-bound hold now contributes FAIL to the fused verdict.
+    /// This replicates the exact `recording-verdict.rs` fold expression
+    /// (`hold_within || !gates_overall_pass()`) so the pure module pins the ticket's core promise —
+    /// a repeating hop that exceeds the bound FAILS the run instead of being silently reported.
+    /// RED against the report-only seam (the fold was always `true`); GREEN once LIVE.
+    #[test]
+    fn live_flip_makes_a_pathology_hold_fail_the_fold_870() {
+        // A max-hold-5 pathology (run 396782734 shape): id 100 re-delivered on 5 consecutive frames.
+        let d = burn_hold_distribution("strih", &contig(&[98, 100, 100, 100, 100, 100, 102, 104]));
+        let hold_within = d.within_bound(MAX_HOLD_FRAMES);
+        assert!(!hold_within, "max hold 5 > bound 4 ⇒ the hop is out of bound");
+        // The recording-verdict fold: this term's contribution to `all_pass`.
+        let contributes_pass = hold_within || !gates_overall_pass();
+        assert!(
+            !contributes_pass,
+            "#870 LIVE: an over-bound hold must FAIL the fused verdict (report-only would pass it)"
+        );
     }
 }
