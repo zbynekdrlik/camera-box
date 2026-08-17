@@ -634,3 +634,55 @@ fn cleanup_reverify_stays_warn_only_and_never_escalates() {
     assert!(!wrapper.contains("mv_reverify_or_escalate"),
         "#1093: the cleanup wrapper must NEVER call the OBS-restart escalation (WARN-only trap safety)");
 }
+
+#[test]
+fn orchestrator_restart_budget_allows_a_second_restart_within_cap() {
+    // #1093 follow-up (issue 1096 live rate, 2026-08-17): with today's per-bounce wedge rate a
+    // single restart per RUN cannot carry a run whose deploy bounces 3+ senders — the budget is
+    // now a COUNTER (MV_REVERIFY_OBS_RESTART_MAX, default 3). Two successive wedged legs must BOTH
+    // get a restart while under the cap; the legacy MV_REVERIFY_OBS_RESTARTED=1 kill-switch stays
+    // honored (previous test). The restart stub records invocations to a file.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let marker = dir.path().join("restarts.log");
+    let stub = dir.path().join("restart-stub.sh");
+    std::fs::write(
+        &stub,
+        format!("#!/bin/bash\necho x >> {}\n", marker.display()),
+    )
+    .expect("write stub");
+    let mut perms = std::fs::metadata(&stub).expect("meta").permissions();
+    use std::os::unix::fs::PermissionsExt;
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&stub, perms).expect("chmod");
+    let script = format!(
+        "set -uo pipefail\n. \"{lib}\" 2>/dev/null\n\
+         HERE='{here}'\nSTRIH=10.0.0.9\nALL_CAMBOX=1\nSTRIH_USER=x\nSTRIH_PW=x\n\
+         MV_REVERIFY_RECEIVED_CMD='{rx}'\nMV_REVERIFY_OBS_RESTART_CMD='{restart}'\n\
+         MV_REVERIFY_SWEEP_CMD='/bin/true'\n\
+         MV_REVERIFY_WEDGE_SAMPLE_GAP_S=0\nMV_REVERIFY_OBS_WS_WAIT_ITERS=1\nMV_REVERIFY_OBS_WS_WAIT_GAP_S=0\n\
+         preflight_mv_reverify() {{ return 1; }}\n\
+         mv_reverify_or_escalate cam2 2; echo RC1=$?\n\
+         mv_reverify_or_escalate cam3 3; echo RC2=$?\n",
+        lib = lib_path().display(),
+        here = manifest_dir().join("scripts").display(),
+        rx = frozen_rx_stub(),
+        restart = stub.display(),
+    );
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(&script)
+        .output()
+        .expect("run");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let restarts = std::fs::read_to_string(&marker).unwrap_or_default();
+    assert_eq!(
+        restarts.lines().count(),
+        2,
+        "#1093/#1096: two wedged legs under the cap must EACH get a strih-OBS restart (got {} restarts); out=\n{combined}",
+        restarts.lines().count()
+    );
+}
