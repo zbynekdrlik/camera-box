@@ -32,6 +32,7 @@ Sign/convention notes:
 """
 
 import argparse
+import errno
 import socket
 import sys
 from urllib.parse import parse_qs, urlsplit
@@ -107,9 +108,10 @@ def probe_listener_bindable(host, port, timeout=1.0):
         try:
             s.bind((host, port))
         except OSError as exc:
-            # EADDRINUSE (98) -> a listener already holds the port (fine); any other bind error
-            # (e.g. cannot assign a non-local address) is 'cannot confirm'.
-            return False if exc.errno == 98 else None
+            # EADDRINUSE -> a listener already holds the port (fine); any other bind error
+            # (e.g. cannot assign a non-local address) is 'cannot confirm'. errno.EADDRINUSE is
+            # portable (98 on Linux, 48 on macOS, WSAEADDRINUSE 10048 on Windows).
+            return False if exc.errno == errno.EADDRINUSE else None
         return True
     finally:
         s.close()
