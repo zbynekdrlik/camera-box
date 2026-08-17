@@ -513,6 +513,30 @@ imag_openbox_menu_looks_valid() {
   [ -n "$(printf '%s' "$1" | tr -d '[:space:]')" ] && printf '%s' "$1" | grep -qi '<menu'
 }
 
+# imag_openbox_root_menu_bound RC_XML_TEXT -> 0 iff RC_XML_TEXT (the EFFECTIVE openbox rc.xml the
+# box will load -- the user's ~/.config/openbox/rc.xml if present, else the stock
+# /etc/xdg/openbox/rc.xml) binds the desktop right-click (the Root mouse context, Right button) to
+# `ShowMenu root-menu`, so the provisioned menu.xml (`<menu id="root-menu">`, #785) is actually
+# reachable (#1095). Newlines/tabs are flattened first (the binding spans several indented lines),
+# then XML comments (`<!-- ... -->`) are STRIPPED so a COMMENTED-OUT binding cannot false-PASS a
+# box whose live binding actually points elsewhere (the sed stops at the first `-->`, since `--` is
+# illegal inside an XML comment, so it never over-strips across a real binding). The match then
+# requires, INSIDE a `<context name="Root">...</context>` block, a `<mousebind ... button="Right"
+# ...>` whose `<action ... name="ShowMenu" ...>` names `<menu>root-menu</menu>`. Attribute ORDER is
+# not significant in XML, so `button`/`name` are matched positionally-independent
+# (`\s[^>]*\bATTR=`). Scoped to the Root mouse context ON PURPOSE -- a root-menu named only in a
+# keybind, or a Root right-click bound to a DIFFERENT menu, must NOT pass. Tolerant of both XML
+# attribute quote styles ([\x22\x27] = " or '). Assert-only (#1095 design (b)): the acceptance gate
+# fails loud, it never rewrites a hand-tuned operator rc.xml. Runs LOCALLY on dev1 against the
+# ssh-read text (GNU grep 3.11 and ugrep both provide -P/PCRE2), never on the box.
+imag_openbox_root_menu_bound() {
+  local flat root_block
+  flat="$(printf '%s' "$1" | tr '\n\t' '  ' | sed 's/<!--\([^-]\|-[^-]\)*-->//g' | tr -s ' ')"
+  root_block="$(printf '%s' "$flat" | grep -oP '<context\s+name=[\x22\x27]Root[\x22\x27]\s*>.*?</context>' || true)"
+  [ -n "$root_block" ] || return 1
+  printf '%s' "$root_block" | grep -qP '<mousebind\s[^>]*\bbutton=[\x22\x27]Right[\x22\x27][^>]*>.*?<action\s[^>]*\bname=[\x22\x27]ShowMenu[\x22\x27][^>]*>\s*<menu>\s*root-menu\s*</menu>'
+}
+
 # imag_watchdog_installed_but_disabled SCRIPT_MODE UNIT_LIST_TEXT IS_ENABLED -> 0 iff the
 # watchdog script is present+executable (SCRIPT_MODE, an `ls -la` mode field), its systemd unit
 # is genuinely installed (UNIT_LIST_TEXT, a `systemctl list-unit-files imag-obs-watchdog.service
@@ -1290,6 +1314,28 @@ if imag_openbox_menu_looks_valid "$MENU_TEXT"; then
   ok "right-click menu (~/.config/openbox/menu.xml) present"
 else
   fail "/home/${IMAG_USER}/.config/openbox/menu.xml missing or invalid (#791)"
+fi
+
+# #1095: the menu.xml above is only REACHABLE if the openbox rc.xml binds the desktop right-click
+# (Root mouse context, Right button) to ShowMenu root-menu. openbox loads the user's
+# ~/.config/openbox/rc.xml when present, else the stock /etc/xdg/openbox/rc.xml -- assert whichever
+# it will ACTUALLY load, and name that file in the failure so the operator knows where to fix. This
+# is a static-file read (independent of check (o)'s OBS restart above), so its placement here is
+# harmless (#884 ordering). Assert-only (#1095 design (b)): the gate fails loud on a stale
+# bind-elsewhere rc.xml, it NEVER rewrites a hand-tuned operator rc.xml (the same operator-state
+# preservation #785 is about).
+RC_USER_PATH="/home/${IMAG_USER}/.config/openbox/rc.xml"
+RC_STOCK_PATH="/etc/xdg/openbox/rc.xml"
+if [ "$(ssh_box "[ -f ${RC_USER_PATH} ] && echo user || echo stock")" = "user" ]; then
+  RC_EFFECTIVE_PATH="$RC_USER_PATH"
+else
+  RC_EFFECTIVE_PATH="$RC_STOCK_PATH"
+fi
+RC_TEXT="$(ssh_box "cat ${RC_EFFECTIVE_PATH} 2>/dev/null" || true)"
+if imag_openbox_root_menu_bound "$RC_TEXT"; then
+  ok "openbox rc.xml (${RC_EFFECTIVE_PATH}) binds the desktop right-click to root-menu -- the ~/.config/openbox/menu.xml is reachable (#1095)"
+else
+  fail "openbox rc.xml (${RC_EFFECTIVE_PATH}) does NOT bind the desktop right-click (Root context, Right button) to ShowMenu root-menu -- the ~/.config/openbox/menu.xml is UNREACHABLE on this box (#1095). Assert-only: fix the operator rc.xml by hand (it is never auto-overwritten, to protect a hand-tuned openbox config)."
 fi
 
 WALL_MODE="$(ssh_box "ls -la /home/${IMAG_USER}/Pictures/wall-fallback.png 2>/dev/null | awk '{print \$1}'" || true)"

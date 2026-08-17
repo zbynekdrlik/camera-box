@@ -683,3 +683,32 @@ must NOT|!.*contains' tests/`) for any OTHER token your addition introduces — 
 `systemctl reboot`/`systemctl poweroff`, and the only bans on those live in
 `tests/imag_obs_watchdog_unit_778.rs`, which reads the `systemd/imag-obs-watchdog.service` FILE, not
 setup-imag.sh, so a menu.xml poweroff/reboot entry never trips them.
+
+## The #785 menu is only REACHABLE if rc.xml binds the desktop right-click to it — verify ASSERTS it, never rewrites operator rc.xml (#1095)
+
+`verify-imag.sh` asserts BOTH that `~/.config/openbox/menu.xml` is present (#791) AND — since
+#1095 — that the openbox rc.xml actually BINDS the desktop right-click to it
+(`imag_openbox_root_menu_bound`). The #785 `menu.xml` (`<menu id="root-menu">`) is only reachable
+because the rc.xml's Root mouse-context Right-button binds `ShowMenu root-menu`; a stale hand-placed
+`~/.config/openbox/rc.xml` (the "hand-placed, not provisioned" class #785 exists to close) could
+bind the desktop click elsewhere and silently orphan the menu, with no gate catching it.
+
+- **Design (b) — ASSERT-ONLY, never provision/rewrite rc.xml.** Provisioning a full stock rc.xml
+  (option a) or patching just the binding into it (option c) would clobber an operator's hand-tuned
+  openbox config (keybindings, etc.) — the same operator-state concern #785 is about. The gate
+  fails loud and names the offending file; the operator fixes it by hand. This is the
+  `minimal-fix-inform-dont-force` model — the right default for ANY "the box has an operator-owned
+  config file" reachability check here (weigh it before reaching for a provision/overwrite fix).
+- **Read the EFFECTIVE rc.xml, not a fixed path.** openbox loads `~/.config/openbox/rc.xml` when
+  present, else the stock `/etc/xdg/openbox/rc.xml`. The check does a remote
+  `[ -f <user> ] && echo user || echo stock` to pick whichever openbox will ACTUALLY load, asserts
+  on THAT file, and names it in the failure. A fresh box (no user rc.xml) passes on the stock
+  default; only a stale USER rc.xml binding elsewhere fails — which is exactly the target case.
+- **`grep -P` is fine in a verify-imag.sh helper — it runs LOCALLY on dev1, not on the box.** The
+  helper flattens the ssh-read rc.xml text and uses `grep -oP`/`-qP` (PCRE2) to scope the match to
+  the `<context name="Root">` block (so a `root-menu` named only in a keybind, or a Root right-click
+  bound to a different menu, does NOT falsely pass; `[\x22\x27]` tolerates both attribute quote
+  styles). GOTCHA when TESTING such a helper: on dev1 the interactive `grep` is a **ugrep wrapper
+  FUNCTION** (Claude Code shell integration), but `/usr/bin/grep` is GNU grep 3.11 and CI runs GNU
+  grep — verify your exact patterns under `/usr/bin/grep` (GNU), not only the interactive wrapper.
+  Both provide -P/PCRE2 and agreed here, but the wrapper is not what the deployed script or CI runs.
