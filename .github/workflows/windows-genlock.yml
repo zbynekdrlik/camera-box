@@ -872,6 +872,17 @@ jobs:
           if ($ndi -notmatch [regex]::Escape('genlock_reconnect_decision(genlock_source_is_active(s->obs_source), no_conn,')) {
             Write-Error "ndi-source.cpp: the receiver loop no longer CALLS the #767 reconnect watchdog with the live source state -- a stale genlocked source is never force-rebound. Re-apply the #767 wiring"; exit 1
           }
+          # camera-box #1080: a failed recv_create_v3 in the reset path must NOT permanently kill the
+          # receiver thread. A break there leaves s->running true, so ndi_source_update's if (s->running)
+          # never restarts it (reattach-proof black); since #767 the stale watchdog reaches this path
+          # unattended. It must back off + retry instead. A subtree pull re-importing stock DistroAV
+          # silently drops this (mirrors tests/distroav_recv_create_retry_1080.rs).
+          if ($ndi -notmatch [regex]::Escape('static inline uint64_t ndi_recv_create_retry_backoff_ns(')) {
+            Write-Error "ndi-source.cpp: the #1080 ndi_recv_create_retry_backoff_ns backoff helper is gone -- a transient recv_create_v3 failure permanently kills the receiver thread. Re-apply the #1080 retry"; exit 1
+          }
+          if ($ndi -notmatch [regex]::Escape('ndi_recv_create_retry_backoff_ns(recv_create_fail_count)')) {
+            Write-Error "ndi-source.cpp: the reset block no longer CALLS ndi_recv_create_retry_backoff_ns(recv_create_fail_count) -- a failed recv_create_v3 is no longer backed off + retried (reverts to the permanent-death break). Re-apply the #1080 retry"; exit 1
+          }
           # #257: the UI is a HARD WHITELIST — the forced knobs are REMOVED from the UI (not hidden via
           # apply_genlock_lockdown_visibility, which is gone). getproperties must expose EXACTLY the
           # 4 whitelist props and the forced knobs (e.g. behavior list) must NOT be added.
