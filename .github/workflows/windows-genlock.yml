@@ -817,6 +817,17 @@ jobs:
           if ($ndi -notmatch [regex]::Escape('force_genlock_certified_settings(settings)')) {
             Write-Error "ndi-source.cpp: ndi_source_update no longer CALLS force_genlock_certified_settings(settings) — the certified values are not enforced at update time. Re-apply the #150 lockdown"; exit 1
           }
+          # camera-box #767: reconnect-on-sender-restart watchdog. A genlocked, CONNECTED source
+          # with no new frame for GENLOCK_RECONNECT_STALE_NS must force a full receiver rebind — the
+          # steady loop has no self-rebind path, and a hard-reboot half-open connection never drops
+          # no_connections to 0, so NDI's own name-based reconnect never fires (41-min silent black,
+          # 2026-08-13). A subtree pull re-importing stock DistroAV silently drops this.
+          if ($ndi -notmatch [regex]::Escape('static inline bool genlock_reconnect_decision(')) {
+            Write-Error "ndi-source.cpp: the #767 genlock_reconnect_decision watchdog helper is gone -- a genlocked source never rebinds when its sender instance restarts. Re-apply the #767 watchdog"; exit 1
+          }
+          if ($ndi -notmatch [regex]::Escape('genlock_reconnect_decision(genlock_source_is_active(s->obs_source), no_conn,')) {
+            Write-Error "ndi-source.cpp: the receiver loop no longer CALLS the #767 reconnect watchdog with the live source state -- a stale genlocked source is never force-rebound. Re-apply the #767 wiring"; exit 1
+          }
           # #257: the UI is a HARD WHITELIST — the forced knobs are REMOVED from the UI (not hidden via
           # apply_genlock_lockdown_visibility, which is gone). getproperties must expose EXACTLY the
           # 4 whitelist props and the forced knobs (e.g. behavior list) must NOT be added.

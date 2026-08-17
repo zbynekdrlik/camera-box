@@ -244,6 +244,9 @@ jobs:
           if ($ndi -notmatch [regex]::Escape('GENLOCK_WHITELIST_PROPS')) { Write-Error "ndi-source.cpp: GENLOCK_WHITELIST_PROPS gone — #257 hard-lock UI reverted"; exit 1 }
           if ($ndi -notmatch [regex]::Escape('obs_data_set_default_bool(settings, PROP_GENLOCK_FIFO, true)')) { Write-Error "ndi-source.cpp: genlock no longer default-ON — #257 reverted"; exit 1 }
           if ($ndi -notmatch [regex]::Escape('obs_source_set_genlock_burn')) { Write-Error "ndi-source.cpp: ndi_source_update no longer applies obs_source_set_genlock_burn — #257 burn inert"; exit 1 }
+          # camera-box #767: reconnect-on-sender-restart watchdog (this FAST path ships distroav.dll for hot-swap, so re-assert the tokens here too — mirrors tests/distroav_ndi_reconnect_767.rs).
+          if ($ndi -notmatch [regex]::Escape('static inline bool genlock_reconnect_decision(')) { Write-Error "ndi-source.cpp: the #767 genlock_reconnect_decision watchdog helper is gone -- a genlocked source never rebinds when its sender instance restarts"; exit 1 }
+          if ($ndi -notmatch [regex]::Escape('genlock_reconnect_decision(genlock_source_is_active(s->obs_source), no_conn,')) { Write-Error "ndi-source.cpp: the receiver loop no longer CALLS the #767 reconnect watchdog -- a stale genlocked source is never force-rebound"; exit 1 }
           $flt = (Get-Content "vendor/distroav/src/ndi-burn-filter.cpp" -Raw) -replace '\s+', ' '
           if ($flt -match [regex]::Escape('getenv("OBS_BURN')) { Write-Error "ndi-burn-filter.cpp: OBS_BURN_* env is BACK — #257 made the burn a per-source bool"; exit 1 }
           if ($flt -notmatch [regex]::Escape('obs_source_get_genlock_burn')) { Write-Error "ndi-burn-filter.cpp: burn no longer reads the parent genlock_burn flag — #257 reverted"; exit 1 }

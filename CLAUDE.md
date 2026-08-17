@@ -13,6 +13,7 @@ Rust app for embedded NDI cameras (CAM1-4): multi-camera NDI streaming with soft
 - Genlock OBS (deployed state, monorepo direction, NDI input mapping, timecode lag) → load `.claude/skills/genlock`
   - Genlock latency is ONE user knob in MS (#235): `OBS_GENLOCK_LATENCY_MS=N` (canonical; `OBS_GENLOCK_RESERVE_MS` is the back-compat alias; prod=3ms). Setting it implies ts-align on; preload is internal/auto-derived. Display: `latency = N ms (≈ M frames)`.
 - OBS launch/recovery on strih/stream → load `.claude/skills/obs-ops`
+- OBS launch-path contract (.lnk primary + per-box params test-pinned; obs-guarded-launch.ps1 bare-no-args = correct for stream; strih AHK versioned at scripts/strih/NL_STARTUP.ahk, #774/#775) → `.claude/rules/obs-launch-paths.md` (auto-loads on its `paths:`)
 - `--display` HDMI path (connector/phantom-fb detect, upscale cap, capture-dropped counter) → load `.claude/skills/display`
 - CI artifacts, Discord notify, probe binary flow → load `.claude/skills/ci`
 - E2E zero-loss testing (acceptance criteria, QR harness, reporting scope, active fleet size / `CAMERA_ACTIVE_SET` reactivation) → load `.claude/skills/e2e`
@@ -72,6 +73,8 @@ Rust app for embedded NDI cameras (CAM1-4): multi-camera NDI streaming with soft
 - Measurement-burn OFF/CHECK/RESTORE target set — ENUMERATE ndi_source inputs over WS (obs_burn_filter.py sweep-check/sweep-off), never a static or CAMERA_ACTIVE_SET list; fail CLOSED on a failed GetInputList (#938/#1011 leak, guard class #246/#844) → `.claude/rules/burn-target-enumeration.md` (auto-loads on its `paths:`)
 - dev1 fresh-OBS-start burn reconciliation for UNATTENDED strih/stream starts (renderTotalFrames restart signal via obs_burn_filter session-probe; discriminator is a FRESH START not burn-presence — a persistent TEST burn is legit; durable ~/.camera-box baseline never tmpfs; defer while #281 heartbeat/#830 lease coordinate; unresolved-retry; fail-closed; #1060) → `.claude/rules/obs-burn-reconcile-watchdog.md` (auto-loads on its `paths:`)
 - Reading/verifying per-source genlock latency pins (authoritative key is `genlock_latency_ms_src` over WS, NOT bundle-state's DistroAV-stock `ndi_input_latency`=0; verify-at-start is REPORT-ONLY vs `scripts/latency-pins-baseline.json`; fail-closed enumeration vs honest-None per-input read, #1061/#866) → `.claude/rules/latency-pins-verify.md` (auto-loads on its `paths:`)
+- Per-cambox HDMI-splitter-port no-signal recurrence watch (dev1-side timer reads each ACTIVE cambox's last `capture chroma:` journal line; SELF-ANCHORING discriminator — PAGE (`DEAD_PORT`) only when a box is capturing-but-GRAYSCALE AND ≥1 sibling on the SAME camera+splitter is proven-good; `capturing=0` = `NO_CAPTURE` report-only, NOT a splitter-port page — it is the routine cambox-down/device-busy/E2E-stop class, a mis-attribution otherwise; all-grey = `SOURCE_WIDE` report-only; the FIRST check for "weird colours on some cameras" = per-box signal presence not card tuning; Elgato purple-noise residual; #739) → `.claude/rules/splitter-port-health-watchdog.md` (auto-loads on its `paths:`)
+- MV-clone-vs-main presentation SKEW via OBS-WS screenshots (the `t_send` latch-timing + local-wall-gap compensation — RPC-midpoint stamping is the noise source; universal-painter vs cam1-burn run_id; shared-source regression-guard reframing; imag WS uses OBS_PASSWORD not IMAG_PW, #761) → `.claude/rules/mv-skew-measurement.md` (auto-loads on its `paths:`)
 
 ## DO NOT DELETE These Files
 
@@ -494,6 +497,34 @@ A NON-TRIVIAL design comment additionally needs 2-3 NUMBERED approaches (`Approa
 `classify_triage_and_approaches` shape); one chosen + one rejected reads as trivial and is rejected.
 (Incident 2026-08-16, #1070/#1075 batch: 4 comments posted via `gh api` never registered — had to
 delete them and re-post via `gh issue comment`.)
+## GOTCHA — the design/validated/reviewed marker recorder needs `gh issue comment`, and its re-read intermittently times out on this repo
+
+The autopilot design-gate has THREE mandatory durable comments (validated at STEP 0, design before
+first code commit, reviewed at CYCLE step 6); a hook writes a `~/.claude/{design,validated,reviewed}
+-posted/camera-box#<N>` marker for each, and `block-commit-without-design.sh` blocks the first commit
+until the DESIGN marker exists. Three things bite on THIS repo specifically:
+
+- **The recorder (`post-record-design-comment.sh`) fires ONLY on a `gh issue comment` Bash call** — it
+  word-matches `gh issue comment`, then re-reads the issue and classifies the FRESHEST comment you
+  authored in the last 180s. Posting the comment via `gh api repos/.../issues/<N>/comments -F body=@…`
+  (the projectCards-safe path the sibling gotchas above recommend for PR bodies) posts the comment
+  fine but writes NO marker → the commit stays blocked. Post design/validation/review comments with
+  `gh issue comment <N> --body-file <abs>` so the recorder runs. (`gh issue comment` itself works here;
+  only `gh issue view`/`gh pr edit`'s GraphQL hits projectCards.)
+- **The recorder's own `gh issue view <N> --json comments` re-read INTERMITTENTLY times out at 10s on
+  this repo** (see `~/.claude/design-gate-errors.log` — many `gh-view #N … TimeoutExpired`), and a
+  returncode-nonzero read is a SILENT `continue` (no marker, no reject, no log). So a correctly-shaped
+  comment can still leave no marker. After each such post, `ls ~/.claude/<kind>-posted/camera-box#<N>`;
+  if missing (and not in `…-rejected/`), the read timed out — re-post the SAME comment (delete the
+  prior one via `gh api -X DELETE …/issues/comments/<id>` to avoid a dup) when the query is fast.
+- **A NON-TRIVIAL design comment must match the exact classifier shape or it lands in
+  `design-rejected/`:** a `Triage:` line naming non-trivial, ≥2 NUMBERED approaches spelled
+  `Prístup/Approach/Možnosť/Variant 1-3` (NOT `A)/B)`), a trade-off word (`Trade-off`/`výhod`/…), and
+  an `Architektúra:` section (colon or `###` heading) containing a structure word
+  (`štruktúra`/`topológia`/`structure`), ≥400 chars. VERIFY locally before posting:
+  `python3 -c "import sys; sys.path.insert(0,'/home/newlevel/devel/airuleset'); import design_gate as
+  dg; b=open('body.md').read(); print(dg.classify_design_comment(b), dg.classify_triage_and_approaches(b),
+  dg.classify_architecture_section(b))"` — all three must be `(True, …)`.
 
 ## GOTCHA — a live-triggered E2E gate run can race ahead of a mid-cycle fleet redeploy
 
