@@ -1167,7 +1167,7 @@ preflight_mv_reverify() {
   local a
   for a in $(seq 1 "$attempts"); do
     if timeout "$call_timeout" python3 "$HERE/frozen-camera-gate.py" --host "$STRIH" --password "" \
-        --sources "NDI cam${cam_n}" --samples 2 --cadence 3.5 --threshold 1 --warm-settle 0 \
+        --sources "NDI cam${cam_n}" --samples 2 --cadence 3.5 --threshold 1 --warm-settle "${PREFLIGHT_MV_REVERIFY_WARM_SETTLE:-0}" \
         --verdict-bin "$PROBE_BIN_DIR/frozen-camera-gate" >/dev/null 2>&1; then
       if [ "$a" -gt 1 ]; then
         echo "    [sender-bounce] ${box} recovered on attempt ${a}/${attempts}" >&2

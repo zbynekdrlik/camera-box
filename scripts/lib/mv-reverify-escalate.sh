@@ -108,25 +108,36 @@ mv_reverify_painter_up_wait() {
 }
 
 # ---- (b) received= reader (env-overridable) ----------------------------------------------------
-# mv_reverify_probe_received <strih_ip> <source> -> stdout: newest cumulative `received=` for the
-# named source, or empty. One flat ssh + single (non-nested) powershell OBS-log tail -- a session-
-# agnostic FILE read (win-ssh-vs-mcp Context B), mirroring frozen-input-alert-watchdog.sh's
-# probe_received. Override the WHOLE read with MV_REVERIFY_RECEIVED_CMD (run with "<ip> <source>",
-# stdout = raw log text) for offline tests / a future alternate tap.
-mv_reverify_probe_received() {
-  local ip="$1" source="$2" raw
+# mv_reverify_probe_raw <strih_ip> <source> -> stdout: the RAW newest-tail of strih's OBS log. One
+# flat ssh + single (non-nested) powershell OBS-log tail -- a session-agnostic FILE read (win-ssh-
+# vs-mcp Context B), mirroring frozen-input-alert-watchdog.sh's probe_received. Override the WHOLE
+# read with MV_REVERIFY_RECEIVED_CMD (run with "<ip> <source>", stdout = raw log text) for offline
+# tests / a future alternate tap. EMPTY output => the READ ITSELF failed (a healthy tail is never
+# empty) -- the orchestrator treats that as READ_FAIL, NOT as "no recv" (#1093 review finding 3, the
+# frozen_input_classify UNKNOWN discipline: never act on absence-of-evidence).
+mv_reverify_probe_raw() {
+  local ip="$1" source="$2"
   if [ -n "${MV_REVERIFY_RECEIVED_CMD:-}" ]; then
-    raw="$($MV_REVERIFY_RECEIVED_CMD "$ip" "$source" 2>/dev/null || true)"
+    $MV_REVERIFY_RECEIVED_CMD "$ip" "$source" 2>/dev/null || true
   else
-    raw="$(timeout "${MV_REVERIFY_RECEIVED_SSH_TIMEOUT:-20}" sshpass -p "${STRIH_PW:-newlevel}" \
+    timeout "${MV_REVERIFY_RECEIVED_SSH_TIMEOUT:-20}" sshpass -p "${STRIH_PW:-newlevel}" \
       ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 "${STRIH_USER:-newlevel}@$ip" \
       "powershell -NoProfile -Command \"gc (gci \$env:APPDATA\\obs-studio\\logs\\*.txt | sort LastWriteTime | select -last 1).FullName -Tail ${MV_REVERIFY_RECEIVED_TAIL:-400}\"" \
-      2>/dev/null || true)"
+      2>/dev/null || true
   fi
-  printf '%s\n' "$raw" \
-    | grep -F "genlock-fifo audit '$source': " \
-    | tail -n1 \
-    | sed -n 's/.*received=\([0-9][0-9]*\).*/\1/p'
+}
+
+# mv_reverify_extract_received <source> -- stdin: raw OBS-log text; stdout: newest cumulative
+# `received=` for the named source, or empty (raw read but no audit line = genuine "no recv").
+mv_reverify_extract_received() {
+  grep -F "genlock-fifo audit '$1': " | tail -n1 | sed -n 's/.*received=\([0-9][0-9]*\).*/\1/p'
+}
+
+# mv_reverify_probe_received <strih_ip> <source> -> the newest `received=` (raw read + extract in
+# one step). Kept for callers/tests that only need the value; the orchestrator uses the raw form
+# above so it can tell READ_FAIL (empty raw) from genuine no-recv (raw present, no audit line).
+mv_reverify_probe_received() {
+  mv_reverify_probe_raw "$1" "$2" | mv_reverify_extract_received "$2"
 }
 
 # ---- (b) headless strih-OBS restart ------------------------------------------------------------
@@ -139,6 +150,16 @@ mv_reverify_probe_received() {
 mv_reverify_obs_restart_ps() {
   cat <<'PS'
 $ErrorActionPreference = 'SilentlyContinue'
+# GUARD (#1093 review finding 2): NEVER kill obs64 unless the AutoHotkey64 respawn watcher is alive
+# -- otherwise a force-kill leaves strih OBS DOWN with nothing to relaunch it (strictly worse than
+# the old exit 1). We cannot detect NL_STARTUP.ahk's SafeLoop=0 "No"-latch (#774) over ssh, so that
+# stays an accepted residual; process-presence is the detectable half. No AHK -> report + exit 2
+# WITHOUT killing; the orchestrator treats exit 2 / MV_REVERIFY_NO_AHK as "restart impossible -> fail
+# loud, strih untouched".
+if (-not (Get-Process AutoHotkey64 -ErrorAction SilentlyContinue)) {
+  Write-Host "MV_REVERIFY_NO_AHK: AutoHotkey64 respawn watcher not running on strih -- NOT killing obs64 (a force-kill would leave OBS down with no relaunch)"
+  exit 2
+}
 # Force-kill the wedged obs64 (session-agnostic). strih's NL_STARTUP.ahk (session 1) then respawns
 # ONE clean genlock obs64 within ~25s; this program never LAUNCHES obs64 itself (no ssh GUI launch,
 # no double-launch) and never stops AutoHotkey64 (the respawn watcher we depend on).
@@ -152,19 +173,21 @@ PS
 
 # mv_reverify_obs_restart_run <strih_ip> -- LOCAL runner. Runs the headless restart PowerShell on
 # strih over ssh (win_ssh_run EncodedCommand). Override with MV_REVERIFY_OBS_RESTART_CMD (run with
-# "<ip>") for offline tests. Best-effort (never returns non-zero to the caller).
+# "<ip>") for offline tests. Returns 2 (restart NOT performed -- AHK respawn watcher absent, obs64
+# untouched, #1093 review finding 2) when the program reported MV_REVERIFY_NO_AHK; 0 otherwise.
 mv_reverify_obs_restart_run() {
-  local ip="$1"
+  local ip="$1" out
   if [ -n "${MV_REVERIFY_OBS_RESTART_CMD:-}" ]; then
-    $MV_REVERIFY_OBS_RESTART_CMD "$ip" 2>&1 | sed 's/^/    [#1093 obs-restart] /' || true
-    return 0
+    out="$($MV_REVERIFY_OBS_RESTART_CMD "$ip" 2>&1 || true)"
+  else
+    # win_ssh_run BLOCKS; bound it. timeout execvp()s directly so it cannot invoke a shell FUNCTION --
+    # route through `bash -c` re-sourcing the lib, the SAME shape recording-e2e.sh's other win_ssh_run
+    # call sites already use.
+    out="$(timeout "${MV_REVERIFY_OBS_RESTART_SSH_TIMEOUT:-30}" bash -c '. "$1"; win_ssh_run "$2" "$3" "$4" "$5"' _ \
+      "$HERE/lib/win-ssh-exec.sh" "${STRIH_USER:-newlevel}" "${STRIH_PW:-newlevel}" "$ip" "$(mv_reverify_obs_restart_ps)" 2>&1 || true)"
   fi
-  # win_ssh_run BLOCKS; bound it. timeout execvp()s directly so it cannot invoke a shell FUNCTION --
-  # route through `bash -c` re-sourcing the lib, the SAME shape recording-e2e.sh's other win_ssh_run
-  # call sites already use.
-  timeout "${MV_REVERIFY_OBS_RESTART_SSH_TIMEOUT:-30}" bash -c '. "$1"; win_ssh_run "$2" "$3" "$4" "$5"' _ \
-    "$HERE/lib/win-ssh-exec.sh" "${STRIH_USER:-newlevel}" "${STRIH_PW:-newlevel}" "$ip" "$(mv_reverify_obs_restart_ps)" 2>&1 \
-    | sed 's/^/    [#1093 obs-restart] /' || true
+  printf '%s\n' "$out" | sed 's/^/    [#1093 obs-restart] /' >&2
+  case "$out" in *MV_REVERIFY_NO_AHK*) return 2 ;; esac
   return 0
 }
 
@@ -196,10 +219,21 @@ mv_reverify_or_escalate() {
   local box="$1" cam_n="$2"
   preflight_mv_reverify "$box" "$cam_n" && return 0
 
-  local src="NDI cam${cam_n}" r0 r1 verdict
-  r0="$(mv_reverify_probe_received "$STRIH" "$src" 2>/dev/null || true)"
-  sleep "${MV_REVERIFY_WEDGE_SAMPLE_GAP_S:-8}"
-  r1="$(mv_reverify_probe_received "$STRIH" "$src" 2>/dev/null || true)"
+  # Read strih's received= RAW twice (default gap >= 2x the ~5s audit emit cadence, #1093 review
+  # finding 6, so healthy emit jitter/flush can't read the same newest line twice = false WEDGE).
+  local src="NDI cam${cam_n}" raw0 raw1 r0 r1 verdict
+  raw0="$(mv_reverify_probe_raw "$STRIH" "$src" 2>/dev/null || true)"
+  sleep "${MV_REVERIFY_WEDGE_SAMPLE_GAP_S:-12}"
+  raw1="$(mv_reverify_probe_raw "$STRIH" "$src" 2>/dev/null || true)"
+  # READ_FAIL (#1093 review finding 3): a healthy 400-line tail is NEVER empty, so both reads empty
+  # means the LOG READ failed (ssh blip / log absent), not "no recv". Never force-kill strih on
+  # absence-of-evidence (the frozen_input_classify UNKNOWN discipline) -- fail loud, no restart.
+  if [ -z "$raw0" ] && [ -z "$raw1" ]; then
+    echo "    [#1093 escalate] ${box} (${src}): could NOT read strih's OBS log for received= (both samples empty) -- READ_FAIL, not a proven wedge. Failing loud WITHOUT restarting strih OBS." >&2
+    return 1
+  fi
+  r0="$(printf '%s\n' "$raw0" | mv_reverify_extract_received "$src")"
+  r1="$(printf '%s\n' "$raw1" | mv_reverify_extract_received "$src")"
   verdict="$(mv_reverify_wedge_verdict "$r0" "$r1")"
   echo "    [#1093 escalate] ${box} (${src}) reverify budget exhausted -- strih received= sample0='${r0:-none}' sample1='${r1:-none}' -> ${verdict}" >&2
 
@@ -207,18 +241,42 @@ mv_reverify_or_escalate() {
     echo "    [#1093 escalate] ${box}: received= is advancing -- NOT a receiver wedge; the source/leg is genuinely dead. Failing loud (no OBS restart)." >&2
     return 1
   fi
+  # ACCEPTED RESIDUAL (#1093 review finding 4): a DEAD SENDER (its burn unit never came up) ALSO
+  # freezes strih's received= and is misclassified WEDGE here, costing ONE needless strih restart +
+  # the wait budget before the same exit 1. This is bounded (once-per-run guard below), rare (a dead
+  # sender right after its own deploy is a run-ending failure regardless), and the OUTCOME is still
+  # correct (exit 1). A sender-side pre-check would need the box IP + burn-unit name threaded through
+  # both call sites; deferred as not worth the coupling for a bounded, self-healing waste.
   if [ "${MV_REVERIFY_OBS_RESTARTED:-0}" = "1" ]; then
     echo "    [#1093 escalate] ${box}: still wedged AFTER a prior strih-OBS restart this run -- not restarting again (issue 1096: a fresh OBS can re-wedge on the next bounce). Failing loud." >&2
     return 1
   fi
-  MV_REVERIFY_OBS_RESTARTED=1
   echo "    [#1093 escalate] ${box}: receiver WEDGE confirmed (issue 1096) -- restarting strih OBS once (force-kill+sentinel-clear; AutoHotkey64 respawns one clean genlock obs64), then re-checking once." >&2
-  mv_reverify_obs_restart_run "$STRIH"
+  local _rr=0
+  mv_reverify_obs_restart_run "$STRIH" || _rr=$?
+  if [ "$_rr" = "2" ]; then
+    # AHK respawn watcher absent -> the restart was NOT performed (obs64 untouched). We cannot cure
+    # the wedge from the harness without risking a dead strih; fail loud instead of leaving OBS down.
+    echo "    [#1093 escalate] ${box}: strih's AutoHotkey64 respawn watcher is ABSENT -- restart skipped (obs64 left running). Cannot recover this wedge safely from the harness; failing loud." >&2
+    return 1
+  fi
+  MV_REVERIFY_OBS_RESTARTED=1
   mv_reverify_wait_obs_ws "$STRIH"
   # A force-kill reload can restore a SAVED genlock_burn=true (obs-ops) -- sweep it off before the
-  # re-check + before the run proceeds. Best-effort dev1-side WS op (session-agnostic).
-  python3 "$HERE/obs_burn_filter.py" sweep-off --host "$STRIH" >/dev/null 2>&1 || true
-  if preflight_mv_reverify "$box" "$cam_n"; then
+  # re-check + before the run proceeds. Best-effort dev1-side WS op (session-agnostic), timeout-bound
+  # like every other OBS-touching call (#328). Override with MV_REVERIFY_SWEEP_CMD for offline tests.
+  if [ -n "${MV_REVERIFY_SWEEP_CMD:-}" ]; then
+    $MV_REVERIFY_SWEEP_CMD "$STRIH" >/dev/null 2>&1 || true
+  else
+    timeout "${MV_REVERIFY_SWEEP_SSH_TIMEOUT:-30}" python3 "$HERE/obs_burn_filter.py" sweep-off --host "$STRIH" >/dev/null 2>&1 || true
+  fi
+  # #1093 review finding 1 (CRITICAL): the fresh OBS's built-in Multiview projector may NOT reopen
+  # (SaveProjectors), so the "NDI camN" inputs the reverify relies on can be INACTIVE. Run the single
+  # re-check with a POSITIVE warm-settle so frozen-camera-gate PREVIEW-activates the input itself
+  # (#747, Studio Mode; it restores the operator's preview afterwards) -- recovery no longer depends
+  # on the projector, and this touches no operator display. (The operator's own strih multiview stays
+  # closed until re-opened -- an inherent property of ANY strih-OBS force-kill, tracked separately.)
+  if PREFLIGHT_MV_REVERIFY_WARM_SETTLE="${MV_REVERIFY_RECHECK_WARM_SETTLE:-3}" preflight_mv_reverify "$box" "$cam_n"; then
     echo "    [#1093 escalate] ${box}: recovered after the strih-OBS restart + re-check." >&2
     return 0
   fi

@@ -309,7 +309,8 @@ fn run_orchestrator(preflight_body: &str, received_cmd: &str) -> (String, i32) {
         "set -uo pipefail\n. \"{lib}\" 2>/dev/null\n\
          HERE='{here}'\nSTRIH=10.0.0.9\nALL_CAMBOX=1\nSTRIH_USER=x\nSTRIH_PW=x\n\
          MV_REVERIFY_RECEIVED_CMD='{rx}'\nMV_REVERIFY_OBS_RESTART_CMD='{restart}'\n\
-         MV_REVERIFY_WEDGE_SAMPLE_GAP_S=0\nMV_REVERIFY_OBS_WS_WAIT_ITERS=1\nMV_REVERIFY_OBS_WS_WAIT_GAP_S=0\n\
+         MV_REVERIFY_SWEEP_CMD=/bin/true\n\
+         MV_REVERIFY_WEDGE_SAMPLE_GAP_S=0\nMV_REVERIFY_OBS_WS_WAIT_ITERS=0\nMV_REVERIFY_OBS_WS_WAIT_GAP_S=0\n\
          {preflight}\n\
          mv_reverify_or_escalate cam1 1; echo RC=$?\n",
         lib = lib_path().display(),
@@ -467,6 +468,103 @@ fn orchestrator_restarts_obs_at_most_once_per_run() {
     assert!(
         extract_rc(&combined) == 1,
         "#1093(b): a still-wedged leg after the one restart fails loud; out=\n{combined}"
+    );
+}
+
+/// A `received=` stub that prints NOTHING -> the log READ failed (empty raw), distinct from a
+/// read that succeeded but has no audit line.
+fn empty_rx_stub() -> String {
+    let p = std::env::temp_dir().join(format!("mv_rx_empty_{}.sh", nanos()));
+    fs::write(&p, "#!/usr/bin/env bash\nexit 0\n").unwrap();
+    make_exec(&p);
+    p.display().to_string()
+}
+
+#[test]
+fn orchestrator_does_not_restart_obs_when_the_strih_log_read_fails() {
+    // #1093 review finding 3: both received= reads empty = the LOG READ failed (ssh blip / log
+    // absent), NOT "no recv". Must fail loud WITHOUT force-killing strih (absence-of-evidence).
+    let (out, rc) = run_orchestrator("preflight_mv_reverify() { return 1; }", &empty_rx_stub());
+    assert!(
+        !out.contains("RESTARTED"),
+        "#1093(3): an unreadable strih log must NEVER force-kill strih OBS; out=\n{out}"
+    );
+    assert!(
+        out.contains("READ_FAIL") || out.contains("could NOT read"),
+        "#1093(3): must report READ_FAIL, not a wedge; out=\n{out}"
+    );
+    assert_eq!(
+        rc, 1,
+        "#1093(3): a read failure fails loud (rc=1); out=\n{out}"
+    );
+}
+
+#[test]
+fn orchestrator_fails_loud_without_killing_when_ahk_absent() {
+    // #1093 review finding 2: a WEDGE whose restart reports MV_REVERIFY_NO_AHK (the respawn watcher
+    // is absent) must fail loud WITHOUT having killed obs64 (never leave strih OBS down).
+    let no_ahk_stub = std::env::temp_dir().join(format!("mv_noahk_{}.sh", nanos()));
+    fs::write(
+        &no_ahk_stub,
+        "#!/usr/bin/env bash\necho MV_REVERIFY_NO_AHK\n",
+    )
+    .unwrap();
+    make_exec(&no_ahk_stub);
+    let script = format!(
+        "set -uo pipefail\n. \"{lib}\" 2>/dev/null\n\
+         HERE='{here}'\nSTRIH=10.0.0.9\nALL_CAMBOX=1\nSTRIH_USER=x\nSTRIH_PW=x\n\
+         MV_REVERIFY_RECEIVED_CMD='{rx}'\nMV_REVERIFY_OBS_RESTART_CMD='{restart}'\n\
+         MV_REVERIFY_SWEEP_CMD=/bin/true\n\
+         MV_REVERIFY_WEDGE_SAMPLE_GAP_S=0\nMV_REVERIFY_OBS_WS_WAIT_ITERS=0\nMV_REVERIFY_OBS_WS_WAIT_GAP_S=0\n\
+         preflight_mv_reverify() {{ return 1; }}\n\
+         mv_reverify_or_escalate cam1 1; echo RC=$?\n",
+        lib = lib_path().display(),
+        here = manifest_dir().join("scripts").display(),
+        rx = frozen_rx_stub(),
+        restart = no_ahk_stub.display(),
+    );
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(&script)
+        .output()
+        .expect("run");
+    let _ = fs::remove_file(&no_ahk_stub);
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        combined.contains("ABSENT") || combined.contains("AutoHotkey64"),
+        "#1093(2): must report the AHK watcher is absent; out=\n{combined}"
+    );
+    assert!(
+        !combined.contains("recovered after"),
+        "#1093(2): must NOT claim recovery when the restart was skipped; out=\n{combined}"
+    );
+    assert_eq!(
+        extract_rc(&combined),
+        1,
+        "#1093(2): fail loud (rc=1); out=\n{combined}"
+    );
+}
+
+#[test]
+fn obs_restart_ps_guards_on_ahk_presence_before_killing() {
+    // #1093 review finding 2: the PS must CHECK AutoHotkey64 is alive and `exit 2` (MV_REVERIFY_NO_AHK)
+    // BEFORE the Stop-Process obs64 -- never kill obs64 when nothing will respawn it.
+    let (_ok, ps) = run("mv_reverify_obs_restart_ps");
+    assert!(
+        ps.contains("Get-Process AutoHotkey64")
+            && ps.contains("MV_REVERIFY_NO_AHK")
+            && ps.contains("exit 2"),
+        "#1093(2): the restart PS must guard on AutoHotkey64 presence and exit 2 when absent"
+    );
+    let guard = ps.find("MV_REVERIFY_NO_AHK").expect("guard present");
+    let kill = ps.find("Stop-Process").expect("kill present");
+    assert!(
+        guard < kill,
+        "#1093(2): the AHK-presence guard must precede the obs64 kill (never kill first, check later)"
     );
 }
 
