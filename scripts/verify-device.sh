@@ -105,6 +105,10 @@
 #       the live `amixer -c HID` Mic/PCM percents match this box's per-box table (cam1-4 75%/79%,
 #       cam5-7 80%/94%). A re-provisioned box that drifts back to a dangling config or the CSCTEK
 #       power-on gain (Mic 91%) FAILs.
+#   (ab) RemoteOS MCP control-channel agent (#1066): remoteos-mcp.service (the linux-camN MCP surface
+#       on :8092, provisioned by setup-device.sh STEP 17b) is ENABLED (reboot-survival) AND active
+#       AND :8092 is listening. A fresh box that never provisioned the agent FAILs instead of coming
+#       up with a dead MCP surface.
 #
 # Exit: 0 iff every check passes. Non-zero if ANY check FAILs or is UNREADABLE (test-strictness --
 # an unreachable/unreadable check is a FAIL, never a silent pass).
@@ -602,6 +606,8 @@ Checks:
       publishing the secondary "CAMn (30p)" 30fps blend stream (issue 792 / #1087)
   (aa) interkom audio bake-in: by-NAME /etc/asound.conf (CARD=HID), alsa-utils installed, and the
       live amixer Mic/PCM gain matches the per-box table (cam1-4 75%/79%, cam5-7 80%/94%) (#782)
+  (ab) RemoteOS MCP agent: remoteos-mcp.service enabled (reboot-survival) + active, :8092 listening
+      (the linux-camN MCP control surface, provisioned by setup-device.sh STEP 17b) (#1066)
 
 Env: KERNEL_PIN (optional exact running-kernel pin), NDI_VERSION_PIN (default 6.3.2),
      DANTESYNC_OFFSET_FRESHNESS_S (max age of a fresh [NTP] offset line, default 300),
@@ -1157,6 +1163,33 @@ elif [ "$MIC_ACTUAL" != "$MIC_EXPECT" ] || [ "$PCM_ACTUAL" != "$PCM_EXPECT" ]; t
   fail "interkom mixer gain drift on $NAME_UPPER: Mic ${MIC_ACTUAL}% (expect ${MIC_EXPECT}%) / PCM ${PCM_ACTUAL}% (expect ${PCM_EXPECT}%) (#782)"
 else
   ok "interkom audio: by-NAME asound.conf + Mic ${MIC_ACTUAL}%/PCM ${PCM_ACTUAL}% (per-box #782) + alsa-utils installed"
+fi
+
+# (ab) RemoteOS MCP control-channel agent (#1066) ----------------------------------------------
+# The linux-camN MCP surface (:8092) is served by the SEPARATE zbynekdrlik/remoteos-mcp agent
+# (remoteos-mcp.service), provisioned by setup-device.sh STEP 17b. This POST-REBOOT check proves
+# the LIVE surface (where setup-device.sh's enable-only gate deliberately stops): the unit is
+# ENABLED (reboot-survival) AND active AND :8092 is listening. Every ssh_box read is `|| rc=$?`-
+# guarded (the (aa)/(e)/(z) shape) so an unreachable box FALLS to the first fail branch, never
+# aborts the gate. Inserted BEFORE (q) -- (q) stays the LAST check.
+mcpenr=0
+# tr runs on the REMOTE (inside ssh_box's command) so the local `|| mcpenr=$?` captures ssh's OWN
+# rc (255 on an unreachable box), not the always-0 exit of a local `| tr` pipe -- an accurate
+# `ssh rc=` in the fail message (review 🔵). The verdict itself is fail-closed either way (empty
+# state never equals "enabled").
+MCP_ENABLED="$(ssh_box "systemctl is-enabled remoteos-mcp 2>/dev/null | tr -d '[:space:]'")" || mcpenr=$?
+mcpacr=0
+MCP_ACTIVE="$(ssh_box "systemctl is-active remoteos-mcp 2>/dev/null | tr -d '[:space:]'")" || mcpacr=$?
+mcplr=0
+MCP_LISTEN="$(ssh_box "ss -ltn 2>/dev/null | grep -cE ':8092([^0-9]|\$)' || true")" || mcplr=$?
+if [ "${MCP_ENABLED:-}" != "enabled" ]; then
+  fail "remoteos-mcp.service is not enabled (is-enabled='${MCP_ENABLED:-<none>}', ssh rc=$mcpenr) -- the linux-camN MCP surface would be dead after a reboot (#1066)"
+elif [ "${MCP_ACTIVE:-}" != "active" ]; then
+  fail "remoteos-mcp.service is not active (is-active='${MCP_ACTIVE:-<none>}', ssh rc=$mcpacr) -- the linux-camN MCP :8092 surface is down (#1066)"
+elif [ "${MCP_LISTEN:-0}" = "0" ]; then
+  fail "remoteos-mcp is not listening on :8092 (ss rc=$mcplr) -- the linux-camN MCP surface is unreachable (#1066)"
+else
+  ok "remoteos-mcp agent enabled + active + listening on :8092 (linux-camN MCP surface, #1066)"
 fi
 
 # (q) .bak cruft drift -- WARNING only, never a FAIL (#453) -------------------------------------

@@ -1160,6 +1160,76 @@ DANTESYNC_INSTALLED=true
 echo "  dantesync: installed and enabled"
 
 # =============================================================================
+# STEP 17b: RemoteOS MCP control-channel agent (#1066) -- cam1-4 parity with the 858 imag fix
+# =============================================================================
+echo ""
+echo -e "${GREEN}[17b] Provisioning RemoteOS MCP control-channel agent...${NC}"
+
+# The linux-camN MCP surface (:8092) is served by the SEPARATE zbynekdrlik/remoteos-mcp project
+# (ops skill #555). camera-box does NOT re-implement or re-pin the agent -- it INVOKES that
+# project's own canonical install-linux.sh (pip-git install + config.json + systemd unit +
+# enable/start), mirroring setup-imag.sh's own remoteos step and the standing "use the installer,
+# never a bare pip command" discipline. The agent survived only as a hand-install on each live cam
+# box before this step; a fresh reprovision / new box came up with the MCP surface DEAD.
+#
+# Runs HERE, after STEP 17 (dantesync) and BEFORE STEP 18's ro-root flip: the installer writes to
+# /usr + /etc, which must happen while root is still rw. Per this script's enable-only convention
+# (.claude/rules/provisioning-scripts.md), the gate is `systemctl is-enabled` (the reboot-survival
+# property), NOT is-active -- the LIVE :8092 surface is proven post-reboot by verify-device.sh's
+# (ab) acceptance check. curl and the CA store are ensured fail-loud by the pre-flight above (and
+# STEP 16), so both are present by the time this step runs.
+#
+# Auth-key handling (security-boundary): the --auth-key is a full-shell-RCE bearer token bound to
+# 0.0.0.0:8092, so it NEVER lands in this repo. Two paths, mirroring this script's env-secret
+# convention (CAM_PW/GH_TOKEN):
+#   - REMOTEOS_MCP_AUTH_KEY set -> pre-seed /etc/remoteos-mcp/config.json (chmod 600) so the
+#     installer REUSES that known key and dev1's gitignored .mcp.json keeps matching a freshly
+#     hardware'd box (fully closes #1066: a working MCP surface, not just an installed agent).
+#   - unset -> the installer generates a fresh on-box key; update dev1's .mcp.json linux-camN entry.
+REMOTEOS_MCP_INSTALLER_URL="${REMOTEOS_MCP_INSTALLER_URL:-https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/master/install-linux.sh}"
+REMOTEOS_MCP_CONFIG="/etc/remoteos-mcp/config.json"
+if [ -n "${REMOTEOS_MCP_AUTH_KEY:-}" ]; then
+    # Reject any shell/JSON-special char: the installer generates [A-Za-z0-9] keys, and a
+    # non-alphanumeric value in the unquoted heredoc below would break the JSON (the installer then
+    # silently discards it and generates a DIFFERENT key -- dev1's .mcp.json breaks while the
+    # is-enabled gate still passes) or run command substitution. Fail loud instead.
+    case "$REMOTEOS_MCP_AUTH_KEY" in
+        *[!A-Za-z0-9]*) fail "REMOTEOS_MCP_AUTH_KEY must be alphanumeric [A-Za-z0-9] (installer key charset); refusing to write it unsafely (#1066)" ;;
+    esac
+    install -d -m 700 /etc/remoteos-mcp
+    ( umask 077; cat > "$REMOTEOS_MCP_CONFIG" <<CFG
+{
+  "port": 8092,
+  "auth_key": "${REMOTEOS_MCP_AUTH_KEY}",
+  "host": "0.0.0.0"
+}
+CFG
+    )
+    chmod 600 "$REMOTEOS_MCP_CONFIG"
+    echo "  #1066: pre-seeded $REMOTEOS_MCP_CONFIG from REMOTEOS_MCP_AUTH_KEY (installer reuses it; dev1 .mcp.json stays valid)"
+else
+    echo "  #1066: REMOTEOS_MCP_AUTH_KEY unset -- the installer will generate a fresh on-box key; update dev1's .mcp.json linux-camN entry to match"
+fi
+REMOTEOS_MCP_INSTALLER_TMP="$(mktemp /tmp/remoteos-mcp-install-linux.XXXXXX.sh)"
+curl -fsSL "$REMOTEOS_MCP_INSTALLER_URL" -o "$REMOTEOS_MCP_INSTALLER_TMP" \
+    || fail "cannot fetch remoteos-mcp installer from $REMOTEOS_MCP_INSTALLER_URL (#1066)"
+bash "$REMOTEOS_MCP_INSTALLER_TMP" \
+    || fail "canonical remoteos-mcp install-linux.sh failed (#1066)"
+rm -f "$REMOTEOS_MCP_INSTALLER_TMP"
+# Enable-only convention: ensure the reboot-survival symlink exists (idempotent if the installer
+# already did `enable --now`), then gate on is-enabled. verify-device.sh's (ab) check proves the
+# LIVE :8092 surface after the box reboots.
+systemctl enable remoteos-mcp 2>/dev/null || true
+# Compare the LITERAL is-enabled state, not `--quiet`'s exit code: `is-enabled --quiet` returns 0
+# for a `static` unit (no [Install] section) too, which is NOT pulled in at boot -- the exact
+# reboot-survival property this gate claims to prove. A literal `= enabled` compare rejects that
+# (review 🔵); verify-device.sh's (ab) check makes the same strict compare post-reboot.
+REMOTEOS_MCP_ENABLED_STATE="$(systemctl is-enabled remoteos-mcp 2>/dev/null || true)"
+[ "$REMOTEOS_MCP_ENABLED_STATE" = "enabled" ] \
+    || fail "remoteos-mcp.service is not enabled (is-enabled='${REMOTEOS_MCP_ENABLED_STATE:-<none>}') after install -- the linux-camN MCP surface would be dead on next boot (#1066)"
+echo "  #1066: remoteos-mcp agent installed + enabled (linux-camN MCP surface :8092; proven live post-reboot by verify-device.sh (ab))"
+
+# =============================================================================
 # STEP 18: Configure read-only root filesystem
 # =============================================================================
 echo ""
