@@ -409,5 +409,15 @@ fn windows_genlock_workflows_gate_on_the_list_only_source_selector_795() {
             "{wf_path}: #795 — the build no longer asserts the saved-source-name preservation helper \
              (genlock_ensure_saved_source_listed). Re-add the pwsh #795 gate."
         );
+        // The NEGATIVE anti-editable gate must stay too — the token only appears in the pwsh
+        // `-match OBS_COMBO_TYPE_EDITABLE → exit 1` guard, so its presence proves that gate is armed
+        // (without this, a future edit could drop the anti-editable pwsh check unnoticed by the
+        // workflow-parity guard, even though the source test still protects ndi-source.cpp itself).
+        assert!(
+            wf.contains("OBS_COMBO_TYPE_EDITABLE"),
+            "{wf_path}: #795 — the build no longer asserts the anti-editable gate (the pwsh \
+             `-match OBS_COMBO_TYPE_EDITABLE → exit 1` check is gone). A subtree bump could reship \
+             an editable source combo. Re-add the pwsh #795 anti-editable gate."
+        );
     }
 }
