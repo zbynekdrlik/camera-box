@@ -129,7 +129,10 @@ fn measure(pt: &str, pr: &str, ct: &str, cr: &str) -> String {
 fn measure_healthy_60fps_over_a_full_pass_window() {
     // 18000 frames over the two lines' own 300 s span => exactly 60.000 fps.
     let out = measure("14:00:00.000", "0", "14:05:00.000", "18000");
-    assert!((measured_fps(&out) - 60.0).abs() < 0.05, "want ~60, got {out}");
+    assert!(
+        (measured_fps(&out) - 60.0).abs() < 0.05,
+        "want ~60, got {out}"
+    );
     assert_eq!(field(&out, "advanced"), "1");
     assert!((field(&out, "window_s").parse::<f64>().unwrap() - 300.0).abs() < 1e-3);
 }
@@ -155,7 +158,10 @@ fn measure_avoids_the_phantom_50_from_a_single_audit_tick_797() {
 fn measure_reads_a_genuine_50fps_delivery() {
     // A camera genuinely delivering 50 fps advances received= 15000 over a 300 s span.
     let out = measure("14:00:00.000", "0", "14:05:00.000", "15000");
-    assert!((measured_fps(&out) - 50.0).abs() < 0.05, "want ~50, got {out}");
+    assert!(
+        (measured_fps(&out) - 50.0).abs() < 0.05,
+        "want ~50, got {out}"
+    );
     assert_eq!(field(&out, "advanced"), "1");
 }
 
@@ -163,7 +169,10 @@ fn measure_reads_a_genuine_50fps_delivery() {
 fn measure_reads_a_genuine_43fps_delivery() {
     // The dispatch's own example: "a camera silently delivering 43/50 fps must alarm".
     let out = measure("14:00:00.000", "0", "14:05:00.000", "12900");
-    assert!((measured_fps(&out) - 43.0).abs() < 0.05, "want ~43, got {out}");
+    assert!(
+        (measured_fps(&out) - 43.0).abs() < 0.05,
+        "want ~43, got {out}"
+    );
 }
 
 #[test]
@@ -185,8 +194,17 @@ fn measure_frozen_source_advances_zero_and_is_flagged_not_advancing() {
 
 #[test]
 fn measure_non_numeric_received_is_unmeasurable() {
-    assert_eq!(field(&measure("14:00:00.000", "abc", "14:05:00.000", "18000"), "fps"), "");
-    assert_eq!(field(&measure("14:00:00.000", "0", "14:05:00.000", "xx"), "fps"), "");
+    assert_eq!(
+        field(
+            &measure("14:00:00.000", "abc", "14:05:00.000", "18000"),
+            "fps"
+        ),
+        ""
+    );
+    assert_eq!(
+        field(&measure("14:00:00.000", "0", "14:05:00.000", "xx"), "fps"),
+        ""
+    );
 }
 
 #[test]
@@ -194,7 +212,10 @@ fn measure_handles_midnight_wrap() {
     // The OBS log is date-less; a window straddling midnight (curr seconds-of-day < prev) must add
     // 86400 rather than read a negative/absurd window. 23:59:30 -> 00:04:30 is a real 300 s span.
     let out = measure("23:59:30.000", "0", "00:04:30.000", "18000");
-    assert!((measured_fps(&out) - 60.0).abs() < 0.05, "wrap must read ~60, got {out}");
+    assert!(
+        (measured_fps(&out) - 60.0).abs() < 0.05,
+        "wrap must read ~60, got {out}"
+    );
     assert!((field(&out, "window_s").parse::<f64>().unwrap() - 300.0).abs() < 1e-3);
 }
 
@@ -203,14 +224,22 @@ fn measure_stale_prev_beyond_the_cap_is_unmeasurable() {
     // A prev sample many hours old (watchdog was down) -> the window is implausible -> reseed, never
     // compute a rate over a stale span.
     let out = measure("00:00:00.000", "0", "10:00:00.000", "2160000");
-    assert_eq!(field(&out, "fps"), "", "stale prev must be unmeasurable: {out}");
+    assert_eq!(
+        field(&out, "fps"),
+        "",
+        "stale prev must be unmeasurable: {out}"
+    );
 }
 
 #[test]
 fn measure_no_prior_timestamp_is_unmeasurable() {
     // An empty/absent prev timestamp (first pass / a reseed) -> nothing to measure against.
     let out = measure("", "0", "14:05:00.000", "18000");
-    assert_eq!(field(&out, "fps"), "", "no prior ts must be unmeasurable: {out}");
+    assert_eq!(
+        field(&out, "fps"),
+        "",
+        "no prior ts must be unmeasurable: {out}"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -234,49 +263,79 @@ fn classify(
 
 #[test]
 fn classify_60fps_is_ok() {
-    assert_eq!(classify("60.000", "300", "1", "60", "3", "60", "1", "1"), "OK");
+    assert_eq!(
+        classify("60.000", "300", "1", "60", "3", "60", "1", "1"),
+        "OK"
+    );
 }
 
 #[test]
 fn classify_ntsc_5994_is_ok_within_tolerance() {
     // 59.94 (NTSC 60000/1001) is a legitimate "60" and must stay inside the ±3 band.
-    assert_eq!(classify("59.940", "300", "1", "60", "3", "60", "1", "1"), "OK");
+    assert_eq!(
+        classify("59.940", "300", "1", "60", "3", "60", "1", "1"),
+        "OK"
+    );
 }
 
 #[test]
 fn classify_50fps_is_wrong() {
-    assert_eq!(classify("50.000", "300", "1", "60", "3", "60", "1", "1"), "WRONG");
+    assert_eq!(
+        classify("50.000", "300", "1", "60", "3", "60", "1", "1"),
+        "WRONG"
+    );
 }
 
 #[test]
 fn classify_43fps_is_wrong() {
-    assert_eq!(classify("43.000", "300", "1", "60", "3", "60", "1", "1"), "WRONG");
+    assert_eq!(
+        classify("43.000", "300", "1", "60", "3", "60", "1", "1"),
+        "WRONG"
+    );
 }
 
 #[test]
 fn classify_above_band_is_also_wrong() {
     // The band is symmetric — an implausibly-high rate is wrong too.
-    assert_eq!(classify("72.000", "300", "1", "60", "3", "60", "1", "1"), "WRONG");
+    assert_eq!(
+        classify("72.000", "300", "1", "60", "3", "60", "1", "1"),
+        "WRONG"
+    );
 }
 
 #[test]
 fn classify_tolerance_boundary_is_inclusive_ok_exclusive_wrong() {
     // |57-60| == 3 is NOT > tolerance -> OK (edge inclusive); 56.9 (3.1 off) -> WRONG.
-    assert_eq!(classify("57.000", "300", "1", "60", "3", "60", "1", "1"), "OK");
-    assert_eq!(classify("63.000", "300", "1", "60", "3", "60", "1", "1"), "OK");
-    assert_eq!(classify("56.900", "300", "1", "60", "3", "60", "1", "1"), "WRONG");
+    assert_eq!(
+        classify("57.000", "300", "1", "60", "3", "60", "1", "1"),
+        "OK"
+    );
+    assert_eq!(
+        classify("63.000", "300", "1", "60", "3", "60", "1", "1"),
+        "OK"
+    );
+    assert_eq!(
+        classify("56.900", "300", "1", "60", "3", "60", "1", "1"),
+        "WRONG"
+    );
 }
 
 #[test]
 fn classify_frozen_advanced_zero_is_unknown_not_wrong() {
     // A frozen source (advanced=0) is issue-1052's job — never double-classified as a cadence fault.
-    assert_eq!(classify("0.000", "300", "0", "60", "3", "60", "1", "1"), "UNKNOWN");
+    assert_eq!(
+        classify("0.000", "300", "0", "60", "3", "60", "1", "1"),
+        "UNKNOWN"
+    );
 }
 
 #[test]
 fn classify_short_window_is_unknown() {
     // A window below the minimum trustable span (first pass / reseed) -> UNKNOWN, never a noisy page.
-    assert_eq!(classify("60.000", "30", "1", "60", "3", "60", "1", "1"), "UNKNOWN");
+    assert_eq!(
+        classify("60.000", "30", "1", "60", "3", "60", "1", "1"),
+        "UNKNOWN"
+    );
 }
 
 #[test]
@@ -288,19 +347,31 @@ fn classify_unmeasurable_is_unknown() {
 #[test]
 fn classify_not_expected_live_is_skip() {
     // A source not listed as expected-live is out of scope regardless of its measured rate.
-    assert_eq!(classify("50.000", "300", "1", "60", "3", "60", "0", "1"), "SKIP");
+    assert_eq!(
+        classify("50.000", "300", "1", "60", "3", "60", "0", "1"),
+        "SKIP"
+    );
 }
 
 #[test]
 fn classify_box_unreachable_is_skip_never_double_page() {
     // strih down per issue-1001 -> that watchdog owns the page; a cadence reading is out of scope.
-    assert_eq!(classify("50.000", "300", "1", "60", "3", "60", "1", "0"), "SKIP");
+    assert_eq!(
+        classify("50.000", "300", "1", "60", "3", "60", "1", "0"),
+        "SKIP"
+    );
 }
 
 #[test]
 fn classify_defensive_non_one_flags_are_skip() {
-    assert_eq!(classify("50", "300", "1", "60", "3", "60", "yes", "1"), "SKIP");
-    assert_eq!(classify("50", "300", "1", "60", "3", "60", "1", "up"), "SKIP");
+    assert_eq!(
+        classify("50", "300", "1", "60", "3", "60", "yes", "1"),
+        "SKIP"
+    );
+    assert_eq!(
+        classify("50", "300", "1", "60", "3", "60", "1", "up"),
+        "SKIP"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
