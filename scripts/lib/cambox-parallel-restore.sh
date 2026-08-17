@@ -74,21 +74,25 @@ cambox_parallel_label_ip() {
 }
 
 # _cambox_retry_remote_cmd [painter] -> print the REMOTE bash text for a single sequential
-# recovery attempt (#715). Generic: free the capture device (the #626 self-match-safe anchored
-# burn pkill), restart camera-box, then poll `systemctl is-active` (~16s); the final test sets the
-# ssh status so the caller's `if timeout ... ssh ...; then` branches on genuine recovery. For a
-# "painter" box it ALSO restarts cam2-painter.service and requires BOTH units active -- a generic
-# camera-box restart alone leaves cam2's monitor BLACK (the #860 trap), so its recovery must be
-# VERIFIED before the caller prunes it from the failed set. Single-quoted heredocs: every remote
-# `$`/`$(...)` is literal (evaluated on the cam box, never locally on dev1).
+# recovery attempt (#715). Generic (source cam1/cam3): STOP any transient burn unit FIRST (the
+# #668 stop-before-pkill ordering -- otherwise a `Restart=on-failure` respawn races the pkill and
+# `systemctl restart camera-box` fails "Device or resource busy", the exact stranded-burn case
+# #715 targets; a `camera-box-burn-*` glob needs no per-box RUN_ID), then the #626 self-match-safe
+# anchored burn pkill, restart camera-box, poll `is-active` (bounded, the outer `timeout` caps it),
+# and END with the is-active test so the ssh status reflects GENUINE camera-box recovery (the
+# caller prunes a source cam on that). For a "painter" box it ALSO restarts cam2-painter.service
+# (an extra restart the #684 FINAL pass does NOT do) but ENDS with `true`: the painter is NEVER
+# pruned on this (see cambox_parallel_retry_failed) because "is-active" cannot tell painting from a
+# BLACK monitor (#863/#860) -- the genuine paint verdict stays with the #684/#863 pass. Single-
+# quoted heredocs: every remote `$`/`$(...)` is literal (evaluated on the cam box, never on dev1).
 _cambox_retry_remote_cmd() {
   if [ "${1:-}" = painter ]; then
     cat <<'CBOX715P'
-pkill -9 -f 'camera-box-burn-[a-z0-9]' 2>/dev/null || true; pkill -x camera-box 2>/dev/null || true; sleep 1; systemctl restart camera-box 2>/dev/null || true; _cbr=0; while [ "$(systemctl is-active camera-box 2>/dev/null)" != active ] && [ $_cbr -lt 16 ]; do sleep 1; _cbr=$((_cbr+1)); done; if [ "$(systemctl is-active camera-box 2>/dev/null)" = active ]; then systemctl start cam2-painter 2>/dev/null || true; _cbp=0; while [ "$(systemctl is-active cam2-painter 2>/dev/null)" != active ] && [ $_cbp -lt 16 ]; do sleep 1; _cbp=$((_cbp+1)); done; [ "$(systemctl is-active cam2-painter 2>/dev/null)" = active ]; else false; fi
+systemctl stop 'camera-box-burn-*' 2>/dev/null || true; systemctl reset-failed 'camera-box-burn-*' 2>/dev/null || true; pkill -9 -f 'camera-box-burn-[a-z0-9]' 2>/dev/null || true; pkill -x camera-box 2>/dev/null || true; sleep 1; systemctl restart camera-box 2>/dev/null || true; _cbr=0; while [ "$(systemctl is-active camera-box 2>/dev/null)" != active ] && [ $_cbr -lt 8 ]; do sleep 1; _cbr=$((_cbr+1)); done; systemctl restart cam2-painter 2>/dev/null || true; true
 CBOX715P
   else
     cat <<'CBOX715G'
-pkill -9 -f 'camera-box-burn-[a-z0-9]' 2>/dev/null || true; pkill -x camera-box 2>/dev/null || true; sleep 1; systemctl restart camera-box 2>/dev/null || true; _cbr=0; while [ "$(systemctl is-active camera-box 2>/dev/null)" != active ] && [ $_cbr -lt 16 ]; do sleep 1; _cbr=$((_cbr+1)); done; [ "$(systemctl is-active camera-box 2>/dev/null)" = active ]
+systemctl stop 'camera-box-burn-*' 2>/dev/null || true; systemctl reset-failed 'camera-box-burn-*' 2>/dev/null || true; pkill -9 -f 'camera-box-burn-[a-z0-9]' 2>/dev/null || true; pkill -x camera-box 2>/dev/null || true; sleep 1; systemctl restart camera-box 2>/dev/null || true; _cbr=0; while [ "$(systemctl is-active camera-box 2>/dev/null)" != active ] && [ $_cbr -lt 8 ]; do sleep 1; _cbr=$((_cbr+1)); done; [ "$(systemctl is-active camera-box 2>/dev/null)" = active ]
 CBOX715G
   fi
 }
@@ -98,19 +102,28 @@ CBOX715G
 # current fleet because 3 ssh sessions launched in the same instant are connection-rejected within
 # ~2s (a dev1-side burst, confirmed by exact CI timing); the identical command run one-at-a-time
 # (as the later #684 FINAL pass proves every run) succeeds. So this pass runs AFTER the burst has
-# drained, waits a short settle, and retries each failed box IN SEQUENCE, pruning the ones that
-# genuinely recover so cambox_parallel_surface_painter_failure only surfaces still-dead boxes.
-# Strictly sequential -> never itself bursts. Gated on CAM_PW so a no-credential context (unit
+# drained, waits a short settle, and retries each failed box IN SEQUENCE. Strictly sequential ->
+# never itself bursts. Each retry is bounded by CAMBOX_PARALLEL_RETRY_TIMEOUT (default 15s, SHORTER
+# than the 30s parallel timeout so the sequential tail stays close to #712/#713's cancellation-
+# grace budget: <=~45s for 3 boxes, not ~90s). Gated on CAM_PW so a no-credential context (unit
 # tests) never touches the rig. Always returns 0 and keeps every ssh inside an `if ...; then` --
 # cleanup()'s trap must always run to completion (the #649/#675/#712 warn-only discipline).
+#
+# A SOURCE cam (cam1/cam3) that the retry brings genuinely active is PRUNED from the failed set. A
+# PAINTER box is NEVER pruned here: the retry gives it an extra early restart of camera-box AND
+# cam2-painter, but "is-active" cannot distinguish a painting monitor from a BLACK one (#863), so
+# pruning it on a weak signal could mask a dead monitor and suppress the #860 ::error::. Its
+# authoritative paint verdict + surfacing stay with the #684/#863 pass and
+# cambox_parallel_surface_painter_failure (which the caller runs on the STILL-failed set after us).
 cambox_parallel_retry_failed() {
   [ -n "${CAM_PW:-}" ] || return 0
   [ "${#CAMBOX_PARALLEL_FAILED_LABELS[@]}" -gt 0 ] || return 0
   local _delay="${CAMBOX_PARALLEL_RETRY_DELAY:-2}"
+  local _rt="${CAMBOX_PARALLEL_RETRY_TIMEOUT:-15}"
   # settle: let any sshd/dev1 burst-penalty state from the parallel group decay before the first
   # retry (the retries below are one-at-a-time, so this pass never bursts by construction).
   sleep "$_delay" 2>/dev/null || true
-  local _lbl _ip _remote _kind
+  local _lbl _ip _remote
   local _still=()
   for _lbl in "${CAMBOX_PARALLEL_FAILED_LABELS[@]}"; do
     _ip="$(cambox_parallel_label_ip "$_lbl")" || _ip=""
@@ -120,16 +133,26 @@ cambox_parallel_retry_failed() {
       continue
     fi
     case "$_lbl" in
-      *painter*) _kind=painter ;;
-      *)         _kind=generic ;;
+      *painter*)
+        _remote="$(_cambox_retry_remote_cmd painter)"
+        if timeout "$_rt" sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$_ip" "$_remote"; then
+          echo "    [cleanup] #715: $_lbl early recovery attempted (camera-box + cam2-painter restarted); paint verdict left to the #684/#860 pass"
+        else
+          echo "    WARNING #715: $_lbl early recovery attempt did not complete cleanly -- left for the #684/#860 pass" >&2
+        fi
+        # NEVER pruned -- see the function header: is-active can't tell a black monitor from a live one.
+        _still+=("$_lbl")
+        ;;
+      *)
+        _remote="$(_cambox_retry_remote_cmd generic)"
+        if timeout "$_rt" sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$_ip" "$_remote"; then
+          echo "    [cleanup] #715: $_lbl recovered on sequential retry (after the parallel burst drained)"
+        else
+          echo "    WARNING #715: $_lbl still down after a sequential retry -- leaving it for the #684 FINAL pass" >&2
+          _still+=("$_lbl")
+        fi
+        ;;
     esac
-    _remote="$(_cambox_retry_remote_cmd "$_kind")"
-    if timeout "${CLEANUP_SSH_TIMEOUT:-30}" sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$_ip" "$_remote"; then
-      echo "    [cleanup] #715: $_lbl recovered on sequential retry (after the parallel burst drained)"
-    else
-      echo "    WARNING #715: $_lbl still down after a sequential retry -- leaving it for the #684 FINAL pass" >&2
-      _still+=("$_lbl")
-    fi
   done
   if [ "${#_still[@]}" -gt 0 ]; then
     CAMBOX_PARALLEL_FAILED_LABELS=("${_still[@]}")
@@ -154,7 +177,8 @@ cambox_parallel_wait_and_report() {
     else
       echo "    WARNING #712: ${CAMBOX_PARALLEL_LABELS[$_i]} restore failed/timed out in parallel cleanup — check it manually" >&2
       CAMBOX_PARALLEL_FAILED_LABELS+=("${CAMBOX_PARALLEL_LABELS[$_i]}")
-      _rc=1
+      # #715: _rc is (re)computed from the FINAL failed set after cambox_parallel_retry_failed
+      # below prunes recovered boxes, so setting it here would be dead — the retry may clear it.
     fi
     _i=$((_i + 1))
   done
