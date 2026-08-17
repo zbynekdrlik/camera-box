@@ -214,6 +214,15 @@ pub mod zero_loss_restart_survival;
 // `docs/genlock-latency-floor-rationale.md`.
 pub mod jitter_audit;
 
+// #811 — resolume-snv (CG box) frame-loss-free playback verdict. Given ONE
+// resolume NDI input's genlock-FIFO AuditSummary window (from the jitter_audit
+// pipeline above), decide PASS/FAIL against the ticket's acceptance bounds
+// (skew flat ±20 ms + zero drop/underrun/relock/late-hold/backward-regime
+// deltas). Cadence-agnostic (resolume is a non-60 CG source, #787). Pure
+// Tier-0 std, self-contained (standalone-rustc testable); the crate consumer
+// is `genlock-jitter-report --verdict-source`.
+pub mod resolume_playback;
+
 // #771 — MV fps observability: parse the vendored libobs `multiview-audit:` log line (the
 // per-projector real render cadence emitted every ~5s by render_display()) + apply the
 // canvas/2 alarm floor (byte-identical to obs_multiview_floor_fps() in obs-display-budget.h).

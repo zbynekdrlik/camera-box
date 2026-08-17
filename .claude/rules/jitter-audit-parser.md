@@ -2,6 +2,7 @@
 paths:
   - "src/jitter_audit.rs"
   - "src/bin/genlock-jitter-report.rs"
+  - "src/resolume_playback.rs"
 ---
 
 # genlock audit-log parser (`src/jitter_audit.rs` + `genlock-jitter-report`)
@@ -57,3 +58,34 @@ The CLI's `--json` output is `summaries_to_json` — the INPUT-side per-source o
 send-side table); the `--json` branch parses + returns BEFORE any send-side work so it never
 double-parses and never gains keys. A send-only log is valid in text mode (exit 0); the
 no-lines error (exit 2) fires only when NO audit line of any kind is present.
+
+## The `--verdict-source` frame-loss verdict seam (#811, resolume-snv maintenance)
+
+`genlock-jitter-report --verdict-source <NAME>` (repeatable) is an ADDITIVE scriptable mode, NOT a
+new line kind: it reuses the INPUT-side `summarize_all` pipeline, then evaluates one source's
+`AuditSummary` through the pure `src/resolume_playback.rs` verdict (`evaluate`) and prints one
+`RESOLUME-VERDICT <name>: PASS/FAIL/ABSENT` line (exit 3 on any FAIL/ABSENT unless
+`--verdict-report-only`). It exists for the resolume-snv (CG box) maintenance check — confirm its
+NDI feed plays frame-loss-free on strih/stream after a dantesync roll (#811). Landmines to respect:
+
+- **`--json` stays byte-locked (#757) — the verdict mode does NOT touch it.** The verdict branch
+  sits AFTER the `--json` early-return, so `--json` still wins if both are passed and its shape
+  never gains keys. Never route a verdict field into `summaries_to_json`.
+- **The verdict is CADENCE-AGNOSTIC — this is deliberate, do not "fix" it.** resolume is a **non-60**
+  CG source (#787 "resolume-rate exemption"), so its FIFO adapts cadence normally: raw
+  `delta_holds`/`delta_overruns` MOVE on a healthy window and are NOT gated. The verdict gates only
+  skew (`max_abs_head_skew_ms` ≤ bound, default 20 ms) + the pathology set
+  (`delta_dropped_due`/`underruns`/`relocks`/`late_holds`/`backward_regime_ticks` == 0);
+  `backward_regime_ticks` (#1009) IS the true frame-jump/duplicate signal. Gating holds/overruns
+  would false-fail any non-60 source.
+- **The verdict lives in a crate-root PURE module** (`src/resolume_playback.rs`, self-contained std,
+  no `use crate::…`) so it is standalone-rustc Tier-0 testable (`rustc --test src/resolume_playback.rs`),
+  same recipe as `jitter_audit.rs`. The bin maps `AuditSummary → PlaybackWindow` (a trivial field
+  copy — cover it through the real bin path, `tests/*` re-implementing its own copy of the mapping
+  does NOT catch a field-swap in the bin's copy; #811 review 🔵-1).
+- **This is a STANDALONE maintenance verify, NOT an E2E `[0/8]` precondition.** resolume is not a
+  measured source in the cam→strih→stream recording path and is a traveling box often powered off —
+  wiring it into `recording-e2e.sh`'s dantesync-version-gate roster would fail-CLOSE every E2E run
+  when it is away (the imag-nb #1013 pain). The general rule for ANY new maintenance target: an
+  arg-driven fleet gate takes a DOCUMENTED node (targets.md + `.claude/skills/ops`), not a code
+  roster; keep a non-measured / traveling box out of the E2E hot path.

@@ -20,7 +20,21 @@
 //! genlock-jitter-report < obs.log
 //! genlock-jitter-report --file /path/to/obs.log
 //! genlock-jitter-report --file /path/to/obs.log --json
+//! genlock-jitter-report --file /path/to/strih-obs.log \
+//!     --verdict-source 'cg' --verdict-source 'NDI obs hudba'
 //! ```
+//!
+//! `--verdict-source <NAME>` (#811, repeatable): a distinct SCRIPTABLE verdict mode for the
+//! resolume-snv (CG box) maintenance check. For each requested input it prints one
+//! `RESOLUME-VERDICT <name>: PASS/FAIL/ABSENT` line, evaluating that source's genlock-FIFO
+//! window against the frame-loss-free acceptance bounds (`camera_box::resolume_playback`):
+//! skew flat within `--skew-bound-ms` (default 20) and ZERO drop/underrun/relock/late-hold/
+//! backward-regime deltas over the window, with at least `--min-samples` (default 2) samples.
+//! Exits 3 if ANY requested source FAILs or is ABSENT, unless `--verdict-report-only` (then
+//! always 0 — telemetry, not a gate). This mode prints only the verdict lines (run with no
+//! flag for the full tables) and never touches `--json` (input-side, shape-locked). Used
+//! after a dantesync roll onto resolume to confirm frame-loss-free playback of its
+//! `RESOLUME-SNV (cg-obs)` feed on strih/stream — see `.claude/skills/ops`.
 //!
 //! #874: the same log also carries the SEND-side audit lines the genlock build emits
 //! (`genlock-ndi-output audit '<name>':` / `genlock-ndi-filter audit '<ndi name>':`, from
@@ -44,13 +58,25 @@
 
 use camera_box::jitter_audit::{
     parse_audit_lines, parse_send_audit_lines, summaries_to_json, summarize_all,
-    summarize_send_all, SendAuditKind, SendAuditSummary,
+    summarize_send_all, AuditSummary, SendAuditKind, SendAuditSummary,
 };
+use camera_box::resolume_playback::{evaluate, PlaybackBounds, PlaybackVerdict, PlaybackWindow};
 use std::io::Read;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let json_mode = args.iter().any(|a| a == "--json");
+
+    // #811 — resolume-snv frame-loss-free playback verdict mode. When one or
+    // more `--verdict-source <NAME>` are given, this is a distinct SCRIPTABLE
+    // path: it emits one `RESOLUME-VERDICT <name>: PASS/FAIL/ABSENT` line per
+    // requested input and exits nonzero (3) if ANY requested source FAILs or
+    // is ABSENT — unless `--verdict-report-only` forces exit 0. It never
+    // prints the big per-source tables (run with no flag for those) and never
+    // touches `--json` (input-side, shape-locked). Optional bound overrides:
+    // `--skew-bound-ms N` (default 20), `--min-samples N` (default 2).
+    let verdict_sources = collect_repeated_flag(&args, "--verdict-source");
+    let verdict_report_only = args.iter().any(|a| a == "--verdict-report-only");
 
     let text = match read_input() {
         Ok(t) => t,
@@ -77,6 +103,40 @@ fn main() {
         }
         println!("{}", summaries_to_json(&summarize_all(&samples)));
         return;
+    }
+
+    // #811 — resolume playback verdict mode (distinct scriptable path; see the
+    // flag doc in main's head). Uses only the INPUT-side FIFO summaries.
+    if !verdict_sources.is_empty() {
+        let bail = |msg: String| -> ! {
+            eprintln!("ERROR: {msg}");
+            std::process::exit(2);
+        };
+        let skew_bound_ms = match parse_i64_flag(
+            &args,
+            "--skew-bound-ms",
+            PlaybackBounds::default().skew_bound_ms,
+        ) {
+            Ok(v) if v >= 0 => v,
+            Ok(v) => bail(format!("--skew-bound-ms must be >= 0 (got {v})")),
+            Err(e) => bail(e),
+        };
+        let min_samples = match parse_usize_flag(
+            &args,
+            "--min-samples",
+            PlaybackBounds::default().min_samples,
+        ) {
+            Ok(v) => v,
+            Err(e) => bail(e),
+        };
+        let bounds = PlaybackBounds {
+            skew_bound_ms,
+            min_samples,
+        };
+        let summaries = summarize_all(&samples);
+        let code =
+            print_resolume_verdicts(&verdict_sources, &summaries, &bounds, verdict_report_only);
+        std::process::exit(code);
     }
 
     // #874: the genlock build also emits send-side audit lines (genlock-ndi-output /
@@ -136,6 +196,106 @@ fn main() {
             println!();
         }
         print_send_table(&summarize_send_all(&send_samples));
+    }
+}
+
+/// Collect every value of a repeatable `--flag VALUE` from `args`, in order.
+fn collect_repeated_flag(args: &[String], flag: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == flag {
+            if let Some(v) = args.get(i + 1) {
+                out.push(v.clone());
+            }
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Parse an optional `--flag N` (i64): `default` when absent, the parsed value
+/// when present + valid, or `Err(message)` when present-but-unparseable. A
+/// malformed bound on a verification gate is a HARD error, never a silent
+/// fallback to the default — a silent fallback would mask an operator typo
+/// (`--skew-bound-ms 2O`) behind a misleading PASS/FAIL verdict.
+fn parse_i64_flag(args: &[String], flag: &str, default: i64) -> Result<i64, String> {
+    match collect_repeated_flag(args, flag).last() {
+        None => Ok(default),
+        Some(v) => v
+            .parse::<i64>()
+            .map_err(|_| format!("{flag}: '{v}' is not an integer")),
+    }
+}
+
+/// Parse an optional `--flag N` (usize) with the same absent/valid/error
+/// contract as [`parse_i64_flag`].
+fn parse_usize_flag(args: &[String], flag: &str, default: usize) -> Result<usize, String> {
+    match collect_repeated_flag(args, flag).last() {
+        None => Ok(default),
+        Some(v) => v
+            .parse::<usize>()
+            .map_err(|_| format!("{flag}: '{v}' is not a non-negative integer")),
+    }
+}
+
+/// #811 — map one INPUT-side [`AuditSummary`] onto the frame-loss verdict's window view.
+fn window_from_summary(s: &AuditSummary) -> PlaybackWindow {
+    PlaybackWindow {
+        source: s.source.clone(),
+        samples: s.samples,
+        latency_ms: s.latency_ms,
+        max_abs_head_skew_ms: s.max_abs_head_skew_ms,
+        delta_dropped_due: s.delta_dropped_due,
+        delta_underruns: s.delta_underruns,
+        delta_relocks: s.delta_relocks,
+        delta_late_holds: s.delta_late_holds,
+        delta_backward_regime_ticks: s.delta_backward_regime_ticks,
+    }
+}
+
+/// #811 — emit one `RESOLUME-VERDICT <name>: PASS/FAIL/ABSENT` line per requested source and
+/// return the process exit code. A requested source with no matching genlock-fifo audit
+/// summary is ABSENT (treated as a failure — the input was never seen, so playback cannot be
+/// confirmed frame-loss-free). Returns 0 when every requested source PASSed, or when
+/// `report_only` is set (the caller wanted telemetry, not a gate); otherwise 3.
+fn print_resolume_verdicts(
+    sources: &[String],
+    summaries: &[AuditSummary],
+    bounds: &PlaybackBounds,
+    report_only: bool,
+) -> i32 {
+    let mut any_bad = false;
+    for name in sources {
+        match summaries.iter().find(|s| &s.source == name) {
+            Some(s) => {
+                let PlaybackVerdict { pass, reasons, .. } =
+                    evaluate(&window_from_summary(s), bounds);
+                if pass {
+                    println!(
+                        "RESOLUME-VERDICT {name}: PASS ({} samples, latency {} ms, max_skew {} ms)",
+                        s.samples, s.latency_ms, s.max_abs_head_skew_ms
+                    );
+                } else {
+                    any_bad = true;
+                    println!("RESOLUME-VERDICT {name}: FAIL -- {}", reasons.join("; "));
+                }
+            }
+            None => {
+                any_bad = true;
+                println!(
+                    "RESOLUME-VERDICT {name}: ABSENT -- no 'genlock-fifo audit' lines for this input \
+                     (wrong log, input not genlocked, or the source name does not match)"
+                );
+            }
+        }
+    }
+    if any_bad && !report_only {
+        3
+    } else {
+        0
     }
 }
 
@@ -208,4 +368,113 @@ fn read_input() -> std::io::Result<String> {
     let mut buf = Vec::new();
     std::io::stdin().read_to_end(&mut buf)?;
     Ok(String::from_utf8_lossy(&buf).into_owned())
+}
+
+#[cfg(test)]
+mod verdict_tests {
+    use super::*;
+
+    #[test]
+    fn collect_repeated_flag_gathers_all_values_in_order() {
+        let args: Vec<String> = [
+            "prog",
+            "--verdict-source",
+            "cg",
+            "--json",
+            "--verdict-source",
+            "NDI obs hudba",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(
+            collect_repeated_flag(&args, "--verdict-source"),
+            vec!["cg".to_string(), "NDI obs hudba".to_string()]
+        );
+    }
+
+    #[test]
+    fn collect_repeated_flag_empty_when_absent_or_dangling() {
+        let none: Vec<String> = ["prog", "--file", "x"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(collect_repeated_flag(&none, "--verdict-source").is_empty());
+        // A trailing flag with no following value yields nothing (no panic).
+        let dangling: Vec<String> = ["prog", "--verdict-source"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(collect_repeated_flag(&dangling, "--verdict-source").is_empty());
+    }
+
+    #[test]
+    fn parse_flags_default_when_absent_valid_when_present_error_on_garbage() {
+        let args: Vec<String> = ["prog", "--skew-bound-ms", "35", "--min-samples", "nope"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        // present + valid -> the value.
+        assert_eq!(parse_i64_flag(&args, "--skew-bound-ms", 20), Ok(35));
+        // absent -> the default.
+        assert_eq!(parse_i64_flag(&args, "--absent", 20), Ok(20));
+        // present-but-garbage -> a hard error (never a silent fall-back to default).
+        assert!(parse_usize_flag(&args, "--min-samples", 2).is_err());
+    }
+
+    fn summary(source: &str, dropped: u64, skew: i64, samples: usize) -> AuditSummary {
+        AuditSummary {
+            source: source.to_string(),
+            samples,
+            latency_ms: 3,
+            delta_underruns: 0,
+            delta_holds: 4,
+            delta_overruns: 2,
+            delta_backward_steps: 0,
+            delta_backward_regime_ticks: 0,
+            delta_dropped_due: dropped,
+            delta_relocks: 0,
+            delta_late_holds: 0,
+            max_abs_head_skew_ms: skew,
+            mean_abs_head_skew_ms: 0.0,
+            mean_head_skew_ms: 0.0,
+            peak_depth: 5,
+        }
+    }
+
+    // #811 review 🔵-1: exercise window_from_summary + evaluate through the REAL
+    // bin path (print_resolume_verdicts) on a POPULATED AuditSummary, so a
+    // field-swap typo in window_from_summary can't slip through untested.
+    #[test]
+    fn present_source_pass_is_0_and_fail_is_3_through_the_bin_path() {
+        let want = vec!["cg".to_string()];
+        let bounds = PlaybackBounds::default();
+        // clean (holds/overruns move but are not gated) -> PASS -> 0
+        let clean = vec![summary("cg", 0, 8, 30)];
+        assert_eq!(print_resolume_verdicts(&want, &clean, &bounds, false), 0);
+        // drops + a skew excursion -> FAIL -> 3
+        let bad = vec![summary("cg", 3, 45, 30)];
+        assert_eq!(print_resolume_verdicts(&want, &bad, &bounds, false), 3);
+        // ...but report-only never gates.
+        assert_eq!(print_resolume_verdicts(&want, &bad, &bounds, true), 0);
+    }
+
+    #[test]
+    fn absent_source_is_a_failure_exit_3_but_report_only_is_0() {
+        let summaries: Vec<AuditSummary> = Vec::new();
+        let want = vec!["cg".to_string()];
+        let bounds = PlaybackBounds::default();
+        assert_eq!(
+            print_resolume_verdicts(&want, &summaries, &bounds, false),
+            3
+        );
+        assert_eq!(print_resolume_verdicts(&want, &summaries, &bounds, true), 0);
+    }
+
+    #[test]
+    fn no_requested_sources_is_clean_exit_0() {
+        let summaries: Vec<AuditSummary> = Vec::new();
+        let bounds = PlaybackBounds::default();
+        assert_eq!(print_resolume_verdicts(&[], &summaries, &bounds, false), 0);
+    }
 }
