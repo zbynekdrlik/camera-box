@@ -260,3 +260,36 @@ def test_projector_no_panel_opens_and_heals_program_only(monkeypatch, capsys):
     # only Program is reconciled -- a Multiview that was never opened must not be healed
     assert healed_kinds == ["Program"]
     assert "no panel monitor detected" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# g. the REAL subprocess branches of _wmctrl_list_local (#833 rc-check, NOT monkeypatched out)
+# ---------------------------------------------------------------------------
+
+class _FakeRun:
+    def __init__(self, returncode, stdout=""):
+        self.returncode = returncode
+        self.stdout = stdout
+
+
+def test_wmctrl_list_local_missing_tool_returns_none(monkeypatch):
+    mod = _scenes_module()
+    monkeypatch.setattr(mod.shutil, "which", lambda _n: None)  # wmctrl absent
+    assert mod._wmctrl_list_local() is None
+
+
+def test_wmctrl_list_local_rc_nonzero_returns_none_never_zero_windows(monkeypatch, capsys):
+    # #833: a PRESENT-but-failing wmctrl (rc != 0, e.g. X unreachable) must return None + WARN,
+    # NEVER be read as "0 windows". Exercises the real subprocess branch (not monkeypatched out).
+    mod = _scenes_module()
+    monkeypatch.setattr(mod.shutil, "which", lambda _n: "/usr/bin/wmctrl")
+    monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: _FakeRun(1, ""))
+    assert mod._wmctrl_list_local() is None
+    assert "wmctrl" in capsys.readouterr().out
+
+
+def test_wmctrl_list_local_rc_zero_returns_stdout(monkeypatch):
+    mod = _scenes_module()
+    monkeypatch.setattr(mod.shutil, "which", lambda _n: "/usr/bin/wmctrl")
+    monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: _FakeRun(0, _CLEAN))
+    assert mod._wmctrl_list_local() == _CLEAN
