@@ -73,7 +73,12 @@ ALERT_THROTTLE_PASSES="${AVSYNC_LINEUP_ALERT_THROTTLE_PASSES:-12}"   # ~1h at th
 # password just makes the read fail -> stream state UNKNOWN -> SUPPRESSED (fail-safe: never a false
 # page, and the network-reach/obs-liveness watchdogs own "OBS unreachable").
 STREAM_OBS_WS_HOST="${STREAM_OBS_WS_HOST:-$STREAM_IP}"
-STREAM_OBS_WS_PW="${STREAM_OBS_WS_PW:-}"
+# The stream box OBS-WS requires a password; the repo-standard env is OBS_WS_PASSWORD (rig-mode.sh's
+# convention). Defaulting to it (NOT an empty string) is what keeps the stream-state read from
+# silently failing -> None -> SUPPRESSED every pass -> a permanently-inert alarm (the #3 review
+# finding). `--assert` additionally FAILS if the read comes back None, so a mis-set password is caught
+# before the event rather than muting the alarm during it.
+STREAM_OBS_WS_PW="${STREAM_OBS_WS_PW:-${OBS_WS_PASSWORD:-${OBS_PASSWORD:-}}}"
 OBS_PHASE2="${AVSYNC_LINEUP_OBS_PHASE2:-$HERE/obs_phase2.py}"
 
 LINEUP_DECIDER="${AVSYNC_LINEUP_DECIDER:-$HERE/avsync_lineup.py}"
@@ -94,6 +99,20 @@ STATE_DIR="${AVSYNC_LINEUP_STATE_DIR:-${XDG_RUNTIME_DIR:-/tmp}}"
 STATE_FILE="${AVSYNC_LINEUP_STATE_FILE:-$STATE_DIR/camera-box-avsync-lineup.state}"
 
 log() { printf '%s [avsync-lineup-alert-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >&2; }
+
+# #813 (#6): fail LOUD by name if a hard dependency is missing. Without this the run-time liveness
+# pass fails OPEN on a tooling gap (a missing jq -> empty facts -> the decider's json.load errors,
+# swallowed by 2>/dev/null -> action="" -> no alarm AND the pending state is reset). A dev1 watchdog
+# must never silently mute itself because a dependency is absent (mirrors the sibling dev1
+# watchdogs' require_tools discipline).
+require_tools() {
+  local t missing=""
+  for t in "$@"; do command -v "$t" >/dev/null 2>&1 || missing="$missing $t"; done
+  if [ -n "$missing" ]; then
+    log "FATAL: missing required tool(s):$missing -- refusing to run (a missing dependency must fail LOUD, never silently mute the alarm)"
+    exit 3
+  fi
+}
 
 # ── gather: the stream box heartbeat (reuse the shared probe/parse lib) ──────
 HEARTBEAT_EPOCH=""
@@ -204,8 +223,13 @@ run_liveness_pass() {
   local out; out="$(python3 "$LINEUP_DECIDER" liveness --facts "$factfile" 2>/dev/null || true)"
   rm -f "$factfile"
   action="$(printf '%s\n' "$out" | sed -n 's/^action=\([A-Za-z]*\).*/\1/p' | tail -1)"
-  reason="$(printf '%s\n' "$out" | sed -n 's/^action=[A-Za-z]* reason=//p' | tail -1)"
-  log "stream_active=$STREAM_ACTIVE_JSON heartbeat_epoch=${HEARTBEAT_EPOCH:-<none>} status='${HEARTBEAT_STATUS:-<none>}' -> action=${action:-<none>}"
+  # reason is everything between "reason=" and the trailing " sig=..."; sig is the COARSE stamp-free
+  # token the decider emits for throttling (#4 -- never the volatile heartbeat text, whose [stamp]
+  # changes every pass and would defeat the throttle into re-paging every 5 min).
+  local sig
+  reason="$(printf '%s\n' "$out" | sed -n 's/^action=[A-Za-z]* reason=\(.*\) sig=[A-Za-z0-9-]*$/\1/p' | tail -1)"
+  sig="$(printf '%s\n' "$out" | sed -n 's/.* sig=\([A-Za-z0-9-]*\)$/\1/p' | tail -1)"
+  log "stream_active=$STREAM_ACTIVE_JSON heartbeat_epoch=${HEARTBEAT_EPOCH:-<none>} status='${HEARTBEAT_STATUS:-<none>}' -> action=${action:-<none>} sig=${sig:-<none>}"
 
   # confirm/throttle ONLY on ALARM; OK and SUPPRESSED both reset the pending state (a live-again OK,
   # or an off-air stream, clears any pending confirmation -- same "reset on clean signal" discipline
@@ -227,7 +251,9 @@ run_liveness_pass() {
   [ "${act:-0}" = "1" ] || { log "ALARM pending (confirm ${confirm}/${CONFIRM_THRESHOLD})"; return 0; }
 
   local current_sig prior_sig prior_passes throttle_out alert_now new_sig new_passes
-  current_sig="lineup:${HEARTBEAT_STATUS}"
+  # #4: throttle on the COARSE decider sig (no-audio/wedged/stale/no-signal), never the timestamped
+  # heartbeat text -- a sustained condition keeps ONE signature so the ~1h throttle actually holds.
+  current_sig="lineup:${sig:-alarm}"
   prior_sig="$(read_state_field "lineup_alert_sig" "")"
   prior_passes="$(read_state_field "lineup_alert_passes" 0)"
   throttle_out="$(obs_watchdog_alert_throttle "$current_sig" "$prior_sig" "$prior_passes" "$ALERT_THROTTLE_PASSES")"
@@ -255,6 +281,10 @@ forwarder_present_json() {
 
 run_preflight_assert() {
   gather_heartbeat
+  # #3: also read the stream state so preflight can prove the OBS-WS read WORKS -- a None (unreadable)
+  # read means the run-time alarm's own stream gate can't function, and the decider makes that NO-GO.
+  gather_stream_state
+  [ "$DRY_RUN" -eq 1 ] || require_tools curl
   local now fwd http factfile facts go_out rc
   now="$(date +%s)"
   fwd="$(forwarder_present_json)"
@@ -277,7 +307,8 @@ run_preflight_assert() {
     --arg status "$HEARTBEAT_STATUS" \
     --argjson fwd "$fwd" \
     --argjson http "$http_json" \
-    '{heartbeat_epoch:$epoch, now:$now, preflight_stale_s:$stale_s, heartbeat_status:$status, forwarder_present:$fwd, discord_ping_http:$http}')"
+    --argjson active "$STREAM_ACTIVE_JSON" \
+    '{heartbeat_epoch:$epoch, now:$now, preflight_stale_s:$stale_s, heartbeat_status:$status, forwarder_present:$fwd, discord_ping_http:$http, stream_output_active:$active}')"
   printf '%s' "$facts" > "$factfile"
   go_out="$(python3 "$LINEUP_DECIDER" preflight --facts "$factfile" 2>/dev/null)"; rc=$?
   rm -f "$factfile"
@@ -291,6 +322,9 @@ run_preflight_assert() {
 
 # ── main ─────────────────────────────────────────────────────────────────────
 main() {
+  # #6: both modes ssh (sshpass/ssh) the heartbeat, build facts (jq) and call the decider (python3) --
+  # a missing one must fail LOUD, never silently mute the alarm.
+  require_tools sshpass ssh python3 jq
   if [ "$MODE" = "assert" ]; then
     log "pre-event assert (dry_run=$DRY_RUN)"
     run_preflight_assert

@@ -3,9 +3,10 @@
 //!
 //! Background: the existing scripts/avsync-heartbeat-alert-watchdog.sh alarms on heartbeat
 //! STALENESS only, and UNCONDITIONALLY -- so it would NOT have paged the 2026-08-17 silent-audio
-//! incident (the heartbeat stayed FRESH; only the CONTENT died -> "measured: unknown, candidates:
-//! 0") and a plain stale-log alarm can't tell a legitimately-off box from a dead watchdog during a
-//! live event. This watchdog reads the SAME on-box heartbeat + the stream's outputActive and routes
+//! incident (the heartbeat stayed FRESH; only the CONTENT died -> the program audio went silent,
+//! ~-91 dB, which avsync-watchdog.ps1 now carries as `db=` in the heartbeat) and a plain stale-log
+//! alarm can't tell a legitimately-off box from a dead watchdog during a live event. This watchdog
+//! reads the SAME on-box heartbeat (its db= reading) + the stream's outputActive and routes
 //! the whole judgment through the pure avsync_lineup.py decider, reusing the SAME #391 confirm/
 //! throttle lib + airuleset.py notify path (never a second alerting mechanism).
 //!
@@ -154,10 +155,13 @@ impl Harness {
         );
 
         // fake obs_phase2 target (run by REAL python3): prints active=<FAKE_STREAM_ACTIVE>, ignoring
-        // argv -- so one file covers active/inactive/unknown.
+        // argv -- so one file covers active/inactive. FAKE_OBS_FAIL=1 exits non-zero (an unreachable
+        // OBS-WS), which the watchdog reads as stream state UNKNOWN (None).
         fs::write(
             &obs_phase2_fake,
-            "import os\nprint('active=' + os.environ.get('FAKE_STREAM_ACTIVE', 'True') + ' path=')\n",
+            "import os, sys\n\
+             sys.exit(1) if os.environ.get('FAKE_OBS_FAIL') else \
+             print('active=' + os.environ.get('FAKE_STREAM_ACTIVE', 'True') + ' path=')\n",
         )
         .expect("write fake obs_phase2");
         // fake notify target (run by REAL python3): logs its argv to the marker.
@@ -225,20 +229,30 @@ fn write_exec(path: &Path, body: &str) {
     fs::set_permissions(path, perm).unwrap();
 }
 
+// Real heartbeat status strings (byte-shaped like avsync-watchdog.ps1's `measured: db=<X> <out>`).
+// ASCII-only (no quotes/`$`/backtick) so they embed cleanly in the fake sshpass shell script.
+const HB_OK: &str =
+    "measured: db=-5.4 [2026-08-17 08:00:00] AV offset +0 fr (+0 ms) conf 8.2 :: A/V sync OK (offset 0 ms)";
+const HB_SILENT: &str =
+    "measured: db=-91.0 [2026-08-17 08:00:00] UNMEASURABLE window (best confidence 3.2 < 4.0 - no usable face)";
+const HB_BAND: &str =
+    "measured: db=-5.4 [2026-08-17 08:00:00] UNMEASURABLE window (best confidence 3.2 < 4.0 - no usable face)";
+const HB_NO_SIGNAL: &str = "no-signal: grab failed: ffmpeg rc=-5 (relay/stream down)";
+
 // --- the load-bearing case: TODAY (2026-08-17) would have paged --------------------------------
 
 #[test]
 fn liveness_alarms_when_stream_live_and_content_silent_the_2026_08_17_case() {
-    // heartbeat FRESH but status = silent/undecodable content on a successful grab; stream LIVE.
-    let h = Harness::new(r#"measured: av_sync verdict: \"unknown\", candidates: 0"#);
+    // heartbeat FRESH ("measured:", grab succeeded => stream live) but the program audio is silent
+    // (db=-91). The staleness-only sibling misses this entirely (the heartbeat is fresh).
+    let h = Harness::new(HB_SILENT);
     let (_code, _out, err) = h.run(
         ". \"$SCRIPT\"\nDRY_RUN=1\nmain",
         &[("FAKE_STREAM_ACTIVE", "True")],
     );
     assert!(
-        err.contains("action=ALARM"),
-        "a fresh heartbeat with unknown/candidates:0 content DURING a live stream must be ALARM \
-         (the staleness-only watchdog misses this): stderr={err}"
+        err.contains("action=ALARM") && err.contains("sig=no-audio"),
+        "fresh measured heartbeat + silent audio during a live stream must be ALARM(no-audio): stderr={err}"
     );
     assert!(
         err.contains("WOULD alert") && err.contains("ZIVEHO streamu"),
@@ -247,8 +261,21 @@ fn liveness_alarms_when_stream_live_and_content_silent_the_2026_08_17_case() {
 }
 
 #[test]
+fn liveness_alarms_on_silent_audio_even_when_the_ws_read_is_broken() {
+    // #3 robustness: a fresh "measured:" heartbeat proves the stream is publishing, so silent audio
+    // ALARMS even when obs_phase2 (the outputActive read) is unreachable -> the alarm is NOT inert
+    // just because the WS password is mis-set.
+    let h = Harness::new(HB_SILENT);
+    let (_c, _o, err) = h.run(". \"$SCRIPT\"\nDRY_RUN=1\nmain", &[("FAKE_OBS_FAIL", "1")]);
+    assert!(
+        err.contains("action=ALARM") && err.contains("sig=no-audio"),
+        "silent audio on a fresh measured heartbeat must ALARM regardless of the WS read: stderr={err}"
+    );
+}
+
+#[test]
 fn liveness_alarm_fires_the_notify_when_not_dry_run() {
-    let h = Harness::new(r#"measured: av_sync verdict: \"unknown\", candidates: 0"#);
+    let h = Harness::new(HB_SILENT);
     let (_c, _o, _e) = h.run(". \"$SCRIPT\"\nmain", &[("FAKE_STREAM_ACTIVE", "True")]);
     let calls = h.notify_calls();
     assert!(
@@ -258,9 +285,24 @@ fn liveness_alarm_fires_the_notify_when_not_dry_run() {
 }
 
 #[test]
+fn liveness_ok_for_a_band_segment_with_audio_present_no_false_page() {
+    // UNMEASURABLE (no face) but audio present (db=-5.4) -> the instrument is alive -> OK, no page.
+    let h = Harness::new(HB_BAND);
+    let (_c, _o, err) = h.run(
+        ". \"$SCRIPT\"\nDRY_RUN=1\nmain",
+        &[("FAKE_STREAM_ACTIVE", "True")],
+    );
+    assert!(
+        err.contains("action=OK"),
+        "a band segment with audio present must NOT page: stderr={err}"
+    );
+    assert!(!err.contains("WOULD alert"), "stderr={err}");
+}
+
+#[test]
 fn liveness_suppressed_when_stream_off_air_even_with_a_dead_line() {
     // stream not emitting -> a dead line is EXPECTED (box off / between events) -> never page.
-    let h = Harness::new("no-signal: relay down");
+    let h = Harness::new(HB_NO_SIGNAL);
     let (_c, _o, err) = h.run(
         ". \"$SCRIPT\"\nDRY_RUN=1\nmain",
         &[("FAKE_STREAM_ACTIVE", "False")],
@@ -271,13 +313,13 @@ fn liveness_suppressed_when_stream_off_air_even_with_a_dead_line() {
     );
     assert!(
         !err.contains("WOULD alert"),
-        "SUPPRESSED must never reach the alert branch: stderr={err}"
+        "SUPPRESSED must never alert: stderr={err}"
     );
 }
 
 #[test]
 fn liveness_ok_when_stream_live_and_line_healthy() {
-    let h = Harness::new("measured: A/V sync OK (offset 0 ms)");
+    let h = Harness::new(HB_OK);
     let (_c, _o, err) = h.run(
         ". \"$SCRIPT\"\nDRY_RUN=1\nmain",
         &[("FAKE_STREAM_ACTIVE", "True")],
@@ -293,11 +335,15 @@ fn liveness_ok_when_stream_live_and_line_healthy() {
 
 #[test]
 fn assert_go_when_everything_green() {
-    // fresh healthy heartbeat + forwarder active (systemctl rc 0) + Discord test-ping 200.
-    let h = Harness::new("measured: A/V sync OK (offset 0 ms)");
+    // fresh healthy heartbeat (audio present) + forwarder active + Discord 200 + WS read works.
+    let h = Harness::new(HB_OK);
     let (code, out, _e) = h.run(
         ". \"$SCRIPT\"\nMODE=assert\nmain",
-        &[("FAKE_SYSTEMCTL_RC", "0"), ("FAKE_CURL_HTTP_CODE", "200")],
+        &[
+            ("FAKE_SYSTEMCTL_RC", "0"),
+            ("FAKE_CURL_HTTP_CODE", "200"),
+            ("FAKE_STREAM_ACTIVE", "True"),
+        ],
     );
     assert_eq!(
         code, 0,
@@ -309,34 +355,81 @@ fn assert_go_when_everything_green() {
 #[test]
 fn assert_no_go_and_alerts_when_forwarder_down() {
     // forwarder timer inactive (systemctl rc 1) -> NO-GO -> exit 1 + a loud pre-event alert.
-    let h = Harness::new("measured: A/V sync OK (offset 0 ms)");
+    let h = Harness::new(HB_OK);
     let (code, out, _e) = h.run(
         ". \"$SCRIPT\"\nMODE=assert\nmain",
-        &[("FAKE_SYSTEMCTL_RC", "1"), ("FAKE_CURL_HTTP_CODE", "200")],
+        &[
+            ("FAKE_SYSTEMCTL_RC", "1"),
+            ("FAKE_CURL_HTTP_CODE", "200"),
+            ("FAKE_STREAM_ACTIVE", "True"),
+        ],
     );
     assert_eq!(
         code, 1,
         "a dead forwarder must be NO-GO (exit 1): stdout={out}"
     );
     assert!(out.contains("NO-GO"), "stdout={out}");
-    let calls = h.notify_calls();
     assert!(
-        calls.contains("PRE-EVENT NO-GO"),
-        "a NO-GO must fire a loud pre-event alert: calls={calls:?}"
+        h.notify_calls().contains("PRE-EVENT NO-GO"),
+        "a NO-GO must fire a loud pre-event alert: calls={:?}",
+        h.notify_calls()
     );
 }
 
 #[test]
 fn assert_no_go_when_discord_ping_not_delivered() {
     // forwarder active but the Discord test-ping returns 403 -> not delivered -> NO-GO.
-    let h = Harness::new("measured: A/V sync OK (offset 0 ms)");
+    let h = Harness::new(HB_OK);
     let (code, out, _e) = h.run(
         ". \"$SCRIPT\"\nMODE=assert\nmain",
-        &[("FAKE_SYSTEMCTL_RC", "0"), ("FAKE_CURL_HTTP_CODE", "403")],
+        &[
+            ("FAKE_SYSTEMCTL_RC", "0"),
+            ("FAKE_CURL_HTTP_CODE", "403"),
+            ("FAKE_STREAM_ACTIVE", "True"),
+        ],
     );
     assert_eq!(
         code, 1,
         "an undelivered test-ping must be NO-GO: stdout={out}"
     );
     assert!(out.contains("NO-GO"), "stdout={out}");
+}
+
+#[test]
+fn assert_no_go_when_stream_state_read_is_broken() {
+    // #3: a mis-set OBS-WS password (here: obs_phase2 fails) -> the run-time alarm's stream gate
+    // can't work -> preflight must NO-GO, catching the inert-alarm class BEFORE the event.
+    let h = Harness::new(HB_OK);
+    let (code, out, _e) = h.run(
+        ". \"$SCRIPT\"\nMODE=assert\nmain",
+        &[
+            ("FAKE_SYSTEMCTL_RC", "0"),
+            ("FAKE_CURL_HTTP_CODE", "200"),
+            ("FAKE_OBS_FAIL", "1"),
+        ],
+    );
+    assert_eq!(
+        code, 1,
+        "an unreadable stream-state must be NO-GO: stdout={out}"
+    );
+    assert!(
+        out.contains("NO-GO") && out.contains("outputActive"),
+        "stdout={out}"
+    );
+}
+
+#[test]
+fn watchdog_fails_loud_when_a_required_tool_is_missing() {
+    // #6: a missing dependency must fail LOUD by name, never silently mute the alarm. Call
+    // require_tools directly with a tool that cannot exist (keeps the script's own setup intact).
+    let h = Harness::new(HB_OK);
+    let (code, _out, err) = h.run(
+        ". \"$SCRIPT\"\nrequire_tools this_tool_does_not_exist_xyz",
+        &[],
+    );
+    assert_eq!(code, 3, "a missing tool must exit 3: stderr={err}");
+    assert!(
+        err.contains("this_tool_does_not_exist_xyz") && err.contains("missing required tool"),
+        "must name the missing tool: stderr={err}"
+    );
 }

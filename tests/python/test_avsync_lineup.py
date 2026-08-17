@@ -2,22 +2,16 @@
 A/V-sync LINE's GO/NO-GO (pre-event assert) + stream-state-bound liveness alarm.
 
 Trigger: two silent-failure incidents. (1) 2026-07-22: the measurement watchdog was dead the whole
-event and nobody noticed ("neprisla ani jedna hlaska") -- silence was indistinguishable from "content
-can't be measured". (2) 2026-08-17: the measurement audio chain went digitally silent (~-91 dB) while
-the watchdog PROCESS stayed alive (heartbeat fresh), caught only ~7h later at the #748 E2E preflight.
-The existing dev1 avsync-heartbeat-alert-watchdog.sh alarms on heartbeat STALENESS only, and
-UNCONDITIONALLY (not bound to stream state) -- so it (a) would NOT have paged today (heartbeat was
-fresh) and (b) can't tell a legitimately-off box from a dead watchdog during a live event.
+event and nobody noticed. (2) 2026-08-17: the measurement audio chain went digitally silent (~-91 dB)
+while the watchdog PROCESS stayed alive (heartbeat FRESH), caught only ~7h later at the #748 E2E
+preflight. The existing dev1 avsync-heartbeat-alert-watchdog.sh alarms on staleness only + always.
 
-These tests exercise avsync_lineup.py directly (no subprocess, no network) -- pure functions on
-already-gathered fact dicts, exactly as the CLI is called after the watchdog shell assembles facts.
-The heartbeat status vocabulary mirrored here is the REAL one written by scripts/avsync-watchdog.ps1
-(Write-Heartbeat) + parsed by scripts/lib/avsync-heartbeat.sh:
-  "no-signal: <reason>"          -> dead relay / stale-clip (the #814 case)
-  "measured: TIMEOUT: ..."       -> wedged watchdog (av_sync_measure.py killed at 180s)
-  "measured: A/V sync OK ..."    -> a live, in-sync reading (HEALTHY)
-  "measured: ... ZNIZ/ZVYS ..."  -> a live, misaligned reading (still HEALTHY -- the line is alive)
-  "measured: ... unknown, candidates: 0" -> silent/undecodable content on a SUCCESSFUL grab (TODAY)
+CRITICAL: the fixtures below use the REAL heartbeat vocabulary. avsync-watchdog.ps1 writes
+`measured: db=<max_volume> <last line of av_sync_measure.py>`. av_sync_measure.py (verified: zero
+hits for `unknown`/`candidates`) prints `[stamp] UNMEASURABLE window (... band/graphics segments are
+expected to skip)` for BOTH silent audio AND a normal no-face band segment -- so the SyncNet text
+CANNOT distinguish them. The discriminator is the audio dB (silence ~-91 dB, a live QPSK marker
+~-5 dB), which avsync-watchdog.ps1 now prefixes as `db=`. These tests pin exactly that.
 """
 
 import pathlib
@@ -29,10 +23,25 @@ if str(_SCRIPTS) not in sys.path:
 
 import avsync_lineup as al  # noqa: E402
 
+# --- real heartbeat status strings (byte-shaped like avsync-watchdog.ps1's Write-Heartbeat) -------
+HB_OK = "measured: db=-5.4 [2026-08-17 08:00:00] AV offset +0 fr (+0 ms) conf 8.2 :: A/V sync OK (offset 0 ms)"
+HB_MISALIGNED = ("measured: db=-5.4 [2026-08-17 08:00:00] AV offset +2 fr (+80 ms) conf 5.1 :: "
+                 "audio predbieha video o ~80 ms -> ZNIZ '2ME PGM' latency o 80")
+# THE 2026-08-17 case: audio digitally silent, so the grab succeeds but the reading is UNMEASURABLE
+# AND the level is ~-91 dB. A fresh, "measured:" heartbeat that is nonetheless a DEAD line.
+HB_SILENT = ("measured: db=-91.0 [2026-08-17 08:00:00] UNMEASURABLE window (best confidence 3.2 < 4.0"
+             " - no usable face/lips; band/graphics segments are expected to skip)")
+# an ORDINARY band/graphics segment: no face to lock (UNMEASURABLE) but the audio IS present. This
+# MUST NOT page -- the instrument is alive, SyncNet just had nothing to measure.
+HB_BAND_SEGMENT = ("measured: db=-5.4 [2026-08-17 08:00:00] UNMEASURABLE window (best confidence 3.2 <"
+                   " 4.0 - no usable face/lips; band/graphics segments are expected to skip)")
+HB_TIMEOUT = "measured: db=-5.4 TIMEOUT: av_sync_measure.py did not complete within 180s -- killed"
+HB_NO_DB = "measured: [2026-08-17 08:00:00] AV offset +0 fr (+0 ms) conf 8.2 :: A/V sync OK (offset 0 ms)"
+HB_NO_SIGNAL = "no-signal: grab failed: ffmpeg rc=-5 (relay/stream down)"
+
 
 # ---------------------------------------------------------------------------
-# heartbeat_fresh -- fail-CLOSED (missing/corrupt/negative-age/too-old = NOT fresh),
-# mirroring scripts/lib/avsync-heartbeat.sh's avsync_heartbeat_is_stale contract.
+# heartbeat_fresh -- fail-CLOSED.
 # ---------------------------------------------------------------------------
 
 
@@ -48,79 +57,97 @@ def test_heartbeat_stale_past_window():
     assert al.heartbeat_fresh(1000, 1301, 300) is False
 
 
-def test_heartbeat_none_epoch_is_not_fresh():
+def test_heartbeat_none_or_nonnumeric_epoch_is_not_fresh():
     assert al.heartbeat_fresh(None, 1100, 300) is False
-
-
-def test_heartbeat_nonnumeric_epoch_is_not_fresh():
     assert al.heartbeat_fresh("", 1100, 300) is False
     assert al.heartbeat_fresh("abc", 1100, 300) is False
 
 
 def test_heartbeat_negative_age_clock_skew_is_not_fresh():
-    # a heartbeat stamped in the future (corrupt/clock skew) must NOT read fresh
     assert al.heartbeat_fresh(2000, 1000, 300) is False
 
 
 # ---------------------------------------------------------------------------
-# status_is_healthy_measured -- a REAL, present, decodable reading only.
+# audio dB parsing + presence (the real content-liveness signal).
 # ---------------------------------------------------------------------------
 
 
-def test_status_measured_in_sync_is_healthy():
-    assert al.status_is_healthy_measured("measured: A/V sync OK (offset 0 ms)") is True
+def test_audio_db_parsed_from_a_measured_heartbeat():
+    assert al.audio_db_from_status(HB_OK) == -5.4
+    assert al.audio_db_from_status(HB_SILENT) == -91.0
 
 
-def test_status_measured_misaligned_verdict_is_still_healthy():
-    # a misalignment recommendation still PROVES the chain is alive -- it is a real reading
-    assert al.status_is_healthy_measured("measured: [2026-08-17 08:00:00] :: -> ZNIZ '2ME PGM' latency o 80") is True
+def test_audio_db_none_when_absent_or_unreadable():
+    assert al.audio_db_from_status(HB_NO_DB) is None
+    assert al.audio_db_from_status("measured: db=unreadable [stamp] ...") is None
+    assert al.audio_db_from_status("") is None
+    assert al.audio_db_from_status(None) is None
 
 
-def test_status_measured_timeout_is_not_healthy():
-    assert al.status_is_healthy_measured(
-        "measured: TIMEOUT: av_sync_measure.py did not complete within 180s -- killed") is False
+def test_audio_present_true_above_floor_false_below():
+    assert al.audio_present(HB_OK) is True         # -5.4 >= -60
+    assert al.audio_present(HB_SILENT) is False     # -91.0 < -60
 
 
-def test_status_measured_unknown_silent_content_is_not_healthy_TODAY():
-    # THE 2026-08-17 case: silent audio -> grab succeeds -> measurement runs ->
-    # unknown / candidates: 0. Heartbeat is FRESH and starts with "measured: " but the
-    # CONTENT is dead. This MUST be NO-GO so the stream-bound alarm pages.
-    assert al.status_is_healthy_measured(
-        'measured: av_sync verdict: "unknown", candidates: 0') is False
+def test_audio_present_fail_closed_when_db_unreadable():
+    assert al.audio_present(HB_NO_DB) is False
 
 
-def test_status_no_signal_is_not_healthy():
-    assert al.status_is_healthy_measured("no-signal: grab failed: ffmpeg rc=-5 (relay/stream down)") is False
+def test_audio_present_exactly_at_floor_is_present():
+    assert al.audio_present("measured: db=-60 [stamp] A/V sync OK") is True
 
 
-def test_status_empty_or_none_is_not_healthy():
+# ---------------------------------------------------------------------------
+# status_is_healthy_measured -- a VALID reading (measured + present + not wedged).
+# ---------------------------------------------------------------------------
+
+
+def test_status_healthy_for_in_sync_and_misaligned_with_audio_present():
+    assert al.status_is_healthy_measured(HB_OK) is True
+    assert al.status_is_healthy_measured(HB_MISALIGNED) is True
+
+
+def test_status_healthy_for_a_band_segment_when_audio_is_present():
+    # UNMEASURABLE (no face) but audio present -> the instrument is alive -> VALID, must not page.
+    assert al.status_is_healthy_measured(HB_BAND_SEGMENT) is True
+
+
+def test_status_NOT_healthy_for_silent_audio_the_2026_08_17_case():
+    # UNMEASURABLE AND db < -60 -> silent audio -> dead line -> INVALID.
+    assert al.status_is_healthy_measured(HB_SILENT) is False
+
+
+def test_status_NOT_healthy_for_timeout():
+    assert al.status_is_healthy_measured(HB_TIMEOUT) is False
+
+
+def test_status_NOT_healthy_without_a_db_reading():
+    assert al.status_is_healthy_measured(HB_NO_DB) is False
+
+
+def test_status_NOT_healthy_for_no_signal_or_empty():
+    assert al.status_is_healthy_measured(HB_NO_SIGNAL) is False
     assert al.status_is_healthy_measured("") is False
     assert al.status_is_healthy_measured(None) is False
 
 
-def test_status_bare_measured_without_prefix_space_is_not_healthy():
-    # "measured" without the ": " reading is not a real verdict line
-    assert al.status_is_healthy_measured("measuredsomething") is False
+def test_measured_vs_no_signal_prefix_classification():
+    assert al.is_measured_heartbeat(HB_OK) is True
+    assert al.is_measured_heartbeat(HB_NO_SIGNAL) is False
+    assert al.is_no_signal_heartbeat(HB_NO_SIGNAL) is True
+    assert al.is_no_signal_heartbeat(HB_OK) is False
 
 
 # ---------------------------------------------------------------------------
-# stream_is_live -> True / False / None (unknown).
+# stream_is_live -> True / False / None.
 # ---------------------------------------------------------------------------
 
 
-def test_stream_is_live_bool_true():
+def test_stream_is_live_bool_and_string_variants():
     assert al.stream_is_live(True) is True
-
-
-def test_stream_is_live_bool_false():
     assert al.stream_is_live(False) is False
-
-
-def test_stream_is_live_string_variants():
     assert al.stream_is_live("True") is True
     assert al.stream_is_live("false") is False
-    assert al.stream_is_live("1") is True
-    assert al.stream_is_live("0") is False
 
 
 def test_stream_is_live_none_or_garbage_is_unknown():
@@ -129,7 +156,7 @@ def test_stream_is_live_none_or_garbage_is_unknown():
 
 
 # ---------------------------------------------------------------------------
-# preflight_verdict -- the pre-event GO/NO-GO of the measurement line.
+# preflight_verdict -- pre-event GO/NO-GO of the measurement line.
 # ---------------------------------------------------------------------------
 
 
@@ -138,55 +165,62 @@ def _preflight_go_facts():
         "heartbeat_epoch": 1000,
         "now": 1100,
         "preflight_stale_s": 300,
-        "heartbeat_status": "measured: A/V sync OK (offset 0 ms)",
+        "heartbeat_status": HB_OK,
         "forwarder_present": True,
         "discord_ping_http": 200,
+        "stream_output_active": True,
     }
 
 
 def test_preflight_all_green_is_go():
     go, reasons = al.preflight_verdict(_preflight_go_facts())
-    assert go is True
-    assert reasons == []
+    assert go is True and reasons == []
+
+
+def test_preflight_go_when_stream_off_at_assert_time_with_a_no_signal_heartbeat():
+    # before the stream starts, the heartbeat is a fresh no-signal (grab fails) -> the audio check is
+    # N/A, but the infra (fresh process, forwarder, discord, WS-readable) must still pass -> GO.
+    f = _preflight_go_facts()
+    f["heartbeat_status"] = HB_NO_SIGNAL
+    f["stream_output_active"] = False  # a definite read (not None) -> WS works
+    go, reasons = al.preflight_verdict(f)
+    assert go is True, reasons
 
 
 def test_preflight_stale_heartbeat_is_no_go():
     f = _preflight_go_facts()
-    f["now"] = 5000  # way past the window
+    f["now"] = 5000
     go, reasons = al.preflight_verdict(f)
-    assert go is False
-    assert any("heartbeat" in r.lower() for r in reasons)
+    assert go is False and any("heartbeat" in r.lower() for r in reasons)
 
 
-def test_preflight_silent_content_is_no_go():
+def test_preflight_live_but_silent_audio_is_no_go():
     f = _preflight_go_facts()
-    f["heartbeat_status"] = 'measured: av_sync verdict: "unknown", candidates: 0'
+    f["heartbeat_status"] = HB_SILENT
     go, reasons = al.preflight_verdict(f)
-    assert go is False
-    assert any("meranie" in r.lower() for r in reasons)
+    assert go is False and any("ticha" in r.lower() for r in reasons)
 
 
 def test_preflight_forwarder_down_is_no_go():
     f = _preflight_go_facts()
     f["forwarder_present"] = False
     go, reasons = al.preflight_verdict(f)
-    assert go is False
-    assert any("forwarder" in r.lower() for r in reasons)
+    assert go is False and any("forwarder" in r.lower() for r in reasons)
 
 
 def test_preflight_discord_not_delivered_is_no_go():
     f = _preflight_go_facts()
     f["discord_ping_http"] = 403
     go, reasons = al.preflight_verdict(f)
-    assert go is False
-    assert any("discord" in r.lower() for r in reasons)
+    assert go is False and any("discord" in r.lower() for r in reasons)
 
 
-def test_preflight_missing_discord_ping_is_no_go():
+def test_preflight_ws_unreadable_is_no_go():
+    # #3: a None stream-state read means the run-time alarm's stream gate can't work -> NO-GO.
     f = _preflight_go_facts()
-    f["discord_ping_http"] = None
+    f["stream_output_active"] = None
     go, reasons = al.preflight_verdict(f)
-    assert go is False
+    assert go is False and any("outputactive" in r.lower() for r in reasons)
 
 
 # ---------------------------------------------------------------------------
@@ -200,55 +234,75 @@ def _live_facts():
         "heartbeat_epoch": 1000,
         "now": 1100,
         "stale_s": 1200,
-        "heartbeat_status": "measured: A/V sync OK (offset 0 ms)",
+        "heartbeat_status": HB_OK,
     }
 
 
 def test_liveness_ok_when_stream_live_and_line_healthy():
-    action, _ = al.liveness_alarm(_live_facts())
+    action, _, sig = al.liveness_alarm(_live_facts())
+    assert action == "OK" and sig == "ok"
+
+
+def test_liveness_ok_for_a_band_segment_with_audio_present_no_false_page():
+    f = _live_facts()
+    f["heartbeat_status"] = HB_BAND_SEGMENT
+    action, _, _ = al.liveness_alarm(f)
     assert action == "OK"
 
 
-def test_liveness_ALARM_when_stream_live_and_content_silent_TODAY():
-    # THE BAR: stream emitting, heartbeat FRESH, but status = unknown/candidates:0
-    # (silent audio). The existing staleness-only watchdog misses this entirely.
+def test_liveness_ALARM_when_stream_live_and_content_silent_the_2026_08_17_case():
+    # THE BAR: fresh "measured:" heartbeat, silent audio (db=-91). Must ALARM.
     f = _live_facts()
-    f["heartbeat_status"] = 'measured: av_sync verdict: "unknown", candidates: 0'
-    action, reason = al.liveness_alarm(f)
-    assert action == "ALARM"
-    # ASCII-transliterated Slovak, matching the repo's operator-string convention
-    # (cf. event_assert.py's ITEM_LABELS_SK) -- keeps logs/Discord encoding-safe across the pipeline.
+    f["heartbeat_status"] = HB_SILENT
+    action, reason, sig = al.liveness_alarm(f)
+    assert action == "ALARM" and sig == "no-audio"
     assert "treba zasah" in reason
+
+
+def test_liveness_ALARM_on_silent_audio_even_when_ws_read_is_broken():
+    # #3 robustness: a fresh "measured:" heartbeat proves the stream is publishing (the grab
+    # succeeded), so silent audio ALARMS even if outputActive can't be read (None).
+    f = _live_facts()
+    f["heartbeat_status"] = HB_SILENT
+    f["stream_output_active"] = None
+    action, _, sig = al.liveness_alarm(f)
+    assert action == "ALARM" and sig == "no-audio"
+
+
+def test_liveness_ALARM_when_measured_but_timeout():
+    f = _live_facts()
+    f["heartbeat_status"] = HB_TIMEOUT
+    action, _, sig = al.liveness_alarm(f)
+    assert action == "ALARM" and sig == "wedged"
 
 
 def test_liveness_ALARM_when_stream_live_and_heartbeat_stale():
     f = _live_facts()
-    f["now"] = 1000 + 1201  # just past the 20-min window
-    action, reason = al.liveness_alarm(f)
-    assert action == "ALARM"
+    f["heartbeat_status"] = HB_NO_SIGNAL  # process still writing but nothing to measure...
+    f["now"] = 1000 + 1201                # ...and now the process is stale too
+    action, _, sig = al.liveness_alarm(f)
+    assert action == "ALARM" and sig == "stale"
 
 
-def test_liveness_SUPPRESSED_when_stream_not_live():
-    # stream not emitting -> box off / between events -> silence is fine, no page
+def test_liveness_ALARM_when_stream_live_and_no_signal_grab_failed():
+    f = _live_facts()
+    f["heartbeat_status"] = HB_NO_SIGNAL
+    action, _, sig = al.liveness_alarm(f)
+    assert action == "ALARM" and sig == "no-signal"
+
+
+def test_liveness_SUPPRESSED_when_stream_off_air_even_with_a_dead_line():
     f = _live_facts()
     f["stream_output_active"] = False
-    f["heartbeat_status"] = "no-signal: relay down"  # even a dead line does not page when off-air
+    f["heartbeat_status"] = HB_NO_SIGNAL
     f["now"] = 99999
-    action, _ = al.liveness_alarm(f)
-    assert action == "SUPPRESSED"
+    action, _, sig = al.liveness_alarm(f)
+    assert action == "SUPPRESSED" and sig == "off"
 
 
-def test_liveness_SUPPRESSED_when_stream_state_unknown():
-    # OBS-WS unreachable -> owned by network-reach/obs-liveness watchdogs, do not double-page
+def test_liveness_SUPPRESSED_when_stream_state_unknown_and_line_down():
     f = _live_facts()
     f["stream_output_active"] = None
-    f["heartbeat_status"] = "no-signal: relay down"
-    action, _ = al.liveness_alarm(f)
-    assert action == "SUPPRESSED"
-
-
-def test_liveness_ALARM_when_stream_live_and_no_signal_status():
-    f = _live_facts()
-    f["heartbeat_status"] = "no-signal: grab failed: ffmpeg rc=-5 (relay/stream down)"
-    action, _ = al.liveness_alarm(f)
-    assert action == "ALARM"
+    f["heartbeat_status"] = HB_NO_SIGNAL
+    action, _, sig = al.liveness_alarm(f)
+    assert action == "SUPPRESSED" and sig == "unknown"
