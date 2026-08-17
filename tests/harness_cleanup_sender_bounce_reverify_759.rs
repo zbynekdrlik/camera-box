@@ -27,7 +27,9 @@ fn recording_e2e() -> String {
 /// substring that matches a prose comment ~1000 lines earlier, per the #758 fix in
 /// harness_recording_e2e_cleanup_resilient.rs) to the `\ntrap ` that installs it.
 fn cleanup_body(s: &str) -> &str {
-    let start = s.find("cleanup() {").expect("recording-e2e.sh must define cleanup() {");
+    let start = s
+        .find("cleanup() {")
+        .expect("recording-e2e.sh must define cleanup() {");
     let end = s[start..]
         .find("\ntrap ")
         .map(|i| start + i)
@@ -77,7 +79,10 @@ fn cleanup_mv_reverify_wrapper_is_defined_before_the_trap() {
     let trap = s
         .find("\ntrap cleanup EXIT")
         .expect("#759: the cleanup trap must be armed");
-    assert!(def < trap, "#759: the cleanup reverify wrapper must be defined before the trap");
+    assert!(
+        def < trap,
+        "#759: the cleanup reverify wrapper must be defined before the trap"
+    );
 }
 
 /// `cleanup()` must CALL the wrapper, and only AFTER the device-restore phase's shared

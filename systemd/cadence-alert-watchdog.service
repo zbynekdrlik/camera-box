@@ -1,0 +1,17 @@
+[Unit]
+# NON-60 SOURCE-CADENCE alert (#794), DEV1-SIDE. ONE measure -> decide -> alert pass. A camera set
+# to 50 fps feeding the 60 fps chain delivers a clean 60 to every fps counter (a duplication-masked
+# upconvert) OR advances the receiver's genlock-fifo `received=` counter at only 50/s (a genuine
+# non-60 delivery). This watchdog reads strih's OBS-log `received=` counters + their OWN timestamps
+# from dev1 and pages when a camera's delivered cadence sits sustained away from 60 fps. SAME
+# dev1-side topology as frozen-input-alert-watchdog.service (#1052) /
+# network-reach-alert-watchdog.service (#1001) / bundle-state-alert-watchdog.service (#732).
+Description=camera-box non-60 source-cadence alert (#794) — one measure/decide/alert pass
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Service]
+Type=oneshot
+# %h = the installing user's home on dev1. Adjust if the checkout lives elsewhere.
+ExecStart=%h/devel/camera-box/scripts/cadence-alert-watchdog.sh
+# One ssh OBS-log tail to the (reachable) strih box + a local state read; generous but never a hang.
+TimeoutStartSec=90
