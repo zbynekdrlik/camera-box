@@ -83,7 +83,10 @@ fn read_cmd_linux_tails_the_newest_obs_log() {
         out.contains(".config/obs-studio/logs/*.txt"),
         "linux read must target the OBS log dir: {out}"
     );
-    assert!(out.contains("ls -t"), "linux read must pick the NEWEST log: {out}");
+    assert!(
+        out.contains("ls -t"),
+        "linux read must pick the NEWEST log: {out}"
+    );
     assert!(
         out.contains("tail -n 500"),
         "linux read must honour the passed tail count: {out}"
@@ -124,7 +127,10 @@ fn read_cmd_unknown_os_fails() {
     // never silently emitting an empty command that would read as "no audit line".
     let (rc, out, err) = run_lib("mv_fps_preflight_read_cmd macos 100 || echo REJECTED", &[]);
     assert_eq!(rc, 0, "harness itself must run: {err}");
-    assert!(out.contains("REJECTED"), "unknown os must fail (non-zero): {out}");
+    assert!(
+        out.contains("REJECTED"),
+        "unknown os must fail (non-zero): {out}"
+    );
 }
 
 // -------------------------------------------------------------------------------------------
@@ -244,7 +250,10 @@ fn run_assert(probe_out: &str, gate_exits: &str) -> (i32, String, String) {
 fn pass_proceeds() {
     // Gate exit 0 (above floor) -> ok, the run proceeds.
     let (rc, out, err) = run_assert(AUDIT_LINE, "0");
-    assert_eq!(rc, 0, "a PASS box must not abort:\nstdout={out}\nstderr={err}");
+    assert_eq!(
+        rc, 0,
+        "a PASS box must not abort:\nstdout={out}\nstderr={err}"
+    );
     assert!(out.contains("PROCEEDED"), "PASS must proceed:\n{out}");
     assert!(out.contains("ok:"), "PASS must log ok:\n{out}");
 }
@@ -253,7 +262,10 @@ fn pass_proceeds() {
 fn unknown_no_audit_line_proceeds() {
     // No audit line read (box down / pre-issue-771 build / ssh failed) -> UNKNOWN -> NOTE, proceed.
     let (rc, out, err) = run_assert("", "0");
-    assert_eq!(rc, 0, "an unreadable box must NOT abort a CI gate:\nstderr={err}");
+    assert_eq!(
+        rc, 0,
+        "an unreadable box must NOT abort a CI gate:\nstderr={err}"
+    );
     assert!(out.contains("PROCEEDED"), "UNKNOWN must proceed:\n{out}");
     assert!(
         err.contains("no multiview-audit line"),
@@ -266,8 +278,14 @@ fn unknown_unclassifiable_gate_proceeds() {
     // Audit lines present but the gate cannot classify (exit 2) -> UNKNOWN -> NOTE, proceed
     // (a missing/broken gate binary must never false-abort the whole E2E).
     let (rc, out, err) = run_assert(AUDIT_LINE, "2");
-    assert_eq!(rc, 0, "an unclassifiable gate must NOT abort:\nstderr={err}");
-    assert!(out.contains("PROCEEDED"), "UNKNOWN(gate) must proceed:\n{out}");
+    assert_eq!(
+        rc, 0,
+        "an unclassifiable gate must NOT abort:\nstderr={err}"
+    );
+    assert!(
+        out.contains("PROCEEDED"),
+        "UNKNOWN(gate) must proceed:\n{out}"
+    );
     assert!(
         err.contains("could not classify"),
         "UNKNOWN(gate) must name the classify failure:\n{err}"
@@ -283,7 +301,10 @@ fn a_single_transient_below_recovers_on_grace_reread_and_proceeds() {
         rc, 0,
         "a transient below-floor read that recovers must NOT abort:\nstdout={out}\nstderr={err}"
     );
-    assert!(out.contains("PROCEEDED"), "a recovered transient must proceed:\n{out}");
+    assert!(
+        out.contains("PROCEEDED"),
+        "a recovered transient must proceed:\n{out}"
+    );
     assert!(
         err.contains("grace re-read") && err.contains("recovered"),
         "the transient path must log the grace re-read + recovery:\n{err}"
@@ -295,7 +316,10 @@ fn a_sustained_below_floor_collapse_aborts_the_run() {
     // Below floor on BOTH the first read and the grace re-read (a real sustained collapse) -> exit 1,
     // loud ERROR, the run does NOT start.
     let (rc, out, err) = run_assert(AUDIT_LINE, "1 1");
-    assert_eq!(rc, 1, "a CONFIRMED collapse must abort (exit 1):\nstdout={out}\nstderr={err}");
+    assert_eq!(
+        rc, 1,
+        "a CONFIRMED collapse must abort (exit 1):\nstdout={out}\nstderr={err}"
+    );
     assert!(
         !out.contains("PROCEEDED"),
         "the run must NOT proceed past a confirmed collapse:\n{out}"
