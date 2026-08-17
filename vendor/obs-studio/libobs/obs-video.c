@@ -1279,6 +1279,11 @@ static inline bool stop_requested(void)
 	return success;
 }
 
+/* camera-box #1029: emit the PROGRAM-render observability line (program-render-audit:) on this
+ * cadence. Matches MULTIVIEW_AUDIT_WINDOW_NS (obs-display-budget.h) so the program-render line and
+ * the per-projector multiview-audit line share one ~5s window in the log. */
+#define PROGRAM_RENDER_AUDIT_WINDOW_NS 5000000000ULL
+
 bool obs_graphics_thread_loop(struct obs_graphics_context *context)
 {
 	uint64_t frame_start = os_gettime_ns();
@@ -1351,6 +1356,43 @@ bool obs_graphics_thread_loop(struct obs_graphics_context *context)
 		context->fps_total_frames = 0;
 	}
 
+	/* camera-box #1029: PROGRAM-render observability. The multiview-audit line (obs-display.c)
+	 * covers ONLY the throttleable monitoring surfaces (render_display, divisor>1); the PROGRAM
+	 * output that feeds the imag HDMI fullscreen projector renders EVERY tick (divisor<=1) and
+	 * had NO durable render-cadence signal in the log — only the transient WS GetStats
+	 * renderSkipped, whose activeFps gauge LIES during a stall (returns the configured canvas fps
+	 * even when the render loop is frozen, #935). Emit render_fps (the HONEST rate from the real
+	 * total_frames delta, NOT activeFps), avg_frame_ms, and the lagged (renderSkipped) delta over
+	 * a ~5s window so a burn-square forward JUMP (#1029) is attributable to the render path
+	 * (lagged>0) vs a clean-render FIFO/scanout origin, durably and offline. Report-only: no
+	 * threshold, no gate (the gate is #798). */
+	{
+		const uint64_t prg_audit_now = os_gettime_ns();
+		if (context->program_render_audit_window_start_ns == 0) {
+			context->program_render_audit_window_start_ns = prg_audit_now;
+			context->program_render_audit_total_at_start = obs->video.total_frames;
+			context->program_render_audit_lagged_at_start = obs->video.lagged_frames;
+		}
+		const uint64_t prg_audit_elapsed = prg_audit_now - context->program_render_audit_window_start_ns;
+		if (prg_audit_elapsed >= PROGRAM_RENDER_AUDIT_WINDOW_NS) {
+			const uint32_t total_delta =
+				obs->video.total_frames - context->program_render_audit_total_at_start;
+			const uint32_t lagged_delta =
+				obs->video.lagged_frames - context->program_render_audit_lagged_at_start;
+			const double win_s = (double)prg_audit_elapsed / 1000000000.0;
+			const double render_fps = (win_s > 0.0) ? (double)total_delta / win_s : 0.0;
+			const double target_fps =
+				(context->interval != 0) ? 1000000000.0 / (double)context->interval : 0.0;
+			const double avg_frame_ms = (double)obs->video.video_avg_frame_time_ns / 1000000.0;
+			blog(LOG_INFO,
+			     "program-render-audit: render_fps=%.1f target_fps=%.1f avg_frame_ms=%.2f lagged=%u total=%u",
+			     render_fps, target_fps, avg_frame_ms, lagged_delta, total_delta);
+			context->program_render_audit_window_start_ns = prg_audit_now;
+			context->program_render_audit_total_at_start = obs->video.total_frames;
+			context->program_render_audit_lagged_at_start = obs->video.lagged_frames;
+		}
+	}
+
 	return !stop_requested();
 }
 
@@ -1388,6 +1430,10 @@ void *obs_graphics_thread(void *param)
 	context.fps_total_frames = 0;
 	context.last_time = 0;
 	context.video_thread_name = video_thread_name;
+	/* camera-box #1029: window-start==0 seeds the program-render audit on the first loop. */
+	context.program_render_audit_window_start_ns = 0;
+	context.program_render_audit_total_at_start = 0;
+	context.program_render_audit_lagged_at_start = 0;
 
 #ifdef __APPLE__
 	while (obs_graphics_thread_loop_autorelease(&context))
