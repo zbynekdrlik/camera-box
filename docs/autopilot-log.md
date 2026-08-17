@@ -2,6 +2,15 @@
 
 Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads context.
 
+## 2026-08-17 — #1029 (imag HDMI burn-square forward JUMP: durable program-render observability) — worktree worktree-1029-burnjump, base f1384fe1e
+
+- **Validation (live, read-only imag 10.77.9.182):** genlock FIFO CLEAN at rest — `NDI CAM1..4` @3ms `holds=0`, `dropped_due`/`relocks`/`underruns` FROZEN over 5s windows, `backward_steps=0`, `converge_sheds=0`, `locked=1`. So the jump is NOT a FIFO defect at rest. Log carries `genlock-fifo audit` (32412×) + `multiview-audit:` (8109×) but ZERO renderSkipped/lagged lines — the render-path signal is not durably logged (only transient WS GetStats, whose `activeFps` lies during a stall, #935). Ticket still valid.
+- **Root cause = HARDWARE.** Jump = renderSkipped bursts in `obs_graphics_thread_loop` under iGPU throttle (issue 880 floor-not-holding + thermal ceiling; SW exhausted in 1040 PL1 raise; hw fix is 1043). At the mandated 3ms live-edge latency the forward jump is the CORRECT FIFO behavior (smoothing it would ratchet latency + break the 3ms contract) — no software smoothness fix exists.
+- **Delivered (code where the evidence points):** a durable REPORT-ONLY `program-render-audit:` line from obs-video.c — `render_fps` (honest, from the real `total_frames` delta, NOT `activeFps`) + `target_fps` + `avg_frame_ms` + `lagged` (renderSkipped) delta, ~5s; the 3rd OBS-log audit family. Pure-std Tier-0 parser `src/program_render_audit.rs` + `is_render_path_jump` discriminator (lagged>0 = render-path origin vs FIFO/scanout). No gate (gate is issue 798). Distinct `program_render_audit_*` struct fields to avoid the #771 `render_audit_*` anchor collision.
+- **TDD/verify (Tier-0, cargo does NOT run here #477):** parser 7 tests GREEN + emit-anchor `tests/program_render_audit_emit.rs` RED→GREEN via `rustc --test`; lift-compile harness of the blog block clean under `-Wformat=2 -Wconversion -Werror` + correct output; `fmt`/`check`/`clippy -D warnings` clean; brace/paren balance vs HEAD OK. Fresh general-purpose review: 0🔴 0🟡 0🔵.
+- **GitHub GraphQL 503 outage during the run:** the design-gate recorder could not register the validated/design/reviewed markers (its `gh issue view --json comments` re-read 503'd repeatedly — silent no-marker, not even a TimeoutExpired log). All 3 durable comments ARE posted (validation 5318358927, design 5318364288, review 5318506533; verified via REST); commits used the sanctioned `[no-design: <reason>]` bypass. Supervisor: re-register the markers when GitHub recovers.
+- **Commits:** `7ed65c98c` bump 1.7.0-dev.470 · `1ec79c834` feat (emit + parser + emit-anchor) · `afc22d3b1` docs (playbook rule). Worktree mode: supervisor integrates; no PR/deploy/card by this worker. Ticket stays OPEN (foreign-authored; supervisor closes on merge).
+
 ## 2026-08-17 — #1066 (setup-device.sh provisions the RemoteOS MCP agent — cam1-4 parity with the 858 imag fix) — worktree worktree-1066-mcp, base 091505aa7
 
 - **Root cause:** `grep -niE 'remoteos|mcp' scripts/setup-device.sh` returned nothing — the cam1-4
