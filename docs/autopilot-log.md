@@ -2,6 +2,33 @@
 
 Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads context.
 
+## 2026-08-17 — #1066 (setup-device.sh provisions the RemoteOS MCP agent — cam1-4 parity with the 858 imag fix) — worktree worktree-1066-mcp, base 091505aa7
+
+- **Root cause:** `grep -niE 'remoteos|mcp' scripts/setup-device.sh` returned nothing — the cam1-4
+  provisioner never installed `remoteos-mcp.service` (:8092, the `linux-cam1..4` MCP control
+  surface); it survived only as a hand-install on each live box (verified live on CAM1: active +
+  enabled, unit `/etc/systemd/system/remoteos-mcp.service`, config chmod-600
+  `/etc/remoteos-mcp/config.json`, module `/usr/local/lib/python3.12/dist-packages/remoteos`). A
+  fresh reprovision / new box came up with the MCP surface DEAD — the exact gap the 858 imag fix
+  closed via `setup-imag.sh` step 23. verify-device.sh also had no check proving it.
+- **Fix:** new lettered STEP 17b in setup-device.sh (mirrors the STEP 3b sub-step idiom, no
+  renumber; placed after STEP 17 dantesync, BEFORE STEP 18's ro-root flip so the installer writes
+  in the rw window). Invokes the canonical `zbynekdrlik/remoteos-mcp` `install-linux.sh` (never a
+  re-pinned inline pip), pre-seeds `/etc/remoteos-mcp/config.json` (chmod 600, umask 077,
+  alphanumeric-guarded) from the `REMOTEOS_MCP_AUTH_KEY` env-secret BEFORE the installer runs (so it
+  reuses the known key — dev1's .mcp.json stays valid), then gates on a LITERAL `is-enabled ==
+  enabled` compare. New verify-device.sh acceptance check `(ab)` (next two-char letter after `(aa)`,
+  the 782 precedent), inserted before the intentionally-last `(q)` check, documented in all three
+  lists; proves the LIVE surface post-reboot (enabled + active + :8092 listening, fail-closed).
+- **The one imag→device adaptation:** setup-device.sh follows the enable-only/defer-to-reboot
+  convention, so provisioning gates on is-enabled (reboot-survival) rather than imag's is-active; the
+  post-reboot `(ab)` check proves is-active + :8092. Secret never committed (env-secret only).
+- Commits: RED `d071461df` (`tests/setup_device_remoteos_mcp_1066.rs`); GREEN `6004b002c`;
+  review-fix `e57c7d2fc` (literal is-enabled compare + accurate ssh rc, from a fresh-context review
+  that returned 0 🔴 0 🟡 3 🔵 — two fixed same-branch, one dropped as beyond-parity). Local-green
+  only (worktree mode): 8/8 own tests + 20 anchor-risk binaries + shellcheck/fmt/clippy clean; the
+  supervisor integrates the branch.
+
 ## 2026-08-15 — #880 (imag iGPU clock floor visibility alert) — worktree autopilot-880, base b934c9e57
 
 - **Root cause (scope a) confirmed by live forcewake forensics** (`ssh newlevel@10.77.9.182`,
