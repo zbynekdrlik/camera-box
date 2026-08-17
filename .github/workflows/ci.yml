@@ -388,8 +388,8 @@ jobs:
             --bin recording-verdict --bin frame-probe --bin camera-box
           cp target/release/camera-box target/release/camera-box-probe
 
-      - name: Build default-feature gate bins (frozen-camera-gate #365, render-budget-gate #405, obs-watchdog-gate #391, av-restart-sync-gate #137, zero-loss-restart-gate #109, phase-sync-gate #438)
-        run: cargo build --release --bin frozen-camera-gate --bin render-budget-gate --bin obs-watchdog-gate --bin av-restart-sync-gate --bin zero-loss-restart-gate --bin phase-sync-gate
+      - name: Build default-feature gate bins (frozen-camera-gate #365, render-budget-gate #405, obs-watchdog-gate #391, av-restart-sync-gate #137, zero-loss-restart-gate #109, phase-sync-gate #438, mv-fps-gate #771)
+        run: cargo build --release --bin frozen-camera-gate --bin render-budget-gate --bin obs-watchdog-gate --bin av-restart-sync-gate --bin zero-loss-restart-gate --bin phase-sync-gate --bin mv-fps-gate
 
       - name: Upload probe tools
         uses: actions/upload-artifact@v4
@@ -405,6 +405,7 @@ jobs:
             target/release/av-restart-sync-gate
             target/release/zero-loss-restart-gate
             target/release/phase-sync-gate
+            target/release/mv-fps-gate
 
   windows-probe:
     name: Windows probe build (recording-verdict.exe + obs-watchdog-gate.exe + obs-self-heal-gate.exe)

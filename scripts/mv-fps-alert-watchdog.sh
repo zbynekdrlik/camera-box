@@ -248,22 +248,30 @@ handle_box() {
     return 0
   fi
 
-  # -- UNKNOWN: reset the confirm streak; a READABLE-but-blind box (raw present, no audit) counts
-  # toward the tap-blind WARN. A failed read (raw empty) is a box-down condition #1001/#882 own.
+  # -- UNKNOWN: reset the confirm streak; a READABLE box that STAYS unknown counts toward the
+  # tap-blind WARN -- either no `multiview-audit:` line (a pre-#771 OBS build / the audit stopped) OR
+  # audit lines present but the gate could not classify them (exit != 0/1 -- a missing/broken
+  # `mv-fps-gate` binary → 127, which UNKNOWN would otherwise swallow SILENTLY forever). A failed
+  # read (raw empty, box down) is #1001/#882's job -> never counted here.
   if [ "$verdict" = "UNKNOWN" ]; then
     write_state_field "confirm_${k}" 0
-    if [ -n "$raw" ] && [ -z "$mv_lines" ]; then
-      local unk tap_alerted
+    if [ -n "$raw" ]; then
+      local unk tap_alerted reason
       unk="$(read_state_field "unknown_${k}" 0)"; case "$unk" in '' | *[!0-9]*) unk=0 ;; esac
       unk=$((unk + 1)); write_state_field "unknown_${k}" "$unk"
+      if [ -z "$mv_lines" ]; then
+        reason="no \`multiview-audit:\` line (a pre-#771 OBS build, or the audit stopped)"
+      else
+        reason="\`mv-fps-gate\` could not classify the audit lines -- a missing/broken gate binary at MV_FPS_GATE_BIN?"
+      fi
       tap_alerted="$(read_state_field "tap_blind_${k}" 0)"
       if [ "$unk" -ge "$TAP_BLIND_THRESHOLD" ] && [ "$tap_alerted" != "1" ]; then
         if [ "$DRY_RUN" -eq 1 ]; then
-          log "[dry-run] WOULD alert: $name MV-fps tap BLIND (no multiview-audit line for $unk passes)"
+          log "[dry-run] WOULD alert: $name MV-fps tap BLIND for $unk passes ($reason)"
         else
           log "ALERT: firing Discord notification for $name MV-fps tap blind"
           python3 "$NOTIFY" notify --body \
-            "⚠️ #1083 mv-fps: no \`multiview-audit:\` line on **$name** for $unk consecutive passes ($REPO_SLUG) -- OBS is up but the MV-fps tap is BLIND (a pre-#771 OBS build, or the audit stopped). MV-fps coverage for $name is OFF until fixed." \
+            "⚠️ #1083 mv-fps: **$name** MV-fps tap is BLIND for $unk consecutive passes ($REPO_SLUG) -- OBS is up but $reason. MV-fps coverage for $name is OFF until fixed." \
             >/dev/null 2>&1 || log "tap-blind: airuleset.py notify failed (non-fatal)"
         fi
         write_state_field "tap_blind_${k}" 1
@@ -322,14 +330,18 @@ main() {
   # Fail-loud preflight (log only -- an install problem the supervisor fixes at enable-time, never a
   # Discord page): the gate binary must be runnable on the real path.
   if [ -z "$MV_FPS_PROBE_CMD" ] && [ ! -x "$MV_FPS_GATE_BIN" ]; then
-    log "ERROR: mv-fps-gate binary not executable at '$MV_FPS_GATE_BIN' -- build it (cargo build --release --bin mv-fps-gate) or set MV_FPS_GATE_BIN; every box will read UNKNOWN until then"
+    log "ERROR: mv-fps-gate binary not executable at '$MV_FPS_GATE_BIN' -- point MV_FPS_GATE_BIN at the probe-tools-linux-amd64 CI artifact's mv-fps-gate (#771); every box will read UNKNOWN until then"
   fi
 
+  # `set -f` disables globbing so a `*`/`?`/`[` in a box spec never pathname-expands during the split
+  # (glob-safety parity with frozen-input-alert-watchdog). Box names/ips/os have none today, defensive.
   local spec name rest ip os
+  set -f
   for spec in $MV_FPS_BOXES; do
     name="${spec%%|*}"; rest="${spec#*|}"; ip="${rest%%|*}"; os="${rest##*|}"
     [ -n "$name" ] && [ -n "$ip" ] && [ -n "$os" ] && handle_box "$name" "$ip" "$os"
   done
+  set +f
   log "pass end"
 }
 

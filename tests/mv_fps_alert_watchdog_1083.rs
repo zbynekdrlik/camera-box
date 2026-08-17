@@ -391,3 +391,131 @@ fn an_unreadable_box_is_unknown_and_never_pages() {
         );
     }
 }
+
+#[test]
+fn a_box_1001_marks_unreachable_is_skipped_never_double_paged() {
+    // #1001 has the box CONFIRMED unreachable -> reachability owns the page. Even a below-floor
+    // probe + gate exit 1 must NOT page here (the box is skipped, not probed).
+    let dir = temp_dir("nodouble");
+    let gate = write_fake_gate(&dir);
+    let probe = write_fake_probe(&dir);
+    let state = dir.join("state").to_string_lossy().into_owned();
+    let gate_s = gate.to_string_lossy().into_owned();
+    let probe_s = probe.to_string_lossy().into_owned();
+    // #1001's own state file marks imag CONFIRMED unreachable.
+    let netreach = dir.join("netreach.state");
+    std::fs::write(&netreach, "alerted_imag=1\n").unwrap();
+    let netreach_s = netreach.to_string_lossy().into_owned();
+
+    let mut env = base_env(&state, &gate_s, &probe_s);
+    // Override the netreach path away from the base_env's /nonexistent default.
+    env.retain(|(k, _)| *k != "MV_FPS_NETREACH_STATE_FILE");
+    env.push(("MV_FPS_NETREACH_STATE_FILE", &netreach_s));
+    env.push(("FAKE_GATE_EXIT", "1")); // below floor — would page if it were probed
+    env.push((
+        "FAKE_GATE_OUT",
+        "FAIL monitor=1 rendered_fps=9.0 < floor=13.0",
+    ));
+    env.push(("FAKE_PROBE_OUT", "MVFPS_LOGID:log-1\n00: multiview-audit: monitor=1 divisor=1 rendered_fps=9.0 target=30 floor=13.0 cx=3840 cy=2160"));
+
+    for _ in 0..3 {
+        let (rc, _o, e) = run_watchdog(&["--dry-run"], &env, "main");
+        assert_eq!(rc, 0, "skip pass failed: {e}");
+        assert!(
+            !e.contains("WOULD alert"),
+            "a #1001-down box must never MV-fps page:\n{e}"
+        );
+        assert!(
+            e.contains("SKIP MV-fps"),
+            "the box must be explicitly skipped:\n{e}"
+        );
+    }
+}
+
+#[test]
+fn a_recovered_box_we_paged_for_sends_one_recovery_ping() {
+    // Pre-seed state as if we had already paged for this box (alerted latch set). A healthy PASS
+    // pass then fires exactly one recovery, and clears the latch.
+    let dir = temp_dir("recovery");
+    let gate = write_fake_gate(&dir);
+    let probe = write_fake_probe(&dir);
+    let state = dir.join("state").to_string_lossy().into_owned();
+    std::fs::write(&state, "alerted_imag=1\n").unwrap();
+    let gate_s = gate.to_string_lossy().into_owned();
+    let probe_s = probe.to_string_lossy().into_owned();
+
+    let mut env = base_env(&state, &gate_s, &probe_s);
+    env.push(("FAKE_GATE_EXIT", "0")); // healthy -> PASS
+    env.push(("FAKE_PROBE_OUT", "MVFPS_LOGID:log-1\n00: multiview-audit: monitor=1 divisor=1 rendered_fps=30.0 target=30 floor=13.0 cx=3840 cy=2160"));
+
+    // Pass 1: recovered -> WOULD send recovery.
+    let (_r1, _o1, e1) = run_watchdog(&["--dry-run"], &env, "main");
+    assert!(
+        e1.contains("WOULD send recovery"),
+        "a paged box returning healthy must recover:\n{e1}"
+    );
+    // Pass 2: latch cleared -> no second recovery ping.
+    let (_r2, _o2, e2) = run_watchdog(&["--dry-run"], &env, "main");
+    assert!(
+        !e2.contains("WOULD send recovery"),
+        "the recovery ping must fire only once:\n{e2}"
+    );
+}
+
+#[test]
+fn a_readable_box_with_no_audit_line_warns_tap_blind_after_the_threshold() {
+    // OBS log present but NO multiview-audit line (a pre-#771 OBS build / the audit stopped) ->
+    // UNKNOWN. Silent forever is banned: after TAP_BLIND_THRESHOLD passes, ONE "tap BLIND" WARN.
+    let dir = temp_dir("tapblind");
+    let gate = write_fake_gate(&dir);
+    let probe = write_fake_probe(&dir);
+    let state = dir.join("state").to_string_lossy().into_owned();
+    let gate_s = gate.to_string_lossy().into_owned();
+    let probe_s = probe.to_string_lossy().into_owned();
+
+    let mut env = base_env(&state, &gate_s, &probe_s);
+    env.push(("MV_FPS_ALERT_TAP_BLIND_THRESHOLD", "2"));
+    // Readable (non-empty) but carries NO `multiview-audit:` line.
+    env.push((
+        "FAKE_PROBE_OUT",
+        "MVFPS_LOGID:log-1\n00:00:00.000: some other obs log line, no marker",
+    ));
+
+    let (_r1, _o1, e1) = run_watchdog(&["--dry-run"], &env, "main");
+    assert!(!e1.contains("tap BLIND"), "pass1 must not WARN yet:\n{e1}");
+    let (_r2, _o2, e2) = run_watchdog(&["--dry-run"], &env, "main");
+    assert!(
+        e2.contains("tap BLIND"),
+        "pass2 must WARN tap blind after the threshold:\n{e2}"
+    );
+}
+
+#[test]
+fn a_readable_box_whose_gate_cannot_classify_warns_tap_blind() {
+    // Audit lines PRESENT but the gate returns exit 2 (or 127 for a missing binary) -> UNKNOWN. This
+    // must ALSO count toward the tap-blind WARN (the silent-unknown a naive empty-audit-only check
+    // would swallow forever), with the "could not classify" reason.
+    let dir = temp_dir("gateblind");
+    let gate = write_fake_gate(&dir);
+    let probe = write_fake_probe(&dir);
+    let state = dir.join("state").to_string_lossy().into_owned();
+    let gate_s = gate.to_string_lossy().into_owned();
+    let probe_s = probe.to_string_lossy().into_owned();
+
+    let mut env = base_env(&state, &gate_s, &probe_s);
+    env.push(("MV_FPS_ALERT_TAP_BLIND_THRESHOLD", "2"));
+    env.push(("FAKE_GATE_EXIT", "2")); // gate could not classify
+    env.push(("FAKE_PROBE_OUT", "MVFPS_LOGID:log-1\n00: multiview-audit: monitor=1 divisor=1 rendered_fps=30.0 target=30 floor=13.0 cx=3840 cy=2160"));
+
+    let (_r1, _o1, e1) = run_watchdog(&["--dry-run"], &env, "main");
+    assert!(!e1.contains("tap BLIND"), "pass1 must not WARN yet:\n{e1}");
+    let (_r2, _o2, e2) = run_watchdog(&["--dry-run"], &env, "main");
+    assert!(
+        e2.contains("tap BLIND"),
+        "a persistently-unclassifiable gate must WARN tap blind:\n{e2}"
+    );
+    assert!(
+        e2.contains("could not classify"),
+        "the WARN reason must name the gate-classify failure:\n{e2}"
+    );
+}

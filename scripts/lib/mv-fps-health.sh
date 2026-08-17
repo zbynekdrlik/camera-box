@@ -76,7 +76,11 @@ mv_fps_recovery_decision() {
 #   the body is never empty.
 mv_fps_alert_detail() {
   local box="${1:-?}" gate_output="${2:-}" fails
-  fails="$(printf '%s\n' "$gate_output" | grep '^FAIL ' | sed 's/^FAIL //' | paste -sd'; ' -)"
+  # Join every `FAIL …` line with a literal "; " separator. NOT `paste -sd'; '` -- paste's -d takes
+  # a CYCLED delimiter LIST, so '; ' would alternate ';' and ' ' between fields, not separate with
+  # "; ". awk emits the separator only BETWEEN records.
+  fails="$(printf '%s\n' "$gate_output" | grep '^FAIL ' | sed 's/^FAIL //' \
+    | awk 'NR>1{printf "; "} {printf "%s", $0} END{if (NR>0) printf "\n"}')"
   if [ -n "$fails" ]; then
     printf '%s MV render collapsed -- %s\n' "$box" "$fails"
   else
