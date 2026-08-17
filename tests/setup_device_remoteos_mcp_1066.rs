@@ -176,7 +176,8 @@ fn verify_device_has_remoteos_mcp_check_ab_1066() {
         "{VERIFY}: the (ab) check must prove the :8092 MCP surface is listening (#1066)"
     );
     assert!(
-        body.contains("is-enabled remoteos-mcp") || body.contains("is-enabled --quiet remoteos-mcp"),
+        body.contains("is-enabled remoteos-mcp")
+            || body.contains("is-enabled --quiet remoteos-mcp"),
         "{VERIFY}: the (ab) check must assert the unit is enabled (reboot-survival) (#1066)"
     );
     assert!(
