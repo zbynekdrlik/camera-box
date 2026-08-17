@@ -8999,3 +8999,27 @@ No push/PR/rig touch (worktree worker).
 - Commits: `c348b7227` bump 1.7.0-dev.467 · `f5d310156` RED · `ed601302d` GREEN · `dd6812c8e` shellcheck/diagnostics · `20d4922c4` review symmetry fix.
 - Supervisor deploy note: no NEW target deploy beyond re-fetching `scripts/imag-obs-alert-watchdog.sh` + `scripts/lib/imag-obs-reachability.sh` on dev1 (where the already-enabled timer runs). Operators can `touch /tmp/imag-watchdog-pause` on imag-nb to pause alerts for 60 min.
 - Fleet note: ran in an isolated `git worktree`; targeted-tests only; target/ purged for disk mid-round by the supervisor (rebuilt lean). No cross-worker interleaving on dev (isolation).
+
+## 2026-08-17 — #1093 E2E preflight painter-order proof + receiver-wedge escalation (worktree worker)
+- Scope = the two OPEN items after the budget recalibration (4b5c2baf6, already on dev): (a) prove
+  cam2-painter is PAINTING before the cam1 pixel probe (ordering, not a longer blind window); (b) on
+  reverify budget-exhaust, distinguish a dead SOURCE from the issue-1096 strih receiver WEDGE via the
+  `received=` delta and, only for the wedge, restart strih OBS once + re-check once.
+- Design: all logic in NEW `scripts/lib/mv-reverify-escalate.sh` (#675 pattern); recording-e2e.sh
+  gained only a source line, one painter-up wait (before cam1 ONLY — the ALL_CAMBOX loop runs while
+  the painter is deliberately stopped), two call-site swaps (`preflight_mv_reverify` →
+  `mv_reverify_or_escalate`), and a `--warm-settle` env seam. Headless strih-OBS restart = kill+
+  sentinel over ssh + NL_STARTUP.ahk respawn (NO ssh GUI launch; AHK-presence guard so a missing
+  respawner never leaves strih down). Reuses the painting signal (cam2-painter-restore-verify.sh),
+  the `received=` reader (frozen-input-alert-watchdog.sh) + `frozen_input_classify` discipline, the
+  launch-obs-genlock.sh --force kill/sentinel semantics.
+- Fable adversarial review (gate OPEN): 1 red / 3 warn / 3 suggest, ALL fixed same-branch — the red
+  was the post-restart input-activation (fixed via projector-independent positive `--warm-settle`);
+  warns: AHK-presence guard, READ_FAIL≠no-recv, dead-sender accepted residual; suggests: sweep
+  timeout+seam, gap 8→12s, test stubs. Playbook: `.claude/rules/mv-reverify-escalate.md` + router.
+- Commits: `48eee5dd5` bump 1.7.0-dev.468 · `41a0f91f4` RED · `34cbfbb05` GREEN · `aa0a2b86d` review.
+- Filed follow-up (issue 1098): restore strih's operator Multiview projector after a force-kill
+  (separate rig-ops scope; needs live strih monitor-topology decision).
+- Fleet note: isolated `git worktree` (worktree-1093-preflight); Tier-0 targeted tests only (23/23
+  own + 19 recording-e2e.sh anchor-reader binaries green; fmt+clippy clean). The LIVE strih-OBS
+  restart is UNVERIFIED at Tier-0 — flagged for the supervisor's integration/E2E run.
