@@ -58,8 +58,9 @@ STATE_FILE="${IMAG_POWER_ALERT_STATE_FILE:-$STATE_DIR/camera-box-imag-power-aler
 log() { printf '%s [imag-power-envelope-alert-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >&2; }
 
 # ── measure: the guard's journal window + a live PL1/TCPU/act_freq snapshot ──────────────────
-# JOURNAL empty means an ssh/connectivity failure (the fleet's own preflight owns THAT condition),
-# treated as "nothing to decide" this pass, never a false alert.
+# JOURNAL empty means an ssh/connectivity failure (the fleet's own preflight owns THAT condition) OR
+# a quiet window (the guard logs only on transitions) -- either way UNMEASURED, so alert_from_journal
+# treats it as "no new info": it preserves the existing dedup signature (#1076), never a false alert.
 measure() {
   JOURNAL="$(sshpass -p "$IMAG_PW_SSH" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 \
     "${IMAG_USER_SSH}@${IMAG_IP}" \
@@ -107,11 +108,14 @@ write_state_field() {
 # PL1 re-program). Own dedup signature (alert_sig / alert_passes).
 alert_from_journal() {
   if [ -z "${JOURNAL:-}" ]; then
-    log "no guard journal from imag-nb (ssh/connectivity failure, or the guard has logged nothing in $WINDOW) -- nothing to decide this pass"
-    # A quiet window is NOT an incident: clear the sig so a genuinely NEW episode later pages fresh
-    # instead of being dedup'd against a stale signature.
-    write_state_field alert_sig ""
-    write_state_field alert_passes 0
+    log "no guard journal from imag-nb (ssh/connectivity failure, or a quiet journal window) -- UNMEASURED this pass"
+    # #1076: an empty journal is UNMEASURED (an ssh hiccup, OR a quiet window -- the guard logs ONLY
+    # on STEP-DOWN/RESTORE/RE-ASSERT transitions, never a heartbeat, so a quiet window genuinely
+    # carries no reading), NOT a resolved episode. Treat it as no-new-info and PRESERVE the dedup
+    # signature + pass count (do NOT write them) so a persistent episode stays deduped across a
+    # transient gap instead of re-paging every time the measurement flaps. Only a genuinely
+    # MEASURED-healthy pass (a non-empty journal with no STEP-DOWN/RE-ASSERT marker, below) resolves
+    # the episode and resets, so a later NEW episode still pages fresh.
     return 0
   fi
 
@@ -165,7 +169,17 @@ alert_from_throttle() {
   local markers
   markers="$(imag_power_throttle_alert_condition "${BURST:-}")"
   if [ -z "$markers" ]; then
-    log "imag-nb iGPU freq: no sustained throttle-under-floor in this burst (or nothing measured) -- healthy"
+    # #1076: no THROTTLE-UNDER-FLOOR marker is TWO distinct states the 2-state condition collapses.
+    # Use the 3-state imag_power_throttle_state to tell them apart: `unknown` (no FLOOR / too few
+    # samples = an ssh/burst hiccup) is UNMEASURED -> PRESERVE the dedup signature + passes so a
+    # persistent clamp stays deduped across a transient gap; `clean` (a valid burst = the GPU has
+    # headroom) is MEASURED-healthy -> the clamp genuinely resolved -> reset so a later new clamp
+    # pages fresh.
+    if [ "$(imag_power_throttle_state "${BURST:-}")" = "unknown" ]; then
+      log "imag-nb iGPU freq: throttle burst UNMEASURED (no FLOOR / too few samples) -- preserving dedup signature"
+      return 0
+    fi
+    log "imag-nb iGPU freq: no sustained throttle-under-floor in this burst (GPU headroom) -- healthy"
     write_state_field throttle_sig ""
     write_state_field throttle_passes 0
     return 0
@@ -218,13 +232,23 @@ alert_from_render_discriminator() {
   detail="$(printf '%s\n' "$cause_out" | head -1 | cut -d'|' -f2-)"
 
   # Only churn-leak is the NEW, previously-silent, restart-clears alert. power-clamp is already paged
-  # by alert_from_throttle (no duplicate); healthy/stalled/unknown never page. All non-churn outcomes
-  # clear the confirm + dedup state so a genuinely NEW episode later pages fresh.
+  # by alert_from_throttle (no duplicate); healthy/stalled/unknown never page. A MEASURED non-churn
+  # outcome (healthy/stalled/power-clamp) clears the confirm + dedup state so a genuinely NEW episode
+  # later pages fresh; the UNMEASURED `unknown` outcome preserves the dedup state (see #1076 below).
   if [ "$cause" != "churn-leak" ]; then
     log "imag render discriminator: cause=$cause ($detail)"
+    # #1076: `unknown` (the render sample or the throttle burst was unreadable this pass) is
+    # UNMEASURED -- the ticket's headline "a persistent churn leak whose WS read intermittently
+    # fails" case. A churn candidate cannot carry its 2-pass confirmation across a measurement gap,
+    # so ALWAYS reset the confirm counter; but on `unknown` PRESERVE the dedup signature + passes so
+    # the persistent churn stays deduped instead of re-paging every gap. Every OTHER non-churn cause
+    # (healthy/stalled/power-clamp) is a MEASURED outcome -> genuinely resolved (or owned by the
+    # throttle path) -> reset the full dedup state so a later new episode pages fresh.
     write_state_field render_confirm 0
-    write_state_field render_sig ""
-    write_state_field render_passes 0
+    if [ "$cause" != "unknown" ]; then
+      write_state_field render_sig ""
+      write_state_field render_passes 0
+    fi
     return 0
   fi
 

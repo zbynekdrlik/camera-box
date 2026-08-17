@@ -79,8 +79,7 @@ fn field(state: &str, key: &str) -> String {
     let prefix = format!("{key}=");
     state
         .lines()
-        .filter(|l| l.starts_with(&prefix))
-        .last()
+        .rfind(|l| l.starts_with(&prefix))
         .map(|l| l[prefix.len()..].to_string())
         .unwrap_or_else(|| format!("<{key} ABSENT>"))
 }
@@ -139,7 +138,11 @@ fn journal_measured_healthy_no_markers_still_resets_1076() {
         "",
         "a measured-healthy journal (present, no STEP-DOWN/RE-ASSERT) resolves the episode -> reset the sig: {s:?}"
     );
-    assert_eq!(field(&s, "alert_passes"), "0", "measured-healthy -> reset passes: {s:?}");
+    assert_eq!(
+        field(&s, "alert_passes"),
+        "0",
+        "measured-healthy -> reset passes: {s:?}"
+    );
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -178,7 +181,11 @@ fn throttle_unmeasured_unknown_burst_preserves_dedup_signature_1076() {
         "imag-throttle:under-floor",
         "a truncated burst (< min samples) is UNMEASURED -> preserve the dedup signature (#1076): {s2:?}"
     );
-    assert_eq!(field(&s2, "throttle_passes"), "4", "truncated burst -> preserve passes: {s2:?}");
+    assert_eq!(
+        field(&s2, "throttle_passes"),
+        "4",
+        "truncated burst -> preserve passes: {s2:?}"
+    );
 }
 
 #[test]
@@ -196,7 +203,11 @@ fn throttle_measured_clean_burst_still_resets_1076() {
         "",
         "a clean measured burst (GPU headroom) resolves the clamp -> reset the sig: {s:?}"
     );
-    assert_eq!(field(&s, "throttle_passes"), "0", "clean measured burst -> reset passes: {s:?}");
+    assert_eq!(
+        field(&s, "throttle_passes"),
+        "0",
+        "clean measured burst -> reset passes: {s:?}"
+    );
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -242,7 +253,19 @@ fn render_measured_healthy_cause_still_resets_all_1076() {
         "RENDER='RENDER|60.00|9.00|0.000|true'\nBURST=''",
         "alert_from_render_discriminator",
     );
-    assert_eq!(field(&s, "render_sig"), "", "measured-healthy render -> reset the sig: {s:?}");
-    assert_eq!(field(&s, "render_passes"), "0", "measured-healthy render -> reset passes: {s:?}");
-    assert_eq!(field(&s, "render_confirm"), "0", "measured-healthy render -> reset confirm: {s:?}");
+    assert_eq!(
+        field(&s, "render_sig"),
+        "",
+        "measured-healthy render -> reset the sig: {s:?}"
+    );
+    assert_eq!(
+        field(&s, "render_passes"),
+        "0",
+        "measured-healthy render -> reset passes: {s:?}"
+    );
+    assert_eq!(
+        field(&s, "render_confirm"),
+        "0",
+        "measured-healthy render -> reset confirm: {s:?}"
+    );
 }
