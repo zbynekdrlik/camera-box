@@ -73,6 +73,12 @@ APPDATA_DISTROAV_ROOT = "obs-studio/plugins"
 # non-genlock install, or a build predating the marker) -> UNKNOWN, never a guessed SHA.
 DEFAULT_GENLOCK_BUILD_SHA_FILE = r"C:\Program Files\obs-studio\GENLOCK_BUILD_SHA.txt"
 
+# #770 — the deployed OBS core DLL whose sha256 the [0/8] version-integrity gate compares against
+# the #120 BUNDLE_MANIFEST (drift-guard --compare's obs_dll_sha256 key). The genlock hot-swap
+# replaces this exact file (sibling of DEFAULT_OBS_INSTALL_EXE), mirroring imag's libobs.so.30.
+# Read-only Get-FileHash-equivalent (bsg.component_sha256); "" if absent -> UNKNOWN, never guessed.
+DEFAULT_OBS_DLL = r"C:\Program Files\obs-studio\bin\64bit\obs.dll"
+
 # #826 — the strih OBS-identity machine-check facet. The 2026-07-27 incident: a hand-launched
 # stale `1ME` OBS 31.1.2 install squatted TCP :4455 while this box's own parity marker still
 # described the pinned genlock 32.1.2 build. These defaults are read-only scan roots/paths; every
@@ -277,6 +283,7 @@ def gather_bundle_state(
     obs_install_scan_roots=DEFAULT_OBS_INSTALL_SCAN_ROOTS,
     startup_shortcut=DEFAULT_STARTUP_SHORTCUT,
     ahk_path=DEFAULT_AHK_PATH,
+    obs_dll_path=DEFAULT_OBS_DLL,
 ):
     """Build the fresh bundle-state dict for THIS request — every gather is attempted
     independently so one failing facet (e.g. OBS-WS momentarily unreachable) does not blank out
@@ -295,6 +302,16 @@ def gather_bundle_state(
     ahk_text = read_ahk_text(ahk_path)
     shortcut_target, shortcut_workdir = resolve_shortcut(startup_shortcut)
 
+    # #770 — the DEPLOYED plugin/core byte identity the [0/8] version-integrity gate compares
+    # against the #120 BUNDLE_MANIFEST. distroav.dll: hash the FIRST located copy (scan order:
+    # Program Files, then ProgramData, then %APPDATA% — the primary genlock plugin), so a single
+    # observed distroav_dll_sha256 pairs with the manifest's by-basename distroav.dll sha. A
+    # shadowing duplicate is a SEPARATE #124 concern (distroav_dll_paths reports the whole set).
+    # Each hash degrades to "" (UNKNOWN downstream, never a guessed/zero SHA) when the file is
+    # missing/unreadable — the opt-in landing (#756-shape): a box with no genlock DLL is skipped.
+    distroav_paths_csv = bsg.distroav_dll_paths(distroav_scan_roots)
+    first_distroav = distroav_paths_csv.split(",")[0] if distroav_paths_csv else ""
+
     return bsg.build_bundle_state(
         obs_version=bsg.obs_version_from_log(log_text),
         distroav_version=bsg.distroav_version_from_log(log_text),
@@ -302,8 +319,11 @@ def gather_bundle_state(
         output_fps=bsg.output_fps_from_log(log_text),
         genlock_wall_clock=bsg.genlock_wall_clock_from_log(log_text),
         ndi_input_latency=bsg.ndi_input_latency_csv(ndi_inputs),
-        distroav_dll_paths=bsg.distroav_dll_paths(distroav_scan_roots),
+        distroav_dll_paths=distroav_paths_csv,
         genlock_capability=bsg.genlock_capability_from_log(log_text),
+        # #770 — deployed core/plugin byte sha256 (the truth the marker only POINTS at).
+        obs_dll_sha256=bsg.component_sha256(obs_dll_path),
+        distroav_dll_sha256=bsg.component_sha256(first_distroav),
         # #756 — the deployed genlock build SHA for the cross-box parity gate.
         genlock_build_sha=bsg.genlock_build_sha_from_file(genlock_build_sha_file),
         # #826 — the strih OBS-identity machine-check facet.
@@ -355,6 +375,7 @@ def make_handler(args, state):
                     obs_install_scan_roots=args.obs_install_scan_root,
                     startup_shortcut=args.startup_shortcut,
                     ahk_path=args.ahk_path,
+                    obs_dll_path=args.obs_dll,
                 )
             except Exception as e:  # noqa: BLE001 - never let a gather bug hang the gate forever
                 log(f"ERROR: bundle-state gather failed: {e}")
@@ -461,6 +482,7 @@ def main(argv=None):
     # #756 — the deployed genlock build-SHA marker file for the cross-box parity gate. Default is
     # the Windows bundle path; imag's service passes /opt/obs-genlock/GENLOCK_BUILD_SHA.txt.
     ap.add_argument("--genlock-build-sha-file", default=DEFAULT_GENLOCK_BUILD_SHA_FILE)
+    ap.add_argument("--obs-dll", default=DEFAULT_OBS_DLL)
     # #826 — the strih OBS-identity machine-check facet. --obs-install-scan-root is repeatable;
     # --ahk-path defaults to strih's NL_STARTUP.ahk -- a box that has none (stream) just gathers ""
     # for every ahk_* key, which the gate correctly reads as "this facet does not apply here".

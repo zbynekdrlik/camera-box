@@ -83,3 +83,45 @@ Local Tier-0 you CAN do here: `cargo fmt --all --check`, `bash -n` + `shellcheck
 the Python tests (`python3 -m pytest tests/python/test_bundle_state_*.py` — these DO run locally and
 gave a real RED→GREEN for the `log()` dead-stdout fix). `log()` legitimately swallows the dead-stdout
 `OSError` (stdout is the broken resource, cannot log it) — bypass-marked `# airuleset:script-ok`.
+
+## #770 — byte-derived DistroAV/libobs parity: gather the DEPLOYED bytes, opt-in
+
+The `[0/8]` byte-vs-manifest COMPARE already lives in the engine (`drift-guard.sh`
+`manifest_sha_for_component` #122 / `drift_check_all_files` #121) and the gate already threads the
+`obs_dll_sha256`/`distroav_dll_sha256`/`manifest`/`bundle_hashes` `--compare` keys — the missing
+piece was the GATHER. #770 added `bundle_state_gather.component_sha256(path)` (chunked sha256, `""`
+= UNKNOWN on missing/dir/empty/unreadable — never a false-clean SHA) + `obs_dll_sha256` /
+`distroav_dll_sha256` on `build_bundle_state` (omit-when-empty), wired in `bundle-state-server.py`
+(`DEFAULT_OBS_DLL` = the pinned install's obs.dll; distroav.dll = the FIRST located copy). This makes
+the marker (`GENLOCK_BUILD_SHA.txt`) a POINTER — the truth is the bytes — closing the wrong-direction
+#119/#767 hole the marker-only cross-box parity cannot catch. Landed OPT-IN (#756-shape): a box not
+yet reporting the SHAs is silently skipped, never a false UNKNOWN. **Still opt-in / dormant in CI
+until #1082**: the CI-authoritative `BUNDLE_MANIFEST.json` is not auto-fetched per box yet (only
+`VERSION_GATE_MANIFEST=` activates `--manifest`), the imag `.so` ssh byte gather is not wired, and the
+ENFORCE flip (#758-shape) is deferred — all in #1082 (needs the live gather deployed + verified first,
+a LIVE-Windows property no worktree worker can verify, same class as #1067's port4455 caveat).
+
+## GOTCHA — a BUNDLE_MANIFEST test fixture MUST be one `files[]` entry per LINE (drift-guard's grep is line-based)
+
+`drift-guard.sh`'s manifest parsers (`manifest_sha_for_component`, `manifest_all_paths`,
+`manifest_sha_for_path`) are `grep`/`sed` LINE-based — they assume each `files[]` entry is on its own
+line (`{ "path": "…", "sha256": "…", "size": N }`), exactly as `genlock-manifest.sh::generate_manifest`
+emits. A SINGLE-LINE manifest fixture (e.g. Python `json.dump(obj, f)` with no indent) puts every
+entry on ONE line, so `grep "…obs[.]dll…" | sed 's/.*"sha256": "\(…\)".*/\1/'`'s GREEDY `.*` grabs the
+LAST entry's sha256 on that line — `manifest_sha_for_component obs` returns the distroav sha, and the
+byte compare reads DRIFT/OK for the wrong reason. Confirmed live writing #770's offline gate check.
+When hand-writing a manifest fixture (in a Rust test's `write_manifest`, a python verify script, or
+by hand), emit ONE `files[]` entry per line — never a compact single-line JSON. `tests/version_integrity_gate.rs::write_manifest`
+does this correctly (`\n    { … },\n    { … }\n`).
+
+## Offline-proving the byte-vs-manifest gate without cargo (Tier-0)
+
+`tests/version_integrity_gate.rs` invokes the gate as a SUBPROCESS, so its assertions can be verified
+WITHOUT `cargo test` (banned locally) by driving the real bash gate directly: build strih+stream
+state JSONs carrying the byte-facet keys (`obs_dll_sha256`, `distroav_dll_sha256`, `genlock_capability`
+— a `manifest=` ALWAYS also activates the capability check) + the enforced parity/obs-identity keys
+(`with_sha`/`with_obs_identity_ok` equivalents), a multi-line manifest, then run
+`bash scripts/version-integrity-gate.sh --manifest <m> --win-state strih=<s> --win-state stream=<t>
+--genlock-sha imag=<sha>` from the repo root and assert exit 20 (byte drift → REFUSE, names the
+drifted component + box) / exit 0 (bytes match → GATE PASS). This is the genuine offline verification
+for the Rust fixtures (which only compile+run at CI/integration).
