@@ -1,0 +1,16 @@
+[Unit]
+# Fires the #813 measurement-line liveness alarm every 5 min. Confirm threshold 1 pages within
+# ~5 min of onset (matches the #812 heartbeat sibling); the pure decider's own 20-min staleness
+# window is the tolerance for a slightly-late measurement pass during a live event -- so a genuinely
+# dead line during a live stream is caught at ~08:00, not 7h later at the E2E preflight.
+Description=Run the camera-box avsync LINE liveness alarm every 5 min (#813)
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=20s
+Persistent=false
+
+[Install]
+WantedBy=timers.target
