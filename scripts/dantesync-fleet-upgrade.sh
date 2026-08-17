@@ -455,28 +455,35 @@ STAGED_LOCAL_DIR=""
 trap 'rm -rf "${STAGED_LOCAL_DIR:-}" 2>/dev/null || true' EXIT
 
 # ensure_linux_binary_staged VERSION -> download+verify the pinned Linux binary+sha into
-# STAGED_LOCAL_DIR on dev1 (memoized: only the first call fetches). Returns non-zero (nothing
-# staged) if the download or the dev1-side sha256 verification fails -- a bad download never
-# reaches a node.
+# STAGED_LOCAL_DIR on dev1 (memoized: only the first successful call fetches). Returns non-zero
+# (nothing staged) if the download or the dev1-side sha256 verification fails -- a bad download
+# never reaches a node. #1077 review: stage into a LOCAL dir first and publish it to the memo
+# (STAGED_LOCAL_DIR) ONLY after the sha256 passes, so a failed dev1 fetch never poisons the memo
+# (which would falsely short-circuit the next node's call); the temp dir is cleaned on every
+# failure branch.
 ensure_linux_binary_staged() {
-  local version="$1" url expected actual
+  local version="$1" url expected actual dir
   [ -n "$STAGED_LOCAL_DIR" ] && return 0
   url="$(dantesync_release_url_linux "$version")"
-  STAGED_LOCAL_DIR="$(mktemp -d)"
-  if ! curl --fail -fsSL -o "$STAGED_LOCAL_DIR/dantesync" "$url"; then
+  dir="$(mktemp -d)"
+  if ! curl --fail -fsSL -o "$dir/dantesync" "$url"; then
     err "could not download the pinned dantesync binary on dev1 ($url)"
+    rm -rf "$dir"
     return 1
   fi
-  if ! curl --fail -fsSL -o "$STAGED_LOCAL_DIR/dantesync.sha256" "$url.sha256"; then
+  if ! curl --fail -fsSL -o "$dir/dantesync.sha256" "$url.sha256"; then
     err "could not download the pinned dantesync sha256 on dev1 ($url.sha256)"
+    rm -rf "$dir"
     return 1
   fi
-  expected="$(awk '{print $1}' "$STAGED_LOCAL_DIR/dantesync.sha256")"
-  actual="$(sha256sum "$STAGED_LOCAL_DIR/dantesync" | awk '{print $1}')"
+  expected="$(awk '{print $1}' "$dir/dantesync.sha256")"
+  actual="$(sha256sum "$dir/dantesync" | awk '{print $1}')"
   if [ "$expected" != "$actual" ]; then
     err "staged binary SHA256 mismatch on dev1: expected $expected got $actual"
+    rm -rf "$dir"
     return 1
   fi
+  STAGED_LOCAL_DIR="$dir"   # publish to the memo only after a fully-verified download
   return 0
 }
 

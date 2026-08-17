@@ -954,3 +954,27 @@ fn master_verify_uses_a_longer_bounded_settle_window() {
         "#1077: the settle loop must stay bounded (no unbounded while-true wait)"
     );
 }
+
+/// #1077 review: `ensure_linux_binary_staged` must publish the memo (`STAGED_LOCAL_DIR`) only
+/// AFTER a fully-verified download — a failed dev1 fetch must NOT poison the memo (which would
+/// falsely short-circuit the next node's call). Assert the `STAGED_LOCAL_DIR="$dir"` publish comes
+/// AFTER the `sha256sum` verification inside the function.
+#[test]
+fn ensure_linux_binary_staged_publishes_memo_only_after_sha_verify() {
+    let s = fs::read_to_string(script()).expect("read dantesync-fleet-upgrade.sh");
+    let start = s
+        .find("ensure_linux_binary_staged()")
+        .expect("#1077: expected the ensure_linux_binary_staged function");
+    let region = &s[start..(start + 1200).min(s.len())];
+    let sha = region
+        .find("sha256sum")
+        .expect("#1077: expected the sha256 verification");
+    let publish = region
+        .find(r#"STAGED_LOCAL_DIR="$dir""#)
+        .expect("#1077: the memo must be published from a local $dir, not armed before the fetch");
+    assert!(
+        sha < publish,
+        "#1077: STAGED_LOCAL_DIR must be published only AFTER the sha256 verify, so a failed \
+         dev1 download never poisons the memo. Got region:\n{region}"
+    );
+}
