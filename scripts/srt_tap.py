@@ -155,9 +155,20 @@ def assert_safe_to_start(url):
 
     This is the enforced redesign: for the A/V-sync tap the OBS-side output MUST be a listener;
     the player connects as the caller. The message hands back the recommended listener URL."""
-    # [red] unguarded baseline -- reproduces the pre-#802 crash-enabling condition: nothing
-    # refuses a caller/rendezvous start, so an unreachable-target start proceeds (and crashed OBS).
-    return None
+    parse_srt_target(url)  # validates it is a well-formed srt://host:port URL first
+    mode = srt_mode(url)
+    if mode == "listener":
+        return None
+    try:
+        _, port = parse_srt_target(url)
+        suggestion = recommend_tap_url(port=port)
+    except ValueError:
+        suggestion = recommend_tap_url()
+    raise UnsafeTapError(
+        f"SRT tap in {mode!r} mode is crash-prone: an unreachable peer fails the output start and "
+        f"has crashed OBS (#802). Use LISTENER mode for the OBS-side tap instead: {suggestion} "
+        f"(the player connects as the caller)."
+    )
 
 
 def reader_should_grab(url, timeout=1.0):
