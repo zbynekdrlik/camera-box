@@ -457,7 +457,10 @@ jobs:
           if ($src -notmatch [regex]::Escape('backward_regime_ticks=%llu')) {
             Write-Error "obs-source.c: #1009 backward_regime_ticks audit exposure gone — a sustained hold-bypass regime would be invisible to the E2E/drift gates — re-apply"; exit 1
           }
-          Write-Output "genlock timestamp-aligned release patch present (#257 build-default ts-align + wall-clock guard + present_ts + #147/#1009 re-qualified backward-step recovery + self-heal) — OK"
+          if ($src -notmatch [regex]::Escape('wall_qpc_drift_ms=%lld') -or $src -notmatch [regex]::Escape('static long long genlock_wall_qpc_drift_ms(void)') -or $src -notmatch [regex]::Escape('genlock_wall_qpc_drift_ms());')) {
+            Write-Error "obs-source.c: #800 wall-vs-QPC clock-drift audit term/helper gone — the leading remaining A/V-shift candidate (WALL-slaved video vs QPC-slaved audio) would be invisible in the OBS log — re-apply"; exit 1
+          }
+          Write-Output "genlock timestamp-aligned release patch present (#257 build-default ts-align + wall-clock guard + present_ts + #147/#1009 re-qualified backward-step recovery + self-heal + #800 wall-qpc drift) — OK"
 
       # #940 piece 1: fail fast if the per-event relock phase-evidence log line is missing —
       # mirrors the Linux-CI guard

@@ -152,6 +152,7 @@ pub fn parse_audit_line(line: &str) -> Option<AuditSample> {
             "ts_due" => set!(ts_due),
             "ts_head_skew_ms" => set!(ts_head_skew_ms),
             "backward_regime_ticks" => set!(backward_regime_ticks),
+            "wall_qpc_drift_ms" => set!(wall_qpc_drift_ms),
             _ => {}
         }
     }
