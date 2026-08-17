@@ -1391,3 +1391,52 @@ fn imag_touchpad_conf_ok_rejects_the_wrong_scroll_distance_value_779() {
         "imag_touchpad_conf_ok must REJECT the wrong ScrollPixelDistance value (#779): out={out:?} err={err:?}"
     );
 }
+
+#[test]
+fn imag_touchpad_conf_ok_rejects_a_conf_missing_the_touchpad_selector_779() {
+    // WITHOUT MatchIsTouchpad the InputClass never binds any device, so a file that kept the four
+    // Options but dropped the selector is functionally inert -- it must FAIL, not pass on option
+    // presence (the function's "PARTIAL file must FAIL" contract covers the selector too).
+    let bad = GOOD_TOUCHPAD_CONF.replace("    MatchIsTouchpad \"on\"\n", "");
+    let harness = format!(
+        "CONF={q}{bad}{q}\nimag_touchpad_conf_ok \"$CONF\" && echo ACCEPT || echo REJECT",
+        q = "'",
+        bad = bad
+    );
+    let (code, out, err) = run_sourced(&harness);
+    assert_eq!(code, 0, "harness/source failed: out={out:?} err={err:?}");
+    assert!(
+        out.contains("REJECT"),
+        "imag_touchpad_conf_ok must REJECT a conf missing the MatchIsTouchpad selector (#779): out={out:?} err={err:?}"
+    );
+}
+
+/// #779 — the pure fn is only useful if the live flow CALLS it. Mirror the #884/#1015
+/// DEFINE-and-CALL and ordering discipline (this file's own `imag_obs_cgroup_shows_service_unit`
+/// and #884 tests) so a future edit cannot delete check (w) with every other test still green.
+#[test]
+fn verify_imag_wires_the_779_touchpad_check_into_the_live_flow() {
+    let body = std::fs::read_to_string(script()).unwrap();
+    assert!(
+        body.matches("imag_touchpad_conf_ok").count() >= 2,
+        "verify-imag.sh must both DEFINE and CALL imag_touchpad_conf_ok (#779) -- a sourced-but-never-called pure fn gives zero acceptance coverage"
+    );
+    assert!(
+        body.contains("cat /etc/X11/xorg.conf.d/30-touchpad-tap.conf"),
+        "verify-imag.sh check (w) must read /etc/X11/xorg.conf.d/30-touchpad-tap.conf back over SSH (#779)"
+    );
+    // Check (w) must run BEFORE check (o)'s OBS restart (#884 ordering) -- a static read is
+    // side-effect-free, but the ordering must hold so a future reorder can't hide it post-restart.
+    let call = body
+        .find("imag_touchpad_conf_ok \"$TOUCHPAD_CONF\"")
+        .expect(
+            "verify-imag.sh check (w) must CALL imag_touchpad_conf_ok on the ssh-read conf (#779)",
+        );
+    let restart = body
+        .find("ssh_box_timeout \"$IMAG_OBS_RESTART_TIMEOUT\"")
+        .expect("check (o)'s bounded OBS restart must exist (#890)");
+    assert!(
+        call < restart,
+        "verify-imag.sh check (w) (#779) must run BEFORE check (o)'s OBS restart (#884 ordering)"
+    );
+}

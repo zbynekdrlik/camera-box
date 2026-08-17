@@ -625,15 +625,19 @@ imag_powerkey_protection_ok() {
   return 0
 }
 
-# imag_touchpad_conf_ok CONF_TEXT -> 0 iff the touchpad InputClass (#779) carries the four
-# live-verified libinput options at their EXACT values: Tapping/TappingDrag/NaturalScrolling "on"
-# and ScrollPixelDistance "50" (the user's final tuning; the libinput default 15 is far too
-# sensitive). A reprovision that regenerated a PARTIAL file (a missing option) or the WRONG value
-# must FAIL, not pass on mere presence -- the gate proves durability, not just existence. Purely
-# textual (unit-tested), whitespace-tolerant, here-string fed (no SIGPIPE-under-pipefail risk).
+# imag_touchpad_conf_ok CONF_TEXT -> 0 iff the touchpad InputClass (#779) carries BOTH the selector
+# (MatchIsTouchpad "on" + Driver "libinput" -- WITHOUT them libinput never binds the class and the
+# config is inert, so a file that dropped either selector but kept the options must still FAIL) AND
+# the four live-verified libinput options at their EXACT values: Tapping/TappingDrag/NaturalScrolling
+# "on" and ScrollPixelDistance "50" (the user's final tuning; the libinput default 15 is far too
+# sensitive). A reprovision that regenerated a PARTIAL file (a missing selector/option) or the WRONG
+# value must FAIL, not pass on mere presence -- the gate proves durability, not just existence.
+# Purely textual (unit-tested), whitespace-tolerant, here-string fed (no SIGPIPE-under-pipefail risk).
 imag_touchpad_conf_ok() {
   local conf="$1" pat
   for pat in \
+    'MatchIsTouchpad[[:space:]]+"on"' \
+    'Driver[[:space:]]+"libinput"' \
     'Option[[:space:]]+"Tapping"[[:space:]]+"on"' \
     'Option[[:space:]]+"TappingDrag"[[:space:]]+"on"' \
     'Option[[:space:]]+"NaturalScrolling"[[:space:]]+"on"' \
@@ -1199,7 +1203,7 @@ if [ "$rc" -ne 0 ] || [ -z "$TOUCHPAD_CONF" ]; then
 elif imag_touchpad_conf_ok "$TOUCHPAD_CONF"; then
   ok "touchpad usability config present + correct (tap-to-click + natural scroll + ScrollPixelDistance 50, #779)"
 else
-  fail "30-touchpad-tap.conf present but INCOMPLETE/WRONG (#779) -- must carry Tapping/TappingDrag/NaturalScrolling \"on\" + ScrollPixelDistance \"50\"; a reprovision regenerated a partial/wrong file"
+  fail "30-touchpad-tap.conf present but INCOMPLETE/WRONG (#779) -- must carry the selector (MatchIsTouchpad \"on\" + Driver \"libinput\") AND Tapping/TappingDrag/NaturalScrolling \"on\" + ScrollPixelDistance \"50\"; a reprovision regenerated a partial/wrong file"
 fi
 
 # (o) both projectors PRESENT (never self-established) + PERSIST across a real restart (#756/#840)

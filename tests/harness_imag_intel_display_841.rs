@@ -63,12 +63,26 @@ const START: &str = "scripts/imag-obs-start.sh";
 #[test]
 fn setup_imag_does_not_ship_the_dead_tearfree_option_841() {
     let body = read(SETUP);
+    // #779 legitimately provisions the touchpad INPUT config as an xorg.conf.d write
+    // (30-touchpad-tap.conf) -- NOT a display-tuning file. So this ban (which exists to keep the
+    // dead `Option "TearFree"` DISPLAY snippet, and any other cargo-culted display xorg.conf.d
+    // knob, off the Intel path) narrows from "no xorg.conf.d write at all" to "no xorg.conf.d write
+    // OTHER than the touchpad input config" -- a display cargo-cult would be a different file and
+    // still trips this. A `#`-prefixed comment mentioning the option's literal name is still fine
+    // (only a WRITE is banned), same as before.
+    let non_touchpad_xorg_writes: Vec<&str> = body
+        .lines()
+        .filter(|l| {
+            let t = l.trim_start();
+            t.starts_with("cat > /etc/X11/xorg.conf.d/") && !t.contains("30-touchpad-tap.conf")
+        })
+        .collect();
     assert!(
-        !body.contains("cat > /etc/X11/xorg.conf.d/"),
-        "{SETUP}: must NOT write any xorg.conf.d file for the Intel path -- a live-tested \
-         `Option \"TearFree\"` snippet was proven a DEAD option on the `modesetting` driver bound \
-         here (#841) and must not ship; the explanatory comment mentioning the option's literal \
-         name for documentation purposes is fine, only an actual xorg.conf.d WRITE is banned"
+        non_touchpad_xorg_writes.is_empty(),
+        "{SETUP}: the ONLY permitted xorg.conf.d WRITE is the #779 touchpad INPUT config \
+         (30-touchpad-tap.conf); a live-tested `Option \"TearFree\"` snippet was proven a DEAD \
+         option on the `modesetting` driver bound here (#841) and must not ship, nor any other \
+         display xorg.conf.d knob -- found a non-touchpad write: {non_touchpad_xorg_writes:?}"
     );
     assert!(
         body.contains("is not used") && body.contains("modesetting_drv.so"),
