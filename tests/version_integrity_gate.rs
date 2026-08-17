@@ -1246,3 +1246,209 @@ fn gate_passes_when_deployed_bytes_match_the_manifest_770() {
     let _ = std::fs::remove_file(&t);
     let _ = std::fs::remove_file(&manifest);
 }
+
+// ── #1082 byte-parity follow-up to #770: the imag (Linux) box's DEPLOYED .so BYTES are compared
+// against its CI-authoritative linux BUNDLE_MANIFEST, closing the gap #770 left. #770 wired the
+// WINDOWS obs.dll/distroav.dll byte compare (via drift-guard's by-basename manifest_sha_for_component);
+// imag is threaded into the gate only by its MARKER (--genlock-sha), never its bytes, and the engine's
+// component resolver knows only the Windows DLL basenames. The gate now takes a TARGETED per-.so
+// facet (--imag-manifest + --imag-bytes) that resolves each gathered .so path via manifest_sha_for_path
+// (the linux resolver) — a per-path compare, NOT the whole-bundle walk, so a partial 3-file ssh gather
+// never flips the gate UNKNOWN. OPT-IN (#756-shape): DORMANT when the gather/manifest is absent, so a
+// live gather/auto-source failure never spuriously refuses (the ENFORCE flip, #1082 part 3, is deferred).
+
+const LIBOBS_SO_PATH_1082: &str = "lib/x86_64-linux-gnu/libobs.so.30";
+const DISTROAV_SO_PATH_1082: &str = "lib/x86_64-linux-gnu/obs-plugins/distroav.so";
+
+/// Write a minimal #120 linux BUNDLE_MANIFEST.json listing the two genlock-bearing .so files, one
+/// files[] entry per LINE (drift-guard's manifest parsers are line-based — a single-line JSON makes
+/// the greedy `.*` grab the wrong entry, see the version-integrity-gate playbook).
+fn write_linux_manifest(name: &str, libobs_sha: &str, distroav_sha: &str) -> PathBuf {
+    let json = format!(
+        "{{\n  \"schema\": \"camera-box/genlock-bundle-manifest@1\",\n  \"build_sha\": \"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\",\n  \"files\": [\n    {{ \"path\": \"{LIBOBS_SO_PATH_1082}\", \"sha256\": \"{libobs_sha}\", \"size\": 100 }},\n    {{ \"path\": \"{DISTROAV_SO_PATH_1082}\", \"sha256\": \"{distroav_sha}\", \"size\": 200 }}\n  ]\n}}\n"
+    );
+    write_state(name, &json)
+}
+
+/// Build a clean, PASSING fleet (strih/stream pinned + obs-identity + a matching genlock_build_sha,
+/// imag's marker matching via --genlock-sha) so the ONLY signal a byte test can move is the imag .so
+/// facet. Returns (strih_state, stream_state) paths.
+fn clean_fleet_states_1082(sha: &str) -> (PathBuf, PathBuf) {
+    let s = write_state(
+        &format!("strih_1082_{}", &sha[..8]),
+        &with_obs_identity_ok(&with_sha(STRIH_PINNED, sha), true),
+    );
+    let t = write_state(
+        &format!("stream_1082_{}", &sha[..8]),
+        &with_obs_identity_ok(&with_sha(STREAM_PINNED, sha), false),
+    );
+    (s, t)
+}
+
+#[test]
+fn gate_refuses_when_imag_so_bytes_mismatch_the_manifest_1082() {
+    // imag's DEPLOYED libobs.so.30 bytes do NOT match the authoritative linux manifest for its build
+    // (the wrong-direction #119 hole for imag: its marker agrees with the fleet, but the bytes are an
+    // older lineage). The marker-only parity facet cannot see this; the new imag byte facet MUST, and
+    // REFUSE (exit 20) naming the drifted .so + the imag box.
+    const SHA: &str = "26de1c3c23980488a110dbf02e5e472f15cb001d";
+    const LIBOBS_MANIFEST: &str =
+        "1111111111111111111111111111111111111111111111111111111111111111";
+    const DISTROAV_MANIFEST: &str =
+        "2222222222222222222222222222222222222222222222222222222222222222";
+    const LIBOBS_STALE: &str = "9999999999999999999999999999999999999999999999999999999999999999";
+    let manifest =
+        write_linux_manifest("imag_bundle_1082_drift", LIBOBS_MANIFEST, DISTROAV_MANIFEST);
+    let (s, t) = clean_fleet_states_1082(SHA);
+    // imag: stale libobs.so.30 bytes, distroav.so bytes correct — isolates the DRIFT to libobs.so.30.
+    let imag_bytes = format!(
+        "imag={LIBOBS_SO_PATH_1082}={LIBOBS_STALE},{DISTROAV_SO_PATH_1082}={DISTROAV_MANIFEST}"
+    );
+    let (code, stdout, stderr) = run_gate(&[
+        "--win-state",
+        &format!("strih={}", s.display()),
+        "--win-state",
+        &format!("stream={}", t.display()),
+        "--genlock-sha",
+        &format!("imag={SHA}"),
+        "--imag-manifest",
+        manifest.to_str().unwrap(),
+        "--imag-bytes",
+        &imag_bytes,
+    ]);
+    assert_eq!(
+        code, 20,
+        "stale deployed imag libobs.so.30 bytes (marker agrees) must REFUSE with DRIFT (20). \
+         stdout={stdout} stderr={stderr}"
+    );
+    let all = format!("{stdout}{stderr}");
+    assert!(
+        all.contains("imag_so_bytes") && all.contains("DRIFT"),
+        "must name the imag byte facet as DRIFT: {all}"
+    );
+    assert!(
+        all.contains("libobs.so.30") && all.contains("imag"),
+        "must name the drifted .so + attribute it to imag: {all}"
+    );
+    let _ = std::fs::remove_file(&s);
+    let _ = std::fs::remove_file(&t);
+    let _ = std::fs::remove_file(&manifest);
+}
+
+#[test]
+fn gate_passes_when_imag_so_bytes_match_the_manifest_1082() {
+    // imag's deployed libobs.so.30 + distroav.so bytes match the authoritative linux manifest -> the
+    // imag byte facet is OK, and (with the fleet otherwise pinned) the whole gate PASSES. The
+    // marker-as-pointer end state for imag: the truth is the bytes.
+    const SHA: &str = "26de1c3c23980488a110dbf02e5e472f15cb001d";
+    const LIBOBS_MANIFEST: &str =
+        "1111111111111111111111111111111111111111111111111111111111111111";
+    const DISTROAV_MANIFEST: &str =
+        "2222222222222222222222222222222222222222222222222222222222222222";
+    let manifest = write_linux_manifest("imag_bundle_1082_ok", LIBOBS_MANIFEST, DISTROAV_MANIFEST);
+    let (s, t) = clean_fleet_states_1082(SHA);
+    let imag_bytes = format!(
+        "imag={LIBOBS_SO_PATH_1082}={LIBOBS_MANIFEST},{DISTROAV_SO_PATH_1082}={DISTROAV_MANIFEST}"
+    );
+    let (code, stdout, stderr) = run_gate(&[
+        "--win-state",
+        &format!("strih={}", s.display()),
+        "--win-state",
+        &format!("stream={}", t.display()),
+        "--genlock-sha",
+        &format!("imag={SHA}"),
+        "--imag-manifest",
+        manifest.to_str().unwrap(),
+        "--imag-bytes",
+        &imag_bytes,
+    ]);
+    assert_eq!(
+        code, 0,
+        "matching imag .so bytes + pinned fleet must PASS. stdout={stdout} stderr={stderr}"
+    );
+    assert!(stdout.contains("GATE PASS"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("imag_so_bytes") && stdout.contains("OK"),
+        "the imag byte facet must have engaged + reported OK: {stdout}"
+    );
+    let _ = std::fs::remove_file(&s);
+    let _ = std::fs::remove_file(&t);
+    let _ = std::fs::remove_file(&manifest);
+}
+
+#[test]
+fn gate_stays_dormant_when_imag_so_bytes_not_gathered_1082() {
+    // OPT-IN safety: a manifest is auto-sourced but the imag .so gather returned nothing (--imag-bytes
+    // empty). The facet must go DORMANT — NOT UNKNOWN/DRIFT — so a live ssh gather failure never
+    // spuriously refuses the run while the ENFORCE flip (#1082 part 3) is still deferred.
+    const SHA: &str = "26de1c3c23980488a110dbf02e5e472f15cb001d";
+    let manifest = write_linux_manifest(
+        "imag_bundle_1082_dormant",
+        "1111111111111111111111111111111111111111111111111111111111111111",
+        "2222222222222222222222222222222222222222222222222222222222222222",
+    );
+    let (s, t) = clean_fleet_states_1082(SHA);
+    let (code, stdout, stderr) = run_gate(&[
+        "--win-state",
+        &format!("strih={}", s.display()),
+        "--win-state",
+        &format!("stream={}", t.display()),
+        "--genlock-sha",
+        &format!("imag={SHA}"),
+        "--imag-manifest",
+        manifest.to_str().unwrap(),
+        "--imag-bytes",
+        "imag=",
+    ]);
+    assert_eq!(
+        code, 0,
+        "an empty imag byte gather must stay DORMANT + PASS, never refuse. stdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        stdout.contains("imag_so_bytes") && stdout.contains("DORMANT"),
+        "the facet must report DORMANT (opt-in), not UNKNOWN/DRIFT: {stdout}"
+    );
+    let _ = std::fs::remove_file(&s);
+    let _ = std::fs::remove_file(&t);
+    let _ = std::fs::remove_file(&manifest);
+}
+
+#[test]
+fn gate_unknown_when_imag_so_path_not_in_manifest_1082() {
+    // A gathered .so path the manifest does not list is UNKNOWN (never a false clean) -> the gate is
+    // INCOMPLETE (11), exactly the never-false-clean discipline every other facet enforces.
+    const SHA: &str = "26de1c3c23980488a110dbf02e5e472f15cb001d";
+    let manifest = write_linux_manifest(
+        "imag_bundle_1082_unknown",
+        "1111111111111111111111111111111111111111111111111111111111111111",
+        "2222222222222222222222222222222222222222222222222222222222222222",
+    );
+    let (s, t) = clean_fleet_states_1082(SHA);
+    // A path NOT in the manifest -> UNKNOWN.
+    let imag_bytes = "imag=lib/x86_64-linux-gnu/libobs-opengl.so.30=abcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabca";
+    let (code, stdout, stderr) = run_gate(&[
+        "--win-state",
+        &format!("strih={}", s.display()),
+        "--win-state",
+        &format!("stream={}", t.display()),
+        "--genlock-sha",
+        &format!("imag={SHA}"),
+        "--imag-manifest",
+        manifest.to_str().unwrap(),
+        "--imag-bytes",
+        imag_bytes,
+    ]);
+    assert_eq!(
+        code, 11,
+        "a gathered .so not listed in the manifest must be UNKNOWN/INCOMPLETE (11). \
+         stdout={stdout} stderr={stderr}"
+    );
+    let all = format!("{stdout}{stderr}");
+    assert!(
+        all.contains("imag_so_bytes") && all.contains("UNKNOWN"),
+        "must report the imag byte facet UNKNOWN: {all}"
+    );
+    let _ = std::fs::remove_file(&s);
+    let _ = std::fs::remove_file(&t);
+    let _ = std::fs::remove_file(&manifest);
+}
