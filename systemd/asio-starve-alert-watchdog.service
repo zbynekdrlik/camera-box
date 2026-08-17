@@ -1,0 +1,20 @@
+[Unit]
+# ASIO-SOURCE-STARVED alert (#1023), DEV1-SIDE. ONE measure -> decide -> alert pass. When stream OBS
+# starts before its ASIO device/matrix is ready, an ASIO source connects but its audio callback
+# perpetually STARVES (no samples) -> the source is silent and only an OBS reset fixes it. This
+# watchdog reads the per-source `asrc: … starved_blocks=` telemetry from stream's OBS log (from dev1,
+# ssh read-only) and pages when a watched source sits sustained at a high per-interval starvation
+# while a sibling ASIO source is healthy. SAME dev1-side topology as
+# cadence-alert-watchdog.service (issue 794) / frozen-input-alert-watchdog.service (issue 1052) /
+# network-reach-alert-watchdog.service (issue 1001). Alert-only: it makes NO rig-side change (a dev1
+# timer has no session-aware win-* MCP to restart the live stream OBS); the alert embeds the
+# OBS-reset recovery plan the ticket confirms.
+Description=camera-box ASIO-source-starved alert (#1023) — one measure/decide/alert pass
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Service]
+Type=oneshot
+# %h = the installing user's home on dev1. Adjust if the checkout lives elsewhere.
+ExecStart=%h/devel/camera-box/scripts/asio-starve-alert-watchdog.sh
+# One ssh OBS-log tail to the (reachable) stream box + a local state read; generous but never a hang.
+TimeoutStartSec=90
