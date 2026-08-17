@@ -68,6 +68,9 @@ const COLOUR: &str = r"printf 'PROBE_OK\ncapture chroma: u_dev=6.1 v_dev=8.8 -> 
 const GREY: &str = r"printf 'PROBE_OK\ncapture chroma: u_dev=0.5 v_dev=0.4 -> grayscale (source likely monochrome)\n'";
 const NO_LINE: &str = r"printf 'PROBE_OK\n'"; // reachable, but no fresh capture line
 const SSH_FAIL: &str = r"printf ''"; // ssh connect failed -> empty
+// #1079: a colour box whose frame ALSO carries the new rough= spatial-roughness metric.
+const COLOUR_ROUGH: &str =
+    r"printf 'PROBE_OK\ncapture chroma: u_dev=6.1 v_dev=8.8 rough=52.3 -> colour\n'";
 
 #[test]
 fn driver_mixed_fleet_pages_dead_port_for_the_grey_box() {
@@ -103,6 +106,28 @@ fn driver_mixed_fleet_pages_dead_port_for_the_grey_box() {
     assert!(
         !log.contains("WOULD alert: cam3"),
         "cam3 must not page: {log}"
+    );
+}
+
+#[test]
+fn driver_surfaces_rough_metric_in_per_box_log_1079() {
+    // #1079 report-only: the watchdog must SURFACE each box's rough= metric in its per-box log
+    // line (fleet-wide telemetry so a data-first follow-up can calibrate the noise threshold).
+    // No paging change this PR — a high-roughness colour box still classifies OK (colour=1); the
+    // rough= number is observational only until the threshold is calibrated.
+    let cases = format!("*) {COLOUR_ROUGH} ;;");
+    let log = run_driver(&cases, 1);
+    assert!(
+        log.contains("rough=52.3"),
+        "the per-box log must surface the rough= metric: {log}"
+    );
+    assert!(
+        log.contains("-> OK"),
+        "a high-roughness colour box still classifies OK this PR (report-only): {log}"
+    );
+    assert!(
+        !log.contains("WOULD alert"),
+        "report-only: roughness must not page this PR: {log}"
     );
 }
 
