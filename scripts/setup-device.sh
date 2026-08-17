@@ -665,8 +665,9 @@ EOF
 # temporal blend) is enabled by this env drop-in; the binary defaults the feature OFF. Every active
 # fleet box already runs it (hand-installed until now), so writing it here makes a re-provisioned
 # box keep the (30p) stream instead of silently regressing to 60p-only. Same enable-only convention
-# as the drop-ins above — effective on the box's next reboot. Byte-faithful to the live fleet file
-# (proven post-reboot by verify-device.sh's (y) acceptance check).
+# as the drop-ins above — effective on the box's next reboot. The heredoc below reproduces the live
+# fleet file byte-for-byte; verify-device.sh's (y) check then proves the drop-in AND the live (30p)
+# stream post-reboot.
 cat > /etc/systemd/system/camera-box.service.d/publish-30p.conf << 'EOF'
 [Service]
 Environment=CAMERA_BOX_PUBLISH_30P=1
