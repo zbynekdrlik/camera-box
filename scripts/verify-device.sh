@@ -93,6 +93,9 @@
 #   (x) ffmpeg is installed AND runs (`ffmpeg -version`) -- the #930 lipsync-test-mode runtime
 #       dependency (scripts/lipsync-test-mode.sh); any box may take cam2's painter role, so this
 #       is checked fleet-wide, never cam2-only.
+#   (y) camera-box.service has the ExecStartPre device-free bake-in (drop-in wired to the helper,
+#       helper stops the stray E2E burn UNIT + pkills the burn, never the painter) so every start
+#       frees /dev/video instead of crash-looping on "Device or resource busy" (#772).
 #
 # Exit: 0 iff every check passes. Non-zero if ANY check FAILs or is UNREADABLE (test-strictness --
 # an unreachable/unreadable check is a FAIL, never a silent pass).
@@ -124,6 +127,10 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/udev-camera-box.sh" # udev_camera_box_rule_is_burn_gated/
                                  # udev_camera_box_grabber_power_control_read_cmd/_from_output/
                                  # _power_control_is_on -- the (w) check (#894)
+# shellcheck source=scripts/lib/camera-box-free-device.sh
+. "$HERE/lib/camera-box-free-device.sh" # camera_box_free_device_dropin_wired/
+                                        # camera_box_free_device_script_is_burn_scoped -- the (y)
+                                        # ExecStartPre device-free bake-in check (#772)
 # clock-offset-guard.sh is sourced ONLY for its pure functions; its own
 # `[ "${BASH_SOURCE[0]}" != "${0}" ]` guard skips clock-offset-guard.sh's own `main "$@"` flow.
 # shellcheck source=scripts/clock-offset-guard.sh
@@ -555,6 +562,8 @@ Checks:
       permanently no-display so it never contests /dev/fb0 (#863)
   (w) udev rule is burn-gated (never the old unconditional restart) AND the live grabber's USB
       power/control currently reads "on" (drift check; N/A when no grabber is fitted, #894)
+  (y) camera-box ExecStartPre device-free bake-in present (drop-in + helper) so every start frees
+      /dev/video from a killed E2E run's stray capture burn (#772)
 
 Env: KERNEL_PIN (optional exact running-kernel pin), NDI_VERSION_PIN (default 6.3.2),
      DANTESYNC_OFFSET_FRESHNESS_S (max age of a fresh [NTP] offset line, default 300),
@@ -1028,6 +1037,28 @@ if [ "$rc" -eq 0 ] && [ -n "$FFMPEG_VERSION_LINE" ]; then
 else
   fail "ffmpeg not found/runnable on PATH (ssh rc=$rc) -- scripts/lipsync-test-mode.sh needs it \
 for the lipsync cross-validation TEST-mode variant (#930)"
+fi
+
+# (y) camera-box ExecStartPre device-free bake-in (#772) -----------------------------------------
+# setup-device.sh installs a helper + a camera-box.service.d/free-capture-device.conf drop-in whose
+# ExecStartPre frees /dev/video before every camera-box start, so a killed E2E run's stray
+# camera-box-burn-*.service can never crash-loop production on "Device or resource busy". Prove the
+# box actually has BOTH, and that the helper is burn-scoped (stops the burn UNIT, never the painter)
+# -- single-sourced in scripts/lib/camera-box-free-device.sh. Inserted BEFORE (q) -- see
+# .claude/rules/provisioning-scripts.md: (q) must remain the intentionally-LAST check.
+yrc=0
+FREE_DEV_DROPIN="$(ssh_box "cat /etc/systemd/system/camera-box.service.d/free-capture-device.conf 2>/dev/null")" || yrc=$?
+FREE_DEV_HELPER="$(ssh_box "cat /usr/local/bin/camera-box-free-capture-device.sh 2>/dev/null")" || true
+if [ "$yrc" -ne 0 ]; then
+  fail "could not read camera-box.service.d/free-capture-device.conf (ssh rc=$yrc)"
+elif [ -z "$FREE_DEV_DROPIN" ]; then
+  fail "camera-box.service.d/free-capture-device.conf is missing -- a killed E2E run's stray capture burn will crash-loop camera-box on 'Device or resource busy' (#772)"
+elif ! camera_box_free_device_dropin_wired "$FREE_DEV_DROPIN"; then
+  fail "camera-box.service.d/free-capture-device.conf is not wired to the ExecStartPre device-free helper (#772): $FREE_DEV_DROPIN"
+elif ! camera_box_free_device_script_is_burn_scoped "$FREE_DEV_HELPER"; then
+  fail "/usr/local/bin/camera-box-free-capture-device.sh missing or not burn-scoped -- it must stop the stray burn UNIT + pkill the burn and never touch the painter (#772)"
+else
+  ok "camera-box ExecStartPre frees /dev/video on every start (#772)"
 fi
 
 # (q) .bak cruft drift -- WARNING only, never a FAIL (#453) -------------------------------------

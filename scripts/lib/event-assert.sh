@@ -57,7 +57,7 @@ PAINT_COUNT=\$(pgrep -c -f -- "\$PAINT_PATTERN" 2>/dev/null); PAINT_COUNT="\${PA
 # Same shape: \`systemctl is-active\` prints ITS OWN state word (inactive/failed/unknown/...) even
 # though it exits non-zero for anything other than "active" -- same double-print trap as above.
 SERVICE_ACTIVE=\$(systemctl is-active camera-box 2>/dev/null); SERVICE_ACTIVE="\${SERVICE_ACTIVE:-unknown}"
-STRAY_UNITS=\$(systemctl list-units --all --plain --no-legend 'camera-box-burn-*' 'cam2-painter-deadman*' 2>/dev/null | awk '{print \$1}' | paste -sd, -)
+STRAY_UNITS=\$(systemctl list-units --all --plain --no-legend 'camera-box-burn-*' 'cam2-painter-deadman*' 'camera-box-deadman*' 2>/dev/null | awk '{print \$1}' | paste -sd, -)
 echo "PAINT_COUNT=\$PAINT_COUNT SERVICE_ACTIVE=\$SERVICE_ACTIVE STRAY_UNITS=\$STRAY_UNITS"
 REMOTE
 }

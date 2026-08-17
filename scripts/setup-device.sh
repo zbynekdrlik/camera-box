@@ -47,6 +47,11 @@ fail() {
                                    # (#894) -- also sourced (unmodified) by verify-device.sh's (w)
                                    # check and create-usb-linux.sh, single source of truth for the
                                    # conditional restart-on-hotplug + autosuspend-on-readd udev rule
+# shellcheck source=scripts/lib/camera-box-free-device.sh
+. "$HERE/lib/camera-box-free-device.sh"  # camera_box_free_capture_device_script_content /
+                                          # camera_box_free_capture_device_dropin_content (#772) --
+                                          # also sourced by verify-device.sh's (y) check; the
+                                          # ExecStartPre device-free bake-in for camera-box.service
 
 # GitHub repo + CI dev-build channel for installing the fleet-matching binary (#457 -- the fleet
 # runs CI dev-builds, e.g. 1.7.0-dev.157, never a GitHub release; see STEP 3 below).
@@ -661,6 +666,15 @@ cat > /etc/systemd/system/camera-box.service.d/genlock.conf << EOF
 [Service]
 Environment=CAMERA_BOX_GENLOCK_FPS=${CAMERA_GENLOCK_FPS}
 EOF
+# #772 -- ExecStartPre device-free bake-in: a small helper + drop-in so EVERY camera-box start
+# (the on-box dead-man, cleanup(), the next-run preflight, or a manual operator restart) first
+# frees /dev/video from a killed E2E run's stray capture burn, instead of crash-looping on
+# "Device or resource busy". Single-sourced in scripts/lib/camera-box-free-device.sh, verified by
+# verify-device.sh's (y) check. Enable-only convention: files written now, take effect next start.
+camera_box_free_capture_device_script_content > /usr/local/bin/camera-box-free-capture-device.sh
+chmod +x /usr/local/bin/camera-box-free-capture-device.sh
+camera_box_free_capture_device_dropin_content > /etc/systemd/system/camera-box.service.d/free-capture-device.conf
+echo "  camera-box.service.d/free-capture-device.conf installed -- frees /dev/video on every start (#772)"
 
 systemctl daemon-reload
 systemctl enable camera-box
