@@ -437,7 +437,14 @@ def projector_strays_to_close(wmctrl_output, kind):
     newest (highest NUMERIC X id == the projector just opened on the correct monitor). Returns []
     when 0 or 1 windows exist (nothing to heal -> a repeated seed is a no-op, the idempotence
     acceptance criterion). The survivor is chosen numerically, not lexicographically, so a
-    wmctrl/`sort` ordering of unequal-length ids can never pick the wrong one."""
+    wmctrl/`sort` ordering of unequal-length ids can never pick the wrong one.
+
+    MIRROR NOTE: the already-merged bash gate heal (scripts/lib/imag-projector-heal.sh) picks the
+    survivor with `sort | tail -1` (LEXICOGRAPHIC) -- equivalent here because real wmctrl ids are
+    fixed-width `0x`+8 hex digits (lexicographic == numeric), and this numeric form is strictly the
+    more robust of the two. The two mirrored keep-newest copies must stay behaviorally aligned.
+    keep-newest assumes no XID recycling of a freed lower id onto the fresh window (vanishingly
+    unlikely per-client id space); the gate `[0/8]` 1+1 count check is the backstop if it ever bit."""
     ids = projector_window_ids(wmctrl_output, kind)
     if len(ids) <= 1:
         return []
@@ -471,9 +478,14 @@ def _wmctrl_list_local():
 
 def _wmctrl_close_local(win_id):
     """Close one X window by id on the local display. Best-effort, never raises (a failed close is
-    warned, not fatal -- the gate [0/8] count check catches a stray that survives)."""
+    warned, not fatal -- the gate [0/8] count check catches a stray that survives). Injects
+    DISPLAY=:0 exactly like _wmctrl_list_local (symmetric with the remote close's `DISPLAY=:0`
+    prefix) so a caller with no DISPLAY set never ENUMERATES strays yet silently fails to CLOSE
+    them."""
     try:
-        subprocess.run(["wmctrl", "-i", "-c", win_id], timeout=10, check=False)
+        env = dict(os.environ)
+        env.setdefault("DISPLAY", ":0")
+        subprocess.run(["wmctrl", "-i", "-c", win_id], timeout=10, check=False, env=env)
     except Exception as e:
         print("WARN #769: local wmctrl -c %s failed: %s" % (win_id, e))
 
