@@ -1,0 +1,36 @@
+[Unit]
+# strih cambox FROZEN-INPUT alert (#1069), DEV1-SIDE. A SECOND instance of
+# scripts/frozen-input-alert-watchdog.sh -- same script, same decision core, pointed at STRIH's OBS
+# log and watching the CAMBOX camera branch (`NDI cam1`..`NDI camN`) via dynamic enumeration
+# (FROZEN_INPUT_ENUMERATE=1), never a static cam-number list. WHY a dev1-side alarm: strih's DistroAV
+# receiver can WEDGE a cambox input (`genlock-fifo audit 'NDI camN': received=` frozen, line still
+# printing) while strih keeps compositing the frozen frame into program (#1096 live incidents,
+# surfaced by the #935 forensics). #1052 watches the WRONG box (stream) + only `NDI 2ME PGM`; #1001
+# reachability + #391 render-liveness are both blind to a per-cambox-input receiver freeze. Same
+# dev1-side topology as frozen-input-alert-watchdog.service (#1052) / network-reach (#1001) /
+# imag-obs (#882): one flat session-agnostic ssh OBS-log tail to the (reachable) strih box + a local
+# state read; the alert MUST come from dev1 (the Windows boxes have no airuleset / Discord creds, and
+# a box whose input is silently frozen still looks healthy to every on-box check).
+Description=camera-box strih cambox frozen-input alert (#1069) — one measure/decide/alert pass
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Service]
+Type=oneshot
+# The RECEIVER whose OBS log carries the per-cambox `received=` counters = strih. SENDER=strih too
+# (the no-double-page guard keys on the ONE box whose log we read; #1001 does not track the cambox
+# senders). ENUMERATE=1 derives the watched cambox set from the live log each pass. A distinct state
+# file so the strih instance's per-source state never collides with the #1052 stream instance.
+Environment="FROZEN_INPUT_RECEIVER=strih|10.77.9.202"
+Environment="FROZEN_INPUT_SENDER=strih"
+Environment="FROZEN_INPUT_ENUMERATE=1"
+Environment="FROZEN_INPUT_ALERT_TAG=#1069"
+Environment="FROZEN_INPUT_ALERT_STATE_FILE=%t/camera-box-frozen-strih-input-alert.state"
+# ALERT-ONLY (the ticket asks for an alarm, not auto-restart): the cure is EMBEDDED in the alert text
+# (obs-liveness #391 convention). A wedged strih receiver only recovers via an OBS restart -- reattach
+# + recv-rebuild are ineffective (#1096); NL_STARTUP.ahk respawns one clean genlock OBS after a kill.
+Environment="FROZEN_INPUT_CURE_HINT=Restart strih OBS to clear the wedge -- reattach + recv-rebuild do NOT cure it (issue 1096). Force-kill obs64 on strih (Stop-Process -Name obs64 -Force) and NL_STARTUP.ahk respawns one clean genlock OBS, or run the issue-1096 harness escalation. If instead the cambox SENDER is down, check that camera-box on the affected cam."
+# %h = the installing user's home on dev1. Adjust if the checkout lives elsewhere.
+ExecStart=%h/devel/camera-box/scripts/frozen-input-alert-watchdog.sh
+# One enumeration OBS-log tail + one per watched cambox source (~4-7) to the reachable strih box, each
+# bounded by FROZEN_INPUT_SSH_TIMEOUT; generous but never a hang.
+TimeoutStartSec=180

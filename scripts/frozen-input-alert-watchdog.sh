@@ -47,6 +47,12 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/obs-watchdog-decision.sh"
 # shellcheck source=scripts/lib/frozen-input-health.sh
 . "$HERE/lib/frozen-input-health.sh"
+# shellcheck source=scripts/lib/mv-reverify-escalate.sh
+# #1069: the STRIH-instance enumeration read reuses mv_reverify_probe_raw (the round-24 #1093 flat
+# session-agnostic strih OBS-log tail) rather than a THIRD ssh-tail implementation. Source-only lib,
+# no top-level statements, and its own $HERE-relative sourcing is call-time only (never triggered by
+# the raw read), so sourcing it here is side-effect-free.
+. "$HERE/lib/mv-reverify-escalate.sh"
 
 DRY_RUN=0
 case "${1:-}" in
@@ -70,6 +76,30 @@ SENDER_NAME="${FROZEN_INPUT_SENDER:-strih}"
 # feed only -- the always-live input whose #767 receiver freeze this ticket targets. Listing a source
 # here IS the "expected live" scope (an idle input that may legitimately stop is simply not listed).
 SOURCES="${FROZEN_INPUT_SOURCES:-NDI 2ME PGM}"
+
+# -- #1069 dynamic-enumeration mode (default OFF -> the #1052 stream instance behaves identically) --
+# When ENUMERATE=1 the watched source LIST is derived from the receiver's live OBS log each pass
+# (never a static cam-number list) instead of the static SOURCES above -- for the STRIH instance that
+# watches the changing cambox camera branch (`NDI cam1`..`NDI camN`). The cambox filter is the pure
+# frozen_input_cambox_sources seam (include/exclude regexes, defaults match the live rig labels).
+ENUMERATE="${FROZEN_INPUT_ENUMERATE:-0}"
+ENUM_INCLUDE="${FROZEN_INPUT_ENUMERATE_INCLUDE:-cam}"
+ENUM_EXCLUDE="${FROZEN_INPUT_ENUMERATE_EXCLUDE:-2me|pgm|pvw|multiview|preview|program}"
+# A failed enumeration must NEVER read as a silent green (the standing rig-degradation rule / the
+# burn-target FAIL-CLOSED discipline): after this many CONSECUTIVE passes that enumerate ZERO cambox
+# sources while the receiver is reachable, fire ONE fail-loud "enumeration blind" WARN. Default ~2h.
+ENUM_BLIND_THRESHOLD="${FROZEN_INPUT_ENUM_BLIND_THRESHOLD:-24}"
+
+# The Discord ticket tag on every alert body. Default #1052 (the stream instance); the strih instance
+# sets #1069. The human "cure" line + the reachable-boxes phrase are env-overridable too so each
+# instance names its own remedy without the decision core knowing which box it watches.
+ALERT_TAG="${FROZEN_INPUT_ALERT_TAG:-#1052}"
+CURE_HINT="${FROZEN_INPUT_CURE_HINT:-Restart the OBS receiver for the frozen source on $RECEIVER_NAME.}"
+if [ "$SENDER_NAME" = "$RECEIVER_NAME" ]; then
+  REACHABLE_PHRASE="$RECEIVER_NAME is reachable"
+else
+  REACHABLE_PHRASE="both $SENDER_NAME and $RECEIVER_NAME are reachable"
+fi
 
 SSH_USER="${FROZEN_INPUT_SSH_USER:-newlevel}"
 SSH_PW="${FROZEN_INPUT_SSH_PW:-newlevel}"
@@ -128,6 +158,31 @@ probe_received() {
     | tail -1 \
     | sed -n 's/.*received=\([0-9][0-9]*\).*/\1/p' \
     | tail -1
+}
+
+# -- #1069 dynamic enumeration probe (dev1-local; NOT pure) -------------------------------------
+# probe_enumerate <receiver_ip> -> stdout: newline-separated cambox source names to watch this pass
+# (dynamic, derived from the receiver's live OBS log). The RAW OBS-log read reuses the round-24
+# mv_reverify_probe_raw (scripts/lib/mv-reverify-escalate.sh, #1093) -- the SAME flat session-agnostic
+# `sshpass … powershell … -Tail` strih OBS-log tail -- rather than a third ssh-tail; the cambox filter
+# is the pure frozen_input_cambox_sources seam. Override the whole RAW read with FROZEN_INPUT_ENUMERATE_CMD
+# (run with <receiver_ip>, stdout = raw log text) for a --dry-run smoke test / offline tests. An empty
+# read yields no sources -> the caller's enum-blind guard fires a fail-loud WARN (never a silent green).
+probe_enumerate() {
+  local ip="$1" raw
+  if [ -n "${FROZEN_INPUT_ENUMERATE_CMD:-}" ]; then
+    raw="$($FROZEN_INPUT_ENUMERATE_CMD "$ip" 2>/dev/null || true)"
+  else
+    # Reuse the #1093 strih OBS-log reader (source name unused for the raw read -> ""). Thread the
+    # watchdog's OWN FROZEN_INPUT_SSH_* env into mv_reverify_probe_raw's STRIH_*/tail/timeout knobs so
+    # the enumeration read and the per-source probe_received read share ONE credential + tail namespace
+    # -- otherwise changing only FROZEN_INPUT_SSH_PW would fix per-source reads while the enumeration
+    # read (on STRIH_PW) starts failing -> a spurious enumeration-BLIND WARN (review #1069).
+    raw="$(STRIH_USER="$SSH_USER" STRIH_PW="$SSH_PW" \
+      MV_REVERIFY_RECEIVED_SSH_TIMEOUT="$SSH_TIMEOUT" MV_REVERIFY_RECEIVED_TAIL="$OBS_LOG_TAIL" \
+      mv_reverify_probe_raw "$ip" "" 2>/dev/null || true)"
+  fi
+  printf '%s\n' "$raw" | frozen_input_cambox_sources "$ENUM_INCLUDE" "$ENUM_EXCLUDE"
 }
 
 # -- issue-1001 reachability read (never re-probed) ---------------------------------------------
@@ -221,7 +276,7 @@ handle_source() {
           else
             log "ALERT: firing Discord notification for '$source' tap broken"
             python3 "$NOTIFY" notify --body \
-              "⚠️ #1052 frozen-input: no \`genlock-fifo audit '$source'\` line on $RECEIVER_NAME for $unk consecutive passes ($REPO_SLUG). The freeze TAP for this source is BLIND (source renamed / re-created / dropped from the scene, or FROZEN_INPUT_SOURCES drifted from the live label) -- frozen-input coverage for '$source' is OFF until fixed." \
+              "⚠️ $ALERT_TAG frozen-input: no \`genlock-fifo audit '$source'\` line on $RECEIVER_NAME for $unk consecutive passes ($REPO_SLUG). The freeze TAP for this source is BLIND (source renamed / re-created / dropped from the scene, or FROZEN_INPUT_SOURCES drifted from the live label) -- frozen-input coverage for '$source' is OFF until fixed." \
               >/dev/null 2>&1 || log "tap-broken: airuleset.py notify failed (non-fatal)"
           fi
           write_state_field "tap_broken_${k}" 1
@@ -244,7 +299,7 @@ handle_source() {
       else
         log "RECOVERY: '$source' advancing again -- firing recovery notification"
         python3 "$NOTIFY" notify --body \
-          "✅ #1052 frozen-input: **$source** on $RECEIVER_NAME is advancing again ($REPO_SLUG)." \
+          "✅ $ALERT_TAG frozen-input: **$source** on $RECEIVER_NAME is advancing again ($REPO_SLUG)." \
           >/dev/null 2>&1 || log "RECOVERY: airuleset.py notify failed (non-fatal)"
       fi
       write_state_field "alerted_${k}" 0
@@ -295,15 +350,55 @@ handle_source() {
   if [ "${alert_now:-0}" = "1" ]; then
     log "ALERT: firing Discord notification for '$source' frozen"
     python3 "$NOTIFY" notify --body \
-      "🚨 #1052 frozen-input: **$detail** ($REPO_SLUG). Confirmed over ${CONFIRM_THRESHOLD} consecutive passes while both $SENDER_NAME and $RECEIVER_NAME are reachable -- the input is silently frozen on its last frame (a DistroAV receiver-rebind / upstream freeze). Restart the frozen source's OBS receiver on $RECEIVER_NAME." \
+      "🚨 $ALERT_TAG frozen-input: **$detail** ($REPO_SLUG). Confirmed over ${CONFIRM_THRESHOLD} consecutive passes while $REACHABLE_PHRASE -- the input is silently frozen on its last frame (a DistroAV receiver-rebind / upstream freeze). $CURE_HINT" \
       >/dev/null 2>&1 || log "ALERT: airuleset.py notify failed (non-fatal)"
   else
     log "ALERT: suppressed by throttle (pass ${prior_passes}/${ALERT_THROTTLE_PASSES})"
   fi
 }
 
+# -- #1069 enumeration + fail-loud blind guard --------------------------------------------------
+# enumerate_and_guard <receiver_ip> -> stdout: ';'-joined cambox source list to watch this pass.
+# Derives the watched set DYNAMICALLY from the receiver's live OBS log (never a static cam-number
+# list). A failed / empty enumeration must NEVER read as a silent green: track consecutive-empty
+# passes and fire ONE fail-loud "enumeration blind" WARN past ENUM_BLIND_THRESHOLD (the burn-target
+# FAIL-CLOSED discipline + the standing rig-degradation rule). Only called when the receiver is
+# reachable (a box-down pass SKIPs before here, leaving the counter untouched).
+enumerate_and_guard() {
+  local ip="$1" names joined blind blind_alerted
+  names="$(probe_enumerate "$ip")"
+  if [ -n "$names" ]; then
+    # A real enumeration proves the tap works -> reset the blind streak + latch.
+    write_state_field "enum_blind" 0
+    write_state_field "enum_blind_alerted" 0
+    joined="$(printf '%s' "$names" | paste -sd';' -)"
+    log "enumerated $(printf '%s\n' "$names" | grep -c .) cambox source(s) on $RECEIVER_NAME: $joined"
+    printf '%s' "$joined"
+    return 0
+  fi
+  # Zero cambox sources this pass -> a blind tap. Count it; WARN once past the threshold.
+  blind="$(read_state_field "enum_blind" 0)"
+  case "$blind" in '' | *[!0-9]*) blind=0 ;; esac
+  blind=$((blind + 1))
+  write_state_field "enum_blind" "$blind"
+  log "enumeration returned ZERO cambox sources on $RECEIVER_NAME (blind pass $blind/$ENUM_BLIND_THRESHOLD)"
+  blind_alerted="$(read_state_field "enum_blind_alerted" 0)"
+  if [ "$blind" -ge "$ENUM_BLIND_THRESHOLD" ] && [ "$blind_alerted" != "1" ]; then
+    if [ "$DRY_RUN" -eq 1 ]; then
+      log "[dry-run] WOULD alert: enumeration BLIND on $RECEIVER_NAME ($blind consecutive passes)"
+    else
+      log "ALERT: firing Discord notification for enumeration blind on $RECEIVER_NAME"
+      python3 "$NOTIFY" notify --body \
+        "⚠️ $ALERT_TAG frozen-input: enumeration BLIND on $RECEIVER_NAME -- zero cambox inputs matched (\`genlock-fifo audit '<src>':\` include=/$ENUM_INCLUDE/ exclude=/$ENUM_EXCLUDE/) for $blind consecutive passes ($REPO_SLUG). Frozen-input coverage for the $RECEIVER_NAME cambox branch is OFF (the OBS-log read is failing, or the cambox source labels drifted) -- no frozen-input page can fire until this is fixed." \
+        >/dev/null 2>&1 || log "enum-blind: airuleset.py notify failed (non-fatal)"
+    fi
+    write_state_field "enum_blind_alerted" 1
+  fi
+  printf '%s' ""
+}
+
 main() {
-  log "pass start (dry_run=$DRY_RUN, receiver='$RECEIVER', sender='$SENDER_NAME', sources='$SOURCES')"
+  log "pass start (dry_run=$DRY_RUN, receiver='$RECEIVER', sender='$SENDER_NAME', enumerate=$ENUMERATE, sources='$SOURCES')"
 
   # No-double-page guard: both the sender and the receiver box must be reachable per #1001's OWN
   # on-disk state, else #1001 already owns the page -> sender_reachable=0 -> every source SKIPs.
@@ -315,6 +410,19 @@ main() {
     log "issue-1001 state: $SENDER_NAME down=$sender_down $RECEIVER_NAME down=$receiver_down -> #1001 owns the page, SKIP all sources this pass"
   else
     sender_reachable=1
+  fi
+
+  # #1069 enumeration mode: derive the watched cambox set from the receiver's live OBS log each pass
+  # (never a static list). Only when the receiver is reachable -- a box-down pass has nothing to read
+  # and must not count as an enumeration-blind streak. A box-down pass leaves SOURCES empty -> the
+  # loop below simply iterates nothing (every source would SKIP anyway).
+  if [ "$ENUMERATE" = "1" ]; then
+    if [ "$sender_reachable" = "1" ]; then
+      SOURCES="$(enumerate_and_guard "$RECEIVER_IP")"
+    else
+      SOURCES=""
+      log "enumerate mode: receiver not reachable per #1001 -> no enumeration this pass (SKIP)"
+    fi
   fi
 
   # Iterate ';'-separated source names (they contain spaces, so split on ';' not whitespace).
