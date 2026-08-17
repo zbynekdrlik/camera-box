@@ -79,6 +79,21 @@ sourcing), network/mutating flow below.
   sleep-and-hope. Because the master (strih) is the first Windows canary, waiting it to steady state
   also gates the REST loop — slaves are verified only after the fleet has re-converged. `NTP_MASTER`
   defaults from `DANTESYNC_NTP_MASTER_NAME` (strih), the gate's own single source of truth.
+- **Read the ACTUAL root mount state (findmnt), NEVER a `touch` write probe** — the generated
+  upgrade+rollback scripts detect a read-only root (cam boxes) with
+  `findmnt -no OPTIONS / 2>/dev/null || awk '$2=="/"{print $4; exit}' /proc/mounts 2>/dev/null`
+  matched `case "$opts" in ro | ro,*)`, adopted VERBATIM from `setup-device.sh`'s
+  `ensure_root_writable()`/`root_mount_is_readonly()` (#599, also mirrored in `verify-device.sh`).
+  A `touch` write probe conflates a read-only filesystem with a mere permission error — and once
+  the script runs escalated (see the escalation bullet) it reads writable everywhere a real move
+  is possible, so it can BOTH miss a genuine ro root AND misfire on a permission quirk. The
+  `ro | ro,*` FIRST-comma-token match is why `errors=remount-ro` (present in every ext4 rw mount)
+  never false-positives — a bare `contains("ro")`/`,ro,`-anywhere match would. Both the detection
+  and the remount action key on `/` (never `-T "$bindir"`), so they cannot diverge. The initial
+  #1077 cut used a findmnt-guarded read with a `touch`-probe FALLBACK — the review caught that the
+  fallback reintroduced the exact conflation; the #599 `|| /proc/mounts` fallback reads REAL state
+  on the findmnt-less path too. This is the FIRST place to reuse for any future generated-remote
+  or on-box ro-root read in this repo.
 
 ## Testing (Tier-0)
 
