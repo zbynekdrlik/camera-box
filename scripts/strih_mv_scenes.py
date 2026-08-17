@@ -48,6 +48,13 @@ import obs_phase2 as op  # reuse the repo's ONE obs-websocket client (_conn/_rpc
 CAMS = range(1, 8)  # #753 (2026-07-14): fleet growth 6->7, cam7 is real + provisioned now
 _CAM_SCENE_RE = re.compile(r"^Cam (\d+)$")
 
+# #795/#759 — reattach() sentinel: the input HAS a bound ndi_source_name to re-apply, but the
+# DistroAV finder list was still EMPTY after the bounded wait, so the re-apply was SKIPPED (setting
+# ndi_source_name against an empty finder list mangles it — event review 2026-07-18). Distinct from
+# None (input missing / never seeded), so a caller — especially the WARN-only #759 cleanup path —
+# can tell "skipped to avoid mangling" from "no name to re-apply".
+FINDER_LIST_EMPTY = object()
+
 # obs-websocket v5 SceneItemTransform: only these fields are SETTABLE via SetSceneItemTransform.
 # GetSceneItemList also returns read-only computed fields (width/height/sourceWidth/sourceHeight)
 # that must be stripped before echoing a transform back, or the request can be rejected/ignored.
@@ -227,7 +234,8 @@ def measure_stats(obs, seconds: float) -> dict:
     return stats_delta(before, after)
 
 
-def reattach(obs, cam_n: int) -> "str | None":
+def reattach(obs, cam_n: int, *, finder_retries: int = 6, finder_wait_s: float = 1.0,
+             sleep=time.sleep):
     """#758 item 2 — sender-bounce re-attach: re-read an input's OWN current ndi_source_name and
     re-apply the EXACT same value via SetInputSettings, forcing OBS to tear down and
     re-establish its DistroAV NDI receive for that source. This is the SAME "SetInputSettings
@@ -248,12 +256,28 @@ def reattach(obs, cam_n: int) -> "str | None":
     nothing the probe cares about). Targets `f"NDI cam{cam_n}"` — the main, always-rendered
     input (per #761's own reasoning: it's continuously shown via the built-in OBS Multiview
     grid projector, so a stuck receiver here is a genuine sender-bounce symptom, same as it
-    always was for the clone)."""
+    always was for the clone).
+
+    #795/#759 (event review 2026-07-18): re-applying ndi_source_name via SetInputSettings while
+    OBS's DistroAV finder list is momentarily EMPTY MANGLES the value (OBS drops a name absent from
+    the combo's live item list). So before re-applying, wait (bounded: finder_retries x
+    finder_wait_s) for the finder list to be non-empty; if it never populates, SKIP the set entirely
+    — leave the input bound as-is — and return the FINDER_LIST_EMPTY sentinel. This matters most for
+    the WARN-only cleanup() reattach (#759): it never fails the run loud, so a mangled name here
+    would silently point a camera leg at garbage until the next run's [0/8] preflight caught it."""
     input_name = f"NDI cam{cam_n}"
     settings = op._rpc(obs, "GetInputSettings", {"inputName": input_name}, ignore_err=True)
     ndi_name = (settings or {}).get("inputSettings", {}).get("ndi_source_name")
     if not ndi_name:
         return None
+    # #795/#759: bounded wait for a NON-EMPTY finder list before the mangling-prone re-apply.
+    for attempt in range(max(1, finder_retries)):
+        if op._ndi_source_list(obs, input_name):
+            break
+        if attempt < finder_retries - 1:
+            sleep(finder_wait_s)
+    else:
+        return FINDER_LIST_EMPTY
     op._rpc(obs, "SetInputSettings",
             {"inputName": input_name, "inputSettings": {"ndi_source_name": ndi_name}},
             ignore_err=True)
@@ -278,7 +302,15 @@ def main() -> None:
     try:
         if args.reattach is not None:
             ndi_name = reattach(obs, args.reattach)
-            if ndi_name:
+            if ndi_name is FINDER_LIST_EMPTY:
+                # #795/#759: had a name to re-apply but the finder list stayed empty — SKIPPED the
+                # set to avoid mangling it. Distinct exit code (2) from the no-name-to-reattach
+                # case (1); the preflight_mv_reverify caller swallows both with `|| true` and lets
+                # the pixel re-sample decide, so this is informational for the operator/logs.
+                print(f"REATTACH SKIPPED: MV NDI cam{args.reattach}'s DistroAV finder list was "
+                      f"empty — NOT re-applying ndi_source_name (would mangle it); left bound as-is")
+                sys.exit(2)
+            elif ndi_name:
                 print(f"reattached MV NDI cam{args.reattach} -> ndi_source_name={ndi_name!r}")
             else:
                 print(f"REATTACH FAILED: MV NDI cam{args.reattach} has no ndi_source_name to "

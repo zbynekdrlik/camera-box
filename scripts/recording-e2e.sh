@@ -1081,6 +1081,97 @@ sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$
   "$(v4l2_neutral_apply_cmds)" \
   || echo "WARNING: could not pre-apply $CAMERA_NAME v4l2 controls (the [2/8] deploy step re-applies them)" >&2
 
+# #758 item 2 — sender-bounce liveness re-verify: after a box's [2/8]/[2b/8] service->burn-unit
+# swap, re-verify its "NDI cam<N>" main input still delivers CHANGING frames. A swap can leave
+# the box emitting NDI again while strih's receiver never re-locks on its own; ONE auto
+# re-attach (strih_mv_scenes.py --reattach, re-applying the input's OWN current
+# ndi_source_name) is tried, THEN the harness gives the reconnect real SETTLE time across a
+# bounded number of re-checks before failing loud — never StartRecord, never a cleanup that
+# ends with a leg still dead.
+#
+# #761 (2026-07-15, user-directed, KEPT): strih's "MV Cam N" scenes were switched to
+# SAME-SOURCE — the old "MV NDI cam<N>" low-bandwidth clone items are now DISABLED in those
+# scenes, so probing them always reads frozen regardless of camera health. This re-verify (and
+# strih_mv_scenes.py's reattach()) now targets the MAIN "NDI cam<N>" input instead — the SAME
+# per-box split as the [1/8] preflight above. It works without frozen-camera-gate.py's own
+# #747 PREVIEW warm-up (still --warm-settle 0, unchanged) because the built-in OBS Multiview
+# grid projector renders every "Cam N" scene's thumbnail continuously while open, keeping every
+# "NDI cam<N>" main input always-active regardless of program/preview state. IMAG stays on the
+# low-bandwidth clone model (#763 tracks unifying the two boxes later) — this function is
+# strih-only (called with a camera name/number, always resolves against $STRIH).
+#
+# Retry/settle budget calibrated from a LIVE measurement (2026-07-14), not guessed: this
+# mechanism's first two real CI exercises both failed cam1 with the ORIGINAL tight budget (a
+# single ~3.5s check, one re-attach, a 2s settle, one more ~3.5s check -- ~13s total after the
+# caller's own upfront `sleep 4`). A direct timed `systemctl restart camera-box` + repeated
+# frozen-camera-gate polling against the SAME "MV NDI cam1" clone (the pre-#761 target)
+# measured genuine recovery at t+11.4s -- inside the OLD budget's margin, but only barely,
+# matching the two real failures. The mid-run [3/8]-area frozen-camera-gate retry loop below
+# (FROZEN_CAM_ATTEMPTS=4 x FROZEN_CAM_RETRY_SLEEP=30s) already establishes this repo's OWN
+# precedent for how long a genuine post-deploy NDI reconnect can take -- this preflight check
+# reuses the SAME "attempts x settle" shape, just with a smaller per-camera budget (it fires up
+# to 7x in an ALL_CAMBOX sweep, vs. the mid-run gate's one-shot use), sized comfortably above
+# the measured 11.4s.
+preflight_mv_reverify() {
+  local box="$1" cam_n="$2"
+  [ "${ALL_CAMBOX:-0}" = "1" ] || return 0
+  case " $PREFLIGHT_EXCLUDED_CAMS " in *" $box "*) return 0 ;; esac
+  local attempts="${PREFLIGHT_MV_REVERIFY_ATTEMPTS:-3}"
+  local settle_s="${PREFLIGHT_MV_REVERIFY_SETTLE_S:-6}"
+  local a
+  for a in $(seq 1 "$attempts"); do
+    if python3 "$HERE/frozen-camera-gate.py" --host "$STRIH" --password "" \
+        --sources "NDI cam${cam_n}" --samples 2 --cadence 3.5 --threshold 1 --warm-settle 0 \
+        --verdict-bin "$PROBE_BIN_DIR/frozen-camera-gate" >/dev/null 2>&1; then
+      if [ "$a" -gt 1 ]; then
+        echo "    [sender-bounce] ${box} recovered on attempt ${a}/${attempts}" >&2
+      fi
+      return 0
+    fi
+    if [ "$a" -eq 1 ]; then
+      echo "    [sender-bounce] ${box} (NDI cam${cam_n}) shows no pixel change right after its deploy — attempting re-attach (#758 item 2)" >&2
+      python3 "$HERE/strih_mv_scenes.py" --host "$STRIH" --password "" --reattach "$cam_n" >&2 || true
+    fi
+    if [ "$a" -lt "$attempts" ]; then
+      echo "    [sender-bounce] ${box} attempt ${a}/${attempts} still no pixel change — settling ${settle_s}s for the NDI reconnect, then re-sampling" >&2
+      sleep "$settle_s"
+    fi
+  done
+  echo "ERROR: [preflight] FAIL: ${box} (NDI cam${cam_n}) still shows no pixel change after ${attempts} attempts (incl. one re-attach, ~$((attempts * 4 + (attempts - 1) * settle_s))s total) — the camera leg is dead right after its own deploy. Investigate the box directly (this run must not proceed with a known-dead leg)." >&2
+  return 1
+}
+
+# shellcheck disable=SC2317  # called only from the cleanup trap (SC2317 = "unreachable")
+cleanup_mv_reverify_active_boxes() {
+  # #759 (#758 item 2, cleanup half): WARN-only sender-bounce re-verify for the cleanup trap. After
+  # the device-restore phase above restarts camera-box on every active box (a sender bounce), a
+  # camera's NDI leg can come back up while strih's receiver never re-locks on its own -- leaving a
+  # dead leg that poisons the NEXT run's [0/8] preflight. Re-check each active camera and nudge it
+  # once (one fire-and-forget reattach), WARN-only: this runs inside the EXIT trap and must NEVER
+  # abort it (the deploy-time sites correctly fail the run loud; here we only warn), per the
+  # #328/#712/#713 cleanup discipline.
+  [ "${ALL_CAMBOX:-0}" = "1" ] || return 0
+  # Ordering/readiness guard: the trap can fire from an early [0/8] preflight failure BEFORE
+  # PROBE_BIN_DIR is set / the probe binaries exist. With no frozen-camera-gate binary there is
+  # nothing to verify against, so SKIP -- never fire a spurious reattach against an unset
+  # $PROBE_BIN_DIR. (preflight_mv_reverify is now defined ABOVE the trap, so it is always callable
+  # here regardless of how early the trap fires.)
+  if [ ! -x "${PROBE_BIN_DIR:-}/frozen-camera-gate" ]; then
+    echo "[cleanup] #759 sender-bounce reverify SKIPPED -- probe binaries not yet available (trap fired before deploy setup)" >&2
+    return 0
+  fi
+  echo "[cleanup] #759 sender-bounce reverify -- re-checking each active camera's NDI leg re-locked after its restart (WARN-only)" >&2
+  local _rvcam
+  for _rvcam in $CAMERA_ACTIVE_SET; do
+    # attempts=1: one quick check + one fire-and-forget reattach on failure, NO multi-attempt
+    # settle loop -- the next run's [0/8] preflight is the real gate; cleanup only nudges + warns,
+    # never blocking the trap long enough to outlast a GH-Actions cancellation grace window. The
+    # `|| echo` (never a hard fail) keeps a still-dead leg from ever aborting the cleanup trap.
+    PREFLIGHT_MV_REVERIFY_ATTEMPTS=1 preflight_mv_reverify "$_rvcam" "${_rvcam#cam}" \
+      || echo "    WARNING #759: ${_rvcam} NDI leg still not delivering changing frames after its cleanup restart (reattach nudged) -- the next run's [0/8] preflight will re-check/fail on it if still dead" >&2
+  done
+}
+
 # shellcheck disable=SC2317  # cleanup() runs via the EXIT/HUP/INT/TERM trap
 cleanup() {
   set +e
@@ -1254,6 +1345,11 @@ fi"
   # silently poisoned consecutive gate runs (2026-08-14). Reads CAMBOX_PARALLEL_FAILED_LABELS the
   # wait above populated; never exits (set +e region), never changes always-runs semantics.
   cambox_parallel_surface_painter_failure
+  # #759 (#758 item 2, cleanup half): now that every active box has finished restarting above (a
+  # sender bounce), re-verify each camera's "NDI camN" leg re-locked on strih and nudge it once if
+  # not — WARN-only, so a restart-left-unlocked leg never poisons the NEXT run's [0/8] preflight.
+  # Bounded (attempts=1 per box) + guarded so it can never abort this trap; see the function above.
+  cleanup_mv_reverify_active_boxes
   # The cam devices are now freed regardless of what the OBS restore does. #328: bound every OBS
   # call by `timeout` so a hung obs-websocket op (#328) can't block the trap even if it runs.
   # #649: StopRecord itself already ran, FIRST, at the top of this function (harness-started boxes
@@ -1667,66 +1763,6 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
     echo "[preflight] WARN: ${_divisor_msg}"
   fi
 fi
-
-# #758 item 2 — sender-bounce liveness re-verify: after a box's [2/8]/[2b/8] service->burn-unit
-# swap, re-verify its "NDI cam<N>" main input still delivers CHANGING frames. A swap can leave
-# the box emitting NDI again while strih's receiver never re-locks on its own; ONE auto
-# re-attach (strih_mv_scenes.py --reattach, re-applying the input's OWN current
-# ndi_source_name) is tried, THEN the harness gives the reconnect real SETTLE time across a
-# bounded number of re-checks before failing loud — never StartRecord, never a cleanup that
-# ends with a leg still dead.
-#
-# #761 (2026-07-15, user-directed, KEPT): strih's "MV Cam N" scenes were switched to
-# SAME-SOURCE — the old "MV NDI cam<N>" low-bandwidth clone items are now DISABLED in those
-# scenes, so probing them always reads frozen regardless of camera health. This re-verify (and
-# strih_mv_scenes.py's reattach()) now targets the MAIN "NDI cam<N>" input instead — the SAME
-# per-box split as the [1/8] preflight above. It works without frozen-camera-gate.py's own
-# #747 PREVIEW warm-up (still --warm-settle 0, unchanged) because the built-in OBS Multiview
-# grid projector renders every "Cam N" scene's thumbnail continuously while open, keeping every
-# "NDI cam<N>" main input always-active regardless of program/preview state. IMAG stays on the
-# low-bandwidth clone model (#763 tracks unifying the two boxes later) — this function is
-# strih-only (called with a camera name/number, always resolves against $STRIH).
-#
-# Retry/settle budget calibrated from a LIVE measurement (2026-07-14), not guessed: this
-# mechanism's first two real CI exercises both failed cam1 with the ORIGINAL tight budget (a
-# single ~3.5s check, one re-attach, a 2s settle, one more ~3.5s check -- ~13s total after the
-# caller's own upfront `sleep 4`). A direct timed `systemctl restart camera-box` + repeated
-# frozen-camera-gate polling against the SAME "MV NDI cam1" clone (the pre-#761 target)
-# measured genuine recovery at t+11.4s -- inside the OLD budget's margin, but only barely,
-# matching the two real failures. The mid-run [3/8]-area frozen-camera-gate retry loop below
-# (FROZEN_CAM_ATTEMPTS=4 x FROZEN_CAM_RETRY_SLEEP=30s) already establishes this repo's OWN
-# precedent for how long a genuine post-deploy NDI reconnect can take -- this preflight check
-# reuses the SAME "attempts x settle" shape, just with a smaller per-camera budget (it fires up
-# to 7x in an ALL_CAMBOX sweep, vs. the mid-run gate's one-shot use), sized comfortably above
-# the measured 11.4s.
-preflight_mv_reverify() {
-  local box="$1" cam_n="$2"
-  [ "${ALL_CAMBOX:-0}" = "1" ] || return 0
-  case " $PREFLIGHT_EXCLUDED_CAMS " in *" $box "*) return 0 ;; esac
-  local attempts="${PREFLIGHT_MV_REVERIFY_ATTEMPTS:-3}"
-  local settle_s="${PREFLIGHT_MV_REVERIFY_SETTLE_S:-6}"
-  local a
-  for a in $(seq 1 "$attempts"); do
-    if python3 "$HERE/frozen-camera-gate.py" --host "$STRIH" --password "" \
-        --sources "NDI cam${cam_n}" --samples 2 --cadence 3.5 --threshold 1 --warm-settle 0 \
-        --verdict-bin "$PROBE_BIN_DIR/frozen-camera-gate" >/dev/null 2>&1; then
-      if [ "$a" -gt 1 ]; then
-        echo "    [sender-bounce] ${box} recovered on attempt ${a}/${attempts}" >&2
-      fi
-      return 0
-    fi
-    if [ "$a" -eq 1 ]; then
-      echo "    [sender-bounce] ${box} (NDI cam${cam_n}) shows no pixel change right after its deploy — attempting re-attach (#758 item 2)" >&2
-      python3 "$HERE/strih_mv_scenes.py" --host "$STRIH" --password "" --reattach "$cam_n" >&2 || true
-    fi
-    if [ "$a" -lt "$attempts" ]; then
-      echo "    [sender-bounce] ${box} attempt ${a}/${attempts} still no pixel change — settling ${settle_s}s for the NDI reconnect, then re-sampling" >&2
-      sleep "$settle_s"
-    fi
-  done
-  echo "ERROR: [preflight] FAIL: ${box} (NDI cam${cam_n}) still shows no pixel change after ${attempts} attempts (incl. one re-attach, ~$((attempts * 4 + (attempts - 1) * settle_s))s total) — the camera leg is dead right after its own deploy. Investigate the box directly (this run must not proceed with a known-dead leg)." >&2
-  return 1
-}
 
 echo "[2/8] $CAMERA_NAME (${CAM1_IP}) — probe-featured camera-box with the #174 capture BURN (emits NDI w/ $CAMERA_NAME mark, NO grab #179)"
 # #174 + #179: deploy the freshly-built PROBE-featured camera-box (carries the #174 capture

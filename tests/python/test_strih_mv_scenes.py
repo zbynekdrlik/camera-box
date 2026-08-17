@@ -171,17 +171,27 @@ class _FakeObsRpc:
 
 
 def test_reattach_reapplies_the_inputs_own_current_ndi_source_name(monkeypatch):
-    # #761: reattach() now targets the MAIN "NDI camN" input (strih's "MV Cam N" scenes were
-    # switched to same-source, the old "MV NDI camN" clone items are disabled and no longer
-    # what the sender-bounce probe checks).
-    fake = _FakeObsRpc({"inputSettings": {"ndi_source_name": "CAM3 (usb)"}})
+    # #761: reattach() targets the MAIN "NDI camN" input (strih's "MV Cam N" scenes were switched
+    # to same-source, the old "MV NDI camN" clone items are disabled and no longer what the
+    # sender-bounce probe checks).
+    # #795/#759: reattach() now ALSO consults the DistroAV finder list (op._ndi_source_list) before
+    # re-applying, and only sets once it is non-empty — so the recorded rpc sequence is now
+    # GetInputSettings -> GetInputPropertiesListPropertyItems -> SetInputSettings.
+    fake = _FakeObsRpcWithFinder(
+        {"inputSettings": {"ndi_source_name": "CAM3 (usb)"}},
+        finder_items=[{"itemValue": "CAM3 (usb)"}],
+    )
     monkeypatch.setattr(strih_mv_scenes.op, "_rpc", fake.rpc)
 
     result = strih_mv_scenes.reattach(object(), 5)
 
     assert result == "CAM3 (usb)"
     assert fake.calls[0] == ("GetInputSettings", {"inputName": "NDI cam5"})
-    assert fake.calls[1] == (
+    assert (
+        "GetInputPropertiesListPropertyItems",
+        {"inputName": "NDI cam5", "propertyName": "ndi_source_name"},
+    ) in fake.calls
+    assert fake.calls[-1] == (
         "SetInputSettings",
         {"inputName": "NDI cam5", "inputSettings": {"ndi_source_name": "CAM3 (usb)"}},
     )
