@@ -3094,13 +3094,15 @@ fn check_imag_report_clean_when_every_value_matches_the_pinned_set_463() {
     let log = format!("genlock: latency = 3 ms\n{GENLOCK_RT_PIN_OK_LINE}");
     let body = r#"
         rc=0
-        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "$LOG" "/usr/lib/x86_64-linux-gnu/obs-plugins/distroav.so" "1" "locked" "Jul 05 10:15:22 imag-nb dantesync[1234]: [PTP] LOCK Drift 12 ns/s offset -340ns" "$TS_STATES" "$POWER" "29" "$DP" || rc=$?
+        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "$LOG" "/usr/lib/x86_64-linux-gnu/obs-plugins/distroav.so" "1" "locked" "Jul 05 10:15:22 imag-nb dantesync[1234]: [PTP] LOCK Drift 12 ns/s offset -340ns" "$TS_STATES" "$POWER" "29" "$DP" "$CL" || rc=$?
         echo "RC=$rc"
     "#;
     // #1040: the 13th/14th args are a clean power-envelope block + the pinned 29 W — must ALSO read
     // clean, or this "everything matches" case regresses to UNKNOWN on the new power_envelope check.
     // #780: the 15th arg is a clean display-path block — same reason, or this case regresses to
     // UNKNOWN on the new display_path check #10.
+    // #784: the 16th arg is a clean /proc/cmdline block — same reason, or this case regresses to
+    // UNKNOWN on the new cmdline_isolation check #11.
     let out = run_sourced(
         body,
         &[
@@ -3108,6 +3110,7 @@ fn check_imag_report_clean_when_every_value_matches_the_pinned_set_463() {
             ("TS_STATES", TIMESYNC_STATES_CLEAN_FIXTURE),
             ("POWER", POWER_GATHER_CLEAN_29W),
             ("DP", DISPLAY_PATH_GATHER_CLEAN),
+            ("CL", CMDLINE_GATHER_CLEAN),
         ],
     );
     assert!(
@@ -3638,11 +3641,12 @@ fn check_imag_report_end_to_end_from_a_realistic_imag_log_463() {
         fps="$(fps_from_log "$LOG")"
         latency="$(genlock_latency_ms_from_log "$LOG")"
         rc=0
-        check_imag_report "DSHA_A" "DSHA_A" "60" "$fps" "3" "$latency" "$LOG" "/plugin/path" "1" "locked" "$DANTESYNC_LOG" "$TS_STATES" "$POWER" "29" "$DP" || rc=$?
+        check_imag_report "DSHA_A" "DSHA_A" "60" "$fps" "3" "$latency" "$LOG" "/plugin/path" "1" "locked" "$DANTESYNC_LOG" "$TS_STATES" "$POWER" "29" "$DP" "$CL" || rc=$?
         echo "RC=$rc"
     "#;
     // #1040: a clean power-envelope block + pinned 29 W keeps this end-to-end case fully clean.
     // #780: a clean display-path block (15th) keeps it clean on the new display_path check #10.
+    // #784: a clean /proc/cmdline block (16th) keeps it clean on the new cmdline_isolation check #11.
     let out = run_sourced(
         body,
         &[
@@ -3651,6 +3655,7 @@ fn check_imag_report_end_to_end_from_a_realistic_imag_log_463() {
             ("TS_STATES", TIMESYNC_STATES_CLEAN_FIXTURE),
             ("POWER", POWER_GATHER_CLEAN_29W),
             ("DP", DISPLAY_PATH_GATHER_CLEAN),
+            ("CL", CMDLINE_GATHER_CLEAN),
         ],
     );
     assert!(
@@ -3748,11 +3753,12 @@ fn check_imag_report_dantesync_lock_ok_when_locked_and_pinned_489() {
     let log = format!("genlock: latency = 3 ms\n{GENLOCK_RT_PIN_OK_LINE}");
     let body = r#"
         rc=0
-        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "$LOG" "/plugin/path" "1" "locked" "$DANTESYNC_LOG" "$TS_STATES" "$POWER" "29" "$DP" || rc=$?
+        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "$LOG" "/plugin/path" "1" "locked" "$DANTESYNC_LOG" "$TS_STATES" "$POWER" "29" "$DP" "$CL" || rc=$?
         echo "RC=$rc"
     "#;
     // #1040: a clean power-envelope block + pinned 29 W keeps this "everything else clean" case clean.
     // #780: a clean display-path block (15th) keeps it clean on the new display_path check #10.
+    // #784: a clean /proc/cmdline block (16th) keeps it clean on the new cmdline_isolation check #11.
     let out = run_sourced(
         body,
         &[
@@ -3761,6 +3767,7 @@ fn check_imag_report_dantesync_lock_ok_when_locked_and_pinned_489() {
             ("TS_STATES", TIMESYNC_STATES_CLEAN_FIXTURE),
             ("POWER", POWER_GATHER_CLEAN_29W),
             ("DP", DISPLAY_PATH_GATHER_CLEAN),
+            ("CL", CMDLINE_GATHER_CLEAN),
         ],
     );
     assert!(out.contains("RC=0"), "locked matches pin -> clean: {out:?}");
