@@ -380,6 +380,12 @@ pub mod e2e_latency_gate;
 pub mod imag_leg_gate;
 pub mod optical_floor;
 
+// issue 1033 — the ALL-CAMBOX cross-camera DELIVERY-latency spread gate: REPORT-ONLY today (the
+// fleet data is not tight-green — cam1's delivery lottery), one-line-flippable to blocking by a
+// follow-up. Pure crate-root logic (Tier-0), consumed thinly by recording-verdict; reuses the
+// switch_latency 16 ms bound (no new constant).
+pub mod delivery_spread_gate;
+
 // #889 (user decision on #883, 2026-07-30) — the per-cambox-window `copies`/`gaps` terms become
 // REPORT-ONLY (still computed, still printed, no longer fail the window/run). No probe deps, so
 // it unit-tests Tier-0; `probe::recording_segments::window_segment` calls this and wires the
