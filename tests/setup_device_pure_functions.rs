@@ -318,6 +318,31 @@ fn bak_cruft_cleanup_is_wired_into_ndi_and_dropin_provisioning_steps() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// #1087 — STEP 7 bakes the publish-30p.conf drop-in so a re-provisioned box keeps the secondary
+// "CAMn (30p)" 30fps blend stream (issue 792). The binary defaults the feature OFF; this env
+// drop-in is what enables it, byte-faithful to the live fleet file. Enable-only (written now,
+// effective on the box's next reboot) -- proven post-reboot by verify-device.sh's (y) check.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn publish_30p_dropin_is_written_in_step_7() {
+    let body = std::fs::read_to_string(script()).unwrap();
+    let guard_pos = body
+        .find("stop here -- never run the destructive")
+        .expect("source-guard comment must still be present");
+    let live_flow = &body[guard_pos..];
+    assert!(
+        live_flow.contains("/etc/systemd/system/camera-box.service.d/publish-30p.conf"),
+        "STEP 7 must write the publish-30p.conf drop-in so a re-provisioned box keeps the (30p) \
+         blend stream (issue 792 / #1087)"
+    );
+    assert!(
+        live_flow.contains("CAMERA_BOX_PUBLISH_30P=1"),
+        "the publish-30p.conf drop-in must set CAMERA_BOX_PUBLISH_30P=1 (issue 792 / #1087)"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
 // #599 — ensure_root_writable() / restore_root_mode(): STEP 15-18 run apt-get/dpkg/systemctl +
 // write files under /etc, all of which require a writable root. On a FIRST provisioning run root
 // is naturally rw (the ro fstab STEP 18 writes only takes effect on the NEXT reboot), but on an

@@ -686,6 +686,80 @@ CPUAffinity=3'
 }
 
 // ---------------------------------------------------------------------------------------------
+// (y) publish-30p.conf drop-in + live "CAMn (30p)" blend stream (issue 792 feature, baked into
+// provisioning by #1087). Two facets: the drop-in enables the secondary 30fps stream, AND the
+// box must actually be publishing it (an old binary predating issue 792 still FAILs facet 2).
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn publish_30p_dropin_value_parses_the_value() {
+    let (code, out, err) = run_sourced(
+        r#"TEXT='[Service]
+Environment=CAMERA_BOX_PUBLISH_30P=1'
+           publish_30p_dropin_value "$TEXT""#,
+    );
+    assert_eq!(code, 0, "stderr: {err}");
+    assert_eq!(out.trim(), "1");
+}
+
+#[test]
+fn publish_30p_dropin_value_empty_when_missing() {
+    let (code, out, err) = run_sourced(r#"publish_30p_dropin_value """#);
+    assert_eq!(code, 0, "stderr: {err}");
+    assert_eq!(out.trim(), "");
+}
+
+#[test]
+fn publish_30p_stream_live_counts_publisher_activity() {
+    // Both the one-shot startup line and the recurring per-interval output line count as "the
+    // (30p) stream is genuinely being published" -- mirrors the live cam1/cam2 journal shape.
+    let (code, out, err) = run_sourced(
+        r#"TEXT='INFO camera_box: #792 publish-30p ACTIVE: streaming as 30p (blend=0.5, channel depth 4)
+INFO camera_box::publish_30p: #792 publish-30p: 300 outputs (300 blended, 0 solo), 0 tee drops'
+           publish_30p_stream_live "$TEXT""#,
+    );
+    assert_eq!(code, 0, "stderr: {err}");
+    assert_eq!(out.trim(), "2");
+}
+
+#[test]
+fn publish_30p_stream_live_zero_when_stream_absent() {
+    // A box publishing only the primary 'usb' source (no publish-30p publisher lines) reports 0
+    // -> the (y) check FAILs facet 2 even when the drop-in is on disk (e.g. an old binary).
+    let (code, out, err) = run_sourced(
+        r#"TEXT='INFO camera_box: NDI sender ready, streaming as usb'
+           publish_30p_stream_live "$TEXT""#,
+    );
+    assert_eq!(code, 0, "stderr: {err}");
+    assert_eq!(out.trim(), "0");
+}
+
+#[test]
+fn check_publish_30p_is_wired_into_the_live_flow() {
+    // The pure parsers above are dead unless the live flow CALLs them -- assert the real call
+    // sites (with their args) appear AFTER the source-guard, and that the check list advertises
+    // the new (y) letter. Same non-tautological pattern as check_q_is_wired / dantesync-liveness.
+    let body = std::fs::read_to_string(script()).unwrap();
+    let guard_pos = body
+        .find("never run the live SSH flow below.")
+        .expect("source-guard comment must still be present");
+    let live_flow = &body[guard_pos..];
+    assert!(
+        live_flow.contains("publish_30p_dropin_value \"$P30_CONF\""),
+        "the live flow must CALL publish_30p_dropin_value on the publish-30p.conf drop-in (#1087)"
+    );
+    assert!(
+        live_flow.contains("publish_30p_stream_live \"$CB_JOURNAL\""),
+        "the live flow must CALL publish_30p_stream_live over CB_JOURNAL to prove the (30p) stream \
+         is genuinely being published, not merely enabled on disk (#1087)"
+    );
+    assert!(
+        live_flow.contains("(y)"),
+        "the check list / (y) block must advertise the new publish-30p acceptance check (#1087)"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
 // (g) libndi root-owned symlink chain
 // ---------------------------------------------------------------------------------------------
 
