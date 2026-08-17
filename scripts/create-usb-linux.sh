@@ -302,8 +302,15 @@ apt-get install -y \
 # cam2 clone (2026-07-13) had no `fuser` at all, false-FAILing rig-mode.sh's #464 KMS-held check
 # AND silently no-op'ing recording-e2e.sh's capture-release busy-wait (`fuser` exits 127 ->
 # the `while` loop's condition reads false immediately, same as "already released").
+# #782: alsa-utils (provides `amixer`/`alsactl`) joins the SAME dual-bake -- the oldest boxes
+# (cam1/cam3) were provisioned before it was in either list, so their interkom Mic/PCM gain was
+# neither readable nor persisted across boot. Baked into the base image AND applied by
+# setup-device.sh STEP 16 (per-box gain via `amixer` + `alsactl store`). The asound.conf/mixer
+# BAKE stays in setup-device.sh, not here -- it needs the live HID card present, which the
+# chroot base-image build does not have.
 apt-get install -y \
     libasound2t64 \
+    alsa-utils \
     libavahi-client3 \
     libavahi-common3 \
     avahi-daemon \
