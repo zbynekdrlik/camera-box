@@ -9,8 +9,8 @@
 //! `spread_gate_pass = spread_ms <= `[`crate::switch_latency::SPREAD_THRESHOLD_MS`] (16 ms). But
 //! that block, UNLIKE the source-side sweep right above it (which does `all_pass &= sv.pass`),
 //! never touched `all_pass` — the metric was *computed + structurally forbidden from gating*, with
-//! a test (`all_cambox_delivery_latency_spread_never_gates_all_pass_286`) pinning the no-fold.
-//! There was no gate seam at all — not even flip-ready.
+//! a test pinning the no-fold. There was no gate seam at all — not even flip-ready. Issue 1033
+//! replaces that with THIS report-only seam (the fold now flows through it, one line from LIVE).
 //!
 //! ## Why REPORT-ONLY today — the data (issue 1033 design comment, 2026-08-17)
 //!
@@ -56,10 +56,12 @@ pub const DELIVERY_SPREAD_BOUND_MS: f64 = crate::switch_latency::SPREAD_THRESHOL
 /// promote it to a LIVE blocking gate once cam1's lottery is killed and ~5 consecutive green runs
 /// hold delivery spread ≤ ~10 ms.
 pub fn gates_overall_pass() -> bool {
-    // issue 1033 — RED: intentionally the WRONG, naive would-gate-LIVE value. The GREEN commit
-    // flips this to `false` (REPORT-ONLY), which is what the fleet data supports. Shipping `true`
-    // here would red the 10+ recent green runs whose delivery spread sits at ~66–81 ms.
-    true
+    // issue 1033 — REPORT-ONLY today: the delivery-spread term flows + is surfaced but never reds
+    // a run. The ONE line a follow-up flips to `true` to promote it to a LIVE blocking gate, once
+    // cam1's delivery lottery is killed (issue-909 grabber) and ~5 consecutive green E2E runs hold
+    // the delivery spread ≤ ~10 ms. Shipping `true` today would red the 10+ recent green runs
+    // whose delivery spread sits at ~66–81 ms (the fleet is not tight-green yet).
+    false
 }
 
 /// Pure fold: does a delivery-spread outcome (`spread_ok` = `spread_ms <= DELIVERY_SPREAD_BOUND_MS`)

@@ -404,12 +404,14 @@ fn merge_subprocess_exits_nonzero_when_av_sync_unknown_from_silent_audio_861_rea
 /// two cameras whose measured p50 latencies differ by far more than the 16ms
 /// `switch_latency::SPREAD_THRESHOLD_MS` MUST make the merge subprocess exit non-zero.
 ///
-/// (NOT the SAME gate as the #286 `all_cambox_delivery_latency`/`cross_camera_spread_ms` block —
-/// that one is DELIBERATELY report-only per its own code comment ("does NOT fold into all_pass")
-/// and per `all_cambox_delivery_latency_spread_never_gates_all_pass_286` in
-/// `src/bin/recording-verdict.rs`'s own test module; this test targets the #624
-/// `all_cambox_latency` block specifically, which DOES gate — asserting the #286 one gates here
-/// would misrepresent an intentionally-advisory signal as a hard gate.)
+/// (NOT the SAME gate as the #286/#1033 `all_cambox_delivery_latency`/`cross_camera_spread_ms`
+/// block — that one now folds THROUGH the report-only `delivery_spread_gate` seam, which ships
+/// `gates_overall_pass()==false` today (issue 1033: the fleet is not tight-green — cam1's delivery
+/// lottery), so its fold is a NO-OP and it never reds a run yet; pinned by
+/// `all_cambox_delivery_latency_spread_folds_through_report_only_seam_1033` in
+/// `src/bin/recording-verdict.rs`'s own test module. This test targets the #624 `all_cambox_latency`
+/// block specifically, which DOES gate hard — asserting the delivery one gates here would
+/// misrepresent an intentionally report-only signal as a live gate.)
 #[test]
 fn merge_subprocess_exits_nonzero_when_cross_camera_latency_spread_gate_fails_703() {
     let dir = tempdir("spread-fail");
