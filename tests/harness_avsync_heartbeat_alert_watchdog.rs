@@ -847,3 +847,80 @@ fn unit_files_exist_and_are_wired_correctly() {
         "the timer must be installable"
     );
 }
+
+// ================================================================================================
+// #814 second net -- identical-verdict (offset,conf) dedup. The heartbeat epoch is UtcNow written
+// every pass, so it ADVANCES each pass; epoch-only dedup does NOT stop a FROZEN input (a
+// fresh-looking clip whose CONTENT is frozen) from re-forwarding the byte-identical (offset,conf)
+// verdict every ~90 s. This net suppresses a POST whose stamp-stripped signature equals the last
+// forwarded one, mirroring the incident's own "dup-suppressed (frozen input?)" second net.
+// ================================================================================================
+
+#[test]
+fn verdict_signature_strips_the_timestamp_814() {
+    // The pure helper: two passes measuring the SAME (frozen) clip differ ONLY in their
+    // "[timestamp]" bracket -- everything else (offset, conf, verdict) is deterministic from the
+    // offset, so stripping the bracket makes an identical (offset,conf) byte-identical.
+    let (code, out, err) = run_lib(
+        "avsync_heartbeat_verdict_signature \
+         'measured: [2026-07-26 14:25:40] AV offset +2 fr (+80 ms) conf 3.6 :: ZNIZ latency o 80'",
+    );
+    assert_eq!(code, 0, "stderr={err}");
+    assert_eq!(
+        out.trim(),
+        "measured: AV offset +2 fr (+80 ms) conf 3.6 :: ZNIZ latency o 80",
+        "the signature must be the status with only the [timestamp] bracket removed"
+    );
+
+    // A second pass with a DIFFERENT timestamp but the SAME offset/conf yields the SAME signature.
+    let (_c2, out2, _e2) = run_lib(
+        "avsync_heartbeat_verdict_signature \
+         'measured: [2026-07-26 14:31:10] AV offset +2 fr (+80 ms) conf 3.6 :: ZNIZ latency o 80'",
+    );
+    assert_eq!(
+        out.trim(),
+        out2.trim(),
+        "only the timestamp differs -> identical signature"
+    );
+}
+
+#[test]
+fn an_identical_offset_conf_verdict_is_dedup_suppressed_across_epochs_814() {
+    let h = Harness::new(&fresh_body("ok"), &fresh_body("ok"));
+    // Two forwardable verdicts with DIFFERENT epochs (1111 vs 2222) and different timestamps but
+    // the SAME (offset,conf) -- the frozen-input signature. Only the first must reach Discord.
+    let body = concat!(
+        ". \"$SCRIPT\"\n",
+        "maybe_forward_verdict 1111 'measured: [2026-07-26 14:25:40] AV offset +2 fr (+80 ms) conf 3.6 :: ZNIZ latency o 80'\n",
+        "maybe_forward_verdict 2222 'measured: [2026-07-26 14:31:10] AV offset +2 fr (+80 ms) conf 3.6 :: ZNIZ latency o 80'\n",
+    );
+    let (code, _out, err) = h.run_bash_body(body);
+    assert_eq!(code, 0, "stderr={err}");
+    assert_eq!(
+        h.discord_call_count(),
+        1,
+        "a frozen input re-measuring the SAME (offset,conf) across two epochs must forward ONCE, \
+         not every pass -- the second identical verdict is dedup-suppressed (frozen input?)"
+    );
+}
+
+#[test]
+fn a_changed_offset_verdict_forwards_again_even_after_a_dup_814() {
+    let h = Harness::new(&fresh_body("ok"), &fresh_body("ok"));
+    // v1 (+2) forwards; v2 (+2, dup) suppressed; v3 (-1, a genuine change) must forward again --
+    // the dedup must never block a real change in the measured offset.
+    let body = concat!(
+        ". \"$SCRIPT\"\n",
+        "maybe_forward_verdict 1111 'measured: [2026-07-26 14:25:40] AV offset +2 fr (+80 ms) conf 3.6 :: ZNIZ latency o 80'\n",
+        "maybe_forward_verdict 2222 'measured: [2026-07-26 14:31:10] AV offset +2 fr (+80 ms) conf 3.6 :: ZNIZ latency o 80'\n",
+        "maybe_forward_verdict 3333 'measured: [2026-07-26 14:40:00] AV offset -1 fr (-40 ms) conf 3.6 :: ZVYS latency o 40'\n",
+    );
+    let (code, _out, err) = h.run_bash_body(body);
+    assert_eq!(code, 0, "stderr={err}");
+    assert_eq!(
+        h.discord_call_count(),
+        2,
+        "a CHANGED (offset,conf) after a dup must forward again -- dedup must not over-suppress a \
+         genuine change"
+    );
+}

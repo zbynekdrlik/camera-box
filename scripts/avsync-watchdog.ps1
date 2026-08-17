@@ -42,6 +42,7 @@ $webhookCfg  = 'C:\avsync\discord-webhook.txt'
 $grabUrl     = 'rtmp://127.0.0.1:1234/live/obs-e2e-test'   # the REAL production broadcast (service.json) -- see issue 812's comment
 $pythonExe   = 'C:\avsync\venv\Scripts\python.exe'
 $measureScript = 'C:\avsync\av_sync_measure.py'
+$freshnessScript = 'C:\avsync\avsync_freshness.py'   # #814 pure grab-freshness gate (single source of truth)
 $syncnetRepo = 'C:\avsync\syncnet_python'
 
 function Get-Webhook {
@@ -84,17 +85,29 @@ while ($true) {
   Remove-Item $clip -Force -ErrorAction SilentlyContinue
   & ffmpeg -v error -y -i $grabUrl -t 35 -vf "scale=1280:-2,fps=25" -c:v libx264 -preset veryfast -crf 26 -c:a aac -ar 16000 -ac 1 $clip 2>&1 | Out-File $ferr
   $rc = $LASTEXITCODE
-  $reason = $null
-  if ($rc -ne 0) { $reason = "ffmpeg rc=$rc (relay/stream down)" }
-  elseif (-not (Test-Path $clip)) { $reason = 'no clip produced' }
-  else {
+  # #814: gather the grab facts here (I/O) but DELEGATE the fresh/stale DECISION to the pure
+  # single-source-of-truth gate avsync_freshness.py -- no thresholds duplicated in this loop. The
+  # grab itself is the liveness probe (a dead stream -> dead relay -> ffmpeg rc!=0 / no fresh clip),
+  # so no second OBS-WS probe is needed. A failed decider call fails SAFE to NO-SIGNAL -- a verdict
+  # is never emitted on unprovable freshness. Facts are passed as locale-safe integers.
+  $size = -1; $ageSec = -1; $dur = -1
+  if (Test-Path $clip) {
     $fi = Get-Item $clip
-    $ageSec = ((Get-Date) - $fi.LastWriteTime).TotalSeconds
-    $dur = -1
-    try { $dur = [double](& ffprobe -v error -show_entries format=duration -of csv=p=0 $clip) } catch { $dur = -1 }
-    if ($fi.Length -lt 200000) { $reason = "clip too small ($($fi.Length) B)" }
-    elseif ($ageSec -gt 180) { $reason = "clip STALE (age $([int]$ageSec)s) - grab did not run" }
-    elseif ($dur -ge 0 -and $dur -lt 20) { $reason = "clip too short ($([math]::Round($dur,1))s < 20s)" }
+    $size = $fi.Length
+    $ageSec = [int]((Get-Date) - $fi.LastWriteTime).TotalSeconds
+    try { $dur = [int][double](& ffprobe -v error -show_entries format=duration -of csv=p=0 $clip) } catch { $dur = -1 }
+  }
+  $reason = $null
+  $freshOut = & $pythonExe $freshnessScript --grab-rc $rc --size-bytes $size --mtime-age-s $ageSec --duration-s $dur 2>&1
+  $freshRc = $LASTEXITCODE
+  $freshText = "$($freshOut | Select-Object -Last 1)"
+  # Fail CLOSED: proceed to measure ONLY when the decider clearly says OK (exit 0 AND a literal
+  # "OK"). ANY other outcome -- a NO-SIGNAL verdict, a non-zero exit, or an unexpected output (e.g.
+  # a missing interpreter, which on Windows leaves $LASTEXITCODE unchanged at a stale prior value)
+  # -- is NO-SIGNAL, so a verdict is never emitted on unprovable freshness.
+  if ($freshRc -ne 0 -or $freshText -notmatch '^\s*OK\s*$') {
+    if ($freshText -match 'NO-SIGNAL:\s*(.*)$') { $reason = $Matches[1] }
+    else { $reason = "freshness gate unavailable (rc=$freshRc): $freshText" }
   }
   $webhook = Get-Webhook
   if ($reason) {

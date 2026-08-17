@@ -125,6 +125,31 @@ build_keepalive_task_xml() {
 XML
 }
 
+# avsync_freshness_go_no_go -> #813 GO/NO-GO self-test for the #814 grab-freshness gate: PROVE the
+# pure decider yields NO-SIGNAL for a dead relay (ffmpeg rc=-5, a plausible-looking stale clip still
+# on disk) rather than a stale verdict -- the exact 2h09m frozen-input case. Prints the observed
+# verdict and returns 0 iff it is NO-SIGNAL. Skips gracefully (returns 0, "SKIP") when python3 is
+# unavailable so the pure planner never hard-fails on a box without it; the harness runs it where
+# python3 exists.
+avsync_freshness_go_no_go() {
+  local here gate out
+  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  gate="$here/avsync_freshness.py"
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "GO/NO-GO SKIP: python3 not available (run on a box that has it)"
+    return 0
+  fi
+  if [ ! -f "$gate" ]; then
+    echo "GO/NO-GO FAIL: freshness gate not found at $gate" >&2
+    return 1
+  fi
+  out="$(python3 "$gate" --grab-rc -5 --size-bytes 500000 --mtime-age-s 7200 --duration-s 35 2>&1)" || true
+  case "$out" in
+    "NO-SIGNAL:"*) echo "GO/NO-GO PASS: dead relay -> $out"; return 0 ;;
+    *) echo "GO/NO-GO FAIL: dead relay produced '$out' (expected a NO-SIGNAL verdict)" >&2; return 1 ;;
+  esac
+}
+
 # --- source-guard: when sourced (the unit tests), stop here ----------------------------------------
 if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
   return 0
@@ -172,18 +197,28 @@ main() {
 # Run this via the ${mcp} MCP Shell -- writing scripts + registering scheduled tasks is exactly
 # what the win-* MCP is for here (same convention as scripts/obs-self-heal-install.sh).
 #
-# STEP 0: deploy the 3 script files (FileUpload/FileWrite via ${mcp}):
+# STEP 0: deploy the 4 script files (FileUpload/FileWrite via ${mcp}):
 #   scripts/avsync-watchdog.ps1      -> C:\\avsync\\watchdog.ps1               (OVERWRITES the
 #                                        existing hand-built file at the SAME path the current
 #                                        \`avsync-watchdog\` task already targets -- no task-action
 #                                        change needed for this one)
 #   scripts/avsync-vlc-monitor.ps1   -> C:\\avsync\\avsync-vlc-monitor.ps1     (new file)
 #   scripts/avsync-keepalive.ps1     -> C:\\avsync\\avsync-keepalive.ps1       (new file)
+#   scripts/avsync_freshness.py      -> C:\\avsync\\avsync_freshness.py        (NEW -- the #814 pure
+#                                        grab-freshness gate; avsync-watchdog.ps1 + av_sync_measure.py
+#                                        both call it, so it MUST be present -- if absent, every pass
+#                                        fails SAFE to NO-SIGNAL, never a stale verdict)
 #
 # STEP 0b: write the Discord webhook URL to C:\\avsync\\discord-webhook.txt (ONE line, the full
 #          webhook URL -- this is a SECRET, never committed to the repo; paste it directly on the
 #          box). Until this file exists, avsync-watchdog.ps1 runs fine but never posts to Discord
 #          (fail-safe no-op, not a crash).
+#
+# STEP 0c: #813 GO/NO-GO -- PROVE the freshness gate rejects a dead relay before trusting the loop.
+#          On dev1: source this script and run  avsync_freshness_go_no_go  (must print NO-SIGNAL).
+#          On the box: python3 C:\\avsync\\avsync_freshness.py --grab-rc -5 --size-bytes 500000
+#          --mtime-age-s 7200 --duration-s 35   MUST print a NO-SIGNAL line, never an offset --
+#          this is the exact 2h09m stale-clip case the whole ticket exists to prevent.
 #
 # STEP 1: the EXISTING \`avsync-watchdog\` task needs NO XML change (its BootTrigger + action
 #          already point at C:\\avsync\\watchdog.ps1, which now has the fixed content). If it is
