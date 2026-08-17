@@ -9148,3 +9148,20 @@ No push/PR/rig touch (worktree worker).
 - Functional verification: `enable-nic-wol.ps1 -VerifyOnly` run live on BOTH boxes → `VERIFY OK` (magic packet can wake, NIC armed); `-DryRun` shows the one `*WakeOnPattern` hardening `WOULD-CHANGE`. `wake-box.sh --dry-run` resolves MAC+targets; python SO_BROADCAST transport sent 102 bytes to loopback (no rig broadcast sent). Temp .ps1 removed from both boxes.
 - TDD (`tests/harness_wol_1053.rs`, 13 tests): behavioral RED→GREEN for the pure lib (proven RED — 8/13 fail with impl absent, all 13 pass with it, harness reads fixtures at runtime) + static anchors for wake-box.sh / enable-nic-wol.ps1 / wol-targets.txt.
 - Verify (Tier-0, cargo does NOT run here #477): `cargo test --no-run --test harness_wol_1053` + direct binary run 13/13; `cargo fmt --all --check` clean; `cargo clippy --all-targets -D warnings` clean; `shellcheck -x` clean. No edit to recording-e2e.sh / rig-mode.sh (only NEW files) → no static-anchor collision risk.
+- issue 813 (measurement A/V-sync line pre-event GO/NO-GO assert + stream-state-bound liveness alarm):
+  root cause = the existing dev1 avsync-heartbeat-alert-watchdog.sh alarms on heartbeat STALENESS
+  only + unconditionally, so it missed the 2026-08-17 silent-audio content-death (fresh heartbeat,
+  status "measured: unknown, candidates: 0") and can't tell an off-air box from a dead watchdog
+  during a live event. Added a PURE single-source decider scripts/avsync_lineup.py
+  (heartbeat_fresh + status_is_healthy_measured + stream_is_live -> preflight_verdict + liveness_alarm,
+  fail-CLOSED) mirroring avsync_freshness.py/event_assert.py; a thin dev1 caller
+  scripts/avsync-lineup-alert-watchdog.sh (default liveness pass BOUND to stream outputActive via
+  obs_phase2.py stream-status; --assert one-shot pre-event GO/NO-GO with forwarder-timer + real
+  Discord 200 test-ping) reusing obs-watchdog-decision.sh confirm/throttle + avsync-heartbeat.sh
+  probe/parse + airuleset.py notify (no fourth measurement path); systemd 5-min timer.
+  RED test_avsync_lineup.py b66cfdd50 -> GREEN avsync_lineup.py 5ff4f91c4 (29 pytest); feature +
+  harness e06150af0 (11 rust harness tests). Local Tier-0 green (fmt, clippy -D warnings, pytest).
+  GOTCHA: scripts/lib/avsync-heartbeat.sh's `set -euo pipefail` LEAKS -e into the caller and a
+  `set -uo pipefail` re-assert does NOT clear it; a `var="$(decider)"` where the decider exits 1
+  (a preflight NO-GO) then aborts at the ASSIGNMENT before the verdict prints -> needs explicit
+  `set +e` (ci-testing-gotchas.md leaked-set-e trap).
