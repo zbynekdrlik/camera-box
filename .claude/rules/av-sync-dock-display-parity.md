@@ -43,3 +43,22 @@ wallclock). #1004 result: residual is UNSTABLE (dock's own within-window swing 2
 25–35ms, exceeds the +9..+53ms run-to-run residual spread) — #952's ~55ms is NOT a stable constant.
 Decision locked in `DOCK_LOCK_DISPLAY_ADDITIVE_MS = 0.0`: the dock is a coarse MONITOR, the offline
 optical `--av-sync` chain is the sole authoritative gate. Never compensate with a guessed constant.
+
+## Live-dock cluster CONSTANTS can't be recalibrated from an offline gate-run audit (#735)
+`DOCK_CLUSTER_TOL_MS` / `DOCK_CLUSTER_MAX_MAD_MS` / `DOCK_CLUSTER_MIN_MATCHED` are the live dock's
+own densest-cluster window/honesty gates. Do NOT port an offline `recording-verdict --av-sync`
+audit value onto them (issue 735 evaluated exactly that — tightening `DOCK_CLUSTER_TOL_MS` 60→25 to
+match issue 733's offline default — and rejected it). The live continuous-rolling dock is
+intrinsically much noisier than a clean offline gate-run decode: mining 1381 live `LOCKED/UPDATED
+offset=... matched=... mad=` estimates off the running STREAM-box dock showed `mad_ms` median ~29ms
+(min 12.9, bulk 25–40, 77% > the 25ms entry ceiling, held only by the #999 hold multiplier) with
+the offset CENTER wobbling >150ms — vs the tight 7–9ms `mad` of the 3 clean runs issue 733's 25ms
+was calibrated on. So issue 733's "wide window blends a nearby sub-cluster → tighten to reveal a 7–9ms
+core" pattern does NOT reproduce live (no hidden tight core over 1381 samples), and tightening the
+window below the cluster's natural width would only drop `matched` toward the `MIN_MATCHED=8` floor
+and lock LESS reliably — worse for a MONITOR that gates nothing.
+**How to characterize it:** the dock logs NO raw candidate stream — the post-cluster `LOCKED/UPDATED
+offset=... matched=... mad=` lines ARE the characterization; mine their distribution (agent-session
+win-stream-snv MCP, not ssh) from `$env:APPDATA\obs-studio\logs\<latest>.txt`. Any live-dock-constant
+change is a VALUE seam mirrored byte-for-byte in `camera-box-audio.hpp` (`CB_CLUSTER_TOL_MS` etc.) +
+the ~150min genlock vendored-OBS build — high cost for a monitor whose precision gates nothing.
