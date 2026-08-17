@@ -165,25 +165,59 @@ pub fn transition_is_clean(wakeup_latency_ns: Option<i64>, onset_undecodable: u3
 
 /// Build the cold-cut onset report from the ordered schedule windows (+ their onset frames).
 ///
-/// `hidden_secs_before` for a cambox's window is the gap from the same cambox's PREVIOUS window
-/// end; for a cambox's FIRST appearance it is anchored to the run's first switch
-/// (`windows[0].start_ns`), which UNDER-estimates the true hidden time (the camera was also hidden
-/// during the pre-sweep preroll) — deliberately conservative, so a first appearance is never
-/// falsely flagged cold.
+/// `hidden_secs_before` is defined ONLY for a cambox's 2nd+ appearance — the gap from the same
+/// cambox's PREVIOUS window `end_ns` to this window's `start_ns`, which is exactly known. A
+/// cambox's FIRST appearance has NO known prior hidden duration (its pre-sweep state — the
+/// certified prod scene, preroll, or on-program — is not in the schedule), so it is never a cold
+/// candidate: only well-defined `>= COLD_HIDDEN_SECS` gaps between two windows of the same cambox
+/// count, avoiding a false positive on an unknowable first-appearance interval.
 pub fn build_report(windows: &[ColdCutWindow]) -> ColdCutReport {
-    // #768 RED stub — the real derivation lands in the GREEN commit. Returns an empty report so the
-    // cold-transition tests (cold flagging + onset gap detection) fail until then.
-    let _ = windows;
+    use std::collections::HashMap;
+
+    // The end_ns of each cambox's most recent PRIOR window, keyed by label.
+    let mut last_end: HashMap<&str, i64> = HashMap::new();
+    let mut transitions: Vec<ColdCutTransition> = Vec::new();
+
+    for w in windows {
+        // Only a 2nd+ appearance has an exactly-known hidden duration; skip the first.
+        if let Some(&prev_end) = last_end.get(w.cambox.as_str()) {
+            let hidden_secs_before = (w.start_ns - prev_end) as f64 / 1e9;
+            if hidden_secs_before >= COLD_HIDDEN_SECS {
+                let (delivered, decodable, undecodable, wakeup) =
+                    onset_stats(w.start_ns, &w.onset_frames);
+                transitions.push(ColdCutTransition {
+                    cambox: w.cambox.clone(),
+                    hidden_secs_before,
+                    onset_frames: delivered,
+                    onset_decodable: decodable,
+                    onset_undecodable: undecodable,
+                    wakeup_latency_ns: wakeup,
+                    clean: transition_is_clean(wakeup, undecodable),
+                });
+            }
+        }
+        last_end.insert(w.cambox.as_str(), w.end_ns);
+    }
+
+    let cold_transitions_found = transitions.len();
+    let worst_wakeup_latency_ns = transitions.iter().filter_map(|t| t.wakeup_latency_ns).max();
+    let any_wakeup_over_max = transitions.iter().any(|t| {
+        t.wakeup_latency_ns
+            .is_some_and(|w| w > WAKEUP_LATENCY_MAX_NS)
+    });
+    let any_wakeup_missing = transitions.iter().any(|t| t.wakeup_latency_ns.is_none());
+    let any_onset_undecodable = transitions.iter().any(|t| t.onset_undecodable > 0);
+
     ColdCutReport {
         cold_hidden_secs: COLD_HIDDEN_SECS,
         onset_window_ns: ONSET_WINDOW_NS,
         wakeup_latency_max_ns: WAKEUP_LATENCY_MAX_NS,
-        cold_transitions_found: 0,
-        worst_wakeup_latency_ns: None,
-        any_wakeup_over_max: false,
-        any_wakeup_missing: false,
-        any_onset_undecodable: false,
-        transitions: Vec::new(),
+        cold_transitions_found,
+        worst_wakeup_latency_ns,
+        any_wakeup_over_max,
+        any_wakeup_missing,
+        any_onset_undecodable,
+        transitions,
     }
 }
 
@@ -351,27 +385,21 @@ mod tests {
     }
 
     #[test]
-    fn first_appearance_is_anchored_to_first_switch_and_never_cold() {
-        // CAM1's first appearance (window 0) is anchored to the first switch -> 0s hidden.
-        // CAM3's first appearance at seg2 is 60s after the first switch, but a FIRST appearance is
-        // anchored conservatively to windows[0].start_ns, so it is 60s -> COLD by the anchor rule,
-        // which is acceptable (it WAS hidden >= 60s since the first switch). The point of the anchor
-        // is only to never OVER-flag; here 60s is a real lower bound. window 0 must be 0s.
+    fn first_appearance_is_never_a_cold_candidate() {
+        // Every cambox appears exactly ONCE -> all are first appearances with no known prior hidden
+        // duration -> none is a cold candidate, even CAM3 at 60s after the first switch (its
+        // pre-sweep state is unknown, so flagging it would be a false positive on unknowable data).
         let windows = vec![
             window("CAM1", BASE, warm_onset(BASE)),
             window("CAM2", BASE + SEG_NS, warm_onset(BASE + SEG_NS)),
             window("CAM3", BASE + 2 * SEG_NS, warm_onset(BASE + 2 * SEG_NS)),
         ];
         let r = build_report(&windows);
-        // window 0 (CAM1 first) is 0s hidden -> never cold; CAM2 (30s) not cold; CAM3 (60s) cold.
-        assert!(
-            !r.transitions.iter().any(|t| t.cambox == "CAM1"),
-            "CAM1's only (first) appearance is 0s hidden, never cold"
+        assert_eq!(
+            r.cold_transitions_found, 0,
+            "a first appearance has no known prior hidden duration -> never cold"
         );
-        assert!(
-            !r.transitions.iter().any(|t| t.cambox == "CAM2"),
-            "CAM2 first appearance is only 30s after the first switch, not cold"
-        );
+        assert!(r.transitions.is_empty());
     }
 
     #[test]
