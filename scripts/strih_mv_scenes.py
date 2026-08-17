@@ -48,12 +48,14 @@ import obs_phase2 as op  # reuse the repo's ONE obs-websocket client (_conn/_rpc
 CAMS = range(1, 8)  # #753 (2026-07-14): fleet growth 6->7, cam7 is real + provisioned now
 _CAM_SCENE_RE = re.compile(r"^Cam (\d+)$")
 
-# #795/#759 — reattach() sentinel: the input HAS a bound ndi_source_name to re-apply, but the
-# DistroAV finder list was still EMPTY after the bounded wait, so the re-apply was SKIPPED (setting
-# ndi_source_name against an empty finder list mangles it — event review 2026-07-18). Distinct from
-# None (input missing / never seeded), so a caller — especially the WARN-only #759 cleanup path —
-# can tell "skipped to avoid mangling" from "no name to re-apply".
-FINDER_LIST_EMPTY = object()
+# #795/#759 — reattach() sentinel: the input HAS a bound ndi_source_name to re-apply, but that name
+# was NOT present in the DistroAV finder list after the bounded wait (an empty list, or a non-empty
+# list that does not offer THIS source — the sender is not currently discoverable), so the re-apply
+# was SKIPPED. SetInputSettings with a name absent from the combo's live item list MANGLES it (event
+# review 2026-07-18: "mangles names when OBS's NDI finder list is empty"). Distinct from None (input
+# missing / never seeded), so a caller — especially the WARN-only #759 cleanup path — can tell
+# "skipped to avoid mangling" from "no name to re-apply".
+NDI_SOURCE_NOT_DISCOVERABLE = object()
 
 # obs-websocket v5 SceneItemTransform: only these fields are SETTABLE via SetSceneItemTransform.
 # GetSceneItemList also returns read-only computed fields (width/height/sourceWidth/sourceHeight)
@@ -258,26 +260,28 @@ def reattach(obs, cam_n: int, *, finder_retries: int = 6, finder_wait_s: float =
     grid projector, so a stuck receiver here is a genuine sender-bounce symptom, same as it
     always was for the clone).
 
-    #795/#759 (event review 2026-07-18): re-applying ndi_source_name via SetInputSettings while
-    OBS's DistroAV finder list is momentarily EMPTY MANGLES the value (OBS drops a name absent from
-    the combo's live item list). So before re-applying, wait (bounded: finder_retries x
-    finder_wait_s) for the finder list to be non-empty; if it never populates, SKIP the set entirely
-    — leave the input bound as-is — and return the FINDER_LIST_EMPTY sentinel. This matters most for
-    the WARN-only cleanup() reattach (#759): it never fails the run loud, so a mangled name here
-    would silently point a camera leg at garbage until the next run's [0/8] preflight caught it."""
+    #795/#759 (event review 2026-07-18): re-applying ndi_source_name via SetInputSettings MANGLES
+    the value whenever the target name is absent from OBS's DistroAV finder list — an empty list, OR
+    a non-empty list that does not (yet) offer THIS source because its sender is still bouncing. So
+    before re-applying, wait (bounded: finder_retries x finder_wait_s) for the bound name to APPEAR
+    in the finder list; if it never does, SKIP the set entirely — leave the input bound as-is — and
+    return the NDI_SOURCE_NOT_DISCOVERABLE sentinel. This matters most for the WARN-only cleanup()
+    reattach (#759): it never fails the run loud, so a mangled name here would silently point a
+    camera leg at garbage until the next run's [0/8] preflight caught it."""
     input_name = f"NDI cam{cam_n}"
     settings = op._rpc(obs, "GetInputSettings", {"inputName": input_name}, ignore_err=True)
     ndi_name = (settings or {}).get("inputSettings", {}).get("ndi_source_name")
     if not ndi_name:
         return None
-    # #795/#759: bounded wait for a NON-EMPTY finder list before the mangling-prone re-apply.
+    # #795/#759: only re-apply once the bound name is actually PRESENT in the finder list (mere
+    # non-emptiness is not enough — a list lacking THIS name would still mangle it on set).
     for attempt in range(max(1, finder_retries)):
-        if op._ndi_source_list(obs, input_name):
+        if ndi_name in op._ndi_source_list(obs, input_name):
             break
         if attempt < finder_retries - 1:
             sleep(finder_wait_s)
     else:
-        return FINDER_LIST_EMPTY
+        return NDI_SOURCE_NOT_DISCOVERABLE
     op._rpc(obs, "SetInputSettings",
             {"inputName": input_name, "inputSettings": {"ndi_source_name": ndi_name}},
             ignore_err=True)
@@ -302,13 +306,14 @@ def main() -> None:
     try:
         if args.reattach is not None:
             ndi_name = reattach(obs, args.reattach)
-            if ndi_name is FINDER_LIST_EMPTY:
-                # #795/#759: had a name to re-apply but the finder list stayed empty — SKIPPED the
-                # set to avoid mangling it. Distinct exit code (2) from the no-name-to-reattach
-                # case (1); the preflight_mv_reverify caller swallows both with `|| true` and lets
-                # the pixel re-sample decide, so this is informational for the operator/logs.
-                print(f"REATTACH SKIPPED: MV NDI cam{args.reattach}'s DistroAV finder list was "
-                      f"empty — NOT re-applying ndi_source_name (would mangle it); left bound as-is")
+            if ndi_name is NDI_SOURCE_NOT_DISCOVERABLE:
+                # #795/#759: had a name to re-apply but it never appeared in the DistroAV finder
+                # list — SKIPPED the set to avoid mangling it. Distinct exit code (2) from the
+                # no-name-to-reattach case (1); the preflight_mv_reverify caller swallows both with
+                # `|| true` and lets the pixel re-sample decide, so this is informational only.
+                print(f"REATTACH SKIPPED: MV NDI cam{args.reattach}'s bound source is not in the "
+                      f"DistroAV finder list — NOT re-applying ndi_source_name (would mangle it); "
+                      f"left bound as-is")
                 sys.exit(2)
             elif ndi_name:
                 print(f"reattached MV NDI cam{args.reattach} -> ndi_source_name={ndi_name!r}")

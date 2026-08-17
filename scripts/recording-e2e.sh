@@ -1118,9 +1118,14 @@ preflight_mv_reverify() {
   case " $PREFLIGHT_EXCLUDED_CAMS " in *" $box "*) return 0 ;; esac
   local attempts="${PREFLIGHT_MV_REVERIFY_ATTEMPTS:-3}"
   local settle_s="${PREFLIGHT_MV_REVERIFY_SETTLE_S:-6}"
+  # #759 review: bound each OBS-touching python call by `timeout` (the #328 discipline — a hung
+  # obs-websocket op must NEVER block, least of all the cleanup trap this is now called from). The
+  # calls are already internally bounded (create_connection timeout + per-RPC timeout); this is the
+  # belt-and-suspenders outer bound, harmless in the happy path (both complete well under it).
+  local call_timeout="${PREFLIGHT_MV_REVERIFY_CALL_TIMEOUT:-30}"
   local a
   for a in $(seq 1 "$attempts"); do
-    if python3 "$HERE/frozen-camera-gate.py" --host "$STRIH" --password "" \
+    if timeout "$call_timeout" python3 "$HERE/frozen-camera-gate.py" --host "$STRIH" --password "" \
         --sources "NDI cam${cam_n}" --samples 2 --cadence 3.5 --threshold 1 --warm-settle 0 \
         --verdict-bin "$PROBE_BIN_DIR/frozen-camera-gate" >/dev/null 2>&1; then
       if [ "$a" -gt 1 ]; then
@@ -1130,14 +1135,20 @@ preflight_mv_reverify() {
     fi
     if [ "$a" -eq 1 ]; then
       echo "    [sender-bounce] ${box} (NDI cam${cam_n}) shows no pixel change right after its deploy — attempting re-attach (#758 item 2)" >&2
-      python3 "$HERE/strih_mv_scenes.py" --host "$STRIH" --password "" --reattach "$cam_n" >&2 || true
+      timeout "$call_timeout" python3 "$HERE/strih_mv_scenes.py" --host "$STRIH" --password "" --reattach "$cam_n" >&2 || true
     fi
     if [ "$a" -lt "$attempts" ]; then
       echo "    [sender-bounce] ${box} attempt ${a}/${attempts} still no pixel change — settling ${settle_s}s for the NDI reconnect, then re-sampling" >&2
       sleep "$settle_s"
     fi
   done
-  echo "ERROR: [preflight] FAIL: ${box} (NDI cam${cam_n}) still shows no pixel change after ${attempts} attempts (incl. one re-attach, ~$((attempts * 4 + (attempts - 1) * settle_s))s total) — the camera leg is dead right after its own deploy. Investigate the box directly (this run must not proceed with a known-dead leg)." >&2
+  # #759 review: in the WARN-only cleanup context the run is already ending and nothing is being
+  # aborted, so DON'T emit the deploy-time "ERROR ... this run must not proceed" line there (it reads
+  # as a spurious run-abort in the teardown log). The cleanup caller emits its own accurate WARNING;
+  # the deploy-time callers (|| exit 1) keep the loud ERROR that correctly precedes their abort.
+  if [ "${PREFLIGHT_MV_REVERIFY_CONTEXT:-preflight}" != "cleanup" ]; then
+    echo "ERROR: [preflight] FAIL: ${box} (NDI cam${cam_n}) still shows no pixel change after ${attempts} attempts (incl. one re-attach, ~$((attempts * 4 + (attempts - 1) * settle_s))s total) — the camera leg is dead right after its own deploy. Investigate the box directly (this run must not proceed with a known-dead leg)." >&2
+  fi
   return 1
 }
 
@@ -1167,7 +1178,7 @@ cleanup_mv_reverify_active_boxes() {
     # settle loop -- the next run's [0/8] preflight is the real gate; cleanup only nudges + warns,
     # never blocking the trap long enough to outlast a GH-Actions cancellation grace window. The
     # `|| echo` (never a hard fail) keeps a still-dead leg from ever aborting the cleanup trap.
-    PREFLIGHT_MV_REVERIFY_ATTEMPTS=1 preflight_mv_reverify "$_rvcam" "${_rvcam#cam}" \
+    PREFLIGHT_MV_REVERIFY_ATTEMPTS=1 PREFLIGHT_MV_REVERIFY_CONTEXT=cleanup preflight_mv_reverify "$_rvcam" "${_rvcam#cam}" \
       || echo "    WARNING #759: ${_rvcam} NDI leg still not delivering changing frames after its cleanup restart (reattach nudged) -- the next run's [0/8] preflight will re-check/fail on it if still dead" >&2
   done
 }
