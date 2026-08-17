@@ -221,7 +221,7 @@ main() {
         log "pass end"
         return 0
       fi
-      log "imag-nb OBS is down and NOT a deliberate quit ($dd_reason) -- proceeding to alert"
+      log "imag-nb OBS is down and NOT a deliberate quit ($dd_reason; probe2 ssh rc=$dd_rc, out='$(printf '%s' "$dd_probe" | tr '\n' ' ')') -- proceeding to alert"
       ;;
   esac
 
