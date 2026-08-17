@@ -24,16 +24,24 @@
 # in recording-e2e.sh — the static-anchor test suite reads only recording-e2e.sh's own text, so
 # this function body is invisible to it while its emitted line still lands in the run log.
 
-# imag_leg_run_marker <imag_partial_path> <imag_host_path>
+# imag_leg_run_marker <imag_partial_path> <imag_host_path> [acked_offline_reason]
 # Prints EXACTLY one marker line to stdout. Distinct greppable tokens:
 #   IMAG-LEG-VERIFIED       — the partial JSON exists on dev1 (the cam→imag leg flowed + is proven).
 #   IMAG-LEG-NOT-VERIFIED   — no partial reached dev1; the message names the reason.
 # Pure/read-only (a single `[ -f ]` stat + printf) — no network, no mutation; safe to unit-test by
 # sourcing + calling with a temp path.
+#
+# issue 1013: the optional 3rd arg is the operator-acked-offline reason (from CAMBOX_OFFLINE_ACK,
+# via cambox_offline_ack_reason "imag"). When non-empty, imag was a KNOWN-ABSENT box this run and
+# the whole imag leg was DELIBERATELY skipped — so name that true cause here instead of the generic
+# "no recording path". The 2-arg #798 calls are byte-for-byte unchanged (3rd arg empty -> the old
+# branches), so every existing caller/test keeps its behaviour.
 imag_leg_run_marker() {
-  local partial="${1:-}" host_path="${2:-}"
+  local partial="${1:-}" host_path="${2:-}" acked_reason="${3:-}"
   if [ -n "$partial" ] && [ -f "$partial" ]; then
     printf 'IMAG-LEG-VERIFIED: imag partial produced (%s) — the cam->imag leg is proven this run (report-only, issue 798).\n' "$partial"
+  elif [ -n "$acked_reason" ]; then
+    printf 'IMAG-LEG-NOT-VERIFIED: imag acked offline (%s) — the cam->imag leg was DELIBERATELY skipped this run (operator-acknowledged absent box, issue 1013). Report-only; a green run that skips the imag leg is a NAMED partial, never a hidden pass (issue 798; ONE full test, no partials).\n' "$acked_reason"
   elif [ -z "$host_path" ]; then
     printf 'IMAG-LEG-NOT-VERIFIED: no imag recording path (StopRecord returned none) — cam->imag proof SKIPPED this run. A green run that skips the imag leg is a hidden partial (issue 798; ONE full test, no partials). Report-only.\n'
   else

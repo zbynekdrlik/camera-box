@@ -11,6 +11,15 @@
 # healthy fails the run LOUDLY as a stale ack (#758/#827); remove the line the moment the box is
 # back in the fleet.
 #
+# issue 1013: imag-nb (the 60fps IMAG cutter, 10.77.9.182) is ACKABLE here too, as the box name
+# "imag" -- `imag:notebook-taken-after-event-<date>`. When the notebook is physically absent
+# (taken away after an event) this lets the whole E2E gate RUN with the imag leg SKIPPED (a loud,
+# report-only IMAG-LEG-SKIPPED note per step + an IMAG-LEG-NOT-VERIFIED marker) instead of dying at
+# the [0/8] reachability preflight. Exactly like a cam box, an acked-but-reachable imag is a STALE
+# ack that fails the run -- so add the `imag:` line ONLY while it is genuinely off the network, and
+# remove it the moment the notebook is back. (Remote wake / WoL for imag is separate hardware work,
+# tracked apart from this gate change; issue 1053 is its strih/stream counterpart.)
+#
 # Current physical state (2026-08-13, issue-939 cam3 re-integration):
 # cam3: RE-ACTIVATED 2026-08-13 (issue 939) -- in CAMERA_ACTIVE_SET, a measured preflight
 #   target again; its former ack line is GONE (a healthy acked box trips the stale-ack guard).
