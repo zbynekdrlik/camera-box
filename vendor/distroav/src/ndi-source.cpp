@@ -949,6 +949,16 @@ void *ndi_source_thread(void *data)
 		// check if there are any connections.
 		// If not then micro-pause and restart the loop.
 		//
+		// camera-box #1080: defensive -- a create failure left ndi_receiver NULL and re-armed
+		// reset_ndi_receiver; if a racing ndi_source_update cleared that flag before this iteration
+		// read it, the reset block was skipped with ndi_receiver still NULL. Re-arm + retry rather
+		// than dereference NULL in recv_get_no_connections below.
+		if (!ndi_receiver) {
+			pthread_mutex_lock(&s->config_mutex);
+			s->config.reset_ndi_receiver = true;
+			pthread_mutex_unlock(&s->config_mutex);
+			continue;
+		}
 		int no_conn = ndiLib->recv_get_no_connections(ndi_receiver);
 		if (no_conn == 0) {
 #if 0

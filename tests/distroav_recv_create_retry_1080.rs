@@ -63,6 +63,15 @@ fn backoff_helper_present() {
          permanently kills the receiver thread (reattach-proof black). A `git subtree pull` likely \
          reverted it."
     );
+    // The shift-clamp guard: it prevents `base_ns << shift` shifting by >= 64 (UB) for a large
+    // consecutive_failures count. The truth-table vectors cannot make its removal go RED (on x86 the
+    // shift masks to shift&63 and still exceeds the cap), so pin it with a source anchor.
+    assert!(
+        src.contains("if (shift > 5) shift = 5;"),
+        "{NDI_SOURCE}: #1080 patch weakened — the backoff shift-clamp `if (shift > 5) shift = 5;` \
+         is gone. Without it a large consecutive_failures count shifts `base_ns` by >= 64 \
+         (undefined behaviour). Re-apply the clamp."
+    );
 }
 
 #[test]
@@ -83,10 +92,15 @@ fn create_failure_retries_instead_of_breaking() {
         "{NDI_SOURCE}: #1080 patch missing — the recv_create_fail_count counter is never \
          incremented on a create failure, so the backoff cannot escalate."
     );
+    // Must appear at least TWICE: the `unsigned recv_create_fail_count = 0;` declaration AND the
+    // bare on-success reset. Asserting `.contains(...)` alone is satisfied by the declaration, so
+    // it could not detect removal of the on-success reset (the branch-slice below still would, but
+    // this assertion must not be a false comfort).
     assert!(
-        src.contains("recv_create_fail_count = 0;"),
+        src.matches("recv_create_fail_count = 0;").count() >= 2,
         "{NDI_SOURCE}: #1080 patch missing — recv_create_fail_count is never reset to 0 after a \
-         successful create, so the backoff would stay escalated forever."
+         successful create (only the declaration is present), so the backoff would stay escalated \
+         forever."
     );
 
     // The recv-create-failure branch must RETRY (continue), never `break`. Slice the branch between
