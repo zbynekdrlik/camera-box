@@ -151,14 +151,14 @@ fn lift_backoff_helper() -> String {
 /// the base; large n is clamped (no shift UB) and stays at the cap.
 fn vectors() -> Vec<(u32, u64)> {
     vec![
-        (0, 250_000_000),           // defensive: 0 folds to base
-        (1, 250_000_000),           // first failure -> base 250 ms
-        (2, 500_000_000),           // doubling
+        (0, 250_000_000), // defensive: 0 folds to base
+        (1, 250_000_000), // first failure -> base 250 ms
+        (2, 500_000_000), // doubling
         (3, 1_000_000_000),
-        (4, 2_000_000_000),         // just under the 3 s cap
-        (5, 3_000_000_000),         // 250 ms << 4 = 4 s -> capped to 3 s (ternary cap boundary)
-        (6, 3_000_000_000),         // 250 ms << 5 = 8 s -> capped (shift-clamp path)
-        (100, 3_000_000_000),       // large n: shift clamped, no UB, stays capped
+        (4, 2_000_000_000),   // just under the 3 s cap
+        (5, 3_000_000_000),   // 250 ms << 4 = 4 s -> capped to 3 s (ternary cap boundary)
+        (6, 3_000_000_000),   // 250 ms << 5 = 8 s -> capped (shift-clamp path)
+        (100, 3_000_000_000), // large n: shift clamped, no UB, stays capped
     ]
 }
 
@@ -240,7 +240,9 @@ fn backoff_computes_the_spec_truth_table() {
     let mut diffs = Vec::new();
     for ((n, want), g) in vs.iter().zip(&got) {
         if g != want {
-            diffs.push(format!("  consecutive_failures={n} -> C {g} ns, expected {want} ns"));
+            diffs.push(format!(
+                "  consecutive_failures={n} -> C {g} ns, expected {want} ns"
+            ));
         }
     }
     assert!(
