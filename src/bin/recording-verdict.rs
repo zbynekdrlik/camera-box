@@ -353,7 +353,10 @@ struct Args {
     /// and `scripts/av_sync_calibrate.py --calibrate` (its `mean_offset_ms`). Optional -- when
     /// given together with `--av-sync`, adds a `lipsync_cross_check` object to the printed JSON
     /// comparing it against this recording's own QR/QPSK offset (`camera_box::lipsync_cross_check`).
-    /// Report-only (see that module's `gates_overall_pass`) -- never affects this CLI's exit code.
+    /// Report-only TODAY (issue 1032: `gates_overall_pass` is derived-`false` while
+    /// `RECORDED_CLEAN_PAIRED_RUNS` < `REQUIRED_CLEAN_PAIRED_RUNS`, so it does not affect this CLI's
+    /// exit code); once the supervisor records N>=5 clean paired runs, a Disagree verdict makes
+    /// `--av-sync` exit non-zero (the JSON is still printed first).
     /// `allow_negative_numbers`: video-earlier-than-audio is half the real outcome space and must
     /// parse as a bare `-N` value (clap 4 otherwise reads a leading `-` as a new flag).
     #[arg(long, allow_negative_numbers = true)]
@@ -2696,26 +2699,48 @@ fn run_av_sync(args: &Args) -> Result<()> {
         "video_fps": report.fps,
         "latency_adjust_ms": -report.offset.offset_ms,
     });
-    // issue 930 — lipsync cross-validation: only added when the caller supplied the paired
+    // issue 930/1032 — lipsync cross-validation: only added when the caller supplied the paired
     // lipsync-test-mode run's SyncNet offset (never printed on a plain --av-sync call, so every
     // pre-930 invocation's JSON shape is byte-for-byte unchanged).
+    let mut lipsync_folds_to_failure = false;
     if let Some(cross_check) =
         lipsync_cross_check_for(report.offset.offset_ms, args.syncnet_offset_ms)
     {
+        let gate_pass =
+            camera_box::lipsync_cross_check::lipsync_cross_check_gate_pass(cross_check.verdict);
+        // issue 1032: fold-earned check against the recorded evidence count. DORMANT today —
+        // RECORDED_CLEAN_PAIRED_RUNS (0) < REQUIRED_CLEAN_PAIRED_RUNS (5), so this is always
+        // `false` and the run still exits 0; it goes live the instant the supervisor bumps the
+        // recorded count to 5 (one-constant flip in src/lipsync_cross_check.rs).
+        lipsync_folds_to_failure = camera_box::lipsync_cross_check::folds_to_failure(
+            cross_check.verdict,
+            camera_box::lipsync_cross_check::RECORDED_CLEAN_PAIRED_RUNS,
+        );
         json["lipsync_cross_check"] = serde_json::json!({
             "syncnet_offset_ms": cross_check.syncnet_offset_ms,
             "qr_qpsk_offset_ms": cross_check.qr_qpsk_offset_ms,
             "delta_ms": cross_check.delta_ms,
             "tolerance_ms": cross_check.tolerance_ms,
             "verdict": format!("{:?}", cross_check.verdict),
+            "gate_pass": gate_pass,
             "gates_overall_pass": camera_box::lipsync_cross_check::gates_overall_pass(),
+            "required_clean_paired_runs": camera_box::lipsync_cross_check::REQUIRED_CLEAN_PAIRED_RUNS,
+            "recorded_clean_paired_runs": camera_box::lipsync_cross_check::RECORDED_CLEAN_PAIRED_RUNS,
+            "folds_to_failure": lipsync_folds_to_failure,
         });
         tracing::info!(
             syncnet_offset_ms = ?cross_check.syncnet_offset_ms,
             qr_qpsk_offset_ms = report.offset.offset_ms,
             delta_ms = ?cross_check.delta_ms,
             verdict = ?cross_check.verdict,
-            "issue 930 lipsync cross-check (report-only)"
+            gate_pass,
+            gates_overall_pass = camera_box::lipsync_cross_check::gates_overall_pass(),
+            recorded_clean_paired_runs =
+                camera_box::lipsync_cross_check::RECORDED_CLEAN_PAIRED_RUNS,
+            required_clean_paired_runs =
+                camera_box::lipsync_cross_check::REQUIRED_CLEAN_PAIRED_RUNS,
+            folds_to_failure = lipsync_folds_to_failure,
+            "issue 930/1032 lipsync cross-check"
         );
     }
     println!("{}", serde_json::to_string_pretty(&json)?);
@@ -2727,6 +2752,21 @@ fn run_av_sync(args: &Args) -> Result<()> {
         video_ticks = report.video_ticks,
         "A/V-sync offset measured (video − audio; >0 = video lags audio)"
     );
+    // issue 1032 — fold the lipsync cross-check into this --av-sync run's exit code. The JSON above
+    // is ALWAYS printed first (the operator sees both offsets + the delta) before the run fails.
+    // DORMANT today: `folds_to_failure` is always `false` while RECORDED_CLEAN_PAIRED_RUNS (0) <
+    // REQUIRED_CLEAN_PAIRED_RUNS (5), so exit behavior is byte-identical to before; it goes LIVE
+    // the moment the supervisor records N>=5 clean paired runs by bumping that one constant.
+    if lipsync_folds_to_failure {
+        anyhow::bail!(
+            "lipsync cross-check DISAGREE: SyncNet vs QR/QPSK differ beyond the {}ms tolerance \
+             (see the printed lipsync_cross_check JSON) — the fold is live ({} of {} clean paired \
+             runs recorded)",
+            camera_box::lipsync_cross_check::LIPSYNC_CROSS_CHECK_TOLERANCE_MS,
+            camera_box::lipsync_cross_check::RECORDED_CLEAN_PAIRED_RUNS,
+            camera_box::lipsync_cross_check::REQUIRED_CLEAN_PAIRED_RUNS,
+        );
+    }
     Ok(())
 }
 
