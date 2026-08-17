@@ -64,8 +64,17 @@ set -euo pipefail
 # per-class default (every member must be in the fleet). --dry-run reads + reports the plan,
 # changes nothing. --force allows a downgrade (target OLDER than installed).
 #
-# Env: SSH_PASS (default newlevel), DANTESYNC_GATE_BOUND_US (offset bound, passed to the gate),
-#      GATE_WAIT_TRIES/GATE_WAIT_SECS (post-restart settle poll for the verification gate).
+# Env: SSH_PASS (default newlevel; also the sudo password fed to sudo -S on non-root Linux nodes),
+#      DANTESYNC_GATE_BOUND_US (offset bound, passed to the gate),
+#      GATE_WAIT_TRIES/GATE_WAIT_SECS (post-restart settle poll for a SLAVE node's verification gate),
+#      NTP_MASTER (the master node name, default from DANTESYNC_NTP_MASTER_NAME / strih),
+#      MASTER_GATE_WAIT_TRIES/MASTER_GATE_WAIT_SECS (#1077: the LONGER bounded settle window the
+#      master node gets so verifying it right after its own restart waits out the fleet sawtooth).
+# Linux privilege (#1077): a root@ node runs the generated script directly; a non-root node
+#      (imag-nb newlevel@, dev1 --local) runs it by FILE with sudo (sudo -n where passwordless, else
+#      sudo -S fed SSH_PASS). Binary fetch: dev1 downloads+verifies ONCE and scp's the binary to each
+#      Linux node (curl-less boxes like cam3 upgrade with no on-box fetch; on-box curl then wget are
+#      only standalone fallbacks).
 #
 # Exit codes: 0 = every requested node ended on the target (or was already there) AND verified;
 #   1 = usage/env error; 2 = unknown argument; 10 = a CANARY failed (recovered; rest NOT
@@ -87,6 +96,13 @@ DANTESYNC_WIN_PS_REMOTE='C:\Windows\Temp\dantesync-fleet-upgrade.ps1'
 DANTESYNC_LINUX_BIN="/usr/local/bin/dantesync"
 DANTESYNC_LINUX_BAK="/usr/local/bin/dantesync.bak"
 DANTESYNC_DEAD_TASK="DanteSyncUpdate"
+# #1077: the orchestrator downloads + sha256-verifies the binary ONCE on dev1 and scp's it to each
+# Linux node here — the generated script prefers this pre-placed binary (the curl-less path: cam3
+# has no curl and a broken apt; also friendlier to the metered venue LAN). DANTESYNC_LINUX_SH_REMOTE
+# is where the generated upgrade/rollback script is uploaded and run BY FILE (so a non-root node can
+# `sudo -S bash <file>` without any nested-quoting hazard — mirrors the Windows -File pattern).
+DANTESYNC_LINUX_STAGED="/tmp/dantesync-staged"
+DANTESYNC_LINUX_SH_REMOTE="/tmp/dantesync-fleet-upgrade-remote.sh"
 
 # --- PURE functions (no network/ssh — unit-tested from tests/dantesync_fleet_upgrade.rs) -----
 
@@ -134,9 +150,26 @@ dantesync_linux_upgrade_cmd() {
 set -e
 tmp="\$(mktemp -d)"
 trap 'rm -rf "\$tmp"' EXIT
-# 1. download + sha256-verify BEFORE touching the running clock master
-curl --fail -fsSL -o "\$tmp/dantesync" "$url"
-curl --fail -fsSL -o "\$tmp/dantesync.sha256" "$url.sha256"
+# 1. obtain the new binary BEFORE touching the running clock master. Order (#1077):
+#    (a) a pre-staged binary the orchestrator downloaded+verified on dev1 and scp'd here -- the
+#        curl-less path (cam3 has no curl + a broken apt) AND the metered-LAN-friendly path (one
+#        download on dev1, not eight); (b) on-box curl; (c) on-box wget as a secondary. Whichever
+#        path, the sha256 is re-verified below, so a corrupt scp OR download never reaches the
+#        clock master. The staged file is consumed (moved into \$tmp) and removed immediately.
+if [ -f "$DANTESYNC_LINUX_STAGED" ]; then
+  cp -a "$DANTESYNC_LINUX_STAGED" "\$tmp/dantesync"
+  cp -a "$DANTESYNC_LINUX_STAGED.sha256" "\$tmp/dantesync.sha256"
+  rm -f "$DANTESYNC_LINUX_STAGED" "$DANTESYNC_LINUX_STAGED.sha256"
+elif command -v curl >/dev/null 2>&1; then
+  curl --fail -fsSL -o "\$tmp/dantesync" "$url"
+  curl --fail -fsSL -o "\$tmp/dantesync.sha256" "$url.sha256"
+elif command -v wget >/dev/null 2>&1; then
+  wget -q -O "\$tmp/dantesync" "$url"
+  wget -q -O "\$tmp/dantesync.sha256" "$url.sha256"
+else
+  echo "no staged binary at $DANTESYNC_LINUX_STAGED and neither curl nor wget is available" >&2
+  exit 1
+fi
 expected="\$(awk '{print \$1}' "\$tmp/dantesync.sha256")"
 actual="\$(sha256sum "\$tmp/dantesync" | awk '{print \$1}')"
 if [ "\$expected" != "\$actual" ]; then
@@ -320,6 +353,41 @@ dantesync_remaining_after_canary() {
   echo "$out"
 }
 
+# dantesync_needs_sudo USER -> 0 (needs privilege escalation) unless USER is already root. #1077:
+# the Linux path silently assumed a root@ ssh session; imag-nb (newlevel@) and dev1 (--local, runs
+# as newlevel) are NON-root and must escalate to run the root-only remount/install/systemctl steps.
+dantesync_needs_sudo() {
+  [ "$1" != "root" ]
+}
+
+# dantesync_linux_run_script_cmd USER REMOTE_PATH PW -> the command that RUNS an already-uploaded
+# upgrade/rollback script FILE on a Linux node, escalating iff USER is not root (#1077). A root@
+# node (the cam boxes) runs it directly. A non-root node prefers passwordless sudo (`sudo -n`, e.g.
+# dev1) and otherwise feeds the password to `sudo -S` via stdin (imag-nb) -- so the password reaches
+# sudo only and is NEVER written into the on-disk script FILE the orchestrator scp'd. Running by
+# FILE (bash "$path"), never a nested inline -c, mirrors the Windows -File pattern (no quoting hazard).
+dantesync_linux_run_script_cmd() {
+  local user="$1" path="$2" pw="${3:-}"
+  if dantesync_needs_sudo "$user"; then
+    cat <<EOF
+if sudo -n true 2>/dev/null; then
+  sudo bash "$path"
+else
+  printf '%s\n' '$pw' | sudo -S -p '' bash "$path"
+fi
+EOF
+  else
+    echo "bash \"$path\""
+  fi
+}
+
+# dantesync_is_ntp_master NODE MASTER_NAME -> 0 iff NODE is the (non-empty) configured NTP master.
+# #1077: the master node is graded/settled differently at verify time (see verify_node) -- an empty
+# master name means NO node is the master (never a false match).
+dantesync_is_ntp_master() {
+  [ -n "$2" ] && [ "$1" = "$2" ]
+}
+
 # --- source-guard: when sourced (the unit tests), stop here ----------------------------------
 if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
   return 0
@@ -341,6 +409,16 @@ DRY_RUN=0
 FORCE=0
 GATE_WAIT_TRIES="${GATE_WAIT_TRIES:-10}"
 GATE_WAIT_SECS="${GATE_WAIT_SECS:-6}"
+# #1077: the NTP master's OWN dantesync restart makes it re-discipline against upstream and the
+# whole fleet chases (a sawtooth that converges MINUTES later). Verifying the master right after its
+# restart with the strict ~60s slave window measured that restart-induced storm and rolled back a
+# HEALTHY swap (rc=20 twice, live v1.8.43 roll). So the master node gets (a) --ntp-master <self> (the
+# gate's master-aware median+freshness grade, #1014, not the strict single-node offset bound) and
+# (b) a LONGER bounded settle window (retry to steady state, clear PASS/FAIL, no silent sleep-and-
+# hope). NTP_MASTER defaults to the SAME name dantesync-gate.sh uses (single source of truth).
+NTP_MASTER="${NTP_MASTER:-${DANTESYNC_NTP_MASTER_NAME:-strih}}"
+MASTER_GATE_WAIT_TRIES="${MASTER_GATE_WAIT_TRIES:-20}"
+MASTER_GATE_WAIT_SECS="${MASTER_GATE_WAIT_SECS:-15}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -370,6 +448,53 @@ scp_node() {  # LOCAL_PATH  ADDR:REMOTE
   sshpass -p "$SSH_PASS" scp -O -o StrictHostKeyChecking=no -o ConnectTimeout=12 "$1" "$2"
 }
 
+# #1077: the orchestrator downloads + sha256-verifies the pinned binary ONCE on dev1 (this box HAS
+# curl), caches it for the whole run, and scp's the verified copy to each Linux node -- so a
+# curl-less box (cam3) never needs to fetch, and the metered venue LAN pays ONE download, not eight.
+STAGED_LOCAL_DIR=""
+trap 'rm -rf "${STAGED_LOCAL_DIR:-}" 2>/dev/null || true' EXIT
+
+# ensure_linux_binary_staged VERSION -> download+verify the pinned Linux binary+sha into
+# STAGED_LOCAL_DIR on dev1 (memoized: only the first call fetches). Returns non-zero (nothing
+# staged) if the download or the dev1-side sha256 verification fails -- a bad download never
+# reaches a node.
+ensure_linux_binary_staged() {
+  local version="$1" url expected actual
+  [ -n "$STAGED_LOCAL_DIR" ] && return 0
+  url="$(dantesync_release_url_linux "$version")"
+  STAGED_LOCAL_DIR="$(mktemp -d)"
+  if ! curl --fail -fsSL -o "$STAGED_LOCAL_DIR/dantesync" "$url"; then
+    err "could not download the pinned dantesync binary on dev1 ($url)"
+    return 1
+  fi
+  if ! curl --fail -fsSL -o "$STAGED_LOCAL_DIR/dantesync.sha256" "$url.sha256"; then
+    err "could not download the pinned dantesync sha256 on dev1 ($url.sha256)"
+    return 1
+  fi
+  expected="$(awk '{print $1}' "$STAGED_LOCAL_DIR/dantesync.sha256")"
+  actual="$(sha256sum "$STAGED_LOCAL_DIR/dantesync" | awk '{print $1}')"
+  if [ "$expected" != "$actual" ]; then
+    err "staged binary SHA256 mismatch on dev1: expected $expected got $actual"
+    return 1
+  fi
+  return 0
+}
+
+# stage_linux_binary_to KIND ADDR -> place the verified binary+sha where the generated script's
+# staged-binary branch will find it: for a remote node scp it to DANTESYNC_LINUX_STAGED on the box;
+# for --local copy it to the same path on dev1. Assumes ensure_linux_binary_staged already ran.
+stage_linux_binary_to() {  # KIND ADDR
+  local kind="$1" addr="$2"
+  case "$kind" in
+    local)
+      cp -a "$STAGED_LOCAL_DIR/dantesync" "$DANTESYNC_LINUX_STAGED" \
+        && cp -a "$STAGED_LOCAL_DIR/dantesync.sha256" "$DANTESYNC_LINUX_STAGED.sha256" ;;
+    linux)
+      scp_node "$STAGED_LOCAL_DIR/dantesync" "$addr:$DANTESYNC_LINUX_STAGED" \
+        && scp_node "$STAGED_LOCAL_DIR/dantesync.sha256" "$addr:$DANTESYNC_LINUX_STAGED.sha256" ;;
+  esac
+}
+
 # read_node_version NAME KIND ADDR -> the parsed dantesync version ("" if unread). KIND is
 # local|linux|win. Reuses the #862 gate's PURE parser — never a second parser.
 read_node_version() {
@@ -387,29 +512,46 @@ node_ip() { printf '%s\n' "${1##*@}"; }
 
 # verify_node NAME KIND ADDR -> 0 iff (version reads back == TARGET) AND (dantesync-gate.sh green
 # for this node: PTP-locked + fresh in-bound offset). The version read-back is the hard gate on
-# every node kind; the lock/offset gate runs for linux (ssh) + win (--win-http) nodes. Each gate
-# call passes `--ntp-master ""` — a single-node isolated verification has no NTP master among its
-# one configured node, so opting out avoids the gate's "master not among configured nodes" refusal
-# (dantesync-gate.sh) AND grades the freshly-relocked node on plain offset+PTP-lock; the
-# #1041/#1055 master-step-chase widening is knowingly forgone here (the settle poll below covers a
-# transient re-lock). A settle poll gives the servo a few seconds to re-lock after restart.
+# every node kind; the lock/offset gate runs for linux (ssh) + win (--win-http) nodes.
+#
+# #1077 -- master-vs-slave grading + settle window:
+#  * A SLAVE node passes `--ntp-master ""` -- a single-node isolated verification has no NTP master
+#    among its one configured node, so opting out avoids the gate's "master not among configured
+#    nodes" refusal AND grades the freshly-relocked node on plain offset+PTP-lock. Its settle window
+#    is the normal GATE_WAIT_TRIES x GATE_WAIT_SECS (the servo re-locks in seconds after a slave's
+#    own restart).
+#  * The MASTER node passes `--ntp-master <self>` so the gate applies its master-aware median+
+#    freshness grade (#1014) instead of the strict single-node offset bound, AND gets a LONGER
+#    bounded settle window (MASTER_GATE_WAIT_TRIES x MASTER_GATE_WAIT_SECS). The master's OWN restart
+#    makes it re-discipline against upstream and the whole fleet chases (a sawtooth that converges
+#    minutes later); the old strict ~60s slave window measured that storm and rolled back a HEALTHY
+#    swap (rc=20 twice, live v1.8.43). Because the master (strih) is the first Windows canary, this
+#    wait-to-steady-state also gates the REST loop -- slaves are only verified after the fleet has
+#    already converged. The loop stays BOUNDED (seq/tries) with a clear PASS/FAIL, never a silent
+#    sleep-and-hope.
 verify_node() {
-  local name="$1" kind="$2" addr="$3" ip got tries="$GATE_WAIT_TRIES" gate_rc=0 i
+  local name="$1" kind="$2" addr="$3" ip got gate_rc=0 i master_arg tries secs
   ip="$(node_ip "$addr")"
   got="$(read_node_version "$name" "$kind" "$addr")"
   if [ "$got" != "$TARGET" ]; then
     err "[$name] version read back as '${got:-<unread>}', expected $TARGET"
     return 1
   fi
+  if dantesync_is_ntp_master "$name" "$NTP_MASTER"; then
+    master_arg="$name"; tries="$MASTER_GATE_WAIT_TRIES"; secs="$MASTER_GATE_WAIT_SECS"
+    log "[$name] is the NTP master — verifying master-aware, settling to steady state (up to $((tries * secs))s)"
+  else
+    master_arg=""; tries="$GATE_WAIT_TRIES"; secs="$GATE_WAIT_SECS"
+  fi
   for i in $(seq 1 "$tries"); do
     gate_rc=0
     case "$kind" in
-      linux) "$HERE/dantesync-gate.sh" --linux "$name=$ip" --ntp-master "" >/dev/null 2>&1 || gate_rc=$? ;;
-      win)   "$HERE/dantesync-gate.sh" --win-http "$name=$ip" --ntp-master "" >/dev/null 2>&1 || gate_rc=$? ;;
+      linux) "$HERE/dantesync-gate.sh" --linux "$name=$ip" --ntp-master "$master_arg" >/dev/null 2>&1 || gate_rc=$? ;;
+      win)   "$HERE/dantesync-gate.sh" --win-http "$name=$ip" --ntp-master "$master_arg" >/dev/null 2>&1 || gate_rc=$? ;;
       local) gate_rc=0 ;;  # dev1 lock is confirmed by the fleet-wide gate precondition on the next E2E
     esac
     [ "$gate_rc" -eq 0 ] && break
-    [ "$i" -lt "$tries" ] && sleep "$GATE_WAIT_SECS"
+    [ "$i" -lt "$tries" ] && sleep "$secs"
   done
   if [ "$gate_rc" -ne 0 ]; then
     err "[$name] dantesync-gate.sh did not confirm PTP-lock + in-bound offset (rc=$gate_rc)"
@@ -425,12 +567,34 @@ verify_node() {
 # non-zero, so a non-zero rc here means the service is on the PREVIOUS (working) version already.
 REMOTE_OUT=""
 run_upgrade() {
-  local name="$1" kind="$2" addr="$3" rc=0 local_ps
+  local name="$1" kind="$2" addr="$3" rc=0 local_ps local_sh user runcmd
   case "$kind" in
     local)
-      REMOTE_OUT="$(bash -c "$(dantesync_linux_upgrade_cmd "$TARGET")" 2>&1)" || rc=$? ;;
+      # #1077: dev1 runs as newlevel (non-root). Stage the verified binary, then run the upgrade
+      # script by FILE with sudo escalation (dev1 has passwordless sudo -> sudo -n).
+      if ! ensure_linux_binary_staged "$TARGET"; then REMOTE_OUT="dev1-side staging failed"; return 1; fi
+      if ! stage_linux_binary_to local ""; then REMOTE_OUT="could not place the staged binary on dev1"; return 1; fi
+      local_sh="$(mktemp)"
+      dantesync_linux_upgrade_cmd "$TARGET" >"$local_sh"
+      runcmd="$(dantesync_linux_run_script_cmd "$(id -un)" "$local_sh" "$SSH_PASS")"
+      REMOTE_OUT="$(bash -c "$runcmd" 2>&1)" || rc=$?
+      rm -f "$local_sh" ;;
     linux)
-      REMOTE_OUT="$(ssh_node "$addr" "$(dantesync_linux_upgrade_cmd "$TARGET")" 2>&1)" || rc=$? ;;
+      # #1077: stage the verified binary + upload the upgrade script as a FILE, then run it escalated
+      # (root@ boxes run it directly; newlevel@ imag-nb via sudo -S). The staged binary makes a
+      # curl-less box (cam3) upgrade with no on-box fetch.
+      if ! ensure_linux_binary_staged "$TARGET"; then REMOTE_OUT="dev1-side staging failed"; return 1; fi
+      user="${addr%%@*}"
+      local_sh="$(mktemp)"
+      dantesync_linux_upgrade_cmd "$TARGET" >"$local_sh"
+      if ! REMOTE_OUT="$( { stage_linux_binary_to linux "$addr" \
+            && scp_node "$local_sh" "$addr:$DANTESYNC_LINUX_SH_REMOTE"; } 2>&1)"; then
+        rm -f "$local_sh"
+        return 1
+      fi
+      rm -f "$local_sh"
+      runcmd="$(dantesync_linux_run_script_cmd "$user" "$DANTESYNC_LINUX_SH_REMOTE" "$SSH_PASS")"
+      REMOTE_OUT="$(ssh_node "$addr" "$runcmd" 2>&1)" || rc=$? ;;
     win)
       local_ps="$(mktemp)"
       dantesync_windows_upgrade_ps "$TARGET" >"$local_ps"
@@ -448,10 +612,27 @@ run_upgrade() {
 # the VERIFY-failure path (the swap provably completed). A rollback that itself fails is logged
 # loudly but never masks the original failure.
 rollback_node() {
-  local name="$1" kind="$2" addr="$3" rb_rc=0 out="" local_ps
+  local name="$1" kind="$2" addr="$3" rb_rc=0 out="" local_ps local_sh user runcmd
   case "$kind" in
-    local) out="$(bash -c "$(dantesync_linux_rollback_cmd)" 2>&1)" || rb_rc=$? ;;
-    linux) out="$(ssh_node "$addr" "$(dantesync_linux_rollback_cmd)" 2>&1)" || rb_rc=$? ;;
+    local)
+      # #1077: the rollback also does root-only ops (remount, install, systemctl) -> run by FILE with
+      # sudo escalation, same as the upgrade path. No staging (it restores from the on-box .bak).
+      local_sh="$(mktemp)"
+      dantesync_linux_rollback_cmd >"$local_sh"
+      runcmd="$(dantesync_linux_run_script_cmd "$(id -un)" "$local_sh" "$SSH_PASS")"
+      out="$(bash -c "$runcmd" 2>&1)" || rb_rc=$?
+      rm -f "$local_sh" ;;
+    linux)
+      user="${addr%%@*}"
+      local_sh="$(mktemp)"
+      dantesync_linux_rollback_cmd >"$local_sh"
+      if scp_node "$local_sh" "$addr:$DANTESYNC_LINUX_SH_REMOTE" >/dev/null 2>&1; then
+        runcmd="$(dantesync_linux_run_script_cmd "$user" "$DANTESYNC_LINUX_SH_REMOTE" "$SSH_PASS")"
+        out="$(ssh_node "$addr" "$runcmd" 2>&1)" || rb_rc=$?
+      else
+        rb_rc=1
+      fi
+      rm -f "$local_sh" ;;
     win)
       local_ps="$(mktemp)"
       dantesync_windows_rollback_ps >"$local_ps"
