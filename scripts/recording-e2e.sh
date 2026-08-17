@@ -551,9 +551,9 @@ optical_chain_preflight_assert "$PAINTER_IP" root "$CAM_PW" "$STRIH" "${OBS_PASS
 # direct scanout), the #841 iGPU max-freq pin down, or the #779 tap conf gone are DETERMINISTIC
 # config states that live BELOW every other measurement in this gate (OBS render / recording verdict
 # / screenshots all end before the display path). Fail-fast HERE, at minute 0, instead of projecting
-# a laggy/torn 40-min run. UNKNOWN facets (an SSH hiccup — the imag reachability check below owns
-# genuine unreachability) only WARN; a proven DRIFT aborts. Same shared verdict lib the
-# --check-imag facet runs, so the two can never diverge.
+# a laggy/torn 40-min run. UNKNOWN facets (an SSH hiccup — the earlier fleet-reachability step above,
+# imag included, owns genuine unreachability) only WARN; a proven DRIFT aborts. Same shared verdict
+# lib the --check-imag facet runs, so the two can never diverge.
 echo "[0/8] imag display-path config preflight — a compositor / idle-GPU / lost-tap drift must fail-fast, not waste a run (#780)"
 imag_display_path_preflight_assert "$IMAG_IP" "${IMAG_USER:-newlevel}" || exit 1
 

@@ -142,7 +142,12 @@ imag_display_path_verdict() {
 # over their own transport to collect the observed display-path state into the `|`-delimited block
 # imag_display_path_verdict parses. Uses only ubiquitous tools (cat/systemctl/sed/grep); the ONE
 # not-strictly-guaranteed tool is `pgrep` (procps), so its presence is probed and emitted (#833) —
-# a missing pgrep must never let "picom not running" read as a false OK.
+# a missing pgrep must never let "picom not running" read as a false OK. This uses an INLINE
+# PICOM_PGREP marker rather than the shared imag_require_remote_tool_cmd (scripts/lib/imag-require-
+# remote-tool.sh) ON PURPOSE: that helper is for a SEPARATE fail-fast preflight probe that HARD-ABORTS
+# the whole run on any absent tool; here the desired semantics are per-facet — a missing pgrep must
+# degrade ONLY the picom_process facet to UNKNOWN while the other three facets (autostart, maxperf,
+# tap) still verdict normally, which the inline marker (read by the verdict's own two-tier) gives.
 imag_display_path_gather_remote_snippet() {
   cat <<'REMOTE'
 # --- picom: pgrep presence (#833) then the picom process itself ---
@@ -179,11 +184,13 @@ fi
 printf 'MAXPERF_ENABLED|%s\n' "$(systemctl is-enabled imag-igpu-maxperf.service 2>/dev/null || true)"
 printf 'MAXPERF_ACTIVE|%s\n' "$(systemctl is-active imag-igpu-maxperf.service 2>/dev/null || true)"
 # --- touchpad tap conf (#779): extract the SECOND quoted value of the exact `Option "Tapping"` line
-# (never the sibling `Option "TappingDrag"` — the grep anchors on the closing quote after Tapping) ---
+# (never the sibling `Option "TappingDrag"` — the closing quote after Tapping anchors both stages).
+# The grep AND the sed are BOTH case-insensitive (grep -i; sed's GNU `I` flag) so they agree — a
+# hand-edited `Option "TAPPING" "on"` is captured, not silently dropped to a false DRIFT. ---
 _dp_tc="/etc/X11/xorg.conf.d/30-touchpad-tap.conf"
 if [ -e "$_dp_tc" ]; then
   printf 'TAPCONF|present\n'
-  printf 'TAPCONF_TAPPING|%s\n' "$(grep -iE 'Option[[:space:]]+"Tapping"' "$_dp_tc" 2>/dev/null | sed -E 's/.*"[Tt]apping"[[:space:]]+"([^"]*)".*/\1/' | head -1 || true)"
+  printf 'TAPCONF_TAPPING|%s\n' "$(grep -iE 'Option[[:space:]]+"Tapping"' "$_dp_tc" 2>/dev/null | sed -E 's/.*"tapping"[[:space:]]+"([^"]*)".*/\1/I' | head -1 || true)"
 else
   printf 'TAPCONF|absent\n'
 fi
