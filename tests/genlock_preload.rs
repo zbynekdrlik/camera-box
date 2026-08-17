@@ -2585,7 +2585,7 @@ mod vendored_source {
         // window), so the multiview fps is VISIBLE in the OBS log (drift-guard / rig-health-audit
         // / E2E preflight facet) and can be alarmed on a collapse. A subtree pull dropping any of
         // these silently loses the observability + the floor gate. Pure Tier-0 consumer:
-        // src/mv_audit.rs (parser + canvas/2 floor, byte-identical to obs_multiview_floor_fps()).
+        // src/mv_audit.rs (parser + target floor, byte-identical to obs_multiview_floor_fps()).
         let disp = squish(&vendor_file(OBS_DISPLAY));
         assert!(
             disp.contains(
@@ -2612,8 +2612,8 @@ mod vendored_source {
 
         let bud = squish(&vendor_file(OBS_DISPLAY_BUDGET));
         assert!(
-            bud.contains("static inline double obs_multiview_floor_fps(double canvas_fps)"),
-            "{OBS_DISPLAY_BUDGET}: #771 — the pure canvas/2 floor helper is gone; the C log line \
+            bud.contains("static inline double obs_multiview_floor_fps(double target_fps)"),
+            "{OBS_DISPLAY_BUDGET}: #771/#776 — the pure target floor helper is gone; the C log line \
              and the Rust gate (src/mv_audit.rs) would diverge."
         );
         assert!(

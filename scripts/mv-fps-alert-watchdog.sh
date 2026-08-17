@@ -317,7 +317,7 @@ handle_box() {
   if [ "${alert_now:-0}" = "1" ]; then
     log "ALERT: firing Discord notification for $name MV fps collapse"
     python3 "$NOTIFY" notify --body \
-      "🚨 #1083 mv-fps: **$detail** ($REPO_SLUG). Confirmed over ${CONFIRM_THRESHOLD} consecutive passes -- the Multiview projector render cadence fell below its floor (canvas/2 − tolerance). Restart OBS on $name or find the process stealing GPU/CPU render budget. NEVER reboot the host." \
+      "🚨 #1083 mv-fps: **$detail** ($REPO_SLUG). Confirmed over ${CONFIRM_THRESHOLD} consecutive passes -- the Multiview projector render cadence fell below its floor (target − tolerance). Restart OBS on $name or find the process stealing GPU/CPU render budget. NEVER reboot the host." \
       >/dev/null 2>&1 || log "ALERT: airuleset.py notify failed (non-fatal)"
   else
     log "ALERT: suppressed by throttle (pass ${prior_passes}/${ALERT_THROTTLE_PASSES})"

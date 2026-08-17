@@ -206,7 +206,7 @@ echo $((n + 1)) > "$cf"
 read -r -a arr <<< "${FAKE_GATE_EXITS:-0}"
 idx="$n"; [ "$idx" -ge "${#arr[@]}" ] && idx=$(( ${#arr[@]} - 1 ))
 ec="${arr[$idx]}"
-[ "$ec" = "1" ] && echo "FAIL monitor=1 divisor=1 rendered_fps=9.0 < floor=13.0 (target 30, 3840x2160)"
+[ "$ec" = "1" ] && echo "FAIL monitor=1 divisor=1 rendered_fps=9.0 < floor=28.0 (target 30, 3840x2160)"
 exit "$ec"
 "#,
     )
@@ -215,7 +215,7 @@ exit "$ec"
     p
 }
 
-const AUDIT_LINE: &str = "20:15:03.123: multiview-audit: monitor=1 divisor=1 rendered_fps=9.0 target=30 floor=13.0 cx=3840 cy=2160";
+const AUDIT_LINE: &str = "20:15:03.123: multiview-audit: monitor=1 divisor=1 rendered_fps=9.0 target=30 floor=28.0 cx=3840 cy=2160";
 
 /// Run `mv_fps_preflight_assert` for ONE box under `set -euo pipefail` with a fake probe + fake gate.
 /// `probe_out` is what the fake probe prints; `gate_exits` is the space-separated exit sequence.

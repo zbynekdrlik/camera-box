@@ -40,7 +40,7 @@ fn mv_fps_gate_bin_src_exists() {
 #[test]
 fn gate_binary_passes_a_healthy_log() {
     let bin = env!("CARGO_BIN_EXE_mv-fps-gate");
-    let healthy = "20:15:03.123: multiview-audit: monitor=1 divisor=1 rendered_fps=30.0 target=30 floor=13.0 cx=1920 cy=1080\n\
+    let healthy = "20:15:03.123: multiview-audit: monitor=1 divisor=1 rendered_fps=30.0 target=30 floor=28.0 cx=1920 cy=1080\n\
                    20:15:08.456: multiview-audit: monitor=2 divisor=2 rendered_fps=29.0 target=30 floor=28.0 cx=1280 cy=720\n";
     assert_eq!(run(bin, healthy), 0, "healthy MV fps must exit 0 (pass)");
 }
@@ -49,9 +49,9 @@ fn gate_binary_passes_a_healthy_log() {
 #[test]
 fn gate_binary_fails_a_below_floor_collapse() {
     let bin = env!("CARGO_BIN_EXE_mv-fps-gate");
-    // monitor=1's newest sample is 9.0fps < floor 13.0 (freeze / budget starvation).
-    let breach = "multiview-audit: monitor=1 divisor=1 rendered_fps=30.0 target=30 floor=13.0 cx=1920 cy=1080\n\
-                  multiview-audit: monitor=1 divisor=1 rendered_fps=9.0 target=30 floor=13.0 cx=1920 cy=1080\n";
+    // monitor=1's newest sample is 9.0fps < floor 28.0 (freeze / budget starvation).
+    let breach = "multiview-audit: monitor=1 divisor=1 rendered_fps=30.0 target=30 floor=28.0 cx=1920 cy=1080\n\
+                  multiview-audit: monitor=1 divisor=1 rendered_fps=9.0 target=30 floor=28.0 cx=1920 cy=1080\n";
     assert_eq!(
         run(bin, breach),
         1,

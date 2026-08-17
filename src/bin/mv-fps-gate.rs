@@ -3,7 +3,7 @@
 //! Reads an OBS log (the newest `%APPDATA%\obs-studio\logs\*.txt` on strih/stream, or the
 //! `~/.config/obs-studio/logs/*.txt` on imag), takes each Multiview projector's LATEST
 //! `multiview-audit:` sample, and alarms if any projector's measured render cadence fell below
-//! its own printed floor (`canvas/2 − tolerance`, #771). This is the E2E-preflight / drift-guard
+//! its own printed floor (`target − tolerance`, #771/#776). This is the E2E-preflight / drift-guard
 //! consumer of the audit line the vendored libobs `render_display()` emits — so the user's
 //! binding "multiview fps must be measured AND guarded against a drop" requirement has a machine
 //! check, not just a log a human might read.
