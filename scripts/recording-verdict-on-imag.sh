@@ -59,8 +59,12 @@ onimag_decode_core_range() {
   local n="${1:-}" lo
   case "$n" in ''|*[!0-9]*) echo ""; return 0 ;; esac
   [ "$n" -ge 1 ] 2>/dev/null || { echo ""; return 0; }
-  lo=$(( n > 4 ? n - 4 : 0 ))
-  echo "${lo}-$(( n - 1 ))"
+  # force base-10: an all-digit token with a leading zero (e.g. 08/09) is octal to $(( )) and 08/09
+  # are invalid octal digits -> an arithmetic error that (under the caller's set -e) would abort the
+  # extract, defeating the fail-open contract. nproc never emits one, but a leading zero must stay
+  # harmless. `[ -ge ]` above already compares in base-10, so this also removes that inconsistency.
+  lo=$(( 10#$n > 4 ? 10#$n - 4 : 0 ))
+  echo "${lo}-$(( 10#$n - 1 ))"
 }
 
 build_onimag_command() {

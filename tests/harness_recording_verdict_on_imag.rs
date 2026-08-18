@@ -131,6 +131,12 @@ fn build_onimag_command_pins_to_the_resolved_range_and_quotes_safely() {
         "issue 1094: the retired 16-thread box's hardcoded `taskset -c 12-15` must be gone — those \
          cores do not exist on the 12-thread i5-13420H, so taskset aborts before the decode. Got: {cmd:?}"
     );
+    // issue 1094 review (🔵): lock the EXACT one-trailing-space adjacency — a `taskset -c 8-11  env`
+    // double-space regression would slip past the substring checks above.
+    assert!(
+        cmd.contains("taskset -c 8-11 env RUST_LOG=info"),
+        "issue 1094: the pin must sit exactly `taskset -c 8-11 env RUST_LOG=info` (one space). Got: {cmd:?}"
+    );
     // The space-containing path must be safely quoted — re-running the printed command line through
     // bash must parse without a syntax error, proving the %q-quoting round-trips.
     let roundtrip = Command::new("bash")
@@ -179,6 +185,12 @@ fn build_onimag_command_empty_range_runs_unpinned() {
         "issue 1094: an empty resolved range must run the decode UNPINNED (no taskset) — fail-open, \
          so a pin error never aborts the extract. Got: {cmd:?}"
     );
+    // issue 1094 review (🔵): the empty-range command must be exactly `nice -n 19 env RUST_LOG=info`
+    // (one space, no dangling/double token where the taskset prefix was elided).
+    assert!(
+        cmd.contains("nice -n 19 env RUST_LOG=info"),
+        "issue 1094: unpinned command must read exactly `nice -n 19 env RUST_LOG=info` (one space). Got: {cmd:?}"
+    );
 }
 
 /// issue 1094 — the pure pin-range formula: the top min(4, ncpus) online cores (the E-cores on
@@ -195,6 +207,9 @@ fn onimag_decode_core_range_maps_cpu_count_to_top_four_cores() {
         ("4", "0-3"),
         ("2", "0-1"),
         ("1", "0-0"),
+        ("08", "4-7"), // issue 1094 review: a leading-zero token must NOT be read as octal
+        ("09", "5-8"), // (09 is an invalid octal digit -> a $(( )) error that would defeat
+        ("012", "8-11"), // fail-open); base-10 forcing keeps them harmless.
         ("", ""),      // absent count -> unpinned
         ("bogus", ""), // non-numeric -> unpinned
         ("0", ""),     // zero -> unpinned
