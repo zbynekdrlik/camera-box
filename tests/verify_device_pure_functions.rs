@@ -973,6 +973,58 @@ fn cmdline_has_isolation_matches_whole_tokens_not_prefixes() {
     assert_eq!(out.trim(), "NO");
 }
 
+// --- issue 899: realtime-isolation check (ac) pure helpers -----------------------------------
+
+#[test]
+fn cpulist_contains_matches_ranges_lists_and_singles() {
+    // /proc/irq/<n>/smp_affinity_list renders "3" / "0-2" / "0,2-3" — membership must handle all.
+    let (code, out, err) = run_sourced(
+        r#"chk() { if cpulist_contains "$1" "$2"; then echo IN; else echo OUT; fi; }
+           chk "3" "3"
+           chk "0-2" "3"
+           chk "0-2" "1"
+           chk "0,1,2" "3"
+           chk "0,2-3" "3"
+           chk "" "3"
+           chk "0-3" "3"
+"#,
+    );
+    assert_eq!(code, 0, "harness crashed. stderr: {err}");
+    assert_eq!(out.trim(), "IN\nOUT\nIN\nOUT\nIN\nOUT\nIN");
+}
+
+#[test]
+fn cpulist_max_picks_the_highest_core() {
+    let (code, out, err) = run_sourced(
+        r#"echo "$(cpulist_max "3")"
+           echo "$(cpulist_max "2-3")"
+           echo "$(cpulist_max "0,2-3")"
+           echo "max=$(cpulist_max "")"
+"#,
+    );
+    assert_eq!(code, 0, "harness crashed. stderr: {err}");
+    assert_eq!(out.trim(), "3\n3\n3\nmax=");
+}
+
+#[test]
+fn rt_irq_placement_verdict_grades_by_kernel_and_core() {
+    // Defect 3 core logic: non-RT must route the capture IRQ OFF the grab core; RT co-locates it.
+    let (code, out, err) = run_sourced(
+        r#"rt_irq_placement_verdict 0 "3" "3"; echo
+           rt_irq_placement_verdict 0 "0-2" "3"; echo
+           rt_irq_placement_verdict 1 "3" "3"; echo
+           rt_irq_placement_verdict 1 "0-2" "3"; echo
+           rt_irq_placement_verdict 0 "" "3"; echo
+           rt_irq_placement_verdict 0 "3" ""; echo
+"#,
+    );
+    assert_eq!(code, 0, "harness crashed. stderr: {err}");
+    assert_eq!(
+        out.trim(),
+        "drift-on-grab\nok-off-grab\nok-on-grab\nrt-off-grab\nno-irq\nno-irq"
+    );
+}
+
 #[test]
 fn ndi_symlink_version_extracts_from_canonical_target() {
     let (code, out, err) = run_sourced(&format!(
@@ -1660,10 +1712,15 @@ fn check_aa_fails_on_each_drift_facet() {
     let aa = live_flow
         .find("# (aa) interkom audio bake-in")
         .expect("(aa) block start");
-    let q = live_flow
-        .rfind("# (q) .bak cruft drift")
-        .expect("(q) block start");
-    let aa_block = &live_flow[aa..q];
+    // Scope the slice to the (aa) block ALONE — end it at the NEXT check block (ab), not at (q).
+    // A later WARN-using check inserted between (aa) and (q) (e.g. the issue-899 (ac) realtime-
+    // isolation drift check, which is WARN-only by design) must not be folded into this
+    // (aa)-is-a-hard-gate assertion.
+    let aa_end = live_flow[aa..]
+        .find("\n# (ab) ")
+        .map(|i| aa + i)
+        .expect("(ab) block start (the check immediately after (aa))");
+    let aa_block = &live_flow[aa..aa_end];
     assert!(
         aa_block.contains("is not the by-NAME form"),
         "(aa) must FAIL on a non-by-NAME asound.conf"

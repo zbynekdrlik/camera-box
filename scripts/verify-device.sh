@@ -109,6 +109,11 @@
 #       on :8092, provisioned by setup-device.sh STEP 17b) is ENABLED (reboot-survival) AND active
 #       AND :8092 is listening. A fresh box that never provisioned the agent FAILs instead of coming
 #       up with a dead MCP surface.
+#   (ac) realtime-isolation drift (issue 899) -- WARNING ONLY (never fails the gate for now): reports
+#       whether the kernel is PREEMPT_RT (defect 1 -- the fleet is not yet, informational) and whether
+#       the xhci capture IRQ is routed OFF the isolated grab core on a stock kernel (defect 3 -- the
+#       fix is in src/affinity.rs and lands on the next fleet redeploy; a pre-899 box WARNs). The flip
+#       to a hard FAIL is a follow-up gated on the redeploy (docs/runbooks/899-realtime-isolation.md).
 #
 # Exit: 0 iff every check passes. Non-zero if ANY check FAILs or is UNREADABLE (test-strictness --
 # an unreachable/unreadable check is a FAIL, never a silent pass).
@@ -498,6 +503,58 @@ cmdline_has_isolation() {
   return 0
 }
 
+# cpulist_contains LIST CORE -> 0 iff CORE is a member of the Linux cpulist LIST (the kernel
+# "0-2" / "0,1,2" / "3" comma+range format that /proc/irq/<n>/smp_affinity_list renders). issue 899.
+cpulist_contains() {
+  local list="$1" want="$2" part a b n
+  local -a _parts
+  [ -n "$want" ] || return 1
+  IFS=',' read -ra _parts <<< "$list" || true
+  for part in "${_parts[@]}"; do
+    part="${part//[[:space:]]/}"
+    case "$part" in
+      *-*) a="${part%%-*}"; b="${part##*-}"
+           case "$a" in ''|*[!0-9]*) continue ;; esac
+           case "$b" in ''|*[!0-9]*) continue ;; esac
+           for ((n = a; n <= b; n++)); do [ "$n" = "$want" ] && return 0; done ;;
+      *)   [ "$part" = "$want" ] && return 0 ;;
+    esac
+  done
+  return 1
+}
+
+# cpulist_max LIST -> the highest core index in the Linux cpulist LIST (the isolated capture core;
+# the fleet's isolcpus=3 renders "3", a future "2-3" -> 3), "" if LIST carries no number. issue 899.
+cpulist_max() {
+  local list="$1" part n max=""
+  local -a _parts
+  IFS=',' read -ra _parts <<< "$list" || true
+  for part in "${_parts[@]}"; do
+    part="${part//[[:space:]]/}"
+    case "$part" in *-*) n="${part##*-}" ;; *) n="$part" ;; esac
+    case "$n" in ''|*[!0-9]*) continue ;; esac
+    if [ -z "$max" ] || [ "$n" -gt "$max" ]; then max="$n"; fi
+  done
+  printf '%s' "$max"
+}
+
+# rt_irq_placement_verdict RT IRQ_LIST CAPTURE_CORE -> echoes a verdict token (issue 899 defect 3):
+#   RT=1  (PREEMPT_RT kernel): the IRQ handler is a schedulable thread below the grab priority, so
+#         co-locating it on the isolated core is the #289 intent.
+#   RT!=1 (stock kernel): the non-preemptible hardirq handler MUST run OFF the grab core.
+# Tokens: "no-irq" (no capture IRQ / core to grade -> WARN), "ok-off-grab"/"ok-on-grab" (correct for
+# the kernel), "drift-on-grab" (non-RT but the IRQ shares the grab core -> the defect-3 state),
+# "rt-off-grab" (RT but the IRQ is not co-located -> the RT optimization is not being applied).
+rt_irq_placement_verdict() {
+  local rt="$1" list="$2" core="$3"
+  { [ -n "$list" ] && [ -n "$core" ]; } || { printf 'no-irq'; return 0; }
+  if cpulist_contains "$list" "$core"; then
+    if [ "$rt" = "1" ]; then printf 'ok-on-grab'; else printf 'drift-on-grab'; fi
+  else
+    if [ "$rt" = "1" ]; then printf 'rt-off-grab'; else printf 'ok-off-grab'; fi
+  fi
+}
+
 # ndi_symlink_version LS_TEXT -> the version portion of the libndi.so.6 symlink target in an
 # `ls -la /usr/lib/ndi` listing (e.g. "6.3.2.0" from "libndi.so.6 -> libndi.so.6.3.2.0"), "" if
 # the target is not resolvable. Builds on ndi_symlink_target (the root-owned symlink check).
@@ -608,6 +665,8 @@ Checks:
       live amixer Mic/PCM gain matches the per-box table (cam1-4 75%/79%, cam5-7 80%/94%) (#782)
   (ab) RemoteOS MCP agent: remoteos-mcp.service enabled (reboot-survival) + active, :8092 listening
       (the linux-camN MCP control surface, provisioned by setup-device.sh STEP 17b) (#1066)
+  (ac) realtime-isolation drift (issue 899, WARN-only): kernel PREEMPT_RT status + the xhci capture
+      IRQ routed off the isolated grab core on a stock kernel (defects 1+3; hard-FAIL flip staged)
 
 Env: KERNEL_PIN (optional exact running-kernel pin), NDI_VERSION_PIN (default 6.3.2),
      DANTESYNC_OFFSET_FRESHNESS_S (max age of a fresh [NTP] offset line, default 300),
@@ -1190,6 +1249,58 @@ elif [ "${MCP_LISTEN:-0}" = "0" ]; then
   fail "remoteos-mcp is not listening on :8092 (ss rc=$mcplr) -- the linux-camN MCP surface is unreachable (#1066)"
 else
   ok "remoteos-mcp agent enabled + active + listening on :8092 (linux-camN MCP surface, #1066)"
+fi
+
+# (ac) realtime-isolation drift (issue 899) -- WARNING only for now ------------------------------
+# Surfaces the issue-899 realtime state at the acceptance gate. Two facts, read in ONE ssh call:
+#   * whether the running kernel is PREEMPT_RT (defect 1 -- the fleet is NOT yet, so this is
+#     informational, never a FAIL);
+#   * whether the xhci capture IRQ is routed OFF the isolated grab core on a stock kernel (defect 3
+#     -- the fix lives in src/affinity.rs setup_irq_affinity and lands on the next fleet redeploy).
+# Scope (deliberate, WARN-only surfacing): it grades the REPRESENTATIVE first capture IRQ (head -1)
+# -- the fleet has one xhci host-controller IRQ, and setup_irq_affinity writes the same mask to every
+# matching IRQ, so the first is representative of the routing decision. It also derives the grab core
+# as cpulist_max(/sys/.../isolated), i.e. the AUTO-derived isolated core -- the same core the binary
+# pins unless the CAMERA_BOX_CAPTURE_CORE ops override is set (not used on the fleet).
+# WARN-only, inserted BEFORE (q) per .claude/rules/provisioning-scripts.md (the (q)-last invariant).
+# A box still running the pre-899 binary WARNs here (capture IRQ on the grab core); the flip to a
+# hard FAIL is a documented follow-up gated on the fleet redeploy (docs/runbooks/899-realtime-isolation.md).
+rtrc=0
+RT_STATE="$(ssh_box '
+  rt=0; { grep -q PREEMPT_RT /proc/version || [ "$(cat /sys/kernel/realtime 2>/dev/null)" = "1" ]; } && rt=1
+  iso="$(cat /sys/devices/system/cpu/isolated 2>/dev/null)"
+  irqn="$(grep -iE "xhci|ehci|ohci|uvcvideo" /proc/interrupts 2>/dev/null | head -1 | sed "s/:.*//" | tr -d " ")"
+  irql=""; [ -n "$irqn" ] && irql="$(cat /proc/irq/$irqn/smp_affinity_list 2>/dev/null)"
+  printf "%s\n%s\n%s\n%s\n" "$rt" "$iso" "$irqn" "$irql"
+')" || rtrc=$?
+if [ "$rtrc" -ne 0 ]; then
+  warn "could not read realtime-isolation state (ssh rc=$rtrc) -- issue-899 check (ac) incomplete"
+else
+  RT_FLAG="$(printf '%s' "$RT_STATE" | sed -n 1p)"
+  RT_ISO="$(printf '%s' "$RT_STATE" | sed -n 2p)"
+  RT_IRQN="$(printf '%s' "$RT_STATE" | sed -n 3p)"
+  RT_IRQL="$(printf '%s' "$RT_STATE" | sed -n 4p)"
+  RT_CORE="$(cpulist_max "$RT_ISO")"
+  RT_VERDICT="$(rt_irq_placement_verdict "$RT_FLAG" "$RT_IRQL" "$RT_CORE")"
+  # Defect 1: report the kernel preemption model (never a FAIL -- the fleet is not RT yet).
+  if [ "$RT_FLAG" = "1" ]; then
+    ok "kernel is PREEMPT_RT -- the SCHED_FIFO priorities + IRQ placement are fully honoured (issue 899 defect 1)"
+  else
+    warn "kernel is NOT PREEMPT_RT (stock voluntary-preempt); a hardirq can preempt even the prio-90 grab -- see docs/runbooks/899-realtime-isolation.md (issue 899 defect 1)"
+  fi
+  # Defect 3: capture-IRQ placement relative to the isolated grab core.
+  case "$RT_VERDICT" in
+    ok-off-grab)
+      ok "capture IRQ ${RT_IRQN:-?} routed OFF the isolated grab core ${RT_CORE:-?} (list=${RT_IRQL:-?}) on a stock kernel (issue 899 defect 3)" ;;
+    ok-on-grab)
+      ok "capture IRQ ${RT_IRQN:-?} co-located on the isolated core ${RT_CORE:-?} on a PREEMPT_RT kernel (issue 899 defect 3)" ;;
+    drift-on-grab)
+      warn "capture IRQ ${RT_IRQN:-?} is on the isolated grab core ${RT_CORE:-?} (list=${RT_IRQL:-?}) on a stock kernel -- redeploy the issue-899 binary to route it off (docs/runbooks/899-realtime-isolation.md, issue 899 defect 3)" ;;
+    rt-off-grab)
+      warn "PREEMPT_RT kernel but capture IRQ ${RT_IRQN:-?} is NOT co-located on the isolated core ${RT_CORE:-?} (list=${RT_IRQL:-?}) -- the RT co-location optimization is not applied (issue 899)" ;;
+    *)
+      warn "could not grade capture-IRQ placement (irq='${RT_IRQN:-}', list='${RT_IRQL:-}', core='${RT_CORE:-}') -- issue-899 check (ac) incomplete" ;;
+  esac
 fi
 
 # (q) .bak cruft drift -- WARNING only, never a FAIL (#453) -------------------------------------
