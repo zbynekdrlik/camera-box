@@ -42,3 +42,33 @@ against, and there were ZERO imag runs at report-only-land time. The follow-up m
 rig-side extract is healthy so imag partials flow (a live E2E — supervisor/rig-ops scope), (2)
 accumulate green imag runs, (3) flip `gates_overall_pass()` to `true`, and (4) fold in the issue-887
 produced-vs-presented ~7% deficit as a blocking term. Do NOT flip it blind.
+
+## The 0/76 root cause was the decode CPU-PIN, not StopRecord/reachability/decode (issue 1094, FIXED)
+
+The `[8/8c]` extract ran `recording-verdict-on-imag.sh`, whose `build_onimag_command` hardcoded
+`nice -n 19 taskset -c 12-15 …`. That range was the E-cores of the RETIRED 16-thread imag notebook.
+The box was swapped to an **i5-13420H (12 threads, online cpus 0-11, E-cores 8-11)** — cores 12-15
+do not exist, so `taskset -c 12-15` exits **rc=1 "Invalid argument" BEFORE it can exec
+recording-verdict**. No partial was ever produced → `[8/8c]` "extract failed" → `[8/8d]` omitted
+`--merge-partials imag=…` → `imag_leg_verified=false` on EVERY run. The setup-imag.sh CPU-isolation
+plan was already made topology-agnostic for this same swap (`imag_cpu_isolation_plan`, #833/#841),
+but the DECODE pin in recording-verdict-on-imag.sh was a SEPARATE hardcoded core reference the swap
+sweep missed.
+
+Fixed (1094): `onimag_decode_core_range <ncpus>` (pure, Tier-0-tested) → top min(4,ncpus) cores
+(8-11 here, 12-15 on the old box); `main()` resolves it from the LIVE box (nproc over ssh + a
+`taskset` probe) and FAILS OPEN (empty range → decode runs unpinned, nice 19 only), so a pin error
+can never again silently zero the imag leg. The stale on-box binary is NOT a factor — it supports
+`--extract-partial imag` and emits `schema_version=3`, exactly what the current merge expects.
+
+Diagnostic tells: an imag extract that fails with **no decode-progress log line at all** (no
+`recording decode progress frames_read=…`) points at the PREFIX (`taskset`/`nice`), not the binary
+or the recording — a failing `taskset` aborts the whole command before recording-verdict starts.
+And when a box is swapped, sweep EVERY hardcoded core reference (`grep -rn 'taskset -c'`), not just
+the isolation plan.
+
+Latent (not a current defect, no ticket): recording-verdict-on-imag.sh STEP 1 re-uploads the binary
+only when it is absent/non-executable (`[ -x ]`) — it does NOT compare versions, so a FUTURE
+`PARTIAL_SCHEMA_VERSION` bump would leave imag on a stale binary whose partial the fresh dev1 merge
+rejects. Harmless while the schema stays at 3; if you bump the schema, add a checksum/version gate
+to STEP 1 (or have recording-e2e.sh pass `--force-upload`).
