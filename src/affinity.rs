@@ -196,7 +196,11 @@ pub fn select_irq_target_cores(
     // non-preemptible handler runs on the general cores. If that leaves nothing
     // (single-core box where the only core IS the capture core), fall back to
     // the capture core rather than an empty mask.
-    let general: Vec<usize> = online.iter().copied().filter(|&c| c != capture_core).collect();
+    let general: Vec<usize> = online
+        .iter()
+        .copied()
+        .filter(|&c| c != capture_core)
+        .collect();
     if general.is_empty() {
         vec![capture_core]
     } else {
@@ -627,7 +631,10 @@ LOC:    1000000    1000000    1000000    1000000   Local timer interrupts
     fn irq_target_on_non_rt_kernel_moves_off_the_grab_core() {
         // issue 899 defect 3: on a stock kernel the non-preemptible xhci handler
         // must run OFF the grab core (onto the general cores 0-2), not on it.
-        assert_eq!(select_irq_target_cores(false, 3, &[0, 1, 2, 3]), vec![0, 1, 2]);
+        assert_eq!(
+            select_irq_target_cores(false, 3, &[0, 1, 2, 3]),
+            vec![0, 1, 2]
+        );
     }
 
     #[test]
