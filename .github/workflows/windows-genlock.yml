@@ -886,6 +886,29 @@ jobs:
           if ($ndi -notmatch [regex]::Escape('ndi_recv_create_retry_backoff_ns(recv_create_fail_count)')) {
             Write-Error "ndi-source.cpp: the reset block no longer CALLS ndi_recv_create_retry_backoff_ns(recv_create_fail_count) -- a failed recv_create_v3 is no longer backed off + retried (reverts to the permanent-death break). Re-apply the #1080 retry"; exit 1
           }
+          # camera-box #1096: the strih receiver wedges after a cambox sender restart -- recv_create_v3
+          # connect-by-name re-consults the poisoned long-lived per-process finder (stale rotated-port
+          # address) and never re-resolves; only an OBS restart clears it. The fix resolves the source
+          # via a FRESH NDIlib_find per reset and connects BY-ADDRESS (p_url_address). A subtree pull
+          # re-importing stock DistroAV silently drops this (mirrors tests/distroav_fresh_finder_connect_1096.rs).
+          if ($ndi -notmatch [regex]::Escape('static inline const char *ndi_find_url_for_source_name(')) {
+            Write-Error "ndi-source.cpp: the #1096 ndi_find_url_for_source_name URL-picker helper is gone -- the receiver can no longer connect BY-ADDRESS and stays wedged after a sender restart. Re-apply the #1096 fix"; exit 1
+          }
+          if ($ndi -notmatch [regex]::Escape('ndiLib->find_create_v2(')) {
+            Write-Error "ndi-source.cpp: the #1096 reset block no longer creates a FRESH NDIlib_find (find_create_v2) -- the receiver keeps resolving through the poisoned long-lived finder. Re-apply the #1096 fix"; exit 1
+          }
+          if ($ndi -notmatch [regex]::Escape('ndi_find_url_for_source_name(owned_source_name,')) {
+            Write-Error "ndi-source.cpp: the #1096 reset block no longer calls ndi_find_url_for_source_name(owned_source_name, ...) to pick the fresh URL. Re-apply the #1096 wiring"; exit 1
+          }
+          if ($ndi -notmatch [regex]::Escape('recv_desc.source_to_connect_to.p_url_address = owned_source_url;')) {
+            Write-Error "ndi-source.cpp: the #1096 reset block no longer binds the fresh URL onto recv_desc.source_to_connect_to.p_url_address -- it still connects by name through the poisoned finder. Re-apply the #1096 connect-by-URL"; exit 1
+          }
+          if ($ndi -notmatch [regex]::Escape('ndiLib->find_destroy(')) {
+            Write-Error "ndi-source.cpp: the #1096 fresh finder is never find_destroy'd (per-reset leak). Re-apply the #1096 fix"; exit 1
+          }
+          if ($ndi -notmatch [regex]::Escape('uint64_t no_conn_since_ns = 0;')) {
+            Write-Error "ndi-source.cpp: the #1096 no_conn_since_ns disconnect timer is gone -- the no_connections==0 path can no longer arm a fresh-finder reset, so a GRACEFUL cambox restart (clean FIN -> no_conn==0, where #767 never fires) leaves the strih source black. Re-apply the #1096 no-connection recovery"; exit 1
+          }
           # #257: the UI is a HARD WHITELIST — the forced knobs are REMOVED from the UI (not hidden via
           # apply_genlock_lockdown_visibility, which is gone). getproperties must expose EXACTLY the
           # 4 whitelist props and the forced knobs (e.g. behavior list) must NOT be added.

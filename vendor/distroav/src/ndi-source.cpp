@@ -166,6 +166,43 @@ static inline uint64_t ndi_recv_create_retry_backoff_ns(unsigned consecutive_fai
 	return backoff_ns < cap_ns ? backoff_ns : cap_ns;
 }
 
+/* camera-box #1096: bounded wait budget for the fresh-finder resolution in the reset block. The
+ * restarted sender is already announcing (the wedge case), so it resolves on the first wait; the
+ * cap bounds a source that is genuinely mid-restart. The loop respects s->running so OBS shutdown
+ * is never blocked more than one wait interval. */
+static const uint32_t NDI_FRESH_FIND_WAIT_MS = 500;
+static const unsigned NDI_FRESH_FIND_MAX_WAITS = 4;
+
+/* camera-box #1096: pick the CURRENT network address for a source name from a FRESH finder's
+ * discovered list, so the receiver can connect BY-ADDRESS and BYPASS the poisoned long-lived
+ * in-process NDI finder. The wedge: a restarted cambox sender rotates its NDI port; recv_create_v3
+ * connect-by-name re-consults the SAME per-process finder, which keeps the stale name->address
+ * entry and never re-resolves -- only an OBS process restart (fresh SDK finder) recovers. Returns
+ * the matched source's p_url_address (owned by the finder -- COPY it before find_destroy), or NULL
+ * when the name is empty, absent from the list, or carries no address (then the caller keeps the
+ * name-based connect, i.e. no worse than upstream). Exact name match -- mirrors recv_create's own
+ * name-equality. PURE (only primitives + the two const char* fields) so it lift-compiles +
+ * truth-table-tests offline -- CI is otherwise the first compiler for this file
+ * (tests/distroav_fresh_finder_connect_1096.rs). */
+static inline const char *ndi_find_url_for_source_name(const char *requested_name,
+						       const NDIlib_source_t *sources, uint32_t n_sources)
+{
+	if (!requested_name || !requested_name[0])
+		return NULL; /* no name to match -> keep the name path (nothing to bypass) */
+	if (!sources || n_sources == 0)
+		return NULL; /* fresh finder saw nothing (yet) -> fall back to name */
+	for (uint32_t i = 0; i < n_sources; ++i) {
+		const char *name = sources[i].p_ndi_name;
+		if (name && strcmp(name, requested_name) == 0) {
+			const char *url = sources[i].p_url_address;
+			if (url && url[0])
+				return url; /* current address -> connect BY-URL, bypassing the poison */
+			return NULL;   /* matched but no usable address -> fall back to name */
+		}
+	}
+	return NULL; /* not discovered (yet) -> fall back to name */
+}
+
 /* camera-box #257: per-source MEASUREMENT-BURN setter, runtime-resolved by name — same
  * rationale as the fifo/latency setters: the Windows DistroAV build fetches stock OBS SDK
  * headers (no genlock symbols), so a link-time call cannot build; resolve at runtime so
@@ -684,6 +721,9 @@ void *ndi_source_thread(void *data)
 	 * reset_ndi_receiver block; freed on thread exit. */
 	char *owned_source_name = nullptr;
 	char *owned_receiver_name = nullptr;
+	/* camera-box #1096: the fresh-finder-resolved source URL (owned copy — the finder frees its
+	 * source pointers on find_destroy). Refreshed in the reset block, freed on thread exit. */
+	char *owned_source_url = nullptr;
 
 	NDIlib_recv_instance_t ndi_receiver = nullptr;
 	NDIlib_video_frame_v2_t video_frame;
@@ -704,6 +744,12 @@ void *ndi_source_thread(void *data)
 	/* camera-box #1080: consecutive recv_create_v3 failures, driving the retry backoff below. Reset
 	 * to 0 on the next successful create so a one-off blip does not leave the backoff escalated. */
 	unsigned recv_create_fail_count = 0;
+
+	/* camera-box #1096: os_gettime_ns() at which no_connections first became 0 (0 = currently
+	 * connected). A GRACEFUL cambox restart drops the strih receiver to no_connections==0
+	 * (clean FIN), where the #767 watchdog (no_connections>0 only) never fires and a by-URL
+	 * receiver cannot self-rebind. Used to force a FRESH-finder reset after a stale window. */
+	uint64_t no_conn_since_ns = 0;
 
 	/* camera-box #797 recv-timing instrumentation: locate the ~50-of-60fps pull-loop
 	 * throttle. Times recv_capture_v3 (wait for SDK) vs process_video2+free (our cost,
@@ -830,6 +876,61 @@ void *ndi_source_thread(void *data)
 				ndi_receiver = nullptr;
 			}
 
+			//
+			// camera-box #1096: BEFORE creating the new receiver, resolve the source through a
+			// FRESH NDIlib_find (create+wait+read+destroy — the SAME sequence ndi-finder.cpp uses)
+			// and connect BY-ADDRESS. recv_create_v3 connect-by-name re-consults the long-lived
+			// per-process finder, which stays poisoned with a restarted sender's stale (rotated-
+			// port) address — the wedge only an OBS restart otherwise clears. Connecting by the
+			// fresh p_url_address bypasses it. Fallback: no fresh URL resolved -> keep the name-
+			// based connect (no worse than upstream). This blocks a bounded window and NEVER holds
+			// config_mutex (dropped above), matching the 'no blocking NDI call under the lock' rule.
+			//
+			bool url_resolved_1096 = false;
+			if (owned_source_name && owned_source_name[0]) {
+				NDIlib_find_create_t fresh_find_desc = {0};
+				fresh_find_desc.show_local_sources = true;
+				fresh_find_desc.p_groups = nullptr;
+				NDIlib_find_instance_t fresh_finder = ndiLib->find_create_v2(&fresh_find_desc);
+				if (fresh_finder) {
+					for (unsigned w = 0; w < NDI_FRESH_FIND_MAX_WAITS && s->running; ++w) {
+						ndiLib->find_wait_for_sources(fresh_finder, NDI_FRESH_FIND_WAIT_MS);
+						uint32_t n_fresh = 0;
+						const NDIlib_source_t *fresh_sources =
+							ndiLib->find_get_current_sources(fresh_finder, &n_fresh);
+						const char *fresh_url = ndi_find_url_for_source_name(owned_source_name,
+												     fresh_sources, n_fresh);
+						if (fresh_url && fresh_url[0]) {
+							// Copy the URL out while the finder (owner of the string) is alive.
+							bfree(owned_source_url);
+							owned_source_url = bstrdup(fresh_url);
+							url_resolved_1096 = true;
+							break;
+						}
+					}
+					ndiLib->find_destroy(fresh_finder);
+				} else {
+					obs_log(LOG_WARNING,
+						"'%s' ndi_source_thread: reset_ndi_receiver: #1096 fresh finder create failed; keeping name-based connect",
+						obs_source_name);
+				}
+			}
+			if (url_resolved_1096) {
+				// Empty p_ndi_name => the SDK uses p_url_address directly (bypass the finder).
+				recv_desc.source_to_connect_to.p_ndi_name = "";
+				recv_desc.source_to_connect_to.p_url_address = owned_source_url;
+				obs_log(LOG_INFO,
+					"'%s' ndi_source_thread: reset_ndi_receiver: #1096 connect BY-URL '%s' (fresh finder; bypassing poisoned name resolver)",
+					obs_source_name, owned_source_url);
+			} else {
+				// Fresh finder resolved no URL -> name-based connect (upstream behavior).
+				recv_desc.source_to_connect_to.p_ndi_name = owned_source_name;
+				recv_desc.source_to_connect_to.p_url_address = nullptr;
+				obs_log(LOG_INFO,
+					"'%s' ndi_source_thread: reset_ndi_receiver: #1096 connect BY-NAME '%s' (fresh finder resolved no URL; no worse than upstream)",
+					obs_source_name, owned_source_name);
+			}
+
 			obs_log(LOG_DEBUG,
 				"'%s' ndi_source_thread: reset_ndi_receiver: recv_desc = { p_ndi_recv_name='%s', source_to_connect_to.p_ndi_name='%s' }",
 				obs_source_name, //
@@ -856,9 +957,9 @@ void *ndi_source_thread(void *data)
 				//
 				recv_create_fail_count++;
 				obs_log(LOG_ERROR,
-					"ERR-407 - Error creating the NDI Receiver '%s' set for '%s' (attempt %u); keeping the receiver thread alive and retrying with backoff",
-					recv_desc.source_to_connect_to.p_ndi_name, obs_source_name,
-					recv_create_fail_count);
+					"ERR-407 - Error creating the NDI Receiver '%s' (url='%s') set for '%s' (attempt %u); keeping the receiver thread alive and retrying with backoff",
+					owned_source_name ? owned_source_name : "", owned_source_url ? owned_source_url : "",
+					obs_source_name, recv_create_fail_count);
 				process_empty_frame(s);
 				// Give the freshly (re)connected receiver a full #767 stale window once it comes
 				// back, instead of judging it against this failed epoch.
@@ -972,6 +1073,29 @@ void *ndi_source_thread(void *data)
 			// next connection a fresh stale window (see the transition refresh below).
 			was_disconnected = true;
 
+			// camera-box #1096: a receiver stuck at no_connections==0 (a GRACEFUL sender restart
+			// drops the connection cleanly to 0) has NO autonomous recovery -- #767 requires
+			// no_connections>0, a by-URL receiver has no name for NDI's internal rebind, and a
+			// name-based one re-consults the poisoned finder. For a GENLOCKED source, after the
+			// same GENLOCK_RECONNECT_STALE_NS window as #767, force reset_ndi_receiver so the reset
+			// block's FRESH finder re-resolves the restarted sender's rotated port. Own timer
+			// (last_frame_timestamp froze on disconnect); re-armed at most once per window (natural
+			// backoff while the sender is genuinely down); scoped like #767 so non-genlock/aux and
+			// stock-OBS inputs are untouched.
+			uint64_t now_nc = os_gettime_ns();
+			if (no_conn_since_ns == 0)
+				no_conn_since_ns = now_nc;
+			if ((now_nc - no_conn_since_ns) >= GENLOCK_RECONNECT_STALE_NS &&
+			    genlock_source_is_active(s->obs_source)) {
+				obs_log(LOG_INFO,
+					"genlock: NDI receiver disconnected (no_connections==0) past the stale window -- forcing fresh-finder rebind (sender restart?) '%s'",
+					obs_source_name);
+				pthread_mutex_lock(&s->config_mutex);
+				s->config.reset_ndi_receiver = true;
+				pthread_mutex_unlock(&s->config_mutex);
+				no_conn_since_ns = now_nc; /* backoff: next re-arm one full window later */
+			}
+
 			// This will also slow down the shutdown of OBS when no NDI feed is received.
 			std::this_thread::sleep_for(std::chrono::milliseconds(100));
 			continue;
@@ -1000,6 +1124,9 @@ void *ndi_source_thread(void *data)
 		// on an already-recovering feed). Give the freshly (re)connected receiver a full stale
 		// window first; the next real frame (or a genuinely stuck new connection after the full
 		// window) drives the decision from here on.
+		// camera-box #1096: connected again (no_conn>0) -> clear the no-connection timer so a
+		// future disconnect starts a fresh stale window.
+		no_conn_since_ns = 0;
 		if (was_disconnected) {
 			s->last_frame_timestamp = os_gettime_ns();
 			was_disconnected = false;
@@ -1213,6 +1340,8 @@ void *ndi_source_thread(void *data)
 	owned_source_name = nullptr;
 	bfree(owned_receiver_name);
 	owned_receiver_name = nullptr;
+	bfree(owned_source_url);
+	owned_source_url = nullptr;
 
 	obs_log(LOG_DEBUG, "'%s' -ndi_source_thread(…)", obs_source_name);
 
