@@ -743,9 +743,9 @@ Options:
                        #1021 deadband widening (1000+1000=2000) gives NO widening and a healthy
                        sawtooth median (the round-33 failed run: 2699us) false-DRIFTs the bare
                        2000us bound. The master's median bound therefore ALSO floors at
-                       (step-cap + --deadband-margin-us) = ${GATE_NTP_MASTER_STEP_CAP_US}+${GATE_DEADBAND_MARGIN_US}=3500us
+                       (step-cap + --deadband-margin-us) = ${GATE_NTP_MASTER_STEP_CAP_US}+${GATE_DEADBAND_MARGIN_US}=$((GATE_NTP_MASTER_STEP_CAP_US + GATE_DEADBAND_MARGIN_US))us
                        (default ${GATE_NTP_MASTER_STEP_CAP_US}, v1.8.46's documented step cap). Master-only (median-only
-                       row); a genuine gross desync (>>3500us) still DRIFTs, CLIENT rows keep the
+                       row); a genuine gross desync (well beyond that ceiling) still DRIFTs, CLIENT rows keep the
                        fixed 2000us bound. Gated on a numeric ntp_deadband_us being present, so a
                        pre-dantesync-#84 master keeps the bare bound. Since the master's raw UTC
                        median is thus no longer a health signal up to the step-cap, the master is
