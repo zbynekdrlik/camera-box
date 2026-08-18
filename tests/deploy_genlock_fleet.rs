@@ -159,6 +159,46 @@ fn genlock_write_markers_fails_loud_on_missing_args() {
     );
 }
 
+/// setup-imag.sh ships STANDALONE to the box (it cannot source the sibling lib), so it carries an
+/// inline copy of genlock_write_markers. That copy must be BEHAVIORALLY IDENTICAL to the shared
+/// scripts/lib/genlock-markers.sh — one behavior, two homes. Source both, write markers with the
+/// same args (incl. an explicit DEPLOYED_AT so the timestamp is deterministic), assert the three
+/// marker files are byte-for-byte identical.
+#[test]
+fn inline_genlock_write_markers_matches_the_shared_lib() {
+    let setup = manifest_dir().join("scripts/setup-imag.sh");
+    assert!(setup.exists(), "{} not found", setup.display());
+    let a = tempfile::tempdir().expect("tempdir a");
+    let b = tempfile::tempdir().expect("tempdir b");
+    let at = "2026-08-18T12:00:00+00:00";
+    run_sourced(
+        &setup,
+        &format!(
+            "genlock_write_markers '{}' shaGGG shaDDD '{at}'",
+            a.path().display()
+        ),
+    );
+    run_sourced(
+        &markers_lib(),
+        &format!(
+            "genlock_write_markers '{}' shaGGG shaDDD '{at}'",
+            b.path().display()
+        ),
+    );
+    for f in [
+        "GENLOCK_BUILD_SHA.txt",
+        "DISTROAV_BUILD_SHA.txt",
+        "DEPLOYED_AT",
+    ] {
+        let ca = std::fs::read_to_string(a.path().join(f)).unwrap();
+        let cb = std::fs::read_to_string(b.path().join(f)).unwrap();
+        assert_eq!(
+            ca, cb,
+            "setup-imag.sh inline vs the shared lib genlock_write_markers differ on {f}"
+        );
+    }
+}
+
 // ============================================================================================
 // deploy-genlock-fleet.sh — pure resolution helpers.
 // ============================================================================================

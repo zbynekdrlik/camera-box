@@ -84,6 +84,51 @@ manifest_sha_for_path() {
     printf '%s\n' "$sha"
 }
 
+# _genlock_marker_atomic / genlock_write_markers — issue 789: the shared genlock deploy marker
+# writer, kept BEHAVIORALLY IDENTICAL to scripts/lib/genlock-markers.sh's copy of the same name and
+# locked to it by tests/deploy_genlock_fleet.rs::inline_genlock_write_markers_matches_the_shared_lib.
+# setup-imag.sh is scp'd to the box STANDALONE (no sibling scripts/lib checked out there — same
+# reason manifest_sha_for_path cannot shell out to the repo's own tool), so it carries this inline
+# copy rather than sourcing the lib; the fleet script's on-imag program sources the lib instead.
+# Writes each marker temp-then-rename (a POSIX same-dir `mv -f`) so a concurrent drift-guard reader
+# never sees a half-written marker. A missing MARKER_DIR/GENLOCK_SHA/DISTROAV_SHA is fail-loud
+# (return 2), never a silent partial write — under this script's `set -e` a non-zero return aborts.
+_genlock_marker_atomic() {
+    local dest="$1" content="$2" tmp
+    tmp="${dest}.tmp.$$"
+    if ! printf '%s\n' "$content" > "$tmp" 2>/dev/null; then
+        echo "genlock_write_markers: could not write temp file $tmp" >&2
+        rm -f "$tmp" 2>/dev/null
+        return 1
+    fi
+    if ! mv -f "$tmp" "$dest" 2>/dev/null; then
+        echo "genlock_write_markers: could not rename $tmp -> $dest" >&2
+        rm -f "$tmp" 2>/dev/null
+        return 1
+    fi
+    return 0
+}
+genlock_write_markers() {
+    local marker_dir="${1:-}" genlock_sha="${2:-}" distroav_sha="${3:-}" deployed_at="${4:-}"
+    if [ -z "$marker_dir" ]; then
+        echo "genlock_write_markers: MARKER_DIR (arg 1) is required" >&2; return 2
+    fi
+    if [ -z "$genlock_sha" ]; then
+        echo "genlock_write_markers: GENLOCK_SHA (arg 2) is required" >&2; return 2
+    fi
+    if [ -z "$distroav_sha" ]; then
+        echo "genlock_write_markers: DISTROAV_SHA (arg 3) is required" >&2; return 2
+    fi
+    [ -n "$deployed_at" ] || deployed_at="$(date -Is)"
+    if ! mkdir -p "$marker_dir" 2>/dev/null; then
+        echo "genlock_write_markers: could not create marker dir $marker_dir" >&2; return 1
+    fi
+    _genlock_marker_atomic "$marker_dir/GENLOCK_BUILD_SHA.txt"  "$genlock_sha"  || return 1
+    _genlock_marker_atomic "$marker_dir/DISTROAV_BUILD_SHA.txt" "$distroav_sha" || return 1
+    _genlock_marker_atomic "$marker_dir/DEPLOYED_AT"           "$deployed_at"  || return 1
+    return 0
+}
+
 # imag_cpu_isolation_plan  (stdin: one "CPU SIBLINGS_LIST" line per logical CPU, numerically
 # ordered — i.e. cpuN + the contents of its topology/thread_siblings_list) -> THREE lines:
 #   1. the CPUs to ISOLATE for the OBS thread pool   (isolcpus=)
@@ -1137,10 +1182,12 @@ else
     nm -D -u "$OBS_FRONTEND_REAL" 2>/dev/null | grep 'obs_display_set_render_divisor' >/dev/null \
         || fail "post-swap /usr/bin/obs does not reference obs_display_set_render_divisor — refuse a stock/wrong frontend binary (#499: multiview render-budget decouple would be missing)"
 
-    echo "$NEW_SHA" > "$GENLOCK_MARKER_DIR/GENLOCK_BUILD_SHA.txt"
-    echo "$FAST_SHA" > "$GENLOCK_MARKER_DIR/DISTROAV_BUILD_SHA.txt"
+    # issue 789: write GENLOCK_BUILD_SHA.txt + DISTROAV_BUILD_SHA.txt + DEPLOYED_AT via the shared
+    # marker helper (atomic temp-then-rename) so this provisioning path and deploy-genlock-fleet.sh
+    # can never drift on HOW a box records its deployed build. The manifest copy stays here (the
+    # helper writes only the three text markers).
+    genlock_write_markers "$GENLOCK_MARKER_DIR" "$NEW_SHA" "$FAST_SHA"
     cp -a "$MANIFEST" "$GENLOCK_MARKER_DIR/BUNDLE_MANIFEST.json"
-    date -Is > "$GENLOCK_MARKER_DIR/DEPLOYED_AT"
 
     # Prevent an unattended `apt upgrade` from silently reverting libobs.so.30 back to PPA-stock
     # bytes behind the operator's back (dpkg still tracks obs-studio) — drift must be a deliberate
