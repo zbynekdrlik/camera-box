@@ -5901,7 +5901,7 @@ fn build_and_print_verdict_with_stream_hashes(
                     let mut av_all_zero = true;
                     let mut av_judged = 0usize;
                     for &camera in CAMERA_UNDER_TEST_NODES.iter() {
-                        if offline_ack_map.get(camera).is_some() {
+                        if offline_ack_map.contains_key(camera) {
                             continue;
                         }
                         if let Some(cs) = cam_syncs.get(camera) {
