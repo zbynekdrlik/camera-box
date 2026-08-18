@@ -108,3 +108,27 @@ issue 858 — into setup-device.sh). Two adaptations are NOT optional copy-paste
   `[Install]`). Prove the LIVE runtime state (`is-active` + a listening port) in the paired
   verify-device.sh `(ab)`-style check, which runs post-reboot — that is where a cam-box install's
   liveness belongs (see its own header: "the fourth and final phase").
+
+## A WARN-using check inserted before (q) trips the (aa)-hard-gate test, which slices [aa..q] (#899)
+
+The `(q)`-last invariant above keeps `(q)` physically last, but a SECOND slice-based test also
+spans multiple checks: `tests/verify_device_pure_functions.rs::check_aa_fails_on_each_drift_facet`
+sliced the (aa) block as `&live_flow[aa..q]` — from the `# (aa)` marker all the way to the `# (q)`
+marker — then asserted `!aa_block.contains("warn \"")` (the (aa) interkom check must FAIL, never
+merely warn, on a drift). That slice silently folds in EVERY check between (aa) and (q). It stayed
+green only because the intervening checks ((ab) remoteos) used `fail`/`ok` exclusively — so the
+FIRST check inserted between (aa) and (q) that legitimately uses `warn "` (the #899 `(ac)`
+realtime-isolation drift check, which is WARN-only by design) tripped the assertion. **Fix: scope
+that slice to the (aa) block ALONE** — end it at the NEXT check boundary
+(`live_flow[aa..].find("\n# (ab) ")`), not at `(q)`. This is the same over-slice class as the
+`(q)`-last rule, but for a different test whose window happens to span from (aa) to (q). When
+adding ANY new check that can `warn` (a report-only / informational check) before `(q)`, grep the
+test file for slices bounded by `# (q)` / `.bak cruft drift` and confirm your new WARN lines don't
+fall inside a `!...contains("warn \"")` window; narrow the offending slice to its own check block.
+
+## Two-char check-letter scheme is now at (ac) (#899)
+
+The single letters (a)-(z) are exhausted; the two-char scheme continues (aa) interkom (#782),
+(ab) remoteos-mcp (#1066), **(ac) realtime-isolation drift (#899, WARN-only)**. Grep the header /
+usage / exec lists for the next free two-char letter (they are NOT in file order) rather than
+assume — a letter cited only in a `setup-device.sh` comment is not proof the check exists.
