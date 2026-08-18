@@ -145,7 +145,10 @@ fn secondary_dantesync_gate_is_invoked_with_gm_enforce_on_1073() {
         .env("CALL_LOG", &call_log)
         .env("CAMERA_SET_SH", &camera_set_sh)
         .env("CAMERA_ACTIVE_SET", "cam1 cam2 cam5")
-        .env("PF_LINUX", "cam1=10.77.9.61 cam2=10.77.9.62 cam5=10.77.9.65")
+        .env(
+            "PF_LINUX",
+            "cam1=10.77.9.61 cam2=10.77.9.62 cam5=10.77.9.65",
+        )
         .env("STRIH", "10.77.9.202")
         .env_remove("DANTESYNC_GATE_GM_ENFORCE")
         .output()
