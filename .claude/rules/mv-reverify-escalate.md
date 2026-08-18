@@ -77,6 +77,7 @@ save/restore cannot cover this gap; the active re-open is what restores the oper
 
 All pure/builder pieces are unit-tested with fakes on PATH (the #833/#716 pattern) —
 `tests/harness_mv_reverify_escalate_1093.rs`. The env override seams (`MV_REVERIFY_RECEIVED_CMD`,
-`MV_REVERIFY_OBS_RESTART_CMD`, `MV_REVERIFY_SWEEP_CMD`, `MV_REVERIFY_OBS_WS_WAIT_ITERS=0`,
+`MV_REVERIFY_OBS_RESTART_CMD`, `MV_REVERIFY_SWEEP_CMD`, `MV_REVERIFY_REOPEN_MV_CMD` (#1098),
+`MV_REVERIFY_OBS_WS_WAIT_ITERS=0`,
 `MV_REVERIFY_*_GAP_S=0`) let the orchestrator's decision flow run offline with zero ssh/OBS/network.
 The LIVE strih-OBS restart itself is NOT exercisable at Tier-0 — flag it UNVERIFIED for the E2E run.
