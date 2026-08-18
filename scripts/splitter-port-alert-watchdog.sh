@@ -152,7 +152,7 @@ handle_box() {
       else
         log "RECOVERY: $box back to colour -- firing recovery notification"
         python3 "$NOTIFY" notify --body \
-          "✅ #739 splitter-port: **$box** ($ip) is capturing in colour again ($REPO_SLUG)." \
+          "✅ HDMI splitter ($REPO_SLUG): **$box** ($ip) opäť sníma vo farbe." \
           >/dev/null 2>&1 || log "RECOVERY: airuleset.py notify failed (non-fatal)"
       fi
       write_state_field "alerted_${box}" 0
@@ -222,7 +222,7 @@ handle_box() {
   if [ "${alert_now:-0}" = "1" ]; then
     log "ALERT: firing Discord notification for $box splitter-port fault"
     python3 "$NOTIFY" notify --body \
-      "🚨 #739 splitter-port: **$box** ($ip) — ${detail}. A sibling cambox on the SAME camera+splitter is fine, so the shared camera is delivering: check the HDMI splitter port / cable feeding $box FIRST, not the camera colour ($REPO_SLUG). Confirmed over ${CONFIRM_THRESHOLD} consecutive passes." \
+      "🚨 HDMI splitter ($REPO_SLUG): **$box** ($ip) — ${detail}. Iný cambox na tej istej kamere+splitteri je v poriadku, čiže kamera obraz dodáva: chyba je najskôr v HDMI splitter porte / kábli do $box, nie vo farbe kamery. Potrebný fyzický zásah — skontroluj splitter port a kábel do $box. Potvrdené počas ${CONFIRM_THRESHOLD} po sebe idúcich kontrol." \
       >/dev/null 2>&1 || log "ALERT: airuleset.py notify failed (non-fatal)"
   else
     log "ALERT: suppressed by throttle (pass ${prior_passes}/${ALERT_THROTTLE_PASSES})"

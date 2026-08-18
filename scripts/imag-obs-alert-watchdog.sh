@@ -153,7 +153,7 @@ latency_drift_check() {
   if [ "${alert_now:-0}" = "1" ]; then
     log "ALERT: firing Discord report for imag latency-pin DRIFT (REPORT-ONLY, not overwritten)"
     python3 "$NOTIFY" notify --body \
-      "⚠️ #1070 imag latency-pin DRIFT ($REPO_SLUG) -- REPORT-ONLY, pins NOT overwritten (operator A/V-align domain): $out" \
+      "⚠️ imag latencia pinov ($REPO_SLUG) — len INFO, piny sa neprepisujú (toto je doména operátora pre A/V zarovnanie): $out" \
       >/dev/null 2>&1 || log "latency report: airuleset.py notify failed (non-fatal)"
   else
     log "latency drift report suppressed by throttle (pass ${prior_passes}/${LATENCY_ALERT_THROTTLE_PASSES})"
@@ -254,7 +254,7 @@ main() {
   if [ "${alert_now:-0}" = "1" ]; then
     log "ALERT: firing Discord notification for imag-nb"
     python3 "$NOTIFY" notify --body \
-      "🚨 #882 imag-obs-alert-watchdog: imag-nb OBS is DOWN ($REPO_SLUG). ${msg}" \
+      "🚨 imag OBS ($REPO_SLUG): OBS na imag-nb je DOLE. ${msg} Rieši Claude automaticky, ty nemusíš nič robiť." \
       >/dev/null 2>&1 || log "ALERT: airuleset.py notify failed (non-fatal)"
   else
     log "ALERT: suppressed by throttle (pass ${prior_passes}/${ALERT_THROTTLE_PASSES})"

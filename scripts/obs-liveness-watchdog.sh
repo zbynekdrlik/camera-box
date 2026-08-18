@@ -197,7 +197,7 @@ main() {
 
     if [ "${alert_now:-0}" = "1" ]; then
       local msg
-      msg="🚨 #391 obs-liveness-watchdog: **$box** OBS is **$label** ($REPO_SLUG). Reasons: ${reasons:-none}. Confirmed over ${CONFIRM_THRESHOLD} consecutive passes (no false-positive on a single blip). Recovery (agent-driven — run the win-* MCP plan): \`$(recovery_plan_for "$box" "$label")\`"
+      msg="🚨 OBS zamrznuté ($REPO_SLUG): OBS na **$box** je **$label**. Dôvod: ${reasons:-none}. Potvrdené počas ${CONFIRM_THRESHOLD} po sebe idúcich kontrol (nie je to jednorazový výkyv). Rieši Claude automaticky (win-* MCP plán: \`$(recovery_plan_for "$box" "$label")\`), ty nemusíš nič robiť."
       log "ALERT: firing Discord notification for $box ($label)"
       python3 "$NOTIFY" notify --body "$msg" >/dev/null 2>&1 \
         || log "ALERT: airuleset.py notify failed (non-fatal)"
