@@ -87,6 +87,84 @@ pub const ONSET_WINDOW_NS: i64 = 1_000_000_000;
 /// module doc); it only classifies a transition's reported `clean` flag.
 pub const WAKEUP_LATENCY_MAX_NS: i64 = 66_666_667;
 
+/// #1086 part-4 — the recorded program's target delivered-frame rate: 30fps on BOTH strih and
+/// stream (recording-e2e.sh records a 30fps cut-to-stream canvas). REPORT-ONLY: used ONLY to
+/// classify the sustained-receive-fps health field below; it is NOT a calibrated LIVE bound.
+pub const TARGET_RECEIVE_FPS: f64 = 30.0;
+
+/// #1086 part-4 — provisional tolerance below `TARGET_RECEIVE_FPS` for the sustained-fps receive
+/// health classifier. REPORT-ONLY (calibration-first, same as the wake-up ceiling): a real bound
+/// is set once live warm-baseline + genuine-cold data exist.
+pub const SUSTAINED_FPS_TOLERANCE: f64 = 3.0;
+
+/// #1086 part-4 (RESCOPE confound) — the issue-793 libobs pooled-thread startup-segfault window is
+/// ~60-90s after a FRESH OBS start. A cold-cut onset MISS whose switch fell this soon after the run
+/// began could be that startup segfault rather than a genuine cold receiver failure. The recording
+/// start (`window[0].start_ns`) is a LOWER BOUND on OBS uptime (OBS was already running when the
+/// recording began), so an onset miss whose switch is LATER than this many seconds after the run's
+/// first switch is DEFINITELY past the segfault window (a genuine cold-cut miss); an earlier one is
+/// ambiguous and flagged for the LIVE-flip follow-up to disambiguate (explicitly wait past the
+/// window, or capture the true OBS start). REPORT-ONLY.
+pub const SEGFAULT_WINDOW_MAX_SECS: f64 = 90.0;
+
+/// #1086 part-4 — sustained-receive-fps health of the tested camera's program window. Separates
+/// "the warm cut worked" (onset clean) from "steady-state receive on that camera is healthy" (the
+/// issue #1/#799 degradation class). REPORT-ONLY.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReceiveHealth {
+    /// Sustained fps within `SUSTAINED_FPS_TOLERANCE` of `TARGET_RECEIVE_FPS`.
+    Healthy,
+    /// Sustained fps below `TARGET_RECEIVE_FPS - SUSTAINED_FPS_TOLERANCE` — steady-state receive is
+    /// degraded even if the cut itself woke up promptly.
+    Degraded,
+    /// Not enough delivered frames / a degenerate span to define a rate.
+    Unknown,
+}
+
+/// #1086 part-4 (RESCOPE confound) — attribution of a cold-cut onset MISS: is it plausibly the
+/// issue-793 libobs startup segfault (the switch fell early in the run), or a genuine cold-cut
+/// receiver failure (the switch was late enough to rule the segfault out)? REPORT-ONLY.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OnsetMissAttribution {
+    /// The transition's switch fell inside the issue-793 startup-segfault window (early in the run)
+    /// — an onset miss here could be that segfault, not a cold receiver. Ambiguous, flagged for the
+    /// LIVE-flip follow-up.
+    PossibleSegfaultWindow,
+    /// The switch was later than `SEGFAULT_WINDOW_MAX_SECS` after the run's first switch, so the
+    /// issue-793 startup segfault is ruled out — an onset miss here is a genuine cold-cut failure.
+    GenuineColdCutMiss,
+    /// The transition had NO onset miss (clean), so there is nothing to attribute.
+    NoMiss,
+}
+
+/// #1086 part-4 — sustained delivered-frame rate over a window: `delivered / span_secs`. Returns
+/// `None` when the span is non-positive or fewer than 2 frames were delivered (a rate is
+/// undefined). REPORT-ONLY.
+pub fn sustained_fps(_delivered: u32, _span_ns: i64) -> Option<f64> {
+    // RED stub (#1086) — not yet implemented; the tests below pin the real behavior.
+    None
+}
+
+/// #1086 part-4 — classify a window's sustained receive fps against the target. `None` fps →
+/// `Unknown`; below `TARGET_RECEIVE_FPS - SUSTAINED_FPS_TOLERANCE` → `Degraded`; otherwise
+/// `Healthy`. REPORT-ONLY.
+pub fn receive_health(_fps: Option<f64>) -> ReceiveHealth {
+    // RED stub (#1086) — not yet implemented; the tests below pin the real behavior.
+    ReceiveHealth::Unknown
+}
+
+/// #1086 part-4 (RESCOPE confound) — attribute a cold-cut onset miss. `has_miss` is whether the
+/// transition showed a late/missing wake-up or a black onset frame (i.e. NOT `clean`);
+/// `secs_since_run_start` is `(switch_ns - run_start_ns) / 1e9`. A clean transition returns
+/// `NoMiss`; otherwise a switch earlier than `SEGFAULT_WINDOW_MAX_SECS` into the run is
+/// `PossibleSegfaultWindow`, a later one `GenuineColdCutMiss`. REPORT-ONLY.
+pub fn onset_miss_attribution(_has_miss: bool, _secs_since_run_start: f64) -> OnsetMissAttribution {
+    // RED stub (#1086) — not yet implemented; the tests below pin the real behavior.
+    OnsetMissAttribution::NoMiss
+}
+
 /// A decoded frame that landed inside a transition's onset window.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct OnsetFrame {
@@ -110,6 +188,10 @@ pub struct ColdCutWindow {
     pub end_ns: i64,
     /// The decoded frames in `[start_ns, start_ns + ONSET_WINDOW_NS)` (see [`in_onset_window`]).
     pub onset_frames: Vec<OnsetFrame>,
+    /// #1086 part-4 — total delivered frames in the WHOLE window `[start_ns, end_ns)` (not just the
+    /// onset), for the sustained-receive-fps health check. The consumer counts `seg_frames`; the
+    /// unit tests set it directly.
+    pub window_frames: u32,
 }
 
 /// The onset report for ONE cold-cut transition.
@@ -129,6 +211,23 @@ pub struct ColdCutTransition {
     pub wakeup_latency_ns: Option<i64>,
     /// First decodable frame within `WAKEUP_LATENCY_MAX_NS` AND no onset frame undecodable.
     pub clean: bool,
+    /// #1086 part-4 — total delivered frames across the WHOLE program window `[start_ns, end_ns)`.
+    pub window_frames: u32,
+    /// #1086 part-4 — sustained delivered-frame rate over the whole window (`None` = too few frames
+    /// / degenerate span). REPORT-ONLY.
+    pub sustained_fps: Option<f64>,
+    /// #1086 part-4 — receive-health classification of `sustained_fps` (separates "warm cut works"
+    /// from "steady-state receive healthy"). REPORT-ONLY.
+    pub receive_health: ReceiveHealth,
+    /// #1086 part-4 — seconds from the run's first switch to THIS switch (`(start_ns -
+    /// run_start_ns) / 1e9`), the issue-793 confound anchor.
+    pub secs_since_run_start: f64,
+    /// #1086 part-4 — whether this transition showed an onset miss (late/missing wake-up or a black
+    /// onset frame), i.e. NOT `clean`.
+    pub has_onset_miss: bool,
+    /// #1086 part-4 (RESCOPE confound) — attribution of an onset miss: issue-793 startup segfault vs
+    /// a genuine cold-cut failure vs no miss. REPORT-ONLY.
+    pub miss_attribution: OnsetMissAttribution,
 }
 
 /// The whole run's cold-cut onset report.
@@ -147,6 +246,18 @@ pub struct ColdCutReport {
     pub any_wakeup_missing: bool,
     /// Any cold transition with a black/frozen (undecodable) frame at onset.
     pub any_onset_undecodable: bool,
+    /// #1086 part-4 — the target/tolerance the receive-health field classifies against (echoed for
+    /// the report). REPORT-ONLY.
+    pub target_receive_fps: f64,
+    pub sustained_fps_tolerance: f64,
+    /// #1086 part-4 — any cold transition whose whole-window sustained receive fps was `Degraded`.
+    pub any_receive_degraded: bool,
+    /// #1086 part-4 (RESCOPE confound) — any onset miss whose switch fell in the issue-793
+    /// startup-segfault window (ambiguous — could be the segfault, not a cold receiver).
+    pub any_miss_possibly_segfault: bool,
+    /// #1086 part-4 (RESCOPE confound) — any onset miss whose switch was late enough to rule the
+    /// issue-793 segfault out (a genuine cold-cut receiver failure).
+    pub any_genuine_cold_cut_miss: bool,
     pub transitions: Vec<ColdCutTransition>,
 }
 
@@ -196,6 +307,10 @@ pub fn transition_is_clean(wakeup_latency_ns: Option<i64>, onset_undecodable: u3
 pub fn build_report(windows: &[ColdCutWindow]) -> ColdCutReport {
     use std::collections::HashMap;
 
+    // #1086: the run's first switch (~recording start) is the issue-793 confound anchor — a LOWER
+    // BOUND on OBS uptime. `None` for an empty schedule (no transitions are produced anyway).
+    let run_start_ns = windows.first().map(|w| w.start_ns);
+
     // The end_ns of each cambox's most recent PRIOR window, keyed by label.
     let mut last_end: HashMap<&str, i64> = HashMap::new();
     let mut transitions: Vec<ColdCutTransition> = Vec::new();
@@ -207,6 +322,18 @@ pub fn build_report(windows: &[ColdCutWindow]) -> ColdCutReport {
             if hidden_secs_before >= COLD_HIDDEN_SECS {
                 let (delivered, decodable, undecodable, wakeup) =
                     onset_stats(w.start_ns, &w.onset_frames);
+                let clean = transition_is_clean(wakeup, undecodable);
+                // #1086 part-4: sustained receive fps over the WHOLE program window.
+                let span_ns = w.end_ns - w.start_ns;
+                let fps = sustained_fps(w.window_frames, span_ns);
+                let health = receive_health(fps);
+                // #1086 part-4 (RESCOPE confound): seconds from the run's first switch to this one
+                // (0.0 when this IS the first window — then it is trivially in the segfault window).
+                let secs_since_run_start =
+                    (w.start_ns - run_start_ns.unwrap_or(w.start_ns)) as f64 / 1e9;
+                let has_onset_miss = !clean;
+                let miss_attribution =
+                    onset_miss_attribution(has_onset_miss, secs_since_run_start);
                 transitions.push(ColdCutTransition {
                     cambox: w.cambox.clone(),
                     hidden_secs_before,
@@ -214,7 +341,13 @@ pub fn build_report(windows: &[ColdCutWindow]) -> ColdCutReport {
                     onset_decodable: decodable,
                     onset_undecodable: undecodable,
                     wakeup_latency_ns: wakeup,
-                    clean: transition_is_clean(wakeup, undecodable),
+                    clean,
+                    window_frames: w.window_frames,
+                    sustained_fps: fps,
+                    receive_health: health,
+                    secs_since_run_start,
+                    has_onset_miss,
+                    miss_attribution,
                 });
             }
         }
@@ -229,6 +362,16 @@ pub fn build_report(windows: &[ColdCutWindow]) -> ColdCutReport {
     });
     let any_wakeup_missing = transitions.iter().any(|t| t.wakeup_latency_ns.is_none());
     let any_onset_undecodable = transitions.iter().any(|t| t.onset_undecodable > 0);
+    // #1086 part-4 aggregates.
+    let any_receive_degraded = transitions
+        .iter()
+        .any(|t| t.receive_health == ReceiveHealth::Degraded);
+    let any_miss_possibly_segfault = transitions
+        .iter()
+        .any(|t| t.miss_attribution == OnsetMissAttribution::PossibleSegfaultWindow);
+    let any_genuine_cold_cut_miss = transitions
+        .iter()
+        .any(|t| t.miss_attribution == OnsetMissAttribution::GenuineColdCutMiss);
 
     ColdCutReport {
         cold_hidden_secs: COLD_HIDDEN_SECS,
@@ -239,6 +382,11 @@ pub fn build_report(windows: &[ColdCutWindow]) -> ColdCutReport {
         any_wakeup_over_max,
         any_wakeup_missing,
         any_onset_undecodable,
+        target_receive_fps: TARGET_RECEIVE_FPS,
+        sustained_fps_tolerance: SUSTAINED_FPS_TOLERANCE,
+        any_receive_degraded,
+        any_miss_possibly_segfault,
+        any_genuine_cold_cut_miss,
         transitions,
     }
 }
@@ -279,12 +427,26 @@ mod tests {
             .collect()
     }
 
+    // A healthy 30s window at 30fps delivers ~900 frames — the default for windows a test does not
+    // care about the sustained-fps of.
+    const HEALTHY_WINDOW_FRAMES: u32 = 900;
+
     fn window(cambox: &str, start_ns: i64, onset: Vec<OnsetFrame>) -> ColdCutWindow {
+        window_with_frames(cambox, start_ns, onset, HEALTHY_WINDOW_FRAMES)
+    }
+
+    fn window_with_frames(
+        cambox: &str,
+        start_ns: i64,
+        onset: Vec<OnsetFrame>,
+        window_frames: u32,
+    ) -> ColdCutWindow {
         ColdCutWindow {
             cambox: cambox.to_string(),
             start_ns,
             end_ns: start_ns + SEG_NS,
             onset_frames: onset,
+            window_frames,
         }
     }
 
@@ -548,5 +710,185 @@ mod tests {
             "#768: the cold-cut onset seam is report-only (calibration-first) until a warm \
              baseline + a deliberate keepalive-bypass cold cut exist"
         );
+    }
+
+    // --- #1086 part-4: sustained-receive-fps + issue-793 segfault-window discriminator ----------
+
+    #[test]
+    fn sustained_fps_computes_rate_and_guards_degenerate() {
+        // 900 frames over a 30s window -> 30fps exactly.
+        assert_eq!(sustained_fps(900, SEG_NS), Some(30.0));
+        // 450 frames over 30s -> 15fps.
+        assert_eq!(sustained_fps(450, SEG_NS), Some(15.0));
+        // < 2 frames -> undefined.
+        assert_eq!(sustained_fps(1, SEG_NS), None);
+        assert_eq!(sustained_fps(0, SEG_NS), None);
+        // non-positive span -> undefined (never divides by zero).
+        assert_eq!(sustained_fps(900, 0), None);
+        assert_eq!(sustained_fps(900, -1), None);
+    }
+
+    #[test]
+    fn receive_health_classifies_against_target() {
+        assert_eq!(receive_health(Some(30.0)), ReceiveHealth::Healthy);
+        // exactly at target - tolerance is still Healthy (the boundary is strict `<`).
+        assert_eq!(
+            receive_health(Some(TARGET_RECEIVE_FPS - SUSTAINED_FPS_TOLERANCE)),
+            ReceiveHealth::Healthy
+        );
+        // one below the tolerance floor is Degraded.
+        assert_eq!(
+            receive_health(Some(TARGET_RECEIVE_FPS - SUSTAINED_FPS_TOLERANCE - 0.01)),
+            ReceiveHealth::Degraded
+        );
+        assert_eq!(receive_health(Some(15.0)), ReceiveHealth::Degraded);
+        assert_eq!(receive_health(None), ReceiveHealth::Unknown);
+    }
+
+    #[test]
+    fn onset_miss_attribution_splits_segfault_window() {
+        // A clean transition (no miss) is never attributed.
+        assert_eq!(
+            onset_miss_attribution(false, 10.0),
+            OnsetMissAttribution::NoMiss
+        );
+        assert_eq!(
+            onset_miss_attribution(false, 200.0),
+            OnsetMissAttribution::NoMiss
+        );
+        // A miss earlier than the segfault-window ceiling is ambiguous.
+        assert_eq!(
+            onset_miss_attribution(true, 0.0),
+            OnsetMissAttribution::PossibleSegfaultWindow
+        );
+        assert_eq!(
+            onset_miss_attribution(true, SEGFAULT_WINDOW_MAX_SECS - 0.01),
+            OnsetMissAttribution::PossibleSegfaultWindow
+        );
+        // Exactly at / past the ceiling rules the segfault out -> a genuine cold-cut miss.
+        assert_eq!(
+            onset_miss_attribution(true, SEGFAULT_WINDOW_MAX_SECS),
+            OnsetMissAttribution::GenuineColdCutMiss
+        );
+        assert_eq!(
+            onset_miss_attribution(true, 300.0),
+            OnsetMissAttribution::GenuineColdCutMiss
+        );
+    }
+
+    #[test]
+    fn cold_transition_carries_sustained_fps_and_health() {
+        // A clean 60s-hidden cold cut whose whole window delivered a healthy 900 frames.
+        let windows = vec![
+            window("CAM1", BASE, warm_onset(BASE)),
+            window("CAM2", BASE + SEG_NS, warm_onset(BASE + SEG_NS)),
+            window("CAM3", BASE + 2 * SEG_NS, warm_onset(BASE + 2 * SEG_NS)),
+            window("CAM1", BASE + 3 * SEG_NS, warm_onset(BASE + 3 * SEG_NS)),
+        ];
+        let r = build_report(&windows);
+        assert_eq!(r.cold_transitions_found, 1);
+        assert_eq!(r.target_receive_fps, TARGET_RECEIVE_FPS);
+        assert_eq!(r.sustained_fps_tolerance, SUSTAINED_FPS_TOLERANCE);
+        assert!(!r.any_receive_degraded, "900 frames / 30s is healthy");
+        let t = &r.transitions[0];
+        assert_eq!(t.window_frames, 900);
+        assert_eq!(t.sustained_fps, Some(30.0));
+        assert_eq!(t.receive_health, ReceiveHealth::Healthy);
+        // A clean transition has no onset miss and nothing to attribute.
+        assert!(!t.has_onset_miss);
+        assert_eq!(t.miss_attribution, OnsetMissAttribution::NoMiss);
+    }
+
+    #[test]
+    fn degraded_receive_fps_is_flagged_report_only() {
+        // The cold CAM1 window's whole-window delivery is HALF the target (450 frames / 30s = 15fps)
+        // even though its onset is clean -- "warm cut works" but "steady-state receive degraded"
+        // (the issue #1/#799 class). Flagged report-only; the gate stays report-only regardless.
+        let windows = vec![
+            window("CAM1", BASE, warm_onset(BASE)),
+            window("CAM2", BASE + SEG_NS, warm_onset(BASE + SEG_NS)),
+            window("CAM3", BASE + 2 * SEG_NS, warm_onset(BASE + 2 * SEG_NS)),
+            window_with_frames("CAM1", BASE + 3 * SEG_NS, warm_onset(BASE + 3 * SEG_NS), 450),
+        ];
+        let r = build_report(&windows);
+        assert_eq!(r.cold_transitions_found, 1);
+        let t = &r.transitions[0];
+        assert_eq!(t.sustained_fps, Some(15.0));
+        assert_eq!(t.receive_health, ReceiveHealth::Degraded);
+        assert!(t.clean, "the ONSET is still clean -- the degradation is steady-state, not the cut");
+        assert!(r.any_receive_degraded);
+        assert!(
+            !gates_overall_pass(),
+            "a degraded receive fps is report-only -- it never gates while the seam is report-only"
+        );
+    }
+
+    #[test]
+    fn genuine_cold_cut_miss_ruled_out_of_segfault_window() {
+        // CAM1@seg3 (switch at 90s) is a wake-up-gap cold cut. 90s == SEGFAULT_WINDOW_MAX_SECS, so
+        // the issue-793 startup segfault is ruled out -> a genuine cold-cut miss.
+        let bad = vec![
+            frame(BASE + 3 * SEG_NS, false),
+            frame(BASE + 3 * SEG_NS + FRAME_NS, false),
+        ];
+        let windows = vec![
+            window("CAM1", BASE, warm_onset(BASE)),
+            window("CAM2", BASE + SEG_NS, warm_onset(BASE + SEG_NS)),
+            window("CAM3", BASE + 2 * SEG_NS, warm_onset(BASE + 2 * SEG_NS)),
+            window("CAM1", BASE + 3 * SEG_NS, bad),
+        ];
+        let r = build_report(&windows);
+        assert_eq!(r.cold_transitions_found, 1);
+        let t = &r.transitions[0];
+        assert!(t.has_onset_miss, "a black onset is a miss");
+        assert!(
+            (t.secs_since_run_start - 90.0).abs() < 1e-6,
+            "the switch is 90s after the run's first switch"
+        );
+        assert_eq!(t.miss_attribution, OnsetMissAttribution::GenuineColdCutMiss);
+        assert!(r.any_genuine_cold_cut_miss);
+        assert!(!r.any_miss_possibly_segfault);
+    }
+
+    #[test]
+    fn early_onset_miss_flagged_possible_segfault() {
+        // A custom-timed cold cut: CAM1 shown [0,5s], hidden while CAM2 holds [5s,70s], then CAM1
+        // cut back at 70s -- hidden 65s (COLD) but the switch is only 70s into the run (< 90s), so
+        // a black onset here could be the issue-793 startup segfault, not a cold receiver.
+        let s2 = BASE + 70 * ONSET_WINDOW_NS; // 70s after run start (ONSET_WINDOW_NS == 1e9)
+        let windows = vec![
+            ColdCutWindow {
+                cambox: "CAM1".to_string(),
+                start_ns: BASE,
+                end_ns: BASE + 5 * ONSET_WINDOW_NS,
+                onset_frames: warm_onset(BASE),
+                window_frames: 150,
+            },
+            ColdCutWindow {
+                cambox: "CAM2".to_string(),
+                start_ns: BASE + 5 * ONSET_WINDOW_NS,
+                end_ns: s2,
+                onset_frames: warm_onset(BASE + 5 * ONSET_WINDOW_NS),
+                window_frames: 1950,
+            },
+            ColdCutWindow {
+                cambox: "CAM1".to_string(),
+                start_ns: s2,
+                end_ns: s2 + SEG_NS,
+                onset_frames: vec![frame(s2, false), frame(s2 + FRAME_NS, false)],
+                window_frames: 900,
+            },
+        ];
+        let r = build_report(&windows);
+        assert_eq!(r.cold_transitions_found, 1, "hidden 65s from CAM1's prior end is cold");
+        let t = &r.transitions[0];
+        assert!(t.has_onset_miss);
+        assert!(
+            (t.secs_since_run_start - 70.0).abs() < 1e-6,
+            "the switch is 70s into the run"
+        );
+        assert_eq!(t.miss_attribution, OnsetMissAttribution::PossibleSegfaultWindow);
+        assert!(r.any_miss_possibly_segfault);
+        assert!(!r.any_genuine_cold_cut_miss);
     }
 }
