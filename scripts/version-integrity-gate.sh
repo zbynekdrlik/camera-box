@@ -268,18 +268,18 @@ fi
 # TARGETED per-.so compare, NOT the whole-bundle drift_check_all_files walk, so a partial 3-file
 # gather never flips the gate UNKNOWN for the ~1600 files it did not hash.
 #
-# OPT-IN (#756-shape): DORMANT (returns 10, treated as SKIP by the caller -- neither ok/bad/unknown)
-# when CSV or MANIFEST is empty, so a live gather/auto-source failure never spuriously refuses while
-# the ENFORCE flip (#1082 part 3) is deferred to a follow-up (needs the live gather deployed+verified,
-# a property no worktree worker can check). Present + all match -> OK (0); any mismatch -> DRIFT (20)
+# ENFORCED (#758-shape, #1100): an absent CSV or MANIFEST is a gate-blocking UNKNOWN (returns 11), so
+# a live gather/auto-source failure REFUSES the run rather than silently passing -- the live imag
+# gather is deployed + verified on the rig (imag_so_bytes OK on a green E2E, obs-genlock bundle at
+# /usr/lib). Present + all match -> OK (0); any mismatch -> DRIFT (20)
 # naming the .so + box; a path absent from the manifest -> UNKNOWN (11, never a false clean). Defined
 # below the source-guard because it calls manifest_sha_for_path (drift-guard) -- tested end-to-end via
 # the gate subprocess (tests/version_integrity_gate.rs), the same path the #770 byte facet uses.
 imag_bytes_verdict() {
   local label="$1" manifest="$2" csv="$3"
   if [ -z "$csv" ] || [ -z "$manifest" ]; then
-    printf '  %-22s DORMANT  (%s byte gather/manifest not supplied -- opt-in, #1082 ENFORCE deferred)\n' "imag_so_bytes" "$label"
-    return 10
+    printf '  %-22s UNKNOWN  (%s byte gather/manifest not supplied -- #1100 ENFORCED, every box must report its .so bytes)\n' "imag_so_bytes" "$label"
+    return 11
   fi
   if [ ! -f "$manifest" ]; then
     printf '  %-22s UNKNOWN  (%s manifest %s not readable)\n' "imag_so_bytes" "$label" "$manifest"
@@ -308,8 +308,8 @@ imag_bytes_verdict() {
     fi
   done
   if [ "$total" -eq 0 ]; then
-    printf '  %-22s DORMANT  (%s byte CSV empty)\n' "imag_so_bytes" "$label"
-    return 10
+    printf '  %-22s UNKNOWN  (%s byte CSV empty -- #1100 ENFORCED)\n' "imag_so_bytes" "$label"
+    return 11
   fi
   [ "$drift" -gt 0 ] && return 20
   [ "$unknown" -gt 0 ] && return 11
@@ -343,10 +343,10 @@ Options:
                     here). Repeatable. A box with no
                     file is UNKNOWN -> the gate refuses.
   --imag-manifest PATH  #1082 -- the CI-authoritative linux BUNDLE_MANIFEST.json for imag's build,
-                    against which imag's DEPLOYED .so bytes are compared. OPT-IN.
+                    against which imag's DEPLOYED .so bytes are compared. ENFORCED (#1100).
   --imag-bytes LABEL=path=sha,...  #1082 -- imag's DEPLOYED libobs.so.30 / distroav.so /
                     libobs-opengl.so.30 sha256s (gathered over ssh; imag is not a --win-state box).
-                    OPT-IN: absent -> the imag byte facet is DORMANT (never a spurious refuse).
+                    ENFORCED (#1100): absent -> the imag byte facet is UNKNOWN -> the gate refuses.
 
 Exit: 0 = every box matches the pinned set (proceed), 20 = a box DRIFTED (REFUSED),
 11 = a box UNKNOWN/unread (INCOMPLETE, not clean), 1 = usage error.
@@ -363,7 +363,7 @@ main() {
   local -a genlock_sha=()
   # #1082 -- imag (Linux) .so BYTE parity: a linux BUNDLE_MANIFEST for imag's build + imag's DEPLOYED
   # .so sha256s (LABEL=path=sha,...), gathered over ssh (imag is NOT a --win-state bundle-state box).
-  # Both OPT-IN: absent -> the facet is DORMANT (skipped), never a spurious refuse.
+  # Both ENFORCED (#758-shape, #1100): absent -> the facet is UNKNOWN -> the gate refuses.
   local imag_manifest="" imag_bytes=""
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -619,30 +619,28 @@ main() {
     *)  echo "    !! genlock_build_parity_report exited ${prc} (engine error)" >&2; bad=$((bad + 1)) ;;
   esac
 
-  # #1082 -- imag (Linux) .so BYTE parity facet: compare imag's DEPLOYED libobs.so.30 / distroav.so /
-  # libobs-opengl.so.30 sha256s (--imag-bytes, gathered over ssh) against the CI-authoritative linux
-  # BUNDLE_MANIFEST for imag's build (--imag-manifest, auto-sourced per box by recording-e2e.sh). This
-  # closes the byte-parity gap #770 left for imag (its bytes had NO path into the gate -- only its
-  # marker). OPT-IN (#756-shape): the facet engages only when --imag-bytes or --imag-manifest is
-  # supplied, and DORMANT (code 10 = SKIP, uncounted) when the gather/manifest is absent -- so a live
-  # ssh gather / CI-artifact fetch failure never spuriously refuses. The ENFORCE flip (#758-shape) is
-  # deferred to a follow-up (needs the live gather deployed+verified, a property no worktree worker can
-  # check -- the #1067 port4455 class).
-  if [ -n "$imag_bytes" ] || [ -n "$imag_manifest" ]; then
-    echo "  -- imag .so byte parity (#1082, opt-in) --"
-    local ib_label="imag" ib_csv=""
-    if [ -n "$imag_bytes" ]; then ib_label="${imag_bytes%%=*}"; ib_csv="${imag_bytes#*=}"; fi
-    local ib_out="" ibrc=0
-    ib_out="$(imag_bytes_verdict "${ib_label:-imag}" "$imag_manifest" "$ib_csv")" || ibrc=$?
-    printf '%s\n' "$ib_out" | sed 's/^/    /'
-    case "$ibrc" in
-      0)  ok=$((ok + 1)) ;;
-      20) bad=$((bad + 1)) ;;
-      11) unknown=$((unknown + 1)); unknown_boxes+=("imag:so_bytes") ;;
-      10) : ;;  # DORMANT -- opt-in skip, not counted (never refuses)
-      *)  echo "    !! imag_bytes_verdict exited ${ibrc} (unexpected)" >&2; bad=$((bad + 1)) ;;
-    esac
-  fi
+  # #1082/#1100 -- imag (Linux) .so BYTE parity facet: compare imag's DEPLOYED libobs.so.30 /
+  # distroav.so / libobs-opengl.so.30 sha256s (--imag-bytes, gathered over ssh) against the
+  # CI-authoritative linux BUNDLE_MANIFEST for imag's build (--imag-manifest, auto-sourced per box by
+  # recording-e2e.sh). This closes the byte-parity gap #770 left for imag (its bytes had NO path into
+  # the gate -- only its marker). ENFORCED (#758-shape, #1100): the facet runs UNCONDITIONALLY and an
+  # absent gather/manifest is a gate-blocking UNKNOWN (11), never the old silent DORMANT skip -- the
+  # live imag gather is deployed + verified on the rig (imag_so_bytes OK on a green E2E). Same
+  # 756->758 second step #1067 applied to port4455_identity. (The WINDOWS obs.dll/distroav.dll byte
+  # enforcement -- removing recording-e2e.sh's manifest-autosource opt-in guard -- stays staged until
+  # the bundle-state-server byte gather is redeployed to strih+stream; see #1100.)
+  echo "  -- imag .so byte parity (#1082/#1100, enforced) --"
+  local ib_label="imag" ib_csv=""
+  if [ -n "$imag_bytes" ]; then ib_label="${imag_bytes%%=*}"; ib_csv="${imag_bytes#*=}"; fi
+  local ib_out="" ibrc=0
+  ib_out="$(imag_bytes_verdict "${ib_label:-imag}" "$imag_manifest" "$ib_csv")" || ibrc=$?
+  printf '%s\n' "$ib_out" | sed 's/^/    /'
+  case "$ibrc" in
+    0)  ok=$((ok + 1)) ;;
+    20) bad=$((bad + 1)) ;;
+    11) unknown=$((unknown + 1)); unknown_boxes+=("imag:so_bytes") ;;
+    *)  echo "    !! imag_bytes_verdict exited ${ibrc} (unexpected)" >&2; bad=$((bad + 1)) ;;
+  esac
 
   echo
   if [ "$bad" -gt 0 ]; then
