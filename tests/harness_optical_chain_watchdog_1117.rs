@@ -94,8 +94,14 @@ const SWEEP: &[(&str, &str)] = &[
     ("scripts/splitter-port-alert-watchdog.sh", "HDMI splitter"),
     ("scripts/mv-fps-alert-watchdog.sh", "Multiview fps"),
     ("scripts/network-reach-alert-watchdog.sh", "nedostupný box"),
-    ("scripts/avsync-heartbeat-alert-watchdog.sh", "A/V-sync monitor"),
-    ("scripts/bundle-state-alert-watchdog.sh", "BundleStateServer"),
+    (
+        "scripts/avsync-heartbeat-alert-watchdog.sh",
+        "A/V-sync monitor",
+    ),
+    (
+        "scripts/bundle-state-alert-watchdog.sh",
+        "BundleStateServer",
+    ),
     ("scripts/obs-liveness-watchdog.sh", "OBS zamrznuté"),
     ("scripts/imag-obs-alert-watchdog.sh", "imag OBS"),
     ("scripts/imag-power-envelope-alert-watchdog.sh", "imag"),

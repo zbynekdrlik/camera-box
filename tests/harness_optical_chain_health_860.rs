@@ -160,7 +160,9 @@ fn cond(exp: &str, alv: &str, opt: &str) -> String {
 // fresh #281 rig-active heartbeat). Defaults to 0 when omitted (the 3-arg calls above), so the
 // signature stays backward-compatible.
 fn cond4(exp: &str, alv: &str, opt: &str, busy: &str) -> String {
-    stdout_of(&format!("optical_chain_alert_condition {exp} {alv} {opt} {busy}"))
+    stdout_of(&format!(
+        "optical_chain_alert_condition {exp} {alv} {opt} {busy}"
+    ))
 }
 
 #[test]
@@ -196,7 +198,10 @@ fn condition_optical_ok_vetoes_painter_dead() {
     // E2E painter is painting), so the monitored outcome is fine -> log only, never a page.
     assert_eq!(cond("1", "0", "OK"), "log-only:PAINTER-DEAD-optical-ok");
     // Same veto with the 4-arg form (rig_busy explicitly 0): still the optical-ok veto, not a page.
-    assert_eq!(cond4("1", "0", "OK", "0"), "log-only:PAINTER-DEAD-optical-ok");
+    assert_eq!(
+        cond4("1", "0", "OK", "0"),
+        "log-only:PAINTER-DEAD-optical-ok"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -207,17 +212,29 @@ fn condition_optical_ok_vetoes_painter_dead() {
 fn condition_e2e_window_suppresses_painter_dead() {
     // recording-e2e.sh `systemctl stop cam2-painter` BY DESIGN during a run -> painter_alive=0 is
     // expected this window. Suppress regardless of the optical read (OK / UNKNOWN / BLACK).
-    assert_eq!(cond4("1", "0", "UNKNOWN", "1"), "log-only:PAINTER-DEAD-e2e-window");
-    assert_eq!(cond4("1", "0", "BLACK", "1"), "log-only:PAINTER-DEAD-e2e-window");
+    assert_eq!(
+        cond4("1", "0", "UNKNOWN", "1"),
+        "log-only:PAINTER-DEAD-e2e-window"
+    );
+    assert_eq!(
+        cond4("1", "0", "BLACK", "1"),
+        "log-only:PAINTER-DEAD-e2e-window"
+    );
     // Both fixes apply here (dead + rig_busy + optical OK); the E2E-window reason takes precedence.
-    assert_eq!(cond4("1", "0", "OK", "1"), "log-only:PAINTER-DEAD-e2e-window");
+    assert_eq!(
+        cond4("1", "0", "OK", "1"),
+        "log-only:PAINTER-DEAD-e2e-window"
+    );
 }
 
 #[test]
 fn condition_e2e_window_suppresses_optical_black() {
     // Painter ALIVE but strih program reads BLACK DURING a run: the harness reroutes/rebuilds the
     // program, so a transient BLACK is expected-by-design -> log only, never a page.
-    assert_eq!(cond4("1", "1", "BLACK", "1"), "log-only:OPTICAL-BLACK-e2e-window");
+    assert_eq!(
+        cond4("1", "1", "BLACK", "1"),
+        "log-only:OPTICAL-BLACK-e2e-window"
+    );
 }
 
 #[test]
