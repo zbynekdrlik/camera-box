@@ -75,19 +75,25 @@ fn on_imag_helper_targets_imag_over_plain_ssh_not_mcp() {
     );
 }
 
-/// The pure command-builder must produce a valid, safely-quoted shell command line running
-/// RUST_LOG=info + the verdict binary against the given (imag-local) args — no dev1 path leaks
-/// in, and a path/arg is %q-quoted so a value with spaces can never corrupt the command.
+/// issue 1094 — the pure command-builder takes a RESOLVED core-pin range (empty = run unpinned)
+/// and produces a valid, safely-quoted shell command line running RUST_LOG=info + the verdict
+/// binary against the given (imag-local) args — no dev1 path leaks in, and a path/arg is %q-quoted
+/// so a value with spaces can never corrupt the command. The pin range is resolved FROM THE ACTUAL
+/// BOX by main() (see onimag_decode_core_range) so a hardware swap can never mis-pin it again — the
+/// retired 16-thread box's hardcoded `taskset -c 12-15` silently failed EVERY extract on the
+/// 12-thread i5-13420H replacement (cores 12-15 don't exist), zeroing the imag leg in 0/76 runs.
 #[test]
-fn build_onimag_command_produces_a_safely_quoted_command() {
+fn build_onimag_command_pins_to_the_resolved_range_and_quotes_safely() {
     let out = Command::new("bash")
         .arg("-c")
-        .arg(". \"$1\"; build_onimag_command \"$2\" --imag \"$3\" --out \"$4\"")
+        // exe, RESOLVED range (8-11 = the i5-13420H E-cores), then the forwarded args
+        .arg(". \"$1\"; build_onimag_command \"$2\" \"$3\" --imag \"$4\" --out \"$5\"")
         .arg("bash") // $0
         .arg(script()) // $1 — the script to source
         .arg("/home/newlevel/recording-verdict") // $2 — the remote verdict binary
-        .arg("/home/newlevel/imag REC.mkv") // $3 — a path WITH a space (quoting must survive it)
-        .arg("/home/newlevel/verdict-out/imag-partial-1.json") // $4
+        .arg("8-11") // $3 — the resolved core-pin range (i5-13420H E-cores)
+        .arg("/home/newlevel/imag REC.mkv") // $4 — a path WITH a space (quoting must survive it)
+        .arg("/home/newlevel/verdict-out/imag-partial-1.json") // $5
         .output()
         .expect("run build_onimag_command");
     assert!(
@@ -109,30 +115,28 @@ fn build_onimag_command_produces_a_safely_quoted_command() {
         cmd.contains("--imag") && cmd.contains("--out"),
         "#462: the on-imag command must forward the --imag/--out args. Got: {cmd:?}"
     );
-    // #767 follow-up (live stutter, 2026-07-15 ~18:10): the on-imag decode ran UNTHROTTLED at
-    // 313% CPU (+ its ffmpeg child) alongside production OBS (~400% -- with keep-alive ALL 16
-    // NDI receivers decode continuously), driving load to 27 on a 16-thread box; the starved
-    // NDI decode threads made every source stutter on the projection while the compositor still
-    // reported 60fps. The decode is a BATCH job: it must run nice -n 19 and pinned to cores
-    // 12-15 -- fully OFF the cores OBS is pinned to (taskset -c 2-11 in the watchdog/systemd-run
-    // launch), so it can never compete with the production render/decode again.
+    // #767: the decode is a BATCH job — nice 19 (batch priority) keeps it off the production render.
     assert!(
         cmd.contains("nice -n 19"),
         "#767: the on-imag decode must run at nice 19 (batch priority). Got: {cmd:?}"
     );
+    // issue 1094: the pin uses the RESOLVED range passed in (the box's E-cores), NOT a hardcoded
+    // range. The retired box's `taskset -c 12-15` was the 0/76 root cause on the i5-13420H.
     assert!(
-        cmd.contains("taskset -c 12-15"),
-        "#767: the on-imag decode must be pinned OFF the OBS cores (2-11) onto 12-15. Got: {cmd:?}"
+        cmd.contains("taskset -c 8-11"),
+        "issue 1094: the on-imag decode must pin to the resolved core range (8-11 here). Got: {cmd:?}"
     );
-    // The space-containing path must be safely quoted (bash %q either backslash-escapes the
-    // space or single-quotes the whole token) — re-running the printed command line through bash
-    // must reproduce the exact original argument, proving the quoting round-trips.
+    assert!(
+        !cmd.contains("12-15"),
+        "issue 1094: the retired 16-thread box's hardcoded `taskset -c 12-15` must be gone — those \
+         cores do not exist on the 12-thread i5-13420H, so taskset aborts before the decode. Got: {cmd:?}"
+    );
+    // The space-containing path must be safely quoted — re-running the printed command line through
+    // bash must parse without a syntax error, proving the %q-quoting round-trips.
     let roundtrip = Command::new("bash")
         .arg("-c")
         .arg(format!("printf '%s' {}", cmd.trim()))
         .output();
-    // We only need the quoting to be well-formed enough that bash can parse it without erroring —
-    // a genuine build failure here would mean the %q-quoting was broken.
     if let Ok(rt) = roundtrip {
         // RUST_LOG=info is a var-assignment prefix on a bare command; bash may complain the
         // "binary" doesn't exist (it's a fake path) — that's fine, we only assert no PARSE error.
@@ -140,6 +144,81 @@ fn build_onimag_command_produces_a_safely_quoted_command() {
         assert!(
             !stderr.contains("syntax error"),
             "#462: the built command must be syntactically valid shell. stderr: {stderr}"
+        );
+    }
+}
+
+/// issue 1094 — FAIL-OPEN: when main() could NOT resolve a valid pin (empty range), the decode must
+/// still run, UNPINNED (nice 19 alone), never emitting a bare/broken `taskset` that would abort the
+/// whole extract. A pin error can never again silently zero the imag leg (the 0/76 failure mode).
+#[test]
+fn build_onimag_command_empty_range_runs_unpinned() {
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(". \"$1\"; build_onimag_command \"$2\" \"$3\" --imag \"$4\" --out \"$5\"")
+        .arg("bash")
+        .arg(script())
+        .arg("/home/newlevel/recording-verdict")
+        .arg("") // $3 — EMPTY resolved range => run unpinned
+        .arg("/home/newlevel/imag REC.mkv")
+        .arg("/home/newlevel/verdict-out/imag-partial-1.json")
+        .output()
+        .expect("run build_onimag_command");
+    assert!(
+        out.status.success(),
+        "build_onimag_command failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let cmd = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        cmd.contains("nice -n 19") && cmd.contains("RUST_LOG=info"),
+        "issue 1094: an unpinned decode must still be nice 19 + RUST_LOG=info. Got: {cmd:?}"
+    );
+    assert!(
+        !cmd.contains("taskset"),
+        "issue 1094: an empty resolved range must run the decode UNPINNED (no taskset) — fail-open, \
+         so a pin error never aborts the extract. Got: {cmd:?}"
+    );
+}
+
+/// issue 1094 — the pure pin-range formula: the top min(4, ncpus) online cores (the E-cores on
+/// Intel hybrid). 12 threads (i5-13420H) -> 8-11; 16 threads (retired box) -> 12-15 (reproducing
+/// #767's original pin there); tiny boxes clamp the low end to 0; a non-numeric/absent/zero count
+/// -> empty (the caller then runs the decode unpinned). No network, no real cores needed — pure +
+/// Tier-0 testable.
+#[test]
+fn onimag_decode_core_range_maps_cpu_count_to_top_four_cores() {
+    let cases = [
+        ("12", "8-11"),  // the live i5-13420H
+        ("16", "12-15"), // the retired box — #767's original pin is reproduced
+        ("8", "4-7"),
+        ("4", "0-3"),
+        ("2", "0-1"),
+        ("1", "0-0"),
+        ("", ""),      // absent count -> unpinned
+        ("bogus", ""), // non-numeric -> unpinned
+        ("0", ""),     // zero -> unpinned
+    ];
+    for (n, want) in cases {
+        let out = Command::new("bash")
+            .arg("-c")
+            .arg(". \"$1\"; onimag_decode_core_range \"$2\"")
+            .arg("bash")
+            .arg(script())
+            .arg(n)
+            .output()
+            .expect("run onimag_decode_core_range");
+        assert!(
+            out.status.success(),
+            "onimag_decode_core_range {n:?} exited nonzero: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let got = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(
+            got.trim(),
+            want,
+            "onimag_decode_core_range {n:?} => {:?}, want {want:?}",
+            got.trim()
         );
     }
 }
