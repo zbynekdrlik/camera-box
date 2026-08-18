@@ -146,7 +146,10 @@ fn enabled_bypass_idles_after_first_appearance_and_restores_before_second_cut() 
         ],
         &["CAM1", "CAM2", "CAM3", "CAM1"],
     );
-    assert!(ok, "the sweep must complete under set -e; stdout:\n{stdout}");
+    assert!(
+        ok,
+        "the sweep must complete under set -e; stdout:\n{stdout}"
+    );
     let lines: Vec<&str> = calls.lines().collect();
     assert_eq!(
         lines.len(),
@@ -154,14 +157,14 @@ fn enabled_bypass_idles_after_first_appearance_and_restores_before_second_cut() 
         "#1086: exactly ONE idle + ONE restore for a single genuine cold cut; got:\n{calls}"
     );
     assert!(
-        lines[0].contains("idle-receiver") && lines[0].contains("--input NDI cam1")
+        lines[0].contains("idle-receiver")
+            && lines[0].contains("--input NDI cam1")
             && !lines[0].contains("--restore"),
         "#1086: the FIRST obs call must idle the target receiver; got: {}",
         lines[0]
     );
     assert!(
-        lines[1].contains("idle-receiver")
-            && lines[1].contains("--restore CAM1 (usb)"),
+        lines[1].contains("idle-receiver") && lines[1].contains("--restore CAM1 (usb)"),
         "#1086: the SECOND obs call must RESTORE the captured prev ndi name; got: {}",
         lines[1]
     );

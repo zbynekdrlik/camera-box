@@ -342,8 +342,7 @@ pub fn build_report(windows: &[ColdCutWindow]) -> ColdCutReport {
                 let secs_since_run_start =
                     (w.start_ns - run_start_ns.unwrap_or(w.start_ns)) as f64 / 1e9;
                 let has_onset_miss = !clean;
-                let miss_attribution =
-                    onset_miss_attribution(has_onset_miss, secs_since_run_start);
+                let miss_attribution = onset_miss_attribution(has_onset_miss, secs_since_run_start);
                 transitions.push(ColdCutTransition {
                     cambox: w.cambox.clone(),
                     hidden_secs_before,
@@ -818,14 +817,22 @@ mod tests {
             window("CAM1", BASE, warm_onset(BASE)),
             window("CAM2", BASE + SEG_NS, warm_onset(BASE + SEG_NS)),
             window("CAM3", BASE + 2 * SEG_NS, warm_onset(BASE + 2 * SEG_NS)),
-            window_with_frames("CAM1", BASE + 3 * SEG_NS, warm_onset(BASE + 3 * SEG_NS), 450),
+            window_with_frames(
+                "CAM1",
+                BASE + 3 * SEG_NS,
+                warm_onset(BASE + 3 * SEG_NS),
+                450,
+            ),
         ];
         let r = build_report(&windows);
         assert_eq!(r.cold_transitions_found, 1);
         let t = &r.transitions[0];
         assert_eq!(t.sustained_fps, Some(15.0));
         assert_eq!(t.receive_health, ReceiveHealth::Degraded);
-        assert!(t.clean, "the ONSET is still clean -- the degradation is steady-state, not the cut");
+        assert!(
+            t.clean,
+            "the ONSET is still clean -- the degradation is steady-state, not the cut"
+        );
         assert!(r.any_receive_degraded);
         assert!(
             !gates_overall_pass(),
@@ -890,14 +897,20 @@ mod tests {
             },
         ];
         let r = build_report(&windows);
-        assert_eq!(r.cold_transitions_found, 1, "hidden 65s from CAM1's prior end is cold");
+        assert_eq!(
+            r.cold_transitions_found, 1,
+            "hidden 65s from CAM1's prior end is cold"
+        );
         let t = &r.transitions[0];
         assert!(t.has_onset_miss);
         assert!(
             (t.secs_since_run_start - 70.0).abs() < 1e-6,
             "the switch is 70s into the run"
         );
-        assert_eq!(t.miss_attribution, OnsetMissAttribution::PossibleSegfaultWindow);
+        assert_eq!(
+            t.miss_attribution,
+            OnsetMissAttribution::PossibleSegfaultWindow
+        );
         assert!(r.any_miss_possibly_segfault);
         assert!(!r.any_genuine_cold_cut_miss);
     }
