@@ -5,14 +5,14 @@
 //! genlock target rate and repeats its internal buffer to keep up — an exact BYTE-IDENTICAL
 //! duplicate frame roughly once every ~15 captures, always an ISOLATED pair (never a triple),
 //! every other captured frame genuinely unique (camera sensor noise + painter motion). The
-//! pre-existing genlock decimation gate (`ndi::genlock_emit_gate`) decides purely from
+//! pre-existing genlock decimation gate (`genlock_pacing::genlock_emit_gate`) decides purely from
 //! WALL-CLOCK TIME which captured frame to emit at each target-rate boundary — it has no notion
 //! of frame CONTENT, so it sometimes keeps the grabber's dupe (because it happened to be the
 //! frame that crossed the boundary) and drops the unique tick captured just before it. That is
 //! the exact mechanism behind the per-cambox-window `copies`/`gaps` failures this ticket fixes.
 //!
 //! The fix: pacing still decides WHEN a frame must be shed (unchanged —
-//! [`crate::ndi::genlock_emit_gate`]); this module decides WHICH captured frame is the victim.
+//! [`crate::genlock_pacing::genlock_emit_gate`]); this module decides WHICH captured frame is the victim.
 //! [`DecimationGate::poll`] prefers to shed a captured frame that is content-identical to the
 //! immediately preceding capture (a grabber dupe), deferring emission by exactly ONE more
 //! capture — bounded to a single deferral per boundary so the emitted rate is never affected
@@ -26,8 +26,8 @@
 //! interval). At a genuine over-rate like ~62 fps, a dupe often arrives while the gate is already
 //! in the CATCH-UP regime (the frame is late); deferring THERE holds the boundary while the wall
 //! clock runs on, ratcheting the gate's lag +1 interval per deferral until it trips
-//! `ndi::genlock_emit_gate`'s #707 resync (~9 boundaries leapt at once) — the issue-1110 CAM1
-//! judder. So the deferral is gated on `ndi::genlock_emit_on_time`: a dupe is deferred only when
+//! `genlock_pacing::genlock_emit_gate`'s #707 resync (~9 boundaries leapt at once) — the issue-1110 CAM1
+//! judder. So the deferral is gated on `genlock_pacing::genlock_emit_on_time`: a dupe is deferred only when
 //! on-time; a LATE dupe is EMITTED instead (a repeated frame — invisible, and the mathematically
 //! unavoidable ~2 copies/s when a ~58-unique-fps grabber must feed a steady 60), keeping the emit
 //! grid locked to wall-clock. That emitted-copy is counted in [`DupeShedLog`] for live visibility.
@@ -38,7 +38,7 @@
 //! preference only changes WHICH captured frame within that already-required shed is the
 //! victim.
 //!
-//! Linux-gated in lock-step with capture/ndi (calls into [`crate::ndi::genlock_emit_gate`] and
+//! Linux-gated in lock-step with capture/ndi (calls into [`crate::genlock_pacing::genlock_emit_gate`] and
 //! is shaped around a raw V4L2 YUYV422 frame); pure logic, unit-tests Tier-0 on the Linux `test`
 //! CI job (default features).
 
@@ -172,14 +172,14 @@ impl DecimationGate {
 
     /// The pacing boundary state AFTER the most recent [`poll`](Self::poll) call — main.rs reads
     /// this before/after each poll to feed the pre-existing `#707`
-    /// [`crate::ndi::boundary_skip_count`] diagnostic, unchanged by this ticket.
+    /// [`crate::genlock_pacing::boundary_skip_count`] diagnostic, unchanged by this ticket.
     pub fn next_boundary_ns(&self) -> u64 {
         self.next_boundary_ns
     }
 
     /// Feed ONE captured frame (`now_ns` wall-clock capture instant, `content_hash` from
     /// [`dupe_content_hash`]) through the pacing + dupe-preference gate. `interval_ns == 0`
-    /// disables decimation entirely (mirrors [`crate::ndi::genlock_emit_gate`]'s own guard) —
+    /// disables decimation entirely (mirrors [`crate::genlock_pacing::genlock_emit_gate`]'s own guard) —
     /// always emits, no hashing/state kept. Returns whether THIS captured frame should be
     /// emitted.
     pub fn poll(&mut self, now_ns: u64, interval_ns: u64, content_hash: u64) -> bool {
@@ -187,11 +187,12 @@ impl DecimationGate {
             return true;
         }
         let (would_emit, candidate_next) =
-            crate::ndi::genlock_emit_gate(now_ns, self.next_boundary_ns, interval_ns);
+            crate::genlock_pacing::genlock_emit_gate(now_ns, self.next_boundary_ns, interval_ns);
         // (#1111) is this an ON-TIME/surplus crossing (deferring a dupe is lag-neutral) or a LATE
         // catch-up crossing (deferring would ratchet the lag into the #707 resync -> issue-1110
         // judder)? Shares the boundary math with `genlock_emit_gate` above.
-        let on_time = crate::ndi::genlock_emit_on_time(now_ns, self.next_boundary_ns, interval_ns);
+        let on_time =
+            crate::genlock_pacing::genlock_emit_on_time(now_ns, self.next_boundary_ns, interval_ns);
 
         let is_dupe = self.prev_hash == Some(content_hash);
         self.prev_hash = Some(content_hash);
@@ -488,7 +489,7 @@ mod tests {
         // (#889) rig validation: cam1's ShadowCast measured 64.14 fps captured against a 60 Hz
         // source, 4.18 byte-identical dupes/s (an isolated pair roughly every 15 captures),
         // every non-dupe frame unique. Simulate ~3 seconds of that exact pattern against the
-        // REAL 60fps genlock emit boundary math (`ndi::genlock_emit_gate`, unchanged by this
+        // REAL 60fps genlock emit boundary math (`genlock_pacing::genlock_emit_gate`, unchanged by this
         // ticket) and assert the fix: zero dupes ever emitted, zero unique ticks shed in
         // steady state.
         let captures = synthetic_889_capture_sequence(64.14, 3 * 65, 15);
@@ -549,11 +550,11 @@ mod tests {
     /// 60 Hz source with a byte-identical internal-buffer dupe ~every 15 captures (validated live,
     /// CAM1 10.77.9.61). Before the fix, every #889 dupe DEFERRAL held the wall-clock boundary
     /// while `now` advanced, ratcheting the gate's lag +1 interval per deferral until it crossed
-    /// `crate::ndi::GENLOCK_MAX_CATCHUP_INTERVALS` (8) and `ndi::genlock_emit_gate`'s resync branch
+    /// `crate::genlock_pacing::GENLOCK_MAX_CATCHUP_INTERVALS` (8) and `genlock_pacing::genlock_emit_gate`'s resync branch
     /// leapt ~9 boundaries at once — the `#707 SKIPPED boundaries ... 9 boundary interval(s)` WARN
     /// seen live every ~12 s, dipping the emitted rate to ~58 fps and driving the strih
     /// genlock-FIFO to relock (visible judder). This drives the EXACT production wiring
-    /// (`DecimationGate::poll` + `ndi::boundary_skip_count`, as `src/main.rs` wires it) and asserts
+    /// (`DecimationGate::poll` + `genlock_pacing::boundary_skip_count`, as `src/main.rs` wires it) and asserts
     /// the fix: the boundary grid stays locked to wall-clock (zero skips), the emitted rate holds
     /// ~60.00, and not one unique tick is dropped. RED before the fix (~18 skipped intervals over
     /// 8 s), GREEN after.
@@ -572,7 +573,7 @@ mod tests {
             let prev_boundary_ns = gate.next_boundary_ns();
             let emit = gate.poll(*now_ns, emit_interval_ns, *content_id);
             let next_boundary_ns = gate.next_boundary_ns();
-            total_skips += crate::ndi::boundary_skip_count(
+            total_skips += crate::genlock_pacing::boundary_skip_count(
                 prev_boundary_ns,
                 next_boundary_ns,
                 emit_interval_ns,
@@ -641,8 +642,11 @@ mod tests {
             if gate.poll(*now_ns, emit_interval_ns, *content_id) {
                 emits += 1;
             }
-            total_skips +=
-                crate::ndi::boundary_skip_count(prev, gate.next_boundary_ns(), emit_interval_ns);
+            total_skips += crate::genlock_pacing::boundary_skip_count(
+                prev,
+                gate.next_boundary_ns(),
+                emit_interval_ns,
+            );
         }
         let (dupe_shed, _blind_shed, _dupe_emitted) = gate.take_shed_counts();
 

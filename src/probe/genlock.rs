@@ -770,7 +770,7 @@ pub struct GenlockReleaseGuarded {
 /// (lower) clock, the queue head stays a stale FUTURE-stamped frame and the hold is
 /// INDEFINITE — the live program feed FREEZES until the wall clock naturally climbs back
 /// (potentially seconds–minutes). This is the SINK analogue of the cam-EMIT freeze the
-/// #131/#134 guard fixed (`src/ndi.rs genlock_emit_gate`: a boundary latched impossibly
+/// #131/#134 guard fixed (`src/genlock_pacing.rs genlock_emit_gate`: a boundary latched impossibly
 /// far in the future re-latched to the rewound clock).
 ///
 /// Recovery (mirror of #131's future-state detection, applied to the queued frames): a
