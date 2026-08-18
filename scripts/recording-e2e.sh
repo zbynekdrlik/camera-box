@@ -142,6 +142,12 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # invoked with ONE line below (the #675 sourced-lib pattern -- no anchored line edited).
 # shellcheck source=scripts/lib/imag-display-path.sh
 . "$HERE/lib/imag-display-path.sh"
+# issue 1105: the SHARED imag kernel-cmdline ISOLATION drift gather + verdict (isolcpus/nohz_full/
+# scoped-rcu_nocbs) -- the SAME issue-784 lib scripts/drift-guard.sh's --check-imag facet uses. Its
+# [0/8] preflight fail-fast is invoked with ONE guarded block below (the #675 sourced-lib pattern --
+# no anchored line edited).
+# shellcheck source=scripts/lib/imag-cmdline-isolation.sh
+. "$HERE/lib/imag-cmdline-isolation.sh"
 # #878 (same family as #844/#869/#872): the PURE decision for the STARTUP self-heal below -- a
 # dead harness only ever restores rig state inside cleanup() (the bash EXIT trap), which SIGKILL
 # never reaches, so the leftover camera-box.service/painter/burn state strands until a human
@@ -606,6 +612,21 @@ if [ "$IMAG_OFFLINE_ACKED" = 1 ]; then
   imag_leg_skip_note "[0/8] imag display-path config preflight (#780)" "$IMAG_OFFLINE_ACK_REASON"
 else
   imag_display_path_preflight_assert "$IMAG_IP" "${IMAG_USER:-newlevel}" || exit 1
+fi
+
+# issue 1105: imag kernel-cmdline ISOLATION drift preflight — the SAME shared issue-784 lib the
+# --check-imag facet uses. isolcpus=/nohz_full=/scoped-rcu_nocbs on /proc/cmdline (the issue-784/842
+# footgun re-appearing via a stray grub.d drop-in or hand-edit) strips CPUs from the scheduler
+# load-balancing domain and piles OBS's ~119-thread pool onto one core → NDI 60→~53fps, underruns.
+# Fail-fast HERE at minute 0 instead of projecting a starved ~40-min run. UNKNOWN (an SSH hiccup —
+# the fleet-reachability step above, imag included, owns genuine unreachability) only WARNs; a proven
+# DRIFT aborts. New imag hard-abort site → wrapped in the IMAG_OFFLINE_ACKED guard
+# (.claude/rules/imag-offline-ack.md), exactly like the display-path preflight above.
+echo "[0/8] imag kernel-cmdline isolation preflight — an isolcpus/nohz_full/scoped-rcu_nocbs drift must fail-fast, not starve a run (issue 1105 · issue-784 follow-up)"
+if [ "$IMAG_OFFLINE_ACKED" = 1 ]; then
+  imag_leg_skip_note "[0/8] imag kernel-cmdline isolation preflight (issue 1105)" "$IMAG_OFFLINE_ACK_REASON"
+else
+  imag_cmdline_isolation_preflight_assert "$IMAG_IP" "${IMAG_USER:-newlevel}" || exit 1
 fi
 
 # #977/#958: obs64/AHK Windows-session-visibility gate. A session-0 obs64 (launched via

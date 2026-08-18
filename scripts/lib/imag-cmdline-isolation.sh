@@ -125,3 +125,40 @@ imag_cmdline_isolation_gather_remote_snippet() {
 printf 'CMDLINE|%s\n' "$(cat /proc/cmdline 2>/dev/null)"
 REMOTE
 }
+
+# imag_cmdline_isolation_preflight_assert HOST [USER] -> the E2E `[0/8]` fail-fast (issue 1105 — the
+# issue-784 lib's SECOND consumer, mirroring imag_display_path_preflight_assert). Gathers
+# /proc/cmdline over ssh, runs the shared verdict, and returns 1 (printing the offending token to
+# stderr) iff the cmdline_isolation facet DRIFTs — so a ~40-min recording run refuses to start on a
+# known kernel CPU-isolation footgun (isolcpus=/nohz_full=/scoped-rcu_nocbs) that would strip CPUs
+# from the scheduler load-balancing domain and pile OBS's ~119-thread pool onto one core
+# (issue 784/842). An UNKNOWN facet (an SSH hiccup; the [0/8] reachability preflight already gates
+# genuine unreachability) is warned but does NOT fail the run. Thin ssh glue (NOT unit-tested for the
+# ssh transport — the JUDGMENT is the pure imag_cmdline_isolation_verdict above; same convention as
+# imag_display_path_preflight_assert / optical_chain_preflight_assert).
+imag_cmdline_isolation_preflight_assert() {
+  local host="${1:?imag_cmdline_isolation_preflight_assert: HOST required}" user="${2:-newlevel}"
+  local target="${user}@${host}"
+  local ssh_cmd=(timeout 15 ssh -o ConnectTimeout=10 -o BatchMode=yes -- "$target")
+  local gather verdict facet status detail fails="" unknowns="" nl
+  nl=$'\n'
+  gather="$("${ssh_cmd[@]}" "$(imag_cmdline_isolation_gather_remote_snippet)" 2>/dev/null || true)"
+  verdict="$(imag_cmdline_isolation_verdict "$gather")"
+  while IFS='|' read -r facet status detail; do
+    [ -n "$facet" ] || continue
+    case "$status" in
+      DRIFT)   fails="${fails:+$fails$nl}  - ${facet}: ${detail}" ;;
+      UNKNOWN) unknowns="${unknowns:+$unknowns, }${facet}" ;;
+    esac
+  done <<< "$verdict"
+  if [ -n "$fails" ]; then
+    printf 'ERROR: imag kernel-cmdline isolation DRIFT on %s — refusing to start the run (would strip CPUs from the scheduler load-balancing domain and pile OBS threads onto one core, issue 784/842):\n%s\n' \
+      "$host" "$fails" >&2
+    return 1
+  fi
+  if [ -n "$unknowns" ]; then
+    printf 'WARN: imag cmdline-isolation facet UNKNOWN on %s (not read; not a proven drift): %s\n' "$host" "$unknowns" >&2
+  fi
+  printf 'imag kernel-cmdline isolation preflight OK on %s (no isolcpus/nohz_full/scoped-rcu_nocbs)\n' "$host"
+  return 0
+}

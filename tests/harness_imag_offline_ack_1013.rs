@@ -208,6 +208,9 @@ fn every_imag_hard_abort_site_is_guarded_by_the_gate_flag() {
     let s = e2e();
     // [0/8] display-path preflight.
     guarded_before(&s, "imag_display_path_preflight_assert \"$IMAG_IP\"");
+    // [0/8] kernel-cmdline isolation preflight (issue 1105 — the issue-784 lib's E2E consumer, a
+    // new imag hard-abort site: `… || exit 1`, so it must be guarded to skip cleanly when acked).
+    guarded_before(&s, "imag_cmdline_isolation_preflight_assert \"$IMAG_IP\"");
     // ALL_CAMBOX imag OBS-prep (reachability probe / projectors / wmctrl / heal / studio).
     guarded_before(&s, "imag-nb OBS reachability probe");
     // [1/8] imag render-health preflight.
