@@ -156,15 +156,18 @@ fn normalize_affinity_mask(s: &str) -> String {
 
 /// Detect a PREEMPT_RT kernel from `/proc/version` text plus the optional
 /// `/sys/kernel/realtime` flag (issue 899). True iff the kernel is fully
-/// realtime-preemptible: `proc_version` contains the exact token `PREEMPT_RT`,
+/// realtime-preemptible: `proc_version` contains the marker string `PREEMPT_RT`,
 /// OR `/sys/kernel/realtime` (present only on RT builds) trims to `"1"`.
 ///
-/// Deliberately matches the WHOLE token `PREEMPT_RT` — the stock cam-box kernel
-/// reports `PREEMPT_DYNAMIC` (voluntary preemption with a runtime knob, NOT
-/// realtime), which must read as NON-RT: a bare `PREEMPT` substring would
-/// wrongly classify it. On an RT kernel hardirq/softirq handlers are threaded
-/// and schedulable, so routing the capture IRQ onto the isolated core is
-/// defensible; on a non-RT kernel it is not (issue 899 defect 3).
+/// The marker is `PREEMPT_RT` specifically — a plain substring test is sufficient
+/// because the only preemption strings the kernel emits are `PREEMPT_RT` /
+/// `PREEMPT_RT_FULL` (genuinely realtime, both contain it) vs `PREEMPT_DYNAMIC` /
+/// `PREEMPT_VOLUNTARY` / `PREEMPT_LAZY` (NOT realtime, none contain `PREEMPT_RT`).
+/// So the stock cam-box kernel (`PREEMPT_DYNAMIC`) correctly reads as NON-RT; a
+/// bare `PREEMPT` substring would have wrongly classified it. On an RT kernel
+/// hardirq/softirq handlers are threaded and schedulable, so routing the capture
+/// IRQ onto the isolated core is defensible; on a non-RT kernel it is not (issue
+/// 899 defect 3).
 pub fn kernel_is_preempt_rt(proc_version: &str, sys_realtime: Option<&str>) -> bool {
     if proc_version.contains("PREEMPT_RT") {
         return true;

@@ -1257,6 +1257,11 @@ fi
 #     informational, never a FAIL);
 #   * whether the xhci capture IRQ is routed OFF the isolated grab core on a stock kernel (defect 3
 #     -- the fix lives in src/affinity.rs setup_irq_affinity and lands on the next fleet redeploy).
+# Scope (deliberate, WARN-only surfacing): it grades the REPRESENTATIVE first capture IRQ (head -1)
+# -- the fleet has one xhci host-controller IRQ, and setup_irq_affinity writes the same mask to every
+# matching IRQ, so the first is representative of the routing decision. It also derives the grab core
+# as cpulist_max(/sys/.../isolated), i.e. the AUTO-derived isolated core -- the same core the binary
+# pins unless the CAMERA_BOX_CAPTURE_CORE ops override is set (not used on the fleet).
 # WARN-only, inserted BEFORE (q) per .claude/rules/provisioning-scripts.md (the (q)-last invariant).
 # A box still running the pre-899 binary WARNs here (capture IRQ on the grab core); the flip to a
 # hard FAIL is a documented follow-up gated on the fleet redeploy (docs/runbooks/899-realtime-isolation.md).
