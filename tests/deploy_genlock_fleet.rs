@@ -433,9 +433,11 @@ fn windows_full_deploys_distroav_to_programdata_load_path_1115() {
         p.contains(r"C:\ProgramData\obs-studio\plugins\distroav\bin\64bit\distroav.dll"),
         "FULL deploy must ship the bundle distroav.dll to the ProgramData load path:\n{p}"
     );
-    // sourced from the staged bundle's obs-plugins\64bit\distroav.dll (explicit path map, not bulk copy)
+    // sourced from the staged bundle's obs-plugins\64bit\distroav.dll via an explicit CODE-side path
+    // map -- anchor on the code line (Join-Path $stage '...'), not the loose basename which also
+    // appears in the adjacent comment (review 🔵: keep the anchor code-unique, #1115).
     assert!(
-        p.contains(r"obs-plugins\64bit\distroav.dll"),
+        p.contains(r"Join-Path $stage 'obs-plugins\64bit\distroav.dll'"),
         "the deployed distroav.dll is sourced from the staged bundle obs-plugins\\64bit:\n{p}"
     );
     // the pre-deploy ProgramData distroav.dll is backed up alongside obs.dll.pre-789 (instant rollback)
